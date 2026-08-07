@@ -26,6 +26,13 @@ func (e *Executor) materializeDynamicFilters(
 	var ranges []exec.DynamicRange
 	var blooms []*exec.BloomScanFilter
 	for _, s := range specs {
+		// Deferred (attach-on-arrival) specs are not materializable up
+		// front — the artifact may not exist yet. The fragment wrap site
+		// handles them via the poll-and-install path; every other consume
+		// path skips them (scan runs unfiltered, always correct).
+		if s.Deferred {
+			continue
+		}
 		if s.HasRange {
 			ranges = append(ranges, exec.DynamicRange{
 				Column:   s.TargetColumn,

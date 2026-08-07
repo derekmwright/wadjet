@@ -155,6 +155,11 @@ const (
 	// holding a dispatched task it has no free slot for. Makes a wedged worker
 	// visible in its own logs instead of stalling silently (#101).
 	dispatchBackpressureWarn = 15 * time.Second
+	// priorityLaneSlots is the dedicated concurrency for the latency-
+	// critical task lane (SubjectPriTasksAll), OUTSIDE MaxConcurrent. The
+	// lane carries only planner-bounded dimension-class tasks (dyn-filter
+	// emitter scans); 2 covers a cascade's D+B0 chain arriving back-to-back.
+	priorityLaneSlots = 2
 )
 
 type Worker struct {
@@ -385,6 +390,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	// Skipped when the gRPC data plane is in use: coord pushes TaskDispatch
 	// over the bidi stream and the JetStream Fetch loop stays dormant.
 	var consumer jetstream.Consumer
+	var priConsumer jetstream.Consumer
 	if w.dpClient == nil {
 		consumerName := "tasks"
 		if w.config.ClusterID != "" {
@@ -401,6 +407,27 @@ func (w *Worker) Start(ctx context.Context) error {
 			return fmt.Errorf("creating consumer: %w", err)
 		}
 		consumer = c
+
+		// Priority lane: latency-critical dimension-class tasks (dyn-filter
+		// emitter scans) drain through their own consumer + slots so they
+		// never queue behind bulk fan-out occupying MaxConcurrent.
+		priFilter := distributed.SubjectPriTasksAll
+		priName := "pritasks"
+		if w.config.ClusterID != "" {
+			priFilter = distributed.ClusterPriTasksFilter(w.config.ClusterID)
+			priName = "pritasks-" + w.config.ClusterID
+		}
+		pc, err := w.js.CreateOrUpdateConsumer(ctx, distributed.StreamPriTasks, jetstream.ConsumerConfig{
+			Durable:       priName,
+			FilterSubject: priFilter,
+			AckPolicy:     jetstream.AckExplicitPolicy,
+			AckWait:       10 * time.Minute,
+			MaxDeliver:    3,
+		})
+		if err != nil {
+			return fmt.Errorf("creating priority consumer: %w", err)
+		}
+		priConsumer = pc
 	}
 
 	// Subscribe to query cancellation messages
@@ -585,6 +612,18 @@ func (w *Worker) Start(ctx context.Context) error {
 		go func() {
 			defer w.wg.Done()
 			w.taskLoop(ctx, consumer, sem)
+		}()
+		// Priority lane runs the SAME loop with its own slot pool: the
+		// tasks are planner-bounded tiny (dimension scans), so two extra
+		// concurrent tasks cannot meaningfully move worker memory, and
+		// giving them dedicated slots is the whole point — a saturated
+		// MaxConcurrent must not delay the filter that makes the
+		// saturating work cheap.
+		priSem := make(chan struct{}, priorityLaneSlots)
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.taskLoop(ctx, priConsumer, priSem)
 		}()
 	}
 

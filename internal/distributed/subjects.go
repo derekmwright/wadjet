@@ -79,10 +79,20 @@ const (
 	SubjectDLQ    = "wadjet.dlq"
 	SubjectDLQAll = "wadjet.dlq.>"
 
+	// Priority task lane — latency-critical, dimension-class tasks
+	// (dyn-filter emitter scans) that must never queue behind bulk scan
+	// fan-out. Separate subject space + stream because WADJET_TASKS is a
+	// WorkQueue stream whose main consumer filters wadjet.tasks.> — a
+	// second consumer under the same prefix would overlap, which WorkQueue
+	// retention forbids. Workers drain this lane with dedicated slots
+	// outside MaxConcurrent (docs/design/attach-on-arrival-dynamic-filters.md).
+	SubjectPriTasksAll = "wadjet.pritasks.>"
+
 	// Stream names
-	StreamTasks   = "WADJET_TASKS"
-	StreamResults = "WADJET_RESULTS"
-	StreamDLQ     = "WADJET_DLQ"
+	StreamTasks    = "WADJET_TASKS"
+	StreamPriTasks = "WADJET_TASKS_PRI"
+	StreamResults  = "WADJET_RESULTS"
+	StreamDLQ      = "WADJET_DLQ"
 
 	// KV bucket for catalog locks
 	KVCatalogLocks = "wadjet_catalog_locks"
@@ -91,6 +101,22 @@ const (
 // TaskSubject returns the NATS subject for a task of the given type.
 func TaskSubject(taskType string, queryID string, stageID string) string {
 	return SubjectTasksScan[:len("wadjet.tasks.")] + taskType + "." + queryID + "." + stageID
+}
+
+// PriTaskSubject is TaskSubject's counterpart on the priority lane.
+func PriTaskSubject(taskType string, queryID string, stageID string) string {
+	return "wadjet.pritasks." + taskType + "." + queryID + "." + stageID
+}
+
+// ClusterPriTaskSubject is ClusterTaskSubject's counterpart on the priority lane.
+func ClusterPriTaskSubject(clusterID, taskType, queryID, stageID string) string {
+	return "wadjet.pritasks." + clusterID + "." + taskType + "." + queryID + "." + stageID
+}
+
+// ClusterPriTasksFilter returns the priority-lane filter subject for a
+// worker to receive only its cluster's priority tasks.
+func ClusterPriTasksFilter(clusterID string) string {
+	return "wadjet.pritasks." + clusterID + ".>"
 }
 
 // ClusterTaskSubject returns the NATS subject for a task targeted at a specific cluster.

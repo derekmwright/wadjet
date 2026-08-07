@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/planner/physical"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 )
@@ -62,21 +63,84 @@ func TestMergeCompleteBuildStats_CompletenessGate(t *testing.T) {
 	}
 
 	// Full coverage: 3 partials, 3 tasks → attach.
-	merged := c.mergeCompleteBuildStats(context.Background(), "q", "s", refs, 3)
+	merged := c.mergeCompleteBuildStats(context.Background(), "q", "s", refs, 3, nil)
 	if merged["f1"] == nil {
 		t.Fatal("full coverage must attach the filter")
 	}
 
 	// Short coverage: 2 of 3 tasks → withhold.
-	merged = c.mergeCompleteBuildStats(context.Background(), "q", "s", refs[:2], 3)
+	merged = c.mergeCompleteBuildStats(context.Background(), "q", "s", refs[:2], 3, nil)
 	if merged["f1"] != nil {
 		t.Fatal("incomplete coverage must withhold the filter (missing keys = false rejections)")
 	}
 
 	// Duplicate refs from a task retry (same key) must not fake coverage.
 	dup := []distributed.DynamicFilterPartialRef{refs[0], refs[0], refs[1]}
-	merged = c.mergeCompleteBuildStats(context.Background(), "q", "s", dup, 3)
+	merged = c.mergeCompleteBuildStats(context.Background(), "q", "s", dup, 3, nil)
 	if merged["f1"] != nil {
 		t.Fatal("duplicate refs must dedupe by key; 2 distinct partials != 3 tasks")
+	}
+}
+
+// LateAttach filters must be staged to the deterministic merged key even
+// when inline-sized — attach-on-arrival consumers poll that key, so an
+// inline-only merge would leave them permanently unfiltered.
+func TestMergeCompleteBuildStats_ForceStageLateAttach(t *testing.T) {
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, "test")
+	if err := cat.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c := &Coordinator{catalog: cat, logger: slog.Default(), config: Config{ResultBucket: "test"}}
+
+	refs := []distributed.DynamicFilterPartialRef{
+		putPartial(t, store, "test", "queries/q/dynfilter/s/task0-f1.wdf", []int64{7}),
+	}
+
+	// Without force: tiny bloom stays inline (no staged key).
+	merged := c.mergeCompleteBuildStats(context.Background(), "q", "s", refs, 1, nil)
+	if merged["f1"] == nil || merged["f1"].StagedKey != "" {
+		t.Fatalf("tiny filter without force must stay inline: %+v", merged["f1"])
+	}
+
+	// With force: staged at the deterministic key and readable.
+	merged = c.mergeCompleteBuildStats(context.Background(), "q", "s", refs, 1, map[string]bool{"f1": true})
+	stats := merged["f1"]
+	if stats == nil {
+		t.Fatal("filter must attach")
+	}
+	wantKey := mergedDynamicFilterKey("q", "s", "f1")
+	if stats.StagedKey != wantKey || stats.StagedBucket != "test" {
+		t.Fatalf("force-stage key mismatch: got %q/%q want test/%q", stats.StagedBucket, stats.StagedKey, wantKey)
+	}
+	rc, _, err := store.Get(context.Background(), "test", wantKey)
+	if err != nil {
+		t.Fatalf("staged artifact must exist at the deterministic key: %v", err)
+	}
+	art, err := distributed.DecodeDynamicFilterArtifact(rc)
+	rc.Close()
+	if err != nil || len(art.Bloom) == 0 {
+		t.Fatalf("staged artifact must decode with a bloom: %v", err)
+	}
+}
+
+// Deferred spec construction: an attach-on-arrival consume whose emitter
+// output is absent (the stat-dep edge no longer exists) must produce a
+// Deferred spec pointing at the deterministic merged key; a wait-mode
+// consume in the same state is silently omitted (existing degradation).
+func TestDynamicFilterSpecsDeferred(t *testing.T) {
+	consumes := []physical.DynamicFilterConsume{
+		{FilterID: "fa", SourceStageID: "src-a", TargetColumn: "l_suppkey", KeyType: "int64", AttachOnArrival: true},
+		{FilterID: "fb", SourceStageID: "src-b", TargetColumn: "l_orderkey", KeyType: "int64"},
+	}
+	specs := dynamicFilterSpecsFromBuildStats(consumes, map[string]StageOutput{}, "q", "bkt")
+	if len(specs) != 1 {
+		t.Fatalf("want 1 spec (deferred only), got %d", len(specs))
+	}
+	s := specs[0]
+	if !s.Deferred || s.FilterID != "fa" || s.BloomBucket != "bkt" ||
+		s.BloomKey != mergedDynamicFilterKey("q", "src-a", "fa") ||
+		s.TargetColumn != "l_suppkey" {
+		t.Fatalf("deferred spec malformed: %+v", s)
 	}
 }

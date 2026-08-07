@@ -141,6 +141,7 @@ func (c *Coordinator) mergeCompleteBuildStats(
 	queryID, stageID string,
 	refs []distributed.DynamicFilterPartialRef,
 	expectedTasks int,
+	forceStage map[string]bool,
 ) map[string]*BuildStats {
 	if len(refs) == 0 {
 		return nil
@@ -178,7 +179,11 @@ func (c *Coordinator) mergeCompleteBuildStats(
 		if stats == nil {
 			continue
 		}
-		if estimateBuildStatsInlineSize(stats) > dynamicFilterInlineThresholdBytes {
+		// Attach-on-arrival consumers poll the deterministic staged key, so
+		// LateAttach filters are staged regardless of inline size — an
+		// inline-only bloom would leave the key absent and the consumer
+		// permanently unfiltered.
+		if estimateBuildStatsInlineSize(stats) > dynamicFilterInlineThresholdBytes || forceStage[filterID] {
 			if err := stageBuildStats(ctx, c.catalog.Store(), c.config.ResultBucket, queryID, stageID, filterID, stats); err != nil {
 				c.logger.Warn("dynamic_filter: stage upload failed; falling back to inline",
 					"stage_id", stageID, "filter_id", filterID, "error", err)
@@ -224,7 +229,7 @@ func stageBuildStats(
 	if err := distributed.EncodeDynamicFilterArtifact(buf, artifact); err != nil {
 		return fmt.Errorf("encode: %w", err)
 	}
-	key := fmt.Sprintf("queries/%s/dynfilter-merged/%s/%s.wdf", queryID, stageID, filterID)
+	key := mergedDynamicFilterKey(queryID, stageID, filterID)
 	if _, err := store.Put(ctx, bucket, key, buf.Reader(), int64(buf.Len()), "application/octet-stream"); err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
@@ -242,6 +247,29 @@ func estimateBuildStatsInlineSize(stats *BuildStats) int {
 	return 48 + 8*len(stats.Bloom)
 }
 
+// mergedDynamicFilterKey is the deterministic S3 key for a merged dynamic-
+// filter artifact. Attach-on-arrival consumers reconstruct it from their
+// consume edge (root query ID + source stage + filter ID) and poll it, so
+// the producer (stageBuildStats) and consumer sides must agree byte-for-byte.
+func mergedDynamicFilterKey(queryID, stageID, filterID string) string {
+	return fmt.Sprintf("queries/%s/dynfilter-merged/%s/%s.wdf", queryID, stageID, filterID)
+}
+
+// lateAttachFilterIDs collects the FilterIDs the planner marked LateAttach
+// on a stage's emits — the set mergeCompleteBuildStats must force-stage.
+func lateAttachFilterIDs(emits []physical.DynamicFilterEmit) map[string]bool {
+	var out map[string]bool
+	for _, e := range emits {
+		if e.LateAttach {
+			if out == nil {
+				out = make(map[string]bool, len(emits))
+			}
+			out[e.FilterID] = true
+		}
+	}
+	return out
+}
+
 // dynamicFilterSpecsFromBuildStats translates a stage's ConsumeDynamicFilters
 // into the OpSpec wire form, pulling the merged stats from the upstream
 // stage's StageOutput. The returned slice is suitable for direct assignment
@@ -250,10 +278,14 @@ func estimateBuildStatsInlineSize(stats *BuildStats) int {
 // If a consume spec references a stat that's missing from the upstream
 // stage's BuildStats (build-side returned no eligible partials), that
 // consume is silently omitted — probe-scan runs without that filter, which
-// is always safe.
+// is always safe. EXCEPT attach-on-arrival consumes: their emitter is not a
+// dependency (the stat-dep edge was removed), so the stats are never in
+// `upstream`; they get a Deferred spec pointing at the deterministic merged
+// key, which the worker polls and installs mid-scan.
 func dynamicFilterSpecsFromBuildStats(
 	consumes []physical.DynamicFilterConsume,
 	upstream map[string]StageOutput,
+	queryID, bucket string,
 ) []distributed.DynamicFilterSpec {
 	if len(consumes) == 0 {
 		return nil
@@ -262,10 +294,30 @@ func dynamicFilterSpecsFromBuildStats(
 	for _, c := range consumes {
 		stageOut, ok := upstream[c.SourceStageID]
 		if !ok || stageOut.BuildStats == nil {
+			if c.AttachOnArrival && bucket != "" {
+				out = append(out, distributed.DynamicFilterSpec{
+					FilterID:     c.FilterID,
+					TargetColumn: c.TargetColumn,
+					KeyType:      c.KeyType,
+					BloomBucket:  bucket,
+					BloomKey:     mergedDynamicFilterKey(queryID, c.SourceStageID, c.FilterID),
+					Deferred:     true,
+				})
+			}
 			continue
 		}
 		stats, ok := stageOut.BuildStats[c.FilterID]
 		if !ok || stats == nil {
+			if c.AttachOnArrival && bucket != "" {
+				out = append(out, distributed.DynamicFilterSpec{
+					FilterID:     c.FilterID,
+					TargetColumn: c.TargetColumn,
+					KeyType:      c.KeyType,
+					BloomBucket:  bucket,
+					BloomKey:     mergedDynamicFilterKey(queryID, c.SourceStageID, c.FilterID),
+					Deferred:     true,
+				})
+			}
 			continue
 		}
 		spec := distributed.DynamicFilterSpec{

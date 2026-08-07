@@ -52,6 +52,12 @@ type Task struct {
 	// worker died possibly-of-memory is only admitted where strictly more
 	// headroom exists.
 	EstimatedBytes int64 `json:"estimated_bytes,omitempty"`
+	// Priority routes the task onto the latency-critical lane
+	// (SubjectPriTasksAll → dedicated worker slots outside MaxConcurrent).
+	// Set only for dimension-class tasks whose completion unblocks bulk
+	// work (dyn-filter emitter scans); their smallness is enforced by the
+	// planner passes that mark them.
+	Priority bool `json:"priority,omitempty"`
 
 	// Pipeline-specific (full query on one worker)
 	SQLText    string `json:"sql_text,omitempty"`    // SQL query to execute as standalone pipeline

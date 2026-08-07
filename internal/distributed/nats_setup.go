@@ -207,6 +207,20 @@ func SetupStreams(ctx context.Context, js jetstream.JetStream) error {
 		return fmt.Errorf("creating tasks stream: %w", err)
 	}
 
+	// Priority task lane: same WorkQueue semantics, separate stream so its
+	// consumer filter can't overlap the main tasks consumer (WorkQueue
+	// retention forbids overlapping filters).
+	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:      StreamPriTasks,
+		Subjects:  []string{SubjectPriTasksAll},
+		Retention: jetstream.WorkQueuePolicy,
+		MaxAge:    1 * time.Hour,
+		Storage:   jetstream.FileStorage,
+	})
+	if err != nil {
+		return fmt.Errorf("creating priority tasks stream: %w", err)
+	}
+
 	// Results stream: Interest retention so coordinators get results while subscribed
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:      StreamResults,

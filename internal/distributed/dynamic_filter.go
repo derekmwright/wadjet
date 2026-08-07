@@ -71,4 +71,12 @@ type DynamicFilterSpec struct {
 	BloomBucket string `json:"bloom_bucket,omitempty"`
 	BloomKey    string `json:"bloom_key,omitempty"`
 	BloomWords  int    `json:"bloom_words,omitempty"`
+
+	// Deferred marks an attach-on-arrival consume: the artifact at
+	// BloomBucket/BloomKey may not exist yet when the task starts. The
+	// worker begins scanning unfiltered, polls the key, and installs the
+	// bloom mid-scan when it lands (drop-only semantics keep results
+	// identical). A key that never appears (emitter withheld the filter)
+	// degrades to an unfiltered scan, same as a missing filter today.
+	Deferred bool `json:"deferred,omitempty"`
 }

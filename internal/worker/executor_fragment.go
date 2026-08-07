@@ -448,9 +448,23 @@ func (e *Executor) wrapSourceWithBloomFilters(ctx context.Context, task distribu
 	if len(spec.DynamicFilters) == 0 || spec.Type != distributed.OpScan {
 		return src
 	}
+	// Deferred (attach-on-arrival) specs: register with the singleflight
+	// poller now; the source installs each bloom mid-scan when its merged
+	// artifact lands (docs/design/attach-on-arrival-dynamic-filters.md).
+	var pending []*deferredBloomFilter
+	for _, s := range spec.DynamicFilters {
+		if !s.Deferred || s.BloomBucket == "" || s.BloomKey == "" {
+			continue
+		}
+		pending = append(pending, &deferredBloomFilter{
+			pb:       e.pollDeferredBloom(s),
+			filterID: s.FilterID,
+			column:   s.TargetColumn,
+		})
+	}
 	_, blooms, err := e.materializeDynamicFilters(spec.DynamicFilters)
-	if err != nil || len(blooms) == 0 {
-		return src
+	if err != nil {
+		blooms = nil
 	}
 	var ops []*exec.BloomFilterOp
 	for _, bf := range blooms {
@@ -463,30 +477,94 @@ func (e *Executor) wrapSourceWithBloomFilters(ctx context.Context, task distribu
 		}
 		ops = append(ops, op)
 	}
-	if len(ops) == 0 {
+	if len(ops) == 0 && len(pending) == 0 {
 		return src
 	}
 	e.logger.Info("dynamic_filter: row-level blooms active on fragment scan",
-		"task_id", task.ID, "stage_id", task.StageID, "filters", len(ops))
-	return &bloomFilteredSource{inner: src, ops: ops}
+		"task_id", task.ID, "stage_id", task.StageID,
+		"filters", len(ops), "deferred", len(pending))
+	return &bloomFilteredSource{
+		inner: src, ops: ops, pending: pending,
+		logger: e.logger, taskID: task.ID, stageID: task.StageID,
+	}
+}
+
+// deferredBloomFilter tracks one attach-on-arrival consume on a fragment
+// scan: the shared poll slot plus enough identity to build the op and log
+// the install when the bloom lands.
+type deferredBloomFilter struct {
+	pb       *pendingBloom
+	filterID string
+	column   string
+	batches  int // batches seen before attach (engagement telemetry)
 }
 
 // bloomFilteredSource filters each batch through row-level bloom ops via
 // selection vectors. Batches that reject every row are skipped (the
-// consumer never sees them).
+// consumer never sees them). Deferred filters promote into active ops
+// mid-scan when their staged artifact resolves — Next is producer-single-
+// threaded in every execution path (linear, morsel, breaker), so the
+// promotion needs no synchronization beyond the pendingBloom's done channel.
 type bloomFilteredSource struct {
-	inner exec.Source
-	ops   []*exec.BloomFilterOp
+	inner   exec.Source
+	ops     []*exec.BloomFilterOp
+	pending []*deferredBloomFilter
+	logger  *slog.Logger
+	taskID  string
+	stageID string
 }
 
 func (s *bloomFilteredSource) Init(ctx context.Context) error { return s.inner.Init(ctx) }
+
+// promotePending installs any deferred blooms whose artifacts resolved.
+// Non-blocking; called once per batch.
+func (s *bloomFilteredSource) promotePending(ctx context.Context) {
+	if len(s.pending) == 0 {
+		return
+	}
+	remaining := s.pending[:0]
+	for _, d := range s.pending {
+		bloom, mask, ok := d.pb.resolved()
+		if !ok {
+			select {
+			case <-d.pb.done:
+				// Poll finished without a bloom (withheld/expired): drop the
+				// pending entry, scan stays unfiltered for this filter.
+				if s.logger != nil {
+					s.logger.Info("dynamic_filter: late attach never arrived",
+						"task_id", s.taskID, "stage_id", s.stageID,
+						"filter_id", d.filterID, "batches_seen", d.batches)
+				}
+			default:
+				d.batches++
+				remaining = append(remaining, d)
+			}
+			continue
+		}
+		op := exec.NewBloomFilterOp(bloom, mask, []string{d.column}, true)
+		if err := op.Init(ctx); err == nil {
+			s.ops = append(s.ops, op)
+			if s.logger != nil {
+				s.logger.Info("dynamic_filter: late attach installed",
+					"task_id", s.taskID, "stage_id", s.stageID,
+					"filter_id", d.filterID, "batches_before_attach", d.batches)
+			}
+		}
+	}
+	s.pending = remaining
+}
 
 func (s *bloomFilteredSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	for {
 		b, err := s.inner.Next(ctx)
 		if err != nil || b == nil {
+			// End of stream (the fragment's defer closes the INNER source,
+			// not this wrapper, so this is the reliable end-of-scan hook):
+			// deferred filters still outstanding went fully unfiltered.
+			s.logOutstandingPending()
 			return b, err
 		}
+		s.promotePending(ctx)
 		for _, op := range s.ops {
 			nb, err := op.Execute(ctx, b)
 			if err != nil {
@@ -514,7 +592,24 @@ func (s *bloomFilteredSource) Next(ctx context.Context) (*batch.RecordBatch, err
 	}
 }
 
-func (s *bloomFilteredSource) Close() error { return s.inner.Close() }
+// logOutstandingPending reports deferred filters that never installed —
+// the head-coverage trade went fully unfiltered for these. Idempotent via
+// the pending reset; called from the end-of-stream path and Close.
+func (s *bloomFilteredSource) logOutstandingPending() {
+	for _, d := range s.pending {
+		if s.logger != nil {
+			s.logger.Info("dynamic_filter: late attach never arrived",
+				"task_id", s.taskID, "stage_id", s.stageID,
+				"filter_id", d.filterID, "batches_seen", d.batches)
+		}
+	}
+	s.pending = nil
+}
+
+func (s *bloomFilteredSource) Close() error {
+	s.logOutstandingPending()
+	return s.inner.Close()
+}
 
 func prependEmitOps(emit []*exec.DynamicFilterEmitOp, rest []exec.UnaryOperator) []exec.UnaryOperator {
 	if len(emit) == 0 {

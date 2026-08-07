@@ -85,6 +85,11 @@ type Executor struct {
 	// from scratch. See broadcast_join_cache.go.
 	broadcastCache *broadcastJoinCache
 
+	// Attach-on-arrival dynamic filters: singleflight pollers for staged
+	// merge artifacts, keyed by bucket/key (dynamic_filter_attach.go).
+	dfAttachMu    sync.Mutex
+	dfAttachPolls map[string]*pendingBloom
+
 	// Streaming-exchange state: fetch tokens + peer-location hints from task
 	// specs, and the outbound PeerClient (nil client = peer reads disabled).
 	// Always non-nil; dormant without --streaming-exchange.

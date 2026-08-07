@@ -1,4 +1,4 @@
-scan-0	scan	Singleton	deps=scan-1
+scan-0	scan	Singleton
 scan-1	scan	Singleton	deps=scan-3
 scan-3	scan	Singleton
 join-4	broadcast_join	Singleton	deps=scan-0,exchange-replicate-join-4-3,scan-1

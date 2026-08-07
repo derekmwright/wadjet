@@ -171,9 +171,20 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 		}
 
 		// Subject is only used by the NATS path; cheap to compute upfront.
-		subject := distributed.TaskSubject(string(task.Type), task.QueryID, task.StageID)
-		if task.ClusterID != "" {
-			subject = distributed.ClusterTaskSubject(task.ClusterID, string(task.Type), task.QueryID, task.StageID)
+		// Priority tasks ride the latency-critical lane (separate WorkQueue
+		// stream + dedicated worker slots) so they never queue behind bulk
+		// scan fan-out.
+		var subject string
+		if task.Priority {
+			subject = distributed.PriTaskSubject(string(task.Type), task.QueryID, task.StageID)
+			if task.ClusterID != "" {
+				subject = distributed.ClusterPriTaskSubject(task.ClusterID, string(task.Type), task.QueryID, task.StageID)
+			}
+		} else {
+			subject = distributed.TaskSubject(string(task.Type), task.QueryID, task.StageID)
+			if task.ClusterID != "" {
+				subject = distributed.ClusterTaskSubject(task.ClusterID, string(task.Type), task.QueryID, task.StageID)
+			}
 		}
 
 		batch = append(batch, preparedTask{

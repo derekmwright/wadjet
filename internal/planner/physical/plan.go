@@ -368,6 +368,11 @@ type DynamicFilterEmit struct {
 	// filtered scan whose output, not input, defines the key set
 	// (markSemiAntiBuildFilters).
 	AtOutput bool
+	// LateAttach forces the coordinator to stage the merged filter to its
+	// deterministic S3 key regardless of inline size — an attach-on-arrival
+	// consumer polls that key, so it must exist even for tiny blooms
+	// (applyAttachOnArrival; docs/design/attach-on-arrival-dynamic-filters.md).
+	LateAttach bool
 }
 
 // DynamicFilterConsume is the planner-side spec attached to a probe-side
@@ -379,6 +384,12 @@ type DynamicFilterConsume struct {
 	SourceStageID string
 	TargetColumn  string
 	KeyType       string
+	// AttachOnArrival marks this consume as non-blocking: the stat-dep edge
+	// is removed, the consumer dispatches immediately, and its tasks install
+	// the bloom mid-scan when the emitter's merged artifact lands at the
+	// deterministic staged key. Set only by applyAttachOnArrival under its
+	// structural rules; drop-only bloom semantics keep results identical.
+	AttachOnArrival bool
 }
 
 // PrettyPrint returns a formatted string representation of the physical plan.
@@ -1928,6 +1939,12 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// filtered dimension riding a chained/fused build. Cardinality-capped
 	// L2-resident blooms. Kill switch WADJET_DIMENSION_CASCADE=0.
 	stages = p.markDimensionCascade(ctx, stages)
+	// Attach-on-arrival normalization: converts consume edges whose emitter
+	// chain is scan-only and whose consumer is a terminal dispatched scan
+	// into non-blocking consumes (stat-dep removed; bloom installs
+	// mid-scan). Must see the FINAL emit/consume state, so it runs after
+	// every marking pass. Kill switch WADJET_DF_ATTACH_ON_ARRIVAL=0.
+	stages = applyAttachOnArrival(stages)
 	prev := BehaviorPreservingMode
 	BehaviorPreservingMode = false
 	defer func() { BehaviorPreservingMode = prev }()

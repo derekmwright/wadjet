@@ -664,12 +664,29 @@ func (c *Coordinator) executeStageDAG(
 			// about to publish tasks. Held until the stage completes so
 			// concurrent stage count never exceeds dispatchSlots. Released
 			// via defer so it always fires, even on dispatch error.
-			select {
-			case dispatchSem <- struct{}{}:
-			case <-gctx.Done():
-				return gctx.Err()
+			//
+			// EXCEPTION: dyn-filter-emitting scan stages bypass the
+			// semaphore. They are dimension-class tiny by the marking
+			// passes' eligibility rules (cascade ≤2M rows, legacy ≤10M),
+			// yet they gate the filtering of concurrent bulk scans — under
+			// attach-on-arrival the consumer no longer waits for them, so
+			// a bulk stage holding a slot for its full runtime would
+			// starve exactly the stage whose output makes that bulk work
+			// cheap (observed at SF10-local: supplier's dispatch pinned
+			// behind lineitem's slot for 4s, bloom landed after the scan
+			// ended). The semaphore's stampede/memory rationale does not
+			// apply to single-digit-task dimension scans.
+			if s.Type == physical.StageScan && len(s.EmitDynamicFilters) > 0 {
+				c.logger.Info("stage-DAG dispatch: emitter scan bypasses dispatch slot",
+					"query", queryID, "stage_id", s.ID)
+			} else {
+				select {
+				case dispatchSem <- struct{}{}:
+				case <-gctx.Done():
+					return gctx.Err()
+				}
+				defer func() { <-dispatchSem }()
 			}
-			defer func() { <-dispatchSem }()
 
 			var stageFusion *gatherFusion
 			if fusion != nil && s.ID == fuseStageID {
@@ -1458,7 +1475,7 @@ func (c *Coordinator) dispatchPipelineStage(
 		// stage dispatchers can ship them in their task descriptors
 		// without having to re-walk the plan.
 		if len(stage.ConsumeDynamicFilters) > 0 {
-			out.DynamicFilters = dynamicFilterSpecsFromBuildStats(stage.ConsumeDynamicFilters, inputs)
+			out.DynamicFilters = dynamicFilterSpecsFromBuildStats(stage.ConsumeDynamicFilters, inputs, queryID, c.config.ResultBucket)
 			c.logger.Info("dynamic_filter: consume specs attached to pass-through scan output",
 				"stage_id", stage.ID,
 				"requested", len(stage.ConsumeDynamicFilters),
@@ -1876,11 +1893,18 @@ func (c *Coordinator) dispatchScanFilterStage(
 	// seeing in an A/B run).
 	var consumeSpecs []distributed.DynamicFilterSpec
 	if len(stage.ConsumeDynamicFilters) > 0 {
-		consumeSpecs = dynamicFilterSpecsFromBuildStats(stage.ConsumeDynamicFilters, inputs)
+		consumeSpecs = dynamicFilterSpecsFromBuildStats(stage.ConsumeDynamicFilters, inputs, queryID, c.config.ResultBucket)
+		deferred := 0
+		for _, s := range consumeSpecs {
+			if s.Deferred {
+				deferred++
+			}
+		}
 		c.logger.Info("dynamic_filter: consume specs attached to probe scan",
 			"stage_id", stage.ID,
 			"requested", len(stage.ConsumeDynamicFilters),
-			"attached", len(consumeSpecs))
+			"attached", len(consumeSpecs),
+			"deferred", deferred)
 	}
 	tasks := make([]distributed.Task, 0, actualTasks)
 	for shardIdx, files := range fileSets {
@@ -1894,6 +1918,11 @@ func (c *Coordinator) dispatchScanFilterStage(
 			ResultBucket: c.config.ResultBucket,
 			ResultPrefix: resultPrefix,
 			CreatedAt:    time.Now(),
+			// Emitter scans ride the priority lane for the same reason
+			// they bypass the dispatch semaphore: their completion is what
+			// makes the concurrently-running bulk scans cheap, and the
+			// bulk fan-out must not be able to queue them out.
+			Priority: len(stage.EmitDynamicFilters) > 0,
 		}
 		// Both branches emit fragment Operators[]. fuseShuffle terminates
 		// in OpExchangeSender (writing partitioned shuffle output);
@@ -2072,7 +2101,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 	// falsely rejects rows downstream).
 	var buildStats map[string]*BuildStats
 	if len(stage.EmitDynamicFilters) > 0 {
-		merged := c.mergeCompleteBuildStats(ctx, queryID, stage.ID, retrier.DynamicFilterPartials(), len(tasks))
+		merged := c.mergeCompleteBuildStats(ctx, queryID, stage.ID, retrier.DynamicFilterPartials(), len(tasks), lateAttachFilterIDs(stage.EmitDynamicFilters))
 		buildStats = merged
 	}
 
@@ -2821,7 +2850,7 @@ func (c *Coordinator) dispatchComputeStage(
 	// StageOutput shape below so the consuming build scan can resolve them.
 	var buildStats map[string]*BuildStats
 	if len(stage.EmitDynamicFilters) > 0 {
-		buildStats = c.mergeCompleteBuildStats(ctx, queryID, stage.ID, retrier.DynamicFilterPartials(), len(tasks))
+		buildStats = c.mergeCompleteBuildStats(ctx, queryID, stage.ID, retrier.DynamicFilterPartials(), len(tasks), lateAttachFilterIDs(stage.EmitDynamicFilters))
 	}
 	// Fused join + downstream exchange-sender: each task produced N partition
 	// files at "<prefix>partition=NNNN/<task>.wshf" (worker's executeFragment
