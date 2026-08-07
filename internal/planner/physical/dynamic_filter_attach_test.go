@@ -162,3 +162,32 @@ func TestFilterAttachedStatDepsKeepsMixedSource(t *testing.T) {
 		t.Fatalf("fully-attached source drops, unrelated dep survives: %v", deps)
 	}
 }
+
+func TestParseSemiAntiNE(t *testing.T) {
+	cases := []struct {
+		filter         string
+		wantProbe, wantBuild string
+		wantOK         bool
+	}{
+		{"l1.l_suppkey <> l2.l_suppkey", "l_suppkey", "l_suppkey", true},
+		{"a.x != b.y", "x", "y", true},
+		{"l_suppkey <> s_suppkey", "l_suppkey", "s_suppkey", true},
+		{"a.x <> b.y AND a.z > b.w", "", "", false}, // conjunction
+		{"a.x = b.y", "", "", false},                // wrong op
+		{"p_brand <> 'Brand#45'", "", "", false},    // literal
+		{"a.x <> 42", "", "", false},                // numeric literal
+		{"", "", "", false},
+	}
+	for _, c := range cases {
+		p, b, ok := ParseSemiAntiNE(c.filter)
+		if ok != c.wantOK || p != c.wantProbe || b != c.wantBuild {
+			t.Errorf("ParseSemiAntiNE(%q) = (%q,%q,%v), want (%q,%q,%v)",
+				c.filter, p, b, ok, c.wantProbe, c.wantBuild, c.wantOK)
+		}
+	}
+	SemiAntiNE.Store(false)
+	defer SemiAntiNE.Store(true)
+	if _, _, ok := ParseSemiAntiNE("a.x <> b.y"); ok {
+		t.Fatal("kill switch must disable recognition")
+	}
+}

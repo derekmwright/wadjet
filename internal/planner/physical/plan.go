@@ -4408,6 +4408,9 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	}
 	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter != "" {
 		hj.SemiAntiFilter = BuildSemiAntiFilter(node.JoinFilter)
+		if pc, bc, ok := ParseSemiAntiNE(node.JoinFilter); ok {
+			hj.SemiAntiNEProbeCol, hj.SemiAntiNEBuildCol = pc, bc
+		}
 	}
 
 	// Build right side (small table) into hash table
@@ -4944,6 +4947,64 @@ func mapExecJoinType(jt string) exec.JoinType {
 // across the lifetime of the query (same logical plan → same projected
 // columns). Use sync.Once to resolve indices safely on first call; later
 // calls become a single relaxed atomic load on the once.done flag.
+// SemiAntiNE gates the distinct-pair semi/anti build fast path
+// (exec/join_semianti_ne.go). Kill switch WADJET_SEMIANTI_NE=0.
+var SemiAntiNE atomic.Bool
+
+func init() {
+	SemiAntiNE.Store(os.Getenv("WADJET_SEMIANTI_NE") != "0")
+}
+
+// ParseSemiAntiNE recognizes a join filter that is EXACTLY one
+// column-to-column not-equal condition ("l1.l_suppkey <> l2.l_suppkey").
+// That is the decorrelated-EXISTS self-inequality class the distinct-pair
+// build serves; anything else (conjunctions, other operators, literals)
+// returns ok=false and stays on the generic closure path.
+func ParseSemiAntiNE(filter string) (probeCol, buildCol string, ok bool) {
+	if !SemiAntiNE.Load() || filter == "" {
+		return "", "", false
+	}
+	parts := strings.Split(strings.ToLower(filter), " and ")
+	if len(parts) != 1 {
+		return "", "", false
+	}
+	part := strings.TrimSpace(parts[0])
+	var idx int
+	var opLen int
+	if i := strings.Index(part, " <> "); i >= 0 {
+		idx, opLen = i, 4
+	} else if i := strings.Index(part, " != "); i >= 0 {
+		idx, opLen = i, 4
+	} else {
+		return "", "", false
+	}
+	left := cleanExpr(strings.TrimSpace(part[:idx]))
+	right := cleanExpr(strings.TrimSpace(part[idx+opLen:]))
+	if !isBareColumnRef(left) || !isBareColumnRef(right) {
+		return "", "", false
+	}
+	return left, right, true
+}
+
+// isBareColumnRef accepts identifier-shaped refs (optionally qualified);
+// rejects literals, expressions, and anything with quoting or operators.
+func isBareColumnRef(s string) bool {
+	if s == "" {
+		return false
+	}
+	hasLetter := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_':
+			hasLetter = true
+		case r >= '0' && r <= '9', r == '.':
+		default:
+			return false
+		}
+	}
+	return hasLetter
+}
+
 func BuildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
 	type filterCond struct {
 		probeCol string

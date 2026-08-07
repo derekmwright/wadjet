@@ -105,6 +105,20 @@ type HashJoin struct {
 	// for large build sides (e.g., 6M-row lineitem scan for EXISTS subqueries).
 	SemiAntiKeyOnly bool
 
+	// SemiAntiNEProbeCol/SemiAntiNEBuildCol carry the planner-recognized
+	// single-condition `probe.col <> build.col` join filter (the
+	// decorrelated-EXISTS self-inequality class). When both are set on a
+	// semi/anti join, Build collapses to a distinct-pair table — see
+	// join_semianti_ne.go. SemiAntiFilter stays wired as the fallback for
+	// shapes the runtime can't activate (non-int value column).
+	SemiAntiNEProbeCol string
+	SemiAntiNEBuildCol string
+	neActive           bool
+	neValIdx           int
+	neValInt32         bool
+	nePairs            []nePair
+	neProbeValIdx      int
+
 	// BuildStoreCols, when non-empty, narrows every stored build batch to the
 	// named columns (join keys + SemiAntiFilter-referenced columns) at arrival
 	// time. Filtered semi/anti joins never emit build rows, but the probe must
@@ -720,7 +734,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// and a MemTracker (so it dispatches to buildPartitioned below), register as
 	// a Spillable so the worker's SpillManager.RequestRelief can target this
 	// operator's in-memory partitions when another task hits Reserve failure.
-	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly {
+	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly && !h.semiAntiNEEligible() {
 		// Register with the relief registry for the duration of Build (the
 		// spill-eligible phase).
 		h.accInstanceID = memory.NextInstanceID()
@@ -742,7 +756,13 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// Q17/Q18 mc=4 failure mode). The flat path below runs only for callers
 	// without a tracker/spill (embedded queries, tests, spill-replay rebuilds),
 	// where it is a pure in-memory build that never spills.
-	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly {
+	// Distinct-pair NE builds (join_semianti_ne.go) take the flat path
+	// below: their state is keyOnly-class compact (24 B/key vs stored
+	// batches), so the partition-on-arrival spill machinery is skipped the
+	// same way SemiAntiKeyOnly skips it. The defensive fallback (value
+	// column fails to resolve on the first batch) builds flat+full without
+	// spill — planner catalog type gating makes that branch theoretical.
+	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly && !h.semiAntiNEEligible() {
 		return h.buildPartitioned(ctx, source)
 	}
 
@@ -792,9 +812,12 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			}
 			// Try to enable int64 fast path for single-column integer keys
 			h.tryEnableIntKey(b)
+			// Distinct-pair NE activation (join_semianti_ne.go): needs the
+			// int-key path plus an integer value vector on this batch.
+			h.neTryEnable(b)
 
 			// Pre-allocate arena and index to avoid repeated slice growth.
-			if h.BuildRowHint > 0 && !h.SemiAntiKeyOnly {
+			if h.BuildRowHint > 0 && !h.SemiAntiKeyOnly && !h.neActive {
 				hint := int(h.BuildRowHint)
 				h.arena = make([]buildRef, 0, hint)
 				h.arenaNext = make([]int32, 0, hint)
@@ -803,6 +826,16 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 					h.strIndex = newStrHashTable(hint)
 				}
 			}
+		}
+
+		if h.neActive {
+			// Distinct-pair NE build: key index + per-key value pairs, no
+			// batch storage (join_semianti_ne.go).
+			h.updateKeyMinMax(b)
+			h.insertNEBatch(b)
+			h.buildRows += int64(b.ActiveLen())
+			h.mu.Unlock()
+			continue
 		}
 
 		if h.SemiAntiKeyOnly {
@@ -2755,6 +2788,26 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 			}
 			goto done
 		}
+	}
+
+	// Distinct-pair NE path (join_semianti_ne.go): lookup + ≤2 compares per
+	// row, no chain walk, no filter closure. Takes precedence over the
+	// generic filtered path when the build activated.
+	if h.useIntKey && h.neActive {
+		h.resolveProbeKeyIdx(in)
+		keyIdx := h.probeKeyIdx[0]
+		valIdx := columnIndexFallback(in, h.SemiAntiNEProbeCol)
+		if keyIdx >= 0 && valIdx >= 0 {
+			sel = h.probeNESemiAnti(in, keyIdx, valIdx, isSemi, sel)
+			goto done
+		}
+		// Probe column unresolvable — fall through to the closure path,
+		// which reports the same rows via GetValue-based comparison...
+		// except the NE build stored no batches, so the closure path
+		// cannot run. Fail safe: emit nothing for semi, everything for
+		// anti ONLY via the closure would be wrong; instead treat as a
+		// planner/runtime contract violation loudly.
+		return nil, fmt.Errorf("semi/anti NE probe column %q unresolvable in probe schema", h.SemiAntiNEProbeCol)
 	}
 
 	// Fast path: int-key semi/anti WITH filter — inline hash lookup + chain walk.

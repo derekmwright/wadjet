@@ -2295,6 +2295,12 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			// broadcast lineitem build retains every scanned column.
 			if hj.JoinType == exec.SemiJoin || hj.JoinType == exec.AntiJoin {
 				hj.BuildStoreCols = physical.SemiAntiBuildStoreCols(spec.RightKeys, spec.JoinFilter)
+				// Distinct-pair fast path for `probe.col <> build.col`
+				// filters (exec/join_semianti_ne.go): the build collapses
+				// to key -> ≤2 distinct values, no batch storage.
+				if pc, bc, ok := physical.ParseSemiAntiNE(spec.JoinFilter); ok {
+					hj.SemiAntiNEProbeCol, hj.SemiAntiNEBuildCol = pc, bc
+				}
 			}
 		}
 		if e.sharedSpill != nil {
@@ -2308,6 +2314,11 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 		}
 		if err := hj.Build(ctx, src); err != nil {
 			return nil, fmt.Errorf("building hash table: %w", err)
+		}
+		if hj.NEActive() {
+			e.logger.Info("semi_anti_ne: distinct-pair build active",
+				"join_type", spec.JoinType, "build_alias", spec.BuildAlias,
+				"probe_col", hj.SemiAntiNEProbeCol, "build_col", hj.SemiAntiNEBuildCol)
 		}
 		if hj.FixKeyAssignment() {
 			slog.Warn("join key repair fired at runtime — plan-time side assignment missed a pair",
