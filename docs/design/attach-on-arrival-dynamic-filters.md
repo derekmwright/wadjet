@@ -201,6 +201,49 @@ The coordinator merge + merged-key staging are unchanged and still run —
 they serve wait-mode consumes, late-registering consumers (post-merge
 polls resolve in one GET), and the mixed-version fallback.
 
+## Guarded re-emit (2026-08-07, rule-1 relaxation)
+
+Kill switch: `WADJET_DF_GUARDED_REEMIT=0`.
+
+After incremental publication, cold Q07's fact-filter availability was
+bounded by the emitter chain itself: hop-B (the cascade mid-scan) could not
+DISPATCH until the dim stage completed and merged — measured directly
+(SF10-local coord.log: scan-1 dispatched at the same millisecond the dim
+merge finished; at SF100 cold that segment is the 2-4s the union missed the
+consumer scan by).
+
+Rule 1 existed because a re-emitter's late-attached consume silently widens
+its emitted bloom (head-of-scan rows bypass the dim filter and poison the
+key set). The relaxation removes the barrier while preserving the emitted
+set EXACTLY:
+
+- The mid-scan's consume converts to attach mode like any other edge; the
+  whole chain (dim, mid, fact) dispatches at t=0 on the priority lane.
+- The mid's emit op is GUARDED: while the consumed bloom is pending, rows
+  buffer as (emit-key, guard-column-value) pairs — bounded at the 2M-row
+  cascade eligibility ceiling, overflow degrades to unguarded (wider,
+  drop-only correct, never a lost key) — and retro-filter through the bloom
+  when it settles (mid-scan or at finalize, with a bounded 10s finalize
+  wait). Null guard values drop when the bloom resolved (BloomFilterOp
+  parity); a withheld guard passes everything (the consume side's
+  degradation, mirrored).
+- Eligibility is structural: the re-emitter must be a bare scan (no
+  FilterExprs, no projections) so repositioning its emit from the sink
+  (AtOutput) to the scan head (AtScan, pre-prune — where the guard column
+  still exists) provably observes the same rows and columns. Cascade mids
+  are exactly this shape; semi/anti build-filter emitters (join-fed,
+  filtered) keep the barrier.
+
+What changes on the chain: fact-bloom availability was
+`dim scan → dim merge → hop-B dispatch → hop-B scan → partial PUT + poll`;
+it becomes `max(dim chain, hop-B scan) → retro-filter (µs) → partial PUT +
+poll`. The mid's own OUTPUT gains its pre-attach head rows (downstream
+joins re-verify — the standard attach trade, small for dimension-class
+mids).
+
+Markers: planner `attach-on-arrival ... guarded_reemit=true`; worker
+`guarded emit finalized` with buffered/dropped-by-guard/overflow counts.
+
 ## Observability
 
 - Planner: `AttachOnArrivalConsumesPlanned` counter +

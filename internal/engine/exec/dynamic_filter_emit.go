@@ -31,6 +31,16 @@ type DynamicFilterEmitOp struct {
 	hasRange bool
 	min, max int64
 	rowCount int64
+
+	// Guarded re-emit state (dynamic_filter_emit_guard.go): while any
+	// guard's upstream bloom is pending, rows buffer as (key, guard-value)
+	// pairs and retro-filter on settle instead of inserting directly.
+	guards            []*emitGuard
+	bufKeys           []int64
+	guardBuffered     int64
+	guardDropped      int64
+	guardOverflowed   bool
+	guardUnresolvable bool
 }
 
 // NewDynamicFilterEmitOp constructs an emit op. bloomBits must be a power
@@ -85,26 +95,25 @@ func (op *DynamicFilterEmitOp) Execute(_ context.Context, in *batch.RecordBatch)
 		return in, nil
 	}
 
-	col := in.Columns[op.keyIdx]
-	bloom := op.bloom
-	mask := op.bloomMask
-
-	set := func(key int64) {
-		h := bloomHashInt(key)
-		h1 := h & mask
-		h2 := (h >> 17) & mask
-		b1 := h & 63
-		b2 := (h >> 6) & 63
-		bloom[h1] |= 1 << b1
-		bloom[h2] |= 1 << b2
-		if key < op.min {
-			op.min = key
+	// Guarded re-emit: while any upstream bloom is pending, buffer pairs
+	// instead of inserting (retro-filtered on settle). Settling mid-scan
+	// flushes the buffer here. Overflow degrades: the buffer flushes
+	// UNGUARDED and the current + subsequent batches fall through to the
+	// direct path (wider bloom, drop-only correct — never a lost key).
+	if len(op.guards) > 0 && !op.guardOverflowed {
+		if !op.guardsSettled() {
+			if op.bufferBatch(in) {
+				return in, nil
+			}
+			op.degradeGuardsToUnguarded()
+		} else if len(op.bufKeys) > 0 {
+			op.flushGuardBuffer()
 		}
-		if key > op.max {
-			op.max = key
-		}
-		op.rowCount++
 	}
+
+	col := in.Columns[op.keyIdx]
+
+	set := op.insertKey
 
 	if in.Sel != nil {
 		if !col.Nulls.HasNulls() {
@@ -162,6 +171,21 @@ func (op *DynamicFilterEmitOp) Execute(_ context.Context, in *batch.RecordBatch)
 }
 
 func (op *DynamicFilterEmitOp) Close() error { return nil }
+
+// insertKey adds one key to the bloom and range accumulators. Shared by the
+// direct Execute path and the guard buffer's retro-filtered flush.
+func (op *DynamicFilterEmitOp) insertKey(key int64) {
+	h := bloomHashInt(key)
+	op.bloom[h&op.bloomMask] |= 1 << (h & 63)
+	op.bloom[(h>>17)&op.bloomMask] |= 1 << ((h >> 6) & 63)
+	if key < op.min {
+		op.min = key
+	}
+	if key > op.max {
+		op.max = key
+	}
+	op.rowCount++
+}
 
 // DynamicFilterPartial is the in-memory representation of one task's
 // emitted partial stats, ready for serialization by the fragment runner.

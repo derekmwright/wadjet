@@ -135,6 +135,22 @@ func (e *Executor) finalizeDynamicFilterEmits(
 	}
 
 	for _, op := range emitOps {
+		// Guarded re-emit: settle outstanding guards (bounded wait — the
+		// upstream bloom usually resolved long before the scan ended) and
+		// retro-filter the buffered head rows before snapshotting. The wait
+		// trades partial-upload latency for emitted-bloom quality exactly
+		// when the scan outran the upstream chain; unresolved guards after
+		// the wait degrade to a wider (still drop-only correct) bloom.
+		if guards, _, _, _, _ := op.GuardStats(); guards > 0 {
+			gctx, cancel := context.WithTimeout(ctx, guardFinalizeWait)
+			op.FinalizeGuards(gctx)
+			cancel()
+			_, buffered, dropped, overflowed, unresolvable := op.GuardStats()
+			e.logger.Info("dynamic_filter_emit: guarded emit finalized",
+				"task_id", task.ID, "filter_id", op.FilterID(),
+				"buffered", buffered, "dropped_by_guard", dropped,
+				"overflowed", overflowed, "guard_col_unresolvable", unresolvable)
+		}
 		snap := op.Snapshot()
 		spec := specByID[snap.FilterID]
 

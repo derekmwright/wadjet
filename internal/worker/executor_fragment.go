@@ -338,6 +338,12 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	}
 	defer sink.close()
 
+	// Deferred (attach-on-arrival) consume registration happens BEFORE emit
+	// op construction: guarded re-emits share these poll slots — the emit
+	// op buffers rows until the consumed bloom settles, then retro-filters
+	// (docs/design/attach-on-arrival-dynamic-filters.md §Guarded re-emit).
+	deferredBlooms := e.registerDeferredBlooms(sourceSpec.DynamicFilters)
+
 	// Dynamic-filter emit (Trino-style semi-join pushdown). When the source
 	// spec carries DynamicFilterEmits, prepend a pass-through accumulator
 	// op per emit to the unary chain. Snapshots are uploaded after the
@@ -346,9 +352,20 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	if err != nil {
 		return fmt.Errorf("fragment task %s: dynamic filter emit ops: %w", task.ID, err)
 	}
-	for _, op := range emitOps {
+	for i, op := range emitOps {
 		if err := op.Init(ctx); err != nil {
 			return fmt.Errorf("fragment task %s: emit op init: %w", task.ID, err)
+		}
+		for _, guardID := range sourceSpec.DynamicFilterEmits[i].GuardConsumes {
+			d, ok := deferredBlooms[guardID]
+			if !ok {
+				// Guard's consume is not deferred: either the bloom shipped
+				// resolved (source filters from batch 0 — no guard needed)
+				// or it was withheld (no filtering anywhere — unguarded
+				// emit is the correct wider degradation).
+				continue
+			}
+			op.AddGuard(guardID, d.column, pendingBloomProbe{pb: d.pb})
 		}
 	}
 	// Output-side emits (DynamicFilterEmit.AtOutput — semi/anti build
@@ -377,7 +394,7 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	// keys) never prune a row group, so also filter row-level via selection
 	// vectors before the first operator. Adaptive disable inside
 	// BloomFilterOp bypasses non-selective blooms after 32 batches.
-	src = e.wrapSourceWithBloomFilters(ctx, task, sourceSpec, src)
+	src = e.wrapSourceWithBloomFilters(ctx, task, sourceSpec, src, deferredBlooms)
 
 	if len(breakerIdxs) == 0 {
 		// Linear pipeline: source → unary ops → sink.
@@ -444,23 +461,20 @@ func (s *emitCapturingSink) close() { s.inner.close() }
 // single wrap point ahead of the operator chain covers the linear, morsel-
 // parallel, and breaker execution paths (Next is producer-single-threaded
 // in all three). Returns src unchanged when there is nothing to apply.
-func (e *Executor) wrapSourceWithBloomFilters(ctx context.Context, task distributed.Task, spec distributed.OpSpec, src exec.Source) exec.Source {
+func (e *Executor) wrapSourceWithBloomFilters(ctx context.Context, task distributed.Task, spec distributed.OpSpec, src exec.Source, deferred map[string]*deferredBloomFilter) exec.Source {
 	if len(spec.DynamicFilters) == 0 || spec.Type != distributed.OpScan {
 		return src
 	}
-	// Deferred (attach-on-arrival) specs: register with the singleflight
-	// poller now; the source installs each bloom mid-scan when its merged
-	// artifact lands (docs/design/attach-on-arrival-dynamic-filters.md).
+	// Deferred (attach-on-arrival) specs were registered with the
+	// singleflight poller by registerDeferredBlooms; the source installs
+	// each bloom mid-scan when its artifact lands
+	// (docs/design/attach-on-arrival-dynamic-filters.md). Iterate the spec
+	// list (not the map) to keep install order deterministic.
 	var pending []*deferredBloomFilter
 	for _, s := range spec.DynamicFilters {
-		if !s.Deferred || s.BloomBucket == "" || s.BloomKey == "" {
-			continue
+		if d, ok := deferred[s.FilterID]; ok {
+			pending = append(pending, d)
 		}
-		pending = append(pending, &deferredBloomFilter{
-			pb:       e.pollDeferredBloom(s),
-			filterID: s.FilterID,
-			column:   s.TargetColumn,
-		})
 	}
 	_, blooms, err := e.materializeDynamicFilters(spec.DynamicFilters)
 	if err != nil {

@@ -40,8 +40,18 @@ import (
 // WADJET_DF_ATTACH_ON_ARRIVAL=0 restores the barrier on every edge.
 var DFAttachOnArrival atomic.Bool
 
+// DFGuardedReemit gates the rule-1 relaxation: a RE-EMITTING consumer
+// (cascade mid-scan) may also convert to attach mode when every one of its
+// emits is an AtScan accumulator — the emit op then buffers rows scanned
+// before the consumed bloom lands and retro-filters them at finalize
+// (guarded re-emit), preserving downstream filter quality without the
+// start barrier. Kill switch WADJET_DF_GUARDED_REEMIT=0 restores rule 1's
+// original form (re-emitters keep the barrier).
+var DFGuardedReemit atomic.Bool
+
 func init() {
 	DFAttachOnArrival.Store(os.Getenv("WADJET_DF_ATTACH_ON_ARRIVAL") != "0")
+	DFGuardedReemit.Store(os.Getenv("WADJET_DF_GUARDED_REEMIT") != "0")
 }
 
 // AttachOnArrivalConsumesPlanned counts converted consume edges,
@@ -67,9 +77,42 @@ func applyAttachOnArrival(stages []Stage) []Stage {
 		if len(c.ConsumeDynamicFilters) == 0 {
 			continue
 		}
-		// Rule 1: terminal consumers only.
+		// Rule 1: terminal consumers convert freely. Re-emitting consumers
+		// (the cascade mid-scan shape) convert IFF their emitted key set is
+		// provably identical under an AtScan guard: the stage is a scan
+		// with NO FilterExprs (its only filtering is the consume itself),
+		// so repositioning the emit from the sink (AtOutput) to the scan
+		// head + guarding it reproduces the post-consume key set exactly —
+		// rows scanned before the consumed bloom installs buffer as
+		// (emit-key, guard-column) pairs and retro-filter on settle.
+		// Stages with FilterExprs or join-fed AtOutput emits (semi/anti
+		// build filters ride non-scan stages) keep the barrier: their
+		// emitted set depends on filtering a column-pair guard can't
+		// reproduce.
+		guarded := false
 		if len(c.EmitDynamicFilters) > 0 {
-			continue
+			// No FilterExprs/projections: the scan-head emit position must
+			// observe the same rows and columns the sink would (projections
+			// could compute or alias the emit key away from the raw scan
+			// schema). Cascade mids carry neither. Log the reject reason —
+			// a silently-kept barrier here is invisible in an A/B run.
+			reason := ""
+			switch {
+			case !DFGuardedReemit.Load():
+				reason = "kill_switch"
+			case len(c.FilterExprs) > 0:
+				reason = "filter_exprs"
+			case len(c.ProjectExprs) > 0:
+				reason = "project_exprs"
+			case len(c.SecurityProjectExprs) > 0:
+				reason = "security_project_exprs"
+			}
+			if reason != "" {
+				slog.Info("dynamic_filter: guarded re-emit rejected",
+					"consumer", c.ID, "reason", reason)
+				continue
+			}
+			guarded = true
 		}
 		// Rule 3: consumer must take the dispatched scan-filter fragment
 		// path — the only dispatch shape that wires OpSpec.DynamicFilters
@@ -80,7 +123,11 @@ func applyAttachOnArrival(stages []Stage) []Stage {
 		if len(c.FusedAggSpecs) > 0 || len(c.FusedAggGroupBy) > 0 {
 			continue
 		}
-		dispatched := len(c.FilterExprs) > 0 || len(c.ProjectExprs) > 0 ||
+		// Emit-bearing scans are a dispatch-shape witness on their own:
+		// their emits only function via dispatchScanFilterStage's fragment
+		// plumbing (observed: cascade mid-scans dispatch there with zero
+		// FilterExprs), so `guarded` implies the fragment path.
+		dispatched := guarded || len(c.FilterExprs) > 0 || len(c.ProjectExprs) > 0 ||
 			len(c.SecurityProjectExprs) > 0 ||
 			(c.Exchange != nil && len(c.Exchange.Keys) > 0 && c.Exchange.Count > 0)
 		if !dispatched {
@@ -103,9 +150,22 @@ func applyAttachOnArrival(stages []Stage) []Stage {
 					src.EmitDynamicFilters[ei].LateAttach = true
 				}
 			}
+			if guarded {
+				// Every emit on this stage must retro-filter its buffered
+				// head rows through this consume's bloom, and reposition to
+				// the scan head (AtScan) where the guard column is still
+				// present — equivalent by the no-FilterExprs/no-projection
+				// eligibility above.
+				for ei := range c.EmitDynamicFilters {
+					c.EmitDynamicFilters[ei].GuardConsumes = append(
+						c.EmitDynamicFilters[ei].GuardConsumes, consume.FilterID)
+					c.EmitDynamicFilters[ei].AtOutput = false
+				}
+			}
 			AttachOnArrivalConsumesPlanned.Add(1)
 			slog.Info("dynamic_filter: attach-on-arrival",
-				"consumer", c.ID, "source", src.ID, "filter_id", consume.FilterID)
+				"consumer", c.ID, "source", src.ID, "filter_id", consume.FilterID,
+				"guarded_reemit", guarded)
 		}
 		// Drop stat-dep edges whose every consume from that source converted.
 		c.Dependencies = filterAttachedStatDeps(c.Dependencies, c.ConsumeDynamicFilters)

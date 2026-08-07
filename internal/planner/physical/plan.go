@@ -373,6 +373,14 @@ type DynamicFilterEmit struct {
 	// consumer polls that key, so it must exist even for tiny blooms
 	// (applyAttachOnArrival; docs/design/attach-on-arrival-dynamic-filters.md).
 	LateAttach bool
+	// GuardConsumes lists the FilterIDs of this stage's OWN attach-mode
+	// consumes that must retro-filter this emit's buffered head rows at
+	// finalize (guarded re-emit — applyAttachOnArrival rule-1 relaxation).
+	// The worker's emit op buffers (emit-key, guard-column) pairs for rows
+	// scanned before those blooms install and drops non-matching pairs
+	// before the partial uploads, keeping the emitted bloom exactly as
+	// tight as under the start barrier.
+	GuardConsumes []string
 }
 
 // DynamicFilterConsume is the planner-side spec attached to a probe-side

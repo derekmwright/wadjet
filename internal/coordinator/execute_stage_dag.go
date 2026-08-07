@@ -1948,11 +1948,12 @@ func (c *Coordinator) dispatchScanFilterStage(
 			var scanEmits []distributed.DynamicFilterEmit
 			for _, e := range stage.EmitDynamicFilters {
 				em := distributed.DynamicFilterEmit{
-					FilterID:  e.FilterID,
-					KeyColumn: e.KeyColumn,
-					KeyType:   e.KeyType,
-					BloomBits: e.BloomBits,
-					AtOutput:  e.AtOutput,
+					FilterID:      e.FilterID,
+					KeyColumn:     e.KeyColumn,
+					KeyType:       e.KeyType,
+					BloomBits:     e.BloomBits,
+					AtOutput:      e.AtOutput,
+					GuardConsumes: append([]string(nil), e.GuardConsumes...),
 					// Count-in-key completeness target + upload prefix for
 					// incremental partial publication: attach-on-arrival
 					// consumers listing the prefix learn from any one

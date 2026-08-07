@@ -6,10 +6,12 @@ import (
 
 // The cascade fixture after marking: hop-B's consume on the fact scan is a
 // terminal consume fed by a scan-only emitter on a dispatched scan — it
-// must convert to attach-on-arrival (stat-dep removed, emit LateAttach).
-// Hop-A's consume on the supplier scan must NOT convert: the supplier
-// re-emits hop B from its post-consume output, so a late attach would
-// silently widen the downstream filter.
+// converts to attach-on-arrival (stat-dep removed, emit LateAttach).
+// Hop-A's consume on the supplier converts as a GUARDED RE-EMIT (rule-1
+// relaxation): the supplier's emit repositions AtOutput→AtScan and gains a
+// GuardConsumes entry so its buffered head rows retro-filter through the
+// nation bloom, and the supplier's stat-dep on nation is removed — the
+// entire chain dispatches at t=0.
 func TestAttachOnArrivalConvertsTerminalScanConsume(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 	p := NewPlanner(cat)
@@ -40,18 +42,82 @@ func TestAttachOnArrivalConvertsTerminalScanConsume(t *testing.T) {
 	if !supp.EmitDynamicFilters[0].LateAttach {
 		t.Fatal("emit matching an attach consume must be LateAttach")
 	}
-	// Hop A on the re-emitting supplier: NOT converted, barrier kept.
-	if supp.ConsumeDynamicFilters[0].AttachOnArrival {
-		t.Fatal("re-emitting consumer must keep the barrier (rule 1)")
+	// Hop A on the re-emitting supplier: converted as a guarded re-emit.
+	if !supp.ConsumeDynamicFilters[0].AttachOnArrival {
+		t.Fatal("re-emitting consumer must convert under the guarded relaxation")
 	}
-	if !containsString(supp.Dependencies, "scan-nation") {
-		t.Fatalf("hop-A stat-dep must survive: %v", supp.Dependencies)
+	if containsString(supp.Dependencies, "scan-nation") {
+		t.Fatalf("hop-A stat-dep must be removed on guarded attach: %v", supp.Dependencies)
 	}
-	if nation.EmitDynamicFilters[0].LateAttach {
-		t.Fatal("hop-A emit must not be LateAttach (its consume kept the barrier)")
+	if !nation.EmitDynamicFilters[0].LateAttach {
+		t.Fatal("hop-A emit must be LateAttach (its consume converted)")
 	}
-	if AttachOnArrivalConsumesPlanned.Load() != before+1 {
-		t.Fatal("counter must count exactly the converted edge")
+	em := supp.EmitDynamicFilters[0]
+	if em.AtOutput {
+		t.Fatal("guarded emit must reposition AtOutput→AtScan")
+	}
+	if len(em.GuardConsumes) != 1 || em.GuardConsumes[0] != supp.ConsumeDynamicFilters[0].FilterID {
+		t.Fatalf("guarded emit must reference the consume as its guard: %+v", em.GuardConsumes)
+	}
+	if AttachOnArrivalConsumesPlanned.Load() != before+2 {
+		t.Fatal("counter must count both converted edges")
+	}
+}
+
+// Guarded-re-emit kill switch: re-emitters revert to the barrier while
+// terminal consumes still convert.
+func TestAttachOnArrivalGuardedReemitKillSwitch(t *testing.T) {
+	DFGuardedReemit.Store(false)
+	defer DFGuardedReemit.Store(true)
+	cat, ctx := setupTPCHCatalog(t)
+	p := NewPlanner(cat)
+	stages := cascadeFixture()
+	p.markDimensionCascade(ctx, stages)
+	stages = applyAttachOnArrival(stages)
+	for i := range stages {
+		s := &stages[i]
+		switch s.ID {
+		case "scan-supp":
+			if s.ConsumeDynamicFilters[0].AttachOnArrival {
+				t.Fatal("kill switch must keep the re-emitter barrier")
+			}
+			if !containsString(s.Dependencies, "scan-nation") {
+				t.Fatal("kill switch must keep the hop-A stat-dep")
+			}
+			if !s.EmitDynamicFilters[0].AtOutput || len(s.EmitDynamicFilters[0].GuardConsumes) != 0 {
+				t.Fatal("kill switch must leave the emit unrewritten")
+			}
+		case "scan-l1":
+			if !s.ConsumeDynamicFilters[0].AttachOnArrival {
+				t.Fatal("terminal consume must still convert with guarded re-emit off")
+			}
+		}
+	}
+}
+
+// A re-emitting scan WITH FilterExprs must keep the barrier: repositioning
+// its emit to the scan head would observe pre-filter rows and a column-pair
+// guard cannot reproduce arbitrary predicate filtering.
+func TestAttachOnArrivalGuardedReemitRequiresBareScan(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	p := NewPlanner(cat)
+	stages := cascadeFixture()
+	p.markDimensionCascade(ctx, stages)
+	for i := range stages {
+		if stages[i].ID == "scan-supp" {
+			stages[i].FilterExprs = []string{"s_acctbal > 0"}
+		}
+	}
+	stages = applyAttachOnArrival(stages)
+	for i := range stages {
+		if stages[i].ID == "scan-supp" {
+			if stages[i].ConsumeDynamicFilters[0].AttachOnArrival {
+				t.Fatal("re-emitter with FilterExprs must keep the barrier")
+			}
+			if !stages[i].EmitDynamicFilters[0].AtOutput {
+				t.Fatal("emit must stay AtOutput when not guarded")
+			}
+		}
 	}
 }
 

@@ -29,6 +29,13 @@ const deferredBloomPollInterval = 250 * time.Millisecond
 // finished simply never install it.
 const deferredBloomPollDeadline = 10 * time.Minute
 
+// guardFinalizeWait bounds how long a guarded re-emit waits at finalize for
+// its upstream bloom before flushing the buffer unguarded. Only paid when
+// the mid-scan finished before the upstream dim chain — rare (dims are
+// tiny), and the wider-bloom alternative costs the downstream fact filter
+// its entire selectivity, so a generous bound is the right trade.
+const guardFinalizeWait = 10 * time.Second
+
 // pendingBloom is the shared result slot for one staged-artifact key. done
 // closes exactly once; after that, bloom/mask/ok are immutable.
 type pendingBloom struct {
@@ -217,6 +224,52 @@ func parsePartialCount(key, filterID string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// registerDeferredBlooms builds the fragment's deferred-consume registry:
+// one poll slot per Deferred spec, keyed by FilterID. Shared by the source
+// bloom wrapper (mid-scan install) and guarded re-emits (retro-filter at
+// settle) so both observe the same resolution.
+func (e *Executor) registerDeferredBlooms(specs []distributed.DynamicFilterSpec) map[string]*deferredBloomFilter {
+	var out map[string]*deferredBloomFilter
+	for _, s := range specs {
+		if !s.Deferred || s.BloomBucket == "" || s.BloomKey == "" {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]*deferredBloomFilter, len(specs))
+		}
+		out[s.FilterID] = &deferredBloomFilter{
+			pb:       e.pollDeferredBloom(s),
+			filterID: s.FilterID,
+			column:   s.TargetColumn,
+		}
+	}
+	return out
+}
+
+// pendingBloomProbe adapts a pendingBloom poll slot to the exec.GuardProbe
+// interface consumed by guarded re-emit ops.
+type pendingBloomProbe struct{ pb *pendingBloom }
+
+func (p pendingBloomProbe) TryResolve() ([]uint64, uint64, bool) { return p.pb.resolved() }
+
+func (p pendingBloomProbe) Done() bool {
+	select {
+	case <-p.pb.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p pendingBloomProbe) Wait(ctx context.Context) ([]uint64, uint64, bool) {
+	select {
+	case <-p.pb.done:
+		return p.pb.bloom, p.pb.mask, p.pb.ok
+	case <-ctx.Done():
+		return nil, 0, false
+	}
 }
 
 // taskBlobPriority reports whether a marshaled Task carries the Priority
