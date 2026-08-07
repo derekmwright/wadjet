@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
@@ -135,21 +136,20 @@ func (e *Executor) finalizeDynamicFilterEmits(
 	}
 
 	for _, op := range emitOps {
-		// Guarded re-emit: settle outstanding guards (bounded wait — the
-		// upstream bloom usually resolved long before the scan ended) and
-		// retro-filter the buffered head rows before snapshotting. The wait
-		// trades partial-upload latency for emitted-bloom quality exactly
-		// when the scan outran the upstream chain; unresolved guards after
-		// the wait degrade to a wider (still drop-only correct) bloom.
+		// Guarded re-emit: settle outstanding guards and retro-filter the
+		// buffered head rows before snapshotting. The wait runs until the
+		// guard's poll TERMINATES (resolve or withhold; the poller's
+		// deadline is the only cap) — see the guard-wait comment in
+		// dynamic_filter_attach.go for why no shorter bound is sound.
 		if guards, _, _, _, _ := op.GuardStats(); guards > 0 {
-			gctx, cancel := context.WithTimeout(ctx, guardFinalizeWait)
-			op.FinalizeGuards(gctx)
-			cancel()
+			waitStart := time.Now()
+			op.FinalizeGuards(ctx)
 			_, buffered, dropped, overflowed, unresolvable := op.GuardStats()
 			e.logger.Info("dynamic_filter_emit: guarded emit finalized",
 				"task_id", task.ID, "filter_id", op.FilterID(),
 				"buffered", buffered, "dropped_by_guard", dropped,
-				"overflowed", overflowed, "guard_col_unresolvable", unresolvable)
+				"overflowed", overflowed, "guard_col_unresolvable", unresolvable,
+				"guard_wait_ms", time.Since(waitStart).Milliseconds())
 		}
 		snap := op.Snapshot()
 		spec := specByID[snap.FilterID]

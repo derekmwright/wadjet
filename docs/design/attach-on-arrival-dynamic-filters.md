@@ -223,10 +223,16 @@ set EXACTLY:
   buffer as (emit-key, guard-column-value) pairs — bounded at the 2M-row
   cascade eligibility ceiling, overflow degrades to unguarded (wider,
   drop-only correct, never a lost key) — and retro-filter through the bloom
-  when it settles (mid-scan or at finalize, with a bounded 10s finalize
-  wait). Null guard values drop when the bloom resolved (BloomFilterOp
-  parity); a withheld guard passes everything (the consume side's
-  degradation, mirrored).
+  when it settles (mid-scan or at finalize). The finalize wait runs until
+  the guard's poll TERMINATES — resolve or genuine withhold — with the
+  poller's own deadline as the only cap: the first SF100 pair proved any
+  shorter cap unsound (a 10s cap expired 300ms-10s before the dim chain
+  delivered, flushed unguarded, and destroyed the downstream fact filter's
+  selectivity; cold Q05/Q21 +50%). Waiting is strictly ≤ the old start
+  barrier, which waited for the same chain before scanning at all. Null
+  guard values drop when the bloom resolved (BloomFilterOp parity); a
+  withheld guard passes everything (the consume side's degradation,
+  mirrored — and now the ONLY unguarded-flush case).
 - Eligibility is structural: the re-emitter must be a bare scan (no
   FilterExprs, no projections) so repositioning its emit from the sink
   (AtOutput) to the scan head (AtScan, pre-prune — where the guard column

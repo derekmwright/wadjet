@@ -29,12 +29,16 @@ const deferredBloomPollInterval = 250 * time.Millisecond
 // finished simply never install it.
 const deferredBloomPollDeadline = 10 * time.Minute
 
-// guardFinalizeWait bounds how long a guarded re-emit waits at finalize for
-// its upstream bloom before flushing the buffer unguarded. Only paid when
-// the mid-scan finished before the upstream dim chain — rare (dims are
-// tiny), and the wider-bloom alternative costs the downstream fact filter
-// its entire selectivity, so a generous bound is the right trade.
-const guardFinalizeWait = 10 * time.Second
+// Guarded re-emits wait at finalize until the guard's poll TERMINATES —
+// resolve or genuine withhold (the poller's own deadline caps the wait).
+// The first SF100 pair (2026-08-07, trt 372e2da) proved any shorter cap
+// wrong twice over: a 10s cap expired while the dim chain was 300ms-10s+
+// away, flushing UNGUARDED and destroying the downstream fact filter's
+// entire selectivity (5 hop-B tasks, buffered=240000 dropped=0, cold
+// Q05/Q21 +50%). Waiting is strictly ≤ the old start barrier — the
+// barrier also waited for the same dim chain, before scanning a single
+// row — and the unguarded flush now happens only when WAIT mode would
+// also have run filterless (withheld upstream).
 
 // pendingBloom is the shared result slot for one staged-artifact key. done
 // closes exactly once; after that, bloom/mask/ok are immutable.
