@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
@@ -90,6 +91,21 @@ func (e *Executor) pollDeferredBloom(spec distributed.DynamicFilterSpec) *pendin
 		}
 	}()
 	return p
+}
+
+// taskBlobPriority reports whether a marshaled Task carries the Priority
+// flag, without decoding the full task. Task blobs are JSON
+// (distributed.Marshal); a partial decode into a one-field struct is
+// microseconds against multi-second tasks. Used by the gRPC dispatch
+// handler to route latency-critical tasks onto the priority queue.
+func taskBlobPriority(blob []byte) bool {
+	var p struct {
+		Priority bool `json:"priority"`
+	}
+	if err := json.Unmarshal(blob, &p); err != nil {
+		return false
+	}
+	return p.Priority
 }
 
 // tryLoadStagedBloom is the quiet fetch used by the poll loop — a missing

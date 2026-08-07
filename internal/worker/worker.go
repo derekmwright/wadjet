@@ -573,7 +573,16 @@ func (w *Worker) Start(ctx context.Context) error {
 		// inside the dataplane client, so blocking the handler blocks
 		// recv → coord's stream.Send blocks → backpressure propagates.
 		pending := make(chan dataplane.TaskDispatch, w.config.MaxConcurrent)
+		// Priority lane, gRPC flavor: latency-critical tasks (Task.Priority
+		// inside the blob) route to their own bounded queue + slot pool so
+		// bulk fan-out saturating MaxConcurrent cannot delay them — the
+		// same guarantee the NATS path gets from the pritasks consumer.
+		priPending := make(chan dataplane.TaskDispatch, priorityLaneSlots)
 		w.dpClient.RegisterDispatchHandler(func(td dataplane.TaskDispatch) {
+			pending := pending
+			if taskBlobPriority(td.TaskBlob) {
+				pending = priPending
+			}
 			// Fast path: the bounded queue has room.
 			select {
 			case pending <- td:
@@ -606,6 +615,12 @@ func (w *Worker) Start(ctx context.Context) error {
 		go func() {
 			defer w.wg.Done()
 			w.dispatchLoop(ctx, pending, sem)
+		}()
+		priSem := make(chan struct{}, priorityLaneSlots)
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.dispatchLoop(ctx, priPending, priSem)
 		}()
 	} else {
 		w.wg.Add(1)
