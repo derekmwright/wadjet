@@ -86,6 +86,13 @@ resource "aws_iam_role_policy" "trino_s3_glue" {
         Resource = ["arn:aws:s3:::${var.data_bucket}/results/*"]
       },
       {
+        # FTE arm: exchange spooling scratch (retry-policy=TASK with the
+        # filesystem exchange manager). Cleaned up by the runner post-suite.
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"]
+        Resource = ["arn:aws:s3:::${var.data_bucket}/trino-exchange/*"]
+      },
+      {
         # Glue data-catalog access for the Hive connector metastore. Scoped
         # to catalog+database+table ARNs in this account/region.
         Effect = "Allow"
