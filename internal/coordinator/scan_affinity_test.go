@@ -18,6 +18,9 @@ func testFiles(n int) []string {
 // input orderings — the property that makes per-worker first touches
 // happen once cluster-wide.
 func TestAffineFileSetsCoverageAndDeterminism(t *testing.T) {
+	old := scanAffinityEnabled
+	scanAffinityEnabled = true
+	defer func() { scanAffinityEnabled = old }()
 	files := testFiles(63)
 	workers := []string{"w-b", "w-a", "w-c"}
 	sets, owners := affineFileSets(files, workers, 12)
@@ -83,6 +86,9 @@ func TestAffinityOwnerMinimalRemap(t *testing.T) {
 // Degenerate shapes fall back: no workers, few files (single-file shard
 // fan-outs must not serialize onto one owner), kill switch off.
 func TestAffineFileSetsFallbacks(t *testing.T) {
+	oldOn := scanAffinityEnabled
+	scanAffinityEnabled = true
+	defer func() { scanAffinityEnabled = oldOn }()
 	if sets, _ := affineFileSets(testFiles(63), nil, 12); sets != nil {
 		t.Fatal("no workers must fall back")
 	}

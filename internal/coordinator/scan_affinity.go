@@ -24,8 +24,19 @@ import (
 // scans of the same table are warm on every query, and the per-worker
 // cache footprint drops from |dataset| to |dataset|/N.
 //
-// Kill switch: WADJET_SCAN_AFFINITY=0 restores unaffine fan-out.
-var scanAffinityEnabled = os.Getenv("WADJET_SCAN_AFFINITY") != "0"
+// DEFAULT OFF pending the base-table peer tier (SF100 pair
+// 20260808-{125821,131723}): scan affinity alone delivered the cold-run
+// win (first-touch misses 327→227, cold suite −11.7%, the roaming Q06
+// disturbance 19.1s→2.0s) but non-affine base-table readers — the
+// late-materialization column gathers in join tasks, broadcast builds,
+// sub-2×workers tables — kept reading files their worker doesn't own,
+// and with PARTITIONED caches those reads miss where full replication
+// used to hit: run 2 paid ~18 GB of S3 first-touches control didn't
+// (steady suite +12.8%). The class completion is a peer tier on the
+// base-table cache miss path (non-owners fetch the owner's NVMe copy
+// instead of S3), after which every reader converges cheaply and the
+// flag flips on. WADJET_SCAN_AFFINITY=1 opts in for A/B arms.
+var scanAffinityEnabled = os.Getenv("WADJET_SCAN_AFFINITY") == "1"
 
 // affinityOwner returns the rendezvous (highest-random-weight) owner of
 // file among workers: argmax_w fnv64(file, w). Deterministic for a given

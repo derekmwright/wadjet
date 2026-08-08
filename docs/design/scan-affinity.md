@@ -1,6 +1,7 @@
 # Scan-task file→worker affinity
 
-Status: landed 2026-08-08. Kill switch `WADJET_SCAN_AFFINITY=0`.
+Status: landed 2026-08-08, DEFAULT OFF pending the base-table peer
+tier (see §SF100 verdict). Opt-in `WADJET_SCAN_AFFINITY=1`.
 
 ## The diagnosis (SF100, 2026-08-08 wlogs, zero EC2)
 
@@ -55,3 +56,23 @@ Stage-output (queries/ scratch) reads keep locality placement (#263) —
 their producers, not a hash, define the right worker. NATS-pull dispatch
 ignores the hint (placement needs the targeted gRPC data plane); the
 hint degrades to today's behavior there.
+
+## SF100 verdict (pair 20260808-125821 ctl / 131723 trt)
+
+Correctness clean (44/44, rows identical, Q19 ULP only), placement
+honored (`placement=affine:13/10` on scan batches). Cold run: first-
+touch misses 327→227 (80.5→70.9 GB total S3 across the suite, 53 GB of
+it in run 1), cold suite −11.7%, and the roaming disturbance died —
+Q06 cold 19.1 s (ctl) → 2.0 s (trt). Steady run: +12.8% REAL
+regression — control's caches were fully replicated after run 1
+(run-2 miss delta 0.00 GB on every worker) while affinity's
+PARTITIONED caches left the non-affine base-table readers
+(late-materialization column gathers inside join tasks, broadcast
+builds, sub-2×workers tables) paying ~18 GB of run-2 first-touches.
+
+The mechanism is correct but the CLASS is "every base-table reader",
+not "scan fan-outs". Completion: a peer tier on the base-table cache
+miss path — a non-owner fetches the owner's NVMe copy over the peer
+wire (machinery exists for stage outputs) instead of S3, populating
+locally. Then first touches hit S3 once per file cluster-wide
+regardless of reader, convergence is NIC-speed, and the flag flips on.
