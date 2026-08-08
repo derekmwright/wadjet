@@ -597,8 +597,15 @@ func (m *uploadManager) startJob(qs *queryUploadState, tu *taskUploads, j upload
 func (m *uploadManager) runJob(qs *queryUploadState, tu *taskUploads, j uploadJob) {
 	ctx := qs.ctx
 	defer tu.jobDone()
-	var jobYieldNs int64
-	if !m.acquireSlot(ctx, qs, &jobYieldNs) {
+	// SEPARATE budgets: admission waits and in-flight pauses each get
+	// uploadHardCapMs. A deep backlog routinely burns the full admission
+	// budget per job (upload_yield_ms ≈ 60-70s/job at SF100), and a
+	// shared budget let every job enter its stream already at the escape
+	// threshold — the v4 gate shipped engaged-never (pair 20260808-0224:
+	// upload_pause_ms=0 on all workers). Total per-job delay stays
+	// bounded at 2× the cap.
+	var admitYieldNs, pauseBudgetNs int64
+	if !m.acquireSlot(ctx, qs, &admitYieldNs) {
 		tu.anyCanceled.Store(true)
 		m.noteCancelled(j)
 		return
@@ -614,7 +621,7 @@ func (m *uploadManager) runJob(qs *queryUploadState, tu *taskUploads, j uploadJo
 			m.noteCancelled(j)
 			return
 		}
-		lastErr = m.uploadOnce(ctx, qs, seq, j, &jobYieldNs)
+		lastErr = m.uploadOnce(ctx, qs, seq, j, &pauseBudgetNs)
 		if lastErr == nil {
 			m.completed.Add(1)
 			return

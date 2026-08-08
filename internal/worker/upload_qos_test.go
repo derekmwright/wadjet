@@ -371,3 +371,35 @@ func TestUploadChunkGateSameRootExempt(t *testing.T) {
 		t.Fatal("the window root's own uploads must not freeze")
 	}
 }
+
+// Regression (SF100 pair 20260808-0224): admission waits and in-flight
+// pauses have SEPARATE budgets — a job that burned its full admission
+// budget must still pause at the chunk gate. runJob wires distinct
+// counters; this pins the gate-level behavior a shared budget broke.
+func TestUploadChunkGateBudgetSeparateFromAdmission(t *testing.T) {
+	m := newUploadManager(nil, nil, nil)
+	m.SetForegroundProbe(func() bool { return true })
+	m.NoteForegroundQuery("test-root")
+	for i := 0; i < uploadSlotsBusy; i++ {
+		m.registerJob()
+	}
+	// Fresh pause budget — must pause even though the job "already
+	// waited" its full admission budget (tracked separately by runJob).
+	var pauseBudget int64
+	done := make(chan bool, 1)
+	go func() { done <- m.chunkGate(context.Background(), nil, m.registerJob(), &pauseBudget) }()
+	select {
+	case <-done:
+		t.Fatal("chunk gate must pause on a fresh pause budget")
+	case <-time.After(300 * time.Millisecond):
+	}
+	m.protectedUntil.Store(0) // close the window; the gate releases
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("gate returned false")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("gate did not release after the window closed")
+	}
+}
