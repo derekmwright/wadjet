@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/diskio"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -128,5 +130,35 @@ func TestDropBehindWalk_SkipsUnownedFiles(t *testing.T) {
 	s.dropBehindWalk()
 	if s.walkDropMark != 0 {
 		t.Fatalf("walkDropMark = %d on an unowned file", s.walkDropMark)
+	}
+}
+
+// TestWillNeedAdviserClampsAndCounts: the adviser must page-align, clamp
+// to the mapping, ignore out-of-range spans, and count only advised
+// bytes. Uses a real anonymous mapping so Madvise succeeds.
+func TestWillNeedAdviserClampsAndCounts(t *testing.T) {
+	const size = 1 << 20
+	data, err := unix.Mmap(-1, 0, size, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE|unix.MAP_ANON)
+	if err != nil {
+		t.Fatalf("anon mmap: %v", err)
+	}
+	defer unix.Munmap(data)
+
+	before := readaheadAdviseBytes.Load()
+	adv := willNeedAdviser(data)
+	pg := int64(os.Getpagesize())
+
+	adv(pg+123, 1000)        // unaligned interior span → aligned down, counted
+	adv(-5, 100)             // negative offset → ignored
+	adv(int64(size), 10)     // past the end → ignored
+	adv(int64(size)-50, 500) // tail overrun → clamped to mapping end
+	adv(0, 0)                // empty → ignored
+
+	got := readaheadAdviseBytes.Load() - before
+	span1 := int64(123 + 1000)                              // start aligns down pg+123 → pg; end stays pg+1123
+	span4 := int64(size) - ((int64(size) - 50) &^ (pg - 1)) // tail: aligned-down start to mapping end
+	want := span1 + span4
+	if got != want {
+		t.Fatalf("advised bytes = %d, want %d (span1 %d + span4 %d)", got, want, span1, span4)
 	}
 }

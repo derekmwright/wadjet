@@ -742,3 +742,82 @@ func TestDecodeAheadIter_PressureOccupancyFloor(t *testing.T) {
 	}
 	it3.win.mu.Unlock()
 }
+
+// TestDecodeAheadIter_AdviseCoversAllGroups: with an Advise hook wired,
+// every row group's projected column chunks are announced exactly once,
+// with sane file-relative ranges, and output is unchanged.
+func TestDecodeAheadIter_AdviseCoversAllGroups(t *testing.T) {
+	const groups = 12
+	data := manyRowGroupFile(t, groups, 40)
+	schema := []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}
+
+	var mu sync.Mutex
+	type span struct{ off, n int64 }
+	var advised []span
+	it, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 3, Advise: func(off, n int64) {
+			mu.Lock()
+			advised = append(advised, span{off, n})
+			mu.Unlock()
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := drainGroupIter(t, it)
+	it.Close()
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if len(got) != groups {
+		t.Fatalf("batches = %d, want %d", len(got), groups)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// One projected leaf per group → exactly one span per group.
+	if len(advised) != groups {
+		t.Fatalf("advised spans = %d, want %d (one per group, no repeats)", len(advised), groups)
+	}
+	seen := make(map[int64]bool)
+	for _, s := range advised {
+		if s.off < 0 || s.n <= 0 || s.off+s.n > int64(len(data)) {
+			t.Fatalf("advised span [%d,+%d) outside file of %d bytes", s.off, s.n, len(data))
+		}
+		if seen[s.off] {
+			t.Fatalf("span at offset %d advised twice", s.off)
+		}
+		seen[s.off] = true
+	}
+}
+
+// TestDecodeAheadIter_AdviseRespectsShardRange: a sharded iterator must
+// only advise the row groups in its own shard slice.
+func TestDecodeAheadIter_AdviseRespectsShardRange(t *testing.T) {
+	const groups = 12
+	data := manyRowGroupFile(t, groups, 40)
+	schema := []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}
+
+	var mu sync.Mutex
+	var spans int
+	it, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 1, 3,
+		DecodeAheadOpts{Workers: 2, Advise: func(off, n int64) {
+			mu.Lock()
+			spans++
+			mu.Unlock()
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := drainGroupIter(t, it)
+	it.Close()
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if spans != len(got) {
+		t.Fatalf("advised %d spans for a shard that decoded %d groups", spans, len(got))
+	}
+	if spans == 0 || spans >= groups {
+		t.Fatalf("shard advised %d of %d groups; want a proper subset", spans, groups)
+	}
+}

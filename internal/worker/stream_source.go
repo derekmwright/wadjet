@@ -1008,6 +1008,12 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 		if s.executor.cpuTokens != nil {
 			opts.Tokens = s.executor.cpuTokens
 		}
+		// Row-group I/O-ahead: only meaningful when the file bytes are a
+		// real mmap (local-tier opens); the S3-streamed path decodes from
+		// heap and has nothing to fault.
+		if rowGroupReadaheadEnabled && len(mmapData) > 0 {
+			opts.Advise = willNeedAdviser(mmapData)
+		}
 		da, err := scan.OpenDecodeAheadIter(reader, projCols, nil, shardIdx, shardCount, opts)
 		if err != nil {
 			p.release(s.executor.logger)

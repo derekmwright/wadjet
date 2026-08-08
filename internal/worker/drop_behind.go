@@ -1,6 +1,9 @@
 package worker
 
 import (
+	"os"
+	"sync/atomic"
+
 	"golang.org/x/sys/unix"
 
 	"github.com/citc-tech/wadjet/internal/engine/diskio"
@@ -54,4 +57,39 @@ func adviseSequential(data []byte) {
 		return
 	}
 	_ = unix.Madvise(data, unix.MADV_SEQUENTIAL)
+}
+
+// Row-group I/O-ahead (docs/design/rowgroup-readahead.md): the
+// decode-ahead iterator announces the projected column-chunk ranges of
+// row groups about to be decoded, and this adviser turns them into
+// madvise(MADV_WILLNEED) on the scan mmap — asynchronous kernel
+// readahead that lands the pages BEFORE a token-holding decode worker
+// faults on them. On a page-cache-hot mmap (cold runs re-reading their
+// own tee) the advise is a no-op; in the saturated steady regime it
+// converts synchronous per-fault NVMe reads under a held CPU token into
+// batched background I/O. WADJET_ROWGROUP_READAHEAD=0 is the kill
+// switch.
+var rowGroupReadaheadEnabled = os.Getenv("WADJET_ROWGROUP_READAHEAD") != "0"
+
+// readaheadAdviseBytes counts bytes handed to MADV_WILLNEED, the
+// engagement marker beside the drop-behind counters in wlogs.
+var readaheadAdviseBytes atomic.Int64
+
+// willNeedAdviser returns the scan.DecodeAheadOpts.Advise closure for one
+// whole-file scan mmap. Offsets are file-relative, which is mmap-relative
+// here (offset-0 whole-file map). The closure clamps to the mapping,
+// page-aligns downward (madvise requires an aligned start; the base is
+// page-aligned), and never errors out loud — WILLNEED is advisory.
+func willNeedAdviser(data []byte) func(off, n int64) {
+	pageMask := int64(os.Getpagesize()) - 1
+	return func(off, n int64) {
+		if off < 0 || n <= 0 || off >= int64(len(data)) {
+			return
+		}
+		end := min(off+n, int64(len(data)))
+		off &^= pageMask
+		if unix.Madvise(data[off:end], unix.MADV_WILLNEED) == nil {
+			readaheadAdviseBytes.Add(end - off)
+		}
+	}
 }

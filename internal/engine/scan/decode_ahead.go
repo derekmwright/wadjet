@@ -51,6 +51,8 @@ type DecodeAheadIter struct {
 	pressure       func() bool
 	pressureStrict bool
 	tokens         TokenPool
+	advise         func(off, n int64)
+	advisedIdx     int // next row-group index to I/O-advise (win.mu)
 
 	dynamicRanges []exec.DynamicRange
 	bloomFilters  []*exec.BloomScanFilter
@@ -153,6 +155,17 @@ type DecodeAheadOpts struct {
 	// fragments' morsel width (Q20 +54%, Q05 +17%) while utilization
 	// stayed flat.
 	Tokens TokenPool
+	// Advise, when set, receives the file-relative byte range of each
+	// projected column chunk shortly BEFORE its row group is decoded —
+	// the I/O-ahead seam (docs/design/rowgroup-readahead.md). The worker
+	// wires an madvise(MADV_WILLNEED) closure over the scan mmap so a
+	// steady-state re-read faults asynchronously via kernel readahead
+	// instead of synchronously under a held CPU token. Ranges for group
+	// N+workers are issued as group N is assigned, so the advice leads
+	// decode by roughly one full assignment wave. Must be safe for
+	// concurrent use; calls stop before Close returns (decode workers
+	// are joined), so an mmap-backed closure never outlives its munmap.
+	Advise func(off, n int64)
 }
 
 // TokenPool is the compute-budget seam shared with the caller's pool
@@ -281,6 +294,7 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 		pressure:       opts.Pressure,
 		pressureStrict: opts.PressureStrict,
 		tokens:         opts.Tokens,
+		advise:         opts.Advise,
 	}
 	if it.win == nil {
 		it.win = NewDecodeWindow(opts.WindowBytes)
@@ -304,6 +318,7 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 	it.readSchema = readSchema
 	it.start, it.end = rowGroupRangeForShard(fr.NumRowGroups(), shardIdx, shardCount)
 	it.nextIdx, it.deliver = it.start, it.start
+	it.advisedIdx = it.start
 	it.slots = make(map[int]*decodeSlot, it.workers)
 
 	leaves := fr.Leaves()
@@ -508,9 +523,16 @@ func (it *DecodeAheadIter) decodeLoop() {
 		if isAhead {
 			it.win.ahead++
 		}
+		// I/O-ahead: claim the advise range for groups up to one worker
+		// wave past this assignment while the lock is held, issue the
+		// (syscall-bearing) advises after release.
+		adviseLo, adviseHi := it.claimAdviseLocked(idx)
 		ranges, blooms := it.dynamicRanges, it.bloomFilters
 		it.win.mu.Unlock()
 
+		for g := adviseLo; g < adviseHi; g++ {
+			it.adviseGroup(g)
+		}
 		slot := &decodeSlot{est: est, ahead: isAhead}
 		if pruned := it.pruneGroup(idx, ranges, blooms); !pruned {
 			b, err := ReadRowGroupNative(it.fr, idx, it.readSchema, nil)
@@ -530,6 +552,55 @@ func (it *DecodeAheadIter) decodeLoop() {
 		it.win.mu.Lock()
 		it.slots[idx] = slot
 		it.win.cond.Broadcast()
+	}
+}
+
+// claimAdviseLocked advances the advise cursor to one worker wave past
+// the group just assigned, returning the half-open range of groups this
+// worker should advise. Covering assignedIdx+workers (rather than
+// assignedIdx itself, which is about to be decoded and would gain
+// nothing) makes the advice lead decode by roughly one group-decode
+// duration — long enough for kernel readahead to land the pages, short
+// enough that a saturated LRU hasn't evicted them again. Caller holds
+// win.mu.
+func (it *DecodeAheadIter) claimAdviseLocked(assignedIdx int) (lo, hi int) {
+	if it.advise == nil {
+		return 0, 0
+	}
+	target := assignedIdx + it.workers + 1
+	if target > it.end {
+		target = it.end
+	}
+	if target <= it.advisedIdx {
+		return 0, 0
+	}
+	lo, hi = it.advisedIdx, target
+	it.advisedIdx = target
+	return lo, hi
+}
+
+// adviseGroup issues the projected column chunks of one row group to the
+// Advise hook. Offsets follow the page-reader convention: a chunk starts
+// at its dictionary page when one precedes the data pages, else at the
+// first data page, and spans TotalCompressedSize.
+func (it *DecodeAheadIter) adviseGroup(rgIdx int) {
+	rg := it.fr.RowGroupMeta(rgIdx)
+	if rg == nil {
+		return
+	}
+	for _, li := range it.estLeaves {
+		if li < 0 || li >= len(rg.Columns) {
+			continue
+		}
+		md := rg.Columns[li].MetaData
+		if md == nil || md.TotalCompressedSize <= 0 {
+			continue
+		}
+		off := md.DataPageOffset
+		if md.DictionaryPageOffset > 0 && md.DictionaryPageOffset < md.DataPageOffset {
+			off = md.DictionaryPageOffset
+		}
+		it.advise(off, md.TotalCompressedSize)
 	}
 }
 

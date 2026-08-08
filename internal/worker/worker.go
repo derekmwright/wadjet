@@ -771,7 +771,8 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 						"refault_episode_ignores", memory.PageCachePressureBoundedIgnores())
 					writeDrop, readDrop := diskio.DropBehindStats()
 					w.logger.Info("drop-behind stats",
-						"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop)
+						"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop,
+						"readahead_advise_bytes", readaheadAdviseBytes.Load())
 				}
 				w.executor.sweepScanDecodeAheadQueryStats(false)
 			}
@@ -1105,7 +1106,8 @@ func (w *Worker) Stop() {
 	}
 	writeDrop, readDrop := diskio.DropBehindStats()
 	w.logger.Info("drop-behind stats (final)",
-		"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop)
+		"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop,
+		"readahead_advise_bytes", readaheadAdviseBytes.Load())
 
 	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
 }
