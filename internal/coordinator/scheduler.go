@@ -318,6 +318,15 @@ func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]i
 			return id, "local", true
 		}
 	}
+	// Scan affinity (docs/design/scan-affinity.md): the task's base-table
+	// files rendezvous-hash to one worker's NVMe cache. Preference only —
+	// same-batch cap and connectivity checks as locality, and a fallback
+	// placement just misses the cache exactly as pre-affinity fan-out did.
+	if t.AffinityWorkerID != "" {
+		if id, ok := pickAffinityWorkerFrom(t.AffinityWorkerID, s.dpSrv.ConnectedWorkers(), batchAssigned, batchLen); ok {
+			return id, "affine", true
+		}
+	}
 	if t.EstimatedBytes > 0 && s.registry != nil {
 		if id, ok := s.pickLeastLoadedSpread(batchAssigned); ok {
 			return id, "binpack", true
@@ -325,6 +334,22 @@ func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]i
 	}
 	id, ok := s.dpSrv.PickWorker()
 	return id, "rr", ok
+}
+
+// pickAffinityWorkerFrom honors a scan task's cache-affinity hint when the
+// worker is connected and the same-batch cap leaves it room. The cap
+// mirrors pickLocalityWorkerFrom's anti-stacking rule; affine fan-outs
+// produce near-fair shares by construction (rendezvous over uniform
+// files), so the cap only bites on skewed ownership — the overflow tasks
+// place normally and pay at most a cache miss.
+func pickAffinityWorkerFrom(want string, connected []string, batchAssigned map[string]int, batchLen int) (string, bool) {
+	if want == "" || len(connected) == 0 || !slices.Contains(connected, want) {
+		return "", false
+	}
+	if batchAssigned[want] >= (batchLen+len(connected)-1)/len(connected) {
+		return "", false
+	}
+	return want, true
 }
 
 // pickLocalityWorkerFrom places a task whose peer-location hints all point

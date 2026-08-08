@@ -235,6 +235,14 @@ type Task struct {
 	// hints. Only populated when the coordinator runs --streaming-exchange.
 	InputLocations map[string]string `json:"input_locations,omitempty"`
 
+	// AffinityWorkerID is the rendezvous-hash owner of this scan task's
+	// base-table files (docs/design/scan-affinity.md): the worker whose
+	// NVMe base-table cache canonically holds them. Placement PREFERENCE
+	// only — the scheduler falls through to binpack/round-robin when the
+	// worker is absent or the same-batch cap bites, and a task placed
+	// elsewhere just misses the cache exactly as before.
+	AffinityWorkerID string `json:"affinity_worker_id,omitempty"`
+
 	// EagerInputs maps an input alias to its eager manifest-feed
 	// descriptor (docs/design/eager-consumer-dispatch.md). When an alias
 	// appears here, the worker builds a manifest-fed source for it

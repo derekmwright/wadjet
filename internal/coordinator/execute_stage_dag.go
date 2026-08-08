@@ -1587,6 +1587,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	taskCount := workerCount
 	capacity := c.workers.ClusterCapacity()
 	var fileSets [][]string
+	var affinity []string
 	var shardCount int
 	if len(stage.ScanFiles) == 1 {
 		shardCount = scanShardCountForSingleFile(workerCount, capacity, stage.EstimatedBytes)
@@ -1602,7 +1603,10 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		taskCount = shardCount
 	} else {
 		taskCount = scanFanOutTaskCount(workerCount, capacity, len(stage.ScanFiles))
-		fileSets = splitFilesEvenly(stage.ScanFiles, taskCount)
+		fileSets, affinity = affineFileSets(stage.ScanFiles, c.activeWorkerIDs(), taskCount)
+		if fileSets == nil {
+			fileSets = splitFilesEvenly(stage.ScanFiles, taskCount)
+		}
 	}
 	actualTasks := len(fileSets)
 	if actualTasks == 0 {
@@ -1637,15 +1641,16 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	tasks := make([]distributed.Task, 0, actualTasks)
 	for shardIdx, files := range fileSets {
 		t := distributed.Task{
-			ID:          uuid.New().String()[:8],
-			QueryID:     queryID,
-			StageID:     stage.ID,
-			Type:        distributed.TaskTypeStage,
-			StageType:   "aggregate",
-			TableName:   stage.TableName,
-			Columns:     stage.Columns,
-			GroupByCols: stage.FusedAggGroupBy,
-			Aggregates:  aggs,
+			ID:               uuid.New().String()[:8],
+			QueryID:          queryID,
+			StageID:          stage.ID,
+			Type:             distributed.TaskTypeStage,
+			StageType:        "aggregate",
+			AffinityWorkerID: affinityFor(affinity, shardIdx),
+			TableName:        stage.TableName,
+			Columns:          stage.Columns,
+			GroupByCols:      stage.FusedAggGroupBy,
+			Aggregates:       aggs,
 			// Propagate scan-pushed WHERE fragments. Without this the worker
 			// aggregates every row in the file slice and ignores the query's
 			// predicate — group counts match legacy but aggregate VALUES are
@@ -1845,6 +1850,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 	// for free.
 	capacity := c.workers.ClusterCapacity()
 	var fileSets [][]string
+	var affinity []string
 	var shardCount int
 	if len(stage.ScanFiles) == 1 {
 		shardCount = scanShardCountForSingleFile(workerCount, capacity, stage.EstimatedBytes)
@@ -1863,7 +1869,10 @@ func (c *Coordinator) dispatchScanFilterStage(
 		// which keeps each task's heap below the 32GB worker limit and avoids
 		// the OOM-restart-then-idle-timeout pattern observed on Q04 SF10.
 		taskCount := scanFanOutTaskCount(workerCount, capacity, len(stage.ScanFiles))
-		fileSets = splitFilesEvenly(stage.ScanFiles, taskCount)
+		fileSets, affinity = affineFileSets(stage.ScanFiles, c.activeWorkerIDs(), taskCount)
+		if fileSets == nil {
+			fileSets = splitFilesEvenly(stage.ScanFiles, taskCount)
+		}
 	}
 	actualTasks := len(fileSets)
 	if actualTasks == 0 {
@@ -1909,15 +1918,16 @@ func (c *Coordinator) dispatchScanFilterStage(
 	tasks := make([]distributed.Task, 0, actualTasks)
 	for shardIdx, files := range fileSets {
 		t := distributed.Task{
-			ID:           uuid.New().String()[:8],
-			QueryID:      queryID,
-			StageID:      stage.ID,
-			Type:         distributed.TaskTypeStage,
-			TableName:    stage.TableName,
-			DataBucket:   c.config.ResultBucket,
-			ResultBucket: c.config.ResultBucket,
-			ResultPrefix: resultPrefix,
-			CreatedAt:    time.Now(),
+			ID:               uuid.New().String()[:8],
+			QueryID:          queryID,
+			StageID:          stage.ID,
+			Type:             distributed.TaskTypeStage,
+			TableName:        stage.TableName,
+			AffinityWorkerID: affinityFor(affinity, shardIdx),
+			DataBucket:       c.config.ResultBucket,
+			ResultBucket:     c.config.ResultBucket,
+			ResultPrefix:     resultPrefix,
+			CreatedAt:        time.Now(),
 			// Emitter scans ride the priority lane for the same reason
 			// they bypass the dispatch semaphore: their completion is what
 			// makes the concurrently-running bulk scans cheap, and the

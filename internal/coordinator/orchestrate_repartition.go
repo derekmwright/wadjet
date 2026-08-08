@@ -223,7 +223,10 @@ func (c *Coordinator) runShuffleSide(
 	// (used by dispatchScanAggregateStage et al) — see execute_stage_dag.go.
 	capacity := c.workers.ClusterCapacity()
 	taskCount := scanFanOutTaskCount(workerCount, capacity, len(sourceStage.ScanFiles))
-	fileSets := splitFilesEvenly(sourceStage.ScanFiles, taskCount)
+	fileSets, affinity := affineFileSets(sourceStage.ScanFiles, c.activeWorkerIDs(), taskCount)
+	if fileSets == nil {
+		fileSets = splitFilesEvenly(sourceStage.ScanFiles, taskCount)
+	}
 	actualTasks := len(fileSets)
 	if actualTasks == 0 {
 		// No files — nothing to shuffle. Return empty partition layout.
@@ -256,24 +259,25 @@ func (c *Coordinator) runShuffleSide(
 	tasks := make([]distributed.Task, actualTasks)
 	for i, files := range fileSets {
 		t := distributed.Task{
-			ID:             uuid.New().String()[:8],
-			QueryID:        shuffleQueryID,
-			StageID:        stageID,
-			Type:           distributed.TaskTypeShuffle,
-			TableName:      sourceStage.TableName,
-			Files:          files,
-			Columns:        cols,
-			ShuffleKeys:    keys,
-			NumPartitions:  numParts,
-			DataBucket:     c.config.ResultBucket,
-			ResultBucket:   c.config.ResultBucket,
-			ResultPrefix:   resultPrefix,
-			CreatedAt:      time.Now(),
-			DynamicFilters: dynamicFilters,
-			ComputedCols:   computedCols,
-			DropCols:       dropCols,
-			PartialAggKeys:  partialAggKeys,
-			PartialAggSpecs: partialAggSpecs,
+			ID:               uuid.New().String()[:8],
+			QueryID:          shuffleQueryID,
+			StageID:          stageID,
+			Type:             distributed.TaskTypeShuffle,
+			AffinityWorkerID: affinityFor(affinity, i),
+			TableName:        sourceStage.TableName,
+			Files:            files,
+			Columns:          cols,
+			ShuffleKeys:      keys,
+			NumPartitions:    numParts,
+			DataBucket:       c.config.ResultBucket,
+			ResultBucket:     c.config.ResultBucket,
+			ResultPrefix:     resultPrefix,
+			CreatedAt:        time.Now(),
+			DynamicFilters:   dynamicFilters,
+			ComputedCols:     computedCols,
+			DropCols:         dropCols,
+			PartialAggKeys:   partialAggKeys,
+			PartialAggSpecs:  partialAggSpecs,
 		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
