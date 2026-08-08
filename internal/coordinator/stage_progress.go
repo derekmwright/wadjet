@@ -23,11 +23,11 @@ import (
 // Routing happens by stageID embedded in each TaskProgress message,
 // not by NATS subject — keeps the subject layout flat.
 type stageProgressBridge struct {
-	mu       sync.RWMutex
-	chans    map[string]chan<- struct{}
-	sub      *nats.Subscription
-	dpSrv    *dataplane.Server
-	queryID  string
+	mu      sync.RWMutex
+	chans   map[string]chan<- struct{}
+	sub     *nats.Subscription
+	dpSrv   *dataplane.Server
+	queryID string
 }
 
 func newStageProgressBridge(nc *nats.Conn, dpSrv *dataplane.Server, queryID string) (*stageProgressBridge, error) {

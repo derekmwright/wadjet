@@ -39,4 +39,3 @@ func TestExecuteUnsupportedTaskType(t *testing.T) {
 		t.Error("expected non-zero duration")
 	}
 }
-

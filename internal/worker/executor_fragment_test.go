@@ -34,7 +34,7 @@ func TestExecuteFragment_ScanFilterAggregateUnpartitioned(t *testing.T) {
 
 	data := makeGroupedWshf(t, [][2]int64{
 		{1, 10}, {1, 20}, // g=1 → after filter v>=20: 20
-		{2, 50}, // g=2 → 50
+		{2, 50},          // g=2 → 50
 		{3, 30}, {3, 30}, // g=3 → 60
 	})
 

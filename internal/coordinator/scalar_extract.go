@@ -286,4 +286,3 @@ func replacePlaceholders(s string, literals map[string]string) string {
 	}
 	return s
 }
-

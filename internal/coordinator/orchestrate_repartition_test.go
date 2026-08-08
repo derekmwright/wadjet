@@ -7,10 +7,10 @@ import (
 
 func TestSplitFilesEvenly(t *testing.T) {
 	cases := []struct {
-		name    string
-		files   []string
-		n       int
-		wantLen int   // expected number of non-nil slices
+		name      string
+		files     []string
+		n         int
+		wantLen   int // expected number of non-nil slices
 		wantTotal int // expected total files across all slices
 	}{
 		{

@@ -41,9 +41,9 @@ func TestPartitionFilesForWorker_Partitioned(t *testing.T) {
 		},
 	}
 	cases := []struct {
-		name    string
-		w, wc   int
-		want    []string
+		name  string
+		w, wc int
+		want  []string
 	}{
 		{"worker 0 of 2", 0, 2, []string{"p0.wshf", "p1.wshf", "p2.wshf", "p3.wshf"}},
 		{"worker 1 of 2", 1, 2, []string{"p4.wshf", "p5.wshf", "p6.wshf", "p7.wshf"}},

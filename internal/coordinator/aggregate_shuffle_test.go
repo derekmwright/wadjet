@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	"github.com/citc-tech/wadjet/benchmarks/tpch"
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 )
 
 // TestPreComputeDerivedAggregate_Q17SF001 exercises the Phase 1 pre-compute

@@ -59,9 +59,9 @@ type eagerFeed struct {
 	numPartitions     int
 	decisionThreshold int // completions needed before decisionReady closes
 
-	mu        sync.Mutex
-	replay    []distributed.ProducerTaskManifest // manifests accumulated so far
-	closed    bool                               // query finished; republisher must stop
+	mu     sync.Mutex
+	replay []distributed.ProducerTaskManifest // manifests accumulated so far
+	closed bool                               // query finished; republisher must stop
 	// active is set the first time a consumer stage clears dispatch on
 	// this feed. Until then no NATS traffic leaves the coordinator for
 	// this stage — the replay list and completion accounting still

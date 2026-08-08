@@ -43,7 +43,8 @@ var updateSF01Golden = flag.Bool("update-sf01-golden", false, "update TPCH SF0.1
 // from SF0.01.
 //
 // Opt-in: skipped in `-short`. Run with:
-//   go test -run TestTPCHNativeDAG_SF01 ./internal/coordinator/ -timeout 20m
+//
+//	go test -run TestTPCHNativeDAG_SF01 ./internal/coordinator/ -timeout 20m
 func TestTPCHNativeDAG_SF01(t *testing.T) {
 	if testing.Short() {
 		t.Skip("TPCH SF0.1 native-DAG gate — skipped in -short")

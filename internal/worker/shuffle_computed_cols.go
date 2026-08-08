@@ -8,8 +8,8 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/expr"
-	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // computedColAppender evaluates one Task.ComputedCols expression per batch

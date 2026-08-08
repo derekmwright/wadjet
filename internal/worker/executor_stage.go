@@ -25,7 +25,6 @@ func (e *Executor) executeStage(ctx context.Context, task distributed.Task, resu
 	return e.executeFragment(ctx, task, result)
 }
 
-
 // uploadUnpartitionedSpill uploads a streaming sink's finalised file to S3,
 // populates the NATS KV fast-read cache for small payloads, and adopts the
 // file into the LocalStageCache for same-worker downstream tasks. Mirrors the

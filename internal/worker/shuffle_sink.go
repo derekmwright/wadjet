@@ -30,9 +30,9 @@ type shuffleStreamSink struct {
 	mu      sync.Mutex
 	file    *os.File
 	bufFile *bufio.Writer // wraps file so the small per-row/per-column
-	                     // Writes from shuffleWriter coalesce into one
-	                     // syscall per buffer worth (see partitioned
-	                     // shuffle sink for the profile that drove this).
+	// Writes from shuffleWriter coalesce into one
+	// syscall per buffer worth (see partitioned
+	// shuffle sink for the profile that drove this).
 	writer  *shuffleWriter
 	schema  []parquet.Column
 	numRows int64

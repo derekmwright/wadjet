@@ -260,4 +260,3 @@ func TestWorkerStartWithClusterID(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	w.Stop()
 }
-

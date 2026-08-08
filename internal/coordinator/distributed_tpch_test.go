@@ -1267,7 +1267,7 @@ func TestDistributedTPCHQ17AggregateShuffleCorrectness(t *testing.T) {
 	// aggregate-shuffle detection entirely → Q17's inner aggregate runs
 	// redundantly per probe task, same as pre-Phase-1 behavior.
 	origAggShuffle := aggregateShuffleThreshold
-	aggregateShuffleThreshold = 1<<62 // effectively infinite
+	aggregateShuffleThreshold = 1 << 62 // effectively infinite
 	t.Cleanup(func() { aggregateShuffleThreshold = origAggShuffle })
 
 	inPlan, err := coord.ExecuteSQL(ctx, q17.SQL)
@@ -1419,12 +1419,12 @@ func TestAggregateShuffleCorrectness_NonEmptyResult(t *testing.T) {
 // 4 GB gate — so without the override the new path never fires. This test
 // proves the full chain works end-to-end:
 //
-//   1. PickAggregateShuffleCandidate fires on Q17's decorrelated plan.
-//   2. Coordinator dispatches preComputeDerivedAggregate, which runs the
-//      reconstructed GROUP BY l_partkey SQL on a worker and caches to S3.
-//   3. Probe-split tasks carry the signatures; worker substitutes the
-//      matching Aggregate subtree with a streaming source of the cache.
-//   4. Q17 returns its 1 expected row with the correct avg_yearly value.
+//  1. PickAggregateShuffleCandidate fires on Q17's decorrelated plan.
+//  2. Coordinator dispatches preComputeDerivedAggregate, which runs the
+//     reconstructed GROUP BY l_partkey SQL on a worker and caches to S3.
+//  3. Probe-split tasks carry the signatures; worker substitutes the
+//     matching Aggregate subtree with a streaming source of the cache.
+//  4. Q17 returns its 1 expected row with the correct avg_yearly value.
 //
 // If this test passes but the SF1-sample / SF10 run doesn't, the gap is
 // scale-specific (e.g. pre-compute task memory) not structural.

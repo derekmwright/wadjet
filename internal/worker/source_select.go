@@ -11,7 +11,7 @@ import (
 type inputFileKind int
 
 const (
-	inputKindUnknown    inputFileKind = iota
+	inputKindUnknown     inputFileKind = iota
 	inputKindPartitioned               // "partition=NNNN/*.wshf" — upstream Repartition stage output
 	inputKindShuffleFlat               // "*.wshf" without partition segments — upstream Replicate/pipeline output
 	inputKindParquet                   // "*.parquet" — table scan

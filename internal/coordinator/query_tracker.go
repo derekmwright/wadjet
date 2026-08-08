@@ -12,7 +12,7 @@ import (
 type QueryState int
 
 const (
-	QueryStatePending    QueryState = iota
+	QueryStatePending QueryState = iota
 	QueryStateRunning
 	QueryStateCompleted
 	QueryStateFailed

@@ -20,7 +20,7 @@ import (
 // coord planning/dispatch — but that's a bigger change. See
 // project_multi_signal_liveness_ec2_validation_2026-05-03.md.
 const (
-	coordSubMsgLimit  = 1_048_576       // 1M messages (default 65k)
+	coordSubMsgLimit  = 1_048_576         // 1M messages (default 65k)
 	coordSubByteLimit = 256 * 1024 * 1024 // 256 MB (default 64 MB)
 )
 
@@ -28,11 +28,11 @@ const (
 type WorkerInfo struct {
 	WorkerID      string
 	ClusterID     string
-	MaxConcurrent int   // effective task-slot count reported in heartbeat; 0 = legacy worker (assume default)
+	MaxConcurrent int // effective task-slot count reported in heartbeat; 0 = legacy worker (assume default)
 	MemoryUsed    int64
 	MemoryTotal   int64
-	PoolUsed      int64 // shared memory pool bytes Reserved
-	PoolBudget    int64 // shared memory pool capacity in bytes; pressure = PoolUsed / PoolBudget
+	PoolUsed      int64    // shared memory pool bytes Reserved
+	PoolBudget    int64    // shared memory pool capacity in bytes; pressure = PoolUsed / PoolBudget
 	ActiveTaskIDs []string // task IDs in flight per the most recent heartbeat
 	Draining      bool
 	PeerAddr      string // dialable peer-exchange address; "" = worker serves no peer fetches

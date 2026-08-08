@@ -89,4 +89,3 @@ func readMemStoreInts(t *testing.T, store *objstore.MemStore, bucket, key, colNa
 	}
 	return out
 }
-

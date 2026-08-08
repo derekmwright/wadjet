@@ -24,12 +24,12 @@ import (
 // reaped simultaneously) is NOT caused by Go runtime scheduling
 // starvation on the workers. Likely remaining causes — needing different
 // diagnostics:
-//   1. NATS server-side slow-consumer drops on the coord's heartbeat sub
-//      (heartbeat traffic from many workers fanning into one sub)
-//   2. Coord-side heartbeat goroutine starvation (this test measures
-//      worker side only)
-//   3. cgroup/kernel pause on workers under MemoryHigh pressure
-//   4. Network-level pause between worker hosts and coord
+//  1. NATS server-side slow-consumer drops on the coord's heartbeat sub
+//     (heartbeat traffic from many workers fanning into one sub)
+//  2. Coord-side heartbeat goroutine starvation (this test measures
+//     worker side only)
+//  3. cgroup/kernel pause on workers under MemoryHigh pressure
+//  4. Network-level pause between worker hosts and coord
 //
 // Multi-signal liveness at coord (commit landing alongside this test)
 // covers cases (1) and the heartbeat-only-stops-but-data-plane-keeps-
@@ -69,9 +69,9 @@ func TestHeartbeatStarvationUnderLoad(t *testing.T) {
 	}
 	measure := func(lockOSThread bool) result {
 		var (
-			samples = make([]time.Duration, 0, 128)
+			samples   = make([]time.Duration, 0, 128)
 			samplesMu sync.Mutex
-			ticks   int32
+			ticks     int32
 		)
 		stop := make(chan struct{})
 

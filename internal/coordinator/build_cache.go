@@ -335,4 +335,3 @@ func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID s
 	// from the build cache and produce wrong query results downstream.
 	return nil, fmt.Errorf("build cache scan returned %d rows but no result path or inline data", resultRows)
 }
-

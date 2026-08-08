@@ -35,11 +35,11 @@ func TestCreatePipelineTasksBuildCache(t *testing.T) {
 	}
 
 	stage := physical.Stage{
-		ID:              "pipeline-0",
-		Type:            "pipeline",
-		Tasks:           3,
-		ProbeSplitAlias: "lineitem",
-		ProbeSplitFiles: []string{"l1.parquet", "l2.parquet", "l3.parquet"},
+		ID:                 "pipeline-0",
+		Type:               "pipeline",
+		Tasks:              3,
+		ProbeSplitAlias:    "lineitem",
+		ProbeSplitFiles:    []string{"l1.parquet", "l2.parquet", "l3.parquet"},
 		BuildCachePreScans: cacheFiles,
 	}
 
@@ -261,13 +261,13 @@ func TestPrunedScanColumnsFiltersAlienColumns(t *testing.T) {
 		ScanAlias: "partsupp:1",
 		TableName: "ps_test",
 		Columns: []string{
-			"ps_partkey",   // real
-			"r_name",       // alien (from region)
-			"ps_suppkey",   // real
-			"p_mfgr",       // alien (from part)
-			"ps_partkey",   // duplicate — should be deduped
+			"ps_partkey",    // real
+			"r_name",        // alien (from region)
+			"ps_suppkey",    // real
+			"p_mfgr",        // alien (from part)
+			"ps_partkey",    // duplicate — should be deduped
 			"ps_supplycost", // real
-			"s_phone",      // alien (from supplier)
+			"s_phone",       // alien (from supplier)
 		},
 	}
 

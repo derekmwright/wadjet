@@ -56,13 +56,13 @@ type manifestStreamSource struct {
 	sub      *nats.Subscription
 
 	mu        sync.Mutex
-	arrived   chan struct{}            // closed+recreated on every state change
-	queue     []manifestFileSet        // resolved, not yet consumed
-	resolved  map[string]int           // producer taskID → attempt of resolved manifest
-	consumed  map[string]int           // producer taskID → attempt pinned at first read
-	poisoned  error                    // sticky fencing violation
-	candidate map[string]struct{}      // full producer task ID set
-	ordinal   map[string]int           // producer taskID → dispatch-order index
+	arrived   chan struct{}       // closed+recreated on every state change
+	queue     []manifestFileSet   // resolved, not yet consumed
+	resolved  map[string]int      // producer taskID → attempt of resolved manifest
+	consumed  map[string]int      // producer taskID → attempt pinned at first read
+	poisoned  error               // sticky fencing violation
+	candidate map[string]struct{} // full producer task ID set
+	ordinal   map[string]int      // producer taskID → dispatch-order index
 
 	inner   *cachedFileStreamSource // current file-set reader
 	current manifestFileSet

@@ -503,7 +503,6 @@ func TestExecuteFragment_MorselParallel_LargeBatchViewParity(t *testing.T) {
 	morselDispenserBudgetBytes = 64 << 10
 	defer func() { morselDispenserBudgetBytes = origBudget }()
 
-
 	const numFiles = 4
 	const rowsPerFile = 10000 // > DefaultBatchSize → splitting engages
 
@@ -537,7 +536,6 @@ func TestExecuteFragment_MorselParallel_LinearPressureCollapse(t *testing.T) {
 	origBudget := morselDispenserBudgetBytes
 	morselDispenserBudgetBytes = 64 << 10
 	defer func() { morselDispenserBudgetBytes = origBudget }()
-
 
 	orig := heapPressureActive
 	heapPressureActive = func() bool { return true }
@@ -632,7 +630,6 @@ func TestExecuteFragment_MorselParallel_LargeBatchJoinSpillFlush(t *testing.T) {
 	origBudget := morselDispenserBudgetBytes
 	morselDispenserBudgetBytes = 64 << 10
 	defer func() { morselDispenserBudgetBytes = origBudget }()
-
 
 	ctx := context.Background()
 	const bucket = "test-morsel-hj-flush-big"

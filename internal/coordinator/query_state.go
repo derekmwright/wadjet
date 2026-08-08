@@ -26,11 +26,11 @@ const (
 // This is stored in NATS KV so that a standby coordinator can recover
 // queries after a failover.
 type PersistentQueryState struct {
-	ID              string   `json:"id"`
-	SQL             string   `json:"sql"`
-	CompletedStages []string `json:"completed_stages"`
-	Status          string   `json:"status"` // "planning", "executing", "merging", "done", "failed"
-	LeaderID        string   `json:"leader_id"`
+	ID              string    `json:"id"`
+	SQL             string    `json:"sql"`
+	CompletedStages []string  `json:"completed_stages"`
+	Status          string    `json:"status"` // "planning", "executing", "merging", "done", "failed"
+	LeaderID        string    `json:"leader_id"`
 	StartedAt       time.Time `json:"started_at"`
 }
 

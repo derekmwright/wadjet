@@ -320,10 +320,10 @@ func TestEagerFeedKeyScoping(t *testing.T) {
 func TestEagerFeedDecisionThreshold(t *testing.T) {
 	// threshold = min(total, max(workerCount, ceil(total/4))), floor 1.
 	cases := []struct{ total, workers, want int }{
-		{12, 3, 3},  // one wave dominates
-		{24, 3, 6},  // quarter dominates
-		{2, 3, 2},   // capped at total
-		{1, 3, 1},   // single-task producer
+		{12, 3, 3}, // one wave dominates
+		{24, 3, 6}, // quarter dominates
+		{2, 3, 2},  // capped at total
+		{1, 3, 1},  // single-task producer
 		{100, 4, 25},
 	}
 	for _, tc := range cases {

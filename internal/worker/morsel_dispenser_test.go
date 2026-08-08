@@ -74,7 +74,6 @@ func activeIDs(b *batch.RecordBatch) []int64 {
 	return out
 }
 
-
 // newSplitTestDispenser builds a dispenser whose bytes gate is disabled
 // (budget 0 → splitMinCost 0) so tests with small in-memory parents still
 // exercise the view-splitting machinery. admit() always admits when nothing
@@ -285,10 +284,10 @@ func TestMorselDispenser_AdaptiveViewSize(t *testing.T) {
 	cases := []struct {
 		k, n, want int
 	}{
-		{2, 4196, batch.DefaultBatchSize},          // small parent → floor
-		{8, 1_000_000, 31250},                      // 1M rows, k=8 → n/32
-		{4, 40_000, 2500},                          // 40k rows, k=4 → n/16
-		{2, 2_000_000, morselMaxViewRows},          // huge parent → cap
+		{2, 4196, batch.DefaultBatchSize},                       // small parent → floor
+		{8, 1_000_000, 31250},                                   // 1M rows, k=8 → n/32
+		{4, 40_000, 2500},                                       // 40k rows, k=4 → n/16
+		{2, 2_000_000, morselMaxViewRows},                       // huge parent → cap
 		{8, 8 * batch.DefaultBatchSize, batch.DefaultBatchSize}, // exactly 4·k floor-sized views
 	}
 	for _, c := range cases {

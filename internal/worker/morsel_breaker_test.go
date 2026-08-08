@@ -472,7 +472,6 @@ func TestExecuteFragment_MorselParallel_AggLargeBatchParity(t *testing.T) {
 	morselDispenserBudgetBytes = 64 << 10
 	defer func() { morselDispenserBudgetBytes = origBudget }()
 
-
 	const numFiles = 4
 	const rowsPerFile = 6000 // > DefaultBatchSize → dispenser splits into views
 	const groups = 50
