@@ -84,6 +84,33 @@ marks Q02 (region→nation→supplier), Q05 (both segments,
 region→nation→supplier→lineitem), and Q08 (region→n1→customer), leaving
 Q07/Q21 untouched.
 
+## In-flow mid emitters (2026-08-08)
+
+The emitter cap (`cascadeMaxEmitterRows`, 2M) exists because emitting
+forces a scan onto the priority lane, whose extra-slots-above-
+MaxConcurrent contract is memory-safe only for planner-bounded tiny
+scans — and the lane's purpose (overtaking bulk work that is ALREADY
+consuming the filter attach-mode) doesn't apply to a mid whose consumer
+is WAIT-blocked on a stat-dep. Decoupling "may emit" from "rides the
+lane" admits the IN-FLOW class: a mid above the dimension cap may emit
+(`DynamicFilterEmit.InFlow`, tasks on normal scheduling) iff
+
+1. it already dispatches in the normal flow — pushed filters, fused
+   exchange, or exchange-fed pass-through (same rule as targets);
+2. its target amortizes the added serialization: target rows ≥ 4× the
+   mid's (scale-free, same family as skew-split's 2×-mean gate);
+3. it stays under the bloom-saturation bound: 4× `cascadeBloomMaxBits`
+   in rows (~16.7M). A residency-capped bloom saturates once surviving
+   keys approach its bit count; with no plan-time selectivity the raw
+   row count is the only proxy. Customer-class mids (15M → ~1-3M keys
+   post-hop) produce useful FPR; orders-class mids (150M) never can, so
+   Q03-shaped chains self-reject.
+
+At SF100 this unlocks Q07's n2→customer→orders (orders shuffle guarded
+by a c_custkey bloom from FRANCE/GERMANY-nation customers) and extends
+Q08 to the full region→n1→customer→orders three-segment chain. The mark
+line carries `mid_in_flow`.
+
 ## Alias provenance guard (2026-08-07 late)
 
 Widening the gate exposed a latent wrong-results hazard in hop-A

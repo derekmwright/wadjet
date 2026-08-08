@@ -503,6 +503,137 @@ func TestDimensionCascadeUnqualifiedAmbiguityRejects(t *testing.T) {
 	}
 }
 
+// sf100Q07Fixture mirrors the SF100 Q07 shape around join-12: lineitem
+// (filtered probe root) → join-8 against exchange-fed orders → join-12
+// against exchange-fed customer with n2 (filtered nation) chained on
+// c_nationkey. Customer (15M) exceeds the dimension-class emitter cap but
+// qualifies as an IN-FLOW mid: exchange-fed, and orders (150M) amortizes
+// the added serialization 10×.
+func sf100Q07Fixture() []Stage {
+	return []Stage{
+		{ID: "scan-0", Type: StageScan, TableName: "lineitem",
+			ScanFiles: []string{"f"}, FilterExprs: []string{"l_shipdate >= '1995-01-01'"},
+			Columns: []string{"l_orderkey", "l_suppkey"}, EstimatedRows: 600_000_000},
+		{ID: "scan-5", Type: StageScan, TableName: "orders",
+			ScanFiles: []string{"f"}, Columns: []string{"o_custkey", "o_orderkey"}, EstimatedRows: 150_000_000},
+		{ID: "exchange-repartition-7", Type: StageExchangeRepartition,
+			Dependencies: []string{"scan-5"},
+			Exchange:     &ExchangeStage{Keys: []string{"o_orderkey"}, Count: 24}},
+		{ID: "join-8", Type: StageHashJoin, JoinType: "inner",
+			JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"o_orderkey"},
+			LeftDepStage: "scan-0", RightDepStage: "exchange-repartition-7",
+			Dependencies: []string{"scan-0", "exchange-repartition-7"},
+		},
+		{ID: "scan-9", Type: StageScan, TableName: "customer",
+			ScanFiles: []string{"f"}, Columns: []string{"c_custkey", "c_nationkey"}, EstimatedRows: 15_000_000},
+		{ID: "exchange-repartition-11", Type: StageExchangeRepartition,
+			Dependencies: []string{"scan-9"},
+			Exchange:     &ExchangeStage{Keys: []string{"c_custkey"}, Count: 24}},
+		{ID: "scan-13", Type: StageScan, TableName: "nation",
+			ScanFiles: []string{"f"}, FilterExprs: []string{"n2.n_name in ('GERMANY', 'FRANCE')"},
+			Columns: []string{"n_name", "n_nationkey"}, EstimatedRows: 25},
+		{ID: "exchange-replicate-n2", Type: StageExchangeReplicate,
+			Dependencies: []string{"scan-13"}},
+		{ID: "join-12", Type: StageHashJoin, JoinType: "inner",
+			JoinLeftKeys: []string{"o_custkey"}, JoinRightKeys: []string{"c_custkey"},
+			LeftDepStage: "join-8", RightDepStage: "exchange-repartition-11",
+			Dependencies: []string{"join-8", "exchange-repartition-11", "exchange-replicate-n2"},
+			ChainedJoins: []ChainedJoinSpec{
+				{JoinType: "inner", JoinLeftKeys: []string{"c_nationkey"}, JoinRightKeys: []string{"n2.n_nationkey"}, BuildDepStage: "exchange-replicate-n2"},
+			},
+		},
+	}
+}
+
+// The in-flow mid class: customer (15M, exchange-fed) must emit c_custkey
+// with InFlow=true — the coordinator keeps such stages OFF the priority
+// lane — and orders (its exchange-fed target) must consume with a WAIT
+// stat-dep. Fails pre-feature: the flat emitter cap rejected the mid.
+func TestDimensionCascadeInFlowMidQ07Shape(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	p := NewPlanner(cat)
+	stages := sf100Q07Fixture()
+	before := DimensionCascadesPlanned.Load()
+	p.markDimensionCascade(ctx, stages)
+
+	get := func(id string) *Stage {
+		for i := range stages {
+			if stages[i].ID == id {
+				return &stages[i]
+			}
+		}
+		t.Fatalf("stage %s missing", id)
+		return nil
+	}
+	n2, cust, orders := get("scan-13"), get("scan-9"), get("scan-5")
+
+	if len(n2.EmitDynamicFilters) != 1 || n2.EmitDynamicFilters[0].KeyColumn != "n_nationkey" ||
+		n2.EmitDynamicFilters[0].InFlow {
+		t.Fatalf("n2 must emit n_nationkey on the LANE (dimension class): %+v", n2.EmitDynamicFilters)
+	}
+	if len(cust.ConsumeDynamicFilters) != 1 || cust.ConsumeDynamicFilters[0].TargetColumn != "c_nationkey" {
+		t.Fatalf("customer must consume n2's bloom: %+v", cust.ConsumeDynamicFilters)
+	}
+	if len(cust.EmitDynamicFilters) != 1 || cust.EmitDynamicFilters[0].KeyColumn != "c_custkey" ||
+		!cust.EmitDynamicFilters[0].InFlow {
+		t.Fatalf("customer must emit c_custkey as IN-FLOW: %+v", cust.EmitDynamicFilters)
+	}
+	if cust.EmitDynamicFilters[0].BloomBits > cascadeBloomMaxBits {
+		t.Fatalf("in-flow bloom must stay residency-clamped: %d", cust.EmitDynamicFilters[0].BloomBits)
+	}
+	if len(orders.ConsumeDynamicFilters) != 1 || orders.ConsumeDynamicFilters[0].TargetColumn != "o_custkey" ||
+		orders.ConsumeDynamicFilters[0].SourceStageID != "scan-9" {
+		t.Fatalf("orders must consume customer's bloom on o_custkey: %+v", orders.ConsumeDynamicFilters)
+	}
+	if !containsString(orders.Dependencies, "scan-9") || !containsString(cust.Dependencies, "scan-13") {
+		t.Fatalf("WAIT stat-deps missing: orders=%v cust=%v", orders.Dependencies, cust.Dependencies)
+	}
+	if got := DimensionCascadesPlanned.Load() - before; got != 1 {
+		t.Fatalf("expected exactly 1 segment, counter moved %d", got)
+	}
+}
+
+// In-flow eligibility negatives: each variant must reject the customer mid.
+func TestDimensionCascadeInFlowNegatives(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	cases := map[string]func([]Stage){
+		"mid not dispatched (no exchange feed)": func(s []Stage) {
+			for i := range s {
+				if s[i].ID == "exchange-repartition-11" {
+					s[i].Dependencies = []string{"somewhere-else"}
+				}
+			}
+		},
+		"target too small to amortize": func(s []Stage) {
+			for i := range s {
+				if s[i].ID == "scan-5" {
+					s[i].EstimatedRows = 40_000_000 // < 4× the 15M mid
+				}
+			}
+		},
+		"mid above bloom-saturation bound": func(s []Stage) {
+			for i := range s {
+				if s[i].ID == "scan-9" {
+					s[i].EstimatedRows = 150_000_000
+				}
+				if s[i].ID == "scan-5" {
+					s[i].EstimatedRows = 800_000_000
+				}
+			}
+		},
+	}
+	for name, mutate := range cases {
+		stages := sf100Q07Fixture()
+		mutate(stages)
+		NewPlanner(cat).markDimensionCascade(ctx, stages)
+		for i := range stages {
+			if stages[i].ID == "scan-9" && len(stages[i].EmitDynamicFilters) != 0 {
+				t.Errorf("%s: customer mid unexpectedly emits: %+v", name, stages[i].EmitDynamicFilters)
+			}
+		}
+	}
+}
+
 // Fixpoint termination: re-running the pass on an already-marked plan must
 // mark nothing new (the segment dedup) — guards against oscillation.
 func TestDimensionCascadeFixpointTerminates(t *testing.T) {

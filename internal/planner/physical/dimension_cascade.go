@@ -33,6 +33,24 @@ const (
 	// are excluded: their blooms would blow the residency cap and their
 	// scan time would serialize the fact scan behind them.
 	cascadeMaxEmitterRows = 2_000_000
+	// cascadeMaxInFlowEmitterRows bounds the IN-FLOW mid-emitter class
+	// (mids above the lane cap whose tasks ride normal scheduling). The
+	// bound derives from the bloom residency ceiling, not from lane
+	// memory: a residency-capped bloom (cascadeBloomMaxBits) saturates
+	// into uselessness once the emitter's plausible surviving key count
+	// approaches its bit count, and without plan-time selectivity
+	// estimates the raw row count is the only available proxy. 4× the
+	// bit count admits customer-class mids (15M rows, ~1-3M surviving
+	// keys after the upstream hop → useful FPR) and rejects orders-class
+	// mids (150M rows — saturated at any plausible selectivity, so the
+	// emit would be pure scan-tax + serialization for zero filtering).
+	cascadeMaxInFlowEmitterRows = 4 * cascadeBloomMaxBits
+	// cascadeInFlowAmortizationRatio: an in-flow mid's emit serializes
+	// its target behind the mid's scan+merge (WAIT stat-dep), so the
+	// protected scan must be meaningfully bigger than the emitter for
+	// the trade to pay — a scale-free structural gate, same family as
+	// the skew-split's 2× mean rule.
+	cascadeInFlowAmortizationRatio = 4
 )
 
 // markDimensionCascade wires the two-hop dimension bloom cascade
@@ -290,17 +308,32 @@ func (p *Planner) markDimensionCascadeOnce(ctx context.Context, stages []Stage, 
 					continue
 				}
 				b0 := &stages[b0Idx]
-				// The mid becomes an EMITTER: the dimension-class size cap
-				// applies to it exactly as to D — emitters bypass the
-				// dispatch semaphore and ride the priority lane, whose
-				// memory rationale assumes tiny scans, and an oversized
-				// mid's bloom saturates the L2-residency ceiling anyway.
-				// (The 2-hop matcher got this bound implicitly from join
-				// shape; the fixpoint + generalized target must enforce it:
-				// customer at SF100 is 15M rows and must not qualify.)
+				// The mid becomes an EMITTER. Dimension-class mids (≤
+				// cascadeMaxEmitterRows) ride the priority lane — the
+				// lane's memory contract assumes tiny scans. Bigger mids
+				// may still emit as the IN-FLOW class: their tasks ride
+				// normal scheduling (no lane), which is safe because
+				// their consumer is WAIT-blocked on the stat-dep anyway.
+				// In-flow eligibility is structural: the mid must already
+				// dispatch in the normal flow (filters / fused exchange /
+				// exchange-fed), its target must amortize the added
+				// serialization (≥4× the mid's rows), and the mid must
+				// stay under the bloom-saturation bound (Q07/Q08's 15M
+				// customer qualifies; Q03's 150M orders never can).
+				b0InFlow := false
 				if b0.EstimatedRows <= 0 || b0.EstimatedRows > cascadeMaxEmitterRows {
-					note("B0 via %s: est=%d exceeds emitter cap", legB.buildDep, stages[b0Idx].EstimatedRows)
-					continue
+					b0Dispatched := len(b0.FilterExprs) > 0 ||
+						(b0.Exchange != nil && len(b0.Exchange.Keys) > 0 && b0.Exchange.Count > 0) ||
+						exchangeFed[b0Idx]
+					if b0.EstimatedRows <= 0 || !b0Dispatched ||
+						b0.EstimatedRows > cascadeMaxInFlowEmitterRows ||
+						t.EstimatedRows <= 0 ||
+						b0.EstimatedRows*cascadeInFlowAmortizationRatio > t.EstimatedRows {
+						note("B0 via %s: est=%d exceeds emitter cap (in-flow: dispatched=%t target_est=%d)",
+							legB.buildDep, b0.EstimatedRows, b0Dispatched, t.EstimatedRows)
+						continue
+					}
+					b0InFlow = true
 				}
 				if b0.TableName == "" || len(b0.ScanFiles) == 0 ||
 					!hasColumn(b0.Columns, legD.leftKey) ||
@@ -380,6 +413,7 @@ func (p *Planner) markDimensionCascadeOnce(ctx context.Context, stages []Stage, 
 					KeyType:   b0KeyType,
 					BloomBits: cascadeBloomBits(b0.EstimatedRows / 8),
 					AtOutput:  true,
+					InFlow:    b0InFlow,
 				})
 				t.ConsumeDynamicFilters = append(t.ConsumeDynamicFilters, DynamicFilterConsume{
 					FilterID:      hopB,
@@ -395,7 +429,7 @@ func (p *Planner) markDimensionCascadeOnce(ctx context.Context, stages []Stage, 
 				slog.Info("dimension_cascade: marked",
 					"join", j.ID, "dim", d.ID, "mid", b0.ID, "target", t.ID, "fact", f.ID,
 					"hop_a", legD.rightKey+"->"+legD.leftKey, "hop_a_reused", hopAExists,
-					"hop_b", legB.rightKey+"->"+legB.leftKey)
+					"hop_b", legB.rightKey+"->"+legB.leftKey, "mid_in_flow", b0InFlow)
 				marked = true
 				anyMarked = true
 				break

@@ -1926,8 +1926,14 @@ func (c *Coordinator) dispatchScanFilterStage(
 			// "deep" class — a disjoint slot pool, because they may block
 			// at finalize on a leaf emitter's bloom and must never occupy
 			// the slots that leaf needs (lane deadlock otherwise).
-			Priority:     len(stage.EmitDynamicFilters) > 0,
-			PriorityDeep: len(stage.EmitDynamicFilters) > 0 && len(stage.ConsumeDynamicFilters) > 0,
+			// IN-FLOW emitters (cascade mids above the dimension-class
+			// cap, e.g. 15M-row customer) stay OFF both lanes: the lane's
+			// extra-slots-above-MaxConcurrent contract is only memory-safe
+			// for planner-bounded tiny scans, and an in-flow mid's
+			// consumer is WAIT-blocked on its stat-dep, so normal
+			// scheduling serves it correctly.
+			Priority:     stageHasLaneEmit(stage),
+			PriorityDeep: stageHasLaneEmit(stage) && len(stage.ConsumeDynamicFilters) > 0,
 		}
 		// Both branches emit fragment Operators[]. fuseShuffle terminates
 		// in OpExchangeSender (writing partitioned shuffle output);
@@ -2158,6 +2164,19 @@ func (c *Coordinator) dispatchScanFilterStage(
 		BuildStats:    buildStats,
 		Bytes:         retrier.TotalBytes(),
 	}, nil
+}
+
+// stageHasLaneEmit reports whether any of the stage's dynamic-filter
+// emits belongs on the priority lane. In-flow emits (planner-marked
+// cascade mids riding normal scheduling) don't count; a stage with only
+// in-flow emits dispatches as ordinary bulk work.
+func stageHasLaneEmit(stage physical.Stage) bool {
+	for _, e := range stage.EmitDynamicFilters {
+		if !e.InFlow {
+			return true
+		}
+	}
+	return false
 }
 
 // scanAliasForStage returns the alias key used when handing scan-fused

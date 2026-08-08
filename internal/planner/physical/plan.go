@@ -381,6 +381,16 @@ type DynamicFilterEmit struct {
 	// before the partial uploads, keeping the emitted bloom exactly as
 	// tight as under the start barrier.
 	GuardConsumes []string
+	// InFlow marks an emitter whose tasks must ride NORMAL scheduling
+	// instead of the priority lane. The lane's contract is planner-bounded
+	// tiny tasks (extra slots above MaxConcurrent are memory-safe only
+	// because dimension scans are tiny) and its purpose is overtaking bulk
+	// work that is ALREADY consuming the filter attach-mode. An in-flow
+	// cascade mid (e.g. 15M-row customer) violates the first and doesn't
+	// need the second: its consumer is WAIT-blocked on a stat-dep, so
+	// ordinary slots serve it correctly (docs/design/dimension-cascade.md
+	// §In-flow mid emitters).
+	InFlow bool
 }
 
 // DynamicFilterConsume is the planner-side spec attached to a probe-side
