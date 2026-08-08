@@ -1,7 +1,30 @@
 # Background-upload QoS: drains yield to foreground queries
 
-Status: v3 landed 2026-08-05. Kill switch: `WADJET_UPLOAD_QOS=0` (pins
-the idle width — pre-QoS behavior).
+Status: v4 landed 2026-08-08. Kill switch: `WADJET_UPLOAD_QOS=0` (pins
+the idle width and disables in-flight pausing — pre-QoS behavior).
+
+## v4: in-flight streams honor the window
+
+v3's gate applied only at slot ACQUISITION — up to 8 jobs admitted
+during idle kept compressing (a core each) and PUTting full-speed
+straight through the next query's protection window. That residual was
+the cold coin-flip class: Q06 10.7s midpoint in the v3 validation arm,
+and same-plan cold swings (Q04 +192%, Q05 11→32s) in every window
+since.
+
+v4 threads the gate INTO running jobs: both the s2 compression source
+and the PUT body read through `governedReader`, which re-consults
+`chunkGate` every `uploadChunkBytes` (1 MB). While `busy && window
+open`, non-urgent in-flight streams freeze — compression stops (the s2
+writer advances only as fast as its reads) and the PUT body stalls (the
+connection idles safely under the 30-minute ResponseHeaderTimeout).
+Escapes mirror the admission gate: urgent (demand-released) roots never
+pause, and a JOB-TOTAL yield budget (`uploadHardCapMs`, shared between
+admission waits and chunk pauses) guarantees progress under any query
+arrival pattern. Synchronous fallback uploads (the query is blocked on
+them) run ungoverned by construction (nil yield budget). Engagement
+marker: `upload_pause_ms` on the shuffle io stats line, distinct from
+the admission gate's `upload_yield_ms`.
 
 ## v3 (same day): foreground-epoch yield clock
 

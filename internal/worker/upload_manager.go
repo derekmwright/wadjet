@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"sync"
@@ -35,20 +36,30 @@ const (
 	uploadSlotPollMs = 50
 )
 
+// uploadChunkBytes is the granularity at which IN-FLIGHT upload streams
+// consult the foreground gate (QoS v4). v3 gated only slot ACQUISITION:
+// up to 8 jobs admitted during idle kept compressing and PUTting at full
+// speed straight through the next query's protection window — the
+// residual cold coin-flip (Q06 10.7s midpoint in the v3 arm; Q04/Q05
+// same-plan cold swings every window since). A var so tests can shrink
+// it; semantically constant.
+var uploadChunkBytes = 1 << 20
+
 // Yield-clock tunables (vars so tests can compress time; semantically
 // constants). Three generations of this gate, each SF100-measured
 // (docs/design/upload-foreground-qos.md):
-//   v1 flat busy-width — backlog snowballed, durability lagged minutes,
-//     Q06/Q08 steady FAILED, 28 uploads/worker abandoned.
-//   v2 per-job 10s wait cap — the budget burns while the PRODUCING query
-//     is still running, so protection for the NEXT query was a coin flip
-//     (Q06 cold 2.6s vs 20.6s across arms).
-//   v3 (this): the clock references the FOREGROUND EPOCH — each new root
-//     query's first task opens a protection window during which drains
-//     run at the busy width; outside it they run full width even while
-//     busy. Every query gets the same head start; long queries release
-//     the drain after the window; per-job uploadHardCapMs guarantees
-//     progress even under a pathological stream of new queries.
+//
+//	v1 flat busy-width — backlog snowballed, durability lagged minutes,
+//	  Q06/Q08 steady FAILED, 28 uploads/worker abandoned.
+//	v2 per-job 10s wait cap — the budget burns while the PRODUCING query
+//	  is still running, so protection for the NEXT query was a coin flip
+//	  (Q06 cold 2.6s vs 20.6s across arms).
+//	v3 (this): the clock references the FOREGROUND EPOCH — each new root
+//	  query's first task opens a protection window during which drains
+//	  run at the busy width; outside it they run full width even while
+//	  busy. Every query gets the same head start; long queries release
+//	  the drain after the window; per-job uploadHardCapMs guarantees
+//	  progress even under a pathological stream of new queries.
 var (
 	uploadProtectMs int64 = 10_000
 	uploadHardCapMs int64 = 60_000
@@ -90,12 +101,30 @@ type uploadManager struct {
 	slots   atomic.Int64
 	busy    func() bool
 	yieldNs atomic.Int64 // time jobs spent waiting on the busy-width gate
+	pauseNs atomic.Int64 // time IN-FLIGHT streams spent paused mid-chunk (v4)
+
+	// v4 progress quota: during an open protection window the OLDEST
+	// uploadSlotsBusy in-flight jobs keep advancing and the rest freeze
+	// at their next chunk boundary. Oldest-first is deterministic (no
+	// token churn, no round-robin burst where all 8 s2 streams advance
+	// at 1/4 speed) and preserves v3's progress guarantee: at least
+	// busyWidth streams are always draining.
+	jobSeq     atomic.Int64
+	activeMu   sync.Mutex
+	activeJobs map[int64]struct{}
 
 	// Foreground-epoch protection window (v3): protectedUntil holds the
 	// unixnano until which drains yield; NoteForegroundQuery extends it
 	// when a NEW root query's first task arrives. seenRoots dedupes so a
-	// query's hundreds of tasks open exactly one window.
+	// query's hundreds of tasks open exactly one window. windowRoot names
+	// the root whose window is open: that query's OWN uploads are exempt
+	// from the v4 in-flight freeze (the window protects a query from the
+	// PREVIOUS queries' drains, not from its own critical-path uploads —
+	// same-query consumers may need those durable copies, and freezing
+	// them just converts progress into demand-release round-trips; SF1
+	// q18 +6s when this exemption was missing).
 	protectedUntil atomic.Int64
+	windowRoot     atomic.Value // string
 	seenMu         sync.Mutex
 	seenRoots      map[string]struct{}
 
@@ -113,6 +142,7 @@ type uploadManager struct {
 }
 
 type queryUploadState struct {
+	root     string
 	ctx      context.Context
 	cancel   context.CancelFunc
 	inflight sync.WaitGroup
@@ -139,11 +169,12 @@ func newUploadManager(store objstore.Store, nc *nats.Conn, logger *slog.Logger) 
 		logger = slog.Default()
 	}
 	return &uploadManager{
-		store:     store,
-		nc:        nc,
-		logger:    logger,
-		queries:   make(map[string]*queryUploadState),
-		seenRoots: make(map[string]struct{}),
+		store:      store,
+		nc:         nc,
+		logger:     logger,
+		queries:    make(map[string]*queryUploadState),
+		seenRoots:  make(map[string]struct{}),
+		activeJobs: make(map[int64]struct{}),
 	}
 }
 
@@ -166,6 +197,7 @@ func (m *uploadManager) NoteForegroundQuery(root string) {
 	}
 	m.seenRoots[root] = struct{}{}
 	m.seenMu.Unlock()
+	m.windowRoot.Store(root)
 	until := time.Now().Add(time.Duration(uploadProtectMs) * time.Millisecond).UnixNano()
 	for {
 		cur := m.protectedUntil.Load()
@@ -202,19 +234,25 @@ var uploadQoSEnabled = os.Getenv("WADJET_UPLOAD_QOS") != "0"
 // width itself changes with foreground activity so a condvar would need
 // external kicks anyway. Progress is guaranteed — the busy width is ≥1,
 // and two escapes bound the yield: an URGENT root (demand-released — a
-// consumer needs the durable copy) and a per-job wait past
-// uploadYieldMaxMs both escalate to the idle width.
-func (m *uploadManager) acquireSlot(ctx context.Context, qs *queryUploadState) bool {
+// consumer needs the durable copy) and a JOB-TOTAL yield past
+// uploadHardCapMs (jobYieldNs accumulates across this gate and the v4
+// in-flight chunk gate) both escalate to the idle width.
+func (m *uploadManager) acquireSlot(ctx context.Context, qs *queryUploadState, jobYieldNs *int64) bool {
+	var scratch int64
+	if jobYieldNs == nil {
+		jobYieldNs = &scratch
+	}
 	waited := int64(0)
 	for {
 		cap := m.slotCap()
-		if (qs != nil && qs.urgent.Load()) || waited >= uploadHardCapMs*int64(time.Millisecond) {
+		if (qs != nil && qs.urgent.Load()) || *jobYieldNs+waited >= uploadHardCapMs*int64(time.Millisecond) {
 			cap = uploadSlotsIdle
 		}
 		cur := m.slots.Load()
 		if cur < cap && m.slots.CompareAndSwap(cur, cur+1) {
 			if waited > 0 {
 				m.yieldNs.Add(waited)
+				*jobYieldNs += waited
 			}
 			return true
 		}
@@ -227,6 +265,110 @@ func (m *uploadManager) acquireSlot(ctx context.Context, qs *queryUploadState) b
 	}
 }
 
+// registerJob assigns an in-flight job its age rank for the v4 progress
+// quota; unregisterJob releases it (deferred in runJob).
+func (m *uploadManager) registerJob() int64 {
+	seq := m.jobSeq.Add(1)
+	m.activeMu.Lock()
+	m.activeJobs[seq] = struct{}{}
+	m.activeMu.Unlock()
+	return seq
+}
+
+func (m *uploadManager) unregisterJob(seq int64) {
+	m.activeMu.Lock()
+	delete(m.activeJobs, seq)
+	m.activeMu.Unlock()
+}
+
+// inProgressQuota reports whether seq is among the uploadSlotsBusy OLDEST
+// in-flight jobs — the ones allowed to keep advancing during an open
+// protection window. O(active) with active ≤ idle width + lane slack.
+func (m *uploadManager) inProgressQuota(seq int64) bool {
+	m.activeMu.Lock()
+	defer m.activeMu.Unlock()
+	older := 0
+	for s := range m.activeJobs {
+		if s < seq {
+			older++
+			if older >= uploadSlotsBusy {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// chunkGate is the v4 in-flight pause point: between chunks, a running
+// upload stream stops while a foreground protection window is open AND
+// the job is outside the oldest-busyWidth progress quota — freezing both
+// the s2 compression (its reads stop) and the PUT body (the connection
+// idles; ResponseHeaderTimeout is 30m, far above any bounded pause). The
+// quota preserves v3's throughput guarantee (busyWidth streams always
+// draining); the freeze removes v3's residual (the OTHER admitted-while-
+// idle jobs no longer burn cores/wire through the window). Escapes
+// mirror acquireSlot: urgent roots never pause, and the JOB-TOTAL yield
+// budget (uploadHardCapMs, shared with the admission gate) guarantees
+// progress under any query arrival pattern. Returns false only when ctx
+// ends.
+func (m *uploadManager) chunkGate(ctx context.Context, qs *queryUploadState, seq int64, jobYieldNs *int64) bool {
+	var scratch int64
+	if jobYieldNs == nil {
+		jobYieldNs = &scratch
+	}
+	waited := int64(0)
+	for {
+		windowRoot, _ := m.windowRoot.Load().(string)
+		pause := uploadQoSEnabled && m.busy != nil && m.busy() &&
+			time.Now().UnixNano() < m.protectedUntil.Load() &&
+			!(qs != nil && (qs.urgent.Load() || qs.root == windowRoot)) &&
+			*jobYieldNs+waited < uploadHardCapMs*int64(time.Millisecond) &&
+			!m.inProgressQuota(seq)
+		if !pause {
+			if waited > 0 {
+				m.pauseNs.Add(waited)
+				*jobYieldNs += waited
+			}
+			return true
+		}
+		select {
+		case <-time.After(uploadSlotPollMs * time.Millisecond):
+			waited += int64(uploadSlotPollMs) * int64(time.Millisecond)
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+// governedReader threads chunkGate into an upload stream: every
+// uploadChunkBytes of source reads re-consults the foreground gate.
+// Wrapping the SOURCE governs everything downstream of it — the s2
+// writer and the PUT body advance only as fast as their reads.
+type governedReader struct {
+	ctx        context.Context
+	m          *uploadManager
+	qs         *queryUploadState
+	seq        int64
+	r          io.Reader
+	budget     int
+	jobYieldNs *int64
+}
+
+func (g *governedReader) Read(p []byte) (int, error) {
+	if g.budget <= 0 {
+		if !g.m.chunkGate(g.ctx, g.qs, g.seq, g.jobYieldNs) {
+			return 0, g.ctx.Err()
+		}
+		g.budget = uploadChunkBytes
+	}
+	if len(p) > g.budget {
+		p = p[:g.budget]
+	}
+	n, err := g.r.Read(p)
+	g.budget -= n
+	return n, err
+}
+
 func (m *uploadManager) releaseSlot() { m.slots.Add(-1) }
 
 // UploadYieldNs returns cumulative time background jobs spent yielding to
@@ -236,6 +378,16 @@ func (m *uploadManager) UploadYieldNs() int64 {
 		return 0
 	}
 	return m.yieldNs.Load()
+}
+
+// UploadPauseNs returns cumulative time IN-FLIGHT upload streams spent
+// paused at the v4 chunk gate — the engagement marker distinguishing
+// in-flight freezes from admission-gate yields (upload_pause_ms).
+func (m *uploadManager) UploadPauseNs() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.pauseNs.Load()
 }
 
 // uploadJob is one file to land in S3: srcPath is a LocalStageCache-owned
@@ -272,7 +424,7 @@ func (m *uploadManager) queryState(root string) *queryUploadState {
 	qs := m.queries[root]
 	if qs == nil {
 		ctx, cancel := context.WithCancel(context.Background())
-		qs = &queryUploadState{ctx: ctx, cancel: cancel}
+		qs = &queryUploadState{root: root, ctx: ctx, cancel: cancel}
 		m.queries[root] = qs
 	}
 	return qs
@@ -445,12 +597,15 @@ func (m *uploadManager) startJob(qs *queryUploadState, tu *taskUploads, j upload
 func (m *uploadManager) runJob(qs *queryUploadState, tu *taskUploads, j uploadJob) {
 	ctx := qs.ctx
 	defer tu.jobDone()
-	if !m.acquireSlot(ctx, qs) {
+	var jobYieldNs int64
+	if !m.acquireSlot(ctx, qs, &jobYieldNs) {
 		tu.anyCanceled.Store(true)
 		m.noteCancelled(j)
 		return
 	}
 	defer m.releaseSlot()
+	seq := m.registerJob()
+	defer m.unregisterJob(seq)
 
 	var lastErr error
 	for attempt := 1; attempt <= uploadRetryAttempts; attempt++ {
@@ -459,7 +614,7 @@ func (m *uploadManager) runJob(qs *queryUploadState, tu *taskUploads, j uploadJo
 			m.noteCancelled(j)
 			return
 		}
-		lastErr = m.uploadOnce(ctx, j)
+		lastErr = m.uploadOnce(ctx, qs, seq, j, &jobYieldNs)
 		if lastErr == nil {
 			m.completed.Add(1)
 			return
@@ -513,16 +668,28 @@ func (m *uploadManager) noteElided(j uploadJob) {
 
 // uploadOnce mirrors the synchronous path: optional s2 compression (≥10%
 // savings heuristic) staged as a temp file, then a streaming Put. The
-// source file is cache-owned and never deleted here.
-func (m *uploadManager) uploadOnce(ctx context.Context, j uploadJob) error {
+// source file is cache-owned and never deleted here. Both the compression
+// source and the PUT body read through governedReader (QoS v4), so an
+// in-flight job freezes — CPU and wire alike — while a foreground
+// protection window is open.
+func (m *uploadManager) uploadOnce(ctx context.Context, qs *queryUploadState, seq int64, j uploadJob, jobYieldNs *int64) error {
 	uploadPath := j.srcPath
 	var tmpCompressed string
+	// jobYieldNs == nil marks a SYNCHRONOUS caller (the query is blocked
+	// on this PUT) — those run ungoverned; only background jobs pause.
+	governed := jobYieldNs != nil
 	if j.compress {
 		tmp, err := os.CreateTemp(j.tmpDir, "async-upload-*.s2")
 		if err == nil {
 			tmpPath := tmp.Name()
 			tmp.Close()
-			_, useCompressed, compErr := CompressShuffleFile(j.srcPath, tmpPath)
+			var useCompressed bool
+			var compErr error
+			if governed {
+				useCompressed, compErr = m.compressGoverned(ctx, qs, seq, j.srcPath, tmpPath, jobYieldNs)
+			} else {
+				_, useCompressed, compErr = CompressShuffleFile(j.srcPath, tmpPath)
+			}
 			if compErr != nil || !useCompressed {
 				_ = os.Remove(tmpPath)
 			} else {
@@ -545,11 +712,33 @@ func (m *uploadManager) uploadOnce(ctx context.Context, j uploadJob) error {
 	if err != nil {
 		return fmt.Errorf("stat %s: %w", uploadPath, err)
 	}
-	if _, err := m.store.Put(ctx, j.bucket, j.key, f, fi.Size(), "application/octet-stream"); err != nil {
+	var body io.Reader = f
+	if governed {
+		body = &governedReader{ctx: ctx, m: m, qs: qs, seq: seq, r: f, jobYieldNs: jobYieldNs}
+	}
+	if _, err := m.store.Put(ctx, j.bucket, j.key, body, fi.Size(), "application/octet-stream"); err != nil {
 		return fmt.Errorf("put %s: %w", j.key, err)
 	}
 	m.completedBytes.Add(fi.Size())
 	return nil
+}
+
+// compressGoverned is CompressShuffleFile with the source read through
+// the v4 chunk gate — the s2 writer's CPU advances only as fast as its
+// governed reads.
+func (m *uploadManager) compressGoverned(ctx context.Context, qs *queryUploadState, seq int64, srcPath, dstPath string, jobYieldNs *int64) (bool, error) {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return false, fmt.Errorf("open shuffle source: %w", err)
+	}
+	defer src.Close()
+	info, err := src.Stat()
+	if err != nil {
+		return false, fmt.Errorf("stat shuffle source: %w", err)
+	}
+	gr := &governedReader{ctx: ctx, m: m, qs: qs, seq: seq, r: src, jobYieldNs: jobYieldNs}
+	_, useCompressed, err := compressShuffleStream(gr, info.Size(), dstPath)
+	return useCompressed, err
 }
 
 // jobDone publishes UploadComplete when the task's last upload settles.

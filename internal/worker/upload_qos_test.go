@@ -1,7 +1,10 @@
 package worker
 
 import (
+	"os"
+
 	"context"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,7 +32,7 @@ func TestUploadSlotGateYieldsToForeground(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if !m.acquireSlot(ctx, nil) {
+			if !m.acquireSlot(ctx, nil, nil) {
 				return
 			}
 			defer m.releaseSlot()
@@ -72,13 +75,13 @@ func TestUploadSlotGateCancel(t *testing.T) {
 	// Fill the busy width.
 	ctx := context.Background()
 	for i := 0; i < uploadSlotsBusy; i++ {
-		if !m.acquireSlot(ctx, nil) {
+		if !m.acquireSlot(ctx, nil, nil) {
 			t.Fatal("initial acquire failed")
 		}
 	}
 	cctx, cancel := context.WithCancel(context.Background())
 	done := make(chan bool, 1)
-	go func() { done <- m.acquireSlot(cctx, nil) }()
+	go func() { done <- m.acquireSlot(cctx, nil, nil) }()
 	cancel()
 	select {
 	case ok := <-done:
@@ -99,7 +102,7 @@ func TestUploadSlotGateUrgencyAndBoundedYield(t *testing.T) {
 	ctx := context.Background()
 	// Saturate the busy width.
 	for i := 0; i < uploadSlotsBusy; i++ {
-		if !m.acquireSlot(ctx, nil) {
+		if !m.acquireSlot(ctx, nil, nil) {
 			t.Fatal("initial acquire failed")
 		}
 	}
@@ -108,7 +111,7 @@ func TestUploadSlotGateUrgencyAndBoundedYield(t *testing.T) {
 	go func() {
 		c, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
 		defer cancel()
-		blocked <- m.acquireSlot(c, nil)
+		blocked <- m.acquireSlot(c, nil, nil)
 	}()
 	if ok := <-blocked; ok {
 		t.Fatal("non-urgent job passed a saturated busy gate")
@@ -117,7 +120,7 @@ func TestUploadSlotGateUrgencyAndBoundedYield(t *testing.T) {
 	qs := &queryUploadState{}
 	qs.urgent.Store(true)
 	done := make(chan bool, 1)
-	go func() { done <- m.acquireSlot(ctx, qs) }()
+	go func() { done <- m.acquireSlot(ctx, qs, nil) }()
 	select {
 	case ok := <-done:
 		if !ok {
@@ -127,7 +130,6 @@ func TestUploadSlotGateUrgencyAndBoundedYield(t *testing.T) {
 		t.Fatal("urgent job did not bypass the busy gate")
 	}
 }
-
 
 // The v3 epoch clock: the busy width applies only inside the protection
 // window a NEW root query opens; the window expires (drains resume full
@@ -162,5 +164,210 @@ func TestUploadSlotGateEpochWindow(t *testing.T) {
 	m.NoteForegroundQuery("root-b")
 	if got := m.slotCap(); got != uploadSlotsBusy {
 		t.Fatalf("new-root cap = %d, want busy %d", got, uploadSlotsBusy)
+	}
+}
+
+// v4: an IN-FLIGHT upload stream must freeze at the chunk gate while a
+// protection window is open — v3 gated only admission, so jobs admitted
+// during idle ran compression+PUT full-speed through the next query's
+// window (the residual cold coin-flip).
+func TestUploadChunkGatePausesInFlight(t *testing.T) {
+	m := newUploadManager(nil, nil, nil)
+	busy := atomic.Bool{}
+	busy.Store(true)
+	m.SetForegroundProbe(busy.Load)
+	m.NoteForegroundQuery("test-root")
+	ctx := context.Background()
+
+	// Fill the progress quota with older in-flight jobs; the job under
+	// test is then outside the oldest-busyWidth set and must freeze.
+	for i := 0; i < uploadSlotsBusy; i++ {
+		m.registerJob()
+	}
+	var jobYield int64
+	done := make(chan bool, 1)
+	go func() { done <- m.chunkGate(ctx, nil, m.registerJob(), &jobYield) }()
+	select {
+	case <-done:
+		t.Fatal("chunk gate passed while the protection window was open")
+	case <-time.After(300 * time.Millisecond):
+	}
+	busy.Store(false) // foreground clears → in-flight stream resumes
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("chunk gate returned false after foreground cleared")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("chunk gate did not release after foreground cleared")
+	}
+	if m.UploadPauseNs() == 0 || jobYield == 0 {
+		t.Fatalf("pause accounting missing: mgr=%d job=%d", m.UploadPauseNs(), jobYield)
+	}
+}
+
+// Urgent roots and the job-total hard cap both escape the chunk gate.
+func TestUploadChunkGateEscapes(t *testing.T) {
+	m := newUploadManager(nil, nil, nil)
+	m.SetForegroundProbe(func() bool { return true })
+	m.NoteForegroundQuery("test-root")
+	ctx := context.Background()
+
+	qs := &queryUploadState{}
+	qs.urgent.Store(true)
+	var y1 int64
+	done := make(chan bool, 1)
+	go func() { done <- m.chunkGate(ctx, qs, m.registerJob(), &y1) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("urgent chunk gate returned false")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("urgent root paused at the chunk gate")
+	}
+
+	// Job that already burned its yield budget passes immediately.
+	spent := uploadHardCapMs * int64(time.Millisecond)
+	go func() { done <- m.chunkGate(ctx, nil, m.registerJob(), &spent) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("hard-capped chunk gate returned false")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("job past the hard cap paused at the chunk gate")
+	}
+}
+
+// Kill switch pins pre-v4 behavior: no in-flight pausing.
+func TestUploadChunkGateKillSwitch(t *testing.T) {
+	old := uploadQoSEnabled
+	uploadQoSEnabled = false
+	defer func() { uploadQoSEnabled = old }()
+	m := newUploadManager(nil, nil, nil)
+	m.SetForegroundProbe(func() bool { return true })
+	m.NoteForegroundQuery("test-root")
+	done := make(chan bool, 1)
+	go func() { done <- m.chunkGate(context.Background(), nil, m.registerJob(), nil) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("gate returned false under kill switch")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("kill switch must disable in-flight pausing")
+	}
+}
+
+// End-to-end through uploadOnce: a governed background job's PUT bytes
+// stall during the window and complete after; the same file uploaded by
+// the synchronous path (nil yield budget) never pauses.
+func TestUploadOnceGovernedVsSync(t *testing.T) {
+	oldChunk := uploadChunkBytes
+	uploadChunkBytes = 1024
+	defer func() { uploadChunkBytes = oldChunk }()
+
+	dir := t.TempDir()
+	src := dir + "/part.wshf"
+	if err := os.WriteFile(src, make([]byte, 64*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := objstore.NewMemStore()
+	_ = store.MakeBucket(context.Background(), "b")
+	m := newUploadManager(store, nil, nil)
+	busy := atomic.Bool{}
+	busy.Store(true)
+	m.SetForegroundProbe(busy.Load)
+	m.NoteForegroundQuery("test-root")
+
+	// Synchronous path (nil budget): completes despite the open window.
+	syncDone := make(chan error, 1)
+	go func() {
+		syncDone <- m.uploadOnce(context.Background(), nil, 0, uploadJob{
+			bucket: "b", key: "sync", srcPath: src, tmpDir: dir,
+		}, nil)
+	}()
+	select {
+	case err := <-syncDone:
+		if err != nil {
+			t.Fatalf("sync upload failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("synchronous upload paused at the chunk gate")
+	}
+
+	// Governed background job OUTSIDE the progress quota: stalls while
+	// the window is open.
+	for i := 0; i < uploadSlotsBusy; i++ {
+		m.registerJob()
+	}
+	var jobYield int64
+	bgDone := make(chan error, 1)
+	go func() {
+		bgDone <- m.uploadOnce(context.Background(), nil, m.registerJob(), uploadJob{
+			bucket: "b", key: "bg", srcPath: src, tmpDir: dir,
+		}, &jobYield)
+	}()
+	select {
+	case <-bgDone:
+		t.Fatal("governed upload completed through an open protection window")
+	case <-time.After(300 * time.Millisecond):
+	}
+	busy.Store(false)
+	select {
+	case err := <-bgDone:
+		if err != nil {
+			t.Fatalf("governed upload failed after window: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("governed upload did not resume after foreground cleared")
+	}
+	if _, _, err := store.Get(context.Background(), "b", "bg"); err != nil {
+		t.Fatalf("governed upload key missing: %v", err)
+	}
+}
+
+// The progress quota: the OLDEST busyWidth in-flight jobs advance
+// through an open window (v3's throughput guarantee, preserved).
+func TestUploadChunkGateQuotaOldestAdvance(t *testing.T) {
+	m := newUploadManager(nil, nil, nil)
+	m.SetForegroundProbe(func() bool { return true })
+	m.NoteForegroundQuery("test-root")
+	oldest := m.registerJob()
+	for i := 0; i < uploadSlotsIdle; i++ {
+		m.registerJob() // younger backlog
+	}
+	done := make(chan bool, 1)
+	go func() { done <- m.chunkGate(context.Background(), nil, oldest, nil) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("oldest job's gate returned false")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("oldest in-flight job must advance through the window")
+	}
+}
+
+// The window protects a query from the PREVIOUS queries' drains — the
+// window-opening root's own uploads are exempt from the in-flight freeze.
+func TestUploadChunkGateSameRootExempt(t *testing.T) {
+	m := newUploadManager(nil, nil, nil)
+	m.SetForegroundProbe(func() bool { return true })
+	m.NoteForegroundQuery("current-root")
+	for i := 0; i < uploadSlotsBusy; i++ {
+		m.registerJob() // older backlog filling the quota
+	}
+	qs := m.queryState("current-root")
+	done := make(chan bool, 1)
+	go func() { done <- m.chunkGate(context.Background(), qs, m.registerJob(), nil) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("same-root gate returned false")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the window root's own uploads must not freeze")
 	}
 }

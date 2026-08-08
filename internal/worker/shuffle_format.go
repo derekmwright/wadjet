@@ -779,7 +779,15 @@ func CompressShuffleFile(srcPath, dstPath string) (compressedSize int64, useComp
 	if err != nil {
 		return 0, false, fmt.Errorf("stat shuffle source: %w", err)
 	}
-	srcSize := info.Size()
+	return compressShuffleStream(src, info.Size(), dstPath)
+}
+
+// compressShuffleStream is CompressShuffleFile over an already-open
+// source reader — the background-upload path wraps the source in a
+// progress-governed reader so in-flight compression yields to foreground
+// queries (upload QoS v4); the s2 writer only advances as fast as its
+// reads, so governing the source governs the compression CPU too.
+func compressShuffleStream(src io.Reader, srcSize int64, dstPath string) (compressedSize int64, useCompressed bool, err error) {
 	if srcSize < 64 {
 		// Below the threshold; CompressShuffleData skips these too.
 		return srcSize, false, nil

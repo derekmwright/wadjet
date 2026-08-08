@@ -1318,10 +1318,13 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 			// Adoption failed (cross-device rename etc.) — this partition
 			// must upload synchronously: its local file dies with the task
 			// spill dir and nothing else could produce the durable copy.
-			if upErr := e.uploads.uploadOnce(ctx, uploadJob{
+			// Synchronous fallback: the QUERY is waiting on this PUT, so it
+			// runs ungoverned (nil query state, no yield budget — chunkGate
+			// pauses only background streams; a nil jobYieldNs is scratch).
+			if upErr := e.uploads.uploadOnce(ctx, nil, 0, uploadJob{
 				bucket: task.ResultBucket, key: key, srcPath: localPath,
 				compress: true, tmpDir: e.spillDir,
-			}); upErr != nil {
+			}, nil); upErr != nil {
 				return fmt.Errorf("shuffle task %s: partition %d sync-fallback upload: %w", task.ID, p, upErr)
 			}
 			result.ResultFiles = append(result.ResultFiles, key)

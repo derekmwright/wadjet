@@ -805,7 +805,8 @@ func (w *Worker) logShuffleIOStats(ioStats ShuffleIOSnapshot, up [7]int64) {
 		"upload_cancelled", up[1], "upload_cancelled_bytes", up[4],
 		"upload_failed", up[2],
 		"upload_elided", up[5], "upload_elided_bytes", up[6],
-		"upload_yield_ms", w.executor.uploads.UploadYieldNs()/1e6)
+		"upload_yield_ms", w.executor.uploads.UploadYieldNs()/1e6,
+		"upload_pause_ms", w.executor.uploads.UploadPauseNs()/1e6)
 }
 
 // dispatchLoop consumes TaskDispatch envelopes pushed by coord over
