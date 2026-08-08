@@ -1,6 +1,7 @@
 # Single-pass drop-behind + refault-sensor streaming discount
 
-Status: shipped (default ON), 2026-08-08. Kill switches:
+Status: shipped (default ON), 2026-08-08; **SF100-validated KEEPER, same
+window** (§SF100 verdict). Kill switches:
 `WADJET_DROP_BEHIND=0` (all drop-behind mechanisms),
 `WADJET_REFAULT_STREAM_DISCOUNT=0` (sensor discount only).
 
@@ -93,3 +94,30 @@ separation argument needs only order-of-magnitude accuracy.
 - Rows identical both arms; drop-behind markers nonzero.
 - `WADJET_REFAULT_PRESSURE_RATE=0` remains the sensor-off A/B lever to
   separate sensor tax from raw I/O cost if the pair is ambiguous.
+
+## SF100 verdict — KEEPER (2026-08-08, same-window pair)
+
+Ctl 753ac51 results/20260808-191407 / trt bddf0ca results/20260808-194140,
+2 runs each, 3× c7gd.4xlarge + c7g.2xlarge on-demand, wlogs grabbed both
+arms before destroy, all EC2 destroyed + zero verified.
+
+- **Correctness**: rows identical everywhere both runs; the single vsig
+  delta is a 1-ULP Q19 flicker in the CTL arm's run 2
+  (5.985878904e8 vs ...903e8) — the known accepted class.
+- **Walls**: cold 435→364s (**−16.3%** — drop-behind pays on cold runs
+  too), steady 812→560s (**−31.1%**). Run2/run1 ratio 1.87→1.54.
+- **Sensor tax gone**: per-worker pressure_stall_ms 239-292s → 8-15s
+  (−95%), activations 12-19 → 2-3, episode ignores 1370-3661 → 0.
+  refault_discount live at 5k-105k pages/s (hit-open streaming ~240-320
+  GB/worker/suite as predicted; raw refault samples 33-50k pages/s were
+  fully explained by designed streaming).
+- **Drop-behind engaged**: ~25 GB write-side + 15-21 GB read-side
+  dropped per worker per suite.
+- **Residual**: run 2 still 1.54× run 1. The remaining excess is the raw
+  I/O cost of the saturated regime (26 GB NVMe cache re-read from disk
+  instead of run-1's page-cache-hot just-written bytes) plus tripled
+  token stalls downstream — no longer sensor tax. Follow-up levers if
+  worth chasing: reduce steady hit-open re-read volume (row-group-level
+  residency for the hottest columns), or accept as the true steady
+  floor; the criterion "run-2 ≤ run-1" was aspirational for a regime
+  where run 1 reads just-written RAM-hot bytes.
