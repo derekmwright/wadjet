@@ -204,3 +204,29 @@ Expected SF100 shape: cold-run cluster-wide `miss_bytes` +
 `peer_fallthroughs` ≈ 0, `readthroughs` > 0 on every worker, rows and
 value signatures identical, steady behavior unchanged (read-through is
 first-touch-only by construction — resident keys never enter it).
+
+### SF100 verdict (pair 20260808-204142 ctl 774177b / 210616 trt daece0d)
+
+KEEPER — default stays ON. Same-window pair, runs=2 each, wlogs both
+arms, all EC2 destroyed. The mechanism landed exactly on the predicted
+shape:
+
+- **First-touch S3 = 1.0× dataset.** Ctl 34.1 GB (1.29×: misses
+  48-55 / 10.7-11.9 GB per worker, `peer_fallthroughs` 6/18/17). Trt
+  **25.6 GB ≈ 0.97×** (22.6 GB misses + 3.0 GB read-throughs),
+  `peer_fallthroughs` **0/0/0** — the cold first-touch race is gone
+  entirely. `readthroughs` 4/12/6 per worker, `readthrough_fails` 0;
+  `peer_hits` rose 124→154 as redirected peers stayed on the wire
+  instead of going durable.
+- **Correctness:** rows identical 44/44; single vsig delta is the
+  known 1-ULP Q19 float-order flicker (ctl's own two runs disagree in
+  the same last digit).
+- **Walls: window-neutral.** Cold 409→423s (+3.3%), steady 719→685s
+  (−4.8%) — both inside the SF100 noise band, movers are the usual
+  chaotic set (Q08 −25%, Q09 +35%, Q21 −13/−20%). Consistent with the
+  parent verdict: at 0.2×-dataset scale the duplication cost was
+  roaming disturbance, not wall-dominating bandwidth — the win is the
+  structural completion (S3 sees each file once cluster-wide,
+  convergence at NIC speed) plus ~8.5 GB less cold S3 per suite.
+
+`WADJET_BASE_PEER_READTHROUGH=0` reproduces the ctl arm.
