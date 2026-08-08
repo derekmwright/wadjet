@@ -331,6 +331,13 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 			w.basePeers = newBaseTablePeerDirectory(cfg.WorkerID)
 			btc.SetPeerFetcher(&baseTablePeerTier{dir: w.basePeers, client: w.peerClient})
 			executor.SetBaseTableCache(btc)
+			// Owner read-through (first-touch single-flight): a peer fetch
+			// for a not-yet-resident file this worker owns populates from
+			// S3 once and serves, instead of bouncing the peer to S3.
+			executor.SetBaseTableOwnership(func(key string) bool {
+				ids, _ := w.basePeers.domain()
+				return distributed.AffinityOwner(key, ids) == cfg.WorkerID
+			})
 		}
 		// Refault-sensor streaming discount: steady-state re-reads of the
 		// NVMe cache (hit-opens here, peer serves of the same files) are

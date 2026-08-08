@@ -134,9 +134,9 @@ func (e *Executor) SetPeerClient(c *dataplane.PeerClient) {
 // A worker that never executed a task for the root query has no token
 // recorded and denies the fetch — it also could not hold the file, so the
 // consumer loses nothing by falling through to S3.
-func (e *Executor) ResolveShuffleFile(_, key, token string) (string, error) {
+func (e *Executor) ResolveShuffleFile(ctx context.Context, _, key, token string) (string, error) {
 	if bucket, obj, ok := distributed.CutBaseTablePeerKey(key); ok {
-		return e.resolveBaseTableFile(bucket, obj, token)
+		return e.resolveBaseTableFile(ctx, bucket, obj, token)
 	}
 	root := distributed.ScratchQueryID(key)
 	if token == "" || root == "" {
@@ -156,10 +156,15 @@ func (e *Executor) ResolveShuffleFile(_, key, token string) (string, error) {
 // from this worker's base-table cache. Unlike query-scratch keys there is
 // no per-query capability token — the owner may never have run a task of
 // the consumer's query — so serving is gated by the tier kill switch, the
-// optional cluster-wide WADJET_PEER_SECRET, and residency: only bytes
-// already admitted to the cache are ever served, via its own index lookup
-// (no path construction from request input).
-func (e *Executor) resolveBaseTableFile(bucket, key, token string) (string, error) {
+// optional cluster-wide WADJET_PEER_SECRET, and residency-or-ownership:
+// bytes already admitted to the cache are served via its own index lookup
+// (no path construction from request input), and a not-yet-resident file
+// this worker OWNS (same rendezvous hash both sides use for placement) is
+// read through from the inner store first — first-touch single-flight,
+// docs/design/scan-affinity.md. Non-owned misses stay NotFound: a
+// divergent membership view must not let a peer make this worker fetch
+// and cache arbitrary S3 objects it will never own.
+func (e *Executor) resolveBaseTableFile(ctx context.Context, bucket, key, token string) (string, error) {
 	if e.baseTableCache == nil || !basePeerTierEnabled {
 		return "", dataplane.ErrPeerNotFound
 	}
@@ -168,7 +173,19 @@ func (e *Executor) resolveBaseTableFile(bucket, key, token string) (string, erro
 	}
 	path, ok := e.baseTableCache.PeerLocalPath(bucket, key)
 	if !ok {
-		return "", dataplane.ErrPeerNotFound
+		if !basePeerReadThroughEnabled || e.baseTableOwns == nil || !e.baseTableOwns(key) {
+			return "", dataplane.ErrPeerNotFound
+		}
+		if err := e.baseTableCache.ReadThrough(ctx, bucket, key); err != nil {
+			if e.logger != nil {
+				e.logger.Debug("base-table read-through failed; peer goes durable",
+					"bucket", bucket, "key", key, "error", err)
+			}
+			return "", dataplane.ErrPeerNotFound
+		}
+		if path, ok = e.baseTableCache.PeerLocalPath(bucket, key); !ok {
+			return "", dataplane.ErrPeerNotFound // admitted then instantly evicted
+		}
 	}
 	return path, nil
 }
@@ -178,6 +195,15 @@ func (e *Executor) resolveBaseTableFile(bucket, key, token string) (string, erro
 // base-table fetches with NotFound.
 func (e *Executor) SetBaseTableCache(c *objstore.BaseTableCache) {
 	e.baseTableCache = c
+}
+
+// SetBaseTableOwnership wires the rendezvous-ownership check the owner
+// read-through path consults (worker wiring, pre-Start — read without
+// synchronization on every base-table fetch). owns receives the bare
+// object key, matching the hash the coordinator and the consumer tier
+// use for placement. nil (default) disables read-through.
+func (e *Executor) SetBaseTableOwnership(owns func(key string) bool) {
+	e.baseTableOwns = owns
 }
 
 // tokenFor returns the recorded fetch token for a root query ID ("" when

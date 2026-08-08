@@ -67,5 +67,8 @@ exec docker run --rm -i --init --network=host \
   -e WADJET_REFAULT_STREAM_DISCOUNT \
   -e WADJET_REFAULT_PRESSURE_RATE \
   -e WADJET_REFAULT_EPISODE_CAP \
+  -e WADJET_SCAN_AFFINITY \
+  -e WADJET_BASE_PEER_TIER \
+  -e WADJET_BASE_PEER_READTHROUGH \
   ${EDGE_GOGC:+-e WADJET_GOGC="${EDGE_GOGC}"} \
   "$IMAGE" timeout --signal=KILL "$TTL" "$@"

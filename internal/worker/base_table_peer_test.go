@@ -99,11 +99,11 @@ func TestResolveBaseTableFileServesResidentOnly(t *testing.T) {
 	e.SetBaseTableCache(btc)
 
 	// Not resident yet → NotFound (the consumer falls through to S3).
-	if _, err := e.ResolveShuffleFile("", distributed.BaseTablePeerKey(bucket, key), ""); !errors.Is(err, dataplane.ErrPeerNotFound) {
+	if _, err := e.ResolveShuffleFile(t.Context(), "", distributed.BaseTablePeerKey(bucket, key), ""); !errors.Is(err, dataplane.ErrPeerNotFound) {
 		t.Fatalf("pre-population resolve err = %v, want ErrPeerNotFound", err)
 	}
 	populate(t, btc, bucket, key)
-	path, err := e.ResolveShuffleFile("", distributed.BaseTablePeerKey(bucket, key), "")
+	path, err := e.ResolveShuffleFile(t.Context(), "", distributed.BaseTablePeerKey(bucket, key), "")
 	if err != nil || path == "" {
 		t.Fatalf("resolve = (%q, %v), want a local path", path, err)
 	}
@@ -112,18 +112,146 @@ func TestResolveBaseTableFileServesResidentOnly(t *testing.T) {
 	restore := basePeerSecret
 	basePeerSecret = "s3cret"
 	t.Cleanup(func() { basePeerSecret = restore })
-	if _, err := e.ResolveShuffleFile("", distributed.BaseTablePeerKey(bucket, key), "wrong"); !errors.Is(err, dataplane.ErrPeerDenied) {
+	if _, err := e.ResolveShuffleFile(t.Context(), "", distributed.BaseTablePeerKey(bucket, key), "wrong"); !errors.Is(err, dataplane.ErrPeerDenied) {
 		t.Fatalf("bad-secret resolve err = %v, want ErrPeerDenied", err)
 	}
-	if _, err := e.ResolveShuffleFile("", distributed.BaseTablePeerKey(bucket, key), "s3cret"); err != nil {
+	if _, err := e.ResolveShuffleFile(t.Context(), "", distributed.BaseTablePeerKey(bucket, key), "s3cret"); err != nil {
 		t.Fatalf("matching-secret resolve err = %v", err)
 	}
 
 	// No cache wired → NotFound, never a panic.
 	bare := NewExecutor(objstore.NewMemStore(), NewLRUCache(1<<20), nil)
 	bare.SetMemoryBudget(0, t.TempDir())
-	if _, err := bare.ResolveShuffleFile("", distributed.BaseTablePeerKey(bucket, key), "s3cret"); !errors.Is(err, dataplane.ErrPeerNotFound) {
+	if _, err := bare.ResolveShuffleFile(t.Context(), "", distributed.BaseTablePeerKey(bucket, key), "s3cret"); !errors.Is(err, dataplane.ErrPeerNotFound) {
 		t.Fatalf("no-cache resolve err = %v, want ErrPeerNotFound", err)
+	}
+}
+
+func TestResolveBaseTableFileOwnerReadThrough(t *testing.T) {
+	const bucket, key = "data", "tables/customer/chunk_rt.parquet"
+	body := par1Frame([]byte("owner-fetches-once"))
+	btc := newBaseTableCache(t, bucket, key, body)
+	e := NewExecutor(btc, NewLRUCache(1<<20), nil)
+	e.SetMemoryBudget(0, t.TempDir())
+	e.SetBaseTableCache(btc)
+	e.SetBaseTableOwnership(func(string) bool { return true })
+
+	// Not resident, but owned: the resolver populates from the inner store
+	// and serves — first-touch single-flight.
+	path, err := e.ResolveShuffleFile(t.Context(), "", distributed.BaseTablePeerKey(bucket, key), "")
+	if err != nil || path == "" {
+		t.Fatalf("owned-miss resolve = (%q, %v), want a read-through serve", path, err)
+	}
+	s := btc.Stats()
+	if s.ReadThroughs != 1 || s.ReadThroughBytes != int64(len(body)) {
+		t.Fatalf("stats = %+v, want 1 read-through of %d bytes", s, len(body))
+	}
+	if s.PeerServes != 1 {
+		t.Fatalf("stats = %+v, want the read-through serve on the peer-serve ledger", s)
+	}
+
+	// Second fetch is a plain resident serve.
+	if _, err := e.ResolveShuffleFile(t.Context(), "", distributed.BaseTablePeerKey(bucket, key), ""); err != nil {
+		t.Fatalf("resident resolve err = %v", err)
+	}
+	if s := btc.Stats(); s.ReadThroughs != 1 || s.PeerServes != 2 {
+		t.Fatalf("stats = %+v, want no second read-through", s)
+	}
+}
+
+func TestResolveBaseTableFileReadThroughGuards(t *testing.T) {
+	const bucket, key = "data", "tables/region/chunk_guard.parquet"
+	body := par1Frame([]byte("guarded"))
+
+	// Non-owned miss stays NotFound: a divergent membership view must not
+	// let a peer make this worker fetch arbitrary objects.
+	btc := newBaseTableCache(t, bucket, key, body)
+	e := NewExecutor(btc, NewLRUCache(1<<20), nil)
+	e.SetMemoryBudget(0, t.TempDir())
+	e.SetBaseTableCache(btc)
+	e.SetBaseTableOwnership(func(string) bool { return false })
+	if _, err := e.ResolveShuffleFile(t.Context(), "", distributed.BaseTablePeerKey(bucket, key), ""); !errors.Is(err, dataplane.ErrPeerNotFound) {
+		t.Fatalf("non-owned miss err = %v, want ErrPeerNotFound", err)
+	}
+	if s := btc.Stats(); s.ReadThroughs != 0 || s.ReadThroughFails != 0 {
+		t.Fatalf("stats = %+v, want no read-through activity for a non-owned key", s)
+	}
+
+	// No ownership func wired (legacy wiring) → same NotFound behavior.
+	e.SetBaseTableOwnership(nil)
+	if _, err := e.ResolveShuffleFile(t.Context(), "", distributed.BaseTablePeerKey(bucket, key), ""); !errors.Is(err, dataplane.ErrPeerNotFound) {
+		t.Fatalf("nil-ownership miss err = %v, want ErrPeerNotFound", err)
+	}
+
+	// Kill switch: owned miss answers NotFound with read-through disabled.
+	restore := basePeerReadThroughEnabled
+	basePeerReadThroughEnabled = false
+	t.Cleanup(func() { basePeerReadThroughEnabled = restore })
+	e.SetBaseTableOwnership(func(string) bool { return true })
+	if _, err := e.ResolveShuffleFile(t.Context(), "", distributed.BaseTablePeerKey(bucket, key), ""); !errors.Is(err, dataplane.ErrPeerNotFound) {
+		t.Fatalf("kill-switched miss err = %v, want ErrPeerNotFound", err)
+	}
+	if s := btc.Stats(); s.ReadThroughs != 0 {
+		t.Fatalf("stats = %+v, want no read-through under the kill switch", s)
+	}
+}
+
+// TestBaseTablePeerTierFirstTouchSingleFlight is the cross-worker shape:
+// the consumer misses BEFORE the owner ever touched the file. The owner
+// reads through to its inner store once and serves; the consumer's own
+// store is never consulted.
+func TestBaseTablePeerTierFirstTouchSingleFlight(t *testing.T) {
+	const bucket, key = "data", "tables/lineitem/chunk_ft.parquet"
+	body := par1Frame(bytes.Repeat([]byte("cold"), 4096))
+
+	// Owner side: inner store holds the file, cache does NOT.
+	ownerCache := newBaseTableCache(t, bucket, key, body)
+	owner := NewExecutor(ownerCache, NewLRUCache(1<<20), nil)
+	owner.SetMemoryBudget(0, t.TempDir())
+	owner.SetBaseTableCache(ownerCache)
+	owner.SetBaseTableOwnership(func(string) bool { return true })
+	srv := dataplane.NewPeerServer(dataplane.PeerServerConfig{Addr: "127.0.0.1:0"}, owner, nil)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("starting peer server: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+
+	ids := []string{"w-1", "w-2"}
+	ownerID := distributed.AffinityOwner(key, ids)
+	selfID := "w-1"
+	if ownerID == "w-1" {
+		selfID = "w-2"
+	}
+
+	// Consumer side: empty inner store — the owner's read-through is the
+	// only possible source.
+	consumerCache := newBaseTableCache(t, bucket, key, nil)
+	client := dataplane.NewPeerClient(nil)
+	t.Cleanup(client.Close)
+	dir := newBaseTablePeerDirectory(selfID)
+	dir.record(distributed.WorkerHeartbeat{WorkerID: selfID, PeerAddr: "127.0.0.1:1"})
+	dir.record(distributed.WorkerHeartbeat{WorkerID: ownerID, PeerAddr: srv.AdvertiseAddr()})
+	consumerCache.SetPeerFetcher(&baseTablePeerTier{dir: dir, client: client})
+
+	rc, _, err := consumerCache.Get(context.Background(), bucket, key)
+	if err != nil {
+		t.Fatalf("consumer Get: %v", err)
+	}
+	got, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		t.Fatalf("consumer read: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("first-touch body mismatch: %d bytes vs %d", len(got), len(body))
+	}
+	cs := consumerCache.Stats()
+	if cs.PeerHits != 1 || cs.Misses != 0 || cs.PeerFallthroughs != 0 {
+		t.Fatalf("consumer stats = %+v, want a clean peer hit on first touch", cs)
+	}
+	own := ownerCache.Stats()
+	if own.ReadThroughs != 1 || own.PeerServes != 1 || own.PeerServeBytes != int64(len(body)) {
+		t.Fatalf("owner stats = %+v, want 1 read-through + 1 serve", own)
 	}
 }
 

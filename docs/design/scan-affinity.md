@@ -151,6 +151,56 @@ arms, all EC2 destroyed.
   than their own colds — ctl 796s vs historical steady ~460s):
   window noise by the measurement doctrine, no row-level mechanism.
 
-Follow-up (unscheduled): cross-worker single-flight on the very first
-touch — concurrent cold misses still fan out to S3 until the owner
-populates (the residual 0.2× above 1×).
+## First-touch single-flight (owner read-through)
+
+The verdict above left one residual: concurrent cold misses fan out to
+S3 until the owner populates (31.4 GB total vs ~26.5 GB dataset — the
+0.2× above 1×, visible as `peer_fallthroughs` 7-12 per worker). The
+consumer side was already right — every miss dials the owner first —
+but a not-yet-resident owner answered NotFound and bounced the
+consumer to S3, while the owner itself would fetch the same file again
+on its own first touch.
+
+Owner read-through closes it: `resolveBaseTableFile`, on a residency
+miss for a file this worker OWNS (same rendezvous hash over the same
+heartbeat domain the consumer tier uses), populates from the inner
+store once and serves the admitted copy —
+`BaseTableCache.ReadThrough`. S3 first-touch becomes single-flight
+cluster-wide: whoever demands a file first, exactly one S3 GET (the
+owner's) satisfies the cluster.
+
+- **Single-flight.** Concurrent peer fetches for one key coalesce onto
+  one populate op. The fetch runs detached with its own timeout
+  (60s) — a canceled waiter neither strands other waiters nor aborts a
+  populate whose bytes the owner wants anyway. A concurrent local tee
+  for the same key is waited out and its residency reused, never raced
+  with a second S3 stream. (This deliberately does NOT touch the local
+  miss path's no-blocking-single-flight stance —
+  base-table-nvme-cache.md — consumer lifetimes stay uncoupled; only
+  the detached owner-side populate blocks, and only peers wait on it.)
+- **Ownership guard.** Non-owned misses still answer NotFound: a
+  divergent membership view must not let a peer make a worker fetch
+  and cache arbitrary S3 objects it will never own. The consumer's S3
+  fallthrough covers that (transient, ≤90s) window, as before.
+- **Admission.** The read-through spool enforces the inner store's
+  advertised size on top of the PAR1 head+tail framing check.
+- **Ledger.** `readthroughs`/`readthrough_bytes`/`readthrough_fails`
+  on the owner (S3 reads performed for peer-redirected demand — kept
+  out of `misses`/`miss_bytes`, which remain local demand that left
+  the cluster); the serve itself still counts as
+  `peer_serves`/`peer_serve_bytes`, the consumer still ledgers
+  `peer_hits`/`peer_bytes`.
+- **Serve-slot exposure.** A read-through holds one of the peer
+  server's 16 serve slots for the S3 fetch duration (seconds, cold
+  only). Overflow rejects with ResourceExhausted past the 10s acquire
+  bound and the consumer goes durable — graceful degradation, no new
+  stall mode.
+- **Kill switch.** `WADJET_BASE_PEER_READTHROUGH=0` restores
+  NotFound-on-nonresident exactly; `WADJET_BASE_PEER_TIER=0` still
+  kills the whole tier.
+
+Expected SF100 shape: cold-run cluster-wide `miss_bytes` +
+`readthrough_bytes` ≈ 1.0× dataset (down from 1.2×),
+`peer_fallthroughs` ≈ 0, `readthroughs` > 0 on every worker, rows and
+value signatures identical, steady behavior unchanged (read-through is
+first-touch-only by construction — resident keys never enter it).

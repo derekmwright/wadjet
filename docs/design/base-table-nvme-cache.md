@@ -157,7 +157,11 @@ best-effort — the cache can never change results, only skip GETs.
   Rationale: sharing one download across consumers couples their
   lifetimes and re-creates the cancellation-poisoning class the breaker
   incident just taught us (PR #220); duplicate GETs during warmup are
-  bounded and vanish once the entry lands.
+  bounded and vanish once the entry lands. (One carve-out, later: the
+  peer tier's owner read-through — `ReadThrough`, scan-affinity.md
+  §first-touch single-flight — DOES single-flight, but only the
+  detached owner-side populate serving peer fetches; local consumer
+  streams stay uncoupled.)
 - `GetReaderAt` misses pass through to inner **without** populating
   (population needs the whole object; ranged misses are footer-sized).
   The whole-file `Get` that follows on every scan path populates.

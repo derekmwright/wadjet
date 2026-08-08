@@ -39,9 +39,11 @@ const peerServeAcquireTimeout = 10 * time.Second
 // implements it over its LocalStageCache + per-query fetch tokens.
 // Implementations return ErrPeerDenied for a bad token and ErrPeerNotFound
 // for a key the worker doesn't hold; both are terminal for the fetch and the
-// consumer falls through to S3.
+// consumer falls through to S3. ctx is the fetch stream's context — a
+// resolver that does real work (base-table owner read-through) bounds its
+// wait on it.
 type ShuffleFileResolver interface {
-	ResolveShuffleFile(queryID, key, token string) (string, error)
+	ResolveShuffleFile(ctx context.Context, queryID, key, token string) (string, error)
 }
 
 // Sentinel errors for ShuffleFileResolver implementations.
@@ -206,7 +208,7 @@ func (s *PeerServer) FetchShuffle(req *dpv1.FetchShuffleRequest, stream grpc.Ser
 		return status.FromContextError(ctx.Err()).Err()
 	}
 
-	path, err := s.resolver.ResolveShuffleFile(req.GetQueryId(), req.GetKey(), req.GetToken())
+	path, err := s.resolver.ResolveShuffleFile(ctx, req.GetQueryId(), req.GetKey(), req.GetToken())
 	switch {
 	case errors.Is(err, ErrPeerDenied):
 		return status.Error(codes.PermissionDenied, "peer fetch denied")

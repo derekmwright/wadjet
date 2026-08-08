@@ -19,7 +19,7 @@ type fakeResolver struct {
 	queryID, key, token, path string
 }
 
-func (f *fakeResolver) ResolveShuffleFile(queryID, key, token string) (string, error) {
+func (f *fakeResolver) ResolveShuffleFile(_ context.Context, queryID, key, token string) (string, error) {
 	if token != f.token {
 		return "", ErrPeerDenied
 	}

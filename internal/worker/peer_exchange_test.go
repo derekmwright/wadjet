@@ -265,13 +265,13 @@ func TestPeerExchangeRegistryLifecycle(t *testing.T) {
 		t.Fatalf("hintFor = (%q, %q)", addr, tok)
 	}
 	// Serving validation: right token but key not in the local cache.
-	if _, err := e.ResolveShuffleFile("q1", "queries/q1/s/f.wshf", "tok"); !errors.Is(err, dataplane.ErrPeerNotFound) {
+	if _, err := e.ResolveShuffleFile(t.Context(), "q1", "queries/q1/s/f.wshf", "tok"); !errors.Is(err, dataplane.ErrPeerNotFound) {
 		t.Fatalf("want ErrPeerNotFound, got %v", err)
 	}
-	if _, err := e.ResolveShuffleFile("q1", "queries/q1/s/f.wshf", "bad"); !errors.Is(err, dataplane.ErrPeerDenied) {
+	if _, err := e.ResolveShuffleFile(t.Context(), "q1", "queries/q1/s/f.wshf", "bad"); !errors.Is(err, dataplane.ErrPeerDenied) {
 		t.Fatalf("want ErrPeerDenied for bad token, got %v", err)
 	}
-	if _, err := e.ResolveShuffleFile("q1", "any", ""); !errors.Is(err, dataplane.ErrPeerDenied) {
+	if _, err := e.ResolveShuffleFile(t.Context(), "q1", "any", ""); !errors.Is(err, dataplane.ErrPeerDenied) {
 		t.Fatalf("want ErrPeerDenied for empty token, got %v", err)
 	}
 
@@ -279,7 +279,7 @@ func TestPeerExchangeRegistryLifecycle(t *testing.T) {
 	if addr, tok := e.peers.hintFor("queries/q1/s/f.wshf"); addr != "" || tok != "" {
 		t.Fatalf("hints survived CleanupQuery: (%q, %q)", addr, tok)
 	}
-	if _, err := e.ResolveShuffleFile("q1", "queries/q1/s/f.wshf", "tok"); !errors.Is(err, dataplane.ErrPeerDenied) {
+	if _, err := e.ResolveShuffleFile(t.Context(), "q1", "queries/q1/s/f.wshf", "tok"); !errors.Is(err, dataplane.ErrPeerDenied) {
 		t.Fatalf("want ErrPeerDenied after cleanup, got %v", err)
 	}
 }

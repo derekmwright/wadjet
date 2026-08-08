@@ -36,12 +36,16 @@ import (
 // S3 fallthrough, never correctness.
 //
 // WADJET_BASE_PEER_TIER=0 is the kill switch (both fetching and serving).
+// WADJET_BASE_PEER_READTHROUGH=0 kills only the owner read-through
+// (first-touch single-flight): a peer fetch for a not-yet-resident owned
+// file then answers NotFound as before instead of populating from S3.
 // WADJET_PEER_SECRET, when set cluster-wide, gates base-table serving on
 // token match; unset (default) matches the peer plane's existing
 // intra-cluster trust posture, with TLS as the hardening seam.
 var (
-	basePeerTierEnabled = os.Getenv("WADJET_BASE_PEER_TIER") != "0"
-	basePeerSecret      = os.Getenv("WADJET_PEER_SECRET")
+	basePeerTierEnabled        = os.Getenv("WADJET_BASE_PEER_TIER") != "0"
+	basePeerReadThroughEnabled = os.Getenv("WADJET_BASE_PEER_READTHROUGH") != "0"
+	basePeerSecret             = os.Getenv("WADJET_PEER_SECRET")
 )
 
 // basePeerStaleTTL mirrors the coordinator registry's default heartbeat

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/engine/diskio"
 )
@@ -54,6 +55,16 @@ type BaseTableCacheStats struct {
 	PeerFallthroughs int64
 	PeerServes       int64
 	PeerServeBytes   int64
+
+	// Owner read-through (docs/design/scan-affinity.md §first-touch
+	// single-flight): populates performed on behalf of a peer's fetch for
+	// a not-yet-resident owned file. ReadThroughBytes land in the cache
+	// and are S3 reads, but are counted separately from Misses/MissBytes —
+	// those keep measuring local demand that left the cluster; these
+	// measure demand a peer redirected here.
+	ReadThroughs     int64
+	ReadThroughBytes int64
+	ReadThroughFails int64
 }
 
 // BaseTablePeerFetcher is the seam between the cache's miss path and the
@@ -88,11 +99,12 @@ type BaseTableCache struct {
 	budget int64
 	logger *slog.Logger
 
-	mu       sync.Mutex
-	entries  map[string]*list.Element // cache key -> element holding *btcEntry
-	lru      *list.List               // front = most recently used
-	curBytes int64
-	inflight map[string]struct{} // keys with a tee in progress (dedupe, non-blocking)
+	mu         sync.Mutex
+	entries    map[string]*list.Element // cache key -> element holding *btcEntry
+	lru        *list.List               // front = most recently used
+	curBytes   int64
+	inflight   map[string]struct{}    // keys with a tee in progress (dedupe, non-blocking)
+	populating map[string]*populateOp // keys with a ReadThrough populate in flight
 
 	peer BaseTablePeerFetcher // nil = no peer tier (default)
 
@@ -106,6 +118,16 @@ type BaseTableCache struct {
 	peerFallthroughs atomic.Int64
 	peerServes       atomic.Int64
 	peerServeBytes   atomic.Int64
+	readThroughs     atomic.Int64
+	readThroughBytes atomic.Int64
+	readThroughFails atomic.Int64
+}
+
+// populateOp is one in-flight ReadThrough population. The runner closes
+// done after setting err; waiters select on it against their own ctx.
+type populateOp struct {
+	done chan struct{}
+	err  error
 }
 
 var (
@@ -138,9 +160,10 @@ func NewBaseTableCache(inner Store, dir string, budget int64, logger *slog.Logge
 		tmpDir:   filepath.Join(dir, "tmp"),
 		budget:   budget,
 		logger:   logger,
-		entries:  make(map[string]*list.Element),
-		lru:      list.New(),
-		inflight: make(map[string]struct{}),
+		entries:    make(map[string]*list.Element),
+		lru:        list.New(),
+		inflight:   make(map[string]struct{}),
+		populating: make(map[string]*populateOp),
 	}
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating base-table cache dir: %w", err)
@@ -349,7 +372,7 @@ func (c *BaseTableCache) getFromPeer(ctx context.Context, ck, bucket, key string
 		return nil, ObjectInfo{}, false
 	}
 	defer rc.Close()
-	size, path, err := c.spoolFromPeer(bucket, key, rc)
+	size, path, err := c.spool(bucket, key, rc, -1)
 	if err != nil {
 		c.peerFallthroughs.Add(1)
 		c.logger.Debug("base-table cache: peer fetch fell through to S3",
@@ -381,10 +404,11 @@ func (c *BaseTableCache) getFromPeer(ctx context.Context, ck, bucket, key string
 // is admitted into the safety-critical parquet read path.
 var parquetMagic = [4]byte{'P', 'A', 'R', '1'}
 
-// spoolFromPeer copies the peer stream into a temp file and renames it
-// into place, returning the final size and path. Any error leaves no
-// state behind.
-func (c *BaseTableCache) spoolFromPeer(bucket, key string, rc io.Reader) (int64, string, error) {
+// spool copies a population stream (peer fetch or read-through) into a
+// temp file and renames it into place, returning the final size and path.
+// want is the advertised size to enforce, or -1 when the stream carries
+// none (peer fetches). Any error leaves no state behind.
+func (c *BaseTableCache) spool(bucket, key string, rc io.Reader, want int64) (int64, string, error) {
 	f, err := os.CreateTemp(c.tmpDir, "peer-*.tmp")
 	if err != nil {
 		return 0, "", fmt.Errorf("creating peer spool temp: %w", err)
@@ -404,6 +428,9 @@ func (c *BaseTableCache) spoolFromPeer(bucket, key string, rc io.Reader) (int64,
 		return discard(fmt.Errorf("peer object exceeds cache budget (%d)", c.budget))
 	}
 	fl.Finish()
+	if want >= 0 && size != want {
+		return discard(fmt.Errorf("spooled %d bytes, want %d", size, want))
+	}
 	if size < int64(2*len(parquetMagic)) {
 		return discard(fmt.Errorf("peer object too short (%d bytes)", size))
 	}
@@ -434,6 +461,113 @@ func (c *BaseTableCache) spoolFromPeer(bucket, key string, rc io.Reader) (int64,
 		return 0, "", fmt.Errorf("renaming peer spool into place: %w", err)
 	}
 	return size, final, nil
+}
+
+// readThroughTimeout bounds one detached read-through fetch (largest
+// ingest chunks are a few hundred MB; S3 streams them in seconds — a
+// minute means the store is in real trouble and the peer should go
+// durable itself). readThroughPoll is the cadence for waiting out a
+// concurrent tee. Both are vars so tests can shrink them.
+var (
+	readThroughTimeout = 60 * time.Second
+	readThroughPoll    = 25 * time.Millisecond
+)
+
+// ReadThrough ensures bucket/key is resident, fetching it from the inner
+// store if needed (docs/design/scan-affinity.md §first-touch
+// single-flight). The worker's peer resolver is the only caller: a peer
+// asked this worker — the file's rendezvous owner — for a copy it doesn't
+// hold yet, and fetching it HERE (once) instead of bouncing the peer to
+// S3 is what keeps cluster-wide first-touch at one S3 read per file.
+//
+// Concurrent callers for one key coalesce onto a single fetch. The fetch
+// runs detached with its own timeout — a canceled waiter neither strands
+// other waiters nor aborts a populate whose bytes this node will want
+// anyway. An error return means the caller should fall back to
+// NotFound-style behavior (the peer goes durable); the cache is
+// unchanged.
+func (c *BaseTableCache) ReadThrough(ctx context.Context, bucket, key string) error {
+	if !c.eligibleKey(bucket, key) {
+		return fmt.Errorf("read-through: ineligible key %s/%s", bucket, key)
+	}
+	ck := cacheKey(bucket, key)
+	c.mu.Lock()
+	if _, ok := c.entries[ck]; ok {
+		c.mu.Unlock()
+		return nil
+	}
+	op, joined := c.populating[ck]
+	if !joined {
+		op = &populateOp{done: make(chan struct{})}
+		c.populating[ck] = op
+	}
+	c.mu.Unlock()
+	if !joined {
+		go c.runReadThrough(ck, bucket, key, op)
+	}
+	select {
+	case <-op.done:
+		return op.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// runReadThrough is the detached single-flight runner for one key. It
+// waits out any concurrent tee population (the bytes are already flowing
+// to this node — starting a second S3 stream would recreate exactly the
+// duplication this path exists to kill), rechecks residency, then fetches
+// from the inner store and admits via the standard spool.
+func (c *BaseTableCache) runReadThrough(ck, bucket, key string, op *populateOp) {
+	defer func() {
+		c.mu.Lock()
+		delete(c.populating, ck)
+		c.mu.Unlock()
+		if op.err != nil {
+			c.readThroughFails.Add(1)
+		}
+		close(op.done)
+	}()
+	deadline := time.Now().Add(readThroughTimeout)
+	for {
+		c.mu.Lock()
+		if _, resident := c.entries[ck]; resident {
+			c.mu.Unlock()
+			return
+		}
+		if _, busy := c.inflight[ck]; !busy {
+			c.inflight[ck] = struct{}{} // claim: local tees now skip, same as any populate
+			c.mu.Unlock()
+			break
+		}
+		c.mu.Unlock()
+		if time.Now().After(deadline) {
+			op.err = fmt.Errorf("read-through %s: tee population still in flight after %s", ck, readThroughTimeout)
+			return
+		}
+		time.Sleep(readThroughPoll)
+	}
+	defer c.clearInflight(ck)
+	ctx, cancel := context.WithTimeout(context.Background(), readThroughTimeout)
+	defer cancel()
+	rc, info, err := c.inner.Get(ctx, bucket, key)
+	if err != nil {
+		op.err = fmt.Errorf("read-through %s: %w", ck, err)
+		return
+	}
+	defer rc.Close()
+	want := info.Size
+	if want <= 0 {
+		want = -1 // stores that don't advertise a size fall back to framing checks
+	}
+	size, path, err := c.spool(bucket, key, rc, want)
+	if err != nil {
+		op.err = fmt.Errorf("read-through %s: %w", ck, err)
+		return
+	}
+	c.admit(ck, path, size)
+	c.readThroughs.Add(1)
+	c.readThroughBytes.Add(size)
 }
 
 // PeerLocalPath resolves a resident entry for a peer's fetch, counting it
@@ -583,6 +717,9 @@ func (c *BaseTableCache) Stats() BaseTableCacheStats {
 		PeerFallthroughs: c.peerFallthroughs.Load(),
 		PeerServes:       c.peerServes.Load(),
 		PeerServeBytes:   c.peerServeBytes.Load(),
+		ReadThroughs:     c.readThroughs.Load(),
+		ReadThroughBytes: c.readThroughBytes.Load(),
+		ReadThroughFails: c.readThroughFails.Load(),
 	}
 }
 
@@ -595,7 +732,9 @@ func (c *BaseTableCache) LogStats() {
 		"evictions", s.Evictions, "entries", s.Entries, "bytes", s.Bytes,
 		"peer_hits", s.PeerHits, "peer_bytes", s.PeerBytes,
 		"peer_fallthroughs", s.PeerFallthroughs,
-		"peer_serves", s.PeerServes, "peer_serve_bytes", s.PeerServeBytes)
+		"peer_serves", s.PeerServes, "peer_serve_bytes", s.PeerServeBytes,
+		"readthroughs", s.ReadThroughs, "readthrough_bytes", s.ReadThroughBytes,
+		"readthrough_fails", s.ReadThroughFails)
 }
 
 // Put implements Store. Eligible keys invalidate defensively — ingest

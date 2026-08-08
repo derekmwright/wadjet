@@ -58,6 +58,7 @@ type Executor struct {
 	resultKV       jetstream.KeyValue       // NATS KV for cross-worker inter-stage results (nil = disabled)
 	localCache     *LocalStageCache         // same-worker stage-output local-disk cache (nil = disabled)
 	baseTableCache *objstore.BaseTableCache // base-table cache layer for serving peer fetches (nil = disabled)
+	baseTableOwns  func(key string) bool    // rendezvous-ownership check for owner read-through (nil = read-through disabled)
 	memoryBudget   int64                    // per-task memory budget in bytes (0 = unlimited)
 	spillDir       string                   // directory for spill files
 	metrics        *metrics.Metrics
