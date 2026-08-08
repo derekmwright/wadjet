@@ -26,6 +26,31 @@ them) run ungoverned by construction (nil yield budget). Engagement
 marker: `upload_pause_ms` on the shuffle io stats line, distinct from
 the admission gate's `upload_yield_ms`.
 
+### v4 SF100 validation (2026-08-08): correct, and inert in sequential suites
+
+Two SF100 arms (results/20260808-{022440,025007}, the second with the
+pause budget split from the admission budget after the shared budget
+let backlogged jobs enter their streams already past the escape):
+44/44 identical rows/vsigs, `upload_failed=0`, walls at parity — and
+`upload_pause_ms=0` on every worker. The zero is STRUCTURAL, not a bug:
+in a sequential suite, `CancelQuery` kills a query's remaining uploads
+at its completion broadcast (the boundary-crossing tail — 365–780
+files/worker in the ledger), and uploads in flight during a query's
+protection window belong to that query itself (10,773 completed
+during their own query's run) — correctly exempt. There is nothing
+for the gate to pause unless queries OVERLAP.
+
+Consequences: (1) v4 stays default-on as defense for concurrent /
+multi-tenant workloads, where another root's drain genuinely crosses a
+query's window — the exact case the gate governs. (2) **The
+"in-flight-upload cold coin flip" attribution for Q04/Q06-class cold
+variance in benchmark suites is REFUTED** — those uploads are either
+same-root (exempt by design: v3 already re-widens after the 10s
+window) or cancelled at the boundary. The cold-disturbance cause is
+open again; remaining suspects are intra-query upload/scan contention
+at the post-window full width (a v3 design choice), S3 GET contention,
+and page-cache effects.
+
 ## v3 (same day): foreground-epoch yield clock
 
 The v2 pair delivered suite −12.4% cold / −12.6% steady with zero
