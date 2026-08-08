@@ -88,3 +88,7 @@ verdict on run-2 pressure_stall_ms ≈ 0, refault activations ~0, and
 run-2 wall ≤ run-1 wall (the historical cache-less relationship),
 rows identical. A zero-EC2 repro is plausible: SF1 harness under a
 docker memory cap (spawn-wrapper) sized so cache+scratch > RAM.
+
+**Fix shipped**: directions 1 and 2 both landed — see
+docs/design/single-pass-drop-behind.md (kill switches
+WADJET_DROP_BEHIND=0, WADJET_REFAULT_STREAM_DISCOUNT=0).

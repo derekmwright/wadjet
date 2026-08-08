@@ -746,7 +746,8 @@ func openPartialSpillReader(path string) (*partialSpillReader, error) {
 	}
 	r := &partialSpillReader{
 		f: f,
-		r: bufio.NewReaderSize(f, 64*1024),
+		// Drop-behind: partial-state files are merged once and deleted.
+		r: bufio.NewReaderSize(diskio.NewDropBehindReader(f), 64*1024),
 	}
 	if err := r.readHeader(); err != nil {
 		f.Close()

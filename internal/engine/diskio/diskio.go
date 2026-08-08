@@ -32,12 +32,18 @@
 //     windows stay resident (only the dirty bound applies), so the
 //     imminent readers take minor faults, not majors.
 //
-// The whole mechanism is gated on --bounded-dirty-writes (default false).
-// When disabled, NewWriter returns the file itself and a nil Flusher, so
-// the only cost is one atomic load at writer construction.
+// The write mechanism is gated on --bounded-dirty-writes (default true
+// since the SF100 suite-neutral validation; =false restores
+// kernel-writeback-only), with Spill-class writers additionally kept
+// active by the drop-behind default below. When fully disabled, NewWriter
+// returns the file itself and a nil Flusher, so the only cost is one
+// atomic load at writer construction.
 package diskio
 
-import "sync/atomic"
+import (
+	"os"
+	"sync/atomic"
+)
 
 // enabled gates the whole mechanism. Set once at startup via SetEnabled.
 var enabled atomic.Bool
@@ -49,6 +55,40 @@ func SetEnabled(on bool) { enabled.Store(on) }
 
 // Enabled reports whether windowed writeback is active.
 func Enabled() bool { return enabled.Load() }
+
+// dropBehind gates the single-pass drop-behind treatment independently of
+// --bounded-dirty-writes: Spill-class writers and DropBehindReader stay
+// active by default so single-pass bytes (spill runs, shuffle scratch,
+// base-table populate copies) never accumulate in the page cache and
+// evict the reusable pages a steady-state suite re-reads
+// (docs/benchmarks/steady-slower-than-cold-2026-08-08.md). Kill switch:
+// WADJET_DROP_BEHIND=0.
+var dropBehind atomic.Bool
+
+func init() { dropBehind.Store(os.Getenv("WADJET_DROP_BEHIND") != "0") }
+
+// SetDropBehindEnabled toggles single-pass drop-behind; tests only.
+func SetDropBehindEnabled(on bool) { dropBehind.Store(on) }
+
+// DropBehindEnabled reports whether single-pass drop-behind is active.
+func DropBehindEnabled() bool { return dropBehind.Load() }
+
+// Drop-behind engagement counters, exposed as wlog rollout markers so an
+// SF100 run shows the mechanism working without a kernel-side probe.
+var (
+	writeDropBytes atomic.Int64 // Spill-class windows dropped after writeback
+	readDropBytes  atomic.Int64 // bytes dropped behind single-pass readers (fd + mmap walks)
+)
+
+// AddReadDropBytes records n bytes dropped behind a single-pass read by a
+// caller that issues its own advise calls (the worker's shuffle mmap walk).
+func AddReadDropBytes(n int64) { readDropBytes.Add(n) }
+
+// DropBehindStats returns cumulative dropped bytes on the write and read
+// sides since process start.
+func DropBehindStats() (write, read int64) {
+	return writeDropBytes.Load(), readDropBytes.Load()
+}
 
 // Class describes how a file's pages are treated once written back.
 type Class int

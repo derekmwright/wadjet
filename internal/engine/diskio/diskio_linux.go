@@ -40,8 +40,14 @@ type Flusher struct {
 // them with a whole-file pass). When the mechanism is disabled it
 // returns f itself and a nil Flusher (whose Finish is a no-op), so call
 // sites need no branches.
+//
+// Spill-class writers are additionally active whenever drop-behind is on
+// (the default), independent of --bounded-dirty-writes: a Spill file is
+// single-pass by definition, so dropping its written-back windows is the
+// steady-regime fix, not a memory-tight tuning knob. KeepResident writers
+// (imminently re-read files) stay gated on the flag.
 func NewWriter(f *os.File, class Class) (io.Writer, *Flusher) {
-	if !enabled.Load() {
+	if !enabled.Load() && !(class == Spill && dropBehind.Load()) {
 		return f, nil
 	}
 	fl := &Flusher{fd: int(f.Fd()), class: class}
@@ -95,6 +101,7 @@ func (fl *Flusher) wrote(n int) {
 			// skips them); Finish()'s whole-file pass is the guaranteed
 			// drop.
 			_ = fadvise(fl.fd, cur-windowBytes, windowBytes, unix.FADV_DONTNEED)
+			writeDropBytes.Add(windowBytes)
 		}
 	}
 }
@@ -119,4 +126,77 @@ func (fl *Flusher) Finish() {
 		return
 	}
 	_ = fadvise(fl.fd, 0, 0, unix.FADV_DONTNEED)
+	if dropped := fl.boundary - windowBytes; dropped < fl.off {
+		if dropped < 0 {
+			dropped = 0
+		}
+		writeDropBytes.Add(fl.off - dropped)
+	}
+}
+
+// dropWindowBytes is the read-side drop granularity. Same 8 MiB shape as
+// the write window: large enough that the advise syscall amortizes to
+// noise, page-aligned by construction.
+const dropWindowBytes = windowBytes
+
+// DropBehindReader reads a single-pass file sequentially and drops
+// consumed pages from the page cache one window behind the read cursor,
+// so multi-GB spill read-backs never displace reusable pages. On EOF the
+// whole file is dropped (covers the tail window). Advisory only: FADV
+// errors disable further calls but never affect the data read.
+type DropBehindReader struct {
+	f        *os.File
+	off      int64
+	dropped  int64 // everything below this offset has been advised away
+	disabled bool
+}
+
+// NewDropBehindReader wraps f for drop-behind reading. Returns f itself
+// when drop-behind is disabled, so call sites need no branches. The
+// caller keeps ownership of f (Close as usual).
+func NewDropBehindReader(f *os.File) io.Reader {
+	if !dropBehind.Load() {
+		return f
+	}
+	return &DropBehindReader{f: f}
+}
+
+func (r *DropBehindReader) Read(p []byte) (int, error) {
+	n, err := r.f.Read(p)
+	if n > 0 {
+		r.off += int64(n)
+		r.advance()
+	}
+	if err == io.EOF {
+		r.finish()
+	}
+	return n, err
+}
+
+// advance drops completed windows behind the cursor, keeping the window
+// currently being read resident (readahead already pulled it in; dropping
+// it would force a re-fault on the very next Read).
+func (r *DropBehindReader) advance() {
+	if r.disabled {
+		return
+	}
+	for r.off-r.dropped >= 2*dropWindowBytes {
+		if err := fadvise(int(r.f.Fd()), r.dropped, dropWindowBytes, unix.FADV_DONTNEED); err != nil {
+			r.disabled = true
+			return
+		}
+		r.dropped += dropWindowBytes
+		readDropBytes.Add(dropWindowBytes)
+	}
+}
+
+// finish drops the remainder of the file once fully consumed.
+func (r *DropBehindReader) finish() {
+	if r.disabled || r.off <= r.dropped {
+		return
+	}
+	if err := fadvise(int(r.f.Fd()), 0, 0, unix.FADV_DONTNEED); err == nil {
+		readDropBytes.Add(r.off - r.dropped)
+		r.dropped = r.off
+	}
 }

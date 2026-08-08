@@ -396,7 +396,12 @@ func openSpillBatchReader(path string) (*spillBatchReader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening spill file: %w", err)
 	}
-	r := bufio.NewReaderSize(f, 1024*1024)
+	// Drop-behind: spill runs are read back once and deleted; dropping
+	// consumed windows keeps a multi-GB merge from displacing reusable
+	// page-cache pages. (The empty-PARTITION-BY window two-pass evaluator
+	// re-reads its runs once more from NVMe — accepted, the runs would
+	// rarely still be resident in the regimes where this matters.)
+	r := bufio.NewReaderSize(diskio.NewDropBehindReader(f), 1024*1024)
 	var buf [4]byte
 	if _, err := io.ReadFull(r, buf[:]); err != nil {
 		f.Close()

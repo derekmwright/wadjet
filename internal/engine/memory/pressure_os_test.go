@@ -126,6 +126,45 @@ func TestParseRefaultFile(t *testing.T) {
 	}
 }
 
+// TestRefaultSensor_StreamingDiscount pins the 2026-08-08 fix: refaults
+// matching the engine's own designed streaming rate (base-table cache
+// hit-opens + peer serves) must not arm the sensor — once the NVMe cache
+// exceeds RAM, steady-state re-reads ARE refaults by kernel accounting
+// and v3 semantics taxed every run-2 scan for zero relief. Displacement
+// beyond the designed rate must still activate.
+func TestRefaultSensor_StreamingDiscount(t *testing.T) {
+	var streamBytes int64
+	SetPageCacheStreamingSource(func() int64 { return streamBytes })
+	t.Cleanup(func() { SetPageCacheStreamingSource(nil) })
+
+	f := &fakeCounter{value: 0, ok: true}
+	s := newRefaultSensor(f.read, 1000, time.Millisecond)
+
+	// Prime the stream baseline (first sighting measures no delta).
+	sample(t, s, f, f.value)
+
+	// Hot refault rate fully explained by designed streaming: the deltas
+	// are computed over the same elapsed window, so pages == bytes/4096
+	// nets to exactly zero regardless of timing jitter.
+	for range 4 {
+		streamBytes += 1_000_000 * refaultPageBytes
+		if got := sample(t, s, f, f.value+1_000_000); got {
+			t.Fatal("active while refaults match designed streaming rate")
+		}
+	}
+	if s.Discount() <= 0 {
+		t.Fatal("discount not recorded during streaming samples")
+	}
+
+	// Streaming stops; the same refault rate is now genuine displacement.
+	if got := sample(t, s, f, f.value+1_000_000); got {
+		t.Fatal("active after a single undiscounted hot sample — damping missing")
+	}
+	if got := sample(t, s, f, f.value+1_000_000); !got {
+		t.Fatal("not active after two undiscounted hot samples")
+	}
+}
+
 // TestPageCachePressureActive_Smoke exercises the real singleton path —
 // whatever the host provides, it must not panic and must be callable
 // concurrently (the -race build is the assertion).

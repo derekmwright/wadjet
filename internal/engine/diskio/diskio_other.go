@@ -18,3 +18,6 @@ func NewWriter(f *os.File, _ Class) (io.Writer, *Flusher) { return f, nil }
 
 // Finish is a no-op on non-Linux platforms. nil-safe.
 func (fl *Flusher) Finish() {}
+
+// NewDropBehindReader returns f unchanged on non-Linux platforms.
+func NewDropBehindReader(f *os.File) io.Reader { return f }

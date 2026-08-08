@@ -46,6 +46,50 @@ const refaultPressureRatePerSec = 1000.0
 // per row-group admission (~ms cadence) and must stay near-free.
 const refaultSampleInterval = time.Second
 
+// refaultPageBytes converts the streaming-discount byte rate to pages.
+// workingset_refault counts 4 KiB pages on every platform we deploy to.
+const refaultPageBytes = 4096
+
+// streamingReadSource, when set, returns a monotonic cumulative byte count
+// of the engine's own DESIGNED streaming re-reads — base-table cache
+// hit-opens plus peer-serve reads of those same NVMe files. The sensor's
+// founding premise ("healthy streaming ≈ 0 refaults") only holds while
+// files are read for the FIRST time; once the NVMe cache exceeds RAM,
+// every steady-state scan of a cached file is a workingset refault by
+// kernel accounting, and the 2026-08-08 investigation measured the sensor
+// classifying that designed behavior as thrash for 230-460s of stalls per
+// worker per run. Subtracting the expected streaming page-in rate before
+// thresholding restores the premise: genuine displacement thrash (15k+
+// pages/s) still clears the threshold by an order of magnitude, while the
+// engine's own ~5k pages/s of cache-file streaming no longer arms
+// episodes. The source over-counts slightly (hit-opens are whole-file
+// sizes; projection-pruned scans fault fewer pages) — acceptable, the
+// separation argument needs only order-of-magnitude accuracy.
+// Set once at worker startup; kill switch WADJET_REFAULT_STREAM_DISCOUNT=0.
+var streamingReadSource struct {
+	mu   sync.Mutex
+	read func() int64
+}
+
+// SetPageCacheStreamingSource registers the designed-streaming byte
+// counter the refault sensor discounts before thresholding. Disabled by
+// WADJET_REFAULT_STREAM_DISCOUNT=0. Call before or after sensor
+// construction; the sensor consults the registration at each sample.
+func SetPageCacheStreamingSource(read func() int64) {
+	if os.Getenv("WADJET_REFAULT_STREAM_DISCOUNT") == "0" {
+		return
+	}
+	streamingReadSource.mu.Lock()
+	streamingReadSource.read = read
+	streamingReadSource.mu.Unlock()
+}
+
+func loadStreamingSource() func() int64 {
+	streamingReadSource.mu.Lock()
+	defer streamingReadSource.mu.Unlock()
+	return streamingReadSource.read
+}
+
 // refaultSensor computes a refault rate from a monotonic counter source
 // and applies two-sample activation damping. The zero value is unusable;
 // construct with newRefaultSensor.
@@ -61,6 +105,14 @@ type refaultSensor struct {
 	lastRate   float64
 	hotStreak  int // consecutive over-threshold samples
 	active     bool
+
+	// Designed-streaming discount (see streamingReadSource). streamBytes
+	// is the source's cumulative value at the last sample; streamPrimed
+	// distinguishes "no baseline yet" (first sample after registration
+	// measures the counter's absolute value, not a delta) from zero.
+	streamBytes  int64
+	streamPrimed bool
+	lastDiscount float64 // pages/sec subtracted at the last sample
 
 	activations int64     // inactive->active transitions, for markers
 	activeSince time.Time // start of the current activation episode
@@ -114,7 +166,16 @@ func (s *refaultSensor) Active() bool {
 	s.lastRate = float64(c-s.lastCount) / elapsed.Seconds()
 	s.lastCount = c
 	s.lastSample = now
-	if s.lastRate > s.threshold {
+	s.lastDiscount = 0
+	if src := loadStreamingSource(); src != nil {
+		sb := src()
+		if s.streamPrimed {
+			s.lastDiscount = float64(sb-s.streamBytes) / elapsed.Seconds() / refaultPageBytes
+		}
+		s.streamBytes = sb
+		s.streamPrimed = true
+	}
+	if s.lastRate-s.lastDiscount > s.threshold {
 		s.hotStreak++
 	} else {
 		s.hotStreak = 0
@@ -170,6 +231,17 @@ func (s *refaultSensor) Stats() (lastRate float64, activations int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lastRate, s.activations
+}
+
+// Discount returns the designed-streaming rate (pages/sec) subtracted at
+// the last sample — the streaming-discount rollout marker.
+func (s *refaultSensor) Discount() float64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastDiscount
 }
 
 // BoundedIgnores returns how many ActiveBounded consultations declined an
@@ -293,6 +365,13 @@ func PageCachePressureBoundedIgnores() int64 {
 // (pages/sec) and its lifetime activation count, for rollout markers.
 func PageCachePressureStats() (lastRate float64, activations int64) {
 	return pageCachePressureSensor().Stats()
+}
+
+// PageCachePressureDiscount returns the designed-streaming pages/sec
+// subtracted from the refault rate at the last sample — the
+// streaming-discount rollout marker.
+func PageCachePressureDiscount() float64 {
+	return pageCachePressureSensor().Discount()
 }
 
 // ReadRefaultCounterForDiagnostics reads the raw refault counter through

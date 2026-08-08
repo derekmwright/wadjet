@@ -488,6 +488,11 @@ func newShuffleChunkReader(data []byte) (*shuffleChunkReader, error) {
 	}, nil
 }
 
+// Pos returns the reader's byte offset into the WSHF slice — everything
+// below it has been fully decoded (batches copy column data out), so the
+// drop-behind walk can discard those pages. Strictly monotonic.
+func (r *shuffleChunkReader) Pos() int { return r.pos }
+
 // Next returns the next RecordBatch from the file, or (nil, nil) when all chunks
 // have been consumed. Allocates exactly one RecordBatch per non-empty chunk.
 func (r *shuffleChunkReader) Next() (*batch.RecordBatch, error) {

@@ -28,6 +28,7 @@ func record(t *testing.T) *syscallRecorder {
 	rec := &syscallRecorder{}
 	origSync, origFadvise := syncFileRange, fadvise
 	origEnabled := Enabled()
+	origDropBehind := DropBehindEnabled()
 	syncFileRange = func(fd int, off, n int64, flags int) error {
 		if rec.syncErr != nil {
 			return rec.syncErr
@@ -54,6 +55,7 @@ func record(t *testing.T) *syscallRecorder {
 	t.Cleanup(func() {
 		syncFileRange, fadvise = origSync, origFadvise
 		SetEnabled(origEnabled)
+		SetDropBehindEnabled(origDropBehind)
 	})
 	return rec
 }
@@ -71,6 +73,7 @@ func tempFile(t *testing.T) *os.File {
 func TestDisabledPassthrough(t *testing.T) {
 	rec := record(t)
 	SetEnabled(false)
+	SetDropBehindEnabled(false)
 	f := tempFile(t)
 	w, fl := NewWriter(f, Spill)
 	if w != io.Writer(f) {
@@ -197,6 +200,126 @@ func TestSyscallErrorDisables(t *testing.T) {
 	}
 	if fi.Size() != 2*windowBytes {
 		t.Fatalf("file size %d, want %d", fi.Size(), 2*windowBytes)
+	}
+}
+
+// TestSpillActiveViaDropBehind verifies the steady-regime default: with
+// --bounded-dirty-writes off, Spill-class writers still get the windowed
+// writeback + drop treatment (single-pass by definition), while
+// KeepResident writers stay passthrough.
+func TestSpillActiveViaDropBehind(t *testing.T) {
+	rec := record(t)
+	SetEnabled(false)
+	SetDropBehindEnabled(true)
+
+	f := tempFile(t)
+	w, fl := NewWriter(f, Spill)
+	if fl == nil {
+		t.Fatal("Spill writer should be active under drop-behind alone")
+	}
+	buf := make([]byte, 2*windowBytes)
+	if _, err := w.Write(buf); err != nil {
+		t.Fatal(err)
+	}
+	fl.Finish()
+	if len(rec.calls) == 0 {
+		t.Fatal("Spill writer under drop-behind made no syscalls")
+	}
+
+	f2 := tempFile(t)
+	w2, fl2 := NewWriter(f2, KeepResident)
+	if w2 != io.Writer(f2) || fl2 != nil {
+		t.Fatalf("KeepResident should stay passthrough without --bounded-dirty-writes")
+	}
+}
+
+// TestDropBehindReader verifies the read-side single-pass treatment: the
+// reader drops completed windows two windows behind the cursor (the
+// current window stays resident for readahead) and drops the whole file
+// at EOF.
+func TestDropBehindReader(t *testing.T) {
+	rec := record(t)
+	SetDropBehindEnabled(true)
+
+	f := tempFile(t)
+	total := int64(3*windowBytes + windowBytes/2)
+	if err := f.Truncate(total); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	_, readBefore := DropBehindStats()
+	r := NewDropBehindReader(f)
+	if _, ok := r.(*DropBehindReader); !ok {
+		t.Fatalf("expected DropBehindReader, got %T", r)
+	}
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		// cursor at 2 windows: window 0 is complete and one full window
+		// behind — drop it
+		fmt.Sprintf("dontneed[0,%d)", windowBytes),
+		// cursor at 3 windows: drop window 1
+		fmt.Sprintf("dontneed[%d,%d)", windowBytes, 2*windowBytes),
+		// EOF: whole-file drop covers the tail
+		"dontneed[0,0)",
+	}
+	if len(rec.calls) != len(want) {
+		t.Fatalf("calls = %v\nwant   %v", rec.calls, want)
+	}
+	for i := range want {
+		if rec.calls[i] != want[i] {
+			t.Fatalf("call %d = %q, want %q", i, rec.calls[i], want[i])
+		}
+	}
+	_, readAfter := DropBehindStats()
+	if got := readAfter - readBefore; got != total {
+		t.Fatalf("read drop bytes = %d, want %d", got, total)
+	}
+}
+
+// TestDropBehindReaderDisabled verifies the kill switch returns the file
+// itself — zero overhead, no syscalls.
+func TestDropBehindReaderDisabled(t *testing.T) {
+	rec := record(t)
+	SetDropBehindEnabled(false)
+	f := tempFile(t)
+	if r := NewDropBehindReader(f); r != io.Reader(f) {
+		t.Fatalf("disabled NewDropBehindReader should return the file, got %T", r)
+	}
+	if len(rec.calls) != 0 {
+		t.Fatalf("disabled reader made syscalls: %v", rec.calls)
+	}
+}
+
+// TestDropBehindReaderContent verifies the real fadvise path never
+// affects the bytes read.
+func TestDropBehindReaderContent(t *testing.T) {
+	origDrop := DropBehindEnabled()
+	SetDropBehindEnabled(true)
+	t.Cleanup(func() { SetDropBehindEnabled(origDrop) })
+
+	f := tempFile(t)
+	data := make([]byte, 2*windowBytes+98765)
+	if _, err := rand.Read(data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(NewDropBehindReader(f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("content differs through DropBehindReader")
 	}
 }
 

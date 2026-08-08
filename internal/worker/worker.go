@@ -326,10 +326,21 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	// (rendezvous, matching the coordinator's scan-affinity placement)
 	// fetch that owner's copy over the peer wire instead of S3, and this
 	// worker serves its own cached base tables to peers in turn.
-	if btc := objstore.FindBaseTableCache(store); btc != nil && basePeerTierEnabled {
-		w.basePeers = newBaseTablePeerDirectory(cfg.WorkerID)
-		btc.SetPeerFetcher(&baseTablePeerTier{dir: w.basePeers, client: w.peerClient})
-		executor.SetBaseTableCache(btc)
+	if btc := objstore.FindBaseTableCache(store); btc != nil {
+		if basePeerTierEnabled {
+			w.basePeers = newBaseTablePeerDirectory(cfg.WorkerID)
+			btc.SetPeerFetcher(&baseTablePeerTier{dir: w.basePeers, client: w.peerClient})
+			executor.SetBaseTableCache(btc)
+		}
+		// Refault-sensor streaming discount: steady-state re-reads of the
+		// NVMe cache (hit-opens here, peer serves of the same files) are
+		// designed behavior, not thrash — subtract their page-in rate
+		// before the sensor thresholds
+		// (docs/benchmarks/steady-slower-than-cold-2026-08-08.md).
+		memory.SetPageCacheStreamingSource(func() int64 {
+			s := btc.Stats()
+			return s.HitBytes + s.PeerServeBytes
+		})
 	}
 	if cfg.PeerListenAddr != "" {
 		w.peerServer = dataplane.NewPeerServer(dataplane.PeerServerConfig{
@@ -748,8 +759,12 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 						"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
 						"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
 						"refault_rate", int64(refaultRate),
+						"refault_discount", int64(memory.PageCachePressureDiscount()),
 						"refault_activations", refaultActivations,
 						"refault_episode_ignores", memory.PageCachePressureBoundedIgnores())
+					writeDrop, readDrop := diskio.DropBehindStats()
+					w.logger.Info("drop-behind stats",
+						"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop)
 				}
 				w.executor.sweepScanDecodeAheadQueryStats(false)
 			}
@@ -1077,9 +1092,13 @@ func (w *Worker) Stop() {
 			"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
 			"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
 			"refault_rate", int64(refaultRate),
+			"refault_discount", int64(memory.PageCachePressureDiscount()),
 			"refault_activations", refaultActivations,
 			"refault_episode_ignores", memory.PageCachePressureBoundedIgnores())
 	}
+	writeDrop, readDrop := diskio.DropBehindStats()
+	w.logger.Info("drop-behind stats (final)",
+		"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop)
 
 	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
 }

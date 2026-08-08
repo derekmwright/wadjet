@@ -609,7 +609,8 @@ func ReadSpilledRows(path string) ([]map[string]any, error) {
 	}
 	defer f.Close()
 
-	r := bufio.NewReaderSize(f, 64*1024)
+	// Drop-behind: raw-row spill files are read back once and deleted.
+	r := bufio.NewReaderSize(diskio.NewDropBehindReader(f), 64*1024)
 	var buf [8]byte
 
 	// Read header: column names

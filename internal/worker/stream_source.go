@@ -99,6 +99,11 @@ type cachedFileStreamSource struct {
 	mmapRegion  *mmapRegion // Phase-5 relief handle for mmapData; nil when relief is disabled
 	localPath   string      // path the source is responsible for unlinking; "" when the file is owned by LocalStageCache or in-memory
 
+	// walkDropMark is the byte offset below which the current owned WSHF
+	// mmap's pages have already been MADV_DONTNEED'd behind the walk
+	// (single-pass drop-behind). Reset with each file.
+	walkDropMark int
+
 	// Streaming-decode state (docs/design/exchange-streaming-consumption.md
 	// §3 D1). When the current file is being stream-decoded, streamReader
 	// == chunkReader and streamKey names the object so a mid-stream
@@ -233,6 +238,7 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 				return nil, err
 			}
 			if b != nil {
+				s.dropBehindWalk()
 				return b, nil
 			}
 			// Current file exhausted — release its mmap and remove the local
@@ -352,6 +358,7 @@ func (s *cachedFileStreamSource) releaseParquetIter() {
 // current chunkReader. Safe to call multiple times.
 func (s *cachedFileStreamSource) releaseCurrentFile() {
 	s.chunkReader = nil
+	s.walkDropMark = 0
 	if s.streamReader != nil {
 		_ = s.streamReader.Close()
 		s.streamReader = nil
@@ -809,6 +816,7 @@ func (s *cachedFileStreamSource) openPrefetchedShuffle(localPath, filePath strin
 		_ = os.Remove(localPath)
 		return fmt.Errorf("opening prefetched shuffle file %s: %w", filePath, err)
 	}
+	adviseSequential(mmapData)
 	s.chunkReader = r
 	s.mmapData = mmapData
 	s.mmapRegion = registerMmap(mmapData)
@@ -1102,6 +1110,7 @@ func (s *cachedFileStreamSource) buildParquetFromLocal(localPath, filePath, owne
 		}
 		return nil, fmt.Errorf("mmap local parquet %s: %w", localPath, err)
 	}
+	adviseSequential(mmapData)
 	// buildParquetState unwinds mmap (and unlinks ownedPath when set) on a
 	// bad payload.
 	return s.buildParquetState(filePath, mmapData, mmapData, ownedPath)
@@ -1253,6 +1262,7 @@ func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath st
 		_ = syscall.Munmap(mmapData)
 		return fmt.Errorf("opening shuffle file %s: %w", srcPath, err)
 	}
+	adviseSequential(mmapData)
 
 	cleanupLocal = false
 	s.chunkReader = r
@@ -1321,6 +1331,7 @@ func (s *cachedFileStreamSource) streamParquetToLocalMmap(ctx context.Context, s
 		_ = syscall.Munmap(mmapData)
 		return nil, "", fmt.Errorf("closing local parquet fd: %w", err)
 	}
+	adviseSequential(mmapData)
 	cleanup = false
 	return mmapData, localPath, nil
 }
@@ -1351,6 +1362,7 @@ func (s *cachedFileStreamSource) openShuffleFromLocalFile(localPath string) erro
 		_ = syscall.Munmap(mmapData)
 		return fmt.Errorf("opening cached shuffle file %s: %w", localPath, err)
 	}
+	adviseSequential(mmapData)
 	s.chunkReader = r
 	s.mmapData = mmapData
 	s.mmapRegion = registerMmap(mmapData) // nil when relief disabled

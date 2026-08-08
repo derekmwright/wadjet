@@ -63,5 +63,9 @@ exec docker run --rm -i --init --network=host \
   -e GODEBUG=gctrace=1 \
   -e WADJET_HEAP_DUMP_INTERVAL="${EDGE_HEAP_DUMP_INTERVAL:-5s}" \
   -e WADJET_HEAP_DUMP_DIR \
+  -e WADJET_DROP_BEHIND \
+  -e WADJET_REFAULT_STREAM_DISCOUNT \
+  -e WADJET_REFAULT_PRESSURE_RATE \
+  -e WADJET_REFAULT_EPISODE_CAP \
   ${EDGE_GOGC:+-e WADJET_GOGC="${EDGE_GOGC}"} \
   "$IMAGE" timeout --signal=KILL "$TTL" "$@"
