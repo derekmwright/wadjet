@@ -1,9 +1,12 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -188,6 +191,64 @@ func TestWorkerDrain_ScanDecodeAheadMarkerLoop(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Drain did not complete: scan-decode-ahead marker loop blocks drain (wg vs bgWG)")
 	}
+}
+
+// TestWorkerDrain_EmitsFinalScanStats: Drain must emit the same
+// end-of-life scan/IO marker lines as Stop — including the final
+// per-query decode-ahead sweep. The 2026-08-08 SF1 --runs=2 repro lost
+// every drained worker's per-query decode spans because the final
+// emission lived only on the Stop path, and SIGTERM'd workers
+// (harness teardown, rolling updates) always go through Drain.
+func TestWorkerDrain_EmitsFinalScanStats(t *testing.T) {
+	store := objstore.NewMemStore()
+	var logBuf syncBuffer
+	_, cancel := context.WithCancel(context.Background())
+	w := &Worker{
+		config:   Config{WorkerID: "drain-final-stats-test", ScanDecodeAhead: true},
+		logger:   slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		drainCh:  make(chan struct{}),
+		cancel:   cancel,
+		executor: NewExecutor(store, NewLRUCache(1024), nil),
+	}
+	w.executor.logger = w.logger
+	w.executor.foldScanDecodeAheadQueryStats("q-drain", 3, 0, 0, 0, 0, 0, 0, 0, 0, 7e6, 4096)
+
+	done := make(chan struct{})
+	go func() { w.Drain(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Drain did not complete")
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, "scan decode-ahead stats (final)") {
+		t.Error("drain did not emit final decode-ahead stats line")
+	}
+	if !strings.Contains(out, "q-drain") || !strings.Contains(out, "decode_ms=7") {
+		t.Errorf("drain did not sweep per-query decode-ahead stats; log:\n%s", out)
+	}
+	if !strings.Contains(out, "proc io stats (final)") {
+		t.Error("drain did not emit final proc io stats line")
+	}
+}
+
+// syncBuffer is a mutex-guarded bytes.Buffer — slog handlers may be
+// written from multiple goroutines (marker loops) during Drain.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // TestWorkerDrain_TimeoutEscalatesToStop: with DrainTimeout set and a task

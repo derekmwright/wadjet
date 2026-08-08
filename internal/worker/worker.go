@@ -1068,6 +1068,7 @@ func (w *Worker) Drain() {
 	if ioStats, up := w.shuffleIOTotals(); ioStats != (ShuffleIOSnapshot{}) || up != ([7]int64{}) {
 		w.logShuffleIOStats(ioStats, up)
 	}
+	w.logFinalScanStats()
 	w.logger.Info("worker drained and stopped", "worker_id", w.config.WorkerID)
 }
 
@@ -1102,10 +1103,20 @@ func (w *Worker) Stop() {
 	}
 	w.executor.uploads.Drain()
 
-	// Final decode-ahead stats: short runs end before the 60s marker
-	// ticker ever fires, leaving the fold-on-close counters unreported —
-	// the 2026-07-17 capped repro lost every worker-side sample this way.
-	// Emitted after wg.Wait, so every source has folded its counters.
+	w.logFinalScanStats()
+
+	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
+}
+
+// logFinalScanStats emits the end-of-life scan/IO marker lines. Called
+// from BOTH shutdown paths (Stop and Drain): short runs end before the
+// 60s marker ticker ever fires, leaving the fold-on-close counters
+// unreported — the 2026-07-17 capped repro lost every worker-side
+// sample this way, and the 2026-08-08 SF1 --runs=2 repro lost the
+// drained workers' per-query decode spans the same way (Drain never
+// reached Stop's emission). Callers run it after wg.Wait, so every
+// source has folded its counters.
+func (w *Worker) logFinalScanStats() {
 	if w.config.ScanDecodeAhead {
 		w.executor.sweepScanDecodeAheadQueryStats(true)
 		groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := w.executor.ScanDecodeAheadStats()
@@ -1135,8 +1146,6 @@ func (w *Worker) Stop() {
 		"minflt", minflt, "majflt", majflt,
 		"proc_read_bytes", procRead, "proc_write_bytes", procWrite,
 		"nvme_read_bytes", nvmeRead, "nvme_write_bytes", nvmeWrite)
-
-	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
 }
 
 // SetTelemetry enables OpenTelemetry tracing on the worker.
