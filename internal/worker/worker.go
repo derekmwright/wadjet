@@ -212,6 +212,12 @@ type Worker struct {
 	peerServer *dataplane.PeerServer
 	peerClient *dataplane.PeerClient
 
+	// basePeers is the heartbeat-fed membership replica behind the
+	// base-table cache peer tier (nil when the store has no BaseTableCache
+	// layer); basePeersSub is its Stop-time cleanup handle.
+	basePeers    *baseTablePeerDirectory
+	basePeersSub *nats.Subscription
+
 	// CPU profiling state — started/stopped via NATS profile requests.
 	profMu  sync.Mutex
 	profBuf *bytes.Buffer // nil when not profiling
@@ -315,6 +321,16 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 		peerClient:  dataplane.NewPeerClient(nil),
 	}
 	executor.SetPeerClient(w.peerClient)
+	// Base-table cache peer tier: when the store stack includes the
+	// base-table NVMe cache, misses on files another live worker owns
+	// (rendezvous, matching the coordinator's scan-affinity placement)
+	// fetch that owner's copy over the peer wire instead of S3, and this
+	// worker serves its own cached base tables to peers in turn.
+	if btc := objstore.FindBaseTableCache(store); btc != nil && basePeerTierEnabled {
+		w.basePeers = newBaseTablePeerDirectory(cfg.WorkerID)
+		btc.SetPeerFetcher(&baseTablePeerTier{dir: w.basePeers, client: w.peerClient})
+		executor.SetBaseTableCache(btc)
+	}
 	if cfg.PeerListenAddr != "" {
 		w.peerServer = dataplane.NewPeerServer(dataplane.PeerServerConfig{
 			Addr:          cfg.PeerListenAddr,
@@ -365,6 +381,10 @@ func (w *Worker) Start(ctx context.Context) error {
 			return fmt.Errorf("starting peer exchange server: %w", err)
 		}
 	}
+
+	// Base-table peer tier membership: bound after the peer server so the
+	// self-seed carries the final advertised address.
+	w.basePeersSub = w.startBaseTablePeerDirectory()
 
 	// Sweep stale build-cache spill files left over from a previous worker
 	// crash. Without this, a c7gd.4xlarge worker that crashes mid-query at
@@ -1029,6 +1049,10 @@ func (w *Worker) Stop() {
 	w.wg.Wait()
 	w.bgWG.Wait()
 
+	if w.basePeersSub != nil {
+		_ = w.basePeersSub.Unsubscribe()
+		w.basePeersSub = nil
+	}
 	if w.peerServer != nil {
 		w.peerServer.Stop()
 	}

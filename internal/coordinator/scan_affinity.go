@@ -1,9 +1,10 @@
 package coordinator
 
 import (
-	"hash/fnv"
 	"os"
 	"sort"
+
+	"github.com/citc-tech/wadjet/internal/distributed"
 )
 
 // Scan-task file→worker affinity (docs/design/scan-affinity.md).
@@ -24,36 +25,26 @@ import (
 // scans of the same table are warm on every query, and the per-worker
 // cache footprint drops from |dataset| to |dataset|/N.
 //
-// DEFAULT OFF pending the base-table peer tier (SF100 pair
-// 20260808-{125821,131723}): scan affinity alone delivered the cold-run
-// win (first-touch misses 327→227, cold suite −11.7%, the roaming Q06
-// disturbance 19.1s→2.0s) but non-affine base-table readers — the
-// late-materialization column gathers in join tasks, broadcast builds,
-// sub-2×workers tables — kept reading files their worker doesn't own,
-// and with PARTITIONED caches those reads miss where full replication
-// used to hit: run 2 paid ~18 GB of S3 first-touches control didn't
-// (steady suite +12.8%). The class completion is a peer tier on the
-// base-table cache miss path (non-owners fetch the owner's NVMe copy
-// instead of S3), after which every reader converges cheaply and the
-// flag flips on. WADJET_SCAN_AFFINITY=1 opts in for A/B arms.
-var scanAffinityEnabled = os.Getenv("WADJET_SCAN_AFFINITY") == "1"
+// DEFAULT ON since the base-table peer tier landed (worker
+// base_table_peer.go). Affinity alone delivered the cold-run win (SF100
+// pair 20260808-{125821,131723}: first-touch misses 327→227, cold suite
+// −11.7%, the roaming Q06 disturbance 19.1s→2.0s) but regressed steady
+// +12.8%: non-affine base-table readers — late-materialization column
+// gathers in join tasks, broadcast builds, sub-2×workers tables — kept
+// reading files their worker doesn't own, and with PARTITIONED caches
+// those reads missed to S3 where full replication used to hit (~18 GB of
+// run-2 first-touches). The peer tier completes the class: a non-owner's
+// miss fetches the owner's NVMe copy over the peer wire and populates
+// locally, so every reader converges at NIC speed and S3 sees each file
+// once cluster-wide. WADJET_SCAN_AFFINITY=0 is the kill switch for the
+// placement half; WADJET_BASE_PEER_TIER=0 kills the peer tier half.
+var scanAffinityEnabled = os.Getenv("WADJET_SCAN_AFFINITY") != "0"
 
 // affinityOwner returns the rendezvous (highest-random-weight) owner of
-// file among workers: argmax_w fnv64(file, w). Deterministic for a given
-// worker set; a joining/leaving worker remaps only the files it wins/held.
+// file among workers. The hash lives in distributed.AffinityOwner because
+// the worker's base-table peer tier must compute identical ownership.
 func affinityOwner(file string, workers []string) string {
-	var best string
-	var bestScore uint64
-	for _, w := range workers {
-		h := fnv.New64a()
-		h.Write([]byte(file))
-		h.Write([]byte{0})
-		h.Write([]byte(w))
-		if s := h.Sum64(); best == "" || s > bestScore || (s == bestScore && w < best) {
-			best, bestScore = w, s
-		}
-	}
-	return best
+	return distributed.AffinityOwner(file, workers)
 }
 
 // affineFileSets splits files into ~taskCount tasks grouped by rendezvous

@@ -43,6 +43,28 @@ type BaseTableCacheStats struct {
 	MissBytes int64
 	Entries   int
 	Bytes     int64
+
+	// Peer tier (docs/design/scan-affinity.md §peer tier). Consumer side:
+	// misses served from the file's rendezvous owner instead of S3.
+	// Server side: fetches this cache served to non-owner peers.
+	// Misses/MissBytes above stay S3-only so the first-touch ledger keeps
+	// measuring exactly the reads that left the cluster.
+	PeerHits         int64
+	PeerBytes        int64
+	PeerFallthroughs int64
+	PeerServes       int64
+	PeerServeBytes   int64
+}
+
+// BaseTablePeerFetcher is the seam between the cache's miss path and the
+// worker's peer tier. FetchBaseTable returns a whole-object stream from
+// the file's rendezvous owner, or ok=false when the tier cannot help
+// (this worker owns the file, no live owner is known, or the tier is
+// disabled) — the miss then goes to the inner store exactly as before.
+// A returned stream may still fail mid-read; the cache treats any error
+// as a fallthrough to the inner store.
+type BaseTablePeerFetcher interface {
+	FetchBaseTable(ctx context.Context, bucket, key string) (io.ReadCloser, bool)
 }
 
 // BaseTableCache is a read-through, disk-backed, whole-file cache for
@@ -72,11 +94,18 @@ type BaseTableCache struct {
 	curBytes int64
 	inflight map[string]struct{} // keys with a tee in progress (dedupe, non-blocking)
 
-	hits      atomic.Int64
-	misses    atomic.Int64
-	evictions atomic.Int64
-	hitBytes  atomic.Int64
-	missBytes atomic.Int64
+	peer BaseTablePeerFetcher // nil = no peer tier (default)
+
+	hits             atomic.Int64
+	misses           atomic.Int64
+	evictions        atomic.Int64
+	hitBytes         atomic.Int64
+	missBytes        atomic.Int64
+	peerHits         atomic.Int64
+	peerBytes        atomic.Int64
+	peerFallthroughs atomic.Int64
+	peerServes       atomic.Int64
+	peerServeBytes   atomic.Int64
 }
 
 var (
@@ -217,8 +246,9 @@ func (c *BaseTableCache) localPath(bucket, key string) string {
 	return filepath.Join(c.dir, bucket, filepath.FromSlash(key))
 }
 
-// Get implements Store. Hits stream from the cache file; misses stream
-// from the inner store while teeing into the cache.
+// Get implements Store. Hits stream from the cache file; misses try the
+// peer tier (the file's rendezvous owner's cache, when wired), then
+// stream from the inner store while teeing into the cache.
 func (c *BaseTableCache) Get(ctx context.Context, bucket, key string) (io.ReadCloser, ObjectInfo, error) {
 	if !c.eligibleKey(bucket, key) {
 		return c.inner.Get(ctx, bucket, key)
@@ -226,6 +256,11 @@ func (c *BaseTableCache) Get(ctx context.Context, bucket, key string) (io.ReadCl
 	ck := cacheKey(bucket, key)
 	if f, info, ok := c.openHit(ck, key); ok {
 		return f, info, nil
+	}
+	if c.peer != nil {
+		if f, info, ok := c.getFromPeer(ctx, ck, bucket, key); ok {
+			return f, info, nil
+		}
 	}
 	rc, info, err := c.inner.Get(ctx, bucket, key)
 	if err != nil {
@@ -286,6 +321,133 @@ func (c *BaseTableCache) GetReaderAt(ctx context.Context, bucket, key string) (R
 		return nil, 0, fmt.Errorf("underlying store does not support ReaderAt")
 	}
 	return ras.GetReaderAt(ctx, bucket, key)
+}
+
+// SetPeerFetcher wires the peer tier into the miss path. Must be called
+// before the cache serves traffic (worker wiring, pre-Start) — the field
+// is read without synchronization on every Get.
+func (c *BaseTableCache) SetPeerFetcher(f BaseTablePeerFetcher) { c.peer = f }
+
+// getFromPeer spools the whole object from its rendezvous owner into the
+// cache, then serves the admitted local file. ok=false on any failure —
+// the caller falls through to the inner store, which re-populates via the
+// ordinary tee. The inflight map dedupes against concurrent populations
+// of the same key (racing readers go straight to the inner store, same as
+// the tee path).
+func (c *BaseTableCache) getFromPeer(ctx context.Context, ck, bucket, key string) (*os.File, ObjectInfo, bool) {
+	c.mu.Lock()
+	if _, busy := c.inflight[ck]; busy {
+		c.mu.Unlock()
+		return nil, ObjectInfo{}, false
+	}
+	c.inflight[ck] = struct{}{}
+	c.mu.Unlock()
+	defer c.clearInflight(ck)
+
+	rc, ok := c.peer.FetchBaseTable(ctx, bucket, key)
+	if !ok {
+		return nil, ObjectInfo{}, false
+	}
+	defer rc.Close()
+	size, path, err := c.spoolFromPeer(bucket, key, rc)
+	if err != nil {
+		c.peerFallthroughs.Add(1)
+		c.logger.Debug("base-table cache: peer fetch fell through to S3",
+			"bucket", bucket, "key", key, "error", err)
+		return nil, ObjectInfo{}, false
+	}
+	c.admit(ck, path, size)
+	f, err := os.Open(path)
+	if err != nil {
+		// Admitted then instantly evicted under extreme pressure — the
+		// bytes are gone; let the inner store serve.
+		c.peerFallthroughs.Add(1)
+		return nil, ObjectInfo{}, false
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		c.peerFallthroughs.Add(1)
+		return nil, ObjectInfo{}, false
+	}
+	c.peerHits.Add(1)
+	c.peerBytes.Add(size)
+	return f, ObjectInfo{Key: key, Size: st.Size(), LastModified: st.ModTime()}, true
+}
+
+// parquetMagic frames every valid parquet file ("PAR1" head and tail).
+// The peer stream has no advertised size to validate against — clean EOF
+// plus both magics is the truncation/corruption guard before a peer copy
+// is admitted into the safety-critical parquet read path.
+var parquetMagic = [4]byte{'P', 'A', 'R', '1'}
+
+// spoolFromPeer copies the peer stream into a temp file and renames it
+// into place, returning the final size and path. Any error leaves no
+// state behind.
+func (c *BaseTableCache) spoolFromPeer(bucket, key string, rc io.Reader) (int64, string, error) {
+	f, err := os.CreateTemp(c.tmpDir, "peer-*.tmp")
+	if err != nil {
+		return 0, "", fmt.Errorf("creating peer spool temp: %w", err)
+	}
+	tmpPath := f.Name()
+	discard := func(err error) (int64, string, error) {
+		f.Close()
+		_ = os.Remove(tmpPath)
+		return 0, "", err
+	}
+	w, fl := diskio.NewWriter(f, diskio.Spill)
+	size, err := io.Copy(w, io.LimitReader(rc, c.budget+1))
+	if err != nil {
+		return discard(fmt.Errorf("copying peer stream: %w", err))
+	}
+	if size > c.budget {
+		return discard(fmt.Errorf("peer object exceeds cache budget (%d)", c.budget))
+	}
+	fl.Finish()
+	if size < int64(2*len(parquetMagic)) {
+		return discard(fmt.Errorf("peer object too short (%d bytes)", size))
+	}
+	var head, tail [4]byte
+	if _, err := f.ReadAt(head[:], 0); err != nil {
+		return discard(fmt.Errorf("reading spooled head: %w", err))
+	}
+	if _, err := f.ReadAt(tail[:], size-4); err != nil {
+		return discard(fmt.Errorf("reading spooled tail: %w", err))
+	}
+	if head != parquetMagic || tail != parquetMagic {
+		return discard(fmt.Errorf("peer object is not framed parquet (head %q tail %q)", head[:], tail[:]))
+	}
+	if err := f.Sync(); err != nil {
+		return discard(fmt.Errorf("syncing peer spool: %w", err))
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, "", fmt.Errorf("closing peer spool: %w", err)
+	}
+	final := c.localPath(bucket, key)
+	if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, "", fmt.Errorf("creating cache dir: %w", err)
+	}
+	if err := os.Rename(tmpPath, final); err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, "", fmt.Errorf("renaming peer spool into place: %w", err)
+	}
+	return size, final, nil
+}
+
+// PeerLocalPath resolves a resident entry for a peer's fetch, counting it
+// as a peer serve (never a local hit — served bytes leave on the wire and
+// must not inflate the hit ledger). The worker's ShuffleFileResolver
+// base-table branch is the only caller.
+func (c *BaseTableCache) PeerLocalPath(bucket, key string) (string, bool) {
+	e, ok := c.lookup(bucket, key)
+	if !ok {
+		return "", false
+	}
+	c.peerServes.Add(1)
+	c.peerServeBytes.Add(e.size)
+	return e.path, true
 }
 
 // CachedLocalPath implements LocalPathStore.
@@ -409,13 +571,18 @@ func (c *BaseTableCache) Stats() BaseTableCacheStats {
 	bytes := c.curBytes
 	c.mu.Unlock()
 	return BaseTableCacheStats{
-		Hits:      c.hits.Load(),
-		Misses:    c.misses.Load(),
-		Evictions: c.evictions.Load(),
-		HitBytes:  c.hitBytes.Load(),
-		MissBytes: c.missBytes.Load(),
-		Entries:   entries,
-		Bytes:     bytes,
+		Hits:             c.hits.Load(),
+		Misses:           c.misses.Load(),
+		Evictions:        c.evictions.Load(),
+		HitBytes:         c.hitBytes.Load(),
+		MissBytes:        c.missBytes.Load(),
+		Entries:          entries,
+		Bytes:            bytes,
+		PeerHits:         c.peerHits.Load(),
+		PeerBytes:        c.peerBytes.Load(),
+		PeerFallthroughs: c.peerFallthroughs.Load(),
+		PeerServes:       c.peerServes.Load(),
+		PeerServeBytes:   c.peerServeBytes.Load(),
 	}
 }
 
@@ -425,7 +592,10 @@ func (c *BaseTableCache) LogStats() {
 	c.logger.Info("base-table cache stats",
 		"hits", s.Hits, "misses", s.Misses,
 		"hit_bytes", s.HitBytes, "miss_bytes", s.MissBytes,
-		"evictions", s.Evictions, "entries", s.Entries, "bytes", s.Bytes)
+		"evictions", s.Evictions, "entries", s.Entries, "bytes", s.Bytes,
+		"peer_hits", s.PeerHits, "peer_bytes", s.PeerBytes,
+		"peer_fallthroughs", s.PeerFallthroughs,
+		"peer_serves", s.PeerServes, "peer_serve_bytes", s.PeerServeBytes)
 }
 
 // Put implements Store. Eligible keys invalidate defensively — ingest
@@ -480,6 +650,24 @@ func (c *BaseTableCache) MakeBucket(ctx context.Context, bucket string) error {
 
 // Unwrap returns the underlying store.
 func (c *BaseTableCache) Unwrap() Store { return c.inner }
+
+// FindBaseTableCache walks a decorator chain (via Unwrap) to the
+// BaseTableCache layer, or nil when the store has none. Lets the worker
+// wire the peer tier without threading the concrete cache through every
+// construction path.
+func FindBaseTableCache(s Store) *BaseTableCache {
+	for s != nil {
+		if btc, ok := s.(*BaseTableCache); ok {
+			return btc
+		}
+		u, ok := s.(interface{ Unwrap() Store })
+		if !ok {
+			return nil
+		}
+		s = u.Unwrap()
+	}
+	return nil
+}
 
 // cacheTee owns one in-flight population: the temp file the miss body is
 // copied into, finalized (fsync + rename + admit) only on clean EOF with

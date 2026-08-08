@@ -135,6 +135,9 @@ func (e *Executor) SetPeerClient(c *dataplane.PeerClient) {
 // recorded and denies the fetch — it also could not hold the file, so the
 // consumer loses nothing by falling through to S3.
 func (e *Executor) ResolveShuffleFile(_, key, token string) (string, error) {
+	if bucket, obj, ok := distributed.CutBaseTablePeerKey(key); ok {
+		return e.resolveBaseTableFile(bucket, obj, token)
+	}
 	root := distributed.ScratchQueryID(key)
 	if token == "" || root == "" {
 		return "", dataplane.ErrPeerDenied
@@ -147,6 +150,34 @@ func (e *Executor) ResolveShuffleFile(_, key, token string) (string, error) {
 		return "", dataplane.ErrPeerNotFound
 	}
 	return path, nil
+}
+
+// resolveBaseTableFile serves a base-table peer fetch (base_table_peer.go)
+// from this worker's base-table cache. Unlike query-scratch keys there is
+// no per-query capability token — the owner may never have run a task of
+// the consumer's query — so serving is gated by the tier kill switch, the
+// optional cluster-wide WADJET_PEER_SECRET, and residency: only bytes
+// already admitted to the cache are ever served, via its own index lookup
+// (no path construction from request input).
+func (e *Executor) resolveBaseTableFile(bucket, key, token string) (string, error) {
+	if e.baseTableCache == nil || !basePeerTierEnabled {
+		return "", dataplane.ErrPeerNotFound
+	}
+	if basePeerSecret != "" && token != basePeerSecret {
+		return "", dataplane.ErrPeerDenied
+	}
+	path, ok := e.baseTableCache.PeerLocalPath(bucket, key)
+	if !ok {
+		return "", dataplane.ErrPeerNotFound
+	}
+	return path, nil
+}
+
+// SetBaseTableCache attaches the store stack's base-table cache layer so
+// incoming peer fetches can be served from it. nil (default) rejects
+// base-table fetches with NotFound.
+func (e *Executor) SetBaseTableCache(c *objstore.BaseTableCache) {
+	e.baseTableCache = c
 }
 
 // tokenFor returns the recorded fetch token for a root query ID ("" when

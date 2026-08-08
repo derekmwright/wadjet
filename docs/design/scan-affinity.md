@@ -1,7 +1,9 @@
 # Scan-task file→worker affinity
 
-Status: landed 2026-08-08, DEFAULT OFF pending the base-table peer
-tier (see §SF100 verdict). Opt-in `WADJET_SCAN_AFFINITY=1`.
+Status: landed 2026-08-08; DEFAULT ON since the base-table peer tier
+(§peer tier) completed the class the same day. Kill switches:
+`WADJET_SCAN_AFFINITY=0` (placement), `WADJET_BASE_PEER_TIER=0`
+(peer fetches + serving).
 
 ## The diagnosis (SF100, 2026-08-08 wlogs, zero EC2)
 
@@ -76,3 +78,49 @@ miss path — a non-owner fetches the owner's NVMe copy over the peer
 wire (machinery exists for stage outputs) instead of S3, populating
 locally. Then first touches hit S3 once per file cluster-wide
 regardless of reader, convergence is NIC-speed, and the flag flips on.
+
+## Peer tier (landed 2026-08-08, same day)
+
+A non-owner's whole-file cache miss (`BaseTableCache.Get`) fetches the
+file's rendezvous owner's NVMe copy over the existing PeerExchange
+wire, spools it into the local cache (fsync + rename + admit), and
+serves the admitted copy; ANY failure — no live owner, owner cache
+cold, dial refused, mid-stream reset, corrupt payload — falls through
+to the S3 path exactly as before. Population semantics mirror the tee:
+inflight-deduped, best-effort, invisible to the caller's stream.
+
+Mechanics:
+
+- **One ownership definition.** `distributed.AffinityOwner` (moved
+  from the coordinator) hashes bare object keys over the sorted live,
+  non-draining worker set — the same domain the coordinator's fan-out
+  placement uses. The worker learns membership the same way the
+  coordinator does: subscribing `SubjectHeartbeat` (heartbeats already
+  carry `PeerAddr`), with the registry's 90s staleness TTL. A
+  transiently divergent view costs one NotFound → S3 fallthrough.
+- **Serving.** `Executor.ResolveShuffleFile` branches on the
+  `basetable:<bucket>/<key>` key shape and resolves ONLY entries
+  already resident in the cache, via the cache's own index
+  (`PeerLocalPath`) — no path construction from request input. There
+  is no per-query capability token for this class (the owner may never
+  have run the consumer's query); serving matches the peer plane's
+  intra-cluster trust posture, optionally gated cluster-wide by
+  `WADJET_PEER_SECRET`, with TLS as the hardening seam.
+- **Admission guard.** The peer stream advertises no size, so clean
+  EOF plus parquet framing (PAR1 head AND tail) gates admission into
+  the safety-critical parquet read path; anything else is discarded
+  and the miss goes durable.
+- **Ledger separation.** Peer-served misses count as `peer_hits` /
+  `peer_bytes` (and `peer_serves`/`peer_serve_bytes` on the owner),
+  never as hits or S3 misses — `miss_bytes` keeps measuring exactly
+  the reads that left the cluster, so the first-touch ledger that
+  produced this diagnosis stays valid.
+- **Ranged reads** (`GetReaderAt`, footer-sized) still pass through to
+  S3 without populating, as before — the whole-file Get on every scan
+  path remains the populator. Follow-up if footer misses ever ledger
+  as material.
+
+Expected SF100 shape vs the 131723 trt arm: identical cold win, and
+the steady +12.8% regression gone — run-2 non-affine first-touches
+become NIC-speed peer fetches (`peer_hits` > 0, run-2 `miss_bytes`
+delta ≈ 0 on every worker, matching control's full-replication run-2).

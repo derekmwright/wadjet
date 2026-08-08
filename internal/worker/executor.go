@@ -49,18 +49,19 @@ const maxBufferedRows = 500_000
 
 // Executor dispatches task types to the appropriate execution logic.
 type Executor struct {
-	store        objstore.Store
-	js           jetstream.JetStream // for catalog access in pipeline tasks
-	nc           *nats.Conn          // for Gather-task reply streaming (nil = Gather disabled)
-	dpClient     *dataplane.Client   // optional gRPC data-plane; when connected, gather sinks prefer it
-	cache        *LRUCache
-	resultStore  *ResultStore       // in-memory result passing between stages (nil = disabled)
-	resultKV     jetstream.KeyValue // NATS KV for cross-worker inter-stage results (nil = disabled)
-	localCache   *LocalStageCache   // same-worker stage-output local-disk cache (nil = disabled)
-	memoryBudget int64              // per-task memory budget in bytes (0 = unlimited)
-	spillDir     string             // directory for spill files
-	metrics      *metrics.Metrics
-	logger       *slog.Logger
+	store          objstore.Store
+	js             jetstream.JetStream // for catalog access in pipeline tasks
+	nc             *nats.Conn          // for Gather-task reply streaming (nil = Gather disabled)
+	dpClient       *dataplane.Client   // optional gRPC data-plane; when connected, gather sinks prefer it
+	cache          *LRUCache
+	resultStore    *ResultStore             // in-memory result passing between stages (nil = disabled)
+	resultKV       jetstream.KeyValue       // NATS KV for cross-worker inter-stage results (nil = disabled)
+	localCache     *LocalStageCache         // same-worker stage-output local-disk cache (nil = disabled)
+	baseTableCache *objstore.BaseTableCache // base-table cache layer for serving peer fetches (nil = disabled)
+	memoryBudget   int64                    // per-task memory budget in bytes (0 = unlimited)
+	spillDir       string                   // directory for spill files
+	metrics        *metrics.Metrics
+	logger         *slog.Logger
 
 	// Worker-level shared memory pool. All concurrent tasks Reserve against
 	// the same Tracker, so operators (HashJoin, HashAggregate) spill under
