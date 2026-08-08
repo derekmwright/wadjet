@@ -124,3 +124,33 @@ Expected SF100 shape vs the 131723 trt arm: identical cold win, and
 the steady +12.8% regression gone — run-2 non-affine first-touches
 become NIC-speed peer fetches (`peer_hits` > 0, run-2 `miss_bytes`
 delta ≈ 0 on every worker, matching control's full-replication run-2).
+
+## SF100 verdict (pair 20260808-144825 ctl 1fd166a / 155850 trt 90eeb17)
+
+KEEPER — defaults stay ON. Same-window pair, 2 runs each, wlogs both
+arms, all EC2 destroyed.
+
+- Correctness: 44/44 both arms, rows identical, value signatures
+  identical (not even the usual Q19 ULP flicker).
+- **Cold S3 collapse**: ctl replicated fully in run 1 (107-109 misses
+  / ~26.5 GB PER WORKER, ~80 GB total = 3× dataset — the diagnosis
+  shape exactly). Trt: 43/46/49 misses, 9.6-11.0 GB per worker,
+  **31.4 GB total ≈ 1.2× dataset (−61%)**. Peer wire moved ~35 GB
+  (peer_hits 41-53 / 10.7-13.7 GB per worker, serves balanced across
+  all three), fallthroughs 7-12 each (cold races: consumer dials
+  before the owner populated — the accepted first-touch gap).
+- **Run-2 criterion (the affinity-alone killer): PASS.** Trt run-2
+  per-worker S3 miss delta +0.81/0/0 GB vs ctl's +0.33/0/0 GB — the
+  ~18 GB run-2 S3 penalty from partitioned caches is gone; the peer
+  tier absorbed the non-affine readers (peer_hits kept climbing
+  through run 2 while misses stayed flat).
+- Walls: cold suite −11.2% (503→447s), Q04 30.8→8.6s / Q03 −49% /
+  Q14 −35% — the roaming disturbance died, replicating the 131723
+  cold win. Run-2 walls +4.5% on plan-identical arms with matched
+  miss ledgers and a freak window (BOTH arms' run-2 ran ~60% slower
+  than their own colds — ctl 796s vs historical steady ~460s):
+  window noise by the measurement doctrine, no row-level mechanism.
+
+Follow-up (unscheduled): cross-worker single-flight on the very first
+touch — concurrent cold misses still fan out to S3 until the owner
+populates (the residual 0.2× above 1×).
