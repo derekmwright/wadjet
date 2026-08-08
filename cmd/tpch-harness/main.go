@@ -33,6 +33,7 @@ func main() {
 		ssl            = flag.Bool("ssl", true, "use SSL for S3 (source=s3)")
 		dataPrefix     = flag.String("data-prefix", "tables/", "S3 prefix under --bucket containing table data (source=s3)")
 		numWorkers     = flag.Int("workers", 0, "number of worker processes to spawn (local mode); 0 = default of 2. Set to 1 to avoid 2-process memory overcommit on small dev boxes when measuring SF10+.")
+		runs           = flag.Int("runs", 1, "repeat the whole query suite N times against the same cluster (EC2 benchmark_runs mirror; run 2+ measures the steady regime). Baseline gates run 1 only; later runs must be row-identical to run 1.")
 		scaleFactor    = flag.Float64("scale-factor", 0, "TPC-H scale factor for local-mode generated data (0=SF0.01 default, 0.1, 1, 10). Larger values exercise per-stage round-trip overhead and memory paths at meaningful scale without EC2 spend.")
 		dataPlane      = flag.String("data-plane", "", "Worker↔coord transport: empty/nats (default) or grpc (Phase B+)")
 		serveArgs      = flag.String("serve-args", "", "comma-separated extra flags appended to every spawned `wadjet serve` (coord + workers), e.g. --bounded-dirty-writes")
@@ -74,6 +75,7 @@ func main() {
 		WadjetBin:      *wadjetBin,
 		PgAddr:         *pgAddr,
 		NumWorkers:     *numWorkers,
+		Runs:           *runs,
 		ScaleFactor:    *scaleFactor,
 		Source:         *source,
 		Bucket:         *bucket,
@@ -131,8 +133,12 @@ func printSummary(r harness.RunResult) {
 		if q.Hung {
 			marker = "H"
 		}
+		name := q.Query
+		if q.Run > 0 {
+			name = fmt.Sprintf("%s#%d", q.Query, q.Run)
+		}
 		fmt.Printf("  [%s] %-20s wall=%6d ms peak=%5d MB rows=%d\n",
-			marker, q.Query, q.WallMs, q.PeakHeapMB, q.RowCount)
+			marker, name, q.WallMs, q.PeakHeapMB, q.RowCount)
 	}
 	if len(r.Regressions) > 0 {
 		fmt.Println("regressions:")

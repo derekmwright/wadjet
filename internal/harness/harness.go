@@ -142,25 +142,56 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 	stopHB := startHeartbeatSubscriber(ctx, cluster, collector, hangDetector)
 	defer stopHB()
 
-	// Run the query suite.
+	// Run the query suite — cfg.Runs times over the same live cluster
+	// (run 2+ is the steady regime: caches populated, page cache
+	// saturated). Run 1's measurements gate against the baseline; later
+	// runs must be row/value-identical to run 1.
 	queries := SelectQueries(cfg.Queries)
 	sliceCfg := SliceConfigs[cfg.Slice]
-	for _, qname := range queries {
-		m, err := runOneQuery(ctx, coordURL, qname, collector, hangDetector, baseline, sliceCfg, cluster, runDir, logger)
-		if err != nil {
-			logger.Error("query failed", "q", qname, "err", err)
-			m.Hung = true
-		}
-		result.Queries = append(result.Queries, m)
-		if m.Hung {
-			result.Hangs = append(result.Hangs, qname)
+	runs := cfg.Runs
+	if runs < 1 {
+		runs = 1
+	}
+	firstRun := make(map[string]QueryMeasurement, len(queries))
+	for run := 1; run <= runs; run++ {
+		for _, qname := range queries {
+			m, err := runOneQuery(ctx, coordURL, qname, collector, hangDetector, baseline, sliceCfg, cluster, runDir, logger)
+			if err != nil {
+				logger.Error("query failed", "q", qname, "run", run, "err", err)
+				m.Hung = true
+			}
+			if runs > 1 {
+				m.Run = run
+			}
+			result.Queries = append(result.Queries, m)
+			if m.Hung {
+				result.Hangs = append(result.Hangs, qname)
+				continue
+			}
+			if run == 1 {
+				firstRun[qname] = m
+			} else if ref, ok := firstRun[qname]; ok {
+				if m.RowCount != ref.RowCount {
+					result.Regressions = append(result.Regressions, QueryDelta{
+						Query: qname, Metric: "row_count", Status: "REGRESS",
+						Baseline: float64(ref.RowCount), Projected: float64(m.RowCount),
+						Detail: fmt.Sprintf("run %d row count diverged from run 1", run),
+					})
+				} else if m.ValueSig != ref.ValueSig {
+					result.Regressions = append(result.Regressions, QueryDelta{
+						Query: qname, Metric: "value_sig", Status: "REGRESS",
+						Detail: fmt.Sprintf("run %d value signature diverged from run 1", run),
+					})
+				}
+			}
 		}
 	}
 
-	// Compare against baseline.
+	// Compare against baseline (run 1 only — the baseline models a cold
+	// single-pass suite).
 	if baseline != nil {
 		for _, m := range result.Queries {
-			if m.Hung {
+			if m.Hung || m.Run > 1 {
 				continue
 			}
 			projected, err := baseline.Project(string(cfg.Slice)+"_slice", m)

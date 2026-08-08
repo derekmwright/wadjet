@@ -44,6 +44,16 @@ type Config struct {
 	PgAddr         string // local only; override for coordinator pgwire listen addr
 	NumWorkers     int    // local only; cluster size to spawn (0 = default of 2)
 
+	// Runs repeats the whole query suite against the same live cluster
+	// (0/1 = once). The EC2 SF100 protocol is benchmark_runs=2 — run 1
+	// populates the NVMe base-table cache cold, run 2 measures the
+	// steady regime over it (docs/benchmarks/
+	// steady-slower-than-cold-2026-08-08.md); this is the local mirror.
+	// Baseline comparison applies to run 1 only; later runs are recorded
+	// with QueryMeasurement.Run set, plus a cross-run row-count/value-sig
+	// identity check.
+	Runs int
+
 	// ScaleFactor is the TPC-H data volume for local mode generation.
 	// 0 (zero value) defaults to 0.01 (~10 MB total, lineitem 60K rows).
 	// Larger values let the harness exercise per-stage round-trip and
@@ -93,6 +103,9 @@ type QueryMeasurement struct {
 	Hung          bool      `json:"hung"`
 	HangDumpPath  string    `json:"hang_dump_path,omitempty"`
 	StartedAt     time.Time `json:"started_at"`
+	// Run numbers the suite pass this measurement came from under
+	// Config.Runs > 1 (0/absent = single-pass run or run 1).
+	Run int `json:"run,omitempty"`
 }
 
 // QueryDelta records a single per-metric drift between projected and baseline.
