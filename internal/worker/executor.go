@@ -147,6 +147,13 @@ type Executor struct {
 	scanDecodeAheadPressureNs   atomic.Int64
 	scanDecodeAheadTokenNs      atomic.Int64
 	scanDecodeAheadLedgerNs     atomic.Int64
+	// Decode-span totals (scan.DecodeAheadIter.DecodeSpans): wall time
+	// inside ReadRowGroupNative and the compressed bytes decoded. The
+	// stall buckets above only see parked waiters — inline mmap fault
+	// time under a held CPU token is visible only here, as ns/byte excess
+	// over a page-cache-hot run (rowgroup-readahead residual diagnosis).
+	scanDecodeAheadDecodeNs    atomic.Int64
+	scanDecodeAheadDecodeBytes atomic.Int64
 
 	// activeForeground counts tasks currently inside Execute — the busy
 	// signal the background-upload QoS gate yields to.
@@ -165,17 +172,20 @@ type Executor struct {
 // decodeAheadQueryStats is one query's decode-ahead counter slice.
 // emitted holds the counter snapshot at the last sweep; a sweep that
 // finds the counters unchanged emits the final line and drops the entry.
-// Indices 5-8 are the stall durations (ns) behind counters 1-4.
+// Indices 5-8 are the stall durations (ns) behind counters 1-4; 9-10
+// are the decode-span totals (ns, compressed bytes).
 type decodeAheadQueryStats struct {
 	groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls atomic.Int64
 	windowFullNs, pressureNs, tokenNs, ledgerNs                    atomic.Int64
-	emitted                                                        [9]int64
+	decodeNs, decodeBytes                                          atomic.Int64
+	emitted                                                        [11]int64
 }
 
-func (s *decodeAheadQueryStats) snapshot() [9]int64 {
-	return [9]int64{s.groups.Load(), s.windowFulls.Load(), s.pressureStalls.Load(),
+func (s *decodeAheadQueryStats) snapshot() [11]int64 {
+	return [11]int64{s.groups.Load(), s.windowFulls.Load(), s.pressureStalls.Load(),
 		s.tokenStalls.Load(), s.ledgerStalls.Load(),
-		s.windowFullNs.Load(), s.pressureNs.Load(), s.tokenNs.Load(), s.ledgerNs.Load()}
+		s.windowFullNs.Load(), s.pressureNs.Load(), s.tokenNs.Load(), s.ledgerNs.Load(),
+		s.decodeNs.Load(), s.decodeBytes.Load()}
 }
 
 // SetStreamingShuffleRead enables streaming decode of shuffle inputs
@@ -229,7 +239,7 @@ func (e *Executor) SetScanDecodeAhead(on bool, windowBytes int64) {
 // foldScanDecodeAheadQueryStats adds one closed iterator's counters to
 // the per-query accumulator. queryID may be empty (embedded callers);
 // those fold under the "-" bucket rather than being dropped.
-func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls, windowFullNs, pressureNs, tokenNs, ledgerNs int64) {
+func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls, windowFullNs, pressureNs, tokenNs, ledgerNs, decodeNs, decodeBytes int64) {
 	if queryID == "" {
 		queryID = "-"
 	}
@@ -244,6 +254,8 @@ func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowF
 	qs.pressureNs.Add(pressureNs)
 	qs.tokenNs.Add(tokenNs)
 	qs.ledgerNs.Add(ledgerNs)
+	qs.decodeNs.Add(decodeNs)
+	qs.decodeBytes.Add(decodeBytes)
 }
 
 // sweepScanDecodeAheadQueryStats emits per-query decode-ahead stats
@@ -271,7 +283,8 @@ func (e *Executor) sweepScanDecodeAheadQueryStats(final bool) {
 			"pressure_stalls", cur[2], "token_stalls", cur[3],
 			"ledger_stalls", cur[4],
 			"window_full_ms", cur[5]/1e6, "pressure_stall_ms", cur[6]/1e6,
-			"token_stall_ms", cur[7]/1e6, "ledger_stall_ms", cur[8]/1e6)
+			"token_stall_ms", cur[7]/1e6, "ledger_stall_ms", cur[8]/1e6,
+			"decode_ms", cur[9]/1e6, "decode_bytes", cur[10])
 		return true
 	})
 }
@@ -292,6 +305,13 @@ func (e *Executor) ScanDecodeAheadStats() (groups, windowFulls, pressureStalls, 
 func (e *Executor) ScanDecodeAheadStallNs() (windowFullNs, pressureNs, tokenNs, ledgerNs int64) {
 	return e.scanDecodeAheadWindowFullNs.Load(), e.scanDecodeAheadPressureNs.Load(),
 		e.scanDecodeAheadTokenNs.Load(), e.scanDecodeAheadLedgerNs.Load()
+}
+
+// ScanDecodeAheadDecodeSpans returns the total wall time (ns) inside
+// row-group decode calls and the projected compressed bytes decoded —
+// the inline-fault discriminator the stall counters cannot see.
+func (e *Executor) ScanDecodeAheadDecodeSpans() (ns, bytes int64) {
+	return e.scanDecodeAheadDecodeNs.Load(), e.scanDecodeAheadDecodeBytes.Load()
 }
 
 // NewExecutor creates a new task executor.

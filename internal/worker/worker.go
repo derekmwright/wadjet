@@ -746,6 +746,7 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 	go func() {
 		defer w.bgWG.Done()
 		var last [5]int64
+		var lastIO [6]int64
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for {
@@ -759,12 +760,14 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 					last = cur
 					refaultRate, refaultActivations := memory.PageCachePressureStats()
 					windowFullNs, pressureNs, tokenNs, ledgerNs := w.executor.ScanDecodeAheadStallNs()
+					decodeNs, decodeBytes := w.executor.ScanDecodeAheadDecodeSpans()
 					w.logger.Info("scan decode-ahead stats",
 						"groups", groups, "window_fulls", windowFulls,
 						"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
 						"ledger_stalls", ledgerStalls,
 						"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
 						"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
+						"decode_ms", decodeNs/1e6, "decode_bytes", decodeBytes,
 						"refault_rate", int64(refaultRate),
 						"refault_discount", int64(memory.PageCachePressureDiscount()),
 						"refault_activations", refaultActivations,
@@ -773,6 +776,21 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 					w.logger.Info("drop-behind stats",
 						"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop,
 						"readahead_advise_bytes", readaheadAdviseBytes.Load())
+				}
+				// Proc/device I-O marker (residual diagnosis): cumulative
+				// counters, so analyzers diff consecutive lines for interval
+				// rates. Change-detected independently of the decode counters
+				// — shuffle-heavy phases move I-O without moving decode.
+				minflt, majflt := procSelfFaults()
+				procRead, procWrite := procSelfIO()
+				nvmeRead, nvmeWrite := nvmeDiskstats()
+				curIO := [6]int64{minflt, majflt, procRead, procWrite, nvmeRead, nvmeWrite}
+				if curIO != lastIO {
+					lastIO = curIO
+					w.logger.Info("proc io stats",
+						"minflt", minflt, "majflt", majflt,
+						"proc_read_bytes", procRead, "proc_write_bytes", procWrite,
+						"nvme_read_bytes", nvmeRead, "nvme_write_bytes", nvmeWrite)
 				}
 				w.executor.sweepScanDecodeAheadQueryStats(false)
 			}
@@ -1093,12 +1111,14 @@ func (w *Worker) Stop() {
 		groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := w.executor.ScanDecodeAheadStats()
 		refaultRate, refaultActivations := memory.PageCachePressureStats()
 		windowFullNs, pressureNs, tokenNs, ledgerNs := w.executor.ScanDecodeAheadStallNs()
+		decodeNs, decodeBytes := w.executor.ScanDecodeAheadDecodeSpans()
 		w.logger.Info("scan decode-ahead stats (final)",
 			"groups", groups, "window_fulls", windowFulls,
 			"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
 			"ledger_stalls", ledgerStalls,
 			"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
 			"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
+			"decode_ms", decodeNs/1e6, "decode_bytes", decodeBytes,
 			"refault_rate", int64(refaultRate),
 			"refault_discount", int64(memory.PageCachePressureDiscount()),
 			"refault_activations", refaultActivations,
@@ -1108,6 +1128,13 @@ func (w *Worker) Stop() {
 	w.logger.Info("drop-behind stats (final)",
 		"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop,
 		"readahead_advise_bytes", readaheadAdviseBytes.Load())
+	minflt, majflt := procSelfFaults()
+	procRead, procWrite := procSelfIO()
+	nvmeRead, nvmeWrite := nvmeDiskstats()
+	w.logger.Info("proc io stats (final)",
+		"minflt", minflt, "majflt", majflt,
+		"proc_read_bytes", procRead, "proc_write_bytes", procWrite,
+		"nvme_read_bytes", nvmeRead, "nvme_write_bytes", nvmeWrite)
 
 	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
 }

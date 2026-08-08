@@ -449,6 +449,56 @@ func TestDecodeAheadIter_PruneParity(t *testing.T) {
 	}
 }
 
+// TestDecodeAheadIter_DecodeSpans: a full drain accounts every decoded
+// group's wall time and projected compressed bytes; pruned groups are
+// excluded (their mmap bytes are never touched, so counting them would
+// dilute the ns/byte fault-stretch discriminator).
+func TestDecodeAheadIter_DecodeSpans(t *testing.T) {
+	data := manyRowGroupFile(t, 8, 50)
+	schema := []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}
+
+	it, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer it.Close()
+	if _, err := drainGroupIter(t, it); err != nil {
+		t.Fatal(err)
+	}
+	var wantBytes int64
+	for g := 0; g < 8; g++ {
+		wantBytes += it.projectedCompressedBytes(g)
+	}
+	if wantBytes <= 0 {
+		t.Fatal("fixture: projected compressed bytes must be positive")
+	}
+	ns, bytesRead := it.DecodeSpans()
+	if ns <= 0 {
+		t.Errorf("decode span ns = %d, want > 0", ns)
+	}
+	if bytesRead != wantBytes {
+		t.Errorf("decode span bytes = %d, want %d (all 8 groups)", bytesRead, wantBytes)
+	}
+
+	// Pruning 6 of 8 groups: only the surviving groups' bytes count.
+	pruned, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pruned.Close()
+	pruned.SetDynamicFilters([]exec.DynamicRange{
+		{Column: "id", MinValue: int64(3000), MaxValue: int64(4049)}}, nil)
+	if _, err := drainGroupIter(t, pruned); err != nil {
+		t.Fatal(err)
+	}
+	wantPrunedBytes := pruned.projectedCompressedBytes(3) + pruned.projectedCompressedBytes(4)
+	if _, bytesRead := pruned.DecodeSpans(); bytesRead != wantPrunedBytes {
+		t.Errorf("pruned decode span bytes = %d, want %d (groups 3+4 only)", bytesRead, wantPrunedBytes)
+	}
+}
+
 // TestDecodeAheadIter_CloseMidStreamJoinsWorkers: Close after a partial
 // read must stop delivery and return only after in-flight decodes are
 // joined — the caller munmaps the underlying bytes immediately after.

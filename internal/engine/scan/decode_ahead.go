@@ -91,6 +91,19 @@ type DecodeAheadIter struct {
 	pressureStallNs   atomic.Int64
 	tokenStallNs      atomic.Int64
 	ledgerStallNs     atomic.Int64
+
+	// Decode-span accounting: wall time inside ReadRowGroupNative and the
+	// projected column chunks' compressed (on-disk/mmap) bytes for groups
+	// actually decoded. The stall counters above only see PARKED waiters —
+	// a worker that holds its token and faults inline on a non-resident
+	// mmap page is invisible to them, its cost surfacing only as a longer
+	// decode span. ns/byte across identically-shaped runs is therefore the
+	// direct fault-stretch discriminator: page-cache-hot runs measure pure
+	// decode CPU per compressed byte, and any steady-regime excess over
+	// that baseline is time spent faulting under a held token
+	// (docs/design/rowgroup-readahead.md, residual diagnosis).
+	decodeSpanNs    atomic.Int64
+	decodeSpanBytes atomic.Int64
 }
 
 // timedWait waits on the window condvar and adds the blocked span to ns.
@@ -417,6 +430,19 @@ func (it *DecodeAheadIter) StallDurations() (windowFullNs, pressureNs, tokenNs, 
 	return it.windowFullStallNs.Load(), it.pressureStallNs.Load(), it.tokenStallNs.Load(), it.ledgerStallNs.Load()
 }
 
+// DecodeSpans returns the total wall time (ns) spent inside
+// ReadRowGroupNative and the projected compressed bytes those decodes
+// covered. Unlike StallDurations — which only measures parked waiters —
+// this captures inline mmap fault time hidden inside token-holding
+// decode spans: ns/byte materially above a page-cache-hot run's ratio
+// means decode workers are faulting synchronously despite I/O-ahead.
+func (it *DecodeAheadIter) DecodeSpans() (ns, bytes int64) {
+	if it == nil {
+		return 0, 0
+	}
+	return it.decodeSpanNs.Load(), it.decodeSpanBytes.Load()
+}
+
 // Next returns the next decoded row group in source order, or (nil, nil)
 // when exhausted. Contract identical to RowGroupIter.Next.
 func (it *DecodeAheadIter) Next() (*batch.RecordBatch, error) {
@@ -535,7 +561,10 @@ func (it *DecodeAheadIter) decodeLoop() {
 		}
 		slot := &decodeSlot{est: est, ahead: isAhead}
 		if pruned := it.pruneGroup(idx, ranges, blooms); !pruned {
+			t0 := time.Now()
 			b, err := ReadRowGroupNative(it.fr, idx, it.readSchema, nil)
+			it.decodeSpanNs.Add(time.Since(t0).Nanoseconds())
+			it.decodeSpanBytes.Add(it.projectedCompressedBytes(idx))
 			if err != nil {
 				slot.err = fmt.Errorf("reading row group %d: %w", idx, err)
 			} else {
@@ -602,6 +631,27 @@ func (it *DecodeAheadIter) adviseGroup(rgIdx int) {
 		}
 		it.advise(off, md.TotalCompressedSize)
 	}
+}
+
+// projectedCompressedBytes sums the projected leaf columns' on-disk
+// compressed sizes for one row group — the mmap bytes a decode of that
+// group touches, and the denominator of the DecodeSpans ns/byte
+// discriminator. Same metadata walk as adviseGroup.
+func (it *DecodeAheadIter) projectedCompressedBytes(rgIdx int) int64 {
+	rg := it.fr.RowGroupMeta(rgIdx)
+	if rg == nil {
+		return 0
+	}
+	var n int64
+	for _, li := range it.estLeaves {
+		if li < 0 || li >= len(rg.Columns) {
+			continue
+		}
+		if md := rg.Columns[li].MetaData; md != nil && md.TotalCompressedSize > 0 {
+			n += md.TotalCompressedSize
+		}
+	}
+	return n
 }
 
 // pruneGroup applies the dynamic-filter row-group pruning, mirroring the

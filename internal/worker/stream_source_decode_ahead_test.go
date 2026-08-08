@@ -439,6 +439,10 @@ func TestScanDecodeAhead_PerQueryAttribution(t *testing.T) {
 	if qa.groups.Load() != 2*3 || qb.groups.Load() != 2*3 {
 		t.Fatalf("per-query groups = %d/%d, want 6/6", qa.groups.Load(), qb.groups.Load())
 	}
+	if qa.decodeNs.Load() <= 0 || qa.decodeBytes.Load() <= 0 {
+		t.Fatalf("per-query decode spans = (%d ns, %d bytes), want both > 0",
+			qa.decodeNs.Load(), qa.decodeBytes.Load())
+	}
 
 	// First sweep: counters moved since the zero snapshot — entries held.
 	e.sweepScanDecodeAheadQueryStats(false)
