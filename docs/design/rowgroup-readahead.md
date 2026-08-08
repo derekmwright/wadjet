@@ -73,3 +73,33 @@ SF100 same-window pair vs main. Verdict: run-2 token_stall_ms
 materially below 575-627s/worker, run-2 wall toward ≤ 1.2× run-1,
 run-1 unchanged (advise is no-op on hot pages), rows + value sigs
 identical, readahead_advise_bytes > 0 on every worker.
+
+## SF100 verdict (pair 20260808-223206 ctl daece0d-bins / 225512 trt 65cdf61)
+
+KEEPER — default stays ON. Same-window pair, runs=2 each, wlogs both
+arms, all EC2 destroyed.
+
+- **Steady −16.7%**: run 2 667→555s; steady/cold ratio 1.71×→1.47×.
+  The movers are broad and all one-directional — Q14 −58%, Q22 −43%,
+  Q19 −38%, Q20 −35%, Q17 −28% — the signature of an I/O-shape
+  change, not single-query variance.
+- **Cold unchanged**: run 1 389→378s (−2.8%, in-band) — the no-op-on-
+  hot-pages design held.
+- **Engagement**: readahead_advise_bytes 104-126 GB per worker (both
+  runs' projected chunks, advised once per decode pass).
+- Cumulative token_stall_ms: 2131s→1857s summed across workers
+  (−13%). Wall moved more than the stall ledger — consistent with
+  faults ALSO stretching decode/consume spans that never park (stall
+  counters only see waiters).
+- Correctness: rows identical 44/44 both runs; single vsig delta is
+  the known Q19 1-ULP float-order flicker (each arm internally
+  consistent).
+- Side observation: the cluster first-touch S3 total (single-flight
+  metric, identical code both arms) read 24.9 GB ctl / 32.0 GB trt —
+  ±20% window wobble from same-worker miss races; `peer_fallthroughs`
+  stayed 0/0/0 in both arms, so the single-flight mechanism verdict
+  (scan-affinity.md) is unaffected.
+
+`WADJET_ROWGROUP_READAHEAD=0` reproduces the ctl arm. Residual: run 2
+still 1.47× run 1 — remaining candidates are the never-parked decode
+spans above and the raw NVMe bandwidth floor.
