@@ -30,6 +30,25 @@ import (
 // this.
 var rowGroupTouchEnabled = os.Getenv("WADJET_ROWGROUP_TOUCH") != "0"
 
+// Batched population: MADV_POPULATE_READ faults a whole range in one
+// syscall at device streaming speed instead of one 4 KiB fault per
+// round-trip. The 2026-08-09 SF100 cache-on re-profile measured the
+// per-page walk as the steady-regime scan ceiling: 81-140 MB/s per
+// worker from an NVMe capable of multi-GB/s, with decode workers
+// faulting inline under held CPU tokens once the toucher fell behind
+// (docs/benchmarks/cache-on-reprofile-2026-08-09.md). Ranges are
+// populated in bounded chunks so stop() keeps its promptness contract.
+// A toucher that sees madvise fail (pre-5.14 kernel, or a non-mmap
+// backing slice as in tests) falls back to the byte walk permanently —
+// per toucher, since the failure is a property of its mapping.
+// WADJET_TOUCH_POPULATE=0 forces the byte walk (same-binary A/B lever).
+var touchPopulateEnabled = os.Getenv("WADJET_TOUCH_POPULATE") != "0"
+
+// touchPopulateChunk bounds one populate syscall. 8 MiB ≈ single-digit
+// milliseconds at NVMe streaming rates, so a pending stop() (munmap is
+// waiting) is honored promptly between chunks.
+const touchPopulateChunk = 8 << 20
+
 // Engagement markers beside readaheadAdviseBytes on the drop-behind
 // stats line: bytes actually walked by touchers, and ranges dropped
 // because a toucher's queue was full (WILLNEED-only fallback — decode
@@ -37,6 +56,9 @@ var rowGroupTouchEnabled = os.Getenv("WADJET_ROWGROUP_TOUCH") != "0"
 var (
 	touchAheadBytes atomic.Int64
 	touchAheadDrops atomic.Int64
+	// touchPopulateBytes is the subset of touchAheadBytes paged in via
+	// MADV_POPULATE_READ — engagement marker for the batched path.
+	touchPopulateBytes atomic.Int64
 )
 
 // rangeToucher pages-in advise ranges over one scan mmap.
@@ -45,6 +67,9 @@ type rangeToucher struct {
 	ch    chan [2]int64 // [off, end) — clamped, off page-aligned
 	stopc chan struct{}
 	done  chan struct{}
+	// populate flips false on the first madvise failure; the toucher
+	// then byte-walks for its remaining lifetime.
+	populate bool
 }
 
 func newRangeToucher(data []byte) *rangeToucher {
@@ -53,9 +78,10 @@ func newRangeToucher(data []byte) *rangeToucher {
 		// One advise call is one column chunk; a full assignment wave is
 		// groups x projected leaves of them. 1024 absorbs several waves;
 		// overflow degrades to WILLNEED-only, counted, never blocking.
-		ch:    make(chan [2]int64, 1024),
-		stopc: make(chan struct{}),
-		done:  make(chan struct{}),
+		ch:       make(chan [2]int64, 1024),
+		stopc:    make(chan struct{}),
+		done:     make(chan struct{}),
+		populate: touchPopulateEnabled,
 	}
 	go t.loop()
 	return t
@@ -97,18 +123,38 @@ func (t *rangeToucher) loop() {
 			return
 		case r := <-t.ch:
 			off, end := r[0], r[1]
-			for ; off < end; off += pg {
-				// A stop mid-range must win promptly: a range can span
-				// hundreds of cold pages (~ms each under load) and munmap
-				// is waiting behind us.
+			// off is page-aligned (enqueue) and the chunk size is a page
+			// multiple, so every chunk boundary except end stays aligned.
+			for off < end {
+				// A stop mid-chunk must win promptly: a range can span
+				// hundreds of cold pages (or several populate chunks)
+				// and munmap is waiting behind us.
 				select {
 				case <-t.stopc:
 					return
 				default:
 				}
-				sink += t.data[off]
+				chunk := min(off+touchPopulateChunk, end)
+				n := chunk - off
+				if t.populate {
+					if madvisePopulateRead(t.data[off:chunk]) == nil {
+						touchPopulateBytes.Add(n)
+						touchAheadBytes.Add(n)
+						off = chunk
+						continue
+					}
+					t.populate = false
+				}
+				for ; off < chunk; off += pg {
+					select {
+					case <-t.stopc:
+						return
+					default:
+					}
+					sink += t.data[off]
+				}
+				touchAheadBytes.Add(n)
 			}
-			touchAheadBytes.Add(end - r[0])
 		}
 	}
 }

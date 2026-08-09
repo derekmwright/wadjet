@@ -306,6 +306,12 @@ variable "rowgroup_touch" {
   default     = "1"
 }
 
+variable "touch_populate" {
+  description = "WADJET_TOUCH_POPULATE for the workers: batched MADV_POPULATE_READ page-in inside the row-group toucher instead of the byte-per-page walk (rowgroup_touch.go). Default \"1\" matches the in-binary default; \"0\" is the same-binary A/B off arm / kill switch. Inert when rowgroup_touch=0."
+  type        = string
+  default     = "1"
+}
+
 variable "df_late_group_attach" {
   description = "WADJET_DF_LATE_GROUP_ATTACH for the workers: full-layer delivery of attach-on-arrival dynamic filters — resolved deferred blooms/ranges reach the row-group iterator layer (pruning + prune-aware advises) and the shuffle-task path, not just row-level ops (attach-on-arrival-dynamic-filters.md §Full-layer delivery). Default \"1\" matches the in-binary default; \"0\" is the same-binary A/B off arm / kill switch."
   type        = string

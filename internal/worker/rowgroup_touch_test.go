@@ -56,6 +56,49 @@ func TestRangeToucher_NilStop(t *testing.T) {
 	tc.stop()
 }
 
+// TestRangeToucher_PopulateFallback: a toucher over heap-backed (or
+// otherwise madvise-rejecting) memory must flip to the byte walk on the
+// first failure and still touch and count every enqueued range — the
+// populate path is an accelerator, never a correctness dependency.
+func TestRangeToucher_PopulateFallback(t *testing.T) {
+	data := make([]byte, 1<<20)
+	before := touchAheadBytes.Load()
+	tc := newRangeToucher(data)
+	defer tc.stop()
+	tc.populate = true // force the probe regardless of env/platform
+	tc.enqueue(0, 1<<20)
+	deadline := time.Now().Add(5 * time.Second)
+	want := int64(1 << 20)
+	for touchAheadBytes.Load()-before < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("touch bytes = %d, want %d (fallback did not complete the range)",
+				touchAheadBytes.Load()-before, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestRangeToucher_PopulateChunkAccounting: a range spanning multiple
+// populate chunks is fully accounted whichever path each chunk takes.
+func TestRangeToucher_PopulateChunkAccounting(t *testing.T) {
+	data := make([]byte, touchPopulateChunk*2+4096)
+	before := touchAheadBytes.Load()
+	tc := newRangeToucher(data)
+	defer tc.stop()
+	tc.enqueue(0, int64(len(data)))
+	deadline := time.Now().Add(10 * time.Second)
+	want := int64(len(data))
+	for touchAheadBytes.Load()-before < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("touch bytes = %d, want %d", touchAheadBytes.Load()-before, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := touchAheadBytes.Load() - before; got != want {
+		t.Fatalf("touch bytes = %d, want exactly %d (double counting)", got, want)
+	}
+}
+
 // TestRangeToucher_EnqueuePageAligns: offsets round down to a page
 // boundary so the byte-per-page walk starts on the page containing off.
 func TestRangeToucher_EnqueuePageAligns(t *testing.T) {

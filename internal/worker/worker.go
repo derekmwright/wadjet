@@ -785,6 +785,7 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 						"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop,
 						"readahead_advise_bytes", readaheadAdviseBytes.Load(),
 						"touch_bytes", touchAheadBytes.Load(),
+						"touch_populate_bytes", touchPopulateBytes.Load(),
 						"touch_drops", touchAheadDrops.Load())
 				}
 				// Proc/device I-O marker (residual diagnosis): cumulative
@@ -1173,6 +1174,7 @@ func (w *Worker) logFinalScanStats() {
 		"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop,
 		"readahead_advise_bytes", readaheadAdviseBytes.Load(),
 		"touch_bytes", touchAheadBytes.Load(),
+		"touch_populate_bytes", touchPopulateBytes.Load(),
 		"touch_drops", touchAheadDrops.Load())
 	minflt, majflt := procSelfFaults()
 	procRead, procWrite := procSelfIO()
