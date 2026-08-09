@@ -839,6 +839,45 @@ func TestDecodeAheadIter_AdviseCoversAllGroups(t *testing.T) {
 	}
 }
 
+// TestDecodeAheadIter_AdviseSkipsPrunableGroups: groups the attached
+// dynamic filters prune must not be advised — the touch-ahead worker
+// behind the hook faults advised ranges in unconditionally, and forced
+// I/O for never-decoded groups was the Q17 +96% regression in the
+// 2026-08-09 SF100 touch-ahead pair.
+func TestDecodeAheadIter_AdviseSkipsPrunableGroups(t *testing.T) {
+	const groups = 8
+	data := manyRowGroupFile(t, groups, 50)
+	schema := []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}
+
+	var mu sync.Mutex
+	var spans int
+	it, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 3, Advise: func(off, n int64) {
+			mu.Lock()
+			spans++
+			mu.Unlock()
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer it.Close()
+	// Ids are g*1000+i — [3000, 4049] survives exactly groups 3 and 4.
+	it.SetDynamicFilters([]exec.DynamicRange{
+		{Column: "id", MinValue: int64(3000), MaxValue: int64(4049)}}, nil)
+	if _, err := drainGroupIter(t, it); err != nil {
+		t.Fatal(err)
+	}
+	_, prunedRange, read := it.PruneStats()
+	if read != 2 || prunedRange != 6 {
+		t.Fatalf("fixture: read=%d pruned=%d, want 2/6", read, prunedRange)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if spans != 2 {
+		t.Fatalf("advised %d spans, want 2 (only the unpruned groups)", spans)
+	}
+}
+
 // TestDecodeAheadIter_AdviseRespectsShardRange: a sharded iterator must
 // only advise the row groups in its own shard slice.
 func TestDecodeAheadIter_AdviseRespectsShardRange(t *testing.T) {

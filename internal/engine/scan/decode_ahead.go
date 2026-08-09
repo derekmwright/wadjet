@@ -557,7 +557,7 @@ func (it *DecodeAheadIter) decodeLoop() {
 		it.win.mu.Unlock()
 
 		for g := adviseLo; g < adviseHi; g++ {
-			it.adviseGroup(g)
+			it.adviseGroup(g, ranges, blooms)
 		}
 		slot := &decodeSlot{est: est, ahead: isAhead}
 		if pruned := it.pruneGroup(idx, ranges, blooms); !pruned {
@@ -612,10 +612,33 @@ func (it *DecodeAheadIter) claimAdviseLocked(assignedIdx int) (lo, hi int) {
 // Advise hook. Offsets follow the page-reader convention: a chunk starts
 // at its dictionary page when one precedes the data pages, else at the
 // first data page, and spans TotalCompressedSize.
-func (it *DecodeAheadIter) adviseGroup(rgIdx int) {
+//
+// Groups the attached dynamic filters would prune are SKIPPED — the same
+// metadata-only checks pruneGroup runs at decode time. Advising them was
+// merely useless under WILLNEED alone (the kernel is free to ignore it),
+// but the touch-ahead worker behind the hook faults ranges in
+// unconditionally, and on prune-heavy scans that forced I/O for groups
+// no decode will ever read: the 2026-08-09 SF100 touch-ahead pair
+// measured Q17 (the heaviest dyn-filter pruner) +96% steady from exactly
+// this while every low-prune query improved. The filter snapshot is the
+// assigning worker's — a filter arriving between this wave and the
+// group's own decode still prunes authoritatively there; skipping here
+// is only ever an I/O hint withheld.
+func (it *DecodeAheadIter) adviseGroup(rgIdx int, ranges []exec.DynamicRange, blooms []*exec.BloomScanFilter) {
 	rg := it.fr.RowGroupMeta(rgIdx)
 	if rg == nil {
 		return
+	}
+	if len(ranges) > 0 || len(blooms) > 0 {
+		stats := it.fr.RowGroupStats(rgIdx)
+		if len(ranges) > 0 && CanRangePruneRowGroup(ranges, stats) {
+			return
+		}
+		for _, bf := range blooms {
+			if CanBloomPruneRowGroup(bf, stats) {
+				return
+			}
+		}
 	}
 	for _, li := range it.estLeaves {
 		if li < 0 || li >= len(rg.Columns) {
