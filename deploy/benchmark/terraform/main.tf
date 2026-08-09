@@ -588,6 +588,24 @@ resource "aws_instance" "worker" {
       exit 1
     fi
 
+    # NIC/ENA sampler: journal cumulative rx/tx bytes and ENA
+    # allowance-exceeded counters every 30s. Wall deltas on
+    # burst-networked bench types (c7gd "up to 15 Gbps") are
+    # uninterpretable without throttle context — the entire 2026-08-09
+    # steady-residual arc chased in-host causes before ENA counters
+    # settled it (docs/benchmarks/network-bound-diagnosis-2026-08-09.md).
+    # grab-worker-logs.sh ships journald wholesale, so samples ride
+    # along in wlogs with no separate collection step. Filter with:
+    #   zcat wlog-*.gz | grep ena-poll
+    NET_IF=$(ls /sys/class/net | grep -E '^(eth|ens|enp)' | head -1)
+    if [ -n "$NET_IF" ]; then
+      ( while true; do
+          logger -t ena-poll "if=$NET_IF rx=$(cat /sys/class/net/$NET_IF/statistics/rx_bytes) tx=$(cat /sys/class/net/$NET_IF/statistics/tx_bytes) $(ethtool -S $NET_IF 2>/dev/null | grep allowance_exceeded | tr -s ' ' | tr '\n' ' ')"
+          sleep 30
+        done ) &
+      echo "ena-poll sampler started on $NET_IF (30s cadence -> journald)"
+    fi
+
     # Spill-to-disk location selection. NVMe instance store (c7gd, i4g)
     # is fastest; fall back to EBS-backed /var/spill for instances
     # without instance store (c7g.* etc.).
