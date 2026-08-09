@@ -1194,6 +1194,7 @@ func (d *decodeAheadStatsIter) Close() error {
 		groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := d.Stats()
 		windowFullNs, pressureNs, tokenNs, ledgerNs := d.StallDurations()
 		decodeNs, decodeBytes := d.DecodeSpans()
+		decodeUserNs, decodeSysNs := d.DecodeSpanCPU()
 		prunedBloom, prunedRange, _ := d.PruneStats()
 		pruned := int64(prunedBloom + prunedRange)
 		d.executor.scanDecodeAheadPrunedGroups.Add(pruned)
@@ -1208,9 +1209,12 @@ func (d *decodeAheadStatsIter) Close() error {
 		d.executor.scanDecodeAheadLedgerNs.Add(ledgerNs)
 		d.executor.scanDecodeAheadDecodeNs.Add(decodeNs)
 		d.executor.scanDecodeAheadDecodeBytes.Add(decodeBytes)
+		d.executor.scanDecodeAheadDecodeUserNs.Add(decodeUserNs)
+		d.executor.scanDecodeAheadDecodeSysNs.Add(decodeSysNs)
 		d.executor.foldScanDecodeAheadQueryStats(d.queryID,
 			groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls,
-			windowFullNs, pressureNs, tokenNs, ledgerNs, decodeNs, decodeBytes, pruned)
+			windowFullNs, pressureNs, tokenNs, ledgerNs, decodeNs, decodeBytes, pruned,
+			decodeUserNs, decodeSysNs)
 	}
 	return d.DecodeAheadIter.Close()
 }

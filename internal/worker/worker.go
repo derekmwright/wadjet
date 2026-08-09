@@ -747,6 +747,7 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 		defer w.bgWG.Done()
 		var last [6]int64
 		var lastIO [6]int64
+		var lastCPU [12]int64
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for {
@@ -762,6 +763,7 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 					refaultRate, refaultActivations := memory.PageCachePressureStats()
 					windowFullNs, pressureNs, tokenNs, ledgerNs := w.executor.ScanDecodeAheadStallNs()
 					decodeNs, decodeBytes := w.executor.ScanDecodeAheadDecodeSpans()
+					decodeUserNs, decodeSysNs := w.executor.ScanDecodeAheadDecodeCPU()
 					w.logger.Info("scan decode-ahead stats",
 						"groups", groups, "window_fulls", windowFulls,
 						"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
@@ -769,6 +771,7 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 						"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
 						"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
 						"decode_ms", decodeNs/1e6, "decode_bytes", decodeBytes,
+						"decode_user_ms", decodeUserNs/1e6, "decode_sys_ms", decodeSysNs/1e6,
 						"refault_rate", int64(refaultRate),
 						"refault_discount", int64(memory.PageCachePressureDiscount()),
 						"refault_activations", refaultActivations,
@@ -794,6 +797,28 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 						"minflt", minflt, "majflt", majflt,
 						"proc_read_bytes", procRead, "proc_write_bytes", procWrite,
 						"nvme_read_bytes", nvmeRead, "nvme_write_bytes", nvmeWrite)
+				}
+				// CPU/pressure marker (steady-residual diagnosis): where
+				// stretched decode spans spend their time — process CPU
+				// split, host runqueue vs idle, kernel PSI, and Go
+				// scheduler wait. Cumulative; analyzers diff per run.
+				utimeMs, stimeMs := procSelfCPU()
+				hostBusyMs, hostIdleMs, hostIowaitMs, hostStealMs := hostCPUTimes()
+				psiCPUSome, psiMemSome, psiMemFull, psiIOSome, psiIOFull := psiTotals()
+				schedWaitMs := schedWaitTotalMs()
+				curCPU := [12]int64{utimeMs, stimeMs, hostBusyMs, hostIdleMs,
+					hostIowaitMs, hostStealMs, psiCPUSome, psiMemSome,
+					psiMemFull, psiIOSome, psiIOFull, schedWaitMs}
+				if curCPU != lastCPU {
+					lastCPU = curCPU
+					w.logger.Info("cpu psi stats",
+						"utime_ms", utimeMs, "stime_ms", stimeMs,
+						"host_busy_ms", hostBusyMs, "host_idle_ms", hostIdleMs,
+						"host_iowait_ms", hostIowaitMs, "host_steal_ms", hostStealMs,
+						"psi_cpu_some_ms", psiCPUSome/1e3,
+						"psi_mem_some_ms", psiMemSome/1e3, "psi_mem_full_ms", psiMemFull/1e3,
+						"psi_io_some_ms", psiIOSome/1e3, "psi_io_full_ms", psiIOFull/1e3,
+						"sched_wait_ms", schedWaitMs)
 				}
 				w.executor.sweepScanDecodeAheadQueryStats(false)
 			}
@@ -1126,6 +1151,7 @@ func (w *Worker) logFinalScanStats() {
 		refaultRate, refaultActivations := memory.PageCachePressureStats()
 		windowFullNs, pressureNs, tokenNs, ledgerNs := w.executor.ScanDecodeAheadStallNs()
 		decodeNs, decodeBytes := w.executor.ScanDecodeAheadDecodeSpans()
+	decodeUserNs, decodeSysNs := w.executor.ScanDecodeAheadDecodeCPU()
 		w.logger.Info("scan decode-ahead stats (final)",
 			"groups", groups, "window_fulls", windowFulls,
 			"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
@@ -1134,6 +1160,7 @@ func (w *Worker) logFinalScanStats() {
 			"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
 			"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
 			"decode_ms", decodeNs/1e6, "decode_bytes", decodeBytes,
+			"decode_user_ms", decodeUserNs/1e6, "decode_sys_ms", decodeSysNs/1e6,
 			"refault_rate", int64(refaultRate),
 			"refault_discount", int64(memory.PageCachePressureDiscount()),
 			"refault_activations", refaultActivations,
@@ -1152,6 +1179,17 @@ func (w *Worker) logFinalScanStats() {
 		"minflt", minflt, "majflt", majflt,
 		"proc_read_bytes", procRead, "proc_write_bytes", procWrite,
 		"nvme_read_bytes", nvmeRead, "nvme_write_bytes", nvmeWrite)
+	utimeMs, stimeMs := procSelfCPU()
+	hostBusyMs, hostIdleMs, hostIowaitMs, hostStealMs := hostCPUTimes()
+	psiCPUSome, psiMemSome, psiMemFull, psiIOSome, psiIOFull := psiTotals()
+	w.logger.Info("cpu psi stats (final)",
+		"utime_ms", utimeMs, "stime_ms", stimeMs,
+		"host_busy_ms", hostBusyMs, "host_idle_ms", hostIdleMs,
+		"host_iowait_ms", hostIowaitMs, "host_steal_ms", hostStealMs,
+		"psi_cpu_some_ms", psiCPUSome/1e3,
+		"psi_mem_some_ms", psiMemSome/1e3, "psi_mem_full_ms", psiMemFull/1e3,
+		"psi_io_some_ms", psiIOSome/1e3, "psi_io_full_ms", psiIOFull/1e3,
+		"sched_wait_ms", schedWaitTotalMs())
 }
 
 // SetTelemetry enables OpenTelemetry tracing on the worker.
