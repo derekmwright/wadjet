@@ -1,6 +1,12 @@
 # Peer-wire compression (`--peer-wire-compression`)
 
-Status: implemented 2026-07-24. Default off pending SF100 validation.
+Status: implemented 2026-07-24; DEFAULT ON since 2026-08-09 (SF100
+validated: rows 44/44 identical vs same-day eager arm, walls in the
+same-day band, cluster ENA bw_out_allowance_exceeded rate -30%
+(1361/s -> 955/s) on network-allowance-bound c7gd.4xlarge workers —
+see the 2026-08-09 steady-residual arc: the suite is ENA
+bandwidth-throttled end-to-end, making peer-stream bytes a first-class
+cost). `--peer-wire-compression=false` is the kill switch.
 
 ## Motivation
 

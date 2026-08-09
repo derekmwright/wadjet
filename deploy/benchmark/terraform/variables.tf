@@ -343,9 +343,9 @@ variable "shuffle_durability" {
 }
 
 variable "peer_wire_compression" {
-  description = "Worker --peer-wire-compression (docs/design/peer-wire-compression.md): s2-compress raw WSHF payloads on outgoing peer-exchange streams (WSHC envelope, consumers already decode it). Default false pending SF100 validation."
+  description = "Worker --peer-wire-compression (docs/design/peer-wire-compression.md): s2-compress raw WSHF payloads on outgoing peer-exchange streams (WSHC envelope, consumers already decode it). Default true (SF100-validated 2026-08-09); false is the kill switch."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "async_scratch_purge" {
