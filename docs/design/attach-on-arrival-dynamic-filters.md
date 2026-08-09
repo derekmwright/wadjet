@@ -127,6 +127,42 @@ Kill switch: `WADJET_DF_LATE_GROUP_ATTACH=0` (worker-side; terraform
 `-var=df_late_group_attach=0`, forwarded by cap-wrapper.sh) restores the
 pre-2026-08-09 behavior — the same-binary A/B off arm.
 
+### SF100 A/B verdict (2026-08-09, pair 20260809-025538 off / 031532 on)
+
+Same-window kill-switch pair, bin 8c43b36, runs=2 each, wlogs both arms,
+EC2 destroyed after each arm.
+
+- **Delivery FIXED and verified**: on arm 41 `group_level=true` installs
+  (the dimension-cascade filter `dimc-join-4-0-b` on scan-0 fragments,
+  `has_range=true`, `batches_before_attach` 0–83 — early-to-mid scan,
+  both merged and partial-union sources); off arm 0. Row-level installs
+  fire on both arms (unchanged path).
+- **Pruning power at SF100 TPC-H: ZERO** — `rg_pruned=0` on every
+  worker on BOTH arms, advise totals byte-identical (~343 GB/arm), and
+  decoded groups unchanged (~110k/suite). With bloom AND range attached
+  from the first batches, no row group ever prunes: TPC-H join keys
+  (partkey/suppkey/custkey) are uniformly distributed, so every
+  ~200k-row group's min/max spans essentially the whole key domain —
+  `CanBloomPruneRowGroup`'s narrow-range gate never opens and the build
+  range is never disjoint. The touch-ahead third-arm follow-up
+  ("group-level pruning is available but not engaged — potential wall
+  on the table") is therefore REFUTED for this data layout: the
+  110k-group constant was stats-powerlessness, not only the missing
+  delivery.
+- **Walls neutral, correctness clean**: cold 355.4→336.3 s (−5.4%),
+  steady 522.9→539.1 s (+3.1%) — both inside the ±7% window band
+  documented 2026-08-09; per-query swings symmetric (Q16 −42.7% vs
+  Q15 +42.7% in the same run). Rows identical 44/44 across arms.
+- **Decision: KEEP, default on.** The invariant is architectural
+  (arrival timing must not choose pushdown layers), the promotion cost
+  is negligible (tens of installs per suite), and the seam pays off
+  wherever layout gives group stats selectivity — the SF10 local
+  harness prunes thousands of groups through this same path, and any
+  future key-clustered ingest layout would too. Note: this suite's plan
+  shape produced no Deferred specs on shuffle tasks (scan-fragment
+  consumes only); the shuffle-path delivery is validated by unit tests
+  (`TestExecuteShuffle_DeferredDynamicFilter`) and stands ready.
+
 ## Correctness argument
 
 - Drop-only invariant: the bloom only ever *removes* rows, and only rows

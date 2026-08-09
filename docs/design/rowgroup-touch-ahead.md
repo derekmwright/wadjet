@@ -115,5 +115,10 @@ dynamic filters never attached on that path because attach-on-arrival
 (the default consume mode) delivered resolved blooms to the ROW level
 only — deferred specs skip `materializeDynamicFilters`, and nothing
 routed the late bloom to the iterator layer (shuffle tasks ignored
-deferred specs entirely). Fixed by full-layer delivery: see
-docs/design/attach-on-arrival-dynamic-filters.md §Full-layer delivery.
+deferred specs entirely). Fixed by full-layer delivery (e413f37); the
+SF100 A/B then showed the deeper truth: with delivery fixed, group
+pruning STILL fires zero times at SF100 — TPC-H join keys are uniform
+across row groups, so group stats carry no selectivity. The 110k
+decoded-group constant was stats-powerlessness, not recoverable wall.
+See docs/design/attach-on-arrival-dynamic-filters.md §Full-layer
+delivery for the full verdict.
