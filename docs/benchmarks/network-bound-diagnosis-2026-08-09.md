@@ -17,10 +17,19 @@ the largest single SF100 improvement on record.
 | GC latency tax | `-var=gogc=300 -var=task_gc=0` pair (d85e94a) | REFUTED — 4.15× fewer cycles, walls identical |
 | Network allowance | SSM `ethtool -S` ENA counters | **CONFIRMED** — bw_in/out_allowance_exceeded climbing 300–900 events/s per worker, continuously, both runs |
 
-Wadjet-vs-Trino on identical shapes (Trino 470 FTE, filesystem exchange
-manager): Trino walls 167.6/160.7s vs our 544.7/654.2s but **20/22
-queries** (q09+q21 failed both runs, q15 returned 0 rows in run 2 —
-our 22/22 with identical rows held through every arm). Trino sustains
+Wadjet-vs-Trino on identical shapes: Trino walls 167.6/160.7s vs our
+544.7/654.2s but **20/22 queries** (q09+q21 failed both runs, q15
+returned 0 rows in run 2 — our 22/22 with identical rows held through
+every arm). CONFIG CORRECTION (post-hoc audit of the deployed
+properties): despite the harness's FTE labeling, terraform-trino wires
+NO retry-policy, NO exchange manager, and NO spill — Trino ran default
+PIPELINED/STREAMING mode (in-memory direct exchange, memory-or-die),
+its fastest and most fragile configuration; the NVMe scratch mount and
+S3 trino-exchange/* IAM grants are prepared-but-unused. The q09/q21
+failures are deterministic query.max-memory=42GB cap kills (~14s/~11s
+both runs) with no spill relief; q15's zero rows is double-evaluated
+CTE + nondeterministic float summation missing an equality match.
+Trino sustains
 ~400 MB/s/worker inbound pinned at the allowance ceiling (37k throttle
 events/s); we averaged ~230 MB/s in burst/idle alternation (3k/s).
 Byte economy AND pipe utilization both favored Trino — but see below:
