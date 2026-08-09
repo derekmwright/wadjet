@@ -103,3 +103,9 @@ arms, all EC2 destroyed.
 `WADJET_ROWGROUP_READAHEAD=0` reproduces the ctl arm. Residual: run 2
 still 1.47× run 1 — remaining candidates are the never-parked decode
 spans above and the raw NVMe bandwidth floor.
+
+**Residual resolved 2026-08-09**: rowgroup-touch-ahead.md — the
+bandwidth floor was refuted (device ~1% utilized during steady decode)
+and the inline-fault stretch confirmed (+91% decode ns/byte run 2,
+measured by the new decode-span instrument); forced page-in behind the
+WILLNEED took the steady ratio 1.483 → 1.242 (steady −17.6%).
