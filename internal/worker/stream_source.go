@@ -95,10 +95,10 @@ type cachedFileStreamSource struct {
 	// walking mmapData below, or a streamingShuffleReader decoding the
 	// transport body directly (--streaming-shuffle-read).
 	chunkReader shuffleBatchIter
-	mmapData    []byte      // mmap'd view of the current local cache file (nil if Parquet)
-	mmapRegion  *mmapRegion // Phase-5 relief handle for mmapData; nil when relief is disabled
+	mmapData    []byte        // mmap'd view of the current local cache file (nil if Parquet)
+	mmapRegion  *mmapRegion   // Phase-5 relief handle for mmapData; nil when relief is disabled
 	toucher     *rangeToucher // touch-ahead worker over the scan mmap; stopped before munmap
-	localPath   string      // path the source is responsible for unlinking; "" when the file is owned by LocalStageCache or in-memory
+	localPath   string        // path the source is responsible for unlinking; "" when the file is owned by LocalStageCache or in-memory
 
 	// walkDropMark is the byte offset below which the current owned WSHF
 	// mmap's pages have already been MADV_DONTNEED'd behind the walk
@@ -181,6 +181,27 @@ func (s *cachedFileStreamSource) SetDynamicFilters(ranges []exec.DynamicRange, b
 	}
 	s.dynamicRanges = ranges
 	s.bloomFilters = blooms
+}
+
+// AddDynamicFilters appends iterator-level dynamic filters mid-scan — the
+// attach-on-arrival delivery for the row-group pruning layer. The union set
+// is forwarded to the currently open parquet iterator (both iterator kinds
+// consult filters per group, so every not-yet-read/assigned group prunes)
+// and to a pre-opened next file; files opened later pick the set up from
+// the source fields as usual. Must be called from the producer goroutine
+// (the Next loop) — the same thread that opens files and iterators.
+func (s *cachedFileStreamSource) AddDynamicFilters(ranges []exec.DynamicRange, blooms []*exec.BloomScanFilter) {
+	if s == nil || (len(ranges) == 0 && len(blooms) == 0) {
+		return
+	}
+	s.dynamicRanges = append(s.dynamicRanges, ranges...)
+	s.bloomFilters = append(s.bloomFilters, blooms...)
+	if s.parquetIter != nil {
+		s.parquetIter.SetDynamicFilters(s.dynamicRanges, s.bloomFilters)
+	}
+	if s.nextParquet != nil && s.nextParquet.iter != nil {
+		s.nextParquet.iter.SetDynamicFilters(s.dynamicRanges, s.bloomFilters)
+	}
 }
 
 func newCachedFileStreamSource(executor *Executor, queryID, bucket string, files []string) *cachedFileStreamSource {
@@ -1173,6 +1194,9 @@ func (d *decodeAheadStatsIter) Close() error {
 		groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := d.Stats()
 		windowFullNs, pressureNs, tokenNs, ledgerNs := d.StallDurations()
 		decodeNs, decodeBytes := d.DecodeSpans()
+		prunedBloom, prunedRange, _ := d.PruneStats()
+		pruned := int64(prunedBloom + prunedRange)
+		d.executor.scanDecodeAheadPrunedGroups.Add(pruned)
 		d.executor.scanDecodeAheadGroups.Add(groups)
 		d.executor.scanDecodeAheadWindowFulls.Add(windowFulls)
 		d.executor.scanDecodeAheadPressureStalls.Add(pressureStalls)
@@ -1186,7 +1210,7 @@ func (d *decodeAheadStatsIter) Close() error {
 		d.executor.scanDecodeAheadDecodeBytes.Add(decodeBytes)
 		d.executor.foldScanDecodeAheadQueryStats(d.queryID,
 			groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls,
-			windowFullNs, pressureNs, tokenNs, ledgerNs, decodeNs, decodeBytes)
+			windowFullNs, pressureNs, tokenNs, ledgerNs, decodeNs, decodeBytes, pruned)
 	}
 	return d.DecodeAheadIter.Close()
 }

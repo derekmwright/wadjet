@@ -32,9 +32,9 @@ import (
 // allocates a fresh ColumnPageReader, so concurrent decodes of distinct
 // row groups never share mutable state (columnar_native.go:124-126).
 //
-// Lifecycle: workers start on the FIRST Next() call, not at Open — this
-// preserves RowGroupIter's "SetDynamicFilters before first Next"
-// contract (filters attach after Open on the worker scan path). Close()
+// Lifecycle: workers start on the FIRST Next() call, not at Open —
+// filters attach after Open on the worker scan path (and may keep
+// arriving mid-scan; assignments re-read them per group). Close()
 // stops assignment and JOINS in-flight decodes before returning: the
 // caller munmaps the file bytes right after Close, so no decode may
 // touch the underlying slice once Close returns.
@@ -350,9 +350,13 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 	return it, nil
 }
 
-// SetDynamicFilters attaches dynamic-filter pushdowns. Must be called
-// before the first Next() — workers snapshot the filters when they
-// start. Mirrors RowGroupIter.SetDynamicFilters.
+// SetDynamicFilters attaches dynamic-filter pushdowns. Safe mid-scan:
+// decode workers re-read the filter set under the window lock at every
+// group assignment, so a set that lands while the scan is running prunes
+// every group not yet assigned (attach-on-arrival delivery). Groups
+// already assigned or advised before the call decode/advise unfiltered —
+// drop-only semantics, results identical. Multiple calls overwrite;
+// callers pass the accumulated union. Mirrors RowGroupIter.SetDynamicFilters.
 func (it *DecodeAheadIter) SetDynamicFilters(ranges []exec.DynamicRange, blooms []*exec.BloomScanFilter) {
 	if it == nil {
 		return
@@ -366,7 +370,9 @@ func (it *DecodeAheadIter) SetDynamicFilters(ranges []exec.DynamicRange, blooms 
 // Start spawns the decode workers immediately instead of on the first
 // Next — the cross-file continuation pre-opens the next file's iterator
 // and wants its head decoding while the current file's tail delivers.
-// Filters must already be attached. Idempotent.
+// Dispatch-time filters should already be attached; late (attach-on-
+// arrival) filters may still land afterward via SetDynamicFilters.
+// Idempotent.
 func (it *DecodeAheadIter) Start() {
 	if it == nil || it.empty {
 		return

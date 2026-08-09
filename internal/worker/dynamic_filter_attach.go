@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 )
 
@@ -19,6 +22,13 @@ import (
 // the task starts. The scan begins unfiltered; a per-worker singleflight
 // poller watches the key and delivers the bloom to every waiting fragment,
 // which installs it mid-scan (drop-only semantics — results identical).
+
+// dfLateGroupAttach gates full-layer delivery of resolved deferred filters
+// (§Full-layer delivery): iterator-level forwarding on fragment scans and
+// the whole deferred promotion on shuffle tasks. Kill switch
+// WADJET_DF_LATE_GROUP_ATTACH=0 restores the pre-2026-08-09 behavior —
+// row-level-only fragment installs, deferred specs inert on shuffle tasks.
+var dfLateGroupAttach = os.Getenv("WADJET_DF_LATE_GROUP_ATTACH") != "0"
 
 // deferredBloomPollInterval bounds attach latency after the coordinator
 // stages the merged artifact. Each poll is one small GET against the result
@@ -43,12 +53,18 @@ const deferredBloomPollDeadline = 10 * time.Minute
 // also have run filterless (withheld upstream).
 
 // pendingBloom is the shared result slot for one staged-artifact key. done
-// closes exactly once; after that, bloom/mask/ok are immutable.
+// closes exactly once; after that, every field is immutable.
 type pendingBloom struct {
 	done  chan struct{}
 	bloom []uint64
 	mask  uint64
 	ok    bool
+	// Build-key range from the resolved artifact(s), when every contributing
+	// artifact carried one. Late attach forwards it to the iterator layer so
+	// a deferred filter gets the same row-group range pruning a dispatch-time
+	// spec's HasRange/Min/Max would have provided.
+	hasRange bool
+	min, max int64
 	// source records how the bloom resolved — "merged" (coordinator-staged
 	// union) or "partials" (consumer-side incremental union) — with the
 	// partial count for the latter. A/B telemetry only.
@@ -109,14 +125,15 @@ func (e *Executor) pollDeferredBloom(spec distributed.DynamicFilterSpec) *pendin
 			// — terminate now (ok=false) instead of waiting out the
 			// deadline; consumers stay unfiltered and guarded re-emits flush
 			// unguarded, both the correct withhold degradations.
-			bloom, mask, ok, tombstone := e.tryLoadStagedBloom(ctx, spec.BloomBucket, spec.BloomKey)
+			art, ok, tombstone := e.tryLoadStagedBloom(ctx, spec.BloomBucket, spec.BloomKey)
 			if tombstone {
 				e.logger.Info("dynamic_filter: filter withheld (tombstone)",
 					"filter_id", spec.FilterID, "key", spec.BloomKey)
 				return
 			}
 			if ok {
-				p.bloom, p.mask, p.ok = bloom, mask, true
+				p.bloom, p.mask, p.ok = art.Bloom, art.BloomMask, true
+				p.hasRange, p.min, p.max = art.HasRange, art.Min, art.Max
 				p.source = "merged"
 				return
 			}
@@ -137,6 +154,7 @@ func (e *Executor) pollDeferredBloom(spec distributed.DynamicFilterSpec) *pendin
 						return
 					}
 					p.bloom, p.mask, p.ok = acc.bloom, acc.mask, true
+					p.hasRange, p.min, p.max = acc.rangeUnion()
 					p.source = "partials"
 					p.partials = acc.merged
 					e.logger.Info("dynamic_filter: incremental partial union complete",
@@ -168,6 +186,21 @@ type partialUnion struct {
 	mask     uint64
 	merged   int
 	expected int // parsed from the ".of<N>" key suffix; 0 = not yet known
+	// Range union across partials. A non-empty partial WITHOUT a range
+	// breaks the union (an incomplete range falsely prunes); empty partials
+	// contribute no keys and leave it intact.
+	hasRange    bool
+	rangeBroken bool
+	min, max    int64
+}
+
+// rangeUnion returns the folded build-key range, valid only when every
+// non-empty partial carried one.
+func (u *partialUnion) rangeUnion() (hasRange bool, min, max int64) {
+	if u.rangeBroken || !u.hasRange {
+		return false, 0, 0
+	}
+	return true, u.min, u.max
 }
 
 // dynamicFilterMaxBloomWords mirrors the coordinator-side cap (16 MiB): a
@@ -216,6 +249,20 @@ func (e *Executor) tryUnionPartials(ctx context.Context, spec distributed.Dynami
 		if len(art.Bloom) > dynamicFilterMaxBloomWords {
 			acc.seen[obj.Key] = true // structural: never counts (coordinator drops it too)
 			continue
+		}
+		if art.HasRange {
+			if !acc.hasRange {
+				acc.hasRange, acc.min, acc.max = true, art.Min, art.Max
+			} else {
+				if art.Min < acc.min {
+					acc.min = art.Min
+				}
+				if art.Max > acc.max {
+					acc.max = art.Max
+				}
+			}
+		} else {
+			acc.rangeBroken = true
 		}
 		if acc.bloom == nil {
 			acc.bloom = append([]uint64(nil), art.Bloom...)
@@ -280,9 +327,100 @@ func (e *Executor) registerDeferredBlooms(specs []distributed.DynamicFilterSpec)
 			pb:       e.pollDeferredBloom(s),
 			filterID: s.FilterID,
 			column:   s.TargetColumn,
+			keyType:  s.KeyType,
 		}
 	}
 	return out
+}
+
+// pendingInSpecOrder flattens a deferred registry back into the spec list's
+// order — installs must be deterministic across runs for A/B comparability.
+func pendingInSpecOrder(specs []distributed.DynamicFilterSpec, deferred map[string]*deferredBloomFilter) []*deferredBloomFilter {
+	var out []*deferredBloomFilter
+	for _, s := range specs {
+		if d, ok := deferred[s.FilterID]; ok {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// resolvedScanForms builds the two scan-pushdown forms of a resolved
+// deferred filter: the iterator-level BloomScanFilter (+DynamicRange when
+// the artifact carried one) for row-group pruning, and the row-level
+// BloomFilterOp. A dynamic filter is one pushdown object — arrival timing
+// must not change which layers it reaches, so late attach delivers exactly
+// what a dispatch-time spec would have.
+func (d *deferredBloomFilter) resolvedScanForms(ctx context.Context) (*exec.BloomFilterOp, []exec.DynamicRange, *exec.BloomScanFilter) {
+	bsf := &exec.BloomScanFilter{
+		Bloom:     d.pb.bloom,
+		BloomMask: d.pb.mask,
+		Column:    d.column,
+		UseIntKey: true,
+	}
+	var ranges []exec.DynamicRange
+	if d.pb.hasRange {
+		ranges = []exec.DynamicRange{{
+			Column:   d.column,
+			MinValue: int64ToAny(d.keyType, d.pb.min),
+			MaxValue: int64ToAny(d.keyType, d.pb.max),
+		}}
+	}
+	op := exec.NewBloomFilterOp(d.pb.bloom, d.pb.mask, []string{d.column}, true)
+	if err := op.Init(ctx); err != nil {
+		op = nil
+	}
+	return op, ranges, bsf
+}
+
+// dynamicFilterAppender is implemented by scan sources that accept
+// additional iterator-level dynamic filters mid-scan (group pruning for
+// row groups not yet assigned, plus every later file the source opens).
+type dynamicFilterAppender interface {
+	AddDynamicFilters(ranges []exec.DynamicRange, blooms []*exec.BloomScanFilter)
+}
+
+// promoteDeferredFilters polls each pending deferred filter once, without
+// blocking. Resolved filters are handed to install as their scan-pushdown
+// forms (a nil op means the row-level Init failed; the iterator-level
+// forms are always valid). Polls that terminated without a bloom are
+// dropped — the scan stays unfiltered for that filter, the documented
+// withhold degradation. Returns the still-pending remainder. Must run on
+// the scan's producer goroutine.
+func promoteDeferredFilters(ctx context.Context, pending []*deferredBloomFilter, logger *slog.Logger, taskID, stageID string, groupLevel bool, install func(op *exec.BloomFilterOp, ranges []exec.DynamicRange, bsf *exec.BloomScanFilter)) []*deferredBloomFilter {
+	remaining := pending[:0]
+	for _, d := range pending {
+		if _, _, ok := d.pb.resolved(); !ok {
+			select {
+			case <-d.pb.done:
+				// Poll finished without a bloom (withheld/expired): drop the
+				// pending entry, scan stays unfiltered for this filter.
+				if logger != nil {
+					logger.Info("dynamic_filter: late attach never arrived",
+						"task_id", taskID, "stage_id", stageID,
+						"filter_id", d.filterID, "batches_seen", d.batches)
+				}
+			default:
+				d.batches++
+				remaining = append(remaining, d)
+			}
+			continue
+		}
+		op, ranges, bsf := d.resolvedScanForms(ctx)
+		install(op, ranges, bsf)
+		if logger != nil {
+			source := d.pb.source
+			if source == "" {
+				source = "merged"
+			}
+			logger.Info("dynamic_filter: late attach installed",
+				"task_id", taskID, "stage_id", stageID,
+				"filter_id", d.filterID, "batches_before_attach", d.batches,
+				"source", source, "partials", d.pb.partials,
+				"group_level", groupLevel, "has_range", d.pb.hasRange)
+		}
+	}
+	return remaining
 }
 
 // pendingBloomProbe adapts a pendingBloom poll slot to the exec.GuardProbe
@@ -331,25 +469,25 @@ func taskBlobPriority(blob []byte) (priority, deep bool) {
 // must not log per attempt (4 attempts/second). tombstone=true reports a
 // zero-byte object: the coordinator's explicit "withheld, stop waiting"
 // marker.
-func (e *Executor) tryLoadStagedBloom(ctx context.Context, bucket, key string) (bloom []uint64, mask uint64, ok, tombstone bool) {
+func (e *Executor) tryLoadStagedBloom(ctx context.Context, bucket, key string) (art *distributed.DynamicFilterArtifact, ok, tombstone bool) {
 	rc, _, err := e.store.Get(ctx, bucket, key)
 	if err != nil {
-		return nil, 0, false, false
+		return nil, false, false
 	}
 	data, err := io.ReadAll(rc)
 	rc.Close()
 	if err != nil {
-		return nil, 0, false, false
+		return nil, false, false
 	}
 	// Zero BYTES read (not store-reported size, which not every impl
 	// populates) is the tombstone test — a real artifact always has a
 	// header, so an empty body can only be the coordinator's marker.
 	if len(data) == 0 {
-		return nil, 0, false, true
+		return nil, false, true
 	}
-	art, err := distributed.DecodeDynamicFilterArtifact(bytes.NewReader(data))
+	art, err = distributed.DecodeDynamicFilterArtifact(bytes.NewReader(data))
 	if err != nil || len(art.Bloom) == 0 {
-		return nil, 0, false, false
+		return nil, false, false
 	}
-	return art.Bloom, art.BloomMask, true, false
+	return art, true, false
 }

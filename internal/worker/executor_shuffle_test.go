@@ -354,3 +354,65 @@ func TestExecuteShuffle_SchemaRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestExecuteShuffle_DeferredDynamicFilter: a Deferred (attach-on-arrival)
+// spec whose artifact is already staged must engage on the shuffle path —
+// before this test's fix, handleShuffleTask skipped Deferred specs
+// entirely (no poller, no ops), leaving SF100 probe-side shuffle scans
+// unfiltered at every layer. Rows outside the bloom must be dropped from
+// the shuffle output (drop-only: a brief unfiltered head is legal, so the
+// assertion allows a small pass-through prefix).
+func TestExecuteShuffle_DeferredDynamicFilter(t *testing.T) {
+	ctx := context.Background()
+	const bucket = "test-shuffle-deferred-df"
+	const numRows = 5000
+
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, bucket); err != nil {
+		t.Fatalf("MakeBucket: %v", err)
+	}
+	rows := make([]map[string]any, numRows)
+	for i := 0; i < numRows; i++ {
+		rows[i] = map[string]any{"k": int64(i), "v": fmt.Sprintf("value-%d", i)}
+	}
+	writeParquetFile(t, store, bucket, "tables/src/part-0.parquet", rows)
+
+	// Stage the merged artifact BEFORE the task runs: the poll resolves on
+	// its first tick, so the filter installs within the first batches.
+	mergedKey := "queries/q-shuf-df/dynfilter-merged/scan-1/f1.wdf"
+	stageRangedArtifact(t, store, bucket, mergedKey, 0, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+
+	executor := NewExecutor(store, NewLRUCache(64*1024*1024), nil)
+	executor.SetMemoryBudget(0, t.TempDir())
+
+	task := distributed.Task{
+		ID:            "shuf-df-1",
+		QueryID:       "q-shuf-df",
+		StageID:       "shuffle-0",
+		Type:          distributed.TaskTypeShuffle,
+		Files:         []string{"tables/src/part-0.parquet"},
+		ShuffleKeys:   []string{"k"},
+		NumPartitions: 2,
+		DataBucket:    bucket,
+		ResultBucket:  bucket,
+		ResultPrefix:  "shuffle/q-shuf-df/s0/",
+		DynamicFilters: []distributed.DynamicFilterSpec{{
+			FilterID: "f1", TargetColumn: "k", KeyType: "int64",
+			BloomBucket: bucket, BloomKey: mergedKey, Deferred: true,
+		}},
+	}
+	result := executor.Execute(ctx, task, "w1")
+	if !result.Success {
+		t.Fatalf("shuffle task failed: %s", result.Error)
+	}
+	// 10 keys pass the bloom. Install happens between batches, so an
+	// unfiltered head may leak through — but anything close to the full
+	// input means the deferred filter never engaged.
+	if result.NumRows >= numRows/2 {
+		t.Fatalf("deferred filter never engaged: %d of %d rows shuffled", result.NumRows, numRows)
+	}
+	if result.NumRows < 10 {
+		t.Fatalf("in-bloom rows lost: %d rows shuffled, want >= 10", result.NumRows)
+	}
+	t.Logf("deferred filter engaged: %d of %d rows shuffled", result.NumRows, numRows)
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -191,5 +192,45 @@ func TestRowGroupIter_CloseStopsFurtherReads(t *testing.T) {
 	}
 	if b != nil {
 		t.Errorf("Next after Close: got batch, want nil")
+	}
+}
+
+// TestRowGroupIter_MidScanAttach: filters attached AFTER some groups were
+// read prune every remaining group (attach-on-arrival delivery — the
+// worker installs dynamic filters mid-scan when the staged artifact
+// lands; drop-only semantics).
+func TestRowGroupIter_MidScanAttach(t *testing.T) {
+	data := fourRowGroupFile(t)
+	reader, err := pqt.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}
+
+	it, err := OpenRowGroupIter(reader, schema, nil, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer it.Close()
+
+	// First group reads unfiltered.
+	b, err := it.Next()
+	if err != nil || b == nil {
+		t.Fatalf("first Next: (%v, %v)", b, err)
+	}
+
+	// Attach a range that matches nothing: all remaining groups prune.
+	it.SetDynamicFilters([]exec.DynamicRange{
+		{Column: "id", MinValue: int64(-2), MaxValue: int64(-1)}}, nil)
+	b, err = it.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b != nil {
+		t.Fatalf("group delivered after all-pruning mid-scan attach (id[0]=%d)", b.Columns[0].Int64Data[0])
+	}
+	_, prunedRange, read := it.PruneStats()
+	if read != 1 || prunedRange != 3 {
+		t.Errorf("PruneStats: read=%d prunedRange=%d, want read=1 prunedRange=3", read, prunedRange)
 	}
 }

@@ -87,6 +87,46 @@ Worker:
   `dynamic_filter: late attach installed` with `batches_before_attach`
   (the A/B engagement marker).
 
+## Full-layer delivery (2026-08-09)
+
+The original wiring delivered a resolved deferred filter to the ROW level
+only. The SF100 touch-ahead third arm (docs/design/rowgroup-touch-ahead.md)
+exposed the consequence: iterator-level dynamic filters never attach on the
+deferred path, so row-group pruning and the prune-aware advise skip were
+structurally inert wherever attach-on-arrival ran — advise totals were
+byte-identical across arms and decoded-group totals identical
+(110,256/suite) even for Q17-class pruners. Deferred specs on SHUFFLE tasks
+were worse: `materializeDynamicFilters` skips them and no poller was
+registered, so probe-side shuffle scans ran unfiltered at every layer.
+
+The invariant now is: **a dynamic filter is one pushdown object; arrival
+timing must not change which layers it reaches.** On resolution the worker
+promotes the artifact into ALL the forms a dispatch-time spec would have
+produced:
+
+- Row-level `BloomFilterOp` (as before).
+- Iterator-level `exec.BloomScanFilter` — plus an `exec.DynamicRange` when
+  the artifact carries `HasRange/Min/Max` (partial unions fold min-of-mins/
+  max-of-maxes; a non-empty rangeless partial breaks the range, never the
+  bloom) — delivered via `cachedFileStreamSource.AddDynamicFilters`, which
+  forwards the union to the currently open parquet iterator, a pre-opened
+  next file, and every file opened later. Both iterator kinds consult
+  filters per group (`DecodeAheadIter` re-reads them under the window lock
+  at each assignment), so all not-yet-assigned groups prune and the
+  prune-aware advise/touch skip engages. Drop-only still holds: groups
+  already assigned or advised decode/advise unfiltered.
+- Shuffle tasks register the same singleflight pollers and promote in the
+  read loop (`handleShuffleTask`), feeding both layers identically.
+
+Engagement markers: `rg_pruned` on the `scan decode-ahead stats` /
+`scan decode-ahead query stats` wlog lines (iterator-level prunes, bloom +
+range combined), beside the existing `late attach installed` row-level
+marker with its `group_level`/`has_range` fields.
+
+Kill switch: `WADJET_DF_LATE_GROUP_ATTACH=0` (worker-side; terraform
+`-var=df_late_group_attach=0`, forwarded by cap-wrapper.sh) restores the
+pre-2026-08-09 behavior — the same-binary A/B off arm.
+
 ## Correctness argument
 
 - Drop-only invariant: the bloom only ever *removes* rows, and only rows

@@ -745,7 +745,7 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 	w.bgWG.Add(1)
 	go func() {
 		defer w.bgWG.Done()
-		var last [5]int64
+		var last [6]int64
 		var lastIO [6]int64
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
@@ -755,7 +755,8 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 				return
 			case <-t.C:
 				groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := w.executor.ScanDecodeAheadStats()
-				cur := [5]int64{groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls}
+				rgPruned := w.executor.ScanDecodeAheadPrunedGroups()
+				cur := [6]int64{groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls, rgPruned}
 				if cur != last {
 					last = cur
 					refaultRate, refaultActivations := memory.PageCachePressureStats()
@@ -764,7 +765,7 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 					w.logger.Info("scan decode-ahead stats",
 						"groups", groups, "window_fulls", windowFulls,
 						"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
-						"ledger_stalls", ledgerStalls,
+						"ledger_stalls", ledgerStalls, "rg_pruned", rgPruned,
 						"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
 						"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
 						"decode_ms", decodeNs/1e6, "decode_bytes", decodeBytes,
@@ -1129,6 +1130,7 @@ func (w *Worker) logFinalScanStats() {
 			"groups", groups, "window_fulls", windowFulls,
 			"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
 			"ledger_stalls", ledgerStalls,
+			"rg_pruned", w.executor.ScanDecodeAheadPrunedGroups(),
 			"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
 			"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
 			"decode_ms", decodeNs/1e6, "decode_bytes", decodeBytes,

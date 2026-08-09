@@ -60,9 +60,12 @@ type RowGroupIter struct {
 	rgRead        int
 }
 
-// SetDynamicFilters attaches dynamic-filter pushdowns to the iterator. Must
-// be called before the first Next(). Empty slices clear any existing
-// filters. Multiple calls overwrite prior state.
+// SetDynamicFilters attaches dynamic-filter pushdowns to the iterator.
+// Safe mid-scan from the goroutine calling Next: filters are consulted
+// per group, so a set attached after some groups were read prunes every
+// remaining group (attach-on-arrival delivery; drop-only semantics).
+// Empty slices clear any existing filters. Multiple calls overwrite
+// prior state — callers pass the accumulated union.
 func (it *RowGroupIter) SetDynamicFilters(ranges []exec.DynamicRange, blooms []*exec.BloomScanFilter) {
 	if it == nil {
 		return

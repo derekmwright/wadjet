@@ -154,6 +154,10 @@ type Executor struct {
 	// over a page-cache-hot run (rowgroup-readahead residual diagnosis).
 	scanDecodeAheadDecodeNs    atomic.Int64
 	scanDecodeAheadDecodeBytes atomic.Int64
+	// Row groups skipped by dynamic-filter pruning (bloom + range),
+	// engagement marker for iterator-level attach — dispatch-time AND
+	// late (attach-on-arrival) deliveries both land here.
+	scanDecodeAheadPrunedGroups atomic.Int64
 
 	// activeForeground counts tasks currently inside Execute — the busy
 	// signal the background-upload QoS gate yields to.
@@ -173,19 +177,21 @@ type Executor struct {
 // emitted holds the counter snapshot at the last sweep; a sweep that
 // finds the counters unchanged emits the final line and drops the entry.
 // Indices 5-8 are the stall durations (ns) behind counters 1-4; 9-10
-// are the decode-span totals (ns, compressed bytes).
+// are the decode-span totals (ns, compressed bytes); 11 is the dynamic-
+// filter pruned-group count.
 type decodeAheadQueryStats struct {
 	groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls atomic.Int64
 	windowFullNs, pressureNs, tokenNs, ledgerNs                    atomic.Int64
 	decodeNs, decodeBytes                                          atomic.Int64
-	emitted                                                        [11]int64
+	prunedGroups                                                   atomic.Int64
+	emitted                                                        [12]int64
 }
 
-func (s *decodeAheadQueryStats) snapshot() [11]int64 {
-	return [11]int64{s.groups.Load(), s.windowFulls.Load(), s.pressureStalls.Load(),
+func (s *decodeAheadQueryStats) snapshot() [12]int64 {
+	return [12]int64{s.groups.Load(), s.windowFulls.Load(), s.pressureStalls.Load(),
 		s.tokenStalls.Load(), s.ledgerStalls.Load(),
 		s.windowFullNs.Load(), s.pressureNs.Load(), s.tokenNs.Load(), s.ledgerNs.Load(),
-		s.decodeNs.Load(), s.decodeBytes.Load()}
+		s.decodeNs.Load(), s.decodeBytes.Load(), s.prunedGroups.Load()}
 }
 
 // SetStreamingShuffleRead enables streaming decode of shuffle inputs
@@ -239,7 +245,7 @@ func (e *Executor) SetScanDecodeAhead(on bool, windowBytes int64) {
 // foldScanDecodeAheadQueryStats adds one closed iterator's counters to
 // the per-query accumulator. queryID may be empty (embedded callers);
 // those fold under the "-" bucket rather than being dropped.
-func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls, windowFullNs, pressureNs, tokenNs, ledgerNs, decodeNs, decodeBytes int64) {
+func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls, windowFullNs, pressureNs, tokenNs, ledgerNs, decodeNs, decodeBytes, prunedGroups int64) {
 	if queryID == "" {
 		queryID = "-"
 	}
@@ -256,6 +262,7 @@ func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowF
 	qs.ledgerNs.Add(ledgerNs)
 	qs.decodeNs.Add(decodeNs)
 	qs.decodeBytes.Add(decodeBytes)
+	qs.prunedGroups.Add(prunedGroups)
 }
 
 // sweepScanDecodeAheadQueryStats emits per-query decode-ahead stats
@@ -284,7 +291,8 @@ func (e *Executor) sweepScanDecodeAheadQueryStats(final bool) {
 			"ledger_stalls", cur[4],
 			"window_full_ms", cur[5]/1e6, "pressure_stall_ms", cur[6]/1e6,
 			"token_stall_ms", cur[7]/1e6, "ledger_stall_ms", cur[8]/1e6,
-			"decode_ms", cur[9]/1e6, "decode_bytes", cur[10])
+			"decode_ms", cur[9]/1e6, "decode_bytes", cur[10],
+			"rg_pruned", cur[11])
 		return true
 	})
 }
@@ -298,6 +306,12 @@ func (e *Executor) ScanDecodeAheadStats() (groups, windowFulls, pressureStalls, 
 	return e.scanDecodeAheadGroups.Load(), e.scanDecodeAheadWindowFulls.Load(),
 		e.scanDecodeAheadPressureStalls.Load(), e.scanDecodeAheadTokenStalls.Load(),
 		e.scanDecodeAheadLedgerStalls.Load()
+}
+
+// ScanDecodeAheadPrunedGroups returns the row groups skipped by dynamic-
+// filter pruning at the iterator layer (bloom + range combined).
+func (e *Executor) ScanDecodeAheadPrunedGroups() int64 {
+	return e.scanDecodeAheadPrunedGroups.Load()
 }
 
 // ScanDecodeAheadStallNs returns the total blocked time (ns) behind the
@@ -1101,8 +1115,11 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	//     the hash-partitioning sink. Effective at any scale because it
 	//     prunes pre-shuffle-write. Adaptive-disables if rejection <5% to
 	//     avoid paying lookup cost on non-selective workloads.
-	// Together they cover the SF1→SF100 selectivity spectrum.
+	// Together they cover the SF1→SF100 selectivity spectrum. Deferred
+	// (attach-on-arrival) specs reach BOTH layers too — mid-scan, via the
+	// promotion in the read loop below.
 	var shuffleBloomOps []*exec.BloomFilterOp
+	var pendingShuffleDF []*deferredBloomFilter
 	if len(task.DynamicFilters) > 0 {
 		ranges, blooms, err := e.materializeDynamicFilters(task.DynamicFilters)
 		if err != nil {
@@ -1119,6 +1136,15 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 					shuffleBloomOps = append(shuffleBloomOps, op)
 				}
 			}
+		}
+		// Deferred (attach-on-arrival) specs skip the materialization above —
+		// their artifact may not exist yet. Register the singleflight pollers
+		// and promote resolved filters mid-scan in the read loop below, into
+		// BOTH layers: iterator-level on the source (row-group pruning +
+		// prune-aware advises for groups/files not yet read) and a row-level
+		// op. Drop-only semantics — batches already read pass unfiltered.
+		if dfLateGroupAttach {
+			pendingShuffleDF = pendingInSpecOrder(task.DynamicFilters, e.registerDeferredBlooms(task.DynamicFilters))
 		}
 	}
 	if err := src.Init(ctx); err != nil {
@@ -1216,6 +1242,15 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		if b == nil {
 			break
 		}
+		if len(pendingShuffleDF) > 0 {
+			pendingShuffleDF = promoteDeferredFilters(ctx, pendingShuffleDF, e.logger, task.ID, task.StageID, true,
+				func(op *exec.BloomFilterOp, ranges []exec.DynamicRange, bsf *exec.BloomScanFilter) {
+					if op != nil {
+						shuffleBloomOps = append(shuffleBloomOps, op)
+					}
+					src.AddDynamicFilters(ranges, []*exec.BloomScanFilter{bsf})
+				})
+		}
 		n := int64(b.ActiveLen())
 		if n == 0 {
 			continue
@@ -1279,6 +1314,11 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		if progress != nil {
 			progress.AddRows(n)
 		}
+	}
+	for _, d := range pendingShuffleDF {
+		e.logger.Info("dynamic_filter: late attach never arrived",
+			"task_id", task.ID, "stage_id", task.StageID,
+			"filter_id", d.filterID, "batches_seen", d.batches)
 	}
 	if partialAgg != nil {
 		flushed, aggErr := partialAgg.drain(ctx)

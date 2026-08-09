@@ -211,7 +211,7 @@ func TestWorkerDrain_EmitsFinalScanStats(t *testing.T) {
 		executor: NewExecutor(store, NewLRUCache(1024), nil),
 	}
 	w.executor.logger = w.logger
-	w.executor.foldScanDecodeAheadQueryStats("q-drain", 3, 0, 0, 0, 0, 0, 0, 0, 0, 7e6, 4096)
+	w.executor.foldScanDecodeAheadQueryStats("q-drain", 3, 0, 0, 0, 0, 0, 0, 0, 0, 7e6, 4096, 0)
 
 	done := make(chan struct{})
 	go func() { w.Drain(); close(done) }()

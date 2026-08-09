@@ -110,9 +110,10 @@ A third arm (touch on + the prune-aware advise skip) measured cold
   depend on the wall samples.
 
 The prune-aware skip stays (sound, tested, engages where iterator
-filters attach). **Follow-up**: why do iterator-level dynamic filters
-never attach on the EC2 SF100 worker scan path? Decoded-group totals
-are identical across runs and arms (110,256/suite) even for
-prune-heavy queries — if group-level pruning is available but not
-engaged there, that is potential wall being left on the table
-independent of this arc.
+filters attach). **Follow-up (RESOLVED 2026-08-09)**: iterator-level
+dynamic filters never attached on that path because attach-on-arrival
+(the default consume mode) delivered resolved blooms to the ROW level
+only — deferred specs skip `materializeDynamicFilters`, and nothing
+routed the late bloom to the iterator layer (shuffle tasks ignored
+deferred specs entirely). Fixed by full-layer delivery: see
+docs/design/attach-on-arrival-dynamic-filters.md §Full-layer delivery.

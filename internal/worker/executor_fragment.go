@@ -494,11 +494,21 @@ func (e *Executor) wrapSourceWithBloomFilters(ctx context.Context, task distribu
 	if len(ops) == 0 && len(pending) == 0 {
 		return src
 	}
+	// Late-resolving filters are also forwarded to the iterator layer when
+	// the source supports it — deferred specs skip the buildFragmentSource
+	// attach (nothing to materialize yet), and without this the row-group
+	// pruning + prune-aware advise layers never see attach-on-arrival
+	// filters at all (the EC2 SF100 finding in
+	// docs/design/rowgroup-touch-ahead.md §third arm).
+	var groupSink dynamicFilterAppender
+	if dfLateGroupAttach {
+		groupSink, _ = src.(dynamicFilterAppender)
+	}
 	e.logger.Info("dynamic_filter: row-level blooms active on fragment scan",
 		"task_id", task.ID, "stage_id", task.StageID,
 		"filters", len(ops), "deferred", len(pending))
 	return &bloomFilteredSource{
-		inner: src, ops: ops, pending: pending,
+		inner: src, ops: ops, pending: pending, groupSink: groupSink,
 		logger: e.logger, taskID: task.ID, stageID: task.StageID,
 	}
 }
@@ -510,7 +520,8 @@ type deferredBloomFilter struct {
 	pb       *pendingBloom
 	filterID string
 	column   string
-	batches  int // batches seen before attach (engagement telemetry)
+	keyType  string // spec KeyType — typing for the late-attached range values
+	batches  int    // batches seen before attach (engagement telemetry)
 }
 
 // bloomFilteredSource filters each batch through row-level bloom ops via
@@ -523,54 +534,33 @@ type bloomFilteredSource struct {
 	inner   exec.Source
 	ops     []*exec.BloomFilterOp
 	pending []*deferredBloomFilter
-	logger  *slog.Logger
-	taskID  string
-	stageID string
+	// groupSink receives resolved deferred filters at iterator level (row-
+	// group pruning); nil when the inner source has no parquet iterator
+	// layer (e.g. manifest-fed eager inputs).
+	groupSink dynamicFilterAppender
+	logger    *slog.Logger
+	taskID    string
+	stageID   string
 }
 
 func (s *bloomFilteredSource) Init(ctx context.Context) error { return s.inner.Init(ctx) }
 
-// promotePending installs any deferred blooms whose artifacts resolved.
-// Non-blocking; called once per batch.
+// promotePending installs any deferred blooms whose artifacts resolved —
+// row-level op here, iterator-level forms into groupSink when the inner
+// source has one. Non-blocking; called once per batch.
 func (s *bloomFilteredSource) promotePending(ctx context.Context) {
 	if len(s.pending) == 0 {
 		return
 	}
-	remaining := s.pending[:0]
-	for _, d := range s.pending {
-		bloom, mask, ok := d.pb.resolved()
-		if !ok {
-			select {
-			case <-d.pb.done:
-				// Poll finished without a bloom (withheld/expired): drop the
-				// pending entry, scan stays unfiltered for this filter.
-				if s.logger != nil {
-					s.logger.Info("dynamic_filter: late attach never arrived",
-						"task_id", s.taskID, "stage_id", s.stageID,
-						"filter_id", d.filterID, "batches_seen", d.batches)
-				}
-			default:
-				d.batches++
-				remaining = append(remaining, d)
+	s.pending = promoteDeferredFilters(ctx, s.pending, s.logger, s.taskID, s.stageID, s.groupSink != nil,
+		func(op *exec.BloomFilterOp, ranges []exec.DynamicRange, bsf *exec.BloomScanFilter) {
+			if op != nil {
+				s.ops = append(s.ops, op)
 			}
-			continue
-		}
-		op := exec.NewBloomFilterOp(bloom, mask, []string{d.column}, true)
-		if err := op.Init(ctx); err == nil {
-			s.ops = append(s.ops, op)
-			if s.logger != nil {
-				source := d.pb.source
-				if source == "" {
-					source = "merged"
-				}
-				s.logger.Info("dynamic_filter: late attach installed",
-					"task_id", s.taskID, "stage_id", s.stageID,
-					"filter_id", d.filterID, "batches_before_attach", d.batches,
-					"source", source, "partials", d.pb.partials)
+			if s.groupSink != nil {
+				s.groupSink.AddDynamicFilters(ranges, []*exec.BloomScanFilter{bsf})
 			}
-		}
-	}
-	s.pending = remaining
+		})
 }
 
 func (s *bloomFilteredSource) Next(ctx context.Context) (*batch.RecordBatch, error) {

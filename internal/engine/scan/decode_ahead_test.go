@@ -910,3 +910,54 @@ func TestDecodeAheadIter_AdviseRespectsShardRange(t *testing.T) {
 		t.Fatalf("shard advised %d of %d groups; want a proper subset", spans, groups)
 	}
 }
+
+// TestDecodeAheadIter_MidScanAttach: filters attached AFTER the scan
+// started prune every group not yet assigned to a decode worker —
+// assignments re-read the filter set under the window lock, so a
+// mid-scan SetDynamicFilters (attach-on-arrival delivery) takes effect
+// without restarting the iterator. Workers=1 with a 1-byte window bounds
+// the lookahead to at most one group past the delivery cursor, making
+// the attach point deterministic to within one group.
+func TestDecodeAheadIter_MidScanAttach(t *testing.T) {
+	const groups = 16
+	data := manyRowGroupFile(t, groups, 50)
+	schema := []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}
+
+	it, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 1, WindowBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer it.Close()
+
+	// First group delivers unfiltered.
+	b, err := it.Next()
+	if err != nil || b == nil {
+		t.Fatalf("first Next: (%v, %v)", b, err)
+	}
+	if got := b.Columns[0].Int64Data[0]; got != 0 {
+		t.Fatalf("first delivered id = %d, want 0", got)
+	}
+
+	// Attach a range matching nothing mid-scan: every group not yet
+	// assigned must prune.
+	it.SetDynamicFilters([]exec.DynamicRange{
+		{Column: "id", MinValue: int64(-2), MaxValue: int64(-1)}}, nil)
+
+	rest, err := drainGroupIter(t, it)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// At most one group (the one admitted while group 0 delivered) may
+	// have been assigned before the attach landed.
+	if len(rest) > 1 {
+		t.Fatalf("%d groups delivered after all-pruning mid-scan attach, want <= 1", len(rest))
+	}
+	_, prunedRange, read := it.PruneStats()
+	if read != 1+len(rest) {
+		t.Errorf("read = %d, want %d (delivered batches)", read, 1+len(rest))
+	}
+	if prunedRange != groups-read {
+		t.Errorf("prunedRange = %d, want %d (all unassigned groups)", prunedRange, groups-read)
+	}
+}
