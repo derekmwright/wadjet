@@ -97,6 +97,7 @@ type cachedFileStreamSource struct {
 	chunkReader shuffleBatchIter
 	mmapData    []byte      // mmap'd view of the current local cache file (nil if Parquet)
 	mmapRegion  *mmapRegion // Phase-5 relief handle for mmapData; nil when relief is disabled
+	toucher     *rangeToucher // touch-ahead worker over the scan mmap; stopped before munmap
 	localPath   string      // path the source is responsible for unlinking; "" when the file is owned by LocalStageCache or in-memory
 
 	// walkDropMark is the byte offset below which the current owned WSHF
@@ -351,6 +352,11 @@ func (s *cachedFileStreamSource) releaseParquetIter() {
 		_ = s.parquetIter.Close()
 		s.parquetIter = nil
 	}
+	// After iter.Close (the advising decode workers are joined), before
+	// releaseCurrentFile's munmap — a live toucher must never outlast the
+	// mapping it walks.
+	s.toucher.stop()
+	s.toucher = nil
 	s.parquetReader = nil
 }
 
@@ -839,6 +845,7 @@ type pendingParquet struct {
 	mmapData        []byte
 	mmapRegion      *mmapRegion
 	localPath       string
+	toucher         *rangeToucher
 	fallbackBatches []*batch.RecordBatch
 }
 
@@ -853,6 +860,8 @@ func (p *pendingParquet) release(logger *slog.Logger) {
 		_ = p.iter.Close()
 		p.iter = nil
 	}
+	p.toucher.stop() // after iter.Close (enqueuers joined), before munmap
+	p.toucher = nil
 	p.reader = nil
 	if p.mmapData != nil {
 		unregisterMmap(p.mmapRegion)
@@ -876,6 +885,7 @@ func (s *cachedFileStreamSource) installParquet(p *pendingParquet) {
 	s.localPath = p.localPath
 	s.parquetIter = p.iter
 	s.parquetReader = p.reader
+	s.toucher = p.toucher
 	s.fallbackBatches = p.fallbackBatches
 	s.fallbackBatchIdx = 0
 }
@@ -1010,9 +1020,22 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 		}
 		// Row-group I/O-ahead: only meaningful when the file bytes are a
 		// real mmap (local-tier opens); the S3-streamed path decodes from
-		// heap and has nothing to fault.
+		// heap and has nothing to fault. The toucher rides behind the
+		// WILLNEED advises and guarantees residency before a token-holding
+		// decode arrives (rowgroup_touch.go); its stop happens after
+		// iter.Close joins the advising decode workers and before munmap.
 		if rowGroupReadaheadEnabled && len(mmapData) > 0 {
-			opts.Advise = willNeedAdviser(mmapData)
+			advise := willNeedAdviser(mmapData)
+			if rowGroupTouchEnabled {
+				p.toucher = newRangeToucher(mmapData)
+				toucher := p.toucher
+				opts.Advise = func(off, n int64) {
+					advise(off, n)
+					toucher.enqueue(off, n)
+				}
+			} else {
+				opts.Advise = advise
+			}
 		}
 		da, err := scan.OpenDecodeAheadIter(reader, projCols, nil, shardIdx, shardCount, opts)
 		if err != nil {

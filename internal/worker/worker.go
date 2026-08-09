@@ -775,7 +775,9 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 					writeDrop, readDrop := diskio.DropBehindStats()
 					w.logger.Info("drop-behind stats",
 						"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop,
-						"readahead_advise_bytes", readaheadAdviseBytes.Load())
+						"readahead_advise_bytes", readaheadAdviseBytes.Load(),
+						"touch_bytes", touchAheadBytes.Load(),
+						"touch_drops", touchAheadDrops.Load())
 				}
 				// Proc/device I-O marker (residual diagnosis): cumulative
 				// counters, so analyzers diff consecutive lines for interval
@@ -1138,7 +1140,9 @@ func (w *Worker) logFinalScanStats() {
 	writeDrop, readDrop := diskio.DropBehindStats()
 	w.logger.Info("drop-behind stats (final)",
 		"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop,
-		"readahead_advise_bytes", readaheadAdviseBytes.Load())
+		"readahead_advise_bytes", readaheadAdviseBytes.Load(),
+		"touch_bytes", touchAheadBytes.Load(),
+		"touch_drops", touchAheadDrops.Load())
 	minflt, majflt := procSelfFaults()
 	procRead, procWrite := procSelfIO()
 	nvmeRead, nvmeWrite := nvmeDiskstats()
