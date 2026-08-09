@@ -687,6 +687,7 @@ resource "aws_instance" "worker" {
           --setenv="WADJET_GOGC=100" \
           --setenv="WADJET_REFAULT_PRESSURE_RATE=${var.refault_pressure_rate}" \
           --setenv="WADJET_REFAULT_EPISODE_CAP=${var.refault_episode_cap_seconds}" \
+          --setenv="WADJET_ROWGROUP_TOUCH=${var.rowgroup_touch}" \
           /usr/local/bin/wadjet serve \
             --mode=worker \
             --nats-url="nats://$COORD_IP:4222" \

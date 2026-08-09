@@ -300,6 +300,12 @@ variable "eager_min_tail_seconds" {
   default     = 12
 }
 
+variable "rowgroup_touch" {
+  description = "WADJET_ROWGROUP_TOUCH for the workers: row-group touch-ahead — a per-mmap goroutine that physically pages-in advised column-chunk ranges behind MADV_WILLNEED, off the CPU-token budget (rowgroup_touch.go). Default \"1\" matches the in-binary default; \"0\" is the same-binary A/B off arm / kill switch. Inert when WADJET_ROWGROUP_READAHEAD=0 or scan_decode_ahead=false."
+  type        = string
+  default     = "1"
+}
+
 variable "base_table_cache_bytes" {
   description = "Base-table NVMe cache LRU budget in bytes per worker process (docs/design/base-table-nvme-cache.md): cross-query disk cache for immutable base-table parquet under <spill-dir>/base-cache, so repeat scans skip the S3 GET. Worker-side flag only. 0 = disabled (default pending SF100 validation). SF100 shape proposal: 150 GB (161061273600) — working set ~100 GB, leaves ~85 GB of the 237 GB NVMe for spill."
   type        = number
