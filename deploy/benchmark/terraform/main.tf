@@ -437,7 +437,8 @@ locals {
     # GC fired; the resulting mark-assist starved the heartbeat goroutine
     # for >90s and the coord reaped workers, kicking off the Q03 redelivery
     # loop observed on the 2026-05-01 streaming-refactor deploy.
-    export WADJET_GOGC=100
+    export WADJET_GOGC=${var.gogc}
+    export WADJET_TASK_GC=${var.task_gc}
     # Scan-output column pruning (pruneScanOutputColumns, 03b1a10):
     # coordinator-side planner pass. Default on; =false is the A/B /
     # kill-switch arm.
@@ -684,7 +685,8 @@ resource "aws_instance" "worker" {
         systemd-run --quiet --unit="wadjet-worker-$idx-$$-$(date +%s)" \
           --scope -p "MemoryMax=$PER_PROC_BYTES" -p "MemoryHigh=$PER_PROC_GOMEMLIMIT" \
           --setenv="GOMEMLIMIT=$PER_PROC_GOMEMLIMIT" \
-          --setenv="WADJET_GOGC=100" \
+          --setenv="WADJET_GOGC=${var.gogc}" \
+          --setenv="WADJET_TASK_GC=${var.task_gc}" \
           --setenv="WADJET_REFAULT_PRESSURE_RATE=${var.refault_pressure_rate}" \
           --setenv="WADJET_REFAULT_EPISODE_CAP=${var.refault_episode_cap_seconds}" \
           --setenv="WADJET_ROWGROUP_TOUCH=${var.rowgroup_touch}" \

@@ -133,6 +133,12 @@ type Config struct {
 }
 
 // DefaultConfig returns default worker configuration.
+// taskGCDisabled turns off the per-task forced runtime.GC() after
+// memory-intensive tasks (WADJET_TASK_GC=0). Read once at init: the
+// discipline predates the memory ledger and is under A/B for the
+// steady-regime GC-tax hypothesis.
+var taskGCDisabled = os.Getenv("WADJET_TASK_GC") == "0"
+
 func DefaultConfig() Config {
 	return Config{
 		MaxConcurrent:    4,
@@ -1705,6 +1711,10 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 	// 2026-04-25 confirmed num_gc=0 for the entire 72s run, heap climbed
 	// monotonically to 19 GB then OS-killed the coord. Including TaskTypeStage
 	// ensures the same per-task GC discipline that legacy task types get.
+	// WADJET_TASK_GC=0 disables the blanket discipline (GC-tax A/B for the
+	// steady-regime residual: at GOGC=100 these forced full cycles run
+	// synchronously in the task-completion path and grow with the live
+	// set, which the steady regime inflates).
 	shouldGC := false
 	switch task.Type {
 	case "join", "aggregate", "sort", "window":
@@ -1715,7 +1725,7 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 			shouldGC = true
 		}
 	}
-	if shouldGC {
+	if shouldGC && !taskGCDisabled {
 		runtime.GC()
 	}
 

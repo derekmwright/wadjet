@@ -404,3 +404,16 @@ variable "refault_episode_cap_seconds" {
   type        = number
   default     = 10
 }
+
+variable "gogc" {
+  description = "WADJET_GOGC for coordinator + workers: 'off' (GOMEMLIMIT-only), an integer percent, or empty for the profile default of 100. Steady-residual GC-discipline A/B knob."
+  type        = string
+  default     = "100"
+}
+
+variable "task_gc" {
+  description = "WADJET_TASK_GC: set '0' to disable the per-task forced runtime.GC() after join/aggregate/sort/window tasks (worker.go). Default on (empty). Steady-residual GC-discipline A/B knob."
+  type        = string
+  default     = ""
+}
+

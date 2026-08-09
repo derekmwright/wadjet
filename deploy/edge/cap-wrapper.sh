@@ -75,5 +75,6 @@ exec docker run --rm -i --init --network=host \
   -e WADJET_DF_LATE_GROUP_ATTACH \
   -e WADJET_BLOCK_PROFILE_RATE \
   -e WADJET_MUTEX_PROFILE_FRACTION \
+  -e WADJET_TASK_GC \
   ${EDGE_GOGC:+-e WADJET_GOGC="${EDGE_GOGC}"} \
   "$IMAGE" timeout --signal=KILL "$TTL" "$@"
