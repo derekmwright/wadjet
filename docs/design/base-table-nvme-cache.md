@@ -1,6 +1,13 @@
 # Base-table NVMe cache (cross-query parquet cache tier)
 
-> **Status:** DESIGN FOR REVIEW — no code. **Date:** 2026-07-12.
+> **Status:** IMPLEMENTED (#221-#223) + SF100-VALIDATED 2026-08-09;
+> the sf100-distributed bench profile now sets 150 GB by default
+> (pair 20260809-212321/214810: suite −37.8% cold / −35.5% steady,
+> cluster NIC rx −85%, ENA inbound throttle events −86%, rows 44/44).
+> The 2026-08-09 network-bound diagnosis (docs/benchmarks/
+> network-bound-diagnosis-2026-08-09.md) found the terraform default
+> had silently stayed 0 — every cache-off run re-streamed the full
+> dataset per run. **Date:** 2026-07-12 (design), 2026-08-09 (default).
 > **Verified against:** main @ `562a358`. Anchors below were confirmed
 > against that commit; they drift.
 > **Context:** primary lever after the eager-dispatch arc verdict

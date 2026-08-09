@@ -28,6 +28,12 @@ cluster:
 
 benchmark:
   scale_factor: 100
+  # Base-table NVMe cache: 150 GB of the workers' 237 GB instance store.
+  # SF100-validated 2026-08-09 (pair 20260809-212321/214810): suite
+  # -37.8% cold / -35.5% steady, cluster NIC rx 908->137 GB (-85%),
+  # inbound ENA throttle events -86%, rows 44/44 identical. Disable
+  # with -var=base_table_cache_bytes=0.
+  base_table_cache_bytes: 161061273600
   runs: 1
   query_timeout: 30m
   skip_load: true

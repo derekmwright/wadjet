@@ -313,9 +313,9 @@ variable "df_late_group_attach" {
 }
 
 variable "base_table_cache_bytes" {
-  description = "Base-table NVMe cache LRU budget in bytes per worker process (docs/design/base-table-nvme-cache.md): cross-query disk cache for immutable base-table parquet under <spill-dir>/base-cache, so repeat scans skip the S3 GET. Worker-side flag only. 0 = disabled (default pending SF100 validation). SF100 shape proposal: 150 GB (161061273600) — working set ~100 GB, leaves ~85 GB of the 237 GB NVMe for spill."
+  description = "Base-table NVMe cache LRU budget in bytes per worker process (docs/design/base-table-nvme-cache.md): cross-query disk cache for immutable base-table parquet under <spill-dir>/base-cache, so repeat scans skip the S3 GET. Worker-side flag only. null = take the profile's benchmark.base_table_cache_bytes (sf100-distributed sets 150 GB — SF100-validated 2026-08-09: suite -37.8% cold / -35.5% steady, cluster NIC rx -85%, rows identical), else 0 = disabled. Explicit -var (including 0) overrides the profile."
   type        = number
-  default     = 0
+  default     = null
 }
 
 variable "streaming_shuffle_read" {
