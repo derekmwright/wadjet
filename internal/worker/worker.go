@@ -769,7 +769,6 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 					refaultRate, refaultActivations := memory.PageCachePressureStats()
 					windowFullNs, pressureNs, tokenNs, ledgerNs := w.executor.ScanDecodeAheadStallNs()
 					decodeNs, decodeBytes := w.executor.ScanDecodeAheadDecodeSpans()
-					decodeUserNs, decodeSysNs := w.executor.ScanDecodeAheadDecodeCPU()
 					w.logger.Info("scan decode-ahead stats",
 						"groups", groups, "window_fulls", windowFulls,
 						"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
@@ -777,7 +776,6 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 						"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
 						"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
 						"decode_ms", decodeNs/1e6, "decode_bytes", decodeBytes,
-						"decode_user_ms", decodeUserNs/1e6, "decode_sys_ms", decodeSysNs/1e6,
 						"refault_rate", int64(refaultRate),
 						"refault_discount", int64(memory.PageCachePressureDiscount()),
 						"refault_activations", refaultActivations,
@@ -1157,7 +1155,6 @@ func (w *Worker) logFinalScanStats() {
 		refaultRate, refaultActivations := memory.PageCachePressureStats()
 		windowFullNs, pressureNs, tokenNs, ledgerNs := w.executor.ScanDecodeAheadStallNs()
 		decodeNs, decodeBytes := w.executor.ScanDecodeAheadDecodeSpans()
-	decodeUserNs, decodeSysNs := w.executor.ScanDecodeAheadDecodeCPU()
 		w.logger.Info("scan decode-ahead stats (final)",
 			"groups", groups, "window_fulls", windowFulls,
 			"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
@@ -1166,7 +1163,6 @@ func (w *Worker) logFinalScanStats() {
 			"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
 			"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
 			"decode_ms", decodeNs/1e6, "decode_bytes", decodeBytes,
-			"decode_user_ms", decodeUserNs/1e6, "decode_sys_ms", decodeSysNs/1e6,
 			"refault_rate", int64(refaultRate),
 			"refault_discount", int64(memory.PageCachePressureDiscount()),
 			"refault_activations", refaultActivations,

@@ -480,15 +480,6 @@ func TestDecodeAheadIter_DecodeSpans(t *testing.T) {
 	if bytesRead != wantBytes {
 		t.Errorf("decode span bytes = %d, want %d (all 8 groups)", bytesRead, wantBytes)
 	}
-	// CPU split: non-negative, and never wildly above wall (thread
-	// migration adds bounded noise; 2x wall means broken accounting).
-	userNs, sysNs := it.DecodeSpanCPU()
-	if userNs < 0 || sysNs < 0 {
-		t.Errorf("decode span cpu = (%d, %d), want both >= 0", userNs, sysNs)
-	}
-	if userNs+sysNs > 2*ns {
-		t.Errorf("decode span cpu %d > 2x wall %d", userNs+sysNs, ns)
-	}
 
 	// Pruning 6 of 8 groups: only the surviving groups' bytes count.
 	pruned, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,

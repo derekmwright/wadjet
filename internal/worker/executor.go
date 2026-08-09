@@ -154,10 +154,6 @@ type Executor struct {
 	// over a page-cache-hot run (rowgroup-readahead residual diagnosis).
 	scanDecodeAheadDecodeNs    atomic.Int64
 	scanDecodeAheadDecodeBytes atomic.Int64
-	// On-CPU user/sys split of scanDecodeAheadDecodeNs (RUSAGE_THREAD
-	// deltas): wall minus (user+sys) = off-CPU time inside decode spans.
-	scanDecodeAheadDecodeUserNs atomic.Int64
-	scanDecodeAheadDecodeSysNs  atomic.Int64
 	// Row groups skipped by dynamic-filter pruning (bloom + range),
 	// engagement marker for iterator-level attach — dispatch-time AND
 	// late (attach-on-arrival) deliveries both land here.
@@ -187,17 +183,15 @@ type decodeAheadQueryStats struct {
 	groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls atomic.Int64
 	windowFullNs, pressureNs, tokenNs, ledgerNs                    atomic.Int64
 	decodeNs, decodeBytes                                          atomic.Int64
-	decodeUserNs, decodeSysNs                                      atomic.Int64
 	prunedGroups                                                   atomic.Int64
-	emitted                                                        [14]int64
+	emitted                                                        [12]int64
 }
 
-func (s *decodeAheadQueryStats) snapshot() [14]int64 {
-	return [14]int64{s.groups.Load(), s.windowFulls.Load(), s.pressureStalls.Load(),
+func (s *decodeAheadQueryStats) snapshot() [12]int64 {
+	return [12]int64{s.groups.Load(), s.windowFulls.Load(), s.pressureStalls.Load(),
 		s.tokenStalls.Load(), s.ledgerStalls.Load(),
 		s.windowFullNs.Load(), s.pressureNs.Load(), s.tokenNs.Load(), s.ledgerNs.Load(),
-		s.decodeNs.Load(), s.decodeBytes.Load(), s.prunedGroups.Load(),
-		s.decodeUserNs.Load(), s.decodeSysNs.Load()}
+		s.decodeNs.Load(), s.decodeBytes.Load(), s.prunedGroups.Load()}
 }
 
 // SetStreamingShuffleRead enables streaming decode of shuffle inputs
@@ -251,7 +245,7 @@ func (e *Executor) SetScanDecodeAhead(on bool, windowBytes int64) {
 // foldScanDecodeAheadQueryStats adds one closed iterator's counters to
 // the per-query accumulator. queryID may be empty (embedded callers);
 // those fold under the "-" bucket rather than being dropped.
-func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls, windowFullNs, pressureNs, tokenNs, ledgerNs, decodeNs, decodeBytes, prunedGroups, decodeUserNs, decodeSysNs int64) {
+func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls, windowFullNs, pressureNs, tokenNs, ledgerNs, decodeNs, decodeBytes, prunedGroups int64) {
 	if queryID == "" {
 		queryID = "-"
 	}
@@ -269,8 +263,6 @@ func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowF
 	qs.decodeNs.Add(decodeNs)
 	qs.decodeBytes.Add(decodeBytes)
 	qs.prunedGroups.Add(prunedGroups)
-	qs.decodeUserNs.Add(decodeUserNs)
-	qs.decodeSysNs.Add(decodeSysNs)
 }
 
 // sweepScanDecodeAheadQueryStats emits per-query decode-ahead stats
@@ -300,7 +292,6 @@ func (e *Executor) sweepScanDecodeAheadQueryStats(final bool) {
 			"window_full_ms", cur[5]/1e6, "pressure_stall_ms", cur[6]/1e6,
 			"token_stall_ms", cur[7]/1e6, "ledger_stall_ms", cur[8]/1e6,
 			"decode_ms", cur[9]/1e6, "decode_bytes", cur[10],
-			"decode_user_ms", cur[12]/1e6, "decode_sys_ms", cur[13]/1e6,
 			"rg_pruned", cur[11])
 		return true
 	})
@@ -337,11 +328,6 @@ func (e *Executor) ScanDecodeAheadDecodeSpans() (ns, bytes int64) {
 	return e.scanDecodeAheadDecodeNs.Load(), e.scanDecodeAheadDecodeBytes.Load()
 }
 
-// ScanDecodeAheadDecodeCPU returns the on-CPU user/system split (ns) of
-// the ScanDecodeAheadDecodeSpans wall total.
-func (e *Executor) ScanDecodeAheadDecodeCPU() (userNs, sysNs int64) {
-	return e.scanDecodeAheadDecodeUserNs.Load(), e.scanDecodeAheadDecodeSysNs.Load()
-}
 
 // NewExecutor creates a new task executor.
 func NewExecutor(store objstore.Store, cache *LRUCache, js jetstream.JetStream) *Executor {

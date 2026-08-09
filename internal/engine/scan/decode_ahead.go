@@ -104,12 +104,6 @@ type DecodeAheadIter struct {
 	// (docs/design/rowgroup-readahead.md, residual diagnosis).
 	decodeSpanNs    atomic.Int64
 	decodeSpanBytes atomic.Int64
-	// On-CPU split of decodeSpanNs via RUSAGE_THREAD deltas sampled on
-	// a LockOSThread-pinned span: wall minus (user+sys) is the span's
-	// off-CPU time — faults, reclaim, and scheduler waits the stall
-	// counters cannot see.
-	decodeSpanUserNs atomic.Int64
-	decodeSpanSysNs  atomic.Int64
 }
 
 // timedWait waits on the window condvar and adds the blocked span to ns.
@@ -455,16 +449,6 @@ func (it *DecodeAheadIter) DecodeSpans() (ns, bytes int64) {
 	return it.decodeSpanNs.Load(), it.decodeSpanBytes.Load()
 }
 
-// DecodeSpanCPU returns the on-CPU user/system split (ns) of the
-// DecodeSpans wall total, from RUSAGE_THREAD deltas around each decode.
-// DecodeSpans wall minus (user+sys) approximates off-CPU time inside
-// spans. Zero on non-linux.
-func (it *DecodeAheadIter) DecodeSpanCPU() (userNs, sysNs int64) {
-	if it == nil {
-		return 0, 0
-	}
-	return it.decodeSpanUserNs.Load(), it.decodeSpanSysNs.Load()
-}
 
 // Next returns the next decoded row group in source order, or (nil, nil)
 // when exhausted. Contract identical to RowGroupIter.Next.
@@ -584,24 +568,10 @@ func (it *DecodeAheadIter) decodeLoop() {
 		}
 		slot := &decodeSlot{est: est, ahead: isAhead}
 		if pruned := it.pruneGroup(idx, ranges, blooms); !pruned {
-			// RUSAGE_THREAD deltas are only meaningful if both samples
-			// come from the same OS thread — pin the goroutine for the
-			// span. Decode is CPU-bound for milliseconds; the pin cost
-			// is a flag set/clear.
-			runtime.LockOSThread()
 			t0 := time.Now()
-			u0, s0 := threadCPUNs()
 			b, err := ReadRowGroupNative(it.fr, idx, it.readSchema, nil)
-			u1, s1 := threadCPUNs()
-			runtime.UnlockOSThread()
 			it.decodeSpanNs.Add(time.Since(t0).Nanoseconds())
 			it.decodeSpanBytes.Add(it.projectedCompressedBytes(idx))
-			if du := u1 - u0; du > 0 {
-				it.decodeSpanUserNs.Add(du)
-			}
-			if ds := s1 - s0; ds > 0 {
-				it.decodeSpanSysNs.Add(ds)
-			}
 			if err != nil {
 				slot.err = fmt.Errorf("reading row group %d: %w", idx, err)
 			} else {
