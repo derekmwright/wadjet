@@ -2,6 +2,7 @@ package distributed
 
 import (
 	"hash/fnv"
+	"sort"
 	"strings"
 )
 
@@ -19,15 +20,41 @@ func AffinityOwner(file string, workers []string) string {
 	var best string
 	var bestScore uint64
 	for _, w := range workers {
-		h := fnv.New64a()
-		h.Write([]byte(file))
-		h.Write([]byte{0})
-		h.Write([]byte(w))
-		if s := h.Sum64(); best == "" || s > bestScore || (s == bestScore && w < best) {
+		if s := affinityScore(file, w); best == "" || s > bestScore || (s == bestScore && w < best) {
 			best, bestScore = w, s
 		}
 	}
 	return best
+}
+
+// AffinityRank returns workers ordered by descending rendezvous weight for
+// file: rank[0] is the AffinityOwner, rank[1] the runner-up, and so on.
+// The runner-up is the file's stable secondary home — it inherits the file
+// on owner departure, so byte-balance shedding (coordinator
+// scan_affinity.go) targets it to keep shed placement consistent across
+// stages, queries, and membership churn.
+func AffinityRank(file string, workers []string) []string {
+	rank := append([]string(nil), workers...)
+	scores := make(map[string]uint64, len(rank))
+	for _, w := range rank {
+		scores[w] = affinityScore(file, w)
+	}
+	sort.Slice(rank, func(i, j int) bool {
+		si, sj := scores[rank[i]], scores[rank[j]]
+		if si != sj {
+			return si > sj
+		}
+		return rank[i] < rank[j]
+	})
+	return rank
+}
+
+func affinityScore(file, worker string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(file))
+	h.Write([]byte{0})
+	h.Write([]byte(worker))
+	return h.Sum64()
 }
 
 // BaseTablePeerKeyPrefix marks a PeerExchange FetchShuffle key as a

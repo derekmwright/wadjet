@@ -62,6 +62,12 @@ type StageOutput struct {
 	// across pass-through leaf scans that don't dispatch tasks themselves.
 	DynamicFilters []distributed.DynamicFilterSpec
 
+	// ScanFileSizes aligns 1:1 with Files[0] on the pass-through leaf
+	// scan path (catalog SizeBytes, copied from Stage.ScanFileSizes) so
+	// the downstream shuffle dispatcher's synthetic source stage can
+	// byte-balance its affine fan-out. Nil elsewhere.
+	ScanFileSizes []int64
+
 	// ScanTable/ScanColumns identify a pass-through leaf scan's relation
 	// and (sanitized) projection. Set ONLY on the no-task pass-through
 	// path, where downstream shuffle tasks read base parquet directly —

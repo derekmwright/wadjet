@@ -58,7 +58,11 @@ type Stage struct {
 	OutputColumns   []string
 	PartitionFilter map[string]string
 	ScanFiles       []string // files to distribute across scan tasks
-	FilterExprs     []string // SQL filter expressions pushed down to scan
+	// ScanFileSizes aligns 1:1 with ScanFiles (catalog SizeBytes). Feeds
+	// byte-balanced affinity fan-outs (coordinator scan_affinity.go);
+	// empty/misaligned degrades to count-based splitting.
+	ScanFileSizes []int64
+	FilterExprs   []string // SQL filter expressions pushed down to scan
 
 	// Aggregate metadata
 	GroupByCols []string
@@ -2785,6 +2789,7 @@ func (p *Planner) ExpandFederatedScans(stages []Stage) []Stage {
 					continue // skip clusters we can't read
 				}
 				var files []string
+				var fileSizes []int64
 				for _, part := range manifest.Partitions {
 					if len(stage.PartitionFilter) > 0 && len(part.Values) > 0 {
 						if !matchesPartitionFilter(part.Values, stage.PartitionFilter) {
@@ -2793,9 +2798,11 @@ func (p *Planner) ExpandFederatedScans(stages []Stage) []Stage {
 					}
 					for _, f := range part.Files {
 						files = append(files, f.Path)
+						fileSizes = append(fileSizes, f.SizeBytes)
 					}
 				}
 				newStage.ScanFiles = files
+				newStage.ScanFileSizes = fileSizes
 				if len(files) > 0 {
 					newStage.Tasks = len(files)
 				}
@@ -3395,6 +3402,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		stageID := fmt.Sprintf("scan-%d", len(*stages))
 		tasks := 1
 		var scanFiles []string
+		var scanFileSizes []int64
 		var estBytes, estRows int64
 		partFilter := node.PartitionFilter
 		if meta, err := p.catalog.GetManifest(context.Background(), node.TableName); err == nil {
@@ -3406,6 +3414,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				}
 				for _, f := range part.Files {
 					scanFiles = append(scanFiles, f.Path)
+					scanFileSizes = append(scanFileSizes, f.SizeBytes)
 					estBytes += f.SizeBytes
 					estRows += f.NumRows
 				}
@@ -3437,6 +3446,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			Columns:         node.RequiredColumns,
 			PartitionFilter: partFilter,
 			ScanFiles:       scanFiles,
+			ScanFileSizes:   scanFileSizes,
 			EstimatedBytes:  estBytes,
 			EstimatedRows:   estRows,
 		}

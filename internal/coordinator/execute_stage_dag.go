@@ -1036,6 +1036,9 @@ func (c *Coordinator) dispatchShuffleStage(
 		Columns:        upstream.ScanColumns,
 		EstimatedBytes: upstream.Bytes,
 	}
+	if len(upstream.ScanFileSizes) == len(sourceFiles) {
+		synthetic.ScanFileSizes = upstream.ScanFileSizes
+	}
 	// WSHF-input shuffle projection (fix 2 of the scan-output column leak):
 	// stage outputs get no read-time narrowing, so without this a shuffle
 	// over a wide upstream re-materializes every decoded column. Ship the
@@ -1465,11 +1468,12 @@ func (c *Coordinator) dispatchPipelineStage(
 		}
 		files := append([]string(nil), stage.ScanFiles...)
 		out := StageOutput{
-			Kind:        OutputSinglePart,
-			Files:       [][]string{files},
-			Bytes:       stage.EstimatedBytes, // catalog-true file sizes
-			ScanTable:   stage.TableName,
-			ScanColumns: append([]string(nil), stage.Columns...),
+			Kind:          OutputSinglePart,
+			Files:         [][]string{files},
+			Bytes:         stage.EstimatedBytes, // catalog-true file sizes
+			ScanFileSizes: append([]int64(nil), stage.ScanFileSizes...),
+			ScanTable:     stage.TableName,
+			ScanColumns:   append([]string(nil), stage.Columns...),
 		}
 		// Materialize Consume specs into wire form so downstream shuffle/
 		// stage dispatchers can ship them in their task descriptors
@@ -1603,7 +1607,9 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		taskCount = shardCount
 	} else {
 		taskCount = scanFanOutTaskCount(workerCount, capacity, len(stage.ScanFiles))
-		fileSets, affinity = affineFileSets(stage.ScanFiles, c.activeWorkerIDs(), taskCount)
+		var bal *affineBalance
+		fileSets, affinity, bal = affineFileSets(stage.ScanFiles, stage.ScanFileSizes, c.activeWorkerIDs(), taskCount)
+		c.logAffineBalance(stage.ID, bal)
 		if fileSets == nil {
 			fileSets = splitFilesEvenly(stage.ScanFiles, taskCount)
 		}
@@ -1869,7 +1875,9 @@ func (c *Coordinator) dispatchScanFilterStage(
 		// which keeps each task's heap below the 32GB worker limit and avoids
 		// the OOM-restart-then-idle-timeout pattern observed on Q04 SF10.
 		taskCount := scanFanOutTaskCount(workerCount, capacity, len(stage.ScanFiles))
-		fileSets, affinity = affineFileSets(stage.ScanFiles, c.activeWorkerIDs(), taskCount)
+		var bal *affineBalance
+		fileSets, affinity, bal = affineFileSets(stage.ScanFiles, stage.ScanFileSizes, c.activeWorkerIDs(), taskCount)
+		c.logAffineBalance(stage.ID, bal)
 		if fileSets == nil {
 			fileSets = splitFilesEvenly(stage.ScanFiles, taskCount)
 		}

@@ -444,6 +444,9 @@ locals {
     # coordinator-side planner pass. Default on; =false is the A/B /
     # kill-switch arm.
     export WADJET_SCAN_OUTPUT_PRUNE="${var.scan_output_prune ? "1" : "0"}"
+    # Byte-balanced affinity fan-outs (scan-affinity-byte-balance.md):
+    # coordinator-side. Default on; "0" is the A/B / kill-switch arm.
+    export WADJET_AFFINITY_BYTE_BALANCE="${var.affinity_byte_balance}"
     # Scan→shuffle fusion (fuseScanShuffle, 765ce81): coordinator-side
     # planner pass. Default on; =false is the A/B / kill-switch arm.
     export WADJET_FUSE_SCAN_SHUFFLE="${var.fuse_scan_shuffle ? "1" : "0"}"

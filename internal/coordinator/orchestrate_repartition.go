@@ -223,7 +223,8 @@ func (c *Coordinator) runShuffleSide(
 	// (used by dispatchScanAggregateStage et al) — see execute_stage_dag.go.
 	capacity := c.workers.ClusterCapacity()
 	taskCount := scanFanOutTaskCount(workerCount, capacity, len(sourceStage.ScanFiles))
-	fileSets, affinity := affineFileSets(sourceStage.ScanFiles, c.activeWorkerIDs(), taskCount)
+	fileSets, affinity, bal := affineFileSets(sourceStage.ScanFiles, sourceStage.ScanFileSizes, c.activeWorkerIDs(), taskCount)
+	c.logAffineBalance(sourceStage.ID, bal)
 	if fileSets == nil {
 		fileSets = splitFilesEvenly(sourceStage.ScanFiles, taskCount)
 	}

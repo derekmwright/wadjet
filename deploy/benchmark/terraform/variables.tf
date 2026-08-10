@@ -306,6 +306,12 @@ variable "rowgroup_touch" {
   default     = "1"
 }
 
+variable "affinity_byte_balance" {
+  description = "WADJET_AFFINITY_BYTE_BALANCE for the coordinator: byte-balanced scan-affinity fan-outs — over-share owners shed surplus files to each file's rendezvous runner-up (docs/design/scan-affinity-byte-balance.md). Default \"1\" matches the in-binary default; \"0\" is the same-binary A/B off arm / kill switch. Inert when WADJET_SCAN_AFFINITY=0."
+  type        = string
+  default     = "1"
+}
+
 variable "touch_populate" {
   description = "WADJET_TOUCH_POPULATE for the workers: batched MADV_POPULATE_READ page-in inside the row-group toucher instead of the byte-per-page walk (rowgroup_touch.go). Default \"1\" matches the in-binary default; \"0\" is the same-binary A/B off arm / kill switch. Inert when rowgroup_touch=0."
   type        = string
