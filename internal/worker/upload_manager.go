@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -130,6 +131,16 @@ type uploadManager struct {
 
 	mu      sync.Mutex
 	queries map[string]*queryUploadState
+	// cancelledRoots tombstones roots whose CancelQuery already ran. A
+	// straggler task can reach StartTask AFTER its query's terminal
+	// broadcast was handled (the same adopt-after-cleanup race the
+	// LocalStageCache tombstones); without this, queryState resurrects the
+	// root with a fresh un-cancelled context and its jobs run against
+	// already-purged scratch files — each one burning the full retry
+	// ladder on ENOENT and logging an abandoned-upload error storm
+	// (q22-R2 stall window, 2026-08-10). Pruned on insert after
+	// tombstoneTTL, same retention as the cache's cleaned map.
+	cancelledRoots map[string]time.Time
 
 	// Observability counters.
 	completed      atomic.Int64 // files uploaded in the background
@@ -169,12 +180,13 @@ func newUploadManager(store objstore.Store, nc *nats.Conn, logger *slog.Logger) 
 		logger = slog.Default()
 	}
 	return &uploadManager{
-		store:      store,
-		nc:         nc,
-		logger:     logger,
-		queries:    make(map[string]*queryUploadState),
-		seenRoots:  make(map[string]struct{}),
-		activeJobs: make(map[int64]struct{}),
+		store:          store,
+		nc:             nc,
+		logger:         logger,
+		queries:        make(map[string]*queryUploadState),
+		cancelledRoots: make(map[string]time.Time),
+		seenRoots:      make(map[string]struct{}),
+		activeJobs:     make(map[int64]struct{}),
 	}
 }
 
@@ -417,10 +429,17 @@ type taskUploads struct {
 	anyCanceled atomic.Bool
 }
 
-// queryState returns (creating if needed) the cancel scope for a root query.
+// queryState returns (creating if needed) the cancel scope for a root query,
+// or nil when the root is tombstoned (CancelQuery already ran — the query is
+// terminal and its scratch is purged or about to be; starting uploads for it
+// is pure waste). The tombstone check shares mu with the map so a concurrent
+// CancelQuery can never slip between check and insert.
 func (m *uploadManager) queryState(root string) *queryUploadState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, terminal := m.cancelledRoots[root]; terminal {
+		return nil
+	}
 	qs := m.queries[root]
 	if qs == nil {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -430,9 +449,10 @@ func (m *uploadManager) queryState(root string) *queryUploadState {
 	return qs
 }
 
-// CancelQuery aborts pending uploads for a terminal query and drops its
-// scope. Queued lazy jobs are elided — counted as PUT work the query never
-// needed. Safe for unknown roots, repeated calls, and nil receivers.
+// CancelQuery aborts pending uploads for a terminal query, drops its scope,
+// and tombstones the root so a straggler task's later StartTask can't
+// resurrect it. Queued lazy jobs are elided — counted as PUT work the query
+// never needed. Safe for unknown roots, repeated calls, and nil receivers.
 func (m *uploadManager) CancelQuery(root string) {
 	if m == nil {
 		return
@@ -440,6 +460,13 @@ func (m *uploadManager) CancelQuery(root string) {
 	m.mu.Lock()
 	qs := m.queries[root]
 	delete(m.queries, root)
+	m.cancelledRoots[root] = time.Now()
+	cutoff := time.Now().Add(-tombstoneTTL)
+	for r, at := range m.cancelledRoots {
+		if at.Before(cutoff) {
+			delete(m.cancelledRoots, r)
+		}
+	}
 	m.mu.Unlock()
 	if qs != nil {
 		qs.cancel()
@@ -563,12 +590,22 @@ func (m *uploadManager) StartTask(root, taskID, workerID string, jobs []uploadJo
 		}
 		return
 	}
+	qs := m.queryState(root)
+	if qs == nil {
+		// Root already terminal (straggler task racing the query-complete
+		// broadcast): the scratch these jobs would read is purged or about
+		// to be. Count them cancelled; no UploadComplete — nobody consumes
+		// the durability bit anymore.
+		for _, j := range jobs {
+			m.noteCancelled(j)
+		}
+		return
+	}
 	tu := &taskUploads{m: m, root: root, taskID: taskID, workerID: workerID}
 	for _, j := range jobs {
 		tu.keys = append(tu.keys, j.key)
 	}
 	tu.remaining.Store(int64(len(jobs)))
-	qs := m.queryState(root)
 	if policy == distributed.UploadLazy {
 		qs.mu.Lock()
 		if !qs.released {
@@ -630,6 +667,12 @@ func (m *uploadManager) runJob(qs *queryUploadState, tu *taskUploads, j uploadJo
 			tu.anyCanceled.Store(true)
 			m.noteCancelled(j)
 			return
+		}
+		if errors.Is(lastErr, os.ErrNotExist) {
+			// The source is cache-owned; once unlinked it never comes back.
+			// Retrying just stretches a certain failure across the backoff
+			// ladder (3.5s of ENOENT reopens per file during purge races).
+			break
 		}
 		backoff := uploadRetryBackoff << (attempt - 1)
 		select {

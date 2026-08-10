@@ -507,6 +507,12 @@ func (w *Worker) Start(ctx context.Context) error {
 			}
 		}
 		w.cancelledMu.Unlock()
+		// Abort pending background uploads FIRST — the cache purge below
+		// unlinks the very files those jobs read, and a job that loses its
+		// source before its context is cancelled reports an abandoned
+		// upload instead of a cancelled one. Cancel-then-purge keeps the
+		// race window at zero.
+		w.executor.uploads.CancelQuery(queryID)
 		// Free per-query state. Cancelled queries won't read any further
 		// stage outputs, so their spill files are pure leak otherwise.
 		if w.executor.localCache != nil {
@@ -516,9 +522,6 @@ func (w *Worker) Start(ctx context.Context) error {
 			w.executor.broadcastCache.CleanupQuery(queryID)
 		}
 		w.executor.peers.CleanupQuery(queryID)
-		// Abort pending background uploads — a terminal query's scratch is
-		// about to be purged; landing more of it is waste (and re-leaks).
-		w.executor.uploads.CancelQuery(queryID)
 		w.logger.Debug("query cancelled", "query_id", queryID)
 	})
 	if err != nil {
@@ -530,6 +533,9 @@ func (w *Worker) Start(ctx context.Context) error {
 	// query in cleanupQuery().
 	completeSub, err := w.nc.Subscribe(distributed.CompleteSubjectAll(), func(msg *nats.Msg) {
 		queryID := string(msg.Data)
+		// Same ordering as the cancel handler: kill the uploads before
+		// purging the files they read.
+		w.executor.uploads.CancelQuery(queryID)
 		if w.executor.localCache != nil {
 			n := w.executor.localCache.CleanupQuery(queryID)
 			if n > 0 {
@@ -556,7 +562,6 @@ func (w *Worker) Start(ctx context.Context) error {
 			w.executor.resultStore.CleanupQuery(queryID)
 		}
 		w.executor.peers.CleanupQuery(queryID)
-		w.executor.uploads.CancelQuery(queryID)
 	})
 	if err != nil {
 		return fmt.Errorf("subscribing to completions: %w", err)

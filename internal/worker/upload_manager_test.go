@@ -179,6 +179,55 @@ func TestUploadManagerLazyElidedOnCancel(t *testing.T) {
 	}
 }
 
+// TestUploadManagerStartTaskAfterCancelTombstoned: a straggler task's
+// StartTask arriving AFTER its query's CancelQuery must not resurrect the
+// root with a fresh un-cancelled context — before the tombstone, its jobs
+// ran against already-purged scratch files and burned the full retry ladder
+// into an abandoned-upload error storm (q22-R2 stall window, 2026-08-10).
+func TestUploadManagerStartTaskAfterCancelTombstoned(t *testing.T) {
+	store := newTestStore(t, "b")
+	m := newUploadManager(store, nil, nil)
+	m.CancelQuery("q1")
+	// Simulate the purge having already unlinked the adopted file.
+	gone := filepath.Join(t.TempDir(), "purged.wshf")
+	m.StartTask("q1", "t1", "w1", []uploadJob{
+		{bucket: "b", key: "queries/q1/s/a.wshf", srcPath: gone, size: 8},
+		{bucket: "b", key: "queries/q1/s/b.wshf", srcPath: gone, size: 8},
+	}, distributed.UploadEager)
+	done, cancelled, failed := m.UploadStats()
+	if done != 0 || cancelled != 2 || failed != 0 {
+		t.Fatalf("stats = (done %d, cancelled %d, failed %d), want (0, 2, 0)", done, cancelled, failed)
+	}
+	if _, cancelledBytes := m.UploadByteStats(); cancelledBytes != 16 {
+		t.Fatalf("cancelledBytes = %d, want 16", cancelledBytes)
+	}
+	m.mu.Lock()
+	_, resurrected := m.queries["q1"]
+	m.mu.Unlock()
+	if resurrected {
+		t.Fatal("StartTask resurrected a cancelled root's upload scope")
+	}
+}
+
+// TestUploadManagerMissingSourceFailsFast: a live root whose source file is
+// gone must abandon on the FIRST attempt — the source is cache-owned, so
+// ENOENT is permanent and the retry backoff ladder (3.5s/file) is pure delay.
+func TestUploadManagerMissingSourceFailsFast(t *testing.T) {
+	store := newTestStore(t, "b")
+	m := newUploadManager(store, nil, nil)
+	start := time.Now()
+	m.StartTask("q1", "t1", "w1", []uploadJob{
+		{bucket: "b", key: "queries/q1/s/a.wshf", srcPath: filepath.Join(t.TempDir(), "gone.wshf"), size: 8},
+	}, distributed.UploadEager)
+	waitFor(t, "missing-source job to abandon", func() bool {
+		_, _, failed := m.UploadStats()
+		return failed == 1
+	})
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("abandon took %v — retry ladder ran despite permanent ENOENT", elapsed)
+	}
+}
+
 // TestUploadManagerOffElidesImmediately: off-policy jobs never start, never
 // track, and count elided at StartTask.
 func TestUploadManagerOffElidesImmediately(t *testing.T) {
