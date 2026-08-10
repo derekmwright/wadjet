@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +257,124 @@ func TestCompactTable_AppliesDeleteMarkers(t *testing.T) {
 	manifest, _ := cat.GetManifest(ctx, "logs")
 	if len(manifest.DeleteMarkers) != 0 {
 		t.Errorf("expected 0 delete markers after compaction, got %d", len(manifest.DeleteMarkers))
+	}
+}
+
+// TestCompactTable_DeleteMarkersAcrossRowGroups: the merge reads one row
+// group at a time (memory-bound fix for the 2026-08-10 coordinator OOM),
+// and delete markers index rows FILE-wide — the per-group offset math
+// must keep markers in later row groups landing on the right rows.
+func TestCompactTable_DeleteMarkersAcrossRowGroups(t *testing.T) {
+	cat, store := setupTestCatalog(t)
+	ctx := context.Background()
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+		},
+	}
+	if err := cat.CreateTable(ctx, "logs", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two files, each with 3 row groups of 4 rows (RowGroupSize=4).
+	partValues := map[string]string{}
+	partPath := "tables/logs/data"
+	var allFiles []catalog.FileEntry
+	for i := 0; i < 2; i++ {
+		path := fmt.Sprintf("%s/chunk_%04d.parquet", partPath, i)
+		var rows []map[string]any
+		for r := 0; r < 12; r++ {
+			rows = append(rows, map[string]any{"id": int64(i*100 + r)})
+		}
+		var buf bytes.Buffer
+		cfg := parquet.DefaultWriterConfig()
+		cfg.RowGroupSize = 4
+		w, err := parquet.NewWriter(&buf, schema, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.WriteRows(rows); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		size := int64(buf.Len())
+		if _, err := store.Put(ctx, "test-bucket", path, bytes.NewReader(buf.Bytes()), size, "application/octet-stream"); err != nil {
+			t.Fatal(err)
+		}
+		fe := catalog.FileEntry{Path: path, SizeBytes: size, NumRows: 12, CreatedAt: time.Now().UTC()}
+		allFiles = append(allFiles, fe)
+		if err := cat.AddFiles(ctx, "logs", partValues, partPath, []catalog.FileEntry{fe}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Markers in the first, middle, and last row group of file 0, and the
+	// last row group of file 1: file-wide indices 0, 5, 11; and 100+8..11.
+	if err := cat.AddDeleteMarkers(ctx, "logs", []catalog.DeleteMarker{
+		{FilePath: allFiles[0].Path, RowIndices: []int64{0, 5, 11}},
+		{FilePath: allFiles[1].Path, RowIndices: []int64{8, 9, 10, 11}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.MinFiles = 2
+	c := New(cat, nil, cfg)
+	result, err := c.CompactTable(ctx, "logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowsMerged != 17 { // 24 - 7 deleted
+		t.Fatalf("rows merged: got %d, want 17", result.RowsMerged)
+	}
+
+	// Read the merged file back and verify exactly the surviving ids.
+	manifest, err := cat.GetManifest(ctx, "logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[int64]bool{}
+	for _, r := range []int64{1, 2, 3, 4, 6, 7, 8, 9, 10} {
+		want[r] = true
+	}
+	for _, r := range []int64{100, 101, 102, 103, 104, 105, 106, 107} {
+		want[r] = true
+	}
+	got := map[int64]bool{}
+	for _, part := range manifest.Partitions {
+		for _, fe := range part.Files {
+			rc, _, err := cat.ReadFile(ctx, fe.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			rd, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := rd.ReadRows([]string{"id"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range rows {
+				got[row["id"].(int64)] = true
+			}
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("surviving ids: got %d, want %d (%v)", len(got), len(want), got)
+	}
+	for id := range want {
+		if !got[id] {
+			t.Fatalf("id %d missing from merged output", id)
+		}
 	}
 }
 

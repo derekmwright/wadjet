@@ -348,28 +348,40 @@ func (c *Compactor) mergeAndWriteFiles(ctx context.Context, files []catalog.File
 		if err != nil {
 			return nil, fmt.Errorf("opening parquet %s: %w", f.Path, err)
 		}
-		rows, err := reader.ReadRows(schema.ColumnNames())
-		if err != nil {
-			return nil, fmt.Errorf("reading rows from %s: %w", f.Path, err)
-		}
-
-		// Apply delete markers
-		if deleted, ok := deleteSet[f.Path]; ok && len(deleted) > 0 {
-			filtered := make([]map[string]any, 0, len(rows))
-			for i, row := range rows {
-				if !deleted[int64(i)] {
-					filtered = append(filtered, row)
-				}
+		// Merge one row group at a time: ReadRows materializes the whole
+		// file as []map[string]any (~10x the on-disk bytes), and the
+		// background sweep runs concurrently with query execution — the
+		// 2026-08-10 SF10 coordinator memcg OOM was this exact path
+		// holding 1.4 GB live mid-suite. The writer flushes its own row
+		// groups as it goes, so peak memory is one input row group.
+		// Delete markers index rows file-wide; base carries the offset.
+		cols := schema.ColumnNames()
+		deleted := deleteSet[f.Path]
+		var base int64
+		for rg := 0; rg < reader.NumRowGroups(); rg++ {
+			rows, err := reader.ReadRowGroup(rg, cols)
+			if err != nil {
+				return nil, fmt.Errorf("reading row group %d from %s: %w", rg, f.Path, err)
 			}
-			rows = filtered
+			groupRows := int64(len(rows))
+			if len(deleted) > 0 {
+				filtered := make([]map[string]any, 0, len(rows))
+				for i, row := range rows {
+					if !deleted[base+int64(i)] {
+						filtered = append(filtered, row)
+					}
+				}
+				rows = filtered
+			}
+			base += groupRows
+			if len(rows) == 0 {
+				continue
+			}
+			if err := w.WriteRows(rows); err != nil {
+				return nil, fmt.Errorf("writing rows from %s: %w", f.Path, err)
+			}
+			res.rowsWritten += int64(len(rows))
 		}
-		if len(rows) == 0 {
-			continue
-		}
-		if err := w.WriteRows(rows); err != nil {
-			return nil, fmt.Errorf("writing rows from %s: %w", f.Path, err)
-		}
-		res.rowsWritten += int64(len(rows))
 	}
 
 	if res.rowsWritten == 0 {
