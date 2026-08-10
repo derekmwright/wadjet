@@ -606,6 +606,39 @@ resource "aws_instance" "worker" {
       echo "ena-poll sampler started on $NET_IF (30s cadence -> journald)"
     fi
 
+    # Frozen-spin watchdog: the 2026-08-10 q22-R2 stall was a worker
+    # process whose Go scheduler froze for 3m43s while one goroutine
+    # pegged a core (STW-stuck signature; docs/benchmarks/
+    # rebaseline-2026-08-10.md). Detection: the metrics port stops
+    # answering while process CPU keeps accruing. Response: SIGQUIT —
+    # the runtime dumps every goroutine stack (including the RUNNING
+    # spinner) to stderr -> journald -> wlogs, and the supervising
+    # restart loop + JetStream redelivery keep the suite going. A
+    # healthy-idle or healthy-busy worker always answers pprof, so
+    # false positives need a 4s unresponsive window AND >=1.5s of CPU.
+    ( declare -A lastok lastut
+      while true; do
+        sleep 1
+        for pid in $(pgrep -f "wadjet serve --mode=worker"); do
+          ut=$(awk '{print $14+$15}' /proc/$pid/stat 2>/dev/null) || continue
+          now=$(date +%s%N)
+          if curl -s --max-time 1 "http://127.0.0.1:9100/debug/pprof/cmdline" -o /dev/null; then
+            lastok[$pid]=$now; lastut[$pid]=$ut
+            continue
+          fi
+          prevok=$${lastok[$pid]:-$now}; prevut=$${lastut[$pid]:-$ut}
+          unresp_ms=$(( (now - prevok) / 1000000 ))
+          dut=$(( ut - prevut ))
+          if [ "$unresp_ms" -gt 4000 ] && [ "$dut" -gt 150 ]; then
+            logger -t stall-watchdog "FROZEN-SPIN pid=$pid unresp_ms=$unresp_ms cpu_jiffies=$dut sending SIGQUIT"
+            kill -QUIT "$pid"
+            unset "lastok[$pid]" "lastut[$pid]"
+            sleep 5
+          fi
+        done
+      done ) &
+    echo "stall-watchdog started (SIGQUIT on frozen-spin signature)"
+
     # Spill-to-disk location selection. NVMe instance store (c7gd, i4g)
     # is fastest; fall back to EBS-backed /var/spill for instances
     # without instance store (c7g.* etc.).
