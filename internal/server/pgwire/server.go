@@ -225,6 +225,7 @@ type pgConn struct {
 	resultFmtCodes []int16                 // result format codes from Bind (0=text, 1=binary)
 	describeResult *wadjet.QueryResult     // cached Describe result for Execute reuse
 	describeStream coordinator.BatchStream // columnar half of describeResult (coord path)
+	describeErr    error                   // cached Describe-time execution failure for Execute replay
 
 	// Transaction state: 'I' = idle, 'T' = in transaction, 'E' = failed
 	txState byte
@@ -998,8 +999,15 @@ func (c *pgConn) describeSQL(sql string) {
 		result, err = c.db.Query(ctx, sql)
 	}
 	if err != nil {
-		// Can't describe — send NoData rather than error (the error
-		// will surface when Execute runs).
+		// Can't describe — send NoData rather than error, and CACHE the
+		// failure for Execute to replay. The query already ran to failure
+		// here; re-executing it at Execute would double the cost of every
+		// deterministic failure (and against a broken environment the
+		// second run can behave far worse than the first — the 2026-08-10
+		// disk-full repro's first execution failed in 4s, then the silent
+		// re-execution hung to the query timeout on lost task results).
+		c.closeDescribeCache()
+		c.describeErr = err
 		c.sendMsg('n', nil)
 		return
 	}
@@ -1065,6 +1073,16 @@ func (c *pgConn) handleExecute(payload []byte) {
 
 	// Handle catalog/introspection queries from BI tools
 	if result := c.handleIntrospection(sql, upper); result {
+		return
+	}
+
+	// Replay a Describe-time execution failure instead of re-executing:
+	// the query already ran to failure once; Execute's job is to surface
+	// that error to the client, not to run the query again.
+	if c.describeErr != nil {
+		err := c.describeErr
+		c.describeErr = nil
+		c.sendError("ERROR", "42000", err.Error())
 		return
 	}
 

@@ -122,4 +122,5 @@ func (c *pgConn) closeDescribeCache() {
 		c.describeStream = nil
 	}
 	c.describeResult = nil
+	c.describeErr = nil
 }

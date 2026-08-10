@@ -2,14 +2,18 @@ package pgwire
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/coordinator"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/wadjet"
 )
 
 // recordConn is a net.Conn that captures everything written to it.
@@ -68,6 +72,50 @@ func TestSendResultRows_PerBatch(t *testing.T) {
 		if b != nil {
 			t.Errorf("batch %d reference not dropped after send", i)
 		}
+	}
+}
+
+// Regression test (2026-08-10 disk-full sit): a Describe-time execution
+// failure was swallowed (NoData) and Execute silently RE-EXECUTED the whole
+// query — doubling the cost of every deterministic failure, and against a
+// broken environment (ENOSPC) converting a 4s fast-fail into a hang to the
+// query timeout. Execute must replay the cached Describe error instead.
+func TestExecuteReplaysDescribeError(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rc := &recordConn{}
+	c := &pgConn{conn: rc, db: db, stmts: map[string]string{}}
+	c.preparedSQL = "SELECT no_such_function(1) FROM (SELECT" // guaranteed parse failure
+
+	c.describeSQL(c.preparedSQL)
+	if c.describeErr == nil {
+		t.Fatal("describeSQL on a failing query did not cache the failure")
+	}
+	if got := countMsgs(rc.buf.Bytes(), 'n'); got != 1 {
+		t.Fatalf("NoData messages after failed Describe = %d, want 1", got)
+	}
+
+	// Overwrite the cached error with a sentinel: if Execute REPLAYS the
+	// cache, the client sees the sentinel; if it re-executes the query, it
+	// would see a fresh table-not-found message instead.
+	c.describeErr = errors.New("sentinel: describe-time failure replayed")
+	rc.buf.Reset()
+	c.handleExecute(nil)
+
+	wire := rc.buf.Bytes()
+	if got := countMsgs(wire, 'E'); got != 1 {
+		t.Fatalf("ErrorResponse messages = %d, want 1", got)
+	}
+	if !bytes.Contains(wire, []byte("sentinel: describe-time failure replayed")) {
+		t.Fatalf("Execute did not replay the cached Describe error; wire = %q", wire)
+	}
+	if c.describeErr != nil {
+		t.Fatal("describeErr not cleared after replay")
 	}
 }
 
