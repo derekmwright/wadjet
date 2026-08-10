@@ -100,3 +100,31 @@ Validation path: SF10-capped zero-EC2 testbed first (the 08-08 recipe;
 the same regime — +23 % ns/byte, 14× token stalls — reproduces locally),
 then one SF100 pair. Gate: R2/R1 ratio and absolute steady wall vs the
 323.5/449.8 reference; rows 44/44.
+
+## VERDICT (2026-08-10 pair): lever 1 SHIPPED, KEEPER
+
+Lever 1 (`MADV_POPULATE_READ` chunked populate in the toucher,
+commit 2c7f7a9, kill switch `WADJET_TOUCH_POPULATE=0`) validated on an
+SF100 same-window pair (ctl 20260809-234631 byte-walk / trt
+20260810-000753 populate, bin 2c7f7a9, cache-on defaults):
+
+- Walls: ctl 348.0 / 691.4 s (drift 1.99×) → trt 361.2 / 449.3 s
+  (drift **1.24×**). Steady wall **−35.0 %** same-window; cold +3.8 %
+  (in-band — trt absorbed ~20 % more ENA throttle events pushing the
+  same bytes in less time).
+- Rows 44/44 both arms, per-query counts identical across arms/runs.
+- Engagement: trt populated 127.2 GB = 100 % of touched bytes, 0
+  drops; ctl `touch_populate_bytes=0` (kill-switch path verified).
+- ENA context: byte totals near-identical (rx 136 vs 134 GB cluster) —
+  the win is not a network artifact.
+- Note the ctl run-2 of 691 s versus the reference night's 449.8 s on
+  the same code: the byte-walk regime carries huge window-to-window
+  steady variance; populate clamps run 2 at the reference level in a
+  window where byte-walk doubled. The lever likely reduces steady
+  *variance* even more than the single-pair delta shows.
+
+Remaining residual: steady ratio ~1.24 (matches the post-touch-ahead
+08-08 floor). Open follow-ups: scan-affinity per-worker decode skew
+(barriers pace on the slowest worker), and the coordinator q11
+live-set runaway under peer-wire compression found on the SF10 capped
+testbed (2 GiB envelope) during this arc's local validation.
