@@ -27,8 +27,8 @@ remains is event-shaped, not throughput-shaped.
 
 ## The q22 finding: a coordinator dispatch stall, not variance
 
-q22 run 2: 5.6 s → 48.7 s reported (and the true span is worse — see
-below). Coordinator timeline (query ad6030c5):
+q22 run 2: 5.6 s → 3m48.7 s reported. Coordinator timeline (query
+ad6030c5):
 
 - 02:10:15.5 — stage-DAG dispatch (9 stages, `dispatch_concurrency=12
   source=cluster_capacity`)
@@ -52,10 +52,15 @@ q22 run-2 also blew up 3.8× in the same night's SF10 capped off-arm
 late-suite repartition, always run 2 — whatever state the wakeup race
 needs, end-of-suite run 2 has the most of it.
 
-Measurement nuance: the harness reported 48.7 s for a query whose
-dispatch-to-gather span was ~229 s — per-query walls under-count
-coordinator-side stalls, and R2's sum-of-walls (571 s) disagrees with
-the actual run span. Trust coordinator timestamps for stall forensics.
+Measurement note (corrected 2026-08-10): an earlier revision of this
+doc claimed the harness reported 48.7 s against a ~229 s true span —
+that was a transcription slip of "3m48.7s". The raw results file shows
+Q22 R2 = 3m48.683 s and R2 sum-of-walls 9m31 s including it: the
+bench's client-side per-query wall wraps the full ExecuteSQL
+dispatch→gather span and does NOT under-count coordinator-side stalls.
+Per-query walls are trustworthy for stall accounting; coordinator
+timestamps remain the tool for attributing WHERE inside the span the
+time went.
 
 ## Standing numbers
 
