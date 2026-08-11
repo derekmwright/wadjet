@@ -500,6 +500,11 @@ resource "aws_instance" "standalone" {
   # gzip: cloud-init auto-decompresses; the raw bootstrap outgrew the
   # 16KB user-data cap (2026-08-11, stall-watchdog + ena-poll growth).
   user_data_base64 = base64gzip(local.standalone_user_data)
+  # Without this, a user-data change on an instance surviving in state
+  # (e.g. a self-stopped coordinator) is applied in place and cloud-init
+  # never re-runs per-instance scripts on restart — the box boots with a
+  # stale bootstrap and the benchmark silently never starts (2026-08-11).
+  user_data_replace_on_change = true
 
   tags = {
     Name    = "wadjet-bench-standalone"
@@ -534,6 +539,8 @@ resource "aws_instance" "coordinator" {
   # shutdown_behavior = stop so we can inspect logs if the benchmark crashes.
 
   user_data_base64 = base64gzip(local.coordinator_user_data)
+  # See standalone resource: stale-bootstrap restart guard (2026-08-11).
+  user_data_replace_on_change = true
 
   tags = {
     Name    = "wadjet-bench-coordinator"
@@ -819,6 +826,8 @@ resource "aws_instance" "worker" {
     wait
   EOF
   )
+  # See standalone resource: stale-bootstrap restart guard (2026-08-11).
+  user_data_replace_on_change = true
 
   tags = {
     Name    = "wadjet-bench-worker-${count.index}"
