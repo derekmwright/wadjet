@@ -251,6 +251,15 @@ locals {
       return 1
     }
 
+    # Wait for IAM instance-profile creds to reach IMDS: a fresh apply
+    # creates the profile seconds before launch and the coordinator can
+    # boot ahead of propagation (2026-08-11 ctl arm bootstrap death).
+    for i in $(seq 1 60); do
+      T=$(curl -s -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" http://169.254.169.254/latest/api/token)
+      [ -n "$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/iam/security-credentials/)" ] && break
+      sleep 5
+    done
+
     # Download pre-built arm64 binaries from the data bucket
     retry aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/wadjet" /usr/local/bin/wadjet --region ${local.eff_region}
     retry aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/tpch-bench" /usr/local/bin/tpch-bench --region ${local.eff_region}
