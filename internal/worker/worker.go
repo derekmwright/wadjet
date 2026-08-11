@@ -14,6 +14,7 @@ import (
 	"runtime/pprof"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/dataplane"
@@ -1582,6 +1583,7 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 		progressIdleThreshold   = 60 * time.Second
 		maxInProgressExtensions = 5 // belt-and-suspenders if the progress signal stops working
 	)
+	var executeDone atomic.Bool // set when executor.Execute returns; read by the idle WARN
 	go func() {
 		cancelTicker := time.NewTicker(500 * time.Millisecond)
 		defer cancelTicker.Stop()
@@ -1621,8 +1623,19 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 			case <-ackTicker.C:
 				_, _, lastUpdate := taskProgress.snapshot()
 				if !lastUpdate.IsZero() && time.Since(lastUpdate) > progressIdleThreshold {
+					// The monitor lives until handleTask RETURNS, which
+					// includes result delivery after Execute — so say which
+					// phase went idle. The 2026-08-11 Q21-R2 diagnosis burned
+					// time on WARNs that read as execution stalls but were
+					// post-execution delivery stalls (2 of 3 tasks had logged
+					// "task completed" minutes earlier) — that distinction IS
+					// the finding, and the log line should carry it.
+					phase := "executing"
+					if executeDone.Load() {
+						phase = "delivering result (execution already completed)"
+					}
 					w.logger.Warn("task progress idle; stopping AckWait extension",
-						"task_id", task.ID, "query_id", task.QueryID,
+						"task_id", task.ID, "query_id", task.QueryID, "phase", phase,
 						"idle_for", time.Since(lastUpdate).Round(time.Second))
 					return
 				}
@@ -1664,6 +1677,7 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 		}()
 		result = w.executor.Execute(taskCtx, task, w.config.WorkerID)
 	}()
+	executeDone.Store(true)
 
 	// Propagate trace context to result notification
 	result.TraceID = task.TraceID
