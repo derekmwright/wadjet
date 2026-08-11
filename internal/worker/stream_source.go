@@ -639,21 +639,13 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	// Fallback: when spillDir is empty (tests, MemStore-only setups)
 	// keep the in-memory path but drop the double-buffer by using
 	// NewReaderFromBytes (zero-copy) instead of NewReader+bytes.Reader.
+	// Just-written temp: always the zero-copy mmap (pages resident; the
+	// SF100 pair priced pread staging of this hot path at +15.9% cold —
+	// see the design doc's refinement section).
 	var data []byte
 	var mmapData []byte
 	var localPath string
-	if s.executor.spillDir != "" && scanPreadEnabled {
-		f, lp, size, err := s.streamParquetToLocalFile(ctx, filePath, magic[:], rc)
-		if err != nil {
-			return fmt.Errorf("streaming parquet %s to local file: %w", filePath, err)
-		}
-		p, err := s.buildParquetStateFromFile(filePath, f, size, lp)
-		if err != nil {
-			return err
-		}
-		s.installParquet(p)
-		return nil
-	} else if s.executor.spillDir != "" {
+	if s.executor.spillDir != "" {
 		md, lp, err := s.streamParquetToLocalMmap(ctx, filePath, magic[:], rc)
 		if err != nil {
 			return fmt.Errorf("streaming parquet %s to local mmap: %w", filePath, err)
@@ -678,7 +670,8 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 func (s *cachedFileStreamSource) openPrefetchedParquet(localPath, filePath string) error {
 	// buildParquetFromLocal unwinds mmap+file itself if the payload isn't
 	// valid parquet (e.g. a legacy shuffle object under a .parquet key).
-	p, err := s.buildParquetFromLocal(localPath, filePath, localPath)
+	// justWritten: the prefetcher streamed this temp moments ago.
+	p, err := s.buildParquetFromLocal(localPath, filePath, localPath, true)
 	if err != nil {
 		return err
 	}
@@ -824,9 +817,10 @@ func (s *cachedFileStreamSource) fallbackFromStream(ctx context.Context, cause e
 // cache owns the file, so neither releaseCurrentFile nor the open-failure
 // unwind may unlink it.
 func (s *cachedFileStreamSource) openParquetFromBaseCache(cachePath, filePath string) error {
-	// ownedPath "" — the cache owns the file; only the mmap unwinds on a
-	// bad payload.
-	p, err := s.buildParquetFromLocal(cachePath, filePath, "")
+	// ownedPath "" — the cache owns the file; only the reader state
+	// unwinds on a bad payload. Not just-written: cache entries may be
+	// arbitrarily cold — this is the pread (drift-killing) tier.
+	p, err := s.buildParquetFromLocal(cachePath, filePath, "", false)
 	if err != nil {
 		return err
 	}
@@ -1169,7 +1163,7 @@ func (s *cachedFileStreamSource) tryPreOpenNextParquet() {
 	// Base-table cache tier: map lookup + local open, never blocks.
 	if lps, ok := s.executor.store.(objstore.LocalPathStore); ok {
 		if cached, ok := lps.CachedLocalPath(s.bucket, filePath); ok {
-			if p, err := s.buildParquetFromLocal(cached, filePath, ""); err == nil {
+			if p, err := s.buildParquetFromLocal(cached, filePath, "", false); err == nil {
 				s.adoptPending(p, idx)
 				return
 			} else if s.executor.logger != nil {
@@ -1188,7 +1182,7 @@ func (s *cachedFileStreamSource) tryPreOpenNextParquet() {
 			s.preOpenSkip = idx + 1 // skipped/err — openNextFile owns it
 			return
 		}
-		if p, err := s.buildParquetFromLocal(res.localPath, filePath, res.localPath); err == nil {
+		if p, err := s.buildParquetFromLocal(res.localPath, filePath, res.localPath, true); err == nil {
 			s.adoptPending(p, idx)
 			return
 		}
@@ -1199,10 +1193,17 @@ func (s *cachedFileStreamSource) tryPreOpenNextParquet() {
 }
 
 // buildParquetFromLocal opens a local parquet file and builds its pending
-// state — pread-staged by default, mmap'd under the WADJET_SCAN_PREAD=0
-// kill switch. ownedPath is "" when the file belongs to a cache (must not
-// be unlinked) and the file's own path when ownership transfers to us.
-func (s *cachedFileStreamSource) buildParquetFromLocal(localPath, filePath, ownedPath string) (*pendingParquet, error) {
+// state. justWritten selects the backing (docs/design/scan-pread-reads.md
+// §refinement): files this process just streamed to disk are page-cache-
+// resident, so the mmap reads them zero-copy and its faults are minor —
+// that path was never implicated in the drift, and the SF100 pair priced
+// pread's alloc+memcpy on it at +15.9% cold. Cache-hit files are the
+// opposite: potentially cold on NVMe, exactly the fault class whose STW
+// interaction drives the R2 drift — those decode from pread-staged
+// buffers (WADJET_SCAN_PREAD=0 forces mmap everywhere). ownedPath is ""
+// when the file belongs to a cache (must not be unlinked) and the file's
+// own path when ownership transfers to us.
+func (s *cachedFileStreamSource) buildParquetFromLocal(localPath, filePath, ownedPath string, justWritten bool) (*pendingParquet, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
 		if ownedPath != "" {
@@ -1218,7 +1219,7 @@ func (s *cachedFileStreamSource) buildParquetFromLocal(localPath, filePath, owne
 		}
 		return nil, fmt.Errorf("local parquet %s unusable (err=%v)", localPath, err)
 	}
-	if scanPreadEnabled {
+	if scanPreadEnabled && !justWritten {
 		fadviseSequential(f, fi.Size())
 		// buildParquetStateFromFile owns f (and unlinks ownedPath when
 		// set) on a bad payload.

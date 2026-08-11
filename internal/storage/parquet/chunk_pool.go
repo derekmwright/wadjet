@@ -20,8 +20,14 @@ import (
 // never pooled, keeping outlier chunks from pinning giant buffers.
 
 const (
-	chunkPoolMinCap = 64 << 10  // smallest pooled class
-	chunkPoolMaxCap = 32 << 20  // largest pooled class; bigger chunks bypass the pool
+	chunkPoolMinCap = 64 << 10 // smallest pooled class
+	// Largest pooled class; bigger chunks bypass the pool. 128 MiB: the
+	// 2026-08-11 SF100 pair measured 42% of stagings (99k of 237k)
+	// overflowing the original 32 MiB ceiling — SF100 lineitem column
+	// chunks routinely run tens of MB. Transient footprint is unchanged
+	// (oversized chunks were allocated fresh anyway); pooling them just
+	// stops the churn, and sync.Pool sheds idle buffers at GC.
+	chunkPoolMaxCap = 128 << 20
 )
 
 // chunkPools[i] holds buffers of capacity chunkPoolMinCap << i.

@@ -159,6 +159,29 @@ fit one shared local disk — 6 GiB × 2 does; same both arms).
   diagnosis. Sweep them between launches until the harness cleans up
   after itself.
 
+## Refinement (2026-08-11, follows the pair verdict below): hot/cold backing split
+
+The pair priced full-pread's cold cost: R1 decodes just-written spill
+temps whose pages are cache-resident — mmap read them zero-copy, pread
+paid an alloc+memcpy per chunk (+15.9 % cold, 42 % of SF100 chunks
+over the 32 MiB pool ceiling). The refinement matches backing to
+thermal state:
+
+- **Just-written temps** (S3 stream-to-spill, prefetch downloads):
+  zero-copy mmap, as before the lever. Pages are resident by
+  construction; minor faults on them were never implicated in the
+  drift.
+- **Base-table cache hits** (including the decode-ahead pre-open cache
+  tier): pread-staged pooled buffers — the potentially-cold NVMe reads
+  whose fault class drives the STW interaction.
+- Chunk pool ceiling 32 → 128 MiB (SF100 lineitem chunks run tens of
+  MB; transient footprint unchanged — oversized chunks allocated fresh
+  anyway).
+
+`WADJET_SCAN_PREAD=0` still forces mmap everywhere. The worker parity
+test pins the tier split: a cold (stream) pass must not move the pread
+counters; a cache-hit pass must.
+
 ## SF100 same-window pair VERDICT (2026-08-11, bin 1ab474e) — DRIFT KILLED
 
 Pair: ctl 20260811-113603 (`-var=scan_pread=0`, mmap + touch-populate)

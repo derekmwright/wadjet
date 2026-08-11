@@ -93,6 +93,9 @@ func TestScanPread_ParityWithMmapPath(t *testing.T) {
 
 	// Cold (stream-to-spill) + steady (cache-hit) passes per mode, each
 	// mode with its own cache dir so both populate from the same store.
+	// The tier split is part of the contract: just-written stream temps
+	// decode via mmap (pread counters must not move on the cold pass),
+	// cache hits stage via pread when enabled.
 	runMode := func(enabled bool) (cold, steady []string) {
 		t.Helper()
 		prev := scanPreadEnabled
@@ -103,11 +106,23 @@ func TestScanPread_ParityWithMmapPath(t *testing.T) {
 			t.Fatal(err)
 		}
 		ex := &Executor{store: btc, spillDir: t.TempDir()}
+		c0, _, _ := parquet.PreadStats()
 		cold = scanAll(ex)
 		if s := btc.Stats(); s.Entries != len(files) {
 			t.Fatalf("cold pass cached %d entries, want %d", s.Entries, len(files))
 		}
+		c1, _, _ := parquet.PreadStats()
+		if c1 != c0 {
+			t.Fatalf("cold (just-written) pass staged %d chunks via pread; want 0", c1-c0)
+		}
 		steady = scanAll(ex)
+		c2, _, _ := parquet.PreadStats()
+		if enabled && c2 == c1 {
+			t.Fatal("steady (cache-hit) pass staged nothing via pread with the lever on")
+		}
+		if !enabled && c2 != c1 {
+			t.Fatalf("steady pass staged %d chunks via pread with the kill switch set", c2-c1)
+		}
 		return cold, steady
 	}
 
