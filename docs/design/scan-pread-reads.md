@@ -203,20 +203,32 @@ arms (Q21 = Q02 = 100), EC2 zero after.
   vs ctl 418.9 s (−33.1 %).
 - **Headline ratio is incident-confounded, not mechanism**: trt R2
   TOTAL 522.2 s (1.62× vs its low R1) is entirely one query — Q21-R2
-  242.0 s vs ctl 25.6 s (+216 s). The stall-watchdog fired FROZEN-SPIN
-  (unresp_ms=5097, cpu_jiffies=364) mid-Q21; its SIGQUIT drained and
-  restarted the worker (the SIGQUIT-as-drain flaw again) and the FTE
-  retry re-ran the lost work (+~45 GB cluster re-decode). Every other
-  R2 query nets −139 s in trt's favor.
-- **Watchdog is now the top open item**: 2/2 firings on pread arms,
-  0/2 on ctl arms (small sample; the class predates the lever — q22-R2
-  arc). No stacks exist because wadjet swallows SIGQUIT as drain.
-  Before any conclusion about pread correlation: fix the trap to
-  capture /debug/pprof/goroutine?debug=2 over localhost BEFORE
-  signalling (or use SIGABRT + GOTRACEBACK), and consider observe-only
-  mode — if the 5 s unresponsiveness threshold is triggering on live
-  load, the trap itself is now the largest single wall item on these
-  arms.
+  242.0 s vs ctl 25.6 s (+216 s). CORRECTED anatomy (wlog timeline,
+  same day): the stall-watchdog FROZEN-SPIN fired at 15:23:38 during
+  an EARLIER query; its SIGQUIT drained + restarted the worker in ~7 s
+  and the suite ran at full cadence for 3.5 more minutes — the restart
+  itself was absorbed invisibly. Q21 (15:27:10) then dispatched and
+  ran normally for 14 s, after which THREE st-join-12 tasks on a
+  DIFFERENT worker sat input-starved for ~227 s ("task progress idle;
+  stopping AckWait extension" at idle=2m) and completed
+  simultaneously at 15:31:11 — a classic dispatch-stall-arc
+  input-wait, caught live with full wlogs. Probable chain: the
+  restarted worker's drain cancelled 1,316 queued uploads and reset
+  its peer-exchange state, so a repartition-11 partition was neither
+  peer-fetchable (stale hint/token) nor yet durable (upload QoS
+  backlog: ~10,000 s cumulative upload yield on that worker); the
+  consumers waited out AckWait until redelivery / the late durable
+  copy landed. Every other R2 query nets −139 s in trt's favor.
+- **Handed to the dispatch-stall arc** (now the top open item): (1)
+  the trap works but destroys its own evidence — wadjet swallows
+  SIGQUIT as drain, so capture /debug/pprof/goroutine?debug=2 over
+  localhost BEFORE signalling (or SIGABRT + GOTRACEBACK); 2/2 firings
+  on pread arms vs 0/2 ctl is an open correlation question. (2) The
+  Q21 stall class: post-drain shuffle-partition resolution takes
+  minutes because failure falls through peer → durable-wait →
+  AckWait-expiry redelivery instead of an eager re-resolve; the
+  coordinator log (not grabbed by the pair script) is the missing
+  witness — grab it next firing.
 
 ## SF100 same-window pair VERDICT (2026-08-11, bin 1ab474e) — DRIFT KILLED
 
