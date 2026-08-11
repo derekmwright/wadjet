@@ -165,6 +165,46 @@ func SweepStaleRunArtifacts(harnessRoot, dataDir string, pruneOlderThan time.Dur
 	sweep(harnessRoot)
 	if dataDir != "" {
 		sweep(filepath.Join(dataDir, "wadjet", "queries"))
+		sweepCompactionOrphans(filepath.Join(dataDir, "wadjet", "tables"), cutoff, pruneOlderThan, logger)
+	}
+}
+
+// sweepCompactionOrphans removes compacted_*.parquet files a previous
+// launch's coordinator left in the shared tables dir (issue #282). Each
+// harness launch builds a fresh catalog over the chunk_* files it writes
+// or adopts, so a prior launch's compaction outputs are referenced by no
+// live catalog — and they accumulate fast: 180 orphans / 35 GB over four
+// SF10 launches on 2026-08-10, filling the disk twice mid-validation.
+// Same clean-before-generate rule as the EC2 GENERATE_DATA path. The
+// caller guarantees no concurrent wadjet touches the dir (see
+// SweepStaleRunArtifacts safety note); pruneOlderThan spares files a
+// sibling harness may have just written.
+func sweepCompactionOrphans(tablesDir string, cutoff time.Time, pruneOlderThan time.Duration, logger *slog.Logger) {
+	var freed int64
+	var removed int
+	err := filepath.Walk(tablesDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil //nolint:nilerr // best-effort sweep: skip unreadable entries
+		}
+		base := filepath.Base(p)
+		if !strings.HasPrefix(base, "compacted_") || !strings.HasSuffix(base, ".parquet") {
+			return nil
+		}
+		if pruneOlderThan > 0 && info.ModTime().After(cutoff) {
+			return nil
+		}
+		if rmErr := os.Remove(p); rmErr == nil {
+			freed += info.Size()
+			removed++
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		logger.Debug("compaction-orphan sweep: walk ended early", "dir", tablesDir, "error", err)
+	}
+	if removed > 0 {
+		logger.Info("swept orphaned compaction outputs",
+			"dir", tablesDir, "files_removed", removed, "bytes_freed", freed)
 	}
 }
 
