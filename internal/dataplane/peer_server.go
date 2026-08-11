@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
 	dpv1 "github.com/citc-tech/wadjet/gen/dataplane/v1"
@@ -127,6 +128,23 @@ func (s *PeerServer) Start() error {
 	} else {
 		opts = append(opts, grpc.Creds(insecure.NewCredentials()))
 	}
+	// Keepalive: the mirror image of the client-side idle bound
+	// (peer_client.go PeerFetchIdleTimeout). A stream's Send blocks on
+	// HTTP/2 flow control, so a consumer that dies or stops reading
+	// wedges the serving goroutine and permanently leaks its concurrency
+	// slot — the semaphore's acquire timeout then rejects every later
+	// fetch. Server keepalive reaps dead transports in bounded time,
+	// firing the stream context and releasing the slot. The enforcement
+	// policy admits the client's 30s pings.
+	opts = append(opts,
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    30 * time.Second,
+			Timeout: 10 * time.Second,
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             10 * time.Second,
+			PermitWithoutStream: true,
+		}))
 	s.grpcSrv = grpc.NewServer(opts...)
 	dpv1.RegisterPeerExchangeServer(s.grpcSrv, s)
 
