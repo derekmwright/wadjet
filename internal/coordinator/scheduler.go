@@ -555,6 +555,13 @@ func (s *Scheduler) inflightByWorker() map[string]int64 {
 // worker's heartbeat PoolUsed. Eager consumer tasks are additionally
 // tracked (regardless of estimate) for pickEagerWorker's lane accounting.
 func (s *Scheduler) noteInflight(t distributed.Task, workerID string) {
+	// Record the task→worker binding so a reaped worker's dispatched-but-
+	// never-reported tasks can be expired into the stuck-task sweep
+	// (TaskLiveness.ExpireWorker). gRPC targeted dispatch only — the NATS
+	// path is a work queue with JetStream redelivery and no fixed target.
+	if s.registry != nil && s.registry.Liveness != nil {
+		s.registry.Liveness.Assign(t.ID, workerID)
+	}
 	if len(t.EagerInputs) > 0 {
 		s.inflightMu.Lock()
 		s.eagerInflight[t.ID] = inflightTask{

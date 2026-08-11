@@ -343,6 +343,59 @@ func TestReapStuckOnce(t *testing.T) {
 	}
 }
 
+// TestReapStuckOnce_DeadWorkerUnreportedTask: regression for the
+// 2026-08-11 Q09/Q21-R2 coordinator wedge. A task gRPC-dispatched to a
+// worker that dies before ever mentioning it in a heartbeat has no
+// liveness clock — the stuck sweep can't see it, no result will ever
+// arrive, and the stage waits until the query timeout. ExpireWorker
+// (called by ReapStale when the worker's heartbeats stop) must force the
+// dead worker's assigned tasks into the stuck set so the next sweep
+// re-dispatches them.
+func TestReapStuckOnce_DeadWorkerUnreportedTask(t *testing.T) {
+	rep := &collectingRepublisher{}
+	tr := newTaskRetrier(retryTestTasks(2), true, rep.republish, slog.Default(), "s", nil)
+
+	liveness := NewTaskLiveness()
+	// Task a: dispatched to w-dead, never reported (died in the worker's
+	// intake before any heartbeat mentioned it). Task b: dispatched to
+	// w-live and heartbeating normally.
+	liveness.Assign("a", "w-dead")
+	liveness.Assign("b", "w-live")
+	liveness.Update([]string{"b"}, time.Now())
+
+	// Without the death signal the sweep must see nothing: an assigned-
+	// but-unreported task must NOT be treated as stuck (it may simply be
+	// queued behind a busy worker's slots).
+	if n := reapStuckOnce(liveness, tr, 2*time.Minute); n != 0 {
+		t.Fatalf("pre-death sweep redispatched %d, want 0", n)
+	}
+
+	// Worker death: the registry reap path expires its assignments.
+	expired := liveness.ExpireWorker("w-dead")
+	if len(expired) != 1 || expired[0] != "a" {
+		t.Fatalf("expired = %v, want [a]", expired)
+	}
+
+	// The very next sweep re-dispatches the invisible task.
+	if n := reapStuckOnce(liveness, tr, 2*time.Minute); n != 1 {
+		t.Fatalf("post-death sweep redispatched %d, want 1", n)
+	}
+	got := waitRepublished(t, rep, 1)
+	if got[0].ID != "a" || got[0].Attempt != 2 {
+		t.Fatalf("republished %+v, want task a attempt 2", got[0])
+	}
+	// The live worker's task was untouched by the expiry.
+	if stuck := liveness.StuckTasks(2 * time.Minute); len(stuck) != 0 {
+		t.Fatalf("post-sweep stuck = %v, want empty", stuck)
+	}
+
+	// The re-dispatched attempt's result completes the stage.
+	tr.Observe(okResult("b", "f-b"))
+	if !tr.Observe(okResult("a", "f-a")) {
+		t.Fatal("stage must complete once the re-dispatched task reports")
+	}
+}
+
 // TestTaskRetrier_PartitionAccounting: element-wise reduction across the
 // final surviving attempts, retry-safe (a failed attempt's vectors never
 // count — only the surviving attempt's do).

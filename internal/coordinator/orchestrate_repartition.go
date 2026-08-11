@@ -39,15 +39,18 @@ const shuffleStageTimeout = 60 * time.Minute
 // for stageIdleTimeout is broken (worker crashed, deadlock, lost result
 // publish).
 //
-// 30 min is sized for SF10 shuffle stages where each task uploads many
-// partitions sequentially over a contended network. Observed wall time
-// per task: 10–20 min for lineitem shuffle output. The previous 10 min
-// fired before any task could complete on legitimately-long shuffles
-// and surfaced as confusing "S3 PUT context deadline exceeded" errors —
-// what actually happened was coord cancelling the query out from under
-// the in-flight upload. shuffleStageTimeout (60 min absolute) still
-// catches pathological cases where progress signals leak entirely.
-const stageIdleTimeout = 30 * time.Minute
+// History: 10 min originally; raised to 30 min when long SF10 shuffle
+// uploads (10–20 min/task, zero completions) false-fired it. That
+// rationale predates the per-task TaskProgress bridge: workers now emit
+// TaskProgress every ~2s for every running task and all await sites
+// register with the bridge, so ANY live task resets the idle clock —
+// idle now means "no progress signal from any task", not "no
+// completions". Back to 10 min: 30 min was ≥ the benchmark query
+// timeout, so the backstop could never fire first and a wedged stage
+// always ate the full query budget (2026-08-11 Q09/Q21-R2 wedge).
+// shuffleStageTimeout (60 min absolute) still catches pathological
+// cases where progress signals leak entirely.
+const stageIdleTimeout = 10 * time.Minute
 
 // ShuffleLayout describes the shard file layout produced by the two-sided
 // shuffle stages. The caller (coordinator routing path) constructs probe

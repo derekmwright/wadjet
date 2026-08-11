@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"log/slog"
+	"sort"
 	"testing"
 	"time"
 
@@ -117,6 +118,50 @@ func TestTaskLiveness(t *testing.T) {
 	stuck = tl.StuckTasks(60 * time.Second)
 	if len(stuck) != 0 {
 		t.Errorf("expected 0 stuck after remove, got %d", len(stuck))
+	}
+}
+
+// TestTaskLiveness_AssignExpireWorker: dispatch-time assignment makes a
+// dead worker's tasks — reported or not — immediately stuck via
+// ExpireWorker, without ever letting bare assignment (a task queued on a
+// busy-but-alive worker) count as stuck. Regression companion to the
+// 2026-08-11 wedge fix.
+func TestTaskLiveness_AssignExpireWorker(t *testing.T) {
+	tl := NewTaskLiveness()
+	tl.Assign("t1", "w1")
+	tl.Assign("t2", "w1")
+	tl.Assign("t3", "w2")
+	tl.Update([]string{"t2"}, time.Now()) // t2 reported; t1/t3 never
+
+	// Assignment alone is not stuckness.
+	if s := tl.StuckTasks(time.Nanosecond); len(s) != 1 || s[0] != "t2" {
+		// only t2 has a clock, and only after it goes stale
+		if len(s) != 0 {
+			t.Fatalf("pre-expiry stuck = %v, want at most [t2]", s)
+		}
+	}
+
+	// Expire w1: both its tasks are immediately stuck, w2's untouched.
+	expired := tl.ExpireWorker("w1")
+	sort.Strings(expired)
+	if len(expired) != 2 || expired[0] != "t1" || expired[1] != "t2" {
+		t.Fatalf("expired = %v, want [t1 t2]", expired)
+	}
+	stuck := tl.StuckTasks(time.Hour)
+	sort.Strings(stuck)
+	if len(stuck) != 2 || stuck[0] != "t1" || stuck[1] != "t2" {
+		t.Fatalf("post-expiry stuck = %v, want [t1 t2]", stuck)
+	}
+
+	// Remove (result arrived / re-dispatched) clears the binding: a second
+	// expiry of the same worker resurrects nothing.
+	tl.Remove("t1")
+	tl.Remove("t2")
+	if e := tl.ExpireWorker("w1"); len(e) != 0 {
+		t.Fatalf("re-expiry after Remove = %v, want empty", e)
+	}
+	if s := tl.StuckTasks(time.Hour); len(s) != 0 {
+		t.Fatalf("stuck after Remove = %v, want empty", s)
 	}
 }
 

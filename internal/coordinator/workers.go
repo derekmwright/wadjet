@@ -43,13 +43,28 @@ type WorkerInfo struct {
 // Updated from worker heartbeats AND from per-task TaskProgress messages —
 // either signal is proof the worker process is alive (see WorkerRegistry's
 // progress subscription for why we need both). Used to detect stuck tasks.
+//
+// It also records which worker each gRPC-dispatched task was sent to
+// (Assign). Assignment alone does NOT make a task eligible for the
+// stuck-task sweep — a task queued behind a busy worker's slots is
+// mentioned in no heartbeat and must never be falsely re-dispatched.
+// The binding exists for ExpireWorker: when the registry reaps a dead
+// worker, every task dispatched to it — including tasks it never got
+// to report before dying — enters the stuck set at once. Without this,
+// a task that died with its worker before ever appearing in a heartbeat
+// fell through both recovery nets and wedged its stage until the query
+// timeout (2026-08-11 Q09/Q21-R2 coordinator wedge).
 type TaskLiveness struct {
-	mu    sync.RWMutex
-	tasks map[string]time.Time // task ID → last heartbeat time
+	mu       sync.RWMutex
+	tasks    map[string]time.Time // task ID → last heartbeat time
+	assigned map[string]string    // task ID → worker it was gRPC-dispatched to
 }
 
 func NewTaskLiveness() *TaskLiveness {
-	return &TaskLiveness{tasks: make(map[string]time.Time)}
+	return &TaskLiveness{
+		tasks:    make(map[string]time.Time),
+		assigned: make(map[string]string),
+	}
 }
 
 // Update records that the given task IDs are actively running.
@@ -61,10 +76,41 @@ func (tl *TaskLiveness) Update(taskIDs []string, now time.Time) {
 	}
 }
 
+// Assign records which worker a task was dispatched to. Re-dispatches
+// overwrite the binding with the new target. Deliberately does not touch
+// the task's liveness clock (see type comment).
+func (tl *TaskLiveness) Assign(taskID, workerID string) {
+	if taskID == "" || workerID == "" {
+		return
+	}
+	tl.mu.Lock()
+	tl.assigned[taskID] = workerID
+	tl.mu.Unlock()
+}
+
+// ExpireWorker moves every task assigned to workerID into the stuck set
+// immediately (zero last-seen), returning the affected task IDs. Called
+// when the registry reaps a dead worker so its dispatched-but-unreported
+// tasks re-dispatch on the next stuck sweep instead of never.
+func (tl *TaskLiveness) ExpireWorker(workerID string) []string {
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+	var expired []string
+	for id, w := range tl.assigned {
+		if w != workerID {
+			continue
+		}
+		tl.tasks[id] = time.Time{}
+		expired = append(expired, id)
+	}
+	return expired
+}
+
 // Remove stops tracking the given task (completed or failed).
 func (tl *TaskLiveness) Remove(taskID string) {
 	tl.mu.Lock()
 	delete(tl.tasks, taskID)
+	delete(tl.assigned, taskID)
 	tl.mu.Unlock()
 }
 
@@ -460,6 +506,18 @@ func (wr *WorkerRegistry) ReapStale() int {
 					"worker_id", id, "last_seen_ago", lastSeenAgo)
 			}
 			delete(wr.workers, id)
+			// Force every task dispatched to the dead worker into the
+			// stuck set — including tasks it never reported in a
+			// heartbeat before dying. Those otherwise fall through both
+			// recovery nets (no result will ever come, and the stuck
+			// sweep only sees reported tasks) and wedge their stage
+			// until the query timeout (2026-08-11 Q09/Q21-R2 wedge).
+			if wr.Liveness != nil {
+				if expired := wr.Liveness.ExpireWorker(id); len(expired) > 0 {
+					wr.logger.Warn("dead worker's dispatched tasks queued for re-dispatch",
+						"worker_id", id, "tasks", len(expired), "task_ids", expired)
+				}
+			}
 			// Tell the worker to stop pulling tasks. Use request/reply
 			// with a short timeout — if the worker is truly dead, the
 			// NATS connection is gone and this times out harmlessly.
