@@ -497,7 +497,9 @@ resource "aws_instance" "standalone" {
     }
   }
 
-  user_data = base64encode(local.standalone_user_data)
+  # gzip: cloud-init auto-decompresses; the raw bootstrap outgrew the
+  # 16KB user-data cap (2026-08-11, stall-watchdog + ena-poll growth).
+  user_data_base64 = base64gzip(local.standalone_user_data)
 
   tags = {
     Name    = "wadjet-bench-standalone"
@@ -531,7 +533,7 @@ resource "aws_instance" "coordinator" {
   # spot since they auto-reconnect on restart.
   # shutdown_behavior = stop so we can inspect logs if the benchmark crashes.
 
-  user_data = base64encode(local.coordinator_user_data)
+  user_data_base64 = base64gzip(local.coordinator_user_data)
 
   tags = {
     Name    = "wadjet-bench-coordinator"
@@ -575,7 +577,7 @@ resource "aws_instance" "worker" {
     }
   }
 
-  user_data = base64encode(<<-EOF
+  user_data_base64 = base64gzip(<<-EOF
     ${local.build_script}
 
     # Export tunables that the wadjet binary reads via os.Getenv at startup.
