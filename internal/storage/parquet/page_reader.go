@@ -41,6 +41,16 @@ type DictionaryData struct {
 
 // ColumnPageReader reads pages from a single column chunk.
 // It provides an iterator interface: call NextPage() until it returns nil.
+//
+// Two backing modes share the decode path:
+//   - slice mode (NewColumnPageReader): data is a caller-held buffer of
+//     the whole file, offsets are file-absolute, Close is a no-op.
+//   - staged mode (NewColumnPageReaderAt): the chunk's byte range is
+//     read from src into a pooled buffer on first use, offsets are
+//     chunk-relative, and Close returns the buffer to the pool. No
+//     decoded value may be referenced after Close — the same
+//     copy-before-release contract PageData.Release already imposes
+//     per page (uncompressed pages alias the chunk buffer directly).
 type ColumnPageReader struct {
 	data       []byte          // raw column chunk bytes
 	off        int             // current read position
@@ -50,6 +60,14 @@ type ColumnPageReader struct {
 	typeLength int             // for FIXED_LEN_BYTE_ARRAY
 	maxDefLevel int            // 0 if column is required
 	maxRepLevel int            // 0 for flat schemas
+
+	// Staged mode (docs/design/scan-pread-reads.md): the chunk is read
+	// from src on first NextDictionary/NextPage instead of sliced from a
+	// caller-held full-file buffer.
+	src    io.ReaderAt // nil in slice mode
+	srcOff int64       // file offset of the chunk's first byte
+	srcLen int         // chunk byte length ([srcOff, srcOff+srcLen))
+	owned  []byte      // pooled staging buffer; returned on Close
 }
 
 // NewColumnPageReader creates a page reader for a column chunk.
@@ -89,6 +107,66 @@ func NewColumnPageReader(fileData []byte, cm *ColumnMetaData, maxDefLevel, maxRe
 	}
 }
 
+// NewColumnPageReaderAt creates a staged page reader: the column chunk's
+// byte range [startOff, startOff+TotalCompressedSize), clamped to
+// fileSize, is read from src into a pooled buffer on first use via one
+// ranged read (pread on an *os.File). Decode then runs over heap bytes —
+// no page faults inside decode goroutines, which is the point: a
+// goroutine blocked in a read syscall parks at a GC-safe point, while
+// one faulting on an mmap'd page stalls every STW in the process
+// (docs/design/scan-pread-reads.md).
+//
+// The caller MUST Close the reader to return the buffer, and must not
+// retain any decoded Values past Close.
+func NewColumnPageReaderAt(src io.ReaderAt, fileSize int64, cm *ColumnMetaData, maxDefLevel, maxRepLevel int) *ColumnPageReader {
+	startOff := cm.DataPageOffset
+	if cm.DictionaryPageOffset > 0 && cm.DictionaryPageOffset < cm.DataPageOffset {
+		startOff = cm.DictionaryPageOffset
+	}
+	endOff := startOff + cm.TotalCompressedSize
+	if endOff > fileSize {
+		endOff = fileSize
+	}
+	srcLen := 0
+	if endOff > startOff {
+		srcLen = int(endOff - startOff)
+	}
+
+	typeLength := 0 // FIXED_LEN_BYTE_ARRAY: caller sets via SetTypeLength
+
+	return &ColumnPageReader{
+		off:         0,
+		endOff:      srcLen,
+		codec:       cm.Codec,
+		physType:    cm.Type,
+		typeLength:  typeLength,
+		maxDefLevel: maxDefLevel,
+		maxRepLevel: maxRepLevel,
+		src:         src,
+		srcOff:      startOff,
+		srcLen:      srcLen,
+	}
+}
+
+// ensureData stages the chunk bytes in staged mode; a no-op in slice
+// mode. Any read error surfaces to the NextPage/NextDictionary caller —
+// a staged chunk must never silently read as empty.
+func (r *ColumnPageReader) ensureData() error {
+	if r.data != nil || r.src == nil || r.srcLen == 0 {
+		return nil
+	}
+	buf := getChunkBuf(r.srcLen)
+	if err := readAtFull(r.src, buf, r.srcOff); err != nil {
+		putChunkBuf(buf)
+		return fmt.Errorf("staging column chunk [%d, %d): %w", r.srcOff, r.srcOff+int64(r.srcLen), err)
+	}
+	preadChunks.Add(1)
+	preadBytes.Add(int64(r.srcLen))
+	r.data = buf
+	r.owned = buf
+	return nil
+}
+
 // SetTypeLength sets the type length for FIXED_LEN_BYTE_ARRAY columns.
 func (r *ColumnPageReader) SetTypeLength(n int) {
 	r.typeLength = n
@@ -96,6 +174,9 @@ func (r *ColumnPageReader) SetTypeLength(n int) {
 
 // NextPage reads and decodes the next page. Returns nil at end of column.
 func (r *ColumnPageReader) NextPage() (*PageData, error) {
+	if err := r.ensureData(); err != nil {
+		return nil, err
+	}
 	for r.off < r.endOff {
 		ph, headerSize, err := DecodePageHeader(r.data[r.off:])
 		if err != nil {
@@ -129,6 +210,9 @@ func (r *ColumnPageReader) NextPage() (*PageData, error) {
 func (r *ColumnPageReader) NextDictionary() (*DictionaryData, error) {
 	if r.off >= r.endOff {
 		return nil, nil
+	}
+	if err := r.ensureData(); err != nil {
+		return nil, err
 	}
 
 	ph, headerSize, err := DecodePageHeader(r.data[r.off:])
@@ -381,9 +465,16 @@ func bitsRequired(v int) int {
 	return bits
 }
 
-// Close releases resources. Currently a no-op since we use slices into
-// the caller's byte buffer, but included for interface compatibility.
+// Close releases resources. Slice mode is a no-op (the data belongs to
+// the caller); staged mode returns the pooled chunk buffer — after which
+// no decoded Values from this reader may be used (uncompressed pages
+// alias the buffer).
 func (r *ColumnPageReader) Close() error {
+	if r.owned != nil {
+		putChunkBuf(r.owned)
+		r.owned = nil
+		r.data = nil
+	}
 	return nil
 }
 

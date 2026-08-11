@@ -22,7 +22,9 @@ import (
 //	    }
 //	}
 type FileReader struct {
-	data       []byte          // entire file in memory
+	data       []byte          // entire file in memory; nil in staged (pread) mode
+	src        io.ReaderAt     // staged mode: chunk reads issue ranged reads here
+	size       int64           // staged mode: file size (chunk-range clamp)
 	meta       *FileMetaData   // decoded footer
 	schemaRoot *SchemaNode     // schema tree
 	leaves     []*SchemaNode   // leaf nodes indexed by column position
@@ -90,6 +92,37 @@ func OpenFileReaderMetadata(r io.ReaderAt, size int64) (*FileReader, error) {
 	schema := schemaFromTree(root, leaves)
 	return &FileReader{
 		data:       nil, // metadata-only — page reads will fail
+		meta:       meta,
+		schemaRoot: root,
+		leaves:     leaves,
+		schema:     schema,
+	}, nil
+}
+
+// OpenFileReaderAt opens a Parquet file in staged (pread) mode: only the
+// footer is read eagerly; each ColumnPages call reads exactly that column
+// chunk's byte range from r into a pooled buffer released on the page
+// reader's Close (docs/design/scan-pread-reads.md). Unlike OpenFileReader
+// there is never a whole-file buffer — and unlike an mmap of the file,
+// decode goroutines never take page faults: the I/O happens in ranged
+// read syscalls, which park at GC-safe points instead of stretching
+// stop-the-world pauses.
+//
+// r must support concurrent ReadAt (an *os.File does): row groups decode
+// in parallel, one staged chunk per projected column.
+func OpenFileReaderAt(r io.ReaderAt, size int64) (*FileReader, error) {
+	meta, err := ReadFileMetaData(r, size)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateHeader(r); err != nil {
+		return nil, err
+	}
+	root, leaves := BuildSchemaTree(meta.Schema)
+	schema := schemaFromTree(root, leaves)
+	return &FileReader{
+		src:        r,
+		size:       size,
 		meta:       meta,
 		schemaRoot: root,
 		leaves:     leaves,
@@ -174,7 +207,12 @@ func (f *FileReader) ColumnPages(rgIdx, colIdx int) *ColumnPageReader {
 		maxRep = leaf.MaxRepLevel
 	}
 
-	pr := NewColumnPageReader(f.data, cc.MetaData, maxDef, maxRep)
+	var pr *ColumnPageReader
+	if f.data == nil && f.src != nil {
+		pr = NewColumnPageReaderAt(f.src, f.size, cc.MetaData, maxDef, maxRep)
+	} else {
+		pr = NewColumnPageReader(f.data, cc.MetaData, maxDef, maxRep)
+	}
 
 	// Set type length for FIXED_LEN_BYTE_ARRAY from schema.
 	if colIdx < len(f.leaves) && f.leaves[colIdx].TypeLength > 0 {

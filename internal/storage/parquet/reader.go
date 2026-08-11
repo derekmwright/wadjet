@@ -34,6 +34,19 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 	return &Reader{fr: fr, schema: fr.Schema()}, nil
 }
 
+// NewReaderAt creates a Parquet reader in staged (pread) mode: no
+// whole-file buffer is ever held — each column-chunk read stages its
+// byte range from r into a pooled buffer on demand (OpenFileReaderAt).
+// Use this over NewReader when r is a local file: NewReader eagerly
+// copies the entire file to heap, NewReaderAt reads footer-only.
+func NewReaderAt(r io.ReaderAt, size int64) (*Reader, error) {
+	fr, err := OpenFileReaderAt(r, size)
+	if err != nil {
+		return nil, fmt.Errorf("opening parquet file: %w", err)
+	}
+	return &Reader{fr: fr, schema: fr.Schema()}, nil
+}
+
 // NewReaderFromBytes creates a Parquet reader from a byte slice.
 // Zero-copy: the slice is used directly by the underlying FileReader
 // without allocating a separate copy. Use this when the data is already

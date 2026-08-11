@@ -23,6 +23,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/metrics"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 	"github.com/citc-tech/wadjet/internal/telemetry"
 
 	"github.com/google/uuid"
@@ -786,12 +787,16 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 						"refault_activations", refaultActivations,
 						"refault_episode_ignores", memory.PageCachePressureBoundedIgnores())
 					writeDrop, readDrop := diskio.DropBehindStats()
+					preadChunks, preadBytes, preadAllocs := parquet.PreadStats()
 					w.logger.Info("drop-behind stats",
 						"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop,
 						"readahead_advise_bytes", readaheadAdviseBytes.Load(),
 						"touch_bytes", touchAheadBytes.Load(),
 						"touch_populate_bytes", touchPopulateBytes.Load(),
-						"touch_drops", touchAheadDrops.Load())
+						"touch_drops", touchAheadDrops.Load(),
+						"pread_chunks", preadChunks,
+						"pread_bytes", preadBytes,
+						"pread_allocs", preadAllocs)
 				}
 				// Proc/device I-O marker (residual diagnosis): cumulative
 				// counters, so analyzers diff consecutive lines for interval
@@ -1175,12 +1180,16 @@ func (w *Worker) logFinalScanStats() {
 			"refault_episode_ignores", memory.PageCachePressureBoundedIgnores())
 	}
 	writeDrop, readDrop := diskio.DropBehindStats()
+	preadChunks, preadBytes, preadAllocs := parquet.PreadStats()
 	w.logger.Info("drop-behind stats (final)",
 		"write_drop_bytes", writeDrop, "read_drop_bytes", readDrop,
 		"readahead_advise_bytes", readaheadAdviseBytes.Load(),
 		"touch_bytes", touchAheadBytes.Load(),
 		"touch_populate_bytes", touchPopulateBytes.Load(),
-		"touch_drops", touchAheadDrops.Load())
+		"touch_drops", touchAheadDrops.Load(),
+		"pread_chunks", preadChunks,
+		"pread_bytes", preadBytes,
+		"pread_allocs", preadAllocs)
 	minflt, majflt := procSelfFaults()
 	procRead, procWrite := procSelfIO()
 	nvmeRead, nvmeWrite := nvmeDiskstats()

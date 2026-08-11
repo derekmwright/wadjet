@@ -98,6 +98,7 @@ type cachedFileStreamSource struct {
 	mmapData    []byte        // mmap'd view of the current local cache file (nil if Parquet)
 	mmapRegion  *mmapRegion   // Phase-5 relief handle for mmapData; nil when relief is disabled
 	toucher     *rangeToucher // touch-ahead worker over the scan mmap; stopped before munmap
+	file        *os.File      // fd backing a pread-mode parquet reader; closed after the iterator quiesces
 	localPath   string        // path the source is responsible for unlinking; "" when the file is owned by LocalStageCache or in-memory
 
 	// walkDropMark is the byte offset below which the current owned WSHF
@@ -400,6 +401,12 @@ func (s *cachedFileStreamSource) releaseCurrentFile() {
 		_ = syscall.Munmap(s.mmapData)
 		s.mmapData = nil
 	}
+	// Pread-mode fd: callers release the iterator first (decode workers
+	// joined), so no staging read can hit a closed fd.
+	if s.file != nil {
+		_ = s.file.Close()
+		s.file = nil
+	}
 	if s.localPath != "" {
 		if rmErr := os.Remove(s.localPath); rmErr != nil && !os.IsNotExist(rmErr) && s.executor.logger != nil {
 			// Visibility only — clearing localPath below means nothing will
@@ -635,7 +642,18 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	var data []byte
 	var mmapData []byte
 	var localPath string
-	if s.executor.spillDir != "" {
+	if s.executor.spillDir != "" && scanPreadEnabled {
+		f, lp, size, err := s.streamParquetToLocalFile(ctx, filePath, magic[:], rc)
+		if err != nil {
+			return fmt.Errorf("streaming parquet %s to local file: %w", filePath, err)
+		}
+		p, err := s.buildParquetStateFromFile(filePath, f, size, lp)
+		if err != nil {
+			return err
+		}
+		s.installParquet(p)
+		return nil
+	} else if s.executor.spillDir != "" {
 		md, lp, err := s.streamParquetToLocalMmap(ctx, filePath, magic[:], rc)
 		if err != nil {
 			return fmt.Errorf("streaming parquet %s to local mmap: %w", filePath, err)
@@ -865,6 +883,7 @@ type pendingParquet struct {
 	reader          *parquet.Reader
 	mmapData        []byte
 	mmapRegion      *mmapRegion
+	file            *os.File // pread mode: fd the reader stages chunks from; nil on mmap/in-memory paths
 	localPath       string
 	toucher         *rangeToucher
 	fallbackBatches []*batch.RecordBatch
@@ -890,6 +909,10 @@ func (p *pendingParquet) release(logger *slog.Logger) {
 		_ = syscall.Munmap(p.mmapData)
 		p.mmapData = nil
 	}
+	if p.file != nil { // after iter.Close: no staging read may hit a closed fd
+		_ = p.file.Close()
+		p.file = nil
+	}
 	if p.localPath != "" {
 		if rmErr := os.Remove(p.localPath); rmErr != nil && !os.IsNotExist(rmErr) && logger != nil {
 			logger.Warn("pending parquet cleanup failed", "path", p.localPath, "error", rmErr)
@@ -903,6 +926,7 @@ func (p *pendingParquet) release(logger *slog.Logger) {
 func (s *cachedFileStreamSource) installParquet(p *pendingParquet) {
 	s.mmapData = p.mmapData
 	s.mmapRegion = p.mmapRegion
+	s.file = p.file
 	s.localPath = p.localPath
 	s.parquetIter = p.iter
 	s.parquetReader = p.reader
@@ -939,6 +963,38 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 		mmapRegion: registerMmap(mmapData), // nil when relief disabled
 		localPath:  localPath,
 	}
+	return s.finishParquetState(p, filePath)
+}
+
+// buildParquetStateFromFile is buildParquetState for the pread path
+// (docs/design/scan-pread-reads.md): the reader stages column chunks
+// from f on demand — no mmap, no toucher, no whole-file buffer. f's
+// ownership transfers to the returned pendingParquet (closed on
+// release after the iterator quiesces); ownedPath is "" when the file
+// belongs to a cache and must not be unlinked.
+func (s *cachedFileStreamSource) buildParquetStateFromFile(filePath string, f *os.File, size int64, ownedPath string) (*pendingParquet, error) {
+	reader, err := parquet.NewReaderAt(f, size)
+	if err != nil {
+		f.Close()
+		if ownedPath != "" {
+			_ = os.Remove(ownedPath)
+		}
+		return nil, fmt.Errorf("opening parquet file %s: %w", filePath, err)
+	}
+	p := &pendingParquet{
+		reader:    reader,
+		file:      f,
+		localPath: ownedPath,
+	}
+	return s.finishParquetState(p, filePath)
+}
+
+// finishParquetState is the shared open tail over a constructed reader:
+// column projection guard, iterator setup (decode-ahead or serial), and
+// the I/O-ahead wiring appropriate to the backing (fadvise on a pread
+// fd, madvise + touch-ahead on an mmap). On error p is released.
+func (s *cachedFileStreamSource) finishParquetState(p *pendingParquet, filePath string) (*pendingParquet, error) {
+	reader := p.reader
 	projCols := reader.Schema().Columns
 	// Apply column projection only when EVERY requested column is present
 	// in the file schema. If any requested name is missing (likely a
@@ -1039,23 +1095,31 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 		if s.executor.cpuTokens != nil {
 			opts.Tokens = s.executor.cpuTokens
 		}
-		// Row-group I/O-ahead: only meaningful when the file bytes are a
-		// real mmap (local-tier opens); the S3-streamed path decodes from
-		// heap and has nothing to fault. The toucher rides behind the
-		// WILLNEED advises and guarantees residency before a token-holding
-		// decode arrives (rowgroup_touch.go); its stop happens after
-		// iter.Close joins the advising decode workers and before munmap.
-		if rowGroupReadaheadEnabled && len(mmapData) > 0 {
-			advise := willNeedAdviser(mmapData)
-			if rowGroupTouchEnabled {
-				p.toucher = newRangeToucher(mmapData)
-				toucher := p.toucher
-				opts.Advise = func(off, n int64) {
-					advise(off, n)
-					toucher.enqueue(off, n)
+		// Row-group I/O-ahead: on the pread path, FADV_WILLNEED on the fd
+		// starts kernel readahead so the staging pread copies from page
+		// cache; no toucher — there are no faults to pre-take. On the mmap
+		// path the WILLNEED madvise plus the touch-ahead worker guarantee
+		// residency before a token-holding decode arrives
+		// (rowgroup_touch.go); the toucher's stop happens after iter.Close
+		// joins the advising decode workers and before munmap. The
+		// in-memory fallback decodes from heap and has nothing to fault.
+		if rowGroupReadaheadEnabled {
+			if p.file != nil {
+				if adv := fdWillNeedAdviser(p.file); adv != nil {
+					opts.Advise = adv
 				}
-			} else {
-				opts.Advise = advise
+			} else if len(p.mmapData) > 0 {
+				advise := willNeedAdviser(p.mmapData)
+				if rowGroupTouchEnabled {
+					p.toucher = newRangeToucher(p.mmapData)
+					toucher := p.toucher
+					opts.Advise = func(off, n int64) {
+						advise(off, n)
+						toucher.enqueue(off, n)
+					}
+				} else {
+					opts.Advise = advise
+				}
 			}
 		}
 		da, err := scan.OpenDecodeAheadIter(reader, projCols, nil, shardIdx, shardCount, opts)
@@ -1134,9 +1198,10 @@ func (s *cachedFileStreamSource) tryPreOpenNextParquet() {
 	}
 }
 
-// buildParquetFromLocal mmaps a local parquet file and builds its pending
-// state. ownedPath is "" when the file belongs to a cache (must not be
-// unlinked) and the file's own path when ownership transfers to us.
+// buildParquetFromLocal opens a local parquet file and builds its pending
+// state — pread-staged by default, mmap'd under the WADJET_SCAN_PREAD=0
+// kill switch. ownedPath is "" when the file belongs to a cache (must not
+// be unlinked) and the file's own path when ownership transfers to us.
 func (s *cachedFileStreamSource) buildParquetFromLocal(localPath, filePath, ownedPath string) (*pendingParquet, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -1145,14 +1210,21 @@ func (s *cachedFileStreamSource) buildParquetFromLocal(localPath, filePath, owne
 		}
 		return nil, fmt.Errorf("opening local parquet %s: %w", localPath, err)
 	}
-	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil || fi.Size() == 0 {
+		f.Close()
 		if ownedPath != "" {
 			_ = os.Remove(ownedPath)
 		}
 		return nil, fmt.Errorf("local parquet %s unusable (err=%v)", localPath, err)
 	}
+	if scanPreadEnabled {
+		fadviseSequential(f, fi.Size())
+		// buildParquetStateFromFile owns f (and unlinks ownedPath when
+		// set) on a bad payload.
+		return s.buildParquetStateFromFile(filePath, f, fi.Size(), ownedPath)
+	}
+	defer f.Close()
 	mmapData, err := syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
 		if ownedPath != "" {
@@ -1328,20 +1400,19 @@ func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath st
 	return nil
 }
 
-// streamParquetToLocalMmap streams a parquet body (with `magic` prepended)
-// from rc to a temp file on the worker's NVMe spill dir, then mmaps the
-// file PROT_READ and returns the mmap'd slice. The caller takes ownership:
-// on success it must munmap the slice and remove the local path. Used by
-// the parquet branch of openNextFile to avoid the double-full-file-buffer
-// allocation pattern of io.ReadAll + OpenFileReader.
-func (s *cachedFileStreamSource) streamParquetToLocalMmap(ctx context.Context, srcPath string, magic []byte, rc io.Reader) ([]byte, string, error) {
+// streamParquetToLocalFile streams a parquet body (with `magic`
+// prepended) from rc to a temp file on the worker's NVMe spill dir and
+// returns the still-open file positioned for ReadAt. The caller takes
+// ownership of both the fd and the path. Shared tail of the two
+// openNextFile parquet stagings (pread reader / mmap).
+func (s *cachedFileStreamSource) streamParquetToLocalFile(ctx context.Context, srcPath string, magic []byte, rc io.Reader) (*os.File, string, int64, error) {
 	spillDir := s.executor.spillDir
 	if err := os.MkdirAll(spillDir, 0o755); err != nil {
-		return nil, "", fmt.Errorf("creating spill dir: %w", err)
+		return nil, "", 0, fmt.Errorf("creating spill dir: %w", err)
 	}
 	tmp, err := os.CreateTemp(spillDir, "parquet-stream-*.parquet")
 	if err != nil {
-		return nil, "", fmt.Errorf("creating local parquet file: %w", err)
+		return nil, "", 0, fmt.Errorf("creating local parquet file: %w", err)
 	}
 	localPath := tmp.Name()
 	cleanup := true
@@ -1353,7 +1424,7 @@ func (s *cachedFileStreamSource) streamParquetToLocalMmap(ctx context.Context, s
 	}()
 
 	rep := exec.ProgressReporterFromContext(ctx)
-	// KeepResident: mmap'd and read by the parquet row-group iterator right
+	// KeepResident: read back by the parquet row-group iterator right
 	// after the download — bound dirty pages, keep them resident.
 	wf, _ := diskio.NewWriter(tmp, diskio.KeepResident)
 	dst := io.Writer(wf)
@@ -1361,34 +1432,48 @@ func (s *cachedFileStreamSource) streamParquetToLocalMmap(ctx context.Context, s
 		dst = &progressWriter{w: wf, rep: rep}
 	}
 	if _, err := dst.Write(magic); err != nil {
-		return nil, "", fmt.Errorf("writing magic to local parquet: %w", err)
+		return nil, "", 0, fmt.Errorf("writing magic to local parquet: %w", err)
 	}
 	if _, err := io.Copy(dst, rc); err != nil {
-		return nil, "", fmt.Errorf("streaming %s to local parquet: %w", srcPath, err)
+		return nil, "", 0, fmt.Errorf("streaming %s to local parquet: %w", srcPath, err)
 	}
 	if err := tmp.Sync(); err != nil {
-		return nil, "", fmt.Errorf("syncing local parquet: %w", err)
+		return nil, "", 0, fmt.Errorf("syncing local parquet: %w", err)
 	}
 
 	fi, err := tmp.Stat()
 	if err != nil {
-		return nil, "", fmt.Errorf("stat local parquet: %w", err)
+		return nil, "", 0, fmt.Errorf("stat local parquet: %w", err)
 	}
 	if fi.Size() == 0 {
-		return nil, "", fmt.Errorf("local parquet for %s is empty after stream", srcPath)
+		return nil, "", 0, fmt.Errorf("local parquet for %s is empty after stream", srcPath)
 	}
+	cleanup = false
+	return tmp, localPath, fi.Size(), nil
+}
 
-	mmapData, err := syscall.Mmap(int(tmp.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+// streamParquetToLocalMmap is streamParquetToLocalFile plus an mmap of
+// the staged file — the WADJET_SCAN_PREAD=0 kill-switch path. The caller
+// takes ownership: on success it must munmap the slice and remove the
+// local path.
+func (s *cachedFileStreamSource) streamParquetToLocalMmap(ctx context.Context, srcPath string, magic []byte, rc io.Reader) ([]byte, string, error) {
+	tmp, localPath, size, err := s.streamParquetToLocalFile(ctx, srcPath, magic, rc)
 	if err != nil {
+		return nil, "", err
+	}
+	mmapData, err := syscall.Mmap(int(tmp.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		tmp.Close()
+		_ = os.Remove(localPath)
 		return nil, "", fmt.Errorf("mmap local parquet %s: %w", localPath, err)
 	}
 	// Close the fd — the mmap keeps the inode alive until Munmap.
 	if err := tmp.Close(); err != nil {
 		_ = syscall.Munmap(mmapData)
+		_ = os.Remove(localPath)
 		return nil, "", fmt.Errorf("closing local parquet fd: %w", err)
 	}
 	adviseSequential(mmapData)
-	cleanup = false
 	return mmapData, localPath, nil
 }
 
