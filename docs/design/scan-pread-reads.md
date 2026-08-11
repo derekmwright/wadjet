@@ -158,3 +158,45 @@ fit one shared local disk — 6 GiB × 2 does; same both arms).
   35 GB of orphans across four launches filled the disk twice before
   diagnosis. Sweep them between launches until the harness cleans up
   after itself.
+
+## SF100 same-window pair VERDICT (2026-08-11, bin 1ab474e) — DRIFT KILLED
+
+Pair: ctl 20260811-113603 (`-var=scan_pread=0`, mmap + touch-populate)
+/ trt 20260811-115448 (pread on), same binary, benchmark_runs=2,
+sf100-distributed profile.
+
+- **Drift: ctl 1.756× → trt 1.029×.** Walls ctl 312.4 / 548.6 s, trt
+  362.0 / 372.5 s. Steady wall **−32.1 %**; whole pair −14.7 %. The ctl
+  arm drew a strong drift window and reproduced the full documented
+  anatomy: 2/3 workers R2-inflamed (decode 23.8 / 29.3 ns/B vs 9–13
+  healthy) and exactly those two degrading to 15.8 / 12.4 ms STW per
+  GC cycle (healthy stays ~4). The trt arm on the same window: ns/B
+  9–13 both runs on every worker, pauses ≤ 7.5 ms/cyc late-run — the
+  mechanism is gone, not paced around.
+- Engagement exact both arms: trt pread_bytes 118.6 GB ==
+  readahead_advise_bytes with touch_bytes = 0; ctl pread_chunks = 0
+  with touch_populate covering 112.7 GB (kill switch verified live).
+- Rows: all four runs × both arms identical per query (Q02 = 100), no
+  zero-row queries.
+- **Cold regression (open residual): ctl R1 312.4 → trt R1 362.0 s
+  (+15.9 %).** Mechanism, partially quantified: R1 decodes just-written
+  spill files whose pages are cache-hot — the mmap path read them
+  zero-copy, the pread path pays a buffer allocation + memcpy per
+  chunk, and at SF100 chunk sizes 42 % of stagings (99 k of 237 k)
+  overflow the 32 MiB pool ceiling and allocate fresh. R1 decode ns/B
+  moves ~+11 % (9.3–10.8 → 9.4–12.7), which does not account for the
+  full +49.6 s — remainder unattributed. Refinement that follows the
+  mechanism: keep zero-copy mmap for just-written temps (stream-to-
+  spill, prefetch — pages guaranteed resident, never implicated in the
+  drift) and stage via pread only the base-table-cache hits, where the
+  cold-fault class actually lives; plus larger pool classes for
+  SF100-sized chunks.
+- Incident, feeds the dispatch-stall arc: the stall-watchdog fired for
+  the FIRST time (trt worker i-075b, R2, FROZEN-SPIN unresp_ms=5157
+  cpu_jiffies=151 → SIGQUIT). The frozen-spin class therefore SURVIVES
+  the scan-pread lever — consistent with it living in the WSHF shuffle
+  mmap walk, which this lever does not touch. Design flaw exposed:
+  wadjet handles SIGQUIT as graceful drain, so the trap produced a
+  drain + restart instead of the goroutine dump it was built to
+  capture (the FTE retry re-ran the lost tasks; rows unaffected, trt
+  R2 wall slightly inflated — the drift kill is conservative).
