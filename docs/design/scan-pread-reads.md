@@ -182,6 +182,42 @@ thermal state:
 test pins the tier split: a cold (stream) pass must not move the pread
 counters; a cache-hit pass must.
 
+## SF100 confirm pair (2026-08-11 day, bin cb706cd) — refinement KEEPER
+
+Pair: ctl 20260811-1450xx (`scan_pread=0`) / trt (refined split), same
+shape as the night pair. Rows identical across all four runs × both
+arms (Q21 = Q02 = 100), EC2 zero after.
+
+- **Cold reclaimed and reversed: trt R1 322.5 s vs ctl 360.2 s
+  (−10.5 %).** The full-pread arm's +15.9 % cold cost is gone. A key
+  reframe from the markers: R1's scan volume converges onto CACHE HITS
+  almost immediately (the miss tee populates fast, and the prefetcher
+  skips resident files), so even in R1 the pread tier dominates
+  (47.4 GB staged vs only ~1.5 GB touched via the residual mmap
+  paths) — the cold win comes from pread of page-hot cache files
+  beating the mmap+touch machinery, not from the stream-temp mmap
+  revert alone.
+- **Steady mechanism stays dead**: trt R2 decode 9.7–12.3 ns/B, STW
+  ≤ 5.1 ms/cycle late-run, every worker, while ctl drew a mild 1.234×
+  drift window. Excluding the incident query below, trt R2 = 280.2 s
+  vs ctl 418.9 s (−33.1 %).
+- **Headline ratio is incident-confounded, not mechanism**: trt R2
+  TOTAL 522.2 s (1.62× vs its low R1) is entirely one query — Q21-R2
+  242.0 s vs ctl 25.6 s (+216 s). The stall-watchdog fired FROZEN-SPIN
+  (unresp_ms=5097, cpu_jiffies=364) mid-Q21; its SIGQUIT drained and
+  restarted the worker (the SIGQUIT-as-drain flaw again) and the FTE
+  retry re-ran the lost work (+~45 GB cluster re-decode). Every other
+  R2 query nets −139 s in trt's favor.
+- **Watchdog is now the top open item**: 2/2 firings on pread arms,
+  0/2 on ctl arms (small sample; the class predates the lever — q22-R2
+  arc). No stacks exist because wadjet swallows SIGQUIT as drain.
+  Before any conclusion about pread correlation: fix the trap to
+  capture /debug/pprof/goroutine?debug=2 over localhost BEFORE
+  signalling (or use SIGABRT + GOTRACEBACK), and consider observe-only
+  mode — if the 5 s unresponsiveness threshold is triggering on live
+  load, the trap itself is now the largest single wall item on these
+  arms.
+
 ## SF100 same-window pair VERDICT (2026-08-11, bin 1ab474e) — DRIFT KILLED
 
 Pair: ctl 20260811-113603 (`-var=scan_pread=0`, mmap + touch-populate)
