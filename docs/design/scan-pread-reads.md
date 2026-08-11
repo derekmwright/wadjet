@@ -129,3 +129,32 @@ to identical results across cold and cache-hit tiers).
 - SF100 same-window pair (baseline first): gate on R2/R1 drift ratio
   vs the 1.24× post-populate floor, decode ns/byte per worker,
   gc_pause_delta_ms per cycle, rows 44/44.
+
+## SF10-capped zero-EC2 verdict (2026-08-10 night, bin ca856eb)
+
+Shape: EDGE_CAP_MB=3072 EDGE_CPUS=4, --workers=1, runs=2,
+--base-table-cache-bytes=6 GiB (recipe's 8 GiB × 3 processes does not
+fit one shared local disk — 6 GiB × 2 does; same both arms).
+
+- Engagement (worker wlogs): pread_chunks 95.7k, pread_bytes 29.6 GB ==
+  readahead_advise_bytes (full scan volume staged through the fadvise
+  seam); touch_bytes = touch_populate_bytes = 0 (no scan mmaps exist);
+  pread_allocs 1.3k = 1.4 % pool miss rate.
+- Correctness: row counts identical across modes and runs, no zero-row
+  queries; 10-significant-digit value signatures bit-identical
+  cross-mode on the same dataset (q01/q14/q19 probes + full-suite row
+  parity). The harness's full-precision row_checksum flips run-to-run
+  WITHIN each arm (mmap arm included) on aggregate-heavy queries —
+  pre-existing sub-ulp parallel-merge-order noise, not a decode
+  artifact; use value_sig, not row_checksum, for cross-arm verdicts.
+- Walls: same-dataset cold pass over the 10 scan-heavy queries 92.3 s
+  (pread) vs 95.0 s (mmap) — in-band. Full-suite steady R2 172.4 s vs
+  169.7 s (+1.6 %, arms crossed different dataset states; no
+  regression signal). The capped box does not fire the intermittent
+  STW storm, so this gate validates no-regression + engagement; the
+  drift verdict itself belongs to the SF100 same-window pair.
+- Testbed note: every harness launch strands the previous launch's
+  compaction outputs (compacted_*.parquet) in the shared data dir —
+  35 GB of orphans across four launches filled the disk twice before
+  diagnosis. Sweep them between launches until the harness cleans up
+  after itself.
