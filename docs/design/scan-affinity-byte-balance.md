@@ -106,3 +106,38 @@ whose per-worker spread is the engagement criterion.
   logic applies while populating).
 - Rows 44/44, per-query counts identical — placement is never
   correctness.
+
+## SF100 verdict (pair 20260810-232606 ctl / 234309 trt, bin 027c262)
+
+KEEPER — default stays ON. Same-window pair, same binary, runs=2, wlogs
+both arms, all EC2 destroyed. Cross-arm walls are draw-confounded by
+construction (each deploy redraws worker IDs), so the pair was judged on
+engagement, spread, and correctness:
+
+- **Engagement exact.** Trt logged 30 shed events across every orders and
+  partsupp fan-out (scans + exchange-repartition sources); the logged
+  `max_share_before` values (1.36 orders, 1.53 partsupp) match the
+  offline rendezvous recompute of that deploy's draw digit-for-digit,
+  and `max_share_after` landed at 1.04/1.10 — inside the band. The same
+  2 files shed with identical bytes on every recurrence of each stage
+  shape (the determinism the runner-up rule promises). Trt's lineitem
+  draw (1.09× fair) sat inside the band and correctly did NOT shed.
+  Ctl logged zero events (kill-switch arm verified).
+- **Spread compressed.** R2 per-worker decode bytes: ctl 51.0/64.4/49.3
+  GB (1.31× max/min, tracking its 34/37/29 ownership draw) → trt
+  50.2/52.6/58.7 GB (1.17×). Residual spread is consistent with the
+  10 % tolerance plus non-affine reads.
+- **Correctness.** Per-query row counts identical across arms and runs
+  (44/44).
+- **Walls neutral** — R1 338.9→350.7 s (+3.5 %, cold band), R2
+  420.2→421.1 s (+0.2 %): the shed's peer traffic costs nothing
+  measurable. Both arms drew MILD lotteries (totals 34/37/29 and
+  32/36/32), so the bad-draw wall win (arm1-class, 43/18/39) was not
+  exercisable this window; the sim over the real file set covers that
+  case, and tonight's orders/partsupp sheds are the same mechanism at
+  smaller byte scale.
+- No stall-watchdog firings either arm (dispatch-stall trap stays armed).
+
+The standing effect: worst-case draws are now clamped to ≤1.10× fair
+share per stage, removing the largest known non-code component of
+cross-deploy steady-wall variance.
