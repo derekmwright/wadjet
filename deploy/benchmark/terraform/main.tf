@@ -622,12 +622,16 @@ resource "aws_instance" "worker" {
     # process whose Go scheduler froze for 3m43s while one goroutine
     # pegged a core (STW-stuck signature; docs/benchmarks/
     # rebaseline-2026-08-10.md). Detection: the metrics port stops
-    # answering while process CPU keeps accruing. Response: SIGQUIT —
-    # the runtime dumps every goroutine stack (including the RUNNING
-    # spinner) to stderr -> journald -> wlogs, and the supervising
-    # restart loop + JetStream redelivery keep the suite going. A
-    # healthy-idle or healthy-busy worker always answers pprof, so
-    # false positives need a 4s unresponsive window AND >=1.5s of CPU.
+    # answering while process CPU keeps accruing (4s unresponsive AND
+    # >=1.5s CPU; a healthy worker always answers pprof). Response,
+    # evidence first (the 2026-08-11 firing proved SIGQUIT captures
+    # nothing — wadjet handles it as graceful drain): (1) best-effort
+    # pprof goroutine dump into journald, works when only partially
+    # stuck; (2) SIGABRT — uncaught, so the Go runtime's fatal-signal
+    # handler dumps ALL goroutine stacks (GOTRACEBACK=all, set on the
+    # worker unit) to stderr -> journald -> wlogs even while the
+    # scheduler is STW-wedged, then exits; the restart loop +
+    # JetStream redelivery keep the suite going.
     ( declare -A lastok lastut
       while true; do
         sleep 1
@@ -642,14 +646,22 @@ resource "aws_instance" "worker" {
           unresp_ms=$(( (now - prevok) / 1000000 ))
           dut=$(( ut - prevut ))
           if [ "$unresp_ms" -gt 4000 ] && [ "$dut" -gt 150 ]; then
-            logger -t stall-watchdog "FROZEN-SPIN pid=$pid unresp_ms=$unresp_ms cpu_jiffies=$dut sending SIGQUIT"
-            kill -QUIT "$pid"
+            logger -t stall-watchdog "FROZEN-SPIN pid=$pid unresp_ms=$unresp_ms cpu_jiffies=$dut capturing stacks"
+            D=/var/log/stall-$pid-$(date +%s).stacks
+            if curl -s --max-time 2 "http://127.0.0.1:9100/debug/pprof/goroutine?debug=2" -o "$D" && [ -s "$D" ]; then
+              logger -t stall-watchdog "pprof stacks captured ($(wc -c <"$D") bytes)"
+              logger -t stall-stacks -f "$D"
+            else
+              logger -t stall-watchdog "pprof grab failed (fully wedged) - relying on SIGABRT dump"
+            fi
+            logger -t stall-watchdog "sending SIGABRT"
+            kill -ABRT "$pid"
             unset "lastok[$pid]" "lastut[$pid]"
             sleep 5
           fi
         done
       done ) &
-    echo "stall-watchdog started (SIGQUIT on frozen-spin signature)"
+    echo "stall-watchdog started (pprof grab + SIGABRT on frozen-spin signature)"
 
     # Spill-to-disk location selection. NVMe instance store (c7gd, i4g)
     # is fastest; fall back to EBS-backed /var/spill for instances
@@ -749,6 +761,7 @@ resource "aws_instance" "worker" {
         systemd-run --quiet --unit="wadjet-worker-$idx-$$-$(date +%s)" \
           --scope -p "MemoryMax=$PER_PROC_BYTES" -p "MemoryHigh=$PER_PROC_GOMEMLIMIT" \
           --setenv="GOMEMLIMIT=$PER_PROC_GOMEMLIMIT" \
+          --setenv="GOTRACEBACK=all" \
           --setenv="WADJET_GOGC=${var.gogc}" \
           --setenv="WADJET_TASK_GC=${var.task_gc}" \
           --setenv="WADJET_REFAULT_PRESSURE_RATE=${var.refault_pressure_rate}" \
