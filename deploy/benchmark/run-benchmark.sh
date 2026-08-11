@@ -190,6 +190,16 @@ log ""
 log "=== Uploading results to S3 ==="
 aws s3 cp "$RESULTS_DIR/" "s3://${BUCKET}/results/${TIMESTAMP}/" --recursive 2>&1 | tee -a "$RESULT_FILE"
 
+# Coordinator-side logs ride along with the results: the 2026-08-11
+# Q21-R2 stall diagnosis had worker logs (grab-worker-logs.sh) but no
+# coordinator witness — manifest publish times, retry classification,
+# and stage barrier events all live here. benchmark.log is this
+# script's own transcript; the journal slice carries the coordinator
+# wadjet process output.
+aws s3 cp /root/benchmark.log "s3://${BUCKET}/results/${TIMESTAMP}/coord-benchmark.log" 2>/dev/null || true
+journalctl --since "24 hours ago" --no-pager 2>/dev/null | gzip -c | \
+  aws s3 cp - "s3://${BUCKET}/results/${TIMESTAMP}/coord-journal.gz" 2>/dev/null || true
+
 log ""
 log "Results uploaded to: s3://${BUCKET}/results/${TIMESTAMP}/"
 
