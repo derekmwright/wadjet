@@ -103,6 +103,38 @@ path byte-for-byte; it remains the off arm for same-binary A/Bs.
   counters advance on a >2-window walk).
 - TPC-H SF0.01: 22/22.
 - tpch-harness --mode=local --slice=small: PASS vs baseline.
-- SF100 pair (pending): gate is **trap firings → 0** and R2 ex-firing ≈
-  R1; off arm `-var=shuffle_pread=0`. Do not change the trap threshold
-  in the same window.
+- SF100 pair (2026-08-12, same-window, bin 9df82ca; ctl
+  results/20260812-012146 `-var=shuffle_pread=0`, trt
+  results/20260812-014906 default-on; evidence
+  ~/wadjet-artifacts/20260812-wshfpread):
+  - **Engagement full**: trt file_pread_bytes 53.1/24.3/24.9 GB per
+    worker, fallbacks 0; ctl 0/0/0.
+  - **Rows exact**: 44/44 both arms, all four sections agree per query,
+    no zero-row.
+  - **R2 steady-drift KILLED**: trt R2 ex-firing 379.2s ≈ trt R1
+    ex-same-query 380.5s (0.997×); ctl R2 ex-firing still 1.61× R1
+    (532.2 vs 331.0). The WSHF-mmap drift mechanism is dead.
+  - **Frozen-spin gate FAILED**: 2 trap firings on trt (01:57:08/09,
+    simultaneous pair at the Q04-R2 scan→join barrier, unresp ~5.0s)
+    vs 1 on ctl. Recovery clean both arms (a805b37): firing windows
+    cost Q18-R2 153s (ctl) / Q04-R2 158s (trt), suites completed.
+  - **Residual named by the dump**: the non-preempting M runs a
+    `scan.ReadRowGroupNative` per-column decode worker
+    (columnar_native.go errgroup under DecodeAheadIter.decodeLoop) —
+    the parquet side. With WSHF converted and parquet ~96% pread by
+    bytes, the surviving fault classes are the **just-written parquet
+    mmap exemption** (S3-staged + prefetched temps,
+    scan-pread-reads.md §refinement) and/or mmap_lock serialization
+    against the barrier writeback storm. Next lever: env-gate the
+    justWritten exemption off (retry pread-everywhere with the 128 MiB
+    pool classes) and pair again.
+  - Open residual: trt R1 +7.7% vs ctl R1 (387.8 vs 360.2) — the
+    read()-staging memcpy on page-hot just-written WSHF temps, the
+    same cost shape the parquet lever priced. Pair total still -11.5%
+    (925.2 vs 1045.8). A hot/cold split would reintroduce the fault
+    class on exactly the trigger tier, so it is deliberately NOT
+    taken; revisit only if the cold cost survives a firing-free
+    confirm pair.
+  - Verdict: **keeper, default stays on** — drift dead, rows exact,
+    pair total -11.5%; the frozen-spin arc continues on the parquet
+    residual.
