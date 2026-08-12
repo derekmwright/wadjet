@@ -9,7 +9,12 @@
 /tpch-bench-arm64
 /tpch-bench-local
 /tpch-harness
-/harness-result.json
+/tpch-harness-bin
+/plan-repro
+/wadjet-bin
+/s3probe
+/security-bench
+/harness-*.json
 
 # Terraform
 *.plan
