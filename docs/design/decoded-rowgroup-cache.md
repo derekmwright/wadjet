@@ -451,6 +451,35 @@ per-deploy placement lottery. Discrimination needs the ENA counters,
 now sampled to journald every 60s by the worker user_data poller
 (rides the auto-wlog); the clean-window re-baseline reads them.
 
+### 9.5 New-config baseline + instrumentation validation (2026-08-12 night)
+
+Single arm, bin 995409d, config as pinned (results/20260812-233343,
+profilers on): rows 22/22 both runs, **R1 347.8s / R2 466.5s**
+(R2/R1 1.341 — same degraded conditions class as pair 3; treat as
+provisional, re-baseline when the ENA record certifies a clean run).
+
+Mechanics all validated: auto-wlogs landed 20s after coordinator
+self-stop with no manual grab; ENA poller captured 60 samples/worker;
+admission pause engaged (pressure_paused 4.7-7.2K on scan-heavy
+workers); shed fired 9×.
+
+First ENA-instrumented findings:
+
+- **Outbound throttling is chronic and bursty**: bw_out_
+  allowance_exceeded 76K-257K events/worker/pair, spiking at barrier
+  phases in BOTH runs (not an R2 ramp) — the 5-min CloudWatch averages
+  in §9.4's forensics genuinely hid this; instantaneous bursts exceed
+  allowance while averages sit below baseline. Consistent with the
+  2026-08-09 pipe-utilization finding; feeds the cross-barrier
+  overlap / upload-pacing arc.
+- Worker asymmetry: throttle totals 257K/183K/76K, and one worker
+  again served almost no cache traffic (hits 2.3K vs 58-60K —
+  recurring across arms; affinity/hit-distribution residual).
+- pressure_stall_ms 118K/94K/7K — admission pause did not visibly
+  reduce decode-ahead pressure stalls vs pair 3; the refault channel
+  is still active with the cache at cap. Residual continues (next
+  candidates unchanged: lower shed low-water / 4 GiB arm).
+
 ## 10. Open questions
 
 - Cap auto-derivation (fraction of GOMEMLIMIT once validated) — same
