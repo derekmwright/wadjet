@@ -217,8 +217,10 @@ func TestDecodedChunkCache_NoIdentityNoEngagement(t *testing.T) {
 	}
 }
 
-// TestDecodedChunkCache_EvictionCap: admissions beyond the byte budget
-// evict coldest-first and the size invariant holds.
+// TestDecodedChunkCache_EvictionCap: below-cap warm-up admits on second
+// touch; once at cap, a uniform flood of equally-touched keys STOPS
+// admitting (the churn gate — ties and near-ties go to incumbents) and
+// the size invariant holds with zero eviction churn.
 func TestDecodedChunkCache_EvictionCap(t *testing.T) {
 	src := batch.NewVector(batch.TypeInt64, 1024)
 	for i := range src.Int64Data {
@@ -228,23 +230,63 @@ func TestDecodedChunkCache_EvictionCap(t *testing.T) {
 	capBytes := entryBytes * 16 // maxEntry = 2×entry, room for ~16 entries
 	cache := NewDecodedChunkCache(capBytes)
 
-	admit := func(i int) {
+	offerTwice := func(i int) {
 		key := decodedChunkKey{identity: "x#1", rgIdx: i, colIdx: 0, catalogType: pqt.TypeInt64}
-		cache.Offer(key, src, src.Len) // ghost
-		cache.Offer(key, src, src.Len) // admit
+		cache.Offer(key, src, src.Len)
+		cache.Offer(key, src, src.Len)
 	}
 	for i := 0; i < 40; i++ {
-		admit(i)
+		offerTwice(i)
 	}
 	st := cache.Stats()
 	if st.SizeBytes > capBytes {
 		t.Fatalf("size %d exceeds cap %d", st.SizeBytes, capBytes)
 	}
-	if st.Evictions == 0 {
-		t.Fatal("expected evictions past cap")
+	if st.Admitted == 0 || st.Admitted > 16 {
+		t.Fatalf("admitted=%d, want warm-up-only (1..16)", st.Admitted)
 	}
-	if st.Admitted != 40 {
-		t.Fatalf("admitted=%d, want 40", st.Admitted)
+	if st.Evictions != 0 {
+		t.Fatalf("uniform flood churned: evictions=%d, want 0", st.Evictions)
+	}
+	if st.FreqRejected == 0 {
+		t.Fatal("expected freq-gated rejections at cap")
+	}
+}
+
+// TestDecodedChunkCache_HotKeyDisplacesColdIncumbent: a key durably hotter
+// than the coldest incumbent (ghost frequency ≥ victim + margin) does get
+// admitted at cap, evicting exactly one victim — displacement stays
+// possible, churn does not.
+func TestDecodedChunkCache_HotKeyDisplacesColdIncumbent(t *testing.T) {
+	src := batch.NewVector(batch.TypeInt64, 1024)
+	entryBytes := src.MemBytes()
+	cache := NewDecodedChunkCache(entryBytes * 16)
+
+	// Fill to cap with freq-2 incumbents.
+	for i := 0; i < 16; i++ {
+		key := decodedChunkKey{identity: "x#1", rgIdx: i, colIdx: 0, catalogType: pqt.TypeInt64}
+		cache.Offer(key, src, src.Len)
+		cache.Offer(key, src, src.Len)
+	}
+	base := cache.Stats()
+	if base.Evictions != 0 {
+		t.Fatalf("warm-up evicted: %+v", base)
+	}
+
+	hot := decodedChunkKey{identity: "hot#1", rgIdx: 0, colIdx: 0, catalogType: pqt.TypeInt64}
+	// Touch until ghost frequency reaches victim(2) + margin(2) = 4.
+	for i := 0; i < 4; i++ {
+		cache.Offer(hot, src, src.Len)
+	}
+	st := cache.Stats()
+	if st.Admitted != base.Admitted+1 {
+		t.Fatalf("hot key not admitted: admitted %d -> %d (stats %+v)", base.Admitted, st.Admitted, st)
+	}
+	if st.Evictions != 1 {
+		t.Fatalf("evictions=%d, want exactly 1", st.Evictions)
+	}
+	if !cache.fillFromCache(batch.NewVector(batch.TypeInt64, 1024), hot, 1024) {
+		t.Fatal("hot key not resident after displacement")
 	}
 }
 

@@ -175,13 +175,19 @@ tracker charge on shared cache vectors is a known regression, do not"
 
 ### 3.5 Eviction, admission, pressure relief
 
-- **Segmented LRU** (probation/protected) with **second-touch
-  admission** via ghost keys: a key's first decode registers a
-  ghost (key + size only); the clone is stored on the second touch.
-  Sequential scan floods — the classic LRU killer, and exactly what a
-  TPC-H suite's cold first pass is — cannot evict the protected
-  segment, and single-touch keys never displace proven-hot entries.
-  Entries larger than cap/8 are never admitted.
+- **Segmented LRU** (probation/protected) with **frequency-gated
+  admission** (TinyLFU-lite, §9.2): a key's first decode registers a
+  ghost carrying a touch count; below cap, the second touch admits;
+  **at cap, a candidate must beat the eviction victim's frequency by a
+  margin of 2** — ties and lockstep near-ties go to the incumbent, so
+  a scan working set larger than the cap stabilizes a resident subset
+  instead of thrashing (the 2026-08-12 pair's churn mechanism). The
+  clone runs only after a positive admission decision; a rejected
+  offer costs a map touch, not a memmove. Evicted entries re-ghost
+  with their accumulated frequency so displaced-hot chunks can win
+  back in; frequencies saturate at 63 and halve every 2^18 touches so
+  incumbents stay displaceable when the workload shifts. Entries
+  larger than cap/8 are never admitted.
 - **Pressure relief (never-OOM):** the cache registers with the
   SpillManager as an `AccountedOperator`
   (`memory.RegisterAccounted`, `spill.go:163`): `Inspect` reports
@@ -354,6 +360,21 @@ at-cap admissions must beat the victim on ghost frequency (TinyLFU-lite
 filter), or admit only while below cap and let ghost frequency promote;
 either kills the wasted-clone tax while keeping the surviving hot set.
 Re-pair after that lands.
+
+### 9.2 Churn-controlled admission (2026-08-12, same evening)
+
+Implemented as §9.1 prescribed, one refinement deeper: strict
+greater-than alone still churns under a sequential flood, because
+resident hits and ghost touches advance in lockstep — a candidate whose
+scan position precedes the victim's transiently leads by one and would
+displace the exact chunk about to be hit. At-cap admission therefore
+requires `candidate ≥ victim + 2` (admitFreqMargin). Clone moved after
+the admission decision (rejections cost no memmove); evictions re-ghost
+with accumulated frequency; saturate-at-63 + halve-every-2^18-touches
+aging. New counter: freq_rejected (worker stats line). Local gates all
+green (race, full suite, SF0.01, harness 3 arms); churn-resistance and
+hot-displacement regression tests added. SF100 re-pair verdict appended
+below when run.
 
 ## 10. Open questions
 
