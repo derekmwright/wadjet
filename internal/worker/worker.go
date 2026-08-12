@@ -1967,6 +1967,25 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 				"gc_delta", gcDelta,
 				"gc_pause_delta_ms", pauseDeltaNs/1_000_000)
 
+			// Decoded-chunk cache pressure yield (doc §9.3): while either
+			// pressure channel is active, shed the cache to half its cap.
+			// The 2026-08-12 re-pair showed the failure mode this prevents:
+			// resident cache heap raised HeapAlloc and displaced page cache,
+			// the backpressure gauge + refault sensor fired 39-52x/worker
+			// (vs 1-4 control), and decode-ahead collapsed while the cache
+			// held its 6 GiB — the cheapest bytes in the process must yield
+			// FIRST. Evicted entries re-ghost, so the hot set re-admits
+			// through the frequency gate when pressure clears.
+			if dc := w.executor.decodedCache; dc != nil {
+				if heapPressureActive() || pageCachePressureActive() {
+					if freed := dc.ShedUnderPressure(dc.CapBytes() / 2); freed > 0 {
+						w.logger.Warn("decoded-rowgroup cache pressure shed",
+							"freed_mb", freed/(1<<20),
+							"low_water_mb", dc.CapBytes()/2/(1<<20))
+					}
+				}
+			}
+
 			// Decoded-chunk cache engagement markers (change-only, the
 			// base-table cache stats convention).
 			if dc := w.executor.decodedCache; dc != nil {

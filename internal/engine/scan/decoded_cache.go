@@ -139,6 +139,34 @@ func (c *DecodedChunkCache) Size() int64 {
 	return c.size.Load()
 }
 
+// CapBytes returns the configured budget. Nil-safe.
+func (c *DecodedChunkCache) CapBytes() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.capBytes
+}
+
+// ShedUnderPressure evicts down to lowWater bytes and returns bytes freed.
+// The pressure-yield valve (doc §9.3): the worker stats loop calls this
+// while the heap-backpressure gauge or the page-cache refault sensor is
+// active, because resident cache heap is exactly what those channels see
+// as displacement — a cache must be the first thing to yield, before
+// decode-ahead collapses and producers pause on its behalf. Evicted
+// entries re-ghost with their frequency, so the hot set re-admits through
+// the normal gate once pressure clears. Nil-safe.
+func (c *DecodedChunkCache) ShedUnderPressure(lowWater int64) int64 {
+	if c == nil {
+		return 0
+	}
+	target := c.Size() - lowWater
+	if target <= 0 {
+		return 0
+	}
+	freed, _ := c.SpillSome(target)
+	return freed
+}
+
 // keyFor builds the cache key for one leaf column read, or ok=false when
 // the cache is nil, the reader carries no identity, or the column type is
 // outside the supported clone set.
