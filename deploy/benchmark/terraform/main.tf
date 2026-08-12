@@ -780,6 +780,7 @@ resource "aws_instance" "worker" {
           --setenv="WADJET_SCAN_PREAD=${var.scan_pread}" \
           --setenv="WADJET_SCAN_PREAD_HOT=${var.scan_pread_hot}" \
           --setenv="WADJET_SHUFFLE_PREAD=${var.shuffle_pread}" \
+          --setenv="WADJET_SINK_DIRECT_CHUNK=${var.sink_direct_chunk}" \
           --setenv="WADJET_DF_LATE_GROUP_ATTACH=${var.df_late_group_attach}" \
           /usr/local/bin/wadjet serve \
             --mode=worker \

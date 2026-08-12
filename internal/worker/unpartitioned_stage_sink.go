@@ -71,7 +71,7 @@ type unpartitionedStageSink struct {
 	bufBytes   int
 	flushing   bool
 	flushCond  *sync.Cond // signaled when an out-of-lock flush completes
-	rowScratch []int
+	rowScratch []uint32
 	// Flush thresholds; fields (not consts) so tests can force frequent
 	// flushes. Default to unpartitionedFlushRows/-Bytes.
 	flushRows   int
@@ -156,6 +156,17 @@ func (s *unpartitionedStageSink) Consume(_ context.Context, b *batch.RecordBatch
 	if n == 0 {
 		return nil
 	}
+	// Direct-chunk bypass: a batch that alone meets a flush threshold would
+	// only pass through the accumulator to be flushed immediately — encode
+	// it straight from b instead, outside the lock (same flushing-flag
+	// exclusion as the double-buffered flush; docs/design/sink-direct-chunk.md).
+	// Flat schemas only, mirroring the coalesce gate: for flat schemas the
+	// sink always coalesces, so the two paths never mix with the legacy one.
+	if sinkDirectChunkEnabled &&
+		(n >= s.flushRows || n*approxRowBytes(b) >= s.flushBytesT) &&
+		batchSchemaIsFlat(b.Schema) {
+		return s.consumeDirectChunk(b, n)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -201,18 +212,17 @@ func (s *unpartitionedStageSink) Consume(_ context.Context, b *batch.RecordBatch
 	if s.rowBuf == nil {
 		s.rowBuf = s.takeAccumulator(b, n)
 	}
-	if cap(s.rowScratch) < n {
-		s.rowScratch = make([]int, n)
-	}
-	rows := s.rowScratch[:n]
-	if b.Sel != nil {
-		for i := 0; i < n; i++ {
-			rows[i] = int(b.Sel[i])
+	rows := b.Sel
+	if rows == nil {
+		// Identity row list, extended lazily (values are position-stable, so
+		// a previously filled prefix stays valid for any smaller n).
+		if cap(s.rowScratch) < n {
+			s.rowScratch = make([]uint32, 0, n)
 		}
-	} else {
-		for i := 0; i < n; i++ {
-			rows[i] = i
+		for i := len(s.rowScratch); i < n; i++ {
+			s.rowScratch = append(s.rowScratch, uint32(i))
 		}
+		rows = s.rowScratch[:n]
 	}
 	s.bufBytes += appendBatchRowsBulk(s.rowBuf, b, rows)
 	s.bufRows += n
@@ -255,6 +265,66 @@ func (s *unpartitionedStageSink) Consume(_ context.Context, b *batch.RecordBatch
 		return fmt.Errorf("writing wshf chunk: %w", err)
 	}
 	s.numChunks++
+	return nil
+}
+
+// consumeDirectChunk writes b as one chunk straight into the stream,
+// bypassing the accumulator — the caller established that b alone meets a
+// flush threshold, so accumulating it would only add a copy. The encode runs
+// OUTSIDE mu under the same flushing-flag exclusion the double-buffered
+// flusher uses; the lock covers only writer init and counters.
+func (s *unpartitionedStageSink) consumeDirectChunk(b *batch.RecordBatch, n int) error {
+	// Own-null view columns (outer-join fill) can't ride writeChunk's sel
+	// composition. b is this call's private batch (caller contract, same as
+	// the coalescing path relies on for its copy), so flattening outside the
+	// lock is single-threaded.
+	if b.HasViews() {
+		for _, col := range b.Columns {
+			if col.IsView() && col.Nulls.HasNulls() {
+				col.Flatten()
+				exec.LateMatFlattens.Add(1)
+			}
+		}
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return fmt.Errorf("unpartitionedStageSink: Consume after Close")
+	}
+	// Wait for stream ownership BEFORE the lazy writer init — writeHeader
+	// touches bufFile, which an in-flight flusher owns outside the lock.
+	// (flushing can only be set once the writer exists, but keep the order
+	// robust rather than rely on that.)
+	for s.flushing {
+		s.flushCond.Wait()
+	}
+	if s.writer == nil {
+		s.writer = newShuffleWriter(s.bufFile, b.Schema)
+		if err := s.writer.writeHeader(); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("writing wshf header: %w", err)
+		}
+	}
+	if s.coalesce == 0 {
+		s.coalesce = 1 // flat schema, per the caller's gate
+	}
+	s.flushing = true
+	w := s.writer
+	s.mu.Unlock()
+
+	err := w.writeChunk(b.Columns, b.Sel, n)
+
+	s.mu.Lock()
+	s.flushing = false
+	s.flushCond.Broadcast()
+	if err == nil {
+		s.numChunks++
+		s.totalRows += int64(n)
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("writing wshf chunk: %w", err)
+	}
 	return nil
 }
 

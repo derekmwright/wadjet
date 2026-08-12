@@ -116,22 +116,22 @@ func BenchmarkAppendBatchRowsBulkBytes(b *testing.B) {
 	}
 	src.Len = nRows
 
-	dense := make([]int, nRows)
+	dense := make([]uint32, nRows)
 	for i := range dense {
-		dense[i] = i
+		dense[i] = uint32(i)
 	}
-	clustered := make([]int, 0, nRows/6)
-	for base := 0; base+4 < nRows; base += 24 { // one order's 4 rows out of each 24-row stripe
+	clustered := make([]uint32, 0, nRows/6)
+	for base := uint32(0); base+4 < nRows; base += 24 { // one order's 4 rows out of each 24-row stripe
 		clustered = append(clustered, base, base+1, base+2, base+3)
 	}
-	scattered := make([]int, 0, nRows/24)
-	for i := 7; i < nRows; i += 24 {
+	scattered := make([]uint32, 0, nRows/24)
+	for i := uint32(7); i < nRows; i += 24 {
 		scattered = append(scattered, i)
 	}
 
 	for _, tc := range []struct {
 		name string
-		rows []int
+		rows []uint32
 	}{{"dense", dense}, {"clustered", clustered}, {"scattered", scattered}} {
 		b.Run(tc.name, func(b *testing.B) {
 			dst := batch.NewRecordBatch(schema, 0)

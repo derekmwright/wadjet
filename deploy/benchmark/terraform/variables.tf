@@ -336,6 +336,12 @@ variable "shuffle_pread" {
   default     = "1"
 }
 
+variable "sink_direct_chunk" {
+  description = "WADJET_SINK_DIRECT_CHUNK for the workers: stage-sink direct-chunk path — consume slices that alone exceed their sink's flush threshold encode straight from the source batch OUTSIDE the partition/sink mutex (flushing-flag stream exclusion), collapsing the appendAndMaybeFlush lock hold that was 64.3% of all worker mutex block time in the 2026-08-12 SF100 re-profile (docs/design/sink-direct-chunk.md). Default \"1\" matches the in-binary default; \"0\" is the same-binary A/B off arm / kill switch restoring the locked-accumulator path."
+  type        = string
+  default     = "1"
+}
+
 variable "df_late_group_attach" {
   description = "WADJET_DF_LATE_GROUP_ATTACH for the workers: full-layer delivery of attach-on-arrival dynamic filters — resolved deferred blooms/ranges reach the row-group iterator layer (pruning + prune-aware advises) and the shuffle-task path, not just row-level ops (attach-on-arrival-dynamic-filters.md §Full-layer delivery). Default \"1\" matches the in-binary default; \"0\" is the same-binary A/B off arm / kill switch."
   type        = string
