@@ -307,6 +307,283 @@ func TestUnpartitionedStageSinkConcurrentConsume(t *testing.T) {
 	_ = os.Remove(s.Path())
 }
 
+// withDirectChunk pins the direct-chunk kill switch for a test and restores
+// it on cleanup. Tests using it must not call t.Parallel.
+func withDirectChunk(t *testing.T, on bool) {
+	t.Helper()
+	prev := sinkDirectChunkEnabled
+	sinkDirectChunkEnabled = on
+	t.Cleanup(func() { sinkDirectChunkEnabled = prev })
+}
+
+// runPartitionedSink feeds the standard mixed-size input serially and
+// returns the per-partition key multisets (sorted) plus row counts.
+func runPartitionedSink(t *testing.T, numParts, flushBytes int) (map[int][]int64, []int64) {
+	t.Helper()
+	dir := t.TempDir()
+	s := newPartitionedShuffleSink(dir, []string{"k"}, numParts, sinkTestSchema)
+	s.flushBytes = flushBytes
+	if err := s.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	// Alternate small (accumulator) and large (direct-eligible) consumes so
+	// both paths interleave chunks within the same partition files.
+	for i := 0; i < 6; i++ {
+		n := 500
+		if i%2 == 1 {
+			n = 6000
+		}
+		if err := s.Consume(context.Background(), makeSinkBatch(i*10000, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Finalize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	perPart := make(map[int][]int64)
+	for p, path := range s.PartitionFiles() {
+		if path == "" {
+			continue
+		}
+		vals := readWSHFInts(t, path, "k")
+		sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
+		perPart[p] = vals
+	}
+	return perPart, s.PartitionRowCounts()
+}
+
+// TestPartitionedShuffleSinkDirectChunkParity pins the direct-chunk path to
+// the accumulator path's exact per-partition output: same rows, same
+// partition placement, same PartitionRowCounts, for an input that mixes
+// sub-threshold consumes (accumulator) with direct-eligible ones.
+func TestPartitionedShuffleSinkDirectChunkParity(t *testing.T) {
+	const numParts, flushBytes = 8, 8 << 10
+	withDirectChunk(t, false)
+	wantParts, wantCounts := runPartitionedSink(t, numParts, flushBytes)
+	withDirectChunk(t, true)
+	gotParts, gotCounts := runPartitionedSink(t, numParts, flushBytes)
+
+	for p := 0; p < numParts; p++ {
+		if gotCounts[p] != wantCounts[p] {
+			t.Fatalf("partition %d: rows %d, accumulator path wrote %d", p, gotCounts[p], wantCounts[p])
+		}
+		w, g := wantParts[p], gotParts[p]
+		if len(w) != len(g) {
+			t.Fatalf("partition %d: decoded %d keys, want %d", p, len(g), len(w))
+		}
+		for i := range w {
+			if w[i] != g[i] {
+				t.Fatalf("partition %d diverges at %d: got %d want %d", p, i, g[i], w[i])
+			}
+		}
+	}
+}
+
+// TestPartitionedShuffleSinkConcurrentMixedSizes is the race gate for the
+// direct-chunk path: concurrent consumers alternate accumulator-path and
+// direct-path consumes against the same partitions, so direct writers,
+// accumulator appends, threshold flushes, and flushCond waits all interleave.
+// The union of the partition files must hold exactly the input multiset.
+func TestPartitionedShuffleSinkConcurrentMixedSizes(t *testing.T) {
+	const (
+		numParts   = 4
+		consumers  = 6
+		batchesPer = 6
+	)
+	withDirectChunk(t, true)
+	dir := t.TempDir()
+	s := newPartitionedShuffleSink(dir, []string{"k"}, numParts, sinkTestSchema)
+	s.flushBytes = 4 << 10
+	if err := s.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sizeFor := func(c, i int) int {
+		if (c+i)%2 == 0 {
+			return 300 // accumulator path
+		}
+		return 6000 // burst fan-out, direct-eligible slices
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, consumers)
+	for c := 0; c < consumers; c++ {
+		wg.Add(1)
+		go func(c int) {
+			defer wg.Done()
+			for i := 0; i < batchesPer; i++ {
+				base := (c*batchesPer + i) * 10000
+				if err := s.Consume(context.Background(), makeSinkBatch(base, sizeFor(c, i))); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(c)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent consume: %v", err)
+	}
+	if err := s.Finalize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	var want []int64
+	for c := 0; c < consumers; c++ {
+		for i := 0; i < batchesPer; i++ {
+			want = append(want, expectedKeys((c*batchesPer+i)*10000, sizeFor(c, i))...)
+		}
+	}
+	var got []int64
+	for _, path := range s.PartitionFiles() {
+		if path == "" {
+			continue
+		}
+		got = append(got, readWSHFInts(t, path, "k")...)
+	}
+	sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	if len(got) != len(want) {
+		t.Fatalf("row count mismatch: got %d rows, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("key multiset diverges at %d: got %d want %d", i, got[i], want[i])
+		}
+	}
+}
+
+// TestPartitionedShuffleSinkDirectChunkViews drives view-column batches (the
+// morsel-parallel production shape) through the direct path: writeChunk must
+// serialize views through composed selections without flattening or
+// corrupting neighbors.
+func TestPartitionedShuffleSinkDirectChunkViews(t *testing.T) {
+	const (
+		numParts = 4
+		baseRows = 8192
+	)
+	withDirectChunk(t, true)
+	base := makeSinkBatch(0, baseRows)
+	base.Sel = nil // views address physical rows; drop the helper's Sel
+	// Reversed even rows: exercises non-identity index translation.
+	var indices []uint32
+	for i := baseRows - 2; i >= 0; i -= 2 {
+		indices = append(indices, uint32(i))
+	}
+	view := &batch.RecordBatch{
+		Schema: sinkTestSchema,
+		Len:    len(indices),
+	}
+	for _, col := range base.Columns {
+		view.Columns = append(view.Columns, batch.NewViewVector(col, indices))
+	}
+
+	dir := t.TempDir()
+	s := newPartitionedShuffleSink(dir, []string{"k"}, numParts, sinkTestSchema)
+	s.flushBytes = 4 << 10 // per-partition view slices (~34 KB) take the direct path
+	if err := s.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Consume(context.Background(), view); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Finalize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var want []int64
+	for _, idx := range indices {
+		want = append(want, int64(idx))
+	}
+	var got []int64
+	for _, path := range s.PartitionFiles() {
+		if path == "" {
+			continue
+		}
+		got = append(got, readWSHFInts(t, path, "k")...)
+	}
+	sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	if len(got) != len(want) {
+		t.Fatalf("row count mismatch: got %d rows, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("key multiset diverges at %d: got %d want %d", i, got[i], want[i])
+		}
+	}
+}
+
+// TestUnpartitionedStageSinkDirectChunk mixes direct-eligible batches (n ≥
+// flushRows bypasses the accumulator) with coalescing-path batches from
+// concurrent consumers; decoded output must be the exact input multiset and
+// TotalRows must match.
+func TestUnpartitionedStageSinkDirectChunk(t *testing.T) {
+	const consumers = 6
+	withDirectChunk(t, true)
+	dir := t.TempDir()
+	s := newUnpartitionedStageSink(dir, "direct-test")
+	s.flushRows = 1000
+	s.flushBytesT = 64 << 10
+	if err := s.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sizeFor := func(c, i int) int {
+		if (c+i)%2 == 0 {
+			return 300 // coalescing path
+		}
+		return 4000 // ≥ flushRows: direct path
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, consumers)
+	for c := 0; c < consumers; c++ {
+		wg.Add(1)
+		go func(c int) {
+			defer wg.Done()
+			for i := 0; i < 8; i++ {
+				base := (c*8 + i) * 10000
+				if err := s.Consume(context.Background(), makeSinkBatch(base, sizeFor(c, i))); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(c)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent consume: %v", err)
+	}
+	if err := s.Finalize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	var want []int64
+	for c := 0; c < consumers; c++ {
+		for i := 0; i < 8; i++ {
+			want = append(want, expectedKeys((c*8+i)*10000, sizeFor(c, i))...)
+		}
+	}
+	if s.TotalRows() != int64(len(want)) {
+		t.Fatalf("TotalRows %d, want %d", s.TotalRows(), len(want))
+	}
+	got := readWSHFInts(t, s.Path(), "k")
+	sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	if len(got) != len(want) {
+		t.Fatalf("decoded rows %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("key multiset diverges at %d: got %d want %d", i, got[i], want[i])
+		}
+	}
+	_ = os.Remove(s.Path())
+}
+
 // BenchmarkPartitionedShuffleSinkConsume measures Consume throughput on the
 // serial path (the production default — guards the per-partition-lock
 // refactor against serial regression) and under 8 concurrent consumers (the
@@ -351,4 +628,37 @@ func BenchmarkPartitionedShuffleSinkConsume(b *testing.B) {
 			}
 		})
 	})
+
+	// Large-consume shape (morsel views run up to 64K rows): the burst path
+	// whose per-partition lock hold was 64% of SF100 worker mutex block time
+	// (2026-08-12 re-profile). direct=off pins the old locked-accumulator
+	// cost for comparison.
+	for _, direct := range []bool{true, false} {
+		name := "parallel-8-large-direct"
+		if !direct {
+			name = "parallel-8-large-locked"
+		}
+		b.Run(name, func(b *testing.B) {
+			prev := sinkDirectChunkEnabled
+			sinkDirectChunkEnabled = direct
+			defer func() { sinkDirectChunkEnabled = prev }()
+			s := mkSink(b)
+			defer s.Close()
+			// 64K rows = morselMaxViewRows, the production large-consume
+			// size; per-partition slices (~90 KB at 24 parts) clear the
+			// direct-chunk byte gate.
+			const rows = 65536
+			b.SetBytes(int64(rows * 40))
+			b.SetParallelism(8)
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				in := makeSinkBatch(0, rows)
+				for pb.Next() {
+					if err := s.Consume(context.Background(), in); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		})
+	}
 }

@@ -46,19 +46,19 @@ func TestAppendBatchRowsBulk_BytesRuns(t *testing.T) {
 	nulls := map[int]bool{5: true, 6: true, 20: true, 63: true}
 	cases := []struct {
 		name      string
-		rows      []int
+		rows      []uint32
 		nulls     map[int]bool
 		malformed bool
 	}{
 		{"dense-no-nulls", seq(0, n), nil, false},
 		{"dense-with-nulls", seq(0, n), nulls, false},
 		{"dense-malformed-null-offsets", seq(0, n), nulls, true},
-		{"scattered-singletons", []int{1, 3, 7, 9, 30, 62}, nil, false},
-		{"clustered-runs", []int{0, 1, 2, 3, 10, 11, 12, 40, 41, 60}, nil, false},
-		{"runs-broken-by-nulls", []int{4, 5, 6, 7, 8, 19, 20, 21}, nulls, false},
-		{"runs-broken-by-malformed-nulls", []int{4, 5, 6, 7, 8, 19, 20, 21}, nulls, true},
-		{"run-ending-before-null", []int{3, 4, 18, 19}, nulls, true},
-		{"single-row", []int{42}, nil, false},
+		{"scattered-singletons", []uint32{1, 3, 7, 9, 30, 62}, nil, false},
+		{"clustered-runs", []uint32{0, 1, 2, 3, 10, 11, 12, 40, 41, 60}, nil, false},
+		{"runs-broken-by-nulls", []uint32{4, 5, 6, 7, 8, 19, 20, 21}, nulls, false},
+		{"runs-broken-by-malformed-nulls", []uint32{4, 5, 6, 7, 8, 19, 20, 21}, nulls, true},
+		{"run-ending-before-null", []uint32{3, 4, 18, 19}, nulls, true},
+		{"single-row", []uint32{42}, nil, false},
 		{"empty-rows", nil, nil, false},
 	}
 	for _, tc := range cases {
@@ -82,7 +82,7 @@ func TestAppendBatchRowsBulk_BytesRuns(t *testing.T) {
 			wantAdded := 0
 			for i, row := range tc.rows {
 				di := 1 + i
-				if tc.nulls[row] {
+				if tc.nulls[int(row)] {
 					if !col.Nulls.IsNull(di) {
 						t.Fatalf("row %d (src %d): expected null", di, row)
 					}
@@ -91,7 +91,7 @@ func TestAppendBatchRowsBulk_BytesRuns(t *testing.T) {
 					}
 					continue
 				}
-				want := scol.BytesData.Value(row)
+				want := scol.BytesData.Value(int(row))
 				if got := col.BytesData.Value(di); !bytes.Equal(got, want) {
 					t.Fatalf("row %d (src %d): got %q want %q", di, row, got, want)
 				}
@@ -104,10 +104,10 @@ func TestAppendBatchRowsBulk_BytesRuns(t *testing.T) {
 	}
 }
 
-func seq(lo, hi int) []int {
-	out := make([]int, 0, hi-lo)
+func seq(lo, hi int) []uint32 {
+	out := make([]uint32, 0, hi-lo)
 	for i := lo; i < hi; i++ {
-		out = append(out, i)
+		out = append(out, uint32(i))
 	}
 	return out
 }

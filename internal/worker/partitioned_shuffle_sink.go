@@ -34,13 +34,24 @@ import (
 // Concurrency model: the lock is PER PARTITION, not sink-wide. Hashing and
 // row scatter are per-call private state (pooled scratch), so concurrent
 // Consume calls — morsel-parallel fragment consumers, or exec.Pipeline's
-// parallel workers — contend only when appending to the SAME partition, and
-// each such critical section covers 1/numParts of a batch plus an occasional
-// 64 KB chunk encode. The previous sink-wide mutex serialized the entire
-// consume (hash + scatter + append + flush) across k consumers, which is what
-// kept join/probe fragments +12-27% slower under morsel-auto at SF100
-// (2026-07-07 default-flip gate) — the sink was the fragment's dominant cost
-// and only one consumer could be inside it.
+// parallel workers — contend only when appending to the SAME partition. The
+// previous sink-wide mutex serialized the entire consume (hash + scatter +
+// append + flush) across k consumers, which is what kept join/probe
+// fragments +12-27% slower under morsel-auto at SF100 (2026-07-07
+// default-flip gate) — the sink was the fragment's dominant cost and only
+// one consumer could be inside it.
+//
+// Large consume slices additionally take the DIRECT-CHUNK path (see
+// writeDirectChunk and docs/design/sink-direct-chunk.md): a per-partition
+// slice whose estimated bytes already exceed the flush threshold skips the
+// accumulator and encodes straight from the source batch into the partition
+// stream OUTSIDE pw.mu, guarded by pw.flushing. The 2026-08-12 SF100 block
+// profile showed the per-partition locks themselves as 64.3% of all worker
+// mutex block time — nearly all of it concurrent 64K-row morsel consumes
+// holding a lock for the accumulator copy plus encode. With the direct path
+// the lock covers only counter updates for those slices, and the row data is
+// copied once (source→wire) instead of twice (source→accumulator→wire).
+// WADJET_SINK_DIRECT_CHUNK=0 is the kill switch.
 type partitionedShuffleSink struct {
 	spillDir   string
 	keys       []string // partition key column names
@@ -65,9 +76,9 @@ type partitionedShuffleSink struct {
 
 // consumeScratch is the per-Consume private working set.
 type consumeScratch struct {
-	partScratch []int    // per-row partition assignment
-	hashScratch []uint64 // per-row uint64 hash accumulator
-	perPartRows [][]int  // per-partition source-row indices
+	partScratch []int      // per-row partition assignment
+	hashScratch []uint64   // per-row uint64 hash accumulator
+	perPartRows [][]uint32 // per-partition source-row indices
 }
 
 // partitionWriter holds the open file handle and incremental state for one
@@ -75,9 +86,16 @@ type consumeScratch struct {
 // immutable after Init. Chunks written by different Consume calls may
 // interleave within a partition file — a .wshf file is a self-contained
 // chunk sequence, so interleaving is valid as long as individual chunk
-// writes are serialized (which mu provides).
+// writes are serialized. Two exclusion domains provide that: mu guards the
+// accumulator (rowBuf and counters) and any writer access made while
+// holding it; flushing marks a direct-chunk writer streaming into
+// writer/bufFile OUTSIDE mu (set and cleared under mu, waiters park on
+// flushCond). Accumulator flushes and writer lazy-init wait for !flushing
+// before touching the stream.
 type partitionWriter struct {
-	mu sync.Mutex
+	mu        sync.Mutex
+	flushing  bool       // a direct-chunk writer owns writer/bufFile outside mu
+	flushCond *sync.Cond // signaled when a direct-chunk write completes
 
 	file    *os.File
 	bufFile *bufio.Writer // wraps file so the many small Writes from
@@ -132,7 +150,9 @@ func (s *partitionedShuffleSink) Init(_ context.Context) error {
 		if err != nil {
 			return fmt.Errorf("creating partition %d: %w", p, err)
 		}
-		s.parts[p] = &partitionWriter{file: f}
+		pw := &partitionWriter{file: f}
+		pw.flushCond = sync.NewCond(&pw.mu)
+		s.parts[p] = pw
 	}
 	return nil
 }
@@ -201,7 +221,7 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 	n := b.ActiveLen()
 	sc, _ := s.scratchPool.Get().(*consumeScratch)
 	if sc == nil {
-		sc = &consumeScratch{perPartRows: make([][]int, s.numParts)}
+		sc = &consumeScratch{perPartRows: make([][]uint32, s.numParts)}
 	}
 	defer s.scratchPool.Put(sc)
 	if cap(sc.partScratch) < n {
@@ -223,12 +243,19 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 	}
 	if b.Sel != nil {
 		for i := 0; i < n; i++ {
-			sc.perPartRows[parts[i]] = append(sc.perPartRows[parts[i]], int(b.Sel[i]))
+			sc.perPartRows[parts[i]] = append(sc.perPartRows[parts[i]], b.Sel[i])
 		}
 	} else {
 		for i := 0; i < n; i++ {
-			sc.perPartRows[parts[i]] = append(sc.perPartRows[parts[i]], i)
+			sc.perPartRows[parts[i]] = append(sc.perPartRows[parts[i]], uint32(i))
 		}
+	}
+
+	// Direct-chunk gate input: estimated bytes per row, so each partition
+	// slice can decide accumulator vs direct encode. 0 = direct path off.
+	rowBytes := 0
+	if sinkDirectChunkEnabled {
+		rowBytes = approxRowBytes(b)
 	}
 
 	// Pre-warm the source batch's lazy Bitmap.HasNulls() cache on every
@@ -260,7 +287,7 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 			if len(sc.perPartRows[p]) == 0 {
 				continue
 			}
-			if err := s.appendAndMaybeFlush(p, b, sc.perPartRows[p]); err != nil {
+			if err := s.appendPartition(p, b, sc.perPartRows[p], rowBytes); err != nil {
 				return err
 			}
 		}
@@ -285,17 +312,71 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 		}
 		p := p
 		g.Go(func() error {
-			return s.appendAndMaybeFlush(p, b, sc.perPartRows[p])
+			return s.appendPartition(p, b, sc.perPartRows[p], rowBytes)
 		})
 	}
 	return g.Wait()
 }
 
+// appendPartition routes one partition's row slice: a slice whose estimated
+// bytes already exceed the flush threshold would only pass through the
+// accumulator to be flushed immediately, so it encodes directly from b into
+// the partition stream instead (writeDirectChunk); everything else takes the
+// locked accumulator path. rowBytes == 0 means the direct path is disabled
+// (WADJET_SINK_DIRECT_CHUNK=0).
+func (s *partitionedShuffleSink) appendPartition(p int, b *batch.RecordBatch, rows []uint32, rowBytes int) error {
+	if rowBytes > 0 && len(rows)*rowBytes >= s.flushBytes {
+		return s.writeDirectChunk(p, b, rows)
+	}
+	return s.appendAndMaybeFlush(p, b, rows)
+}
+
+// writeDirectChunk encodes rows of b as one complete chunk straight into
+// partition p's stream, bypassing the accumulator. The expensive work — the
+// row gather and chunk encode in writeChunk — runs OUTSIDE pw.mu; exclusive
+// ownership of writer/bufFile during that window is marked by pw.flushing
+// (accumulator flushes and other direct writers wait on pw.flushCond). The
+// mutex is held only to acquire/release that ownership and bump counters.
+//
+// Safe against the source batch: b is this Consume call's private batch
+// (caller contract), Consume pre-warmed every column's HasNulls memoization
+// and flattened own-null views before the fan-out, and writeChunk reads
+// remaining view columns through composed selections without mutation.
+func (s *partitionedShuffleSink) writeDirectChunk(p int, b *batch.RecordBatch, rows []uint32) error {
+	pw := s.parts[p]
+	pw.mu.Lock()
+	for pw.flushing {
+		pw.flushCond.Wait()
+	}
+	if err := s.ensureWriterLocked(p); err != nil {
+		pw.mu.Unlock()
+		return err
+	}
+	w := pw.writer
+	pw.flushing = true
+	pw.mu.Unlock()
+
+	err := w.writeChunk(b.Columns, rows, len(rows))
+
+	pw.mu.Lock()
+	pw.flushing = false
+	pw.flushCond.Broadcast()
+	if err == nil {
+		pw.numRows += int64(len(rows))
+	}
+	pw.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("partition %d direct chunk: %w", p, err)
+	}
+	return nil
+}
+
 // appendAndMaybeFlush appends rows to partition p's accumulator and flushes
 // it if the byte threshold tripped, all under that partition's lock. This is
 // the whole per-partition critical section: ~1/numParts of a batch's rows
-// plus an occasional flushBytes-sized chunk encode.
-func (s *partitionedShuffleSink) appendAndMaybeFlush(p int, b *batch.RecordBatch, rows []int) error {
+// plus an occasional flushBytes-sized chunk encode. (Slices big enough to
+// flush on their own bypass this via writeDirectChunk — see appendPartition.)
+func (s *partitionedShuffleSink) appendAndMaybeFlush(p int, b *batch.RecordBatch, rows []uint32) error {
 	pw := s.parts[p]
 	pw.mu.Lock()
 	defer pw.mu.Unlock()
@@ -304,6 +385,13 @@ func (s *partitionedShuffleSink) appendAndMaybeFlush(p int, b *batch.RecordBatch
 	}
 	if pw.rowBuf == nil || pw.bufRows == 0 || pw.bufBytes < s.flushBytes {
 		return nil
+	}
+	// The stream may be owned by an in-flight direct-chunk writer; wait it
+	// out (Wait releases mu, so appends to OTHER consumers proceed). Another
+	// accumulator flusher may drain rowBuf while we wait —
+	// flushPartitionLocked's empty-buffer guard makes that a no-op here.
+	for pw.flushing {
+		pw.flushCond.Wait()
 	}
 	return s.flushPartitionLocked(p)
 }
@@ -320,7 +408,7 @@ func (s *partitionedShuffleSink) appendAndMaybeFlush(p int, b *batch.RecordBatch
 // emit SetNull on actual source nulls. Offsets for bytes/string columns are
 // pre-grown to end+1 so BytesData.Set can write Offsets[di+1] in place
 // without per-row growth.
-func (s *partitionedShuffleSink) appendRowsBulkLocked(p int, b *batch.RecordBatch, rows []int) error {
+func (s *partitionedShuffleSink) appendRowsBulkLocked(p int, b *batch.RecordBatch, rows []uint32) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -356,7 +444,7 @@ func (s *partitionedShuffleSink) appendRowsBulkLocked(p int, b *batch.RecordBatc
 // types only — the switch (like growBatchTo) has no Array/Map/Row/Vector
 // arms. Shared by the partition writers and the unpartitioned stage sink's
 // chunk-coalescing accumulator.
-func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows []int) int {
+func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows []uint32) int {
 	start := dst.Len
 	end := start + len(srcRows)
 
@@ -367,7 +455,7 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 	bytesAdded := 0
 	nRows := len(srcRows)
 
-	var viewRows []int // lazy scratch for view-column row translation
+	var viewRows []uint32 // lazy scratch for view-column row translation
 	for ci, srcCol := range b.Columns {
 		dstCol := dst.Columns[ci]
 		rows := srcRows
@@ -378,10 +466,10 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 			// directly — one copy, straight into the accumulator, instead
 			// of a flatten copy followed by this copy.
 			if viewRows == nil {
-				viewRows = make([]int, nRows)
+				viewRows = make([]uint32, nRows)
 			}
 			for i, r := range srcRows {
-				viewRows[i] = int(srcCol.Indices[r])
+				viewRows[i] = srcCol.Indices[r]
 			}
 			srcCol = srcCol.Base
 			rows = viewRows
@@ -398,7 +486,7 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 				}
 			} else {
 				for i, row := range rows {
-					if srcCol.Nulls.IsNullFast(row) {
+					if srcCol.Nulls.IsNullFast(int(row)) {
 						dstCol.Nulls.SetNull(start + i)
 					} else {
 						dstSlice[i] = srcData[row]
@@ -416,7 +504,7 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 				}
 			} else {
 				for i, row := range rows {
-					if srcCol.Nulls.IsNullFast(row) {
+					if srcCol.Nulls.IsNullFast(int(row)) {
 						dstCol.Nulls.SetNull(start + i)
 					} else {
 						dstSlice[i] = srcData[row]
@@ -434,7 +522,7 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 				}
 			} else {
 				for i, row := range rows {
-					if srcCol.Nulls.IsNullFast(row) {
+					if srcCol.Nulls.IsNullFast(int(row)) {
 						dstCol.Nulls.SetNull(start + i)
 					} else {
 						dstSlice[i] = srcData[row]
@@ -452,7 +540,7 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 				}
 			} else {
 				for i, row := range rows {
-					if srcCol.Nulls.IsNullFast(row) {
+					if srcCol.Nulls.IsNullFast(int(row)) {
 						dstCol.Nulls.SetNull(start + i)
 					} else {
 						dstSlice[i] = srcData[row]
@@ -470,7 +558,7 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 				}
 			} else {
 				for i, row := range rows {
-					if srcCol.Nulls.IsNullFast(row) {
+					if srcCol.Nulls.IsNullFast(int(row)) {
 						dstCol.Nulls.SetNull(start + i)
 					} else {
 						dstSlice[i] = srcData[row]
@@ -495,7 +583,7 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 			srcData := srcCol.BytesData.Data
 			dstB := &dstCol.BytesData
 			for i := 0; i < nRows; {
-				row := rows[i]
+				row := int(rows[i])
 				if hasNulls && srcCol.Nulls.IsNullFast(row) {
 					di := start + i
 					dstCol.Nulls.SetNull(di)
@@ -504,7 +592,7 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 					continue
 				}
 				runLen := 1
-				for i+runLen < nRows && rows[i+runLen] == row+runLen &&
+				for i+runLen < nRows && int(rows[i+runLen]) == row+runLen &&
 					!(hasNulls && srcCol.Nulls.IsNullFast(row+runLen)) {
 					runLen++
 				}
@@ -540,7 +628,7 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 				}
 			} else {
 				for i, row := range rows {
-					if srcCol.Nulls.IsNullFast(row) {
+					if srcCol.Nulls.IsNullFast(int(row)) {
 						dstCol.Nulls.SetNull(start + i)
 					} else {
 						dstSlice[i] = srcData[row]
@@ -631,24 +719,37 @@ func growBatchTo(dst *batch.RecordBatch, n int) {
 	}
 }
 
+// ensureWriterLocked lazily opens partition p's stream (buffered writer +
+// header). Caller must hold s.parts[p].mu with pw.flushing false — the init
+// writes header bytes into bufFile, which a direct-chunk writer would
+// otherwise be streaming into outside the lock.
+func (s *partitionedShuffleSink) ensureWriterLocked(p int) error {
+	pw := s.parts[p]
+	if pw.writer != nil {
+		return nil
+	}
+	// 256 KB stream buffer keeps the syscall count down to ~1 per
+	// 256 KB of column data. The previous unbuffered path issued a
+	// syscall per row of bytes-typed columns (writeBytesData), which
+	// made that the dominant shuffle cost on Q03 SF1 (~95% of CPU).
+	wf, _ := diskio.NewWriter(pw.file, diskio.KeepResident)
+	pw.bufFile = bufio.NewWriterSize(wf, 256*1024)
+	pw.writer = newShuffleWriter(pw.bufFile, s.schema)
+	if err := pw.writer.writeHeader(); err != nil {
+		return fmt.Errorf("partition %d header: %w", p, err)
+	}
+	return nil
+}
+
 // flushPartitionLocked writes partition p's accumulator as one chunk and
-// resets it. Caller must hold s.parts[p].mu.
+// resets it. Caller must hold s.parts[p].mu with pw.flushing false.
 func (s *partitionedShuffleSink) flushPartitionLocked(p int) error {
 	pw := s.parts[p]
 	if pw.rowBuf == nil || pw.bufRows == 0 {
 		return nil
 	}
-	if pw.writer == nil {
-		// 256 KB stream buffer keeps the syscall count down to ~1 per
-		// 256 KB of column data. The previous unbuffered path issued a
-		// syscall per row of bytes-typed columns (writeBytesData), which
-		// made that the dominant shuffle cost on Q03 SF1 (~95% of CPU).
-		wf, _ := diskio.NewWriter(pw.file, diskio.KeepResident)
-		pw.bufFile = bufio.NewWriterSize(wf, 256*1024)
-		pw.writer = newShuffleWriter(pw.bufFile, s.schema)
-		if err := pw.writer.writeHeader(); err != nil {
-			return fmt.Errorf("partition %d header: %w", p, err)
-		}
+	if err := s.ensureWriterLocked(p); err != nil {
+		return err
 	}
 	if err := pw.writer.writeChunk(pw.rowBuf.Columns, nil, pw.bufRows); err != nil {
 		return fmt.Errorf("partition %d chunk: %w", p, err)
@@ -699,6 +800,11 @@ func (s *partitionedShuffleSink) Finalize(_ context.Context) error {
 			pw := s.parts[p]
 			pw.mu.Lock()
 			defer pw.mu.Unlock()
+			// Callers guarantee no NEW Consume after Finalize, but wait out
+			// any straggling direct-chunk writer that still owns the stream.
+			for pw.flushing {
+				pw.flushCond.Wait()
+			}
 			if err := s.flushPartitionLocked(p); err != nil {
 				return err
 			}
