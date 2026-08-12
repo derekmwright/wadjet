@@ -330,6 +330,31 @@ Merged default-off (flag 0 = disabled ⇒ inert; standing default-off
 merge rule). §8 S3 — the SF100 same-window pair — remains open and
 deploy-gated; it decides any default flip and the tfvars cap.
 
+### 9.1 SF100 same-window pair (2026-08-12 evening — split verdict, default stays OFF)
+
+Control results/20260812-195726 (cache=0) vs treatment
+results/20260812-201647 (6 GiB/worker), bin 26aaa55, runs=2, block rate
+20000, rows **44/44 identical** across all four arms.
+
+- **Steady state pays**: R2 322.1s → 264.6s (**−17.9%**), R2/R1
+  1.077 → 0.715. Hit-bytes 37–76 GB served per worker; zstd
+  `decodeSync` cum 697.9s → 483.1s (**−31%**). Mechanism-marked wins:
+  Q08-R2 −87%, Q18-R2 −63%, Q12-R2 −47%, Q04-R2 −39%.
+- **Cold pass pays a tax**: R1 299.1s → 370.1s (+23.7%). Named
+  mechanism (worker counters): **admission churn** — 59–75K admissions
+  vs 55–73K evictions per worker at the 6 GiB cap; ~95% of admission
+  clones (multi-MB memmoves) evicted before any reuse; only ~3K entries
+  live. Q16-R1 5.5s → 51.5s = a mid-query admission storm. Relief never
+  fired (relief_mb=0); no rejections, no pressure events.
+- Pair total +2.2% ⇒ **no default flip**; flag stays 0.
+
+The cache mechanism is validated (R2 + zstd collapse); the admission
+policy is the defect. Next iteration: **churn-controlled admission** —
+at-cap admissions must beat the victim on ghost frequency (TinyLFU-lite
+filter), or admit only while below cap and let ghost frequency promote;
+either kills the wasted-clone tax while keeping the surviving hot set.
+Re-pair after that lands.
+
 ## 10. Open questions
 
 - Cap auto-derivation (fraction of GOMEMLIMIT once validated) — same
