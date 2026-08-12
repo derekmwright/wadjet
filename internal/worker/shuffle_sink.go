@@ -103,7 +103,7 @@ func (s *shuffleStreamSink) Finalize(_ context.Context) error {
 	}
 	if s.writer == nil {
 		// No batches consumed — leave the file empty so upstream sees zero rows.
-		return s.file.Sync()
+		return syncStageFile(s.file)
 	}
 
 	// Flush the bufio.Writer before seeking the underlying file: a Seek
@@ -129,7 +129,7 @@ func (s *shuffleStreamSink) Finalize(_ context.Context) error {
 	if _, err := s.file.Seek(0, 2); err != nil { // back to end
 		return fmt.Errorf("seeking back to end: %w", err)
 	}
-	return s.file.Sync()
+	return syncStageFile(s.file)
 }
 
 // Close releases the file handle. The spill file itself is left on disk for

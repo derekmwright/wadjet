@@ -346,7 +346,7 @@ func (s *unpartitionedStageSink) Finalize(_ context.Context) error {
 		if _, err := s.file.WriteAt(hdr[:], 4); err != nil {
 			return fmt.Errorf("patching chunk count: %w", err)
 		}
-		if err := s.file.Sync(); err != nil {
+		if err := syncStageFile(s.file); err != nil {
 			return fmt.Errorf("syncing wshf file: %w", err)
 		}
 	}

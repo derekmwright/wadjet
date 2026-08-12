@@ -682,7 +682,8 @@ func (s *partitionedShuffleSink) Finalize(_ context.Context) error {
 	if !s.finalized.CompareAndSwap(false, true) {
 		return nil
 	}
-	// Per-partition flush + header-patch + fsync. All steps touch only the
+	// Per-partition flush + header-patch (+ fsync only when
+	// WADJET_SHUFFLE_FSYNC=1 — see stage_fsync.go). All steps touch only the
 	// target partition's state; each goroutine takes its partition's lock,
 	// which also quiesces any straggling Consume appends (callers guarantee
 	// no NEW Consume starts after Finalize — the pipeline contract).
@@ -703,7 +704,7 @@ func (s *partitionedShuffleSink) Finalize(_ context.Context) error {
 			}
 			if pw.writer == nil {
 				// Empty partition — leave file at zero bytes; downstream treats as no rows.
-				return pw.file.Sync()
+				return syncStageFile(pw.file)
 			}
 			// The bufio.Writer must be flushed before we Seek the underlying
 			// file: a Seek bypasses the buffer, so any unflushed bytes would
@@ -727,7 +728,7 @@ func (s *partitionedShuffleSink) Finalize(_ context.Context) error {
 			if _, err := pw.file.Seek(0, 2); err != nil {
 				return fmt.Errorf("partition %d seek end: %w", p, err)
 			}
-			return pw.file.Sync()
+			return syncStageFile(pw.file)
 		})
 	}
 	return g.Wait()
