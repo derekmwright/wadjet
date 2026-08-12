@@ -54,6 +54,11 @@ type RowGroupIter struct {
 	dynamicRanges []exec.DynamicRange
 	bloomFilters  []*exec.BloomScanFilter
 
+	// cache, when set via SetDecodedCache, consults/feeds the worker's
+	// decoded-chunk cache (docs/design/decoded-rowgroup-cache.md). Inert
+	// unless the reader carries a CacheIdentity.
+	cache *DecodedChunkCache
+
 	// Per-iterator counters for diagnostics. Reset on each Open.
 	rgPrunedBloom int
 	rgPrunedRange int
@@ -72,6 +77,15 @@ func (it *RowGroupIter) SetDynamicFilters(ranges []exec.DynamicRange, blooms []*
 	}
 	it.dynamicRanges = ranges
 	it.bloomFilters = blooms
+}
+
+// SetDecodedCache attaches the worker's decoded-chunk cache. Call before
+// the first Next (the field is read without synchronization). nil = uncached.
+func (it *RowGroupIter) SetDecodedCache(c *DecodedChunkCache) {
+	if it == nil {
+		return
+	}
+	it.cache = c
 }
 
 // PruneStats returns counters for diagnostic logging: row groups skipped
@@ -160,7 +174,7 @@ func (it *RowGroupIter) Next() (*batch.RecordBatch, error) {
 			}
 		}
 
-		b, err := ReadRowGroupNative(it.fr, rgIdx, it.readSchema, nil)
+		b, err := ReadRowGroupNativeCached(it.fr, rgIdx, it.readSchema, nil, it.cache)
 		if err != nil {
 			return nil, fmt.Errorf("reading row group %d: %w", rgIdx, err)
 		}

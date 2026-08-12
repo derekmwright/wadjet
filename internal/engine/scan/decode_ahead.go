@@ -53,6 +53,7 @@ type DecodeAheadIter struct {
 	tokens         TokenPool
 	advise         func(off, n int64)
 	advisedIdx     int // next row-group index to I/O-advise (win.mu)
+	cache          *DecodedChunkCache
 
 	dynamicRanges []exec.DynamicRange
 	bloomFilters  []*exec.BloomScanFilter
@@ -179,6 +180,10 @@ type DecodeAheadOpts struct {
 	// concurrent use; calls stop before Close returns (decode workers
 	// are joined), so an mmap-backed closure never outlives its munmap.
 	Advise func(off, n int64)
+	// Cache, when set, consults/feeds the worker's decoded-chunk cache
+	// inside ReadRowGroupNativeCached (docs/design/decoded-rowgroup-cache.md).
+	// Inert unless the reader carries a CacheIdentity. nil = uncached.
+	Cache *DecodedChunkCache
 }
 
 // TokenPool is the compute-budget seam shared with the caller's pool
@@ -308,6 +313,7 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 		pressureStrict: opts.PressureStrict,
 		tokens:         opts.Tokens,
 		advise:         opts.Advise,
+		cache:          opts.Cache,
 	}
 	if it.win == nil {
 		it.win = NewDecodeWindow(opts.WindowBytes)
@@ -569,7 +575,7 @@ func (it *DecodeAheadIter) decodeLoop() {
 		slot := &decodeSlot{est: est, ahead: isAhead}
 		if pruned := it.pruneGroup(idx, ranges, blooms); !pruned {
 			t0 := time.Now()
-			b, err := ReadRowGroupNative(it.fr, idx, it.readSchema, nil)
+			b, err := ReadRowGroupNativeCached(it.fr, idx, it.readSchema, nil, it.cache)
 			it.decodeSpanNs.Add(time.Since(t0).Nanoseconds())
 			it.decodeSpanBytes.Add(it.projectedCompressedBytes(idx))
 			if err != nil {

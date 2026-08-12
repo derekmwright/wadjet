@@ -354,6 +354,12 @@ variable "base_table_cache_bytes" {
   default     = null
 }
 
+variable "decoded_cache_bytes" {
+  description = "Decoded-chunk cache budget in bytes per worker process (docs/design/decoded-rowgroup-cache.md): worker-lifetime in-memory cache of decoded base-table parquet column chunks, so repeat scans skip zstd decompress + decode kernels. Registered as a hard reservoir and evicted first under memory relief. Worker-side flag only. null = take the profile's benchmark.decoded_cache_bytes, else 0 = disabled (default until SF100 validation). Explicit -var (including 0) overrides the profile."
+  type        = number
+  default     = null
+}
+
 variable "streaming_shuffle_read" {
   description = "Streaming shuffle read (docs/design/exchange-streaming-consumption.md): workers decode WSHF/WSHC exchange inputs directly from the peer/S3 byte stream (D1) and prefetch peer-hinted shuffle inputs ahead of consumption (D2), instead of staging whole files before the first chunk decodes. Worker-side flag only. Default true (SF100-validated, 2026-07-14 pair) — set false for a control arm / kill switch."
   type        = bool

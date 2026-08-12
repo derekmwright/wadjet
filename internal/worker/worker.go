@@ -22,6 +22,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/diskio"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
+	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/metrics"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -93,6 +94,14 @@ type Config struct {
 	// per scan source; <= 0 selects the engine default (256 MiB).
 	ScanDecodeAhead      bool
 	ScanDecodeAheadBytes int64
+
+	// DecodedCacheBytes bounds the worker-lifetime decoded-chunk cache:
+	// decoded base-table parquet column chunks reused across queries and
+	// runs instead of re-paying zstd decompress + decode
+	// (docs/design/decoded-rowgroup-cache.md). 0 (the default) disables
+	// the cache entirely — the kill switch. Registered as a hard system
+	// reservoir and as a relief target (evicts before operators spill).
+	DecodedCacheBytes int64
 
 	// MmapRelief enables the Phase-5 MADV_DONTNEED relief of cold mmap'd cache
 	// files under heap pressure. Default false: fully dormant (no region
@@ -273,6 +282,14 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	executor.SetMorselWorkers(cfg.MorselWorkers)
 	executor.SetStreamingShuffleRead(cfg.StreamingShuffleRead)
 	executor.SetScanDecodeAhead(cfg.ScanDecodeAhead, cfg.ScanDecodeAheadBytes)
+	// Decoded-chunk cache (docs/design/decoded-rowgroup-cache.md): default
+	// off; a positive budget creates the cache, wires it into scan sources,
+	// and (below) registers it as a hard reservoir + relief target.
+	var decodedCache *scan.DecodedChunkCache
+	if cfg.DecodedCacheBytes > 0 {
+		decodedCache = scan.NewDecodedChunkCache(cfg.DecodedCacheBytes)
+		executor.SetDecodedCache(decodedCache)
+	}
 	// Phase 3: wire the system-reservoir registry for ACCOUNTING (Available()/
 	// drift) — this does NOT activate the floating spill threshold; that stays
 	// gated on FloatingBudgetActive (default false → tuned static 40%/90% path).
@@ -281,6 +298,9 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	// precede SetResultStore so the store reservoir lands in the same registry.
 	if cfg.Reservoirs != nil {
 		cfg.Reservoirs.Register(memory.NewReservoirFunc("lru-cache/parquet-metadata", cfg.CacheBytes, cache.Size))
+		if decodedCache != nil {
+			cfg.Reservoirs.Register(memory.NewReservoirFunc("decoded-rowgroup-cache", cfg.DecodedCacheBytes, decodedCache.Size))
+		}
 		executor.SetReservoirs(cfg.Reservoirs)
 		executor.SetFloatingBudgetActive(cfg.FloatingBudgetActive)
 	}
@@ -1907,6 +1927,7 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 	cache.refresh(w.config.SpillDir)
 	var prevGC uint32
 	var prevPauseNs uint64
+	var lastDecodedStats scan.DecodedChunkCacheStats
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -1945,6 +1966,22 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 				"goroutines", ng,
 				"gc_delta", gcDelta,
 				"gc_pause_delta_ms", pauseDeltaNs/1_000_000)
+
+			// Decoded-chunk cache engagement markers (change-only, the
+			// base-table cache stats convention).
+			if dc := w.executor.decodedCache; dc != nil {
+				if st := dc.Stats(); st != lastDecodedStats {
+					lastDecodedStats = st
+					w.logger.Info("decoded-rowgroup cache stats",
+						"hits", st.Hits, "misses", st.Misses,
+						"hit_mb", st.HitBytes/(1<<20),
+						"admitted", st.Admitted, "ghosts", st.GhostRegistered,
+						"evictions", st.Evictions, "relief_mb", st.ReliefBytes/(1<<20),
+						"rejected_large", st.RejectedTooLarge, "clone_skips", st.CloneSkips,
+						"size_mb", st.SizeBytes/(1<<20), "cap_mb", st.CapBytes/(1<<20),
+						"entries", st.Entries)
+				}
+			}
 
 			// Phase-5 mmap relief (dormant unless --mmap-relief): when TOTAL
 			// process RSS exceeds the configured ceiling, MADV_DONTNEED the

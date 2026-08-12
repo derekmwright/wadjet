@@ -29,7 +29,24 @@ type FileReader struct {
 	schemaRoot *SchemaNode     // schema tree
 	leaves     []*SchemaNode   // leaf nodes indexed by column position
 	schema     Schema          // Wadjet-level schema (for compatibility)
+
+	// cacheIdentity is an opaque, content-stable identity for the underlying
+	// object (e.g. "<bucket>/<key>#<size>"), set by callers that know it via
+	// SetCacheIdentity. It is PASSIVE: nothing in this package reads it — it
+	// exists so downstream layers (the scan decoded-chunk cache) can key
+	// per-(row group, column) work on the object without re-plumbing identity
+	// through every call. Empty means "unknown" and disables such caching.
+	cacheIdentity string
 }
+
+// SetCacheIdentity attaches a content-stable object identity to the reader
+// (see the cacheIdentity field). Call once, before handing the reader to
+// concurrent consumers — the field is read without synchronization.
+func (fr *FileReader) SetCacheIdentity(id string) { fr.cacheIdentity = id }
+
+// CacheIdentity returns the identity set by SetCacheIdentity, or "" when none
+// was attached (caching layers must treat "" as uncacheable).
+func (fr *FileReader) CacheIdentity() string { return fr.cacheIdentity }
 
 // OpenFileReader opens a Parquet file from an io.ReaderAt.
 // The entire file is read into memory for zero-copy page access.

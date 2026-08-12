@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -984,6 +985,9 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 		}
 		return nil, fmt.Errorf("opening parquet file %s: %w", filePath, err)
 	}
+	if id := s.decodedCacheIdentity(filePath, int64(len(data))); id != "" {
+		reader.FileReader().SetCacheIdentity(id)
+	}
 	// nil/empty mmap/localPath are fine for the in-memory fallback.
 	p := &pendingParquet{
 		reader:     reader,
@@ -992,6 +996,23 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 		localPath:  localPath,
 	}
 	return s.finishParquetState(p, filePath)
+}
+
+// decodedCacheIdentity returns the content-stable identity under which the
+// decoded-chunk cache keys this object, or "" when caching must not engage:
+// cache disabled, non-parquet, or query-scratch keys (queries/ objects are
+// deleted at query end and have their own tiers — same eligibility rule as
+// the base-table NVMe cache). (bucket, key) is content-stable for its
+// lifetime (ingest writes UUID-named chunks; compaction swaps keys via the
+// manifest); size is a free paranoia discriminator.
+func (s *cachedFileStreamSource) decodedCacheIdentity(filePath string, size int64) string {
+	if s.executor.decodedCache == nil {
+		return ""
+	}
+	if !strings.HasSuffix(filePath, ".parquet") || strings.HasPrefix(filePath, "queries/") {
+		return ""
+	}
+	return s.bucket + "/" + filePath + "#" + strconv.FormatInt(size, 10)
 }
 
 // buildParquetStateFromFile is buildParquetState for the pread path
@@ -1008,6 +1029,9 @@ func (s *cachedFileStreamSource) buildParquetStateFromFile(filePath string, f *o
 			_ = os.Remove(ownedPath)
 		}
 		return nil, fmt.Errorf("opening parquet file %s: %w", filePath, err)
+	}
+	if id := s.decodedCacheIdentity(filePath, size); id != "" {
+		reader.FileReader().SetCacheIdentity(id)
 	}
 	p := &pendingParquet{
 		reader:    reader,
@@ -1119,7 +1143,8 @@ func (s *cachedFileStreamSource) finishParquetState(p *pendingParquet, filePath 
 		// the heap hook cannot see; the capped repro measured decode-ahead
 		// width as worthless-to-harmful precisely when refaults run hot).
 		opts := scan.DecodeAheadOpts{Window: s.decodeWin, Pressure: scanDecodeAheadPressure,
-			PressureStrict: scanDecodeAheadStrictPressure()}
+			PressureStrict: scanDecodeAheadStrictPressure(),
+			Cache:          s.executor.decodedCache}
 		if s.executor.cpuTokens != nil {
 			opts.Tokens = s.executor.cpuTokens
 		}
@@ -1162,6 +1187,7 @@ func (s *cachedFileStreamSource) finishParquetState(p *pendingParquet, filePath 
 			p.release(s.executor.logger)
 			return nil, fmt.Errorf("opening row-group iterator for %s: %w", filePath, err)
 		}
+		rgIter.SetDecodedCache(s.executor.decodedCache)
 		iter = rgIter
 	}
 	if len(s.dynamicRanges) > 0 || len(s.bloomFilters) > 0 {
