@@ -337,20 +337,37 @@ const heapPressureRatio = 0.95
 // Disable with "0" or by leaving GOMEMLIMIT unset.
 const heapBackpressureRatio = 0.70
 
+// Both gauges are lock-free: per-batch callers across every operator hit
+// these on hot paths, and a plain mutex around the 100ms cache serialized
+// all of them (13% of worker mutex block, SF100 2026-08-12 profile). A
+// CAS on the check timestamp elects exactly one refresher per 100ms
+// window; every other caller reads the cached value. Losers during a
+// refresh return the previous value — staleness bounded by the same
+// 100ms the cache already allows.
 var (
-	heapPressureMu        sync.Mutex
-	heapPressureLastCheck time.Time
-	heapPressureLastValue bool
-	heapPressureMemLimit  int64 // cached debug.SetMemoryLimit value
+	heapPressureLastCheckNS atomic.Int64 // unix nanos of last refresh
+	heapPressureLastValue   atomic.Bool
+	heapPressureMemLimit    atomic.Int64 // cached debug.SetMemoryLimit value; 0 = unread
 )
 
 var (
-	heapBackpressureMu        sync.Mutex
-	heapBackpressureLastCheck time.Time
-	heapBackpressureLastValue bool
-	heapBackpressureRatioOnce sync.Once
-	heapBackpressureRatioEff  float64
+	heapBackpressureLastCheckNS atomic.Int64
+	heapBackpressureLastValue   atomic.Bool
+	heapBackpressureRatioOnce   sync.Once
+	heapBackpressureRatioEff    float64
 )
+
+// cachedMemLimit returns the GOMEMLIMIT, reading it once via
+// debug.SetMemoryLimit(-1) and caching. The read is idempotent, so a
+// racing double-read is harmless.
+func cachedMemLimit() int64 {
+	if v := heapPressureMemLimit.Load(); v != 0 {
+		return v
+	}
+	v := debug.SetMemoryLimit(-1)
+	heapPressureMemLimit.Store(v)
+	return v
+}
 
 func effectiveHeapBackpressureRatio() float64 {
 	heapBackpressureRatioOnce.Do(func() {
@@ -407,34 +424,28 @@ func HeapBackpressureActive() bool {
 	if ratio <= 0 {
 		return false
 	}
-	heapBackpressureMu.Lock()
-	defer heapBackpressureMu.Unlock()
-
-	if time.Since(heapBackpressureLastCheck) < 100*time.Millisecond {
-		return heapBackpressureLastValue
+	now := time.Now().UnixNano()
+	last := heapBackpressureLastCheckNS.Load()
+	if now-last < int64(100*time.Millisecond) {
+		return heapBackpressureLastValue.Load()
 	}
-	heapBackpressureLastCheck = time.Now()
-
-	// Reuse the spill-side cached limit lookup to avoid a second
-	// debug.SetMemoryLimit call. Both functions share the same value once
-	// cached.
-	heapPressureMu.Lock()
-	if heapPressureMemLimit == 0 {
-		heapPressureMemLimit = debug.SetMemoryLimit(-1)
+	if !heapBackpressureLastCheckNS.CompareAndSwap(last, now) {
+		// Another caller won the refresh; use the value it will replace.
+		return heapBackpressureLastValue.Load()
 	}
-	limit := heapPressureMemLimit
-	heapPressureMu.Unlock()
 
+	limit := cachedMemLimit()
 	if limit <= 0 || limit == math.MaxInt64 {
-		heapBackpressureLastValue = false
+		heapBackpressureLastValue.Store(false)
 		return false
 	}
 
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	threshold := int64(float64(limit) * ratio)
-	heapBackpressureLastValue = int64(ms.HeapAlloc) > threshold
-	return heapBackpressureLastValue
+	v := int64(ms.HeapAlloc) > threshold
+	heapBackpressureLastValue.Store(v)
+	return v
 }
 
 // HeapPressureExceeded is the exported view of the process heap-pressure
@@ -447,39 +458,38 @@ func HeapPressureExceeded() bool { return heapPressureExceeded() }
 // heap is using more than heapPressureRatio of GOMEMLIMIT. Result is
 // cached for 100 ms to keep the per-call overhead near zero on hot paths.
 func heapPressureExceeded() bool {
-	heapPressureMu.Lock()
-	defer heapPressureMu.Unlock()
-
-	if time.Since(heapPressureLastCheck) < 100*time.Millisecond {
-		return heapPressureLastValue
+	now := time.Now().UnixNano()
+	last := heapPressureLastCheckNS.Load()
+	if now-last < int64(100*time.Millisecond) {
+		return heapPressureLastValue.Load()
 	}
-	heapPressureLastCheck = time.Now()
-
-	if heapPressureMemLimit == 0 {
-		// debug.SetMemoryLimit(-1) is the standard "read current limit" idiom.
-		heapPressureMemLimit = debug.SetMemoryLimit(-1)
+	if !heapPressureLastCheckNS.CompareAndSwap(last, now) {
+		// Another caller won the refresh; use the value it will replace.
+		return heapPressureLastValue.Load()
 	}
-	if heapPressureMemLimit <= 0 || heapPressureMemLimit == math.MaxInt64 {
+
+	limit := cachedMemLimit()
+	if limit <= 0 || limit == math.MaxInt64 {
 		// No GOMEMLIMIT set — heap pressure check is disabled.
-		heapPressureLastValue = false
+		heapPressureLastValue.Store(false)
 		return false
 	}
 
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
-	threshold := int64(float64(heapPressureMemLimit) * heapPressureRatio)
-	prev := heapPressureLastValue
-	heapPressureLastValue = int64(ms.HeapAlloc) > threshold
-	if heapPressureLastValue && !prev {
+	threshold := int64(float64(limit) * heapPressureRatio)
+	v := int64(ms.HeapAlloc) > threshold
+	prev := heapPressureLastValue.Swap(v)
+	if v && !prev {
 		// Transition false→true: log loudly because the tracker missed something.
 		// This indicates an allocation site that should be added to the tracker.
 		slog.Warn("heap-pressure spill triggered (likely tracker accounting gap)",
 			"heap_alloc_mb", ms.HeapAlloc/(1<<20),
 			"threshold_mb", threshold/(1<<20),
-			"gomemlimit_mb", heapPressureMemLimit/(1<<20),
+			"gomemlimit_mb", limit/(1<<20),
 		)
 	}
-	return heapPressureLastValue
+	return v
 }
 
 // TrackBatch adds an estimated batch size to the memory tracker.
