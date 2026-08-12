@@ -965,6 +965,20 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		} else if h.strIndex != nil {
 			h.strIndex.EnsureCapacity(batchRows)
 		}
+		// Pre-grow the ref arena the same way: every inserted row appends
+		// one buildRef + one chain link, and the per-append doubling inside
+		// arenaAppend* re-memmoved both slices log2(buildRows) times per
+		// build (14% of worker growslice CPU, 2026-08-12 treatment profile).
+		if need := len(h.arena) + batchRows; cap(h.arena) < need {
+			grown := make([]buildRef, len(h.arena), need+need/2)
+			copy(grown, h.arena)
+			h.arena = grown
+		}
+		if need := len(h.arenaNext) + batchRows; cap(h.arenaNext) < need {
+			grown := make([]int32, len(h.arenaNext), need+need/2)
+			copy(grown, h.arenaNext)
+			h.arenaNext = grown
+		}
 
 		if h.useIntKey {
 			col := b.Columns[h.buildKeyIdx[0]]
@@ -3602,8 +3616,24 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 		// monotonically non-decreasing so Value(i) returns a valid
 		// (empty) slice rather than a descending pair that panics in
 		// writeBytesData when the null bitmap isn't consulted.
+		//
+		// Runs of ascending-contiguous build rows collapse into ONE
+		// BulkCopy instead of per-row SetFrom appends (the 2026-07-17
+		// bytes-run shape from appendBatchRowsBulk, transplanted): a
+		// fact-side build stores rows in insertion order, so a probe hit
+		// against a clustered key (lineitem by l_orderkey/l_partkey —
+		// the Q17/Q18/Q21 class) matches consecutive build rows, and the
+		// per-row ~25 B memmove fixed cost dominated the copy. The
+		// 2026-08-12 treatment profile put SetFrom-under-gather at
+		// 380 CPU-s/suite, 81% of it memmove. Runs break at batch
+		// switches, unmatched pairs, and source nulls (a null row's
+		// offsets may be malformed — see BytesColumn.Value). Singletons
+		// keep the SetFrom fast path: the run probe costs one compare on
+		// the next pair, and hash-scattered layouts stay at parity.
+		n := len(pairs)
 		if allMatched {
-			for di, pair := range pairs {
+			for di := 0; di < n; {
+				pair := pairs[di]
 				if bi := pair.ref.batchIdx; bi != prevBatch {
 					src = buildBatches[bi].Columns[srcIdx]
 					prevBatch = bi
@@ -3613,15 +3643,37 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				if srcHasNulls && src.Nulls.IsNullFast(si) {
 					dst.Nulls.SetNull(di)
 					dst.BytesData.Offsets[di+1] = dst.BytesData.Offsets[di]
-				} else {
-					dst.BytesData.SetFrom(di, &src.BytesData, si)
+					di++
+					continue
 				}
+				// Probe order: rowIdx first — on hash-scattered layouts it
+				// fails immediately and the row takes the SetFrom fast path
+				// at parity with the pre-run code.
+				run := 1
+				for di+run < n {
+					np := pairs[di+run]
+					if int(np.ref.rowIdx) != si+run ||
+						np.ref.batchIdx != pair.ref.batchIdx ||
+						(srcHasNulls && src.Nulls.IsNullFast(si+run)) {
+						break
+					}
+					run++
+				}
+				if run == 1 {
+					dst.BytesData.SetFrom(di, &src.BytesData, si)
+					di++
+					continue
+				}
+				dst.BytesData.BulkCopy(di, &src.BytesData, si, run)
+				di += run
 			}
 		} else {
-			for di, pair := range pairs {
+			for di := 0; di < n; {
+				pair := pairs[di]
 				if !pair.matched {
 					dst.Nulls.SetNull(di)
 					dst.BytesData.Offsets[di+1] = dst.BytesData.Offsets[di]
+					di++
 					continue
 				}
 				if bi := pair.ref.batchIdx; bi != prevBatch {
@@ -3633,9 +3685,27 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				if srcHasNulls && src.Nulls.IsNullFast(si) {
 					dst.Nulls.SetNull(di)
 					dst.BytesData.Offsets[di+1] = dst.BytesData.Offsets[di]
-				} else {
-					dst.BytesData.SetFrom(di, &src.BytesData, si)
+					di++
+					continue
 				}
+				run := 1
+				for di+run < n {
+					np := pairs[di+run]
+					if int(np.ref.rowIdx) != si+run ||
+						np.ref.batchIdx != pair.ref.batchIdx ||
+						!np.matched ||
+						(srcHasNulls && src.Nulls.IsNullFast(si+run)) {
+						break
+					}
+					run++
+				}
+				if run == 1 {
+					dst.BytesData.SetFrom(di, &src.BytesData, si)
+					di++
+					continue
+				}
+				dst.BytesData.BulkCopy(di, &src.BytesData, si, run)
+				di += run
 			}
 		}
 	case batch.TypeDecimal:

@@ -234,6 +234,30 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		return fmt.Errorf("reading dictionary: %w", err)
 	}
 
+	// Pre-size the bytes arena for the whole column chunk so the per-page
+	// BulkSet appends never grow it: append-doubling re-memmoved the arena
+	// log2(chunkBytes) times per chunk (31% of worker growslice CPU,
+	// 2026-08-12 treatment profile). Plain chunks use the chunk metadata's
+	// uncompressed size (an overestimate by page framing — a hint, not an
+	// accounting figure); dictionary chunks expand to ~numRows × the mean
+	// dictionary entry width.
+	switch catalogType {
+	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
+		est := 0
+		if dict != nil && dict.NumValues > 0 {
+			if dictData, _ := dict.Data.ByteArray(); dictData != nil {
+				est = numRows * (len(dictData)/dict.NumValues + 1)
+			}
+		} else if rg := fr.RowGroupMeta(rgIdx); rg != nil && colIdx < len(rg.Columns) {
+			if cm := rg.Columns[colIdx].MetaData; cm != nil {
+				est = int(cm.TotalUncompressedSize)
+			}
+		}
+		if est > 0 {
+			vec.BytesData.PreAllocBytes(est)
+		}
+	}
+
 	offset := 0
 	for {
 		page, err := pr.NextPage()
@@ -325,42 +349,38 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 
 	case pqt.TypeVector:
 		// VECTOR stored as FIXED_LEN_BYTE_ARRAY: resolve dictionary indices.
-		dictData, dictOffsets := dict.Data.ByteArray()
-		var buf []byte
-		offsets := make([]uint32, n+1)
-		for i := 0; i < n; i++ {
-			idx := indices[i]
-			offsets[i] = uint32(len(buf))
-			buf = append(buf, dictData[dictOffsets[idx]:dictOffsets[idx+1]]...)
-		}
-		offsets[n] = uint32(len(buf))
-		return pqt.ByteArrayValues(buf, offsets)
+		return resolveDictByteArray(dict, indices, n)
 
 	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
-		dictData, dictOffsets := dict.Data.ByteArray()
-		var buf []byte
-		offsets := make([]uint32, n+1)
-		for i := 0; i < n; i++ {
-			idx := indices[i]
-			offsets[i] = uint32(len(buf))
-			buf = append(buf, dictData[dictOffsets[idx]:dictOffsets[idx+1]]...)
-		}
-		offsets[n] = uint32(len(buf))
-		return pqt.ByteArrayValues(buf, offsets)
+		return resolveDictByteArray(dict, indices, n)
 
 	default:
 		// Fallback for unknown types: treat as byte array.
-		dictData, dictOffsets := dict.Data.ByteArray()
-		var buf []byte
-		offsets := make([]uint32, n+1)
-		for i := 0; i < n; i++ {
-			idx := indices[i]
-			offsets[i] = uint32(len(buf))
-			buf = append(buf, dictData[dictOffsets[idx]:dictOffsets[idx+1]]...)
-		}
-		offsets[n] = uint32(len(buf))
-		return pqt.ByteArrayValues(buf, offsets)
+		return resolveDictByteArray(dict, indices, n)
 	}
+}
+
+// resolveDictByteArray gathers byte-array dictionary entries for a page's
+// indices. The output buffer is sized EXACTLY in a first pass over the
+// indices: the append-from-nil growth this replaces re-memmoved the whole
+// buffer log2(size) times per page and ranked 23% of worker growslice CPU
+// in the 2026-08-12 treatment profile.
+func resolveDictByteArray(dict *pqt.DictionaryData, indices []int32, n int) pqt.Values {
+	dictData, dictOffsets := dict.Data.ByteArray()
+	total := 0
+	for i := 0; i < n; i++ {
+		idx := indices[i]
+		total += int(dictOffsets[idx+1] - dictOffsets[idx])
+	}
+	buf := make([]byte, 0, total)
+	offsets := make([]uint32, n+1)
+	for i := 0; i < n; i++ {
+		idx := indices[i]
+		offsets[i] = uint32(len(buf))
+		buf = append(buf, dictData[dictOffsets[idx]:dictOffsets[idx+1]]...)
+	}
+	offsets[n] = uint32(len(buf))
+	return pqt.ByteArrayValues(buf, offsets)
 }
 
 // copyNativeDataDirect copies non-null page data into a Vector.
