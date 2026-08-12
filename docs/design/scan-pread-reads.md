@@ -294,6 +294,36 @@ on the benchmark deploy). Inert when WADJET_SCAN_PREAD=0. Engagement:
 the cold pass now moves parquet.PreadStats — the parity test pins
 per-flag-state behavior (TestScanPread_ParityWithMmapPath).
 
-SF100 pair gate (pending): trap firings → 0; watch R1 for the cold-cost
-shape (pool classes should hold it near flat; the WSHF lever's pair
-already carries a +7.7% R1 open residual to re-measure alongside).
+### SF100 pair verdict (2026-08-12 morning window, bin ebd006f)
+
+ctl results/20260812-114313 (`-var=scan_pread_hot=0`), trt
+results/20260812-120237 (default on); evidence
+~/wadjet-artifacts/20260812-preadhot.
+
+- **Gate PASSED: trap firings ctl 1 → trt 0.** Control fired at
+  11:51:52 (Q10-R2, unresp 5.0s, worker death + clean a805b37
+  recovery, Q10-R2 174s) — the disease was live in this window — and
+  the pread-everywhere arm ran both suites without a single firing:
+  the first firing-free SF100 run on any pread-era binary (previously
+  6/6 arms fired).
+- **Cold cost REVERSED**: trt R1 280.5s vs ctl 299.0s (−6.2%). The
+  +15.9% that motivated the exemption is fully gone with the 128 MiB
+  pool classes.
+- R2: trt 354.0s (1.26× its R1, no deaths) vs ctl 481.5s (1.61×;
+  ex-firing 307.5s ≈ 1.07× — mild morning window). Pair total
+  −18.7% (634.5 vs 780.5).
+- Rows: 44/44 both arms, no per-query mismatch, no zero-row. Q19-R2
+  vsig differs in the 10th digit (rel ~2e-10) — float SUM merge
+  order, rows exact.
+- Engagement: trt parquet pread 104–115 GB/worker (everything
+  stages); ctl surviving workers ~104–112 GB (cache-hit tier) — the
+  arms differ exactly in the just-written slice, and only ctl fired.
+- Open residuals: (1) trt Q17-R2 55.6s vs 23.0 R1 — no retries, no
+  firings; sub-trap pause tax (20 intervals ≥1 s gc_pause_delta per
+  30 s on trt vs 27 on ctl) and/or probe-split share lottery — the
+  drift-arc 1.6×-share thread; (2) sub-trap STW stretch class remains
+  at reduced severity — revisit only if it escalates or the clean
+  re-profile pair surfaces it.
+- Verdict: **KEEPER, default stays on.** The frozen-spin arc's
+  firing gate is met in shipped default config; the trap-threshold
+  question (4 s → 8–10 s) stays open pending soak.
