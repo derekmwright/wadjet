@@ -362,6 +362,41 @@ func TestDecodedChunkCache_ShedUnderPressure(t *testing.T) {
 	}
 }
 
+// TestDecodedChunkCache_AdmissionPauseUnderPressure: while the pressure
+// func reports true, offers are paused (no ghosts, no clones) but hits
+// keep serving; admission resumes with ghost history intact when
+// pressure clears.
+func TestDecodedChunkCache_AdmissionPauseUnderPressure(t *testing.T) {
+	src := batch.NewVector(batch.TypeInt64, 1024)
+	cache := NewDecodedChunkCache(64 << 20)
+	pressured := false
+	cache.SetPressureFunc(func() bool { return pressured })
+
+	warm := decodedChunkKey{identity: "x#1", rgIdx: 0, colIdx: 0, catalogType: pqt.TypeInt64}
+	cache.Offer(warm, src, src.Len)
+	cache.Offer(warm, src, src.Len) // admitted while unpressured
+
+	pressured = true
+	blocked := decodedChunkKey{identity: "x#1", rgIdx: 1, colIdx: 0, catalogType: pqt.TypeInt64}
+	cache.Offer(blocked, src, src.Len)
+	cache.Offer(blocked, src, src.Len)
+	st := cache.Stats()
+	if st.PressurePaused != 2 || st.Admitted != 1 || st.Entries != 1 {
+		t.Fatalf("pressure pause leaked admissions: %+v", st)
+	}
+	// Hits still serve under pressure.
+	if !cache.fillFromCache(batch.NewVector(batch.TypeInt64, 1024), warm, 1024) {
+		t.Fatal("hit refused under pressure")
+	}
+
+	pressured = false
+	cache.Offer(blocked, src, src.Len) // ghost (history was untouched)
+	cache.Offer(blocked, src, src.Len) // admit
+	if cache.Stats().Admitted != 2 {
+		t.Fatalf("admission did not resume after pressure cleared: %+v", cache.Stats())
+	}
+}
+
 // TestDecodedChunkCache_TooLargeRejected: entries above cap/8 never admit.
 func TestDecodedChunkCache_TooLargeRejected(t *testing.T) {
 	src := batch.NewVector(batch.TypeInt64, 4096) // 32 KiB data

@@ -57,6 +57,13 @@ type DecodedChunkCache struct {
 
 	size atomic.Int64 // total cached bytes; lock-free reservoir accessor
 
+	// pressure, when set (SetPressureFunc), pauses ADMISSION while it
+	// reports true: no ghost promotion, no clone — a heap already under
+	// pressure must not grow by cache admissions between shed passes.
+	// Hits keep serving (they only copy out). Must be cheap and safe for
+	// concurrent use.
+	pressure func() bool
+
 	instanceID uint64
 
 	// Counters (atomic; surfaced by Stats for the 60s worker ticker).
@@ -64,7 +71,17 @@ type DecodedChunkCache struct {
 	admitted, ghostRegistered      atomic.Int64
 	evictions, reliefEvictedBytes  atomic.Int64
 	rejectedTooLarge, cloneSkipped atomic.Int64
-	freqRejected                   atomic.Int64
+	freqRejected, pressurePaused   atomic.Int64
+}
+
+// SetPressureFunc wires the admission-pause pressure signal (worker: the
+// heap-backpressure gauge OR the page-cache refault sensor). Call before
+// the cache is shared with readers; nil leaves admission ungated. Nil-safe.
+func (c *DecodedChunkCache) SetPressureFunc(f func() bool) {
+	if c == nil {
+		return
+	}
+	c.pressure = f
 }
 
 type decodedChunkKey struct {
@@ -257,6 +274,13 @@ func (c *DecodedChunkCache) Offer(key decodedChunkKey, vec *batch.Vector, numRow
 	est := vec.MemBytes()
 	if est <= 0 || est > c.maxEntry {
 		c.rejectedTooLarge.Add(1)
+		return
+	}
+	if c.pressure != nil && c.pressure() {
+		// Admission pause (doc §9.4 residual): between shed passes, new
+		// clones must not re-inflate a pressured heap. Ghost state is left
+		// untouched — the key's history resumes when pressure clears.
+		c.pressurePaused.Add(1)
 		return
 	}
 
@@ -458,7 +482,7 @@ type DecodedChunkCacheStats struct {
 	Admitted, GhostRegistered    int64
 	Evictions, ReliefBytes       int64
 	RejectedTooLarge, CloneSkips int64
-	FreqRejected                 int64
+	FreqRejected, PressurePaused int64
 	SizeBytes, CapBytes          int64
 	Entries                      int
 }
@@ -482,6 +506,7 @@ func (c *DecodedChunkCache) Stats() DecodedChunkCacheStats {
 		RejectedTooLarge: c.rejectedTooLarge.Load(),
 		CloneSkips:       c.cloneSkipped.Load(),
 		FreqRejected:     c.freqRejected.Load(),
+		PressurePaused:   c.pressurePaused.Load(),
 		SizeBytes:        c.Size(),
 		CapBytes:         c.capBytes,
 		Entries:          entries,

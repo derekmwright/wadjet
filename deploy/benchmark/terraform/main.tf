@@ -828,6 +828,29 @@ resource "aws_instance" "worker" {
     for i in $(seq 0 $((WORKERS_PER_NODE - 1))); do
       start_worker $i &
     done
+
+    # Auto wlog upload (benchmark-turnaround backlog): run-benchmark.sh
+    # publishes s3://<bucket>/wlog-request containing the results prefix
+    # after its own uploads; each worker polls for a CHANGE from the
+    # boot-time value (a stale marker from a prior deploy is ignored) and
+    # self-uploads its journal under <prefix>/wlogs/. Zero marginal
+    # operator time per arm; grab-worker-logs.sh stays as the manual
+    # fallback for crashed/aborted runs that never publish the marker.
+    (
+      TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+      IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+      LAST=$(aws s3 cp "s3://${local.bucket_name}/wlog-request" - --region ${local.eff_region} 2>/dev/null || true)
+      while true; do
+        sleep 30
+        M=$(aws s3 cp "s3://${local.bucket_name}/wlog-request" - --region ${local.eff_region} 2>/dev/null || true)
+        if [ -n "$M" ] && [ "$M" != "$LAST" ]; then
+          LAST="$M"
+          journalctl --no-pager | gzip -c > "/root/wlog-$IID.gz"
+          aws s3 cp "/root/wlog-$IID.gz" "s3://${local.bucket_name}/$M/wlogs/wlog-$IID.gz" --region ${local.eff_region} || true
+          echo "wlog auto-uploaded to $M/wlogs/"
+        fi
+      done
+    ) &
     wait
   EOF
   )

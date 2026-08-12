@@ -1997,7 +1997,7 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 						"admitted", st.Admitted, "ghosts", st.GhostRegistered,
 						"evictions", st.Evictions, "relief_mb", st.ReliefBytes/(1<<20),
 						"rejected_large", st.RejectedTooLarge, "clone_skips", st.CloneSkips,
-						"freq_rejected", st.FreqRejected,
+						"freq_rejected", st.FreqRejected, "pressure_paused", st.PressurePaused,
 						"size_mb", st.SizeBytes/(1<<20), "cap_mb", st.CapBytes/(1<<20),
 						"entries", st.Entries)
 				}
