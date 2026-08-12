@@ -34,6 +34,13 @@ benchmark:
   # inbound ENA throttle events -86%, rows 44/44 identical. Disable
   # with -var=base_table_cache_bytes=0.
   base_table_cache_bytes: 161061273600
+  # Decoded row-group chunk cache (docs/design/decoded-rowgroup-cache.md
+  # §9.4): 6 GiB/worker heap cache of decoded parquet column chunks.
+  # SF100 pair 2026-08-12 (bin f251178, worst ENA window of the night):
+  # pair -14.4%, R1 -20.4% / R2 -10.1%, rows 44/44 identical; pressure
+  # valve engaged (shed WARNs). Reproduce cache-less with
+  # -var=decoded_cache_bytes=0.
+  decoded_cache_bytes: 6442450944
   runs: 1
   query_timeout: 30m
   skip_load: true

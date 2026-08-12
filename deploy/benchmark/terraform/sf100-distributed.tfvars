@@ -44,6 +44,10 @@ catalog_snapshot_prefix   = "catalog/" # restore post-discovery catalog; first b
 # (results/20260713-013357), cold-with-cache 29m54s / steady-state 28m50s
 # (results/20260713-021126). Set 0 to reproduce cache-less runs.
 base_table_cache_bytes    = 161061273600
+# Decoded row-group chunk cache (docs/design/decoded-rowgroup-cache.md §9.4):
+# SF100-validated 2026-08-12 (pair -14.4%, R1 -20.4% / R2 -10.1%, rows
+# identical, pressure valve engaged). Set 0 to reproduce cache-less runs.
+decoded_cache_bytes       = 6442450944
 # Input-locality task placement (docs/design/locality-placement.md, PR #263):
 # 1:1 stage-chain consumers dispatch to their producer's worker — read split
 # 37/32% -> 50/49% local across two validation windows (2026-07-24), Q18

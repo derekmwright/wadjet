@@ -409,6 +409,31 @@ judges the valve and the flip. If pressure-shed proves insufficient,
 the fallback lever is a smaller cap (4 GiB) — the boot-invariant math
 in §5 was optimistic about gauge headroom, not about reservoir caps.
 
+### 9.4 Third pair: KEEPER — SF100 benchmark config flipped on
+
+Third same-window pair (bin f251178 with the pressure valve; control
+results/20260812-221530 vs treatment results/20260812-224230; the most
+ENA-degraded window of the night — control's own R2/R1 was 1.406):
+
+- Rows **44/44 identical** (third consecutive pair).
+- **Pair −14.4%** (891.0 → 762.8s); R1 −20.4% (370.4 → 294.8), R2
+  −10.1% (520.6 → 468.1). First decisively negative pair.
+- Valve engaged: 10 "pressure shed" WARNs, ~15 GB relief-evicted,
+  re-admission through the gate afterwards (admitted 15.3K — shed
+  cycles, not churn; freq_rejected 111K still holding the flood).
+- Hit-bytes 87 GB/worker; zstd `decodeSync` cum 18.7% (baseline 24.4%).
+
+**Open residual (logged, does not block the flip):** treatment still
+pays a pressure tax the valve only partially removes —
+`pressure_stall_ms` 13s/141s/142s per worker vs control's **0**.
+Candidate follow-ups if it ranks: lower shed low-water (cap/4),
+pausing admission during pressure episodes, or a 4 GiB cap arm.
+
+**Decision:** per the §8 judge order (rows → markers → walls), the
+SF100 benchmark config pins `decoded_cache_bytes: 6442450944`
+(profile + tfvars, the base-table-cache precedent — engine default
+stays 0/opt-in). Cache-less repro: `-var=decoded_cache_bytes=0`.
+
 ## 10. Open questions
 
 - Cap auto-derivation (fraction of GOMEMLIMIT once validated) — same
