@@ -829,6 +829,18 @@ resource "aws_instance" "worker" {
       start_worker $i &
     done
 
+    # ENA allowance polling (2026-08-09 doctrine: wall deltas on this rig
+    # are read against ENA counters, never attributed to "windows"). One
+    # sample/minute to journald, so the counters ride the wlog into every
+    # run's artifacts. Cumulative counters — diff consecutive samples.
+    (
+      NIC=$(ls /sys/class/net | grep -v '^lo$' | head -1)
+      while true; do
+        ethtool -S "$NIC" 2>/dev/null | grep -E "allowance_exceeded" | tr -s ' \n' '  ' | logger -t ena-poll
+        sleep 60
+      done
+    ) &
+
     # Auto wlog upload (benchmark-turnaround backlog): run-benchmark.sh
     # publishes s3://<bucket>/wlog-request containing the results prefix
     # after its own uploads; each worker polls for a CHANGE from the

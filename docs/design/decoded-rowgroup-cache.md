@@ -412,8 +412,9 @@ in §5 was optimistic about gauge headroom, not about reservoir caps.
 ### 9.4 Third pair: KEEPER — SF100 benchmark config flipped on
 
 Third same-window pair (bin f251178 with the pressure valve; control
-results/20260812-221530 vs treatment results/20260812-224230; the most
-ENA-degraded window of the night — control's own R2/R1 was 1.406):
+results/20260812-221530 vs treatment results/20260812-224230; the
+slowest conditions of the night — control's own R2/R1 was 1.406, cause
+unattributed, see the cross-arm residual below):
 
 - Rows **44/44 identical** (third consecutive pair).
 - **Pair −14.4%** (891.0 → 762.8s); R1 −20.4% (370.4 → 294.8), R2
@@ -433,6 +434,22 @@ pausing admission during pressure episodes, or a 4 GiB cap arm.
 SF100 benchmark config pins `decoded_cache_bytes: 6442450944`
 (profile + tfvars, the base-table-cache precedent — engine default
 stays 0/opt-in). Cache-less repro: `-var=decoded_cache_bytes=0`.
+
+**Cross-arm residual (open, correctly unattributed):** control R2/R1
+degraded 1.077 → 1.237 → 1.406 across the evening's three pairs. ENA
+counters were NOT polled on any arm (a doctrine miss —
+network-bound-diagnosis-2026-08-09 requires reading wall deltas
+against them), so "evening ENA state" claims made during the session
+were labels, not measurements. Post-hoc CloudWatch (5-min buckets,
+survives termination): per-worker byte volumes are flat across all
+three controls (~42-48 GB in / 68-85 GB out) — the degradation is
+lower realized throughput at equal bytes, not more bytes — and 5-min
+average peaks sit below the c7gd baseline allowance, weakening pure
+credit exhaustion. Remaining candidates: supply-side S3/network
+latency (the day-vs-night S3 PUT effect observed 2026-07-12) vs
+per-deploy placement lottery. Discrimination needs the ENA counters,
+now sampled to journald every 60s by the worker user_data poller
+(rides the auto-wlog); the clean-window re-baseline reads them.
 
 ## 10. Open questions
 
