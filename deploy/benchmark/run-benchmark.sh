@@ -200,6 +200,12 @@ aws s3 cp /root/benchmark.log "s3://${BUCKET}/results/${TIMESTAMP}/coord-benchma
 journalctl --since "24 hours ago" --no-pager 2>/dev/null | gzip -c | \
   aws s3 cp - "s3://${BUCKET}/results/${TIMESTAMP}/coord-journal.gz" 2>/dev/null || true
 
+# Signal workers to self-upload their journals (auto wlog — see the
+# poller in the terraform worker user_data). Marker content = the results
+# prefix the workers upload into; workers act only on a CHANGE from their
+# boot-time read, so stale markers are inert.
+echo -n "results/${TIMESTAMP}" | aws s3 cp - "s3://${BUCKET}/wlog-request" 2>/dev/null || true
+
 log ""
 log "Results uploaded to: s3://${BUCKET}/results/${TIMESTAMP}/"
 

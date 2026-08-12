@@ -453,6 +453,15 @@ func (e *Executor) SetSharedPoolBudget(budget int64) {
 // Call before any task executes; nil leaves scans uncached.
 func (e *Executor) SetDecodedCache(c *scan.DecodedChunkCache) {
 	e.decodedCache = c
+	// Admission pause: while either pressure channel is live, the cache
+	// stops cloning new entries (hits keep serving) — the between-shed
+	// half of the §9.4 pressure-coupling fix. Uses the same test-seam
+	// package vars as the fragment runner.
+	if c != nil {
+		c.SetPressureFunc(func() bool {
+			return heapPressureActive() || pageCachePressureActive()
+		})
+	}
 	if c != nil && e.sharedSpill != nil && !e.decodedCacheRegistered {
 		e.sharedSpill.RegisterAccounted(c)
 		e.decodedCacheRegistered = true
