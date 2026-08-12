@@ -137,6 +137,15 @@ type Executor struct {
 	// worker's 60s "shuffle io stats" marker.
 	shuffleIO shuffleIOCounters
 
+	// decodedCache is the worker-lifetime decoded-chunk cache
+	// (docs/design/decoded-rowgroup-cache.md); nil = disabled (the
+	// default). decodedCacheRegistered guards the one-time
+	// RegisterAccounted with the shared SpillManager — either
+	// SetDecodedCache or SetSharedPoolBudget runs second and links them
+	// (the setter-order self-healing pattern).
+	decodedCache           *scan.DecodedChunkCache
+	decodedCacheRegistered bool
+
 	// Scan decode pipelining (docs/design/scan-decode-pipelining.md):
 	// parquet scan sources decode row groups ahead of consumption with a
 	// bounded window instead of one group per Next. Counters are the §5
@@ -428,6 +437,25 @@ func (e *Executor) SetSharedPoolBudget(budget int64) {
 	if e.reservoirs != nil {
 		e.sharedSpill.SetReservoirs(e.reservoirs)
 		e.sharedSpill.SetFloatingBudgetActive(e.floatingBudgetActive)
+	}
+	if e.decodedCache != nil && !e.decodedCacheRegistered {
+		e.sharedSpill.RegisterAccounted(e.decodedCache)
+		e.decodedCacheRegistered = true
+	}
+}
+
+// SetDecodedCache attaches the worker-lifetime decoded-chunk cache
+// (docs/design/decoded-rowgroup-cache.md) consulted by parquet scan
+// sources. When the shared SpillManager exists it also registers the cache
+// as an AccountedOperator so RequestRelief can shed cached bytes —
+// eviction, the cheapest relief in the process, runs before any operator
+// pays a real spill. Same setter-order self-healing as SetReservoirs.
+// Call before any task executes; nil leaves scans uncached.
+func (e *Executor) SetDecodedCache(c *scan.DecodedChunkCache) {
+	e.decodedCache = c
+	if c != nil && e.sharedSpill != nil && !e.decodedCacheRegistered {
+		e.sharedSpill.RegisterAccounted(c)
+		e.decodedCacheRegistered = true
 	}
 }
 

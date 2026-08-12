@@ -81,6 +81,15 @@ func rowGroupRangeForShard(total, shardIdx, shardCount int) (int, int) {
 // ReadRowGroupNative reads a row group using our custom page reader,
 // bypassing parquet-go entirely for the data path.
 func ReadRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool) (*batch.RecordBatch, error) {
+	return ReadRowGroupNativeCached(fr, rgIdx, schema, pool, nil)
+}
+
+// ReadRowGroupNativeCached is ReadRowGroupNative with an optional decoded
+// chunk cache: plain leaf columns whose (identity, row group, column, type)
+// is cached skip decompress+decode and copy from the cache; fresh decodes
+// are offered back for admission. A nil cache (or a reader without a
+// CacheIdentity) is byte-identical to ReadRowGroupNative.
+func ReadRowGroupNativeCached(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, cache *DecodedChunkCache) (*batch.RecordBatch, error) {
 	// ARRAY/MAP leaves don't resolve by column name here; without this
 	// guard the column lookup missed and the "schema evolution" branch
 	// silently emitted ALL-NULL values for the array column — valid-looking
@@ -179,8 +188,15 @@ func ReadRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 
 		ci := colIdx
 		g.Go(func() error {
+			key, cacheable := cache.keyFor(fr, rgIdx, ci, col)
+			if cacheable && cache.fillFromCache(b.Columns[i], key, numRows) {
+				return nil
+			}
 			if err := readColumnNative(b.Columns[i], fr, rgIdx, ci, numRows, col.Type); err != nil {
 				return fmt.Errorf("reading column %s: %w", col.Name, err)
+			}
+			if cacheable {
+				cache.Offer(key, b.Columns[i], numRows)
 			}
 			return nil
 		})

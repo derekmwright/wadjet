@@ -60,6 +60,7 @@ locals {
   eff_mode         = var.mode != null ? var.mode : (local.has_profile ? try(local._raw_p.cluster.mode, "standalone") : "standalone")
   eff_workers      = var.worker_count != null ? var.worker_count : (local.has_profile ? try(local._raw_p.cluster.workers, 3) : 3)
   eff_base_cache   = var.base_table_cache_bytes != null ? var.base_table_cache_bytes : (local.has_profile ? try(local._raw_p.benchmark.base_table_cache_bytes, 0) : 0)
+  eff_decoded_cache = var.decoded_cache_bytes != null ? var.decoded_cache_bytes : (local.has_profile ? try(local._raw_p.benchmark.decoded_cache_bytes, 0) : 0)
   eff_coord_type   = var.coordinator_instance_type != null ? var.coordinator_instance_type : (local.has_profile ? try(local._raw_p.cluster.coordinator_instance, "c7g.2xlarge") : "c7g.2xlarge")
   eff_worker_type  = var.worker_instance_type != null ? var.worker_instance_type : (local.has_profile ? try(local._raw_p.cluster.worker_instance, "c7g.2xlarge") : "c7g.2xlarge")
   eff_arch         = var.arch != null ? var.arch : (local.has_profile ? try(local._raw_p.cluster.arch, "arm64") : "arm64")
@@ -808,6 +809,7 @@ resource "aws_instance" "worker" {
             --bounded-dirty-writes=${var.bounded_dirty_writes} \
             --morsel-workers=${var.morsel_workers} \
             --base-table-cache-bytes=${local.eff_base_cache} \
+            --decoded-cache-bytes=${local.eff_decoded_cache} \
             --streaming-shuffle-read=${var.streaming_shuffle_read} \
             --scan-decode-ahead=${var.scan_decode_ahead} \
             --async-scratch-purge=${var.async_scratch_purge} \
