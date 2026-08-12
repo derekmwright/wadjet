@@ -850,7 +850,7 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 	w.bgWG.Add(1)
 	go func() {
 		defer w.bgWG.Done()
-		var lastReads, lastFallbacks, lastSkips int64
+		var lastReads, lastFallbacks, lastSkips, lastFPFiles int64
 		var lastIO ShuffleIOSnapshot
 		var lastUp [7]int64
 		t := time.NewTicker(60 * time.Second)
@@ -861,10 +861,14 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 				return
 			case <-t.C:
 				reads, fallbacks, skips := w.executor.ShuffleStreamStats()
-				if reads != lastReads || fallbacks != lastFallbacks || skips != lastSkips {
+				fpFiles, fpBytes := w.executor.ShuffleFilePreadStats()
+				if reads != lastReads || fallbacks != lastFallbacks || skips != lastSkips ||
+					fpFiles != lastFPFiles {
 					lastReads, lastFallbacks, lastSkips = reads, fallbacks, skips
+					lastFPFiles = fpFiles
 					w.logger.Info("streaming shuffle read stats",
-						"reads", reads, "fallbacks", fallbacks, "skip_resumes", skips)
+						"reads", reads, "fallbacks", fallbacks, "skip_resumes", skips,
+						"file_pread_files", fpFiles, "file_pread_bytes", fpBytes)
 				}
 				// Per-tier shuffle-read ledger + upload ledger (step-0
 				// measurement for the shuffle NVMe/durability arc): which

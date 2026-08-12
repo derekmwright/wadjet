@@ -110,7 +110,10 @@ type cachedFileStreamSource struct {
 	// §3 D1). When the current file is being stream-decoded, streamReader
 	// == chunkReader and streamKey names the object so a mid-stream
 	// transport failure can fall back to the durable copy, skipping the
-	// batches already delivered (no double delivery).
+	// batches already delivered (no double delivery). The read-staged
+	// local path (shuffle_pread.go) also parks its reader here for the
+	// release obligation, but leaves streamKey "" — local read errors are
+	// terminal, not transport failures.
 	streamReader *streamingShuffleReader
 	streamKey    string
 
@@ -482,9 +485,9 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	// must NOT unlink, so we leave s.localPath empty.
 	if s.queryID != "" && s.executor.localCache != nil {
 		if cached := s.executor.localCache.Get(s.queryID, filePath); cached != "" {
-			if err := s.openShuffleFromLocalFile(cached); err == nil {
+			if n, err := s.openShuffleFromLocalFile(cached); err == nil {
 				s.executor.shuffleIO.localFiles.Add(1)
-				s.executor.shuffleIO.localBytes.Add(int64(len(s.mmapData)))
+				s.executor.shuffleIO.localBytes.Add(n)
 				return nil
 			}
 			// On any failure (file vanished, mmap error), fall through to
@@ -837,6 +840,20 @@ func (s *cachedFileStreamSource) openPrefetchedShuffle(localPath, filePath strin
 	if err != nil {
 		_ = os.Remove(localPath)
 		return fmt.Errorf("opening prefetched shuffle file %s: %w", localPath, err)
+	}
+	if shufflePreadEnabled {
+		fi, err := f.Stat()
+		if err != nil || fi.Size() == 0 {
+			f.Close()
+			_ = os.Remove(localPath)
+			return fmt.Errorf("prefetched shuffle file %s unusable (err=%v)", localPath, err)
+		}
+		if err := s.openShuffleFromFileStreaming(f, fi.Size(), localPath); err != nil {
+			f.Close()
+			_ = os.Remove(localPath)
+			return fmt.Errorf("opening prefetched shuffle file %s: %w", filePath, err)
+		}
+		return nil
 	}
 	defer f.Close()
 	fi, err := f.Stat()
@@ -1371,6 +1388,20 @@ func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath st
 		return fmt.Errorf("local cache for %s is empty after stream", srcPath)
 	}
 
+	// Read-staged consumption (shuffle_pread.go): rewind the staged temp
+	// and decode it with sequential read() calls — no mmap, no fault class
+	// in decode goroutines. On error the deferred cleanup still owns tmp.
+	if shufflePreadEnabled {
+		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("rewinding local cache %s: %w", localPath, err)
+		}
+		if err := s.openShuffleFromFileStreaming(tmp, fi.Size(), localPath); err != nil {
+			return fmt.Errorf("opening shuffle file %s: %w", srcPath, err)
+		}
+		cleanupLocal = false
+		return nil
+	}
+
 	mmapData, err := syscall.Mmap(int(tmp.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
 		return fmt.Errorf("mmap local cache %s: %w", localPath, err)
@@ -1478,31 +1509,43 @@ func (s *cachedFileStreamSource) streamParquetToLocalMmap(ctx context.Context, s
 	return mmapData, localPath, nil
 }
 
-// openShuffleFromLocalFile mmaps an existing local file (typically owned by
-// LocalStageCache) directly, without staging a copy. The chunkReader walks
-// the mmap'd region; the cache will unlink the file on CleanupQuery, so the
-// consumer must NOT delete it — releaseCurrentFile only munmaps.
-func (s *cachedFileStreamSource) openShuffleFromLocalFile(localPath string) error {
+// openShuffleFromLocalFile opens an existing local file (typically owned
+// by LocalStageCache) directly, without staging a copy — read-staged by
+// default, mmap'd under the kill switch. Returns the file size for the
+// tier ledger. The cache will unlink the file on CleanupQuery, so the
+// consumer must NOT delete it — releaseCurrentFile only drops the reader.
+func (s *cachedFileStreamSource) openShuffleFromLocalFile(localPath string) (int64, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
-		return fmt.Errorf("opening cached local file %s: %w", localPath, err)
+		return 0, fmt.Errorf("opening cached local file %s: %w", localPath, err)
 	}
-	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("stat cached local file %s: %w", localPath, err)
+		f.Close()
+		return 0, fmt.Errorf("stat cached local file %s: %w", localPath, err)
 	}
 	if fi.Size() == 0 {
-		return fmt.Errorf("cached local file %s is empty", localPath)
+		f.Close()
+		return 0, fmt.Errorf("cached local file %s is empty", localPath)
 	}
+	// ownedPath "" — the cache owns the file: never unlinked here, and no
+	// drop-behind (other consumers or a peer fetch may re-read it).
+	if shufflePreadEnabled {
+		if err := s.openShuffleFromFileStreaming(f, fi.Size(), ""); err != nil {
+			f.Close()
+			return 0, fmt.Errorf("opening cached shuffle file %s: %w", localPath, err)
+		}
+		return fi.Size(), nil
+	}
+	defer f.Close()
 	mmapData, err := syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
-		return fmt.Errorf("mmap cached local file %s: %w", localPath, err)
+		return 0, fmt.Errorf("mmap cached local file %s: %w", localPath, err)
 	}
 	r, err := newShuffleChunkReader(mmapData)
 	if err != nil {
 		_ = syscall.Munmap(mmapData)
-		return fmt.Errorf("opening cached shuffle file %s: %w", localPath, err)
+		return 0, fmt.Errorf("opening cached shuffle file %s: %w", localPath, err)
 	}
 	adviseSequential(mmapData)
 	s.chunkReader = r
@@ -1512,7 +1555,7 @@ func (s *cachedFileStreamSource) openShuffleFromLocalFile(localPath string) erro
 	// than assuming it is empty: a stale path from a previous file would
 	// make releaseCurrentFile delete the wrong file later.
 	s.localPath = ""
-	return nil
+	return int64(len(mmapData)), nil
 }
 
 // openShuffleInMemory is the legacy fallback for environments without a

@@ -123,6 +123,13 @@ type Executor struct {
 	shuffleStreamFallbacks   atomic.Int64
 	shuffleStreamSkipResumes atomic.Int64
 
+	// Read-staged local .wshf opens (shuffle_pread.go): files decoded via
+	// sequential read() into heap scratch instead of an mmap walk. The
+	// engagement markers for the WSHF-pread lever — on a staged run expect
+	// file_pread_bytes to carry what the local/s3/peer tiers serve.
+	shuffleFilePreadFiles atomic.Int64
+	shuffleFilePreadBytes atomic.Int64
+
 	// Per-tier shuffle-read transfer accounting: which tier served each
 	// exchange input open and how many bytes moved. peer/s3 bytes are
 	// wire bytes (WSHC stays compressed in transit); local/kv bytes are
@@ -202,6 +209,12 @@ func (e *Executor) SetStreamingShuffleRead(on bool) { e.streamingShuffleRead = o
 // streaming opens, staged fallbacks, and batches skipped by fallbacks.
 func (e *Executor) ShuffleStreamStats() (reads, fallbacks, skipResumes int64) {
 	return e.shuffleStreamReads.Load(), e.shuffleStreamFallbacks.Load(), e.shuffleStreamSkipResumes.Load()
+}
+
+// ShuffleFilePreadStats returns the read-staged local shuffle open
+// counters: files opened via the WSHF-pread path and their total bytes.
+func (e *Executor) ShuffleFilePreadStats() (files, bytes int64) {
+	return e.shuffleFilePreadFiles.Load(), e.shuffleFilePreadBytes.Load()
 }
 
 // shuffleIOCounters is the per-tier shuffle-read ledger: one files/bytes

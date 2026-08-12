@@ -324,6 +324,12 @@ variable "scan_pread" {
   default     = "1"
 }
 
+variable "shuffle_pread" {
+  description = "WADJET_SHUFFLE_PREAD for the workers: read-staged WSHF shuffle consumption — local .wshf opens (staged S3 downloads, tier-0 LocalStageCache hits, prefetched downloads) decode from sequential read() calls into reused heap scratch instead of walking an mmap, removing the shuffle-phase page-fault class (and its GC-STW-stretch interaction, the frozen-spin trigger) from decode goroutines (docs/design/shuffle-pread-reads.md). Default \"1\" matches the in-binary default; \"0\" is the same-binary A/B off arm / kill switch restoring the mmap + shuffleChunkReader path."
+  type        = string
+  default     = "1"
+}
+
 variable "df_late_group_attach" {
   description = "WADJET_DF_LATE_GROUP_ATTACH for the workers: full-layer delivery of attach-on-arrival dynamic filters — resolved deferred blooms/ranges reach the row-group iterator layer (pruning + prune-aware advises) and the shuffle-task path, not just row-level ops (attach-on-arrival-dynamic-filters.md §Full-layer delivery). Default \"1\" matches the in-binary default; \"0\" is the same-binary A/B off arm / kill switch."
   type        = string
