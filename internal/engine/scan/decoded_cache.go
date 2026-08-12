@@ -47,8 +47,13 @@ type DecodedChunkCache struct {
 	probation *list.List                        // front = MRU
 	protected *list.List
 	protBytes int64
-	ghosts    map[decodedChunkKey]*list.Element // element value: decodedChunkKey
+	ghosts    map[decodedChunkKey]*list.Element // element value: *ghostEntry
 	ghostLRU  *list.List
+	// touches counts Offer/hit events since the last aging pass; when it
+	// crosses agingInterval every entry and ghost frequency is halved so
+	// long-resident incumbents cannot become permanently undisplaceable
+	// when the workload shifts (the TinyLFU reset).
+	touches int64
 
 	size atomic.Int64 // total cached bytes; lock-free reservoir accessor
 
@@ -59,6 +64,7 @@ type DecodedChunkCache struct {
 	admitted, ghostRegistered      atomic.Int64
 	evictions, reliefEvictedBytes  atomic.Int64
 	rejectedTooLarge, cloneSkipped atomic.Int64
+	freqRejected                   atomic.Int64
 }
 
 type decodedChunkKey struct {
@@ -74,11 +80,35 @@ const (
 	segProtected
 )
 
+// Frequency bookkeeping (TinyLFU-lite): a key's frequency is its touch
+// count — ghost touches before admission, resident hits after. At-cap
+// admission requires the candidate to STRICTLY beat the eviction victim,
+// so under a uniform flood (a scan working set larger than the cap, the
+// 2026-08-12 pair's churn mechanism) ties go to the incumbent and the
+// resident set stabilizes instead of thrashing. Frequencies saturate at
+// maxChunkFreq and halve every agingInterval touches so displacement
+// stays possible when the workload shifts.
+const (
+	maxChunkFreq    = 63
+	agingInterval   = 1 << 18
+	admitFreqMargin = 2
+)
+
 type decodedChunkEntry struct {
 	key   decodedChunkKey
 	vec   *batch.Vector // immutable once stored
 	bytes int64
 	seg   int
+	freq  int32 // touch count (admission carries the ghost count forward)
+}
+
+// ghostEntry is the metadata-only record of a decoded-but-not-admitted
+// (or evicted) key: its identity and touch count. Eviction re-ghosts an
+// entry with its accumulated frequency so a genuinely hot chunk that was
+// displaced can win its way back in.
+type ghostEntry struct {
+	key   decodedChunkKey
+	count int32
 }
 
 // NewDecodedChunkCache returns a cache bounded to capBytes. capBytes <= 0
@@ -160,6 +190,10 @@ func (c *DecodedChunkCache) fillFromCache(dst *batch.Vector, key decodedChunkKey
 // probation entries promote to protected (demoting the protected tail back
 // to probation while the protected segment exceeds its bound).
 func (c *DecodedChunkCache) touchLocked(el *list.Element, e *decodedChunkEntry) {
+	if e.freq < maxChunkFreq {
+		e.freq++
+	}
+	c.ageLocked()
 	if e.seg == segProtected {
 		c.protected.MoveToFront(el)
 		return
@@ -182,12 +216,18 @@ func (c *DecodedChunkCache) touchLocked(el *list.Element, e *decodedChunkEntry) 
 }
 
 // Offer presents a freshly decoded chunk vector for admission. First touch
-// registers a ghost; second touch clones vec into cache-owned storage. The
-// clone runs outside the cache lock.
+// registers a ghost; later touches admit only when there is free budget or
+// the candidate's frequency STRICTLY beats the eviction victim's — the
+// churn gate from the 2026-08-12 SF100 pair (doc §9.2): under a uniform
+// flood ties go to the incumbent, so the resident set stabilizes and the
+// wasted-clone admission storms cannot form. The clone runs outside the
+// cache lock, and only after the admission decision — a rejected offer
+// costs a map touch, not a memmove.
 func (c *DecodedChunkCache) Offer(key decodedChunkKey, vec *batch.Vector, numRows int) {
 	// Pre-filter on the decoded vector's footprint; the entry is charged at
 	// the clone's own (exactly sized) footprint below.
-	if est := vec.MemBytes(); est <= 0 || est > c.maxEntry {
+	est := vec.MemBytes()
+	if est <= 0 || est > c.maxEntry {
 		c.rejectedTooLarge.Add(1)
 		return
 	}
@@ -197,18 +237,39 @@ func (c *DecodedChunkCache) Offer(key decodedChunkKey, vec *batch.Vector, numRow
 		c.mu.Unlock()
 		return
 	}
+	c.ageLocked()
 	gel, wasGhost := c.ghosts[key]
 	if !wasGhost {
-		// First touch: ghost only.
-		c.ghosts[key] = c.ghostLRU.PushFront(key)
+		// First touch: ghost only, never a clone.
+		c.ghosts[key] = c.ghostLRU.PushFront(&ghostEntry{key: key, count: 1})
 		for len(c.ghosts) > c.maxGhosts {
 			tail := c.ghostLRU.Back()
-			delete(c.ghosts, tail.Value.(decodedChunkKey))
+			delete(c.ghosts, tail.Value.(*ghostEntry).key)
 			c.ghostLRU.Remove(tail)
 		}
 		c.ghostRegistered.Add(1)
 		c.mu.Unlock()
 		return
+	}
+	g := gel.Value.(*ghostEntry)
+	if g.count < maxChunkFreq {
+		g.count++
+	}
+	candFreq := g.count
+	if c.size.Load()+est > c.capBytes {
+		// At cap: candidate must beat the coldest incumbent by
+		// admitFreqMargin. Strictly-greater alone still churns under a
+		// sequential flood: hits and ghost touches advance in lockstep, so
+		// a candidate whose scan position precedes the victim's transiently
+		// leads by one and would displace the exact chunk about to be hit.
+		// The margin means only a durably hotter key displaces.
+		victim := c.coldestLocked()
+		if victim == nil || candFreq < victim.freq+admitFreqMargin {
+			c.ghostLRU.MoveToFront(gel)
+			c.freqRejected.Add(1)
+			c.mu.Unlock()
+			return
+		}
 	}
 	c.ghostLRU.Remove(gel)
 	delete(c.ghosts, key)
@@ -230,12 +291,42 @@ func (c *DecodedChunkCache) Offer(key decodedChunkKey, vec *batch.Vector, numRow
 		c.mu.Unlock() // concurrent Offer won the race; drop our clone
 		return
 	}
-	e := &decodedChunkEntry{key: key, vec: clone, bytes: bytes, seg: segProbation}
+	e := &decodedChunkEntry{key: key, vec: clone, bytes: bytes, seg: segProbation, freq: candFreq}
 	c.entries[key] = c.probation.PushFront(e)
 	c.size.Add(bytes)
 	c.admitted.Add(1)
 	c.evictToCapLocked()
 	c.mu.Unlock()
+}
+
+// coldestLocked returns the eviction victim (probation tail, else
+// protected tail) without removing it, or nil when the cache is empty.
+func (c *DecodedChunkCache) coldestLocked() *decodedChunkEntry {
+	if tail := c.probation.Back(); tail != nil {
+		return tail.Value.(*decodedChunkEntry)
+	}
+	if tail := c.protected.Back(); tail != nil {
+		return tail.Value.(*decodedChunkEntry)
+	}
+	return nil
+}
+
+// ageLocked halves every entry and ghost frequency once agingInterval
+// touches have accumulated. O(entries+ghosts), amortized to ~never.
+func (c *DecodedChunkCache) ageLocked() {
+	c.touches++
+	if c.touches < agingInterval {
+		return
+	}
+	c.touches = 0
+	for _, el := range c.entries {
+		e := el.Value.(*decodedChunkEntry)
+		e.freq /= 2
+	}
+	for el := c.ghostLRU.Front(); el != nil; el = el.Next() {
+		g := el.Value.(*ghostEntry)
+		g.count /= 2
+	}
 }
 
 // evictToCapLocked evicts probation-tail-first (then protected tail) until
@@ -270,6 +361,16 @@ func (c *DecodedChunkCache) evictOneLocked() int64 {
 	delete(c.entries, e.key)
 	c.size.Add(-e.bytes)
 	c.evictions.Add(1)
+	// Re-ghost with the accumulated frequency so a displaced-but-hot chunk
+	// can win its way back in (metadata only, bounded by maxGhosts).
+	if _, ok := c.ghosts[e.key]; !ok {
+		c.ghosts[e.key] = c.ghostLRU.PushFront(&ghostEntry{key: e.key, count: e.freq})
+		for len(c.ghosts) > c.maxGhosts {
+			gt := c.ghostLRU.Back()
+			delete(c.ghosts, gt.Value.(*ghostEntry).key)
+			c.ghostLRU.Remove(gt)
+		}
+	}
 	return e.bytes
 }
 
@@ -329,6 +430,7 @@ type DecodedChunkCacheStats struct {
 	Admitted, GhostRegistered    int64
 	Evictions, ReliefBytes       int64
 	RejectedTooLarge, CloneSkips int64
+	FreqRejected                 int64
 	SizeBytes, CapBytes          int64
 	Entries                      int
 }
@@ -351,6 +453,7 @@ func (c *DecodedChunkCache) Stats() DecodedChunkCacheStats {
 		ReliefBytes:      c.reliefEvictedBytes.Load(),
 		RejectedTooLarge: c.rejectedTooLarge.Load(),
 		CloneSkips:       c.cloneSkipped.Load(),
+		FreqRejected:     c.freqRejected.Load(),
 		SizeBytes:        c.Size(),
 		CapBytes:         c.capBytes,
 		Entries:          entries,
