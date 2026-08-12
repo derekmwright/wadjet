@@ -77,3 +77,37 @@ feeds `writeChunk` as a selection without conversion (and
 - Gates: `go test -race ./internal/worker/`, TPC-H SF0.01 22/22,
   `tpch-harness --mode=local --slice=small`, SF100 same-window A/B pair with
   block-profile confirmation (baseline arm `WADJET_SINK_DIRECT_CHUNK=0`).
+
+## Validation verdict (2026-08-12, KEEPER default-on)
+
+Two SF100 same-window pairs, bin 30587ff, fixed shapes, runs=2, baseline
+arm = kill switch off. Evidence: `~/wadjet-artifacts/20260812-sinkdirect/`.
+
+**Profiled pair** (block rate 20000; ctl results/20260812-163738, trt
+results/20260812-165832 — the decisive pair, no anomalies in either arm):
+
+- Walls: total **−15.7%** (683.6 s → 576.1 s), R1 −10.0%, R2 −20.6%;
+  R2/R1 drift 1.166 → **1.029**.
+- Rows 44/44 exact both arms; vsigs identical except Q19's documented
+  last-digit float merge-order wobble.
+- **Mutex confirm:** `appendAndMaybeFlush` block 2,860 s (3 workers,
+  reproducing the morning ranking's 64% share) → **231 s (−92%)**; the
+  direct path's own `Mutex.Lock` totals ~18 s.
+
+**Clean pair** (ctl results/20260812-155149, trt results/20260812-161603):
+total −14.9%; ctl suffered a one-off 4m02s Q21-R2 barrier collapse
+(242.5 s → trt 29.8 s) with otherwise anomalously fast R2s — the window
+lottery that motivated the profiled confirm pair. Worker pressure_stall_ms
+totals: ctl 35.6 s vs trt 2.8 s (12× lower under the fix).
+
+Open residuals / follow-up levers, not blockers:
+
+- The per-partition stream still serializes concurrent direct writers via
+  `flushCond` (~2.4 ks summed cond-wait inside `writeDirectChunk` across
+  3 workers, replacing 2.9 ks of mutex block on half the copied bytes).
+  Next-level lever if it ever ranks: per-writer partition files (readers
+  already accept multiple files per partition prefix) or offset-reserved
+  `pwrite`.
+- `unpartitionedStageSink.Consume` block only moved 601 s → 575 s: its
+  sub-threshold coalescing appends still copy under one mutex. Candidate:
+  striped accumulators, only if it ranks in a future profile.
