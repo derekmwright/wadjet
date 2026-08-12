@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"runtime/debug"
+	"sync"
 	"testing"
 	"time"
 )
@@ -335,10 +336,8 @@ func TestPauseOnHeapBackpressure_RespectsContextCancel(t *testing.T) {
 	resetHeapBackpressureCache(t)
 
 	// Force the cached value to "active" by writing it directly.
-	heapBackpressureMu.Lock()
-	heapBackpressureLastValue = true
-	heapBackpressureLastCheck = time.Now()
-	heapBackpressureMu.Unlock()
+	heapBackpressureLastValue.Store(true)
+	heapBackpressureLastCheckNS.Store(time.Now().UnixNano())
 	t.Cleanup(func() { resetHeapBackpressureCache(t) })
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -363,10 +362,8 @@ func TestPauseOnHeapBackpressure_RespectsContextCancel(t *testing.T) {
 func TestPauseOnHeapBackpressure_PausesUnderPressure(t *testing.T) {
 	resetHeapBackpressureCache(t)
 
-	heapBackpressureMu.Lock()
-	heapBackpressureLastValue = true
-	heapBackpressureLastCheck = time.Now()
-	heapBackpressureMu.Unlock()
+	heapBackpressureLastValue.Store(true)
+	heapBackpressureLastCheckNS.Store(time.Now().UnixNano())
 	t.Cleanup(func() { resetHeapBackpressureCache(t) })
 
 	start := time.Now()
@@ -385,15 +382,46 @@ func TestPauseOnHeapBackpressure_PausesUnderPressure(t *testing.T) {
 	}
 }
 
+// TestHeapGauges_ConcurrentCallers hammers both lock-free gauges from many
+// goroutines. Under -race this validates the CAS-elected-refresher design:
+// concurrent readers of the cached value must not race the single refresher
+// doing ReadMemStats, and every caller must get a coherent bool.
+func TestHeapGauges_ConcurrentCallers(t *testing.T) {
+	resetHeapBackpressureCache(t)
+	t.Cleanup(func() { resetHeapBackpressureCache(t) })
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 1000 {
+				HeapBackpressureActive()
+				heapPressureExceeded()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// BenchmarkHeapGaugesParallel measures the per-call cost of the pressure
+// gauges under parallel load — the shape of the SF100 hot path, where every
+// operator's per-batch spill check and every fragment runner's backpressure
+// check hit these concurrently.
+func BenchmarkHeapGaugesParallel(b *testing.B) {
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			HeapBackpressureActive()
+			heapPressureExceeded()
+		}
+	})
+}
+
 // resetHeapBackpressureCache wipes the package-level cache so the next call
 // re-reads runtime.MemStats. Tests that toggle GOMEMLIMIT must call this
 // after Setenv/SetMemoryLimit.
 func resetHeapBackpressureCache(_ *testing.T) {
-	heapBackpressureMu.Lock()
-	heapBackpressureLastCheck = time.Time{}
-	heapBackpressureLastValue = false
-	heapBackpressureMu.Unlock()
-	heapPressureMu.Lock()
-	heapPressureMemLimit = 0 // force re-read on next call
-	heapPressureMu.Unlock()
+	heapBackpressureLastCheckNS.Store(0)
+	heapBackpressureLastValue.Store(false)
+	heapPressureMemLimit.Store(0) // force re-read on next call
 }
