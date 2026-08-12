@@ -376,6 +376,39 @@ green (race, full suite, SF0.01, harness 3 arms); churn-resistance and
 hot-displacement regression tests added. SF100 re-pair verdict appended
 below when run.
 
+### 9.3 Re-pair verdict + pressure-yield valve (2026-08-12 night)
+
+Re-pair on bin 5e5da01 (control results/20260812-210645 vs treatment
+results/20260812-213009, 6 GiB, runs=2, profilers on). Rows 44/44
+identical. **Churn fix validated**: admissions 59-75K → 4.2-4.9K
+(−94%), evictions 55-73K → 0.7-1.2K, freq_rejected 26-126K carrying
+the load, Q16-R1 storm gone (6.9→7.5s), R1 delta collapsed to +2.3%
+(≈noise). Hit path again decisive where reuse exists: Q05-R2 −78%,
+Q09-R2 −74%, Q06 −62/−73% (899ms — first sub-second SF100 query),
+Q08-R2 −27%, Q21 −29%; hit-bytes rose to 101-106 GB/worker (stable
+resident set serves more).
+
+Pair wall +2.8% — **new named residual: pressure coupling.** Treatment
+wlogs show 39-52 pressure events/worker (control 1-4): 6 GiB of
+resident cache heap raises HeapAlloc and displaces page cache, firing
+the heap-backpressure gauge and the refault sensor; decode-ahead
+collapses (pressure_stall_ms ~9s/worker, refault_rate to 191K/s) and
+producers pause — while the cache held every byte, because relief only
+ran on the RequestRelief operator path (relief_mb=0), not the gauge
+channels. Window caveats logged: control's own R2/R1 was 1.237
+(evening ENA state), ctl-Q17-R2 a 1.4s freak-fast outlier, trt-Q07-R2
+a 54.5s pressure-collapsed straggler.
+
+**Valve shipped same night**: the worker stats loop now sheds the
+cache to cap/2 while either pressure channel is active
+(`ShedUnderPressure`, WARN marker "decoded-rowgroup cache pressure
+shed"); evicted entries re-ghost with frequency and re-admit through
+the gate when pressure clears. The cheapest bytes in the process yield
+first. Default still OFF; the next same-window pair (deploy-gated)
+judges the valve and the flip. If pressure-shed proves insufficient,
+the fallback lever is a smaller cap (4 GiB) — the boot-invariant math
+in §5 was optimistic about gauge headroom, not about reservoir caps.
+
 ## 10. Open questions
 
 - Cap auto-derivation (fraction of GOMEMLIMIT once validated) — same

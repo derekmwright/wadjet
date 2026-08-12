@@ -330,6 +330,38 @@ func TestDecodedChunkCache_ReliefSpillSome(t *testing.T) {
 	}
 }
 
+// TestDecodedChunkCache_ShedUnderPressure: the pressure valve evicts down
+// to the low-water mark, re-ghosts what it evicts (frequency preserved),
+// and is a no-op when already below the mark.
+func TestDecodedChunkCache_ShedUnderPressure(t *testing.T) {
+	src := batch.NewVector(batch.TypeInt64, 4096)
+	cache := NewDecodedChunkCache(64 << 20)
+	for i := 0; i < 8; i++ {
+		key := decodedChunkKey{identity: "x#1", rgIdx: i, colIdx: 0, catalogType: pqt.TypeInt64}
+		cache.Offer(key, src, src.Len)
+		cache.Offer(key, src, src.Len)
+	}
+	full := cache.Size()
+	if full == 0 {
+		t.Fatal("nothing admitted")
+	}
+	low := full / 2
+	freed := cache.ShedUnderPressure(low)
+	if freed < full-low || cache.Size() > low {
+		t.Fatalf("shed freed=%d size=%d, want size <= %d", freed, cache.Size(), low)
+	}
+	if cache.ShedUnderPressure(low) != 0 {
+		t.Fatal("second shed at same low-water should be a no-op")
+	}
+	// Evicted keys are ghosts with history: two more touches re-admit
+	// (below cap now, second-touch path).
+	evicted := decodedChunkKey{identity: "x#1", rgIdx: 0, colIdx: 0, catalogType: pqt.TypeInt64}
+	cache.Offer(evicted, src, src.Len)
+	if !cache.fillFromCache(batch.NewVector(batch.TypeInt64, 4096), evicted, 4096) {
+		t.Fatal("shed key did not re-admit below cap")
+	}
+}
+
 // TestDecodedChunkCache_TooLargeRejected: entries above cap/8 never admit.
 func TestDecodedChunkCache_TooLargeRejected(t *testing.T) {
 	src := batch.NewVector(batch.TypeInt64, 4096) // 32 KiB data
