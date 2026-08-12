@@ -642,13 +642,30 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	// Fallback: when spillDir is empty (tests, MemStore-only setups)
 	// keep the in-memory path but drop the double-buffer by using
 	// NewReaderFromBytes (zero-copy) instead of NewReader+bytes.Reader.
-	// Just-written temp: always the zero-copy mmap (pages resident; the
-	// SF100 pair priced pread staging of this hot path at +15.9% cold —
-	// see the design doc's refinement section).
+	// Just-written temp: pread-staged like every other tier once
+	// scanPreadHotEnabled (scan_pread.go — the 2026-08-12 pair put the
+	// frozen-spin holdout in a decode worker with these mmaps as the
+	// prime surviving fault class); under WADJET_SCAN_PREAD_HOT=0 the
+	// original zero-copy mmap of the page-hot temp.
 	var data []byte
 	var mmapData []byte
 	var localPath string
 	if s.executor.spillDir != "" {
+		if scanPreadEnabled && scanPreadHotEnabled {
+			f, lp, size, err := s.streamParquetToLocalFile(ctx, filePath, magic[:], rc)
+			if err != nil {
+				return fmt.Errorf("streaming parquet %s to local file: %w", filePath, err)
+			}
+			fadviseSequential(f, size)
+			// buildParquetStateFromFile owns f and unlinks lp on a bad
+			// payload.
+			p, err := s.buildParquetStateFromFile(filePath, f, size, lp)
+			if err != nil {
+				return err
+			}
+			s.installParquet(p)
+			return nil
+		}
 		md, lp, err := s.streamParquetToLocalMmap(ctx, filePath, magic[:], rc)
 		if err != nil {
 			return fmt.Errorf("streaming parquet %s to local mmap: %w", filePath, err)
@@ -1210,16 +1227,17 @@ func (s *cachedFileStreamSource) tryPreOpenNextParquet() {
 }
 
 // buildParquetFromLocal opens a local parquet file and builds its pending
-// state. justWritten selects the backing (docs/design/scan-pread-reads.md
-// §refinement): files this process just streamed to disk are page-cache-
-// resident, so the mmap reads them zero-copy and its faults are minor —
-// that path was never implicated in the drift, and the SF100 pair priced
-// pread's alloc+memcpy on it at +15.9% cold. Cache-hit files are the
-// opposite: potentially cold on NVMe, exactly the fault class whose STW
-// interaction drives the R2 drift — those decode from pread-staged
-// buffers (WADJET_SCAN_PREAD=0 forces mmap everywhere). ownedPath is ""
-// when the file belongs to a cache (must not be unlinked) and the file's
-// own path when ownership transfers to us.
+// state. justWritten marks files this process just streamed to disk
+// (page-cache-resident); with scanPreadHotEnabled (default) they stage
+// via pread like every other tier — the 2026-08-12 SF100 pair put the
+// frozen-spin holdout M inside a decode worker with these mmaps as the
+// prime surviving fault class (docs/design/shuffle-pread-reads.md
+// §Validation). WADJET_SCAN_PREAD_HOT=0 restores the original split:
+// just-written temps mmap zero-copy (the +15.9%-cold pricing that
+// motivated the exemption predates the 128 MiB pool classes), cache-hit
+// files pread. WADJET_SCAN_PREAD=0 forces mmap everywhere. ownedPath is
+// "" when the file belongs to a cache (must not be unlinked) and the
+// file's own path when ownership transfers to us.
 func (s *cachedFileStreamSource) buildParquetFromLocal(localPath, filePath, ownedPath string, justWritten bool) (*pendingParquet, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -1236,7 +1254,7 @@ func (s *cachedFileStreamSource) buildParquetFromLocal(localPath, filePath, owne
 		}
 		return nil, fmt.Errorf("local parquet %s unusable (err=%v)", localPath, err)
 	}
-	if scanPreadEnabled && !justWritten {
+	if scanPreadEnabled && (scanPreadHotEnabled || !justWritten) {
 		fadviseSequential(f, fi.Size())
 		// buildParquetStateFromFile owns f (and unlinks ownedPath when
 		// set) on a bad payload.

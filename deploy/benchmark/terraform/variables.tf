@@ -324,6 +324,12 @@ variable "scan_pread" {
   default     = "1"
 }
 
+variable "scan_pread_hot" {
+  description = "WADJET_SCAN_PREAD_HOT for the workers: extend pread staging to just-written (page-hot) parquet temps — S3 bodies staged to spill and prefetched downloads — removing the last parquet scan mmap class from decode goroutines (the 2026-08-12 frozen-spin holdout sat in a ReadRowGroupNative decode worker with WSHF already converted; docs/design/shuffle-pread-reads.md §Validation). Default \"1\" matches the in-binary default; \"0\" is the same-binary A/B off arm / kill switch restoring the just-written mmap exemption. Inert when scan_pread=0."
+  type        = string
+  default     = "1"
+}
+
 variable "shuffle_pread" {
   description = "WADJET_SHUFFLE_PREAD for the workers: read-staged WSHF shuffle consumption — local .wshf opens (staged S3 downloads, tier-0 LocalStageCache hits, prefetched downloads) decode from sequential read() calls into reused heap scratch instead of walking an mmap, removing the shuffle-phase page-fault class (and its GC-STW-stretch interaction, the frozen-spin trigger) from decode goroutines (docs/design/shuffle-pread-reads.md). Default \"1\" matches the in-binary default; \"0\" is the same-binary A/B off arm / kill switch restoring the mmap + shuffleChunkReader path."
   type        = string

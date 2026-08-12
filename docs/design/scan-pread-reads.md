@@ -271,3 +271,29 @@ sf100-distributed profile.
   drain + restart instead of the goroutine dump it was built to
   capture (the FTE retry re-ran the lost tasks; rows unaffected, trt
   R2 wall slightly inflated — the drift kill is conservative).
+
+## Hot-tier retry (WADJET_SCAN_PREAD_HOT, 2026-08-12)
+
+The just-written mmap exemption above is withdrawn behind a new flag,
+default on. Two pieces of evidence moved it:
+
+1. The +15.9%-cold pricing that motivated the exemption predates the
+   128 MiB pool classes (cb706cd); the alloc component (42% overflow at
+   32 MiB) is largely absorbed now.
+2. The 2026-08-12 SF100 pair for the WSHF read-staging lever
+   (shuffle-pread-reads.md §Validation) fired the frozen-spin trap
+   twice with WSHF fully converted and parquet ~96% pread by bytes,
+   and the SIGABRT dump put the non-preempting M inside a
+   ReadRowGroupNative per-column decode worker — the just-written
+   parquet mmaps (S3-staged temps + prefetched downloads) are the
+   prime surviving fault class.
+
+With WADJET_SCAN_PREAD_HOT=1 (default) every local parquet open stages
+via pread; =0 restores the hot/cold split exactly (`-var=scan_pread_hot`
+on the benchmark deploy). Inert when WADJET_SCAN_PREAD=0. Engagement:
+the cold pass now moves parquet.PreadStats — the parity test pins
+per-flag-state behavior (TestScanPread_ParityWithMmapPath).
+
+SF100 pair gate (pending): trap firings → 0; watch R1 for the cold-cost
+shape (pool classes should hold it near flat; the WSHF lever's pair
+already carries a +7.7% R1 open residual to re-measure alongside).

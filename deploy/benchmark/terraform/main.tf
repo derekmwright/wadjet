@@ -778,6 +778,7 @@ resource "aws_instance" "worker" {
           --setenv="WADJET_ROWGROUP_TOUCH=${var.rowgroup_touch}" \
           --setenv="WADJET_TOUCH_POPULATE=${var.touch_populate}" \
           --setenv="WADJET_SCAN_PREAD=${var.scan_pread}" \
+          --setenv="WADJET_SCAN_PREAD_HOT=${var.scan_pread_hot}" \
           --setenv="WADJET_SHUFFLE_PREAD=${var.shuffle_pread}" \
           --setenv="WADJET_DF_LATE_GROUP_ATTACH=${var.df_late_group_attach}" \
           /usr/local/bin/wadjet serve \

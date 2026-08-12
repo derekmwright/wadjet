@@ -93,14 +93,16 @@ func TestScanPread_ParityWithMmapPath(t *testing.T) {
 
 	// Cold (stream-to-spill) + steady (cache-hit) passes per mode, each
 	// mode with its own cache dir so both populate from the same store.
-	// The tier split is part of the contract: just-written stream temps
-	// decode via mmap (pread counters must not move on the cold pass),
-	// cache hits stage via pread when enabled.
-	runMode := func(enabled bool) (cold, steady []string) {
+	// Backing per tier is part of the contract: with the hot extension
+	// (default) BOTH passes stage via pread; under WADJET_SCAN_PREAD_HOT=0
+	// just-written stream temps decode via mmap (pread counters must not
+	// move on the cold pass) while cache hits still pread; with
+	// WADJET_SCAN_PREAD=0 nothing preads.
+	runMode := func(enabled, hot bool) (cold, steady []string) {
 		t.Helper()
-		prev := scanPreadEnabled
-		scanPreadEnabled = enabled
-		defer func() { scanPreadEnabled = prev }()
+		prevP, prevH := scanPreadEnabled, scanPreadHotEnabled
+		scanPreadEnabled, scanPreadHotEnabled = enabled, hot
+		defer func() { scanPreadEnabled, scanPreadHotEnabled = prevP, prevH }()
 		btc, err := objstore.NewBaseTableCache(inner, t.TempDir(), 1<<30, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -112,8 +114,11 @@ func TestScanPread_ParityWithMmapPath(t *testing.T) {
 			t.Fatalf("cold pass cached %d entries, want %d", s.Entries, len(files))
 		}
 		c1, _, _ := parquet.PreadStats()
-		if c1 != c0 {
-			t.Fatalf("cold (just-written) pass staged %d chunks via pread; want 0", c1-c0)
+		if enabled && hot && c1 == c0 {
+			t.Fatal("cold (just-written) pass staged nothing via pread with the hot extension on")
+		}
+		if (!enabled || !hot) && c1 != c0 {
+			t.Fatalf("cold (just-written) pass staged %d chunks via pread; want 0 (enabled=%v hot=%v)", c1-c0, enabled, hot)
 		}
 		steady = scanAll(ex)
 		c2, _, _ := parquet.PreadStats()
@@ -126,8 +131,9 @@ func TestScanPread_ParityWithMmapPath(t *testing.T) {
 		return cold, steady
 	}
 
-	preadCold, preadSteady := runMode(true)
-	mmapCold, mmapSteady := runMode(false)
+	hotCold, hotSteady := runMode(true, true)
+	preadCold, preadSteady := runMode(true, false)
+	mmapCold, mmapSteady := runMode(false, false)
 
 	want := 3 * rowsPerFile
 	if len(preadCold) != want {
@@ -137,6 +143,8 @@ func TestScanPread_ParityWithMmapPath(t *testing.T) {
 		"cold":         {preadCold, mmapCold},
 		"steady":       {preadSteady, mmapSteady},
 		"pread-passes": {preadCold, preadSteady},
+		"hot-cold":     {hotCold, mmapCold},
+		"hot-steady":   {hotSteady, mmapSteady},
 	} {
 		a, b := pair[0], pair[1]
 		if len(a) != len(b) {

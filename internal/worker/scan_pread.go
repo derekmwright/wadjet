@@ -15,3 +15,17 @@ import "os"
 // WADJET_SCAN_PREAD=0 is the kill switch, restoring the mmap +
 // touch-ahead path unchanged.
 var scanPreadEnabled = os.Getenv("WADJET_SCAN_PREAD") != "0"
+
+// scanPreadHotEnabled extends pread staging to the just-written (page-hot)
+// tier: S3 bodies staged to spill and prefetched downloads, which the
+// original refinement deliberately kept on mmap after full-pread priced
+// that tier at +15.9% cold — a cost dominated by pool-overflow allocs the
+// 128 MiB pool classes have since absorbed. The 2026-08-12 SF100 pair
+// (docs/design/shuffle-pread-reads.md §Validation) put the frozen-spin
+// holdout M inside a ReadRowGroupNative decode worker with WSHF fully
+// converted and parquet ~96% pread by bytes — the just-written mmaps are
+// the prime surviving fault class, so the exemption goes.
+//
+// WADJET_SCAN_PREAD_HOT=0 restores the mmap exemption for just-written
+// temps (tonight's shipped behavior). Inert when WADJET_SCAN_PREAD=0.
+var scanPreadHotEnabled = os.Getenv("WADJET_SCAN_PREAD_HOT") != "0"
