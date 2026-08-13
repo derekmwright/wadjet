@@ -172,6 +172,11 @@ const (
 	// holding a dispatched task it has no free slot for. Makes a wedged worker
 	// visible in its own logs instead of stalling silently (#101).
 	dispatchBackpressureWarn = 15 * time.Second
+	// livenessMarkerInterval is the cadence of the unconditional
+	// "liveness marker" log line; the deploy-side silent-stall watchdog
+	// fires when a live worker's journal shows >2 missed intervals.
+	// Keep the watchdog's silence window >2× this value.
+	livenessMarkerInterval = 30 * time.Second
 	// priorityLaneSlots is the dedicated concurrency for the latency-
 	// critical task lane (SubjectPriTasksAll), OUTSIDE MaxConcurrent. The
 	// lane carries only planner-bounded dimension-class tasks (dyn-filter
@@ -391,6 +396,30 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 func (w *Worker) SetMetrics(m *metrics.Metrics) {
 	w.metrics = m
 	w.executor.SetMetrics(m)
+}
+
+// trackTaskStart registers a task as executing for heartbeat progress
+// reporting and mirrors the count into the wadjet_worker_active_tasks
+// gauge so the metrics port exposes it to external watchdogs.
+func (w *Worker) trackTaskStart(taskID string) {
+	w.activeTasksMu.Lock()
+	w.activeTasks[taskID] = struct{}{}
+	n := len(w.activeTasks)
+	w.activeTasksMu.Unlock()
+	if w.metrics != nil {
+		w.metrics.WorkerActive.Set(float64(n))
+	}
+}
+
+// trackTaskEnd removes a task from the active set and updates the gauge.
+func (w *Worker) trackTaskEnd(taskID string) {
+	w.activeTasksMu.Lock()
+	delete(w.activeTasks, taskID)
+	n := len(w.activeTasks)
+	w.activeTasksMu.Unlock()
+	if w.metrics != nil {
+		w.metrics.WorkerActive.Set(float64(n))
+	}
 }
 
 // SetControlConn provides a dedicated NATS connection for the heartbeat
@@ -766,8 +795,51 @@ func (w *Worker) Start(ctx context.Context) error {
 	if w.config.ScanDecodeAhead {
 		w.startScanDecodeAheadMarkerLoop(ctx)
 	}
+	w.startLivenessMarkerLoop(ctx)
 
 	return nil
+}
+
+// startLivenessMarkerLoop emits an unconditional periodic marker line.
+// Unlike the flag-gated stats markers below, this one always runs and
+// always logs: the deploy-side silent-stall watchdog keys on app-log
+// silence (the q22-R2 quiet-stall shape — heartbeats survive, metrics
+// port answers, app log fully silent for minutes), so a healthy worker
+// must be guaranteed to emit at least one line per interval regardless
+// of feature flags or load. >2 missed intervals from a live pid is the
+// firing signature. Runs on bgWG (ctx-bound; must not join w.wg — see
+// the wg/bgWG split comment on the Worker struct).
+func (w *Worker) startLivenessMarkerLoop(ctx context.Context) {
+	w.bgWG.Add(1)
+	go func() {
+		defer w.bgWG.Done()
+		var seq int64
+		t := time.NewTicker(livenessMarkerInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				seq++
+				w.emitLivenessMarker(seq)
+			}
+		}
+	}()
+}
+
+// emitLivenessMarker logs one liveness line. Kept allocation-light and
+// dependency-free (no executor calls, no change detection): the line's
+// only job is to exist on every tick.
+func (w *Worker) emitLivenessMarker(seq int64) {
+	w.activeTasksMu.RLock()
+	active := len(w.activeTasks)
+	w.activeTasksMu.RUnlock()
+	utimeMs, stimeMs := procSelfCPU()
+	w.logger.Info("liveness marker",
+		"seq", seq, "active_tasks", active,
+		"goroutines", runtime.NumGoroutine(),
+		"utime_ms", utimeMs, "stime_ms", stimeMs)
 }
 
 // startScanDecodeAheadMarkerLoop runs the scan-decode-ahead stats marker
@@ -1526,14 +1598,8 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 	}
 
 	// Track active task for heartbeat progress reporting
-	w.activeTasksMu.Lock()
-	w.activeTasks[task.ID] = struct{}{}
-	w.activeTasksMu.Unlock()
-	defer func() {
-		w.activeTasksMu.Lock()
-		delete(w.activeTasks, task.ID)
-		w.activeTasksMu.Unlock()
-	}()
+	w.trackTaskStart(task.ID)
+	defer w.trackTaskEnd(task.ID)
 
 	// Long-task watcher: one-shot goroutine + heap snapshot if this task
 	// runs past longTaskWatchAt. Cancelled here on completion so short
