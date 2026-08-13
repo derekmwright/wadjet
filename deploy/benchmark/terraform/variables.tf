@@ -295,9 +295,9 @@ variable "eager_dispatch" {
 }
 
 variable "eager_min_tail_seconds" {
-  description = "WADJET_EAGER_MIN_TAIL_SECONDS for the coordinator: projected-tail clearance floor for eager dispatch (eager-consumer-dispatch.md §11/§14). Default matches the in-binary default (12); treatment arms set ~3 because current-world producer spreads sit below the legacy calibration. Inert when eager_dispatch=false."
+  description = "WADJET_EAGER_MIN_TAIL_SECONDS for the coordinator: projected-tail clearance floor for eager dispatch (eager-consumer-dispatch.md §11/§16). Default matches the in-binary default (1, recalibrated 2026-08-13 from the measured post-collapse-fix tail distribution — 12 and 3 are inert on the current config). Inert when eager_dispatch=false."
   type        = number
-  default     = 12
+  default     = 1
 }
 
 variable "rowgroup_touch" {
