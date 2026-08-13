@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/s2"
@@ -95,6 +96,9 @@ type PeerServer struct {
 	grpcSrv *grpc.Server
 	lis     net.Listener
 	sem     chan struct{}
+
+	advertiseOnce sync.Once // guards advertiseAddr; see AdvertiseAddr
+	advertiseAddr string    // resolved once after Start binds
 }
 
 // NewPeerServer constructs a PeerServer. Call Start to begin accepting.
@@ -172,6 +176,17 @@ func (s *PeerServer) Stop() {
 // AdvertiseAddr returns the address peers should dial, for the worker to
 // carry in its heartbeats. Empty until Start has bound the listener (unless
 // an explicit AdvertiseAddr was configured).
+//
+// The derived address is resolved ONCE and cached. Deriving it means a
+// netlink RIB dump (net.InterfaceAddrs → NetlinkRIB), and netlink route
+// dumps serialize on the kernel's global rtnl_lock — held by ec2net policy-
+// route refreshes and ENA reconfiguration on EC2. The heartbeat loop calls
+// this every tick; before the cache, a wedged rtnl_lock stalled the
+// heartbeat goroutine inside the kernel, silencing heartbeats AND peer
+// advertisement while the process stayed alive — the dispatch-stall arc's
+// "network-silent while alive" family (2026-08-13 frozen-spin stack capture
+// caught the heartbeat goroutine in syscall.NetlinkRIB/bind). The address
+// cannot change after the listener binds, so the dump buys nothing.
 func (s *PeerServer) AdvertiseAddr() string {
 	if s.cfg.AdvertiseAddr != "" {
 		return s.cfg.AdvertiseAddr
@@ -179,21 +194,27 @@ func (s *PeerServer) AdvertiseAddr() string {
 	if s.lis == nil {
 		return ""
 	}
-	bound, ok := s.lis.Addr().(*net.TCPAddr)
-	if !ok {
-		return s.lis.Addr().String()
-	}
-	host := bound.IP
-	if host == nil || host.IsUnspecified() {
-		host = firstUnicastIPv4()
-	}
-	return net.JoinHostPort(host.String(), fmt.Sprintf("%d", bound.Port))
+	s.advertiseOnce.Do(func() {
+		bound, ok := s.lis.Addr().(*net.TCPAddr)
+		if !ok {
+			s.advertiseAddr = s.lis.Addr().String()
+			return
+		}
+		host := bound.IP
+		if host == nil || host.IsUnspecified() {
+			host = firstUnicastIPv4()
+		}
+		s.advertiseAddr = net.JoinHostPort(host.String(), fmt.Sprintf("%d", bound.Port))
+	})
+	return s.advertiseAddr
 }
 
 // firstUnicastIPv4 returns the first non-loopback unicast IPv4 on any
 // interface, falling back to loopback. Best-effort — deployments that need
-// a specific address set AdvertiseAddr explicitly.
-func firstUnicastIPv4() net.IP {
+// a specific address set AdvertiseAddr explicitly. Costs a netlink RIB dump
+// (rtnl_lock); callers must not sit on a hot or liveness-critical path —
+// AdvertiseAddr caches its result for exactly that reason. Var for tests.
+var firstUnicastIPv4 = func() net.IP {
 	addrs, err := net.InterfaceAddrs()
 	if err == nil {
 		for _, a := range addrs {
