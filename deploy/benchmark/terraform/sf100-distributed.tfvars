@@ -59,3 +59,12 @@ locality_placement        = true
 # SF100 A/B 2026-07-25: peer stream bytes -50% (265.9 -> 133.4 GB/pair) at
 # wall-neutral cost, rows identical. Set false for raw-wire baselines.
 peer_wire_compression     = true
+# Outbound burst smoothing (docs/design/upload-burst-smoothing.md §5):
+# SF100 A/B 2026-08-13 (pair 20260813-195410/201428, bin d2036be):
+# ENA bw_out_allowance_exceeded -30% at equal bytes (735K -> 517K/arm;
+# no-query rate -74%, scan -47%), rows 88/88 + vsig identical,
+# upload_failed=0, walls neutral-or-better (paced arm's R2 301.3s =
+# cleanest R2 on this config). Aggregate background PUT budget in MB/s;
+# c7gd.4xlarge baseline allowance ~234 MB/s. Set 0 to reproduce
+# unpaced baselines.
+upload_pace_mbps          = 150

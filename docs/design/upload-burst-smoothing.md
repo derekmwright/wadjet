@@ -1,7 +1,9 @@
 # Outbound burst smoothing: pacing background PUT bytes below the NIC allowance
 
-Status: implemented 2026-08-13, **default OFF** (`WADJET_UPLOAD_PACE_MBPS`,
-terraform `upload_pace_mbps`), pending SF100 A/B.
+Status: implemented 2026-08-13; **SF100-validated same day (§6) and
+pinned at 150 MB/s in the SF100 bench profile**. Engine default stays
+env-off (`WADJET_UPLOAD_PACE_MBPS`, terraform `upload_pace_mbps`; 0
+reproduces unpaced baselines).
 
 Barrier-overlap arc step 2. Evidence base: the 2026-08-13 ENA×stage
 attribution (`deploy/benchmark/attribute-ena.py`, results/20260813-012354
@@ -97,7 +99,42 @@ next window, which would recreate the v1-QoS backlog snowball at the
 wire layer. 150 MB/s sits ~2x above the measured average PUT rate, so
 backlog growth means the rate is mis-set, not the mechanism wrong.
 
-## 6. Future
+## 6. A/B result (2026-08-13, bin d2036be, adjacent arms, runs=2)
+
+Control `upload_pace_mbps=0` (results/20260813-195410) vs treatment
+`=150` (results/20260813-201428), fresh on-demand cluster each,
+destroyed + EC2-zero verified.
+
+- **Correctness**: rows 88/88 and vsig identical; `upload_failed=0`
+  both arms; upload-cancelled counts comparable (no drain-backlog
+  signal — the §5 failure mode did not appear).
+- **Engagement**: `upload_pace_wait_ms` = 56.1s / 93.6s / 69.1s per
+  worker (0 in control) — the pacer slept off real debt all suite.
+- **ENA (the designed judge)**: `bw_out_allowance_exceeded` **−30% at
+  equal bytes** (735K → 517K per arm, ~231 vs ~222 GB tx). By
+  signature: join-window rate 365→312/s (−14%), scan 308→188/s
+  (−40%), no-query 209→55/s (−74%). The completion-wave peaks are
+  exactly what got clipped.
+- **Walls: neutral-or-better within contamination.** Pair −3.6% raw.
+  Each arm had one contaminated run in opposite directions: control R2
+  showed the recurring cross-arm R2/R1 creep (1.62, broad, no single
+  stall); treatment R1 absorbed a frozen-spin episode (Q20-R1 135.7s,
+  stall-arc specimen 8 — full stack dump shipped by the new wlog
+  uploader). Treatment's clean R2 = 301.3s, the fastest R2 recorded on
+  this config (prior best 378.1).
+- **Hypothesis logged, not claimed**: the unattributed cross-arm R2/R1
+  creep (1.08→1.6+ across 08-12/08-13 controls) did not appear in the
+  paced arm (R2/R1 0.686). If the creep is throttle/backlog state
+  accumulating across runs, pacing removes its cause. Discriminator:
+  R2/R1 on future paced arms.
+
+VERDICT: §5 success criteria met (out-exc collapse, correctness
+perfect, walls neutral-or-better) — pinned at 150 MB/s in the SF100
+bench profile; engine default stays env-off. Every future SF100 arm
+doubles as a confirm run; revisit the rate only with ENA evidence
+(e.g. if peer-serve growth eats the 84 MB/s headroom).
+
+## 7. Future
 
 - Rate from instance metadata (baseline allowance lookup) instead of a
   knob, once validated.
