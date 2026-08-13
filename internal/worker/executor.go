@@ -458,9 +458,19 @@ func (e *Executor) SetDecodedCache(c *scan.DecodedChunkCache) {
 	// half of the §9.4 pressure-coupling fix. Uses the same test-seam
 	// package vars as the fragment runner.
 	if c != nil {
+		// RAW heap gauge on purpose: the adjusted gauge discounts the
+		// cache's own bytes (memory.SetReclaimableBytesFunc below), so it
+		// goes quiet exactly when residency is the pressure source — the
+		// case admission must pause for.
 		c.SetPressureFunc(func() bool {
-			return heapPressureActive() || pageCachePressureActive()
+			return rawHeapPressureActive() || pageCachePressureActive()
 		})
+		// Gauge deduction: the cache is evictable on demand, so its
+		// resident bytes must not read as heap pressure to execution
+		// decisions (morsel collapse, backpressure pauses, the spill
+		// breaker). See the 2026-08-12 collapse evidence at
+		// memory.SetReclaimableBytesFunc.
+		memory.SetReclaimableBytesFunc(c.Size)
 	}
 	if c != nil && e.sharedSpill != nil && !e.decodedCacheRegistered {
 		e.sharedSpill.RegisterAccounted(c)

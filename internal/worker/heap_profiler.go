@@ -76,7 +76,9 @@ func (w *Worker) startHeapPressureProfiler(ctx context.Context) {
 				return
 			case <-ticker.C:
 			}
-			if !memory.HeapBackpressureActive() {
+			// Raw gauge: the profiler documents the high-heap state itself,
+			// including evictable cache residency the adjusted gauge ignores.
+			if !memory.RawHeapBackpressureActive() {
 				continue
 			}
 			if !lastWrite.IsZero() && time.Since(lastWrite) < heapPressureProfileRateLimit {

@@ -786,6 +786,12 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 // manipulating GOMEMLIMIT. Production never reassigns it.
 var heapPressureActive = memory.HeapBackpressureActive
 
+// rawHeapPressureActive is the unadjusted variant (no reclaimable-bytes
+// deduction) for the consumers that free reclaimable bytes themselves:
+// the cache-shed valve and the cache admission pause. Same test-seam
+// rationale.
+var rawHeapPressureActive = memory.RawHeapBackpressureActive
+
 // pageCachePressureActive mirrors it for memory.PageCachePressureActive
 // (the §9 refault-rate sensor), same test-seam rationale.
 var pageCachePressureActive = memory.PageCachePressureActive

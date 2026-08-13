@@ -352,10 +352,46 @@ var (
 
 var (
 	heapBackpressureLastCheckNS atomic.Int64
-	heapBackpressureLastValue   atomic.Bool
+	heapBackpressureLastValue   atomic.Bool // reclaimable-adjusted
+	heapBackpressureRawValue    atomic.Bool // raw HeapAlloc, same refresh
 	heapBackpressureRatioOnce   sync.Once
 	heapBackpressureRatioEff    float64
 )
+
+// Reclaimable heap: bytes the process can hand back on demand — today the
+// decoded row-group chunk cache, evictable at any moment via ledger relief
+// or the worker's shed valve. Both pressure gauges subtract these bytes
+// before comparing against their thresholds: pressure that eviction could
+// relieve must slow the CACHE, not execution. The 2026-08-12 SF100
+// baseline is the motivating failure: 6 GiB of resident cache held
+// HeapAlloc near the 0.70 backpressure threshold, morsel dispensers
+// collapsed fragments to serial (31-45 collapses/arm vs 0 with the cache
+// off), and Q08/Q17 intermittently ran ~2-minute broadcast-join legs on
+// one core. RawHeapBackpressureActive keeps the unadjusted signal for the
+// consumers whose job is to evict (worker cache-shed valve, admission
+// pause) or to diagnose (heap profiler).
+var heapReclaimableBytesFn atomic.Pointer[func() int64]
+
+// SetReclaimableBytesFunc registers the process's reclaimable-bytes
+// reporter (worker startup: the decoded-chunk cache's Size). f must be
+// cheap and non-blocking — it runs inside the gauges' 100ms refresh.
+// nil unregisters.
+func SetReclaimableBytesFunc(f func() int64) {
+	if f == nil {
+		heapReclaimableBytesFn.Store(nil)
+		return
+	}
+	heapReclaimableBytesFn.Store(&f)
+}
+
+func reclaimableBytes() int64 {
+	if p := heapReclaimableBytesFn.Load(); p != nil {
+		if n := (*p)(); n > 0 {
+			return n
+		}
+	}
+	return 0
+}
 
 // cachedMemLimit returns the GOMEMLIMIT, reading it once via
 // debug.SetMemoryLimit(-1) and caching. The read is idempotent, so a
@@ -420,36 +456,57 @@ func PauseOnHeapBackpressure(ctx context.Context) error {
 // Use this between batches in the consume loop, not in per-row hot
 // paths. Returns false when GOMEMLIMIT is unset.
 func HeapBackpressureActive() bool {
+	_, adj := heapBackpressureVals()
+	return adj
+}
+
+// RawHeapBackpressureActive is HeapBackpressureActive WITHOUT the
+// reclaimable-bytes deduction: raw HeapAlloc against the same threshold.
+// This is the right signal only for consumers that respond by freeing the
+// reclaimable bytes themselves (the worker's cache-shed valve and the
+// cache admission pause — eviction must engage while the adjusted gauge
+// stays quiet) or that capture diagnostics of the high-heap state (heap
+// profiler). Execution decisions must use HeapBackpressureActive.
+func RawHeapBackpressureActive() bool {
+	raw, _ := heapBackpressureVals()
+	return raw
+}
+
+// heapBackpressureVals returns (raw, reclaimable-adjusted) backpressure,
+// refreshing both cached values together under the CAS election.
+func heapBackpressureVals() (raw, adj bool) {
 	ratio := effectiveHeapBackpressureRatio()
 	if ratio <= 0 {
-		return false
+		return false, false
 	}
 	now := time.Now().UnixNano()
 	last := heapBackpressureLastCheckNS.Load()
-	if now-last < int64(100*time.Millisecond) {
-		return heapBackpressureLastValue.Load()
-	}
-	if !heapBackpressureLastCheckNS.CompareAndSwap(last, now) {
-		// Another caller won the refresh; use the value it will replace.
-		return heapBackpressureLastValue.Load()
+	if now-last < int64(100*time.Millisecond) ||
+		!heapBackpressureLastCheckNS.CompareAndSwap(last, now) {
+		// Fresh enough, or another caller won the refresh.
+		return heapBackpressureRawValue.Load(), heapBackpressureLastValue.Load()
 	}
 
 	limit := cachedMemLimit()
 	if limit <= 0 || limit == math.MaxInt64 {
+		heapBackpressureRawValue.Store(false)
 		heapBackpressureLastValue.Store(false)
-		return false
+		return false, false
 	}
 
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	threshold := int64(float64(limit) * ratio)
-	v := int64(ms.HeapAlloc) > threshold
-	heapBackpressureLastValue.Store(v)
-	return v
+	raw = int64(ms.HeapAlloc) > threshold
+	adj = int64(ms.HeapAlloc)-reclaimableBytes() > threshold
+	heapBackpressureRawValue.Store(raw)
+	heapBackpressureLastValue.Store(adj)
+	return raw, adj
 }
 
 // HeapPressureExceeded is the exported view of the process heap-pressure
-// circuit breaker: HeapAlloc > heapPressureRatio × GOMEMLIMIT (100ms-cached).
+// circuit breaker: HeapAlloc (less registered reclaimable bytes) >
+// heapPressureRatio × GOMEMLIMIT (100ms-cached).
 // Used by the Phase-5 mmap-relief trigger to gate MADV_DONTNEED on genuine
 // pressure rather than relieving page cache when there is headroom.
 func HeapPressureExceeded() bool { return heapPressureExceeded() }
@@ -478,13 +535,15 @@ func heapPressureExceeded() bool {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	threshold := int64(float64(limit) * heapPressureRatio)
-	v := int64(ms.HeapAlloc) > threshold
+	recl := reclaimableBytes()
+	v := int64(ms.HeapAlloc)-recl > threshold
 	prev := heapPressureLastValue.Swap(v)
 	if v && !prev {
 		// Transition false→true: log loudly because the tracker missed something.
 		// This indicates an allocation site that should be added to the tracker.
 		slog.Warn("heap-pressure spill triggered (likely tracker accounting gap)",
 			"heap_alloc_mb", ms.HeapAlloc/(1<<20),
+			"reclaimable_mb", recl/(1<<20),
 			"threshold_mb", threshold/(1<<20),
 			"gomemlimit_mb", limit/(1<<20),
 		)

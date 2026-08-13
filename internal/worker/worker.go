@@ -1976,8 +1976,11 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 			// held its 6 GiB — the cheapest bytes in the process must yield
 			// FIRST. Evicted entries re-ghost, so the hot set re-admits
 			// through the frequency gate when pressure clears.
+			// RAW heap gauge on purpose: the adjusted gauge discounts the
+			// cache's own bytes, so residency-driven pressure only shows
+			// here — and shedding is exactly this valve's job.
 			if dc := w.executor.decodedCache; dc != nil {
-				if heapPressureActive() || pageCachePressureActive() {
+				if rawHeapPressureActive() || pageCachePressureActive() {
 					if freed := dc.ShedUnderPressure(dc.CapBytes() / 2); freed > 0 {
 						w.logger.Warn("decoded-rowgroup cache pressure shed",
 							"freed_mb", freed/(1<<20),

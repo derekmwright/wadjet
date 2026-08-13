@@ -382,6 +382,40 @@ func TestPauseOnHeapBackpressure_PausesUnderPressure(t *testing.T) {
 	}
 }
 
+// TestHeapGauges_DiscountReclaimable is the regression test for the
+// 2026-08-12 morsel-collapse coupling: 6 GiB of decoded-cache residency
+// kept raw HeapAlloc over the backpressure threshold, and fragment
+// runners collapsed to serial for pressure that cache eviction could
+// have relieved. With a reclaimable-bytes reporter registered, the
+// adjusted gauges must stay quiet while the raw gauge still fires (the
+// shed valve's signal).
+func TestHeapGauges_DiscountReclaimable(t *testing.T) {
+	resetHeapBackpressureCache(t)
+	prev := debug.SetMemoryLimit(-1)
+	// A 1 MB limit puts real HeapAlloc far above both thresholds.
+	debug.SetMemoryLimit(1 << 20)
+	t.Cleanup(func() { debug.SetMemoryLimit(prev); resetHeapBackpressureCache(t) })
+
+	if !HeapBackpressureActive() || !heapPressureExceeded() {
+		t.Fatal("precondition: gauges should fire with a 1MB GOMEMLIMIT and no reclaimable bytes")
+	}
+
+	// Register reclaimable bytes covering the whole heap; force a refresh.
+	SetReclaimableBytesFunc(func() int64 { return 1 << 40 })
+	heapBackpressureLastCheckNS.Store(0)
+	heapPressureLastCheckNS.Store(0)
+
+	if HeapBackpressureActive() {
+		t.Error("HeapBackpressureActive should be false when reclaimable bytes cover the heap")
+	}
+	if heapPressureExceeded() {
+		t.Error("heapPressureExceeded should be false when reclaimable bytes cover the heap")
+	}
+	if !RawHeapBackpressureActive() {
+		t.Error("RawHeapBackpressureActive must keep firing — it is the shed valve's signal")
+	}
+}
+
 // TestHeapGauges_ConcurrentCallers hammers both lock-free gauges from many
 // goroutines. Under -race this validates the CAS-elected-refresher design:
 // concurrent readers of the cached value must not race the single refresher
@@ -423,5 +457,7 @@ func BenchmarkHeapGaugesParallel(b *testing.B) {
 func resetHeapBackpressureCache(_ *testing.T) {
 	heapBackpressureLastCheckNS.Store(0)
 	heapBackpressureLastValue.Store(false)
+	heapBackpressureRawValue.Store(false)
 	heapPressureMemLimit.Store(0) // force re-read on next call
+	SetReclaimableBytesFunc(nil)
 }

@@ -480,6 +480,38 @@ First ENA-instrumented findings:
   is still active with the cache at cap. Residual continues (next
   candidates unchanged: lower shed low-water / 4 GiB arm).
 
+### 9.6 Morsel-collapse coupling: gauges now discount reclaimable cache bytes (2026-08-13)
+
+Offline forensics on the 20260812-233343 baseline found the sharpest
+pressure-coupling failure yet, hiding inside the "intermittent Q08/Q17
+straggler" walls: worker-8acac700's Q08-R1 broadcast-join task logged
+`morsel pressure collapse: linear fragment continuing serial` 3s after
+dispatch and then ran its 1.35M-row probe on one core for 106s while
+its two siblings finished equal-size tasks in 22-26s (ENA flat, pool
+at 2% — pure serialization, not network or memory starvation). Counts
+across the night's arms are categorical: **31-45 collapses per
+cache-on arm, 0 in every cache-off arm.** Mechanism: the cache's ~6
+GiB residency sits inside `HeapAlloc`, holding the process near the
+0.70 backpressure threshold, and the morsel dispenser's pressure gate
+(`heapPressureActive`) reads that as heap distress. Q08-R1/R2
+1m50/2m11 vs 26-35s cache-off, Q17-R2 2m27 — roughly 300s of the
+814s baseline pair.
+
+Fix (with 9.3's valve, completing the "cheapest bytes yield first"
+ordering): `memory.SetReclaimableBytesFunc` registers the cache's
+`Size`, and both heap gauges (`HeapBackpressureActive` 0.70,
+`heapPressureExceeded` 0.95 spill breaker) subtract reclaimable bytes
+before comparing — execution decisions no longer see evictable cache
+as pressure. The raw signal survives as
+`memory.RawHeapBackpressureActive` and drives exactly the consumers
+whose job is to evict or observe: the §9.3 shed valve, the §9.4
+admission pause, and the heap profiler. Regression test:
+`TestHeapGauges_DiscountReclaimable`. Validation marker for the next
+SF100 arm: `morsel pressure collapse` count must drop to ~0 and the
+Q08/Q17 straggler class should vanish (the cache-off Q17-R2 2m10 in
+pair 3's control is a separate pre-existing outlier — zero collapses
+that arm — and stays an open residual).
+
 ## 10. Open questions
 
 - Cap auto-derivation (fraction of GOMEMLIMIT once validated) — same
