@@ -668,6 +668,24 @@ resource "aws_instance" "worker" {
           if [ "$unresp_ms" -gt 4000 ] && [ "$dut" -gt 150 ]; then
             logger -t stall-watchdog "FROZEN-SPIN pid=$pid unresp_ms=$unresp_ms cpu_jiffies=$dut capturing stacks"
             D=/var/log/stall-$pid-$(date +%s).stacks
+            # Per-thread CPU deltas + kernel stacks FIRST: specimen 8
+            # (2026-08-13) proved the burn can live in a runtime-level
+            # thread executing NO goroutine (SIGABRT dump: 100 goroutines,
+            # none running, host idle, process CPU accruing) — goroutine
+            # dumps alone cannot name that thread; per-TID utime deltas
+            # over 1s plus /proc kernel stacks can.
+            T=/var/log/stall-$pid-$(date +%s).threads
+            { for t in /proc/$pid/task/*/; do
+                tid=$(basename "$t")
+                echo "TID $tid stat1: $(awk '{print $14, $15, $3}' "$t/stat" 2>/dev/null)"
+              done
+              sleep 1
+              for t in /proc/$pid/task/*/; do
+                tid=$(basename "$t")
+                echo "TID $tid stat2: $(awk '{print $14, $15, $3}' "$t/stat" 2>/dev/null)"
+                echo "TID $tid kstack: $(tr '\n' '|' < "$t/stack" 2>/dev/null)"
+              done; } > "$T" 2>/dev/null
+            logger -t stall-watchdog "thread capture ($(wc -c <"$T") bytes)"
             if curl -s --max-time 2 "http://127.0.0.1:9100/debug/pprof/goroutine?debug=2" -o "$D" && [ -s "$D" ]; then
               logger -t stall-watchdog "pprof stacks captured ($(wc -c <"$D") bytes)"
               logger -t stall-stacks -f "$D"
@@ -860,7 +878,7 @@ resource "aws_instance" "worker" {
           # Full stall-watchdog stack dumps: the syslog copy (logger -t
           # stall-stacks) gets rate-limited to a fraction of the dump
           # (2026-08-13: 214 of ~1500 lines survived). Ship the files.
-          for D in /var/log/stall-*.stacks; do
+          for D in /var/log/stall-*.stacks /var/log/stall-*.threads; do
             [ -e "$D" ] || continue
             gzip -c "$D" | aws s3 cp - "s3://${local.bucket_name}/$M/wlogs/$(basename "$D")-$IID.gz" --region ${local.eff_region} || true
           done
