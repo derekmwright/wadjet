@@ -652,6 +652,27 @@ resource "aws_instance" "worker" {
     # worker unit) to stderr -> journald -> wlogs even while the
     # scheduler is STW-wedged, then exits; the restart loop +
     # JetStream redelivery keep the suite going.
+    # Per-thread CPU deltas + kernel stacks: specimen 8 (2026-08-13)
+    # proved the burn can live in a runtime-level thread executing NO
+    # goroutine (SIGABRT dump: 100 goroutines, none running, host idle,
+    # process CPU accruing) — goroutine dumps alone cannot name that
+    # thread; per-TID utime deltas over 1s plus /proc kernel stacks can.
+    # Shared by both watchdog signatures below; the wlog uploader ships
+    # /var/log/stall-*.threads automatically.
+    thread_capture() {
+      local pid=$1 out=$2
+      { for t in /proc/$pid/task/*/; do
+          tid=$(basename "$t")
+          echo "TID $tid stat1: $(awk '{print $14, $15, $3}' "$t/stat" 2>/dev/null)"
+        done
+        sleep 1
+        for t in /proc/$pid/task/*/; do
+          tid=$(basename "$t")
+          echo "TID $tid stat2: $(awk '{print $14, $15, $3}' "$t/stat" 2>/dev/null)"
+          echo "TID $tid kstack: $(tr '\n' '|' < "$t/stack" 2>/dev/null)"
+        done; } > "$out" 2>/dev/null
+    }
+
     ( declare -A lastok lastut
       while true; do
         sleep 1
@@ -668,23 +689,8 @@ resource "aws_instance" "worker" {
           if [ "$unresp_ms" -gt 4000 ] && [ "$dut" -gt 150 ]; then
             logger -t stall-watchdog "FROZEN-SPIN pid=$pid unresp_ms=$unresp_ms cpu_jiffies=$dut capturing stacks"
             D=/var/log/stall-$pid-$(date +%s).stacks
-            # Per-thread CPU deltas + kernel stacks FIRST: specimen 8
-            # (2026-08-13) proved the burn can live in a runtime-level
-            # thread executing NO goroutine (SIGABRT dump: 100 goroutines,
-            # none running, host idle, process CPU accruing) — goroutine
-            # dumps alone cannot name that thread; per-TID utime deltas
-            # over 1s plus /proc kernel stacks can.
             T=/var/log/stall-$pid-$(date +%s).threads
-            { for t in /proc/$pid/task/*/; do
-                tid=$(basename "$t")
-                echo "TID $tid stat1: $(awk '{print $14, $15, $3}' "$t/stat" 2>/dev/null)"
-              done
-              sleep 1
-              for t in /proc/$pid/task/*/; do
-                tid=$(basename "$t")
-                echo "TID $tid stat2: $(awk '{print $14, $15, $3}' "$t/stat" 2>/dev/null)"
-                echo "TID $tid kstack: $(tr '\n' '|' < "$t/stack" 2>/dev/null)"
-              done; } > "$T" 2>/dev/null
+            thread_capture "$pid" "$T"
             logger -t stall-watchdog "thread capture ($(wc -c <"$T") bytes)"
             if curl -s --max-time 2 "http://127.0.0.1:9100/debug/pprof/goroutine?debug=2" -o "$D" && [ -s "$D" ]; then
               logger -t stall-watchdog "pprof stacks captured ($(wc -c <"$D") bytes)"
@@ -700,6 +706,50 @@ resource "aws_instance" "worker" {
         done
       done ) &
     echo "stall-watchdog started (pprof grab + SIGABRT on frozen-spin signature)"
+
+    # Silent-stall watchdog: the CPU-QUIET cousin of the frozen spin
+    # (three q22-R2 control-arm specimens, 2026-08-13 week): app log goes
+    # FULLY silent for ~3m30-3m45 while heartbeats survive, the metrics
+    # port stays responsive, and the NIC sits at keepalives — then the
+    # episode self-heals and all repartition outputs leave in one burst.
+    # The frozen-spin watchdog above is blind to it (its trigger is
+    # port-unresponsive AND CPU accruing; this shape is neither).
+    # Detection: the worker emits an unconditional "liveness marker"
+    # line every 30s (worker.go startLivenessMarkerLoop), so zero
+    # journal lines from a live worker over 75s (>2 missed intervals)
+    # while the port answers = the signature. Response is EVIDENCE-ONLY:
+    # .threads capture + pprof goroutine dump (the port is responsive,
+    # so the grab works). NO SIGABRT — the episode self-heals and the
+    # process is healthy enough to dump; killing it would poison the arm
+    # for nothing. 180s per-pid cooldown ≈ 1-2 captures per episode.
+    ( declare -A lastfire
+      while true; do
+        sleep 15
+        for pid in $(pgrep -f "wadjet serve --mode=worker"); do
+          curl -s --max-time 1 "http://127.0.0.1:9100/debug/pprof/cmdline" -o /dev/null || continue
+          idx=$(tr '\0' '\n' < /proc/$pid/cmdline 2>/dev/null | sed -n 's|.*--spill-dir=.*/w\([0-9]\+\)$|\1|p')
+          [ -n "$idx" ] || continue
+          nowep=$(date +%s)
+          prev=$${lastfire[$pid]:-0}
+          [ $(( nowep - prev )) -lt 180 ] && continue
+          lines=$(journalctl --since=-75s -o cat --no-pager 2>/dev/null | grep -c "^\[w$idx\] ")
+          if [ "$lines" -eq 0 ]; then
+            active=$(curl -s --max-time 1 "http://127.0.0.1:9100/metrics" | awk '/^wadjet_worker_active_tasks/ {print $2}')
+            logger -t silent-stall "SILENT-STALL pid=$pid idx=$idx active_tasks=$${active:-?} no app-log lines in 75s, port responsive - capturing (no signal sent)"
+            T=/var/log/stall-$pid-$nowep.threads
+            thread_capture "$pid" "$T"
+            logger -t silent-stall "thread capture ($(wc -c <"$T") bytes)"
+            D=/var/log/stall-$pid-$nowep.stacks
+            if curl -s --max-time 2 "http://127.0.0.1:9100/debug/pprof/goroutine?debug=2" -o "$D" && [ -s "$D" ]; then
+              logger -t silent-stall "pprof stacks captured ($(wc -c <"$D") bytes)"
+            else
+              logger -t silent-stall "pprof grab failed despite responsive port"
+            fi
+            lastfire[$pid]=$nowep
+          fi
+        done
+      done ) &
+    echo "silent-stall watchdog started (evidence-only capture on app-log silence)"
 
     # Spill-to-disk location selection. NVMe instance store (c7gd, i4g)
     # is fastest; fall back to EBS-backed /var/spill for instances
@@ -791,6 +841,9 @@ resource "aws_instance" "worker" {
     PER_TASK_BUDGET=$((PER_PROC_POOL / ${var.max_concurrent}))
     echo "Starting $WORKERS_PER_NODE worker process(es): per-proc envelope=$((PER_PROC_BYTES/1024/1024/1024))GiB, GOMEMLIMIT=$((PER_PROC_GOMEMLIMIT/1024/1024/1024))GiB, pool=$((PER_PROC_POOL/1024/1024/1024))GiB, per-task=$((PER_TASK_BUDGET/1024/1024/1024))GiB"
 
+    # sed -u on the log pipe: without it, stdio block-buffers quiet-phase
+    # worker output for minutes, and journald arrival time (what the
+    # silent-stall watchdog measures) lags emission — a fake silence.
     start_worker() {
       local idx=$1
       local worker_spill="$SPILL_DIR/w$idx"
@@ -845,7 +898,7 @@ resource "aws_instance" "worker" {
             %{if var.spill_floating_budget~}
             --spill-floating-budget \
             %{endif~}
-            2>&1 | sed "s/^/[w$idx] /"
+            2>&1 | sed -u "s/^/[w$idx] /"
         EXIT_CODE=$?
         echo "[w$idx] exited code=$EXIT_CODE, restarting in 5s..."
         sleep 5
