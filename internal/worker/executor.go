@@ -350,7 +350,6 @@ func (e *Executor) ScanDecodeAheadDecodeSpans() (ns, bytes int64) {
 	return e.scanDecodeAheadDecodeNs.Load(), e.scanDecodeAheadDecodeBytes.Load()
 }
 
-
 // NewExecutor creates a new task executor.
 func NewExecutor(store objstore.Store, cache *LRUCache, js jetstream.JetStream) *Executor {
 	e := &Executor{

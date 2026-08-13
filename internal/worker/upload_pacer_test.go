@@ -11,9 +11,9 @@ import (
 // TestBytePacerRate: draining N bytes through the pacer takes at least
 // (N-burst)/rate — the token bucket actually bounds throughput.
 func TestBytePacerRate(t *testing.T) {
-	const rate = 10e6  // 10 MB/s
-	const burst = 1e6  // 1 MB free headroom
-	const total = 4e6  // 4 MB payload
+	const rate = 10e6 // 10 MB/s
+	const burst = 1e6 // 1 MB free headroom
+	const total = 4e6 // 4 MB payload
 	p := newBytePacer(rate, burst)
 	ctx := context.Background()
 	start := time.Now()
