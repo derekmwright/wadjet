@@ -512,6 +512,24 @@ Q08/Q17 straggler class should vanish (the cache-off Q17-R2 2m10 in
 pair 3's control is a separate pre-existing outlier — zero collapses
 that arm — and stays an open residual).
 
+**SF100 VALIDATED (2026-08-13, results/20260813-012354, bin 683fcfd,
+on-demand, single arm runs=2)**: `morsel pressure collapse` **0 on all
+3 workers** and `fragment task heap backpressure` 0 (prior cache-on
+arms: 31-45 and 18-32). Q08 30.4s/50.3s, Q17 16.2s/23.9s — straggler
+class gone. Rows 44/44 OK, vsig identical vs the 08-12 baseline except
+the known-benign Q19 last-digit wobble. ★ New config-baseline walls:
+**R1 319.3s / R2 378.1s (pair 697.3s, R2/R1 1.184)** vs 347.8/466.5
+the night before on the same config without the fix (cross-window;
+the categorical collapse-count zero, not the wall delta, is the
+validation per the no-A/B-on-architectural-perf doctrine). Raw-gauge
+consumers still engage as designed: shed valve fired 2×/worker,
+relief ~6 GB, pressure_paused 4.2-5.7K. Decode-ahead
+pressure_stall_ms 13K/11K/54K (was 118K/94K/7K) — the remaining tax is
+the page-cache/refault channel (§9.4 residual continues, smaller).
+Also: the "one worker serves ~zero cache traffic" asymmetry did NOT
+recur this arm (hits 53-55K on all three); watch whether it returns —
+it now looks like a placement lottery, not a cache defect.
+
 ## 10. Open questions
 
 - Cap auto-derivation (fraction of GOMEMLIMIT once validated) — same
