@@ -4,7 +4,7 @@
 # rx/tx bytes plus ENA allowance-exceeded counters per worker. Use this
 # for LIVE checks while an arm runs (is the cluster throttling right
 # now?). For analysis-grade series, don't use this — worker user-data
-# journals the same counters every 30s under the `ena-poll` tag and
+# journals the same counters every 10s under the `ena-poll` tag and
 # grab-worker-logs.sh ships them in wlogs (zcat wlog-*.gz | grep ena-poll).
 #
 # Interpretation (2026-08-09 diagnosis, docs/benchmarks/

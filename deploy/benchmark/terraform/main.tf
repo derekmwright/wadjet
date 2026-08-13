@@ -611,11 +611,18 @@ resource "aws_instance" "worker" {
     fi
 
     # NIC/ENA sampler: journal cumulative rx/tx bytes and ENA
-    # allowance-exceeded counters every 30s. Wall deltas on
+    # allowance-exceeded counters every 10s. Wall deltas on
     # burst-networked bench types (c7gd "up to 15 Gbps") are
     # uninterpretable without throttle context — the entire 2026-08-09
     # steady-residual arc chased in-host causes before ENA counters
     # settled it (docs/benchmarks/network-bound-diagnosis-2026-08-09.md).
+    # 10s cadence (was 30s) for the barrier-overlap arc: the 2026-08-12
+    # baseline showed bw_out bursts at stage barriers, and attributing
+    # them to stage classes needs sub-barrier resolution
+    # (deploy/benchmark/attribute-ena.py joins these samples against
+    # the coordinator's stage-DAG timeline). This is the ONLY ena-poll
+    # sampler — a 60s duplicate briefly coexisted (995409d) and doubled
+    # every sample; keep it single.
     # grab-worker-logs.sh ships journald wholesale, so samples ride
     # along in wlogs with no separate collection step. Filter with:
     #   zcat wlog-*.gz | grep ena-poll
@@ -623,9 +630,9 @@ resource "aws_instance" "worker" {
     if [ -n "$NET_IF" ]; then
       ( while true; do
           logger -t ena-poll "if=$NET_IF rx=$(cat /sys/class/net/$NET_IF/statistics/rx_bytes) tx=$(cat /sys/class/net/$NET_IF/statistics/tx_bytes) $(ethtool -S $NET_IF 2>/dev/null | grep allowance_exceeded | tr -s ' ' | tr '\n' ' ')"
-          sleep 30
+          sleep 10
         done ) &
-      echo "ena-poll sampler started on $NET_IF (30s cadence -> journald)"
+      echo "ena-poll sampler started on $NET_IF (10s cadence -> journald)"
     fi
 
     # Frozen-spin watchdog: the 2026-08-10 q22-R2 stall was a worker
@@ -828,18 +835,6 @@ resource "aws_instance" "worker" {
     for i in $(seq 0 $((WORKERS_PER_NODE - 1))); do
       start_worker $i &
     done
-
-    # ENA allowance polling (2026-08-09 doctrine: wall deltas on this rig
-    # are read against ENA counters, never attributed to "windows"). One
-    # sample/minute to journald, so the counters ride the wlog into every
-    # run's artifacts. Cumulative counters — diff consecutive samples.
-    (
-      NIC=$(ls /sys/class/net | grep -v '^lo$' | head -1)
-      while true; do
-        ethtool -S "$NIC" 2>/dev/null | grep -E "allowance_exceeded" | tr -s ' \n' '  ' | logger -t ena-poll
-        sleep 60
-      done
-    ) &
 
     # Auto wlog upload (benchmark-turnaround backlog): run-benchmark.sh
     # publishes s3://<bucket>/wlog-request containing the results prefix
