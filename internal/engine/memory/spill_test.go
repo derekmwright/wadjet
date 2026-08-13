@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"math"
+	"runtime"
 	"runtime/debug"
 	"sync"
 	"testing"
@@ -392,7 +393,13 @@ func TestPauseOnHeapBackpressure_PausesUnderPressure(t *testing.T) {
 func TestHeapGauges_DiscountReclaimable(t *testing.T) {
 	resetHeapBackpressureCache(t)
 	prev := debug.SetMemoryLimit(-1)
-	// A 1 MB limit puts real HeapAlloc far above both thresholds.
+	// A 1 MB limit puts HeapAlloc above both thresholds — but only
+	// RETAINED memory guarantees it stays there: GOMEMLIMIT=1MB makes
+	// the GC collect continuously, and transient garbage can drop
+	// HeapAlloc under the 0.7MB threshold between assertions (flaked
+	// once under the loaded pre-push race run). Hold 8 MB live for the
+	// test's duration.
+	ballast := make([]byte, 8<<20)
 	debug.SetMemoryLimit(1 << 20)
 	t.Cleanup(func() { debug.SetMemoryLimit(prev); resetHeapBackpressureCache(t) })
 
@@ -411,9 +418,13 @@ func TestHeapGauges_DiscountReclaimable(t *testing.T) {
 	if heapPressureExceeded() {
 		t.Error("heapPressureExceeded should be false when reclaimable bytes cover the heap")
 	}
+	// Fresh refresh for the raw read too — the assertions above may have
+	// consumed the 100ms cache window.
+	heapBackpressureLastCheckNS.Store(0)
 	if !RawHeapBackpressureActive() {
 		t.Error("RawHeapBackpressureActive must keep firing — it is the shed valve's signal")
 	}
+	runtime.KeepAlive(ballast)
 }
 
 // TestHeapGauges_ConcurrentCallers hammers both lock-free gauges from many
@@ -458,6 +469,8 @@ func resetHeapBackpressureCache(_ *testing.T) {
 	heapBackpressureLastCheckNS.Store(0)
 	heapBackpressureLastValue.Store(false)
 	heapBackpressureRawValue.Store(false)
+	heapPressureLastCheckNS.Store(0)
+	heapPressureLastValue.Store(false)
 	heapPressureMemLimit.Store(0) // force re-read on next call
 	SetReclaimableBytesFunc(nil)
 }
