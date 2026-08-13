@@ -854,6 +854,13 @@ resource "aws_instance" "worker" {
           LAST="$M"
           journalctl --no-pager | gzip -c > "/root/wlog-$IID.gz"
           aws s3 cp "/root/wlog-$IID.gz" "s3://${local.bucket_name}/$M/wlogs/wlog-$IID.gz" --region ${local.eff_region} || true
+          # Full stall-watchdog stack dumps: the syslog copy (logger -t
+          # stall-stacks) gets rate-limited to a fraction of the dump
+          # (2026-08-13: 214 of ~1500 lines survived). Ship the files.
+          for D in /var/log/stall-*.stacks; do
+            [ -e "$D" ] || continue
+            gzip -c "$D" | aws s3 cp - "s3://${local.bucket_name}/$M/wlogs/$(basename "$D")-$IID.gz" --region ${local.eff_region} || true
+          done
           echo "wlog auto-uploaded to $M/wlogs/"
         fi
       done
