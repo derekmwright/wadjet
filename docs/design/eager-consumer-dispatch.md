@@ -757,3 +757,50 @@ not an economics verdict: §15's "wins and taxes cancel" stands until
 a clean-window adjacent-arm pair on THIS config (control flag-off vs
 eager=1 floor=1, vsig protocol, judge-pair) says otherwise. Flag
 remains default OFF.
+
+## 17. The clean-window pair (2026-08-13, bin eb00a77, floor=1):
+## still a tax — ARC PARKED WITH NUMBERS, flag stays OFF
+
+The pair §16 called for ran 2026-08-13 morning: adjacent arms, fresh
+on-demand cluster each, runs=2, control results/20260813-131001 vs
+treatment (eager=1, floor=1) results/20260813-132846.
+
+- CORRECTNESS (strongest yet): rows 88/88 AND vsig 42/42 identical —
+  including the Q19 digit that wobbled benignly in earlier arms.
+  0 morsel collapses; 0 reaps.
+- GATE BEHAVIOR: exactly as calibrated — 15 declines, every declined
+  tail < 0.94s; 5 clearances above the floor (join-8, join-10 ×2,
+  final_aggregate-17 ×2); 75 manifests, 3 governed waves.
+- ECONOMICS: both R2s are stall-contaminated (control: q22-R2 216.2s,
+  the third q22-R2 silent-stall specimen; treatment: two frozen-spin
+  episodes, see below), so R1 vs R1 is the clean read:
+  **282.7 → 299.1s, +5.8% treatment tax.** ENA attribution rules out
+  window skew — treatment's window was equal or better (out-exc
+  1.29M vs 1.47M at ~equal 222/232 GB tx). With only 5 clearances
+  harvesting ≤ ~10s of 1.0–2.7s tails, flag-on machinery cost
+  (manifest publication, feeds, provisional outputs — §12 measured
+  the same class at +2.1%) dominates any possible win.
+
+VERDICT: on the post-collapse-fix config, producer tails are simply
+too short for post-threshold tail clearance to pay. Five floors have
+now been tried across six arms (0, 1, 3, 12) plus the known-optimistic
+ungated C3; every properly-measured arm lands between "cancel" and a
+small tax. The §10 world that motivated eager (10–40s straggler-driven
+tails) no longer exists — the stragglers were bugs and got fixed. The
+17%/106s adjacent-overlap ceiling measured 2026-08-13 is real but NOT
+harvestable by this mechanism class (clearance can only start after
+the decision threshold; the serial mass sits before it). Barrier
+overlap now belongs to different lever classes: stage-output upload
+smoothing inside join windows (barrier-overlap arc step 2) and
+streaming consumption. The machinery stays merged, correct, and OFF;
+its durable outputs stand (§15 list, plus the floor gate and this
+pair's protocol). Do not re-pair without a config change that
+re-lengthens producer tails.
+
+Bonus finding (treatment arm): the two frozen-spin episodes fired the
+new stall-watchdog and captured the first-ever live stacks — the
+heartbeat goroutine was mid syscall.NetlinkRIB/bind, exposing the
+netlink-RIB-dump-per-heartbeat defect fixed in 18cf955 (see
+dispatch-stall arc). Whether eager load makes those episodes more
+likely remains open (2-for-2 in eager arms so far, but n=2 and the
+q22 shape strikes control arms).
