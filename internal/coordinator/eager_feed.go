@@ -190,12 +190,18 @@ func (f *eagerFeed) projectedPartitionBytes() []int64 {
 // nothing worth overlapping, so the gate declines toward the barrier,
 // never toward a wrong clearance.
 //
-// The C3 SF100 pair (eager-consumer-dispatch.md §10) is the calibration:
-// every edge whose measured producer spread was ≥ ~12s converted under
-// eager clearance (Q05 −29%, Q21, Q18, Q04, Q03); every edge below ~10s
-// paid a slot-occupancy tax instead. eagerMinTailSeconds encodes that
-// envelope; WADJET_EAGER_MIN_TAIL_SECONDS overrides it (0 = gate off,
-// restoring the ungated C3 behavior for A/B).
+// Calibration history (eager-consumer-dispatch.md §10, §15): the July C3
+// SF100 pair put the envelope at ~12s — every edge with producer spread
+// ≥ ~12s converted under eager clearance (Q05 −29%, Q21, Q18, Q04, Q03),
+// every edge below ~10s paid a slot-occupancy tax. That world's long
+// tails were straggler-driven; after the 2026-08 producer speedups
+// (morsel-collapse fix dde1f02, decoded cache, scan levers) SF100 tails
+// compressed to 0–2.7s, making a 12s (or 3s) floor inert — the
+// 2026-08-13 floor=3 arm declined 17/17 clearances, 11 of them with
+// tails ≤ 0.33s (nothing to overlap) and 6 in the 1.0–2.7s band. The
+// 1.0 floor separates those two populations on the current config.
+// WADJET_EAGER_MIN_TAIL_SECONDS overrides it (0 = gate off, restoring
+// the ungated C3 behavior for A/B).
 func (f *eagerFeed) projectedTailSeconds() float64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -214,7 +220,7 @@ var eagerMinTailSeconds = func() float64 {
 			return n
 		}
 	}
-	return 12.0
+	return 1.0
 }()
 
 // replaySnapshot returns a copy of the manifests published so far.

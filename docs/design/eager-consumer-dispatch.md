@@ -710,3 +710,50 @@ not scheduled. The arc's durable outputs: three real bugs found and
 fixed (replay-alias, feed-hijack, empty-batch panic), catalog
 idempotency (#278), and the value-signature gate now guarding every
 future benchmark run.
+
+## 16. 2026-08-13 arms on the post-collapse-fix config: floor
+## recalibrated 12s → 1s; safety re-proven; economics still open
+
+The barrier-overlap arc (docs/internals/native-dag-execution.md era,
+step-0 attribution 2026-08-13) re-opened the flag because the world
+under it changed: the morsel-collapse fix (dde1f02) plus the producer
+speedup arcs (base-table cache, decoded chunk cache, pread, direct
+chunk sink) compressed SF100 producer tails from the tens of seconds
+§10 calibrated against down to 0–2.7s, and ENA attribution showed
+join-stage windows own 68% of outbound throttle — the PUT bursts A3
+manifests spread are exactly the throttled ones.
+
+Two arms ran 2026-08-13 (fresh cluster each, on-demand, bin 683fcfd):
+
+- **floor=3 (results/20260813-022123): EFFECTIVELY INERT.** 1
+  clearance, 17 floor-declines. Declined projected tails: 11 of 17
+  ≤ 0.33s (six exactly zero — no measurable tail), 6 in 1.0–2.7s.
+  The July absolute calibration is stale on this config; nothing
+  economic can be read from the arm (its +29% wall vs control was
+  window degradation with the flag inert — ENA 787K vs 565K out-exc
+  at equal bytes).
+- **floor=0 (results/20260813-092113): ENGAGED, VALUE-SAFE.** 12
+  clearances / 103 manifests / 22 backlog flushes / 10 governed waves
+  / 28 chained markers. Rows 44/44; vsig 41/42 identical to control
+  (benign Q19 last-digit); 0 morsel collapses — the §9.6 gauge fix
+  holds under eager load. This was the mandatory post-2f97f42 safety
+  gate; it PASSES. Walls unjudgeable (same window degradation family;
+  Q18/Q21 +70–96% in BOTH arms including the inert one).
+- **New failure shape — reap-while-alive under eager** (Q03-R2,
+  2m56 recovery, values correct): a worker went network-silent 105s
+  (heartbeats AND peer-serving; process alive and logging) → reaped →
+  its not-yet-uploaded shuffle outputs invalidated → re-dispatch
+  recovered. Eager load stacks peer serve + eager uploads + probe
+  fetches on the NIC simultaneously, making this silent-network
+  family (dispatch-stall arc, specimens 3–5) more likely to cross the
+  reap threshold. Before any default flip: consider reap-grace for
+  workers with pending non-durable outputs, or heartbeat/peer-serve
+  QoS.
+
+RECALIBRATION: eagerMinTailSeconds default 12.0 → 1.0 — the boundary
+between the measurable-tail population (1.0–2.7s) and the
+zero/trivial one on the current config. This is a gate calibration,
+not an economics verdict: §15's "wins and taxes cancel" stands until
+a clean-window adjacent-arm pair on THIS config (control flag-off vs
+eager=1 floor=1, vsig protocol, judge-pair) says otherwise. Flag
+remains default OFF.
