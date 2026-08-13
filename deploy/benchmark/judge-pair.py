@@ -20,7 +20,11 @@ import sys
 import glob
 import os
 
-QLINE = re.compile(r'^(Q\d+) .*?([\d.]+)(ms|s)\s+(\d+) rows.*?(OK|FAIL)$', re.M)
+# Wall formats seen in results files: `12.345s`, `899ms`, `3m47.376s`.
+# The optional minutes group must come first or "3m47.376s" silently
+# parses as 47.376s (dropped 3 minutes — hid the 2026-08-13 control
+# Q22-R2 stall from the pair table).
+QLINE = re.compile(r'^(Q\d+) .*?(?:(\d+)m)?([\d.]+)(ms|s)\s+(\d+) rows.*?(OK|FAIL)$', re.M)
 TRINO_Q = re.compile(r'(q\d+)\s+wall_ms=(\d+)')
 TRINO_FAIL = re.compile(r'(q\d+)\s+FAILED')
 
@@ -39,9 +43,10 @@ def parse(path):
     runs = []
     for chunk in open(resolve(path)).read().split('=== Run ')[1:]:
         seen = {}
-        for q, w, unit, rows, st in QLINE.findall(chunk):
+        for q, mins, w, unit, rows, st in QLINE.findall(chunk):
             if q not in seen:  # result file repeats queries in a summary table
                 wall = float(w) / 1000 if unit == 'ms' else float(w)
+                wall += 60 * int(mins) if mins else 0
                 seen[q] = (wall, int(rows), st)
         runs.append(seen)
     if not runs:
