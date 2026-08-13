@@ -142,6 +142,14 @@ type uploadManager struct {
 	// tombstoneTTL, same retention as the cache's cleaned map.
 	cancelledRoots map[string]time.Time
 
+	// Outbound burst smoothing (docs/design/upload-burst-smoothing.md):
+	// paces aggregate background PUT wire bytes below the NIC allowance so
+	// completion-wave bursts stop tripping the ENA clamp that throttles
+	// critical-path peer/NATS traffic. nil = off (WADJET_UPLOAD_PACE_MBPS
+	// unset). Sync uploads and urgent (demand-released) roots bypass.
+	pacer      *bytePacer
+	paceWaitNs atomic.Int64 // time PUT streams slept in the pacer
+
 	// Observability counters.
 	completed      atomic.Int64 // files uploaded in the background
 	cancelledFiles atomic.Int64 // uploads aborted by query completion
@@ -187,6 +195,7 @@ func newUploadManager(store objstore.Store, nc *nats.Conn, logger *slog.Logger) 
 		cancelledRoots: make(map[string]time.Time),
 		seenRoots:      make(map[string]struct{}),
 		activeJobs:     make(map[int64]struct{}),
+		pacer:          newBytePacer(uploadPaceRate, 0),
 	}
 }
 
@@ -356,6 +365,13 @@ func (m *uploadManager) chunkGate(ctx context.Context, qs *queryUploadState, seq
 // uploadChunkBytes of source reads re-consults the foreground gate.
 // Wrapping the SOURCE governs everything downstream of it — the s2
 // writer and the PUT body advance only as fast as their reads.
+//
+// paced additionally charges the read bytes to the manager's outbound
+// pacer (upload-burst-smoothing). Set ONLY on PUT-body readers — their
+// reads are the wire bytes; the compression-source reader stays unpaced
+// so s2 can run ahead of the wire. Urgent roots bypass: a demand release
+// means a consumer or the coordinator is waiting on this durable copy
+// NOW, and stretching it converts smoothing into barrier latency.
 type governedReader struct {
 	ctx        context.Context
 	m          *uploadManager
@@ -364,6 +380,7 @@ type governedReader struct {
 	r          io.Reader
 	budget     int
 	jobYieldNs *int64
+	paced      bool
 }
 
 func (g *governedReader) Read(p []byte) (int, error) {
@@ -378,6 +395,15 @@ func (g *governedReader) Read(p []byte) (int, error) {
 	}
 	n, err := g.r.Read(p)
 	g.budget -= n
+	if g.paced && n > 0 && g.m.pacer != nil && !(g.qs != nil && g.qs.urgent.Load()) {
+		var waited int64
+		if !g.m.pacer.waitAfter(g.ctx, n, &waited) {
+			return n, g.ctx.Err()
+		}
+		if waited > 0 {
+			g.m.paceWaitNs.Add(waited)
+		}
+	}
 	return n, err
 }
 
@@ -400,6 +426,16 @@ func (m *uploadManager) UploadPauseNs() int64 {
 		return 0
 	}
 	return m.pauseNs.Load()
+}
+
+// UploadPaceWaitNs returns cumulative time PUT streams slept in the
+// outbound pacer — the engagement marker for burst-smoothing A/B arms
+// (upload_pace_wait_ms).
+func (m *uploadManager) UploadPaceWaitNs() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.paceWaitNs.Load()
 }
 
 // uploadJob is one file to land in S3: srcPath is a LocalStageCache-owned
@@ -764,7 +800,7 @@ func (m *uploadManager) uploadOnce(ctx context.Context, qs *queryUploadState, se
 	}
 	var body io.Reader = f
 	if governed {
-		body = &governedReader{ctx: ctx, m: m, qs: qs, seq: seq, r: f, jobYieldNs: jobYieldNs}
+		body = &governedReader{ctx: ctx, m: m, qs: qs, seq: seq, r: f, jobYieldNs: jobYieldNs, paced: true}
 	}
 	if _, err := m.store.Put(ctx, j.bucket, j.key, body, fi.Size(), "application/octet-stream"); err != nil {
 		return fmt.Errorf("put %s: %w", j.key, err)

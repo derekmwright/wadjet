@@ -603,6 +603,9 @@ resource "aws_instance" "worker" {
     export WADJET_STAGE_FUSION_AGG="${var.stage_fusion_agg}"
     export WADJET_BLOCK_PROFILE_RATE="${var.block_profile_rate}"
     export WADJET_MUTEX_PROFILE_FRACTION="${var.mutex_profile_fraction}"
+    # Outbound burst smoothing (docs/design/upload-burst-smoothing.md):
+    # aggregate background stage-output PUT budget in MB/s. 0 = off.
+    export WADJET_UPLOAD_PACE_MBPS="${var.upload_pace_mbps}"
 
     # Verify binary was downloaded successfully
     if [ ! -x /usr/local/bin/wadjet ]; then

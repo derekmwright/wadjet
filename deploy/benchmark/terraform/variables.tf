@@ -294,6 +294,12 @@ variable "eager_dispatch" {
   default     = false
 }
 
+variable "upload_pace_mbps" {
+  description = "WADJET_UPLOAD_PACE_MBPS for workers (docs/design/upload-burst-smoothing.md): aggregate background stage-output PUT budget in MB/s (wire bytes). Smooths completion-wave PUT bursts below the ENA baseline allowance so the clamp stops hitting critical-path peer/NATS traffic. 0 (default) = off; treatment arms start at ~150 (c7gd.4xlarge baseline ≈ 234 MB/s). Sync uploads and demand-released roots always bypass."
+  type        = number
+  default     = 0
+}
+
 variable "eager_min_tail_seconds" {
   description = "WADJET_EAGER_MIN_TAIL_SECONDS for the coordinator: projected-tail clearance floor for eager dispatch (eager-consumer-dispatch.md §11/§16). Default matches the in-binary default (1, recalibrated 2026-08-13 from the measured post-collapse-fix tail distribution — 12 and 3 are inert on the current config). Inert when eager_dispatch=false."
   type        = number
