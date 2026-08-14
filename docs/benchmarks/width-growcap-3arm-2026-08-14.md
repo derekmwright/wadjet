@@ -149,9 +149,12 @@ itself runs q18 ≈ 14.3s / q21 ≈ 13.7s steady — much of §1's q18/q21
 "best ever" delta was recovering drift damage. The genuine engine wins
 on equal config are the table above.
 
-Window note: this evening window is soft (ctl steady 277.9 vs the
-canonical morning 198.6 on the same binary+config) — absolute
-record-book numbers deserve a clean AM window; the within-window
-−24.7% is the defensible claim. q08 steady 22.3 vs Trino FTE 14.0 →
+Inter-run note: ctl steady 277.9 here vs 198.6 on the same
+binary+config in results/20260814-121720 — a 40% inter-run delta with
+NO mechanism named. OPEN RESIDUAL (unfound cause, not "window
+physics"); candidates to rule in/out on the next pair's telemetry:
+re-execution incidents, cache/sensor state divergence, ENA throttle
+counters, background-upload interference. The within-window −24.7% is
+the defensible claim. q08 steady 22.3 vs Trino FTE 14.0 →
 1.59× (from 2.07×); remaining q08 material: exchange-sink per-consume
 partition hashing residual + effective-width plateau (~10 of 15).
