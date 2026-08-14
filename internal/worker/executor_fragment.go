@@ -862,9 +862,14 @@ var scanDecodeAheadStrictPressure = sync.OnceValue(func() bool {
 // lower it.
 var morselMinFragmentBytes int64 = 64 << 20
 
-// morselFragmentParallelismCap bounds per-fragment width regardless of
-// policy: past ~8 consumers the single producer (source decode) is the
-// bottleneck and extra clones only add merge/scratch overhead.
+// morselFragmentParallelismCap bounds per-fragment width in legacy
+// fixed-width mode (WADJET_MORSEL_YIELD=0), where every consumer holds a
+// token for the fragment's lifetime. Work-conserving mode is bounded by the
+// token pool instead: active width can never exceed the baseline slot plus
+// pool capacity, so consumers past that are unreachable dead weight — and
+// the old universal cap of 8 left cores idle on single-fragment workers
+// whose producer (the multi-group decode-ahead scanner) was blocked on a
+// full window, not saturated (SF100 q08 probe-split, 2026-08-14).
 const morselFragmentParallelismCap = 8
 
 // morselFragmentWorkers decides the parallel width for a linear fragment.
@@ -902,7 +907,13 @@ func (e *Executor) morselFragmentWorkers(task distributed.Task, ops []exec.Unary
 		}
 		target = runtime.GOMAXPROCS(0)
 	}
-	if target > morselFragmentParallelismCap {
+	if morselWidthYield {
+		// The gate admits active consumers against the pool per morsel, so
+		// baseline + capacity is the reachable width; more clones can never run.
+		if bound := 1 + int(e.cpuTokens.Capacity()); target > bound {
+			target = bound
+		}
+	} else if target > morselFragmentParallelismCap {
 		target = morselFragmentParallelismCap
 	}
 	if target <= 1 {

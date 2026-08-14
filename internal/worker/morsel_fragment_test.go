@@ -134,28 +134,54 @@ func TestMorselFragmentWorkers_Gates(t *testing.T) {
 }
 
 // TestMorselFragmentWorkers_YieldMode: work-conserving mode takes no tokens
-// up front and returns the full policy target even on an exhausted pool —
-// active width is metered per-morsel by the gate instead of frozen at
-// start-time availability.
+// up front and does not narrow k on a busy pool — active width is metered
+// per-morsel by the gate instead of frozen at start-time availability. Pool
+// CAPACITY does bound k: consumers past baseline+capacity can never claim a
+// slot, so their clones would be dead weight (the static cap only applies
+// in legacy fixed-width mode).
 func TestMorselFragmentWorkers_YieldMode(t *testing.T) {
 	pinWidthYield(t, true)
-	e := NewExecutor(objstore.NewMemStore(), NewLRUCache(1024*1024), nil)
-	e.SetMorselWorkers(4)
-	e.cpuTokens = newCPUTokens(0) // exhausted pool must not narrow k
 	cloneable := []exec.UnaryOperator{exec.NewFilter(func(*batch.RecordBatch, int) bool { return true })}
 	task := distributed.Task{EstimatedBytes: morselMinFragmentBytes}
+	newExec := func(policy, tokens int) *Executor {
+		e := NewExecutor(objstore.NewMemStore(), NewLRUCache(1024*1024), nil)
+		e.SetMorselWorkers(policy)
+		e.cpuTokens = newCPUTokens(tokens)
+		return e
+	}
 
-	k, gate, release := e.morselFragmentWorkers(task, cloneable)
-	if k != 4 {
-		t.Fatalf("k = %d, want policy target 4", k)
-	}
-	if gate == nil {
-		t.Fatal("gate = nil, want a width gate in yield mode")
-	}
-	if got := e.cpuTokens.InUse(); got != 0 {
-		t.Fatalf("tokens taken up front = %d, want 0", got)
-	}
-	release()
+	t.Run("busy pool does not narrow k", func(t *testing.T) {
+		e := newExec(4, 8)
+		if got := e.cpuTokens.TryAcquire(8); got != 8 {
+			t.Fatalf("drained %d tokens, want 8", got)
+		}
+		k, gate, release := e.morselFragmentWorkers(task, cloneable)
+		if k != 4 {
+			t.Fatalf("k = %d, want policy target 4", k)
+		}
+		if gate == nil {
+			t.Fatal("gate = nil, want a width gate in yield mode")
+		}
+		if got := e.cpuTokens.InUse(); got != 8 {
+			t.Fatalf("tokens in use = %d, want 8 (none taken up front)", got)
+		}
+		release()
+	})
+	t.Run("pool capacity bounds k above the legacy cap", func(t *testing.T) {
+		e := newExec(64, 12)
+		k, _, release := e.morselFragmentWorkers(task, cloneable)
+		if k != 13 {
+			t.Fatalf("k = %d, want 13 (baseline + 12 tokens)", k)
+		}
+		release()
+	})
+	t.Run("zero-capacity pool stays serial", func(t *testing.T) {
+		e := newExec(4, 0)
+		k, gate, _ := e.morselFragmentWorkers(task, cloneable)
+		if k != 1 || gate != nil {
+			t.Fatalf("k = %d gate = %v, want serial with nil gate", k, gate)
+		}
+	})
 }
 
 // TestExecuteFragment_MorselParallel_FilterParity runs the same
