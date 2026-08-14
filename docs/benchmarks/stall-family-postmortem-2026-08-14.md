@@ -1,8 +1,13 @@
 # The dispatch-stall family: two mechanisms, found and fixed
 
-**Status:** fixes merged (`10efb1b`, `6b26a15`, `6ea848e`, `c49bf6d`,
-watchdog `20020ab`/`260b883`); SF100 validation arm on `c49bf6d`
-pending. **Date:** 2026-08-14. **Arc:** dispatch-stall specimens 1-8
+**Status: CLOSED.** All fixes merged (`10efb1b`, `6b26a15`, `6ea848e`,
+`c49bf6d`, `5d9746f`; watchdog `20020ab`/`260b883`) and validated:
+run `results/20260814-024313` (bin `c3204b7`, 4 suites) finished with
+**zero firings on all three watchdog signatures** and walls
+R1 268.5 / R2 264.9 / **R3 212.1 / R4 214.2** — later suites faster
+than earlier for the first time in this config's history, steady-state
+~213s vs the pre-arc validated baseline pair of 319.3/378.1.
+**Date:** 2026-08-14. **Arc:** dispatch-stall specimens 1-8
 (2026-08-10 → 08-13) + 11 trap captures (08-13/14).
 
 Every SF100 arm since 2026-08-10 risked wall poisoning from
@@ -121,11 +126,16 @@ pressure. Both heap-pressure gates (plus the long-task sidecar and the
 remain outside the two deliberate isolated sites (30s stats refresher,
 on-demand profile envelope).
 
-## Open items
+## Closure: run `20260814-024313`
 
-1. **Validation arm on `5d9746f`** (benchmark_runs=4): expect ZERO
-   firings on all three signatures. If clean: close the dispatch-stall
-   arc (specimens 1-8 attributed: CPU-hot shape → mechanism 1 incl.
-   the spill-gate storm; silent q22-R2 shape → mechanism 2) and re-run
-   the barrier-overlap eager pair on the new clean-wall baseline
-   (R1 ≈ 249s / R4 ≈ 244s).
+The arm ran clean end to end: zero firings, zero stall files, 88/88
+correct, and the first monotonically *improving* multi-suite profile
+(268.5 / 264.9 / 212.1 / 214.2). Specimens 1-8 stand attributed:
+CPU-hot frozen-spin → the ReadMemStats storms (tracker, forced-GC
+train, spill gates); silent q22-R2 cousins → the journald log jam.
+The new clean-wall baseline for this config is ~265s cold-pair-entry /
+~213s steady-state. Follow-ups that inherit the clean walls: the
+barrier-overlap eager pair re-run, and one operational note — the
+closure arm's coordinator never registered with SSM (run unaffected;
+first occurrence in five deploys; suspect-list: journald restart in
+the new prelude racing agent registration — watch next deploy).
