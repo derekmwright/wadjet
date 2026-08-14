@@ -71,6 +71,15 @@ locals {
   eff_timeout      = var.query_timeout != null ? var.query_timeout : (local.has_profile ? try(local._raw_p.benchmark.query_timeout, "10m") : "10m")
   eff_generate     = var.generate_data != null ? var.generate_data : (local.has_profile ? try(!local._raw_p.benchmark.skip_load, false) : false)
   eff_skip_queries = var.skip_queries != null ? var.skip_queries : (local.has_profile ? try(join(",", [for q in local._raw_p.benchmark.skip_queries : tostring(q)]), "") : "")
+    # Profile-first knobs added 2026-08-14 after the profile/tfvars drift incident:
+  # three arms deployed with -var=profile= silently ran NATS data plane,
+  # unpaced uploads, s2 wire, and no locality placement (the tfvars-only
+  # values), producing the afternoon stall storms. Explicit -var still wins.
+  eff_data_plane     = var.data_plane != null ? var.data_plane : (local.has_profile ? try(local._raw_p.benchmark.data_plane, "") : "")
+  eff_locality       = var.locality_placement != null ? var.locality_placement : (local.has_profile ? try(local._raw_p.benchmark.locality_placement, false) : false)
+  eff_upload_pace    = var.upload_pace_mbps != null ? var.upload_pace_mbps : (local.has_profile ? try(local._raw_p.benchmark.upload_pace_mbps, 0) : 0)
+  eff_exchange_zstd  = var.exchange_zstd != null ? var.exchange_zstd : (local.has_profile ? try(local._raw_p.benchmark.exchange_zstd, 0) : 0)
+  eff_catalog_prefix = var.catalog_snapshot_prefix != null ? var.catalog_snapshot_prefix : (local.has_profile ? try(local._raw_p.benchmark.catalog_snapshot_prefix, "") : "")
   eff_bench_type   = var.benchmark_type != null ? var.benchmark_type : (local.has_profile ? try(local._raw_p.benchmark.type, "tpch") : "tpch")
 
   create_bucket = local.eff_data_bucket == ""
@@ -428,7 +437,7 @@ locals {
     # subjects; "grpc" routes task dispatch + results + gather +
     # TaskProgress over a per-worker bidi gRPC stream on
     # ${var.data_plane_port}.
-    export TPCH_DATA_PLANE="${var.data_plane}"
+    export TPCH_DATA_PLANE="${local.eff_data_plane}"
     export TPCH_DATA_PLANE_ADDR=":${var.data_plane_port}"
     # Streaming exchange (peer shuffle reads + async upload). Coordinator
     # side of the flag; the worker cloud-init adds --streaming-exchange
@@ -449,11 +458,11 @@ locals {
     export WADJET_SHUFFLE_DURABILITY="${var.shuffle_durability}"
     # Input-locality placement (docs/design/locality-placement.md).
     # Coordinator-side only; explicit opt-in pending SF100 validation.
-    export WADJET_LOCALITY_PLACEMENT="${var.locality_placement ? "1" : "0"}"
+    export WADJET_LOCALITY_PLACEMENT="${local.eff_locality ? "1" : "0"}"
     # Catalog snapshot/restore prefix (PR #115). Non-empty = restore the
     # post-discovery catalog from s3://<bucket>/<prefix> instead of paying
     # ~15 min of discovery+ANALYZE per deploy; first boot writes it.
-    export TPCH_CATALOG_SNAPSHOT_PREFIX="${var.catalog_snapshot_prefix}"
+    export TPCH_CATALOG_SNAPSHOT_PREFIX="${local.eff_catalog_prefix}"
     # Force GOGC=100 so heap is bounded by 2x live data instead of growing to
     # GOMEMLIMIT before triggering mark-assist. Without this, scan-3 SF10
     # tasks accumulated parquet-decode garbage to ~10 GB peak heap before
@@ -617,11 +626,11 @@ resource "aws_instance" "worker" {
     export WADJET_MUTEX_PROFILE_FRACTION="${var.mutex_profile_fraction}"
     # Outbound burst smoothing (docs/design/upload-burst-smoothing.md):
     # aggregate background stage-output PUT budget in MB/s. 0 = off.
-    export WADJET_UPLOAD_PACE_MBPS="${var.upload_pace_mbps}"
+    export WADJET_UPLOAD_PACE_MBPS="${local.eff_upload_pace}"
     # WSHZ upload envelope (docs/design/exchange-zstd-wire.md): zstd
     # instead of s2 for S3 stage/shuffle uploads. 1 = on, 0 = off
     # (matches the in-binary default: off).
-    export WADJET_EXCHANGE_ZSTD="${var.exchange_zstd}"
+    export WADJET_EXCHANGE_ZSTD="${local.eff_exchange_zstd}"
 
     # Verify binary was downloaded successfully
     if [ ! -x /usr/local/bin/wadjet ]; then
@@ -920,7 +929,7 @@ resource "aws_instance" "worker" {
             --cache-bytes=$PER_PROC_CACHE \
             --memory-budget=$PER_TASK_BUDGET \
             --shared-pool-budget=$PER_PROC_POOL \
-            %{if var.data_plane == "grpc"~}
+            %{if local.eff_data_plane == "grpc"~}
             --data-plane=grpc \
             --coord-data-plane="$COORD_IP:${var.data_plane_port}" \
             %{endif~}

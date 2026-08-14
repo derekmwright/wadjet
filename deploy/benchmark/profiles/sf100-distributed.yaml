@@ -44,6 +44,22 @@ benchmark:
   runs: 1
   query_timeout: 30m
   skip_load: true
+  # The four knobs below were tfvars-only until 2026-08-14, when three
+  # profile-driven deploys silently ran without them (NATS data plane,
+  # unpaced uploads, s2 wire, no locality) and produced an afternoon of
+  # stall-storm windows — see docs/benchmarks/width-growcap-3arm-2026-08-14.md
+  # §3. Keep profile and sf100-distributed.tfvars in agreement.
+  # gRPC data plane (task dispatch/results/gather); NATS keeps heartbeats
+  # + cancellation + KV. SF100 is where NATS-plane pathologies live.
+  data_plane: grpc
+  # Input-locality task placement (docs/design/locality-placement.md).
+  locality_placement: true
+  # Aggregate background PUT budget, MB/s (upload-burst-smoothing §5;
+  # c7gd.4xlarge ENA baseline ≈ 234 MB/s).
+  upload_pace_mbps: 150
+  # zstd WSHZ upload envelope (exchange-zstd-wire §6): upload bytes −19%,
+  # zero stall firings vs 13 on the same-window s2 arm (2026-08-14 pair).
+  exchange_zstd: 1
   # Restore the post-discovery catalog from s3://<bucket>/catalog/ instead
   # of re-running discovery + ANALYZE every deploy. First deploy with this
   # set pays the full cost once and writes the snapshot; later deploys

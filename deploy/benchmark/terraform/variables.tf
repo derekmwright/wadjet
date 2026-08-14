@@ -149,7 +149,7 @@ variable "bounded_dirty_writes" {
 variable "catalog_snapshot_prefix" {
   description = "S3 prefix (within the data bucket) for catalog snapshots, e.g. 'catalog/'. Non-empty: tpch-bench restores the post-discovery catalog instead of running discovery+ANALYZE (~15 min/deploy), writing a snapshot on the first boot. Empty = disabled. Delete s3://<bucket>/<prefix> after changing table data."
   type        = string
-  default     = ""
+  default     = null # null = profile value, else legacy default ("") — see eff_ locals
 }
 
 variable "workers_per_node" {
@@ -279,7 +279,7 @@ variable "use_native_dag" {
 variable "data_plane" {
   description = "Worker↔coord data-plane transport. Empty or 'nats' uses the legacy NATS reply-subject path; 'grpc' enables the bidi gRPC stream (Phases C+D+E). See project_split_plane_design_2026-05-20."
   type        = string
-  default     = ""
+  default     = null # null = profile value, else legacy default ("") — see eff_ locals
 }
 
 variable "streaming_exchange" {
@@ -297,13 +297,13 @@ variable "eager_dispatch" {
 variable "upload_pace_mbps" {
   description = "WADJET_UPLOAD_PACE_MBPS for workers (docs/design/upload-burst-smoothing.md): aggregate background stage-output PUT budget in MB/s (wire bytes). Smooths completion-wave PUT bursts below the ENA baseline allowance so the clamp stops hitting critical-path peer/NATS traffic. 0 (default) = off; treatment arms start at ~150 (c7gd.4xlarge baseline ≈ 234 MB/s). Sync uploads and demand-released roots always bypass."
   type        = number
-  default     = 0
+  default     = null # null = profile value, else legacy default (0) — see eff_ locals
 }
 
 variable "exchange_zstd" {
   description = "WADJET_EXCHANGE_ZSTD for workers (docs/design/exchange-zstd-wire.md): 1 = compress S3 stage/shuffle uploads with zstd (WSHZ envelope, wire bytes ~-34% vs s2 measured on TPC-H distributions) instead of s2 (WSHC). Consumers decode both regardless of the flag. Default 0 = s2, matching the in-binary default, pending the SF100 A/B."
   type        = number
-  default     = 0
+  default     = null # null = profile value, else legacy default (0) — see eff_ locals
 }
 
 variable "eager_min_tail_seconds" {
@@ -411,7 +411,7 @@ variable "async_scratch_purge" {
 variable "locality_placement" {
   description = "WADJET_LOCALITY_PLACEMENT for the coordinator (docs/design/locality-placement.md): dispatch a task whose peer-location hints all point at one worker onto that worker, converting 1:1 stage-chain reads from peer gRPC streams into same-worker mmaps. Coordinator-side only. Default false pending SF100 validation."
   type        = bool
-  default     = false
+  default     = null # null = profile value, else legacy default (false) — see eff_ locals
 }
 
 variable "peer_exchange_port" {
