@@ -95,3 +95,46 @@ now bounded by the bbdb985 fixes; the trigger remains.
    continues from the zstd-wire arc, s2-correlation retired).
 3. q17 clean-pair verdict decides whether shared-join chain-fusion
    loss needs a chained-agg-aware dedup variant.
+
+## Clean-window re-pair (same night, 22:19 ctl / 22:54 trt — no kills, drag persists)
+
+Arms: ctl aa47b15 → `results/20260814-221930`, trt b32e13b (dedup +
+q11-unlock 6e01351 + corpse fixes bbdb985) → `results/20260814-225424`.
+Runs=4 each, back-to-back, ZERO task failures / re-executions / hangs on
+both arms (the bbdb985 fixes were not exercised — no kills occurred).
+Dedup fired 3 queries × 4 runs in trt (q02 exact, q11 exact
+post-6e01351, q17 semi≡inner).
+
+**Correctness: 88/88 row sets identical across arms — the SF100 gate
+for the dedup PASSES.**
+
+Walls: intra-arm swings up to 5× on identical binary+config (ctl Q08
+7.1↔36.1s across runs; trt Q06 2.0↔47.0s) with zero failures — the
+per-query noise floor exceeds most expected effects. Judgeable signals
+(every-run-dominant only):
+
+- **Q17: every trt run ≤ every ctl run** — cold 24.3→8.5 (−65%), steady
+  runs 31.9/17.9/16.8 → 14.0/17.6/14.1. The dropped 600M decode is
+  visible through the noise. Best trt run (8.5s) beats Trino FTE (11.6).
+- **Q12 and Q20: every trt run < every ctl run** (Q20 median 28→19).
+  Neither dedups; candidate mechanism is the placement change riding
+  bbdb985 (liveness-filtered rr rotation) — unverified, logged.
+- Q02/Q11: inconclusive here (Q02's storm-pair −71% remains the better
+  evidence for Q02; q11 4.3 best-of-arm vs ctl 5.0 — within noise).
+- Q08/Q09/Q18 lean worse in trt but sit inside the 3-5× intra-arm
+  swings — WATCH ITEMS for the next quiet-environment pair, not
+  verdicts.
+
+**OPEN RESIDUAL (sharpened): the no-kill drag.** Both arms' steady
+totals 290-498s vs the same lineage's 187-210 at 12:17 — with zero
+failures, zero re-executions, and only partial stall captures (14/18
+wlog files, no SIGABRT). Whatever inflated tonight's cluster does NOT
+require watchdog kills; the kill storms earlier were its worst
+expression, not its definition. Signature for the hunt: multi-×
+per-query intra-arm swings, broad-based, small queries included, both
+arms equally. Specimens: tonight's four result prefixes + wlogs.
+
+Standing verdict on the dedup: correctness proven at SF100 (this pair)
+and e2e; q17 delivers consistently; no attributable regression. It
+stays on main default-on. Record-book absolute numbers wait for a
+quiet environment AND the drag root cause.
