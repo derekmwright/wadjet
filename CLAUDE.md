@@ -5,8 +5,9 @@ Columnar analytics engine in Go with network-native operations, distributed exec
 ## Build & Test
 
 ```bash
-# Build
-go build -o wadjet ./cmd/wadjet
+# Build — NEVER -o wadjet: wadjet/ is the API package directory, the
+# binary would land inside it (and /wadjet in .gitignore hides it)
+go build -o wadjet-bin ./cmd/wadjet
 
 # Unit tests
 go test ./internal/...

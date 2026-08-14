@@ -15,7 +15,9 @@ This guide walks you through installing Wadjet, creating a table, ingesting data
 ```bash
 git clone https://github.com/citc-tech/wadjet.git
 cd wadjet
-go build -o wadjet ./cmd/wadjet
+# NOTE: -o must not be plain "wadjet" — that's the API package
+# directory, and Go would drop the binary inside it.
+go build -o wadjet-bin ./cmd/wadjet
 ```
 
 ### As a Go Library
@@ -49,7 +51,7 @@ mc mb local/wadjet
 ### Standalone Mode (Single Process)
 
 ```bash
-./wadjet serve \
+./wadjet-bin serve \
   --mode standalone \
   --endpoint localhost:9000 \
   --access-key minioadmin \
@@ -63,7 +65,7 @@ This starts an embedded coordinator and worker in a single process — ideal for
 ### One-Off Query
 
 ```bash
-./wadjet query \
+./wadjet-bin query \
   --endpoint localhost:9000 \
   --access-key minioadmin \
   --secret-key minioadmin \
@@ -76,7 +78,7 @@ Supports `--format` flag: `json` (default), `table`, or `csv`.
 ### Interactive Shell
 
 ```bash
-./wadjet shell \
+./wadjet-bin shell \
   --endpoint localhost:9000 \
   --access-key minioadmin \
   --secret-key minioadmin \
@@ -88,7 +90,7 @@ Supports `--format` flag: `table` (default), `json`, or `csv`.
 ### List Tables
 
 ```bash
-./wadjet tables \
+./wadjet-bin tables \
   --endpoint localhost:9000 \
   --access-key minioadmin \
   --secret-key minioadmin \
