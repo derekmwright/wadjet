@@ -512,74 +512,138 @@ func (d *subplanDeduper) coverageDirection(aID, bID string) (int, bool) {
 	if !walk(aID, bID) {
 		return 0, false
 	}
-	// Collision hazard: the keeper's extra probe columns must not shadow a
-	// build-side output name anywhere in the kept subtree.
-	extras := extraA
-	keepID := aID
+	// Collision hazard, checked per join with keep/drop orientation.
+	keepID, dropID := aID, bID
 	if dir < 0 {
-		extras = extraB
-		keepID = bID
+		keepID, dropID = bID, aID
 	}
-	if len(extras) > 0 && d.buildColsCollide(keepID, extras) {
+	if d.probeExtrasCollide(keepID, dropID) {
 		return 0, false
 	}
 	return dir, true
 }
 
-// buildColsCollide reports whether any of cols appears among the scan
-// columns of a build-side subtree (RightDepStage or FusedJoins builds) of
-// any join in the subtree rooted at id.
-func (d *subplanDeduper) buildColsCollide(id string, cols []string) bool {
-	colset := colSet(cols)
-	var buildScanCols func(string) map[string]bool
-	buildScanCols = func(cur string) map[string]bool {
-		out := make(map[string]bool)
-		i, ok := d.idx[cur]
-		if !ok {
-			return out
+// probeExtrasCollide walks the paired subtrees and reports whether, at any
+// join, the keeper's extra PROBE-side columns (columns its probe subtree's
+// scans read beyond the dropped leg's) collide with a build-side output
+// name. Such a collision flips the join executor's qualify-on-collision
+// naming for that build column — bare in the dropped leg's output,
+// qualified in the keeper's — silently rebinding a rewired consumer's bare
+// reference to the probe column. Extra columns on the BUILD side are
+// harmless: probe names always stay bare, already-colliding build names
+// stay qualified, and new build names are never referenced by the dropped
+// leg's consumers (Q11's SF100 shape — the wider partsupp scan is the
+// join's build input — must dedup).
+func (d *subplanDeduper) probeExtrasCollide(keepID, dropID string) bool {
+	var hazard bool
+	var walk func(kID, dID string)
+	walk = func(kID, dID string) {
+		if hazard {
+			return
 		}
-		s := &d.stages[i]
-		for _, c := range s.Columns {
-			if s.Type == StageScan {
-				out[c] = true
-			}
+		ki, kok := d.idx[kID]
+		di, dok := d.idx[dID]
+		if !kok || !dok {
+			return
 		}
-		for _, dep := range s.Dependencies {
-			for c := range buildScanCols(dep) {
-				out[c] = true
-			}
-		}
-		return out
-	}
-	var walk func(string) bool
-	walk = func(cur string) bool {
-		i, ok := d.idx[cur]
-		if !ok {
-			return false
-		}
-		s := &d.stages[i]
-		var builds []string
-		if s.RightDepStage != "" {
-			builds = append(builds, s.RightDepStage)
-		}
-		for _, fj := range s.FusedJoins {
-			builds = append(builds, fj.BuildDepStage)
-		}
-		for _, bdep := range builds {
-			for c := range buildScanCols(bdep) {
-				if colset[c] {
-					return true
+		k, dd := &d.stages[ki], &d.stages[di]
+		if k.LeftDepStage != "" {
+			// Paired probe subtrees: same dep slot on both sides.
+			kSlot, dSlot := depSlot(k, k.LeftDepStage), depSlot(dd, dd.LeftDepStage)
+			if kSlot >= 0 && dSlot >= 0 {
+				extras := d.pairExtraCols(k.Dependencies[kSlot], dd.Dependencies[dSlot])
+				if len(extras) > 0 {
+					var builds []string
+					if k.RightDepStage != "" {
+						builds = append(builds, k.RightDepStage)
+					}
+					for _, fj := range k.FusedJoins {
+						builds = append(builds, fj.BuildDepStage)
+					}
+					for _, b := range builds {
+						bCols := d.subtreeScanCols(b)
+						for c := range extras {
+							if bCols[c] {
+								hazard = true
+								return
+							}
+						}
+					}
 				}
 			}
 		}
-		for _, dep := range s.Dependencies {
-			if walk(dep) {
-				return true
+		if len(k.Dependencies) == len(dd.Dependencies) {
+			for i := range k.Dependencies {
+				walk(k.Dependencies[i], dd.Dependencies[i])
 			}
 		}
-		return false
 	}
-	return walk(id)
+	walk(keepID, dropID)
+	return hazard
+}
+
+func depSlot(s *Stage, dep string) int {
+	for i, dd := range s.Dependencies {
+		if dd == dep {
+			return i
+		}
+	}
+	return -1
+}
+
+// pairExtraCols returns the scan columns the keeper-side subtree reads
+// beyond the dropped-side subtree, walking the fingerprint-matched pairs
+// in lockstep.
+func (d *subplanDeduper) pairExtraCols(kID, dID string) map[string]bool {
+	extras := make(map[string]bool)
+	var walk func(kID, dID string)
+	walk = func(kID, dID string) {
+		ki, kok := d.idx[kID]
+		di, dok := d.idx[dID]
+		if !kok || !dok {
+			return
+		}
+		k, dd := &d.stages[ki], &d.stages[di]
+		if k.Type == StageScan {
+			dCols := colSet(dd.Columns)
+			for _, c := range k.Columns {
+				if !dCols[c] {
+					extras[c] = true
+				}
+			}
+			return
+		}
+		if len(k.Dependencies) == len(dd.Dependencies) {
+			for i := range k.Dependencies {
+				walk(k.Dependencies[i], dd.Dependencies[i])
+			}
+		}
+	}
+	walk(kID, dID)
+	return extras
+}
+
+// subtreeScanCols unions the scan columns under id.
+func (d *subplanDeduper) subtreeScanCols(id string) map[string]bool {
+	out := make(map[string]bool)
+	var walk func(string)
+	walk = func(cur string) {
+		i, ok := d.idx[cur]
+		if !ok {
+			return
+		}
+		s := &d.stages[i]
+		if s.Type == StageScan {
+			for _, c := range s.Columns {
+				out[c] = true
+			}
+		}
+		for _, dep := range s.Dependencies {
+			walk(dep)
+		}
+	}
+	walk(id)
+	return out
 }
 
 // semiConsumerDuplicationInvariant reports whether consumer c's result is

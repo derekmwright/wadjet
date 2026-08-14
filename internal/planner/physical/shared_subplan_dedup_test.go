@@ -215,6 +215,70 @@ func TestSharedSubplanDedup_HandBuiltPairCollapses(t *testing.T) {
 	}
 }
 
+// Extra keeper columns on the BUILD side must not block dedup — the SF100
+// Q11 shape: the wider partsupp scan is the hash join's build input; build-
+// side extras never rebind a dropped-leg consumer's references. (The
+// 2026-08-14 SF100 pair caught the original global-extras check skipping
+// exactly this.)
+func TestSharedSubplanDedup_BuildSideExtraColsDedup(t *testing.T) {
+	mk := func(sfx string, partsuppCols []string) []Stage {
+		return []Stage{
+			{ID: "supscan" + sfx, Type: StageScan, TableName: "supplier", Columns: []string{"s_suppkey", "s_nationkey"}, Tasks: 2},
+			{ID: "psscan" + sfx, Type: StageScan, TableName: "partsupp", Columns: partsuppCols, Tasks: 4},
+			{ID: "rpL" + sfx, Type: StageExchangeRepartition, Dependencies: []string{"supscan" + sfx},
+				Exchange: &ExchangeStage{Keys: []string{"s_suppkey"}, Count: 8}, Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"s_suppkey"}, Count: 8}},
+			{ID: "rpR" + sfx, Type: StageExchangeRepartition, Dependencies: []string{"psscan" + sfx},
+				Exchange: &ExchangeStage{Keys: []string{"ps_suppkey"}, Count: 8}, Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"ps_suppkey"}, Count: 8}},
+			{ID: "join" + sfx, Type: StageHashJoin, JoinType: "inner",
+				JoinLeftKeys: []string{"s_suppkey"}, JoinRightKeys: []string{"ps_suppkey"},
+				Dependencies: []string{"rpL" + sfx, "rpR" + sfx},
+				LeftDepStage: "rpL" + sfx, RightDepStage: "rpR" + sfx,
+				JoinPartitionCount: 8, Tasks: 8},
+		}
+	}
+	// Main leg's partsupp (build side) reads ps_partkey extra — superset.
+	stages := append(mk("1", []string{"ps_suppkey", "ps_supplycost", "ps_partkey"}),
+		mk("2", []string{"ps_suppkey", "ps_supplycost"})...)
+	stages = append(stages,
+		Stage{ID: "agg1", Type: StageAggregate, GroupByCols: []string{"ps_partkey"}, AggSpecs: []AggSpec{{Func: "sum", InputCol: "ps_supplycost", OutputCol: "v"}}, Dependencies: []string{"join1"}},
+		Stage{ID: "agg2", Type: StageAggregate, AggSpecs: []AggSpec{{Func: "sum", InputCol: "ps_supplycost", OutputCol: "t"}}, Dependencies: []string{"join2"}},
+	)
+	out := dedupeSharedSubplans(stages)
+	if len(out) != 7 {
+		t.Fatalf("got %d stages, want 7 (join2 leg dropped; build-side extra must not block)", len(out))
+	}
+	agg2 := stagesByID(out)["agg2"]
+	if len(agg2.Dependencies) != 1 || agg2.Dependencies[0] != "join1" {
+		t.Errorf("agg2 deps=%v, want [join1]", agg2.Dependencies)
+	}
+}
+
+// Extra keeper columns on the PROBE side that collide with a build output
+// name MUST still block dedup — the qualification flip would rebind the
+// rewired consumer's bare reference.
+func TestSharedSubplanDedup_ProbeExtraCollisionSkips(t *testing.T) {
+	mk := func(sfx string, probeCols []string) []Stage {
+		return []Stage{
+			{ID: "probe" + sfx, Type: StageScan, TableName: "t", Columns: probeCols, Tasks: 2},
+			{ID: "build" + sfx, Type: StageScan, TableName: "u", Columns: []string{"k", "shared_name"}, Tasks: 1},
+			{ID: "join" + sfx, Type: StageBroadcastJoin, JoinType: "inner",
+				JoinLeftKeys: []string{"k"}, JoinRightKeys: []string{"k"},
+				Dependencies: []string{"probe" + sfx, "build" + sfx},
+				LeftDepStage: "probe" + sfx, RightDepStage: "build" + sfx, Tasks: 2},
+		}
+	}
+	// Keeper probe reads "shared_name" extra — collides with build's column.
+	stages := append(mk("1", []string{"k", "v", "shared_name"}), mk("2", []string{"k", "v"})...)
+	stages = append(stages,
+		Stage{ID: "agg1", Type: StageAggregate, Dependencies: []string{"join1"}},
+		Stage{ID: "agg2", Type: StageAggregate, Dependencies: []string{"join2"}},
+	)
+	out := dedupeSharedSubplans(stages)
+	if len(out) != len(stages) {
+		t.Fatalf("probe-extra collision pair collapsed: %d stages, want %d", len(out), len(stages))
+	}
+}
+
 // When neither leg's scan columns cover the other's, the pair must be left
 // alone (v1 has no union-columns merge).
 func TestSharedSubplanDedup_IncomparableColumnsSkipped(t *testing.T) {
