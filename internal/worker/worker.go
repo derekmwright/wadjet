@@ -150,6 +150,32 @@ type Config struct {
 // steady-regime GC-tax hypothesis.
 var taskGCDisabled = os.Getenv("WADJET_TASK_GC") == "0"
 
+// forcedGCMinGap coalesces the per-task forced GCs. Stage drains complete
+// many tasks in a burst (STW-fix validation run 2026-08-14, results/
+// 20260814-*: 40 task completions in the firing minute) and each
+// join/agg/sort/window completion forced a synchronous runtime.GC — a
+// stop-the-world train in which every GC after the first collects almost
+// nothing. Under writeback pressure the stretched STWs produced the
+// residual frozen-spin firings after the ReadMemStats storm fix
+// (10efb1b). One forced GC per gap preserves the discipline's purpose
+// (heap released between memory-intensive tasks; see the shouldGC comment
+// above) at burst-safe cost.
+const forcedGCMinGap = 2 * time.Second
+
+// lastForcedGCNano is the unix-nano time of the last per-task forced GC.
+var lastForcedGCNano atomic.Int64
+
+// claimForcedGCSlot returns true if the caller should run a forced GC:
+// at most one claim per minGap, decided by CAS so concurrent task
+// completions cannot double-claim.
+func claimForcedGCSlot(last *atomic.Int64, now time.Time, minGap time.Duration) bool {
+	prev := last.Load()
+	if now.UnixNano()-prev < int64(minGap) {
+		return false
+	}
+	return last.CompareAndSwap(prev, now.UnixNano())
+}
+
 func DefaultConfig() Config {
 	return Config{
 		MaxConcurrent:    4,
@@ -1842,7 +1868,7 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 			shouldGC = true
 		}
 	}
-	if shouldGC && !taskGCDisabled {
+	if shouldGC && !taskGCDisabled && claimForcedGCSlot(&lastForcedGCNano, time.Now(), forcedGCMinGap) {
 		runtime.GC()
 	}
 

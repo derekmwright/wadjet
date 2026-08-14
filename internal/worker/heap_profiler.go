@@ -7,12 +7,41 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	runtimemetrics "runtime/metrics"
 	"runtime/pprof"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 )
+
+// heapStats is an STW-free snapshot of the MemStats-equivalent heap
+// gauges, read via runtime/metrics: alloc==HeapAlloc, inuse==HeapInuse,
+// idle==HeapIdle, sys==HeapSys, gcCycles==NumGC.
+type heapStats struct {
+	alloc, inuse, idle, sys uint64
+	gcCycles                uint64
+}
+
+func heapProfilerStats() heapStats {
+	s := []runtimemetrics.Sample{
+		{Name: "/memory/classes/heap/objects:bytes"},
+		{Name: "/memory/classes/heap/unused:bytes"},
+		{Name: "/memory/classes/heap/free:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+		{Name: "/gc/cycles/total:gc-cycles"},
+	}
+	runtimemetrics.Read(s)
+	objects, unused := s[0].Value.Uint64(), s[1].Value.Uint64()
+	free, released := s[2].Value.Uint64(), s[3].Value.Uint64()
+	return heapStats{
+		alloc:    objects,
+		inuse:    objects + unused,
+		idle:     free + released,
+		sys:      objects + unused + free + released,
+		gcCycles: s[4].Value.Uint64(),
+	}
+}
 
 // longTaskWatchAt is how long a task may run before the watcher fires a
 // one-shot snapshot (goroutine stacks + heap + sidecar). 5 min is well
@@ -117,13 +146,15 @@ func (w *Worker) writeHeapPressureProfile(dir string) error {
 	}
 	w.activeTasksMu.RUnlock()
 
-	var msBefore runtime.MemStats
-	runtime.ReadMemStats(&msBefore)
+	// STW-free heap stats (see taskPeakHeapTracker doc comment): the
+	// sidecar numbers ride runtime/metrics; the runtime.GC stays because
+	// pprof's live-heap profile is only accurate post-collection, and the
+	// 30s rate limit bounds its cost.
+	allocBefore := heapProfilerStats().alloc
 
 	runtime.GC()
 
-	var msAfter runtime.MemStats
-	runtime.ReadMemStats(&msAfter)
+	after := heapProfilerStats()
 
 	f, err := os.Create(profilePath)
 	if err != nil {
@@ -159,12 +190,12 @@ func (w *Worker) writeHeapPressureProfile(dir string) error {
 		w.config.WorkerID,
 		ts,
 		time.UnixMilli(ts).UTC().Format(time.RFC3339Nano),
-		msBefore.HeapAlloc/1024/1024,
-		msAfter.HeapAlloc/1024/1024,
-		msAfter.HeapSys/1024/1024,
-		msAfter.HeapIdle/1024/1024,
-		msAfter.HeapInuse/1024/1024,
-		msAfter.NumGC,
+		allocBefore/1024/1024,
+		after.alloc/1024/1024,
+		after.sys/1024/1024,
+		after.idle/1024/1024,
+		after.inuse/1024/1024,
+		after.gcCycles,
 		len(activeIDs),
 		activeIDs,
 	)
@@ -177,8 +208,8 @@ func (w *Worker) writeHeapPressureProfile(dir string) error {
 
 	w.logger.Info("heap pressure profile written",
 		"path", profilePath,
-		"heap_alloc_before_gc_mb", msBefore.HeapAlloc/1024/1024,
-		"heap_alloc_after_gc_mb", msAfter.HeapAlloc/1024/1024,
+		"heap_alloc_before_gc_mb", allocBefore/1024/1024,
+		"heap_alloc_after_gc_mb", after.alloc/1024/1024,
 		"active_tasks", len(activeIDs))
 	return nil
 }
