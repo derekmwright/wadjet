@@ -698,8 +698,17 @@ resource "aws_instance" "worker" {
             else
               logger -t stall-watchdog "pprof grab failed (fully wedged) - relying on SIGABRT dump"
             fi
-            logger -t stall-watchdog "sending SIGABRT"
-            kill -ABRT "$pid"
+            # Recovery grace (2026-08-13 creep run, 6 firings): short
+            # episodes (~5s freeze) are often OVER by the time the ~3s
+            # capture finishes — the SIGABRT then kills a recovered
+            # worker for nothing. Evidence is already on disk at this
+            # point; only kill if the port is still dead.
+            if curl -s --max-time 2 "http://127.0.0.1:9100/debug/pprof/cmdline" -o /dev/null; then
+              logger -t stall-watchdog "port recovered post-capture - skipping SIGABRT (evidence kept)"
+            else
+              logger -t stall-watchdog "sending SIGABRT"
+              kill -ABRT "$pid"
+            fi
             unset "lastok[$pid]" "lastut[$pid]"
             sleep 5
           fi
