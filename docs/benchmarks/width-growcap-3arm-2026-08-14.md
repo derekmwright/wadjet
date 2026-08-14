@@ -51,7 +51,48 @@ Candidate: per-consumer partition pre-accumulation. Also effective
 width plateaus at ~10 of 15 admitted — width_wait/yield telemetry
 would say whether tokens or the dispenser pace it.
 
-## 3. Ambient run-2 disturbances (ALL arms, control included)
+## 3. Run-2 disturbances — ROOT-CAUSED same evening (config drift, fixed 085a6ce)
+
+**Post-analysis verdict (corpus forensics over all arms' wlogs + dumps
+vs the clean morning window):** the "ambient" disturbances were
+self-inflicted. All three arms deployed via `-var=profile=` which did
+NOT carry five tfvars-only knobs — the arms ran the legacy **NATS data
+plane**, **unpaced uploads**, **s2 wire** (not zstd), no locality
+placement, no catalog restore. The morning window was a tfvars deploy
+(gRPC etc.) on the same binary: zero firings, walls −46%.
+
+Mechanism chain (18 frozen-spin firings, 5 SIGABRT kills, none in the
+morning): synchronized query-boundary bursts (shuffle completion waves
++ 24-way unpaced upload fan-outs + scratch purge + next scan wave)
+push heaps to 15.8–19.3 GB against the 13.8 GB GOMEMLIMIT (GOGC=off →
+GC only runs at the limit) → single GC pauses of 2–12s (worst 30s
+window: 14.3s of pause) → watchdog's 4s port-dead threshold fires →
+SIGABRT on the >15s tail. The triple simultaneous freeze across all
+three control workers at 14:52:18–27 (a query boundary) rules out
+per-instance environmental noise. Zero gcAssistAlloc / ReadMemStats /
+journald-jam signatures — the closed stall family's mechanisms did NOT
+recur; this was config-drift-induced GC-STW stretch.
+
+Kill amplification: a SIGABRT'd worker loses its deferred (lazy
+durability) shuffle outputs → consumers hit "no durable copy" → 3
+retries exhaust in ~60s → "task failed terminally" → the query then
+waits for **NATS JetStream redelivery at ~600s ack-wait** (kill
+15:01:10 → redelivery 15:11:06) — that is the 10–12-minute wreck
+anatomy (control Q18 11m52, treatment Q03 10m50). ENGINE FOLLOW-UPS
+regardless of config: (a) terminal task failure should trigger
+immediate stage re-dispatch, not sit out the ack-wait; (b) watchdog
+capture tail should record /proc/pressure/* + meminfo + /gc/pauses;
+(c) restart-surviving stage outputs (or eager-upload-on-drain before
+SIGABRT); (d) the GC-STW burst class at query boundaries is real at
+memory-limit heaps even on the right config — worth a boundary-heap
+headroom look.
+
+IMPLICATION for §1/§4 numbers: all three arms ran the handicapped
+config uniformly, so the cross-arm deltas stand, but absolute walls
+are understated vs the canonical config — the clean-window headline
+pair (main vs pre-arc, gRPC config) will supersede them.
+
+## 3b. Original same-evening notes (superseded by §3 above)
 
 Two distinct classes wrecked every arm's steady pass in this window
 (control worst: q04 2m20, q08 1m40, q18 11m52, q20 2m24):
