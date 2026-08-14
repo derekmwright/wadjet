@@ -300,6 +300,12 @@ variable "upload_pace_mbps" {
   default     = 0
 }
 
+variable "exchange_zstd" {
+  description = "WADJET_EXCHANGE_ZSTD for workers (docs/design/exchange-zstd-wire.md): 1 = compress S3 stage/shuffle uploads with zstd (WSHZ envelope, wire bytes ~-34% vs s2 measured on TPC-H distributions) instead of s2 (WSHC). Consumers decode both regardless of the flag. Default 0 = s2, matching the in-binary default, pending the SF100 A/B."
+  type        = number
+  default     = 0
+}
+
 variable "eager_min_tail_seconds" {
   description = "WADJET_EAGER_MIN_TAIL_SECONDS for the coordinator: projected-tail clearance floor for eager dispatch (eager-consumer-dispatch.md §11/§16). Default matches the in-binary default (1, recalibrated 2026-08-13 from the measured post-collapse-fix tail distribution — 12 and 3 are inert on the current config). Inert when eager_dispatch=false."
   type        = number

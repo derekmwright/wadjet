@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
@@ -724,39 +725,111 @@ func isShuffleFormat(data []byte) bool {
 	if len(data) < 4 {
 		return false
 	}
-	return (data[0] == shuffleMagic[0] && data[1] == shuffleMagic[1] &&
-		data[2] == shuffleMagic[2] && data[3] == shuffleMagic[3]) ||
-		(data[0] == compressedMagic[0] && data[1] == compressedMagic[1] &&
-			data[2] == compressedMagic[2] && data[3] == compressedMagic[3])
+	_, ok := codecForMagic([4]byte{data[0], data[1], data[2], data[3]})
+	return ok
 }
 
-// compressedMagic identifies a compressed WSHF payload.
+// compressedMagic identifies an s2-compressed WSHF payload.
 var compressedMagic = [4]byte{'W', 'S', 'H', 'C'}
 
-// CompressShuffleData compresses raw WSHF data using S2 streaming format.
-// Returns data with "WSHC" magic prefix followed by the S2 stream.
-// Uses streaming (not block) format to support arbitrarily large payloads.
-// If the compressed output is not smaller, the original WSHF data is returned.
+// zstdMagic identifies a zstd-compressed WSHF payload (WSHZ envelope,
+// docs/design/exchange-zstd-wire.md). Chosen for S3 uploads when
+// WADJET_EXCHANGE_ZSTD=1; peer-wire compress-on-serve stays s2 and disk
+// stays raw WSHF, so WSHZ appears only on S3-uploaded objects.
+var zstdMagic = [4]byte{'W', 'S', 'H', 'Z'}
+
+// shuffleCodec identifies the envelope around a WSHF payload.
+type shuffleCodec uint8
+
+const (
+	codecNone shuffleCodec = iota // plain WSHF
+	codecS2                       // WSHC: s2 stream of the WSHF bytes
+	codecZstd                     // WSHZ: zstd stream of the WSHF bytes
+)
+
+// codecForMagic maps a 4-byte magic to its codec. ok=false means the
+// payload is not a shuffle format at all (e.g. parquet).
+func codecForMagic(magic [4]byte) (shuffleCodec, bool) {
+	switch magic {
+	case shuffleMagic:
+		return codecNone, true
+	case compressedMagic:
+		return codecS2, true
+	case zstdMagic:
+		return codecZstd, true
+	}
+	return codecNone, false
+}
+
+// exchangeZstd selects the WSHZ (zstd) envelope instead of WSHC (s2) for
+// S3 stage/shuffle uploads. Default off pending the SF100 A/B
+// (docs/design/exchange-zstd-wire.md §5); every consumer decodes both
+// regardless, so flipping the flag never strands data.
+var exchangeZstd = os.Getenv("WADJET_EXCHANGE_ZSTD") == "1"
+
+// uploadCodec returns the envelope for S3-bound compression and its magic.
+func uploadCodec() (shuffleCodec, [4]byte) {
+	if exchangeZstd {
+		return codecZstd, zstdMagic
+	}
+	return codecS2, compressedMagic
+}
+
+// WSHZ engagement counters (greppable in the periodic "shuffle io stats"
+// line as wshz_files/wshz_bytes): the A/B judge protocol requires proof
+// the treatment arm actually produced zstd envelopes.
+var (
+	wshzFiles atomic.Int64
+	wshzBytes atomic.Int64
+)
+
+// WSHZStats reports how many uploads chose the WSHZ envelope and their
+// total compressed bytes.
+func WSHZStats() (files, bytes int64) {
+	return wshzFiles.Load(), wshzBytes.Load()
+}
+
+func noteWSHZ(compressedLen int64) {
+	wshzFiles.Add(1)
+	wshzBytes.Add(compressedLen)
+}
+
+// CompressShuffleData compresses raw WSHF data into the upload envelope:
+// "WSHC" + s2 stream by default, "WSHZ" + zstd stream under
+// WADJET_EXCHANGE_ZSTD=1. Uses streaming (not block) format to support
+// arbitrarily large payloads. If the compressed output is not smaller,
+// the original WSHF data is returned.
 func CompressShuffleData(data []byte) []byte {
 	if len(data) < 64 {
 		return data // too small to benefit
 	}
+	codec, magic := uploadCodec()
 	var buf bytes.Buffer
 	buf.Grow(len(data)/2 + 4)
-	buf.Write(compressedMagic[:])
-	w := acquireS2Writer(&buf)
-	if _, err := w.Write(data); err != nil {
+	buf.Write(magic[:])
+	var werr error
+	if codec == codecZstd {
+		w := acquireZstdWriter(&buf)
+		if _, werr = w.Write(data); werr == nil {
+			werr = w.Close()
+		}
+		releaseZstdWriter(w)
+	} else {
+		w := acquireS2Writer(&buf)
+		if _, werr = w.Write(data); werr == nil {
+			werr = w.Close()
+		}
 		releaseS2Writer(w)
+	}
+	if werr != nil {
 		return data
 	}
-	if err := w.Close(); err != nil {
-		releaseS2Writer(w)
-		return data
-	}
-	releaseS2Writer(w)
 	// Only use compression if it saves at least 10%
 	if buf.Len() >= len(data)*9/10 {
 		return data
+	}
+	if codec == codecZstd {
+		noteWSHZ(int64(buf.Len()))
 	}
 	return buf.Bytes()
 }
@@ -798,27 +871,37 @@ func compressShuffleStream(src io.Reader, srcSize int64, dstPath string) (compre
 		return srcSize, false, nil
 	}
 
+	codec, magic := uploadCodec()
 	dst, err := os.Create(dstPath)
 	if err != nil {
 		return 0, false, fmt.Errorf("create shuffle compressed temp: %w", err)
 	}
-	if _, err := dst.Write(compressedMagic[:]); err != nil {
+	if _, err := dst.Write(magic[:]); err != nil {
 		dst.Close()
-		return 0, false, fmt.Errorf("write WSHC magic: %w", err)
+		return 0, false, fmt.Errorf("write %s magic: %w", magic[:], err)
 	}
-	w := acquireS2Writer(dst)
-	if _, err := io.Copy(w, src); err != nil {
-		w.Close()
+	var cerr error
+	if codec == codecZstd {
+		w := acquireZstdWriter(dst)
+		if _, cerr = io.Copy(w, src); cerr == nil {
+			cerr = w.Close()
+		} else {
+			w.Close()
+		}
+		releaseZstdWriter(w)
+	} else {
+		w := acquireS2Writer(dst)
+		if _, cerr = io.Copy(w, src); cerr == nil {
+			cerr = w.Close()
+		} else {
+			w.Close()
+		}
 		releaseS2Writer(w)
-		dst.Close()
-		return 0, false, fmt.Errorf("s2 stream copy: %w", err)
 	}
-	if err := w.Close(); err != nil {
-		releaseS2Writer(w)
+	if cerr != nil {
 		dst.Close()
-		return 0, false, fmt.Errorf("s2 close: %w", err)
+		return 0, false, fmt.Errorf("%s stream copy: %w", magic[:], cerr)
 	}
-	releaseS2Writer(w)
 	outInfo, err := dst.Stat()
 	if err != nil {
 		dst.Close()
@@ -834,15 +917,31 @@ func compressShuffleStream(src io.Reader, srcSize int64, dstPath string) (compre
 		// upload the uncompressed source and drop the compressed temp.
 		return compressedSize, false, nil
 	}
+	if codec == codecZstd {
+		noteWSHZ(compressedSize)
+	}
 	return compressedSize, true, nil
 }
 
-// streamDecompressShuffle reads the s2 body that follows a WSHC magic header
-// from src and writes the decompressed bytes to dst. The caller is responsible
-// for writing the WSHF magic header to dst beforehand if needed. This is used
-// by the build-cache stream source to transcode WSHC payloads to WSHF on disk
-// without first materializing the entire compressed body in memory.
-func streamDecompressShuffle(src io.Reader, dst io.Writer) error {
+// streamDecompressShuffle reads the compressed body that follows a
+// WSHC/WSHZ magic header from src and writes the decompressed bytes to
+// dst. codec names the envelope (the caller sniffed the magic). The
+// caller is responsible for writing the WSHF magic header to dst
+// beforehand if needed. This is used by the build-cache stream source to
+// transcode compressed payloads to WSHF on disk without first
+// materializing the entire compressed body in memory.
+func streamDecompressShuffle(src io.Reader, dst io.Writer, codec shuffleCodec) error {
+	if codec == codecZstd {
+		r, err := acquireZstdReader(src)
+		if err != nil {
+			return fmt.Errorf("attaching zstd decoder: %w", err)
+		}
+		defer releaseZstdReader(r)
+		if _, err := io.Copy(dst, r); err != nil {
+			return fmt.Errorf("decompressing shuffle stream (zstd): %w", err)
+		}
+		return nil
+	}
 	r := acquireS2Reader(src)
 	defer releaseS2Reader(r)
 	if _, err := io.Copy(dst, r); err != nil {
@@ -851,21 +950,21 @@ func streamDecompressShuffle(src io.Reader, dst io.Writer) error {
 	return nil
 }
 
-// DecompressShuffleData detects and decompresses a WSHC payload back to raw WSHF.
-// If the data is already plain WSHF (or non-shuffle), it is returned unchanged.
+// DecompressShuffleData detects and decompresses a WSHC or WSHZ payload
+// back to raw WSHF. If the data is already plain WSHF (or non-shuffle),
+// it is returned unchanged.
 func DecompressShuffleData(data []byte) ([]byte, error) {
 	if len(data) < 4 {
 		return data, nil
 	}
-	if data[0] != compressedMagic[0] || data[1] != compressedMagic[1] ||
-		data[2] != compressedMagic[2] || data[3] != compressedMagic[3] {
-		return data, nil // not compressed
+	codec, ok := codecForMagic([4]byte{data[0], data[1], data[2], data[3]})
+	if !ok || codec == codecNone {
+		return data, nil // plain WSHF or not compressed shuffle data
 	}
-	r := acquireS2Reader(bytes.NewReader(data[4:]))
-	defer releaseS2Reader(r)
-	decoded, err := io.ReadAll(r)
-	if err != nil {
+	var buf bytes.Buffer
+	buf.Grow(len(data) * 2)
+	if err := streamDecompressShuffle(bytes.NewReader(data[4:]), &buf, codec); err != nil {
 		return nil, fmt.Errorf("decompressing shuffle data: %w", err)
 	}
-	return decoded, nil
+	return buf.Bytes(), nil
 }

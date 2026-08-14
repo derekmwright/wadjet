@@ -513,10 +513,9 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 			if len(data) >= 4 {
 				magic := [4]byte{data[0], data[1], data[2], data[3]}
 				kvMagic = string(magic[:])
-				wshf := magic == shuffleMagic
-				wshc := magic == compressedMagic
-				if wshf || wshc {
-					if err := s.openShuffleInMemory(filePath, magic[:], bytes.NewReader(data[4:]), wshc); err != nil {
+				codec, isShuffle := codecForMagic(magic)
+				if isShuffle {
+					if err := s.openShuffleInMemory(filePath, magic[:], bytes.NewReader(data[4:]), codec); err != nil {
 						return err
 					}
 					s.executor.shuffleIO.kvFiles.Add(1)
@@ -594,10 +593,9 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 		return fmt.Errorf("reading magic from %s: %w", filePath, err)
 	}
 
-	wshf := magic == shuffleMagic
-	wshc := magic == compressedMagic
+	codec, isShuffle := codecForMagic(magic)
 
-	if wshf || wshc {
+	if isShuffle {
 		// Per-tier ledger: whatever consumes rc past this point drains the
 		// durable-S3 copy, so the counting wrapper records exactly the wire
 		// bytes moved (WSHC stays compressed through it). The 4 magic bytes
@@ -609,7 +607,7 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 		// has partially consumed rc — re-resolve the durable copy for the
 		// staged path rather than reusing the stream.
 		if s.executor.streamingShuffleRead {
-			if err := s.openShuffleStreaming(ctx, filePath, crc, wshc); err == nil {
+			if err := s.openShuffleStreaming(ctx, filePath, crc, codec); err == nil {
 				s.executor.shuffleIO.s3Files.Add(1)
 				rcOwnedByReader = true
 				return nil
@@ -619,7 +617,7 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 			}
 			return s.openShuffleStagedFromStore(ctx, filePath)
 		}
-		if err := s.openShuffleFile(ctx, filePath, magic[:], crc, wshc); err != nil {
+		if err := s.openShuffleFile(ctx, filePath, magic[:], crc, codec); err != nil {
 			return err
 		}
 		s.executor.shuffleIO.s3Files.Add(1)
@@ -737,16 +735,17 @@ func (c *countingReadCloser) Read(b []byte) (int, error) {
 
 func (c *countingReadCloser) Close() error { return c.rc.Close() }
 
-// openShuffleStreaming decodes a WSHF/WSHC body directly from rc
+// openShuffleStreaming decodes a WSHF/WSHC/WSHZ body directly from rc
 // (--streaming-shuffle-read, memo §3 D1). rc must be positioned after the
-// outer 4-byte magic. On success the reader owns rc; on error the caller
-// still owns it — but note rc has been partially consumed either way, so
-// a failed streaming open must re-resolve the object, not reuse rc.
-func (s *cachedFileStreamSource) openShuffleStreaming(ctx context.Context, srcPath string, rc io.ReadCloser, compressed bool) error {
+// outer 4-byte magic; codec names the sniffed envelope. On success the
+// reader owns rc; on error the caller still owns it — but note rc has
+// been partially consumed either way, so a failed streaming open must
+// re-resolve the object, not reuse rc.
+func (s *cachedFileStreamSource) openShuffleStreaming(ctx context.Context, srcPath string, rc io.ReadCloser, codec shuffleCodec) error {
 	if rep := exec.ProgressReporterFromContext(ctx); rep != nil {
 		rc = &progressReadCloser{rc: rc, rep: rep}
 	}
-	r, err := newStreamingShuffleReader(rc, compressed)
+	r, err := newStreamingShuffleReader(rc, codec)
 	if err != nil {
 		return err
 	}
@@ -784,12 +783,11 @@ func (s *cachedFileStreamSource) openShuffleStagedFromStore(ctx context.Context,
 	if _, err := io.ReadFull(crc, magic[:]); err != nil {
 		return fmt.Errorf("reading magic from durable copy of %s: %w", srcPath, err)
 	}
-	wshf := magic == shuffleMagic
-	wshc := magic == compressedMagic
-	if !wshf && !wshc {
+	codec, isShuffle := codecForMagic(magic)
+	if !isShuffle {
 		return fmt.Errorf("durable copy of %s is not a shuffle payload (magic %q)", srcPath, magic[:])
 	}
-	if err := s.openShuffleFile(ctx, srcPath, magic[:], crc, wshc); err != nil {
+	if err := s.openShuffleFile(ctx, srcPath, magic[:], crc, codec); err != nil {
 		return err
 	}
 	s.executor.shuffleIO.s3Files.Add(1)
@@ -1361,13 +1359,13 @@ func (d *decodeAheadStatsIter) Close() error {
 // load — without it, a multi-GB load can run for minutes with no per-task
 // progress, and the coord's stale-worker reap fires on an instance that's
 // making real I/O progress.
-func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath string, magic []byte, rc io.Reader, compressed bool) error {
+func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath string, magic []byte, rc io.Reader, codec shuffleCodec) error {
 	spillDir := s.executor.spillDir
 	if spillDir == "" {
 		// Fall back to the in-memory path if no NVMe spill is available.
 		// This is primarily a test-environment safety net; production
 		// workers always have a spill dir.
-		return s.openShuffleInMemory(srcPath, magic, rc, compressed)
+		return s.openShuffleInMemory(srcPath, magic, rc, codec)
 	}
 	if err := os.MkdirAll(spillDir, 0o755); err != nil {
 		return fmt.Errorf("creating spill dir: %w", err)
@@ -1389,11 +1387,12 @@ func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath st
 	}()
 
 	// The local file must hold a plain-WSHF stream because the chunk reader
-	// only knows the WSHF magic. For a compressed (WSHC) input the s2 stream
-	// already encodes the original WSHF body — including its own WSHF magic
-	// — so we write nothing yet and let streamDecompressShuffle below produce
-	// the entire WSHF stream. For a plain (WSHF) input we re-prepend the
-	// magic that we already consumed from rc.
+	// only knows the WSHF magic. For a compressed (WSHC/WSHZ) input the
+	// codec stream already encodes the original WSHF body — including its
+	// own WSHF magic — so we write nothing yet and let
+	// streamDecompressShuffle below produce the entire WSHF stream. For a
+	// plain (WSHF) input we re-prepend the magic that we already consumed
+	// from rc.
 	rep := exec.ProgressReporterFromContext(ctx)
 	// KeepResident: the file is mmap'd and walked immediately after the
 	// download, so only the dirty bound applies — windowed writeback caps
@@ -1405,8 +1404,8 @@ func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath st
 		dst = &progressWriter{w: wf, rep: rep}
 	}
 
-	if compressed {
-		if err := streamDecompressShuffle(rc, dst); err != nil {
+	if codec != codecNone {
+		if err := streamDecompressShuffle(rc, dst, codec); err != nil {
 			return fmt.Errorf("decompressing %s into local cache: %w", srcPath, err)
 		}
 	} else {
@@ -1606,13 +1605,13 @@ func (s *cachedFileStreamSource) openShuffleFromLocalFile(localPath string) (int
 // spill directory (mainly tests). Downloads the full payload, decompresses
 // in memory, and hands the resulting byte slice to a chunk reader. Bounded
 // by the test data sizes.
-func (s *cachedFileStreamSource) openShuffleInMemory(srcPath string, magic []byte, rc io.Reader, compressed bool) error {
+func (s *cachedFileStreamSource) openShuffleInMemory(srcPath string, magic []byte, rc io.Reader, codec shuffleCodec) error {
 	rest, err := io.ReadAll(rc)
 	if err != nil {
 		return fmt.Errorf("reading shuffle body for %s: %w", srcPath, err)
 	}
 	data := append(magic[:], rest...)
-	if compressed {
+	if codec != codecNone {
 		decoded, err := DecompressShuffleData(data)
 		if err != nil {
 			return fmt.Errorf("decompressing %s: %w", srcPath, err)

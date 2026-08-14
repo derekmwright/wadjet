@@ -1,6 +1,10 @@
 # Exchange zstd-on-wire (barrier-overlap arc, step 3)
 
-Status: KICKOFF — premise measured 2026-08-14, implementation pending.
+Status: IMPLEMENTED 2026-08-14 — flag `WADJET_EXCHANGE_ZSTD` default
+OFF, tf var `exchange_zstd`; SF100 A/B pending. Engagement marker:
+`wshz_files`/`wshz_bytes` in the "shuffle io stats" line. Harness
+local gate green both flag states (treatment: wshz_files=32/48,
+upload_failed=0, all queries green vs baseline).
 Companion benchmark: `internal/worker/shuffle_codec_bench_test.go`
 (`BenchmarkWSHCCompressionCodecs` / `BenchmarkWSHCDecompressionCodecs`).
 

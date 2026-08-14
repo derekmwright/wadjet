@@ -3,6 +3,9 @@ package worker
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
@@ -338,5 +341,163 @@ func TestShuffleFormatDecimalScaleRoundTrip(t *testing.T) {
 	}
 	if got := cr.schema[1].Scale; got != 2 {
 		t.Fatalf("chunk reader schema scale = %d, want 2", got)
+	}
+}
+
+// buildTestWSHF builds a small complete WSHF payload with enough
+// redundancy for both codecs to clear the ≥10% savings heuristic.
+func buildRoundTripWSHF(tb testing.TB) []byte {
+	tb.Helper()
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: false},
+		{Name: "name", Type: parquet.TypeString, Nullable: false},
+	}
+	const rowCount = 2048
+	rb := batch.NewRecordBatch(schema, rowCount)
+	for i := 0; i < rowCount; i++ {
+		rb.Columns[0].Int64Data[i] = int64(i)
+		rb.Columns[1].BytesData.Set(i, []byte("repeated-value-for-compression"))
+	}
+	var buf bytes.Buffer
+	sw := newShuffleWriter(&buf, schema)
+	if err := sw.writeHeader(); err != nil {
+		tb.Fatal(err)
+	}
+	if err := sw.writeChunk(rb.Columns, nil, rowCount); err != nil {
+		tb.Fatal(err)
+	}
+	raw := buf.Bytes()
+	raw[4] = byte(sw.numChunks)
+	return raw
+}
+
+// withExchangeZstd flips the WSHZ upload envelope for the test body and
+// restores the prior state afterward.
+func withExchangeZstd(tb testing.TB, on bool) {
+	tb.Helper()
+	prev := exchangeZstd
+	exchangeZstd = on
+	tb.Cleanup(func() { exchangeZstd = prev })
+}
+
+// WSHZ (zstd) envelope round trip, mirroring TestShuffleCompressedRoundTrip
+// (docs/design/exchange-zstd-wire.md).
+func TestShuffleZstdRoundTrip(t *testing.T) {
+	withExchangeZstd(t, true)
+	raw := buildRoundTripWSHF(t)
+
+	compressed := CompressShuffleData(raw)
+	if len(compressed) < 4 {
+		t.Fatal("compressed data too short")
+	}
+	if string(compressed[:4]) != "WSHZ" {
+		t.Fatalf("expected WSHZ magic under WADJET_EXCHANGE_ZSTD, got %q", compressed[:4])
+	}
+	if !isShuffleFormat(compressed) {
+		t.Error("WSHZ data should be detected as shuffle format")
+	}
+	if c, ok := codecForMagic([4]byte{'W', 'S', 'H', 'Z'}); !ok || c != codecZstd {
+		t.Fatalf("codecForMagic(WSHZ) = (%v,%v), want (codecZstd,true)", c, ok)
+	}
+
+	decompressed, err := DecompressShuffleData(compressed)
+	if err != nil {
+		t.Fatalf("DecompressShuffleData: %v", err)
+	}
+	if !bytes.Equal(decompressed, raw) {
+		t.Fatalf("WSHZ round trip not byte-identical: %d bytes vs %d raw", len(decompressed), len(raw))
+	}
+	batches, err := shuffleReadBatches(decompressed)
+	if err != nil {
+		t.Fatalf("shuffleReadBatches after WSHZ decompress: %v", err)
+	}
+	if len(batches) != 1 || batches[0].Len != 2048 {
+		t.Fatalf("expected 1 batch with 2048 rows, got %d batches", len(batches))
+	}
+	if _, err := shuffleReadBatches(compressed); err == nil {
+		t.Error("reading WSHZ data without decompressing should fail")
+	}
+
+	// Flag off must keep producing WSHC — and both envelopes must remain
+	// decodable side by side (mixed objects within one query during a
+	// flag flip).
+	withExchangeZstd(t, false)
+	s2c := CompressShuffleData(raw)
+	if string(s2c[:4]) != "WSHC" {
+		t.Fatalf("expected WSHC with flag off, got %q", s2c[:4])
+	}
+	for _, payload := range [][]byte{compressed, s2c} {
+		out, err := DecompressShuffleData(payload)
+		if err != nil {
+			t.Fatalf("mixed-envelope decompress (%q): %v", payload[:4], err)
+		}
+		if !bytes.Equal(out, raw) {
+			t.Fatalf("mixed-envelope round trip (%q) not byte-identical", payload[:4])
+		}
+	}
+}
+
+// File-streaming WSHZ path: compressShuffleStream writes WSHZ, and both
+// streamDecompressShuffle and the streaming reader decode it.
+func TestShuffleZstdFileStreamRoundTrip(t *testing.T) {
+	withExchangeZstd(t, true)
+	raw := buildRoundTripWSHF(t)
+
+	srcPath := filepath.Join(t.TempDir(), "src.wshf")
+	if err := os.WriteFile(srcPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dstPath := filepath.Join(t.TempDir(), "dst.wshz")
+	size, useCompressed, err := CompressShuffleFile(srcPath, dstPath)
+	if err != nil {
+		t.Fatalf("CompressShuffleFile: %v", err)
+	}
+	if !useCompressed {
+		t.Fatal("expected compression to clear the 10% heuristic")
+	}
+	wire, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(wire)) != size {
+		t.Fatalf("reported size %d != file size %d", size, len(wire))
+	}
+	if string(wire[:4]) != "WSHZ" {
+		t.Fatalf("expected WSHZ file magic, got %q", wire[:4])
+	}
+
+	// Transcode path (openShuffleFile/streamShuffleToSpill): body after
+	// magic → plain WSHF, byte-identical.
+	var out bytes.Buffer
+	if err := streamDecompressShuffle(bytes.NewReader(wire[4:]), &out, codecZstd); err != nil {
+		t.Fatalf("streamDecompressShuffle(zstd): %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), raw) {
+		t.Fatal("streamed WSHZ transcode not byte-identical")
+	}
+
+	// Streaming-decode path (openShuffleStreaming): reader positioned
+	// after the outer magic, decodes chunks straight off the zstd stream.
+	r, err := newStreamingShuffleReader(nopReadCloser{bytes.NewReader(wire[4:])}, codecZstd)
+	if err != nil {
+		t.Fatalf("newStreamingShuffleReader(WSHZ): %v", err)
+	}
+	defer r.Close()
+	rows := 0
+	for {
+		b, err := r.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("streaming WSHZ Next: %v", err)
+		}
+		if b == nil {
+			break
+		}
+		rows += b.Len
+	}
+	if rows != 2048 {
+		t.Fatalf("streaming WSHZ decoded %d rows, want 2048", rows)
 	}
 }

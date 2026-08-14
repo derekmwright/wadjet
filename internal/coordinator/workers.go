@@ -400,7 +400,7 @@ func (wr *WorkerRegistry) MayRecover(workerID string) bool {
 	wr.mu.RLock()
 	defer wr.mu.RUnlock()
 	w, ok := wr.workers[workerID]
-	return ok && w.LastSeen.After(time.Now().Add(-(wr.stale+wr.grace)))
+	return ok && w.LastSeen.After(time.Now().Add(-(wr.stale + wr.grace)))
 }
 
 // Count returns the number of active workers.

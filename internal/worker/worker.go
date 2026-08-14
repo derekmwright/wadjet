@@ -1021,6 +1021,7 @@ func (w *Worker) shuffleIOTotals() (ShuffleIOSnapshot, [7]int64) {
 // snapshots — the greppable record of which tier served exchange inputs and
 // how much S3 PUT work the background uploads did vs saved.
 func (w *Worker) logShuffleIOStats(ioStats ShuffleIOSnapshot, up [7]int64) {
+	wshzF, wshzB := WSHZStats()
 	w.logger.Info("shuffle io stats",
 		"local_files", ioStats.LocalFiles, "local_bytes", ioStats.LocalBytes,
 		"kv_files", ioStats.KVFiles, "kv_bytes", ioStats.KVBytes,
@@ -1034,7 +1035,8 @@ func (w *Worker) logShuffleIOStats(ioStats ShuffleIOSnapshot, up [7]int64) {
 		"upload_elided", up[5], "upload_elided_bytes", up[6],
 		"upload_yield_ms", w.executor.uploads.UploadYieldNs()/1e6,
 		"upload_pause_ms", w.executor.uploads.UploadPauseNs()/1e6,
-		"upload_pace_wait_ms", w.executor.uploads.UploadPaceWaitNs()/1e6)
+		"upload_pace_wait_ms", w.executor.uploads.UploadPaceWaitNs()/1e6,
+		"wshz_files", wshzF, "wshz_bytes", wshzB)
 }
 
 // dispatchLoop consumes TaskDispatch envelopes pushed by coord over

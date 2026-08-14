@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/klauspost/compress/s2"
+	"github.com/klauspost/compress/zstd"
 )
 
 // s2.Writer / s2.Reader carry sizable internal buffers (the encoder block
@@ -53,4 +54,66 @@ func acquireS2Reader(src io.Reader) *s2.Reader {
 func releaseS2Reader(r *s2.Reader) {
 	r.Reset(nil)
 	s2ReaderPool.Put(r)
+}
+
+// zstd pools for the WSHZ envelope (docs/design/exchange-zstd-wire.md).
+// Level pinned to SpeedFastest — higher levels measured 0.1–1pp better
+// ratio for 1.3–1.6× the CPU on real shuffle payloads (see
+// BenchmarkWSHCCompressionCodecs). Concurrency pinned to 1: klauspost's
+// internal parallelism spawns per-codec goroutines that defeat pooling,
+// and upload-path parallelism already comes from concurrent upload jobs.
+// Encoders/decoders are goroutine-bound while acquired — never share one
+// across goroutines.
+var (
+	zstdWriterPool = sync.Pool{New: func() any {
+		w, err := zstd.NewWriter(nil,
+			zstd.WithEncoderLevel(zstd.SpeedFastest),
+			zstd.WithEncoderConcurrency(1))
+		if err != nil {
+			panic("zstd encoder init: " + err.Error()) // static options; cannot fail
+		}
+		return w
+	}}
+	zstdReaderPool = sync.Pool{New: func() any {
+		r, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+		if err != nil {
+			panic("zstd decoder init: " + err.Error()) // static options; cannot fail
+		}
+		return r
+	}}
+)
+
+// acquireZstdWriter returns a pooled *zstd.Encoder attached to dst. The
+// caller MUST call Close before releaseZstdWriter — Close flushes the
+// final frame; without it the produced stream is truncated.
+func acquireZstdWriter(dst io.Writer) *zstd.Encoder {
+	w := zstdWriterPool.Get().(*zstd.Encoder)
+	w.Reset(dst)
+	return w
+}
+
+// releaseZstdWriter returns w to the pool after detaching it from its
+// destination. Safe to call after w.Close() (Reset re-arms a closed
+// encoder for reuse).
+func releaseZstdWriter(w *zstd.Encoder) {
+	w.Reset(nil)
+	zstdWriterPool.Put(w)
+}
+
+// acquireZstdReader returns a pooled *zstd.Decoder attached to src.
+func acquireZstdReader(src io.Reader) (*zstd.Decoder, error) {
+	r := zstdReaderPool.Get().(*zstd.Decoder)
+	if err := r.Reset(src); err != nil {
+		zstdReaderPool.Put(r)
+		return nil, err
+	}
+	return r, nil
+}
+
+// releaseZstdReader returns r to the pool after detaching it from src.
+// Reset(nil) parks the decoder without Close-ing it (Close would retire
+// it permanently).
+func releaseZstdReader(r *zstd.Decoder) {
+	_ = r.Reset(nil) // nil input parks the decoder; error is by-design
+	zstdReaderPool.Put(r)
 }

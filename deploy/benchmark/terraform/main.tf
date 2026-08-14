@@ -618,6 +618,10 @@ resource "aws_instance" "worker" {
     # Outbound burst smoothing (docs/design/upload-burst-smoothing.md):
     # aggregate background stage-output PUT budget in MB/s. 0 = off.
     export WADJET_UPLOAD_PACE_MBPS="${var.upload_pace_mbps}"
+    # WSHZ upload envelope (docs/design/exchange-zstd-wire.md): zstd
+    # instead of s2 for S3 stage/shuffle uploads. 1 = on, 0 = off
+    # (matches the in-binary default: off).
+    export WADJET_EXCHANGE_ZSTD="${var.exchange_zstd}"
 
     # Verify binary was downloaded successfully
     if [ ! -x /usr/local/bin/wadjet ]; then

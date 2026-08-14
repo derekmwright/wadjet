@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/klauspost/compress/s2"
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -36,13 +37,15 @@ const (
 // decoded with the exact same readColumnData path as the mmap reader, so
 // the two readers cannot diverge on payload interpretation.
 //
-// The reader owns the transport body (and the pooled s2 reader for WSHC)
-// once constructed: Close releases both and is idempotent. Batches it
-// returns are self-contained copies, exactly like the mmap reader's.
+// The reader owns the transport body (and the pooled s2/zstd reader for
+// WSHC/WSHZ) once constructed: Close releases both and is idempotent.
+// Batches it returns are self-contained copies, exactly like the mmap
+// reader's.
 type streamingShuffleReader struct {
 	br        *bufio.Reader
-	s2r       *s2.Reader // non-nil for WSHC; returned to the pool on Close
-	body      io.Closer  // transport body; closed on Close
+	s2r       *s2.Reader    // non-nil for WSHC; returned to the pool on Close
+	zr        *zstd.Decoder // non-nil for WSHZ; returned to the pool on Close
+	body      io.Closer     // transport body; closed on Close
 	schema    []parquet.Column
 	numChunks uint32
 	chunk     uint32
@@ -54,27 +57,37 @@ type streamingShuffleReader struct {
 
 // newStreamingShuffleReader parses the WSHF header from rc, which must be
 // positioned immediately AFTER the outer 4-byte magic (the tiered open
-// path consumes it to detect the format). wshc selects the s2-compressed
-// framing; the s2 stream contains the complete inner WSHF payload
-// including its own magic.
+// path consumes it to detect the format). codec selects the compressed
+// framing (WSHC=s2, WSHZ=zstd); the compressed stream contains the
+// complete inner WSHF payload including its own magic.
 //
 // Ownership: on success the reader owns rc. On error the caller still
 // owns rc (matching the tiered open path's deferred close).
-func newStreamingShuffleReader(rc io.ReadCloser, wshc bool) (*streamingShuffleReader, error) {
+func newStreamingShuffleReader(rc io.ReadCloser, codec shuffleCodec) (*streamingShuffleReader, error) {
 	r := &streamingShuffleReader{body: rc}
 	var src io.Reader = rc
-	if wshc {
-		r.s2r = acquireS2Reader(rc)
-		src = r.s2r
-		// The s2 body re-carries the inner WSHF magic.
+	if codec != codecNone {
+		switch codec {
+		case codecZstd:
+			zr, err := acquireZstdReader(rc)
+			if err != nil {
+				return nil, fmt.Errorf("attaching zstd decoder to WSHZ stream: %w", err)
+			}
+			r.zr = zr
+			src = zr
+		default:
+			r.s2r = acquireS2Reader(rc)
+			src = r.s2r
+		}
+		// The compressed body re-carries the inner WSHF magic.
 		var magic [4]byte
 		if _, err := io.ReadFull(src, magic[:]); err != nil {
 			r.releasePooled()
-			return nil, fmt.Errorf("reading inner magic from WSHC stream: %w", err)
+			return nil, fmt.Errorf("reading inner magic from compressed shuffle stream: %w", err)
 		}
 		if magic != shuffleMagic {
 			r.releasePooled()
-			return nil, fmt.Errorf("WSHC stream does not contain WSHF payload (magic %q)", magic[:])
+			return nil, fmt.Errorf("compressed shuffle stream does not contain WSHF payload (magic %q)", magic[:])
 		}
 	}
 	r.br = bufio.NewReaderSize(src, 256<<10)
@@ -273,9 +286,13 @@ func (r *streamingShuffleReader) releasePooled() {
 		releaseS2Reader(r.s2r)
 		r.s2r = nil
 	}
+	if r.zr != nil {
+		releaseZstdReader(r.zr)
+		r.zr = nil
+	}
 }
 
-// Close releases the pooled s2 reader and closes the transport body.
+// Close releases the pooled codec reader and closes the transport body.
 // Idempotent.
 func (r *streamingShuffleReader) Close() error {
 	if r.closed {

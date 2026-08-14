@@ -79,8 +79,8 @@ func (nopReadCloser) Close() error { return nil }
 // open path does, and constructs the streaming reader.
 func openStreaming(tb testing.TB, wire []byte) *streamingShuffleReader {
 	tb.Helper()
-	wshc := bytes.HasPrefix(wire, compressedMagic[:])
-	r, err := newStreamingShuffleReader(nopReadCloser{bytes.NewReader(wire[4:])}, wshc)
+	codec, _ := codecForMagic([4]byte{wire[0], wire[1], wire[2], wire[3]})
+	r, err := newStreamingShuffleReader(nopReadCloser{bytes.NewReader(wire[4:])}, codec)
 	if err != nil {
 		tb.Fatalf("newStreamingShuffleReader: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestStreamingShuffleReader_TruncationIsAnError(t *testing.T) {
 	for _, cut := range []int{6, 40, len(wire) / 2, len(wire) - 3} {
 		t.Run(fmt.Sprintf("cut=%d", cut), func(t *testing.T) {
 			truncated := wire[:cut]
-			r, err := newStreamingShuffleReader(nopReadCloser{bytes.NewReader(truncated[4:])}, false)
+			r, err := newStreamingShuffleReader(nopReadCloser{bytes.NewReader(truncated[4:])}, codecNone)
 			if err != nil {
 				return // header-stage truncation error is a pass
 			}
@@ -218,7 +218,7 @@ func TestStreamingShuffleReader_CountMismatchIsAnError(t *testing.T) {
 	inflated := append([]byte(nil), wire...)
 	binary.LittleEndian.PutUint32(inflated[4:], 3) // promise one more chunk than exists
 
-	r, err := newStreamingShuffleReader(nopReadCloser{bytes.NewReader(inflated[4:])}, false)
+	r, err := newStreamingShuffleReader(nopReadCloser{bytes.NewReader(inflated[4:])}, codecNone)
 	if err != nil {
 		t.Fatalf("header parse: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestStreamingShuffleReader_FixedWidthLengthMismatch(t *testing.T) {
 	corrupt := append([]byte(nil), wire...)
 	binary.LittleEndian.PutUint32(corrupt[dataLenOff:], binary.LittleEndian.Uint32(wire[dataLenOff:])+8)
 
-	r, err := newStreamingShuffleReader(nopReadCloser{bytes.NewReader(corrupt[4:])}, false)
+	r, err := newStreamingShuffleReader(nopReadCloser{bytes.NewReader(corrupt[4:])}, codecNone)
 	if err != nil {
 		t.Fatalf("header parse: %v", err)
 	}
@@ -297,7 +297,7 @@ func FuzzStreamingShuffleReader(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte{0, 0, 0, 0, 0, 0})
 	f.Fuzz(func(t *testing.T, data []byte) {
-		r, err := newStreamingShuffleReader(nopReadCloser{bytes.NewReader(data)}, false)
+		r, err := newStreamingShuffleReader(nopReadCloser{bytes.NewReader(data)}, codecNone)
 		if err != nil {
 			return
 		}

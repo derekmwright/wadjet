@@ -62,7 +62,7 @@ func (s *cachedFileStreamSource) openShuffleFromFileStreaming(f *os.File, size i
 	if magic != shuffleMagic {
 		return fmt.Errorf("local shuffle file %s is not WSHF (magic %q)", f.Name(), magic[:])
 	}
-	r, err := newStreamingShuffleReader(rc, false)
+	r, err := newStreamingShuffleReader(rc, codecNone)
 	if err != nil {
 		return err
 	}

@@ -269,9 +269,8 @@ func (p *filePrefetcher) fetchShuffle(ctx context.Context, s *cachedFileStreamSo
 	if _, err := io.ReadFull(rc, magic[:]); err != nil {
 		return &prefetchResult{err: fmt.Errorf("reading magic from peer %s: %w", addr, err)}
 	}
-	wshf := magic == shuffleMagic
-	wshc := magic == compressedMagic
-	if !wshf && !wshc {
+	codec, isShuffle := codecForMagic(magic)
+	if !isShuffle {
 		return &prefetchResult{err: fmt.Errorf("peer %s returned non-shuffle payload for %s (magic %q)", addr, filePath, magic[:])}
 	}
 
@@ -281,7 +280,7 @@ func (p *filePrefetcher) fetchShuffle(ctx context.Context, s *cachedFileStreamSo
 	if err := p.acquireWindow(ctx, idx, winBytes); err != nil {
 		return &prefetchResult{err: err}
 	}
-	localPath, err := p.streamShuffleToSpill(ctx, s, filePath, magic[:], rc, wshc)
+	localPath, err := p.streamShuffleToSpill(ctx, s, filePath, magic[:], rc, codec)
 	if err != nil {
 		p.releaseWindow(winBytes)
 		return &prefetchResult{err: err}
@@ -291,9 +290,9 @@ func (p *filePrefetcher) fetchShuffle(ctx context.Context, s *cachedFileStreamSo
 }
 
 // streamShuffleToSpill copies a shuffle body to a spill temp as plain
-// WSHF (transcoding WSHC via the streaming s2 decoder), reporting
-// progress like streamToSpill.
-func (p *filePrefetcher) streamShuffleToSpill(ctx context.Context, s *cachedFileStreamSource, srcPath string, magic []byte, rc io.Reader, compressed bool) (string, error) {
+// WSHF (transcoding WSHC/WSHZ via the streaming codec decoder),
+// reporting progress like streamToSpill.
+func (p *filePrefetcher) streamShuffleToSpill(ctx context.Context, s *cachedFileStreamSource, srcPath string, magic []byte, rc io.Reader, codec shuffleCodec) (string, error) {
 	spillDir := s.executor.spillDir
 	if err := os.MkdirAll(spillDir, 0o755); err != nil {
 		return "", fmt.Errorf("creating spill dir: %w", err)
@@ -317,9 +316,9 @@ func (p *filePrefetcher) streamShuffleToSpill(ctx context.Context, s *cachedFile
 	if rep != nil {
 		dst = &progressWriter{w: wf, rep: rep}
 	}
-	if compressed {
-		// The s2 body re-carries the inner WSHF magic; write nothing first.
-		if err := streamDecompressShuffle(rc, dst); err != nil {
+	if codec != codecNone {
+		// The compressed body re-carries the inner WSHF magic; write nothing first.
+		if err := streamDecompressShuffle(rc, dst, codec); err != nil {
 			return "", fmt.Errorf("prefetch-decompressing %s: %w", srcPath, err)
 		}
 	} else {
