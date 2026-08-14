@@ -34,6 +34,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/expr"
 	"github.com/citc-tech/wadjet/internal/format"
 	"github.com/citc-tech/wadjet/internal/geoip"
+	"github.com/citc-tech/wadjet/internal/logio"
 	"github.com/citc-tech/wadjet/internal/metrics"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/server"
@@ -232,7 +233,18 @@ func serveCmd() *cobra.Command {
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
 
-		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(logLevel)}))
+		// Async log sink: in deploys stderr is a pipe into journald, and a
+		// stalled journald otherwise freezes the whole process via the
+		// slog handler mutex (frozen-spin/quiet-stall family; see
+		// internal/logio doc comment). WADJET_SYNC_LOG=1 restores direct
+		// writes for debugging.
+		var logSink io.Writer = os.Stderr
+		if os.Getenv("WADJET_SYNC_LOG") != "1" {
+			asyncSink := logio.NewAsyncWriter(os.Stderr, 8192)
+			defer asyncSink.Close()
+			logSink = asyncSink
+		}
+		logger := slog.New(slog.NewTextHandler(logSink, &slog.HandlerOptions{Level: parseLogLevel(logLevel)}))
 
 		// Env-gated contention profiling for benchmark/profiling deploys.
 		// Rates are the raw runtime knobs (block rate in ns, mutex 1-in-N);
