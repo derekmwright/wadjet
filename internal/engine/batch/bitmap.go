@@ -274,7 +274,33 @@ func (b Bitmap) Grow(newLen int) Bitmap {
 		b.len = newLen
 		return b
 	}
-	data := make([]uint64, newWords)
+	if newWords <= cap(b.data) {
+		// Spare capacity from a previous geometric Grow: reslice and
+		// initialize the newly exposed words in place (same ownership
+		// contract as the in-place branch above).
+		oldWords := len(b.data)
+		b.data = b.data[:newWords]
+		for w := oldWords; w < newWords; w++ {
+			b.data[w] = ^uint64(0)
+		}
+		oldEnd := oldWords * 64
+		for i := b.len; i < oldEnd && i < newLen; i++ {
+			b.data[i/64] |= 1 << uint(i%64)
+		}
+		if rem := newLen % 64; rem > 0 {
+			b.data[newWords-1] &= (uint64(1) << rem) - 1
+		}
+		b.len = newLen
+		return b
+	}
+	// Grow capacity geometrically: per-consume Grow from accumulator sinks
+	// otherwise reallocates and copies every few rows, O(n²) across a fill
+	// cycle (q17 join-5 sink convoy, SF100 2026-08-14).
+	newCap := newWords
+	if c := 2 * cap(b.data); c > newCap {
+		newCap = c
+	}
+	data := make([]uint64, newWords, newCap)
 	copy(data, b.data)
 	// Mark previously-excess bits in the OLD last word as valid. The copy
 	// above preserved them as the 0s that NewBitmap wrote as padding; once

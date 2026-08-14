@@ -648,13 +648,19 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 // (vs. the per-row appends in the legacy growBatch). After this call, the
 // null bitmaps default to non-null in the new range — callers must explicitly
 // SetNull for source rows that are null.
+//
+// Capacity grows GEOMETRICALLY (at least 2×): callers append a few rows at a
+// time — a low-selectivity morsel-parallel probe hands the sink ~2 surviving
+// rows per consume — and exact-size growth made every such append reallocate
+// and copy the whole accumulator, O(n²) (q17 join-5's 55s-per-task sink
+// convoy, SF100 2026-08-14).
 func growBatchTo(dst *batch.RecordBatch, n int) {
 	for _, col := range dst.Columns {
 		col.Len = n
 		switch col.Type {
 		case parquet.TypeBool:
 			if cap(col.BoolData) < n {
-				grew := make([]bool, n)
+				grew := make([]bool, n, growCap(cap(col.BoolData), n))
 				copy(grew, col.BoolData)
 				col.BoolData = grew
 			} else if len(col.BoolData) < n {
@@ -662,7 +668,7 @@ func growBatchTo(dst *batch.RecordBatch, n int) {
 			}
 		case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
 			if cap(col.Int32Data) < n {
-				grew := make([]int32, n)
+				grew := make([]int32, n, growCap(cap(col.Int32Data), n))
 				copy(grew, col.Int32Data)
 				col.Int32Data = grew
 			} else if len(col.Int32Data) < n {
@@ -670,7 +676,7 @@ func growBatchTo(dst *batch.RecordBatch, n int) {
 			}
 		case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
 			if cap(col.Int64Data) < n {
-				grew := make([]int64, n)
+				grew := make([]int64, n, growCap(cap(col.Int64Data), n))
 				copy(grew, col.Int64Data)
 				col.Int64Data = grew
 			} else if len(col.Int64Data) < n {
@@ -678,7 +684,7 @@ func growBatchTo(dst *batch.RecordBatch, n int) {
 			}
 		case parquet.TypeFloat32:
 			if cap(col.Float32Data) < n {
-				grew := make([]float32, n)
+				grew := make([]float32, n, growCap(cap(col.Float32Data), n))
 				copy(grew, col.Float32Data)
 				col.Float32Data = grew
 			} else if len(col.Float32Data) < n {
@@ -686,7 +692,7 @@ func growBatchTo(dst *batch.RecordBatch, n int) {
 			}
 		case parquet.TypeFloat64:
 			if cap(col.Float64Data) < n {
-				grew := make([]float64, n)
+				grew := make([]float64, n, growCap(cap(col.Float64Data), n))
 				copy(grew, col.Float64Data)
 				col.Float64Data = grew
 			} else if len(col.Float64Data) < n {
@@ -700,7 +706,7 @@ func growBatchTo(dst *batch.RecordBatch, n int) {
 			// overwritten by the next Set/SetFrom.
 			needed := n + 1
 			if cap(col.BytesData.Offsets) < needed {
-				grew := make([]uint32, needed)
+				grew := make([]uint32, needed, growCap(cap(col.BytesData.Offsets), needed))
 				copy(grew, col.BytesData.Offsets)
 				col.BytesData.Offsets = grew
 			} else if len(col.BytesData.Offsets) < needed {
@@ -708,7 +714,7 @@ func growBatchTo(dst *batch.RecordBatch, n int) {
 			}
 		case parquet.TypeDecimal:
 			if cap(col.DecimalData.Data) < n {
-				grew := make([]batch.Int128, n)
+				grew := make([]batch.Int128, n, growCap(cap(col.DecimalData.Data), n))
 				copy(grew, col.DecimalData.Data)
 				col.DecimalData.Data = grew
 			} else if len(col.DecimalData.Data) < n {
@@ -717,6 +723,16 @@ func growBatchTo(dst *batch.RecordBatch, n int) {
 		}
 		col.Nulls = col.Nulls.Grow(n)
 	}
+}
+
+// growCap is the allocation capacity for growing a slice of capacity c to
+// hold n elements: at least double the old capacity, so per-consume growth
+// amortizes to O(1) per element.
+func growCap(c, n int) int {
+	if g := 2 * c; g > n {
+		return g
+	}
+	return n
 }
 
 // ensureWriterLocked lazily opens partition p's stream (buffered writer +
