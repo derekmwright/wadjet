@@ -34,6 +34,7 @@ import (
 	distrib "github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/harness"
+	"github.com/citc-tech/wadjet/internal/logio"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
@@ -176,7 +177,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Async log sink: the bench coordinator's stderr is the same
+	// journald pipe as the workers'; a stalled journald must not freeze
+	// coordinator dispatch (log-jam mechanism, internal/logio).
+	// WADJET_SYNC_LOG=1 restores direct writes.
+	var logSink io.Writer = os.Stderr
+	if os.Getenv("WADJET_SYNC_LOG") != "1" {
+		asyncSink := logio.NewAsyncWriter(os.Stderr, 8192)
+		defer asyncSink.Close()
+		logSink = asyncSink
+	}
+	logger := slog.New(slog.NewTextHandler(logSink, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	var db *wadjet.DB
 	var coord *coordinator.Coordinator

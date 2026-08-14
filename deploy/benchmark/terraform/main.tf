@@ -261,6 +261,18 @@ locals {
       sleep 5
     done
 
+    # journald hardening (log-jam mechanism, 2026-08-14 — see
+    # internal/logio): bench boxes are ephemeral, so the journal gets no
+    # disk durability. Storage=volatile keeps it in /run (RAM) — no EBS
+    # writeback in the log path — and the raised rate limit stops
+    # journald from stalling/suppressing under benchmark log volume.
+    # journalctl (wlog collection) reads the runtime journal fine.
+    mkdir -p /etc/systemd/journald.conf.d
+    printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=2G\nRateLimitIntervalSec=30s\nRateLimitBurst=100000\n' \
+      > /etc/systemd/journald.conf.d/99-bench.conf
+    systemctl restart systemd-journald
+    echo "journald: volatile storage + raised rate limits"
+
     # Download pre-built arm64 binaries from the data bucket
     retry aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/wadjet" /usr/local/bin/wadjet --region ${local.eff_region}
     retry aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/tpch-bench" /usr/local/bin/tpch-bench --region ${local.eff_region}
