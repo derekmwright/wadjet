@@ -11,7 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
+	runtimemetrics "runtime/metrics"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -740,11 +740,17 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	}
 
 	// Phase-4 per-task accounting observability (diagnostic only; no decision).
-	// One ReadMemStats at the existing task-end reporting point — not a hot path.
+	// STW-free heap read: task ends bunch at stage completion (24-task
+	// stages drain in seconds), so a ReadMemStats here compounded the
+	// taskPeakHeapTracker STW storm — see that type's doc comment.
+	// HeapInuse == heap/objects + heap/unused in runtime/metrics terms.
 	if e.sharedSpill != nil {
-		var ms runtime.MemStats
-		runtime.ReadMemStats(&ms)
-		heapInuse := int64(ms.HeapInuse)
+		s := []runtimemetrics.Sample{
+			{Name: "/memory/classes/heap/objects:bytes"},
+			{Name: "/memory/classes/heap/unused:bytes"},
+		}
+		runtimemetrics.Read(s)
+		heapInuse := int64(s[0].Value.Uint64() + s[1].Value.Uint64())
 		rss := result.TaskStats.RSS
 		if rss == 0 {
 			rss = distributed.ProcessRSS()
