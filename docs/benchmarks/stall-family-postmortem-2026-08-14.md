@@ -102,18 +102,30 @@ All captures land in `/var/log/stall-*` and auto-ship via the wlog
 uploader. The liveness marker (30s, unconditional) is the ground truth
 for per-worker freeze windows in any wlog.
 
+## Addendum: validation run `20260814-020153` (bin `eba88ad`)
+
+**State accumulation: FIXED.** R1 249.4s (new best-ever), R2 448.7,
+R3 309.9, **R4 243.7s — faster than R1, on the fourth consecutive
+suite** (previous run: 259 → 672 → 822 → 1105 monotonic). The volatile
+journald + async sink removed the accumulating drag. 88/88 correct.
+LOGPIPE capture during a firing showed sed parked in `pipe_read`
+waiting for data — the log path was empty, confirming the jam is gone.
+
+**Residual firings (4) attributed and fixed (`5d9746f`):** the SIGABRT
+dump named a third `ReadMemStats` caller missed by the first sweep —
+`SpillManager.ShouldSpillFor → memory.heapPressureExceeded`
+(`spill.go`), in the pipeline-breaker consume path behind 100ms caches:
+up to 20 STW/s combined, refreshed exactly when the heap is under
+pressure. Both heap-pressure gates (plus the long-task sidecar and the
+`ProcessRSS` fallback) now ride `runtime/metrics`. Zero `ReadMemStats`
+remain outside the two deliberate isolated sites (30s stats refresher,
+on-demand profile envelope).
+
 ## Open items
 
-1. **Validation arm on `c49bf6d`** (benchmark_runs=4): expect zero
-   freezes, R1 ≈ 259s held, and the R1→R4 monotonic degradation
-   (259 → 672 → 822 → 1105 on `20260814-002639`) gone or greatly
-   reduced. That degradation is confirmed within-cluster state
-   accumulation (zero restarts that run; earlier SIGABRT restarts were
-   masking it) — the jam theory predicts it via progressively loaded
-   journald + growing disk journal, now removed by `Storage=volatile`
-   + async sink. If accumulation persists post-fix, it is a separate
-   mechanism and gets its own arc.
-2. If the validation arm is clean, close the dispatch-stall arc
-   (specimens 1-8 attributed: CPU-hot shape → mechanism 1; silent
-   q22-R2 shape → mechanism 2) and re-run the barrier-overlap eager
-   pair on a clean-wall config.
+1. **Validation arm on `5d9746f`** (benchmark_runs=4): expect ZERO
+   firings on all three signatures. If clean: close the dispatch-stall
+   arc (specimens 1-8 attributed: CPU-hot shape → mechanism 1 incl.
+   the spill-gate storm; silent q22-R2 shape → mechanism 2) and re-run
+   the barrier-overlap eager pair on the new clean-wall baseline
+   (R1 ≈ 249s / R4 ≈ 244s).
