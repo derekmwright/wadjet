@@ -42,6 +42,7 @@ if [ "${n:-0}" -lt "$WANT_NODES" ]; then
   exit 1
 fi
 log "Trino version: $("$CLI" --output-format TSV --execute 'SELECT node_version FROM system.runtime.nodes LIMIT 1' | tr -d '"')"
+log "Config: $(grep -E 'retry-policy|spill-enabled|max-memory' /opt/trino/etc/config.properties 2>/dev/null | tr '\n' ' ')"
 
 # ---- Register tables (idempotent) ----
 log "Registering Glue-backed external tables over s3://${BUCKET}/..."
@@ -89,4 +90,8 @@ done
 # ---- Upload ----
 log "Uploading results to s3://${BUCKET}/results/trino-${TS}/"
 aws s3 cp "$OUT" "s3://${BUCKET}/results/trino-${TS}/" --region "$REGION" --quiet
+
+# ---- FTE exchange scratch purge (must not persist past the suite; the
+# teardown checklist purges again as a belt-and-suspenders) ----
+aws s3 rm "s3://${BUCKET}/trino-exchange/" --recursive --region "$REGION" --quiet || true
 log "done"

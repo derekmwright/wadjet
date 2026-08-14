@@ -132,7 +132,7 @@ locals {
   # tarball + CLI. Runs on every node.
   install = <<-SCRIPT
     set -euxo pipefail
-    dnf install -y python3 tar gzip
+    dnf install -y python3 tar gzip ethtool
     cd /opt
     curl -fsSL -o corretto.tar.gz "https://corretto.aws/downloads/latest/amazon-corretto-23-aarch64-linux-jdk.tar.gz"
     mkdir -p /opt/java && tar -xzf corretto.tar.gz -C /opt/java --strip-components=1
@@ -153,6 +153,40 @@ locals {
       mkdir -p /mnt/nvme/trino-spill && chmod 777 /mnt/nvme/trino-spill
     fi
   SCRIPT
+
+  # ENA/NIC sampler — identical cadence + tag to the wadjet arm's worker
+  # user-data loop (deploy/benchmark/terraform/main.tf), so
+  # attribute-ena.py and `journalctl -t ena-poll` work on both arms. The
+  # utilization-shape comparison (Trino saturates continuously ~400MB/s/
+  # worker vs wadjet paced at 150 + zstd) is half the point of the pair.
+  ena_poll = <<-SCRIPT
+    NET_IF=$(ls /sys/class/net | grep -E '^(eth|ens|enp)' | head -1)
+    if [ -n "$NET_IF" ]; then
+      ( while true; do
+          logger -t ena-poll "if=$NET_IF rx=$(cat /sys/class/net/$NET_IF/statistics/rx_bytes) tx=$(cat /sys/class/net/$NET_IF/statistics/tx_bytes) $(ethtool -S $NET_IF 2>/dev/null | grep allowance_exceeded | tr -s ' ' | tr '\n' ' ')"
+          sleep 10
+        done ) &
+    fi
+  SCRIPT
+
+  # FTE (retry-policy=TASK + filesystem exchange manager spooling to S3).
+  # SSM-applied in July, folded into the module 2026-08-14. Empty when
+  # var.fte=false → streaming mode.
+  fte_config_line = var.fte ? "retry-policy=TASK" : ""
+  exchange_manager = <<-PROPS
+    exchange-manager.name=filesystem
+    exchange.base-directories=s3://${var.data_bucket}/trino-exchange
+    exchange.s3.region=${var.region}
+  PROPS
+
+  # Spill on the NVMe instance store — required in streaming mode (q09/q21
+  # OOM at 14GB/node without it) and harmless under FTE. Only written on
+  # nodes that actually execute tasks AND have the c7gd instance store
+  # (workers; the coordinator too in single-node validation mode).
+  spill_config = <<-PROPS
+    spill-enabled=true
+    spiller-spill-path=/mnt/nvme/trino-spill
+  PROPS
 
   hive_catalog = <<-PROPS
     connector.name=hive
@@ -204,11 +238,19 @@ resource "aws_instance" "coordinator" {
     discovery.uri=http://localhost:8080
     query.max-memory=${local.single_node ? "14GB" : "42GB"}
     query.max-memory-per-node=${local.coord_query_per_node}
+    ${local.fte_config_line}
+    %{if local.single_node}${local.spill_config}%{endif}
     CP
+    %{if var.fte}
+    cat > /opt/trino/etc/exchange-manager.properties <<'EM'
+    ${local.exchange_manager}
+    EM
+    %{endif}
     cat > /opt/trino/etc/catalog/hive.properties <<'HP'
     ${local.hive_catalog}
     HP
 
+    ${local.ena_poll}
     JAVA_HOME=/opt/java PATH=/opt/java/bin:$PATH /opt/trino/bin/launcher start
 
     # Pull comparison assets and run.
@@ -263,11 +305,19 @@ resource "aws_instance" "worker" {
     discovery.uri=http://${aws_instance.coordinator.private_ip}:8080
     query.max-memory=42GB
     query.max-memory-per-node=14GB
+    ${local.fte_config_line}
+    ${local.spill_config}
     CP
+    %{if var.fte}
+    cat > /opt/trino/etc/exchange-manager.properties <<'EM'
+    ${local.exchange_manager}
+    EM
+    %{endif}
     cat > /opt/trino/etc/catalog/hive.properties <<'HP'
     ${local.hive_catalog}
     HP
 
+    ${local.ena_poll}
     JAVA_HOME=/opt/java PATH=/opt/java/bin:$PATH /opt/trino/bin/launcher start
   EOF
 }
