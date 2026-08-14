@@ -437,6 +437,7 @@ func (e *Executor) writeUnpartitionedWSHF(ctx context.Context, task distributed.
 	if root, asyncOK := e.asyncUploadEligible(&task); asyncOK {
 		if adopted := e.cacheUnpartitionedLocal(task.QueryID, key, payload); adopted != "" {
 			result.ResultFiles = append(result.ResultFiles, key)
+			result.UploadPendingKeys = append(result.UploadPendingKeys, key)
 			result.SizeBytes += int64(len(payload))
 			if e.resultKV != nil && len(payload) <= natsKVResultThreshold {
 				if _, kvErr := e.resultKV.Put(ctx, natsKVKey(key), payload); kvErr != nil {

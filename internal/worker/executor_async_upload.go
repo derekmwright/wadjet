@@ -34,6 +34,7 @@ func (e *Executor) finishStageOutputAsync(ctx context.Context, task *distributed
 		return uploadJob{}, false
 	}
 	result.ResultFiles = append(result.ResultFiles, key)
+	result.UploadPendingKeys = append(result.UploadPendingKeys, key)
 	result.SizeBytes += size
 
 	// KV fast-read tier for small payloads, written from the local copy —

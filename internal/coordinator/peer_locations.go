@@ -43,6 +43,7 @@ type peerFileRegistry struct {
 type peerFileGroup struct {
 	keys      []string
 	durable   map[string]bool // key → background upload landed (Phase B); absent = not durable
+	pending   map[string]bool // key → worker reported its background upload still in flight
 	createdAt time.Time
 }
 
@@ -83,6 +84,54 @@ func (r *peerFileRegistry) Record(files []string, workerID string) {
 		}
 		g.keys = append(g.keys, f)
 	}
+}
+
+// RecordPending marks keys the producing worker reported as
+// background-upload-in-flight (ResultNotification.UploadPendingKeys).
+// Call after Record — only already-recorded keys are marked. A key stops
+// counting as pending once MarkDurable flips its durable bit; the pair of
+// bits feeds PendingNonDurableFor (reap grace).
+func (r *peerFileRegistry) RecordPending(keys []string) {
+	if r == nil || len(keys) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, k := range keys {
+		g := r.groups[QueryIDFromPath(k)]
+		if g == nil {
+			continue
+		}
+		if g.pending == nil {
+			g.pending = make(map[string]bool)
+		}
+		g.pending[k] = true
+	}
+}
+
+// PendingNonDurableFor counts the worker's recorded output keys whose
+// background upload is still in flight (pending, not yet durable). The
+// reaper grants a bounded reap grace while this is non-zero: reaping a
+// producer that holds the only copy of stage outputs invalidates them and
+// forces a producer-stage re-run, a far costlier recovery than waiting
+// out a transient network silence. See docs/design/reap-grace.md.
+func (r *peerFileRegistry) PendingNonDurableFor(workerID string) int {
+	if r == nil || workerID == "" {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for key, w := range r.files {
+		if w != workerID {
+			continue
+		}
+		g := r.groups[QueryIDFromPath(key)]
+		if g != nil && g.pending[key] && !g.durable[key] {
+			n++
+		}
+	}
+	return n
 }
 
 // Lookup returns the producing worker ID for a file key, or "".
@@ -306,11 +355,16 @@ func (c *Coordinator) classifyFatalResult(r distributed.ResultNotification) bool
 	if producer == "" {
 		return false // unknown producer — can't conclude, let retries run
 	}
-	if c.workers.IsAlive(producer) {
-		// Producer alive: its upload will land or the peer serves the
-		// retry. Under lazy durability "will land" needs a nudge — the
-		// upload is queued unstarted on the producer, so release it; the
-		// retry then converges on the S3 copy even if the peer path stays
+	if c.workers.MayRecover(producer) {
+		// Producer alive OR inside the reap-grace window: its upload will
+		// land, the peer serves the retry, or the grace expires and a
+		// later failure classifies fatal. Grace-deferred producers MUST
+		// stay retryable here — otherwise this fast path declares input
+		// lost during the very window the reaper is holding open for the
+		// producer's uploads to land (docs/design/reap-grace.md). Under
+		// lazy durability "will land" needs a nudge — the upload is
+		// queued unstarted on the producer, so release it; the retry
+		// then converges on the S3 copy even if the peer path stays
 		// broken.
 		c.releaseDeferredUploads(distributed.ScratchQueryID(r.MissingInputKey))
 		return false
@@ -340,11 +394,23 @@ func (c *Coordinator) fetchStageOutputData(ctx context.Context, path string) ([]
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		if !c.peerFiles.IsDurable(path) {
-			if producer := c.peerFiles.Lookup(path); producer != "" && !c.workers.IsAlive(producer) {
+			// MayRecover, not IsAlive: a grace-deferred producer keeps the
+			// re-poll running — its upload may still land within this
+			// poll's budget (docs/design/reap-grace.md).
+			if producer := c.peerFiles.Lookup(path); producer != "" && !c.workers.MayRecover(producer) {
 				return nil, fmt.Errorf("%s (%s): producer dead before upload landed", inputLostMarker, path)
 			}
 		}
 		if time.Now().After(deadline) {
+			// Budget exhausted with the producer silent past the stale
+			// TTL (grace-deferred or not): classify input-lost so the
+			// caller gets the streaming-disabled re-execution instead of
+			// an opaque fetch failure.
+			if !c.peerFiles.IsDurable(path) {
+				if producer := c.peerFiles.Lookup(path); producer != "" && !c.workers.IsAlive(producer) {
+					return nil, fmt.Errorf("%s (%s): producer dead before upload landed", inputLostMarker, path)
+				}
+			}
 			return nil, err
 		}
 		select {

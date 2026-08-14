@@ -247,3 +247,77 @@ func TestStreamingDisabledCtxDepthCap(t *testing.T) {
 		t.Fatal("flag leaked into a fresh ctx")
 	}
 }
+
+func TestPendingNonDurableFor(t *testing.T) {
+	c := testCoordinatorForPeers(time.Minute)
+	r := c.peerFiles
+	files := []string{
+		"queries/q1/stage-2/partition=0000/t1.wshf",
+		"queries/q1/stage-2/partition=0001/t1.wshf",
+	}
+	r.Record(files, "w1")
+	r.Record([]string{"queries/q1/stage-3/t2.wshf"}, "w2")
+
+	// Only keys the worker reported as upload-in-flight count — sync
+	// uploads (pipeline/gather, old workers) never grant grace.
+	if n := r.PendingNonDurableFor("w1"); n != 0 {
+		t.Fatalf("expected 0 pending before RecordPending, got %d", n)
+	}
+	r.RecordPending(files)
+	if n := r.PendingNonDurableFor("w1"); n != 2 {
+		t.Fatalf("expected 2 pending, got %d", n)
+	}
+	if n := r.PendingNonDurableFor("w2"); n != 0 {
+		t.Fatalf("w2 reported nothing pending, got %d", n)
+	}
+
+	// UploadComplete flips keys durable one at a time.
+	r.MarkDurable(files[:1])
+	if n := r.PendingNonDurableFor("w1"); n != 1 {
+		t.Fatalf("expected 1 pending after first MarkDurable, got %d", n)
+	}
+	r.MarkDurable(files[1:])
+	if n := r.PendingNonDurableFor("w1"); n != 0 {
+		t.Fatalf("expected 0 pending after all durable, got %d", n)
+	}
+}
+
+func TestPendingNonDurableForClearedByCleanup(t *testing.T) {
+	c := testCoordinatorForPeers(time.Minute)
+	r := c.peerFiles
+	key := "queries/q9/stage-1/t1.wshf"
+	r.Record([]string{key}, "w1")
+	r.RecordPending([]string{key})
+	if n := r.PendingNonDurableFor("w1"); n != 1 {
+		t.Fatalf("expected 1 pending, got %d", n)
+	}
+	// Query done: terminal roots elide their uploads (no UploadComplete
+	// ever comes), so cleanup must stop the keys from granting grace.
+	r.CleanupQuery("q9")
+	if n := r.PendingNonDurableFor("w1"); n != 0 {
+		t.Fatalf("expected 0 pending after CleanupQuery, got %d", n)
+	}
+}
+
+func TestClassifyFatalResultGraceWindow(t *testing.T) {
+	const key = "queries/q1/stage-2/partition=0001/t7.wshf"
+	fail := distributed.ResultNotification{TaskID: "t9", MissingInputKey: key}
+
+	// Producer past the stale TTL but inside the reap-grace window: the
+	// failure must stay retryable — the reaper is holding the worker open
+	// precisely so its uploads can land (docs/design/reap-grace.md).
+	c := testCoordinatorForPeers(time.Millisecond)
+	c.workers.grace = time.Minute
+	c.peerFiles.Record([]string{key}, "w1")
+	c.workers.record(distributed.WorkerHeartbeat{WorkerID: "w1"})
+	time.Sleep(5 * time.Millisecond) // past stale, inside grace
+	if c.classifyFatalResult(fail) {
+		t.Fatal("grace-window producer must stay retryable, not input-lost")
+	}
+
+	// Same silence with zero grace (pre-grace semantics): input lost.
+	c.workers.grace = 0
+	if !c.classifyFatalResult(fail) {
+		t.Fatal("with grace disabled, dead producer must classify input-lost")
+	}
+}

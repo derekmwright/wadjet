@@ -3,6 +3,8 @@ package coordinator
 import (
 	"context"
 	"log/slog"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -139,6 +141,18 @@ type WorkerRegistry struct {
 	sub         *nats.Subscription
 	progressSub *nats.Subscription // per-task progress, used as a heartbeat-equivalent liveness signal
 	Liveness    *TaskLiveness      // per-task progress tracking from heartbeats AND TaskProgress messages
+	// grace extends the stale TTL for a worker that still holds the only
+	// copy of shuffle/stage outputs (no durable S3 copy landed yet).
+	// Reaping such a worker invalidates those outputs and forces a
+	// producer-stage re-run — a far costlier recovery than waiting out a
+	// transient network silence (2026-08-13 Q03-R2: ~105s NIC silence vs
+	// the 90s TTL cost a 2m56 re-dispatch). Bounded: past stale+grace the
+	// worker is reaped regardless. See docs/design/reap-grace.md.
+	grace time.Duration
+	// PendingNonDurable reports how many of the worker's recorded outputs
+	// still lack a durable copy. Set before StartReaper (never after — the
+	// reaper goroutine reads it unlocked); nil disables the grace.
+	PendingNonDurable func(workerID string) int
 }
 
 // NewWorkerRegistry creates a worker registry that subscribes to heartbeats.
@@ -164,9 +178,22 @@ func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger, staleTTL time.Duratio
 		staleTTL = 90 * time.Second
 	}
 
+	// Reap grace default 90s (one extra TTL): the observed reap-while-alive
+	// silence was ~105s, barely past the 90s TTL, so TTL+90s covers that
+	// class with margin while bounding the truly-dead recovery delay to
+	// one extra grace window — and only when outputs are pending, exactly
+	// the case where a reap costs a producer re-run anyway.
+	grace := 90 * time.Second
+	if v := os.Getenv("WADJET_REAP_GRACE_SECONDS"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+			grace = time.Duration(f * float64(time.Second))
+		}
+	}
+
 	wr := &WorkerRegistry{
 		workers:  make(map[string]*WorkerInfo),
 		stale:    staleTTL,
+		grace:    grace,
 		logger:   logger,
 		nc:       nc,
 		Liveness: NewTaskLiveness(),
@@ -363,6 +390,19 @@ func (wr *WorkerRegistry) IsAlive(workerID string) bool {
 	return ok && w.LastSeen.After(time.Now().Add(-wr.stale))
 }
 
+// MayRecover reports whether the worker is alive OR still registered
+// inside the reap-grace window (silent for less than stale+grace). The
+// input-lost classifiers use it in place of IsAlive so a grace-deferred
+// producer keeps missing-input failures retryable — its background
+// uploads may still land, or the peer path may resume, before the grace
+// expires. Once the reaper removes the worker this returns false.
+func (wr *WorkerRegistry) MayRecover(workerID string) bool {
+	wr.mu.RLock()
+	defer wr.mu.RUnlock()
+	w, ok := wr.workers[workerID]
+	return ok && w.LastSeen.After(time.Now().Add(-(wr.stale+wr.grace)))
+}
+
 // Count returns the number of active workers.
 func (wr *WorkerRegistry) Count() int {
 	return len(wr.ActiveWorkers())
@@ -484,9 +524,28 @@ func (wr *WorkerRegistry) ReapStale() int {
 	defer wr.mu.Unlock()
 
 	cutoff := time.Now().Add(-wr.stale)
+	graceCutoff := cutoff.Add(-wr.grace)
 	reaped := 0
 	for id, w := range wr.workers {
 		if w.LastSeen.Before(cutoff) {
+			// Output-aware grace: a worker past the TTL but still inside
+			// the grace window, holding outputs with no durable copy,
+			// gets deferred instead of reaped. Both liveness signals ride
+			// NATS, so total NIC silence looks identical for a healthy
+			// process and a dead one; when the worker holds the only copy
+			// of stage outputs, the asymmetry favors waiting (a wrong
+			// reap invalidates the outputs and re-runs the producer
+			// stage). Past stale+grace it is reaped unconditionally.
+			if wr.grace > 0 && wr.PendingNonDurable != nil && w.LastSeen.After(graceCutoff) {
+				if pending := wr.PendingNonDurable(id); pending > 0 {
+					wr.logger.Warn("worker reap deferred (grace): pending non-durable outputs",
+						"worker_id", id,
+						"last_seen_ago", time.Since(w.LastSeen).Round(time.Second),
+						"pending_non_durable", pending,
+						"grace_deadline_in", time.Until(w.LastSeen.Add(wr.stale+wr.grace)).Round(time.Second))
+					continue
+				}
+			}
 			// Report which tasks the dead worker was holding. Surfaces
 			// "8 tasks orphaned because worker wedged" in the coord log
 			// instead of just "worker reaped." Operators reading the log

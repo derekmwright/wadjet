@@ -280,3 +280,75 @@ func TestReapStillFiresWhenAllSignalsStop(t *testing.T) {
 		t.Fatalf("expected 1 reaped (truly dead worker); got %d", reaped)
 	}
 }
+
+// Reap grace (docs/design/reap-grace.md): a worker past the stale TTL but
+// inside the grace window, holding outputs with no durable copy, is
+// deferred instead of reaped. Regression for the 2026-08-13 Q03-R2
+// reap-while-alive incident: ~105s NIC silence vs the 90s TTL invalidated
+// the worker's not-yet-uploaded shuffle outputs and cost a 2m56 re-dispatch.
+func TestReapStaleGraceDefersWorkerWithPendingOutputs(t *testing.T) {
+	wr := &WorkerRegistry{
+		workers: make(map[string]*WorkerInfo),
+		stale:   90 * time.Second,
+		grace:   90 * time.Second,
+		logger:  slog.Default(),
+	}
+	pending := 1
+	wr.PendingNonDurable = func(string) int { return pending }
+
+	wr.record(distributed.WorkerHeartbeat{WorkerID: "w-silent", Timestamp: time.Now()})
+	wr.workers["w-silent"].LastSeen = time.Now().Add(-105 * time.Second)
+
+	if reaped := wr.ReapStale(); reaped != 0 {
+		t.Fatalf("expected grace deferral, got %d reaped", reaped)
+	}
+	if !wr.MayRecover("w-silent") {
+		t.Fatal("grace-deferred worker must report MayRecover")
+	}
+	if wr.IsAlive("w-silent") {
+		t.Fatal("grace-deferred worker must not report IsAlive")
+	}
+
+	// Uploads landed, pending drains to zero: the same silence now reaps.
+	pending = 0
+	if reaped := wr.ReapStale(); reaped != 1 {
+		t.Fatalf("expected reap once outputs drained, got %d", reaped)
+	}
+}
+
+func TestReapStaleGraceExhaustedReapsDespitePendingOutputs(t *testing.T) {
+	wr := &WorkerRegistry{
+		workers: make(map[string]*WorkerInfo),
+		stale:   90 * time.Second,
+		grace:   90 * time.Second,
+		logger:  slog.Default(),
+	}
+	wr.PendingNonDurable = func(string) int { return 7 }
+
+	wr.record(distributed.WorkerHeartbeat{WorkerID: "w-gone", Timestamp: time.Now()})
+	wr.workers["w-gone"].LastSeen = time.Now().Add(-181 * time.Second) // past stale+grace
+
+	if reaped := wr.ReapStale(); reaped != 1 {
+		t.Fatalf("grace is bounded: expected reap past stale+grace, got %d", reaped)
+	}
+	if wr.MayRecover("w-gone") {
+		t.Fatal("reaped worker must not report MayRecover")
+	}
+}
+
+func TestReapStaleNoGraceWithoutCallback(t *testing.T) {
+	// Streaming exchange off → no PendingNonDurable callback → grace never
+	// engages, reap behavior identical to pre-grace.
+	wr := &WorkerRegistry{
+		workers: make(map[string]*WorkerInfo),
+		stale:   90 * time.Second,
+		grace:   90 * time.Second,
+		logger:  slog.Default(),
+	}
+	wr.record(distributed.WorkerHeartbeat{WorkerID: "w-silent", Timestamp: time.Now()})
+	wr.workers["w-silent"].LastSeen = time.Now().Add(-105 * time.Second)
+
+	if reaped := wr.ReapStale(); reaped != 1 {
+		t.Fatalf("nil callback must disable grace, got %d reaped", reaped)
+	}
+}

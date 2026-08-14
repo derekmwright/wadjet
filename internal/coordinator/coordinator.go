@@ -320,6 +320,11 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 	// durability from worker UploadComplete notifications.
 	if cfg.StreamingExchange {
 		c.peerFiles = newPeerFileRegistry()
+		// Reap grace: the reaper defers reaping a silent worker while it
+		// holds the only copy of stage outputs (pending background
+		// uploads), bounded by the grace window. Wired here, before any
+		// StartReaper caller runs (setter-before-start).
+		c.workers.PendingNonDurable = c.peerFiles.PendingNonDurableFor
 		c.scheduler.SetTaskAnnotator(c.annotateTaskPeerLocations)
 		if nc != nil {
 			sub, subErr := nc.Subscribe(distributed.SubjectUploadComplete, func(msg *nats.Msg) {
@@ -411,6 +416,7 @@ func (c *Coordinator) noteTaskResult(r distributed.ResultNotification) {
 	// to fetch them from. Retries record the winning attempt's worker.
 	if c.peerFiles != nil && r.Success {
 		c.peerFiles.Record(r.ResultFiles, r.WorkerID)
+		c.peerFiles.RecordPending(r.UploadPendingKeys)
 	}
 }
 

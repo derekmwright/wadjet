@@ -534,6 +534,14 @@ type ResultNotification struct {
 	// Result location
 	ResultPath  string   `json:"result_path,omitempty"`
 	ResultFiles []string `json:"result_files,omitempty"` // multi-file output (e.g., shuffle per-partition files)
+	// UploadPendingKeys lists the ResultFiles whose durable (S3) copy was
+	// still uploading in the background when this notification was sent
+	// (streaming exchange Phase B). The coordinator's reap grace counts
+	// these per worker: a silent worker holding the only copy of such
+	// keys gets a bounded reap deferral (docs/design/reap-grace.md).
+	// Keys leave pending via UploadComplete. Absent (older worker or
+	// synchronous upload) = nothing pending — grace disengages.
+	UploadPendingKeys []string `json:"upload_pending_keys,omitempty"`
 	NumRows     int64    `json:"num_rows"`
 	SizeBytes   int64    `json:"size_bytes"`
 
