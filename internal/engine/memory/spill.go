@@ -10,8 +10,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"runtime/debug"
+	runtimemetrics "runtime/metrics"
 	"sort"
 	"strconv"
 	"sync"
@@ -494,14 +494,28 @@ func heapBackpressureVals() (raw, adj bool) {
 		return false, false
 	}
 
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
+	alloc := heapAllocBytesNoSTW()
 	threshold := int64(float64(limit) * ratio)
-	raw = int64(ms.HeapAlloc) > threshold
-	adj = int64(ms.HeapAlloc)-reclaimableBytes() > threshold
+	raw = alloc > threshold
+	adj = alloc-reclaimableBytes() > threshold
 	heapBackpressureRawValue.Store(raw)
 	heapBackpressureLastValue.Store(adj)
 	return raw, adj
+}
+
+// heapAllocBytesNoSTW reads live heap bytes via runtime/metrics —
+// equivalent to MemStats.HeapAlloc WITHOUT the stop-the-world that
+// runtime.ReadMemStats performs. This function sits behind 100ms caches
+// on the spill/backpressure hot paths, which refresh precisely when the
+// heap is under pressure — the exact moment a ReadMemStats STW
+// stretches worst (frozen-spin residual, SIGABRT dump 2026-08-14
+// 02:14: ShouldSpillFor → heapPressureExceeded → ReadMemStats caught
+// in [stopping the world]; docs/benchmarks/
+// stall-family-postmortem-2026-08-14.md).
+func heapAllocBytesNoSTW() int64 {
+	s := []runtimemetrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+	runtimemetrics.Read(s)
+	return int64(s[0].Value.Uint64())
 }
 
 // HeapPressureExceeded is the exported view of the process heap-pressure
@@ -511,9 +525,10 @@ func heapBackpressureVals() (raw, adj bool) {
 // pressure rather than relieving page cache when there is headroom.
 func HeapPressureExceeded() bool { return heapPressureExceeded() }
 
-// heapPressureExceeded reads runtime.MemStats and returns true if the
-// heap is using more than heapPressureRatio of GOMEMLIMIT. Result is
-// cached for 100 ms to keep the per-call overhead near zero on hot paths.
+// heapPressureExceeded returns true if the live heap (STW-free
+// runtime/metrics read, less reclaimable bytes) is using more than
+// heapPressureRatio of GOMEMLIMIT. Result is cached for 100 ms to keep
+// the per-call overhead near zero on hot paths.
 func heapPressureExceeded() bool {
 	now := time.Now().UnixNano()
 	last := heapPressureLastCheckNS.Load()
@@ -532,17 +547,16 @@ func heapPressureExceeded() bool {
 		return false
 	}
 
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
+	alloc := heapAllocBytesNoSTW()
 	threshold := int64(float64(limit) * heapPressureRatio)
 	recl := reclaimableBytes()
-	v := int64(ms.HeapAlloc)-recl > threshold
+	v := alloc-recl > threshold
 	prev := heapPressureLastValue.Swap(v)
 	if v && !prev {
 		// Transition false→true: log loudly because the tracker missed something.
 		// This indicates an allocation site that should be added to the tracker.
 		slog.Warn("heap-pressure spill triggered (likely tracker accounting gap)",
-			"heap_alloc_mb", ms.HeapAlloc/(1<<20),
+			"heap_alloc_mb", alloc/(1<<20),
 			"reclaimable_mb", recl/(1<<20),
 			"threshold_mb", threshold/(1<<20),
 			"gomemlimit_mb", limit/(1<<20),

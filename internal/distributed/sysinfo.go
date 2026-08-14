@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	runtimemetrics "runtime/metrics"
 	"strconv"
 	"strings"
 )
@@ -30,9 +31,14 @@ func ProcessRSS() int64 {
 			return rss
 		}
 	}
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	return int64(ms.HeapInuse)
+	// STW-free fallback (never taken on Linux): HeapInuse == heap
+	// objects + unused span bytes in runtime/metrics terms.
+	s := []runtimemetrics.Sample{
+		{Name: "/memory/classes/heap/objects:bytes"},
+		{Name: "/memory/classes/heap/unused:bytes"},
+	}
+	runtimemetrics.Read(s)
+	return int64(s[0].Value.Uint64() + s[1].Value.Uint64())
 }
 
 // processRSSFromStatm parses the resident-pages field (2) of /proc/self/statm

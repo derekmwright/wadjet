@@ -315,8 +315,9 @@ func (w *Worker) writeLongTaskSnapshot(dir string, task distributed.Task) error 
 		return fmt.Errorf("close heap profile: %w", cErr)
 	}
 
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
+	// STW-free (see heapProfilerStats): a 5-minute task usually means
+	// pressure, exactly when a ReadMemStats STW stretches worst.
+	hs := heapProfilerStats()
 	sidecar := fmt.Sprintf(
 		"worker_id=%s\n"+
 			"task_id=%s\n"+
@@ -341,10 +342,10 @@ func (w *Worker) writeLongTaskSnapshot(dir string, task distributed.Task) error 
 		ts,
 		time.UnixMilli(ts).UTC().Format(time.RFC3339Nano),
 		longTaskWatchAt,
-		ms.HeapAlloc/1024/1024,
-		ms.HeapSys/1024/1024,
-		ms.HeapInuse/1024/1024,
-		ms.NumGC,
+		hs.alloc/1024/1024,
+		hs.sys/1024/1024,
+		hs.inuse/1024/1024,
+		hs.gcCycles,
 		runtime.NumGoroutine(),
 	)
 	if sErr := os.WriteFile(sidecarPath, []byte(sidecar), 0o644); sErr != nil {
@@ -357,7 +358,7 @@ func (w *Worker) writeLongTaskSnapshot(dir string, task distributed.Task) error 
 		"query_id", task.QueryID,
 		"stage_id", task.StageID,
 		"goroutines", runtime.NumGoroutine(),
-		"heap_alloc_mb", ms.HeapAlloc/1024/1024,
+		"heap_alloc_mb", hs.alloc/1024/1024,
 		"goroutine_path", goroutinePath,
 		"heap_path", heapPath)
 	return nil
