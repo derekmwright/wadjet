@@ -670,6 +670,12 @@ resource "aws_instance" "worker" {
           tid=$(basename "$t")
           echo "TID $tid stat2: $(awk '{print $14, $15, $3}' "$t/stat" 2>/dev/null)"
           echo "TID $tid kstack: $(tr '\n' '|' < "$t/stack" 2>/dev/null)"
+        done
+        # Log-pipeline state (log-jam theory, 2026-08-14): if journald or
+        # the sed relay is wedged, the worker's stderr pipe backs up and
+        # (pre-async-writer binaries) freezes every logging goroutine.
+        for lp in $(pgrep -x systemd-journald; pgrep -x sed); do
+          echo "LOGPIPE $lp $(cat /proc/$lp/comm 2>/dev/null) stat: $(awk '{print $14, $15, $3}' /proc/$lp/stat 2>/dev/null) kstack: $(tr '\n' '|' < /proc/$lp/stack 2>/dev/null)"
         done; } > "$out" 2>/dev/null
     }
 
@@ -692,9 +698,12 @@ resource "aws_instance" "worker" {
             T=/var/log/stall-$pid-$(date +%s).threads
             thread_capture "$pid" "$T"
             logger -t stall-watchdog "thread capture ($(wc -c <"$T") bytes)"
+            # NOTE: the full dump is NOT logger-ed into journald anymore
+            # (2026-08-14): shipping 350KB dumps through syslog feeds the
+            # journald stall this watchdog hunts — the log-jam mechanism
+            # (see internal/logio). Files ship via the wlog uploader glob.
             if curl -s --max-time 2 "http://127.0.0.1:9100/debug/pprof/goroutine?debug=2" -o "$D" && [ -s "$D" ]; then
               logger -t stall-watchdog "pprof stacks captured ($(wc -c <"$D") bytes)"
-              logger -t stall-stacks -f "$D"
             else
               logger -t stall-watchdog "pprof grab failed (fully wedged) - relying on SIGABRT dump"
             fi
@@ -711,6 +720,15 @@ resource "aws_instance" "worker" {
             fi
             unset "lastok[$pid]" "lastut[$pid]"
             sleep 5
+          elif [ "$unresp_ms" -gt 75000 ]; then
+            # Third signature (2026-08-14): port dead >75s with CPU
+            # QUIET falls between frozen-spin (needs CPU accrual) and
+            # silent-stall (needs a responsive port). Evidence-only.
+            logger -t quiet-freeze "QUIET-FREEZE pid=$pid unresp_ms=$unresp_ms cpu_jiffies=$dut capturing threads (no signal sent)"
+            T=/var/log/stall-$pid-$(date +%s).threads
+            thread_capture "$pid" "$T"
+            logger -t quiet-freeze "thread capture ($(wc -c <"$T") bytes)"
+            lastok[$pid]=$now; lastut[$pid]=$ut
           fi
         done
       done ) &
