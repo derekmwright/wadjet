@@ -804,3 +804,36 @@ netlink-RIB-dump-per-heartbeat defect fixed in 18cf955 (see
 dispatch-stall arc). Whether eager load makes those episodes more
 likely remains open (2-for-2 in eager arms so far, but n=2 and the
 q22 shape strikes control arms).
+
+## 18. Post-stall-fix re-check (2026-08-14, closure run
+## 20260814-024313): tails did NOT re-lengthen — park confirmed
+
+The 08-14 stall-family closure (postmortem
+docs/benchmarks/stall-family-postmortem-2026-08-14.md) moved the
+config baseline 30–44% (319/378 → ~265 cold / ~213 steady), which
+raised the question of whether §17's parking verdict — rendered on
+the stall-taxed engine — still holds. Offline re-measurement on the
+closure run's clean coord journal (zero stall firings, 4 suites,
+88/88) answers it:
+
+- **Producer completion spreads are unchanged-to-shorter**: 0.4–3.5s
+  across the edge population, single outlier Q18
+  exchange-repartition-11 at 2.5–5.6s. Same short-tail world as the
+  §17 pair; the stall fixes made walls faster, so tails shrank
+  further. The §17 re-pair precondition ("config change that
+  re-lengthens producer tails") is explicitly NOT met.
+- **Adjacent-overlap ceiling shrank**: 14% of DAG wall
+  (stage_timeline2.py, 863s across 4 suites) vs 17% on 08-13;
+  measured edge ceiling 65s = 16.7% of the 390s steady pass
+  (eager_spread.py). Serial mass unchanged in kind: broadcast_join
+  28% / hash_join 20% / repartition 12% — all BEFORE the decision
+  threshold, unreachable by post-threshold clearance.
+- Economics bound unchanged: floor=1 would clear the same 1–3s
+  population §17 already cleared (≤ ~10s/suite possible win) against
+  a machinery cost measured twice (+2.1% §12, +5.8% §17).
+
+VERDICT: park stands on clean-wall evidence; no deploy spent. The
+2026-08-14 handoff menu item "eager pair re-run on clean walls" is
+resolved offline as NO-GO. Overlap investment stays with upload
+smoothing (shipped, pinned 150 MB/s) and, if ever, streaming
+consumption.
