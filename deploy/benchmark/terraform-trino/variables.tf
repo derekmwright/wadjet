@@ -35,7 +35,7 @@ variable "trino_version" {
 }
 
 variable "fte" {
-  description = "Fault-tolerant execution (retry-policy=TASK + S3 exchange spooling under s3://<data_bucket>/trino-exchange) — the fair durability class vs wadjet's materialized stage outputs. FTE tax ≈0 at SF100 (2026-07-25: 225.7s FTE vs 235.0s streaming+spill; q09 improved). false = streaming mode; spill on NVMe stays enabled either way (streaming without spill OOMs q09/q21 at 14GB/node). Purge the trino-exchange prefix at teardown (the runner also purges post-suite)."
+  description = "Fault-tolerant execution (retry-policy=TASK + S3 exchange spooling under s3://<data_bucket>/trino-exchange) — the fair durability class vs wadjet's materialized stage outputs. FTE tax ≈0 at SF100 (2026-07-25: 225.7s FTE vs 235.0s streaming+spill; q09 improved). false = streaming mode with spill on NVMe (streaming without spill OOMs q09/q21 at 14GB/node; spill is NOT written under FTE — Trino rejects the combination with 'spillable not yet set' join failures, 2026-08-14). Purge the trino-exchange prefix at teardown (the runner also purges post-suite)."
   type        = bool
   default     = true
 }

@@ -180,10 +180,15 @@ locals {
   PROPS
 
   # Spill on the NVMe instance store — required in streaming mode (q09/q21
-  # OOM at 14GB/node without it) and harmless under FTE. Only written on
-  # nodes that actually execute tasks AND have the c7gd instance store
-  # (workers; the coordinator too in single-node validation mode).
-  spill_config = <<-PROPS
+  # OOM at 14GB/node without it) but INCOMPATIBLE with retry-policy=TASK:
+  # spill-enabled=true under FTE fails every join query with internal error
+  # "spillable not yet set" (~190s of exchange.s3 retries per query,
+  # observed 2026-08-14; q01/q06 pass because they have no spillable
+  # operators). FTE's memory relief is the spooled exchange itself. July's
+  # SSM-applied arms never combined them — keep that invariant here. Only
+  # written on task-executing nodes with the c7gd instance store (workers;
+  # the coordinator too in single-node validation mode).
+  spill_config = var.fte ? "" : <<-PROPS
     spill-enabled=true
     spiller-spill-path=/mnt/nvme/trino-spill
   PROPS
