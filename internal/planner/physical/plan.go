@@ -1891,6 +1891,14 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		if rewired := rewireAggOverRawExchange(stages); len(rewired) != len(stages) {
 			stages = elideCoPartitionedExchanges(rewired)
 		}
+		// Drop join subtrees that duplicate a sibling subtree (Q11's
+		// scalar-subquery leg clones its main leg stage-for-stage; Q17's
+		// semi lineitem⋈part ≡ its inner sibling), rewiring the clone's
+		// consumers onto the survivor — stage outputs already support
+		// multiple consumers. MUST run before fuseStageChains: chain
+		// fusion absorbs consumers into the legs, breaking the clones'
+		// structural symmetry. Kill switch WADJET_SHARED_SUBPLAN=0.
+		stages = dedupeSharedSubplans(stages)
 		// Fuse 1:1 same-distribution join chains (consumer task i reads
 		// exactly producer task i's output) into single fragments, eliding
 		// the per-link materialization — Q18's join-class 48.9 GB at

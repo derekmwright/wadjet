@@ -97,11 +97,13 @@ identify the sink type join-5's fragment actually gets.
 
 1. ~~q08 morsel width~~ — shipped 0af1ed5; SF100 pair to confirm
    (expect q08 ~17–18s, q09 improvement, no regression elsewhere).
-2. **Shared-subplan dedup (closes q11 AND q17):** planner pass that
-   detects stage subtrees identical up to projected columns (q11 —
-   exact; q17 — plus semi≡inner-on-unique-build equivalence), emits one
-   stage with union columns, multi-consumes its exchange. Runtime
-   support (multi-consumer exchanges, subsume) already exists.
+2. ~~Shared-subplan dedup (closes q11 AND q17)~~ — SHIPPED 2026-08-14
+   (`dedupeSharedSubplans`, design
+   `docs/design/shared-subplan-dedup.md`): fingerprint-based join-rooted
+   subtree dedup; q17's semi rides the inner via a
+   duplication-invariant-consumer gate (no uniqueness oracle needed —
+   AVG grouped on the probe key is invariant under per-key duplication).
+   Q11 15→10 stages, Q17 15→11. SF100 pair owed.
 3. q11 tail: unblock final-aggregate partials from scalar deps
    (dependency granularity: partials depend on inputs only; the merge
    holds the scalar dep). Generic small-stage dispatch gap (~1s per

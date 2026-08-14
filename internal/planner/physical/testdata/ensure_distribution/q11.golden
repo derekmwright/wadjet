@@ -4,12 +4,7 @@ scan-3	scan	Singleton
 join-4	broadcast_join	Singleton	deps=scan-0,exchange-replicate-join-4-3,scan-1
 aggregate-5	aggregate	RoundRobin	deps=join-4
 final_aggregate-6	final_aggregate	Singleton	deps=aggregate-5
-scan-7	scan	Singleton
-scan-8	scan	Singleton
-scan-10	scan	Singleton
-join-11	broadcast_join	Singleton	deps=scan-7,exchange-replicate-join-11-9,scan-8
-aggregate-12	aggregate	Singleton	deps=join-11
+aggregate-12	aggregate	Singleton	deps=join-4
 final_aggregate-13	final_aggregate	Singleton	deps=aggregate-12
 exchange-replicate-join-4-3	exchange-replicate	Broadcast	deps=scan-3
-exchange-replicate-join-11-9	exchange-replicate	Broadcast	deps=scan-10
 exchange-gather-final_aggregate-6	exchange-gather	Singleton	deps=final_aggregate-6

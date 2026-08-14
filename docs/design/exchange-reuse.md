@@ -123,6 +123,12 @@ the preserved side.
 
 ### C — duplicate/subsumable exchanges of the same relation
 
+> **Status 2026-08-14**: the filtered-subset case shipped as
+> `dedupeSubsumedScanExchanges` (#266); the general duplicate-subtree
+> case shipped as `dedupeSharedSubplans` — join-rooted, fingerprint-based,
+> including semi≡inner riding (`docs/design/shared-subplan-dedup.md`).
+> The union-columns leaf-exchange form described below remains unbuilt.
+
 Q21 shuffles lineitem on `l_orderkey`/24 twice from base data:
 raw (l2, 600M rows) and filtered `l_receiptdate > l_commitdate`
 (l3, 379M rows). The raw shuffle is a superset of the filtered one.
