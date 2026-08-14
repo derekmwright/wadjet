@@ -125,3 +125,33 @@ same-window cold −30.2%; q08 gap vs Trino 2.07×→1.22×; q17 steady
 window headline pair (main vs pre-arc) is worth running for the record
 books; the remaining q08/q11 gap levers are the shared-subplan dedup
 (diagnosis memo) and the join-6 exchange-sink residual above.
+
+## 5. Headline pair on the corrected config (2026-08-14 evening, runs=4 each)
+
+Same-window pair, both arms profile-first config (gRPC plane, paced
+uploads, zstd, locality, catalog): ctl b88159e `results/20260814-164842`
+vs trt main-1388bf8 `results/20260814-171656`. Local:
+`~/wadjet-artifacts/20260814-headline-pair/`.
+
+**Storms: gone. Zero watchdog firings, zero failures, both arms, all
+8 suites** — the 085a6ce config fix holds under load. Correctness:
+rows identical, all spot vsigs byte-match.
+
+**Steady (R3/R4 mean): 277.9 → 209.4s (−24.7%), 20 of 22 queries
+improved.** Best treatment suite 197.3s. Biggest: q20 −55% (28.7→12.8),
+q17 −43% (26.8→15.2), q08 −37% (35.6→22.3), q12 −32%, q02 −30%, q01
+−25%. Cold R1 308.7 vs 268.5 is a single-outlier artifact (trt Q20-R1
+71.6s, the in-flight-upload cold lottery; ex-Q20 R1 = 237.1 vs 256.2,
+−7.5%).
+
+Config-context correction to §1: on the proper gRPC config the control
+itself runs q18 ≈ 14.3s / q21 ≈ 13.7s steady — much of §1's q18/q21
+"best ever" delta was recovering drift damage. The genuine engine wins
+on equal config are the table above.
+
+Window note: this evening window is soft (ctl steady 277.9 vs the
+canonical morning 198.6 on the same binary+config) — absolute
+record-book numbers deserve a clean AM window; the within-window
+−24.7% is the defensible claim. q08 steady 22.3 vs Trino FTE 14.0 →
+1.59× (from 2.07×); remaining q08 material: exchange-sink per-consume
+partition hashing residual + effective-width plateau (~10 of 15).
