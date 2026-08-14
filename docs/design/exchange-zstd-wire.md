@@ -1,7 +1,8 @@
 # Exchange zstd-on-wire (barrier-overlap arc, step 3)
 
-Status: IMPLEMENTED 2026-08-14 — flag `WADJET_EXCHANGE_ZSTD` default
-OFF, tf var `exchange_zstd`; SF100 A/B pending. Engagement marker:
+Status: VALIDATED 2026-08-14 (§6) — SF100 A/B green; pinned
+`exchange_zstd=1` in sf100-distributed.tfvars. Engine default stays
+env-off (`WADJET_EXCHANGE_ZSTD` unset/0 = s2). Engagement marker:
 `wshz_files`/`wshz_bytes` in the "shuffle io stats" line. Harness
 local gate green both flag states (treatment: wshz_files=32/48,
 upload_failed=0, all queries green vs baseline).
@@ -93,3 +94,49 @@ unpaced; s2 already "runs ahead" of the paced PUT-body reader).
   PUTs if §2's relative ratio holds); watch drain-backlog (encode
   keeping up) and pace_wait deltas; R3/R4 steady walls primary
   (multi-suite runs are cheap post-stall-fix).
+
+## 6. SF100 A/B verdict (2026-08-14, bin 6d3082c, adjacent arms,
+## runs=4 each): VALIDATED — pinned exchange_zstd=1 in
+## sf100-distributed.tfvars
+
+Control (flag off, results/20260814-100950) vs treatment (flag on,
+results/20260814-110321); both destroyed, EC2 zero; artifacts
+~/wadjet-artifacts/20260814-zstdpair/.
+
+- **CORRECTNESS: perfect.** Rows 88/88 identical both arms; vsig 84/84
+  identical except the known-benign Q19 last digit. Engagement real:
+  wshz_files ≈2500/worker (7,515 total), 18.3 GB WSHZ wire bytes.
+- **BYTE ECONOMY**: S3 upload bytes 92.1 GB (closure-run clean s2
+  reference, same config/runs) → 74.7 GB = **−19%** (cross-window
+  reference; the compressed-subset envelope measures −34% in the §2
+  bench). Same-window NIC tx −13.9% (427.9→368.5 GB) — confounded
+  upward by control's re-dispatch re-uploads. ENA out-exc totals NOT
+  comparable at these walls (treatment ran 3× faster; same-bytes-
+  shorter-window inflates event counts — the known chronic-throttle
+  pattern). A paced-rate ENA read at equal walls remains unread;
+  judge it opportunistically on future arms (all future arms carry
+  the flag via tfvars).
+- **WALLS: treatment R1 255.7 / R2 217.0 / R3 201.8 / R4 198.4 —
+  the best steady suites recorded on this config** (closure baseline
+  212.1/214.2), cross-window caveat. Control walls are unjudgeable
+  (see below).
+- **★ STALL ASYMMETRY (same window, same binary, only the flag
+  differs)**: control suffered ~13 frozen-spin firings incl. 5
+  SIGABRTs (all 3 workers, 88/88 still correct through re-dispatch);
+  treatment fired ZERO. Control SIGABRT dumps show the mechanism
+  class: GC mark cycle wedged with 31 goroutines in "GC assist wait",
+  port handler starved ~5s (NOT specimen-8's "no GC workers" read —
+  go1.26 dumps show them plainly). Hypothesis for the frozen-spin
+  arc: s2.Writer's default-concurrency encode goroutines + block
+  churn (writeFull/Reset frames present in dumps) drive allocation
+  pressure that zstd's pooled concurrency-1 encoder avoids. NOT
+  proven — the clean-closure-vs-control gap on the SAME s2 codec
+  (zero vs 13 firings, near-identical binary, night vs day window)
+  is an open residual. Evidence archived: 7 stack captures + SIGABRT
+  dumps in control/wlogs/.
+- Reap-grace note: its first live exposure (5 worker deaths) —
+  recovery clean, no lost-input query failures, rows perfect.
+
+DECISION: exchange_zstd=1 pinned in sf100-distributed.tfvars (engine
+default stays env-off; 0 reproduces s2 baselines). Envelope decode
+support for WSHC and WSHZ ships everywhere regardless of the flag.

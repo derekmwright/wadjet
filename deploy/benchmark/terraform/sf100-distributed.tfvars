@@ -68,3 +68,10 @@ peer_wire_compression     = true
 # c7gd.4xlarge baseline allowance ~234 MB/s. Set 0 to reproduce
 # unpaced baselines.
 upload_pace_mbps          = 150
+# WSHZ zstd upload envelope (docs/design/exchange-zstd-wire.md §6):
+# SF100 A/B 2026-08-14 (pair 20260814-100950/110321, bin 6d3082c):
+# rows 88/88 + vsig identical, S3 upload bytes -19% vs clean s2
+# reference, best steady suites on this config (R3/R4 ~200s), zero
+# stall-watchdog firings in the zstd arm vs 13 (5 SIGABRT) in the
+# same-window s2 arm. Set 0 to reproduce s2/WSHC baselines.
+exchange_zstd             = 1
