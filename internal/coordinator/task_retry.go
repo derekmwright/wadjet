@@ -408,8 +408,19 @@ func reapStuckOnce(liveness *TaskLiveness, retrier *taskRetrier, threshold time.
 		return 0
 	}
 	re, term := retrier.RetryStuck(stuck)
+	// Re-dispatched tasks RESET their liveness clock instead of leaving
+	// tracking: Remove() here used to make the new attempt invisible until
+	// some heartbeat mentioned it — and an attempt published to an
+	// already-reaped-but-still-TCP-connected worker is never mentioned by
+	// anything, so the task fell out of both recovery nets and wedged the
+	// query to its deadline (2026-08-14 SF100 Q22-R3: 30m hang; the reaped
+	// worker's ExpireWorker had already fired and cannot fire twice). The
+	// reset keeps the no-instant-double-burn property — the next sweep sees
+	// a fresh clock — while guaranteeing a silent re-dispatch re-enters the
+	// stuck set one threshold later for its remaining attempts.
+	now := time.Now()
 	for _, id := range re {
-		liveness.Remove(id)
+		liveness.Update([]string{id}, now)
 	}
 	for _, id := range term {
 		liveness.Remove(id)

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/dataplane"
@@ -53,6 +54,11 @@ type Scheduler struct {
 
 	inflightMu sync.Mutex
 	inflight   map[string]inflightTask // task ID → estimate charged to a worker
+
+	// rrCursor rotates the liveness-filtered round-robin fallback
+	// (pickRoundRobinFrom); dpSrv's own round-robin can't skip reaped-but-
+	// still-connected workers.
+	rrCursor atomic.Uint64
 
 	// eagerInflight tracks dispatched-not-yet-done eager consumer tasks
 	// (Task.EagerInputs non-empty) per worker, for the §3.3 producer-lane
@@ -308,13 +314,14 @@ func formatCounts(m map[string]int) string {
 // The returned method ("eager" | "local" | "binpack" | "rr") feeds the
 // placement attr on the "published tasks" line.
 func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]int, batchLen int) (workerID, method string, ok bool) {
+	connected := s.liveConnectedWorkers()
 	if len(t.EagerInputs) > 0 {
 		if id, ok := s.pickEagerWorker(); ok {
 			return id, "eager", true
 		}
 	}
 	if s.localityPlacement && s.registry != nil {
-		if id, ok := pickLocalityWorkerFrom(t, s.dpSrv.ConnectedWorkers(), s.registry.ActiveWorkers(), batchAssigned, batchLen); ok {
+		if id, ok := pickLocalityWorkerFrom(t, connected, s.registry.ActiveWorkers(), batchAssigned, batchLen); ok {
 			return id, "local", true
 		}
 	}
@@ -323,7 +330,7 @@ func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]i
 	// same-batch cap and connectivity checks as locality, and a fallback
 	// placement just misses the cache exactly as pre-affinity fan-out did.
 	if t.AffinityWorkerID != "" {
-		if id, ok := pickAffinityWorkerFrom(t.AffinityWorkerID, s.dpSrv.ConnectedWorkers(), batchAssigned, batchLen); ok {
+		if id, ok := pickAffinityWorkerFrom(t.AffinityWorkerID, connected, batchAssigned, batchLen); ok {
 			return id, "affine", true
 		}
 	}
@@ -332,8 +339,57 @@ func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]i
 			return id, "binpack", true
 		}
 	}
+	if id, ok := pickRoundRobinFrom(connected, &s.rrCursor); ok {
+		return id, "rr", true
+	}
 	id, ok := s.dpSrv.PickWorker()
 	return id, "rr", ok
+}
+
+// liveConnectedWorkers filters the data plane's connected workers by
+// registry liveness. A frozen-spin-wedged worker keeps its TCP connection
+// ESTABLISHED while its heartbeats stop, so after the registry reaps it
+// the socket still looks "connected" and placement kept routing tasks into
+// the corpse — 2026-08-14 SF100 Q22-R3: the reaped worker's re-dispatched
+// tasks were affine-placed straight back onto it, hanging the query to its
+// 30m deadline. Falls back to the unfiltered list when the filter empties
+// it (startup: data-plane connections can precede the first heartbeats,
+// and with every worker wedged there is no better candidate anyway).
+func (s *Scheduler) liveConnectedWorkers() []string {
+	connected := s.dpSrv.ConnectedWorkers()
+	if s.registry == nil {
+		return connected
+	}
+	return filterAliveWorkers(connected, s.registry.IsAlive)
+}
+
+// filterAliveWorkers drops candidates the liveness oracle rejects, keeping
+// the original list when the filter would empty it (see
+// liveConnectedWorkers for why).
+func filterAliveWorkers(connected []string, isAlive func(string) bool) []string {
+	if len(connected) == 0 {
+		return connected
+	}
+	live := make([]string, 0, len(connected))
+	for _, id := range connected {
+		if isAlive(id) {
+			live = append(live, id)
+		}
+	}
+	if len(live) == 0 {
+		return connected
+	}
+	return live
+}
+
+// pickRoundRobinFrom rotates over the candidate list with the scheduler's
+// own cursor — the dpSrv round-robin can't be used once the candidate set
+// is liveness-filtered.
+func pickRoundRobinFrom(candidates []string, cursor *atomic.Uint64) (string, bool) {
+	if len(candidates) == 0 {
+		return "", false
+	}
+	return candidates[int(cursor.Add(1)-1)%len(candidates)], true
 }
 
 // pickAffinityWorkerFrom honors a scan task's cache-affinity hint when the
