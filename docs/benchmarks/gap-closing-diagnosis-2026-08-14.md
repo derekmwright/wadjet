@@ -114,4 +114,12 @@ identify the sink type join-5's fragment actually gets.
    agg specs / join filters keep the upfront barrier. Generic
    small-stage dispatch gap (~1s per boundary) is a separate,
    suite-wide observation, still open.
+   **SF100 verdict (window 20260815-121238, bin 6fa0237): wall-neutral
+   — the 5.1s tail this item was diagnosed against had ALREADY
+   collapsed to ~0.9s by ship time (dedup removed the duplicate leg;
+   fa-17 now completes in ~10ms and fa-8 takes the single-task path,
+   no fanout to overlap). q11 = 2.5-3.5s, dominated by the main leg.
+   Change kept: architecturally correct, zero regression, and it
+   engages whenever a fanout final-aggregate gates on a slow scalar
+   chain (larger scales / other plans).**
 4. q17 sink residual + slow-run read-wait — diagnose before touching.
