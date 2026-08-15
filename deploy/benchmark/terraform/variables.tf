@@ -390,6 +390,12 @@ variable "scan_decode_ahead" {
   default     = true
 }
 
+variable "shuffle_decode_ahead" {
+  description = "Shuffle decode-ahead (docs/design/shuffle-decode-ahead.md): chunk-parallel WSHF decode behind the streaming reader — one scanner stages chunk bytes, CPU-token-budgeted workers decode, strict in-order delivery. The q08/q09 probe width-plateau fix. Worker-side flag only. Default true (matches the in-binary default); set false as the same-binary kill switch restoring the serial streaming reader."
+  type        = bool
+  default     = true
+}
+
 variable "shuffle_durability" {
   description = "WADJET_SHUFFLE_DURABILITY for the coordinator (docs/design/shuffle-durability.md): stage-output upload policy stamped on dispatched tasks. eager = uploads start as outputs finalize (default, pre-knob behavior); lazy = uploads queue unstarted and run only on demand (consumer missing-input retry, coordinator read, worker drain) with the rest elided at query end; off = scratch never uploads. Coordinator-side only — workers act on Task.UploadPolicy."
   type        = string

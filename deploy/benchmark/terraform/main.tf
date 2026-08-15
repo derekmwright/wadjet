@@ -965,6 +965,7 @@ resource "aws_instance" "worker" {
             --decoded-cache-bytes=${local.eff_decoded_cache} \
             --streaming-shuffle-read=${var.streaming_shuffle_read} \
             --scan-decode-ahead=${var.scan_decode_ahead} \
+            --shuffle-decode-ahead=${var.shuffle_decode_ahead} \
             --async-scratch-purge=${var.async_scratch_purge} \
             --peer-wire-compression=${var.peer_wire_compression} \
             %{if var.spill_floating_budget~}
