@@ -233,6 +233,15 @@ counts both paths. Success judgment at SF100: join-6
 `width_claim_donations > 0`, warm-shape `consumer_dry_wait_ms`
 collapse, then q08/q09 wall.
 
+SF100 pricing (memo
+`shuffle-da-claim-donation-sf100-2026-08-15.md`): KEPT — 50.4k claim
+donations (total donated +50%), rows identical, zero reaps, first
+window with no warm q08 slow-mode run. The warm join-6 trio did NOT
+collapse, and the counters re-attribute it: those scanners are
+stage-walk-bound (stage_ms > decode_ms, token stalls absent), so no
+donation path can reach them — the residual is §4 extent skip-walk
+staging, not admission.
+
 ## 3. Alternatives rejected
 
 - **N producer goroutines over disjoint file slices** (the other option
