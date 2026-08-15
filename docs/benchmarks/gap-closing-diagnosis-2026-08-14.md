@@ -104,8 +104,14 @@ identify the sink type join-5's fragment actually gets.
    duplication-invariant-consumer gate (no uniqueness oracle needed —
    AVG grouped on the probe key is invariant under per-key duplication).
    Q11 15→10 stages, Q17 15→11. SF100 pair owed.
-3. q11 tail: unblock final-aggregate partials from scalar deps
-   (dependency granularity: partials depend on inputs only; the merge
-   holds the scalar dep). Generic small-stage dispatch gap (~1s per
-   boundary) is a separate, suite-wide observation.
+3. ~~q11 tail: unblock final-aggregate partials from scalar deps~~ —
+   SHIPPED 2026-08-15 (`scalarsDeferrableToFinalMerge` +
+   `scalarResolver` deferral): when a final_aggregate's placeholders
+   appear only in FilterExprs (HAVING at the final merge), the
+   coordinator defers the scalar await+substitution past the fanout's
+   intermediate phase — partials overlap the scalar chain; the final
+   task joins the substituted stage. Stages whose placeholders reach
+   agg specs / join filters keep the upfront barrier. Generic
+   small-stage dispatch gap (~1s per boundary) is a separate,
+   suite-wide observation, still open.
 4. q17 sink residual + slow-run read-wait — diagnose before touching.

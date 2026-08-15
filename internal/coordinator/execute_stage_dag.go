@@ -601,32 +601,54 @@ func (c *Coordinator) executeStageDAG(
 			// their output feeds into FilterExprs via string substitution
 			// rather than flowing in as record batches), then extract the
 			// single scalar and substitute the placeholder.
+			//
+			// Deferral (q11 serial-tail fix): when every placeholder is
+			// consumed only by the final-merge phase (HAVING on merged
+			// groups — scalarsDeferrableToFinalMerge), the await +
+			// substitution moves INTO dispatch, between the fanout's
+			// intermediate phase and its final task. The partials then
+			// overlap the scalar producer chain instead of serializing
+			// behind it (gap-closing diagnosis §q11: fa-8's partials
+			// waited ~2s on the fa-17 chain for a filter only the merge
+			// applies). A deferred stage blocks holding its dispatch
+			// slot; deadlock would need >= dispatchSlots deferred stages
+			// all gating their own producers — a query carries at most a
+			// couple of scalar-consuming stages (TPC-H peaks at one).
+			var deferredScalars scalarResolver
 			if len(s.ScalarDependencies) > 0 {
-				for _, pid := range s.ScalarDependencies {
-					ch, tracked := done[pid]
-					if !tracked {
-						continue
+				stage := s
+				resolve := func(rctx context.Context) (physical.Stage, error) {
+					for _, pid := range stage.ScalarDependencies {
+						ch, tracked := done[pid]
+						if !tracked {
+							continue
+						}
+						select {
+						case <-ch:
+						case <-rctx.Done():
+							return stage, rctx.Err()
+						}
 					}
-					select {
-					case <-ch:
-					case <-gctx.Done():
-						return gctx.Err()
+					outputsMu.Lock()
+					prod := make(map[string]StageOutput, len(stage.ScalarDependencies))
+					prodStages := make(map[string]physical.Stage, len(stage.ScalarDependencies))
+					for _, pid := range stage.ScalarDependencies {
+						prod[pid] = outputs[pid]
+						if ps, ok := stageByID[pid]; ok {
+							prodStages[pid] = ps
+						}
 					}
+					outputsMu.Unlock()
+					return c.substituteScalarDependencies(rctx, stage, prod, prodStages)
 				}
-				outputsMu.Lock()
-				prod := make(map[string]StageOutput, len(s.ScalarDependencies))
-				prodStages := make(map[string]physical.Stage, len(s.ScalarDependencies))
-				for _, pid := range s.ScalarDependencies {
-					prod[pid] = outputs[pid]
-					if ps, ok := stageByID[pid]; ok {
-						prodStages[pid] = ps
+				if scalarsDeferrableToFinalMerge(s) {
+					deferredScalars = resolve
+				} else {
+					var subErr error
+					s, subErr = resolve(gctx)
+					if subErr != nil {
+						return fmt.Errorf("stage %s scalar substitution: %w", s.ID, subErr)
 					}
-				}
-				outputsMu.Unlock()
-				var subErr error
-				s, subErr = c.substituteScalarDependencies(gctx, s, prod, prodStages)
-				if subErr != nil {
-					return fmt.Errorf("stage %s scalar substitution: %w", s.ID, subErr)
 				}
 			}
 			var inputs map[string]StageOutput
@@ -699,7 +721,7 @@ func (c *Coordinator) executeStageDAG(
 			case physical.StageExchangeReplicate:
 				out, err = c.dispatchReplicateStage(gctx, queryID, sql, s, inputs)
 			default:
-				out, err = c.dispatchPipelineStage(gctx, queryID, sql, s, inputs, workerCount, probeOfBroadcast[s.ID], stageFusion)
+				out, err = c.dispatchPipelineStage(gctx, queryID, sql, s, inputs, workerCount, probeOfBroadcast[s.ID], stageFusion, deferredScalars)
 			}
 			if err != nil {
 				return fmt.Errorf("stage %s (%s): %w", s.ID, s.Type, err)
@@ -1378,6 +1400,7 @@ func (c *Coordinator) dispatchPipelineStage(
 	workerCount int,
 	isBroadcastJoinProbe bool,
 	fusion *gatherFusion,
+	scalars scalarResolver,
 ) (StageOutput, error) {
 	_ = sql
 	// Leaf scan stage.
@@ -1492,7 +1515,48 @@ func (c *Coordinator) dispatchPipelineStage(
 	// The stage's output is collected into a Partitioned StageOutput where
 	// partition p = the files produced by worker p — downstream Exchange
 	// stages treat this as partitioned if they need to re-hash.
-	return c.dispatchComputeStage(ctx, queryID, stage, inputs, workerCount, fusion)
+	return c.dispatchComputeStage(ctx, queryID, stage, inputs, workerCount, fusion, scalars)
+}
+
+// scalarResolver blocks until a stage's scalar-subquery producer stages have
+// completed, then returns a copy of the stage with every :placeholder
+// substituted (substituteScalarDependencies). Non-nil only when the stage
+// goroutine chose deferral (scalarsDeferrableToFinalMerge): dispatch calls
+// it at the last point before the substituted exprs are consumed, letting
+// earlier phases overlap the scalar producer chain.
+type scalarResolver func(context.Context) (physical.Stage, error)
+
+// scalarsDeferrableToFinalMerge reports whether a stage's scalar
+// placeholders are consumed only by its final-merge phase — i.e. they
+// appear in none of the fields the fanout's intermediate tasks are built
+// from (AggSpec input exprs, JoinFilter). substituteScalarDependencies
+// rewrites FilterExprs, AggSpecs, FusedAggSpecs and JoinFilter; of those,
+// dispatchFinalAggregateFanout's intermediates see only the agg specs
+// (FilterExprs are final-only by construction — applying HAVING to a
+// partial merge would drop groups before they finished merging). Only
+// final_aggregate qualifies because it is the one stage type dispatched
+// in two phases; every other type consumes its exprs in its only phase.
+func scalarsDeferrableToFinalMerge(s physical.Stage) bool {
+	if s.Type != "final_aggregate" || len(s.ScalarDependencies) == 0 {
+		return false
+	}
+	for ph := range s.ScalarDependencies {
+		tok := ":" + ph
+		for _, a := range s.AggSpecs {
+			if strings.Contains(a.InputExpr, tok) {
+				return false
+			}
+		}
+		for _, a := range s.FusedAggSpecs {
+			if strings.Contains(a.InputExpr, tok) {
+				return false
+			}
+		}
+		if strings.Contains(s.JoinFilter, tok) {
+			return false
+		}
+	}
+	return true
 }
 
 // scanFanOutTaskCount picks the number of scan-side tasks for stage fan-out.
@@ -2222,6 +2286,7 @@ func (c *Coordinator) dispatchComputeStage(
 	inputs map[string]StageOutput,
 	workerCount int,
 	fusion *gatherFusion,
+	scalars scalarResolver,
 ) (StageOutput, error) {
 	if workerCount <= 0 {
 		workerCount = 1 // single-worker fallback for sparse test / bootstrap setups
@@ -2232,7 +2297,17 @@ func (c *Coordinator) dispatchComputeStage(
 	// merge when the preconditions hold (multi-worker, K>=2 upstream files,
 	// no AVG). Falls back to the standard 1-task path otherwise.
 	if _, _, ok := finalAggregateFanoutCandidate(stage, inputs, workerCount); ok {
-		return c.dispatchFinalAggregateFanout(ctx, queryID, stage, inputs, workerCount, fusion)
+		return c.dispatchFinalAggregateFanout(ctx, queryID, stage, inputs, workerCount, fusion, scalars)
+	}
+	// Deferred scalars on the single-task fallback: no earlier phase to
+	// overlap with, so resolve before building the task — same wall
+	// behavior as the pre-deferral upfront await.
+	if scalars != nil {
+		var rerr error
+		stage, rerr = scalars(ctx)
+		if rerr != nil {
+			return StageOutput{}, fmt.Errorf("stage %s scalar substitution: %w", stage.ID, rerr)
+		}
 	}
 	// Task count derivation:
 	//   - Singleton output: exactly 1 task. The stage produces one logical
@@ -3499,10 +3574,28 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	inputs map[string]StageOutput,
 	workerCount int,
 	fusion *gatherFusion,
+	scalars scalarResolver,
 ) (StageOutput, error) {
 	depID, files, ok := finalAggregateFanoutCandidate(stage, inputs, workerCount)
 	if !ok {
 		return StageOutput{}, fmt.Errorf("final_aggregate fanout precondition failed for stage %s", stage.ID)
+	}
+	// Deferred scalar substitution (q11 serial-tail fix): start the await
+	// now so it overlaps the intermediate phase, and join it just before
+	// the final task — the only consumer of the substituted FilterExprs
+	// (scalarsDeferrableToFinalMerge guarantees the agg specs the
+	// intermediates are built from carry no placeholders).
+	type resolvedStage struct {
+		stage physical.Stage
+		err   error
+	}
+	var scalarCh chan resolvedStage
+	if scalars != nil {
+		scalarCh = make(chan resolvedStage, 1)
+		go func() {
+			s, err := scalars(ctx)
+			scalarCh <- resolvedStage{stage: s, err: err}
+		}()
 	}
 	N := workerCount
 	if N > len(files) {
@@ -3597,6 +3690,16 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	finalInputs := make([]string, 0)
 	for _, fs := range intermFiles {
 		finalInputs = append(finalInputs, fs...)
+	}
+
+	// Join the deferred scalar substitution before anything below reads
+	// stage.FilterExprs — the final task is built from the resolved copy.
+	if scalarCh != nil {
+		r := <-scalarCh
+		if r.err != nil {
+			return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: deferred scalar substitution: %w", stage.ID, r.err)
+		}
+		stage = r.stage
 	}
 
 	// Convert SortKeys once for both the legacy and fragment paths below.

@@ -212,3 +212,58 @@ func TestReadScalarFromStageOutput_WSHFDecode(t *testing.T) {
 		t.Fatalf("got %q, want 42.5", got)
 	}
 }
+
+// TestScalarsDeferrableToFinalMerge is the regression test for the q11
+// serial-tail fix: a final_aggregate whose scalar placeholder appears only
+// in FilterExprs (HAVING applied at the final merge) defers substitution
+// past the fanout's intermediate phase; any placeholder reachable from the
+// fields intermediates are built from must keep the upfront barrier.
+func TestScalarsDeferrableToFinalMerge(t *testing.T) {
+	q11 := physical.Stage{
+		Type:               "final_aggregate",
+		ScalarDependencies: map[string]string{"scalar_1": "final_aggregate-17"},
+		FilterExprs:        []string{"value > :scalar_1"},
+		AggSpecs:           []physical.AggSpec{{Func: "SUM", InputCol: "v", OutputCol: "value"}},
+	}
+	cases := []struct {
+		name   string
+		mutate func(*physical.Stage)
+		want   bool
+	}{
+		{"q11 shape: placeholder only in HAVING", func(s *physical.Stage) {}, true},
+		{"placeholder in AggSpec input expr", func(s *physical.Stage) {
+			s.AggSpecs[0].InputExpr = "v * :scalar_1"
+		}, false},
+		{"placeholder in fused agg spec", func(s *physical.Stage) {
+			s.FusedAggSpecs = []physical.AggSpec{{Func: "SUM", InputCol: "v", OutputCol: "w", InputExpr: "v - :scalar_1"}}
+		}, false},
+		{"placeholder in join filter", func(s *physical.Stage) {
+			s.JoinFilter = "a > :scalar_1"
+		}, false},
+		{"non-final_aggregate stage", func(s *physical.Stage) {
+			s.Type = "aggregate"
+		}, false},
+		{"no scalar deps", func(s *physical.Stage) {
+			s.ScalarDependencies = nil
+		}, false},
+		{"second placeholder leaks into agg specs", func(s *physical.Stage) {
+			s.ScalarDependencies["scalar_2"] = "final_aggregate-19"
+			s.AggSpecs[0].InputExpr = "v * :scalar_2"
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := q11
+			s.ScalarDependencies = map[string]string{}
+			for k, v := range q11.ScalarDependencies {
+				s.ScalarDependencies[k] = v
+			}
+			s.FilterExprs = append([]string(nil), q11.FilterExprs...)
+			s.AggSpecs = append([]physical.AggSpec(nil), q11.AggSpecs...)
+			tc.mutate(&s)
+			if got := scalarsDeferrableToFinalMerge(s); got != tc.want {
+				t.Fatalf("scalarsDeferrableToFinalMerge = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
