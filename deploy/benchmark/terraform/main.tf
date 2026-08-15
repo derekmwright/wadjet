@@ -988,6 +988,14 @@ resource "aws_instance" "worker" {
             [ -e "$D" ] || continue
             gzip -c "$D" | aws s3 cp - "s3://${local.bucket_name}/$M/wlogs/$(basename "$D")-$IID.gz" --region ${local.eff_region} || true
           done
+          # Heap-pressure .pb.gz profiles (worker heap-pressure profiler
+          # writes to NVMe spill dirs): the 2026-08-14 frozen-spin arc
+          # lost every profile to teardown — they carry the pointer-
+          # density evidence that decides the GC mark-cost fix.
+          for P in /mnt/nvme/spill/*/heap-profiles/*.pb.gz; do
+            [ -e "$P" ] || continue
+            aws s3 cp "$P" "s3://${local.bucket_name}/$M/wlogs/heap-profiles/$(basename "$P")-$IID.pb.gz" --region ${local.eff_region} || true
+          done
           echo "wlog auto-uploaded to $M/wlogs/"
         fi
       done
