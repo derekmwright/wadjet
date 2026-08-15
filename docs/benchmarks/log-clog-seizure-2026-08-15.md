@@ -105,3 +105,27 @@ harness (`tpch-harness --mode=local --slice=small`) 25/25.
 - **Not chased:** why the journald drain ceiling is ~58 KB/s on these boxes
   (suspect EBS/journal fsync). At post-fix volumes (~0.3 MB/min/worker) the
   margin is >10×, so it stops mattering; do not tune journald as a fix.
+
+## Validation (window `results/20260815-113452`, bin 92cc687, same config)
+
+Same shape as the seizure window: 4-run SF100 distributed, on-demand
+c7g.2xlarge + 3× c7gd.4xlarge, binaries pinned to the fix commit.
+
+- **Zero worker reaps, zero stuck-task re-dispatches** across all 4 runs
+  (seizure window: 4 reaps in run 3 alone).
+- **No minute-scale outliers**: worst single query in the whole window is
+  Q09 at 27.8s. Run totals 227.5 / 167.2 / 182.8 / 165.4s — runs 2 and 4
+  are the **two best suites ever recorded** on this config (previous record
+  187.2s); the run-to-run spread collapsed exactly as predicted.
+- **Mechanism counters**: journald ingestion lag max **2–3s** flat across
+  all three workers for the whole window (was a monotonic sawtooth to
+  278s); `task completed` lines max **3.3 KB** (was 48 KB); worker journal
+  totals ~6 MB (was 57–77 MB).
+- **Watch item closed**: worst gather→next-dispatch gap is **0.4s** (was
+  60.03s) — the coordinator pre-dispatch stall was a reap consequence, no
+  further instrumentation needed.
+- Correctness: 22/22 × 4 runs OK, Q02=100 rows, Q18=100 rows, no zero-row
+  queries, no row drift across runs.
+
+The seizure family is closed end-to-end: mechanism identified, fix shipped,
+counters and walls both confirm.
