@@ -75,3 +75,37 @@ the watchdog's stat1/stat2/kstack format from main.tf `thread_capture`).
 Amplification path is already fixed (bbdb985: corpse placement +
 stuck-clock re-arm), so a seizure now costs seconds, not 30-minute
 queries.
+
+## UPDATE 2026-08-15: gogc=off probe — the deeper disease is MemoryHigh==GOMEMLIMIT
+
+Single-arm probe (b32e13b, `-var=gogc=off`, gctrace on, killed after
+~1.5 runs — verdict measured, config known-bad; evidence in session
+scratchpad `gogcoff-evidence/`, partial benchmark log + per-worker
+gctrace/cgroup snapshots):
+
+- gctrace kills the "monster cycle" theory for off-mode pauses: cycles
+  at the 20.3GB goal are CHEAP (2-12ms clocks, live 4-5GB) — but they
+  run back-to-back during allocation-heavy phases, holding the heap at
+  the limit.
+- The real cost is the cgroup: worker scopes ran
+  `MemoryHigh == GOMEMLIMIT` (20.7GB), and memcg charges heap + mmap'd
+  file pages. A gogc=off heap CAMPS at GOMEMLIMIT, so
+  memory.current > memory.high permanently: **memory.events
+  high=670,494; PSI memory full avg10=10.04%** — the kernel
+  direct-reclaim-throttles the worker continuously. Q02 cold 45.6s vs
+  11.8s same-binary gogc=100 (~4×). No watchdog firings — the
+  throttle is smooth, not seizing.
+- This also re-frames the gogc=100 arms: heap oscillates 8→16-17GB and
+  crosses the same line at peaks (plus cache file pages) — the memcg
+  slab/stock frames in the seizure specimens are this throttle
+  contributing to the freeze windows. GC cycles and reclaim throttle
+  compose.
+
+**Answer to "what should GOGC be": 100 stays; `off` is measurably
+wrong under the current cgroup shape.** FIX SHIPPED (deploy):
+MemoryHigh removed from worker scopes — MemoryMax remains the OOM
+guard and memcg evicts clean cache pages before killing, which is the
+graceful path ADR-0006 wants. Next window (any config) validates:
+expect memory.events high ≈ 0, PSI full ≈ 0, and re-judge firing
+counts at gogc=100 without the throttle composing; re-open the GOGC
+question only if seizures persist with clean PSI.

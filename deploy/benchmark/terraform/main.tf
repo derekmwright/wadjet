@@ -902,7 +902,17 @@ resource "aws_instance" "worker" {
       mkdir -p "$worker_spill"
       while true; do
         systemd-run --quiet --unit="wadjet-worker-$idx-$$-$(date +%s)" \
-          --scope -p "MemoryMax=$PER_PROC_BYTES" -p "MemoryHigh=$PER_PROC_GOMEMLIMIT" \
+          # MemoryHigh deliberately NOT set (2026-08-15): it sat at
+          # PER_PROC_GOMEMLIMIT, but the cgroup charges heap AND mmap'd
+          # file pages — so a GOMEMLIMIT-governed heap plus any cache
+          # pages guarantees memory.current > memory.high, and the
+          # kernel direct-reclaim-throttles the worker for behaving as
+          # configured (gogc=off probe: memory.events high=670k, PSI
+          # full avg10=10%, Q02 4x; gogc=100 crosses the same line at
+          # heap peaks = the memcg frames in the frozen-spin
+          # specimens). MemoryMax alone is the guard: memcg reclaims
+          # clean file pages before OOM, which is the graceful path.
+          --scope -p "MemoryMax=$PER_PROC_BYTES" \
           --setenv="GOMEMLIMIT=$PER_PROC_GOMEMLIMIT" \
           --setenv="GOTRACEBACK=all" \
           --setenv="GODEBUG=gctrace=1" \
