@@ -14,6 +14,21 @@ import (
 // moment). Package var so tests can pin either mode.
 var morselWidthYield = os.Getenv("WADJET_MORSEL_YIELD") != "0"
 
+// widthDonate gates producer token donation (docs/design/
+// shuffle-decode-ahead.md §2.2): a consumer yielding a pool token offers it
+// to its own fragment's token-stalled decode-ahead scanner before releasing
+// it to the pool. WADJET_WIDTH_DONATE=0 restores unconditional
+// yield-to-pool. Package var so tests can pin either mode.
+var widthDonate = os.Getenv("WADJET_WIDTH_DONATE") != "0"
+
+// producerTokenDonor is implemented by fragment sources whose producer-side
+// decode can accept a directly donated cpu token. tryDonateToken must be
+// safe to call from any consumer goroutine; true means ownership of one
+// token transferred (the caller must NOT release it to the pool).
+type producerTokenDonor interface {
+	tryDonateToken() bool
+}
+
 // widthSlot is what one morsel consumer currently holds: nothing, the
 // fragment's free baseline slot, or one worker-pool cpu token.
 type widthSlot uint8
@@ -40,6 +55,11 @@ const (
 // because the baseline cannot be held by an idle consumer.
 type widthGate struct {
 	tokens *cpuTokens
+	// donor, when non-nil, is the fragment's own source: a pool token
+	// yielded on dispenser-dry is offered to its token-stalled decode
+	// scanner before the pool (§2.2 donation). Set once before consumers
+	// start; the baseline slot is never donated.
+	donor producerTokenDonor
 	// baseline carries the fragment's one free slot; buffered cap 1, primed
 	// at construction.
 	baseline chan struct{}
@@ -47,6 +67,7 @@ type widthGate struct {
 	// Stats for the fragment-completion log line.
 	claimWaitNs atomic.Int64
 	yields      atomic.Int64
+	donations   atomic.Int64
 }
 
 func newWidthGate(tokens *cpuTokens) *widthGate {
@@ -83,13 +104,21 @@ func (g *widthGate) claim(ctx context.Context) (widthSlot, error) {
 	}
 }
 
-// yield returns a held slot. Safe to call with slotNone.
+// yield returns a held slot. Safe to call with slotNone. A pool token is
+// first offered to the fragment's own producer (§2.2 donation) — accepted
+// only while its decode scanner is parked token-stalled, i.e. exactly when
+// this consumer's input starvation is producer-caused — and goes to the
+// pool otherwise.
 func (g *widthGate) yield(s widthSlot) {
 	switch s {
 	case slotBaseline:
 		g.baseline <- struct{}{}
 	case slotToken:
-		g.tokens.Release(1)
+		if widthDonate && g.donor != nil && g.donor.tryDonateToken() {
+			g.donations.Add(1)
+		} else {
+			g.tokens.Release(1)
+		}
 	default:
 		return
 	}
@@ -101,5 +130,6 @@ func (g *widthGate) logAttrs() []any {
 	return []any{
 		"width_wait_ms", g.claimWaitNs.Load() / 1e6,
 		"width_yields", g.yields.Load(),
+		"width_donations", g.donations.Load(),
 	}
 }

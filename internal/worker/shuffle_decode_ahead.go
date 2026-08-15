@@ -89,6 +89,7 @@ type shuffleDecodeAheadStats struct {
 	pressureNs   atomic.Int64
 	stageNs      atomic.Int64
 	decodeNs     atomic.Int64
+	donated      atomic.Int64
 }
 
 // shuffleDecodeSlot is one staged chunk moving through the pipeline: the
@@ -121,13 +122,22 @@ type shuffleDecodeAhead struct {
 	bufPool  sync.Pool
 
 	// mu guards the byte window and occupancy; cond is broadcast on every
-	// delivery and on stop, waking a scanner parked in admit.
+	// delivery, on every donation, and on stop, waking a scanner parked in
+	// admit.
 	mu          sync.Mutex
 	cond        *sync.Cond
 	inflight    int64
 	undelivered int
 	limit       int64
 	stopped     bool
+
+	// Producer token donation (§2.2). tokenStalled is set only while the
+	// scanner is parked in admit's token wait; tryDonate accepts a
+	// consumer's yielded pool token only in that state. donated holds
+	// accepted tokens until the scanner's next admission consumes them or
+	// a non-token path flushes them back to the pool. Both under mu.
+	tokenStalled bool
+	donated      int
 }
 
 // startDecodeAhead switches r from serial Next to chunk-parallel decode.
@@ -180,6 +190,10 @@ func (r *streamingShuffleReader) startDecodeAhead(workers int, tokens *cpuTokens
 func (d *shuffleDecodeAhead) scan() {
 	defer close(d.jobs)
 	defer close(d.delivery)
+	// Donations deposited during the scanner's final token wait but never
+	// consumed (file end, error, quit) go back to the pool. Deposits are
+	// impossible after this runs: tokenStalled is false once admit returns.
+	defer d.flushDonated()
 	r := d.r
 	for r.chunk < r.numChunks {
 		if _, err := io.ReadFull(r.br, r.hdr[:4]); err != nil {
@@ -256,12 +270,20 @@ func (d *shuffleDecodeAhead) admit(est int64) (token, ok bool) {
 	defer d.mu.Unlock()
 	for {
 		if d.stopped {
+			d.flushDonatedLocked()
 			return false, false
 		}
 		if d.undelivered == 0 {
+			// A donated token found at the cursor is attached to the chunk
+			// (its decode worker releases it) rather than left parked —
+			// cursor progress itself stays token-free either way.
+			if d.donated > 0 {
+				d.donated--
+				token = true
+			}
 			d.inflight += est
 			d.undelivered++
-			return false, true
+			return token, true
 		}
 		if d.inflight+est > d.limit {
 			d.timedWait(&d.stats.windowFullNs)
@@ -273,21 +295,65 @@ func (d *shuffleDecodeAhead) admit(est int64) (token, ok bool) {
 				floor = 0
 			}
 			if d.undelivered > floor {
+				// Never park holding donated capacity: pressure waits are
+				// unbounded from the pool's point of view.
+				d.flushDonatedLocked()
 				d.timedWait(&d.stats.pressureNs)
 				continue
 			}
 		}
 		if d.tokens != nil {
-			if d.tokens.TryAcquire(1) == 0 {
+			if d.donated > 0 {
+				d.donated--
+				token = true
+			} else if d.tokens.TryAcquire(1) == 1 {
+				token = true
+			} else {
+				d.tokenStalled = true
 				d.timedWait(&d.stats.tokenStallNs)
+				d.tokenStalled = false
 				continue
 			}
-			token = true
 		}
 		d.inflight += est
 		d.undelivered++
 		return token, true
 	}
+}
+
+// tryDonate transfers one cpu token from a yielding morsel consumer to this
+// reader's scanner, accepted only while the scanner is parked in a token
+// stall (§2.2 producer token donation). Ownership passes without touching
+// the pool; the decode worker releases the token exactly like a
+// TryAcquire'd one. Returns false when the caller should Release to the
+// pool instead.
+func (d *shuffleDecodeAhead) tryDonate() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stopped || !d.tokenStalled {
+		return false
+	}
+	d.donated++
+	d.stats.donated.Add(1)
+	d.cond.Broadcast()
+	return true
+}
+
+// flushDonatedLocked returns unconsumed donated tokens to the pool. Caller
+// holds d.mu; the reader lock → pool lock order is safe because cpuTokens
+// never calls back into the reader.
+func (d *shuffleDecodeAhead) flushDonatedLocked() {
+	if d.donated > 0 {
+		d.tokens.Release(d.donated)
+		d.donated = 0
+	}
+}
+
+// flushDonated is flushDonatedLocked for callers not holding d.mu.
+func (d *shuffleDecodeAhead) flushDonated() {
+	d.mu.Lock()
+	d.flushDonatedLocked()
+	d.mu.Unlock()
 }
 
 // timedWait waits on the delivery condvar, adding the parked span to ns.

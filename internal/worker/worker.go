@@ -979,7 +979,7 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 		var lastReads, lastFallbacks, lastSkips, lastFPFiles int64
 		var lastIO ShuffleIOSnapshot
 		var lastUp [7]int64
-		var lastDA [6]int64
+		var lastDA [7]int64
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for {
@@ -1010,15 +1010,16 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 				// Shuffle decode-ahead markers (docs/design/
 				// shuffle-decode-ahead.md §5). stage_ms is the serial
 				// scanner walk — the structural floor to watch.
-				chunks, winNs, tokNs, presNs, stageNs, decNs := w.executor.ShuffleDecodeAheadStats()
-				curDA := [6]int64{chunks, winNs, tokNs, presNs, stageNs, decNs}
+				chunks, winNs, tokNs, presNs, stageNs, decNs, donated := w.executor.ShuffleDecodeAheadStats()
+				curDA := [7]int64{chunks, winNs, tokNs, presNs, stageNs, decNs, donated}
 				if curDA != lastDA {
 					lastDA = curDA
 					w.logger.Info("shuffle decode-ahead stats",
 						"chunks", chunks,
 						"window_full_ms", winNs/1e6, "token_stall_ms", tokNs/1e6,
 						"pressure_stall_ms", presNs/1e6,
-						"stage_ms", stageNs/1e6, "decode_ms", decNs/1e6)
+						"stage_ms", stageNs/1e6, "decode_ms", decNs/1e6,
+						"donated", donated)
 				}
 			}
 		}
@@ -1328,12 +1329,13 @@ func (w *Worker) logFinalScanStats() {
 			"refault_episode_ignores", memory.PageCachePressureBoundedIgnores())
 	}
 	if w.config.ShuffleDecodeAhead {
-		chunks, winNs, tokNs, presNs, stageNs, decNs := w.executor.ShuffleDecodeAheadStats()
+		chunks, winNs, tokNs, presNs, stageNs, decNs, donated := w.executor.ShuffleDecodeAheadStats()
 		w.logger.Info("shuffle decode-ahead stats (final)",
 			"chunks", chunks,
 			"window_full_ms", winNs/1e6, "token_stall_ms", tokNs/1e6,
 			"pressure_stall_ms", presNs/1e6,
-			"stage_ms", stageNs/1e6, "decode_ms", decNs/1e6)
+			"stage_ms", stageNs/1e6, "decode_ms", decNs/1e6,
+			"donated", donated)
 	}
 	writeDrop, readDrop := diskio.DropBehindStats()
 	preadChunks, preadBytes, preadAllocs := parquet.PreadStats()

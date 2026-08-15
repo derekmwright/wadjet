@@ -151,6 +151,15 @@ type cachedFileStreamSource struct {
 	prefetchStarted  bool
 	prefetchDisabled bool
 
+	// Current shuffle decode-ahead pipeline, for producer token donation
+	// (docs/design/shuffle-decode-ahead.md §2.2). Written by the producer
+	// goroutine on each file open/release; read by consumer goroutines via
+	// tryDonateToken, hence atomic. A stale or stopping target refuses the
+	// donation (tryDonate checks stopped/tokenStalled under its lock), so
+	// the race with file turnover is benign — the token just goes to the
+	// pool instead.
+	shuffleDA atomic.Pointer[shuffleDecodeAhead]
+
 	// Cross-file decode continuation (--scan-decode-ahead, memo S2): the
 	// next parquet file, pre-opened once the current file's row groups
 	// are all assigned, so its head decodes while the current tail
@@ -391,6 +400,10 @@ func (s *cachedFileStreamSource) releaseParquetIter() {
 func (s *cachedFileStreamSource) releaseCurrentFile() {
 	s.chunkReader = nil
 	s.walkDropMark = 0
+	// Donation target first: a consumer racing tryDonateToken against this
+	// release either hits the stopping pipeline (refused under its lock) or
+	// the pool. Cleared even when the reader is closed elsewhere.
+	s.shuffleDA.Store(nil)
 	if s.streamReader != nil {
 		_ = s.streamReader.Close()
 		s.streamReader = nil
@@ -768,6 +781,18 @@ func (s *cachedFileStreamSource) maybeStartShuffleDecodeAhead(r *streamingShuffl
 	}
 	r.startDecodeAhead(0, e.cpuTokens, shuffleDecodeAheadPressure,
 		scanDecodeAheadStrictPressure(), &e.shuffleDecodeAheadStats)
+	if r.da != nil {
+		s.shuffleDA.Store(r.da)
+	}
+}
+
+// tryDonateToken implements producerTokenDonor: a morsel consumer yielding
+// a pool token on dispenser-dry offers it to this source's current shuffle
+// decode-ahead scanner (§2.2). False (no transfer) when no pipeline is
+// active or its scanner is not token-stalled.
+func (s *cachedFileStreamSource) tryDonateToken() bool {
+	d := s.shuffleDA.Load()
+	return d != nil && d.tryDonate()
 }
 
 // openShuffleStagedFromStore re-resolves srcPath from the durable store

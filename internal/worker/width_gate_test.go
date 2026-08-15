@@ -250,3 +250,88 @@ func TestConsumeMorsels_SerialUnderZeroCapacity(t *testing.T) {
 		t.Fatalf("processed = %d, want 32", got)
 	}
 }
+
+// fakeTokenDonor records §2.2 donation offers and accepts or refuses them.
+type fakeTokenDonor struct {
+	accept bool
+	calls  atomic.Int64
+}
+
+func (f *fakeTokenDonor) tryDonateToken() bool {
+	f.calls.Add(1)
+	return f.accept
+}
+
+// TestWidthGate_YieldDonatesPoolTokenToProducer pins the §2.2 donation
+// routing: a yielded pool token transfers to an accepting donor WITHOUT a
+// pool release, a refusing donor falls back to the pool, and the baseline
+// slot is never offered.
+func TestWidthGate_YieldDonatesPoolTokenToProducer(t *testing.T) {
+	tok := newCPUTokens(1)
+	g := newWidthGate(tok)
+	donor := &fakeTokenDonor{accept: true}
+	g.donor = donor
+	ctx := context.Background()
+
+	base, _ := g.claim(ctx)
+	s, _ := g.claim(ctx)
+	if base != slotBaseline || s != slotToken {
+		t.Fatalf("claims = %v, %v; want baseline, token", base, s)
+	}
+	g.yield(s)
+	if got := donor.calls.Load(); got != 1 {
+		t.Fatalf("donor offers = %d, want 1", got)
+	}
+	if got := tok.InUse(); got != 1 {
+		t.Fatalf("InUse = %d, want 1 (accepted donation must not also release)", got)
+	}
+	if got := g.donations.Load(); got != 1 {
+		t.Fatalf("donations = %d, want 1", got)
+	}
+	tok.Release(1) // the donor's decode worker releases in production
+
+	// Baseline yields never consult the donor.
+	g.yield(base)
+	if got := donor.calls.Load(); got != 1 {
+		t.Fatalf("donor consulted on baseline yield (calls = %d)", got)
+	}
+
+	// A refusing donor falls back to the pool.
+	donor.accept = false
+	if s, _ = g.claim(ctx); s != slotBaseline {
+		t.Fatalf("claim = %v, want baseline back", s)
+	}
+	s2, _ := g.claim(ctx)
+	if s2 != slotToken {
+		t.Fatalf("claim = %v, want token", s2)
+	}
+	g.yield(s2)
+	if got := tok.InUse(); got != 0 {
+		t.Fatalf("InUse = %d, want 0 (refused donation must release)", got)
+	}
+	g.yield(s)
+}
+
+// TestWidthGate_DonationKillSwitch pins WADJET_WIDTH_DONATE=0: the donor is
+// never consulted and pool tokens yield straight to the pool.
+func TestWidthGate_DonationKillSwitch(t *testing.T) {
+	orig := widthDonate
+	widthDonate = false
+	defer func() { widthDonate = orig }()
+
+	tok := newCPUTokens(1)
+	g := newWidthGate(tok)
+	donor := &fakeTokenDonor{accept: true}
+	g.donor = donor
+	ctx := context.Background()
+	base, _ := g.claim(ctx)
+	s, _ := g.claim(ctx)
+	g.yield(s)
+	if donor.calls.Load() != 0 {
+		t.Fatal("donor consulted with the kill switch set")
+	}
+	if got := tok.InUse(); got != 0 {
+		t.Fatalf("InUse = %d, want 0", got)
+	}
+	g.yield(base)
+}

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/nats-io/nats.go"
 
@@ -67,6 +68,13 @@ type manifestStreamSource struct {
 	inner   *cachedFileStreamSource // current file-set reader
 	current manifestFileSet
 	initCtx context.Context
+
+	// donorInner mirrors inner for producer token donation (§2.2): inner is
+	// owned by the producer goroutine in Next, but tryDonateToken is called
+	// from consumer goroutines yielding width. A stale target refuses the
+	// donation itself (its decode-ahead is stopped), so the mirror only has
+	// to be race-free, not transactional.
+	donorInner atomic.Pointer[cachedFileStreamSource]
 }
 
 func newManifestStreamSource(e *Executor, queryID, bucket string, spec distributed.EagerInput) *manifestStreamSource {
@@ -175,6 +183,7 @@ func (s *manifestStreamSource) Next(ctx context.Context) (*batch.RecordBatch, er
 			if b != nil {
 				return b, nil
 			}
+			s.donorInner.Store(nil)
 			s.inner.Close()
 			s.inner = nil
 		}
@@ -196,6 +205,7 @@ func (s *manifestStreamSource) Next(ctx context.Context) (*batch.RecordBatch, er
 				return nil, fmt.Errorf("eager source: inner init (%s): %w", s.current.taskID, err)
 			}
 			s.inner = inner
+			s.donorInner.Store(inner)
 			continue
 		}
 		if len(s.resolved) >= len(s.candidate) {
@@ -218,11 +228,19 @@ func (s *manifestStreamSource) Close() error {
 		s.sub.Unsubscribe()
 		s.sub = nil
 	}
+	s.donorInner.Store(nil)
 	if s.inner != nil {
 		s.inner.Close()
 		s.inner = nil
 	}
 	return nil
+}
+
+// tryDonateToken implements producerTokenDonor by forwarding to the current
+// inner file-set reader (§2.2 producer token donation).
+func (s *manifestStreamSource) tryDonateToken() bool {
+	inner := s.donorInner.Load()
+	return inner != nil && inner.tryDonateToken()
 }
 
 var _ exec.Source = (*manifestStreamSource)(nil)

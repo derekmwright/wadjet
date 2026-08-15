@@ -673,6 +673,9 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 	// in legacy mode tokens are held for the duration of the fragment.
 	if k, gate, release := e.morselFragmentWorkers(task, ops); k > 1 {
 		defer release()
+		if dn, ok := src.(producerTokenDonor); ok && gate != nil {
+			gate.donor = dn
+		}
 		e.logger.Debug("morsel parallel fragment",
 			"task_id", task.ID,
 			"stage_id", task.StageID,
@@ -1642,6 +1645,9 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 				k, gate, release = e.morselFragmentWorkers(task, phaseOps)
 			}
 			if k > 1 {
+				if dn, ok := currentSrc.(producerTokenDonor); ok && gate != nil {
+					gate.donor = dn
+				}
 				err = func() error {
 					defer release()
 					e.logger.Debug("morsel parallel breaker consume",

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -397,5 +398,225 @@ func TestShuffleDecodeAhead_PressureFlaps(t *testing.T) {
 	requireBatchesEqual(t, want, got)
 	if err := r.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+// waitTokenStalled polls until the reader's scanner parks in admit's token
+// wait — the only state in which §2.2 donations are accepted.
+func waitTokenStalled(tb testing.TB, d *shuffleDecodeAhead) {
+	tb.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		d.mu.Lock()
+		stalled := d.tokenStalled
+		d.mu.Unlock()
+		if stalled {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	tb.Fatal("scanner never parked in a token stall")
+}
+
+// TestShuffleDecodeAhead_DonationAdmitsPastCursor pins §2.2 producer token
+// donation: a token donated while the scanner is parked token-stalled is
+// consumed for a non-cursor admission (the stall breaks without any pool
+// release), parity holds, and the donated token drains back to the pool by
+// Close.
+func TestShuffleDecodeAhead_DonationAdmitsPastCursor(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 31, 12, 150)
+	want := drain(t, openStreaming(t, wire).Next)
+
+	tokens := newCPUTokens(1)
+	if got := tokens.TryAcquire(1); got != 1 { // stand in for a consumer holding the pool
+		t.Fatalf("TryAcquire = %d, want 1", got)
+	}
+	var stats shuffleDecodeAheadStats
+	r := openDecodeAhead(t, wire, 4, tokens, nil, false, &stats)
+
+	waitTokenStalled(t, r.da)
+	if !r.da.tryDonate() {
+		t.Fatal("tryDonate refused while the scanner is token-stalled")
+	}
+	got := drain(t, r.Next)
+	requireBatchesEqual(t, want, got)
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if stats.donated.Load() != 1 {
+		t.Fatalf("donated = %d, want 1", stats.donated.Load())
+	}
+	if got := tokens.InUse(); got != 0 {
+		t.Fatalf("InUse = %d, want 0 (donated token must drain back)", got)
+	}
+}
+
+// TestShuffleDecodeAhead_DonationBalanceOnEarlyClose: tokens donated to a
+// parked scanner must drain back to the pool even when the reader closes
+// before consuming them (stopped-branch and scan-exit flushes).
+func TestShuffleDecodeAhead_DonationBalanceOnEarlyClose(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 41, 16, 150)
+	tokens := newCPUTokens(2)
+	if got := tokens.TryAcquire(2); got != 2 {
+		t.Fatalf("TryAcquire = %d, want 2", got)
+	}
+	r := openDecodeAhead(t, wire, 2, tokens, nil, false, nil)
+	if b, err := r.Next(); err != nil || b == nil {
+		t.Fatalf("first Next: %v %v", b, err)
+	}
+	waitTokenStalled(t, r.da)
+	accepted := 0
+	for i := 0; i < 2; i++ {
+		if r.da.tryDonate() {
+			accepted++
+		}
+	}
+	if accepted == 0 {
+		t.Fatal("no donation accepted while scanner token-stalled")
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := int(tokens.InUse()); got != 2-accepted {
+		t.Fatalf("InUse = %d, want %d (donations must flush on close)", got, 2-accepted)
+	}
+}
+
+// TestShuffleDecodeAhead_DonationRefused: an unbudgeted reader (nil pool)
+// never token-stalls so it must refuse, a closed reader must refuse, and a
+// source with no active pipeline must refuse — the caller keeps its token
+// in every case.
+func TestShuffleDecodeAhead_DonationRefused(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 43, 8, 64)
+	r := openDecodeAhead(t, wire, 2, nil, nil, false, nil)
+	if r.da.tryDonate() {
+		t.Fatal("donation accepted by an unbudgeted reader")
+	}
+	_ = drain(t, r.Next)
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if r.da.tryDonate() {
+		t.Fatal("donation accepted after Close")
+	}
+	var s cachedFileStreamSource
+	if s.tryDonateToken() {
+		t.Fatal("source with no decode-ahead accepted a donation")
+	}
+}
+
+// TestShuffleDecodeAhead_DonationRace hammers tryDonate from several
+// goroutines against a draining reader — race-detector coverage for the
+// donation paths; parity and exact pool balance must hold.
+func TestShuffleDecodeAhead_DonationRace(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 47, 24, 100)
+	want := drain(t, openStreaming(t, wire).Next)
+
+	tokens := newCPUTokens(4)
+	r := openDecodeAhead(t, wire, 4, tokens, nil, false, nil)
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if tokens.TryAcquire(1) == 1 {
+					if !r.da.tryDonate() {
+						tokens.Release(1)
+					}
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}()
+	}
+	got := drain(t, r.Next)
+	close(stop)
+	wg.Wait()
+	requireBatchesEqual(t, want, got)
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if inUse := tokens.InUse(); inUse != 0 {
+		t.Fatalf("tokens leaked: %d", inUse)
+	}
+}
+
+// TestShuffleDecodeAhead_DonationEndToEnd runs the production seam: a real
+// MemStore-backed cachedFileStreamSource with decode-ahead engaged and a
+// starved token pool, a widthGate wired to it as donor (exactly as the
+// fragment runner wires it), and a consumer-held token yielded while the
+// scanner is token-stalled. The donation must transfer (no pool release),
+// reach the reader (stats.donated), forward through manifestStreamSource,
+// and drain back to the pool by Close.
+func TestShuffleDecodeAhead_DonationEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	const bucket = "test"
+	if err := store.MakeBucket(ctx, bucket); err != nil {
+		t.Fatal(err)
+	}
+	wire := buildMultiTypeWSHF(t, 53, 40, 200)
+	key := "queries/test/partition=0000/task.wshf"
+	if _, err := store.Put(ctx, bucket, key, bytes.NewReader(wire), int64(len(wire)), "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+
+	tokens := newCPUTokens(1)
+	if got := tokens.TryAcquire(1); got != 1 { // the consumer's held width token
+		t.Fatalf("TryAcquire = %d, want 1", got)
+	}
+	e := &Executor{store: store, spillDir: t.TempDir(), shuffleDecodeAhead: true, cpuTokens: tokens}
+	src := newCachedFileStreamSource(e, "", bucket, []string{key})
+	if err := src.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := src.Next(ctx); err != nil || b == nil { // opens the file, engages decode-ahead
+		t.Fatalf("first Next: %v %v", b, err)
+	}
+	da := src.shuffleDA.Load()
+	if da == nil {
+		t.Fatal("decode-ahead not engaged on the source")
+	}
+	waitTokenStalled(t, da)
+
+	// Forwarding through the eager-consumer wrapper hits the same reader.
+	ms := &manifestStreamSource{}
+	ms.donorInner.Store(src)
+
+	gate := newWidthGate(tokens)
+	gate.donor = ms
+	gate.yield(slotToken) // the §2.2 moment: dry consumer yields its token
+	if got := gate.donations.Load(); got != 1 {
+		t.Fatalf("gate donations = %d, want 1", got)
+	}
+	if got := e.shuffleDecodeAheadStats.donated.Load(); got != 1 {
+		t.Fatalf("reader donated = %d, want 1", got)
+	}
+
+	for { // drain
+		b, err := src.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil {
+			break
+		}
+	}
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := tokens.InUse(); got != 0 {
+		t.Fatalf("InUse = %d, want 0 (donated token must drain back)", got)
+	}
+	// With the pipeline gone, the wrapper refuses and the plain release
+	// path is the fallback again.
+	if ms.tryDonateToken() {
+		t.Fatal("donation accepted after source Close")
 	}
 }

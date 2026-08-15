@@ -110,6 +110,70 @@ restoring the coupled behavior. The parquet scan windows keep their
 sensor unchanged — their units are 10–20× larger and their
 displacement was measured (§9.5).
 
+## 2.2 Producer token donation (2026-08-15, post-exemption window)
+
+The pressure-exemption window (memo
+`shuffle-da-pressure-exemption-2026-08-15.md`) re-attributed the warm
+join-6 dry-wait to a token **priority inversion**: with the refault
+channel gone, non-cursor admission is denied almost exclusively by
+`cpuTokens.TryAcquire`, and §4.2.1's "queued waiters beat TryAcquire"
+rule is exactly backwards on a producer-starved fragment. Consumers
+park as FIFO token waiters because the dispenser is dry; their queued
+presence pins every scanner at cursor-only width; starved decode dries
+the dispenser further. The system oscillates (token_stall 24.5→43.5s
+after the exemption, dry-wait ~7 widths unchanged).
+
+The fix changes who a yielding consumer gives its token to — not how
+the pool grants. When `widthGate.yield` returns a **pool token** (never
+the fragment baseline slot) and the same fragment's decode-ahead
+scanner is at that moment parked in a token stall, the token transfers
+directly to the scanner (`tryDonate`: deposit into the reader's
+`donated` counter + condvar broadcast, accepted only while
+`tokenStalled` is set under the reader lock). The scanner's admit
+consumes donated tokens before consulting the pool; the decode worker
+releases them to the pool exactly like TryAcquire'd ones. If the
+scanner takes any path other than token-gated admission — pressure
+wait, stop, end of file — leftover donations are flushed to the pool
+(release inside the reader lock; the only compound order is reader
+lock → pool lock, and the pool never calls into the reader).
+
+Why this ranks "at least equal": a starved consumer's token does
+nothing until decode runs. The donation precondition — this fragment's
+consumer went dispenser-dry while holding a pool token AND this
+fragment's scanner is token-stalled — is precisely the state where the
+marginal token produces more progress on the producer side, and the
+token being redirected is the fragment's *own* held capacity, not a
+pool grant taken from anyone's queue position.
+
+**No-wedge argument (re-established for donation):**
+
+- *Pool FIFO semantics are formally unchanged.* Donation never grants
+  pool capacity: the token moves consumer → `donated` counter → slot →
+  decode worker → pool without re-entering the pool in between.
+  Queued waiters' order among pool grants is untouched; their service
+  is delayed by at most one bounded chunk decode per donation, and
+  donations are rate-limited by the donating fragment's own yield
+  events (each requires a full claim→process→go-dry cycle).
+- *No goroutine ever waits holding a token.* The `donated` counter is
+  drained on the very next scanner wake (a broadcast accompanies every
+  deposit) or flushed before any non-token wait and at scan exit
+  (deferred flush covers error paths; `stop` covers a scanner parked at
+  deposit time — the stopped branch flushes before returning). Deposits
+  are impossible once `tokenStalled` clears, so nothing can strand a
+  token after the scanner moves on.
+- *The §4.2.1 baseline guarantee is untouched.* Only `slotToken` yields
+  donate; the fragment baseline slot always returns to the fragment, so
+  every fragment keeps a token-free runnable consumer.
+- *The cursor exemption is untouched.* Serial-floor progress is never
+  gated on donations; a donated token found at the cursor branch is
+  simply attached to the cursor chunk (released by its decode worker)
+  rather than left parked.
+
+Kill switch: `WADJET_WIDTH_DONATE=0` restores yield-to-pool. The
+parquet scan path has the same tension (scan memo §9.3, token_stalls
+18–28k) but binds far softer there; wiring `DecodeAheadIter` into the
+same donor interface is a follow-up gated on its own counters.
+
 ## 3. Alternatives rejected
 
 - **N producer goroutines over disjoint file slices** (the other option
@@ -127,6 +191,18 @@ displacement was measured (§9.5).
 - **Decode inside morsel consumers**: rejected for the same reason as in
   scan-decode-pipelining §4 — it erases the producer/consumer split the
   morsel machinery assumes and couples decode width to op-chain width.
+- **Scanner joins the token FIFO** (the exemption memo's other
+  candidate for §2.2): enqueue the scanner as a blocking waiter with a
+  went-empty escape back to the cursor exemption. Rejected on
+  complexity-for-equal-coverage: the escape needs a grant-notification
+  bridge between the pool's waiter channels and the reader's condvar
+  (or deferred-notify surgery in `cpuTokens` to avoid a pool→reader
+  lock inversion), it queues the scanner behind every other fragment's
+  consumers even when its own consumers are the starved ones, and it
+  weakens the "serial progress is never gated" invariant while parked.
+  Donation triggers on exactly the state the re-attribution measured —
+  own-fragment consumers going dry while holding width — and touches
+  neither the pool nor the cursor rule.
 - **Out-of-order delivery**: the dispenser doesn't need order, but
   in-order forfeits nothing here (the window bounds occupancy either
   way), preserves `Delivered()`/truncation-position semantics for the
@@ -155,6 +231,8 @@ Per-worker counters, folded from each reader at Close and logged by the
 existing worker marker loop + final summary: `chunks`, `window_full_ns`,
 `token_stall_ns` (stalls where a non-cursor chunk waited), `pressure_ns`,
 `stage_ns` (scanner readChunkBytes time — the serial-floor watch item),
-`decode_ns`. The morsel done-line's `consumer_dry_wait_ms` /
+`decode_ns`, `donated` (tokens accepted via §2.2 donation — expect
+token_stall_ns to fall as this rises). The width gate's fragment line
+adds `width_donations`. The morsel done-line's `consumer_dry_wait_ms` /
 `dispenser_parents` (already Info) are the before/after judgment
 counters for the width plateau itself.
