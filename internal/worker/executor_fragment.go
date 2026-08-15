@@ -957,11 +957,13 @@ func consumeMorsels(ctx context.Context, d *morselDispenser, gate *widthGate, pr
 				gate.yield(slot)
 				slot = slotNone
 			}
+			tDry := time.Now()
 			select {
 			case m, ok = <-d.ch:
 			case <-ctx.Done():
 				return ctx.Err()
 			}
+			d.consumerDryNs.Add(time.Since(tDry).Nanoseconds())
 		}
 		if !ok {
 			return nil
@@ -974,7 +976,10 @@ func consumeMorsels(ctx context.Context, d *morselDispenser, gate *widthGate, pr
 			}
 			slot = s
 		}
-		if err := process(m); err != nil {
+		tProc := time.Now()
+		err := process(m)
+		d.processNs.Add(time.Since(tProc).Nanoseconds())
+		if err != nil {
 			return err
 		}
 		if stop != nil && stop() {
@@ -1017,6 +1022,7 @@ func consumeMorsels(ctx context.Context, d *morselDispenser, gate *widthGate, pr
 // the chain is still single-threaded; clones then only read the resolved
 // caches.
 func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification, k int, gate *widthGate) error {
+	fragStart := time.Now()
 	progress := exec.ProgressReporterFromContext(ctx)
 	fp := newFragmentProgress(e.logger, task, e)
 	src = fp.timeSource(src)
@@ -1192,11 +1198,16 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 		if err := <-prodErr; err != nil {
 			return fmt.Errorf("fragment task %s: %w", task.ID, err)
 		}
-		attrs := append([]any{"task_id", task.ID, "k", k}, d.logAttrs()...)
+		// Info (was Debug, invisible in production wlogs — which is why the
+		// width plateau went unattributed): with elapsed_ms alongside
+		// process_ms / consumer_dry_wait_ms / width_wait_ms this one line
+		// names the fragment's pacer. One line per fragment task.
+		attrs := append([]any{"task_id", task.ID, "stage_id", task.StageID, "k", k,
+			"elapsed_ms", time.Since(fragStart).Milliseconds()}, d.logAttrs()...)
 		if gate != nil {
 			attrs = append(attrs, gate.logAttrs()...)
 		}
-		e.logger.Debug("morsel parallel fragment done", attrs...)
+		e.logger.Info("morsel parallel fragment done", attrs...)
 	}
 
 	// Spilled-partition flush, over EVERY chain. Clone probes share the
@@ -1241,6 +1252,7 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 // same rule as drainThroughBreaker. Finalize on the primary is called here,
 // matching the serial Pipeline.Run contract for the j==0 phase.
 func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink exec.MergeableSink, k int, gate *widthGate) error {
+	fragStart := time.Now()
 	fp := newFragmentProgress(e.logger, task, e)
 
 	consumeInto := func(ctx context.Context, dst exec.Sink, b *batch.RecordBatch) error {
@@ -1471,11 +1483,14 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	if err := <-prodErr; err != nil {
 		return err
 	}
-	doneAttrs := append([]any{"task_id", task.ID, "k", k}, d.logAttrs()...)
+	// Info for the same reason as the linear path's done-line: the width
+	// attribution is useless at Debug in production wlogs.
+	doneAttrs := append([]any{"task_id", task.ID, "stage_id", task.StageID, "k", k,
+		"elapsed_ms", time.Since(fragStart).Milliseconds()}, d.logAttrs()...)
 	if gate != nil {
 		doneAttrs = append(doneAttrs, gate.logAttrs()...)
 	}
-	e.logger.Debug("morsel parallel breaker consume done", doneAttrs...)
+	e.logger.Info("morsel parallel breaker consume done", doneAttrs...)
 
 	// Spilled-partition flush over every chain (shared spillState; the first
 	// drain clears it, later chains no-op — same rule as the linear path),

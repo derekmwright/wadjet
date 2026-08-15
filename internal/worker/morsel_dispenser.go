@@ -81,6 +81,16 @@ type morselDispenser struct {
 	morsels       atomic.Int64
 	peakInFlight  atomic.Int64
 	producerWaits atomic.Int64 // ns spent blocked in admit
+
+	// Width-plateau attribution (2026-08-15, q08 join-6 ~10/15 effective
+	// cores): consumerDryNs is consumer time blocked on an EMPTY morsel
+	// channel (slot yielded — the dispenser paces the fragment);
+	// processNs is Σ consumer time inside process(m) (chain + sink), so
+	// processNs / elapsed = the fragment's true effective width. Read
+	// together with widthGate.claimWaitNs (token-paced): whichever of
+	// dry-wait vs claim-wait dominates names the plateau's pacer.
+	consumerDryNs atomic.Int64
+	processNs     atomic.Int64
 }
 
 func newMorselDispenser(k int, split bool) *morselDispenser {
@@ -294,5 +304,7 @@ func (d *morselDispenser) logAttrs() []any {
 		"dispenser_morsels", d.morsels.Load(),
 		"dispenser_peak_mb", d.peakInFlight.Load() / (1 << 20),
 		"dispenser_producer_wait_ms", d.producerWaits.Load() / 1e6,
+		"consumer_dry_wait_ms", d.consumerDryNs.Load() / 1e6,
+		"process_ms", d.processNs.Load() / 1e6,
 	}
 }
