@@ -23,8 +23,8 @@ import (
 // partitionedShuffleSink is an exec.Sink that hash-partitions incoming batches
 // into N output .wshf files, one per partition. Each partition's writer flushes
 // its accumulated rows once a per-partition buffer threshold is reached, so
-// peak memory is bounded by (N partitions × flush threshold), independent of
-// the total input size.
+// peak memory is bounded by (N partitions × 2 × flush threshold — accumulator
+// plus its ping-pong spare), independent of the total input size.
 //
 // This is the build-side and probe-side output sink for the shuffle execution
 // path. The N output files are uploaded by the executor to S3 under a stable
@@ -116,6 +116,15 @@ type partitionWriter struct {
 	bufRows  int                // rows currently in rowBuf
 	bufBytes int                // approximate byte count of buffered rows
 	numRows  int64              // total rows written to disk
+	// spareBuf is the ping-pong partner of rowBuf: a threshold flush
+	// detaches the full accumulator under mu, installs spareBuf (or nil —
+	// appendRowsBulkLocked lazily allocates), and encodes the detached
+	// batch OUTSIDE mu under the flushing handoff. The encoded batch is
+	// recycled back here. Without the swap, the 64KB chunk encode ran
+	// inside mu and every consumer targeting the partition blocked behind
+	// it — measured at ~6.5ms mean Consume latency on q08's join-6
+	// (2026-08-15 sink_ms counter, unmoved by lock-count reduction alone).
+	spareBuf *batch.RecordBatch
 }
 
 // flushPartitionBytes is the per-partition accumulator size (in approx bytes
@@ -385,29 +394,65 @@ func (s *partitionedShuffleSink) writeDirectChunk(p int, b *batch.RecordBatch, r
 	return nil
 }
 
-// appendAndMaybeFlush appends rows to partition p's accumulator and flushes
-// it if the byte threshold tripped, all under that partition's lock. This is
-// the whole per-partition critical section: ~1/numParts of a batch's rows
-// plus an occasional flushBytes-sized chunk encode. (Slices big enough to
-// flush on their own bypass this via writeDirectChunk — see appendPartition.)
+// appendAndMaybeFlush appends rows to partition p's accumulator under that
+// partition's lock. When the byte threshold trips, the full accumulator is
+// DETACHED (spareBuf swapped in) and encoded outside mu under the flushing
+// stream handoff, so concurrent appends to the same partition proceed during
+// the chunk encode+write. Pre-swap, the encode ran inside mu and every
+// consumer targeting a flushing partition blocked for the encode's duration
+// — the dominant q08 join-6 sink cost. (Slices big enough to flush on their
+// own bypass this via writeDirectChunk — see appendPartition.)
 func (s *partitionedShuffleSink) appendAndMaybeFlush(p int, b *batch.RecordBatch, rows []uint32) error {
 	pw := s.parts[p]
 	pw.mu.Lock()
-	defer pw.mu.Unlock()
 	if err := s.appendRowsBulkLocked(p, b, rows); err != nil {
+		pw.mu.Unlock()
 		return err
 	}
 	if pw.rowBuf == nil || pw.bufRows == 0 || pw.bufBytes < s.flushBytes {
+		pw.mu.Unlock()
 		return nil
 	}
-	// The stream may be owned by an in-flight direct-chunk writer; wait it
-	// out (Wait releases mu, so appends to OTHER consumers proceed). Another
-	// accumulator flusher may drain rowBuf while we wait —
-	// flushPartitionLocked's empty-buffer guard makes that a no-op here.
+	// The stream may be owned by an in-flight direct-chunk writer or
+	// another accumulator flusher; wait it out (Wait releases mu, so
+	// appends by OTHER consumers proceed). The buffer may have been
+	// swapped away while we waited — re-check the threshold after.
 	for pw.flushing {
 		pw.flushCond.Wait()
 	}
-	return s.flushPartitionLocked(p)
+	if pw.rowBuf == nil || pw.bufRows == 0 || pw.bufBytes < s.flushBytes {
+		pw.mu.Unlock()
+		return nil
+	}
+	if err := s.ensureWriterLocked(p); err != nil {
+		pw.mu.Unlock()
+		return err
+	}
+	full, fullRows := pw.rowBuf, pw.bufRows
+	pw.rowBuf = pw.spareBuf // may be nil — appendRowsBulkLocked lazily allocates
+	pw.spareBuf = nil
+	pw.bufRows, pw.bufBytes = 0, 0
+	w := pw.writer
+	pw.flushing = true
+	pw.mu.Unlock()
+
+	err := w.writeChunk(full.Columns, nil, fullRows)
+
+	pw.mu.Lock()
+	pw.flushing = false
+	pw.flushCond.Broadcast()
+	if err == nil {
+		pw.numRows += int64(fullRows)
+		resetShuffleAccumBatch(full)
+		if pw.spareBuf == nil {
+			pw.spareBuf = full // recycle for the next swap
+		}
+	}
+	pw.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("partition %d chunk: %w", p, err)
+	}
+	return nil
 }
 
 // appendRowsBulkLocked appends `len(rows)` rows from b into the accumulator
