@@ -905,6 +905,7 @@ resource "aws_instance" "worker" {
           --scope -p "MemoryMax=$PER_PROC_BYTES" -p "MemoryHigh=$PER_PROC_GOMEMLIMIT" \
           --setenv="GOMEMLIMIT=$PER_PROC_GOMEMLIMIT" \
           --setenv="GOTRACEBACK=all" \
+          --setenv="GODEBUG=gctrace=1" \
           --setenv="WADJET_GOGC=${var.gogc}" \
           --setenv="WADJET_TASK_GC=${var.task_gc}" \
           --setenv="WADJET_REFAULT_PRESSURE_RATE=${var.refault_pressure_rate}" \
