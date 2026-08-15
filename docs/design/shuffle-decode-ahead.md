@@ -174,6 +174,13 @@ parquet scan path has the same tension (scan memo §9.3, token_stalls
 18–28k) but binds far softer there; wiring `DecodeAheadIter` into the
 same donor interface is a follow-up gated on its own counters.
 
+SF100 pricing (memo
+`shuffle-da-token-donation-sf100-2026-08-15.md`): KEPT — 96.6k
+donations/window, record fast runs, rows/vsigs identical. Donation
+does not reach the DEEP starvation mode (consumers parked slot-less in
+claim have nothing to donate — join-6 width_donations = 0); that mode
+and the stage-walk serial floor are the recorded follow-ups.
+
 ## 3. Alternatives rejected
 
 - **N producer goroutines over disjoint file slices** (the other option
