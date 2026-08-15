@@ -936,6 +936,11 @@ func (s *partitionedShuffleSink) Finalize(_ context.Context) error {
 				// Empty partition — leave file at zero bytes; downstream treats as no rows.
 				return syncStageFile(pw.file)
 			}
+			// Extent-index footer appends through the buffered stream, so it
+			// precedes the flush; the patch below only overwrites in place.
+			if err := pw.writer.writeFooter(); err != nil {
+				return fmt.Errorf("partition %d extent footer: %w", p, err)
+			}
 			// The bufio.Writer must be flushed before we Seek the underlying
 			// file: a Seek bypasses the buffer, so any unflushed bytes would
 			// land at the wrong offset.

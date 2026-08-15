@@ -37,11 +37,54 @@ import (
 
 var shuffleMagic = [4]byte{'W', 'S', 'H', 'F'}
 
+// Extent-index footer (docs/design/shuffle-extent-index.md): file sinks
+// append a WIDX footer recording every chunk's start offset, letting the
+// file-backed decode-ahead reader skip the serial stage walk entirely —
+// the scanner emits extents and decode workers pread their own chunks.
+// Readers fall back to the walk on any absent or invalid footer, so no
+// flag state or old file can strand data.
+//
+// WADJET_SHUFFLE_INDEX=0 disables emission and consumption both;
+// WADJET_SHUFFLE_INDEX_READ=0 disables consumption alone (the reader-side
+// A/B arm). Package vars so tests can pin either mode.
+var (
+	shuffleIndexWrite = os.Getenv("WADJET_SHUFFLE_INDEX") != "0"
+	shuffleIndexRead  = os.Getenv("WADJET_SHUFFLE_INDEX") != "0" &&
+		os.Getenv("WADJET_SHUFFLE_INDEX_READ") != "0"
+)
+
+// shuffleIndexMagic terminates a WIDX footer. Layout appended after the
+// last chunk:
+//
+//	offsets:  numChunks × u64 LE  — absolute offset of each chunk's row-count word
+//	count:    u32 LE              — numChunks (cross-check vs the patched header)
+//	trailer:  tableOff u64 LE | version u8 | magic "WIDX"
+var shuffleIndexMagic = [4]byte{'W', 'I', 'D', 'X'}
+
+const (
+	shuffleIndexVersion    = 1
+	shuffleIndexTrailerLen = 13 // tableOff u64 + version u8 + magic 4
+)
+
+// countingWriter tracks the absolute write offset so the shuffleWriter
+// knows each chunk's start without seeking (the sinks write through bufio).
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.n += int64(n)
+	return n, err
+}
+
 // shuffleWriter writes RecordBatch chunks in columnar binary format.
 type shuffleWriter struct {
-	w              io.Writer
+	w              *countingWriter
 	schema         []parquet.Column
 	numChunks      uint32
+	chunkOffs      []int64  // absolute start offset of each chunk (WIDX footer)
 	buf            []byte   // reusable scratch buffer
 	gatherBuf      []byte   // reusable buffer for gathering selected rows
 	viewSelScratch []uint32 // reusable composed selection for view columns
@@ -49,7 +92,7 @@ type shuffleWriter struct {
 
 func newShuffleWriter(w io.Writer, schema []parquet.Column) *shuffleWriter {
 	return &shuffleWriter{
-		w:      w,
+		w:      &countingWriter{w: w},
 		schema: schema,
 		buf:    make([]byte, 8),
 	}
@@ -123,6 +166,7 @@ func (sw *shuffleWriter) writeHeader() error {
 // the in-place mutation is single-threaded).
 func (sw *shuffleWriter) writeChunk(cols []*batch.Vector, sel []uint32, numRows int) error {
 	sw.numChunks++
+	sw.chunkOffs = append(sw.chunkOffs, sw.w.n)
 
 	// NumRows
 	binary.LittleEndian.PutUint32(sw.buf[:4], uint32(numRows))
@@ -146,6 +190,178 @@ func (sw *shuffleWriter) writeChunk(cols []*batch.Vector, sel []uint32, numRows 
 		if err := sw.writeColumnData(vec, colSel, numRows, sw.schema[ci].Type); err != nil {
 			return fmt.Errorf("writing column %d (%s): %w", ci, sw.schema[ci].Name, err)
 		}
+	}
+	return nil
+}
+
+// writeFooter appends the WIDX extent-index footer at the current write
+// position. File sinks call it after the last chunk and BEFORE their bufio
+// flush + NumChunks patch (the footer appends through the same stream; the
+// patch overwrites in place and never appends). No-op under
+// WADJET_SHUFFLE_INDEX=0. In-memory writers (gather replies) skip it.
+func (sw *shuffleWriter) writeFooter() error {
+	if !shuffleIndexWrite {
+		return nil
+	}
+	tableOff := sw.w.n
+	var buf [shuffleIndexTrailerLen]byte
+	for _, off := range sw.chunkOffs {
+		binary.LittleEndian.PutUint64(buf[:8], uint64(off))
+		if _, err := sw.w.Write(buf[:8]); err != nil {
+			return fmt.Errorf("writing extent table: %w", err)
+		}
+	}
+	binary.LittleEndian.PutUint32(buf[:4], sw.numChunks)
+	if _, err := sw.w.Write(buf[:4]); err != nil {
+		return fmt.Errorf("writing extent count: %w", err)
+	}
+	binary.LittleEndian.PutUint64(buf[:8], uint64(tableOff))
+	buf[8] = shuffleIndexVersion
+	copy(buf[9:], shuffleIndexMagic[:])
+	if _, err := sw.w.Write(buf[:]); err != nil {
+		return fmt.Errorf("writing extent trailer: %w", err)
+	}
+	return nil
+}
+
+// parseShuffleExtentIndex reads and validates a WIDX footer. Returns
+// numChunks+1 offsets (offs[i] = chunk i's row-count word; offs[numChunks]
+// = end of the last chunk) or nil when the footer is absent, gated off, or
+// fails ANY check — nil always means "use the stage walk", never an error:
+// a truncated file loses its trailer and must surface the walk path's
+// truncation error at the walk path's position, not a footer complaint.
+func parseShuffleExtentIndex(ra io.ReaderAt, size int64, numChunks uint32, headerEnd int64) []int64 {
+	if !shuffleIndexRead {
+		return nil
+	}
+	n := int64(numChunks)
+	// Exact size arithmetic first: trailer + count + table must fit after
+	// at least a header.
+	if n <= 0 || size < headerEnd+n*8+4+shuffleIndexTrailerLen {
+		return nil
+	}
+	var tr [shuffleIndexTrailerLen]byte
+	if _, err := ra.ReadAt(tr[:], size-shuffleIndexTrailerLen); err != nil {
+		return nil
+	}
+	if [4]byte{tr[9], tr[10], tr[11], tr[12]} != shuffleIndexMagic || tr[8] != shuffleIndexVersion {
+		return nil
+	}
+	tableOff := int64(binary.LittleEndian.Uint64(tr[:8]))
+	if tableOff < headerEnd || tableOff+n*8+4+shuffleIndexTrailerLen != size {
+		return nil
+	}
+	raw := make([]byte, n*8+4)
+	if _, err := ra.ReadAt(raw, tableOff); err != nil {
+		return nil
+	}
+	if uint32(binary.LittleEndian.Uint32(raw[n*8:])) != numChunks {
+		return nil
+	}
+	offs := make([]int64, n+1)
+	offs[n] = tableOff
+	for i := int64(0); i < n; i++ {
+		off := int64(binary.LittleEndian.Uint64(raw[i*8:]))
+		offs[i] = off
+	}
+	// offs[0] anchors at the header end; every extent carries at least its
+	// 4-byte row-count word; the last extent ends exactly at the table.
+	if offs[0] != headerEnd {
+		return nil
+	}
+	for i := int64(0); i < n; i++ {
+		if offs[i+1]-offs[i] < 4 {
+			return nil
+		}
+	}
+	return offs
+}
+
+// fixedShuffleTypeLen returns the exact payload byte length for fixed-width
+// shuffle types, or -1 for variable-length (bytes-class) types. Shared by
+// the streaming stage walk and the index-mode extent validation so the two
+// cannot diverge.
+func fixedShuffleTypeLen(typ parquet.TypeID, numRows int) (int, error) {
+	switch typ {
+	case parquet.TypeBool:
+		return (numRows + 7) / 8, nil
+	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+		return numRows * 4, nil
+	case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+		return numRows * 8, nil
+	case parquet.TypeFloat32:
+		return numRows * 4, nil
+	case parquet.TypeFloat64:
+		return numRows * 8, nil
+	case parquet.TypeDecimal:
+		return numRows * 16, nil
+	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
+		return -1, nil
+	default:
+		return 0, fmt.Errorf("unsupported shuffle type %v", typ)
+	}
+}
+
+// validateShuffleChunkBytes walks one chunk's column segments in buf (the
+// bytes AFTER the row-count word), applying exactly the stage walk's bounds
+// checks, and requires the walk to consume buf in full. Index-mode decode
+// workers run it over their pread extent before decodeShuffleChunk —
+// readColumnData slices without bounds checks, and a decoder must not trust
+// length prefixes it has not checked, whether they arrived by stream or by
+// pread.
+func validateShuffleChunkBytes(schema []parquet.Column, numRows int, buf []byte) error {
+	pos := 0
+	take := func(n int) error {
+		if n < 0 || len(buf)-pos < n {
+			return io.ErrUnexpectedEOF
+		}
+		pos += n
+		return nil
+	}
+	for ci := range schema {
+		if len(buf)-pos < 4 {
+			return fmt.Errorf("column %d bitmap header: %w", ci, io.ErrUnexpectedEOF)
+		}
+		bitmapWords := int(binary.LittleEndian.Uint32(buf[pos:]))
+		pos += 4
+		maxWords := (numRows+63)/64 + 1
+		if bitmapWords < 0 || bitmapWords > maxWords {
+			return fmt.Errorf("column %d: implausible bitmap words %d for %d rows", ci, bitmapWords, numRows)
+		}
+		if err := take(bitmapWords * 8); err != nil {
+			return fmt.Errorf("column %d bitmap: %w", ci, err)
+		}
+		if len(buf)-pos < 4 {
+			return fmt.Errorf("column %d data header: %w", ci, io.ErrUnexpectedEOF)
+		}
+		dataLen := int(binary.LittleEndian.Uint32(buf[pos:]))
+		pos += 4
+		want, err := fixedShuffleTypeLen(schema[ci].Type, numRows)
+		if err != nil {
+			return fmt.Errorf("column %d: %w", ci, err)
+		}
+		if want >= 0 {
+			if dataLen != want {
+				return fmt.Errorf("column %d (%v): data length %d != expected %d for %d rows",
+					ci, schema[ci].Type, dataLen, want, numRows)
+			}
+			if err := take(dataLen); err != nil {
+				return fmt.Errorf("column %d data: %w", ci, err)
+			}
+		} else {
+			if dataLen < 0 || dataLen > streamMaxBytesLen {
+				return fmt.Errorf("column %d: implausible bytes payload length %d", ci, dataLen)
+			}
+			if err := take(dataLen); err != nil {
+				return fmt.Errorf("column %d bytes data: %w", ci, err)
+			}
+			if err := take(numRows * 4); err != nil {
+				return fmt.Errorf("column %d offsets: %w", ci, err)
+			}
+		}
+	}
+	if pos != len(buf) {
+		return fmt.Errorf("extent is %d bytes but the column walk consumed %d", len(buf), pos)
 	}
 	return nil
 }

@@ -190,6 +190,44 @@ func (r *DropBehindReader) advance() {
 	}
 }
 
+// DropBehindCursor is offset-driven drop-behind for readers that consume a
+// single-pass file via out-of-band preads delivered in ascending order
+// (the WSHF extent-index decode path — docs/design/shuffle-extent-index.md):
+// the reads happen on worker goroutines, but delivery is strictly in order,
+// so the delivery cursor is the safe drop watermark. Same window shape,
+// counters, and advisory-failure latch as DropBehindReader.
+type DropBehindCursor struct {
+	f        *os.File
+	dropped  int64
+	disabled bool
+}
+
+// NewDropBehindCursor returns a cursor for f, or nil when drop-behind is
+// disabled. A nil cursor's Advance is a no-op, so call sites need no
+// branches.
+func NewDropBehindCursor(f *os.File) *DropBehindCursor {
+	if !dropBehind.Load() {
+		return nil
+	}
+	return &DropBehindCursor{f: f}
+}
+
+// Advance marks everything below off consumed and drops completed windows
+// behind it, keeping the window containing off resident.
+func (c *DropBehindCursor) Advance(off int64) {
+	if c == nil || c.disabled {
+		return
+	}
+	for off-c.dropped >= 2*dropWindowBytes {
+		if err := fadvise(int(c.f.Fd()), c.dropped, dropWindowBytes, unix.FADV_DONTNEED); err != nil {
+			c.disabled = true
+			return
+		}
+		c.dropped += dropWindowBytes
+		readDropBytes.Add(dropWindowBytes)
+	}
+}
+
 // finish drops the remainder of the file once fully consumed.
 func (r *DropBehindReader) finish() {
 	if r.disabled || r.off <= r.dropped {

@@ -407,6 +407,13 @@ func (s *unpartitionedStageSink) Finalize(_ context.Context) error {
 	}
 	s.rowBuf = nil
 	s.spareBuf = nil
+	// Extent-index footer appends through the buffered stream before the
+	// flush; the WriteAt patch below only overwrites in place.
+	if s.writer != nil {
+		if err := s.writer.writeFooter(); err != nil {
+			return fmt.Errorf("writing wshf extent footer: %w", err)
+		}
+	}
 	if err := s.bufFile.Flush(); err != nil {
 		return fmt.Errorf("flushing wshf bufio: %w", err)
 	}

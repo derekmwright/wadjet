@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/klauspost/compress/s2"
 	"github.com/klauspost/compress/zstd"
@@ -60,6 +61,22 @@ type streamingShuffleReader struct {
 	// strictly in order. Set once by startDecodeAhead before the first
 	// Next; nil = the serial path below, byte-identical to before.
 	da *shuffleDecodeAhead
+
+	// headerEnd is the absolute file offset where chunk data begins
+	// (magic + header + schema), computed arithmetically — the bufio may
+	// have buffered ahead, so stream position is not usable.
+	headerEnd int64
+
+	// Extent index (docs/design/shuffle-extent-index.md). Set by
+	// tryEnableExtentIndex on file-backed opens whose WIDX footer
+	// validates: idx holds numChunks+1 offsets (idx[i] = chunk i's
+	// row-count word, idx[numChunks] = end of the last chunk), file is the
+	// fd decode workers pread extents from (ReadAt is goroutine-safe), and
+	// idxOwned marks single-pass temps eligible for cursor drop-behind.
+	// Nil idx = the stage walk, unchanged.
+	file     *os.File
+	idx      []int64
+	idxOwned bool
 }
 
 // newStreamingShuffleReader parses the WSHF header from rc, which must be
@@ -115,6 +132,7 @@ func (r *streamingShuffleReader) readHeader() error {
 	if numCols > streamMaxCols {
 		return fmt.Errorf("shuffle stream header: implausible column count %d", numCols)
 	}
+	r.headerEnd = 4 + 6 // outer magic (consumed by the open path) + this header
 	r.schema = make([]parquet.Column, numCols)
 	for i := 0; i < numCols; i++ {
 		if _, err := io.ReadFull(r.br, r.hdr[:2]); err != nil {
@@ -134,15 +152,28 @@ func (r *streamingShuffleReader) readHeader() error {
 		}
 		r.schema[i].Type = parquet.TypeID(r.hdr[0])
 		r.schema[i].Nullable = true
+		r.headerEnd += int64(2 + nameLen + 1)
 		if r.schema[i].Type == parquet.TypeDecimal {
 			if _, err := io.ReadFull(r.br, r.hdr[:2]); err != nil {
 				return fmt.Errorf("truncated decimal schema at column %d: %w", i, err)
 			}
 			r.schema[i].Scale = int(r.hdr[0])
 			r.schema[i].Precision = int(r.hdr[1])
+			r.headerEnd += 2
 		}
 	}
 	return nil
+}
+
+// tryEnableExtentIndex offers a file-backed reader its fd for WIDX
+// index-staged decode (docs/design/shuffle-extent-index.md). owned marks a
+// single-pass temp this source will unlink (cursor drop-behind applies).
+// Must run after the header parse and before startDecodeAhead; a missing
+// or invalid footer leaves the reader on the stage walk unchanged.
+func (r *streamingShuffleReader) tryEnableExtentIndex(f *os.File, size int64, owned bool) {
+	if offs := parseShuffleExtentIndex(f, size, r.numChunks, r.headerEnd); offs != nil {
+		r.file, r.idx, r.idxOwned = f, offs, owned
+	}
 }
 
 // Next returns the next RecordBatch, or (nil, nil) once all promised
@@ -238,24 +269,10 @@ func (r *streamingShuffleReader) readChunkBytesInto(buf []byte, numRows int) ([]
 			return nil, fmt.Errorf("column %d data header: %w", ci, err)
 		}
 		dataLen := int(binary.LittleEndian.Uint32(buf[len(buf)-4:]))
-		var want int
-		switch r.schema[ci].Type {
-		case parquet.TypeBool:
-			want = (numRows + 7) / 8
-		case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
-			want = numRows * 4
-		case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
-			want = numRows * 8
-		case parquet.TypeFloat32:
-			want = numRows * 4
-		case parquet.TypeFloat64:
-			want = numRows * 8
-		case parquet.TypeDecimal:
-			want = numRows * 16
-		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
-			want = -1 // variable: dataLen is the concatenated payload length
-		default:
-			return nil, fmt.Errorf("column %d: unsupported shuffle type %v", ci, r.schema[ci].Type)
+		// -1 = variable: dataLen is the concatenated payload length.
+		want, err := fixedShuffleTypeLen(r.schema[ci].Type, numRows)
+		if err != nil {
+			return nil, fmt.Errorf("column %d: %w", ci, err)
 		}
 		if want >= 0 {
 			if dataLen != want {

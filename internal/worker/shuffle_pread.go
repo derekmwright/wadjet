@@ -66,6 +66,11 @@ func (s *cachedFileStreamSource) openShuffleFromFileStreaming(f *os.File, size i
 	if err != nil {
 		return err
 	}
+	// WIDX extent index: a validated footer lets decode-ahead skip the
+	// stage walk — the scanner emits extents, workers pread their own
+	// chunks (docs/design/shuffle-extent-index.md). Falls back to the walk
+	// silently when absent/invalid.
+	r.tryEnableExtentIndex(f, size, ownedPath != "")
 	s.maybeStartShuffleDecodeAhead(r)
 	s.chunkReader = r
 	// streamReader carries the release obligation (Close → fd close);

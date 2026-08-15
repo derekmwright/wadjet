@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/diskio"
 )
 
 // Shuffle decode-ahead (docs/design/shuffle-decode-ahead.md): the WSHF
@@ -90,6 +91,8 @@ type shuffleDecodeAheadStats struct {
 	stageNs      atomic.Int64
 	decodeNs     atomic.Int64
 	donated      atomic.Int64
+	preadNs      atomic.Int64 // index mode: worker-side extent read time
+	indexedFiles atomic.Int64 // readers that engaged WIDX index staging
 }
 
 // shuffleDecodeSlot is one staged chunk moving through the pipeline: the
@@ -100,6 +103,7 @@ type shuffleDecodeSlot struct {
 	chunkIdx uint32
 	numRows  int
 	buf      []byte
+	off, end int64 // index mode: the chunk's file extent (incl. row-count word)
 	est      int64
 	token    bool // holds one cpu token, released by the decoding worker
 	counted  bool // admitted against the window/occupancy (false for error slots)
@@ -138,6 +142,15 @@ type shuffleDecodeAhead struct {
 	// a non-token path flushes them back to the pool. Both under mu.
 	tokenStalled bool
 	donated      int
+
+	// WIDX index staging (docs/design/shuffle-extent-index.md). Non-nil
+	// idx switches the scanner to scanIndexed (extent slots, no staging;
+	// workers pread from r.file). dropCursor, set only for owned
+	// single-pass temps, drops page cache behind the in-order delivery
+	// cursor — the walk path's DropBehindReader equivalent. Advanced only
+	// from next()'s credit path (single goroutine).
+	idx        []int64
+	dropCursor *diskio.DropBehindCursor
 }
 
 // startDecodeAhead switches r from serial Next to chunk-parallel decode.
@@ -168,10 +181,20 @@ func (r *streamingShuffleReader) startDecodeAhead(workers int, tokens *cpuTokens
 		limit:    shuffleDecodeAheadWindowBytes,
 	}
 	d.cond = sync.NewCond(&d.mu)
+	if r.idx != nil {
+		d.idx = r.idx
+		if r.idxOwned {
+			d.dropCursor = diskio.NewDropBehindCursor(r.file)
+		}
+	}
 	d.wg.Add(1 + workers)
 	go func() {
 		defer d.wg.Done()
-		d.scan()
+		if d.idx != nil {
+			d.scanIndexed()
+		} else {
+			d.scan()
+		}
 	}()
 	for i := 0; i < workers; i++ {
 		go func() {
@@ -229,6 +252,63 @@ func (d *shuffleDecodeAhead) scan() {
 			chunkIdx: r.chunk - 1,
 			numRows:  numRows,
 			buf:      buf,
+			est:      est,
+			token:    token,
+			counted:  true,
+			done:     make(chan struct{}),
+		}
+		select {
+		case d.delivery <- slot:
+		case <-d.quit:
+			d.retireUndispatched(slot)
+			return
+		}
+		select {
+		case d.jobs <- slot:
+		case <-d.quit:
+			// Already in delivery; a worker will never see it. Resolve it
+			// here so a concurrent next() cannot wait forever on done.
+			if slot.token {
+				d.tokens.Release(1)
+				slot.token = false
+			}
+			slot.err = fmt.Errorf("shuffle decode-ahead: reader closed")
+			close(slot.done)
+			return
+		}
+		d.stats.chunks.Add(1)
+	}
+}
+
+// scanIndexed is the stage phase over a validated WIDX extent index: no
+// chunk bytes are read here — the scanner walks the offset table, admits
+// each non-empty extent under exactly the same window/pressure/token/
+// donation rules (est = extent payload size, cursor exemption intact), and
+// emits extent slots for workers to pread, validate, and decode. The
+// fragment's serial floor collapses from full-file staging to this loop.
+// Quit/stop/flush semantics mirror scan().
+func (d *shuffleDecodeAhead) scanIndexed() {
+	defer close(d.jobs)
+	defer close(d.delivery)
+	defer d.flushDonated()
+	r := d.r
+	d.stats.indexedFiles.Add(1)
+	for r.chunk < r.numChunks {
+		i := r.chunk
+		start, end := d.idx[i], d.idx[i+1]
+		r.chunk++
+		if end-start == 4 {
+			continue // bare row-count word: the empty-chunk encoding
+		}
+		est := end - start - 4
+		token, ok := d.admit(est)
+		if !ok {
+			return // stopped
+		}
+		slot := &shuffleDecodeSlot{
+			chunkIdx: i,
+			off:      start,
+			end:      end,
 			est:      est,
 			token:    token,
 			counted:  true,
@@ -372,11 +452,17 @@ func (d *shuffleDecodeAhead) worker() {
 			if !ok {
 				return
 			}
-			t0 := time.Now()
-			b, err := decodeShuffleChunk(d.r.schema, slot.numRows, slot.buf, slot.chunkIdx)
-			d.stats.decodeNs.Add(time.Since(t0).Nanoseconds())
-			d.putBuf(slot.buf)
-			slot.buf = nil
+			var b *batch.RecordBatch
+			var err error
+			if d.idx != nil {
+				b, err = d.decodeIndexed(slot)
+			} else {
+				t0 := time.Now()
+				b, err = decodeShuffleChunk(d.r.schema, slot.numRows, slot.buf, slot.chunkIdx)
+				d.stats.decodeNs.Add(time.Since(t0).Nanoseconds())
+				d.putBuf(slot.buf)
+				slot.buf = nil
+			}
 			if slot.token {
 				d.tokens.Release(1)
 				slot.token = false
@@ -387,6 +473,44 @@ func (d *shuffleDecodeAhead) worker() {
 			return
 		}
 	}
+}
+
+// decodeIndexed stages and decodes one extent slot on the worker: a single
+// pread of the chunk's extent (read syscall — GC-safe, ReadAt is
+// goroutine-safe), the stage walk's bounds validation over the in-memory
+// bytes (readColumnData slices unchecked, and pread bytes deserve exactly
+// the trust stream bytes get: none), then the shared decode. Errors carry
+// the chunk position and surface at the serial reader's exact error
+// position via ordered delivery.
+func (d *shuffleDecodeAhead) decodeIndexed(slot *shuffleDecodeSlot) (*batch.RecordBatch, error) {
+	n := int(slot.end - slot.off)
+	var buf []byte
+	if p, ok := d.bufPool.Get().([]byte); ok && cap(p) >= n {
+		buf = p[:n]
+	} else {
+		buf = make([]byte, n)
+	}
+	t0 := time.Now()
+	if _, err := d.r.file.ReadAt(buf, slot.off); err != nil {
+		d.putBuf(buf)
+		return nil, fmt.Errorf("shuffle file truncated: chunk %d/%d extent [%d,%d): %w",
+			slot.chunkIdx, d.r.numChunks, slot.off, slot.end, err)
+	}
+	d.stats.preadNs.Add(time.Since(t0).Nanoseconds())
+	numRows := int(binary.LittleEndian.Uint32(buf[:4]))
+	if numRows <= 0 || numRows > streamMaxRows {
+		d.putBuf(buf)
+		return nil, fmt.Errorf("shuffle chunk %d: implausible row count %d", slot.chunkIdx, numRows)
+	}
+	if err := validateShuffleChunkBytes(d.r.schema, numRows, buf[4:]); err != nil {
+		d.putBuf(buf)
+		return nil, fmt.Errorf("shuffle chunk %d: %w", slot.chunkIdx, err)
+	}
+	t1 := time.Now()
+	b, err := decodeShuffleChunk(d.r.schema, numRows, buf[4:], slot.chunkIdx)
+	d.stats.decodeNs.Add(time.Since(t1).Nanoseconds())
+	d.putBuf(buf)
+	return b, err
 }
 
 // next is the consumer face: strictly ordered delivery, one window credit
@@ -408,7 +532,9 @@ func (d *shuffleDecodeAhead) next() (*batch.RecordBatch, error) {
 }
 
 // credit returns a delivered slot's window reservation and wakes the
-// scanner. Error slots were never admitted (counted == false).
+// scanner. Error slots were never admitted (counted == false). Called only
+// from next() (the single consumer goroutine), which is what makes the
+// drop cursor's ascending-watermark contract hold.
 func (d *shuffleDecodeAhead) credit(slot *shuffleDecodeSlot) {
 	if !slot.counted {
 		return
@@ -419,6 +545,9 @@ func (d *shuffleDecodeAhead) credit(slot *shuffleDecodeSlot) {
 	d.undelivered--
 	d.cond.Broadcast()
 	d.mu.Unlock()
+	if d.dropCursor != nil && slot.end > 0 {
+		d.dropCursor.Advance(slot.end)
+	}
 }
 
 // fail emits a terminal, pre-resolved error slot. The delivery queue is

@@ -280,10 +280,11 @@ func (e *Executor) SetShuffleDecodeAhead(on bool) { e.shuffleDecodeAhead = on }
 // scanner walk, the structural floor) and decode (worker time) on the
 // throughput side — and tokens accepted via producer donation (§2.2;
 // expect token stalls to fall as this rises).
-func (e *Executor) ShuffleDecodeAheadStats() (chunks, windowFullNs, tokenNs, pressureNs, stageNs, decodeNs, donated int64) {
+func (e *Executor) ShuffleDecodeAheadStats() (chunks, windowFullNs, tokenNs, pressureNs, stageNs, decodeNs, donated, preadNs, indexedFiles int64) {
 	s := &e.shuffleDecodeAheadStats
 	return s.chunks.Load(), s.windowFullNs.Load(), s.tokenStallNs.Load(),
-		s.pressureNs.Load(), s.stageNs.Load(), s.decodeNs.Load(), s.donated.Load()
+		s.pressureNs.Load(), s.stageNs.Load(), s.decodeNs.Load(), s.donated.Load(),
+		s.preadNs.Load(), s.indexedFiles.Load()
 }
 
 // foldScanDecodeAheadQueryStats adds one closed iterator's counters to

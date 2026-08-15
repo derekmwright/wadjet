@@ -106,6 +106,12 @@ func (s *shuffleStreamSink) Finalize(_ context.Context) error {
 		return syncStageFile(s.file)
 	}
 
+	// Extent-index footer appends through the same buffered stream, so it
+	// must precede the flush (the NumChunks patch below overwrites in
+	// place and never appends).
+	if err := s.writer.writeFooter(); err != nil {
+		return fmt.Errorf("writing shuffle extent footer: %w", err)
+	}
 	// Flush the bufio.Writer before seeking the underlying file: a Seek
 	// bypasses the buffer, so any buffered bytes would otherwise land at
 	// the wrong offset.

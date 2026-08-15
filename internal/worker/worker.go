@@ -979,7 +979,7 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 		var lastReads, lastFallbacks, lastSkips, lastFPFiles int64
 		var lastIO ShuffleIOSnapshot
 		var lastUp [7]int64
-		var lastDA [7]int64
+		var lastDA [9]int64
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for {
@@ -1009,9 +1009,10 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 				}
 				// Shuffle decode-ahead markers (docs/design/
 				// shuffle-decode-ahead.md §5). stage_ms is the serial
-				// scanner walk — the structural floor to watch.
-				chunks, winNs, tokNs, presNs, stageNs, decNs, donated := w.executor.ShuffleDecodeAheadStats()
-				curDA := [7]int64{chunks, winNs, tokNs, presNs, stageNs, decNs, donated}
+				// scanner walk; indexed files skip it and surface pread_ms
+				// on the workers instead (shuffle-extent-index.md §5).
+				chunks, winNs, tokNs, presNs, stageNs, decNs, donated, preadNs, indexed := w.executor.ShuffleDecodeAheadStats()
+				curDA := [9]int64{chunks, winNs, tokNs, presNs, stageNs, decNs, donated, preadNs, indexed}
 				if curDA != lastDA {
 					lastDA = curDA
 					w.logger.Info("shuffle decode-ahead stats",
@@ -1019,7 +1020,8 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 						"window_full_ms", winNs/1e6, "token_stall_ms", tokNs/1e6,
 						"pressure_stall_ms", presNs/1e6,
 						"stage_ms", stageNs/1e6, "decode_ms", decNs/1e6,
-						"donated", donated)
+						"donated", donated,
+						"pread_ms", preadNs/1e6, "indexed_files", indexed)
 				}
 			}
 		}
@@ -1329,13 +1331,14 @@ func (w *Worker) logFinalScanStats() {
 			"refault_episode_ignores", memory.PageCachePressureBoundedIgnores())
 	}
 	if w.config.ShuffleDecodeAhead {
-		chunks, winNs, tokNs, presNs, stageNs, decNs, donated := w.executor.ShuffleDecodeAheadStats()
+		chunks, winNs, tokNs, presNs, stageNs, decNs, donated, preadNs, indexed := w.executor.ShuffleDecodeAheadStats()
 		w.logger.Info("shuffle decode-ahead stats (final)",
 			"chunks", chunks,
 			"window_full_ms", winNs/1e6, "token_stall_ms", tokNs/1e6,
 			"pressure_stall_ms", presNs/1e6,
 			"stage_ms", stageNs/1e6, "decode_ms", decNs/1e6,
-			"donated", donated)
+			"donated", donated,
+			"pread_ms", preadNs/1e6, "indexed_files", indexed)
 	}
 	writeDrop, readDrop := diskio.DropBehindStats()
 	preadChunks, preadBytes, preadAllocs := parquet.PreadStats()

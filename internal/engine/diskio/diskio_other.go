@@ -21,3 +21,13 @@ func (fl *Flusher) Finish() {}
 
 // NewDropBehindReader returns f unchanged on non-Linux platforms.
 func NewDropBehindReader(f *os.File) io.Reader { return f }
+
+// DropBehindCursor is inert on non-Linux platforms.
+type DropBehindCursor struct{}
+
+// NewDropBehindCursor returns nil on non-Linux platforms; a nil cursor's
+// Advance is a no-op.
+func NewDropBehindCursor(_ *os.File) *DropBehindCursor { return nil }
+
+// Advance is a no-op on non-Linux platforms. nil-safe.
+func (c *DropBehindCursor) Advance(_ int64) {}
