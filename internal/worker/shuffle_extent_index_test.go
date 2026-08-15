@@ -98,6 +98,34 @@ func openIndexedFile(tb testing.TB, wire []byte, owned bool) (*streamingShuffleR
 	return r, f
 }
 
+// TestShuffleDecodeAhead_WorkerCeilingOverride pins the WADJET_SHUFFLE_
+// DA_WORKERS override seam: the package var feeds startDecodeAhead's
+// default and the GOMAXPROCS cap still binds above it.
+func TestShuffleDecodeAhead_WorkerCeilingOverride(t *testing.T) {
+	orig := shuffleDecodeAheadWorkers
+	defer func() { shuffleDecodeAheadWorkers = orig }()
+
+	shuffleDecodeAheadWorkers = 2
+	wire := buildMultiTypeWSHF(t, 101, 12, 64)
+	want := drain(t, openStreaming(t, wire).Next)
+	r := openDecodeAhead(t, wire, 0, newCPUTokens(4), nil, false, nil)
+	got := drain(t, r.Next)
+	requireBatchesEqual(t, want, got)
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// An override above GOMAXPROCS is capped, not honored blindly — the
+	// parity drain must still hold.
+	shuffleDecodeAheadWorkers = 4096
+	r = openDecodeAhead(t, wire, 0, newCPUTokens(4), nil, false, nil)
+	got = drain(t, r.Next)
+	requireBatchesEqual(t, want, got)
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
 // TestShuffleExtentIndex_FooterRoundTrip pins the WIDX layout: the footer
 // parses back to offsets that reconstruct every chunk exactly (row counts,
 // extents validating under the stage walk's checks), anchored at the

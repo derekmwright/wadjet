@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,14 +31,25 @@ import (
 // in chunk order, so batches, errors (position-exact), and the transport
 // fallback's Delivered() count are byte-identical to the serial reader.
 const (
-	// shuffleDecodeAheadWorkersDefault is the decode worker ceiling per
-	// reader; actual width is governed per chunk by the CPU-token pool.
-	shuffleDecodeAheadWorkersDefault = 4
-
 	// shuffleDecodeAheadMinChunks gates engagement: below this there is
 	// nothing to overlap (keeps the low-volume gather/reply class serial).
 	shuffleDecodeAheadMinChunks = 4
 )
+
+// shuffleDecodeAheadWorkers is the decode worker ceiling per reader;
+// actual width is governed per chunk by the CPU-token pool, so this is a
+// cap, not a commitment. The extent-index window re-attributed the warm
+// join-6 trio's eff ~6.5 plateau to this cap (4 decode widths feeding an
+// op-chain ~1.6× heavier per row — memo
+// shuffle-extent-index-sf100-2026-08-15.md finding 1); WADJET_SHUFFLE_
+// DA_WORKERS overrides it for the ceiling-lift A/B arm. Package var so
+// tests can pin it.
+var shuffleDecodeAheadWorkers = func() int {
+	if v, err := strconv.Atoi(os.Getenv("WADJET_SHUFFLE_DA_WORKERS")); err == nil && v > 0 {
+		return v
+	}
+	return 4
+}()
 
 // shuffleDecodeAheadWindowBytes bounds staged+decoded-but-undelivered
 // bytes per reader (charged at exact staged size — WSHF is uncompressed,
@@ -161,7 +173,7 @@ func (r *streamingShuffleReader) startDecodeAhead(workers int, tokens *cpuTokens
 		return
 	}
 	if workers <= 0 {
-		workers = shuffleDecodeAheadWorkersDefault
+		workers = shuffleDecodeAheadWorkers
 	}
 	if mp := runtime.GOMAXPROCS(0); workers > mp {
 		workers = mp

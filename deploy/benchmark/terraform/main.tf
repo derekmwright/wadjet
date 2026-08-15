@@ -316,6 +316,9 @@ locals {
     echo "WADJET_STAGE_FUSION_AGG=${var.stage_fusion_agg}" >> /etc/environment
     echo "WADJET_BLOCK_PROFILE_RATE=${var.block_profile_rate}" >> /etc/environment
     echo "WADJET_MUTEX_PROFILE_FRACTION=${var.mutex_profile_fraction}" >> /etc/environment
+    %{for k, v in var.extra_env~}
+    echo "${k}=${v}" >> /etc/environment
+    %{endfor~}
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
@@ -358,6 +361,9 @@ locals {
     echo "WADJET_STAGE_FUSION_AGG=${var.stage_fusion_agg}" >> /etc/environment
     echo "WADJET_BLOCK_PROFILE_RATE=${var.block_profile_rate}" >> /etc/environment
     echo "WADJET_MUTEX_PROFILE_FRACTION=${var.mutex_profile_fraction}" >> /etc/environment
+    %{for k, v in var.extra_env~}
+    echo "${k}=${v}" >> /etc/environment
+    %{endfor~}
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
