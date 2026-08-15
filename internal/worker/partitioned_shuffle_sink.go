@@ -72,6 +72,14 @@ type partitionedShuffleSink struct {
 	// lists). Pooled because concurrent Consume calls each need private
 	// scratch; a sink-level buffer would reintroduce the global lock.
 	scratchPool sync.Pool
+
+	// Consumer-local pre-accumulation slabs (shuffle_local_accum.go).
+	// Explicit freelist + registry, NOT a sync.Pool: slabs hold row data
+	// between consumes, and a GC-dropped pool entry would lose rows.
+	// localAll is drained by Finalize.
+	localsMu  sync.Mutex
+	localFree []*localAccum
+	localAll  []*localAccum
 }
 
 // consumeScratch is the per-Consume private working set.
@@ -283,6 +291,12 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 	// SF10 v1.5 A/B (2026-07-03) measured the per-consume burst as a
 	// wall-time serializer.
 	if n < shuffleBurstGateRows {
+		// Consumer-local pre-accumulation (shuffle_local_accum.go): tiny
+		// post-join consumes append lock-free into a checked-out slab set
+		// and touch the shared partition writers only when a slab fills.
+		if sinkLocalAccumEnabled {
+			return s.consumeLocalAccum(b, sc)
+		}
 		for p := 0; p < s.numParts; p++ {
 			if len(sc.perPartRows[p]) == 0 {
 				continue
@@ -414,29 +428,50 @@ func (s *partitionedShuffleSink) appendRowsBulkLocked(p int, b *batch.RecordBatc
 	}
 	pw := s.parts[p]
 	if pw.rowBuf == nil {
-		// Allocate buffer with a reasonable initial capacity to reduce resizes.
-		// Size by the first batch's per-partition row count (fall back to 256
-		// for tiny incoming batches) so the typical case avoids any growth.
-		initCap := len(rows)
-		if initCap < 256 {
-			initCap = 256
-		}
-		pw.rowBuf = batch.NewRecordBatch(b.Schema, initCap)
-		pw.rowBuf.Len = 0
-		// Reset BytesData offsets so we can append incrementally.
-		for _, col := range pw.rowBuf.Columns {
-			if col.BytesData.Offsets != nil {
-				col.BytesData.Offsets = col.BytesData.Offsets[:1]
-				col.BytesData.Offsets[0] = 0
-				col.BytesData.Data = col.BytesData.Data[:0]
-			}
-		}
+		pw.rowBuf = newShuffleAccumBatch(b.Schema, len(rows))
 	}
 
 	bytesAdded := appendBatchRowsBulk(pw.rowBuf, b, rows)
 	pw.bufRows += len(rows)
 	pw.bufBytes += bytesAdded
 	return nil
+}
+
+// newShuffleAccumBatch allocates an append-target accumulator batch: Len 0,
+// BytesData offsets reset for incremental append. Sized by the first append's
+// row count (floor 256 for tiny incoming batches) so the typical case avoids
+// any growth. Shared by the partition writers' accumulators and the
+// consumer-local pre-accumulators (shuffle_local_accum.go).
+func newShuffleAccumBatch(schema []parquet.Column, initCap int) *batch.RecordBatch {
+	if initCap < 256 {
+		initCap = 256
+	}
+	rb := batch.NewRecordBatch(schema, initCap)
+	rb.Len = 0
+	for _, col := range rb.Columns {
+		if col.BytesData.Offsets != nil {
+			col.BytesData.Offsets = col.BytesData.Offsets[:1]
+			col.BytesData.Offsets[0] = 0
+			col.BytesData.Data = col.BytesData.Data[:0]
+		}
+	}
+	return rb
+}
+
+// resetShuffleAccumBatch resets an accumulator batch in place, reusing its
+// memory. Mirror of the reset flushPartitionLocked performs on pw.rowBuf.
+func resetShuffleAccumBatch(rb *batch.RecordBatch) {
+	rb.Len = 0
+	for _, col := range rb.Columns {
+		col.Len = 0
+		col.Nulls.ResetNonNull(0)
+		switch col.Type {
+		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
+			col.BytesData.Data = col.BytesData.Data[:0]
+			col.BytesData.Offsets = col.BytesData.Offsets[:1]
+			col.BytesData.Offsets[0] = 0
+		}
+	}
 }
 
 // appendBatchRowsBulk copies the given source rows of b into dst (appending
@@ -773,19 +808,9 @@ func (s *partitionedShuffleSink) flushPartitionLocked(p int) error {
 	pw.numRows += int64(pw.bufRows)
 
 	// Reset the accumulator in-place. Re-use the same RecordBatch memory.
-	pw.rowBuf.Len = 0
+	resetShuffleAccumBatch(pw.rowBuf)
 	pw.bufRows = 0
 	pw.bufBytes = 0
-	for _, col := range pw.rowBuf.Columns {
-		col.Len = 0
-		col.Nulls.ResetNonNull(0)
-		switch col.Type {
-		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
-			col.BytesData.Data = col.BytesData.Data[:0]
-			col.BytesData.Offsets = col.BytesData.Offsets[:1]
-			col.BytesData.Offsets[0] = 0
-		}
-	}
 	return nil
 }
 
@@ -798,6 +823,12 @@ func (s *partitionedShuffleSink) flushPartitionLocked(p int) error {
 func (s *partitionedShuffleSink) Finalize(_ context.Context) error {
 	if !s.finalized.CompareAndSwap(false, true) {
 		return nil
+	}
+	// Drain consumer-local pre-accumulation slabs first: their residual rows
+	// land in the shared partition accumulators, which the loop below
+	// flushes to disk. No Consume is in flight (pipeline contract).
+	if err := s.drainAllLocals(); err != nil {
+		return err
 	}
 	// Per-partition flush + header-patch (+ fsync only when
 	// WADJET_SHUFFLE_FSYNC=1 — see stage_fsync.go). All steps touch only the
