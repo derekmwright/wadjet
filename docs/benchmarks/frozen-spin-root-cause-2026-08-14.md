@@ -109,3 +109,32 @@ graceful path ADR-0006 wants. Next window (any config) validates:
 expect memory.events high ≈ 0, PSI full ≈ 0, and re-judge firing
 counts at gogc=100 without the throttle composing; re-open the GOGC
 question only if seizures persist with clean PSI.
+
+## UPDATE 2026-08-15 (2): MemoryHigh-removal validation arm — near-record suite, throttle cured, residual seizures quantified
+
+Single arm `results/20260815-011731` (b32e13b, gogc=100, no MemoryHigh,
+gctrace + heap-profile shipping; the first attempt at 01:07 launched
+zero workers — a comment placed inside the systemd-run continuation
+chain truncated the command; fixed in-place, and that window's "PSI=0"
+probe is void: with no scope the probe read the parent slice).
+
+- **Throttle cured, measured for real**: worker PSI memory full total
+  ≈1.3s over a whole run (~0.2%) vs 10% sustained under
+  MemoryHigh==GOMEMLIMIT.
+- **Walls back to canonical and beyond, all fixes on**: totals
+  234.8 (cold) / 217.3 / ~313 (one seizure run) / **194.4** — second-
+  best suite total ever (record 187.2), zero failures, vsigs identical
+  across runs. Post-dedup targets at SF100: **Q11 2.9-3.0s steady
+  (Trino FTE 5.2 — now 1.8× FASTER; was 1.63× slower pre-arc)**,
+  **Q17 best 9.3s (Trino 11.6)**, Q02 best 4.5s, Q18 12.5, Q21 11.5.
+- **Residual: 2 frozen-spin firings in 4 runs** (vs ~20 in the storm
+  arms) — pure GC-cycle seizures now, no throttle composing; when one
+  lands mid-query it costs ~45-60s (Q17-R3 60.2s, Q02-R3 58.5s).
+  gctrace lines + heap-pressure .pb.gz ARE banked in this run's wlogs
+  — the mark-cost/pointer-density analysis starts fully instrumented.
+
+Standing config: gogc=100, no MemoryHigh, MemoryMax guard. The stall
+family is now: cured of amplification (bbdb985), cured of the memcg
+throttle (bf4b895), residual = infrequent GC-cycle seizures with a
+complete evidence kit and one named next lever (decoded-cache mark
+cost).
