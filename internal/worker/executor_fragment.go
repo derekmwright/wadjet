@@ -2487,6 +2487,19 @@ func (s *fragmentExchangeSink) finalize(ctx context.Context, task distributed.Ta
 	if err := s.sink.Finalize(ctx); err != nil {
 		return err
 	}
+	// Per-phase sink attribution (see the counter block in
+	// partitionedShuffleSink): says where this task's sink_ms went.
+	// encode overlaps append (the flushing consumer's append window
+	// includes its encode); the buckets are otherwise disjoint.
+	if calls := s.sink.consumeCalls.Load(); calls > 0 {
+		s.executor.logger.Info("shuffle sink phases",
+			"task_id", task.ID, "stage_id", task.StageID,
+			"consumes", calls, "rows", s.sink.consumeRows.Load(),
+			"flatten_ms", s.sink.phaseFlattenNs.Load()/1e6,
+			"hash_ms", s.sink.phaseHashNs.Load()/1e6,
+			"append_ms", s.sink.phaseAppendNs.Load()/1e6,
+			"encode_ms", s.sink.phaseEncodeNs.Load()/1e6)
+	}
 	return s.executor.uploadPartitionedShuffleFiles(ctx, task, s.sink, result)
 }
 

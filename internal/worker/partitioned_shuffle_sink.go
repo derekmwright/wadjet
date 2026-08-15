@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -80,6 +81,19 @@ type partitionedShuffleSink struct {
 	localsMu  sync.Mutex
 	localFree []*localAccum
 	localAll  []*localAccum
+
+	// Per-phase attribution counters (atomic ns), logged once per task by
+	// fragmentExchangeSink.finalize as "shuffle sink phases". Added
+	// 2026-08-15 after two sink-lock theories (acquire count e50fd1b,
+	// encode-under-lock f47a6e8) each failed to move q08 join-6's ~26s/task
+	// sink_ms — the counters say where a consume's ~260µs mean actually
+	// goes instead of a third inference.
+	phaseFlattenNs atomic.Int64 // view normalization at Consume top
+	phaseHashNs    atomic.Int64 // partition hashing + row scatter
+	phaseAppendNs  atomic.Int64 // slab/accumulator appends incl. lock waits
+	phaseEncodeNs  atomic.Int64 // chunk encode+write (outside mu since f47a6e8)
+	consumeCalls   atomic.Int64
+	consumeRows    atomic.Int64
 }
 
 // consumeScratch is the per-Consume private working set.
@@ -215,6 +229,7 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 		// per-column row translation — flattening either inside the burst
 		// goroutines would race on the shared vectors. Remaining views defer
 		// nulls to their base and serialize through the translation, copy-free.
+		tFlat := time.Now()
 		for _, ki := range s.keyIdxs {
 			if b.Columns[ki].IsView() {
 				b.FlattenColumn(ki)
@@ -227,6 +242,7 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 				exec.LateMatFlattens.Add(1)
 			}
 		}
+		s.phaseFlattenNs.Add(time.Since(tFlat).Nanoseconds())
 	}
 
 	// Vectorized partition assignment: one pass per key column over the
@@ -236,6 +252,9 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 	// allocation-free. Scratch is pooled per call so concurrent consumers
 	// never share it.
 	n := b.ActiveLen()
+	s.consumeCalls.Add(1)
+	s.consumeRows.Add(int64(n))
+	tHash := time.Now()
 	sc, _ := s.scratchPool.Get().(*consumeScratch)
 	if sc == nil {
 		sc = &consumeScratch{perPartRows: make([][]uint32, s.numParts)}
@@ -267,6 +286,8 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 			sc.perPartRows[parts[i]] = append(sc.perPartRows[parts[i]], uint32(i))
 		}
 	}
+
+	s.phaseHashNs.Add(time.Since(tHash).Nanoseconds())
 
 	// Direct-chunk gate input: estimated bytes per row, so each partition
 	// slice can decide accumulator vs direct encode. 0 = direct path off.
@@ -303,18 +324,22 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 		// Consumer-local pre-accumulation (shuffle_local_accum.go): tiny
 		// post-join consumes append lock-free into a checked-out slab set
 		// and touch the shared partition writers only when a slab fills.
+		tApp := time.Now()
+		var err error
 		if sinkLocalAccumEnabled {
-			return s.consumeLocalAccum(b, sc)
-		}
-		for p := 0; p < s.numParts; p++ {
-			if len(sc.perPartRows[p]) == 0 {
-				continue
+			err = s.consumeLocalAccum(b, sc)
+		} else {
+			for p := 0; p < s.numParts; p++ {
+				if len(sc.perPartRows[p]) == 0 {
+					continue
+				}
+				if err = s.appendPartition(p, b, sc.perPartRows[p], rowBytes); err != nil {
+					break
+				}
 			}
-			if err := s.appendPartition(p, b, sc.perPartRows[p], rowBytes); err != nil {
-				return err
-			}
 		}
-		return nil
+		s.phaseAppendNs.Add(time.Since(tApp).Nanoseconds())
+		return err
 	}
 
 	// Each partitionWriter is fully independent (own file handle, bufio.Writer,
@@ -327,6 +352,7 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 	if gp := runtime.GOMAXPROCS(0); limit > gp {
 		limit = gp
 	}
+	tApp := time.Now()
 	g := new(errgroup.Group)
 	g.SetLimit(limit)
 	for p := 0; p < s.numParts; p++ {
@@ -338,7 +364,9 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 			return s.appendPartition(p, b, sc.perPartRows[p], rowBytes)
 		})
 	}
-	return g.Wait()
+	err := g.Wait()
+	s.phaseAppendNs.Add(time.Since(tApp).Nanoseconds())
+	return err
 }
 
 // appendPartition routes one partition's row slice: a slice whose estimated
@@ -379,7 +407,9 @@ func (s *partitionedShuffleSink) writeDirectChunk(p int, b *batch.RecordBatch, r
 	pw.flushing = true
 	pw.mu.Unlock()
 
+	tEnc := time.Now()
 	err := w.writeChunk(b.Columns, rows, len(rows))
+	s.phaseEncodeNs.Add(time.Since(tEnc).Nanoseconds())
 
 	pw.mu.Lock()
 	pw.flushing = false
@@ -436,7 +466,9 @@ func (s *partitionedShuffleSink) appendAndMaybeFlush(p int, b *batch.RecordBatch
 	pw.flushing = true
 	pw.mu.Unlock()
 
+	tEnc := time.Now()
 	err := w.writeChunk(full.Columns, nil, fullRows)
+	s.phaseEncodeNs.Add(time.Since(tEnc).Nanoseconds())
 
 	pw.mu.Lock()
 	pw.flushing = false
