@@ -95,6 +95,13 @@ type Config struct {
 	ScanDecodeAhead      bool
 	ScanDecodeAheadBytes int64
 
+	// ShuffleDecodeAhead fans WSHF chunk decode out to CPU-token-budgeted
+	// workers behind the streaming reader's scanner, with strict in-order
+	// delivery (docs/design/shuffle-decode-ahead.md — the q08/q09 probe
+	// width-plateau fix). Default on at the CLI; false is the kill switch
+	// restoring the serial streaming reader.
+	ShuffleDecodeAhead bool
+
 	// DecodedCacheBytes bounds the worker-lifetime decoded-chunk cache:
 	// decoded base-table parquet column chunks reused across queries and
 	// runs instead of re-paying zstd decompress + decode
@@ -313,6 +320,7 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	executor.SetMorselWorkers(cfg.MorselWorkers)
 	executor.SetStreamingShuffleRead(cfg.StreamingShuffleRead)
 	executor.SetScanDecodeAhead(cfg.ScanDecodeAhead, cfg.ScanDecodeAheadBytes)
+	executor.SetShuffleDecodeAhead(cfg.ShuffleDecodeAhead)
 	// Decoded-chunk cache (docs/design/decoded-rowgroup-cache.md): default
 	// off; a positive budget creates the cache, wires it into scan sources,
 	// and (below) registers it as a hard reservoir + relief target.
@@ -971,6 +979,7 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 		var lastReads, lastFallbacks, lastSkips, lastFPFiles int64
 		var lastIO ShuffleIOSnapshot
 		var lastUp [7]int64
+		var lastDA [6]int64
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for {
@@ -997,6 +1006,19 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 					lastIO = ioStats
 					lastUp = up
 					w.logShuffleIOStats(ioStats, up)
+				}
+				// Shuffle decode-ahead markers (docs/design/
+				// shuffle-decode-ahead.md §5). stage_ms is the serial
+				// scanner walk — the structural floor to watch.
+				chunks, winNs, tokNs, presNs, stageNs, decNs := w.executor.ShuffleDecodeAheadStats()
+				curDA := [6]int64{chunks, winNs, tokNs, presNs, stageNs, decNs}
+				if curDA != lastDA {
+					lastDA = curDA
+					w.logger.Info("shuffle decode-ahead stats",
+						"chunks", chunks,
+						"window_full_ms", winNs/1e6, "token_stall_ms", tokNs/1e6,
+						"pressure_stall_ms", presNs/1e6,
+						"stage_ms", stageNs/1e6, "decode_ms", decNs/1e6)
 				}
 			}
 		}
@@ -1304,6 +1326,14 @@ func (w *Worker) logFinalScanStats() {
 			"refault_discount", int64(memory.PageCachePressureDiscount()),
 			"refault_activations", refaultActivations,
 			"refault_episode_ignores", memory.PageCachePressureBoundedIgnores())
+	}
+	if w.config.ShuffleDecodeAhead {
+		chunks, winNs, tokNs, presNs, stageNs, decNs := w.executor.ShuffleDecodeAheadStats()
+		w.logger.Info("shuffle decode-ahead stats (final)",
+			"chunks", chunks,
+			"window_full_ms", winNs/1e6, "token_stall_ms", tokNs/1e6,
+			"pressure_stall_ms", presNs/1e6,
+			"stage_ms", stageNs/1e6, "decode_ms", decNs/1e6)
 	}
 	writeDrop, readDrop := diskio.DropBehindStats()
 	preadChunks, preadBytes, preadAllocs := parquet.PreadStats()

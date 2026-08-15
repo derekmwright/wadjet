@@ -66,6 +66,7 @@ func (s *cachedFileStreamSource) openShuffleFromFileStreaming(f *os.File, size i
 	if err != nil {
 		return err
 	}
+	s.maybeStartShuffleDecodeAhead(r)
 	s.chunkReader = r
 	// streamReader carries the release obligation (Close → fd close);
 	// streamKey stays "" — a read error on a local file is terminal, not a

@@ -175,6 +175,12 @@ type Executor struct {
 	// late (attach-on-arrival) deliveries both land here.
 	scanDecodeAheadPrunedGroups atomic.Int64
 
+	// Shuffle decode-ahead (docs/design/shuffle-decode-ahead.md): WSHF
+	// chunk decode fans out to workers behind the streaming reader's
+	// scanner. Readers add directly to the shared counter sink.
+	shuffleDecodeAhead      bool
+	shuffleDecodeAheadStats shuffleDecodeAheadStats
+
 	// activeForeground counts tasks currently inside Execute — the busy
 	// signal the background-upload QoS gate yields to.
 	activeForeground atomic.Int64
@@ -262,6 +268,21 @@ func (e *Executor) ShuffleIOStats() ShuffleIOSnapshot {
 func (e *Executor) SetScanDecodeAhead(on bool, windowBytes int64) {
 	e.scanDecodeAhead = on
 	e.scanDecodeAheadBytes = windowBytes
+}
+
+// SetShuffleDecodeAhead enables chunk-parallel decode on WSHF shuffle
+// inputs (--shuffle-decode-ahead). Call before Worker.Start.
+func (e *Executor) SetShuffleDecodeAhead(on bool) { e.shuffleDecodeAhead = on }
+
+// ShuffleDecodeAheadStats returns the shuffle decode-ahead markers:
+// chunks decoded ahead, and the parked/spent spans (ns) per class —
+// window-full, token, pressure on the admission side; stage (the serial
+// scanner walk, the structural floor) and decode (worker time) on the
+// throughput side.
+func (e *Executor) ShuffleDecodeAheadStats() (chunks, windowFullNs, tokenNs, pressureNs, stageNs, decodeNs int64) {
+	s := &e.shuffleDecodeAheadStats
+	return s.chunks.Load(), s.windowFullNs.Load(), s.tokenStallNs.Load(),
+		s.pressureNs.Load(), s.stageNs.Load(), s.decodeNs.Load()
 }
 
 // foldScanDecodeAheadQueryStats adds one closed iterator's counters to

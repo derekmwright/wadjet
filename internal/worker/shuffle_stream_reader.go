@@ -53,6 +53,13 @@ type streamingShuffleReader struct {
 	scratch   []byte
 	hdr       [8]byte
 	closed    bool
+
+	// da, when non-nil, replaces the serial Next with chunk-parallel
+	// decode-ahead (shuffle_decode_ahead.go): the stream walk stays on one
+	// scanner goroutine, column decode fans out to workers, delivery stays
+	// strictly in order. Set once by startDecodeAhead before the first
+	// Next; nil = the serial path below, byte-identical to before.
+	da *shuffleDecodeAhead
 }
 
 // newStreamingShuffleReader parses the WSHF header from rc, which must be
@@ -143,6 +150,9 @@ func (r *streamingShuffleReader) readHeader() error {
 // surfaces the same truncation error class as the mmap reader — silent
 // EOF would drop rows on the floor (the SF100 Q05 zero-rows incident).
 func (r *streamingShuffleReader) Next() (*batch.RecordBatch, error) {
+	if r.da != nil {
+		return r.da.next()
+	}
 	for r.chunk < r.numChunks {
 		if _, err := io.ReadFull(r.br, r.hdr[:4]); err != nil {
 			return nil, fmt.Errorf("shuffle stream truncated: chunk %d/%d row-count: %w", r.chunk, r.numChunks, err)
@@ -161,18 +171,31 @@ func (r *streamingShuffleReader) Next() (*batch.RecordBatch, error) {
 			return nil, fmt.Errorf("shuffle stream truncated: chunk %d/%d: %w", r.chunk-1, r.numChunks, err)
 		}
 
-		b := batch.NewRecordBatch(r.schema, numRows)
-		pos := 0
-		for ci := range r.schema {
-			pos, err = readColumnData(chunkBytes, pos, b.Columns[ci], numRows, r.schema[ci].Type)
-			if err != nil {
-				return nil, fmt.Errorf("reading column %d (%s) chunk %d: %w", ci, r.schema[ci].Name, r.chunk-1, err)
-			}
+		b, err := decodeShuffleChunk(r.schema, numRows, chunkBytes, r.chunk-1)
+		if err != nil {
+			return nil, err
 		}
 		r.delivered++
 		return b, nil
 	}
 	return nil, nil
+}
+
+// decodeShuffleChunk materializes one staged chunk's column segments into a
+// fresh RecordBatch. Shared verbatim by the serial path and the decode-ahead
+// workers so the two cannot diverge on payload interpretation; chunkIdx is
+// for error text only.
+func decodeShuffleChunk(schema []parquet.Column, numRows int, chunkBytes []byte, chunkIdx uint32) (*batch.RecordBatch, error) {
+	b := batch.NewRecordBatch(schema, numRows)
+	pos := 0
+	for ci := range schema {
+		var err error
+		pos, err = readColumnData(chunkBytes, pos, b.Columns[ci], numRows, schema[ci].Type)
+		if err != nil {
+			return nil, fmt.Errorf("reading column %d (%s) chunk %d: %w", ci, schema[ci].Name, chunkIdx, err)
+		}
+	}
+	return b, nil
 }
 
 // readChunkBytes reads one chunk's column segments (everything after the
@@ -181,7 +204,19 @@ func (r *streamingShuffleReader) Next() (*batch.RecordBatch, error) {
 // types are cross-checked against numRows — a stream decoder must not
 // trust a length it is about to allocate/skip by.
 func (r *streamingShuffleReader) readChunkBytes(numRows int) ([]byte, error) {
-	buf := r.scratch[:0]
+	buf, err := r.readChunkBytesInto(r.scratch[:0], numRows)
+	if err != nil {
+		return nil, err
+	}
+	r.scratch = buf[:0]
+	return buf, nil
+}
+
+// readChunkBytesInto is readChunkBytes over a caller-supplied buffer — the
+// decode-ahead scanner stages each chunk into a pooled private buffer so
+// workers can decode chunk N while the scanner walks N+1. Single caller at
+// a time (the stream is serial); only the buffer's ownership differs.
+func (r *streamingShuffleReader) readChunkBytesInto(buf []byte, numRows int) ([]byte, error) {
 	for ci := range r.schema {
 		// Null bitmap: word count + words.
 		w, err := r.appendN(buf, 4)
@@ -242,7 +277,6 @@ func (r *streamingShuffleReader) readChunkBytes(numRows int) ([]byte, error) {
 			}
 		}
 	}
-	r.scratch = buf[:0]
 	return buf, nil
 }
 
@@ -293,12 +327,25 @@ func (r *streamingShuffleReader) releasePooled() {
 }
 
 // Close releases the pooled codec reader and closes the transport body.
-// Idempotent.
+// Idempotent. In decode-ahead mode the body closes FIRST (unblocking a
+// scanner parked in a read syscall), then the scanner and workers are
+// joined before the pooled codec reader is released — the scanner reads
+// through it, so the return-to-pool must not race a live read.
 func (r *streamingShuffleReader) Close() error {
 	if r.closed {
 		return nil
 	}
 	r.closed = true
+	if r.da != nil {
+		var err error
+		if r.body != nil {
+			err = r.body.Close()
+			r.body = nil
+		}
+		r.da.stop()
+		r.releasePooled()
+		return err
+	}
 	r.releasePooled()
 	if r.body != nil {
 		return r.body.Close()

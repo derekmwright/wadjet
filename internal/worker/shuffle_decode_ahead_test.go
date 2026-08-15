@@ -1,0 +1,356 @@
+package worker
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"fmt"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+)
+
+// openDecodeAhead builds a streaming reader over wire and engages
+// chunk-parallel decode with the given knobs (nil tokens/pressure = the
+// production defaults minus budgeting).
+func openDecodeAhead(tb testing.TB, wire []byte, workers int, tokens *cpuTokens, pressure func() bool, strict bool, stats *shuffleDecodeAheadStats) *streamingShuffleReader {
+	tb.Helper()
+	r := openStreaming(tb, wire)
+	r.startDecodeAhead(workers, tokens, pressure, strict, stats)
+	if r.da == nil {
+		tb.Fatalf("decode-ahead did not engage (numChunks=%d)", r.numChunks)
+	}
+	return r
+}
+
+// insertEmptyChunk splices a bare zero row-count word between chunk
+// payloads and patches the header count — the wire shape the serial
+// reader's numRows==0 skip tolerates. Returns the modified wire.
+func insertEmptyChunk(tb testing.TB, wire []byte) []byte {
+	tb.Helper()
+	// Walk to the end of the first chunk using the serial reader, which
+	// tracks its position via the buffered stream: simplest is to re-read
+	// the header + first chunk through a fresh reader over a counting
+	// stream. Instead, splice at the very end — an empty trailing chunk
+	// exercises the same skip path in both readers.
+	out := append([]byte(nil), wire...)
+	out = append(out, 0, 0, 0, 0)
+	binary.LittleEndian.PutUint32(out[4:], binary.LittleEndian.Uint32(out[4:])+1)
+	return out
+}
+
+// TestShuffleDecodeAhead_MatchesSerial is the core parity gate: same
+// batches, same order, same values as the serial streaming reader, across
+// every WSHF-supported column class, with an empty chunk in the wire.
+func TestShuffleDecodeAhead_MatchesSerial(t *testing.T) {
+	wire := insertEmptyChunk(t, buildMultiTypeWSHF(t, 42, 16, 257))
+	want := drain(t, openStreaming(t, wire).Next)
+
+	for _, workers := range []int{1, 3, 8} {
+		r := openDecodeAhead(t, wire, workers, nil, nil, false, nil)
+		got := drain(t, r.Next)
+		requireBatchesEqual(t, want, got)
+		if r.Delivered() != len(want) {
+			t.Fatalf("workers=%d: Delivered()=%d, want %d", workers, r.Delivered(), len(want))
+		}
+		if err := r.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+}
+
+// TestShuffleDecodeAhead_TruncationErrorPosition verifies a truncated
+// stream delivers exactly the batches the serial reader would deliver and
+// then surfaces an error at the same position (transport-fallback
+// contract: Delivered() is the skip count).
+func TestShuffleDecodeAhead_TruncationErrorPosition(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 7, 12, 128)
+	cut := len(wire) - len(wire)/3 // mid-chunk somewhere past the header
+
+	drainToErr := func(r *streamingShuffleReader) (int, error) {
+		n := 0
+		for {
+			b, err := r.Next()
+			if err != nil {
+				return n, err
+			}
+			if b == nil {
+				t.Fatalf("truncated stream ended with clean EOF after %d batches", n)
+			}
+			n++
+		}
+	}
+
+	sN, sErr := drainToErr(openStreaming(t, wire[:cut]))
+	r := openDecodeAhead(t, wire[:cut], 4, nil, nil, false, nil)
+	pN, pErr := drainToErr(r)
+	if pN != sN {
+		t.Fatalf("batches before error: parallel %d, serial %d", pN, sN)
+	}
+	if pErr == nil || !strings.Contains(pErr.Error(), "truncated") {
+		t.Fatalf("parallel error %v, want truncation (serial: %v)", pErr, sErr)
+	}
+	if r.Delivered() != sN {
+		t.Fatalf("Delivered()=%d, want %d", r.Delivered(), sN)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestShuffleDecodeAhead_ZeroTokens verifies token exhaustion degrades to
+// the cursor-exempt serial cadence and still completes with exact parity.
+func TestShuffleDecodeAhead_ZeroTokens(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 3, 10, 200)
+	want := drain(t, openStreaming(t, wire).Next)
+
+	var stats shuffleDecodeAheadStats
+	r := openDecodeAhead(t, wire, 4, newCPUTokens(0), nil, false, &stats)
+	got := drain(t, r.Next)
+	requireBatchesEqual(t, want, got)
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if stats.tokenStallNs.Load() == 0 {
+		t.Fatalf("expected token stalls with a zero-capacity pool")
+	}
+}
+
+// TestShuffleDecodeAhead_TokensBalance verifies every token acquired for a
+// non-cursor chunk is returned by the time the reader closes.
+func TestShuffleDecodeAhead_TokensBalance(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 9, 20, 100)
+	tokens := newCPUTokens(3)
+	r := openDecodeAhead(t, wire, 4, tokens, nil, false, nil)
+	_ = drain(t, r.Next)
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := tokens.InUse(); got != 0 {
+		t.Fatalf("tokens leaked: InUse=%d after Close", got)
+	}
+}
+
+// TestShuffleDecodeAhead_TokensBalanceOnEarlyClose closes the reader after
+// one batch — tokens attached to staged-but-undecoded chunks must drain
+// back to the pool and Close must not hang or leak goroutines.
+func TestShuffleDecodeAhead_TokensBalanceOnEarlyClose(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 11, 32, 200)
+	tokens := newCPUTokens(3)
+	r := openDecodeAhead(t, wire, 4, tokens, nil, false, nil)
+	if b, err := r.Next(); err != nil || b == nil {
+		t.Fatalf("first Next: %v %v", b, err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := tokens.InUse(); got != 0 {
+		t.Fatalf("tokens leaked: InUse=%d after early Close", got)
+	}
+}
+
+// TestShuffleDecodeAhead_UnderPressure forces the pressure hook active for
+// the whole run: admission collapses to the occupancy floor but the stream
+// must still complete with exact parity (cursor exemption = liveness).
+func TestShuffleDecodeAhead_UnderPressure(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 5, 10, 150)
+	want := drain(t, openStreaming(t, wire).Next)
+
+	for _, strict := range []bool{false, true} {
+		var stats shuffleDecodeAheadStats
+		r := openDecodeAhead(t, wire, 4, nil, func() bool { return true }, strict, &stats)
+		got := drain(t, r.Next)
+		requireBatchesEqual(t, want, got)
+		if err := r.Close(); err != nil {
+			t.Fatalf("strict=%v Close: %v", strict, err)
+		}
+		if stats.pressureNs.Load() == 0 {
+			t.Fatalf("strict=%v: expected pressure stalls with hook forced on", strict)
+		}
+	}
+}
+
+// TestShuffleDecodeAhead_WindowBound shrinks the byte window below one
+// chunk: every chunk is oversized, admission must alternate via the cursor
+// exemption rather than deadlock, and parity must hold.
+func TestShuffleDecodeAhead_WindowBound(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 13, 8, 300)
+	want := drain(t, openStreaming(t, wire).Next)
+
+	old := shuffleDecodeAheadWindowBytes
+	shuffleDecodeAheadWindowBytes = 1 // below any real chunk
+	defer func() { shuffleDecodeAheadWindowBytes = old }()
+
+	var stats shuffleDecodeAheadStats
+	r := openDecodeAhead(t, wire, 4, nil, nil, false, &stats)
+	got := drain(t, r.Next)
+	requireBatchesEqual(t, want, got)
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if stats.windowFullNs.Load() == 0 {
+		t.Fatalf("expected window-full stalls with a 1-byte window")
+	}
+}
+
+// TestShuffleDecodeAhead_MinChunksGate verifies small files stay serial.
+func TestShuffleDecodeAhead_MinChunksGate(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 1, shuffleDecodeAheadMinChunks-1, 8)
+	r := openStreaming(t, wire)
+	r.startDecodeAhead(4, nil, nil, false, nil)
+	if r.da != nil {
+		t.Fatalf("decode-ahead engaged below the min-chunks gate")
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestShuffleDecodeAhead_WSHC runs parity through the s2-compressed
+// envelope — the codec stream stays on the scanner.
+func TestShuffleDecodeAhead_WSHC(t *testing.T) {
+	plain := buildMultiTypeWSHF(t, 21, 10, 120)
+	want := drain(t, openStreaming(t, plain).Next)
+
+	var comp bytes.Buffer
+	comp.Write(compressedMagic[:])
+	w := acquireS2Writer(&comp)
+	if _, err := w.Write(plain); err != nil {
+		t.Fatalf("s2 write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("s2 close: %v", err)
+	}
+	releaseS2Writer(w)
+
+	r := openDecodeAhead(t, comp.Bytes(), 4, nil, nil, false, nil)
+	got := drain(t, r.Next)
+	requireBatchesEqual(t, want, got)
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestShuffleDecodeAhead_StatsProgress sanity-checks the throughput
+// markers move.
+func TestShuffleDecodeAhead_StatsProgress(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 17, 10, 100)
+	var stats shuffleDecodeAheadStats
+	r := openDecodeAhead(t, wire, 4, nil, nil, false, &stats)
+	_ = drain(t, r.Next)
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if stats.chunks.Load() != 10 {
+		t.Fatalf("chunks=%d, want 10", stats.chunks.Load())
+	}
+	if stats.stageNs.Load() == 0 || stats.decodeNs.Load() == 0 {
+		t.Fatalf("stage/decode spans did not move: stage=%d decode=%d",
+			stats.stageNs.Load(), stats.decodeNs.Load())
+	}
+}
+
+// TestShuffleDecodeAhead_CloseIdempotent mirrors the serial reader's
+// idempotent-Close contract, mid-stream and at EOF.
+func TestShuffleDecodeAhead_CloseIdempotent(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 23, 8, 50)
+	r := openDecodeAhead(t, wire, 4, nil, nil, false, nil)
+	if b, err := r.Next(); err != nil || b == nil {
+		t.Fatalf("first Next: %v %v", b, err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestShuffleDecodeAhead_SourceIntegration runs the production fragment
+// input path (MemStore → cachedFileStreamSource tiered open → streaming
+// pread reader) with the executor flag on and off and requires identical
+// row/sum totals across multi-chunk, multi-file WSHF input — the
+// engagement-site parity gate.
+func TestShuffleDecodeAhead_SourceIntegration(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	const bucket = "test"
+	if err := store.MakeBucket(ctx, bucket); err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	var wantSum int64
+	var wantRows int
+	for f := 0; f < 3; f++ {
+		wire := buildMultiTypeWSHF(t, int64(100+f), 12, 300)
+		for _, b := range drain(t, openStreaming(t, wire).Next) {
+			for i := 0; i < b.Len; i++ {
+				if b.Columns[0].Nulls.IsNull(i) {
+					continue
+				}
+				wantSum += b.Columns[0].Int64Data[i]
+				wantRows++
+			}
+		}
+		key := fmt.Sprintf("queries/test/partition=%04d/task.wshf", f)
+		if _, err := store.Put(ctx, bucket, key, bytes.NewReader(wire), int64(len(wire)), "application/octet-stream"); err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, key)
+	}
+
+	for _, ahead := range []bool{false, true} {
+		e := &Executor{store: store, spillDir: t.TempDir(), shuffleDecodeAhead: ahead, cpuTokens: newCPUTokens(4)}
+		src := newCachedFileStreamSource(e, "", bucket, keys)
+		if err := src.Init(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var sum int64
+		var rows int
+		for {
+			b, err := src.Next(ctx)
+			if err != nil {
+				t.Fatalf("ahead=%v: %v", ahead, err)
+			}
+			if b == nil {
+				break
+			}
+			for i := 0; i < b.Len; i++ {
+				if b.Columns[0].Nulls.IsNull(i) {
+					continue
+				}
+				sum += b.Columns[0].Int64Data[i]
+				rows++
+			}
+		}
+		if err := src.Close(); err != nil {
+			t.Fatalf("ahead=%v Close: %v", ahead, err)
+		}
+		if sum != wantSum || rows != wantRows {
+			t.Fatalf("ahead=%v: rows=%d sum=%d, want rows=%d sum=%d", ahead, rows, sum, wantRows, wantSum)
+		}
+		if got := e.cpuTokens.InUse(); got != 0 {
+			t.Fatalf("ahead=%v: tokens leaked: %d", ahead, got)
+		}
+	}
+}
+
+// TestShuffleDecodeAhead_PressureFlaps alternates the pressure hook per
+// call — admission decisions flip mid-stream; parity and completion must
+// survive the churn.
+func TestShuffleDecodeAhead_PressureFlaps(t *testing.T) {
+	wire := buildMultiTypeWSHF(t, 29, 24, 64)
+	want := drain(t, openStreaming(t, wire).Next)
+
+	var n atomic.Int64
+	r := openDecodeAhead(t, wire, 4, newCPUTokens(2), func() bool {
+		return n.Add(1)%3 == 0
+	}, false, nil)
+	got := drain(t, r.Next)
+	requireBatchesEqual(t, want, got)
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}

@@ -1,0 +1,140 @@
+# Shuffle decode-ahead (parallel WSHF chunk decode)
+
+Status: IMPLEMENTED (2026-08-15, this arc). Flag `--shuffle-decode-ahead`,
+default true; `=false` is the kill switch restoring the serial streaming
+reader unchanged.
+
+Predicted by the width-plateau attribution
+(`docs/benchmarks/q08-width-plateau-attribution-2026-08-15.md`): q08
+join-6's effective width plateaus at 8.7/3.7 of 15 admitted consumers
+with dry-wait at 5–10.6 widths, token wait ≤0.7, and
+`dispenser_producer_wait_ms = 0` — the single-threaded producer
+(`src.Next`, probe-input WSHF decode, ~40 parents/s) is the fragment's
+pacer. The parquet side of the same structure was fixed by
+`docs/design/scan-decode-pipelining.md`; this memo is that design applied
+to the WSHF chunk path, which today decodes fully serially in the morsel
+producer goroutine whatever the consumer width.
+
+## 1. The structure
+
+All production WSHF consumption flows through `streamingShuffleReader`
+(`--streaming-shuffle-read` default true routes transport bodies there;
+`WADJET_SHUFFLE_PREAD` default on routes local staged/cached files there
+too — the mmap `shuffleChunkReader` survives only behind that kill
+switch). Its `Next` is two phases per chunk:
+
+1. **Stage** — `readChunkBytes`: walk the chunk's length-prefixed column
+   segments off the stream into scratch. Sequential I/O + memcpy; this is
+   also where chunk boundaries are discovered (a WSHF chunk's extent is
+   only known by walking its column headers).
+2. **Decode** — `batch.NewRecordBatch` + the `readColumnData` column
+   loop: bitmap copies, fixed-width memcpys, BytesColumn append, decimal
+   transform. Allocation- and memmove-heavy; the dominant cost.
+
+Both phases run on the one producer goroutine, so k morsel consumers
+starve behind one core's staging+decode throughput. Warm runs starve
+HARDER (probe processing gets faster; decode does not — task B eff 3.7).
+
+## 2. Design
+
+Split the two phases at the seam they already have:
+
+- **Scanner (one goroutine)** owns the stream exactly as today: reads
+  row-count words, stages each chunk's raw bytes via `readChunkBytes`
+  into a **pooled per-chunk buffer** (instead of the shared scratch),
+  and emits one slot per non-empty chunk — to an ordered delivery queue
+  (consumer side) and a work queue (decode side).
+- **k decode workers** take slots and run the exact serial decode
+  (`decodeShuffleChunk`, extracted so the two paths cannot diverge),
+  parking the batch in the slot. Workers never touch the stream and
+  never block on anything but the work queue.
+- **`Next` delivers strictly in order** (slot FIFO, wait on each slot's
+  done channel). Same batches, same order, same error at the same
+  position as the serial reader; `Delivered()` (the transport-fallback
+  skip count) counts delivered batches exactly as before.
+
+Admission control mirrors the validated scan-decode-ahead rules:
+
+- **Byte window** (`shuffleDecodeAheadWindowBytes`, 128 MiB): staged +
+  decoded-but-undelivered bytes, charged at exact staged size (no
+  estimation — WSHF is uncompressed, decoded ≈ wire bytes). The chunk at
+  the delivery cursor is always admitted (an oversized chunk alternates,
+  never deadlocks). Downstream, the morsel dispenser's 512 MiB budget
+  bounds the next stage as before.
+- **CPU tokens, cursor-exempt, per chunk** (the §8.1 lesson taken as a
+  birth defect to avoid, not a fix to repeat): the scanner acquires one
+  token per non-cursor chunk before dispatching it; the worker releases
+  it when the decoded batch parks. No goroutine ever holds a token while
+  stalled. Token exhaustion degrades to cursor-only staging = today's
+  serial alternation.
+- **Pressure** (`scanDecodeAheadPressure`, the same Go-heap +
+  refault-sensor hook, occupancy-floored with the same strict/edge
+  variant): under pressure non-cursor admission waits for deliveries.
+  The held bytes here are the same displacement class the §9 arc
+  measured; there is no reason WSHF bytes would be exempt.
+
+GC-safety is preserved by construction: the frozen-spin fix moved WSHF
+decode off mmap so no decode span faults on file pages
+(`shuffle_pread.go`); the scanner still does all file I/O through read
+syscalls (GC-safe park points) and workers decode pure heap buffers.
+Extent-parallel decode over an mmap — the obvious alternative — would
+have reintroduced exactly the fault-inside-decode-span class that
+produced the 2026-08-11/12 SIGABRTs, on more threads.
+
+Engagement: both `streamingShuffleReader` construction sites
+(`openShuffleStreaming` for transport bodies, incl. the WSHC/WSHZ
+compressed framings — the codec stream is sequential and stays on the
+scanner; `openShuffleFromFileStreaming` for local pread), gated on
+`numChunks >= 4` (nothing to overlap below that; keeps the gather/reply
+class serial for free). Workers default 4 (`GOMAXPROCS` cap); width is
+governed at runtime by the token pool, so the constant is a ceiling, not
+a promise.
+
+## 3. Alternatives rejected
+
+- **N producer goroutines over disjoint file slices** (the other option
+  in the attribution memo): parallelism is capped by per-task file
+  count — probe-split tasks hold few files — and it multiplies the
+  tiered-fetch/staging state machines and makes the morsel dispenser's
+  single-writer admit multi-producer. Chunk granularity (~40+ chunks per
+  probe file) parallelizes within one file and composes with the
+  existing file prefetcher for cross-file overlap.
+- **Extent-parallel decode over the mmap reader**: WSHF extents are
+  cheaply skippable (every column segment is length-prefixed), but the
+  mmap path is the frozen-spin fault class the pread arc just closed;
+  building the new parallelism on it would be architectural regression.
+  The mmap reader stays as the untouched kill-switch path.
+- **Decode inside morsel consumers**: rejected for the same reason as in
+  scan-decode-pipelining §4 — it erases the producer/consumer split the
+  morsel machinery assumes and couples decode width to op-chain width.
+- **Out-of-order delivery**: the dispenser doesn't need order, but
+  in-order forfeits nothing here (the window bounds occupancy either
+  way), preserves `Delivered()`/truncation-position semantics for the
+  transport fallback unchanged, and keeps drop-behind trivially correct.
+
+## 4. Honest bounds
+
+- The scanner's sequential stage walk is the new serial floor: staging
+  is syscall+memcpy at page-cache bandwidth, so the ceiling moves from
+  ~stage+decode to ~stage — a structural several-fold lift, priced only
+  by the SF100 window. If the scanner itself becomes the measured pacer,
+  the follow-up is extent skip-walk staging (headers only, bulk pread by
+  workers), not wider decode.
+- Queries whose probe fragments are already producer-fed at consumer
+  speed move little; this targets the q08/q09 broadcast probe-split
+  shape (`consumer_dry_wait_ms` collapse is the success marker, before
+  wall).
+- Pooled staging buffers add (workers + queue) × chunk-size transient
+  heap (≤ the byte window by construction) that the ledger does not
+  charge — the same accounting posture as the morsel dispenser budget,
+  and bounded well below it.
+
+## 5. Markers
+
+Per-worker counters, folded from each reader at Close and logged by the
+existing worker marker loop + final summary: `chunks`, `window_full_ns`,
+`token_stall_ns` (stalls where a non-cursor chunk waited), `pressure_ns`,
+`stage_ns` (scanner readChunkBytes time — the serial-floor watch item),
+`decode_ns`. The morsel done-line's `consumer_dry_wait_ms` /
+`dispenser_parents` (already Info) are the before/after judgment
+counters for the width plateau itself.

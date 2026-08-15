@@ -749,11 +749,25 @@ func (s *cachedFileStreamSource) openShuffleStreaming(ctx context.Context, srcPa
 	if err != nil {
 		return err
 	}
+	s.maybeStartShuffleDecodeAhead(r)
 	s.chunkReader = r
 	s.streamReader = r
 	s.streamKey = srcPath
 	s.executor.shuffleStreamReads.Add(1)
 	return nil
+}
+
+// maybeStartShuffleDecodeAhead engages chunk-parallel decode on a freshly
+// constructed streaming reader (docs/design/shuffle-decode-ahead.md).
+// Must run before the reader's first Next. No-op when the flag is off or
+// the file is below the engagement gate.
+func (s *cachedFileStreamSource) maybeStartShuffleDecodeAhead(r *streamingShuffleReader) {
+	e := s.executor
+	if e == nil || !e.shuffleDecodeAhead {
+		return
+	}
+	r.startDecodeAhead(0, e.cpuTokens, scanDecodeAheadPressure,
+		scanDecodeAheadStrictPressure(), &e.shuffleDecodeAheadStats)
 }
 
 // openShuffleStagedFromStore re-resolves srcPath from the durable store

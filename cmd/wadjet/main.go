@@ -119,6 +119,7 @@ var (
 	peerWireCompression   bool
 	scanDecodeAhead       bool
 	scanDecodeAheadBytes  int64
+	shuffleDecodeAhead    bool
 )
 
 func main() {
@@ -195,6 +196,7 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&peerWireCompression, "peer-wire-compression", true, "s2-compress raw WSHF payloads on outgoing peer-exchange streams: the wire carries a standard WSHC envelope every consumer already decodes, cutting peer-stream bytes ~20% for ~1 core-GB/s of producer CPU per stream. Worker-side. Default true (SF100-validated 2026-08-09: rows identical, walls in-band, ENA out-throttle events -30% on network-allowance-bound c7gd.4xlarge); =false is the kill switch. See docs/design/peer-wire-compression.md.")
 	rootCmd.PersistentFlags().BoolVar(&scanDecodeAhead, "scan-decode-ahead", true, "Decode parquet row groups ahead of scan consumption: k decode workers per scan source with in-order delivery and a decoded-bytes window bounded by the shared memory pool and the page-cache refault sensor. Worker scan path only. Default true (SF100-validated, steady-state -7.3%); =false is the kill switch restoring the serial row-group path. See docs/design/scan-decode-pipelining.md.")
 	rootCmd.PersistentFlags().Int64Var(&scanDecodeAheadBytes, "scan-decode-ahead-bytes", 0, "Decoded-but-unconsumed byte window per scan source for --scan-decode-ahead. 0 = engine default (256 MiB).")
+	rootCmd.PersistentFlags().BoolVar(&shuffleDecodeAhead, "shuffle-decode-ahead", true, "Decode WSHF shuffle chunks ahead of consumption: the streaming reader's scanner stages chunk bytes while CPU-token-budgeted workers decode them, with strict in-order delivery — the probe-input width-plateau fix (q08/q09 broadcast probe-split). Default true; =false is the kill switch restoring the serial streaming reader. See docs/design/shuffle-decode-ahead.md.")
 	rootCmd.PersistentFlags().Int64Var(&decodedCacheBytes, "decoded-cache-bytes", 0, "Worker-lifetime in-memory cache of decoded base-table parquet column chunks: hits skip zstd decompress + decode kernels for re-reads of the same immutable objects across queries and runs. Registered as a hard system reservoir and evicted first under memory relief. 0 = disabled (default until SF100 validation). See docs/design/decoded-rowgroup-cache.md.")
 	rootCmd.PersistentFlags().Int64Var(&baseTableCacheBytes, "base-table-cache-bytes", 0, "Cross-query disk cache for immutable base-table parquet objects: LRU byte budget on the cache volume. Hits are served from local disk without touching S3 (or the circuit breaker); misses tee the download into the cache. The cache survives restarts (index rebuilt from the directory). 0 = disabled (default until SF100 validation). See docs/design/base-table-nvme-cache.md.")
 	rootCmd.PersistentFlags().StringVar(&baseTableCacheDir, "base-table-cache-dir", "", "Directory for the base-table cache (default: <spill-dir>/base-cache, inheriting the spill volume's NVMe mount)")
@@ -964,6 +966,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		PeerWireCompression:   peerWireCompression,
 		ScanDecodeAhead:       scanDecodeAhead,
 		ScanDecodeAheadBytes:  scanDecodeAheadBytes,
+		ShuffleDecodeAhead:    shuffleDecodeAhead,
 		DecodedCacheBytes:     decodedCacheBytes,
 	}, store, nc, js, logger)
 
@@ -1552,6 +1555,7 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		PeerWireCompression:   peerWireCompression,
 		ScanDecodeAhead:       scanDecodeAhead,
 		ScanDecodeAheadBytes:  scanDecodeAheadBytes,
+		ShuffleDecodeAhead:    shuffleDecodeAhead,
 		DecodedCacheBytes:     decodedCacheBytes,
 	}, store, nc, js, logger)
 	w.SetControlConn(controlNC)
