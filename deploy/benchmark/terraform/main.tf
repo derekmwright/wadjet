@@ -913,12 +913,18 @@ resource "aws_instance" "worker" {
       # OUTSIDE the continuation chain — a mid-command comment line
       # gets shell-joined and truncates the systemd-run invocation;
       # 2026-08-15 deploy 01:07 lost all workers to exactly that.)
+      # gctrace deliberately NOT set (2026-08-15): the runtime prints
+      # the trace line while the world is STOPPED, so a saturated
+      # journald stream turns every GC into a whole-process freeze —
+      # heartbeats included — until the sink drains (the 01:17 run's
+      # 90s+ reap seizures). Its diagnostic job (seizure root-cause)
+      # is done; re-enable only for a dedicated GC investigation, on
+      # a sink that can absorb it.
       while true; do
         systemd-run --quiet --unit="wadjet-worker-$idx-$$-$(date +%s)" \
           --scope -p "MemoryMax=$PER_PROC_BYTES" \
           --setenv="GOMEMLIMIT=$PER_PROC_GOMEMLIMIT" \
           --setenv="GOTRACEBACK=all" \
-          --setenv="GODEBUG=gctrace=1" \
           --setenv="WADJET_GOGC=${var.gogc}" \
           --setenv="WADJET_TASK_GC=${var.task_gc}" \
           --setenv="WADJET_REFAULT_PRESSURE_RATE=${var.refault_pressure_rate}" \
