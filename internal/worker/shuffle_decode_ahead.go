@@ -51,6 +51,16 @@ var shuffleDecodeAheadWorkers = func() int {
 	return 4
 }()
 
+// shuffleIndexReadaheadBytes is how far ahead of the scan cursor the
+// index scanner advises FADV_WILLNEED over upcoming extents (the 3-arm
+// window's finding 1: k interleaved worker preads defeat kernel
+// readahead on not-yet-resident files, costing the early-warm runs what
+// the walk path's sequential read got for free — memo
+// shuffle-index-3arm-2026-08-15.md). The scanner is idle by construction
+// in index mode and holds every extent, so the advice costs one syscall
+// per window step. Package var so tests can shrink it; 0 disables.
+var shuffleIndexReadaheadBytes int64 = 32 << 20
+
 // shuffleDecodeAheadWindowBytes bounds staged+decoded-but-undelivered
 // bytes per reader (charged at exact staged size — WSHF is uncompressed,
 // decoded ≈ wire bytes). The morsel dispenser's 512 MiB budget bounds
@@ -305,12 +315,31 @@ func (d *shuffleDecodeAhead) scanIndexed() {
 	defer d.flushDonated()
 	r := d.r
 	d.stats.indexedFiles.Add(1)
+	// Extent readahead: keep FADV_WILLNEED issued a bounded distance ahead
+	// of the scan cursor so worker preads copy from page cache instead of
+	// blocking on NVMe under a held CPU token. Advisory; nil on non-Linux.
+	advise := fdWillNeedAdviser(r.file)
+	fileEnd := d.idx[len(d.idx)-1]
+	advisedUpTo := d.idx[r.chunk]
 	for r.chunk < r.numChunks {
 		i := r.chunk
 		start, end := d.idx[i], d.idx[i+1]
 		r.chunk++
 		if end-start == 4 {
 			continue // bare row-count word: the empty-chunk encoding
+		}
+		if advise != nil && shuffleIndexReadaheadBytes > 0 {
+			target := start + shuffleIndexReadaheadBytes
+			if target < end {
+				target = end
+			}
+			if target > fileEnd {
+				target = fileEnd
+			}
+			if target > advisedUpTo {
+				advise(advisedUpTo, target-advisedUpTo)
+				advisedUpTo = target
+			}
 		}
 		est := end - start - 4
 		token, ok := d.admit(est)

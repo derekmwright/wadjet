@@ -91,6 +91,23 @@ counters, same advisory-failure latch) advances on each in-order
 delivery credit, so the transient page-cache bound is preserved.
 Cache-owned files keep their pages, exactly as before.
 
+## 2.1 Extent readahead (2026-08-16, post-3-arm window)
+
+The 3-arm A/B (memo `shuffle-index-3arm-2026-08-15.md`) measured the
+index reader ~5–8s slower on q08 and ~12–18s on the suite at R2
+(early-warm), converging with the walk reader by R3+ — a
+warmth-dependent penalty, so the cause is I/O pattern, not token
+economics: k interleaved worker preads defeat kernel readahead on
+not-yet-resident files, where the walk scanner's sequential read
+warmed pages for free. The idle index scanner therefore keeps
+FADV_WILLNEED issued `shuffleIndexReadaheadBytes` (32 MiB) ahead of
+its cursor over the extent table — the same posture as the parquet
+scan path's `fdWillNeedAdviser`, one syscall per window step, counted
+in `readahead_advise_bytes`. Confirm-window judgment: R2 q08 back to
+~18s; fallback if it fails is defaulting the reader to walk
+(`WADJET_SHUFFLE_INDEX_READ=0` shipping as default) with the footer
+kept.
+
 ## 3. Alternatives rejected
 
 - **Seek-based skip-walk (reader-only, the §4 sketch as literally
