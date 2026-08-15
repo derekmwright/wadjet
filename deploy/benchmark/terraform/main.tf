@@ -633,6 +633,12 @@ resource "aws_instance" "worker" {
     export WADJET_STAGE_FUSION_AGG="${var.stage_fusion_agg}"
     export WADJET_BLOCK_PROFILE_RATE="${var.block_profile_rate}"
     export WADJET_MUTEX_PROFILE_FRACTION="${var.mutex_profile_fraction}"
+    # Generic env-arm seam (var.extra_env): systemd-run --scope workers
+    # inherit this shell's environment, so exports here reach the worker
+    # binary — /etc/environment does NOT (see comment above).
+    %{for k, v in var.extra_env~}
+    export ${k}="${v}"
+    %{endfor~}
     # Outbound burst smoothing (docs/design/upload-burst-smoothing.md):
     # aggregate background stage-output PUT budget in MB/s. 0 = off.
     export WADJET_UPLOAD_PACE_MBPS="${local.eff_upload_pace}"
