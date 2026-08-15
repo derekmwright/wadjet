@@ -69,7 +69,7 @@ variable "benchmark_runs" {
 }
 
 variable "use_spot" {
-  description = "Use spot instances. null = use profile or default true."
+  description = "Use spot instances. null = use profile or default false (benchmark preflight requires on-demand; spot is explicit opt-in)."
   type        = bool
   default     = null
 }

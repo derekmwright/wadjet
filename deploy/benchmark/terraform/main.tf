@@ -64,7 +64,10 @@ locals {
   eff_coord_type   = var.coordinator_instance_type != null ? var.coordinator_instance_type : (local.has_profile ? try(local._raw_p.cluster.coordinator_instance, "c7g.2xlarge") : "c7g.2xlarge")
   eff_worker_type  = var.worker_instance_type != null ? var.worker_instance_type : (local.has_profile ? try(local._raw_p.cluster.worker_instance, "c7g.2xlarge") : "c7g.2xlarge")
   eff_arch         = var.arch != null ? var.arch : (local.has_profile ? try(local._raw_p.cluster.arch, "arm64") : "arm64")
-  eff_spot         = var.use_spot != null ? var.use_spot : (local.has_profile ? try(local._raw_p.cluster.use_spot, true) : true)
+  # Spot defaults OFF: benchmark windows are wall-clock judgments and a
+  # mid-suite spot reclaim silently corrupts them — every deploy-preflight
+  # requires on-demand. Spot must be opted into explicitly (var or profile).
+  eff_spot         = var.use_spot != null ? var.use_spot : (local.has_profile ? try(local._raw_p.cluster.use_spot, false) : false)
   eff_data_bucket  = var.data_bucket != null ? var.data_bucket : (local.has_profile ? try(local._raw_p.storage.bucket, "") : "")
   eff_runs         = var.benchmark_runs != null ? var.benchmark_runs : (local.has_profile ? try(local._raw_p.benchmark.runs, 1) : 1)
   eff_prefix       = var.data_prefix != null ? var.data_prefix : (local.has_profile ? try(local._raw_p.storage.data_prefix, "tables/") : "tables/")
