@@ -731,6 +731,7 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 					Owned:    s.OwnedBytes,
 					Retained: s.RetainedBytes,
 					State:    s.State.String(),
+					Closed:   s.Departed,
 				}
 			}
 		}
@@ -1942,6 +1943,7 @@ func (e *Executor) collectTaskStats(spill *memory.SpillManager, tracker *memory.
 					Owned:    s.OwnedBytes,
 					Retained: s.RetainedBytes,
 					State:    s.State.String(),
+					Closed:   s.Departed,
 				}
 			}
 		}

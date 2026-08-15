@@ -75,6 +75,12 @@ type OperatorFootprint struct {
 	InstanceID uint64
 	Name       string
 
+	// Departed is only set on entries returned by SpillManager.Inspect for
+	// closed operators: the number of same-Name instances coalesced into this
+	// entry (the footprint itself is the max-peak instance's). Zero on live
+	// entries and on snapshots returned by AccountedOperator.Inspect.
+	Departed int
+
 	// SharedViews lists zero-byte references this instance holds onto a build
 	// owned by another instance (broadcast probes). Empty for owners.
 	SharedViews []ViewRef

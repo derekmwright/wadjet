@@ -665,6 +665,7 @@ type OperatorPeak struct {
 	Owned    int64  `json:"owned,omitempty"`    // OwnedBytes incl. operator overhead
 	Retained int64  `json:"retained,omitempty"` // RetainedBytes (detained batches)
 	State    string `json:"state,omitempty"`    // OpState string
+	Closed   int    `json:"closed,omitempty"`   // closed same-Name instances coalesced into this entry (max-peak shown)
 }
 
 // WorkerHeartbeat is periodically sent by workers.

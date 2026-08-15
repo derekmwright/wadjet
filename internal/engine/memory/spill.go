@@ -52,10 +52,15 @@ type SpillManager struct {
 	// RegisterAccounted and the floating-budget RequestRelief ranks them by
 	// SpillableBytes. accountedPeak survives an operator's Close so a closed
 	// operator's peak OwnedBytes is still reported by Inspect.
-	accountedMu        sync.Mutex
-	accounted          []AccountedOperator
-	accountedPeak      map[uint64]int64    // InstanceID -> peak OwnedBytes
-	departedFootprints []OperatorFootprint // final snapshot of closed operators
+	accountedMu   sync.Mutex
+	accounted     []AccountedOperator
+	accountedPeak map[uint64]int64 // InstanceID -> peak OwnedBytes
+	// departed coalesces closed operators' final snapshots by Name (max peak
+	// wins, count recorded) so Inspect stays bounded by the number of DISTINCT
+	// operator names. A per-instance list here grows for the worker's lifetime
+	// and its full dump rode every "task completed" log line — 48KB lines that
+	// saturated journald and froze workers into reap (2026-08-15 seizures).
+	departed map[string]*departedFootprint
 
 	// reservoirs sources the floating operator budget (GOMEMLIMIT − Σreservoir
 	// actual − GC headroom). In Phase 3 it is wired for ACCOUNTING/observability
@@ -156,10 +161,18 @@ func (sm *SpillManager) TrackingOnlyView() *SpillManager {
 	}
 }
 
+// departedFootprint is the per-Name aggregate of closed operators' final
+// snapshots: the max-peak instance's footprint plus how many instances closed
+// under that name.
+type departedFootprint struct {
+	f     OperatorFootprint
+	count int
+}
+
 // RegisterAccounted adds an AccountedOperator to the Phase-2 relief registry
-// and returns an unregister closure. The closure captures the operator's final
-// footprint (peak OwnedBytes) into departedFootprints so a closed operator's
-// peak is still surfaced by Inspect.
+// and returns an unregister closure. The closure folds the operator's final
+// footprint (peak OwnedBytes) into the per-Name departed aggregate so a closed
+// operator's peak is still surfaced by Inspect.
 func (sm *SpillManager) RegisterAccounted(op AccountedOperator) func() {
 	sm.accountedMu.Lock()
 	sm.accounted = append(sm.accounted, op)
@@ -174,7 +187,17 @@ func (sm *SpillManager) RegisterAccounted(op AccountedOperator) func() {
 			if x == op {
 				f := op.Inspect() // Closed-zeros; peak comes from accountedPeak
 				f.OwnedBytes = sm.accountedPeak[f.InstanceID]
-				sm.departedFootprints = append(sm.departedFootprints, f)
+				if sm.departed == nil {
+					sm.departed = make(map[string]*departedFootprint)
+				}
+				if d, ok := sm.departed[f.Name]; ok {
+					d.count++
+					if f.OwnedBytes > d.f.OwnedBytes {
+						d.f = f
+					}
+				} else {
+					sm.departed[f.Name] = &departedFootprint{f: f, count: 1}
+				}
 				sm.accounted = append(sm.accounted[:i], sm.accounted[i+1:]...)
 				// Drop this instance's published owned-byte counter so OwnedTotal
 				// reflects only LIVE operators. Without this, every closed
@@ -1028,14 +1051,24 @@ func (sm *SpillManager) forceSpillLargestOwned(target int64) int64 {
 }
 
 // Inspect returns the per-operator footprints for the AccountedOperator
-// registry — live operators plus the final snapshots of departed ones (with
-// their peak OwnedBytes restored from accountedPeak). Replaces Inspect() once
-// the executor migrates to the new wire format.
+// registry — live operators plus one aggregated entry per departed operator
+// Name (max-peak instance, Departed = closed-instance count). Bounded by
+// distinct names, not by how many instances have ever closed.
 func (sm *SpillManager) Inspect() []OperatorFootprint {
 	sm.accountedMu.Lock()
 	defer sm.accountedMu.Unlock()
-	out := make([]OperatorFootprint, 0, len(sm.accounted)+len(sm.departedFootprints))
-	out = append(out, sm.departedFootprints...)
+	out := make([]OperatorFootprint, 0, len(sm.accounted)+len(sm.departed))
+	names := make([]string, 0, len(sm.departed))
+	for name := range sm.departed {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		d := sm.departed[name]
+		f := d.f
+		f.Departed = d.count
+		out = append(out, f)
+	}
 	for _, op := range sm.accounted {
 		f := op.Inspect()
 		if f.OwnedBytes > sm.accountedPeak[f.InstanceID] {

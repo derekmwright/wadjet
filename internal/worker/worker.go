@@ -1907,9 +1907,13 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 		for i, op := range result.TaskStats.OperatorPeaks {
 			// Keep the existing %s=%dMB(peak)/%dMB(now) shape (entries are
 			// comma-joined, so intra-token extras use ';') for grep continuity;
-			// append the Phase-2 owned/state breakdown.
+			// append the Phase-2 owned/state breakdown. Closed entries are
+			// per-Name aggregates (n = instances coalesced, max peak shown).
 			parts[i] = fmt.Sprintf("%s=%dMB(peak)/%dMB(now);owned=%dMB;state=%s",
 				op.Name, op.Peak/(1<<20), op.Current/(1<<20), op.Owned/(1<<20), op.State)
+			if op.Closed > 1 {
+				parts[i] += fmt.Sprintf(";n=%d", op.Closed)
+			}
 		}
 		logAttrsEnd = append(logAttrsEnd, "operator_peaks", strings.Join(parts, ","))
 	}

@@ -79,6 +79,56 @@ func TestNextInstanceID_NeverCollidesWithReservoirOwner(t *testing.T) {
 	}
 }
 
+// TestInspect_DepartedBoundedByDistinctNames is the regression test for the
+// 2026-08-15 worker-seizure root cause: departed footprints accumulated one
+// entry per closed operator INSTANCE for the SpillManager's lifetime, and the
+// full list rode every "task completed" log line (~48KB by late suite),
+// saturating journald until synchronous log writes froze the worker into
+// coordinator reap. Departed entries must aggregate by Name: Inspect output
+// is bounded by distinct names, carries the max instance peak, and counts the
+// coalesced instances.
+func TestInspect_DepartedBoundedByDistinctNames(t *testing.T) {
+	sm := newSM(t)
+	names := []string{"HashJoin/build=orders", "HashAggregate/group_by=n_name", "Sort"}
+	const perName = 400
+	for i := 0; i < perName; i++ {
+		for j, name := range names {
+			op := &fakeAccountedOp{id: NextInstanceID(), name: name,
+				owned: int64((i + 1) * (j + 1)), spillable: 0, state: OpActive}
+			unreg := sm.RegisterAccounted(op)
+			sm.Inspect() // record live peak into accountedPeak
+			op.mu.Lock()
+			op.state = OpClosed
+			op.mu.Unlock()
+			unreg()
+		}
+	}
+	got := sm.Inspect()
+	if len(got) != len(names) {
+		t.Fatalf("departed entries must aggregate by name: want %d entries, got %d", len(names), len(got))
+	}
+	for _, f := range got {
+		if f.Departed != perName {
+			t.Errorf("%s: want Departed=%d coalesced instances, got %d", f.Name, perName, f.Departed)
+		}
+		var j int64
+		switch f.Name {
+		case names[0]:
+			j = 1
+		case names[1]:
+			j = 2
+		case names[2]:
+			j = 3
+		default:
+			t.Fatalf("unexpected name %q", f.Name)
+			continue
+		}
+		if want := int64(perName) * j; f.OwnedBytes != want {
+			t.Errorf("%s: want max instance peak %d, got %d", f.Name, want, f.OwnedBytes)
+		}
+	}
+}
+
 func TestInspect_ClosedReturnsZeros(t *testing.T) {
 	sm := newSM(t)
 	op := &fakeAccountedOp{id: NextInstanceID(), name: "op", owned: 1000, spillable: 1000, state: OpClosed}
