@@ -312,6 +312,167 @@ func TestWidthGate_YieldDonatesPoolTokenToProducer(t *testing.T) {
 	g.yield(s)
 }
 
+// TestWidthGate_ClaimGrantRedirectsToStalledProducer pins §2.3 claim-path
+// donation, the deep-starvation admission path: a grant landing on a
+// slot-less FIFO waiter whose donor accepts (scanner token-stalled) is ceded
+// to the donor and the consumer re-parks; the second grant sticks even
+// though the donor still accepts (one redirect per claim), and the pool
+// balances.
+func TestWidthGate_ClaimGrantRedirectsToStalledProducer(t *testing.T) {
+	tok := newCPUTokens(1)
+	g := newWidthGate(tok)
+	donor := &fakeTokenDonor{accept: true}
+	g.donor = donor
+	ctx := context.Background()
+
+	base, _ := g.claim(ctx)
+	if base != slotBaseline {
+		t.Fatalf("claim = %v, want baseline", base)
+	}
+	if got := tok.TryAcquire(1); got != 1 { // another fragment holds the pool
+		t.Fatalf("TryAcquire = %d, want 1", got)
+	}
+
+	done := make(chan widthSlot, 1)
+	go func() {
+		s, err := g.claim(ctx)
+		if err != nil {
+			t.Errorf("claim: %v", err)
+		}
+		done <- s
+	}()
+	time.Sleep(20 * time.Millisecond) // let the claim park as a FIFO waiter
+
+	tok.Release(1) // the other fragment finishes: the grant lands on the waiter
+	deadline := time.Now().Add(2 * time.Second)
+	for donor.calls.Load() != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("donor offers = %d, want 1 after grant", donor.calls.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case s := <-done:
+		t.Fatalf("claim returned %v before the donated token was released", s)
+	default:
+	}
+
+	tok.Release(1) // the donor's decode worker releases the donated token
+	select {
+	case s := <-done:
+		if s != slotToken {
+			t.Fatalf("claim = %v, want token on the second grant", s)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("re-parked claim not granted after donated-token release")
+	}
+	if got := donor.calls.Load(); got != 1 {
+		t.Fatalf("donor offers = %d, want 1 (one redirect per claim)", got)
+	}
+	if got := g.claimDonations.Load(); got != 1 {
+		t.Fatalf("claimDonations = %d, want 1", got)
+	}
+	donor.accept = false // keep the yield path out of the balance check
+	g.yield(slotToken)
+	g.yield(base)
+	if got := tok.InUse(); got != 0 {
+		t.Fatalf("tokens leaked: %d", got)
+	}
+}
+
+// TestWidthGate_ClaimGrantSticksWhenDonorRefuses: a refusing donor (scanner
+// not token-stalled) leaves the grant with the consumer — no re-park, no
+// claim donation counted.
+func TestWidthGate_ClaimGrantSticksWhenDonorRefuses(t *testing.T) {
+	tok := newCPUTokens(1)
+	g := newWidthGate(tok)
+	donor := &fakeTokenDonor{accept: false}
+	g.donor = donor
+	ctx := context.Background()
+
+	base, _ := g.claim(ctx)
+	tok.TryAcquire(1)
+	done := make(chan widthSlot, 1)
+	go func() {
+		s, _ := g.claim(ctx)
+		done <- s
+	}()
+	time.Sleep(20 * time.Millisecond)
+	tok.Release(1)
+	select {
+	case s := <-done:
+		if s != slotToken {
+			t.Fatalf("claim = %v, want token", s)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("claim not granted after release")
+	}
+	if got := donor.calls.Load(); got != 1 {
+		t.Fatalf("donor offers = %d, want 1", got)
+	}
+	if got := g.claimDonations.Load(); got != 0 {
+		t.Fatalf("claimDonations = %d, want 0", got)
+	}
+	g.yield(slotToken)
+	g.yield(base)
+	if got := tok.InUse(); got != 0 {
+		t.Fatalf("tokens leaked: %d", got)
+	}
+}
+
+// TestWidthGate_ClaimDonationKillSwitch pins both switches: WADJET_CLAIM_
+// DONATE=0 disables the claim path alone, WADJET_WIDTH_DONATE=0 disables
+// both paths — either way a parked claim's grant sticks and the donor is
+// never consulted at claim.
+func TestWidthGate_ClaimDonationKillSwitch(t *testing.T) {
+	cases := []struct {
+		name string
+		v    *bool
+	}{
+		{"claim_donate_off", &widthClaimDonate},
+		{"width_donate_off", &widthDonate},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := *tc.v
+			*tc.v = false
+			defer func() { *tc.v = orig }()
+
+			tok := newCPUTokens(1)
+			g := newWidthGate(tok)
+			donor := &fakeTokenDonor{accept: true}
+			g.donor = donor
+			ctx := context.Background()
+			base, _ := g.claim(ctx)
+			tok.TryAcquire(1)
+			done := make(chan widthSlot, 1)
+			go func() {
+				s, _ := g.claim(ctx)
+				done <- s
+			}()
+			time.Sleep(20 * time.Millisecond)
+			tok.Release(1)
+			select {
+			case s := <-done:
+				if s != slotToken {
+					t.Fatalf("claim = %v, want token", s)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("claim not granted with the kill switch set")
+			}
+			if got := donor.calls.Load(); got != 0 {
+				t.Fatalf("donor consulted at claim with the kill switch set (calls = %d)", got)
+			}
+			donor.accept = false
+			g.yield(slotToken)
+			g.yield(base)
+			if got := tok.InUse(); got != 0 {
+				t.Fatalf("tokens leaked: %d", got)
+			}
+		})
+	}
+}
+
 // TestWidthGate_DonationKillSwitch pins WADJET_WIDTH_DONATE=0: the donor is
 // never consulted and pool tokens yield straight to the pool.
 func TestWidthGate_DonationKillSwitch(t *testing.T) {

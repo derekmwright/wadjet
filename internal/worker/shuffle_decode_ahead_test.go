@@ -620,3 +620,104 @@ func TestShuffleDecodeAhead_DonationEndToEnd(t *testing.T) {
 		t.Fatal("donation accepted after source Close")
 	}
 }
+
+// TestShuffleDecodeAhead_ClaimDonationEndToEnd runs the §2.3 deep-starvation
+// seam: the pool is exhausted by another holder, the scanner is
+// token-stalled, and the fragment's only extra consumer is a slot-less
+// waiter parked inside widthGate.claim — the §2.2 yield precondition (a
+// HELD token going dry) can never occur. The grant that lands on the parked
+// claim must cede to the scanner (reader stats.donated, gate
+// width_claim_donations), the scanner must admit past the cursor and its
+// decode worker's release must re-grant the consumer, whose second grant
+// sticks; the pool balances by Close.
+func TestShuffleDecodeAhead_ClaimDonationEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	const bucket = "test"
+	if err := store.MakeBucket(ctx, bucket); err != nil {
+		t.Fatal(err)
+	}
+	wire := buildMultiTypeWSHF(t, 59, 40, 200)
+	key := "queries/test/partition=0000/task.wshf"
+	if _, err := store.Put(ctx, bucket, key, bytes.NewReader(wire), int64(len(wire)), "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+
+	tokens := newCPUTokens(1)
+	if got := tokens.TryAcquire(1); got != 1 { // another fragment holds the pool
+		t.Fatalf("TryAcquire = %d, want 1", got)
+	}
+	e := &Executor{store: store, spillDir: t.TempDir(), shuffleDecodeAhead: true, cpuTokens: tokens}
+	src := newCachedFileStreamSource(e, "", bucket, []string{key})
+	if err := src.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := src.Next(ctx); err != nil || b == nil { // opens the file, engages decode-ahead
+		t.Fatalf("first Next: %v %v", b, err)
+	}
+	da := src.shuffleDA.Load()
+	if da == nil {
+		t.Fatal("decode-ahead not engaged on the source")
+	}
+	waitTokenStalled(t, da)
+
+	ms := &manifestStreamSource{}
+	ms.donorInner.Store(src)
+	gate := newWidthGate(tokens)
+	gate.donor = ms
+
+	base, _ := gate.claim(ctx) // the baseline consumer
+	if base != slotBaseline {
+		t.Fatalf("claim = %v, want baseline", base)
+	}
+	done := make(chan widthSlot, 1)
+	go func() { // the slot-less deep-starvation waiter
+		s, err := gate.claim(ctx)
+		if err != nil {
+			t.Errorf("claim: %v", err)
+		}
+		done <- s
+	}()
+	time.Sleep(20 * time.Millisecond) // let the claim park FIFO
+
+	tokens.Release(1) // the other fragment finishes: grant lands on the waiter
+	deadline := time.Now().Add(5 * time.Second)
+	for e.shuffleDecodeAheadStats.donated.Load() != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("reader donated = %d, want 1 (claim grant not redirected)",
+				e.shuffleDecodeAheadStats.donated.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := gate.claimDonations.Load(); got != 1 {
+		t.Fatalf("gate claimDonations = %d, want 1", got)
+	}
+	// The donated token admits past the cursor; its decode worker's release
+	// is what re-grants the parked consumer.
+	select {
+	case s := <-done:
+		if s != slotToken {
+			t.Fatalf("claim = %v, want token on the second grant", s)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumer not re-granted after the donated token's decode release")
+	}
+
+	for { // drain; scanner exits, so the yield below is refused → pool release
+		b, err := src.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil {
+			break
+		}
+	}
+	gate.yield(slotToken)
+	gate.yield(base)
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := tokens.InUse(); got != 0 {
+		t.Fatalf("InUse = %d, want 0 (all tokens must drain back)", got)
+	}
+}

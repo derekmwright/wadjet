@@ -179,7 +179,59 @@ SF100 pricing (memo
 donations/window, record fast runs, rows/vsigs identical. Donation
 does not reach the DEEP starvation mode (consumers parked slot-less in
 claim have nothing to donate — join-6 width_donations = 0); that mode
-and the stage-walk serial floor are the recorded follow-ups.
+is addressed by §2.3 below; the stage-walk serial floor (§4) is the
+remaining recorded follow-up.
+
+## 2.3 Claim-path donation (2026-08-15, post-donation window)
+
+The donation window measured the §2.2 gap precisely: join-6's warm
+shape ran `width_donations = 0` on every task while its dry-wait held
+at ~7 widths. In that DEEP starvation mode no consumer ever *holds* a
+pool token at a dry moment — the fleet is parked slot-less inside
+`widthGate.claim` as FIFO token waiters, and their queued presence is
+itself what pins the scanner at cursor-only width (`TryAcquire`
+returns 0 while waiters are queued, and the §4.2.1 rule intends that).
+The yield-path precondition can never occur; the fragment oscillates
+at serial producer cadence.
+
+The fix uses the one resource those consumers do hold: their queue
+position. When a parked claim's grant lands (`w.ch`) and the same
+fragment's decode-ahead scanner is at that moment parked token-stalled,
+the consumer cedes the granted token to the scanner (the same
+`tryDonateToken` seam as §2.2) and re-enqueues at the FIFO tail — at
+most once per claim, so the second grant always sticks and the held
+morsel's delay is bounded at one extra FIFO wait. The redirected token
+follows the §2.2 ownership chain unchanged: grant → `donated` counter →
+chunk slot → decode worker → pool, never re-entering the pool in
+between; every §2.2 flush path applies as-is.
+
+Why this closes the deep mode: each morsel-claim can now ferry one
+token to producer admission, so the donation supply scales with the
+morsel rate rather than with held-token dry events (zero in this
+mode), and each donated chunk decode yields multiple morsels — positive
+feedback that lifts the fragment until the window or dispenser budget
+fills, at which point the scanner stops token-stalling and grants stick
+to consumers again. The transfer is self-limiting at decode width: a
+scanner blocked on the jobs queue or the byte window is not
+token-stalled and refuses, so consumer width can never collapse below
+(pool − decode workers), and the baseline consumer is untouched by
+construction.
+
+No-wedge addendum (over §2.2's argument, which covers the token's
+lifecycle): the redirecting consumer re-parks as an ordinary FIFO
+waiter — identical state to before its grant — and its bounded-progress
+justification is unchanged (capacity is freed by other goroutines'
+bounded holds, including the donated token's own bounded decode).
+Pool FIFO order among waiters is untouched: the grant went to the head
+waiter; ceding it is the grantee's use of its own token. Context
+cancellation paths are the existing claim ones.
+
+Kill switch: `WADJET_CLAIM_DONATE=0` restores grant-always-sticks
+(`WADJET_WIDTH_DONATE=0` disables both donation paths). Marker:
+`width_claim_donations` on the fragment line; reader-side `donated`
+counts both paths. Success judgment at SF100: join-6
+`width_claim_donations > 0`, warm-shape `consumer_dry_wait_ms`
+collapse, then q08/q09 wall.
 
 ## 3. Alternatives rejected
 
@@ -209,7 +261,10 @@ and the stage-walk serial floor are the recorded follow-ups.
   weakens the "serial progress is never gated" invariant while parked.
   Donation triggers on exactly the state the re-attribution measured —
   own-fragment consumers going dry while holding width — and touches
-  neither the pool nor the cursor rule.
+  neither the pool nor the cursor rule. Revisited after the donation
+  window for the deep-starvation mode: still rejected — §2.3 reaches
+  that mode through the consumers' own queue positions with none of
+  the pool/reader notification bridging this shape requires.
 - **Out-of-order delivery**: the dispenser doesn't need order, but
   in-order forfeits nothing here (the window bounds occupancy either
   way), preserves `Delivered()`/truncation-position semantics for the
@@ -238,8 +293,10 @@ Per-worker counters, folded from each reader at Close and logged by the
 existing worker marker loop + final summary: `chunks`, `window_full_ns`,
 `token_stall_ns` (stalls where a non-cursor chunk waited), `pressure_ns`,
 `stage_ns` (scanner readChunkBytes time — the serial-floor watch item),
-`decode_ns`, `donated` (tokens accepted via §2.2 donation — expect
-token_stall_ns to fall as this rises). The width gate's fragment line
-adds `width_donations`. The morsel done-line's `consumer_dry_wait_ms` /
+`decode_ns`, `donated` (tokens accepted via §2.2 yield-path or §2.3
+claim-path donation — expect token_stall_ns to fall as this rises). The
+width gate's fragment line adds `width_donations` (yield-path) and
+`width_claim_donations` (claim-path — the deep-starvation engagement
+marker). The morsel done-line's `consumer_dry_wait_ms` /
 `dispenser_parents` (already Info) are the before/after judgment
 counters for the width plateau itself.

@@ -21,6 +21,15 @@ var morselWidthYield = os.Getenv("WADJET_MORSEL_YIELD") != "0"
 // yield-to-pool. Package var so tests can pin either mode.
 var widthDonate = os.Getenv("WADJET_WIDTH_DONATE") != "0"
 
+// widthClaimDonate gates claim-path donation (docs/design/
+// shuffle-decode-ahead.md §2.3), the deep-starvation admission path: a
+// consumer whose FIFO claim grant lands while its own fragment's scanner is
+// token-stalled redirects that grant to the scanner and re-parks, at most
+// once per claim. WADJET_CLAIM_DONATE=0 restores grant-always-sticks
+// (WADJET_WIDTH_DONATE=0 disables both donation paths). Package var so
+// tests can pin either mode.
+var widthClaimDonate = os.Getenv("WADJET_CLAIM_DONATE") != "0"
+
 // producerTokenDonor is implemented by fragment sources whose producer-side
 // decode can accept a directly donated cpu token. tryDonateToken must be
 // safe to call from any consumer goroutine; true means ownership of one
@@ -65,9 +74,10 @@ type widthGate struct {
 	baseline chan struct{}
 
 	// Stats for the fragment-completion log line.
-	claimWaitNs atomic.Int64
-	yields      atomic.Int64
-	donations   atomic.Int64
+	claimWaitNs    atomic.Int64
+	yields         atomic.Int64
+	donations      atomic.Int64
+	claimDonations atomic.Int64
 }
 
 func newWidthGate(tokens *cpuTokens) *widthGate {
@@ -80,6 +90,16 @@ func newWidthGate(tokens *cpuTokens) *widthGate {
 // fragment baseline, then a free pool token, then parking FIFO for either.
 // The caller holds an admitted morsel; see cpuTokens.enqueueWaiter for why
 // parking here cannot deadlock.
+//
+// Claim-path donation (§2.3): a granted waiter whose own fragment's scanner
+// is at that moment parked token-stalled cedes its grant to the scanner and
+// re-enqueues, at most once per claim — the second grant always sticks, so
+// per-morsel delay is bounded at one extra FIFO wait. This is the only
+// producer admission path in the deep-starvation mode, where every consumer
+// is a slot-less waiter and the §2.2 yield-path precondition (a HELD token
+// going dry) never occurs. The redirected token never re-enters the pool:
+// grant → tryDonateToken → chunk decode → worker release, the same bounded
+// ownership chain as a yield donation.
 func (g *widthGate) claim(ctx context.Context) (widthSlot, error) {
 	select {
 	case <-g.baseline:
@@ -91,16 +111,25 @@ func (g *widthGate) claim(ctx context.Context) (widthSlot, error) {
 	}
 	t0 := time.Now()
 	defer func() { g.claimWaitNs.Add(time.Since(t0).Nanoseconds()) }()
-	w := g.tokens.enqueueWaiter()
-	select {
-	case <-g.baseline:
-		g.tokens.cancelWaiter(w)
-		return slotBaseline, nil
-	case <-w.ch:
-		return slotToken, nil
-	case <-ctx.Done():
-		g.tokens.cancelWaiter(w)
-		return slotNone, ctx.Err()
+	redirected := false
+	for {
+		w := g.tokens.enqueueWaiter()
+		select {
+		case <-g.baseline:
+			g.tokens.cancelWaiter(w)
+			return slotBaseline, nil
+		case <-w.ch:
+			if !redirected && widthDonate && widthClaimDonate &&
+				g.donor != nil && g.donor.tryDonateToken() {
+				redirected = true
+				g.claimDonations.Add(1)
+				continue
+			}
+			return slotToken, nil
+		case <-ctx.Done():
+			g.tokens.cancelWaiter(w)
+			return slotNone, ctx.Err()
+		}
 	}
 }
 
@@ -131,5 +160,6 @@ func (g *widthGate) logAttrs() []any {
 		"width_wait_ms", g.claimWaitNs.Load() / 1e6,
 		"width_yields", g.yields.Load(),
 		"width_donations", g.donations.Load(),
+		"width_claim_donations", g.claimDonations.Load(),
 	}
 }
