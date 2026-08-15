@@ -766,7 +766,7 @@ func (s *cachedFileStreamSource) maybeStartShuffleDecodeAhead(r *streamingShuffl
 	if e == nil || !e.shuffleDecodeAhead {
 		return
 	}
-	r.startDecodeAhead(0, e.cpuTokens, scanDecodeAheadPressure,
+	r.startDecodeAhead(0, e.cpuTokens, shuffleDecodeAheadPressure,
 		scanDecodeAheadStrictPressure(), &e.shuffleDecodeAheadStats)
 }
 

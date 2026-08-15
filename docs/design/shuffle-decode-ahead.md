@@ -90,6 +90,26 @@ class serial for free). Workers default 4 (`GOMAXPROCS` cap); width is
 governed at runtime by the token pool, so the constant is a ceiling, not
 a promise.
 
+## 2.1 Pressure regime amendment (2026-08-15, post-validation window)
+
+The first SF100 window (memo
+`shuffle-decode-ahead-sf100-2026-08-15.md`) measured
+`pressure_stall_ms` ≈ 92s/worker against `window_full_ms` 5.7s — the
+refault channel was denying admission to a near-empty window, the
+scan memo's §9.4 pathology reborn on the WSHF path. At SF100 partial
+residency the refault rate is ambient (dataset vs cache) and WSHF
+admission holds nothing worth shedding: exact-charged bytes ≤128 MiB
+per reader, retired within one probe pass.
+
+`shuffleDecodeAheadPressure` therefore drops the refault channel on
+non-edge envelopes: the Go-heap tide gauge always binds (staged chunks
+are our own heap), and strict/edge envelopes keep the full coupling
+(the capped repro measured even one extra in-flight unit harmful
+there). `WADJET_SHUFFLE_DA_REFAULT=1` is the same-binary kill switch
+restoring the coupled behavior. The parquet scan windows keep their
+sensor unchanged — their units are 10–20× larger and their
+displacement was measured (§9.5).
+
 ## 3. Alternatives rejected
 
 - **N producer goroutines over disjoint file slices** (the other option

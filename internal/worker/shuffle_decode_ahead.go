@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -43,6 +44,41 @@ const (
 // the next stage downstream, exactly as before. Package-level var so
 // tests can shrink it.
 var shuffleDecodeAheadWindowBytes int64 = 128 << 20
+
+// shuffleDARefaultCoupled restores the refault channel on non-edge
+// envelopes (WADJET_SHUFFLE_DA_REFAULT=1) — the same-binary A/B arm for
+// the exemption below. Default off.
+var shuffleDARefaultCoupled = os.Getenv("WADJET_SHUFFLE_DA_REFAULT") == "1"
+
+// shuffleDecodeAheadPressure gates WSHF decode-ahead admission beyond
+// the delivery cursor: the Go-heap tide gauge ALWAYS (staged+decoded
+// chunks are our own heap, and the window is what must yield first),
+// but the page-cache refault channel only on strict/edge envelopes.
+//
+// The SF100 validation window (results/20260815-154200, memo
+// shuffle-decode-ahead-sf100-2026-08-15.md) measured pressure_stall_ms
+// ≈ 92s/worker against window_full_ms 5.7s — the sensor was denying
+// admission to a near-empty window, the scan-decode-ahead memo §9.4
+// pathology. At SF100 partial residency the refault rate is dominated
+// by ambient dataset-vs-cache thrash that WSHF admission cannot
+// relieve: this window holds exact-charged bytes bounded at 128 MiB
+// per reader that retire within one probe pass — orders below the
+// scan windows whose displacement the sensor was built to shed.
+// Edge-class envelopes keep the full coupling: the capped repro
+// measured even one extra in-flight unit as harmful there, and its
+// thrash is window-caused by construction.
+func shuffleDecodeAheadPressure() bool {
+	if heapPressureActive() {
+		return true
+	}
+	if scanDecodeAheadStrictPressure() {
+		return pageCachePressureActive()
+	}
+	if shuffleDARefaultCoupled {
+		return pageCachePressureActiveBounded(refaultEpisodeCap)
+	}
+	return false
+}
 
 // shuffleDecodeAheadStats is the executor-owned counter sink shared by every
 // reader (readers add directly; no per-reader fold step).

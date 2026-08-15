@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 )
@@ -333,6 +334,50 @@ func TestShuffleDecodeAhead_SourceIntegration(t *testing.T) {
 		}
 		if got := e.cpuTokens.InUse(); got != 0 {
 			t.Fatalf("ahead=%v: tokens leaked: %d", ahead, got)
+		}
+	}
+}
+
+// TestShuffleDecodeAheadPressure_RefaultExemption pins the pressure
+// routing: ambient page-cache refaults must NOT throttle WSHF
+// decode-ahead on non-edge envelopes (the 154200 window's 92s/worker
+// pressure-stall pathology), while the heap gauge always does and
+// strict/edge envelopes keep the full refault coupling.
+func TestShuffleDecodeAheadPressure_RefaultExemption(t *testing.T) {
+	origHeap, origCache, origBounded, origStrict, origCoupled :=
+		heapPressureActive, pageCachePressureActive, pageCachePressureActiveBounded,
+		scanDecodeAheadStrictPressure, shuffleDARefaultCoupled
+	defer func() {
+		heapPressureActive, pageCachePressureActive, pageCachePressureActiveBounded =
+			origHeap, origCache, origBounded
+		scanDecodeAheadStrictPressure = origStrict
+		shuffleDARefaultCoupled = origCoupled
+	}()
+
+	var heap, cache bool
+	heapPressureActive = func() bool { return heap }
+	pageCachePressureActive = func() bool { return cache }
+	pageCachePressureActiveBounded = func(time.Duration) bool { return cache }
+
+	cases := []struct {
+		name                        string
+		heap, cache, strict, couple bool
+		want                        bool
+	}{
+		{"quiet", false, false, false, false, false},
+		{"ambient refaults, non-edge: EXEMPT", false, true, false, false, false},
+		{"heap tide always binds", true, false, false, false, true},
+		{"edge keeps refault coupling", false, true, true, false, true},
+		{"edge quiet", false, false, true, false, false},
+		{"kill switch restores coupling", false, true, false, true, true},
+	}
+	for _, tc := range cases {
+		heap, cache = tc.heap, tc.cache
+		strict := tc.strict
+		scanDecodeAheadStrictPressure = func() bool { return strict }
+		shuffleDARefaultCoupled = tc.couple
+		if got := shuffleDecodeAheadPressure(); got != tc.want {
+			t.Errorf("%s: pressure=%v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
