@@ -160,51 +160,96 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 ## Benchmarks
 
 All 22 TPC-H queries pass with row-count-validated results at SF0.01 (CI,
-~5s), SF10 (single node and 4-node cluster), and SF100 (~600M lineitem
-rows, 4-node cluster with spill-to-disk under a 21 GB worker memory
-limit). Cross-engine result validation against DuckDB confirms identical
-row counts on all 22 queries over the same S3 Parquet data.
+~5s), SF10, and SF100 (~600M lineitem rows, distributed with
+spill-to-disk). Cross-engine result validation against DuckDB confirms
+identical results over the same S3 Parquet data. ClickBench runs the full
+43-query suite under the official methodology with cell-exact
+cross-validation against DuckDB.
 
-### TPC-H SF10, cold S3, single node
+### TPC-H SF100, distributed (4 nodes)
 
-Both engines on the same `c7g.4xlarge` (16 vCPU / 32 GB), reading the
-same S3 Parquet data (600 lineitem chunk files, us-east-2, same run,
-cold — no page cache, every byte fetched from S3). DuckDB v1.5.4 via
-`httpfs`. 2026-07-06, reproducible with the command below.
+Coordinator `c7g.2xlarge` + 3× `c7gd.4xlarge` workers (16 vCPU / 32 GB /
+NVMe each), SF100 Parquet on S3 (us-east-2), NATS control plane, gRPC
+streaming exchange with durable S3 fallback. Steady-state suite (run 4 of
+4; caches populated — cold run 1 of the same session was 3m21s).
+2026-08-16, `results/20260816-000900`.
 
-| Query | Wadjet | DuckDB | | Query | Wadjet | DuckDB |
-|---|---:|---:|---|---|---:|---:|
-| Q01 | 9.0s | 7.3s | | Q12 | 18.1s | 13.0s |
-| Q02 | 8.8s | 2.3s | | Q13 | 16.1s | 1.6s |
-| Q03 | 20.4s | 10.9s | | Q14 | **7.0s** | 8.6s |
-| Q04 | 18.9s | 7.3s | | Q15 | **6.1s** | 8.6s |
-| Q05 | 21.0s | 9.9s | | Q16 | 8.4s | 0.9s |
-| Q06 | **5.9s** | 10.2s | | Q17 | 8.6s | 6.8s |
-| Q07 | 17.6s | 11.8s | | Q18 | 30.9s | 7.5s |
-| Q08 | 17.0s | 12.1s | | Q19 | **6.9s** | 10.5s |
-| Q09 | 17.7s | 12.4s | | Q20 | 16.1s | 10.9s |
-| Q10 | 19.9s | 9.7s | | Q21 | 23.3s | 9.7s |
-| Q11 | 23.3s | 1.2s | | Q22 | 16.1s | 0.9s |
+| Query | Time | | Query | Time |
+|---|---:|---|---|---:|
+| Q01 | 3.9s | | Q12 | 5.5s |
+| Q02 | 4.5s | | Q13 | 5.9s |
+| Q03 | 9.7s | | Q14 | 1.9s |
+| Q04 | 7.0s | | Q15 | 1.4s |
+| Q05 | 9.2s | | Q16 | 5.5s |
+| Q06 | 1.3s | | Q17 | 5.9s |
+| Q07 | 8.0s | | Q18 | 11.0s |
+| Q08 | 18.1s | | Q19 | 3.9s |
+| Q09 | 16.1s | | Q20 | 10.2s |
+| Q10 | 11.0s | | Q21 | 10.1s |
+| Q11 | 2.6s | | Q22 | 2.9s |
 
-**Suite total: Wadjet 5m37s, DuckDB 2m54s.** Wadjet now wins the four
-scan-dominated queries (Q06, Q14, Q15, Q19); DuckDB's decade of
-optimizer and operator tuning still leads on join-heavy and
-tiny-result queries. The honest summary: on cold object storage Wadjet
-is currently ~1.9× DuckDB overall — from ~7× two release cycles ago
-and 2.6× last cycle — with identical results on every query. The
-benchmark harness (`deploy/benchmark/`) reproduces every
-configuration.
+**Suite total: 2m35.9s steady / 3m21s cold.** On identical hardware in a
+same-day paired run (2026-08-14), Wadjet's steady state beat Trino 470
+FTE by 10% on suite wall and 19% on per-query geomean, winning 12 of 22
+queries ([full comparison](docs/benchmarks/trino-comparison-2026-08-14.md));
+the numbers above include further improvements landed since that pairing.
+
+### ClickBench, single node (official spec)
+
+The full 43-query ClickBench suite on the official listing hardware —
+`c6a.4xlarge` (16 vCPU / 32 GB), 500 GB gp2, querying the 100M-row
+`hits` Parquet data in place (14.7 GB, no import step). Official
+methodology: page-cache drop before each query, cold + 2 hot tries,
+one process per query. Every query result is cell-exact against DuckDB
+on the same data (`benchmarks/clickbench/`). 2026-08-16,
+`benchmarks/clickbench/results-c6a-20260816.json`.
+
+| Query | Cold | Hot | Query | Cold | Hot |
+|---|---:|---:|---|---:|---:|
+| Q01 | 0.14s | 0.13s | Q23 | 21.74s | 7.59s |
+| Q02 | 0.14s | 0.12s | Q24 | 55.66s | 55.75s |
+| Q03 | 0.28s | 0.25s | Q25 | 0.79s | 0.77s |
+| Q04 | 0.29s | 0.23s | Q26 | 0.81s | 0.79s |
+| Q05 | 40.75s | 8.72s | Q27 | 0.81s | 0.78s |
+| Q06 | 6.06s | 5.92s | Q28 | 9.63s | 3.74s |
+| Q07 | 0.14s | 0.13s | Q29 | 22.96s | 22.61s |
+| Q08 | 0.17s | 0.14s | Q30 | 0.18s | 0.16s |
+| Q09 | 2.19s | 2.04s | Q31 | 2.27s | 1.70s |
+| Q10 | 2.80s | 2.65s | Q32 | 6.27s | 2.66s |
+| Q11 | 0.73s | 0.69s | Q33 | 116.52s | 20.18s |
+| Q12 | 0.80s | 0.79s | Q34 | 17.02s | 13.76s |
+| Q13 | 2.26s | 1.88s | Q35 | 22.50s | 22.02s |
+| Q14 | 3.45s | 2.93s | Q36 | 5.71s | 5.40s |
+| Q15 | 2.51s | 2.29s | Q37 | 9.63s | 3.14s |
+| Q16 | 1.66s | 1.47s | Q38 | 8.57s | 2.79s |
+| Q17 | 8.65s | 7.95s | Q39 | 9.56s | 3.08s |
+| Q18 | 5.77s | 5.24s | Q40 | 18.62s | 5.43s |
+| Q19 | 59.35s | 58.57s | Q41 | 2.33s | 0.91s |
+| Q20 | 0.31s | 0.24s | Q42 | 1.58s | 0.94s |
+| Q21 | 10.30s | 5.08s | Q43 | 0.98s | 0.67s |
+| Q22 | 11.69s | 5.44s |  |  |  |
+
+**Suite sums: 8m15s cold / 4m48s hot (43/43, no failures).** By the
+ClickBench relative-time formula this places Wadjet ahead of the
+Trino, Presto, Impala, and Spark Parquet entries on the same hardware
+(computed against the published results as of 2026-08-16). The
+remaining hot spots (Q19, Q24, Q29, Q33-35 — high-cardinality
+aggregation and wide-row top-N) are the active optimization arc.
 
 ```bash
 # SF0.01 correctness (CI, ~5s)
 go test -v -run TestTPCHQueries ./benchmarks/tpch/
 
-# Distributed smoke gate (~11s, spawns a local coordinator + workers)
+# ClickBench correctness vs DuckDB (needs a hits part + /tmp/duckdb)
+WADJET_HITS_PART=hits_0.parquet WADJET_CLICKBENCH_DUCKDB=1 \
+  go test -run TestHitsCorrectness ./benchmarks/clickbench/
+
+# Distributed smoke gate (~20s, spawns a local coordinator + workers)
 go run ./cmd/tpch-harness --mode=local
 
 # Full EC2 benchmark matrix (OpenTofu + SSM, no SSH required)
-cd deploy/benchmark/terraform
-tofu apply -var-file=sf10-standalone.tfvars -var=run_duckdb_comparison=true
+cd deploy/benchmark/terraform && tofu apply -var-file=sf100-distributed.tfvars
+cd deploy/benchmark/terraform-clickbench && tofu apply   # official ClickBench run
 ```
 
 ## Deployment Modes
@@ -267,7 +312,7 @@ AI agents automatically understand network-typed columns (IPv4, CIDR, MAC, Port,
 Use Wadjet as a Go library:
 
 ```go
-import "github.com/citc-tech/wadjet/wadjet"
+import "github.com/derekmwright/wadjet/wadjet"
 
 db, _ := wadjet.Open(ctx, wadjet.Config{
     StorageEndpoint: "localhost:9000",

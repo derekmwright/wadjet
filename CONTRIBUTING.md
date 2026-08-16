@@ -95,10 +95,34 @@ contributor for CLA or licensing purposes. The project is distributed
 under the terms in [LICENSE](LICENSE); contributions are licensed to
 the maintainer, Derek Wright, under the [CLA](CLA.md).
 
+## Releases
+
+Tags follow `vMAJOR.MINOR.PATCH-<arc-name>`, where the suffix names the
+headline work of the release (e.g. `v0.11.0-parallelism-cascade`).
+
+Checklist for every release:
+
+1. **Refresh the README benchmark numbers.** The `## Benchmarks` section
+   must reflect the most recent *official-methodology* runs — TPC-H SF100
+   distributed (coordinator + 3 workers, per-query table, suite totals)
+   and ClickBench c6a.4xlarge (cold/hot per-query table, suite sums) —
+   including the hardware specs and the date of each run. If an arc since
+   the last release changed performance, re-run before tagging; never
+   ship a release whose README describes a previous release's numbers.
+2. **Gates green at the tagged commit**: `go build ./...`, unit suites
+   (`go test ./internal/... ./wadjet/`), TPC-H SF0.01 correctness
+   (`go test -run TestTPCHQueries ./benchmarks/tpch/`), and ClickBench
+   correctness vs DuckDB when a hits part is staged.
+3. **Release notes** summarize the arc since the previous tag: headline
+   perf/feature work first, then correctness fixes, with benchmark
+   deltas stated as before → after.
+4. Tag with `git tag -s` or an annotated tag from the release commit and
+   create the GitHub release from it.
+
 ## Reporting Issues
 
-Use the [issue templates](https://github.com/citc-tech/wadjet/issues/new/choose) for bug reports and feature requests. Include reproduction steps and expected vs actual behavior.
+Use the [issue templates](https://github.com/derekmwright/wadjet/issues/new/choose) for bug reports and feature requests. Include reproduction steps and expected vs actual behavior.
 
 ## Questions?
 
-Open a [discussion](https://github.com/citc-tech/wadjet/discussions) or reach out via the issue tracker.
+Open a [discussion](https://github.com/derekmwright/wadjet/discussions) or reach out via the issue tracker.
