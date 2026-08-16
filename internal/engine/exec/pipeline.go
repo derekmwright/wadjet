@@ -262,6 +262,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		workerSinks[0] = p.Sink
 		for i := 1; i < workers; i++ {
 			cloned := mergeable.CloneSink()
+			wireCloneSinkSpill(cloned, p.Sink, workers)
 			if err := cloned.Init(ctx); err != nil {
 				return fmt.Errorf("cloned sink init: %w", err)
 			}
@@ -661,3 +662,28 @@ func (s *CollectSink) Schema() []parquet.Column {
 }
 
 func (s *CollectSink) Close() error { return nil }
+
+// wireCloneSinkSpill is the embedded-pipeline mirror of the worker
+// executor's clone spill wiring (executor_fragment.go): clone sinks charge
+// a tracking-only SpillManager view so their state is visible to the
+// memory ledger, and HashAggregate clones get a partial-drain bound
+// because they cannot spill themselves — without it a high-cardinality
+// GROUP BY accumulates ~the full key set in EVERY clone, k× serial state,
+// invisible to the tracker. That exact shape OOM-killed the ClickBench
+// c6a recon on Q19 (heap 30.5GB, reclaimable 0, GOMEMLIMIT 27.6GB) — the
+// protection previously existed only on the distributed path.
+func wireCloneSinkSpill(cloned Sink, primary Sink, workers int) {
+	switch cs := cloned.(type) {
+	case *HashAggregate:
+		if prim, ok := primary.(*HashAggregate); ok && prim.Spill != nil {
+			cs.Spill = prim.Spill.TrackingOnlyView()
+			if b := prim.Spill.Tracker().Budget(); b > 0 && workers > 0 {
+				cs.PartialDrainBytes = b / int64(2*workers)
+			}
+		}
+	case *Sort:
+		if prim, ok := primary.(*Sort); ok && prim.Spill != nil {
+			cs.Spill = prim.Spill.TrackingOnlyView()
+		}
+	}
+}
