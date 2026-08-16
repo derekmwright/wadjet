@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"os"
@@ -107,6 +108,12 @@ type HashAggregate struct {
 	mu                sync.Mutex
 	keys              [][]any
 	serializedKeys    []string // pre-serialized keys matching h.keys order
+	// deferGenericKeyBoxing: on the generic SoA path, skip per-group
+	// extras/keyValues/h.keys boxing at consume and reconstruct keys from
+	// serializedKeys (a lossless binary encoding) at output/spill time.
+	// Set in resolveIndices when every group column's type round-trips
+	// through the serialization exactly.
+	deferGenericKeyBoxing bool
 	groupColIdx       []int
 	aggColIdx         []int
 	aggColIdx2        []int // second column indices for two-column aggregates
@@ -1055,6 +1062,25 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	if !h.useIntGroupKey && !h.useDualIntGroupKey && !h.useCompactGroupKey &&
 		!h.useStrGroupKey && !h.isScalarAgg && len(h.GroupByCols) > 0 && allSimpleAggs {
 		h.useGenericSoA = true
+		// Defer key boxing when every group column both round-trips through
+		// the binary key encoding losslessly AND boxes to a primitive whose
+		// reconstruction is trivial (GetValue parity: int64/int32/float/
+		// bool/string/[]byte). Network types, Date, and UUID box as
+		// FORMATTED STRINGS in GetValue; Decimal encodes float64 bits —
+		// those keep eager boxing. Kills the per-new-group []any +
+		// GetValue-box + extras allocations that were 29% (mallocgc cum) of
+		// ClickBench Q19's profile.
+		h.deferGenericKeyBoxing = true
+		for _, t := range h.groupColTypes {
+			switch t {
+			case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration,
+				batch.TypeInt32, batch.TypePort, batch.TypeProtocol,
+				batch.TypeFloat64, batch.TypeFloat32, batch.TypeBool,
+				batch.TypeString, batch.TypeBytes:
+			default:
+				h.deferGenericKeyBoxing = false
+			}
+		}
 		if h.strGroupIndex == nil {
 			h.strGroupIndex = newStrHashTable(htInitSize)
 		}
@@ -1831,6 +1857,9 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 
 	h.strGroupStates = ensureAppendCap(h.strGroupStates, batchRows)
 	h.serializedKeys = ensureAppendCap(h.serializedKeys, batchRows)
+	if !h.deferGenericKeyBoxing {
+		h.keys = ensureAppendCap(h.keys, batchRows)
+	}
 
 	// Phase 1: Serialize keys, hash lookup, build group index array.
 	var gi []int32
@@ -1855,16 +1884,18 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 	}
 
 	newGroup := func(row int) {
-		keyVals := make([]any, len(h.GroupByCols))
-		for ki, idx := range h.groupColIdx {
-			if idx >= 0 {
-				keyVals[ki] = b.Columns[idx].GetValue(row)
-			}
-		}
 		gs := h.gsPool.alloc()
-		gs.ensureExtras().keyValues = keyVals
+		if !h.deferGenericKeyBoxing {
+			keyVals := make([]any, len(h.GroupByCols))
+			for ki, idx := range h.groupColIdx {
+				if idx >= 0 {
+					keyVals[ki] = b.Columns[idx].GetValue(row)
+				}
+			}
+			gs.ensureExtras().keyValues = keyVals
+			h.keys = append(h.keys, keyVals)
+		}
 		h.strGroupStates = append(h.strGroupStates, gs)
-		h.keys = append(h.keys, keyVals)
 		h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
 		h.serializedKeyBytes += int64(len(h.keyBuf))
 		for ai := range h.intFlatAccs {
@@ -2736,7 +2767,9 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		return out, nil
 	}
 
-	totalGroups := len(h.keys)
+	// strGroupStates is 1:1 with groups on every str-side path; h.keys is
+	// not — the generic SoA path defers key boxing and leaves it empty.
+	totalGroups := len(h.strGroupStates)
 	if h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey {
 		totalGroups = len(h.intGroupStates)
 	}
@@ -2787,6 +2820,11 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 			idx := start + i
 			writeIntKeyToColumn(out.Columns[0], i, h.dualIntKeysA[idx], h.groupColTypes[0])
 			writeIntKeyToColumn(out.Columns[1], i, h.dualIntKeysB[idx], h.groupColTypes[1])
+		} else if deferredBoxing {
+			// Generic-path deferred boxing: keys were never boxed at
+			// consume; decode the group's binary serialized key straight
+			// into the typed output columns.
+			decodeSerializedKeyIntoColumns(h.serializedKeys[start+i], h.groupColTypes, out.Columns, i)
 		} else {
 			for j, val := range ext.keyValues {
 				out.Columns[j].SetValue(i, val)
@@ -3184,8 +3222,10 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 	o.migrateToGenericMap()
 
 	// migrateToGenericMap → materializeFlatAccums on both sides, so every
-	// group's extras is allocated and extras.accs is populated. Bind locals.
-	for i := range o.keys {
+	// group's extras is allocated and extras.accs is populated. Iterate
+	// strGroupStates, not o.keys — deferred-boxing generic sinks never
+	// populate o.keys (serializedKeys carries the identity).
+	for i := range o.strGroupStates {
 		key := o.serializedKeys[i]
 		oGS := o.strGroupStates[i]
 		oExt := oGS.extras
@@ -3692,6 +3732,104 @@ func (h *HashAggregate) migrateToGenericMap() {
 	h.useIntGroupKey = false
 	h.intGroupStates = nil
 	h.intGroupIndex = nil
+}
+
+// decodeSerializedKeyIntoColumns parses a group's binary serialized key
+// ([null-flag][typed payload] per column — serializeKey/processRow's
+// format) and writes each column's value into the typed output vector at
+// row. The hot-output counterpart of decodeSerializedKey: no `any` boxes.
+func decodeSerializedKeyIntoColumns(key string, types []batch.TypeID, cols []*batch.Vector, row int) {
+	for j, t := range types {
+		if len(key) == 0 {
+			// WriteNullAt, not bare SetNull: Bytes-class vectors are
+			// offset-append storage — a skipped write desyncs every later
+			// row's offsets in that column.
+			cols[j].WriteNullAt(row)
+			continue
+		}
+		flag := key[0]
+		key = key[1:]
+		if flag == 1 {
+			cols[j].WriteNullAt(row)
+			continue
+		}
+		switch t {
+		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
+			v := int64(binary.LittleEndian.Uint64([]byte(key[:8])))
+			key = key[8:]
+			writeIntKeyToColumn(cols[j], row, v, t)
+		case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
+			v := int64(int32(binary.LittleEndian.Uint32([]byte(key[:4]))))
+			key = key[4:]
+			writeIntKeyToColumn(cols[j], row, v, t)
+		case batch.TypeFloat64:
+			cols[j].Float64Data[row] = math.Float64frombits(binary.LittleEndian.Uint64([]byte(key[:8])))
+			key = key[8:]
+		case batch.TypeFloat32:
+			cols[j].Float32Data[row] = math.Float32frombits(binary.LittleEndian.Uint32([]byte(key[:4])))
+			key = key[4:]
+		case batch.TypeBool:
+			cols[j].BoolData[row] = key[0] == 1
+			key = key[1:]
+		case batch.TypeString, batch.TypeBytes:
+			l := int(uint16(key[0]) | uint16(key[1])<<8)
+			key = key[2:]
+			cols[j].BytesData.Set(row, []byte(key[:l]))
+			key = key[l:]
+		default:
+			// deferGenericKeyBoxing excludes every other type at resolve;
+			// reaching here means the gate and the decoder disagree.
+			cols[j].Nulls.SetNull(row)
+		}
+	}
+}
+
+// decodeSerializedKey is the boxed-value variant for cold paths (spill
+// drain cursor): parses the binary key into a fresh []any matching what
+// consume-time boxing would have produced.
+func decodeSerializedKey(key string, types []batch.TypeID) []any {
+	vals := make([]any, len(types))
+	for j, t := range types {
+		if len(key) == 0 {
+			continue
+		}
+		flag := key[0]
+		key = key[1:]
+		if flag == 1 {
+			continue // nil
+		}
+		// Box types mirror Vector.GetValue exactly (int32 stays int32,
+		// float32 stays float32, TypeBytes gives []byte) so the spill
+		// cursor's tag dispatch sees the same shapes as eager boxing.
+		switch t {
+		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
+			vals[j] = int64(binary.LittleEndian.Uint64([]byte(key[:8])))
+			key = key[8:]
+		case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
+			vals[j] = int32(binary.LittleEndian.Uint32([]byte(key[:4])))
+			key = key[4:]
+		case batch.TypeFloat64:
+			vals[j] = math.Float64frombits(binary.LittleEndian.Uint64([]byte(key[:8])))
+			key = key[8:]
+		case batch.TypeFloat32:
+			vals[j] = math.Float32frombits(binary.LittleEndian.Uint32([]byte(key[:4])))
+			key = key[4:]
+		case batch.TypeBool:
+			vals[j] = key[0] == 1
+			key = key[1:]
+		case batch.TypeString:
+			l := int(uint16(key[0]) | uint16(key[1])<<8)
+			key = key[2:]
+			vals[j] = key[:l]
+			key = key[l:]
+		case batch.TypeBytes:
+			l := int(uint16(key[0]) | uint16(key[1])<<8)
+			key = key[2:]
+			vals[j] = []byte(key[:l])
+			key = key[l:]
+		}
+	}
+	return vals
 }
 
 // appendIntKeyRowFormat encodes one int-fast-path group key column exactly

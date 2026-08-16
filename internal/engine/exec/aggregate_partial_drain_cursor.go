@@ -51,6 +51,7 @@ type partialGroupCursor struct {
 	strGroupStates []*groupState
 	dualIntKeysA   []int64
 	dualIntKeysB   []int64
+	serializedKeys []string // binary group keys, 1:1 with strGroupStates (deferred-boxing source of truth)
 	groupColTypes  []batch.TypeID
 	nAggs          int
 	nGroupCols     int
@@ -129,6 +130,7 @@ func newPartialGroupCursor(h *HashAggregate, liveGroups []int32) *partialGroupCu
 		strGroupStates: h.strGroupStates,
 		dualIntKeysA:   h.dualIntKeysA,
 		dualIntKeysB:   h.dualIntKeysB,
+		serializedKeys: h.serializedKeys,
 		groupColTypes:  h.groupColTypes,
 		nAggs:          nAggs,
 		nGroupCols:     nGroupCols,
@@ -175,7 +177,7 @@ func newPartialGroupCursor(h *HashAggregate, liveGroups []int32) *partialGroupCu
 		for p := 0; p < numGroups; p++ {
 			slot := c.slotAt(p)
 			c.keyOffsets[p] = int32(len(c.keyArena))
-			c.keyArena = appendSerializedKey(c.keyArena, c.strGroupStates[slot].extras.keyValues)
+			c.keyArena = appendSerializedKey(c.keyArena, c.strKeyValsAt(slot))
 			c.sortedIdx[p] = uint32(p)
 		}
 	}
@@ -229,14 +231,25 @@ func (c *partialGroupCursor) populateHeadKeyVals(gi int) {
 			setPartialKeyFromAny(&c.headKeyVals[i], v)
 		}
 	default: // partialKeyModeStrOrGeneric
-		gs := c.strGroupStates[gi]
-		for i, v := range gs.extras.keyValues {
+		for i, v := range c.strKeyValsAt(gi) {
 			if i >= len(c.headKeyVals) {
 				break
 			}
 			setPartialKeyFromAny(&c.headKeyVals[i], v)
 		}
 	}
+}
+
+// strKeyValsAt returns the boxed key values for a str/generic-mode group,
+// decoding from the binary serialized key when consume-time boxing was
+// deferred (generic SoA path). The decode allocates, but this runs only
+// on the spill/drain cold path — the whole point of deferral is that the
+// hot consume loop never boxes.
+func (c *partialGroupCursor) strKeyValsAt(gi int) []any {
+	if ext := c.strGroupStates[gi].extras; ext != nil && ext.keyValues != nil {
+		return ext.keyValues
+	}
+	return decodeSerializedKey(c.serializedKeys[gi], c.groupColTypes)
 }
 
 // setPartialKeyFromInt populates dst from an int64 SoA key value typed by t.
