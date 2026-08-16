@@ -8599,9 +8599,19 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 			return fmt.Errorf("scan %s: all %d files failed to read (%d failures)%s", s.tableName, len(inner.files), inner.failedFiles, sampleErr)
 		}
 
-		// Initialize batch pool from the most common row group size
+		// Initialize batch pool from the LARGEST row group: GetForSize
+		// falls back to a fresh unpooled allocation for any request above
+		// the pool's batch size, so sizing from rgUnits[0] meant every
+		// row group bigger than the first bypassed the pool entirely —
+		// full vector allocation + zeroing per row group (13% of the
+		// 100-part floor probe's makeslice profile).
 		if len(inner.rgUnits) > 0 {
-			rgSize := int(inner.rgUnits[0].numRows)
+			rgSize := 0
+			for _, u := range inner.rgUnits {
+				if int(u.numRows) > rgSize {
+					rgSize = int(u.numRows)
+				}
+			}
 			readSchema := inner.readSchema()
 			// Row-loc stamping appends a column after decode, which would
 			// poison the fixed-schema pool on release — skip pooling (the

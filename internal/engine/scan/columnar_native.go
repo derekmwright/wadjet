@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"sync"
 
 	"golang.org/x/sync/errgroup"
 
@@ -216,6 +217,18 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		return fmt.Errorf("column %d not found in row group %d", colIdx, rgIdx)
 	}
 	defer pr.Close()
+	// This loop fully consumes each page (values copied into vec) before
+	// advancing, so per-page buffers are reused — and pooled ACROSS
+	// column reads (chunks often hold only 1-3 large pages, so
+	// within-reader reuse alone saves nothing). Per-page/per-chunk
+	// allocation zeroing was a third of the narrow-scan floor.
+	scr := colReadScratchPool.Get().(*colReadScratch)
+	pr.SeedScratch(scr.def, scr.idx)
+	drs := &scr.drs
+	defer func() {
+		scr.def, scr.idx = pr.TakeScratch()
+		colReadScratchPool.Put(scr)
+	}()
 
 	// Detect file type from schema tree.
 	leaves := fr.Leaves()
@@ -298,7 +311,7 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 				page.Release()
 				return fmt.Errorf("dictionary-encoded page but chunk has no dictionary page")
 			}
-			data, err = resolveNativeDictionary(dict, data, fileType)
+			data, err = resolveNativeDictionaryScratch(drs, dict, data, fileType)
 			if err != nil {
 				page.Release()
 				return fmt.Errorf("resolving dictionary page: %w", err)
@@ -339,6 +352,37 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 // Indices are bounds-checked against the dictionary before any gather:
 // corrupt or hostile files can carry out-of-range indices.
 func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType pqt.TypeID) (pqt.Values, error) {
+	return resolveNativeDictionaryScratch(nil, dict, page, fileType)
+}
+
+// colReadScratch bundles every per-column-read reusable buffer; pooled
+// process-wide so the buffers amortize across row groups, files, and
+// queries instead of being reallocated (and zeroed) per column chunk.
+type colReadScratch struct {
+	def []int32
+	idx []int32
+	drs dictResolveScratch
+}
+
+var colReadScratchPool = sync.Pool{New: func() any { return &colReadScratch{} }}
+
+// dictResolveScratch holds gather buffers reused across the pages of one
+// column read. Values returned from a scratch-backed resolve alias these
+// buffers and are invalidated by the next resolve — callers must copy
+// into their destination vector before advancing (readColumnNative does).
+type dictResolveScratch struct {
+	i64  []int64
+	i32  []int32
+	f64  []float64
+	f32  []float32
+	buf  []byte
+	offs []uint32
+}
+
+// resolveNativeDictionaryScratch resolves INT32 dictionary indices to
+// values, reusing s's buffers when non-nil (nil s = allocate fresh, the
+// prior behavior for callers that retain the result).
+func resolveNativeDictionaryScratch(s *dictResolveScratch, dict *pqt.DictionaryData, page pqt.Values, fileType pqt.TypeID) (pqt.Values, error) {
 	indices := page.Int32()
 	n := page.Count()
 	if err := pqt.ValidateDictIndices(indices, n, dict.NumValues); err != nil {
@@ -348,7 +392,15 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 	switch fileType {
 	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration, pqt.TypeDecimal:
 		src := dict.Data.Int64()
-		dst := make([]int64, n)
+		var dst []int64
+		if s != nil {
+			if cap(s.i64) < n {
+				s.i64 = make([]int64, n)
+			}
+			dst = s.i64[:n]
+		} else {
+			dst = make([]int64, n)
+		}
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
 		}
@@ -356,7 +408,15 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 
 	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
 		src := dict.Data.Int32()
-		dst := make([]int32, n)
+		var dst []int32
+		if s != nil {
+			if cap(s.i32) < n {
+				s.i32 = make([]int32, n)
+			}
+			dst = s.i32[:n]
+		} else {
+			dst = make([]int32, n)
+		}
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
 		}
@@ -364,7 +424,15 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 
 	case pqt.TypeFloat64:
 		src := dict.Data.Double()
-		dst := make([]float64, n)
+		var dst []float64
+		if s != nil {
+			if cap(s.f64) < n {
+				s.f64 = make([]float64, n)
+			}
+			dst = s.f64[:n]
+		} else {
+			dst = make([]float64, n)
+		}
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
 		}
@@ -372,7 +440,15 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 
 	case pqt.TypeFloat32:
 		src := dict.Data.Float()
-		dst := make([]float32, n)
+		var dst []float32
+		if s != nil {
+			if cap(s.f32) < n {
+				s.f32 = make([]float32, n)
+			}
+			dst = s.f32[:n]
+		} else {
+			dst = make([]float32, n)
+		}
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
 		}
@@ -380,14 +456,14 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 
 	case pqt.TypeVector:
 		// VECTOR stored as FIXED_LEN_BYTE_ARRAY: resolve dictionary indices.
-		return resolveDictByteArray(dict, indices, n), nil
+		return resolveDictByteArrayScratch(s, dict, indices, n), nil
 
 	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
-		return resolveDictByteArray(dict, indices, n), nil
+		return resolveDictByteArrayScratch(s, dict, indices, n), nil
 
 	default:
 		// Fallback for unknown types: treat as byte array.
-		return resolveDictByteArray(dict, indices, n), nil
+		return resolveDictByteArrayScratch(s, dict, indices, n), nil
 	}
 }
 
@@ -397,20 +473,40 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 // buffer log2(size) times per page and ranked 23% of worker growslice CPU
 // in the 2026-08-12 treatment profile.
 func resolveDictByteArray(dict *pqt.DictionaryData, indices []int32, n int) pqt.Values {
+	return resolveDictByteArrayScratch(nil, dict, indices, n)
+}
+
+func resolveDictByteArrayScratch(s *dictResolveScratch, dict *pqt.DictionaryData, indices []int32, n int) pqt.Values {
 	dictData, dictOffsets := dict.Data.ByteArray()
 	total := 0
 	for i := 0; i < n; i++ {
 		idx := indices[i]
 		total += int(dictOffsets[idx+1] - dictOffsets[idx])
 	}
-	buf := make([]byte, 0, total)
-	offsets := make([]uint32, n+1)
+	var buf []byte
+	var offsets []uint32
+	if s != nil {
+		if cap(s.buf) < total {
+			s.buf = make([]byte, 0, total)
+		}
+		buf = s.buf[:0]
+		if cap(s.offs) < n+1 {
+			s.offs = make([]uint32, n+1)
+		}
+		offsets = s.offs[:n+1]
+	} else {
+		buf = make([]byte, 0, total)
+		offsets = make([]uint32, n+1)
+	}
 	for i := 0; i < n; i++ {
 		idx := indices[i]
 		offsets[i] = uint32(len(buf))
 		buf = append(buf, dictData[dictOffsets[idx]:dictOffsets[idx+1]]...)
 	}
 	offsets[n] = uint32(len(buf))
+	if s != nil {
+		s.buf = buf
+	}
 	return pqt.ByteArrayValues(buf, offsets)
 }
 

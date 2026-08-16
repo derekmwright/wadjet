@@ -256,18 +256,36 @@ func init() {
 // DecodeRLEInt32 decodes RLE/bit-packing hybrid encoded data into a slice of int32.
 // This is the primary entry point for decoding definition levels and dictionary indices.
 func DecodeRLEInt32(data []byte, bitWidth, count int) ([]int32, error) {
-	result := make([]int32, count)
+	return DecodeRLEInt32Into(nil, data, bitWidth, count)
+}
+
+// DecodeRLEInt32Into decodes into dst's capacity, allocating only when it
+// doesn't fit. The page decode path calls this once per PAGE — reusing a
+// per-chunk scratch buffer turns ~50 allocations per column chunk into
+// one (allocation zeroing was a third of the 100-part narrow-scan floor).
+func DecodeRLEInt32Into(dst []int32, data []byte, bitWidth, count int) ([]int32, error) {
+	if cap(dst) < count {
+		dst = make([]int32, count)
+	} else {
+		dst = dst[:count]
+	}
 	dec := NewRLEDecoder(data, bitWidth, count)
-	n, err := dec.decodeAllBatch(result)
+	n, err := dec.decodeAllBatch(dst)
 	if err != nil {
 		return nil, err
 	}
-	return result[:n], nil
+	return dst[:n], nil
 }
 
 // DecodeRLEInt32WithLength decodes RLE data prefixed with a 4-byte LE length.
 // Returns the decoded values and total bytes consumed (including length prefix).
 func DecodeRLEInt32WithLength(data []byte, bitWidth, count int) ([]int32, int, error) {
+	return DecodeRLEInt32WithLengthInto(nil, data, bitWidth, count)
+}
+
+// DecodeRLEInt32WithLengthInto is DecodeRLEInt32WithLength with buffer
+// reuse (see DecodeRLEInt32Into).
+func DecodeRLEInt32WithLengthInto(dst []int32, data []byte, bitWidth, count int) ([]int32, int, error) {
 	if len(data) < 4 {
 		return nil, 0, fmt.Errorf("rle: data too short for length prefix")
 	}
@@ -275,11 +293,15 @@ func DecodeRLEInt32WithLength(data []byte, bitWidth, count int) ([]int32, int, e
 	if 4+length > len(data) {
 		return nil, 0, fmt.Errorf("rle: length %d exceeds data %d", length, len(data)-4)
 	}
-	result := make([]int32, count)
+	if cap(dst) < count {
+		dst = make([]int32, count)
+	} else {
+		dst = dst[:count]
+	}
 	dec := NewRLEDecoder(data[4:4+length], bitWidth, count)
-	n, err := dec.decodeAllBatch(result)
+	n, err := dec.decodeAllBatch(dst)
 	if err != nil {
 		return nil, 0, err
 	}
-	return result[:n], 4 + length, nil
+	return dst[:n], 4 + length, nil
 }

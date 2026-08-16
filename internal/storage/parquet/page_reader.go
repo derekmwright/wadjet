@@ -77,6 +77,37 @@ type ColumnPageReader struct {
 	srcOff int64       // file offset of the chunk's first byte
 	srcLen int         // chunk byte length ([srcOff, srcOff+srcLen))
 	owned  []byte      // pooled staging buffer; returned on Close
+
+	// Opt-in per-page buffer reuse (EnableScratch): definition-level and
+	// dictionary-index slices are reused across NextPage calls, so a
+	// returned PageData's DefinitionLevels/Data are INVALIDATED by the
+	// next NextPage. Only callers that fully consume each page before
+	// advancing (the native columnar reader) may enable this.
+	scratchOn  bool
+	defScratch []int32
+	idxScratch []int32
+}
+
+// EnableScratch turns on per-page buffer reuse for this reader. See the
+// field comment for the lifetime contract.
+func (r *ColumnPageReader) EnableScratch() { r.scratchOn = true }
+
+// SeedScratch enables buffer reuse AND seeds it with buffers pooled by
+// the caller across readers — chunks with one or two large pages get no
+// within-reader reuse, so cross-reader pooling is where the allocation
+// win is. Retrieve the (possibly grown) buffers with TakeScratch before
+// Close and return them to the caller's pool.
+func (r *ColumnPageReader) SeedScratch(def, idx []int32) {
+	r.scratchOn = true
+	r.defScratch = def
+	r.idxScratch = idx
+}
+
+// TakeScratch hands back the scratch buffers for caller-side pooling.
+func (r *ColumnPageReader) TakeScratch() (def, idx []int32) {
+	def, idx = r.defScratch, r.idxScratch
+	r.defScratch, r.idxScratch = nil, nil
+	return def, idx
 }
 
 // NewColumnPageReader creates a page reader for a column chunk.
@@ -350,9 +381,16 @@ func (r *ColumnPageReader) decodeDataPageV1(ph *PageHeader, compressed []byte) (
 	numNulls := 0
 	if r.maxDefLevel > 0 {
 		bitWidth := bitsRequired(r.maxDefLevel)
-		decoded, consumed, err := DecodeRLEInt32WithLength(pageData[off:], bitWidth, numValues)
+		var scratch []int32
+		if r.scratchOn {
+			scratch = r.defScratch
+		}
+		decoded, consumed, err := DecodeRLEInt32WithLengthInto(scratch, pageData[off:], bitWidth, numValues)
 		if err != nil {
 			return nil, fmt.Errorf("decoding definition levels: %w", err)
+		}
+		if r.scratchOn {
+			r.defScratch = decoded
 		}
 		defLevels = decoded
 		off += consumed
@@ -425,9 +463,16 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 	defLen := int(dph.DefinitionLevelsByteLength)
 	if defLen > 0 && r.maxDefLevel > 0 {
 		bitWidth := bitsRequired(r.maxDefLevel)
-		decoded, err := DecodeRLEInt32(compressed[off:off+defLen], bitWidth, numValues)
+		var scratch []int32
+		if r.scratchOn {
+			scratch = r.defScratch
+		}
+		decoded, err := DecodeRLEInt32Into(scratch, compressed[off:off+defLen], bitWidth, numValues)
 		if err != nil {
 			return nil, fmt.Errorf("decoding v2 definition levels: %w", err)
+		}
+		if r.scratchOn {
+			r.defScratch = decoded
 		}
 		defLevels = decoded
 	}
@@ -475,9 +520,16 @@ func (r *ColumnPageReader) decodeValues(data []byte, n int, enc Encoding) (Value
 			return Values{physType: PhysicalInt32, count: 0}, nil
 		}
 		bitWidth := int(data[0])
-		indices, err := DecodeRLEInt32(data[1:], bitWidth, n)
+		var scratch []int32
+		if r.scratchOn {
+			scratch = r.idxScratch
+		}
+		indices, err := DecodeRLEInt32Into(scratch, data[1:], bitWidth, n)
 		if err != nil {
 			return Values{}, fmt.Errorf("decoding dictionary indices: %w", err)
+		}
+		if r.scratchOn {
+			r.idxScratch = indices
 		}
 		return PlainInt32Values(indices), nil
 	case EncodingDeltaBinaryPacked:
