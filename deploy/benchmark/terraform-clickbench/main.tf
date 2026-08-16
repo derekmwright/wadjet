@@ -109,6 +109,13 @@ locals {
     mkdir -p /data/hits
     TS=$(date +%Y%m%d-%H%M%S)
 
+    # Disk + memory telemetry alongside the run: settles disk-bound vs
+    # CPU-bound for warm-try anomalies (Q05/Q33 warming is knife-edge —
+    # their multi-GB aggregation state competes with the page cache).
+    yum install -y sysstat >/dev/null 2>&1 || true
+    nohup iostat -x -t 5 > /root/iostat.log 2>&1 &
+    nohup bash -c 'while true; do echo "== $(date -u +%H:%M:%S)"; grep -E "MemFree|Cached|Dirty" /proc/meminfo; sleep 5; done' > /root/meminfo.log 2>&1 &
+
     /usr/local/bin/clickbench-bench \
       --mem-budget "${var.mem_budget_bytes}" \
       --s3-bucket "${var.data_bucket}" \
@@ -123,6 +130,8 @@ locals {
     aws s3 cp /root/results.json "s3://${var.data_bucket}/results/clickbench/$TS/results.json" --region ${var.region} || true
     aws s3 cp /root/clickbench.log "s3://${var.data_bucket}/results/clickbench/$TS/clickbench.log" --region ${var.region} || true
     aws s3 cp /root/bootstrap.log "s3://${var.data_bucket}/results/clickbench/$TS/bootstrap.log" --region ${var.region} || true
+    aws s3 cp /root/iostat.log "s3://${var.data_bucket}/results/clickbench/$TS/iostat.log" --region ${var.region} || true
+    aws s3 cp /root/meminfo.log "s3://${var.data_bucket}/results/clickbench/$TS/meminfo.log" --region ${var.region} || true
 
     %{if var.auto_shutdown}
     shutdown -h now
