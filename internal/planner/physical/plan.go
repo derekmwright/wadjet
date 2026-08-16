@@ -6208,6 +6208,24 @@ func (p *Planner) buildLimit(ctx context.Context, node *logical.Node) (exec.Sour
 
 	child := node.Children[0]
 
+	// Top-N late materialization: narrow scan + row-loc top-N + winner
+	// refetch for wide-projection ORDER BY ... LIMIT over a plain scan.
+	// Falls back to the ordinary top-N build when the shape doesn't
+	// qualify (see topn_late_mat.go).
+	if child.Type == logical.NodeSort && node.LimitVal > 0 {
+		src, ok, err := p.tryBuildTopNLateMat(ctx, child, node.LimitVal+node.OffsetVal)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if ok {
+			var ops []exec.UnaryOperator
+			if node.OffsetVal > 0 {
+				ops = append(ops, exec.NewLimit(int64(node.LimitVal), int64(node.OffsetVal)))
+			}
+			return src, ops, &exec.CollectSink{}, nil
+		}
+	}
+
 	// Optimization: Limit(Sort(...)) → TopN sort (heap-based, keeps only N rows)
 	if child.Type == logical.NodeSort && node.OffsetVal == 0 {
 		return p.buildTopN(ctx, child, node.LimitVal)
@@ -6709,6 +6727,18 @@ type catalogScanSource struct {
 	rowLimit        int64                 // LIMIT pushdown: enables lazy file downloading (0 = eager)
 	memTracker      *memory.Tracker       // per-query memory tracker; wired at construction when budget>0
 	spillMgr        *memory.SpillManager  // for pre-emptive relief on file-load reservations; nil-safe
+	emitRowLoc      bool                  // top-N late materialization: stamp __row_loc on scan batches
+}
+
+// RefetchRows re-reads the full-width rows named by __row_loc values (see
+// topn_late_mat.go), in locs order. Only valid on an emitRowLoc scan whose
+// narrow phase has completed and whose source has not been closed.
+func (s *catalogScanSource) RefetchRows(ctx context.Context, locs []int64) (*batch.RecordBatch, error) {
+	ses, ok := s.inner.(*scannerExecSource)
+	if !ok || ses.scanner == nil {
+		return nil, fmt.Errorf("refetch: scan source is not a row-loc scan")
+	}
+	return ses.scanner.RefetchRows(ctx, locs)
 }
 
 // SetBloomFilter attaches a bloom filter for scan-level row group pruning.
@@ -6773,6 +6803,7 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 			ses.memTracker = s.memTracker
 			ses.spillMgr = s.spillMgr
 		}
+		ses.emitRowLoc = s.emitRowLoc
 	}
 	s.inner = sc
 	return s.inner.Init(ctx)
@@ -8152,6 +8183,7 @@ type scannerExecSource struct {
 	rowLimit        int64                // LIMIT pushdown: enables lazy file downloading (0 = eager)
 	memTracker      *memory.Tracker      // per-query memory tracker; passed to scanSourceInner at Init
 	spillMgr        *memory.SpillManager // for pre-emptive relief on file-load reservations; nil-safe
+	emitRowLoc      bool                 // top-N late materialization: stamp __row_loc on scan batches
 }
 
 type scanSourceInner struct {
@@ -8170,6 +8202,7 @@ type scanSourceInner struct {
 	// row-group-level parallel scan
 	rgUnits   []rgUnit  // flat list of row group work units
 	rgIdx     int64     // atomic index for parallel RG workers
+	emitRowLoc bool     // stamp __row_loc (rgUnit ordinal, row) on every scan batch; disables batch pooling
 	useNative bool      // true if native page decoder can be used (no Decimal/Array/Map)
 	loadGate  *loadGate // byte-budgeted admission for in-flight file LOADs (data, not metadata)
 
@@ -8408,6 +8441,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		cancel:        cancel,
 		memTracker:    s.memTracker,
 		spillMgr:      s.spillMgr,
+		emitRowLoc:    s.emitRowLoc,
 	}
 	// Nested (ARRAY/MAP/ROW) schemas must take the file-level scan whose
 	// readBatchDirect falls back to the row-based reader. This MUST be
@@ -8418,6 +8452,14 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	innerSchema := parquet.Schema{Columns: inner.schema}
 	inner.hasNestedTypes = innerSchema.HasNestedColumns()
 	s.scanner = inner
+
+	// Row-loc stamping needs the row-group-parallel path: rgUnit ordinals
+	// are the row identity. The planner's rewrite only engages on shapes
+	// that take the eager branch; this is the belt-and-braces check.
+	if inner.emitRowLoc && (inner.rowLimit > 0 || inner.hasNestedTypes) {
+		cancel()
+		return fmt.Errorf("scan %s: row-loc emission requires the row-group-parallel scan path", s.tableName)
+	}
 
 	if inner.rowLimit > 0 || inner.hasNestedTypes {
 		// Lazy file-level scan: download files on-demand, one at a time per worker.
@@ -8455,7 +8497,10 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		if len(inner.rgUnits) > 0 {
 			rgSize := int(inner.rgUnits[0].numRows)
 			readSchema := inner.readSchema()
-			if rgSize > 0 && len(readSchema) > 0 {
+			// Row-loc stamping appends a column after decode, which would
+			// poison the fixed-schema pool on release — skip pooling (the
+			// narrow late-mat scan allocates little anyway).
+			if rgSize > 0 && len(readSchema) > 0 && !inner.emitRowLoc {
 				inner.pool = batch.NewBatchPool(readSchema, rgSize)
 				inner.pool.PreWarm(runtime.NumCPU())
 			}

@@ -892,7 +892,7 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 			if idx >= len(inner.rgUnits) {
 				return
 			}
-			b = inner.readRG(ctx, inner.rgUnits[idx])
+			b = inner.readRG(ctx, idx)
 		}
 
 		if b == nil || b.Len == 0 {
@@ -936,7 +936,7 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 			if nextIdx < len(inner.rgUnits) {
 				prefetched = &prefetchResult{
 					idx:   nextIdx,
-					batch: inner.readRG(ctx, inner.rgUnits[nextIdx]),
+					batch: inner.readRG(ctx, nextIdx),
 				}
 			}
 		}
@@ -947,7 +947,8 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 // bytes lazily on first call (bounded by inner.loadGate) and releases them
 // once this slot's last row group has been processed. The decoded batch is
 // charged to the memory tracker until it leaves the scan source.
-func (inner *scanSourceInner) readRG(ctx context.Context, unit rgUnit) *batch.RecordBatch {
+func (inner *scanSourceInner) readRG(ctx context.Context, unitIdx int) *batch.RecordBatch {
+	unit := inner.rgUnits[unitIdx]
 	if unit.slot == nil {
 		return nil
 	}
@@ -969,8 +970,113 @@ func (inner *scanSourceInner) readRG(ctx context.Context, unit rgUnit) *batch.Re
 		}
 		return nil
 	}
+	if inner.emitRowLoc && b != nil && b.Len > 0 {
+		stampRowLoc(b, unitIdx)
+	}
 	inner.trackScanBatch(b)
 	return b
+}
+
+// stampRowLoc appends the synthetic __row_loc column: rgUnit ordinal in
+// the high 32 bits, row-within-group in the low 32. Positional (before any
+// Sel is applied), so delete-marker selection composes naturally. Schema
+// append copies the slice header capacity-clamped so a pooled/shared
+// backing array is never mutated in place.
+func stampRowLoc(b *batch.RecordBatch, unitIdx int) {
+	loc := batch.NewVector(batch.TypeInt64, b.Len)
+	base := int64(unitIdx) << 32
+	for i := 0; i < b.Len; i++ {
+		loc.Int64Data[i] = base | int64(i)
+	}
+	b.Columns = append(b.Columns[:len(b.Columns):len(b.Columns)], loc)
+	b.Schema = append(b.Schema[:len(b.Schema):len(b.Schema)], parquet.Column{Name: RowLocColumn, Type: parquet.TypeInt64})
+}
+
+// RefetchRows reads back the full-width rows named by __row_loc values, in
+// locs order (the caller's sort order). Files are reopened independently
+// of the scan's slot lifecycle — by refetch time the narrow phase has
+// already released every slot's bytes. At most one row-group decode per
+// distinct (file, row group) among the winners, so the cost is bounded by
+// len(locs) wide row groups.
+func (inner *scanSourceInner) RefetchRows(ctx context.Context, locs []int64) (*batch.RecordBatch, error) {
+	byOrd := make(map[int64][]int, 4)
+	for i, loc := range locs {
+		byOrd[loc>>32] = append(byOrd[loc>>32], i)
+	}
+	// Two passes because Bytes-class vectors are offset-append storage:
+	// writes must be sequential. Pass 1 stages winners row-group by
+	// row-group (sequential writes into stage, one wide decode live at a
+	// time); pass 2 gathers stage rows into final sorted order (sequential
+	// writes into out, random reads from stage).
+	stage := batch.NewRecordBatch(inner.schema, len(locs))
+	stageIdx := make([]int, len(locs))
+	si := 0
+	for ord, positions := range byOrd {
+		if ord < 0 || ord >= int64(len(inner.rgUnits)) {
+			return nil, fmt.Errorf("refetch: row-loc ordinal %d out of range (%d units)", ord, len(inner.rgUnits))
+		}
+		unit := inner.rgUnits[ord]
+		fr, closeFn, err := openRefetchReader(ctx, inner.cat, unit.slot.entry)
+		if err != nil {
+			return nil, fmt.Errorf("refetch %s: %w", unit.slot.entry.Path, err)
+		}
+		wide, err := scan.ReadRowGroupNative(fr, unit.rgIndex, inner.schema, nil)
+		closeFn()
+		if err != nil {
+			return nil, fmt.Errorf("refetch %s row group %d: %w", unit.slot.entry.Path, unit.rgIndex, err)
+		}
+		for _, pos := range positions {
+			row := int(locs[pos] & 0xffffffff)
+			if wide == nil || row >= wide.Len {
+				return nil, fmt.Errorf("refetch %s row group %d: row %d out of range", unit.slot.entry.Path, unit.rgIndex, row)
+			}
+			for c := range inner.schema {
+				copyVecRange(stage.Columns[c], si, wide.Columns[c], row, 1)
+			}
+			stageIdx[pos] = si
+			si++
+		}
+	}
+	out := batch.NewRecordBatch(inner.schema, len(locs))
+	for pos := range locs {
+		for c := range inner.schema {
+			copyVecRange(out.Columns[c], pos, stage.Columns[c], stageIdx[pos], 1)
+		}
+	}
+	return out, nil
+}
+
+// openRefetchReader opens a file reader for the refetch phase, preferring
+// the staged-pread path (only the needed column chunks are read) and
+// falling back to a whole-file read. Untracked: the refetch touches at
+// most a handful of files and frees them immediately.
+func openRefetchReader(ctx context.Context, cat *catalog.Catalog, entry catalog.FileEntry) (*parquet.FileReader, func(), error) {
+	if ras, ok := cat.Store().(objstore.ReaderAtStore); ok {
+		if ra, size, err := ras.GetReaderAt(ctx, cat.Bucket(), entry.Path); err == nil {
+			if f, isFile := ra.(*os.File); isFile {
+				if fr, ferr := parquet.OpenFileReaderAt(f, size); ferr == nil {
+					return fr, func() { f.Close() }, nil
+				}
+				f.Close()
+			} else {
+				ra.Close()
+			}
+		}
+	}
+	rc, _, err := cat.Store().Get(ctx, cat.Bucket(), entry.Path)
+	if err != nil {
+		return nil, nil, err
+	}
+	data, err := readAllSized(rc, entry.SizeBytes, false)
+	rc.Close()
+	if err != nil {
+		return nil, nil, err
+	}
+	reader, err := parquet.NewReaderFromBytes(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return reader.FileReader(), func() {}, nil
 }
 
 // copyVecRange copies count values from src[srcOff..] to dst[dstOff..] using

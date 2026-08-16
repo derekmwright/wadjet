@@ -371,6 +371,21 @@ func collectSubtreeColumnsRec(n *Node, result map[string]bool) {
 	}
 }
 
+// NodeColumnRefs returns the column names referenced by a node's own
+// expressions (filter predicates, sort keys, projections, ...) — the same
+// collection column pruning uses, exported for the physical planner's
+// top-N late-materialization rewrite.
+func NodeColumnRefs(n *Node) []string {
+	refs := make(map[string]bool, 8)
+	collectNodeColumnRefs(n, refs)
+	cols := make([]string, 0, len(refs))
+	for c := range refs {
+		cols = append(cols, c)
+	}
+	sort.Strings(cols)
+	return cols
+}
+
 // collectNodeColumnRefs adds column names referenced by a node's metadata
 // (predicates, projections, join conditions, aggregates, etc.) to the set.
 func collectNodeColumnRefs(n *Node, refs map[string]bool) {
