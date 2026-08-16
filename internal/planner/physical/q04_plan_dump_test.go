@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
 )
 
 func TestQ04PlanDump(t *testing.T) {

@@ -3,8 +3,8 @@ package coordinator
 import (
 	"strings"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // avgSumPrefix and avgCountPrefix name the two synthetic columns that

@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // buildVec constructs an owned vector from boxed values (nil = null) using

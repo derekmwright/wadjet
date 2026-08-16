@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TestFirstScalarLiteral verifies the scalar extractor renders each column

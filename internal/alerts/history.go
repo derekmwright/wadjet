@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // HistoryTableName is the name of the system table holding alert fires.

@@ -263,8 +263,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TestPartitionedShuffleSink_RoundTrip verifies that rows hash-partitioned
@@ -376,8 +376,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // partitionedShuffleSink is an exec.Sink that hash-partitions incoming batches
@@ -674,9 +674,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // partitionShardSource is an exec.Source that reads all .wshf files at a
@@ -763,7 +763,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 func TestPartitionShardSource_ReadsAllFiles(t *testing.T) {
@@ -989,7 +989,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet"
+	"github.com/derekmwright/wadjet"
 )
 
 // TestBroadcastPressure_OrdersHashOOM_ReproducesSignature loads the SF100-sample
@@ -1245,8 +1245,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // shuffleBuildThreshold gates the routing decision: if the largest build

@@ -3,7 +3,7 @@ package exec
 import (
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // flatAccumArrays stores accumulator state in SoA (Struct of Arrays) layout

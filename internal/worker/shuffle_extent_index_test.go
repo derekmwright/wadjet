@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // buildIndexedWSHF is buildMultiTypeWSHF plus the WIDX footer the file

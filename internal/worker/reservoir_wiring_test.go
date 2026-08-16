@@ -4,7 +4,7 @@ import (
 	"runtime/debug"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
 )
 
 // TestExecutor_ReservoirPropagation verifies the Phase-3 plumbing linchpin: the

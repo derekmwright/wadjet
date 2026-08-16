@@ -3,7 +3,7 @@ package logical
 import (
 	"regexp"
 
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // rewriteDistinctAsGroupBy rewrites a top-level SELECT DISTINCT into an

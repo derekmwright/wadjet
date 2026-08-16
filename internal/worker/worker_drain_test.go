@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // TestUploadManagerFlush_WaitsForPendingUploads: Flush must block until

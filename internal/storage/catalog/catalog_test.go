@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 func testSchema() parquet.Schema {

@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Columnar binary shuffle format — replaces Parquet for inter-stage shuffle data.

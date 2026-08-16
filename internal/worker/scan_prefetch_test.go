@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // writePrefetchFixture writes n small parquet files ("id" int64, "val"

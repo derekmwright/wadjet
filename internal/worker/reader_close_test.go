@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // trackingReaderAt wraps a ReaderAtCloser and increments a shared counter on Close.

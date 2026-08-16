@@ -13,10 +13,10 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	wadjetv1 "github.com/citc-tech/wadjet/gen/wadjet/v1"
-	"github.com/citc-tech/wadjet/internal/auth"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	wadjetv1 "github.com/derekmwright/wadjet/gen/wadjet/v1"
+	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 func setupGRPCTestWithAuth(t *testing.T) (wadjetv1.WadjetServiceClient, func()) {

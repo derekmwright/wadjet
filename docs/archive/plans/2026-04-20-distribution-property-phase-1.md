@@ -241,7 +241,7 @@ func keysEqual(a, b []string) bool {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `go test -run TestDistributionSatisfies ./internal/planner/physical/`
-Expected: `PASS` with all 19 subtests passing, `ok  github.com/citc-tech/wadjet/internal/planner/physical`
+Expected: `PASS` with all 19 subtests passing, `ok  github.com/derekmwright/wadjet/internal/planner/physical`
 
 - [ ] **Step 5: Commit**
 
@@ -269,7 +269,7 @@ EOF
 - [ ] **Step 1: Verify the existing `TestDistributionSatisfiesJoin` test still exists and passes (baseline)**
 
 Run: `go test -run TestDistributionSatisfiesJoin ./internal/planner/physical/`
-Expected: `PASS`, `ok  github.com/citc-tech/wadjet/internal/planner/physical`
+Expected: `PASS`, `ok  github.com/derekmwright/wadjet/internal/planner/physical`
 
 - [ ] **Step 2: Replace the body of `SatisfiesJoinKeys` to delegate to `Satisfies`**
 
@@ -1563,7 +1563,7 @@ Expected: every query passes — same row counts and (where checked) checksums a
 - [ ] **Step 2: Verify the test summary line**
 
 Run: `grep -E '^(--- FAIL|FAIL|PASS|ok)' /tmp/tpch-sf001-after.txt | head -5`
-Expected output ends with `PASS` and `ok  github.com/citc-tech/wadjet/benchmarks/tpch`. No `FAIL` lines.
+Expected output ends with `PASS` and `ok  github.com/derekmwright/wadjet/benchmarks/tpch`. No `FAIL` lines.
 
 - [ ] **Step 3: If any failure, halt and report**
 

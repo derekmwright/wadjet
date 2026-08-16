@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 func TestRowGroupRangeForShard(t *testing.T) {

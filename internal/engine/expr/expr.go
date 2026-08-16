@@ -29,8 +29,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/geoip"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/geoip"
 	"golang.org/x/net/publicsuffix"
 )
 

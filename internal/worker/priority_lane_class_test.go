@@ -7,7 +7,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // Probe: two non-overlapping filtered consumers on the pritasks WorkQueue

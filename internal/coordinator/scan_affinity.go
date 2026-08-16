@@ -5,7 +5,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // Scan-task file→worker affinity (docs/design/scan-affinity.md).

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 func TestGenerateSeriesE2E(t *testing.T) {

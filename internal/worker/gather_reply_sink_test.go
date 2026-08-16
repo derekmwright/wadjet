@@ -11,10 +11,10 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/citc-tech/wadjet/internal/dataplane"
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/dataplane"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TestGatherReplySink publishes two batches and a terminal to a NATS reply

@@ -9,7 +9,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // FileRGMeta carries one parquet file's row-group-level metadata: per-RG

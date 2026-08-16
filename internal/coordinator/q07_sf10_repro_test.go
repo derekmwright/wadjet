@@ -5,7 +5,7 @@ package coordinator
 import (
 	"testing"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
 )
 
 // TestQ07SF01InProcess attempts to reproduce the EC2 SF10 stall on

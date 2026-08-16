@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Regression tests for the advance-on-NULL / nested-copy sweep (2026-06-12).

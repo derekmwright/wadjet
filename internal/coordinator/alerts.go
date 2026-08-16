@@ -6,10 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/alerts"
-	"github.com/citc-tech/wadjet/internal/auth"
-	sql "github.com/citc-tech/wadjet/internal/planner/sql"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/alerts"
+	"github.com/derekmwright/wadjet/internal/auth"
+	sql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 // handleCreateAlertSQL parses a CREATE ALERT statement and persists the AlertMeta.

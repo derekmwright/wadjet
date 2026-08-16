@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // ClickBench-surfaced aggregate gaps:

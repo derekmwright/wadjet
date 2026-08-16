@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Regression tests for the unguarded NoGrow-insert loops (found 2026-07-07 by

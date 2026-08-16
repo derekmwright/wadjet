@@ -3,7 +3,7 @@ package worker
 import (
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // TestShufflePrefetch_PeerHintedFilesServeAhead: with streaming shuffle

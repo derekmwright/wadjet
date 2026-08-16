@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 func TestCosineSimilarity(t *testing.T) {

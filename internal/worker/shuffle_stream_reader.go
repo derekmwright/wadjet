@@ -10,8 +10,8 @@ import (
 	"github.com/klauspost/compress/s2"
 	"github.com/klauspost/compress/zstd"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Sanity bounds for stream-decoded WSHF fields. The mmap reader is

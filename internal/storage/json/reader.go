@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // defaultSampleSize is the number of rows sampled for schema inference.

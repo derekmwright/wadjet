@@ -3,7 +3,7 @@ package main
 import (
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // ClientTrafficSchema defines the schema for the client_traffic table.

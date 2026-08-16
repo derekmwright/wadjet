@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/engine/diskio"
+	"github.com/derekmwright/wadjet/internal/engine/diskio"
 )
 
 // LocalPathStore is an optional interface for stores that hold whole

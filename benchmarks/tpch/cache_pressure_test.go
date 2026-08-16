@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/worker"
+	"github.com/derekmwright/wadjet/internal/worker"
 )
 
 // TestCachePressureQ07 measures Q07 performance with different amounts of

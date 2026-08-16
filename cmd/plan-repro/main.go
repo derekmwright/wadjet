@@ -16,12 +16,12 @@ import (
 	"os"
 	"strings"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 func main() {

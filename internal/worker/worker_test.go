@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 func setupWorkerNATS(t *testing.T) (context.Context, *distributed.EmbeddedNATS, *objstore.MemStore) {

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 )
 
 // Predicate evaluates a row and returns true if it passes the filter.

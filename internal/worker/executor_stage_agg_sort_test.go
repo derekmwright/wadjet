@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // makeGroupedWshf writes rows with (group int64, value int64) schema.

@@ -3,7 +3,7 @@ package logical
 import (
 	"testing"
 
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 func buildPlan(t *testing.T, sql string) *Node {

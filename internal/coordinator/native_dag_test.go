@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TestNativeDAG_SimpleAggregate runs a small query end-to-end through the

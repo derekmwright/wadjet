@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/citc-tech/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

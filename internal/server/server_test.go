@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/auth"
-	"github.com/citc-tech/wadjet/internal/config"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/config"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // newTestServer creates a minimal server with an in-memory catalog for testing

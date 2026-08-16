@@ -6,7 +6,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/citc-tech/wadjet/internal/engine/diskio"
+	"github.com/derekmwright/wadjet/internal/engine/diskio"
 )
 
 // Single-pass drop-behind for the WSHF mmap walk

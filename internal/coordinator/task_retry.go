@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // maxTaskAttempts caps total executions of one task (first attempt +

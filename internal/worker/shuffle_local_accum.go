@@ -3,7 +3,7 @@ package worker
 import (
 	"os"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // sinkLocalAccumEnabled gates consumer-local partition pre-accumulation in

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // sleepSource yields n empty-schema batches, sleeping per Next so the

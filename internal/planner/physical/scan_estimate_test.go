@@ -3,8 +3,8 @@ package physical
 import (
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // setupTPCHCatalog registers every file as 10 MiB (plan_tpch_test.go), so

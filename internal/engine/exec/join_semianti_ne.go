@@ -1,7 +1,7 @@
 package exec
 
 import (
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // Distinct-pair build for `probe.col <> build.col` semi/anti joins

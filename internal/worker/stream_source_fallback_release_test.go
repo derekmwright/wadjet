@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TestFallbackPath_ReleasesMmapAndTempPerFile: the Array/Map eager-decode

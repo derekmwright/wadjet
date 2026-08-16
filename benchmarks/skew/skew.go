@@ -31,7 +31,7 @@ import (
 	"math/rand"
 	"strconv"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Tables maps table name → schema, for catalog registration and S3 discovery.

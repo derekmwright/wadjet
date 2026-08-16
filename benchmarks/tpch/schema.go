@@ -1,6 +1,6 @@
 package tpch
 
-import "github.com/citc-tech/wadjet/internal/storage/parquet"
+import "github.com/derekmwright/wadjet/internal/storage/parquet"
 
 // TPC-H table schemas adapted for Wadjet's type system.
 // Monetary values use FLOAT64 (DECIMAL would be ideal but Wadjet uses float).

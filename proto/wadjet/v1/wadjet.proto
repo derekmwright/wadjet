@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package wadjet.v1;
 
-option go_package = "github.com/citc-tech/wadjet/gen/wadjet/v1;wadjetv1";
+option go_package = "github.com/derekmwright/wadjet/gen/wadjet/v1;wadjetv1";
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/struct.proto";

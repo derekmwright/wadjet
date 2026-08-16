@@ -18,7 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/engine/diskio"
+	"github.com/derekmwright/wadjet/internal/engine/diskio"
 )
 
 // Binary spill format type tags

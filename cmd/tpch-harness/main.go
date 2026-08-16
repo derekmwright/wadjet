@@ -10,7 +10,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/citc-tech/wadjet/internal/harness"
+	"github.com/derekmwright/wadjet/internal/harness"
 )
 
 func main() {

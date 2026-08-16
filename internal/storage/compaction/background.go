@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 const DefaultCompactionInterval = 5 * time.Minute

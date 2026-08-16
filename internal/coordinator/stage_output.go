@@ -3,8 +3,8 @@ package coordinator
 import (
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // OutputKind describes how a stage's output is distributed across S3 keys.

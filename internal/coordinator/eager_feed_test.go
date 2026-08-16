@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 func newEagerTestCoordinator(eager bool) *Coordinator {

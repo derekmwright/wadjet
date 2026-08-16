@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // TestLoadSampleDataPopulatesCatalog verifies that loadSampleData writes

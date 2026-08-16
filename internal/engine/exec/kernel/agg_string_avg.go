@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 var debugStrKernel = os.Getenv("WADJET_DEBUG_STRKERNEL") == "1"

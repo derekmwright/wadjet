@@ -340,7 +340,7 @@ locals {
     # Clone and build
     dnf install -y git
     cd /root
-    git clone https://github.com/citc-tech/wadjet.git
+    git clone https://github.com/derekmwright/wadjet.git
     cd wadjet
     go build -o /usr/local/bin/wadjet ./cmd/wadjet
     go build -o /usr/local/bin/tpch-bench ./cmd/tpch-bench

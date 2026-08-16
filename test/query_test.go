@@ -7,11 +7,11 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/auth"
-	"github.com/citc-tech/wadjet/internal/storage/ingest"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
-	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 func toFloat64(v any) float64 {

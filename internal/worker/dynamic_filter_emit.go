@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 )
 
 // materializeDynamicFilters translates a probe-side OpSpec.DynamicFilters

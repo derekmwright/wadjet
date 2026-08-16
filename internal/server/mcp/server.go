@@ -30,8 +30,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/auth"
-	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 const (

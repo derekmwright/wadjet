@@ -5,7 +5,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/citc-tech/wadjet/internal/engine/diskio"
+	"github.com/derekmwright/wadjet/internal/engine/diskio"
 )
 
 // Read-staged WSHF shuffle consumption (docs/design/shuffle-pread-reads.md):

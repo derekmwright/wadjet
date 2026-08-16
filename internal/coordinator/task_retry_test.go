@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/worker"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/worker"
 )
 
 func retryTestTasks(n int) []distributed.Task {

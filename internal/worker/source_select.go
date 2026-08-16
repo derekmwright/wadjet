@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 )
 
 // inputFileKind classifies a list of S3 keys for one input alias.

@@ -3,8 +3,8 @@ package scan
 import (
 	"strings"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // ReadFileBatches reads all row groups from a Parquet file into separate RecordBatches

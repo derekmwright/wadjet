@@ -6,10 +6,10 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	"github.com/citc-tech/wadjet/internal/storage/ingest"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // TestTPCHQueriesBushyForced is the Layer B parity gate from

@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/memory"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TestHashJoin_StateRetentionAcrossQueries probes worker-process state

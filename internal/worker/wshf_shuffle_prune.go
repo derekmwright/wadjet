@@ -3,7 +3,7 @@ package worker
 import (
 	"strings"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // wshfShufflePruneKeep resolves the post-decode keep set for a shuffle task

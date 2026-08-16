@@ -6,8 +6,8 @@ import (
 
 	goparquet "github.com/parquet-go/parquet-go"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TestRowColumnarRead verifies that TypeRow columns are read via the direct

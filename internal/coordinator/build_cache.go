@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"golang.org/x/sync/errgroup"

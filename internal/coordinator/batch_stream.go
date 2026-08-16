@@ -3,7 +3,7 @@ package coordinator
 import (
 	"context"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // BatchStream is a lazy, single-consumer iterator over result batches.

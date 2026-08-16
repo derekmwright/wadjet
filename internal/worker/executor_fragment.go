@@ -16,11 +16,11 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
-	"github.com/citc-tech/wadjet/internal/engine/memory"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // fragmentBackpressurePauseMS is how long the consume loop sleeps when

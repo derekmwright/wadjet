@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
 )
 
 // TestQ07PlanDump prints the full physical plan for Q07. Run with

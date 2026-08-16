@@ -13,11 +13,11 @@ import (
 	"github.com/nats-io/nats.go"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/expr"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // gatherReceiveTimeout bounds the coordinator's wait for worker terminal

@@ -12,17 +12,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/alerts"
-	"github.com/citc-tech/wadjet/internal/auth"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
-	"github.com/citc-tech/wadjet/internal/engine/expr"
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/ingest"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/alerts"
+	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // DB is the main entry point for embedded usage of Wadjet.

@@ -3,7 +3,7 @@ package coordinator
 import (
 	"sync/atomic"
 
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // Adaptive skew-aware task layout for shuffled hash joins

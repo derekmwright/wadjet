@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // peerRegistryTTL bounds how long file locations and fetch tokens survive

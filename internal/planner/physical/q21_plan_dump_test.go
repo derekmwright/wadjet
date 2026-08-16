@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
 )
 
 // TestQ21PlanDump emits the Q21 stage DAG plus all Emit/Consume

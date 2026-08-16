@@ -6,10 +6,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	wadjetv1 "github.com/citc-tech/wadjet/gen/wadjet/v1"
-	"github.com/citc-tech/wadjet/internal/coordinator"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	wadjetv1 "github.com/derekmwright/wadjet/gen/wadjet/v1"
+	"github.com/derekmwright/wadjet/internal/coordinator"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // fakeQueryStream records every response Send'd by the streaming path.

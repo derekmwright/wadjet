@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 // TestListAlertsTool seeds two alerts and verifies list_alerts returns them both.

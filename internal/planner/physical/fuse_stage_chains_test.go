@@ -3,7 +3,7 @@ package physical
 import (
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
 // Q05-shape: hash_join (orders ⨝ customer-side chain) whose only consumer

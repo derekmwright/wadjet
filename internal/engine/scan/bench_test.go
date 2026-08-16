@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // generateParquetData writes n rows to a parquet buffer and returns the bytes.

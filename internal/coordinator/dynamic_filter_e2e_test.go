@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
 )
 
 // TestDynamicFilterE2EQ17Correctness runs Q17 twice on the same SF0.1

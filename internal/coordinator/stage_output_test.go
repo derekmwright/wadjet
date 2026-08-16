@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 func TestCollectInputs(t *testing.T) {

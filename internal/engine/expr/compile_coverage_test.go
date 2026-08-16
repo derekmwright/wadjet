@@ -3,7 +3,7 @@ package expr
 import (
 	"testing"
 
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 func TestCompileNilNode(t *testing.T) {

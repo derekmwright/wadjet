@@ -4,9 +4,9 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // makeAggPartial builds one partial batch: one (g, v) row per group, where

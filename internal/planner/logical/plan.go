@@ -4,7 +4,7 @@ package logical
 import (
 	"fmt"
 
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // ScanColumnStats holds aggregated column statistics from the catalog.

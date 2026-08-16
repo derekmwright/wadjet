@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
-	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
 // SortMergeJoinsPlanned counts joins routed through the sort-merge path,

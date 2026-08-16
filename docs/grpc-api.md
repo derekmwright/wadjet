@@ -180,7 +180,7 @@ Service names:
 Generated Go code is already included at `gen/wadjet/v1/`. Import it directly:
 
 ```go
-import wadjetv1 "github.com/citc-tech/wadjet/gen/wadjet/v1"
+import wadjetv1 "github.com/derekmwright/wadjet/gen/wadjet/v1"
 
 conn, _ := grpc.NewClient("localhost:9090", grpc.WithTransportCredentials(insecure.NewCredentials()))
 client := wadjetv1.NewWadjetServiceClient(conn)

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // openDecodeAhead builds a streaming reader over wire and engages

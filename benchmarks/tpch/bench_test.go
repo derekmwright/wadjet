@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/wadjet"
-	"github.com/citc-tech/wadjet/internal/storage/ingest"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // setupTPCH creates a Wadjet DB loaded with TPC-H data at the given scale factor.

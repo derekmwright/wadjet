@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // partitionKeys are the standard Hive-style partition key columns.

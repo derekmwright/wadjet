@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TestCreatePipelineTasksBuildCache verifies that BuildCachePreScans on a

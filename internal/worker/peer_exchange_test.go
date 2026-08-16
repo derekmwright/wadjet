@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/dataplane"
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/dataplane"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // startProducerPeer builds a producer-side executor holding one adopted

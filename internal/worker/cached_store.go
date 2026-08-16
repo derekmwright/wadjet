@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/citc-tech/wadjet/internal/engine/memory"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // CachedStore wraps an objstore.Store with the worker's LRU cache so that

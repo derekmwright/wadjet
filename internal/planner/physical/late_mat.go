@@ -3,7 +3,7 @@ package physical
 import (
 	"sync/atomic"
 
-	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 )
 
 // LateMatJoinsPlanned counts local-pipeline hash-join probes planned with

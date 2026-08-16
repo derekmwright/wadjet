@@ -3,7 +3,7 @@ package batch
 import (
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 func ownerTestSchema() []parquet.Column {

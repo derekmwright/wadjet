@@ -8,9 +8,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/citc-tech/wadjet/internal/engine/diskio"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/engine/diskio"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // Prefetch tuning. Vars (not consts) so tests can shrink them to exercise

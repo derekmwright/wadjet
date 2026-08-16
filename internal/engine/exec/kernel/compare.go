@@ -5,7 +5,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // CompareOp represents a comparison operation.

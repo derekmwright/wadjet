@@ -5,9 +5,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/memory"
-	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
+	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // DecodedChunkCache is a worker-lifetime cache of decoded parquet column

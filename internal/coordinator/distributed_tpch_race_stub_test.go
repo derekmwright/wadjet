@@ -19,7 +19,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
 )
 
 func setupTPCHDistributedAtScale(t *testing.T, _ tpch.ScaleFactor) (context.Context, *Coordinator) {

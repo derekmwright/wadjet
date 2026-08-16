@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/coordinator"
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/server"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
-	"github.com/citc-tech/wadjet/internal/worker"
+	"github.com/derekmwright/wadjet/internal/coordinator"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/server"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/worker"
 )
 
 // setupTestServer creates an embedded NATS, coordinator, worker, and HTTP server for testing.

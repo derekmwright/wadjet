@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/exec"
-	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // fourRowGroupFile builds an in-memory parquet file with 4 row groups of 100

@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/auth"
 )
 
 // TestResolveMCPAuth is the fail-closed guard for the MCP entrypoint: when an

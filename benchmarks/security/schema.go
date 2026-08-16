@@ -1,6 +1,6 @@
 package security
 
-import "github.com/citc-tech/wadjet/internal/storage/parquet"
+import "github.com/derekmwright/wadjet/internal/storage/parquet"
 
 // Security event schemas using Wadjet's network-native types.
 // Five tables model a realistic SIEM data pipeline: network flows,

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
-	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
 // TestTPCHNativeDAG_BushyForced is the distributed Layer B parity gate from

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TableMetadata represents an Iceberg table metadata file (v1 or v2).

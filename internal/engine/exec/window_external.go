@@ -1,9 +1,9 @@
 package exec
 
 import (
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // ---- External window: partition-at-a-time over externally sorted runs ----

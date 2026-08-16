@@ -333,9 +333,9 @@ import (
     "context"
     "log"
 
-    "github.com/citc-tech/wadjet/internal/storage/objstore"
-    "github.com/citc-tech/wadjet/internal/storage/parquet"
-    "github.com/citc-tech/wadjet/wadjet"
+    "github.com/derekmwright/wadjet/internal/storage/objstore"
+    "github.com/derekmwright/wadjet/internal/storage/parquet"
+    "github.com/derekmwright/wadjet/wadjet"
 )
 
 func main() {
@@ -553,8 +553,8 @@ import (
     "log"
     "time"
 
-    "github.com/citc-tech/wadjet/internal/storage/objstore"
-    "github.com/citc-tech/wadjet/wadjet"
+    "github.com/derekmwright/wadjet/internal/storage/objstore"
+    "github.com/derekmwright/wadjet/wadjet"
 )
 
 type Alert struct {

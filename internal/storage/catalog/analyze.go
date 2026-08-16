@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // AnalyzeTable computes HyperLogLog sketches over every column of every

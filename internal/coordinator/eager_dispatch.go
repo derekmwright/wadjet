@@ -3,7 +3,7 @@ package coordinator
 import (
 	"sync/atomic"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // Eager consumer dispatch, Phase C1 (docs/design/eager-consumer-dispatch.md).

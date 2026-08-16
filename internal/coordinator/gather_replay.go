@@ -9,7 +9,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // maxGatherFrameBytes sanity-bounds a replayed frame's declared length.

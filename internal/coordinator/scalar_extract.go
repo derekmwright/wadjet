@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/expr"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // readScalarFromStageOutput extracts a single scalar value from a producer

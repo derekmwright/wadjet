@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 const q21SQL = `SELECT s_name, COUNT(*) as numwait

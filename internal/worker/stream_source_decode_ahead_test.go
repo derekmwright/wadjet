@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/engine/memory"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // writeMultiGroupFixture writes n parquet files with groupsPerFile row

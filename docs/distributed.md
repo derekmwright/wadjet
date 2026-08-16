@@ -190,7 +190,7 @@ spec:
     spec:
       containers:
         - name: coordinator
-          image: ghcr.io/citc-tech/wadjet:latest
+          image: ghcr.io/derekmwright/wadjet:latest
           args:
             - serve
             - --mode=coordinator
@@ -243,7 +243,7 @@ spec:
     spec:
       containers:
         - name: worker
-          image: ghcr.io/citc-tech/wadjet:latest
+          image: ghcr.io/derekmwright/wadjet:latest
           args:
             - serve
             - --mode=worker

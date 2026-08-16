@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/dataplane"
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/dataplane"
+	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/nats-io/nats.go"
 )
 

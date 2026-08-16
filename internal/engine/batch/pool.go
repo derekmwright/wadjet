@@ -4,7 +4,7 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // NOTE: When Go arenas reach GA (currently experimental behind GOEXPERIMENT=arenas),

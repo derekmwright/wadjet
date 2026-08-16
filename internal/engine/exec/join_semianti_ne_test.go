@@ -7,8 +7,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // runSemiAntiNE builds a join over (k, v) rows and probes (k, v) rows,

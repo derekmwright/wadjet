@@ -861,7 +861,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 func TestCollectorAggregatesPeak(t *testing.T) {
@@ -941,7 +941,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // MeasurementCollector subscribes to worker heartbeats and aggregates
@@ -1123,7 +1123,7 @@ package harness
 import (
 	"fmt"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
 )
 
 // SliceConfig describes a local-mode data slice. The harness uses these
@@ -1466,7 +1466,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // ClusterConfig describes a local-mode cluster to spawn.
@@ -2263,7 +2263,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/citc-tech/wadjet/internal/harness"
+	"github.com/derekmwright/wadjet/internal/harness"
 )
 
 func main() {
@@ -2521,7 +2521,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // TestRunsCleanThroughFakeCluster exercises Run end-to-end against a

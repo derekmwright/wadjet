@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // Regression test for sweep finding #17: readFinalResults decoded every

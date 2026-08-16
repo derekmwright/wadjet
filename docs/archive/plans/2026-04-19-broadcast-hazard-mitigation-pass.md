@@ -1093,7 +1093,7 @@ package coordinator
 import (
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 func TestGroupShuffleHazards_Q21Shape_AlignedKeys(t *testing.T) {
@@ -1190,8 +1190,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // shuffleGroup bundles RemedyShuffleScan hazards that share a probe alias
@@ -1700,8 +1700,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 ```
 

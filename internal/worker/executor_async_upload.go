@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // asyncUploadEligible reports whether this task's stage outputs may be

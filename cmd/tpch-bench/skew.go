@@ -12,12 +12,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/citc-tech/wadjet/benchmarks/skew"
-	"github.com/citc-tech/wadjet/internal/coordinator"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
-	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/derekmwright/wadjet/benchmarks/skew"
+	"github.com/derekmwright/wadjet/internal/coordinator"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // Skew-suite mode (docs/design/skew-aware-shuffle.md Phase 3): instead of

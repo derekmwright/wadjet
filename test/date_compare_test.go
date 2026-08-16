@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/ingest"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
-	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // TestDateColumnComparison is a regression test for GitHub issue #3:

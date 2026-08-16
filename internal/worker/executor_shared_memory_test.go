@@ -3,7 +3,7 @@ package worker
 import (
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // TestSetMemoryBudget_SharedPool verifies that SetMemoryBudget creates a

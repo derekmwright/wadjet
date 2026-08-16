@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

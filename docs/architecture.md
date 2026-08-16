@@ -21,7 +21,7 @@ graph TD
 ## Package Layout
 
 ```
-github.com/citc-tech/wadjet/
+github.com/derekmwright/wadjet/
 ├── cmd/wadjet/             # CLI entry point (cobra commands)
 ├── wadjet/             # Public embeddable Go API
 ├── proto/wadjet/v1/        # Protobuf service definition

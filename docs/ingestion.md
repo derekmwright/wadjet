@@ -36,8 +36,8 @@ The ingester flushes automatically when any threshold is exceeded:
 
 ```go
 import (
-    "github.com/citc-tech/wadjet/internal/storage/ingest"
-    "github.com/citc-tech/wadjet/internal/storage/parquet"
+    "github.com/derekmwright/wadjet/internal/storage/ingest"
+    "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 schema := parquet.Schema{
@@ -325,9 +325,9 @@ After Bento starts writing Parquet files to S3, register the table schema in Wad
 
 ```go
 import (
-    "github.com/citc-tech/wadjet/internal/storage/objstore"
-    "github.com/citc-tech/wadjet/internal/storage/parquet"
-    "github.com/citc-tech/wadjet/wadjet"
+    "github.com/derekmwright/wadjet/internal/storage/objstore"
+    "github.com/derekmwright/wadjet/internal/storage/parquet"
+    "github.com/derekmwright/wadjet/wadjet"
 )
 
 store, _ := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{

@@ -1,6 +1,6 @@
 package kernel
 
-import "github.com/citc-tech/wadjet/internal/engine/batch"
+import "github.com/derekmwright/wadjet/internal/engine/batch"
 
 // ResolveSortCompare returns a comparison function for the given column type.
 // The returned function has no type switch — the type is baked into the closure.

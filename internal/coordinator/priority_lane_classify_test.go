@@ -3,7 +3,7 @@ package coordinator
 import (
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // The priority lane's memory contract only covers planner-bounded tiny

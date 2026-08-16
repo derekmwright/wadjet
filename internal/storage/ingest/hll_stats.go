@@ -1,8 +1,8 @@
 package ingest
 
 import (
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // columnStats holds both the HLL sketch and the reservoir sample for

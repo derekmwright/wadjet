@@ -21,7 +21,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
 )
 
 func main() {

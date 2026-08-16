@@ -22,7 +22,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
-	dpv1 "github.com/citc-tech/wadjet/gen/dataplane/v1"
+	dpv1 "github.com/derekmwright/wadjet/gen/dataplane/v1"
 )
 
 // peerChunkBytes is the per-frame payload size for FetchShuffle streams.

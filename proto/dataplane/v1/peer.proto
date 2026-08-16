@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package wadjet.dataplane.v1;
 
-option go_package = "github.com/citc-tech/wadjet/gen/dataplane/v1;dataplanev1";
+option go_package = "github.com/derekmwright/wadjet/gen/dataplane/v1;dataplanev1";
 
 // PeerExchange is the worker→worker shuffle-fetch service (streaming
 // exchange, Phase A). Every worker hosts it when --streaming-exchange is

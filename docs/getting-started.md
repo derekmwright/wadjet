@@ -13,7 +13,7 @@ This guide walks you through installing Wadjet, creating a table, ingesting data
 ### From Source
 
 ```bash
-git clone https://github.com/citc-tech/wadjet.git
+git clone https://github.com/derekmwright/wadjet.git
 cd wadjet
 # NOTE: -o must not be plain "wadjet" — that's the API package
 # directory, and Go would drop the binary inside it.
@@ -23,7 +23,7 @@ go build -o wadjet-bin ./cmd/wadjet
 ### As a Go Library
 
 ```bash
-go get github.com/citc-tech/wadjet/wadjet
+go get github.com/derekmwright/wadjet/wadjet
 ```
 
 ## Start MinIO (Local Development)
@@ -108,10 +108,10 @@ import (
     "log"
     "time"
 
-    "github.com/citc-tech/wadjet/internal/storage/ingest"
-    "github.com/citc-tech/wadjet/internal/storage/objstore"
-    "github.com/citc-tech/wadjet/internal/storage/parquet"
-    "github.com/citc-tech/wadjet/wadjet"
+    "github.com/derekmwright/wadjet/internal/storage/ingest"
+    "github.com/derekmwright/wadjet/internal/storage/objstore"
+    "github.com/derekmwright/wadjet/internal/storage/parquet"
+    "github.com/derekmwright/wadjet/wadjet"
 )
 
 func main() {

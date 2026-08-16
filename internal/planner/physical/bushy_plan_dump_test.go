@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
-	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
 func TestBushyPlanDump(t *testing.T) {

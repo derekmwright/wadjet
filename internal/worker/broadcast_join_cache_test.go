@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 )
 
 func TestBroadcastJoinCache_SingleAcquireRelease(t *testing.T) {

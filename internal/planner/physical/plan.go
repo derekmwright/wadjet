@@ -16,17 +16,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/config"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
-	"github.com/citc-tech/wadjet/internal/engine/expr"
-	"github.com/citc-tech/wadjet/internal/engine/memory"
-	"github.com/citc-tech/wadjet/internal/engine/scan"
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/config"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/engine/scan"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // PhysicalPlan represents an executable query plan.

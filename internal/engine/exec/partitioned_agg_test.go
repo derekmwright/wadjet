@@ -8,8 +8,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/memory"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Partitioned parallel aggregation must produce results identical to the

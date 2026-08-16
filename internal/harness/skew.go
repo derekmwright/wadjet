@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/citc-tech/wadjet/benchmarks/skew"
+	"github.com/derekmwright/wadjet/benchmarks/skew"
 )
 
 // Skew-suite integration (docs/design/skew-aware-shuffle.md Phase 3): the

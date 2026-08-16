@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 func schemaOf(names ...string) []parquet.Column {

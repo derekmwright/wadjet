@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // TestQ21ReverseBloomSemiAnti reproduces the 2026-07-05 SF10 standalone

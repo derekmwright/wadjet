@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/ingest"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // setupSecurity creates a Wadjet DB loaded with security event data.

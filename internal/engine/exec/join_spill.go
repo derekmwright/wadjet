@@ -12,9 +12,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/diskio"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/diskio"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // spillFileSeq is a global atomic counter for unique spill file names.

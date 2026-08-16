@@ -1,7 +1,7 @@
 package physical
 
 import (
-	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"strings"
 	"testing"
 )

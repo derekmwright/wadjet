@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TestNativeReadDictFallbackMixedPages drives the native columnar path over

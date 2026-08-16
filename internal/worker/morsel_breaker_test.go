@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // readGroupTotals decodes an unpartitioned agg output (g, total) into a map.

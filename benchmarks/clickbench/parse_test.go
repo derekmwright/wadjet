@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // TestClickBenchQueriesParse is the arc's coverage floor: every one of the

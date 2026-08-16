@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 // tableColumnSource resolves a table name to its catalog metadata. It is the

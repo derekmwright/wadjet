@@ -5,7 +5,7 @@ Wadjet can be embedded directly in Go applications via the `wadjet` package, giv
 ## Installation
 
 ```bash
-go get github.com/citc-tech/wadjet/wadjet
+go get github.com/derekmwright/wadjet/wadjet
 ```
 
 ## Core API
@@ -14,8 +14,8 @@ go get github.com/citc-tech/wadjet/wadjet
 
 ```go
 import (
-    "github.com/citc-tech/wadjet/internal/storage/objstore"
-    "github.com/citc-tech/wadjet/wadjet"
+    "github.com/derekmwright/wadjet/internal/storage/objstore"
+    "github.com/derekmwright/wadjet/wadjet"
 )
 
 // First create an object store client
@@ -61,7 +61,7 @@ store := db.Store()
 ### Ingestion
 
 ```go
-import "github.com/citc-tech/wadjet/internal/storage/ingest"
+import "github.com/derekmwright/wadjet/internal/storage/ingest"
 
 // NewIngester returns *ingest.Ingester (no error return)
 ingester := db.NewIngester("flow_logs", schema, []string{"date"}, ingest.Config{
@@ -134,9 +134,9 @@ import (
     "net/http"
     "time"
 
-    "github.com/citc-tech/wadjet/internal/storage/objstore"
-    "github.com/citc-tech/wadjet/internal/storage/parquet"
-    "github.com/citc-tech/wadjet/wadjet"
+    "github.com/derekmwright/wadjet/internal/storage/objstore"
+    "github.com/derekmwright/wadjet/internal/storage/parquet"
+    "github.com/derekmwright/wadjet/wadjet"
 )
 
 var db *wadjet.DB

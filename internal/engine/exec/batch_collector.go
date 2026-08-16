@@ -5,9 +5,9 @@ import (
 	"os"
 	"sync"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/memory"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // SpillableBatchCollector is a Sink that buffers a child pipeline's entire

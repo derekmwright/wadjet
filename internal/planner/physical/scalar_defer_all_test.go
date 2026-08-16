@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // TestScalarDeferAll_Q11_Q22 verifies that non-CTE uncorrelated scalar

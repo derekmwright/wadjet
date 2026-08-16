@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
-	"github.com/citc-tech/wadjet/internal/engine/expr"
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
-	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // computedColAppender evaluates one Task.ComputedCols expression per batch

@@ -12,8 +12,8 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // ColumnarReader reads JSON directly into columnar vectors using a custom

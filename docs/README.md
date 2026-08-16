@@ -33,6 +33,6 @@ graph LR
 
 ## Quick Links
 
-- **Repository**: [github.com/citc-tech/wadjet](https://github.com/citc-tech/wadjet)
-- **Go Package**: `github.com/citc-tech/wadjet/wadjet`
+- **Repository**: [github.com/derekmwright/wadjet](https://github.com/derekmwright/wadjet)
+- **Go Package**: `github.com/derekmwright/wadjet/wadjet`
 - **License**: See repository root

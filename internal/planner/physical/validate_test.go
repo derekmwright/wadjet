@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // fakeCatalog is a minimal tableColumnSource for binder tests.

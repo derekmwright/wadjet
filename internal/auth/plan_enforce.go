@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // EnforcePlanPolicies applies ABAC to a query at plan level: table-access

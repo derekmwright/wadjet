@@ -3,7 +3,7 @@ package exec
 import (
 	"context"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // Guarded re-emit support (docs/design/attach-on-arrival-dynamic-filters.md

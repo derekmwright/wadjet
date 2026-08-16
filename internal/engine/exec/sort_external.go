@@ -5,9 +5,9 @@ import (
 	"os"
 	"sort"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // ---- External sort: sorted-run generation + streaming k-way merge ----

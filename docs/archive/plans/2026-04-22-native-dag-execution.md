@@ -201,8 +201,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // TestGatherReplySink publishes a single RecordBatch to a test NATS subject
@@ -305,8 +305,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/nats-io/nats.go"
 )
 
@@ -542,7 +542,7 @@ package coordinator
 import (
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // OutputKind describes how a stage's output is distributed across S3 keys.
@@ -625,7 +625,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 func TestCollectInputs(t *testing.T) {
@@ -715,8 +715,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 )
@@ -1004,7 +1004,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // dispatchReplicateStage executes a StageExchangeReplicate by pre-scanning
@@ -1126,8 +1126,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 )
@@ -1300,8 +1300,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/nats-io/nats.go"
 )
 
@@ -1394,9 +1394,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/google/uuid"
 )
 
@@ -1542,7 +1542,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // executeStageDAG walks the Exchange-annotated stage DAG from EnsureDistribution

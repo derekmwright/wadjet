@@ -8,8 +8,8 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // ReadFileBatchesNative reads all row groups from a Parquet file using our

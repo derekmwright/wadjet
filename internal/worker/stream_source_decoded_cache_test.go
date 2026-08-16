@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/scan"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/engine/scan"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // TestDecodedCache_StreamSourceEngagement drives the full worker scan path

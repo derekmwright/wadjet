@@ -9,8 +9,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 )
 
 // broadcastJoinCache is a worker-local, query-scoped cache that lets multiple

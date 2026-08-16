@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
 )
 
 // Spot-check whether the SF10 A/B "wins" actually had dynamic-filter

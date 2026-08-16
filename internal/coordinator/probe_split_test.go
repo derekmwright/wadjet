@@ -5,7 +5,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // TestBroadcastJoinProbeSplit_Trigger verifies the dispatcher's decision to

@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	dpv1 "github.com/citc-tech/wadjet/gen/dataplane/v1"
+	dpv1 "github.com/derekmwright/wadjet/gen/dataplane/v1"
 )
 
 // ErrNoWorkers is returned by SendTaskDispatch when no worker is

@@ -9,10 +9,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	_ "github.com/lib/pq"
 
-	"github.com/citc-tech/wadjet/wadjet"
-	"github.com/citc-tech/wadjet/internal/storage/ingest"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // setupRealDB creates a test DB with a multi-type schema to exercise type mapping.

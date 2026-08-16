@@ -1361,7 +1361,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 func TestEnsureHistoryTableIdempotent(t *testing.T) {
@@ -1415,8 +1415,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // HistoryTableName is the name of the system table holding alert fires.
@@ -1687,7 +1687,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 type stubSink struct {
@@ -1803,7 +1803,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 // SinkFactory returns the set of sinks for an alert. Injected so the scheduler
@@ -2106,9 +2106,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/alerts"
-	"github.com/citc-tech/wadjet/internal/planner/sql"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/alerts"
+	"github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 // handleCreateAlertSQL parses a CREATE ALERT statement and persists the
@@ -2233,7 +2233,7 @@ In `internal/coordinator/coordinator.go`, add fields to the `Coordinator` struct
 	alertsEnabled        bool
 ```
 
-Import `"github.com/citc-tech/wadjet/internal/alerts"`.
+Import `"github.com/derekmwright/wadjet/internal/alerts"`.
 
 Add methods (in `alerts.go` of the coordinator package to keep it tidy):
 
@@ -2621,7 +2621,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 type alertSummary struct {
@@ -3022,7 +3022,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // TestCreateAlertEndToEnd boots an embedded Wadjet with alerts enabled,

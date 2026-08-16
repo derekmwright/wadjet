@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // #277 regression: a rows-but-no-columns batch reaching a grouped or

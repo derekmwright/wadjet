@@ -672,7 +672,7 @@ const file_dataplane_v1_dataplane_proto_rawDesc = "" +
 	"\x0fbytes_processed\x18\x06 \x01(\x03R\x0ebytesProcessed\x12.\n" +
 	"\x13timestamp_unix_nano\x18\a \x01(\x03R\x11timestampUnixNano2c\n" +
 	"\tDataPlane\x12V\n" +
-	"\aConnect\x12#.wadjet.dataplane.v1.WorkerEnvelope\x1a\".wadjet.dataplane.v1.CoordEnvelope(\x010\x01B:Z8github.com/citc-tech/wadjet/gen/dataplane/v1;dataplanev1b\x06proto3"
+	"\aConnect\x12#.wadjet.dataplane.v1.WorkerEnvelope\x1a\".wadjet.dataplane.v1.CoordEnvelope(\x010\x01B=Z;github.com/derekmwright/wadjet/gen/dataplane/v1;dataplanev1b\x06proto3"
 
 var (
 	file_dataplane_v1_dataplane_proto_rawDescOnce sync.Once

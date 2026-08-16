@@ -1,6 +1,6 @@
 package batch
 
-import "github.com/citc-tech/wadjet/internal/storage/parquet"
+import "github.com/derekmwright/wadjet/internal/storage/parquet"
 
 // DefaultBatchSize is the number of rows per batch (2048 for cache-friendly vectorized processing).
 const DefaultBatchSize = 2048

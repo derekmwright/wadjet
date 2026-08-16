@@ -6,7 +6,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // AddValueToHLL hashes a value according to its declared parquet type

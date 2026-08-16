@@ -13,7 +13,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	dpv1 "github.com/citc-tech/wadjet/gen/dataplane/v1"
+	dpv1 "github.com/derekmwright/wadjet/gen/dataplane/v1"
 )
 
 // wedgedStream mimics the 2026-08-11 Q21-R2 failure: the server delivers

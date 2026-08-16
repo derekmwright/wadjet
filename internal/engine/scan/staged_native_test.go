@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // stagedNativeFile builds an uncompressed multi-row-group parquet file

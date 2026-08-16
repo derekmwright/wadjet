@@ -9,7 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/citc-tech/wadjet/internal/metrics"
+	"github.com/derekmwright/wadjet/internal/metrics"
 )
 
 func gaugeValue(tb testing.TB, g prometheus.Gauge) float64 {

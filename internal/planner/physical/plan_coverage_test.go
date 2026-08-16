@@ -3,10 +3,10 @@ package physical
 import (
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/config"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
-	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/config"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
 // --- PrettyPrint ---

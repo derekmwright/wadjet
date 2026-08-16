@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package wadjet.dataplane.v1;
 
-option go_package = "github.com/citc-tech/wadjet/gen/dataplane/v1;dataplanev1";
+option go_package = "github.com/derekmwright/wadjet/gen/dataplane/v1;dataplanev1";
 
 // DataPlane is the worker↔coord transport for high-rate operational
 // traffic that NATS JetStream is a poor fit for at scale: task dispatch,

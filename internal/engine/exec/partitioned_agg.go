@@ -7,7 +7,7 @@ import (
 	"os"
 	"sync/atomic"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 // Partitioned parallel aggregation (docs in pipeline.runParallel):

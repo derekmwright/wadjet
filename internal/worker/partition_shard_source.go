@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // newPartitionShardSource lists all .wshf files at the given S3 prefix and

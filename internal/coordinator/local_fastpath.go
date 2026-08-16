@@ -5,9 +5,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/engine/exec"
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // DefaultLocalFastPathBytes is the default routing threshold: a query whose

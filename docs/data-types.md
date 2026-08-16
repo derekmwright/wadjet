@@ -157,7 +157,7 @@ Null handling in expressions:
 ### In Go (Embedded API)
 
 ```go
-import "github.com/citc-tech/wadjet/internal/storage/parquet"
+import "github.com/derekmwright/wadjet/internal/storage/parquet"
 
 schema := parquet.Schema{
     Columns: []parquet.Column{

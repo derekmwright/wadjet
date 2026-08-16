@@ -7,7 +7,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // Regression test for issue #143: result-subject subscriptions were

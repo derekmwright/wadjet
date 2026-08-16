@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 )
 
 // globalProvider is the configured embedding provider. Set via SetProvider.

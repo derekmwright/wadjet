@@ -210,9 +210,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/citc-tech/wadjet"
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // primeS3Catalog lists parquet files under bucket/dataPrefix/<table>/ for each

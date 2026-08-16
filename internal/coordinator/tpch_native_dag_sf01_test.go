@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
 )
 
 var updateSF01Golden = flag.Bool("update-sf01-golden", false, "update TPCH SF0.1 native-DAG golden snapshots")

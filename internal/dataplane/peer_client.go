@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
-	dpv1 "github.com/citc-tech/wadjet/gen/dataplane/v1"
+	dpv1 "github.com/derekmwright/wadjet/gen/dataplane/v1"
 )
 
 // PeerClient dials worker PeerExchange endpoints and streams shuffle files.

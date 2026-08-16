@@ -1,4 +1,4 @@
-module github.com/citc-tech/wadjet
+module github.com/derekmwright/wadjet
 
 go 1.26.1
 

@@ -288,7 +288,7 @@ Replace with:
 	if h.Spill != nil && h.Spill.ShouldSpillFor(memory.SpillCheap) {
 ```
 
-(The `memory` package is likely already imported; confirm with `grep -n '"github.com/citc-tech/wadjet/internal/engine/memory"' internal/engine/exec/aggregate.go`.)
+(The `memory` package is likely already imported; confirm with `grep -n '"github.com/derekmwright/wadjet/internal/engine/memory"' internal/engine/exec/aggregate.go`.)
 
 - [ ] **Step 2: Update join.go (two sites)**
 
@@ -381,7 +381,7 @@ type scanSourceInner struct {
 }
 ```
 
-(Add the `"sync/atomic"` import if not present, and `"github.com/citc-tech/wadjet/internal/engine/memory"` if not present.)
+(Add the `"sync/atomic"` import if not present, and `"github.com/derekmwright/wadjet/internal/engine/memory"` if not present.)
 
 - [ ] **Step 3: Update trackPooledBuf to report to tracker**
 

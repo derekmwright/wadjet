@@ -1287,7 +1287,7 @@ const file_wadjet_v1_wadjet_proto_rawDesc = "" +
 	"ListTables\x12\x1c.wadjet.v1.ListTablesRequest\x1a\x1d.wadjet.v1.ListTablesResponse\x12R\n" +
 	"\rDescribeTable\x12\x1f.wadjet.v1.DescribeTableRequest\x1a .wadjet.v1.DescribeTableResponse\x12L\n" +
 	"\vCreateTable\x12\x1d.wadjet.v1.CreateTableRequest\x1a\x1e.wadjet.v1.CreateTableResponse\x12F\n" +
-	"\tDropTable\x12\x1b.wadjet.v1.DropTableRequest\x1a\x1c.wadjet.v1.DropTableResponseB4Z2github.com/citc-tech/wadjet/gen/wadjet/v1;wadjetv1b\x06proto3"
+	"\tDropTable\x12\x1b.wadjet.v1.DropTableRequest\x1a\x1c.wadjet.v1.DropTableResponseB7Z5github.com/derekmwright/wadjet/gen/wadjet/v1;wadjetv1b\x06proto3"
 
 var (
 	file_wadjet_v1_wadjet_proto_rawDescOnce sync.Once

@@ -6,8 +6,8 @@ import (
 	"io"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // TestExecuteShuffle_WSHFInput verifies that a shuffle task can accept .wshf

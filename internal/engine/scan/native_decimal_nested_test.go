@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Regression tests for the native row-group decoder (issue #144 suite

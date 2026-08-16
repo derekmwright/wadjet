@@ -9,7 +9,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // formatIPv4 formats a uint32 IPv4 address as a string without allocating net.IP.

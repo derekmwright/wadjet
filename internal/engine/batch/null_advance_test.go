@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Regression tests for the advance-on-NULL sweep (2026-06-12): a NULL write

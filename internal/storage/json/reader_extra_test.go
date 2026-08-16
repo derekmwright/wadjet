@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 func TestInvalidJSON(t *testing.T) {

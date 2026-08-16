@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // mockRunner returns a SubqueryRunner that returns predefined rows.

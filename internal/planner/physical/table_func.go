@@ -14,13 +14,13 @@ import (
 
 	"database/sql"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/exec"
-	csvreader "github.com/citc-tech/wadjet/internal/storage/csv"
-	"github.com/citc-tech/wadjet/internal/storage/dbscan"
-	jsonreader "github.com/citc-tech/wadjet/internal/storage/json"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	csvreader "github.com/derekmwright/wadjet/internal/storage/csv"
+	"github.com/derekmwright/wadjet/internal/storage/dbscan"
+	jsonreader "github.com/derekmwright/wadjet/internal/storage/json"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 
 	_ "github.com/go-sql-driver/mysql" // MySQL driver
 	_ "github.com/lib/pq"              // PostgreSQL driver

@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
 )
 
 // SliceConfig describes a local-mode data slice. The harness uses these

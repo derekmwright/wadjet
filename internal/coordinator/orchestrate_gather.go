@@ -3,9 +3,9 @@ package coordinator
 import (
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // orchestrateGather dispatches a StageExchangeGather. It wraps the

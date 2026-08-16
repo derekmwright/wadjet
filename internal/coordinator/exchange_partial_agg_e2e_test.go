@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/citc-tech/wadjet/benchmarks/tpch"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // TestQ18ExchangePartialAggEngagesAndMatches proves the exchange partial

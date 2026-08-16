@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	tpch "github.com/citc-tech/wadjet/benchmarks/tpch"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	tpch "github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // TestDistributedTPCHSortMergeJoin is the phase-3 in-process gate for the

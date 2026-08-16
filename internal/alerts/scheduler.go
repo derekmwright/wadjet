@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 // SinkFactory returns the set of sinks for an alert. Injected so the scheduler

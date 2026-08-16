@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // FileSketches bundles every supported column's HLL + reservoir sample

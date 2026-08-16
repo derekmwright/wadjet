@@ -10,8 +10,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/citc-tech/wadjet/internal/dataplane"
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/dataplane"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // Base-table cache peer tier (docs/design/scan-affinity.md §peer tier).

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Dynamic-filter planner pass. Identifies hash_join stages where the build

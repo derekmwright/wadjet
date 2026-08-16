@@ -3,7 +3,7 @@ package kernel
 import (
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
 func makeInt32Vec(vals []int32, nulls []int) *batch.Vector {

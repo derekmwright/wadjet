@@ -18,12 +18,12 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	wadjetv1 "github.com/citc-tech/wadjet/gen/wadjet/v1"
-	"github.com/citc-tech/wadjet/internal/auth"
-	"github.com/citc-tech/wadjet/internal/coordinator"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
-	wadjetdb "github.com/citc-tech/wadjet/wadjet"
+	wadjetv1 "github.com/derekmwright/wadjet/gen/wadjet/v1"
+	"github.com/derekmwright/wadjet/internal/auth"
+	"github.com/derekmwright/wadjet/internal/coordinator"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	wadjetdb "github.com/derekmwright/wadjet/wadjet"
 	"google.golang.org/grpc/metadata"
 )
 

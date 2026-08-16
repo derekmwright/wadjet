@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // CatalogIntegration bridges Iceberg table metadata into Wadjet's native catalog.

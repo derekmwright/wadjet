@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
 // SnapshotOptions configures where catalog snapshots are written.

@@ -9,8 +9,8 @@ import (
 
 	"github.com/klauspost/compress/s2"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // decompressShuffleData detects compressed shuffle data (magic "WSHC") and

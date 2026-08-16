@@ -4,7 +4,7 @@ import (
 	"context"
 	"regexp"
 
-	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
 // planSubqueryRe conservatively detects a residual (non-decorrelated)

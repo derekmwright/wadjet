@@ -653,7 +653,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // TestLowerExchangeDAG_Repartition feeds a plan with one Repartition
@@ -729,9 +729,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 )
 
 // hasExchangeStages reports whether the given plan contains any
@@ -1036,7 +1036,7 @@ Append to `internal/coordinator/dag_lower_test.go`:
 ```go
 import (
 	// ... existing imports ...
-	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
 // TestLowerExchangeDAG_Gather feeds a plan with a final Gather stage
@@ -1421,7 +1421,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/citc-tech/wadjet"
+	"github.com/derekmwright/wadjet"
 )
 
 // TestTPCHParity runs each TPC-H query at SF0.01 with EnsureDistribution

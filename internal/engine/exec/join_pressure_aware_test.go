@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/memory"
-	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TestPartitionOnArrival_SpillEligibleAllocatesSpillState confirms that any

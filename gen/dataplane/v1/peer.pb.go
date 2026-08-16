@@ -142,7 +142,7 @@ const file_dataplane_v1_peer_proto_rawDesc = "" +
 	"\fShuffleChunk\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data2m\n" +
 	"\fPeerExchange\x12]\n" +
-	"\fFetchShuffle\x12(.wadjet.dataplane.v1.FetchShuffleRequest\x1a!.wadjet.dataplane.v1.ShuffleChunk0\x01B:Z8github.com/citc-tech/wadjet/gen/dataplane/v1;dataplanev1b\x06proto3"
+	"\fFetchShuffle\x12(.wadjet.dataplane.v1.FetchShuffleRequest\x1a!.wadjet.dataplane.v1.ShuffleChunk0\x01B=Z;github.com/derekmwright/wadjet/gen/dataplane/v1;dataplanev1b\x06proto3"
 
 var (
 	file_dataplane_v1_peer_proto_rawDescOnce sync.Once

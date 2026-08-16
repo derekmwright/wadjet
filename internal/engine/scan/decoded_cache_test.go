@@ -6,9 +6,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/memory"
-	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
+	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // decodedCacheFixtureSchema is the multi-type schema used by the cache e2e

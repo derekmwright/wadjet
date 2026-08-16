@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/citc-tech/wadjet/internal/coordinator"
-	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/derekmwright/wadjet/internal/coordinator"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // shouldRouteThroughCoord reports whether a SQL statement should go through

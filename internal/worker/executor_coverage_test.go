@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/distributed"
 )
 
 // --- Execute dispatch and error handling ---

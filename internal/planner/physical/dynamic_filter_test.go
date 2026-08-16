@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/logical"
-	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
-	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
 func sqlToStagesWithDynamicFilters(t *testing.T, cat *catalog.Catalog, ctx context.Context, sql string, workerCount int, broadcastThreshold int64) []Stage {

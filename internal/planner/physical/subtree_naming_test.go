@@ -3,7 +3,7 @@ package physical
 import (
 	"testing"
 
-	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
 func scanNode(table, alias string, cols ...string) *logical.Node {
