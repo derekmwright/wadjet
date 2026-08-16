@@ -3,6 +3,7 @@ package kernel
 import (
 	"encoding/binary"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -498,19 +499,12 @@ func compileLikePattern(pattern string) func(string) bool {
 }
 
 // containsStr is a simple string contains check (avoids strings import in kernel).
+// containsStr delegates to strings.Contains: the stdlib uses the SIMD
+// bytealg index (AVX2 on amd64) plus Rabin-Karp fallback. The previous
+// hand-rolled positional scan called memeq at every offset — 27% flat of
+// ClickBench Q23 (LIKE '%Google%' over 100M titles/URLs).
 func containsStr(s, substr string) bool {
-	if len(substr) == 0 {
-		return true
-	}
-	if len(substr) > len(s) {
-		return false
-	}
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(s, substr)
 }
 
 // matchLike implements recursive SQL LIKE pattern matching.
