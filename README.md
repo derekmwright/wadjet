@@ -206,35 +206,35 @@ on the same data (`benchmarks/clickbench/`). 2026-08-16,
 
 | Query | Cold | Hot | Query | Cold | Hot |
 |---|---:|---:|---|---:|---:|
-| Q01 | 0.14s | 0.13s | Q23 | 21.74s | 7.59s |
-| Q02 | 0.14s | 0.12s | Q24 | 55.66s | 55.75s |
-| Q03 | 0.28s | 0.25s | Q25 | 0.79s | 0.77s |
-| Q04 | 0.29s | 0.23s | Q26 | 0.81s | 0.79s |
-| Q05 | 40.75s | 8.72s | Q27 | 0.81s | 0.78s |
-| Q06 | 6.06s | 5.92s | Q28 | 9.63s | 3.74s |
-| Q07 | 0.14s | 0.13s | Q29 | 22.96s | 22.61s |
-| Q08 | 0.17s | 0.14s | Q30 | 0.18s | 0.16s |
-| Q09 | 2.19s | 2.04s | Q31 | 2.27s | 1.70s |
-| Q10 | 2.80s | 2.65s | Q32 | 6.27s | 2.66s |
-| Q11 | 0.73s | 0.69s | Q33 | 116.52s | 20.18s |
-| Q12 | 0.80s | 0.79s | Q34 | 17.02s | 13.76s |
-| Q13 | 2.26s | 1.88s | Q35 | 22.50s | 22.02s |
-| Q14 | 3.45s | 2.93s | Q36 | 5.71s | 5.40s |
-| Q15 | 2.51s | 2.29s | Q37 | 9.63s | 3.14s |
-| Q16 | 1.66s | 1.47s | Q38 | 8.57s | 2.79s |
-| Q17 | 8.65s | 7.95s | Q39 | 9.56s | 3.08s |
-| Q18 | 5.77s | 5.24s | Q40 | 18.62s | 5.43s |
-| Q19 | 59.35s | 58.57s | Q41 | 2.33s | 0.91s |
-| Q20 | 0.31s | 0.24s | Q42 | 1.58s | 0.94s |
-| Q21 | 10.30s | 5.08s | Q43 | 0.98s | 0.67s |
-| Q22 | 11.69s | 5.44s |  |  |  |
+| Q01 | 0.15s | 0.13s | Q23 | 21.70s | 7.27s |
+| Q02 | 0.14s | 0.13s | Q24 | 12.62s | 5.83s |
+| Q03 | 0.28s | 0.26s | Q25 | 0.81s | 0.77s |
+| Q04 | 0.31s | 0.24s | Q26 | 0.81s | 0.79s |
+| Q05 | 33.05s | 1.60s | Q27 | 0.83s | 0.78s |
+| Q06 | 6.02s | 5.86s | Q28 | 9.51s | 3.79s |
+| Q07 | 0.15s | 0.13s | Q29 | 15.04s | 14.97s |
+| Q08 | 0.18s | 0.15s | Q30 | 0.18s | 0.16s |
+| Q09 | 2.09s | 2.02s | Q31 | 2.27s | 1.65s |
+| Q10 | 2.76s | 2.63s | Q32 | 6.20s | 2.48s |
+| Q11 | 0.73s | 0.70s | Q33 | 109.11s | 19.30s |
+| Q12 | 0.84s | 0.82s | Q34 | 16.76s | 13.52s |
+| Q13 | 2.16s | 1.84s | Q35 | 19.72s | 16.63s |
+| Q14 | 3.59s | 2.92s | Q36 | 4.81s | 4.65s |
+| Q15 | 1.90s | 1.75s | Q37 | 9.61s | 2.79s |
+| Q16 | 1.60s | 1.39s | Q38 | 8.57s | 2.56s |
+| Q17 | 4.70s | 4.11s | Q39 | 9.61s | 2.75s |
+| Q18 | 3.21s | 2.70s | Q40 | 18.56s | 4.84s |
+| Q19 | 19.76s | 18.65s | Q41 | 2.32s | 0.93s |
+| Q20 | 0.30s | 0.24s | Q42 | 1.61s | 0.96s |
+| Q21 | 10.22s | 4.83s | Q43 | 0.99s | 0.68s |
+| Q22 | 11.68s | 5.19s |  |  |  |
 
-**Suite sums: 8m15s cold / 4m48s hot (43/43, no failures).** By the
+**Suite sums: 6m17s cold / 2m46s hot (43/43, no failures).** By the
 ClickBench relative-time formula this places Wadjet ahead of the
 Trino, Presto, Impala, and Spark Parquet entries on the same hardware
 (computed against the published results as of 2026-08-16). The
-remaining hot spots (Q19, Q24, Q29, Q33-35 — high-cardinality
-aggregation and wide-row top-N) are the active optimization arc.
+remaining hot spots (Q33, Q19, Q35, Q29 — high-cardinality
+aggregation and regex-keyed grouping) are the active optimization arc.
 
 ```bash
 # SF0.01 correctness (CI, ~5s)
