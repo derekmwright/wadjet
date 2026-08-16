@@ -262,7 +262,7 @@ func scatterSumInt[T ~int32 | ~int64](sumArr, countArr []int64, data []T, gi []i
 	}
 }
 
-func scatterSumFloat[T ~float32 | ~float64](sumArr []float64, countArr []int64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
+func scatterSumFloat[T ~float32 | ~float64 | ~int64](sumArr []float64, countArr []int64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
 		if !hasNulls {
@@ -468,7 +468,22 @@ func scatterMaxFloat[T ~float32 | ~float64](maxArr []float64, hasMax []bool, dat
 // Type switch runs once per aggregate per batch, not per row.
 func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batch.Vector, sel []uint32, n int) {
 	switch fn {
-	case AggSum, AggAvg:
+	case AggAvg:
+		// AVG over int64-class accumulates float64 (overflow-safe; the
+		// result is a float mean anyway). Layout must match initFlatAggs.
+		switch col.Type {
+		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
+			scatterSumFloat(fa.sumF64, fa.count, col.Int64Data, gi, &col.Nulls, sel, n)
+		case batch.TypeInt32, batch.TypePort, batch.TypeDate:
+			scatterSumInt(fa.sumI64, fa.count, col.Int32Data, gi, &col.Nulls, sel, n)
+		case batch.TypeFloat64:
+			scatterSumFloat(fa.sumF64, fa.count, col.Float64Data, gi, &col.Nulls, sel, n)
+		case batch.TypeFloat32:
+			scatterSumFloat(fa.sumF64, fa.count, col.Float32Data, gi, &col.Nulls, sel, n)
+		case batch.TypeDecimal:
+			scatterSumDecimal(fa.sumDec, fa.count, col.DecimalData.Data, gi, &col.Nulls, sel, n)
+		}
+	case AggSum:
 		switch col.Type {
 		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
 			scatterSumInt(fa.sumI64, fa.count, col.Int64Data, gi, &col.Nulls, sel, n)

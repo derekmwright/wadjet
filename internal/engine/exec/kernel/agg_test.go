@@ -204,8 +204,10 @@ func TestMinRowWithNulls(t *testing.T) {
 }
 
 func TestResolveRowMinUnsupported(t *testing.T) {
-	k := ResolveRowMin(batch.TypeString)
-	if k != nil {
+	if k := ResolveRowMin(batch.TypeString); k == nil {
+		t.Fatal("string min is supported and must resolve")
+	}
+	if k := ResolveRowMin(batch.TypeArray); k != nil {
 		t.Fatal("expected nil for unsupported type")
 	}
 }
@@ -270,8 +272,10 @@ func TestMaxRowDecimal(t *testing.T) {
 }
 
 func TestResolveRowMaxUnsupported(t *testing.T) {
-	k := ResolveRowMax(batch.TypeString)
-	if k != nil {
+	if k := ResolveRowMax(batch.TypeString); k == nil {
+		t.Fatal("string max is supported and must resolve")
+	}
+	if k := ResolveRowMax(batch.TypeArray); k != nil {
 		t.Fatal("expected nil for unsupported type")
 	}
 }

@@ -357,6 +357,8 @@ func ResolveRowMin(typ batch.TypeID) RowAggUpdater {
 		return minRowFloat32
 	case batch.TypeDecimal:
 		return minRowDecimal
+	case batch.TypeString, batch.TypeBytes:
+		return minRowString
 	default:
 		return nil
 	}
@@ -375,6 +377,8 @@ func ResolveRowMinNoNulls(typ batch.TypeID) RowAggUpdater {
 		return minRowFloat32NoNulls
 	case batch.TypeDecimal:
 		return minRowDecimal
+	case batch.TypeString, batch.TypeBytes:
+		return minRowStringNoNulls
 	default:
 		return nil
 	}
@@ -393,6 +397,8 @@ func ResolveRowMax(typ batch.TypeID) RowAggUpdater {
 		return maxRowFloat32
 	case batch.TypeDecimal:
 		return maxRowDecimal
+	case batch.TypeString, batch.TypeBytes:
+		return maxRowString
 	default:
 		return nil
 	}
@@ -411,6 +417,8 @@ func ResolveRowMaxNoNulls(typ batch.TypeID) RowAggUpdater {
 		return maxRowFloat32NoNulls
 	case batch.TypeDecimal:
 		return maxRowDecimal
+	case batch.TypeString, batch.TypeBytes:
+		return maxRowStringNoNulls
 	default:
 		return nil
 	}
@@ -539,6 +547,8 @@ func ResolveBatchMin(typ batch.TypeID) BatchAggKernel {
 			acc.IsDecimal = true
 			acc.DecScale = vec.DecimalData.Scale
 		}
+	case batch.TypeString, batch.TypeBytes:
+		return minBatchString
 	default:
 		return nil
 	}
@@ -593,6 +603,8 @@ func ResolveBatchMax(typ batch.TypeID) BatchAggKernel {
 			acc.IsDecimal = true
 			acc.DecScale = vec.DecimalData.Scale
 		}
+	case batch.TypeString, batch.TypeBytes:
+		return maxBatchString
 	default:
 		return nil
 	}

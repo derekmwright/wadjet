@@ -105,6 +105,7 @@ type HashAggregate struct {
 	aggColIdx2        []int // second column indices for two-column aggregates
 	groupColTypes     []batch.TypeID
 	groupColMeta      []parquet.Column // full input column metadata per group col (Decimal Scale/Precision survive into outputSchema)
+	aggInputTypes     []batch.TypeID          // observed input column type per aggregate (0 = unresolved)
 	aggUpdaters       []kernel.RowAggUpdater  // resolved typed updaters
 	aggUpdatersNoNull []kernel.RowAggUpdater  // no-null-check variants
 	batchUpdaters     []kernel.RowAggUpdater  // per-batch updater selection (reusable)
@@ -778,6 +779,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	}
 	h.aggColIdx = make([]int, len(h.Aggs))
 	h.aggColIdx2 = make([]int, len(h.Aggs))
+	h.aggInputTypes = make([]batch.TypeID, len(h.Aggs))
 	h.aggUpdaters = make([]kernel.RowAggUpdater, len(h.Aggs))
 	h.aggUpdatersNoNull = make([]kernel.RowAggUpdater, len(h.Aggs))
 	h.batchUpdaters = make([]kernel.RowAggUpdater, len(h.Aggs))
@@ -800,6 +802,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			idx := columnIndexFallback(b, agg.InputCol)
 			h.aggColIdx[i] = idx
 			if idx >= 0 {
+				h.aggInputTypes[i] = b.Columns[idx].Type
 				h.aggUpdaters[i] = resolveAggUpdater(agg.Func, b.Columns[idx].Type)
 				h.aggUpdatersNoNull[i] = resolveAggUpdaterNoNull(agg.Func, b.Columns[idx].Type)
 			}
@@ -862,6 +865,18 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		case AggMode:
 			allSimpleAggs = false
 			h.needsExtra = true
+		case AggMin, AggMax:
+			if idx := h.aggColIdx[i]; idx >= 0 {
+				switch b.Columns[idx].Type {
+				case batch.TypeString, batch.TypeBytes:
+					// The flat SoA arrays have no string min/max storage;
+					// route through the generic kernel.Accumulator path.
+					allSimpleAggs = false
+				}
+			}
+			if h.aggUpdaters[i] == nil && agg.InputCol != "" {
+				allSimpleAggs = false
+			}
 		default:
 			if h.aggUpdaters[i] == nil && agg.InputCol != "" {
 				allSimpleAggs = false
@@ -2910,14 +2925,47 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 		}
 		cols = append(cols, out)
 	}
-	for _, agg := range h.Aggs {
-		cols = append(cols, parquet.Column{Name: agg.OutputCol, Type: agg.OutputType, Nullable: true})
+	for i, agg := range h.Aggs {
+		typ := agg.OutputType
+		// MIN/MAX preserve their input's type. The planner declares float64
+		// (it has no resolved input types); override from the type observed
+		// at Consume so MIN(url) emits a string and MIN(date) stays a date
+		// instead of surfacing raw epoch days.
+		if (agg.Func == AggMin || agg.Func == AggMax) && i < len(h.aggInputTypes) {
+			if t := minMaxOutputType(h.aggInputTypes[i]); t != 0 {
+				typ = t
+			}
+		}
+		cols = append(cols, parquet.Column{Name: agg.OutputCol, Type: typ, Nullable: true})
 	}
 	// GROUPING SETS null columns (appear in other sets but not this one)
 	for _, name := range h.NullGroupCols {
 		cols = append(cols, parquet.Column{Name: name, Type: parquet.TypeString, Nullable: true})
 	}
 	return cols
+}
+
+// minMaxOutputType maps a MIN/MAX input column type to its output type.
+// Returns 0 (keep the planner-declared type) for unresolved or types whose
+// finalized value is already a float64 (Decimal finalizes via ToFloat64).
+func minMaxOutputType(in batch.TypeID) parquet.TypeID {
+	switch in {
+	case batch.TypeString, batch.TypeBytes:
+		return parquet.TypeString
+	case batch.TypeDate:
+		return parquet.TypeDate
+	case batch.TypeTimestamp:
+		return parquet.TypeTimestamp
+	case batch.TypeIPv4:
+		return parquet.TypeIPv4
+	case batch.TypeInt64:
+		return parquet.TypeInt64
+	case batch.TypeInt32:
+		return parquet.TypeInt64
+	case batch.TypeFloat64, batch.TypeFloat32:
+		return parquet.TypeFloat64
+	}
+	return 0
 }
 
 // CloneSink returns a new HashAggregate with the same configuration but fresh state.
@@ -3138,6 +3186,7 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	h.groupColIdx = o.groupColIdx
 	h.aggColIdx = o.aggColIdx
 	h.aggColIdx2 = o.aggColIdx2
+	h.aggInputTypes = o.aggInputTypes
 	h.groupColTypes = o.groupColTypes
 	h.groupColMeta = o.groupColMeta
 	h.aggUpdaters = o.aggUpdaters
@@ -3579,11 +3628,17 @@ func appendIntKeyRowFormat(buf []byte, key int64, typ batch.TypeID) []byte {
 // Returns nil if the aggregate function is not batch-able (e.g., COUNT(DISTINCT), STRING_AGG).
 func resolveBatchAggKernel(fn AggFunc, colIdx int, b *batch.RecordBatch) kernel.BatchAggKernel {
 	switch fn {
-	case AggSum, AggAvg:
+	case AggSum:
 		if colIdx < 0 {
 			return nil
 		}
 		return kernel.ResolveBatchSum(b.Columns[colIdx].Type)
+	case AggAvg:
+		if colIdx < 0 {
+			return nil
+		}
+		// AVG accumulates float64 for int64-class inputs (overflow-safe).
+		return kernel.ResolveBatchAvg(b.Columns[colIdx].Type)
 	case AggCount:
 		if colIdx < 0 {
 			// COUNT(*) — counts all rows
@@ -3613,8 +3668,10 @@ func resolveBatchAggKernel(fn AggFunc, colIdx int, b *batch.RecordBatch) kernel.
 
 func resolveAggUpdater(fn AggFunc, typ batch.TypeID) kernel.RowAggUpdater {
 	switch fn {
-	case AggSum, AggAvg:
+	case AggSum:
 		return kernel.ResolveRowSum(typ)
+	case AggAvg:
+		return kernel.ResolveRowAvg(typ)
 	case AggCount:
 		return kernel.ResolveRowCount(false)
 	case AggMin:
@@ -3630,8 +3687,10 @@ func resolveAggUpdater(fn AggFunc, typ batch.TypeID) kernel.RowAggUpdater {
 // Used when the aggregate column's vector has no nulls in the current batch.
 func resolveAggUpdaterNoNull(fn AggFunc, typ batch.TypeID) kernel.RowAggUpdater {
 	switch fn {
-	case AggSum, AggAvg:
+	case AggSum:
 		return kernel.ResolveRowSumNoNulls(typ)
+	case AggAvg:
+		return kernel.ResolveRowAvgNoNulls(typ)
 	case AggCount:
 		return kernel.ResolveRowCount(true) // no nulls → every row counts
 	case AggMin:
@@ -3832,7 +3891,16 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 				fa.sumDec = make([]batch.Int128, 0, initCap)
 				fa.isDecimal = true
 				fa.decScale = b.Columns[ci].DecimalData.Scale
-			default: // int types
+			case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
+				if agg.Func == AggAvg {
+					// Overflow-safe AVG: float64 accumulation, matching
+					// scatterFlatAggUpdate's AggAvg case and the row kernels.
+					fa.sumF64 = make([]float64, 0, initCap)
+					fa.isFloat = true
+				} else {
+					fa.sumI64 = make([]int64, 0, initCap)
+				}
+			default: // int32-class: exact int64 sum, cannot overflow
 				fa.sumI64 = make([]int64, 0, initCap)
 			}
 		case AggCount:

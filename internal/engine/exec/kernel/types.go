@@ -29,10 +29,13 @@ type Accumulator struct {
 	MaxF64    float64
 	MinDec    batch.Int128
 	MaxDec    batch.Int128
+	MinStr    string
+	MaxStr    string
 	HasMin    bool
 	HasMax    bool
-	IsFloat   bool // true when the source column is a float type
+	IsFloat   bool // true when the source column is a float type (or AVG over int64, which accumulates in float64 to avoid int64 sum wraparound)
 	IsDecimal bool // true when the source column is DECIMAL
+	IsString  bool // true when the source column is a string/bytes type (MIN/MAX)
 	DecScale  int  // scale for DECIMAL columns
 }
 
@@ -69,6 +72,9 @@ func (a *Accumulator) FinalMin() any {
 	if !a.HasMin {
 		return nil
 	}
+	if a.IsString {
+		return a.MinStr
+	}
 	if a.IsDecimal {
 		return a.MinDec.ToFloat64(a.DecScale)
 	}
@@ -82,6 +88,9 @@ func (a *Accumulator) FinalMin() any {
 func (a *Accumulator) FinalMax() any {
 	if !a.HasMax {
 		return nil
+	}
+	if a.IsString {
+		return a.MaxStr
 	}
 	if a.IsDecimal {
 		return a.MaxDec.ToFloat64(a.DecScale)
@@ -106,14 +115,22 @@ func (a *Accumulator) Merge(other *Accumulator) {
 		a.SumDec = a.SumDec.Add(other.SumDec)
 		a.DecScale = other.DecScale
 	}
+	if other.IsString {
+		a.IsString = true
+	}
 	if other.HasMin {
 		if !a.HasMin {
 			a.MinI64 = other.MinI64
 			a.MinF64 = other.MinF64
 			a.MinDec = other.MinDec
+			a.MinStr = other.MinStr
 			a.HasMin = true
 		} else {
-			if other.IsFloat || a.IsFloat {
+			if other.IsString || a.IsString {
+				if other.MinStr < a.MinStr {
+					a.MinStr = other.MinStr
+				}
+			} else if other.IsFloat || a.IsFloat {
 				if other.MinF64 < a.MinF64 {
 					a.MinF64 = other.MinF64
 				}
@@ -133,9 +150,14 @@ func (a *Accumulator) Merge(other *Accumulator) {
 			a.MaxI64 = other.MaxI64
 			a.MaxF64 = other.MaxF64
 			a.MaxDec = other.MaxDec
+			a.MaxStr = other.MaxStr
 			a.HasMax = true
 		} else {
-			if other.IsFloat || a.IsFloat {
+			if other.IsString || a.IsString {
+				if other.MaxStr > a.MaxStr {
+					a.MaxStr = other.MaxStr
+				}
+			} else if other.IsFloat || a.IsFloat {
 				if other.MaxF64 > a.MaxF64 {
 					a.MaxF64 = other.MaxF64
 				}
