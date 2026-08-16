@@ -304,7 +304,7 @@ type groupState struct {
 type groupStateExtras struct {
 	keyValues    []any
 	accs         []kernel.Accumulator
-	distinctSets []map[string]struct{} // per-agg distinct value sets (nil if not COUNT(DISTINCT))
+	distinctSets []*distinctSet // per-agg distinct value sets (nil if not COUNT(DISTINCT)); typed int set for int-class columns
 	extraState   []any                 // per-agg custom state (string_agg builder, variance state, etc.)
 }
 
@@ -1959,7 +1959,7 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 	ext.accs = make([]kernel.Accumulator, len(h.Aggs))
 	h.extrasAccsCount += int64(len(h.Aggs))
 	if h.needsDistinct {
-		ext.distinctSets = make([]map[string]struct{}, len(h.Aggs))
+		ext.distinctSets = make([]*distinctSet, len(h.Aggs))
 	}
 	if h.needsExtra {
 		ext.extraState = make([]any, len(h.Aggs))
@@ -1969,7 +1969,7 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 		switch agg.Func {
 		case AggCountDistinct:
 			if ext.distinctSets != nil {
-				ext.distinctSets[i] = make(map[string]struct{})
+				ext.distinctSets[i] = newDistinctSetFor(h.distinctColType(b, i))
 				h.distinctBytes += 48
 			}
 		case AggStringAgg:
@@ -1986,7 +1986,7 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 			ext.extraState[i] = false
 		case AggApproxDistinct:
 			if ext.distinctSets != nil {
-				ext.distinctSets[i] = make(map[string]struct{})
+				ext.distinctSets[i] = newDistinctSetFor(h.distinctColType(b, i))
 				h.distinctBytes += 48
 			}
 		case AggCorr, AggCovarSamp, AggCovarPop:
@@ -2067,7 +2067,7 @@ func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
 		ext.accs = make([]kernel.Accumulator, len(h.Aggs))
 		h.extrasAccsCount += int64(len(h.Aggs))
 		if h.needsDistinct {
-			ext.distinctSets = make([]map[string]struct{}, len(h.Aggs))
+			ext.distinctSets = make([]*distinctSet, len(h.Aggs))
 		}
 		if h.needsExtra {
 			ext.extraState = make([]any, len(h.Aggs))
@@ -2077,7 +2077,7 @@ func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
 			switch agg.Func {
 			case AggCountDistinct, AggApproxDistinct:
 				if ext.distinctSets != nil {
-					ext.distinctSets[i] = make(map[string]struct{})
+					ext.distinctSets[i] = newDistinctSetFor(h.distinctColType(b, i))
 					h.distinctBytes += 48
 				}
 			case AggStringAgg:
@@ -2128,12 +2128,17 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if v.Nulls.IsNullFast(row) {
 				continue
 			}
-			h.keyBuf = h.keyBuf[:0]
-			h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
-			valKey := string(h.keyBuf)
-			if _, dup := ext.distinctSets[i][valKey]; !dup {
-				ext.distinctSets[i][valKey] = struct{}{}
-				h.distinctBytes += int64(len(valKey)) + 48
+			if ds := ext.distinctSets[i]; ds.ints != nil {
+				if ds.addInt(intColValue(v, row)) {
+					h.distinctBytes += 16
+				}
+			} else {
+				h.keyBuf = h.keyBuf[:0]
+				h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
+				valKey := string(h.keyBuf)
+				if ds.addStr(valKey) {
+					h.distinctBytes += int64(len(valKey)) + 48
+				}
 			}
 
 		case AggStringAgg:
@@ -2216,12 +2221,17 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if v.Nulls.IsNullFast(row) {
 				continue
 			}
-			h.keyBuf = h.keyBuf[:0]
-			h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
-			valKey := string(h.keyBuf)
-			if _, dup := ext.distinctSets[i][valKey]; !dup {
-				ext.distinctSets[i][valKey] = struct{}{}
-				h.distinctBytes += int64(len(valKey)) + 48
+			if ds := ext.distinctSets[i]; ds.ints != nil {
+				if ds.addInt(intColValue(v, row)) {
+					h.distinctBytes += 16
+				}
+			} else {
+				h.keyBuf = h.keyBuf[:0]
+				h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
+				valKey := string(h.keyBuf)
+				if ds.addStr(valKey) {
+					h.distinctBytes += int64(len(valKey)) + 48
+				}
 			}
 
 		case AggCorr, AggCovarSamp, AggCovarPop:
@@ -2737,7 +2747,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 			colIdx := len(h.GroupByCols) + j
 			switch agg.Func {
 			case AggCountDistinct:
-				out.Columns[colIdx].SetValue(i, int64(len(ext.distinctSets[j])))
+				out.Columns[colIdx].SetValue(i, int64(ext.distinctSets[j].count()))
 			case AggStringAgg:
 				state := ext.extraState[j].(*stringAggState)
 				if len(state.parts) == 0 {
@@ -2776,7 +2786,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 					out.Columns[colIdx].SetValue(i, state.variancePop())
 				}
 			case AggApproxDistinct:
-				out.Columns[colIdx].SetValue(i, int64(len(ext.distinctSets[j])))
+				out.Columns[colIdx].SetValue(i, int64(ext.distinctSets[j].count()))
 			case AggCorr:
 				state := ext.extraState[j].(*covarianceState)
 				if state.count < 2 {
@@ -3133,15 +3143,13 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 					continue
 				}
 				if ext.distinctSets[j] == nil {
-					ext.distinctSets[j] = make(map[string]struct{}, len(oExt.distinctSets[j]))
-					h.distinctBytes += 48
+					ext.distinctSets[j] = oExt.distinctSets[j]
+					h.distinctBytes += oExt.distinctSets[j].memBytes()
+					continue
 				}
-				for k := range oExt.distinctSets[j] {
-					if _, dup := ext.distinctSets[j][k]; !dup {
-						ext.distinctSets[j][k] = struct{}{}
-						h.distinctBytes += int64(len(k)) + 48
-					}
-				}
+				before := ext.distinctSets[j].memBytes()
+				ext.distinctSets[j].mergeFrom(oExt.distinctSets[j])
+				h.distinctBytes += ext.distinctSets[j].memBytes() - before
 			}
 		} else {
 			h.strGroupStates = append(h.strGroupStates, oGS)
@@ -3152,18 +3160,34 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 				h.extraStateBytes += int64(len(oExt.extraState)) * 80
 			}
 			for _, ds := range oExt.distinctSets {
-				if ds == nil {
-					continue
-				}
-				h.distinctBytes += 48
-				for k := range ds {
-					h.distinctBytes += int64(len(k)) + 48
-				}
+				h.distinctBytes += ds.memBytes()
 			}
 			h.keys = append(h.keys, oExt.keyValues)
 			h.serializedKeys = append(h.serializedKeys, key)
 			h.serializedKeyBytes += int64(len(key))
 		}
+	}
+}
+
+// distinctColType resolves the input column type for aggregate i from the
+// live batch, for choosing the distinct-set representation. Unresolvable
+// columns fall back to the string representation (safe for any type).
+func (h *HashAggregate) distinctColType(b *batch.RecordBatch, i int) batch.TypeID {
+	if i < len(h.aggColIdx) {
+		if idx := h.aggColIdx[i]; idx >= 0 && idx < len(b.Columns) {
+			return b.Columns[idx].Type
+		}
+	}
+	return batch.TypeString
+}
+
+// intColValue reads an int-class column value widened to int64.
+func intColValue(v *batch.Vector, row int) int64 {
+	switch v.Type {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return int64(v.Int32Data[row])
+	default:
+		return v.Int64Data[row]
 	}
 }
 
