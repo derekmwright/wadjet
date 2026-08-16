@@ -3322,8 +3322,8 @@ func fnRegexpExtract(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re, err := regexp.Compile(toString(args[1]))
-	if err != nil {
+	re := compileRegexpCached(toString(args[1]))
+	if re == nil {
 		return nil
 	}
 	group := 0
@@ -3337,12 +3337,32 @@ func fnRegexpExtract(args []any) any {
 	return matches[group]
 }
 
+// regexpCache caches compiled patterns process-wide. Scalar regexp
+// functions previously called regexp.Compile PER ROW — ClickBench Q29
+// (REGEXP_REPLACE over 100M Referers) spent its 117s recompiling one
+// pattern 100M times. sync.Map: read-mostly, a handful of distinct
+// patterns per workload.
+var regexpCache sync.Map // pattern string → *regexp.Regexp (nil for invalid)
+
+func compileRegexpCached(pattern string) *regexp.Regexp {
+	if v, ok := regexpCache.Load(pattern); ok {
+		re, _ := v.(*regexp.Regexp)
+		return re
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		re = nil
+	}
+	regexpCache.Store(pattern, re)
+	return re
+}
+
 func fnRegexpReplace(args []any) any {
 	if len(args) < 3 || args[0] == nil || args[1] == nil || args[2] == nil {
 		return nil
 	}
-	re, err := regexp.Compile(toString(args[1]))
-	if err != nil {
+	re := compileRegexpCached(toString(args[1]))
+	if re == nil {
 		return nil
 	}
 	return re.ReplaceAllString(toString(args[0]), sqlBackrefsToGo(toString(args[2])))
@@ -6400,8 +6420,8 @@ func fnRegexpCount(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re, err := regexp.Compile(fmt.Sprint(args[1]))
-	if err != nil {
+	re := compileRegexpCached(fmt.Sprint(args[1]))
+	if re == nil {
 		return nil
 	}
 	matches := re.FindAllString(fmt.Sprint(args[0]), -1)
@@ -6412,8 +6432,8 @@ func fnRegexpExtractAll(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re, err := regexp.Compile(fmt.Sprint(args[1]))
-	if err != nil {
+	re := compileRegexpCached(fmt.Sprint(args[1]))
+	if re == nil {
 		return nil
 	}
 	matches := re.FindAllString(fmt.Sprint(args[0]), -1)
@@ -6433,8 +6453,8 @@ func fnRegexpSplit(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	re, err := regexp.Compile(fmt.Sprint(args[1]))
-	if err != nil {
+	re := compileRegexpCached(fmt.Sprint(args[1]))
+	if re == nil {
 		return nil
 	}
 	parts := re.Split(fmt.Sprint(args[0]), -1)
