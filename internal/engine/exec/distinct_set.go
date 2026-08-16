@@ -67,6 +67,12 @@ func (d *distinctSet) mergeFrom(o *distinctSet) {
 	}
 	if d.ints != nil && o.ints != nil {
 		s := o.ints
+		// Pre-grow to the merged cardinality upper bound: growing through
+		// doubling mid-merge re-hashes the table log2 times and holds two
+		// copies live at each step — at Q05 scale (90M distinct across 16
+		// clones) the doubling transients were a multi-GB heap spike that
+		// evicted the query's own input page cache.
+		d.ints.reserve(d.ints.n + s.n)
 		if s.hasZero {
 			d.ints.insert(0)
 		}
@@ -78,6 +84,7 @@ func (d *distinctSet) mergeFrom(o *distinctSet) {
 		return
 	}
 	if d.strs != nil && o.strs != nil {
+		d.strs.reserve(d.strs.n + o.strs.n)
 		for _, e := range o.strs.entries {
 			if e.l >= 0 {
 				d.strs.insert(o.strs.arena[e.off : e.off+e.l])
@@ -113,6 +120,33 @@ func newStrSet(capHint int) *strSet {
 		s.entries[i].l = -1
 	}
 	return s
+}
+
+// reserve grows the entry table once for n total members (see i64Set.reserve).
+func (s *strSet) reserve(n int) {
+	need := 16
+	for uint64(n+1)*4 >= uint64(need)*3 {
+		need <<= 1
+	}
+	if need <= len(s.entries) {
+		return
+	}
+	old := s.entries
+	s.entries = make([]strSetEntry, need)
+	for i := range s.entries {
+		s.entries[i].l = -1
+	}
+	s.mask = uint64(need - 1)
+	for _, e := range old {
+		if e.l == -1 {
+			continue
+		}
+		i := strHash(s.arena[e.off:e.off+e.l]) & s.mask
+		for s.entries[i].l != -1 {
+			i = (i + 1) & s.mask
+		}
+		s.entries[i] = e
+	}
 }
 
 // insert adds k (copying into the arena), returning true when newly added.
@@ -183,6 +217,31 @@ func mix64(x uint64) uint64 {
 	x *= 0x94d049bb133111eb
 	x ^= x >> 31
 	return x
+}
+
+// reserve grows the table once so n total members fit under the 75%%
+// load factor without incremental doubling.
+func (s *i64Set) reserve(n int) {
+	need := 16
+	for uint64(n+1)*4 >= uint64(need)*3 {
+		need <<= 1
+	}
+	if need <= len(s.slots) {
+		return
+	}
+	old := s.slots
+	s.slots = make([]int64, need)
+	s.mask = uint64(need - 1)
+	for _, v := range old {
+		if v == 0 {
+			continue
+		}
+		i := mix64(uint64(v)) & s.mask
+		for s.slots[i] != 0 {
+			i = (i + 1) & s.mask
+		}
+		s.slots[i] = v
+	}
 }
 
 // insert adds v, returning true when newly added.

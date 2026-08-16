@@ -51,7 +51,8 @@ type partialGroupCursor struct {
 	strGroupStates []*groupState
 	dualIntKeysA   []int64
 	dualIntKeysB   []int64
-	serializedKeys []string // binary group keys, 1:1 with strGroupStates (deferred-boxing source of truth)
+	serializedKeys []string // group keys, 1:1 with strGroupStates (deferred-boxing source of truth; RAW strings in single-string mode, binary framing otherwise)
+	rawStringKeys  bool     // single-string path: serializedKeys entries are the keys themselves
 	groupColTypes  []batch.TypeID
 	nAggs          int
 	nGroupCols     int
@@ -131,6 +132,7 @@ func newPartialGroupCursor(h *HashAggregate, liveGroups []int32) *partialGroupCu
 		dualIntKeysA:   h.dualIntKeysA,
 		dualIntKeysB:   h.dualIntKeysB,
 		serializedKeys: h.serializedKeys,
+		rawStringKeys:  h.useStrGroupKey,
 		groupColTypes:  h.groupColTypes,
 		nAggs:          nAggs,
 		nGroupCols:     nGroupCols,
@@ -246,8 +248,15 @@ func (c *partialGroupCursor) populateHeadKeyVals(gi int) {
 // on the spill/drain cold path — the whole point of deferral is that the
 // hot consume loop never boxes.
 func (c *partialGroupCursor) strKeyValsAt(gi int) []any {
-	if ext := c.strGroupStates[gi].extras; ext != nil && ext.keyValues != nil {
-		return ext.keyValues
+	// gs itself is nil for fully-deferred groups (typed-generic and
+	// single-string paths).
+	if gs := c.strGroupStates[gi]; gs != nil && gs.extras != nil && gs.extras.keyValues != nil {
+		return gs.extras.keyValues
+	}
+	if c.rawStringKeys {
+		// Single-string path: serializedKeys holds the raw key, not the
+		// binary multi-column framing.
+		return []any{c.serializedKeys[gi]}
 	}
 	return decodeSerializedKey(c.serializedKeys[gi], c.groupColTypes)
 }

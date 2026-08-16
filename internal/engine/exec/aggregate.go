@@ -1785,10 +1785,11 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 				gi[si] = gsIdx
 			} else {
 				keyStr := string(key)
-				gs := h.gsPool.alloc()
-				gs.ensureExtras().keyValues = []any{keyStr}
-				h.strGroupStates = append(h.strGroupStates, gs)
-				h.keys = append(h.keys, []any{keyStr})
+				// Deferred state: the arena string in serializedKeys IS
+				// the key; simple aggs live in the flat SoA arrays. The
+				// per-group groupState + []any box + h.keys slot were
+				// ~100B of overhead per group (Q34's 18M URL groups).
+				h.strGroupStates = append(h.strGroupStates, nil)
 				h.serializedKeys = append(h.serializedKeys, keyStr)
 				h.serializedKeyBytes += int64(len(keyStr))
 				for ai := range h.intFlatAccs {
@@ -1811,10 +1812,11 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 				gi[row] = gsIdx
 			} else {
 				keyStr := string(key)
-				gs := h.gsPool.alloc()
-				gs.ensureExtras().keyValues = []any{keyStr}
-				h.strGroupStates = append(h.strGroupStates, gs)
-				h.keys = append(h.keys, []any{keyStr})
+				// Deferred state: the arena string in serializedKeys IS
+				// the key; simple aggs live in the flat SoA arrays. The
+				// per-group groupState + []any box + h.keys slot were
+				// ~100B of overhead per group (Q34's 18M URL groups).
+				h.strGroupStates = append(h.strGroupStates, nil)
 				h.serializedKeys = append(h.serializedKeys, keyStr)
 				h.serializedKeyBytes += int64(len(keyStr))
 				for ai := range h.intFlatAccs {
@@ -1940,7 +1942,11 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 
 		newTypedGroup := func(row int, chainHead int32) int32 {
 			newIdx := int32(len(h.strGroupStates))
-			h.strGroupStates = append(h.strGroupStates, h.gsPool.alloc())
+			// nil state — simple aggs live entirely in the flat SoA
+			// arrays + serializedKeys; materializeFlatAccums reifies on
+			// the migration/merge cold paths (same deferral as dual-int:
+			// 32B x groups of pure overhead otherwise).
+			h.strGroupStates = append(h.strGroupStates, nil)
 			h.keyBuf = serializeGroupKey(h.keyBuf[:0], kcols, row)
 			h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
 			h.serializedKeyBytes += int64(len(h.keyBuf))
@@ -2916,6 +2922,10 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 			idx := start + i
 			writeIntKeyToColumn(out.Columns[0], i, h.dualIntKeysA[idx], h.groupColTypes[0])
 			writeIntKeyToColumn(out.Columns[1], i, h.dualIntKeysB[idx], h.groupColTypes[1])
+		} else if h.useStrGroupKey && deferredBoxing {
+			// Single-string path: serializedKeys holds the RAW key string
+			// (no binary framing) — write it straight into the key column.
+			out.Columns[0].BytesData.Set(i, []byte(h.serializedKeys[start+i]))
 		} else if deferredBoxing {
 			// Generic-path deferred boxing: keys were never boxed at
 			// consume; decode the group's binary serialized key straight
@@ -4524,6 +4534,12 @@ func (h *HashAggregate) materializeFlatAccums() {
 	// String GROUP BY and generic SoA use strGroupStates with SoA flat accumulators.
 	if h.useStrGroupKey || h.useGenericSoA {
 		for gi, gs := range h.strGroupStates {
+			if gs == nil {
+				// Deferred state (typed-generic / str paths): reify for
+				// the migration/merge cold path.
+				gs = h.gsPool.alloc()
+				h.strGroupStates[gi] = gs
+			}
 			ext := gs.ensureExtras()
 			if ext.accs == nil {
 				ext.accs = make([]kernel.Accumulator, nAggs)
