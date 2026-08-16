@@ -175,6 +175,26 @@ func ensureSliceCap(s []int64, n int) []int64 {
 	return ns
 }
 
+// ensureAppendCap is ensureSliceCap for any element type: pre-grows s
+// (≥2x) to absorb n more appends. The group-key side arrays (key values,
+// chain links, group states) are appended once per NEW group inside the
+// hash-lookup loops; Go's builtin append growth drops to ~1.25x for large
+// slices, which turned those appends into a realloc-and-copy treadmill at
+// high group cardinality (ClickBench Q33: growslice was 22% of the
+// profile — more than the aggregation itself).
+func ensureAppendCap[T any](s []T, n int) []T {
+	if cap(s)-len(s) >= n {
+		return s
+	}
+	newCap := len(s) + n
+	if double := cap(s) * 2; double > newCap {
+		newCap = double
+	}
+	ns := make([]T, len(s), newCap)
+	copy(ns, s)
+	return ns
+}
+
 func ensureSliceCapF64(s []float64, n int) []float64 {
 	if cap(s)-len(s) >= n {
 		return s

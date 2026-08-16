@@ -1250,6 +1250,7 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 	for ai := range h.intFlatAccs {
 		h.intFlatAccs[ai].ensureCapacity(batchRows)
 	}
+	h.intGroupStates = ensureAppendCap(h.intGroupStates, batchRows)
 
 	// Phase 1: Hash lookup — build group index array.
 	// gi[i] maps iteration index i to its group state index, or -1 for null keys.
@@ -1411,6 +1412,10 @@ func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
 	for ai := range h.intFlatAccs {
 		h.intFlatAccs[ai].ensureCapacity(batchRows)
 	}
+	h.intGroupStates = ensureAppendCap(h.intGroupStates, batchRows)
+	h.dualIntKeysA = ensureAppendCap(h.dualIntKeysA, batchRows)
+	h.dualIntKeysB = ensureAppendCap(h.dualIntKeysB, batchRows)
+	h.dualIntNextGroup = ensureAppendCap(h.dualIntNextGroup, batchRows)
 
 	// Phase 1: Hash lookup — build group index array with chain verification.
 	var gi []int32
@@ -1549,6 +1554,9 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 	for ai := range h.intFlatAccs {
 		h.intFlatAccs[ai].ensureCapacity(batchRows)
 	}
+	h.intGroupStates = ensureAppendCap(h.intGroupStates, batchRows)
+	h.compactKeys = ensureAppendCap(h.compactKeys, batchRows)
+	h.keys = ensureAppendCap(h.keys, batchRows)
 
 	// Phase 1: Encode keys, hash lookup, build group index array.
 	var gi []int32
@@ -1698,6 +1706,9 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 		h.intFlatAccs[ai].ensureCapacity(batchRows)
 	}
 
+	h.strGroupStates = ensureAppendCap(h.strGroupStates, batchRows)
+	h.serializedKeys = ensureAppendCap(h.serializedKeys, batchRows)
+
 	// Phase 1: Hash lookup — build group index array. NULL keys get their
 	// own first-class group slot (strNullGroupIdx) so the typed scatter in
 	// Phase 2 updates its flat accumulators like any other group. The
@@ -1817,6 +1828,9 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 	for ai := range h.intFlatAccs {
 		h.intFlatAccs[ai].ensureCapacity(batchRows)
 	}
+
+	h.strGroupStates = ensureAppendCap(h.strGroupStates, batchRows)
+	h.serializedKeys = ensureAppendCap(h.serializedKeys, batchRows)
 
 	// Phase 1: Serialize keys, hash lookup, build group index array.
 	var gi []int32
