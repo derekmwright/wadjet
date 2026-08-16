@@ -1613,6 +1613,11 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	if h.strGroupIndex != nil {
 		h.strGroupIndex = newStrHashTable(4096)
 	}
+	// Typed-generic lookup state: slot indices are dead after a full reset.
+	if h.genKeyIdx != nil {
+		h.genKeyIdx = newIntHashTable(4096)
+	}
+	h.genKeyNext = nil
 	h.intGroupStates = nil
 	h.strGroupStates = nil
 	h.strNullGroupIdx = -1

@@ -114,6 +114,16 @@ type HashAggregate struct {
 	// Set in resolveIndices when every group column's type round-trips
 	// through the serialization exactly.
 	deferGenericKeyBoxing bool
+	// Typed generic lookup (rides the same gate): rows hash from typed
+	// column storage and verify against stored serializedKeys via a
+	// chained int hash table — serialization happens once per NEW group,
+	// not once per row. genKeyIdx maps combined key hash → chain head in
+	// genKeyNext (dual-int pattern). strGroupIndex is NOT maintained on
+	// this path; ensureStrGroupIndexForMerge rebuilds it for the slow
+	// merge fallback.
+	genKeyIdx  *intHashTable
+	genKeyNext []int32
+	keySerCols []keySerCol // per-batch resolved key accessors (scratch)
 	groupColIdx       []int
 	aggColIdx         []int
 	aggColIdx2        []int // second column indices for two-column aggregates
@@ -377,6 +387,10 @@ func (h *HashAggregate) groupMemoryUsage() int64 {
 	if h.strGroupIndex != nil {
 		size += h.strGroupIndex.MemoryUsage()
 	}
+	if h.genKeyIdx != nil {
+		size += h.genKeyIdx.MemoryUsage()
+	}
+	size += int64(cap(h.genKeyNext)) * 4
 	// Group state pool: each chunk is a contiguous array of slim groupState
 	// structs (24 bytes each: intKey + setID + extras pointer). The heavy
 	// per-group state behind the extras pointer is accounted below via the
@@ -1903,7 +1917,63 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 		}
 	}
 
-	if b.Sel != nil {
+	if h.deferGenericKeyBoxing {
+		// Typed lookup: hash and chain-verify straight off the typed
+		// column storage; serialize only on insert. strGroupIndex is not
+		// maintained here — serializedKeys + genKeyIdx/genKeyNext carry
+		// the identity (see ensureStrGroupIndexForMerge for the one
+		// consumer that still needs the string table).
+		h.keySerCols = buildKeySerCols(h.keySerCols, b, h.groupColIdx, h.groupColTypes)
+		kcols := h.keySerCols
+		if h.genKeyIdx == nil {
+			h.genKeyIdx = newIntHashTable(4096)
+		}
+		h.genKeyNext = ensureAppendCap(h.genKeyNext, batchRows)
+
+		newTypedGroup := func(row int, chainHead int32) int32 {
+			newIdx := int32(len(h.strGroupStates))
+			h.strGroupStates = append(h.strGroupStates, h.gsPool.alloc())
+			h.keyBuf = serializeGroupKey(h.keyBuf[:0], kcols, row)
+			h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
+			h.serializedKeyBytes += int64(len(h.keyBuf))
+			h.genKeyNext = append(h.genKeyNext, chainHead)
+			for ai := range h.intFlatAccs {
+				h.intFlatAccs[ai].appendGroup()
+			}
+			return newIdx
+		}
+		lookup := func(row int) int32 {
+			ck := int64(typedRowHash(kcols, row))
+			if head, ok := h.genKeyIdx.Get(ck); ok {
+				for g := head; g >= 0; g = h.genKeyNext[g] {
+					if serializedKeyMatchesRow(h.serializedKeys[g], kcols, row) {
+						return g
+					}
+				}
+				newIdx := newTypedGroup(row, head)
+				h.genKeyIdx.Put(ck, newIdx)
+				return newIdx
+			}
+			newIdx := newTypedGroup(row, -1)
+			h.genKeyIdx.Put(ck, newIdx)
+			return newIdx
+		}
+
+		if b.Sel != nil {
+			iterLen = len(b.Sel)
+			sel = b.Sel
+			gi = h.ensureGroupIndexBuf(iterLen)
+			for si, selIdx := range b.Sel {
+				gi[si] = lookup(int(selIdx))
+			}
+		} else {
+			iterLen = b.Len
+			gi = h.ensureGroupIndexBuf(iterLen)
+			for row := 0; row < iterLen; row++ {
+				gi[row] = lookup(row)
+			}
+		}
+	} else if b.Sel != nil {
 		iterLen = len(b.Sel)
 		sel = b.Sel
 		gi = h.ensureGroupIndexBuf(iterLen)
@@ -1943,6 +2013,21 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 			scatterCountStar(fa.count, gi, iterLen)
 		}
 	}
+}
+
+// ensureStrGroupIndexForMerge rebuilds the string hash table from
+// serializedKeys when the typed generic path (which doesn't maintain it)
+// produced the groups. Cold path: only the slow in-memory merge fallback
+// needs the string table.
+func (h *HashAggregate) ensureStrGroupIndexForMerge() {
+	if !(h.useGenericSoA && h.deferGenericKeyBoxing) {
+		return
+	}
+	idx := newStrHashTable(len(h.strGroupStates) + 16)
+	for i, k := range h.serializedKeys {
+		idx.Put([]byte(k), int32(i))
+	}
+	h.strGroupIndex = idx
 }
 
 // migrateCompactToGeneric moves all groups from intHashTable to the string map
@@ -2960,6 +3045,8 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		h.resetStateByteCounters()
 		h.strGroupStates = nil
 		h.strGroupIndex = nil
+		h.genKeyIdx = nil
+		h.genKeyNext = nil
 		h.strNullGroupIdx = -1
 		// Drop SoA arrays now that the SoA-direct path has finished reading
 		// from them. materializeFlatAccums used to do this implicitly (it
@@ -3221,6 +3308,10 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 	h.migrateToGenericMap()
 	o.migrateToGenericMap()
 
+	// Typed-generic sinks don't maintain strGroupIndex during consume;
+	// the dedup loop below probes it, so rebuild from serializedKeys.
+	h.ensureStrGroupIndexForMerge()
+
 	// migrateToGenericMap → materializeFlatAccums on both sides, so every
 	// group's extras is allocated and extras.accs is populated. Iterate
 	// strGroupStates, not o.keys — deferred-boxing generic sinks never
@@ -3355,6 +3446,9 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	h.useGenericSoA = o.useGenericSoA
 	h.strGroupIndex = o.strGroupIndex
 	h.strGroupStates = o.strGroupStates
+	h.deferGenericKeyBoxing = o.deferGenericKeyBoxing
+	h.genKeyIdx = o.genKeyIdx
+	h.genKeyNext = o.genKeyNext
 	h.keys = o.keys
 	h.serializedKeys = o.serializedKeys
 	h.gsPool = o.gsPool
@@ -3380,6 +3474,8 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	o.strGroupIndex = nil
 	o.strGroupStates = nil
 	o.strNullGroupIdx = -1
+	o.genKeyIdx = nil
+	o.genKeyNext = nil
 	o.keys = nil
 	o.serializedKeys = nil
 	o.gsPool = groupStatePool{}
@@ -3732,6 +3828,203 @@ func (h *HashAggregate) migrateToGenericMap() {
 	h.useIntGroupKey = false
 	h.intGroupStates = nil
 	h.intGroupIndex = nil
+}
+
+// keySerCol resolves one group-key column's typed accessors once per
+// batch, for the generic path's typed lookup loop: per-row hashing and
+// key verification run straight off the typed slices instead of
+// serializing every row's key (ClickBench Q19: serialization +
+// string-hash-table probing was ~30% of the profile).
+type keySerCol struct {
+	kind  byte // 0=missing 1=i64-class 2=i32-class 3=f64 4=f32 5=bytes-class 6=bool
+	i64   []int64
+	i32   []int32
+	f64   []float64
+	f32   []float32
+	bools []bool
+	bytes *batch.BytesColumn
+	nulls *batch.Bitmap
+}
+
+// buildKeySerCols resolves the group-key columns of one batch. dst is
+// reused across batches (scratch on the sink). Callers gate on
+// deferGenericKeyBoxing, whose type set exactly matches the kinds here.
+func buildKeySerCols(dst []keySerCol, b *batch.RecordBatch, colIdx []int, colTypes []batch.TypeID) []keySerCol {
+	dst = dst[:0]
+	for ci, idx := range colIdx {
+		if idx < 0 {
+			dst = append(dst, keySerCol{kind: 0})
+			continue
+		}
+		v := b.Columns[idx]
+		c := keySerCol{nulls: &v.Nulls}
+		switch colTypes[ci] {
+		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
+			c.kind, c.i64 = 1, v.Int64Data
+		case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
+			c.kind, c.i32 = 2, v.Int32Data
+		case batch.TypeFloat64:
+			c.kind, c.f64 = 3, v.Float64Data
+		case batch.TypeFloat32:
+			c.kind, c.f32 = 4, v.Float32Data
+		case batch.TypeString, batch.TypeBytes:
+			c.kind, c.bytes = 5, &v.BytesData
+		case batch.TypeBool:
+			c.kind, c.bools = 6, v.BoolData
+		default:
+			// Unreachable under the deferGenericKeyBoxing gate; treated as
+			// always-null so a gate/kind drift fails loudly in tests
+			// (groups collapse) rather than corrupting memory.
+			c.kind = 0
+		}
+		dst = append(dst, c)
+	}
+	return dst
+}
+
+// serializeGroupKey writes one row's group key into buf, byte-identical
+// to the appendColumnValue-based serializeKey loop (null flag byte, then
+// the typed payload). Only called once per NEW group on the typed path.
+func serializeGroupKey(buf []byte, cols []keySerCol, row int) []byte {
+	for i := range cols {
+		c := &cols[i]
+		if c.kind == 0 || c.nulls.IsNullFast(row) {
+			buf = append(buf, 1)
+			continue
+		}
+		buf = append(buf, 0)
+		switch c.kind {
+		case 1:
+			v := uint64(c.i64[row])
+			buf = append(buf, byte(v), byte(v>>8), byte(v>>16), byte(v>>24),
+				byte(v>>32), byte(v>>40), byte(v>>48), byte(v>>56))
+		case 2:
+			v := uint32(c.i32[row])
+			buf = append(buf, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+		case 3:
+			v := math.Float64bits(c.f64[row])
+			buf = append(buf, byte(v), byte(v>>8), byte(v>>16), byte(v>>24),
+				byte(v>>32), byte(v>>40), byte(v>>48), byte(v>>56))
+		case 4:
+			v := math.Float32bits(c.f32[row])
+			buf = append(buf, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+		case 5:
+			data := c.bytes.Value(row)
+			l := uint16(len(data))
+			buf = append(buf, byte(l), byte(l>>8))
+			buf = append(buf, data...)
+		case 6:
+			if c.bools[row] {
+				buf = append(buf, 1)
+			} else {
+				buf = append(buf, 0)
+			}
+		}
+	}
+	return buf
+}
+
+// typedRowHash combines per-column hashes of one row's group key. Values
+// hash from their typed storage (no serialization); NULL and missing
+// columns contribute a fixed marker so (NULL, x) and (x, NULL) differ.
+func typedRowHash(cols []keySerCol, row int) uint64 {
+	h := uint64(0x9e3779b97f4a7c15)
+	for i := range cols {
+		c := &cols[i]
+		var ch uint64
+		if c.kind == 0 || c.nulls.IsNullFast(row) {
+			ch = 0xdeadbeefdeadbeef
+		} else {
+			switch c.kind {
+			case 1:
+				ch = mix64(uint64(c.i64[row]))
+			case 2:
+				ch = mix64(uint64(uint32(c.i32[row])))
+			case 3:
+				ch = mix64(math.Float64bits(c.f64[row]))
+			case 4:
+				ch = mix64(uint64(math.Float32bits(c.f32[row])))
+			case 5:
+				ch = strHash([]byte(c.bytes.UnsafeStringValue(row)))
+			case 6:
+				if c.bools[row] {
+					ch = 0xb001b001b001b001
+				} else {
+					ch = 0x0b000b000b000b00
+				}
+			}
+		}
+		h = mix64(h ^ ch)
+	}
+	return h
+}
+
+// serializedKeyMatchesRow reports whether a stored binary group key equals
+// the key formed by this row — the typed path's chain-verification,
+// equivalent to serializing the row and comparing bytes, without the
+// serialization.
+func serializedKeyMatchesRow(key string, cols []keySerCol, row int) bool {
+	for i := range cols {
+		c := &cols[i]
+		if len(key) == 0 {
+			return false
+		}
+		flag := key[0]
+		key = key[1:]
+		isNull := c.kind == 0 || c.nulls.IsNullFast(row)
+		if isNull != (flag == 1) {
+			return false
+		}
+		if isNull {
+			continue
+		}
+		switch c.kind {
+		case 1:
+			if len(key) < 8 || int64(binary.LittleEndian.Uint64([]byte(key[:8]))) != c.i64[row] {
+				return false
+			}
+			key = key[8:]
+		case 2:
+			if len(key) < 4 || int32(binary.LittleEndian.Uint32([]byte(key[:4]))) != c.i32[row] {
+				return false
+			}
+			key = key[4:]
+		case 3:
+			if len(key) < 8 || binary.LittleEndian.Uint64([]byte(key[:8])) != math.Float64bits(c.f64[row]) {
+				return false
+			}
+			key = key[8:]
+		case 4:
+			if len(key) < 4 || binary.LittleEndian.Uint32([]byte(key[:4])) != math.Float32bits(c.f32[row]) {
+				return false
+			}
+			key = key[4:]
+		case 5:
+			// Compare the row's own wrapped-uint16 prefix + full data —
+			// exact byte-equality with the serialized form, correct even
+			// for >64KB values where the stored prefix wraps.
+			data := c.bytes.UnsafeStringValue(row)
+			l := uint16(len(data))
+			if len(key) < 2 || key[0] != byte(l) || key[1] != byte(l>>8) {
+				return false
+			}
+			key = key[2:]
+			if len(key) < len(data) || key[:len(data)] != data {
+				return false
+			}
+			key = key[len(data):]
+		case 6:
+			want := byte(0)
+			if c.bools[row] {
+				want = 1
+			}
+			if key[0] != want {
+				return false
+			}
+			key = key[1:]
+		}
+	}
+	return len(key) == 0
 }
 
 // decodeSerializedKeyIntoColumns parses a group's binary serialized key
