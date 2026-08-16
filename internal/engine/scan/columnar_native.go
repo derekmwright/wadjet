@@ -385,8 +385,13 @@ type dictResolveScratch struct {
 func resolveNativeDictionaryScratch(s *dictResolveScratch, dict *pqt.DictionaryData, page pqt.Values, fileType pqt.TypeID) (pqt.Values, error) {
 	indices := page.Int32()
 	n := page.Count()
-	if err := pqt.ValidateDictIndices(indices, n, dict.NumValues); err != nil {
-		return pqt.Values{}, err
+	// Bounds are verified IN the gather loops below (uint cast catches
+	// negative and >= numValues in one compare) — the separate
+	// ValidateDictIndices pre-pass re-read every index and was 8.5% of
+	// the narrow-scan floor profile. Same failure contract: corrupt or
+	// hostile indices return an error, never panic.
+	if len(indices) < n {
+		return pqt.Values{}, fmt.Errorf("dictionary page: %d indices for %d values", len(indices), n)
 	}
 
 	switch fileType {
@@ -402,7 +407,11 @@ func resolveNativeDictionaryScratch(s *dictResolveScratch, dict *pqt.DictionaryD
 			dst = make([]int64, n)
 		}
 		for i := 0; i < n; i++ {
-			dst[i] = src[indices[i]]
+			idx := indices[i]
+			if uint(idx) >= uint(len(src)) {
+				return pqt.Values{}, fmt.Errorf("dictionary index %d out of range [0,%d)", idx, len(src))
+			}
+			dst[i] = src[idx]
 		}
 		return pqt.PlainInt64Values(dst), nil
 
@@ -418,7 +427,11 @@ func resolveNativeDictionaryScratch(s *dictResolveScratch, dict *pqt.DictionaryD
 			dst = make([]int32, n)
 		}
 		for i := 0; i < n; i++ {
-			dst[i] = src[indices[i]]
+			idx := indices[i]
+			if uint(idx) >= uint(len(src)) {
+				return pqt.Values{}, fmt.Errorf("dictionary index %d out of range [0,%d)", idx, len(src))
+			}
+			dst[i] = src[idx]
 		}
 		return pqt.PlainInt32Values(dst), nil
 
@@ -434,7 +447,11 @@ func resolveNativeDictionaryScratch(s *dictResolveScratch, dict *pqt.DictionaryD
 			dst = make([]float64, n)
 		}
 		for i := 0; i < n; i++ {
-			dst[i] = src[indices[i]]
+			idx := indices[i]
+			if uint(idx) >= uint(len(src)) {
+				return pqt.Values{}, fmt.Errorf("dictionary index %d out of range [0,%d)", idx, len(src))
+			}
+			dst[i] = src[idx]
 		}
 		return pqt.PlainFloat64Values(dst), nil
 
@@ -450,20 +467,24 @@ func resolveNativeDictionaryScratch(s *dictResolveScratch, dict *pqt.DictionaryD
 			dst = make([]float32, n)
 		}
 		for i := 0; i < n; i++ {
-			dst[i] = src[indices[i]]
+			idx := indices[i]
+			if uint(idx) >= uint(len(src)) {
+				return pqt.Values{}, fmt.Errorf("dictionary index %d out of range [0,%d)", idx, len(src))
+			}
+			dst[i] = src[idx]
 		}
 		return pqt.PlainFloat32Values(dst), nil
 
 	case pqt.TypeVector:
 		// VECTOR stored as FIXED_LEN_BYTE_ARRAY: resolve dictionary indices.
-		return resolveDictByteArrayScratch(s, dict, indices, n), nil
+		return resolveDictByteArrayScratch(s, dict, indices, n)
 
 	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
-		return resolveDictByteArrayScratch(s, dict, indices, n), nil
+		return resolveDictByteArrayScratch(s, dict, indices, n)
 
 	default:
 		// Fallback for unknown types: treat as byte array.
-		return resolveDictByteArrayScratch(s, dict, indices, n), nil
+		return resolveDictByteArrayScratch(s, dict, indices, n)
 	}
 }
 
@@ -472,15 +493,21 @@ func resolveNativeDictionaryScratch(s *dictResolveScratch, dict *pqt.DictionaryD
 // indices: the append-from-nil growth this replaces re-memmoved the whole
 // buffer log2(size) times per page and ranked 23% of worker growslice CPU
 // in the 2026-08-12 treatment profile.
-func resolveDictByteArray(dict *pqt.DictionaryData, indices []int32, n int) pqt.Values {
+func resolveDictByteArray(dict *pqt.DictionaryData, indices []int32, n int) (pqt.Values, error) {
 	return resolveDictByteArrayScratch(nil, dict, indices, n)
 }
 
-func resolveDictByteArrayScratch(s *dictResolveScratch, dict *pqt.DictionaryData, indices []int32, n int) pqt.Values {
+func resolveDictByteArrayScratch(s *dictResolveScratch, dict *pqt.DictionaryData, indices []int32, n int) (pqt.Values, error) {
 	dictData, dictOffsets := dict.Data.ByteArray()
+	numVals := len(dictOffsets) - 1
 	total := 0
 	for i := 0; i < n; i++ {
 		idx := indices[i]
+		// In-loop bounds check (the ValidateDictIndices pre-pass is gone):
+		// corrupt/hostile indices must error, never panic or mis-slice.
+		if uint(idx) >= uint(numVals) {
+			return pqt.Values{}, fmt.Errorf("dictionary index %d out of range [0,%d)", idx, numVals)
+		}
 		total += int(dictOffsets[idx+1] - dictOffsets[idx])
 	}
 	var buf []byte
@@ -507,7 +534,7 @@ func resolveDictByteArrayScratch(s *dictResolveScratch, dict *pqt.DictionaryData
 	if s != nil {
 		s.buf = buf
 	}
-	return pqt.ByteArrayValues(buf, offsets)
+	return pqt.ByteArrayValues(buf, offsets), nil
 }
 
 // copyNativeDataDirect copies non-null page data into a Vector.
