@@ -470,3 +470,55 @@ func TestShuffleExtentIndex_EndToEndMemStore(t *testing.T) {
 		t.Fatal("indexed consumption still staged bytes")
 	}
 }
+
+// TestSrcAcqStats_TierTallies pins the straggler-attribution counters: a
+// drained source reports one acquisition per input file, distributed over
+// the tier set, and exposes them via the srcAcqReporter seam the phases
+// line consumes.
+func TestSrcAcqStats_TierTallies(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	const bucket = "test"
+	if err := store.MakeBucket(ctx, bucket); err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{"queries/q/p0/a.wshf", "queries/q/p1/b.wshf"}
+	for i, k := range keys {
+		wire := buildMultiTypeWSHF(t, int64(103+i), 6, 32)
+		if _, err := store.Put(ctx, bucket, k, bytes.NewReader(wire), int64(len(wire)), "application/octet-stream"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := &Executor{store: store, spillDir: t.TempDir(), cpuTokens: newCPUTokens(2)}
+	src := newCachedFileStreamSource(e, "", bucket, keys)
+	if err := src.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		b, err := src.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil {
+			break
+		}
+	}
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var rep srcAcqReporter = src
+	attrs := rep.srcAcqAttrs()
+	if len(attrs) == 0 {
+		t.Fatal("no acquisition attrs after drain")
+	}
+	var total int64
+	for i := 0; i+1 < len(attrs); i += 2 {
+		k, _ := attrs[i].(string)
+		if strings.HasSuffix(k, "_files") {
+			total += attrs[i+1].(int64)
+		}
+	}
+	if total != int64(len(keys)) {
+		t.Fatalf("tier file tallies sum to %d, want %d (attrs: %v)", total, len(keys), attrs)
+	}
+}

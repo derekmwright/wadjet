@@ -69,6 +69,11 @@ type manifestStreamSource struct {
 	current manifestFileSet
 	initCtx context.Context
 
+	// acq aggregates acquisition tallies across every inner source this
+	// wrapper creates (src_acq_stats.go); injected into each inner at
+	// construction so the fragment phases line sees the whole task.
+	acq srcAcqStats
+
 	// donorInner mirrors inner for producer token donation (§2.2): inner is
 	// owned by the producer goroutine in Next, but tryDonateToken is called
 	// from consumer goroutines yielding width. A stale target refuses the
@@ -201,6 +206,7 @@ func (s *manifestStreamSource) Next(ctx context.Context) (*batch.RecordBatch, er
 			s.consumed[s.current.taskID] = s.current.attempt
 			s.mu.Unlock()
 			inner := newCachedFileStreamSource(s.executor, s.queryID, s.bucket, s.current.files)
+			inner.acq = &s.acq
 			if err := inner.Init(ctx); err != nil {
 				return nil, fmt.Errorf("eager source: inner init (%s): %w", s.current.taskID, err)
 			}
@@ -235,6 +241,10 @@ func (s *manifestStreamSource) Close() error {
 	}
 	return nil
 }
+
+// srcAcqAttrs implements srcAcqReporter: the shared tally covers every
+// inner source this task consumed.
+func (s *manifestStreamSource) srcAcqAttrs() []any { return s.acq.attrs() }
 
 // tryDonateToken implements producerTokenDonor by forwarding to the current
 // inner file-set reader (§2.2 producer token donation).

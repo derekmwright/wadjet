@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -67,6 +68,12 @@ type cachedFileStreamSource struct {
 	bucket   string
 	queryID  string // used to look up same-worker LocalStageCache entries; "" disables
 	files    []string
+
+	// acq tallies per-tier file-open counts and wall (src_acq_stats.go —
+	// the straggler-mode attribution counters). Lazily allocated by
+	// openNextFile; an eager-manifest wrapper injects its shared instance
+	// so tallies aggregate across inner sources. Producer-goroutine only.
+	acq *srcAcqStats
 
 	// projectColumns optionally restricts parquet reads to these columns
 	// by name. Applied only when EVERY requested column exists in the
@@ -438,7 +445,25 @@ func (s *cachedFileStreamSource) releaseCurrentFile() {
 
 // openNextFile downloads and opens the next file, setting either chunkReader
 // (for WSHF) or batches (for Parquet). Advances fileIdx.
+// openNextFile resolves and opens the next input file through the tier
+// chain, charging the end-to-end wall (prefetch-take wait, fallthroughs,
+// first byte) to the tier that resolved it — the straggler-mode
+// attribution counters (src_acq_stats.go). Errors are charged to the tier
+// that raised them: the time was spent either way.
 func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
+	if s.acq == nil {
+		s.acq = &srcAcqStats{}
+	}
+	t0 := time.Now()
+	tier, err := s.openNextFileTiered(ctx)
+	s.acq.note(tier, time.Since(t0))
+	return err
+}
+
+// srcAcqAttrs implements srcAcqReporter for the fragment phases line.
+func (s *cachedFileStreamSource) srcAcqAttrs() []any { return s.acq.attrs() }
+
+func (s *cachedFileStreamSource) openNextFileTiered(ctx context.Context) (acqTier, error) {
 	filePath := s.files[s.fileIdx]
 	idx := s.fileIdx
 	s.fileIdx++
@@ -464,14 +489,17 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 				err = s.openPrefetchedParquet(res.localPath, filePath)
 			}
 			if err == nil {
-				return nil
+				return acqPrefetch, nil
 			}
 			// Open failed (truncated download, unexpected payload) — the
 			// temp was removed; fall through to the tiered path below,
 			// which re-resolves from the durable copy.
+			s.acq.prefetchMiss++
+		} else {
+			// skipped or err: strictly best-effort — the tiered path below
+			// is authoritative for both resolution and error reporting.
+			s.acq.prefetchMiss++
 		}
-		// skipped or err: strictly best-effort — the tiered path below is
-		// authoritative for both resolution and error reporting.
 	}
 
 	// Base-table cache tier: the process-wide NVMe cache already holds
@@ -484,7 +512,7 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	if lps, ok := s.executor.store.(objstore.LocalPathStore); ok {
 		if cached, ok := lps.CachedLocalPath(s.bucket, filePath); ok {
 			if err := s.openParquetFromBaseCache(cached, filePath); err == nil {
-				return nil
+				return acqBaseCache, nil
 			} else if s.executor.logger != nil {
 				s.executor.logger.Debug("base-table cache open fell through",
 					"key", filePath, "path", cached, "error", err)
@@ -502,7 +530,7 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 			if n, err := s.openShuffleFromLocalFile(cached); err == nil {
 				s.executor.shuffleIO.localFiles.Add(1)
 				s.executor.shuffleIO.localBytes.Add(n)
-				return nil
+				return acqTier0, nil
 			}
 			// On any failure (file vanished, mmap error), fall through to
 			// the existing KV/S3 path — the durable copy is still there.
@@ -529,11 +557,11 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 				codec, isShuffle := codecForMagic(magic)
 				if isShuffle {
 					if err := s.openShuffleInMemory(filePath, magic[:], bytes.NewReader(data[4:]), codec); err != nil {
-						return err
+						return acqKV, err
 					}
 					s.executor.shuffleIO.kvFiles.Add(1)
 					s.executor.shuffleIO.kvBytes.Add(int64(kvDataLen))
-					return nil
+					return acqKV, nil
 				}
 				// Non-shuffle payload (e.g., parquet) — fall through to S3.
 			}
@@ -551,7 +579,7 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 			if perr := s.openShuffleFromPeer(ctx, filePath, addr, token); perr == nil {
 				peers.fetchHits.Add(1)
 				s.executor.shuffleIO.peerFiles.Add(1)
-				return nil
+				return acqPeer, nil
 			} else {
 				peers.fetchFallthrough.Add(1)
 				if s.executor.logger != nil {
@@ -578,7 +606,7 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 			if addr, token := peers.hintFor(filePath); addr != "" || token != "" {
 				waited, waitErr := s.awaitDurableObject(ctx, filePath)
 				if waitErr != nil {
-					return &missingInputError{key: filePath, cause: waitErr}
+					return acqS3, &missingInputError{key: filePath, cause: waitErr}
 				}
 				rc = waited
 				err = nil
@@ -589,7 +617,7 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 		// Both KV and store missed. Annotate so the diagnostic gap from
 		// 2026-04-25 (object not found cascade in pgwire→coord routing)
 		// is visible the next time it surfaces.
-		return fmt.Errorf("opening cached file %s (kvErr=%v, kvDataLen=%d, kvMagic=%q, bucket=%s): %w",
+		return acqS3, fmt.Errorf("opening cached file %s (kvErr=%v, kvDataLen=%d, kvMagic=%q, bucket=%s): %w",
 			filePath, kvErr, kvDataLen, kvMagic, s.bucket, err)
 	}
 	rcOwnedByReader := false
@@ -603,7 +631,7 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	// have a 4-byte magic at offset 0.
 	var magic [4]byte
 	if _, err := io.ReadFull(rc, magic[:]); err != nil {
-		return fmt.Errorf("reading magic from %s: %w", filePath, err)
+		return acqS3, fmt.Errorf("reading magic from %s: %w", filePath, err)
 	}
 
 	codec, isShuffle := codecForMagic(magic)
@@ -623,18 +651,18 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 			if err := s.openShuffleStreaming(ctx, filePath, crc, codec); err == nil {
 				s.executor.shuffleIO.s3Files.Add(1)
 				rcOwnedByReader = true
-				return nil
+				return acqS3, nil
 			} else if s.executor.logger != nil {
 				s.executor.logger.Debug("streaming shuffle open failed; restaging from durable copy",
 					"key", filePath, "error", err)
 			}
-			return s.openShuffleStagedFromStore(ctx, filePath)
+			return acqS3, s.openShuffleStagedFromStore(ctx, filePath)
 		}
 		if err := s.openShuffleFile(ctx, filePath, magic[:], crc, codec); err != nil {
-			return err
+			return acqS3, err
 		}
 		s.executor.shuffleIO.s3Files.Add(1)
-		return nil
+		return acqS3, nil
 	}
 
 	// Parquet path: when a spill dir is available, stream the body to a
@@ -666,21 +694,21 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 		if scanPreadEnabled && scanPreadHotEnabled {
 			f, lp, size, err := s.streamParquetToLocalFile(ctx, filePath, magic[:], rc)
 			if err != nil {
-				return fmt.Errorf("streaming parquet %s to local file: %w", filePath, err)
+				return acqS3, fmt.Errorf("streaming parquet %s to local file: %w", filePath, err)
 			}
 			fadviseSequential(f, size)
 			// buildParquetStateFromFile owns f and unlinks lp on a bad
 			// payload.
 			p, err := s.buildParquetStateFromFile(filePath, f, size, lp)
 			if err != nil {
-				return err
+				return acqS3, err
 			}
 			s.installParquet(p)
-			return nil
+			return acqS3, nil
 		}
 		md, lp, err := s.streamParquetToLocalMmap(ctx, filePath, magic[:], rc)
 		if err != nil {
-			return fmt.Errorf("streaming parquet %s to local mmap: %w", filePath, err)
+			return acqS3, fmt.Errorf("streaming parquet %s to local mmap: %w", filePath, err)
 		}
 		mmapData = md
 		localPath = lp
@@ -688,11 +716,11 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	} else {
 		rest, err := io.ReadAll(rc)
 		if err != nil {
-			return fmt.Errorf("reading parquet body for %s: %w", filePath, err)
+			return acqS3, fmt.Errorf("reading parquet body for %s: %w", filePath, err)
 		}
 		data = append(magic[:], rest...)
 	}
-	return s.finishOpenParquet(filePath, data, mmapData, localPath)
+	return acqS3, s.finishOpenParquet(filePath, data, mmapData, localPath)
 }
 
 // openPrefetchedParquet opens a parquet file the prefetcher already

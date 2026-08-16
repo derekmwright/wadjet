@@ -63,6 +63,11 @@ type fragmentProgress struct {
 	backpressureCount   atomic.Int64
 	backpressurePauseMS atomic.Int64
 
+	// srcAcq, when set by the runner, folds the source's per-tier file
+	// acquisition tallies (src_acq_stats.go) into the phases line — the
+	// straggler-mode attribution counters. Read only in finish().
+	srcAcq srcAcqReporter
+
 	// Phase timing (ns), fed by the fragment runners. Splits a slow task's
 	// wall into WHERE it went — the 2026-07-20 Q08 diagnosis had a task at
 	// uniform 1/3 speed and no counter that could say whether the source,
@@ -166,6 +171,9 @@ func (p *fragmentProgress) finish(totalRows int64) {
 		"elapsed_ms", elapsed.Milliseconds(),
 		"rows", totalRows,
 	})
+	if p.srcAcq != nil {
+		attrs = append(attrs, p.srcAcq.srcAcqAttrs()...)
+	}
 	if elapsed >= fragmentPhaseLogFloor {
 		p.logger.Info("fragment task phases", attrs...)
 		return
@@ -687,6 +695,9 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 	}
 	progress := exec.ProgressReporterFromContext(ctx)
 	fp := newFragmentProgress(e.logger, task, e)
+	if r, ok := src.(srcAcqReporter); ok {
+		fp.srcAcq = r
+	}
 	src = fp.timeSource(src)
 	var totalRows int64
 	consume := func(ctx context.Context, b *batch.RecordBatch) error {
@@ -1028,6 +1039,9 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 	fragStart := time.Now()
 	progress := exec.ProgressReporterFromContext(ctx)
 	fp := newFragmentProgress(e.logger, task, e)
+	if r, ok := src.(srcAcqReporter); ok {
+		fp.srcAcq = r
+	}
 	src = fp.timeSource(src)
 	var totalRows atomic.Int64
 	defer func() { fp.finish(totalRows.Load()) }()
@@ -1257,6 +1271,9 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink exec.MergeableSink, k int, gate *widthGate) error {
 	fragStart := time.Now()
 	fp := newFragmentProgress(e.logger, task, e)
+	if r, ok := src.(srcAcqReporter); ok {
+		fp.srcAcq = r
+	}
 
 	consumeInto := func(ctx context.Context, dst exec.Sink, b *batch.RecordBatch) error {
 		if b.Sel != nil {
@@ -1592,6 +1609,9 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 	// Created up front (not at the final phase) so the elapsed clock and
 	// src timing cover the breaker-consume phases too.
 	fp := newFragmentProgress(e.logger, task, e)
+	if r, ok := src.(srcAcqReporter); ok {
+		fp.srcAcq = r
+	}
 	src = fp.timeSource(src)
 
 	breakers := make([]*fragmentBreaker, len(breakerIdxs))
