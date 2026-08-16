@@ -903,18 +903,31 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 		// Apply delete markers with row offset adjustment
 		unit := inner.rgUnits[idx]
 		if delSet := inner.deleteMarkers[unit.slot.entry.Path]; len(delSet) > 0 {
-			sel := make([]uint32, 0, b.Len)
-			for i := 0; i < b.Len; i++ {
-				absRow := unit.rgRowOffset + int64(i)
-				if !delSet[absRow] {
-					sel = append(sel, uint32(i))
+			// Intersect with any selection the scan-level filter already
+			// applied — overwriting it would resurrect filtered rows.
+			var sel []uint32
+			if b.Sel != nil {
+				sel = make([]uint32, 0, len(b.Sel))
+				for _, i := range b.Sel {
+					absRow := unit.rgRowOffset + int64(i)
+					if !delSet[absRow] {
+						sel = append(sel, i)
+					}
+				}
+			} else {
+				sel = make([]uint32, 0, b.Len)
+				for i := 0; i < b.Len; i++ {
+					absRow := unit.rgRowOffset + int64(i)
+					if !delSet[absRow] {
+						sel = append(sel, uint32(i))
+					}
 				}
 			}
 			if len(sel) == 0 {
 				inner.releaseScanBatch(b)
 				continue
 			}
-			if len(sel) < b.Len {
+			if len(sel) < b.Len || b.Sel != nil {
 				b.Sel = sel
 			}
 		}
@@ -964,6 +977,37 @@ func (inner *scanSourceInner) readRG(ctx context.Context, unitIdx int) *batch.Re
 		unit.slot.releaseRG(inner)
 		return nil
 	}
+	// Scan-level filter: evaluate pushed conjuncts off the pages before
+	// materializing anything (dictionary-mask per chunk; filter-only
+	// columns never reach a vector). See scan/row_filter.go.
+	var filterSel []uint32
+	if len(inner.rowPreds) > 0 {
+		sel, dec, ferr := scan.EvalRowGroupPreds(rdr, unit.rgIndex, inner.rowPreds, int(unit.numRows))
+		if ferr != nil {
+			unit.slot.releaseRG(inner)
+			select {
+			case inner.errCh <- fmt.Errorf("scan filter %s row group %d: %w", unit.slot.entry.Path, unit.rgIndex, ferr):
+			default:
+			}
+			return nil
+		}
+		switch dec {
+		case scan.FilterNone:
+			unit.slot.releaseRG(inner)
+			return nil
+		case scan.FilterPartial:
+			filterSel = sel
+		}
+		// Count-only scans (bare COUNT(*) with every filter column pushed
+		// down): nothing needs materialization — the batch is Len + Sel.
+		// Without this the row-count sentinel decoded the narrowest column
+		// for values nobody reads, which was the entire remaining cost of
+		// the filtered-count floor shape.
+		if inner.countOnlyScan && !inner.emitRowLoc {
+			unit.slot.releaseRG(inner)
+			return &batch.RecordBatch{Len: int(unit.numRows), Sel: filterSel}
+		}
+	}
 	b, err := scan.ReadRowGroupNative(rdr, unit.rgIndex, inner.readSchema(), inner.pool)
 	unit.slot.releaseRG(inner)
 	if err != nil {
@@ -979,6 +1023,9 @@ func (inner *scanSourceInner) readRG(ctx context.Context, unitIdx int) *batch.Re
 	}
 	if inner.emitRowLoc && b != nil && b.Len > 0 {
 		stampRowLoc(b, unitIdx)
+	}
+	if filterSel != nil && b != nil {
+		b.Sel = filterSel
 	}
 	inner.trackScanBatch(b)
 	return b

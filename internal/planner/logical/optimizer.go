@@ -108,6 +108,41 @@ func attachScanPredicates(n *Node) {
 	}
 }
 
+// SplitConjunctsForPushdown decomposes an AST filter into top-level
+// AND-conjuncts and partitions them: structured `column <op> literal`
+// comparisons (as Predicates) and everything else (residual ASTs). The
+// physical planner uses this to push eligible conjuncts into the scan
+// and compile only the residue as the exec filter.
+func SplitConjunctsForPushdown(expr plansql.Node) ([]Predicate, []plansql.Node) {
+	structured := structuredConjuncts(expr)
+	// Recompute the conjunct list and subtract the structured ones by AST
+	// identity (structuredConjuncts stores each conjunct's AST).
+	matched := make(map[plansql.Node]bool, len(structured))
+	for _, p := range structured {
+		matched[p.ASTExpr] = true
+	}
+	var conj []plansql.Node
+	var split func(n plansql.Node)
+	split = func(n plansql.Node) {
+		switch t := stripParens(n).(type) {
+		case *plansql.AndNode:
+			split(t.Left)
+			split(t.Right)
+		default:
+			conj = append(conj, n)
+		}
+	}
+	split(expr)
+	var residual []plansql.Node
+	for _, c := range conj {
+		if sp, ok := stripParens(c).(*plansql.CmpExpr); ok && matched[plansql.Node(sp)] {
+			continue
+		}
+		residual = append(residual, c)
+	}
+	return structured, residual
+}
+
 // structuredConjuncts splits an AST filter into top-level AND-conjuncts
 // and returns a structured Predicate for each `column <op> literal` (or
 // flipped) comparison. Anything else — ORs, functions, non-literal sides —
@@ -379,6 +414,24 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 		needs[col] = true
 	}
 	collectNodeColumnRefs(n, needs)
+
+	// A Filter directly over a Scan: record which columns the filter alone
+	// requires (referenced by the filter, not by anything above it). When
+	// the physical planner pushes a conjunct into the scan's row filter,
+	// a filter-only column needs no materialization at all — the scan
+	// evaluates it from pages and the value never reaches a vector.
+	if n.Type == NodeFilter && len(n.Children) == 1 && n.Children[0].Type == NodeScan {
+		filterRefs := make(map[string]bool, 4)
+		collectNodeColumnRefs(n, filterRefs)
+		var only []string
+		for col := range filterRefs {
+			if !parentNeeds[col] {
+				only = append(only, col)
+			}
+		}
+		sort.Strings(only)
+		n.Children[0].FilterOnlyColumns = only
+	}
 
 	if n.Type == NodeScan {
 		if len(needs) > 0 {

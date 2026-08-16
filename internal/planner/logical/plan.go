@@ -96,6 +96,7 @@ type Node struct {
 	ScanPredicates  []Predicate       // pushed-down filter predicates for row group pruning
 	ScanRowEstimate int64             // estimated row count from manifest (0 = unknown)
 	ScanColStats    map[string]ScanColumnStats // aggregated column stats from catalog (nil = unavailable)
+	FilterOnlyColumns []string        // columns needed ONLY by the filter directly above this scan (candidates for scan-level filter evaluation without materialization)
 	SampleMethod    string            // TABLESAMPLE method: BERNOULLI, SYSTEM
 	SamplePercent   float64           // percentage for TABLESAMPLE (0-100)
 

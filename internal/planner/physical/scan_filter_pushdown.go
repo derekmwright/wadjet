@@ -1,0 +1,219 @@
+package physical
+
+import (
+	"context"
+	"os"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/derekmwright/wadjet/internal/engine/scan"
+	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+)
+
+// Scan-level filter pushdown (see scan/row_filter.go): eligible
+// `col <op> literal` conjuncts of a Filter directly over a catalog scan
+// are evaluated by the scan itself — dictionary-mask per chunk instead of
+// gather+compare per row — and filter-only columns stop being
+// materialized. The exec filter keeps only the residual conjuncts.
+//
+// Eligibility is deliberately strict (semantics parity with the
+// expression layer): int-class columns take integral literals, string
+// columns take string literals, DATE columns take parseable date strings
+// (coerced to day numbers). Floats, timestamps-as-strings, and anything
+// with coercion ambiguity stay in the exec filter. Local planning path
+// only. Kill switch: WADJET_SCAN_FILTER=0.
+
+// ScanFilterPushdowns counts filters (conjuncts) pushed into scans.
+var ScanFilterPushdowns atomic.Int64
+
+var scanFilterEnabled = os.Getenv("WADJET_SCAN_FILTER") != "0"
+
+// tryPushFilterIntoScan attempts the pushdown for one Filter node whose
+// built child is css. It returns the predicates the exec filter must
+// still evaluate (possibly the originals, untouched).
+func (p *Planner) tryPushFilterIntoScan(ctx context.Context, node *logical.Node, css *catalogScanSource) []logical.Predicate {
+	orig := node.Predicates
+	if !scanFilterEnabled || css.cache != nil ||
+		p.StreamingSources != nil || p.MaterializedInputs != nil || p.ScanFileFilter != nil {
+		return orig
+	}
+	scanNode := node.Children[0]
+	if scanNode.Type != logical.NodeScan || scanNode.IsTableFunc || scanNode.SampleMethod != "" {
+		return orig
+	}
+	meta, err := p.catalog.GetTable(ctx, scanNode.TableName)
+	if err != nil {
+		return orig
+	}
+	// Nested schemas take the row-based fallback scan, which never
+	// evaluates rowPreds — pushing there would silently DROP the filter.
+	if (&parquet.Schema{Columns: meta.Schema.Columns}).HasNestedColumns() {
+		return orig
+	}
+	colType := make(map[string]parquet.TypeID, len(meta.Schema.Columns))
+	canon := make(map[string]string, len(meta.Schema.Columns))
+	for _, c := range meta.Schema.Columns {
+		colType[strings.ToLower(c.Name)] = c.Type
+		canon[strings.ToLower(c.Name)] = c.Name
+	}
+
+	var pushed []scan.RowPred
+	var pushedCols []string
+	var residual []logical.Predicate
+	for _, pred := range orig {
+		if pred.ASTExpr == nil {
+			residual = append(residual, pred)
+			continue
+		}
+		structured, rest := logical.SplitConjunctsForPushdown(pred.ASTExpr)
+		for _, c := range rest {
+			residual = append(residual, logical.Predicate{Raw: c.String(), ASTExpr: c})
+		}
+		for _, sc := range structured {
+			name, ok := canon[strings.ToLower(sc.Column)]
+			if !ok {
+				residual = append(residual, logical.Predicate{Raw: sc.Raw, ASTExpr: sc.ASTExpr})
+				continue
+			}
+			rp, ok := makeRowPred(name, colType[strings.ToLower(sc.Column)], sc)
+			if !ok {
+				residual = append(residual, logical.Predicate{Raw: sc.Raw, ASTExpr: sc.ASTExpr})
+				continue
+			}
+			pushed = append(pushed, rp)
+			pushedCols = append(pushedCols, name)
+		}
+	}
+	if len(pushed) == 0 {
+		return orig
+	}
+	css.rowPreds = pushed
+	ScanFilterPushdowns.Add(int64(len(pushed)))
+
+	// Drop filter-only columns from materialization when the residual no
+	// longer references them: the scan filter reads their pages itself.
+	if len(scanNode.FilterOnlyColumns) > 0 && len(css.requiredCols) > 0 {
+		residualRefs := make(map[string]bool, 4)
+		for _, r := range residual {
+			if r.ASTExpr != nil {
+				collectASTCols(r.ASTExpr, residualRefs)
+			}
+		}
+		filterOnly := make(map[string]bool, len(scanNode.FilterOnlyColumns))
+		for _, c := range scanNode.FilterOnlyColumns {
+			filterOnly[strings.ToLower(c)] = true
+		}
+		droppable := make(map[string]bool, len(pushedCols))
+		for _, c := range pushedCols {
+			lc := strings.ToLower(c)
+			if filterOnly[lc] && !residualRefs[lc] {
+				droppable[lc] = true
+			}
+		}
+		if len(droppable) > 0 {
+			kept := css.requiredCols[:0:0]
+			for _, c := range css.requiredCols {
+				if !droppable[strings.ToLower(c)] {
+					kept = append(kept, c)
+				}
+			}
+			if len(kept) == 0 {
+				// Nothing left to materialize — the row-count sentinel
+				// keeps batch lengths flowing (narrowest-column decode).
+				kept = []string{logical.RowCountOnlyColumn}
+			}
+			css.requiredCols = kept
+		}
+	}
+	return residual
+}
+
+// makeRowPred normalizes one structured conjunct into a scan.RowPred,
+// declining anything whose comparison semantics would not be exact.
+func makeRowPred(colName string, typ parquet.TypeID, sc logical.Predicate) (scan.RowPred, bool) {
+	switch sc.Op {
+	case "=", "!=", "<", "<=", ">", ">=":
+	default:
+		return scan.RowPred{}, false
+	}
+	switch typ {
+	case parquet.TypeInt64, parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration:
+		if v, ok := sc.Value.(int64); ok {
+			return scan.RowPred{Col: colName, Op: sc.Op, Value: v}, true
+		}
+	case parquet.TypeDate:
+		if str, ok := sc.Value.(string); ok {
+			if ts, err := time.Parse("2006-01-02", str); err == nil {
+				return scan.RowPred{Col: colName, Op: sc.Op, Value: ts.Unix() / 86400}, true
+			}
+		}
+		if v, ok := sc.Value.(int64); ok {
+			return scan.RowPred{Col: colName, Op: sc.Op, Value: v}, true
+		}
+	case parquet.TypeString, parquet.TypeBytes:
+		if v, ok := sc.Value.(string); ok {
+			return scan.RowPred{Col: colName, Op: sc.Op, Value: v}, true
+		}
+	}
+	return scan.RowPred{}, false
+}
+
+// collectASTCols gathers lowercase column names referenced by an AST.
+func collectASTCols(n plansql.Node, out map[string]bool) {
+	switch t := n.(type) {
+	case *plansql.ColRef:
+		out[strings.ToLower(t.Column)] = true
+	case *plansql.CmpExpr:
+		collectASTCols(t.Left, out)
+		collectASTCols(t.Right, out)
+	case *plansql.BinaryOp:
+		collectASTCols(t.Left, out)
+		collectASTCols(t.Right, out)
+	case *plansql.AndNode:
+		collectASTCols(t.Left, out)
+		collectASTCols(t.Right, out)
+	case *plansql.OrNode:
+		collectASTCols(t.Left, out)
+		collectASTCols(t.Right, out)
+	case *plansql.NotNode:
+		collectASTCols(t.Inner, out)
+	case *plansql.ParenNode:
+		collectASTCols(t.Inner, out)
+	case *plansql.UnaryOp:
+		collectASTCols(t.Inner, out)
+	case *plansql.LikeExpr:
+		collectASTCols(t.Left, out)
+		collectASTCols(t.Pattern, out)
+	case *plansql.InExpr:
+		collectASTCols(t.Left, out)
+		for _, v := range t.Values {
+			collectASTCols(v, out)
+		}
+	case *plansql.BetweenExpr:
+		collectASTCols(t.Left, out)
+		collectASTCols(t.Low, out)
+		collectASTCols(t.High, out)
+	case *plansql.IsExpr:
+		collectASTCols(t.Left, out)
+	case *plansql.FuncCallNode:
+		for _, a := range t.Args {
+			collectASTCols(a, out)
+		}
+	case *plansql.CaseNode:
+		if t.Subject != nil {
+			collectASTCols(t.Subject, out)
+		}
+		for _, w := range t.Whens {
+			collectASTCols(w.Cond, out)
+			collectASTCols(w.Result, out)
+		}
+		if t.Else != nil {
+			collectASTCols(t.Else, out)
+		}
+	case *plansql.CastNode:
+		collectASTCols(t.Inner, out)
+	}
+}

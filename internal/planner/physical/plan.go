@@ -5336,7 +5336,16 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 	outerTables := collectTableAliases(node.Children[0])
 	outerCols := collectOuterColumns(node.Children[0])
 
-	for _, pred := range node.Predicates {
+	// Scan-level filter pushdown: when the filter sits directly on a
+	// catalog scan, eligible conjuncts move into the scan (dictionary-mask
+	// evaluation, no materialization of filter-only columns) and only the
+	// residue compiles into exec filter ops. See scan_filter_pushdown.go.
+	preds := node.Predicates
+	if css, ok := source.(*catalogScanSource); ok && len(ops) == 0 {
+		preds = p.tryPushFilterIntoScan(ctx, node, css)
+	}
+
+	for _, pred := range preds {
 		filter := p.buildFilterOp(pred, outerTables, outerCols)
 		if filter != nil {
 			ops = append(ops, filter)
@@ -6331,7 +6340,10 @@ func (p *Planner) buildLimit(ctx context.Context, node *logical.Node) (exec.Sour
 	// of the eager "download all files upfront" strategy. Safe when no pipeline
 	// breaker (sort/aggregate/join) sits between LIMIT and SCAN — if there is
 	// one, the source won't be a catalogScanSource and the assertion fails.
-	if cs, ok := source.(*catalogScanSource); ok {
+	if cs, ok := source.(*catalogScanSource); ok && len(cs.rowPreds) == 0 {
+		// Pushed scan filters need the row-group-parallel path; the lazy
+		// LIMIT scan would silently skip them. Filters win — a filtered
+		// LIMIT usually needs to scan broadly anyway.
 		cs.rowLimit = int64(node.LimitVal) + int64(node.OffsetVal)
 	}
 
@@ -6807,6 +6819,7 @@ type catalogScanSource struct {
 	memTracker      *memory.Tracker       // per-query memory tracker; wired at construction when budget>0
 	spillMgr        *memory.SpillManager  // for pre-emptive relief on file-load reservations; nil-safe
 	emitRowLoc      bool                  // top-N late materialization: stamp __row_loc on scan batches
+	rowPreds        []scan.RowPred        // scan-level filter conjuncts (scan_filter_pushdown.go)
 }
 
 // RefetchRows re-reads the full-width rows named by __row_loc values (see
@@ -6883,6 +6896,7 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 			ses.spillMgr = s.spillMgr
 		}
 		ses.emitRowLoc = s.emitRowLoc
+		ses.rowPreds = s.rowPreds
 	}
 	s.inner = sc
 	return s.inner.Init(ctx)
@@ -8263,6 +8277,7 @@ type scannerExecSource struct {
 	memTracker      *memory.Tracker      // per-query memory tracker; passed to scanSourceInner at Init
 	spillMgr        *memory.SpillManager // for pre-emptive relief on file-load reservations; nil-safe
 	emitRowLoc      bool                 // top-N late materialization: stamp __row_loc on scan batches
+	rowPreds        []scan.RowPred       // scan-level filter conjuncts
 }
 
 type scanSourceInner struct {
@@ -8283,6 +8298,8 @@ type scanSourceInner struct {
 	rgIdx     int64     // atomic index for parallel RG workers
 	emitRowLoc bool     // stamp __row_loc (rgUnit ordinal, row) on every scan batch; disables batch pooling
 	eqProbes  []scan.EqProbe // "=" conjuncts for dictionary-probe row-group pruning (dict_prune.go)
+	rowPreds  []scan.RowPred // scan-level filter conjuncts, evaluated per row group in readRG
+	countOnlyScan bool // requiredCols is exactly the row-count sentinel: batches carry Len/Sel only
 	useNative bool      // true if native page decoder can be used (no Decimal/Array/Map)
 	loadGate  *loadGate // byte-budgeted admission for in-flight file LOADs (data, not metadata)
 
@@ -8548,6 +8565,8 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		spillMgr:      s.spillMgr,
 		emitRowLoc:    s.emitRowLoc,
 		eqProbes:      eqProbes,
+		rowPreds:      s.rowPreds,
+		countOnlyScan: len(s.requiredCols) == 1 && s.requiredCols[0] == logical.RowCountOnlyColumn,
 	}
 	// Nested (ARRAY/MAP/ROW) schemas must take the file-level scan whose
 	// readBatchDirect falls back to the row-based reader. This MUST be
@@ -8565,6 +8584,13 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	if inner.emitRowLoc && (inner.rowLimit > 0 || inner.hasNestedTypes) {
 		cancel()
 		return fmt.Errorf("scan %s: row-loc emission requires the row-group-parallel scan path", s.tableName)
+	}
+	// Same for pushed scan filters: the lazy/nested path never evaluates
+	// them, and a silently dropped filter is wrong results. The planner
+	// gates both conditions; fail loudly if they ever meet anyway.
+	if len(inner.rowPreds) > 0 && (inner.rowLimit > 0 || inner.hasNestedTypes) {
+		cancel()
+		return fmt.Errorf("scan %s: pushed scan filters require the row-group-parallel scan path", s.tableName)
 	}
 
 	if inner.rowLimit > 0 || inner.hasNestedTypes {
