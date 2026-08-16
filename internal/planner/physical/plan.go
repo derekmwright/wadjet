@@ -5716,11 +5716,60 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		groupByCols[i] = strings.TrimSpace(gb)
 	}
 
+	// Literal group keys (GROUP BY 1, URL — the positional ref resolves to
+	// the literal select item) are constant per row: they cannot affect
+	// grouping, but as synthetic key columns they widen every serialized
+	// key and force the multi-column generic path over the single-column
+	// fast paths (ClickBench Q35 vs Q34). Elide them from the key set and
+	// re-attach the constant as a post-aggregate column under the same
+	// synthetic name the downstream projection expects. Kept out of
+	// grouping-sets plans (set indices reference key positions), and only
+	// when a non-literal key remains — GROUP BY over literals alone must
+	// still emit zero rows on empty input, which one retained key
+	// preserves.
+	var litPostOps []exec.UnaryOperator
+	litElided := map[int]bool{}
+	if len(node.GroupByExprs) == len(node.GroupBy) && len(node.GroupingSets) == 0 {
+		nonLit := 0
+		for _, gbExpr := range node.GroupByExprs {
+			if gbExpr == nil {
+				nonLit++
+				continue
+			}
+			if _, isLit := gbExpr.(*plansql.Lit); !isLit {
+				nonLit++
+			}
+		}
+		if nonLit > 0 {
+			for i, gbExpr := range node.GroupByExprs {
+				if gbExpr == nil {
+					continue
+				}
+				if _, isLit := gbExpr.(*plansql.Lit); !isLit {
+					continue
+				}
+				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
+				if compErr != nil {
+					continue
+				}
+				litPostOps = append(litPostOps, &aggPreProject{computed: []exec.ProjectColumn{{
+					Name: fmt.Sprintf("__gb_expr_%d", i),
+					Type: inferProjectionType(gbExpr, parquet.TypeString),
+					Expr: wrapExpr(compiled),
+				}}})
+				litElided[i] = true
+			}
+		}
+	}
+
 	// Handle GROUP BY expressions (e.g., SUBSTR(c_phone, 1, 2)).
 	// Compile expression-valued GROUP BY entries into pre-aggregate projections
 	// so the aggregate can group by the computed result.
 	if len(node.GroupByExprs) == len(node.GroupBy) {
 		for i, gbExpr := range node.GroupByExprs {
+			if litElided[i] {
+				continue
+			}
 			if gbExpr != nil && !isPlainGroupKey(gbExpr) {
 				synName := fmt.Sprintf("__gb_expr_%d", i)
 				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
@@ -5755,6 +5804,17 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		childOps = append(childOps, &aggPreProject{computed: preProjectCols})
 	}
 
+	// Compact literal-elided entries out of the key set.
+	if len(litElided) > 0 {
+		kept := groupByCols[:0:0]
+		for i, c := range groupByCols {
+			if !litElided[i] {
+				kept = append(kept, c)
+			}
+		}
+		groupByCols = kept
+	}
+
 	hashAgg := exec.NewHashAggregate(groupByCols, aggCols)
 	if est := findScanRowEstimate(node.Children[0]); est > 0 {
 		hashAgg.InputRowHint = est
@@ -5784,6 +5844,10 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	} else if len(node.GroupingSetNulls) > 0 {
 		hashAgg.NullGroupCols = node.GroupingSetNulls
 	}
+
+	// Elided literal keys re-attach as constant columns on the aggregate's
+	// output, under the synthetic names the projection maps to.
+	postOps = append(postOps, litPostOps...)
 
 	// The aggregate acts as both sink and source
 	// We need to run childSource -> childOps -> hashAgg(sink), then hashAgg(source) -> collectSink
