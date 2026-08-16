@@ -1248,6 +1248,9 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 		e.vecFn = DefaultRegistry.LookupVec(e.Name)
 	})
 	if e.vecFn == nil {
+		if e.tryEvalMemoized(b, out, n) {
+			return
+		}
 		for i := 0; i < n; i++ {
 			out.SetValue(i, e.Eval(b, i))
 		}
@@ -1290,6 +1293,64 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 	}
 
 	e.vecFn(argVecs, out, n)
+}
+
+// memoizableFuncs: deterministic, per-row-expensive string→scalar
+// functions with no vec kernel. Their batch inputs repeat heavily on real
+// data (ClickBench Referer: ~3x duplication within a 2048-row batch), so
+// the per-row fallback dedups inputs per batch and evaluates once per
+// distinct value. Only shapes where every argument except the first is a
+// literal qualify — the memo key is then just the first argument.
+var memoizableFuncs = map[string]bool{
+	"regexp_replace": true,
+	"regexp_extract": true,
+	"regexp_like":    true,
+	"regexp_matches": true,
+}
+
+// tryEvalMemoized runs the per-row fallback with a per-batch input memo.
+// Returns false when the call shape doesn't qualify (caller falls through
+// to the plain per-row loop).
+func (e *FuncCall) tryEvalMemoized(b *batch.RecordBatch, out *batch.Vector, n int) bool {
+	if len(e.Args) == 0 || !memoizableFuncs[strings.ToLower(e.Name)] {
+		return false
+	}
+	cr, ok := e.Args[0].(*ColRef)
+	if !ok {
+		return false
+	}
+	for _, a := range e.Args[1:] {
+		if _, isLit := a.(*Lit); !isLit {
+			return false
+		}
+	}
+	cr.resolve(b)
+	if cr.idx < 0 || cr.idx >= len(b.Columns) {
+		return false
+	}
+	vec := b.Columns[cr.idx]
+	if vec.Type != batch.TypeString && vec.Type != batch.TypeBytes {
+		return false
+	}
+	hasNulls := vec.Nulls.HasNulls()
+	memo := make(map[string]any, n/2)
+	for i := 0; i < n; i++ {
+		if hasNulls && vec.Nulls.IsNullFast(i) {
+			out.SetValue(i, e.Eval(b, i))
+			continue
+		}
+		s := vec.BytesData.UnsafeStringValue(i)
+		if v, hit := memo[s]; hit {
+			out.SetValue(i, v)
+			continue
+		}
+		v := e.Eval(b, i)
+		out.SetValue(i, v)
+		// The lookup key above is a zero-copy view into the batch;
+		// inserting needs a stable copy.
+		memo[strings.Clone(s)] = v
+	}
+	return true
 }
 
 func (e *FuncCall) evalVecPerRow(b *batch.RecordBatch, out *batch.Vector, n int) {

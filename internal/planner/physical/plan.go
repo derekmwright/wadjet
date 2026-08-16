@@ -5725,14 +5725,23 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				synName := fmt.Sprintf("__gb_expr_%d", i)
 				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
 				if compErr == nil {
-					preProjectCols = append(preProjectCols, exec.ProjectColumn{
+					pc := exec.ProjectColumn{
 						Name: synName,
 						// Numeric expressions (abs(x), x-1, …) must get a
 						// numeric synthetic column: SetValue on a String
 						// vector mangles float group keys.
 						Type: inferProjectionType(gbExpr, parquet.TypeString),
 						Expr: wrapExpr(compiled),
-					})
+					}
+					// Batched evaluation when available — beyond the vec
+					// kernels themselves, FuncCall.EvalVec is where the
+					// per-batch input memo for expensive scalar functions
+					// (regexp family, ClickBench Q29's GROUP BY key) lives;
+					// the per-row Expr path bypasses it.
+					if ve, ok := compiled.(expr.VecExpr); ok {
+						pc.VecEval = ve.EvalVec
+					}
+					preProjectCols = append(preProjectCols, pc)
 					groupByCols[i] = synName
 				}
 			}

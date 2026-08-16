@@ -35,15 +35,26 @@ func TestHitsProfileOne(t *testing.T) {
 
 	ctx := context.Background()
 	db, _ := openHitsDB(t, ctx)
-	queries := loadHitsQueries(t)
-	if qn < 1 || qn > len(queries) {
-		t.Fatalf("query %d out of range 1..%d", qn, len(queries))
+	var q string
+	if sql := os.Getenv("WADJET_HITS_SQL"); sql != "" {
+		q = sql
+	} else {
+		queries := loadHitsQueries(t)
+		if qn < 1 || qn > len(queries) {
+			t.Fatalf("query %d out of range 1..%d", qn, len(queries))
+		}
+		q = queries[qn-1]
 	}
-	q := queries[qn-1]
 
 	// One untimed warmup so first-touch decode noise stays out of reps.
-	if _, err := db.Query(ctx, q); err != nil {
+	res, err := db.Query(ctx, q)
+	if err != nil {
 		t.Fatalf("warmup: %v", err)
+	}
+	if len(res.Rows) <= 5 {
+		for _, r := range res.Rows {
+			t.Logf("row: %v", r)
+		}
 	}
 	start := time.Now()
 	for i := 0; i < reps; i++ {
