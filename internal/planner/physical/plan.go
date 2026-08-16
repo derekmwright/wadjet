@@ -5362,7 +5362,10 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	if hasAggregateAncestor(child) {
 		needsProject := false
 		for _, proj := range node.Projections {
-			if proj.ASTExpr != nil && !proj.IsAgg && !isSimpleColRef(proj.ASTExpr) {
+			// A literal select item is NOT elidable: the aggregate's output
+			// carries it as a synthetic __gb_expr_N key column, and only the
+			// projection renames it to the select-list name.
+			if proj.ASTExpr != nil && !proj.IsAgg && !isPlainGroupKey(proj.ASTExpr) {
 				needsProject = true
 				break
 			}
@@ -5415,7 +5418,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	gbExprToSyn := map[string]string{}
 	if isOverAggregate && len(aggNode.GroupByExprs) == len(aggNode.GroupBy) {
 		for i, gbExpr := range aggNode.GroupByExprs {
-			if gbExpr != nil && !isSimpleColRef(gbExpr) {
+			if gbExpr != nil && !isPlainGroupKey(gbExpr) {
 				gbExprToSyn[gbExpr.String()] = fmt.Sprintf("__gb_expr_%d", i)
 			}
 		}
@@ -5718,16 +5721,19 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// so the aggregate can group by the computed result.
 	if len(node.GroupByExprs) == len(node.GroupBy) {
 		for i, gbExpr := range node.GroupByExprs {
-			if gbExpr != nil && !isSimpleColRef(gbExpr) {
+			if gbExpr != nil && !isPlainGroupKey(gbExpr) {
 				synName := fmt.Sprintf("__gb_expr_%d", i)
 				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
 				if compErr == nil {
 					preProjectCols = append(preProjectCols, exec.ProjectColumn{
 						Name: synName,
-						Type: parquet.TypeString,
+						// Numeric expressions (abs(x), x-1, …) must get a
+						// numeric synthetic column: SetValue on a String
+						// vector mangles float group keys.
+						Type: inferProjectionType(gbExpr, parquet.TypeString),
 						Expr: wrapExpr(compiled),
 					})
-						groupByCols[i] = synName
+					groupByCols[i] = synName
 				}
 			}
 		}
@@ -5863,7 +5869,14 @@ func isNumericFunc(name string) bool {
 		"log10", "exp", "pow", "power", "sign", "trunc", "truncate",
 		"sin", "cos", "tan", "asin", "acos", "atan", "atan2",
 		"radians", "degrees", "pi", "mod", "greatest", "least",
-		"coalesce", "nullif", "random":
+		"coalesce", "nullif", "random",
+		// Temporal part extractors return float64. Typing them String made
+		// the projection allocate a Bytes output vector, which the
+		// Float64Data-writing vec kernels then panicked on (hour()) or
+		// nulled out (extract()) — ClickBench Q19/Q43.
+		"year", "month", "day", "hour", "minute", "second", "quarter",
+		"extract", "epoch", "day_of_week", "day_of_year", "week",
+		"dayofweek", "dayofyear", "millisecond", "microsecond":
 		return true
 	}
 	return false
@@ -5902,6 +5915,17 @@ func nodeIsDateOrInterval(n plansql.Node) bool {
 	default:
 		return false
 	}
+}
+
+// isPlainGroupKey reports whether a GROUP BY expression is a bare column
+// reference the aggregate can resolve by name. A literal is NOT plain here:
+// GROUP BY 1 (a positional ref resolved to a literal select item, or an
+// actual constant key) has no input column — it needs the synthetic
+// pre-projection like any computed expression, or the key silently
+// resolves to a nonexistent column and every row lands in one NULL group.
+func isPlainGroupKey(node plansql.Node) bool {
+	_, ok := node.(*plansql.ColRef)
+	return ok
 }
 
 func isSimpleColRef(node plansql.Node) bool {

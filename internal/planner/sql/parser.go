@@ -862,7 +862,8 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 }
 
 // resolvePositionalRefs replaces numeric positional references in GROUP BY
-// and ORDER BY with the corresponding SELECT column expression (1-indexed).
+// and ORDER BY with the corresponding SELECT column expression (1-indexed),
+// and resolves GROUP BY references to SELECT aliases of computed expressions.
 // UNION queries are skipped since positions would be ambiguous.
 func resolvePositionalRefs(info *SelectInfo) error {
 	if info.Union != nil {
@@ -873,7 +874,16 @@ func resolvePositionalRefs(info *SelectInfo) error {
 	for i, gb := range info.GroupBy {
 		pos, err := strconv.Atoi(strings.TrimSpace(gb))
 		if err != nil {
-			continue // not a number, leave as-is
+			// Not a number. A bare identifier naming a SELECT alias whose
+			// expression is computed (CASE, function call, arithmetic —
+			// anything but a plain column ref) must group by that
+			// expression: previously only the alias STRING was kept, so
+			// the aggregate grouped by a nonexistent column (one giant
+			// group) and the projection above re-evaluated the expression
+			// over the aggregate output, where its source columns no
+			// longer exist — every row got the ELSE/NULL value.
+			resolveGroupByAliasRef(info, i, gb)
+			continue
 		}
 		if pos < 1 || pos > len(info.Columns) {
 			return fmt.Errorf("GROUP BY position %d is out of range (1-%d)", pos, len(info.Columns))
@@ -884,6 +894,7 @@ func resolvePositionalRefs(info *SelectInfo) error {
 		} else {
 			info.GroupBy[i] = col.Expr
 		}
+		substituteGroupByExpr(info, i, col)
 	}
 
 	// Resolve ORDER BY positional refs
@@ -904,6 +915,37 @@ func resolvePositionalRefs(info *SelectInfo) error {
 	}
 
 	return nil
+}
+
+// resolveGroupByAliasRef resolves GROUP BY <alias> where <alias> names a
+// SELECT column with a computed expression. Plain column refs (including
+// renamed ones) are left alone — the aggregate resolves those by name, and
+// a table column with the same name keeps precedence over the alias.
+func resolveGroupByAliasRef(info *SelectInfo, i int, gb string) {
+	name := strings.TrimSpace(gb)
+	if strings.ContainsAny(name, ". ()") {
+		return // qualified or expression-shaped — not a bare alias
+	}
+	for _, col := range info.Columns {
+		if col.Alias != "" && strings.EqualFold(col.Alias, name) && !col.IsAgg && !col.IsWindow {
+			substituteGroupByExpr(info, i, col)
+			return
+		}
+	}
+}
+
+// substituteGroupByExpr replaces GROUP BY entry i with the select column's
+// underlying expression, so downstream column pruning, the aggregate's
+// synthetic pre-projection, and the projection's group-expression matching
+// all see the real expression. A plain renamed column (URL AS Dst) resolves
+// to its source column name — the alias is not a column of the input, so
+// grouping by it found nothing and collapsed to a single NULL-keyed group.
+func substituteGroupByExpr(info *SelectInfo, i int, col SelectColumn) {
+	if col.ASTExpr == nil || i >= len(info.GroupByExprs) {
+		return
+	}
+	info.GroupByExprs[i] = col.ASTExpr
+	info.GroupBy[i] = col.ASTExpr.String()
 }
 
 // lexParseCTEs parses CTE definitions from a lexer.
