@@ -28,11 +28,21 @@ GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/wadjet" ./cmd/wadjet
 GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/tpch-bench" ./cmd/tpch-bench
 GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/security-bench" ./cmd/security-bench
 
+# amd64 variants (ClickBench arc: the official listing hardware is
+# c6a.4xlarge x86). Staged under bin/<ver>/amd64/; the terraform arch
+# knob selects the path at instance bootstrap.
+echo "Building linux/amd64 variants..."
+mkdir -p "${OUTDIR}/amd64"
+GOOS=linux GOARCH=amd64 go build -o "${OUTDIR}/amd64/wadjet" ./cmd/wadjet
+GOOS=linux GOARCH=amd64 go build -o "${OUTDIR}/amd64/tpch-bench" ./cmd/tpch-bench
+
 echo "Uploading binaries to s3://${BUCKET}/bin/{${GIT_SHA},latest}/..."
 for ver in "$GIT_SHA" "latest"; do
   aws s3 cp "${OUTDIR}/wadjet" "s3://${BUCKET}/bin/${ver}/wadjet" --region "$REGION" --quiet
   aws s3 cp "${OUTDIR}/tpch-bench" "s3://${BUCKET}/bin/${ver}/tpch-bench" --region "$REGION" --quiet
   aws s3 cp "${OUTDIR}/security-bench" "s3://${BUCKET}/bin/${ver}/security-bench" --region "$REGION" --quiet
+  aws s3 cp "${OUTDIR}/amd64/wadjet" "s3://${BUCKET}/bin/${ver}/amd64/wadjet" --region "$REGION" --quiet
+  aws s3 cp "${OUTDIR}/amd64/tpch-bench" "s3://${BUCKET}/bin/${ver}/amd64/tpch-bench" --region "$REGION" --quiet
 done
 
 # Upload deploy scripts alongside binaries so instances don't depend on git clone
