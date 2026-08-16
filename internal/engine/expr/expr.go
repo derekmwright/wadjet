@@ -509,6 +509,26 @@ func (e *BinOpFloat64) CloneVec() *BinOpFloat64 {
 func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int) bool {
 	e.resolveOpCode()
 
+	// Fused (column op constant) fast path: one typed convert+op loop, no
+	// constant-vector fill and no separate column→float64 conversion pass.
+	// ClickBench Q30 (90 SUM(col + k) expressions over one int16 column)
+	// spent 20% of CPU materializing constant vectors and 25% re-converting
+	// the same column per expression; this path removes both.
+	if cr, ok := e.Left.(*ColRef); ok {
+		if lit, ok2 := e.Right.(*Lit); ok2 && lit.Val != nil {
+			if done, hasNull := fusedColConstFloat64(b, cr, ToFloat64(lit.Val), e.opCode, false, dst, n); done {
+				return hasNull
+			}
+		}
+	}
+	if lit, ok := e.Left.(*Lit); ok && lit.Val != nil {
+		if cr, ok2 := e.Right.(*ColRef); ok2 {
+			if done, hasNull := fusedColConstFloat64(b, cr, ToFloat64(lit.Val), e.opCode, true, dst, n); done {
+				return hasNull
+			}
+		}
+	}
+
 	// Check if children support vectorized evaluation
 	leftVec, leftOK := e.Left.(VecFloat64Expr)
 	rightVec, rightOK := e.Right.(VecFloat64Expr)
@@ -563,6 +583,113 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 	}
 
 	return leftNull || rightNull
+}
+
+// fusedColConstFloat64 computes dst = col op c (or c op col when constFirst)
+// in a single typed loop. Returns done=false when the column type or op has
+// no fused kernel — the caller falls through to the generic two-pass path.
+// Division keeps the fused path only when the CONSTANT is the (non-zero)
+// divisor; per-element zero-divisor handling stays on the generic path.
+func fusedColConstFloat64(b *batch.RecordBatch, cr *ColRef, c float64, op arithOp, constFirst bool, dst []float64, n int) (bool, bool) {
+	switch op {
+	case arithAdd, arithSub, arithMul:
+	case arithDiv:
+		if constFirst || c == 0 {
+			return false, false
+		}
+	default:
+		return false, false
+	}
+	cr.resolve(b)
+	if cr.idx < 0 || cr.idx >= len(b.Columns) {
+		return false, false
+	}
+	v := b.Columns[cr.idx]
+
+	apply := func(get func(i int) float64) {
+		switch {
+		case op == arithAdd:
+			for i := 0; i < n; i++ {
+				dst[i] = get(i) + c
+			}
+		case op == arithSub && !constFirst:
+			for i := 0; i < n; i++ {
+				dst[i] = get(i) - c
+			}
+		case op == arithSub:
+			for i := 0; i < n; i++ {
+				dst[i] = c - get(i)
+			}
+		case op == arithMul:
+			for i := 0; i < n; i++ {
+				dst[i] = get(i) * c
+			}
+		case op == arithDiv:
+			for i := 0; i < n; i++ {
+				dst[i] = get(i) / c
+			}
+		}
+	}
+
+	// Monomorphic loops per storage type: the closure indirection above
+	// would defeat the point, so each case runs its own tight loop.
+	switch cr.typ {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		src := v.Int32Data
+		switch {
+		case op == arithAdd:
+			for i := 0; i < n; i++ {
+				dst[i] = float64(src[i]) + c
+			}
+		case op == arithSub && !constFirst:
+			for i := 0; i < n; i++ {
+				dst[i] = float64(src[i]) - c
+			}
+		case op == arithSub:
+			for i := 0; i < n; i++ {
+				dst[i] = c - float64(src[i])
+			}
+		case op == arithMul:
+			for i := 0; i < n; i++ {
+				dst[i] = float64(src[i]) * c
+			}
+		default:
+			for i := 0; i < n; i++ {
+				dst[i] = float64(src[i]) / c
+			}
+		}
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		src := v.Int64Data
+		switch {
+		case op == arithAdd:
+			for i := 0; i < n; i++ {
+				dst[i] = float64(src[i]) + c
+			}
+		case op == arithSub && !constFirst:
+			for i := 0; i < n; i++ {
+				dst[i] = float64(src[i]) - c
+			}
+		case op == arithSub:
+			for i := 0; i < n; i++ {
+				dst[i] = c - float64(src[i])
+			}
+		case op == arithMul:
+			for i := 0; i < n; i++ {
+				dst[i] = float64(src[i]) * c
+			}
+		default:
+			for i := 0; i < n; i++ {
+				dst[i] = float64(src[i]) / c
+			}
+		}
+	case batch.TypeFloat64:
+		apply(func(i int) float64 { return v.Float64Data[i] })
+	case batch.TypeFloat32:
+		apply(func(i int) float64 { return float64(v.Float32Data[i]) })
+	default:
+		return false, false
+	}
+	return true, v.Nulls.HasNulls()
 }
 
 // BinOpInt64 is a typed binary op that operates on int64 without boxing.

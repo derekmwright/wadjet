@@ -130,6 +130,19 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 					continue
 				}
 
+				// Algebraic constant-arithmetic rewrite: SUM(x+k) →
+				// SUM(x)+k*COUNT(x), AVG(x+k) → AVG(x)+k, MIN/MAX(x±k) →
+				// MIN/MAX(x)±k, etc. Turns N expression-aggregates over one
+				// column into one shared aggregate plus post-projection
+				// arithmetic — ClickBench Q30 (90 × SUM(col + k)) went from
+				// evaluating 90 full-column expression passes per batch to
+				// a single SUM + COUNT.
+				if col.ASTExpr != nil {
+					if rw := rewriteConstArithAggs(col.ASTExpr); rw != nil {
+						col.ASTExpr = rw
+					}
+				}
+
 				// Find all aggregates in this expression (handles multi-aggregate
 				// expressions like MAX(x) - MIN(x)).
 				var allAggs []*plansql.FuncCallNode
@@ -151,9 +164,19 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				}
 
 				if isNested && len(allAggs) > 0 {
-					// Register each aggregate with its own synthetic name
+					// Register each aggregate with its own synthetic name.
+					// Identical aggregates (same textual form) across select
+					// items share ONE synthetic column — after the const-arith
+					// rewrite a 90-expression query references the same
+					// SUM(col)/COUNT(col) pair 90 times; without dedup each
+					// reference computed its own copy.
 					replacements := map[string]string{}
 					for _, agg := range allAggs {
+						aggKey := strings.ToLower(agg.String())
+						if existing, ok := aggSyntheticNames[aggKey]; ok {
+							replacements[aggKey] = existing
+							continue
+						}
 						syntheticName := fmt.Sprintf("__agg_%d", aggCounter)
 						aggCounter++
 
@@ -176,7 +199,6 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 							InputExpr: aggInputExpr,
 						})
 
-						aggKey := strings.ToLower(agg.String())
 						replacements[aggKey] = syntheticName
 						aggSyntheticNames[aggKey] = syntheticName
 					}
