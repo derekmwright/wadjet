@@ -290,9 +290,19 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		}
 
 		data := page.Data
-		// Resolve dictionary indices to actual values.
-		if dict != nil {
-			data = resolveNativeDictionary(dict, data, fileType)
+		// Resolve dictionary indices to actual values — per page, not per
+		// chunk: dict-overflow fallback mixes dictionary and PLAIN pages
+		// within one chunk.
+		if page.IsDictEncoded() {
+			if dict == nil {
+				page.Release()
+				return fmt.Errorf("dictionary-encoded page but chunk has no dictionary page")
+			}
+			data, err = resolveNativeDictionary(dict, data, fileType)
+			if err != nil {
+				page.Release()
+				return fmt.Errorf("resolving dictionary page: %w", err)
+			}
 		}
 
 		defLevels := page.DefinitionLevels
@@ -326,9 +336,14 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 }
 
 // resolveNativeDictionary resolves INT32 dictionary indices to actual values.
-func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType pqt.TypeID) pqt.Values {
+// Indices are bounds-checked against the dictionary before any gather:
+// corrupt or hostile files can carry out-of-range indices.
+func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType pqt.TypeID) (pqt.Values, error) {
 	indices := page.Int32()
 	n := page.Count()
+	if err := pqt.ValidateDictIndices(indices, n, dict.NumValues); err != nil {
+		return pqt.Values{}, err
+	}
 
 	switch fileType {
 	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration, pqt.TypeDecimal:
@@ -337,7 +352,7 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
 		}
-		return pqt.PlainInt64Values(dst)
+		return pqt.PlainInt64Values(dst), nil
 
 	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
 		src := dict.Data.Int32()
@@ -345,7 +360,7 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
 		}
-		return pqt.PlainInt32Values(dst)
+		return pqt.PlainInt32Values(dst), nil
 
 	case pqt.TypeFloat64:
 		src := dict.Data.Double()
@@ -353,7 +368,7 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
 		}
-		return pqt.PlainFloat64Values(dst)
+		return pqt.PlainFloat64Values(dst), nil
 
 	case pqt.TypeFloat32:
 		src := dict.Data.Float()
@@ -361,18 +376,18 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
 		}
-		return pqt.PlainFloat32Values(dst)
+		return pqt.PlainFloat32Values(dst), nil
 
 	case pqt.TypeVector:
 		// VECTOR stored as FIXED_LEN_BYTE_ARRAY: resolve dictionary indices.
-		return resolveDictByteArray(dict, indices, n)
+		return resolveDictByteArray(dict, indices, n), nil
 
 	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
-		return resolveDictByteArray(dict, indices, n)
+		return resolveDictByteArray(dict, indices, n), nil
 
 	default:
 		// Fallback for unknown types: treat as byte array.
-		return resolveDictByteArray(dict, indices, n)
+		return resolveDictByteArray(dict, indices, n), nil
 	}
 }
 

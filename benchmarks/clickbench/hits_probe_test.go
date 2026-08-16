@@ -36,4 +36,7 @@ func TestHitsColumnProbe(t *testing.T) {
 		}()
 	}
 	t.Logf("bad columns: %d / %d", bad, len(sch.Columns))
+	if bad > 0 {
+		t.Fatalf("%d columns failed to decode", bad)
+	}
 }

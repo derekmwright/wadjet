@@ -10,9 +10,10 @@ type PageData struct {
 	NumValues        int
 	NumRows          int
 	NumNulls         int
-	Data             Values  // decoded column values (non-null values only)
-	DefinitionLevels []int32 // nil if column is required (no nulls)
-	RepetitionLevels []int32 // nil for flat schemas (no nesting)
+	Data             Values   // decoded column values (non-null values only)
+	Encoding         Encoding // value encoding of THIS page (pages in one chunk can differ)
+	DefinitionLevels []int32  // nil if column is required (no nulls)
+	RepetitionLevels []int32  // nil for flat schemas (no nesting)
 
 	// rawBuf is the decompressed page buffer that backs Data when the page
 	// values alias the decompress output (PLAIN-encoded numeric/fixed-len
@@ -20,6 +21,14 @@ type PageData struct {
 	// pages, dictionary-indexed pages, or codecs without a buffer pool).
 	rawBuf []byte
 	codec  CompressionCodec
+}
+
+// IsDictEncoded reports whether this page's values are dictionary indices
+// that must be resolved through the chunk's dictionary page. A chunk whose
+// dictionary page overflowed the writer's size limit mixes dictionary-encoded
+// and PLAIN pages, so resolution must be decided per page, never per chunk.
+func (p *PageData) IsDictEncoded() bool {
+	return p.Encoding == EncodingPlainDictionary || p.Encoding == EncodingRLEDictionary
 }
 
 // Release returns any pooled decompression buffer backing this page to its
@@ -307,6 +316,7 @@ func (r *ColumnPageReader) decodeDataPageV1(ph *PageHeader, compressed []byte) (
 		NumRows:          numRows,
 		NumNulls:         numNulls,
 		Data:             vals,
+		Encoding:         dph.Encoding,
 		DefinitionLevels: defLevels,
 		RepetitionLevels: repLevels,
 		rawBuf:           pageData,
@@ -378,6 +388,7 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 		NumRows:          numRows,
 		NumNulls:         numNulls,
 		Data:             vals,
+		Encoding:         dph.Encoding,
 		DefinitionLevels: defLevels,
 		RepetitionLevels: repLevels,
 		rawBuf:           rawBuf,

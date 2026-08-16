@@ -256,8 +256,14 @@ func readLeafColumn(fr *FileReader, rgIdx, colIdx int) (leafColumnData, error) {
 		}
 
 		data := page.Data
-		if dict != nil {
-			data = resolveDictForRows(dict, data, typeID)
+		if page.IsDictEncoded() {
+			if dict == nil {
+				return lcd, fmt.Errorf("dictionary-encoded page but chunk has no dictionary page")
+			}
+			data, err = resolveDictForRows(dict, data, typeID)
+			if err != nil {
+				return lcd, fmt.Errorf("resolving dictionary page: %w", err)
+			}
 		}
 
 		// Collect definition and repetition levels.
@@ -714,8 +720,14 @@ func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, typeID TypeID) 
 		}
 
 		data := page.Data
-		if dict != nil {
-			data = resolveDictForRows(dict, data, typeID)
+		if page.IsDictEncoded() {
+			if dict == nil {
+				return nil, fmt.Errorf("dictionary-encoded page but chunk has no dictionary page")
+			}
+			data, err = resolveDictForRows(dict, data, typeID)
+			if err != nil {
+				return nil, fmt.Errorf("resolving dictionary page: %w", err)
+			}
 		}
 
 		n := page.NumValues
@@ -965,10 +977,29 @@ func decimalBytesToInt64(b []byte) int64 {
 	return v
 }
 
+// ValidateDictIndices checks that a page's dictionary indices are all
+// within [0, numValues) before any gather dereferences them. Corrupt or
+// hostile files can carry out-of-range indices; without this pass the
+// typed gather loops panic (or silently read the wrong entry).
+func ValidateDictIndices(indices []int32, n, numValues int) error {
+	if len(indices) < n {
+		return fmt.Errorf("dictionary page: %d indices for %d values", len(indices), n)
+	}
+	for i := 0; i < n; i++ {
+		if idx := indices[i]; idx < 0 || int(idx) >= numValues {
+			return fmt.Errorf("dictionary index %d out of range [0, %d)", idx, numValues)
+		}
+	}
+	return nil
+}
+
 // resolveDictForRows resolves dictionary indices to actual values.
-func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) Values {
+func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) (Values, error) {
 	indices := page.Int32()
 	n := page.Count()
+	if err := ValidateDictIndices(indices, n, dict.NumValues); err != nil {
+		return Values{}, err
+	}
 
 	switch typeID {
 	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
@@ -977,28 +1008,28 @@ func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) Values
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
 		}
-		return PlainInt64Values(dst)
+		return PlainInt64Values(dst), nil
 	case TypeInt32, TypePort, TypeProtocol, TypeDate:
 		src := dict.Data.Int32()
 		dst := make([]int32, n)
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
 		}
-		return PlainInt32Values(dst)
+		return PlainInt32Values(dst), nil
 	case TypeFloat64:
 		src := dict.Data.Double()
 		dst := make([]float64, n)
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
 		}
-		return PlainFloat64Values(dst)
+		return PlainFloat64Values(dst), nil
 	case TypeFloat32:
 		src := dict.Data.Float()
 		dst := make([]float32, n)
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
 		}
-		return PlainFloat32Values(dst)
+		return PlainFloat32Values(dst), nil
 	default:
 		dictData, dictOffsets := dict.Data.ByteArray()
 		var buf []byte
@@ -1009,7 +1040,7 @@ func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) Values
 			buf = append(buf, dictData[dictOffsets[idx]:dictOffsets[idx+1]]...)
 		}
 		offsets[n] = uint32(len(buf))
-		return ByteArrayValues(buf, offsets)
+		return ByteArrayValues(buf, offsets), nil
 	}
 }
 
