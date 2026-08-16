@@ -122,7 +122,14 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// a union equals top-K of (top-K(A) ∪ B), so compacting the running
 	// buffer is exact. The threshold keeps compaction amortized: each pass
 	// costs O(buffer · log limit) and fires once per ~threshold rows.
-	if s.Limit > 0 && s.totalRows > s.Limit*2+4*batch.DefaultBatchSize {
+	// Trigger on ACTIVE rows, buffered BYTES, or batch count — active rows
+	// alone is blind to selectivity: under a 2% filter over wide scan
+	// batches, 8k active rows means ~24 pinned full-width 500k-row batches
+	// (~6GB) per clone, which still OOM-killed the c6a on Q24. The byte
+	// trigger uses the exact tracked cost when a spill manager is wired;
+	// the batch-count trigger covers the untracked case.
+	if s.Limit > 0 && (s.totalRows > s.Limit*2+4*batch.DefaultBatchSize ||
+		s.trackedMem > 96<<20 || len(s.batches) >= 4) {
 		s.compactTopKLocked()
 	}
 

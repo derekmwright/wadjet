@@ -8440,7 +8440,41 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 			inner.useNative = !scan.HasUnsupportedColumnarTypes(readSchema)
 		}
 
+		// Byte-aware decode parallelism: CPU-count workers with a CPU-count
+		// queue are blind to batch WIDTH. On a 105-column SELECT * scan each
+		// decoded row-group batch is hundreds of MB; 16 decoders + 16 queued
+		// batches held multiple GB of live wide batches (plus the GC target
+		// doubling that live set), which OOM-killed the c6a on ClickBench
+		// Q24 even with the sort side bounded. Clamp workers + queue so
+		// estimated in-flight decoded bytes stay within a budget slice;
+		// narrow scans (TPC-H) still get full CPU-count parallelism.
 		workers := runtime.NumCPU()
+		if len(inner.rgUnits) > 0 {
+			rgRows := int(inner.rgUnits[0].numRows)
+			perBatch := estimateDecodedBatchBytes(inner.readSchema(), rgRows)
+			inflightCap := int64(8 << 30)
+			if inner.memTracker != nil {
+				if b := inner.memTracker.Budget(); b > 0 && b/3 < inflightCap {
+					inflightCap = b / 3
+				}
+			}
+			if perBatch > 0 {
+				maxInflight := int(inflightCap / perBatch)
+				if maxInflight < 2 {
+					maxInflight = 2
+				}
+				if workers > maxInflight-1 {
+					workers = maxInflight - 1
+				}
+				queue := maxInflight - workers
+				if queue < 1 {
+					queue = 1
+				}
+				if queue < cap(inner.batchCh) {
+					inner.batchCh = make(chan *batch.RecordBatch, queue)
+				}
+			}
+		}
 		if workers > len(inner.rgUnits) {
 			workers = len(inner.rgUnits)
 		}
@@ -8460,6 +8494,33 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+// estimateDecodedBatchBytes estimates the decoded in-memory size of one
+// row-group batch for the projected schema. Fixed types use their storage
+// width; variable-length types assume 48 B/row — a deliberate overestimate
+// for short strings (safe direction: it only reduces decode parallelism).
+func estimateDecodedBatchBytes(schema []parquet.Column, rows int) int64 {
+	if rows <= 0 {
+		return 0
+	}
+	perRow := 0
+	for _, c := range schema {
+		switch c.Type {
+		case parquet.TypeBool:
+			perRow += 1
+		case parquet.TypeInt32, parquet.TypeDate, parquet.TypePort, parquet.TypeProtocol, parquet.TypeFloat32:
+			perRow += 4
+		case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeFloat64, parquet.TypeIPv4,
+			parquet.TypeMAC, parquet.TypeDuration:
+			perRow += 8
+		case parquet.TypeDecimal, parquet.TypeUUID, parquet.TypeIPv6:
+			perRow += 16
+		default: // strings/bytes/nested
+			perRow += 48
+		}
+	}
+	return int64(perRow) * int64(rows)
 }
 
 // matchesPartitionFilter returns true if all filter keys match the partition values.
