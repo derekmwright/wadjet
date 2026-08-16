@@ -541,6 +541,15 @@ func heapAllocBytesNoSTW() int64 {
 	return int64(s[0].Value.Uint64())
 }
 
+// PauseOnHeapBackpressureUnless is PauseOnHeapBackpressure with an exempt
+// flag (drain-phase pipelines pass true and never pause).
+func PauseOnHeapBackpressureUnless(ctx context.Context, exempt bool) error {
+	if exempt {
+		return ctx.Err()
+	}
+	return PauseOnHeapBackpressure(ctx)
+}
+
 // HeapPressureExceeded is the exported view of the process heap-pressure
 // circuit breaker: HeapAlloc (less registered reclaimable bytes) >
 // heapPressureRatio × GOMEMLIMIT (100ms-cached).

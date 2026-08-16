@@ -1,6 +1,13 @@
 package kernel
 
-import "github.com/citc-tech/wadjet/internal/engine/batch"
+import (
+	"fmt"
+	"os"
+
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+)
+
+var debugStrKernel = os.Getenv("WADJET_DEBUG_STRKERNEL") == "1"
 
 // String MIN/MAX kernels and overflow-safe AVG kernels.
 //
@@ -46,6 +53,9 @@ func maxRowStringNoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 func maxStrUpdate(acc *Accumulator, vec *batch.Vector, row int) {
 	acc.IsString = true
 	v := vec.BytesData.UnsafeStringValue(row)
+	if debugStrKernel && len(v) > 64 {
+		panic(fmt.Sprintf("maxStrUpdate oversized: row=%d len=%d offsets=%d vecLen=%d type=%v", row, len(v), len(vec.BytesData.Offsets), vec.Len, vec.Type))
+	}
 	if !acc.HasMax || v > acc.MaxStr {
 		acc.MaxStr = vec.BytesData.StringValue(row)
 		acc.HasMax = true

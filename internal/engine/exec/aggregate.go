@@ -93,6 +93,13 @@ type HashAggregate struct {
 	// worker deaths (morsel-agg-partials-v2.md §3.A). 0 = disabled (primary
 	// aggregates keep their ShouldSpillFor-driven spill machinery).
 	PartialDrainBytes int64
+	// PartitionedDisjoint marks a sink participating in partitioned
+	// parallel aggregation (partitioned_agg.go): every group key lives in
+	// exactly one sink. MergeSink then ADOPTS clone partitions instead of
+	// re-inserting their groups, and Next() streams each adopted
+	// partition's state after its own.
+	PartitionedDisjoint bool
+	adoptedPartitions   []*HashAggregate
 	NullGroupCols []string             // GROUPING SETS: columns to output as NULL (legacy per-node)
 	GroupingSets  [][]int              // single-pass grouping sets: column indices within GroupByCols per set
 	InputRowHint  int64                // estimated input rows for pre-sizing hash table
@@ -2416,7 +2423,16 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 	// budget when input >> output. Partial-state merge processes each group
 	// once and is bounded by the merged result size.
 	if len(h.partialSpillFiles) > 0 {
-		return h.finalizeViaPartialMerge()
+		if err := h.finalizeViaPartialMerge(); err != nil {
+			return err
+		}
+	}
+	// Partitioned-disjoint adoption: each adopted partition finalizes its
+	// own state (including any drained runs it produced).
+	for _, ap := range h.adoptedPartitions {
+		if err := ap.Finalize(context.Background()); err != nil {
+			return fmt.Errorf("finalizing adopted partition: %w", err)
+		}
 	}
 	return nil
 }
@@ -2427,6 +2443,10 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 // shared tracker for the lifetime of the process; see HashJoin.Close for
 // the full background.
 func (h *HashAggregate) Close() error {
+	for _, ap := range h.adoptedPartitions {
+		ap.Close()
+	}
+	h.adoptedPartitions = nil
 	if h.unregisterAccounted != nil {
 		h.accState.Store(int32(memory.OpClosed))
 		h.unregisterAccounted()
@@ -2624,7 +2644,24 @@ func (h *HashAggregate) SpillSome(target int64) (int64, error) {
 }
 
 // Next returns the aggregated results in batches of DefaultBatchSize rows.
-func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
+func (h *HashAggregate) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	b, err := h.nextOwn(ctx)
+	if err != nil || b != nil {
+		return b, err
+	}
+	// Own state exhausted — stream adopted disjoint partitions in order.
+	for len(h.adoptedPartitions) > 0 {
+		b, err := h.adoptedPartitions[0].Next(ctx)
+		if err != nil || b != nil {
+			return b, err
+		}
+		h.adoptedPartitions[0].Close()
+		h.adoptedPartitions = h.adoptedPartitions[1:]
+	}
+	return nil, nil
+}
+
+func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 	// Streaming partial-merge path: when finalizeViaPartialMerge stored a
 	// merger, drain it incrementally instead of walking strGroupStates.
 	// This bounds peak Next() memory to ~one batch + merger heap, which is
@@ -3003,7 +3040,22 @@ func (h *HashAggregate) CloneSink() SinkSource {
 // this recharge, so the tracker never under-reports in between). No-op when
 // h.Spill is nil — the single-process planner path.
 func (h *HashAggregate) MergeSink(other SinkSource) {
-	h.mergeSinkState(other.(*HashAggregate))
+	o := other.(*HashAggregate)
+	// Partitioned-disjoint adoption: keys never overlap across sinks, so
+	// re-inserting the clone's groups into the primary's table (a serial
+	// O(total groups) rehash) is pure waste — keep the clone's state and
+	// stream it during Next().
+	if h.PartitionedDisjoint && o.PartitionedDisjoint {
+		// The clone keeps its state AND its drained runs: normally
+		// mergeSinkState hands drainedRuns to the primary, but an adopted
+		// partition finalizes its own runs itself — without this transfer
+		// they were orphaned and every drained group silently vanished.
+		o.partialSpillFiles = append(o.partialSpillFiles, o.drainedRuns...)
+		o.drainedRuns = nil
+		h.adoptedPartitions = append(h.adoptedPartitions, o)
+		return
+	}
+	h.mergeSinkState(o)
 	h.reconcileGroupMemory()
 }
 

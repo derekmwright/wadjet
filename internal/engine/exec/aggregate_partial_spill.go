@@ -1818,7 +1818,7 @@ func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggF
 	switch fn {
 	case AggSum:
 		if acc.Count == 0 {
-			dst.Nulls.SetNull(i)
+			dst.WriteNullAt(i)
 			return
 		}
 		dst.Nulls.SetValid(i)
@@ -1838,7 +1838,7 @@ func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggF
 		}
 	case AggAvg:
 		if acc.Count == 0 {
-			dst.Nulls.SetNull(i)
+			dst.WriteNullAt(i)
 			return
 		}
 		dst.Nulls.SetValid(i)
@@ -1863,7 +1863,7 @@ func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggF
 		writeAccFallback(dst, i, acc, fn)
 	case AggMin:
 		if !acc.HasMin {
-			dst.Nulls.SetNull(i)
+			dst.WriteNullAt(i)
 			return
 		}
 		dst.Nulls.SetValid(i)
@@ -1883,7 +1883,7 @@ func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggF
 		}
 	case AggMax:
 		if !acc.HasMax {
-			dst.Nulls.SetNull(i)
+			dst.WriteNullAt(i)
 			return
 		}
 		dst.Nulls.SetValid(i)
@@ -1913,7 +1913,10 @@ func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggF
 func writeAccFallback(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggFunc) {
 	result := finalizeKernelAcc(acc, fn)
 	if result == nil {
-		dst.Nulls.SetNull(i)
+		// WriteNullAt, not Nulls.SetNull: variable-length destinations must
+		// advance their offsets bookkeeping on null rows or every later row
+		// reads shifted (the offsets-on-NULL corruption class).
+		dst.WriteNullAt(i)
 		return
 	}
 	dst.SetValue(i, result)

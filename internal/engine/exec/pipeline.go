@@ -12,6 +12,22 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
+// HeldStateSource marks sources that serve a pipeline-breaker's HELD
+// state (aggregate/sort/window output phases). Heap-backpressure pauses
+// must not throttle pipelines draining such sources: the held state IS
+// the memory pressure, and draining it is the only way the pressure
+// clears — pausing the drain turned ClickBench Q33's output phase into
+// 100+ seconds of sleeping on a single goroutine while 15GB of finished
+// aggregate state waited to be streamed out.
+type HeldStateSource interface {
+	ServesHeldState() bool
+}
+
+func sourceServesHeldState(src Source) bool {
+	h, ok := src.(HeldStateSource)
+	return ok && h.ServesHeldState()
+}
+
 // Pipeline represents Source → [UnaryOps...] → Sink.
 type Pipeline struct {
 	Source  Source
@@ -56,6 +72,7 @@ func (p *Pipeline) allOpsCloneable() bool {
 // runSerial is the original single-threaded pipeline loop.
 func (p *Pipeline) runSerial(ctx context.Context) error {
 	progress := ProgressReporterFromContext(ctx)
+	drainPhase := sourceServesHeldState(p.Source)
 	batchCount := 0
 	for {
 		if batchCount&63 == 0 {
@@ -69,8 +86,10 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 		// GOMEMLIMIT, pause briefly so GC can reclaim before pulling more
 		// data. Cheap (cached check) when no pressure; sleeps 50ms when
 		// fired. See memory.HeapBackpressureActive for rationale.
-		if err := memory.PauseOnHeapBackpressure(ctx); err != nil {
-			return err
+		if !drainPhase {
+			if err := memory.PauseOnHeapBackpressure(ctx); err != nil {
+				return err
+			}
 		}
 
 		b, err := p.Source.Next(ctx)
@@ -180,6 +199,37 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 	// Warm-up: process one batch through the original ops to resolve lazy
 	// column indices in expressions (e.g., KernelFilter, ColumnCompare).
 	// This ensures clones inherit resolved state where possible.
+	// Partitioned aggregation: when the sink is a grouped HashAggregate,
+	// each worker OWNS a hash partition of the key space instead of
+	// aggregating an arbitrary row slice. See partitioned_agg.go for the
+	// rationale (kills clone key duplication and the drain-sort-merge tax
+	// on high-cardinality GROUP BY). Requires per-worker sinks and no
+	// buffer-reusing operator upstream (their outputs can't be shared
+	// across asynchronous consumers).
+	primaryAgg, sinkIsAgg := p.Sink.(*HashAggregate)
+	_, sinkMergeable := p.Sink.(MergeableSink)
+	usePartitioned := partitionedAggEnabled && sinkIsAgg && sinkMergeable &&
+		len(primaryAgg.GroupByCols) > 0 && len(primaryAgg.GroupingSets) == 0 &&
+		!primaryAgg.GroupByAll && !opsReuseBuffers(p.Ops)
+	var partQueues []chan partitionItem
+	var producersWG sync.WaitGroup
+	if usePartitioned {
+		PartitionedAggRuns.Add(1)
+		primaryAgg.PartitionedDisjoint = true
+		partQueues = make([]chan partitionItem, p.Workers)
+		for i := range partQueues {
+			partQueues[i] = make(chan partitionItem, 8)
+		}
+		producersWG.Add(p.Workers)
+		go func() {
+			producersWG.Wait()
+			for _, q := range partQueues {
+				close(q)
+			}
+		}()
+	}
+
+
 	warmupBatch, err := p.Source.Next(ctx)
 	if err != nil {
 		return fmt.Errorf("source next: %w", err)
@@ -190,6 +240,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 	}
 
 	// Process warmup batch through original ops.
+	var pendingWarmup *batch.RecordBatch
 	{
 		b := warmupBatch
 		exhausted := false
@@ -212,10 +263,19 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		}
 		if b != nil {
 			FlattenForConsumer(b, p.Sink)
-			if err := p.Sink.Consume(ctx, b); err != nil {
-				return fmt.Errorf("sink consume: %w", err)
+			if usePartitioned {
+				// Partitioned mode: the warmup batch must be hash-routed
+				// like every other batch — consuming it whole into the
+				// primary splits its groups across sinks (partial
+				// duplicates in the output). Worker 0 partitions it once
+				// the queues are live.
+				pendingWarmup = b
+			} else {
+				if err := p.Sink.Consume(ctx, b); err != nil {
+					return fmt.Errorf("sink consume: %w", err)
+				}
+				b.Release()
 			}
-			b.Release()
 			// Check DoneSignalers even when batch was non-nil — Limit
 			// may have returned a truncated batch and is now satisfied.
 			for _, op := range p.Ops {
@@ -263,6 +323,19 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		for i := 1; i < workers; i++ {
 			cloned := mergeable.CloneSink()
 			wireCloneSinkSpill(cloned, p.Sink, workers)
+			if usePartitioned {
+				cs := cloned.(*HashAggregate)
+				cs.PartitionedDisjoint = true
+				// Ownership means clone state is DISJOINT — total across
+				// clones ≈ what a serial aggregate would hold, so the
+				// duplicated-state bound budget/(2k) over-drains. Give each
+				// partition its fair share with headroom.
+				if prim := p.Sink.(*HashAggregate); prim.Spill != nil {
+					if b := prim.Spill.Tracker().Budget(); b > 0 {
+						cs.PartialDrainBytes = b * 3 / int64(4*workers)
+					}
+				}
+			}
 			if err := cloned.Init(ctx); err != nil {
 				return fmt.Errorf("cloned sink init: %w", err)
 			}
@@ -278,6 +351,8 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 			doneSignalers = append(doneSignalers, ds)
 		}
 	}
+
+	drainPhase := sourceServesHeldState(p.Source)
 
 	// Launch workers.
 	workerCtx, cancel := context.WithCancel(ctx)
@@ -297,6 +372,28 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 			} else {
 				sink = p.Sink
 			}
+			// Partitioned mode: however the pull loop exits, this worker
+			// stops producing and then drains its own partition queue until
+			// every producer is done and the closer shuts the queues.
+			producing := usePartitioned
+			stopProducing := func() {
+				if producing {
+					producing = false
+					producersWG.Done()
+					drainPartitionQueue(workerCtx, sink, partQueues[workerID])
+				}
+			}
+			if usePartitioned {
+				defer stopProducing()
+				if workerID == 0 && pendingWarmup != nil {
+					if err := partitionAndDeliver(workerCtx, primaryAgg, sink, pendingWarmup, 0, partQueues); err != nil {
+						firstErr.CompareAndSwap(nil, err)
+						cancel()
+						return
+					}
+					pendingWarmup = nil
+				}
+			}
 			for {
 				// Check for cancellation or done signaling.
 				if workerCtx.Err() != nil {
@@ -310,8 +407,9 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 
 				// Heap-aware backpressure (parallel variant). All workers
 				// pause concurrently when fired, so the system-wide pause
-				// is the same 50ms regardless of Workers count.
-				if err := memory.PauseOnHeapBackpressure(workerCtx); err != nil {
+				// is the same 50ms regardless of Workers count. Drain-phase
+				// pipelines are exempt (see HeldStateSource).
+				if err := memory.PauseOnHeapBackpressureUnless(workerCtx, drainPhase); err != nil {
 					if workerCtx.Err() == nil {
 						firstErr.CompareAndSwap(nil, err)
 						cancel()
@@ -355,12 +453,20 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 
 				if b != nil {
 					FlattenForConsumer(b, sink)
-					if err := sink.Consume(workerCtx, b); err != nil {
-						firstErr.CompareAndSwap(nil, fmt.Errorf("sink consume: %w", err))
-						cancel()
-						return
+					if usePartitioned {
+						if err := partitionAndDeliver(workerCtx, primaryAgg, sink, b, workerID, partQueues); err != nil {
+							firstErr.CompareAndSwap(nil, err)
+							cancel()
+							return
+						}
+					} else {
+						if err := sink.Consume(workerCtx, b); err != nil {
+							firstErr.CompareAndSwap(nil, fmt.Errorf("sink consume: %w", err))
+							cancel()
+							return
+						}
+						b.Release()
 					}
-					b.Release()
 				}
 
 				if exhausted {
@@ -378,11 +484,15 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		return v.(error)
 	}
 
-	// Merge per-worker partial sinks into the primary sink.
+	// Merge per-worker partial sinks into the primary sink. In partitioned
+	// mode the primary ADOPTS clone state (streams it at Next) and owns the
+	// clones' lifecycle — closing them here would free live state.
 	if isMergeable {
 		for i := 1; i < workers; i++ {
 			mergeable.MergeSink(workerSinks[i].(SinkSource))
-			workerSinks[i].Close()
+			if !usePartitioned {
+				workerSinks[i].Close()
+			}
 		}
 	}
 

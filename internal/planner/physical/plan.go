@@ -5950,9 +5950,21 @@ type aggPreProject struct {
 	canPassSelThrough bool                // true if all computed columns are numeric (no BytesColumn)
 	checkedSelPass    bool                // true after first call resolves canPassSelThrough
 	matPool           *batch.BatchPool    // pool for materialize buffers (avoids per-call allocation)
+	shareOutputs      bool                // per-call vector allocation (partitioned-agg sharing)
 }
 
 func (a *aggPreProject) Init(_ context.Context) error { return nil }
+
+// ReusesOutputBuffers marks the pre-projection's computed vectors as reused
+// across Execute calls — its batches must not be shared across partition
+// owners (exec.BufferReusingOperator) unless shared-output mode is on.
+func (a *aggPreProject) ReusesOutputBuffers() bool { return !a.shareOutputs }
+
+// EnableSharedOutputs switches to per-call computed-vector allocation so
+// this op's batches can be shared across partition owners
+// (exec.OutputSharingAware). Costs the pooled-buffer reuse; only the
+// partitioned-aggregation pipeline enables it.
+func (a *aggPreProject) EnableSharedOutputs() { a.shareOutputs = true }
 
 // Clone returns a copy with deep-cloned VecFloat64Eval expression trees.
 // Each parallel worker must have its own BinOpFloat64.vecBuf scratch buffers
@@ -5965,7 +5977,7 @@ func (a *aggPreProject) Clone() exec.UnaryOperator {
 			clonedComputed[i].VecFloat64Eval = c.VecFloat64Clone()
 		}
 	}
-	return &aggPreProject{computed: clonedComputed}
+	return &aggPreProject{computed: clonedComputed, shareOutputs: a.shareOutputs}
 }
 
 func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
@@ -6026,7 +6038,7 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	// Allocate a fresh RecordBatch struct every call. The struct itself is
 	// tiny (header only); the heavy state (Vectors, BytesColumn buffers)
 	// is still pooled via a.computedVectors.
-	if a.computedVectors == nil || in.Len > a.computedCap {
+	if a.shareOutputs || a.computedVectors == nil || in.Len > a.computedCap {
 		a.computedVectors = make([]*batch.Vector, len(a.computed))
 		for k, c := range a.computed {
 			a.computedVectors[k] = batch.NewVector(c.Type, in.Len)
@@ -7988,6 +8000,10 @@ type aggSourceAdapter struct {
 	initialized bool
 }
 
+// ServesHeldState marks the adapter's output phase as a held-state drain —
+// exempt from heap-backpressure pauses (exec.HeldStateSource).
+func (a *aggSourceAdapter) ServesHeldState() bool { return true }
+
 func (a *aggSourceAdapter) Init(ctx context.Context) error {
 	return nil
 }
@@ -8032,6 +8048,10 @@ type sortSourceAdapter struct {
 	initialized bool
 }
 
+// ServesHeldState marks the adapter's output phase as a held-state drain —
+// exempt from heap-backpressure pauses (exec.HeldStateSource).
+func (s *sortSourceAdapter) ServesHeldState() bool { return true }
+
 func (s *sortSourceAdapter) Init(ctx context.Context) error {
 	return nil
 }
@@ -8069,6 +8089,9 @@ func (s *sortSourceAdapter) RowsScanned() int64 {
 }
 
 // windowSourceAdapter wraps a child pipeline + window into a Source.
+// ServesHeldState — see aggSourceAdapter (exec.HeldStateSource).
+func (w *windowSourceAdapter) ServesHeldState() bool { return true }
+
 type windowSourceAdapter struct {
 	childSource exec.Source
 	childOps    []exec.UnaryOperator
