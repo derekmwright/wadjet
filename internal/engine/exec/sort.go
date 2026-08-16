@@ -90,6 +90,17 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 	}
 	FlattenForConsumer(b, nil) // retained past the batch cycle: views must not survive
 	b.Detach()                 // prevent pool recycle — pipeline calls Release() after Consume()
+	// Snapshot the selection vector — Filter operators reuse their sel
+	// buffer across calls (see CollectSink.Consume); a stored batch would
+	// otherwise see its Sel silently rewritten by the NEXT batch's filter
+	// pass, yielding out-of-range physical indices at finalize (ClickBench
+	// Q24: SELECT * + LIKE filter straight into Sort — panic in
+	// sortCompareInt64NoNulls) or silently wrong sorted output.
+	if b.Sel != nil {
+		selCopy := make([]uint32, len(b.Sel))
+		copy(selCopy, b.Sel)
+		b.Sel = selCopy
+	}
 	s.batches = append(s.batches, b)
 	s.totalRows += b.ActiveLen()
 
@@ -101,6 +112,18 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 		if s.accInstanceID != 0 {
 			s.Spill.Tracker().PublishOwned(s.accInstanceID, s.trackedMem)
 		}
+	}
+
+	// Streaming Top-K: with a known limit, periodically compact the buffer
+	// down to the current top Limit rows. Without this, the top-K heap only
+	// ran at FINALIZE, so ORDER BY ... LIMIT n buffered its entire input —
+	// on a filter-into-sort shape (ClickBench Q24, SELECT * + LIKE) that
+	// pinned every scanned wide batch and OOM-killed the process. Top-K of
+	// a union equals top-K of (top-K(A) ∪ B), so compacting the running
+	// buffer is exact. The threshold keeps compaction amortized: each pass
+	// costs O(buffer · log limit) and fires once per ~threshold rows.
+	if s.Limit > 0 && s.totalRows > s.Limit*2+4*batch.DefaultBatchSize {
+		s.compactTopKLocked()
 	}
 
 	// Spill to disk if memory pressure is high. The columnar run path
@@ -141,6 +164,34 @@ func (s *Sort) flushSpillLocked() (int64, error) {
 		s.Spill.Tracker().PublishOwned(s.accInstanceID, 0)
 	}
 	return freed, nil
+}
+
+// compactTopKLocked replaces the buffered batches with a single dense
+// batch holding only the current top Limit rows. Caller must hold s.mu,
+// s.Limit must be > 0, and s.schema must be set.
+func (s *Sort) compactTopKLocked() {
+	if len(s.batches) == 0 {
+		return
+	}
+	entries := buildSortEntries(s.batches, s.totalRows)
+	resolved := resolveSortKeysForBatches(s.Keys, s.batches)
+	entries = selectSortedEntries(entries, sortEntriesLessFunc(resolved, s.batches), s.Limit)
+	compacted := gatherEntriesBatch(s.schema, s.batches, entries)
+	if s.Spill != nil && s.trackedMem > 0 {
+		s.Spill.ReleaseTracking(s.trackedMem)
+		s.trackedMem = 0
+	}
+	s.batches = s.batches[:0]
+	s.batches = append(s.batches, compacted)
+	s.totalRows = compacted.ActiveLen()
+	if s.Spill != nil {
+		cost := compacted.MemBytes()
+		s.Spill.TrackBatch(cost)
+		s.trackedMem = cost
+		if s.accInstanceID != 0 {
+			s.Spill.Tracker().PublishOwned(s.accInstanceID, s.trackedMem)
+		}
+	}
 }
 
 func (s *Sort) Finalize(_ context.Context) error {

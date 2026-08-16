@@ -6200,6 +6200,18 @@ func (p *Planner) buildLimit(ctx context.Context, node *logical.Node) (exec.Sour
 	if child.Type == logical.NodeSort && node.OffsetVal == 0 {
 		return p.buildTopN(ctx, child, node.LimitVal)
 	}
+	// LIMIT n OFFSET m over a sort: same Top-K machinery with n+m kept
+	// rows, plus the Limit operator above to skip the offset. Without
+	// this, OFFSET queries (ClickBench Q40-43) fully materialized the
+	// sort input.
+	if child.Type == logical.NodeSort && node.OffsetVal > 0 && node.LimitVal > 0 {
+		source, ops, sink, err := p.buildTopN(ctx, child, node.LimitVal+node.OffsetVal)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		ops = append(ops, exec.NewLimit(int64(node.LimitVal), int64(node.OffsetVal)))
+		return source, ops, sink, nil
+	}
 
 	source, ops, sink, err := p.buildPipeline(ctx, child)
 	if err != nil {

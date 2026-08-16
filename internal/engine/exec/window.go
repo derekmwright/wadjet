@@ -128,6 +128,17 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 	}
 	FlattenForConsumer(b, nil) // retained past the batch cycle: views must not survive
 	b.Detach()                 // prevent pool recycle — pipeline calls Release() after Consume()
+	// Snapshot the selection vector — Filter operators reuse their sel
+	// buffer across calls (see CollectSink.Consume); a stored batch would
+	// otherwise see its Sel silently rewritten by the NEXT batch's filter
+	// pass, yielding out-of-range physical indices at finalize (ClickBench
+	// Q24: SELECT * + LIKE filter straight into Sort — panic in
+	// sortCompareInt64NoNulls) or silently wrong sorted output.
+	if b.Sel != nil {
+		selCopy := make([]uint32, len(b.Sel))
+		copy(selCopy, b.Sel)
+		b.Sel = selCopy
+	}
 	w.batches = append(w.batches, b)
 	w.totalRows += b.ActiveLen()
 
