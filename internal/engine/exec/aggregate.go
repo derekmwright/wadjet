@@ -2270,11 +2270,11 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 					h.distinctBytes += 16
 				}
 			} else {
-				h.keyBuf = h.keyBuf[:0]
-				h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
-				valKey := string(h.keyBuf)
-				if ds.addStr(valKey) {
-					h.distinctBytes += int64(len(valKey)) + 48
+				h.keyBuf = appendColumnValue(h.keyBuf[:0], v, row, v.Type)
+				// addStr probes zero-copy and copies into the set's arena
+				// only on insert — no per-row string allocation.
+				if ds.addStr(h.keyBuf) {
+					h.distinctBytes += int64(len(h.keyBuf)) + 48
 				}
 			}
 
@@ -2363,11 +2363,11 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 					h.distinctBytes += 16
 				}
 			} else {
-				h.keyBuf = h.keyBuf[:0]
-				h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
-				valKey := string(h.keyBuf)
-				if ds.addStr(valKey) {
-					h.distinctBytes += int64(len(valKey)) + 48
+				h.keyBuf = appendColumnValue(h.keyBuf[:0], v, row, v.Type)
+				// addStr probes zero-copy and copies into the set's arena
+				// only on insert — no per-row string allocation.
+				if ds.addStr(h.keyBuf) {
+					h.distinctBytes += int64(len(h.keyBuf)) + 48
 				}
 			}
 

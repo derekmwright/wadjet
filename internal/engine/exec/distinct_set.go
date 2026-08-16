@@ -10,10 +10,13 @@ import (
 // allocation, an AES string hash, and map overhead PER ROW, and the
 // clone-merge union re-paid all of it per element (ClickBench Q05,
 // COUNT(DISTINCT UserID) at 100M: 73% of a 14s profile inside the serial
-// string-map merge). Non-int columns keep the serialized-string map.
+// string-map merge). Non-int columns use an arena-backed open-addressing
+// set for the same reasons — the map path allocated a string per ROW
+// (duplicates included) before it could even probe (ClickBench Q06,
+// COUNT(DISTINCT SearchPhrase) at 100M).
 type distinctSet struct {
 	ints *i64Set
-	strs map[string]struct{}
+	strs *strSet
 }
 
 // newDistinctSetFor picks the representation from the input column type.
@@ -23,21 +26,17 @@ func newDistinctSetFor(typ batch.TypeID) *distinctSet {
 		batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		return &distinctSet{ints: newI64Set(16)}
 	default:
-		return &distinctSet{strs: make(map[string]struct{})}
+		return &distinctSet{strs: newStrSet(16)}
 	}
 }
 
 // addInt inserts v; returns true when newly added. Only valid on int-mode sets.
 func (d *distinctSet) addInt(v int64) bool { return d.ints.insert(v) }
 
-// addStr inserts the serialized key; returns true when newly added.
-func (d *distinctSet) addStr(k string) bool {
-	if _, dup := d.strs[k]; dup {
-		return false
-	}
-	d.strs[k] = struct{}{}
-	return true
-}
+// addStr inserts the serialized value; returns true when newly added.
+// k may be a transient view (scratch buffer) — bytes are copied into the
+// set's arena only on insert.
+func (d *distinctSet) addStr(k []byte) bool { return d.strs.insert(k) }
 
 func (d *distinctSet) count() int {
 	if d == nil {
@@ -46,10 +45,10 @@ func (d *distinctSet) count() int {
 	if d.ints != nil {
 		return d.ints.n
 	}
-	return len(d.strs)
+	return d.strs.n
 }
 
-// memBytes estimates retained bytes (slots or map entries + overhead).
+// memBytes estimates retained bytes (slots or arena + entries + overhead).
 func (d *distinctSet) memBytes() int64 {
 	if d == nil {
 		return 0
@@ -57,11 +56,7 @@ func (d *distinctSet) memBytes() int64 {
 	if d.ints != nil {
 		return 48 + int64(len(d.ints.slots))*8
 	}
-	var b int64 = 48
-	for k := range d.strs {
-		b += int64(len(k)) + 48
-	}
-	return b
+	return 48 + int64(cap(d.strs.arena)) + int64(len(d.strs.entries))*12
 }
 
 // mergeFrom unions o into d. Both sides come from the same aggregate spec,
@@ -82,10 +77,84 @@ func (d *distinctSet) mergeFrom(o *distinctSet) {
 		}
 		return
 	}
-	if d.strs != nil {
-		for k := range o.strs {
-			d.strs[k] = struct{}{}
+	if d.strs != nil && o.strs != nil {
+		for _, e := range o.strs.entries {
+			if e.l >= 0 {
+				d.strs.insert(o.strs.arena[e.off : e.off+e.l])
+			}
 		}
+	}
+}
+
+// strSet is an arena-backed open-addressing byte-string set: entries hold
+// (offset, length, hash tag) into a shared append-only arena. Probing is
+// alloc-free (hash + tag/length prefilter + byte compare); insert appends
+// the bytes once. l == -1 marks an empty slot.
+type strSet struct {
+	entries []strSetEntry
+	mask    uint64
+	n       int
+	arena   []byte
+}
+
+type strSetEntry struct {
+	off int32
+	l   int32
+	tag uint32
+}
+
+func newStrSet(capHint int) *strSet {
+	size := 16
+	for size < capHint*2 {
+		size <<= 1
+	}
+	s := &strSet{entries: make([]strSetEntry, size), mask: uint64(size - 1)}
+	for i := range s.entries {
+		s.entries[i].l = -1
+	}
+	return s
+}
+
+// insert adds k (copying into the arena), returning true when newly added.
+func (s *strSet) insert(k []byte) bool {
+	if uint64(s.n+1)*4 >= uint64(len(s.entries))*3 { // 75% load
+		s.grow()
+	}
+	h := strHash(k)
+	tag := uint32(h)
+	i := h & s.mask
+	for {
+		e := &s.entries[i]
+		if e.l == -1 {
+			off := int32(len(s.arena))
+			s.arena = append(s.arena, k...)
+			*e = strSetEntry{off: off, l: int32(len(k)), tag: tag}
+			s.n++
+			return true
+		}
+		if e.tag == tag && int(e.l) == len(k) && string(s.arena[e.off:e.off+e.l]) == string(k) {
+			return false
+		}
+		i = (i + 1) & s.mask
+	}
+}
+
+func (s *strSet) grow() {
+	old := s.entries
+	s.entries = make([]strSetEntry, len(old)*2)
+	for i := range s.entries {
+		s.entries[i].l = -1
+	}
+	s.mask = uint64(len(s.entries) - 1)
+	for _, e := range old {
+		if e.l == -1 {
+			continue
+		}
+		i := strHash(s.arena[e.off:e.off+e.l]) & s.mask
+		for s.entries[i].l != -1 {
+			i = (i + 1) & s.mask
+		}
+		s.entries[i] = e
 	}
 }
 
