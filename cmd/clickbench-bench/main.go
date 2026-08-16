@@ -88,14 +88,22 @@ func main() {
 		log.Fatal("--data-dir is required")
 	}
 
-	// GOMEMLIMIT safety net, same policy as tpch-bench. An explicit
-	// GOMEMLIMIT env (runtime already honors it) wins — needed for
-	// reduced-scale memory repros.
+	// GOMEMLIMIT safety net. An explicit GOMEMLIMIT env (runtime already
+	// honors it) wins — needed for reduced-scale memory repros.
+	//
+	// GOGC stays at its DEFAULT (on), deliberately diverging from
+	// tpch-bench's GOGC=off policy (which serves a large long-lived LRU
+	// file-cache heap). ClickBench aggregation is allocation-heavy on 16
+	// cores; with GOGC off, garbage accumulates until the GOMEMLIMIT
+	// cliff, where every cycle scans a ~limit-sized heap under assist
+	// storms — Q13-Q15 ran 163s/157s/145s on the c6a against 3s/2s/3s
+	// with default GC locally, and on Q19 the allocation rate overshot
+	// GOMEMLIMIT past physical RAM and the kernel killed the process
+	// (recon runs #2-#4, 2026-08-16).
 	if memLimit := memory.DetectMemoryLimit(); memLimit > 0 && os.Getenv("GOMEMLIMIT") == "" {
 		goMemLimit := memLimit * 9 / 10
 		debug.SetMemoryLimit(goMemLimit)
-		debug.SetGCPercent(-1)
-		log.Printf("GOMEMLIMIT=%.1f GB, GOGC=off", float64(goMemLimit)/(1<<30))
+		log.Printf("GOMEMLIMIT=%.1f GB, GOGC=default", float64(goMemLimit)/(1<<30))
 	}
 
 	if *pprofAddr != "" {
