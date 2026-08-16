@@ -2223,12 +2223,26 @@ func fnDateTrunc(args []any) any {
 	switch unit {
 	case "year":
 		return time.Date(t.Year(), 1, 1, 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+	case "quarter":
+		q1 := time.Month((int(t.Month())-1)/3*3 + 1)
+		return time.Date(t.Year(), q1, 1, 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
 	case "month":
 		return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
+	case "week":
+		// ISO convention (DuckDB/Postgres): truncate to Monday.
+		d := t
+		for d.Weekday() != time.Monday {
+			d = d.AddDate(0, 0, -1)
+		}
+		return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
 	case "day":
 		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location()).Format(time.RFC3339)
 	case "hour":
 		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, t.Location()).Format(time.RFC3339)
+	case "minute":
+		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, t.Location()).Format(time.RFC3339)
+	case "second":
+		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, t.Location()).Format(time.RFC3339)
 	default:
 		return nil
 	}
@@ -2886,9 +2900,11 @@ func parseTime(v any) time.Time {
 	case time.Time:
 		return tv
 	case int64:
-		return time.Unix(tv, 0)
+		// UTC, matching the vectorized kernels (vecExtract/vecHour/…).
+		// Local time made date_trunc/extract results depend on host TZ.
+		return time.Unix(tv, 0).UTC()
 	case float64:
-		return time.Unix(int64(tv), 0)
+		return time.Unix(int64(tv), 0).UTC()
 	case string:
 		for _, layout := range []string{
 			time.RFC3339,
@@ -3202,7 +3218,43 @@ func fnRegexpReplace(args []any) any {
 	if err != nil {
 		return nil
 	}
-	return re.ReplaceAllString(toString(args[0]), toString(args[2]))
+	return re.ReplaceAllString(toString(args[0]), sqlBackrefsToGo(toString(args[2])))
+}
+
+// sqlBackrefsToGo converts SQL-style backreferences (\1 … \9, the
+// POSIX/DuckDB/Postgres convention) in a replacement string to Go's ${N}
+// form. \\ stays a literal backslash escape for a following digit.
+func sqlBackrefsToGo(repl string) string {
+	if !strings.ContainsRune(repl, '\\') {
+		return repl
+	}
+	var b strings.Builder
+	b.Grow(len(repl) + 4)
+	for i := 0; i < len(repl); i++ {
+		c := repl[i]
+		if c == '\\' && i+1 < len(repl) {
+			next := repl[i+1]
+			if next >= '1' && next <= '9' {
+				b.WriteString("${")
+				b.WriteByte(next)
+				b.WriteString("}")
+				i++
+				continue
+			}
+			if next == '\\' {
+				b.WriteByte('\\')
+				i++
+				continue
+			}
+		}
+		// Go's Expand treats $ specially — escape literal dollars.
+		if c == '$' {
+			b.WriteString("$$")
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // --- Encoding functions ---
