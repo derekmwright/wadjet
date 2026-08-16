@@ -361,11 +361,13 @@ func (c *partialGroupCursor) loadHeadAccsAoS(gi int) {
 	default:
 		gs = c.strGroupStates[gi]
 	}
-	if gs.extras == nil || gs.extras.accs == nil {
+	if gs == nil || gs.extras == nil || gs.extras.accs == nil {
 		// Defensive: a group with no extras at this point would be a bug
-		// upstream (migrate populates extras for all groups). Zero out the
-		// head so any partial spill written from this cursor produces
-		// identity values instead of stale fields from a prior load.
+		// upstream (migrate populates extras for all groups; dual-int
+		// groups defer the state struct entirely and are nil until
+		// materializeFlatAccums reifies them). Zero out the head so any
+		// partial spill written from this cursor produces identity values
+		// instead of stale fields from a prior load.
 		for ai := range c.headAccs {
 			c.headAccs[ai] = kernel.Accumulator{}
 		}

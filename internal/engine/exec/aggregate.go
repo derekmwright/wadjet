@@ -1473,9 +1473,17 @@ func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
 					return gi
 				}
 			}
-			// Collision: new group, chain to existing head
+			// Collision: new group, chain to existing head.
+			// The state pointer is NIL: this path is gated to simple
+			// aggregates, whose per-group state lives entirely in the flat
+			// SoA arrays + dualIntKeysA/B. A 24B groupState + pool chunk
+			// per group was ~2.4GB live (~5GB heap peak with GC headroom)
+			// on ClickBench Q33's 100M groups — enough to push the query
+			// into the GOMEMLIMIT thrash zone and evict the input page
+			// cache every try. materializeFlatAccums reifies on demand for
+			// migration/merge cold paths.
 			newIdx := int32(len(h.intGroupStates))
-			h.intGroupStates = append(h.intGroupStates, h.gsPool.alloc())
+			h.intGroupStates = append(h.intGroupStates, nil)
 			h.dualIntKeysA = append(h.dualIntKeysA, a)
 			h.dualIntKeysB = append(h.dualIntKeysB, b)
 			h.dualIntNextGroup = append(h.dualIntNextGroup, head)
@@ -1485,9 +1493,9 @@ func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
 			}
 			return newIdx
 		}
-		// New composite key
+		// New composite key (nil state — see the collision branch above)
 		newIdx := int32(len(h.intGroupStates))
-		h.intGroupStates = append(h.intGroupStates, h.gsPool.alloc())
+		h.intGroupStates = append(h.intGroupStates, nil)
 		h.dualIntKeysA = append(h.dualIntKeysA, a)
 		h.dualIntKeysB = append(h.dualIntKeysB, b)
 		h.dualIntNextGroup = append(h.dualIntNextGroup, -1)
@@ -2886,11 +2894,14 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		} else {
 			gs = h.strGroupStates[start+i]
 		}
-		// gs.extras is nil on the SoA hot path (consumeBatchIntGroup /
-		// consumeBatchDualIntGroup defer boxing) — those reads go through
-		// the SoA-direct branch below. Complex-agg / compact / generic
-		// paths populate extras during consume or processRow.
-		ext := gs.extras
+		// gs is NIL for dual-int groups (state fully deferred to the SoA
+		// arrays); gs.extras is nil on the other SoA hot paths — both go
+		// through the SoA-direct branches below. Complex-agg / compact /
+		// generic paths populate extras during consume or processRow.
+		var ext *groupStateExtras
+		if gs != nil {
+			ext = gs.extras
+		}
 
 		// Set group-by columns. Int and dual-int paths take the typed-direct
 		// route (writeIntKeyToColumn) so the per-row int64 → `any` box that
@@ -4575,6 +4586,12 @@ func (h *HashAggregate) materializeFlatAccums() {
 		return
 	}
 	for gi, gs := range h.intGroupStates {
+		if gs == nil {
+			// Dual-int deferred state: reify for the migration/merge cold
+			// path that needs boxed extras.
+			gs = h.gsPool.alloc()
+			h.intGroupStates[gi] = gs
+		}
 		ext := gs.ensureExtras()
 		if ext.accs == nil {
 			ext.accs = make([]kernel.Accumulator, nAggs)
