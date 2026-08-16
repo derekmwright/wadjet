@@ -103,6 +103,15 @@ func computeRequiredColumns(n *Node) {
 	pushColumnNeeds(n, nil)
 }
 
+// RowCountOnlyColumn is the sentinel required-column emitted for scans
+// that only need a row count (bare COUNT(*) / literal-only projections).
+// The physical scan drops it when any real column is required and
+// otherwise projects the narrowest schema column instead of all columns.
+// The "__" prefix keeps it flowing through sanitizeScanNeeds and makes the
+// distributed worker's all-or-nothing projection guard fall back to full
+// width (safe) if it ever reaches that path.
+const RowCountOnlyColumn = "__rowcount_only__"
+
 // scanColSanitize gates sanitizeScanNeeds (WADJET_SCAN_COL_SANITIZE=0
 // restores the pre-2026-07 polluted lists for A/B). Default on.
 var scanColSanitize = os.Getenv("WADJET_SCAN_COL_SANITIZE") != "0"
@@ -139,15 +148,26 @@ func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
 		sort.Strings(cols)
 		return cols
 	}
-	inSchema := make(map[string]bool, len(n.ScanColumns))
+	// lower → canonical schema spelling. Refs arrive lowercased from
+	// collectASTColumnRefs; downstream projection (buildReadSchema and the
+	// scan readers) matches column names case-SENSITIVELY, so the kept
+	// names must carry the schema's case. On all-lowercase schemas (TPC-H)
+	// this was invisible; on CamelCase schemas (ClickBench hits) the
+	// lowercased refs matched nothing and every scan silently read all
+	// 105 columns — the entire dataset per query.
+	inSchema := make(map[string]string, len(n.ScanColumns))
 	for _, c := range n.ScanColumns {
-		inSchema[strings.ToLower(c)] = true
+		inSchema[strings.ToLower(c)] = c
 	}
 	keep := make(map[string]bool, len(needs))
 	for name := range needs {
 		if alias, col, ok := strings.Cut(name, "."); ok {
 			if strings.EqualFold(alias, n.TableAlias) || strings.EqualFold(alias, n.TableName) {
-				keep[col] = true
+				if canon, ok := inSchema[strings.ToLower(col)]; ok {
+					keep[canon] = true
+				} else {
+					keep[col] = true
+				}
 				continue
 			}
 			// "attrs.score" where attrs is a ROW-typed column of THIS
@@ -156,12 +176,14 @@ func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
 			// the scan must read the base column). Dropping it broke
 			// every dotted Row access (filter column "attrs.score" does
 			// not exist) when sanitization landed in #249.
-			if inSchema[strings.ToLower(alias)] {
+			if _, ok := inSchema[strings.ToLower(alias)]; ok {
 				keep[name] = true
 			}
 			continue // other relation's qualified column: drop
 		}
-		if len(inSchema) == 0 || inSchema[strings.ToLower(name)] || strings.HasPrefix(name, "__") {
+		if canon, ok := inSchema[strings.ToLower(name)]; ok {
+			keep[canon] = true
+		} else if len(inSchema) == 0 || strings.HasPrefix(name, "__") {
 			keep[name] = true
 		}
 	}
@@ -195,12 +217,19 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 		if n.Type == NodeProject || n.Type == NodeAggregate {
 			needs := make(map[string]bool, 8)
 			collectNodeColumnRefs(n, needs)
-			if len(needs) > 0 {
-				for _, child := range n.Children {
-					pushColumnNeeds(child, needs)
-				}
-				return
+			if len(needs) == 0 {
+				// Zero column refs — SELECT COUNT(*) or SELECT <literal>.
+				// Previously this fell through to "all columns", so a bare
+				// COUNT(*) read (and decoded) the entire table. The
+				// sentinel tells the scan "any single narrow column is
+				// enough to count rows"; intermediate Filter nodes still
+				// add their predicate columns on the way down.
+				needs[RowCountOnlyColumn] = true
 			}
+			for _, child := range n.Children {
+				pushColumnNeeds(child, needs)
+			}
+			return
 		}
 		// SEMI/ANTI join build side never contributes columns to output,
 		// so restrict it even in "all columns" mode.

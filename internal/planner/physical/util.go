@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
+	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -318,6 +320,7 @@ type fileSlot struct {
 	reader       *parquet.Reader     // full reader (data + metadata) once loaded
 	nativeReader *parquet.FileReader // alias of reader.FileReader()
 	dataBuf      []byte              // pooled buffer holding the file bytes; returned to pool on releaseRG
+	stagedFile   *os.File            // staged pread mode: local fd; column chunks read on demand (no dataBuf)
 	chargedBytes int64               // bytes reserved on inner.memTracker for dataBuf; released with it
 	gateBytes    int64               // bytes admitted on inner.loadGate; released with the buffer
 	rgRemaining  atomic.Int64        // refcount of unprocessed row groups; release on 0
@@ -345,6 +348,35 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 		return s.nativeReader, s.loadErr
 	}
 	s.loaded = true
+
+	// Staged pread mode (docs/design/scan-pread-reads.md, extended to the
+	// embedded/standalone scan 2026-08-16): when the store hands back a
+	// real file descriptor, skip the whole-file read entirely — each
+	// projected column chunk is read with one ranged pread on first use
+	// by the decode path (FileReader.ColumnPages staged mode). On a
+	// 105-column ClickBench hits part where a query touches a handful of
+	// columns this is the difference between reading 137 MB and a few MB
+	// per file; the c6a recon run's ~56s/query floor was exactly
+	// full-dataset reads at the gp2 throughput cap. Wide-projection scans
+	// still read most bytes but as per-chunk preads, so no whole-file
+	// heap buffer, no load-gate admission, and no big tracker charge.
+	// Non-local stores (S3) keep the whole-file path: one object GET beats
+	// per-chunk ranged GETs for the narrow TPC-H tables it serves.
+	if ras, ok := inner.cat.Store().(objstore.ReaderAtStore); ok {
+		if ra, size, err := ras.GetReaderAt(ctx, inner.cat.Bucket(), s.entry.Path); err == nil {
+			if f, isFile := ra.(*os.File); isFile {
+				fr, ferr := parquet.OpenFileReaderAt(f, size)
+				if ferr == nil {
+					s.stagedFile = f
+					s.nativeReader = fr
+					return s.nativeReader, nil
+				}
+				f.Close()
+			} else {
+				ra.Close()
+			}
+		}
+	}
 
 	// Admit this load against the byte-budgeted gate so peak heap from
 	// loaded files is bounded by the gate's budget regardless of how many
@@ -455,6 +487,8 @@ func (s *fileSlot) releaseRG(inner *scanSourceInner) {
 	s.nativeReader = nil
 	buf := s.dataBuf
 	s.dataBuf = nil
+	sf := s.stagedFile
+	s.stagedFile = nil
 	s.releaseCharge(inner)
 	gateN := s.gateBytes
 	s.gateBytes = 0
@@ -464,6 +498,9 @@ func (s *fileSlot) releaseRG(inner *scanSourceInner) {
 	// is what makes the byte-budgeted load gate actually bound peak heap.
 	if buf != nil {
 		putReadBuf(buf)
+	}
+	if sf != nil {
+		sf.Close()
 	}
 	if gateN > 0 && inner.loadGate != nil {
 		inner.loadGate.release(gateN)
@@ -484,12 +521,17 @@ func (s *fileSlot) drainAbandoned(inner *scanSourceInner) {
 	s.nativeReader = nil
 	buf := s.dataBuf
 	s.dataBuf = nil
+	sf := s.stagedFile
+	s.stagedFile = nil
 	s.releaseCharge(inner)
 	gateN := s.gateBytes
 	s.gateBytes = 0
 	s.mu.Unlock()
 	if buf != nil {
 		putReadBuf(buf)
+	}
+	if sf != nil {
+		sf.Close()
 	}
 	if gateN > 0 && inner.loadGate != nil {
 		inner.loadGate.release(gateN)
@@ -964,6 +1006,25 @@ func buildReadSchema(schema []parquet.Column, requiredCols []string) []parquet.C
 	if len(requiredCols) == 0 {
 		return schema
 	}
+	// Row-count-only scans (bare COUNT(*)): the sentinel means "any one
+	// narrow column suffices". Drop it when real columns are present
+	// (predicate columns already give a row count); when it stands alone,
+	// project the narrowest column instead of the full schema.
+	countOnly := false
+	realCols := requiredCols[:0:0]
+	for _, c := range requiredCols {
+		if c == logical.RowCountOnlyColumn {
+			countOnly = true
+			continue
+		}
+		realCols = append(realCols, c)
+	}
+	if countOnly && len(realCols) == 0 {
+		return []parquet.Column{narrowestColumn(schema)}
+	}
+	if countOnly {
+		requiredCols = realCols
+	}
 	needed := make(map[string]bool, len(requiredCols))
 	// Dotted references: "attrs.score" must pull in the parent column when
 	// the qualifier names a ROW column ("attrs"), or the field access in a
@@ -988,6 +1049,33 @@ func buildReadSchema(schema []parquet.Column, requiredCols []string) []parquet.C
 		return filtered
 	}
 	return schema
+}
+
+// narrowestColumn picks the cheapest-to-read column for row-count-only
+// scans: fixed narrow types beat wide ones beat variable-length ones.
+func narrowestColumn(schema []parquet.Column) parquet.Column {
+	width := func(t parquet.TypeID) int {
+		switch t {
+		case parquet.TypeBool:
+			return 1
+		case parquet.TypeInt32, parquet.TypeDate, parquet.TypePort, parquet.TypeProtocol, parquet.TypeFloat32:
+			return 4
+		case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeFloat64, parquet.TypeIPv4,
+			parquet.TypeMAC, parquet.TypeDuration, parquet.TypeDecimal:
+			return 8
+		case parquet.TypeUUID, parquet.TypeIPv6:
+			return 16
+		default:
+			return 64 // strings/bytes/nested — avoid
+		}
+	}
+	best := schema[0]
+	for _, c := range schema[1:] {
+		if width(c.Type) < width(best.Type) {
+			best = c
+		}
+	}
+	return best
 }
 
 // expandRowFieldRequirements rewrites required column names of the form

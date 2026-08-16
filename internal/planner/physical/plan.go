@@ -8574,25 +8574,7 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 // cachedReadSchema field.
 func (inner *scanSourceInner) readSchema() []parquet.Column {
 	inner.cachedReadSchemaOnce.Do(func() {
-		if len(inner.requiredCols) == 0 {
-			inner.cachedReadSchema = inner.schema
-			return
-		}
-		needed := make(map[string]bool, len(inner.requiredCols))
-		for _, c := range inner.requiredCols {
-			needed[c] = true
-		}
-		filtered := make([]parquet.Column, 0, len(inner.requiredCols))
-		for _, col := range inner.schema {
-			if needed[col.Name] {
-				filtered = append(filtered, col)
-			}
-		}
-		if len(filtered) > 0 {
-			inner.cachedReadSchema = filtered
-		} else {
-			inner.cachedReadSchema = inner.schema
-		}
+		inner.cachedReadSchema = buildReadSchema(inner.schema, inner.requiredCols)
 	})
 	return inner.cachedReadSchema
 }
