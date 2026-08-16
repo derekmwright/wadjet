@@ -5607,6 +5607,12 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		return nil, nil, nil, fmt.Errorf("aggregate has no child")
 	}
 
+	// Bare COUNT(*) over a plain scan answers from the catalog manifest —
+	// no scan pipeline at all (see metadata_count.go).
+	if src, ok := p.tryBuildMetadataCount(ctx, node); ok {
+		return src, nil, &exec.CollectSink{}, nil
+	}
+
 	childSource, childOps, _, err := p.buildPipeline(ctx, node.Children[0])
 	if err != nil {
 		return nil, nil, nil, err
