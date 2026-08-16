@@ -81,6 +81,8 @@ func main() {
 		pprofAddr    = flag.String("pprof-addr", "", "Start a net/http/pprof server on this address (e.g. localhost:6060) for live profiling")
 		spillDir     = flag.String("spill-dir", "", "Spill directory (default: <data-dir>/../wadjet-spill). MUST be real disk: the os temp dir default of the engine is tmpfs on AL2023, so spill runs consumed RAM and helped OOM-kill the c6a on high-cardinality aggregation")
 		memBudget    = flag.Int64("mem-budget", 0, "Per-query memory budget in bytes (0 = auto-detect: 75% of the memory limit)")
+		isolate      = flag.Bool("isolate", true, "Run each query in a fresh child process (the duckdb-entry pattern: one invocation per query). A query that OOMs or crashes becomes a null result instead of aborting the suite; per-process registration costs ~0.05s (footer reads)")
+		childQuery   = flag.String("child-query", "", "internal: run this single query (isolate child mode) and print per-try seconds as JSON on the last stdout line")
 		analyze      = flag.Bool("analyze", false, "Run ANALYZE (per-column HLL) after registration. Off by default: ClickBench has no joins, planner NDV buys little, and HLL over 105 columns dominates load_time (~24s per 1M-row part)")
 	)
 	flag.Parse()
@@ -116,7 +118,7 @@ func main() {
 
 	ctx := context.Background()
 
-	if *s3Bucket != "" {
+	if *s3Bucket != "" && *childQuery == "" {
 		if err := downloadParts(ctx, *s3Endpoint, *s3Region, *s3Bucket, *s3Prefix, *dataDir); err != nil {
 			log.Fatalf("downloading parts: %v", err)
 		}
@@ -154,13 +156,23 @@ func main() {
 	loadTime := time.Since(loadStart)
 	log.Printf("hits registered in %.2fs", loadTime.Seconds())
 
-	// Sanity: COUNT(*) must be positive before timing anything.
-	res, err := db.Query(ctx, "SELECT COUNT(*) FROM hits")
-	if err != nil || len(res.Rows) != 1 {
-		log.Fatalf("sanity COUNT(*): rows=%v err=%v", res, err)
+	if *childQuery == "" {
+		// Sanity: COUNT(*) must be positive before timing anything.
+		res, err := db.Query(ctx, "SELECT COUNT(*) FROM hits")
+		if err != nil || len(res.Rows) != 1 {
+			log.Fatalf("sanity COUNT(*): rows=%v err=%v", res, err)
+		}
+		for _, v := range res.Rows[0] {
+			log.Printf("hits rows: %v", v)
+		}
 	}
-	for _, v := range res.Rows[0] {
-		log.Printf("hits rows: %v", v)
+
+	if *childQuery != "" {
+		// Isolate child: one query, N tries, JSON triple on the last line.
+		triesOut := runQueryTries(ctx, db, *childQuery, *tries, *queryTimeout, 0)
+		buf, _ := json.Marshal(triesOut)
+		fmt.Println(string(buf))
+		return
 	}
 
 	results := make([][]float64, 0, len(queries))
@@ -168,20 +180,11 @@ func main() {
 		if *dropCaches {
 			dropPageCache()
 		}
-		triesOut := make([]float64, 0, *tries)
-		for t := 0; t < *tries; t++ {
-			qctx, cancel := context.WithTimeout(ctx, *queryTimeout)
-			start := time.Now()
-			res, err := db.Query(qctx, q)
-			elapsed := time.Since(start).Seconds()
-			cancel()
-			if err != nil {
-				log.Printf("Q%02d try %d FAILED after %.3fs: %v", qi+1, t+1, elapsed, err)
-				triesOut = append(triesOut, -1) // null-ed below in JSON
-				continue
-			}
-			log.Printf("Q%02d try %d: %.3fs (%d rows)", qi+1, t+1, elapsed, len(res.Rows))
-			triesOut = append(triesOut, elapsed)
+		var triesOut []float64
+		if *isolate {
+			triesOut = runQueryIsolated(qi+1, q, *tries)
+		} else {
+			triesOut = runQueryTries(ctx, db, q, *tries, *queryTimeout, qi+1)
 		}
 		results = append(results, triesOut)
 	}
@@ -205,6 +208,65 @@ func main() {
 		log.Fatalf("write %s: %v", *out, err)
 	}
 	log.Printf("wrote %s", *out)
+}
+
+// runQueryTries runs one query N times in-process. qNum 0 suppresses the
+// per-try log prefix (child mode logs go to stderr and the parent relogs).
+func runQueryTries(ctx context.Context, db *wadjet.DB, q string, tries int, timeout time.Duration, qNum int) []float64 {
+	out := make([]float64, 0, tries)
+	for t := 0; t < tries; t++ {
+		qctx, cancel := context.WithTimeout(ctx, timeout)
+		start := time.Now()
+		res, err := db.Query(qctx, q)
+		elapsed := time.Since(start).Seconds()
+		cancel()
+		if err != nil {
+			log.Printf("Q%02d try %d FAILED after %.3fs: %v", qNum, t+1, elapsed, err)
+			out = append(out, -1)
+			continue
+		}
+		log.Printf("Q%02d try %d: %.3fs (%d rows)", qNum, t+1, elapsed, len(res.Rows))
+		out = append(out, elapsed)
+	}
+	return out
+}
+
+// runQueryIsolated re-execs this binary in child mode for one query. A
+// child that dies (OOM kill, panic) yields nulls for all its tries; the
+// suite continues — the duckdb-entry one-process-per-query pattern.
+func runQueryIsolated(qNum int, q string, tries int) []float64 {
+	nulls := make([]float64, tries)
+	for i := range nulls {
+		nulls[i] = -1
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		log.Printf("Q%02d: cannot resolve executable: %v", qNum, err)
+		return nulls
+	}
+	args := append([]string(nil), os.Args[1:]...)
+	args = append(args, "--child-query", q, "--isolate=false", "--drop-caches=false")
+	cmd := exec.Command(exe, args...)
+	cmd.Stderr = os.Stderr
+	outBuf, err := cmd.Output()
+	if err != nil {
+		log.Printf("Q%02d CHILD DIED: %v", qNum, err)
+		return nulls
+	}
+	lines := strings.Split(strings.TrimSpace(string(outBuf)), "\n")
+	var triesOut []float64
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &triesOut); err != nil || len(triesOut) != tries {
+		log.Printf("Q%02d: bad child output %q: %v", qNum, lines[len(lines)-1], err)
+		return nulls
+	}
+	for t, v := range triesOut {
+		if v >= 0 {
+			log.Printf("Q%02d try %d: %.3fs", qNum, t+1, v)
+		} else {
+			log.Printf("Q%02d try %d FAILED (child)", qNum, t+1)
+		}
+	}
+	return triesOut
 }
 
 // marshalResults renders the official JSON, encoding failed tries (-1) as
