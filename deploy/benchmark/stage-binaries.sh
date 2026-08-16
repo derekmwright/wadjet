@@ -35,6 +35,7 @@ echo "Building linux/amd64 variants..."
 mkdir -p "${OUTDIR}/amd64"
 GOOS=linux GOARCH=amd64 go build -o "${OUTDIR}/amd64/wadjet" ./cmd/wadjet
 GOOS=linux GOARCH=amd64 go build -o "${OUTDIR}/amd64/tpch-bench" ./cmd/tpch-bench
+GOOS=linux GOARCH=amd64 go build -o "${OUTDIR}/amd64/clickbench-bench" ./cmd/clickbench-bench
 
 echo "Uploading binaries to s3://${BUCKET}/bin/{${GIT_SHA},latest}/..."
 for ver in "$GIT_SHA" "latest"; do
@@ -43,6 +44,7 @@ for ver in "$GIT_SHA" "latest"; do
   aws s3 cp "${OUTDIR}/security-bench" "s3://${BUCKET}/bin/${ver}/security-bench" --region "$REGION" --quiet
   aws s3 cp "${OUTDIR}/amd64/wadjet" "s3://${BUCKET}/bin/${ver}/amd64/wadjet" --region "$REGION" --quiet
   aws s3 cp "${OUTDIR}/amd64/tpch-bench" "s3://${BUCKET}/bin/${ver}/amd64/tpch-bench" --region "$REGION" --quiet
+  aws s3 cp "${OUTDIR}/amd64/clickbench-bench" "s3://${BUCKET}/bin/${ver}/amd64/clickbench-bench" --region "$REGION" --quiet
 done
 
 # Upload deploy scripts alongside binaries so instances don't depend on git clone
