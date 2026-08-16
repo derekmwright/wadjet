@@ -340,6 +340,11 @@ func downloadParts(ctx context.Context, endpoint, region, bucket, prefix, dataDi
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return err
 	}
+	if endpoint == "" {
+		// The MinIO client needs a concrete endpoint even for AWS
+		// (same convention as tpch-bench / run-benchmark.sh).
+		endpoint = "s3." + region + ".amazonaws.com"
+	}
 	store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
 		Endpoint: endpoint,
 		UseSSL:   true,
