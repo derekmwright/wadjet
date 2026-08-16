@@ -45,3 +45,9 @@ variable "auto_shutdown" {
   type        = bool
   default     = true
 }
+
+variable "mem_budget_bytes" {
+  description = "Per-query memory budget passed to clickbench-bench. Default 18GiB on the 32GB c6a.4xlarge: the auto-detected 75%-of-RAM budget (23GB) sat too close to the 27.6GB GOMEMLIMIT — with GOGC off, budget-full aggregate state plus uncollected garbage and merge overhead crossed physical RAM on Q19 (100M-row high-cardinality GROUP BY) and the kernel killed the process."
+  type        = number
+  default     = 19327352832
+}

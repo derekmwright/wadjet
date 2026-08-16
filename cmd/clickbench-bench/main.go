@@ -33,6 +33,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,6 +78,8 @@ func main() {
 		machine      = flag.String("machine", "", "Machine description for the results JSON (e.g. \"c6a.4xlarge, 500gb gp2\")")
 		comment      = flag.String("comment", "", "Comment for the results JSON")
 		queriesPath  = flag.String("queries", "", "Query file override (default: embedded queries.sql)")
+		pprofAddr    = flag.String("pprof-addr", "", "Start a net/http/pprof server on this address (e.g. localhost:6060) for live profiling")
+		memBudget    = flag.Int64("mem-budget", 0, "Per-query memory budget in bytes (0 = auto-detect: 75% of the memory limit)")
 		analyze      = flag.Bool("analyze", false, "Run ANALYZE (per-column HLL) after registration. Off by default: ClickBench has no joins, planner NDV buys little, and HLL over 105 columns dominates load_time (~24s per 1M-row part)")
 	)
 	flag.Parse()
@@ -84,12 +88,21 @@ func main() {
 		log.Fatal("--data-dir is required")
 	}
 
-	// GOMEMLIMIT safety net, same policy as tpch-bench.
-	if memLimit := memory.DetectMemoryLimit(); memLimit > 0 {
+	// GOMEMLIMIT safety net, same policy as tpch-bench. An explicit
+	// GOMEMLIMIT env (runtime already honors it) wins — needed for
+	// reduced-scale memory repros.
+	if memLimit := memory.DetectMemoryLimit(); memLimit > 0 && os.Getenv("GOMEMLIMIT") == "" {
 		goMemLimit := memLimit * 9 / 10
 		debug.SetMemoryLimit(goMemLimit)
 		debug.SetGCPercent(-1)
 		log.Printf("GOMEMLIMIT=%.1f GB, GOGC=off", float64(goMemLimit)/(1<<30))
+	}
+
+	if *pprofAddr != "" {
+		go func() {
+			log.Printf("pprof listening on %s", *pprofAddr)
+			log.Println(http.ListenAndServe(*pprofAddr, nil))
+		}()
 	}
 
 	ctx := context.Background()
@@ -115,7 +128,7 @@ func main() {
 	// Register the hits table. load_time = registration + ANALYZE (wadjet
 	// queries the parquet in place; there is no import step).
 	loadStart := time.Now()
-	db, err := openHitsDB(ctx, *dataDir, parts, *analyze)
+	db, err := openHitsDB(ctx, *dataDir, parts, *analyze, *memBudget)
 	if err != nil {
 		log.Fatalf("opening db: %v", err)
 	}
@@ -255,7 +268,7 @@ func listParts(dir string) ([]string, int64, error) {
 // INT16-annotated INT32 — the catalog-level equivalent of the official
 // DuckDB view's make_date rewrite). EventTime stays INT64 epoch-seconds:
 // wadjet's temporal scalar functions take int64 seconds directly.
-func openHitsDB(ctx context.Context, dataDir string, parts []string, analyze bool) (*wadjet.DB, error) {
+func openHitsDB(ctx context.Context, dataDir string, parts []string, analyze bool, memBudget int64) (*wadjet.DB, error) {
 	abs, err := filepath.Abs(dataDir)
 	if err != nil {
 		return nil, err
@@ -266,7 +279,7 @@ func openHitsDB(ctx context.Context, dataDir string, parts []string, analyze boo
 		return nil, fmt.Errorf("filestore: %w", err)
 	}
 
-	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: bucket})
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: bucket, MemoryBudget: memBudget})
 	if err != nil {
 		return nil, err
 	}

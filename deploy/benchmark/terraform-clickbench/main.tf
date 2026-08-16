@@ -110,6 +110,7 @@ locals {
     TS=$(date +%Y%m%d-%H%M%S)
 
     /usr/local/bin/clickbench-bench \
+      --mem-budget "${var.mem_budget_bytes}" \
       --s3-bucket "${var.data_bucket}" \
       --s3-region "${var.region}" \
       --s3-prefix "tables/hits/" \
