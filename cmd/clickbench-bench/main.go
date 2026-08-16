@@ -39,6 +39,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,6 +84,7 @@ func main() {
 		memBudget    = flag.Int64("mem-budget", 0, "Per-query memory budget in bytes (0 = auto-detect: 75% of the memory limit)")
 		isolate      = flag.Bool("isolate", true, "Run each query in a fresh child process (the duckdb-entry pattern: one invocation per query). A query that OOMs or crashes becomes a null result instead of aborting the suite; per-process registration costs ~0.05s (footer reads)")
 		childQuery   = flag.String("child-query", "", "internal: run this single query (isolate child mode) and print per-try seconds as JSON on the last stdout line")
+		childQNum    = flag.Int("child-qnum", 0, "internal: real query number for the child's per-try log lines — without it every isolate child logs itself as Q00, which misreads as Q01 when tailing the live log")
 		analyze      = flag.Bool("analyze", false, "Run ANALYZE (per-column HLL) after registration. Off by default: ClickBench has no joins, planner NDV buys little, and HLL over 105 columns dominates load_time (~24s per 1M-row part)")
 	)
 	flag.Parse()
@@ -169,7 +171,7 @@ func main() {
 
 	if *childQuery != "" {
 		// Isolate child: one query, N tries, JSON triple on the last line.
-		triesOut := runQueryTries(ctx, db, *childQuery, *tries, *queryTimeout, 0)
+		triesOut := runQueryTries(ctx, db, *childQuery, *tries, *queryTimeout, *childQNum)
 		buf, _ := json.Marshal(triesOut)
 		fmt.Println(string(buf))
 		return
@@ -245,7 +247,7 @@ func runQueryIsolated(qNum int, q string, tries int) []float64 {
 		return nulls
 	}
 	args := append([]string(nil), os.Args[1:]...)
-	args = append(args, "--child-query", q, "--isolate=false", "--drop-caches=false")
+	args = append(args, "--child-query", q, "--child-qnum", strconv.Itoa(qNum), "--isolate=false", "--drop-caches=false")
 	cmd := exec.Command(exe, args...)
 	cmd.Stderr = os.Stderr
 	outBuf, err := cmd.Output()
