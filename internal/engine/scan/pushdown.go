@@ -45,22 +45,34 @@ func CanPruneRowGroup(pred StatsPredicate, stats pqt.RowGroupStats) bool {
 	switch pred.Op {
 	case exec.OpEq:
 		// Prune if value < min or value > max
-		return compareValues(pred.Value, min) < 0 || compareValues(pred.Value, max) > 0
+		if c, ok := compareValuesOK(pred.Value, min); ok && c < 0 {
+			return true
+		}
+		if c, ok := compareValuesOK(pred.Value, max); ok && c > 0 {
+			return true
+		}
+		return false
 	case exec.OpLt:
 		// Looking for rows where col < value. Prune if min >= value
-		return compareValues(min, pred.Value) >= 0
+		c, ok := compareValuesOK(min, pred.Value)
+		return ok && c >= 0
 	case exec.OpLe:
 		// Looking for rows where col <= value. Prune if min > value
-		return compareValues(min, pred.Value) > 0
+		c, ok := compareValuesOK(min, pred.Value)
+		return ok && c > 0
 	case exec.OpGt:
 		// Looking for rows where col > value. Prune if max <= value
-		return compareValues(max, pred.Value) <= 0
+		c, ok := compareValuesOK(max, pred.Value)
+		return ok && c <= 0
 	case exec.OpGe:
 		// Looking for rows where col >= value. Prune if max < value
-		return compareValues(max, pred.Value) < 0
+		c, ok := compareValuesOK(max, pred.Value)
+		return ok && c < 0
 	case exec.OpNe:
 		// Can only prune if min == max == value (all rows have the excluded value)
-		return compareValues(min, max) == 0 && compareValues(min, pred.Value) == 0
+		cm, okm := compareValuesOK(min, max)
+		cv, okv := compareValuesOK(min, pred.Value)
+		return okm && okv && cm == 0 && cv == 0
 	default:
 		return false
 	}
@@ -83,43 +95,94 @@ func compareValues(a, b any) int {
 		return 1
 	}
 
+	c, _ := compareValuesOK(a, b)
+	return c
+}
+
+// compareValuesOK compares two typed values and reports whether the
+// comparison was MEANINGFUL. A cross-type comparison that cannot be
+// coerced exactly (string vs numeric, non-numeric types) returns
+// ok=false — callers deciding to PRUNE must treat that as "unknown, keep
+// the row group". The old compareValues silently coerced mismatches to 0
+// (string → int64 0), which made `dateCol <= '2013-07-31'` compare
+// day-number stats against zero and prune every row group the moment
+// string date literals reached the stats layer.
+func compareValuesOK(a, b any) (int, bool) {
 	switch av := a.(type) {
 	case int64:
-		bv := toInt64(b)
+		bv, ok := toInt64OK(b)
+		if !ok {
+			return 0, false
+		}
 		if av < bv {
-			return -1
+			return -1, true
 		}
 		if av > bv {
-			return 1
+			return 1, true
 		}
-		return 0
+		return 0, true
 	case int32:
-		return compareValues(int64(av), b)
+		return compareValuesOK(int64(av), b)
 	case float64:
-		bv := toFloat64(b)
+		bv, ok := toFloat64OK(b)
+		if !ok {
+			return 0, false
+		}
 		if av < bv {
-			return -1
+			return -1, true
 		}
 		if av > bv {
-			return 1
+			return 1, true
 		}
-		return 0
+		return 0, true
 	case float32:
-		return compareValues(float64(av), b)
+		return compareValuesOK(float64(av), b)
 	case string:
 		bv, ok := b.(string)
 		if !ok {
-			return 0
+			return 0, false
 		}
 		if av < bv {
-			return -1
+			return -1, true
 		}
 		if av > bv {
-			return 1
+			return 1, true
 		}
-		return 0
+		return 0, true
 	default:
-		return 0
+		return 0, false
+	}
+}
+
+func toInt64OK(v any) (int64, bool) {
+	switch tv := v.(type) {
+	case int64:
+		return tv, true
+	case int32:
+		return int64(tv), true
+	case int:
+		return int64(tv), true
+	case float64:
+		return int64(tv), tv == float64(int64(tv))
+	default:
+		return 0, false
+	}
+}
+
+func toFloat64OK(v any) (float64, bool) {
+	switch tv := v.(type) {
+	case float64:
+		return tv, true
+	case float32:
+		return float64(tv), true
+	case int64:
+		return float64(tv), true
+	case int32:
+		return float64(tv), true
+	case int:
+		return float64(tv), true
+	default:
+		return 0, false
 	}
 }
 

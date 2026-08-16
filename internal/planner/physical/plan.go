@@ -8282,6 +8282,7 @@ type scanSourceInner struct {
 	rgUnits   []rgUnit  // flat list of row group work units
 	rgIdx     int64     // atomic index for parallel RG workers
 	emitRowLoc bool     // stamp __row_loc (rgUnit ordinal, row) on every scan batch; disables batch pooling
+	eqProbes  []scan.EqProbe // "=" conjuncts for dictionary-probe row-group pruning (dict_prune.go)
 	useNative bool      // true if native page decoder can be used (no Decimal/Array/Map)
 	loadGate  *loadGate // byte-budgeted admission for in-flight file LOADs (data, not metadata)
 
@@ -8477,11 +8478,36 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	}
 
 	scanCtx, cancel := context.WithCancel(ctx)
-	// Convert logical predicates to scan predicates for row-group pruning
+	// Convert logical predicates to scan predicates for row-group pruning.
+	// Date-typed columns store int32 days-since-epoch; a string literal
+	// ('2013-07-31') coerces to its day number HERE, where the schema is
+	// known — the stats layer refuses cross-type comparisons, so without
+	// this coercion date-range predicates simply never prune.
+	dateCols := make(map[string]bool, 2)
+	for _, c := range tableMeta.Schema.Columns {
+		if c.Type == parquet.TypeDate {
+			dateCols[c.Name] = true
+		}
+	}
 	var sp []scanPredicate
+	var eqProbes []scan.EqProbe
 	for _, pred := range s.scanPreds {
 		if pred.Column != "" && pred.Op != "" && pred.Value != nil {
-			sp = append(sp, scanPredicate{Column: pred.Column, Op: pred.Op, Value: pred.Value})
+			val := pred.Value
+			if dateCols[pred.Column] {
+				if str, ok := val.(string); ok {
+					if ts, err := time.Parse("2006-01-02", str); err == nil {
+						val = ts.Unix() / 86400
+					}
+				}
+			}
+			sp = append(sp, scanPredicate{Column: pred.Column, Op: pred.Op, Value: val})
+			// Equality conjuncts also feed the dictionary probe — the
+			// precise prune where zonemaps are blind (point filters on
+			// high-cardinality columns).
+			if pred.Op == "=" {
+				eqProbes = append(eqProbes, scan.EqProbe{ColName: pred.Column, Value: val})
+			}
 		}
 	}
 
@@ -8521,6 +8547,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		memTracker:    s.memTracker,
 		spillMgr:      s.spillMgr,
 		emitRowLoc:    s.emitRowLoc,
+		eqProbes:      eqProbes,
 	}
 	// Nested (ARRAY/MAP/ROW) schemas must take the file-level scan whose
 	// readBatchDirect falls back to the row-based reader. This MUST be

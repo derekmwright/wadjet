@@ -171,6 +171,13 @@ type Predicate struct {
 	Value   any
 	Raw     string         // raw SQL expression
 	ASTExpr plansql.Node // compiled AST expression node
+	// PruneOnly marks predicates attached solely for storage-level pruning
+	// (row-group stats / dictionary probes). The cardinality estimator
+	// ignores them: attaching AST-decomposed conjuncts must not shift
+	// distributed plan choices (Q08's orders join flipped shuffle →
+	// broadcast off a 0.33^n selectivity guess the moment they appeared).
+	// Estimate-visible attachment is a separate, SF100-validated change.
+	PruneOnly bool
 }
 
 // Projection is a column expression in a SELECT.

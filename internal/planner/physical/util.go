@@ -957,6 +957,13 @@ func (inner *scanSourceInner) readRG(ctx context.Context, unitIdx int) *batch.Re
 		unit.slot.releaseRG(inner)
 		return nil
 	}
+	// Dictionary-probe pruning: an equality conjunct whose constant is
+	// absent from a pure-dictionary chunk proves the row group empty for
+	// this query — skip the decode entirely (see scan/dict_prune.go).
+	if len(inner.eqProbes) > 0 && scan.CanDictPruneRowGroup(rdr, unit.rgIndex, inner.eqProbes) {
+		unit.slot.releaseRG(inner)
+		return nil
+	}
 	b, err := scan.ReadRowGroupNative(rdr, unit.rgIndex, inner.readSchema(), inner.pool)
 	unit.slot.releaseRG(inner)
 	if err != nil {

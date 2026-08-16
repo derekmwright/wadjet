@@ -107,7 +107,10 @@ func estimateScanStats(n *Node) RelStats {
 
 	// Apply scan-level predicate selectivity
 	scanSel := 1.0
-	for range n.ScanPredicates {
+	for _, p := range n.ScanPredicates {
+		if p.PruneOnly {
+			continue
+		}
 		scanSel *= 0.33
 	}
 	for range n.PartitionFilter {

@@ -7,6 +7,7 @@ import (
 	"math/bits"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -74,6 +75,14 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 // attachScanPredicates copies simple filter predicates to scan nodes for
 // row-group-level pruning. Only predicates with a Column, Op, and literal Value
 // are useful for stats-based pruning.
+//
+// The builder wraps the WHOLE WHERE clause in one Raw/AST predicate with
+// Column/Op/Value empty, so the structured check alone attached NOTHING on
+// the embedded path — zonemap pruning never saw a predicate there. When
+// the structured fields are empty but an AST is present, decompose the
+// AST's top-level AND-conjuncts and attach each `col <op> literal` shape.
+// ScanPredicates feed PRUNING only (row filtering still runs the full
+// Filter), so attaching a conservative subset is always safe.
 func attachScanPredicates(n *Node) {
 	if n == nil {
 		return
@@ -85,12 +94,122 @@ func attachScanPredicates(n *Node) {
 		return
 	}
 	child := n.Children[0]
-	if child.Type == NodeScan {
-		for _, pred := range n.Predicates {
-			if pred.Column != "" && pred.Op != "" && pred.Value != nil {
-				child.ScanPredicates = append(child.ScanPredicates, pred)
-			}
+	if child.Type != NodeScan {
+		return
+	}
+	for _, pred := range n.Predicates {
+		if pred.Column != "" && pred.Op != "" && pred.Value != nil {
+			child.ScanPredicates = append(child.ScanPredicates, pred)
+			continue
 		}
+		if pred.ASTExpr != nil {
+			child.ScanPredicates = append(child.ScanPredicates, structuredConjuncts(pred.ASTExpr)...)
+		}
+	}
+}
+
+// structuredConjuncts splits an AST filter into top-level AND-conjuncts
+// and returns a structured Predicate for each `column <op> literal` (or
+// flipped) comparison. Anything else — ORs, functions, non-literal sides —
+// contributes nothing; pruning must only ever see conjuncts that are
+// necessary conditions of the whole filter.
+func structuredConjuncts(expr plansql.Node) []Predicate {
+	var conj []plansql.Node
+	var split func(n plansql.Node)
+	split = func(n plansql.Node) {
+		switch t := stripParens(n).(type) {
+		case *plansql.AndNode:
+			split(t.Left)
+			split(t.Right)
+		default:
+			conj = append(conj, n)
+		}
+	}
+	split(expr)
+
+	var out []Predicate
+	for _, c := range conj {
+		bin, ok := stripParens(c).(*plansql.CmpExpr)
+		if !ok {
+			continue
+		}
+		op := bin.Op
+		var colNode plansql.Node
+		var lit *plansql.Lit
+		if cn, l := plainColAndLit(bin.Left, bin.Right); cn != nil {
+			colNode, lit = cn, l
+		} else if cn, l := plainColAndLitStr(bin.Right, bin.Left); cn != nil {
+			colNode, lit = cn, l
+			op = flipCompareOp(op)
+		} else if cn, l := plainColAndLitStr(bin.Left, bin.Right); cn != nil {
+			// plainColAndLit only accepts numeric literals; the string
+			// variant covers `col = 'x'` shapes.
+			colNode, lit = cn, l
+		} else {
+			continue
+		}
+		switch op {
+		case "=", "<", "<=", ">", ">=", "!=", "<>":
+		default:
+			continue
+		}
+		if op == "<>" {
+			op = "!="
+		}
+		col, ok := colNode.(*plansql.ColRef)
+		if !ok {
+			continue
+		}
+		var val any
+		switch lit.Kind {
+		case plansql.LitNumber:
+			if iv, err := strconv.ParseInt(lit.Value, 10, 64); err == nil {
+				val = iv
+			} else if fv, err := strconv.ParseFloat(lit.Value, 64); err == nil {
+				val = fv
+			} else {
+				continue
+			}
+		case plansql.LitString:
+			val = lit.Value
+		default:
+			continue
+		}
+		name := col.Column
+		if col.Table != "" {
+			name = col.Table + "." + col.Column
+		}
+		out = append(out, Predicate{Column: name, Op: op, Value: val, Raw: c.String(), ASTExpr: c, PruneOnly: true})
+	}
+	return out
+}
+
+// plainColAndLitStr is plainColAndLit without the numeric-kind restriction.
+func plainColAndLitStr(a, b plansql.Node) (plansql.Node, *plansql.Lit) {
+	col, ok := stripParens(a).(*plansql.ColRef)
+	if !ok {
+		return nil, nil
+	}
+	lit, ok := stripParens(b).(*plansql.Lit)
+	if !ok {
+		return nil, nil
+	}
+	return col, lit
+}
+
+// flipCompareOp mirrors a comparison for `literal <op> column` shapes.
+func flipCompareOp(op string) string {
+	switch op {
+	case "<":
+		return ">"
+	case "<=":
+		return ">="
+	case ">":
+		return "<"
+	case ">=":
+		return "<="
+	default:
+		return op // =, !=, <> are symmetric
 	}
 }
 

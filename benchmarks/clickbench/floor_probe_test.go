@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -133,5 +134,44 @@ func TestSubSecondFloor(t *testing.T) {
 			}
 		}
 		t.Logf("%-12s min %7.1fms  all=%v", q.name, float64(min.Microseconds())/1000, times)
+	}
+}
+
+// TestDictPruneEngages checks the dictionary-probe pruning fires for an
+// equality on a low-cardinality (pure-dict) column with an absent value.
+func TestDictPruneEngages(t *testing.T) {
+	part := os.Getenv("WADJET_HITS_PART")
+	if part == "" {
+		t.Skip("WADJET_HITS_PART not set")
+	}
+	ctx := context.Background()
+	db, _ := openHitsDB(t, ctx)
+
+	// Out-of-stats-range constant: the ZONEMAP layer must prune before the
+	// dict probe ever runs (structured predicates feed both).
+	p0, m0 := scan.DictPruneStatsSnapshot()
+	res, err := db.Query(ctx, "SELECT COUNT(*) FROM hits WHERE AdvEngineID = 999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Rows[0]["count(*)"] != int64(0) {
+		t.Fatalf("expected 0 rows: %v", res.Rows)
+	}
+	p1, m1 := scan.DictPruneStatsSnapshot()
+	if p1-p0 != 0 {
+		t.Fatalf("dict probe pruned where zonemaps should have (pruned=%d)", p1-p0)
+	}
+
+	// In-stats-range point filter on a high-cardinality column: zonemaps
+	// are blind (min/max spans everything), the dictionary is not.
+	p0, m0 = scan.DictPruneStatsSnapshot()
+	res, err = db.Query(ctx, "SELECT UserID FROM hits WHERE UserID = 435090932899640449")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, m1 = scan.DictPruneStatsSnapshot()
+	t.Logf("point-filter rows=%d pruned=%d misses=%d", len(res.Rows), p1-p0, m1-m0)
+	if p1-p0 == 0 {
+		t.Fatal("dict probe pruned nothing on the point-filter shape")
 	}
 }

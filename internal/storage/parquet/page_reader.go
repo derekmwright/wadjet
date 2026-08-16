@@ -249,6 +249,75 @@ func (r *ColumnPageReader) NextDictionary() (*DictionaryData, error) {
 	return &DictionaryData{NumValues: numValues, Data: vals}, nil
 }
 
+// DictionaryIfPure walks the chunk's PAGE HEADERS (tiny thrift parses,
+// no data-page decompression or decode) and returns the decoded
+// dictionary when EVERY data page is dictionary-encoded. ok=false means
+// the chunk is not provably pure-dictionary — either no dictionary page,
+// a PLAIN fallback data page (writer dictionary overflow, the mixed-
+// encoding class from the 2026-08 dict-fallback bug), or an unknown page
+// type — and the caller MUST NOT draw any conclusion from the dictionary.
+//
+// The chunk-metadata Encodings list cannot answer this: writers list the
+// dictionary PAGE's PLAIN encoding there too, so PLAIN-in-the-list is
+// ambiguous between "has a dict page" and "has fallback data pages".
+// Walking the actual headers is unambiguous.
+//
+// Must be called on a fresh reader (before NextDictionary/NextPage); the
+// reader's position is not advanced. Returned dictionary Values may
+// alias the reader's staged buffer — consume them before Close.
+func (r *ColumnPageReader) DictionaryIfPure() (*DictionaryData, bool, error) {
+	if err := r.ensureData(); err != nil {
+		return nil, false, err
+	}
+	var dict *DictionaryData
+	off := r.off
+	for off < r.endOff {
+		ph, headerSize, err := DecodePageHeader(r.data[off:])
+		if err != nil {
+			return nil, false, fmt.Errorf("walking page header at offset %d: %w", off, err)
+		}
+		off += headerSize
+		if int(ph.CompressedPageSize) < 0 || off+int(ph.CompressedPageSize) > r.endOff {
+			return nil, false, fmt.Errorf("page at offset %d overruns chunk", off-headerSize)
+		}
+		body := r.data[off : off+int(ph.CompressedPageSize)]
+		off += int(ph.CompressedPageSize)
+
+		switch ph.Type {
+		case PageDictionary:
+			if dict != nil {
+				return nil, false, nil // second dictionary page: malformed, be conservative
+			}
+			pageData, err := Decompress(r.codec, body, int(ph.UncompressedPageSize))
+			if err != nil {
+				return nil, false, fmt.Errorf("decompressing dictionary page: %w", err)
+			}
+			n := int(ph.DictionaryPageHeader.NumValues)
+			dict = &DictionaryData{NumValues: n, Data: r.decodePlainValues(pageData, n)}
+		case PageDataV1:
+			if ph.DataPageHeader == nil {
+				return nil, false, nil
+			}
+			if e := ph.DataPageHeader.Encoding; e != EncodingPlainDictionary && e != EncodingRLEDictionary {
+				return nil, false, nil
+			}
+		case PageDataV2:
+			if ph.DataPageHeaderV2 == nil {
+				return nil, false, nil
+			}
+			if e := ph.DataPageHeaderV2.Encoding; e != EncodingPlainDictionary && e != EncodingRLEDictionary {
+				return nil, false, nil
+			}
+		default:
+			return nil, false, nil // unknown page type: conservative
+		}
+	}
+	if dict == nil {
+		return nil, false, nil
+	}
+	return dict, true, nil
+}
+
 func (r *ColumnPageReader) decodeDataPageV1(ph *PageHeader, compressed []byte) (*PageData, error) {
 	dph := ph.DataPageHeader
 	if dph == nil {
