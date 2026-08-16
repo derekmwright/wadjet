@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"os"
@@ -178,12 +179,26 @@ func f64bits(f float64) uint64 {
 	return math.Float64bits(f)
 }
 
+// fnv1aBytes routes string group keys to partition owners. Word-at-a-time
+// (8 bytes per multiply, same shape as strHash but distinct constants so
+// partition routing stays independent of the sink hash tables): the
+// byte-at-a-time FNV loop was 5% of ClickBench Q34's profile on ~80-byte
+// URLs, hashing every row serially in the partitioning stage. Only
+// within-run consistency matters — every partitioner and sink in a query
+// uses this same function — so the hash change is invisible outside.
 func fnv1aBytes(b []byte) uint64 {
-	var h uint64 = 0xcbf29ce484222325
-	for _, c := range b {
-		h ^= uint64(c)
-		h *= 0x100000001b3
+	h := uint64(0xcbf29ce484222325)
+	for len(b) >= 8 {
+		k := binary.LittleEndian.Uint64(b)
+		h = (h ^ k) * 0x100000001b3
+		b = b[8:]
 	}
+	for _, c := range b {
+		h = (h ^ uint64(c)) * 0x100000001b3
+	}
+	h ^= h >> 29
+	h *= 0xbf58476d1ce4e5b9
+	h ^= h >> 32
 	return h
 }
 
