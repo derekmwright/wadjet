@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,40 @@ import (
 
 func readAll(rc io.ReadCloser) ([]byte, error) {
 	return io.ReadAll(rc)
+}
+
+// footerCacheIdentity returns the identity under which the process footer
+// cache (storage/parquet/footer_cache.go) keys this object, or "" when
+// caching must not engage.
+//
+// Shape: "<storeID>/<bucket>/<key>#<size>@<createdAtUnixNano>". The full
+// staleness argument lives on the cache; the short version is that the store
+// ID separates unrelated stores that reuse bucket/object names, (bucket, key)
+// is content-stable by Wadjet's manifest discipline, and (size, createdAt)
+// discriminate a path recreated out of band — a fresh manifest entry carries
+// a fresh CreatedAt, so a recreated path can never hit a stale footer.
+//
+// size MUST be the authoritative object size the footer was (or will be)
+// decoded against, never a manifest hint that could disagree with the bytes.
+//
+// Ineligible: stores that decline to identify themselves, non-parquet
+// objects, and query scratch under queries/ — those are written, read once,
+// and deleted per query, so caching their footers is pure LRU pollution.
+// Same eligibility gate as the decoded-chunk cache (worker/stream_source.go).
+func footerCacheIdentity(cat *catalog.Catalog, entry catalog.FileEntry, size int64) string {
+	if cat == nil || size <= 0 {
+		return ""
+	}
+	if !strings.HasSuffix(entry.Path, ".parquet") || strings.HasPrefix(entry.Path, "queries/") {
+		return ""
+	}
+	storeID := objstore.StoreID(cat.Store())
+	if storeID == "" {
+		return ""
+	}
+	return storeID + "/" + cat.Bucket() + "/" + entry.Path +
+		"#" + strconv.FormatInt(size, 10) +
+		"@" + strconv.FormatInt(entry.CreatedAt.UnixNano(), 10)
 }
 
 // readBufPool reuses []byte buffers across queries to reduce allocation
@@ -365,7 +400,12 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	if ras, ok := inner.cat.Store().(objstore.ReaderAtStore); ok {
 		if ra, size, err := ras.GetReaderAt(ctx, inner.cat.Bucket(), s.entry.Path); err == nil {
 			if f, isFile := ra.(*os.File); isFile {
-				fr, ferr := parquet.OpenFileReaderAt(f, size)
+				// Cached footer: buildRGUnits already decoded this file's
+				// footer to prune its row groups, so re-decoding 105 columns
+				// of Thrift ColumnMetaData here is pure duplicated work. The
+				// fd is still needed for every column-chunk pread.
+				fr, ferr := parquet.OpenFileReaderAtCached(f, size,
+					footerCacheIdentity(inner.cat, s.entry, size))
 				if ferr == nil {
 					s.stagedFile = f
 					s.nativeReader = fr
@@ -432,7 +472,10 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 			s.chargedBytes = int64(cap(data))
 		}
 	}
-	reader, err := parquet.NewReaderFromBytes(data)
+	// Same duplicate-decode elision as the staged path above, for the
+	// whole-file (S3) backing: the bytes are ours, the footer is shared.
+	reader, err := parquet.NewReaderFromBytesCached(data,
+		footerCacheIdentity(inner.cat, s.entry, int64(len(data))))
 	if err != nil {
 		s.releaseCharge(inner)
 		s.releaseGate(inner)
@@ -644,11 +687,30 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 					idx := footerFiles[n]
 					entry := inner.files[idx]
 
+					// Footer already decoded in this process? Then skip the
+					// object open entirely — no range GET, no Thrift decode.
+					// The manifest, not this cache, decides which files the
+					// scan covers; a since-deleted object still surfaces its
+					// error when the rg worker reads data.
+					if meta := parquet.LookupFooter(
+						footerCacheIdentity(inner.cat, entry, entry.SizeBytes)); meta != nil {
+						stats := make([]parquet.RowGroupStats, meta.NumRowGroups())
+						for rg := range stats {
+							stats[rg] = meta.RowGroupStats(rg)
+						}
+						slots[idx] = &fileSlot{entry: entry}
+						fileRGStats[idx] = stats
+						continue
+					}
+
 					var meta *parquet.FileReader
 					if ras, ok := inner.cat.Store().(readerAtStore); ok {
 						ra, sz, err := ras.GetReaderAt(ctx, inner.cat.Bucket(), entry.Path)
 						if err == nil {
-							meta, err = parquet.OpenFileReaderMetadata(ra, sz)
+							// sz is the authoritative size — the manifest's
+							// SizeBytes is only a probe hint above.
+							meta, err = parquet.OpenFileReaderMetadataCached(ra, sz,
+								footerCacheIdentity(inner.cat, entry, sz))
 							ra.Close()
 							if err != nil {
 								if failedFiles.Add(1) == 1 {
@@ -679,7 +741,8 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 							}
 							continue
 						}
-						reader, err := parquet.NewReaderFromBytes(data)
+						reader, err := parquet.NewReaderFromBytesCached(data,
+							footerCacheIdentity(inner.cat, entry, int64(len(data))))
 						if err != nil {
 							if failedFiles.Add(1) == 1 {
 								firstErr.Store(fmt.Errorf("parquet %s (%d bytes): %w", entry.Path, len(data), err))
@@ -1110,7 +1173,8 @@ func openRefetchReader(ctx context.Context, cat *catalog.Catalog, entry catalog.
 	if ras, ok := cat.Store().(objstore.ReaderAtStore); ok {
 		if ra, size, err := ras.GetReaderAt(ctx, cat.Bucket(), entry.Path); err == nil {
 			if f, isFile := ra.(*os.File); isFile {
-				if fr, ferr := parquet.OpenFileReaderAt(f, size); ferr == nil {
+				if fr, ferr := parquet.OpenFileReaderAtCached(f, size,
+					footerCacheIdentity(cat, entry, size)); ferr == nil {
 					return fr, func() { f.Close() }, nil
 				}
 				f.Close()
@@ -1128,7 +1192,8 @@ func openRefetchReader(ctx context.Context, cat *catalog.Catalog, entry catalog.
 	if err != nil {
 		return nil, nil, err
 	}
-	reader, err := parquet.NewReaderFromBytes(data)
+	reader, err := parquet.NewReaderFromBytesCached(data,
+		footerCacheIdentity(cat, entry, int64(len(data))))
 	if err != nil {
 		return nil, nil, err
 	}

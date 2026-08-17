@@ -9084,7 +9084,8 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 				continue
 			}
 			inner.trackPooledBuf(data)
-			reader, err = parquet.NewReaderFromBytes(data)
+			reader, err = parquet.NewReaderFromBytesCached(data,
+				footerCacheIdentity(inner.cat, file, int64(len(data))))
 			if err != nil {
 				continue
 			}

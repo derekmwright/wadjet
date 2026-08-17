@@ -60,6 +60,18 @@ func NewReaderFromBytes(data []byte) (*Reader, error) {
 	return &Reader{fr: fr, schema: fr.Schema()}, nil
 }
 
+// NewReaderFromBytesCached is NewReaderFromBytes with the footer decode
+// served from the process footer cache when identity is non-empty (see
+// footer_cache.go). data is still used zero-copy for every page read; only
+// the Thrift footer decode is elided.
+func NewReaderFromBytesCached(data []byte, identity string) (*Reader, error) {
+	fr, err := OpenFileReaderFromBytesCached(data, identity)
+	if err != nil {
+		return nil, fmt.Errorf("opening parquet file: %w", err)
+	}
+	return &Reader{fr: fr, schema: fr.Schema()}, nil
+}
+
 // Schema returns the schema of the Parquet file.
 func (r *Reader) Schema() Schema { return r.schema }
 

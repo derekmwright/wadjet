@@ -46,7 +46,13 @@ type MinIOStore struct {
 	client        *minio.Client
 	uploadSem     chan struct{}
 	uploadThreads uint
+	id            string
 }
+
+// StoreID implements IdentifiedStore: the endpoint (plus region) names the
+// backing S3 service, so two MinIOStore values pointed at one endpoint share
+// a namespace, as they should — the objects are the same objects.
+func (s *MinIOStore) StoreID() string { return s.id }
 
 // s3Transport returns an http.Transport tuned for high-throughput S3 access.
 // Connection pooling avoids TCP/TLS handshake overhead on repeated requests
@@ -121,6 +127,7 @@ func NewMinIOStore(cfg MinIOConfig) (*MinIOStore, error) {
 		client:        client,
 		uploadSem:     make(chan struct{}, maxUploads),
 		uploadThreads: uint(uploadThreads),
+		id:            "s3:" + cfg.Endpoint + "/" + cfg.Region,
 	}, nil
 }
 

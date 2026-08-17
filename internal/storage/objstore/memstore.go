@@ -23,14 +23,21 @@ type memObject struct {
 type MemStore struct {
 	mu      sync.RWMutex
 	buckets map[string]map[string]*memObject
+	id      string
 }
 
 // NewMemStore creates a new in-memory object store.
 func NewMemStore() *MemStore {
 	return &MemStore{
 		buckets: make(map[string]map[string]*memObject),
+		id:      nextStoreID("mem"),
 	}
 }
+
+// StoreID implements IdentifiedStore. Every MemStore gets its own namespace:
+// unlike a durable store there is no external name to key on, and separate
+// tests in one binary reuse bucket/object names freely for different content.
+func (m *MemStore) StoreID() string { return m.id }
 
 func computeETag(data []byte) string {
 	h := md5.Sum(data)

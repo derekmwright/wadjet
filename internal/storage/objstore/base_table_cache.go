@@ -329,6 +329,11 @@ func (c *BaseTableCache) openHit(ck, objKey string) (*os.File, ObjectInfo, bool)
 	return f, ObjectInfo{Key: objKey, Size: st.Size(), LastModified: st.ModTime()}, true
 }
 
+// StoreID implements IdentifiedStore by delegating: this cache is a local
+// materialization of inner's objects under the SAME (bucket, key) names, so
+// it must share inner's namespace rather than mint its own.
+func (c *BaseTableCache) StoreID() string { return StoreID(c.inner) }
+
 // GetReaderAt implements ReaderAtStore. Hits serve column-chunk range
 // reads as local preads; misses pass through WITHOUT populating (ranged
 // misses are footer-sized — the whole-file Get on every scan path is the

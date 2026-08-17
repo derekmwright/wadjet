@@ -325,6 +325,10 @@ func (cs *CircuitStore) MakeBucket(ctx context.Context, bucket string) error {
 	})
 }
 
+// StoreID implements IdentifiedStore by delegating: the breaker changes
+// availability, never object identity.
+func (cs *CircuitStore) StoreID() string { return StoreID(cs.inner) }
+
 // GetReaderAt implements ReaderAtStore if the underlying store supports it.
 // Like Get, this cannot use do() because it returns a streaming handle.
 func (cs *CircuitStore) GetReaderAt(ctx context.Context, bucket, key string) (ReaderAtCloser, int64, error) {

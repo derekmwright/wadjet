@@ -23,6 +23,7 @@ import (
 // ETags are computed as MD5 hex of file contents.
 type FileStore struct {
 	rootDir string
+	id      string
 	mu      sync.RWMutex // protects concurrent writes to the same path
 }
 
@@ -32,8 +33,18 @@ func NewFileStore(rootDir string) (*FileStore, error) {
 	if err := os.MkdirAll(rootDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating filestore root %q: %w", rootDir, err)
 	}
-	return &FileStore{rootDir: rootDir}, nil
+	// Absolute root: two FileStores over one directory ARE one store and must
+	// share a namespace; two over different directories must not. A relative
+	// root would alias them under a changed working directory.
+	abs, err := filepath.Abs(rootDir)
+	if err != nil {
+		abs = rootDir
+	}
+	return &FileStore{rootDir: rootDir, id: "file:" + abs}, nil
 }
+
+// StoreID implements IdentifiedStore.
+func (f *FileStore) StoreID() string { return f.id }
 
 func (f *FileStore) bucketDir(bucket string) string {
 	return filepath.Join(f.rootDir, bucket)
