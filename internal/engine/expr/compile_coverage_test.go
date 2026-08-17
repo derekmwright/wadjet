@@ -278,6 +278,8 @@ func TestCompileBinOpGeneric(t *testing.T) {
 		// good - generic path
 	} else if _, ok := e.(*BinOpFloat64); ok {
 		// also acceptable since ColRef implements Float64Expr
+	} else if _, ok := e.(*BinOpNumeric); ok {
+		// int-arith path: column types resolve on the first batch
 	} else {
 		t.Fatalf("unexpected type %T", e)
 	}

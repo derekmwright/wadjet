@@ -432,9 +432,34 @@ func compileBinOp(left, right Expr, op string) Expr {
 		if liOk && riOk && op != "/" && isIntNative(left) && isIntNative(right) {
 			return &BinOpInt64{Left: li, Right: ri, Op: op}
 		}
+		// Column operands: their types resolve on the first batch, so the
+		// int-vs-float decision defers there (BinOpNumeric). Only when both
+		// sides COULD be integers at runtime — a compile-time float operand
+		// pins the whole expression float, so keep the direct float node.
+		// Division stays float unconditionally.
+		ln, lnOk := left.(numericOperand)
+		rn, rnOk := right.(numericOperand)
+		if lnOk && rnOk && op != "/" && intArithToggle.On() &&
+			possiblyIntAtRuntime(left) && possiblyIntAtRuntime(right) {
+			return &BinOpNumeric{Left: ln, Right: rn, Op: op}
+		}
 		return &BinOpFloat64{Left: lf, Right: rf, Op: op}
 	}
 	return &BinOp{Left: left, Right: right, Op: op}
+}
+
+// possiblyIntAtRuntime reports whether an operand might turn out integer
+// once column types resolve: columns and deferred arithmetic qualify;
+// literals and everything else are decided at compile time.
+func possiblyIntAtRuntime(e Expr) bool {
+	switch e.(type) {
+	case *ColRef:
+		return true
+	case *BinOpNumeric:
+		return true
+	default:
+		return isIntNative(e)
+	}
 }
 
 // isIntNative returns true if the expression natively produces int64 values
