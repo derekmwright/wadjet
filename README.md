@@ -176,6 +176,36 @@ streaming exchange with durable S3 fallback. Steady-state suite (run 4 of
 
 | Query | Time | | Query | Time |
 |---|---:|---|---|---:|
+| Q01 | 3.9s | | Q12 | 5.5s |
+| Q02 | 4.5s | | Q13 | 5.9s |
+| Q03 | 9.7s | | Q14 | 1.9s |
+| Q04 | 7.0s | | Q15 | 1.4s |
+| Q05 | 9.2s | | Q16 | 5.5s |
+| Q06 | 1.3s | | Q17 | 5.9s |
+| Q07 | 8.0s | | Q18 | 11.0s |
+| Q08 | 18.1s | | Q19 | 3.9s |
+| Q09 | 16.1s | | Q20 | 10.2s |
+| Q10 | 11.0s | | Q21 | 10.1s |
+| Q11 | 2.6s | | Q22 | 2.9s |
+
+**Suite total: 2m35.9s steady / 3m21s cold.** On identical hardware in a
+same-day paired run (2026-08-14), Wadjet's steady state beat Trino 470
+FTE by 10% on suite wall and 19% on per-query geomean, winning 12 of 22
+queries ([full comparison](docs/benchmarks/trino-comparison-2026-08-14.md));
+the numbers above include further improvements landed since that pairing.
+
+### ClickBench, single node (official spec)
+
+The full 43-query ClickBench suite on the official listing hardware —
+`c6a.4xlarge` (16 vCPU / 32 GB), 500 GB gp2, querying the 100M-row
+`hits` Parquet data in place (14.7 GB, no import step). Official
+methodology: page-cache drop before each query, cold + 2 hot tries,
+one process per query. Every query result is cell-exact against DuckDB
+on the same data (`benchmarks/clickbench/`). 2026-08-16,
+`benchmarks/clickbench/results-c6a-20260816.json`.
+
+| Query | Cold | Hot | Query | Cold | Hot |
+|---|---:|---:|---|---:|---:|
 | Q01 | 0.001s | 0.001s | Q23 | 21.59s | 4.91s |
 | Q02 | 0.097s | 0.066s | Q24 | 12.34s | 3.60s |
 | Q03 | 0.22s | 0.19s | Q25 | 1.01s | 0.95s |
