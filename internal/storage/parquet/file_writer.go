@@ -553,13 +553,129 @@ func (nw *NativeWriter) flushRowGroup() error {
 	return nil
 }
 
+// pageRange is one data page's slice of a leaf buffer: entry (row-level)
+// range [rowStart,rowEnd) and the matching non-null value range
+// [valStart,valEnd).
+type pageRange struct {
+	rowStart, rowEnd, valStart, valEnd int
+}
+
+// pageRowRanges splits a leaf buffer into page-sized entry ranges
+// targeting WriterConfig.PageBufferSize of PLAIN-encoded value bytes per
+// page (#300 — one page per chunk defeated every page-granular reader
+// optimization: sel-decode page skipping, future page-stat pruning, and
+// bounded decompression buffers). Splitting is restricted to flat leaves
+// of byte-sliceable physical types; everything else — nested (page cuts
+// must fall on record boundaries), BOOLEAN (bit-packed values can't
+// split on an unaligned value index), INT96 / FIXED_LEN (rare, low
+// value) — keeps the single-page layout, byte-identical to the previous
+// writer.
+func (lb *leafBuffer) pageRowRanges(target int) []pageRange {
+	numVals := lb.count - int(lb.numNulls)
+	single := []pageRange{{0, lb.count, 0, numVals}}
+	if target <= 0 || lb.maxRepLevel > 0 || lb.count == 0 {
+		return single
+	}
+	var width int
+	switch lb.physical {
+	case PhysicalInt32, PhysicalFloat:
+		width = 4
+	case PhysicalInt64, PhysicalDouble:
+		width = 8
+	case PhysicalByteArray:
+		width = 0 // sized from offsets below
+	default:
+		return single
+	}
+	var ranges []pageRange
+	rowStart, valStart, val, sz := 0, 0, 0, 0
+	for i := 0; i < lb.count; i++ {
+		isVal := lb.maxDefLevel == 0 || lb.defLevels[i] == lb.maxDefLevel
+		if isVal {
+			if lb.physical == PhysicalByteArray {
+				end := uint32(len(lb.packed))
+				if val+1 < len(lb.offsets) {
+					end = lb.offsets[val+1]
+				}
+				sz += 4 + int(end-lb.offsets[val])
+			} else {
+				sz += width
+			}
+			val++
+		}
+		sz++ // per-entry definition-level estimate
+		if sz >= target {
+			ranges = append(ranges, pageRange{rowStart, i + 1, valStart, val})
+			rowStart, valStart, sz = i+1, val, 0
+		}
+	}
+	if rowStart < lb.count || len(ranges) == 0 {
+		ranges = append(ranges, pageRange{rowStart, lb.count, valStart, val})
+	}
+	return ranges
+}
+
+// pagePlainData returns the PLAIN-encoded value bytes for one page range.
+func (lb *leafBuffer) pagePlainData(pr pageRange, full bool) []byte {
+	switch lb.physical {
+	case PhysicalBoolean:
+		return lb.boolBuf // never split (pageRowRanges)
+	case PhysicalByteArray:
+		// PLAIN byte array: each value prefixed with 4-byte LE length.
+		var buf bytes.Buffer
+		for i := pr.valStart; i < pr.valEnd; i++ {
+			start := lb.offsets[i]
+			end := uint32(len(lb.packed))
+			if i+1 < len(lb.offsets) {
+				end = lb.offsets[i+1]
+			}
+			val := lb.packed[start:end]
+			var lenBuf [4]byte
+			binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(val)))
+			buf.Write(lenBuf[:])
+			buf.Write(val)
+		}
+		return buf.Bytes()
+	default:
+		if full {
+			return lb.data
+		}
+		numVals := lb.count - int(lb.numNulls)
+		if numVals <= 0 {
+			return nil
+		}
+		width := len(lb.data) / numVals
+		return lb.data[pr.valStart*width : pr.valEnd*width]
+	}
+}
+
 func (nw *NativeWriter) writeColumnChunk(lb *leafBuffer) (uncompressed, compressed int64, err error) {
+	ranges := lb.pageRowRanges(nw.config.PageBufferSize)
+	single := len(ranges) == 1
+	var totU, totC int64
+	for _, pr := range ranges {
+		u, c, err := nw.writeDataPage(lb, pr, single)
+		if err != nil {
+			return 0, 0, err
+		}
+		totU += u
+		totC += c
+	}
+	return totU, totC, nil
+}
+
+// writeDataPage emits one PLAIN data page covering pr. A single-page
+// chunk is byte-identical to the pre-split writer (chunk-level stats in
+// the page header included); multi-page chunks omit per-page stats — the
+// chunk ColumnMetaData carries the authoritative statistics either way,
+// and per-page stats would otherwise repeat the chunk bounds.
+func (nw *NativeWriter) writeDataPage(lb *leafBuffer, pr pageRange, single bool) (uncompressed, compressed int64, err error) {
 	var pageBuf bytes.Buffer
 
 	// Write repetition levels (RLE encoded with 4-byte LE length prefix).
 	if lb.maxRepLevel > 0 {
 		bitWidth := bitsRequiredForMax(lb.maxRepLevel)
-		repData := encodeLevelsRLE(lb.repLevels, lb.count, bitWidth)
+		repData := encodeLevelsRLE(lb.repLevels[pr.rowStart:pr.rowEnd], pr.rowEnd-pr.rowStart, bitWidth)
 		var lenBuf [4]byte
 		binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(repData)))
 		pageBuf.Write(lenBuf[:])
@@ -569,7 +685,7 @@ func (nw *NativeWriter) writeColumnChunk(lb *leafBuffer) (uncompressed, compress
 	// Write definition levels (RLE encoded with 4-byte LE length prefix).
 	if lb.maxDefLevel > 0 {
 		bitWidth := bitsRequiredForMax(lb.maxDefLevel)
-		defData := encodeLevelsRLE(lb.defLevels, lb.count, bitWidth)
+		defData := encodeLevelsRLE(lb.defLevels[pr.rowStart:pr.rowEnd], pr.rowEnd-pr.rowStart, bitWidth)
 		var lenBuf [4]byte
 		binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(defData)))
 		pageBuf.Write(lenBuf[:])
@@ -577,7 +693,7 @@ func (nw *NativeWriter) writeColumnChunk(lb *leafBuffer) (uncompressed, compress
 	}
 
 	// Write PLAIN-encoded values.
-	pageBuf.Write(lb.plainData())
+	pageBuf.Write(lb.pagePlainData(pr, single))
 
 	uncompressedData := pageBuf.Bytes()
 	uncompressedSize := int32(len(uncompressedData))
@@ -590,17 +706,20 @@ func (nw *NativeWriter) writeColumnChunk(lb *leafBuffer) (uncompressed, compress
 	compressedSize := int32(len(compressedData))
 
 	// Build page header.
+	dph := &DataPageHeader{
+		NumValues:               int32(pr.rowEnd - pr.rowStart),
+		Encoding:                EncodingPlain,
+		DefinitionLevelEncoding: EncodingRLE,
+		RepetitionLevelEncoding: EncodingRLE,
+	}
+	if single {
+		dph.Statistics = lb.buildStats()
+	}
 	ph := &PageHeader{
 		Type:                 PageDataV1,
 		UncompressedPageSize: uncompressedSize,
 		CompressedPageSize:   compressedSize,
-		DataPageHeader: &DataPageHeader{
-			NumValues:               int32(lb.count),
-			Encoding:                EncodingPlain,
-			DefinitionLevelEncoding: EncodingRLE,
-			RepetitionLevelEncoding: EncodingRLE,
-			Statistics:              lb.buildStats(),
-		},
+		DataPageHeader:       dph,
 	}
 
 	headerBytes := EncodePageHeader(ph)
@@ -950,32 +1069,6 @@ func (lb *leafBuffer) appendByteArray(b []byte) {
 	lb.updateStatsBytes(b)
 }
 
-func (lb *leafBuffer) plainData() []byte {
-	switch lb.physical {
-	case PhysicalBoolean:
-		return lb.boolBuf
-	case PhysicalByteArray:
-		// PLAIN byte array: each value prefixed with 4-byte LE length.
-		var buf bytes.Buffer
-		for i := 0; i < len(lb.offsets); i++ {
-			start := lb.offsets[i]
-			var end uint32
-			if i+1 < len(lb.offsets) {
-				end = lb.offsets[i+1]
-			} else {
-				end = uint32(len(lb.packed))
-			}
-			val := lb.packed[start:end]
-			var lenBuf [4]byte
-			binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(val)))
-			buf.Write(lenBuf[:])
-			buf.Write(val)
-		}
-		return buf.Bytes()
-	default:
-		return lb.data
-	}
-}
 
 func (lb *leafBuffer) reset() {
 	lb.data = lb.data[:0]
