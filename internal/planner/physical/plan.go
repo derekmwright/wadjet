@@ -962,8 +962,16 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 					intCols[strings.ToLower(c.Name)] = true
 				}
 			}
+			strictInt := make(map[string]bool, len(table.Schema.Columns))
+			for _, c := range table.Schema.Columns {
+				switch c.Type {
+				case parquet.TypeInt64, parquet.TypeInt32:
+					strictInt[strings.ToLower(c.Name)] = true
+				}
+			}
 			node.ScanColumns = cols
 			node.ScanIntCols = intCols
+			node.ScanStrictIntCols = strictInt
 		}
 		// Estimate row count from manifest for join reordering
 		if manifest, err := p.catalog.GetManifest(ctx, node.TableName); err == nil {
@@ -5649,7 +5657,17 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// __agg_0 * 0.0001), use TypeFloat64.
 		outType := parquet.TypeString
 		if proj.ASTExpr != nil && !proj.IsAgg {
-			outType = inferProjectionType(proj.ASTExpr, outType)
+			// A select expression mapped to a synthetic group column is a
+			// RENAME of a value computed BELOW the aggregate — type it
+			// against the aggregate's input, or the declared Float64
+			// coerces the pre-projected int64 keys on the copy (#297).
+			strictInt := strictIntArithCols(child)
+			if isOverAggregate {
+				if _, ok := gbExprToSyn[proj.ASTExpr.String()]; ok {
+					strictInt = strictIntArithCols(aggNode.Children[0])
+				}
+			}
+			outType = inferProjectionTypeCols(proj.ASTExpr, outType, strictInt)
 		}
 
 		pc := exec.ProjectColumn{
@@ -5874,7 +5892,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				}
 				litPostOps = append(litPostOps, &aggPreProject{computed: []exec.ProjectColumn{{
 					Name: fmt.Sprintf("__gb_expr_%d", i),
-					Type: inferProjectionType(gbExpr, parquet.TypeString),
+					Type: inferProjectionTypeCols(gbExpr, parquet.TypeString, strictIntArithCols(node.Children[0])),
 					Expr: wrapExpr(compiled),
 				}}})
 				litElided[i] = true
@@ -5899,7 +5917,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 						// Numeric expressions (abs(x), x-1, …) must get a
 						// numeric synthetic column: SetValue on a String
 						// vector mangles float group keys.
-						Type: inferProjectionType(gbExpr, parquet.TypeString),
+						Type: inferProjectionTypeCols(gbExpr, parquet.TypeString, strictIntArithCols(node.Children[0])),
 						Expr: wrapExpr(compiled),
 					}
 					// Batched evaluation when available — beyond the vec
@@ -6016,6 +6034,80 @@ func replaceAggWithColRef(node plansql.Node, target *plansql.FuncCallNode, colNa
 // Date ± interval produces a date string, not a numeric value.
 // inferProjectionType infers the output parquet type from an AST expression node.
 // Returns the inferred type, or the fallback if inference isn't possible.
+// inferProjectionTypeCols is inferProjectionType with scan column types in
+// hand: integer-preserving arithmetic (+, -, *, % over strictly-int columns
+// and integer literals) declares Int64 instead of the blanket Float64,
+// keeping derived GROUP BY keys on the typed-int aggregation paths (#297;
+// ClickBench Q36's four ClientIP-derived keys). The rule mirrors
+// expr.BinOpNumeric's runtime mode resolution and MUST stay a strict
+// subset of it: a declared-int column over a float-mode expression reads
+// NULL through the typed getter. The reverse direction (declared float,
+// runtime int) is the pre-existing safe coercion.
+func inferProjectionTypeCols(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool) parquet.TypeID {
+	if strictInt != nil && expr.IntArithOn() {
+		inner := node
+		for {
+			p, ok := inner.(*plansql.ParenNode)
+			if !ok {
+				break
+			}
+			inner = p.Inner
+		}
+		if bo, ok := inner.(*plansql.BinaryOp); ok && intArithAllInt(bo, strictInt) {
+			return parquet.TypeInt64
+		}
+	}
+	return inferProjectionType(node, fallback)
+}
+
+// intArithAllInt mirrors expr.operandIsInt over the AST: int-typed scan
+// columns, integer literals, and nested integer arithmetic. Division and
+// anything unrecognized decline (Float64 declaration = today's behavior).
+func intArithAllInt(node plansql.Node, strictInt map[string]bool) bool {
+	switch n := node.(type) {
+	case *plansql.BinaryOp:
+		switch n.Op {
+		case "+", "-", "*", "%":
+		default:
+			return false
+		}
+		return intArithAllInt(n.Left, strictInt) && intArithAllInt(n.Right, strictInt)
+	case *plansql.ParenNode:
+		return intArithAllInt(n.Inner, strictInt)
+	case *plansql.ColRef:
+		return strictInt[strings.ToLower(n.Column)]
+	case *plansql.Lit:
+		if n.Kind != plansql.LitNumber {
+			return false
+		}
+		_, err := strconv.ParseInt(n.Value, 10, 64)
+		return err == nil
+	}
+	return false
+}
+
+// strictIntArithCols resolves the strictly-int column set feeding a node,
+// walking only shape-preserving single-child steps. It deliberately stops
+// at Project nodes: a projection may rebind a name to a non-int value,
+// and a wrong int claim corrupts (see inferProjectionTypeCols); declining
+// just keeps the Float64 declaration.
+func strictIntArithCols(n *logical.Node) map[string]bool {
+	for n != nil {
+		switch n.Type {
+		case logical.NodeScan:
+			return n.ScanStrictIntCols
+		case logical.NodeFilter, logical.NodeLimit, logical.NodeSort:
+			if len(n.Children) != 1 {
+				return nil
+			}
+			n = n.Children[0]
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
 func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.TypeID {
 	switch n := node.(type) {
 	case *plansql.BinaryOp:

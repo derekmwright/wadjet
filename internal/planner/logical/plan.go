@@ -121,6 +121,13 @@ type Node struct {
 	SecurityBarrier bool
 
 	// Aggregate
+	// ScanStrictIntCols marks scan columns whose vectors are plain
+	// Int64/Int32 at runtime — exactly the set expr.BinOpNumeric resolves
+	// to integer arithmetic. Planner-side int typing must stay a subset
+	// of the runtime rule (a declared-int column over a float-mode expr
+	// would read as NULL through the typed getter), so this is
+	// deliberately narrower than ScanIntCols' int-class set.
+	ScanStrictIntCols map[string]bool
 	// ScanIntCols marks scan columns whose types land on the typed
 	// integer aggregation paths (set by physical.AnnotateScanColumns;
 	// consumed by the two-level distinct rewrite's cost gate).

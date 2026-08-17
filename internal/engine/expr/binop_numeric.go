@@ -27,6 +27,11 @@ import (
 var intArithToggle = optswitch.Register("int-arith", "WADJET_INT_ARITH",
 	"integer-preserving +,-,*,%: int columns stay int64 instead of promoting to float64")
 
+// IntArithOn exposes the toggle to the planner: projection output types
+// may only declare Int64 for arithmetic when the runtime will actually
+// take the integer path (see inferProjectionTypeCols).
+func IntArithOn() bool { return intArithToggle.On() }
+
 // numericOperand is what BinOpNumeric accepts: both typed getters, so the
 // resolved mode can use either path.
 type numericOperand interface {
