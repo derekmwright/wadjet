@@ -71,6 +71,14 @@ func (p *Planner) tryPushFilterIntoScan(ctx context.Context, node *logical.Node,
 		}
 		structured, rest := logical.SplitConjunctsForPushdown(pred.ASTExpr)
 		for _, c := range rest {
+			// LIKE conjuncts push as pattern predicates (evaluated once
+			// per dictionary entry on dict pages — the Q22/Q23/Q24 class
+			// was pure URL decode with the match after materialization).
+			if rp, name, ok := makeLikeRowPred(canon, colType, c); ok {
+				pushed = append(pushed, rp)
+				pushedCols = append(pushedCols, name)
+				continue
+			}
 			residual = append(residual, logical.Predicate{Raw: c.String(), ASTExpr: c})
 		}
 		for _, sc := range structured {
@@ -130,6 +138,46 @@ func (p *Planner) tryPushFilterIntoScan(ctx context.Context, node *logical.Node,
 		}
 	}
 	return residual
+}
+
+// makeLikeRowPred recognizes a `col [NOT] LIKE 'literal'` conjunct over a
+// string column and returns its pattern RowPred. Anything else — computed
+// left sides, non-literal patterns, non-string columns — declines.
+func makeLikeRowPred(canon map[string]string, colType map[string]parquet.TypeID, c plansql.Node) (scan.RowPred, string, bool) {
+	n := c
+	for {
+		if pn, ok := n.(*plansql.ParenNode); ok {
+			n = pn.Inner
+			continue
+		}
+		break
+	}
+	le, ok := n.(*plansql.LikeExpr)
+	if !ok {
+		return scan.RowPred{}, "", false
+	}
+	cr, ok := le.Left.(*plansql.ColRef)
+	if !ok {
+		return scan.RowPred{}, "", false
+	}
+	lit, ok := le.Pattern.(*plansql.Lit)
+	if !ok || lit.Kind != plansql.LitString {
+		return scan.RowPred{}, "", false
+	}
+	name, ok := canon[strings.ToLower(cr.Column)]
+	if !ok {
+		return scan.RowPred{}, "", false
+	}
+	switch colType[strings.ToLower(cr.Column)] {
+	case parquet.TypeString, parquet.TypeBytes:
+	default:
+		return scan.RowPred{}, "", false
+	}
+	op := scan.OpLike
+	if le.Not {
+		op = scan.OpNotLike
+	}
+	return scan.RowPred{Col: name, Op: op, Value: lit.Value}, name, true
 }
 
 // makeRowPred normalizes one structured conjunct into a scan.RowPred,

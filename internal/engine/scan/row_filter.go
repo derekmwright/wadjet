@@ -243,6 +243,9 @@ func evalPredOnDict(dict *pqt.DictionaryData, p RowPred) ([]bool, error) {
 	n := dict.NumValues
 	mask := make([]bool, n)
 	d := dict.Data
+	if isLikeOp(p.Op) && d.PhysType() != pqt.PhysicalByteArray {
+		return nil, fmt.Errorf("scan filter: LIKE on non-string dictionary type %v", d.PhysType())
+	}
 	switch d.PhysType() {
 	case pqt.PhysicalInt64:
 		want, ok := p.Value.(int64)
@@ -286,6 +289,13 @@ func evalPredOnDict(dict *pqt.DictionaryData, p RowPred) ([]bool, error) {
 			return nil, fmt.Errorf("scan filter: non-string literal for BYTE_ARRAY column")
 		}
 		data, offs := d.ByteArray()
+		if isLikeOp(p.Op) {
+			match := compileLike(want, p.Op == OpNotLike)
+			for i := 0; i < n && i+1 < len(offs); i++ {
+				mask[i] = match(data[offs[i]:offs[i+1]])
+			}
+			break
+		}
 		for i := 0; i < n && i+1 < len(offs); i++ {
 			s := string(data[offs[i]:offs[i+1]])
 			mask[i] = cmpMatch(compareStr(s, want), p.Op)
@@ -301,6 +311,15 @@ func evalPredOnDict(dict *pqt.DictionaryData, p RowPred) ([]bool, error) {
 func andPlainPage(bits []bool, page *pqt.PageData, p RowPred) error {
 	d := page.Data
 	nv := d.Count()
+	var likeFn func([]byte) bool
+	if isLikeOp(p.Op) {
+		if d.PhysType() != pqt.PhysicalByteArray {
+			return fmt.Errorf("scan filter: LIKE on non-string page type %v", d.PhysType())
+		}
+		if pat, ok := p.Value.(string); ok {
+			likeFn = compileLike(pat, p.Op == OpNotLike)
+		}
+	}
 	match := func(vi int) (bool, error) {
 		switch d.PhysType() {
 		case pqt.PhysicalInt64:
@@ -335,6 +354,9 @@ func andPlainPage(bits []bool, page *pqt.PageData, p RowPred) error {
 			data, offs := d.ByteArray()
 			if vi+1 >= len(offs) {
 				return false, fmt.Errorf("scan filter: value index %d out of range", vi)
+			}
+			if likeFn != nil {
+				return likeFn(data[offs[vi]:offs[vi+1]]), nil
 			}
 			s := string(data[offs[vi]:offs[vi+1]])
 			return cmpMatch(compareStr(s, want), p.Op), nil
