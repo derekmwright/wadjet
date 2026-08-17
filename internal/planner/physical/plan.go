@@ -1792,7 +1792,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	pipelineWorkers := 0
 	switch source.(type) {
 	case *catalogScanSource, *scannerExecSource, *deferredJoinBridge:
-		pipelineWorkers = runtime.NumCPU()
+		pipelineWorkers = scanParallelism()
 	}
 
 	plan := &PhysicalPlan{
@@ -8382,13 +8382,30 @@ func extractFilterBuildColumns(filter string) []string {
 	return cols
 }
 
+// scanParallelism returns the worker count for scan/decode/pipeline
+// parallelism, honoring WADJET_SCAN_WORKERS when set (>0). Default is
+// runtime.NumCPU(), the historical behavior — but a 2026-08-17 profiling
+// pass measured the fast-query tier DOUBLING its wall time from decode
+// over-subscription past the memory-bandwidth knee (24 workers 87.6ms vs
+// 12 workers 43.8ms on a 12-core box, every profile symbol inflating
+// uniformly with zero contention symbols). The env knob exists to A/B a
+// lower default on the benchmark metal before changing it for everyone.
+func scanParallelism() int {
+	if v := os.Getenv("WADJET_SCAN_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return runtime.NumCPU()
+}
+
 // innerPipelineWorkers returns the number of parallel workers for an inner
 // pipeline (aggregate/sort child). Returns 0 (serial) unless the source is
 // a concurrent-safe scan source.
 func innerPipelineWorkers(src exec.Source) int {
 	switch src.(type) {
 	case *catalogScanSource, *scannerExecSource, *deferredJoinBridge:
-		return runtime.NumCPU()
+		return scanParallelism()
 	}
 	return 0
 }
@@ -8819,7 +8836,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	}
 
 	// Use a smaller batch channel for LIMIT queries to bound in-flight downloads.
-	batchChSize := runtime.NumCPU()
+	batchChSize := scanParallelism()
 	if s.rowLimit > 0 {
 		batchChSize = 2
 	}
@@ -8875,7 +8892,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		// Used for LIMIT pushdown (avoids downloading all files upfront) and
 		// nested types (which need row-level reading).
 		// Workers stop when context is cancelled (pipeline cancels after LIMIT satisfied).
-		workers := runtime.NumCPU()
+		workers := scanParallelism()
 		if workers > len(files) {
 			workers = len(files)
 		}
@@ -8935,7 +8952,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		// Q24 even with the sort side bounded. Clamp workers + queue so
 		// estimated in-flight decoded bytes stay within a budget slice;
 		// narrow scans (TPC-H) still get full CPU-count parallelism.
-		workers := runtime.NumCPU()
+		workers := scanParallelism()
 		if len(inner.rgUnits) > 0 {
 			rgRows := int(inner.rgUnits[0].numRows)
 			perBatch := estimateDecodedBatchBytes(inner.readSchema(), rgRows)

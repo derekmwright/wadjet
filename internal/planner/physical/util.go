@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -664,7 +663,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 		type readerAtStore interface {
 			GetReaderAt(ctx context.Context, bucket, key string) (objstore.ReaderAtCloser, int64, error)
 		}
-		metaWorkers := runtime.NumCPU()
+		metaWorkers := scanParallelism()
 		if metaWorkers > len(footerFiles) {
 			metaWorkers = len(footerFiles)
 		}
