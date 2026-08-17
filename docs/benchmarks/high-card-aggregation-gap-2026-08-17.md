@@ -90,3 +90,23 @@ G1 -> G2 -> G3 (instruction path; validate on the controlled-cardinality
 harness) -> G4 -> G5 -> G6 (memory/serial regime) -> G7 (endgame).
 G1+G2 delegated for implementation 2026-08-17; G3 and G4 shipped the same
 day. Next: G5 (hash once + batched salted probe), then G6.
+
+## Post-wave-6 rerank (hot 99.4s era) and the DuckDB-parity ceiling
+
+Field-best ratios on Q18/Q25-27 (~0ms answers) are index-system mirages;
+the achievable bar for the data-lake shape is DuckDB-on-Parquet. At
+per-query DuckDB parity our hot geomean goes x15.7 -> x6.0 (hot rank
+#67 -> ~#21) with zero index building — that is the whole remaining
+engine gap.
+
+Ranked by vs-DuckDB gap (wave-6): Q27 9.3x, Q33 8.7x (G6/G7), Q25 7.5x,
+Q24 7.2x, Q28 7.0x, Q36 6.3x (G-queue), Q35 3.7x, Q26 3.2x, Q18/Q23
+2.7x, Q40 2.1x.
+
+NEXT ARC after G5-G7: the string-TopN/materialization family
+(Q24/25/26/27/28) — filter -> ORDER BY x LIMIT k shapes that
+materialize far too much before the TopN decides. Specific lever:
+LENGTH(byte-array col) is an offsets subtraction — Q28's
+AVG(LENGTH(URL)) never needs the URL bytes (projection pushdown of
+length()). Q24 is SELECT-* TopN: late-materialize everything behind
+the TopN decision.
