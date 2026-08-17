@@ -150,7 +150,19 @@ type HashAggregate struct {
 	// instead of serializing keys to strings and using map[string].
 	useIntGroupKey bool
 	intGroupIndex  *intHashTable
+	// intGroupStates carries per-group AoS state for the int-keyed modes
+	// that need it (compact keys, and any mode after materializeFlatAccums
+	// reifies). The single-int and dual-int fast paths defer state entirely
+	// to the SoA arrays and leave this EMPTY — numIntGroups, not len(), is
+	// the group count on every int-keyed path. A []*groupState of pure nils
+	// cost 8 GC-scanned bytes per group for nothing (ClickBench Q33: 100M
+	// groups).
 	intGroupStates []*groupState
+	// numIntGroups is the authoritative slot count for the int-keyed modes
+	// (single-int, dual-int, compact). Slots recycled through freeGroupIDs
+	// do not bump it. Invariant: len(intGroupStates) is either 0 (deferred)
+	// or == numIntGroups (materialized / compact).
+	numIntGroups   int
 	intGroupKeyCol int // column index for the integer group-by key
 	// offheap owns the mmap reservations backing the pointer-free SoA
 	// state arrays (flat accumulators, int key SoAs) when the offheap-agg
@@ -1038,15 +1050,15 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			h.useIntGroupKey = true
 			h.intGroupIndex = newIntHashTableReg(intHTInitSize, h.offheapReg())
 			h.intGroupKeyCol = h.groupColIdx[0]
-			if h.intGroupStates == nil {
-				h.intGroupStates = make([]*groupState, 0, htInitSize)
+			if h.intKeys == nil {
 				h.intKeys = memory.Offheap[int64](h.offheapReg(), htInitSize)
-				// No gsPool.preAlloc: states stay nil on this path, and a
-				// hint-sized chunk would be dead weight at exactly the
-				// group counts where memory is the constraint.
+				// No gsPool.preAlloc and no []*groupState: state is deferred
+				// entirely to the SoA arrays on this path, and a hint-sized
+				// chunk would be dead weight at exactly the group counts
+				// where memory is the constraint.
 			}
 			if h.intFlatAccs == nil {
-				if len(h.intGroupStates) > 0 {
+				if h.numIntGroups > 0 {
 					h.rebuildFlatAccums(b)
 				} else {
 					h.initFlatAccums(b)
@@ -1066,10 +1078,9 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 				h.useDualIntGroupKey = true
 				h.dualIntGroupKeyCols = [2]int{idx0, idx1}
 				h.intGroupIndex = newIntHashTableReg(intHTInitSize, h.offheapReg())
-				if h.intGroupStates == nil {
-					h.intGroupStates = make([]*groupState, 0, htInitSize)
-					// Key SoAs off-heap (states stay nil on this path —
-					// 6806c83); no preAlloc for the same dead-weight
+				if h.dualIntKeysA == nil {
+					// Key SoAs off-heap (no per-group state at all on this
+					// path — 6806c83); no preAlloc for the same dead-weight
 					// reason as the single-int branch.
 					reg := h.offheapReg()
 					h.dualIntKeysA = memory.Offheap[int64](reg, htInitSize)
@@ -1077,7 +1088,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 					h.dualIntNextGroup = memory.Offheap[int32](reg, htInitSize)
 				}
 				if h.intFlatAccs == nil {
-					if len(h.intGroupStates) > 0 {
+					if h.numIntGroups > 0 {
 						h.rebuildFlatAccums(b)
 					} else {
 						h.initFlatAccums(b)
@@ -1115,7 +1126,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 				h.gsPool.preAlloc(htInitSize)
 			}
 			if h.intFlatAccs == nil {
-				if len(h.intGroupStates) > 0 {
+				if h.numIntGroups > 0 {
 					h.rebuildFlatAccums(b)
 				} else {
 					h.initFlatAccums(b)
@@ -1366,17 +1377,14 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 	hasNulls := gkVec.Nulls.HasNulls()
 
 	intIdx := h.intGroupIndex
-	colIdx := h.aggColIdx
-	nAggs := len(h.Aggs)
 
-	// Pre-reserve accumulator capacity so per-group append() calls in the
-	// hash lookup loop don't trigger growslice reallocations. The batch size
-	// is an upper bound on new groups this batch can create.
+	// Pre-reserve key capacity so per-group appends in the hash lookup loop
+	// don't trigger growslice reallocations. The batch size is an upper
+	// bound on new groups this batch can create. The flat accumulators are
+	// NOT touched here — they are grown once, after the loop, to the final
+	// group count (scatterBatchAggs below).
 	batchRows := b.ActiveLen()
-	for ai := range h.intFlatAccs {
-		h.intFlatAccs[ai].ensureCapacity(batchRows)
-	}
-	h.intGroupStates = ensureAppendCap(h.intGroupStates, batchRows)
+	h.intKeys = ensureAppendCap(h.intKeys, batchRows)
 
 	// Phase 1: Hash lookup — build group index array.
 	// gi[i] maps iteration index i to its group state index, or -1 for null keys.
@@ -1408,7 +1416,7 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 				newIdx = h.freeGroupIDs[nf-1]
 				fromFree = true
 			} else {
-				newIdx = int32(len(h.intGroupStates))
+				newIdx = int32(h.numIntGroups)
 			}
 			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
 			if ok {
@@ -1419,14 +1427,11 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 					h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
 					h.intKeys[newIdx] = key
 				} else {
-					// nil state — the key lives in the intKeys SoA and the
-					// accumulators in the flat arrays (see the intKeys field
-					// comment; the dual-int deferral pattern).
-					h.intGroupStates = append(h.intGroupStates, nil)
+					// No per-group state at all: the key lives in the intKeys
+					// SoA and the accumulators in the flat arrays, which are
+					// grown to numIntGroups once this loop finishes.
+					h.numIntGroups++
 					h.intKeys = append(h.intKeys, key)
-					for ai := range h.intFlatAccs {
-						h.intFlatAccs[ai].appendGroup()
-					}
 				}
 				gi[si] = newIdx
 			}
@@ -1452,7 +1457,7 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 				newIdx = h.freeGroupIDs[nf-1]
 				fromFree = true
 			} else {
-				newIdx = int32(len(h.intGroupStates))
+				newIdx = int32(h.numIntGroups)
 			}
 			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
 			if ok {
@@ -1463,14 +1468,11 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 					h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
 					h.intKeys[newIdx] = key
 				} else {
-					// nil state — the key lives in the intKeys SoA and the
-					// accumulators in the flat arrays (see the intKeys field
-					// comment; the dual-int deferral pattern).
-					h.intGroupStates = append(h.intGroupStates, nil)
+					// No per-group state at all: the key lives in the intKeys
+					// SoA and the accumulators in the flat arrays, which are
+					// grown to numIntGroups once this loop finishes.
+					h.numIntGroups++
 					h.intKeys = append(h.intKeys, key)
-					for ai := range h.intFlatAccs {
-						h.intFlatAccs[ai].appendGroup()
-					}
 				}
 				gi[row] = newIdx
 			}
@@ -1479,15 +1481,7 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 
 	// Phase 2: Per-aggregate typed scatter update using flat arrays.
 	// One pass per aggregate with inlined typed arithmetic (no function pointers).
-	for i := 0; i < nAggs; i++ {
-		fa := &h.intFlatAccs[i]
-		ci := colIdx[i]
-		if ci >= 0 {
-			scatterFlatAggUpdate(fa, gi, h.Aggs[i].Func, b.Columns[ci], sel, iterLen)
-		} else if h.Aggs[i].Func == AggCount {
-			scatterCountStar(fa.count, gi, iterLen)
-		}
-	}
+	h.scatterBatchAggs(h.numIntGroups, b, gi, sel, iterLen)
 
 	// Handle null-key rows via generic path (rare: only when GROUP BY key is nullable).
 	if hasNullKeys {
@@ -1534,15 +1528,10 @@ func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
 	}
 
 	intIdx := h.intGroupIndex
-	colIdx := h.aggColIdx
-	nAggs := len(h.Aggs)
 
-	// Pre-reserve accumulator capacity for this batch.
+	// Pre-reserve key capacity for this batch. The flat accumulators grow
+	// once, after the lookup loop, to the final group count.
 	batchRows := b.ActiveLen()
-	for ai := range h.intFlatAccs {
-		h.intFlatAccs[ai].ensureCapacity(batchRows)
-	}
-	h.intGroupStates = ensureAppendCap(h.intGroupStates, batchRows)
 	h.dualIntKeysA = ensureAppendCap(h.dualIntKeysA, batchRows)
 	h.dualIntKeysB = ensureAppendCap(h.dualIntKeysB, batchRows)
 	h.dualIntNextGroup = ensureAppendCap(h.dualIntNextGroup, batchRows)
@@ -1564,35 +1553,29 @@ func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
 				}
 			}
 			// Collision: new group, chain to existing head.
-			// The state pointer is NIL: this path is gated to simple
-			// aggregates, whose per-group state lives entirely in the flat
-			// SoA arrays + dualIntKeysA/B. A 24B groupState + pool chunk
-			// per group was ~2.4GB live (~5GB heap peak with GC headroom)
-			// on ClickBench Q33's 100M groups — enough to push the query
-			// into the GOMEMLIMIT thrash zone and evict the input page
-			// cache every try. materializeFlatAccums reifies on demand for
-			// migration/merge cold paths.
-			newIdx := int32(len(h.intGroupStates))
-			h.intGroupStates = append(h.intGroupStates, nil)
+			// There is NO per-group state object: this path is gated to
+			// simple aggregates, whose per-group state lives entirely in
+			// the flat SoA arrays + dualIntKeysA/B. A 24B groupState + pool
+			// chunk per group was ~2.4GB live (~5GB heap peak with GC
+			// headroom) on ClickBench Q33's 100M groups — enough to push
+			// the query into the GOMEMLIMIT thrash zone and evict the input
+			// page cache every try. materializeFlatAccums reifies on demand
+			// for migration/merge cold paths.
+			newIdx := int32(h.numIntGroups)
+			h.numIntGroups++
 			h.dualIntKeysA = append(h.dualIntKeysA, a)
 			h.dualIntKeysB = append(h.dualIntKeysB, b)
 			h.dualIntNextGroup = append(h.dualIntNextGroup, head)
 			intIdx.Put(ck, newIdx)
-			for ai := range h.intFlatAccs {
-				h.intFlatAccs[ai].appendGroup()
-			}
 			return newIdx
 		}
-		// New composite key (nil state — see the collision branch above)
-		newIdx := int32(len(h.intGroupStates))
-		h.intGroupStates = append(h.intGroupStates, nil)
+		// New composite key (no state object — see the collision branch above)
+		newIdx := int32(h.numIntGroups)
+		h.numIntGroups++
 		h.dualIntKeysA = append(h.dualIntKeysA, a)
 		h.dualIntKeysB = append(h.dualIntKeysB, b)
 		h.dualIntNextGroup = append(h.dualIntNextGroup, -1)
 		intIdx.Put(ck, newIdx)
-		for ai := range h.intFlatAccs {
-			h.intFlatAccs[ai].appendGroup()
-		}
 		return newIdx
 	}
 
@@ -1640,15 +1623,7 @@ func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
 	}
 
 	// Phase 2: Per-aggregate typed scatter update using flat arrays.
-	for i := 0; i < nAggs; i++ {
-		fa := &h.intFlatAccs[i]
-		ci := colIdx[i]
-		if ci >= 0 {
-			scatterFlatAggUpdate(fa, gi, h.Aggs[i].Func, b.Columns[ci], sel, iterLen)
-		} else if h.Aggs[i].Func == AggCount {
-			scatterCountStar(fa.count, gi, iterLen)
-		}
-	}
+	h.scatterBatchAggs(h.numIntGroups, b, gi, sel, iterLen)
 
 	// Handle null-key rows via generic path (rare).
 	if hasNullKeys {
@@ -1668,6 +1643,72 @@ func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
 	}
 }
 
+// scatterBatchAggs is Phase 2 for every SoA consume path: extend the flat
+// accumulators to the batch's final group count in ONE step per array, then
+// run one typed scatter pass per aggregate.
+//
+// The growth used to happen one group at a time inside the hash-probe loop
+// (flatAccumArrays.appendGroup, 11 nil-checks + up to 3 appends per NEW group
+// PER AGGREGATE). In the near-unique-key regime that is ~33 branch
+// evaluations per row for three aggregates, all of it redundant: the arrays
+// are append-in-place off-heap slices, so the extension itself is a length
+// bump plus a memclr.
+//
+// Aggregates whose entire accumulator is a SHARED count array (a duplicate
+// COUNT over an identical non-null predicate) are skipped — the owner's pass
+// already wrote the array they read. SUM/AVG sharers still run, through the
+// count-free kernels.
+func (h *HashAggregate) scatterBatchAggs(nGroups int, b *batch.RecordBatch, gi []int32, sel []uint32, iterLen int) {
+	for ai := range h.intFlatAccs {
+		h.intFlatAccs[ai].growTo(nGroups)
+	}
+	for i := range h.Aggs {
+		fa := &h.intFlatAccs[i]
+		ci := h.aggColIdx[i]
+		if h.Aggs[i].Func == AggCount && fa.count == nil {
+			continue // shared count IS this aggregate's whole state
+		}
+		if ci >= 0 {
+			scatterFlatAggUpdate(fa, gi, h.Aggs[i].Func, b.Columns[ci], sel, iterLen)
+		} else if h.Aggs[i].Func == AggCount {
+			scatterCountStar(fa.count, gi, iterLen)
+		}
+	}
+}
+
+// appendFlatAccumSlot extends every flat accumulator by exactly one
+// zero-initialized slot. Used by the two paths that mint a group outside the
+// batch-oriented growth above: processRow (generic per-row insert) and
+// strNullGroupSlot (created mid-loop, before the batch's group count is
+// known).
+func (h *HashAggregate) appendFlatAccumSlot() {
+	for ai := range h.intFlatAccs {
+		fa := &h.intFlatAccs[ai]
+		fa.growTo(flatAccumLen(fa) + 1)
+	}
+}
+
+// flatAccumLen reports the group-slot length of a flat accumulator. count is
+// the natural probe, but MIN/MAX aggregates have none and count-sharing
+// aggregates borrow one, so fall back to the first live array.
+func flatAccumLen(fa *flatAccumArrays) int {
+	switch {
+	case fa.count != nil:
+		return len(fa.count)
+	case fa.sumI64 != nil:
+		return len(fa.sumI64)
+	case fa.sumF64 != nil:
+		return len(fa.sumF64)
+	case fa.sumDec != nil:
+		return len(fa.sumDec)
+	case fa.hasMin != nil:
+		return len(fa.hasMin)
+	case fa.hasMax != nil:
+		return len(fa.hasMax)
+	}
+	return 0
+}
+
 // ensureGroupIndexBuf returns a []int32 of at least length n, reusing the buffer.
 func (h *HashAggregate) ensureGroupIndexBuf(n int) []int32 {
 	if cap(h.groupIndexBuf) < n {
@@ -1684,14 +1725,10 @@ func (h *HashAggregate) ensureGroupIndexBuf(n int) []int32 {
 // Falls back to generic path if any key exceeds 8 bytes.
 func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 	intIdx := h.intGroupIndex
-	colIdx := h.aggColIdx
-	nAggs := len(h.Aggs)
 
-	// Pre-reserve accumulator capacity.
+	// Pre-reserve key/state capacity. The flat accumulators grow once, after
+	// the lookup loop, to the final group count.
 	batchRows := b.ActiveLen()
-	for ai := range h.intFlatAccs {
-		h.intFlatAccs[ai].ensureCapacity(batchRows)
-	}
 	h.intGroupStates = ensureAppendCap(h.intGroupStates, batchRows)
 	h.compactKeys = ensureAppendCap(h.compactKeys, batchRows)
 	h.keys = ensureAppendCap(h.keys, batchRows)
@@ -1730,12 +1767,10 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 		gs := h.gsPool.alloc()
 		gs.ensureExtras().keyValues = keyVals
 		h.intGroupStates = append(h.intGroupStates, gs)
+		h.numIntGroups++
 		h.compactKeys = append(h.compactKeys, string(h.keyBuf))
 		h.compactKeyBytes += int64(len(h.keyBuf))
 		h.keys = append(h.keys, keyVals)
-		for ai := range h.intFlatAccs {
-			h.intFlatAccs[ai].appendGroup()
-		}
 	}
 
 	if b.Sel != nil {
@@ -1749,7 +1784,7 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 				return
 			}
 			key := packKeyInt64(h.keyBuf)
-			newIdx := int32(len(h.intGroupStates))
+			newIdx := int32(h.numIntGroups)
 			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
 			if ok {
 				gi[si] = gsIdx
@@ -1767,7 +1802,7 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 				return
 			}
 			key := packKeyInt64(h.keyBuf)
-			newIdx := int32(len(h.intGroupStates))
+			newIdx := int32(h.numIntGroups)
 			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
 			if ok {
 				gi[row] = gsIdx
@@ -1779,15 +1814,7 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 	}
 
 	// Phase 2: Per-aggregate typed scatter update using flat arrays.
-	for i := 0; i < nAggs; i++ {
-		fa := &h.intFlatAccs[i]
-		ci := colIdx[i]
-		if ci >= 0 {
-			scatterFlatAggUpdate(fa, gi, h.Aggs[i].Func, b.Columns[ci], sel, iterLen)
-		} else if h.Aggs[i].Func == AggCount {
-			scatterCountStar(fa.count, gi, iterLen)
-		}
-	}
+	h.scatterBatchAggs(h.numIntGroups, b, gi, sel, iterLen)
 }
 
 // compactFallback handles the case where a compact key exceeds 8 bytes.
@@ -1796,20 +1823,11 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 func (h *HashAggregate) compactFallback(b *batch.RecordBatch, gi []int32, sel []uint32, fallbackAt int, totalRows int) {
 	// Phase 2 for rows already indexed.
 	if fallbackAt > 0 {
-		colIdx := h.aggColIdx
 		truncSel := sel
 		if truncSel != nil {
 			truncSel = truncSel[:fallbackAt]
 		}
-		for i := 0; i < len(h.Aggs); i++ {
-			fa := &h.intFlatAccs[i]
-			ci := colIdx[i]
-			if ci >= 0 {
-				scatterFlatAggUpdate(fa, gi, h.Aggs[i].Func, b.Columns[ci], truncSel, fallbackAt)
-			} else if h.Aggs[i].Func == AggCount {
-				scatterCountStar(fa.count, gi[:fallbackAt], fallbackAt)
-			}
-		}
+		h.scatterBatchAggs(h.numIntGroups, b, gi[:fallbackAt], truncSel, fallbackAt)
 	}
 
 	// Materialize SoA → AoS and migrate to generic.
@@ -1835,15 +1853,10 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 	gkVec := b.Columns[h.strGroupKeyCol]
 	hasNulls := gkVec.Nulls.HasNulls()
 	strIdx := h.strGroupIndex
-	colIdx := h.aggColIdx
-	nAggs := len(h.Aggs)
 
-	// Pre-reserve accumulator capacity (same rationale as consumeBatchIntGroup).
+	// Pre-reserve key/state capacity (same rationale as consumeBatchIntGroup);
+	// the flat accumulators grow once after the lookup loop.
 	batchRows := b.ActiveLen()
-	for ai := range h.intFlatAccs {
-		h.intFlatAccs[ai].ensureCapacity(batchRows)
-	}
-
 	h.strGroupStates = ensureAppendCap(h.strGroupStates, batchRows)
 	h.serializedKeys = ensureAppendCap(h.serializedKeys, batchRows)
 
@@ -1882,9 +1895,6 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 				h.strGroupStates = append(h.strGroupStates, nil)
 				h.serializedKeys = append(h.serializedKeys, keyStr)
 				h.serializedKeyBytes += int64(len(keyStr))
-				for ai := range h.intFlatAccs {
-					h.intFlatAccs[ai].appendGroup()
-				}
 				gi[si] = gsIdx
 			}
 		}
@@ -1909,24 +1919,13 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 				h.strGroupStates = append(h.strGroupStates, nil)
 				h.serializedKeys = append(h.serializedKeys, keyStr)
 				h.serializedKeyBytes += int64(len(keyStr))
-				for ai := range h.intFlatAccs {
-					h.intFlatAccs[ai].appendGroup()
-				}
 				gi[row] = gsIdx
 			}
 		}
 	}
 
 	// Phase 2: Per-aggregate typed scatter update using flat arrays.
-	for i := 0; i < nAggs; i++ {
-		fa := &h.intFlatAccs[i]
-		ci := colIdx[i]
-		if ci >= 0 {
-			scatterFlatAggUpdate(fa, gi, h.Aggs[i].Func, b.Columns[ci], sel, iterLen)
-		} else if h.Aggs[i].Func == AggCount {
-			scatterCountStar(fa.count, gi, iterLen)
-		}
-	}
+	h.scatterBatchAggs(len(h.strGroupStates), b, gi, sel, iterLen)
 
 }
 
@@ -1948,9 +1947,7 @@ func (h *HashAggregate) strNullGroupSlot() int32 {
 	h.keys = append(h.keys, []any{nil})
 	h.serializedKeys = append(h.serializedKeys, "\x01")
 	h.serializedKeyBytes++
-	for ai := range h.intFlatAccs {
-		h.intFlatAccs[ai].appendGroup()
-	}
+	h.appendFlatAccumSlot()
 	return h.strNullGroupIdx
 }
 
@@ -1961,14 +1958,8 @@ func (h *HashAggregate) strNullGroupSlot() int32 {
 // Phase 2: Per-aggregate typed scatter update (one pass per agg, no per-row dispatch).
 func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 	strIdx := h.strGroupIndex
-	colIdx := h.aggColIdx
-	nAggs := len(h.Aggs)
 
 	batchRows := b.ActiveLen()
-	for ai := range h.intFlatAccs {
-		h.intFlatAccs[ai].ensureCapacity(batchRows)
-	}
-
 	h.strGroupStates = ensureAppendCap(h.strGroupStates, batchRows)
 	h.serializedKeys = ensureAppendCap(h.serializedKeys, batchRows)
 	if !h.deferGenericKeyBoxing {
@@ -2012,9 +2003,6 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
 		h.serializedKeyBytes += int64(len(h.keyBuf))
-		for ai := range h.intFlatAccs {
-			h.intFlatAccs[ai].appendGroup()
-		}
 	}
 
 	if h.deferGenericKeyBoxing {
@@ -2041,9 +2029,6 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 			h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
 			h.serializedKeyBytes += int64(len(h.keyBuf))
 			h.genKeyNext = append(h.genKeyNext, chainHead)
-			for ai := range h.intFlatAccs {
-				h.intFlatAccs[ai].appendGroup()
-			}
 			return newIdx
 		}
 		lookup := func(row int) int32 {
@@ -2108,15 +2093,7 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 	}
 
 	// Phase 2: Per-aggregate typed scatter update using flat arrays.
-	for i := 0; i < nAggs; i++ {
-		fa := &h.intFlatAccs[i]
-		ci := colIdx[i]
-		if ci >= 0 {
-			scatterFlatAggUpdate(fa, gi, h.Aggs[i].Func, b.Columns[ci], sel, iterLen)
-		} else if h.Aggs[i].Func == AggCount {
-			scatterCountStar(fa.count, gi, iterLen)
-		}
-	}
+	h.scatterBatchAggs(len(h.strGroupStates), b, gi, sel, iterLen)
 }
 
 // ensureStrGroupIndexForMerge rebuilds the string hash table from
@@ -2138,8 +2115,8 @@ func (h *HashAggregate) ensureStrGroupIndexForMerge() {
 // when compact mode cannot handle a key that exceeds 8 bytes.
 func (h *HashAggregate) migrateCompactToGeneric() {
 	h.useCompactGroupKey = false
-	h.strGroupIndex = newStrHashTable(len(h.intGroupStates))
-	h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
+	h.strGroupIndex = newStrHashTable(h.numIntGroups)
+	h.strGroupStates = make([]*groupState, 0, h.numIntGroups)
 	for i, gs := range h.intGroupStates {
 		key := h.compactKeys[i]
 		h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
@@ -2148,6 +2125,7 @@ func (h *HashAggregate) migrateCompactToGeneric() {
 		h.serializedKeyBytes += int64(len(key))
 	}
 	h.intGroupStates = nil
+	h.numIntGroups = 0
 	h.intGroupIndex = nil
 	h.compactKeys = nil
 	h.compactKeyBytes = 0
@@ -2248,12 +2226,10 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 	// Keep the SoA flat accumulator length in sync with strGroupStates.
 	// processRow is called from the null-key branch of consumeBatchStrGroup
 	// (and other str-group paths) AFTER the SoA fast paths are configured;
-	// without this appendGroup, the hash table maps a new key to gsIdx N
-	// but fa.count is still len N, so the next batch's scatterCountStar
-	// indexes out of bounds. Manifested as Q21 SF1's mysterious panic.
-	for ai := range h.intFlatAccs {
-		h.intFlatAccs[ai].appendGroup()
-	}
+	// without this extra slot, the hash table maps a new key to gsIdx N but
+	// fa.count is still len N, so the next batch's scatterCountStar indexes
+	// out of bounds. Manifested as Q21 SF1's mysterious panic.
+	h.appendFlatAccumSlot()
 
 	h.updateGroup(gs, b, row)
 }
@@ -2975,7 +2951,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 	// not — the generic SoA path defers key boxing and leaves it empty.
 	totalGroups := len(h.strGroupStates)
 	if h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey {
-		totalGroups = len(h.intGroupStates)
+		totalGroups = h.numIntGroups
 	}
 	if h.outputPos >= totalGroups {
 		return nil, nil
@@ -3001,7 +2977,11 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 	for i := 0; i < numRows; i++ {
 		var gs *groupState
 		if h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey {
-			gs = h.intGroupStates[start+i]
+			// Empty on the deferred single-/dual-int paths: numIntGroups is
+			// the count and every group's state lives in the SoA arrays.
+			if start+i < len(h.intGroupStates) {
+				gs = h.intGroupStates[start+i]
+			}
 		} else {
 			gs = h.strGroupStates[start+i]
 		}
@@ -3149,7 +3129,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 					// Accumulator value never escapes (writeAccToColumn doesn't
 					// retain it), so this is alloc-free.
 					var acc kernel.Accumulator
-					loadAccFromFlat(&h.intFlatAccs[j], start+i, &acc)
+					loadAccFromFlat(&h.intFlatAccs[j], countArrayOf(h.intFlatAccs, j), start+i, &acc)
 					writeAccToColumn(out.Columns[colIdx], i, &acc, agg.Func)
 				}
 			}
@@ -3180,6 +3160,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		// materialize on the SoA hot path, we must release these explicitly.
 		h.intFlatAccs = nil
 		h.intGroupStates = nil
+		h.numIntGroups = 0
 		h.intGroupIndex = nil
 		h.intKeys = nil
 		h.dualIntKeysA = nil
@@ -3536,7 +3517,33 @@ func intColValue(v *batch.Vector, row int) int64 {
 // (freed slots still occupy the slices) reports non-zero and is not adopted
 // into.
 func (h *HashAggregate) groupCount() int {
-	return len(h.intGroupStates) + len(h.strGroupStates)
+	return h.numIntGroups + len(h.strGroupStates)
+}
+
+// groupStateAt returns the AoS state for int-keyed slot i, or nil when the
+// path deferred it (single-int / dual-int, where intGroupStates is empty).
+func (h *HashAggregate) groupStateAt(i int) *groupState {
+	if i < len(h.intGroupStates) {
+		return h.intGroupStates[i]
+	}
+	return nil
+}
+
+// appendIntGroupSlot claims the next int-keyed group slot and returns its
+// index. A nil gs on a path that never materialized state leaves
+// intGroupStates empty (numIntGroups alone tracks the count); anything else
+// stores gs, padding the slice so slot indices stay aligned.
+func (h *HashAggregate) appendIntGroupSlot(gs *groupState) int32 {
+	idx := int32(h.numIntGroups)
+	h.numIntGroups++
+	if gs == nil && len(h.intGroupStates) == 0 {
+		return idx
+	}
+	for len(h.intGroupStates) < int(idx) {
+		h.intGroupStates = append(h.intGroupStates, nil)
+	}
+	h.intGroupStates = append(h.intGroupStates, gs)
+	return idx
 }
 
 // adoptStateFrom moves o's entire group state (and the schema-resolution
@@ -3574,6 +3581,7 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	h.useIntGroupKey = o.useIntGroupKey
 	h.intGroupIndex = o.intGroupIndex
 	h.intGroupStates = o.intGroupStates
+	h.numIntGroups = o.numIntGroups
 	h.intGroupKeyCol = o.intGroupKeyCol
 	h.intKeys = o.intKeys
 	h.intFlatAccs = o.intFlatAccs
@@ -3621,6 +3629,7 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	// the charge it made while accumulating).
 	o.intGroupIndex = nil
 	o.intGroupStates = nil
+	o.numIntGroups = 0
 	o.intKeys = nil
 	o.intFlatAccs = nil
 	o.dualIntKeysA = nil
@@ -3643,8 +3652,8 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 // materializeFlatAccums + migrateToGenericMap + per-group Accumulator.Merge.
 // Operates on flat arrays (count, sumI64, sumF64, min, max) with int hash lookup.
 func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
-	for i := range o.intGroupStates {
-		newIdx := int32(len(h.intGroupStates))
+	for i := 0; i < o.numIntGroups; i++ {
+		newIdx := int32(h.numIntGroups)
 		gsIdx, found := h.intGroupIndex.GetOrInsert(o.intKeys[i], newIdx)
 		if found {
 			// Existing group: merge flat accumulators in-place
@@ -3652,7 +3661,9 @@ func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
 				hfa := &h.intFlatAccs[ai]
 				ofa := &o.intFlatAccs[ai]
 				idx := int(gsIdx)
-				hfa.count[idx] += ofa.count[i]
+				if hfa.count != nil {
+					hfa.count[idx] += ofa.count[i]
+				}
 				if hfa.sumI64 != nil {
 					hfa.sumI64[idx] += ofa.sumI64[i]
 				}
@@ -3722,47 +3733,59 @@ func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
 				}
 			}
 		} else {
-			// New group: append to all flat arrays (already inserted by GetOrInsert)
-			h.intGroupStates = append(h.intGroupStates, o.intGroupStates[i])
+			// New group: claim the slot, then copy o's row into it.
+			h.appendIntGroupSlot(o.groupStateAt(i))
 			h.intKeys = append(h.intKeys, o.intKeys[i])
-			for ai := range h.intFlatAccs {
-				hfa := &h.intFlatAccs[ai]
-				ofa := &o.intFlatAccs[ai]
-				hfa.count = append(hfa.count, ofa.count[i])
-				if hfa.sumI64 != nil {
-					hfa.sumI64 = append(hfa.sumI64, ofa.sumI64[i])
-				}
-				if hfa.sumF64 != nil {
-					hfa.sumF64 = append(hfa.sumF64, ofa.sumF64[i])
-				}
-				if hfa.sumDec != nil {
-					hfa.sumDec = append(hfa.sumDec, ofa.sumDec[i])
-				}
-				if hfa.minI64 != nil {
-					hfa.minI64 = append(hfa.minI64, ofa.minI64[i])
-				}
-				if hfa.maxI64 != nil {
-					hfa.maxI64 = append(hfa.maxI64, ofa.maxI64[i])
-				}
-				if hfa.minF64 != nil {
-					hfa.minF64 = append(hfa.minF64, ofa.minF64[i])
-				}
-				if hfa.maxF64 != nil {
-					hfa.maxF64 = append(hfa.maxF64, ofa.maxF64[i])
-				}
-				if hfa.minDec != nil {
-					hfa.minDec = append(hfa.minDec, ofa.minDec[i])
-				}
-				if hfa.maxDec != nil {
-					hfa.maxDec = append(hfa.maxDec, ofa.maxDec[i])
-				}
-				if hfa.hasMin != nil {
-					hfa.hasMin = append(hfa.hasMin, ofa.hasMin[i])
-				}
-				if hfa.hasMax != nil {
-					hfa.hasMax = append(hfa.hasMax, ofa.hasMax[i])
-				}
-			}
+			copyFlatAccumRow(h.intFlatAccs, o.intFlatAccs, int(newIdx), i)
+		}
+	}
+}
+
+// copyFlatAccumRow grows dst to cover slot dstIdx and copies every live field
+// of src's row srcIdx into it. Growth is idempotent per array, so a count
+// array shared by several aggregates is extended (and copied) exactly once —
+// which is why the merge paths grow-then-assign instead of appending per
+// field.
+func copyFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
+	for ai := range dst {
+		dfa := &dst[ai]
+		sfa := &src[ai]
+		dfa.growTo(dstIdx + 1)
+		if dfa.count != nil {
+			dfa.count[dstIdx] = sfa.count[srcIdx]
+		}
+		if dfa.sumI64 != nil {
+			dfa.sumI64[dstIdx] = sfa.sumI64[srcIdx]
+		}
+		if dfa.sumF64 != nil {
+			dfa.sumF64[dstIdx] = sfa.sumF64[srcIdx]
+		}
+		if dfa.sumDec != nil {
+			dfa.sumDec[dstIdx] = sfa.sumDec[srcIdx]
+		}
+		if dfa.minI64 != nil {
+			dfa.minI64[dstIdx] = sfa.minI64[srcIdx]
+		}
+		if dfa.maxI64 != nil {
+			dfa.maxI64[dstIdx] = sfa.maxI64[srcIdx]
+		}
+		if dfa.minF64 != nil {
+			dfa.minF64[dstIdx] = sfa.minF64[srcIdx]
+		}
+		if dfa.maxF64 != nil {
+			dfa.maxF64[dstIdx] = sfa.maxF64[srcIdx]
+		}
+		if dfa.minDec != nil {
+			dfa.minDec[dstIdx] = sfa.minDec[srcIdx]
+		}
+		if dfa.maxDec != nil {
+			dfa.maxDec[dstIdx] = sfa.maxDec[srcIdx]
+		}
+		if dfa.hasMin != nil {
+			dfa.hasMin[dstIdx] = sfa.hasMin[srcIdx]
+		}
+		if dfa.hasMax != nil {
+			dfa.hasMax[dstIdx] = sfa.hasMax[srcIdx]
 		}
 	}
 }
@@ -3770,7 +3793,7 @@ func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
 // mergeDualIntGroupSoA merges another dual-int-keyed SoA aggregate directly,
 // using composite hash lookup with chain verification for collision handling.
 func (h *HashAggregate) mergeDualIntGroupSoA(o *HashAggregate) {
-	for i := range o.intGroupStates {
+	for i := 0; i < o.numIntGroups; i++ {
 		a := o.dualIntKeysA[i]
 		b := o.dualIntKeysB[i]
 
@@ -3792,7 +3815,9 @@ func (h *HashAggregate) mergeDualIntGroupSoA(o *HashAggregate) {
 				hfa := &h.intFlatAccs[ai]
 				ofa := &o.intFlatAccs[ai]
 				idx := int(gsIdx)
-				hfa.count[idx] += ofa.count[i]
+				if hfa.count != nil {
+					hfa.count[idx] += ofa.count[i]
+				}
 				if hfa.sumI64 != nil {
 					hfa.sumI64[idx] += ofa.sumI64[i]
 				}
@@ -3861,8 +3886,8 @@ func (h *HashAggregate) mergeDualIntGroupSoA(o *HashAggregate) {
 			}
 		} else {
 			// New group
-			newIdx := int32(len(h.intGroupStates))
-			h.intGroupStates = append(h.intGroupStates, o.intGroupStates[i])
+			newIdx := int32(h.numIntGroups)
+			h.appendIntGroupSlot(o.groupStateAt(i))
 			h.dualIntKeysA = append(h.dualIntKeysA, a)
 			h.dualIntKeysB = append(h.dualIntKeysB, b)
 			// Chain to existing head if composite hash exists
@@ -3872,44 +3897,7 @@ func (h *HashAggregate) mergeDualIntGroupSoA(o *HashAggregate) {
 				h.dualIntNextGroup = append(h.dualIntNextGroup, -1)
 			}
 			h.intGroupIndex.Put(ck, newIdx)
-			for ai := range h.intFlatAccs {
-				hfa := &h.intFlatAccs[ai]
-				ofa := &o.intFlatAccs[ai]
-				hfa.count = append(hfa.count, ofa.count[i])
-				if hfa.sumI64 != nil {
-					hfa.sumI64 = append(hfa.sumI64, ofa.sumI64[i])
-				}
-				if hfa.sumF64 != nil {
-					hfa.sumF64 = append(hfa.sumF64, ofa.sumF64[i])
-				}
-				if hfa.sumDec != nil {
-					hfa.sumDec = append(hfa.sumDec, ofa.sumDec[i])
-				}
-				if hfa.minI64 != nil {
-					hfa.minI64 = append(hfa.minI64, ofa.minI64[i])
-				}
-				if hfa.maxI64 != nil {
-					hfa.maxI64 = append(hfa.maxI64, ofa.maxI64[i])
-				}
-				if hfa.minF64 != nil {
-					hfa.minF64 = append(hfa.minF64, ofa.minF64[i])
-				}
-				if hfa.maxF64 != nil {
-					hfa.maxF64 = append(hfa.maxF64, ofa.maxF64[i])
-				}
-				if hfa.minDec != nil {
-					hfa.minDec = append(hfa.minDec, ofa.minDec[i])
-				}
-				if hfa.maxDec != nil {
-					hfa.maxDec = append(hfa.maxDec, ofa.maxDec[i])
-				}
-				if hfa.hasMin != nil {
-					hfa.hasMin = append(hfa.hasMin, ofa.hasMin[i])
-				}
-				if hfa.hasMax != nil {
-					hfa.hasMax = append(hfa.hasMax, ofa.hasMax[i])
-				}
-			}
+			copyFlatAccumRow(h.intFlatAccs, o.intFlatAccs, int(newIdx), i)
 		}
 	}
 }
@@ -3932,11 +3920,11 @@ func (h *HashAggregate) migrateToGenericMap() {
 		// a migrated side with a natively-generic side). A text-format
 		// index entry would never match the binary key of the same
 		// logical group, silently duplicating groups.
-		h.strGroupIndex = newStrHashTable(len(h.intGroupStates))
-		h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
-		h.serializedKeys = make([]string, 0, len(h.intGroupStates))
+		h.strGroupIndex = newStrHashTable(h.numIntGroups)
+		h.strGroupStates = make([]*groupState, 0, h.numIntGroups)
+		h.serializedKeys = make([]string, 0, h.numIntGroups)
 		h.serializedKeyBytes = 0
-		h.keys = make([][]any, 0, len(h.intGroupStates))
+		h.keys = make([][]any, 0, h.numIntGroups)
 		for i, gs := range h.intGroupStates {
 			ext := gs.ensureExtras()
 			if ext.keyValues == nil {
@@ -3953,6 +3941,7 @@ func (h *HashAggregate) migrateToGenericMap() {
 		}
 		h.useDualIntGroupKey = false
 		h.intGroupStates = nil
+		h.numIntGroups = 0
 		h.intGroupIndex = nil
 		h.dualIntKeysA = nil
 		h.dualIntKeysB = nil
@@ -3964,11 +3953,11 @@ func (h *HashAggregate) migrateToGenericMap() {
 	}
 	// Migrate int group key → generic path (binary key format — see the
 	// dual-int branch comment).
-	h.strGroupIndex = newStrHashTable(len(h.intGroupStates))
-	h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
-	h.serializedKeys = make([]string, 0, len(h.intGroupStates))
+	h.strGroupIndex = newStrHashTable(h.numIntGroups)
+	h.strGroupStates = make([]*groupState, 0, h.numIntGroups)
+	h.serializedKeys = make([]string, 0, h.numIntGroups)
 	h.serializedKeyBytes = 0
-	h.keys = make([][]any, 0, len(h.intGroupStates))
+	h.keys = make([][]any, 0, h.numIntGroups)
 	for gi, gs := range h.intGroupStates {
 		intKey := h.intKeys[gi]
 		if gs == nil {
@@ -3990,6 +3979,7 @@ func (h *HashAggregate) migrateToGenericMap() {
 	}
 	h.useIntGroupKey = false
 	h.intGroupStates = nil
+	h.numIntGroups = 0
 	h.intGroupIndex = nil
 	h.intKeys = nil
 }
@@ -4548,6 +4538,88 @@ func (h *HashAggregate) offheapReg() *memory.OffheapRegistry {
 	return h.offheap
 }
 
+// aggNeedsCount reports whether an aggregate's flat state includes a row
+// count. MIN/MAX do not: no scatter kernel writes their count[], and every
+// consumer (finalizeKernelAcc, writeAccToColumn, the partial-spill
+// emitAcc/readAcc format) drives MIN/MAX purely off HasMin/HasMax. The array
+// was 8 bytes per group per aggregate of permanent zeroes.
+func aggNeedsCount(fn AggFunc) bool {
+	return fn == AggSum || fn == AggAvg || fn == AggCount
+}
+
+// planCountArrays decides, per aggregate, which aggregate's count[] it reads.
+// Result[i] == i means "owns its own"; result[i] == j < i means "shares j's".
+//
+// Two aggregates may share a count array only when every row increments both
+// counts or neither — i.e. their count kernels run over an identical
+// predicate. That holds exactly when:
+//
+//   - both are COUNT(*) (no input column: every row with a live group index
+//     counts), or
+//   - both read the SAME input column AND both count kernels are guaranteed
+//     to fire for that column's type.
+//
+// The type guard matters: scatterFlatAggUpdate's SUM/AVG dispatch has no case
+// for e.g. Bool or String, so SUM over such a column silently increments
+// nothing while COUNT over it increments every non-null row. Restricting
+// sharing to the numeric set the SUM/AVG switches actually handle keeps the
+// two predicates identical.
+//
+// MIN/MAX never participate — they have no count at all (aggNeedsCount).
+//
+// NOT shared: aggregates over different columns, even when the data happens
+// to have no nulls in either. Null-ness is a per-batch property, so that
+// equality isn't provable at plan time. ClickBench Q33's three aggregates
+// (COUNT(*), SUM(IsRefresh), AVG(ResolutionWidth)) fall in exactly that
+// bucket and each keep their own count.
+func (h *HashAggregate) planCountArrays(b *batch.RecordBatch) []int32 {
+	plan := make([]int32, len(h.Aggs))
+	for i := range plan {
+		plan[i] = int32(i)
+	}
+	// classOf returns a shareable class key, or ok=false for "never shares".
+	classOf := func(i int) (int, bool) {
+		agg := h.Aggs[i]
+		if !aggNeedsCount(agg.Func) {
+			return 0, false
+		}
+		ci := h.aggColIdx[i]
+		if ci < 0 {
+			// COUNT(*): counts every row of every group.
+			return -1, agg.Func == AggCount
+		}
+		if agg.Func != AggCount && !isFlatSumType(b.Columns[ci].Type) {
+			return 0, false
+		}
+		return ci, true
+	}
+	owners := make(map[int]int32, len(h.Aggs))
+	for i := range h.Aggs {
+		key, ok := classOf(i)
+		if !ok {
+			continue
+		}
+		if owner, seen := owners[key]; seen {
+			plan[i] = owner
+			continue
+		}
+		owners[key] = int32(i)
+	}
+	return plan
+}
+
+// isFlatSumType reports whether scatterFlatAggUpdate's SUM/AVG dispatch has a
+// case for this column type (and therefore increments count for it).
+func isFlatSumType(t batch.TypeID) bool {
+	switch t {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration,
+		batch.TypeInt32, batch.TypePort, batch.TypeDate,
+		batch.TypeFloat64, batch.TypeFloat32, batch.TypeDecimal:
+		return true
+	}
+	return false
+}
+
 func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 	// Flat accumulator arrays: same sizing principle as the group-state pool
 	// above. InputRowHint overshoots for low-cardinality GROUP BY (Q12: 7
@@ -4567,9 +4639,17 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 		initCap = est
 	}
 
+	// Count-array plan: which aggregates need a count[] of their own, and
+	// which can read another aggregate's. See planCountArrays for the
+	// safety argument.
+	countPlan := h.planCountArrays(b)
+
 	for i, agg := range h.Aggs {
 		fa := &h.intFlatAccs[i]
-		fa.count = memory.Offheap[int64](reg, initCap)
+		fa.countFrom = countPlan[i]
+		if fa.countFrom == int32(i) && aggNeedsCount(agg.Func) {
+			fa.count = memory.Offheap[int64](reg, initCap)
+		}
 
 		ci := h.aggColIdx[i]
 		if ci < 0 {
@@ -4631,14 +4711,19 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 	h.groupIndexBuf = make([]int32, batch.DefaultBatchSize)
 }
 
-// loadAccFromFlat fills dst from a flatAccumArrays row at index gi. The
+// loadAccFromFlat fills dst from a flatAccumArrays row at index gi. countArr
+// is the aggregate's resolved count array (countArrayOf) — nil for MIN/MAX,
+// or the owner's array when this aggregate shares one. The
 // SoA-direct counterpart to materializing per-group accs into extras.accs:
 // callers build a stack-local Accumulator (which the compiler sees value-
 // typed and proves doesn't escape) and pass it to a finalizer that doesn't
 // retain it. At SF100 Q17 scale (20M groups) this saves a multi-GB heap
 // pass through materializeFlatAccums.
-func loadAccFromFlat(fa *flatAccumArrays, gi int, dst *kernel.Accumulator) {
-	dst.Count = fa.count[gi]
+func loadAccFromFlat(fa *flatAccumArrays, countArr []int64, gi int, dst *kernel.Accumulator) {
+	dst.Count = 0
+	if countArr != nil {
+		dst.Count = countArr[gi]
+	}
 	dst.IsFloat = fa.isFloat
 	dst.IsDecimal = fa.isDecimal
 	dst.DecScale = fa.decScale
@@ -4708,11 +4793,14 @@ func (h *HashAggregate) materializeFlatAccums() {
 				// index a zero-length array and panic. Leave the
 				// accumulator at its zero value so downstream kernels
 				// emit identity output rather than crashing the worker.
-				if gi >= len(fa.count) {
+				if gi >= flatAccumLen(fa) {
 					continue
 				}
 				acc := &ext.accs[ai]
-				acc.Count = fa.count[gi]
+				acc.Count = 0
+				if ca := countArrayOf(h.intFlatAccs, ai); ca != nil {
+					acc.Count = ca[gi]
+				}
 				acc.IsFloat = fa.isFloat
 				acc.IsDecimal = fa.isDecimal
 				acc.DecScale = fa.decScale
@@ -4755,6 +4843,14 @@ func (h *HashAggregate) materializeFlatAccums() {
 		h.groupIndexBuf = nil
 		return
 	}
+	// Single-int and dual-int defer per-group state entirely: numIntGroups is
+	// the count and intGroupStates is empty. Reify the slice here — the
+	// migration/merge cold paths this feeds all read intGroupStates.
+	if len(h.intGroupStates) < h.numIntGroups {
+		reified := make([]*groupState, h.numIntGroups)
+		copy(reified, h.intGroupStates)
+		h.intGroupStates = reified
+	}
 	for gi, gs := range h.intGroupStates {
 		if gs == nil {
 			// Deferred state (single-int and dual-int paths): reify for
@@ -4775,7 +4871,10 @@ func (h *HashAggregate) materializeFlatAccums() {
 		for ai := range h.intFlatAccs {
 			fa := &h.intFlatAccs[ai]
 			acc := &ext.accs[ai]
-			acc.Count = fa.count[gi]
+			acc.Count = 0
+			if ca := countArrayOf(h.intFlatAccs, ai); ca != nil {
+				acc.Count = ca[gi]
+			}
 			acc.IsFloat = fa.isFloat
 			acc.IsDecimal = fa.isDecimal
 			acc.DecScale = fa.decScale
@@ -4827,16 +4926,25 @@ func (h *HashAggregate) rebuildFlatAccums(b *batch.RecordBatch) {
 	h.initFlatAccums(b)
 
 	var groups []*groupState
+	nGroups := h.numIntGroups
 	if h.useStrGroupKey || h.useGenericSoA {
 		groups = h.strGroupStates
+		nGroups = len(groups)
 	} else {
 		groups = h.intGroupStates
 	}
 
+	// Size every array to the group count first, so slots survive even for
+	// group slices that were left deferred (empty) by the SoA paths.
+	for ai := range h.intFlatAccs {
+		h.intFlatAccs[ai].growTo(nGroups)
+	}
 	for gi, gs := range groups {
+		if gs == nil {
+			continue
+		}
 		for ai := range h.intFlatAccs {
 			fa := &h.intFlatAccs[ai]
-			fa.appendGroup()
 			// extras may be nil if rebuild runs before any materialize/Group
 			// path allocated them; treat those as the "no accumulators yet"
 			// case the original `gs.accs == nil` branch handled.
@@ -4844,7 +4952,9 @@ func (h *HashAggregate) rebuildFlatAccums(b *batch.RecordBatch) {
 				continue
 			}
 			acc := &gs.extras.accs[ai]
-			fa.count[gi] = acc.Count
+			if fa.count != nil {
+				fa.count[gi] = acc.Count
+			}
 			if fa.sumI64 != nil {
 				fa.sumI64[gi] = acc.SumI64
 			}

@@ -107,13 +107,13 @@ func newPartialGroupCursor(h *HashAggregate, liveGroups []int32) *partialGroupCu
 	switch {
 	case h.useIntGroupKey:
 		keyMode = partialKeyModeInt
-		srcGroups = len(h.intGroupStates)
+		srcGroups = h.numIntGroups
 	case h.useDualIntGroupKey:
 		keyMode = partialKeyModeDualInt
-		srcGroups = len(h.intGroupStates)
+		srcGroups = h.numIntGroups
 	case h.useCompactGroupKey:
 		keyMode = partialKeyModeCompact
-		srcGroups = len(h.intGroupStates)
+		srcGroups = h.numIntGroups
 	default: // useStrGroupKey || useGenericSoA || post-MergeSink generic
 		keyMode = partialKeyModeStrOrGeneric
 		srcGroups = len(h.strGroupStates)
@@ -319,10 +319,13 @@ func (c *partialGroupCursor) loadHeadAccsSoA(gi int) {
 		// Reset acc so a previously-loaded group's HasMin/HasMax/etc. don't
 		// leak into a fresh load that doesn't touch those fields.
 		*acc = kernel.Accumulator{
-			Count:     fa.count[gi],
 			IsFloat:   fa.isFloat,
 			IsDecimal: fa.isDecimal,
 			DecScale:  fa.decScale,
+		}
+		// Resolve the count array through the sharing link (nil for MIN/MAX).
+		if ca := countArrayOf(c.flatAccs, ai); ca != nil {
+			acc.Count = ca[gi]
 		}
 		if fa.sumI64 != nil {
 			acc.SumI64 = fa.sumI64[gi]
@@ -367,7 +370,9 @@ func (c *partialGroupCursor) loadHeadAccsAoS(gi int) {
 	var gs *groupState
 	switch c.keyMode {
 	case partialKeyModeInt, partialKeyModeDualInt, partialKeyModeCompact:
-		gs = c.intGroupStates[gi]
+		if gi < len(c.intGroupStates) {
+			gs = c.intGroupStates[gi]
+		}
 	default:
 		gs = c.strGroupStates[gi]
 	}

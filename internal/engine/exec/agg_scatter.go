@@ -14,9 +14,13 @@ import (
 // With SoA layout, each accumulator field is a contiguous array (~16MB per field),
 // fitting in L3 cache and enabling sequential memory access.
 type flatAccumArrays struct {
-	count  []int64       // used by SUM, AVG, COUNT
-	sumI64 []int64       // SUM/AVG for integer types
-	sumF64 []float64     // SUM/AVG for float types
+	// count is nil for aggregates that neither write nor read a row count
+	// (MIN/MAX — their scatter kernels touch only min/max + hasMin/hasMax,
+	// and their finalizers read only HasMin/HasMax) and for aggregates that
+	// SHARE another aggregate's count array (see countFrom).
+	count  []int64        // used by SUM, AVG, COUNT
+	sumI64 []int64        // SUM/AVG for integer types
+	sumF64 []float64      // SUM/AVG for float types
 	sumDec []batch.Int128 // SUM/AVG for decimal types
 	minI64 []int64
 	maxI64 []int64
@@ -27,47 +31,67 @@ type flatAccumArrays struct {
 	hasMin []bool
 	hasMax []bool
 
+	// countFrom is the index (within the owning []flatAccumArrays) of the
+	// aggregate whose count array this aggregate reads. It equals the
+	// aggregate's own index when it owns its count (or has none). Sharers
+	// keep count nil and resolve through countArrayOf; their scatter runs
+	// the *NoCount kernel so the shared array is incremented exactly once
+	// per batch. Set by initFlatAccums, which is also where the sharing
+	// legality analysis lives. Travels with intFlatAccs through adoption,
+	// merge and the drain cursor.
+	countFrom int32
+
 	isFloat   bool
 	isDecimal bool
 	decScale  int
 }
 
-// appendGroup extends all non-nil arrays by one zero-initialized element.
-func (fa *flatAccumArrays) appendGroup() {
-	fa.count = append(fa.count, 0)
-	if fa.sumI64 != nil {
-		fa.sumI64 = append(fa.sumI64, 0)
+// countArrayOf resolves the count array an aggregate reads, following the
+// count-sharing link. Returns nil for aggregates with no count at all.
+func countArrayOf(accs []flatAccumArrays, ai int) []int64 {
+	return accs[accs[ai].countFrom].count
+}
+
+// growTo extends every live array to length n, zero-filling the new slots.
+// Replaces the old per-new-group appendGroup(): the hash-probe loop now only
+// counts groups, and each accumulator array is extended once per batch. Arrays
+// the aggregate doesn't use stay nil (nil means "field absent", not "empty").
+//
+// Zero is the identity element for every operator here — COUNT/SUM start at 0,
+// MIN/MAX start at 0 with hasMin/hasMax false so the scatter kernels seed from
+// the first input — so a freshly grown slot behaves exactly like the old
+// appendGroup'd one.
+func (fa *flatAccumArrays) growTo(n int) {
+	fa.count = growZeros(fa.count, n)
+	fa.sumI64 = growZeros(fa.sumI64, n)
+	fa.sumF64 = growZeros(fa.sumF64, n)
+	fa.sumDec = growZeros(fa.sumDec, n)
+	fa.minI64 = growZeros(fa.minI64, n)
+	fa.maxI64 = growZeros(fa.maxI64, n)
+	fa.minF64 = growZeros(fa.minF64, n)
+	fa.maxF64 = growZeros(fa.maxF64, n)
+	fa.minDec = growZeros(fa.minDec, n)
+	fa.maxDec = growZeros(fa.maxDec, n)
+	fa.hasMin = growZeros(fa.hasMin, n)
+	fa.hasMax = growZeros(fa.hasMax, n)
+}
+
+// growZeros extends a live (non-nil) array to length n, zero-filling the new
+// tail. A nil array means the aggregate has no such field and stays nil.
+// Capacity growth is multiplicative (ensureAppendCap) so the heap-backed
+// fallback doesn't realloc-and-copy every batch; off-heap arrays never
+// realloc at all (their reservation caps at 512M elements).
+func growZeros[T any](s []T, n int) []T {
+	if s == nil || len(s) >= n {
+		return s
 	}
-	if fa.sumF64 != nil {
-		fa.sumF64 = append(fa.sumF64, 0)
+	if cap(s) < n {
+		s = ensureAppendCap(s, n-len(s))
 	}
-	if fa.sumDec != nil {
-		fa.sumDec = append(fa.sumDec, batch.Int128{})
-	}
-	if fa.minI64 != nil {
-		fa.minI64 = append(fa.minI64, 0)
-	}
-	if fa.maxI64 != nil {
-		fa.maxI64 = append(fa.maxI64, 0)
-	}
-	if fa.minF64 != nil {
-		fa.minF64 = append(fa.minF64, 0)
-	}
-	if fa.maxF64 != nil {
-		fa.maxF64 = append(fa.maxF64, 0)
-	}
-	if fa.minDec != nil {
-		fa.minDec = append(fa.minDec, batch.Int128{})
-	}
-	if fa.maxDec != nil {
-		fa.maxDec = append(fa.maxDec, batch.Int128{})
-	}
-	if fa.hasMin != nil {
-		fa.hasMin = append(fa.hasMin, false)
-	}
-	if fa.hasMax != nil {
-		fa.hasMax = append(fa.hasMax, false)
-	}
+	old := len(s)
+	s = s[:n]
+	clear(s[old:])
+	return s
 }
 
 // clearGroup zeros every non-nil SoA field at index idx. Used by the
@@ -78,10 +102,16 @@ func (fa *flatAccumArrays) appendGroup() {
 // Zero is the identity element for the operators we run here: COUNT starts
 // at 0, SUM at 0, MIN/MAX at 0 with hasMin/hasMax false (which makes the
 // scatter kernels treat the first input as the seed). So a clearGroup'd
-// slot behaves identically to a fresh appendGroup'd slot for subsequent
-// scatter updates.
+// slot behaves identically to a freshly grown slot for subsequent scatter
+// updates.
+//
+// A shared count array (see countFrom) is zeroed by whichever aggregate owns
+// it; sharers hold count == nil and skip it. Zeroing is idempotent, so the
+// order aggregates are visited in doesn't matter.
 func (fa *flatAccumArrays) clearGroup(idx int) {
-	fa.count[idx] = 0
+	if fa.count != nil {
+		fa.count[idx] = 0
+	}
 	if fa.sumI64 != nil {
 		fa.sumI64[idx] = 0
 	}
@@ -117,66 +147,7 @@ func (fa *flatAccumArrays) clearGroup(idx int) {
 	}
 }
 
-// ensureCapacity pre-grows all non-nil arrays so that n additional
-// appendGroup calls won't trigger growslice reallocation. Called
-// before the hash lookup phase with n = batch row count as an upper
-// bound on new groups this batch can create.
-func (fa *flatAccumArrays) ensureCapacity(n int) {
-	fa.count = ensureSliceCap(fa.count, n)
-	if fa.sumI64 != nil {
-		fa.sumI64 = ensureSliceCap(fa.sumI64, n)
-	}
-	if fa.sumF64 != nil {
-		fa.sumF64 = ensureSliceCapF64(fa.sumF64, n)
-	}
-	if fa.sumDec != nil {
-		fa.sumDec = ensureSliceCapInt128(fa.sumDec, n)
-	}
-	if fa.minI64 != nil {
-		fa.minI64 = ensureSliceCap(fa.minI64, n)
-	}
-	if fa.maxI64 != nil {
-		fa.maxI64 = ensureSliceCap(fa.maxI64, n)
-	}
-	if fa.minF64 != nil {
-		fa.minF64 = ensureSliceCapF64(fa.minF64, n)
-	}
-	if fa.maxF64 != nil {
-		fa.maxF64 = ensureSliceCapF64(fa.maxF64, n)
-	}
-	if fa.minDec != nil {
-		fa.minDec = ensureSliceCapInt128(fa.minDec, n)
-	}
-	if fa.maxDec != nil {
-		fa.maxDec = ensureSliceCapInt128(fa.maxDec, n)
-	}
-	if fa.hasMin != nil {
-		fa.hasMin = ensureSliceCapBool(fa.hasMin, n)
-	}
-	if fa.hasMax != nil {
-		fa.hasMax = ensureSliceCapBool(fa.hasMax, n)
-	}
-}
-
-// ensureSliceCap grows the capacity of s to fit n more appends without reallocation.
-// Uses multiplicative growth (at least 2x) to amortize allocation cost. Without this,
-// additive growth by batch size (2048) causes a reallocation nearly every batch when
-// only a few new groups are created per batch.
-func ensureSliceCap(s []int64, n int) []int64 {
-	if cap(s)-len(s) >= n {
-		return s
-	}
-	newCap := len(s) + n
-	if double := cap(s) * 2; double > newCap {
-		newCap = double
-	}
-	ns := make([]int64, len(s), newCap)
-	copy(ns, s)
-	return ns
-}
-
-// ensureAppendCap is ensureSliceCap for any element type: pre-grows s
-// (≥2x) to absorb n more appends. The group-key side arrays (key values,
+// ensureAppendCap pre-grows s (≥2x) to absorb n more appends. The group-key side arrays (key values,
 // chain links, group states) are appended once per NEW group inside the
 // hash-lookup loops; Go's builtin append growth drops to ~1.25x for large
 // slices, which turned those appends into a realloc-and-copy treadmill at
@@ -191,45 +162,6 @@ func ensureAppendCap[T any](s []T, n int) []T {
 		newCap = double
 	}
 	ns := make([]T, len(s), newCap)
-	copy(ns, s)
-	return ns
-}
-
-func ensureSliceCapF64(s []float64, n int) []float64 {
-	if cap(s)-len(s) >= n {
-		return s
-	}
-	newCap := len(s) + n
-	if double := cap(s) * 2; double > newCap {
-		newCap = double
-	}
-	ns := make([]float64, len(s), newCap)
-	copy(ns, s)
-	return ns
-}
-
-func ensureSliceCapInt128(s []batch.Int128, n int) []batch.Int128 {
-	if cap(s)-len(s) >= n {
-		return s
-	}
-	newCap := len(s) + n
-	if double := cap(s) * 2; double > newCap {
-		newCap = double
-	}
-	ns := make([]batch.Int128, len(s), newCap)
-	copy(ns, s)
-	return ns
-}
-
-func ensureSliceCapBool(s []bool, n int) []bool {
-	if cap(s)-len(s) >= n {
-		return s
-	}
-	newCap := len(s) + n
-	if double := cap(s) * 2; double > newCap {
-		newCap = double
-	}
-	ns := make([]bool, len(s), newCap)
 	copy(ns, s)
 	return ns
 }
@@ -282,6 +214,45 @@ func scatterSumInt[T ~int32 | ~int64](sumArr, countArr []int64, data []T, gi []i
 	}
 }
 
+// scatterSumIntNoCount is scatterSumInt without the count increment, for an
+// aggregate that shares another aggregate's count array (the owner's kernel
+// already incremented it over the identical non-null predicate). Keeping the
+// count-less loop separate rather than nil-checking countArr per row is the
+// same typed-kernel rule the rest of this file follows.
+func scatterSumIntNoCount[T ~int32 | ~int64](sumArr []int64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
+	hasNulls := nulls.HasNulls()
+	if sel != nil {
+		if !hasNulls {
+			for si := range sel {
+				if idx := gi[si]; idx >= 0 {
+					sumArr[idx] += int64(data[sel[si]])
+				}
+			}
+		} else {
+			for si := range sel {
+				row := int(sel[si])
+				if idx := gi[si]; idx >= 0 && !nulls.IsNullFast(row) {
+					sumArr[idx] += int64(data[row])
+				}
+			}
+		}
+	} else {
+		if !hasNulls {
+			for row := 0; row < n; row++ {
+				if idx := gi[row]; idx >= 0 {
+					sumArr[idx] += int64(data[row])
+				}
+			}
+		} else {
+			for row := 0; row < n; row++ {
+				if idx := gi[row]; idx >= 0 && !nulls.IsNullFast(row) {
+					sumArr[idx] += int64(data[row])
+				}
+			}
+		}
+	}
+}
+
 func scatterSumFloat[T ~float32 | ~float64 | ~int64](sumArr []float64, countArr []int64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
@@ -321,6 +292,41 @@ func scatterSumFloat[T ~float32 | ~float64 | ~int64](sumArr []float64, countArr 
 	}
 }
 
+// scatterSumFloatNoCount is scatterSumFloat for a count-sharing aggregate.
+func scatterSumFloatNoCount[T ~float32 | ~float64 | ~int64](sumArr []float64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
+	hasNulls := nulls.HasNulls()
+	if sel != nil {
+		if !hasNulls {
+			for si := range sel {
+				if idx := gi[si]; idx >= 0 {
+					sumArr[idx] += float64(data[sel[si]])
+				}
+			}
+		} else {
+			for si := range sel {
+				row := int(sel[si])
+				if idx := gi[si]; idx >= 0 && !nulls.IsNullFast(row) {
+					sumArr[idx] += float64(data[row])
+				}
+			}
+		}
+	} else {
+		if !hasNulls {
+			for row := 0; row < n; row++ {
+				if idx := gi[row]; idx >= 0 {
+					sumArr[idx] += float64(data[row])
+				}
+			}
+		} else {
+			for row := 0; row < n; row++ {
+				if idx := gi[row]; idx >= 0 && !nulls.IsNullFast(row) {
+					sumArr[idx] += float64(data[row])
+				}
+			}
+		}
+	}
+}
+
 func scatterSumDecimal(sumArr []batch.Int128, countArr []int64, data []batch.Int128, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
@@ -336,6 +342,25 @@ func scatterSumDecimal(sumArr []batch.Int128, countArr []int64, data []batch.Int
 			if idx := gi[row]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
 				sumArr[idx] = sumArr[idx].Add(data[row])
 				countArr[idx]++
+			}
+		}
+	}
+}
+
+// scatterSumDecimalNoCount is scatterSumDecimal for a count-sharing aggregate.
+func scatterSumDecimalNoCount(sumArr []batch.Int128, data []batch.Int128, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
+	hasNulls := nulls.HasNulls()
+	if sel != nil {
+		for si := range sel {
+			row := int(sel[si])
+			if idx := gi[si]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
+				sumArr[idx] = sumArr[idx].Add(data[row])
+			}
+		}
+	} else {
+		for row := 0; row < n; row++ {
+			if idx := gi[row]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
+				sumArr[idx] = sumArr[idx].Add(data[row])
 			}
 		}
 	}
@@ -486,7 +511,16 @@ func scatterMaxFloat[T ~float32 | ~float64](maxArr []float64, hasMax []bool, dat
 
 // scatterFlatAggUpdate dispatches to the right scatter function for one aggregate.
 // Type switch runs once per aggregate per batch, not per row.
+//
+// fa.count == nil means this aggregate shares an earlier aggregate's count
+// array (initFlatAccums proved the two receive identical increments), so the
+// count-free kernels run and the owner's pass does the counting. AggCount
+// sharers have no state of their own at all and are skipped by the caller.
 func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batch.Vector, sel []uint32, n int) {
+	if fa.count == nil && (fn == AggSum || fn == AggAvg) {
+		scatterFlatAggUpdateNoCount(fa, gi, fn, col, sel, n)
+		return
+	}
 	switch fn {
 	case AggAvg:
 		// AVG over int64-class accumulates float64 (overflow-safe; the
@@ -540,5 +574,38 @@ func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batc
 		case batch.TypeFloat32:
 			scatterMaxFloat(fa.maxF64, fa.hasMax, col.Float32Data, gi, &col.Nulls, sel, n)
 		}
+	}
+}
+
+// scatterFlatAggUpdateNoCount is the SUM/AVG dispatch for an aggregate that
+// shares another aggregate's count array. Same layout rules as
+// scatterFlatAggUpdate — only the count increment is dropped.
+func scatterFlatAggUpdateNoCount(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batch.Vector, sel []uint32, n int) {
+	if fn == AggAvg {
+		switch col.Type {
+		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
+			scatterSumFloatNoCount(fa.sumF64, col.Int64Data, gi, &col.Nulls, sel, n)
+		case batch.TypeInt32, batch.TypePort, batch.TypeDate:
+			scatterSumIntNoCount(fa.sumI64, col.Int32Data, gi, &col.Nulls, sel, n)
+		case batch.TypeFloat64:
+			scatterSumFloatNoCount(fa.sumF64, col.Float64Data, gi, &col.Nulls, sel, n)
+		case batch.TypeFloat32:
+			scatterSumFloatNoCount(fa.sumF64, col.Float32Data, gi, &col.Nulls, sel, n)
+		case batch.TypeDecimal:
+			scatterSumDecimalNoCount(fa.sumDec, col.DecimalData.Data, gi, &col.Nulls, sel, n)
+		}
+		return
+	}
+	switch col.Type {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
+		scatterSumIntNoCount(fa.sumI64, col.Int64Data, gi, &col.Nulls, sel, n)
+	case batch.TypeInt32, batch.TypePort, batch.TypeDate:
+		scatterSumIntNoCount(fa.sumI64, col.Int32Data, gi, &col.Nulls, sel, n)
+	case batch.TypeFloat64:
+		scatterSumFloatNoCount(fa.sumF64, col.Float64Data, gi, &col.Nulls, sel, n)
+	case batch.TypeFloat32:
+		scatterSumFloatNoCount(fa.sumF64, col.Float32Data, gi, &col.Nulls, sel, n)
+	case batch.TypeDecimal:
+		scatterSumDecimalNoCount(fa.sumDec, col.DecimalData.Data, gi, &col.Nulls, sel, n)
 	}
 }

@@ -1620,6 +1620,7 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	}
 	h.genKeyNext = nil
 	h.intGroupStates = nil
+	h.numIntGroups = 0
 	h.intKeys = nil
 	h.strGroupStates = nil
 	// Retire (do NOT unmap) the off-heap reservations backing the SoA

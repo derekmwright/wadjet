@@ -408,3 +408,97 @@ func BenchmarkSortSmall(b *testing.B) {
 		s.Close()
 	}
 }
+
+// BenchmarkHashAggregateDualIntNearUnique mirrors ClickBench Q33's shape:
+// GROUP BY two int64 columns with COUNT(*) + SUM + AVG, at a ~1:1 group:row
+// ratio so that essentially every row mints a new group. In that regime the
+// per-new-group accumulator growth dominates: the old shape ran
+// flatAccumArrays.appendGroup once per new group PER AGGREGATE (11 nil-checks
+// + up to 3 appends each, ~33 branch evaluations per row at 3 aggregates),
+// where the arrays are append-in-place off-heap slices and the branches buy
+// nothing. Batch-oriented growTo replaces all of it with one length extension
+// per array per batch.
+func BenchmarkHashAggregateDualIntNearUnique(b *testing.B) {
+	const nBatches = 16
+	const rowsPerBatch = 2048
+
+	schema := []parquet.Column{
+		{Name: "wid", Type: parquet.TypeInt64},
+		{Name: "ip", Type: parquet.TypeInt64},
+		{Name: "refresh", Type: parquet.TypeInt64},
+		{Name: "width", Type: parquet.TypeInt64},
+	}
+	batches := make([]*batch.RecordBatch, nBatches)
+	for bi := range batches {
+		bb := batch.NewRecordBatch(schema, rowsPerBatch)
+		for i := 0; i < rowsPerBatch; i++ {
+			row := int64(bi*rowsPerBatch + i)
+			bb.Columns[0].SetValue(i, row*2654435761)
+			bb.Columns[1].SetValue(i, row)
+			bb.Columns[2].SetValue(i, row&1)
+			bb.Columns[3].SetValue(i, 1024+row%512)
+		}
+		batches[bi] = bb
+	}
+	ctx := context.Background()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		agg := NewHashAggregate(
+			[]string{"wid", "ip"},
+			[]AggColumn{
+				{Func: AggCount, InputCol: "", OutputCol: "c", OutputType: parquet.TypeInt64},
+				{Func: AggSum, InputCol: "refresh", OutputCol: "s", OutputType: parquet.TypeInt64},
+				{Func: AggAvg, InputCol: "width", OutputCol: "a", OutputType: parquet.TypeFloat64},
+			},
+		)
+		agg.Init(ctx)
+		for _, bb := range batches {
+			agg.Consume(ctx, bb)
+		}
+		agg.Close()
+	}
+}
+
+// BenchmarkHashAggregateSumAvgSameColumn exercises the count-array sharing
+// case: SUM(x) and AVG(x) over the SAME column increment their counts over an
+// identical non-null predicate, so one array serves both (16 B/group saved,
+// one fewer count store per row).
+func BenchmarkHashAggregateSumAvgSameColumn(b *testing.B) {
+	const nBatches = 16
+	const rowsPerBatch = 2048
+
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeFloat64},
+	}
+	batches := make([]*batch.RecordBatch, nBatches)
+	for bi := range batches {
+		bb := batch.NewRecordBatch(schema, rowsPerBatch)
+		for i := 0; i < rowsPerBatch; i++ {
+			row := bi*rowsPerBatch + i
+			bb.Columns[0].SetValue(i, int64(row))
+			bb.Columns[1].SetValue(i, float64(row)*1.5)
+		}
+		batches[bi] = bb
+	}
+	ctx := context.Background()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		agg := NewHashAggregate(
+			[]string{"k"},
+			[]AggColumn{
+				{Func: AggSum, InputCol: "v", OutputCol: "s", OutputType: parquet.TypeFloat64},
+				{Func: AggAvg, InputCol: "v", OutputCol: "a", OutputType: parquet.TypeFloat64},
+			},
+		)
+		agg.Init(ctx)
+		for _, bb := range batches {
+			agg.Consume(ctx, bb)
+		}
+		agg.Close()
+	}
+}

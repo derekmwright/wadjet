@@ -617,8 +617,8 @@ func TestExternalMergeSpill_FinalizeAllSpilledNoRemainder(t *testing.T) {
 	if len(h.partialSpillFiles) != 1 {
 		t.Fatalf("expected 1 spill file, got %d", len(h.partialSpillFiles))
 	}
-	if len(h.intGroupStates) != 0 {
-		t.Fatalf("expected empty in-memory groups, got %d", len(h.intGroupStates))
+	if h.numIntGroups != 0 {
+		t.Fatalf("expected empty in-memory groups, got %d", h.numIntGroups)
 	}
 
 	// Finalize hits finalizeViaPartialMerge with no in-memory remainder.
@@ -1283,7 +1283,7 @@ func TestPartialDrain_FreeListReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	slotsBeforeDrain := len(h.intGroupStates)
+	slotsBeforeDrain := h.numIntGroups
 	footprint := h.Inspect().OwnedBytes
 	if footprint <= 0 {
 		t.Fatalf("post-Consume footprint: got %d want > 0", footprint)
@@ -1307,13 +1307,13 @@ func TestPartialDrain_FreeListReuse(t *testing.T) {
 	}
 
 	// Re-Consume the same keys. Drained keys should recycle slots from the
-	// free list. The intGroupStates slice length must NOT grow above
+	// free list. The int-keyed slot count must NOT grow above
 	// slotsBeforeDrain — every drained key reuses a freed slot.
 	if err := h.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(h.intGroupStates); got > slotsBeforeDrain {
-		t.Errorf("intGroupStates grew despite free-list: got %d, expected ≤ %d", got, slotsBeforeDrain)
+	if got := h.numIntGroups; got > slotsBeforeDrain {
+		t.Errorf("int group slots grew despite free-list: got %d, expected ≤ %d", got, slotsBeforeDrain)
 	}
 	// Free list should be empty again — every entry got reused.
 	if got := len(h.freeGroupIDs); got != 0 {
