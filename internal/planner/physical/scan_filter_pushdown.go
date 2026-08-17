@@ -71,10 +71,16 @@ func (p *Planner) tryPushFilterIntoScan(ctx context.Context, node *logical.Node,
 		}
 		structured, rest := logical.SplitConjunctsForPushdown(pred.ASTExpr)
 		for _, c := range rest {
-			// LIKE conjuncts push as pattern predicates (evaluated once
-			// per dictionary entry on dict pages — the Q22/Q23/Q24 class
-			// was pure URL decode with the match after materialization).
-			if rp, name, ok := makeLikeRowPred(canon, colType, c); ok {
+			// LIKE conjuncts push as pattern predicates — but ONLY when
+			// the pattern column is filter-only, so the pushdown ELIDES
+			// its materialization (TPC-H Q13's `o_comment NOT LIKE`
+			// class). When the column is also selected, the scan filter
+			// walks the pages AND the decode materializes them — metal
+			// measured that double read as a straight regression
+			// (ClickBench Q23 +31%, Q24 +28%; 2026-08-17 validation),
+			// so those shapes keep the residual match. Their lever is
+			// sel-aware materialization, tracked separately.
+			if rp, name, ok := makeLikeRowPred(canon, colType, c); ok && likeColFilterOnly(scanNode, name) {
 				pushed = append(pushed, rp)
 				pushedCols = append(pushedCols, name)
 				continue
@@ -138,6 +144,18 @@ func (p *Planner) tryPushFilterIntoScan(ctx context.Context, node *logical.Node,
 		}
 	}
 	return residual
+}
+
+// likeColFilterOnly reports whether the scan marks col as referenced by
+// the filter and nothing above it — the eligibility condition for LIKE
+// pushdown to pay (the drop pass then removes it from materialization).
+func likeColFilterOnly(scanNode *logical.Node, col string) bool {
+	for _, c := range scanNode.FilterOnlyColumns {
+		if strings.EqualFold(c, col) {
+			return true
+		}
+	}
+	return false
 }
 
 // makeLikeRowPred recognizes a `col [NOT] LIKE 'literal'` conjunct over a
