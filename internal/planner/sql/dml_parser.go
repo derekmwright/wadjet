@@ -139,6 +139,13 @@ func parseInsert(sql string, l *lexer) (*ParsedQuery, error) {
 			if colTok.typ == TokenRParen {
 				break
 			}
+			// Unterminated column list: at EOF/error the ')' never comes,
+			// and nextToken keeps returning EOF, so the loop must stop
+			// itself. Return a parse error instead. (Found by
+			// FuzzParseSQL on the truncated input "INSERT INTO t( VA".)
+			if colTok.typ == TokenEOF || colTok.typ == TokenError {
+				return nil, fmt.Errorf("unterminated column list in INSERT INTO %s", tableName)
+			}
 			if colTok.typ == TokenComma {
 				continue
 			}
@@ -168,6 +175,9 @@ func parseInsert(sql string, l *lexer) (*ParsedQuery, error) {
 			tok := l.nextToken()
 			if tok.typ == TokenRParen {
 				break
+			}
+			if tok.typ == TokenEOF || tok.typ == TokenError {
+				return nil, fmt.Errorf("unterminated VALUES row in INSERT INTO %s", tableName)
 			}
 			if tok.typ == TokenComma {
 				continue
@@ -214,6 +224,15 @@ func collectUntil(l *lexer, stops ...TokenType) string {
 	for {
 		next := l.peekToken()
 		if depth == 0 && stopSet[next.typ] {
+			break
+		}
+		// EOF/error always stop, whatever the paren depth: with an
+		// unbalanced '(' (e.g. "UPDATE a SET a=(") the stop token can
+		// never arrive at depth>0, so peekToken keeps returning EOF and
+		// the loop would not terminate on its own. Callers see a
+		// truncated collection and fail their own structural checks.
+		// (Found by FuzzParseSQL.)
+		if next.typ == TokenEOF || next.typ == TokenError {
 			break
 		}
 		tok := l.nextToken()
