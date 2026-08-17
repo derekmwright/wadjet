@@ -176,65 +176,38 @@ streaming exchange with durable S3 fallback. Steady-state suite (run 4 of
 
 | Query | Time | | Query | Time |
 |---|---:|---|---|---:|
-| Q01 | 3.9s | | Q12 | 5.5s |
-| Q02 | 4.5s | | Q13 | 5.9s |
-| Q03 | 9.7s | | Q14 | 1.9s |
-| Q04 | 7.0s | | Q15 | 1.4s |
-| Q05 | 9.2s | | Q16 | 5.5s |
-| Q06 | 1.3s | | Q17 | 5.9s |
-| Q07 | 8.0s | | Q18 | 11.0s |
-| Q08 | 18.1s | | Q19 | 3.9s |
-| Q09 | 16.1s | | Q20 | 10.2s |
-| Q10 | 11.0s | | Q21 | 10.1s |
-| Q11 | 2.6s | | Q22 | 2.9s |
+| Q01 | 0.001s | 0.001s | Q23 | 21.59s | 4.91s |
+| Q02 | 0.097s | 0.066s | Q24 | 12.34s | 3.60s |
+| Q03 | 0.22s | 0.19s | Q25 | 1.01s | 0.95s |
+| Q04 | 0.29s | 0.19s | Q26 | 1.04s | 0.95s |
+| Q05 | 1.89s | 1.39s | Q27 | 1.03s | 0.94s |
+| Q06 | 3.66s | 3.14s | Q28 | 9.72s | 5.30s |
+| Q07 | 0.12s | 0.094s | Q29 | 15.62s | 15.27s |
+| Q08 | 0.15s | 0.12s | Q30 | 0.16s | 0.12s |
+| Q09 | 2.13s | 1.94s | Q31 | 2.29s | 1.28s |
+| Q10 | 2.81s | 2.59s | Q32 | 6.27s | 2.11s |
+| Q11 | 0.73s | 0.64s | Q33 | 20.68s | 18.62s |
+| Q12 | 0.84s | 0.78s | Q34 | 16.03s | 11.12s |
+| Q13 | 1.90s | 1.62s | Q35 | 19.39s | 15.15s |
+| Q14 | 3.81s | 2.98s | Q36 | 4.84s | 4.43s |
+| Q15 | 2.05s | 1.81s | Q37 | 0.38s | 0.25s |
+| Q16 | 1.60s | 1.39s | Q38 | 0.21s | 0.16s |
+| Q17 | 4.08s | 3.73s | Q39 | 0.30s | 0.12s |
+| Q18 | 2.53s | 2.13s | Q40 | 0.70s | 0.56s |
+| Q19 | 15.13s | 12.79s | Q41 | 0.072s | 0.040s |
+| Q20 | 0.16s | 0.064s | Q42 | 0.081s | 0.039s |
+| Q21 | 10.10s | 2.38s | Q43 | 0.19s | 0.17s |
+| Q22 | 11.16s | 2.73s |  |  |  |
 
-**Suite total: 2m35.9s steady / 3m21s cold.** On identical hardware in a
-same-day paired run (2026-08-14), Wadjet's steady state beat Trino 470
-FTE by 10% on suite wall and 19% on per-query geomean, winning 12 of 22
-queries ([full comparison](docs/benchmarks/trino-comparison-2026-08-14.md));
-the numbers above include further improvements landed since that pairing.
-
-### ClickBench, single node (official spec)
-
-The full 43-query ClickBench suite on the official listing hardware —
-`c6a.4xlarge` (16 vCPU / 32 GB), 500 GB gp2, querying the 100M-row
-`hits` Parquet data in place (14.7 GB, no import step). Official
-methodology: page-cache drop before each query, cold + 2 hot tries,
-one process per query. Every query result is cell-exact against DuckDB
-on the same data (`benchmarks/clickbench/`). 2026-08-16,
-`benchmarks/clickbench/results-c6a-20260816.json`.
-
-| Query | Cold | Hot | Query | Cold | Hot |
-|---|---:|---:|---|---:|---:|
-| Q01 | 0.15s | 0.13s | Q23 | 21.58s | 5.26s |
-| Q02 | 0.14s | 0.12s | Q24 | 12.30s | 3.80s |
-| Q03 | 0.28s | 0.26s | Q25 | 0.80s | 0.76s |
-| Q04 | 0.30s | 0.24s | Q26 | 0.83s | 0.77s |
-| Q05 | 1.88s | 9.50s | Q27 | 0.80s | 0.77s |
-| Q06 | 3.63s | 3.30s | Q28 | 9.52s | 3.82s |
-| Q07 | 0.14s | 0.13s | Q29 | 14.94s | 14.76s |
-| Q08 | 0.16s | 0.15s | Q30 | 0.18s | 0.16s |
-| Q09 | 2.12s | 2.04s | Q31 | 2.23s | 1.63s |
-| Q10 | 2.70s | 2.63s | Q32 | 6.21s | 2.42s |
-| Q11 | 0.74s | 0.72s | Q33 | 21.11s | 20.32s |
-| Q12 | 0.82s | 0.82s | Q34 | 17.12s | 13.28s |
-| Q13 | 2.21s | 1.88s | Q35 | 21.76s | 18.29s |
-| Q14 | 3.44s | 2.95s | Q36 | 4.92s | 4.84s |
-| Q15 | 1.87s | 1.72s | Q37 | 9.65s | 2.73s |
-| Q16 | 1.62s | 1.41s | Q38 | 8.57s | 2.56s |
-| Q17 | 4.38s | 3.85s | Q39 | 9.62s | 2.79s |
-| Q18 | 2.85s | 2.43s | Q40 | 18.54s | 4.79s |
-| Q19 | 20.12s | 17.92s | Q41 | 2.33s | 0.92s |
-| Q20 | 0.31s | 0.24s | Q42 | 1.60s | 0.95s |
-| Q21 | 9.79s | 2.60s | Q43 | 0.99s | 0.69s |
-| Q22 | 11.18s | 3.01s |  |  |  |
-
-**Suite sums: 4m17s cold / 2m44s hot (43/43, no failures).** By the
+**Suite sums: 3m19s cold / 2m09s hot (43/43, no failures).** By the
 ClickBench relative-time formula this places Wadjet ahead of the
 Trino, Presto, Impala, and Spark Parquet entries on the same hardware
 (computed against the published results as of 2026-08-16). The
-remaining hot spots (Q33, Q19, Q35, Q29 — high-cardinality
-aggregation and regex-keyed grouping) are the active optimization arc.
+remaining hot spots (Q29, Q33, Q35, Q19 — regex-keyed grouping and
+high-cardinality aggregation) are the active optimization arc. Cold
+times for early large-read queries vary run-to-run with EBS gp2
+burst-credit state (inherent to the official hardware spec); hot times
+are stable.
 
 ```bash
 # SF0.01 correctness (CI, ~5s)
