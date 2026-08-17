@@ -518,9 +518,20 @@ func queryCmd() *cobra.Command {
 			}
 			defer geoip.Close()
 
-			store, err := newStore()
-			if err != nil {
+			// A statement whose every source is a catalog-free table
+			// function (read_json / read_csv / read_parquet over a local
+			// path or URL) needs no object store at all. Building one
+			// against the default endpoint is what made the first command
+			// a new user runs fail inside catalog init, before the SQL was
+			// ever parsed (#303). Anything else keeps the existing path.
+			var store objstore.Store
+			if isCatalogFreeQuery(args[0]) {
 				store = objstore.NewMemStore()
+			} else {
+				store, err = newStore()
+				if err != nil {
+					store = objstore.NewMemStore()
+				}
 			}
 
 			db, err := wadjet.Open(ctx, wadjet.Config{

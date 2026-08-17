@@ -35,17 +35,17 @@ func buildTableFunctionSource(funcName string, args []string, namedArgs map[stri
 		if len(args) < 1 {
 			return nil, fmt.Errorf("read_json requires at least 1 argument (path or URL)")
 		}
-		return &jsonTableFuncSource{path: args[0]}, nil
+		return &jsonTableFuncSource{path: expandHome(args[0])}, nil
 	case "read_parquet":
 		if len(args) < 1 {
 			return nil, fmt.Errorf("read_parquet requires at least 1 argument (path or URL)")
 		}
-		return &parquetTableFuncSource{path: args[0]}, nil
+		return &parquetTableFuncSource{path: expandHome(args[0])}, nil
 	case "read_csv", "read_csv_auto":
 		if len(args) < 1 {
 			return nil, fmt.Errorf("read_csv requires at least 1 argument (path or URL)")
 		}
-		return &csvTableFuncSource{path: args[0], namedArgs: namedArgs}, nil
+		return &csvTableFuncSource{path: expandHome(args[0]), namedArgs: namedArgs}, nil
 	case "postgres_scan":
 		if len(args) < 2 {
 			return nil, fmt.Errorf("postgres_scan requires 2 arguments (connection_string, table_name)")
@@ -71,6 +71,24 @@ func buildTableFunctionSource(funcName string, args []string, namedArgs map[stri
 	default:
 		return nil, fmt.Errorf("unknown table function: %s", funcName)
 	}
+}
+
+// expandHome resolves a leading "~/" against the user's home directory.
+// Table function paths arrive inside a SQL string literal, so no shell ever
+// expands them and every user who types a home-relative path would
+// otherwise get a bare file-not-found (#303). Only the "~/" form is
+// handled — "~user/..." is left alone — and if the home directory cannot
+// be resolved the original path is returned so the underlying error still
+// names the path the user wrote.
+func expandHome(path string) string {
+	if !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	return filepath.Join(home, path[2:])
 }
 
 // jsonTableFuncSource reads JSON (local file, glob, or HTTP) and produces

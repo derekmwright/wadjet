@@ -1,10 +1,13 @@
 # Getting Started
 
-This guide walks you through installing Wadjet, creating a table, ingesting data, and running your first query.
+This guide walks you through installing Wadjet, querying files on disk, and then creating a table, ingesting data, and running queries against managed storage.
 
 ## Prerequisites
 
 - **Go 1.26+**
+
+Nothing else is required to query local files. Managed tables additionally need:
+
 - **S3-compatible object storage** (MinIO for local development, AWS S3 or similar for production)
 - **NATS** (only required for distributed mode)
 
@@ -25,6 +28,27 @@ go build -o wadjet-bin ./cmd/wadjet
 ```bash
 go get github.com/derekmwright/wadjet/wadjet
 ```
+
+## Your First Query (No Setup)
+
+Table functions read files directly, so a query whose only sources are `read_json()`, `read_csv()`, or `read_parquet()` needs no object storage, no server, and no configuration:
+
+```bash
+cat > conn.log <<'JSON'
+{"id_orig_h":"10.0.0.1","orig_bytes":1024}
+{"id_orig_h":"10.0.0.2","orig_bytes":512}
+{"id_orig_h":"10.0.0.1","orig_bytes":2048}
+JSON
+
+./wadjet-bin query --format table \
+  "SELECT id_orig_h, SUM(orig_bytes) AS total
+   FROM read_json('conn.log')
+   GROUP BY 1 ORDER BY 2 DESC LIMIT 10"
+```
+
+Paths may be local files, `~/` home-relative paths, glob patterns (`logs/*.json`), or HTTP URLs.
+
+The rest of this guide covers **managed tables** — persistent, partitioned, statistics-backed storage — which is where object storage comes in.
 
 ## Start MinIO (Local Development)
 

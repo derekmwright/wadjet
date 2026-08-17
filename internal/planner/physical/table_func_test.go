@@ -762,3 +762,62 @@ func TestMultiFileReadCloser_NewlineFraming(t *testing.T) {
 		t.Fatalf("framing = %q, want %q", got, "abc\ndef\n")
 	}
 }
+
+// TestExpandHome covers the leading "~/" resolution for table function
+// paths — the shell never sees them, they arrive inside a SQL string
+// literal (#303).
+func TestExpandHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"~/conn.log", filepath.Join(home, "conn.log")},
+		{"~/logs/*.json", filepath.Join(home, "logs/*.json")},
+		{"/var/log/conn.log", "/var/log/conn.log"},
+		{"conn.log", "conn.log"},
+		{"~otheruser/conn.log", "~otheruser/conn.log"},
+		{"~", "~"},
+		{"https://example.com/~/a.json", "https://example.com/~/a.json"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := expandHome(tc.in); got != tc.want {
+			t.Errorf("expandHome(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestTableFuncReadJSON_Tilde proves the expansion reaches the source: a
+// home-relative path in the SQL literal opens the real file.
+func TestTableFuncReadJSON_Tilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "conn.log"),
+		[]byte(`{"name":"alice","age":30}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	source, err := buildTableFunctionSource("read_json", []string{"~/conn.log"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Init(t.Context()); err != nil {
+		t.Fatalf("init with ~ path: %v", err)
+	}
+	defer source.Close()
+
+	b, err := source.Next(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b == nil {
+		t.Fatal("expected non-nil batch")
+	}
+	rows := b.ToRows()
+	if len(rows) != 1 || rows[0]["name"] != "alice" {
+		t.Fatalf("rows = %v, want one row with name=alice", rows)
+	}
+}

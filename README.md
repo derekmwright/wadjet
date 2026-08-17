@@ -15,18 +15,31 @@ A lightweight analytical query engine in pure Go. Columnar storage on Parquet, v
 
 ## Quick Start
 
+Query files on disk. No server, no object storage, no configuration:
+
 ```bash
-# Build
-go build -o wadjet ./cmd/wadjet
+# Build (-o must not be plain "wadjet" — that's the API package directory)
+go build -o wadjet-bin ./cmd/wadjet
 
+# Query a JSON log straight from disk
+./wadjet-bin query "SELECT id_orig_h, SUM(orig_bytes) AS total FROM read_json('conn.log') GROUP BY 1 ORDER BY 2 DESC LIMIT 10"
+```
+
+`read_json()`, `read_csv()`, and `read_parquet()` take local paths, `~/` paths, glob patterns, and HTTP URLs. Add `--format table` for human-readable output.
+
+### With object storage
+
+Managed tables live in an S3-compatible store (MinIO, AWS S3, R2). That is the distributed and production path — see [Getting Started](docs/getting-started.md) for MinIO setup:
+
+```bash
 # Start standalone (embedded NATS + worker + coordinator)
-./wadjet serve --mode=standalone --endpoint=localhost:9000
+./wadjet-bin serve --mode=standalone --endpoint=localhost:9000
 
-# Run a query
-./wadjet query "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip ORDER BY total DESC LIMIT 10"
+# Run a query against a managed table
+./wadjet-bin query --endpoint=localhost:9000 "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip ORDER BY total DESC LIMIT 10"
 
 # Interactive shell
-./wadjet shell
+./wadjet-bin shell --endpoint=localhost:9000
 ```
 
 ## Features
