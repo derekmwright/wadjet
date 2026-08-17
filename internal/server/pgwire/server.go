@@ -1337,6 +1337,15 @@ func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
 		})
 	}
 
+	// The catalog intercept matches on statement text, so it may only look at
+	// statements that read. A write whose literal happens to mention a catalog
+	// name — INSERT INTO audit(msg) VALUES ('pg_class scan failed') — used to
+	// be answered with an empty result set and a success tag, and never
+	// executed: a silent lost write.
+	if !strings.HasPrefix(normalized, "SELECT ") && !strings.HasPrefix(normalized, "WITH ") {
+		return nil
+	}
+
 	// pg_catalog / information_schema introspection — return real catalog data
 	// for table/column discovery, empty results for everything else.
 	isPgCatalog := strings.Contains(normalized, "PG_CATALOG") ||
@@ -1359,7 +1368,7 @@ func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
 	if isPgCatalog {
 		ctx, cancel := c.queryContext()
 		defer cancel()
-		if ans := c.matchCatalogQuery(ctx, normalized); ans != nil {
+		if ans := c.matchCatalogQuery(ctx, sql, normalized); ans != nil {
 			return ans
 		}
 		// Fallback: empty result with the columns the SELECT list names.
@@ -1411,26 +1420,32 @@ func (c *pgConn) matchSyntheticSelect(normalized string) *synthAnswer {
 
 	case "CURRENT_SCHEMA", "CURRENT_SCHEMA()":
 		return singleRow([]string{"current_schema"}, map[string]any{
-			"current_schema": "public",
+			"current_schema": expr.SessionSchema,
 		})
 
-	case "CURRENT_DATABASE()", "CURRENT_CATALOG":
+	case "CURRENT_DATABASE()":
 		return singleRow([]string{"current_database"}, map[string]any{
-			"current_database": "wadjet",
+			"current_database": expr.SessionCatalog,
+		})
+
+	case "CURRENT_CATALOG":
+		return singleRow([]string{"current_catalog"}, map[string]any{
+			"current_catalog": expr.SessionCatalog,
 		})
 
 	case "CURRENT_USER", "CURRENT_USER()", "SESSION_USER", "USER", "CURRENT_ROLE":
 		// The authenticated identity is known here and not in the engine —
 		// the scalar registry is process-global and has no per-connection
 		// context — so this is the one answer that beats the engine's
-		// constant.
-		user := "wadjet"
+		// constant. Each spelling keeps its own label, the way PostgreSQL
+		// labels it and the way the engine labels it for every spelling this
+		// layer does not claim.
+		user := expr.SessionUser
 		if c.identity != nil {
 			user = c.identity.Name
 		}
-		return singleRow([]string{"current_user"}, map[string]any{
-			"current_user": user,
-		})
+		label := strings.ToLower(strings.TrimSuffix(list, "()"))
+		return singleRow([]string{label}, map[string]any{label: user})
 
 	case "1":
 		// Connection liveness check; PostgreSQL labels the column ?column?.
@@ -1544,8 +1559,9 @@ func pgTypeOID(typeName string) int {
 }
 
 // matchCatalogQuery returns real catalog data for specific pg_catalog queries
-// that SQLAlchemy/Superset uses for schema introspection.
-func (c *pgConn) matchCatalogQuery(ctx context.Context, normalized string) *synthAnswer {
+// that SQLAlchemy/Superset uses for schema introspection. sql is the statement
+// being answered; normalized is its uppercased, whitespace-collapsed form.
+func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) *synthAnswer {
 	// pg_type — JDBC drivers query this to map OIDs to type names
 	if strings.Contains(normalized, "PG_TYPE") && !strings.Contains(normalized, "PG_CLASS") &&
 		!strings.Contains(normalized, "PG_ATTRIBUTE") {
@@ -1577,13 +1593,13 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, normalized string) *synt
 		return singleRow([]string{"nspname"}, map[string]any{"nspname": "public"})
 	}
 
-	// Index/constraint queries that happen to JOIN pg_attribute — return empty
+	// Index/constraint queries that happen to JOIN pg_attribute — return empty.
+	// The columns come from the statement being answered, not from portalSQL:
+	// at a statement Describe the portal still holds the PREVIOUS query, which
+	// described one shape and then executed another.
 	if strings.Contains(normalized, "PG_INDEX") ||
 		strings.Contains(normalized, "PG_CONSTRAINT") {
-		cols := extractSelectColumns(c.portalSQL)
-		if len(cols) == 0 {
-			cols = extractSelectColumns(c.preparedSQL)
-		}
+		cols := extractSelectColumns(sql)
 		if len(cols) == 0 {
 			cols = []string{"?column?"}
 		}

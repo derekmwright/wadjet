@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
@@ -529,6 +530,111 @@ func TestAliasedSessionQueryKeepsClientLabels(t *testing.T) {
 			if rows[0][i] != w {
 				t.Errorf("%q: value %d = %q, want %q", tc.sql, i, rows[0][i], w)
 			}
+		}
+	}
+}
+
+// TestWriteMentioningCatalogNameExecutes pins that the introspection layer
+// only claims statements that read. It matches on statement text, so a write
+// whose literal mentions a catalog name was swallowed: the client got an empty
+// result set and a success tag, and the row was never written.
+func TestWriteMentioningCatalogNameExecutes(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "msg", Type: parquet.TypeString},
+	}}
+	if err := db.CreateTable(ctx, "audit", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := startTestServer(t, db)
+	client := newPGClient(t, srv.Addr())
+	client.startup("wadjet", "wadjet")
+	defer client.terminate()
+
+	for _, sql := range []string{
+		"INSERT INTO audit (msg) VALUES ('pg_class scan failed')",
+		"INSERT INTO audit (msg) VALUES ('information_schema unavailable')",
+	} {
+		_, _, tag := client.simpleQuery(sql)
+		if !strings.HasPrefix(tag, "INSERT") {
+			t.Errorf("%q: tag = %q, want an INSERT tag (the write was swallowed)", sql, tag)
+		}
+	}
+
+	cols, rows, tag := client.simpleQuery("SELECT msg FROM audit ORDER BY msg")
+	t.Logf("readback cols=%v rows=%v tag=%q", cols, rows, tag)
+	if len(rows) != 2 {
+		t.Fatalf("readback returned %d rows, want 2 — writes were lost", len(rows))
+	}
+}
+
+// TestSessionFunctionLabels pins that each bare session spelling comes back
+// under its own label. The synthetic answers reported `current_user` for
+// session_user and current_role, and `current_database` for current_catalog,
+// which disagrees with both PostgreSQL and the engine's label for the same
+// function.
+func TestSessionFunctionLabels(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+	client := newPGClient(t, srv.Addr())
+	client.startup("wadjet", "wadjet")
+	defer client.terminate()
+
+	for sql, want := range map[string]string{
+		"select current_user":       "current_user",
+		"select session_user":       "session_user",
+		"select user":               "user",
+		"select current_role":       "current_role",
+		"select current_catalog":    "current_catalog",
+		"select current_schema":     "current_schema",
+		"select current_database()": "current_database",
+	} {
+		names, _, rows, tag := client.extendedQuery(sql)
+		if strings.HasPrefix(tag, "ERROR") {
+			t.Errorf("%q: %s", sql, tag)
+			continue
+		}
+		if len(names) != 1 || names[0] != want {
+			t.Errorf("%q: columns = %v, want [%s]", sql, names, want)
+		}
+		if len(rows) != 1 {
+			t.Errorf("%q: got %d rows, want 1", sql, len(rows))
+		}
+	}
+}
+
+// TestCatalogFallbackDescribesTheStatementNotThePortal covers the last place
+// where the two ends of a round could still disagree: the pg_index fallback
+// took its columns from the connection's portal instead of the statement it
+// was answering. At a statement Describe the portal still holds the PREVIOUS
+// query, so the round described one width and executed another — which the
+// shape guard reports as an error on a perfectly valid query.
+func TestCatalogFallbackDescribesTheStatementNotThePortal(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+	client := newPGClient(t, srv.Addr())
+	client.startup("wadjet", "wadjet")
+	defer client.terminate()
+
+	// Leave a two-column query in the portal.
+	if names, _, _, tag := client.extendedQuery("SELECT id, name FROM users"); len(names) != 2 {
+		t.Fatalf("setup query: cols=%v tag=%q", names, tag)
+	}
+
+	// Now a one-column pg_index lookup, described as a STATEMENT before Bind.
+	trace := client.extendedTraceParams(
+		"SELECT i.indexrelid FROM pg_index i WHERE i.indrelid = $1", []string{"users"})
+	t.Logf("%s", traceString(trace))
+	assertShapeCoherent(t, "pg_index lookup", trace)
+
+	for _, m := range trace {
+		if m.typ == 'E' {
+			t.Fatalf("pg_index lookup errored: %s; trace = %s", m.text, traceString(trace))
+		}
+		if m.typ == 'T' && m.fields != 1 {
+			t.Errorf("RowDescription has %d fields, want 1 (the statement's own SELECT list); trace = %s",
+				m.fields, traceString(trace))
 		}
 	}
 }
