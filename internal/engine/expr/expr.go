@@ -1753,6 +1753,12 @@ func init() {
 	"last_day_of_month":  fnLastDayOfMonth,
 	"current_timestamp":  fnCurrentTimestamp,
 	"at_timezone":        fnAtTimezone,
+	// epoch: the rewrite target of EXTRACT(EPOCH FROM ts).
+	// timezone: the rewrite target of `ts AT TIME ZONE zone`, zone first,
+	// matching PostgreSQL's own canonical form.
+	"epoch":                    fnEpoch,
+	"timezone":                 fnTimezone,
+	"pg_postmaster_start_time": fnPgPostmasterStartTime,
 	"human_readable_seconds": fnHumanReadableSeconds,
 
 	// Network: analytics
@@ -4555,6 +4561,92 @@ func fnAtTimezone(args []any) any {
 		return nil
 	}
 	return t.In(loc).Format(time.RFC3339)
+}
+
+// processStart is when this process began, captured once at package
+// initialization.
+var processStart = time.Now()
+
+// fnPgPostmasterStartTime implements pg_postmaster_start_time(). DataGrip asks
+// for it while opening a connection (`select round(extract(epoch from
+// pg_postmaster_start_time() at time zone 'UTC')) as startup_time`) to label
+// the session with the server's uptime.
+//
+// PostgreSQL reports when the postmaster — the process that owns the cluster —
+// started. `wadjet serve` is that process, so process start is the honest
+// answer. The value is a timestamp in the representation now() and
+// current_timestamp use, RFC3339 text: the scalar registry is func([]any) any
+// with no type channel, and every temporal function downstream (parseTime,
+// epoch, timezone) reads that form.
+func fnPgPostmasterStartTime(args []any) any {
+	return processStart.Format(time.RFC3339)
+}
+
+// fnEpoch implements EXTRACT(EPOCH FROM ts), which the parser rewrites to
+// epoch(ts): seconds since 1970-01-01T00:00:00Z. Timestamp columns already
+// hold exactly that — parseTime round-trips an int64 through time.Unix, and
+// the vectorized EXTRACT kernel's own "epoch" case returns the raw int64 —
+// so a column's value passes through unchanged and text timestamps are parsed.
+func fnEpoch(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	t := parseTime(args[0])
+	if t.IsZero() {
+		return nil
+	}
+	return float64(t.Unix())
+}
+
+// fnTimezone implements PostgreSQL's timezone(zone, timestamp), the canonical
+// form of the `<timestamp> AT TIME ZONE <zone>` operator that the parser
+// rewrites to this call.
+//
+// PostgreSQL gives the operator two directions, chosen by the input type:
+//
+//	timestamptz AT TIME ZONE zone → timestamp   (absolute instant → wall clock in zone)
+//	timestamp   AT TIME ZONE zone → timestamptz (wall clock in zone → absolute instant)
+//
+// Wadjet has one timestamp type and its values are absolute instants
+// (vectors hold epoch seconds, the scalar layer passes RFC3339 text), so only
+// the first direction has a meaning here. But PostgreSQL's result for that
+// direction is a *naive* timestamp, which this type system cannot represent.
+// Rendering the instant in the zone instead — keeping the offset, so the
+// instant is preserved — disagrees with PostgreSQL for everything downstream
+// that reads the naive result as UTC: PostgreSQL's EXTRACT(EPOCH FROM ts AT
+// TIME ZONE 'America/New_York') is the zone's offset away from EXTRACT(EPOCH
+// FROM ts), while an instant-preserving conversion leaves it equal.
+//
+// So the zone is restricted to UTC, the case where the two readings coincide:
+// an instant and its UTC wall clock are the same count of seconds since the
+// epoch, and the EXTRACT(EPOCH FROM …) round trip is exact. Every other zone
+// is rejected rather than converted with a wrong sign — as a compile-time
+// error when the zone is a literal (see compileFuncCallNode) and as NULL here
+// when it is not. Widening this means giving the type system a naive-timestamp
+// type first.
+func fnTimezone(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	if !isUTCZone(toString(args[0])) {
+		return nil
+	}
+	t := parseTime(args[1])
+	if t.IsZero() {
+		return nil
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// isUTCZone reports whether a zone name is one of the spellings of UTC that
+// AT TIME ZONE accepts. All of these are zero offset with no DST rule, so the
+// conversion fnTimezone declines to guess at does not arise for them.
+func isUTCZone(zone string) bool {
+	switch strings.ToUpper(strings.TrimSpace(zone)) {
+	case "UTC", "GMT", "Z", "ETC/UTC", "ETC/GMT":
+		return true
+	}
+	return false
 }
 
 func fnHumanReadableSeconds(args []any) any {

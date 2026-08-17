@@ -37,14 +37,29 @@ func (p *selectParser) peek() TokenType {
 
 // peekN returns the token type n positions ahead (0 = current token).
 func (p *selectParser) peekN(n int) TokenType {
+	return p.peekTok(n).typ
+}
+
+// peekTok returns the token n positions ahead (0 = current token), buffering
+// from the lexer as needed. Past end of input the lexer keeps returning EOF,
+// so lookahead beyond the last token is safe.
+func (p *selectParser) peekTok(n int) token {
 	if n == 0 {
-		return p.cur.typ
+		return p.cur
 	}
 	// Buffer enough tokens
 	for len(p.lookahead) < n {
 		p.lookahead = append(p.lookahead, p.lex.nextToken())
 	}
-	return p.lookahead[n-1].typ
+	return p.lookahead[n-1]
+}
+
+// isBareWord reports whether the token n positions ahead is the unquoted word
+// w, compared case-insensitively. Used for the multi-word operators whose
+// pieces this lexer does not reserve (AT TIME ZONE).
+func (p *selectParser) isBareWord(n int, w string) bool {
+	tok := p.peekTok(n)
+	return tok.typ == TokenIdent && !tok.quoted && strings.EqualFold(tok.val, w)
 }
 
 func (p *selectParser) expect(typ TokenType) (token, error) {
@@ -1165,7 +1180,7 @@ func (p *selectParser) parseAddition() (Node, error) {
 }
 
 func (p *selectParser) parseMultiplication() (Node, error) {
-	left, err := p.parseUnary()
+	left, err := p.parseAtTimeZone()
 	if err != nil {
 		return nil, err
 	}
@@ -1182,12 +1197,84 @@ func (p *selectParser) parseMultiplication() (Node, error) {
 			return left, nil
 		}
 		p.advance()
-		right, err := p.parseUnary()
+		right, err := p.parseAtTimeZone()
 		if err != nil {
 			return nil, err
 		}
 		left = &BinaryOp{Left: left, Op: op, Right: right}
 	}
+}
+
+// parseAtTimeZone parses the infix `<expr> AT TIME ZONE <zone>` operator and
+// rewrites it to PostgreSQL's own canonical form, the function call
+// `timezone(<zone>, <expr>)` — zone first, exactly as PostgreSQL's parser
+// does. Engine semantics (which of the operator's two directions this
+// implements, and which zones it accepts) live with fnTimezone in
+// internal/engine/expr.
+//
+// Precedence mirrors PostgreSQL's grammar, where `%left AT` sits above the
+// multiplicative operators and below unary minus. So this level sits between
+// parseMultiplication and parseUnary, which gives:
+//
+//	a * ts AT TIME ZONE z   →  a * (ts AT TIME ZONE z)      (AT binds tighter than *)
+//	ts AT TIME ZONE z + i   →  (ts AT TIME ZONE z) + i      (and tighter than +)
+//	ts AT TIME ZONE z = x   →  (ts AT TIME ZONE z) = x      (and tighter than =)
+//	-ts AT TIME ZONE z      →  (-ts) AT TIME ZONE z         (looser than unary minus)
+//	ts AT TIME ZONE 'a'::text → zone is the whole cast      (looser than ::)
+//
+// The operator is left associative, so the zone operand is parsed one level
+// tighter (parseUnary) and a chain groups as `(ts AT TIME ZONE a) AT TIME
+// ZONE b`.
+func (p *selectParser) parseAtTimeZone() (Node, error) {
+	left, err := p.parseUnary()
+	if err != nil {
+		return nil, err
+	}
+	for p.matchAtTimeZone() {
+		zone, err := p.parseUnary()
+		if err != nil {
+			return nil, fmt.Errorf("expected time zone after AT TIME ZONE: %w", err)
+		}
+		if lit, ok := zone.(*Lit); ok && lit.Kind == LitString && !isUTCZoneName(lit.Value) {
+			return nil, fmt.Errorf("AT TIME ZONE: only UTC is supported, got %q", lit.Value)
+		}
+		left = &FuncCallNode{Name: "timezone", Args: []Node{zone, left}}
+	}
+	return left, nil
+}
+
+// isUTCZoneName reports whether a zone name is one of the spellings of UTC.
+// A written-out zone this engine cannot convert correctly is rejected here,
+// where the operator is spelled and the zone can be named in the message,
+// because a planner-stage expression-compile error is not user-visible: both
+// the projection and the filter builder fall back to a column reference when
+// compilation fails. A zone that is not a literal (a column, a parameter) is
+// only knowable at run time and comes back NULL instead.
+//
+// Kept in step with isUTCZone in internal/engine/expr, which backs the
+// timezone() call this rewrites to and carries the reasoning for the
+// restriction. That package imports this one, so the list cannot be shared.
+func isUTCZoneName(zone string) bool {
+	switch strings.ToUpper(strings.TrimSpace(zone)) {
+	case "UTC", "GMT", "Z", "ETC/UTC", "ETC/GMT":
+		return true
+	}
+	return false
+}
+
+// matchAtTimeZone consumes the AT TIME ZONE word triple when the next three
+// tokens are exactly that, and reports whether it did. None of the three is a
+// reserved word in this lexer, so a partial match must consume nothing:
+// `SELECT ts at` is a column aliased `at`, and `SELECT ts at time` is that
+// alias followed by a syntax error, not a half-parsed operator.
+func (p *selectParser) matchAtTimeZone() bool {
+	if !p.isBareWord(0, "AT") || !p.isBareWord(1, "TIME") || !p.isBareWord(2, "ZONE") {
+		return false
+	}
+	p.advance() // AT
+	p.advance() // TIME
+	p.advance() // ZONE
+	return true
 }
 
 func (p *selectParser) parseUnary() (Node, error) {

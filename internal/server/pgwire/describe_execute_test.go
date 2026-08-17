@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -236,6 +237,10 @@ func TestExtendedProtocolShapeCoherence(t *testing.T) {
 		"select version() as v",
 		"select current_user, current_schema",
 		"select current_schema(), 1",
+		// DataGrip's uptime probe. It reaches the engine (no FROM, not one of
+		// the claimed one-column spellings) and used to fail to parse, which
+		// left Describe with NoData.
+		"select round(extract(epoch from pg_postmaster_start_time() at time zone 'UTC')) as startup_time",
 		// Real queries.
 		"SELECT id, name FROM users ORDER BY id",
 		"SELECT COUNT(*) AS cnt FROM users",
@@ -294,6 +299,11 @@ func TestDataGripOpeningSequence(t *testing.T) {
 		{
 			sql:      "SHOW TRANSACTION ISOLATION LEVEL",
 			wantCols: []string{"transaction_isolation"},
+			wantRows: 1,
+		},
+		{
+			sql:      "select round(extract(epoch from pg_postmaster_start_time() at time zone 'UTC')) as startup_time",
+			wantCols: []string{"startup_time"},
 			wantRows: 1,
 		},
 	}
@@ -481,6 +491,29 @@ func TestDataGripOpeningSequencePgx(t *testing.T) {
 	}
 	if isolation != "read committed" {
 		t.Errorf("transaction_isolation = %q, want %q", isolation, "read committed")
+	}
+
+	// The uptime probe. DataGrip binds it to a number, so the value has to
+	// arrive as one — a text column here fails in the driver, not the server.
+	const startupSQL = "select round(extract(epoch from pg_postmaster_start_time() at time zone 'UTC')) as startup_time"
+	startupRows, err := conn.Query(ctx, startupSQL)
+	if err != nil {
+		t.Fatalf("%s: %v", startupSQL, err)
+	}
+	sfds := startupRows.FieldDescriptions()
+	if len(sfds) != 1 || sfds[0].Name != "startup_time" {
+		startupRows.Close()
+		t.Fatalf("startup_time RowDescription = %+v, want one field named startup_time", sfds)
+	}
+	startupRows.Close()
+
+	var startup float64
+	if err := conn.QueryRow(ctx, startupSQL).Scan(&startup); err != nil {
+		t.Fatalf("scanning startup_time as a number: %v", err)
+	}
+	t.Logf("startup_time = %v", startup)
+	if delta := float64(time.Now().Unix()) - startup; delta < 0 || delta > 300 {
+		t.Errorf("startup_time %v is %vs from now — not this process's start", startup, delta)
 	}
 }
 

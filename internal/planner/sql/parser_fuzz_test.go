@@ -53,6 +53,19 @@ func FuzzParseSQL(f *testing.F) {
 		"SELECT \"unterminated FROM t",
 		"SELECT * FROM t WHERE s = 'it''s' AND u = 'üñî'",
 		"SELECT ((((((1))))))",
+		// AT TIME ZONE: a three-word infix operator built from words the
+		// lexer does not reserve, so every partial spelling has to stay
+		// harmless (an alias, or an error) rather than half-consume tokens.
+		"select round(extract(epoch from pg_postmaster_start_time() at time zone 'UTC')) as startup_time",
+		"SELECT ts AT TIME ZONE 'UTC' AT TIME ZONE 'GMT' FROM t",
+		"SELECT -ts AT TIME ZONE 'UTC'::text * 2 FROM t WHERE ts AT TIME ZONE 'UTC' > 'x'",
+		"SELECT x at, y time, z zone FROM t",
+		"SELECT x at time FROM t",
+		"SELECT x at time zone FROM t",
+		"SELECT ts AT TIME ZONE FROM t",
+		"SELECT ts AT TIME ZONE 'America/New_York' FROM t",
+		"SELECT ts AT TIME ZONE zonecol FROM t",
+		"SELECT at FROM at at",
 		"EXPLAIN SELECT 1",
 		"",
 		";;;",
