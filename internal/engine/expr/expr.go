@@ -1179,6 +1179,12 @@ type FuncCall struct {
 
 	vecOnce sync.Once
 	vecFn   VecScalarFunc
+
+	// Compile-once state for literal-argument regexp_replace (see
+	// regexp_prepared.go). Built lazily under prepOnce; nil when the call
+	// shape doesn't qualify.
+	prepOnce sync.Once
+	prepared *preparedRegexp
 }
 
 // stringInputFuncs are scalar functions whose arguments are string-typed.
@@ -1333,6 +1339,10 @@ func (e *FuncCall) tryEvalMemoized(b *batch.RecordBatch, out *batch.Vector, n in
 		return false
 	}
 	hasNulls := vec.Nulls.HasNulls()
+	// Prepared fast path (regexp_prepared.go): literal-argument
+	// regexp_replace evaluates as a direct string→string call — compiled
+	// pattern and pre-parsed replacement template, no []any boxing.
+	prep := e.preparedReplace()
 	memo := make(map[string]any, n/2)
 	for i := 0; i < n; i++ {
 		if hasNulls && vec.Nulls.IsNullFast(i) {
@@ -1344,7 +1354,12 @@ func (e *FuncCall) tryEvalMemoized(b *batch.RecordBatch, out *batch.Vector, n in
 			out.SetValue(i, v)
 			continue
 		}
-		v := e.Eval(b, i)
+		var v any
+		if prep != nil {
+			v = prep.replaceAll(s)
+		} else {
+			v = e.Eval(b, i)
+		}
 		out.SetValue(i, v)
 		// The lookup key above is a zero-copy view into the batch;
 		// inserting needs a stable copy.
