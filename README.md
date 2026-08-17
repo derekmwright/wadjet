@@ -201,41 +201,43 @@ The full 43-query ClickBench suite on the official listing hardware —
 `hits` Parquet data in place (14.7 GB, no import step). Official
 methodology: page-cache drop before each query, cold + 2 hot tries,
 one process per query. Every query result is cell-exact against DuckDB
-on the same data (`benchmarks/clickbench/`). 2026-08-16,
-`benchmarks/clickbench/results-c6a-20260816.json`.
+on the same data (`benchmarks/clickbench/`). 2026-08-17,
+`benchmarks/clickbench/results-c6a-20260817-wave6.json`.
 
 | Query | Cold | Hot | Query | Cold | Hot |
 |---|---:|---:|---|---:|---:|
-| Q01 | 0.001s | 0.001s | Q23 | 21.59s | 4.91s |
-| Q02 | 0.097s | 0.066s | Q24 | 12.34s | 3.60s |
-| Q03 | 0.22s | 0.19s | Q25 | 1.01s | 0.95s |
-| Q04 | 0.29s | 0.19s | Q26 | 1.04s | 0.95s |
-| Q05 | 1.89s | 1.39s | Q27 | 1.03s | 0.94s |
-| Q06 | 3.66s | 3.14s | Q28 | 9.72s | 5.30s |
-| Q07 | 0.12s | 0.094s | Q29 | 15.62s | 15.27s |
-| Q08 | 0.15s | 0.12s | Q30 | 0.16s | 0.12s |
-| Q09 | 2.13s | 1.94s | Q31 | 2.29s | 1.28s |
-| Q10 | 2.81s | 2.59s | Q32 | 6.27s | 2.11s |
-| Q11 | 0.73s | 0.64s | Q33 | 20.68s | 18.62s |
-| Q12 | 0.84s | 0.78s | Q34 | 16.03s | 11.12s |
-| Q13 | 1.90s | 1.62s | Q35 | 19.39s | 15.15s |
-| Q14 | 3.81s | 2.98s | Q36 | 4.84s | 4.43s |
-| Q15 | 2.05s | 1.81s | Q37 | 0.38s | 0.25s |
-| Q16 | 1.60s | 1.39s | Q38 | 0.21s | 0.16s |
-| Q17 | 4.08s | 3.73s | Q39 | 0.30s | 0.12s |
-| Q18 | 2.53s | 2.13s | Q40 | 0.70s | 0.56s |
-| Q19 | 15.13s | 12.79s | Q41 | 0.072s | 0.040s |
-| Q20 | 0.16s | 0.064s | Q42 | 0.081s | 0.039s |
-| Q21 | 10.10s | 2.38s | Q43 | 0.19s | 0.17s |
-| Q22 | 11.16s | 2.73s |  |  |  |
+| Q01 | 0.001s | 0.001s | Q23 | 21.45s | 4.36s |
+| Q02 | 0.093s | 0.054s | Q24 | 12.30s | 3.10s |
+| Q03 | 0.22s | 0.18s | Q25 | 0.98s | 0.93s |
+| Q04 | 0.30s | 0.19s | Q26 | 1.03s | 0.93s |
+| Q05 | 0.77s | 0.71s | Q27 | 1.00s | 0.94s |
+| Q06 | 1.72s | 1.59s | Q28 | 9.72s | 5.22s |
+| Q07 | 0.015s | 0.011s | Q29 | 13.21s | 13.52s |
+| Q08 | 0.16s | 0.12s | Q30 | 0.15s | 0.12s |
+| Q09 | 1.22s | 1.15s | Q31 | 2.01s | 0.99s |
+| Q10 | 2.80s | 2.60s | Q32 | 5.65s | 1.43s |
+| Q11 | 0.70s | 0.63s | Q33 | 17.09s | 16.76s |
+| Q12 | 0.80s | 0.71s | Q34 | 10.67s | 4.85s |
+| Q13 | 1.36s | 1.13s | Q35 | 14.38s | 8.37s |
+| Q14 | 3.12s | 2.65s | Q36 | 4.48s | 4.19s |
+| Q15 | 1.57s | 1.33s | Q37 | 0.35s | 0.18s |
+| Q16 | 0.96s | 0.89s | Q38 | 0.18s | 0.12s |
+| Q17 | 3.05s | 2.45s | Q39 | 0.16s | 0.073s |
+| Q18 | 2.54s | 2.15s | Q40 | 0.63s | 0.42s |
+| Q19 | 12.06s | 10.65s | Q41 | 0.079s | 0.040s |
+| Q20 | 0.15s | 0.056s | Q42 | 0.073s | 0.039s |
+| Q21 | 10.11s | 1.46s | Q43 | 0.21s | 0.17s |
+| Q22 | 11.15s | 1.95s |  |  |  |
 
-**Suite sums: 3m19s cold / 2m09s hot (43/43, no failures).** By the
-ClickBench relative-time formula this places Wadjet ahead of the
-Trino, Presto, Impala, and Spark Parquet entries on the same hardware
-(computed against the published results as of 2026-08-16). The
-remaining hot spots (Q29, Q33, Q35, Q19 — regex-keyed grouping and
-high-cardinality aggregation) are the active optimization arc. Cold
-times for early large-read queries vary run-to-run with EBS gp2
+**Suite sums: 2m51s cold / 1m39s hot (43/43, no failures).** By the
+official ClickBench formula (reproducible via
+`benchmarks/clickbench/rank.py`) this places Wadjet at combined #47,
+hot #67, and cold #18 of the 132 published `c6a.4xlarge` entries
+(as of 2026-08-17) — ahead of the Trino, Presto, Impala, Spark,
+Daft, GlareDB, and pg_duckdb Parquet entries on the same hardware.
+The remaining hot spots (Q29, Q33, Q19, Q35 — regex-keyed grouping
+and high-cardinality aggregation) are the active optimization arc.
+Cold times for early large-read queries vary run-to-run with EBS gp2
 burst-credit state (inherent to the official hardware spec); hot times
 are stable.
 
