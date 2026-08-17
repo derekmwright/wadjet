@@ -83,7 +83,7 @@ type HashAggregate struct {
 	// distinct key tuples, in input column order.
 	GroupByAll bool
 	Aggs       []AggColumn
-	Spill         *memory.SpillManager // optional: enables spill-to-disk
+	Spill      *memory.SpillManager // optional: enables spill-to-disk
 	// PartialDrainBytes bounds this aggregate's in-memory state when it is a
 	// morsel-parallel CLONE partial: past the threshold, Consume drains the
 	// whole state to canonical partial-state run files (drainedRuns) that
@@ -101,9 +101,9 @@ type HashAggregate struct {
 	// partition's state after its own.
 	PartitionedDisjoint bool
 	adoptedPartitions   []*HashAggregate
-	NullGroupCols []string             // GROUPING SETS: columns to output as NULL (legacy per-node)
-	GroupingSets  [][]int              // single-pass grouping sets: column indices within GroupByCols per set
-	InputRowHint  int64                // estimated input rows for pre-sizing hash table
+	NullGroupCols       []string // GROUPING SETS: columns to output as NULL (legacy per-node)
+	GroupingSets        [][]int  // single-pass grouping sets: column indices within GroupByCols per set
+	InputRowHint        int64    // estimated input rows for pre-sizing hash table
 	// GroupNDVHint is the planner's HLL-based estimate of GROUP-KEY
 	// cardinality (catalog merged sketches; ~2% error) — the quantity the
 	// hash table actually holds, unlike InputRowHint's input-row proxy.
@@ -112,9 +112,9 @@ type HashAggregate struct {
 	GroupNDVHint    int64
 	cloneNDVDivisor int
 
-	mu                sync.Mutex
-	keys              [][]any
-	serializedKeys    []string // pre-serialized keys matching h.keys order
+	mu             sync.Mutex
+	keys           [][]any
+	serializedKeys []string // pre-serialized keys matching h.keys order
 	// deferGenericKeyBoxing: on the generic SoA path, skip per-group
 	// extras/keyValues/h.keys boxing at consume and reconstruct keys from
 	// serializedKeys (a lossless binary encoding) at output/spill time.
@@ -128,14 +128,14 @@ type HashAggregate struct {
 	// genKeyNext (dual-int pattern). strGroupIndex is NOT maintained on
 	// this path; ensureStrGroupIndexForMerge rebuilds it for the slow
 	// merge fallback.
-	genKeyIdx  *intHashTable
-	genKeyNext []int32
-	keySerCols []keySerCol // per-batch resolved key accessors (scratch)
+	genKeyIdx         *intHashTable
+	genKeyNext        []int32
+	keySerCols        []keySerCol // per-batch resolved key accessors (scratch)
 	groupColIdx       []int
 	aggColIdx         []int
 	aggColIdx2        []int // second column indices for two-column aggregates
 	groupColTypes     []batch.TypeID
-	groupColMeta      []parquet.Column // full input column metadata per group col (Decimal Scale/Precision survive into outputSchema)
+	groupColMeta      []parquet.Column        // full input column metadata per group col (Decimal Scale/Precision survive into outputSchema)
 	aggInputTypes     []batch.TypeID          // observed input column type per aggregate (0 = unresolved)
 	aggUpdaters       []kernel.RowAggUpdater  // resolved typed updaters
 	aggUpdatersNoNull []kernel.RowAggUpdater  // no-null-check variants
@@ -308,7 +308,11 @@ type HashAggregate struct {
 	// tracker never crossed the spill threshold while the process died at
 	// GOMEMLIMIT (docs/design/morsel-agg-partials-v2.md §1-2).
 	// TestGroupMemoryUsageTruth guards these against rot.
-	serializedKeyBytes int64 // string bytes appended to serializedKeys (+ shared by keyValues boxes)
+	// serializedKeyBytes counts string bytes appended to serializedKeys (+
+	// shared by keyValues boxes). The single-string fast path is excluded on
+	// purpose: its entries alias the hash table's key arena, whose bytes
+	// MemoryUsage() already charges.
+	serializedKeyBytes int64
 	compactKeyBytes    int64 // string bytes appended to compactKeys
 	distinctBytes      int64 // COUNT(DISTINCT) map contents + entry overhead
 	extraStateBytes    int64 // extraState objects (alloc-time estimates)
@@ -367,7 +371,7 @@ type groupStateExtras struct {
 	keyValues    []any
 	accs         []kernel.Accumulator
 	distinctSets []*distinctSet // per-agg distinct value sets (nil if not COUNT(DISTINCT)); typed int set for int-class columns
-	extraState   []any                 // per-agg custom state (string_agg builder, variance state, etc.)
+	extraState   []any          // per-agg custom state (string_agg builder, variance state, etc.)
 }
 
 // ensureExtras lazily allocates the extras struct on first complex-path
@@ -640,7 +644,14 @@ func NewHashAggregate(groupByCols []string, aggs []AggColumn) *HashAggregate {
 }
 
 func (h *HashAggregate) Init(_ context.Context) error {
-	h.strGroupIndex = newStrHashTable(4096)
+	// The string group index is built by resolveIndices, which sizes it from
+	// the planner's NDV hint. Constructing it here left every one of those
+	// pre-size branches (all guarded on `strGroupIndex == nil`) unreachable,
+	// so every string GROUP BY started at 4096 slots and doubled — rehashing
+	// the whole table on the way up to Q34's ~18M keys. The generic per-row
+	// paths, which resolveIndices doesn't cover, create it via
+	// strIndexForRow.
+	h.strGroupIndex = nil
 	h.strGroupStates = nil
 	h.strNullGroupIdx = -1
 	h.keys = nil
@@ -1151,9 +1162,15 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 				}
 				if h.strGroupStates == nil {
 					h.strGroupStates = make([]*groupState, 0, htInitSize)
-					h.keys = make([][]any, 0, htInitSize)
 					h.serializedKeys = make([]string, 0, htInitSize)
-					h.gsPool.preAlloc(htInitSize)
+					// No gsPool.preAlloc and no h.keys pre-size: this path
+					// defers group state entirely (nil entries in
+					// strGroupStates, keys carried by serializedKeys), so
+					// only the NULL group ever allocates either. At the NDV
+					// pre-size cap that would be 4M × 24 B of groupState plus
+					// 4M × 24 B of slice header for one used slot — the same
+					// dead weight the int paths dropped in 6806c83.
+					h.keys = nil
 				}
 				if h.intFlatAccs == nil {
 					if len(h.strGroupStates) > 0 {
@@ -1846,9 +1863,29 @@ func (h *HashAggregate) compactFallback(b *batch.RecordBatch, gi []int32, sel []
 	}
 }
 
+// arenaString builds a string header over hash-table arena bytes without
+// copying them. Sound ONLY for bytes handed out by strHashTable's chunked key
+// arena: those chunks are append-only, are never reallocated, and are never
+// written again once a key lands in them (see str_hash.go), so the bytes
+// behind the header can never change. The GC keeps the chunk alive through the
+// header's interior pointer, so the string also outlives the table itself —
+// which is what the emit, spill, drain-cursor and merge readers of
+// serializedKeys rely on after Next() drops strGroupIndex.
+func arenaString(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(&b[0], len(b))
+}
+
 // consumeBatchStrGroup is the fast path for single-column string GROUP BY.
 // Uses strHashTable for group lookup with SoA flat accumulator scatter.
 // Two-phase approach matches consumeBatchIntGroup: hash lookup then typed scatter.
+//
+// Group keys are stored ONCE, in the hash table's key arena: serializedKeys
+// entries alias those bytes (arenaString) instead of holding a private copy.
+// Their bytes are therefore accounted by strGroupIndex.MemoryUsage(), not by
+// h.serializedKeyBytes — bumping the counter here would double-charge them.
 func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 	gkVec := b.Columns[h.strGroupKeyCol]
 	hasNulls := gkVec.Nulls.HasNulls()
@@ -1883,18 +1920,18 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 				continue
 			}
 			key := gkVec.BytesData.Value(row)
-			gsIdx, found := strIdx.GetOrInsert(key, int32(len(h.strGroupStates)))
+			gsIdx, found, stored := strIdx.GetOrInsertRef(key, int32(len(h.strGroupStates)))
 			if found {
 				gi[si] = gsIdx
 			} else {
-				keyStr := string(key)
-				// Deferred state: the arena string in serializedKeys IS
-				// the key; simple aggs live in the flat SoA arrays. The
-				// per-group groupState + []any box + h.keys slot were
-				// ~100B of overhead per group (Q34's 18M URL groups).
+				// Deferred state: the serializedKeys entry IS the key, and
+				// it aliases the table's arena copy rather than making a
+				// second one (arenaString). Simple aggs live in the flat
+				// SoA arrays. The per-group groupState + []any box +
+				// h.keys slot were ~100B of overhead per group (Q34's 18M
+				// URL groups).
 				h.strGroupStates = append(h.strGroupStates, nil)
-				h.serializedKeys = append(h.serializedKeys, keyStr)
-				h.serializedKeyBytes += int64(len(keyStr))
+				h.serializedKeys = append(h.serializedKeys, arenaString(stored))
 				gi[si] = gsIdx
 			}
 		}
@@ -1907,18 +1944,18 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 				continue
 			}
 			key := gkVec.BytesData.Value(row)
-			gsIdx, found := strIdx.GetOrInsert(key, int32(len(h.strGroupStates)))
+			gsIdx, found, stored := strIdx.GetOrInsertRef(key, int32(len(h.strGroupStates)))
 			if found {
 				gi[row] = gsIdx
 			} else {
-				keyStr := string(key)
-				// Deferred state: the arena string in serializedKeys IS
-				// the key; simple aggs live in the flat SoA arrays. The
-				// per-group groupState + []any box + h.keys slot were
-				// ~100B of overhead per group (Q34's 18M URL groups).
+				// Deferred state: the serializedKeys entry IS the key, and
+				// it aliases the table's arena copy rather than making a
+				// second one (arenaString). Simple aggs live in the flat
+				// SoA arrays. The per-group groupState + []any box +
+				// h.keys slot were ~100B of overhead per group (Q34's 18M
+				// URL groups).
 				h.strGroupStates = append(h.strGroupStates, nil)
-				h.serializedKeys = append(h.serializedKeys, keyStr)
-				h.serializedKeyBytes += int64(len(keyStr))
+				h.serializedKeys = append(h.serializedKeys, arenaString(stored))
 				gi[row] = gsIdx
 			}
 		}
@@ -2101,14 +2138,20 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 // produced the groups. Cold path: only the slow in-memory merge fallback
 // needs the string table.
 func (h *HashAggregate) ensureStrGroupIndexForMerge() {
-	if !(h.useGenericSoA && h.deferGenericKeyBoxing) {
+	if h.useGenericSoA && h.deferGenericKeyBoxing {
+		idx := newStrHashTable(len(h.strGroupStates) + 16)
+		for i, k := range h.serializedKeys {
+			idx.Put([]byte(k), int32(i))
+		}
+		h.strGroupIndex = idx
 		return
 	}
-	idx := newStrHashTable(len(h.strGroupStates) + 16)
-	for i, k := range h.serializedKeys {
-		idx.Put([]byte(k), int32(i))
+	// A sink that never resolved a key path has no table at all (Init no
+	// longer pre-builds one so resolveIndices' NDV pre-size can take
+	// effect); the dedup loop that follows probes it unconditionally.
+	if h.strGroupIndex == nil {
+		h.strGroupIndex = newStrHashTable(len(h.strGroupStates) + 16)
 	}
-	h.strGroupIndex = idx
 }
 
 // migrateCompactToGeneric moves all groups from intHashTable to the string map
@@ -2140,6 +2183,18 @@ func packKeyInt64(b []byte) int64 {
 	return v
 }
 
+// strIndexForRow returns the string group index used by the generic per-row
+// paths, creating it on first use. Those paths are reached without going
+// through resolveIndices' pre-sized branches (spill replay, grouping sets on
+// a sink that never resolved a fast path), so they own the fallback
+// construction now that Init no longer hands out a fixed 4096-slot table.
+func (h *HashAggregate) strIndexForRow() *strHashTable {
+	if h.strGroupIndex == nil {
+		h.strGroupIndex = newStrHashTable(4096)
+	}
+	return h.strGroupIndex
+}
+
 func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 	// Serialize group key using binary encoding (fixed-width for numeric types).
 	// Each column is prefixed by a 1-byte null flag (0=value, 1=null).
@@ -2159,7 +2214,7 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 	}
 
 	// Use open-addressing string hash table to avoid GC overhead of map[string].
-	groupIdx, found := h.strGroupIndex.GetOrInsert(h.keyBuf, int32(len(h.strGroupStates)))
+	groupIdx, found := h.strIndexForRow().GetOrInsert(h.keyBuf, int32(len(h.strGroupStates)))
 	if found {
 		h.updateGroup(h.strGroupStates[groupIdx], b, row)
 		return
@@ -2259,7 +2314,7 @@ func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
 			h.keyBuf = appendColumnValue(h.keyBuf, v, row, h.groupColTypes[ci])
 		}
 
-		groupIdx, found := h.strGroupIndex.GetOrInsert(h.keyBuf, int32(len(h.strGroupStates)))
+		groupIdx, found := h.strIndexForRow().GetOrInsert(h.keyBuf, int32(len(h.strGroupStates)))
 		if found {
 			h.updateGroup(h.strGroupStates[groupIdx], b, row)
 			continue

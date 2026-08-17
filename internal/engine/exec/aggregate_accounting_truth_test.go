@@ -32,12 +32,13 @@ func strKeyBatch(tb testing.TB, base, n, keyLen int) *batch.RecordBatch {
 	return batch.FromRows(schema, rows)
 }
 
-// TestGroupMemoryUsageTruth_StringKeys: every string-keyed group carries (at
-// least) the arena copy of its key, a second key copy behind
-// serializedKeys/keyValues, and a 96-byte groupStateExtras. The pre-counter
-// accounting saw only the arena copy (+ table/pool overhead ≈ 84 B/group for
-// 32-byte keys), so a floor of 2×keyLen+96 per group fails without the
-// counters.
+// TestGroupMemoryUsageTruth_StringKeys: on the single-string fast path a group
+// carries its key bytes ONCE — in the hash table's key arena, which
+// serializedKeys aliases rather than copying — plus a 16-byte string header
+// and (at the 70% load factor) at least one 16-byte table entry. The floor
+// below is that per-group truth; the arena term is what the pre-arena
+// accounting could reach only through the serializedKeyBytes counter, and
+// MemoryUsage() must keep charging it now that the counter no longer does.
 func TestGroupMemoryUsageTruth_StringKeys(t *testing.T) {
 	const n = 5000
 	const keyLen = 32
@@ -53,10 +54,56 @@ func TestGroupMemoryUsageTruth_StringKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := h.groupMemoryUsage()
-	floor := int64(n) * (2*keyLen + 96)
+	floor := int64(n) * (keyLen + 16 + 16)
 	if got < floor {
-		t.Fatalf("groupMemoryUsage = %d, want >= %d (2×key bytes + extras per group; pre-counter accounting reported ~%d)",
-			got, floor, n*84)
+		t.Fatalf("groupMemoryUsage = %d, want >= %d (key bytes + string header + table entry per group)",
+			got, floor)
+	}
+	// The keys are the arena's contents: dropping the table from the estimate
+	// would silently un-count every group key.
+	if arena := h.strGroupIndex.arenaCap; arena < int64(n)*keyLen {
+		t.Fatalf("key arena = %d bytes, want >= %d (one copy of every key)", arena, n*keyLen)
+	}
+}
+
+// TestGroupMemoryUsageTruth_GenericStringKeys: the multi-column generic path
+// serializes its keys into freshly allocated strings (no arena aliasing —
+// those keys exist nowhere else), so serializedKeyBytes remains the ONLY
+// accounting for them. Three string columns keeps the key wider than the
+// 8-byte compact path.
+func TestGroupMemoryUsageTruth_GenericStringKeys(t *testing.T) {
+	const n = 5000
+	const keyLen = 32
+	schema := []parquet.Column{
+		{Name: "a", Type: parquet.TypeString},
+		{Name: "b", Type: parquet.TypeString},
+		{Name: "c", Type: parquet.TypeString},
+		{Name: "v", Type: parquet.TypeFloat64},
+	}
+	rows := make([]map[string]any, n)
+	for i := range rows {
+		key := fmt.Sprintf("key-%0*d", keyLen-4, i)
+		rows[i] = map[string]any{"a": key, "b": key, "c": key, "v": float64(i)}
+	}
+	h := &HashAggregate{
+		GroupByCols: []string{"a", "b", "c"},
+		Aggs:        []AggColumn{{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeFloat64}},
+	}
+	ctx := context.Background()
+	if err := h.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
+		t.Fatal(err)
+	}
+	if h.serializedKeyBytes < int64(n)*3*keyLen {
+		t.Fatalf("serializedKeyBytes = %d, want >= %d (3 columns × %d bytes per group)",
+			h.serializedKeyBytes, n*3*keyLen, keyLen)
+	}
+	got := h.groupMemoryUsage()
+	floor := int64(n) * 3 * keyLen
+	if got < floor {
+		t.Fatalf("groupMemoryUsage = %d, want >= %d (serialized key bytes per group)", got, floor)
 	}
 }
 

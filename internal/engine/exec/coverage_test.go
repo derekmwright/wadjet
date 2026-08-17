@@ -1,7 +1,10 @@
 package exec
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -1348,6 +1351,115 @@ func TestStrHashTablePreSizing(t *testing.T) {
 
 	if len(ht.entries) != initialCap {
 		t.Errorf("hash table grew from %d to %d with %d entries", initialCap, len(ht.entries), n)
+	}
+}
+
+// TestStrHashTableArenaKeyShapes round-trips key widths that stress the
+// chunked arena's boundaries: keys that don't divide a chunk evenly (so each
+// chunk ends with a skipped tail), keys wider than a whole chunk (dedicated
+// chunks), and the empty key.
+func TestStrHashTableArenaKeyShapes(t *testing.T) {
+	cases := []struct {
+		name    string
+		keyLen  int
+		nKeys   int
+		wantMin int // minimum chunks the shape must produce (0 = don't check)
+	}{
+		{name: "empty", keyLen: 0, nKeys: 1},
+		{name: "tiny", keyLen: 3, nKeys: 26}, // sub-4-byte keys carry no index prefix
+		{name: "small", keyLen: 9, nKeys: 5000},
+		{name: "chunk_tail_skips", keyLen: 300, nKeys: 5000, wantMin: 2},
+		{name: "just_under_chunk", keyLen: strArenaMaxChunk - 1, nKeys: 3, wantMin: 3},
+		{name: "exactly_chunk", keyLen: strArenaMaxChunk, nKeys: 2, wantMin: 2},
+		{name: "oversize", keyLen: 3*strArenaMaxChunk + 7, nKeys: 2, wantMin: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			makeKey := func(i int) []byte {
+				k := make([]byte, tc.keyLen)
+				for j := range k {
+					k[j] = byte('a' + (i+j)%26)
+				}
+				if tc.keyLen >= 4 {
+					binary.LittleEndian.PutUint32(k, uint32(i))
+				}
+				return k
+			}
+			ht := newStrHashTable(16)
+			for i := 0; i < tc.nKeys; i++ {
+				if _, existed := ht.Put(makeKey(i), int32(i)); existed {
+					t.Fatalf("key %d reported as pre-existing", i)
+				}
+			}
+			if ht.Len() != tc.nKeys {
+				t.Fatalf("Len = %d, want %d", ht.Len(), tc.nKeys)
+			}
+			for i := 0; i < tc.nKeys; i++ {
+				val, ok := ht.Get(makeKey(i))
+				if !ok {
+					t.Fatalf("key %d not found", i)
+				}
+				if val != int32(i) {
+					t.Fatalf("Get(key %d) = %d", i, val)
+				}
+			}
+			if tc.wantMin > 0 && len(ht.chunks) < tc.wantMin {
+				t.Fatalf("arena used %d chunks, want >= %d", len(ht.chunks), tc.wantMin)
+			}
+			// Every entry must address a key that reads back intact, and no
+			// in-chunk offset may exceed the packed field's range.
+			seen := 0
+			for _, e := range ht.entries {
+				if e.keyLen < 0 {
+					continue
+				}
+				seen++
+				if off := e.ref & strArenaOffsetMask; int(off) >= strArenaMaxChunk {
+					t.Fatalf("offset %d out of range", off)
+				}
+				if got := ht.keyAt(e); !bytes.Equal(got, makeKey(int(e.val))) {
+					t.Fatalf("arena key for value %d does not match", e.val)
+				}
+			}
+			if seen != tc.nKeys {
+				t.Fatalf("walked %d occupied entries, want %d", seen, tc.nKeys)
+			}
+		})
+	}
+}
+
+// TestStrHashTableArenaStability is the invariant the single-string GROUP BY
+// path depends on: bytes handed out by GetOrInsertRef are never moved or
+// rewritten, so a string header built over them (arenaString) stays correct
+// no matter how many keys arrive afterwards — including through table growth.
+func TestStrHashTableArenaStability(t *testing.T) {
+	const n = 200000
+	makeKey := func(i int) []byte {
+		return []byte(fmt.Sprintf("https://example.com/path/segment/%060d", i))
+	}
+	ht := newStrHashTable(16)
+	aliases := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		_, found, stored := ht.GetOrInsertRef(makeKey(i), int32(i))
+		if found {
+			t.Fatalf("key %d reported as pre-existing", i)
+		}
+		aliases = append(aliases, arenaString(stored))
+	}
+	for i, s := range aliases {
+		if s != string(makeKey(i)) {
+			t.Fatalf("arena alias %d changed under later inserts: %q", i, s)
+		}
+	}
+	// Re-probing must hit the same groups, not duplicate them.
+	for i := 0; i < n; i++ {
+		val, found, _ := ht.GetOrInsertRef(makeKey(i), -1)
+		if !found || val != int32(i) {
+			t.Fatalf("re-probe of key %d = (%d, %v)", i, val, found)
+		}
+	}
+	if ht.Len() != n {
+		t.Fatalf("Len = %d, want %d", ht.Len(), n)
 	}
 }
 

@@ -2,6 +2,8 @@ package exec
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -500,5 +502,108 @@ func BenchmarkHashAggregateSumAvgSameColumn(b *testing.B) {
 			agg.Consume(ctx, bb)
 		}
 		agg.Close()
+	}
+}
+
+// urlKeyBatches builds `numKeys` distinct URL-shaped string keys (~90 bytes,
+// the ClickBench hits URL mean) spread over 2048-row batches. Shared by the
+// string-key aggregation benchmarks; built outside the timed region so input
+// construction stays out of ns/op and B/op.
+func urlKeyBatches(numKeys int) []*batch.RecordBatch {
+	const batchRows = 2048
+	schema := []parquet.Column{
+		{Name: "url", Type: parquet.TypeString},
+		{Name: "amount", Type: parquet.TypeFloat64},
+	}
+	// 34 + 40 + 4 + 12 = 90 bytes per key.
+	prefix := "https://example.com/watch/section/" + strings.Repeat("x", 40) + "/id="
+	batches := make([]*batch.RecordBatch, 0, numKeys/batchRows)
+	for base := 0; base < numKeys; base += batchRows {
+		bb := batch.NewRecordBatch(schema, batchRows)
+		for i := 0; i < batchRows; i++ {
+			bb.Columns[0].SetValue(i, fmt.Sprintf("%s%012d", prefix, base+i))
+			bb.Columns[1].SetValue(i, float64(base+i))
+		}
+		batches = append(batches, bb)
+	}
+	return batches
+}
+
+// BenchmarkHashAggregateStringKeyConsume drives the single-column string
+// GROUP BY consume path at ClickBench Q34/Q35 shape: 1M+ distinct ~90-byte
+// URL keys. B/op is the headline metric — it counts key-storage
+// amplification (arena growth copies plus any per-group key duplication),
+// which was 24.8% (arena memmove/memclr) + 7.3% (per-group string copy) of
+// Q34's profile before the chunked arena landed.
+//
+// The ndvhint sub-benchmarks supply the planner's GROUP-key cardinality
+// estimate: they exercise the NDV pre-size branch in resolveIndices, which
+// only became reachable once Init stopped hard-coding strGroupIndex. The
+// x4 arms replay the input four times, so 75% of the probes are lookups
+// into a full-size table — the real Q34 ratio (100M rows / 18M keys),
+// where pre-sizing skips ~8 whole-table rehashes instead of paying for
+// cold random access into a table the input never fills.
+func BenchmarkHashAggregateStringKeyConsume(b *testing.B) {
+	const numKeys = 1 << 20 // 1,048,576 distinct keys
+	batches := urlKeyBatches(numKeys)
+	ctx := context.Background()
+
+	run := func(b *testing.B, ndvHint int64, passes int) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			agg := NewHashAggregate(
+				[]string{"url"},
+				[]AggColumn{
+					{Func: AggSum, InputCol: "amount", OutputCol: "total", OutputType: parquet.TypeFloat64},
+					{Func: AggCount, InputCol: "", OutputCol: "cnt", OutputType: parquet.TypeInt64},
+				},
+			)
+			agg.GroupNDVHint = ndvHint
+			if err := agg.Init(ctx); err != nil {
+				b.Fatal(err)
+			}
+			for p := 0; p < passes; p++ {
+				for _, bb := range batches {
+					if err := agg.Consume(ctx, bb); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+			if got := len(agg.serializedKeys); got != numKeys {
+				b.Fatalf("groups = %d, want %d", got, numKeys)
+			}
+			agg.Close()
+		}
+	}
+
+	b.Run("nohint", func(b *testing.B) { run(b, 0, 1) })
+	b.Run("ndvhint", func(b *testing.B) { run(b, numKeys, 1) })
+	b.Run("nohint_x4", func(b *testing.B) { run(b, 0, 4) })
+	b.Run("ndvhint_x4", func(b *testing.B) { run(b, numKeys, 4) })
+}
+
+// BenchmarkStrHashTableInsert isolates the key arena from the aggregate:
+// 1M distinct ~90-byte keys inserted into a fresh table. B/op measures the
+// arena's write amplification directly (plain-append growth reallocates and
+// copies every live byte ~log2(N) times; chunked blocks copy each key once).
+func BenchmarkStrHashTableInsert(b *testing.B) {
+	const numKeys = 1 << 20
+	prefix := "https://example.com/watch/section/" + strings.Repeat("x", 40) + "/id="
+	keys := make([][]byte, numKeys)
+	for i := range keys {
+		keys[i] = []byte(fmt.Sprintf("%s%012d", prefix, i))
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ht := newStrHashTable(1024)
+		for j, k := range keys {
+			ht.GetOrInsert(k, int32(j))
+		}
+		if ht.Len() != numKeys {
+			b.Fatalf("len = %d, want %d", ht.Len(), numKeys)
+		}
 	}
 }
