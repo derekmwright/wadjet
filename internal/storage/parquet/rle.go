@@ -158,10 +158,33 @@ func DecodeBitPacked(data []byte, bitWidth, n int) []int32 {
 	if bitWidth == 0 || n == 0 {
 		return make([]int32, n)
 	}
-
 	result := make([]int32, n)
+	decodeBitPackedRange(result, data, bitWidth, 0, n)
+	return result
+}
+
+// decodeBitPackedRange decodes n bit-packed values starting at VALUE index
+// `from` into dst[:n], without allocating. Bit-packed values are
+// positionally addressable (value i starts at bit i*bitWidth), so a
+// bit-packed group can be walked through a fixed window instead of
+// expanded whole — that is what RLERunIterator does.
+//
+// Extraction is the same arithmetic DecodeBitPacked has always used,
+// including its out-of-range behavior: bytes past the end of data read as
+// zero rather than erroring, so a truncated group decodes to zeros exactly
+// as before.
+func decodeBitPackedRange(dst []int32, data []byte, bitWidth, from, n int) {
+	if n > len(dst) {
+		n = len(dst)
+	}
+	if bitWidth == 0 {
+		for i := 0; i < n; i++ {
+			dst[i] = 0
+		}
+		return
+	}
 	mask := int32((1 << bitWidth) - 1)
-	bitPos := 0
+	bitPos := from * bitWidth
 
 	for i := 0; i < n; i++ {
 		byteIdx := bitPos / 8
@@ -181,10 +204,9 @@ func DecodeBitPacked(data []byte, bitWidth, n int) []int32 {
 			raw = uint32(data[byteIdx])
 		}
 
-		result[i] = int32(raw>>bitIdx) & mask
+		dst[i] = int32(raw>>bitIdx) & mask
 		bitPos += bitWidth
 	}
-	return result
 }
 
 // Refactored DecodeAll using batch bit-packed decoding.

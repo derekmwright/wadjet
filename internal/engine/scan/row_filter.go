@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -19,6 +20,11 @@ import (
 //   - Filter-only columns (referenced by the filter and nothing else)
 //     are never materialized at all; the scan reads their pages here and
 //     the projected read schema excludes them.
+//   - RUN-GRANULARITY evaluation (WADJET_RLE_RUN_PREDS): a dictionary
+//     page's index stream is RLE — columns like ClickBench's EventDate
+//     are ONE run per row group, CounterID three — so the mask is applied
+//     once per run over a SPAN of rows rather than once per row, and the
+//     indices are never expanded to an int32 array at all.
 //
 // Semantics parity with the expression layer: NULL rows never match a
 // comparison; the planner only pushes conjuncts whose literal/column type
@@ -53,24 +59,50 @@ func ScanFilterStatsSnapshot() (int64, int64) {
 	return scanFilterRowGroups.Load(), scanFilterSkipped.Load()
 }
 
-var rowBitsPool = sync.Pool{New: func() any { return &[]bool{} }}
+// RLERunPreds gates run-granularity predicate evaluation over
+// dictionary-index pages. With it off, dictionary pages expand their index
+// stream and the mask is applied per row, exactly as before. Kill switch:
+// WADJET_RLE_RUN_PREDS=0.
+var RLERunPreds = optswitch.Register("rle-run-preds", "WADJET_RLE_RUN_PREDS",
+	"run-granularity predicate evaluation over RLE dictionary-index pages in the scan filter")
+
+// runPathMinRunRatio: the run path is taken when a dictionary page's run
+// census comes in under numValues/runPathMinRunRatio. Both paths cost
+// ~one dictionary-mask lookup per run; the expand path additionally pays
+// the full RLE materialization (one int32 write per row) plus a per-row
+// mask test, so the true break-even sits well above 1/8. Eight is the
+// conservative side of it: a page has to be genuinely run-structured
+// before the census is worth acting on, and the census itself short-
+// circuits at the limit so a bit-packed page costs numValues/64 header
+// reads to reject.
+const runPathMinRunRatio = 8
+
+// runPathPages / runPathRows count what the run path actually handled
+// (test engagement markers — a threshold that silently stops firing is
+// otherwise invisible).
+var (
+	runPathPages atomic.Int64
+	runPathRows  atomic.Int64
+)
+
+// RunPathStatsSnapshot returns (pages, rows) evaluated run-wise.
+func RunPathStatsSnapshot() (int64, int64) {
+	return runPathPages.Load(), runPathRows.Load()
+}
+
+var rowBitsPool = sync.Pool{New: func() any { return &rowBitmap{} }}
 
 // EvalRowGroupPreds evaluates the AND of preds over one row group and
 // returns the matching selection. sel is only meaningful for
 // FilterPartial and holds row indices in ascending order.
 func EvalRowGroupPreds(fr *pqt.FileReader, rgIdx int, preds []RowPred, numRows int) ([]uint32, FilterDecision, error) {
 	scanFilterRowGroups.Add(1)
-	// bits[i] = row i still matching. Pooled: a fresh 1M-bool slice per
-	// row group was ~100MB of allocation zeroing per 100-part query.
-	bp := rowBitsPool.Get().(*[]bool)
-	defer rowBitsPool.Put(bp)
-	if cap(*bp) < numRows {
-		*bp = make([]bool, numRows)
-	}
-	bits := (*bp)[:numRows]
-	for i := range bits {
-		bits[i] = true
-	}
+	// bm bit i = row i still matching. Pooled: a fresh mask per row group
+	// was ~100MB of allocation zeroing per 100-part query even at one
+	// byte per row.
+	bm := rowBitsPool.Get().(*rowBitmap)
+	defer rowBitsPool.Put(bm)
+	bm.reset(numRows)
 	leaves := fr.Leaves()
 	for _, p := range preds {
 		colIdx := -1
@@ -83,16 +115,11 @@ func EvalRowGroupPreds(fr *pqt.FileReader, rgIdx int, preds []RowPred, numRows i
 		if colIdx < 0 {
 			return nil, FilterNone, fmt.Errorf("scan filter: column %q not in file", p.Col)
 		}
-		if err := andPredOverColumn(fr, rgIdx, colIdx, p, bits); err != nil {
+		if err := andPredOverColumn(fr, rgIdx, colIdx, p, bm); err != nil {
 			return nil, FilterNone, err
 		}
 	}
-	matched := 0
-	for _, b := range bits {
-		if b {
-			matched++
-		}
-	}
+	matched := bm.count()
 	switch matched {
 	case 0:
 		scanFilterSkipped.Add(1)
@@ -100,18 +127,12 @@ func EvalRowGroupPreds(fr *pqt.FileReader, rgIdx int, preds []RowPred, numRows i
 	case numRows:
 		return nil, FilterAll, nil
 	}
-	sel := make([]uint32, 0, matched)
-	for i, b := range bits {
-		if b {
-			sel = append(sel, uint32(i))
-		}
-	}
-	return sel, FilterPartial, nil
+	return bm.appendSel(make([]uint32, 0, matched)), FilterPartial, nil
 }
 
 // andPredOverColumn walks the column's pages and clears bits for rows
 // that fail the predicate (NULL rows always fail a comparison).
-func andPredOverColumn(fr *pqt.FileReader, rgIdx, colIdx int, p RowPred, bits []bool) error {
+func andPredOverColumn(fr *pqt.FileReader, rgIdx, colIdx int, p RowPred, bm *rowBitmap) error {
 	pr := fr.ColumnPages(rgIdx, colIdx)
 	if pr == nil {
 		return fmt.Errorf("scan filter: column %d pages missing", colIdx)
@@ -123,6 +144,14 @@ func andPredOverColumn(fr *pqt.FileReader, rgIdx, colIdx int, p RowPred, bits []
 		scr.def, scr.idx = pr.TakeScratch()
 		colReadScratchPool.Put(scr)
 	}()
+
+	if RLERunPreds.On() {
+		// Keep dictionary pages' index streams in RLE form. Pages that
+		// end up on the expand path below get them back through
+		// DecodeDeferredIndices, using the very scratch buffer the reader
+		// would have used, so nothing is decoded twice or allocated extra.
+		pr.DeferDictIndices()
+	}
 
 	dict, err := pr.NextDictionary()
 	if err != nil {
@@ -144,8 +173,8 @@ func andPredOverColumn(fr *pqt.FileReader, rgIdx, colIdx int, p RowPred, bits []
 		if n == 0 {
 			continue
 		}
-		if row+n > len(bits) {
-			return fmt.Errorf("scan filter: page rows overflow row group (%d+%d > %d)", row, n, len(bits))
+		if row+n > bm.n {
+			return fmt.Errorf("scan filter: page rows overflow row group (%d+%d > %d)", row, n, bm.n)
 		}
 
 		if page.IsDictEncoded() {
@@ -160,14 +189,12 @@ func andPredOverColumn(fr *pqt.FileReader, rgIdx, colIdx int, p RowPred, bits []
 					return err
 				}
 			}
-			indices := page.Data.Int32()
-			nv := page.Data.Count()
-			if err := andDictPage(bits[row:row+n], indices, nv, dictMask, page.DefinitionLevels, pageMaxDef(page)); err != nil {
+			if err := andDictPageAny(bm, row, n, page, pr, dictMask); err != nil {
 				page.Release()
 				return err
 			}
 		} else {
-			if err := andPlainPage(bits[row:row+n], page, p); err != nil {
+			if err := andPlainPage(bm, row, n, page, p); err != nil {
 				page.Release()
 				return err
 			}
@@ -176,8 +203,116 @@ func andPredOverColumn(fr *pqt.FileReader, rgIdx, colIdx int, p RowPred, bits []
 		page.Release()
 	}
 	// Rows beyond the pages we saw (shouldn't happen) fail closed.
-	for i := row; i < len(bits); i++ {
-		bits[i] = false
+	bm.clearRange(row, bm.n)
+	return nil
+}
+
+// andDictPageAny picks between run-granularity and per-row evaluation for
+// one dictionary-encoded page and applies the chosen one.
+func andDictPageAny(bm *rowBitmap, base, n int, page *pqt.PageData, pr *pqt.ColumnPageReader, dictMask []bool) error {
+	// Census first, eligibility second: the census short-circuits at the
+	// limit, so a bit-packed page is rejected in numValues/64 header reads,
+	// before dictRunPathEligible's (possibly per-row) null verification.
+	if page.DictIndexRLE != nil && page.NumNulls == 0 {
+		limit := n / runPathMinRunRatio
+		runs, err := pqt.CountRLERuns(page.DictIndexRLE, page.DictIndexBitWidth, n, limit)
+		if err == nil && runs <= limit && dictRunPathEligible(page, n) {
+			runPathPages.Add(1)
+			runPathRows.Add(int64(n))
+			return andDictPageRuns(bm, base, n, page.DictIndexRLE, page.DictIndexBitWidth, dictMask)
+		}
+		// A census error is not reported here: the expand path decodes the
+		// same bytes and surfaces the identical error with page context.
+	}
+	indices := page.Data.Int32()
+	nv := page.Data.Count()
+	if page.DictIndexRLE != nil {
+		idx, err := pr.DecodeDeferredIndices(page)
+		if err != nil {
+			return fmt.Errorf("scan filter: %w", err)
+		}
+		indices, nv = idx, len(idx)
+	}
+	return andDictPage(bm, base, n, indices, nv, dictMask, page.DefinitionLevels, pageMaxDef(page))
+}
+
+// dictRunPathEligible reports whether a run of k dictionary indices covers
+// exactly k consecutive ROWS on this page, which is the whole premise of
+// the run path.
+//
+// That holds only when the page has no nulls: values are stored dense over
+// non-null rows, so with nulls present a run of k values spans k *non-null*
+// rows and locating it means walking the definition levels row by row —
+// the very work the run path exists to skip. Such pages take the expand
+// path unchanged, keeping "a NULL never matches a comparison" implemented
+// in exactly one place.
+//
+// "No nulls" has to be established from the levels, not asserted by the
+// file. Three cases:
+//
+//   - no definition levels at all: a REQUIRED column, nothing to check;
+//   - NullsFromLevels: the reader counted the nulls off these levels
+//     (v1 pages always; v2 pages with no level data);
+//   - otherwise a v2 header's num_nulls claim, which is verified here with
+//     a compare-only pass. That pass costs far less than the RLE expansion
+//     plus per-row mask work it buys, and the caller runs it only after
+//     the census has already accepted the page.
+func dictRunPathEligible(page *pqt.PageData, n int) bool {
+	if page.DictIndexRLE == nil || page.NumNulls != 0 {
+		return false
+	}
+	def := page.DefinitionLevels
+	if def == nil {
+		return true
+	}
+	if len(def) < n {
+		return false // truncated levels: let the expand path report it
+	}
+	if page.NullsFromLevels {
+		return true
+	}
+	maxDef := pageMaxDef(page)
+	for i := 0; i < n; i++ {
+		if def[i] < maxDef {
+			return false
+		}
+	}
+	return true
+}
+
+// andDictPageRuns ANDs a dictionary page into the mask run-wise: the
+// predicate has already been evaluated per dictionary entry, so a run
+// resolves to one dictMask lookup and — only when the run fails — one
+// span clear. A page of all-matching runs costs nothing at all.
+//
+// The page must have no nulls (see andDictPageAny), so run positions and
+// row positions coincide.
+func andDictPageRuns(bm *rowBitmap, base, n int, rle []byte, bitWidth int, dictMask []bool) error {
+	it := pqt.NewRLERunIterator(rle, bitWidth, n)
+	row, end := base, base+n
+	for {
+		val, runLen, ok := it.Next()
+		if !ok {
+			break
+		}
+		// Span arithmetic against the page window: a run reaching past it
+		// is a corrupt stream, never something to clamp into place.
+		if runLen <= 0 || runLen > end-row {
+			return fmt.Errorf("scan filter: RLE run overruns page (row %d + %d > %d)", row, runLen, end)
+		}
+		if uint(val) >= uint(len(dictMask)) {
+			return fmt.Errorf("scan filter: dictionary index %d out of range [0,%d)", val, len(dictMask))
+		}
+		if !dictMask[val] {
+			bm.clearRange(row, row+runLen)
+		}
+		row += runLen
+	}
+	if err := it.Err(); err != nil {
+		return fmt.Errorf("scan filter: dictionary indices: %w", err)
+	}
+	if row != end {
+		return fmt.Errorf("scan filter: %d indices for %d rows", row-base, n)
 	}
 	return nil
 }
@@ -194,44 +329,53 @@ func pageMaxDef(page *pqt.PageData) int32 {
 	return 1
 }
 
-// andDictPage ANDs a dictionary page into bits: value present and
-// non-null and dictMask[idx] true.
-func andDictPage(bits []bool, indices []int32, numValues int, dictMask []bool, defLevels []int32, maxDef int32) error {
+// andDictPage ANDs a dictionary page into the mask per row: value present
+// and non-null and dictMask[idx] true. Rows [base, base+n) of bm.
+func andDictPage(bm *rowBitmap, base, n int, indices []int32, numValues int, dictMask []bool, defLevels []int32, maxDef int32) error {
 	if defLevels == nil {
 		// No nulls: one index per row.
-		if numValues < len(bits) {
-			return fmt.Errorf("scan filter: %d indices for %d rows", numValues, len(bits))
+		if numValues < n {
+			return fmt.Errorf("scan filter: %d indices for %d rows", numValues, n)
 		}
-		for i := range bits {
-			if bits[i] {
-				idx := indices[i]
-				if uint(idx) >= uint(len(dictMask)) {
-					return fmt.Errorf("scan filter: dictionary index %d out of range [0,%d)", idx, len(dictMask))
-				}
-				bits[i] = dictMask[idx]
+		// A still-untouched mask makes the per-row test dead weight; each
+		// row index is visited once, so nothing this loop clears is read
+		// back by it.
+		allSet := bm.allSet
+		for i := 0; i < n; i++ {
+			if !allSet && !bm.get(base+i) {
+				continue
+			}
+			idx := indices[i]
+			if uint(idx) >= uint(len(dictMask)) {
+				return fmt.Errorf("scan filter: dictionary index %d out of range [0,%d)", idx, len(dictMask))
+			}
+			if !dictMask[idx] {
+				bm.clear(base + i)
 			}
 		}
 		return nil
 	}
 	// Nulls present: values are dense over non-null rows only.
 	vi := 0
-	for i := range bits {
+	for i := 0; i < n; i++ {
 		if i >= len(defLevels) {
-			return fmt.Errorf("scan filter: definition levels short (%d < %d)", len(defLevels), len(bits))
+			return fmt.Errorf("scan filter: definition levels short (%d < %d)", len(defLevels), n)
 		}
 		if defLevels[i] < maxDef {
-			bits[i] = false // NULL never matches a comparison
+			bm.clear(base + i) // NULL never matches a comparison
 			continue
 		}
 		if vi >= numValues {
 			return fmt.Errorf("scan filter: non-null values exhausted at row %d", i)
 		}
-		if bits[i] {
+		if bm.get(base + i) {
 			idx := indices[vi]
 			if uint(idx) >= uint(len(dictMask)) {
 				return fmt.Errorf("scan filter: dictionary index %d out of range [0,%d)", idx, len(dictMask))
 			}
-			bits[i] = dictMask[idx]
+			if !dictMask[idx] {
+				bm.clear(base + i)
+			}
 		}
 		vi++
 	}
@@ -306,9 +450,10 @@ func evalPredOnDict(dict *pqt.DictionaryData, p RowPred) ([]bool, error) {
 	return mask, nil
 }
 
-// andPlainPage ANDs a PLAIN-encoded page into bits with per-value
+// andPlainPage ANDs a PLAIN-encoded page into the mask with per-value
 // comparison (the fallback-page case; still saves materialization).
-func andPlainPage(bits []bool, page *pqt.PageData, p RowPred) error {
+// Rows [base, base+n) of bm.
+func andPlainPage(bm *rowBitmap, base, n int, page *pqt.PageData, p RowPred) error {
 	d := page.Data
 	nv := d.Count()
 	var likeFn func([]byte) bool
@@ -366,39 +511,45 @@ func andPlainPage(bits []bool, page *pqt.PageData, p RowPred) error {
 	}
 	defLevels := page.DefinitionLevels
 	if defLevels == nil {
-		if nv < len(bits) {
-			return fmt.Errorf("scan filter: %d values for %d rows", nv, len(bits))
+		if nv < n {
+			return fmt.Errorf("scan filter: %d values for %d rows", nv, n)
 		}
-		for i := range bits {
-			if bits[i] {
-				m, err := match(i)
-				if err != nil {
-					return err
-				}
-				bits[i] = m
+		allSet := bm.allSet
+		for i := 0; i < n; i++ {
+			if !allSet && !bm.get(base+i) {
+				continue
+			}
+			m, err := match(i)
+			if err != nil {
+				return err
+			}
+			if !m {
+				bm.clear(base + i)
 			}
 		}
 		return nil
 	}
 	maxDef := pageMaxDef(page)
 	vi := 0
-	for i := range bits {
+	for i := 0; i < n; i++ {
 		if i >= len(defLevels) {
 			return fmt.Errorf("scan filter: definition levels short")
 		}
 		if defLevels[i] < maxDef {
-			bits[i] = false
+			bm.clear(base + i)
 			continue
 		}
 		if vi >= nv {
 			return fmt.Errorf("scan filter: non-null values exhausted")
 		}
-		if bits[i] {
+		if bm.get(base + i) {
 			m, err := match(vi)
 			if err != nil {
 				return err
 			}
-			bits[i] = m
+			if !m {
+				bm.clear(base + i)
+			}
 		}
 		vi++
 	}

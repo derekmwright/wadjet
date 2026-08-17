@@ -16,6 +16,25 @@ type PageData struct {
 	DefinitionLevels []int32  // nil if column is required (no nulls)
 	RepetitionLevels []int32  // nil for flat schemas (no nesting)
 
+	// DictIndexRLE is the page's raw RLE/bit-packing hybrid index payload,
+	// set only when the reader is in deferred-index mode
+	// (DeferDictIndices) and this page is dictionary-encoded. Data is
+	// empty in that case: the indices have NOT been expanded. Walk the
+	// payload with RLERunIterator, or expand it with
+	// ColumnPageReader.DecodeDeferredIndices.
+	//
+	// Aliases the page buffer with the same lifetime as Data — invalid
+	// after Release.
+	DictIndexRLE      []byte
+	DictIndexBitWidth int
+
+	// NullsFromLevels reports that NumNulls was COUNTED from the decoded
+	// definition levels rather than taken from the page header. A consumer
+	// that wants to conclude "no nulls, so value i belongs to row i" needs
+	// that distinction: a v2 header's null count is the writer's claim
+	// about the levels, not a fact derived from them.
+	NullsFromLevels bool
+
 	// rawBuf is the decompressed page buffer that backs Data when the page
 	// values alias the decompress output (PLAIN-encoded numeric/fixed-len
 	// columns). nil when no pooled buffer needs to be returned (uncompressed
@@ -87,6 +106,47 @@ type ColumnPageReader struct {
 	scratchOn  bool
 	defScratch []int32
 	idxScratch []int32
+
+	// Deferred dictionary indices (DeferDictIndices): dictionary-encoded
+	// data pages keep their raw RLE payload on PageData instead of
+	// expanding it to one int32 per value. pendingIdx* carry the payload
+	// out of decodeValues to the PageData constructor.
+	deferDictIdx  bool
+	pendingIdxRLE []byte
+	pendingIdxBW  int
+}
+
+// DeferDictIndices stops dictionary-encoded data pages from expanding
+// their index stream: NextPage leaves PageData.Data empty and hands back
+// the raw payload as PageData.DictIndexRLE instead. Only for callers that
+// can consume runs (scan-level predicate evaluation); everyone else wants
+// the default. Definition levels are still decoded normally.
+func (r *ColumnPageReader) DeferDictIndices() { r.deferDictIdx = true }
+
+// DecodeDeferredIndices expands a deferred dictionary-index payload into
+// the reader's scratch buffer, giving the caller the exact slice NextPage
+// would have produced without the deferral. Returns nil for pages with no
+// deferred payload (PLAIN pages, all-null pages, deferral off).
+func (r *ColumnPageReader) DecodeDeferredIndices(p *PageData) ([]int32, error) {
+	if p == nil || p.DictIndexRLE == nil {
+		return nil, nil
+	}
+	n := p.NumValues - p.NumNulls
+	if n < 0 {
+		return nil, fmt.Errorf("page reports %d nulls of %d values", p.NumNulls, p.NumValues)
+	}
+	var scratch []int32
+	if r.scratchOn {
+		scratch = r.idxScratch
+	}
+	indices, err := DecodeRLEInt32Into(scratch, p.DictIndexRLE, p.DictIndexBitWidth, n)
+	if err != nil {
+		return nil, fmt.Errorf("decoding dictionary indices: %w", err)
+	}
+	if r.scratchOn {
+		r.idxScratch = indices
+	}
+	return indices, nil
 }
 
 // EnableScratch turns on per-page buffer reuse for this reader. See the
@@ -441,15 +501,20 @@ func (r *ColumnPageReader) decodeDataPageV1(ph *PageHeader, compressed []byte) (
 	numRows := numValues
 
 	return &PageData{
-		NumValues:        numValues,
-		NumRows:          numRows,
-		NumNulls:         numNulls,
-		Data:             vals,
-		Encoding:         dph.Encoding,
-		DefinitionLevels: defLevels,
-		RepetitionLevels: repLevels,
-		rawBuf:           pageData,
-		codec:            r.codec,
+		NumValues:         numValues,
+		NumRows:           numRows,
+		NumNulls:          numNulls,
+		Data:              vals,
+		Encoding:          dph.Encoding,
+		DefinitionLevels:  defLevels,
+		RepetitionLevels:  repLevels,
+		DictIndexRLE:      r.pendingIdxRLE,
+		DictIndexBitWidth: r.pendingIdxBW,
+		// v1 has no null count in its header: numNulls above is counted
+		// from the levels this page actually carries.
+		NullsFromLevels: true,
+		rawBuf:          pageData,
+		codec:           r.codec,
 	}, nil
 }
 
@@ -520,20 +585,27 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 	}
 
 	return &PageData{
-		NumValues:        numValues,
-		NumRows:          numRows,
-		NumNulls:         numNulls,
-		Data:             vals,
-		Encoding:         dph.Encoding,
-		DefinitionLevels: defLevels,
-		RepetitionLevels: repLevels,
-		rawBuf:           rawBuf,
-		codec:            r.codec,
+		NumValues:         numValues,
+		NumRows:           numRows,
+		NumNulls:          numNulls,
+		Data:              vals,
+		Encoding:          dph.Encoding,
+		DefinitionLevels:  defLevels,
+		RepetitionLevels:  repLevels,
+		DictIndexRLE:      r.pendingIdxRLE,
+		DictIndexBitWidth: r.pendingIdxBW,
+		// v2 carries num_nulls in its header; it is the writer's claim
+		// about the levels, not something derived from them. Only a page
+		// with no levels at all is self-evidently null-free.
+		NullsFromLevels: defLevels == nil,
+		rawBuf:          rawBuf,
+		codec:           r.codec,
 	}, nil
 }
 
 // decodeValues decodes column values using the specified encoding.
 func (r *ColumnPageReader) decodeValues(data []byte, n int, enc Encoding) (Values, error) {
+	r.pendingIdxRLE, r.pendingIdxBW = nil, 0
 	switch enc {
 	case EncodingPlain:
 		return r.decodePlainValues(data, n), nil
@@ -542,6 +614,12 @@ func (r *ColumnPageReader) decodeValues(data []byte, n int, enc Encoding) (Value
 			return Values{physType: PhysicalInt32, count: 0}, nil
 		}
 		bitWidth := int(data[0])
+		if r.deferDictIdx {
+			// Hand the raw index stream to the caller instead of
+			// expanding it (see DeferDictIndices).
+			r.pendingIdxRLE, r.pendingIdxBW = data[1:], bitWidth
+			return Values{physType: PhysicalInt32, count: 0}, nil
+		}
 		var scratch []int32
 		if r.scratchOn {
 			scratch = r.idxScratch
