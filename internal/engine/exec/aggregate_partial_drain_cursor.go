@@ -48,6 +48,7 @@ type partialGroupCursor struct {
 	// Source state borrowed from HashAggregate.
 	flatAccs       []flatAccumArrays
 	intGroupStates []*groupState
+	intKeys        []int64 // single-int key SoA (states are nil on that path)
 	strGroupStates []*groupState
 	dualIntKeysA   []int64
 	dualIntKeysB   []int64
@@ -129,6 +130,7 @@ func newPartialGroupCursor(h *HashAggregate, liveGroups []int32) *partialGroupCu
 		flatAccs:       h.intFlatAccs,
 		intGroupStates: h.intGroupStates,
 		strGroupStates: h.strGroupStates,
+		intKeys:        h.intKeys,
 		dualIntKeysA:   h.dualIntKeysA,
 		dualIntKeysB:   h.dualIntKeysB,
 		serializedKeys: h.serializedKeys,
@@ -219,8 +221,7 @@ func (c *partialGroupCursor) slotAt(position int) int {
 func (c *partialGroupCursor) populateHeadKeyVals(gi int) {
 	switch c.keyMode {
 	case partialKeyModeInt:
-		gs := c.intGroupStates[gi]
-		setPartialKeyFromInt(&c.headKeyVals[0], gs.intKey, c.groupColTypes[0])
+		setPartialKeyFromInt(&c.headKeyVals[0], c.intKeys[gi], c.groupColTypes[0])
 	case partialKeyModeDualInt:
 		setPartialKeyFromInt(&c.headKeyVals[0], c.dualIntKeysA[gi], c.groupColTypes[0])
 		setPartialKeyFromInt(&c.headKeyVals[1], c.dualIntKeysB[gi], c.groupColTypes[1])
@@ -412,8 +413,7 @@ func appendSerializedKey(buf []byte, vals []any) []byte {
 // files written via the cursor stay compatible with file-source readers.
 func (c *partialGroupCursor) appendIntModeSortKey(buf []byte, gi int) []byte {
 	if c.keyMode == partialKeyModeInt {
-		gs := c.intGroupStates[gi]
-		return appendTypedIntKey(buf, gs.intKey, c.groupColTypes[0])
+		return appendTypedIntKey(buf, c.intKeys[gi], c.groupColTypes[0])
 	}
 	// partialKeyModeDualInt
 	buf = appendTypedIntKey(buf, c.dualIntKeysA[gi], c.groupColTypes[0])

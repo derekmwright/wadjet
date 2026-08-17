@@ -1569,7 +1569,7 @@ func (h *HashAggregate) spillPartialPartitions(target int64) error {
 	// probe chains correct), zero the SoA accumulator slots, and push the
 	// slot indices onto the free list for the next Consume cycle to reuse.
 	for _, slot := range drainSet {
-		key := h.intGroupStates[slot].intKey
+		key := h.intKeys[slot]
 		h.intGroupIndex.Delete(key)
 		for ai := range h.intFlatAccs {
 			h.intFlatAccs[ai].clearGroup(int(slot))
@@ -1619,6 +1619,7 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	}
 	h.genKeyNext = nil
 	h.intGroupStates = nil
+	h.intKeys = nil
 	h.strGroupStates = nil
 	h.strNullGroupIdx = -1
 	h.keys = nil

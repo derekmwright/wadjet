@@ -145,6 +145,14 @@ type HashAggregate struct {
 	intGroupIndex  *intHashTable
 	intGroupStates []*groupState
 	intGroupKeyCol int // column index for the integer group-by key
+	// intKeys is the per-group key SoA for the single-int path. With
+	// simple aggregates the groupState carries NOTHING this array and the
+	// flat accumulators don't (the 24B struct held only the key), so
+	// intGroupStates entries stay nil — the same deferral the dual-int
+	// path got in 6806c83 (ClickBench Q33: per-group structs were the
+	// margin between fitting under GOMEMLIMIT and thrashing).
+	// materializeFlatAccums reifies on the migration/merge cold paths.
+	intKeys []int64
 
 	// SoA (Struct of Arrays) accumulators for intGroupKey fast path.
 	// Stores accumulator fields in contiguous arrays instead of per-group
@@ -969,7 +977,10 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			h.intGroupKeyCol = h.groupColIdx[0]
 			if h.intGroupStates == nil {
 				h.intGroupStates = make([]*groupState, 0, htInitSize)
-				h.gsPool.preAlloc(htInitSize)
+				h.intKeys = make([]int64, 0, htInitSize)
+				// No gsPool.preAlloc: states stay nil on this path, and a
+				// hint-sized chunk would be dead weight at exactly the
+				// group counts where memory is the constraint.
 			}
 			if h.intFlatAccs == nil {
 				if len(h.intGroupStates) > 0 {
@@ -1337,11 +1348,13 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 				intIdx.CheckGrow()
 				if fromFree {
 					h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
-					h.intGroupStates[newIdx].intKey = key
+					h.intKeys[newIdx] = key
 				} else {
-					gs := h.gsPool.alloc()
-					gs.intKey = key
-					h.intGroupStates = append(h.intGroupStates, gs)
+					// nil state — the key lives in the intKeys SoA and the
+					// accumulators in the flat arrays (see the intKeys field
+					// comment; the dual-int deferral pattern).
+					h.intGroupStates = append(h.intGroupStates, nil)
+					h.intKeys = append(h.intKeys, key)
 					for ai := range h.intFlatAccs {
 						h.intFlatAccs[ai].appendGroup()
 					}
@@ -1379,11 +1392,13 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 				intIdx.CheckGrow()
 				if fromFree {
 					h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
-					h.intGroupStates[newIdx].intKey = key
+					h.intKeys[newIdx] = key
 				} else {
-					gs := h.gsPool.alloc()
-					gs.intKey = key
-					h.intGroupStates = append(h.intGroupStates, gs)
+					// nil state — the key lives in the intKeys SoA and the
+					// accumulators in the flat arrays (see the intKeys field
+					// comment; the dual-int deferral pattern).
+					h.intGroupStates = append(h.intGroupStates, nil)
+					h.intKeys = append(h.intKeys, key)
 					for ai := range h.intFlatAccs {
 						h.intFlatAccs[ai].appendGroup()
 					}
@@ -2923,7 +2938,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		// and hands them to SetValue without re-boxing.
 		deferredBoxing := ext == nil || ext.keyValues == nil
 		if h.useIntGroupKey && deferredBoxing {
-			writeIntKeyToColumn(out.Columns[0], i, gs.intKey, h.groupColTypes[0])
+			writeIntKeyToColumn(out.Columns[0], i, h.intKeys[start+i], h.groupColTypes[0])
 		} else if h.useDualIntGroupKey && deferredBoxing {
 			idx := start + i
 			writeIntKeyToColumn(out.Columns[0], i, h.dualIntKeysA[idx], h.groupColTypes[0])
@@ -3082,6 +3097,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		h.intFlatAccs = nil
 		h.intGroupStates = nil
 		h.intGroupIndex = nil
+		h.intKeys = nil
 		h.dualIntKeysA = nil
 		h.dualIntKeysB = nil
 		h.dualIntNextGroup = nil
@@ -3459,6 +3475,7 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	h.intGroupIndex = o.intGroupIndex
 	h.intGroupStates = o.intGroupStates
 	h.intGroupKeyCol = o.intGroupKeyCol
+	h.intKeys = o.intKeys
 	h.intFlatAccs = o.intFlatAccs
 	h.useDualIntGroupKey = o.useDualIntGroupKey
 	h.dualIntGroupKeyCols = o.dualIntGroupKeyCols
@@ -3493,6 +3510,7 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	// the charge it made while accumulating).
 	o.intGroupIndex = nil
 	o.intGroupStates = nil
+	o.intKeys = nil
 	o.intFlatAccs = nil
 	o.dualIntKeysA = nil
 	o.dualIntKeysB = nil
@@ -3514,9 +3532,9 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 // materializeFlatAccums + migrateToGenericMap + per-group Accumulator.Merge.
 // Operates on flat arrays (count, sumI64, sumF64, min, max) with int hash lookup.
 func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
-	for i, oGS := range o.intGroupStates {
+	for i := range o.intGroupStates {
 		newIdx := int32(len(h.intGroupStates))
-		gsIdx, found := h.intGroupIndex.GetOrInsert(oGS.intKey, newIdx)
+		gsIdx, found := h.intGroupIndex.GetOrInsert(o.intKeys[i], newIdx)
 		if found {
 			// Existing group: merge flat accumulators in-place
 			for ai := range h.intFlatAccs {
@@ -3594,7 +3612,8 @@ func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
 			}
 		} else {
 			// New group: append to all flat arrays (already inserted by GetOrInsert)
-			h.intGroupStates = append(h.intGroupStates, oGS)
+			h.intGroupStates = append(h.intGroupStates, o.intGroupStates[i])
+			h.intKeys = append(h.intKeys, o.intKeys[i])
 			for ai := range h.intFlatAccs {
 				hfa := &h.intFlatAccs[ai]
 				ofa := &o.intFlatAccs[ai]
@@ -3839,13 +3858,19 @@ func (h *HashAggregate) migrateToGenericMap() {
 	h.serializedKeys = make([]string, 0, len(h.intGroupStates))
 	h.serializedKeyBytes = 0
 	h.keys = make([][]any, 0, len(h.intGroupStates))
-	for _, gs := range h.intGroupStates {
+	for gi, gs := range h.intGroupStates {
+		intKey := h.intKeys[gi]
+		if gs == nil {
+			// Deferred single-int state: reify for the generic path.
+			gs = h.gsPool.alloc()
+			gs.intKey = intKey
+		}
 		// Lazily construct keyValues for groups that deferred boxing
 		ext := gs.ensureExtras()
 		if ext.keyValues == nil {
-			ext.keyValues = []any{gs.intKey}
+			ext.keyValues = []any{intKey}
 		}
-		key := string(appendIntKeyRowFormat(h.keyBuf[:0], gs.intKey, h.groupColTypes[0]))
+		key := string(appendIntKeyRowFormat(h.keyBuf[:0], intKey, h.groupColTypes[0]))
 		h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.serializedKeys = append(h.serializedKeys, key)
@@ -3855,6 +3880,7 @@ func (h *HashAggregate) migrateToGenericMap() {
 	h.useIntGroupKey = false
 	h.intGroupStates = nil
 	h.intGroupIndex = nil
+	h.intKeys = nil
 }
 
 // keySerCol resolves one group-key column's typed accessors once per
@@ -4609,9 +4635,14 @@ func (h *HashAggregate) materializeFlatAccums() {
 	}
 	for gi, gs := range h.intGroupStates {
 		if gs == nil {
-			// Dual-int deferred state: reify for the migration/merge cold
-			// path that needs boxed extras.
+			// Deferred state (single-int and dual-int paths): reify for
+			// the migration/merge cold path that needs boxed extras. The
+			// single-int key rides along so post-reify readers of
+			// gs.intKey stay correct; dual-int keys stay in their SoA.
 			gs = h.gsPool.alloc()
+			if h.useIntGroupKey && gi < len(h.intKeys) {
+				gs.intKey = h.intKeys[gi]
+			}
 			h.intGroupStates[gi] = gs
 		}
 		ext := gs.ensureExtras()
