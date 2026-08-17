@@ -1189,6 +1189,31 @@ LIMIT 10
 | `URL_EXTRACT_QUERY(url)` | Extract query string | `URL_EXTRACT_QUERY('https://x.com?a=1&b=2')` → `'a=1&b=2'` |
 | `URL_EXTRACT_PARAMETER(url, key)` | Extract query parameter value | `URL_EXTRACT_PARAMETER(url, 'limit')` |
 
+### Session Information Functions
+
+PostgreSQL clients ask who and where they are before they ask for data, so
+these answer the standard session functions. `CURRENT_USER`, `SESSION_USER`,
+`USER`, `CURRENT_ROLE`, `CURRENT_CATALOG` and `CURRENT_SCHEMA` are niladic:
+standard SQL spells them without parentheses, and both spellings work. The
+values are server constants — the scalar function registry is process-global
+and cannot see the calling connection.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `CURRENT_USER` | Session user name | `SELECT CURRENT_USER` → `'wadjet'` |
+| `SESSION_USER` | Alias for `CURRENT_USER` | `SELECT SESSION_USER` → `'wadjet'` |
+| `USER` | Alias for `CURRENT_USER` | `SELECT USER` → `'wadjet'` |
+| `CURRENT_ROLE` | Alias for `CURRENT_USER` | `SELECT CURRENT_ROLE` → `'wadjet'` |
+| `CURRENT_CATALOG` | Database name | `SELECT CURRENT_CATALOG` → `'wadjet'` |
+| `CURRENT_DATABASE()` | Database name | `SELECT CURRENT_DATABASE()` → `'wadjet'` |
+| `CURRENT_SCHEMA` | Current schema | `SELECT CURRENT_SCHEMA` → `'public'` |
+| `CURRENT_SCHEMAS(implicit)` | Search path as a text array | `CURRENT_SCHEMAS(false)` → `'{public}'` |
+| `VERSION()` | Server version string | `SELECT VERSION()` → `'PostgreSQL 15.0 (Wadjet analytical query engine)'` |
+
+These names are reserved, as they are in PostgreSQL: a table column that is
+literally called `user` is referenced with the double-quoted spelling
+(`SELECT "user" FROM audit`), which is a plain column reference.
+
 ### Type Introspection
 
 | Function | Description | Example |

@@ -20,6 +20,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/coordinator"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -218,14 +219,17 @@ type pgConn struct {
 	sessionVars map[string]string
 
 	// Extended Query protocol state
-	preparedSQL    string                  // last parsed statement SQL
-	portalSQL      string                  // last bound portal SQL
-	stmts          map[string]string       // named prepared statements
-	described      bool                    // true if Describe was sent for current portal
-	resultFmtCodes []int16                 // result format codes from Bind (0=text, 1=binary)
-	describeResult *wadjet.QueryResult     // cached Describe result for Execute reuse
-	describeStream coordinator.BatchStream // columnar half of describeResult (coord path)
-	describeErr    error                   // cached Describe-time execution failure for Execute replay
+	preparedSQL     string                  // last parsed statement SQL
+	portalSQL       string                  // last bound portal SQL
+	stmts           map[string]string       // named prepared statements
+	described       bool                    // true if Describe was sent for current portal
+	describedFields int                     // field count of the RowDescription Describe sent
+	resultFmtCodes  []int16                 // result format codes from Bind (0=text, 1=binary)
+	describeResult  *wadjet.QueryResult     // cached Describe result for Execute reuse
+	describeStream  coordinator.BatchStream // columnar half of describeResult (coord path)
+	describeErr     error                   // cached Describe-time execution failure for Execute replay
+	describeSynth   *synthAnswer            // cached Describe-time introspection answer
+	describedSQL    string                  // statement the three caches above belong to
 
 	// Transaction state: 'I' = idle, 'T' = in transaction, 'E' = failed
 	txState byte
@@ -744,7 +748,8 @@ func (c *pgConn) handleQuery(sql string) {
 	}
 
 	// Handle introspection/synthetic queries (SELECT 1, version(), pg_catalog, etc.)
-	if c.handleIntrospection(sql, upper) {
+	if ans := c.matchIntrospection(sql, upper); ans != nil {
+		c.sendSynthAnswer(ans)
 		c.sendReadyForQuery()
 		return
 	}
@@ -858,6 +863,7 @@ func (c *pgConn) handleParse(payload []byte) {
 		c.logger.Debug("pgwire parse", "stmt", name, "sql", sql)
 	}
 	c.described = false
+	c.describedFields = 0
 	c.closeDescribeCache() // invalidate cached result for new statement
 
 	// Send ParseComplete ('1')
@@ -962,33 +968,32 @@ func (c *pgConn) describeSQL(sql string) {
 	sql = strings.TrimSpace(sql)
 
 	if sql == "" || isCommandSQL(sql) {
-		c.sendMsg('n', nil) // NoData
+		c.sendNoData()
 		return
 	}
 
-	// Check introspection queries — these return synthetic results
+	// Introspection queries answer synthetically. Describe resolves them
+	// through the same matcher Execute uses and describes the exact column
+	// list that Execute will send rows for — a guessed description (the old
+	// extractSelectColumns path) can disagree with the answer, and a driver
+	// that trusts the description then misreads the tuples.
 	upper := strings.ToUpper(sql)
-	normalized := strings.Join(strings.Fields(upper), " ")
-
-	// SHOW TABLES and SHOW COLUMNS FROM are handled by the query engine
-	// (QueryShowTables / QueryDescribe), so fall through to the real
-	// query execution below to discover correct column metadata.
-	isEngineShow := strings.HasPrefix(normalized, "SHOW TABLES") ||
-		strings.HasPrefix(normalized, "SHOW COLUMNS ")
-	if !isEngineShow && (strings.HasPrefix(normalized, "SHOW ") ||
-		strings.Contains(normalized, "PG_CATALOG") ||
-		strings.Contains(normalized, "INFORMATION_SCHEMA") ||
-		strings.Contains(normalized, "PG_TYPE") ||
-		strings.Contains(normalized, "PG_CLASS")) {
-		// Return text columns based on SELECT list
-		cols := extractSelectColumns(sql)
-		if len(cols) == 0 {
-			cols = []string{"?column?"}
-		}
-		c.sendRowDescription(cols)
-		c.described = true
+	if ans := c.matchIntrospection(sql, upper); ans != nil {
+		c.closeDescribeCache()
+		c.describeSynth = ans
+		c.describedSQL = sql
+		c.sendRowDescription(ans.cols)
+		c.described, c.describedFields = true, len(ans.cols)
 		return
 	}
+
+	// A statement still holding $N placeholders does not parse — Bind
+	// substitutes them into the portal — but Describe has to answer the shape
+	// now: pgJDBC ties a RowDescription to the Describe it sent and does not
+	// pick up a later one. So the shape is discovered from the statement with
+	// NULL standing in for the parameters. The rows that run produces are the
+	// wrong rows for any portal, so nothing is cached from it.
+	shapeSQL, parameterized := substituteNullParams(sql)
 
 	// Execute the real query to get typed column metadata.
 	// Cache the result so Execute can reuse it instead of re-executing,
@@ -999,10 +1004,10 @@ func (c *pgConn) describeSQL(sql string) {
 	var result *wadjet.QueryResult
 	var stream coordinator.BatchStream
 	var err error
-	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
-		result, stream, err = c.queryViaCoord(ctx, sql)
+	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(shapeSQL) {
+		result, stream, err = c.queryViaCoord(ctx, shapeSQL)
 	} else {
-		result, err = c.db.Query(ctx, sql)
+		result, err = c.db.Query(ctx, shapeSQL)
 	}
 	if err != nil {
 		// Can't describe — send NoData rather than error, and CACHE the
@@ -1014,28 +1019,71 @@ func (c *pgConn) describeSQL(sql string) {
 		// re-execution hung to the query timeout on lost task results).
 		c.closeDescribeCache()
 		c.describeErr = err
+		c.describedSQL = sql
 		// The client now has NoData for this statement; if a later Execute
 		// nevertheless produces rows, drivers fail with "tuples but no
 		// field structure" — this line is the breadcrumb for that hunt.
 		if c.logger != nil {
 			c.logger.Debug("pgwire describe: no data (execution failed)", "sql", sql, "err", err)
 		}
-		c.sendMsg('n', nil)
+		c.sendNoData()
 		return
 	}
 	c.closeDescribeCache() // release any prior cached stream before overwriting
-	c.describeResult = result
-	c.describeStream = stream
+	if parameterized {
+		// Shape only: these rows answer NULL parameters, not the portal's.
+		if stream != nil {
+			stream.Close()
+		}
+	} else {
+		c.describeResult = result
+		c.describeStream = stream
+		c.describedSQL = sql
+	}
 
 	if len(result.ColumnMetas) > 0 {
 		c.sendTypedRowDescription(result.ColumnMetas)
-		c.described = true
+		c.described, c.describedFields = true, len(result.ColumnMetas)
 	} else if len(result.Columns) > 0 {
 		c.sendRowDescription(result.Columns)
-		c.described = true
+		c.described, c.describedFields = true, len(result.Columns)
 	} else {
-		c.sendMsg('n', nil)
+		c.sendNoData()
 	}
+}
+
+// substituteNullParams replaces every $N placeholder with NULL and reports
+// whether the statement had any. Like Bind's own substitution, the scan does
+// not skip string literals — a literal '$1' is rewritten too.
+func substituteNullParams(sql string) (string, bool) {
+	if !strings.Contains(sql, "$") {
+		return sql, false
+	}
+	var b strings.Builder
+	b.Grow(len(sql))
+	found := false
+	for i := 0; i < len(sql); i++ {
+		if sql[i] == '$' && i+1 < len(sql) && sql[i+1] >= '0' && sql[i+1] <= '9' {
+			j := i + 1
+			for j < len(sql) && sql[j] >= '0' && sql[j] <= '9' {
+				j++
+			}
+			b.WriteString("NULL")
+			found = true
+			i = j - 1
+			continue
+		}
+		b.WriteByte(sql[i])
+	}
+	return b.String(), found
+}
+
+// sendNoData sends NoData ('n') and records that this statement has no
+// promised result shape. Execute must not produce tuples after it.
+func (c *pgConn) sendNoData() {
+	c.described = false
+	c.describedFields = 0
+	c.sendMsg('n', nil)
 }
 
 func (c *pgConn) handleExecute(payload []byte) {
@@ -1086,9 +1134,29 @@ func (c *pgConn) handleExecute(payload []byte) {
 		return
 	}
 
-	// Handle catalog/introspection queries from BI tools
-	if result := c.handleIntrospection(sql, upper); result {
+	// Handle catalog/introspection queries from BI tools. Describe resolved
+	// the same statement through the same matcher, so the RowDescription the
+	// client holds already describes these columns; Execute sends tuples only.
+	if ans := c.introspectionAnswer(sql, upper); ans != nil {
+		// A Describe-time failure cached for this statement is moot once the
+		// introspection layer answers it — dropping it here keeps a stale
+		// error from replaying on the NEXT statement of this connection.
+		c.closeDescribeCache()
+		if !c.shapeAgrees(len(ans.cols), sql) {
+			return
+		}
+		c.ensureDescribed(ans.cols, nil)
+		c.sendSynthRows(ans, c.resultFmtCodes)
 		return
+	}
+
+	// Everything Describe cached belongs to the statement Describe ran. A
+	// portal carrying different SQL — Bind substitutes parameter literals, so
+	// `WHERE id = $1` becomes `WHERE id = '2'` — gets none of it: replaying a
+	// placeholder statement's parse failure would fail an executable portal,
+	// and reusing its rows would answer with the wrong ones.
+	if c.describedSQL != sql {
+		c.closeDescribeCache()
 	}
 
 	// Replay a Describe-time execution failure instead of re-executing:
@@ -1140,6 +1208,13 @@ func (c *pgConn) handleExecute(payload []byte) {
 		c.sendCommandComplete("SELECT 0")
 		return
 	}
+	if !c.shapeAgrees(len(columns), sql) {
+		if stream != nil {
+			stream.Close()
+		}
+		return
+	}
+	c.ensureDescribed(columns, result.ColumnMetas)
 
 	// Extended query protocol: Execute sends only DataRow + CommandComplete.
 	// RowDescription was already sent by Describe. Do NOT send it again.
@@ -1152,6 +1227,63 @@ func (c *pgConn) handleExecute(payload []byte) {
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", sent))
 }
 
+// introspectionAnswer resolves sql for the Execute path, reusing the answer
+// Describe already computed for the same statement. The reuse is keyed on the
+// SQL text: Bind substitutes parameter literals into the portal, so a portal
+// can carry a narrower query than the statement Describe saw, and that portal
+// deserves its own answer (a pg_class OID lookup for `relname = $1` matches
+// nothing; the bound `relname = 'users'` matches a table).
+func (c *pgConn) introspectionAnswer(sql, upper string) *synthAnswer {
+	if c.describeSynth != nil && c.describedSQL == sql {
+		return c.describeSynth
+	}
+	return c.matchIntrospection(sql, upper)
+}
+
+// ensureDescribed sends a RowDescription for the result Execute is about to
+// emit when the client holds none — Describe answered NoData (a parameterized
+// statement it cannot plan yet, or a Describe-time failure) or the client
+// skipped Describe entirely.
+//
+// PostgreSQL never needs this: it can describe a parameterized statement, so
+// its Execute only ever carries tuples. Wadjet's Describe runs the statement
+// to learn its shape and a statement still holding $N placeholders does not
+// run, so the shape is only knowable once Bind has substituted them. Tuples
+// with no field structure are the one thing a driver cannot recover from, so
+// the structure goes out first.
+func (c *pgConn) ensureDescribed(cols []string, metas []wadjet.ColumnMeta) {
+	if c.described {
+		return
+	}
+	if len(metas) > 0 {
+		c.sendTypedRowDescription(metas)
+		c.describedFields = len(metas)
+	} else {
+		c.sendRowDescription(cols)
+		c.describedFields = len(cols)
+	}
+	c.described = true
+}
+
+// shapeAgrees enforces the extended-protocol invariant that Execute's tuples
+// fit the field structure Describe promised. Describe and Execute route
+// through the same decisions, so a disagreement is a server bug — reporting
+// it as an error beats emitting DataRows a driver cannot read ("Received
+// resultset tuples, but no field structure for them").
+func (c *pgConn) shapeAgrees(cols int, sql string) bool {
+	if !c.described || c.describedFields == cols {
+		return true
+	}
+	if c.logger != nil {
+		c.logger.Error("pgwire execute: result shape disagrees with Describe",
+			"sql", sql, "described_fields", c.describedFields, "execute_fields", cols)
+	}
+	c.sendError("ERROR", "42804", fmt.Sprintf(
+		"result shape changed between Describe and Execute: described %d columns, execute produced %d",
+		c.describedFields, cols))
+	return false
+}
+
 func (c *pgConn) handleClose(payload []byte) {
 	// Close: type('S'/'P') + name\0
 	if len(payload) >= 1 && payload[0] == 'S' {
@@ -1162,24 +1294,47 @@ func (c *pgConn) handleClose(payload []byte) {
 	c.sendMsg('3', nil)
 }
 
-// handleIntrospection handles pg_catalog queries and synthetic expressions
-// from BI tools like Superset, SQLAlchemy, DBeaver, and psql.
-func (c *pgConn) handleIntrospection(sql, upper string) bool {
+// synthAnswer is a fully materialized introspection answer: the columns the
+// server promises in RowDescription and the rows it sends for them.
+//
+// Describe and Execute resolve a statement through the same matchIntrospection
+// call, so the shape a driver is promised and the shape it receives come from
+// one decision instead of two independent pattern matches. The pair drifting
+// apart is what the 2026-08-17 DataGrip report was: Describe failed and sent
+// NoData, Execute matched a substring and sent a one-column row anyway, and
+// pgJDBC reported "Received resultset tuples, but no field structure for them".
+type synthAnswer struct {
+	cols []string
+	rows []map[string]any
+}
+
+func singleRow(cols []string, row map[string]any) *synthAnswer {
+	return &synthAnswer{cols: cols, rows: []map[string]any{row}}
+}
+
+// matchIntrospection resolves pg_catalog queries and the synthetic expressions
+// BI tools (Superset, SQLAlchemy, DBeaver, DataGrip, psql) send during
+// connection setup. It returns nil when the statement is not one this layer
+// answers — the caller then runs it on the query engine.
+func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
 	// Normalize whitespace for matching (newlines, tabs → spaces)
 	normalized := strings.Join(strings.Fields(upper), " ")
 
 	// SHOW statements (SHOW TRANSACTION ISOLATION LEVEL, SHOW server_version, etc.)
 	if strings.HasPrefix(normalized, "SHOW ") {
-		return c.handleShow(normalized)
+		return c.matchShow(normalized)
 	}
 
-	// Well-known functions that may reference pg_catalog — handle before the
-	// blanket pg_catalog intercept so we return real values.
-	if strings.Contains(normalized, "VERSION()") {
-		c.sendSingleRow([]string{"version"}, map[string]any{
-			"version": "PostgreSQL 15.0 (Wadjet analytical query engine)",
+	// version() is often spelled with a pg_catalog qualifier, which would
+	// otherwise fall into the blanket pg_catalog intercept below and come
+	// back empty. Only the bare one-expression form is claimed here; any
+	// richer spelling (an alias, more columns) is a real query the engine
+	// answers with version()'s value under the client's own labels.
+	if list, ok := selectList(normalized); ok &&
+		(list == "VERSION()" || list == "PG_CATALOG.VERSION()") {
+		return singleRow([]string{"version"}, map[string]any{
+			"version": expr.ServerVersion,
 		})
-		return true
 	}
 
 	// pg_catalog / information_schema introspection — return real catalog data
@@ -1202,123 +1357,153 @@ func (c *pgConn) handleIntrospection(sql, upper string) bool {
 		strings.Contains(normalized, "PG_DATABASE")
 
 	if isPgCatalog {
-		if c.handleCatalogQuery(normalized) {
-			return true
+		ctx, cancel := c.queryContext()
+		defer cancel()
+		if ans := c.matchCatalogQuery(ctx, normalized); ans != nil {
+			return ans
 		}
-		// Fallback: return empty result with proper columns
+		// Fallback: empty result with the columns the SELECT list names.
 		cols := extractSelectColumns(sql)
-		c.sendRowDescription(cols)
-		c.sendCommandComplete("SELECT 0")
-		return true
+		if len(cols) == 0 {
+			cols = []string{"?column?"}
+		}
+		return &synthAnswer{cols: cols}
 	}
 
 	// SELECT with no FROM clause — evaluate common synthetic expressions.
 	// Wadjet requires FROM, but PostgreSQL clients expect these to work.
 	if strings.HasPrefix(normalized, "SELECT ") && !strings.Contains(normalized, " FROM ") {
-		return c.handleSyntheticSelect(sql, normalized)
+		return c.matchSyntheticSelect(normalized)
 	}
 
-	return false
+	return nil
 }
 
-// handleSyntheticSelect handles SELECT expressions that have no FROM clause.
-func (c *pgConn) handleSyntheticSelect(sql, upper string) bool {
-	// version()
-	if strings.Contains(upper, "VERSION()") {
-		c.sendSingleRow([]string{"version"}, map[string]any{
-			"version": "PostgreSQL 15.0 (Wadjet analytical query engine)",
-		})
-		return true
+// selectList returns the projection list of a normalized SELECT that has no
+// FROM clause, and reports whether the statement is one.
+func selectList(normalized string) (string, bool) {
+	if !strings.HasPrefix(normalized, "SELECT ") || strings.Contains(normalized, " FROM ") {
+		return "", false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(normalized, "SELECT ")), true
+}
+
+// matchSyntheticSelect answers SELECT expressions that have no FROM clause.
+// Matching is against the whole projection list, never a substring: these
+// answers are one column wide, so they may only claim a statement that is one
+// column wide. `select current_database(), current_schema(), current_user` —
+// DataGrip's opening query, answered here with a single column until this
+// changed — has three columns and belongs to the engine, which resolves
+// current_user, current_schema, current_catalog and friends as ordinary
+// niladic functions. Anything this layer does not claim exactly still returns
+// a real result, with a RowDescription that matches it.
+func (c *pgConn) matchSyntheticSelect(normalized string) *synthAnswer {
+	list, ok := selectList(normalized)
+	if !ok || strings.Contains(list, ",") {
+		return nil
 	}
 
-	// current_schema / current_schema()
-	if strings.Contains(upper, "CURRENT_SCHEMA") {
-		c.sendSingleRow([]string{"current_schema"}, map[string]any{
+	switch list {
+	case "VERSION()":
+		return singleRow([]string{"version"}, map[string]any{
+			"version": expr.ServerVersion,
+		})
+
+	case "CURRENT_SCHEMA", "CURRENT_SCHEMA()":
+		return singleRow([]string{"current_schema"}, map[string]any{
 			"current_schema": "public",
 		})
-		return true
-	}
 
-	// current_database()
-	if strings.Contains(upper, "CURRENT_DATABASE()") {
-		c.sendSingleRow([]string{"current_database"}, map[string]any{
+	case "CURRENT_DATABASE()", "CURRENT_CATALOG":
+		return singleRow([]string{"current_database"}, map[string]any{
 			"current_database": "wadjet",
 		})
-		return true
-	}
 
-	// current_user / session_user
-	if strings.Contains(upper, "CURRENT_USER") || strings.Contains(upper, "SESSION_USER") {
+	case "CURRENT_USER", "CURRENT_USER()", "SESSION_USER", "USER", "CURRENT_ROLE":
+		// The authenticated identity is known here and not in the engine —
+		// the scalar registry is process-global and has no per-connection
+		// context — so this is the one answer that beats the engine's
+		// constant.
 		user := "wadjet"
 		if c.identity != nil {
 			user = c.identity.Name
 		}
-		c.sendSingleRow([]string{"current_user"}, map[string]any{
+		return singleRow([]string{"current_user"}, map[string]any{
 			"current_user": user,
 		})
-		return true
-	}
 
-	// SELECT 1 (connection liveness check)
-	if strings.TrimSpace(upper) == "SELECT 1" {
-		c.sendSingleRow([]string{"?column?"}, map[string]any{
+	case "1":
+		// Connection liveness check; PostgreSQL labels the column ?column?.
+		return singleRow([]string{"?column?"}, map[string]any{
 			"?column?": "1",
 		})
-		return true
 	}
 
-	// Any other SELECT without FROM — delegate to the query engine which
-	// handles table-less SELECTs via DualSource (e.g., SELECT CURRENT_DATE,
-	// SELECT 1+1, SELECT NOW()). Return false so handleQuery falls through
-	// to db.Query().
-	return false
+	// Any other SELECT without FROM — delegate to the query engine, which
+	// handles table-less SELECTs via DualSource (SELECT CURRENT_DATE,
+	// SELECT 1+1, SELECT NOW(), multi-column session queries).
+	return nil
 }
 
-// handleShow handles SHOW statements from PostgreSQL clients.
-func (c *pgConn) handleShow(upper string) bool {
+// matchShow answers SHOW statements from PostgreSQL clients.
+func (c *pgConn) matchShow(upper string) *synthAnswer {
 	switch {
 	case strings.Contains(upper, "TRANSACTION ISOLATION LEVEL"):
-		c.sendSingleRow([]string{"transaction_isolation"}, map[string]any{
+		return singleRow([]string{"transaction_isolation"}, map[string]any{
 			"transaction_isolation": "read committed",
 		})
 	case strings.Contains(upper, "STANDARD_CONFORMING_STRINGS"):
-		c.sendSingleRow([]string{"standard_conforming_strings"}, map[string]any{
+		return singleRow([]string{"standard_conforming_strings"}, map[string]any{
 			"standard_conforming_strings": "on",
 		})
 	case strings.Contains(upper, "SERVER_VERSION"):
-		c.sendSingleRow([]string{"server_version"}, map[string]any{
+		return singleRow([]string{"server_version"}, map[string]any{
 			"server_version": "15.0",
 		})
 	case strings.Contains(upper, "SERVER_ENCODING"):
-		c.sendSingleRow([]string{"server_encoding"}, map[string]any{
+		return singleRow([]string{"server_encoding"}, map[string]any{
 			"server_encoding": "UTF8",
 		})
 	case strings.Contains(upper, "CLIENT_ENCODING"):
-		c.sendSingleRow([]string{"client_encoding"}, map[string]any{
+		return singleRow([]string{"client_encoding"}, map[string]any{
 			"client_encoding": "UTF8",
 		})
 	case strings.Contains(upper, "DATESTYLE"):
-		c.sendSingleRow([]string{"DateStyle"}, map[string]any{
+		return singleRow([]string{"DateStyle"}, map[string]any{
 			"DateStyle": "ISO, MDY",
 		})
 	case strings.HasPrefix(upper, "SHOW TABLES"), strings.HasPrefix(upper, "SHOW COLUMNS "):
 		// Route SHOW TABLES and SHOW COLUMNS FROM through the query engine,
 		// which parses them as QueryShowTables / QueryDescribe respectively.
-		return false
+		return nil
 	default:
 		// Unknown SHOW — return empty
-		c.sendSingleRow([]string{"setting"}, map[string]any{
+		return singleRow([]string{"setting"}, map[string]any{
 			"setting": "",
 		})
 	}
-	return true
 }
 
-// sendSingleRow sends a one-row result set.
-func (c *pgConn) sendSingleRow(cols []string, row map[string]any) {
-	c.sendRowDescription(cols)
-	c.sendDataRow(cols, row)
-	c.sendCommandComplete("SELECT 1")
+// sendSynthAnswer writes a complete simple-protocol result for ans:
+// RowDescription, DataRows, CommandComplete. Simple-protocol results are
+// always in text format.
+func (c *pgConn) sendSynthAnswer(ans *synthAnswer) {
+	c.sendRowDescription(ans.cols)
+	c.sendSynthRows(ans, nil)
+}
+
+// sendSynthRows writes the DataRows and CommandComplete for ans, without a
+// RowDescription. The extended protocol takes the description from Describe
+// alone; Execute contributes tuples.
+func (c *pgConn) sendSynthRows(ans *synthAnswer, fmtCodes []int16) {
+	for _, row := range ans.rows {
+		if len(fmtCodes) > 0 {
+			c.sendDataRowFormatted(ans.cols, row, fmtCodes)
+		} else {
+			c.sendDataRow(ans.cols, row)
+		}
+	}
+	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(ans.rows)))
 }
 
 // tableOID returns a deterministic fake OID for a table name.
@@ -1358,31 +1543,29 @@ func pgTypeOID(typeName string) int {
 	}
 }
 
-// handleCatalogQuery returns real catalog data for specific pg_catalog queries
+// matchCatalogQuery returns real catalog data for specific pg_catalog queries
 // that SQLAlchemy/Superset uses for schema introspection.
-func (c *pgConn) handleCatalogQuery(normalized string) bool {
-	ctx := context.Background()
-
+func (c *pgConn) matchCatalogQuery(ctx context.Context, normalized string) *synthAnswer {
 	// pg_type — JDBC drivers query this to map OIDs to type names
 	if strings.Contains(normalized, "PG_TYPE") && !strings.Contains(normalized, "PG_CLASS") &&
 		!strings.Contains(normalized, "PG_ATTRIBUTE") {
-		return c.handlePgType(normalized)
+		return c.matchPgType(normalized)
 	}
 
 	// information_schema.alerts
 	if strings.Contains(normalized, "INFORMATION_SCHEMA") && strings.Contains(normalized, "ALERTS") {
-		return c.handleInfoSchemaAlerts(ctx)
+		return c.matchInfoSchemaAlerts(ctx)
 	}
 
 	// information_schema.tables
 	if strings.Contains(normalized, "INFORMATION_SCHEMA") && strings.Contains(normalized, "TABLES") &&
 		!strings.Contains(normalized, "COLUMNS") {
-		return c.handleInfoSchemaTables(ctx)
+		return c.matchInfoSchemaTables(ctx)
 	}
 
 	// information_schema.columns
 	if strings.Contains(normalized, "INFORMATION_SCHEMA") && strings.Contains(normalized, "COLUMNS") {
-		return c.handleInfoSchemaColumns(ctx, normalized)
+		return c.matchInfoSchemaColumns(ctx, normalized)
 	}
 
 	// Schema listing: SELECT nspname FROM pg_namespace (used by get_schema_names)
@@ -1391,11 +1574,7 @@ func (c *pgConn) handleCatalogQuery(normalized string) bool {
 		!strings.Contains(normalized, "PG_CLASS") &&
 		!strings.Contains(normalized, "PG_TYPE") &&
 		!strings.Contains(normalized, "PG_ATTRIBUTE") {
-		cols := []string{"nspname"}
-		c.sendRowDescription(cols)
-		c.sendDataRow(cols, map[string]any{"nspname": "public"})
-		c.sendCommandComplete("SELECT 1")
-		return true
+		return singleRow([]string{"nspname"}, map[string]any{"nspname": "public"})
 	}
 
 	// Index/constraint queries that happen to JOIN pg_attribute — return empty
@@ -1408,21 +1587,19 @@ func (c *pgConn) handleCatalogQuery(normalized string) bool {
 		if len(cols) == 0 {
 			cols = []string{"?column?"}
 		}
-		c.sendRowDescription(cols)
-		c.sendCommandComplete("SELECT 0")
-		return true
+		return &synthAnswer{cols: cols}
 	}
 
 	// Column info: pg_attribute query
 	if strings.Contains(normalized, "PG_ATTRIBUTE") {
-		return c.handleAttributeQuery(ctx, normalized)
+		return c.matchAttributeQuery(ctx, normalized)
 	}
 
 	// pg_class queries: table listing, OID lookup, or reverse OID lookup
 	if strings.Contains(normalized, "PG_CLASS") && strings.Contains(normalized, "RELNAME") {
 		tables, err := c.db.ListTables(ctx)
 		if err != nil {
-			return false
+			return nil
 		}
 
 		// Specific table lookup: relname = '<value>' in WHERE
@@ -1431,16 +1608,12 @@ func (c *pgConn) handleCatalogQuery(normalized string) bool {
 			// OID lookup for a specific table
 			for _, t := range tables {
 				if t == specificTable {
-					oid := tableOID(t)
-					c.sendRowDescription([]string{"oid"})
-					c.sendDataRow([]string{"oid"}, map[string]any{"oid": fmt.Sprintf("%d", oid)})
-					c.sendCommandComplete("SELECT 1")
-					return true
+					return singleRow([]string{"oid"}, map[string]any{
+						"oid": fmt.Sprintf("%d", tableOID(t)),
+					})
 				}
 			}
-			c.sendRowDescription([]string{"oid"})
-			c.sendCommandComplete("SELECT 0")
-			return true
+			return &synthAnswer{cols: []string{"oid"}}
 		}
 
 		// Reverse OID lookup: SELECT relname FROM pg_class WHERE oid = '<value>'
@@ -1448,40 +1621,33 @@ func (c *pgConn) handleCatalogQuery(normalized string) bool {
 		if oidVal != "" {
 			for _, t := range tables {
 				if fmt.Sprintf("%d", tableOID(t)) == oidVal {
-					c.sendRowDescription([]string{"relname"})
-					c.sendDataRow([]string{"relname"}, map[string]any{"relname": t})
-					c.sendCommandComplete("SELECT 1")
-					return true
+					return singleRow([]string{"relname"}, map[string]any{"relname": t})
 				}
 			}
-			c.sendRowDescription([]string{"relname"})
-			c.sendCommandComplete("SELECT 0")
-			return true
+			return &synthAnswer{cols: []string{"relname"}}
 		}
 
 		// List all tables — only when RELKIND is present (real table listing query)
 		if strings.Contains(normalized, "RELKIND") {
-			cols := []string{"relname"}
-			c.sendRowDescription(cols)
+			ans := &synthAnswer{cols: []string{"relname"}}
 			for _, t := range tables {
-				c.sendDataRow(cols, map[string]any{"relname": t})
+				ans.rows = append(ans.rows, map[string]any{"relname": t})
 			}
-			c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(tables)))
-			return true
+			return ans
 		}
 
 		// Unknown pg_class query — don't handle, fall through to blanket
-		return false
+		return nil
 	}
 
-	return false
+	return nil
 }
 
-// handleAttributeQuery returns column metadata from our catalog for pg_attribute queries.
-func (c *pgConn) handleAttributeQuery(ctx context.Context, normalized string) bool {
+// matchAttributeQuery returns column metadata from our catalog for pg_attribute queries.
+func (c *pgConn) matchAttributeQuery(ctx context.Context, normalized string) *synthAnswer {
 	tables, err := c.db.ListTables(ctx)
 	if err != nil || len(tables) == 0 {
-		return false
+		return nil
 	}
 
 	// Try to find the target from the query text.
@@ -1550,17 +1716,12 @@ func (c *pgConn) handleAttributeQuery(ctx context.Context, normalized string) bo
 		}
 	}
 
-	c.sendRowDescription(cols)
-	for _, row := range resultRows {
-		c.sendDataRow(cols, row)
-	}
-	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(resultRows)))
-	return true
+	return &synthAnswer{cols: cols, rows: resultRows}
 }
 
-// handlePgType returns rows from pg_type for JDBC/ODBC type mapping.
+// matchPgType returns rows from pg_type for JDBC/ODBC type mapping.
 // Drivers like pgjdbc query pg_type to map OIDs to Java types.
-func (c *pgConn) handlePgType(normalized string) bool {
+func (c *pgConn) matchPgType(normalized string) *synthAnswer {
 	type pgType struct {
 		oid          string
 		typname      string
@@ -1590,63 +1751,53 @@ func (c *pgConn) handlePgType(normalized string) bool {
 	// If query is looking for a specific OID, filter
 	specificOID := extractParamValue(normalized, "OID")
 
-	cols := []string{"oid", "typname", "typlen", "typtype", "typnamespace"}
-	c.sendRowDescription(cols)
-
-	count := 0
+	ans := &synthAnswer{cols: []string{"oid", "typname", "typlen", "typtype", "typnamespace"}}
 	for _, t := range types {
 		if specificOID != "" && t.oid != specificOID {
 			continue
 		}
-		c.sendDataRow(cols, map[string]any{
+		ans.rows = append(ans.rows, map[string]any{
 			"oid":          t.oid,
 			"typname":      t.typname,
 			"typlen":       t.typlen,
 			"typtype":      t.typtype,
 			"typnamespace": t.typnamespace,
 		})
-		count++
 	}
-	c.sendCommandComplete(fmt.Sprintf("SELECT %d", count))
-	return true
+	return ans
 }
 
-// handleInfoSchemaTables returns information_schema.tables data.
-func (c *pgConn) handleInfoSchemaTables(ctx context.Context) bool {
+// matchInfoSchemaTables returns information_schema.tables data.
+func (c *pgConn) matchInfoSchemaTables(ctx context.Context) *synthAnswer {
 	tables, err := c.db.ListTables(ctx)
 	if err != nil {
-		return false
+		return nil
 	}
 
-	cols := []string{"table_catalog", "table_schema", "table_name", "table_type"}
-	c.sendRowDescription(cols)
+	ans := &synthAnswer{cols: []string{"table_catalog", "table_schema", "table_name", "table_type"}}
 	for _, t := range tables {
-		c.sendDataRow(cols, map[string]any{
+		ans.rows = append(ans.rows, map[string]any{
 			"table_catalog": "wadjet",
 			"table_schema":  "public",
 			"table_name":    t,
 			"table_type":    "BASE TABLE",
 		})
 	}
-	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(tables)))
-	return true
+	return ans
 }
 
-// handleInfoSchemaColumns returns information_schema.columns data.
-func (c *pgConn) handleInfoSchemaColumns(ctx context.Context, normalized string) bool {
+// matchInfoSchemaColumns returns information_schema.columns data.
+func (c *pgConn) matchInfoSchemaColumns(ctx context.Context, normalized string) *synthAnswer {
 	tables, err := c.db.ListTables(ctx)
 	if err != nil {
-		return false
+		return nil
 	}
 
 	// Filter to specific table if referenced
 	targetTable := extractParamValue(normalized, "TABLE_NAME")
 
-	cols := []string{"table_catalog", "table_schema", "table_name",
-		"column_name", "ordinal_position", "data_type", "is_nullable"}
-
-	c.sendRowDescription(cols)
-	count := 0
+	ans := &synthAnswer{cols: []string{"table_catalog", "table_schema", "table_name",
+		"column_name", "ordinal_position", "data_type", "is_nullable"}}
 	for _, tableName := range tables {
 		if targetTable != "" && tableName != targetTable {
 			continue
@@ -1666,7 +1817,7 @@ func (c *pgConn) handleInfoSchemaColumns(ctx context.Context, normalized string)
 			if nullable == "NO" {
 				isNullable = "NO"
 			}
-			c.sendDataRow(cols, map[string]any{
+			ans.rows = append(ans.rows, map[string]any{
 				"table_catalog":    "wadjet",
 				"table_schema":     "public",
 				"table_name":       tableName,
@@ -1675,29 +1826,26 @@ func (c *pgConn) handleInfoSchemaColumns(ctx context.Context, normalized string)
 				"data_type":        pgFormatType(colType),
 				"is_nullable":      isNullable,
 			})
-			count++
 		}
 	}
-	c.sendCommandComplete(fmt.Sprintf("SELECT %d", count))
-	return true
+	return ans
 }
 
-// handleInfoSchemaAlerts returns information_schema.alerts data.
-func (c *pgConn) handleInfoSchemaAlerts(ctx context.Context) bool {
+// matchInfoSchemaAlerts returns information_schema.alerts data.
+func (c *pgConn) matchInfoSchemaAlerts(ctx context.Context) *synthAnswer {
 	alerts, err := c.db.Catalog().ListAlerts(ctx)
 	if err != nil {
-		return false
+		return nil
 	}
 
-	cols := []string{"name", "interval_seconds", "enabled", "webhook_url",
-		"insert_into_table", "last_evaluated_at"}
-	c.sendRowDescription(cols)
+	ans := &synthAnswer{cols: []string{"name", "interval_seconds", "enabled", "webhook_url",
+		"insert_into_table", "last_evaluated_at"}}
 	for _, a := range alerts {
 		lastEval := ""
 		if !a.LastEvaluatedAt.IsZero() {
 			lastEval = a.LastEvaluatedAt.UTC().Format(time.RFC3339)
 		}
-		c.sendDataRow(cols, map[string]any{
+		ans.rows = append(ans.rows, map[string]any{
 			"name":              a.Name,
 			"interval_seconds":  fmt.Sprintf("%d", a.IntervalSeconds),
 			"enabled":           boolStr(a.Enabled),
@@ -1706,8 +1854,7 @@ func (c *pgConn) handleInfoSchemaAlerts(ctx context.Context) bool {
 			"last_evaluated_at": lastEval,
 		})
 	}
-	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(alerts)))
-	return true
+	return ans
 }
 
 // pgFormatType maps Wadjet type names to PostgreSQL format_type() output.

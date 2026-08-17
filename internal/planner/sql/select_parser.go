@@ -409,6 +409,14 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 		col.Alias = p.advance().val
 	}
 
+	// Unaliased session information function: label the output column the way
+	// PostgreSQL does (`current_user`, not `current_user()`).
+	if col.Alias == "" {
+		if label := sessionInfoLabel(expr); label != "" {
+			col.Alias = label
+		}
+	}
+
 	return col, nil
 }
 
@@ -1362,9 +1370,12 @@ func (p *selectParser) parsePrimary() (Node, error) {
 
 		upper := strings.ToUpper(p.cur.val)
 
-		// CURRENT_DATE / CURRENT_TIMESTAMP / CURRENT_TIME — niladic SQL functions
-		// These are used without parentheses in standard SQL.
-		if upper == "CURRENT_DATE" || upper == "CURRENT_TIMESTAMP" || upper == "CURRENT_TIME" {
+		// Niladic SQL functions: standard SQL spells these without
+		// parentheses (CURRENT_DATE, CURRENT_USER, ...). A following '('
+		// means the client wrote the parenthesized spelling — let the normal
+		// function-call path consume it — and a following '.' means the name
+		// is a qualifier (an alias spelled `user`, say), not the function.
+		if isNiladicFunc(upper) && p.peekN(1) != TokenLParen && p.peekN(1) != TokenDot {
 			p.advance()
 			return &FuncCallNode{Name: strings.ToLower(upper)}, nil
 		}
@@ -1394,6 +1405,54 @@ func (p *selectParser) parsePrimary() (Node, error) {
 	default:
 		return nil, fmt.Errorf("unexpected token %q at position %d", p.cur.val, p.cur.pos)
 	}
+}
+
+// niladicFuncs are the SQL functions spelled without an argument list.
+// PostgreSQL reserves every one of these names, so a bare occurrence in an
+// expression position is the function and never a column reference. The
+// double-quoted spelling ("user", "current_schema") is a plain column
+// reference — the quoted branch in parsePrimary returns before this check.
+var niladicFuncs = map[string]bool{
+	"CURRENT_DATE":      true,
+	"CURRENT_TIME":      true,
+	"CURRENT_TIMESTAMP": true,
+	"CURRENT_USER":      true,
+	"SESSION_USER":      true,
+	"USER":              true,
+	"CURRENT_ROLE":      true,
+	"CURRENT_CATALOG":   true,
+	"CURRENT_SCHEMA":    true,
+}
+
+func isNiladicFunc(upper string) bool { return niladicFuncs[upper] }
+
+// sessionInfoFuncs are the session/catalog information functions whose result
+// column PostgreSQL labels with the bare function name: `SELECT current_user`
+// reports the column as `current_user`, not `current_user()`. JDBC and BI
+// clients read these results by label, so the label has to match.
+var sessionInfoFuncs = map[string]bool{
+	"current_user":     true,
+	"session_user":     true,
+	"user":             true,
+	"current_role":     true,
+	"current_catalog":  true,
+	"current_schema":   true,
+	"current_schemas":  true,
+	"current_database": true,
+	"version":          true,
+}
+
+// sessionInfoLabel returns the PostgreSQL output column name for a session
+// information function call, or "" when expr is not one.
+func sessionInfoLabel(expr Node) string {
+	fn, ok := expr.(*FuncCallNode)
+	if !ok || fn.Star || fn.Distinct {
+		return ""
+	}
+	if !sessionInfoFuncs[fn.Name] {
+		return ""
+	}
+	return fn.Name
 }
 
 func (p *selectParser) parseIdentExpr() (Node, error) {

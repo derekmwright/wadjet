@@ -123,4 +123,6 @@ func (c *pgConn) closeDescribeCache() {
 	}
 	c.describeResult = nil
 	c.describeErr = nil
+	c.describeSynth = nil
+	c.describedSQL = ""
 }

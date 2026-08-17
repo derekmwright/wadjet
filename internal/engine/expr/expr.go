@@ -1607,6 +1607,18 @@ func init() {
 	"extract":      fnExtract,
 	"current_date": fnCurrentDate,
 	"date_diff":    fnDateDiff,
+
+	// Session / catalog information (see the SessionUser block below)
+	"current_user":     fnCurrentUser,
+	"session_user":     fnCurrentUser,
+	"user":             fnCurrentUser,
+	"current_role":     fnCurrentUser,
+	"current_catalog":  fnCurrentCatalog,
+	"current_database": fnCurrentCatalog,
+	"current_schema":   fnCurrentSchema,
+	"current_schemas":  fnCurrentSchemas,
+	"version":          fnVersion,
+
 	"date_add":     fnDateAdd,
 	"date_sub":     fnDateSub,
 	"to_date":      fnToDate,
@@ -2484,6 +2496,62 @@ func fnExtract(args []any) any {
 
 func fnCurrentDate(args []any) any {
 	return time.Now().Format("2006-01-02")
+}
+
+// --- Session / catalog information functions ---
+//
+// PostgreSQL clients (pgJDBC, DataGrip, psql, Superset) open a connection by
+// asking who and where they are: current_user, current_schema,
+// current_database. These are answered here rather than only in the pgwire
+// introspection layer so that a query mixing them with real columns — or
+// selecting three of them at once — executes as an ordinary query with an
+// ordinary result shape.
+//
+// The values are server constants. ScalarFunc is func([]any) any and
+// DefaultRegistry is process-global, so a scalar function cannot see the
+// calling connection's identity; a per-session answer would need a
+// context-carrying evaluation path that does not exist. The constants match
+// what pgwire reports for an unauthenticated session.
+const (
+	// SessionUser is the user name reported by current_user / session_user /
+	// user / current_role.
+	SessionUser = "wadjet"
+	// SessionCatalog is the database name reported by current_catalog /
+	// current_database().
+	SessionCatalog = "wadjet"
+	// SessionSchema is the schema reported by current_schema.
+	SessionSchema = "public"
+	// ServerVersion is the answer to version(). PostgreSQL drivers parse the
+	// leading "PostgreSQL <major>" to decide which protocol features and
+	// catalog queries they may use, so the string keeps that prefix.
+	ServerVersion = "PostgreSQL 15.0 (Wadjet analytical query engine)"
+)
+
+func fnVersion(args []any) any { return ServerVersion }
+
+func fnCurrentUser(args []any) any { return SessionUser }
+
+func fnCurrentCatalog(args []any) any { return SessionCatalog }
+
+func fnCurrentSchema(args []any) any { return SessionSchema }
+
+// fnCurrentSchemas mirrors PostgreSQL's current_schemas(include_implicit),
+// which returns the search path as a text array. pgJDBC calls it during
+// connection setup; the value is rendered in PostgreSQL's array text format.
+func fnCurrentSchemas(args []any) any {
+	includeImplicit := false
+	if len(args) > 0 {
+		switch v := args[0].(type) {
+		case bool:
+			includeImplicit = v
+		case string:
+			includeImplicit = strings.EqualFold(v, "true") || strings.EqualFold(v, "t")
+		}
+	}
+	if includeImplicit {
+		return "{pg_catalog," + SessionSchema + "}"
+	}
+	return "{" + SessionSchema + "}"
 }
 
 // fnDateDiff returns the number of days between two dates.
