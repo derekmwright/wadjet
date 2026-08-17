@@ -1008,7 +1008,9 @@ func (inner *scanSourceInner) readRG(ctx context.Context, unitIdx int) *batch.Re
 			return &batch.RecordBatch{Len: int(unit.numRows), Sel: filterSel}
 		}
 	}
-	b, err := scan.ReadRowGroupNative(rdr, unit.rgIndex, inner.readSchema(), inner.pool)
+	// filterSel threads into the decode: byte-array columns materialize
+	// only selected rows (sel_decode.go); nil sel = full decode.
+	b, err := scan.ReadRowGroupNativeSel(rdr, unit.rgIndex, inner.readSchema(), inner.pool, filterSel)
 	unit.slot.releaseRG(inner)
 	if err != nil {
 		// Surface the first decode error so the scan FAILS instead of

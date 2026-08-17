@@ -71,16 +71,19 @@ func (p *Planner) tryPushFilterIntoScan(ctx context.Context, node *logical.Node,
 		}
 		structured, rest := logical.SplitConjunctsForPushdown(pred.ASTExpr)
 		for _, c := range rest {
-			// LIKE conjuncts push as pattern predicates — but ONLY when
-			// the pattern column is filter-only, so the pushdown ELIDES
-			// its materialization (TPC-H Q13's `o_comment NOT LIKE`
-			// class). When the column is also selected, the scan filter
-			// walks the pages AND the decode materializes them — metal
-			// measured that double read as a straight regression
-			// (ClickBench Q23 +31%, Q24 +28%; 2026-08-17 validation),
-			// so those shapes keep the residual match. Their lever is
-			// sel-aware materialization, tracked separately.
-			if rp, name, ok := makeLikeRowPred(canon, colType, c); ok && likeColFilterOnly(scanNode, name) {
+			// LIKE conjuncts push as pattern predicates when the pattern
+			// column is filter-only, so the pushdown ELIDES its
+			// materialization (TPC-H Q13's `o_comment NOT LIKE` class).
+			// A selected pattern column pays a double page read — the
+			// scan filter walks its pages AND the decode materializes
+			// them; metal measured that as a straight regression when
+			// materialization was full (ClickBench Q23 +31%, Q24 +28%;
+			// 2026-08-17 validation). Under sel-aware decode (#299) the
+			// second pass copies only selected rows — and the selection
+			// the pushdown produces prunes EVERY other byte-array column
+			// in the read schema — so the gate lifts with it.
+			if rp, name, ok := makeLikeRowPred(canon, colType, c); ok &&
+				(likeColFilterOnly(scanNode, name) || scan.SelDecodeOn()) {
 				pushed = append(pushed, rp)
 				pushedCols = append(pushedCols, name)
 				continue

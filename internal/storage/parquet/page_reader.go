@@ -10,6 +10,7 @@ type PageData struct {
 	NumValues        int
 	NumRows          int
 	NumNulls         int
+	Skipped          bool // payload never decompressed (NextPageMaybeSkip); only NumValues is meaningful
 	Data             Values   // decoded column values (non-null values only)
 	Encoding         Encoding // value encoding of THIS page (pages in one chunk can differ)
 	DefinitionLevels []int32  // nil if column is required (no nulls)
@@ -214,6 +215,19 @@ func (r *ColumnPageReader) SetTypeLength(n int) {
 
 // NextPage reads and decodes the next page. Returns nil at end of column.
 func (r *ColumnPageReader) NextPage() (*PageData, error) {
+	return r.NextPageMaybeSkip(nil)
+}
+
+// NextPageMaybeSkip is NextPage with an optional pre-decompression skip:
+// for each data page, shouldSkip is consulted with the page's row count
+// (from the page HEADER — a tiny thrift parse, the same walk
+// DictionaryIfPure does) BEFORE the payload is decompressed. When it
+// returns true the payload is bypassed entirely and a PageData with
+// Skipped=true and only NumValues set is returned — the caller must
+// account for those rows itself. Only meaningful for flat columns
+// (MaxRepLevel 0), where header NumValues equals the row count; callers
+// gate on that. A nil shouldSkip is exactly NextPage.
+func (r *ColumnPageReader) NextPageMaybeSkip(shouldSkip func(numRows int) bool) (*PageData, error) {
 	if err := r.ensureData(); err != nil {
 		return nil, err
 	}
@@ -229,8 +243,16 @@ func (r *ColumnPageReader) NextPage() (*PageData, error) {
 
 		switch ph.Type {
 		case PageDataV1:
+			if shouldSkip != nil && ph.DataPageHeader != nil &&
+				ph.DataPageHeader.NumValues > 0 && shouldSkip(int(ph.DataPageHeader.NumValues)) {
+				return &PageData{NumValues: int(ph.DataPageHeader.NumValues), Skipped: true}, nil
+			}
 			return r.decodeDataPageV1(ph, compressedData)
 		case PageDataV2:
+			if shouldSkip != nil && ph.DataPageHeaderV2 != nil &&
+				ph.DataPageHeaderV2.NumValues > 0 && shouldSkip(int(ph.DataPageHeaderV2.NumValues)) {
+				return &PageData{NumValues: int(ph.DataPageHeaderV2.NumValues), Skipped: true}, nil
+			}
 			return r.decodeDataPageV2(ph, compressedData)
 		case PageDictionary:
 			// Dictionary pages are handled separately via NextDictionary.

@@ -91,6 +91,21 @@ func ReadRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 // are offered back for admission. A nil cache (or a reader without a
 // CacheIdentity) is byte-identical to ReadRowGroupNative.
 func ReadRowGroupNativeCached(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, cache *DecodedChunkCache) (*batch.RecordBatch, error) {
+	return readRowGroupNative(fr, rgIdx, schema, pool, cache, nil)
+}
+
+// ReadRowGroupNativeSel is ReadRowGroupNative under a partial scan-filter
+// selection: eligible byte-array columns materialize only the rows in sel
+// (ascending row indices; see sel_decode.go). A nil sel — or the sel-decode
+// kill switch off — is identical to ReadRowGroupNative.
+func ReadRowGroupNativeSel(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, sel []uint32) (*batch.RecordBatch, error) {
+	if !selDecodeToggle.On() {
+		sel = nil
+	}
+	return readRowGroupNative(fr, rgIdx, schema, pool, nil, sel)
+}
+
+func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, cache *DecodedChunkCache, sel []uint32) (*batch.RecordBatch, error) {
 	// ARRAY/MAP leaves don't resolve by column name here; without this
 	// guard the column lookup missed and the "schema evolution" branch
 	// silently emitted ALL-NULL values for the array column — valid-looking
@@ -191,6 +206,14 @@ func ReadRowGroupNativeCached(fr *pqt.FileReader, rgIdx int, schema []pqt.Column
 		g.Go(func() error {
 			key, cacheable := cache.keyFor(fr, rgIdx, ci, col)
 			if cacheable && cache.fillFromCache(b.Columns[i], key, numRows) {
+				return nil
+			}
+			if len(sel) > 0 && selEligibleLeaf(fr, ci, col.Type) {
+				// Sel-pruned columns are partial — never offered to the
+				// cache (its key has no selection component).
+				if err := readColumnNativeSel(b.Columns[i], fr, rgIdx, ci, numRows, sel); err != nil {
+					return fmt.Errorf("reading column %s (sel): %w", col.Name, err)
+				}
 				return nil
 			}
 			if err := readColumnNative(b.Columns[i], fr, rgIdx, ci, numRows, col.Type); err != nil {
