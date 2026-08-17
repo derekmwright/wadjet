@@ -1,5 +1,11 @@
 package exec
 
+import (
+	"unsafe"
+
+	"github.com/derekmwright/wadjet/internal/engine/memory"
+)
+
 // intHashEntry stores a key-value pair co-located in memory.
 // Size: 16 bytes (8 key + 4 val + 4 padding). Four entries fit in one 64-byte
 // cache line, so a probe hit reads both key and value in a single cache access
@@ -22,24 +28,52 @@ type intHashTable struct {
 	entries []intHashEntry
 	mask    uint64 // len(entries) - 1, for power-of-two modular indexing
 	size    int    // number of occupied slots
+
+	// reg, when non-nil, backs entries with off-heap reservations (ADR-0006
+	// amendment): the entry array is pointer-free bulk state, and at the
+	// 100M-group scale each doubling's old+new-live rehash transient is
+	// exactly the GC-pressure class the group-state arena eliminated.
+	// grow() releases the old reservation immediately after the rehash.
+	// nil (join builds, generic keys) keeps plain heap entries.
+	reg            *memory.OffheapRegistry
+	entriesOffheap bool
 }
 
 const intHashEmpty int64 = -0x7FFFFFFFFFFFFFFF // sentinel for empty slot
 
 // newIntHashTable creates a hash table pre-sized for at least n entries at 70% load.
 func newIntHashTable(n int) *intHashTable {
+	return newIntHashTableReg(n, nil)
+}
+
+// newIntHashTableReg is newIntHashTable with off-heap entry backing when
+// reg is non-nil (aggregate group indexes own an OffheapRegistry).
+func newIntHashTableReg(n int, reg *memory.OffheapRegistry) *intHashTable {
 	// Round up to next power of 2, targeting ~70% max load factor
 	cap := 16
 	target := n + n/3 // ~143% of n → 70% load at n entries
 	for cap < target {
 		cap <<= 1
 	}
-	entries := make([]intHashEntry, cap)
+	h := &intHashTable{reg: reg}
+	entries := h.allocEntries(cap)
 	fillEmptyEntries(entries)
-	return &intHashTable{
-		entries: entries,
-		mask:    uint64(cap - 1),
+	h.entries = entries
+	h.mask = uint64(cap - 1)
+	return h
+}
+
+// allocEntries returns a len=n entry array, off-heap when the table has a
+// registry and the reservation fits, heap otherwise.
+func (h *intHashTable) allocEntries(n int) []intHashEntry {
+	if h.reg != nil {
+		if s, ok := memory.OffheapSized[intHashEntry](h.reg, n); ok {
+			h.entriesOffheap = true
+			return s
+		}
 	}
+	h.entriesOffheap = false
+	return make([]intHashEntry, n)
 }
 
 // fillEmptyEntries sets all entries to the empty sentinel using copy-doubling.
@@ -278,12 +312,14 @@ func (h *intHashTable) Delete(key int64) (int32, bool) {
 // grow doubles the table capacity and rehashes all entries.
 func (h *intHashTable) grow() {
 	newCap := len(h.entries) * 2
-	newEntries := make([]intHashEntry, newCap)
+	oldOffheap := h.entriesOffheap
+	old := h.entries
+	newEntries := h.allocEntries(newCap)
 	fillEmptyEntries(newEntries)
 	newMask := uint64(newCap - 1)
 
-	for i := range h.entries {
-		e := &h.entries[i]
+	for i := range old {
+		e := &old[i]
 		if e.key == intHashEmpty {
 			continue
 		}
@@ -294,6 +330,11 @@ func (h *intHashTable) grow() {
 		newEntries[idx] = *e
 	}
 
+	if oldOffheap {
+		// Return the old table's pages now — dead RSS otherwise held
+		// until the owning aggregate's registry Close.
+		h.reg.Release(unsafe.Pointer(unsafe.SliceData(old)))
+	}
 	h.entries = newEntries
 	h.mask = newMask
 }

@@ -157,6 +157,47 @@ func Offheap[T any](r *OffheapRegistry, heapCap int) []T {
 	return make([]T, 0, heapCap)
 }
 
+// OffheapSized returns a len=n off-heap slice over a single fresh
+// reservation, or ok=false when off-heap is unavailable or n elements
+// exceed one reservation. For fixed-size tables (hash entries) rather
+// than append-grown arrays.
+func OffheapSized[T any](r *OffheapRegistry, n int) ([]T, bool) {
+	var zero T
+	sz := int(unsafe.Sizeof(zero))
+	if n <= 0 || sz <= 0 || n > offheapReserveBytes/sz {
+		return nil, false
+	}
+	s, ok := offheapSlice[T](r)
+	if !ok {
+		return nil, false
+	}
+	// Full three-index slice: cap == len == n, so cap()-based memory
+	// accounting sees the table's real size, not the 4GB reservation.
+	return s[:n:n], true
+}
+
+// Release unmaps the single reservation whose base address is p and
+// forgets it, returning whether a reservation matched. Lets a grow-and-
+// rehash owner (hash table doubling) return the OLD table's pages
+// immediately instead of holding dead RSS until registry Close. The
+// caller must have dropped every slice into the reservation first.
+func (r *OffheapRegistry) Release(p unsafe.Pointer) bool {
+	if r == nil || p == nil {
+		return false
+	}
+	r.mu.Lock()
+	for i, m := range r.maps {
+		if unsafe.Pointer(unsafe.SliceData(m)) == p {
+			r.maps = append(r.maps[:i], r.maps[i+1:]...)
+			r.mu.Unlock()
+			_ = syscall.Munmap(m)
+			return true
+		}
+	}
+	r.mu.Unlock()
+	return false
+}
+
 // OffheapToggleForTest flips the kill switch and returns the previous
 // value. Test-only seam for parity runs against the heap path.
 func OffheapToggleForTest(v bool) bool { return offheapAggToggle.Set(v) }

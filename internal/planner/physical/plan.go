@@ -5957,6 +5957,9 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	if est := findScanRowEstimate(node.Children[0]); est > 0 {
 		hashAgg.InputRowHint = est
 	}
+	if ndv := groupKeyNDVEstimate(node.Children[0], groupByCols); ndv > 0 {
+		hashAgg.GroupNDVHint = ndv
+	}
 	if sm := p.getSpillManager(); sm != nil {
 		hashAgg.Spill = sm
 	}
@@ -7674,6 +7677,62 @@ func attachDynamicFilterToScanSource(source exec.Source, ranges []exec.DynamicRa
 
 // findScanRowEstimate returns the total row estimate from scan nodes in a subtree.
 // Used to pre-allocate hash join arena and index.
+// groupKeyNDVEstimate resolves a GROUP-KEY cardinality estimate from the
+// scan's merged-HLL column stats: the per-column NDVs' product (single
+// column: the NDV itself), capped by the scan row estimate — the true
+// group count can exceed neither. Returns 0 (no hint) when any key column
+// lacks stats (synthetic __gb_expr keys, expression keys, missing HLL) or
+// the input shape hides the scan (joins, subqueries): sizing then falls
+// back to organic growth, which is never wrong, just slower.
+func groupKeyNDVEstimate(child *logical.Node, groupByCols []string) int64 {
+	if len(groupByCols) == 0 {
+		return 0
+	}
+	n := child
+	for n != nil && n.Type != logical.NodeScan {
+		switch n.Type {
+		case logical.NodeFilter, logical.NodeLimit, logical.NodeSort:
+			if len(n.Children) != 1 {
+				return 0
+			}
+			n = n.Children[0]
+		default:
+			return 0
+		}
+	}
+	if n == nil || n.ScanColStats == nil {
+		return 0
+	}
+	est := int64(1)
+	for _, c := range groupByCols {
+		cs, ok := n.ScanColStats[c]
+		if !ok {
+			// Stats keys carry catalog casing; group cols may be
+			// SQL-normalized.
+			for name, v := range n.ScanColStats {
+				if strings.EqualFold(name, c) {
+					cs, ok = v, true
+					break
+				}
+			}
+		}
+		if !ok || cs.NDV <= 0 {
+			return 0
+		}
+		// Overflow-safe product; anything past the row estimate is capped
+		// below anyway.
+		if est > (1<<62)/cs.NDV {
+			est = 1 << 62
+			break
+		}
+		est *= cs.NDV
+	}
+	if n.ScanRowEstimate > 0 && est > n.ScanRowEstimate {
+		est = n.ScanRowEstimate
+	}
+	return est
+}
+
 func findScanRowEstimate(node *logical.Node) int64 {
 	if node == nil {
 		return 0

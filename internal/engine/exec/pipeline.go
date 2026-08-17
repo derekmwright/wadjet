@@ -216,6 +216,9 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 	if usePartitioned {
 		PartitionedAggRuns.Add(1)
 		primaryAgg.PartitionedDisjoint = true
+		// Each clone owns 1/Workers of the key space — divide the NDV
+		// presize hint accordingly (CloneSink propagates it).
+		primaryAgg.cloneNDVDivisor = p.Workers
 		partQueues = make([]chan partitionItem, p.Workers)
 		for i := range partQueues {
 			partQueues[i] = make(chan partitionItem, 8)

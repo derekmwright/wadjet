@@ -3,6 +3,8 @@ package exec
 import (
 	"math/rand"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/engine/memory"
 )
 
 func TestIntHashTable_DeleteBackShift(t *testing.T) {
@@ -121,4 +123,72 @@ func TestIntHashTable_DeleteStress(t *testing.T) {
 			t.Fatalf("final Get(%d)=%d,%v want %d,true", k, got, ok, want)
 		}
 	}
+}
+
+// Off-heap-backed tables must behave identically to heap tables across
+// growth, and each grow must release the previous reservation (exactly
+// one live mapping regardless of doublings).
+func TestIntHashTableOffheapParity(t *testing.T) {
+	reg := memory.NewOffheapRegistry()
+	defer reg.Close()
+	ht := newIntHashTableReg(16, reg)
+	heap := newIntHashTable(16)
+	const n = 200000
+	for i := 0; i < n; i++ {
+		k := int64(i*7919 + 3)
+		a, aok := ht.GetOrInsertNoGrow(k, int32(i))
+		b, bok := heap.GetOrInsertNoGrow(k, int32(i))
+		ht.CheckGrow()
+		heap.CheckGrow()
+		if a != b || aok != bok {
+			t.Fatalf("insert %d diverged: offheap (%d,%v) heap (%d,%v)", i, a, aok, b, bok)
+		}
+	}
+	for i := 0; i < n; i++ {
+		k := int64(i*7919 + 3)
+		a, aok := ht.Get(k)
+		b, bok := heap.Get(k)
+		if a != b || aok != bok || !aok {
+			t.Fatalf("lookup %d diverged: offheap (%d,%v) heap (%d,%v)", i, a, aok, b, bok)
+		}
+	}
+	if ht.entriesOffheap {
+		if m := reg.Mappings(); m != 1 {
+			t.Fatalf("registry holds %d mappings after grows, want 1 (old tables must release)", m)
+		}
+		if ht.MemoryUsage() >= int64(4)<<30 {
+			t.Fatalf("MemoryUsage %d reflects the reservation, not the table", ht.MemoryUsage())
+		}
+	}
+}
+
+// BenchmarkIntHashInsertHighCard models the Q33-class insert storm: 20M
+// distinct keys. Variants: organic doubling vs NDV-presized, heap vs
+// off-heap entries.
+func BenchmarkIntHashInsertHighCard(b *testing.B) {
+	const n = 20_000_000
+	run := func(b *testing.B, presize int, reg *memory.OffheapRegistry) {
+		for i := 0; i < b.N; i++ {
+			ht := newIntHashTableReg(presize, reg)
+			for j := 0; j < n; j++ {
+				ht.GetOrInsertNoGrow(int64(j)*2654435761, int32(j))
+				ht.CheckGrow()
+			}
+			if ht.size != n {
+				b.Fatal("bad size")
+			}
+		}
+	}
+	b.Run("organic-heap", func(b *testing.B) { run(b, 16, nil) })
+	b.Run("organic-offheap", func(b *testing.B) {
+		reg := memory.NewOffheapRegistry()
+		defer reg.Close()
+		run(b, 16, reg)
+	})
+	b.Run("presized-heap", func(b *testing.B) { run(b, n+n/8, nil) })
+	b.Run("presized-offheap", func(b *testing.B) {
+		reg := memory.NewOffheapRegistry()
+		defer reg.Close()
+		run(b, n+n/8, reg)
+	})
 }

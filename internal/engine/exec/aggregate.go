@@ -104,6 +104,13 @@ type HashAggregate struct {
 	NullGroupCols []string             // GROUPING SETS: columns to output as NULL (legacy per-node)
 	GroupingSets  [][]int              // single-pass grouping sets: column indices within GroupByCols per set
 	InputRowHint  int64                // estimated input rows for pre-sizing hash table
+	// GroupNDVHint is the planner's HLL-based estimate of GROUP-KEY
+	// cardinality (catalog merged sketches; ~2% error) — the quantity the
+	// hash table actually holds, unlike InputRowHint's input-row proxy.
+	// 0 = unknown. cloneNDVDivisor spreads the hint across partitioned
+	// clones (each owns a disjoint 1/k of the key space).
+	GroupNDVHint    int64
+	cloneNDVDivisor int
 
 	mu                sync.Mutex
 	keys              [][]any
@@ -970,6 +977,40 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 		htInitSize = est
 	}
+	// NDV presize: when the planner supplies a group-key cardinality
+	// estimate (merged-HLL, ~2% error), size the table ONCE instead of
+	// doubling up through the cardinality (each doubling rehashes
+	// everything; the top grows of a 100M-group query rehash tens of
+	// millions of entries with old+new tables both live). +12.5% slack
+	// absorbs HLL underestimation. Two caps bound overestimate damage by
+	// per-slot cost: the generic/string paths pre-allocate arena + group
+	// pool per slot (the Q12 lesson: never over-provision heavy slots),
+	// so they cap at 4M; the int-key paths pay only the 16B entry — and
+	// off-heap when the registry is live — so they presize up to a 1GB
+	// table (intHTInitSize, applied at the int-table sites).
+	intHTInitSize := 0
+	if h.GroupNDVHint > 0 {
+		est := h.GroupNDVHint + h.GroupNDVHint/8
+		if d := int64(h.cloneNDVDivisor); d > 1 {
+			est = est/d + est/(8*d) // partition skew slack
+		}
+		const intNDVCap = 1 << 26
+		const genericNDVCap = 1 << 22
+		intEst := est
+		if intEst > intNDVCap {
+			intEst = intNDVCap
+		}
+		intHTInitSize = int(intEst)
+		if est > genericNDVCap {
+			est = genericNDVCap
+		}
+		if int(est) > htInitSize {
+			htInitSize = int(est)
+		}
+	}
+	if intHTInitSize < htInitSize {
+		intHTInitSize = htInitSize
+	}
 
 	// Grouping sets force the generic path — keys are prefixed with set ID
 	// and only subset columns are serialized per set.
@@ -995,7 +1036,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			typ == batch.TypeInt32 || typ == batch.TypePort || typ == batch.TypeProtocol || typ == batch.TypeDate
 		if isIntType && allSimpleAggs {
 			h.useIntGroupKey = true
-			h.intGroupIndex = newIntHashTable(htInitSize)
+			h.intGroupIndex = newIntHashTableReg(intHTInitSize, h.offheapReg())
 			h.intGroupKeyCol = h.groupColIdx[0]
 			if h.intGroupStates == nil {
 				h.intGroupStates = make([]*groupState, 0, htInitSize)
@@ -1024,7 +1065,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			if isAggIntType(typ0) && isAggIntType(typ1) {
 				h.useDualIntGroupKey = true
 				h.dualIntGroupKeyCols = [2]int{idx0, idx1}
-				h.intGroupIndex = newIntHashTable(htInitSize)
+				h.intGroupIndex = newIntHashTableReg(intHTInitSize, h.offheapReg())
 				if h.intGroupStates == nil {
 					h.intGroupStates = make([]*groupState, 0, htInitSize)
 					// Key SoAs off-heap (states stay nil on this path —
@@ -1068,7 +1109,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 		if canCompact && estimatedWidth <= 8 {
 			h.useCompactGroupKey = true
-			h.intGroupIndex = newIntHashTable(htInitSize)
+			h.intGroupIndex = newIntHashTableReg(intHTInitSize, h.offheapReg())
 			if h.intGroupStates == nil {
 				h.intGroupStates = make([]*groupState, 0, htInitSize)
 				h.gsPool.preAlloc(htInitSize)
@@ -3258,6 +3299,15 @@ func (h *HashAggregate) CloneSink() SinkSource {
 		GroupingSets:  h.GroupingSets,
 		// No spill manager — partial aggregates are small enough
 		strNullGroupIdx: -1, // defensive: Init sets it, but the zero value is a VALID slot
+	}
+	// Partitioned clones own disjoint 1/k slices of the key space, so the
+	// NDV presize divides cleanly across them (the pipeline sets the
+	// divisor before cloning). Non-partitioned clones can each see the
+	// full key set — presizing every clone to full NDV would k× the
+	// table memory, so they keep organic growth.
+	if h.cloneNDVDivisor > 1 {
+		clone.GroupNDVHint = h.GroupNDVHint
+		clone.cloneNDVDivisor = h.cloneNDVDivisor
 	}
 	return clone
 }
