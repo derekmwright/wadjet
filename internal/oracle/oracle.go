@@ -97,13 +97,13 @@ func RunDifferential(ctx context.Context, t *testing.T, queries []Query, run Run
 		}
 	}()
 
-	baseline := make(map[string]*canonResult, len(queries))
+	baseline := make(map[string]*Canon, len(queries))
 	for _, q := range queries {
 		res, err := run(ctx, q.SQL)
 		if err != nil {
 			t.Fatalf("baseline %s: %v", q.Name, err)
 		}
-		baseline[q.Name] = canonicalize(res)
+		baseline[q.Name] = Canonicalize(res)
 	}
 
 	names := make([]string, len(toggles))
@@ -129,7 +129,7 @@ func RunDifferential(ctx context.Context, t *testing.T, queries []Query, run Run
 					t.Errorf("%s: query failed with %s disabled: %v", q.Name, label, err)
 					continue
 				}
-				if diff := baseline[q.Name].compare(canonicalize(res), q); diff != "" {
+				if diff := baseline[q.Name].Diff(Canonicalize(res), q); diff != "" {
 					t.Errorf("%s diverges with %s disabled:\n%s", q.Name, label, diff)
 				}
 			}
@@ -142,55 +142,82 @@ func RunDifferential(ctx context.Context, t *testing.T, queries []Query, run Run
 	runConfig("all-off", toggles)
 }
 
-type canonResult struct {
-	rows []string // canonical per-row encodings, sorted (multiset compare)
+// Canon is a result in canonical comparable form. Exported so other
+// differential harnesses (the standalone-vs-distributed oracle, #288)
+// share the same comparison semantics as the kill-switch oracle.
+//
+// Rows are rendered at two float precisions. Rounding floats can land a
+// value exactly on a rounding boundary, where one ULP of accumulation-
+// order noise between two CORRECT runs flips the rendered digit (observed:
+// SUM at 14903.55 rendering 14903.5 vs 14903.6). A divergence therefore
+// only counts when it survives BOTH precisions — real bugs (missing rows,
+// nulls, dropped limits, wrong groups) differ at every precision, while a
+// boundary hit at two independent quanta simultaneously is vanishingly
+// rare. The cost: a float-only error smaller than the coarse quantum
+// (~1e-4 relative) is absorbed; row-membership and integer errors are
+// unaffected.
+type Canon struct {
+	rows       []string // canonical per-row encodings at 6 sig digits, sorted
+	coarseRows []string // same rows at 4 sig digits, sorted
 }
 
-// canonicalize renders every row to a stable string: cells in Columns
+// Canonicalize renders every row to a stable string: cells in Columns
 // order, floats at 6 significant digits so accumulation-order noise
 // between two correct runs doesn't register as divergence.
-func canonicalize(res *Result) *canonResult {
+func Canonicalize(res *Result) *Canon {
 	rows := make([]string, len(res.Rows))
-	var sb strings.Builder
+	coarse := make([]string, len(res.Rows))
+	var sb, csb strings.Builder
 	for i, row := range res.Rows {
 		sb.Reset()
+		csb.Reset()
 		for j, col := range res.Columns {
 			if j > 0 {
 				sb.WriteByte('|')
+				csb.WriteByte('|')
 			}
-			sb.WriteString(canonCell(row[col]))
+			fine, rough := canonCell(row[col])
+			sb.WriteString(fine)
+			csb.WriteString(rough)
 		}
 		rows[i] = sb.String()
+		coarse[i] = csb.String()
 	}
 	sort.Strings(rows)
-	return &canonResult{rows: rows}
+	sort.Strings(coarse)
+	return &Canon{rows: rows, coarseRows: coarse}
 }
 
-func canonCell(v any) string {
+// Rows returns the number of canonical rows.
+func (b *Canon) Rows() int { return len(b.rows) }
+
+func canonCell(v any) (fine, rough string) {
 	switch tv := v.(type) {
 	case nil:
-		return "<null>"
+		return "<null>", "<null>"
 	case float64:
-		return canonFloat(tv)
+		return canonFloat(tv, 6), canonFloat(tv, 4)
 	case float32:
-		return canonFloat(float64(tv))
+		return canonFloat(float64(tv), 6), canonFloat(float64(tv), 4)
 	case []byte:
-		return string(tv)
+		s := string(tv)
+		return s, s
 	default:
-		return fmt.Sprint(tv)
+		s := fmt.Sprint(tv)
+		return s, s
 	}
 }
 
-func canonFloat(f float64) string {
+func canonFloat(f float64, prec int) string {
 	if f == 0 {
 		f = 0 // collapse -0
 	}
-	return strconv.FormatFloat(f, 'g', 6, 64)
+	return strconv.FormatFloat(f, 'g', prec, 64)
 }
 
-// compare returns "" when other matches, else a description of the first
+// Diff returns "" when other matches, else a description of the first
 // difference.
-func (b *canonResult) compare(other *canonResult, q Query) string {
+func (b *Canon) Diff(other *Canon, q Query) string {
 	if q.CountOnly {
 		diff := len(other.rows) - len(b.rows)
 		if diff < -q.Tolerance || diff > q.Tolerance {
@@ -204,9 +231,26 @@ func (b *canonResult) compare(other *canonResult, q Query) string {
 	}
 	for i := range b.rows {
 		if b.rows[i] != other.rows[i] {
+			// Fine-precision mismatch: confirm at coarse precision before
+			// declaring divergence (see the Canon doc comment).
+			if coarseEqual(b.coarseRows, other.coarseRows) {
+				return ""
+			}
 			return fmt.Sprintf("first differing row (canonical order, index %d):\n  baseline: %s\n  got:      %s",
 				i, b.rows[i], other.rows[i])
 		}
 	}
 	return ""
+}
+
+func coarseEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

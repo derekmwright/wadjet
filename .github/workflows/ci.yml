@@ -48,6 +48,13 @@ jobs:
         # A failing subtest names the diverging optimization.
         run: go test -v -run TestTPCHOptimizationInvariance ./benchmarks/tpch/ -timeout 10m
 
+      - name: Standalone-vs-Distributed Differential (SF0.01)
+        # Randomized differential (#288): seeded generated queries run in
+        # a single process and in a 3-worker cluster; results must match.
+        # Bounded seed range in CI; longer campaigns via
+        # WADJET_DIFF_SEED_START/COUNT.
+        run: go test -v -run TestStandaloneVsDistributedDifferential ./internal/coordinator/ -timeout 15m
+
       - name: Nested Types + Decimal Correctness
         # The gate TPC-H is structurally blind to (issue #144): TPC-H has
         # no ARRAY/MAP/ROW columns, no Decimal in the merge path, and no
