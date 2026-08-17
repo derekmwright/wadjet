@@ -116,6 +116,15 @@ func HasUnsupportedColumnarTypes(schema []pqt.Column) bool {
 	return false
 }
 
+// StorageClass exposes storageClass to other packages. It is the file-vs-
+// catalog compatibility relation the columnar decoder uses: when the file's
+// type and the catalog's type share a storage class the page values are
+// copied into the vector VERBATIM, and only a mismatch routes through
+// copyNativeCoerced* (which converts values). Callers that want to reason
+// about a parquet value without reading it — the planner's footer-statistics
+// MIN/MAX path — need exactly this test.
+func StorageClass(t pqt.TypeID) pqt.TypeID { return storageClass(t) }
+
 // storageClass returns a normalized type representing the physical storage
 // format used in a Vector. Types sharing a storage class have identical
 // in-memory layout (e.g. TypeIPv4 and TypeInt64 both use Int64Data).

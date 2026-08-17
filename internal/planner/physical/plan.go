@@ -5740,8 +5740,13 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	}
 
 	// Bare COUNT(*) over a plain scan answers from the catalog manifest —
-	// no scan pipeline at all (see metadata_count.go).
+	// no scan pipeline at all (see metadata_count.go). Un-grouped MIN/MAX
+	// (optionally alongside COUNT(*)) answers the same way from parquet
+	// footer statistics (see metadata_minmax.go).
 	if src, ok := p.tryBuildMetadataCount(ctx, node); ok {
+		return src, nil, &exec.CollectSink{}, nil
+	}
+	if src, ok := p.tryBuildMetadataMinMax(ctx, node); ok {
 		return src, nil, &exec.CollectSink{}, nil
 	}
 

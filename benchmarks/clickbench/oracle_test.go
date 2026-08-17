@@ -30,6 +30,7 @@ func TestHitsOptimizationInvariance(t *testing.T) {
 	}
 
 	metaCountBefore := physical.MetadataCountsPlanned.Load()
+	metaMinMaxBefore := physical.MetadataMinMaxPlanned.Load()
 	oracle.RunDifferential(ctx, t, oracle.ExpandLimits(queries), func(ctx context.Context, sql string) (*oracle.Result, error) {
 		res, err := db.Query(ctx, sql)
 		if err != nil {
@@ -41,5 +42,13 @@ func TestHitsOptimizationInvariance(t *testing.T) {
 	// rewrite must fire somewhere in the run or its oracle arm is dormant.
 	if physical.MetadataCountsPlanned.Load() == metaCountBefore {
 		t.Error("metadata COUNT(*) rewrite never engaged across the corpus — oracle arm is dormant")
+	}
+	// Q07 is `SELECT MIN(EventDate), MAX(EventDate) FROM hits`, so the
+	// statistics-answered MIN/MAX rewrite must fire too. This assertion is
+	// load-bearing: the rewrite declines silently (falling back to the scan)
+	// whenever a file's schema does not let it trust the footer, and a
+	// dormant arm proves nothing about a live optimization.
+	if physical.MetadataMinMaxPlanned.Load() == metaMinMaxBefore {
+		t.Error("metadata MIN/MAX rewrite never engaged across the corpus — oracle arm is dormant")
 	}
 }
