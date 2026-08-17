@@ -110,3 +110,26 @@ LENGTH(byte-array col) is an offsets subtraction — Q28's
 AVG(LENGTH(URL)) never needs the URL bytes (projection pushdown of
 length()). Q24 is SELECT-* TopN: late-materialize everything behind
 the TopN decision.
+
+## Corrections from external review (2026-08-17 evening, verified)
+
+- COMBINED at hot-parity is #8/132 (x4.83), not "top 30": the banked
+  cold #18 position (0.2 weight) means hot improvements convert to
+  combined rank at close to full value. Staged: G5-G7 alone ~ combined
+  #40; + string-TopN family ~ #30; full DuckDB hot-parity #8.
+- The Q28 LENGTH() lever generalizes to an OFFSETS-SHAPE EVALUATION
+  CLASS: any consumer of a var-length column's shape rather than its
+  contents — LENGTH/octet_length, IS NULL, = '' / <> '' comparisons,
+  COUNT(col) — can run off the offsets array with zero byte decode.
+  Two landing sites: (a) expr kernels over decoded BytesColumn reading
+  Offsets only; (b) a lengths-only column decode mode that parses
+  length prefixes and never memcpys values (composes with #299
+  sel-decode). Note WHERE SearchPhrase <> '' appears across Q22-27:
+  dict pages already answer it per-entry at the scan filter; the class
+  pays on PLAIN pages and on post-scan expression evaluation.
+- Q29 anomaly: hot (13.52 = min of two warm tries) is SLOWER than cold
+  (13.21) in wave-6 — the only query that regresses warm. Suspect
+  nondeterminism (GC timing / allocation growth across tries / the
+  GOMEMLIMIT margin class from the Q33 postmortem), not throughput.
+  Investigate before any ClickBench submission: a bimodal spike in a
+  published run is the reproducibility risk.
