@@ -57,6 +57,7 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	plan = pushSemiAntiBelowInnerJoins(plan)
 	plan = reorderJoins(plan)
 	plan = rewriteDistinctAsGroupBy(plan)
+	plan = rewriteCountDistinctTwoLevel(plan)
 	plan = extractPartitionFilters(plan)
 	plan = pruneProjections(plan)
 	// Re-annotate before column pruning: scans created AFTER the first

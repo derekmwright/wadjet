@@ -66,17 +66,24 @@ func TestDistributedCountDistinct(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("got %d groups, want 3", len(rows))
 	}
-	var totalC int64
+	var totalC float64
 	for _, r := range rows {
 		if got := fmt.Sprint(r["d"]); got != "100" {
 			t.Errorf("group %v: d = %s, want 100 (all suppliers)", r["l_returnflag"], got)
 		}
-		if c, ok := r["c"].(int64); ok {
+		// Numeric, not Go-typed: the two-level distinct rewrite recombines
+		// COUNT(*) as a SUM of partial counts, and distributed SUM(int)
+		// boxes float64 (pre-existing type divergence vs standalone int64
+		// for ALL distributed integer SUMs — see the typing issue).
+		switch c := r["c"].(type) {
+		case int64:
+			totalC += float64(c)
+		case float64:
 			totalC += c
 		}
 	}
 	if totalC != 60000 {
-		t.Errorf("COUNT(*) sum across groups = %d, want 60000", totalC)
+		t.Errorf("COUNT(*) sum across groups = %v, want 60000", totalC)
 	}
 }
 
