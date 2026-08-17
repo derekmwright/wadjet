@@ -2,12 +2,12 @@ package physical
 
 import (
 	"context"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/scan"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -29,14 +29,15 @@ import (
 // ScanFilterPushdowns counts filters (conjuncts) pushed into scans.
 var ScanFilterPushdowns atomic.Int64
 
-var scanFilterEnabled = os.Getenv("WADJET_SCAN_FILTER") != "0"
+var scanFilterToggle = optswitch.Register("scan-filter", "WADJET_SCAN_FILTER",
+	"scan-level filter pushdown: dictionary-mask evaluation, filter-only column elision, count-only batches")
 
 // tryPushFilterIntoScan attempts the pushdown for one Filter node whose
 // built child is css. It returns the predicates the exec filter must
 // still evaluate (possibly the originals, untouched).
 func (p *Planner) tryPushFilterIntoScan(ctx context.Context, node *logical.Node, css *catalogScanSource) []logical.Predicate {
 	orig := node.Predicates
-	if !scanFilterEnabled || css.cache != nil ||
+	if !scanFilterToggle.On() || css.cache != nil ||
 		p.StreamingSources != nil || p.MaterializedInputs != nil || p.ScanFileFilter != nil {
 		return orig
 	}

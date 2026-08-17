@@ -8522,7 +8522,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 			// Equality conjuncts also feed the dictionary probe — the
 			// precise prune where zonemaps are blind (point filters on
 			// high-cardinality columns).
-			if pred.Op == "=" {
+			if pred.Op == "=" && scan.DictPrune.On() {
 				eqProbes = append(eqProbes, scan.EqProbe{ColName: pred.Column, Value: val})
 			}
 		}

@@ -1,10 +1,11 @@
 package physical
 
-import "os"
+import "github.com/derekmwright/wadjet/internal/optswitch"
 
 // scanOutputPrune gates pruneScanOutputColumns.
 // Kill switch WADJET_SCAN_OUTPUT_PRUNE=0.
-var scanOutputPrune = os.Getenv("WADJET_SCAN_OUTPUT_PRUNE") != "0"
+var scanOutputPrune = optswitch.Register("scan-output-prune", "WADJET_SCAN_OUTPUT_PRUNE",
+	"narrow dispatched scan-stage output to the union of consumer-declared columns")
 
 // pruneScanOutputColumns narrows each dispatched scan stage's OUTPUT to
 // the union of what its consumers declare, leaving Columns (the read
@@ -29,7 +30,7 @@ var scanOutputPrune = os.Getenv("WADJET_SCAN_OUTPUT_PRUNE") != "0"
 //     keys, defensively) is a strict subset of the scan's read set.
 // Anything else keeps the full output — correct, just wider.
 func pruneScanOutputColumns(stages []Stage) {
-	if !scanOutputPrune {
+	if !scanOutputPrune.On() {
 		return
 	}
 	consumers := make(map[string][]*Stage)

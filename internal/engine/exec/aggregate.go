@@ -911,6 +911,12 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			}
 		}
 	}
+	// Kill switch (see agg_fast_path_toggle.go): treat every aggregate as
+	// non-simple so all typed fast paths below stay dormant and grouping
+	// runs on the generic AoS accumulator path.
+	if !aggFastPaths.On() {
+		allSimpleAggs = false
+	}
 	h.simpleAggs = allSimpleAggs
 
 	// Pre-sizing hint: initial hash-table capacity. InputRowHint reflects the

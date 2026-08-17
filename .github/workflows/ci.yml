@@ -42,6 +42,12 @@ jobs:
       - name: TPC-H Correctness (SF0.01)
         run: go test -v -run TestTPCHQueries ./benchmarks/tpch/ -timeout 5m
 
+      - name: Optimization-Invariance Oracle (SF0.01)
+        # Kill-switch differential (#287): every query re-run with each
+        # registered optimization disabled must produce identical results.
+        # A failing subtest names the diverging optimization.
+        run: go test -v -run TestTPCHOptimizationInvariance ./benchmarks/tpch/ -timeout 10m
+
       - name: Nested Types + Decimal Correctness
         # The gate TPC-H is structurally blind to (issue #144): TPC-H has
         # no ARRAY/MAP/ROW columns, no Decimal in the merge path, and no

@@ -2,8 +2,16 @@ package scan
 
 import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
+
+// StatsPrune gates static-predicate min/max (zonemap) row-group pruning at
+// every consumption site: the planner's rgUnit build, readBatchDirect, and
+// the Scanner decode path. Dynamic-filter pruning (join-build ranges,
+// blooms) is separately gated. Kill switch: WADJET_STATS_PRUNE=0.
+var StatsPrune = optswitch.Register("stats-prune", "WADJET_STATS_PRUNE",
+	"min/max zonemap row-group pruning from static scan predicates")
 
 // StatsPredicate evaluates whether a row group can be skipped based on column stats.
 type StatsPredicate struct {

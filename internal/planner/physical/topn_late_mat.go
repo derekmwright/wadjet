@@ -3,12 +3,12 @@ package physical
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -50,13 +50,14 @@ const (
 // instead of inferring from wall clock.
 var TopNLateMatPlanned atomic.Int64
 
-var topNLateMatEnabled = os.Getenv("WADJET_TOPN_LATEMAT") != "0"
+var topNLateMatToggle = optswitch.Register("topn-latemat", "WADJET_TOPN_LATEMAT",
+	"top-N late materialization: sort on key columns + row locator, re-fetch survivors")
 
 // tryBuildTopNLateMat attempts the rewrite for Limit(n) over sortNode.
 // Returns ok=false (nil error) when the shape doesn't qualify — the caller
 // falls back to the ordinary top-N build.
 func (p *Planner) tryBuildTopNLateMat(ctx context.Context, sortNode *logical.Node, n int) (exec.Source, bool, error) {
-	if !topNLateMatEnabled || n <= 0 || n > lateMatMaxRows {
+	if !topNLateMatToggle.On() || n <= 0 || n > lateMatMaxRows {
 		return nil, false, nil
 	}
 	// Fragment/probe-split modes plan scans with different source types and

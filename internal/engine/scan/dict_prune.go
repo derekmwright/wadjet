@@ -4,6 +4,7 @@ import (
 	"math"
 	"sync/atomic"
 
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -22,6 +23,12 @@ import (
 // never matches NULL, so null presence is irrelevant. Predicate values
 // compare in the FILE's physical domain with conservative conversion —
 // anything lossy declines to prune.
+
+// DictPrune gates dictionary-probe row-group pruning. The planner checks
+// it when collecting equality conjuncts into EqProbes (plan.go), so with
+// the switch off no probe is ever built. Kill switch: WADJET_DICT_PRUNE=0.
+var DictPrune = optswitch.Register("dict-prune", "WADJET_DICT_PRUNE",
+	"dictionary-probe row-group pruning for equality predicates on pure-dictionary chunks")
 
 // DictPruneStats counters (wlog / test engagement markers).
 var (

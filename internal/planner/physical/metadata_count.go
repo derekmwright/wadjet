@@ -2,11 +2,11 @@ package physical
 
 import (
 	"context"
-	"os"
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -33,12 +33,13 @@ import (
 // (observability-first, mirrors TopNLateMatPlanned).
 var MetadataCountsPlanned atomic.Int64
 
-var metadataCountEnabled = os.Getenv("WADJET_META_COUNT") != "0"
+var metadataCountToggle = optswitch.Register("meta-count", "WADJET_META_COUNT",
+	"bare COUNT(*) answered from catalog manifest row counts instead of scanning")
 
 // tryBuildMetadataCount returns a one-row source when the aggregate
 // qualifies; ok=false falls back to the ordinary build.
 func (p *Planner) tryBuildMetadataCount(ctx context.Context, node *logical.Node) (exec.Source, bool) {
-	if !metadataCountEnabled {
+	if !metadataCountToggle.On() {
 		return nil, false
 	}
 	if p.StreamingSources != nil || p.MaterializedInputs != nil || p.ScanFileFilter != nil {

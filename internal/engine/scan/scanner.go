@@ -379,7 +379,7 @@ func (s *Scanner) decodeRowGroupsNative(ctx context.Context, fr *pqt.FileReader,
 
 	var batches []*batch.RecordBatch
 	for rgIdx := 0; rgIdx < numRGs; rgIdx++ {
-		if len(s.statsPredicates) > 0 {
+		if len(s.statsPredicates) > 0 && StatsPrune.On() {
 			rgStats := fr.RowGroupStats(rgIdx)
 			pruned := false
 			for _, pred := range s.statsPredicates {

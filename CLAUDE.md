@@ -170,6 +170,14 @@ refactor(scan): extract predicate pushdown into separate module
   # After (on feature branch)
   TPCH_SCALE=1 go test -v -run TestTPCHQueriesLarge -timeout 30m ./benchmarks/tpch/ 2>&1 | tee /tmp/bench-after.txt
   ```
+- **Optimizations that can change the row set must register a kill switch** in `internal/optswitch` (env convention: `WADJET_<NAME>=0` disables) and pass the optimization-invariance oracle, which runs every corpus query with each switch individually disabled and asserts identical results:
+  ```bash
+  # TPC-H arm (SF0.01, ~30s, runs in CI)
+  go test -run TestTPCHOptimizationInvariance ./benchmarks/tpch/
+  # ClickBench arm (needs a local hits part)
+  WADJET_HITS_PART=/path/to/hits_0.parquet go test -run TestHitsOptimizationInvariance ./benchmarks/clickbench/
+  ```
+  A divergence names the disabled toggle — that is the defect localization. Registering the switch extends the oracle for free; this is part of the definition of done for optimization work (#287).
 - **Test patterns**: Table-driven tests preferred. Use `tb.Helper()` in test helpers. Use `objstore.NewMemStore()` for storage in tests (no real S3).
 
 ### Code Style

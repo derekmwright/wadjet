@@ -130,7 +130,7 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 	// Collect active (non-pruned) row group indices.
 	activeRGs := make([]int, 0, numRGs)
 	for rgIdx := 0; rgIdx < numRGs; rgIdx++ {
-		if len(preds) > 0 {
+		if len(preds) > 0 && scan.StatsPrune.On() {
 			stats := pqReader.RowGroupStats(rgIdx)
 			pruned := false
 			for _, pred := range preds {
@@ -723,7 +723,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 			pruned := false
 
 			// Predicate-based row group pruning
-			if len(inner.scanPreds) > 0 {
+			if len(inner.scanPreds) > 0 && scan.StatsPrune.On() {
 				for _, pred := range inner.scanPreds {
 					op := mapPredOp(pred.Op)
 					if op >= 0 {
