@@ -63,9 +63,48 @@ right. The emit phase is single-threaded and 16-35% of WALL clock
   from k emit workers) would take another ~5 ms of the 17, but it requires
   making `aggSourceAdapter` a concurrency-safe source for EVERY aggregate
   pipeline, so it is deliberately left to G6's bucket-parallel emit.
-- **G5 hash once + batched salted probe**: router (partitioned_agg.go:134-163)
-  and sink both hash every row; `% parts` is a hardware divide. Thread the
-  hash through partitionItem, mask, two-pass probe, L2-gated look-ahead.
+- **G5 hash once + mask, not mod** — SHIPPED (`partitioned_agg.go`). Under
+  partitioned aggregation every row was hashed TWICE: the router hashed the
+  whole key (mix64/fnv1a) to choose an owner, then the owning sink's table
+  hashed the same key again (fibHash / packedHash / strHash) to choose a slot
+  — the same ~88-byte URL through two full passes on Q34. The router now
+  computes THE SINK'S OWN hash and threads it through `partitionItem`; the two
+  consumers read disjoint bit windows of that one value: partition = the top
+  `ceil(log2(parts))` bits, slot = the low `log2(cap)` bits, unchanged from
+  what each table already masked. Unifying in this direction (tables keep
+  their hash, router adopts it) is what makes the change invariant — every
+  table sees bit-for-bit the slot sequence it saw before, so dense integer
+  ids keep fibHash's collision-free low-bit bijection.
+  Owner selection is `bits.Mul64(hash, parts)` (Lemire multiply-shift), not
+  `% parts`: `parts` is `runtime.NumCPU()`, never a power of two, and a
+  hardware 64-bit divide per row is 20-40 unpipelined cycles. For a
+  power-of-two `parts` the multiply-shift is bit-identical to DuckDB's
+  `hash >> (64 - radix_bits)`. Routing also became a counting sort, so each
+  batch takes ONE pooled buffer instead of `parts` append chains.
+  Kill switch `WADJET_HASH_ONCE` (oracle-swept). Measured on the isolated
+  router+probe bench (5900X, 1M keys, 8 partitions, min of 10 interleaved
+  rounds), the x4 arms replaying the input so 75% of probes are lookups —
+  Q34's real ratio: single-string 664.8 → 449.7 ms (**−32%**), two-int64
+  packed 366.9 → 326.9 ms (−11%, p25 −16%), single-int64 216.2 → 198.6 ms
+  (−8%); at 1:1 insert ratio −13%, −21%, −5%. Isolated table probe with a
+  supplied hash vs recomputing strHash over 90 bytes: 426.6 → 302.4 ms
+  per 1M probes (−29%).
+  The routed and self-hashing loops are written out SEPARATELY in all three
+  consume paths. A per-row `if provided != nil` is perfectly predicted and
+  still cost +4% on the serial packed path (same-window A/B against the
+  parent commit, two-int64 2.22 → 2.32 ms) — at ~4 ns/row one extra compare
+  is real money. Hoisted, the self-hashing loop compiles to 71 instructions
+  against the baseline's 74. The routing fields also sit LAST in
+  HashAggregate: inserting them mid-struct shifts every hot consume-loop
+  field's offset, which measured on its own.
+- **G5b batched probe** — MEASURED, NOT SHIPPED. Restructuring phase 1 into a
+  branchless slot-index pass over the batch followed by a probe pass does not
+  win outside noise, and an explicit look-ahead load actively hurts
+  (`BenchmarkPackedProbeShapes`, min of 5 rounds): at 1M keys onepass 24.0 ms,
+  twopass 25.2, look-ahead d=8/16 29.8/29.8; at 20M keys onepass 859.9,
+  twopass 887.1, look-ahead 1003.9/1078.1. Go's codegen turns the "prefetch"
+  into a real bounds-checked load the out-of-order window was already
+  covering. The consume loops keep their one-pass shape.
 - **G6 two-level/radix table**: 256-bucket conversion past ~100K keys
   (ClickHouse) / radix partitions (DuckDB). Incremental sub-table rehash,
   bucket-parallel merge+emit, stats-free sizing. Subsumes G4's shape.
@@ -88,8 +127,18 @@ registers without ANALYZE), so tables start at 64K and rehash up to 8x.
 
 G1 -> G2 -> G3 (instruction path; validate on the controlled-cardinality
 harness) -> G4 -> G5 -> G6 (memory/serial regime) -> G7 (endgame).
-G1+G2 delegated for implementation 2026-08-17; G3 and G4 shipped the same
-day. Next: G5 (hash once + batched salted probe), then G6.
+G1+G2 delegated for implementation 2026-08-17; G3, G4 and G5 shipped the same
+day (G5's batched-probe rider measured and declined). Next: G6.
+
+Found while sweeping the unified hash for spread, recorded in
+`TestFibHashStrideCollapse`: `fibHash` is multiply-only, so the low k bits of
+`key * phi` depend only on the low k bits of the key. A single-int GROUP BY
+whose keys are all multiples of 2^s puts EVERY key on one probe chain in any
+table with <= 2^s slots. Pre-existing (this is intHashTable's own indexing,
+untouched by G5) and invisible to the partition bits, which come off the top
+of the same product. Fixing it means re-spreading every int-keyed table and
+giving up the collision-free bijection dense ids currently enjoy — a separate
+decision with its own A/B, not a G5 rider.
 
 ## Post-wave-6 rerank (hot 99.4s era) and the DuckDB-parity ceiling
 

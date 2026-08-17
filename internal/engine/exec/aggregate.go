@@ -332,6 +332,24 @@ type HashAggregate struct {
 	distinctBytes      int64 // COUNT(DISTINCT) map contents + entry overhead
 	extraStateBytes    int64 // extraState objects (alloc-time estimates)
 	extrasAccsCount    int64 // total kernel.Accumulator elements behind extras.accs
+
+	// Hash-once routing state (partitioned_agg.go). routeOnce/routePlanV are
+	// the ROUTER's: read concurrently by every worker off the shared primary
+	// aggregate, so the plan is frozen behind a sync.Once and never re-derived
+	// (a mid-query hash change would split a live group across two owners).
+	// provHashes/provPlan are the SINK's: the current Consume's pre-computed
+	// per-row key hashes, set by ConsumeHashed. Each partitioned sink is
+	// touched by exactly one goroutine at a time, which is what lets them be
+	// plain fields.
+	//
+	// Deliberately LAST in the struct: inserting them mid-struct shifts the
+	// offset of every hot consume-loop field after them, which measured on its
+	// own as a regression on BenchmarkHashAggregatePackedNearUnique with the
+	// loop bodies byte-identical to baseline.
+	routeOnce  sync.Once
+	routePlanV *routePlan
+	provHashes []uint64
+	provPlan   *routePlan
 }
 
 // kernelAccumulatorBytes is the per-element cost of extras.accs slices,
@@ -685,6 +703,23 @@ func (h *HashAggregate) Init(_ context.Context) error {
 	h.emitSchema = nil
 	h.emitSchemaSet = false
 	return nil
+}
+
+// ConsumeHashed is Consume with the group-key hash of every active row
+// already computed by the partition router (hash once — see the bit-budget
+// note in partitioned_agg.go). hashes[i] belongs to b's i'th active row.
+//
+// The hashes are advisory: each consume path checks that the plan names the
+// hash ITS table uses before consuming them, and recomputes otherwise. A sink
+// that migrated to the generic path mid-query (a NULL key arrived) therefore
+// keeps working with a stale plan on the wire.
+func (h *HashAggregate) ConsumeHashed(ctx context.Context, b *batch.RecordBatch, hashes []uint64, plan *routePlan) error {
+	h.provHashes = hashes
+	h.provPlan = plan
+	err := h.Consume(ctx, b)
+	h.provHashes = nil
+	h.provPlan = nil
+	return err
 }
 
 func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
@@ -1434,6 +1469,18 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 
 	intIdx := h.intGroupIndex
 
+	// Hash once: the partition router already computed fibHash over this
+	// column for every routed row. Accept its array only when the plan names
+	// the same key extraction this loop performs. The routed and self-hashing
+	// loops below are written out separately so this test never enters the
+	// per-row path — see the note in consumeBatchPackedGroup for the cost.
+	var ph []uint64
+	if p := h.provPlan; p != nil && p.kind == hashKindInt && p.isI32 == isInt32 &&
+		len(h.provHashes) == b.ActiveLen() {
+		ph = h.provHashes
+		HashOnceRoutedRows.Add(int64(len(ph)))
+	}
+
 	// Pre-reserve key capacity so per-group appends in the hash lookup loop
 	// don't trigger growslice reallocations. The batch size is an upper
 	// bound on new groups this batch can create. The flat accumulators are
@@ -1453,84 +1500,163 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 		iterLen = len(b.Sel)
 		sel = b.Sel
 		gi = h.ensureGroupIndexBuf(iterLen)
-		for si, selIdx := range b.Sel {
-			row := int(selIdx)
-			if hasNulls && gkVec.Nulls.IsNullFast(row) {
-				gi[si] = -1
-				hasNullKeys = true
-				continue
-			}
-			var key int64
-			if isInt32 {
-				key = int64(gkVec.Int32Data[row])
-			} else {
-				key = gkVec.Int64Data[row]
-			}
-			var newIdx int32
-			fromFree := false
-			if nf := len(h.freeGroupIDs); nf > 0 {
-				newIdx = h.freeGroupIDs[nf-1]
-				fromFree = true
-			} else {
-				newIdx = int32(h.numIntGroups)
-			}
-			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
-			if ok {
-				gi[si] = gsIdx
-			} else {
-				intIdx.CheckGrow()
-				if fromFree {
-					h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
-					h.intKeys[newIdx] = key
-				} else {
-					// No per-group state at all: the key lives in the intKeys
-					// SoA and the accumulators in the flat arrays, which are
-					// grown to numIntGroups once this loop finishes.
-					h.numIntGroups++
-					h.intKeys = append(h.intKeys, key)
+		if ph != nil {
+			ph = ph[:iterLen] // provable bound: si ranges over b.Sel
+			for si, selIdx := range b.Sel {
+				row := int(selIdx)
+				if hasNulls && gkVec.Nulls.IsNullFast(row) {
+					gi[si] = -1
+					hasNullKeys = true
+					continue
 				}
-				gi[si] = newIdx
+				var key int64
+				if isInt32 {
+					key = int64(gkVec.Int32Data[row])
+				} else {
+					key = gkVec.Int64Data[row]
+				}
+				var newIdx int32
+				fromFree := false
+				if nf := len(h.freeGroupIDs); nf > 0 {
+					newIdx = h.freeGroupIDs[nf-1]
+					fromFree = true
+				} else {
+					newIdx = int32(h.numIntGroups)
+				}
+				gsIdx, ok := intIdx.GetOrInsertNoGrowAt(key, ph[si], newIdx)
+				if ok {
+					gi[si] = gsIdx
+				} else {
+					intIdx.CheckGrow()
+					if fromFree {
+						h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
+						h.intKeys[newIdx] = key
+					} else {
+						h.numIntGroups++
+						h.intKeys = append(h.intKeys, key)
+					}
+					gi[si] = newIdx
+				}
+			}
+		} else {
+			for si, selIdx := range b.Sel {
+				row := int(selIdx)
+				if hasNulls && gkVec.Nulls.IsNullFast(row) {
+					gi[si] = -1
+					hasNullKeys = true
+					continue
+				}
+				var key int64
+				if isInt32 {
+					key = int64(gkVec.Int32Data[row])
+				} else {
+					key = gkVec.Int64Data[row]
+				}
+				var newIdx int32
+				fromFree := false
+				if nf := len(h.freeGroupIDs); nf > 0 {
+					newIdx = h.freeGroupIDs[nf-1]
+					fromFree = true
+				} else {
+					newIdx = int32(h.numIntGroups)
+				}
+				gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
+				if ok {
+					gi[si] = gsIdx
+				} else {
+					intIdx.CheckGrow()
+					if fromFree {
+						h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
+						h.intKeys[newIdx] = key
+					} else {
+						// No per-group state at all: the key lives in the intKeys
+						// SoA and the accumulators in the flat arrays, which are
+						// grown to numIntGroups once this loop finishes.
+						h.numIntGroups++
+						h.intKeys = append(h.intKeys, key)
+					}
+					gi[si] = newIdx
+				}
 			}
 		}
 	} else {
 		iterLen = b.Len
 		gi = h.ensureGroupIndexBuf(iterLen)
-		for row := 0; row < iterLen; row++ {
-			if hasNulls && gkVec.Nulls.IsNullFast(row) {
-				gi[row] = -1
-				hasNullKeys = true
-				continue
-			}
-			var key int64
-			if isInt32 {
-				key = int64(gkVec.Int32Data[row])
-			} else {
-				key = gkVec.Int64Data[row]
-			}
-			var newIdx int32
-			fromFree := false
-			if nf := len(h.freeGroupIDs); nf > 0 {
-				newIdx = h.freeGroupIDs[nf-1]
-				fromFree = true
-			} else {
-				newIdx = int32(h.numIntGroups)
-			}
-			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
-			if ok {
-				gi[row] = gsIdx
-			} else {
-				intIdx.CheckGrow()
-				if fromFree {
-					h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
-					h.intKeys[newIdx] = key
-				} else {
-					// No per-group state at all: the key lives in the intKeys
-					// SoA and the accumulators in the flat arrays, which are
-					// grown to numIntGroups once this loop finishes.
-					h.numIntGroups++
-					h.intKeys = append(h.intKeys, key)
+		if ph != nil {
+			ph = ph[:iterLen]
+			for row := 0; row < iterLen; row++ {
+				if hasNulls && gkVec.Nulls.IsNullFast(row) {
+					gi[row] = -1
+					hasNullKeys = true
+					continue
 				}
-				gi[row] = newIdx
+				var key int64
+				if isInt32 {
+					key = int64(gkVec.Int32Data[row])
+				} else {
+					key = gkVec.Int64Data[row]
+				}
+				var newIdx int32
+				fromFree := false
+				if nf := len(h.freeGroupIDs); nf > 0 {
+					newIdx = h.freeGroupIDs[nf-1]
+					fromFree = true
+				} else {
+					newIdx = int32(h.numIntGroups)
+				}
+				gsIdx, ok := intIdx.GetOrInsertNoGrowAt(key, ph[row], newIdx)
+				if ok {
+					gi[row] = gsIdx
+				} else {
+					intIdx.CheckGrow()
+					if fromFree {
+						h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
+						h.intKeys[newIdx] = key
+					} else {
+						h.numIntGroups++
+						h.intKeys = append(h.intKeys, key)
+					}
+					gi[row] = newIdx
+				}
+			}
+		} else {
+			for row := 0; row < iterLen; row++ {
+				if hasNulls && gkVec.Nulls.IsNullFast(row) {
+					gi[row] = -1
+					hasNullKeys = true
+					continue
+				}
+				var key int64
+				if isInt32 {
+					key = int64(gkVec.Int32Data[row])
+				} else {
+					key = gkVec.Int64Data[row]
+				}
+				var newIdx int32
+				fromFree := false
+				if nf := len(h.freeGroupIDs); nf > 0 {
+					newIdx = h.freeGroupIDs[nf-1]
+					fromFree = true
+				} else {
+					newIdx = int32(h.numIntGroups)
+				}
+				gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
+				if ok {
+					gi[row] = gsIdx
+				} else {
+					intIdx.CheckGrow()
+					if fromFree {
+						h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
+						h.intKeys[newIdx] = key
+					} else {
+						// No per-group state at all: the key lives in the intKeys
+						// SoA and the accumulators in the flat arrays, which are
+						// grown to numIntGroups once this loop finishes.
+						h.numIntGroups++
+						h.intKeys = append(h.intKeys, key)
+					}
+					gi[row] = newIdx
+				}
 			}
 		}
 	}
@@ -1584,6 +1710,17 @@ func (h *HashAggregate) consumeBatchPackedGroup(b *batch.RecordBatch) {
 
 	idx := h.packedIdx
 
+	// Hash once: the router already folded this row's 128-bit key through
+	// packedHash to choose the owner. Accept its array only when the plan's
+	// key layout is identical to this aggregate's, so the lo/hi words the
+	// router packed are the ones this loop packs.
+	var ph []uint64
+	if p := h.provPlan; p != nil && p.kind == hashKindPacked &&
+		samePackedLayout(p.layout, h.packedLayout) && len(h.provHashes) == b.ActiveLen() {
+		ph = h.provHashes
+		HashOnceRoutedRows.Add(int64(len(ph)))
+	}
+
 	// Pre-reserve key capacity for this batch. The flat accumulators grow
 	// once, after the lookup loop, to the final group count.
 	batchRows := b.ActiveLen()
@@ -1599,50 +1736,97 @@ func (h *HashAggregate) consumeBatchPackedGroup(b *batch.RecordBatch) {
 	// whole aggregate to the generic path before a batch with a NULL key
 	// column reaches here. Keeping the branch costs one predictable test per
 	// row and keeps null-key rows accounted if that ever changes.
+	// The routed and self-hashing loops are written out separately rather than
+	// branching on ph per row. That branch is perfectly predicted and still
+	// measured +4% on this path's own benchmark (two-int64 2.22 -> 2.32 ms,
+	// same-window A/B) — at ~4 ns/row a single extra compare is real money, and
+	// hoisting it is why the self-hashing loops below are byte-identical to
+	// what they were before hash-once landed.
 	if b.Sel != nil {
 		iterLen = len(b.Sel)
 		sel = b.Sel
 		gi = h.ensureGroupIndexBuf(iterLen)
-		for si, selIdx := range b.Sel {
-			row := int(selIdx)
-			if hasNulls && packedRowHasNull(cols, row) {
-				gi[si] = -1
-				hasNullKeys = true
-				continue
+		if ph != nil {
+			ph = ph[:iterLen] // provable bound: si ranges over b.Sel
+			for si, selIdx := range b.Sel {
+				row := int(selIdx)
+				if hasNulls && packedRowHasNull(cols, row) {
+					gi[si] = -1
+					hasNullKeys = true
+					continue
+				}
+				lo, hi := packedKeyAt(cols, row)
+				newIdx := int32(h.numIntGroups)
+				gsIdx := idx.GetOrInsertNoGrowAt(lo, hi, ph[si], newIdx)
+				gi[si] = gsIdx
+				if gsIdx == newIdx {
+					idx.CheckGrow()
+					h.numIntGroups++
+					h.packedKeys = append(h.packedKeys, packedKey{lo: lo, hi: hi})
+				}
 			}
-			lo, hi := packedKeyAt(cols, row)
-			// newIdx is the id this row would claim; the table hands back
-			// exactly it when the key was new (see GetOrInsertNoGrow).
-			newIdx := int32(h.numIntGroups)
-			gsIdx := idx.GetOrInsertNoGrow(lo, hi, newIdx)
-			gi[si] = gsIdx
-			if gsIdx == newIdx {
-				idx.CheckGrow()
-				// No per-group state object: this path is gated to simple
-				// aggregates, whose state lives entirely in the flat SoA
-				// arrays + packedKeys. materializeFlatAccums reifies on
-				// demand for the migration/merge cold paths.
-				h.numIntGroups++
-				h.packedKeys = append(h.packedKeys, packedKey{lo: lo, hi: hi})
+		} else {
+			for si, selIdx := range b.Sel {
+				row := int(selIdx)
+				if hasNulls && packedRowHasNull(cols, row) {
+					gi[si] = -1
+					hasNullKeys = true
+					continue
+				}
+				lo, hi := packedKeyAt(cols, row)
+				// newIdx is the id this row would claim; the table hands back
+				// exactly it when the key was new (see GetOrInsertNoGrow).
+				newIdx := int32(h.numIntGroups)
+				gsIdx := idx.GetOrInsertNoGrow(lo, hi, newIdx)
+				gi[si] = gsIdx
+				if gsIdx == newIdx {
+					idx.CheckGrow()
+					// No per-group state object: this path is gated to simple
+					// aggregates, whose state lives entirely in the flat SoA
+					// arrays + packedKeys. materializeFlatAccums reifies on
+					// demand for the migration/merge cold paths.
+					h.numIntGroups++
+					h.packedKeys = append(h.packedKeys, packedKey{lo: lo, hi: hi})
+				}
 			}
 		}
 	} else {
 		iterLen = b.Len
 		gi = h.ensureGroupIndexBuf(iterLen)
-		for row := 0; row < iterLen; row++ {
-			if hasNulls && packedRowHasNull(cols, row) {
-				gi[row] = -1
-				hasNullKeys = true
-				continue
+		if ph != nil {
+			ph = ph[:iterLen]
+			for row := 0; row < iterLen; row++ {
+				if hasNulls && packedRowHasNull(cols, row) {
+					gi[row] = -1
+					hasNullKeys = true
+					continue
+				}
+				lo, hi := packedKeyAt(cols, row)
+				newIdx := int32(h.numIntGroups)
+				gsIdx := idx.GetOrInsertNoGrowAt(lo, hi, ph[row], newIdx)
+				gi[row] = gsIdx
+				if gsIdx == newIdx {
+					idx.CheckGrow()
+					h.numIntGroups++
+					h.packedKeys = append(h.packedKeys, packedKey{lo: lo, hi: hi})
+				}
 			}
-			lo, hi := packedKeyAt(cols, row)
-			newIdx := int32(h.numIntGroups)
-			gsIdx := idx.GetOrInsertNoGrow(lo, hi, newIdx)
-			gi[row] = gsIdx
-			if gsIdx == newIdx {
-				idx.CheckGrow()
-				h.numIntGroups++
-				h.packedKeys = append(h.packedKeys, packedKey{lo: lo, hi: hi})
+		} else {
+			for row := 0; row < iterLen; row++ {
+				if hasNulls && packedRowHasNull(cols, row) {
+					gi[row] = -1
+					hasNullKeys = true
+					continue
+				}
+				lo, hi := packedKeyAt(cols, row)
+				newIdx := int32(h.numIntGroups)
+				gsIdx := idx.GetOrInsertNoGrow(lo, hi, newIdx)
+				gi[row] = gsIdx
+				if gsIdx == newIdx {
+					idx.CheckGrow()
+					h.numIntGroups++
+					h.packedKeys = append(h.packedKeys, packedKey{lo: lo, hi: hi})
+				}
 			}
 		}
 	}
@@ -1909,6 +2093,15 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 	hasNulls := gkVec.Nulls.HasNulls()
 	strIdx := h.strGroupIndex
 
+	// Hash once: the router already ran strHash over these bytes to pick the
+	// owner — the expensive half of the probe on ClickBench Q34's ~88-byte
+	// URLs. Reusing it also supplies strEntry.hashTag, which is its low half.
+	var ph []uint64
+	if p := h.provPlan; p != nil && p.kind == hashKindStr && len(h.provHashes) == b.ActiveLen() {
+		ph = h.provHashes
+		HashOnceRoutedRows.Add(int64(len(ph)))
+	}
+
 	// Pre-reserve key/state capacity (same rationale as consumeBatchIntGroup);
 	// the flat accumulators grow once after the lookup loop.
 	batchRows := b.ActiveLen()
@@ -1931,50 +2124,89 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 		iterLen = len(b.Sel)
 		sel = b.Sel
 		gi = h.ensureGroupIndexBuf(iterLen)
-		for si, selIdx := range b.Sel {
-			row := int(selIdx)
-			if hasNulls && gkVec.Nulls.IsNullFast(row) {
-				gi[si] = h.strNullGroupSlot()
-				continue
+		if ph != nil {
+			ph = ph[:iterLen] // provable bound: si ranges over b.Sel
+			for si, selIdx := range b.Sel {
+				row := int(selIdx)
+				if hasNulls && gkVec.Nulls.IsNullFast(row) {
+					gi[si] = h.strNullGroupSlot()
+					continue
+				}
+				key := gkVec.BytesData.Value(row)
+				gsIdx, found, stored := strIdx.GetOrInsertRefAt(key, ph[si], int32(len(h.strGroupStates)))
+				if found {
+					gi[si] = gsIdx
+				} else {
+					h.strGroupStates = append(h.strGroupStates, nil)
+					h.serializedKeys = append(h.serializedKeys, arenaString(stored))
+					gi[si] = gsIdx
+				}
 			}
-			key := gkVec.BytesData.Value(row)
-			gsIdx, found, stored := strIdx.GetOrInsertRef(key, int32(len(h.strGroupStates)))
-			if found {
-				gi[si] = gsIdx
-			} else {
-				// Deferred state: the serializedKeys entry IS the key, and
-				// it aliases the table's arena copy rather than making a
-				// second one (arenaString). Simple aggs live in the flat
-				// SoA arrays. The per-group groupState + []any box +
-				// h.keys slot were ~100B of overhead per group (Q34's 18M
-				// URL groups).
-				h.strGroupStates = append(h.strGroupStates, nil)
-				h.serializedKeys = append(h.serializedKeys, arenaString(stored))
-				gi[si] = gsIdx
+		} else {
+			for si, selIdx := range b.Sel {
+				row := int(selIdx)
+				if hasNulls && gkVec.Nulls.IsNullFast(row) {
+					gi[si] = h.strNullGroupSlot()
+					continue
+				}
+				key := gkVec.BytesData.Value(row)
+				gsIdx, found, stored := strIdx.GetOrInsertRef(key, int32(len(h.strGroupStates)))
+				if found {
+					gi[si] = gsIdx
+				} else {
+					// Deferred state: the serializedKeys entry IS the key, and
+					// it aliases the table's arena copy rather than making a
+					// second one (arenaString). Simple aggs live in the flat
+					// SoA arrays. The per-group groupState + []any box +
+					// h.keys slot were ~100B of overhead per group (Q34's 18M
+					// URL groups).
+					h.strGroupStates = append(h.strGroupStates, nil)
+					h.serializedKeys = append(h.serializedKeys, arenaString(stored))
+					gi[si] = gsIdx
+				}
 			}
 		}
 	} else {
 		iterLen = b.Len
 		gi = h.ensureGroupIndexBuf(iterLen)
-		for row := 0; row < iterLen; row++ {
-			if hasNulls && gkVec.Nulls.IsNullFast(row) {
-				gi[row] = h.strNullGroupSlot()
-				continue
+		if ph != nil {
+			ph = ph[:iterLen]
+			for row := 0; row < iterLen; row++ {
+				if hasNulls && gkVec.Nulls.IsNullFast(row) {
+					gi[row] = h.strNullGroupSlot()
+					continue
+				}
+				key := gkVec.BytesData.Value(row)
+				gsIdx, found, stored := strIdx.GetOrInsertRefAt(key, ph[row], int32(len(h.strGroupStates)))
+				if found {
+					gi[row] = gsIdx
+				} else {
+					h.strGroupStates = append(h.strGroupStates, nil)
+					h.serializedKeys = append(h.serializedKeys, arenaString(stored))
+					gi[row] = gsIdx
+				}
 			}
-			key := gkVec.BytesData.Value(row)
-			gsIdx, found, stored := strIdx.GetOrInsertRef(key, int32(len(h.strGroupStates)))
-			if found {
-				gi[row] = gsIdx
-			} else {
-				// Deferred state: the serializedKeys entry IS the key, and
-				// it aliases the table's arena copy rather than making a
-				// second one (arenaString). Simple aggs live in the flat
-				// SoA arrays. The per-group groupState + []any box +
-				// h.keys slot were ~100B of overhead per group (Q34's 18M
-				// URL groups).
-				h.strGroupStates = append(h.strGroupStates, nil)
-				h.serializedKeys = append(h.serializedKeys, arenaString(stored))
-				gi[row] = gsIdx
+		} else {
+			for row := 0; row < iterLen; row++ {
+				if hasNulls && gkVec.Nulls.IsNullFast(row) {
+					gi[row] = h.strNullGroupSlot()
+					continue
+				}
+				key := gkVec.BytesData.Value(row)
+				gsIdx, found, stored := strIdx.GetOrInsertRef(key, int32(len(h.strGroupStates)))
+				if found {
+					gi[row] = gsIdx
+				} else {
+					// Deferred state: the serializedKeys entry IS the key, and
+					// it aliases the table's arena copy rather than making a
+					// second one (arenaString). Simple aggs live in the flat
+					// SoA arrays. The per-group groupState + []any box +
+					// h.keys slot were ~100B of overhead per group (Q34's 18M
+					// URL groups).
+					h.strGroupStates = append(h.strGroupStates, nil)
+					h.serializedKeys = append(h.serializedKeys, arenaString(stored))
+					gi[row] = gsIdx
+				}
 			}
 		}
 	}

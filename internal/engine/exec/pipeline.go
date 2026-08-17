@@ -385,10 +385,14 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 					drainPartitionQueue(workerCtx, sink, partQueues[workerID])
 				}
 			}
+			// Per-worker routing scratch (histogram + per-row hash buffer).
+			// The routed row-id/hash arrays it hands out are allocated per
+			// batch because they travel to other workers' queues.
+			var partScratch partitionScratch
 			if usePartitioned {
 				defer stopProducing()
 				if workerID == 0 && pendingWarmup != nil {
-					if err := partitionAndDeliver(workerCtx, primaryAgg, sink, pendingWarmup, 0, partQueues); err != nil {
+					if err := partitionAndDeliver(workerCtx, primaryAgg, sink, pendingWarmup, 0, partQueues, &partScratch); err != nil {
 						firstErr.CompareAndSwap(nil, err)
 						cancel()
 						return
@@ -456,7 +460,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 				if b != nil {
 					FlattenForConsumer(b, sink)
 					if usePartitioned {
-						if err := partitionAndDeliver(workerCtx, primaryAgg, sink, b, workerID, partQueues); err != nil {
+						if err := partitionAndDeliver(workerCtx, primaryAgg, sink, b, workerID, partQueues, &partScratch); err != nil {
 							firstErr.CompareAndSwap(nil, err)
 							cancel()
 							return

@@ -181,6 +181,31 @@ func (h *intHashTable) GetOrInsertNoGrow(key int64, val int32) (int32, bool) {
 	}
 }
 
+// GetOrInsertNoGrowAt is GetOrInsertNoGrow with the slot hash supplied by the
+// caller — the partition router already computed fibHash(key) to pick this
+// table's owner, so the sink does not compute it a second time (hash once,
+// partitioned_agg.go). hash MUST be fibHash(key): the table's probe order,
+// its grow() rehash and every other entry in it assume exactly that function.
+//
+// Deliberately a copy of GetOrInsertNoGrow's body rather than a shared helper:
+// both must stay under the inliner's budget on the hottest loop in the engine.
+func (h *intHashTable) GetOrInsertNoGrowAt(key int64, hash uint64, val int32) (int32, bool) {
+	idx := hash & h.mask
+	for {
+		e := &h.entries[idx]
+		if e.key == intHashEmpty {
+			e.key = key
+			e.val = val
+			h.size++
+			return val, false
+		}
+		if e.key == key {
+			return e.val, true
+		}
+		idx = (idx + 1) & h.mask
+	}
+}
+
 // PutNoGrow inserts or updates a key-value pair without checking the load factor.
 // The caller must call CheckGrow() after a batch of inserts. This variant is
 // inlineable (cost < 80), eliminating function call overhead in hot loops like

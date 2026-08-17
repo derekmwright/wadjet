@@ -249,6 +249,35 @@ func (h *strHashTable) GetOrInsertRef(key []byte, val int32) (int32, bool, []byt
 	}
 }
 
+// GetOrInsertRefAt is GetOrInsertRef with the key hash supplied by the caller:
+// the partition router already ran strHash over these bytes to pick this
+// table's owner, and on an ~88-byte URL that pass is the expensive half of the
+// probe (hash once — partitioned_agg.go). hash MUST be strHash(key) — the
+// stored hashTag is its low 32 bits and grow() re-indexes off that tag.
+func (h *strHashTable) GetOrInsertRefAt(key []byte, hash uint64, val int32) (int32, bool, []byte) {
+	tag := uint32(hash)
+	idx := hash & h.mask
+	for {
+		e := &h.entries[idx]
+		if e.keyLen < 0 {
+			ref, stored := h.storeKey(key)
+			e.ref = ref
+			e.keyLen = int32(len(key))
+			e.val = val
+			e.hashTag = tag
+			h.size++
+			if h.size*10 > len(h.entries)*7 {
+				h.grow()
+			}
+			return val, false, stored
+		}
+		if e.hashTag == tag && e.keyLen == int32(len(key)) && strKeyEqual(h.keyAt(*e), key) {
+			return e.val, true, nil
+		}
+		idx = (idx + 1) & h.mask
+	}
+}
+
 // PutNoGrow inserts a key-value pair without checking the load factor.
 // The caller must call CheckGrow() after a batch of inserts. This variant
 // defers growth to reduce overhead in hot loops like hash join build.

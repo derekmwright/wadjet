@@ -207,6 +207,28 @@ func (h *packedHashTable) GetOrInsertNoGrow(lo, hi uint64, val int32) int32 {
 	}
 }
 
+// GetOrInsertNoGrowAt is GetOrInsertNoGrow with the slot hash supplied by the
+// caller: the partition router already computed packedHash(lo, hi) to pick
+// this table's owner (hash once — partitioned_agg.go). hash MUST be
+// packedHash(lo, hi), which is what grow() and every resident entry assume.
+func (h *packedHashTable) GetOrInsertNoGrowAt(lo, hi, hash uint64, val int32) int32 {
+	idx := hash & h.mask
+	for {
+		e := &h.entries[idx]
+		if e.val == packedHashEmpty {
+			e.lo = lo
+			e.hi = hi
+			e.val = val
+			h.size++
+			return val
+		}
+		if e.lo == lo && e.hi == hi {
+			return e.val
+		}
+		idx = (idx + 1) & h.mask
+	}
+}
+
 // GetOrInsert is GetOrInsertNoGrow with the load-factor check folded in, for
 // the cold callers (merge) that insert one key at a time. It reports whether
 // the key already existed, which requires val to be an id that has never
@@ -383,6 +405,21 @@ func buildPackedLayout(types []batch.TypeID) []packedField {
 		fields[i] = packedField{word: slot[0], shift: slot[1], i32: true}
 	}
 	return fields
+}
+
+// samePackedLayout reports whether two key layouts place every column in the
+// same word and bit offset — the precondition for a hash computed against one
+// of them to index a table built with the other (hash once, partitioned_agg.go).
+func samePackedLayout(a, b []packedField) bool {
+	if len(a) != len(b) || len(a) == 0 {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // packedKeyCol is one group column's per-batch resolved accessor: the typed
