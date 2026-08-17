@@ -2168,7 +2168,14 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 
 			// Drift WARN is greppable, not pageable (memo §3/C16). Critical at
 			// >50%, high at >20%. Negative drift (sample skew) never trips these.
-			if driftPct > 0.50 {
+			// Absolute floor: an idle process reports 0 owned against the
+			// runtime's ~7MB baseline heap — 100% "drift" by ratio, zero by
+			// meaning. The backstop hunts multi-GB under-reporting; below
+			// 256MB absolute the ratio is just startup noise.
+			const driftAbsFloor = 256
+			if driftMB < driftAbsFloor {
+				// below the floor: never warn
+			} else if driftPct > 0.50 {
 				w.logger.Warn("accounting drift critical",
 					"accounting_drift_mb", driftMB,
 					"accounting_drift_pct", int64(driftPct*100),
