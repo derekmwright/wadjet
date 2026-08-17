@@ -6023,6 +6023,9 @@ func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.Typ
 			return parquet.TypeFloat64
 		}
 	case *plansql.FuncCallNode:
+		if strings.EqualFold(n.Name, "vector_dims") {
+			return parquet.TypeInt64
+		}
 		if isNumericFunc(n.Name) {
 			return parquet.TypeFloat64
 		}
@@ -6069,7 +6072,14 @@ func isNumericFunc(name string) bool {
 		// nulled out (extract()) — ClickBench Q19/Q43.
 		"year", "month", "day", "hour", "minute", "second", "quarter",
 		"extract", "epoch", "day_of_week", "day_of_year", "week",
-		"dayofweek", "dayofyear", "millisecond", "microsecond":
+		"dayofweek", "dayofyear", "millisecond", "microsecond",
+		// Vector distance/norm functions return float64. Same
+		// String-typed-output panic class as the temporal extractors
+		// above: vecCosineSimilarity writes out.Float64Data, which a
+		// Bytes output vector doesn't have — every vector distance
+		// query panicked once the vec kernels landed. (vector_dims
+		// returns int64 and is typed separately in inferProjectionType.)
+		"cosine_similarity", "l2_distance", "dot_product", "vector_norm":
 		return true
 	}
 	return false

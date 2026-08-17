@@ -37,7 +37,11 @@ jobs:
         # overlap on the runner's RAM.
         # ./wadjet/ carries the embeddable-API E2E suites (CTE, nested
         # types, Decimal) — it was previously not run in CI at all.
-        run: go test -short -p 2 ./internal/... ./wadjet/ -timeout 8m
+        # ./test/ carries the SQL-level E2E regression suites (dates,
+        # vectors, lateral joins) — also previously unrun: the vector
+        # distance panic (String-typed kernel output) sat unnoticed there
+        # for seven weeks.
+        run: go test -short -p 2 ./internal/... ./wadjet/ ./test/ -timeout 8m
 
       - name: TPC-H Correctness (SF0.01)
         run: go test -v -run TestTPCHQueries ./benchmarks/tpch/ -timeout 5m
