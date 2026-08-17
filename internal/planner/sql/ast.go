@@ -3,6 +3,7 @@ package sql
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // Node is the base interface for all SQL expression AST nodes.
@@ -23,9 +24,96 @@ type ColRef struct {
 func (*ColRef) nodeTag() {}
 func (c *ColRef) String() string {
 	if c.Table != "" {
-		return c.Table + "." + c.Column
+		return QuoteIdent(c.Table) + "." + QuoteIdent(c.Column)
 	}
-	return c.Column
+	return QuoteIdent(c.Column)
+}
+
+// QuoteIdent renders an identifier so that re-parsing it yields the same
+// identifier. Names the lexer would otherwise re-read as something else —
+// embedded dots (a flat JSON column such as id.orig_h), spaces, other
+// punctuation, a leading digit, or a keyword spelling — come back
+// double-quoted with any interior quote doubled. Names that already lex as
+// a single unquoted identifier are returned unchanged, so printed SQL for
+// ordinary columns is byte-identical to what it was before delimited
+// identifiers existed.
+func QuoteIdent(name string) string {
+	if !identNeedsQuoting(name) {
+		return name
+	}
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// SplitIdentRef interprets s as an identifier reference and returns its
+// optional qualifier and its name. Quoting is honoured, so the qualifier
+// split happens only at a dot the lexer actually produced:
+//
+//	l_orderkey     → ("", "l_orderkey")
+//	o.o_custkey    → ("o", "o_custkey")
+//	"id.orig_h"    → ("", "id.orig_h")   — one delimited name, not qualified
+//	"my tbl"."c"   → ("my tbl", "c")
+//
+// ok is false for anything that is not a bare identifier reference (a
+// function call, an arithmetic expression, a literal, a multi-level path);
+// callers then fall back to their own string handling.
+func SplitIdentRef(s string) (qualifier, name string, ok bool) {
+	lx := newLexer(s)
+	first := lx.nextToken()
+	if first.typ != TokenIdent {
+		return "", "", false
+	}
+	switch sep := lx.nextToken(); sep.typ {
+	case TokenEOF:
+		return "", first.val, true
+	case TokenDot:
+		last := lx.nextToken()
+		if last.typ != TokenIdent || lx.nextToken().typ != TokenEOF {
+			return "", "", false
+		}
+		return first.val, last.val, true
+	default:
+		return "", "", false
+	}
+}
+
+// NormalizeIdentRef strips the delimiters from an identifier reference so
+// that it reads as the plain column name the execution layer matches
+// against batch schemas: `"id.orig_h"` → id.orig_h, `"my tbl"."c"` →
+// my tbl.c. Strings that are not a bare identifier reference (expressions,
+// function calls, literals) are returned unchanged.
+func NormalizeIdentRef(s string) string {
+	if !strings.Contains(s, `"`) {
+		return s
+	}
+	qual, name, ok := SplitIdentRef(s)
+	if !ok {
+		return s
+	}
+	if qual == "" {
+		return name
+	}
+	return qual + "." + name
+}
+
+func identNeedsQuoting(name string) bool {
+	if name == "" {
+		return true
+	}
+	for i, r := range name {
+		switch {
+		case r == '_' || unicode.IsLetter(r):
+			// always allowed
+		case r >= '0' && r <= '9':
+			if i == 0 {
+				return true // a leading digit would lex as a number
+			}
+		default:
+			return true
+		}
+	}
+	// A bare keyword spelling would come back as a keyword token.
+	_, isKeyword := keywords[strings.ToUpper(name)]
+	return isKeyword
 }
 
 // LiteralKind identifies the kind of literal value.
@@ -80,7 +168,7 @@ type StarNode struct {
 func (*StarNode) nodeTag() {}
 func (s *StarNode) String() string {
 	if s.Table != "" {
-		return s.Table + ".*"
+		return QuoteIdent(s.Table) + ".*"
 	}
 	return "*"
 }

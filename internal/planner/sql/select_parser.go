@@ -135,7 +135,7 @@ done:
 		p.advance() // consume FETCH
 		if p.isKeyword(TokenKWFirst) {
 			p.advance()
-		} else if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "NEXT") {
+		} else if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "NEXT") {
 			p.advance()
 		} else {
 			return nil, fmt.Errorf("expected FIRST or NEXT after FETCH")
@@ -150,7 +150,7 @@ done:
 		if p.isKeyword(TokenKWRow) || p.isKeyword(TokenKWRows) {
 			p.advance()
 		}
-		if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "ONLY") {
+		if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "ONLY") {
 			p.advance()
 		}
 	}
@@ -265,7 +265,7 @@ func (p *selectParser) parseSingleSelect() (*SelectInfo, error) {
 	}
 
 	// QUALIFY (window function filter — Snowflake/BigQuery/Teradata extension)
-	if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "QUALIFY") {
+	if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "QUALIFY") {
 		p.advance()
 		qualifyExpr, err := p.parseExpr()
 		if err != nil {
@@ -425,7 +425,7 @@ func (p *selectParser) isFromKeyword() bool {
 		TokenKWPreceding, TokenKWFollowing, TokenKWCurrent, TokenKWRow:
 		return true
 	}
-	if p.cur.typ == TokenIdent {
+	if p.cur.typ == TokenIdent && !p.cur.quoted {
 		upper := strings.ToUpper(p.cur.val)
 		if upper == "QUALIFY" || upper == "LATERAL" {
 			return true
@@ -492,7 +492,7 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 			// Cross join via comma
 			p.advance()
 			// Check for LATERAL after comma
-			if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "LATERAL") {
+			if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "LATERAL") {
 				p.advance()
 				rightTable, err := p.parseTableRef()
 				if err != nil {
@@ -529,7 +529,7 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 
 		// Check for LATERAL modifier
 		lateral := false
-		if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "LATERAL") {
+		if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "LATERAL") {
 			lateral = true
 			p.advance()
 		}
@@ -598,7 +598,7 @@ func (p *selectParser) parseTableRef() (TableRef, error) {
 	tr := TableRef{Name: nameTok.val, Alias: nameTok.val}
 
 	// Optional TABLESAMPLE method(percent)
-	if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "TABLESAMPLE") {
+	if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "TABLESAMPLE") {
 		p.advance() // consume TABLESAMPLE
 		methodTok, err := p.expect(TokenIdent)
 		if err != nil {
@@ -696,7 +696,7 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 		savedStart := p.lex.start
 		savedWidth := p.lex.width
 		p.advance() // consume WITH
-		if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "ORDINALITY") {
+		if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "ORDINALITY") {
 			p.advance() // consume ORDINALITY
 			tr.WithOrdinality = true
 		} else {
@@ -750,7 +750,7 @@ func (p *selectParser) isJoinKeyword() bool {
 		TokenKWNulls, TokenKWRows, TokenKWRange:
 		return true
 	}
-	if p.cur.typ == TokenIdent {
+	if p.cur.typ == TokenIdent && !p.cur.quoted {
 		upper := strings.ToUpper(p.cur.val)
 		if upper == "QUALIFY" || upper == "LATERAL" {
 			return true
@@ -952,7 +952,7 @@ func (p *selectParser) parseComparison() (Node, error) {
 			// fall through to ILIKE handling below
 		default:
 			// Check for NOT SIMILAR TO
-			if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "SIMILAR") {
+			if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "SIMILAR") {
 				not = true
 				break // fall through to SIMILAR TO handling below
 			}
@@ -1037,7 +1037,7 @@ func (p *selectParser) parseComparison() (Node, error) {
 	}
 
 	// SIMILAR TO — rewrite to regexp_like(left, pattern)
-	if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "SIMILAR") {
+	if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "SIMILAR") {
 		savedSim := p.cur
 		savedSimPos := p.lex.pos
 		savedSimStart := p.lex.start
@@ -1353,6 +1353,13 @@ func (p *selectParser) parsePrimary() (Node, error) {
 		return &ParenNode{Inner: inner}, nil
 
 	case TokenIdent:
+		// A double-quoted identifier is always a plain name: the special
+		// spellings below (and any keyword spelling) are not recognised
+		// inside quotes.
+		if p.cur.quoted {
+			return p.parseIdentExpr()
+		}
+
 		upper := strings.ToUpper(p.cur.val)
 
 		// CURRENT_DATE / CURRENT_TIMESTAMP / CURRENT_TIME — niladic SQL functions
@@ -1469,7 +1476,7 @@ func (p *selectParser) parseFuncCall(name string) (Node, error) {
 //   AGG(expr) FILTER (WHERE cond) → AGG(CASE WHEN cond THEN expr END)
 func (p *selectParser) maybeParseOver(fn *FuncCallNode) (Node, error) {
 	// Check for FILTER (WHERE ...) — standard SQL aggregate filtering
-	if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "FILTER") {
+	if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "FILTER") {
 		rewritten, err := p.parseAggFilter(fn)
 		if err != nil {
 			return nil, err

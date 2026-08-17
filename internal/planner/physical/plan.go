@@ -5856,7 +5856,9 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	for i, gb := range node.GroupBy {
 		// Preserve table qualifiers for self-join disambiguation (e.g., n1.n_name vs n2.n_name).
 		// The aggregate operator resolves qualified names with fallback to unqualified.
-		groupByCols[i] = strings.TrimSpace(gb)
+		// Delimited identifiers lose their quotes here: the operator matches
+		// the batch column name itself (Zeek's flat id.orig_h).
+		groupByCols[i] = plansql.NormalizeIdentRef(strings.TrimSpace(gb))
 	}
 
 	// Literal group keys (GROUP BY 1, URL — the positional ref resolves to
@@ -8315,6 +8317,14 @@ func resolveNullsLast(ob logical.OrderExpr) bool {
 
 func cleanExpr(s string) string {
 	s = strings.TrimSpace(s)
+	// A delimited identifier is a single name: "id.orig_h" (a flat Zeek
+	// JSON column) has no qualifier to strip, and splitting it would leave
+	// a name no batch column matches.
+	if strings.Contains(s, `"`) {
+		if _, name, ok := plansql.SplitIdentRef(s); ok {
+			return name
+		}
+	}
 	if parts := strings.SplitN(s, ".", 2); len(parts) == 2 {
 		return parts[1]
 	}

@@ -316,6 +316,25 @@ func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
 	}
 	keep := make(map[string]bool, len(needs))
 	for name := range needs {
+		// A delimited identifier names one column, dots included, so it
+		// must not be read as alias.column. Zeek JSON columns arrive this
+		// way: "id.orig_h" is the whole name.
+		if strings.Contains(name, `"`) {
+			if qual, col, ok := plansql.SplitIdentRef(name); ok && qual == "" {
+				if canon, ok := inSchema[strings.ToLower(col)]; ok {
+					keep[canon] = true
+				} else {
+					keep[col] = true
+				}
+				continue
+			}
+		}
+		// A flat schema column whose own name contains a dot matches
+		// before any qualifier split is attempted.
+		if canon, ok := inSchema[strings.ToLower(name)]; ok {
+			keep[canon] = true
+			continue
+		}
 		if alias, col, ok := strings.Cut(name, "."); ok {
 			if strings.EqualFold(alias, n.TableAlias) || strings.EqualFold(alias, n.TableName) {
 				if canon, ok := inSchema[strings.ToLower(col)]; ok {

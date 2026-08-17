@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -413,6 +414,109 @@ func TestPgxColumnProjection(t *testing.T) {
 		}
 		if count != 3 {
 			t.Fatalf("expected 3 rows, got %d", count)
+		}
+	})
+}
+
+// TestLibPQQuotedIdentifiers covers the query shape BI tools and JDBC
+// metadata-driven builders emit over the wire: identifiers quoted
+// defensively, table name included. Before delimited identifiers were lexed,
+// the first query such a client sent failed in the lexer.
+func TestLibPQQuotedIdentifiers(t *testing.T) {
+	_, srv := setupRealDB(t)
+	db := openPQ(t, srv.Addr())
+
+	t.Run("quoted_table_and_columns", func(t *testing.T) {
+		rows, err := db.Query(`SELECT "name", "score" FROM "users" WHERE "score" > 90 ORDER BY "score" DESC`)
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		defer rows.Close()
+
+		cols, err := rows.Columns()
+		if err != nil {
+			t.Fatalf("columns: %v", err)
+		}
+		if len(cols) != 2 || cols[0] != "name" || cols[1] != "score" {
+			t.Errorf("column names: got %v, want [name score]", cols)
+		}
+
+		var names []string
+		var scores []float64
+		for rows.Next() {
+			var n string
+			var s float64
+			if err := rows.Scan(&n, &s); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			names = append(names, n)
+			scores = append(scores, s)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("rows.Err: %v", err)
+		}
+		if len(names) != 2 || names[0] != "alice" || names[1] != "carol" {
+			t.Errorf("names: got %v, want [alice carol]", names)
+		}
+		if len(scores) != 2 || scores[0] != 95.5 {
+			t.Errorf("scores: got %v, want 95.5 first", scores)
+		}
+	})
+
+	t.Run("quoted_group_by_positional", func(t *testing.T) {
+		rows, err := db.Query(`SELECT "name", COUNT(*) AS "cnt" FROM "users" GROUP BY 1 ORDER BY 1 LIMIT 10`)
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		defer rows.Close()
+
+		cols, err := rows.Columns()
+		if err != nil {
+			t.Fatalf("columns: %v", err)
+		}
+		if len(cols) != 2 || cols[0] != "name" || cols[1] != "cnt" {
+			t.Errorf("column names: got %v, want [name cnt]", cols)
+		}
+
+		var got []string
+		for rows.Next() {
+			var n string
+			var c int64
+			if err := rows.Scan(&n, &c); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			got = append(got, fmt.Sprintf("%s=%d", n, c))
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("rows.Err: %v", err)
+		}
+		if len(got) != 3 || got[0] != "alice=1" || got[2] != "carol=1" {
+			t.Errorf("groups: got %v, want [alice=1 bob=1 carol=1]", got)
+		}
+	})
+
+	t.Run("quoted_alias_with_space", func(t *testing.T) {
+		rows, err := db.Query(`SELECT "name" AS "user name" FROM "users" ORDER BY "name" LIMIT 1`)
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		defer rows.Close()
+		cols, err := rows.Columns()
+		if err != nil {
+			t.Fatalf("columns: %v", err)
+		}
+		if len(cols) != 1 || cols[0] != "user name" {
+			t.Errorf("column names: got %v, want [\"user name\"]", cols)
+		}
+	})
+
+	t.Run("unterminated_reports_a_clear_error", func(t *testing.T) {
+		_, err := db.Query(`SELECT "name FROM users`)
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if !strings.Contains(err.Error(), "unterminated quoted identifier") {
+			t.Errorf("error does not name the cause: %v", err)
 		}
 	})
 }

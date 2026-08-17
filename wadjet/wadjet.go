@@ -546,7 +546,7 @@ func deriveColumns(info *plansql.SelectInfo, rows []map[string]any) []string {
 						name = col.Expr
 					}
 				}
-				cols = append(cols, name)
+				cols = append(cols, reconcileColumnName(name, rows))
 			}
 			return cols
 		}
@@ -565,6 +565,30 @@ func deriveColumns(info *plansql.SelectInfo, rows []map[string]any) []string {
 		return cols
 	}
 	return nil
+}
+
+// reconcileColumnName keeps the reported column name in step with the keys
+// the executed plan actually produced. A projection name only needs
+// repairing when it is absent from the result rows — a column reference
+// whose name carries a dot (a flat JSON column such as Zeek's id.orig_h,
+// referenced either qualified or as a delimited identifier) can be emitted
+// by the aggregate under its qualifier-stripped spelling, and reporting the
+// other spelling would leave every client looking up a key that is not
+// there. Names present in the rows, and every query with no rows, are left
+// exactly as the projection declared them.
+func reconcileColumnName(name string, rows []map[string]any) string {
+	if len(rows) == 0 {
+		return name
+	}
+	if _, ok := rows[0][name]; ok {
+		return name
+	}
+	if dot := strings.IndexByte(name, '.'); dot >= 0 {
+		if _, ok := rows[0][name[dot+1:]]; ok {
+			return name[dot+1:]
+		}
+	}
+	return name
 }
 
 // deriveColumnMetas infers column type metadata from result data and catalog schemas.

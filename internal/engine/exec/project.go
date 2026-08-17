@@ -105,12 +105,17 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 		schema = make([]parquet.Column, len(p.Projections))
 		for i, proj := range p.Projections {
 			typ := proj.Type
-			if idx := in.ColumnIndex(proj.Name); idx >= 0 {
-				typ = in.Schema[idx].Type
-			} else if proj.SourceCol != "" {
-				if idx := in.ColumnIndex(proj.SourceCol); idx >= 0 {
-					typ = in.Schema[idx].Type
-				}
+			srcIdx := in.ColumnIndex(proj.Name)
+			if srcIdx < 0 && proj.SourceCol != "" {
+				// Same-name lookup failed: resolve the source the way the
+				// value paths do, so a renamed reference that only matches
+				// after qualifier fallback (SELECT "id.orig_h" AS src over
+				// an aggregate that emitted orig_h) still reports the input
+				// column's type instead of the planner's placeholder.
+				srcIdx = columnIndexFallback(in, proj.SourceCol)
+			}
+			if srcIdx >= 0 {
+				typ = in.Schema[srcIdx].Type
 			}
 			col := parquet.Column{
 				Name:     proj.Name,
@@ -121,20 +126,12 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			// nested structure: without Fields/ElementType the pooled
 			// destination vectors have nil Children/Child and every nested
 			// value was silently dropped (rows still marked valid).
-			if srcIdx := in.ColumnIndex(proj.Name); srcIdx >= 0 {
+			if srcIdx >= 0 {
 				col.Dimension = in.Schema[srcIdx].Dimension
 				col.Scale = in.Schema[srcIdx].Scale
 				col.Precision = in.Schema[srcIdx].Precision
 				col.Fields = in.Schema[srcIdx].Fields
 				col.ElementType = in.Schema[srcIdx].ElementType
-			} else if proj.SourceCol != "" {
-				if srcIdx := in.ColumnIndex(proj.SourceCol); srcIdx >= 0 {
-					col.Dimension = in.Schema[srcIdx].Dimension
-					col.Scale = in.Schema[srcIdx].Scale
-					col.Precision = in.Schema[srcIdx].Precision
-					col.Fields = in.Schema[srcIdx].Fields
-					col.ElementType = in.Schema[srcIdx].ElementType
-				}
 			}
 			// Computed VECTOR projections (e.g. embed(text)) don't resolve to an
 			// input column, so carry their dimension from the projection itself.

@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -15,7 +16,7 @@ const (
 	TokenEOF                    // end of input
 
 	// Literals
-	TokenIdent  // unquoted identifier
+	TokenIdent  // identifier — unquoted, or double-quoted (token.quoted is set)
 	TokenString // single-quoted string literal (val has quotes stripped, '' unescaped)
 	TokenNumber // integer or decimal
 
@@ -277,6 +278,12 @@ type token struct {
 	typ TokenType
 	val string
 	pos int // byte offset in original input
+	// quoted marks a TokenIdent that came from a double-quoted
+	// ("delimited") identifier. Such a token is always exactly one
+	// identifier: its value is taken verbatim between the quotes, so any
+	// dots, spaces, or keyword spellings inside it are part of the name
+	// rather than syntax.
+	quoted bool
 }
 
 // stateFn is a state function in the Pike lexer pattern.
@@ -345,11 +352,12 @@ func (l *lexer) emitVal(typ TokenType, val string) {
 	l.start = l.pos
 }
 
-// errorf emits an error token.
+// errorf emits an error token, formatting the message with fmt.Sprintf so
+// that verbs such as %c and %q render the offending input.
 func (l *lexer) errorf(format string, args ...any) stateFn {
 	msg := format
 	if len(args) > 0 {
-		msg = strings.NewReplacer().Replace(format) // simple case
+		msg = fmt.Sprintf(format, args...)
 	}
 	l.pending = &token{
 		typ: TokenError,
@@ -639,6 +647,8 @@ func lexStart(l *lexer) stateFn {
 		return nil
 	case r == '\'':
 		return lexString
+	case r == '"':
+		return lexQuotedIdent
 	case r >= '0' && r <= '9':
 		return lexNumber
 	case r == '_' || unicode.IsLetter(r):
@@ -667,6 +677,47 @@ func lexString(l *lexer) stateFn {
 			}
 			// End of string
 			l.emitVal(TokenString, sb.String())
+			return nil
+		default:
+			sb.WriteRune(r)
+		}
+	}
+}
+
+// lexQuotedIdent scans a double-quoted ("delimited") identifier.
+// The opening quote has already been consumed by lexStart.
+//
+// The value is the text between the quotes, taken verbatim: case is
+// preserved, keyword spellings are not recognised, and dots are ordinary
+// characters — so "id.orig_h" is one column name, not a qualified
+// reference. A doubled quote ("") inside the identifier is an escaped
+// quote character.
+func lexQuotedIdent(l *lexer) stateFn {
+	var sb strings.Builder
+
+	for {
+		r := l.next()
+		switch {
+		case r == eof:
+			return l.errorf("unterminated quoted identifier")
+		case r == '"':
+			// Check for escaped quote ("")
+			if l.peek() == '"' {
+				l.next() // consume the second quote
+				sb.WriteByte('"')
+				continue
+			}
+			// End of identifier
+			if sb.Len() == 0 {
+				return l.errorf("zero-length quoted identifier")
+			}
+			l.pending = &token{
+				typ:    TokenIdent,
+				val:    sb.String(),
+				pos:    l.start,
+				quoted: true,
+			}
+			l.start = l.pos
 			return nil
 		default:
 			sb.WriteRune(r)
