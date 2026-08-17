@@ -13,7 +13,7 @@ import (
 // Probe: two non-overlapping filtered consumers on the pritasks WorkQueue
 // stream must BOTH deliver. Pins the lane-split's core NATS assumption.
 func TestPriLaneClassConsumersBothDeliver(t *testing.T) {
-	cfg := distributed.NATSConfig{StoreDir: t.TempDir()}
+	cfg := distributed.NATSConfig{StoreDir: t.TempDir(), Port: -1}
 	en, err := distributed.NewEmbeddedNATS(cfg, nil)
 	if err != nil {
 		t.Fatalf("embed: %v", err)
@@ -67,7 +67,7 @@ func TestPriLaneClassConsumersBothDeliver(t *testing.T) {
 // delivered through the class consumer. Mimics coordinator
 // scheduler.PublishTasks exactly.
 func TestPriLaneCorePublishDelivers(t *testing.T) {
-	en, err := distributed.NewEmbeddedNATS(distributed.NATSConfig{StoreDir: t.TempDir()}, nil)
+	en, err := distributed.NewEmbeddedNATS(distributed.NATSConfig{StoreDir: t.TempDir(), Port: -1}, nil)
 	if err != nil {
 		t.Fatalf("embed: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestPriLaneCorePublishDelivers(t *testing.T) {
 // "wadjet.pritasks.>" filter had this property and TestDistributedTPCH/Q07
 // hung when the split lost it.
 func TestPriLaneClusterSubjectMatchesClasslessFilter(t *testing.T) {
-	en, err := distributed.NewEmbeddedNATS(distributed.NATSConfig{StoreDir: t.TempDir()}, nil)
+	en, err := distributed.NewEmbeddedNATS(distributed.NATSConfig{StoreDir: t.TempDir(), Port: -1}, nil)
 	if err != nil {
 		t.Fatalf("embed: %v", err)
 	}
