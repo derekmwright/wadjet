@@ -127,6 +127,11 @@ func main() {
 		Use:   "wadjet",
 		Short: "Wadjet — lightweight distributed analytical query engine",
 		Long:  "A distributed analytical query engine that uses embedded NATS for coordination and object storage for results.",
+		// Runtime failures (S3 unreachable, query errors) print the error
+		// alone — dumping the full flag listing after "context deadline
+		// exceeded" buries the message. Flag/usage mistakes still show
+		// usage via the FlagErrorFunc below.
+		SilenceUsage: true,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			// Process-wide planner knobs (package-level state read at plan
 			// time; the logical optimizer has no per-query config surface).
@@ -215,6 +220,13 @@ func main() {
 	rootCmd.AddCommand(clustersCmd())
 	rootCmd.AddCommand(mcpCmd())
 	rootCmd.AddCommand(catalogCmd())
+
+	// Flag mistakes keep the usage dump (it answers "what should I have
+	// typed"); SilenceUsage above scopes it away from runtime errors.
+	rootCmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		c.Println(c.UsageString())
+		return err
+	})
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
