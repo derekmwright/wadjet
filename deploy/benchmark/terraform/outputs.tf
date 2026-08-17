@@ -61,3 +61,14 @@ output "estimated_hourly_cost" {
 output "spot_enabled" {
   value = local.eff_spot
 }
+
+# Run-event queue (push monitoring). The harness sends lifecycle events here;
+# consume them with:
+#   deploy/benchmark/watch-events.sh "$(tofu output -raw notify_queue_url)"
+output "notify_queue_url" {
+  value = aws_sqs_queue.bench_events.url
+}
+
+output "watch_events" {
+  value = "deploy/benchmark/watch-events.sh ${aws_sqs_queue.bench_events.url} ${local.eff_region}"
+}

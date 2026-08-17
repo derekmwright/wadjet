@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/benchmarks/skew"
+	"github.com/derekmwright/wadjet/internal/benchnotify"
 	"github.com/derekmwright/wadjet/internal/coordinator"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -72,7 +73,7 @@ func skewDeployConfig() (skew.Config, error) {
 func loadSkewData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket string, ssl bool, dataPrefix string) {
 	cfg, err := skewDeployConfig()
 	if err != nil {
-		log.Fatalf("skew config: %v", err)
+		fatalf("skew config: %v", err)
 	}
 	store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
 		Endpoint: endpoint,
@@ -80,18 +81,18 @@ func loadSkewData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 		Region:   region,
 	})
 	if err != nil {
-		log.Fatalf("creating S3 store for skew load: %v", err)
+		fatalf("creating S3 store for skew load: %v", err)
 	}
 
 	for name := range skew.Tables {
 		prefix := dataPrefix + name + "/"
 		objects, err := store.List(ctx, bucket, objstore.ListOptions{Prefix: prefix})
 		if err != nil {
-			log.Fatalf("listing stale %s files: %v", name, err)
+			fatalf("listing stale %s files: %v", name, err)
 		}
 		for _, obj := range objects {
 			if err := store.Delete(ctx, bucket, obj.Key); err != nil {
-				log.Fatalf("deleting stale %s: %v", obj.Key, err)
+				fatalf("deleting stale %s: %v", obj.Key, err)
 			}
 		}
 		if len(objects) > 0 {
@@ -101,7 +102,7 @@ func loadSkewData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 
 	for name, schema := range skew.Tables {
 		if err := db.CreateTable(ctx, name, schema, nil); err != nil {
-			log.Fatalf("create table %s: %v", name, err)
+			fatalf("create table %s: %v", name, err)
 		}
 	}
 
@@ -138,11 +139,11 @@ func loadSkewData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 		return nil
 	}
 	if err := skew.GenerateChunked(cfg, emit); err != nil {
-		log.Fatalf("generating skew fixture: %v", err)
+		fatalf("generating skew fixture: %v", err)
 	}
 	for table, files := range entries {
 		if err := db.Catalog().AddFiles(ctx, table, nil, "", files); err != nil {
-			log.Fatalf("registering %s files: %v", table, err)
+			fatalf("registering %s files: %v", table, err)
 		}
 		var rows, bytesTotal int64
 		for _, f := range files {
@@ -171,7 +172,7 @@ func loadSkewData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 // this counter moving are window drift, not skew-split signal).
 func runSkewSuite(ctx context.Context, coord *coordinator.Coordinator, expectedWorkers, runs int, timeout time.Duration) {
 	if coord == nil {
-		log.Fatal("--skew-suite requires distributed mode (the mechanism is coordinator task dispatch)")
+		fatalf("--skew-suite requires distributed mode (the mechanism is coordinator task dispatch)")
 	}
 	for run := 1; run <= runs; run++ {
 		log.Printf("=== Skew suite run %d/%d ===", run, runs)
@@ -205,6 +206,11 @@ func runSkewSuite(ctx context.Context, coord *coordinator.Coordinator, expectedW
 			if err != nil {
 				log.Printf("SKEW RESULT run=%d query=%s wall_ms=%d skew_splits=%d ERROR: %v",
 					run, name, wall.Milliseconds(), splits, err)
+				notifier.Send(benchnotify.Event{
+					Event: benchnotify.EventQueryCompleted, Query: name,
+					WallSeconds: benchnotify.Seconds(wall), OK: benchnotify.OK(false),
+					RunIndex: run, TotalRuns: runs,
+				})
 				continue
 			}
 			rendered := make([]string, len(rows))
@@ -221,8 +227,17 @@ func runSkewSuite(ctx context.Context, coord *coordinator.Coordinator, expectedW
 			for _, r := range rendered {
 				log.Printf("  row: %s", r)
 			}
+			notifier.Send(benchnotify.Event{
+				Event: benchnotify.EventQueryCompleted, Query: name,
+				WallSeconds: benchnotify.Seconds(wall), Rows: benchnotify.Rows(int64(len(rows))),
+				OK: benchnotify.OK(true), RunIndex: run, TotalRuns: runs,
+			})
 		}
+		notifier.Send(benchnotify.Event{
+			Event: benchnotify.EventRunCompleted, RunIndex: run, TotalRuns: runs,
+		})
 	}
+	notifier.Send(benchnotify.Event{Event: benchnotify.EventSuiteCompleted, TotalRuns: runs})
 }
 
 // renderRow renders a result row with sorted column names so checksums are

@@ -63,3 +63,9 @@ variable "bench_env" {
   type        = string
   default     = ""
 }
+
+variable "notify_queue_name" {
+  description = "SQS queue clickbench-bench pushes lifecycle events to (internal/benchnotify). Consumed by deploy/benchmark/watch-events.sh. Distinct from the TPC-H module's queue — separate state, separate name."
+  type        = string
+  default     = "wadjet-bench-events-clickbench"
+}

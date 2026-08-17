@@ -90,6 +90,41 @@ resource "aws_iam_role_policy_attachment" "clickbench_ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
+# --- Run-event queue (push monitoring) ---
+#
+# clickbench-bench pushes per-try + suite events here (internal/benchnotify);
+# deploy/benchmark/watch-events.sh consumes them. Its own queue, separate
+# from the TPC-H module's: the two root modules hold separate state and would
+# otherwise fight over one name.
+#
+# Retention is 1h — the durable record is results/clickbench/<run_id>/ in S3,
+# so destroying the queue at teardown discards nothing that matters. AWS
+# refuses to recreate a same-named queue within 60s of deletion, so an apply
+# right after a destroy can fail with QueueDeletedRecently; wait and re-apply.
+resource "aws_sqs_queue" "bench_events" {
+  name                       = var.notify_queue_name
+  message_retention_seconds  = 3600
+  visibility_timeout_seconds = 30
+  receive_wait_time_seconds  = 20
+  tags = {
+    Name    = var.notify_queue_name
+    Project = "wadjet-bench"
+  }
+}
+
+resource "aws_iam_role_policy" "clickbench_events" {
+  name_prefix = "sqs-"
+  role        = aws_iam_role.clickbench.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["sqs:SendMessage", "sqs:GetQueueUrl"]
+      Resource = [aws_sqs_queue.bench_events.arn]
+    }]
+  })
+}
+
 resource "aws_iam_instance_profile" "clickbench" {
   name_prefix = "wadjet-bench-cb-"
   role        = aws_iam_role.clickbench.name
@@ -127,6 +162,9 @@ locals {
       --comment "${var.comment}" \
       --profile-queries "${var.profile_queries}" \
       --profile-dir /root/profiles \
+      --notify-sqs-url "${aws_sqs_queue.bench_events.url}" \
+      --notify-sqs-region "${var.region}" \
+      --notify-run-id "$TS" \
       --out /root/results.json 2>&1 | tee /root/clickbench.log
 
     aws s3 cp /root/results.json "s3://${var.data_bucket}/results/clickbench/$TS/results.json" --region ${var.region} || true

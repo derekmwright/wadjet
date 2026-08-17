@@ -29,6 +29,7 @@ import (
 
 	"github.com/derekmwright/wadjet/benchmarks/skew"
 	tpch "github.com/derekmwright/wadjet/benchmarks/tpch"
+	"github.com/derekmwright/wadjet/internal/benchnotify"
 	"github.com/derekmwright/wadjet/internal/coordinator"
 	"github.com/derekmwright/wadjet/internal/dataplane"
 	distrib "github.com/derekmwright/wadjet/internal/distributed"
@@ -44,6 +45,23 @@ import (
 	"github.com/derekmwright/wadjet/wadjet"
 	"github.com/nats-io/nats.go"
 )
+
+// notifier is the process-wide push-event sink, nil (disabled) unless
+// --notify-sqs-url is set. Package-level because the harness's abort paths
+// are spread across every top-level helper below — fatalf has to reach it
+// from all of them.
+var notifier *benchnotify.Notifier
+
+// fatalf emits a terminal fatal event, then aborts like log.Fatalf. Every
+// abort in this binary goes through here: a deploy that dies during S3
+// setup, catalog discovery, or the worker rendezvous is exactly the case
+// where a silent log is worst, and log.Fatal's os.Exit skips deferred
+// flushes, so the event must be sent inline.
+func fatalf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	notifier.Fatal("%s", msg)
+	log.Fatal(msg)
+}
 
 func main() {
 	var (
@@ -68,8 +86,22 @@ func main() {
 		dataPrefix            = flag.String("data-prefix", "tables/", "S3 prefix for table data (e.g. 'tables/' or '' for root)")
 		skewSuite             = flag.Bool("skew-suite", false, "Run the hot-key skew fixture (benchmarks/skew) instead of TPC-H: without --skip-load, generate + upload the fixture under --data-prefix first. Also enabled by WADJET_SKEW_SUITE=1.")
 		catalogSnapshotPrefix = flag.String("catalog-snapshot-prefix", "", "S3 prefix for catalog snapshots (e.g. 'catalog/'). With --skip-load: restore the latest snapshot instead of running discovery+ANALYZE; after a fresh discovery, write one. Empty = disabled.")
+		notifySQSURL          = flag.String("notify-sqs-url", "", "SQS queue URL for push lifecycle events (run/query/suite/fatal). Empty = disabled. See internal/benchnotify for the event schema and deploy/benchmark/watch-events.sh for the consumer.")
+		notifySQSRegion       = flag.String("notify-sqs-region", "", "Region for --notify-sqs-url (default: derived from the queue URL)")
+		notifyRunID           = flag.String("notify-run-id", "", "run_id stamped on every event (default: a UTC timestamp). run-benchmark.sh passes the results directory timestamp so events and s3://<bucket>/results/<run_id>/ share an id.")
 	)
 	flag.Parse()
+
+	// Push notifications: built before anything else can fail, so a startup
+	// fatal (bad profile, S3, NATS, catalog) reaches the operator's watcher
+	// instead of dying silently in cloud-init. Disabled (nil) without
+	// --notify-sqs-url; every emission below is fire-and-forget.
+	notifier = benchnotify.New(context.Background(), benchnotify.Config{
+		QueueURL: *notifySQSURL,
+		Region:   *notifySQSRegion,
+		RunID:    *notifyRunID,
+		Logf:     log.Printf,
+	})
 
 	if !*skewSuite && skewSuiteEnabled() {
 		*skewSuite = true
@@ -80,7 +112,7 @@ func main() {
 	if *configPath != "" {
 		profile, err := loadProfile(*configPath)
 		if err != nil {
-			log.Fatal(err)
+			fatalf("%v", err)
 		}
 		log.Printf("Loaded profile: %s (%s)", profile.Name, *configPath)
 
@@ -123,7 +155,7 @@ func main() {
 		if !setFlags["query-timeout"] && profile.Benchmark.QueryTimeout != "" {
 			d, err := time.ParseDuration(profile.Benchmark.QueryTimeout)
 			if err != nil {
-				log.Fatalf("invalid query_timeout in profile: %v", err)
+				fatalf("invalid query_timeout in profile: %v", err)
 			}
 			*queryTimeout = d
 		}
@@ -139,10 +171,16 @@ func main() {
 			*scale, *s3Bucket, *s3Region, *dataPrefix, *workers, *queryTimeout)
 	}
 
+	// Emitted after the profile is applied so total_runs is the effective
+	// value. This is the "harness is alive" signal: everything after it
+	// (S3 setup, discovery/ANALYZE or snapshot restore, worker rendezvous)
+	// can take minutes before the first query event.
+	notifier.Send(benchnotify.Event{Event: benchnotify.EventRunStarted, TotalRuns: *runs})
+
 	if *cpuProf != "" {
 		f, err := os.Create(*cpuProf)
 		if err != nil {
-			log.Fatal(err)
+			fatalf("%v", err)
 		}
 		pprof.StartCPUProfile(f)
 		defer func() {
@@ -215,6 +253,9 @@ func main() {
 		}
 		if !*dataOnly {
 			runSkewSuite(ctx, coord, *workers, *runs, *queryTimeout)
+		} else {
+			// Data-only runs the watcher still has to be able to exit on.
+			notifier.Send(benchnotify.Event{Event: benchnotify.EventSuiteCompleted})
 		}
 		return
 	}
@@ -327,6 +368,10 @@ func main() {
 		}
 
 		runBenchmark(ctx, qf, sf, *runs, *profDir, skip, *queryTimeout)
+	} else {
+		// --data-only never reaches runBenchmark's suite_completed; send one
+		// so the watcher exits instead of long-polling a finished deploy.
+		notifier.Send(benchnotify.Event{Event: benchnotify.EventSuiteCompleted})
 	}
 
 	// Collect worker profiles after benchmark
@@ -354,7 +399,7 @@ func main() {
 	if *memProf != "" {
 		f, err := os.Create(*memProf)
 		if err != nil {
-			log.Fatal(err)
+			fatalf("%v", err)
 		}
 		runtime.GC()
 		pprof.WriteHeapProfile(f)
@@ -374,7 +419,7 @@ func setupStandalone(ctx context.Context) *wadjet.DB {
 	store := objstore.NewMemStore()
 	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "tpch"})
 	if err != nil {
-		log.Fatalf("opening DB: %v", err)
+		fatalf("opening DB: %v", err)
 	}
 	return db
 }
@@ -386,11 +431,11 @@ func setupS3Standalone(ctx context.Context, endpoint, region, bucket string, ssl
 		Region:   region,
 	})
 	if err != nil {
-		log.Fatalf("creating S3 store: %v", err)
+		fatalf("creating S3 store: %v", err)
 	}
 	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: bucket})
 	if err != nil {
-		log.Fatalf("opening DB: %v", err)
+		fatalf("opening DB: %v", err)
 	}
 	return db
 }
@@ -403,7 +448,7 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		Region:   region,
 	})
 	if err != nil {
-		log.Fatalf("creating S3 store: %v", err)
+		fatalf("creating S3 store: %v", err)
 	}
 
 	// Embedded NATS for coordination — bind to 0.0.0.0 so remote workers can connect
@@ -412,31 +457,31 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 	natsCfg.Port = nPort
 	embeddedNATS, err := distrib.NewEmbeddedNATS(natsCfg, logger)
 	if err != nil {
-		log.Fatalf("starting NATS: %v", err)
+		fatalf("starting NATS: %v", err)
 	}
 
 	nc, err := distrib.ConnectInProcess(embeddedNATS.Server())
 	if err != nil {
-		log.Fatalf("connecting NATS: %v", err)
+		fatalf("connecting NATS: %v", err)
 	}
 
 	js, err := distrib.NewJetStream(nc)
 	if err != nil {
-		log.Fatalf("JetStream: %v", err)
+		fatalf("JetStream: %v", err)
 	}
 
 	if err := distrib.SetupStreams(ctx, js); err != nil {
-		log.Fatalf("streams: %v", err)
+		fatalf("streams: %v", err)
 	}
 
 	// Catalog backed by NATS KV
 	kv, err := catalog.NewNATSKV(js)
 	if err != nil {
-		log.Fatalf("KV: %v", err)
+		fatalf("KV: %v", err)
 	}
 	cat := catalog.NewWithCluster(kv, store, bucket, "local")
 	if err := cat.Init(ctx); err != nil {
-		log.Fatalf("catalog init: %v", err)
+		fatalf("catalog init: %v", err)
 	}
 
 	// Bushy join reorder (docs/design/bushy-join-cbo.md): process-wide
@@ -517,7 +562,7 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 			ClusterID: "local",
 		}, logger)
 		if err := dpSrv.Start(); err != nil {
-			log.Fatalf("dataplane server: %v", err)
+			fatalf("dataplane server: %v", err)
 		}
 		coord.SetDataPlaneServer(dpSrv)
 		log.Printf("Data-plane gRPC listening on %s", dpSrv.Addr())
@@ -542,7 +587,7 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		MetaKV: kv,
 	})
 	if err != nil {
-		log.Fatalf("opening DB: %v", err)
+		fatalf("opening DB: %v", err)
 	}
 
 	return db, coord, nc
@@ -621,7 +666,7 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 		Region:   region,
 	})
 	if err != nil {
-		log.Fatalf("creating S3 store for discovery: %v", err)
+		fatalf("creating S3 store for discovery: %v", err)
 	}
 
 	// Discover existing parquet files for each table, then probe the first
@@ -641,7 +686,7 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 		prefix := dataPrefix + name + "/"
 		objects, err := store.List(ctx, bucket, objstore.ListOptions{Prefix: prefix})
 		if err != nil {
-			log.Fatalf("listing %s files: %v", name, err)
+			fatalf("listing %s files: %v", name, err)
 		}
 		if len(objects) == 0 {
 			log.Printf("WARNING: no files found for table %s (prefix: %s)", name, prefix)
@@ -665,7 +710,7 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 		if len(pqObjects) == 0 {
 			log.Printf("WARNING: no parquet files for table %s, using hardcoded schema", name)
 			if err := db.CreateTable(ctx, name, tables[name], nil); err != nil && !strings.Contains(err.Error(), "already exists") {
-				log.Fatalf("create table %s: %v", name, err)
+				fatalf("create table %s: %v", name, err)
 			}
 			continue
 		}
@@ -676,7 +721,7 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 			schema = tables[name]
 		}
 		if err := db.CreateTable(ctx, name, schema, nil); err != nil && !strings.Contains(err.Error(), "already exists") {
-			log.Fatalf("create table %s: %v", name, err)
+			fatalf("create table %s: %v", name, err)
 		}
 
 		// Probe the parquet footer of every file to populate NumRows in the
@@ -700,7 +745,7 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 			})
 		}
 		if err := db.Catalog().AddFiles(ctx, name, nil, "", files); err != nil {
-			log.Fatalf("registering %s files: %v", name, err)
+			fatalf("registering %s files: %v", name, err)
 		}
 		totalFiles += len(files)
 		log.Printf("Discovered %d files for table %s (%d cols, %d rows)", len(files), name, len(schema.Columns), totalRows)
@@ -797,7 +842,7 @@ func loadData(ctx context.Context, db *wadjet.DB, sf tpch.ScaleFactor) {
 	// Create tables
 	for name, schema := range tpch.AllTables {
 		if err := db.CreateTable(ctx, name, schema, nil); err != nil {
-			log.Fatalf("create table %s: %v", name, err)
+			fatalf("create table %s: %v", name, err)
 		}
 	}
 
@@ -829,12 +874,12 @@ func loadData(ctx context.Context, db *wadjet.DB, sf tpch.ScaleFactor) {
 		return ingesters[table].Ingest(ctx, chunk)
 	})
 	if err != nil {
-		log.Fatalf("data generation: %v", err)
+		fatalf("data generation: %v", err)
 	}
 
 	for name, ing := range ingesters {
 		if err := ing.FlushAll(ctx); err != nil {
-			log.Fatalf("flushing %s: %v", name, err)
+			fatalf("flushing %s: %v", name, err)
 		}
 	}
 
@@ -863,6 +908,7 @@ func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int
 		Err       error
 	}
 
+	var suiteElapsed time.Duration
 	for run := 1; run <= runs; run++ {
 		fmt.Printf("\n=== Run %d/%d ===\n", run, runs)
 		var results []result
@@ -944,6 +990,19 @@ func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int
 			if vsig != "" {
 				fmt.Printf("Q%02d vsig %s\n", qNum, vsig)
 			}
+
+			// Push event. Deliberately here, after the timing capture, the
+			// forced GC and the result line: a slow or dead queue can cost
+			// inter-query wall time but can never enter a measurement.
+			notifier.Send(benchnotify.Event{
+				Event:       benchnotify.EventQueryCompleted,
+				Query:       fmt.Sprintf("Q%02d", qNum),
+				WallSeconds: benchnotify.Seconds(elapsed),
+				Rows:        benchnotify.Rows(rowCount),
+				OK:          benchnotify.OK(err == nil),
+				RunIndex:    run,
+				TotalRuns:   runs,
+			})
 		}
 
 		// Summary
@@ -960,6 +1019,14 @@ func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int
 		}
 		fmt.Printf("%-5s %-30s %10s\n", "", "TOTAL", totalElapsed.Round(time.Millisecond))
 
+		suiteElapsed += totalElapsed
+		notifier.Send(benchnotify.Event{
+			Event:        benchnotify.EventRunCompleted,
+			RunIndex:     run,
+			TotalRuns:    runs,
+			TotalSeconds: benchnotify.Seconds(totalElapsed),
+		})
+
 		// Per-query memory profile (if profDir set, at end of run)
 		if profDir != "" {
 			path := fmt.Sprintf("%s/mem-run%d.prof", profDir, run)
@@ -971,6 +1038,15 @@ func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int
 			}
 		}
 	}
+
+	// Terminal event: the watcher exits on this one. Sent before the
+	// post-run profile collection so a hung profile fetch cannot swallow
+	// the "suite is done" signal.
+	notifier.Send(benchnotify.Event{
+		Event:        benchnotify.EventSuiteCompleted,
+		TotalRuns:    runs,
+		TotalSeconds: benchnotify.Seconds(suiteElapsed),
+	})
 }
 
 // startWorkerProfiling tells all workers to begin CPU profiling.

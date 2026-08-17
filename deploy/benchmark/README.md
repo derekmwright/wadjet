@@ -65,6 +65,45 @@ COORDINATOR_PRIVATE_IP=<coordinator-private-ip> \
   ./deploy/benchmark/run-benchmark.sh distributed SF10 3
 ```
 
+## Watching a run
+
+The harness **pushes** lifecycle events to an SQS queue that terraform creates
+alongside the cluster (`aws_sqs_queue.bench_events`); the watcher is a blocking
+receive loop. Producer (`cmd/tpch-bench`, `cmd/clickbench-bench` via
+`internal/benchnotify`) and consumer (`watch-events.sh`) ship together, so the
+watcher can't drift off a log format that changed.
+
+```bash
+# TPC-H / SF100
+deploy/benchmark/watch-events.sh \
+  "$(tofu -chdir=deploy/benchmark/terraform output -raw notify_queue_url)"
+
+# ClickBench
+deploy/benchmark/watch-events.sh \
+  "$(tofu -chdir=deploy/benchmark/terraform-clickbench output -raw notify_queue_url)"
+```
+
+One line per event, `<time> <JSON>`. Exits 0 on `suite_completed`, 1 on
+`fatal`, 2 on `MAX_IDLE_MIN=<n>` with no event (the teardown signal). Messages
+are deleted as they print — run **one** watcher per queue, or two will split
+the stream. Event schema: the package comment in `internal/benchnotify`.
+
+Emission is fire-and-forget: a missing or broken queue costs events, never the
+benchmark, and `--notify-sqs-url` unset (the default) is exactly the old
+behavior. Queue retention is 1 hour; the durable record stays
+`s3://<bucket>/results/<run_id>/`, where `run_id` is the id on every event.
+
+Fallback for a cluster deployed before the queue wiring (no `--notify-sqs-url`):
+
+```bash
+deploy/benchmark/watch-sf100.sh \
+  "$(tofu -chdir=deploy/benchmark/terraform output -raw coordinator_instance_id)"
+```
+
+It verifies startup over SSM (cloud-init FATALs, staged binaries, an advancing
+`/root/benchmark.log`) and fails fast at t+5m, then tails the per-query lines
+until the coordinator stops.
+
 ## Teardown
 
 ```bash

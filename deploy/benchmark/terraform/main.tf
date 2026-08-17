@@ -235,6 +235,46 @@ resource "aws_iam_role_policy_attachment" "ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
+# --- Run-event queue (push monitoring) ---
+#
+# The harness PUSHES lifecycle events here (internal/benchnotify) and the
+# operator consumes them with deploy/benchmark/watch-events.sh — producer and
+# consumer ship in the same commit, so a watcher can't drift off a remembered
+# log format. Sends are fire-and-forget: an absent or broken queue costs
+# events, never the benchmark.
+#
+# Retention is deliberately short (1h): these are live-monitoring events, and
+# the durable record is s3://<bucket>/results/<run_id>/. Destroying the queue
+# with `tofu destroy` after teardown is fine — the run is over and any
+# undelivered messages are stale by definition. The one operational catch:
+# AWS refuses to recreate a queue with the same name within 60s of deleting
+# it, so an apply immediately after a destroy can fail with
+# QueueDeletedRecently — wait a minute and re-apply.
+resource "aws_sqs_queue" "bench_events" {
+  name                       = var.notify_queue_name
+  message_retention_seconds  = 3600
+  visibility_timeout_seconds = 30
+  receive_wait_time_seconds  = 20
+  tags = {
+    Name    = var.notify_queue_name
+    Project = "wadjet-bench"
+  }
+}
+
+resource "aws_iam_role_policy" "bench_events" {
+  name_prefix = "wadjet-bench-sqs-"
+  role        = aws_iam_role.bench.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["sqs:SendMessage", "sqs:GetQueueUrl"]
+      Resource = [aws_sqs_queue.bench_events.arn]
+    }]
+  })
+}
+
 resource "aws_iam_instance_profile" "bench" {
   name_prefix = "wadjet-bench-"
   role        = aws_iam_role.bench.name
@@ -385,6 +425,11 @@ locals {
     export DATA_PREFIX="${local.eff_prefix}"
     export SKIP_QUERIES="${local.eff_skip_queries}"
     export QUERY_TIMEOUT="${local.eff_timeout}"
+    # Push run events to the bench-events queue; run-benchmark.sh turns
+    # these into --notify-sqs-url/--notify-run-id. Watch with
+    # deploy/benchmark/watch-events.sh "$(tofu output -raw notify_queue_url)".
+    export NOTIFY_SQS_URL="${aws_sqs_queue.bench_events.url}"
+    export NOTIFY_SQS_REGION="${local.eff_region}"
     ${local.profile_env}
     cd /root/wadjet
 
@@ -428,6 +473,11 @@ locals {
     export DATA_PREFIX="${local.eff_prefix}"
     export SKIP_QUERIES="${local.eff_skip_queries}"
     export QUERY_TIMEOUT="${local.eff_timeout}"
+    # Push run events to the bench-events queue; run-benchmark.sh turns
+    # these into --notify-sqs-url/--notify-run-id. Watch with
+    # deploy/benchmark/watch-events.sh "$(tofu output -raw notify_queue_url)".
+    export NOTIFY_SQS_URL="${aws_sqs_queue.bench_events.url}"
+    export NOTIFY_SQS_REGION="${local.eff_region}"
     export WADJET_REVERSE_BLOOM_INNER_THRESHOLD="${var.reverse_bloom_inner_threshold}"
     export WADJET_JOIN_DEBUG="${var.join_debug}"
     export WADJET_DYNAMIC_FILTERS="${var.dynamic_filters}"

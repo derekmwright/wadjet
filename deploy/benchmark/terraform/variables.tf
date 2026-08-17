@@ -483,3 +483,9 @@ variable "extra_env" {
   type        = map(string)
   default     = {}
 }
+
+variable "notify_queue_name" {
+  description = "SQS queue the bench harness pushes lifecycle events to (internal/benchnotify). Consumed by deploy/benchmark/watch-events.sh. Fixed name = create-once semantics per workspace; override when two TPC-H deploys must not share a queue."
+  type        = string
+  default     = "wadjet-bench-events"
+}

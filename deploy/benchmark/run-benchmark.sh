@@ -12,6 +12,8 @@
 #   WADJET_REGION   — AWS region
 #   GENERATE_DATA   — Set to "1" to regenerate data instead of using pre-seeded bucket
 #   BENCHMARK_TYPE  — "tpch" (default) or "security"
+#   NOTIFY_SQS_URL  — SQS queue for push lifecycle events (empty = disabled)
+#   NOTIFY_SQS_REGION — region override for that queue (default: from the URL)
 #
 # Outputs results to /root/benchmark-results/
 
@@ -122,6 +124,19 @@ elif [ -z "$PROFILE" ]; then
   DATA_PREFIX_FLAG=(--data-prefix="tables/")
 fi
 
+# Push lifecycle events to SQS (internal/benchnotify). NOTIFY_SQS_URL is
+# exported by the terraform user_data when the bench-events queue exists;
+# unset means the harness runs exactly as before. run_id is this script's
+# results TIMESTAMP, so an event stream and s3://${BUCKET}/results/<run_id>/
+# carry the same id. tpch-bench only — security-bench has no such flag and
+# would reject it.
+NOTIFY_FLAGS=()
+if [ -n "${NOTIFY_SQS_URL:-}" ] && [ "$BENCH_TYPE" = "tpch" ]; then
+  NOTIFY_FLAGS=(--notify-sqs-url="${NOTIFY_SQS_URL}" --notify-run-id="${TIMESTAMP}")
+  [ -n "${NOTIFY_SQS_REGION:-}" ] && NOTIFY_FLAGS+=(--notify-sqs-region="${NOTIFY_SQS_REGION}")
+  log "Pushing run events to ${NOTIFY_SQS_URL} (run_id=${TIMESTAMP})"
+fi
+
 if [ "$MODE" = "standalone" ]; then
   log "Running ${BENCH_LABEL} SF${SCALE} standalone benchmark (${RUNS} runs)..."
 
@@ -138,6 +153,7 @@ if [ "$MODE" = "standalone" ]; then
     "${LOAD_FLAGS[@]}" \
     "${CATALOG_SNAP_FLAGS[@]}" \
     "${SKIP_FLAGS[@]}" \
+    "${NOTIFY_FLAGS[@]}" \
     --cpuprofile="${PROF_DIR}/cpu-standalone.prof" \
     --memprofile="${PROF_DIR}/mem-standalone.prof" \
     --profdir="${PROF_DIR}" \
@@ -177,6 +193,7 @@ elif [ "$MODE" = "distributed" ]; then
     "${SKIP_FLAGS[@]}" \
     "${NATIVE_DAG_FLAGS[@]}" \
     "${DATA_PLANE_FLAGS[@]}" \
+    "${NOTIFY_FLAGS[@]}" \
     --nats-port=4222 \
     --cpuprofile="${PROF_DIR}/cpu-distributed.prof" \
     --memprofile="${PROF_DIR}/mem-distributed.prof" \

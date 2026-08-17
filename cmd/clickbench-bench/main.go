@@ -45,6 +45,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/benchnotify"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -67,36 +68,65 @@ type resultsJSON struct {
 	Result      [][]float64 `json:"result"`
 }
 
+// notifier is the process-wide push-event sink, nil (disabled) unless
+// --notify-sqs-url is set. Only the PARENT builds one: isolate children
+// inherit the parent's argv, and the parent already knows every child's
+// timings, so a child-side emitter would only duplicate events.
+var notifier *benchnotify.Notifier
+
+// fatalf emits a terminal fatal event, then aborts like log.Fatalf. Inline,
+// because log.Fatal's os.Exit skips deferred flushes.
+func fatalf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	notifier.Fatal("%s", msg)
+	log.Fatal(msg)
+}
+
 func main() {
 	var (
-		dataDir        = flag.String("data-dir", "", "Directory containing hits_*.parquet parts (required)")
-		s3Bucket       = flag.String("s3-bucket", "", "S3 bucket to download parts from (optional; skips files already present)")
-		s3Region       = flag.String("s3-region", "us-east-2", "S3 region")
-		s3Endpoint     = flag.String("s3-endpoint", "", "S3 endpoint override (empty = AWS)")
-		s3Prefix       = flag.String("s3-prefix", "tables/hits/", "S3 key prefix for the parts")
-		tries          = flag.Int("tries", 3, "Runs per query (first is cold)")
-		dropCaches     = flag.Bool("drop-caches", true, "Drop the OS page cache before each query's first try (needs root; silently skipped if not possible)")
-		queryTimeout   = flag.Duration("query-timeout", 10*time.Minute, "Per-query timeout")
-		out            = flag.String("out", "results.json", "Results JSON output path")
-		machine        = flag.String("machine", "", "Machine description for the results JSON (e.g. \"c6a.4xlarge, 500gb gp2\")")
-		comment        = flag.String("comment", "", "Comment for the results JSON")
-		queriesPath    = flag.String("queries", "", "Query file override (default: embedded queries.sql)")
-		pprofAddr      = flag.String("pprof-addr", "", "Start a net/http/pprof server on this address (e.g. localhost:6060) for live profiling")
-		spillDir       = flag.String("spill-dir", "", "Spill directory (default: <data-dir>/../wadjet-spill). MUST be real disk: the os temp dir default of the engine is tmpfs on AL2023, so spill runs consumed RAM and helped OOM-kill the c6a on high-cardinality aggregation")
-		memBudget      = flag.Int64("mem-budget", 0, "Per-query memory budget in bytes (0 = auto-detect: 75% of the memory limit)")
-		isolate        = flag.Bool("isolate", true, "Run each query in a fresh child process (the duckdb-entry pattern: one invocation per query). A query that OOMs or crashes becomes a null result instead of aborting the suite; per-process registration costs ~0.05s (footer reads)")
-		childQuery     = flag.String("child-query", "", "internal: run this single query (isolate child mode) and print per-try seconds as JSON on the last stdout line")
-		profileQueries = flag.String("profile-queries", "", "comma-separated query numbers to CPU/heap-profile in an EXTRA isolate pass after the timed suite (profiles never contaminate the official triples); output under --profile-dir")
-		profileDir     = flag.String("profile-dir", "/root/profiles", "directory for per-query pprof output from --profile-queries")
-		cpuProfile     = flag.String("cpuprofile", "", "internal: child writes a CPU profile of its tries here")
-		memProfile     = flag.String("memprofile", "", "internal: child writes a heap profile after its tries here")
-		childQNum      = flag.Int("child-qnum", 0, "internal: real query number for the child's per-try log lines — without it every isolate child logs itself as Q00, which misreads as Q01 when tailing the live log")
-		analyze        = flag.Bool("analyze", false, "Run ANALYZE (per-column HLL) after registration. Off by default: ClickBench has no joins, planner NDV buys little, and HLL over 105 columns dominates load_time (~24s per 1M-row part)")
+		dataDir         = flag.String("data-dir", "", "Directory containing hits_*.parquet parts (required)")
+		s3Bucket        = flag.String("s3-bucket", "", "S3 bucket to download parts from (optional; skips files already present)")
+		s3Region        = flag.String("s3-region", "us-east-2", "S3 region")
+		s3Endpoint      = flag.String("s3-endpoint", "", "S3 endpoint override (empty = AWS)")
+		s3Prefix        = flag.String("s3-prefix", "tables/hits/", "S3 key prefix for the parts")
+		tries           = flag.Int("tries", 3, "Runs per query (first is cold)")
+		dropCaches      = flag.Bool("drop-caches", true, "Drop the OS page cache before each query's first try (needs root; silently skipped if not possible)")
+		queryTimeout    = flag.Duration("query-timeout", 10*time.Minute, "Per-query timeout")
+		out             = flag.String("out", "results.json", "Results JSON output path")
+		machine         = flag.String("machine", "", "Machine description for the results JSON (e.g. \"c6a.4xlarge, 500gb gp2\")")
+		comment         = flag.String("comment", "", "Comment for the results JSON")
+		queriesPath     = flag.String("queries", "", "Query file override (default: embedded queries.sql)")
+		pprofAddr       = flag.String("pprof-addr", "", "Start a net/http/pprof server on this address (e.g. localhost:6060) for live profiling")
+		spillDir        = flag.String("spill-dir", "", "Spill directory (default: <data-dir>/../wadjet-spill). MUST be real disk: the os temp dir default of the engine is tmpfs on AL2023, so spill runs consumed RAM and helped OOM-kill the c6a on high-cardinality aggregation")
+		memBudget       = flag.Int64("mem-budget", 0, "Per-query memory budget in bytes (0 = auto-detect: 75% of the memory limit)")
+		isolate         = flag.Bool("isolate", true, "Run each query in a fresh child process (the duckdb-entry pattern: one invocation per query). A query that OOMs or crashes becomes a null result instead of aborting the suite; per-process registration costs ~0.05s (footer reads)")
+		childQuery      = flag.String("child-query", "", "internal: run this single query (isolate child mode) and print per-try seconds as JSON on the last stdout line")
+		profileQueries  = flag.String("profile-queries", "", "comma-separated query numbers to CPU/heap-profile in an EXTRA isolate pass after the timed suite (profiles never contaminate the official triples); output under --profile-dir")
+		profileDir      = flag.String("profile-dir", "/root/profiles", "directory for per-query pprof output from --profile-queries")
+		cpuProfile      = flag.String("cpuprofile", "", "internal: child writes a CPU profile of its tries here")
+		memProfile      = flag.String("memprofile", "", "internal: child writes a heap profile after its tries here")
+		childQNum       = flag.Int("child-qnum", 0, "internal: real query number for the child's per-try log lines — without it every isolate child logs itself as Q00, which misreads as Q01 when tailing the live log")
+		analyze         = flag.Bool("analyze", false, "Run ANALYZE (per-column HLL) after registration. Off by default: ClickBench has no joins, planner NDV buys little, and HLL over 105 columns dominates load_time (~24s per 1M-row part)")
+		notifySQSURL    = flag.String("notify-sqs-url", "", "SQS queue URL for push lifecycle events (run/query/suite/fatal). Empty = disabled. See internal/benchnotify for the event schema and deploy/benchmark/watch-events.sh for the consumer.")
+		notifySQSRegion = flag.String("notify-sqs-region", "", "Region for --notify-sqs-url (default: derived from the queue URL)")
+		notifyRunID     = flag.String("notify-run-id", "", "run_id stamped on every event (default: a UTC timestamp). The terraform userdata passes the results timestamp so events and s3://<bucket>/results/clickbench/<run_id>/ share an id.")
 	)
 	flag.Parse()
 
+	// Parent only: an isolate child inherits argv, and duplicate per-try
+	// events from 43 children would be worse than none.
+	if *childQuery == "" {
+		notifier = benchnotify.New(context.Background(), benchnotify.Config{
+			QueueURL: *notifySQSURL,
+			Region:   *notifySQSRegion,
+			RunID:    *notifyRunID,
+			Logf:     log.Printf,
+		})
+		notifier.Send(benchnotify.Event{Event: benchnotify.EventRunStarted, TotalRuns: *tries})
+	}
+
 	if *dataDir == "" {
-		log.Fatal("--data-dir is required")
+		fatalf("--data-dir is required")
 	}
 
 	// GOMEMLIMIT safety net. An explicit GOMEMLIMIT env (runtime already
@@ -128,16 +158,16 @@ func main() {
 
 	if *s3Bucket != "" && *childQuery == "" {
 		if err := downloadParts(ctx, *s3Endpoint, *s3Region, *s3Bucket, *s3Prefix, *dataDir); err != nil {
-			log.Fatalf("downloading parts: %v", err)
+			fatalf("downloading parts: %v", err)
 		}
 	}
 
 	parts, dataSize, err := listParts(*dataDir)
 	if err != nil {
-		log.Fatal(err)
+		fatalf("%v", err)
 	}
 	if len(parts) == 0 {
-		log.Fatalf("no .parquet parts under %s", *dataDir)
+		fatalf("no .parquet parts under %s", *dataDir)
 	}
 	log.Printf("%d parts, %.2f GB", len(parts), float64(dataSize)/(1<<30))
 
@@ -152,13 +182,13 @@ func main() {
 		sd = filepath.Join(filepath.Dir(strings.TrimRight(*dataDir, "/")), "wadjet-spill")
 	}
 	if err := os.MkdirAll(sd, 0o755); err != nil {
-		log.Fatalf("spill dir %s: %v", sd, err)
+		fatalf("spill dir %s: %v", sd, err)
 	}
 	log.Printf("spill dir: %s", sd)
 
 	db, err := openHitsDB(ctx, *dataDir, parts, *analyze, *memBudget, sd)
 	if err != nil {
-		log.Fatalf("opening db: %v", err)
+		fatalf("opening db: %v", err)
 	}
 	defer db.Close()
 	loadTime := time.Since(loadStart)
@@ -168,7 +198,7 @@ func main() {
 		// Sanity: COUNT(*) must be positive before timing anything.
 		res, err := db.Query(ctx, "SELECT COUNT(*) FROM hits")
 		if err != nil || len(res.Rows) != 1 {
-			log.Fatalf("sanity COUNT(*): rows=%v err=%v", res, err)
+			fatalf("sanity COUNT(*): rows=%v err=%v", res, err)
 		}
 		for _, v := range res.Rows[0] {
 			log.Printf("hits rows: %v", v)
@@ -180,10 +210,10 @@ func main() {
 		if *cpuProfile != "" {
 			f, err := os.Create(*cpuProfile)
 			if err != nil {
-				log.Fatalf("cpuprofile: %v", err)
+				fatalf("cpuprofile: %v", err)
 			}
 			if err := runtimepprof.StartCPUProfile(f); err != nil {
-				log.Fatalf("cpuprofile start: %v", err)
+				fatalf("cpuprofile start: %v", err)
 			}
 			defer func() { runtimepprof.StopCPUProfile(); f.Close() }()
 		}
@@ -213,7 +243,21 @@ func main() {
 			triesOut = runQueryTries(ctx, db, q, *tries, *queryTimeout, qi+1)
 		}
 		results = append(results, triesOut)
+		notifyTries(qi+1, triesOut)
 	}
+
+	// Terminal event, sent before the optional profile pass so a slow
+	// profiling rerun cannot delay the watcher's exit. cold/hot follow the
+	// official scoring (benchmarks/clickbench/rank.py): cold = try 1,
+	// hot = min(try 2, try 3).
+	cold, hot, total := coldHotTotals(results)
+	notifier.Send(benchnotify.Event{
+		Event:        benchnotify.EventSuiteCompleted,
+		TotalRuns:    *tries,
+		ColdSeconds:  benchnotify.SecondsFloat(cold),
+		HotSeconds:   benchnotify.SecondsFloat(hot),
+		TotalSeconds: benchnotify.SecondsFloat(total),
+	})
 
 	// Profile pass: rerun the requested queries in fresh isolate children
 	// with pprof enabled, AFTER the timed suite so profiling overhead never
@@ -263,12 +307,59 @@ func main() {
 	}
 	buf, err := marshalResults(rj)
 	if err != nil {
-		log.Fatalf("marshal: %v", err)
+		fatalf("marshal: %v", err)
 	}
 	if err := os.WriteFile(*out, buf, 0o644); err != nil {
-		log.Fatalf("write %s: %v", *out, err)
+		fatalf("write %s: %v", *out, err)
 	}
 	log.Printf("wrote %s", *out)
+}
+
+// notifyTries pushes one query_completed event per try. Called after the
+// query's tries are complete — never between the timing calls — so a slow
+// queue cannot land inside a measured region. The -1 sentinel (failed try,
+// null in the results JSON) becomes ok:false with no wall_seconds.
+func notifyTries(qNum int, tries []float64) {
+	for i, secs := range tries {
+		ev := benchnotify.Event{
+			Event: benchnotify.EventQueryCompleted,
+			Query: fmt.Sprintf("Q%02d", qNum),
+			Try:   i + 1,
+			OK:    benchnotify.OK(secs >= 0),
+		}
+		if secs >= 0 {
+			ev.WallSeconds = benchnotify.SecondsFloat(secs)
+		}
+		notifier.Send(ev)
+	}
+}
+
+// coldHotTotals sums the suite the way the official ranking reads it
+// (benchmarks/clickbench/rank.py): cold = try 1, hot = min(try 2, try 3).
+// Failed tries (-1) are skipped rather than counted as zero, so a partial
+// suite's numbers stay comparable to the same queries elsewhere; total is
+// every successful try, i.e. the timed wall of the suite itself.
+func coldHotTotals(results [][]float64) (cold, hot, total float64) {
+	for _, tries := range results {
+		for _, secs := range tries {
+			if secs >= 0 {
+				total += secs
+			}
+		}
+		if len(tries) > 0 && tries[0] >= 0 {
+			cold += tries[0]
+		}
+		best := -1.0
+		for _, secs := range tries[min(1, len(tries)):] {
+			if secs >= 0 && (best < 0 || secs < best) {
+				best = secs
+			}
+		}
+		if best >= 0 {
+			hot += best
+		}
+	}
+	return cold, hot, total
 }
 
 // runQueryTries runs one query N times in-process. qNum 0 suppresses the
@@ -367,7 +458,7 @@ func loadQueries(path string) []string {
 	if path != "" {
 		b, err := os.ReadFile(path)
 		if err != nil {
-			log.Fatalf("reading %s: %v", path, err)
+			fatalf("reading %s: %v", path, err)
 		}
 		text = string(b)
 	}
