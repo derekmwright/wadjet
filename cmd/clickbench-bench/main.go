@@ -37,10 +37,10 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/exec"
-	"runtime"
-	runtimepprof "runtime/pprof"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
+	runtimepprof "runtime/pprof"
 	"strconv"
 	"strings"
 	"time"
@@ -69,29 +69,29 @@ type resultsJSON struct {
 
 func main() {
 	var (
-		dataDir      = flag.String("data-dir", "", "Directory containing hits_*.parquet parts (required)")
-		s3Bucket     = flag.String("s3-bucket", "", "S3 bucket to download parts from (optional; skips files already present)")
-		s3Region     = flag.String("s3-region", "us-east-2", "S3 region")
-		s3Endpoint   = flag.String("s3-endpoint", "", "S3 endpoint override (empty = AWS)")
-		s3Prefix     = flag.String("s3-prefix", "tables/hits/", "S3 key prefix for the parts")
-		tries        = flag.Int("tries", 3, "Runs per query (first is cold)")
-		dropCaches   = flag.Bool("drop-caches", true, "Drop the OS page cache before each query's first try (needs root; silently skipped if not possible)")
-		queryTimeout = flag.Duration("query-timeout", 10*time.Minute, "Per-query timeout")
-		out          = flag.String("out", "results.json", "Results JSON output path")
-		machine      = flag.String("machine", "", "Machine description for the results JSON (e.g. \"c6a.4xlarge, 500gb gp2\")")
-		comment      = flag.String("comment", "", "Comment for the results JSON")
-		queriesPath  = flag.String("queries", "", "Query file override (default: embedded queries.sql)")
-		pprofAddr    = flag.String("pprof-addr", "", "Start a net/http/pprof server on this address (e.g. localhost:6060) for live profiling")
-		spillDir     = flag.String("spill-dir", "", "Spill directory (default: <data-dir>/../wadjet-spill). MUST be real disk: the os temp dir default of the engine is tmpfs on AL2023, so spill runs consumed RAM and helped OOM-kill the c6a on high-cardinality aggregation")
-		memBudget    = flag.Int64("mem-budget", 0, "Per-query memory budget in bytes (0 = auto-detect: 75% of the memory limit)")
-		isolate      = flag.Bool("isolate", true, "Run each query in a fresh child process (the duckdb-entry pattern: one invocation per query). A query that OOMs or crashes becomes a null result instead of aborting the suite; per-process registration costs ~0.05s (footer reads)")
-		childQuery   = flag.String("child-query", "", "internal: run this single query (isolate child mode) and print per-try seconds as JSON on the last stdout line")
+		dataDir        = flag.String("data-dir", "", "Directory containing hits_*.parquet parts (required)")
+		s3Bucket       = flag.String("s3-bucket", "", "S3 bucket to download parts from (optional; skips files already present)")
+		s3Region       = flag.String("s3-region", "us-east-2", "S3 region")
+		s3Endpoint     = flag.String("s3-endpoint", "", "S3 endpoint override (empty = AWS)")
+		s3Prefix       = flag.String("s3-prefix", "tables/hits/", "S3 key prefix for the parts")
+		tries          = flag.Int("tries", 3, "Runs per query (first is cold)")
+		dropCaches     = flag.Bool("drop-caches", true, "Drop the OS page cache before each query's first try (needs root; silently skipped if not possible)")
+		queryTimeout   = flag.Duration("query-timeout", 10*time.Minute, "Per-query timeout")
+		out            = flag.String("out", "results.json", "Results JSON output path")
+		machine        = flag.String("machine", "", "Machine description for the results JSON (e.g. \"c6a.4xlarge, 500gb gp2\")")
+		comment        = flag.String("comment", "", "Comment for the results JSON")
+		queriesPath    = flag.String("queries", "", "Query file override (default: embedded queries.sql)")
+		pprofAddr      = flag.String("pprof-addr", "", "Start a net/http/pprof server on this address (e.g. localhost:6060) for live profiling")
+		spillDir       = flag.String("spill-dir", "", "Spill directory (default: <data-dir>/../wadjet-spill). MUST be real disk: the os temp dir default of the engine is tmpfs on AL2023, so spill runs consumed RAM and helped OOM-kill the c6a on high-cardinality aggregation")
+		memBudget      = flag.Int64("mem-budget", 0, "Per-query memory budget in bytes (0 = auto-detect: 75% of the memory limit)")
+		isolate        = flag.Bool("isolate", true, "Run each query in a fresh child process (the duckdb-entry pattern: one invocation per query). A query that OOMs or crashes becomes a null result instead of aborting the suite; per-process registration costs ~0.05s (footer reads)")
+		childQuery     = flag.String("child-query", "", "internal: run this single query (isolate child mode) and print per-try seconds as JSON on the last stdout line")
 		profileQueries = flag.String("profile-queries", "", "comma-separated query numbers to CPU/heap-profile in an EXTRA isolate pass after the timed suite (profiles never contaminate the official triples); output under --profile-dir")
 		profileDir     = flag.String("profile-dir", "/root/profiles", "directory for per-query pprof output from --profile-queries")
 		cpuProfile     = flag.String("cpuprofile", "", "internal: child writes a CPU profile of its tries here")
 		memProfile     = flag.String("memprofile", "", "internal: child writes a heap profile after its tries here")
-		childQNum    = flag.Int("child-qnum", 0, "internal: real query number for the child's per-try log lines — without it every isolate child logs itself as Q00, which misreads as Q01 when tailing the live log")
-		analyze      = flag.Bool("analyze", false, "Run ANALYZE (per-column HLL) after registration. Off by default: ClickBench has no joins, planner NDV buys little, and HLL over 105 columns dominates load_time (~24s per 1M-row part)")
+		childQNum      = flag.Int("child-qnum", 0, "internal: real query number for the child's per-try log lines — without it every isolate child logs itself as Q00, which misreads as Q01 when tailing the live log")
+		analyze        = flag.Bool("analyze", false, "Run ANALYZE (per-column HLL) after registration. Off by default: ClickBench has no joins, planner NDV buys little, and HLL over 105 columns dominates load_time (~24s per 1M-row part)")
 	)
 	flag.Parse()
 
