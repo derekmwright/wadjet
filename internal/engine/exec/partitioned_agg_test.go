@@ -57,7 +57,9 @@ func TestPartitionedAggMatchesSerial(t *testing.T) {
 		}
 	}
 
-	run := func(workers int, withSpill bool) map[string]map[string]any {
+	run := func(workers int, withSpill, parallelEmit bool) map[string]map[string]any {
+		prev := parallelEmitToggle.Set(parallelEmit)
+		defer parallelEmitToggle.Set(prev)
 		agg := NewHashAggregate([]string{"k1", "k2"}, aggsOf())
 		if withSpill {
 			tracker := memory.NewTracker("t", 64<<20)
@@ -98,43 +100,54 @@ func TestPartitionedAggMatchesSerial(t *testing.T) {
 		return out
 	}
 
-	serial := run(1, false)
+	serial := run(1, false, false)
 
-	before := PartitionedAggRuns.Load()
-	par := run(8, spillOn)
-	if PartitionedAggRuns.Load() == before && partitionedAggToggle.On() {
-		t.Fatal("partitioned mode did not engage")
-	}
-
-	t.Logf("fallback consumptions: %d", partitionFallbacks.Load())
-	if len(par) != len(serial) {
-		t.Fatalf("group counts differ: parallel %d vs serial %d", len(par), len(serial))
-	}
-	keys := make([]string, 0, len(serial))
-	for k := range serial {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	bad := 0
-	for _, k := range keys {
-		pr, ok := par[k]
-		if !ok {
-			bad++
-			if bad <= 5 {
-				t.Errorf("group %q missing from parallel result", k)
+	// Both emit phases are checked against the same serial oracle: the
+	// adopted partitions streamed one at a time (parallelEmit=false) and
+	// fanned across one goroutine each (parallelEmit=true).
+	for _, parallelEmit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("parallel_emit=%v", parallelEmit), func(t *testing.T) {
+			beforeParts := PartitionedAggRuns.Load()
+			beforeEmit := ParallelEmitRuns.Load()
+			par := run(8, spillOn, parallelEmit)
+			if PartitionedAggRuns.Load() == beforeParts && partitionedAggToggle.On() {
+				t.Fatal("partitioned mode did not engage")
 			}
-			continue
-		}
-		for col, sv := range serial[k] {
-			if fmt.Sprintf("%v", pr[col]) != fmt.Sprintf("%v", sv) {
-				bad++
-				if bad <= 8 {
-					t.Errorf("group %q col %s: parallel %v vs serial %v", k, col, pr[col], sv)
+			if got := ParallelEmitRuns.Load() != beforeEmit; got != parallelEmit {
+				t.Fatalf("parallel emit engaged=%v, want %v", got, parallelEmit)
+			}
+
+			t.Logf("fallback consumptions: %d", partitionFallbacks.Load())
+			if len(par) != len(serial) {
+				t.Fatalf("group counts differ: parallel %d vs serial %d", len(par), len(serial))
+			}
+			keys := make([]string, 0, len(serial))
+			for k := range serial {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			bad := 0
+			for _, k := range keys {
+				pr, ok := par[k]
+				if !ok {
+					bad++
+					if bad <= 5 {
+						t.Errorf("group %q missing from parallel result", k)
+					}
+					continue
+				}
+				for col, sv := range serial[k] {
+					if fmt.Sprintf("%v", pr[col]) != fmt.Sprintf("%v", sv) {
+						bad++
+						if bad <= 8 {
+							t.Errorf("group %q col %s: parallel %v vs serial %v", k, col, pr[col], sv)
+						}
+					}
 				}
 			}
-		}
-	}
-	if bad > 8 {
-		t.Errorf("... and %d more mismatches", bad-8)
+			if bad > 8 {
+				t.Errorf("... and %d more mismatches", bad-8)
+			}
+		})
 	}
 }

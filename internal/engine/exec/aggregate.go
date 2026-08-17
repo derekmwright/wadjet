@@ -296,6 +296,18 @@ type HashAggregate struct {
 	trackedGroupMem  int64          // bytes charged to Spill tracker for group state growth
 	outputPos        int            // position in keys for batched Next() output
 	gsPool           groupStatePool // chunk allocator for groupState (reduces GC pressure)
+	// emitSchema caches outputSchema() for the emission phase. It used to be
+	// rebuilt for EVERY output batch (name de-qualification map, per-column
+	// metadata copies) — pure waste at 2048 rows per call, and it has to be
+	// read-only anyway once the parallel drain has several units emitting at
+	// once. emitSchemaSet distinguishes "not computed" from the legitimately
+	// empty schema of a zero-column aggregate.
+	emitSchema    []parquet.Column
+	emitSchemaSet bool
+	// emit, when non-nil, is the parallel emit drain that owns the adopted
+	// partitions and streams every unit's output concurrently — see
+	// aggregate_parallel_emit.go.
+	emit *emitDrain
 
 	// Incremental byte counters for per-group state that groupMemoryUsage
 	// cannot enumerate in O(1) from caps: string bytes behind serializedKeys
@@ -644,6 +656,12 @@ func NewHashAggregate(groupByCols []string, aggs []AggColumn) *HashAggregate {
 }
 
 func (h *HashAggregate) Init(_ context.Context) error {
+	// Re-Init on an instance whose previous emission is still fanned out
+	// would strand the drain's goroutines on state we are about to reset.
+	if h.emit != nil {
+		h.emit.shutdown()
+		h.emit = nil
+	}
 	// The string group index is built by resolveIndices, which sizes it from
 	// the planner's NDV hint. Constructing it here left every one of those
 	// pre-size branches (all guarded on `strGroupIndex == nil`) unreachable,
@@ -660,6 +678,8 @@ func (h *HashAggregate) Init(_ context.Context) error {
 	h.resolved = false
 	h.keyBuf = make([]byte, 0, 128)
 	h.outputPos = 0
+	h.emitSchema = nil
+	h.emitSchemaSet = false
 	return nil
 }
 
@@ -2708,6 +2728,14 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 // shared tracker for the lifetime of the process; see HashJoin.Close for
 // the full background.
 func (h *HashAggregate) Close() error {
+	// Stop the parallel drain FIRST and wait for it: its goroutines own the
+	// adopted partitions (each closes its own unit, and with it that unit's
+	// off-heap registry) and read this aggregate's own SoA arrays. Nothing
+	// below may run while a drain goroutine is still live.
+	if h.emit != nil {
+		h.emit.shutdown()
+		h.emit = nil
+	}
 	for _, ap := range h.adoptedPartitions {
 		ap.Close()
 	}
@@ -2924,7 +2952,19 @@ func (h *HashAggregate) SpillSome(target int64) (int64, error) {
 }
 
 // Next returns the aggregated results in batches of DefaultBatchSize rows.
+//
+// With adopted disjoint partitions (partitioned parallel aggregation) the
+// emission is fanned across one goroutine per partition when eligible — see
+// aggregate_parallel_emit.go. The serial fallback below streams this
+// aggregate's own state and then each adopted partition in turn.
 func (h *HashAggregate) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	if h.emit != nil {
+		return h.emit.next()
+	}
+	if h.parallelEmitEligible() {
+		h.startParallelEmit(ctx)
+		return h.emit.next()
+	}
 	b, err := h.nextOwn(ctx)
 	if err != nil || b != nil {
 		return b, err
@@ -2973,8 +3013,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 			return nil, nil
 		}
 		h.outputPos = 1
-		schema := h.outputSchema()
-		out := batch.NewRecordBatch(schema, 1)
+		out := batch.NewRecordBatch(h.emitOutputSchema(), 1)
 		for j, agg := range h.Aggs {
 			result := finalizeKernelAcc(&h.scalarAccs[j], agg.Func)
 			out.Columns[j].SetValue(0, result)
@@ -2990,8 +3029,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 	if len(h.GroupByCols) == 0 && len(h.Aggs) > 0 && h.outputPos == 0 && len(h.keys) == 0 &&
 		!h.useIntGroupKey && !h.useDualIntGroupKey && !h.useCompactGroupKey {
 		h.outputPos = 1
-		schema := h.outputSchema()
-		out := batch.NewRecordBatch(schema, 1)
+		out := batch.NewRecordBatch(h.emitOutputSchema(), 1)
 		for j, agg := range h.Aggs {
 			if agg.Func == AggCount {
 				out.Columns[j].SetValue(0, int64(0))
@@ -3012,7 +3050,6 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		return nil, nil
 	}
 
-	schema := h.outputSchema()
 	start := h.outputPos
 	end := start + batch.DefaultBatchSize
 	if end > totalGroups {
@@ -3021,13 +3058,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 	numRows := end - start
 	h.outputPos = end
 
-	out := batch.NewRecordBatch(schema, numRows)
-
-	// Build a set of null group columns for fast lookup
-	nullSet := make(map[string]bool, len(h.NullGroupCols))
-	for _, c := range h.NullGroupCols {
-		nullSet[c] = true
-	}
+	out := batch.NewRecordBatch(h.emitOutputSchema(), numRows)
 
 	for i := 0; i < numRows; i++ {
 		var gs *groupState
@@ -3230,6 +3261,19 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		}
 	}
 	return out, nil
+}
+
+// emitOutputSchema returns the emission-phase output schema, computed once.
+// Everything it derives from (group column types/metadata, aggregate output
+// types) is frozen by Finalize, so the per-batch rebuild was pure overhead —
+// and a single read-only slice is what lets several parallel drain units
+// share the schema safely.
+func (h *HashAggregate) emitOutputSchema() []parquet.Column {
+	if !h.emitSchemaSet {
+		h.emitSchema = h.outputSchema()
+		h.emitSchemaSet = true
+	}
+	return h.emitSchema
 }
 
 func (h *HashAggregate) outputSchema() []parquet.Column {

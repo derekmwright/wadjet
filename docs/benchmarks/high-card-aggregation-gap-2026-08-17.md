@@ -38,8 +38,18 @@ right. The emit phase is single-threaded and 16-35% of WALL clock
   the key over 3 SoA arrays + does Get-then-Put (two full probes/insert).
   ClickHouse keys128-style one-cell key, one probe. Generalizes past
   "exactly 2 ints" to sum-of-widths <= 16B.
-- **G4 parallel emit**: fan adopted partitions across workers feeding
-  per-worker Top-N, merge k*10 rows. Removes the 16-35% serial tail.
+- **G4 parallel emit** — SHIPPED (`aggregate_parallel_emit.go`): one drain
+  goroutine per adopted partition (plus the primary's own state), batches
+  handed to the downstream over a bounded channel. Kill switch
+  `WADJET_PARALLEL_EMIT`. Spilled aggregates (streaming partial-state
+  merger) keep the serial path. Measured on 1M near-unique int groups ×8
+  partitions: emission 30.6→11.6 ms (2.6x), emission into ORDER BY cnt
+  DESC LIMIT 10 39.0→17.1 ms (2.3x), whole GROUP BY + Top-N pipeline
+  73.8→47.9 ms (−35% wall). The residual is the still-serial consumer:
+  per-worker Top-N (feeding `Sort.CloneSink`'s existing per-clone top-K
+  from k emit workers) would take another ~5 ms of the 17, but it requires
+  making `aggSourceAdapter` a concurrency-safe source for EVERY aggregate
+  pipeline, so it is deliberately left to G6's bucket-parallel emit.
 - **G5 hash once + batched salted probe**: router (partitioned_agg.go:134-163)
   and sink both hash every row; `% parts` is a hardware divide. Thread the
   hash through partitionItem, mask, two-pass probe, L2-gated look-ahead.
