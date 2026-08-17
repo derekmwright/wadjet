@@ -690,6 +690,9 @@ func unescapeCopyText(s string) string {
 
 func (c *pgConn) handleQuery(sql string) {
 	sql = strings.TrimSpace(sql)
+	if c.logger != nil {
+		c.logger.Debug("pgwire simple query", "sql", sql)
+	}
 	if sql == "" {
 		c.sendEmptyQuery()
 		c.sendReadyForQuery()
@@ -851,6 +854,9 @@ func (c *pgConn) handleParse(payload []byte) {
 	} else {
 		c.stmts[name] = sql
 	}
+	if c.logger != nil {
+		c.logger.Debug("pgwire parse", "stmt", name, "sql", sql)
+	}
 	c.described = false
 	c.closeDescribeCache() // invalidate cached result for new statement
 
@@ -1008,6 +1014,12 @@ func (c *pgConn) describeSQL(sql string) {
 		// re-execution hung to the query timeout on lost task results).
 		c.closeDescribeCache()
 		c.describeErr = err
+		// The client now has NoData for this statement; if a later Execute
+		// nevertheless produces rows, drivers fail with "tuples but no
+		// field structure" — this line is the breadcrumb for that hunt.
+		if c.logger != nil {
+			c.logger.Debug("pgwire describe: no data (execution failed)", "sql", sql, "err", err)
+		}
 		c.sendMsg('n', nil)
 		return
 	}
@@ -1029,6 +1041,9 @@ func (c *pgConn) describeSQL(sql string) {
 func (c *pgConn) handleExecute(payload []byte) {
 	// Execute: portal\0 + int32(maxRows)
 	sql := strings.TrimSpace(c.portalSQL)
+	if c.logger != nil {
+		c.logger.Debug("pgwire execute", "sql", sql, "described", c.described)
+	}
 	if sql == "" {
 		sql = strings.TrimSpace(c.preparedSQL)
 	}
