@@ -37,6 +37,8 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/exec"
+	"runtime"
+	runtimepprof "runtime/pprof"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
@@ -84,6 +86,10 @@ func main() {
 		memBudget    = flag.Int64("mem-budget", 0, "Per-query memory budget in bytes (0 = auto-detect: 75% of the memory limit)")
 		isolate      = flag.Bool("isolate", true, "Run each query in a fresh child process (the duckdb-entry pattern: one invocation per query). A query that OOMs or crashes becomes a null result instead of aborting the suite; per-process registration costs ~0.05s (footer reads)")
 		childQuery   = flag.String("child-query", "", "internal: run this single query (isolate child mode) and print per-try seconds as JSON on the last stdout line")
+		profileQueries = flag.String("profile-queries", "", "comma-separated query numbers to CPU/heap-profile in an EXTRA isolate pass after the timed suite (profiles never contaminate the official triples); output under --profile-dir")
+		profileDir     = flag.String("profile-dir", "/root/profiles", "directory for per-query pprof output from --profile-queries")
+		cpuProfile     = flag.String("cpuprofile", "", "internal: child writes a CPU profile of its tries here")
+		memProfile     = flag.String("memprofile", "", "internal: child writes a heap profile after its tries here")
 		childQNum    = flag.Int("child-qnum", 0, "internal: real query number for the child's per-try log lines — without it every isolate child logs itself as Q00, which misreads as Q01 when tailing the live log")
 		analyze      = flag.Bool("analyze", false, "Run ANALYZE (per-column HLL) after registration. Off by default: ClickBench has no joins, planner NDV buys little, and HLL over 105 columns dominates load_time (~24s per 1M-row part)")
 	)
@@ -171,7 +177,25 @@ func main() {
 
 	if *childQuery != "" {
 		// Isolate child: one query, N tries, JSON triple on the last line.
+		if *cpuProfile != "" {
+			f, err := os.Create(*cpuProfile)
+			if err != nil {
+				log.Fatalf("cpuprofile: %v", err)
+			}
+			if err := runtimepprof.StartCPUProfile(f); err != nil {
+				log.Fatalf("cpuprofile start: %v", err)
+			}
+			defer func() { runtimepprof.StopCPUProfile(); f.Close() }()
+		}
 		triesOut := runQueryTries(ctx, db, *childQuery, *tries, *queryTimeout, *childQNum)
+		if *memProfile != "" {
+			f, err := os.Create(*memProfile)
+			if err == nil {
+				runtime.GC()
+				_ = runtimepprof.WriteHeapProfile(f)
+				f.Close()
+			}
+		}
 		buf, _ := json.Marshal(triesOut)
 		fmt.Println(string(buf))
 		return
@@ -189,6 +213,41 @@ func main() {
 			triesOut = runQueryTries(ctx, db, q, *tries, *queryTimeout, qi+1)
 		}
 		results = append(results, triesOut)
+	}
+
+	// Profile pass: rerun the requested queries in fresh isolate children
+	// with pprof enabled, AFTER the timed suite so profiling overhead never
+	// touches the official triples. Warm-oriented (no cache drop): the
+	// remaining levers are hot-side.
+	if *profileQueries != "" {
+		if err := os.MkdirAll(*profileDir, 0o755); err != nil {
+			log.Printf("profile dir: %v", err)
+		}
+		for _, s := range strings.Split(*profileQueries, ",") {
+			qn, err := strconv.Atoi(strings.TrimSpace(s))
+			if err != nil || qn < 1 || qn > len(queries) {
+				log.Printf("profile-queries: skipping %q", s)
+				continue
+			}
+			log.Printf("profiling Q%02d", qn)
+			exe, err := os.Executable()
+			if err != nil {
+				break
+			}
+			args := append([]string(nil), os.Args[1:]...)
+			args = append(args,
+				"--child-query", queries[qn-1],
+				"--child-qnum", strconv.Itoa(qn),
+				"--isolate=false", "--drop-caches=false",
+				"--cpuprofile", fmt.Sprintf("%s/q%02d.cpu.prof", *profileDir, qn),
+				"--memprofile", fmt.Sprintf("%s/q%02d.heap.prof", *profileDir, qn),
+			)
+			cmd := exec.Command(exe, args...)
+			cmd.Stderr = os.Stderr
+			if _, err := cmd.Output(); err != nil {
+				log.Printf("Q%02d profile child: %v", qn, err)
+			}
+		}
 	}
 
 	rj := resultsJSON{

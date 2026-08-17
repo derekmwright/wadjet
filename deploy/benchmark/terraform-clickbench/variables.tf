@@ -51,3 +51,9 @@ variable "mem_budget_bytes" {
   type        = number
   default     = 19327352832
 }
+
+variable "profile_queries" {
+  description = "Comma-separated query numbers to CPU/heap-profile in an extra isolate pass after the timed suite (empty = none). Profiles upload under results/clickbench/<ts>/profiles/."
+  type        = string
+  default     = ""
+}

@@ -125,6 +125,8 @@ locals {
       --tries ${var.tries} \
       --machine "${var.machine}" \
       --comment "${var.comment}" \
+      --profile-queries "${var.profile_queries}" \
+      --profile-dir /root/profiles \
       --out /root/results.json 2>&1 | tee /root/clickbench.log
 
     aws s3 cp /root/results.json "s3://${var.data_bucket}/results/clickbench/$TS/results.json" --region ${var.region} || true
@@ -132,6 +134,7 @@ locals {
     aws s3 cp /root/bootstrap.log "s3://${var.data_bucket}/results/clickbench/$TS/bootstrap.log" --region ${var.region} || true
     aws s3 cp /root/iostat.log "s3://${var.data_bucket}/results/clickbench/$TS/iostat.log" --region ${var.region} || true
     aws s3 cp /root/meminfo.log "s3://${var.data_bucket}/results/clickbench/$TS/meminfo.log" --region ${var.region} || true
+    aws s3 cp /root/profiles "s3://${var.data_bucket}/results/clickbench/$TS/profiles/" --recursive --region ${var.region} || true
 
     %{if var.auto_shutdown}
     shutdown -h now
