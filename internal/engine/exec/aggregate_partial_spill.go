@@ -1464,6 +1464,7 @@ func (h *HashAggregate) drainStateToRuns(dir string) ([]string, error) {
 	cursor.Close()
 
 	h.resetGroupStateAfterSpill()
+	h.closeRetiredOffheap()
 	return []string{path}, nil
 }
 
@@ -1621,6 +1622,20 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	h.intGroupStates = nil
 	h.intKeys = nil
 	h.strGroupStates = nil
+	// Retire (do NOT unmap) the off-heap reservations backing the SoA
+	// arrays: finalizeViaPartialMerge resets while its remainder cursor
+	// still reads them (the cursor keeps the arrays; only h's headers
+	// drop). The retired registry unmaps at closeRetiredOffheap — called
+	// immediately by whole-drain paths whose cursor already closed, and
+	// from closePartialMerger/Close for the streaming-merge path.
+	h.dualIntKeysA = nil
+	h.dualIntKeysB = nil
+	h.dualIntNextGroup = nil
+	h.intFlatAccs = nil
+	if h.offheap != nil {
+		h.retiredOffheap = append(h.retiredOffheap, h.offheap)
+		h.offheap = nil
+	}
 	h.strNullGroupIdx = -1
 	h.keys = nil
 	h.serializedKeys = nil
@@ -1733,6 +1748,16 @@ func (h *HashAggregate) closePartialMerger() {
 	}
 	h.partialSpillFiles = nil
 	h.partialMergerSchema = nil
+	h.closeRetiredOffheap()
+}
+
+// closeRetiredOffheap unmaps registries retired by whole-state resets.
+// Only call once no cursor/merger holds slices into them.
+func (h *HashAggregate) closeRetiredOffheap() {
+	for _, r := range h.retiredOffheap {
+		r.Close()
+	}
+	h.retiredOffheap = nil
 }
 
 // nextFromPartialMerger drains up to batch.DefaultBatchSize groups from the

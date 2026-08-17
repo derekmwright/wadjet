@@ -145,6 +145,17 @@ type HashAggregate struct {
 	intGroupIndex  *intHashTable
 	intGroupStates []*groupState
 	intGroupKeyCol int // column index for the integer group-by key
+	// offheap owns the mmap reservations backing the pointer-free SoA
+	// state arrays (flat accumulators, int key SoAs) when the offheap-agg
+	// switch is on — see memory/offheap_linux.go for the growth-transient
+	// rationale. Created lazily by offheapReg; adopted across merges;
+	// unmapped at Close and on whole-state resets.
+	offheap *memory.OffheapRegistry
+	// retiredOffheap holds registries detached by whole-state resets whose
+	// arrays a drain cursor / partial merger may still be reading; unmapped
+	// via closeRetiredOffheap once those readers close.
+	retiredOffheap []*memory.OffheapRegistry
+
 	// intKeys is the per-group key SoA for the single-int path. With
 	// simple aggregates the groupState carries NOTHING this array and the
 	// flat accumulators don't (the 24B struct held only the key), so
@@ -428,25 +439,36 @@ func (h *HashAggregate) groupMemoryUsage() int64 {
 	size += h.distinctBytes
 	size += h.extraStateBytes
 	size += h.extrasAccsCount * kernelAccumulatorBytes
-	// SoA flat accumulator arrays: 8 bytes per element for int64/float64 fields.
-	for _, fa := range h.intFlatAccs {
-		size += int64(cap(fa.count)) * 8
-		size += int64(cap(fa.sumI64)) * 8
-		size += int64(cap(fa.sumF64)) * 8
-		size += int64(cap(fa.sumDec)) * 16 // Int128
-		size += int64(cap(fa.minI64)) * 8
-		size += int64(cap(fa.maxI64)) * 8
-		size += int64(cap(fa.minF64)) * 8
-		size += int64(cap(fa.maxF64)) * 8
-		size += int64(cap(fa.minDec)) * 16
-		size += int64(cap(fa.maxDec)) * 16
-		size += int64(cap(fa.hasMin))
-		size += int64(cap(fa.hasMax))
+	// SoA flat accumulator arrays: 8 bytes per element for int64/float64
+	// fields. Off-heap arrays carry a huge virtual cap, so account them by
+	// len (the committed/used prefix — appends only ever touch that);
+	// heap-backed arrays keep cap so allocated-but-unused doubling slack
+	// stays charged.
+	dim := func(c, l int) int64 {
+		if h.offheap != nil {
+			return int64(l)
+		}
+		return int64(c)
 	}
-	// Dual-int key arrays
-	size += int64(cap(h.dualIntKeysA)) * 8
-	size += int64(cap(h.dualIntKeysB)) * 8
-	size += int64(cap(h.dualIntNextGroup)) * 4
+	for _, fa := range h.intFlatAccs {
+		size += dim(cap(fa.count), len(fa.count)) * 8
+		size += dim(cap(fa.sumI64), len(fa.sumI64)) * 8
+		size += dim(cap(fa.sumF64), len(fa.sumF64)) * 8
+		size += dim(cap(fa.sumDec), len(fa.sumDec)) * 16 // Int128
+		size += dim(cap(fa.minI64), len(fa.minI64)) * 8
+		size += dim(cap(fa.maxI64), len(fa.maxI64)) * 8
+		size += dim(cap(fa.minF64), len(fa.minF64)) * 8
+		size += dim(cap(fa.maxF64), len(fa.maxF64)) * 8
+		size += dim(cap(fa.minDec), len(fa.minDec)) * 16
+		size += dim(cap(fa.maxDec), len(fa.maxDec)) * 16
+		size += dim(cap(fa.hasMin), len(fa.hasMin))
+		size += dim(cap(fa.hasMax), len(fa.hasMax))
+	}
+	// Int-key SoAs
+	size += dim(cap(h.dualIntKeysA), len(h.dualIntKeysA)) * 8
+	size += dim(cap(h.dualIntKeysB), len(h.dualIntKeysB)) * 8
+	size += dim(cap(h.dualIntNextGroup), len(h.dualIntNextGroup)) * 4
+	size += dim(cap(h.intKeys), len(h.intKeys)) * 8
 	// Group state pointer slices
 	size += int64(cap(h.intGroupStates)) * 8
 	size += int64(cap(h.strGroupStates)) * 8
@@ -977,7 +999,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			h.intGroupKeyCol = h.groupColIdx[0]
 			if h.intGroupStates == nil {
 				h.intGroupStates = make([]*groupState, 0, htInitSize)
-				h.intKeys = make([]int64, 0, htInitSize)
+				h.intKeys = memory.Offheap[int64](h.offheapReg(), htInitSize)
 				// No gsPool.preAlloc: states stay nil on this path, and a
 				// hint-sized chunk would be dead weight at exactly the
 				// group counts where memory is the constraint.
@@ -1005,7 +1027,13 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 				h.intGroupIndex = newIntHashTable(htInitSize)
 				if h.intGroupStates == nil {
 					h.intGroupStates = make([]*groupState, 0, htInitSize)
-					h.gsPool.preAlloc(htInitSize)
+					// Key SoAs off-heap (states stay nil on this path —
+					// 6806c83); no preAlloc for the same dead-weight
+					// reason as the single-int branch.
+					reg := h.offheapReg()
+					h.dualIntKeysA = memory.Offheap[int64](reg, htInitSize)
+					h.dualIntKeysB = memory.Offheap[int64](reg, htInitSize)
+					h.dualIntNextGroup = memory.Offheap[int32](reg, htInitSize)
 				}
 				if h.intFlatAccs == nil {
 					if len(h.intGroupStates) > 0 {
@@ -2639,6 +2667,21 @@ func (h *HashAggregate) Close() error {
 	}
 	h.drainedRuns = nil
 	h.spillBuffer = nil
+	// Unmap off-heap state LAST: every slice referencing the reservations
+	// (flat accs, key SoAs — including any adopted from merged clones) is
+	// dropped above or dead with this instance. Drop the slice headers
+	// explicitly so a use-after-Close is a nil-index panic rather than a
+	// fault into unmapped memory.
+	if h.offheap != nil {
+		h.intFlatAccs = nil
+		h.dualIntKeysA = nil
+		h.dualIntKeysB = nil
+		h.dualIntNextGroup = nil
+		h.intKeys = nil
+		h.offheap.Close()
+		h.offheap = nil
+	}
+	h.closeRetiredOffheap()
 	return nil
 }
 
@@ -3101,6 +3144,13 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		h.dualIntKeysA = nil
 		h.dualIntKeysB = nil
 		h.dualIntNextGroup = nil
+		// Off-heap state returns to the OS the moment emission finishes —
+		// multi-GB reservations shouldn't wait for operator Close while
+		// downstream operators (sort, limit) still run.
+		if h.offheap != nil {
+			h.offheap.Close()
+			h.offheap = nil
+		}
 	}
 	return out, nil
 }
@@ -3477,6 +3527,17 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	h.intGroupKeyCol = o.intGroupKeyCol
 	h.intKeys = o.intKeys
 	h.intFlatAccs = o.intFlatAccs
+	// The adopted slices live in o's off-heap reservations: take ownership
+	// so o.Close (the pipeline closes merged clones) doesn't unmap them
+	// out from under h.
+	if o.offheap != nil {
+		if h.offheap == nil {
+			h.offheap = o.offheap
+		} else {
+			h.offheap.AdoptFrom(o.offheap)
+		}
+		o.offheap = nil
+	}
 	h.useDualIntGroupKey = o.useDualIntGroupKey
 	h.dualIntGroupKeyCols = o.dualIntGroupKeyCols
 	h.dualIntKeysA = o.dualIntKeysA
@@ -4427,6 +4488,16 @@ func vecToFloat64(v *batch.Vector, row int) float64 {
 
 // initFlatAccums initializes SoA accumulator arrays for the intGroupKey fast path.
 // Called once from resolveIndices when useIntGroupKey is true.
+// offheapReg returns the aggregate's off-heap registry, creating it on
+// first use when the platform path is available. nil (heap fallback in
+// every memory.Offheap constructor) otherwise.
+func (h *HashAggregate) offheapReg() *memory.OffheapRegistry {
+	if h.offheap == nil && memory.OffheapAvailable() {
+		h.offheap = memory.NewOffheapRegistry()
+	}
+	return h.offheap
+}
+
 func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 	// Flat accumulator arrays: same sizing principle as the group-state pool
 	// above. InputRowHint overshoots for low-cardinality GROUP BY (Q12: 7
@@ -4437,6 +4508,7 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 	h.intFlatAccs = make([]flatAccumArrays, nAggs)
 	const flatInitCap = 64 * 1024
 	initCap := 4096
+	reg := h.offheapReg()
 	if h.InputRowHint > int64(initCap)*8 {
 		est := int(h.InputRowHint / 8)
 		if est > flatInitCap {
@@ -4447,7 +4519,7 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 
 	for i, agg := range h.Aggs {
 		fa := &h.intFlatAccs[i]
-		fa.count = make([]int64, 0, initCap)
+		fa.count = memory.Offheap[int64](reg, initCap)
 
 		ci := h.aggColIdx[i]
 		if ci < 0 {
@@ -4459,50 +4531,50 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 		case AggSum, AggAvg:
 			switch typ {
 			case batch.TypeFloat64, batch.TypeFloat32:
-				fa.sumF64 = make([]float64, 0, initCap)
+				fa.sumF64 = memory.Offheap[float64](reg, initCap)
 				fa.isFloat = true
 			case batch.TypeDecimal:
-				fa.sumDec = make([]batch.Int128, 0, initCap)
+				fa.sumDec = memory.Offheap[batch.Int128](reg, initCap)
 				fa.isDecimal = true
 				fa.decScale = b.Columns[ci].DecimalData.Scale
 			case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
 				if agg.Func == AggAvg {
 					// Overflow-safe AVG: float64 accumulation, matching
 					// scatterFlatAggUpdate's AggAvg case and the row kernels.
-					fa.sumF64 = make([]float64, 0, initCap)
+					fa.sumF64 = memory.Offheap[float64](reg, initCap)
 					fa.isFloat = true
 				} else {
-					fa.sumI64 = make([]int64, 0, initCap)
+					fa.sumI64 = memory.Offheap[int64](reg, initCap)
 				}
 			default: // int32-class: exact int64 sum, cannot overflow
-				fa.sumI64 = make([]int64, 0, initCap)
+				fa.sumI64 = memory.Offheap[int64](reg, initCap)
 			}
 		case AggCount:
 			// count[] is all we need
 		case AggMin:
 			switch typ {
 			case batch.TypeFloat64, batch.TypeFloat32:
-				fa.minF64 = make([]float64, 0, initCap)
+				fa.minF64 = memory.Offheap[float64](reg, initCap)
 				fa.isFloat = true
 			case batch.TypeDecimal:
-				fa.minDec = make([]batch.Int128, 0, initCap)
+				fa.minDec = memory.Offheap[batch.Int128](reg, initCap)
 				fa.isDecimal = true
 			default:
-				fa.minI64 = make([]int64, 0, initCap)
+				fa.minI64 = memory.Offheap[int64](reg, initCap)
 			}
-			fa.hasMin = make([]bool, 0, initCap)
+			fa.hasMin = memory.Offheap[bool](reg, initCap)
 		case AggMax:
 			switch typ {
 			case batch.TypeFloat64, batch.TypeFloat32:
-				fa.maxF64 = make([]float64, 0, initCap)
+				fa.maxF64 = memory.Offheap[float64](reg, initCap)
 				fa.isFloat = true
 			case batch.TypeDecimal:
-				fa.maxDec = make([]batch.Int128, 0, initCap)
+				fa.maxDec = memory.Offheap[batch.Int128](reg, initCap)
 				fa.isDecimal = true
 			default:
-				fa.maxI64 = make([]int64, 0, initCap)
+				fa.maxI64 = memory.Offheap[int64](reg, initCap)
 			}
-			fa.hasMax = make([]bool, 0, initCap)
+			fa.hasMax = memory.Offheap[bool](reg, initCap)
 		}
 	}
 
