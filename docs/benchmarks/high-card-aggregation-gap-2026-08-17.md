@@ -34,10 +34,23 @@ right. The emit phase is single-threaded and 16-35% of WALL clock
   copy into serializedKeys = 7.3% + 1.6GB dup at 18M URLs. Chunked arena,
   arena-backed key refs. BUG found: Init() hard-codes strGroupIndex=4096
   (aggregate.go:631) making the NDV presize branches dead code.
-- **G3 packed <=16B composite keys, single-probe insert**: dual-int spreads
-  the key over 3 SoA arrays + does Get-then-Put (two full probes/insert).
-  ClickHouse keys128-style one-cell key, one probe. Generalizes past
-  "exactly 2 ints" to sum-of-widths <= 16B.
+- **G3 packed <=16B composite keys, single-probe insert** — SHIPPED
+  (`packed_hash.go`). The dual-int path is REPLACED, not supplemented: a
+  `packedHashTable` holds the whole 128-bit key inline in a 24-byte entry
+  (`{keyLo, keyHi uint64, val int32}`), so one probe resolves a group
+  against data already in the loaded cache line — no chain array, no
+  Get-then-Put, and the three per-group SoA arrays (keysA/keysB/next, 20
+  B/group) collapse to one `[]packedKey` (16 B/group). Empty slots are
+  marked by `val == -1`, not by a key pattern: all 2^128 keys are legal, so
+  the presence bit has to live on the value side (group ids are never
+  negative). NULL keys still migrate the whole aggregate to the generic path
+  before consumption, which is what lets the packing be total — no bit
+  pattern is reserved for NULL. Routing covers every old dual-int shape (two
+  int-class columns are at most 8+8 B) plus 3-4 narrow-int shapes gated on
+  `WADJET_PACKED_KEYS`. Measured on the near-unique bench (5900X, 32K rows ×
+  16 batches, COUNT+SUM+AVG): two-int64 3.89 → 2.56 ms (−34%), four-int32
+  5.16 → 2.75 ms (−47%) with 4.7 MB and 32.8K allocs/op falling to 12.7 KB
+  and 28 (that shape used to serialize keys on the generic path).
 - **G4 parallel emit** — SHIPPED (`aggregate_parallel_emit.go`): one drain
   goroutine per adopted partition (plus the primary's own state), batches
   handed to the downstream over a bounded channel. Kill switch
@@ -75,4 +88,5 @@ registers without ANALYZE), so tables start at 64K and rehash up to 8x.
 
 G1 -> G2 -> G3 (instruction path; validate on the controlled-cardinality
 harness) -> G4 -> G5 -> G6 (memory/serial regime) -> G7 (endgame).
-G1+G2 delegated for implementation 2026-08-17.
+G1+G2 delegated for implementation 2026-08-17; G3 and G4 shipped the same
+day. Next: G5 (hash once + batched salted probe), then G6.

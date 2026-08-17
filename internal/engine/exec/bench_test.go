@@ -212,12 +212,12 @@ func BenchmarkHashAggregatePartialSpillDrain(b *testing.B) {
 	}
 }
 
-// BenchmarkHashAggregatePartialSpillDrainDualInt covers the dual-int SoA
-// path. Two int32 GROUP BY columns trigger the dualIntKeysA/B + chain
-// hash-table layout, and the cursor's appendIntModeSortKey takes the
-// 2N-typed-write branch. Confirms the typed-key optimization scales as
-// well for dual-int as for single-int.
-func BenchmarkHashAggregatePartialSpillDrainDualInt(b *testing.B) {
+// BenchmarkHashAggregatePartialSpillDrainPacked covers the packed-key SoA
+// path. Two int32 GROUP BY columns pack into one composite key, and the
+// cursor's appendIntModeSortKey takes the per-column typed-write branch.
+// Confirms the typed-key optimization scales as well for composite keys as
+// for single-int.
+func BenchmarkHashAggregatePartialSpillDrainPacked(b *testing.B) {
 	const rowsPerBatch = 2048
 	const nBatches = 10
 	const numKeysA = 256 // 256 * 80 = 20480 distinct (a, b) pairs
@@ -411,56 +411,96 @@ func BenchmarkSortSmall(b *testing.B) {
 	}
 }
 
-// BenchmarkHashAggregateDualIntNearUnique mirrors ClickBench Q33's shape:
-// GROUP BY two int64 columns with COUNT(*) + SUM + AVG, at a ~1:1 group:row
-// ratio so that essentially every row mints a new group. In that regime the
-// per-new-group accumulator growth dominates: the old shape ran
-// flatAccumArrays.appendGroup once per new group PER AGGREGATE (11 nil-checks
-// + up to 3 appends each, ~33 branch evaluations per row at 3 aggregates),
-// where the arrays are append-in-place off-heap slices and the branches buy
-// nothing. Batch-oriented growTo replaces all of it with one length extension
-// per array per batch.
-func BenchmarkHashAggregateDualIntNearUnique(b *testing.B) {
+// BenchmarkHashAggregatePackedNearUnique mirrors the ClickBench shapes that
+// drive composite-key aggregation, at a ~1:1 group:row ratio so essentially
+// every row mints a new group:
+//
+//	two-int64    Q33: GROUP BY WatchID, ClientIP  (the old dual-int shape)
+//	four-int32   Q36: four narrow int keys        (packed only; was generic)
+//
+// In that regime the group-lookup path dominates. The dual-int predecessor
+// spread the key over three per-group arrays (keysA, keysB, chain) and did a
+// Get, a chain walk and a Put per insert; the packed table holds the whole
+// 128-bit key inline in the entry and does one probe.
+func BenchmarkHashAggregatePackedNearUnique(b *testing.B) {
 	const nBatches = 16
 	const rowsPerBatch = 2048
 
-	schema := []parquet.Column{
-		{Name: "wid", Type: parquet.TypeInt64},
-		{Name: "ip", Type: parquet.TypeInt64},
-		{Name: "refresh", Type: parquet.TypeInt64},
-		{Name: "width", Type: parquet.TypeInt64},
-	}
-	batches := make([]*batch.RecordBatch, nBatches)
-	for bi := range batches {
-		bb := batch.NewRecordBatch(schema, rowsPerBatch)
-		for i := 0; i < rowsPerBatch; i++ {
-			row := int64(bi*rowsPerBatch + i)
-			bb.Columns[0].SetValue(i, row*2654435761)
-			bb.Columns[1].SetValue(i, row)
-			bb.Columns[2].SetValue(i, row&1)
-			bb.Columns[3].SetValue(i, 1024+row%512)
+	aggs := func() []AggColumn {
+		return []AggColumn{
+			{Func: AggCount, InputCol: "", OutputCol: "c", OutputType: parquet.TypeInt64},
+			{Func: AggSum, InputCol: "refresh", OutputCol: "s", OutputType: parquet.TypeInt64},
+			{Func: AggAvg, InputCol: "width", OutputCol: "a", OutputType: parquet.TypeFloat64},
 		}
-		batches[bi] = bb
 	}
-	ctx := context.Background()
 
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		agg := NewHashAggregate(
-			[]string{"wid", "ip"},
-			[]AggColumn{
-				{Func: AggCount, InputCol: "", OutputCol: "c", OutputType: parquet.TypeInt64},
-				{Func: AggSum, InputCol: "refresh", OutputCol: "s", OutputType: parquet.TypeInt64},
-				{Func: AggAvg, InputCol: "width", OutputCol: "a", OutputType: parquet.TypeFloat64},
-			},
-		)
-		agg.Init(ctx)
-		for _, bb := range batches {
-			agg.Consume(ctx, bb)
+	b.Run("two-int64", func(b *testing.B) {
+		schema := []parquet.Column{
+			{Name: "wid", Type: parquet.TypeInt64},
+			{Name: "ip", Type: parquet.TypeInt64},
+			{Name: "refresh", Type: parquet.TypeInt64},
+			{Name: "width", Type: parquet.TypeInt64},
 		}
-		agg.Close()
-	}
+		batches := make([]*batch.RecordBatch, nBatches)
+		for bi := range batches {
+			bb := batch.NewRecordBatch(schema, rowsPerBatch)
+			for i := 0; i < rowsPerBatch; i++ {
+				row := int64(bi*rowsPerBatch + i)
+				bb.Columns[0].SetValue(i, row*2654435761)
+				bb.Columns[1].SetValue(i, row)
+				bb.Columns[2].SetValue(i, row&1)
+				bb.Columns[3].SetValue(i, 1024+row%512)
+			}
+			batches[bi] = bb
+		}
+		ctx := context.Background()
+		b.ResetTimer()
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			agg := NewHashAggregate([]string{"wid", "ip"}, aggs())
+			agg.Init(ctx)
+			for _, bb := range batches {
+				agg.Consume(ctx, bb)
+			}
+			agg.Close()
+		}
+	})
+
+	b.Run("four-int32", func(b *testing.B) {
+		schema := []parquet.Column{
+			{Name: "k1", Type: parquet.TypeInt32},
+			{Name: "k2", Type: parquet.TypeInt32},
+			{Name: "k3", Type: parquet.TypeInt32},
+			{Name: "k4", Type: parquet.TypeInt32},
+			{Name: "refresh", Type: parquet.TypeInt64},
+			{Name: "width", Type: parquet.TypeInt64},
+		}
+		batches := make([]*batch.RecordBatch, nBatches)
+		for bi := range batches {
+			bb := batch.NewRecordBatch(schema, rowsPerBatch)
+			for i := 0; i < rowsPerBatch; i++ {
+				row := int64(bi*rowsPerBatch + i)
+				bb.Columns[0].SetValue(i, int32(row*2654435761))
+				bb.Columns[1].SetValue(i, int32(row))
+				bb.Columns[2].SetValue(i, int32(row%7919))
+				bb.Columns[3].SetValue(i, int32(row%31))
+				bb.Columns[4].SetValue(i, row&1)
+				bb.Columns[5].SetValue(i, 1024+row%512)
+			}
+			batches[bi] = bb
+		}
+		ctx := context.Background()
+		b.ResetTimer()
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			agg := NewHashAggregate([]string{"k1", "k2", "k3", "k4"}, aggs())
+			agg.Init(ctx)
+			for _, bb := range batches {
+				agg.Consume(ctx, bb)
+			}
+			agg.Close()
+		}
+	})
 }
 
 // BenchmarkHashAggregateSumAvgSameColumn exercises the count-array sharing

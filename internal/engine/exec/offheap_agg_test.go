@@ -12,7 +12,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The off-heap switch must actually back the typed-SoA state (dual-int
+// The off-heap switch must actually back the typed-SoA state (packed
 // keys + flat accumulators live in mmap reservations), produce identical
 // results to the heap path, and release every mapping at Close — the
 // engagement + leak guard for the ADR-0006 amendment.
@@ -73,8 +73,8 @@ func TestOffheapAggEngagesAndReleases(t *testing.T) {
 	}
 
 	got, h := run()
-	if !h.useDualIntGroupKey {
-		t.Fatal("expected dual-int path")
+	if !h.usePackedGroupKey {
+		t.Fatal("expected packed composite-key path")
 	}
 	// State already returned: the post-emit drop closes the registry.
 	if h.offheap != nil && h.offheap.Mappings() != 0 {

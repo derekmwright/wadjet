@@ -1201,7 +1201,7 @@ func (h *HashAggregate) canUseExternalMerge() bool {
 	if len(h.GroupingSets) > 0 {
 		return false
 	}
-	return h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey ||
+	return h.useIntGroupKey || h.usePackedGroupKey || h.useCompactGroupKey ||
 		h.useStrGroupKey || h.useGenericSoA
 }
 
@@ -1373,7 +1373,7 @@ func buildDrainPlan(K, start, numPartitions uint32) drainPlan {
 // preserving the surviving groups in-memory so subsequent Consume rows for
 // those keys do not pay a rebuild cost — this is what closes the drain-
 // rebuild loop that PR #88 created on the whole-table path at SF100 Q17.
-// The whole-table path is preserved for other key modes (dual-int, compact,
+// The whole-table path is preserved for other key modes (packed, compact,
 // string, generic) and for cases where target ≥ footprint.
 func (h *HashAggregate) spillPartialState(target int64) error {
 	if h.Spill == nil {
@@ -1611,6 +1611,9 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	if h.intGroupIndex != nil {
 		h.intGroupIndex = newIntHashTable(4096)
 	}
+	if h.packedIdx != nil {
+		h.packedIdx = newPackedHashTable(4096)
+	}
 	if h.strGroupIndex != nil {
 		h.strGroupIndex = newStrHashTable(4096)
 	}
@@ -1629,9 +1632,7 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	// drop). The retired registry unmaps at closeRetiredOffheap — called
 	// immediately by whole-drain paths whose cursor already closed, and
 	// from closePartialMerger/Close for the streaming-merge path.
-	h.dualIntKeysA = nil
-	h.dualIntKeysB = nil
-	h.dualIntNextGroup = nil
+	h.packedKeys = nil
 	h.intFlatAccs = nil
 	if h.offheap != nil {
 		h.retiredOffheap = append(h.retiredOffheap, h.offheap)
@@ -1642,9 +1643,6 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	h.serializedKeys = nil
 	h.compactKeys = nil
 	h.resetStateByteCounters()
-	h.dualIntKeysA = nil
-	h.dualIntKeysB = nil
-	h.dualIntNextGroup = nil
 	// Partial-drain state is meaningless after a whole-table reset: the
 	// slot indices in freeGroupIDs no longer correspond to live storage,
 	// and the partition cursor will be re-initialized from the (currently
@@ -1684,7 +1682,7 @@ func (h *HashAggregate) finalizeViaPartialMerge() error {
 
 	// Build a streaming SoA-direct cursor over the in-memory remainder. The
 	// cursor owns slice-header references to h.intFlatAccs / *GroupStates /
-	// dualIntKeys for its lifetime; the resetGroupStateAfterSpill call below
+	// packedKeys for its lifetime; the resetGroupStateAfterSpill call below
 	// nils h's slice headers but not the underlying arrays, which the cursor
 	// keeps live until it's drained and Close()d by closePartialMerger.
 	//
@@ -1692,7 +1690,7 @@ func (h *HashAggregate) finalizeViaPartialMerge() error {
 	// has dead slots interspersed with live ones. Walk the hash table to get
 	// the live slot indices — that's the source of truth post-drain, since
 	// back-shift Delete removed the dead keys. Other paths (string/generic/
-	// dual-int/compact) never partial-drain in v1+, so liveGroups stays nil
+	// packed/compact) never partial-drain in v1+, so liveGroups stays nil
 	// and the cursor iterates the dense slot range as before.
 	var liveGroups []int32
 	if h.useIntGroupKey && len(h.freeGroupIDs) > 0 && h.intGroupIndex != nil {
@@ -1727,7 +1725,7 @@ func (h *HashAggregate) finalizeViaPartialMerge() error {
 	// SoA arrays + group-state chunks alive until cursor.Close() runs.
 	h.resetGroupStateAfterSpill()
 	h.useIntGroupKey = false
-	h.useDualIntGroupKey = false
+	h.usePackedGroupKey = false
 	h.useCompactGroupKey = false
 	h.useStrGroupKey = false
 	h.useGenericSoA = false
@@ -1992,8 +1990,8 @@ func writePartialKeyToColumn(dst *batch.Vector, i int, kv *partialKeyValue) {
 }
 
 // writeIntKeyToColumn writes a group-by column value held in int64 SoA
-// storage (gs.intKey or dualIntKeys[i]) into the typed Vector slot
-// indicated by t. Used by HashAggregate.Next on the int / dual-int
+// storage (gs.intKey or an unpacked packedKeys[i] field) into the typed Vector slot
+// indicated by t. Used by HashAggregate.Next on the int / packed-key
 // SoA emit paths to skip the `any` box that SetValue otherwise requires.
 // Mirrors writePartialKeyToColumn but reads from a plain int64 instead
 // of a typed partialKeyValue.

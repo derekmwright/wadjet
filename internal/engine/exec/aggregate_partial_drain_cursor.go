@@ -9,13 +9,13 @@ import (
 )
 
 // partialKeyMode selects how a cursor reifies group-key values from SoA state.
-// One branch per HashAggregate group-key path: int, dual-int, compact, and
-// (string-or-generic).
+// One branch per HashAggregate group-key path: int, packed composite,
+// compact, and (string-or-generic).
 type partialKeyMode int
 
 const (
 	partialKeyModeInt partialKeyMode = iota
-	partialKeyModeDualInt
+	partialKeyModePacked
 	partialKeyModeCompact
 	partialKeyModeStrOrGeneric
 )
@@ -50,10 +50,10 @@ type partialGroupCursor struct {
 	intGroupStates []*groupState
 	intKeys        []int64 // single-int key SoA (states are nil on that path)
 	strGroupStates []*groupState
-	dualIntKeysA   []int64
-	dualIntKeysB   []int64
-	serializedKeys []string // group keys, 1:1 with strGroupStates (deferred-boxing source of truth; RAW strings in single-string mode, binary framing otherwise)
-	rawStringKeys  bool     // single-string path: serializedKeys entries are the keys themselves
+	packedKeys     []packedKey   // packed-key path: composite key per group
+	packedLayout   []packedField // column positions inside the packed key
+	serializedKeys []string      // group keys, 1:1 with strGroupStates (deferred-boxing source of truth; RAW strings in single-string mode, binary framing otherwise)
+	rawStringKeys  bool          // single-string path: serializedKeys entries are the keys themselves
 	groupColTypes  []batch.TypeID
 	nAggs          int
 	nGroupCols     int
@@ -108,8 +108,8 @@ func newPartialGroupCursor(h *HashAggregate, liveGroups []int32) *partialGroupCu
 	case h.useIntGroupKey:
 		keyMode = partialKeyModeInt
 		srcGroups = h.numIntGroups
-	case h.useDualIntGroupKey:
-		keyMode = partialKeyModeDualInt
+	case h.usePackedGroupKey:
+		keyMode = partialKeyModePacked
 		srcGroups = h.numIntGroups
 	case h.useCompactGroupKey:
 		keyMode = partialKeyModeCompact
@@ -131,8 +131,8 @@ func newPartialGroupCursor(h *HashAggregate, liveGroups []int32) *partialGroupCu
 		intGroupStates: h.intGroupStates,
 		strGroupStates: h.strGroupStates,
 		intKeys:        h.intKeys,
-		dualIntKeysA:   h.dualIntKeysA,
-		dualIntKeysB:   h.dualIntKeysB,
+		packedKeys:     h.packedKeys,
+		packedLayout:   h.packedLayout,
 		serializedKeys: h.serializedKeys,
 		rawStringKeys:  h.useStrGroupKey,
 		groupColTypes:  h.groupColTypes,
@@ -156,14 +156,14 @@ func newPartialGroupCursor(h *HashAggregate, liveGroups []int32) *partialGroupCu
 
 	// Arena build pass. Position p in [0, numGroups) maps to SoA slot
 	// c.slotAt(p) — either p (when liveGroups is nil) or liveGroups[p]
-	// (when restricted to a subset). int / dual-int paths read SoA int
+	// (when restricted to a subset). int / packed paths read SoA int
 	// values straight into the arena via typed strconv writes (skips `any`
 	// boxing). Compact and str/generic modes alias the existing
 	// gs.extras.keyValues `[]any` — those boxes were allocated at consume
 	// time and we just hand them to appendSerializedKey for serialization.
 	// No new allocations on either branch.
 	switch keyMode {
-	case partialKeyModeInt, partialKeyModeDualInt:
+	case partialKeyModeInt, partialKeyModePacked:
 		for p := 0; p < numGroups; p++ {
 			slot := c.slotAt(p)
 			c.keyOffsets[p] = int32(len(c.keyArena))
@@ -213,7 +213,7 @@ func (c *partialGroupCursor) slotAt(position int) int {
 // populateHeadKeyVals fills c.headKeyVals (len == nGroupCols) with typed
 // values for the group at SoA index gi.
 //
-// int / dual-int branches set typed slots without any `any` boxing:
+// int / packed branches set typed slots without any `any` boxing:
 // the int64 SoA value goes straight into headKeyVals[k].I64. Compact and
 // str/generic branches read from gs.extras.keyValues (which is `[]any`
 // from consume time) and unbox into the typed slot via setPartialKeyFromAny
@@ -222,9 +222,11 @@ func (c *partialGroupCursor) populateHeadKeyVals(gi int) {
 	switch c.keyMode {
 	case partialKeyModeInt:
 		setPartialKeyFromInt(&c.headKeyVals[0], c.intKeys[gi], c.groupColTypes[0])
-	case partialKeyModeDualInt:
-		setPartialKeyFromInt(&c.headKeyVals[0], c.dualIntKeysA[gi], c.groupColTypes[0])
-		setPartialKeyFromInt(&c.headKeyVals[1], c.dualIntKeysB[gi], c.groupColTypes[1])
+	case partialKeyModePacked:
+		k := c.packedKeys[gi]
+		for i, f := range c.packedLayout {
+			setPartialKeyFromInt(&c.headKeyVals[i], f.get(k), c.groupColTypes[i])
+		}
 	case partialKeyModeCompact:
 		gs := c.intGroupStates[gi]
 		for i, v := range gs.extras.keyValues {
@@ -369,7 +371,7 @@ func (c *partialGroupCursor) loadHeadAccsSoA(gi int) {
 func (c *partialGroupCursor) loadHeadAccsAoS(gi int) {
 	var gs *groupState
 	switch c.keyMode {
-	case partialKeyModeInt, partialKeyModeDualInt, partialKeyModeCompact:
+	case partialKeyModeInt, partialKeyModePacked, partialKeyModeCompact:
 		if gi < len(c.intGroupStates) {
 			gs = c.intGroupStates[gi]
 		}
@@ -378,7 +380,7 @@ func (c *partialGroupCursor) loadHeadAccsAoS(gi int) {
 	}
 	if gs == nil || gs.extras == nil || gs.extras.accs == nil {
 		// Defensive: a group with no extras at this point would be a bug
-		// upstream (migrate populates extras for all groups; dual-int
+		// upstream (migrate populates extras for all groups; packed-key
 		// groups defer the state struct entirely and are nil until
 		// materializeFlatAccums reifies them). Zero out the head so any
 		// partial spill written from this cursor produces identity values
@@ -411,7 +413,7 @@ func appendSerializedKey(buf []byte, vals []any) []byte {
 	return buf
 }
 
-// appendIntModeSortKey writes the sort key for an int- or dual-int-keyed
+// appendIntModeSortKey writes the sort key for an int- or packed-keyed
 // group at SoA index gi directly from typed int64s, bypassing the []any
 // box that appendKeyValue's type switch would otherwise require. Output is
 // byte-identical to serializeKey([]any{reifyIntKey(...)}, ...) so spill
@@ -420,10 +422,16 @@ func (c *partialGroupCursor) appendIntModeSortKey(buf []byte, gi int) []byte {
 	if c.keyMode == partialKeyModeInt {
 		return appendTypedIntKey(buf, c.intKeys[gi], c.groupColTypes[0])
 	}
-	// partialKeyModeDualInt
-	buf = appendTypedIntKey(buf, c.dualIntKeysA[gi], c.groupColTypes[0])
-	buf = append(buf, 0)
-	return appendTypedIntKey(buf, c.dualIntKeysB[gi], c.groupColTypes[1])
+	// partialKeyModePacked: one column per layout field, 0-separated exactly
+	// as appendSerializedKey frames a multi-column key.
+	k := c.packedKeys[gi]
+	for i, f := range c.packedLayout {
+		if i > 0 {
+			buf = append(buf, 0)
+		}
+		buf = appendTypedIntKey(buf, f.get(k), c.groupColTypes[i])
+	}
+	return buf
 }
 
 // appendTypedIntKey writes one int-mode column value to buf using the same
@@ -470,8 +478,8 @@ func (c *partialGroupCursor) Close() error {
 	c.flatAccs = nil
 	c.intGroupStates = nil
 	c.strGroupStates = nil
-	c.dualIntKeysA = nil
-	c.dualIntKeysB = nil
+	c.packedKeys = nil
+	c.packedLayout = nil
 	c.groupColTypes = nil
 	c.liveGroups = nil
 	c.keyArena = nil

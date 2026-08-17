@@ -125,7 +125,7 @@ type HashAggregate struct {
 	// column storage and verify against stored serializedKeys via a
 	// chained int hash table — serialization happens once per NEW group,
 	// not once per row. genKeyIdx maps combined key hash → chain head in
-	// genKeyNext (dual-int pattern). strGroupIndex is NOT maintained on
+	// genKeyNext (chained-hash pattern). strGroupIndex is NOT maintained on
 	// this path; ensureStrGroupIndexForMerge rebuilds it for the slow
 	// merge fallback.
 	genKeyIdx         *intHashTable
@@ -152,14 +152,14 @@ type HashAggregate struct {
 	intGroupIndex  *intHashTable
 	// intGroupStates carries per-group AoS state for the int-keyed modes
 	// that need it (compact keys, and any mode after materializeFlatAccums
-	// reifies). The single-int and dual-int fast paths defer state entirely
+	// reifies). The single-int and packed-key fast paths defer state entirely
 	// to the SoA arrays and leave this EMPTY — numIntGroups, not len(), is
 	// the group count on every int-keyed path. A []*groupState of pure nils
 	// cost 8 GC-scanned bytes per group for nothing (ClickBench Q33: 100M
 	// groups).
 	intGroupStates []*groupState
 	// numIntGroups is the authoritative slot count for the int-keyed modes
-	// (single-int, dual-int, compact). Slots recycled through freeGroupIDs
+	// (single-int, packed, compact). Slots recycled through freeGroupIDs
 	// do not bump it. Invariant: len(intGroupStates) is either 0 (deferred)
 	// or == numIntGroups (materialized / compact).
 	numIntGroups   int
@@ -178,7 +178,7 @@ type HashAggregate struct {
 	// intKeys is the per-group key SoA for the single-int path. With
 	// simple aggregates the groupState carries NOTHING this array and the
 	// flat accumulators don't (the 24B struct held only the key), so
-	// intGroupStates entries stay nil — the same deferral the dual-int
+	// intGroupStates entries stay nil — the same deferral the composite-key
 	// path got in 6806c83 (ClickBench Q33: per-group structs were the
 	// margin between fitting under GOMEMLIMIT and thrashing).
 	// materializeFlatAccums reifies on the migration/merge cold paths.
@@ -190,14 +190,17 @@ type HashAggregate struct {
 	intFlatAccs   []flatAccumArrays // one per aggregate (nil = use AoS path)
 	groupIndexBuf []int32           // reused per-batch for two-phase scatter
 
-	// Dual-integer GROUP BY fast path: two integer columns hashed via dualIntHash
-	// into intHashTable, with chain verification for collision handling.
-	// Uses SoA scatter like the single-int path.
-	useDualIntGroupKey  bool
-	dualIntGroupKeyCols [2]int  // column indices for the two GROUP BY columns
-	dualIntKeysA        []int64 // first key per group
-	dualIntKeysB        []int64 // second key per group
-	dualIntNextGroup    []int32 // chain for hash collisions (-1 = end)
+	// Packed composite-key GROUP BY fast path (packed_hash.go): 2-4 fixed-width
+	// int-class columns whose widths sum to <= 16 bytes are packed into one
+	// 128-bit key stored INLINE in the hash entry — one probe, one compare, no
+	// chain. Replaces the dual-int path, whose key lived across three SoA
+	// arrays (three dependent misses per verify) and whose inserts probed
+	// twice. Uses SoA scatter like the single-int path.
+	usePackedGroupKey bool
+	packedIdx         *packedHashTable
+	packedLayout      []packedField  // per group column: word/shift/width in the key
+	packedKeys        []packedKey    // composite key per group (16 B, ONE array)
+	packedCols        []packedKeyCol // per-batch resolved column accessors (scratch)
 
 	// Multi-column compact GROUP BY fast path: binary-encoded key packed into int64.
 	// Uses intHashTable for lookup. Falls back to generic path if key exceeds 8 bytes.
@@ -377,7 +380,7 @@ type groupState struct {
 // groupStateExtras holds the heavy per-group fields that are only needed by
 // complex-agg paths or by the generic str-keyed path. Allocated lazily by
 // (*groupState).ensureExtras() and pointed at from the slim base. The SoA
-// simple-aggs path (consumeBatchIntGroup, consumeBatchDualIntGroup) never
+// simple-aggs path (consumeBatchIntGroup, consumeBatchPackedGroup) never
 // touches this allocation, so the typical Q17/Q01 pattern leaves it nil.
 type groupStateExtras struct {
 	keyValues    []any
@@ -437,6 +440,9 @@ func (h *HashAggregate) groupMemoryUsage() int64 {
 	var size int64
 	if h.intGroupIndex != nil {
 		size += h.intGroupIndex.MemoryUsage()
+	}
+	if h.packedIdx != nil {
+		size += h.packedIdx.MemoryUsage()
 	}
 	if h.strGroupIndex != nil {
 		size += h.strGroupIndex.MemoryUsage()
@@ -500,9 +506,7 @@ func (h *HashAggregate) groupMemoryUsage() int64 {
 		size += dim(cap(fa.hasMax), len(fa.hasMax))
 	}
 	// Int-key SoAs
-	size += dim(cap(h.dualIntKeysA), len(h.dualIntKeysA)) * 8
-	size += dim(cap(h.dualIntKeysB), len(h.dualIntKeysB)) * 8
-	size += dim(cap(h.dualIntNextGroup), len(h.dualIntNextGroup)) * 4
+	size += dim(cap(h.packedKeys), len(h.packedKeys)) * 16
 	size += dim(cap(h.intKeys), len(h.intKeys)) * 8
 	// Group state pointer slices
 	size += int64(cap(h.intGroupStates)) * 8
@@ -706,7 +710,7 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 			return nil
 		}
 		needsColumns := len(h.GroupByCols) > 0 || h.GroupByAll ||
-			h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey ||
+			h.useIntGroupKey || h.usePackedGroupKey || h.useCompactGroupKey ||
 			h.useStrGroupKey || h.useGenericSoA
 		for _, a := range h.Aggs {
 			if a.InputCol != "" {
@@ -1098,32 +1102,39 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 	}
 
-	// Dual-integer GROUP BY fast path:
-	// When grouping by exactly 2 integer columns, use composite dualIntHash
-	// with chain verification. Gets SoA scatter like the single-int path.
-	if !h.useIntGroupKey && !h.isScalarAgg && len(h.GroupByCols) == 2 && allSimpleAggs {
-		idx0, idx1 := h.groupColIdx[0], h.groupColIdx[1]
-		if idx0 >= 0 && idx1 >= 0 {
-			typ0, typ1 := h.groupColTypes[0], h.groupColTypes[1]
-			if isAggIntType(typ0) && isAggIntType(typ1) {
-				h.useDualIntGroupKey = true
-				h.dualIntGroupKeyCols = [2]int{idx0, idx1}
-				h.intGroupIndex = newIntHashTableReg(intHTInitSize, h.offheapReg())
-				if h.dualIntKeysA == nil {
-					// Key SoAs off-heap (no per-group state at all on this
-					// path — 6806c83); no preAlloc for the same dead-weight
-					// reason as the single-int branch.
-					reg := h.offheapReg()
-					h.dualIntKeysA = memory.Offheap[int64](reg, htInitSize)
-					h.dualIntKeysB = memory.Offheap[int64](reg, htInitSize)
-					h.dualIntNextGroup = memory.Offheap[int32](reg, htInitSize)
-				}
-				if h.intFlatAccs == nil {
-					if h.numIntGroups > 0 {
-						h.rebuildFlatAccums(b)
-					} else {
-						h.initFlatAccums(b)
-					}
+	// Packed composite-key GROUP BY fast path:
+	// 2-4 fixed-width int-class columns whose widths sum to <= 16 bytes pack
+	// into one 128-bit key held inline in packedHashTable's entries — one
+	// probe per row, no chain, one key array. Two-column shapes are exactly
+	// what the dual-int path used to take (two int columns are at most
+	// 8+8 = 16 bytes, so the coverage is a superset); the widened 3-4 column
+	// shapes are gated on the kill switch, which restores their previous
+	// compact/generic routing when off.
+	if !h.useIntGroupKey && !h.isScalarAgg && len(h.GroupByCols) >= 2 && allSimpleAggs {
+		layout := buildPackedLayout(h.groupColTypes)
+		colsResolved := true
+		for _, idx := range h.groupColIdx {
+			if idx < 0 {
+				colsResolved = false
+				break
+			}
+		}
+		if layout != nil && colsResolved &&
+			(len(h.GroupByCols) == 2 || packedKeysToggle.On()) {
+			h.usePackedGroupKey = true
+			h.packedLayout = layout
+			h.packedIdx = newPackedHashTableReg(intHTInitSize, h.offheapReg())
+			if h.packedKeys == nil {
+				// Key SoA off-heap (no per-group state at all on this path —
+				// 6806c83); no preAlloc for the same dead-weight reason as the
+				// single-int branch.
+				h.packedKeys = memory.Offheap[packedKey](h.offheapReg(), htInitSize)
+			}
+			if h.intFlatAccs == nil {
+				if h.numIntGroups > 0 {
+					h.rebuildFlatAccums(b)
+				} else {
+					h.initFlatAccums(b)
 				}
 			}
 		}
@@ -1133,7 +1144,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	// When the binary-encoded GROUP BY key fits in 8 bytes, pack it into int64
 	// and use intHashTable instead of map[string]. Avoids string hashing and
 	// Go map overhead. Falls back to generic path if a key exceeds 8 bytes.
-	if !h.useIntGroupKey && !h.useDualIntGroupKey && !h.isScalarAgg && len(h.GroupByCols) >= 2 && allSimpleAggs {
+	if !h.useIntGroupKey && !h.usePackedGroupKey && !h.isScalarAgg && len(h.GroupByCols) >= 2 && allSimpleAggs {
 		estimatedWidth := 0
 		canCompact := true
 		for _, typ := range h.groupColTypes {
@@ -1169,7 +1180,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	// Single-column string GROUP BY fast path:
 	// When grouping by one string/bytes column with simple aggregates,
 	// use two-phase SoA scatter like consumeBatchIntGroup.
-	if !h.useIntGroupKey && !h.useDualIntGroupKey && !h.useCompactGroupKey &&
+	if !h.useIntGroupKey && !h.usePackedGroupKey && !h.useCompactGroupKey &&
 		!h.isScalarAgg && len(h.GroupByCols) == 1 && allSimpleAggs {
 		idx := h.groupColIdx[0]
 		if idx >= 0 {
@@ -1207,7 +1218,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	// When all other fast paths are exhausted but aggregates are simple,
 	// use strHashTable with binary key serialization and SoA scatter.
 	// Benefits Q7, Q9, Q10, Q18 at SF10 (multi-column GROUP BY with strings).
-	if !h.useIntGroupKey && !h.useDualIntGroupKey && !h.useCompactGroupKey &&
+	if !h.useIntGroupKey && !h.usePackedGroupKey && !h.useCompactGroupKey &&
 		!h.useStrGroupKey && !h.isScalarAgg && len(h.GroupByCols) > 0 && allSimpleAggs {
 		h.useGenericSoA = true
 		// Defer key boxing when every group column both round-trips through
@@ -1319,7 +1330,7 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 	// Rebuild flat accumulators if they were cleared by materializeFlatAccums
 	// (e.g. after parallel merge). This happens when flushSpilledOps replays
 	// spilled batches through Consume after the merge phase.
-	if h.intFlatAccs == nil && (h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey || h.useStrGroupKey || h.useGenericSoA) {
+	if h.intFlatAccs == nil && (h.useIntGroupKey || h.usePackedGroupKey || h.useCompactGroupKey || h.useStrGroupKey || h.useGenericSoA) {
 		h.rebuildFlatAccums(b)
 	}
 
@@ -1334,10 +1345,18 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 	// and a single store is the only shape every reader gets right.
 	if h.useIntGroupKey && b.Columns[h.intGroupKeyCol].Nulls.HasNulls() {
 		h.migrateToGenericMap()
-	} else if h.useDualIntGroupKey &&
-		(b.Columns[h.dualIntGroupKeyCols[0]].Nulls.HasNulls() ||
-			b.Columns[h.dualIntGroupKeyCols[1]].Nulls.HasNulls()) {
-		h.migrateToGenericMap()
+	} else if h.usePackedGroupKey {
+		// Same rule for every packed key column: a NULL in ANY of them
+		// migrates the whole aggregate to the generic path BEFORE this batch
+		// is consumed. This is what makes an in-table NULL impossible, which
+		// in turn is what lets the packing be total — no bit pattern has to
+		// be reserved to mean NULL, so no real value can be mistaken for one.
+		for _, ci := range h.groupColIdx {
+			if b.Columns[ci].Nulls.HasNulls() {
+				h.migrateToGenericMap()
+				break
+			}
+		}
 	}
 
 	if h.useIntGroupKey {
@@ -1345,9 +1364,9 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 		return
 	}
 
-	// Dual-integer GROUP BY fast path
-	if h.useDualIntGroupKey {
-		h.consumeBatchDualIntGroup(b)
+	// Packed composite-key GROUP BY fast path
+	if h.usePackedGroupKey {
+		h.consumeBatchPackedGroup(b)
 		return
 	}
 
@@ -1538,128 +1557,97 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 	}
 }
 
-// consumeBatchDualIntGroup is the fast path for two-column integer GROUP BY.
-// Uses composite dualIntHash in intHashTable with chain verification for collisions.
-// Two-phase SoA approach like consumeBatchIntGroup.
-func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
-	col0 := b.Columns[h.dualIntGroupKeyCols[0]]
-	col1 := b.Columns[h.dualIntGroupKeyCols[1]]
-	hasNulls := col0.Nulls.HasNulls() || col1.Nulls.HasNulls()
-
-	// Pre-extract typed arrays for the two GROUP BY columns.
-	var d0i32 []int32
-	var d0i64 []int64
-	var d1i32 []int32
-	var d1i64 []int64
-	switch col0.Type {
-	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-		d0i32 = col0.Int32Data
-	default:
-		d0i64 = col0.Int64Data
+// consumeBatchPackedGroup is the fast path for multi-column int-class GROUP
+// BY whose packed key fits in 128 bits. Two-phase SoA approach like
+// consumeBatchIntGroup, with the composite key held inline in the hash
+// entry: ONE probe per row resolves the group (or mints it), against the
+// dual-int predecessor's Get-then-Put plus a chain walk across three
+// separate per-group arrays.
+func (h *HashAggregate) consumeBatchPackedGroup(b *batch.RecordBatch) {
+	// Resolve each key column's typed slice and its fixed slot in the key
+	// once per batch.
+	cols := h.packedCols[:0]
+	hasNulls := false
+	for ci, colIdx := range h.groupColIdx {
+		v := b.Columns[colIdx]
+		f := h.packedLayout[ci]
+		pc := packedKeyCol{nulls: &v.Nulls, word: f.word, shift: f.shift}
+		if f.i32 {
+			pc.i32 = v.Int32Data
+		} else {
+			pc.i64 = v.Int64Data
+		}
+		cols = append(cols, pc)
+		hasNulls = hasNulls || v.Nulls.HasNulls()
 	}
-	switch col1.Type {
-	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-		d1i32 = col1.Int32Data
-	default:
-		d1i64 = col1.Int64Data
-	}
+	h.packedCols = cols
 
-	intIdx := h.intGroupIndex
+	idx := h.packedIdx
 
 	// Pre-reserve key capacity for this batch. The flat accumulators grow
 	// once, after the lookup loop, to the final group count.
 	batchRows := b.ActiveLen()
-	h.dualIntKeysA = ensureAppendCap(h.dualIntKeysA, batchRows)
-	h.dualIntKeysB = ensureAppendCap(h.dualIntKeysB, batchRows)
-	h.dualIntNextGroup = ensureAppendCap(h.dualIntNextGroup, batchRows)
+	h.packedKeys = ensureAppendCap(h.packedKeys, batchRows)
 
-	// Phase 1: Hash lookup — build group index array with chain verification.
+	// Phase 1: hash lookup — one probe per row.
 	var gi []int32
 	var sel []uint32
 	var iterLen int
 	hasNullKeys := false
 
-	lookupOrInsert := func(a, b int64) int32 {
-		ck := dualIntHash(a, b)
-		head, ok := intIdx.Get(ck)
-		if ok {
-			// Walk chain, verify both keys
-			for gi := head; gi >= 0; gi = h.dualIntNextGroup[gi] {
-				if h.dualIntKeysA[gi] == a && h.dualIntKeysB[gi] == b {
-					return gi
-				}
-			}
-			// Collision: new group, chain to existing head.
-			// There is NO per-group state object: this path is gated to
-			// simple aggregates, whose per-group state lives entirely in
-			// the flat SoA arrays + dualIntKeysA/B. A 24B groupState + pool
-			// chunk per group was ~2.4GB live (~5GB heap peak with GC
-			// headroom) on ClickBench Q33's 100M groups — enough to push
-			// the query into the GOMEMLIMIT thrash zone and evict the input
-			// page cache every try. materializeFlatAccums reifies on demand
-			// for migration/merge cold paths.
-			newIdx := int32(h.numIntGroups)
-			h.numIntGroups++
-			h.dualIntKeysA = append(h.dualIntKeysA, a)
-			h.dualIntKeysB = append(h.dualIntKeysB, b)
-			h.dualIntNextGroup = append(h.dualIntNextGroup, head)
-			intIdx.Put(ck, newIdx)
-			return newIdx
-		}
-		// New composite key (no state object — see the collision branch above)
-		newIdx := int32(h.numIntGroups)
-		h.numIntGroups++
-		h.dualIntKeysA = append(h.dualIntKeysA, a)
-		h.dualIntKeysB = append(h.dualIntKeysB, b)
-		h.dualIntNextGroup = append(h.dualIntNextGroup, -1)
-		intIdx.Put(ck, newIdx)
-		return newIdx
-	}
-
-	extractKeys := func(row int) (int64, int64) {
-		var a, b int64
-		if d0i32 != nil {
-			a = int64(d0i32[row])
-		} else {
-			a = d0i64[row]
-		}
-		if d1i32 != nil {
-			b = int64(d1i32[row])
-		} else {
-			b = d1i64[row]
-		}
-		return a, b
-	}
-
+	// hasNulls is defensively false in practice: consumeBatch migrates the
+	// whole aggregate to the generic path before a batch with a NULL key
+	// column reaches here. Keeping the branch costs one predictable test per
+	// row and keeps null-key rows accounted if that ever changes.
 	if b.Sel != nil {
 		iterLen = len(b.Sel)
 		sel = b.Sel
 		gi = h.ensureGroupIndexBuf(iterLen)
 		for si, selIdx := range b.Sel {
 			row := int(selIdx)
-			if hasNulls && (col0.Nulls.IsNullFast(row) || col1.Nulls.IsNullFast(row)) {
+			if hasNulls && packedRowHasNull(cols, row) {
 				gi[si] = -1
 				hasNullKeys = true
 				continue
 			}
-			a, bv := extractKeys(row)
-			gi[si] = lookupOrInsert(a, bv)
+			lo, hi := packedKeyAt(cols, row)
+			// newIdx is the id this row would claim; the table hands back
+			// exactly it when the key was new (see GetOrInsertNoGrow).
+			newIdx := int32(h.numIntGroups)
+			gsIdx := idx.GetOrInsertNoGrow(lo, hi, newIdx)
+			gi[si] = gsIdx
+			if gsIdx == newIdx {
+				idx.CheckGrow()
+				// No per-group state object: this path is gated to simple
+				// aggregates, whose state lives entirely in the flat SoA
+				// arrays + packedKeys. materializeFlatAccums reifies on
+				// demand for the migration/merge cold paths.
+				h.numIntGroups++
+				h.packedKeys = append(h.packedKeys, packedKey{lo: lo, hi: hi})
+			}
 		}
 	} else {
 		iterLen = b.Len
 		gi = h.ensureGroupIndexBuf(iterLen)
 		for row := 0; row < iterLen; row++ {
-			if hasNulls && (col0.Nulls.IsNullFast(row) || col1.Nulls.IsNullFast(row)) {
+			if hasNulls && packedRowHasNull(cols, row) {
 				gi[row] = -1
 				hasNullKeys = true
 				continue
 			}
-			a, bv := extractKeys(row)
-			gi[row] = lookupOrInsert(a, bv)
+			lo, hi := packedKeyAt(cols, row)
+			newIdx := int32(h.numIntGroups)
+			gsIdx := idx.GetOrInsertNoGrow(lo, hi, newIdx)
+			gi[row] = gsIdx
+			if gsIdx == newIdx {
+				idx.CheckGrow()
+				h.numIntGroups++
+				h.packedKeys = append(h.packedKeys, packedKey{lo: lo, hi: hi})
+			}
 		}
 	}
 
-	// Phase 2: Per-aggregate typed scatter update using flat arrays.
+	// Phase 2: per-aggregate typed scatter update using flat arrays.
 	h.scatterBatchAggs(h.numIntGroups, b, gi, sel, iterLen)
 
 	// Handle null-key rows via generic path (rare).
@@ -1678,6 +1666,16 @@ func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
 			}
 		}
 	}
+}
+
+// packedRowHasNull reports whether any key column is NULL at row.
+func packedRowHasNull(cols []packedKeyCol, row int) bool {
+	for i := range cols {
+		if cols[i].nulls.IsNullFast(row) {
+			return true
+		}
+	}
+	return false
 }
 
 // scatterBatchAggs is Phase 2 for every SoA consume path: extend the flat
@@ -2009,7 +2007,7 @@ func (h *HashAggregate) strNullGroupSlot() int32 {
 }
 
 // consumeBatchGenericSoA is the SoA fast path for multi-column GROUP BY
-// that doesn't fit int/dual-int/compact/single-string paths.
+// that doesn't fit int/packed/compact/single-string paths.
 // Uses binary key serialization into strHashTable with two-phase scatter.
 // Phase 1: Serialize keys, hash lookup, build group index array.
 // Phase 2: Per-aggregate typed scatter update (one pass per agg, no per-row dispatch).
@@ -2079,7 +2077,7 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 			newIdx := int32(len(h.strGroupStates))
 			// nil state — simple aggs live entirely in the flat SoA
 			// arrays + serializedKeys; materializeFlatAccums reifies on
-			// the migration/merge cold paths (same deferral as dual-int:
+			// the migration/merge cold paths (same deferral as packed keys:
 			// 32B x groups of pure overhead otherwise).
 			h.strGroupStates = append(h.strGroupStates, nil)
 			h.keyBuf = serializeGroupKey(h.keyBuf[:0], kcols, row)
@@ -2774,9 +2772,7 @@ func (h *HashAggregate) Close() error {
 	// fault into unmapped memory.
 	if h.offheap != nil {
 		h.intFlatAccs = nil
-		h.dualIntKeysA = nil
-		h.dualIntKeysB = nil
-		h.dualIntNextGroup = nil
+		h.packedKeys = nil
 		h.intKeys = nil
 		h.offheap.Close()
 		h.offheap = nil
@@ -2922,7 +2918,7 @@ func (h *HashAggregate) selfSpillReliefTarget() int64 {
 // Consume rows whose keys hash to a surviving partition continue to hit
 // existing in-memory groups, paying no rebuild cost.
 //
-// On other paths (dual-int, compact, string, generic) and when target
+// On other paths (packed, compact, string, generic) and when target
 // covers the full footprint, falls through to the whole-drain path —
 // semantically identical to the pre-partial-drain behavior.
 //
@@ -3000,7 +2996,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 	// heap inside Next.
 	//
 	// materializeFlatAccums is still called on the migration paths
-	// (compact→generic, dual-int→generic, MergeSink generic merge) where
+	// (compact→generic, packed→generic, MergeSink generic merge) where
 	// per-group accs are required to run kernel.Accumulator.Merge. After
 	// those run, h.intFlatAccs == nil and the per-group ext.accs branch
 	// below picks up the materialized values. The spill/finalize-via-merge
@@ -3027,7 +3023,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 	// This happens when all input batches were filtered out before reaching the
 	// aggregate.
 	if len(h.GroupByCols) == 0 && len(h.Aggs) > 0 && h.outputPos == 0 && len(h.keys) == 0 &&
-		!h.useIntGroupKey && !h.useDualIntGroupKey && !h.useCompactGroupKey {
+		!h.useIntGroupKey && !h.usePackedGroupKey && !h.useCompactGroupKey {
 		h.outputPos = 1
 		out := batch.NewRecordBatch(h.emitOutputSchema(), 1)
 		for j, agg := range h.Aggs {
@@ -3043,7 +3039,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 	// strGroupStates is 1:1 with groups on every str-side path; h.keys is
 	// not — the generic SoA path defers key boxing and leaves it empty.
 	totalGroups := len(h.strGroupStates)
-	if h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey {
+	if h.useIntGroupKey || h.usePackedGroupKey || h.useCompactGroupKey {
 		totalGroups = h.numIntGroups
 	}
 	if h.outputPos >= totalGroups {
@@ -3062,8 +3058,8 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 
 	for i := 0; i < numRows; i++ {
 		var gs *groupState
-		if h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey {
-			// Empty on the deferred single-/dual-int paths: numIntGroups is
+		if h.useIntGroupKey || h.usePackedGroupKey || h.useCompactGroupKey {
+			// Empty on the deferred single-int / packed paths: numIntGroups is
 			// the count and every group's state lives in the SoA arrays.
 			if start+i < len(h.intGroupStates) {
 				gs = h.intGroupStates[start+i]
@@ -3071,7 +3067,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		} else {
 			gs = h.strGroupStates[start+i]
 		}
-		// gs is NIL for dual-int groups (state fully deferred to the SoA
+		// gs is NIL for packed-key groups (state fully deferred to the SoA
 		// arrays); gs.extras is nil on the other SoA hot paths — both go
 		// through the SoA-direct branches below. Complex-agg / compact /
 		// generic paths populate extras during consume or processRow.
@@ -3080,7 +3076,7 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 			ext = gs.extras
 		}
 
-		// Set group-by columns. Int and dual-int paths take the typed-direct
+		// Set group-by columns. Int and packed paths take the typed-direct
 		// route (writeIntKeyToColumn) so the per-row int64 → `any` box that
 		// the prior SetValue path forced is avoided. For SF100 Q17 scale
 		// (20M emitted groups × 1 int key) this is 20M boxes eliminated per
@@ -3089,10 +3085,11 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		deferredBoxing := ext == nil || ext.keyValues == nil
 		if h.useIntGroupKey && deferredBoxing {
 			writeIntKeyToColumn(out.Columns[0], i, h.intKeys[start+i], h.groupColTypes[0])
-		} else if h.useDualIntGroupKey && deferredBoxing {
-			idx := start + i
-			writeIntKeyToColumn(out.Columns[0], i, h.dualIntKeysA[idx], h.groupColTypes[0])
-			writeIntKeyToColumn(out.Columns[1], i, h.dualIntKeysB[idx], h.groupColTypes[1])
+		} else if h.usePackedGroupKey && deferredBoxing {
+			k := h.packedKeys[start+i]
+			for j, f := range h.packedLayout {
+				writeIntKeyToColumn(out.Columns[j], i, f.get(k), h.groupColTypes[j])
+			}
 		} else if h.useStrGroupKey && deferredBoxing {
 			// Single-string path: serializedKeys holds the RAW key string
 			// (no binary framing) — write it straight into the key column.
@@ -3249,9 +3246,8 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		h.numIntGroups = 0
 		h.intGroupIndex = nil
 		h.intKeys = nil
-		h.dualIntKeysA = nil
-		h.dualIntKeysB = nil
-		h.dualIntNextGroup = nil
+		h.packedIdx = nil
+		h.packedKeys = nil
 		// Off-heap state returns to the OS the moment emission finishes —
 		// multi-GB reservations shouldn't wait for operator Close while
 		// downstream operators (sort, limit) still run.
@@ -3489,9 +3485,9 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 		return
 	}
 
-	// Dual-int-keyed SoA fast path: merge with chain verification.
-	if h.useDualIntGroupKey && o.useDualIntGroupKey && h.intFlatAccs != nil && o.intFlatAccs != nil {
-		h.mergeDualIntGroupSoA(o)
+	// Packed-key SoA fast path: merge via one probe per source group.
+	if h.usePackedGroupKey && o.usePackedGroupKey && h.intFlatAccs != nil && o.intFlatAccs != nil {
+		h.mergePackedGroupSoA(o)
 		return
 	}
 
@@ -3620,7 +3616,7 @@ func (h *HashAggregate) groupCount() int {
 }
 
 // groupStateAt returns the AoS state for int-keyed slot i, or nil when the
-// path deferred it (single-int / dual-int, where intGroupStates is empty).
+// path deferred it (single-int / packed, where intGroupStates is empty).
 func (h *HashAggregate) groupStateAt(i int) *groupState {
 	if i < len(h.intGroupStates) {
 		return h.intGroupStates[i]
@@ -3695,11 +3691,10 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 		}
 		o.offheap = nil
 	}
-	h.useDualIntGroupKey = o.useDualIntGroupKey
-	h.dualIntGroupKeyCols = o.dualIntGroupKeyCols
-	h.dualIntKeysA = o.dualIntKeysA
-	h.dualIntKeysB = o.dualIntKeysB
-	h.dualIntNextGroup = o.dualIntNextGroup
+	h.usePackedGroupKey = o.usePackedGroupKey
+	h.packedIdx = o.packedIdx
+	h.packedLayout = o.packedLayout
+	h.packedKeys = o.packedKeys
 	h.useCompactGroupKey = o.useCompactGroupKey
 	h.compactKeys = o.compactKeys
 	h.useStrGroupKey = o.useStrGroupKey
@@ -3731,9 +3726,8 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	o.numIntGroups = 0
 	o.intKeys = nil
 	o.intFlatAccs = nil
-	o.dualIntKeysA = nil
-	o.dualIntKeysB = nil
-	o.dualIntNextGroup = nil
+	o.packedIdx = nil
+	o.packedKeys = nil
 	o.compactKeys = nil
 	o.strGroupIndex = nil
 	o.strGroupStates = nil
@@ -3755,87 +3749,92 @@ func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
 		newIdx := int32(h.numIntGroups)
 		gsIdx, found := h.intGroupIndex.GetOrInsert(o.intKeys[i], newIdx)
 		if found {
-			// Existing group: merge flat accumulators in-place
-			for ai := range h.intFlatAccs {
-				hfa := &h.intFlatAccs[ai]
-				ofa := &o.intFlatAccs[ai]
-				idx := int(gsIdx)
-				if hfa.count != nil {
-					hfa.count[idx] += ofa.count[i]
-				}
-				if hfa.sumI64 != nil {
-					hfa.sumI64[idx] += ofa.sumI64[i]
-				}
-				if hfa.sumF64 != nil {
-					hfa.sumF64[idx] += ofa.sumF64[i]
-				}
-				if hfa.sumDec != nil {
-					hfa.sumDec[idx] = hfa.sumDec[idx].Add(ofa.sumDec[i])
-				}
-				if ofa.hasMin != nil && ofa.hasMin[i] {
-					if hfa.hasMin[idx] {
-						if hfa.isFloat {
-							if ofa.minF64[i] < hfa.minF64[idx] {
-								hfa.minF64[idx] = ofa.minF64[i]
-							}
-						} else if hfa.isDecimal {
-							if ofa.minDec[i].Less(hfa.minDec[idx]) {
-								hfa.minDec[idx] = ofa.minDec[i]
-							}
-						} else {
-							if ofa.minI64[i] < hfa.minI64[idx] {
-								hfa.minI64[idx] = ofa.minI64[i]
-							}
-						}
-					} else {
-						hfa.hasMin[idx] = true
-						if hfa.minI64 != nil {
-							hfa.minI64[idx] = ofa.minI64[i]
-						}
-						if hfa.minF64 != nil {
-							hfa.minF64[idx] = ofa.minF64[i]
-						}
-						if hfa.minDec != nil {
-							hfa.minDec[idx] = ofa.minDec[i]
-						}
-					}
-				}
-				if ofa.hasMax != nil && ofa.hasMax[i] {
-					if hfa.hasMax[idx] {
-						if hfa.isFloat {
-							if ofa.maxF64[i] > hfa.maxF64[idx] {
-								hfa.maxF64[idx] = ofa.maxF64[i]
-							}
-						} else if hfa.isDecimal {
-							if ofa.maxDec[i].Less(hfa.maxDec[idx]) {
-								// other is less, keep ours
-							} else {
-								hfa.maxDec[idx] = ofa.maxDec[i]
-							}
-						} else {
-							if ofa.maxI64[i] > hfa.maxI64[idx] {
-								hfa.maxI64[idx] = ofa.maxI64[i]
-							}
-						}
-					} else {
-						hfa.hasMax[idx] = true
-						if hfa.maxI64 != nil {
-							hfa.maxI64[idx] = ofa.maxI64[i]
-						}
-						if hfa.maxF64 != nil {
-							hfa.maxF64[idx] = ofa.maxF64[i]
-						}
-						if hfa.maxDec != nil {
-							hfa.maxDec[idx] = ofa.maxDec[i]
-						}
-					}
-				}
-			}
+			mergeFlatAccumRow(h.intFlatAccs, o.intFlatAccs, int(gsIdx), i)
 		} else {
 			// New group: claim the slot, then copy o's row into it.
 			h.appendIntGroupSlot(o.groupStateAt(i))
 			h.intKeys = append(h.intKeys, o.intKeys[i])
 			copyFlatAccumRow(h.intFlatAccs, o.intFlatAccs, int(newIdx), i)
+		}
+	}
+}
+
+// mergeFlatAccumRow combines src's row srcIdx into dst's existing row dstIdx
+// for every aggregate: sums add, MIN/MAX take the extreme, and an unseeded
+// destination adopts the source's value. The single definition serves every
+// SoA merge path (int-keyed and packed-keyed); it used to be copy-pasted per
+// key mode.
+func mergeFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
+	for ai := range dst {
+		hfa := &dst[ai]
+		ofa := &src[ai]
+		if hfa.count != nil {
+			hfa.count[dstIdx] += ofa.count[srcIdx]
+		}
+		if hfa.sumI64 != nil {
+			hfa.sumI64[dstIdx] += ofa.sumI64[srcIdx]
+		}
+		if hfa.sumF64 != nil {
+			hfa.sumF64[dstIdx] += ofa.sumF64[srcIdx]
+		}
+		if hfa.sumDec != nil {
+			hfa.sumDec[dstIdx] = hfa.sumDec[dstIdx].Add(ofa.sumDec[srcIdx])
+		}
+		if ofa.hasMin != nil && ofa.hasMin[srcIdx] {
+			if hfa.hasMin[dstIdx] {
+				if hfa.isFloat {
+					if ofa.minF64[srcIdx] < hfa.minF64[dstIdx] {
+						hfa.minF64[dstIdx] = ofa.minF64[srcIdx]
+					}
+				} else if hfa.isDecimal {
+					if ofa.minDec[srcIdx].Less(hfa.minDec[dstIdx]) {
+						hfa.minDec[dstIdx] = ofa.minDec[srcIdx]
+					}
+				} else {
+					if ofa.minI64[srcIdx] < hfa.minI64[dstIdx] {
+						hfa.minI64[dstIdx] = ofa.minI64[srcIdx]
+					}
+				}
+			} else {
+				hfa.hasMin[dstIdx] = true
+				if hfa.minI64 != nil {
+					hfa.minI64[dstIdx] = ofa.minI64[srcIdx]
+				}
+				if hfa.minF64 != nil {
+					hfa.minF64[dstIdx] = ofa.minF64[srcIdx]
+				}
+				if hfa.minDec != nil {
+					hfa.minDec[dstIdx] = ofa.minDec[srcIdx]
+				}
+			}
+		}
+		if ofa.hasMax != nil && ofa.hasMax[srcIdx] {
+			if hfa.hasMax[dstIdx] {
+				if hfa.isFloat {
+					if ofa.maxF64[srcIdx] > hfa.maxF64[dstIdx] {
+						hfa.maxF64[dstIdx] = ofa.maxF64[srcIdx]
+					}
+				} else if hfa.isDecimal {
+					if !ofa.maxDec[srcIdx].Less(hfa.maxDec[dstIdx]) {
+						hfa.maxDec[dstIdx] = ofa.maxDec[srcIdx]
+					}
+				} else {
+					if ofa.maxI64[srcIdx] > hfa.maxI64[dstIdx] {
+						hfa.maxI64[dstIdx] = ofa.maxI64[srcIdx]
+					}
+				}
+			} else {
+				hfa.hasMax[dstIdx] = true
+				if hfa.maxI64 != nil {
+					hfa.maxI64[dstIdx] = ofa.maxI64[srcIdx]
+				}
+				if hfa.maxF64 != nil {
+					hfa.maxF64[dstIdx] = ofa.maxF64[srcIdx]
+				}
+				if hfa.maxDec != nil {
+					hfa.maxDec[dstIdx] = ofa.maxDec[srcIdx]
+				}
+			}
 		}
 	}
 }
@@ -3889,115 +3888,22 @@ func copyFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 	}
 }
 
-// mergeDualIntGroupSoA merges another dual-int-keyed SoA aggregate directly,
-// using composite hash lookup with chain verification for collision handling.
-func (h *HashAggregate) mergeDualIntGroupSoA(o *HashAggregate) {
+// mergePackedGroupSoA merges another packed-key SoA aggregate directly. One
+// probe per source group against the composite key held inline in the entry
+// — the dual-int predecessor did a Get, a chain walk over three arrays, and
+// then a second Get before its Put.
+func (h *HashAggregate) mergePackedGroupSoA(o *HashAggregate) {
 	for i := 0; i < o.numIntGroups; i++ {
-		a := o.dualIntKeysA[i]
-		b := o.dualIntKeysB[i]
-
-		// Look up in h using chain verification
-		var gsIdx int32 = -1
-		ck := dualIntHash(a, b)
-		if head, ok := h.intGroupIndex.Get(ck); ok {
-			for gi := head; gi >= 0; gi = h.dualIntNextGroup[gi] {
-				if h.dualIntKeysA[gi] == a && h.dualIntKeysB[gi] == b {
-					gsIdx = gi
-					break
-				}
-			}
+		k := o.packedKeys[i]
+		newIdx := int32(h.numIntGroups)
+		gsIdx, found := h.packedIdx.GetOrInsert(k.lo, k.hi, newIdx)
+		if found {
+			mergeFlatAccumRow(h.intFlatAccs, o.intFlatAccs, int(gsIdx), i)
+			continue
 		}
-
-		if gsIdx >= 0 {
-			// Existing group: merge flat accumulators
-			for ai := range h.intFlatAccs {
-				hfa := &h.intFlatAccs[ai]
-				ofa := &o.intFlatAccs[ai]
-				idx := int(gsIdx)
-				if hfa.count != nil {
-					hfa.count[idx] += ofa.count[i]
-				}
-				if hfa.sumI64 != nil {
-					hfa.sumI64[idx] += ofa.sumI64[i]
-				}
-				if hfa.sumF64 != nil {
-					hfa.sumF64[idx] += ofa.sumF64[i]
-				}
-				if hfa.sumDec != nil {
-					hfa.sumDec[idx] = hfa.sumDec[idx].Add(ofa.sumDec[i])
-				}
-				if ofa.hasMin != nil && ofa.hasMin[i] {
-					if hfa.hasMin[idx] {
-						if hfa.isFloat {
-							if ofa.minF64[i] < hfa.minF64[idx] {
-								hfa.minF64[idx] = ofa.minF64[i]
-							}
-						} else if hfa.isDecimal {
-							if ofa.minDec[i].Less(hfa.minDec[idx]) {
-								hfa.minDec[idx] = ofa.minDec[i]
-							}
-						} else {
-							if ofa.minI64[i] < hfa.minI64[idx] {
-								hfa.minI64[idx] = ofa.minI64[i]
-							}
-						}
-					} else {
-						hfa.hasMin[idx] = true
-						if hfa.minI64 != nil {
-							hfa.minI64[idx] = ofa.minI64[i]
-						}
-						if hfa.minF64 != nil {
-							hfa.minF64[idx] = ofa.minF64[i]
-						}
-						if hfa.minDec != nil {
-							hfa.minDec[idx] = ofa.minDec[i]
-						}
-					}
-				}
-				if ofa.hasMax != nil && ofa.hasMax[i] {
-					if hfa.hasMax[idx] {
-						if hfa.isFloat {
-							if ofa.maxF64[i] > hfa.maxF64[idx] {
-								hfa.maxF64[idx] = ofa.maxF64[i]
-							}
-						} else if hfa.isDecimal {
-							if !ofa.maxDec[i].Less(hfa.maxDec[idx]) {
-								hfa.maxDec[idx] = ofa.maxDec[i]
-							}
-						} else {
-							if ofa.maxI64[i] > hfa.maxI64[idx] {
-								hfa.maxI64[idx] = ofa.maxI64[i]
-							}
-						}
-					} else {
-						hfa.hasMax[idx] = true
-						if hfa.maxI64 != nil {
-							hfa.maxI64[idx] = ofa.maxI64[i]
-						}
-						if hfa.maxF64 != nil {
-							hfa.maxF64[idx] = ofa.maxF64[i]
-						}
-						if hfa.maxDec != nil {
-							hfa.maxDec[idx] = ofa.maxDec[i]
-						}
-					}
-				}
-			}
-		} else {
-			// New group
-			newIdx := int32(h.numIntGroups)
-			h.appendIntGroupSlot(o.groupStateAt(i))
-			h.dualIntKeysA = append(h.dualIntKeysA, a)
-			h.dualIntKeysB = append(h.dualIntKeysB, b)
-			// Chain to existing head if composite hash exists
-			if head, ok := h.intGroupIndex.Get(ck); ok {
-				h.dualIntNextGroup = append(h.dualIntNextGroup, head)
-			} else {
-				h.dualIntNextGroup = append(h.dualIntNextGroup, -1)
-			}
-			h.intGroupIndex.Put(ck, newIdx)
-			copyFlatAccumRow(h.intFlatAccs, o.intFlatAccs, int(newIdx), i)
-		}
+		h.appendIntGroupSlot(o.groupStateAt(i))
+		h.packedKeys = append(h.packedKeys, k)
+		copyFlatAccumRow(h.intFlatAccs, o.intFlatAccs, int(newIdx), i)
 	}
 }
 
@@ -4010,27 +3916,34 @@ func (h *HashAggregate) migrateToGenericMap() {
 		h.migrateCompactToGeneric()
 		return
 	}
-	if h.useDualIntGroupKey {
-		// Migrate dual-int group key → generic path. Keys are re-encoded
-		// in processRow's binary format ([null-flag][appendColumnValue
-		// bytes] per column) — NOT serializeKey's text format — because
-		// the generic path keeps inserting after this migration runs (a
-		// null group key triggers it mid-consume, and MergeSink can pair
-		// a migrated side with a natively-generic side). A text-format
-		// index entry would never match the binary key of the same
-		// logical group, silently duplicating groups.
+	if h.usePackedGroupKey {
+		// Migrate packed composite group key → generic path. Keys are
+		// re-encoded in processRow's binary format ([null-flag]
+		// [appendColumnValue bytes] per column) — NOT serializeKey's text
+		// format — because the generic path keeps inserting after this
+		// migration runs (a null group key triggers it mid-consume, and
+		// MergeSink can pair a migrated side with a natively-generic side).
+		// A text-format index entry would never match the binary key of the
+		// same logical group, silently duplicating groups.
 		h.strGroupIndex = newStrHashTable(h.numIntGroups)
 		h.strGroupStates = make([]*groupState, 0, h.numIntGroups)
 		h.serializedKeys = make([]string, 0, h.numIntGroups)
 		h.serializedKeyBytes = 0
 		h.keys = make([][]any, 0, h.numIntGroups)
 		for i, gs := range h.intGroupStates {
+			k := h.packedKeys[i]
 			ext := gs.ensureExtras()
 			if ext.keyValues == nil {
-				ext.keyValues = []any{h.dualIntKeysA[i], h.dualIntKeysB[i]}
+				vals := make([]any, len(h.packedLayout))
+				for j, f := range h.packedLayout {
+					vals[j] = f.get(k)
+				}
+				ext.keyValues = vals
 			}
-			h.keyBuf = appendIntKeyRowFormat(h.keyBuf[:0], h.dualIntKeysA[i], h.groupColTypes[0])
-			h.keyBuf = appendIntKeyRowFormat(h.keyBuf, h.dualIntKeysB[i], h.groupColTypes[1])
+			h.keyBuf = h.keyBuf[:0]
+			for j, f := range h.packedLayout {
+				h.keyBuf = appendIntKeyRowFormat(h.keyBuf, f.get(k), h.groupColTypes[j])
+			}
 			key := string(h.keyBuf)
 			h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
 			h.strGroupStates = append(h.strGroupStates, gs)
@@ -4038,20 +3951,18 @@ func (h *HashAggregate) migrateToGenericMap() {
 			h.serializedKeyBytes += int64(len(key))
 			h.keys = append(h.keys, ext.keyValues)
 		}
-		h.useDualIntGroupKey = false
+		h.usePackedGroupKey = false
 		h.intGroupStates = nil
 		h.numIntGroups = 0
-		h.intGroupIndex = nil
-		h.dualIntKeysA = nil
-		h.dualIntKeysB = nil
-		h.dualIntNextGroup = nil
+		h.packedIdx = nil
+		h.packedKeys = nil
 		return
 	}
 	if !h.useIntGroupKey {
 		return
 	}
 	// Migrate int group key → generic path (binary key format — see the
-	// dual-int branch comment).
+	// packed-key branch comment).
 	h.strGroupIndex = newStrHashTable(h.numIntGroups)
 	h.strGroupStates = make([]*groupState, 0, h.numIntGroups)
 	h.serializedKeys = make([]string, 0, h.numIntGroups)
@@ -4942,7 +4853,7 @@ func (h *HashAggregate) materializeFlatAccums() {
 		h.groupIndexBuf = nil
 		return
 	}
-	// Single-int and dual-int defer per-group state entirely: numIntGroups is
+	// Single-int and packed keys defer per-group state entirely: numIntGroups is
 	// the count and intGroupStates is empty. Reify the slice here — the
 	// migration/merge cold paths this feeds all read intGroupStates.
 	if len(h.intGroupStates) < h.numIntGroups {
@@ -4952,10 +4863,10 @@ func (h *HashAggregate) materializeFlatAccums() {
 	}
 	for gi, gs := range h.intGroupStates {
 		if gs == nil {
-			// Deferred state (single-int and dual-int paths): reify for
+			// Deferred state (single-int and packed-key paths): reify for
 			// the migration/merge cold path that needs boxed extras. The
 			// single-int key rides along so post-reify readers of
-			// gs.intKey stay correct; dual-int keys stay in their SoA.
+			// gs.intKey stay correct; composite keys stay in their SoA.
 			gs = h.gsPool.alloc()
 			if h.useIntGroupKey && gi < len(h.intKeys) {
 				gs.intKey = h.intKeys[gi]
