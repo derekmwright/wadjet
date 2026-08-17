@@ -31,8 +31,8 @@ func sourceServesHeldState(src Source) bool {
 // Pipeline represents Source → [UnaryOps...] → Sink.
 type Pipeline struct {
 	Source  Source
-	Ops    []UnaryOperator
-	Sink   Sink
+	Ops     []UnaryOperator
+	Sink    Sink
 	Workers int // number of parallel workers (0 or 1 = serial)
 }
 
@@ -208,7 +208,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 	// across asynchronous consumers).
 	primaryAgg, sinkIsAgg := p.Sink.(*HashAggregate)
 	_, sinkMergeable := p.Sink.(MergeableSink)
-	usePartitioned := partitionedAggEnabled && sinkIsAgg && sinkMergeable &&
+	usePartitioned := partitionedAggToggle.On() && sinkIsAgg && sinkMergeable &&
 		len(primaryAgg.GroupByCols) > 0 && len(primaryAgg.GroupingSets) == 0 &&
 		!primaryAgg.GroupByAll && !opsReuseBuffers(p.Ops)
 	var partQueues []chan partitionItem
@@ -228,7 +228,6 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 			}
 		}()
 	}
-
 
 	warmupBatch, err := p.Source.Next(ctx)
 	if err != nil {

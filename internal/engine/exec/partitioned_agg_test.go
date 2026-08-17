@@ -102,7 +102,7 @@ func TestPartitionedAggMatchesSerial(t *testing.T) {
 
 	before := PartitionedAggRuns.Load()
 	par := run(8, spillOn)
-	if PartitionedAggRuns.Load() == before && partitionedAggEnabled {
+	if PartitionedAggRuns.Load() == before && partitionedAggToggle.On() {
 		t.Fatal("partitioned mode did not engage")
 	}
 

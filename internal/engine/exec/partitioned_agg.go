@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 )
 
 // Partitioned parallel aggregation (docs in pipeline.runParallel):
@@ -22,8 +23,11 @@ import (
 // duplicated, drains fire only if a single partition alone exceeds its
 // bound, and the post-run merge inserts disjoint keys.
 
-// partitionedAggEnabled is the kill switch (WADJET_PARTITIONED_AGG=0).
-var partitionedAggEnabled = os.Getenv("WADJET_PARTITIONED_AGG") != "0"
+// partitionedAggToggle is the kill switch (WADJET_PARTITIONED_AGG=0),
+// registered so the invariance oracle sweeps it like every other
+// optimization (it predates the optswitch registry).
+var partitionedAggToggle = optswitch.Register("partitioned-agg", "WADJET_PARTITIONED_AGG",
+	"per-worker hash-partitioned parallel aggregation (workers own disjoint group-key partitions)")
 
 // PartitionedAggRuns counts pipelines that ran in partitioned mode
 // (observability + test assertions).
