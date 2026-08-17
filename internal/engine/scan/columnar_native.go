@@ -98,8 +98,18 @@ func ReadRowGroupNativeCached(fr *pqt.FileReader, rgIdx int, schema []pqt.Column
 // selection: eligible byte-array columns materialize only the rows in sel
 // (ascending row indices; see sel_decode.go). A nil sel — or the sel-decode
 // kill switch off — is identical to ReadRowGroupNative.
+//
+// Selectivity gate (metal-validated 2026-08-17): the sel path copies
+// per selected value, the full path bulk-copies the page. At sparse
+// selections the skipped values dominate (ClickBench Q22 −30% hot at
+// ~0.1%); past ~25% selected the per-value loop loses to the single
+// memcpy (Q28 +8s, Q29 +1.9s on `Referer <> ''`, which selects most
+// rows) — those decode in full.
 func ReadRowGroupNativeSel(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, sel []uint32) (*batch.RecordBatch, error) {
 	if !selDecodeToggle.On() {
+		sel = nil
+	}
+	if n := int(fr.RowGroupNumRows(rgIdx)); sel != nil && len(sel)*4 > n {
 		sel = nil
 	}
 	return readRowGroupNative(fr, rgIdx, schema, pool, nil, sel)

@@ -10,7 +10,9 @@ func aggNode(groupBy []string, aggs []AggExpr) *Node {
 }
 
 func TestTwoLevelDistinctRewrite(t *testing.T) {
-	n := aggNode([]string{"k"}, []AggExpr{
+	// Decomposed partials alongside the distinct fire on the GLOBAL form
+	// (the grouped form is gated to a lone distinct — Q10 metal lesson).
+	n := aggNode(nil, []AggExpr{
 		{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
 		{Func: "sum", InputCol: "v", OutputCol: "s"},
 		{Func: "count", OutputCol: "c"},
@@ -21,16 +23,16 @@ func TestTwoLevelDistinctRewrite(t *testing.T) {
 		t.Fatalf("expected two stacked aggregates, got %v over %v", out.Type, out.Children[0].Type)
 	}
 	inner := out.Children[0]
-	if got := inner.GroupBy; len(got) != 2 || got[0] != "k" || got[1] != "x" {
-		t.Fatalf("inner GroupBy = %v, want [k x]", got)
+	if got := inner.GroupBy; len(got) != 1 || got[0] != "x" {
+		t.Fatalf("inner GroupBy = %v, want [x]", got)
 	}
 	for _, a := range inner.AggExprs {
 		if a.Distinct {
 			t.Fatal("inner level must carry no distinct aggregates")
 		}
 	}
-	if len(out.GroupBy) != 1 || out.GroupBy[0] != "k" {
-		t.Fatalf("outer GroupBy = %v, want [k]", out.GroupBy)
+	if len(out.GroupBy) != 0 {
+		t.Fatalf("outer GroupBy = %v, want []", out.GroupBy)
 	}
 	byOut := map[string]AggExpr{}
 	for _, a := range out.AggExprs {
@@ -62,6 +64,10 @@ func TestTwoLevelDistinctGuards(t *testing.T) {
 		"non-decomposable alongside": aggNode([]string{"k"}, []AggExpr{
 			{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
 			{Func: "approx_distinct", InputCol: "v", OutputCol: "a"},
+		}),
+		"grouped with extras (Q10 gate)": aggNode([]string{"k"}, []AggExpr{
+			{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
+			{Func: "sum", InputCol: "v", OutputCol: "s"},
 		}),
 		"distinct col is group key": aggNode([]string{"x"}, []AggExpr{
 			{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
@@ -105,8 +111,22 @@ func TestTwoLevelDistinctKillSwitch(t *testing.T) {
 	}
 }
 
-func TestTwoLevelDistinctAvgRewrite(t *testing.T) {
+func TestTwoLevelDistinctGroupedLoneFires(t *testing.T) {
 	n := aggNode([]string{"k"}, []AggExpr{
+		{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
+	})
+	out := rewriteCountDistinctTwoLevel(n)
+	if out.Type != NodeAggregate || out.Children[0].Type != NodeAggregate {
+		t.Fatalf("grouped lone distinct must rewrite, got %v over %v", out.Type, out.Children[0].Type)
+	}
+	if got := out.Children[0].GroupBy; len(got) != 2 || got[0] != "k" || got[1] != "x" {
+		t.Fatalf("inner GroupBy = %v, want [k x]", got)
+	}
+}
+
+func TestTwoLevelDistinctAvgRewrite(t *testing.T) {
+	// AVG decomposition fires on the global form.
+	n := aggNode(nil, []AggExpr{
 		{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
 		{Func: "avg", InputCol: "v", OutputCol: "a"},
 	})
@@ -133,16 +153,13 @@ func TestTwoLevelDistinctAvgRewrite(t *testing.T) {
 	if outerFuncs["__tl_avgsum_1"] != "sum" || outerFuncs["__tl_avgcnt_1"] != "sum" {
 		t.Fatalf("outer AVG partials = %v, want sum+sum", outerFuncs)
 	}
-	if len(out.Projections) != 3 {
-		t.Fatalf("projections = %+v, want [k d a]", out.Projections)
+	if len(out.Projections) != 2 {
+		t.Fatalf("projections = %+v, want [d a]", out.Projections)
 	}
-	if p := out.Projections[0]; p.Column != "k" || p.Alias != "k" {
-		t.Fatalf("proj[0] = %+v, want k passthrough", p)
+	if p := out.Projections[0]; p.Column != "d" {
+		t.Fatalf("proj[0] = %+v, want d passthrough", p)
 	}
-	if p := out.Projections[1]; p.Column != "d" {
-		t.Fatalf("proj[1] = %+v, want d passthrough", p)
-	}
-	if p := out.Projections[2]; p.Alias != "a" || p.ASTExpr == nil {
-		t.Fatalf("proj[2] = %+v, want division aliased to a", p)
+	if p := out.Projections[1]; p.Alias != "a" || p.ASTExpr == nil {
+		t.Fatalf("proj[1] = %+v, want division aliased to a", p)
 	}
 }

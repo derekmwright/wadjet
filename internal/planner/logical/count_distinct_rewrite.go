@@ -106,6 +106,18 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 				return n
 			}
 		}
+		// Extra-aggregate gate (metal-validated 2026-08-17): decomposed
+		// partials multiply level-1 state per (K, x) pair group. At the
+		// same pair cardinality, the bare grouped distinct wins big
+		// (ClickBench Q9 −31% hot) while four decomposed partials lose
+		// bigger (Q10 +54%) — the accumulator traffic over tens of
+		// millions of pair groups swamps the distinct-set saving. Until
+		// NDV stats can bound pair cardinality at plan time, the grouped
+		// rewrite fires only for a lone COUNT(DISTINCT). The global form
+		// keeps full decomposition (level 1 is single-key; Q6 −40%).
+		if len(n.AggExprs) > 1 {
+			return n
+		}
 	}
 	for _, k := range n.GroupBy {
 		if strings.EqualFold(k, x) {

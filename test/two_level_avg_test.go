@@ -11,9 +11,11 @@ import (
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
-// AVG alongside COUNT(DISTINCT x) rides the two-level rewrite via
-// SUM+COUNT partials and a division projection. NULLs must behave: AVG
-// skips NULL inputs, and a group whose inputs are all NULL yields NULL
+// AVG alongside COUNT(DISTINCT x): the grouped form stays on the
+// distinct-set path (extra-aggregate gate, Q10 metal lesson) and the
+// global form rides the two-level rewrite via SUM+COUNT partials and a
+// division projection — both must agree with hand-computed values. NULL
+// behavior: AVG skips NULL inputs; an all-NULL group yields NULL
 // (division by zero count reads NULL).
 func TestTwoLevelDistinctAvg(t *testing.T) {
 	ctx := context.Background()
@@ -67,5 +69,24 @@ func TestTwoLevelDistinctAvg(t *testing.T) {
 	}
 	if g2["a"] != nil {
 		t.Fatalf("k=2 avg = %v (%T), want NULL", g2["a"], g2["a"])
+	}
+
+	// Global form: the AVG decomposition + finalization projection fire.
+	r, err = db.Query(ctx, "SELECT COUNT(DISTINCT x) AS d, AVG(v) AS a, COUNT(*) AS c FROM ev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Rows) != 1 {
+		t.Fatalf("global: %d rows, want 1", len(r.Rows))
+	}
+	gr := r.Rows[0]
+	if d := toFloat64(gr["d"]); d != 4 {
+		t.Fatalf("global distinct = %v, want 4", gr["d"])
+	}
+	if a := toFloat64(gr["a"]); math.Abs(a-15.0) > 1e-9 {
+		t.Fatalf("global avg = %v, want 15", gr["a"])
+	}
+	if c := toFloat64(gr["c"]); c != 5 {
+		t.Fatalf("global count = %v, want 5", gr["c"])
 	}
 }
