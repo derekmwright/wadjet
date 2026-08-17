@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/derekmwright/wadjet/benchmarks/tpch"
@@ -57,6 +58,49 @@ func TestDistributedJoinSelectExpression(t *testing.T) {
 	// Exactly one nation has n_nationkey = 3.
 	if ones != 1 {
 		t.Fatalf("expected exactly 1 row with e0=1, got %d", ones)
+	}
+}
+
+// ORDER BY over a bare expression SELECT (scan→sort→gather, #288 seeds
+// 231/246): the projection attachment only handled direct scan→gather, so
+// with a standalone sort stage in between the expression was never
+// computed — every e1 came back NULL and the sort keyed on a missing
+// column. The attachment now resolves through one sort hop, naming
+// outputs by alias so the sort resolves them.
+func TestDistributedScanSortSelectExpression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("distributed test skipped in -short mode")
+	}
+	ctx, coord := setupTPCHDistributedAtScale(t, tpch.SF001)
+
+	res, err := coord.ExecuteSQL(ctx, "SELECT o_custkey - 6 AS e1 FROM orders ORDER BY e1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Error != "" {
+		t.Fatal(res.Error)
+	}
+	rows := mustRows(t, res)
+	if len(rows) != 15000 {
+		t.Fatalf("got %d rows, want 15000", len(rows))
+	}
+	// Numeric check only — inferProjectionType boxes the projected column
+	// as float64 (the pre-existing #169-path type residual).
+	prev := math.Inf(-1)
+	for i, r := range rows {
+		var v float64
+		switch tv := r["e1"].(type) {
+		case int64:
+			v = float64(tv)
+		case float64:
+			v = tv
+		default:
+			t.Fatalf("row %d: e1 = %T(%v), want numeric (was NULL before the fix)", i, r["e1"], r["e1"])
+		}
+		if v < prev {
+			t.Fatalf("rows not ascending at index %d: %v after %v", i, v, prev)
+		}
+		prev = v
 	}
 }
 

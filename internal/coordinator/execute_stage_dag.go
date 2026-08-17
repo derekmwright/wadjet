@@ -3529,6 +3529,13 @@ func finalAggregateFanoutCandidate(
 	if stage.Type != "final_aggregate" {
 		return "", nil, false
 	}
+	// A RawInputAggregate consumes RAW rows exactly once, in one task —
+	// re-splitting it into per-slice partials + a COUNT→SUM merge
+	// reintroduces the double-count the raw shape exists to avoid
+	// (COUNT(DISTINCT) partials from overlapping slices don't sum, #291).
+	if stage.RawInputAggregate {
+		return "", nil, false
+	}
 	if stage.Distribution.Kind != physical.DistSingleton {
 		return "", nil, false
 	}

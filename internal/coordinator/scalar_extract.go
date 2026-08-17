@@ -32,7 +32,14 @@ import (
 func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOutput, projection []physical.OutputRename) (string, error) {
 	files := flattenStageFiles(out)
 	if len(files) == 0 {
-		return "", fmt.Errorf("producer stage emitted no output files")
+		// Empty producer output is a legitimate SQL state, not a protocol
+		// error (#292): a scalar SUM/MIN/MAX/AVG over zero input rows IS
+		// NULL, and comparisons against it evaluate to unknown — exactly
+		// what substituting the null literal produces. COUNT-family
+		// producers never reach here: their fragments emit the identity
+		// row (COUNT=0) even over an empty source, so their output is
+		// never file-less (worker executeFragment empty-source exemption).
+		return "null", nil
 	}
 	// Singleton producer: a single WSHF file with one row. If multiple
 	// files surfaced (e.g. a zero-row shard plus a one-row shard), scan

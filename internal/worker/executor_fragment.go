@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -312,23 +313,63 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	// manifests — so "no frozen files" carries no emptiness signal at all.
 	// Short-circuiting here silently dropped the entire input (0 rows,
 	// task success) when eager dispatch first went end-to-end.
+	// Exception: a SCALAR COUNT-family aggregate fragment (ungrouped
+	// OpHashAggregate, every aggregate count/count_distinct). SQL requires
+	// it to emit its identity row over zero input — COUNT()=0 — and a
+	// downstream consumer (scalar-subquery substitution, #292) blocks on
+	// that row existing. Fall through with an empty source so the
+	// aggregate finalizes and the row is written.
+	//
+	// COUNT-family ONLY: their output type (int64) is input-independent.
+	// MIN/MAX/SUM output types follow the input column, which is unknowable
+	// here (zero input files = no schema), so an identity row would guess a
+	// type — and one mistyped partial poisons the merge for every sibling
+	// (a float64-typed NULL min among string-typed partials broke the
+	// skew-parity left join before this gate). Those shapes keep the
+	// empty-output short-circuit.
+	emptyScalarAgg := false
 	_, eagerSource := task.EagerInputs[sourceSpec.InputAlias]
 	if len(sourceSpec.InputFiles) == 0 && !eagerSource {
-		if sinkSpec.Type == distributed.OpGatherSink {
-			sink, err := e.openFragmentSink(task, sinkSpec)
-			if err != nil {
-				return fmt.Errorf("fragment task %s: open gather sink (empty source): %w", task.ID, err)
+		for _, m := range middle {
+			if m.Type != distributed.OpHashAggregate || len(m.GroupByCols) != 0 || m.GroupByAll {
+				continue
 			}
-			defer sink.close()
-			if err := sink.finalize(ctx, task, result); err != nil {
-				return fmt.Errorf("fragment task %s: finalize gather sink (empty source): %w", task.ID, err)
+			countOnly := len(m.Aggregates) > 0
+			for _, a := range m.Aggregates {
+				switch strings.ToLower(strings.TrimSpace(a.Func)) {
+				case "count", "count_distinct", "approx_distinct":
+				default:
+					countOnly = false
+				}
 			}
+			if countOnly {
+				emptyScalarAgg = true
+			}
+			break
 		}
-		return nil
+		if !emptyScalarAgg {
+			if sinkSpec.Type == distributed.OpGatherSink {
+				sink, err := e.openFragmentSink(task, sinkSpec)
+				if err != nil {
+					return fmt.Errorf("fragment task %s: open gather sink (empty source): %w", task.ID, err)
+				}
+				defer sink.close()
+				if err := sink.finalize(ctx, task, result); err != nil {
+					return fmt.Errorf("fragment task %s: finalize gather sink (empty source): %w", task.ID, err)
+				}
+			}
+			return nil
+		}
 	}
 
 	// Build the source.
-	src, err := e.buildFragmentSource(task, sourceSpec)
+	var src exec.Source
+	var err error
+	if emptyScalarAgg {
+		src = emptyFragmentSource{}
+	} else {
+		src, err = e.buildFragmentSource(task, sourceSpec)
+	}
 	if err != nil {
 		return fmt.Errorf("fragment task %s: source: %w", task.ID, err)
 	}
@@ -2178,6 +2219,16 @@ func isFragmentSinkOp(t distributed.OpType) bool {
 func isFragmentBreakerOp(t distributed.OpType) bool {
 	return t == distributed.OpHashAggregate || t == distributed.OpSort || t == distributed.OpSortMergeJoin
 }
+
+// emptyFragmentSource is the zero-input source for a scalar-aggregate
+// fragment over an empty upstream (#292): the aggregate must still
+// finalize and emit its identity row, so the pipeline needs a source that
+// is simply exhausted — not an error, and not a skipped run.
+type emptyFragmentSource struct{}
+
+func (emptyFragmentSource) Init(context.Context) error                       { return nil }
+func (emptyFragmentSource) Next(context.Context) (*batch.RecordBatch, error) { return nil, nil }
+func (emptyFragmentSource) Close() error                                     { return nil }
 
 func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.OpSpec) (exec.Source, error) {
 	bucket := spec.InputBucket

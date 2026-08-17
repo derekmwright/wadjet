@@ -2056,57 +2056,84 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 	if gather == nil || len(gather.Dependencies) != 1 {
 		return
 	}
+	// Resolve the compute target through at most one standalone sort hop:
+	// scan→sort→gather (ORDER BY over a bare expression SELECT, #288 seeds
+	// 231/246) needs the projection on the SCAN so the sort can resolve an
+	// expression alias in its keys — the sort stage itself computes
+	// nothing. The sort's keys join the coverage check below.
+	targetID := gather.Dependencies[0]
+	var viaSort *Stage
 	for i := range stages {
 		s := &stages[i]
-		if s.ID != gather.Dependencies[0] {
+		if s.ID == targetID && (s.Type == "sort" || s.Type == "merge_sort") && len(s.Dependencies) == 1 {
+			viaSort = s
+			targetID = s.Dependencies[0]
+			break
+		}
+	}
+	for i := range stages {
+		s := &stages[i]
+		if s.ID != targetID {
 			continue
 		}
-		// Plain leaf scans only: fused scan-aggregates project via their
-		// aggregate machinery, and non-scan stages mean something else
-		// computes between scan and gather.
-		if s.Type == StageScan && len(s.FusedAggGroupBy) == 0 && len(s.FusedAggSpecs) == 0 {
+		isPlainScan := s.Type == StageScan && len(s.FusedAggGroupBy) == 0 && len(s.FusedAggSpecs) == 0
+		isJoin := (s.Type == StageHashJoin || s.Type == StageBroadcastJoin || s.Type == StageSortMergeJoin) &&
+			len(s.GroupByCols) == 0
+		if !isPlainScan && !isJoin {
+			// Something else computes between here and the gather (fused
+			// scan-aggregates project via their aggregate machinery).
+			return
+		}
+		// Direct scan→gather keeps the original #169 convention: outputs
+		// named by lowercased expression text, which the gather's
+		// project-mode rename maps to the user's alias.
+		if isPlainScan && viaSort == nil {
 			s.ProjectExprs = specs
+			return
 		}
-		// Join feeding the gather directly (#288 differential finding, the
-		// #169 class on the join path): nothing computes between the join
-		// and the gather, so SELECT-list expressions were never evaluated
-		// — the gather renamed-by-expression-text, missed, and passed raw
-		// join columns through. Attach the SELECT list so the join
-		// fragment projects worker-side (buildJoinFragment appends the
-		// OpProject before any fused sort).
+		// Join feeding the gather (the #169 class on the join path), or a
+		// scan/join under a standalone sort (ORDER BY over a bare
+		// expression SELECT): nothing computes the SELECT expressions —
+		// the gather renamed-by-expression-text, missed, and passed raw
+		// columns through. Attach the SELECT list so the producing
+		// fragment projects worker-side (join fragments and the scan's
+		// filter-fragment path both append the OpProject).
 		//
-		// Unlike the scan case, outputs are named by the user's ALIAS when
-		// one exists: a sort fused into the join (fuseSortIntoPredecessor)
-		// may reference the alias, and the projection must emit it under
-		// that name for the sort to resolve. The gather rename then finds
-		// columns already carrying final names and leaves them alone
-		// (rename-only mode keeps exactly the projected set).
-		if (s.Type == StageHashJoin || s.Type == StageBroadcastJoin || s.Type == StageSortMergeJoin) &&
-			len(s.GroupByCols) == 0 {
-			aliased := make([]ProjectExprSpec, len(specs))
-			for j, sp := range specs {
-				aliased[j] = sp
-				if a := proj[j].Alias; a != "" {
-					aliased[j].Name = strings.ToLower(a)
-				}
+		// Unlike the direct-scan case, outputs are named by the user's
+		// ALIAS when one exists: a sort — standalone, or fused into the
+		// join by fuseSortIntoPredecessor — may key on the alias, and the
+		// projection must emit it under that name for the sort to resolve.
+		// The gather rename then finds columns already carrying final
+		// names and leaves them alone (rename-only keeps exactly the
+		// projected set).
+		aliased := make([]ProjectExprSpec, len(specs))
+		for j, sp := range specs {
+			aliased[j] = sp
+			if a := proj[j].Alias; a != "" {
+				aliased[j].Name = strings.ToLower(a)
 			}
-			// A fused sort must find every key among the projection's
-			// outputs — OpProject narrows the schema to exactly its
-			// projections. Bail (keep old behavior) when uncovered.
-			for _, k := range s.SortKeys {
-				covered := false
-				for _, sp := range aliased {
-					if strings.EqualFold(sp.Name, k.Column) {
-						covered = true
-						break
-					}
-				}
-				if !covered {
-					return
-				}
-			}
-			s.ProjectExprs = aliased
 		}
+		// Every sort key — the fused sort's on a join, and the standalone
+		// sort stage's — must resolve among the projection's outputs:
+		// OpProject narrows the schema to exactly its projections. Bail
+		// (keep old behavior) when uncovered.
+		sortKeys := append([]SortKeySpec(nil), s.SortKeys...)
+		if viaSort != nil {
+			sortKeys = append(sortKeys, viaSort.SortKeys...)
+		}
+		for _, k := range sortKeys {
+			covered := false
+			for _, sp := range aliased {
+				if strings.EqualFold(sp.Name, k.Column) {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				return
+			}
+		}
+		s.ProjectExprs = aliased
 		return
 	}
 }
@@ -3513,11 +3540,22 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			p.walkStages(child, stages, nil)
 		}
 		var aggSpecs []AggSpec
+		hasDistinctAgg := false
 		for _, agg := range node.AggExprs {
 			spec := AggSpec{
 				Func:      agg.Func,
 				InputCol:  agg.InputCol,
 				OutputCol: agg.OutputCol,
+			}
+			// DISTINCT rides the canonical Func string the worker already
+			// maps to exec.AggCountDistinct (#291: the flag used to be
+			// dropped here, so distributed COUNT(DISTINCT x) degenerated
+			// to COUNT(x) on every path).
+			if agg.Distinct && strings.EqualFold(agg.Func, "count") {
+				spec.Func = "count_distinct"
+			}
+			if agg.Distinct {
+				hasDistinctAgg = true
 			}
 			// Capture derived expression text when the aggregate argument
 			// is not a bare column reference (e.g.
@@ -3540,7 +3578,26 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// the scan level. Each scan task produces partial aggregate results
 		// instead of raw rows, massively reducing data volume.
 		childStages := (*stages)[preCount:]
-		if canFuseScanAggregate(childStages) {
+		// Distinct aggregates cannot ride the two-phase partial/merge
+		// shape: a per-task partial COUNT(DISTINCT) merged by the final's
+		// COUNT→SUM rewrite double-counts values that appear in more than
+		// one task (#291 — observed as COUNT(DISTINCT)=COUNT(*)). They
+		// dispatch instead as one RawInputAggregate final over raw rows:
+		// exact by construction (grouped finals declare clustering on the
+		// group keys, so the distribution pass hash-partitions raw input
+		// into disjoint groups; ungrouped finals collapse to Singleton).
+		if hasDistinctAgg {
+			finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
+			*stages = append(*stages, Stage{
+				ID:                finalStageID,
+				Type:              "final_aggregate",
+				Tasks:             1,
+				GroupByCols:       groupBy,
+				AggSpecs:          aggSpecs,
+				RawInputAggregate: true,
+				Dependencies:      leafStages(childStages),
+			})
+		} else if canFuseScanAggregate(childStages) {
 			for i := range *stages {
 				if i < preCount {
 					continue
