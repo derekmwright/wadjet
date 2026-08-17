@@ -35,10 +35,10 @@ import (
 //     a bare column (approx_distinct keeps its sketch path; expressions
 //     and multi-distinct fall through).
 //   - Every other aggregate is a decomposable simple: COUNT(*)/COUNT(col),
-//     SUM, MIN, MAX over bare columns or expressions (the expression
+//     SUM, MIN, MAX, AVG over bare columns or expressions (the expression
 //     evaluates at level 1, exactly as it would have in the original).
-//   - AVG is deferred to a follow-up (needs a division projection over
-//     SUM/COUNT partials to preserve the output column contract).
+//     AVG decomposes into SUM+COUNT partials with a division projection
+//     above level 2 (ClickBench Q10's AVG(ResolutionWidth)).
 //   - No grouping sets.
 var twoLevelDistinctToggle = optswitch.Register("two-level-distinct", "WADJET_TWO_LEVEL_DISTINCT",
 	"rewrite COUNT(DISTINCT x) aggregates into two stacked GROUP BYs on the typed fast paths")
@@ -83,7 +83,7 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 			continue
 		}
 		switch strings.ToLower(a.Func) {
-		case "count", "sum", "min", "max":
+		case "count", "sum", "min", "max", "avg":
 		default:
 			return n
 		}
@@ -117,6 +117,11 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 	}
 
 	// Level 1: GROUP BY K + x, partials for the non-distinct aggregates.
+	// AVG decomposes into SUM+COUNT partials at both levels and a division
+	// projection above level 2 (avgDivs); everything else re-aggregates
+	// with a single partial.
+	type avgDiv struct{ out, sum, cnt string }
+	var avgDivs []avgDiv
 	innerGroupBy := append(append([]string(nil), n.GroupBy...), x)
 	innerAggs := make([]AggExpr, 0, len(n.AggExprs)-1)
 	outerAggs := make([]AggExpr, 0, len(n.AggExprs))
@@ -128,6 +133,19 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 				InputCol:  x,
 				OutputCol: a.OutputCol,
 			})
+			continue
+		}
+		if strings.EqualFold(a.Func, "avg") {
+			sumP := fmt.Sprintf("__tl_avgsum_%d", i)
+			cntP := fmt.Sprintf("__tl_avgcnt_%d", i)
+			innerSum, innerCnt := a, a
+			innerSum.Func, innerSum.OutputCol = "sum", sumP
+			innerCnt.Func, innerCnt.OutputCol = "count", cntP
+			innerAggs = append(innerAggs, innerSum, innerCnt)
+			outerAggs = append(outerAggs,
+				AggExpr{Func: "sum", InputCol: sumP, OutputCol: sumP},
+				AggExpr{Func: "sum", InputCol: cntP, OutputCol: cntP})
+			avgDivs = append(avgDivs, avgDiv{out: a.OutputCol, sum: sumP, cnt: cntP})
 			continue
 		}
 		partial := fmt.Sprintf("__tl_%s_%d", strings.ToLower(a.Func), i)
@@ -159,7 +177,39 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 	}
 	outer := NewAggregate(inner, append([]string(nil), n.GroupBy...), outerAggs)
 	outer.GroupByExprs = n.GroupByExprs
-	return outer
+	if len(avgDivs) == 0 {
+		return outer
+	}
+	// AVG finalization: project sum/count into the original output name,
+	// passing every other output column through by name in the original
+	// order (group keys, then aggregates). Division by a zero count reads
+	// NULL — AVG over an all-NULL group (see expr arithDiv).
+	div := make(map[string]avgDiv, len(avgDivs))
+	for _, d := range avgDivs {
+		div[d.out] = d
+	}
+	projs := make([]Projection, 0, len(n.GroupBy)+len(n.AggExprs))
+	for _, k := range n.GroupBy {
+		projs = append(projs, Projection{Column: k, Alias: k})
+	}
+	for _, a := range n.AggExprs {
+		if d, ok := div[a.OutputCol]; ok {
+			projs = append(projs, Projection{
+				Alias: d.out,
+				Expr:  fmt.Sprintf("%s / %s", d.sum, d.cnt),
+				ASTExpr: &plansql.BinaryOp{
+					Left:  &plansql.ColRef{Column: d.sum},
+					Op:    "/",
+					Right: &plansql.ColRef{Column: d.cnt},
+				},
+			})
+			continue
+		}
+		projs = append(projs, Projection{Column: a.OutputCol, Alias: a.OutputCol})
+	}
+	fin := NewProject(outer, projs)
+	fin.PreservesAggOutputs = true
+	return fin
 }
 
 // scanIntCols walks through single-child passthrough nodes to the scan

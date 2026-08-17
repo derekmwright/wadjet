@@ -121,6 +121,13 @@ type Node struct {
 	SecurityBarrier bool
 
 	// Aggregate
+	// PreservesAggOutputs marks a synthetic Project inserted by a rewrite
+	// directly above an Aggregate that passes every aggregate output
+	// through under its original name (possibly adding finalizations,
+	// e.g. the two-level AVG division). The physical builder's
+	// aggregate-ancestor resolution walks through such projections so
+	// SELECT-list aggregate references still resolve by output name.
+	PreservesAggOutputs bool
 	// ScanStrictIntCols marks scan columns whose vectors are plain
 	// Int64/Int32 at runtime — exactly the set expr.BinOpNumeric resolves
 	// to integer arithmetic. Planner-side int typing must stay a subset

@@ -59,9 +59,9 @@ func TestTwoLevelDistinctGuards(t *testing.T) {
 			{Func: "count", InputCol: "x", OutputCol: "d1", Distinct: true},
 			{Func: "count", InputCol: "y", OutputCol: "d2", Distinct: true},
 		}),
-		"avg alongside": aggNode([]string{"k"}, []AggExpr{
+		"non-decomposable alongside": aggNode([]string{"k"}, []AggExpr{
 			{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
-			{Func: "avg", InputCol: "v", OutputCol: "a"},
+			{Func: "approx_distinct", InputCol: "v", OutputCol: "a"},
 		}),
 		"distinct col is group key": aggNode([]string{"x"}, []AggExpr{
 			{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
@@ -102,5 +102,47 @@ func TestTwoLevelDistinctKillSwitch(t *testing.T) {
 	n := aggNode(nil, []AggExpr{{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true}})
 	if out := rewriteCountDistinctTwoLevel(n); out.Children[0].Type == NodeAggregate {
 		t.Fatal("kill switch off but rewrite fired")
+	}
+}
+
+func TestTwoLevelDistinctAvgRewrite(t *testing.T) {
+	n := aggNode([]string{"k"}, []AggExpr{
+		{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
+		{Func: "avg", InputCol: "v", OutputCol: "a"},
+	})
+	out := rewriteCountDistinctTwoLevel(n)
+	if out.Type != NodeProject {
+		t.Fatalf("AVG rewrite must add a finalization projection, got %v", out.Type)
+	}
+	agg := out.Children[0]
+	if agg.Type != NodeAggregate || agg.Children[0].Type != NodeAggregate {
+		t.Fatalf("expected Project over two stacked aggregates")
+	}
+	inner := agg.Children[0]
+	innerFuncs := map[string]string{}
+	for _, a := range inner.AggExprs {
+		innerFuncs[a.OutputCol] = a.Func
+	}
+	if innerFuncs["__tl_avgsum_1"] != "sum" || innerFuncs["__tl_avgcnt_1"] != "count" {
+		t.Fatalf("inner AVG partials = %v, want sum+count", innerFuncs)
+	}
+	outerFuncs := map[string]string{}
+	for _, a := range agg.AggExprs {
+		outerFuncs[a.OutputCol] = a.Func
+	}
+	if outerFuncs["__tl_avgsum_1"] != "sum" || outerFuncs["__tl_avgcnt_1"] != "sum" {
+		t.Fatalf("outer AVG partials = %v, want sum+sum", outerFuncs)
+	}
+	if len(out.Projections) != 3 {
+		t.Fatalf("projections = %+v, want [k d a]", out.Projections)
+	}
+	if p := out.Projections[0]; p.Column != "k" || p.Alias != "k" {
+		t.Fatalf("proj[0] = %+v, want k passthrough", p)
+	}
+	if p := out.Projections[1]; p.Column != "d" {
+		t.Fatalf("proj[1] = %+v, want d passthrough", p)
+	}
+	if p := out.Projections[2]; p.Alias != "a" || p.ASTExpr == nil {
+		t.Fatalf("proj[2] = %+v, want division aliased to a", p)
 	}
 }

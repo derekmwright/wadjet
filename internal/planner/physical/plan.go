@@ -8077,6 +8077,12 @@ func findAggregateAncestor(node *logical.Node) *logical.Node {
 	if node.Type == logical.NodeFilter && len(node.Children) > 0 {
 		return findAggregateAncestor(node.Children[0])
 	}
+	// Synthetic finalization projections (two-level AVG) pass every
+	// aggregate output through by name, so SELECT-list resolution treats
+	// the aggregate below as directly visible.
+	if node.Type == logical.NodeProject && node.PreservesAggOutputs && len(node.Children) > 0 {
+		return findAggregateAncestor(node.Children[0])
+	}
 	return nil
 }
 
