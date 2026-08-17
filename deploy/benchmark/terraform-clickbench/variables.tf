@@ -57,3 +57,9 @@ variable "profile_queries" {
   type        = string
   default     = ""
 }
+
+variable "bench_env" {
+  description = "Env-var prefix for the bench invocation (e.g. \"WADJET_SCAN_WORKERS=8\"); empty = none"
+  type        = string
+  default     = ""
+}

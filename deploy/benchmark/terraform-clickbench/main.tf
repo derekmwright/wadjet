@@ -116,7 +116,7 @@ locals {
     nohup iostat -x -t 5 > /root/iostat.log 2>&1 &
     nohup bash -c 'while true; do echo "== $(date -u +%H:%M:%S)"; grep -E "MemFree|Cached|Dirty" /proc/meminfo; sleep 5; done' > /root/meminfo.log 2>&1 &
 
-    /usr/local/bin/clickbench-bench \
+    ${var.bench_env} /usr/local/bin/clickbench-bench \
       --mem-budget "${var.mem_budget_bytes}" \
       --s3-bucket "${var.data_bucket}" \
       --s3-region "${var.region}" \
