@@ -4,6 +4,8 @@ import "testing"
 
 func aggNode(groupBy []string, aggs []AggExpr) *Node {
 	scan := NewScan("t", "")
+	// The cost gate requires int-typed key knowledge for grouped rewrites.
+	scan.ScanIntCols = map[string]bool{"k": true, "x": true, "v": true}
 	return NewAggregate(scan, groupBy, aggs)
 }
 
@@ -64,11 +66,33 @@ func TestTwoLevelDistinctGuards(t *testing.T) {
 		"distinct col is group key": aggNode([]string{"x"}, []AggExpr{
 			{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
 		}),
+		"string group key (cost gate)": func() *Node {
+			n := aggNode([]string{"s"}, []AggExpr{
+				{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
+			})
+			return n
+		}(),
+		"no type annotation (cost gate)": func() *Node {
+			scan := NewScan("t", "")
+			return NewAggregate(scan, []string{"k"}, []AggExpr{
+				{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
+			})
+		}(),
 	}
 	for name, n := range cases {
 		if out := rewriteCountDistinctTwoLevel(n); out.Children[0].Type == NodeAggregate {
 			t.Errorf("%s: rewrote but must fall through", name)
 		}
+	}
+}
+
+func TestTwoLevelDistinctGlobalNeedsNoTypes(t *testing.T) {
+	scan := NewScan("t", "")
+	n := NewAggregate(scan, nil, []AggExpr{
+		{Func: "count", InputCol: "x", OutputCol: "d", Distinct: true},
+	})
+	if out := rewriteCountDistinctTwoLevel(n); out.Children[0].Type != NodeAggregate {
+		t.Fatal("global distinct must rewrite regardless of type annotations")
 	}
 }
 

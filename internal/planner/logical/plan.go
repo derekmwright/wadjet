@@ -121,6 +121,11 @@ type Node struct {
 	SecurityBarrier bool
 
 	// Aggregate
+	// ScanIntCols marks scan columns whose types land on the typed
+	// integer aggregation paths (set by physical.AnnotateScanColumns;
+	// consumed by the two-level distinct rewrite's cost gate).
+	ScanIntCols map[string]bool
+
 	GroupBy          []string
 	GroupByExprs     []plansql.Node // AST for GROUP BY expressions (may be nil)
 	AggExprs         []AggExpr

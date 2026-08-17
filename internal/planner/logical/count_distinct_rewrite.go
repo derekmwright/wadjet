@@ -89,6 +89,24 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 		}
 	}
 	x := n.AggExprs[distinctIdx].InputCol
+	// Cost gate (metal-validated 2026-08-17): the rewrite pays when level 1
+	// lands on a typed aggregation path — no group keys (single-column
+	// GROUP BY x fast paths; ClickBench Q6 −42% hot) or an all-integer
+	// (K ∪ x) key set (dual/multi-int; Q9 −29%). A string group key pushes
+	// level 1 onto the multi-column generic path at pair cardinality and
+	// LOSES (Q14 +87% before this gate) — those shapes keep the
+	// distinct-set path.
+	if len(n.GroupBy) > 0 {
+		intCols := scanIntCols(n.Children[0])
+		if intCols == nil || !intCols[strings.ToLower(x)] {
+			return n
+		}
+		for _, k := range n.GroupBy {
+			if !intCols[strings.ToLower(k)] {
+				return n
+			}
+		}
+	}
 	for _, k := range n.GroupBy {
 		if strings.EqualFold(k, x) {
 			// COUNT(DISTINCT k) with k a group key is a degenerate 0/1;
@@ -142,4 +160,24 @@ func rewriteCountDistinctTwoLevel(n *Node) *Node {
 	outer := NewAggregate(inner, append([]string(nil), n.GroupBy...), outerAggs)
 	outer.GroupByExprs = n.GroupByExprs
 	return outer
+}
+
+// scanIntCols walks through single-child passthrough nodes to the scan
+// feeding an aggregate and returns its integer-typed column set, or nil
+// when the input shape (joins, subqueries) hides the types.
+func scanIntCols(n *Node) map[string]bool {
+	for n != nil {
+		switch n.Type {
+		case NodeScan:
+			return n.ScanIntCols
+		case NodeFilter, NodeProject, NodeLimit, NodeSort:
+			if len(n.Children) != 1 {
+				return nil
+			}
+			n = n.Children[0]
+		default:
+			return nil
+		}
+	}
+	return nil
 }

@@ -952,10 +952,18 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 		table, err := p.catalog.GetTable(ctx, node.TableName)
 		if err == nil {
 			cols := make([]string, len(table.Schema.Columns))
+			intCols := make(map[string]bool, len(table.Schema.Columns))
 			for i, c := range table.Schema.Columns {
 				cols[i] = c.Name
+				switch c.Type {
+				case parquet.TypeInt64, parquet.TypeInt32, parquet.TypeTimestamp,
+					parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration,
+					parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+					intCols[strings.ToLower(c.Name)] = true
+				}
 			}
 			node.ScanColumns = cols
+			node.ScanIntCols = intCols
 		}
 		// Estimate row count from manifest for join reordering
 		if manifest, err := p.catalog.GetManifest(ctx, node.TableName); err == nil {
