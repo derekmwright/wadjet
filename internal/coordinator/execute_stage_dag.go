@@ -762,7 +762,7 @@ func (c *Coordinator) executeStageDAG(
 	if err != nil {
 		return nil, fmt.Errorf("gather stage %s: %w", gatherStage.ID, err)
 	}
-	gr, gerr := c.dispatchGatherStage(ctx, queryID, sql, gatherStage, inputs, workerCount)
+	gr, gerr := c.dispatchGatherStage(ctx, queryID, sql, gatherStage, stageByID[gatherStage.Dependencies[0]], inputs, workerCount)
 	if gerr != nil {
 		return gr, gerr
 	}
@@ -3179,6 +3179,12 @@ func buildJoinFragment(
 	// Absorbed 1:1 downstream joins (stage-chain fusion) run after the
 	// primary and its residual filter, in stage order.
 	ops = append(ops, chainedOps...)
+	// SELECT-list projection for a gather-terminal join (#288 finding, the
+	// #169 class on the join path): computes scalar expressions worker-side.
+	// Before the sort — a fused sort may key on a projected alias.
+	if op, ok := projectOpFromSpecs(stage.ProjectExprs); ok {
+		ops = append(ops, op)
+	}
 	if len(sorts) > 0 {
 		ops = append(ops, distributed.OpSpec{
 			Type:         distributed.OpSort,
@@ -3256,6 +3262,11 @@ func buildSortMergeJoinFragment(
 			Type:       distributed.OpFilter,
 			Predicates: append([]string(nil), t.PostFilterExprs...),
 		})
+	}
+	// SELECT-list projection for a gather-terminal join — same insertion
+	// as buildJoinFragment (before the fused sort).
+	if op, ok := projectOpFromSpecs(stage.ProjectExprs); ok {
+		ops = append(ops, op)
 	}
 	if len(sorts) > 0 {
 		ops = append(ops, distributed.OpSpec{
@@ -4152,6 +4163,7 @@ func (c *Coordinator) dispatchGatherStage(
 	ctx context.Context,
 	queryID, sql string,
 	stage physical.Stage,
+	depStage physical.Stage,
 	inputs map[string]StageOutput,
 	workerCount int,
 ) (*gatherResult, error) {
@@ -4163,11 +4175,21 @@ func (c *Coordinator) dispatchGatherStage(
 	// wildcard overlap (wadjet.results.<queryID>.>).
 	replySubject := fmt.Sprintf("wadjet.gather.%s", queryID)
 
-	// Subscribe before publishing so we don't miss early messages.
+	// Ordered gather (#288 differential finding): a sort+limit that
+	// fuseSortIntoPredecessor folded into a plan-time-Singleton compute
+	// stage can still fan out at dispatch (broadcast-join probe-split), so
+	// each task emits its own sorted ≤Limit-row output and a plain
+	// streaming gather concatenates them — losing global order AND the
+	// limit. When the upstream carries fused SortKeys, dispatch the gather
+	// as a fragment that merge-sorts the pre-sorted inputs and applies the
+	// limit worker-side: [ShuffleSource, OpSort{keys, limit}, GatherSink].
+	// Standalone sort/merge_sort upstreams are excluded: they are true
+	// single-task Singletons whose output is already globally ordered.
 	var ordering []distributed.SortKeySpec
-	var limit int
-	if stage.Exchange != nil {
-		for _, o := range stage.Exchange.Ordering {
+	switch depStage.Type {
+	case physical.StageHashJoin, physical.StageBroadcastJoin, physical.StageSortMergeJoin,
+		"aggregate", "final_aggregate":
+		for _, o := range depStage.SortKeys {
 			ordering = append(ordering, distributed.SortKeySpec{Column: o.Column, Desc: o.Desc})
 		}
 	}
@@ -4187,10 +4209,27 @@ func (c *Coordinator) dispatchGatherStage(
 		Inputs: map[string][]string{
 			alias: flattenStageFiles(upstream),
 		},
-		ReplySubject:   replySubject,
-		GatherOrdering: ordering,
-		GatherLimit:    limit,
-		CreatedAt:      time.Now(),
+		ReplySubject: replySubject,
+		CreatedAt:    time.Now(),
+	}
+	if len(ordering) > 0 {
+		task.Operators = []distributed.OpSpec{
+			{
+				Type:        distributed.OpShuffleSource,
+				InputAlias:  alias,
+				InputFiles:  task.Inputs[alias],
+				InputBucket: c.config.ResultBucket,
+			},
+			{
+				Type:         distributed.OpSort,
+				SortKeySpecs: ordering,
+				SortLimit:    depStage.Limit,
+			},
+			{
+				Type:         distributed.OpGatherSink,
+				ReplySubject: replySubject,
+			},
+		}
 	}
 	if clusterID := c.catalog.ClusterID(); clusterID != "" {
 		task.ClusterID = clusterID

@@ -2067,6 +2067,46 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		if s.Type == StageScan && len(s.FusedAggGroupBy) == 0 && len(s.FusedAggSpecs) == 0 {
 			s.ProjectExprs = specs
 		}
+		// Join feeding the gather directly (#288 differential finding, the
+		// #169 class on the join path): nothing computes between the join
+		// and the gather, so SELECT-list expressions were never evaluated
+		// — the gather renamed-by-expression-text, missed, and passed raw
+		// join columns through. Attach the SELECT list so the join
+		// fragment projects worker-side (buildJoinFragment appends the
+		// OpProject before any fused sort).
+		//
+		// Unlike the scan case, outputs are named by the user's ALIAS when
+		// one exists: a sort fused into the join (fuseSortIntoPredecessor)
+		// may reference the alias, and the projection must emit it under
+		// that name for the sort to resolve. The gather rename then finds
+		// columns already carrying final names and leaves them alone
+		// (rename-only mode keeps exactly the projected set).
+		if (s.Type == StageHashJoin || s.Type == StageBroadcastJoin || s.Type == StageSortMergeJoin) &&
+			len(s.GroupByCols) == 0 {
+			aliased := make([]ProjectExprSpec, len(specs))
+			for j, sp := range specs {
+				aliased[j] = sp
+				if a := proj[j].Alias; a != "" {
+					aliased[j].Name = strings.ToLower(a)
+				}
+			}
+			// A fused sort must find every key among the projection's
+			// outputs — OpProject narrows the schema to exactly its
+			// projections. Bail (keep old behavior) when uncovered.
+			for _, k := range s.SortKeys {
+				covered := false
+				for _, sp := range aliased {
+					if strings.EqualFold(sp.Name, k.Column) {
+						covered = true
+						break
+					}
+				}
+				if !covered {
+					return
+				}
+			}
+			s.ProjectExprs = aliased
+		}
 		return
 	}
 }

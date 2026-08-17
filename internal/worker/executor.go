@@ -696,13 +696,21 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	case distributed.TaskTypePipeline:
 		err = e.executePipeline(ctx, task, &result)
 	case distributed.TaskTypeGather:
+		// Ordered gather: the coordinator attached a fragment pipeline
+		// ([ShuffleSource, OpSort, GatherSink]) because the upstream's
+		// fused sort may have fanned out at dispatch — merge-sort the
+		// pre-sorted inputs and apply the limit here, then stream to the
+		// reply subject.
 		// Native-DAG Gather: stream upstream files → gatherReplySink. No SQL.
 		// Legacy Gather (set via executePipeline sink swap) is still reachable
 		// when StageType is empty + Inputs is empty — rare today; callers
 		// should prefer Inputs-based routing.
-		if len(task.Inputs) > 0 {
+		switch {
+		case len(task.Operators) > 0:
+			err = e.executeFragment(ctx, task, &result)
+		case len(task.Inputs) > 0:
 			err = e.executeGatherStage(ctx, task, &result)
-		} else {
+		default:
 			err = e.executePipeline(ctx, task, &result)
 		}
 	case distributed.TaskTypeShuffle:
