@@ -143,6 +143,58 @@ requires `len(GroupByCols)>0 || len(Aggregates)>0` and has **no `GroupByAll`**
 - **Top-level DISTINCT:** rewritten at logical-optimize time to an aggregate-free GROUP BY over the SELECT list (`logical.rewriteDistinctAsGroupBy`, `planner/logical/distinct_rewrite.go`) — bare columns AND scalar expressions (derived group-bys are evaluated by the worker's `buildAggInputProjection`). Rides the sharded path above; the coordinator does no dedup (`MergeInfo.HasDistinct` is false post-rewrite). ✅ sharded.
 - **DISTINCT fallback shapes** (`SELECT DISTINCT *`, DISTINCT with aggregate projections, subquery expressions): not rewritten; `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`). Correct but single-node at the coordinator.
 
+## Query cancellation (and `statement_timeout`)
+
+Client cancellation and the query timeout are one mechanism: a cancelled
+statement context, carried from the wire down to the running stage tasks.
+
+1. **Key material.** pgwire gives each session a random `(pid, secret)` pair in
+   BackendKeyData and registers it in `Server.sessions`
+   (`server/pgwire/cancel.go`). A CancelRequest (protocol version `80877102`)
+   arrives on its own connection — the session's own connection is blocked
+   reading results — and `cancelSession` verifies the secret with
+   `crypto/subtle` before cancelling. The cancel connection gets no reply and
+   is closed, as PostgreSQL does.
+2. **Statement context.** `queryContext()` → `beginStatement`
+   (`server/pgwire/server.go`, `cancel.go`) builds `WithCancelCause` (plus
+   `WithTimeoutCause` when `statement_timeout` / `--query-timeout` applies) and
+   registers it as `pgConn.stmt`; the deferred CancelFunc unregisters it, so a
+   cancel between statements or after completion is a no-op. The cause tells
+   the two conditions apart and both report SQLSTATE **57014**
+   (`query_canceled`).
+3. **Coordinator.** That context is what `ExecuteSQL` / `executeStageDAG` run
+   under — every stage wait, dispatch and gather selects on it, so the DAG
+   unwinds in milliseconds — and the deferred `cleanupQuery` broadcasts
+   `wadjet.cancel.<root>` (`coordinator.go`).
+4. **Workers.** The broadcast root id lands in `w.cancelled`; queued tasks Term
+   at pickup and running tasks abort on a 500 ms poll. The match is
+   `taskCancelled(task.QueryID, rootQueryID)` (`worker/worker.go`), which tests
+   BOTH the task's stage-scoped QueryID (`st-<stage>-<root>`) and the root
+   recovered from its `queries/<root>/…` scratch paths
+   (`distributed.TaskRootQueryID`). Testing only the former never matched a DAG
+   stage task, so cancellation and timeout used to free the client while the
+   cluster kept executing. Regression tests:
+   `worker/cancel_root_query_test.go` (the id match) and
+   `coordinator/cancel_distributed_test.go` (end-to-end: a parked worker scan
+   must return while its gate is still shut).
+
+Seams this does **not** close:
+
+- **JetStream dispatch drops the deadline.** `scheduler.PublishTasks` computes
+  `deadlineNano` from `ctx.Deadline()`, but only the gRPC data-plane path
+  carries it into `worker.taskContext`; on the NATS path the task runs with no
+  deadline of its own. Timeout still stops the work through the cancel
+  broadcast above — the deadline is not a second, independent bound there.
+- **`exec.Pipeline.runParallel` swallows cancellation**
+  (`engine/exec/pipeline.go`): its workers exit on `workerCtx.Err()` without
+  setting `firstErr`, so a cancelled parallel pipeline can return a *partial*
+  result with a nil error. pgwire therefore re-checks the statement context
+  after a "successful" execution and reports 57014 instead of sending a
+  silently truncated result.
+- **`Coordinator.CancelQuery` cannot stop a synchronous `ExecuteSQL`** — it
+  marks the tracker and broadcasts, but no cancel func is registered for the
+  DAG path (`resultSubs` is populated only by the async `SubmitSQL` path).
+
 ## Known Issues
 
 ### DISTINCT over a non-decorrelatable scalar-subquery projection (fallback, distributed)

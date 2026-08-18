@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -42,6 +43,12 @@ type Server struct {
 	authProvider *auth.Provider // nil = no auth enforcement
 	querySem     chan struct{}  // nil = unlimited concurrent queries
 	queryQueue   int64          // atomic: number of queries waiting for admission
+
+	// Live sessions keyed by the cancellation pid handed out in
+	// BackendKeyData. A CancelRequest arrives on its own connection and
+	// finds the target here. See cancel.go.
+	sessionsMu sync.Mutex
+	sessions   map[int32]*pgConn
 }
 
 // SetCoordinator attaches a coordinator so SELECT statements stream through
@@ -198,6 +205,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		txState:      'I',
 		authProvider: s.authProvider,
 	}
+	defer s.unregisterSession(c)
 	c.run()
 }
 
@@ -236,6 +244,15 @@ type pgConn struct {
 
 	// Transaction state: 'I' = idle, 'T' = in transaction, 'E' = failed
 	txState byte
+
+	// Cancellation key material advertised in BackendKeyData, and the
+	// statement a CancelRequest carrying it stops. stmt is written by this
+	// connection's goroutine and read by the cancelling connection's, so it
+	// is guarded; it is nil whenever no statement is executing. See cancel.go.
+	cancelPID    int32
+	cancelSecret int32
+	stmtMu       sync.Mutex
+	stmt         *runningStmt
 }
 
 func (c *pgConn) run() {
@@ -324,9 +341,12 @@ func (c *pgConn) handleStartup() error {
 		return c.handleStartup()
 	}
 
-	// Handle cancel request (80877102)
-	if version == 80877102 {
-		return fmt.Errorf("cancel request not supported")
+	// Handle cancel request (80877102). This connection exists only to carry
+	// the request: PostgreSQL sends nothing back on it — no error, no
+	// ReadyForQuery — and closes it, so the caller returns without writing.
+	if version == cancelRequestCode {
+		c.server.handleCancelRequest(payload[4:])
+		return errCancelRequest
 	}
 
 	// Expect protocol version 3.0 (196608 = 3<<16)
@@ -361,8 +381,14 @@ func (c *pgConn) handleStartup() error {
 		c.sendParamStatus("is_superuser", "on")
 	}
 
-	// Send BackendKeyData (process ID + secret key for cancellation)
-	c.sendBackendKeyData(0, 0)
+	// Send BackendKeyData (session handle + secret key for cancellation).
+	// The pair must be real: it is the only way a client can later stop a
+	// statement, and it identifies this session in the server's registry.
+	if err := c.server.registerSession(c); err != nil {
+		c.sendError("FATAL", "53000", err.Error())
+		return err
+	}
+	c.sendBackendKeyData(c.cancelPID, c.cancelSecret)
 
 	// Send ReadyForQuery
 	c.sendReadyForQuery()
@@ -415,7 +441,10 @@ func (c *pgConn) authenticate(params map[string]string) error {
 	return nil
 }
 
-// queryContext returns a context enriched with the connection's identity and timeout.
+// queryContext returns a context enriched with the connection's identity and
+// timeout, registered as this connection's cancellable statement so a
+// CancelRequest arriving on another connection can stop it. The returned
+// CancelFunc unregisters and releases the statement; callers must defer it.
 func (c *pgConn) queryContext() (context.Context, context.CancelFunc) {
 	ctx := context.Background()
 	if c.identity != nil {
@@ -428,10 +457,7 @@ func (c *pgConn) queryContext() (context.Context, context.CancelFunc) {
 			timeout = time.Duration(ms) * time.Millisecond
 		}
 	}
-	if timeout > 0 {
-		return context.WithTimeout(ctx, timeout)
-	}
-	return ctx, func() {}
+	return c.beginStatement(ctx, timeout)
 }
 
 // handleSet parses "SET key = value" / "SET key TO value" and stores the session variable.
@@ -771,14 +797,14 @@ func (c *pgConn) handleQuery(sql string) {
 		ctx, cancel := c.queryContext()
 		defer cancel()
 		if !c.server.acquireQuery(ctx) {
-			c.sendError("ERROR", "53300", "query queue timeout")
+			c.sendQueryError(ctx, "53300", errors.New("query queue timeout"))
 			c.sendReadyForQuery()
 			return
 		}
 		result, err := c.db.Execute(ctx, sql)
 		c.server.releaseQuery()
 		if err != nil {
-			c.sendError("ERROR", "42000", err.Error())
+			c.sendQueryError(ctx, "42000", err)
 			c.sendReadyForQuery()
 			return
 		}
@@ -790,7 +816,7 @@ func (c *pgConn) handleQuery(sql string) {
 	ctx, cancel := c.queryContext()
 	defer cancel()
 	if !c.server.acquireQuery(ctx) {
-		c.sendError("ERROR", "53300", "query queue timeout")
+		c.sendQueryError(ctx, "53300", errors.New("query queue timeout"))
 		c.sendReadyForQuery()
 		return
 	}
@@ -804,7 +830,20 @@ func (c *pgConn) handleQuery(sql string) {
 	}
 	c.server.releaseQuery()
 	if err != nil {
-		c.sendError("ERROR", "42000", err.Error())
+		c.sendQueryError(ctx, "42000", err)
+		c.sendReadyForQuery()
+		return
+	}
+	// A cancelled statement must never answer with rows. Execution does not
+	// always surface the cancellation as an error — exec.Pipeline's parallel
+	// path returns whatever its workers collected before they were stopped,
+	// with a nil error — and a silently truncated result reported as success
+	// is worse than no result: the client believes it saw the whole table.
+	if msg := canceledMessage(ctx); msg != "" {
+		if stream != nil {
+			stream.Close()
+		}
+		c.sendError("ERROR", sqlstateQueryCanceled, msg)
 		c.sendReadyForQuery()
 		return
 	}
@@ -835,11 +874,11 @@ func (c *pgConn) handleQuery(sql string) {
 
 	// Send DataRow for each row — coord-path batches are boxed and sent
 	// one batch at a time, never materialized as a whole.
-	sent, sendErr := c.sendResultRows(columns, stream, result.Rows, nil)
+	sent, sendErr := c.sendResultRows(ctx, columns, stream, result.Rows, nil)
 	if sendErr != nil {
 		// Partial DataRows followed by ErrorResponse is legal in the v3
 		// protocol; the client discards the partial result.
-		c.sendError("ERROR", "58030", "reading result batches: "+sendErr.Error())
+		c.sendQueryError(ctx, "58030", fmt.Errorf("reading result batches: %w", sendErr))
 		c.sendReadyForQuery()
 		return
 	}
@@ -1218,6 +1257,13 @@ func (c *pgConn) handleExecute(payload []byte) {
 	// re-executing the query AND ensures column order matches the
 	// RowDescription (critical for SELECT * where Go map iteration order
 	// is non-deterministic).
+	//
+	// The statement context is created before the branch so that sending a
+	// cached Describe result is cancellable too — that result is a replay
+	// stream, and replaying millions of rows is exactly what a client hits
+	// the stop button over.
+	ctx, cancel := c.queryContext()
+	defer cancel()
 	var result *wadjet.QueryResult
 	var stream coordinator.BatchStream
 	if c.describeResult != nil {
@@ -1226,8 +1272,6 @@ func (c *pgConn) handleExecute(payload []byte) {
 		c.describeResult = nil
 		c.describeStream = nil
 	} else {
-		ctx, cancel := c.queryContext()
-		defer cancel()
 		var err error
 		if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
 			result, stream, err = c.queryViaCoord(ctx, sql)
@@ -1235,9 +1279,18 @@ func (c *pgConn) handleExecute(payload []byte) {
 			result, err = c.db.Query(ctx, sql)
 		}
 		if err != nil {
-			c.sendError("ERROR", "42000", err.Error())
+			c.sendQueryError(ctx, "42000", err)
 			return
 		}
+	}
+	// See handleQuery: a cancelled statement answers 57014, never a
+	// truncated result that execution failed to report as an error.
+	if msg := canceledMessage(ctx); msg != "" {
+		if stream != nil {
+			stream.Close()
+		}
+		c.sendError("ERROR", sqlstateQueryCanceled, msg)
+		return
 	}
 
 	columns := result.Columns
@@ -1264,9 +1317,9 @@ func (c *pgConn) handleExecute(payload []byte) {
 	// Extended query protocol: Execute sends only DataRow + CommandComplete.
 	// RowDescription was already sent by Describe. Do NOT send it again.
 	// Coord-path batches are boxed and sent one batch at a time.
-	sent, sendErr := c.sendResultRows(columns, stream, result.Rows, c.resultFmtCodes)
+	sent, sendErr := c.sendResultRows(ctx, columns, stream, result.Rows, c.resultFmtCodes)
 	if sendErr != nil {
-		c.sendError("ERROR", "58030", "reading result batches: "+sendErr.Error())
+		c.sendQueryError(ctx, "58030", fmt.Errorf("reading result batches: %w", sendErr))
 		return
 	}
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", sent))

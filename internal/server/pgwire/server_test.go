@@ -75,6 +75,9 @@ func startTestServer(t *testing.T, db *wadjet.DB) *Server {
 type pgClient struct {
 	conn net.Conn
 	t    *testing.T
+	// Cancellation key material from BackendKeyData, recorded by startup.
+	pid    int32
+	secret int32
 }
 
 func newPGClient(t *testing.T, addr string) *pgClient {
@@ -112,12 +115,16 @@ func (c *pgClient) startup(user, database string) {
 
 	// Read responses until ReadyForQuery
 	for {
-		typ, _, err := c.readMsg()
+		typ, data, err := c.readMsg()
 		if err != nil {
 			c.t.Fatalf("reading startup response: %v", err)
 		}
 		if typ == 'Z' { // ReadyForQuery
 			return
+		}
+		if typ == 'K' && len(data) >= 8 { // BackendKeyData
+			c.pid = int32(binary.BigEndian.Uint32(data[0:4]))
+			c.secret = int32(binary.BigEndian.Uint32(data[4:8]))
 		}
 		// Expect R (Auth), S (ParamStatus), K (BackendKeyData)
 		if typ != 'R' && typ != 'S' && typ != 'K' {

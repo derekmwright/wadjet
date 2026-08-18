@@ -80,7 +80,9 @@ func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryRe
 // The stream is always fully closed before returning, including on a
 // mid-stream error — the error is returned so the caller can surface an
 // ErrorResponse after the partial DataRows (legal in the v3 protocol).
-func (c *pgConn) sendResultRows(columns []string, stream coordinator.BatchStream, rows []map[string]any, fmtCodes []int16) (int, error) {
+// ctx is the statement's context: a CancelRequest (or statement_timeout)
+// mid-send stops the stream instead of sending the remaining rows.
+func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream coordinator.BatchStream, rows []map[string]any, fmtCodes []int16) (int, error) {
 	sent := 0
 	send := func(row map[string]any) {
 		if len(fmtCodes) > 0 {
@@ -92,8 +94,10 @@ func (c *pgConn) sendResultRows(columns []string, stream coordinator.BatchStream
 	}
 	if stream != nil {
 		defer stream.Close()
-		ctx := context.Background()
 		for {
+			if err := ctx.Err(); err != nil {
+				return sent, err
+			}
 			b, err := stream.Next(ctx)
 			if err != nil {
 				return sent, err
@@ -106,7 +110,15 @@ func (c *pgConn) sendResultRows(columns []string, stream coordinator.BatchStream
 			}
 		}
 	}
-	for _, row := range rows {
+	for i, row := range rows {
+		// Boxed results (legacy db.Query path) are already in memory, but a
+		// large one still takes real time to write out; check for
+		// cancellation once per batch-sized run rather than per row.
+		if i%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return sent, err
+			}
+		}
 		send(row)
 	}
 	return sent, nil

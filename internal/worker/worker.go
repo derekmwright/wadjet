@@ -1582,6 +1582,26 @@ func (w *Worker) isCancelled(queryID string) bool {
 	return ok
 }
 
+// taskCancelled reports whether the query this task belongs to has been
+// cancelled, testing BOTH the ids a stage-DAG task lives under.
+//
+// The coordinator broadcasts cancellation keyed on the ROOT query id
+// (cleanupQuery → wadjet.cancel.<root>), but every native-DAG stage task
+// carries a stage-scoped QueryID — "st-<stage>-<root>" — so matching the
+// task's own id against the cancelled set never hits for a DAG body. The
+// effect was that cancelling or timing out a distributed query freed the
+// client while the cluster kept executing every in-flight stage task to
+// completion, exactly the waste cleanupQuery's broadcast exists to stop.
+// The root id is recovered from the task's queries/<root>/... scratch paths
+// (distributed.TaskRootQueryID), which is how the upload manager and the
+// stage caches already key their per-query state.
+func (w *Worker) taskCancelled(taskQueryID, rootQueryID string) bool {
+	if w.isCancelled(taskQueryID) {
+		return true
+	}
+	return rootQueryID != "" && w.isCancelled(rootQueryID)
+}
+
 // taskAcker abstracts the JetStream message control surface so
 // handleTask can run on both the legacy JetStream path and the gRPC
 // data-plane path. JetStream wraps a real jetstream.Msg; gRPC uses a
@@ -1653,9 +1673,10 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 	// non-blocking handleTask entry — wasted work on a stale task is
 	// bounded by per-task cancelTicker reactivity (~500ms) plus task
 	// duration.
-	if w.isCancelled(task.QueryID) {
+	rootQueryID := distributed.TaskRootQueryID(&task)
+	if w.taskCancelled(task.QueryID, rootQueryID) {
 		w.logger.Debug("skipping task for cancelled query",
-			"task_id", task.ID, "query_id", task.QueryID)
+			"task_id", task.ID, "query_id", task.QueryID, "root_query_id", rootQueryID)
 		msg.Term()
 		return
 	}
@@ -1755,7 +1776,9 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 			case <-taskCtx.Done():
 				return
 			case <-cancelTicker.C:
-				if w.isCancelled(task.QueryID) {
+				if w.taskCancelled(task.QueryID, rootQueryID) {
+					w.logger.Debug("aborting in-flight task for cancelled query",
+						"task_id", task.ID, "query_id", task.QueryID, "root_query_id", rootQueryID)
 					taskCancel()
 					return
 				}
