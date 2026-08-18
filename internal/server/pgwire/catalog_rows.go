@@ -225,6 +225,13 @@ func selectItems(sql string) []selectItem {
 		if asIdx := lastTopLevelAS(p); asIdx >= 0 {
 			exprPart = strings.TrimSpace(p[:asIdx])
 			label = strings.Trim(strings.TrimSpace(p[asIdx+4:]), `"`)
+		} else if fields := strings.Fields(p); len(fields) == 2 {
+			// SQL's implicit alias: `rolsuper is_super` labels the column
+			// is_super with no AS. Without this the whole two-word text
+			// became the column name, and a client reading its own label
+			// found nothing under it. Only the exact two-token form is
+			// treated this way — anything longer is an expression.
+			exprPart, label = fields[0], strings.Trim(fields[1], `"`)
 		}
 		// A cast reads the same attribute: N.oid::bigint is still oid.
 		bare := exprPart

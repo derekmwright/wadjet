@@ -211,3 +211,50 @@ func TestRelationRefs(t *testing.T) {
 		})
 	}
 }
+
+// A branch may only answer a statement whose subject it models. DataGrip's
+// foreign-data-wrapper query joins pg_namespace twice to resolve handler
+// schemas; claiming it on that mention alone answered it as a one-row schema
+// listing whose "name" column (labelled from fdwname) was NULL, and the client
+// aborted introspection with "Argument for @NotNull parameter 'name' ... must
+// not be null".
+func TestCatalogSubject(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{"database listing", "SELECT DATNAME FROM PG_CATALOG.PG_DATABASE N LEFT JOIN PG_CATALOG.PG_SHDESCRIPTION D ON N.OID = D.OBJOID", "PG_DATABASE"},
+		{"schema listing", "SELECT NSPNAME FROM PG_CATALOG.PG_NAMESPACE N LEFT JOIN PG_CATALOG.PG_DESCRIPTION D ON N.OID = D.OBJOID", "PG_NAMESPACE"},
+		// pgJDBC's getColumns enters through namespace/class joins but is
+		// about columns: the most specific modeled relation wins.
+		{"columns via joins", "SELECT A.ATTNAME FROM PG_CATALOG.PG_NAMESPACE N JOIN PG_CATALOG.PG_CLASS C ON C.RELNAMESPACE = N.OID JOIN PG_CATALOG.PG_ATTRIBUTE A ON A.ATTRELID = C.OID", "PG_ATTRIBUTE"},
+		// Subjects this layer does not model get no branch at all.
+		{"foreign data wrapper", "SELECT FDW.FDWNAME AS NAME, NSPC.NSPNAME AS HANDLER_SCHEMA FROM PG_CATALOG.PG_FOREIGN_DATA_WRAPPER FDW LEFT JOIN PG_CATALOG.PG_NAMESPACE NSPC ON TRUE", ""},
+		{"tablespace", "SELECT T.SPCNAME AS NAME FROM PG_CATALOG.PG_TABLESPACE T", ""},
+		{"event trigger", "SELECT T.EVTNAME AS NAME FROM PG_CATALOG.PG_EVENT_TRIGGER T", ""},
+		{"user table", "SELECT * FROM LINEITEM", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := catalogSubject(tt.sql); got != tt.want {
+				t.Fatalf("catalogSubject = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// Column labels come from the same scanner the answers do, so an intercepted
+// statement carries headers its client can read back. The previous hand-rolled
+// split searched for a literal " FROM ", which a statement formatted across
+// lines never contains — the whole remainder became one column name.
+func TestExtractSelectColumnsMultiline(t *testing.T) {
+	cols := extractSelectColumns("select L.transactionid::varchar::bigint as transaction_id\nfrom pg_catalog.pg_locks L\nwhere L.transactionid is not null\nlimit 1")
+	if len(cols) != 1 || cols[0] != "transaction_id" {
+		t.Fatalf("cols = %q", cols)
+	}
+	// Implicit aliases (no AS) name the column too.
+	cols = extractSelectColumns("select rolsuper is_super, rolcanlogin can_login from pg_roles")
+	if len(cols) != 2 || cols[0] != "is_super" || cols[1] != "can_login" {
+		t.Fatalf("implicit aliases = %q", cols)
+	}
+}

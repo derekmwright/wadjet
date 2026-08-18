@@ -1526,6 +1526,53 @@ func (c *pgConn) readsSystemCatalog(normalized string) bool {
 	return false
 }
 
+// catalogRank orders the catalog relations this layer models by how specific
+// a subject they are. A statement that reads pg_attribute is about columns
+// even when it enters through a pg_namespace/pg_class join chain, which is
+// how pgJDBC's DatabaseMetaData.getColumns is written.
+var catalogRank = map[string]int{
+	"PG_ATTRIBUTE": 5,
+	"PG_CLASS":     4,
+	"PG_TYPE":      3,
+	"PG_DATABASE":  2,
+	"PG_NAMESPACE": 1,
+	"PG_USER":      0,
+	"PG_SHADOW":    0,
+	"PG_ROLES":     0,
+}
+
+// catalogSubject returns the catalog relation a statement is about, or "" when
+// this layer should not answer it as any of them.
+//
+// A branch that fires on "the statement mentions my relation somewhere" will
+// answer a question nobody asked: DataGrip's foreign-data-wrapper query joins
+// pg_namespace twice to resolve handler schemas, matched the pg_namespace
+// branch on that alone, and came back as a one-row schema listing whose
+// fdwname-labelled "name" column was NULL — which the client turned into
+// "Argument for @NotNull parameter 'name' ... must not be null" and stopped
+// introspecting. So the FROM target has to be a relation this layer models
+// before any branch may claim the statement; when it is, the most specific
+// relation among all its references wins.
+func catalogSubject(normalized string) string {
+	refs := relationRefs(normalized)
+	if len(refs) == 0 {
+		return ""
+	}
+	if _, ok := catalogRank[refs[0]]; !ok {
+		// Subject is a relation this layer does not model (pg_tablespace,
+		// pg_foreign_data_wrapper, pg_event_trigger, pg_locks, ...). It gets
+		// the empty-but-coherent answer, not another relation's rows.
+		return ""
+	}
+	best, bestRank := "", -1
+	for _, r := range refs {
+		if rank, ok := catalogRank[r]; ok && rank > bestRank {
+			best, bestRank = r, rank
+		}
+	}
+	return best
+}
+
 // relationRefs returns the relation names a normalized statement reads: the
 // token after each FROM or JOIN at paren depth zero, with any pg_catalog
 // qualifier stripped.
@@ -1798,14 +1845,12 @@ func pgTypeOID(typeName string) int {
 // that SQLAlchemy/Superset uses for schema introspection. sql is the statement
 // being answered; normalized is its uppercased, whitespace-collapsed form.
 func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) *synthAnswer {
-	// pg_database — the database picker's source. Checked before pg_type
-	// because a client listing databases may join pg_database to nothing at
-	// all, and the generic pg_catalog fallback below answers zero rows, which
-	// renders as an empty database list.
-	if strings.Contains(normalized, "PG_DATABASE") &&
-		!strings.Contains(normalized, "PG_CLASS") &&
-		!strings.Contains(normalized, "PG_ATTRIBUTE") &&
-		!strings.Contains(normalized, "PG_TYPE") {
+	// Which catalog relation this statement is about. A branch may only claim
+	// a statement whose subject it models — see catalogSubject.
+	subject := catalogSubject(normalized)
+
+	// pg_database — the database picker's source.
+	if subject == "PG_DATABASE" {
 		if ans := c.matchPgDatabase(sql); ans != nil {
 			return ans
 		}
@@ -1814,15 +1859,13 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 	// pg_user / pg_shadow / pg_roles: the identity on this connection. Clients
 	// ask right after startup (DataGrip: select usesuper from pg_user where
 	// usename = current_user) to size their feature set.
-	if strings.Contains(normalized, "PG_USER") ||
-		strings.Contains(normalized, "PG_SHADOW") ||
-		strings.Contains(normalized, "PG_ROLES") {
+	if subject == "PG_USER" || subject == "PG_SHADOW" || subject == "PG_ROLES" {
 		user := expr.SessionUser
 		if c.identity != nil {
 			user = c.identity.Name
 		}
 		attrs := pgUserAttrs(user)
-		if strings.Contains(normalized, "PG_ROLES") {
+		if subject == "PG_ROLES" {
 			// pg_roles names the same principal under rol* columns.
 			attrs["rolname"] = user
 			attrs["rolsuper"] = false
@@ -1838,8 +1881,7 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 	}
 
 	// pg_type — JDBC drivers query this to map OIDs to type names
-	if strings.Contains(normalized, "PG_TYPE") && !strings.Contains(normalized, "PG_CLASS") &&
-		!strings.Contains(normalized, "PG_ATTRIBUTE") {
+	if subject == "PG_TYPE" {
 		return c.matchPgType(normalized)
 	}
 
@@ -1862,10 +1904,7 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 	// Schema listing: SELECT nspname FROM pg_namespace (used by get_schema_names
 	// and by the schema picker, which asks for oid alongside nspname).
 	// Exclude queries that mention pg_type/pg_class/pg_attribute — those just JOIN pg_namespace.
-	if strings.Contains(normalized, "PG_NAMESPACE") && strings.Contains(normalized, "NSPNAME") &&
-		!strings.Contains(normalized, "PG_CLASS") &&
-		!strings.Contains(normalized, "PG_TYPE") &&
-		!strings.Contains(normalized, "PG_ATTRIBUTE") {
+	if subject == "PG_NAMESPACE" && strings.Contains(normalized, "NSPNAME") {
 		if ans := catalogRowAnswer(sql, pgNamespaceAttrs(), []string{"oid", "nspname"}); ans != nil {
 			return ans
 		}
@@ -1886,7 +1925,7 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 	}
 
 	// Column info: pg_attribute query
-	if strings.Contains(normalized, "PG_ATTRIBUTE") {
+	if subject == "PG_ATTRIBUTE" {
 		return c.matchAttributeQuery(ctx, sql, normalized)
 	}
 
@@ -1898,7 +1937,7 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 	// single column each — a client selecting `relname, relkind` was described
 	// one column and sent one, which is how DataGrip's table tree came back
 	// without the kind it uses to tell a table from a view.
-	if strings.Contains(normalized, "PG_CLASS") && strings.Contains(normalized, "RELNAME") {
+	if subject == "PG_CLASS" && strings.Contains(normalized, "RELNAME") {
 		tables, err := c.db.ListTables(ctx)
 		if err != nil {
 			return nil
@@ -2263,45 +2302,27 @@ func extractParamValue(normalized, field string) string {
 	return ""
 }
 
-// extractSelectColumns does a best-effort parse of column names/aliases from a SELECT.
-// This is used to return proper column headers for pg_catalog queries so that
-// clients like psycopg2 don't crash on empty tuples.
+// extractSelectColumns returns the column labels a SELECT promises, so an
+// empty intercepted answer still carries headers a client can read (psycopg2
+// crashes on empty tuples; DataGrip reads results by label).
+//
+// It delegates to selectItems, which scans with paren depth and quote state.
+// The hand-rolled split this replaced looked for " FROM " literally, so a
+// statement with FROM at the start of a line — every introspection query a BI
+// tool formats across lines — never found it and turned the entire remainder
+// of the statement into one column name:
+//
+//	select L.transactionid::varchar::bigint as transaction_id
+//	from pg_catalog.pg_locks L ...
+//	→ column named "transaction_id\nfrom pg_catalog.pg_locks L\nwhere ..."
 func extractSelectColumns(sql string) []string {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-	if !strings.HasPrefix(upper, "SELECT ") {
+	items := selectItems(sql)
+	if len(items) == 0 {
 		return nil
 	}
-
-	// Find the portion between SELECT and FROM
-	fromIdx := strings.Index(upper, " FROM ")
-	selectPart := sql[7:] // skip "SELECT "
-	if fromIdx > 7 {
-		selectPart = sql[7:fromIdx]
-	}
-
-	// Split on commas (rough — doesn't handle nested parens perfectly but good enough)
-	parts := strings.Split(selectPart, ",")
-	var cols []string
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		// Check for AS alias
-		upperP := strings.ToUpper(p)
-		if asIdx := strings.LastIndex(upperP, " AS "); asIdx >= 0 {
-			alias := strings.TrimSpace(p[asIdx+4:])
-			alias = strings.Trim(alias, "\"")
-			cols = append(cols, alias)
-			continue
-		}
-		// Use the last dot-separated part (e.g., "t.oid" -> "oid")
-		if dotIdx := strings.LastIndex(p, "."); dotIdx >= 0 {
-			cols = append(cols, strings.TrimSpace(p[dotIdx+1:]))
-			continue
-		}
-		// Use as-is (trim any remaining spaces)
-		cols = append(cols, p)
+	cols := make([]string, 0, len(items))
+	for _, it := range items {
+		cols = append(cols, it.label)
 	}
 	return cols
 }
