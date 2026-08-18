@@ -174,3 +174,40 @@ func TestShapedAttributeAnswer(t *testing.T) {
 		t.Fatal("SELECT * should keep the fixed tuple")
 	}
 }
+
+// Any relation in PostgreSQL's reserved pg_ namespace is introspection and
+// belongs to this layer. The intercept used to be a hand-listed set of catalog
+// names, so a system relation nobody had listed — pg_user, which DataGrip
+// queries right after startup — reached the query engine and came back as
+// "stage scan-0 has no dependencies and no ScanFiles".
+func TestRelationRefs(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		sql  string
+		want []string
+	}{
+		{"plain", "SELECT USESUPER FROM PG_USER WHERE USENAME = CURRENT_USER", []string{"PG_USER"}},
+		{"qualified", "SELECT * FROM PG_CATALOG.PG_DATABASE N", []string{"PG_DATABASE"}},
+		{"join", "SELECT * FROM PG_CATALOG.PG_DATABASE N LEFT JOIN PG_CATALOG.PG_SHDESCRIPTION D ON N.OID = D.OBJOID",
+			[]string{"PG_DATABASE", "PG_SHDESCRIPTION"}},
+		{"user table", "SELECT * FROM LINEITEM WHERE L_ORDERKEY = 1", []string{"LINEITEM"}},
+		// The word FROM inside EXTRACT is not a clause: reading it as one made
+		// pg_postmaster_start_time() look like a system relation, and DataGrip's
+		// startup-time query was answered empty instead of evaluated.
+		{"extract", "SELECT ROUND(EXTRACT(EPOCH FROM PG_POSTMASTER_START_TIME() AT TIME ZONE 'UTC')) AS STARTUP_TIME", nil},
+		{"no from", "SELECT 1", nil},
+		{"quoted literal", "SELECT * FROM ORDERS WHERE O_COMMENT = 'FROM PG_CLASS'", []string{"ORDERS"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := relationRefs(tt.sql)
+			if len(got) != len(tt.want) {
+				t.Fatalf("relationRefs(%q) = %v, want %v", tt.sql, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("ref %d = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

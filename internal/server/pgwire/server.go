@@ -1446,7 +1446,8 @@ func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
 		strings.Contains(normalized, "PG_TABLES") ||
 		strings.Contains(normalized, "PG_VIEWS") ||
 		strings.Contains(normalized, "PG_MATVIEWS") ||
-		strings.Contains(normalized, "PG_DATABASE")
+		strings.Contains(normalized, "PG_DATABASE") ||
+		c.readsSystemCatalog(normalized)
 
 	if isPgCatalog {
 		ctx, cancel := c.queryContext()
@@ -1469,6 +1470,137 @@ func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
 	}
 
 	return nil
+}
+
+// readsSystemCatalog reports whether the statement reads a relation in
+// PostgreSQL's reserved pg_ namespace (or information_schema) that this server
+// does not have as a real table.
+//
+// The intercept above is a list of catalog names spelled out one at a time,
+// which means every system relation nobody thought of reaches the query
+// engine, where it becomes a scan of a table that does not exist:
+//
+//	select usesuper from pg_user where usename = current_user
+//	→ ERROR: stage scan-0 has no dependencies and no ScanFiles
+//
+// That is what DataGrip hit on pg_user after pg_stat_ssl was fixed the same
+// way, one name at a time. PostgreSQL reserves the pg_ prefix for system
+// catalogs, so a FROM/JOIN target under it is introspection by definition and
+// belongs to this layer — answered with real data where this server knows it,
+// and with an empty result of the right shape where it does not. The catalog
+// is still consulted, so a table that genuinely exists is never intercepted.
+func (c *pgConn) readsSystemCatalog(normalized string) bool {
+	refs := relationRefs(normalized)
+	if len(refs) == 0 {
+		return false
+	}
+	var systemRefs []string
+	for _, r := range refs {
+		if strings.HasPrefix(r, "PG_") || strings.HasPrefix(r, "INFORMATION_SCHEMA.") {
+			systemRefs = append(systemRefs, r)
+		}
+	}
+	if len(systemRefs) == 0 {
+		return false
+	}
+	// A real table wins over the reserved-prefix rule: this layer must never
+	// swallow a query the engine can actually answer.
+	ctx, cancel := c.queryContext()
+	defer cancel()
+	tables, err := c.db.ListTables(ctx)
+	if err != nil {
+		return true // catalog unavailable; a pg_ scan would fail anyway
+	}
+	for _, r := range systemRefs {
+		real := false
+		for _, t := range tables {
+			if strings.EqualFold(t, r) {
+				real = true
+				break
+			}
+		}
+		if !real {
+			return true
+		}
+	}
+	return false
+}
+
+// relationRefs returns the relation names a normalized statement reads: the
+// token after each FROM or JOIN at paren depth zero, with any pg_catalog
+// qualifier stripped.
+//
+// Depth is what makes FROM mean FROM. `extract(epoch from
+// pg_postmaster_start_time())` carries the word inside a function call, and
+// reading it as a clause makes the timestamp function look like a system
+// relation — which turned DataGrip's startup-time query into an empty
+// intercepted answer. Only a top-level FROM introduces a relation.
+func relationRefs(normalized string) []string {
+	var refs []string
+	depth, tokDepth := 0, 0
+	inSingle, inDouble := false, false
+	start := -1
+	want := false
+
+	emit := func(tok string, d int) {
+		if d != 0 || tok == "" {
+			return
+		}
+		if want {
+			want = false
+			name := strings.TrimPrefix(tok, "PG_CATALOG.")
+			if name != "" {
+				refs = append(refs, name)
+			}
+			return
+		}
+		if tok == "FROM" || tok == "JOIN" {
+			want = true
+		}
+	}
+
+	for i := 0; i <= len(normalized); i++ {
+		ch := byte(' ')
+		if i < len(normalized) {
+			ch = normalized[i]
+		}
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		if ch != ' ' && ch != '(' && ch != ')' && ch != ',' && ch != ';' &&
+			ch != '\'' && ch != '"' {
+			if start < 0 {
+				start, tokDepth = i, depth
+			}
+			continue
+		}
+		if start >= 0 {
+			emit(normalized[start:i], tokDepth)
+			start = -1
+		}
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		}
+	}
+	return refs
 }
 
 // selectList returns the projection list of a normalized SELECT that has no
@@ -1675,6 +1807,32 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 		!strings.Contains(normalized, "PG_ATTRIBUTE") &&
 		!strings.Contains(normalized, "PG_TYPE") {
 		if ans := c.matchPgDatabase(sql); ans != nil {
+			return ans
+		}
+	}
+
+	// pg_user / pg_shadow / pg_roles: the identity on this connection. Clients
+	// ask right after startup (DataGrip: select usesuper from pg_user where
+	// usename = current_user) to size their feature set.
+	if strings.Contains(normalized, "PG_USER") ||
+		strings.Contains(normalized, "PG_SHADOW") ||
+		strings.Contains(normalized, "PG_ROLES") {
+		user := expr.SessionUser
+		if c.identity != nil {
+			user = c.identity.Name
+		}
+		attrs := pgUserAttrs(user)
+		if strings.Contains(normalized, "PG_ROLES") {
+			// pg_roles names the same principal under rol* columns.
+			attrs["rolname"] = user
+			attrs["rolsuper"] = false
+			attrs["rolcreatedb"] = false
+			attrs["rolcanlogin"] = true
+			attrs["rolreplication"] = false
+			attrs["rolbypassrls"] = false
+			attrs["oid"] = 10
+		}
+		if ans := catalogRowAnswer(sql, attrs, []string{"usename", "usesysid", "usesuper"}); ans != nil {
 			return ans
 		}
 	}

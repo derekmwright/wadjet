@@ -52,6 +52,27 @@ func pgDatabaseAttrs() map[string]any {
 	}
 }
 
+// pgUserAttrs is the one pg_user row: the identity on this connection.
+//
+// usesuper is false because this server has no superuser: authorization is
+// the RBAC/ABAC policy engine, not a cluster-wide bit, and a client that asks
+// whether it may do anything it likes is owed the honest no. Clients use the
+// answer to decide which admin-only nodes to offer, and PostgreSQL clients
+// introspect perfectly well as ordinary users.
+func pgUserAttrs(user string) map[string]any {
+	return map[string]any{
+		"usename":      user,
+		"usesysid":     10,
+		"usecreatedb":  false,
+		"usesuper":     false,
+		"userepl":      false,
+		"usebypassrls": false,
+		"passwd":       "********",
+		"valuntil":     nil,
+		"useconfig":    nil,
+	}
+}
+
 // pgNamespaceAttrs is the one pg_namespace row.
 func pgNamespaceAttrs() map[string]any {
 	return map[string]any{
