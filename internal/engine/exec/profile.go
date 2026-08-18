@@ -12,11 +12,11 @@ import (
 
 // ProfileStats holds execution statistics for a single pipeline operator.
 type ProfileStats struct {
-	Name       string        // operator name (e.g., "Filter", "HashAggregate")
-	WallTime   time.Duration // total wall time spent in this operator
-	RowsIn     int64         // total input rows
-	RowsOut    int64         // total output rows
-	Calls      int64         // number of calls (Next/Execute/Consume)
+	Name     string        // operator name (e.g., "Filter", "HashAggregate")
+	WallTime time.Duration // total wall time spent in this operator
+	RowsIn   int64         // total input rows
+	RowsOut  int64         // total output rows
+	Calls    int64         // number of calls (Next/Execute/Consume)
 }
 
 // ProfileCollector aggregates stats from all operators in a pipeline.
@@ -120,6 +120,38 @@ func (p *ProfiledOperator) Close() error {
 // Inner returns the wrapped operator (for type assertions like DoneSignaler).
 func (p *ProfiledOperator) Inner() UnaryOperator {
 	return p.inner
+}
+
+// EnableBoundedOutput forwards the bounded-output opt-in to the wrapped
+// operator. Without the forward, wrapping a hash-join probe in a profiler
+// would silently hide its resume protocol from the driver.
+func (p *ProfiledOperator) EnableBoundedOutput() {
+	if bo, ok := p.inner.(BoundedOutputOperator); ok {
+		bo.EnableBoundedOutput()
+	}
+}
+
+// HasPendingOutput reports whether the wrapped operator suspended part of the
+// current input batch's output.
+func (p *ProfiledOperator) HasPendingOutput() bool {
+	bo, ok := p.inner.(BoundedOutputOperator)
+	return ok && bo.HasPendingOutput()
+}
+
+// NextOutput resumes the wrapped operator's suspended output.
+func (p *ProfiledOperator) NextOutput(ctx context.Context) (*batch.RecordBatch, error) {
+	bo, ok := p.inner.(BoundedOutputOperator)
+	if !ok {
+		return nil, nil
+	}
+	start := time.Now()
+	out, err := bo.NextOutput(ctx)
+	atomic.AddInt64((*int64)(&p.stats.WallTime), int64(time.Since(start)))
+	atomic.AddInt64(&p.stats.Calls, 1)
+	if out != nil {
+		atomic.AddInt64(&p.stats.RowsOut, int64(out.ActiveLen()))
+	}
+	return out, err
 }
 
 // Done delegates to the inner operator if it implements DoneSignaler.

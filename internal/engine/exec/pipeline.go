@@ -52,11 +52,90 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	if err := p.Sink.Init(ctx); err != nil {
 		return fmt.Errorf("sink init: %w", err)
 	}
+	// This driver drains pending output after every Execute (chainDriver), so
+	// operators may bound their per-call fan-out. Clones inherit the setting
+	// through their own Clone().
+	enableBoundedOutput(p.Ops)
 
 	if p.Workers > 1 && p.allOpsCloneable() {
 		return p.runParallel(ctx)
 	}
 	return p.runSerial(ctx)
+}
+
+// chainDriver pushes a batch through an operator chain and hands every
+// resulting batch to deliver. It exists because an operator's output for one
+// input batch is not always one batch: a hash-join probe bounds its fan-out
+// per call and suspends the rest (see BoundedOutputOperator), so the chain
+// below it has to be re-driven for each resumed slice before the operator is
+// given its next input.
+//
+// push takes ownership of the batch it is handed: it is released, or handed
+// on to deliver which releases it, before push returns. The input stays alive
+// across the whole resume loop because a suspended fan-out still reads its
+// probe-side columns.
+type chainDriver struct {
+	ops     []UnaryOperator
+	bounded []BoundedOutputOperator // parallel to ops; nil = single-shot operator
+	deliver func(context.Context, *batch.RecordBatch) error
+}
+
+func newChainDriver(ops []UnaryOperator, deliver func(context.Context, *batch.RecordBatch) error) *chainDriver {
+	d := &chainDriver{ops: ops, deliver: deliver, bounded: make([]BoundedOutputOperator, len(ops))}
+	for i, op := range ops {
+		if bo, ok := op.(BoundedOutputOperator); ok {
+			d.bounded[i] = bo
+		}
+	}
+	return d
+}
+
+// push runs b through ops[i:]. The bool result is the pipeline's `exhausted`
+// signal: a DoneSignaler operator (LIMIT) reported satisfaction.
+func (d *chainDriver) push(ctx context.Context, i int, b *batch.RecordBatch) (bool, error) {
+	if i == len(d.ops) {
+		return false, d.deliver(ctx, b)
+	}
+	op := d.ops[i]
+	FlattenForConsumer(b, op)
+	out, err := op.Execute(ctx, b)
+	if err != nil {
+		return false, fmt.Errorf("operator execute: %w", err)
+	}
+	// When the operator returned its input in place, ownership travelled with
+	// it; otherwise the input is ours to release once the operator is done
+	// reading it, which is after the last resumption, not after Execute.
+	ownInput := out != b
+	exhausted := false
+	for {
+		if out == nil {
+			if ds, ok := op.(DoneSignaler); ok && ds.Done() {
+				exhausted = true
+			}
+			break
+		}
+		ex, perr := d.push(ctx, i+1, out)
+		if ex {
+			exhausted = true
+		}
+		if perr != nil {
+			err = perr
+			break
+		}
+		bo := d.bounded[i]
+		if bo == nil || !bo.HasPendingOutput() {
+			break
+		}
+		out, err = bo.NextOutput(ctx)
+		if err != nil {
+			err = fmt.Errorf("operator resume: %w", err)
+			break
+		}
+	}
+	if ownInput && b != nil {
+		b.Release()
+	}
+	return exhausted, err
 }
 
 // allOpsCloneable returns true if every operator in the chain implements Cloneable.
@@ -74,6 +153,14 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 	progress := ProgressReporterFromContext(ctx)
 	drainPhase := sourceServesHeldState(p.Source)
 	batchCount := 0
+	driver := newChainDriver(p.Ops, func(ctx context.Context, b *batch.RecordBatch) error {
+		FlattenForConsumer(b, p.Sink)
+		if err := p.Sink.Consume(ctx, b); err != nil {
+			return fmt.Errorf("sink consume: %w", err)
+		}
+		b.Release()
+		return nil
+	})
 	for {
 		if batchCount&63 == 0 {
 			if err := ctx.Err(); err != nil {
@@ -107,35 +194,10 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 			progress.AddRows(int64(b.ActiveLen()))
 		}
 
-		exhausted := false
-		for _, op := range p.Ops {
-			prev := b
-			FlattenForConsumer(b, op)
-			b, err = op.Execute(ctx, b)
-			if err != nil {
-				return fmt.Errorf("operator execute: %w", err)
-			}
-			// Release intermediate batch when operator created a new one.
-			// Returns source batches to scan pool, probe output to probe pool.
-			if b != prev && prev != nil {
-				prev.Release()
-			}
-			if b == nil {
-				if ds, ok := op.(DoneSignaler); ok && ds.Done() {
-					exhausted = true
-				}
-				break
-			}
+		exhausted, err := driver.push(ctx, 0, b)
+		if err != nil {
+			return err
 		}
-
-		if b != nil {
-			FlattenForConsumer(b, p.Sink)
-			if err := p.Sink.Consume(ctx, b); err != nil {
-				return fmt.Errorf("sink consume: %w", err)
-			}
-			b.Release()
-		}
-
 		if exhausted {
 			break
 		}
@@ -158,7 +220,14 @@ func (p *Pipeline) flushSpilledOps(ctx context.Context, ops []UnaryOperator) err
 		if !ok || !fo.HasPendingFlush() {
 			continue
 		}
-		remainingOps := ops[opIdx+1:]
+		driver := newChainDriver(ops[opIdx+1:], func(ctx context.Context, b *batch.RecordBatch) error {
+			FlattenForConsumer(b, p.Sink)
+			if err := p.Sink.Consume(ctx, b); err != nil {
+				return fmt.Errorf("sink consume (flush): %w", err)
+			}
+			b.Release()
+			return nil
+		})
 		for {
 			b, err := fo.NextFlush(ctx)
 			if err != nil {
@@ -167,26 +236,8 @@ func (p *Pipeline) flushSpilledOps(ctx context.Context, ops []UnaryOperator) err
 			if b == nil {
 				break
 			}
-			for _, rop := range remainingOps {
-				prev := b
-				FlattenForConsumer(b, rop)
-				b, err = rop.Execute(ctx, b)
-				if err != nil {
-					return fmt.Errorf("operator execute (flush): %w", err)
-				}
-				if b != prev && prev != nil {
-					prev.Release()
-				}
-				if b == nil {
-					break
-				}
-			}
-			if b != nil {
-				FlattenForConsumer(b, p.Sink)
-				if err := p.Sink.Consume(ctx, b); err != nil {
-					return fmt.Errorf("sink consume (flush): %w", err)
-				}
-				b.Release()
+			if _, err := driver.push(ctx, 0, b); err != nil {
+				return fmt.Errorf("flush: %w", err)
 			}
 		}
 	}
@@ -242,43 +293,35 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 	}
 
 	// Process warmup batch through original ops.
-	var pendingWarmup *batch.RecordBatch
+	var pendingWarmup []*batch.RecordBatch
 	{
-		b := warmupBatch
-		exhausted := false
-		for _, op := range p.Ops {
-			prev := b
-			FlattenForConsumer(b, op)
-			b, err = op.Execute(ctx, b)
-			if err != nil {
-				return fmt.Errorf("operator execute: %w", err)
-			}
-			if b != prev && prev != nil {
-				prev.Release()
-			}
-			if b == nil {
-				if ds, ok := op.(DoneSignaler); ok && ds.Done() {
-					exhausted = true
-				}
-				break
-			}
-		}
-		if b != nil {
+		emitted := false
+		warmupDriver := newChainDriver(p.Ops, func(ctx context.Context, b *batch.RecordBatch) error {
+			emitted = true
 			FlattenForConsumer(b, p.Sink)
 			if usePartitioned {
 				// Partitioned mode: the warmup batch must be hash-routed
 				// like every other batch — consuming it whole into the
 				// primary splits its groups across sinks (partial
 				// duplicates in the output). Worker 0 partitions it once
-				// the queues are live.
-				pendingWarmup = b
-			} else {
-				if err := p.Sink.Consume(ctx, b); err != nil {
-					return fmt.Errorf("sink consume: %w", err)
-				}
-				b.Release()
+				// the queues are live. A bounded operator can emit the
+				// warmup batch's output as several batches, so this is a
+				// slice, not a single batch.
+				pendingWarmup = append(pendingWarmup, b)
+				return nil
 			}
-			// Check DoneSignalers even when batch was non-nil — Limit
+			if err := p.Sink.Consume(ctx, b); err != nil {
+				return fmt.Errorf("sink consume: %w", err)
+			}
+			b.Release()
+			return nil
+		})
+		exhausted, err := warmupDriver.push(ctx, 0, warmupBatch)
+		if err != nil {
+			return err
+		}
+		if emitted {
+			// Check DoneSignalers even when a batch was emitted — Limit
 			// may have returned a truncated batch and is now satisfied.
 			for _, op := range p.Ops {
 				if ds, ok := op.(DoneSignaler); ok && ds.Done() {
@@ -392,14 +435,27 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 			if usePartitioned {
 				defer stopProducing()
 				if workerID == 0 && pendingWarmup != nil {
-					if err := partitionAndDeliver(workerCtx, primaryAgg, sink, pendingWarmup, 0, partQueues, &partScratch); err != nil {
-						firstErr.CompareAndSwap(nil, err)
-						cancel()
-						return
+					for _, wb := range pendingWarmup {
+						if err := partitionAndDeliver(workerCtx, primaryAgg, sink, wb, 0, partQueues, &partScratch); err != nil {
+							firstErr.CompareAndSwap(nil, err)
+							cancel()
+							return
+						}
 					}
 					pendingWarmup = nil
 				}
 			}
+			driver := newChainDriver(ops, func(ctx context.Context, b *batch.RecordBatch) error {
+				FlattenForConsumer(b, sink)
+				if usePartitioned {
+					return partitionAndDeliver(ctx, primaryAgg, sink, b, workerID, partQueues, &partScratch)
+				}
+				if err := sink.Consume(ctx, b); err != nil {
+					return fmt.Errorf("sink consume: %w", err)
+				}
+				b.Release()
+				return nil
+			})
 			for {
 				// Check for cancellation or done signaling.
 				if workerCtx.Err() != nil {
@@ -436,43 +492,11 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 					return // source exhausted
 				}
 
-				exhausted := false
-				for _, op := range ops {
-					prev := b
-					FlattenForConsumer(b, op)
-					b, err = op.Execute(workerCtx, b)
-					if err != nil {
-						firstErr.CompareAndSwap(nil, fmt.Errorf("operator execute: %w", err))
-						cancel()
-						return
-					}
-					if b != prev && prev != nil {
-						prev.Release()
-					}
-					if b == nil {
-						if ds, ok := op.(DoneSignaler); ok && ds.Done() {
-							exhausted = true
-						}
-						break
-					}
-				}
-
-				if b != nil {
-					FlattenForConsumer(b, sink)
-					if usePartitioned {
-						if err := partitionAndDeliver(workerCtx, primaryAgg, sink, b, workerID, partQueues, &partScratch); err != nil {
-							firstErr.CompareAndSwap(nil, err)
-							cancel()
-							return
-						}
-					} else {
-						if err := sink.Consume(workerCtx, b); err != nil {
-							firstErr.CompareAndSwap(nil, fmt.Errorf("sink consume: %w", err))
-							cancel()
-							return
-						}
-						b.Release()
-					}
+				exhausted, err := driver.push(workerCtx, 0, b)
+				if err != nil {
+					firstErr.CompareAndSwap(nil, err)
+					cancel()
+					return
 				}
 
 				if exhausted {

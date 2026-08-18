@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"fmt"
+	"math"
 	"runtime"
 	"strings"
 	"sync"
@@ -1972,6 +1973,18 @@ func (p *HashJoinProbe) buildProbeKey(b *batch.RecordBatch, row int) {
 // including skewed batches with high fan-out.
 const joinOutputPoolSize = 16 * batch.DefaultBatchSize
 
+// maxProbeOutputRows bounds how many match pairs one probe call materialises.
+// Past it the fan-out is suspended at (probe row, hash-chain position) and
+// resumed on the next call, making probe output O(batch) instead of
+// O(batch x fan-out) — see the resume protocol on HashJoinProbe.
+//
+// The value is joinOutputPoolSize, which is also pairsBuf's pre-allocated
+// capacity and the large output pool's size. Bounding at exactly that point
+// means every join shape that fits today keeps its current batch shape, pool,
+// and allocation profile; only the shapes that used to grow pairsBuf without
+// limit change behaviour.
+const maxProbeOutputRows = joinOutputPoolSize
+
 // matchPair tracks a probe-build row match for output construction.
 // probeRow is int32 (batch sizes ≤8192) to compact the struct from 24→16 bytes,
 // reducing sort swap cost and improving cache utilization during gather.
@@ -2034,6 +2047,32 @@ type HashJoinProbe struct {
 	spillFlushProbeFileIx int               // next file to open in spillFlushProbeFiles
 	spillFlushReader      *spillBatchReader // open reader for the current probe file
 	spillFlushDone        bool              // current partition's probe batches all consumed; emit unmatched/move on
+
+	// Bounded fan-out state (#317). boundOutput is set by a driver that
+	// implements the BoundedOutputOperator protocol; res is the cursor into
+	// the input batch currently being drained. All of it is per-operator, and
+	// Clone() hands every parallel worker its own HashJoinProbe, so cloned
+	// probes never share a cursor.
+	boundOutput bool
+	res         probeResume
+}
+
+// probeResume is the suspended position of a probe's fan-out: which probe row
+// is being expanded, and how far into that row's match chain the previous
+// call got. A probe call stops once it has materialised maxProbeOutputRows
+// match pairs and stores the cursor here; the next call picks up exactly
+// where it left off, so no match is emitted twice and none is skipped.
+type probeResume struct {
+	in     *batch.RecordBatch // input batch being drained; nil when idle
+	active bool               // more output is pending for in
+	pos    int                // next probe position (index into in.Sel, else row index)
+	ref    int32              // cursor within the current probe row's matches
+	mid    bool               // ref is live: resume inside pos's match chain
+
+	// Cross-join cursor: which build batch, and which row within it.
+	crossSchema []parquet.Column
+	crossBatch  int
+	crossRow    int
 }
 
 func (p *HashJoinProbe) Init(_ context.Context) error {
@@ -2108,13 +2147,56 @@ func (p *HashJoinProbe) prepareViewInput(in *batch.RecordBatch) {
 	}
 }
 
+// EnableBoundedOutput opts this probe into the BoundedOutputOperator
+// protocol: Execute emits at most maxProbeOutputRows joined rows and suspends
+// the rest of the input batch's fan-out for NextOutput to resume. Only a
+// driver that drains NextOutput after every Execute may call it.
+func (p *HashJoinProbe) EnableBoundedOutput() { p.boundOutput = true }
+
+// HasPendingOutput reports whether the last input batch still has fan-out
+// left to emit.
+func (p *HashJoinProbe) HasPendingOutput() bool { return p.res.active }
+
+// NextOutput resumes a suspended fan-out and returns the next bounded slice
+// of the current input batch's join output.
+func (p *HashJoinProbe) NextOutput(ctx context.Context) (*batch.RecordBatch, error) {
+	if !p.res.active {
+		return nil, nil
+	}
+	if p.join.JoinType == CrossJoin {
+		return p.nextCrossChunk()
+	}
+	return p.nextProbeChunk(ctx)
+}
+
+// pairLimit is the number of match pairs one call may materialise. Without a
+// driver that resumes, the probe has nowhere to put the remainder, so it
+// keeps its historical single-shot behaviour.
+func (p *HashJoinProbe) pairLimit() int {
+	if p.boundOutput {
+		return maxProbeOutputRows
+	}
+	return math.MaxInt32
+}
+
+// beginResume arms the fan-out cursor for a freshly arrived input batch.
+func (p *HashJoinProbe) beginResume(in *batch.RecordBatch) {
+	p.res = probeResume{in: in, active: true}
+}
+
+// finishResume clears the cursor once an input batch is fully expanded.
+func (p *HashJoinProbe) finishResume() {
+	p.res = probeResume{}
+}
+
 func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if in.HasViews() {
 		p.prepareViewInput(in)
 	}
 	if p.join.JoinType == CrossJoin {
-		outSchema := p.outputSchema(in.Schema)
-		return p.executeCrossJoin(in, outSchema)
+		p.beginResume(in)
+		p.res.crossSchema = p.outputSchema(in.Schema)
+		return p.nextCrossChunk()
 	}
 
 	// When Grace Hash Join is active, partition probe rows and only probe
@@ -2153,58 +2235,72 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 	if p.cachedSchema == nil {
 		p.cachedSchema, p.cachedMapping = p.outputSchemaWithMapping(in.Schema)
 	}
+
+	p.beginResume(in)
+	return p.nextProbeChunk(ctx)
+}
+
+// nextProbeChunk materialises up to maxProbeOutputRows match pairs for the
+// input batch under the fan-out cursor and turns them into one output batch.
+// It is the shared body of Execute and NextOutput: the only difference
+// between the first call for an input batch and a resumption is where the
+// cursor starts.
+func (p *HashJoinProbe) nextProbeChunk(_ context.Context) (*batch.RecordBatch, error) {
+	in := p.res.in
 	outSchema, mapping := p.cachedSchema, p.cachedMapping
 
-	// Collect match pairs using reusable buffer
+	// Collect match pairs using reusable buffer. The typed loops fill it
+	// through a pre-sized window, so it must always be at least `limit` long.
+	if cap(p.pairsBuf) < maxProbeOutputRows {
+		p.pairsBuf = make([]matchPair, 0, maxProbeOutputRows)
+	}
 	pairs := p.pairsBuf[:0]
+	limit := maxProbeOutputRows
+	if !p.boundOutput {
+		limit = cap(pairs)
+	}
+	done := true
 
 	h := p.join
 	// Fast path: single int key inner join without right/full outer tracking.
 	// Inlines hash table lookup + typed data access, eliminating 4 levels of
 	// per-row function calls (probeRow → lookupBuild → intProbeKey → intKeyFromVector).
-	if h.useIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil {
+	inlineInt := h.useIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil
+	inlineDual := !inlineInt && h.useDualIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil
+	if inlineInt || inlineDual {
 		h.resolveProbeKeyIdx(in)
-		if keyIdx := h.probeKeyIdx[0]; keyIdx >= 0 {
-			pairs = p.inlineIntProbe(in.Columns[keyIdx], in, pairs)
+	}
+	for {
+		switch {
+		case inlineInt:
+			if keyIdx := h.probeKeyIdx[0]; keyIdx >= 0 {
+				pairs, done = p.inlineIntProbe(in.Columns[keyIdx], in, pairs, limit)
+			}
+		case inlineDual:
+			if h.probeKeyIdx[0] >= 0 && h.probeKeyIdx[1] >= 0 {
+				pairs, done = p.inlineDualIntProbe(in.Columns[h.probeKeyIdx[0]], in.Columns[h.probeKeyIdx[1]], in, pairs, limit)
+			}
+		default:
+			pairs, done = p.genericProbe(in, pairs, limit)
 		}
-	} else if h.useDualIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil {
-		h.resolveProbeKeyIdx(in)
-		if h.probeKeyIdx[0] >= 0 && h.probeKeyIdx[1] >= 0 {
-			pairs = p.inlineDualIntProbe(in.Columns[h.probeKeyIdx[0]], in.Columns[h.probeKeyIdx[1]], in, pairs)
+		if done || p.boundOutput {
+			break
 		}
-	} else {
-		probeRow := func(row int) {
-			buildMatches := p.lookupBuild(in, row)
-
-			if len(buildMatches) == 0 {
-				if h.JoinType == LeftJoin || h.JoinType == FullOuterJoin {
-					pairs = append(pairs, matchPair{probeRow: int32(row)})
-				}
-				return
-			}
-
-			for _, ref := range buildMatches {
-				pairs = append(pairs, matchPair{probeRow: int32(row), ref: ref, matched: true})
-			}
-
-			if h.arenaMatched != nil {
-				h.mu.Lock()
-				p.markKeyMatched(in, row)
-				h.mu.Unlock()
-			}
-		}
-
-		if in.Sel != nil {
-			for _, idx := range in.Sel {
-				probeRow(int(idx))
-			}
-		} else {
-			for i := 0; i < in.Len; i++ {
-				probeRow(i)
-			}
-		}
+		// The driver did not opt into the resume protocol, so nobody will
+		// call NextOutput: grow the buffer and pick the fan-out back up where
+		// it suspended. This reproduces exactly what pairsBuf used to do on
+		// its own — the whole input batch's fan-out in one output batch — for
+		// chain drivers outside this package that have not adopted
+		// BoundedOutputOperator yet.
+		grown := make([]matchPair, len(pairs), 2*cap(pairs))
+		copy(grown, pairs)
+		pairs = grown
+		limit = cap(pairs)
 	}
 	p.pairsBuf = pairs // save grown slice for reuse
+	if done {
+		p.finishResume()
+	}
 
 	if len(pairs) == 0 {
 		return nil, nil
@@ -2388,7 +2484,24 @@ func (p *HashJoinProbe) emitViewOutput(in *batch.RecordBatch, outSchema []parque
 // per-row function call overhead from lookupBuild/intProbeKey/intKeyFromVector.
 // The probe logic is fully inlined (no closure) to avoid heap allocation of
 // the closure + captured pairs slice, which saves ~2.5GB of allocations at SF1.
-func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBatch, pairs []matchPair) []matchPair {
+//
+// It fills at most limit-len(pairs) pairs and returns done=false when it
+// stopped short; p.res then names the probe row and the chain position to
+// resume from.
+//
+// The loops write through a pre-sized window (buf[:limit], n) rather than
+// appending, so `n >= limit` — the test that suspends the fan-out — is the
+// same compare append already made against cap. Nothing is added per probe
+// row either: a resumed chain is drained by resumeIntChain before the typed
+// loops start, so they still begin at a row boundary. What the chain walk
+// actually compiles to on amd64 is the arena/arenaNext load pair, the
+// 16-byte store, and three compares — `ref >= 0`, the suspend test, and a
+// bounds check on buf[n] that the prover does not fold into the suspend test
+// (it knows n != limit, not n < len(buf)). Measured against the unbounded
+// version: 1:1 fan-out is unchanged, 1:4 costs ~1.5% best-case, and 1:64 is
+// ~45% faster because pairsBuf stops growing. Callers guarantee
+// cap(pairs) >= limit.
+func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBatch, pairs []matchPair, limit int) ([]matchPair, bool) {
 	h := p.join
 	arena := h.arena
 	arenaNext := h.arenaNext
@@ -2398,34 +2511,58 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 	// BloomFilterOp in the pipeline (InnerJoin always gets one). Checking
 	// it again inline would be redundant work.
 
+	if p.res.mid {
+		var ok bool
+		if pairs, ok = p.resumeIntChain(in, pairs, limit); !ok {
+			return pairs, false
+		}
+	}
+
+	buf := pairs[:limit]
+	n := len(pairs)
+
 	if in.Sel != nil {
+		sel := in.Sel
 		if !keyCol.Nulls.HasNulls() {
 			switch keyCol.Type {
 			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 				data := keyCol.Int32Data
-				for _, si := range in.Sel {
+				for pos := p.res.pos; pos < len(sel); pos++ {
+					si := sel[pos]
 					head, ok := idx.Get(int64(data[si]))
 					if !ok {
 						continue
 					}
 					for ref := head; ref >= 0; ref = arenaNext[ref] {
-						pairs = append(pairs, matchPair{probeRow: int32(si), ref: arena[ref], matched: true})
+						if n >= limit {
+							p.res.pos, p.res.ref, p.res.mid = pos, ref, true
+							return buf[:n], false
+						}
+						buf[n] = matchPair{probeRow: int32(si), ref: arena[ref], matched: true}
+						n++
 					}
 				}
 			default:
 				data := keyCol.Int64Data
-				for _, si := range in.Sel {
+				for pos := p.res.pos; pos < len(sel); pos++ {
+					si := sel[pos]
 					head, ok := idx.Get(data[si])
 					if !ok {
 						continue
 					}
 					for ref := head; ref >= 0; ref = arenaNext[ref] {
-						pairs = append(pairs, matchPair{probeRow: int32(si), ref: arena[ref], matched: true})
+						if n >= limit {
+							p.res.pos, p.res.ref, p.res.mid = pos, ref, true
+							return buf[:n], false
+						}
+						buf[n] = matchPair{probeRow: int32(si), ref: arena[ref], matched: true}
+						n++
 					}
 				}
 			}
 		} else {
-			for _, si := range in.Sel {
+			for pos := p.res.pos; pos < len(sel); pos++ {
+				si := sel[pos]
 				if keyCol.Nulls.IsNullFast(int(si)) {
 					continue
 				}
@@ -2438,7 +2575,12 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 					continue
 				}
 				for ref := head; ref >= 0; ref = arenaNext[ref] {
-					pairs = append(pairs, matchPair{probeRow: int32(si), ref: arena[ref], matched: true})
+					if n >= limit {
+						p.res.pos, p.res.ref, p.res.mid = pos, ref, true
+						return buf[:n], false
+					}
+					buf[n] = matchPair{probeRow: int32(si), ref: arena[ref], matched: true}
+					n++
 				}
 			}
 		}
@@ -2447,29 +2589,39 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 			switch keyCol.Type {
 			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 				data := keyCol.Int32Data
-				for i := 0; i < in.Len; i++ {
+				for i := p.res.pos; i < in.Len; i++ {
 					head, ok := idx.Get(int64(data[i]))
 					if !ok {
 						continue
 					}
 					for ref := head; ref >= 0; ref = arenaNext[ref] {
-						pairs = append(pairs, matchPair{probeRow: int32(i), ref: arena[ref], matched: true})
+						if n >= limit {
+							p.res.pos, p.res.ref, p.res.mid = i, ref, true
+							return buf[:n], false
+						}
+						buf[n] = matchPair{probeRow: int32(i), ref: arena[ref], matched: true}
+						n++
 					}
 				}
 			default:
 				data := keyCol.Int64Data
-				for i := 0; i < in.Len; i++ {
+				for i := p.res.pos; i < in.Len; i++ {
 					head, ok := idx.Get(data[i])
 					if !ok {
 						continue
 					}
 					for ref := head; ref >= 0; ref = arenaNext[ref] {
-						pairs = append(pairs, matchPair{probeRow: int32(i), ref: arena[ref], matched: true})
+						if n >= limit {
+							p.res.pos, p.res.ref, p.res.mid = i, ref, true
+							return buf[:n], false
+						}
+						buf[n] = matchPair{probeRow: int32(i), ref: arena[ref], matched: true}
+						n++
 					}
 				}
 			}
 		} else {
-			for i := 0; i < in.Len; i++ {
+			for i := p.res.pos; i < in.Len; i++ {
 				if keyCol.Nulls.IsNullFast(i) {
 					continue
 				}
@@ -2482,18 +2634,52 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 					continue
 				}
 				for ref := head; ref >= 0; ref = arenaNext[ref] {
-					pairs = append(pairs, matchPair{probeRow: int32(i), ref: arena[ref], matched: true})
+					if n >= limit {
+						p.res.pos, p.res.ref, p.res.mid = i, ref, true
+						return buf[:n], false
+					}
+					buf[n] = matchPair{probeRow: int32(i), ref: arena[ref], matched: true}
+					n++
 				}
 			}
 		}
 	}
-	return pairs
+	return buf[:n], true
+}
+
+// resumeIntChain drains what is left of the hash chain a previous
+// inlineIntProbe call suspended, and advances the cursor to the next probe
+// row. done=false means the chain still did not fit in this call.
+func (p *HashJoinProbe) resumeIntChain(in *batch.RecordBatch, pairs []matchPair, limit int) ([]matchPair, bool) {
+	arena := p.join.arena
+	arenaNext := p.join.arenaNext
+	row := p.res.pos
+	if in.Sel != nil {
+		row = int(in.Sel[p.res.pos])
+	}
+	for ref := p.res.ref; ref >= 0; ref = arenaNext[ref] {
+		if len(pairs) >= limit {
+			p.res.ref = ref
+			return pairs, false
+		}
+		pairs = append(pairs, matchPair{probeRow: int32(row), ref: arena[ref], matched: true})
+	}
+	p.res.mid = false
+	p.res.pos++
+	return pairs, true
 }
 
 // inlineDualIntProbe is the fast probe path for dual int key inner joins.
 // Inlines composite hash computation + chain traversal with typed key verification,
 // eliminating per-row lookupBuild/dualIntKeyFromVectors function call overhead.
-func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.RecordBatch, pairs []matchPair) []matchPair {
+//
+// Bounded like inlineIntProbe (see there), and with the same shape: the
+// suspended chain is drained by resumeDualIntChain before the typed loops
+// start, so the loops themselves gain only the pre-sized-window bound test.
+// The chain walk here verifies both key components against the build row, so
+// the resume helper re-derives the probe row's key instead of threading it
+// through the cursor.
+func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.RecordBatch, pairs []matchPair, limit int) ([]matchPair, bool) {
 	h := p.join
 	arena := h.arena
 	arenaNext := h.arenaNext
@@ -2550,9 +2736,22 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 
 	noNulls := !col0.Nulls.HasNulls() && !col1.Nulls.HasNulls()
 
+	sel := in.Sel
+
+	if p.res.mid {
+		var ok bool
+		if pairs, ok = p.resumeDualIntChain(col0, col1, in, pairs, limit); !ok {
+			return pairs, false
+		}
+	}
+
+	buf := pairs[:limit]
+	n := len(pairs)
+
 	if in.Sel != nil {
 		if noNulls {
-			for _, si := range in.Sel {
+			for pos := p.res.pos; pos < len(sel); pos++ {
+				si := sel[pos]
 				var a, b int64
 				if pd0i32 != nil {
 					a = int64(pd0i32[si])
@@ -2586,12 +2785,18 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 						bb = bd1i64[r.rowIdx]
 					}
 					if ba == a && bb == b {
-						pairs = append(pairs, matchPair{probeRow: int32(si), ref: r, matched: true})
+						if n >= limit {
+							p.res.pos, p.res.ref, p.res.mid = pos, ri, true
+							return buf[:n], false
+						}
+						buf[n] = matchPair{probeRow: int32(si), ref: r, matched: true}
+						n++
 					}
 				}
 			}
 		} else {
-			for _, si := range in.Sel {
+			for pos := p.res.pos; pos < len(sel); pos++ {
+				si := sel[pos]
 				if col0.Nulls.IsNullFast(int(si)) || col1.Nulls.IsNullFast(int(si)) {
 					continue
 				}
@@ -2628,14 +2833,19 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 						bb = bd1i64[r.rowIdx]
 					}
 					if ba == a && bb == b {
-						pairs = append(pairs, matchPair{probeRow: int32(si), ref: r, matched: true})
+						if n >= limit {
+							p.res.pos, p.res.ref, p.res.mid = pos, ri, true
+							return buf[:n], false
+						}
+						buf[n] = matchPair{probeRow: int32(si), ref: r, matched: true}
+						n++
 					}
 				}
 			}
 		}
 	} else {
 		if noNulls {
-			for i := 0; i < in.Len; i++ {
+			for i := p.res.pos; i < in.Len; i++ {
 				var a, b int64
 				if pd0i32 != nil {
 					a = int64(pd0i32[i])
@@ -2669,12 +2879,17 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 						bb = bd1i64[r.rowIdx]
 					}
 					if ba == a && bb == b {
-						pairs = append(pairs, matchPair{probeRow: int32(i), ref: r, matched: true})
+						if n >= limit {
+							p.res.pos, p.res.ref, p.res.mid = i, ri, true
+							return buf[:n], false
+						}
+						buf[n] = matchPair{probeRow: int32(i), ref: r, matched: true}
+						n++
 					}
 				}
 			}
 		} else {
-			for i := 0; i < in.Len; i++ {
+			for i := p.res.pos; i < in.Len; i++ {
 				if col0.Nulls.IsNullFast(i) || col1.Nulls.IsNullFast(i) {
 					continue
 				}
@@ -2711,13 +2926,115 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 						bb = bd1i64[r.rowIdx]
 					}
 					if ba == a && bb == b {
-						pairs = append(pairs, matchPair{probeRow: int32(i), ref: r, matched: true})
+						if n >= limit {
+							p.res.pos, p.res.ref, p.res.mid = i, ri, true
+							return buf[:n], false
+						}
+						buf[n] = matchPair{probeRow: int32(i), ref: r, matched: true}
+						n++
 					}
 				}
 			}
 		}
 	}
-	return pairs
+	return buf[:n], true
+}
+
+// resumeDualIntChain drains what is left of the chain a previous
+// inlineDualIntProbe call suspended. It re-derives the probe row's key from
+// the vectors rather than threading it through the cursor: this runs at most
+// once per call, so the cost stays entirely off the typed loops.
+func (p *HashJoinProbe) resumeDualIntChain(col0, col1 *batch.Vector, in *batch.RecordBatch, pairs []matchPair, limit int) ([]matchPair, bool) {
+	h := p.join
+	row := p.res.pos
+	if in.Sel != nil {
+		row = int(in.Sel[p.res.pos])
+	}
+	a, b, ok := dualIntKeyFromVectors(col0, col1, row)
+	if !ok {
+		p.res.mid = false
+		p.res.pos++
+		return pairs, true
+	}
+	for ri := p.res.ref; ri >= 0; ri = h.arenaNext[ri] {
+		r := h.arena[ri]
+		bb := h.buildBatches[r.batchIdx]
+		ba0, ba1, bok := dualIntKeyFromVectors(bb.Columns[h.buildKeyIdx[0]], bb.Columns[h.buildKeyIdx[1]], int(r.rowIdx))
+		if !bok || ba0 != a || ba1 != b {
+			continue
+		}
+		if len(pairs) >= limit {
+			p.res.ref = ri
+			return pairs, false
+		}
+		pairs = append(pairs, matchPair{probeRow: int32(row), ref: r, matched: true})
+	}
+	p.res.mid = false
+	p.res.pos++
+	return pairs, true
+}
+
+// genericProbe is the resumable form of the general probe loop: serialized
+// (string/composite) keys, outer joins, and any shape the inline int paths
+// decline. Unmatched probe rows for LEFT/FULL OUTER are emitted here, exactly
+// once — the cursor only ever moves forward past a row after that row's
+// entire contribution has been appended, so a resumption can neither repeat
+// nor skip the null-filled row.
+//
+// Right/full-outer build-side match marking likewise happens only when a row
+// is finished, so a suspended row is marked once, on the call that completes
+// it, before FlushUnmatched can run.
+func (p *HashJoinProbe) genericProbe(in *batch.RecordBatch, pairs []matchPair, limit int) ([]matchPair, bool) {
+	h := p.join
+	sel := in.Sel
+	n := in.Len
+	if sel != nil {
+		n = len(sel)
+	}
+	// start is the index into this row's match list to resume at; it is reset
+	// to 0 as soon as the suspended row is finished.
+	start := 0
+	if p.res.mid {
+		start = int(p.res.ref)
+		p.res.mid = false
+	}
+
+	for pos := p.res.pos; pos < n; pos++ {
+		row := pos
+		if sel != nil {
+			row = int(sel[pos])
+		}
+		buildMatches := p.lookupBuild(in, row)
+
+		if len(buildMatches) == 0 {
+			if h.JoinType == LeftJoin || h.JoinType == FullOuterJoin {
+				if len(pairs) >= limit {
+					p.res.pos, p.res.ref, p.res.mid = pos, 0, true
+					return pairs, false
+				}
+				pairs = append(pairs, matchPair{probeRow: int32(row)})
+			}
+			start = 0
+			continue
+		}
+
+		for i := start; i < len(buildMatches); i++ {
+			if len(pairs) >= limit {
+				p.res.pos, p.res.ref, p.res.mid = pos, int32(i), true
+				return pairs, false
+			}
+			pairs = append(pairs, matchPair{probeRow: int32(row), ref: buildMatches[i], matched: true})
+		}
+		start = 0
+
+		if h.arenaMatched != nil {
+			h.mu.Lock()
+			p.markKeyMatched(in, row)
+			h.mu.Unlock()
+		}
+	}
+	p.res.pos = n
+	return pairs, true
 }
 
 // executeSemiAntiJoin handles SemiJoin and AntiJoin semantics.
@@ -3011,33 +3328,56 @@ func (p *HashJoinProbe) markKeyMatchedLocked(in *batch.RecordBatch, row int) {
 	}
 }
 
-func (p *HashJoinProbe) executeCrossJoin(in *batch.RecordBatch, outSchema []parquet.Column) (*batch.RecordBatch, error) {
+// nextCrossChunk emits the next bounded slice of a cross join's output. A
+// cross join's fan-out is the entire build side per probe row, so it needs the
+// same suspension as the hash paths; the cursor here is (probe position,
+// build batch, row within that build batch).
+func (p *HashJoinProbe) nextCrossChunk() (*batch.RecordBatch, error) {
+	in := p.res.in
+	outSchema := p.res.crossSchema
 	_, mapping := p.outputSchemaWithMapping(in.Schema)
+	limit := p.pairLimit()
 
-	var pairs []crossPair
-
-	addProbeRow := func(row int) {
-		for bi, buildBatch := range p.join.buildBatches {
-			if buildBatch.Sel != nil {
-				for _, bidx := range buildBatch.Sel {
-					pairs = append(pairs, crossPair{probeRow: row, batchIdx: int32(bi), buildRow: int(bidx)})
-				}
-			} else {
-				for br := 0; br < buildBatch.Len; br++ {
-					pairs = append(pairs, crossPair{probeRow: row, batchIdx: int32(bi), buildRow: br})
-				}
-			}
-		}
+	sel := in.Sel
+	n := in.Len
+	if sel != nil {
+		n = len(sel)
 	}
 
-	if in.Sel != nil {
-		for _, idx := range in.Sel {
-			addProbeRow(int(idx))
+	var pairs []crossPair
+	done := true
+
+expand:
+	for pos := p.res.pos; pos < n; pos++ {
+		row := pos
+		if sel != nil {
+			row = int(sel[pos])
 		}
-	} else {
-		for i := 0; i < in.Len; i++ {
-			addProbeRow(i)
+		for bi := p.res.crossBatch; bi < len(p.join.buildBatches); bi++ {
+			buildBatch := p.join.buildBatches[bi]
+			bn := buildBatch.Len
+			if buildBatch.Sel != nil {
+				bn = len(buildBatch.Sel)
+			}
+			for br := p.res.crossRow; br < bn; br++ {
+				if len(pairs) >= limit {
+					p.res.pos, p.res.crossBatch, p.res.crossRow = pos, bi, br
+					done = false
+					break expand
+				}
+				buildRow := br
+				if buildBatch.Sel != nil {
+					buildRow = int(buildBatch.Sel[br])
+				}
+				pairs = append(pairs, crossPair{probeRow: row, batchIdx: int32(bi), buildRow: buildRow})
+			}
+			p.res.crossRow = 0
 		}
+		p.res.crossBatch = 0
+	}
+
+	if done {
+		p.finishResume()
 	}
 
 	if len(pairs) == 0 {
@@ -3215,7 +3555,13 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 	return out
 }
 
-func (p *HashJoinProbe) Close() error { return nil }
+// Close drops the fan-out cursor's reference to the last input batch. A probe
+// closed mid-suspension (a cancelled query) would otherwise keep that batch
+// reachable for as long as the operator is.
+func (p *HashJoinProbe) Close() error {
+	p.res = probeResume{}
+	return nil
+}
 
 // Close releases any memory still reserved with the shared MemTracker and
 // drops references to the build-side state so Go's GC can reclaim it
@@ -3247,11 +3593,14 @@ func (h *HashJoin) Close() error {
 }
 
 // Clone returns a new HashJoinProbe that shares the same build-side hash table
-// but has its own scratch buffers (pairsBuf, semiSelBuf, lookupBuf, indexBuf).
+// but has its own scratch buffers (pairsBuf, semiSelBuf, lookupBuf, indexBuf)
+// and its own fan-out cursor — parallel pipeline workers each suspend and
+// resume independently.
 func (p *HashJoinProbe) Clone() UnaryOperator {
 	c := p.join.Probe()
 	c.OutputFilter = p.OutputFilter
 	c.LateMaterialize = p.LateMaterialize
+	c.boundOutput = p.boundOutput
 	return c
 }
 

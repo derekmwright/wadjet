@@ -1316,6 +1316,12 @@ func (p *HashJoinProbe) openNextSpillPartition(ctx context.Context) error {
 	probe := tmpJoin.Probe()
 	probe.OutputFilter = p.join.spillOutputFilter
 	probe.LateMaterialize = p.LateMaterialize
+	// nextSpilledProbeBatch drains NextOutput before reading the next probe
+	// batch, so the partition probe may bound its fan-out exactly like the
+	// streaming one — spilled partitions are where the skewed keys land.
+	if p.boundOutput {
+		probe.EnableBoundedOutput()
+	}
 	if err := probe.Init(ctx); err != nil {
 		return fmt.Errorf("initialising probe for spilled partition %d: %w", partID, err)
 	}
@@ -1333,6 +1339,22 @@ func (p *HashJoinProbe) openNextSpillPartition(ctx context.Context) error {
 // when the current partition's probe data is exhausted.
 func (p *HashJoinProbe) nextSpilledProbeBatch(ctx context.Context) (*batch.RecordBatch, error) {
 	for {
+		// Drain any fan-out the partition probe suspended on the batch we
+		// last handed it, before reading another one: the suspended state
+		// still points into that batch, and the spill reader reuses its
+		// buffers across Next() calls.
+		if p.spillFlushTmpProbe.HasPendingOutput() {
+			out, err := p.spillFlushTmpProbe.NextOutput(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("probing spilled partition: %w", err)
+			}
+			if out != nil {
+				out.Detach()
+				return out, nil
+			}
+			continue
+		}
+
 		// Open a probe file if we don't have one.
 		if p.spillFlushReader == nil {
 			if p.spillFlushProbeFileIx >= len(p.spillFlushProbeFiles) {
