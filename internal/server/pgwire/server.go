@@ -782,7 +782,7 @@ func (c *pgConn) handleQuery(sql string) {
 			c.sendReadyForQuery()
 			return
 		}
-		c.sendCommandComplete(fmt.Sprintf("%s 0 %d", result.Command, result.RowsAffected))
+		c.sendCommandComplete(commandTag(result.Command, result.RowsAffected))
 		c.sendReadyForQuery()
 		return
 	}
@@ -1567,10 +1567,20 @@ func catalogSubject(normalized string) string {
 		return ""
 	}
 	if _, ok := catalogRank[refs[0]]; !ok {
-		// Subject is a relation this layer does not model (pg_tablespace,
-		// pg_foreign_data_wrapper, pg_event_trigger, pg_locks, ...). It gets
-		// the empty-but-coherent answer, not another relation's rows.
-		return ""
+		// A CTE name is not a relation — it is a local name for a subquery,
+		// so the statement's subject is whatever the outer query joins it to.
+		// DataGrip reads columns as `from T join pg_catalog.pg_attribute C`
+		// where T wraps pg_class; declining on T alone returned no columns at
+		// all. Only the outer query's own relations are considered, never the
+		// CTE's body: the rules query also wraps pg_class in a CTE but joins
+		// pg_rewrite, and it is about rules, which this layer does not model.
+		if !isCTEName(normalized, refs[0]) {
+			// Subject is a relation this layer does not model (pg_tablespace,
+			// pg_foreign_data_wrapper, pg_event_trigger, pg_locks, ...). It
+			// gets the empty-but-coherent answer, not another relation's rows.
+			return ""
+		}
+		refs = refs[1:]
 	}
 	best, bestRank := "", -1
 	for _, r := range refs {
@@ -1579,6 +1589,15 @@ func catalogSubject(normalized string) string {
 		}
 	}
 	return best
+}
+
+// isCTEName reports whether name is bound by the statement's WITH clause.
+func isCTEName(normalized, name string) bool {
+	if !strings.HasPrefix(normalized, "WITH ") {
+		return false
+	}
+	return strings.Contains(normalized, " "+name+" AS (") ||
+		strings.HasPrefix(normalized, "WITH "+name+" AS (")
 }
 
 // relationRefs returns the relation names a normalized statement reads: the
@@ -2030,6 +2049,7 @@ func (c *pgConn) matchAttributeQuery(ctx context.Context, sql, normalized string
 		"table_oid", "comment", "generated", "identity"}
 
 	var resultRows []map[string]any
+	aliases := cteAliases(sql)
 
 	for _, tableName := range targetTables {
 		table, err := c.db.Query(ctx, fmt.Sprintf("DESCRIBE %s", tableName))
@@ -2048,7 +2068,7 @@ func (c *pgConn) matchAttributeQuery(ctx context.Context, sql, normalized string
 			}
 			attnum++
 
-			resultRows = append(resultRows, map[string]any{
+			row := map[string]any{
 				// SQLAlchemy's positional labels.
 				"attname":     colName,
 				"format_type": pgFormatType(colType),
@@ -2071,7 +2091,25 @@ func (c *pgConn) matchAttributeQuery(ctx context.Context, sql, normalized string
 				"attndims":      0,
 				"attcollation":  0,
 				"attstattarget": -1,
-			})
+				"attislocal":    true,
+			}
+			// The statement joins pg_class to pg_attribute, so one row of the
+			// answer spans both relations: carry the table's own attributes
+			// alongside the column's, then resolve whatever the statement's
+			// CTE renamed them to (T.oid as table_id, T.relkind as kind, ...).
+			for k, v := range pgClassAttrs(tableName) {
+				if _, taken := row[k]; !taken {
+					row[k] = v
+				}
+			}
+			for alias, under := range aliases {
+				if v, ok := row[under]; ok {
+					if _, taken := row[alias]; !taken {
+						row[alias] = v
+					}
+				}
+			}
+			resultRows = append(resultRows, row)
 		}
 	}
 
@@ -2094,16 +2132,33 @@ func shapedAttributeAnswer(sql string, rows []map[string]any) *synthAnswer {
 	if len(items) == 0 {
 		return nil
 	}
-	shape := attributeShape()
 	for _, it := range items {
 		if it.expr == "*" {
 			return nil // let the fixed tuple answer SELECT *
 		}
-		if _, ok := shape[it.expr]; !ok {
-			return nil
+	}
+
+	// Resolvability is judged against a real row, which carries the column's
+	// attributes, its table's pg_class attributes (the statement joins them),
+	// and whatever the statement's CTE renamed those to.
+	probe := attributeShape()
+	if len(rows) > 0 {
+		probe = rows[0]
+	}
+	resolvable := 0
+	for _, it := range items {
+		if _, ok := probe[it.expr]; ok {
+			resolvable++
+			continue
+		}
+		if _, ok := evalCatalogExpr(it.raw, probe); ok {
+			resolvable++
 		}
 	}
-	return catalogRowsAnswer(sql, shape, rows, nil)
+	if resolvable == 0 {
+		return nil
+	}
+	return catalogRowsAnswer(sql, probe, rows, nil)
 }
 
 // attributeShape names the pg_attribute columns a statement may select by
@@ -2734,4 +2789,22 @@ func appendInt16(buf []byte, v int16) []byte {
 
 func appendInt32(buf []byte, v int32) []byte {
 	return append(buf, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
+
+// commandTag renders the CommandComplete tag for a DML statement.
+//
+// PostgreSQL's format carries the row count alone — "DELETE 3", "UPDATE 3" —
+// and only INSERT prefixes an OID, which is 0 on any modern server:
+// "INSERT 0 3". Every command went out in the INSERT form, so psql answered a
+// DELETE with "could not interpret result from server: DELETE 0 0" and drivers
+// that parse the tag for an affected-row count read the wrong field.
+func commandTag(command string, rows int64) string {
+	cmd := strings.ToUpper(strings.TrimSpace(command))
+	if cmd == "" {
+		cmd = "SELECT"
+	}
+	if cmd == "INSERT" {
+		return fmt.Sprintf("INSERT 0 %d", rows)
+	}
+	return fmt.Sprintf("%s %d", cmd, rows)
 }

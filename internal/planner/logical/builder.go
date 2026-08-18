@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
@@ -839,6 +840,19 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 		node.WithOrdinality = table.WithOrdinality
 		node.FuncColAliases = table.ColumnAliases
 		return node, nil
+	}
+
+	// A qualified name resolves to the table when the qualifier names this
+	// server's own schema (public) or catalog.schema (wadjet.public) — the
+	// spelling PostgreSQL clients use by default. Any other qualifier names
+	// something this server does not have, and saying so beats scanning a
+	// table the statement never asked for.
+	if q := strings.ToLower(table.Qualifier); q != "" &&
+		q != expr.SessionSchema &&
+		q != expr.SessionCatalog+"."+expr.SessionSchema &&
+		q != expr.SessionCatalog {
+		return nil, fmt.Errorf("unknown schema %q: this server has one schema, %q, in database %q",
+			table.Qualifier, expr.SessionSchema, expr.SessionCatalog)
 	}
 
 	node := NewScan(table.Name, table.Alias)

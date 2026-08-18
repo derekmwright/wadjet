@@ -372,6 +372,7 @@ type SelectInfo struct {
 // TableRef is a reference to a table or table-producing function.
 type TableRef struct {
 	Name            string
+	Qualifier       string // schema or catalog.schema written before the name
 	Alias           string
 	IsFunction      bool              // true for table functions like read_json(...)
 	FuncArgs        []string          // positional arguments

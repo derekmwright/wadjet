@@ -618,7 +618,29 @@ func (p *selectParser) parseTableRef() (TableRef, error) {
 		return p.parseTableFunction(nameTok.val)
 	}
 
-	tr := TableRef{Name: nameTok.val, Alias: nameTok.val}
+	// A qualified name: schema.table, or catalog.schema.table. PostgreSQL
+	// clients write them constantly — DataGrip opens a table with
+	// `SELECT ... FROM public.customer t` — and reading only the first
+	// identifier made that a scan of a table named "public", which resolved
+	// to nothing. The qualifier is kept rather than dropped so resolution can
+	// reject one that names a schema this server does not have.
+	name := nameTok.val
+	qualifier := ""
+	for p.peek() == TokenDot {
+		p.advance() // consume .
+		partTok, err := p.expect(TokenIdent)
+		if err != nil {
+			return TableRef{}, fmt.Errorf("expected name after %q.", name)
+		}
+		if qualifier == "" {
+			qualifier = name
+		} else {
+			qualifier += "." + name
+		}
+		name = partTok.val
+	}
+
+	tr := TableRef{Name: name, Qualifier: qualifier, Alias: name}
 
 	// Optional TABLESAMPLE method(percent)
 	if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "TABLESAMPLE") {

@@ -281,6 +281,9 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 	var refs []*plansql.ColRef
 	walkExpr(expr, &refs, nil)
 	for _, r := range refs {
+		if pgSystemColumns[strings.ToLower(r.Column)] {
+			continue
+		}
 		if scope.misses(r) {
 			avail := scope.available()
 			if len(avail) > 0 {
@@ -542,4 +545,26 @@ func walkExpr(node plansql.Node, refs *[]*plansql.ColRef, subs *[]string) {
 			walkExpr(v, refs, subs)
 		}
 	}
+}
+
+// pgSystemColumns are PostgreSQL's per-row system columns. Clients request
+// them unconditionally — DataGrip opens a table with `SELECT t.*, CTID FROM
+// public.customer t`, and rejecting the reference made double-clicking a table
+// fail outright.
+//
+// They resolve to NULL rather than to a value this server invents. ctid is a
+// physical row address, and this engine has none: rows live in immutable
+// Parquet files that compaction rewrites, so any identifier synthesized here
+// would be stable only until the next rewrite. Since UPDATE and DELETE are
+// supported, a fabricated ctid is not merely useless but dangerous — a client
+// re-issuing `DELETE ... WHERE ctid = '(0,5)'` could address a row other than
+// the one the user saw. NULL keeps the read working and makes the write match
+// nothing, which is the honest outcome for a row identity that does not exist.
+var pgSystemColumns = map[string]bool{
+	"ctid":     true,
+	"xmin":     true,
+	"xmax":     true,
+	"cmin":     true,
+	"cmax":     true,
+	"tableoid": true,
 }

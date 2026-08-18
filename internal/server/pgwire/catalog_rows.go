@@ -106,6 +106,93 @@ func catalogRowAnswer(sql string, attrs map[string]any, fallbackCols []string) *
 	return catalogRowsAnswer(sql, attrs, []map[string]any{attrs}, fallbackCols)
 }
 
+// cteAliases maps the column names a statement's CTEs expose to the catalog
+// attributes they read, by running the CTE body's own SELECT list through the
+// same scanner the outer list uses.
+//
+// DataGrip reads columns through a CTE over pg_class that renames as it goes —
+// `T.oid as oid, T.relkind as kind, T.relnamespace as schemaId` — and the outer
+// query then selects T.kind and T.schemaId. Those names appear in no catalog,
+// so without this the outer statement asked for columns that resolved to
+// nothing. Resolving them is what lets one answer carry both relations of the
+// join the client wrote.
+func cteAliases(sql string) map[string]string {
+	if len(sql) < 5 || !strings.EqualFold(strings.TrimSpace(sql)[:5], "WITH ") {
+		return nil
+	}
+	aliases := make(map[string]string)
+	// Walk each `... AS ( body )` at paren depth zero.
+	depth, inSingle, inDouble := 0, false, false
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '(':
+			if depth == 0 {
+				// Body runs to the matching close paren.
+				body, end := balancedBody(sql, i)
+				if body != "" {
+					for _, it := range selectItems(strings.TrimSpace(body)) {
+						if it.label != "" && it.expr != "" {
+							aliases[strings.ToLower(it.label)] = it.expr
+						}
+					}
+				}
+				i = end
+				continue
+			}
+			depth++
+		case ch == ')':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return aliases
+}
+
+// balancedBody returns the text between the paren at open and its match, plus
+// the index of that closing paren.
+func balancedBody(s string, open int) (string, int) {
+	depth, inSingle, inDouble := 0, false, false
+	for i := open; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '(':
+			depth++
+		case ch == ')':
+			depth--
+			if depth == 0 {
+				return s[open+1 : i], i
+			}
+		}
+	}
+	return "", len(s) - 1
+}
+
 // evalCatalogExpr computes the value of a SELECT-list expression that wraps a
 // single catalog attribute in one of the text functions clients use to shape
 // catalog values, and reports whether it could.
@@ -117,6 +204,18 @@ func catalogRowAnswer(sql string, attrs map[string]any, fallbackCols []string) *
 // These functions are pure and tiny, so the honest answer is to compute what
 // PostgreSQL would compute rather than to guess or to return nothing.
 func evalCatalogExpr(expr string, attrs map[string]any) (any, bool) {
+	expr = strings.TrimSpace(expr)
+
+	// `not C.attislocal` — a negated attribute, which the column queries use
+	// to report inheritance.
+	if len(expr) > 4 && strings.EqualFold(expr[:4], "NOT ") {
+		v, ok := attrs[strings.ToLower(bareAttr(expr[4:]))]
+		if b, isBool := v.(bool); ok && isBool {
+			return !b, true
+		}
+		return nil, false
+	}
+
 	open := strings.IndexByte(expr, '(')
 	if open < 0 || !strings.HasSuffix(expr, ")") {
 		return nil, false
@@ -126,6 +225,15 @@ func evalCatalogExpr(expr string, attrs map[string]any) (any, bool) {
 	args := splitArgs(expr[open+1 : len(expr)-1])
 	if len(args) == 0 {
 		return nil, false
+	}
+
+	// format_type(atttypid, atttypmod) renders a column's SQL type. Its
+	// argument is an OID rather than the text the rest of these functions
+	// take, and the row already carries the rendering — computed from the
+	// column's real type — under format_type.
+	if fn == "format_type" {
+		ft, ok := attrs["format_type"]
+		return ft, ok
 	}
 
 	// The first argument names the attribute; the rest must be literals.
@@ -438,12 +546,17 @@ func selectItems(sql string) []selectItem {
 		if asIdx := lastTopLevelAS(p); asIdx >= 0 {
 			exprPart = strings.TrimSpace(p[:asIdx])
 			label = strings.Trim(strings.TrimSpace(p[asIdx+4:]), `"`)
-		} else if fields := strings.Fields(p); len(fields) == 2 {
+		} else if fields := strings.Fields(p); len(fields) == 2 &&
+			balancedParens(fields[0]) && isPlainIdent(fields[1]) {
 			// SQL's implicit alias: `rolsuper is_super` labels the column
 			// is_super with no AS. Without this the whole two-word text
 			// became the column name, and a client reading its own label
-			// found nothing under it. Only the exact two-token form is
-			// treated this way — anything longer is an expression.
+			// found nothing under it.
+			//
+			// Both guards matter: `format_type(a.atttypid, a.atttypmod)`
+			// splits into two whitespace tokens too, and reading the second
+			// as an alias turned one expression into a column labelled
+			// "a.atttypmod)".
 			exprPart, label = fields[0], strings.Trim(fields[1], `"`)
 		}
 		// A cast reads the same attribute: N.oid::bigint is still oid.
@@ -458,7 +571,25 @@ func selectItems(sql string) []selectItem {
 		}
 		bare = strings.Trim(bare, `"`)
 		if label == "" {
-			label = bare
+			// PostgreSQL labels an unaliased expression after the function it
+			// calls, and an unaliased subselect ?column?. Falling back to the
+			// trailing identifier instead produced columns named "atttypmod)".
+			switch {
+			case strings.HasPrefix(exprPart, "("):
+				label = "?column?"
+			case strings.Contains(exprPart, "(") && balancedParens(exprPart):
+				fn := strings.TrimSpace(exprPart[:strings.IndexByte(exprPart, '(')])
+				if dot := strings.LastIndex(fn, "."); dot >= 0 {
+					fn = fn[dot+1:]
+				}
+				if isPlainIdent(fn) {
+					label = strings.ToLower(fn)
+				} else {
+					label = bare
+				}
+			default:
+				label = bare
+			}
 		}
 		items = append(items, selectItem{expr: strings.ToLower(bare), label: label, raw: exprPart})
 	}
@@ -560,4 +691,40 @@ func lastTopLevelAS(s string) int {
 		}
 	}
 	return last
+}
+
+// isPlainIdent reports whether s is a bare SQL identifier (or a quoted one),
+// which is what an implicit alias must look like.
+func isPlainIdent(s string) bool {
+	s = strings.Trim(s, `"`)
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+			(i > 0 && c >= '0' && c <= '9')
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// balancedParens reports whether s opens and closes every paren it contains,
+// so a fragment of a longer expression is not mistaken for a whole one.
+func balancedParens(s string) bool {
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0
 }

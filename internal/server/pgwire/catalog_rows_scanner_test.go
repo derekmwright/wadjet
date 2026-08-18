@@ -164,14 +164,26 @@ func TestShapedAttributeAnswer(t *testing.T) {
 		t.Fatalf("attnotnull OID = %d, want 16", got)
 	}
 
-	// SQLAlchemy's query unpacks a fixed tuple of computed values; reshaping
-	// it to per-name attributes would hand back NULLs, so it is declined and
-	// keeps the 8-column tuple.
+	// A list mixing plain attributes with computed values is still answered in
+	// the client's own order — SQLAlchemy unpacks its 8 values positionally,
+	// so order is what it depends on. format_type() is computed, and a
+	// subselect this layer cannot evaluate is honestly NULL.
 	sqlalchemy := "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), " +
 		"(SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = a.attrelid) " +
 		"FROM pg_catalog.pg_attribute a WHERE a.attrelid = 'users'"
-	if got := shapedAttributeAnswer(sqlalchemy, rows); got != nil {
-		t.Fatalf("expression list should decline reshaping, got cols %v", got.cols)
+	mixed := shapedAttributeAnswer(sqlalchemy, rows)
+	if mixed == nil {
+		t.Fatal("mixed list should be shaped")
+	}
+	if len(mixed.cols) != 3 || mixed.cols[0] != "attname" ||
+		mixed.cols[1] != "format_type" || mixed.cols[2] != "?column?" {
+		t.Fatalf("cols = %v", mixed.cols)
+	}
+	if mixed.rows[0]["attname"] != "n_nationkey" || mixed.rows[0]["format_type"] != "bigint" {
+		t.Fatalf("row = %+v", mixed.rows[0])
+	}
+	if mixed.rows[0]["?column?"] != nil {
+		t.Fatalf("uncomputable subselect should be NULL, got %v", mixed.rows[0]["?column?"])
 	}
 	if got := shapedAttributeAnswer("select * from pg_attribute", rows); got != nil {
 		t.Fatal("SELECT * should keep the fixed tuple")
@@ -324,5 +336,22 @@ func TestStripSQLComments(t *testing.T) {
 	line := stripSQLComments("select a, -- why\nb from t")
 	if !strings.Contains(line, "b from t") {
 		t.Fatalf("line comment ate the rest: %q", line)
+	}
+}
+
+// PostgreSQL's CommandComplete tag carries the row count alone; only INSERT
+// prefixes an OID. Every command went out in the INSERT form, so psql answered
+// a DELETE with "could not interpret result from server: DELETE 0 0".
+func TestCommandTag(t *testing.T) {
+	for _, tt := range []struct{ cmd, want string }{
+		{"DELETE", "DELETE 3"},
+		{"UPDATE", "UPDATE 3"},
+		{"INSERT", "INSERT 0 3"},
+		{"delete", "DELETE 3"},
+		{"", "SELECT 3"},
+	} {
+		if got := commandTag(tt.cmd, 3); got != tt.want {
+			t.Errorf("commandTag(%q, 3) = %q, want %q", tt.cmd, got, tt.want)
+		}
 	}
 }

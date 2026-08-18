@@ -45,9 +45,9 @@ type Stage struct {
 	Tasks        int
 
 	// Scan metadata
-	TableName       string
-	ScanAlias       string // unique scan identity: "table" or "table:N" for Nth duplicate
-	Columns         []string
+	TableName string
+	ScanAlias string // unique scan identity: "table" or "table:N" for Nth duplicate
+	Columns   []string
 	// OutputColumns, when non-empty, narrows the stage's EMITTED columns
 	// to this set (worker inserts a zero-copy ColumnPrune before the
 	// sink). Columns stays the READ set — a scan must read its pushed
@@ -66,7 +66,7 @@ type Stage struct {
 
 	// Aggregate metadata
 	GroupByCols []string
-	AggSpecs   []AggSpec
+	AggSpecs    []AggSpec
 	// GroupByAll marks a keys-only hash aggregate over EVERY input column —
 	// the DISTINCT shape. The key set is resolved at runtime from the input
 	// schema (no plan-time column list), matching exec.HashAggregate.GroupByAll
@@ -436,10 +436,10 @@ func (p *PhysicalPlan) PrettyPrint() string {
 type Planner struct {
 	catalog        *catalog.Catalog
 	subqueryRunner expr.SubqueryRunner
-	planCtx        context.Context   // context from the current Plan() call, used by subquery runner
-	ctes           []plansql.CTEDef  // CTE definitions from the current query, for subquery resolution
-	MemoryBudget   int64             // per-query memory budget in bytes (0 = unlimited)
-	SpillDir       string            // directory for spill files (empty = os temp dir)
+	planCtx        context.Context  // context from the current Plan() call, used by subquery runner
+	ctes           []plansql.CTEDef // CTE definitions from the current query, for subquery resolution
+	MemoryBudget   int64            // per-query memory budget in bytes (0 = unlimited)
+	SpillDir       string           // directory for spill files (empty = os temp dir)
 
 	// SharedTracker / SharedSpillMgr (if set) are used in place of per-query
 	// Tracker+SpillManager creation. Workers set these to point at the
@@ -449,12 +449,12 @@ type Planner struct {
 	// falls back to creating a per-query pool as before.
 	SharedTracker  *memory.Tracker
 	SharedSpillMgr *memory.SpillManager
-	QueryLimits    *config.QueryLimits // cost-based query guard (nil = no limits)
+	QueryLimits    *config.QueryLimits         // cost-based query guard (nil = no limits)
 	cteCache       map[string]*cteMaterialized // materialized CTE results
-	scanCache      map[string]*scanCached       // cached scan results for duplicate table scans
-	spillMgr       *memory.SpillManager // shared per-query spill manager (lazy-initialized)
-	memTracker     *memory.Tracker      // shared per-query memory tracker (lazy-initialized)
-	WorkerCount    int                  // number of distributed workers (for shuffle partitioning)
+	scanCache      map[string]*scanCached      // cached scan results for duplicate table scans
+	spillMgr       *memory.SpillManager        // shared per-query spill manager (lazy-initialized)
+	memTracker     *memory.Tracker             // shared per-query memory tracker (lazy-initialized)
+	WorkerCount    int                         // number of distributed workers (for shuffle partitioning)
 
 	// BroadcastBytesThreshold is the maximum estimated build-side size for
 	// a join to be planned as broadcast_join. Builds above this become
@@ -1753,9 +1753,9 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 
 // Plan converts a logical plan to a physical plan for local execution.
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
-	p.planCtx = ctx       // store for subquery runner context propagation
+	p.planCtx = ctx      // store for subquery runner context propagation
 	p.releaseScanCache() // reset per-query scan cache (drops tracker reservation)
-	p.spillMgr = nil  // reset per-query spill manager
+	p.spillMgr = nil     // reset per-query spill manager
 	p.memTracker = nil
 	p.releaseCTECache() // reset per-query CTE cache (frees stale spill scratch)
 	// Propagate CTE definitions from the logical plan so scalar subqueries
@@ -1798,8 +1798,8 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	plan := &PhysicalPlan{
 		Pipeline: &exec.Pipeline{
 			Source:  source,
-			Ops:    ops,
-			Sink:   sink,
+			Ops:     ops,
+			Sink:    sink,
 			Workers: pipelineWorkers,
 		},
 	}
@@ -1862,107 +1862,107 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// shape is a single-pipeline optimization that becomes a SF10-
 	// killing N-round-trip fan-out under native-DAG dispatch.
 	stages = collapseMergeTreesForNativeDAG(stages)
-		// Drop redundant trailing merge_sort Singleton stages whose sole
-		// dep is a Singleton sort — the merge_sort is a no-op in that
-		// shape and costs a full worker round-trip per query.
-		stages = collapseRedundantFinalMergeSort(stages)
-		// Fuse Singleton sort into its Singleton predecessor (aggregate /
-		// hash_join / broadcast_join / final_aggregate) so the worker
-		// applies the sort in-process rather than serializing the
-		// pre-sort output and letting a separate sort task pick it up.
-		stages = fuseSortIntoPredecessor(stages, p.WorkerCount)
-		var ensureErr error
-		stages, ensureErr = EnsureDistribution(stages, p.WorkerCount)
-		if ensureErr != nil {
-			return nil, fmt.Errorf("ensure distribution: %w", ensureErr)
-		}
-		// Re-resolve distributions after EnsureDistribution: stages whose
-		// inputs got rewritten to exchange outputs need their Distribution
-		// recomputed against the new dep distributions. Without this, e.g.,
-		// a grouped final_aggregate whose dep was upgraded from Singleton
-		// to HashPartitioned (via an inserted exchange-repartition) would
-		// keep its initial Singleton label, and dispatchComputeStage would
-		// run it as one task instead of the N parallel tasks the exchange
-		// is feeding (Q18 SF10 OOM trigger).
-		assignStageDistributions(stages, p.WorkerCount)
-		// Drop identity re-shuffles (input already hash-partitioned on the
-		// exchange's exact keys/count — Q18's 40 GB repartition-15 at
-		// SF100). Must run after distributions are final; consumers keep
-		// valid labels because the elided exchange's output distribution
-		// was by definition its input's. Kill switch WADJET_EXCHANGE_ELIDE=0.
-		stages = elideCoPartitionedExchanges(stages)
-		// Drop filtered scan-exchanges fully subsumed by a raw sibling over
-		// the same table (Q21 l3 ⊂ l2): the raw exchange ships the filter
-		// as a computed flag column and the dropped exchange's consumer
-		// filters its build input on it. Kill switch
-		// WADJET_EXCHANGE_SUBSUME=0.
-		stages = dedupeSubsumedScanExchanges(stages)
-		// Feed a grouped final_aggregate from a sibling RAW exchange
-		// hash-partitioned on its exact group keys, dropping the duplicate
-		// fused scan-agg leg (Q18's 2nd full lineitem scan). The rewired
-		// final mirrors the raw exchange's partitioning, which typically
-		// turns its downstream re-shuffle into an identity exchange — run
-		// the elide pass again to collect it. Kill switch
-		// WADJET_AGG_OVER_EXCHANGE=0.
-		if rewired := rewireAggOverRawExchange(stages); len(rewired) != len(stages) {
-			stages = elideCoPartitionedExchanges(rewired)
-		}
-		// Drop join subtrees that duplicate a sibling subtree (Q11's
-		// scalar-subquery leg clones its main leg stage-for-stage; Q17's
-		// semi lineitem⋈part ≡ its inner sibling), rewiring the clone's
-		// consumers onto the survivor — stage outputs already support
-		// multiple consumers. MUST run before fuseStageChains: chain
-		// fusion absorbs consumers into the legs, breaking the clones'
-		// structural symmetry. Kill switch WADJET_SHARED_SUBPLAN=0.
-		stages = dedupeSharedSubplans(stages)
-		// Fuse 1:1 same-distribution join chains (consumer task i reads
-		// exactly producer task i's output) into single fragments, eliding
-		// the per-link materialization — Q18's join-class 48.9 GB at
-		// SF100. Runs when distributions are final so the count-equality
-		// gate sees real values. No file-count amplification (task count
-		// unchanged), unlike the disabled fuseScanShuffle/fuseJoinShuffle
-		// below. Kill switch WADJET_STAGE_FUSION=0.
-		stages = fuseStageChains(stages)
-		// Narrow scan-stage OUTPUT to what consumers declare (Columns
-		// stays the read set — pushed filter columns are read, applied,
-		// then dropped from the payload). Runs after every stage-rewiring
-		// pass so the consumer set is final. Kill switch
-		// WADJET_SCAN_OUTPUT_PRUNE=0.
-		pruneScanOutputColumns(stages)
-		// Fuse scan→exchange-repartition pairs whose consumers all
-		// partition-bind (hash/sort-merge joins, grouped finals): the scan
-		// task hash-partitions its filtered output directly, deleting the
-		// full write+read of the unpartitioned intermediate (2026-08-02
-		// SF100 accounting: ~20 GB duplicated per cold suite run on scan
-		// legs — Q03 10.0 GB, Q21 6.8 GB, Q13 2.4 GB). Re-enabled
-		// 2026-08-02: the 2026-05 regressions that kept this disabled
-		// (Q07 +85%, Q03 +30% — file-count amplification at broadcast
-		// caches and flattening exchange readers) are excluded
-		// structurally by the consumer-shape gate, and the old
-		// consolidation argument no longer holds — scan and shuffle
-		// fan-out are both capacity-bound now, so the fused layout's
-		// per-partition file count matches the unfused two-step for
-		// partition-binding consumers. Kill switch
-		// WADJET_FUSE_SCAN_SHUFFLE=0.
-		stages = fuseScanShuffle(stages)
-		// Same treatment for join→exchange pairs (Q18 join-4→rp-6 7.6 GB,
-		// Q05 join-4→rp-8 2.96 GB duplicated per SF100 run in the 08-02
-		// fusion-ab pair): hash_join outputs partition directly via the
-		// fragment runner's OpExchangeSender terminal, gated identically
-		// (partition-binding consumers only, no computed cols; hash_join
-		// only — broadcast_join fusion stays off per the 2026-05-03 Q02
-		// wrong-rows history). Kill switch WADJET_FUSE_JOIN_SHUFFLE=0.
-		stages = fuseJoinShuffle(stages)
-		//
-		// fuseScanAggregateShuffle IS enabled. Pattern: scan(FusedAgg) →
-		// exchange-repartition → final_aggregate/merge_aggregate. Aggregate
-		// collapses input cardinality to K rows per task, so fused output
-		// scan-task-count × numPartitions matches the unfused output's
-		// post-exchange-repartition file count. No amplification at
-		// downstream consumers. Enables Q01/Q02/Q15/Q17/Q18/Q20-style
-		// aggregation queries to skip the standalone exchange-repartition
-		// stage. Gated on collapsing-consumer (final_aggregate /
-		// merge_aggregate) only.
+	// Drop redundant trailing merge_sort Singleton stages whose sole
+	// dep is a Singleton sort — the merge_sort is a no-op in that
+	// shape and costs a full worker round-trip per query.
+	stages = collapseRedundantFinalMergeSort(stages)
+	// Fuse Singleton sort into its Singleton predecessor (aggregate /
+	// hash_join / broadcast_join / final_aggregate) so the worker
+	// applies the sort in-process rather than serializing the
+	// pre-sort output and letting a separate sort task pick it up.
+	stages = fuseSortIntoPredecessor(stages, p.WorkerCount)
+	var ensureErr error
+	stages, ensureErr = EnsureDistribution(stages, p.WorkerCount)
+	if ensureErr != nil {
+		return nil, fmt.Errorf("ensure distribution: %w", ensureErr)
+	}
+	// Re-resolve distributions after EnsureDistribution: stages whose
+	// inputs got rewritten to exchange outputs need their Distribution
+	// recomputed against the new dep distributions. Without this, e.g.,
+	// a grouped final_aggregate whose dep was upgraded from Singleton
+	// to HashPartitioned (via an inserted exchange-repartition) would
+	// keep its initial Singleton label, and dispatchComputeStage would
+	// run it as one task instead of the N parallel tasks the exchange
+	// is feeding (Q18 SF10 OOM trigger).
+	assignStageDistributions(stages, p.WorkerCount)
+	// Drop identity re-shuffles (input already hash-partitioned on the
+	// exchange's exact keys/count — Q18's 40 GB repartition-15 at
+	// SF100). Must run after distributions are final; consumers keep
+	// valid labels because the elided exchange's output distribution
+	// was by definition its input's. Kill switch WADJET_EXCHANGE_ELIDE=0.
+	stages = elideCoPartitionedExchanges(stages)
+	// Drop filtered scan-exchanges fully subsumed by a raw sibling over
+	// the same table (Q21 l3 ⊂ l2): the raw exchange ships the filter
+	// as a computed flag column and the dropped exchange's consumer
+	// filters its build input on it. Kill switch
+	// WADJET_EXCHANGE_SUBSUME=0.
+	stages = dedupeSubsumedScanExchanges(stages)
+	// Feed a grouped final_aggregate from a sibling RAW exchange
+	// hash-partitioned on its exact group keys, dropping the duplicate
+	// fused scan-agg leg (Q18's 2nd full lineitem scan). The rewired
+	// final mirrors the raw exchange's partitioning, which typically
+	// turns its downstream re-shuffle into an identity exchange — run
+	// the elide pass again to collect it. Kill switch
+	// WADJET_AGG_OVER_EXCHANGE=0.
+	if rewired := rewireAggOverRawExchange(stages); len(rewired) != len(stages) {
+		stages = elideCoPartitionedExchanges(rewired)
+	}
+	// Drop join subtrees that duplicate a sibling subtree (Q11's
+	// scalar-subquery leg clones its main leg stage-for-stage; Q17's
+	// semi lineitem⋈part ≡ its inner sibling), rewiring the clone's
+	// consumers onto the survivor — stage outputs already support
+	// multiple consumers. MUST run before fuseStageChains: chain
+	// fusion absorbs consumers into the legs, breaking the clones'
+	// structural symmetry. Kill switch WADJET_SHARED_SUBPLAN=0.
+	stages = dedupeSharedSubplans(stages)
+	// Fuse 1:1 same-distribution join chains (consumer task i reads
+	// exactly producer task i's output) into single fragments, eliding
+	// the per-link materialization — Q18's join-class 48.9 GB at
+	// SF100. Runs when distributions are final so the count-equality
+	// gate sees real values. No file-count amplification (task count
+	// unchanged), unlike the disabled fuseScanShuffle/fuseJoinShuffle
+	// below. Kill switch WADJET_STAGE_FUSION=0.
+	stages = fuseStageChains(stages)
+	// Narrow scan-stage OUTPUT to what consumers declare (Columns
+	// stays the read set — pushed filter columns are read, applied,
+	// then dropped from the payload). Runs after every stage-rewiring
+	// pass so the consumer set is final. Kill switch
+	// WADJET_SCAN_OUTPUT_PRUNE=0.
+	pruneScanOutputColumns(stages)
+	// Fuse scan→exchange-repartition pairs whose consumers all
+	// partition-bind (hash/sort-merge joins, grouped finals): the scan
+	// task hash-partitions its filtered output directly, deleting the
+	// full write+read of the unpartitioned intermediate (2026-08-02
+	// SF100 accounting: ~20 GB duplicated per cold suite run on scan
+	// legs — Q03 10.0 GB, Q21 6.8 GB, Q13 2.4 GB). Re-enabled
+	// 2026-08-02: the 2026-05 regressions that kept this disabled
+	// (Q07 +85%, Q03 +30% — file-count amplification at broadcast
+	// caches and flattening exchange readers) are excluded
+	// structurally by the consumer-shape gate, and the old
+	// consolidation argument no longer holds — scan and shuffle
+	// fan-out are both capacity-bound now, so the fused layout's
+	// per-partition file count matches the unfused two-step for
+	// partition-binding consumers. Kill switch
+	// WADJET_FUSE_SCAN_SHUFFLE=0.
+	stages = fuseScanShuffle(stages)
+	// Same treatment for join→exchange pairs (Q18 join-4→rp-6 7.6 GB,
+	// Q05 join-4→rp-8 2.96 GB duplicated per SF100 run in the 08-02
+	// fusion-ab pair): hash_join outputs partition directly via the
+	// fragment runner's OpExchangeSender terminal, gated identically
+	// (partition-binding consumers only, no computed cols; hash_join
+	// only — broadcast_join fusion stays off per the 2026-05-03 Q02
+	// wrong-rows history). Kill switch WADJET_FUSE_JOIN_SHUFFLE=0.
+	stages = fuseJoinShuffle(stages)
+	//
+	// fuseScanAggregateShuffle IS enabled. Pattern: scan(FusedAgg) →
+	// exchange-repartition → final_aggregate/merge_aggregate. Aggregate
+	// collapses input cardinality to K rows per task, so fused output
+	// scan-task-count × numPartitions matches the unfused output's
+	// post-exchange-repartition file count. No amplification at
+	// downstream consumers. Enables Q01/Q02/Q15/Q17/Q18/Q20-style
+	// aggregation queries to skip the standalone exchange-repartition
+	// stage. Gated on collapsing-consumer (final_aggregate /
+	// merge_aggregate) only.
 	stages = fuseScanAggregateShuffle(stages)
 	// Sender-side partial aggregation on surviving exchanges (SF100 Q18's
 	// 600M-row raw (l_orderkey, l_quantity) rp leg → ~4× reduction). Runs
@@ -3131,7 +3131,7 @@ func buildSideBytes(stages []Stage, joinStage *Stage) int64 {
 // Example: join-A (lineitem ⨝ part) → join-B (broadcast_join with nation)
 // becomes: join-A with FusedJoins=[nation join spec], join-B removed.
 //
-// FUSION DEPTH AND BYTE BUDGET
+// # FUSION DEPTH AND BYTE BUDGET
 //
 // Multi-level fusion is allowed when the cumulative build-side bytes on the
 // consumer (its primary build, if broadcast_join, plus every existing fused
@@ -5490,6 +5490,17 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 
 	child := node.Children[0]
 
+	// A star sharing its SELECT list with other items — `SELECT t.*, ctid` is
+	// how DataGrip opens a table — reaches here as a projection of the literal
+	// column "*". Nothing expands it: the local pipeline failed with `column
+	// "*" does not exist`, the coordinator read that as an infrastructure
+	// failure and re-ran the query on the DAG, and the DAG answered it without
+	// the projection AND without the LIMIT above it — 25 rows for a LIMIT 3.
+	// Expanding here fixes both paths at once, because both plan through it.
+	if err := p.expandStarProjections(ctx, node, child); err != nil {
+		return nil, nil, nil, err
+	}
+
 	// If the child (or child chain through Filter/HAVING) leads to an Aggregate,
 	// skip the projection when possible — the aggregate already produces correctly
 	// named output columns (group-by cols + agg output cols).
@@ -6263,14 +6274,14 @@ func isSimpleColRef(node plansql.Node) bool {
 // and adds computed expression columns for aggregate inputs.
 type aggPreProject struct {
 	computed          []exec.ProjectColumn
-	cachedSchema      []parquet.Column    // cached output schema (computed once)
-	cachedOutput      *batch.RecordBatch  // most recent output (NOT reused — fresh struct each Execute call to avoid clobbering downstream's stored references; only the underlying Vectors are pooled via computedVectors)
-	computedVectors   []*batch.Vector     // pooled computed-column vectors (reused across calls, sized to computedCap)
-	computedCap       int                 // row capacity of cached computed vectors
-	canPassSelThrough bool                // true if all computed columns are numeric (no BytesColumn)
-	checkedSelPass    bool                // true after first call resolves canPassSelThrough
-	matPool           *batch.BatchPool    // pool for materialize buffers (avoids per-call allocation)
-	shareOutputs      bool                // per-call vector allocation (partitioned-agg sharing)
+	cachedSchema      []parquet.Column   // cached output schema (computed once)
+	cachedOutput      *batch.RecordBatch // most recent output (NOT reused — fresh struct each Execute call to avoid clobbering downstream's stored references; only the underlying Vectors are pooled via computedVectors)
+	computedVectors   []*batch.Vector    // pooled computed-column vectors (reused across calls, sized to computedCap)
+	computedCap       int                // row capacity of cached computed vectors
+	canPassSelThrough bool               // true if all computed columns are numeric (no BytesColumn)
+	checkedSelPass    bool               // true after first call resolves canPassSelThrough
+	matPool           *batch.BatchPool   // pool for materialize buffers (avoids per-call allocation)
+	shareOutputs      bool               // per-call vector allocation (partitioned-agg sharing)
 }
 
 func (a *aggPreProject) Init(_ context.Context) error { return nil }
@@ -6656,7 +6667,7 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 		}
 		if we.Frame != nil {
 			wc.Frame = &exec.WindowFrameSpec{
-				Mode: we.Frame.Mode,
+				Mode:  we.Frame.Mode,
 				Start: exec.WindowBound{Type: we.Frame.Start.Type, Offset: we.Frame.Start.Offset},
 				End:   exec.WindowBound{Type: we.Frame.End.Type, Offset: we.Frame.End.Offset},
 			}
@@ -8473,8 +8484,8 @@ func (a *aggSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error)
 		// Run child pipeline into aggregate
 		pipe := &exec.Pipeline{
 			Source:  a.childSource,
-			Ops:    a.childOps,
-			Sink:   a.agg,
+			Ops:     a.childOps,
+			Sink:    a.agg,
 			Workers: innerPipelineWorkers(a.childSource),
 		}
 		if err := pipe.Run(ctx); err != nil {
@@ -8520,8 +8531,8 @@ func (s *sortSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error
 		s.initialized = true
 		pipe := &exec.Pipeline{
 			Source:  s.childSource,
-			Ops:    s.childOps,
-			Sink:   s.sort,
+			Ops:     s.childOps,
+			Sink:    s.sort,
 			Workers: innerPipelineWorkers(s.childSource),
 		}
 		if err := pipe.Run(ctx); err != nil {
@@ -8630,15 +8641,15 @@ type scanSourceInner struct {
 	rowLimit       int64                     // >0: lazy file downloading (LIMIT pushdown)
 
 	// row-group-level parallel scan
-	rgUnits   []rgUnit  // flat list of row group work units
-	rgIdx     int64     // atomic index for parallel RG workers
-	emitRowLoc bool     // stamp __row_loc (rgUnit ordinal, row) on every scan batch; disables batch pooling
-	eqProbes  []scan.EqProbe // "=" conjuncts for dictionary-probe row-group pruning (dict_prune.go)
-	rowPreds  []scan.RowPred // scan-level filter conjuncts, evaluated per row group in readRG
+	rgUnits       []rgUnit        // flat list of row group work units
+	rgIdx         int64           // atomic index for parallel RG workers
+	emitRowLoc    bool            // stamp __row_loc (rgUnit ordinal, row) on every scan batch; disables batch pooling
+	eqProbes      []scan.EqProbe  // "=" conjuncts for dictionary-probe row-group pruning (dict_prune.go)
+	rowPreds      []scan.RowPred  // scan-level filter conjuncts, evaluated per row group in readRG
 	shapeOnlyCols map[string]bool // lowercased names of columns decoded as lengths only (lengths_decode.go)
-	countOnlyScan bool // requiredCols is exactly the row-count sentinel: batches carry Len/Sel only
-	useNative bool      // true if native page decoder can be used (no Decimal/Array/Map)
-	loadGate  *loadGate // byte-budgeted admission for in-flight file LOADs (data, not metadata)
+	countOnlyScan bool            // requiredCols is exactly the row-count sentinel: batches carry Len/Sel only
+	useNative     bool            // true if native page decoder can be used (no Decimal/Array/Map)
+	loadGate      *loadGate       // byte-budgeted admission for in-flight file LOADs (data, not metadata)
 
 	// batch pooling — reuse batch allocations across row groups
 	pool *batch.BatchPool
@@ -9249,4 +9260,76 @@ func wrapPredicate(e expr.Expr) exec.Predicate {
 		}
 		return false
 	}
+}
+
+// expandStarProjections replaces a `*` (or `alias.*`) projection with one
+// projection per column of the star's source, in schema order.
+//
+// The source is resolved from the catalog when the star's scope is a single
+// base table, which covers the shape clients send. A star over a join or a
+// derived table is left alone: its column set is not knowable here, and
+// guessing it would silently change which columns a query returns — the
+// failure it currently produces is the safer answer until star expansion moves
+// into name resolution proper (#293's territory).
+func (p *Planner) expandStarProjections(ctx context.Context, node, child *logical.Node) error {
+	hasStar := false
+	for _, proj := range node.Projections {
+		if isStarProjection(proj) {
+			hasStar = true
+			break
+		}
+	}
+	if !hasStar || p.catalog == nil {
+		return nil
+	}
+
+	// Only a single base-table source has a knowable column list here.
+	var scans []*logical.Node
+	var walk func(n *logical.Node)
+	walk = func(n *logical.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == logical.NodeScan {
+			scans = append(scans, n)
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(child)
+	if len(scans) != 1 || scans[0].TableName == "" {
+		return nil
+	}
+	tbl, err := p.catalog.GetTable(ctx, scans[0].TableName)
+	if err != nil || tbl == nil {
+		return nil
+	}
+
+	expanded := make([]logical.Projection, 0, len(node.Projections)+len(tbl.Schema.Columns))
+	for _, proj := range node.Projections {
+		if !isStarProjection(proj) {
+			expanded = append(expanded, proj)
+			continue
+		}
+		for _, col := range tbl.Schema.Columns {
+			expanded = append(expanded, logical.Projection{
+				Column:  col.Name,
+				Alias:   col.Name,
+				Expr:    col.Name,
+				ASTExpr: &plansql.ColRef{Column: col.Name},
+			})
+		}
+	}
+	node.Projections = expanded
+	return nil
+}
+
+// isStarProjection reports whether proj is `*` or a qualified `alias.*`.
+func isStarProjection(proj logical.Projection) bool {
+	e := strings.TrimSpace(proj.Expr)
+	if e == "" {
+		e = strings.TrimSpace(proj.Column)
+	}
+	return e == "*" || strings.HasSuffix(e, ".*")
 }
