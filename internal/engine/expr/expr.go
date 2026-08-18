@@ -1176,6 +1176,11 @@ type FuncCall struct {
 
 	fnOnce sync.Once
 	fn     ScalarFunc
+	// Argument-family flags, resolved with fn under fnOnce: this function
+	// reads its arguments as text (stringInputFuncs) / as instants
+	// (temporalInputFuncs). Resolved once rather than re-looked-up per row.
+	wantsText    bool
+	wantsInstant bool
 
 	vecOnce sync.Once
 	vecFn   VecScalarFunc
@@ -1223,7 +1228,81 @@ func (e *FuncCall) formatTemporalArgs(args []any) {
 	}
 }
 
+// temporalInputFuncs are the scalar functions that read an argument as an
+// INSTANT — every function whose body reaches parseTime/toTime. They are the
+// counterpart of stringInputFuncs and exist for the same reason: ColRef.Eval
+// boxes a temporal column as a bare number (epoch DAYS for TypeDate, epoch
+// MILLISECONDS for TypeTimestamp), and a bare number has lost its unit.
+// parseTime reads an int64 as SECONDS, so 9568 days became 9568 seconds and
+// YEAR(l_shipdate) answered 1970 for every row of a decade — no error, no
+// null, one bogus GROUP BY bucket (issue #319).
+//
+// The unit cannot be recovered downstream: distinguishing days from seconds by
+// magnitude is a guess, and a wrong guess is worse than the current bug. It
+// CAN be recovered here, where the argument is still a column reference whose
+// vector knows its own type — so this family, and only this family, resolves
+// its column arguments through columnInstant before the function runs.
+//
+// Keyed lowercase, the registry's convention. Deliberately excluded:
+// date_diff / date_add / date_sub, which read a date through parseDateValue
+// (int64 = DAYS, the unit a TypeDate column already boxes) and are correct as
+// they stand; and from_unixtime / timezone_hour / timezone_minute, whose
+// argument is a number in its own right, not a column instant.
+var temporalInputFuncs = map[string]bool{
+	"year": true, "month": true, "day": true,
+	"hour": true, "minute": true, "second": true,
+	"quarter": true, "week": true,
+	"day_of_week": true, "day_of_year": true,
+	"last_day_of_month": true,
+	"date_trunc":        true, "extract": true,
+	"epoch": true, "to_unixtime": true, "date_format": true,
+	"at_timezone": true, "timezone": true,
+}
+
+// resolveTemporalArgs rewrites a boxed DATE/TIMESTAMP column argument to the
+// instant it denotes, so the function body's parseTime sees an unambiguous
+// time.Time instead of a unit-less number. Resolution goes through
+// columnInstant — the same resolver the vectorized kernels use — which is what
+// makes the two paths agree by construction rather than by coincidence.
+//
+// Only direct column references are covered, matching formatTemporalArgs: a
+// nested expression's output type isn't known here, and a literal or a
+// computed value already carries its own unambiguous form (text, or a number
+// that means seconds). Columns of any other type are left alone, so
+// year(int_col) keeps reading its int64 as epoch seconds exactly as before.
+func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any) {
+	for i, a := range e.Args {
+		if args[i] == nil {
+			continue
+		}
+		cr, ok := a.(*ColRef)
+		if !ok || cr.structField != "" {
+			continue
+		}
+		if cr.typ != batch.TypeDate && cr.typ != batch.TypeTimestamp {
+			continue
+		}
+		if cr.idx < 0 || cr.idx >= len(b.Columns) {
+			continue
+		}
+		if t, ok := columnInstant(b.Columns[cr.idx], row); ok {
+			args[i] = t
+		}
+	}
+}
+
 func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
+	// Cache function pointer to avoid RWMutex contention on every row.
+	// sync.Once ensures concurrent first-time lookups don't race.
+	e.fnOnce.Do(func() {
+		lower := strings.ToLower(e.Name)
+		e.fn = DefaultRegistry.Lookup(e.Name)
+		e.wantsText = stringInputFuncs[lower]
+		e.wantsInstant = temporalInputFuncs[lower]
+	})
+	if e.fn == nil {
+		return nil
+	}
 	// Allocate args on every call so concurrent goroutines sharing this
 	// *FuncCall don't stomp on each other. For small N (the common case)
 	// the Go compiler routinely stack-allocates this slice, so the cost
@@ -1232,16 +1311,11 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	for i, a := range e.Args {
 		args[i] = a.Eval(b, row)
 	}
-	if stringInputFuncs[strings.ToLower(e.Name)] {
+	if e.wantsText {
 		e.formatTemporalArgs(args)
 	}
-	// Cache function pointer to avoid RWMutex contention on every row.
-	// sync.Once ensures concurrent first-time lookups don't race.
-	e.fnOnce.Do(func() {
-		e.fn = DefaultRegistry.Lookup(e.Name)
-	})
-	if e.fn == nil {
-		return nil
+	if e.wantsInstant {
+		e.resolveTemporalArgs(b, row, args)
 	}
 	return e.fn(args)
 }
@@ -2593,11 +2667,18 @@ func fnExtract(args []any) any {
 	if t.IsZero() {
 		return nil
 	}
+	// Unit set kept identical to vecExtract's, so the two paths answer the
+	// same question — quarter/week/epoch used to exist only in the kernel.
 	switch unit {
 	case "year":
 		return float64(t.Year())
+	case "quarter":
+		return float64((int(t.Month())-1)/3 + 1)
 	case "month":
 		return float64(t.Month())
+	case "week":
+		_, week := t.ISOWeek()
+		return float64(week)
 	case "day":
 		return float64(t.Day())
 	case "hour":
@@ -2610,6 +2691,8 @@ func fnExtract(args []any) any {
 		return float64(t.Weekday())
 	case "doy", "dayofyear":
 		return float64(t.YearDay())
+	case "epoch":
+		return float64(t.Unix())
 	default:
 		return nil
 	}
@@ -4700,10 +4783,12 @@ func fnPgPostmasterStartTime(args []any) any {
 }
 
 // fnEpoch implements EXTRACT(EPOCH FROM ts), which the parser rewrites to
-// epoch(ts): seconds since 1970-01-01T00:00:00Z. Timestamp columns already
-// hold exactly that — parseTime round-trips an int64 through time.Unix, and
-// the vectorized EXTRACT kernel's own "epoch" case returns the raw int64 —
-// so a column's value passes through unchanged and text timestamps are parsed.
+// epoch(ts): seconds since 1970-01-01T00:00:00Z. It is derived from the
+// resolved instant, never from the column's raw stored number — a DATE column
+// holds days and a TIMESTAMP column holds milliseconds, so passing the stored
+// value through unchanged answered 9568 for a 1996 date (issue #319).
+// resolveTemporalArgs converts those columns to a time.Time before this runs;
+// text timestamps are parsed by parseTime as they always were.
 func fnEpoch(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
@@ -8310,7 +8395,7 @@ func vecYear(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		t, ok := vecTimeAt(src, i)
+		t, ok := columnInstant(src, i)
 		if !ok {
 			out.Nulls.SetNull(i)
 			continue
@@ -8327,7 +8412,7 @@ func vecMonth(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		t, ok := vecTimeAt(src, i)
+		t, ok := columnInstant(src, i)
 		if !ok {
 			out.Nulls.SetNull(i)
 			continue
@@ -8344,7 +8429,7 @@ func vecDay(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		t, ok := vecTimeAt(src, i)
+		t, ok := columnInstant(src, i)
 		if !ok {
 			out.Nulls.SetNull(i)
 			continue
@@ -8361,7 +8446,7 @@ func vecHour(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		t, ok := vecTimeAt(src, i)
+		t, ok := columnInstant(src, i)
 		if !ok {
 			out.Nulls.SetNull(i)
 			continue
@@ -8383,7 +8468,7 @@ func vecExtract(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		t, ok := vecTimeAt(src, i)
+		t, ok := columnInstant(src, i)
 		if !ok {
 			out.Nulls.SetNull(i)
 			continue
@@ -8391,8 +8476,13 @@ func vecExtract(args []*batch.Vector, out *batch.Vector, n int) {
 		switch unit {
 		case "year":
 			out.Float64Data[i] = float64(t.Year())
+		case "quarter":
+			out.Float64Data[i] = float64((t.Month()-1)/3 + 1)
 		case "month":
 			out.Float64Data[i] = float64(t.Month())
+		case "week":
+			_, week := t.ISOWeek()
+			out.Float64Data[i] = float64(week)
 		case "day":
 			out.Float64Data[i] = float64(t.Day())
 		case "hour":
@@ -8405,10 +8495,13 @@ func vecExtract(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Float64Data[i] = float64(t.Weekday())
 		case "doy", "dayofyear":
 			out.Float64Data[i] = float64(t.YearDay())
-		case "quarter":
-			out.Float64Data[i] = float64((t.Month()-1)/3 + 1)
 		case "epoch":
 			out.Float64Data[i] = float64(t.Unix())
+		default:
+			// fnExtract returns nil for an unrecognized unit. Leaving the
+			// pooled vector's stale contents in place instead answered with
+			// whatever the previous batch wrote there.
+			out.Nulls.SetNull(i)
 		}
 	}
 }
@@ -8547,17 +8640,29 @@ func fnEntropy(args []any) any {
 	return entropy
 }
 
-// vecTimeAt resolves row i of a vector to a UTC time, and reports whether it
-// could. The date-part kernels below all used to read src.Int64Data directly,
-// which is right ONLY for a timestamp: a DATE column stores days-since-epoch
-// in Int32Data and a date held as text stores nothing there at all, so both
-// read zeros and every row came back as 1970 — silently, with no error and no
-// null. `SELECT EXTRACT(YEAR FROM l_shipdate) ... GROUP BY 1` collapsed a
-// decade of data into one bogus bucket.
+// columnInstant resolves row i of a vector to the UTC instant it denotes, and
+// reports whether it could. It is THE definition of "what time is stored in
+// this column", and both evaluation paths go through it: the vectorized
+// date-part kernels below call it directly, and the scalar path reaches it
+// through (*FuncCall).resolveTemporalArgs. Divergence between the two paths is
+// what let this defect survive — one shared resolver makes agreement
+// structural rather than something a test has to keep rediscovering.
 //
-// The scalar implementations (fnYear and friends, via parseTime) always
-// handled these; this is what makes the vectorized path agree with them.
-func vecTimeAt(src *batch.Vector, i int) (time.Time, bool) {
+// A raw stored number carries no unit, and each type stores a different one:
+//
+//	TypeDate      Int32Data, days since the epoch
+//	TypeTimestamp Int64Data, MILLISECONDS since the epoch (what the parquet
+//	              writer emits — file_writer.go encodes TimestampMillis — and
+//	              what the comparison path assumes, parseTemporalInt64)
+//	String/Bytes  text, parsed
+//	anything else Int64Data read as seconds, the only defensible reading of
+//	              an untyped integer and what parseTime(int64) has always done
+//
+// Reading Int64Data unconditionally was right only for a timestamp-in-seconds
+// column: a DATE column has nothing in Int64Data at all, so every row came
+// back as 1970 — silently, with no error and no null, collapsing a decade of
+// `GROUP BY EXTRACT(YEAR FROM d)` into one bogus bucket (issue #319).
+func columnInstant(src *batch.Vector, i int) (time.Time, bool) {
 	switch src.Type {
 	case batch.TypeString, batch.TypeBytes:
 		t := parseTime(src.BytesData.StringValue(i))
@@ -8569,6 +8674,11 @@ func vecTimeAt(src *batch.Vector, i int) (time.Time, bool) {
 		if i < len(src.Int32Data) {
 			// Days since the Unix epoch.
 			return time.Unix(int64(src.Int32Data[i])*86400, 0).UTC(), true
+		}
+	case batch.TypeTimestamp:
+		if i < len(src.Int64Data) {
+			// Milliseconds since the Unix epoch.
+			return time.UnixMilli(src.Int64Data[i]).UTC(), true
 		}
 	default:
 		if i < len(src.Int64Data) {
