@@ -334,6 +334,20 @@ func (h *intHashTable) Delete(key int64) (int32, bool) {
 	return deleted, true
 }
 
+// freeEntries drops the entry array, returning its off-heap reservation
+// immediately when it had one. Used by the two-level conversion, which has
+// already copied every live entry out (two_level_hash.go); the table is
+// unusable afterwards.
+func (h *intHashTable) freeEntries() {
+	if h.entriesOffheap && len(h.entries) > 0 {
+		h.reg.Release(unsafe.Pointer(unsafe.SliceData(h.entries)))
+	}
+	h.entries = nil
+	h.entriesOffheap = false
+	h.mask = 0
+	h.size = 0
+}
+
 // grow doubles the table capacity and rehashes all entries.
 func (h *intHashTable) grow() {
 	newCap := len(h.entries) * 2

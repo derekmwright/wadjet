@@ -350,6 +350,19 @@ type HashAggregate struct {
 	routePlanV *routePlan
 	provHashes []uint64
 	provPlan   *routePlan
+
+	// Two-level group index (two_level_hash.go). EXACTLY ONE of
+	// intGroupIndex/intTwoLevel is non-nil on the single-int path, and one of
+	// packedIdx/packedTwoLevel on the packed path: the sink starts flat and
+	// converts once past twoLevelConvertAt, or constructs bucketed straight
+	// away when the NDV hint already exceeds it. Both are read ONCE per batch
+	// (hoisted out of the row loop), never per row.
+	//
+	// Appended at the very END of the struct for the same reason the routing
+	// fields were: adding a field mid-struct shifts every later hot
+	// consume-loop field's offset, which measured on its own.
+	intTwoLevel    *intTwoLevelTable
+	packedTwoLevel *packedTwoLevelTable
 }
 
 // kernelAccumulatorBytes is the per-element cost of extras.accs slices,
@@ -459,8 +472,14 @@ func (h *HashAggregate) groupMemoryUsage() int64 {
 	if h.intGroupIndex != nil {
 		size += h.intGroupIndex.MemoryUsage()
 	}
+	if h.intTwoLevel != nil {
+		size += h.intTwoLevel.MemoryUsage()
+	}
 	if h.packedIdx != nil {
 		size += h.packedIdx.MemoryUsage()
+	}
+	if h.packedTwoLevel != nil {
+		size += h.packedTwoLevel.MemoryUsage()
 	}
 	if h.strGroupIndex != nil {
 		size += h.strGroupIndex.MemoryUsage()
@@ -1118,7 +1137,19 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			typ == batch.TypeInt32 || typ == batch.TypePort || typ == batch.TypeProtocol || typ == batch.TypeDate
 		if isIntType && allSimpleAggs {
 			h.useIntGroupKey = true
-			h.intGroupIndex = newIntHashTableReg(intHTInitSize, h.offheapReg())
+			// NDV hint already past the conversion threshold: build bucketed
+			// straight away and never pay a conversion (two_level_hash.go).
+			// Gated on a real hint — the hint-free default presize (4096, or
+			// up to 64K from InputRowHint) is a guess, and guessing bucketed
+			// would give a small aggregate 256 sub-tables for nothing.
+			if twoLevelToggle.On() && h.GroupNDVHint > 0 && intHTInitSize >= twoLevelConvertAt {
+				h.intTwoLevel = newIntTwoLevelTable(intHTInitSize, h.offheapReg())
+				h.intGroupIndex = nil
+				TwoLevelDirectBuilds.Add(1)
+			} else {
+				h.intGroupIndex = newIntHashTableReg(intHTInitSize, h.offheapReg())
+				h.intTwoLevel = nil
+			}
 			h.intGroupKeyCol = h.groupColIdx[0]
 			if h.intKeys == nil {
 				h.intKeys = memory.Offheap[int64](h.offheapReg(), htInitSize)
@@ -1158,7 +1189,14 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			(len(h.GroupByCols) == 2 || packedKeysToggle.On()) {
 			h.usePackedGroupKey = true
 			h.packedLayout = layout
-			h.packedIdx = newPackedHashTableReg(intHTInitSize, h.offheapReg())
+			if twoLevelToggle.On() && h.GroupNDVHint > 0 && intHTInitSize >= twoLevelConvertAt {
+				h.packedTwoLevel = newPackedTwoLevelTable(intHTInitSize, h.offheapReg())
+				h.packedIdx = nil
+				TwoLevelDirectBuilds.Add(1)
+			} else {
+				h.packedIdx = newPackedHashTableReg(intHTInitSize, h.offheapReg())
+				h.packedTwoLevel = nil
+			}
 			if h.packedKeys == nil {
 				// Key SoA off-heap (no per-group state at all on this path —
 				// 6806c83); no preAlloc for the same dead-weight reason as the
@@ -1468,6 +1506,13 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 	hasNulls := gkVec.Nulls.HasNulls()
 
 	intIdx := h.intGroupIndex
+	// Live-entry count before this batch: the conversion decision at the
+	// bottom needs the batch's new-group count, and the free-list path
+	// recycles slots without moving numIntGroups.
+	liveBefore := 0
+	if intIdx != nil {
+		liveBefore = intIdx.Len()
+	}
 
 	// Hash once: the partition router already computed fibHash over this
 	// column for every routed row. Accept its array only when the plan names
@@ -1496,7 +1541,9 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 	var iterLen int
 	hasNullKeys := false
 
-	if b.Sel != nil {
+	if tl := h.intTwoLevel; tl != nil {
+		gi, sel, iterLen, hasNullKeys = h.intGroupPhase1TwoLevel(b, tl, gkVec, isInt32, hasNulls, ph)
+	} else if b.Sel != nil {
 		iterLen = len(b.Sel)
 		sel = b.Sel
 		gi = h.ensureGroupIndexBuf(iterLen)
@@ -1681,6 +1728,185 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 			}
 		}
 	}
+
+	// Bucketed conversion is decided ONCE per batch, here at the end: the
+	// loops above hoisted their table pointer, and the decision needs this
+	// batch's new-group count (two_level_hash.go).
+	if intIdx != nil {
+		h.maybeConvertIntIndex(intIdx.Len()-liveBefore, iterLen)
+	}
+}
+
+// intGroupPhase1TwoLevel is consumeBatchIntGroup's phase 1 against the
+// BUCKETED index (two_level_hash.go). Everything else about the batch —
+// key extraction, free-list reuse, the intKeys SoA append, phase 2's
+// scatter, the null-key fallback — is identical; only the table the probe
+// lands in differs, and group ids stay dense globals.
+//
+// Written out rather than branching inside the flat loops for the reason
+// recorded in consumeBatchPackedGroup: a per-row test on a hoistable
+// condition measured +4% on this class of loop. The routed and self-hashing
+// variants are likewise separate; the two-level probe needs the hash as a
+// value (it selects the bucket), so the self-hashing variant computes
+// fibHash once and hands it to the same entry point.
+func (h *HashAggregate) intGroupPhase1TwoLevel(b *batch.RecordBatch, tl *intTwoLevelTable,
+	gkVec *batch.Vector, isInt32, hasNulls bool, ph []uint64) (gi []int32, sel []uint32, iterLen int, hasNullKeys bool) {
+	if b.Sel != nil {
+		iterLen = len(b.Sel)
+		sel = b.Sel
+		gi = h.ensureGroupIndexBuf(iterLen)
+		if ph != nil {
+			ph = ph[:iterLen] // provable bound: si ranges over b.Sel
+			for si, selIdx := range b.Sel {
+				row := int(selIdx)
+				if hasNulls && gkVec.Nulls.IsNullFast(row) {
+					gi[si] = -1
+					hasNullKeys = true
+					continue
+				}
+				var key int64
+				if isInt32 {
+					key = int64(gkVec.Int32Data[row])
+				} else {
+					key = gkVec.Int64Data[row]
+				}
+				var newIdx int32
+				fromFree := false
+				if nf := len(h.freeGroupIDs); nf > 0 {
+					newIdx = h.freeGroupIDs[nf-1]
+					fromFree = true
+				} else {
+					newIdx = int32(h.numIntGroups)
+				}
+				gsIdx, ok := tl.GetOrInsertAt(key, ph[si], newIdx)
+				if ok {
+					gi[si] = gsIdx
+				} else {
+					if fromFree {
+						h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
+						h.intKeys[newIdx] = key
+					} else {
+						h.numIntGroups++
+						h.intKeys = append(h.intKeys, key)
+					}
+					gi[si] = newIdx
+				}
+			}
+			return gi, sel, iterLen, hasNullKeys
+		}
+		for si, selIdx := range b.Sel {
+			row := int(selIdx)
+			if hasNulls && gkVec.Nulls.IsNullFast(row) {
+				gi[si] = -1
+				hasNullKeys = true
+				continue
+			}
+			var key int64
+			if isInt32 {
+				key = int64(gkVec.Int32Data[row])
+			} else {
+				key = gkVec.Int64Data[row]
+			}
+			var newIdx int32
+			fromFree := false
+			if nf := len(h.freeGroupIDs); nf > 0 {
+				newIdx = h.freeGroupIDs[nf-1]
+				fromFree = true
+			} else {
+				newIdx = int32(h.numIntGroups)
+			}
+			gsIdx, ok := tl.GetOrInsertAt(key, fibHash(key), newIdx)
+			if ok {
+				gi[si] = gsIdx
+			} else {
+				if fromFree {
+					h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
+					h.intKeys[newIdx] = key
+				} else {
+					h.numIntGroups++
+					h.intKeys = append(h.intKeys, key)
+				}
+				gi[si] = newIdx
+			}
+		}
+		return gi, sel, iterLen, hasNullKeys
+	}
+
+	iterLen = b.Len
+	gi = h.ensureGroupIndexBuf(iterLen)
+	if ph != nil {
+		ph = ph[:iterLen]
+		for row := 0; row < iterLen; row++ {
+			if hasNulls && gkVec.Nulls.IsNullFast(row) {
+				gi[row] = -1
+				hasNullKeys = true
+				continue
+			}
+			var key int64
+			if isInt32 {
+				key = int64(gkVec.Int32Data[row])
+			} else {
+				key = gkVec.Int64Data[row]
+			}
+			var newIdx int32
+			fromFree := false
+			if nf := len(h.freeGroupIDs); nf > 0 {
+				newIdx = h.freeGroupIDs[nf-1]
+				fromFree = true
+			} else {
+				newIdx = int32(h.numIntGroups)
+			}
+			gsIdx, ok := tl.GetOrInsertAt(key, ph[row], newIdx)
+			if ok {
+				gi[row] = gsIdx
+			} else {
+				if fromFree {
+					h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
+					h.intKeys[newIdx] = key
+				} else {
+					h.numIntGroups++
+					h.intKeys = append(h.intKeys, key)
+				}
+				gi[row] = newIdx
+			}
+		}
+		return gi, sel, iterLen, hasNullKeys
+	}
+	for row := 0; row < iterLen; row++ {
+		if hasNulls && gkVec.Nulls.IsNullFast(row) {
+			gi[row] = -1
+			hasNullKeys = true
+			continue
+		}
+		var key int64
+		if isInt32 {
+			key = int64(gkVec.Int32Data[row])
+		} else {
+			key = gkVec.Int64Data[row]
+		}
+		var newIdx int32
+		fromFree := false
+		if nf := len(h.freeGroupIDs); nf > 0 {
+			newIdx = h.freeGroupIDs[nf-1]
+			fromFree = true
+		} else {
+			newIdx = int32(h.numIntGroups)
+		}
+		gsIdx, ok := tl.GetOrInsertAt(key, fibHash(key), newIdx)
+		if ok {
+			gi[row] = gsIdx
+		} else {
+			if fromFree {
+				h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
+				h.intKeys[newIdx] = key
+			} else {
+				h.numIntGroups++
+				h.intKeys = append(h.intKeys, key)
+			}
+			gi[row] = newIdx
+		}
+	}
+	return gi, sel, iterLen, hasNullKeys
 }
 
 // consumeBatchPackedGroup is the fast path for multi-column int-class GROUP
@@ -1709,6 +1935,10 @@ func (h *HashAggregate) consumeBatchPackedGroup(b *batch.RecordBatch) {
 	h.packedCols = cols
 
 	idx := h.packedIdx
+	liveBefore := 0
+	if idx != nil {
+		liveBefore = idx.Len()
+	}
 
 	// Hash once: the router already folded this row's 128-bit key through
 	// packedHash to choose the owner. Accept its array only when the plan's
@@ -1742,7 +1972,9 @@ func (h *HashAggregate) consumeBatchPackedGroup(b *batch.RecordBatch) {
 	// same-window A/B) — at ~4 ns/row a single extra compare is real money, and
 	// hoisting it is why the self-hashing loops below are byte-identical to
 	// what they were before hash-once landed.
-	if b.Sel != nil {
+	if tl := h.packedTwoLevel; tl != nil {
+		gi, sel, iterLen, hasNullKeys = h.packedPhase1TwoLevel(b, tl, cols, hasNulls, ph)
+	} else if b.Sel != nil {
 		iterLen = len(b.Sel)
 		sel = b.Sel
 		gi = h.ensureGroupIndexBuf(iterLen)
@@ -1850,6 +2082,99 @@ func (h *HashAggregate) consumeBatchPackedGroup(b *batch.RecordBatch) {
 			}
 		}
 	}
+
+	// Bucketed conversion, decided once per batch at the end — see
+	// consumeBatchIntGroup.
+	if idx != nil {
+		h.maybeConvertPackedIndex(idx.Len()-liveBefore, iterLen)
+	}
+}
+
+// packedPhase1TwoLevel is consumeBatchPackedGroup's phase 1 against the
+// BUCKETED index (two_level_hash.go) — same key packing, same dense group
+// ids, same packedKeys SoA append; only the probe's table differs.
+func (h *HashAggregate) packedPhase1TwoLevel(b *batch.RecordBatch, tl *packedTwoLevelTable,
+	cols []packedKeyCol, hasNulls bool, ph []uint64) (gi []int32, sel []uint32, iterLen int, hasNullKeys bool) {
+	if b.Sel != nil {
+		iterLen = len(b.Sel)
+		sel = b.Sel
+		gi = h.ensureGroupIndexBuf(iterLen)
+		if ph != nil {
+			ph = ph[:iterLen]
+			for si, selIdx := range b.Sel {
+				row := int(selIdx)
+				if hasNulls && packedRowHasNull(cols, row) {
+					gi[si] = -1
+					hasNullKeys = true
+					continue
+				}
+				lo, hi := packedKeyAt(cols, row)
+				newIdx := int32(h.numIntGroups)
+				gsIdx := tl.GetOrInsertAt(lo, hi, ph[si], newIdx)
+				gi[si] = gsIdx
+				if gsIdx == newIdx {
+					h.numIntGroups++
+					h.packedKeys = append(h.packedKeys, packedKey{lo: lo, hi: hi})
+				}
+			}
+			return gi, sel, iterLen, hasNullKeys
+		}
+		for si, selIdx := range b.Sel {
+			row := int(selIdx)
+			if hasNulls && packedRowHasNull(cols, row) {
+				gi[si] = -1
+				hasNullKeys = true
+				continue
+			}
+			lo, hi := packedKeyAt(cols, row)
+			newIdx := int32(h.numIntGroups)
+			gsIdx := tl.GetOrInsertAt(lo, hi, packedHash(lo, hi), newIdx)
+			gi[si] = gsIdx
+			if gsIdx == newIdx {
+				h.numIntGroups++
+				h.packedKeys = append(h.packedKeys, packedKey{lo: lo, hi: hi})
+			}
+		}
+		return gi, sel, iterLen, hasNullKeys
+	}
+
+	iterLen = b.Len
+	gi = h.ensureGroupIndexBuf(iterLen)
+	if ph != nil {
+		ph = ph[:iterLen]
+		for row := 0; row < iterLen; row++ {
+			if hasNulls && packedRowHasNull(cols, row) {
+				gi[row] = -1
+				hasNullKeys = true
+				continue
+			}
+			lo, hi := packedKeyAt(cols, row)
+			newIdx := int32(h.numIntGroups)
+			gsIdx := tl.GetOrInsertAt(lo, hi, ph[row], newIdx)
+			gi[row] = gsIdx
+			if gsIdx == newIdx {
+				h.numIntGroups++
+				h.packedKeys = append(h.packedKeys, packedKey{lo: lo, hi: hi})
+			}
+		}
+		return gi, sel, iterLen, hasNullKeys
+	}
+	for row := 0; row < iterLen; row++ {
+		if hasNulls && packedRowHasNull(cols, row) {
+			gi[row] = -1
+			hasNullKeys = true
+			continue
+		}
+		lo, hi := packedKeyAt(cols, row)
+		newIdx := int32(h.numIntGroups)
+		gsIdx := tl.GetOrInsertAt(lo, hi, packedHash(lo, hi), newIdx)
+		gi[row] = gsIdx
+		if gsIdx == newIdx {
+			h.numIntGroups++
+			h.packedKeys = append(h.packedKeys, packedKey{lo: lo, hi: hi})
+		}
+	}
+	return gi, sel, iterLen, hasNullKeys
 }
 
 // packedRowHasNull reports whether any key column is NULL at row.
@@ -1926,6 +2251,114 @@ func flatAccumLen(fa *flatAccumArrays) int {
 		return len(fa.hasMax)
 	}
 	return 0
+}
+
+// --- two-level group index plumbing (two_level_hash.go) ------------------
+//
+// The int and packed key modes hold EITHER a flat table or a bucketed one.
+// These helpers are the seam: hot paths hoist the choice out of the row loop
+// (see consumeBatchIntGroup), cold paths — merge, spill, accounting — call
+// through here so the mode is decided in exactly one place per operation.
+
+// convertsToTwoLevel decides, at the END of a batch, whether a flat index
+// that just crossed the threshold should convert. Two conditions:
+//
+//   - size: live > twoLevelConvertAt (see two_level_hash.go for the curve).
+//   - growth: the batch just consumed minted new groups for at least a
+//     quarter of its rows. Conversion costs one rehash of everything live
+//     (~25 ns per entry), so it is a BET that the table keeps filling. A
+//     table that has saturated — the shape where nearly every row now hits
+//     an existing group — would never win that bet back, and paying it is
+//     exactly the worst case a bare size threshold has: a GROUP BY that
+//     happens to settle just past the threshold pays the whole conversion
+//     for the handful of groups that follow. A still-filling table at a
+//     million groups, by contrast, is one that keeps going.
+//
+// Both are per-BATCH tests on numbers the consume loop already has; nothing
+// here runs per row.
+func convertsToTwoLevel(live, newGroups, rows int) bool {
+	return twoLevelToggle.On() && live >= twoLevelConvertAt && newGroups*4 >= rows
+}
+
+// maybeConvertIntIndex converts the flat single-int index to the bucketed
+// form. Called at the end of a batch, so the consume loop's hoisted table
+// pointer stays valid for the whole batch and the conversion applies from
+// the next one.
+func (h *HashAggregate) maybeConvertIntIndex(newGroups, rows int) {
+	if h.intGroupIndex == nil || !convertsToTwoLevel(h.intGroupIndex.Len(), newGroups, rows) {
+		return
+	}
+	h.intTwoLevel = convertIntHashTableToTwoLevel(h.intGroupIndex, h.offheapReg())
+	h.intGroupIndex = nil
+	TwoLevelConversions.Add(1)
+}
+
+// maybeConvertPackedIndex is maybeConvertIntIndex for the packed composite
+// key mode.
+func (h *HashAggregate) maybeConvertPackedIndex(newGroups, rows int) {
+	if h.packedIdx == nil || !convertsToTwoLevel(h.packedIdx.Len(), newGroups, rows) {
+		return
+	}
+	h.packedTwoLevel = convertPackedHashTableToTwoLevel(h.packedIdx, h.offheapReg())
+	h.packedIdx = nil
+	TwoLevelConversions.Add(1)
+}
+
+// intIndexLen reports the live entry count of whichever int index is active.
+func (h *HashAggregate) intIndexLen() int {
+	if h.intTwoLevel != nil {
+		return h.intTwoLevel.Len()
+	}
+	if h.intGroupIndex != nil {
+		return h.intGroupIndex.Len()
+	}
+	return 0
+}
+
+// intIndexPresent reports whether this aggregate holds a single-int index.
+func (h *HashAggregate) intIndexPresent() bool {
+	return h.intGroupIndex != nil || h.intTwoLevel != nil
+}
+
+// intIndexForEach iterates the active int index's live entries.
+func (h *HashAggregate) intIndexForEach(fn func(key int64, val int32)) {
+	if h.intTwoLevel != nil {
+		h.intTwoLevel.ForEach(fn)
+		return
+	}
+	if h.intGroupIndex != nil {
+		h.intGroupIndex.ForEach(fn)
+	}
+}
+
+// intIndexDelete removes a key from the active int index (partial-drain slot
+// reclaim).
+func (h *HashAggregate) intIndexDelete(key int64) {
+	if h.intTwoLevel != nil {
+		h.intTwoLevel.Delete(key)
+		return
+	}
+	if h.intGroupIndex != nil {
+		h.intGroupIndex.Delete(key)
+	}
+}
+
+// intIndexGetOrInsert is the cold-path (merge) insert into the active int
+// index.
+func (h *HashAggregate) intIndexGetOrInsert(key int64, val int32) (int32, bool) {
+	if h.intTwoLevel != nil {
+		return h.intTwoLevel.GetOrInsert(key, val)
+	}
+	return h.intGroupIndex.GetOrInsert(key, val)
+}
+
+// packedIndexGetOrInsert is the cold-path (merge) insert into the active
+// packed index.
+func (h *HashAggregate) packedIndexGetOrInsert(lo, hi uint64, val int32) (int32, bool) {
+	if h.packedTwoLevel != nil {
+		return h.packedTwoLevel.GetOrInsert(lo, hi, val)
+	}
+	return h.packedIdx.GetOrInsert(lo, hi, val)
 }
 
 // ensureGroupIndexBuf returns a []int32 of at least length n, reusing the buffer.
@@ -3075,12 +3508,13 @@ func (h *HashAggregate) spillableBytesLocked() int64 {
 	if !h.useIntGroupKey {
 		return h.trackedGroupMem // non-int paths whole-drain; all reclaimable
 	}
-	if h.intGroupIndex == nil || h.intGroupIndex.Len() == 0 {
+	n := h.intIndexLen()
+	if n == 0 {
 		return 0
 	}
 	K := h.drainK
 	if K == 0 {
-		K = computeAdaptiveK(h.intGroupIndex.Len())
+		K = computeAdaptiveK(n)
 	}
 	if K <= 1 {
 		return h.trackedGroupMem
@@ -3477,8 +3911,10 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		h.intGroupStates = nil
 		h.numIntGroups = 0
 		h.intGroupIndex = nil
+		h.intTwoLevel = nil
 		h.intKeys = nil
 		h.packedIdx = nil
+		h.packedTwoLevel = nil
 		h.packedKeys = nil
 		// Off-heap state returns to the OS the moment emission finishes —
 		// multi-GB reservations shouldn't wait for operator Close while
@@ -3907,6 +4343,7 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	// Key mode + state.
 	h.useIntGroupKey = o.useIntGroupKey
 	h.intGroupIndex = o.intGroupIndex
+	h.intTwoLevel = o.intTwoLevel
 	h.intGroupStates = o.intGroupStates
 	h.numIntGroups = o.numIntGroups
 	h.intGroupKeyCol = o.intGroupKeyCol
@@ -3925,6 +4362,7 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	}
 	h.usePackedGroupKey = o.usePackedGroupKey
 	h.packedIdx = o.packedIdx
+	h.packedTwoLevel = o.packedTwoLevel
 	h.packedLayout = o.packedLayout
 	h.packedKeys = o.packedKeys
 	h.useCompactGroupKey = o.useCompactGroupKey
@@ -3954,11 +4392,13 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	// Zero o's moved state (o keeps its trackedGroupMem so Close releases
 	// the charge it made while accumulating).
 	o.intGroupIndex = nil
+	o.intTwoLevel = nil
 	o.intGroupStates = nil
 	o.numIntGroups = 0
 	o.intKeys = nil
 	o.intFlatAccs = nil
 	o.packedIdx = nil
+	o.packedTwoLevel = nil
 	o.packedKeys = nil
 	o.compactKeys = nil
 	o.strGroupIndex = nil
@@ -3977,9 +4417,18 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 // materializeFlatAccums + migrateToGenericMap + per-group Accumulator.Merge.
 // Operates on flat arrays (count, sumI64, sumF64, min, max) with int hash lookup.
 func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
+	// A merge that will push the destination past the conversion threshold
+	// converts FIRST, so the inserted groups land in per-bucket tables
+	// instead of driving whole-table rehashes (two_level_hash.go).
+	if h.intGroupIndex != nil && twoLevelToggle.On() &&
+		h.intGroupIndex.Len()+o.numIntGroups >= twoLevelConvertAt {
+		h.intTwoLevel = convertIntHashTableToTwoLevel(h.intGroupIndex, h.offheapReg())
+		h.intGroupIndex = nil
+		TwoLevelConversions.Add(1)
+	}
 	for i := 0; i < o.numIntGroups; i++ {
 		newIdx := int32(h.numIntGroups)
-		gsIdx, found := h.intGroupIndex.GetOrInsert(o.intKeys[i], newIdx)
+		gsIdx, found := h.intIndexGetOrInsert(o.intKeys[i], newIdx)
 		if found {
 			mergeFlatAccumRow(h.intFlatAccs, o.intFlatAccs, int(gsIdx), i)
 		} else {
@@ -4125,10 +4574,16 @@ func copyFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 // — the dual-int predecessor did a Get, a chain walk over three arrays, and
 // then a second Get before its Put.
 func (h *HashAggregate) mergePackedGroupSoA(o *HashAggregate) {
+	if h.packedIdx != nil && twoLevelToggle.On() &&
+		h.packedIdx.Len()+o.numIntGroups >= twoLevelConvertAt {
+		h.packedTwoLevel = convertPackedHashTableToTwoLevel(h.packedIdx, h.offheapReg())
+		h.packedIdx = nil
+		TwoLevelConversions.Add(1)
+	}
 	for i := 0; i < o.numIntGroups; i++ {
 		k := o.packedKeys[i]
 		newIdx := int32(h.numIntGroups)
-		gsIdx, found := h.packedIdx.GetOrInsert(k.lo, k.hi, newIdx)
+		gsIdx, found := h.packedIndexGetOrInsert(k.lo, k.hi, newIdx)
 		if found {
 			mergeFlatAccumRow(h.intFlatAccs, o.intFlatAccs, int(gsIdx), i)
 			continue
@@ -4187,6 +4642,7 @@ func (h *HashAggregate) migrateToGenericMap() {
 		h.intGroupStates = nil
 		h.numIntGroups = 0
 		h.packedIdx = nil
+		h.packedTwoLevel = nil
 		h.packedKeys = nil
 		return
 	}
@@ -4223,6 +4679,7 @@ func (h *HashAggregate) migrateToGenericMap() {
 	h.intGroupStates = nil
 	h.numIntGroups = 0
 	h.intGroupIndex = nil
+	h.intTwoLevel = nil
 	h.intKeys = nil
 }
 

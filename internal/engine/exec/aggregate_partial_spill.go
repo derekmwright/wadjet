@@ -1483,10 +1483,13 @@ func (h *HashAggregate) drainStateToRuns(dir string) ([]string, error) {
 // partitions stay in-memory, so probe rows whose keys hash into them hit
 // existing groups — no rebuild loop.
 func (h *HashAggregate) spillPartialPartitions(target int64) error {
-	if h.intGroupIndex == nil || h.intGroupIndex.Len() == 0 {
+	if !h.intIndexPresent() {
 		return nil
 	}
-	liveBefore := h.intGroupIndex.Len()
+	liveBefore := h.intIndexLen()
+	if liveBefore == 0 {
+		return nil
+	}
 	footprint := h.trackedGroupMem
 
 	if h.drainK == 0 {
@@ -1514,7 +1517,7 @@ func (h *HashAggregate) spillPartialPartitions(target int64) error {
 		estimate = 16
 	}
 	drainSet := make([]int32, 0, estimate)
-	h.intGroupIndex.ForEach(func(key int64, val int32) {
+	h.intIndexForEach(func(key int64, val int32) {
 		partition := uint32(fibHash(key)) & (K - 1)
 		if plan.contains(partition) {
 			drainSet = append(drainSet, val)
@@ -1571,7 +1574,7 @@ func (h *HashAggregate) spillPartialPartitions(target int64) error {
 	// slot indices onto the free list for the next Consume cycle to reuse.
 	for _, slot := range drainSet {
 		key := h.intKeys[slot]
-		h.intGroupIndex.Delete(key)
+		h.intIndexDelete(key)
 		for ai := range h.intFlatAccs {
 			h.intFlatAccs[ai].clearGroup(int(slot))
 		}
@@ -1608,11 +1611,16 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	// Reset hash tables. We allocate fresh ones to avoid carrying capacity
 	// debt forward — the freshly drained run was likely large, and the next
 	// run probably starts smaller.
-	if h.intGroupIndex != nil {
+	// A bucketed index restarts FLAT: the state it indexed is gone, and the
+	// next fill re-converts if it grows back past the threshold
+	// (two_level_hash.go). Exactly one of the two stays non-nil per mode.
+	if h.intGroupIndex != nil || h.intTwoLevel != nil {
 		h.intGroupIndex = newIntHashTable(4096)
+		h.intTwoLevel = nil
 	}
-	if h.packedIdx != nil {
+	if h.packedIdx != nil || h.packedTwoLevel != nil {
 		h.packedIdx = newPackedHashTable(4096)
+		h.packedTwoLevel = nil
 	}
 	if h.strGroupIndex != nil {
 		h.strGroupIndex = newStrHashTable(4096)
@@ -1693,9 +1701,9 @@ func (h *HashAggregate) finalizeViaPartialMerge() error {
 	// packed/compact) never partial-drain in v1+, so liveGroups stays nil
 	// and the cursor iterates the dense slot range as before.
 	var liveGroups []int32
-	if h.useIntGroupKey && len(h.freeGroupIDs) > 0 && h.intGroupIndex != nil {
-		liveGroups = make([]int32, 0, h.intGroupIndex.Len())
-		h.intGroupIndex.ForEach(func(_ int64, val int32) {
+	if h.useIntGroupKey && len(h.freeGroupIDs) > 0 && h.intIndexPresent() {
+		liveGroups = make([]int32, 0, h.intIndexLen())
+		h.intIndexForEach(func(_ int64, val int32) {
 			liveGroups = append(liveGroups, val)
 		})
 	}

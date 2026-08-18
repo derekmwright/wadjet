@@ -26,5 +26,8 @@ func Offheap[T any](_ *OffheapRegistry, heapCap int) []T {
 // OffheapSized reports unavailable off linux (callers heap-allocate).
 func OffheapSized[T any](_ *OffheapRegistry, _ int) ([]T, bool) { return nil, false }
 
+// OffheapExact reports unavailable off linux (callers heap-allocate).
+func OffheapExact[T any](_ *OffheapRegistry, _ int) ([]T, bool) { return nil, false }
+
 // Release is inert off linux.
 func (r *OffheapRegistry) Release(_ unsafe.Pointer) bool { return false }

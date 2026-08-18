@@ -1298,7 +1298,10 @@ func TestPartialDrain_FreeListReuse(t *testing.T) {
 	if freeListSize == 0 {
 		t.Fatalf("freeGroupIDs empty after partial drain — reclamation didn't run")
 	}
-	liveAfterDrain := h.intGroupIndex.Len()
+	// intIndexLen, not intGroupIndex.Len: the index may have converted to
+	// the bucketed form (two_level_hash.go), which this assertion is
+	// indifferent to.
+	liveAfterDrain := h.intIndexLen()
 	if liveAfterDrain >= slotsBeforeDrain {
 		t.Errorf("hash table didn't shrink: liveAfter=%d slotsBefore=%d", liveAfterDrain, slotsBeforeDrain)
 	}

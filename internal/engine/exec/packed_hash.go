@@ -280,6 +280,20 @@ func (h *packedHashTable) ForEach(fn func(lo, hi uint64, val int32)) {
 	}
 }
 
+// freeEntries drops the entry array, returning its off-heap reservation
+// immediately when it had one. Used by the two-level conversion, which has
+// already copied every live entry out (two_level_hash.go); the table is
+// unusable afterwards.
+func (h *packedHashTable) freeEntries() {
+	if h.entriesOffheap && len(h.entries) > 0 {
+		h.reg.Release(unsafe.Pointer(unsafe.SliceData(h.entries)))
+	}
+	h.entries = nil
+	h.entriesOffheap = false
+	h.mask = 0
+	h.size = 0
+}
+
 // grow doubles the capacity and rehashes. Off-heap tables release the old
 // reservation immediately — a 100M-group rehash holding old+new live is
 // exactly the transient ADR-0006's amendment removed.

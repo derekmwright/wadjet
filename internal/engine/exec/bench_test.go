@@ -422,6 +422,11 @@ func BenchmarkSortSmall(b *testing.B) {
 // spread the key over three per-group arrays (keysA, keysB, chain) and did a
 // Get, a chain walk and a Put per insert; the packed table holds the whole
 // 128-bit key inline in the entry and does one probe.
+//
+// Both shapes here stay well under the two-level conversion threshold, so
+// they measure the flat index. The above-threshold arms (1M and 8M keys,
+// flat vs bucketed, single-int and packed) live in
+// BenchmarkHashAggregateHighCardTwoLevel — see two_level_hash_bench_test.go.
 func BenchmarkHashAggregatePackedNearUnique(b *testing.B) {
 	const nBatches = 16
 	const rowsPerBatch = 2048

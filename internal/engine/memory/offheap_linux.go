@@ -62,13 +62,17 @@ type OffheapRegistry struct {
 // NewOffheapRegistry returns an empty registry.
 func NewOffheapRegistry() *OffheapRegistry { return &OffheapRegistry{} }
 
-// reserve creates one reservation and records it. Returns nil when the
-// mmap fails (callers fall back to heap allocation).
-func (r *OffheapRegistry) reserve() []byte {
-	if r == nil {
+// reserve creates one full-size reservation and records it. Returns nil
+// when the mmap fails (callers fall back to heap allocation).
+func (r *OffheapRegistry) reserve() []byte { return r.reserveBytes(offheapReserveBytes) }
+
+// reserveBytes creates one reservation of exactly n bytes (page-rounded by
+// the kernel) and records it.
+func (r *OffheapRegistry) reserveBytes(n int) []byte {
+	if r == nil || n <= 0 {
 		return nil
 	}
-	m, err := syscall.Mmap(-1, 0, offheapReserveBytes,
+	m, err := syscall.Mmap(-1, 0, n,
 		syscall.PROT_READ|syscall.PROT_WRITE,
 		syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS|syscall.MAP_NORESERVE)
 	if err != nil {
@@ -174,6 +178,36 @@ func OffheapSized[T any](r *OffheapRegistry, n int) ([]T, bool) {
 	// Full three-index slice: cap == len == n, so cap()-based memory
 	// accounting sees the table's real size, not the 4GB reservation.
 	return s[:n:n], true
+}
+
+// OffheapExact returns a len=n off-heap slice over a reservation sized to
+// exactly n elements, or ok=false when off-heap is unavailable.
+//
+// Distinct from OffheapSized, which carves n elements out of a fixed 4GB
+// reservation: that is right for the ONE table an operator owns, but the
+// two-level group index owns 256 sub-tables (two_level_hash.go) and 256 ×
+// 4GB = 1TB of address space per aggregate — multiplied again by the
+// partitioned-aggregation clone count. A right-sized reservation costs the
+// same RSS (pages commit on touch either way) and the same one mapping,
+// and keeps the virtual footprint equal to the real table size.
+//
+// The slice is NOT growable in place (cap == len); it is for fixed-size
+// hash-entry arrays whose growth path allocates a new reservation and
+// Releases the old one.
+func OffheapExact[T any](r *OffheapRegistry, n int) ([]T, bool) {
+	if r == nil || !offheapAggToggle.On() {
+		return nil, false
+	}
+	var zero T
+	sz := int(unsafe.Sizeof(zero))
+	if n <= 0 || sz <= 0 || n > (1<<62)/sz {
+		return nil, false
+	}
+	m := r.reserveBytes(n * sz)
+	if m == nil {
+		return nil, false
+	}
+	return unsafe.Slice((*T)(unsafe.Pointer(unsafe.SliceData(m))), n)[:n:n], true
 }
 
 // Release unmaps the single reservation whose base address is p and

@@ -105,9 +105,39 @@ right. The emit phase is single-threaded and 16-35% of WALL clock
   twopass 887.1, look-ahead 1003.9/1078.1. Go's codegen turns the "prefetch"
   into a real bounds-checked load the out-of-order window was already
   covering. The consume loops keep their one-pass shape.
-- **G6 two-level/radix table**: 256-bucket conversion past ~100K keys
-  (ClickHouse) / radix partitions (DuckDB). Incremental sub-table rehash,
-  bucket-parallel merge+emit, stats-free sizing. Subsumes G4's shape.
+- **G6 two-level/radix table** — SHIPPED for the int and packed key modes
+  (`two_level_hash.go`, kill switch `WADJET_TWO_LEVEL_HT`). 256 sub-tables
+  selected by a hash window DISJOINT from the partition and slot windows;
+  each grows by its own doubling, so a rehash touches 1/256 of the entries
+  and the growth transient stops being 1.5x the whole table. Adaptive: a
+  sink starts flat (byte-identical to G5) and converts once it holds
+  > `twoLevelConvertAt` live entries AND the batch that crossed the line was
+  still minting groups for a quarter of its rows — the second test is what
+  stops a saturated table paying for a conversion it can never amortize.
+  Three findings worth carrying forward:
+  (a) the bucket window must be the LOW 8 bits, not ClickHouse's middle
+  window. Ours is not an avalanching hash: `fibHash` is multiply-only, so
+  ANY high-ish window selects a near-arithmetic subsequence of a dense key
+  range and collapses it — 6.46 average probes per insert at 8M keys, worse
+  with scale, against exactly 1.00 for the low window. With the low window
+  (bucket, slot) is bit-for-bit the index a flat table of 256*subcap slots
+  computes, so every spread property of the flat tables carries over
+  unchanged.
+  (b) a bucket's entry array may only go off-heap once it is at least a
+  huge page (2 MiB). Below that a per-bucket mapping is 4 KiB-paged and the
+  fault + dTLB cost swamps the structure: 8M int groups measured 281 ms with
+  a 2 MiB gate, 427 ms with a 64 KiB gate, against 306 ms flat.
+  (c) the payoff on THIS stack is smaller than the literature suggests,
+  because our flat table already avoids what the literature's does not — its
+  entries live in a MAP_NORESERVE reservation, so a doubling is one
+  huge-page-backed mmap and never Go-heap garbage. Consume-path measurement
+  (5900X, near-unique, min of 5): single-int 8M groups 783 -> 758 ms
+  (-3.2%), packed-two-int64 8M 1144 -> 1170 ms (+2.2%); peak RSS filling 32M
+  int keys 1809 -> 1685 MB. The threshold default is therefore 1M entries
+  per sink — below it nothing changes at all — and the remaining structural
+  wins (bucket-parallel emit, bucket-parallel merge, stats-free sizing) are
+  still on the table. The string mode is NOT converted yet; its arena needs
+  the split described in `two_level_hash.go`.
 - **G7 adaptive near-unique bail-out** (the Q33 endgame): DuckDB skips
   probing entirely past 95% uniqueness (HLL over group hashes) and dedups
   once at emit; ClickHouse freezes tables at 16K keys and routes new keys
@@ -127,8 +157,12 @@ registers without ANALYZE), so tables start at 64K and rehash up to 8x.
 
 G1 -> G2 -> G3 (instruction path; validate on the controlled-cardinality
 harness) -> G4 -> G5 -> G6 (memory/serial regime) -> G7 (endgame).
-G1+G2 delegated for implementation 2026-08-17; G3, G4 and G5 shipped the same
-day (G5's batched-probe rider measured and declined). Next: G6.
+G1+G2 delegated for implementation 2026-08-17; G3, G4, G5 and G6 shipped the
+same day (G5's batched-probe rider measured and declined; G6's string mode and
+bucket-parallel emit deferred). Next: G7, then G6's riders — bucket-parallel
+emit (the emit drain can now fan out per BUCKET within a partition, which is
+what would let per-worker Top-N feed `Sort.CloneSink` as G4 wanted) and the
+string-mode conversion.
 
 Found while sweeping the unified hash for spread, recorded in
 `TestFibHashStrideCollapse`: `fibHash` is multiply-only, so the low k bits of
