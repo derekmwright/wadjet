@@ -163,8 +163,20 @@ type Canon struct {
 
 // Canonicalize renders every row to a stable string: cells in Columns
 // order, floats at 6 significant digits so accumulation-order noise
-// between two correct runs doesn't register as divergence.
+// between two correct runs doesn't register as divergence. Rows are
+// sorted, so the comparison is order-insensitive.
 func Canonicalize(res *Result) *Canon {
+	c := CanonicalizeOrdered(res)
+	sort.Strings(c.rows)
+	sort.Strings(c.coarseRows)
+	return c
+}
+
+// CanonicalizeOrdered is Canonicalize without the sort: rows stay in the
+// order the engine returned them. Use it when a top-level ORDER BY makes
+// the row SEQUENCE part of the answer — comparing sorted canonical forms
+// there would accept a result that lost its ordering.
+func CanonicalizeOrdered(res *Result) *Canon {
 	rows := make([]string, len(res.Rows))
 	coarse := make([]string, len(res.Rows))
 	var sb, csb strings.Builder
@@ -183,8 +195,6 @@ func Canonicalize(res *Result) *Canon {
 		rows[i] = sb.String()
 		coarse[i] = csb.String()
 	}
-	sort.Strings(rows)
-	sort.Strings(coarse)
 	return &Canon{rows: rows, coarseRows: coarse}
 }
 
