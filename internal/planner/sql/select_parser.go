@@ -1494,6 +1494,28 @@ func (p *selectParser) parsePrimary() (Node, error) {
 			return p.parseIntervalLiteral()
 		}
 
+		// Typed literals: DATE '1992-01-01', TIMESTAMP '1992-01-01 10:00',
+		// TIME '10:00:00'. Standard SQL, and the spelling analysts and BI
+		// tools reach for first — DataGrip's generated date-range filters use
+		// it. Without this the type name parsed as a column reference and the
+		// query failed with `unknown column "DATE"`.
+		//
+		// It means exactly what CAST('...' AS <type>) means, so it lowers to
+		// the same node rather than introducing a second representation. A
+		// following string literal is what distinguishes the literal from a
+		// column that happens to be named date or time, which still parses as
+		// a plain identifier.
+		if isTypedLiteralType(upper) && p.peekN(1) == TokenString {
+			p.advance() // type name
+			lit := p.advance()
+			return &CastNode{
+				Inner: &Lit{Value: lit.val, Kind: LitString},
+				// Lowercase, matching parseCastExpr — the printed form has to
+				// re-parse to itself, which the fuzz round-trip checks.
+				TypeName: strings.ToLower(upper),
+			}, nil
+		}
+
 		// EXTRACT(field FROM expr) — rewrite to field(expr) function call
 		if upper == "EXTRACT" {
 			return p.parseExtractExpr()
@@ -1640,8 +1662,9 @@ func (p *selectParser) parseFuncCall(name string) (Node, error) {
 
 // maybeParseFilterAndOver checks for FILTER (WHERE ...) and OVER (...) after
 // a function call. FILTER is rewritten to CASE WHEN at the AST level:
-//   COUNT(*) FILTER (WHERE cond) → SUM(CASE WHEN cond THEN 1 ELSE 0 END)
-//   AGG(expr) FILTER (WHERE cond) → AGG(CASE WHEN cond THEN expr END)
+//
+//	COUNT(*) FILTER (WHERE cond) → SUM(CASE WHEN cond THEN 1 ELSE 0 END)
+//	AGG(expr) FILTER (WHERE cond) → AGG(CASE WHEN cond THEN expr END)
 func (p *selectParser) maybeParseOver(fn *FuncCallNode) (Node, error) {
 	// Check for FILTER (WHERE ...) — standard SQL aggregate filtering
 	if p.peek() == TokenIdent && !p.cur.quoted && strings.EqualFold(p.cur.val, "FILTER") {
@@ -2377,4 +2400,15 @@ func expandRollup(cols []string) [][]string {
 		sets = append(sets, set)
 	}
 	return sets
+}
+
+// isTypedLiteralType reports whether name may prefix a string literal to form
+// a typed literal (DATE '...'). INTERVAL has its own parser above: its
+// payload is a quantity with units rather than a value to cast.
+func isTypedLiteralType(name string) bool {
+	switch name {
+	case "DATE", "TIMESTAMP", "TIME", "TIMESTAMPTZ":
+		return true
+	}
+	return false
 }

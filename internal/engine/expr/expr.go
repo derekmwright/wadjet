@@ -1046,9 +1046,9 @@ func (e *In) EvalBool(b *batch.RecordBatch, row int) bool {
 
 // Between checks if a value is between two bounds.
 type Between struct {
-	Expr     Expr
-	Low, Hi  Expr
-	Not      bool
+	Expr    Expr
+	Low, Hi Expr
+	Not     bool
 }
 
 func (e *Between) Eval(b *batch.RecordBatch, row int) any {
@@ -1649,439 +1649,439 @@ var DefaultRegistry = NewFuncRegistry()
 
 func init() {
 	builtins := map[string]ScalarFunc{
-	// String functions
-	"upper":   fnUpper,
-	"lower":   fnLower,
-	"concat":  fnConcat,
-	"length":  fnLength,
-	"len":     fnLength,
-	// length() has always counted BYTES here (see fnLength), so
-	// octet_length is an exact alias and bit_length is 8x. The rune-counting
-	// member of the family is char_length/character_length below. These
-	// three names were reachable from the parser and listed in
-	// isNumericFunc but had no implementation, so they evaluated to NULL.
-	"octet_length": fnOctetLength,
-	"bit_length":   fnBitLength,
-	"substr":    fnSubstr,
-	"substring": fnSubstr,
-	"trim":    fnTrim,
-	"ltrim":   fnLTrim,
-	"rtrim":   fnRTrim,
-	"replace": fnReplace,
-	"reverse": fnReverse,
-	"left":    fnLeft,
-	"right":   fnRight,
+		// String functions
+		"upper":  fnUpper,
+		"lower":  fnLower,
+		"concat": fnConcat,
+		"length": fnLength,
+		"len":    fnLength,
+		// length() has always counted BYTES here (see fnLength), so
+		// octet_length is an exact alias and bit_length is 8x. The rune-counting
+		// member of the family is char_length/character_length below. These
+		// three names were reachable from the parser and listed in
+		// isNumericFunc but had no implementation, so they evaluated to NULL.
+		"octet_length": fnOctetLength,
+		"bit_length":   fnBitLength,
+		"substr":       fnSubstr,
+		"substring":    fnSubstr,
+		"trim":         fnTrim,
+		"ltrim":        fnLTrim,
+		"rtrim":        fnRTrim,
+		"replace":      fnReplace,
+		"reverse":      fnReverse,
+		"left":         fnLeft,
+		"right":        fnRight,
 
-	// Math functions
-	"abs":   fnAbs,
-	"ceil":  fnCeil,
-	"floor": fnFloor,
-	"round": fnRound,
-	"pow":   fnPow,
-	"power": fnPow,
-	"sqrt":  fnSqrt,
-	"mod":   fnMod,
-	"log":   fnLog,
-	"ln":    fnLn,
-	"exp":   fnExp,
+		// Math functions
+		"abs":   fnAbs,
+		"ceil":  fnCeil,
+		"floor": fnFloor,
+		"round": fnRound,
+		"pow":   fnPow,
+		"power": fnPow,
+		"sqrt":  fnSqrt,
+		"mod":   fnMod,
+		"log":   fnLog,
+		"ln":    fnLn,
+		"exp":   fnExp,
 
-	// Conditional
-	"coalesce": fnCoalesce,
-	"nullif":   fnNullIf,
-	"ifnull":   fnIfNull,
-	"if":       fnIf,
+		// Conditional
+		"coalesce": fnCoalesce,
+		"nullif":   fnNullIf,
+		"ifnull":   fnIfNull,
+		"if":       fnIf,
 
-	// Type casting
-	"cast_int":    fnCastInt,
-	"cast_float":  fnCastFloat,
-	"cast_string": fnCastString,
+		// Type casting
+		"cast_int":    fnCastInt,
+		"cast_float":  fnCastFloat,
+		"cast_string": fnCastString,
 
-	// Network functions
-	"ip_to_string":  fnIPToString,
-	"cidr_contains": fnCIDRContains,
-	"ip_version":    fnIPVersion,
-	"mask_ip":       fnMaskIP,
-	"mac_to_string": fnMACToString,
-	"ip_subnet":     fnIPSubnet,
-	"ip_netmask":    fnIPNetmask,
+		// Network functions
+		"ip_to_string":  fnIPToString,
+		"cidr_contains": fnCIDRContains,
+		"ip_version":    fnIPVersion,
+		"mask_ip":       fnMaskIP,
+		"mac_to_string": fnMACToString,
+		"ip_subnet":     fnIPSubnet,
+		"ip_netmask":    fnIPNetmask,
 
-	// Date/time functions
-	"now":          fnNow,
-	"year":         fnYear,
-	"month":        fnMonth,
-	"day":          fnDay,
-	"hour":         fnHour,
-	"minute":       fnMinute,
-	"date_trunc":   fnDateTrunc,
-	"extract":      fnExtract,
-	"current_date": fnCurrentDate,
-	"date_diff":    fnDateDiff,
+		// Date/time functions
+		"now":          fnNow,
+		"year":         fnYear,
+		"month":        fnMonth,
+		"day":          fnDay,
+		"hour":         fnHour,
+		"minute":       fnMinute,
+		"date_trunc":   fnDateTrunc,
+		"extract":      fnExtract,
+		"current_date": fnCurrentDate,
+		"date_diff":    fnDateDiff,
 
-	// Session / catalog information (see the SessionUser block below)
-	"current_user":     fnCurrentUser,
-	"session_user":     fnCurrentUser,
-	"user":             fnCurrentUser,
-	"current_role":     fnCurrentUser,
-	"current_catalog":  fnCurrentCatalog,
-	"current_database": fnCurrentCatalog,
-	"current_schema":   fnCurrentSchema,
-	"current_schemas":  fnCurrentSchemas,
-	"version":          fnVersion,
+		// Session / catalog information (see the SessionUser block below)
+		"current_user":     fnCurrentUser,
+		"session_user":     fnCurrentUser,
+		"user":             fnCurrentUser,
+		"current_role":     fnCurrentUser,
+		"current_catalog":  fnCurrentCatalog,
+		"current_database": fnCurrentCatalog,
+		"current_schema":   fnCurrentSchema,
+		"current_schemas":  fnCurrentSchemas,
+		"version":          fnVersion,
 
-	"date_add":     fnDateAdd,
-	"date_sub":     fnDateSub,
-	"to_date":      fnToDate,
+		"date_add": fnDateAdd,
+		"date_sub": fnDateSub,
+		"to_date":  fnToDate,
 
-	// UUID functions
-	"uuid_version":   fnUUIDVersion,
-	"uuid_to_string": fnUUIDToString,
+		// UUID functions
+		"uuid_version":   fnUUIDVersion,
+		"uuid_to_string": fnUUIDToString,
 
-	// Additional string functions
-	"starts_with": fnStartsWith,
-	"ends_with":   fnEndsWith,
-	"contains":    fnContains,
-	"repeat":      fnRepeat,
+		// Additional string functions
+		"starts_with": fnStartsWith,
+		"ends_with":   fnEndsWith,
+		"contains":    fnContains,
+		"repeat":      fnRepeat,
 
-	// Additional math functions
-	"sign":     fnSign,
-	"greatest": fnGreatest,
-	"least":    fnLeast,
+		// Additional math functions
+		"sign":     fnSign,
+		"greatest": fnGreatest,
+		"least":    fnLeast,
 
-	// Additional date/time functions
-	"second": fnSecond,
+		// Additional date/time functions
+		"second": fnSecond,
 
-	// String: regex and parsing
-	"split_part":     fnSplitPart,
-	"strpos":         fnStrPos,
-	"position":       fnStrPos,
-	"regexp_like":    fnRegexpLike,
-	"regexp_extract": fnRegexpExtract,
-	"regexp_replace": fnRegexpReplace,
+		// String: regex and parsing
+		"split_part":     fnSplitPart,
+		"strpos":         fnStrPos,
+		"position":       fnStrPos,
+		"regexp_like":    fnRegexpLike,
+		"regexp_extract": fnRegexpExtract,
+		"regexp_replace": fnRegexpReplace,
 
-	// Encoding
-	"to_hex":     fnToHex,
-	"from_hex":   fnFromHex,
-	"to_base64":  fnToBase64,
-	"from_base64": fnFromBase64,
+		// Encoding
+		"to_hex":      fnToHex,
+		"from_hex":    fnFromHex,
+		"to_base64":   fnToBase64,
+		"from_base64": fnFromBase64,
 
-	// Date/time conversion
-	"from_unixtime": fnFromUnixtime,
-	"to_unixtime":   fnToUnixtime,
-	"date_format":   fnDateFormat,
-	"date_parse":    fnDateParse,
+		// Date/time conversion
+		"from_unixtime": fnFromUnixtime,
+		"to_unixtime":   fnToUnixtime,
+		"date_format":   fnDateFormat,
+		"date_parse":    fnDateParse,
 
-	// Hash
-	"md5":    fnMD5,
-	"sha256": fnSHA256,
-	"sha512": fnSHA512,
+		// Hash
+		"md5":    fnMD5,
+		"sha256": fnSHA256,
+		"sha512": fnSHA512,
 
-	// Bitwise
-	"bitwise_and": fnBitwiseAnd,
-	"bitwise_or":  fnBitwiseOr,
-	"bitwise_xor": fnBitwiseXor,
-	"bitwise_not": fnBitwiseNot,
+		// Bitwise
+		"bitwise_and": fnBitwiseAnd,
+		"bitwise_or":  fnBitwiseOr,
+		"bitwise_xor": fnBitwiseXor,
+		"bitwise_not": fnBitwiseNot,
 
-	// String: padding and character
-	"lpad":       fnLPad,
-	"rpad":       fnRPad,
-	"chr":        fnChr,
-	"codepoint":  fnCodepoint,
-	"concat_ws":  fnConcatWS,
-	"char_length":      fnCharLength,
-	"character_length": fnCharLength,
-	"translate":  fnTranslate,
+		// String: padding and character
+		"lpad":             fnLPad,
+		"rpad":             fnRPad,
+		"chr":              fnChr,
+		"codepoint":        fnCodepoint,
+		"concat_ws":        fnConcatWS,
+		"char_length":      fnCharLength,
+		"character_length": fnCharLength,
+		"translate":        fnTranslate,
 
-	// Math: trigonometry
-	"pi":       fnPi,
-	"degrees":  fnDegrees,
-	"radians":  fnRadians,
-	"sin":      fnSin,
-	"cos":      fnCos,
-	"tan":      fnTan,
-	"asin":     fnAsin,
-	"acos":     fnAcos,
-	"atan":     fnAtan,
-	"atan2":    fnAtan2,
-	"cbrt":     fnCbrt,
-	"log2":     fnLog2,
-	"truncate": fnTruncate,
-	"rand":     fnRandom,
-	"random":   fnRandom,
+		// Math: trigonometry
+		"pi":       fnPi,
+		"degrees":  fnDegrees,
+		"radians":  fnRadians,
+		"sin":      fnSin,
+		"cos":      fnCos,
+		"tan":      fnTan,
+		"asin":     fnAsin,
+		"acos":     fnAcos,
+		"atan":     fnAtan,
+		"atan2":    fnAtan2,
+		"cbrt":     fnCbrt,
+		"log2":     fnLog2,
+		"truncate": fnTruncate,
+		"rand":     fnRandom,
+		"random":   fnRandom,
 
-	// JSON
-	"json_extract":        fnJSONExtract,
-	"json_extract_scalar": fnJSONExtractScalar,
-	"json_array_length":   fnJSONArrayLength,
-	"json_valid":          fnJSONValid,
+		// JSON
+		"json_extract":        fnJSONExtract,
+		"json_extract_scalar": fnJSONExtractScalar,
+		"json_array_length":   fnJSONArrayLength,
+		"json_valid":          fnJSONValid,
 
-	// URL
-	"url_extract_host":     fnURLExtractHost,
-	"url_extract_port":     fnURLExtractPort,
-	"url_extract_path":     fnURLExtractPath,
-	"url_extract_protocol": fnURLExtractProtocol,
-	"url_extract_query":    fnURLExtractQuery,
-	"url_extract_parameter": fnURLExtractParameter,
+		// URL
+		"url_extract_host":      fnURLExtractHost,
+		"url_extract_port":      fnURLExtractPort,
+		"url_extract_path":      fnURLExtractPath,
+		"url_extract_protocol":  fnURLExtractProtocol,
+		"url_extract_query":     fnURLExtractQuery,
+		"url_extract_parameter": fnURLExtractParameter,
 
-	// Type introspection
-	"typeof": fnTypeof,
+		// Type introspection
+		"typeof": fnTypeof,
 
-	// String: distance and utility
-	"soundex":             fnSoundex,
-	"levenshtein_distance": fnLevenshtein,
-	"hamming_distance":    fnHamming,
-	"normalize":           fnNormalize,
-	"format":              fnFormat,
-	"lcase":               fnLower,
-	"ucase":               fnUpper,
-	"to_utf8":             fnToUTF8,
-	"from_utf8":           fnFromUTF8,
+		// String: distance and utility
+		"soundex":              fnSoundex,
+		"levenshtein_distance": fnLevenshtein,
+		"hamming_distance":     fnHamming,
+		"normalize":            fnNormalize,
+		"format":               fnFormat,
+		"lcase":                fnLower,
+		"ucase":                fnUpper,
+		"to_utf8":              fnToUTF8,
+		"from_utf8":            fnFromUTF8,
 
-	// Math: IEEE 754 and utility
-	"e":             fnE,
-	"log10":         fnLog10,
-	"infinity":      fnInfinity,
-	"nan":           fnNaN,
-	"is_nan":        fnIsNaN,
-	"is_finite":     fnIsFinite,
-	"is_infinite":   fnIsInfinite,
-	"width_bucket":  fnWidthBucket,
-	"from_base":     fnFromBase,
-	"to_base":       fnToBase,
-	"bit_count":     fnBitCount,
+		// Math: IEEE 754 and utility
+		"e":            fnE,
+		"log10":        fnLog10,
+		"infinity":     fnInfinity,
+		"nan":          fnNaN,
+		"is_nan":       fnIsNaN,
+		"is_finite":    fnIsFinite,
+		"is_infinite":  fnIsInfinite,
+		"width_bucket": fnWidthBucket,
+		"from_base":    fnFromBase,
+		"to_base":      fnToBase,
+		"bit_count":    fnBitCount,
 
-	// Hash: additional
-	"sha1":        fnSHA1,
-	"crc32":       fnCRC32,
-	"hmac_sha256": fnHMACSHA256,
-	"hmac_sha512": fnHMACSHA512,
+		// Hash: additional
+		"sha1":        fnSHA1,
+		"crc32":       fnCRC32,
+		"hmac_sha256": fnHMACSHA256,
+		"hmac_sha512": fnHMACSHA512,
 
-	// Date: additional accessors
-	"quarter":            fnQuarter,
-	"week":               fnWeek,
-	"day_of_week":        fnDayOfWeek,
-	"day_of_year":        fnDayOfYear,
-	"last_day_of_month":  fnLastDayOfMonth,
-	"current_timestamp":  fnCurrentTimestamp,
-	"at_timezone":        fnAtTimezone,
-	// epoch: the rewrite target of EXTRACT(EPOCH FROM ts).
-	// timezone: the rewrite target of `ts AT TIME ZONE zone`, zone first,
-	// matching PostgreSQL's own canonical form.
-	"epoch":                    fnEpoch,
-	"timezone":                 fnTimezone,
-	"pg_postmaster_start_time": fnPgPostmasterStartTime,
-	"human_readable_seconds": fnHumanReadableSeconds,
+		// Date: additional accessors
+		"quarter":           fnQuarter,
+		"week":              fnWeek,
+		"day_of_week":       fnDayOfWeek,
+		"day_of_year":       fnDayOfYear,
+		"last_day_of_month": fnLastDayOfMonth,
+		"current_timestamp": fnCurrentTimestamp,
+		"at_timezone":       fnAtTimezone,
+		// epoch: the rewrite target of EXTRACT(EPOCH FROM ts).
+		// timezone: the rewrite target of `ts AT TIME ZONE zone`, zone first,
+		// matching PostgreSQL's own canonical form.
+		"epoch":                    fnEpoch,
+		"timezone":                 fnTimezone,
+		"pg_postmaster_start_time": fnPgPostmasterStartTime,
+		"human_readable_seconds":   fnHumanReadableSeconds,
 
-	// Network: analytics
-	"is_private_ip":   fnIsPrivateIP,
-	"is_loopback_ip":  fnIsLoopbackIP,
-	"ip_to_int":       fnIPToInt,
-	"int_to_ip":       fnIntToIP,
-	"is_ipv4":         fnIsIPv4,
-	"is_ipv6":         fnIsIPv6,
+		// Network: analytics
+		"is_private_ip":  fnIsPrivateIP,
+		"is_loopback_ip": fnIsLoopbackIP,
+		"ip_to_int":      fnIPToInt,
+		"int_to_ip":      fnIntToIP,
+		"is_ipv4":        fnIsIPv4,
+		"is_ipv6":        fnIsIPv6,
 
-	// Network: CIDR / subnet operations
-	"network_address":   fnNetworkAddress,
-	"broadcast_address": fnBroadcastAddress,
-	"prefix_length":     fnPrefixLength,
-	"cidr_to_range":     fnCIDRToRange,
-	"hosts_in_cidr":     fnHostsInCIDR,
-	"cidr_overlap":      fnCIDROverlap,
-	"ip_in_range":       fnIPInRange,
-	"same_subnet":       fnSameSubnet,
+		// Network: CIDR / subnet operations
+		"network_address":   fnNetworkAddress,
+		"broadcast_address": fnBroadcastAddress,
+		"prefix_length":     fnPrefixLength,
+		"cidr_to_range":     fnCIDRToRange,
+		"hosts_in_cidr":     fnHostsInCIDR,
+		"cidr_overlap":      fnCIDROverlap,
+		"ip_in_range":       fnIPInRange,
+		"same_subnet":       fnSameSubnet,
 
-	// Network: IP manipulation
-	"ip_add":            fnIPAdd,
-	"ip_subtract":       fnIPSubtract,
-	"ip_diff":           fnIPDiff,
-	"ip_between":        fnIPBetween,
-	"reverse_dns":       fnReverseDNS,
-	"is_multicast_ip":   fnIsMulticastIP,
-	"is_link_local_ip":  fnIsLinkLocalIP,
-	"is_reserved_ip":    fnIsReservedIP,
-	"ip_to_hex":         fnIPToHex,
+		// Network: IP manipulation
+		"ip_add":           fnIPAdd,
+		"ip_subtract":      fnIPSubtract,
+		"ip_diff":          fnIPDiff,
+		"ip_between":       fnIPBetween,
+		"reverse_dns":      fnReverseDNS,
+		"is_multicast_ip":  fnIsMulticastIP,
+		"is_link_local_ip": fnIsLinkLocalIP,
+		"is_reserved_ip":   fnIsReservedIP,
+		"ip_to_hex":        fnIPToHex,
 
-	// Network: MAC operations
-	"mac_vendor_oui":  fnMACVendorOUI,
-	"mac_is_unicast":  fnMACIsUnicast,
-	"mac_is_local":    fnMACIsLocal,
-	"mac_format":      fnMACFormat,
+		// Network: MAC operations
+		"mac_vendor_oui": fnMACVendorOUI,
+		"mac_is_unicast": fnMACIsUnicast,
+		"mac_is_local":   fnMACIsLocal,
+		"mac_format":     fnMACFormat,
 
-	// Network: port classification
-	"port_name":          fnPortName,
-	"is_well_known_port": fnIsWellKnownPort,
-	"is_registered_port": fnIsRegisteredPort,
-	"is_ephemeral_port":  fnIsEphemeralPort,
-	"port_class":         fnPortClass,
+		// Network: port classification
+		"port_name":          fnPortName,
+		"is_well_known_port": fnIsWellKnownPort,
+		"is_registered_port": fnIsRegisteredPort,
+		"is_ephemeral_port":  fnIsEphemeralPort,
+		"port_class":         fnPortClass,
 
-	// Network: protocol
-	"protocol_name":   fnProtocolName,
-	"protocol_number": fnProtocolNumber,
+		// Network: protocol
+		"protocol_name":   fnProtocolName,
+		"protocol_number": fnProtocolNumber,
 
-	// Deep inspection: TCP
-	"tcp_flags_to_string":   fnTCPFlagsToString,
-	"has_tcp_flag":           fnHasTCPFlag,
-	"tcp_flags_from_string": fnTCPFlagsFromString,
-	"is_tcp_handshake":      fnIsTCPHandshake,
-	"is_tcp_reset":          fnIsTCPReset,
-	"tcp_session_id":        fnTCPSessionID,
-	"flow_direction":        fnFlowDirection,
+		// Deep inspection: TCP
+		"tcp_flags_to_string":   fnTCPFlagsToString,
+		"has_tcp_flag":          fnHasTCPFlag,
+		"tcp_flags_from_string": fnTCPFlagsFromString,
+		"is_tcp_handshake":      fnIsTCPHandshake,
+		"is_tcp_reset":          fnIsTCPReset,
+		"tcp_session_id":        fnTCPSessionID,
+		"flow_direction":        fnFlowDirection,
 
-	// Deep inspection: DNS
-	"dns_query_name":     fnDNSQueryName,
-	"dns_query_type":     fnDNSQueryType,
-	"dns_is_response":    fnDNSIsResponse,
-	"dns_response_code":  fnDNSResponseCode,
-	"dns_question_count": fnDNSQuestionCount,
-	"dns_answer_count":   fnDNSAnswerCount,
-	"dns_transaction_id": fnDNSTransactionID,
+		// Deep inspection: DNS
+		"dns_query_name":     fnDNSQueryName,
+		"dns_query_type":     fnDNSQueryType,
+		"dns_is_response":    fnDNSIsResponse,
+		"dns_response_code":  fnDNSResponseCode,
+		"dns_question_count": fnDNSQuestionCount,
+		"dns_answer_count":   fnDNSAnswerCount,
+		"dns_transaction_id": fnDNSTransactionID,
 
-	// Deep inspection: TLS
-	"tls_sni":             fnTLSSNI,
-	"tls_version":         fnTLSVersion,
-	"tls_record_type":     fnTLSRecordType,
-	"is_tls_client_hello": fnIsTLSClientHello,
-	"tls_handshake_type":  fnTLSHandshakeType,
+		// Deep inspection: TLS
+		"tls_sni":             fnTLSSNI,
+		"tls_version":         fnTLSVersion,
+		"tls_record_type":     fnTLSRecordType,
+		"is_tls_client_hello": fnIsTLSClientHello,
+		"tls_handshake_type":  fnTLSHandshakeType,
 
-	// Deep inspection: HTTP
-	"http_method":         fnHTTPMethod,
-	"http_path":           fnHTTPPath,
-	"http_host":           fnHTTPHost,
-	"http_status_code":    fnHTTPStatusCode,
-	"http_status_class":   fnHTTPStatusClass,
-	"http_content_type":   fnHTTPContentType,
-	"http_content_length": fnHTTPContentLength,
-	"http_user_agent":     fnHTTPUserAgent,
-	"http_header":         fnHTTPHeader,
-	"http_version":        fnHTTPVersion,
-	"is_http_request":     fnIsHTTPRequest,
-	"is_http_response":    fnIsHTTPResponse,
+		// Deep inspection: HTTP
+		"http_method":         fnHTTPMethod,
+		"http_path":           fnHTTPPath,
+		"http_host":           fnHTTPHost,
+		"http_status_code":    fnHTTPStatusCode,
+		"http_status_class":   fnHTTPStatusClass,
+		"http_content_type":   fnHTTPContentType,
+		"http_content_length": fnHTTPContentLength,
+		"http_user_agent":     fnHTTPUserAgent,
+		"http_header":         fnHTTPHeader,
+		"http_version":        fnHTTPVersion,
+		"is_http_request":     fnIsHTTPRequest,
+		"is_http_response":    fnIsHTTPResponse,
 
-	// Deep inspection: packet headers
-	"ip_header_length": fnIPHeaderLength,
-	"ip_ttl":           fnIPTTL,
-	"ip_total_length":  fnIPTotalLength,
-	"ip_dscp":          fnIPDSCP,
-	"ether_type":       fnEtherType,
-	"vlan_id":          fnVLANID,
+		// Deep inspection: packet headers
+		"ip_header_length": fnIPHeaderLength,
+		"ip_ttl":           fnIPTTL,
+		"ip_total_length":  fnIPTotalLength,
+		"ip_dscp":          fnIPDSCP,
+		"ether_type":       fnEtherType,
+		"vlan_id":          fnVLANID,
 
-	// Deep inspection: payload analysis
-	"payload_entropy":  fnPayloadEntropy,
-	"payload_hex_dump": fnPayloadHexDump,
+		// Deep inspection: payload analysis
+		"payload_entropy":  fnPayloadEntropy,
+		"payload_hex_dump": fnPayloadHexDump,
 
-	// ICMP
-	"icmp_type_name": fnICMPTypeName,
-	"icmp_code_name": fnICMPCodeName,
-	"is_icmp_echo":   fnIsICMPEcho,
-	"icmp_parse":     fnICMPParse,
-	"icmp_type":      fnICMPType,
-	"icmp_code":      fnICMPCode,
+		// ICMP
+		"icmp_type_name": fnICMPTypeName,
+		"icmp_code_name": fnICMPCodeName,
+		"is_icmp_echo":   fnIsICMPEcho,
+		"icmp_parse":     fnICMPParse,
+		"icmp_type":      fnICMPType,
+		"icmp_code":      fnICMPCode,
 
-	// IPv6
-	"ipv6_scope":      fnIPv6Scope,
-	"ipv6_expand":     fnIPv6Expand,
-	"ipv6_compress":   fnIPv6Compress,
-	"ipv6_to_eui64":   fnIPv6ToEUI64,
-	"is_6to4":         fnIs6to4,
-	"is_teredo":       fnIsTeredo,
-	"teredo_server":   fnTeredoServer,
-	"teredo_client":   fnTeredoClient,
-	"sixto4_gateway":  fnSixto4Gateway,
+		// IPv6
+		"ipv6_scope":     fnIPv6Scope,
+		"ipv6_expand":    fnIPv6Expand,
+		"ipv6_compress":  fnIPv6Compress,
+		"ipv6_to_eui64":  fnIPv6ToEUI64,
+		"is_6to4":        fnIs6to4,
+		"is_teredo":      fnIsTeredo,
+		"teredo_server":  fnTeredoServer,
+		"teredo_client":  fnTeredoClient,
+		"sixto4_gateway": fnSixto4Gateway,
 
-	// JA3 TLS fingerprinting
-	"ja3_fingerprint":  fnJA3Fingerprint,
-	"ja3_string":       fnJA3String,
-	"ja3s_fingerprint": fnJA3SFingerprint,
-	"ja3s_string":      fnJA3SString,
+		// JA3 TLS fingerprinting
+		"ja3_fingerprint":  fnJA3Fingerprint,
+		"ja3_string":       fnJA3String,
+		"ja3s_fingerprint": fnJA3SFingerprint,
+		"ja3s_string":      fnJA3SString,
 
-	// Payload search
-	"payload_contains": fnPayloadContains,
-	"payload_matches":  fnPayloadMatches,
-	"payload_offset":   fnPayloadOffset,
-	"payload_length":   fnPayloadLength,
+		// Payload search
+		"payload_contains": fnPayloadContains,
+		"payload_matches":  fnPayloadMatches,
+		"payload_offset":   fnPayloadOffset,
+		"payload_length":   fnPayloadLength,
 
-	// Regex: additional
-	"regexp_count":       fnRegexpCount,
-	"regexp_extract_all": fnRegexpExtractAll,
-	"regexp_split":       fnRegexpSplit,
+		// Regex: additional
+		"regexp_count":       fnRegexpCount,
+		"regexp_extract_all": fnRegexpExtractAll,
+		"regexp_split":       fnRegexpSplit,
 
-	// String: additional
-	"split": fnSplit,
+		// String: additional
+		"split": fnSplit,
 
-	// Bitwise: shifts
-	"bitwise_left_shift":             fnBitwiseLeftShift,
-	"bitwise_right_shift":            fnBitwiseRightShift,
-	"bitwise_arithmetic_shift_right": fnBitwiseArithmeticShiftRight,
+		// Bitwise: shifts
+		"bitwise_left_shift":             fnBitwiseLeftShift,
+		"bitwise_right_shift":            fnBitwiseRightShift,
+		"bitwise_arithmetic_shift_right": fnBitwiseArithmeticShiftRight,
 
-	// UUID: generation
-	"uuid": fnUUID,
+		// UUID: generation
+		"uuid": fnUUID,
 
-	// Encoding: additional
-	"to_base32":   fnToBase32,
-	"from_base32": fnFromBase32,
-	"xxhash64":    fnXXHash64,
-	"murmur3":     fnMurmur3,
+		// Encoding: additional
+		"to_base32":   fnToBase32,
+		"from_base32": fnFromBase32,
+		"xxhash64":    fnXXHash64,
+		"murmur3":     fnMurmur3,
 
-	// Date/time: ISO 8601
-	"from_iso8601_timestamp": fnFromISO8601Timestamp,
-	"from_iso8601_date":      fnFromISO8601Date,
-	"to_iso8601":             fnToISO8601,
-	"to_milliseconds":        fnToMilliseconds,
-	"timezone_hour":          fnTimezoneHour,
-	"timezone_minute":        fnTimezoneMinute,
+		// Date/time: ISO 8601
+		"from_iso8601_timestamp": fnFromISO8601Timestamp,
+		"from_iso8601_date":      fnFromISO8601Date,
+		"to_iso8601":             fnToISO8601,
+		"to_milliseconds":        fnToMilliseconds,
+		"timezone_hour":          fnTimezoneHour,
+		"timezone_minute":        fnTimezoneMinute,
 
-	// Formatting
-	"format_number": fnFormatNumber,
+		// Formatting
+		"format_number": fnFormatNumber,
 
-	// GeoIP / ASN lookup (requires MaxMind MMDB databases)
-	"geoip_country":      fnGeoipCountry,
-	"geoip_country_name": fnGeoipCountryName,
-	"geoip_city":         fnGeoipCity,
-	"geoip_subdivision":  fnGeoipSubdivision,
-	"geoip_postal_code":  fnGeoipPostalCode,
-	"geoip_latitude":     fnGeoipLatitude,
-	"geoip_longitude":    fnGeoipLongitude,
-	"geoip_timezone":     fnGeoipTimezone,
-	"geoip_continent":    fnGeoipContinent,
-	"geoip_asn":          fnGeoipASN,
-	"geoip_org":          fnGeoipOrg,
+		// GeoIP / ASN lookup (requires MaxMind MMDB databases)
+		"geoip_country":      fnGeoipCountry,
+		"geoip_country_name": fnGeoipCountryName,
+		"geoip_city":         fnGeoipCity,
+		"geoip_subdivision":  fnGeoipSubdivision,
+		"geoip_postal_code":  fnGeoipPostalCode,
+		"geoip_latitude":     fnGeoipLatitude,
+		"geoip_longitude":    fnGeoipLongitude,
+		"geoip_timezone":     fnGeoipTimezone,
+		"geoip_continent":    fnGeoipContinent,
+		"geoip_asn":          fnGeoipASN,
+		"geoip_org":          fnGeoipOrg,
 
-	// Byte/rate formatting
-	"format_bytes":  fnFormatBytes,
-	"parse_bytes":   fnParseBytes,
-	"format_rate":   fnFormatRate,
-	"parse_rate":    fnParseRate,
+		// Byte/rate formatting
+		"format_bytes": fnFormatBytes,
+		"parse_bytes":  fnParseBytes,
+		"format_rate":  fnFormatRate,
+		"parse_rate":   fnParseRate,
 
-	// Array/nested type functions (Trino-compatible)
-	"cardinality":    fnCardinality,
-	"array_length":   fnCardinality,
-	"element_at":     fnElementAt,
-	"array_contains": fnArrayContains,
-	"array_join":     fnArrayJoin,
-	"array_min":      fnArrayMin,
-	"array_max":      fnArrayMax,
+		// Array/nested type functions (Trino-compatible)
+		"cardinality":    fnCardinality,
+		"array_length":   fnCardinality,
+		"element_at":     fnElementAt,
+		"array_contains": fnArrayContains,
+		"array_join":     fnArrayJoin,
+		"array_min":      fnArrayMin,
+		"array_max":      fnArrayMax,
 
-	// ROW/struct functions
-	"row_field":    fnRowField,
-	"struct_field": fnRowField,
+		// ROW/struct functions
+		"row_field":    fnRowField,
+		"struct_field": fnRowField,
 
-	// Domain parsing (DNS threat hunting)
-	"registered_domain": fnRegisteredDomain,
-	"tld":              fnTLD,
-	"subdomain":        fnSubdomain,
-	"domain_depth":     fnDomainDepth,
+		// Domain parsing (DNS threat hunting)
+		"registered_domain": fnRegisteredDomain,
+		"tld":               fnTLD,
+		"subdomain":         fnSubdomain,
+		"domain_depth":      fnDomainDepth,
 
-	// URL encoding/decoding
-	"url_encode": fnURLEncode,
-	"url_decode": fnURLDecode,
+		// URL encoding/decoding
+		"url_encode": fnURLEncode,
+		"url_decode": fnURLDecode,
 
-	// String analysis
-	"entropy": fnEntropy,
+		// String analysis
+		"entropy": fnEntropy,
 
-	// MAP functions
-	"map_keys":      fnMapKeys,
-	"map_values":    fnMapValues,
-	"map_entries":   fnMapEntries,
-	"map_from_entries": fnMapFromEntries,
+		// MAP functions
+		"map_keys":         fnMapKeys,
+		"map_values":       fnMapValues,
+		"map_entries":      fnMapEntries,
+		"map_from_entries": fnMapFromEntries,
 	}
 	for name, fn := range builtins {
 		DefaultRegistry.funcs[name] = fn
@@ -2089,8 +2089,8 @@ func init() {
 
 	// Vectorized implementations: operate on entire columns instead of per-row.
 	vecBuiltins := map[string]VecScalarFunc{
-		"upper":      vecUpper,
-		"lower":      vecLower,
+		"upper":        vecUpper,
+		"lower":        vecLower,
 		"length":       vecLength,
 		"len":          vecLength,
 		"octet_length": vecOctetLength,
@@ -2098,28 +2098,28 @@ func init() {
 		// Rune counting needs the bytes — no offsets fast path exists.
 		"char_length":      vecCharLength,
 		"character_length": vecCharLength,
-		"trim":       vecTrim,
-		"ltrim":      vecLTrim,
-		"rtrim":      vecRTrim,
-		"substr":     vecSubstr,
-		"substring":  vecSubstr,
-		"replace":    vecReplace,
-		"reverse":    vecReverse,
-		"left":       vecLeft,
-		"right":      vecRight,
-		"concat":     vecConcat,
-		"starts_with": vecStartsWith,
-		"ends_with":  vecEndsWith,
-		"contains":   vecContains,
-		"abs":        vecAbs,
-		"ceil":       vecCeil,
-		"floor":      vecFloor,
-		"round":      vecRound,
-		"year":       vecYear,
-		"month":      vecMonth,
-		"day":        vecDay,
-		"hour":       vecHour,
-		"extract":    vecExtract,
+		"trim":             vecTrim,
+		"ltrim":            vecLTrim,
+		"rtrim":            vecRTrim,
+		"substr":           vecSubstr,
+		"substring":        vecSubstr,
+		"replace":          vecReplace,
+		"reverse":          vecReverse,
+		"left":             vecLeft,
+		"right":            vecRight,
+		"concat":           vecConcat,
+		"starts_with":      vecStartsWith,
+		"ends_with":        vecEndsWith,
+		"contains":         vecContains,
+		"abs":              vecAbs,
+		"ceil":             vecCeil,
+		"floor":            vecFloor,
+		"round":            vecRound,
+		"year":             vecYear,
+		"month":            vecMonth,
+		"day":              vecDay,
+		"hour":             vecHour,
+		"extract":          vecExtract,
 	}
 	for name, fn := range vecBuiltins {
 		DefaultRegistry.vecFuncs[name] = fn
@@ -2691,7 +2691,8 @@ func fnDateDiff(args []any) any {
 
 // fnDateAdd adds days (or an interval) to a date.
 // Usage: date_add(date, days) → date string
-//        date_add(date, interval) → date string
+//
+//	date_add(date, interval) → date string
 func fnDateAdd(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
@@ -2711,7 +2712,8 @@ func fnDateAdd(args []any) any {
 
 // fnDateSub subtracts days (or an interval) from a date.
 // Usage: date_sub(date, days) → date string
-//        date_sub(date, interval) → date string
+//
+//	date_sub(date, interval) → date string
 func fnDateSub(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
@@ -3013,7 +3015,7 @@ func parseTemporalInt64(ref int64, s string) int64 {
 // Q14/Q15/Q20: ~1-3 literals each; suite-wide < 20 distinct strings), so a
 // memoization cache stays trivially small and never grows unbounded.
 var (
-	dateEpochDaysCache  sync.Map // map[string]int64 → epoch days
+	dateEpochDaysCache    sync.Map // map[string]int64 → epoch days
 	timestampEpochMsCache sync.Map // map[string]int64 → epoch milliseconds
 )
 
@@ -7500,12 +7502,12 @@ func fnParseBytes(args []any) any {
 	s = strings.ToUpper(s)
 
 	multipliers := map[string]float64{
-		"B":   1,
-		"KB":  1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12, "PB": 1e15, "EB": 1e18,
+		"B":  1,
+		"KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12, "PB": 1e15, "EB": 1e18,
 		"KIB": 1024, "MIB": 1048576, "GIB": 1073741824,
 		"TIB": 1099511627776, "PIB": 1125899906842624, "EIB": 1152921504606846976,
 		// Also handle Kbps-style (bits)
-		"BPS":  0.125, "KBPS": 125, "MBPS": 125000, "GBPS": 125000000,
+		"BPS": 0.125, "KBPS": 125, "MBPS": 125000, "GBPS": 125000000,
 		"KIBPS": 128, "MIBPS": 131072, "GIBPS": 134217728,
 	}
 
@@ -8308,7 +8310,12 @@ func vecYear(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		out.Float64Data[i] = float64(time.Unix(src.Int64Data[i], 0).UTC().Year())
+		t, ok := vecTimeAt(src, i)
+		if !ok {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = float64(t.Year())
 	}
 }
 
@@ -8320,7 +8327,12 @@ func vecMonth(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		out.Float64Data[i] = float64(time.Unix(src.Int64Data[i], 0).UTC().Month())
+		t, ok := vecTimeAt(src, i)
+		if !ok {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = float64(t.Month())
 	}
 }
 
@@ -8332,7 +8344,12 @@ func vecDay(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		out.Float64Data[i] = float64(time.Unix(src.Int64Data[i], 0).UTC().Day())
+		t, ok := vecTimeAt(src, i)
+		if !ok {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = float64(t.Day())
 	}
 }
 
@@ -8344,7 +8361,12 @@ func vecHour(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		out.Float64Data[i] = float64(time.Unix(src.Int64Data[i], 0).UTC().Hour())
+		t, ok := vecTimeAt(src, i)
+		if !ok {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = float64(t.Hour())
 	}
 }
 
@@ -8361,7 +8383,11 @@ func vecExtract(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		t := time.Unix(src.Int64Data[i], 0).UTC()
+		t, ok := vecTimeAt(src, i)
+		if !ok {
+			out.Nulls.SetNull(i)
+			continue
+		}
 		switch unit {
 		case "year":
 			out.Float64Data[i] = float64(t.Year())
@@ -8382,7 +8408,7 @@ func vecExtract(args []*batch.Vector, out *batch.Vector, n int) {
 		case "quarter":
 			out.Float64Data[i] = float64((t.Month()-1)/3 + 1)
 		case "epoch":
-			out.Float64Data[i] = float64(src.Int64Data[i])
+			out.Float64Data[i] = float64(t.Unix())
 		}
 	}
 }
@@ -8434,7 +8460,7 @@ func fnTLD(args []any) any {
 // fnSubdomain extracts the subdomain portion (everything before the registered domain).
 // subdomain('mail.google.com') → 'mail'
 // subdomain('a.b.c.example.co.uk') → 'a.b.c'
-// subdomain('example.com') → '' (no subdomain)
+// subdomain('example.com') → ” (no subdomain)
 func fnSubdomain(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
@@ -8519,4 +8545,35 @@ func fnEntropy(args []any) any {
 		entropy -= p * math.Log2(p)
 	}
 	return entropy
+}
+
+// vecTimeAt resolves row i of a vector to a UTC time, and reports whether it
+// could. The date-part kernels below all used to read src.Int64Data directly,
+// which is right ONLY for a timestamp: a DATE column stores days-since-epoch
+// in Int32Data and a date held as text stores nothing there at all, so both
+// read zeros and every row came back as 1970 — silently, with no error and no
+// null. `SELECT EXTRACT(YEAR FROM l_shipdate) ... GROUP BY 1` collapsed a
+// decade of data into one bogus bucket.
+//
+// The scalar implementations (fnYear and friends, via parseTime) always
+// handled these; this is what makes the vectorized path agree with them.
+func vecTimeAt(src *batch.Vector, i int) (time.Time, bool) {
+	switch src.Type {
+	case batch.TypeString, batch.TypeBytes:
+		t := parseTime(src.BytesData.StringValue(i))
+		if t.IsZero() {
+			return time.Time{}, false
+		}
+		return t, true
+	case batch.TypeDate:
+		if i < len(src.Int32Data) {
+			// Days since the Unix epoch.
+			return time.Unix(int64(src.Int32Data[i])*86400, 0).UTC(), true
+		}
+	default:
+		if i < len(src.Int64Data) {
+			return time.Unix(src.Int64Data[i], 0).UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
