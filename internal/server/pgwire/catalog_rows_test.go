@@ -328,39 +328,39 @@ func TestSelectItems(t *testing.T) {
 	}{
 		{
 			"SELECT datname FROM pg_database",
-			[]selectItem{{"datname", "datname"}},
+			[]selectItem{{expr: "datname", label: "datname"}},
 		},
 		{
 			"SELECT datname AS TABLE_CAT FROM pg_database",
-			[]selectItem{{"datname", "TABLE_CAT"}},
+			[]selectItem{{expr: "datname", label: "TABLE_CAT"}},
 		},
 		{
 			"select d.oid, d.datname from pg_database d",
-			[]selectItem{{"oid", "oid"}, {"datname", "datname"}},
+			[]selectItem{{expr: "oid", label: "oid"}, {expr: "datname", label: "datname"}},
 		},
 		{
 			`SELECT "datname" FROM pg_database`,
-			[]selectItem{{"datname", "datname"}},
+			[]selectItem{{expr: "datname", label: "datname"}},
 		},
 		{
 			"SELECT DATNAME FROM pg_database",
-			[]selectItem{{"datname", "DATNAME"}},
+			[]selectItem{{expr: "datname", label: "DATNAME"}},
 		},
 		{
 			"SELECT DISTINCT datname FROM pg_database",
-			[]selectItem{{"datname", "datname"}},
+			[]selectItem{{expr: "datname", label: "datname"}},
 		},
 		{
 			`SELECT nspname AS "TABLE_SCHEM", NULL AS TABLE_CATALOG FROM pg_namespace`,
-			[]selectItem{{"nspname", "TABLE_SCHEM"}, {"null", "TABLE_CATALOG"}},
+			[]selectItem{{expr: "nspname", label: "TABLE_SCHEM"}, {expr: "null", label: "TABLE_CATALOG"}},
 		},
 		{
 			"SELECT * FROM pg_database",
-			[]selectItem{{"*", "*"}},
+			[]selectItem{{expr: "*", label: "*"}},
 		},
 		{
 			"SELECT 1",
-			[]selectItem{{"1", "1"}},
+			[]selectItem{{expr: "1", label: "1"}},
 		},
 		{
 			"UPDATE t SET a = 1",
@@ -374,7 +374,9 @@ func TestSelectItems(t *testing.T) {
 				t.Fatalf("got %+v, want %+v", got, tt.want)
 			}
 			for i, w := range tt.want {
-				if got[i] != w {
+				// raw carries the entry's own text; this test is about the
+				// attribute an item reads and the label it reads it under.
+				if got[i].expr != w.expr || got[i].label != w.label {
 					t.Errorf("item %d = %+v, want %+v", i, got[i], w)
 				}
 			}

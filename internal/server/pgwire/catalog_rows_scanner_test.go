@@ -1,6 +1,9 @@
 package pgwire
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The select-list scanner must survive what real clients send. The DataGrip
 // database-listing query is the motivating case: multiline, ::casts, a
@@ -256,5 +259,70 @@ func TestExtractSelectColumnsMultiline(t *testing.T) {
 	cols = extractSelectColumns("select rolsuper is_super, rolcanlogin can_login from pg_roles")
 	if len(cols) != 2 || cols[0] != "is_super" || cols[1] != "can_login" {
 		t.Fatalf("implicit aliases = %q", cols)
+	}
+}
+
+// DataGrip derives an object's kind with translate() over relkind. Mapping
+// only bare attribute names left kind NULL, and an object with no kind is one
+// the client cannot place: "Unsupported object kind ” of object 'customer'".
+func TestEvalCatalogExpr(t *testing.T) {
+	attrs := pgClassAttrs("customer") // relkind "r"
+	for _, tt := range []struct {
+		name string
+		expr string
+		want any
+		ok   bool
+	}{
+		{"translate", "pg_catalog.translate(relkind, 'rmvpfS', 'rmvrfS')", "r", true},
+		{"translate maps p to r", "translate(relkind, 'rmvpfS', 'rmvrfS')", "r", true},
+		{"upper", "pg_catalog.upper(relkind)", "R", true},
+		{"lower", "lower(relpersistence)", "p", true},
+		{"qualified arg", "pg_catalog.upper(T.relkind)", "R", true},
+		{"unknown function", "pg_catalog.pg_get_userbyid(relowner)", nil, false},
+		{"unknown attribute", "upper(nosuchcolumn)", nil, false},
+		{"not a call", "relkind", nil, false},
+		{"non-string attribute", "upper(oid)", nil, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := evalCatalogExpr(tt.expr, attrs)
+			if ok != tt.ok || (ok && got != tt.want) {
+				t.Fatalf("evalCatalogExpr(%q) = %v, %v; want %v, %v", tt.expr, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+
+	// translate's own semantics: chars map by position, and a char with no
+	// counterpart in the target is dropped.
+	// DataGrip's map collapses partitioned tables into ordinary ones
+	// (p→r) and leaves views alone (v→v).
+	if got := translateChars("pv", "rmvpfS", "rmvrfS"); got != "rv" {
+		t.Fatalf("translateChars = %q, want \"rv\"", got)
+	}
+	if got := translateChars("abc", "b", ""); got != "ac" {
+		t.Fatalf("dropped char = %q, want \"ac\"", got)
+	}
+}
+
+// Comments are not part of the statement this layer reasons about. DataGrip
+// ships a commented-out CTE naming pg_class above its index query; read
+// literally, that made an index query look like a table listing.
+func TestStripSQLComments(t *testing.T) {
+	sql := "/* with T as (\n  select T.oid from pg_catalog.pg_class T\n) */\nselect ind_head.indexrelid from pg_catalog.pg_index ind_head"
+	got := stripSQLComments(sql)
+	if strings.Contains(strings.ToUpper(got), "PG_CLASS") {
+		t.Fatalf("commented-out CTE survived: %q", got)
+	}
+	if subject := catalogSubject(strings.ToUpper(strings.Join(strings.Fields(got), " "))); subject != "" {
+		t.Fatalf("subject = %q, want none (pg_index is not modelled)", subject)
+	}
+	// A comment marker inside a literal is data.
+	lit := stripSQLComments("select * from t where c = '-- not a comment'")
+	if !strings.Contains(lit, "-- not a comment") {
+		t.Fatalf("literal was stripped: %q", lit)
+	}
+	// Line comments end at the newline, not at the end of the statement.
+	line := stripSQLComments("select a, -- why\nb from t")
+	if !strings.Contains(line, "b from t") {
+		t.Fatalf("line comment ate the rest: %q", line)
 	}
 }

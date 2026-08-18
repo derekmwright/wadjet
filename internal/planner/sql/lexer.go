@@ -368,6 +368,15 @@ func (l *lexer) errorf(format string, args ...any) stateFn {
 }
 
 // skipWhitespace advances past any whitespace and resets start.
+// Comments are lexical whitespace: `-- to end of line` and `/* block */`,
+// the latter nesting the way PostgreSQL nests it. Skipping them here rather
+// than in the parser means every construct accepts them, in every position,
+// because no parse rule ever sees one.
+//
+// Without this the parser rejected a statement with any comment at all —
+// "expected SELECT" for a leading `--` note typed above a query in a client's
+// editor, and for the commented-out CTE DataGrip ships inside its index
+// introspection query.
 func (l *lexer) skipWhitespace() {
 	for {
 		r := l.next()
@@ -375,11 +384,38 @@ func (l *lexer) skipWhitespace() {
 			l.start = l.pos
 			return
 		}
-		if !unicode.IsSpace(r) {
-			l.backup()
-			l.start = l.pos
-			return
+		if unicode.IsSpace(r) {
+			continue
 		}
+		if r == '-' && l.peek() == '-' {
+			for {
+				c := l.next()
+				if c == eof || c == '\n' {
+					break
+				}
+			}
+			continue
+		}
+		if r == '/' && l.peek() == '*' {
+			l.next() // consume the '*'
+			for depth := 1; depth > 0; {
+				c := l.next()
+				if c == eof {
+					break // unterminated comment: consume to end of input
+				}
+				if c == '/' && l.peek() == '*' {
+					l.next()
+					depth++
+				} else if c == '*' && l.peek() == '/' {
+					l.next()
+					depth--
+				}
+			}
+			continue
+		}
+		l.backup()
+		l.start = l.pos
+		return
 	}
 }
 

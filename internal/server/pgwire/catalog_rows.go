@@ -106,6 +106,142 @@ func catalogRowAnswer(sql string, attrs map[string]any, fallbackCols []string) *
 	return catalogRowsAnswer(sql, attrs, []map[string]any{attrs}, fallbackCols)
 }
 
+// evalCatalogExpr computes the value of a SELECT-list expression that wraps a
+// single catalog attribute in one of the text functions clients use to shape
+// catalog values, and reports whether it could.
+//
+// DataGrip derives an object's kind with
+// `pg_catalog.translate(relkind, 'rmvpfS', 'rmvrfS')`. Mapping only bare
+// attribute names left that column NULL, and an object with no kind is one the
+// client cannot place: "Unsupported object kind ” of object 'customer'".
+// These functions are pure and tiny, so the honest answer is to compute what
+// PostgreSQL would compute rather than to guess or to return nothing.
+func evalCatalogExpr(expr string, attrs map[string]any) (any, bool) {
+	open := strings.IndexByte(expr, '(')
+	if open < 0 || !strings.HasSuffix(expr, ")") {
+		return nil, false
+	}
+	fn := strings.ToLower(strings.TrimSpace(expr[:open]))
+	fn = strings.TrimPrefix(fn, "pg_catalog.")
+	args := splitArgs(expr[open+1 : len(expr)-1])
+	if len(args) == 0 {
+		return nil, false
+	}
+
+	// The first argument names the attribute; the rest must be literals.
+	attr := strings.ToLower(strings.Trim(bareAttr(args[0]), `"`))
+	val, ok := attrs[attr]
+	if !ok {
+		return nil, false
+	}
+	s, isStr := val.(string)
+	if !isStr {
+		return nil, false
+	}
+
+	switch fn {
+	case "upper":
+		if len(args) != 1 {
+			return nil, false
+		}
+		return strings.ToUpper(s), true
+	case "lower":
+		if len(args) != 1 {
+			return nil, false
+		}
+		return strings.ToLower(s), true
+	case "translate":
+		if len(args) != 3 {
+			return nil, false
+		}
+		from, ok1 := literalString(args[1])
+		to, ok2 := literalString(args[2])
+		if !ok1 || !ok2 {
+			return nil, false
+		}
+		return translateChars(s, from, to), true
+	}
+	return nil, false
+}
+
+// translateChars is PostgreSQL's translate(): each character of s that appears
+// in from is replaced by the character at the same position in to, or dropped
+// when to is shorter.
+func translateChars(s, from, to string) string {
+	fromRunes, toRunes := []rune(from), []rune(to)
+	var b strings.Builder
+	for _, r := range s {
+		idx := -1
+		for i, f := range fromRunes {
+			if f == r {
+				idx = i
+				break
+			}
+		}
+		switch {
+		case idx < 0:
+			b.WriteRune(r)
+		case idx < len(toRunes):
+			b.WriteRune(toRunes[idx])
+		}
+	}
+	return b.String()
+}
+
+// literalString returns the contents of a single-quoted SQL literal.
+func literalString(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if len(s) < 2 || s[0] != '\'' || s[len(s)-1] != '\'' {
+		return "", false
+	}
+	return strings.ReplaceAll(s[1:len(s)-1], "''", "'"), true
+}
+
+// bareAttr strips a cast and a table qualifier from an expression, leaving the
+// attribute name it reads: `T.relkind::char` → `relkind`.
+func bareAttr(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.Index(s, "::"); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	if i := strings.LastIndex(s, "."); i >= 0 {
+		s = strings.TrimSpace(s[i+1:])
+	}
+	return s
+}
+
+// splitArgs splits a function argument list on top-level commas.
+func splitArgs(s string) []string {
+	var args []string
+	depth := 0
+	inSingle, inDouble := false, false
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch ch := s[i]; {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '(':
+			depth++
+		case ch == ')':
+			depth--
+		case ch == ',' && depth == 0:
+			args = append(args, s[start:i])
+			start = i + 1
+		}
+	}
+	return append(args, s[start:])
+}
+
 // catalogRowsAnswer is catalogRowAnswer over many rows: pg_class lists one row
 // per table, pg_database one row per database. shape names the relation's
 // columns (which of them the SELECT list may read); rows carry the values, and
@@ -121,7 +257,7 @@ func catalogRowsAnswer(sql string, shape map[string]any, rows []map[string]any, 
 	if len(items) == 1 && items[0].expr == "*" {
 		items = items[:0]
 		for _, col := range fallbackCols {
-			items = append(items, selectItem{expr: col, label: col})
+			items = append(items, selectItem{expr: col, label: col, raw: col})
 		}
 	}
 
@@ -150,7 +286,17 @@ func catalogRowsAnswer(sql string, shape map[string]any, rows []map[string]any, 
 	for _, attrs := range rows {
 		row := make(map[string]any, len(picks))
 		for _, it := range picks {
-			row[it.label] = attrs[it.expr]
+			if v, ok := attrs[it.expr]; ok {
+				row[it.label] = v
+				continue
+			}
+			// Not a bare attribute: a function over one may still be
+			// computable (translate/upper/lower over relkind and friends).
+			if v, ok := evalCatalogExpr(it.raw, attrs); ok {
+				row[it.label] = v
+				continue
+			}
+			row[it.label] = nil
 		}
 		ans.rows = append(ans.rows, row)
 	}
@@ -185,12 +331,79 @@ func pgClassAttrs(name string) map[string]any {
 	}
 }
 
+// stripSQLComments removes -- line comments and /* block */ comments (nested,
+// as PostgreSQL nests them), leaving a space where each stood so tokens do not
+// fuse. String literals and quoted identifiers are respected.
+//
+// This layer reasons about statement text — which relation is the subject,
+// which columns the client asked for — so it has to reason about the statement
+// the server will run, not the commentary around it. DataGrip ships a
+// commented-out CTE at the top of its index query:
+//
+//	/* with T as ( select T.oid from pg_catalog.pg_class T ... ) */
+//	select ind_head.indexrelid ...
+//
+// Read literally that text names pg_class, so the statement looked like a
+// table listing and would have been answered as one.
+func stripSQLComments(sql string) string {
+	var out strings.Builder
+	out.Grow(len(sql))
+	inSingle, inDouble := false, false
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '-' && i+1 < len(sql) && sql[i+1] == '-':
+			for i < len(sql) && sql[i] != '\n' {
+				i++
+			}
+			out.WriteByte(' ')
+			if i < len(sql) {
+				out.WriteByte('\n')
+			}
+			continue
+		case ch == '/' && i+1 < len(sql) && sql[i+1] == '*':
+			depth, j := 1, i+2
+			for j < len(sql) && depth > 0 {
+				if sql[j] == '/' && j+1 < len(sql) && sql[j+1] == '*' {
+					depth++
+					j += 2
+					continue
+				}
+				if sql[j] == '*' && j+1 < len(sql) && sql[j+1] == '/' {
+					depth--
+					j += 2
+					continue
+				}
+				j++
+			}
+			i = j - 1
+			out.WriteByte(' ')
+			continue
+		}
+		out.WriteByte(ch)
+	}
+	return out.String()
+}
+
 // selectItem is one entry of a SELECT list: the attribute it reads, lowercased
 // and stripped of any table qualifier, and the label the client will read the
 // value back under.
 type selectItem struct {
-	expr  string
-	label string
+	expr  string // the attribute it reads, lowercased and unqualified
+	label string // what the client will read the value back under
+	raw   string // the entry's own text, for expressions expr cannot name
 }
 
 // selectItems splits a SELECT list into its entries. It is the same rough
@@ -247,7 +460,7 @@ func selectItems(sql string) []selectItem {
 		if label == "" {
 			label = bare
 		}
-		items = append(items, selectItem{expr: strings.ToLower(bare), label: label})
+		items = append(items, selectItem{expr: strings.ToLower(bare), label: label, raw: exprPart})
 	}
 	return items
 }

@@ -1390,6 +1390,14 @@ func (ans *synthAnswer) colOID(col string) int32 {
 // connection setup. It returns nil when the statement is not one this layer
 // answers — the caller then runs it on the query engine.
 func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
+	// Comments are not part of the statement. Strip them before anything
+	// reads the text, so subject detection and column shaping both see what
+	// the server would actually run (see stripSQLComments).
+	if strings.Contains(sql, "--") || strings.Contains(sql, "/*") {
+		sql = stripSQLComments(sql)
+		upper = strings.ToUpper(sql)
+	}
+
 	// Normalize whitespace for matching (newlines, tabs → spaces)
 	normalized := strings.Join(strings.Fields(upper), " ")
 

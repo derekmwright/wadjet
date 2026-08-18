@@ -387,3 +387,37 @@ func TestLexJSONArrowChain(t *testing.T) {
 		}
 	}
 }
+
+// Comments are whitespace, in every position. The lexer skipped none of them,
+// so any statement carrying one failed with "expected SELECT" — a note typed
+// above a query in a client's editor, or the commented-out CTE DataGrip ships
+// inside its index introspection query.
+func TestLexerSkipsComments(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		sql  string
+	}{
+		{"leading line", "-- note\nSELECT a FROM t"},
+		{"leading block", "/* note */ SELECT a FROM t"},
+		{"inline block", "SELECT /* which */ a FROM t"},
+		{"trailing line", "SELECT a FROM t -- why"},
+		{"nested block", "/* outer /* inner */ still outer */ SELECT a FROM t"},
+		{"block spanning lines", "/*\n  multi\n  line\n*/\nSELECT a FROM t"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			l := newLexer(tt.sql)
+			tok := l.nextToken()
+			if tok.typ != TokenKWSelect {
+				t.Fatalf("first token = %v %q, want SELECT keyword", tok.typ, tok.val)
+			}
+		})
+	}
+
+	// A comment marker inside a string literal is data, not a comment.
+	l := newLexer("SELECT '-- not a comment' FROM t")
+	l.nextToken() // SELECT
+	tok := l.nextToken()
+	if tok.typ != TokenString || tok.val != "-- not a comment" {
+		t.Fatalf("string literal = %v %q", tok.typ, tok.val)
+	}
+}
