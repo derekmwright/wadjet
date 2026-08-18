@@ -67,7 +67,7 @@ func numericOID(oid uint32) bool {
 }
 
 // quoteLiteral renders s as a single-quoted SQL string literal. Doubling the
-// single quotes is the whole escape: this lexer reads '' inside a literal as
+// single quotes is the whole escape: this lexer reads ” inside a literal as
 // one quote and treats a backslash as an ordinary character (the
 // standard_conforming_strings=on behavior the server reports), so there is no
 // backslash escape for a value to break out through.

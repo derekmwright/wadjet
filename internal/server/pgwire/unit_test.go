@@ -48,11 +48,11 @@ func TestPgTypeOID(t *testing.T) {
 		{"BOOL", 16},
 		{"TIMESTAMP", 1114},
 		{"DATE", 1082},
-		{"VARCHAR", 25},   // default = text
-		{"STRING", 25},    // default = text
-		{"UNKNOWN", 25},   // default = text
-		{"int32", 23},     // case insensitive
-		{"float64", 701},  // case insensitive
+		{"VARCHAR", 25},  // default = text
+		{"STRING", 25},   // default = text
+		{"UNKNOWN", 25},  // default = text
+		{"int32", 23},    // case insensitive
+		{"float64", 701}, // case insensitive
 	}
 	for _, tt := range tests {
 		t.Run(tt.typeName, func(t *testing.T) {
@@ -69,16 +69,16 @@ func TestPgTypeSize(t *testing.T) {
 		oid  int
 		want int16
 	}{
-		{16, 1},    // bool
-		{21, 2},    // int2
-		{23, 4},    // int4
-		{20, 8},    // int8
-		{700, 4},   // float4
-		{701, 8},   // float8
-		{1082, 4},  // date
-		{1114, 8},  // timestamp
-		{25, -1},   // text (variable)
-		{0, -1},    // unknown (variable)
+		{16, 1},   // bool
+		{21, 2},   // int2
+		{23, 4},   // int4
+		{20, 8},   // int8
+		{700, 4},  // float4
+		{701, 8},  // float8
+		{1082, 4}, // date
+		{1114, 8}, // timestamp
+		{25, -1},  // text (variable)
+		{0, -1},   // unknown (variable)
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("oid_%d", tt.oid), func(t *testing.T) {
@@ -866,9 +866,9 @@ func TestPGWireNamedPreparedStatementBind(t *testing.T) {
 
 	// Bind: unnamed portal to named statement
 	var bindBuf []byte
-	bindBuf = append(bindBuf, 0)        // unnamed portal
+	bindBuf = append(bindBuf, 0) // unnamed portal
 	bindBuf = append(bindBuf, "my_stmt"...)
-	bindBuf = append(bindBuf, 0)        // statement name
+	bindBuf = append(bindBuf, 0)                        // statement name
 	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0) // 0 format codes
 	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0) // 0 parameters
 	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0) // 0 result format codes
@@ -926,8 +926,8 @@ func TestPGWireBindWithParameters(t *testing.T) {
 
 	// Bind with parameter value "23" (int4)
 	var bindBuf []byte
-	bindBuf = append(bindBuf, 0) // unnamed portal
-	bindBuf = append(bindBuf, 0) // unnamed statement
+	bindBuf = append(bindBuf, 0)                        // unnamed portal
+	bindBuf = append(bindBuf, 0)                        // unnamed statement
 	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0) // 0 format codes for params
 	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 1) // 1 parameter
 	paramVal := []byte("23")
@@ -1325,13 +1325,13 @@ func TestPGWireBindWithNullParam(t *testing.T) {
 
 	// Bind with a NULL parameter (length = -1)
 	var bindBuf []byte
-	bindBuf = append(bindBuf, 0) // unnamed portal
-	bindBuf = append(bindBuf, 0) // unnamed statement
+	bindBuf = append(bindBuf, 0)                        // unnamed portal
+	bindBuf = append(bindBuf, 0)                        // unnamed statement
 	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0) // 0 format codes
 	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 1) // 1 parameter
 	// NULL param: length = -1
 	bindBuf = binary.BigEndian.AppendUint32(bindBuf, 0xFFFFFFFF) // -1
-	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0) // 0 result format codes
+	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0)          // 0 result format codes
 	client.writeMsg('B', bindBuf)
 
 	// Sync

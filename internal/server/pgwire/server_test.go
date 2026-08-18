@@ -406,7 +406,7 @@ func TestPGWireSSLDecline(t *testing.T) {
 	defer conn.Close()
 
 	// Send SSL request
-	sslReq := binary.BigEndian.AppendUint32(nil, 8) // length
+	sslReq := binary.BigEndian.AppendUint32(nil, 8)          // length
 	sslReq = binary.BigEndian.AppendUint32(sslReq, 80877103) // SSL request code
 	conn.Write(sslReq)
 
@@ -642,8 +642,8 @@ func (c *pgClient) extendedQuery(sql string) (names []string, oids []int, rows [
 
 	// Bind: unnamed portal + unnamed statement + 0 fmt codes + 0 params + 0 result fmt codes
 	var bindBuf []byte
-	bindBuf = append(bindBuf, 0)    // unnamed portal
-	bindBuf = append(bindBuf, 0)    // unnamed statement
+	bindBuf = append(bindBuf, 0)                        // unnamed portal
+	bindBuf = append(bindBuf, 0)                        // unnamed statement
 	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0) // 0 format codes
 	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0) // 0 parameters
 	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0) // 0 result format codes
@@ -1655,4 +1655,3 @@ func TestPGWireInfoSchemaAlerts(t *testing.T) {
 
 	client.terminate()
 }
-

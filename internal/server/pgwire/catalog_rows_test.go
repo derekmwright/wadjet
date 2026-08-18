@@ -109,8 +109,8 @@ func TestPgDatabaseListing(t *testing.T) {
 			wantVals: []string{"wadjet", "NULL"},
 		},
 		{
-			name:     "select star names the relation's columns",
-			sql:      "SELECT * FROM pg_database",
+			name: "select star names the relation's columns",
+			sql:  "SELECT * FROM pg_database",
 			wantCols: []string{"oid", "datname", "datdba", "encoding", "datcollate",
 				"datctype", "datistemplate", "datallowconn"},
 			wantVals: []string{"", "wadjet", "10", "6", "en_US.UTF-8", "en_US.UTF-8", "f", "t"},
