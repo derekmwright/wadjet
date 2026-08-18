@@ -2387,9 +2387,34 @@ func formatPgValue(val any) string {
 			return "t"
 		}
 		return "f"
+	case float64:
+		return formatPgFloat(tv, 64)
+	case float32:
+		return formatPgFloat(float64(tv), 32)
 	default:
 		return fmt.Sprintf("%v", val)
 	}
+}
+
+// formatPgFloat renders a float the way PostgreSQL's text protocol does:
+// plain decimal for ordinary magnitudes, where Go's %v switches to
+// e-notation once the exponent reaches the digit count — an epoch like
+// 1787049120 came out "1.78704912e+09", which a client reading it as an
+// integer rejects. Extreme magnitudes keep e-notation, and the special
+// values use PostgreSQL's spellings.
+func formatPgFloat(v float64, bits int) string {
+	switch {
+	case math.IsNaN(v):
+		return "NaN"
+	case math.IsInf(v, 1):
+		return "Infinity"
+	case math.IsInf(v, -1):
+		return "-Infinity"
+	}
+	if a := math.Abs(v); v == 0 || (a >= 1e-4 && a < 1e15) {
+		return strconv.FormatFloat(v, 'f', -1, bits)
+	}
+	return strconv.FormatFloat(v, 'e', -1, bits)
 }
 
 func (c *pgConn) sendCommandComplete(tag string) {
