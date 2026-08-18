@@ -2043,6 +2043,17 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 // text — exactly the source name extractOutputRenames maps to the user's
 // alias — and bare columns become passthrough entries so the fragment emits
 // the full SELECT-list input set.
+//
+// (b) has a second trigger: a SORT KEY that names a SELECT alias the producer
+// does not emit. `SELECT o_orderpriority AS p FROM orders ORDER BY p` has no
+// expression at all, so the pass used to decline — the scan emitted
+// "o_orderpriority", the sort keyed on "p" matched no column and silently did
+// nothing, and only the gather's rename made the output *look* right (#316).
+// Adding any expression to the SELECT list fixed it by accident, because that
+// flipped hasExpr and the alias got materialized on the way past. The alias
+// naming is decided here rather than in resolveSortKeyColumn precisely because
+// this pass owns it: it runs last, and only it knows whether the producing
+// fragment will carry an alias-naming OpProject.
 func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 	proj := findOutputProjectionsForRename(root)
 	if len(proj) == 0 {
@@ -2072,7 +2083,9 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		}
 		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ})
 	}
-	if !hasExpr {
+	// The other trigger is a sort key naming an alias, which needs the target
+	// stage's keys — decided below, once the target is known.
+	if !hasExpr && !anyRenamed(proj, specs) {
 		return
 	}
 	var gather *Stage
@@ -2115,8 +2128,12 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		}
 		// Direct scan→gather keeps the original #169 convention: outputs
 		// named by lowercased expression text, which the gather's
-		// project-mode rename maps to the user's alias.
+		// project-mode rename maps to the user's alias. Nothing sorts here,
+		// so a rename alone is no reason to project: the gather does it.
 		if isPlainScan && viaSort == nil {
+			if !hasExpr {
+				return
+			}
 			s.ProjectExprs = specs
 			return
 		}
@@ -2150,6 +2167,13 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		if viaSort != nil {
 			sortKeys = append(sortKeys, viaSort.SortKeys...)
 		}
+		// With no expression to compute, the projection only earns its place
+		// when a sort key names an alias this stage does not emit under that
+		// name — otherwise the gather's rename already covers the query and
+		// narrowing the schema here would be pure cost (#316).
+		if !hasExpr && !sortKeysNeedAlias(sortKeys, specs, aliased) {
+			return
+		}
 		for _, k := range sortKeys {
 			covered := false
 			for _, sp := range aliased {
@@ -2163,8 +2187,58 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 			}
 		}
 		s.ProjectExprs = aliased
+		// This fragment now emits the SELECT list under its FINAL names, so
+		// the gather's source→alias pairs are stale. Not merely redundant:
+		// when one item's alias shadows another item's source column
+		// ("n_name AS n_comment, n_comment AS c"), the stale pair matches the
+		// column this projection already renamed and renames it a second time
+		// — both outputs came back named "c". Point each source at the name
+		// the stage emits; the gather still projects to exactly the
+		// SELECT-list set, in order, and now resolves every source instead of
+		// relying on all of them missing.
+		if len(gather.OutputRenames) == len(aliased) {
+			for j := range gather.OutputRenames {
+				if gather.OutputRenames[j].Expr == nil {
+					gather.OutputRenames[j].From = aliased[j].Name
+				}
+			}
+		}
 		return
 	}
+}
+
+// anyRenamed reports whether any SELECT-list item carries an alias that
+// differs from the name its producing stage would emit — i.e. whether an
+// alias-naming projection could make any difference at all. Cheap pre-gate
+// for attachScanSelectProjections: with no rename and no expression there is
+// nothing for it to do, and it can decline before looking at any stage.
+func anyRenamed(proj []logical.Projection, specs []ProjectExprSpec) bool {
+	for j, p := range proj {
+		if p.Alias != "" && !strings.EqualFold(p.Alias, specs[j].Name) {
+			return true
+		}
+	}
+	return false
+}
+
+// sortKeysNeedAlias reports whether any sort key names a SELECT-list alias
+// that the producing stage does not emit under that name — the #316
+// condition. specs[j] carries the name the stage emits without an
+// alias-naming projection (the column or expression text); aliased[j] carries
+// the user's alias. A key matching an alias whose source is spelled
+// differently would find no column at all, or — when the alias shadows
+// another column of the input — the WRONG one, so the sort must be given the
+// projection that materializes the alias.
+func sortKeysNeedAlias(sortKeys []SortKeySpec, specs, aliased []ProjectExprSpec) bool {
+	for _, k := range sortKeys {
+		for j := range aliased {
+			if strings.EqualFold(aliased[j].Name, k.Column) &&
+				!strings.EqualFold(specs[j].Name, k.Column) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // extractOutputRenames inspects the logical plan tree's outermost projection

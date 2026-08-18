@@ -438,10 +438,25 @@ func twoPathCorpus() []twoPathQuery {
 		// The aggregate-free sibling of AliasedGroupKeyOrderBy. #313's fix
 		// resolves an aliased sort key against the aggregate below it, which
 		// is what makes it decidable at walkStages time; with no aggregate
-		// the correct spelling depends on a pass that runs later, so this
-		// shape is still lost on the DAG (#316). Adding an expression to the
-		// SELECT list makes it correct by accident, which is the clue.
-		twoPathQuery{name: "AliasedSortNoAggregate", sql: "SELECT o_orderpriority AS p FROM orders ORDER BY p", cmp: cmpOrdered, knownBug: "#316"},
+		// the correct spelling depends on attachScanSelectProjections, which
+		// runs later — and used to fire only for a SELECT list carrying an
+		// expression, so this shape came back unsorted (#316). Adding an
+		// expression made it correct by accident, which is the clue and the
+		// control immediately below.
+		twoPathQuery{name: "AliasedSortNoAggregate", sql: "SELECT o_orderpriority AS p FROM orders ORDER BY p", cmp: cmpOrdered},
+		// The alias shadows another SELECT item's source column, so the sort
+		// key names a column that exists in the scan's input under a
+		// different meaning. Materializing the alias must also settle the
+		// gather's rename: with both spellings in play, a stale source→alias
+		// pair re-renames the column the fragment already renamed and the
+		// result comes back with two columns named "c".
+		twoPathQuery{name: "AliasedSortShadowsColumn", sql: "SELECT n_name AS n_comment, n_comment AS c FROM nation ORDER BY n_comment", cmp: cmpOrdered},
+		// Two sort keys, only the first aliased: materializing the alias must
+		// not cost the plan the second key.
+		twoPathQuery{name: "AliasedSortMixedKeys", sql: "SELECT o_orderpriority AS p, o_orderstatus FROM orders ORDER BY p, o_orderstatus", cmp: cmpOrdered},
+		// Same shape over a join — the alias is materialized on the join
+		// stage rather than the scan.
+		twoPathQuery{name: "AliasedSortNoAggregateJoin", sql: "SELECT n_name AS nm FROM nation JOIN region ON n_regionkey = r_regionkey ORDER BY nm", cmp: cmpOrdered},
 		twoPathQuery{name: "AliasedSortWithExpr", sql: "SELECT n_name AS nm, UPPER(n_comment) AS uc FROM nation ORDER BY nm", cmp: cmpOrdered},
 		twoPathQuery{name: "AliasedGroupKeyOrderBy", sql: "SELECT o_orderpriority AS p, COUNT(*) AS c FROM orders GROUP BY o_orderpriority ORDER BY p", cmp: cmpOrdered},
 		// Minimal repro for the Q05 divergence: a WHERE equality between
