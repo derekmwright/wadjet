@@ -1729,7 +1729,7 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 
 	// Column info: pg_attribute query
 	if strings.Contains(normalized, "PG_ATTRIBUTE") {
-		return c.matchAttributeQuery(ctx, normalized)
+		return c.matchAttributeQuery(ctx, sql, normalized)
 	}
 
 	// pg_class queries: table listing, OID lookup, or reverse OID lookup.
@@ -1775,15 +1775,22 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 }
 
 // matchAttributeQuery returns column metadata from our catalog for pg_attribute queries.
-func (c *pgConn) matchAttributeQuery(ctx context.Context, normalized string) *synthAnswer {
+func (c *pgConn) matchAttributeQuery(ctx context.Context, sql, normalized string) *synthAnswer {
 	tables, err := c.db.ListTables(ctx)
 	if err != nil || len(tables) == 0 {
 		return nil
 	}
 
 	// Try to find the target from the query text.
-	// SQLAlchemy may send a table name or a numeric OID as the attrelid parameter.
+	// SQLAlchemy may send a table name or a numeric OID as the attrelid
+	// parameter; clients that JOIN pg_class instead name the table in
+	// relname (DataGrip's column query), which used to match nothing here —
+	// so a request for one table's columns was answered with every table's
+	// columns, and every table in the tree got every column in the database.
 	target := extractParamValue(normalized, "ATTRELID")
+	if target == "" {
+		target = extractParamValue(normalized, "RELNAME")
+	}
 
 	// Determine which table(s) to describe
 	var targetTables []string
@@ -1825,7 +1832,8 @@ func (c *pgConn) matchAttributeQuery(ctx context.Context, normalized string) *sy
 			continue
 		}
 
-		oid := fmt.Sprintf("%d", tableOID(tableName))
+		oid := tableOID(tableName)
+		attnum := 0
 		for _, row := range table.Rows {
 			colName, _ := row["column_name"].(string)
 			colType, _ := row["type"].(string)
@@ -1833,21 +1841,77 @@ func (c *pgConn) matchAttributeQuery(ctx context.Context, normalized string) *sy
 			if colName == "" || colName == "Partition Keys" {
 				continue
 			}
+			attnum++
 
 			resultRows = append(resultRows, map[string]any{
+				// SQLAlchemy's positional labels.
 				"attname":     colName,
 				"format_type": pgFormatType(colType),
 				"default":     nil,
-				"attnotnull":  boolStr(nullable == "NO"),
+				"attnotnull":  nullable == "NO",
 				"table_oid":   oid,
 				"comment":     nil,
 				"generated":   "",
 				"identity":    "",
+				// pg_attribute's own columns, for clients that select them
+				// by name rather than unpacking a fixed tuple.
+				"attrelid":      oid,
+				"atttypid":      pgTypeOID(colType),
+				"atttypmod":     -1,
+				"attnum":        attnum,
+				"attisdropped":  false,
+				"atthasdef":     false,
+				"attidentity":   "",
+				"attgenerated":  "",
+				"attndims":      0,
+				"attcollation":  0,
+				"attstattarget": -1,
 			})
 		}
 	}
 
+	// A client that asked for plain pg_attribute columns is answered in its
+	// own shape. SQLAlchemy's query is a positional unpack of format_type()
+	// calls and CASE expressions, which map to no attribute name — it keeps
+	// the fixed 8-column tuple it expects.
+	if shaped := shapedAttributeAnswer(sql, resultRows); shaped != nil {
+		return shaped
+	}
 	return &synthAnswer{cols: cols, rows: resultRows}
+}
+
+// shapedAttributeAnswer reshapes a pg_attribute answer to the statement's own
+// SELECT list, but only when every item in that list names an attribute this
+// layer models. A partial match would hand back NULLs where the client asked
+// for a computed value, which is worse than the fixed tuple.
+func shapedAttributeAnswer(sql string, rows []map[string]any) *synthAnswer {
+	items := selectItems(sql)
+	if len(items) == 0 {
+		return nil
+	}
+	shape := attributeShape()
+	for _, it := range items {
+		if it.expr == "*" {
+			return nil // let the fixed tuple answer SELECT *
+		}
+		if _, ok := shape[it.expr]; !ok {
+			return nil
+		}
+	}
+	return catalogRowsAnswer(sql, shape, rows, nil)
+}
+
+// attributeShape names the pg_attribute columns a statement may select by
+// name. Values are irrelevant — only membership is read.
+func attributeShape() map[string]any {
+	return map[string]any{
+		"attname": nil, "format_type": nil, "default": nil, "attnotnull": nil,
+		"table_oid": nil, "comment": nil, "generated": nil, "identity": nil,
+		"attrelid": nil, "atttypid": nil, "atttypmod": nil, "attnum": nil,
+		"attisdropped": nil, "atthasdef": nil, "attidentity": nil,
+		"attgenerated": nil, "attndims": nil, "attcollation": nil,
+		"attstattarget": nil,
+	}
 }
 
 // matchPgType returns rows from pg_type for JDBC/ODBC type mapping.

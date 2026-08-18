@@ -127,3 +127,50 @@ func TestCatalogRowsAnswerPgClassShape(t *testing.T) {
 		t.Fatalf("aggregate should be declined, got %+v", got)
 	}
 }
+
+// A pg_attribute query naming one table through a pg_class join gets that
+// table's columns, in the shape it asked for. The branch only looked for an
+// attrelid parameter, so DataGrip's relname-join form matched nothing and was
+// answered with every table's columns — every table in the tree showed every
+// column in the database.
+func TestShapedAttributeAnswer(t *testing.T) {
+	rows := []map[string]any{
+		{"attname": "n_nationkey", "atttypid": 20, "attnum": 1, "attnotnull": false,
+			"format_type": "bigint", "table_oid": 42},
+		{"attname": "n_name", "atttypid": 25, "attnum": 2, "attnotnull": false,
+			"format_type": "text", "table_oid": 42},
+	}
+
+	ans := shapedAttributeAnswer(
+		"select a.attname, a.atttypid, a.attnotnull, a.attnum from pg_catalog.pg_attribute a "+
+			"join pg_catalog.pg_class c on a.attrelid = c.oid where c.relname = 'nation'", rows)
+	if ans == nil {
+		t.Fatal("plain column list should be shaped")
+	}
+	if len(ans.cols) != 4 || ans.cols[0] != "attname" || ans.cols[3] != "attnum" {
+		t.Fatalf("cols = %v", ans.cols)
+	}
+	if len(ans.rows) != 2 || ans.rows[1]["attnum"] != 2 {
+		t.Fatalf("rows = %+v", ans.rows)
+	}
+	// Typed OIDs so a driver reads attnum as a number and attnotnull as a bool.
+	if got := ans.colOID("attnum"); got != 20 {
+		t.Fatalf("attnum OID = %d, want 20", got)
+	}
+	if got := ans.colOID("attnotnull"); got != 16 {
+		t.Fatalf("attnotnull OID = %d, want 16", got)
+	}
+
+	// SQLAlchemy's query unpacks a fixed tuple of computed values; reshaping
+	// it to per-name attributes would hand back NULLs, so it is declined and
+	// keeps the 8-column tuple.
+	sqlalchemy := "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), " +
+		"(SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = a.attrelid) " +
+		"FROM pg_catalog.pg_attribute a WHERE a.attrelid = 'users'"
+	if got := shapedAttributeAnswer(sqlalchemy, rows); got != nil {
+		t.Fatalf("expression list should decline reshaping, got cols %v", got.cols)
+	}
+	if got := shapedAttributeAnswer("select * from pg_attribute", rows); got != nil {
+		t.Fatal("SELECT * should keep the fixed tuple")
+	}
+}
