@@ -3150,6 +3150,21 @@ func buildJoinFragment(
 			JoinFilter:      fj.JoinFilter,
 			LateMaterialize: lateMat,
 		})
+		// The absorbed stage's own predicates, applied where that stage
+		// would have applied them: immediately after its probe. The planner
+		// carries them on the fused spec and the wire format has the field,
+		// but this loop used to copy every field EXCEPT FilterExprs — so
+		// fusing a filter-carrying join silently discarded its WHERE clause.
+		// `WHERE c_nationkey = s_nationkey` over TPC-H Q05's join survived
+		// while its stage stood alone and vanished the moment a fifth table
+		// made that stage fusable: COUNT(*) 2450 -> 60000 (exactly the
+		// unfiltered count) and Q05 revenues ~25x inflated (#312).
+		if len(fj.FilterExprs) > 0 {
+			ops = append(ops, distributed.OpSpec{
+				Type:       distributed.OpFilter,
+				Predicates: append([]string(nil), fj.FilterExprs...),
+			})
+		}
 	}
 	primaryType := distributed.OpHashJoinProbe
 	if stage.Type == physical.StageBroadcastJoin {

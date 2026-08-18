@@ -367,7 +367,6 @@ func twoPathCorpus() []twoPathQuery {
 		// hand-written case above; the corpus entry stays here so the fix
 		// is proven against the actual TPC-H query, not only the reduction.
 		knownBug := map[int]string{
-			5: "#312", // DAG drops WHERE c_nationkey = s_nationkey; revenues ~25x
 			7: "#314", // DAG NULLs n1.n_name (first alias of the self-joined table)
 			9: "#313", // DAG loses ORDER BY when the grouped column is renamed
 		}[n]
@@ -425,7 +424,7 @@ func twoPathCorpus() []twoPathQuery {
 		// two joined tables that is not itself a join condition. The DAG
 		// answers this with the count it would produce with the predicate
 		// removed entirely.
-		twoPathQuery{name: "CrossTableEqualityFilter", knownBug: "#312", sql: `SELECT COUNT(*) AS c FROM customer
+		twoPathQuery{name: "CrossTableEqualityFilter", sql: `SELECT COUNT(*) AS c FROM customer
 			JOIN orders ON c_custkey = o_custkey
 			JOIN lineitem ON l_orderkey = o_orderkey
 			JOIN supplier ON l_suppkey = s_suppkey
