@@ -58,7 +58,15 @@ func resolveSortKeysForBatches(keys []SortKey, batches []*batch.RecordBatch) []r
 	}
 	firstBatch := batches[0]
 	for i, key := range keys {
-		idx := firstBatch.ColumnIndex(key.Column)
+		// Qualified/bare fallback, the same resolution the rest of the
+		// engine uses (columnIndexFallback). A join qualifies only the
+		// BUILD side's colliding names, so a self-joined table's
+		// probe-side alias arrives bare: the planner's key `n1.n_name`
+		// found no exact match, this loop set idx = -1, and the key was
+		// silently skipped — TPC-H Q07 came back with correct rows in
+		// arbitrary order (#314). A key that matches nothing is still
+		// skipped, as before.
+		idx := columnIndexFallback(firstBatch, key.Column)
 		if idx >= len(firstBatch.Columns) {
 			idx = -1 // schema/column count mismatch — skip this key
 		}
@@ -362,7 +370,7 @@ func newRunMerger(schema []parquet.Column, keys []SortKey, cursors []*runCursor)
 			continue
 		}
 		first := live[0].cur
-		idx := first.ColumnIndex(key.Column)
+		idx := columnIndexFallback(first, key.Column)
 		if idx >= len(first.Columns) {
 			continue
 		}

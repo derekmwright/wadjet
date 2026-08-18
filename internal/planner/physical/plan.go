@@ -3483,21 +3483,30 @@ func resolveShuffleKey(key string, child *logical.Node) string {
 // Each Project substitutes at most once: a projection list is simultaneous,
 // so `b AS a, a AS b` must not chase itself.
 func resolveSortKeyColumn(key string, child *logical.Node) string {
-	resolved := key
+	// resolved is the preferred candidate, alt a second one to try when the
+	// first names no output of the aggregate below.
+	resolved, alt := key, ""
 	for n := child; n != nil; {
 		switch n.Type {
 		case logical.NodeProject:
 			for _, proj := range n.Projections {
-				if !strings.EqualFold(proj.Alias, resolved) {
+				if !strings.EqualFold(proj.Alias, resolved) &&
+					(alt == "" || !strings.EqualFold(proj.Alias, alt)) {
 					continue
 				}
-				// Column for a bare rename (`o_orderpriority AS p`), else the
-				// expression text a grouped expression is keyed by
-				// (`substr(o_orderdate, 1, 4) AS o_year`).
-				if src := proj.Column; src != "" {
-					resolved = src
-				} else if proj.Expr != "" {
-					resolved = proj.Expr
+				// Expression text first, because it keeps the table
+				// qualifier: a self-joined table gives both aliases the same
+				// bare column name, so `n1.n_name AS supp_nation` carries
+				// column "n_name" — which matches neither group key and
+				// cannot, since n2 shares it. Only "n1.n_name" identifies
+				// which alias, and a GROUP BY that spells its key bare is
+				// covered by the Column fallback below (#314/#313).
+				resolved, alt = proj.Expr, proj.Column
+				if resolved == "" {
+					resolved, alt = proj.Column, ""
+				}
+				if alt == resolved {
+					alt = ""
 				}
 				break
 			}
@@ -3506,6 +3515,11 @@ func resolveSortKeyColumn(key string, child *logical.Node) string {
 		case logical.NodeAggregate:
 			if out, ok := aggregateOutputName(n, resolved); ok {
 				return out
+			}
+			if alt != "" {
+				if out, ok := aggregateOutputName(n, alt); ok {
+					return out
+				}
 			}
 			return key
 		default:
