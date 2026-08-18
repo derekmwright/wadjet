@@ -629,6 +629,26 @@ func cloneExprWithArgs(e Expr, argsPtr *[]any) Expr {
 			Operand: cloneExprWithArgs(n.Operand, argsPtr),
 			Not:     n.Not,
 		}
+	// Offsets-shape nodes (shape_funcs.go) wrap a ColRef, which must be
+	// cloned like any other so the per-tree index cache is not shared.
+	case *ColIsNull:
+		return &ColIsNull{
+			Col:      &ColRef{Name: n.Col.Name},
+			Not:      n.Not,
+			Fallback: cloneExprWithArgs(n.Fallback, argsPtr).(*IsNull),
+		}
+	case *ColEmptyStr:
+		return &ColEmptyStr{
+			Col:      &ColRef{Name: n.Col.Name},
+			Not:      n.Not,
+			Fallback: cloneExprWithArgs(n.Fallback, argsPtr).(*Cmp),
+		}
+	case *ColShapeLen:
+		return &ColShapeLen{
+			Col:      &ColRef{Name: n.Col.Name},
+			Mul:      n.Mul,
+			Fallback: cloneExprWithArgs(n.Fallback, argsPtr).(*FuncCall),
+		}
 	case *FuncCall:
 		args := make([]Expr, len(n.Args))
 		for i, a := range n.Args {

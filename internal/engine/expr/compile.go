@@ -207,7 +207,15 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		}
 		switch n.Check {
 		case "null":
-			return &IsNull{Operand: operand, Not: n.Not}, nil
+			isNull := &IsNull{Operand: operand, Not: n.Not}
+			// Offsets-shape: IS [NOT] NULL over a bare column is a null-mask
+			// test. The generic node boxes ColRef.Eval's result — for a
+			// string column that is a full copy of the value — only to
+			// compare it against nil (shape_funcs.go).
+			if col, ok := operand.(*ColRef); ok {
+				return &ColIsNull{Col: col, Not: n.Not, Fallback: isNull}, nil
+			}
+			return isNull, nil
 		case "true":
 			if n.Not {
 				return &Cmp{Left: operand, Right: &Lit{Val: true}, Op: CmpNe}, nil
@@ -369,7 +377,38 @@ func compileCmp(left, right Expr, op CmpOp) Expr {
 			return tl
 		}
 	}
-	return &Cmp{Left: left, Right: right, Op: op}
+	generic := &Cmp{Left: left, Right: right, Op: op}
+	// Offsets-shape: `col = ''` / `col <> ''` is a zero-length test on the
+	// offsets array. WHERE SearchPhrase <> '' is the dominant filter shape
+	// across ClickBench Q22-Q27; the generic path copies every value out of
+	// the arena just to compare its length against zero (shape_funcs.go).
+	if op == CmpEq || op == CmpNe {
+		if col, other := emptyStrOperands(left, right); col != nil && other {
+			return &ColEmptyStr{Col: col, Not: op == CmpNe, Fallback: generic}
+		}
+	}
+	return generic
+}
+
+// emptyStrOperands reports whether the pair is a bare column reference
+// against the empty string literal, in either operand order.
+func emptyStrOperands(left, right Expr) (*ColRef, bool) {
+	if col, ok := left.(*ColRef); ok && isEmptyStrLit(right) {
+		return col, true
+	}
+	if col, ok := right.(*ColRef); ok && isEmptyStrLit(left) {
+		return col, true
+	}
+	return nil, false
+}
+
+func isEmptyStrLit(e Expr) bool {
+	lit, ok := e.(*Lit)
+	if !ok {
+		return false
+	}
+	s, ok := lit.Val.(string)
+	return ok && s == ""
 }
 
 // tryTemporalLit builds a CmpTemporalLit when other is a string literal
@@ -527,10 +566,29 @@ func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, er
 	}
 
 	fc := &FuncCall{Name: name, Args: args}
+	// Offsets-shape: length()/octet_length()/bit_length() over a bare column
+	// reference are offsets subtractions, not value reads (shape_funcs.go).
+	// The node carries fc as its fallback and takes it for every column that
+	// is not a flat byte-array column, so semantics are unchanged.
+	if mul := shapeLenMul[name]; mul != 0 && len(args) == 1 {
+		if col, ok := args[0].(*ColRef); ok {
+			return &ColShapeLen{Col: col, Mul: mul, Fallback: fc}, nil
+		}
+	}
 	if isNumericFunc(name) {
 		return &numericFuncCall{fc}, nil
 	}
 	return fc, nil
+}
+
+// shapeLenMul maps the byte-length family to its multiplier. char_length /
+// character_length are deliberately absent: they count runes and must read
+// the bytes.
+var shapeLenMul = map[string]int{
+	"length":       1,
+	"len":          1,
+	"octet_length": 1,
+	"bit_length":   8,
 }
 
 // isNumericFunc returns true if the function is known to return a numeric value.

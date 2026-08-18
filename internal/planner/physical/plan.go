@@ -7525,6 +7525,20 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 		if col, ok := v.Operand.(*expr.ColRef); ok {
 			return []exec.UnaryOperator{exec.NewNullCheckFilter(col.Name, !v.Not)}
 		}
+	case *expr.ColIsNull:
+		// Offsets-shape rewrite of `col IS [NOT] NULL` (expr/shape_funcs.go).
+		// Same kernel the *expr.IsNull case builds — without this the filter
+		// would silently drop to row-at-a-time evaluation.
+		return []exec.UnaryOperator{exec.NewNullCheckFilter(v.Col.Name, !v.Not)}
+	case *expr.ColEmptyStr:
+		// Offsets-shape rewrite of a column compared against the empty
+		// string literal (expr/shape_funcs.go). Reproduces exactly what the
+		// *expr.Cmp "col op const" branch built for the pre-rewrite node.
+		op := exec.OpEq
+		if v.Not {
+			op = exec.OpNe
+		}
+		return []exec.UnaryOperator{kernelFilterWithRowFallback(v.Col.Name, op, "", v)}
 	case *expr.Not:
 		// NOT (expr) — try to vectorize the inner expression
 		inner := extractFilterOps(v.Operand)

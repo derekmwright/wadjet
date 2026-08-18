@@ -1655,6 +1655,13 @@ func init() {
 	"concat":  fnConcat,
 	"length":  fnLength,
 	"len":     fnLength,
+	// length() has always counted BYTES here (see fnLength), so
+	// octet_length is an exact alias and bit_length is 8x. The rune-counting
+	// member of the family is char_length/character_length below. These
+	// three names were reachable from the parser and listed in
+	// isNumericFunc but had no implementation, so they evaluated to NULL.
+	"octet_length": fnOctetLength,
+	"bit_length":   fnBitLength,
 	"substr":    fnSubstr,
 	"substring": fnSubstr,
 	"trim":    fnTrim,
@@ -1780,7 +1787,8 @@ func init() {
 	"chr":        fnChr,
 	"codepoint":  fnCodepoint,
 	"concat_ws":  fnConcatWS,
-	"char_length": fnCharLength,
+	"char_length":      fnCharLength,
+	"character_length": fnCharLength,
 	"translate":  fnTranslate,
 
 	// Math: trigonometry
@@ -2083,8 +2091,13 @@ func init() {
 	vecBuiltins := map[string]VecScalarFunc{
 		"upper":      vecUpper,
 		"lower":      vecLower,
-		"length":     vecLength,
-		"len":        vecLength,
+		"length":       vecLength,
+		"len":          vecLength,
+		"octet_length": vecOctetLength,
+		"bit_length":   vecBitLength,
+		// Rune counting needs the bytes — no offsets fast path exists.
+		"char_length":      vecCharLength,
+		"character_length": vecCharLength,
 		"trim":       vecTrim,
 		"ltrim":      vecLTrim,
 		"rtrim":      vecRTrim,
@@ -7963,16 +7976,12 @@ func vecLower(args []*batch.Vector, out *batch.Vector, n int) {
 	}
 }
 
+// vecLength is the offsets-shape kernel for length()/len(): a byte count
+// read straight off the offsets array. Non-byte-array inputs (length() of a
+// numeric or temporal column, which used to index a nil Offsets slice and
+// panic) fall through to the boxed per-row definition. See shape_funcs.go.
 func vecLength(args []*batch.Vector, out *batch.Vector, n int) {
-	src := args[0]
-	hasNulls := src.Nulls.HasNulls()
-	for i := 0; i < n; i++ {
-		if hasNulls && src.Nulls.IsNullFast(i) {
-			out.Nulls.SetNull(i)
-			continue
-		}
-		out.Float64Data[i] = float64(src.BytesData.Offsets[i+1] - src.BytesData.Offsets[i])
-	}
+	vecShapeLenScaled(args, out, n, 1)
 }
 
 func vecTrim(args []*batch.Vector, out *batch.Vector, n int) {
