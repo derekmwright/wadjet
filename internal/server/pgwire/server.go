@@ -1732,49 +1732,43 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 		return c.matchAttributeQuery(ctx, normalized)
 	}
 
-	// pg_class queries: table listing, OID lookup, or reverse OID lookup
+	// pg_class queries: table listing, OID lookup, or reverse OID lookup.
+	//
+	// All three shapes are the same answer over a different row set, so they
+	// share one builder: the statement's SELECT list decides the columns, the
+	// WHERE decides which tables are in it. The branches used to hardcode a
+	// single column each — a client selecting `relname, relkind` was described
+	// one column and sent one, which is how DataGrip's table tree came back
+	// without the kind it uses to tell a table from a view.
 	if strings.Contains(normalized, "PG_CLASS") && strings.Contains(normalized, "RELNAME") {
 		tables, err := c.db.ListTables(ctx)
 		if err != nil {
 			return nil
 		}
 
-		// Specific table lookup: relname = '<value>' in WHERE
-		specificTable := extractParamValue(normalized, "RELNAME")
-		if specificTable != "" {
-			// OID lookup for a specific table
-			for _, t := range tables {
-				if t == specificTable {
-					return singleRow([]string{"oid"}, map[string]any{
-						"oid": fmt.Sprintf("%d", tableOID(t)),
-					})
-				}
-			}
-			return &synthAnswer{cols: []string{"oid"}}
+		keep := func(string) bool { return true }
+		switch {
+		case extractParamValue(normalized, "RELNAME") != "":
+			// Specific table lookup: relname = '<value>' in WHERE.
+			want := extractParamValue(normalized, "RELNAME")
+			keep = func(t string) bool { return t == want }
+		case extractParamValue(normalized, "OID") != "":
+			// Reverse lookup: WHERE oid = '<value>'.
+			want := extractParamValue(normalized, "OID")
+			keep = func(t string) bool { return strconv.Itoa(tableOID(t)) == want }
+		case !strings.Contains(normalized, "RELKIND"):
+			// Unknown pg_class query — don't handle, fall through to blanket.
+			return nil
 		}
 
-		// Reverse OID lookup: SELECT relname FROM pg_class WHERE oid = '<value>'
-		oidVal := extractParamValue(normalized, "OID")
-		if oidVal != "" {
-			for _, t := range tables {
-				if fmt.Sprintf("%d", tableOID(t)) == oidVal {
-					return singleRow([]string{"relname"}, map[string]any{"relname": t})
-				}
+		rows := make([]map[string]any, 0, len(tables))
+		for _, t := range tables {
+			if keep(t) {
+				rows = append(rows, pgClassAttrs(t))
 			}
-			return &synthAnswer{cols: []string{"relname"}}
 		}
-
-		// List all tables — only when RELKIND is present (real table listing query)
-		if strings.Contains(normalized, "RELKIND") {
-			ans := &synthAnswer{cols: []string{"relname"}}
-			for _, t := range tables {
-				ans.rows = append(ans.rows, map[string]any{"relname": t})
-			}
-			return ans
-		}
-
-		// Unknown pg_class query — don't handle, fall through to blanket
-		return nil
+		return catalogRowsAnswer(sql, pgClassAttrs(""), rows,
+			[]string{"oid", "relname", "relnamespace", "relkind"})
 	}
 
 	return nil

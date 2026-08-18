@@ -80,3 +80,50 @@ func TestSelectItemsRealClientShapes(t *testing.T) {
 		t.Fatalf("bool text = %q, want \"f\"", got)
 	}
 }
+
+// A pg_class listing answers every column the client selected, one row per
+// table. The branch used to hardcode a single "relname" column, so a client
+// asking for relname and relkind together was described one column and sent
+// one — DataGrip reads relkind to tell a table from a view.
+func TestCatalogRowsAnswerPgClassShape(t *testing.T) {
+	rows := []map[string]any{pgClassAttrs("lineitem"), pgClassAttrs("orders")}
+	fallback := []string{"oid", "relname", "relnamespace", "relkind"}
+
+	ans := catalogRowsAnswer(
+		"select c.oid, c.relname, c.relkind from pg_catalog.pg_class c where c.relkind in ('r','v')",
+		pgClassAttrs(""), rows, fallback)
+	if ans == nil {
+		t.Fatal("pg_class listing declined")
+	}
+	if len(ans.cols) != 3 || ans.cols[1] != "relname" || ans.cols[2] != "relkind" {
+		t.Fatalf("cols = %v", ans.cols)
+	}
+	if len(ans.rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(ans.rows))
+	}
+	if ans.rows[0]["relname"] != "lineitem" || ans.rows[0]["relkind"] != "r" {
+		t.Fatalf("row 0 = %+v", ans.rows[0])
+	}
+	if got := ans.colOID("oid"); got != 20 {
+		t.Fatalf("oid column OID = %d, want 20", got)
+	}
+
+	// An empty row set still answers with the columns that were asked for:
+	// the shape a client was promised cannot depend on how many rows matched.
+	empty := catalogRowsAnswer("select relname, relkind from pg_class where relkind = 'r'",
+		pgClassAttrs(""), nil, fallback)
+	if empty == nil || len(empty.cols) != 2 || len(empty.rows) != 0 {
+		t.Fatalf("empty listing = %+v", empty)
+	}
+
+	// SELECT * names the relation's own columns.
+	star := catalogRowsAnswer("select * from pg_class", pgClassAttrs(""), rows, fallback)
+	if star == nil || len(star.cols) != len(fallback) || star.cols[0] != "oid" {
+		t.Fatalf("star = %+v", star)
+	}
+
+	// A projection of nothing this relation has is declined, not answered.
+	if got := catalogRowsAnswer("select count(*) from pg_class", pgClassAttrs(""), rows, fallback); got != nil {
+		t.Fatalf("aggregate should be declined, got %+v", got)
+	}
+}

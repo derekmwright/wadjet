@@ -82,6 +82,15 @@ func (c *pgConn) matchPgDatabase(sql string) *synthAnswer {
 // empty-but-coherent fallback in place rather than answering a question that
 // was not asked.
 func catalogRowAnswer(sql string, attrs map[string]any, fallbackCols []string) *synthAnswer {
+	return catalogRowsAnswer(sql, attrs, []map[string]any{attrs}, fallbackCols)
+}
+
+// catalogRowsAnswer is catalogRowAnswer over many rows: pg_class lists one row
+// per table, pg_database one row per database. shape names the relation's
+// columns (which of them the SELECT list may read); rows carry the values, and
+// may be empty — a listing narrowed to nothing still has to answer with the
+// columns the client asked for, not with a different shape.
+func catalogRowsAnswer(sql string, shape map[string]any, rows []map[string]any, fallbackCols []string) *synthAnswer {
 	items := selectItems(sql)
 	if len(items) == 0 {
 		return nil
@@ -89,32 +98,70 @@ func catalogRowAnswer(sql string, attrs map[string]any, fallbackCols []string) *
 
 	// SELECT * — the client wants the relation's columns, so name them.
 	if len(items) == 1 && items[0].expr == "*" {
-		row := make(map[string]any, len(fallbackCols))
+		items = items[:0]
 		for _, col := range fallbackCols {
-			row[col] = attrs[col]
+			items = append(items, selectItem{expr: col, label: col})
 		}
-		return singleRow(fallbackCols, row)
 	}
 
 	cols := make([]string, 0, len(items))
-	row := make(map[string]any, len(items))
+	picks := make([]selectItem, 0, len(items))
+	seen := make(map[string]bool, len(items))
 	known := false
 	for _, it := range items {
-		val, ok := attrs[it.expr]
-		if ok {
+		if _, ok := shape[it.expr]; ok {
 			known = true
 		}
 		// Duplicate labels would collapse in the row map; the value under a
 		// repeated label is the same either way, so only the first is kept.
-		if _, dup := row[it.label]; !dup {
-			cols = append(cols, it.label)
-			row[it.label] = val
+		if seen[it.label] {
+			continue
 		}
+		seen[it.label] = true
+		cols = append(cols, it.label)
+		picks = append(picks, it)
 	}
 	if !known {
 		return nil
 	}
-	return singleRow(cols, row)
+
+	ans := &synthAnswer{cols: cols}
+	for _, attrs := range rows {
+		row := make(map[string]any, len(picks))
+		for _, it := range picks {
+			row[it.label] = attrs[it.expr]
+		}
+		ans.rows = append(ans.rows, row)
+	}
+	return ans
+}
+
+// pgClassAttrs is the pg_class row for one table. Everything this server can
+// answer honestly is here; what it does not model (ACLs, index/trigger flags
+// it has no concept of) is either its truthful constant or absent, so a client
+// asking for it reads NULL rather than an invention.
+//
+// relkind is 'r' (ordinary table) for every entry: the catalog holds tables,
+// and a client that reads relkind is deciding which node type to draw.
+func pgClassAttrs(name string) map[string]any {
+	return map[string]any{
+		"oid":            tableOID(name),
+		"relname":        name,
+		"relnamespace":   tableOID(expr.SessionSchema),
+		"relkind":        "r",
+		"relowner":       10,
+		"reltuples":      float64(-1), // PostgreSQL's "not yet vacuumed/analyzed"
+		"relhasindex":    false,
+		"relpersistence": "p",
+		"relispartition": false,
+		"relhasrules":    false,
+		"relhastriggers": false,
+		"relhassubclass": false,
+		"reltablespace":  0,
+		"reloptions":     nil,
+		"relacl":         nil,
+		"description":    nil,
+	}
 }
 
 // selectItem is one entry of a SELECT list: the attribute it reads, lowercased
