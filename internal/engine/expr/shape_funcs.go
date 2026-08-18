@@ -74,6 +74,17 @@ func vecBitLength(args []*batch.Vector, out *batch.Vector, n int) {
 // length/octet_length and 8 for bit_length.
 func vecShapeLenScaled(args []*batch.Vector, out *batch.Vector, n int, mul int) {
 	src := args[0]
+	if len(out.Float64Data) < n {
+		// The output vector cannot hold what this kernel writes — the
+		// planner declared a non-numeric type for the projection. Writing
+		// anyway indexed off the end of a zero-length slice and panicked the
+		// whole server process: `SELECT LENGTH(c) FROM t` killed every
+		// connection, not just the one that asked. Degrade to a typed write
+		// so the query answers instead of the server dying; the declared
+		// type is fixed in the planner (isNumericFunc).
+		vecShapeLenAny(src, out, n, mul)
+		return
+	}
 	if !byteArrayShaped(src) || len(src.BytesData.Offsets) <= n {
 		// Non-byte-array input (or an offsets array too short to cover the
 		// batch): fall back to the boxed per-row definition rather than
@@ -100,6 +111,10 @@ func vecShapeLenScaled(args []*batch.Vector, out *batch.Vector, n int, mul int) 
 // vecShapeLenBoxed is the non-byte-array fallback: it reproduces
 // fnOctetLength/fnBitLength over GetValue exactly.
 func vecShapeLenBoxed(src *batch.Vector, out *batch.Vector, n int, mul int) {
+	if len(out.Float64Data) < n {
+		vecShapeLenAny(src, out, n, mul)
+		return
+	}
 	for i := 0; i < n; i++ {
 		v := src.GetValue(i)
 		if v == nil {
@@ -110,10 +125,37 @@ func vecShapeLenBoxed(src *batch.Vector, out *batch.Vector, n int, mul int) {
 	}
 }
 
+// vecShapeLenAny writes lengths through the output vector's own typed setter,
+// for the case where that vector is not float64-backed. Slower than either
+// fast path and never taken when the projection is typed correctly — it exists
+// so a type mismatch is a slow answer rather than a process-wide panic.
+func vecShapeLenAny(src *batch.Vector, out *batch.Vector, n int, mul int) {
+	for i := 0; i < n; i++ {
+		v := src.GetValue(i)
+		if v == nil {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.SetValue(i, int64(mul*len(toString(v))))
+	}
+}
+
 // vecCharLength counts runes. This is the one member of the length family
 // that genuinely needs the bytes — no offsets fast path exists for it.
 func vecCharLength(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
+	if len(out.Float64Data) < n {
+		// Non-float64 output vector: see vecShapeLenScaled.
+		for i := 0; i < n; i++ {
+			v := src.GetValue(i)
+			if v == nil {
+				out.Nulls.SetNull(i)
+				continue
+			}
+			out.SetValue(i, int64(utf8.RuneCountInString(toString(v))))
+		}
+		return
+	}
 	if !byteArrayShaped(src) || len(src.BytesData.Offsets) <= n {
 		for i := 0; i < n; i++ {
 			v := src.GetValue(i)

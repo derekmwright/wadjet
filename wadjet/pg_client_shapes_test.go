@@ -145,3 +145,37 @@ func TestSystemColumnsAreNull(t *testing.T) {
 		t.Fatalf("delete by ctid removed rows: %d remain, want 10", n)
 	}
 }
+
+// The length family returns a count, but the planner typed it String, so the
+// projection allocated a Bytes output vector and the Float64Data-writing vec
+// kernel indexed off the end of a zero-length slice: `SELECT LENGTH(c) FROM t`
+// panicked the whole server process, taking every connection with it. Third
+// instance of that mismatch; #310 tracks removing the class.
+func TestLengthFamilyOverStringColumn(t *testing.T) {
+	ctx, db := newClientShapeDB(t)
+
+	res, err := db.Query(ctx, "SELECT LENGTH(name) AS l, OCTET_LENGTH(name) AS o, "+
+		"BIT_LENGTH(name) AS b, CHAR_LENGTH(name) AS c FROM items LIMIT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(res.Rows))
+	}
+	row := res.Rows[0]
+	// "row" is 3 characters.
+	for col, want := range map[string]int64{"l": 3, "o": 3, "b": 24, "c": 3} {
+		var got int64
+		switch v := row[col].(type) {
+		case int64:
+			got = v
+		case float64:
+			got = int64(v)
+		default:
+			t.Fatalf("%s = %v (%T), want a number", col, row[col], row[col])
+		}
+		if got != want {
+			t.Errorf("%s = %d, want %d", col, got, want)
+		}
+	}
+}

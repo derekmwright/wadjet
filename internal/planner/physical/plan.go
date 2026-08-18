@@ -6207,7 +6207,17 @@ func isNumericFunc(name string) bool {
 		// Bytes output vector doesn't have — every vector distance
 		// query panicked once the vec kernels landed. (vector_dims
 		// returns int64 and is typed separately in inferProjectionType.)
-		"cosine_similarity", "l2_distance", "dot_product", "vector_norm":
+		"cosine_similarity", "l2_distance", "dot_product", "vector_norm",
+		// The length family returns a count. Typing it String gave the
+		// projection a Bytes output vector, and vecShapeLenScaled — which
+		// writes out.Float64Data — indexed off the end of a zero-length
+		// slice: `SELECT LENGTH(c) FROM t` panicked the whole server
+		// process, taking every connection with it. Third instance of this
+		// exact mismatch (see the two comments above); #310 tracks making
+		// the return type declared once, at registration, instead of
+		// re-listed here.
+		"length", "octet_length", "bit_length", "char_length",
+		"character_length", "strlen":
 		return true
 	}
 	return false

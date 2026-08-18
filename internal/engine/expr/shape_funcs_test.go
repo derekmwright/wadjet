@@ -3,6 +3,7 @@ package expr
 import (
 	"fmt"
 	"math/rand"
+	"strconv"
 	"testing"
 	"unicode/utf8"
 
@@ -420,4 +421,47 @@ func TestCompileShapePredicateSpecializations(t *testing.T) {
 			t.Errorf("%s compiled to %s, want %s", tc.sql, got, tc.want)
 		}
 	}
+}
+
+// A vec kernel must not die when the output vector cannot hold what it writes.
+// `SELECT LENGTH(c) FROM t` typed its projection String, so the projection
+// allocated a Bytes output vector, and the Float64Data-writing kernel indexed
+// off the end of a zero-length slice — panicking the whole server process,
+// every connection with it (#310).
+func TestShapeLenKernelsSurviveMismatchedOutput(t *testing.T) {
+	src := batch.NewVector(batch.TypeString, 3)
+	for i, s := range []string{"abc", "de", ""} {
+		src.SetValue(i, s)
+	}
+	// A Bytes output vector: no Float64Data at all.
+	out := batch.NewVector(batch.TypeString, 3)
+	if len(out.Float64Data) != 0 {
+		t.Skip("string vectors carry Float64Data on this build")
+	}
+
+	vecLength([]*batch.Vector{src}, out, 3)
+	for i, want := range []int64{3, 2, 0} {
+		got := out.GetValue(i)
+		if !valueEqualsInt(got, want) {
+			t.Fatalf("length row %d = %v (%T), want %d", i, got, got, want)
+		}
+	}
+
+	out2 := batch.NewVector(batch.TypeString, 3)
+	vecCharLength([]*batch.Vector{src}, out2, 3)
+	if got := out2.GetValue(0); !valueEqualsInt(got, 3) {
+		t.Fatalf("char_length row 0 = %v, want 3", got)
+	}
+}
+
+func valueEqualsInt(v any, want int64) bool {
+	switch n := v.(type) {
+	case int64:
+		return n == want
+	case float64:
+		return int64(n) == want
+	case string:
+		return n == strconv.FormatInt(want, 10)
+	}
+	return false
 }
