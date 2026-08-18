@@ -3445,6 +3445,85 @@ func resolveShuffleKey(key string, child *logical.Node) string {
 	return key
 }
 
+// resolveSortKeyColumn maps an ORDER BY key that names a SELECT-list alias
+// back to the name the aggregate stage below it actually emits.
+//
+// The logical builder resolves ORDER BY to the SELECT list's OUTPUT name
+// (logical.resolveOrderByColumn), which is exactly what the single-process
+// pipeline needs — there the Project really does run below the Sort, so the
+// alias exists by the time the sort reads a row. Distributed walkStages
+// instead treats an ordinary Project as a passthrough (the same reason
+// resolveShuffleKey exists for join keys), so an aggregate's output keeps the
+// GroupBy spelling. A sort keyed on `p` from `o_orderpriority AS p` then
+// matches no column, the sort is a no-op, and the ORDER BY is silently lost —
+// while the same query without the rename sorts correctly (#313, and TPC-H
+// Q09 via `n_name AS nation` / `SUBSTR(o_orderdate,1,4) AS o_year`).
+//
+// Scope is deliberately the aggregate: a final_aggregate names its output
+// from GroupByCols and AggSpec.OutputCol, which walkStages copies verbatim
+// from this node, so the mapping is exact and decidable here. Sorts over a
+// bare scan or join are left alone — attachScanSelectProjections may attach
+// an alias-naming OpProject to the producing fragment later in
+// PlanDistributed, so the correct spelling for those is not yet known at
+// this point (it declines every plan carrying an aggregate, so the two
+// never overlap).
+//
+// Each Project substitutes at most once: a projection list is simultaneous,
+// so `b AS a, a AS b` must not chase itself.
+func resolveSortKeyColumn(key string, child *logical.Node) string {
+	resolved := key
+	for n := child; n != nil; {
+		switch n.Type {
+		case logical.NodeProject:
+			for _, proj := range n.Projections {
+				if !strings.EqualFold(proj.Alias, resolved) {
+					continue
+				}
+				// Column for a bare rename (`o_orderpriority AS p`), else the
+				// expression text a grouped expression is keyed by
+				// (`substr(o_orderdate, 1, 4) AS o_year`).
+				if src := proj.Column; src != "" {
+					resolved = src
+				} else if proj.Expr != "" {
+					resolved = proj.Expr
+				}
+				break
+			}
+		case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
+			// Order-preserving passthroughs: keep descending.
+		case logical.NodeAggregate:
+			if out, ok := aggregateOutputName(n, resolved); ok {
+				return out
+			}
+			return key
+		default:
+			return key
+		}
+		if len(n.Children) != 1 {
+			return key
+		}
+		n = n.Children[0]
+	}
+	return key
+}
+
+// aggregateOutputName reports the name an Aggregate node emits for col — its
+// own spelling of the matching group key or aggregate output — so a sort key
+// resolved through a rename lands on a column the stage really produces.
+func aggregateOutputName(n *logical.Node, col string) (string, bool) {
+	for _, g := range n.GroupBy {
+		if strings.EqualFold(g, col) {
+			return g, true
+		}
+	}
+	for _, a := range n.AggExprs {
+		if strings.EqualFold(a.OutputCol, col) {
+			return a.OutputCol, true
+		}
+	}
+	return "", false
+}
+
 func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *string) {
 	// CTE deduplication: when this subtree's root is a CTE reference and
 	// a structurally-identical clone has already been planned, link the
@@ -3683,8 +3762,16 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		sortStageID := fmt.Sprintf("sort-%d", len(*stages))
 		var sortKeys []SortKeySpec
+		var sortChild *logical.Node
+		if len(node.Children) == 1 {
+			sortChild = node.Children[0]
+		}
 		for _, ob := range node.OrderBy {
-			sortKeys = append(sortKeys, SortKeySpec{Column: ob.Column, Desc: ob.Desc, NullsLast: resolveNullsLast(ob)})
+			sortKeys = append(sortKeys, SortKeySpec{
+				Column:    resolveSortKeyColumn(ob.Column, sortChild),
+				Desc:      ob.Desc,
+				NullsLast: resolveNullsLast(ob),
+			})
 		}
 
 		// Phase 1: partial sort (coordinator splits into parallel tasks at runtime)

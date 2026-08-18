@@ -368,7 +368,6 @@ func twoPathCorpus() []twoPathQuery {
 		// is proven against the actual TPC-H query, not only the reduction.
 		knownBug := map[int]string{
 			7: "#314", // DAG NULLs n1.n_name (first alias of the self-joined table)
-			9: "#313", // DAG loses ORDER BY when the grouped column is renamed
 		}[n]
 		if lim := trailingLimit(sql); lim > 0 {
 			// Full-row compare on the stripped form (stronger and
@@ -419,7 +418,7 @@ func twoPathCorpus() []twoPathQuery {
 		// column. Without the rename both paths sort; with it the DAG
 		// returns the rows unsorted.
 		twoPathQuery{name: "GroupKeyOrderBy", sql: "SELECT o_orderpriority, COUNT(*) AS c FROM orders GROUP BY o_orderpriority ORDER BY o_orderpriority", cmp: cmpOrdered},
-		twoPathQuery{name: "AliasedGroupKeyOrderBy", sql: "SELECT o_orderpriority AS p, COUNT(*) AS c FROM orders GROUP BY o_orderpriority ORDER BY p", cmp: cmpOrdered, knownBug: "#313"},
+		twoPathQuery{name: "AliasedGroupKeyOrderBy", sql: "SELECT o_orderpriority AS p, COUNT(*) AS c FROM orders GROUP BY o_orderpriority ORDER BY p", cmp: cmpOrdered},
 		// Minimal repro for the Q05 divergence: a WHERE equality between
 		// two joined tables that is not itself a join condition. The DAG
 		// answers this with the count it would produce with the predicate
