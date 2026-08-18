@@ -1317,6 +1317,26 @@ var memoizableFuncs = map[string]bool{
 // tryEvalMemoized runs the per-row fallback with a per-batch input memo.
 // Returns false when the call shape doesn't qualify (caller falls through
 // to the plain per-row loop).
+//
+// Memo ownership (load-bearing for the zero-copy keys below): the map is a
+// local of this call. One evaluation of one batch, by one goroutine, owns
+// it exclusively and it dies at return — parallel pipeline clones share
+// the *FuncCall but never the memo. Keys are therefore zero-copy views
+// into the input column's arena (map assign stores the string header, it
+// does not copy the bytes), which is sound on two invariants:
+//
+//   - the input batch outlives this call — it is the caller's live batch;
+//   - nothing mutates the input column while the call runs. The output
+//     vector is a separate pooled batch's column (project.go / plan.go
+//     both write into out.Columns[j] of a freshly-obtained batch); an
+//     output aliasing the input would already corrupt the pre-existing
+//     zero-copy probe and the sequential offset writes, so no-alias is a
+//     precondition of this path, not a new one.
+//
+// Values live under the same rule and can also be views into the input
+// (replaceAll returns its argument when nothing matches, and a whole-match
+// single-group replacement returns a substring); they are copied into the
+// output arena on the way out.
 func (e *FuncCall) tryEvalMemoized(b *batch.RecordBatch, out *batch.Vector, n int) bool {
 	if len(e.Args) == 0 || !memoizableFuncs[strings.ToLower(e.Name)] {
 		return false
@@ -1343,6 +1363,10 @@ func (e *FuncCall) tryEvalMemoized(b *batch.RecordBatch, out *batch.Vector, n in
 	// regexp_replace evaluates as a direct string→string call — compiled
 	// pattern and pre-parsed replacement template, no []any boxing.
 	prep := e.preparedReplace()
+	if out.Type == batch.TypeString {
+		e.evalMemoizedStrings(b, vec, out, n, prep, hasNulls)
+		return true
+	}
 	memo := make(map[string]any, n/2)
 	for i := 0; i < n; i++ {
 		if hasNulls && vec.Nulls.IsNullFast(i) {
@@ -1361,11 +1385,89 @@ func (e *FuncCall) tryEvalMemoized(b *batch.RecordBatch, out *batch.Vector, n in
 			v = e.Eval(b, i)
 		}
 		out.SetValue(i, v)
-		// The lookup key above is a zero-copy view into the batch;
-		// inserting needs a stable copy.
-		memo[strings.Clone(s)] = v
+		memo[s] = v
 	}
 	return true
+}
+
+// memoStr is the typed memo value for a string-producing memoized call:
+// the result plus its NULL flag, stored by value in the map. The generic
+// map[string]any charges an interface box per DISTINCT input, and then a
+// string→[]byte conversion per ROW inside Vector.SetValue on the way to
+// the output arena. Typed, a distinct input costs the match and nothing
+// else, and a row costs an append.
+type memoStr struct {
+	s    string
+	null bool
+}
+
+// memoStrPool recycles the typed memo's map storage across batches: at
+// 2048 rows a freshly-made map is ~90 KB, which was the largest single
+// allocation left on this path once the boxing and key clones were gone.
+//
+// The map is cleared before it goes back, so a checkout always starts
+// empty — no result and no view into a retired batch's arena survives into
+// the next batch (which would be both a stale-answer bug and a reason
+// pooled batch arenas stayed reachable).
+var memoStrPool = sync.Pool{
+	New: func() any { return make(map[string]memoStr, batch.DefaultBatchSize/2) },
+}
+
+// evalMemoizedStrings is tryEvalMemoized's loop for a string output
+// column: typed memo, and results written straight into the output
+// BytesColumn. Same per-batch memo lifetime as the generic loop — nothing
+// here may outlive the batch, and nothing does: memo values can be
+// zero-copy views into the input arena (replaceAll returns its argument
+// unchanged when the pattern doesn't match), and SetString copies them
+// into the output arena on the way out.
+func (e *FuncCall) evalMemoizedStrings(b *batch.RecordBatch, vec, out *batch.Vector, n int, prep *preparedRegexp, hasNulls bool) {
+	// Only engine-sized batches recycle their map. An oversized batch
+	// (GetForSize's escape hatch) would leave a map whose bucket count —
+	// and therefore whose clear cost — outlives it, charged to every
+	// normal batch after it.
+	var memo map[string]memoStr
+	if n <= batch.DefaultBatchSize {
+		memo = memoStrPool.Get().(map[string]memoStr)
+		defer func() {
+			clear(memo)
+			memoStrPool.Put(memo)
+		}()
+	} else {
+		memo = make(map[string]memoStr, n/2)
+	}
+	for i := 0; i < n; i++ {
+		if hasNulls && vec.Nulls.IsNullFast(i) {
+			out.SetValue(i, e.Eval(b, i))
+			continue
+		}
+		s := vec.BytesData.UnsafeStringValue(i)
+		mv, hit := memo[s]
+		if !hit {
+			if prep != nil {
+				mv = memoStr{s: prep.replaceAll(s)}
+			} else {
+				switch tv := e.Eval(b, i).(type) {
+				case string:
+					mv = memoStr{s: tv}
+				case nil:
+					mv = memoStr{null: true}
+				default:
+					// Mirrors Vector.SetValue's coercion for a string
+					// column, so a memoizable function that returns
+					// something other than a string can't make the typed
+					// path diverge from the generic one.
+					mv = memoStr{s: fmt.Sprint(tv)}
+				}
+			}
+			memo[s] = mv
+		}
+		if mv.null {
+			out.WriteNullAt(i)
+			continue
+		}
+		out.Nulls.SetValid(i)
+		out.BytesData.SetString(i, mv.s)
+	}
 }
 
 func (e *FuncCall) evalVecPerRow(b *batch.RecordBatch, out *batch.Vector, n int) {

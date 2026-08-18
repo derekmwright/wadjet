@@ -2,6 +2,7 @@ package expr
 
 import (
 	"regexp"
+	"regexp/syntax"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/optswitch"
@@ -36,9 +37,10 @@ type replSeg struct {
 // literal pattern and replacement. ok=false means the shape didn't
 // qualify (bad pattern) and callers must use the generic path.
 type preparedRegexp struct {
-	re   *regexp.Regexp
-	segs []replSeg
-	ok   bool
+	re       *regexp.Regexp
+	segs     []replSeg
+	anchored bool // every match must start at offset 0 → at most one match
+	ok       bool
 }
 
 // parseSQLReplacement splits a SQL-convention replacement string into
@@ -83,43 +85,155 @@ func prepareRegexpReplace(pattern, repl string) *preparedRegexp {
 	if err != nil {
 		return &preparedRegexp{}
 	}
-	return &preparedRegexp{re: re, segs: parseSQLReplacement(repl), ok: true}
+	return &preparedRegexp{
+		re:       re,
+		segs:     parseSQLReplacement(repl),
+		anchored: anchoredAtTextStart(pattern),
+		ok:       true,
+	}
+}
+
+// anchoredAtTextStart reports whether every match of pattern must begin at
+// offset 0 of the subject — which makes at most one match possible, so
+// replaceAll can call FindStringSubmatchIndex once instead of asking
+// FindAllStringSubmatchIndex to build a slice-of-slices.
+//
+// Detection is structural, via the same parse regexp.Compile uses (never a
+// "starts with ^" string test, which would misread `[^/]+`, `\^`, or an
+// alternation anchored on only its first branch). The claim rests on
+// OpBeginText — Go's `^` outside (?m), plus `\A` — matching only at
+// absolute position 0 even when the search resumes from a later offset;
+// OpBeginLine (`^` under (?m)) does not qualify and parses to a different
+// op, so the multiline case falls out automatically. Empty first matches
+// are safe for the same reason: FindAll's advance-past-empty-match retry
+// starts at offset 1, where OpBeginText cannot match.
+func anchoredAtTextStart(pattern string) bool {
+	re, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return false
+	}
+	return beginsWithTextAnchor(re)
+}
+
+// beginsWithTextAnchor walks only the operators through which "the match
+// starts here" propagates unconditionally. Everything else — including
+// OpStar and OpQuest, whose sub-expression may be skipped entirely, so
+// `(^a)*` can match empty anywhere — answers false and keeps the generic
+// path.
+func beginsWithTextAnchor(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpBeginText:
+		return true
+	case syntax.OpCapture, syntax.OpPlus:
+		// x+ must match x at least once, at the same start offset.
+		return len(re.Sub) == 1 && beginsWithTextAnchor(re.Sub[0])
+	case syntax.OpConcat:
+		return len(re.Sub) > 0 && beginsWithTextAnchor(re.Sub[0])
+	case syntax.OpAlternate:
+		if len(re.Sub) == 0 {
+			return false
+		}
+		for _, sub := range re.Sub {
+			if !beginsWithTextAnchor(sub) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 // replaceAll is ReplaceAllString with the template pre-parsed. Splicing
-// FindAllStringSubmatchIndex results reproduces ReplaceAllString's output
-// exactly: both use the same non-overlapping match iteration (including
-// empty-match advancement), and an out-of-range or unmatched group
-// expands to nothing, as with Expand.
+// submatch indices reproduces ReplaceAllString's output exactly: both use
+// the same non-overlapping match iteration (including empty-match
+// advancement), and an out-of-range or unmatched group expands to nothing,
+// as with Expand. An anchored pattern skips the iteration entirely, since
+// it cannot match twice.
 //
 // The no-match case returns src unchanged — callers passing zero-copy
 // views into batch memory get the view back, which is safe for the
 // per-batch memo (values never outlive the batch) and for SetValue
 // (which copies into the output vector).
 func (p *preparedRegexp) replaceAll(src string) string {
+	if p.anchored {
+		// At most one match (see anchoredAtTextStart): one []int instead
+		// of FindAll's slice-of-slices plus its scan of the remainder.
+		m := p.re.FindStringSubmatchIndex(src)
+		if m == nil {
+			return src
+		}
+		return p.spliceOne(src, m)
+	}
 	matches := p.re.FindAllStringSubmatchIndex(src, -1)
 	if len(matches) == 0 {
 		return src
+	}
+	if len(matches) == 1 {
+		return p.spliceOne(src, matches[0])
 	}
 	var b strings.Builder
 	b.Grow(len(src))
 	last := 0
 	for _, m := range matches {
 		b.WriteString(src[last:m[0]])
-		for _, seg := range p.segs {
-			if seg.group < 0 {
-				b.WriteString(seg.lit)
-				continue
-			}
-			hi := 2*seg.group + 1
-			if hi < len(m) && m[hi-1] >= 0 {
-				b.WriteString(src[m[hi-1]:m[hi]])
-			}
-		}
+		p.expand(&b, src, m)
 		last = m[1]
 	}
 	b.WriteString(src[last:])
 	return b.String()
+}
+
+// spliceOne builds the result for a single match. Two things the general
+// loop can't do once the match count is known to be one: size the output
+// buffer exactly (Q29 turns a ~70-byte URL into a ~15-byte host, where
+// Grow(len(src)) over-allocates by 4-5x), and recognise the pure-extract
+// shape — replacement is one backreference and the match spans the whole
+// subject — whose result IS a substring of src, returnable with no
+// allocation at all. That zero-copy return has the same contract as the
+// no-match `return src` above: valid for the batch, and the memo/SetValue
+// callers copy on the way out.
+func (p *preparedRegexp) spliceOne(src string, m []int) string {
+	if len(p.segs) == 1 && p.segs[0].group > 0 && m[0] == 0 && m[1] == len(src) {
+		hi := 2*p.segs[0].group + 1
+		if hi < len(m) && m[hi-1] >= 0 {
+			return src[m[hi-1]:m[hi]]
+		}
+		return "" // unmatched or out-of-range group expands to nothing
+	}
+	size := m[0] + (len(src) - m[1])
+	for _, seg := range p.segs {
+		if seg.group < 0 {
+			size += len(seg.lit)
+			continue
+		}
+		hi := 2*seg.group + 1
+		if hi < len(m) && m[hi-1] >= 0 {
+			size += m[hi] - m[hi-1]
+		}
+	}
+	var b strings.Builder
+	b.Grow(size)
+	b.WriteString(src[:m[0]])
+	p.expand(&b, src, m)
+	b.WriteString(src[m[1]:])
+	return b.String()
+}
+
+// expand writes the replacement template for one match, with the same
+// semantics as Go's Expand: an unmatched or out-of-range group
+// contributes nothing.
+func (p *preparedRegexp) expand(b *strings.Builder, src string, m []int) {
+	for _, seg := range p.segs {
+		if seg.group < 0 {
+			b.WriteString(seg.lit)
+			continue
+		}
+		hi := 2*seg.group + 1
+		if hi < len(m) && m[hi-1] >= 0 {
+			b.WriteString(src[m[hi-1]:m[hi]])
+		}
+	}
 }
 
 // preparedReplace returns the compile-once state for this call, building

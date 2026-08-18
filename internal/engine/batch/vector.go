@@ -125,6 +125,16 @@ func (bc *BytesColumn) Set(i int, val []byte) {
 	bc.Offsets[i+1] = uint32(len(bc.Data))
 }
 
+// SetString writes a string value at positional index i. Same contract as
+// Set (sequential i), but takes a string: `append(dst, s...)` copies
+// straight out of the string, where Set's callers had to materialize a
+// []byte(s) conversion first — one heap allocation per row on the
+// string-producing projection paths.
+func (bc *BytesColumn) SetString(i int, val string) {
+	bc.Data = append(bc.Data, val...)
+	bc.Offsets[i+1] = uint32(len(bc.Data))
+}
+
 // BulkSet copies a contiguous block of byte array data into the column,
 // computing offsets from the source offset array. This replaces n individual
 // Set calls with a single bulk append + offset arithmetic, reducing memmove
