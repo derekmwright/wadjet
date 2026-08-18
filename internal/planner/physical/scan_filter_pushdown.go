@@ -29,6 +29,10 @@ import (
 // ScanFilterPushdowns counts filters (conjuncts) pushed into scans.
 var ScanFilterPushdowns atomic.Int64
 
+// ShapeOnlyColumnsPlanned counts columns handed to the scan for lengths-only
+// decode. The optimization-invariance oracle asserts the corpus engages it.
+var ShapeOnlyColumnsPlanned atomic.Int64
+
 var scanFilterToggle = optswitch.Register("scan-filter", "WADJET_SCAN_FILTER",
 	"scan-level filter pushdown: dictionary-mask evaluation, filter-only column elision, count-only batches")
 

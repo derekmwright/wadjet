@@ -85,6 +85,13 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 	var cachedNetInt int64
 	var cachedNetStr string
 	netResolved := false
+	// The literal's string form is constant: rendering it per row cost a
+	// fmt.Sprint allocation on every comparison.
+	strVal := fmt.Sprint(value)
+	// Offsets-shape: comparing a string column against the empty string is
+	// a zero-length test, not a byte compare — and it is what keeps such a
+	// column eligible for the lengths-only scan decode.
+	emptyTest := strVal == "" && (op == OpEq || op == OpNe)
 	return func(b *batch.RecordBatch, row int) bool {
 		if cachedIdx == -2 {
 			cachedIdx = b.ColumnIndex(colName)
@@ -116,7 +123,11 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 		case batch.TypeFloat32:
 			return compareFloat64(float64(v.Float32Data[row]), toFloat64(value), op)
 		case batch.TypeString:
-			return compareString(v.BytesData.UnsafeStringValue(row), fmt.Sprint(value), op)
+			if emptyTest {
+				empty := v.BytesData.LengthAt(row) == 0
+				return empty == (op == OpEq)
+			}
+			return compareString(v.BytesData.UnsafeStringValue(row), strVal, op)
 		case batch.TypeBool:
 			if op == OpEq {
 				return v.BoolData[row] == value.(bool)
@@ -143,13 +154,13 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 			}
 			return compareString(v.BytesData.UnsafeStringValue(row), cachedNetStr, op)
 		case batch.TypeCIDR:
-			return compareString(v.BytesData.UnsafeStringValue(row), fmt.Sprint(value), op)
+			return compareString(v.BytesData.UnsafeStringValue(row), strVal, op)
 		case batch.TypePort, batch.TypeProtocol:
 			return compareInt64(int64(v.Int32Data[row]), toInt64(value), op)
 		case batch.TypeDuration:
 			return compareInt64(v.Int64Data[row], toInt64(value), op)
 		case batch.TypeUUID:
-			return compareString(v.BytesData.UnsafeStringValue(row), fmt.Sprint(value), op)
+			return compareString(v.BytesData.UnsafeStringValue(row), strVal, op)
 		case batch.TypeDate:
 			return compareInt64(int64(v.Int32Data[row]), toInt64(value), op)
 		}

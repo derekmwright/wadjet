@@ -29,20 +29,6 @@ import (
 // resolved column is not a flat byte-array column, so semantics stay
 // bit-identical with the path it replaces.
 
-// shapeLen returns the byte length of row i, mirroring BytesColumn.Value's
-// defensive handling of the descending-offset hazard that HashJoin's
-// gatherBuildVector can leave behind (see BytesColumn.Value's comment):
-// a malformed Offsets[i+1] < Offsets[i] pair reads as empty, exactly as
-// Value would report it.
-func shapeLen(bc *batch.BytesColumn, i int) int {
-	start := bc.Offsets[i]
-	end := bc.Offsets[i+1]
-	if end < start {
-		return 0
-	}
-	return int(end - start)
-}
-
 // byteArrayShaped reports whether v's values are stored as a plain
 // BytesColumn whose byte length equals the length of the value ColRef.Eval
 // would produce. TypeString boxes BytesColumn.StringValue and TypeBytes
@@ -175,7 +161,7 @@ func (e *ColShapeLen) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool)
 		if v.Nulls.IsNullFast(row) {
 			return 0, false
 		}
-		return float64(e.Mul * shapeLen(&v.BytesData, row)), true
+		return float64(e.Mul * v.BytesData.LengthAt(row)), true
 	}
 	g := e.Fallback.Eval(b, row)
 	if g == nil {
@@ -285,7 +271,7 @@ func (e *ColEmptyStr) EvalBool(b *batch.RecordBatch, row int) bool {
 	if v.Nulls.IsNullFast(row) {
 		return false
 	}
-	empty := shapeLen(&v.BytesData, row) == 0
+	empty := v.BytesData.LengthAt(row) == 0
 	if e.Not {
 		return !empty
 	}

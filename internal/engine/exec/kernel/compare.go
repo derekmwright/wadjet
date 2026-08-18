@@ -181,6 +181,15 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 // Uses UnsafeStringValue for zero-copy comparisons — the string is consumed
 // within the comparison function and never stored.
 func compareFilterString(op CompareOp, val string) FilterKernel {
+	// Offsets-shape: comparing against the empty string is a zero-length
+	// test on the offsets array, not a byte compare. This is the dominant
+	// string filter in the ClickBench corpus (16 of 43 queries carry a
+	// `col <> ''` conjunct) and it is what makes a column filtered that way
+	// still eligible for the lengths-only scan decode — the kernel never
+	// touches the value arena.
+	if val == "" && (op == OpEq || op == OpNe) {
+		return emptyStringFilter(op == OpNe)
+	}
 	cmpFn := resolveCompare[string](op)
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		out := outSel[:0]
@@ -212,6 +221,38 @@ func compareFilterString(op CompareOp, val string) FilterKernel {
 						out = append(out, uint32(i))
 					}
 				}
+			}
+		}
+		return out
+	}
+}
+
+// emptyStringFilter selects rows whose value is (nonEmpty=false) or is not
+// (nonEmpty=true) the empty string, reading only offsets and the null mask.
+// NULL rows never pass, matching the byte-compare kernel it replaces.
+func emptyStringFilter(nonEmpty bool) FilterKernel {
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		bd := &vec.BytesData
+		if sel != nil {
+			for _, idx := range sel {
+				i := int(idx)
+				if hasNulls && vec.Nulls.IsNullFast(i) {
+					continue
+				}
+				if (bd.LengthAt(i) != 0) == nonEmpty {
+					out = append(out, idx)
+				}
+			}
+			return out
+		}
+		for i := 0; i < vecLen; i++ {
+			if hasNulls && vec.Nulls.IsNullFast(i) {
+				continue
+			}
+			if (bd.LengthAt(i) != 0) == nonEmpty {
+				out = append(out, uint32(i))
 			}
 		}
 		return out

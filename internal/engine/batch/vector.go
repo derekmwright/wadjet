@@ -91,6 +91,16 @@ const (
 type BytesColumn struct {
 	Offsets []uint32 // len = num_rows + 1
 	Data    []byte   // contiguous buffer
+
+	// ShapeOnly marks a column decoded for its SHAPE only: Offsets carry
+	// the real per-row byte lengths but Data was never written (the
+	// lengths-only scan decode, internal/engine/scan/lengths_decode.go).
+	// LENGTH()/octet_length(), IS [NOT] NULL and the empty-string
+	// comparisons answer off Offsets and the null mask alone; any attempt
+	// to read a VALUE is a planner-analysis bug and panics immediately
+	// rather than returning a wrong answer. Copy paths propagate the flag
+	// instead of moving bytes that do not exist.
+	ShapeOnly bool
 }
 
 // NewBytesColumn creates a new BytesColumn with the given capacity.
@@ -152,6 +162,10 @@ func (bc *BytesColumn) BulkSet(dstOffset int, srcData []byte, srcOffsets []uint3
 // dst at [dstOff, dstOff+count). Uses a single Data append + offset arithmetic
 // instead of per-element Set calls, reducing memmove overhead for batch merging.
 func (dst *BytesColumn) BulkCopy(dstOff int, src *BytesColumn, srcOff, count int) {
+	if src.ShapeOnly {
+		dst.copyShapeRange(dstOff, src, srcOff, count)
+		return
+	}
 	baseOff := uint32(len(dst.Data))
 	srcStart := src.Offsets[srcOff]
 	srcEnd := src.Offsets[srcOff+count]
@@ -166,10 +180,31 @@ func (dst *BytesColumn) BulkCopy(dstOff int, src *BytesColumn, srcOff, count int
 // and reducing function call overhead in gather loops. Values must be set in
 // order (di = 0, 1, 2, ...) because later offsets depend on prior data length.
 func (dst *BytesColumn) SetFrom(di int, src *BytesColumn, si int) {
+	if src.ShapeOnly {
+		dst.copyShapeRange(di, src, si, 1)
+		return
+	}
 	srcStart := src.Offsets[si]
 	srcEnd := src.Offsets[si+1]
 	dst.Data = append(dst.Data, src.Data[srcStart:srcEnd]...)
 	dst.Offsets[di+1] = uint32(len(dst.Data))
+}
+
+// copyShapeRange propagates a shape-only source: the destination inherits
+// the per-row lengths and the ShapeOnly mark, and no bytes move. Mixing a
+// shape-only source into a destination that already holds real values would
+// silently corrupt it, so that combination panics with the same diagnosis
+// Value gives.
+func (dst *BytesColumn) copyShapeRange(dstOff int, src *BytesColumn, srcOff, count int) {
+	if len(dst.Data) > 0 {
+		panic("batch: shape-only column copied into a destination holding values — some consumer of this column is not a shape consumer (planner analysis bug)")
+	}
+	dst.ShapeOnly = true
+	cur := dst.Offsets[dstOff]
+	for i := 0; i < count; i++ {
+		cur += uint32(src.LengthAt(srcOff + i))
+		dst.Offsets[dstOff+i+1] = cur
+	}
 }
 
 // Value returns the byte slice at position i.
@@ -183,12 +218,27 @@ func (dst *BytesColumn) SetFrom(di int, src *BytesColumn, si int) {
 // authoritatively, and downstream filter / projection kernels already
 // consult it.
 func (bc *BytesColumn) Value(i int) []byte {
+	if bc.ShapeOnly {
+		panic("batch: value read from a shape-only BytesColumn — the scan decoded lengths only, so some consumer of this column is not a shape consumer (planner analysis bug)")
+	}
 	start := bc.Offsets[i]
 	end := bc.Offsets[i+1]
 	if end < start {
 		return nil
 	}
 	return bc.Data[start:end]
+}
+
+// LengthAt returns the byte length of row i without reading the value. It
+// is the only value-shaped accessor valid on a shape-only column, and it
+// mirrors Value's defensive handling of the descending-offset hazard.
+func (bc *BytesColumn) LengthAt(i int) int {
+	start := bc.Offsets[i]
+	end := bc.Offsets[i+1]
+	if end < start {
+		return 0
+	}
+	return int(end - start)
 }
 
 // StringValue returns the string at position i.
@@ -219,6 +269,7 @@ func (bc *BytesColumn) Reset() {
 		bc.Offsets[i] = 0
 	}
 	bc.Data = bc.Data[:0]
+	bc.ShapeOnly = false
 }
 
 // MemBytes returns the heap bytes consumed by the offset and data slices.

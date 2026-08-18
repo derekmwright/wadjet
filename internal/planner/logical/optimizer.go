@@ -70,6 +70,10 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	}
 	computeRequiredColumns(plan)
 	attachScanPredicates(plan)
+	// After attachScanPredicates so scan-attached conjuncts are visible to
+	// the walk: a column must be proven shape-only against EVERY predicate
+	// that survives, wherever it ended up.
+	computeShapeOnlyColumns(plan)
 	return plan
 }
 

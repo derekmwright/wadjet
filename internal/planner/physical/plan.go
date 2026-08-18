@@ -4405,6 +4405,21 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 	}
 	scanner := p.newScanner(ctx, node.TableName, node.PartitionFilter, node.RequiredColumns, node.ScanPredicates)
 
+	// Lengths-only decode for columns the logical analysis proved are
+	// consumed for their SHAPE only (logical/shape_only_columns.go). Skipped
+	// for a scan feeding the multi-consumer scan cache: a replay consumer
+	// was not part of the analyzed plan, exactly as scan-filter pushdown
+	// excludes it.
+	if len(node.ShapeOnlyColumns) > 0 {
+		if cs, ok := scanner.(*catalogScanSource); ok && cs.cache == nil {
+			cs.shapeOnlyCols = make(map[string]bool, len(node.ShapeOnlyColumns))
+			for _, c := range node.ShapeOnlyColumns {
+				cs.shapeOnlyCols[strings.ToLower(c)] = true
+			}
+			ShapeOnlyColumnsPlanned.Add(int64(len(node.ShapeOnlyColumns)))
+		}
+	}
+
 	// Probe-split pipeline mode: restrict this scan to only allowed files.
 	if p.ScanFileFilter != nil {
 		if files, ok := p.ScanFileFilter[scanAlias]; ok {
@@ -7037,6 +7052,7 @@ type catalogScanSource struct {
 	spillMgr        *memory.SpillManager  // for pre-emptive relief on file-load reservations; nil-safe
 	emitRowLoc      bool                  // top-N late materialization: stamp __row_loc on scan batches
 	rowPreds        []scan.RowPred        // scan-level filter conjuncts (scan_filter_pushdown.go)
+	shapeOnlyCols   map[string]bool       // byte-array columns decoded as lengths only (logical/shape_only_columns.go)
 }
 
 // RefetchRows re-reads the full-width rows named by __row_loc values (see
@@ -7114,6 +7130,7 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 		}
 		ses.emitRowLoc = s.emitRowLoc
 		ses.rowPreds = s.rowPreds
+		ses.shapeOnlyCols = s.shapeOnlyCols
 	}
 	s.inner = sc
 	return s.inner.Init(ctx)
@@ -8596,6 +8613,7 @@ type scannerExecSource struct {
 	spillMgr        *memory.SpillManager // for pre-emptive relief on file-load reservations; nil-safe
 	emitRowLoc      bool                 // top-N late materialization: stamp __row_loc on scan batches
 	rowPreds        []scan.RowPred       // scan-level filter conjuncts
+	shapeOnlyCols   map[string]bool      // byte-array columns decoded as lengths only
 }
 
 type scanSourceInner struct {
@@ -8617,6 +8635,7 @@ type scanSourceInner struct {
 	emitRowLoc bool     // stamp __row_loc (rgUnit ordinal, row) on every scan batch; disables batch pooling
 	eqProbes  []scan.EqProbe // "=" conjuncts for dictionary-probe row-group pruning (dict_prune.go)
 	rowPreds  []scan.RowPred // scan-level filter conjuncts, evaluated per row group in readRG
+	shapeOnlyCols map[string]bool // lowercased names of columns decoded as lengths only (lengths_decode.go)
 	countOnlyScan bool // requiredCols is exactly the row-count sentinel: batches carry Len/Sel only
 	useNative bool      // true if native page decoder can be used (no Decimal/Array/Map)
 	loadGate  *loadGate // byte-budgeted admission for in-flight file LOADs (data, not metadata)
@@ -8884,6 +8903,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		emitRowLoc:    s.emitRowLoc,
 		eqProbes:      eqProbes,
 		rowPreds:      s.rowPreds,
+		shapeOnlyCols: s.shapeOnlyCols,
 		countOnlyScan: len(s.requiredCols) == 1 && s.requiredCols[0] == logical.RowCountOnlyColumn,
 	}
 	// Nested (ARRAY/MAP/ROW) schemas must take the file-level scan whose

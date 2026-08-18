@@ -97,6 +97,7 @@ type Node struct {
 	ScanRowEstimate int64             // estimated row count from manifest (0 = unknown)
 	ScanColStats    map[string]ScanColumnStats // aggregated column stats from catalog (nil = unavailable)
 	FilterOnlyColumns []string        // columns needed ONLY by the filter directly above this scan (candidates for scan-level filter evaluation without materialization)
+	ShapeOnlyColumns  []string        // byte-array columns whose EVERY use in the plan reads shape, not contents (LENGTH/IS NULL/= ''/COUNT) — the scan decodes them as lengths, see shape_only_columns.go
 	SampleMethod    string            // TABLESAMPLE method: BERNOULLI, SYSTEM
 	SamplePercent   float64           // percentage for TABLESAMPLE (0-100)
 

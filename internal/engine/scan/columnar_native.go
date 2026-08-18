@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"strings"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -91,7 +92,7 @@ func ReadRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 // are offered back for admission. A nil cache (or a reader without a
 // CacheIdentity) is byte-identical to ReadRowGroupNative.
 func ReadRowGroupNativeCached(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, cache *DecodedChunkCache) (*batch.RecordBatch, error) {
-	return readRowGroupNative(fr, rgIdx, schema, pool, cache, nil)
+	return readRowGroupNative(fr, rgIdx, schema, pool, cache, nil, nil)
 }
 
 // ReadRowGroupNativeSel is ReadRowGroupNative under a partial scan-filter
@@ -106,16 +107,28 @@ func ReadRowGroupNativeCached(fr *pqt.FileReader, rgIdx int, schema []pqt.Column
 // memcpy (Q28 +8s, Q29 +1.9s on `Referer <> ''`, which selects most
 // rows) — those decode in full.
 func ReadRowGroupNativeSel(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, sel []uint32) (*batch.RecordBatch, error) {
+	return ReadRowGroupNativeShaped(fr, rgIdx, schema, pool, sel, nil)
+}
+
+// ReadRowGroupNativeShaped is ReadRowGroupNativeSel plus the set of columns
+// (lowercased names) the planner proved are consumed for their SHAPE only.
+// Those decode to per-row lengths with no value bytes materialized at all
+// (lengths_decode.go). A nil/empty set — or the lengths-only kill switch off
+// — is identical to ReadRowGroupNativeSel.
+func ReadRowGroupNativeShaped(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, sel []uint32, shapeOnly map[string]bool) (*batch.RecordBatch, error) {
 	if !selDecodeToggle.On() {
 		sel = nil
 	}
 	if n := int(fr.RowGroupNumRows(rgIdx)); sel != nil && len(sel)*4 > n {
 		sel = nil
 	}
-	return readRowGroupNative(fr, rgIdx, schema, pool, nil, sel)
+	if !lengthsOnlyToggle.On() {
+		shapeOnly = nil
+	}
+	return readRowGroupNative(fr, rgIdx, schema, pool, nil, sel, shapeOnly)
 }
 
-func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, cache *DecodedChunkCache, sel []uint32) (*batch.RecordBatch, error) {
+func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, cache *DecodedChunkCache, sel []uint32, shapeOnly map[string]bool) (*batch.RecordBatch, error) {
 	// ARRAY/MAP leaves don't resolve by column name here; without this
 	// guard the column lookup missed and the "schema evolution" branch
 	// silently emitted ALL-NULL values for the array column — valid-looking
@@ -216,6 +229,15 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 		g.Go(func() error {
 			key, cacheable := cache.keyFor(fr, rgIdx, ci, col)
 			if cacheable && cache.fillFromCache(b.Columns[i], key, numRows) {
+				return nil
+			}
+			if shapeOnly[strings.ToLower(col.Name)] && selEligibleLeaf(fr, ci, col.Type) {
+				// Shape-only columns carry lengths, not values — never
+				// offered to the decoded-chunk cache (a later full read
+				// keyed the same way would get a valueless column).
+				if err := readColumnNativeLengths(b.Columns[i], fr, rgIdx, ci, numRows); err != nil {
+					return fmt.Errorf("reading column %s (lengths): %w", col.Name, err)
+				}
 				return nil
 			}
 			if len(sel) > 0 && selEligibleLeaf(fr, ci, col.Type) {
