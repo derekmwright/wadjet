@@ -17,7 +17,6 @@ package pgwire
 // coherence invariant in describe_execute_test.go.
 
 import (
-	"strconv"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
@@ -25,35 +24,40 @@ import (
 
 // pgDatabaseAttrs is the one pg_database row, keyed by column name.
 //
-// Values are in PostgreSQL's text format, which is what this layer sends: 't'
-// and 'f' for booleans, decimal for OIDs and integers. The encoding is 6
-// (UTF8) and the collation names match a UTF-8 cluster, because that is what
-// this server is. Columns of pg_database that carry no meaning here — the
-// transaction-id horizons, the ACL — are absent, and a client asking for one
-// gets NULL rather than a number this server made up.
+// Values carry their real Go types — bool, int, string — because the declared
+// column OID is inferred from them (synthAnswer.colOID) and typed clients pick
+// their accessor from that OID: a bool declared as text sent DataGrip's reader
+// through getInt("f"). The wire text a bool renders to is still t/f
+// (formatPgValue). The encoding is 6 (UTF8) and the collation names match a
+// UTF-8 cluster, because that is what this server is. Columns of pg_database
+// that carry no meaning here — the transaction-id horizons, the ACL — are
+// absent, and a client asking for one gets NULL rather than a number this
+// server made up.
 func pgDatabaseAttrs() map[string]any {
 	return map[string]any{
-		"oid":            strconv.Itoa(tableOID(expr.SessionCatalog)),
+		"oid":            tableOID(expr.SessionCatalog),
 		"datname":        expr.SessionCatalog,
-		"datdba":         "10",
-		"encoding":       "6",
+		"datdba":         10,
+		"encoding":       6,
 		"datcollate":     "en_US.UTF-8",
 		"datctype":       "en_US.UTF-8",
 		"datlocprovider": "c",
-		"datistemplate":  "f",
-		"datallowconn":   "t",
-		"datconnlimit":   "-1",
-		"dattablespace":  "1663",
+		"datistemplate":  false,
+		"datallowconn":   true,
+		"datconnlimit":   -1,
+		"dattablespace":  1663,
 		"datacl":         nil,
+		// pg_shdescription joined alongside: the database has no comment.
+		"description": nil,
 	}
 }
 
 // pgNamespaceAttrs is the one pg_namespace row.
 func pgNamespaceAttrs() map[string]any {
 	return map[string]any{
-		"oid":      strconv.Itoa(tableOID(expr.SessionSchema)),
+		"oid":      tableOID(expr.SessionSchema),
 		"nspname":  expr.SessionSchema,
-		"nspowner": "10",
+		"nspowner": 10,
 		"nspacl":   nil,
 	}
 }
@@ -131,35 +135,36 @@ type selectItem struct {
 // its whole text as the expression, which matches no attribute and so becomes
 // NULL (or, if nothing in the list matches, declines the statement).
 func selectItems(sql string) []selectItem {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-	if !strings.HasPrefix(upper, "SELECT ") {
+	sql = strings.TrimSpace(sql)
+	if len(sql) < 7 || !strings.EqualFold(sql[:7], "SELECT ") {
 		return nil
 	}
-	sql = strings.TrimSpace(sql)
-	selectPart := sql[len("SELECT "):]
-	if fromIdx := strings.Index(strings.ToUpper(selectPart), " FROM "); fromIdx >= 0 {
-		selectPart = selectPart[:fromIdx]
-	}
-	// DISTINCT belongs to the statement, not to the first column.
-	if trimmed := strings.TrimSpace(selectPart); len(trimmed) > 9 &&
-		strings.EqualFold(trimmed[:9], "DISTINCT ") {
-		selectPart = trimmed[9:]
+	entries := splitSelectList(sql[7:])
+	if len(entries) > 0 {
+		if t := strings.TrimSpace(entries[0]); len(t) > 9 && strings.EqualFold(t[:9], "DISTINCT ") {
+			// DISTINCT belongs to the statement, not to the first column.
+			entries[0] = t[9:]
+		}
 	}
 
 	var items []selectItem
-	for _, p := range strings.Split(selectPart, ",") {
+	for _, p := range entries {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
 		}
 		exprPart, label := p, ""
-		if asIdx := strings.LastIndex(strings.ToUpper(p), " AS "); asIdx >= 0 {
+		if asIdx := lastTopLevelAS(p); asIdx >= 0 {
 			exprPart = strings.TrimSpace(p[:asIdx])
 			label = strings.Trim(strings.TrimSpace(p[asIdx+4:]), `"`)
 		}
+		// A cast reads the same attribute: N.oid::bigint is still oid.
+		bare := exprPart
+		if castIdx := strings.Index(bare, "::"); castIdx >= 0 {
+			bare = strings.TrimSpace(bare[:castIdx])
+		}
 		// Strip a table qualifier: d.datname and pg_database.datname both
 		// read datname.
-		bare := exprPart
 		if dotIdx := strings.LastIndex(bare, "."); dotIdx >= 0 {
 			bare = strings.TrimSpace(bare[dotIdx+1:])
 		}
@@ -170,4 +175,101 @@ func selectItems(sql string) []selectItem {
 		items = append(items, selectItem{expr: strings.ToLower(bare), label: label})
 	}
 	return items
+}
+
+// splitSelectList scans the text after SELECT and returns the top-level
+// comma-separated entries, stopping at the statement's own FROM. Unlike a
+// substring search it survives what real clients send: newlines before
+// FROM, commas inside function calls, and quoted identifiers — the scan
+// tracks paren depth and both quote kinds, and FROM only terminates the
+// list as a word at depth zero.
+func splitSelectList(s string) []string {
+	var entries []string
+	depth := 0
+	inSingle, inDouble := false, false
+	start := 0
+	wordAt := func(i int) bool {
+		// s[i:i+4] is FROM as its own word.
+		if i+4 > len(s) || !strings.EqualFold(s[i:i+4], "FROM") {
+			return false
+		}
+		before := byte(' ')
+		if i > 0 {
+			before = s[i-1]
+		}
+		after := byte(' ')
+		if i+4 < len(s) {
+			after = s[i+4]
+		}
+		isWord := func(b byte) bool {
+			return b == '_' || b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
+		}
+		return !isWord(before) && !isWord(after)
+	}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '(':
+			depth++
+		case ch == ')':
+			if depth > 0 {
+				depth--
+			}
+		case depth == 0 && ch == ',':
+			entries = append(entries, s[start:i])
+			start = i + 1
+		case depth == 0 && (ch == 'f' || ch == 'F') && wordAt(i):
+			entries = append(entries, s[start:i])
+			return entries
+		}
+	}
+	entries = append(entries, s[start:])
+	return entries
+}
+
+// lastTopLevelAS finds the last " AS " outside quotes and parens, so that
+// pg_get_userbyid(x) AS "owner" splits at the alias and CAST(x AS int8)
+// does not.
+func lastTopLevelAS(s string) int {
+	depth := 0
+	inSingle, inDouble := false, false
+	last := -1
+	for i := 0; i+4 <= len(s); i++ {
+		ch := s[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '(':
+			depth++
+		case ch == ')':
+			if depth > 0 {
+				depth--
+			}
+		case depth == 0 && strings.EqualFold(s[i:i+4], " AS "):
+			last = i
+		}
+	}
+	return last
 }

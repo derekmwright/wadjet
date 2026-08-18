@@ -1053,7 +1053,7 @@ func (c *pgConn) describeSQL(sql string) {
 		c.closeDescribeCache()
 		c.describeSynth = ans
 		c.describedSQL = sql
-		c.sendRowDescription(ans.cols)
+		c.sendSynthRowDescription(ans)
 		c.described, c.describedFields = true, len(ans.cols)
 		return
 	}
@@ -1358,6 +1358,33 @@ func singleRow(cols []string, row map[string]any) *synthAnswer {
 	return &synthAnswer{cols: cols, rows: []map[string]any{row}}
 }
 
+// colOID infers the type OID a synthetic column must declare, from the first
+// non-NULL value under it. Declaring everything as text (OID 25) sent DataGrip
+// down pgJDBC's numeric accessor for boolean model fields — the column claimed
+// VARCHAR, its reader called getInt, and toInt("f") threw "Bad value for type
+// int : f" on a byte-perfect row. The values were never the problem; the
+// declared type was.
+func (ans *synthAnswer) colOID(col string) int32 {
+	for _, row := range ans.rows {
+		switch row[col].(type) {
+		case nil:
+		case bool:
+			return 16
+		case int32:
+			return 23
+		case int, int64:
+			return 20
+		case float32:
+			return 700
+		case float64:
+			return 701
+		default:
+			return 25
+		}
+	}
+	return 25
+}
+
 // matchIntrospection resolves pg_catalog queries and the synthetic expressions
 // BI tools (Superset, SQLAlchemy, DBeaver, DataGrip, psql) send during
 // connection setup. It returns nil when the statement is not one this layer
@@ -1390,6 +1417,16 @@ func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
 	// executed: a silent lost write.
 	if !strings.HasPrefix(normalized, "SELECT ") && !strings.HasPrefix(normalized, "WITH ") {
 		return nil
+	}
+
+	// pg_stat_ssl: pgJDBC probes its own connection's TLS state right after
+	// startup (select ssl from pg_stat_ssl where pid = pg_backend_pid()).
+	// Left unclaimed this reached the engine, which tried to SCAN a table
+	// named pg_stat_ssl and aborted DataGrip's whole introspection pass.
+	// Answer from the connection's actual state.
+	if strings.Contains(normalized, "PG_STAT_SSL") {
+		_, isTLS := c.conn.(*tls.Conn)
+		return singleRow([]string{"ssl"}, map[string]any{"ssl": isTLS})
 	}
 
 	// pg_catalog / information_schema introspection — return real catalog data
@@ -1549,8 +1586,27 @@ func (c *pgConn) matchShow(upper string) *synthAnswer {
 // RowDescription, DataRows, CommandComplete. Simple-protocol results are
 // always in text format.
 func (c *pgConn) sendSynthAnswer(ans *synthAnswer) {
-	c.sendRowDescription(ans.cols)
+	c.sendSynthRowDescription(ans)
 	c.sendSynthRows(ans, nil)
+}
+
+// sendSynthRowDescription writes the RowDescription for a synthetic answer with
+// each column's OID inferred from its values (see colOID). Format stays text.
+func (c *pgConn) sendSynthRowDescription(ans *synthAnswer) {
+	c.buf = c.buf[:0]
+	c.buf = appendInt16(c.buf, int16(len(ans.cols)))
+	for _, col := range ans.cols {
+		c.buf = append(c.buf, col...)
+		c.buf = append(c.buf, 0)
+		c.buf = appendInt32(c.buf, 0)
+		c.buf = appendInt16(c.buf, 0)
+		oid := ans.colOID(col)
+		c.buf = appendInt32(c.buf, oid)
+		c.buf = appendInt16(c.buf, pgTypeSize(int(oid)))
+		c.buf = appendInt32(c.buf, -1)
+		c.buf = appendInt16(c.buf, 0)
+	}
+	c.sendMsg('T', c.buf)
 }
 
 // sendSynthRows writes the DataRows and CommandComplete for ans, without a
@@ -2325,6 +2381,12 @@ func formatPgValue(val any) string {
 		}
 		buf.WriteByte('}')
 		return buf.String()
+	case bool:
+		// PostgreSQL text format for bool is t/f, not true/false.
+		if tv {
+			return "t"
+		}
+		return "f"
 	default:
 		return fmt.Sprintf("%v", val)
 	}

@@ -297,7 +297,7 @@ func TestFormatPgValue(t *testing.T) {
 		{"string", "hello", "hello"},
 		{"int", 42, "42"},
 		{"float", 3.14, "3.14"},
-		{"bool", true, "true"},
+		{"bool", true, "t"}, // PostgreSQL text format for bool
 		{"nil_default", nil, "<nil>"},
 		{"array", []any{"a", "b", "c"}, "[a, b, c]"},
 		{"empty_array", []any{}, "[]"},
