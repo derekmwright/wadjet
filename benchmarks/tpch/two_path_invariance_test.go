@@ -40,7 +40,21 @@
 //	only the sequence is lost.
 //
 //	Q07 — the stage DAG returns NULL for the first alias of a self-joined
-//	table (`n1.n_name AS supp_nation`, with n2.n_name populated).
+//	table (`n1.n_name AS supp_nation`, with n2.n_name populated). FIXED
+//	(#314): a join qualifies only its BUILD side's colliding columns, so the
+//	alias that lands on the probe side ships under the bare name and every
+//	DAG-side lookup of the qualified one — the gather's SELECT-list rename
+//	and the worker's pre-aggregate projection — missed, because those two
+//	were the only name resolutions in the engine not going through
+//	columnIndexFallback's qualified↔bare fallback.
+//
+//	Q07 tripped BOTH open defects at once, which is why it is the corpus's
+//	only entry that needed two fixes to go green: #314 for its VALUES, and
+//	#313 for its row SEQUENCE — it orders by three SELECT-list aliases
+//	(supp_nation, cust_nation, l_year), and until #313 the DAG produced no
+//	stage emitting those names, so all three sort keys resolved to nothing.
+//	Q07_noorder below holds the VALUES half on its own, so #314 stays gated
+//	whatever happens to the ordering.
 //
 //	StarPlusColumnFull — the single-process path (local fast path AND the
 //	embedded engine) NULLs every star-expanded column when the select list
@@ -367,7 +381,10 @@ func twoPathCorpus() []twoPathQuery {
 		// hand-written case above; the corpus entry stays here so the fix
 		// is proven against the actual TPC-H query, not only the reduction.
 		knownBug := map[int]string{
-			7: "#314", // DAG NULLs n1.n_name (first alias of the self-joined table)
+			// Empty: #312 (dropped join predicate), #313 (aliased ORDER BY),
+			// #314 (self-joined alias) and #315 (star expansion) are all
+			// fixed. Add an entry only alongside an open issue, and delete it
+			// in the commit that fixes it.
 		}[n]
 		if lim := trailingLimit(sql); lim > 0 {
 			// Full-row compare on the stripped form (stronger and
@@ -438,8 +455,57 @@ func twoPathCorpus() []twoPathQuery {
 			JOIN nation ON s_nationkey = n_nationkey
 			JOIN region ON n_regionkey = r_regionkey
 			WHERE c_nationkey = s_nationkey`, cmp: cmpUnordered},
+		// Minimal repro trio for the Q07 divergence (#314): two aliases of one
+		// table, both n_names projected. A join qualifies only the BUILD
+		// side's colliding columns, so whichever alias lands on the PROBE side
+		// ships under the bare "n_name" while the other becomes "n2.n_name" —
+		// and the SELECT list names both by their aliases. The DAG resolved
+		// those names by exact match only, so the probe-side alias resolved to
+		// nothing: the gather projection collapsed to rename-only and that
+		// column left the result under its raw worker name.
+		//
+		// Run both join orders: which alias is unqualified is decided by which
+		// one the planner puts on the probe side, so a fix that only handles
+		// one direction passes one of these and fails the other.
+		twoPathQuery{name: "SelfJoinAliasedColumns", cmp: cmpUnordered,
+			sql: "SELECT n1.n_name AS supp, n2.n_name AS cust FROM nation n1 JOIN nation n2 ON n1.n_regionkey = n2.n_regionkey"},
+		twoPathQuery{name: "SelfJoinAliasedColumnsReversed", cmp: cmpUnordered,
+			sql: "SELECT n1.n_name AS supp, n2.n_name AS cust FROM nation n2 JOIN nation n1 ON n1.n_regionkey = n2.n_regionkey"},
+		// The same self-join under a GROUP BY with a DERIVED key. That is the
+		// shape Q07 actually takes, and it fails differently: the derived key
+		// makes the worker build a pre-aggregate projection over the group
+		// columns, so the unresolved alias is emitted as a real but all-NULL
+		// column instead of vanishing. Row count and revenue match; only the
+		// first alias's values are gone — which is why every existing gate
+		// (row counts, the harness value signature, DuckDB row-count checks)
+		// stayed green through it.
+		twoPathQuery{name: "SelfJoinDerivedGroupKey", cmp: cmpUnordered,
+			sql: `SELECT n1.n_name AS supp, SUBSTR(n2.n_name, 1, 3) AS cust3, COUNT(*) AS c
+				FROM nation n1 JOIN nation n2 ON n1.n_regionkey = n2.n_regionkey
+				GROUP BY n1.n_name, SUBSTR(n2.n_name, 1, 3)`,
+		},
+		// Q07 itself, with its trailing ORDER BY stripped. The verbatim entry
+		// above compares ordered, so it also depends on #313's aliased-sort-key
+		// fix; this one isolates the VALUES, which is the #314 half. Same split
+		// the LIMIT entries use — assert what the other defect does not cover
+		// rather than loosening either assertion. Keep it after #313 lands: an
+		// ordered compare that regressed to unordered would still pass Q07, and
+		// this entry would not.
+		twoPathQuery{name: "Q07_noorder", cmp: cmpUnordered, sql: stripTrailingOrderBy(TPCHQueries[7].SQL)},
 	)
 	return out
+}
+
+// stripTrailingOrderBy removes a statement's own trailing ORDER BY clause.
+// Only valid for a query whose last ORDER BY is top-level and final —
+// hasTopLevelOrderBy is the same test — which is why callers name the query.
+func stripTrailingOrderBy(sql string) string {
+	locs := orderByRe.FindAllStringIndex(sql, -1)
+	if len(locs) == 0 {
+		return sql
+	}
+	last := locs[len(locs)-1]
+	return strings.TrimRight(sql[:last[0]], " \t\n")
 }
 
 // setupTwoPathCluster stands up one embedded NATS + MemStore + NATS-KV

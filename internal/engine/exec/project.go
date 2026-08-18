@@ -172,9 +172,8 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 		for j, proj := range p.Projections {
 			p.directSrcIdx[j] = -1
 			if proj.DirectCopy != "" {
-				if idx := in.ColumnIndex(proj.DirectCopy); idx >= 0 {
-					p.directSrcIdx[j] = idx
-				} else if !plainColumnReachable(in, proj.DirectCopy) {
+				idx, ok := resolvePlainColumn(in, proj.DirectCopy)
+				if !ok {
 					// A projected plain column that resolves to NOTHING —
 					// not bare, not qualifier-stripped, not a ROW field —
 					// previously emitted an all-NULL column, so a typo'd
@@ -183,6 +182,7 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 					// fallback resolutions stay on the per-row eval path.
 					return nil, fmt.Errorf("column %q does not exist in the input schema", proj.DirectCopy)
 				}
+				p.directSrcIdx[j] = idx
 			}
 		}
 		p.directResolved = true
@@ -270,26 +270,40 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 
 func (p *Project) Close() error { return nil }
 
-// plainColumnReachable reports whether name resolves in b through any of
-// the runtime fallbacks expr.ColRef applies: exact match, qualifier-strip
-// ("t.col" → "col"), or ROW-field access ("attrs.score" → field of ROW
-// column "attrs"). Used to distinguish a typo (error) from a projection
-// the per-row eval path can serve.
-func plainColumnReachable(b *batch.RecordBatch, name string) bool {
-	if b.ColumnIndex(name) >= 0 {
-		return true
+// resolvePlainColumn resolves a projected plain-column reference against the
+// input schema and reports whether it is servable at all.
+//
+// idx >= 0 is a bulk-copy source. idx == -1 with ok=true means the name is
+// reachable only through per-row evaluation (a ROW field like
+// "attrs.score"). ok=false means the name resolves to NOTHING, which the
+// caller turns into an error rather than an all-NULL column (issue #147).
+//
+// The plain-column lookup is columnIndexFallback — the same bidirectional
+// qualified↔bare resolution every other operator uses. A join emits the
+// self-joined table copy that lands on the PROBE side under its bare name
+// while qualifying the build side ("n_name" + "n2.n_name"), so a downstream
+// reference to "n1.n_name" only resolves after the qualifier strip. Without
+// it the projection fell to the per-row ColumnRef path, which misses the
+// same way and silently emits NULLs (#314: Q07's supp_nation). The output
+// TYPE for such a rename already resolved through the same fallback in the
+// schema pass above; this makes the value path agree with it.
+//
+// The ROW-parent check runs BEFORE the fallback so "attrs.score" keeps
+// extracting the ROW field even when an unrelated bare "score" column is
+// also in scope.
+func resolvePlainColumn(b *batch.RecordBatch, name string) (int, bool) {
+	if idx := b.ColumnIndex(name); idx >= 0 {
+		return idx, true
 	}
-	dot := strings.IndexByte(name, '.')
-	if dot <= 0 {
-		return false
+	if dot := strings.IndexByte(name, '.'); dot > 0 {
+		if pi := b.ColumnIndex(name[:dot]); pi >= 0 && b.Columns[pi].Type == batch.TypeRow {
+			return -1, true
+		}
 	}
-	if b.ColumnIndex(name[dot+1:]) >= 0 {
-		return true
+	if idx := columnIndexFallback(b, name); idx >= 0 {
+		return idx, true
 	}
-	if pi := b.ColumnIndex(name[:dot]); pi >= 0 && b.Columns[pi].Type == batch.TypeRow {
-		return true
-	}
-	return false
+	return -1, false
 }
 
 // Clone returns a new Project that shares the same (immutable) projections.

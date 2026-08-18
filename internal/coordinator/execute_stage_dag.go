@@ -852,20 +852,56 @@ func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRe
 			if r.Expr != nil {
 				continue // existence check uses expression evaluation
 			}
-			found := false
-			for _, c := range columns {
-				if strings.EqualFold(c, r.From) {
-					found = true
-					break
-				}
-			}
-			if !found {
+			if resolveRenameSource(columns, r.From) < 0 {
 				br.project = false
 				break
 			}
 		}
 	}
 	return br
+}
+
+// resolveRenameSource finds the column an OutputRename's source names, with
+// the same bidirectional qualified↔bare fallback exec.ColumnIndexFallback
+// applies everywhere else in the engine — and case-insensitively, because a
+// worker emits computed columns under lowercased expression text.
+//
+// The fallback is what makes self-joins resolve. A join qualifies only its
+// BUILD side's colliding columns, so one alias of a self-joined table ships
+// under the bare name and the other under "alias.col" ("n_name" +
+// "n2.n_name"). The SELECT list names both by their aliases, so the copy on
+// the probe side ("n1.n_name") matches nothing exactly; with exact matching
+// alone the whole projection degraded to rename-only and that column left
+// the result under its raw worker name (#314). Order mirrors
+// columnIndexFallback: exact, then qualified→bare, then bare→qualified with
+// ambiguity (2+ matches) refused rather than guessed.
+func resolveRenameSource(names []string, from string) int {
+	for i, n := range names {
+		if strings.EqualFold(n, from) {
+			return i
+		}
+	}
+	if dot := strings.IndexByte(from, '.'); dot >= 0 {
+		bare := from[dot+1:]
+		for i, n := range names {
+			if strings.EqualFold(n, bare) {
+				return i
+			}
+		}
+		return -1
+	}
+	match := -1
+	for i, n := range names {
+		d := strings.LastIndexByte(n, '.')
+		if d < 0 || !strings.EqualFold(n[d+1:], from) {
+			continue
+		}
+		if match >= 0 {
+			return -1 // ambiguous — refuse to guess
+		}
+		match = i
+	}
+	return match
 }
 
 // renameColumns returns the output column list: the renames' To names in
@@ -906,6 +942,10 @@ func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
 		}
 		return b
 	}
+	names := make([]string, len(b.Schema))
+	for j, c := range b.Schema {
+		names[j] = c.Name
+	}
 	newCols := make([]*batch.Vector, len(br.renames))
 	newSchema := make([]parquet.Column, len(br.renames))
 	for i, r := range br.renames {
@@ -917,13 +957,7 @@ func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
 			newSchema[i] = parquet.Column{Name: r.To, Type: parquet.TypeFloat64, Nullable: true}
 			continue
 		}
-		srcIdx := -1
-		for j, c := range b.Schema {
-			if strings.EqualFold(c.Name, r.From) {
-				srcIdx = j
-				break
-			}
-		}
+		srcIdx := resolveRenameSource(names, r.From)
 		if srcIdx < 0 {
 			// Should not happen — project was decided from these names.
 			continue

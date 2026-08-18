@@ -2231,6 +2231,18 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 			target = p.Alias
 			if target == "" {
 				target = src
+				// No AS on a plain column reference: SQL names the output
+				// column after the COLUMN, not the qualified reference the
+				// user typed — `SELECT d.label` is a column named "label",
+				// which is what the single-process path returns. Projection
+				// .Column is the parser's unqualified name and is set only
+				// for a colref, so this branch is exactly that shape. The
+				// SOURCE stays the qualified Expr; the gather resolves it
+				// through the same qualified↔bare fallback everything else
+				// uses.
+				if p.Column != "" {
+					target = p.Column
+				}
 			}
 		case p.Column != "":
 			src = p.Column
