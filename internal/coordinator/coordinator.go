@@ -895,7 +895,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	// comes back: `SELECT n_name FROM nation LIMIT 3` returned all 25, and
 	// DataGrip opening a 15M-row table read all of it (425s) for the 501 rows
 	// it asked for. Enforcing it here makes the answer correct on both paths;
-	// the scan still reads everything, which is #NNN.
+	// the scan still reads everything, which is #311.
 	//
 	// Applied after dedup, since DISTINCT changes which rows the limit keeps,
 	// and only when the result is fully in memory — a spilled result replays
