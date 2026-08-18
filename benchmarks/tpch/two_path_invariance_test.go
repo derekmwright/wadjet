@@ -398,7 +398,7 @@ func twoPathCorpus() []twoPathQuery {
 		// twice — bounded, and unbounded so the expansion is compared cell
 		// by cell rather than just counted.
 		twoPathQuery{name: "StarPlusColumn", sql: "SELECT nation.*, n_name FROM nation LIMIT 4", cmp: cmpCount, limit: 4, expectRows: true},
-		twoPathQuery{name: "StarPlusColumnFull", sql: "SELECT nation.*, n_name FROM nation", cmp: cmpUnordered, knownBug: "#315"},
+		twoPathQuery{name: "StarPlusColumnFull", sql: "SELECT nation.*, n_name FROM nation", cmp: cmpUnordered},
 		// Schema-qualified table name: name resolution runs separately per
 		// path, so `public.nation` must bind on both. No LIMIT — this one
 		// is compared row for row.

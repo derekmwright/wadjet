@@ -2,6 +2,7 @@ package wadjet
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -31,9 +32,12 @@ func newClientShapeDB(t *testing.T) (context.Context, *DB) {
 	if err := db.CreateTable(ctx, "items", schema, nil); err != nil {
 		t.Fatal(err)
 	}
+	// Each name is distinct so a test can assert the value that came back
+	// belongs to the row that came back, and every one is 3 characters so the
+	// LENGTH assertions below stay a fixed number.
 	rows := make([]map[string]any, 0, 10)
 	for i := 0; i < 10; i++ {
-		rows = append(rows, map[string]any{"id": int64(i), "name": "row"})
+		rows = append(rows, map[string]any{"id": int64(i), "name": itemName(int64(i))})
 	}
 	ing := db.NewIngester("items", schema, nil, ingest.Config{MaxBufferRows: 100})
 	if err := ing.Ingest(ctx, rows); err != nil {
@@ -44,6 +48,9 @@ func newClientShapeDB(t *testing.T) (context.Context, *DB) {
 	}
 	return ctx, db
 }
+
+// itemName is the name paired with an id in the items fixture.
+func itemName(id int64) string { return fmt.Sprintf("r%02d", id) }
 
 // A schema-qualified name resolves to the table. The parser read only the
 // first identifier, so `public.items` scanned a table named "public" — which
@@ -86,21 +93,41 @@ func TestStarWithAdditionalSelectItems(t *testing.T) {
 	for _, sql := range []string{
 		"SELECT t.*, name FROM items t LIMIT 3",
 		"SELECT t.*, CTID FROM public.items t LIMIT 3",
+		"SELECT items.*, id FROM items LIMIT 3",
 		"SELECT *, id FROM items LIMIT 3",
+		"SELECT *, name FROM items",
 	} {
 		res, err := db.Query(ctx, sql)
 		if err != nil {
 			t.Fatalf("%s: %v", sql, err)
 		}
-		if len(res.Rows) != 3 {
-			t.Fatalf("%s: got %d rows, want 3 (LIMIT must survive star expansion)", sql, len(res.Rows))
+		want := 3
+		if !strings.Contains(sql, "LIMIT") {
+			want = 10
 		}
-		// The star's own columns are present, not just the extra item.
-		if _, ok := res.Rows[0]["id"]; !ok {
-			t.Fatalf("%s: star did not expand, row = %v", sql, res.Rows[0])
+		if len(res.Rows) != want {
+			t.Fatalf("%s: got %d rows, want %d (LIMIT must survive star expansion)", sql, len(res.Rows), want)
 		}
-		if _, ok := res.Rows[0]["name"]; !ok {
-			t.Fatalf("%s: star did not expand, row = %v", sql, res.Rows[0])
+		for _, row := range res.Rows {
+			// The star's own columns carry VALUES, not just names. Star
+			// expansion used to run after column pruning, so the scan below
+			// read only the columns the OTHER select items named and every
+			// column the star contributed came back NULL (#315).
+			id, ok := row["id"].(int64)
+			if !ok {
+				t.Fatalf("%s: id = %v (%T), want an int64 — the star's columns must carry values, row = %v",
+					sql, row["id"], row["id"], row)
+			}
+			name, ok := row["name"].(string)
+			if !ok {
+				t.Fatalf("%s: name = %v (%T), want a string — the star's columns must carry values, row = %v",
+					sql, row["name"], row["name"], row)
+			}
+			// Values belong to the row they came back on: a star resolved to
+			// the wrong source column would still be non-NULL.
+			if id < 0 || id > 9 || name != itemName(id) {
+				t.Fatalf("%s: row %v pairs id %d with name %q, want %q", sql, row, id, name, itemName(id))
+			}
 		}
 	}
 }

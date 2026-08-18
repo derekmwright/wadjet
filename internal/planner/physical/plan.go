@@ -5613,15 +5613,10 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	child := node.Children[0]
 
 	// A star sharing its SELECT list with other items — `SELECT t.*, ctid` is
-	// how DataGrip opens a table — reaches here as a projection of the literal
-	// column "*". Nothing expands it: the local pipeline failed with `column
-	// "*" does not exist`, the coordinator read that as an infrastructure
-	// failure and re-ran the query on the DAG, and the DAG answered it without
-	// the projection AND without the LIMIT above it — 25 rows for a LIMIT 3.
-	// Expanding here fixes both paths at once, because both plan through it.
-	if err := p.expandStarProjections(ctx, node, child); err != nil {
-		return nil, nil, nil, err
-	}
+	// how DataGrip opens a table — reaches the planner as a projection of the
+	// literal column "*". logical.Optimize expands it (before column pruning,
+	// which is what #315 turned on); this catches the unoptimized-plan case.
+	p.expandStarProjections(ctx, node, child)
 
 	// If the child (or child chain through Filter/HAVING) leads to an Aggregate,
 	// skip the projection when possible — the aggregate already produces correctly
@@ -9394,76 +9389,17 @@ func wrapPredicate(e expr.Expr) exec.Predicate {
 	}
 }
 
-// expandStarProjections replaces a `*` (or `alias.*`) projection with one
-// projection per column of the star's source, in schema order.
-//
-// The source is resolved from the catalog when the star's scope is a single
-// base table, which covers the shape clients send. A star over a join or a
-// derived table is left alone: its column set is not knowable here, and
-// guessing it would silently change which columns a query returns — the
-// failure it currently produces is the safer answer until star expansion moves
-// into name resolution proper (#293's territory).
-func (p *Planner) expandStarProjections(ctx context.Context, node, child *logical.Node) error {
-	hasStar := false
-	for _, proj := range node.Projections {
-		if isStarProjection(proj) {
-			hasStar = true
-			break
-		}
+// expandStarProjections runs logical star expansion on a plan that reached the
+// physical planner without it — logical.Optimize expands stars before column
+// pruning, so this only fires for plans built and planned without optimizing.
+// The rewrite reads the scan's annotated schema, so annotate first; that costs
+// a catalog walk, which is why it is gated on a star actually being present.
+func (p *Planner) expandStarProjections(ctx context.Context, node, child *logical.Node) {
+	if p.catalog == nil || !logical.HasStarProjection(node) {
+		return
 	}
-	if !hasStar || p.catalog == nil {
-		return nil
-	}
-
-	// Only a single base-table source has a knowable column list here.
-	var scans []*logical.Node
-	var walk func(n *logical.Node)
-	walk = func(n *logical.Node) {
-		if n == nil {
-			return
-		}
-		if n.Type == logical.NodeScan {
-			scans = append(scans, n)
-		}
-		for _, c := range n.Children {
-			walk(c)
-		}
-	}
-	walk(child)
-	if len(scans) != 1 || scans[0].TableName == "" {
-		return nil
-	}
-	tbl, err := p.catalog.GetTable(ctx, scans[0].TableName)
-	if err != nil || tbl == nil {
-		return nil
-	}
-
-	expanded := make([]logical.Projection, 0, len(node.Projections)+len(tbl.Schema.Columns))
-	for _, proj := range node.Projections {
-		if !isStarProjection(proj) {
-			expanded = append(expanded, proj)
-			continue
-		}
-		for _, col := range tbl.Schema.Columns {
-			expanded = append(expanded, logical.Projection{
-				Column:  col.Name,
-				Alias:   col.Name,
-				Expr:    col.Name,
-				ASTExpr: &plansql.ColRef{Column: col.Name},
-			})
-		}
-	}
-	node.Projections = expanded
-	return nil
-}
-
-// isStarProjection reports whether proj is `*` or a qualified `alias.*`.
-func isStarProjection(proj logical.Projection) bool {
-	e := strings.TrimSpace(proj.Expr)
-	if e == "" {
-		e = strings.TrimSpace(proj.Column)
-	}
-	return e == "*" || strings.HasSuffix(e, ".*")
+	p.AnnotateScanColumns(ctx, child)
+	logical.ExpandStarProjections(node)
 }
 
 // limitPushdownSafe reports whether a LIMIT may be applied independently by

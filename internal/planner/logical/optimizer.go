@@ -27,6 +27,11 @@ var partitionKeys = map[string]bool{
 // column references. Without an annotator, scalar decorrelation may fail for
 // subqueries that use unqualified outer column references.
 func Optimize(plan *Node, annotators ...func(*Node)) *Node {
+	// Before every rule that reads the SELECT list — computeRequiredColumns
+	// most of all. An unexpanded star names no columns, so column pruning
+	// narrowed the scan to whatever else the SELECT list mentioned and the
+	// star's own columns came back NULL (#315). See star_expansion.go.
+	ExpandStarProjections(plan)
 	plan = decorrelateExists(plan)
 	plan = decorrelateInSubqueries(plan)
 	// Annotate new scans created by IN decorrelation so scalar subquery
