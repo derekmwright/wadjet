@@ -29,10 +29,20 @@ func (c *Coordinator) SetCatalogSnapshotInterval(d time.Duration) {
 
 // MaybeRestoreCatalog restores the catalog from S3 if:
 //   - Snapshot options are configured (Store != nil)
-//   - Either forceTS is set, or the KV has no <cluster>.meta key (empty)
+//   - Either forceTS is set, or the catalog is fresh: no KV at all, or a KV
+//     that holds no tables
 //
 // Otherwise it is a no-op. Errors during restore are propagated unchanged;
 // the caller decides whether to fatal.
+//
+// Freshness cannot be IsKVEmpty alone: every production caller runs
+// Catalog.Init first, and Init writes the <cluster>.meta key, so the KV is
+// never empty by the time this runs. Gating on it made the whole path dead
+// code — `wadjet serve --catalog-snapshot-s3-prefix=...` against a bucket
+// full of data silently restored nothing and came up with an empty table
+// list. Restore overwrites meta with the snapshot's own copy, so the
+// Init-written stub is fine to clobber. (cmd/tpch-bench reached the same
+// conclusion and worked around it locally; this is that fix, upstream.)
 func (c *Coordinator) MaybeRestoreCatalog(ctx context.Context, forceTS string) error {
 	if c.catalogSnapshotOpts.Store == nil {
 		return nil
@@ -43,8 +53,14 @@ func (c *Coordinator) MaybeRestoreCatalog(ctx context.Context, forceTS string) e
 			return fmt.Errorf("checking KV empty: %w", err)
 		}
 		if !empty {
-			// Non-empty: skip restore.
-			return nil
+			tables, err := c.catalog.ListTables(ctx)
+			if err != nil {
+				return fmt.Errorf("listing tables: %w", err)
+			}
+			if len(tables) > 0 {
+				// This catalog already has contents of its own: leave them.
+				return nil
+			}
 		}
 	}
 	ts, err := c.catalog.Restore(ctx, catalog.RestoreOptions{

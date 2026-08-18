@@ -61,6 +61,48 @@ func TestRestoreOnStartupIfKVEmpty(t *testing.T) {
 	}
 }
 
+// A real caller runs Catalog.Init before MaybeRestoreCatalog, and Init writes
+// the <cluster>.meta key. The startup gate used to ask IsKVEmpty, which that
+// key makes false forever, so `wadjet serve --catalog-snapshot-s3-prefix=...`
+// against a bucket full of data restored nothing and served an empty table
+// list. The gate asks whether the catalog holds tables instead.
+func TestRestoreOnStartupAfterInit(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	src := catalog.NewWithCluster(catalog.NewMemKV(), store, snapBucket, "test")
+	if err := src.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	schema := parquet.Schema{Columns: []parquet.Column{{Name: "id", Type: parquet.TypeInt64}}}
+	if err := src.CreateTable(ctx, "orders", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Snapshot(ctx, catalog.SnapshotOptions{
+		Store: store, Bucket: snapBucket, Prefix: snapPrefix,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Destination is Init'ed, the way every production caller leaves it.
+	dst := catalog.NewWithCluster(catalog.NewMemKV(), store, snapBucket, "test")
+	if err := dst.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if empty, err := dst.IsKVEmpty(ctx); err != nil || empty {
+		t.Fatalf("Init should leave the KV non-empty (empty=%v err=%v)", empty, err)
+	}
+	c := &Coordinator{catalog: dst}
+	c.SetCatalogSnapshotOptions(catalog.SnapshotOptions{
+		Store: store, Bucket: snapBucket, Prefix: snapPrefix,
+	})
+	if err := c.MaybeRestoreCatalog(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dst.GetTable(ctx, "orders"); err != nil {
+		t.Errorf("expected orders after restore into an Init'ed catalog: %v", err)
+	}
+}
+
 func TestRestoreSkippedWhenKVNonEmpty(t *testing.T) {
 	// Seed destination catalog with a table (simulates previously-populated KV).
 	c := newSnapshotTestCoord(t)
