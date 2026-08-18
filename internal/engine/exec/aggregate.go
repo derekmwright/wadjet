@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -270,6 +271,22 @@ type HashAggregate struct {
 	// partitions drained so successive calls chip away at different slices
 	// instead of churning the same one and re-rebuilding the same groups.
 	nextDrainPartition uint32
+	// Drain-productivity accounting (#325). A drain is only worth its I/O
+	// when this operator actually owns the bytes under pressure; see
+	// aggregate_drain_gate.go for the gate and the non-convergence check
+	// these feed.
+	//
+	// lastDrainFootprint is the MEASURED group-state size (groupMemoryUsage,
+	// not the tracked value — see noteDrain) immediately after the previous
+	// drain, so the gate can require a floor of NEW state before spending
+	// another drain. drainCount/drainNanos/drainFreedBytes are the counters
+	// reported in the non-convergence error; firstDrainAt anchors the
+	// observation window.
+	lastDrainFootprint int64
+	drainCount         int
+	drainNanos         int64
+	drainFreedBytes    int64
+	firstDrainAt       time.Time
 	// AccountedOperator (Phase 2) state. accInstanceID is the process-unique
 	// id; accState is the lifecycle (memory.OpState) read/written atomically so
 	// Inspect (called off the pipeline goroutine) sees a consistent state.
@@ -829,6 +846,15 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 			// drain per pressure event) instead of a write per Consume.
 			h.consumeBatch(b)
 			h.reconcileGroupMemory()
+			// Drain-productivity gate (#325): ShouldSpillFor answers for the
+			// whole tracker, so an aggregate holding almost none of the
+			// pressured bytes sees it on every batch. Draining then writes a
+			// run file, frees nothing, and leaves the signal set — the
+			// livelock in #325. Require a floor of new state of our own
+			// before spending another drain; see aggregate_drain_gate.go.
+			if !h.drainIsProductive() {
+				return nil
+			}
 			// Self-triggered spill: drain enough to recover headroom below the
 			// SpillCheap threshold (60% of budget), leaving a 5% hysteresis
 			// margin so we don't immediately re-trigger. The partial-drain
@@ -839,7 +865,7 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 			// every pressure event and rebuild from the next probe burst).
 			// Large targets (target >= footprint) and non-int paths fall
 			// through to spillFullState — semantically identical to before.
-			return h.spillPartialState(h.selfSpillReliefTarget())
+			return h.drainAndAccount(h.selfSpillReliefTarget())
 		}
 		// Legacy raw-row spill (extra-state aggs, grouping sets, scalar):
 		// buffer rows on disk and re-aggregate in Finalize.
@@ -3603,9 +3629,15 @@ func (h *HashAggregate) SpillSome(target int64) (int64, error) {
 	if before == 0 {
 		return 0, nil
 	}
+	start := time.Now()
 	if err := h.spillPartialState(target); err != nil {
 		return 0, err
 	}
+	// Rebase the #325 drain gate on the post-drain footprint: a cooperative
+	// drain reclaims just as a self-triggered one does, and leaving the
+	// baseline stale would make the next self-drain wait for regrowth past a
+	// footprint we no longer hold.
+	h.noteDrain(before, start)
 	freed := before - h.trackedGroupMem
 	if h.accInstanceID != 0 {
 		h.Spill.Tracker().PublishOwned(h.accInstanceID, h.trackedGroupMem)
