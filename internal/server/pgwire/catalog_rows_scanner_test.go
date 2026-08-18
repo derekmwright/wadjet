@@ -355,3 +355,55 @@ func TestCommandTag(t *testing.T) {
 		}
 	}
 }
+
+// A WITH clause puts the statement's own SELECT after the CTE bodies. Reading
+// the list from position zero found no SELECT at all, so DataGrip's
+// CTE-based column query fell back to a fixed tuple whose labels it never
+// asked for — and the schemaId it read came back NULL: "There's an object
+// from schema [-9223372036854775808], but the schema was not in where clause."
+func TestOuterSelectThroughCTE(t *testing.T) {
+	sql := `with T as ( select T.oid as oid, T.relkind as kind, T.relnamespace as schemaId
+	                     from pg_catalog.pg_class T where T.relnamespace in ( 42 ) )
+	        select T.schemaId as schemaId, T.oid as majorOid,
+	               pg_catalog.translate(T.kind, 'rmvpf', 'rmvrf') as kind,
+	               C.attnum as position, C.attname as name
+	        from T join pg_catalog.pg_attribute C on T.oid = C.attrelid`
+
+	items := selectItems(sql)
+	if len(items) != 5 {
+		t.Fatalf("got %d items, want 5: %+v", len(items), items)
+	}
+	if items[0].label != "schemaId" || items[4].label != "name" {
+		t.Fatalf("labels = %q ... %q", items[0].label, items[4].label)
+	}
+
+	// The CTE's renames resolve to the catalog attributes behind them.
+	aliases := cteAliases(sql)
+	if aliases["kind"] != "relkind" || aliases["schemaid"] != "relnamespace" {
+		t.Fatalf("aliases = %+v", aliases)
+	}
+
+	// A CTE alias is not a relation, so the subject is what the outer query
+	// joins it to.
+	if got := catalogSubject(strings.ToUpper(strings.Join(strings.Fields(sql), " "))); got != "PG_ATTRIBUTE" {
+		t.Fatalf("subject = %q, want PG_ATTRIBUTE", got)
+	}
+}
+
+// `not C.attislocal` is not the attribute attislocal. Stripping the qualifier
+// left "attislocal", which resolved to the attribute itself and reported the
+// opposite — every column came back inherited.
+func TestNegatedAttributeKeepsItsNot(t *testing.T) {
+	items := selectItems("select not C.attislocal as column_is_inherited from pg_attribute C")
+	if len(items) != 1 {
+		t.Fatalf("items = %+v", items)
+	}
+	if items[0].expr == "attislocal" {
+		t.Fatal("NOT was dropped: expr resolved to the bare attribute")
+	}
+	attrs := map[string]any{"attislocal": true}
+	v, ok := evalCatalogExpr(items[0].raw, attrs)
+	if !ok || v != false {
+		t.Fatalf("evalCatalogExpr(%q) = %v, %v; want false, true", items[0].raw, v, ok)
+	}
+}

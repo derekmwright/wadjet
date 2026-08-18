@@ -524,7 +524,7 @@ type selectItem struct {
 // its whole text as the expression, which matches no attribute and so becomes
 // NULL (or, if nothing in the list matches, declines the statement).
 func selectItems(sql string) []selectItem {
-	sql = strings.TrimSpace(sql)
+	sql = outerSelect(sql)
 	if len(sql) < 7 || !strings.EqualFold(sql[:7], "SELECT ") {
 		return nil
 	}
@@ -559,6 +559,23 @@ func selectItems(sql string) []selectItem {
 			// "a.atttypmod)".
 			exprPart, label = fields[0], strings.Trim(fields[1], `"`)
 		}
+		// A negated attribute is not that attribute. Stripping the qualifier
+		// off `not C.attislocal` leaves "attislocal", which resolves to the
+		// attribute itself and reports the opposite of what was asked — the
+		// column-inheritance flag came back true for every column. Keep the
+		// whole text so the expression evaluator sees the NOT.
+		if len(exprPart) > 4 && strings.EqualFold(exprPart[:4], "NOT ") {
+			items = append(items, selectItem{
+				expr:  strings.ToLower(exprPart),
+				label: label,
+				raw:   exprPart,
+			})
+			if label == "" {
+				items[len(items)-1].label = strings.ToLower(exprPart)
+			}
+			continue
+		}
+
 		// A cast reads the same attribute: N.oid::bigint is still oid.
 		bare := exprPart
 		if castIdx := strings.Index(bare, "::"); castIdx >= 0 {
@@ -727,4 +744,60 @@ func balancedParens(s string) bool {
 		}
 	}
 	return depth == 0
+}
+
+// outerSelect returns the statement text from its outermost SELECT onward.
+//
+// A WITH clause puts the SELECT that decides the answer's shape after the CTE
+// bodies, and reading the list from position zero found no SELECT at all —
+// DataGrip fetches columns through a CTE, so its statement fell back to a
+// fixed tuple whose labels it never asked for, and the schemaId it read came
+// back NULL: "There's an object from schema [-9223372036854775808], but the
+// schema was not in where clause."
+//
+// The scan is depth- and quote-aware, so a SELECT inside a CTE body or a
+// subquery is skipped and only the statement's own SELECT is found.
+func outerSelect(sql string) string {
+	sql = strings.TrimSpace(sql)
+	if len(sql) >= 7 && strings.EqualFold(sql[:7], "SELECT ") {
+		return sql
+	}
+	if len(sql) < 5 || !strings.EqualFold(sql[:5], "WITH ") {
+		return sql
+	}
+	depth, inSingle, inDouble := 0, false, false
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if ch == '"' {
+				inDouble = false
+			}
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '(':
+			depth++
+		case ch == ')':
+			if depth > 0 {
+				depth--
+			}
+		case depth == 0 && (ch == 's' || ch == 'S'):
+			if i+7 <= len(sql) && strings.EqualFold(sql[i:i+7], "SELECT ") {
+				before := byte(' ')
+				if i > 0 {
+					before = sql[i-1]
+				}
+				if before == ' ' || before == '\t' || before == '\n' || before == '\r' || before == ')' {
+					return sql[i:]
+				}
+			}
+		}
+	}
+	return sql
 }
