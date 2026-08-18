@@ -889,6 +889,26 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			}
 		}
 	}
+	// A top-level LIMIT the DAG never enforced. walkStages attaches a limit
+	// only to a sort or merge_sort stage, so `... ORDER BY x LIMIT n` is
+	// bounded but a bare `LIMIT n` lands on no stage at all and every row
+	// comes back: `SELECT n_name FROM nation LIMIT 3` returned all 25, and
+	// DataGrip opening a 15M-row table read all of it (425s) for the 501 rows
+	// it asked for. Enforcing it here makes the answer correct on both paths;
+	// the scan still reads everything, which is #NNN.
+	//
+	// Applied after dedup, since DISTINCT changes which rows the limit keeps,
+	// and only when the result is fully in memory — a spilled result replays
+	// lazily from scratch, and truncating its in-memory prefix would drop rows
+	// the stream still owns.
+	if gr != nil && gr.spillPath == "" {
+		if mi := logical.ExtractMergeInfo(logicalPlan); mi != nil && mi.Limit > 0 &&
+			gr.totalRows > int64(mi.Limit) {
+			gr.batches = limitBatches(gr.batches, mi.Limit)
+			gr.totalRows = int64(mi.Limit)
+		}
+	}
+
 	res := &SQLResult{
 		QueryID:   queryID,
 		Columns:   gr.columns,
