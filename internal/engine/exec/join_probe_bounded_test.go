@@ -140,10 +140,10 @@ func TestHashJoinProbeBoundsFanOut(t *testing.T) {
 	if sink.sum != wantSum {
 		t.Fatalf("checksum %d, want %d (rows joined to the wrong partners)", sink.sum, wantSum)
 	}
-	if sink.maxRows > maxProbeOutputRows {
+	if sink.maxRows > MaxProbeOutputRows {
 		t.Fatalf("probe emitted a %d-row batch; the per-call bound is %d rows "+
 			"(the fan-out of a whole input batch was materialised at once)",
-			sink.maxRows, maxProbeOutputRows)
+			sink.maxRows, MaxProbeOutputRows)
 	}
 	if sink.batches < 2 {
 		t.Fatalf("expected the %d-row fan-out to arrive as multiple bounded batches, got %d",
@@ -218,8 +218,8 @@ func TestHashJoinProbeBoundedOuterSemantics(t *testing.T) {
 			"emitted exactly once per row, not once per resumption",
 			sink.nullBuild, unmatched)
 	}
-	if sink.maxRows > maxProbeOutputRows {
-		t.Fatalf("probe emitted a %d-row batch; the per-call bound is %d rows", sink.maxRows, maxProbeOutputRows)
+	if sink.maxRows > MaxProbeOutputRows {
+		t.Fatalf("probe emitted a %d-row batch; the per-call bound is %d rows", sink.maxRows, MaxProbeOutputRows)
 	}
 }
 
@@ -323,9 +323,9 @@ func TestHashJoinProbeBoundedKeyShapes(t *testing.T) {
 			if sink.sum != wantSum {
 				t.Fatalf("checksum %d, want %d", sink.sum, wantSum)
 			}
-			if sink.maxRows > maxProbeOutputRows {
+			if sink.maxRows > MaxProbeOutputRows {
 				t.Fatalf("probe emitted a %d-row batch; the per-call bound is %d rows",
-					sink.maxRows, maxProbeOutputRows)
+					sink.maxRows, MaxProbeOutputRows)
 			}
 		})
 	}
@@ -377,8 +377,8 @@ func TestCrossJoinBoundsFanOut(t *testing.T) {
 	if sink.sum != wantSum {
 		t.Fatalf("checksum %d, want %d", sink.sum, wantSum)
 	}
-	if sink.maxRows > maxProbeOutputRows {
-		t.Fatalf("cross join emitted a %d-row batch; the per-call bound is %d rows", sink.maxRows, maxProbeOutputRows)
+	if sink.maxRows > MaxProbeOutputRows {
+		t.Fatalf("cross join emitted a %d-row batch; the per-call bound is %d rows", sink.maxRows, MaxProbeOutputRows)
 	}
 }
 
@@ -454,9 +454,9 @@ func TestHashJoinProbeBoundedParallel(t *testing.T) {
 	if sink.inner.sum != int64(want) {
 		t.Fatalf("checksum %d, want %d", sink.inner.sum, want)
 	}
-	if sink.inner.maxRows > maxProbeOutputRows {
+	if sink.inner.maxRows > MaxProbeOutputRows {
 		t.Fatalf("probe emitted a %d-row batch; the per-call bound is %d rows",
-			sink.inner.maxRows, maxProbeOutputRows)
+			sink.inner.maxRows, MaxProbeOutputRows)
 	}
 }
 
@@ -528,9 +528,9 @@ func TestHashJoinProbeBoundedGraceSpill(t *testing.T) {
 	if sink.sum != int64(want) {
 		t.Fatalf("checksum %d, want %d", sink.sum, want)
 	}
-	if sink.maxRows > maxProbeOutputRows {
+	if sink.maxRows > MaxProbeOutputRows {
 		t.Fatalf("spilled-partition probe emitted a %d-row batch; the per-call bound is %d rows",
-			sink.maxRows, maxProbeOutputRows)
+			sink.maxRows, MaxProbeOutputRows)
 	}
 }
 

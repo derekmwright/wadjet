@@ -89,10 +89,12 @@ type BoundedOutputOperator interface {
 	NextOutput(ctx context.Context) (*batch.RecordBatch, error)
 }
 
-// enableBoundedOutput opts every operator in a chain that supports the
+// EnableBoundedOutput opts every operator in a chain that supports the
 // bounded-output protocol into it. Only call it from a driver that drains
-// NextOutput after each Execute.
-func enableBoundedOutput(ops []UnaryOperator) {
+// NextOutput after each Execute — ChainDriver, or a driver that resumes
+// pending output the same way (the worker's fragment executors, the
+// planner's pipelineSource).
+func EnableBoundedOutput(ops []UnaryOperator) {
 	for _, op := range ops {
 		if bo, ok := op.(BoundedOutputOperator); ok {
 			bo.EnableBoundedOutput()

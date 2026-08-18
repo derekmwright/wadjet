@@ -1973,7 +1973,7 @@ func (p *HashJoinProbe) buildProbeKey(b *batch.RecordBatch, row int) {
 // including skewed batches with high fan-out.
 const joinOutputPoolSize = 16 * batch.DefaultBatchSize
 
-// maxProbeOutputRows bounds how many match pairs one probe call materialises.
+// MaxProbeOutputRows bounds how many match pairs one probe call materialises.
 // Past it the fan-out is suspended at (probe row, hash-chain position) and
 // resumed on the next call, making probe output O(batch) instead of
 // O(batch x fan-out) — see the resume protocol on HashJoinProbe.
@@ -1983,7 +1983,11 @@ const joinOutputPoolSize = 16 * batch.DefaultBatchSize
 // means every join shape that fits today keeps its current batch shape, pool,
 // and allocation profile; only the shapes that used to grow pairsBuf without
 // limit change behaviour.
-const maxProbeOutputRows = joinOutputPoolSize
+//
+// Exported because the drivers that hold the probe to it live outside this
+// package (internal/worker, internal/planner/physical), as do the tests that
+// assert they do.
+const MaxProbeOutputRows = joinOutputPoolSize
 
 // matchPair tracks a probe-build row match for output construction.
 // probeRow is int32 (batch sizes ≤8192) to compact the struct from 24→16 bytes,
@@ -2059,7 +2063,7 @@ type HashJoinProbe struct {
 
 // probeResume is the suspended position of a probe's fan-out: which probe row
 // is being expanded, and how far into that row's match chain the previous
-// call got. A probe call stops once it has materialised maxProbeOutputRows
+// call got. A probe call stops once it has materialised MaxProbeOutputRows
 // match pairs and stores the cursor here; the next call picks up exactly
 // where it left off, so no match is emitted twice and none is skipped.
 type probeResume struct {
@@ -2148,7 +2152,7 @@ func (p *HashJoinProbe) prepareViewInput(in *batch.RecordBatch) {
 }
 
 // EnableBoundedOutput opts this probe into the BoundedOutputOperator
-// protocol: Execute emits at most maxProbeOutputRows joined rows and suspends
+// protocol: Execute emits at most MaxProbeOutputRows joined rows and suspends
 // the rest of the input batch's fan-out for NextOutput to resume. Only a
 // driver that drains NextOutput after every Execute may call it.
 func (p *HashJoinProbe) EnableBoundedOutput() { p.boundOutput = true }
@@ -2174,7 +2178,7 @@ func (p *HashJoinProbe) NextOutput(ctx context.Context) (*batch.RecordBatch, err
 // keeps its historical single-shot behaviour.
 func (p *HashJoinProbe) pairLimit() int {
 	if p.boundOutput {
-		return maxProbeOutputRows
+		return MaxProbeOutputRows
 	}
 	return math.MaxInt32
 }
@@ -2240,7 +2244,7 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 	return p.nextProbeChunk(ctx)
 }
 
-// nextProbeChunk materialises up to maxProbeOutputRows match pairs for the
+// nextProbeChunk materialises up to MaxProbeOutputRows match pairs for the
 // input batch under the fan-out cursor and turns them into one output batch.
 // It is the shared body of Execute and NextOutput: the only difference
 // between the first call for an input batch and a resumption is where the
@@ -2251,11 +2255,11 @@ func (p *HashJoinProbe) nextProbeChunk(_ context.Context) (*batch.RecordBatch, e
 
 	// Collect match pairs using reusable buffer. The typed loops fill it
 	// through a pre-sized window, so it must always be at least `limit` long.
-	if cap(p.pairsBuf) < maxProbeOutputRows {
-		p.pairsBuf = make([]matchPair, 0, maxProbeOutputRows)
+	if cap(p.pairsBuf) < MaxProbeOutputRows {
+		p.pairsBuf = make([]matchPair, 0, MaxProbeOutputRows)
 	}
 	pairs := p.pairsBuf[:0]
-	limit := maxProbeOutputRows
+	limit := MaxProbeOutputRows
 	if !p.boundOutput {
 		limit = cap(pairs)
 	}
@@ -2289,9 +2293,11 @@ func (p *HashJoinProbe) nextProbeChunk(_ context.Context) (*batch.RecordBatch, e
 		// The driver did not opt into the resume protocol, so nobody will
 		// call NextOutput: grow the buffer and pick the fan-out back up where
 		// it suspended. This reproduces exactly what pairsBuf used to do on
-		// its own — the whole input batch's fan-out in one output batch — for
-		// chain drivers outside this package that have not adopted
-		// BoundedOutputOperator yet.
+		// its own — the whole input batch's fan-out in one output batch. Every
+		// driver that can be handed a probe now opts in (exec.Pipeline, the
+		// worker's fragment executors, physical.pipelineSource), so this is
+		// the fallback for a probe built and driven ad hoc — a test harness,
+		// or a future driver — not a live query path.
 		grown := make([]matchPair, len(pairs), 2*cap(pairs))
 		copy(grown, pairs)
 		pairs = grown

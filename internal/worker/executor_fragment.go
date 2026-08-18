@@ -698,6 +698,54 @@ func buildDynamicFilterEmitOps(specs []distributed.DynamicFilterEmit) ([]*exec.D
 	return out, nil
 }
 
+// fragmentDriver drives one operator chain, honouring the bounded-output
+// protocol: an operator that fans one input batch out to far more rows than it
+// contains (a hash-join probe) emits a bounded slice per call and suspends the
+// rest, and this driver re-runs the chain below it for every resumed slice
+// before handing it the next input (#317). Without it the probe has nowhere to
+// put the remainder and materialises the whole fan-out in one live allocation —
+// which GOMEMLIMIT cannot help with, because the memory is not garbage.
+//
+// One driver per chain: a chain is driven by exactly one goroutine (worker i
+// owns chains[i]), so opsNs needs no atomics. deliver keeps the ownership rules
+// each caller already had — the fragment paths never released batches, and
+// still don't.
+//
+// Every worker loop that can be handed a join probe runs through this driver.
+// The others stay unopted because no bounded operator can reach them: the
+// gather stage drives a lone Limit (executor_stage.go), the shuffle task drives
+// bloom filters and a column prune (executor.go), and filteredSource drives
+// compiled build-side filters (shuffle_computed_cols.go). A probe only ever
+// lands in a fragment's unary chain.
+type fragmentDriver struct {
+	d      *exec.ChainDriver
+	sinkNs int64 // nanoseconds spent inside deliver during the current push
+}
+
+func newFragmentDriver(ops []exec.UnaryOperator, deliver func(context.Context, *batch.RecordBatch) error) *fragmentDriver {
+	// The opt-in is this driver's promise to drain pending output; it must
+	// happen before any Clone() so cloned chains inherit it.
+	exec.EnableBoundedOutput(ops)
+	fd := &fragmentDriver{}
+	fd.d = exec.NewChainDriver(ops, func(ctx context.Context, b *batch.RecordBatch) error {
+		t0 := time.Now()
+		err := deliver(ctx, b)
+		fd.sinkNs += time.Since(t0).Nanoseconds()
+		return err
+	})
+	return fd
+}
+
+// push runs b through the chain, delivering every output batch. It returns the
+// nanoseconds spent in the operators themselves — total minus deliver — for the
+// caller's opsNs accounting.
+func (fd *fragmentDriver) push(ctx context.Context, b *batch.RecordBatch) (int64, error) {
+	t0 := time.Now()
+	fd.sinkNs = 0
+	_, err := fd.d.Push(ctx, b)
+	return time.Since(t0).Nanoseconds() - fd.sinkNs, err
+}
+
 // runFragmentLinear streams batches from src through unary ops into the sink.
 // No pipeline-breaker — every batch flows end-to-end before the next is read.
 //
@@ -782,6 +830,15 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 		}
 	})
 	// Consumer: ops + sink. Drives backpressure (heap pause) and progress.
+	driver := newFragmentDriver(ops, func(ctx context.Context, b *batch.RecordBatch) error {
+		if b.ActiveLen() == 0 {
+			return nil
+		}
+		if err := consume(ctx, b); err != nil {
+			return fmt.Errorf("sink consume: %w", err)
+		}
+		return nil
+	})
 	g.Go(func() error {
 		for {
 			t0 := time.Now()
@@ -793,25 +850,10 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 			if err := fp.applyBackpressure(gctx); err != nil {
 				return err
 			}
-			cur := b
-			var err error
-			tOps := time.Now()
-			for _, op := range ops {
-				exec.FlattenForConsumer(cur, op)
-				cur, err = op.Execute(gctx, cur)
-				if err != nil {
-					return fmt.Errorf("unary exec: %w", err)
-				}
-				if cur == nil {
-					break
-				}
-			}
-			fp.opsNs.Add(time.Since(tOps).Nanoseconds())
-			if cur == nil || cur.ActiveLen() == 0 {
-				continue
-			}
-			if err := consume(gctx, cur); err != nil {
-				return fmt.Errorf("sink consume: %w", err)
+			opsNs, err := driver.push(gctx, b)
+			fp.opsNs.Add(opsNs)
+			if err != nil {
+				return err
 			}
 		}
 	})
@@ -1102,29 +1144,34 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 		return nil
 	}
 
+	// deliver is every chain's terminal step. Each chain gets its own driver
+	// (below) so a suspended fan-out resumes into the chain that produced it.
+	deliver := func(ctx context.Context, b *batch.RecordBatch) error {
+		if b.ActiveLen() == 0 {
+			return nil
+		}
+		if err := consume(ctx, b); err != nil {
+			return fmt.Errorf("sink consume: %w", err)
+		}
+		return nil
+	}
+
 	// Warmup: one batch through the original chain before any clone exists.
+	// The driver is built first: its EnableBoundedOutput must run before
+	// Clone() so the clones inherit the opt-in.
 	warmup, err := src.Next(ctx)
 	if err != nil {
 		return fmt.Errorf("fragment task %s: source next: %w", task.ID, err)
 	}
 	chains := make([][]exec.UnaryOperator, 1, k)
 	chains[0] = ops
+	drivers := make([]*fragmentDriver, 1, k)
+	drivers[0] = newFragmentDriver(ops, deliver)
 	if warmup != nil {
-		cur := warmup
-		for _, op := range ops {
-			exec.FlattenForConsumer(cur, op)
-			cur, err = op.Execute(ctx, cur)
-			if err != nil {
-				return fmt.Errorf("fragment task %s: unary exec: %w", task.ID, err)
-			}
-			if cur == nil {
-				break
-			}
-		}
-		if cur != nil && cur.ActiveLen() > 0 {
-			if err := consume(ctx, cur); err != nil {
-				return fmt.Errorf("fragment task %s: sink consume: %w", task.ID, err)
-			}
+		opsNs, err := drivers[0].push(ctx, warmup)
+		fp.opsNs.Add(opsNs)
+		if err != nil {
+			return fmt.Errorf("fragment task %s: %w", task.ID, err)
 		}
 
 		// Build the k−1 cloned chains. Clones that return the original
@@ -1146,6 +1193,7 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 				chain[j] = op.(exec.Cloneable).Clone()
 			}
 			chains = append(chains, chain)
+			drivers = append(drivers, newFragmentDriver(chain, deliver))
 			for j, cop := range chain {
 				if cop == ops[j] {
 					continue
@@ -1169,47 +1217,24 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 			prodErr <- d.run(prodCtx, src)
 		}()
 
-		runChain := func(ctx context.Context, chain []exec.UnaryOperator, b *batch.RecordBatch) (*batch.RecordBatch, error) {
-			t0 := time.Now()
-			defer func() { fp.opsNs.Add(time.Since(t0).Nanoseconds()) }()
-			cur := b
-			var err error
-			for _, op := range chain {
-				exec.FlattenForConsumer(cur, op)
-				cur, err = op.Execute(ctx, cur)
-				if err != nil {
-					return nil, fmt.Errorf("unary exec: %w", err)
-				}
-				if cur == nil {
-					return nil, nil
-				}
-			}
-			return cur, nil
-		}
-
 		var collapsed atomic.Bool
 		g, gctx := errgroup.WithContext(ctx)
 		for i := 0; i < k; i++ {
-			chain := chains[i]
+			driver := drivers[i]
 			g.Go(func() error {
 				return consumeMorsels(gctx, d, gate, func(m morsel) error {
 					if err := fp.applyBackpressure(gctx); err != nil {
 						m.retire()
 						return err
 					}
-					cur, err := runChain(gctx, chain, m.b)
-					if err != nil {
-						m.retire()
-						return err
-					}
-					if cur != nil && cur.ActiveLen() > 0 {
-						if err := consume(gctx, cur); err != nil {
-							m.retire()
-							return fmt.Errorf("sink consume: %w", err)
-						}
-					}
+					// The morsel is retired only after the whole chain —
+					// including every resumed slice of a suspended fan-out —
+					// is done with it: a suspended probe still reads its
+					// probe-side columns.
+					opsNs, err := driver.push(gctx, m.b)
+					fp.opsNs.Add(opsNs)
 					m.retire()
-					return nil
+					return err
 				}, func() bool {
 					if collapsed.Load() {
 						return true
@@ -1240,18 +1265,12 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 				m.retire()
 				return fmt.Errorf("fragment task %s: %w", task.ID, err)
 			}
-			cur, err := runChain(ctx, ops, m.b)
+			opsNs, err := drivers[0].push(ctx, m.b)
+			fp.opsNs.Add(opsNs)
+			m.retire()
 			if err != nil {
-				m.retire()
 				return fmt.Errorf("fragment task %s: %w", task.ID, err)
 			}
-			if cur != nil && cur.ActiveLen() > 0 {
-				if err := consume(ctx, cur); err != nil {
-					m.retire()
-					return fmt.Errorf("fragment task %s: sink consume: %w", task.ID, err)
-				}
-			}
-			m.retire()
 		}
 		if err := <-prodErr; err != nil {
 			return fmt.Errorf("fragment task %s: %w", task.ID, err)
@@ -1324,33 +1343,34 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 		}
 		return dst.Consume(ctx, b)
 	}
-	runChain := func(ctx context.Context, chain []exec.UnaryOperator, b *batch.RecordBatch) (*batch.RecordBatch, error) {
-		cur := b
-		var err error
-		for oi, op := range chain {
-			exec.FlattenForConsumer(cur, op)
-			cur, err = op.Execute(ctx, cur)
-			if err != nil {
-				return nil, fmt.Errorf("unary exec: %w", err)
+	// One driver per (chain, sink) pair: a suspended fan-out resumes into the
+	// chain that produced it, and its rows must land in that worker's partial.
+	newBreakerDriver := func(chain []exec.UnaryOperator, dst exec.Sink) *fragmentDriver {
+		fd := newFragmentDriver(chain, func(ctx context.Context, b *batch.RecordBatch) error {
+			if b.ActiveLen() == 0 {
+				return nil
 			}
-			if cur == nil {
-				return nil, nil
+			if err := consumeInto(ctx, dst, b); err != nil {
+				return fmt.Errorf("sink consume: %w", err)
 			}
-			// #277 forensics: a rows-but-no-columns batch downstream of an
-			// operator is the panic-then-retry signature seen on Q18's
-			// fused-chain breaker at SF100. Name the producer here — the
-			// aggregate's own structured error cannot see past the sink
-			// boundary. Rate-limited by the progress logger's once-ish
-			// cadence being unnecessary: this fires at most once per task
-			// before the task errors out.
-			if len(cur.Columns) == 0 && cur.ActiveLen() > 0 {
+			return nil
+		})
+		// #277 forensics: a rows-but-no-columns batch downstream of an
+		// operator is the panic-then-retry signature seen on Q18's
+		// fused-chain breaker at SF100. Name the producer here — the
+		// aggregate's own structured error cannot see past the sink
+		// boundary. Rate-limited by the progress logger's once-ish
+		// cadence being unnecessary: this fires at most once per task
+		// before the task errors out.
+		fd.d.Inspect(func(oi int, op exec.UnaryOperator, out *batch.RecordBatch) {
+			if len(out.Columns) == 0 && out.ActiveLen() > 0 {
 				e.logger.Warn("fragment op emitted schemaless batch (#277)",
 					"task_id", fp.taskID, "stage_id", fp.stageID,
 					"op_index", oi, "op_type", fmt.Sprintf("%T", op),
-					"rows", cur.ActiveLen(), "len", cur.Len, "sel", cur.Sel != nil)
+					"rows", out.ActiveLen(), "len", out.Len, "sel", out.Sel != nil)
 			}
-		}
-		return cur, nil
+		})
+		return fd
 	}
 	flushAll := func(chains [][]exec.UnaryOperator) error {
 		for _, chain := range chains {
@@ -1377,12 +1397,11 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 		}
 		return sink.Finalize(ctx)
 	}
-	if cur, err := runChain(ctx, ops, warmup); err != nil {
+	// Built before the clones exist: newFragmentDriver's bounded-output
+	// opt-in has to precede Clone() for the clones to inherit it.
+	primaryDriver := newBreakerDriver(ops, sink)
+	if _, err := primaryDriver.push(ctx, warmup); err != nil {
 		return err
-	} else if cur != nil && cur.ActiveLen() > 0 {
-		if err := consumeInto(ctx, sink, cur); err != nil {
-			return fmt.Errorf("sink consume: %w", err)
-		}
 	}
 
 	// Cloned chains + clone sinks. Worker 0 keeps the originals and the
@@ -1398,6 +1417,8 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	chains[0] = ops
 	sinks := make([]exec.Sink, 1, k)
 	sinks[0] = sink
+	drivers := make([]*fragmentDriver, 1, k)
+	drivers[0] = primaryDriver
 	defer func() {
 		for _, chain := range chains[1:] {
 			for j, op := range chain {
@@ -1448,6 +1469,7 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 			return fmt.Errorf("cloned sink init: %w", err)
 		}
 		sinks = append(sinks, cloned)
+		drivers = append(drivers, newBreakerDriver(chain, cloned))
 	}
 
 	// Producer: source → byte-bounded morsel dispenser. Runs until EOF or
@@ -1469,26 +1491,18 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	var collapsed atomic.Bool
 	g, gctx := errgroup.WithContext(ctx)
 	for i := 0; i < k; i++ {
-		chain, wsink := chains[i], sinks[i]
+		driver := drivers[i]
 		g.Go(func() error {
 			return consumeMorsels(gctx, d, gate, func(m morsel) error {
 				if err := fp.applyBackpressure(gctx); err != nil {
 					m.retire()
 					return err
 				}
-				cur, err := runChain(gctx, chain, m.b)
-				if err != nil {
-					m.retire()
-					return err
-				}
-				if cur != nil && cur.ActiveLen() > 0 {
-					if err := consumeInto(gctx, wsink, cur); err != nil {
-						m.retire()
-						return fmt.Errorf("sink consume: %w", err)
-					}
-				}
+				// Retire only once the chain — every resumed slice of a
+				// suspended fan-out included — is done reading the morsel.
+				_, err := driver.push(gctx, m.b)
 				m.retire()
-				return nil
+				return err
 			}, func() bool {
 				if collapsed.Load() {
 					return true
@@ -1528,18 +1542,11 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 			m.retire()
 			return err
 		}
-		cur, err := runChain(ctx, ops, m.b)
+		_, err := drivers[0].push(ctx, m.b)
+		m.retire()
 		if err != nil {
-			m.retire()
 			return err
 		}
-		if cur != nil && cur.ActiveLen() > 0 {
-			if err := consumeInto(ctx, sink, cur); err != nil {
-				m.retire()
-				return fmt.Errorf("sink consume: %w", err)
-			}
-		}
-		m.retire()
 	}
 	if err := <-prodErr; err != nil {
 		return err
@@ -1579,7 +1586,20 @@ func drainFlushableOps(ctx context.Context, ops []exec.UnaryOperator, snapshotSe
 		if !ok || !fo.HasPendingFlush() {
 			continue
 		}
-		downstream := ops[opIdx+1:]
+		// The downstream chain gets a bounded-output driver of its own: a
+		// second probe below the flushing one fans its spilled-partition
+		// output out just as far as it does the streaming input (#317).
+		driver := newFragmentDriver(ops[opIdx+1:], func(ctx context.Context, cur *batch.RecordBatch) error {
+			if cur.ActiveLen() == 0 {
+				return nil
+			}
+			if snapshotSel && cur.Sel != nil {
+				selCopy := make([]uint32, len(cur.Sel))
+				copy(selCopy, cur.Sel)
+				cur.Sel = selCopy
+			}
+			return consume(ctx, cur)
+		})
 		for {
 			b, err := fo.NextFlush(ctx)
 			if err != nil {
@@ -1588,26 +1608,7 @@ func drainFlushableOps(ctx context.Context, ops []exec.UnaryOperator, snapshotSe
 			if b == nil {
 				break
 			}
-			cur := b
-			for _, dop := range downstream {
-				exec.FlattenForConsumer(cur, dop)
-				cur, err = dop.Execute(ctx, cur)
-				if err != nil {
-					return err
-				}
-				if cur == nil {
-					break
-				}
-			}
-			if cur == nil || cur.ActiveLen() == 0 {
-				continue
-			}
-			if snapshotSel && cur.Sel != nil {
-				selCopy := make([]uint32, len(cur.Sel))
-				copy(selCopy, cur.Sel)
-				cur.Sel = selCopy
-			}
-			if err := consume(ctx, cur); err != nil {
+			if _, err := driver.push(ctx, b); err != nil {
 				return err
 			}
 		}
@@ -1772,6 +1773,15 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 		fp.addRows(n)
 		return nil
 	}
+	driver := newFragmentDriver(finalOps, func(ctx context.Context, b *batch.RecordBatch) error {
+		if b.ActiveLen() == 0 {
+			return nil
+		}
+		if err := consume(ctx, b); err != nil {
+			return fmt.Errorf("sink consume: %w", err)
+		}
+		return nil
+	})
 	for {
 		b, err := currentSrc.Next(ctx)
 		if err != nil {
@@ -1792,22 +1802,11 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 				continue
 			}
 		}
-		for _, op := range finalOps {
-			exec.FlattenForConsumer(cur, op)
-			cur, err = op.Execute(ctx, cur)
-			if err != nil {
-				return fmt.Errorf("fragment task %s: post-breaker exec: %w", task.ID, err)
-			}
-			if cur == nil {
-				break
-			}
-		}
-		fp.opsNs.Add(time.Since(tOps).Nanoseconds())
-		if cur == nil || cur.ActiveLen() == 0 {
-			continue
-		}
-		if err := consume(ctx, cur); err != nil {
-			return fmt.Errorf("fragment task %s: sink consume: %w", task.ID, err)
+		xformNs := time.Since(tOps).Nanoseconds()
+		opsNs, err := driver.push(ctx, cur)
+		fp.opsNs.Add(xformNs + opsNs)
+		if err != nil {
+			return fmt.Errorf("fragment task %s: post-breaker exec: %w", task.ID, err)
 		}
 	}
 	// Spilled-partition flush for any HashJoin probes in finalOps.
@@ -1841,6 +1840,12 @@ func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch
 		}
 		return sink.Consume(ctx, b)
 	}
+	driver := newFragmentDriver(ops, func(ctx context.Context, b *batch.RecordBatch) error {
+		if b.ActiveLen() == 0 {
+			return nil
+		}
+		return consume(ctx, b)
+	})
 	for {
 		// Heap-aware backpressure between batches; mirrors the runFragment*
 		// callers and the engine-level Pipeline.Run hook.
@@ -1864,20 +1869,7 @@ func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch
 				continue
 			}
 		}
-		for _, op := range ops {
-			exec.FlattenForConsumer(cur, op)
-			cur, err = op.Execute(ctx, cur)
-			if err != nil {
-				return err
-			}
-			if cur == nil {
-				break
-			}
-		}
-		if cur == nil || cur.ActiveLen() == 0 {
-			continue
-		}
-		if err := consume(ctx, cur); err != nil {
+		if _, err := driver.push(ctx, cur); err != nil {
 			return err
 		}
 	}

@@ -5592,10 +5592,22 @@ func evalFilterTyped(pv, bv *batch.Vector, pRow, bRow, op int) bool {
 }
 
 // pipelineSource wraps a Source + UnaryOps into a single Source.
+//
+// It honours the bounded-output protocol (exec.BoundedOutputOperator, #317):
+// an operator whose output for one input batch can be far larger than that
+// batch — a hash-join probe fans one probe row out to every build row sharing
+// its key — emits a bounded slice and suspends the rest, and a Next that finds
+// pending output resumes it instead of pulling new input. Being a pull driver
+// makes that natural: one Next, one batch.
+//
+// Resumption goes DEEPEST first. A suspended operator's pending output was
+// produced from an input the operators after it have not seen yet, so it must
+// drain before the operator above it is asked for its next slice.
 type pipelineSource struct {
-	source exec.Source
-	ops    []exec.UnaryOperator
-	inited bool
+	source  exec.Source
+	ops     []exec.UnaryOperator
+	bounded []exec.BoundedOutputOperator // parallel to ops; nil = single-shot op
+	inited  bool
 }
 
 func (ps *pipelineSource) Init(ctx context.Context) error {
@@ -5611,29 +5623,78 @@ func (ps *pipelineSource) Init(ctx context.Context) error {
 			return err
 		}
 	}
+	// The opt-in is this driver's promise to drain pending output before
+	// supplying the next input batch.
+	exec.EnableBoundedOutput(ps.ops)
+	ps.bounded = make([]exec.BoundedOutputOperator, len(ps.ops))
+	for i, op := range ps.ops {
+		if bo, ok := op.(exec.BoundedOutputOperator); ok {
+			ps.bounded[i] = bo
+		}
+	}
 	return nil
 }
 
 func (ps *pipelineSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	for {
+		if i := ps.pendingFrom(); i >= 0 {
+			out, err := ps.bounded[i].NextOutput(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if out == nil {
+				continue // that operator finished; look for the next one
+			}
+			b, err := ps.runFrom(ctx, i+1, out)
+			if err != nil {
+				return nil, err
+			}
+			if b != nil {
+				return b, nil
+			}
+			continue
+		}
 		b, err := ps.source.Next(ctx)
 		if err != nil || b == nil {
 			return b, err
 		}
-		for _, op := range ps.ops {
-			exec.FlattenForConsumer(b, op)
-			b, err = op.Execute(ctx, b)
-			if err != nil {
-				return nil, err
-			}
-			if b == nil {
-				break
-			}
+		b, err = ps.runFrom(ctx, 0, b)
+		if err != nil {
+			return nil, err
 		}
 		if b != nil {
 			return b, nil
 		}
 	}
+}
+
+// pendingFrom returns the index of the deepest operator with output still to
+// emit, or -1. nil bounded (Init not run) means nothing ever suspends.
+func (ps *pipelineSource) pendingFrom() int {
+	for i := len(ps.bounded) - 1; i >= 0; i-- {
+		if bo := ps.bounded[i]; bo != nil && bo.HasPendingOutput() {
+			return i
+		}
+	}
+	return -1
+}
+
+// runFrom pushes b through ops[i:] and returns what comes out the end. An
+// operator that suspends keeps its remainder; the next Next resumes it.
+func (ps *pipelineSource) runFrom(ctx context.Context, i int, b *batch.RecordBatch) (*batch.RecordBatch, error) {
+	for ; i < len(ps.ops); i++ {
+		op := ps.ops[i]
+		exec.FlattenForConsumer(b, op)
+		var err error
+		b, err = op.Execute(ctx, b)
+		if err != nil {
+			return nil, err
+		}
+		if b == nil {
+			return nil, nil
+		}
+	}
+	return b, nil
 }
 
 func (ps *pipelineSource) Close() error {
