@@ -418,6 +418,14 @@ func twoPathCorpus() []twoPathQuery {
 		// column. Without the rename both paths sort; with it the DAG
 		// returns the rows unsorted.
 		twoPathQuery{name: "GroupKeyOrderBy", sql: "SELECT o_orderpriority, COUNT(*) AS c FROM orders GROUP BY o_orderpriority ORDER BY o_orderpriority", cmp: cmpOrdered},
+		// The aggregate-free sibling of AliasedGroupKeyOrderBy. #313's fix
+		// resolves an aliased sort key against the aggregate below it, which
+		// is what makes it decidable at walkStages time; with no aggregate
+		// the correct spelling depends on a pass that runs later, so this
+		// shape is still lost on the DAG (#316). Adding an expression to the
+		// SELECT list makes it correct by accident, which is the clue.
+		twoPathQuery{name: "AliasedSortNoAggregate", sql: "SELECT o_orderpriority AS p FROM orders ORDER BY p", cmp: cmpOrdered, knownBug: "#316"},
+		twoPathQuery{name: "AliasedSortWithExpr", sql: "SELECT n_name AS nm, UPPER(n_comment) AS uc FROM nation ORDER BY nm", cmp: cmpOrdered},
 		twoPathQuery{name: "AliasedGroupKeyOrderBy", sql: "SELECT o_orderpriority AS p, COUNT(*) AS c FROM orders GROUP BY o_orderpriority ORDER BY p", cmp: cmpOrdered},
 		// Minimal repro for the Q05 divergence: a WHERE equality between
 		// two joined tables that is not itself a join condition. The DAG
