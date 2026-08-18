@@ -193,6 +193,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		tlsConfig:    s.tlsConfig,
 		queryTimeout: s.queryTimeout,
 		stmts:        make(map[string]string),
+		stmtOIDs:     make(map[string][]uint32),
 		sessionVars:  make(map[string]string),
 		txState:      'I',
 		authProvider: s.authProvider,
@@ -220,8 +221,10 @@ type pgConn struct {
 
 	// Extended Query protocol state
 	preparedSQL     string                  // last parsed statement SQL
+	preparedOIDs    []uint32                // parameter type OIDs Parse declared for it
 	portalSQL       string                  // last bound portal SQL
 	stmts           map[string]string       // named prepared statements
+	stmtOIDs        map[string][]uint32     // their declared parameter type OIDs
 	described       bool                    // true if Describe was sent for current portal
 	describedFields int                     // field count of the RowDescription Describe sent
 	resultFmtCodes  []int16                 // result format codes from Bind (0=text, 1=binary)
@@ -853,11 +856,30 @@ func (c *pgConn) handleParse(payload []byte) {
 	name := readCString(payload)
 	payload = payload[len(name)+1:]
 	sql := readCString(payload)
+	payload = payload[len(sql)+1:]
+
+	// The declared parameter types. Bind needs them to know whether a
+	// parameter renders as a bare number or a quoted literal, and Describe
+	// echoes them back as the ParameterDescription. A client may declare
+	// none, or declare OID 0 for a parameter it wants the server to infer.
+	var oids []uint32
+	if len(payload) >= 2 {
+		n := int(binary.BigEndian.Uint16(payload[:2]))
+		payload = payload[2:]
+		if n > 0 && len(payload) >= n*4 {
+			oids = make([]uint32, n)
+			for i := 0; i < n; i++ {
+				oids[i] = binary.BigEndian.Uint32(payload[i*4:])
+			}
+		}
+	}
 
 	if name == "" {
 		c.preparedSQL = sql
+		c.preparedOIDs = oids
 	} else {
 		c.stmts[name] = sql
+		c.stmtOIDs[name] = oids
 	}
 	if c.logger != nil {
 		c.logger.Debug("pgwire parse", "stmt", name, "sql", sql)
@@ -879,40 +901,71 @@ func (c *pgConn) handleBind(payload []byte) {
 	payload = payload[len(stmtName)+1:]
 
 	sql := c.preparedSQL
+	oids := c.preparedOIDs
 	if stmtName != "" {
 		if s, ok := c.stmts[stmtName]; ok {
 			sql = s
+			oids = c.stmtOIDs[stmtName]
 		}
 	}
 
-	// Parse parameter values and substitute $1, $2, ... into the SQL for
-	// introspection queries (pg_catalog). This lets handleCatalogQuery see
-	// literal values instead of placeholders.
+	// Read the parameters and render each as the SQL literal that stands in
+	// for it. The planner takes SQL text, not bound values, so substitution
+	// is how a parameter reaches it — and the literal has to carry the
+	// parameter's type. See bindparams.go.
 	if len(payload) >= 2 {
 		numFmt := int(binary.BigEndian.Uint16(payload[:2]))
 		payload = payload[2:]
-		// Skip format codes
+		// Format codes: 0 of them means every parameter is text, 1 means that
+		// one code applies to all of them, otherwise there is one per
+		// parameter.
+		fmtCodes := make([]int16, 0, numFmt)
 		if len(payload) >= numFmt*2 {
+			for i := 0; i < numFmt; i++ {
+				fmtCodes = append(fmtCodes, int16(binary.BigEndian.Uint16(payload[i*2:])))
+			}
 			payload = payload[numFmt*2:]
 		}
 		if len(payload) >= 2 {
 			numParams := int(binary.BigEndian.Uint16(payload[:2]))
 			payload = payload[2:]
-			for i := 0; i < numParams && len(payload) >= 4; i++ {
+			literals := make([]string, numParams)
+			for i := 0; i < numParams; i++ {
+				literals[i] = "NULL"
+				if len(payload) < 4 {
+					break
+				}
 				paramLen := int(int32(binary.BigEndian.Uint32(payload[:4])))
 				payload = payload[4:]
 				if paramLen < 0 {
-					// NULL parameter
-					continue
+					continue // NULL parameter — the literal is already NULL
 				}
-				if len(payload) >= paramLen {
-					paramVal := string(payload[:paramLen])
-					payload = payload[paramLen:]
-					// Substitute $N with literal value (quoted for safety)
-					placeholder := fmt.Sprintf("$%d", i+1)
-					sql = strings.Replace(sql, placeholder, "'"+paramVal+"'", 1)
+				if len(payload) < paramLen {
+					break
 				}
+				raw := payload[:paramLen]
+				payload = payload[paramLen:]
+
+				binaryFmt := false
+				switch {
+				case len(fmtCodes) == 1:
+					binaryFmt = fmtCodes[0] == 1
+				case i < len(fmtCodes):
+					binaryFmt = fmtCodes[i] == 1
+				}
+				var oid uint32
+				if i < len(oids) {
+					oid = oids[i]
+				}
+
+				lit, err := renderParam(raw, binaryFmt, oid)
+				if err != nil {
+					c.sendError("ERROR", "22023", fmt.Sprintf("binding parameter $%d: %v", i+1, err))
+					return
+				}
+				literals[i] = lit
 			}
+			sql = substituteParams(sql, literals)
 		}
 	}
 
@@ -942,17 +995,35 @@ func (c *pgConn) handleDescribe(payload []byte) {
 	descType := payload[0] // 'S' = statement, 'P' = portal
 
 	if descType == 'S' {
-		// ParameterDescription: no parameters
-		c.buf = c.buf[:0]
-		c.buf = appendInt16(c.buf, 0) // zero parameters
-		c.sendMsg('t', c.buf)
-
 		sql := c.preparedSQL
+		oids := c.preparedOIDs
 		if name := readCString(payload[1:]); name != "" {
 			if s, ok := c.stmts[name]; ok {
 				sql = s
+				oids = c.stmtOIDs[name]
 			}
 		}
+
+		// ParameterDescription: one OID per placeholder (issue #305 item 9).
+		// A client that declared types at Parse gets them echoed back. For
+		// the ones it left to the server — and for a statement that declared
+		// none at all — the answer is OID 0, "unknown". Wadjet infers no
+		// parameter types, so 0 is the honest report and every driver
+		// understands it; claiming zero parameters for a statement that has
+		// three was not honest, and pgJDBC reads the count to size its
+		// parameter list.
+		if n := countParamPlaceholders(sql); n > len(oids) {
+			padded := make([]uint32, n)
+			copy(padded, oids)
+			oids = padded
+		}
+		c.buf = c.buf[:0]
+		c.buf = appendInt16(c.buf, int16(len(oids)))
+		for _, oid := range oids {
+			c.buf = appendInt32(c.buf, int32(oid))
+		}
+		c.sendMsg('t', c.buf)
+
 		c.describeSQL(sql)
 	} else {
 		// Portal describe — send RowDescription based on portal SQL
@@ -1050,32 +1121,6 @@ func (c *pgConn) describeSQL(sql string) {
 	} else {
 		c.sendNoData()
 	}
-}
-
-// substituteNullParams replaces every $N placeholder with NULL and reports
-// whether the statement had any. Like Bind's own substitution, the scan does
-// not skip string literals — a literal '$1' is rewritten too.
-func substituteNullParams(sql string) (string, bool) {
-	if !strings.Contains(sql, "$") {
-		return sql, false
-	}
-	var b strings.Builder
-	b.Grow(len(sql))
-	found := false
-	for i := 0; i < len(sql); i++ {
-		if sql[i] == '$' && i+1 < len(sql) && sql[i+1] >= '0' && sql[i+1] <= '9' {
-			j := i + 1
-			for j < len(sql) && sql[j] >= '0' && sql[j] <= '9' {
-				j++
-			}
-			b.WriteString("NULL")
-			found = true
-			i = j - 1
-			continue
-		}
-		b.WriteByte(sql[i])
-	}
-	return b.String(), found
 }
 
 // sendNoData sends NoData ('n') and records that this statement has no
@@ -1289,6 +1334,7 @@ func (c *pgConn) handleClose(payload []byte) {
 	if len(payload) >= 1 && payload[0] == 'S' {
 		name := readCString(payload[1:])
 		delete(c.stmts, name)
+		delete(c.stmtOIDs, name)
 	}
 	// Send CloseComplete ('3')
 	c.sendMsg('3', nil)
