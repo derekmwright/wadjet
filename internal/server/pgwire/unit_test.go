@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -297,6 +298,15 @@ func TestFormatPgValue(t *testing.T) {
 		{"string", "hello", "hello"},
 		{"int", 42, "42"},
 		{"float", 3.14, "3.14"},
+		// PostgreSQL prints plain decimal until the magnitude is extreme;
+		// Go's %v gave "1.78704912e+09" for an epoch, which a client
+		// reading an integer column rejects.
+		{"float_epoch", 1787049120.0, "1787049120"},
+		{"float_large", 1.5e20, "1.5e+20"},
+		{"float_small", 0.00001, "1e-05"},
+		{"float_neg_inf", math.Inf(-1), "-Infinity"},
+		{"float_nan", math.NaN(), "NaN"},
+		{"float32", float32(2.5), "2.5"},
 		{"bool", true, "t"}, // PostgreSQL text format for bool
 		{"nil_default", nil, "<nil>"},
 		{"array", []any{"a", "b", "c"}, "[a, b, c]"},
