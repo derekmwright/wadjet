@@ -131,6 +131,11 @@ type Task struct {
 	Aggregates  []AggSpec `json:"aggregates,omitempty"`
 	InputFiles  []string  `json:"input_files,omitempty"` // results from previous stage
 
+	// RowLimit bounds how many rows this task emits, for a LIMIT with no
+	// ORDER BY (physical.Stage.RowLimit). The task stops pulling once
+	// satisfied; the coordinator trims the union of tasks to the real limit.
+	RowLimit int `json:"row_limit,omitempty"`
+
 	// Sort-specific
 	SortKeys       []SortKeySpec `json:"sort_keys,omitempty"`
 	Limit          int           `json:"limit,omitempty"`

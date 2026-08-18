@@ -1990,11 +1990,15 @@ func (c *Coordinator) dispatchScanFilterStage(
 	tasks := make([]distributed.Task, 0, actualTasks)
 	for shardIdx, files := range fileSets {
 		t := distributed.Task{
-			ID:               uuid.New().String()[:8],
-			QueryID:          queryID,
-			StageID:          stage.ID,
-			Type:             distributed.TaskTypeStage,
-			TableName:        stage.TableName,
+			ID:        uuid.New().String()[:8],
+			QueryID:   queryID,
+			StageID:   stage.ID,
+			Type:      distributed.TaskTypeStage,
+			TableName: stage.TableName,
+			// A bare LIMIT pushed onto this scan (#311): each task stops
+			// pulling at n instead of reading its whole slice, and the
+			// coordinator trims the union of tasks to the real limit.
+			RowLimit:         stage.RowLimit,
 			AffinityWorkerID: affinityFor(affinity, shardIdx),
 			DataBucket:       c.config.ResultBucket,
 			ResultBucket:     c.config.ResultBucket,
@@ -2592,6 +2596,7 @@ func (c *Coordinator) dispatchComputeStage(
 			Aggregates:          aggs,
 			SortKeys:            sorts,
 			Limit:               stage.Limit,
+			RowLimit:            stage.RowLimit,
 			Inputs:              taskInputs,
 			DataBucket:          c.config.ResultBucket,
 			ResultBucket:        c.config.ResultBucket,
@@ -4206,11 +4211,15 @@ func (c *Coordinator) dispatchGatherStage(
 	// source selection reads the upstream files.
 	alias := stage.Dependencies[0]
 	task := distributed.Task{
-		ID:           uuid.New().String()[:8],
-		QueryID:      queryID,
-		StageID:      stage.ID,
-		Type:         distributed.TaskTypeGather,
-		SQLText:      sql,
+		ID:      uuid.New().String()[:8],
+		QueryID: queryID,
+		StageID: stage.ID,
+		Type:    distributed.TaskTypeGather,
+		SQLText: sql,
+		// A plain scan is passed through rather than dispatched, so this
+		// gather task does its reading — carry the upstream's pushed-down
+		// bare LIMIT so it stops early (#311).
+		RowLimit:     depStage.RowLimit,
 		DataBucket:   c.config.ResultBucket,
 		ResultBucket: c.config.ResultBucket,
 		Inputs: map[string][]string{

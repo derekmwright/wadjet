@@ -359,6 +359,10 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		"TableName": "hashed", "PartitionFilter": "hashed", "ScanFiles": "hashed",
 		"FilterExprs": "hashed", "GroupByCols": "hashed", "AggSpecs": "hashed",
 		"GroupByAll": "hashed", "SortKeys": "hashed", "Limit": "hashed",
+		// RowLimit changes how many rows a stage emits, so two otherwise
+		// identical subtrees with different bounds are not interchangeable
+		// and must not dedup into one.
+		"RowLimit":       "hashed",
 		"SortShardLocal": "hashed", "JoinType": "hashed",
 		"JoinLeftKeys": "hashed", "JoinRightKeys": "hashed",
 		"BuildTableAlias": "hashed", "BuildColOrigins": "hashed",

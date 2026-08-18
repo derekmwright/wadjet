@@ -123,7 +123,23 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 	// idempotent so the explicit success-path call below stays.
 	defer func() { _ = sink.Finalize(ctx) }()
 	var totalRows, batchesPublished int64
+	// A bare LIMIT pushed onto the upstream scan (#311). A plain scan with no
+	// filters is not dispatched as its own task: the coordinator passes its
+	// file list through and THIS task does the reading, so the bound has to
+	// be applied here or the whole table is read for the rows the coordinator
+	// will discard — 15M rows for a LIMIT 501.
+	var rowLimit *exec.Limit
+	if task.RowLimit > 0 {
+		rowLimit = exec.NewLimit(int64(task.RowLimit), 0)
+		if err := rowLimit.Init(ctx); err != nil {
+			return fmt.Errorf("gather task %s: row limit init: %w", task.ID, err)
+		}
+	}
+
 	for alias, files := range task.Inputs {
+		if rowLimit != nil && rowLimit.Done() {
+			break
+		}
 		e.logger.Info("executeGatherStage: opening source",
 			"task_id", task.ID, "alias", alias, "file_count", len(files))
 		if len(files) == 0 {
@@ -149,12 +165,25 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 			if b == nil {
 				break
 			}
+			if rowLimit != nil {
+				b, err = rowLimit.Execute(ctx, b)
+				if err != nil {
+					src.Close()
+					return fmt.Errorf("gather task %s: row limit: %w", task.ID, err)
+				}
+				if b == nil {
+					break
+				}
+			}
 			if err := sink.Consume(ctx, b); err != nil {
 				src.Close()
 				return fmt.Errorf("gather task %s: consume: %w", task.ID, err)
 			}
 			totalRows += int64(b.ActiveLen())
 			batchesPublished++
+			if rowLimit != nil && rowLimit.Done() {
+				break
+			}
 		}
 		src.Close()
 	}

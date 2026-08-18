@@ -2205,6 +2205,23 @@ func (e *Executor) buildUnaryChain(ctx context.Context, task distributed.Task, s
 		}
 		ops = append(ops, results[i].ops...)
 	}
+
+	// A LIMIT with no ORDER BY, pushed down by the planner (#311). Bounding
+	// the task's own output lets the scan stop pulling batches instead of
+	// reading its whole input for rows the coordinator will discard: opening
+	// a 15M-row table read all of it for 501 rows. Safe per task because the
+	// planner only sets RowLimit when nothing between the scan and the LIMIT
+	// changes cardinality (physical.limitPushdownSafe), and because a bare
+	// LIMIT does not specify which rows it returns — the coordinator trims
+	// the union of tasks to the real limit.
+	if task.RowLimit > 0 {
+		lim := exec.NewLimit(int64(task.RowLimit), 0)
+		if err := lim.Init(ctx); err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("fragment task %s: row limit init: %w", task.ID, err)
+		}
+		ops = append(ops, lim)
+	}
 	return ops, cleanup, nil
 }
 

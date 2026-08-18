@@ -76,6 +76,19 @@ type Stage struct {
 	// Sort metadata
 	SortKeys []SortKeySpec
 	Limit    int
+
+	// RowLimit bounds how many rows this stage's tasks EMIT, for a LIMIT with
+	// no ORDER BY. Distinct from Limit, which is a top-N applied after a sort:
+	// this one lets a scan stop pulling batches once satisfied.
+	//
+	// Set only when nothing between the scan and the LIMIT can change
+	// cardinality (no join, aggregate, distinct or sort), so each task may
+	// stop at n independently. k tasks then emit up to k*n rows and the
+	// coordinator's gather limit trims to n — which is well-defined precisely
+	// because a bare LIMIT does not specify WHICH rows it returns. An
+	// `ORDER BY ... LIMIT` must never use this path; it goes through the
+	// sort/TopN stages, where Limit above applies.
+	RowLimit int
 	// SortShardLocal marks a grouped final_aggregate whose SortKeys/Limit
 	// are SHARD-LOCAL: the stage fans out across disjoint group-key shards
 	// (each computes exact aggregates for its groups, then sorts and
@@ -3690,16 +3703,38 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 
 	case logical.NodeLimit:
 		// Pass limit info down to sort stage if child is sort
+		preLimitCount := len(*stages)
 		for _, child := range node.Children {
 			p.walkStages(child, stages, parentID)
 		}
 		// Propagate limit to both merge_sort and sort stages
+		sorted := false
 		for i := len(*stages) - 1; i >= 0; i-- {
 			if (*stages)[i].Type == "merge_sort" {
 				(*stages)[i].Limit = node.LimitVal
+				sorted = true
 			} else if (*stages)[i].Type == "sort" {
 				(*stages)[i].Limit = node.LimitVal
+				sorted = true
 				break
+			}
+		}
+		// No sort to carry it: a bare LIMIT. The coordinator bounds the
+		// gathered result either way (correctness), but without a per-task
+		// bound every task still reads its whole input first — DataGrip
+		// opening a 15M-row table read all of it for the 501 rows it wanted.
+		// Push the bound into this subtree's own stages so each task stops
+		// early. Only when nothing between here and the scan can change
+		// cardinality; see limitPushdownSafe.
+		if !sorted && node.LimitVal > 0 && limitPushdownSafe(node) {
+			for i := preLimitCount; i < len(*stages); i++ {
+				// "scan" is what walkStages emits for a leaf read; "pipeline"
+				// is the type those stages carry once fragments are built.
+				// Exchange stages are left alone — they move rows between
+				// stages rather than producing them.
+				if t := (*stages)[i].Type; t == "scan" || t == "pipeline" {
+					(*stages)[i].RowLimit = node.LimitVal
+				}
 			}
 		}
 
@@ -9342,4 +9377,50 @@ func isStarProjection(proj logical.Projection) bool {
 		e = strings.TrimSpace(proj.Column)
 	}
 	return e == "*" || strings.HasSuffix(e, ".*")
+}
+
+// limitPushdownSafe reports whether a LIMIT may be applied independently by
+// each task under it.
+//
+// It may when every node between the LIMIT and its scans passes rows through
+// one at a time: Project and Filter qualify (a filtered task simply reaches n
+// later, or never), and a scan is the base case. Anything that derives rows
+// from more than one input row — join, aggregate, distinct, sort, window, set
+// operation — does not: bounding its INPUT changes its OUTPUT, which would
+// silently produce wrong answers rather than merely fewer rows.
+//
+// Multiple scans under a UNION ALL are fine: each bounds itself, and the
+// coordinator trims the union to n.
+func limitPushdownSafe(node *logical.Node) bool {
+	if node == nil {
+		return false
+	}
+	sawScan := false
+	var walk func(n *logical.Node) bool
+	walk = func(n *logical.Node) bool {
+		if n == nil {
+			return false
+		}
+		switch n.Type {
+		case logical.NodeScan:
+			// A table function's row count is not bounded by its input, but
+			// stopping early still yields a prefix of what it would produce.
+			sawScan = true
+			return true
+		case logical.NodeProject, logical.NodeFilter, logical.NodeLimit:
+			// A nested LIMIT is at most as permissive as this one.
+		default:
+			return false
+		}
+		for _, c := range n.Children {
+			if !walk(c) {
+				return false
+			}
+		}
+		return true
+	}
+	if !walk(node) {
+		return false
+	}
+	return sawScan
 }
