@@ -250,6 +250,8 @@ func TestExtendedProtocolShapeCoherence(t *testing.T) {
 		"SELECT oid, typname FROM pg_type",
 		"SELECT table_name FROM information_schema.tables",
 		"SELECT nspname FROM pg_namespace",
+		"SELECT datname FROM pg_database",
+		"SELECT datname AS TABLE_CAT FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname",
 		// Statements with no result set at all.
 		"SET extra_float_digits = 3",
 		"BEGIN",
@@ -304,6 +306,18 @@ func TestDataGripOpeningSequence(t *testing.T) {
 		{
 			sql:      "select round(extract(epoch from pg_postmaster_start_time() at time zone 'UTC')) as startup_time",
 			wantCols: []string{"startup_time"},
+			wantRows: 1,
+		},
+		// The database and schema pickers. Both used to come back empty,
+		// which left DataGrip with nothing to select.
+		{
+			sql:      "SELECT datname AS TABLE_CAT FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname",
+			wantCols: []string{"TABLE_CAT"},
+			wantRows: 1,
+		},
+		{
+			sql:      "SELECT nspname AS TABLE_SCHEM, NULL AS TABLE_CATALOG FROM pg_catalog.pg_namespace ORDER BY TABLE_SCHEM",
+			wantCols: []string{"TABLE_SCHEM", "TABLE_CATALOG"},
 			wantRows: 1,
 		},
 	}
@@ -514,6 +528,31 @@ func TestDataGripOpeningSequencePgx(t *testing.T) {
 	t.Logf("startup_time = %v", startup)
 	if delta := float64(time.Now().Unix()) - startup; delta < 0 || delta > 300 {
 		t.Errorf("startup_time %v is %vs from now — not this process's start", startup, delta)
+	}
+
+	// The database picker. An empty list here is what left DataGrip with no
+	// database to select.
+	var cat string
+	err = conn.QueryRow(ctx,
+		"SELECT datname AS TABLE_CAT FROM pg_catalog.pg_database WHERE datallowconn = true ORDER BY datname").
+		Scan(&cat)
+	if err != nil {
+		t.Fatalf("getCatalogs: %v", err)
+	}
+	if cat != "wadjet" {
+		t.Errorf("database list = [%q], want [wadjet]", cat)
+	}
+
+	// The schema picker alongside it.
+	var schem, schemCat *string
+	err = conn.QueryRow(ctx,
+		"SELECT nspname AS TABLE_SCHEM, NULL AS TABLE_CATALOG FROM pg_catalog.pg_namespace ORDER BY TABLE_SCHEM").
+		Scan(&schem, &schemCat)
+	if err != nil {
+		t.Fatalf("getSchemas: %v", err)
+	}
+	if schem == nil || *schem != "public" {
+		t.Errorf("schema list = [%v], want [public]", schem)
 	}
 }
 

@@ -1567,17 +1567,19 @@ func (c *pgConn) sendSynthRows(ans *synthAnswer, fmtCodes []int16) {
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(ans.rows)))
 }
 
-// tableOID returns a deterministic fake OID for a table name.
+// tableOID returns a deterministic fake OID for a catalog object's name.
+//
+// The result stays inside PostgreSQL's OID range, above the 16384 the system
+// objects end at. The previous hash accumulated without a bound and returned
+// values in the trillions — nothing a client can hold in an oid or int4
+// column, which is where a driver puts a catalog OID it reads.
 func tableOID(name string) int {
-	// Simple hash to create stable OIDs starting at 16384 (user table range in PG)
-	h := 16384
+	const base = 16384
+	h := uint32(2166136261) // FNV-1a
 	for _, c := range name {
-		h = h*31 + int(c)
+		h = (h ^ uint32(c)) * 16777619
 	}
-	if h < 0 {
-		h = -h
-	}
-	return h
+	return base + int(h%(1<<31-base))
 }
 
 // pgTypeOID maps Wadjet types to PostgreSQL type OIDs.
@@ -1608,6 +1610,19 @@ func pgTypeOID(typeName string) int {
 // that SQLAlchemy/Superset uses for schema introspection. sql is the statement
 // being answered; normalized is its uppercased, whitespace-collapsed form.
 func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) *synthAnswer {
+	// pg_database — the database picker's source. Checked before pg_type
+	// because a client listing databases may join pg_database to nothing at
+	// all, and the generic pg_catalog fallback below answers zero rows, which
+	// renders as an empty database list.
+	if strings.Contains(normalized, "PG_DATABASE") &&
+		!strings.Contains(normalized, "PG_CLASS") &&
+		!strings.Contains(normalized, "PG_ATTRIBUTE") &&
+		!strings.Contains(normalized, "PG_TYPE") {
+		if ans := c.matchPgDatabase(sql); ans != nil {
+			return ans
+		}
+	}
+
 	// pg_type — JDBC drivers query this to map OIDs to type names
 	if strings.Contains(normalized, "PG_TYPE") && !strings.Contains(normalized, "PG_CLASS") &&
 		!strings.Contains(normalized, "PG_ATTRIBUTE") {
@@ -1630,13 +1645,17 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 		return c.matchInfoSchemaColumns(ctx, normalized)
 	}
 
-	// Schema listing: SELECT nspname FROM pg_namespace (used by get_schema_names)
+	// Schema listing: SELECT nspname FROM pg_namespace (used by get_schema_names
+	// and by the schema picker, which asks for oid alongside nspname).
 	// Exclude queries that mention pg_type/pg_class/pg_attribute — those just JOIN pg_namespace.
 	if strings.Contains(normalized, "PG_NAMESPACE") && strings.Contains(normalized, "NSPNAME") &&
 		!strings.Contains(normalized, "PG_CLASS") &&
 		!strings.Contains(normalized, "PG_TYPE") &&
 		!strings.Contains(normalized, "PG_ATTRIBUTE") {
-		return singleRow([]string{"nspname"}, map[string]any{"nspname": "public"})
+		if ans := catalogRowAnswer(sql, pgNamespaceAttrs(), []string{"oid", "nspname"}); ans != nil {
+			return ans
+		}
+		return singleRow([]string{"nspname"}, map[string]any{"nspname": expr.SessionSchema})
 	}
 
 	// Index/constraint queries that happen to JOIN pg_attribute — return empty.
