@@ -1,0 +1,378 @@
+{
+  "version": 1,
+  "kind": "ground-truth",
+  "scale": "SF0.01",
+  "generator": "duckdb v1.4.1 (Andium) b390a7c376 over duckdb-data, captured 2026-08-19T15:16:39Z (WADJET_FP_GENERATE=1)",
+  "note": "Ground truth. Every entry is DuckDB output over the parquet the benchmark reads; nothing here is derived from Wadjet, and the loader refuses an entry stamped otherwise. Values are deliberately absent: only row counts, column names, and opaque digests are stored.",
+  "queries": {
+    "q01": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "l_returnflag",
+        "l_linestatus",
+        "sum_qty",
+        "sum_base_price",
+        "sum_disc_price",
+        "sum_charge",
+        "avg_qty",
+        "avg_price",
+        "avg_disc",
+        "count_order"
+      ],
+      "row_count": 4,
+      "fine": "7c8b0aa794ade990",
+      "coarse": "d6c5f8e287ef4d5d",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q02": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "s_acctbal",
+        "s_name",
+        "n_name",
+        "p_partkey",
+        "p_mfgr",
+        "s_address",
+        "s_phone",
+        "s_comment"
+      ],
+      "row_count": 4,
+      "fine": "c0839d5b82ef5775",
+      "coarse": "5150eaa65b0f2246",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q03": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "tiebreak": "l_orderkey",
+      "columns": [
+        "l_orderkey",
+        "revenue",
+        "o_orderdate",
+        "o_shippriority"
+      ],
+      "row_count": 10,
+      "fine": "69831032cf47cddd",
+      "coarse": "908ea3992b965dd8",
+      "why": "ORDER BY revenue DESC, o_orderdate ties when two orders shipped the same day for equal revenue; l_orderkey is the GROUP BY key and is projected"
+    },
+    "q04": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "o_orderpriority",
+        "order_count"
+      ],
+      "row_count": 5,
+      "fine": "4dbc238e856c565d",
+      "coarse": "4dbc238e856c565d",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q05": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "tiebreak": "n_name",
+      "columns": [
+        "n_name",
+        "revenue"
+      ],
+      "row_count": 5,
+      "fine": "f9eb6a415f80cc2f",
+      "coarse": "4b5cdcd9f5e0c939",
+      "why": "ORDER BY revenue DESC alone; n_name is the GROUP BY key and is projected"
+    },
+    "q06": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "revenue"
+      ],
+      "row_count": 1,
+      "fine": "ab63fca98d125e18",
+      "coarse": "daef02972d719ca5",
+      "why": "single-row result, no ORDER BY: the sequence is trivially total"
+    },
+    "q07": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "supp_nation",
+        "cust_nation",
+        "l_year",
+        "revenue"
+      ],
+      "row_count": 4,
+      "fine": "48850a88008ac56a",
+      "coarse": "51b19ac8cc74c319",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q08": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "o_year",
+        "brazil_revenue",
+        "total_revenue"
+      ],
+      "row_count": 2,
+      "fine": "500b3324f9678805",
+      "coarse": "23499b7275ae186a",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q09": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "nation",
+        "o_year",
+        "sum_profit"
+      ],
+      "row_count": 173,
+      "fine": "bb943df4f1bfd1b3",
+      "coarse": "9bf0f62e54220705",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q10": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "tiebreak": "c_custkey",
+      "columns": [
+        "c_custkey",
+        "c_name",
+        "revenue",
+        "c_acctbal",
+        "n_name",
+        "c_address",
+        "c_phone",
+        "c_comment"
+      ],
+      "row_count": 20,
+      "fine": "bd1aa426dd53bf5f",
+      "coarse": "c1f037a2944f7746",
+      "why": "ORDER BY revenue DESC alone; c_custkey is the GROUP BY key and is projected"
+    },
+    "q11": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "tiebreak": "ps_partkey",
+      "columns": [
+        "ps_partkey",
+        "value"
+      ],
+      "row_count": 1,
+      "fine": "3cdb2756755cfc7e",
+      "coarse": "fb76c056d76d1d2b",
+      "why": "ORDER BY value DESC alone over ~93k rows at SF100; ps_partkey is the GROUP BY key and is projected"
+    },
+    "q12": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "l_shipmode",
+        "high_line_count",
+        "low_line_count"
+      ],
+      "row_count": 2,
+      "fine": "f5eb3beeadf2bed8",
+      "coarse": "f5eb3beeadf2bed8",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q13": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "c_custkey",
+        "c_count"
+      ],
+      "row_count": 100,
+      "fine": "53df89d69ef13553",
+      "coarse": "53df89d69ef13553",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q14": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "promo_revenue",
+        "total_revenue"
+      ],
+      "row_count": 1,
+      "fine": "96ddaf40017a619e",
+      "coarse": "7fcf5aacef55f03d",
+      "why": "single-row result, no ORDER BY: the sequence is trivially total"
+    },
+    "q15": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "s_suppkey",
+        "s_name",
+        "s_address",
+        "s_phone",
+        "total_revenue"
+      ],
+      "row_count": 1,
+      "fine": "6ce593ec4d539bb6",
+      "coarse": "095be8c4e6cb6e4a",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q16": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "p_brand",
+        "p_type",
+        "p_size",
+        "supplier_cnt"
+      ],
+      "row_count": 296,
+      "fine": "edb101931d473445",
+      "coarse": "edb101931d473445",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q17": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "avg_yearly"
+      ],
+      "row_count": 1,
+      "fine": "fa4d91d2941621e2",
+      "coarse": "fa4d91d2941621e2",
+      "why": "single-row result, no ORDER BY: the sequence is trivially total"
+    },
+    "q18": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "tiebreak": "o_orderkey",
+      "columns": [
+        "c_name",
+        "c_custkey",
+        "o_orderkey",
+        "o_orderdate",
+        "o_totalprice",
+        "total_qty"
+      ],
+      "row_count": 2,
+      "fine": "bc5a04abe324bd15",
+      "coarse": "f7c970031fab0670",
+      "why": "ORDER BY o_totalprice DESC, o_orderdate ties when one customer's orders share a total; o_orderkey is the GROUP BY key and is projected"
+    },
+    "q19": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "revenue"
+      ],
+      "row_count": 1,
+      "fine": "3672b2390594f3f5",
+      "coarse": "edd80e16acda74d8",
+      "why": "single-row result, no ORDER BY: the sequence is trivially total"
+    },
+    "q20": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "s_name",
+        "s_address"
+      ],
+      "row_count": 1,
+      "fine": "2cad260f710ee8b5",
+      "coarse": "2cad260f710ee8b5",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q21": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "s_name",
+        "numwait"
+      ],
+      "row_count": 1,
+      "fine": "3c350ba996bea4e4",
+      "coarse": "3c350ba996bea4e4",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q22": {
+      "engine": "duckdb",
+      "engine_version": "v1.4.1 (Andium) b390a7c376",
+      "dataset": "duckdb-data",
+      "captured_at": "2026-08-19T15:16:39Z",
+      "mode": "ordered-total",
+      "columns": [
+        "cntrycode",
+        "numcust",
+        "totacctbal"
+      ],
+      "row_count": 7,
+      "fine": "a9c2f71d4a79a5a2",
+      "coarse": "02b7bdeeded7aa42",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    }
+  }
+}

@@ -89,6 +89,8 @@ func main() {
 		notifySQSURL          = flag.String("notify-sqs-url", "", "SQS queue URL for push lifecycle events (run/query/suite/fatal). Empty = disabled. See internal/benchnotify for the event schema and deploy/benchmark/watch-events.sh for the consumer.")
 		notifySQSRegion       = flag.String("notify-sqs-region", "", "Region for --notify-sqs-url (default: derived from the queue URL)")
 		notifyRunID           = flag.String("notify-run-id", "", "run_id stamped on every event (default: a UTC timestamp). run-benchmark.sh passes the results directory timestamp so events and s3://<bucket>/results/<run_id>/ share an id.")
+		fingerprintPass       = flag.Bool("fingerprint", false, "After the timed runs, execute the correctness variants and hold each answer against the embedded SF100 value fingerprints (benchmarks/tpch/fingerprint-sf100.json). Adds one untimed pass over the 22 queries; see cmd/tpch-bench/fingerprint.go.")
+		fingerprintOut        = flag.String("fingerprint-out", "", "Write Wadjet's own signatures from that pass to this path (implies --fingerprint). The file is kind=\"regression\": it detects that an answer CHANGED, it is not ground truth.")
 	)
 	flag.Parse()
 
@@ -368,6 +370,16 @@ func main() {
 		}
 
 		runBenchmark(ctx, qf, sf, *runs, *profDir, skip, *queryTimeout)
+
+		// Value gate, after the timed runs so it can never enter a
+		// measurement (same rule the notifier follows above).
+		if *fingerprintPass || *fingerprintOut != "" {
+			dataset := fmt.Sprintf("s3://%s/%s (SF%d)", *s3Bucket, *dataPrefix, *scale)
+			if *s3Endpoint == "" {
+				dataset = fmt.Sprintf("in-memory generated SF%d", *scale)
+			}
+			runFingerprintPass(ctx, coord, db, sf, dataset, *fingerprintOut, *queryTimeout)
+		}
 	} else {
 		// --data-only never reaches runBenchmark's suite_completed; send one
 		// so the watcher exits instead of long-polling a finished deploy.

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "kind": "ground-truth",
+  "scale": "SF100",
+  "generator": "",
+  "note": "SF100 VALUE-level gate: opaque per-query fingerprints (internal/oracle.Fingerprint) of the correctness variants in benchmarks/tpch/fingerprint.go. Deliberately carries NO result values — row counts and column names are structural, everything else is a truncated SHA-256 digest at 6 and 4 significant float digits. NOT YET POPULATED: every entry must come from an external reference engine (duckdb or trino) reading the SAME parquet the benchmark reads (s3://wadjet-bench-sf100-use2/tables/), which is a 280 GiB in-region job — see docs/design/sf100-value-fingerprints.md for the generator and how to run it during a benchmark window. Wadjet-produced fingerprints belong in a separate kind=\"regression\" file (tpch-bench --fingerprint-out) and are refused here by name; a self-fingerprint detects that an answer changed, it cannot establish that an answer is right.",
+  "queries": {}
+}

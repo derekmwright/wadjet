@@ -137,6 +137,17 @@ if [ -n "${NOTIFY_SQS_URL:-}" ] && [ "$BENCH_TYPE" = "tpch" ]; then
   log "Pushing run events to ${NOTIFY_SQS_URL} (run_id=${TIMESTAMP})"
 fi
 
+# Value gate (docs/design/sf100-value-fingerprints.md): TPCH_FINGERPRINT=1
+# adds ONE UNTIMED pass over the correctness variants after the timed runs,
+# holding each answer against the SF100 fingerprints embedded in the binary and
+# writing Wadjet's own signatures (kind="regression", not ground truth) beside
+# the results. Off by default: the pass costs a suite's worth of wall clock.
+FINGERPRINT_FLAGS=()
+if [ "${TPCH_FINGERPRINT:-0}" = "1" ] && [ "$BENCH_TYPE" = "tpch" ]; then
+  FINGERPRINT_FLAGS=(--fingerprint --fingerprint-out="${RESULTS_DIR}/fingerprint-wadjet-${TIMESTAMP}.json")
+  log "Value gate on: grep FINGERPRINT-GATE in ${RESULT_FILE} for the verdict"
+fi
+
 if [ "$MODE" = "standalone" ]; then
   log "Running ${BENCH_LABEL} SF${SCALE} standalone benchmark (${RUNS} runs)..."
 
@@ -154,6 +165,7 @@ if [ "$MODE" = "standalone" ]; then
     "${CATALOG_SNAP_FLAGS[@]}" \
     "${SKIP_FLAGS[@]}" \
     "${NOTIFY_FLAGS[@]}" \
+    "${FINGERPRINT_FLAGS[@]}" \
     --cpuprofile="${PROF_DIR}/cpu-standalone.prof" \
     --memprofile="${PROF_DIR}/mem-standalone.prof" \
     --profdir="${PROF_DIR}" \
@@ -194,6 +206,7 @@ elif [ "$MODE" = "distributed" ]; then
     "${NATIVE_DAG_FLAGS[@]}" \
     "${DATA_PLANE_FLAGS[@]}" \
     "${NOTIFY_FLAGS[@]}" \
+    "${FINGERPRINT_FLAGS[@]}" \
     --nats-port=4222 \
     --cpuprofile="${PROF_DIR}/cpu-distributed.prof" \
     --memprofile="${PROF_DIR}/mem-distributed.prof" \
