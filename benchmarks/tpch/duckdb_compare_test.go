@@ -58,7 +58,7 @@ const (
 // empty there and the shape never arises.
 const emptyJoinAggregateBug = "an ungrouped aggregate over an EMPTY JOIN loses its mandatory single row on the stage DAG " +
 	"(SUM: 0 rows, want 1 row of NULL; COUNT over the same join is correct, and so is the same SUM emptied by a filter). " +
-	"Single-process is correct. No issue filed yet — see the emptyJoinAggregateBug comment."
+	"Single-process is correct. Tracked as #329."
 
 // TestDuckDBCompare is the cross-engine ground-truth gate: every corpus query
 // runs on BOTH Wadjet execution paths and both answers are held against a

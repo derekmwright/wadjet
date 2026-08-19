@@ -147,35 +147,43 @@ func TestTimestampColumnsMask(t *testing.T) {
 		{Name: "s", TypeID: parquet.TypeString},
 	}
 
-	if got := timestampColumns([]string{"a", "s"}, nil); got != nil {
-		t.Errorf("no metas: mask = %v, want nil", got)
+	if got := sendColumnTypes([]string{"a", "s"}, nil); got != nil {
+		t.Errorf("no metas: types = %v, want nil", got)
 	}
-	if got := timestampColumns([]string{"a", "s"}, metas[:1]); got != nil {
-		t.Errorf("no timestamp column: mask = %v, want nil", got)
+	if got := sendColumnTypes([]string{"a", "s"}, metas[:1]); got != nil {
+		t.Errorf("no converted column: types = %v, want nil", got)
 	}
 
-	got := timestampColumns([]string{"a", "ts", "s"}, metas)
-	want := []bool{false, true, false}
+	got := sendColumnTypes([]string{"a", "ts", "s"}, metas)
+	want := []parquet.TypeID{colTypeNone, parquet.TypeTimestamp, colTypeNone}
 	if len(got) != len(want) {
-		t.Fatalf("mask = %v, want %v", got, want)
+		t.Fatalf("types = %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("mask = %v, want %v", got, want)
+			t.Fatalf("types = %v, want %v", got, want)
 		}
 	}
 
 	// Columns in a different order than the metas: resolved by name.
-	got = timestampColumns([]string{"s", "ts"}, metas)
-	if len(got) != 2 || got[0] || !got[1] {
-		t.Errorf("reordered mask = %v, want [false true]", got)
+	got = sendColumnTypes([]string{"s", "ts"}, metas)
+	if len(got) != 2 || got[0] != colTypeNone || got[1] != parquet.TypeTimestamp {
+		t.Errorf("reordered types = %v, want [none timestamp]", got)
 	}
 
 	// A column with no meta at all stays untyped rather than borrowing the
 	// meta that happens to sit at its index.
-	got = timestampColumns([]string{"unknown", "ts"}, metas)
-	if len(got) != 2 || got[0] || !got[1] {
-		t.Errorf("unmatched-column mask = %v, want [false true]", got)
+	got = sendColumnTypes([]string{"unknown", "ts"}, metas)
+	if len(got) != 2 || got[0] != colTypeNone || got[1] != parquet.TypeTimestamp {
+		t.Errorf("unmatched-column types = %v, want [none timestamp]", got)
+	}
+
+	// A DATE column resolves too — it is the other type the send path
+	// converts, and the reason the mask became a type list.
+	got = sendColumnTypes([]string{"d", "a"}, []wadjet.ColumnMeta{
+		{Name: "d", TypeID: parquet.TypeDate}, {Name: "a", TypeID: parquet.TypeInt64}})
+	if len(got) != 2 || got[0] != parquet.TypeDate || got[1] != colTypeNone {
+		t.Errorf("date types = %v, want [date none]", got)
 	}
 }
 

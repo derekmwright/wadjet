@@ -87,12 +87,12 @@ func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream co
 	// Resolved once per result, not per row: the value a client reads has
 	// to match the type the RowDescription declared, and only the metas
 	// carry that (see timestampColumns).
-	tsCols := timestampColumns(columns, metas)
+	colTypes := sendColumnTypes(columns, metas)
 	send := func(row map[string]any) {
 		if len(fmtCodes) > 0 {
-			c.sendDataRowFormatted(columns, row, fmtCodes, tsCols)
+			c.sendDataRowFormatted(columns, row, fmtCodes, colTypes)
 		} else {
-			c.sendDataRow(columns, row, tsCols)
+			c.sendDataRow(columns, row, colTypes)
 		}
 		sent++
 	}

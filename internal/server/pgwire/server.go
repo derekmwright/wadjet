@@ -2628,11 +2628,19 @@ func pgTypeSize(oid int) int16 {
 // Returns nil when no column is a timestamp, so the common query pays one
 // nil check and nothing else. Metas normally arrive in column order; the
 // name lookup is the fallback for callers that reorder or rename.
-func timestampColumns(columns []string, metas []wadjet.ColumnMeta) []bool {
+// The same reasoning covers DATE, which the engine boxes as a rendered
+// string: under a binary format code those text bytes were written beneath
+// the declared OID 1082, whose value is a 4-byte day count, so the client
+// decoded whatever the string happened to contain.
+//
+// Returns nil when no column needs conversion, so the common query pays one
+// nil check and nothing else. Metas normally arrive in column order; the
+// name lookup is the fallback for callers that reorder or rename.
+func sendColumnTypes(columns []string, metas []wadjet.ColumnMeta) []parquet.TypeID {
 	if len(metas) == 0 {
 		return nil
 	}
-	var mask []bool
+	var types []parquet.TypeID
 	for i, col := range columns {
 		var m wadjet.ColumnMeta
 		switch {
@@ -2650,15 +2658,33 @@ func timestampColumns(columns []string, metas []wadjet.ColumnMeta) []bool {
 				continue
 			}
 		}
-		if m.TypeID != parquet.TypeTimestamp {
+		if m.TypeID != parquet.TypeTimestamp && m.TypeID != parquet.TypeDate {
 			continue
 		}
-		if mask == nil {
-			mask = make([]bool, len(columns))
+		if types == nil {
+			types = make([]parquet.TypeID, len(columns))
+			for j := range types {
+				types[j] = colTypeNone
+			}
 		}
-		mask[i] = true
+		types[i] = m.TypeID
 	}
-	return mask
+	return types
+}
+
+// colTypeNone marks a column the send path does not convert. parquet.TypeID
+// has no "unknown" member and its zero value is TypeBool, so the absence has
+// to be spelled out rather than left implicit.
+const colTypeNone = parquet.TypeID(-1)
+
+// columnTypeAt reports the resolved type of output column i, or colTypeNone
+// when the caller supplied no metas or the column is not one the send path
+// converts.
+func columnTypeAt(types []parquet.TypeID, i int) parquet.TypeID {
+	if i < len(types) {
+		return types[i]
+	}
+	return colTypeNone
 }
 
 // pgEpochOffsetMicros is the gap between the Unix epoch and PostgreSQL's
@@ -2666,7 +2692,7 @@ func timestampColumns(columns []string, metas []wadjet.ColumnMeta) []bool {
 // `timestamp` values are microseconds relative to the latter.
 const pgEpochOffsetMicros = 946684800 * 1_000_000
 
-func (c *pgConn) sendDataRow(columns []string, row map[string]any, tsCols []bool) {
+func (c *pgConn) sendDataRow(columns []string, row map[string]any, colTypes []parquet.TypeID) {
 	c.buf = c.buf[:0]
 
 	// Column count (int16)
@@ -2680,7 +2706,7 @@ func (c *pgConn) sendDataRow(columns []string, row map[string]any, tsCols []bool
 			continue
 		}
 		s := formatPgValue(val)
-		if i < len(tsCols) && tsCols[i] {
+		if columnTypeAt(colTypes, i) == parquet.TypeTimestamp {
 			if ms, ok := val.(int64); ok {
 				s = batch.FormatTimestamp(ms)
 			}
@@ -2695,7 +2721,7 @@ func (c *pgConn) sendDataRow(columns []string, row map[string]any, tsCols []bool
 // sendDataRowFormatted sends a DataRow using the format codes from Bind.
 // Columns with format code 1 (binary) get binary-encoded values.
 // metas provides type info for correct binary encoding (may be nil for text-only).
-func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtCodes []int16, tsCols []bool) {
+func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtCodes []int16, colTypes []parquet.TypeID) {
 	c.buf = c.buf[:0]
 	c.buf = appendInt16(c.buf, int16(len(columns)))
 
@@ -2714,8 +2740,10 @@ func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtC
 			binary = fmtCodes[i] == 1
 		}
 
-		isTS := i < len(tsCols) && tsCols[i]
+		colType := columnTypeAt(colTypes, i)
+		isTS := colType == parquet.TypeTimestamp
 		ms, msOK := val.(int64)
+		ds, dsOK := val.(string)
 
 		switch {
 		case binary && isTS && msOK:
@@ -2724,6 +2752,11 @@ func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtC
 			// the declared 8-byte width, so the client parsed it happily
 			// and landed ~30000 years off.
 			c.buf = appendBinaryTimestamp(c.buf, ms)
+		case binary && colType == parquet.TypeDate && dsOK:
+			// Binary `date` is a 4-byte day count. The engine boxes a date
+			// as its rendered text, which appendBinaryValue would have
+			// written verbatim under OID 1082.
+			c.buf = appendBinaryDate(c.buf, ds)
 		case binary:
 			c.buf = appendBinaryValue(c.buf, val)
 		default:
@@ -2756,6 +2789,32 @@ func appendBinaryTimestamp(buf []byte, ms int64) []byte {
 	buf = appendInt32(buf, 8)
 	return append(buf, byte(us>>56), byte(us>>48), byte(us>>40), byte(us>>32),
 		byte(us>>24), byte(us>>16), byte(us>>8), byte(us))
+}
+
+// pgEpochDays is 2000-01-01 expressed in days since the Unix epoch — the
+// origin PostgreSQL's binary `date` counts from.
+const pgEpochDays = 10957
+
+// appendBinaryDate encodes a date rendered as YYYY-MM-DD into a PostgreSQL
+// binary `date` (OID 1082): int32 days since 2000-01-01.
+//
+// A value that does not parse is sent as NULL. The field is a fixed 4 bytes,
+// so there is no way to say "not a date" other than absence — and writing the
+// text instead, which is what the generic encoder did, hands the client four
+// bytes of ASCII to read as a day count.
+func appendBinaryDate(buf []byte, s string) []byte {
+	t, err := time.Parse(time.DateOnly, s)
+	if err != nil {
+		return appendInt32(buf, -1)
+	}
+	// Midnight UTC is always an exact multiple of a day, so this division is
+	// exact on both sides of the epoch.
+	days := t.Unix()/86400 - pgEpochDays
+	if days > math.MaxInt32 || days < math.MinInt32 {
+		return appendInt32(buf, -1)
+	}
+	buf = appendInt32(buf, 4)
+	return appendInt32(buf, int32(days))
 }
 
 // appendBinaryValue appends a value in PostgreSQL binary format.
