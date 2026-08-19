@@ -634,6 +634,15 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 		}
 	case NodeSort:
 		for _, ob := range n.OrderBy {
+			// A materialized ORDER BY term (#320) names a column the Project
+			// below computes, not one any scan stores. Pushing the synthetic
+			// name down would land it in a scan's RequiredColumns, where the
+			// worker's all-or-nothing parquet projection guard treats an
+			// unknown "__" name as a reason to read full width. The columns it
+			// really reads arrive through the projection's own AST refs.
+			if IsHiddenSortColumn(ob.Column) {
+				continue
+			}
 			refs[strings.ToLower(ob.Column)] = true
 		}
 	case NodeWindow:

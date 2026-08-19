@@ -1794,6 +1794,12 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		return nil, err
 	}
 
+	// Drop the columns the logical builder materialized for its own use so the
+	// client sees exactly the columns it selected (#320).
+	if trim := hiddenSortTrimOp(node); trim != nil {
+		ops = append(ops, trim)
+	}
+
 	// Front-load bloom filters whose key columns exist in the source scan.
 	// In multi-way joins with selective semi/anti-join bloom filters (e.g.,
 	// Q18's HAVING filter), this eliminates most rows at the source before
@@ -2196,7 +2202,12 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		// the stage emits; the gather still projects to exactly the
 		// SELECT-list set, in order, and now resolves every source instead of
 		// relying on all of them missing.
-		if len(gather.OutputRenames) == len(aliased) {
+		// The rename list carries only the VISIBLE select items, so it can be
+		// shorter than the projection when the plan materialized an ORDER BY
+		// term (#320). Hidden columns are appended last precisely so the
+		// leading indices still line up — and leaving them unnamed here is
+		// what drops them: the gather projects to exactly the names it lists.
+		if len(gather.OutputRenames) <= len(aliased) {
 			for j := range gather.OutputRenames {
 				if gather.OutputRenames[j].Expr == nil {
 					gather.OutputRenames[j].From = aliased[j].Name
@@ -2259,7 +2270,11 @@ func sortKeysNeedAlias(sortKeys []SortKeySpec, specs, aliased []ProjectExprSpec)
 // Returns nil when the outermost emitting node isn't a projection (e.g.,
 // top-level scan or aggregate without a SELECT-list rename layer).
 func extractOutputRenames(root *logical.Node) []OutputRename {
-	proj := findOutputProjectionsForRename(root)
+	// Hidden projections are the planner's own — a materialized ORDER BY term
+	// the SELECT list does not carry (#320). Leaving them out of the rename
+	// list is what drops them from the client's result: the gather projects to
+	// exactly the columns named here.
+	proj := logical.VisibleProjections(findOutputProjectionsForRename(root))
 	if len(proj) == 0 {
 		return nil
 	}
@@ -2451,6 +2466,54 @@ func findOutputProjectionsForRename(n *logical.Node) []logical.Projection {
 		}
 	}
 	return nil
+}
+
+// hiddenSortTrimOp returns the projection that drops a materialized ORDER BY
+// term from the single-process pipeline's output, or nil when the plan carries
+// none.
+//
+// The DAG drops these at the gather: extractOutputRenames lists only the
+// visible select items and the gather projects to exactly that set. The
+// single-process pipeline has no equivalent stage — its result columns are the
+// sink's schema — so without this the Sort would hand __sortkey_N straight to
+// the client alongside the columns the query asked for. The projection below
+// the Sort is never elided when it carries a hidden column (its alias always
+// differs from its source, which is what buildProject's needsProject test
+// looks for), so the names resolved here are the ones the pipeline emits.
+func hiddenSortTrimOp(root *logical.Node) exec.UnaryOperator {
+	projs := findOutputProjectionsForRename(root)
+	if !logical.HasHiddenProjection(projs) {
+		return nil
+	}
+	visible := logical.VisibleProjections(projs)
+	cols := make([]exec.ProjectColumn, 0, len(visible))
+	for _, p := range visible {
+		// Same output naming buildProject applies: the alias, else the column
+		// reference, else the expression text.
+		name := p.Alias
+		if name == "" {
+			name = p.Column
+		}
+		if name == "" {
+			name = cleanExpr(p.Expr)
+		}
+		if name == "" || name == "*" || strings.HasSuffix(name, ".*") {
+			// An unexpanded star (no catalog to resolve it against) has no
+			// column list to trim to. Leave the plan alone: an extra column in
+			// the result beats projecting every row to nulls.
+			return nil
+		}
+		cols = append(cols, exec.ProjectColumn{
+			Name:       name,
+			DirectCopy: name,
+			SourceCol:  name,
+			// DirectCopy resolution can still miss on a qualified/bare
+			// mismatch; ColumnRef resolves lazily and keeps Project.Execute
+			// from invoking a nil Expr.
+			Expr: exec.ColumnRef(name),
+		})
+	}
+	return exec.NewProject(cols)
 }
 
 // QueryCost summarizes the estimated cost of a query across all scan stages.

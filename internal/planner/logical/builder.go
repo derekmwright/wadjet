@@ -366,7 +366,11 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		}
 	}
 
-	// Build Sort before Project when ORDER BY references nested aggregates
+	// Build Sort before Project when ORDER BY references nested aggregates.
+	// Also outside resolveOrderBy's reach (#320): this Sort runs BELOW the
+	// projection, on the aggregate's own output, so the select-list names it
+	// would resolve against are not the ones it reads. resolveOrderByPreProject
+	// maps each term to the aggregate's synthetic output instead.
 	if sortBeforeProject {
 		var orderExprs []OrderExpr
 		for _, ob := range info.OrderBy {
@@ -380,6 +384,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	}
 
 	// PROJECT (SELECT columns)
+	var projectNode *Node
 	if !isStarOnly(info.Columns) {
 		var projections []Projection
 		for i, col := range info.Columns {
@@ -412,6 +417,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			projections = append(projections, p)
 		}
 		plan = NewProject(plan, projections)
+		projectNode = plan
 	}
 
 	// DISTINCT
@@ -419,17 +425,16 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		plan = NewDistinct(plan)
 	}
 
-	// ORDER BY (skip if already sorted before project)
+	// ORDER BY (skip if already sorted before project). resolveOrderBy
+	// materializes any term the Sort's input does not carry and rejects the
+	// ones it cannot — an ORDER BY that resolves to nothing is an error, not
+	// a silently arbitrary order (#320).
 	if len(info.OrderBy) > 0 && !sortBeforeProject {
-		var orderExprs []OrderExpr
-		for _, ob := range info.OrderBy {
-			orderExprs = append(orderExprs, OrderExpr{
-				Column:     resolveOrderByColumn(cleanExpr(ob.Column), info.Columns),
-				Desc:       ob.Desc,
-				NullsFirst: ob.NullsFirst,
-			})
+		child, orderExprs, err := resolveOrderBy(plan, projectNode, info)
+		if err != nil {
+			return nil, err
 		}
-		plan = NewSort(plan, orderExprs)
+		plan = NewSort(child, orderExprs)
 	}
 
 	// LIMIT
@@ -718,7 +723,12 @@ func buildSetOpPlan(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, err
 		plan = NewUnion(leftPlan, rightPlan, info.Union.All)
 	}
 
-	// ORDER BY on the overall set operation
+	// ORDER BY on the overall set operation. Deliberately outside
+	// resolveOrderBy's reach (#320): a set operation's output names come from
+	// its branches, which are planned independently here, so there is no
+	// SELECT list to resolve a term against and no projection to materialize
+	// one onto. A term that names something the union does not emit still
+	// reaches the sort as written.
 	if len(info.OrderBy) > 0 {
 		var orderExprs []OrderExpr
 		for _, ob := range info.OrderBy {

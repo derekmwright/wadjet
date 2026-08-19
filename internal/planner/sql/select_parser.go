@@ -833,7 +833,7 @@ func (p *selectParser) parseOrderByList() ([]OrderByItem, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parsing ORDER BY: %w", err)
 		}
-		item := OrderByItem{Column: expr.String()}
+		item := OrderByItem{Column: expr.String(), Expr: expr}
 		if p.isKeyword(TokenKWDesc) {
 			p.advance()
 			item.Desc = true

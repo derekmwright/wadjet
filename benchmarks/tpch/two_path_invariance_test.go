@@ -70,6 +70,7 @@ package tpch
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -136,6 +137,92 @@ type twoPathQuery struct {
 	// result is a failure. Off for the TPC-H entries — Q18 legitimately
 	// returns 0 rows at this scale.
 	expectRows bool
+	// assertA is an ABSOLUTE assertion on arm A's rows, run in addition to
+	// the two-arm compare. The compare's contract is "the paths agree", not
+	// "the answer is right" — a defect that hits both engines the same way
+	// passes it while both arms are wrong. #320 was exactly that: an ORDER BY
+	// over an expression was ignored on the single-process pipeline AND on the
+	// stage DAG, so the arms agreed on an arbitrary order. Every entry whose
+	// bug could be symmetric carries one of these.
+	assertA func(tb testing.TB, rows []map[string]any)
+}
+
+// assertOrderedBy checks that rows really are in the order the query asked
+// for, by recomputing the sort key from the columns the result carries. The
+// key is often NOT one of those columns — an ORDER BY expression is dropped
+// from the output on purpose — so each caller supplies the derivation.
+func assertOrderedBy[T cmp.Ordered](tb testing.TB, rows []map[string]any, desc bool, label string, keyOf func(map[string]any) T) {
+	tb.Helper()
+	if len(rows) < 2 {
+		tb.Errorf("arm A (single-process) returned %d rows — too few for the row sequence to prove anything about %s", len(rows), label)
+		return
+	}
+	if i, ok := firstOutOfOrder(rows, desc, keyOf); !ok {
+		dir := "ascending"
+		if desc {
+			dir = "descending"
+		}
+		tb.Errorf("arm A (single-process) is not in %s order by %s: row %d has key %v, row %d has %v\n"+
+			"  the ORDER BY was not honoured — rows came back in an arbitrary sequence",
+			dir, label, i-1, keyOf(rows[i-1]), i, keyOf(rows[i]))
+	}
+}
+
+// firstOutOfOrder reports the first row that breaks the ordering, or ok=true
+// when the whole sequence holds.
+func firstOutOfOrder[T cmp.Ordered](rows []map[string]any, desc bool, keyOf func(map[string]any) T) (int, bool) {
+	for i := 1; i < len(rows); i++ {
+		prev, cur := keyOf(rows[i-1]), keyOf(rows[i])
+		if (!desc && cur < prev) || (desc && cur > prev) {
+			return i, false
+		}
+	}
+	return 0, true
+}
+
+// cellText renders a result cell as a string for key derivation.
+func cellText(row map[string]any, col string) string {
+	v, ok := lookupCell(row, col)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprint(v)
+}
+
+// cellNum renders a result cell as a float for key derivation. Reports 0 for
+// a cell that is missing or non-numeric, which shows up as a flat key and
+// fails the ordering assertion rather than passing it vacuously.
+func cellNum(row map[string]any, col string) float64 {
+	v, ok := lookupCell(row, col)
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return float64(n)
+	case int32:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case float32:
+		return float64(n)
+	case float64:
+		return n
+	}
+	f, err := strconv.ParseFloat(fmt.Sprint(v), 64)
+	if err != nil {
+		return 0
+	}
+	return f
+}
+
+// nationOfComment recovers a nation's name from the fixture's n_comment
+// ("Nation ALGERIA comment", datagen.go). It lets a query ORDER BY n_name
+// without selecting it and still be checked absolutely.
+func nationOfComment(row map[string]any) string {
+	c := cellText(row, "n_comment")
+	c = strings.TrimPrefix(c, "Nation ")
+	return strings.TrimSuffix(c, " comment")
 }
 
 // TestTwoPathInvariance runs every corpus query through both coordinator
@@ -204,6 +291,9 @@ func TestTwoPathInvariance(t *testing.T) {
 			}
 
 			compareArms(t, q, localRows, localCols, dagRows, dagCols)
+			if q.assertA != nil {
+				q.assertA(t, localRows)
+			}
 		})
 	}
 
@@ -222,6 +312,19 @@ func TestTwoPathInvariance(t *testing.T) {
 // at the strictness the query's shape allows.
 func compareArms(t *testing.T, q twoPathQuery, localRows []map[string]any, localCols []string, dagRows []map[string]any, dagCols []string) {
 	t.Helper()
+
+	// A materialized ORDER BY term (#320) is the planner's own column: it is
+	// computed, sorted on, and must be gone before the client sees the result.
+	// Both engines drop it in a different place — the gather's projection on
+	// arm B, a trim operator on arm A — so both are checked.
+	for arm, cols := range map[string][]string{"A (single-process)": localCols, "B (stage DAG)": dagCols} {
+		for _, c := range cols {
+			if strings.HasPrefix(c, "__sortkey_") {
+				t.Errorf("arm %s returned the planner's materialized sort column %q; the client asked for %v\n  SQL: %s",
+					arm, c, localCols, q.sql)
+			}
+		}
+	}
 
 	if q.cmp == cmpCount {
 		if diff := len(dagRows) - len(localRows); diff < -q.tolerance || diff > q.tolerance {
@@ -507,6 +610,187 @@ func twoPathCorpus() []twoPathQuery {
 		// ordered compare that regressed to unordered would still pass Q07, and
 		// this entry would not.
 		twoPathQuery{name: "Q07_noorder", cmp: cmpUnordered, sql: stripTrailingOrderBy(TPCHQueries[7].SQL)},
+	)
+
+	// #320: ORDER BY over anything that is not a plain SELECT-list column.
+	// The third member of the #313/#316 family and the widest — the sort key
+	// named a column nothing computed (`year(d)`, `-id`, `a + b`) or one the
+	// SELECT-list Project had already dropped (`ORDER BY b` over `SELECT a`),
+	// matched nothing, and the sort returned its input untouched on BOTH
+	// engines. The two arms therefore agreed while both were unsorted, which
+	// is why every entry here carries an assertA: the compare proves the paths
+	// agree, assertA proves the answer is right.
+	out = append(out,
+		// The issue verbatim, in its function form. The key is not in the
+		// result at all — it is materialized, sorted on, and dropped.
+		twoPathQuery{name: "ExprSortFunction", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_name FROM nation ORDER BY LENGTH(n_name), n_name",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "length(n_name)", func(r map[string]any) int {
+					return len(cellText(r, "n_name"))
+				})
+			}},
+		// DESC, and over a function whose output is a string rather than a
+		// number: the materialized column has to carry its own type, not the
+		// sorted column's.
+		twoPathQuery{name: "ExprSortFunctionDesc", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_name FROM nation ORDER BY UPPER(n_name) DESC",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, true, "upper(n_name)", func(r map[string]any) string {
+					return strings.ToUpper(cellText(r, "n_name"))
+				})
+			}},
+		// Arithmetic over two columns, both of them selected — so the rows
+		// carry everything needed to recompute the key.
+		twoPathQuery{name: "ExprSortArithmetic", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_nationkey, n_regionkey FROM nation ORDER BY n_nationkey + n_regionkey, n_nationkey",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "n_nationkey + n_regionkey", func(r map[string]any) float64 {
+					return cellNum(r, "n_nationkey") + cellNum(r, "n_regionkey")
+				})
+			}},
+		// Negation. Spelled `0 - x` rather than `-x`: a unary minus is typed
+		// as a string by the projection type inference (#310), which orders
+		// "-10" before "-2" — the same result `SELECT -x AS k ... ORDER BY k`
+		// gives today, so it is not this bug. The sibling entry below pins
+		// the unary spelling to two-path agreement only.
+		twoPathQuery{name: "ExprSortNegated", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_nationkey FROM nation ORDER BY 0 - n_nationkey",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, true, "n_nationkey", func(r map[string]any) float64 {
+					return cellNum(r, "n_nationkey")
+				})
+			}},
+		twoPathQuery{name: "ExprSortUnaryMinus", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_nationkey FROM nation ORDER BY -n_nationkey",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				// Two readings are admissible here, and this bug is about
+				// neither. A unary minus is typed as a string by the
+				// projection type inference (#310), so the materialized key
+				// collates "-0" < "-1" < "-10"; typed numerically it would
+				// order 24, 23, 22. `SELECT -n_nationkey AS k ... ORDER BY k`
+				// — the spelling that always worked — gives whichever of the
+				// two the typing produces, so requiring one specific answer
+				// here would gate #310, not #320. What #320 owns is that the
+				// key is EVALUATED AND APPLIED at all: before the fix the rows
+				// came back in scan order, which is neither.
+				_, numeric := firstOutOfOrder(rows, true, func(r map[string]any) float64 {
+					return cellNum(r, "n_nationkey")
+				})
+				_, lexical := firstOutOfOrder(rows, false, func(r map[string]any) string {
+					return "-" + cellText(r, "n_nationkey")
+				})
+				if !numeric && !lexical {
+					tb.Errorf("arm A (single-process) is ordered by neither the numeric nor the string reading of -n_nationkey — "+
+						"the sort key was not applied at all; first rows: %v", rows[:min(5, len(rows))])
+				}
+			}},
+		// Mixed keys: the first is a plain selected column, the second an
+		// expression. Materializing one must not cost the plan the other.
+		twoPathQuery{name: "ExprSortMixedKeys", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_name, n_regionkey FROM nation ORDER BY n_regionkey, LENGTH(n_name), n_name",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "(n_regionkey, length(n_name))", func(r map[string]any) float64 {
+					// One monotone key from both: n_name is at most 25 chars,
+					// so the length never carries into the region digit.
+					return cellNum(r, "n_regionkey")*100 + float64(len(cellText(r, "n_name")))
+				})
+			}},
+		// The same failure with no expression at all: a plain column the
+		// SELECT list does not carry. The Project below the Sort had already
+		// narrowed it away, so the key matched nothing — `SELECT a ORDER BY b`
+		// came back in scan order. ClickBench Q23/Q25 are this shape.
+		twoPathQuery{name: "ColumnSortNotSelected", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_comment FROM nation ORDER BY n_name",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "n_name (recovered from n_comment)", nationOfComment)
+			}},
+		// Star select: there is no SELECT-list projection to hang the
+		// materialized key on, so the planner has to create one that keeps
+		// the star.
+		twoPathQuery{name: "ExprSortStarSelect", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT * FROM nation ORDER BY LENGTH(n_name), n_name",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "length(n_name)", func(r map[string]any) int {
+					return len(cellText(r, "n_name"))
+				})
+			}},
+		// Under a LIMIT, which plans as a top-N rather than a full sort — a
+		// separate builder, and one that must materialize the key too.
+		twoPathQuery{name: "ExprSortTopN", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_name FROM nation ORDER BY LENGTH(n_name) DESC, n_name LIMIT 5",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 5 {
+					tb.Errorf("arm A returned %d rows for LIMIT 5", len(rows))
+				}
+				assertOrderedBy(tb, rows, true, "length(n_name)", func(r map[string]any) int {
+					return len(cellText(r, "n_name"))
+				})
+				// The top 5 by name length at SF0.01 — a sort that merely
+				// ordered the first five arbitrary rows would pass the
+				// monotonicity check above but not this one.
+				if got := len(cellText(rows[0], "n_name")); got != 14 {
+					tb.Errorf("longest nation name in the top-5 is %d chars, want 14 (UNITED KINGDOM)", got)
+				}
+			}},
+		// Over a join, where the materialized key has to land on the join
+		// fragment rather than a scan.
+		twoPathQuery{name: "ExprSortOverJoin", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_name FROM nation JOIN region ON n_regionkey = r_regionkey ORDER BY LENGTH(n_name), n_name",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "length(n_name)", func(r map[string]any) int {
+					return len(cellText(r, "n_name"))
+				})
+			}},
+		// Over a GROUP BY, sorting on a grouped column the SELECT list does
+		// not carry. The Project below the Sort had narrowed it away, so the
+		// single-process path lost the order; the DAG keeps it because its
+		// aggregate stage still emits the group key. Materializing the key
+		// has to leave that DAG resolution intact — the hidden column maps
+		// back through the Project to the group key, not to a name no stage
+		// emits.
+		twoPathQuery{name: "GroupKeySortNotSelected", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT MIN(n_name) AS m FROM nation GROUP BY n_regionkey ORDER BY n_regionkey",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				// One region per row, ordered by regionkey — which is NOT the
+				// alphabetical order of the values, so a lost ORDER BY cannot
+				// coincide with a sorted-looking result.
+				want := []string{"ALGERIA", "ARGENTINA", "CHINA", "FRANCE", "EGYPT"}
+				if len(rows) != len(want) {
+					tb.Fatalf("arm A returned %d rows, want %d (one per region)", len(rows), len(want))
+				}
+				for i, w := range want {
+					if got := cellText(rows[i], "m"); got != w {
+						tb.Errorf("row %d = %q, want %q (regions in n_regionkey order)", i, got, w)
+					}
+				}
+			}},
+		// ORDER BY <position>: the ordinal used to reach the sort as the
+		// literal "1" and match no column at all.
+		twoPathQuery{name: "OrdinalSort", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_name, n_regionkey FROM nation ORDER BY 1",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "select item 1 (n_name)", func(r map[string]any) string {
+					return cellText(r, "n_name")
+				})
+			}},
+		// The controls: the shapes that already worked must keep working, and
+		// they are what made the bug look like an aliasing problem — putting
+		// the expression in the SELECT list fixed it.
+		twoPathQuery{name: "ExprSortSelected", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_name, LENGTH(n_name) AS l FROM nation ORDER BY l, n_name",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "l", func(r map[string]any) float64 {
+					return cellNum(r, "l")
+				})
+			}},
+		twoPathQuery{name: "PlainColumnSort", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_name FROM nation ORDER BY n_name DESC",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, true, "n_name", func(r map[string]any) string {
+					return cellText(r, "n_name")
+				})
+			}},
 	)
 	return out
 }

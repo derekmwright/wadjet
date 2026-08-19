@@ -203,11 +203,18 @@ type Predicate struct {
 
 // Projection is a column expression in a SELECT.
 type Projection struct {
-	Column  string         // column reference
-	Alias   string         // output name
-	Expr    string         // raw expression
+	Column  string // column reference
+	Alias   string // output name
+	Expr    string // raw expression
 	IsAgg   bool
 	ASTExpr plansql.Node // compiled AST expression node (nil for aggregates)
+	// Hidden marks a projection the planner added for its own use rather
+	// than one the user selected: the materialized value of an ORDER BY term
+	// the SELECT list does not carry (#320). It computes and sorts like any
+	// other projection, and is dropped before the rows reach the client —
+	// extractOutputRenames leaves it out of the DAG's output schema, and
+	// hiddenSortTrimOp drops it on the single-process pipeline.
+	Hidden bool
 }
 
 // AggExpr is an aggregation expression.

@@ -414,7 +414,12 @@ type JoinInfo struct {
 
 // OrderByItem describes an ORDER BY element.
 type OrderByItem struct {
-	Column     string
+	Column string
+	// Expr is the parsed form of Column. A sort term that is not a plain
+	// column reference — `year(d)`, `-id`, `a + b`, an ordinal — can only be
+	// honoured by evaluating it, so the logical builder needs the tree, not
+	// just its text (#320). Nil when the item was built without parsing.
+	Expr       Node
 	Desc       bool
 	NullsFirst *bool // nil = default, true = NULLS FIRST, false = NULLS LAST
 }
