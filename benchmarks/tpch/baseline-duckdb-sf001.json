@@ -125,6 +125,17 @@
       "fine": "d62ab7baf1d7440e",
       "coarse": "d62ab7baf1d7440e"
     },
+    "LimitThenOffset": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey"
+      ],
+      "fine": "c1f5358e908e5d30",
+      "coarse": "c1f5358e908e5d30"
+    },
     "NullAggregatesSkipNulls": {
       "source": "duckdb",
       "row_count": 1,
@@ -243,6 +254,47 @@
       ],
       "fine": "8fafadc9bb14cd8b",
       "coarse": "8fafadc9bb14cd8b"
+    },
+    "OffsetAlone": {
+      "source": "duckdb",
+      "row_count": 20,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey"
+      ],
+      "fine": "249240ebd8271ff1",
+      "coarse": "249240ebd8271ff1"
+    },
+    "OffsetOverGroupBy": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_regionkey",
+        "c"
+      ],
+      "fine": "be38ef291057014d",
+      "coarse": "be38ef291057014d"
+    },
+    "OffsetPastEnd": {
+      "source": "duckdb",
+      "row_count": 0,
+      "compare": "count",
+      "ordered": false,
+      "why": "an empty result has no rows to fingerprint; at tolerance 0 the count is the entire answer"
+    },
+    "OffsetThenLimit": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey"
+      ],
+      "fine": "c1f5358e908e5d30",
+      "coarse": "c1f5358e908e5d30"
     },
     "OrderByExpression": {
       "source": "duckdb",
@@ -672,6 +724,50 @@
       ],
       "fine": "c2a596d1f729fee8",
       "coarse": "e2012d9534d82687"
+    },
+    "UnionAllOrderByOrdinal": {
+      "source": "duckdb",
+      "row_count": 10,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "r_regionkey"
+      ],
+      "fine": "9dbc170626101eb3",
+      "coarse": "9dbc170626101eb3"
+    },
+    "UnionAllOrderByOrdinalLimit": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "r_regionkey"
+      ],
+      "fine": "3c7da9432bfaaff4",
+      "coarse": "3c7da9432bfaaff4"
+    },
+    "UnionOrderByOrdinal": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_regionkey"
+      ],
+      "fine": "026d8ad3dfa1f2aa",
+      "coarse": "026d8ad3dfa1f2aa"
+    },
+    "UnionOrderByOrdinalLimit": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_regionkey"
+      ],
+      "fine": "82c1315e6c757f33",
+      "coarse": "82c1315e6c757f33"
     },
     "VarianceFamily": {
       "source": "duckdb",
