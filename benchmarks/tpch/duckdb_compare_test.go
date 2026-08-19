@@ -46,12 +46,6 @@ const (
 	armBoth = "both arms"
 )
 
-// coalesceNestedTypeBug: Ret.Resolve reports a same-as-argument FALLBACK as a
-// confident answer, so NULLIF tells COALESCE it is Float64 and COALESCE never
-// consults the string literal that would have decided it.
-const coalesceNestedTypeBug = "COALESCE over a computed string argument is typed numeric, so every row comes back as 0. " +
-	"Both arms. Tracked as #331."
-
 // TestDuckDBCompare is the cross-engine ground-truth gate: every corpus query
 // runs on BOTH Wadjet execution paths and both answers are held against a
 // fingerprint of DuckDB's answer, stored in
@@ -332,10 +326,6 @@ func duckdbCorpus() []duckdbCase {
 			FROM nation n LEFT JOIN region r ON n.n_regionkey = r.r_regionkey + 100`},
 		// NULL propagates through arithmetic and string building rather than
 		// being treated as an identity element.
-		duckdbCase{name: "NullPropagatesThroughExpressions", sql: `SELECT n_nationkey,
-			NULLIF(n_regionkey, 1) + 1 AS plus, NULLIF(n_name, 'ALGERIA') || '!' AS cat,
-			COALESCE(NULLIF(n_name, 'ALGERIA'), 'fallback') AS coalesced
-			FROM nation ORDER BY n_nationkey`, knownBugArm: armBoth, knownBug: coalesceNestedTypeBug},
 		// Two aliases of one table, both string columns projected — the #314
 		// shape, where the DAG returned NULL for the alias that landed on the
 		// probe side.
@@ -398,7 +388,8 @@ func duckdbCorpus() []duckdbCase {
 			COALESCE(NULLIF(n_name, 'ALGERIA'), 'fallback') AS coalesced,
 			COALESCE(NULLIF(NULLIF(n_name, 'ALGERIA'), 'BRAZIL'), 'twice') AS nested_twice,
 			UPPER(NULLIF(n_name, 'ARGENTINA')) AS null_through_upper,
-			COALESCE(NULLIF(n_regionkey, 0), -1) AS numeric_fallback
+			COALESCE(NULLIF(n_regionkey, 0), -1) AS numeric_fallback,
+			NULLIF(n_regionkey, 1) + 1 AS plus, NULLIF(n_name, 'ALGERIA') || '!' AS cat
 			FROM nation ORDER BY n_nationkey`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through

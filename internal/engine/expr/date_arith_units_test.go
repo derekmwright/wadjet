@@ -191,8 +191,8 @@ func TestDateArithScalarVecAgree(t *testing.T) {
 	b := dateArithBatch(t)
 	for _, c := range dateArithFamily() {
 		t.Run(c.label, func(t *testing.T) {
-			declared, ok := DefaultRegistry.ReturnType(c.fn).Resolve(0, nil)
-			if !ok {
+			declared, conf := DefaultRegistry.ReturnType(c.fn).Resolve(0, nil)
+			if conf == Undecided {
 				t.Fatalf("%s has no declared return type", c.fn)
 			}
 			// A fresh FuncCall per path: EvalVec and Eval must not share

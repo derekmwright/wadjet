@@ -234,12 +234,15 @@
       "ordered": true,
       "columns": [
         "n_nationkey",
+        "coalesced",
+        "nested_twice",
+        "null_through_upper",
+        "numeric_fallback",
         "plus",
-        "cat",
-        "coalesced"
+        "cat"
       ],
-      "fine": "f371addd5fc4ac8a",
-      "coarse": "f371addd5fc4ac8a"
+      "fine": "8fafadc9bb14cd8b",
+      "coarse": "8fafadc9bb14cd8b"
     },
     "OrderByExpression": {
       "source": "duckdb",
