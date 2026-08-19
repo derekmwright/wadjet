@@ -306,8 +306,14 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 		rows = collectSink.ToRows()
 	}
 
-	// Derive column order from the projection list, not map iteration
-	columns := deriveColumns(selectInfo, rows)
+	// Derive column order from the projection list, not map iteration. The
+	// executed plan's output schema is the authority for `SELECT *`, where
+	// the projection list names no columns of its own.
+	var outSchema []parquet.Column
+	if collectSink, ok := pipeline.Sink.(*exec.CollectSink); ok {
+		outSchema = collectSink.Schema()
+	}
+	columns := deriveColumns(selectInfo, rows, outSchema)
 
 	// Derive typed column metadata
 	var metas []ColumnMeta
@@ -522,7 +528,15 @@ func (db *DB) discoverTableSchema(ctx context.Context, tableName string) (parque
 }
 
 // deriveColumns extracts ordered column names from the SELECT projection.
-func deriveColumns(info *plansql.SelectInfo, rows []map[string]any) []string {
+//
+// schema is the executed plan's output schema and outranks the rows for
+// ORDER: a `SELECT *` names no columns in its projection list, and the rows
+// are map[string]any, whose iteration order Go randomizes. Sorting those keys
+// made column order alphabetical rather than the table's own — values landed
+// in the right names and the wrong positions, which anything reading results
+// positionally (a CSV export, INSERT ... SELECT *, a driver binding by index)
+// silently transposes (#342).
+func deriveColumns(info *plansql.SelectInfo, rows []map[string]any, schema []parquet.Column) []string {
 	// Try to derive from projection
 	if info != nil && len(info.Columns) > 0 {
 		// Check for star expansion — need to get columns from result rows
@@ -552,10 +566,21 @@ func deriveColumns(info *plansql.SelectInfo, rows []map[string]any) []string {
 		}
 	}
 
+	// The plan's own output schema: ordered, and what `SELECT *` expanded to.
+	if len(schema) > 0 {
+		cols := make([]string, 0, len(schema))
+		for _, c := range schema {
+			cols = append(cols, c.Name)
+		}
+		return cols
+	}
+
 	// Fallback: get from first row. Sort for deterministic column ordering —
 	// Go map iteration is non-deterministic, which caused column order
 	// mismatches between RowDescription and DataRow in the pgwire Extended
-	// Query Protocol (GitHub issue #9).
+	// Query Protocol (GitHub issue #9). Reached only when the plan exposed
+	// no schema, so alphabetical is the best available answer rather than
+	// the right one.
 	if len(rows) > 0 {
 		cols := make([]string, 0, len(rows[0]))
 		for k := range rows[0] {
