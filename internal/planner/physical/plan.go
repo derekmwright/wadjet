@@ -9716,15 +9716,17 @@ func emitMergeSortTree(stages *[]Stage, sortStageID string, sortKeys []SortKeySp
 	})
 }
 
-// resolveNullsLast determines whether nulls should sort last for a given order expression.
-// Default SQL behavior: NULLS LAST for ASC, NULLS FIRST for DESC.
-// When NullsFirst is explicitly set, use the explicit value.
+// resolveNullsLast determines whether nulls should sort last for a given order
+// expression. An explicit NULLS FIRST / NULLS LAST always wins; otherwise the
+// engine default applies, which is NULLS LAST in BOTH directions — DuckDB's
+// default_null_order, and the placement the engine has always emitted. See
+// distributed.SortKeySpec.PlaceNullsLast, which has to agree with this
+// function key for key or the two execution paths sort differently.
 func resolveNullsLast(ob logical.OrderExpr) bool {
 	if ob.NullsFirst != nil {
 		return !*ob.NullsFirst // NullsFirst=true => NullsLast=false, and vice versa
 	}
-	// Default: ASC => NULLS LAST, DESC => NULLS FIRST
-	return !ob.Desc
+	return true
 }
 
 // isComputedProjection reports whether a SELECT item's value is COMPUTED

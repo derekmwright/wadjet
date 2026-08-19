@@ -579,11 +579,10 @@ type GatherBatchMsg struct {
 type SortKeySpec struct {
 	Column string `json:"column"`
 	Desc   bool   `json:"desc"`
-	// NullsLast places NULLs after the non-NULL values. Nil means the SQL
-	// default for this key's direction — NULLS LAST for ASC, NULLS FIRST
-	// for DESC — which is also the only safe reading of a spec written
-	// before the field existed, since that default is what the SQL asked
-	// for in the first place.
+	// NullsLast places NULLs after the non-NULL values. Nil means the query
+	// wrote no NULLS clause, and takes the engine default — see
+	// PlaceNullsLast — which is also the only safe reading of a spec written
+	// before the field existed.
 	//
 	// Without this the DAG sorted NULLs first unconditionally: ascending
 	// order came back wrong and an explicit NULLS LAST was dropped, while
@@ -591,13 +590,29 @@ type SortKeySpec struct {
 	NullsLast *bool `json:"nulls_last,omitempty"`
 }
 
-// PlaceNullsLast reports where NULLs belong for this key, applying the SQL
+// PlaceNullsLast reports where NULLs belong for this key, applying the engine
 // default when the spec does not say.
+//
+// The default is NULLS LAST in BOTH directions, which is DuckDB's
+// default_null_order and the placement this engine has always emitted. It is
+// deliberately not PostgreSQL's rule (NULLS LAST for ASC, NULLS FIRST for
+// DESC): SQL leaves the default implementation-defined, DuckDB is this
+// repo's correctness oracle, and benchmarks/tpch's stored DuckDB
+// fingerprints pin the DESC default to NULLS LAST. A query that needs the
+// other placement spells it out, and as of #343 the explicit clause is
+// honoured in both directions.
+//
+// The declared default used to read `!s.Desc` here and in the planner's
+// resolveNullsLast, but no query ever saw it: the DESC comparator negated
+// the kernel's null handling along with its value comparison, so a nominal
+// NULLS FIRST for DESC came out of the engine as NULLS LAST. #343 removed
+// that negation, and this constant records what the engine actually emits
+// rather than what the comment used to claim.
 func (s SortKeySpec) PlaceNullsLast() bool {
 	if s.NullsLast != nil {
 		return *s.NullsLast
 	}
-	return !s.Desc
+	return true
 }
 
 // NullsLastPtr returns a pointer suitable for SortKeySpec.NullsLast.

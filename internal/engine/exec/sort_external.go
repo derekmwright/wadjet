@@ -45,6 +45,35 @@ type resolvedSortKey struct {
 	compare kernel.SortCompareKernel
 }
 
+// resolveSortCompareForKey picks the comparison kernel for one sort key.
+//
+// SortKey.NullsLast states where NULLs land in the OUTPUT. The multi-key less
+// functions below apply direction by NEGATING the kernel's result (`cmp > 0`
+// for DESC), and that negation hits the kernel's null handling as well as its
+// value comparison — so a NULLS-LAST kernel under DESC emits NULLs FIRST.
+// Null placement is not a direction-relative property: `ORDER BY k DESC NULLS
+// LAST` asks for NULLs at the end of the descending sequence. The kernel is
+// therefore chosen for the placement that SURVIVES the negation, which is the
+// opposite one under DESC (#343). Before this, both explicit spellings were
+// inverted on a DESC key while the defaults came out right by cancelling
+// against the same negation.
+//
+// A column with no NULLs in any batch takes the null-free kernel, where
+// placement cannot matter.
+func resolveSortCompareForKey(typ batch.TypeID, key SortKey, nullFree bool) kernel.SortCompareKernel {
+	if nullFree {
+		return kernel.ResolveSortCompareNoNulls(typ)
+	}
+	nullsLast := key.NullsLast
+	if key.Order == Descending {
+		nullsLast = !nullsLast
+	}
+	if nullsLast {
+		return kernel.ResolveSortCompareNullsLast(typ)
+	}
+	return kernel.ResolveSortCompare(typ)
+}
+
 // resolveSortKeysForBatches resolves key columns and picks comparison kernels.
 // Null ordering (NULLS FIRST vs NULLS LAST) is baked into kernel selection;
 // the null-free fast kernel is used only when no batch has nulls in the column.
@@ -80,13 +109,7 @@ func resolveSortKeysForBatches(keys []SortKey, batches []*batch.RecordBatch) []r
 					break
 				}
 			}
-			if allNullFree {
-				cmp = kernel.ResolveSortCompareNoNulls(colType)
-			} else if key.NullsLast {
-				cmp = kernel.ResolveSortCompareNullsLast(colType)
-			} else {
-				cmp = kernel.ResolveSortCompare(colType)
-			}
+			cmp = resolveSortCompareForKey(colType, key, allNullFree)
 		}
 		resolved[i] = resolvedSortKey{colIdx: idx, order: key.Order, compare: cmp}
 	}
@@ -374,12 +397,7 @@ func newRunMerger(schema []parquet.Column, keys []SortKey, cursors []*runCursor)
 		if idx >= len(first.Columns) {
 			continue
 		}
-		var cmp kernel.SortCompareKernel
-		if key.NullsLast {
-			cmp = kernel.ResolveSortCompareNullsLast(first.Columns[idx].Type)
-		} else {
-			cmp = kernel.ResolveSortCompare(first.Columns[idx].Type)
-		}
+		cmp := resolveSortCompareForKey(first.Columns[idx].Type, key, false)
 		resolved[i] = resolvedSortKey{colIdx: idx, order: key.Order, compare: cmp}
 	}
 	h := &mergeHeap{cursors: live, resolved: resolved}

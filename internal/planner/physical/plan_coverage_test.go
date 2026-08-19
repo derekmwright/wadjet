@@ -807,30 +807,36 @@ func containsSubstring(s, sub string) bool {
 // --- resolveNullsLast ---
 
 func TestResolveNullsLast(t *testing.T) {
-	// Default ASC => NullsLast=true
-	ob := logical.OrderExpr{Column: "id", Desc: false}
-	if !resolveNullsLast(ob) {
-		t.Error("ASC default should be NullsLast=true")
+	yes, no := true, false
+	cases := []struct {
+		name string
+		ob   logical.OrderExpr
+		want bool
+	}{
+		// The engine default is NULLS LAST in BOTH directions — DuckDB's
+		// default_null_order, and the placement this engine has always
+		// emitted. It used to be declared here as `!ob.Desc` (PostgreSQL's
+		// rule) but no query ever saw that: the DESC comparator negated the
+		// kernel's null handling along with its values, so a nominal NULLS
+		// FIRST for DESC left the engine as NULLS LAST. #343 removed the
+		// negation, and this constant records what the engine emits rather
+		// than what the comment claimed — the stored DuckDB fingerprints in
+		// benchmarks/tpch pin the DESC default to NULLS LAST.
+		{"ASC default", logical.OrderExpr{Column: "id"}, true},
+		{"DESC default", logical.OrderExpr{Column: "id", Desc: true}, true},
+		// An explicit clause wins in BOTH directions. DESC was the broken
+		// pair — both spellings came out inverted (#343).
+		{"ASC NULLS FIRST", logical.OrderExpr{Column: "id", NullsFirst: &yes}, false},
+		{"ASC NULLS LAST", logical.OrderExpr{Column: "id", NullsFirst: &no}, true},
+		{"DESC NULLS FIRST", logical.OrderExpr{Column: "id", Desc: true, NullsFirst: &yes}, false},
+		{"DESC NULLS LAST", logical.OrderExpr{Column: "id", Desc: true, NullsFirst: &no}, true},
 	}
-
-	// Default DESC => NullsLast=false (NullsFirst)
-	ob = logical.OrderExpr{Column: "id", Desc: true}
-	if resolveNullsLast(ob) {
-		t.Error("DESC default should be NullsLast=false")
-	}
-
-	// Explicit NullsFirst=true => NullsLast=false
-	nf := true
-	ob = logical.OrderExpr{Column: "id", Desc: false, NullsFirst: &nf}
-	if resolveNullsLast(ob) {
-		t.Error("NullsFirst=true should make NullsLast=false")
-	}
-
-	// Explicit NullsFirst=false => NullsLast=true
-	nf = false
-	ob = logical.OrderExpr{Column: "id", Desc: true, NullsFirst: &nf}
-	if !resolveNullsLast(ob) {
-		t.Error("NullsFirst=false should make NullsLast=true")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveNullsLast(tc.ob); got != tc.want {
+				t.Errorf("resolveNullsLast = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
