@@ -7248,6 +7248,31 @@ func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.Typ
 	return inferProjectionTypeCols(node, fallback, nil, nil)
 }
 
+// ProjectionOutputType is inferProjectionType for callers outside this
+// package. The worker's pre-aggregate projection compiles a derived GROUP BY
+// key from its SQL TEXT and has no catalog to resolve the columns in it, so it
+// needs the same rule the planner applies to a SELECT-list expression — the
+// same reason distributed.AggSpec.InputType is carried on the spec.
+//
+// It used to declare every derived key String, which is right only when the
+// expression returns one: CAST(l_shipdate AS DATE) evaluates to an epoch-day
+// number, and a String vector stored it as the DIGITS of that number, so the
+// stage DAG grouped by "8039" where the single-process path grouped by
+// 1992-01-05 (#340).
+//
+// Only a DECIDED type is taken. A polymorphic declaration that answered with
+// its own fallback (expr.Guessed) has decided nothing here, because the caller
+// holds no column types for it to consult: COALESCE(n_name, n_comment) would
+// answer Float64 from coalesce's numeric fallback, and a Float64 vector drops
+// every string it is handed — 1 group where there are 25 (#331/#333). The
+// caller's fallback stands in those cases, exactly as before.
+func ProjectionOutputType(node plansql.Node, fallback parquet.TypeID) parquet.TypeID {
+	if t, c := nodeDeclaredType(node, nil); c == expr.Decided {
+		return t
+	}
+	return fallback
+}
+
 // nodeDeclaredType reports the type an expression decides on its own, and how
 // confidently.
 //
@@ -7273,6 +7298,9 @@ func nodeDeclaredType(node plansql.Node, colTypes map[string]parquet.TypeID) (pa
 			// handed the concat kernel an output vector with no BytesData,
 			// so every row came back NULL (#328).
 			return parquet.TypeString, expr.Decided
+		}
+		if t, c := binOpTemporalType(n, colTypes); c != expr.Undecided {
+			return t, c
 		}
 		if !binOpInvolvesInterval(n) {
 			return parquet.TypeFloat64, expr.Decided
@@ -7342,6 +7370,16 @@ func funcReturnType(n *plansql.FuncCallNode, colTypes map[string]parquet.TypeID)
 }
 
 // inferCastType maps SQL type names to parquet types for CAST expressions.
+//
+// DATE and TIMESTAMP name the real column types because expr.Cast now produces
+// their real representation — epoch days / epoch milliseconds — rather than
+// passing its argument through (#340). The declared type is what turns that
+// number back into a date at the output: the projection allocates a DATE
+// vector, whose renderer is batch.FormatDate. Declaring String instead would
+// print the day NUMBER, which is the mirror image of the bug being fixed.
+//
+// TIME stays a string: the engine has no time-of-day column type, so
+// `TIME '10:00:00'` keeps its text, and so does expr.Cast.
 func inferCastType(typeName string) parquet.TypeID {
 	switch strings.ToUpper(strings.TrimSpace(typeName)) {
 	case "INTEGER", "INT", "BIGINT", "INT64":
@@ -7350,9 +7388,109 @@ func inferCastType(typeName string) parquet.TypeID {
 		return parquet.TypeFloat64
 	case "BOOLEAN", "BOOL":
 		return parquet.TypeBool
+	case "DATE":
+		return parquet.TypeDate
+	case "TIMESTAMP", "DATETIME", "TIMESTAMPTZ":
+		return parquet.TypeTimestamp
 	default:
 		return parquet.TypeString
 	}
+}
+
+// binOpTemporalType types the two date-arithmetic shapes expr.BinOp evaluates,
+// so the projection's output column can hold what the evaluator produces —
+// the disagreement #340 is about, in the other direction.
+//
+//	date - date → BIGINT, a count of days
+//	date ± n    → DATE, the day n days away
+//
+// Everything else declines and the caller's numeric/interval rules stand. In
+// particular a TIMESTAMP operand declines: SQL calls that difference an
+// INTERVAL and the engine has no interval column, so expr.BinOp.dateArith
+// leaves it on the numeric path and this must agree.
+func binOpTemporalType(n *plansql.BinaryOp, colTypes map[string]parquet.TypeID) (parquet.TypeID, expr.Confidence) {
+	if n.Op != "+" && n.Op != "-" {
+		return 0, expr.Undecided
+	}
+	lk := nodeTemporalKind(n.Left, colTypes)
+	rk := nodeTemporalKind(n.Right, colTypes)
+	switch {
+	case n.Op == "-" && lk == temporalDay && rk == temporalDay:
+		return parquet.TypeInt64, expr.Decided
+	case lk == temporalDay && nodeIsPlainNumber(n.Right):
+		return parquet.TypeDate, expr.Decided
+	case rk == temporalDay && n.Op == "+" && nodeIsPlainNumber(n.Left):
+		return parquet.TypeDate, expr.Decided
+	}
+	return 0, expr.Undecided
+}
+
+// temporalKind is what an operand of `date ± x` can be.
+//
+// A column the catalog declares VARCHAR counts as a day: that is how the
+// TPC-H fixtures spell every date, and it is how `l_receiptdate - l_shipdate`
+// reaches the operator at all. Nothing is lost by assuming it, because the
+// only values the runtime can produce for a text column here are a day count
+// (when the text parses as a date) and NULL — reading a text column as a
+// number, which is what the caller's Float64 rule does, answers NULL either
+// way.
+type temporalKind int
+
+const (
+	temporalNone temporalKind = iota
+	temporalDay
+	temporalInstant
+)
+
+// nodeTemporalKind reports what kind of temporal value an operand carries: a
+// CAST names one outright, and a column reference has one in the catalog.
+func nodeTemporalKind(node plansql.Node, colTypes map[string]parquet.TypeID) temporalKind {
+	var t parquet.TypeID
+	switch n := node.(type) {
+	case *plansql.ParenNode:
+		return nodeTemporalKind(n.Inner, colTypes)
+	case *plansql.CastNode:
+		t = inferCastType(n.TypeName)
+	case *plansql.ColRef:
+		var ok bool
+		if t, ok = colTypes[strings.ToLower(n.Column)]; !ok {
+			return temporalNone
+		}
+		if t == parquet.TypeString {
+			return temporalDay
+		}
+	default:
+		return temporalNone
+	}
+	switch t {
+	case parquet.TypeDate:
+		return temporalDay
+	case parquet.TypeTimestamp:
+		// An instant difference is an INTERVAL in SQL and this engine has no
+		// interval column to hold one, so expr.BinOp.dateArith declines it
+		// and the caller's numeric rules stand.
+		return temporalInstant
+	}
+	return temporalNone
+}
+
+// nodeIsPlainNumber reports whether an operand is a whole number written into
+// the query — the `n` of `date ± n`. A column or a computed expression is
+// deliberately excluded: its runtime value decides whether expr.BinOp takes
+// the date branch at all, and a projection column typed DATE on a guess would
+// print an integer difference as a date.
+func nodeIsPlainNumber(node plansql.Node) bool {
+	switch n := node.(type) {
+	case *plansql.ParenNode:
+		return nodeIsPlainNumber(n.Inner)
+	case *plansql.Lit:
+		if n.Kind != plansql.LitNumber {
+			return false
+		}
+		_, err := strconv.ParseInt(n.Value, 10, 64)
+		return err == nil
+	}
+	return false
 }
 
 // binOpInvolvesInterval reports whether either operand of a BinaryOp is an

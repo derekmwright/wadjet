@@ -53,6 +53,11 @@ type BinOpNumeric struct {
 	modeOnce sync.Once
 	isInt    bool
 	flt      *BinOpFloat64 // delegate for float mode (keeps its typed fast path)
+	// A column operand of a temporal (or string) type makes `col ± col` and
+	// `col ± n` candidates for DATE arithmetic rather than for reading both
+	// sides as numbers. Resolved with the mode, from the same column types,
+	// and nil for every other operand pair — see BinOp.dateArith (#340).
+	dateNode *BinOp
 }
 
 // operandIsInt reports whether one operand is integer-preserving against
@@ -84,11 +89,36 @@ func operandIsInt(e Expr, b *batch.RecordBatch) bool {
 	}
 }
 
+// temporalColOperand reports whether an operand is a column whose declared
+// type can carry a date: a DATE or TIMESTAMP column, or a text column holding
+// date strings — which is how the TPC-H fixtures (and plenty of real catalogs)
+// spell a date. Nothing else can be one: a resolved integer column is a number
+// in its own right, and every non-column operand already decides its own form.
+func temporalColOperand(e Expr, b *batch.RecordBatch) bool {
+	cr, ok := e.(*ColRef)
+	if !ok || cr.structField != "" {
+		return false
+	}
+	cr.resolve(b)
+	if cr.idx < 0 {
+		return false
+	}
+	switch cr.typ {
+	case batch.TypeDate, batch.TypeTimestamp, batch.TypeString, batch.TypeBytes:
+		return true
+	}
+	return false
+}
+
 func (e *BinOpNumeric) resolveMode(b *batch.RecordBatch) {
 	e.modeOnce.Do(func() {
-		e.isInt = operandIsInt(e.Left, b) && operandIsInt(e.Right, b)
+		e.isInt = intArithToggle.On() && operandIsInt(e.Left, b) && operandIsInt(e.Right, b)
 		if !e.isInt {
 			e.flt = &BinOpFloat64{Left: e.Left, Right: e.Right, Op: e.Op}
+		}
+		if (e.Op == "+" || e.Op == "-") &&
+			(temporalColOperand(e.Left, b) || temporalColOperand(e.Right, b)) {
+			e.dateNode = &BinOp{Left: e.Left, Right: e.Right, Op: e.Op}
 		}
 	})
 }
@@ -100,6 +130,21 @@ func (e *BinOpNumeric) intMode(b *batch.RecordBatch) bool {
 
 func (e *BinOpNumeric) Eval(b *batch.RecordBatch, row int) any {
 	e.resolveMode(b)
+	// A temporal column operand: ask date arithmetic first. It declines for
+	// anything that is not a date (a text column of non-dates, a timestamp
+	// difference, a fractional shift) and the numeric answer below stands
+	// unchanged — so `l_receiptdate - l_shipdate` becomes the day count it
+	// always meant instead of NULL, and nothing else moves (#340).
+	if e.dateNode != nil {
+		lv := e.Left.Eval(b, row)
+		rv := e.Right.Eval(b, row)
+		if lv == nil || rv == nil {
+			return nil
+		}
+		if res, ok := e.dateNode.dateArith(b, row, lv, rv); ok {
+			return res
+		}
+	}
 	if !e.isInt {
 		return e.flt.Eval(b, row)
 	}

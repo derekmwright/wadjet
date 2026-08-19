@@ -402,6 +402,11 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 				return intervalShift(dv, iv, false)
 			}
 		}
+		// date - date and date ± n. Declines for everything that is not
+		// date arithmetic, leaving the numeric path below untouched (#340).
+		if res, ok := e.dateArith(b, row, lv, rv); ok {
+			return res
+		}
 	}
 
 	lf := ToFloat64(lv)
@@ -1236,6 +1241,24 @@ var stringInputFuncs = map[string]bool{
 // computed date into a string function).
 func (e *FuncCall) formatTemporalArgs(args []any) {
 	for i, a := range e.Args {
+		// A CAST to a temporal type boxes its result exactly as the matching
+		// column does (#340), so it needs the same rendering before a string
+		// function reads it — otherwise SUBSTR(CAST(d AS DATE), 1, 4)
+		// substrings the epoch-day digits, which is the #273 defect reached
+		// through the cast instead of through the column.
+		if c, ok := a.(*Cast); ok {
+			v, isInt := args[i].(int64)
+			if !isInt {
+				continue
+			}
+			switch castTemporalKind(c.DestType) {
+			case castToDateKind:
+				args[i] = batch.FormatDate(int32(v))
+			case castToTimestampKind:
+				args[i] = batch.FormatTimestamp(v)
+			}
+			continue
+		}
 		cr, ok := a.(*ColRef)
 		if !ok || cr.typ != batch.TypeDate {
 			continue
@@ -1319,6 +1342,30 @@ func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any
 		if args[i] == nil {
 			continue
 		}
+		// A CAST to a temporal type is a column value in all but name once
+		// #340 made it box epoch days / epoch milliseconds, and it loses the
+		// unit at exactly the same point. Resolve it here for the same reason
+		// and by the same rule, or YEAR(CAST(d AS DATE)) reads 9505 days as
+		// 9505 seconds and answers 1970 — the #319 defect, reached through
+		// the cast instead of through the column.
+		if c, ok := a.(*Cast); ok {
+			v, isInt := args[i].(int64)
+			if !isInt {
+				continue
+			}
+			switch castTemporalKind(c.DestType) {
+			case castToDateKind:
+				t := time.Unix(v*86400, 0).UTC()
+				if e.wantsDateKind {
+					args[i] = civilDate{t: t}
+				} else {
+					args[i] = t
+				}
+			case castToTimestampKind:
+				args[i] = time.UnixMilli(v).UTC()
+			}
+			continue
+		}
 		cr, ok := a.(*ColRef)
 		if !ok || cr.structField != "" {
 			continue
@@ -1353,12 +1400,33 @@ func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any
 // civilDate for the same reason it is there: the result renders, and a whole
 // day must render as a calendar date.
 //
+// A CAST to a temporal type is resolved the same way and for the same reason:
+// it now BOXES its result the way the matching column type does (epoch days /
+// epoch milliseconds, see castTemporal), so the unit lives in the destination
+// type rather than in the number. Without this case `DATE '1998-12-01' -
+// INTERVAL '90' DAY` — TPC-H Q1's filter, and every typed date literal, which
+// the parser lowers to a CAST — would have fallen straight through to numeric
+// arithmetic once #340 stopped the cast passing its text along.
+//
 // Text passes through as text, keeping the string path's own rendering.
 // Everything else — a bare integer, a computed expression, a column of any
 // other type — declines, and the caller's numeric arithmetic runs unchanged.
 func temporalOperand(b *batch.RecordBatch, row int, e Expr, v any) (any, bool) {
 	if s, ok := v.(string); ok {
 		return s, true
+	}
+	if c, ok := e.(*Cast); ok {
+		n, isInt := v.(int64)
+		if !isInt {
+			return nil, false
+		}
+		switch castTemporalKind(c.DestType) {
+		case castToDateKind:
+			return civilDate{t: time.Unix(n*86400, 0).UTC()}, true
+		case castToTimestampKind:
+			return time.UnixMilli(n).UTC(), true
+		}
+		return nil, false
 	}
 	cr, ok := e.(*ColRef)
 	if !ok || cr.structField != "" {
@@ -3903,7 +3971,7 @@ func (e *ExistsSubquery) EvalBool(_ *batch.RecordBatch, _ int) bool {
 // Cast wraps an expression with explicit type conversion.
 type Cast struct {
 	Operand  Expr
-	DestType string // "int", "float", "string"
+	DestType string // "int", "float", "string", "date", "timestamp"
 }
 
 func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
@@ -3911,7 +3979,14 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	if v == nil {
 		return nil
 	}
-	switch strings.ToLower(e.DestType) {
+	// One normalization for both the temporal check and the switch: this
+	// runs per row, and a WHERE over a typed date literal evaluates it once
+	// per row of the scan.
+	dest := strings.ToLower(e.DestType)
+	if k := castTemporalKindLower(strings.TrimSpace(dest)); k != castNotTemporal {
+		return castTemporal(b, row, e.Operand, v, k)
+	}
+	switch dest {
 	case "int", "integer", "bigint", "signed":
 		return int64(ToFloat64(v))
 	case "float", "double", "real":
@@ -8979,4 +9054,170 @@ func columnInstant(src *batch.Vector, i int) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+// --- CAST to a temporal type, and the arithmetic that reads its result ---
+
+// castTemporalKindT names the destination types CAST resolves to a temporal
+// VALUE rather than leaving to the generic conversions. TIME is deliberately
+// absent: the engine has no time-of-day type to hold one, so `TIME '10:00:00'`
+// keeps its text exactly as before.
+type castTemporalKindT int
+
+const (
+	castNotTemporal castTemporalKindT = iota
+	castToDateKind
+	castToTimestampKind
+)
+
+func castTemporalKind(destType string) castTemporalKindT {
+	return castTemporalKindLower(strings.ToLower(strings.TrimSpace(destType)))
+}
+
+// castTemporalKindLower is castTemporalKind for a caller that has already
+// normalized the name — Cast.Eval, which needs the lowercased form for its own
+// switch and runs once per row.
+func castTemporalKindLower(dest string) castTemporalKindT {
+	switch dest {
+	case "date":
+		return castToDateKind
+	case "timestamp", "datetime", "timestamptz":
+		return castToTimestampKind
+	}
+	return castNotTemporal
+}
+
+// castTemporal is CAST(x AS DATE) / CAST(x AS TIMESTAMP).
+//
+// Both produce the box the corresponding COLUMN type produces: epoch DAYS for
+// DATE, epoch MILLISECONDS for TIMESTAMP, both int64 — the same values
+// ColRef.Eval hands out for a batch.TypeDate / batch.TypeTimestamp column, and
+// the same values batch.Vector.SetValue stores back into one. That identity is
+// the whole point of the fix (#340): until now the cast returned its argument
+// unchanged, so `CAST('1996-01-10' AS DATE) - 1` subtracted 1 from the number
+// ToFloat64 read out of the TEXT's leading digits and answered 1995.
+//
+// The operand resolves through temporalOperand — the #332 helper — so a DATE
+// column arrives as a civilDate and a TIMESTAMP column as a time.Time, with
+// the unit their bare int64 box has lost recovered from the declared column
+// type; parseDateArg (#322) then reads whichever form arrived. Nothing here
+// parses a column value itself, so the cast cannot disagree with date_add,
+// date_diff or `date ± INTERVAL` about what a column means.
+//
+// An operand that resolves to no instant at all becomes NULL. The expression
+// layer has no per-row error channel — every other coercion failure in this
+// file answers NULL — so a silent pass-through of the original value (which is
+// what #340 was) is the one outcome ruled out. DuckDB raises here and its
+// TRY_CAST returns NULL; this is TRY_CAST's rule.
+func castTemporal(b *batch.RecordBatch, row int, operand Expr, v any, kind castTemporalKindT) any {
+	src, ok := temporalOperand(b, row, operand, v)
+	if !ok {
+		src = v
+	}
+	t, _, ok := parseDateArg(src)
+	if !ok {
+		return nil
+	}
+	if kind == castToDateKind {
+		return epochDaysOf(t)
+	}
+	return t.UTC().UnixMilli()
+}
+
+// epochDaysOf floors an instant to the UTC day it falls in and returns that
+// day's distance from 1970-01-01 — the DATE column representation.
+func epochDaysOf(t time.Time) int64 {
+	secs := t.UTC().Unix()
+	days := secs / 86400
+	if secs < 0 && secs%86400 != 0 {
+		days--
+	}
+	return days
+}
+
+// dateArith is `date - date` and `date ± n`, the two shapes BinOp.Eval must
+// recognize once CAST produces a real date (#340).
+//
+// Operands resolve through temporalOperand, so every form the engine has for a
+// date is accepted on equal terms: a DATE/TIMESTAMP column, a CAST to one, and
+// a date-shaped string — which is what a DATE column looks like when the
+// catalog declares it VARCHAR, as the TPC-H fixtures do. `l_receiptdate -
+// l_shipdate` is exactly that shape, and it answered NULL on every row.
+//
+//	date - date → the whole number of days between them (DuckDB: BIGINT)
+//	date ± n    → the date n days away, as epoch days (DuckDB: DATE)
+//
+// Both are gated on the operands being whole DAYS. An instant carrying a clock
+// declines and falls through to the arithmetic below, because
+// timestamp-minus-timestamp is an INTERVAL in SQL and this engine has no
+// interval column type to answer with — inventing a unit here is the mistake
+// #319 and #322 were about. `date ± INTERVAL` is not handled here either: that
+// is intervalShift, which keeps the rendered-string result #322 pinned for it.
+//
+// ok=false means "not date arithmetic" and leaves the caller's numeric path
+// untouched — including the case where an operand is a string that does not
+// parse as a date, which is how `'BUILDING' - 1` keeps its old answer.
+func (e *BinOp) dateArith(b *batch.RecordBatch, row int, lv, rv any) (any, bool) {
+	ld, lok := temporalOperand(b, row, e.Left, lv)
+	if !lok {
+		// `n + date`, the one reversed shape that means anything.
+		if e.Op != "+" {
+			return nil, false
+		}
+		n, nok := plainDayCount(lv)
+		if !nok {
+			return nil, false
+		}
+		rd, rok := temporalOperand(b, row, e.Right, rv)
+		if !rok {
+			return nil, false
+		}
+		rt, dateOnly, parsed := parseDateArg(rd)
+		if !parsed || !dateOnly {
+			return nil, false
+		}
+		return epochDaysOf(rt.AddDate(0, 0, int(n))), true
+	}
+	lt, lDateOnly, lparsed := parseDateArg(ld)
+	if !lparsed {
+		return nil, false
+	}
+	if rd, rok := temporalOperand(b, row, e.Right, rv); rok {
+		rt, rDateOnly, rparsed := parseDateArg(rd)
+		if !rparsed || e.Op != "-" || !lDateOnly || !rDateOnly {
+			return nil, false
+		}
+		return epochDaysOf(lt) - epochDaysOf(rt), true
+	}
+	n, nok := plainDayCount(rv)
+	if !nok || !lDateOnly {
+		return nil, false
+	}
+	if e.Op == "-" {
+		n = -n
+	}
+	return epochDaysOf(lt.AddDate(0, 0, int(n))), true
+}
+
+// plainDayCount reads the non-date side of `date ± n` as a whole number of
+// days. A fractional float declines rather than truncating, so the caller
+// falls through to ordinary arithmetic instead of quietly rounding a date.
+func plainDayCount(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int32:
+		return int64(n), true
+	case int:
+		return int64(n), true
+	case float64:
+		if n == math.Trunc(n) {
+			return int64(n), true
+		}
+	case float32:
+		if float64(n) == math.Trunc(float64(n)) {
+			return int64(n), true
+		}
+	}
+	return 0, false
 }

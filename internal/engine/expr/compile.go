@@ -515,7 +515,14 @@ func compileBinOp(left, right Expr, op string) Expr {
 		// Division stays float unconditionally.
 		ln, lnOk := left.(numericOperand)
 		rn, rnOk := right.(numericOperand)
-		if lnOk && rnOk && op != "/" && intArithToggle.On() &&
+		// The int-arith kill switch is read inside resolveMode rather than
+		// here, so which NODE is built no longer depends on it: a disabled
+		// switch means BinOpNumeric resolves to its float delegate, which is
+		// bit-identical to the BinOpFloat64 below. Keeping the node choice
+		// switch-independent is what keeps `date_col - date_col` (resolved in
+		// the same place, from the same column types — #340) answering the
+		// same on both settings.
+		if lnOk && rnOk && op != "/" &&
 			possiblyIntAtRuntime(left) && possiblyIntAtRuntime(right) {
 			return &BinOpNumeric{Left: ln, Right: rn, Op: op}
 		}

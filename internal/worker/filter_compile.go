@@ -7,6 +7,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -146,7 +147,15 @@ func buildAggInputProjection(
 			e := compiled
 			projCols = append(projCols, exec.ProjectColumn{
 				Name: c,
-				Type: parquet.TypeString, // actual type resolved at first batch
+				// The planner's rule for the same expression. Nothing
+				// resolves this at the first batch — exec.Project types a
+				// COMPUTED output from the declaration and never from the
+				// value — so a blanket String held only for keys that really
+				// are strings. CAST(l_shipdate AS DATE) evaluates to an
+				// epoch-day number and grouped as the digits of that number
+				// (#340). String stays the fallback for anything the rule
+				// leaves undecided, which is what it was standing in for.
+				Type: physical.ProjectionOutputType(node, parquet.TypeString),
 				Expr: func(b *batch.RecordBatch, row int) any {
 					return e.Eval(b, row)
 				},

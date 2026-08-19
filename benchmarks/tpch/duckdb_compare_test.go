@@ -1185,6 +1185,53 @@ func duckdbCorpus() []duckdbCase {
 			SUM(n_regionkey) OVER (ORDER BY n_regionkey
 			  RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS s_all
 			FROM nation ORDER BY n_nationkey`},
+		// #340 — CAST(x AS DATE) returned its argument unchanged, so nothing
+		// downstream knew a date had been asked for and every date rule
+		// reasoned about the text. DuckDB is the only thing here that can say
+		// what the answers should be, and the wrong ones were all plausible
+		// numbers rather than errors or NULLs.
+		//
+		// The two statements the issue names, run verbatim over one row. gap
+		// answered 0 (ToFloat64 read 1996 out of each string and subtracted
+		// them) and prev answered 1995 (1996 - 1). Both are the kind of
+		// number a reader accepts.
+		duckdbCase{name: "DateCastLiteralArithmetic", sql: `SELECT
+			DATE '1996-01-10' - DATE '1996-01-01' AS gap,
+			CAST('1996-01-10' AS DATE) - 1 AS prev,
+			CAST('1996-01-10' AS DATE) + 5 AS nxt,
+			CAST('1996-01-10' AS DATE) AS d
+			FROM region WHERE r_regionkey = 0`},
+		// The per-row form: a shipping lag over real rows, which came back 0
+		// on every line of lineitem. A row count, a NULL check and a value
+		// signature all pass on a column of zeros — only a cross-engine
+		// comparison of the VALUES sees it.
+		duckdbCase{name: "DateCastShippingLag", sql: `SELECT l_orderkey, l_linenumber,
+			CAST(l_receiptdate AS DATE) - CAST(l_shipdate AS DATE) AS lag
+			FROM lineitem WHERE l_orderkey <= 10 ORDER BY l_orderkey, l_linenumber`},
+		// The cast's result as a GROUP BY key: the groups have to be dates,
+		// and they have to be the SAME dates DuckDB groups by.
+		duckdbCase{name: "DateCastGroupKey", sql: `SELECT CAST(l_shipdate AS DATE) AS k, COUNT(*) AS c
+			FROM lineitem WHERE l_shipdate < '1992-01-20'
+			GROUP BY CAST(l_shipdate AS DATE) ORDER BY k`},
+		// Compared against another date, and carried through MIN/MAX — the
+		// two places a date that is secretly a number stops ordering the way
+		// a calendar does.
+		duckdbCase{name: "DateCastComparison", sql: `SELECT COUNT(*) AS c FROM lineitem
+			WHERE CAST(l_shipdate AS DATE) < DATE '1994-01-01'`},
+		duckdbCase{name: "DateCastMinMax", sql: `SELECT MIN(CAST(l_shipdate AS DATE)) AS mn,
+			MAX(CAST(l_shipdate AS DATE)) AS mx FROM lineitem`},
+		// CAST(x AS TIMESTAMP) is the other half of the pair: leaving it
+		// inert while DATE worked would be a new asymmetry. It is compared
+		// through shapes both engines render identically — a cast back down
+		// to a day, a date part, and a comparison against a typed literal —
+		// because Wadjet boxes a TIMESTAMP as epoch milliseconds everywhere
+		// and renders it at the renderers, exactly as a TIMESTAMP column does.
+		duckdbCase{name: "TimestampCastThroughDate", sql: `SELECT o_orderkey,
+			CAST(CAST(o_orderdate AS TIMESTAMP) AS DATE) AS d,
+			YEAR(CAST(o_orderdate AS TIMESTAMP)) AS y
+			FROM orders WHERE o_orderkey <= 10 ORDER BY o_orderkey`},
+		duckdbCase{name: "TimestampCastComparison", sql: `SELECT COUNT(*) AS c FROM lineitem
+			WHERE CAST(l_shipdate AS TIMESTAMP) < TIMESTAMP '1994-01-01 00:00:00'`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

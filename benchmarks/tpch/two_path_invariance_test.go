@@ -2579,7 +2579,99 @@ func twoPathCorpus() []twoPathQuery {
 					}
 				}
 			}},
+		// #340 — CAST(x AS DATE). The cast produces a value the projection
+		// then has to declare a type for, so the shape has two independent
+		// halves that can disagree: what the evaluator computes and what
+		// the output column can hold. The stage DAG builds its projections
+		// from the same planner rules but materializes every stage to S3 in
+		// between, so a date that survives in-process and a date that
+		// survives a round trip through a parquet column are two claims.
+		twoPathQuery{name: "DateCastLiteralArithmetic", cmp: cmpUnordered,
+			sql: `SELECT DATE '1996-01-10' - DATE '1996-01-01' AS gap,
+				CAST('1996-01-10' AS DATE) - 1 AS prev, CAST('1996-01-10' AS DATE) + 5 AS nxt,
+				CAST('1996-01-10' AS DATE) AS d FROM region WHERE r_regionkey = 0`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				if got := cellNum(rows[0], "gap"); got != 9 {
+					tb.Errorf("DATE '1996-01-10' - DATE '1996-01-01' = %v, want 9 "+
+						"(0 means both operands were still strings)", got)
+				}
+				for _, c := range []struct{ col, want string }{
+					{"prev", "1996-01-09"}, {"nxt", "1996-01-15"}, {"d", "1996-01-10"},
+				} {
+					if got := cellText(rows[0], c.col); got != c.want {
+						tb.Errorf("%s = %q, want %q", c.col, got, c.want)
+					}
+				}
+			}},
+		// The per-row form over real rows: a shipping lag that is the same
+		// number on every line is the defect, not an answer.
+		twoPathQuery{name: "DateCastShippingLag", cmp: cmpOrdered,
+			sql: `SELECT l_orderkey, l_linenumber, l_shipdate, l_receiptdate,
+				CAST(l_receiptdate AS DATE) - CAST(l_shipdate AS DATE) AS lag
+				FROM lineitem WHERE l_orderkey <= 10 ORDER BY l_orderkey, l_linenumber`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) == 0 {
+					tb.Fatal("no rows")
+				}
+				// The dates themselves are projected beside the lag, so the
+				// answer is checked against the calendar rather than against
+				// itself. Both operands used to reach the operator as text
+				// and ToFloat64 read a YEAR out of each, which is 0 within a
+				// year and looks varied across one — the shape a
+				// "the answers differ from each other" check would pass.
+				distinct := map[float64]bool{}
+				for _, r := range rows {
+					ship, serr := time.Parse("2006-01-02", cellText(r, "l_shipdate"))
+					recv, rerr := time.Parse("2006-01-02", cellText(r, "l_receiptdate"))
+					if serr != nil || rerr != nil {
+						tb.Fatalf("fixture dates are not calendar dates: %v / %v",
+							cellText(r, "l_shipdate"), cellText(r, "l_receiptdate"))
+					}
+					want := recv.Sub(ship).Hours() / 24
+					got := cellNum(r, "lag")
+					if got != want {
+						tb.Errorf("l_orderkey %v line %v: %s - %s = %v, want %v days",
+							cellText(r, "l_orderkey"), cellText(r, "l_linenumber"),
+							cellText(r, "l_receiptdate"), cellText(r, "l_shipdate"), got, want)
+					}
+					distinct[got] = true
+				}
+				if len(distinct) < 2 {
+					tb.Errorf("every row answered the same lag (%v) — a constant column is the defect",
+						cellNum(rows[0], "lag"))
+				}
+			}},
+		twoPathQuery{name: "DateCastGroupKey", cmp: cmpOrdered,
+			sql: `SELECT CAST(l_shipdate AS DATE) AS k, COUNT(*) AS c FROM lineitem
+				WHERE l_shipdate < '1992-01-20' GROUP BY CAST(l_shipdate AS DATE) ORDER BY k`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) == 0 {
+					tb.Fatal("no rows")
+				}
+				for _, r := range rows {
+					if got := cellText(r, "k"); len(got) != 10 || got[4] != '-' || got[7] != '-' {
+						tb.Fatalf("group key %q is not a calendar date", got)
+					}
+				}
+			}},
+		twoPathQuery{name: "DateCastComparison", cmp: cmpUnordered,
+			sql: `SELECT COUNT(*) AS c FROM lineitem WHERE CAST(l_shipdate AS DATE) < DATE '1994-01-01'`},
+		twoPathQuery{name: "DateCastMinMax", cmp: cmpUnordered,
+			sql: `SELECT MIN(CAST(l_shipdate AS DATE)) AS mn, MAX(CAST(l_shipdate AS DATE)) AS mx FROM lineitem`},
+		// The TIMESTAMP half, through the shapes that render the same on
+		// both paths.
+		twoPathQuery{name: "TimestampCastThroughDate", cmp: cmpOrdered,
+			sql: `SELECT o_orderkey, CAST(CAST(o_orderdate AS TIMESTAMP) AS DATE) AS d,
+				YEAR(CAST(o_orderdate AS TIMESTAMP)) AS y
+				FROM orders WHERE o_orderkey <= 10 ORDER BY o_orderkey`},
+		twoPathQuery{name: "TimestampCastComparison", cmp: cmpUnordered,
+			sql: `SELECT COUNT(*) AS c FROM lineitem
+				WHERE CAST(l_shipdate AS TIMESTAMP) < TIMESTAMP '1994-01-01 00:00:00'`},
 	)
+
 	return out
 }
 
