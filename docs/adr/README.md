@@ -29,3 +29,5 @@ Conventions:
 | [0009](0009-worker-scratch-lifecycle.md) | Worker scratch lifecycle: adopt-into-cache, paced asynchronous purge | Accepted |
 | [0010](0010-shuffle-wire-formats.md) | WSHF/WSHC shuffle formats and where compression happens | Accepted |
 | [0011](0011-performance-measurement-methodology.md) | Performance measurement methodology at SF100 | Accepted |
+| [0012](0012-sql-semantics-authority.md) | PostgreSQL is the SQL semantics authority; DuckDB is the performance goal and an oracle | Accepted |
+| [0013](0013-correctness-gates-and-their-boundaries.md) | The correctness gates, and what they deliberately do not gate | Accepted |
