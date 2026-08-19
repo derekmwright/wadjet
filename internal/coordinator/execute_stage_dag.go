@@ -2514,7 +2514,7 @@ func (c *Coordinator) dispatchComputeStage(
 		// Convert stage.SortKeys → distributed.SortKeySpec.
 		var sorts []distributed.SortKeySpec
 		for _, s := range stage.SortKeys {
-			sorts = append(sorts, distributed.SortKeySpec{Column: s.Column, Desc: s.Desc})
+			sorts = append(sorts, distributed.SortKeySpec{Column: s.Column, Desc: s.Desc, NullsLast: distributed.NullsLastPtr(s.NullsLast)})
 		}
 		// Translate planner-side FusedJoinSpec (carries BuildDepStage) into
 		// wire-side FusedJoinSpec (carries BuildFiles) by looking up each
@@ -3781,7 +3781,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	// separate sort task.
 	var sorts []distributed.SortKeySpec
 	for _, s := range stage.SortKeys {
-		sorts = append(sorts, distributed.SortKeySpec{Column: s.Column, Desc: s.Desc})
+		sorts = append(sorts, distributed.SortKeySpec{Column: s.Column, Desc: s.Desc, NullsLast: distributed.NullsLastPtr(s.NullsLast)})
 	}
 
 	// Phase 2: single final merge task over the intermediate outputs.
@@ -4251,7 +4251,7 @@ func (c *Coordinator) dispatchGatherStage(
 	case physical.StageHashJoin, physical.StageBroadcastJoin, physical.StageSortMergeJoin,
 		"aggregate", "final_aggregate":
 		for _, o := range depStage.SortKeys {
-			ordering = append(ordering, distributed.SortKeySpec{Column: o.Column, Desc: o.Desc})
+			ordering = append(ordering, distributed.SortKeySpec{Column: o.Column, Desc: o.Desc, NullsLast: distributed.NullsLastPtr(o.NullsLast)})
 		}
 	}
 

@@ -2048,8 +2048,10 @@ func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distribu
 }
 
 // buildFragmentSort constructs an exec.Sort from an OpSpec. Converts each
-// SortKeySpec.Desc into exec.Descending. Spill is wired from the executor's
-// shared spill manager when present.
+// SortKeySpec.Desc into exec.Descending and carries its null placement, which
+// defaults to what the SQL means for the direction rather than to Go's zero
+// value — the zero value put NULLs first in ascending order (#330). Spill is
+// wired from the executor's shared spill manager when present.
 func (e *Executor) buildFragmentSort(spec distributed.OpSpec) (*exec.Sort, error) {
 	if len(spec.SortKeySpecs) == 0 {
 		return nil, fmt.Errorf("sort: SortKeySpecs required")
@@ -2060,7 +2062,7 @@ func (e *Executor) buildFragmentSort(spec distributed.OpSpec) (*exec.Sort, error
 		if k.Desc {
 			order = exec.Descending
 		}
-		keys[i] = exec.SortKey{Column: k.Column, Order: order}
+		keys[i] = exec.SortKey{Column: k.Column, Order: order, NullsLast: k.PlaceNullsLast()}
 	}
 	sorter := exec.NewSort(keys)
 	if e.sharedSpill != nil {

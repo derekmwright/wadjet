@@ -502,7 +502,29 @@ type GatherBatchMsg struct {
 type SortKeySpec struct {
 	Column string `json:"column"`
 	Desc   bool   `json:"desc"`
+	// NullsLast places NULLs after the non-NULL values. Nil means the SQL
+	// default for this key's direction — NULLS LAST for ASC, NULLS FIRST
+	// for DESC — which is also the only safe reading of a spec written
+	// before the field existed, since that default is what the SQL asked
+	// for in the first place.
+	//
+	// Without this the DAG sorted NULLs first unconditionally: ascending
+	// order came back wrong and an explicit NULLS LAST was dropped, while
+	// descending was correct by accident (#330).
+	NullsLast *bool `json:"nulls_last,omitempty"`
 }
+
+// PlaceNullsLast reports where NULLs belong for this key, applying the SQL
+// default when the spec does not say.
+func (s SortKeySpec) PlaceNullsLast() bool {
+	if s.NullsLast != nil {
+		return *s.NullsLast
+	}
+	return !s.Desc
+}
+
+// NullsLastPtr returns a pointer suitable for SortKeySpec.NullsLast.
+func NullsLastPtr(v bool) *bool { return &v }
 
 // WindowColSpec defines a window function column in a task.
 type WindowColSpec struct {

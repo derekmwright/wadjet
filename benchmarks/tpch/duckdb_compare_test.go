@@ -61,14 +61,6 @@ const (
 // DAG was held to ground truth — and the generated SF0.01 fixture the
 // two-path suite uses has parts matching Q17's predicate, so its join is not
 // empty there and the shape never arises.
-// dagNullOrderingBug: distributed.SortKeySpec carries Column and Desc and
-// nothing about null placement, so the DAG sorts NULLs first regardless of
-// what the SQL asked for. ASC is wrong (SQL says NULLS LAST); DESC is right
-// by accident, which is why only the ascending entries below fail.
-const dagNullOrderingBug = "the stage DAG ignores NULLS FIRST/LAST and sorts NULLs first unconditionally: " +
-	"ascending order is wrong, descending is correct by accident, and an explicit NULLS LAST is dropped. " +
-	"Single-process is correct. Tracked as #330."
-
 // coalesceNestedTypeBug: Ret.Resolve reports a same-as-argument FALLBACK as a
 // confident answer, so NULLIF tells COALESCE it is Float64 and COALESCE never
 // consults the string literal that would have decided it.
@@ -338,15 +330,15 @@ func duckdbCorpus() []duckdbCase {
 			COUNT(NULLIF(n_regionkey, n_regionkey)) AS c FROM nation`},
 		// NULLs form ONE group, and it survives GROUP BY.
 		duckdbCase{name: "NullGroupsTogether", sql: `SELECT NULLIF(n_regionkey, 1) AS k, COUNT(*) AS c
-			FROM nation GROUP BY NULLIF(n_regionkey, 1) ORDER BY k`, knownBugArm: armDAG, knownBug: dagNullOrderingBug},
+			FROM nation GROUP BY NULLIF(n_regionkey, 1) ORDER BY k`},
 		// Sort placement: PostgreSQL and DuckDB put NULLS LAST for ASC and
 		// NULLS FIRST for DESC. Both directions, because a single default
 		// can be right by accident.
-		duckdbCase{name: "NullOrderingAsc", sql: "SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation ORDER BY k, n_name", knownBugArm: armDAG, knownBug: dagNullOrderingBug},
+		duckdbCase{name: "NullOrderingAsc", sql: "SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation ORDER BY k, n_name"},
 		duckdbCase{name: "NullOrderingDesc", sql: "SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation ORDER BY k DESC, n_name"},
 		// DISTINCT treats NULLs as equal to each other — the one place SQL
 		// does — so exactly one NULL comes back.
-		duckdbCase{name: "NullDistinct", sql: "SELECT DISTINCT NULLIF(n_regionkey, 1) AS k FROM nation ORDER BY k", knownBugArm: armDAG, knownBug: dagNullOrderingBug},
+		duckdbCase{name: "NullDistinct", sql: "SELECT DISTINCT NULLIF(n_regionkey, 1) AS k FROM nation ORDER BY k"},
 		// A comparison against NULL is UNKNOWN, so it neither matches nor
 		// anti-matches; only IS NULL finds those rows.
 		duckdbCase{name: "NullComparisonNeverMatches", sql: `SELECT
