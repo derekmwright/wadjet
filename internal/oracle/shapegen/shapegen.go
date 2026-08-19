@@ -1,0 +1,1186 @@
+// Package shapegen generates random-but-valid SQL over a described schema,
+// aimed at the shapes a BI client emits and the fixed benchmark corpus does
+// not contain.
+//
+// It is a second generator alongside sqlgen, not a replacement: sqlgen targets
+// the distributed-execution breakers (aggregate-free GROUP BY, dedup past a
+// shuffle, scalar-subquery HAVING thresholds) with a flat clause model.
+// shapegen targets NAME RESOLUTION and ORDER BY — table aliases, self-joins,
+// quoted identifiers, star projections, aliases that shadow real columns,
+// ordering by expressions/aliases/ordinals/hidden columns — which needs a
+// query model that knows which output column carries which value. That model
+// is also what lets every generated query declare how its result may be
+// compared without flaking (see Query.CompareSpec).
+//
+// Generation is fully determined by the seed: a failing seed IS the repro.
+package shapegen
+
+import (
+	"fmt"
+	"math/rand"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/derekmwright/wadjet/internal/oracle"
+)
+
+// Kind classifies a column for operator, literal, and expression selection.
+type Kind int
+
+const (
+	KindInt Kind = iota
+	KindFloat
+	KindText
+	// KindDate is a text column holding ISO-8601 dates. Ordering and
+	// comparison are identical to text, but date functions apply.
+	KindDate
+)
+
+// Column is one generatable column. Lits are rendered SQL literals drawn from
+// the column's real domain, so predicates are selective without being empty.
+type Column struct {
+	Name string
+	Kind Kind
+	Lits []string
+}
+
+// Table is one generatable table. PK is a column set unique within the table —
+// the generator appends it to ORDER BY to make an ordering total, which is what
+// lets a LIMIT-ed or positionally-compared query be deterministic.
+type Table struct {
+	Name string
+	PK   []string
+	Cols []Column
+}
+
+// Edge is a joinable equality (FK pairs in practice).
+type Edge struct {
+	LTable, LCol string
+	RTable, RCol string
+}
+
+// Schema is the generation universe.
+type Schema struct {
+	Tables []Table
+	Edges  []Edge
+}
+
+func (s *Schema) table(name string) *Table {
+	for i := range s.Tables {
+		if s.Tables[i].Name == name {
+			return &s.Tables[i]
+		}
+	}
+	return nil
+}
+
+// Item is one select-list entry. Every generated item carries an explicit
+// alias so output column names are unique and identical across engines —
+// without that, results keyed by column name silently collapse duplicates and
+// the two engines' default names for an expression differ.
+type Item struct {
+	Expr string
+	// Alias is the output column name. Empty only for Star items.
+	Alias string
+	// Star renders instead of Expr when set ("*" or "t.*").
+	Star string
+	// Exact marks a value both engines must produce bit-identically: a bare
+	// column reference, or an integer-valued expression. Float arithmetic and
+	// aggregates are not exact, so an ordering on them may legitimately break
+	// ties differently.
+	Exact bool
+	Agg   bool
+}
+
+// From is one FROM-clause entry. The first has an empty Join.
+type From struct {
+	Table   string // base table, or the CTE name
+	Derived string // rendered subquery, for an inline derived table
+	Alias   string
+	Join    string // "JOIN", "LEFT JOIN", ","
+	On      string
+	// PK is a column set unique within this entry's rows, as reachable from
+	// Alias. Empty when the entry exposes no unique key, which is what makes
+	// an ordering non-total.
+	PK []string
+}
+
+// Order is one ORDER BY term.
+type Order struct {
+	Expr string
+	Desc bool
+	// Key is the output column carrying this term's value, or "" when the
+	// term orders by something the select list does not project.
+	Key string
+	// Exact marks a term both engines compute bit-identically (see Item).
+	Exact bool
+}
+
+// Query is a generated query in structured form, so a failure can be shrunk
+// structurally instead of by text mutation.
+type Query struct {
+	With     string // rendered "WITH x AS (...)" prefix, or ""
+	Distinct bool
+	Items    []Item
+	From     []From
+	Where    []string
+	GroupBy  []string
+	Having   string
+	Order    []Order
+	Limit    int
+	Offset   int
+	// TotalOrder records that the generator appended a uniqueness tiebreaker,
+	// so no two output rows tie on the full ORDER BY list.
+	TotalOrder bool
+	// Shape tags the generator arm that produced this query, for coverage
+	// reporting.
+	Shape string
+	Seed  int64
+}
+
+// SQL renders the query.
+func (q *Query) SQL() string {
+	var sb strings.Builder
+	sb.WriteString(q.With)
+	sb.WriteString("SELECT ")
+	if q.Distinct {
+		sb.WriteString("DISTINCT ")
+	}
+	for i, it := range q.Items {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		if it.Star != "" {
+			sb.WriteString(it.Star)
+			continue
+		}
+		sb.WriteString(it.Expr)
+		if it.Alias != "" {
+			fmt.Fprintf(&sb, " AS %s", it.Alias)
+		}
+	}
+	sb.WriteString(" FROM ")
+	for i, f := range q.From {
+		if i > 0 {
+			if f.Join == "," {
+				sb.WriteString(", ")
+			} else {
+				fmt.Fprintf(&sb, " %s ", f.Join)
+			}
+		}
+		if f.Derived != "" {
+			fmt.Fprintf(&sb, "(%s) %s", f.Derived, f.Alias)
+		} else {
+			fmt.Fprintf(&sb, "%s %s", f.Table, f.Alias)
+		}
+		if i > 0 && f.On != "" {
+			fmt.Fprintf(&sb, " ON %s", f.On)
+		}
+	}
+	if len(q.Where) > 0 {
+		sb.WriteString(" WHERE ")
+		sb.WriteString(strings.Join(q.Where, " AND "))
+	}
+	if len(q.GroupBy) > 0 {
+		sb.WriteString(" GROUP BY ")
+		sb.WriteString(strings.Join(q.GroupBy, ", "))
+	}
+	if q.Having != "" {
+		sb.WriteString(" HAVING ")
+		sb.WriteString(q.Having)
+	}
+	if len(q.Order) > 0 {
+		sb.WriteString(" ORDER BY ")
+		for i, o := range q.Order {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(o.Expr)
+			if o.Desc {
+				sb.WriteString(" DESC")
+			}
+		}
+	}
+	if q.Limit > 0 {
+		fmt.Fprintf(&sb, " LIMIT %d", q.Limit)
+		if q.Offset > 0 {
+			fmt.Fprintf(&sb, " OFFSET %d", q.Offset)
+		}
+	}
+	return sb.String()
+}
+
+// CompareSpec derives how this query's results may be compared. This is the
+// harness's trust boundary: a mismatch under the returned spec is always a
+// defect, never an artifact of SQL's under-determination.
+func (q *Query) CompareSpec() oracle.CompareSpec {
+	spec := oracle.CompareSpec{Limit: q.Limit}
+	if len(q.Order) == 0 {
+		// No ORDER BY: the row sequence carries no meaning. A LIMIT on top of
+		// that picks arbitrary rows, so only the count is defined.
+		if q.Limit > 0 {
+			spec.Mode = oracle.CmpCount
+			return spec
+		}
+		spec.Mode = oracle.CmpUnordered
+		return spec
+	}
+	exact := q.TotalOrder
+	for _, o := range q.Order {
+		if !o.Exact {
+			exact = false
+		}
+	}
+	if exact {
+		// Total order over exactly-computed keys: the sequence is fully
+		// determined, so compare rows positionally — LIMIT included.
+		spec.Mode = oracle.CmpOrdered
+		return spec
+	}
+	// Ties or inexact keys are possible. Compare the row multiset plus the
+	// sequence of projected key values; a LIMIT on top of that cuts at a
+	// boundary SQL does not disambiguate, so drop to counts.
+	spec.Mode = oracle.CmpUnordered
+	if q.Limit > 0 {
+		spec.Mode = oracle.CmpCount
+		return spec
+	}
+	spec.OrderKeys = q.OrderKeys()
+	return spec
+}
+
+// OrderKeys returns the ORDER BY terms whose values the result projects, in
+// ORDER BY sequence. It stops at the first term the select list does not
+// carry, since an unprojected key makes every later term unverifiable.
+func (q *Query) OrderKeys() []oracle.OrderKey {
+	var out []oracle.OrderKey
+	for _, o := range q.Order {
+		if o.Key == "" {
+			break
+		}
+		out = append(out, oracle.OrderKey{Alias: o.Key, Desc: o.Desc})
+	}
+	return out
+}
+
+// Gen is a seeded generator. Identical (seed, schema) always yields the
+// identical query.
+type Gen struct {
+	r  *rand.Rand
+	s  *Schema
+	sc *scope
+	n  int // alias counter for generated output names
+}
+
+// New creates a generator.
+func New(seed int64, s *Schema) *Gen {
+	return &Gen{r: rand.New(rand.NewSource(seed)), s: s}
+}
+
+func (g *Gen) pick(n int) int        { return g.r.Intn(n) }
+func (g *Gen) chance(p float64) bool { return g.r.Float64() < p }
+
+func (g *Gen) alias() string {
+	g.n++
+	return fmt.Sprintf("c%d", g.n)
+}
+
+// ref is one column reachable in the current FROM scope, bound to the table
+// alias that carries it.
+type ref struct {
+	tblAlias string
+	table    string
+	col      Column
+}
+
+type scope struct {
+	refs []ref
+	// dupTable is true once one table appears under two aliases, which makes
+	// bare column references ambiguous — every reference must qualify.
+	dupTable bool
+}
+
+func (sc *scope) ofKind(k Kind) []ref {
+	var out []ref
+	for _, r := range sc.refs {
+		if r.col.Kind == k {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func (sc *scope) numeric() []ref {
+	var out []ref
+	for _, r := range sc.refs {
+		if r.col.Kind == KindInt || r.col.Kind == KindFloat {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func (sc *scope) withLits() []ref {
+	var out []ref
+	for _, r := range sc.refs {
+		if len(r.col.Lits) > 0 {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// name renders a reference to r: qualified or bare, plain or double-quoted.
+// Bare references are only produced when no table appears twice, since a
+// self-join makes them ambiguous.
+func (g *Gen) name(r ref) string {
+	col := r.col.Name
+	if g.chance(0.12) {
+		col = `"` + col + `"`
+	}
+	if g.sc != nil && !g.sc.dupTable && g.chance(0.35) {
+		return col
+	}
+	return r.tblAlias + "." + col
+}
+
+// shapes are the generator arms, weighted. Each targets a cluster where the
+// engine has historically been thin.
+var shapes = []struct {
+	name   string
+	weight int
+}{
+	{"projection", 12},
+	{"alias-shadow", 8},
+	{"selfjoin", 10},
+	{"joinchain", 12},
+	{"outerjoin", 10},
+	{"groupagg", 16},
+	{"distinct", 8},
+	{"subquery", 10},
+	{"dates", 8},
+	{"star", 6},
+}
+
+// Query generates one query.
+func (g *Gen) Query() *Query {
+	total := 0
+	for _, s := range shapes {
+		total += s.weight
+	}
+	roll := g.pick(total)
+	shape := shapes[len(shapes)-1].name
+	for _, s := range shapes {
+		if roll < s.weight {
+			shape = s.name
+			break
+		}
+		roll -= s.weight
+	}
+
+	q := &Query{Shape: shape}
+	switch shape {
+	case "selfjoin":
+		g.genSelfJoin(q)
+		g.rebuildScope(q)
+	case "outerjoin":
+		g.genFrom(q, 1+g.pick(2), true)
+		g.rebuildScope(q)
+	case "joinchain":
+		g.genFrom(q, 2+g.pick(4), g.chance(0.3))
+		g.rebuildScope(q)
+	case "subquery":
+		g.genDerivedFrom(q) // sets the scope itself: derived columns are a subset
+	default:
+		g.genFrom(q, g.pick(3), g.chance(0.25))
+		g.rebuildScope(q)
+	}
+
+	g.genWhere(q)
+
+	switch shape {
+	case "groupagg":
+		g.genGroupAgg(q)
+	case "distinct":
+		g.genDistinct(q)
+	case "star":
+		g.genStar(q)
+	case "alias-shadow":
+		g.genShadow(q)
+	case "dates":
+		g.genDates(q)
+	default:
+		g.genProjection(q)
+		if g.chance(0.25) {
+			g.genGroupAgg(q)
+		}
+	}
+	if len(q.Items) == 0 {
+		g.genProjection(q)
+	}
+	g.genOrderLimit(q)
+	return q
+}
+
+// rebuildScope refreshes the column universe from q.From.
+func (g *Gen) rebuildScope(q *Query) {
+	sc := &scope{}
+	seen := map[string]bool{}
+	for _, f := range q.From {
+		if f.Derived != "" {
+			continue
+		}
+		if seen[f.Table] {
+			sc.dupTable = true
+		}
+		seen[f.Table] = true
+		t := g.s.table(f.Table)
+		if t == nil {
+			continue
+		}
+		for _, c := range t.Cols {
+			sc.refs = append(sc.refs, ref{tblAlias: f.Alias, table: f.Table, col: c})
+		}
+	}
+	g.sc = sc
+}
+
+// genFrom builds a base table plus joins along FK edges.
+func (g *Gen) genFrom(q *Query, joins int, outer bool) {
+	base := g.s.Tables[g.pick(len(g.s.Tables))]
+	q.From = []From{{Table: base.Name, Alias: "t0", PK: base.PK}}
+	tables := []string{base.Name}
+
+	for j := 0; j < joins; j++ {
+		var cands []Edge
+		for _, e := range g.s.Edges {
+			l, r := contains(tables, e.LTable), contains(tables, e.RTable)
+			if l != r {
+				cands = append(cands, e)
+			}
+		}
+		if len(cands) == 0 {
+			break
+		}
+		e := cands[g.pick(len(cands))]
+		newTable, newCol, oldCol := e.RTable, e.RCol, e.LCol
+		if contains(tables, e.RTable) {
+			newTable, newCol, oldCol = e.LTable, e.LCol, e.RCol
+		}
+		oldAlias := ""
+		for i, f := range q.From {
+			if (f.Table == e.LTable || f.Table == e.RTable) && f.Table != newTable {
+				oldAlias = q.From[i].Alias
+			}
+		}
+		if oldAlias == "" {
+			break
+		}
+		alias := fmt.Sprintf("t%d", len(q.From))
+		join := "JOIN"
+		switch {
+		case outer && j == joins-1:
+			join = "LEFT JOIN"
+		case g.chance(0.12):
+			join = ","
+		}
+		on := fmt.Sprintf("%s.%s = %s.%s", oldAlias, oldCol, alias, newCol)
+		nt := g.s.table(newTable)
+		f := From{Table: newTable, Alias: alias, Join: join, On: on, PK: nt.PK}
+		if join == "," {
+			// A comma join carries no ON clause; the equality becomes a WHERE
+			// conjunct, which is the shape a BI client emits.
+			f.On = ""
+			q.Where = append(q.Where, on)
+		}
+		q.From = append(q.From, f)
+		tables = append(tables, newTable)
+	}
+}
+
+// genSelfJoin joins one table to itself under two aliases — the shape where a
+// column reference must resolve to the right side and nothing else.
+func (g *Gen) genSelfJoin(q *Query) {
+	// Restrict to tables whose self-join stays bounded.
+	var cands []Table
+	for _, t := range g.s.Tables {
+		switch t.Name {
+		case "nation", "region", "supplier", "customer", "part":
+			cands = append(cands, t)
+		}
+	}
+	t := cands[g.pick(len(cands))]
+	q.From = []From{{Table: t.Name, Alias: "t0", PK: t.PK}}
+	pk := t.PK[0]
+
+	on := fmt.Sprintf("t0.%s = t1.%s", pk, pk) // identity self-join
+	if g.chance(0.5) {
+		// Attribute self-join, bounded by a PK inequality so the row count
+		// stays sane while both aliases really carry different rows.
+		var attr string
+		for _, c := range t.Cols {
+			if c.Kind == KindInt && c.Name != pk {
+				attr = c.Name
+				break
+			}
+		}
+		if attr != "" {
+			on = fmt.Sprintf("t0.%s = t1.%s AND t0.%s < t1.%s", attr, attr, pk, pk)
+		}
+	}
+	join := "JOIN"
+	if g.chance(0.25) {
+		join = "LEFT JOIN"
+	}
+	q.From = append(q.From, From{Table: t.Name, Alias: "t1", Join: join, On: on, PK: t.PK})
+	if g.chance(0.3) {
+		q.From = append(q.From, From{Table: t.Name, Alias: "t2", Join: "JOIN", PK: t.PK,
+			On: fmt.Sprintf("t0.%s = t2.%s", pk, pk)})
+	}
+}
+
+// genDerivedFrom builds a derived table or CTE over a base table, so the outer
+// query resolves names through a subquery boundary.
+func (g *Gen) genDerivedFrom(q *Query) {
+	t := g.s.Tables[g.pick(len(g.s.Tables))]
+	pk := t.PK[0]
+	var cols []string
+	cols = append(cols, pk)
+	for _, c := range t.Cols {
+		if c.Name != pk && len(cols) < 4 && g.chance(0.5) {
+			cols = append(cols, c.Name)
+		}
+	}
+	inner := fmt.Sprintf("SELECT %s FROM %s", strings.Join(cols, ", "), t.Name)
+	if lits := litCols(t); len(lits) > 0 && g.chance(0.6) {
+		c := lits[g.pick(len(lits))]
+		inner += fmt.Sprintf(" WHERE %s %s %s", c.Name, cmpOp(g), c.Lits[g.pick(len(c.Lits))])
+	}
+
+	// The derived table exposes a subset of columns; the scope must reflect
+	// that, so register a synthetic table under the alias.
+	sub := Table{Name: t.Name, PK: []string{pk}}
+	for _, c := range t.Cols {
+		if contains(cols, c.Name) {
+			sub.Cols = append(sub.Cols, c)
+		}
+	}
+	if g.chance(0.5) {
+		q.With = fmt.Sprintf("WITH src AS (%s) ", inner)
+		q.From = []From{{Table: "src", Alias: "t0", PK: []string{pk}}}
+	} else {
+		q.From = []From{{Derived: inner, Alias: "t0", PK: []string{pk}}}
+	}
+	// Register the subquery's columns under t0 without consulting the real
+	// schema — the derived table exposes only the projected subset.
+	g.sc = &scope{}
+	for _, c := range sub.Cols {
+		g.sc.refs = append(g.sc.refs, ref{tblAlias: "t0", table: sub.Name, col: c})
+	}
+}
+
+func litCols(t Table) []Column {
+	var out []Column
+	for _, c := range t.Cols {
+		if len(c.Lits) > 0 {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func cmpOp(g *Gen) string {
+	ops := []string{"=", "<", ">", "<=", ">=", "<>"}
+	return ops[g.pick(len(ops))]
+}
+
+// orderLits puts two rendered literals in ascending order so a BETWEEN range
+// is non-empty. Numeric literals must compare numerically — lexicographic
+// order would render "BETWEEN 10 AND 3", which matches nothing and wastes the
+// query on an empty result.
+func orderLits(a, b string) (lo, hi string) {
+	af, aOK := strconv.ParseFloat(a, 64)
+	bf, bOK := strconv.ParseFloat(b, 64)
+	if aOK == nil && bOK == nil {
+		if af <= bf {
+			return a, b
+		}
+		return b, a
+	}
+	if a <= b {
+		return a, b
+	}
+	return b, a
+}
+
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Gen) genWhere(q *Query) {
+	preds := g.sc.withLits()
+	n := g.pick(4)
+	for i := 0; i < n && len(preds) > 0; i++ {
+		r := preds[g.pick(len(preds))]
+		lit := r.col.Lits[g.pick(len(r.col.Lits))]
+		nm := g.name(r)
+		var p string
+		switch {
+		case r.col.Kind == KindText && g.chance(0.25):
+			s := strings.Trim(lit, "'")
+			if len(s) > 3 {
+				s = s[:3]
+			}
+			p = fmt.Sprintf("%s LIKE '%s%%'", nm, s)
+		case g.chance(0.18):
+			lits := map[string]bool{lit: true}
+			for len(lits) < 2+g.pick(3) && len(lits) < len(r.col.Lits) {
+				lits[r.col.Lits[g.pick(len(r.col.Lits))]] = true
+			}
+			ordered := make([]string, 0, len(lits))
+			for l := range lits {
+				ordered = append(ordered, l)
+			}
+			sort.Strings(ordered) // map iteration must not leak into SQL text
+			p = fmt.Sprintf("%s IN (%s)", nm, strings.Join(ordered, ", "))
+		case g.chance(0.15):
+			lo, hi := orderLits(lit, r.col.Lits[g.pick(len(r.col.Lits))])
+			p = fmt.Sprintf("%s BETWEEN %s AND %s", nm, lo, hi)
+		default:
+			p = fmt.Sprintf("%s %s %s", nm, cmpOp(g), lit)
+		}
+		q.Where = append(q.Where, p)
+	}
+
+	// A cross-table predicate that is NOT a join key: the class where a
+	// predicate went missing once a later stage became fusable.
+	if len(q.From) > 1 && g.chance(0.35) {
+		nums := g.sc.numeric()
+		if len(nums) > 1 {
+			a := nums[g.pick(len(nums))]
+			b := nums[g.pick(len(nums))]
+			if a.tblAlias != b.tblAlias {
+				q.Where = append(q.Where, fmt.Sprintf("%s %s %s", g.name(a), cmpOp(g), g.name(b)))
+			}
+		}
+	}
+	// IS NULL / IS NOT NULL over an outer-joined column.
+	if g.chance(0.12) && len(g.sc.refs) > 0 {
+		r := g.sc.refs[g.pick(len(g.sc.refs))]
+		neg := ""
+		if g.chance(0.5) {
+			neg = "NOT "
+		}
+		q.Where = append(q.Where, fmt.Sprintf("%s IS %sNULL", g.name(r), neg))
+	}
+	// Subquery predicates.
+	if g.chance(0.15) {
+		g.genSubqueryPred(q)
+	}
+}
+
+func (g *Gen) genSubqueryPred(q *Query) {
+	nums := g.sc.numeric()
+	if len(nums) == 0 {
+		return
+	}
+	r := nums[g.pick(len(nums))]
+	t := g.s.Tables[g.pick(len(g.s.Tables))]
+	switch g.pick(3) {
+	case 0:
+		// Scalar threshold from the same column's own table. The subquery
+		// aliases its table and qualifies the aggregate's argument: an
+		// UNQUALIFIED inner name that also exists in the outer scope binds to
+		// the OUTER query, which turns this into a correlated subquery — and a
+		// correlated subquery re-planned from the parallel pipeline crashes the
+		// process with "concurrent map writes" (reported; not generated).
+		q.Where = append(q.Where, fmt.Sprintf("%s > (SELECT AVG(sq.%s) FROM %s sq)",
+			g.name(r), r.col.Name, r.table))
+	case 1:
+		// IN (SELECT pk FROM t WHERE ...)
+		pk := t.PK[0]
+		inner := fmt.Sprintf("SELECT %s FROM %s", pk, t.Name)
+		if lits := litCols(t); len(lits) > 0 {
+			c := lits[g.pick(len(lits))]
+			inner += fmt.Sprintf(" WHERE %s %s %s", c.Name, cmpOp(g), c.Lits[g.pick(len(c.Lits))])
+		}
+		ints := g.sc.ofKind(KindInt)
+		if len(ints) == 0 {
+			return
+		}
+		k := ints[g.pick(len(ints))]
+		q.Where = append(q.Where, fmt.Sprintf("%s IN (%s)", g.name(k), inner))
+	default:
+		// Correlated EXISTS over an FK edge.
+		for _, e := range g.s.Edges {
+			if e.LTable == r.table {
+				neg := ""
+				if g.chance(0.4) {
+					neg = "NOT "
+				}
+				q.Where = append(q.Where, fmt.Sprintf("%sEXISTS (SELECT 1 FROM %s sub WHERE sub.%s = %s.%s)",
+					neg, e.RTable, e.RCol, r.tblAlias, e.LCol))
+				return
+			}
+		}
+	}
+}
+
+func (g *Gen) genProjection(q *Query) {
+	n := 1 + g.pick(3)
+	for i := 0; i < n; i++ {
+		if len(g.sc.refs) == 0 {
+			return
+		}
+		r := g.sc.refs[g.pick(len(g.sc.refs))]
+		q.Items = append(q.Items, g.exprItem(r))
+	}
+}
+
+// exprItem renders one select item over r: the bare column, or an expression.
+func (g *Gen) exprItem(r ref) Item {
+	nm := g.name(r)
+	a := g.alias()
+	switch {
+	case r.col.Kind == KindInt && g.chance(0.25):
+		op := []string{"+", "-", "*"}[g.pick(3)]
+		return Item{Expr: fmt.Sprintf("%s %s %d", nm, op, 1+g.pick(9)), Alias: a, Exact: true}
+	case r.col.Kind == KindInt && g.chance(0.15):
+		return Item{Expr: fmt.Sprintf("%s %% %d", nm, 2+g.pick(9)), Alias: a, Exact: true}
+	case r.col.Kind == KindFloat && g.chance(0.3):
+		op := []string{"+", "-", "*"}[g.pick(3)]
+		return Item{Expr: fmt.Sprintf("%s %s %d", nm, op, 1+g.pick(9)), Alias: a}
+	case r.col.Kind == KindFloat && g.chance(0.2):
+		return Item{Expr: fmt.Sprintf("ROUND(%s, %d)", nm, g.pick(3)), Alias: a}
+	case r.col.Kind == KindText && g.chance(0.3):
+		return Item{Expr: fmt.Sprintf("SUBSTR(%s, 1, %d)", nm, 2+g.pick(5)), Alias: a, Exact: true}
+	case r.col.Kind == KindText && g.chance(0.2):
+		fn := []string{"UPPER", "LOWER", "TRIM"}[g.pick(3)]
+		return Item{Expr: fmt.Sprintf("%s(%s)", fn, nm), Alias: a, Exact: true}
+	case r.col.Kind == KindText && g.chance(0.15):
+		return Item{Expr: fmt.Sprintf("LENGTH(%s)", nm), Alias: a, Exact: true}
+	case len(r.col.Lits) > 0 && g.chance(0.2):
+		lit := r.col.Lits[g.pick(len(r.col.Lits))]
+		return Item{Expr: fmt.Sprintf("CASE WHEN %s = %s THEN 1 ELSE 0 END", nm, lit), Alias: a, Exact: true}
+	case g.chance(0.1):
+		return Item{Expr: fmt.Sprintf("COALESCE(%s, %s)", nm, zeroLit(r.col.Kind)), Alias: a, Exact: true}
+	default:
+		return Item{Expr: nm, Alias: a, Exact: true}
+	}
+}
+
+func zeroLit(k Kind) string {
+	if k == KindText || k == KindDate {
+		return "'?'"
+	}
+	return "0"
+}
+
+// genShadow aliases a column to the NAME OF A DIFFERENT REAL COLUMN, so the
+// output name collides with something the resolver also knows.
+func (g *Gen) genShadow(q *Query) {
+	if len(g.sc.refs) < 2 {
+		g.genProjection(q)
+		return
+	}
+	a := g.sc.refs[g.pick(len(g.sc.refs))]
+	var b ref
+	for i := 0; i < 20; i++ {
+		b = g.sc.refs[g.pick(len(g.sc.refs))]
+		if b.col.Name != a.col.Name {
+			break
+		}
+	}
+	// SELECT a AS <name of b>: the alias shadows a real, in-scope column.
+	q.Items = append(q.Items, Item{Expr: g.name(a), Alias: b.col.Name, Exact: true})
+	if g.chance(0.7) {
+		// ...and select the shadowed column too, under its own generated
+		// alias, so both values are visible and a swap is detectable.
+		q.Items = append(q.Items, Item{Expr: g.name(b), Alias: g.alias(), Exact: true})
+	}
+	if g.chance(0.4) {
+		// An alias that shadows a TABLE alias in scope.
+		r := g.sc.refs[g.pick(len(g.sc.refs))]
+		q.Items = append(q.Items, Item{Expr: g.name(r), Alias: r.tblAlias, Exact: true})
+	}
+	if g.chance(0.3) {
+		r := g.sc.refs[g.pick(len(g.sc.refs))]
+		q.Items = append(q.Items, Item{Expr: g.name(r), Alias: `"odd.name"`, Exact: true})
+	}
+}
+
+func (g *Gen) genStar(q *Query) {
+	// Star over a single table only: two starred tables would produce
+	// duplicate output column names, which a name-keyed row cannot represent.
+	q.From = q.From[:1]
+	g.rebuildScope(q)
+	star := "*"
+	if g.chance(0.5) {
+		star = q.From[0].Alias + ".*"
+	}
+	q.Items = []Item{{Star: star}}
+	if g.chance(0.4) && len(g.sc.refs) > 0 {
+		r := g.sc.refs[g.pick(len(g.sc.refs))]
+		q.Items = append(q.Items, Item{Expr: fmt.Sprintf("LENGTH(%s)", nameOf(r)), Alias: g.alias(), Exact: true})
+	}
+}
+
+func nameOf(r ref) string { return r.tblAlias + "." + r.col.Name }
+
+func (g *Gen) genDistinct(q *Query) {
+	q.Distinct = true
+	n := 1 + g.pick(3)
+	seen := map[string]bool{}
+	for i := 0; i < n && len(g.sc.refs) > 0; i++ {
+		r := g.sc.refs[g.pick(len(g.sc.refs))]
+		it := g.exprItem(r)
+		if seen[it.Expr] {
+			continue
+		}
+		seen[it.Expr] = true
+		q.Items = append(q.Items, it)
+	}
+}
+
+func (g *Gen) genGroupAgg(q *Query) {
+	q.Items = nil
+	q.GroupBy = nil
+	ng := 1 + g.pick(2)
+	seen := map[string]bool{}
+	for i := 0; i < ng && len(g.sc.refs) > 0; i++ {
+		r := g.sc.refs[g.pick(len(g.sc.refs))]
+		it := g.groupItem(r)
+		if seen[it.Expr] {
+			continue
+		}
+		seen[it.Expr] = true
+		q.Items = append(q.Items, it)
+		// GROUP BY by expression, by ordinal, or by output alias — three
+		// different resolution paths for the same query.
+		switch g.pick(3) {
+		case 0:
+			q.GroupBy = append(q.GroupBy, fmt.Sprint(len(q.Items)))
+		case 1:
+			q.GroupBy = append(q.GroupBy, it.Alias)
+		default:
+			q.GroupBy = append(q.GroupBy, it.Expr)
+		}
+	}
+	if len(q.Items) == 0 {
+		return
+	}
+
+	na := 1 + g.pick(3)
+	nums := g.sc.numeric()
+	var havingAgg string
+	for i := 0; i < na; i++ {
+		var agg string
+		switch g.pick(8) {
+		case 0:
+			agg = "COUNT(*)"
+		case 1:
+			r := g.sc.refs[g.pick(len(g.sc.refs))]
+			agg = fmt.Sprintf("COUNT(%s)", g.name(r))
+		case 2:
+			r := g.sc.refs[g.pick(len(g.sc.refs))]
+			agg = fmt.Sprintf("COUNT(DISTINCT %s)", g.name(r))
+		case 3:
+			if len(nums) == 0 {
+				continue
+			}
+			r := nums[g.pick(len(nums))]
+			agg = fmt.Sprintf("SUM(%s)", g.name(r))
+		case 4:
+			if len(nums) == 0 {
+				continue
+			}
+			r := nums[g.pick(len(nums))]
+			agg = fmt.Sprintf("AVG(%s)", g.name(r))
+		case 5:
+			r := g.sc.refs[g.pick(len(g.sc.refs))]
+			fn := "MIN"
+			if g.chance(0.5) {
+				fn = "MAX"
+			}
+			agg = fmt.Sprintf("%s(%s)", fn, g.name(r))
+		case 6:
+			// Aggregate over an expression.
+			if len(nums) < 2 {
+				continue
+			}
+			a, b := nums[g.pick(len(nums))], nums[g.pick(len(nums))]
+			agg = fmt.Sprintf("SUM(%s * (1 - %s))", g.name(a), g.name(b))
+		default:
+			// COUNT(CASE WHEN ...) / SUM(CASE WHEN ...)
+			lits := g.sc.withLits()
+			if len(lits) == 0 {
+				continue
+			}
+			r := lits[g.pick(len(lits))]
+			lit := r.col.Lits[g.pick(len(r.col.Lits))]
+			if g.chance(0.5) {
+				agg = fmt.Sprintf("COUNT(CASE WHEN %s = %s THEN 1 END)", g.name(r), lit)
+			} else {
+				agg = fmt.Sprintf("SUM(CASE WHEN %s = %s THEN 1 ELSE 0 END)", g.name(r), lit)
+			}
+		}
+		exact := strings.HasPrefix(agg, "COUNT")
+		q.Items = append(q.Items, Item{Expr: agg, Alias: g.alias(), Agg: true, Exact: exact})
+		if havingAgg == "" {
+			havingAgg = agg
+		}
+	}
+
+	if havingAgg != "" && g.chance(0.35) {
+		switch g.pick(3) {
+		case 0:
+			q.Having = fmt.Sprintf("%s > %d", havingAgg, 1+g.pick(20))
+		case 1:
+			// HAVING over the output alias.
+			for _, it := range q.Items {
+				if it.Expr == havingAgg {
+					q.Having = fmt.Sprintf("%s > %d", it.Alias, 1+g.pick(20))
+					break
+				}
+			}
+		default:
+			// Scalar-subquery threshold, data-derived on both sides.
+			nums := g.sc.numeric()
+			if len(nums) > 0 {
+				r := nums[g.pick(len(nums))]
+				q.Having = fmt.Sprintf("%s > (SELECT AVG(sq.%s) * 0.%d FROM %s sq)",
+					havingAgg, r.col.Name, 1+g.pick(9), r.table)
+			}
+		}
+	}
+}
+
+// groupItem renders one GROUP BY term: the bare column or an expression.
+func (g *Gen) groupItem(r ref) Item {
+	nm := g.name(r)
+	a := g.alias()
+	switch {
+	case r.col.Kind == KindText && g.chance(0.3):
+		return Item{Expr: fmt.Sprintf("SUBSTR(%s, 1, %d)", nm, 1+g.pick(4)), Alias: a, Exact: true}
+	case r.col.Kind == KindInt && g.chance(0.25):
+		return Item{Expr: fmt.Sprintf("%s %% %d", nm, 2+g.pick(9)), Alias: a, Exact: true}
+	case r.col.Kind == KindDate && g.chance(0.4):
+		part := []string{"YEAR", "MONTH"}[g.pick(2)]
+		return Item{Expr: fmt.Sprintf("EXTRACT(%s FROM CAST(%s AS DATE))", part, nm), Alias: a, Exact: true}
+	default:
+		return Item{Expr: nm, Alias: a, Exact: true}
+	}
+}
+
+// genDates projects and filters date columns through comparisons, BETWEEN and
+// date-part extraction.
+func (g *Gen) genDates(q *Query) {
+	dates := g.sc.ofKind(KindDate)
+	if len(dates) == 0 {
+		g.genProjection(q)
+		return
+	}
+	r := dates[g.pick(len(dates))]
+	nm := g.name(r)
+	q.Items = append(q.Items, Item{Expr: nm, Alias: g.alias(), Exact: true})
+	switch g.pick(3) {
+	case 0:
+		part := []string{"YEAR", "MONTH", "DAY"}[g.pick(3)]
+		q.Items = append(q.Items, Item{Expr: fmt.Sprintf("EXTRACT(%s FROM CAST(%s AS DATE))", part, nm),
+			Alias: g.alias(), Exact: true})
+	case 1:
+		q.Items = append(q.Items, Item{Expr: fmt.Sprintf("SUBSTR(%s, 1, 7)", nm), Alias: g.alias(), Exact: true})
+	}
+	if len(r.col.Lits) > 1 {
+		lo, hi := r.col.Lits[0], r.col.Lits[len(r.col.Lits)-1]
+		if g.chance(0.5) {
+			q.Where = append(q.Where, fmt.Sprintf("%s BETWEEN %s AND %s", nm, lo, hi))
+		} else {
+			q.Where = append(q.Where, fmt.Sprintf("CAST(%s AS DATE) >= DATE %s", nm, lo))
+		}
+	}
+	// A comparison between two date columns of the same table.
+	for _, o := range dates {
+		if o.col.Name != r.col.Name && o.tblAlias == r.tblAlias {
+			if g.chance(0.4) {
+				q.Where = append(q.Where, fmt.Sprintf("%s < %s", nm, g.name(o)))
+			}
+			break
+		}
+	}
+	if g.chance(0.4) {
+		g.genGroupAgg(q)
+	}
+}
+
+// genOrderLimit attaches ORDER BY and LIMIT, appending a uniqueness
+// tiebreaker whenever one is available so the row sequence — and therefore a
+// LIMIT — is fully determined.
+func (g *Gen) genOrderLimit(q *Query) {
+	if g.chance(0.25) {
+		// No ORDER BY. A bare LIMIT here is compared by count only, which is
+		// what caught a limit that failed to bind at all.
+		if g.chance(0.3) {
+			q.Limit = 1 + g.pick(40)
+		}
+		return
+	}
+
+	// Leading keys: alias, ordinal, expression, or a column the select list
+	// does not project.
+	nKeys := 1 + g.pick(2)
+	used := map[string]bool{}
+	for i := 0; i < nKeys; i++ {
+		if len(q.Items) == 0 {
+			break
+		}
+		idx := g.pick(len(q.Items))
+		it := q.Items[idx]
+		if it.Star != "" || used[it.Alias] {
+			continue
+		}
+		used[it.Alias] = true
+		desc := g.chance(0.45)
+		switch {
+		case g.chance(0.2) && !q.Distinct && it.Star == "":
+			// By ordinal. Not with SELECT * (rejected by design) and not with
+			// DISTINCT (the term must be a select item, which it is, but the
+			// ordinal form is the interesting path here).
+			q.Order = append(q.Order, Order{Expr: fmt.Sprint(idx + 1), Desc: desc, Key: it.Alias, Exact: it.Exact})
+		case g.chance(0.25) && !it.Agg && len(q.GroupBy) == 0:
+			// By the expression itself rather than its alias.
+			q.Order = append(q.Order, Order{Expr: it.Expr, Desc: desc, Key: it.Alias, Exact: it.Exact})
+		default:
+			q.Order = append(q.Order, Order{Expr: it.Alias, Desc: desc, Key: it.Alias, Exact: it.Exact})
+		}
+	}
+
+	// ORDER BY a column absent from the SELECT list. Only for ungrouped,
+	// non-DISTINCT queries, where SQL allows it.
+	if len(q.GroupBy) == 0 && !q.Distinct && !q.hasStar() && g.chance(0.3) && len(g.sc.refs) > 0 {
+		r := g.sc.refs[g.pick(len(g.sc.refs))]
+		if !projects(q, r) {
+			q.Order = append(q.Order, Order{Expr: nameOf(r), Desc: g.chance(0.4),
+				Exact: r.col.Kind != KindFloat})
+		}
+	}
+
+	g.appendTiebreaker(q)
+
+	if q.TotalOrder && g.chance(0.45) {
+		q.Limit = 1 + g.pick(40)
+		if g.chance(0.25) {
+			q.Offset = g.pick(10)
+		}
+	} else if g.chance(0.2) {
+		q.Limit = 1 + g.pick(40)
+	}
+}
+
+func (q *Query) hasStar() bool {
+	for _, it := range q.Items {
+		if it.Star != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func projects(q *Query, r ref) bool {
+	n := nameOf(r)
+	for _, it := range q.Items {
+		if it.Expr == n || strings.Contains(it.Expr, r.col.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+// appendTiebreaker extends ORDER BY until no two output rows can tie, and
+// records that on the query. Without it, a LIMIT cuts through a tie group and
+// two correct engines legitimately return different rows.
+func (g *Gen) appendTiebreaker(q *Query) {
+	seen := map[string]bool{}
+	for _, o := range q.Order {
+		seen[o.Expr] = true
+		if o.Key != "" {
+			seen[o.Key] = true
+		}
+	}
+	add := func(expr string, key string, exact bool) {
+		if seen[expr] || (key != "" && seen[key]) {
+			return
+		}
+		seen[expr] = true
+		if key != "" {
+			seen[key] = true
+		}
+		q.Order = append(q.Order, Order{Expr: expr, Key: key, Exact: exact})
+	}
+
+	switch {
+	case len(q.GroupBy) > 0:
+		// The group keys are unique across output rows.
+		for _, it := range q.Items {
+			if it.Agg || it.Star != "" {
+				continue
+			}
+			add(it.Alias, it.Alias, it.Exact)
+		}
+		q.TotalOrder = true
+	case q.Distinct:
+		// Every output row is distinct on the full select list.
+		for _, it := range q.Items {
+			if it.Star != "" {
+				return
+			}
+			add(it.Alias, it.Alias, it.Exact)
+		}
+		q.TotalOrder = true
+	default:
+		// One row per FROM-tuple: the primary keys together are unique. An
+		// outer-joined table contributes NULLs on unmatched rows, which keeps
+		// the tuple unique.
+		//
+		// The key columns are PROJECTED rather than left hidden. Two reasons:
+		// the harness can then verify the ordering it was promised (an
+		// unprojected key is unverifiable), and a hidden sort key is itself a
+		// shape the generator produces deliberately elsewhere — having every
+		// tiebreaker be one would make that variable constant.
+		total := true
+		for _, f := range q.From {
+			if len(f.PK) == 0 {
+				total = false
+				continue
+			}
+			for _, pk := range f.PK {
+				expr := f.Alias + "." + pk
+				if seen[expr] {
+					continue
+				}
+				alias := g.projected(q, expr)
+				add(expr, alias, true)
+			}
+		}
+		q.TotalOrder = total
+	}
+}
+
+// projected returns the output alias carrying expr, adding a select item for
+// it when the query does not already project it.
+func (g *Gen) projected(q *Query, expr string) string {
+	for _, it := range q.Items {
+		if it.Expr == expr && it.Alias != "" {
+			return it.Alias
+		}
+	}
+	alias := g.alias()
+	q.Items = append(q.Items, Item{Expr: expr, Alias: alias, Exact: true})
+	return alias
+}
