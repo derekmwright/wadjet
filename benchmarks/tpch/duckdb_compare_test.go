@@ -46,30 +46,11 @@ const (
 	armBoth = "both arms"
 )
 
-// emptyJoinAggregateBug is the divergence this gate found on the day it
-// gained its distributed arm (2026-08-18), still open.
-//
-// An ungrouped aggregate returns exactly one row for any input, including no
-// input: SUM over the empty set is NULL, and SQL has no reading under which
-// the answer is zero rows. On the stage DAG, when the aggregate's input is
-// an empty JOIN result, that row is lost — TPC-H Q17 comes back with 0 rows
-// against DuckDB's 1 (NULL), and so does the reduction below. It is specific:
-// COUNT(*) over the same empty join keeps its row, and the same SUM emptied
-// by a WHERE clause instead of a join keeps its row on every path (both are
-// corpus entries, gated, as the controls). The single-process engine is
-// correct in all three shapes, which is why nothing caught this before the
-// DAG was held to ground truth — and the generated SF0.01 fixture the
-// two-path suite uses has parts matching Q17's predicate, so its join is not
-// empty there and the shape never arises.
 // coalesceNestedTypeBug: Ret.Resolve reports a same-as-argument FALLBACK as a
 // confident answer, so NULLIF tells COALESCE it is Float64 and COALESCE never
 // consults the string literal that would have decided it.
 const coalesceNestedTypeBug = "COALESCE over a computed string argument is typed numeric, so every row comes back as 0. " +
 	"Both arms. Tracked as #331."
-
-const emptyJoinAggregateBug = "an ungrouped aggregate over an EMPTY JOIN loses its mandatory single row on the stage DAG " +
-	"(SUM: 0 rows, want 1 row of NULL; COUNT over the same join is correct, and so is the same SUM emptied by a filter). " +
-	"Single-process is correct. Tracked as #329."
 
 // TestDuckDBCompare is the cross-engine ground-truth gate: every corpus query
 // runs on BOTH Wadjet execution paths and both answers are held against a
@@ -270,9 +251,6 @@ func duckdbCorpus() []duckdbCase {
 		name := fmt.Sprintf("Q%02d", n)
 		sql := TPCHQueries[n].SQL
 		c := duckdbCase{name: name, sql: sql, ordered: hasTopLevelOrderBy(sql)}
-		if n == 17 {
-			c.knownBugArm, c.knownBug = armDAG, emptyJoinAggregateBug
-		}
 		if n == 2 || n == 22 {
 			c.countOnly, c.tolerance = true, 4
 			c.why = "row membership turns on a float threshold; borderline rows shift with accumulation order"
@@ -392,8 +370,7 @@ func duckdbCorpus() []duckdbCase {
 		// input, so an empty input means one row of NULL — SQL has no case
 		// where it means no rows at all.
 		duckdbCase{name: "EmptyJoinUngroupedSum",
-			sql:         "SELECT SUM(l_extendedprice) AS s FROM lineitem JOIN part ON p_partkey = l_partkey WHERE p_brand = 'Brand#23' AND p_container = 'MED BOX'",
-			knownBugArm: armDAG, knownBug: emptyJoinAggregateBug},
+			sql: "SELECT SUM(l_extendedprice) AS s FROM lineitem JOIN part ON p_partkey = l_partkey WHERE p_brand = 'Brand#23' AND p_container = 'MED BOX'"},
 		// Control 1: the same empty join counted instead of summed. The DAG
 		// keeps the row here, so the defect is not "empty join loses the
 		// stage" in general.
