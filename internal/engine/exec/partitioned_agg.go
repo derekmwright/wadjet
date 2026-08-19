@@ -609,6 +609,12 @@ func partitionAndDeliver(ctx context.Context, hasher *HashAggregate, sink Sink, 
 	rt := hasher.PartitionSelectors(b, parts, sc)
 	if rt == nil {
 		partitionFallbacks.Add(1)
+		// This batch's groups land in whichever sink pulled it, so the
+		// sinks no longer own disjoint slices of the key space. Say so:
+		// the pipeline's merge must then combine states by key instead of
+		// adopting each partial whole, or every group in this batch is
+		// emitted once per worker that took one (#338).
+		hasher.routeFallback.Store(true)
 		if err := sink.Consume(ctx, b); err != nil {
 			return fmt.Errorf("sink consume: %w", err)
 		}

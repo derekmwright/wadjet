@@ -1414,6 +1414,94 @@ func twoPathCorpus() []twoPathQuery {
 			sql:     "SELECT n_regionkey, MAX(COALESCE(n_name, n_comment)) AS m FROM nation GROUP BY n_regionkey",
 			assertA: assertNoNumericCell("m")},
 	)
+
+	// #338: a NULL group key reported once per parallel partial instead of
+	// once — GROUP BY, DISTINCT and set operations are the places SQL
+	// requires NULLs to be treated as EQUAL to each other, so a merge that
+	// matches partial states by key has to match a NULL key to a NULL key.
+	//
+	// Both arms were wrong the same way when it fired (four rows of 375
+	// where the answer is one row of 1500, so no row was lost and every
+	// row-count gate stayed green), which is why each entry below carries an
+	// assertA: "the paths agree" is satisfied by both being wrong.
+	//
+	// The reduction that fires it needs a LEFT JOIN whose right side matches
+	// NOTHING; that shape returns zero rows on the stage DAG for an
+	// unrelated defect (a LEFT JOIN with an empty build side degenerates to
+	// an inner one there — see the NullGroupKey* entries in duckdbCorpus,
+	// where arm A is gated against DuckDB and arm B carries the exemption).
+	// Gating it here would gate that defect instead of this one, so what
+	// this file carries is the NULL grouping invariant over shapes both
+	// engines answer: partial matches, several key columns, and DISTINCT.
+	out = append(out,
+		// Most customers match no order, so the NULL group and real groups
+		// are aggregated side by side. One NULL row, counts summing to 1500.
+		twoPathQuery{name: "NullGroupKeyLeftJoin", cmp: cmpUnordered,
+			sql: `SELECT o.o_orderstatus AS s, COUNT(*) AS c FROM customer c
+				LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 5
+				GROUP BY o.o_orderstatus`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				nulls, total := 0, 0.0
+				for _, r := range rows {
+					if v, ok := lookupCell(r, "s"); ok && v == nil {
+						nulls++
+						// Assert the VALUE, not just the row count: the
+						// failure splits a group's count across partials
+						// without losing a row.
+						if got := cellNum(r, "c"); got != 1496 {
+							tb.Errorf("NULL group COUNT(*) = %v, want 1496", r["c"])
+						}
+					}
+					total += cellNum(r, "c")
+				}
+				if nulls != 1 {
+					tb.Errorf("the NULL group appeared %d times, want exactly 1: %v", nulls, rows)
+				}
+				if total != 1500 {
+					tb.Errorf("counts total %v, want 1500", total)
+				}
+			}},
+		// Two key columns, one NULL and one not — the case a fix narrowed to
+		// "the whole key is NULL" leaves split.
+		twoPathQuery{name: "NullGroupKeyLeftJoinMultiCol", cmp: cmpUnordered,
+			sql: `SELECT c.c_mktsegment AS m, o.o_orderstatus AS s, COUNT(*) AS c FROM customer c
+				LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 5
+				GROUP BY c.c_mktsegment, o.o_orderstatus`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				total, seen := 0.0, map[string]bool{}
+				for _, r := range rows {
+					key := cellText(r, "m") + "|" + cellText(r, "s")
+					if seen[key] {
+						tb.Errorf("group (%s) reported twice — its partial states were not merged", key)
+					}
+					seen[key] = true
+					total += cellNum(r, "c")
+				}
+				if total != 1500 {
+					tb.Errorf("counts total %v, want 1500", total)
+				}
+			}},
+		// DISTINCT groups NULLs together by the same rule, on a code path
+		// (GroupByAll) that partitioned aggregation never takes — so the
+		// merge is the only thing that can get it right.
+		twoPathQuery{name: "NullGroupKeyDistinct", cmp: cmpUnordered,
+			sql: `SELECT DISTINCT o.o_orderstatus AS s FROM customer c
+				LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 5`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				nulls := 0
+				for _, r := range rows {
+					if v, ok := lookupCell(r, "s"); ok && v == nil {
+						nulls++
+					}
+				}
+				if nulls != 1 {
+					tb.Errorf("DISTINCT returned %d NULL rows, want exactly 1: %v", nulls, rows)
+				}
+				if len(rows) != 4 {
+					tb.Errorf("DISTINCT returned %d rows, want 4 (F, O, P and one NULL): %v", len(rows), rows)
+				}
+			}},
+	)
 	return out
 }
 

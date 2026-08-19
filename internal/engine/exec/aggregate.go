@@ -114,9 +114,17 @@ type HashAggregate struct {
 	// partition's state after its own.
 	PartitionedDisjoint bool
 	adoptedPartitions   []*HashAggregate
-	NullGroupCols       []string // GROUPING SETS: columns to output as NULL (legacy per-node)
-	GroupingSets        [][]int  // single-pass grouping sets: column indices within GroupByCols per set
-	InputRowHint        int64    // estimated input rows for pre-sizing hash table
+	// routeFallback records that at least one batch could NOT be
+	// hash-routed and was consumed whole by whichever worker pulled it
+	// (partitionAndDeliver's fallback). That breaks the disjointness
+	// PartitionedDisjoint asserts — the same key then lives in several
+	// sinks — so the pipeline demotes the merge back to a real key merge
+	// before adopting anything. Lives on the shared router instance (the
+	// primary aggregate), written from every worker goroutine.
+	routeFallback atomic.Bool
+	NullGroupCols []string // GROUPING SETS: columns to output as NULL (legacy per-node)
+	GroupingSets  [][]int  // single-pass grouping sets: column indices within GroupByCols per set
+	InputRowHint  int64    // estimated input rows for pre-sizing hash table
 	// GroupNDVHint is the planner's HLL-based estimate of GROUP-KEY
 	// cardinality (catalog merged sketches; ~2% error) — the quantity the
 	// hash table actually holds, unlike InputRowHint's input-row proxy.
@@ -2871,6 +2879,33 @@ func (h *HashAggregate) strNullGroupSlot() int32 {
 	return h.strNullGroupIdx
 }
 
+// mergeNullGroupSlot resolves the destination slot for another sink's
+// NULL-key group during the in-memory merge, returning (slot, found).
+//
+// The single-string fast path keeps its NULL group OUT of strGroupIndex on
+// purpose (strNullGroupSlot: that table stores raw string keys, so a real
+// one-byte "\x01" value would land on the sentinel), which means the merge
+// loop's table probe can never match it. Every merge therefore appended one
+// more NULL group and GROUP BY over a nullable string reported the NULL row
+// once per parallel partial instead of once — the split-group half of #338.
+// GROUP BY treats all NULLs as one group, so the match has to run through
+// strNullGroupIdx here.
+func (h *HashAggregate) mergeNullGroupSlot(key string, newIdx int32) (int32, bool) {
+	if h.strNullGroupIdx >= 0 {
+		return h.strNullGroupIdx, true
+	}
+	// A generic-path destination carries its NULL key in the table like any
+	// other key (the binary encoding of a single NULL column IS "\x01"), so
+	// there the ordinary probe is the correct match.
+	if !h.useStrGroupKey {
+		return h.strGroupIndex.GetOrInsert([]byte(key), newIdx)
+	}
+	// String-path destination with no NULL group yet: the incoming one
+	// becomes it, so the next merge matches instead of appending again.
+	h.strNullGroupIdx = newIdx
+	return newIdx, false
+}
+
 // consumeBatchGenericSoA is the SoA fast path for multi-column GROUP BY
 // that doesn't fit int/packed/compact/single-string paths.
 // Uses binary key serialization into strHashTable with two-phase scatter.
@@ -4429,7 +4464,13 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 		oExt := oGS.extras
 
 		newIdx := int32(len(h.strGroupStates))
-		gsIdx, found := h.strGroupIndex.GetOrInsert([]byte(key), newIdx)
+		var gsIdx int32
+		var found bool
+		if int32(i) == o.strNullGroupIdx {
+			gsIdx, found = h.mergeNullGroupSlot(key, newIdx)
+		} else {
+			gsIdx, found = h.strGroupIndex.GetOrInsert([]byte(key), newIdx)
+		}
 		if found {
 			gs := h.strGroupStates[gsIdx]
 			ext := gs.extras

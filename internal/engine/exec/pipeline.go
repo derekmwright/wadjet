@@ -549,6 +549,22 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		return v.(error)
 	}
 
+	// A batch the router could not hash was consumed whole by the worker
+	// that pulled it, so several sinks may now hold the same group key and
+	// adoption would emit that group once per sink (#338: GROUP BY over a
+	// column the router cannot hash returned one partial row per worker,
+	// counts split k ways). Demote to the ordinary merge, which combines
+	// partial states by key.
+	if usePartitioned && primaryAgg.routeFallback.Load() {
+		usePartitioned = false
+		primaryAgg.PartitionedDisjoint = false
+		for i := 1; i < workers; i++ {
+			if cs, ok := workerSinks[i].(*HashAggregate); ok {
+				cs.PartitionedDisjoint = false
+			}
+		}
+	}
+
 	// Merge per-worker partial sinks into the primary sink. In partitioned
 	// mode the primary ADOPTS clone state (streams it at Next) and owns the
 	// clones' lifecycle — closing them here would free live state.

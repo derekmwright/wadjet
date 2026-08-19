@@ -370,6 +370,64 @@ func duckdbCorpus() []duckdbCase {
 		// Correct on every path, so the join is the trigger.
 		duckdbCase{name: "EmptyScanUngroupedSum",
 			sql: "SELECT SUM(l_extendedprice) AS s FROM lineitem WHERE l_orderkey < 0"},
+		// #338: a NULL group key reported once per PARALLEL PARTIAL instead
+		// of once. GROUP BY, DISTINCT and set operations are the places SQL
+		// requires NULLs to be treated as EQUAL to each other, so a merge
+		// that combines worker partials by key has to match a NULL key to a
+		// NULL key — and one that appends instead splits the group without
+		// losing a row: four rows of 375 for the one row of 1500 below,
+		// which every row-count and total-preserving check calls fine.
+		//
+		// The right side of the join matches nothing, so every group key is
+		// NULL. Only tables big enough to run parallel partials can show it
+		// (customer is 1500 rows; the NULL* entries above are all over
+		// nation's 25 and were green throughout), which is why the whole
+		// SF0.01 corpus missed it.
+		//
+		// Arm B is exempt for a DIFFERENT defect this reduction runs into: on
+		// the stage DAG a LEFT JOIN whose build side is empty returns no rows
+		// at all — `SELECT COUNT(*) FROM customer LEFT JOIN orders ON ... AND
+		// o_orderkey < 0` answers 0 where the truth is 1500, so the outer join
+		// degenerates to an inner one. That is not this bug and not fixed
+		// here; the exemption self-expires the moment arm B agrees.
+		duckdbCase{name: "NullGroupKeyEmptyLeftJoin", sql: `SELECT o.o_orderstatus AS s, COUNT(*) AS c
+			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0
+			GROUP BY o.o_orderstatus`,
+			knownBugArm: armDAG,
+			knownBug: "on the stage DAG a LEFT JOIN with an empty build side returns no rows at all " +
+				"(the outer join degenerates to an inner one), so the query answers 0 rows instead of one NULL group"},
+		// The same shape keyed on an INT column, so the fix cannot be
+		// specific to the string group-key path.
+		duckdbCase{name: "NullGroupKeyEmptyLeftJoinInt", sql: `SELECT o.o_shippriority AS s, COUNT(*) AS c
+			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0
+			GROUP BY o.o_shippriority`,
+			knownBugArm: armDAG,
+			knownBug:    "same empty-build LEFT JOIN defect on the DAG as NullGroupKeyEmptyLeftJoin",
+		},
+		// Multi-column, with one key column NULL and one not: a fix narrowed
+		// to "the whole key is NULL" leaves these five groups split.
+		duckdbCase{name: "NullGroupKeyEmptyLeftJoinPartialNull", sql: `SELECT c.c_mktsegment AS m,
+			o.o_orderstatus AS s, COUNT(*) AS c
+			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0
+			GROUP BY c.c_mktsegment, o.o_orderstatus`,
+			knownBugArm: armDAG,
+			knownBug:    "same empty-build LEFT JOIN defect on the DAG as NullGroupKeyEmptyLeftJoin",
+		},
+		// DISTINCT over the same all-NULL column: one NULL row, on the
+		// GroupByAll path that partitioned aggregation never takes, so the
+		// merge alone has to be right.
+		duckdbCase{name: "NullGroupKeyEmptyLeftJoinDistinct", sql: `SELECT DISTINCT o.o_orderstatus AS s
+			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0`,
+			knownBugArm: armDAG,
+			knownBug:    "same empty-build LEFT JOIN defect on the DAG as NullGroupKeyEmptyLeftJoin",
+		},
+		// The partially-matching sibling, gated on BOTH arms: the join keeps
+		// four orders, so the NULL group is aggregated next to real ones and
+		// the DAG answers it correctly. This is the control that says the
+		// exemptions above are about the empty build side and nothing else.
+		duckdbCase{name: "NullGroupKeyMixedLeftJoin", sql: `SELECT o.o_orderstatus AS s, COUNT(*) AS c
+			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 5
+			GROUP BY o.o_orderstatus`},
 		// A NULL made by one expression and consumed by another, on a STRING
 		// column — the shape whose output type is decided by a function's
 		// declaration rather than by any column in the input schema.

@@ -58,6 +58,27 @@ func TestTPCHOptimizationInvariance(t *testing.T) {
 		oracle.Query{Name: "ShapeRune07", SQL: "SELECT SUM(char_length(l_comment)) AS runes, SUM(LENGTH(l_comment)) AS bytes FROM lineitem"},
 	)
 
+	// #338 shapes: a GROUP BY / DISTINCT whose key is NULL on every row.
+	// TPC-H has no NULLs at all, so nothing in the 22 reaches them — and
+	// they are the shapes where the partitioned-agg switch changes WHICH
+	// merge runs (routed-and-adopted with it on, key-merged with it off).
+	// Both answered with one row per parallel partial, by two different
+	// defects, so with the switch swept these entries diverge from each
+	// other as well as from the truth.
+	queries = append(queries,
+		oracle.Query{Name: "NullGroupKey01", SQL: `SELECT o.o_orderstatus AS s, COUNT(*) AS c
+			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0
+			GROUP BY o.o_orderstatus`},
+		oracle.Query{Name: "NullGroupKey02", SQL: `SELECT c.c_mktsegment AS m, o.o_orderstatus AS s, COUNT(*) AS c
+			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0
+			GROUP BY c.c_mktsegment, o.o_orderstatus ORDER BY m`},
+		oracle.Query{Name: "NullGroupKey03", SQL: `SELECT DISTINCT o.o_orderstatus AS s
+			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0`},
+		oracle.Query{Name: "NullGroupKey04", SQL: `SELECT o.o_orderstatus AS s, COUNT(*) AS c
+			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 5
+			GROUP BY o.o_orderstatus ORDER BY c`},
+	)
+
 	pushdownsBefore := physical.ScanFilterPushdowns.Load()
 	shapeOnlyBefore := physical.ShapeOnlyColumnsPlanned.Load()
 	oracle.RunDifferential(ctx, t, oracle.ExpandLimits(queries), func(ctx context.Context, sql string) (*oracle.Result, error) {
