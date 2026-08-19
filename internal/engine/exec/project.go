@@ -60,6 +60,13 @@ type ProjectColumn struct {
 	SourceCol       string                      // source column name for type resolution on renames
 	DirectCopy      string                      // if set, bulk copy this input column (no per-row eval)
 	Dimension       int                         // VECTOR output dimensionality (e.g. embed()); 0 = not a vector
+	// Computed marks an output whose value comes from Expr rather than from
+	// an input column of the same name. Such an output must NOT be typed by
+	// looking its own name up in the input: when the alias shadows an input
+	// column, that lookup types the vector from a column the value paths
+	// never read. Only the planner can tell the two apart — Expression is
+	// an opaque func here.
+	Computed bool
 }
 
 // Project is a UnaryOperator that selects and computes columns.
@@ -133,11 +140,19 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 				// instead of the planner's placeholder.
 				srcIdx = columnIndexFallback(in, proj.SourceCol)
 			}
-			if srcIdx < 0 {
+			if srcIdx < 0 && !proj.Computed {
 				// No explicit source resolved. A projection that is not a
 				// rename names its own column here (SELECT n_name), so the
 				// same-name lookup is what upgrades the planner's
 				// placeholder type to the real one.
+				//
+				// A COMPUTED output is excluded: its value comes from Expr,
+				// so an input column that happens to share its alias
+				// (SELECT UPPER(n_name) AS n_regionkey) describes a
+				// different column entirely. Typing from it produced an
+				// all-zero int column for UPPER/SUBSTR and a panic for
+				// concatenation, whose vectorized kernel writes into
+				// BytesData the mistyped vector does not have (#327).
 				srcIdx = in.ColumnIndex(proj.Name)
 			}
 			if srcIdx >= 0 {

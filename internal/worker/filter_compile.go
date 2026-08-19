@@ -314,8 +314,11 @@ func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, erro
 		projCols = append(projCols, exec.ProjectColumn{
 			Name: p.Name,
 			// Plan-time inferred type: the output column doesn't exist in
-			// the input schema, so exec.Project cannot resolve it there.
-			Type: typ,
+			// the input schema, so exec.Project cannot resolve it there —
+			// unless the alias happens to name a DIFFERENT input column,
+			// which is the shadowing case Computed exists to reject (#327).
+			Type:     typ,
+			Computed: true,
 			Expr: func(b *batch.RecordBatch, row int) any {
 				return e.Eval(b, row)
 			},

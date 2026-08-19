@@ -6057,6 +6057,11 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		if name != colRef {
 			pc.SourceCol = colRef
 		}
+		// Tell the runtime this output is computed, so it does not type the
+		// output vector from an input column that merely shares the alias
+		// (#327). A bare column reference — the only projection whose value
+		// really does come from a same-named input — is excluded.
+		pc.Computed = isComputedProjection(proj.ASTExpr)
 		// For simple column references (no computed expression), use bulk vector
 		// copy instead of per-row evaluation.
 		if isDirectCopy {
@@ -6505,6 +6510,12 @@ func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.Typ
 func nodeDeclaredType(node plansql.Node) (parquet.TypeID, bool) {
 	switch n := node.(type) {
 	case *plansql.BinaryOp:
+		if n.Op == "||" {
+			// String concatenation, not arithmetic. Declaring it Float64
+			// handed the concat kernel an output vector with no BytesData,
+			// so every row came back NULL (#328).
+			return parquet.TypeString, true
+		}
 		if !binOpInvolvesInterval(n) {
 			return parquet.TypeFloat64, true
 		}
@@ -8710,6 +8721,30 @@ func resolveNullsLast(ob logical.OrderExpr) bool {
 	}
 	// Default: ASC => NULLS LAST, DESC => NULLS FIRST
 	return !ob.Desc
+}
+
+// isComputedProjection reports whether a SELECT item's value is COMPUTED
+// rather than read straight from an input column. Only a bare column
+// reference — optionally parenthesised — reads an input column; everything
+// else (function call, arithmetic, CASE, CAST, concatenation) produces a new
+// value whose type comes from the expression, not from whatever input column
+// happens to share the output's alias (#327).
+//
+// A nil AST expression is the pre-AST projection form, which is always a
+// plain column.
+func isComputedProjection(e plansql.Node) bool {
+	for {
+		switch n := e.(type) {
+		case nil:
+			return false
+		case *plansql.ColRef:
+			return false
+		case *plansql.ParenNode:
+			e = n.Inner
+		default:
+			return true
+		}
+	}
 }
 
 func cleanExpr(s string) string {

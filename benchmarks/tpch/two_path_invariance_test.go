@@ -581,6 +581,41 @@ func twoPathCorpus() []twoPathQuery {
 					return cellText(r, "n_regionkey")
 				})
 			}},
+		// The COMPUTED half of the same shadowing defect (#327): the value
+		// comes from an expression, so an input column sharing the alias
+		// describes a different column entirely. Typing from it returned an
+		// all-zero int column here and panicked the DAG's fragment on the
+		// concatenation form.
+		twoPathQuery{name: "ComputedAliasShadowsTypedColumn", cmp: cmpOrdered,
+			sql: "SELECT UPPER(n_name) AS n_regionkey, n_regionkey AS r FROM nation ORDER BY r, n_regionkey",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				for i, r := range rows {
+					v := cellText(r, "n_regionkey")
+					if _, err := strconv.ParseFloat(v, 64); err == nil {
+						tb.Errorf("row %d: the alias n_regionkey holds %q — a number, so the computed "+
+							"UPPER(n_name) was typed from the shadowed n_regionkey column", i, v)
+						break
+					}
+					if v != strings.ToUpper(v) {
+						tb.Errorf("row %d: n_regionkey = %q is not upper-cased", i, v)
+						break
+					}
+				}
+			}},
+		// || is string concatenation, not arithmetic (#328). Every row came
+		// back NULL: the evaluator had no case for the operator and the
+		// planner declared its output Float64.
+		twoPathQuery{name: "ConcatOperator", cmp: cmpOrdered,
+			sql: "SELECT n_name || '-' || n_name AS doubled FROM nation ORDER BY n_name",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				for i, r := range rows {
+					v := cellText(r, "doubled")
+					if v == "" || v == "<nil>" || !strings.Contains(v, "-") {
+						tb.Errorf("row %d: n_name || '-' || n_name = %q, want the two names joined by a dash", i, v)
+						break
+					}
+				}
+			}},
 		// Two sort keys, only the first aliased: materializing the alias must
 		// not cost the plan the second key.
 		twoPathQuery{name: "AliasedSortMixedKeys", sql: "SELECT o_orderpriority AS p, o_orderstatus FROM orders ORDER BY p, o_orderstatus", cmp: cmpOrdered},

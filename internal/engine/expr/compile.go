@@ -81,6 +81,16 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		return &Lit{Val: iv}, nil
 
 	case *plansql.BinaryOp:
+		if n.Op == "||" {
+			// SQL string concatenation. Compiled as concat() so it shares
+			// that function's scalar and vectorized kernels and its
+			// declared String return type — BinOp.Eval only knows
+			// arithmetic, and returned NULL for every row (#328).
+			return compileFuncCallNode(&plansql.FuncCallNode{
+				Name: "concat",
+				Args: []plansql.Node{n.Left, n.Right},
+			}, ctx)
+		}
 		left, err := compileWithCtx(n.Left, ctx)
 		if err != nil {
 			return nil, err
