@@ -113,6 +113,24 @@ func datePartFamily() []datePartCase {
 			fn: "extract", unitArg: &Lit{Val: "epoch"},
 			wantDate: float64(testDateEpochS), wantInstant: float64(testTSEpochS),
 		},
+		// date_part() is EXTRACT's function spelling and shares its kernels
+		// outright (#341). It is exercised over the same units because sharing
+		// an implementation is a decision that can be undone: if the two ever
+		// diverge, the DATE column is where it shows first.
+		{fn: "date_part", unitArg: &Lit{Val: "year"}, wantDate: 1996.0, wantInstant: 1996.0},
+		{fn: "date_part", unitArg: &Lit{Val: "quarter"}, wantDate: 1.0, wantInstant: 1.0},
+		{fn: "date_part", unitArg: &Lit{Val: "month"}, wantDate: 3.0, wantInstant: 3.0},
+		{fn: "date_part", unitArg: &Lit{Val: "week"}, wantDate: 11.0, wantInstant: 11.0},
+		{fn: "date_part", unitArg: &Lit{Val: "day"}, wantDate: 13.0, wantInstant: 13.0},
+		{fn: "date_part", unitArg: &Lit{Val: "dow"}, wantDate: 3.0, wantInstant: 3.0},
+		{fn: "date_part", unitArg: &Lit{Val: "doy"}, wantDate: 73.0, wantInstant: 73.0},
+		{fn: "date_part", unitArg: &Lit{Val: "hour"}, wantDate: 0.0, wantInstant: 14.0},
+		{fn: "date_part", unitArg: &Lit{Val: "minute"}, wantDate: 0.0, wantInstant: 25.0},
+		{fn: "date_part", unitArg: &Lit{Val: "second"}, wantDate: 0.0, wantInstant: 36.0},
+		{
+			fn: "date_part", unitArg: &Lit{Val: "epoch"},
+			wantDate: float64(testDateEpochS), wantInstant: float64(testTSEpochS),
+		},
 	}
 }
 

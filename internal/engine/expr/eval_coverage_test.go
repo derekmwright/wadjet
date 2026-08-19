@@ -781,6 +781,13 @@ func TestArrayLitExpr(t *testing.T) {
 	}
 }
 
+// TestFuncCallUnknownFunc pins the runtime BACKSTOP, not the behavior a query
+// sees. A hand-built FuncCall naming nothing still evaluates to nil rather than
+// panicking, which is what keeps a directly-constructed expression safe — but
+// no query can reach this state any more: compileFuncCallNode rejects the name
+// at plan time, so the nil is unreachable from SQL (#341). Before that check
+// existed, this nil WAS the query's answer, and a column of them was how every
+// unimplemented function reported itself.
 func TestFuncCallUnknownFunc(t *testing.T) {
 	fc := &FuncCall{
 		Name: "nonexistent_function",
@@ -789,6 +796,10 @@ func TestFuncCallUnknownFunc(t *testing.T) {
 	result := fc.Eval(nil, 0)
 	if result != nil {
 		t.Errorf("expected nil for unknown function, got %v", result)
+	}
+	// The plan-time gate is the real guarantee.
+	if err := checkKnown("nonexistent_function"); err == nil {
+		t.Error("compiling an unregistered name must fail")
 	}
 }
 

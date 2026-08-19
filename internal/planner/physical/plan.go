@@ -6078,7 +6078,10 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 	}
 
 	for _, pred := range preds {
-		filter := p.buildFilterOp(pred, outerTables, outerCols)
+		filter, err := p.buildFilterOp(pred, outerTables, outerCols)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 		if filter != nil {
 			ops = append(ops, filter)
 		}
@@ -6241,6 +6244,9 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					// Replace inner aggregate with a column reference in the AST
 					rewritten := replaceAggWithColRef(proj.ASTExpr, innerAgg, aggOutputCol)
 					compiled, compErr := expr.CompileWithRunner(rewritten, p.subqueryRunner)
+					if expr.IsUnknownFunc(compErr) {
+						return nil, nil, nil, compErr
+					}
 					if compErr == nil {
 						expression = wrapExpr(compiled)
 						compiledExpr = compiled
@@ -6277,6 +6283,12 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				}
 			} else {
 				compiled, compErr = expr.CompileWithRunner(proj.ASTExpr, p.subqueryRunner)
+			}
+			// A name nothing implements has no input column to fall back to,
+			// so the direct-copy path below would only re-report it as a
+			// missing column. Propagate instead (#341).
+			if expr.IsUnknownFunc(compErr) {
+				return nil, nil, nil, compErr
 			}
 			if compErr == nil {
 				expression = wrapExpr(compiled)
@@ -6417,6 +6429,9 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			}
 			synName := fmt.Sprintf("__agg_expr_%d", i)
 			compiled, compErr := expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner)
+			if expr.IsUnknownFunc(compErr) {
+				return nil, nil, nil, compErr
+			}
 			if compErr == nil {
 				pc := exec.ProjectColumn{
 					Name: synName,
@@ -6560,6 +6575,9 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					continue
 				}
 				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
+				if expr.IsUnknownFunc(compErr) {
+					return nil, nil, nil, compErr
+				}
 				if compErr != nil {
 					continue
 				}
@@ -6584,6 +6602,9 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			if gbExpr != nil && !isPlainGroupKey(gbExpr) {
 				synName := fmt.Sprintf("__gb_expr_%d", i)
 				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
+				if expr.IsUnknownFunc(compErr) {
+					return nil, nil, nil, compErr
+				}
 				if compErr == nil {
 					pc := exec.ProjectColumn{
 						Name: synName,
@@ -8080,7 +8101,14 @@ func (s *catalogScanSource) RowsScanned() int64 {
 // RecordBatch type alias for convenience
 type RecordBatch = batch.RecordBatch
 
-func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]bool, outerCols map[string]string) exec.UnaryOperator {
+// buildFilterOp compiles one predicate into a filter operator. It returns an
+// error only for a predicate naming a function that does not exist: every other
+// compile failure falls through to the raw-string and column-compare paths
+// below, which is what makes those fallbacks useful. An unknown function has
+// nothing to fall through TO — the string parser would not recognize it either,
+// so the predicate would quietly become nil and the filter would vanish,
+// admitting every row (#341).
+func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]bool, outerCols map[string]string) (exec.UnaryOperator, error) {
 	// Try to compile from AST expression first (full expression engine)
 	if pred.ASTExpr != nil {
 		var compiled expr.Expr
@@ -8094,17 +8122,20 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 		} else {
 			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner)
 		}
+		if expr.IsUnknownFunc(err) {
+			return nil, err
+		}
 		if err == nil {
 			// Try to extract vectorized filter for simple comparison patterns.
 			// First try full vectorization, then partial (vectorize what we can
 			// from AND chains, keep the rest as row-at-a-time predicates).
 			if vf := tryVectorizeFilter(compiled); vf != nil {
-				return vf
+				return vf, nil
 			}
 			if vf := tryPartialVectorize(compiled); vf != nil {
-				return vf
+				return vf, nil
 			}
-			return exec.NewFilter(wrapPredicate(compiled))
+			return exec.NewFilter(wrapPredicate(compiled)), nil
 		}
 	}
 
@@ -8112,16 +8143,16 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 	if pred.Raw != "" {
 		p := parseSimplePredicate(pred.Raw)
 		if p != nil {
-			return p
+			return p, nil
 		}
 	}
 
 	if pred.Column != "" && pred.Op != "" {
 		op := parseCompareOp(pred.Op)
-		return exec.NewFilter(exec.ColumnCompare(pred.Column, op, pred.Value))
+		return exec.NewFilter(exec.ColumnCompare(pred.Column, op, pred.Value)), nil
 	}
 
-	return nil
+	return nil, nil
 }
 
 // tryVectorizeFilter inspects a compiled expression tree and returns a vectorized

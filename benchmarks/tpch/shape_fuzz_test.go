@@ -76,13 +76,17 @@ var errTooLarge = errors.New("reference result exceeds the harness row cap")
 //
 //	`a || b`                     → NULL (0 for two literals), not concatenation
 //	NULLIF(<text col>, 'x')      → 0, not the text value
-//	DATE_PART('year', d)         → NULL (not registered; unknown functions
-//	                               evaluate to NULL instead of erroring)
 //	CAST(d AS DATE) - CAST(...)  → 0 (CAST-to-DATE is a no-op)
 //	STDDEV/VARIANCE over >1 batch→ wrong by ~0.3-0.9%
 //	<set-op> ... ORDER BY        → ORDER BY dropped; UNION across differently
 //	                               named columns also loses one arm's values
 //	ORDER BY x DESC NULLS LAST   → NULLs come back first
+//
+// DATE_PART('year', d) used to head this list, answering NULL because the name
+// was registered nowhere and an unresolvable function evaluated to NULL rather
+// than erroring. #341 made the missing name a plan-time error and registered
+// date_part as EXTRACT's spelling, so it is gone from here on both counts: it
+// answers correctly now, and a name that does not answer says so.
 //
 // The two below CANNOT be kept out of the generator without deleting the
 // shapes they live in, so they are recognised structurally and skipped. Delete

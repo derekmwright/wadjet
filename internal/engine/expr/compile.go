@@ -613,6 +613,10 @@ func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, er
 		return &Coalesce{Args: args}, nil
 	}
 
+	if err := checkKnown(name); err != nil {
+		return nil, err
+	}
+
 	fc := &FuncCall{Name: name, Args: args}
 	// Offsets-shape: length()/octet_length()/bit_length() over a bare column
 	// reference are offsets subtractions, not value reads (shape_funcs.go).
