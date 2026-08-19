@@ -733,19 +733,13 @@ func duckdbCorpus() []duckdbCase {
 			COUNT(*) OVER (ORDER BY n_nationkey) AS running_count
 			FROM nation ORDER BY n_nationkey`,
 		},
-		// LAST_VALUE with an explicit whole-partition frame, pinned on BOTH
-		// arms: Wadjet returns the CURRENT row's value whatever frame the
-		// query spells out, because computePartitionColumnar's WinLastValue
-		// branch decides on the presence of an ORDER BY and never reads
-		// WindowColumn.Frame (#350). Held against DuckDB's answer so the fix
-		// is detected rather than described.
+		// LAST_VALUE with an explicit whole-partition frame. The window
+		// operator now resolves every frame-sensitive function over its
+		// frame, so this is gated on both arms (#350).
 		duckdbCase{name: "WindowLastValueExplicitFrame", sql: `SELECT n_nationkey,
 			LAST_VALUE(n_name) OVER (ORDER BY n_nationkey
 			  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS lv
-			FROM nation ORDER BY n_nationkey`,
-			knownBugArm: armBoth,
-			knownBug:    "LAST_VALUE ignores an explicit frame and returns the current row's value (#350)",
-		},
+			FROM nation ORDER BY n_nationkey`},
 
 		// #348/#352 — an outer join over an EMPTY side. The rows it exists to
 		// preserve are exactly the ones neither side's data can produce, so
@@ -1086,6 +1080,111 @@ func duckdbCorpus() []duckdbCase {
 		// which is what made the rename the whole of the defect.
 		duckdbCase{name: "MaxOverUnrenamedSubqueryColumn",
 			sql: "SELECT MAX(o_custkey) AS m FROM (SELECT o_custkey FROM orders)"},
+		// --- #343: ORDER BY ... NULLS FIRST / NULLS LAST ---
+		//
+		// All four combinations of direction and explicit placement, plus
+		// the two defaults. Only the two explicit spellings on a DESC key
+		// were wrong (the DESC comparator negated the kernel's null handling
+		// along with its values), so four of these six passed before the fix
+		// — which is why NullOrderingAsc/Desc above, testing the defaults
+		// alone, saw nothing. The key is NULLable via NULLIF; the tiebreak
+		// on n_name keeps the row sequence determined.
+		duckdbCase{name: "NullOrderingAscNullsFirst", sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name
+			FROM nation ORDER BY k ASC NULLS FIRST, n_name`},
+		duckdbCase{name: "NullOrderingAscNullsLast", sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name
+			FROM nation ORDER BY k ASC NULLS LAST, n_name`},
+		duckdbCase{name: "NullOrderingDescNullsFirst", sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name
+			FROM nation ORDER BY k DESC NULLS FIRST, n_name`},
+		duckdbCase{name: "NullOrderingDescNullsLast", sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name
+			FROM nation ORDER BY k DESC NULLS LAST, n_name`},
+		// The issue's own query: a LEFT JOIN that misses is how the NULLs
+		// get there, and the string key means the value signature is blind
+		// to it. Before the fix the three NULL rows came back first.
+		duckdbCase{name: "NullOrderingLeftJoinDescNullsLast", sql: `SELECT o.o_orderstatus AS s, c.c_custkey
+			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 40
+			ORDER BY o.o_orderstatus DESC NULLS LAST, c.c_custkey`},
+		// Explicit placement on a SECOND key, whose direction differs from
+		// the first: a fix that resolved placement per query rather than per
+		// key would answer this one wrong.
+		duckdbCase{name: "NullOrderingSecondKey", sql: `SELECT n_regionkey AS r, NULLIF(n_nationkey % 5, 1) AS k, n_name
+			FROM nation ORDER BY r DESC, k DESC NULLS LAST, n_name`},
+
+		// --- #350: an explicit window frame is obeyed ---
+		//
+		// The frame was parsed, carried through the logical plan, put on the
+		// exec spec and shipped on the wire, and read by nothing: every
+		// value and aggregate function decided on the presence of an ORDER
+		// BY alone. Each pair below is the same function with an explicit
+		// frame and with none, because only the pair shows that the frame is
+		// what moved.
+		//
+		// n_nationkey is unique, so ROWS and RANGE agree here and the frame
+		// is the only variable.
+		duckdbCase{name: "WindowLastValueDefaultFrame", sql: `SELECT n_nationkey,
+			LAST_VALUE(n_name) OVER (ORDER BY n_nationkey) AS lv
+			FROM nation ORDER BY n_nationkey`},
+		duckdbCase{name: "WindowFirstValueMovingLowerBound", sql: `SELECT n_nationkey,
+			FIRST_VALUE(n_name) OVER (ORDER BY n_nationkey ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS fv1,
+			FIRST_VALUE(n_name) OVER (ORDER BY n_nationkey ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS fv2,
+			FIRST_VALUE(n_name) OVER (ORDER BY n_nationkey) AS fv_default
+			FROM nation ORDER BY n_nationkey`},
+		duckdbCase{name: "WindowNthValueFrames", sql: `SELECT n_nationkey,
+			NTH_VALUE(n_name, 2) OVER (ORDER BY n_nationkey) AS nv_default,
+			NTH_VALUE(n_name, 2) OVER (ORDER BY n_nationkey ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS nv_moving,
+			NTH_VALUE(n_name, 2) OVER (ORDER BY n_nationkey
+			  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS nv_all
+			FROM nation ORDER BY n_nationkey`},
+		// A running total against a whole-partition total: the same SUM,
+		// differing only in frame, and getting it wrong is a plausible
+		// number rather than an error.
+		duckdbCase{name: "WindowAggregateFrames", sql: `SELECT n_nationkey,
+			SUM(n_regionkey) OVER (ORDER BY n_nationkey) AS running,
+			SUM(n_regionkey) OVER (ORDER BY n_nationkey
+			  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS total,
+			SUM(n_regionkey) OVER (ORDER BY n_nationkey ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sliding,
+			AVG(n_regionkey) OVER (ORDER BY n_nationkey ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sliding_avg,
+			COUNT(*) OVER (ORDER BY n_nationkey ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sliding_count
+			FROM nation ORDER BY n_nationkey`},
+		// A frame that is EMPTY for the leading rows. SUM and the value
+		// functions answer NULL there; COUNT answers 0, the one aggregate an
+		// empty frame does not make NULL.
+		duckdbCase{name: "WindowEmptyFrame", sql: `SELECT n_nationkey,
+			SUM(n_regionkey) OVER (ORDER BY n_nationkey ROWS BETWEEN 3 PRECEDING AND 2 PRECEDING) AS s,
+			COUNT(*) OVER (ORDER BY n_nationkey ROWS BETWEEN 3 PRECEDING AND 2 PRECEDING) AS c,
+			FIRST_VALUE(n_name) OVER (ORDER BY n_nationkey ROWS BETWEEN 3 PRECEDING AND 2 PRECEDING) AS fv
+			FROM nation ORDER BY n_nationkey`},
+		// MIN/MAX over a moving lower bound: the value that leaves the frame
+		// has to stop winning, which a running accumulator cannot express.
+		// Over a FLOAT column — MIN/MAX of a narrow INT window column is a
+		// separate, pre-existing silent zero (Vector.SetValue has no int32
+		// case for a Float64 output, the #345 family), visible with and
+		// without a frame and not this fix's to make.
+		duckdbCase{name: "WindowMinMaxFrames", sql: `SELECT o_orderkey,
+			MIN(o_totalprice) OVER (ORDER BY o_orderkey ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS mn,
+			MAX(o_totalprice) OVER (ORDER BY o_orderkey ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING) AS mx,
+			MIN(o_totalprice) OVER (ORDER BY o_orderkey) AS mn_default
+			FROM orders WHERE o_orderkey <= 200 ORDER BY o_orderkey`},
+		// A frame inside a PARTITION BY, where the bounds must clamp to the
+		// partition rather than reach across it.
+		duckdbCase{name: "WindowFramePartitioned", sql: `SELECT o_orderkey, o_orderstatus,
+			SUM(o_totalprice) OVER (PARTITION BY o_orderstatus ORDER BY o_orderkey
+			  ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS s,
+			LAST_VALUE(o_orderstatus) OVER (PARTITION BY o_orderstatus ORDER BY o_orderkey
+			  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS lv
+			FROM orders WHERE o_orderkey <= 200 ORDER BY o_orderkey`},
+		// RANGE mode's defining behaviour: bounds move by ORDER-BY PEER
+		// GROUP, not by row. n_regionkey has five rows per value, so every
+		// row of a tied group sees the same frame — and the default frame,
+		// which is RANGE, inherits that. The engine used to answer both of
+		// these row-at-a-time, so a running total over a tied key was wrong
+		// by exactly the tie.
+		duckdbCase{name: "WindowRangePeerGroups", sql: `SELECT n_nationkey, n_regionkey,
+			SUM(n_regionkey) OVER (ORDER BY n_regionkey) AS s_default,
+			COUNT(*) OVER (ORDER BY n_regionkey) AS c_default,
+			SUM(n_regionkey) OVER (ORDER BY n_regionkey RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS s_tail,
+			SUM(n_regionkey) OVER (ORDER BY n_regionkey
+			  RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS s_all
+			FROM nation ORDER BY n_nationkey`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can
