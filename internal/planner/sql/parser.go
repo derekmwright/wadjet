@@ -291,6 +291,12 @@ func Parse(sql string) (*ParsedQuery, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing SQL: %w", err)
 	}
+	// The statement has to be consumed in full. Anything left over is input
+	// this parser did not understand, and returning an answer computed from
+	// the prefix would silently discard it (#337).
+	if err := sp.expectEndOfStatement(); err != nil {
+		return nil, fmt.Errorf("parsing SQL: %w", err)
+	}
 
 	// Resolve positional references (GROUP BY 1, ORDER BY 1 DESC)
 	if err := resolvePositionalRefs(info); err != nil {

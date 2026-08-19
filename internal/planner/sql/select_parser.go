@@ -73,6 +73,35 @@ func (p *selectParser) isKeyword(kw TokenType) bool {
 	return p.cur.typ == kw
 }
 
+// expectEndOfStatement reports an error unless the parser consumed the whole
+// statement: only a statement separator and end of input may remain.
+//
+// Without it every clause this parser does not recognise was discarded in
+// silence, because each parse step returns as soon as it has what it knows
+// and nothing ever asked what was left over (#337). That turned a clause the
+// parser cannot honour — OFFSET before LIMIT, NATURAL JOIN, or a typo — into
+// a wrong answer instead of an error: `... WHERE n_regionkey = 1 GARBAGE`
+// answered as though the garbage were not there, and `... ORDER BY 1 OFFSET
+// 5` returned the whole table, which is the worst shape for pagination since
+// the first page looks right.
+//
+// The token named here is where parsing stopped, which is the clause a client
+// has to fix, not the end of the text.
+func (p *selectParser) expectEndOfStatement() error {
+	for p.cur.typ == TokenSemicolon {
+		p.advance()
+	}
+	switch p.cur.typ {
+	case TokenEOF:
+		return nil
+	case TokenError:
+		return fmt.Errorf("syntax error at position %d: %s", p.cur.pos, p.cur.val)
+	default:
+		return fmt.Errorf("syntax error at or near %q (position %d): trailing input after the end of the statement",
+			p.cur.val, p.cur.pos)
+	}
+}
+
 // parseSelectOrUnion parses a SELECT with optional set operations (UNION, INTERSECT, EXCEPT).
 func (p *selectParser) parseSelectOrUnion() (*SelectInfo, error) {
 	left, err := p.parseSingleSelect()
