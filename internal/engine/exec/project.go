@@ -105,14 +105,40 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 		schema = make([]parquet.Column, len(p.Projections))
 		for i, proj := range p.Projections {
 			typ := proj.Type
-			srcIdx := in.ColumnIndex(proj.Name)
+			// An EXPLICIT source beats a same-name match, because an output
+			// name can shadow a DIFFERENT input column: in
+			// `SELECT n_name AS n_regionkey, n_regionkey AS r`, the first
+			// output is named n_regionkey while its value comes from the
+			// string n_name. Typing it by output name picked the shadowed
+			// int column, and the value paths — which always read the
+			// SOURCE — then wrote a string into an int vector: silent
+			// zeros on the per-row path, a BulkCopy panic on the
+			// DirectCopy path the DAG's fragments take (#323).
+			//
+			// DirectCopy resolves exactly as the bulk-copy path below does,
+			// so the output vector's type always matches the vector that
+			// copy writes. Its idx is -1 both for a name that resolves to
+			// nothing (the copy path turns that into an error) and for a
+			// ROW field, which stays on the per-row route — both fall
+			// through to the resolutions below, as before.
+			srcIdx := -1
+			if proj.DirectCopy != "" {
+				srcIdx, _ = resolvePlainColumn(in, proj.DirectCopy)
+			}
 			if srcIdx < 0 && proj.SourceCol != "" {
-				// Same-name lookup failed: resolve the source the way the
-				// value paths do, so a renamed reference that only matches
-				// after qualifier fallback (SELECT "id.orig_h" AS src over
-				// an aggregate that emitted orig_h) still reports the input
-				// column's type instead of the planner's placeholder.
+				// Resolve the source the way the value paths do, so a
+				// renamed reference that only matches after qualifier
+				// fallback (SELECT "id.orig_h" AS src over an aggregate
+				// that emitted orig_h) reports the input column's type
+				// instead of the planner's placeholder.
 				srcIdx = columnIndexFallback(in, proj.SourceCol)
+			}
+			if srcIdx < 0 {
+				// No explicit source resolved. A projection that is not a
+				// rename names its own column here (SELECT n_name), so the
+				// same-name lookup is what upgrades the planner's
+				// placeholder type to the real one.
+				srcIdx = in.ColumnIndex(proj.Name)
 			}
 			if srcIdx >= 0 {
 				typ = in.Schema[srcIdx].Type

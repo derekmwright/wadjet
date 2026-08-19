@@ -554,6 +554,33 @@ func twoPathCorpus() []twoPathQuery {
 		// pair re-renames the column the fragment already renamed and the
 		// result comes back with two columns named "c".
 		twoPathQuery{name: "AliasedSortShadowsColumn", sql: "SELECT n_name AS n_comment, n_comment AS c FROM nation ORDER BY n_comment", cmp: cmpOrdered},
+		// The same shadow with the two columns DIFFERENTLY TYPED (#323).
+		// Project resolved an output column's type by looking its OUTPUT NAME
+		// up in the input schema before consulting the source it renames, so
+		// the alias took the shadowed int column's type while every value path
+		// read the string source: the single-process arm returned an all-zero
+		// column (wrong data, no error) and the DAG paired a string DirectCopy
+		// with an int output vector and panicked in BulkCopy. Both arms are
+		// wrong in different ways, so the compare catches it — and assertA
+		// pins the answer absolutely, since a symmetric regression that made
+		// both arms return zeros would still agree.
+		twoPathQuery{name: "AliasedSortShadowsTypedColumn", cmp: cmpOrdered,
+			sql: "SELECT n_name AS n_regionkey, n_regionkey AS r FROM nation ORDER BY n_regionkey",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				for i, r := range rows {
+					v := cellText(r, "n_regionkey")
+					if _, err := strconv.ParseFloat(v, 64); err == nil {
+						tb.Errorf("row %d: the alias n_regionkey holds %q — a number, so the projection returned the "+
+							"shadowed n_regionkey column instead of the n_name it renames", i, v)
+						break
+					}
+				}
+				// The sort key names the alias, so it must order the projected
+				// n_name values, not the region keys it shadows.
+				assertOrderedBy(tb, rows, false, "n_name projected as n_regionkey", func(r map[string]any) string {
+					return cellText(r, "n_regionkey")
+				})
+			}},
 		// Two sort keys, only the first aliased: materializing the alias must
 		// not cost the plan the second key.
 		twoPathQuery{name: "AliasedSortMixedKeys", sql: "SELECT o_orderpriority AS p, o_orderstatus FROM orders ORDER BY p, o_orderstatus", cmp: cmpOrdered},
