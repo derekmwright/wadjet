@@ -472,9 +472,9 @@ func TestCleanExpr(t *testing.T) {
 		want  string
 	}{
 		{"  user_id  ", "user_id"},
-		{"e.user_id", "e.user_id"},  // preserve table qualifiers for self-join disambiguation
+		{"e.user_id", "e.user_id"}, // preserve table qualifiers for self-join disambiguation
 		{"user_id", "user_id"},
-		{"e.sub.col", "e.sub.col"},  // preserve all qualifiers
+		{"e.sub.col", "e.sub.col"}, // preserve all qualifiers
 	}
 	for _, tt := range tests {
 		got := cleanExpr(tt.input)
@@ -921,5 +921,35 @@ func TestExtractMergeInfoDistinctNoSort(t *testing.T) {
 	}
 	if !mi.HasDistinct {
 		t.Error("expected HasDistinct = true")
+	}
+}
+
+// WindowExpr.InputCol carries the whole argument list, so the column is only
+// the part before the first comma. Reading the raw string as a column name
+// pruned the real column out of the scan, and the window operator then
+// resolved no input vector for it.
+func TestWindowExprInputColumn(t *testing.T) {
+	tests := []struct {
+		fn    string
+		input string
+		want  string
+	}{
+		{"first_value", "s", "s"},
+		{"lag", "s", "s"},
+		{"lag", "s, 2", "s"},
+		{"lag", "s, 2, 'none'", "s"},
+		{"lead", " s , 3 ", "s"},
+		{"nth_value", "s, 2", "s"},
+		{"nth_value", "t.s, 2", "t.s"}, // the qualifier is the caller's to strip
+		{"ntile", "4", ""},             // a bucket count, not a column
+		{"NTILE", "4", ""},
+		{"row_number", "", ""},
+		{"sum", "amount", "amount"},
+	}
+	for _, tc := range tests {
+		w := WindowExpr{Func: tc.fn, InputCol: tc.input}
+		if got := w.InputColumn(); got != tc.want {
+			t.Errorf("%s(%q): input column %q, want %q", tc.fn, tc.input, got, tc.want)
+		}
 	}
 }

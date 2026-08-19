@@ -3,6 +3,7 @@ package logical
 
 import (
 	"fmt"
+	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -248,11 +249,31 @@ type WindowBound struct {
 // WindowExpr is a window function expression.
 type WindowExpr struct {
 	Func        string // row_number, rank, dense_rank, sum, count, avg, min, max
-	InputCol    string // for aggregate window functions
+	InputCol    string // the argument list, verbatim — see InputColumn
 	OutputCol   string
 	PartitionBy []string
 	OrderBy     []OrderExpr
 	Frame       *WindowFrameSpec
+}
+
+// InputColumn returns the COLUMN argument of a window expression.
+//
+// InputCol carries the whole argument list as one string, so LAG, LEAD and
+// NTH_VALUE spell their column alongside an offset, a default or an N —
+// "l_quantity, 2, 0". The column is everything before the first comma;
+// everything after belongs to the function, not to any table. NTILE's single
+// argument is a bucket count and names no column at all.
+//
+// Every consumer needs the same answer: the column-pruning rule needs it to
+// keep the column readable, and the physical planner needs it to type the
+// output. Taking the raw string for a column name pruned the real one out of
+// the scan, and the window operator then found no input vector and
+// nil-dereferenced it — a crash, not a wrong answer.
+func (w WindowExpr) InputColumn() string {
+	if strings.EqualFold(strings.TrimSpace(w.Func), "ntile") {
+		return ""
+	}
+	return strings.TrimSpace(strings.SplitN(w.InputCol, ",", 2)[0])
 }
 
 // OrderExpr is a sort expression.

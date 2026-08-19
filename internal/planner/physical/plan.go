@@ -7342,10 +7342,15 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 			})
 		}
 		wc := exec.WindowColumn{
-			Func:        parseWindowFunc(we.Func),
-			InputCol:    cleanExpr(we.InputCol),
+			Func: parseWindowFunc(we.Func),
+			// InputColumn drops the offset/default/N that share the
+			// argument string, so cleanExpr sees a column reference and
+			// nothing else. Applied the other way round, a float default
+			// (LAG(x, 1, 1.5)) looked like a qualified name and cleanExpr
+			// returned "5" as the input column.
+			InputCol:    cleanExpr(we.InputColumn()),
 			OutputCol:   we.OutputCol,
-			OutputType:  windowOutputType(we.Func),
+			OutputType:  windowSpecOutputType(node, we),
 			PartitionBy: we.PartitionBy,
 			OrderBy:     orderKeys,
 		}
@@ -7356,28 +7361,21 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 				End:   exec.WindowBound{Type: we.Frame.End.Type, Offset: we.Frame.End.Offset},
 			}
 		}
-		// Parse function-specific arguments from InputCol
+		// Parse the function-specific arguments out of the rest of the
+		// argument string (InputCol carries the whole list verbatim).
 		fn := strings.ToLower(we.Func)
 		if fn == "ntile" {
-			if n, err := strconv.Atoi(strings.TrimSpace(wc.InputCol)); err == nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(we.InputCol)); err == nil {
 				wc.NtileBuckets = n
 			}
-			wc.InputCol = ""
 		} else if fn == "nth_value" {
-			parts := strings.SplitN(wc.InputCol, ",", 2)
-			if len(parts) > 0 {
-				wc.InputCol = strings.TrimSpace(parts[0])
-			}
-			if len(parts) >= 2 {
+			if parts := strings.SplitN(we.InputCol, ",", 2); len(parts) >= 2 {
 				if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
 					wc.NthValueN = n
 				}
 			}
 		} else if fn == "lag" || fn == "lead" {
-			parts := strings.SplitN(wc.InputCol, ",", 3)
-			if len(parts) > 0 {
-				wc.InputCol = strings.TrimSpace(parts[0])
-			}
+			parts := strings.SplitN(we.InputCol, ",", 3)
 			if len(parts) >= 2 {
 				if offset, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
 					wc.LagLeadOffset = offset
@@ -7388,6 +7386,12 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 				if v, err := strconv.ParseFloat(defStr, 64); err == nil {
 					wc.LagLeadDefault = v
 				} else {
+					// A string default arrives as SQL source, quotes and
+					// all; passing it through wrote 'none' — with the
+					// quotes — into the result column.
+					if len(defStr) >= 2 && strings.HasPrefix(defStr, "'") && strings.HasSuffix(defStr, "'") {
+						defStr = strings.ReplaceAll(defStr[1:len(defStr)-1], "''", "'")
+					}
 					wc.LagLeadDefault = defStr
 				}
 			}
@@ -8860,17 +8864,82 @@ func parseWindowFunc(s string) exec.WindowFunc {
 	}
 }
 
+// windowOutputType declares the output type of an INPUT-INDEPENDENT window
+// function — the rank family, whose answer is a position or a ratio computed
+// from the frame, plus the aggregate window functions, which finalize to the
+// same type whatever they consumed (COUNT to int64, SUM/AVG to float64).
+//
+// The value functions — lag, lead, first_value, last_value, nth_value — are
+// NOT here: they return a value taken from their input column rather than
+// computing one, so their output type IS that column's type and no name list
+// can know it. Declaring them float64 typed the window's output vector
+// numeric while the value path wrote strings, and exec.Window (unlike
+// exec.Project) had no runtime correction, so every string write was dropped
+// for the integer 0 (#345). windowSpecOutputType resolves them instead.
+//
+// MIN/MAX over a window are the one input-dependent family still answered
+// from this list, and they still land on the float64 default: MIN(a_string)
+// OVER (...) has #345's symptom for the same reason. Fixing it needs the
+// aggregate side's minMaxDeclaredType plus a check of the window operator's
+// compareAny and spill paths against the non-numeric types, so it is left to
+// its own change rather than folded in here (see exec.windowValueFunc).
 func windowOutputType(funcName string) parquet.TypeID {
 	switch strings.ToLower(funcName) {
 	case "row_number", "rank", "dense_rank", "count", "ntile":
 		return parquet.TypeInt64
-	case "lag", "lead", "first_value", "last_value", "nth_value":
-		return parquet.TypeFloat64 // value functions default to float64
 	case "percent_rank", "cume_dist":
 		return parquet.TypeFloat64
 	default:
 		return parquet.TypeFloat64
 	}
+}
+
+// windowValueFunc reports whether fn returns a value lifted out of its input
+// column instead of computing one. Kept as its own predicate because the same
+// five names decide the type question in the planner and the re-typing
+// question in exec.Window.
+func windowValueFunc(fn string) bool {
+	switch fn {
+	case "lag", "lead", "first_value", "last_value", "nth_value":
+		return true
+	}
+	return false
+}
+
+// windowSpecOutputType declares the output type of one window expression over
+// the subtree rooted at the Window node that owns it. It is to windowOutputType
+// what aggSpecOutputType is to aggOutputType (#329, #333): the name list
+// answers everything that is input-independent, and the input column answers
+// the rest.
+//
+// The value functions copy a value out of their argument column, so the
+// argument's catalog type is the answer. It is resolved through
+// inputColTypes — the Window node's own input schema, which stops at anything
+// that can rebind a name — and colRefDeclaredType, so a parameterized type
+// (DECIMAL without its scale, VECTOR without its dimension, the nested types)
+// declines the same way it does for a projection.
+//
+// UNDECIDABLE cases fall back to windowOutputType's float64, which is exactly
+// today's behavior: a computed argument (`FIRST_VALUE(a || b)`), a column no
+// scan below annotates, two scans that disagree, or an input the walk cannot
+// describe at all. A confidently wrong type here is worse than the fallback —
+// nothing downstream corrects a declaration, which is the whole of #345.
+func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) parquet.TypeID {
+	fn := strings.ToLower(strings.TrimSpace(we.Func))
+	if !windowValueFunc(fn) {
+		return windowOutputType(fn)
+	}
+	// The same spelling buildWindow hands exec as the input column, so the
+	// declaration always describes the vector the operator will read.
+	col := cleanExpr(we.InputColumn())
+	if col == "" || len(node.Children) != 1 {
+		return windowOutputType(fn)
+	}
+	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, inputColTypes(node.Children[0]))
+	if conf != expr.Decided {
+		return windowOutputType(fn)
+	}
+	return t
 }
 
 func aggOutputType(funcName string, distinct bool) parquet.TypeID {

@@ -149,14 +149,14 @@ func TestDuckDBCompare(t *testing.T) {
 
 			aRows, aCols, aErr := runWadjet(ctx, embedded, c.sql)
 			if aErr != nil {
-				t.Errorf("arm A (single-process) failed: %v", aErr)
+				reportArmError(t, armLocal, c, aErr)
 			} else {
 				checkArm(t, armLocal, c, want, aRows, aCols)
 			}
 
 			bRows, bCols, bErr := runArm(t, ctx, dag, c.sql)
 			if bErr != nil {
-				t.Errorf("arm B (stage DAG) failed: %v", bErr)
+				reportArmError(t, armDAG, c, bErr)
 			} else {
 				checkArm(t, armDAG, c, want, bRows, bCols)
 			}
@@ -697,6 +697,75 @@ func duckdbCorpus() []duckdbCase {
 			knownBug: "a non-equi ON conjunct spanning both sides of an OUTER join is still dropped: it cannot " +
 				"move above the join (that would delete the unmatched rows) and the executor has no residual " +
 				"predicate on an outer join's probe. #336 fixed the inner-join half only"},
+		// Window VALUE functions over a non-float column (#345). LAG, LEAD,
+		// FIRST_VALUE, LAST_VALUE and NTH_VALUE return a value taken FROM
+		// their input column, so the output type is that column's type — and
+		// the planner declared all five float64 from a hand-maintained name
+		// list. exec.Window allocates its output vector at the declared type
+		// and, unlike exec.Project, corrected nothing at runtime, so every
+		// string write was dropped and the column came back as the integer 0
+		// on every row. DuckDB is the only thing here that can say what the
+		// answer should have been, since both Wadjet paths were wrong
+		// together on the strings and the ranks were right all along.
+		//
+		// NTH_VALUE names n_name nowhere else in the SELECT list on purpose:
+		// column pruning read the whole argument string ("n_name, 2") as the
+		// column name, so the real column was never marked required.
+		//
+		// Pinned on arm B: the stage DAG cannot execute a window stage at all
+		// (#349) — walkStages emits one and nothing converts it to a
+		// fragment, so the task fails outright. Arm A is fully gated.
+		duckdbCase{name: "WindowValueFunctionsString", sql: `SELECT n_nationkey, n_name,
+			LAG(n_name) OVER (ORDER BY n_nationkey) AS lag_name,
+			LEAD(n_name) OVER (ORDER BY n_nationkey) AS lead_name,
+			FIRST_VALUE(n_name) OVER (ORDER BY n_nationkey) AS first_name,
+			LAST_VALUE(n_name) OVER (ORDER BY n_nationkey) AS last_name,
+			NTH_VALUE(n_comment, 2) OVER (ORDER BY n_nationkey
+			  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS nth_comment
+			FROM nation ORDER BY n_nationkey`,
+			knownBugArm: armDAG,
+			knownBug: "the stage DAG cannot execute a window stage at all (#349): walkStages emits one, " +
+				"nothing converts it to a fragment, and the task fails with \"empty Operators\"",
+		},
+		// The same five over a DATE column and an INT column, partitioned.
+		// The numeric control is not a formality: Float64.SetValue has no
+		// int32 case either, so a narrow int was dropped exactly like a
+		// string, and a DATE typed float64 is not a mis-scaled date, it is 0.
+		duckdbCase{name: "WindowValueFunctionsDateAndInt", sql: `SELECT o_orderkey, o_orderdate,
+			LAG(o_orderdate) OVER (PARTITION BY o_orderstatus ORDER BY o_orderkey) AS prev_date,
+			FIRST_VALUE(o_orderdate) OVER (PARTITION BY o_orderstatus ORDER BY o_orderkey) AS first_date,
+			LAG(o_custkey) OVER (PARTITION BY o_orderstatus ORDER BY o_orderkey) AS prev_cust
+			FROM orders WHERE o_orderkey <= 200 ORDER BY o_orderkey`,
+			knownBugArm: armDAG,
+			knownBug:    "same missing DAG window operator as WindowValueFunctionsString (#349)",
+		},
+		// The rank family, which is genuinely input-independent and is the
+		// half of the name list that stays hand-maintained. It was correct
+		// before the fix and must stay correct after it.
+		duckdbCase{name: "WindowRankFamily", sql: `SELECT n_nationkey,
+			ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn,
+			RANK() OVER (ORDER BY n_regionkey) AS rk,
+			DENSE_RANK() OVER (ORDER BY n_regionkey) AS drk,
+			NTILE(4) OVER (ORDER BY n_nationkey) AS nt,
+			COUNT(*) OVER (ORDER BY n_nationkey) AS running_count
+			FROM nation ORDER BY n_nationkey`,
+			knownBugArm: armDAG,
+			knownBug:    "same missing DAG window operator as WindowValueFunctionsString (#349)",
+		},
+		// LAST_VALUE with an explicit whole-partition frame, pinned on BOTH
+		// arms: Wadjet returns the CURRENT row's value whatever frame the
+		// query spells out, because computePartitionColumnar's WinLastValue
+		// branch decides on the presence of an ORDER BY and never reads
+		// WindowColumn.Frame (#350). Held against DuckDB's answer so the fix
+		// is detected rather than described.
+		duckdbCase{name: "WindowLastValueExplicitFrame", sql: `SELECT n_nationkey,
+			LAST_VALUE(n_name) OVER (ORDER BY n_nationkey
+			  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS lv
+			FROM nation ORDER BY n_nationkey`,
+			knownBugArm: armBoth,
+			knownBug: "LAST_VALUE ignores an explicit frame and returns the current row's value (#350); " +
+				"arm B additionally cannot execute a window stage at all (#349)",
+		},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can
@@ -1204,4 +1273,19 @@ func assertBaselineCoversCorpus(t *testing.T, corpus []duckdbCase, stored map[st
 			t.Errorf("%s has a stale entry %s that no corpus query claims", duckdbBaselineFile, name)
 		}
 	}
+}
+
+// reportArmError handles an arm that could not answer at all. Failing to
+// answer is a divergence like any other — the strongest kind — so it fails the
+// subtest unless the arm is pinned by knownBugArm, and checkArm still fails the
+// pinned arm the day it starts answering correctly. Never silently tolerated:
+// a pin that stopped being about an ERROR and became about a wrong ANSWER is
+// still gated by checkArm on the next run.
+func reportArmError(t *testing.T, arm string, c duckdbCase, err error) {
+	t.Helper()
+	if c.knownBugArm == arm || c.knownBugArm == armBoth {
+		t.Logf("known divergence, NOT gated on arm %s: the arm cannot answer this query: %v\n  %s", arm, err, c.knownBug)
+		return
+	}
+	t.Errorf("arm %s failed: %v\n  SQL: %s", arm, err, c.sql)
 }

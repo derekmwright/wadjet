@@ -61,6 +61,63 @@ type WindowColumn struct {
 	NthValueN      int              // N for NTH_VALUE (1-based)
 }
 
+// windowValueFunc reports whether f returns a value lifted out of its input
+// column rather than computing one. Those five are the functions whose output
+// type IS the input column's type, and the only ones whose compute path goes
+// through Vector.GetValue/SetValue — every other window function writes its
+// typed backing array directly (Int64Data for the ranks, Float64Data for
+// SUM/AVG), so re-typing one of those would panic instead of correcting it.
+//
+// WinMin/WinMax are the near miss: they also copy an input value through
+// SetValue, but they are left on the planner's float64 declaration here
+// because their comparison path (compareAny) and their spill/merge behavior
+// have not been checked against the non-numeric types. MIN/MAX over a string
+// window column has the same silent-zero symptom as #345 and needs its own
+// fix.
+func windowValueFunc(f WindowFunc) bool {
+	switch f {
+	case WinLag, WinLead, WinFirstValue, WinLastValue, WinNthValue:
+		return true
+	}
+	return false
+}
+
+// retypeValueColumns re-declares each value function's output type from the
+// input vector it will actually read, the way exec.Project resolves a
+// projection's type from its input batch instead of trusting the planner's
+// declaration (project.go). It reports whether anything changed.
+//
+// Defence in depth for #345: the planner now resolves these types from the
+// catalog, but a declaration that arrives wrong — a spec built by a caller
+// with no schema to resolve against, an input type the planner had to decline
+// — is otherwise final, because Window allocates batch.NewVector(OutputType)
+// and every write of a value the vector cannot hold is dropped in silence.
+//
+// The lookup is RecordBatch.ColumnIndex's exact-name match, which is how
+// computePartitionColumnar resolves InputCol, so the type declared here is
+// always the type of the vector the compute reads. A name the input does not
+// carry leaves the declaration alone — the compute finds no input column
+// either and writes nothing but NULLs.
+func (w *Window) retypeValueColumns() bool {
+	changed := false
+	for i := range w.Columns {
+		wc := &w.Columns[i]
+		if !windowValueFunc(wc.Func) || wc.InputCol == "" {
+			continue
+		}
+		for _, col := range w.schema {
+			if col.Name == wc.InputCol {
+				if wc.OutputType != col.Type {
+					wc.OutputType = col.Type
+					changed = true
+				}
+				break
+			}
+		}
+	}
+	return changed
+}
+
 // Window is a SinkSource that collects all rows, partitions and sorts them,
 // computes window function values, and emits the original rows with computed
 // window columns appended. Operates directly on column vectors to avoid
@@ -125,6 +182,13 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 	defer w.mu.Unlock()
 	if w.schema == nil {
 		w.schema = b.Schema
+		if w.retypeValueColumns() {
+			// The grouping holds COPIES of the specs, so it has to be
+			// rebuilt to see the corrected types. Group identity is
+			// (PartitionBy, OrderBy) only, so the grouping itself — and any
+			// run already spilled under w.groups[0].sortKeys — is unchanged.
+			w.groups = groupWindowSpecs(w.Columns)
+		}
 	}
 	FlattenForConsumer(b, nil) // retained past the batch cycle: views must not survive
 	b.Detach()                 // prevent pool recycle — pipeline calls Release() after Consume()
@@ -939,6 +1003,19 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 	if inputIdx >= 0 {
 		inputVec = combined.Columns[inputIdx]
 	}
+	if inputVec == nil {
+		switch wc.Func {
+		case WinSum, WinAvg, WinMin, WinMax, WinLag, WinLead, WinFirstValue, WinLastValue, WinNthValue:
+			// The spec names a column this batch does not carry, so there
+			// is nothing to read. Leave the output NULL — it is already
+			// all-null — instead of dereferencing a nil vector: a plan that
+			// loses a column may cost an answer, never the process (#310).
+			// The streaming empty-PARTITION-BY path (window_global.go)
+			// already skips on the same condition; this is the in-memory
+			// and partition-at-a-time path catching up.
+			return
+		}
+	}
 
 	switch wc.Func {
 	case WinRowNumber:
@@ -1068,6 +1145,13 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			}
 		}
 
+	// WriteNullAt, not Nulls.SetNull, throughout the value functions: their
+	// output vector is now the INPUT column's type, so it can be
+	// variable-length, and a bytes column's null still owes its offset slot.
+	// Skipping it leaves Offsets[i+1] at zero and every later row in the
+	// column reads back from the start of the arena — LAG's own leading NULL
+	// made the next row return the whole partition concatenated. The gather
+	// and range-copy helpers above already advance on null for this reason.
 	case WinLag:
 		offset := wc.LagLeadOffset
 		if offset <= 0 {
@@ -1079,7 +1163,7 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			} else if wc.LagLeadDefault != nil {
 				winVec.SetValue(start+i, wc.LagLeadDefault)
 			} else {
-				winVec.Nulls.SetNull(start + i)
+				winVec.WriteNullAt(start + i)
 			}
 		}
 
@@ -1094,7 +1178,7 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			} else if wc.LagLeadDefault != nil {
 				winVec.SetValue(start+i, wc.LagLeadDefault)
 			} else {
-				winVec.Nulls.SetNull(start + i)
+				winVec.WriteNullAt(start + i)
 			}
 		}
 
@@ -1105,7 +1189,7 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 				if first != nil {
 					winVec.SetValue(start+i, first)
 				} else {
-					winVec.Nulls.SetNull(start + i)
+					winVec.WriteNullAt(start + i)
 				}
 			}
 		}
@@ -1123,7 +1207,7 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 					if last != nil {
 						winVec.SetValue(start+i, last)
 					} else {
-						winVec.Nulls.SetNull(start + i)
+						winVec.WriteNullAt(start + i)
 					}
 				}
 			}
@@ -1199,12 +1283,12 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 				if val != nil {
 					winVec.SetValue(start+i, val)
 				} else {
-					winVec.Nulls.SetNull(start + i)
+					winVec.WriteNullAt(start + i)
 				}
 			}
 		} else {
 			for i := 0; i < n; i++ {
-				winVec.Nulls.SetNull(start + i)
+				winVec.WriteNullAt(start + i)
 			}
 		}
 	}

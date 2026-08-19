@@ -652,8 +652,13 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 		}
 	case NodeWindow:
 		for _, w := range n.WindowExprs {
-			if w.InputCol != "" {
-				refs[strings.ToLower(w.InputCol)] = true
+			// InputColumn, not InputCol: LAG/LEAD/NTH_VALUE carry their
+			// offset, default or N in the same string, and registering
+			// "s, 2" as the required column left the real one, s, unread —
+			// the window operator then resolved no input vector and
+			// nil-dereferenced it.
+			if col := w.InputColumn(); col != "" {
+				refs[strings.ToLower(col)] = true
 			}
 			for _, pb := range w.PartitionBy {
 				refs[strings.ToLower(pb)] = true

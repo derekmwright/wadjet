@@ -351,3 +351,84 @@ func TestInputColTypesStopsAtRebindingNodes(t *testing.T) {
 		}
 	}
 }
+
+// windowSpecOutputType is the window operator's half of the same problem
+// (#345). exec.Window allocates batch.NewVector(OutputType) and had no runtime
+// correction, so a value function declared float64 over a string column
+// dropped every write for the integer 0:
+//
+//	SELECT n_name, LAG(n_name) OVER (ORDER BY n_nationkey) FROM nation
+//	-- NULL, 0, 0, 0 ...
+//
+// The rank family is genuinely input-independent and stays on the name list.
+// The value functions resolve from the column they copy out of, and DECLINE —
+// keeping the float64 fallback — wherever the column cannot be resolved,
+// because a confidently wrong declaration is worse than the guess it replaces.
+func TestWindowSpecOutputType(t *testing.T) {
+	nation := map[string]parquet.TypeID{
+		"n_name":      parquet.TypeString,
+		"n_nationkey": parquet.TypeInt32,
+		"n_founded":   parquet.TypeDate,
+		"n_seen_at":   parquet.TypeTimestamp,
+		"n_rate":      parquet.TypeDecimal,
+		"n_tags":      parquet.TypeArray,
+	}
+	scan := func(cols map[string]parquet.TypeID) *logical.Node {
+		return &logical.Node{Type: logical.NodeScan, TableName: "nation", ScanColTypes: cols}
+	}
+	// A Window node over the given child, as buildWindow receives it.
+	win := func(child *logical.Node) *logical.Node {
+		return &logical.Node{Type: logical.NodeWindow, Children: []*logical.Node{child}}
+	}
+
+	tests := []struct {
+		name  string
+		node  *logical.Node
+		fn    string
+		input string
+		want  parquet.TypeID
+	}{
+		// The value functions: the input column IS the answer.
+		{"lag over a string column", win(scan(nation)), "lag", "n_name", parquet.TypeString},
+		{"lead over a string column", win(scan(nation)), "lead", "n_name", parquet.TypeString},
+		{"first_value over a string column", win(scan(nation)), "first_value", "n_name", parquet.TypeString},
+		{"last_value over a string column", win(scan(nation)), "last_value", "n_name", parquet.TypeString},
+		{"nth_value over a string column", win(scan(nation)), "nth_value", "n_name, 2", parquet.TypeString},
+		{"a DATE column keeps its rendering", win(scan(nation)), "first_value", "n_founded", parquet.TypeDate},
+		{"a TIMESTAMP column keeps its rendering", win(scan(nation)), "lag", "n_seen_at", parquet.TypeTimestamp},
+		{"a narrow int stays narrow", win(scan(nation)), "lag", "n_nationkey", parquet.TypeInt32},
+		// LAG's offset and default ride in the same string; the column is
+		// everything up to the first comma, as buildWindow splits it.
+		{"lag with an offset and a default", win(scan(nation)), "lag", "n_name, 2, 'NONE'", parquet.TypeString},
+		{"a qualified reference resolves to its bare name", win(scan(nation)), "lag", "n1.n_name", parquet.TypeString},
+		{"the function name is matched case-insensitively", win(scan(nation)), "FIRST_VALUE", "n_name", parquet.TypeString},
+
+		// The rank family: input-independent, so the name list still answers.
+		{"row_number", win(scan(nation)), "row_number", "", parquet.TypeInt64},
+		{"rank", win(scan(nation)), "rank", "", parquet.TypeInt64},
+		{"dense_rank", win(scan(nation)), "dense_rank", "", parquet.TypeInt64},
+		{"ntile", win(scan(nation)), "ntile", "4", parquet.TypeInt64},
+		{"percent_rank", win(scan(nation)), "percent_rank", "", parquet.TypeFloat64},
+		{"cume_dist", win(scan(nation)), "cume_dist", "", parquet.TypeFloat64},
+		{"count", win(scan(nation)), "count", "n_name", parquet.TypeInt64},
+		{"sum finalizes to float64 whatever it summed", win(scan(nation)), "sum", "n_nationkey", parquet.TypeFloat64},
+
+		// Declines. Each keeps the pre-#345 float64, which is what every
+		// caller's fallback already handles.
+		{"a computed argument decides nothing", win(scan(nation)), "first_value", "UPPER(n_name)", parquet.TypeFloat64},
+		{"a column no scan carries", win(scan(nation)), "lag", "not_a_column", parquet.TypeFloat64},
+		{"an unannotated scan", win(scan(nil)), "lag", "n_name", parquet.TypeFloat64},
+		{"a project can rebind the name", win(&logical.Node{Type: logical.NodeProject, Children: []*logical.Node{scan(nation)}}),
+			"lag", "n_name", parquet.TypeFloat64},
+		{"DECIMAL carries no scale in the catalog map", win(scan(nation)), "lag", "n_rate", parquet.TypeFloat64},
+		{"ARRAY carries no element type", win(scan(nation)), "lag", "n_tags", parquet.TypeFloat64},
+		{"an empty argument", win(scan(nation)), "lag", "", parquet.TypeFloat64},
+		{"a window with no child", &logical.Node{Type: logical.NodeWindow}, "lag", "n_name", parquet.TypeFloat64},
+	}
+	for _, tc := range tests {
+		got := windowSpecOutputType(tc.node, logical.WindowExpr{Func: tc.fn, InputCol: tc.input, OutputCol: "w"})
+		if got != tc.want {
+			t.Errorf("%s: %s(%s) declared %s, want %s", tc.name, tc.fn, tc.input, got, tc.want)
+		}
+	}
+}

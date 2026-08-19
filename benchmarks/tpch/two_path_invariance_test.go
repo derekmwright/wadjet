@@ -1590,6 +1590,95 @@ func twoPathCorpus() []twoPathQuery {
 				ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0`,
 			knownBug: "the stage DAG answers 0 for a LEFT JOIN with an empty build side, where all 25 preserved rows must survive"},
 	)
+
+	// #345: a window VALUE function over a non-float column. LAG, LEAD,
+	// FIRST_VALUE, LAST_VALUE and NTH_VALUE return a value taken FROM their
+	// input column, so their output type is that column's type — and the
+	// planner declared all five float64 from a hand-maintained name list.
+	// exec.Window allocates its output vector at the declared type and, unlike
+	// exec.Project, corrected nothing at runtime, so every string write was
+	// dropped for the integer 0. #333's signature inside the window operator.
+	//
+	// Every entry carries an assertA: the compare would be satisfied by both
+	// arms returning zeros, which is exactly the bug.
+	//
+	// knownBug #349 on all of them: the stage DAG cannot execute a window
+	// stage AT ALL — walkStages emits one, nothing converts it to a fragment,
+	// and the task fails with "empty Operators". Arm A is gated absolutely by
+	// assertA here and against DuckDB in TestDuckDBCompare; these entries turn
+	// on the day arm B can answer.
+	assertNoZeroedColumn := func(col string) func(testing.TB, []map[string]any) {
+		return func(tb testing.TB, rows []map[string]any) {
+			tb.Helper()
+			if len(rows) < 2 {
+				tb.Fatalf("arm A returned %d rows — too few to say anything about %s", len(rows), col)
+			}
+			for i, r := range rows {
+				v, ok := lookupCell(r, col)
+				if !ok {
+					tb.Fatalf("result has no column %q: %v", col, r)
+				}
+				if v == nil {
+					continue // LAG's first row, LEAD's last: genuinely NULL
+				}
+				if s := fmt.Sprint(v); s == "0" {
+					tb.Errorf("row %d: %s = 0 — the window's output vector was typed numeric "+
+						"and the value write was dropped (#345)", i, col)
+					return
+				}
+			}
+		}
+	}
+	out = append(out,
+		twoPathQuery{name: "WindowLagString", cmp: cmpOrdered, knownBug: "#349",
+			sql:     "SELECT n_nationkey, n_name, LAG(n_name) OVER (ORDER BY n_nationkey) AS w FROM nation ORDER BY n_nationkey",
+			assertA: assertNoZeroedColumn("w")},
+		twoPathQuery{name: "WindowLeadString", cmp: cmpOrdered, knownBug: "#349",
+			sql:     "SELECT n_nationkey, n_name, LEAD(n_name) OVER (ORDER BY n_nationkey) AS w FROM nation ORDER BY n_nationkey",
+			assertA: assertNoZeroedColumn("w")},
+		twoPathQuery{name: "WindowFirstValueString", cmp: cmpOrdered, knownBug: "#349",
+			sql:     "SELECT n_nationkey, n_name, FIRST_VALUE(n_name) OVER (ORDER BY n_nationkey) AS w FROM nation ORDER BY n_nationkey",
+			assertA: assertNoZeroedColumn("w")},
+		twoPathQuery{name: "WindowLastValueString", cmp: cmpOrdered, knownBug: "#349",
+			sql:     "SELECT n_nationkey, n_name, LAST_VALUE(n_name) OVER (PARTITION BY n_regionkey ORDER BY n_nationkey) AS w FROM nation ORDER BY n_nationkey",
+			assertA: assertNoZeroedColumn("w")},
+		// NTH_VALUE with an explicit frame, and the column named nowhere else
+		// in the SELECT list: column pruning read the whole argument string
+		// ("n_name, 2") as the column name, so n_name was never marked
+		// required and the operator found no input vector to read.
+		twoPathQuery{name: "WindowNthValueStringFramed", cmp: cmpOrdered, knownBug: "#349",
+			sql: `SELECT n_nationkey, NTH_VALUE(n_name, 2) OVER (ORDER BY n_nationkey
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w
+				FROM nation ORDER BY n_nationkey`,
+			assertA: assertNoZeroedColumn("w")},
+		// A DATE column: its RENDERING is what the declared type buys, so a
+		// date typed float64 is not a mis-scaled date, it is 0.
+		twoPathQuery{name: "WindowFirstValueDate", cmp: cmpOrdered, knownBug: "#349",
+			sql:     "SELECT o_orderkey, FIRST_VALUE(o_orderdate) OVER (ORDER BY o_orderkey) AS w FROM orders ORDER BY o_orderkey",
+			assertA: assertNoZeroedColumn("w")},
+		// The numeric control: Float64.SetValue has no int32 case either, so
+		// a narrow int was dropped exactly like a string.
+		twoPathQuery{name: "WindowLagNumeric", cmp: cmpOrdered, knownBug: "#349",
+			sql:     "SELECT n_nationkey, LAG(n_nationkey) OVER (ORDER BY n_nationkey DESC) AS w FROM nation ORDER BY n_nationkey",
+			assertA: assertNoZeroedColumn("w")},
+		// The rank family is input-independent and must be untouched by the
+		// fix — it is the half of the name list that stays hand-maintained.
+		twoPathQuery{name: "WindowRankFamily", cmp: cmpOrdered, knownBug: "#349",
+			sql: `SELECT n_nationkey, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn,
+				RANK() OVER (ORDER BY n_regionkey) AS rk FROM nation ORDER BY n_nationkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				for i, r := range rows {
+					if got := cellNum(r, "rn"); got != float64(i+1) {
+						tb.Errorf("row %d: ROW_NUMBER() = %v, want %d", i, r["rn"], i+1)
+						return
+					}
+					if cellNum(r, "rk") < 1 {
+						tb.Errorf("row %d: RANK() = %v, want ≥ 1", i, r["rk"])
+						return
+					}
+				}
+			}},
+	)
 	return out
 }
 
