@@ -384,6 +384,55 @@ func duckdbCorpus() []duckdbCase {
 		// fixed-return function instead of consuming it, and numeric_fallback
 		// is the control that must stay a number: nothing in it decides a
 		// type either, and the numeric fallback is the right answer there.
+		// Pagination, held against the engine that defines it. Every one of
+		// these came back as the whole 25-row table before #337 — the
+		// parser read LIMIT and OFFSET in a fixed order and discarded
+		// whichever came second, and the builder read OFFSET only inside the
+		// LIMIT branch. The first page looked right, which is why it took a
+		// fuzzer to find. The DAG then ignored the OFFSET at its stages
+		// (#344.2), so the four spellings have to be checked on both arms
+		// and not only on the one that parses them.
+		duckdbCase{name: "OffsetAlone", sql: "SELECT n_nationkey FROM nation ORDER BY n_nationkey OFFSET 5"},
+		duckdbCase{name: "OffsetThenLimit", sql: "SELECT n_nationkey FROM nation ORDER BY n_nationkey OFFSET 5 LIMIT 3"},
+		duckdbCase{name: "LimitThenOffset", sql: "SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3 OFFSET 5"},
+		// A page past the last page is empty; returning every row is what
+		// the offset bug did. Count-compared because an empty result has no
+		// rows to fingerprint — DuckDB's CSV writer emits nothing at all,
+		// not even a header — and with tolerance 0 the count IS the whole
+		// answer here: 0 rows or a failure, no third outcome.
+		duckdbCase{name: "OffsetPastEnd", sql: "SELECT n_nationkey FROM nation ORDER BY n_nationkey OFFSET 100",
+			countOnly: true, why: "an empty result has no rows to fingerprint; at tolerance 0 the count is the entire answer"},
+		duckdbCase{name: "OffsetOverGroupBy", sql: "SELECT n_regionkey, COUNT(*) AS c FROM nation GROUP BY n_regionkey ORDER BY n_regionkey OFFSET 3"},
+		// ORDER BY after a set operation sorts the WHOLE result, not the last
+		// arm. The ordinal used to be left unresolved for set operations —
+		// positional refs were skipped outright — so the sort key stayed the
+		// literal "1", matched no column, and the rows came back in arrival
+		// order with no error.
+		//
+		// Pinned on the DAG for a defect that predates this and is not a
+		// parser question: walkStages emits no merge stage for UNION /
+		// INTERSECT / EXCEPT (physical/plan.go: "each side runs
+		// independently; merge results at the end" — nothing merges), so a
+		// set operation on the stage DAG returns one arm's raw scan with all
+		// of that table's columns. Arm A is fully gated here.
+		duckdbCase{name: "UnionAllOrderByOrdinal",
+			sql:         "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region ORDER BY 1",
+			knownBugArm: armDAG,
+			knownBug:    "the stage DAG emits no merge stage for a set operation, so it returns one arm's raw scan"},
+		duckdbCase{name: "UnionAllOrderByOrdinalLimit",
+			sql:         "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region ORDER BY 1 LIMIT 3",
+			knownBugArm: armDAG,
+			knownBug:    "the stage DAG emits no merge stage for a set operation, so it returns one arm's raw scan"},
+		duckdbCase{name: "UnionOrderByOrdinal",
+			sql: "SELECT n_regionkey FROM nation WHERE n_nationkey < 5 UNION " +
+				"SELECT n_regionkey FROM nation WHERE n_nationkey >= 5 ORDER BY 1",
+			knownBugArm: armDAG,
+			knownBug:    "the stage DAG emits no merge stage for a set operation, so it returns one arm's raw scan"},
+		duckdbCase{name: "UnionOrderByOrdinalLimit",
+			sql: "SELECT n_regionkey FROM nation WHERE n_nationkey < 5 UNION " +
+				"SELECT n_regionkey FROM nation WHERE n_nationkey >= 5 ORDER BY 1 LIMIT 2",
+			knownBugArm: armDAG,
+			knownBug:    "the stage DAG emits no merge stage for a set operation, so it returns one arm's raw scan"},
 		duckdbCase{name: "NullPropagatesThroughExpressions", sql: `SELECT n_nationkey,
 			COALESCE(NULLIF(n_name, 'ALGERIA'), 'fallback') AS coalesced,
 			COALESCE(NULLIF(NULLIF(n_name, 'ALGERIA'), 'BRAZIL'), 'twice') AS nested_twice,

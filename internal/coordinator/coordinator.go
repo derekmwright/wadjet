@@ -894,23 +894,31 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			}
 		}
 	}
-	// A top-level LIMIT the DAG never enforced. walkStages attaches a limit
-	// only to a sort or merge_sort stage, so `... ORDER BY x LIMIT n` is
+	// A top-level LIMIT/OFFSET the DAG never enforced. walkStages attaches a
+	// bound only to a sort or merge_sort stage, so `... ORDER BY x LIMIT n` is
 	// bounded but a bare `LIMIT n` lands on no stage at all and every row
 	// comes back: `SELECT n_name FROM nation LIMIT 3` returned all 25, and
 	// DataGrip opening a 15M-row table read all of it (425s) for the 501 rows
-	// it asked for. Enforcing it here makes the answer correct on both paths;
-	// the scan still reads everything, which is #311.
+	// it asked for. No stage has ever applied the OFFSET at all, so
+	// `LIMIT 3 OFFSET 5` came back as rows 0-2 — the first page for every
+	// page (#337). Enforcing both here makes the answer correct on both
+	// paths; the scan still reads everything, which is #311.
 	//
 	// Applied after dedup, since DISTINCT changes which rows the limit keeps,
 	// and only when the result is fully in memory — a spilled result replays
 	// lazily from scratch, and truncating its in-memory prefix would drop rows
 	// the stream still owns.
 	if gr != nil && gr.spillPath == "" {
-		if mi := logical.ExtractMergeInfo(logicalPlan); mi != nil && mi.Limit > 0 &&
-			gr.totalRows > int64(mi.Limit) {
-			gr.batches = limitBatches(gr.batches, mi.Limit)
-			gr.totalRows = int64(mi.Limit)
+		if mi := logical.ExtractMergeInfo(logicalPlan); mi != nil && (mi.Limit > 0 || mi.Offset > 0) {
+			gr.batches = offsetBatches(gr.batches, mi.Offset)
+			if mi.Limit > 0 {
+				gr.batches = limitBatches(gr.batches, mi.Limit)
+			}
+			var total int64
+			for _, b := range gr.batches {
+				total += int64(b.ActiveLen())
+			}
+			gr.totalRows = total
 		}
 	}
 
@@ -1497,16 +1505,20 @@ func (c *Coordinator) mergeProbePartials(in BatchStream, columns []string, mi *l
 
 	// Apply sort + limit. When the limit is much smaller than the row count,
 	// use a top-K heap select to avoid sorting the full result set.
-	if len(mi.OrderBy) > 0 && mi.Limit > 0 && len(batches) == 1 && batches[0].Len > mi.Limit*4 {
-		c.topKBatches(batches, columns, colIdx, mi.OrderBy, mi.Limit)
+	// keep is limit+offset: the top-K select and the truncation below both
+	// have to hold the rows the OFFSET will skip, which is applied last.
+	keep := mi.KeepRows()
+	if len(mi.OrderBy) > 0 && keep > 0 && len(batches) == 1 && batches[0].Len > keep*4 {
+		c.topKBatches(batches, columns, colIdx, mi.OrderBy, keep)
 	} else {
 		if len(mi.OrderBy) > 0 {
 			c.sortBatches(batches, columns, colIdx, mi.OrderBy)
 		}
-		if mi.Limit > 0 {
-			batches = limitBatches(batches, mi.Limit)
+		if keep > 0 {
+			batches = limitBatches(batches, keep)
 		}
 	}
+	batches = offsetBatches(batches, mi.Offset)
 
 	var totalRows int64
 	for _, b := range batches {
@@ -1551,8 +1563,10 @@ func (c *Coordinator) dedupGatherResult(gr *gatherResult, mi *logical.MergeInfo)
 		if len(mi.OrderBy) > 0 {
 			c.sortBatches(gr.batches, gr.columns, colIdx, mi.OrderBy)
 		}
-		if mi.Limit > 0 {
-			gr.batches = limitBatches(gr.batches, mi.Limit)
+		// Truncate to limit+offset, not limit: the caller applies the OFFSET
+		// after this, so the rows it skips must still be here.
+		if keep := mi.KeepRows(); keep > 0 {
+			gr.batches = limitBatches(gr.batches, keep)
 		}
 	}
 
@@ -2184,6 +2198,41 @@ func compareBatchRows(b *batch.RecordBatch, a, bIdx int, orderBy []logical.Order
 		}
 	}
 	return 0
+}
+
+// offsetBatches drops the first offset rows of an ordered result — the OFFSET
+// clause, applied after the merge because that is the first point at which the
+// rows are in their final order. Batches wholly inside the offset are dropped;
+// the one straddling it is trimmed through its selection vector, the same way
+// limitBatches truncates. An offset past the end leaves nothing, which is the
+// answer: a page past the last page is empty, not the whole table (#337).
+func offsetBatches(batches []*batch.RecordBatch, offset int) []*batch.RecordBatch {
+	if offset <= 0 {
+		return batches
+	}
+	var result []*batch.RecordBatch
+	remaining := offset
+	for _, b := range batches {
+		n := b.ActiveLen()
+		if remaining >= n {
+			remaining -= n
+			continue
+		}
+		if remaining > 0 {
+			if b.Sel != nil {
+				b.Sel = b.Sel[remaining:]
+			} else {
+				sel := make([]uint32, n-remaining)
+				for i := range sel {
+					sel[i] = uint32(remaining + i)
+				}
+				b.Sel = sel
+			}
+			remaining = 0
+		}
+		result = append(result, b)
+	}
+	return result
 }
 
 // limitBatches truncates batches to at most limit rows total.

@@ -879,7 +879,7 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 // UNION queries are skipped since positions would be ambiguous.
 func resolvePositionalRefs(info *SelectInfo) error {
 	if info.Union != nil {
-		return nil // skip UNION queries
+		return resolveSetOpOrderBy(info)
 	}
 
 	// Resolve GROUP BY positional refs
@@ -926,6 +926,37 @@ func resolvePositionalRefs(info *SelectInfo) error {
 		}
 	}
 
+	return nil
+}
+
+// resolveSetOpOrderBy resolves `ORDER BY <n>` on a set operation.
+//
+// A UNION / INTERSECT / EXCEPT has no SELECT list of its own — its output
+// columns are named by its leftmost arm, which is what an ordinal sort term
+// over a set operation refers to in PostgreSQL and DuckDB alike. Positional
+// refs used to be skipped outright for these queries, so the sort key stayed
+// the literal "1", matched no column, and the rows came back in arrival order
+// with no error (#337).
+func resolveSetOpOrderBy(info *SelectInfo) error {
+	cols := info
+	for cols.Union != nil {
+		cols = cols.Union.Left
+	}
+	for i, ob := range info.OrderBy {
+		pos, err := strconv.Atoi(strings.TrimSpace(ob.Column))
+		if err != nil {
+			continue // not an ordinal, leave as written
+		}
+		if pos < 1 || pos > len(cols.Columns) {
+			return fmt.Errorf("ORDER BY position %d is out of range (1-%d)", pos, len(cols.Columns))
+		}
+		col := cols.Columns[pos-1]
+		if col.Alias != "" {
+			info.OrderBy[i].Column = col.Alias
+		} else {
+			info.OrderBy[i].Column = col.Expr
+		}
+	}
 	return nil
 }
 

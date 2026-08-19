@@ -151,26 +151,36 @@ done:
 		left.OrderBy = orderBy
 	}
 
-	// LIMIT
-	if p.isKeyword(TokenKWLimit) {
-		p.advance()
-		tok, err := p.expect(TokenNumber)
-		if err != nil {
-			return nil, fmt.Errorf("expected number after LIMIT")
-		}
-		left.Limit = tok.val
-	}
-
-	// OFFSET (with optional ROW/ROWS)
-	if p.isKeyword(TokenKWOffset) {
-		p.advance()
-		tok, err := p.expect(TokenNumber)
-		if err != nil {
-			return nil, fmt.Errorf("expected number after OFFSET")
-		}
-		left.Offset = tok.val
-		if p.isKeyword(TokenKWRow) || p.isKeyword(TokenKWRows) {
+	// LIMIT and OFFSET, in either order, each at most once. PostgreSQL and
+	// DuckDB both accept `OFFSET n LIMIT m`, and reading the two in a fixed
+	// order left whichever came second unconsumed — which used to mean the
+	// whole table came back, the worst failure a paginating client can get
+	// since the first page still looks right (#337). A repeat of either
+	// keyword falls out of the loop and the end-of-statement guard rejects
+	// it.
+limitOffset:
+	for {
+		switch {
+		case p.isKeyword(TokenKWLimit) && left.Limit == "":
 			p.advance()
+			tok, err := p.expect(TokenNumber)
+			if err != nil {
+				return nil, fmt.Errorf("expected number after LIMIT")
+			}
+			left.Limit = tok.val
+		case p.isKeyword(TokenKWOffset) && left.Offset == "":
+			p.advance()
+			tok, err := p.expect(TokenNumber)
+			if err != nil {
+				return nil, fmt.Errorf("expected number after OFFSET")
+			}
+			left.Offset = tok.val
+			// Optional ROW/ROWS noise word (SQL standard spelling).
+			if p.isKeyword(TokenKWRow) || p.isKeyword(TokenKWRows) {
+				p.advance()
+			}
+		default:
+			break limitOffset
 		}
 	}
 
@@ -567,6 +577,16 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 				return fmt.Errorf("expected JOIN after CROSS")
 			}
 			joinType = "cross join"
+		case TokenKWNatural:
+			// Not implemented: the join keys are the columns the two sides
+			// happen to share, which is a catalog question the parser cannot
+			// answer. Say so here rather than leaving the clause for the
+			// end-of-statement guard to report as stray input — and rather
+			// than dropping it, which is what used to happen and answered
+			// `FROM nation NATURAL JOIN region` as plain `FROM nation`
+			// (#337). Same shape as JOIN ... USING: an error a client can
+			// act on, not a wrong answer.
+			return fmt.Errorf("NATURAL JOIN is not supported at position %d; write the join condition with ON", p.cur.pos)
 		case TokenComma:
 			// Cross join via comma
 			p.advance()

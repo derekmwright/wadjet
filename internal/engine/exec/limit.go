@@ -7,18 +7,26 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 )
 
-// Limit is a UnaryOperator that passes through at most N rows,
-// optionally skipping the first Offset rows.
+// NoLimit is the Max of a Limit that only skips rows: `OFFSET n` with no
+// LIMIT. Any negative Max means unbounded.
+const NoLimit = int64(-1)
+
+// Limit is a UnaryOperator that passes through at most Max rows, optionally
+// skipping the first Offset rows. A negative Max is unbounded, which is how
+// OFFSET without LIMIT is expressed.
 type Limit struct {
-	Max     int64
-	Offset  int64
-	seen    atomic.Int64 // total rows seen (for offset tracking)
-	passed  atomic.Int64 // rows passed through after offset
+	Max    int64
+	Offset int64
+	seen   atomic.Int64 // total rows seen (for offset tracking)
+	passed atomic.Int64 // rows passed through after offset
 }
 
 func NewLimit(n, offset int64) *Limit {
 	return &Limit{Max: n, Offset: offset}
 }
+
+// bounded reports whether Max caps the number of rows passed through.
+func (l *Limit) bounded() bool { return l.Max >= 0 }
 
 func (l *Limit) Init(_ context.Context) error {
 	l.seen.Store(0)
@@ -31,7 +39,7 @@ func (l *Limit) Init(_ context.Context) error {
 func (l *Limit) AcceptsViews() bool { return true }
 
 func (l *Limit) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
-	if l.passed.Load() >= l.Max {
+	if l.bounded() && l.passed.Load() >= l.Max {
 		return nil, nil
 	}
 
@@ -65,6 +73,11 @@ func (l *Limit) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Record
 				return nil, nil
 			}
 		}
+	}
+
+	if !l.bounded() {
+		l.passed.Add(activeLen)
+		return in, nil
 	}
 
 	remaining := l.Max - l.passed.Load()
@@ -105,7 +118,7 @@ func (l *Limit) Clone() UnaryOperator {
 // Done returns true when the limit has been satisfied, enabling pipeline
 // early termination (LIMIT pushdown).
 func (l *Limit) Done() bool {
-	return l.passed.Load() >= l.Max
+	return l.bounded() && l.passed.Load() >= l.Max
 }
 
 // TopN is a Sink that combines sort + limit efficiently by keeping only the

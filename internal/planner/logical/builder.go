@@ -437,21 +437,12 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		plan = NewSort(child, orderExprs)
 	}
 
-	// LIMIT
-	if info.Limit != "" {
-		limit, err := strconv.Atoi(info.Limit)
-		if err != nil {
-			return nil, fmt.Errorf("invalid LIMIT: %w", err)
-		}
-		offset := 0
-		if info.Offset != "" {
-			offset, err = strconv.Atoi(info.Offset)
-			if err != nil {
-				return nil, fmt.Errorf("invalid OFFSET: %w", err)
-			}
-		}
-		plan = NewLimit(plan, limit, offset)
+	// LIMIT / OFFSET
+	limitNode, err := buildLimitNode(plan, info)
+	if err != nil {
+		return nil, err
 	}
+	plan = limitNode
 
 	// Store CTE definitions on the root node so the physical planner
 	// can resolve CTE references in scalar subqueries.
@@ -741,23 +732,42 @@ func buildSetOpPlan(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, err
 		plan = NewSort(plan, orderExprs)
 	}
 
-	// LIMIT on the overall set operation
+	// LIMIT / OFFSET on the overall set operation
+	return buildLimitNode(plan, info)
+}
+
+// buildLimitNode wraps plan in a Limit for the statement's LIMIT and OFFSET.
+//
+// OFFSET applies whether or not a LIMIT accompanies it. It used to be read
+// only inside the `if info.Limit != ""` branch, so `ORDER BY 1 OFFSET 5`
+// returned all 25 rows instead of 20 — a paginating client asking for any
+// page but the first got the whole table, and the first page still looked
+// right (#337).
+func buildLimitNode(plan *Node, info *plansql.SelectInfo) (*Node, error) {
+	if info.Limit == "" && info.Offset == "" {
+		return plan, nil
+	}
+	limit := NoLimit
 	if info.Limit != "" {
-		limit, err := strconv.Atoi(info.Limit)
+		n, err := strconv.Atoi(info.Limit)
 		if err != nil {
 			return nil, fmt.Errorf("invalid LIMIT: %w", err)
 		}
-		offset := 0
-		if info.Offset != "" {
-			offset, err = strconv.Atoi(info.Offset)
-			if err != nil {
-				return nil, fmt.Errorf("invalid OFFSET: %w", err)
-			}
-		}
-		plan = NewLimit(plan, limit, offset)
+		limit = n
 	}
-
-	return plan, nil
+	offset := 0
+	if info.Offset != "" {
+		n, err := strconv.Atoi(info.Offset)
+		if err != nil {
+			return nil, fmt.Errorf("invalid OFFSET: %w", err)
+		}
+		offset = n
+	}
+	// `OFFSET 0` with no LIMIT skips nothing and bounds nothing.
+	if limit == NoLimit && offset == 0 {
+		return plan, nil
+	}
+	return NewLimit(plan, limit, offset), nil
 }
 
 // resolveTableOrCTE checks whether a table reference matches a CTE name.

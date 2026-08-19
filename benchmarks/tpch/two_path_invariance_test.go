@@ -1241,6 +1241,44 @@ func twoPathCorpus() []twoPathQuery {
 					return cellText(r, "n_name")
 				})
 			}},
+		// Pagination. Both halves of #337 were symmetric — the parser
+		// dropped whichever of LIMIT/OFFSET came second and the builder read
+		// OFFSET only inside the LIMIT branch, so both paths returned the
+		// whole table and agreed with each other — which is why each entry
+		// carries an absolute assertA and not only the two-arm compare. The
+		// DAG then had a defect of its own on top: its stages never applied
+		// the offset at all (#344.2), so `LIMIT 3 OFFSET 5` came back as the
+		// first three rows there while arm A skipped correctly.
+		twoPathQuery{name: "OffsetAlone", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_nationkey FROM nation ORDER BY n_nationkey OFFSET 5",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertFirstKeyAndCount(tb, rows, "n_nationkey", 5, 20)
+			}},
+		twoPathQuery{name: "OffsetThenLimit", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_nationkey FROM nation ORDER BY n_nationkey OFFSET 5 LIMIT 3",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertFirstKeyAndCount(tb, rows, "n_nationkey", 5, 3)
+			}},
+		twoPathQuery{name: "LimitThenOffset", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3 OFFSET 5",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertFirstKeyAndCount(tb, rows, "n_nationkey", 5, 3)
+			}},
+		// The page after the last page. expectRows stays off — emptiness is
+		// the answer, and "all 25 rows" is the bug.
+		twoPathQuery{name: "OffsetPastEnd", cmp: cmpOrdered,
+			sql: "SELECT n_nationkey FROM nation ORDER BY n_nationkey OFFSET 100",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 0 {
+					tb.Errorf("got %d rows past the end of the table, want 0", len(rows))
+				}
+			}},
+		twoPathQuery{name: "OffsetOverGroupBy", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_regionkey, COUNT(*) AS c FROM nation GROUP BY n_regionkey ORDER BY n_regionkey OFFSET 3",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertFirstKeyAndCount(tb, rows, "n_regionkey", 3, 2)
+			}},
 	)
 
 	// #332: a temporal COLUMN plus or minus an INTERVAL. The operator read its
@@ -1377,6 +1415,21 @@ func twoPathCorpus() []twoPathQuery {
 			assertA: assertNoNumericCell("m")},
 	)
 	return out
+}
+
+// assertFirstKeyAndCount pins a page: which row it starts at and how many
+// rows it holds. Both halves matter — a dropped OFFSET keeps the count right
+// while starting at row 0, and a dropped LIMIT keeps the start right while
+// running to the end of the table.
+func assertFirstKeyAndCount(tb testing.TB, rows []map[string]any, col string, wantFirst float64, wantRows int) {
+	tb.Helper()
+	if len(rows) != wantRows {
+		tb.Errorf("got %d rows, want %d — the page bound was not applied", len(rows), wantRows)
+		return
+	}
+	if got := cellNum(rows[0], col); got != wantFirst {
+		tb.Errorf("page starts at %s=%v, want %v — the offset was not applied", col, got, wantFirst)
+	}
 }
 
 // stripTrailingOrderBy removes a statement's own trailing ORDER BY clause.

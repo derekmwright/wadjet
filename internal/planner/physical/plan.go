@@ -4105,14 +4105,24 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		for _, child := range node.Children {
 			p.walkStages(child, stages, parentID)
 		}
+		// The bound a stage may truncate to is limit+offset, not limit: the
+		// OFFSET is applied once, at the coordinator, after the merge, so the
+		// rows it skips have to survive the stage that produced them. A
+		// stage told to keep 3 rows for `LIMIT 3 OFFSET 5` kept the first
+		// three and the answer was the first page again (#337). Zero when
+		// there is no LIMIT — an OFFSET alone bounds nothing.
+		stageBound := 0
+		if node.LimitVal > 0 {
+			stageBound = node.LimitVal + node.OffsetVal
+		}
 		// Propagate limit to both merge_sort and sort stages
 		sorted := false
 		for i := len(*stages) - 1; i >= 0; i-- {
 			if (*stages)[i].Type == "merge_sort" {
-				(*stages)[i].Limit = node.LimitVal
+				(*stages)[i].Limit = stageBound
 				sorted = true
 			} else if (*stages)[i].Type == "sort" {
-				(*stages)[i].Limit = node.LimitVal
+				(*stages)[i].Limit = stageBound
 				sorted = true
 				break
 			}
@@ -4124,14 +4134,14 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// Push the bound into this subtree's own stages so each task stops
 		// early. Only when nothing between here and the scan can change
 		// cardinality; see limitPushdownSafe.
-		if !sorted && node.LimitVal > 0 && limitPushdownSafe(node) {
+		if !sorted && stageBound > 0 && limitPushdownSafe(node) {
 			for i := preLimitCount; i < len(*stages); i++ {
 				// "scan" is what walkStages emits for a leaf read; "pipeline"
 				// is the type those stages carry once fragments are built.
 				// Exchange stages are left alone — they move rows between
 				// stages rather than producing them.
 				if t := (*stages)[i].Type; t == "scan" || t == "pipeline" {
-					(*stages)[i].RowLimit = node.LimitVal
+					(*stages)[i].RowLimit = stageBound
 				}
 			}
 		}
@@ -7230,7 +7240,7 @@ func (p *Planner) buildLimit(ctx context.Context, node *logical.Node) (exec.Sour
 	}
 
 	// Optimization: Limit(Sort(...)) → TopN sort (heap-based, keeps only N rows)
-	if child.Type == logical.NodeSort && node.OffsetVal == 0 {
+	if child.Type == logical.NodeSort && node.OffsetVal == 0 && node.LimitVal != logical.NoLimit {
 		return p.buildTopN(ctx, child, node.LimitVal)
 	}
 	// LIMIT n OFFSET m over a sort: same Top-K machinery with n+m kept
@@ -7255,7 +7265,9 @@ func (p *Planner) buildLimit(ctx context.Context, node *logical.Node) (exec.Sour
 	// of the eager "download all files upfront" strategy. Safe when no pipeline
 	// breaker (sort/aggregate/join) sits between LIMIT and SCAN — if there is
 	// one, the source won't be a catalogScanSource and the assertion fails.
-	if cs, ok := source.(*catalogScanSource); ok && len(cs.rowPreds) == 0 {
+	// OFFSET without LIMIT bounds nothing: every row past the offset is in
+	// the answer, so there is no row count at which the scan may stop.
+	if cs, ok := source.(*catalogScanSource); ok && len(cs.rowPreds) == 0 && node.LimitVal > 0 {
 		// Pushed scan filters need the row-group-parallel path; the lazy
 		// LIMIT scan would silently skip them. Filters win — a filtered
 		// LIMIT usually needs to scan broadly anyway.

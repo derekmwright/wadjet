@@ -291,6 +291,7 @@ func ExtractMergeInfo(plan *Node) *MergeInfo {
 	n := plan
 	if n.Type == NodeLimit {
 		mi.Limit = n.LimitVal
+		mi.Offset = n.OffsetVal
 		if len(n.Children) > 0 {
 			n = n.Children[0]
 		}
@@ -355,12 +356,27 @@ func ExtractMergeInfo(plan *Node) *MergeInfo {
 
 // MergeInfo describes how to merge probe-split partial results.
 type MergeInfo struct {
-	GroupBy      []string
-	AggExprs     []AggExpr
-	OrderBy      []OrderExpr
-	Limit        int
+	GroupBy  []string
+	AggExprs []AggExpr
+	OrderBy  []OrderExpr
+	// Limit is the top-level LIMIT, or NoLimit when the statement has only
+	// an OFFSET. Test Limit > 0 before using it as a row bound.
+	Limit int
+	// Offset is the top-level OFFSET. Rows to keep are [Offset, Offset+Limit)
+	// — a merge that truncates to Limit before skipping Offset returns the
+	// first page for every page (#337).
+	Offset       int
 	HasAggregate bool
 	HasDistinct  bool // DISTINCT requires deduplication across partials
+}
+
+// KeepRows is the number of rows a merge step must hold on to before the
+// offset is applied: everything up to Offset+Limit. Zero means unbounded.
+func (mi *MergeInfo) KeepRows() int {
+	if mi.Limit <= 0 {
+		return 0
+	}
+	return mi.Limit + mi.Offset
 }
 
 // InjectRowFilter walks the logical plan tree and wraps Scan nodes for the
@@ -518,7 +534,14 @@ func NewSort(child *Node, orderBy []OrderExpr) *Node {
 	return &Node{Type: NodeSort, Children: []*Node{child}, OrderBy: orderBy}
 }
 
-// NewLimit creates a limit node.
+// NoLimit is the LimitVal of a Limit node that only skips rows: `OFFSET n`
+// with no LIMIT, which is what a paginating client sends for the last page.
+// Every row past the offset passes. Consumers must test LimitVal > 0 before
+// using it as a row bound — an unbounded node has no bound to push down.
+const NoLimit = -1
+
+// NewLimit creates a limit node. limit is NoLimit when only the offset
+// applies.
 func NewLimit(child *Node, limit, offset int) *Node {
 	return &Node{Type: NodeLimit, Children: []*Node{child}, LimitVal: limit, OffsetVal: offset}
 }
