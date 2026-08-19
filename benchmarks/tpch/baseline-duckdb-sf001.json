@@ -56,6 +56,61 @@
       "fine": "952598a14bab4e04",
       "coarse": "b9918260c9bca643"
     },
+    "CorrelatedExistsUnprojectedOuterCol": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "1b83d57cfef47705",
+      "coarse": "1b83d57cfef47705"
+    },
+    "CorrelatedNestedTwoDeep": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "baa6260e1435a6c0",
+      "coarse": "baa6260e1435a6c0"
+    },
+    "CorrelatedNotExistsUnprojectedOuterCol": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "2a62cf402cd3396a",
+      "coarse": "2a62cf402cd3396a"
+    },
+    "CorrelatedScalarProjectedOuterCol": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "0906e8951d93b2c6",
+      "coarse": "0906e8951d93b2c6"
+    },
+    "CorrelatedScalarUnprojectedOuterCol": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "0906e8951d93b2c6",
+      "coarse": "0906e8951d93b2c6"
+    },
     "CountOverRenamedSubqueryColumn": {
       "source": "duckdb",
       "row_count": 1,
@@ -116,6 +171,68 @@
       ],
       "fine": "7acb3a2c420e587c",
       "coarse": "ea8c575af23c539f"
+    },
+    "DateCastComparison": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "7b78e4b30c2162a0",
+      "coarse": "7b78e4b30c2162a0"
+    },
+    "DateCastGroupKey": {
+      "source": "duckdb",
+      "row_count": 13,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "c"
+      ],
+      "fine": "b6bc5492bba3f294",
+      "coarse": "b6bc5492bba3f294"
+    },
+    "DateCastLiteralArithmetic": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "gap",
+        "prev",
+        "nxt",
+        "d"
+      ],
+      "fine": "ef91027e5fb41b5a",
+      "coarse": "ef91027e5fb41b5a"
+    },
+    "DateCastMinMax": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "mn",
+        "mx"
+      ],
+      "fine": "5043e416c9c21f33",
+      "coarse": "5043e416c9c21f33"
+    },
+    "DateCastShippingLag": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "l_orderkey",
+        "l_linenumber",
+        "lag"
+      ],
+      "fine": "b2c1939226a69e44",
+      "coarse": "b2c1939226a69e44"
     },
     "EmptyBuildAntiJoin": {
       "source": "duckdb",
@@ -1717,6 +1834,30 @@
       ],
       "fine": "ca1c4936a4137a59",
       "coarse": "ca1c4936a4137a59"
+    },
+    "TimestampCastComparison": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "7b78e4b30c2162a0",
+      "coarse": "7b78e4b30c2162a0"
+    },
+    "TimestampCastThroughDate": {
+      "source": "duckdb",
+      "row_count": 7,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "o_orderkey",
+        "d",
+        "y"
+      ],
+      "fine": "baaad1bed97cdc1f",
+      "coarse": "baaad1bed97cdc1f"
     },
     "UnionAllOrderByOrdinal": {
       "source": "duckdb",
