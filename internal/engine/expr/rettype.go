@@ -68,7 +68,9 @@ var (
 )
 
 // RetSameAsArg declares a polymorphic return: the type of the first listed
-// argument the caller can decide, or fallback when it can decide none of them.
+// argument the caller can decide, or fallback when it can decide none of them —
+// and Resolve marks that fallback as a guess, so a CALLER with candidates of
+// its own keeps looking rather than inheriting it (see Confidence).
 // With no indices every argument is a candidate, which is what coalesce,
 // greatest and least want; nullif mirrors argument 0 only.
 func RetSameAsArg(fallback batch.TypeID, args ...int) Ret {
@@ -79,20 +81,69 @@ func RetSameAsArg(fallback batch.TypeID, args ...int) Ret {
 // above. Kept for callers registering functions over the network-native types.
 func RetTypeOf(t batch.TypeID) Ret { return Ret{kind: retFixed, typ: t} }
 
+// Confidence says how a resolved type was arrived at: whether the declaration
+// DECIDED it or only GUESSED it. A same-as-argument declaration has to answer
+// even when none of its candidate arguments decided anything, and that answer
+// — its fallback — is a guess. Reporting a guess as fact is what typed
+//
+//	SELECT COALESCE(NULLIF(n_name, 'ALGERIA'), 'fallback') FROM nation
+//
+// Float64, so every row came back as the integer 0: nullif's argument 0 is a
+// bare column, which decides nothing by design (its type comes from the input
+// schema at runtime), so nullif fell back to its numeric default — and coalesce
+// took that for a decision, stopped, and never consulted the string literal in
+// argument 1 that would have decided it correctly (#331).
+//
+// The fallback itself is right where there is nothing better: NULLIF(int_col, 1)
+// as a projection is numeric and stays numeric. What Confidence adds is that a
+// caller holding another candidate can tell the two apart.
+type Confidence uint8
+
+const (
+	// Undecided: nothing here names a type, and the caller keeps its own
+	// fallback. RetDynamic answers this way, as does an unregistered name.
+	Undecided Confidence = iota
+	// Guessed: a polymorphic declaration reached its fallback because no
+	// candidate argument decided. Still an answer — it is THE answer at top
+	// level — but a caller with a candidate of its own left to ask must
+	// prefer that candidate's decision over this.
+	Guessed
+	// Decided: the declaration names this type outright, or a candidate
+	// argument decided it.
+	Decided
+)
+
+func (c Confidence) String() string {
+	switch c {
+	case Guessed:
+		return "GUESSED"
+	case Decided:
+		return "DECIDED"
+	}
+	return "UNDECIDED"
+}
+
 // Declared reports whether this is a real declaration rather than the zero
 // value. Registration rejects an undeclared Ret.
 func (r Ret) Declared() bool { return r.kind != retUndeclared }
 
-// Resolve returns the output type for a call with nargs arguments. argType
-// reports the type of argument i and whether the caller could decide it; it is
-// consulted only by polymorphic declarations and may be nil.
+// Resolve returns the output type for a call with nargs arguments, and how
+// confidently. argType reports the type of argument i and how confidently the
+// caller decided it; it is consulted only by polymorphic declarations and may
+// be nil.
 //
-// ok=false means the caller should keep its own fallback: the function is
+// Undecided means the caller should keep its own fallback: the function is
 // RetDynamic, or the name is not registered at all.
-func (r Ret) Resolve(nargs int, argType func(i int) (batch.TypeID, bool)) (batch.TypeID, bool) {
+//
+// A polymorphic declaration takes the first candidate argument that DECIDED a
+// type. A candidate that only guessed does not end the search — it is
+// remembered, in preference order, and answered only if no later candidate
+// decides. A guess stays a guess all the way up, so an argument that guessed at
+// any depth never displaces an argument that knows.
+func (r Ret) Resolve(nargs int, argType func(i int) (batch.TypeID, Confidence)) (batch.TypeID, Confidence) {
 	switch r.kind {
 	case retFixed:
-		return r.typ, true
+		return r.typ, Decided
 	case retSameAsArg:
 		if argType != nil {
 			candidates := r.args
@@ -102,18 +153,27 @@ func (r Ret) Resolve(nargs int, argType func(i int) (batch.TypeID, bool)) (batch
 					candidates[i] = i
 				}
 			}
+			guess, guessed := batch.TypeID(0), false
 			for _, i := range candidates {
 				if i < 0 || i >= nargs {
 					continue
 				}
-				if t, ok := argType(i); ok {
-					return t, true
+				switch t, c := argType(i); c {
+				case Decided:
+					return t, Decided
+				case Guessed:
+					if !guessed {
+						guess, guessed = t, true
+					}
 				}
 			}
+			if guessed {
+				return guess, Guessed
+			}
 		}
-		return r.typ, true
+		return r.typ, Guessed
 	}
-	return batch.TypeString, false
+	return batch.TypeString, Undecided
 }
 
 // Numeric reports whether the function always returns a number. It is the

@@ -100,8 +100,8 @@ func TestVecFuncsSurviveEveryOutputType(t *testing.T) {
 
 	var failures, argShape []string
 	for _, name := range vecFuncNames() {
-		declared, ok := DefaultRegistry.ReturnType(name).Resolve(0, nil)
-		if !ok {
+		declared, c := DefaultRegistry.ReturnType(name).Resolve(0, nil)
+		if c == Undecided {
 			continue // reported by TestVecKernelWritesDeclaredType
 		}
 		for si, args := range shapes {
@@ -190,8 +190,8 @@ func TestVecKernelWritesDeclaredType(t *testing.T) {
 
 	for _, name := range vecFuncNames() {
 		ret := DefaultRegistry.ReturnType(name)
-		declared, ok := ret.Resolve(0, nil)
-		if !ok {
+		declared, c := ret.Resolve(0, nil)
+		if c == Undecided {
 			t.Errorf("%s: has a vec kernel but a %s declaration — a kernel writes a "+
 				"typed slice, so its function's return type cannot be undecided", name, ret)
 			continue
@@ -281,29 +281,149 @@ func TestRegisterVecRequiresADeclaration(t *testing.T) {
 
 func TestRetSameAsArgResolution(t *testing.T) {
 	known := map[int]batch.TypeID{1: batch.TypeString}
-	argType := func(i int) (batch.TypeID, bool) {
+	argType := func(i int) (batch.TypeID, Confidence) {
 		t, ok := known[i]
-		return t, ok
+		if !ok {
+			return 0, Undecided
+		}
+		return t, Decided
 	}
 	tests := []struct {
 		name  string
 		ret   Ret
 		nargs int
 		want  batch.TypeID
-		wantK bool
+		wantC Confidence
 	}{
-		{"fixed", RetFloat64, 0, batch.TypeFloat64, true},
-		{"dynamic", RetDynamic, 2, batch.TypeString, false},
-		{"any arg, second decides", RetSameAsArg(batch.TypeFloat64), 3, batch.TypeString, true},
-		{"any arg, none decides", RetSameAsArg(batch.TypeFloat64), 1, batch.TypeFloat64, true},
-		{"named arg misses", RetSameAsArg(batch.TypeFloat64, 0), 3, batch.TypeFloat64, true},
-		{"named arg hits", RetSameAsArg(batch.TypeFloat64, 1, 2), 3, batch.TypeString, true},
-		{"arg out of range", RetSameAsArg(batch.TypeFloat64, 1), 1, batch.TypeFloat64, true},
+		{"fixed", RetFloat64, 0, batch.TypeFloat64, Decided},
+		{"dynamic", RetDynamic, 2, batch.TypeString, Undecided},
+		{"any arg, second decides", RetSameAsArg(batch.TypeFloat64), 3, batch.TypeString, Decided},
+		// Nothing decided, so the fallback is the answer — and it is
+		// reported as the guess it is.
+		{"any arg, none decides", RetSameAsArg(batch.TypeFloat64), 1, batch.TypeFloat64, Guessed},
+		{"named arg misses", RetSameAsArg(batch.TypeFloat64, 0), 3, batch.TypeFloat64, Guessed},
+		{"named arg hits", RetSameAsArg(batch.TypeFloat64, 1, 2), 3, batch.TypeString, Decided},
+		{"arg out of range", RetSameAsArg(batch.TypeFloat64, 1), 1, batch.TypeFloat64, Guessed},
 	}
 	for _, tc := range tests {
-		got, ok := tc.ret.Resolve(tc.nargs, argType)
-		if got != tc.want || ok != tc.wantK {
-			t.Errorf("%s: Resolve = (%s, %v), want (%s, %v)", tc.name, got, ok, tc.want, tc.wantK)
+		got, c := tc.ret.Resolve(tc.nargs, argType)
+		if got != tc.want || c != tc.wantC {
+			t.Errorf("%s: Resolve = (%s, %s), want (%s, %s)", tc.name, got, c, tc.want, tc.wantC)
+		}
+	}
+}
+
+// A nested call that only GUESSED its own type must not stop its caller's
+// search. This is #331 at the declaration layer: coalesce asked nullif,
+// nullif had a bare column in the position it mirrors, and the numeric
+// fallback it answered with was taken for a decision — so the string literal
+// in the next argument, the one that knew, was never asked and every row of
+// COALESCE(NULLIF(n_name,'ALGERIA'), 'fallback') came back as the integer 0.
+func TestRetSameAsArgGuessDoesNotOutrankADecision(t *testing.T) {
+	// The two declarations at play, and the argument shapes a caller sees:
+	// undecided (a bare column reference), decided (a literal), or the
+	// answer of a nested call, resolved recursively.
+	nullif := RetSameAsArg(batch.TypeFloat64, 0)
+	coalesce := RetSameAsArg(batch.TypeFloat64)
+	ifnull := RetSameAsArg(batch.TypeString, 0, 1)
+
+	undecided := func(batch.TypeID) func(int) (batch.TypeID, Confidence) {
+		return func(int) (batch.TypeID, Confidence) { return 0, Undecided }
+	}
+	// nested resolves ret over the argument shapes given, exactly as the
+	// planner's nodeDeclaredType does when an argument is itself a call.
+	nested := func(ret Ret, args ...func(int) (batch.TypeID, Confidence)) func(int) (batch.TypeID, Confidence) {
+		return func(int) (batch.TypeID, Confidence) {
+			return ret.Resolve(len(args), func(i int) (batch.TypeID, Confidence) { return args[i](i) })
+		}
+	}
+	lit := func(t batch.TypeID) func(int) (batch.TypeID, Confidence) {
+		return func(int) (batch.TypeID, Confidence) { return t, Decided }
+	}
+	col := undecided(0)
+
+	tests := []struct {
+		name  string
+		ret   Ret
+		args  []func(int) (batch.TypeID, Confidence)
+		want  batch.TypeID
+		wantC Confidence
+	}{
+		{
+			// The bug. COALESCE(NULLIF(<col>, 'lit'), 'lit')
+			name:  "later argument decides past a nested guess",
+			ret:   coalesce,
+			args:  []func(int) (batch.TypeID, Confidence){nested(nullif, col, lit(batch.TypeString)), lit(batch.TypeString)},
+			want:  batch.TypeString,
+			wantC: Decided,
+		},
+		{
+			// Two levels: COALESCE(NULLIF(NULLIF(<col>,'a'),'b'), 'lit').
+			// A guess stays a guess however deep it is made.
+			name: "two levels of nesting, outer argument decides",
+			ret:  coalesce,
+			args: []func(int) (batch.TypeID, Confidence){
+				nested(nullif, nested(nullif, col, lit(batch.TypeString)), lit(batch.TypeString)),
+				lit(batch.TypeString),
+			},
+			want:  batch.TypeString,
+			wantC: Decided,
+		},
+		{
+			// Nothing anywhere decides: the fallback still answers, so
+			// today's behaviour at top level is unchanged.
+			name:  "nested guess, nothing else to consult",
+			ret:   coalesce,
+			args:  []func(int) (batch.TypeID, Confidence){nested(nullif, col, col)},
+			want:  batch.TypeFloat64,
+			wantC: Guessed,
+		},
+		{
+			// Only guesses among the candidates: the first one wins, in the
+			// declaration's preference order.
+			name: "first guess wins when no candidate decides",
+			ret:  coalesce,
+			args: []func(int) (batch.TypeID, Confidence){
+				nested(RetSameAsArg(batch.TypeBool, 0), col),
+				nested(nullif, col),
+			},
+			want:  batch.TypeBool,
+			wantC: Guessed,
+		},
+		{
+			// NULLIF(<int col>, 1) at top level: nothing decides, and the
+			// numeric fallback is the right answer. Deleting it — the naive
+			// "fix" for the case above — would type this projection String
+			// and hand its kernel a vector with no Float64Data.
+			name:  "numeric fallback survives at top level",
+			ret:   nullif,
+			args:  []func(int) (batch.TypeID, Confidence){col, lit(batch.TypeInt64)},
+			want:  batch.TypeFloat64,
+			wantC: Guessed,
+		},
+		{
+			// The same nullif nested under a numeric caller: the caller's
+			// own numeric literal decides, and the answer stays numeric.
+			name:  "numeric stays numeric through a nested guess",
+			ret:   coalesce,
+			args:  []func(int) (batch.TypeID, Confidence){nested(nullif, col, lit(batch.TypeInt64)), lit(batch.TypeInt64)},
+			want:  batch.TypeInt64,
+			wantC: Decided,
+		},
+		{
+			// ifnull mirrors arguments 0 and 1, so the guess in 0 must not
+			// cost it the decision in 1 either.
+			name:  "declared candidate list skips a guess too",
+			ret:   ifnull,
+			args:  []func(int) (batch.TypeID, Confidence){nested(nullif, col), lit(batch.TypeString)},
+			want:  batch.TypeString,
+			wantC: Decided,
+		},
+	}
+	for _, tc := range tests {
+		got, c := tc.ret.Resolve(len(tc.args), func(i int) (batch.TypeID, Confidence) { return tc.args[i](i) })
+		if got != tc.want || c != tc.wantC {
+			t.Errorf("%s: Resolve = (%s, %s), want (%s, %s)", tc.name, got, c, tc.want, tc.wantC)
 		}
 	}
 }

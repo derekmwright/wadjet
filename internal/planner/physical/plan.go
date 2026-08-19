@@ -6515,33 +6515,40 @@ func strictIntArithCols(n *logical.Node) map[string]bool {
 }
 
 func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.TypeID {
-	if t, ok := nodeDeclaredType(node); ok {
+	// A guess is still the answer here: nothing is left to consult, and a
+	// polymorphic function's fallback is what types SELECT NULLIF(int_col, 1)
+	// numeric. Only expr.Undecided leaves the type to the caller.
+	if t, c := nodeDeclaredType(node); c != expr.Undecided {
 		return t
 	}
 	return fallback
 }
 
-// nodeDeclaredType reports the type an expression decides on its own, and
-// whether it decides one at all. A bare column reference decides nothing —
-// its type is resolved at runtime from the input schema — which is both what
-// the caller's fallback is for and what a polymorphic function declaration
-// needs to know before moving on to its next candidate argument.
-func nodeDeclaredType(node plansql.Node) (parquet.TypeID, bool) {
+// nodeDeclaredType reports the type an expression decides on its own, and how
+// confidently. A bare column reference decides nothing — its type is resolved
+// at runtime from the input schema — which is both what the caller's fallback
+// is for and what a polymorphic function declaration needs to know before
+// moving on to its next candidate argument.
+//
+// The confidence matters only inside a nested call: everything below returns a
+// type it decides outright, but a function call may return one it merely
+// guessed, and its caller must keep looking (see expr.Confidence, #331).
+func nodeDeclaredType(node plansql.Node) (parquet.TypeID, expr.Confidence) {
 	switch n := node.(type) {
 	case *plansql.BinaryOp:
 		if n.Op == "||" {
 			// String concatenation, not arithmetic. Declaring it Float64
 			// handed the concat kernel an output vector with no BytesData,
 			// so every row came back NULL (#328).
-			return parquet.TypeString, true
+			return parquet.TypeString, expr.Decided
 		}
 		if !binOpInvolvesInterval(n) {
-			return parquet.TypeFloat64, true
+			return parquet.TypeFloat64, expr.Decided
 		}
 	case *plansql.FuncCallNode:
 		return funcReturnType(n)
 	case *plansql.CastNode:
-		return inferCastType(n.TypeName), true
+		return inferCastType(n.TypeName), expr.Decided
 	case *plansql.Lit:
 		// Literal projections (e.g., SELECT 13, SELECT 'x') need a typed
 		// output column so the runtime stores the value in the matching
@@ -6551,17 +6558,17 @@ func nodeDeclaredType(node plansql.Node) (parquet.TypeID, bool) {
 		switch n.Kind {
 		case plansql.LitNumber:
 			if _, err := strconv.ParseInt(n.Value, 10, 64); err == nil {
-				return parquet.TypeInt64, true
+				return parquet.TypeInt64, expr.Decided
 			}
-			return parquet.TypeFloat64, true
+			return parquet.TypeFloat64, expr.Decided
 		case plansql.LitBool:
-			return parquet.TypeBool, true
+			return parquet.TypeBool, expr.Decided
 		case plansql.LitString:
-			return parquet.TypeString, true
+			return parquet.TypeString, expr.Decided
 		}
 		// LitNull: type unknown; let the fallback decide.
 	}
-	return 0, false
+	return 0, expr.Undecided
 }
 
 // funcReturnType types a function call from the return type declared where the
@@ -6578,14 +6585,18 @@ func nodeDeclaredType(node plansql.Node) (parquet.TypeID, bool) {
 // registered nowhere (date_part, strlen, ceiling, trunc), which is the same
 // drift pointing the other way.
 //
-// ok=false means the declaration does not decide and the caller keeps its own
-// fallback.
-func funcReturnType(n *plansql.FuncCallNode) (parquet.TypeID, bool) {
-	t, ok := expr.DefaultRegistry.ReturnType(n.Name).Resolve(len(n.Args), func(i int) (parquet.TypeID, bool) {
+// expr.Undecided means the declaration does not decide and the caller keeps its
+// own fallback. expr.Guessed means a polymorphic declaration answered with its
+// fallback because none of its candidate arguments decided: usable, but a
+// CALLING function still holding a candidate of its own must prefer that one —
+// which is the whole of #331, where coalesce took a nested nullif's numeric
+// fallback for fact and never asked the string literal beside it.
+func funcReturnType(n *plansql.FuncCallNode) (parquet.TypeID, expr.Confidence) {
+	t, c := expr.DefaultRegistry.ReturnType(n.Name).Resolve(len(n.Args), func(i int) (parquet.TypeID, expr.Confidence) {
 		return nodeDeclaredType(n.Args[i])
 	})
-	if !ok {
-		return 0, false
+	if c == expr.Undecided {
+		return 0, expr.Undecided
 	}
 	switch t {
 	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
@@ -6593,9 +6604,9 @@ func funcReturnType(n *plansql.FuncCallNode) (parquet.TypeID, bool) {
 		// so, but a projection has no element type to size the child vector
 		// with and an ARRAY column built without one reads back empty. Keep
 		// the string fallback until a projection can carry a nested type.
-		return 0, false
+		return 0, expr.Undecided
 	}
-	return t, true
+	return t, c
 }
 
 // inferCastType maps SQL type names to parquet types for CAST expressions.

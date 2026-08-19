@@ -1373,7 +1373,13 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 	e.vecOnce.Do(func() {
 		e.vecFn = DefaultRegistry.LookupVec(e.Name)
-		e.vecRet, e.vecRetOK = DefaultRegistry.ReturnType(e.Name).Resolve(0, nil)
+		// No argument types to consult here, so a polymorphic declaration
+		// answers with its fallback. That is a guess, and it is used the
+		// same way a decision is: the guard below re-checks it against the
+		// output vector anyway, and a mismatch costs the per-row path.
+		var c Confidence
+		e.vecRet, c = DefaultRegistry.ReturnType(e.Name).Resolve(0, nil)
+		e.vecRetOK = c != Undecided
 		e.vecTextFn = stringInputFuncs[strings.ToLower(e.Name)]
 	})
 	if e.vecFn == nil {

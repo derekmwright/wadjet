@@ -380,6 +380,26 @@ func duckdbCorpus() []duckdbCase {
 		// Correct on every path, so the join is the trigger.
 		duckdbCase{name: "EmptyScanUngroupedSum",
 			sql: "SELECT SUM(l_extendedprice) AS s FROM lineitem WHERE l_orderkey < 0"},
+		// A NULL made by one expression and consumed by another, on a STRING
+		// column — the shape whose output type is decided by a function's
+		// declaration rather than by any column in the input schema.
+		//
+		// coalesced returned the integer 0 on every row, on both paths, with
+		// no error (#331): coalesce mirrors the type of the first argument
+		// anything decides, its first argument is nullif over a bare column,
+		// and nullif — able to decide nothing — answered with its numeric
+		// fallback as though it were fact. coalesce believed it and never
+		// asked the string literal beside it. nested_twice is the same at two
+		// levels, null_through_upper carries the NULL out through a
+		// fixed-return function instead of consuming it, and numeric_fallback
+		// is the control that must stay a number: nothing in it decides a
+		// type either, and the numeric fallback is the right answer there.
+		duckdbCase{name: "NullPropagatesThroughExpressions", sql: `SELECT n_nationkey,
+			COALESCE(NULLIF(n_name, 'ALGERIA'), 'fallback') AS coalesced,
+			COALESCE(NULLIF(NULLIF(n_name, 'ALGERIA'), 'BRAZIL'), 'twice') AS nested_twice,
+			UPPER(NULLIF(n_name, 'ARGENTINA')) AS null_through_upper,
+			COALESCE(NULLIF(n_regionkey, 0), -1) AS numeric_fallback
+			FROM nation ORDER BY n_nationkey`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can
