@@ -1232,6 +1232,73 @@ func duckdbCorpus() []duckdbCase {
 			FROM orders WHERE o_orderkey <= 10 ORDER BY o_orderkey`},
 		duckdbCase{name: "TimestampCastComparison", sql: `SELECT COUNT(*) AS c FROM lineitem
 			WHERE CAST(l_shipdate AS TIMESTAMP) < TIMESTAMP '1994-01-01 00:00:00'`},
+		// Correlated subqueries whose outer column appears NOWHERE else in
+		// the outer query — not in its SELECT list, not in its WHERE. Column
+		// pruning dropped it (the pruning walk had no case for a subquery
+		// node), the per-row evaluator found no such column in the batch and
+		// substituted NULL, and every comparison went UNKNOWN: the scalar and
+		// EXISTS forms answered 0 and the NOT EXISTS form answered the whole
+		// table. All three carry a plausible-looking single number, which is
+		// why nothing caught it (#347).
+		//
+		// The correlation must be NON-EQUI. An `=` correlation is
+		// decorrelated into a join before pruning runs and never executes
+		// per row, so an equality version of any of these passes with the bug
+		// present.
+		//
+		// Arm B is pinned on all five, for a SEPARATE and pre-existing
+		// defect: the stage DAG cannot run a per-row correlated subquery at
+		// all. A worker compiles its fragment's filter without a
+		// SubqueryRunner, so an EXISTS fails the task outright ("EXISTS
+		// subquery requires a SubqueryRunner") and a correlated scalar
+		// answers 0 — including for CorrelatedScalarProjectedOuterCol, which
+		// has nothing to do with pruning and which arm A has always answered
+		// correctly. Arm A stays fully gated, which is the #347 gate; the
+		// pins fail the moment the DAG learns to answer these.
+		duckdbCase{name: "CorrelatedScalarUnprojectedOuterCol",
+			sql: `SELECT COUNT(*) AS n FROM customer c1
+				WHERE c1.c_acctbal > (SELECT AVG(c_acctbal) FROM customer c2
+					WHERE c2.c_nationkey < c1.c_nationkey)`,
+			knownBugArm: armDAG,
+			knownBug: "the stage DAG answers 0 for any per-row correlated subquery: " +
+				"the worker compiles its fragment's filter with no SubqueryRunner",
+		},
+		// The control: the identical correlation with the outer column
+		// forced into a projection, so pruning could never drop it. It was
+		// correct before the fix and must stay correct after — the pair is
+		// what localizes the defect to pruning.
+		duckdbCase{name: "CorrelatedScalarProjectedOuterCol",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT c_nationkey, c_acctbal FROM customer) c1
+				WHERE c1.c_acctbal > (SELECT AVG(c_acctbal) FROM customer c2
+					WHERE c2.c_nationkey < c1.c_nationkey)`,
+			knownBugArm: armDAG,
+			knownBug:    "the stage DAG answers 0 for any per-row correlated subquery (see above)",
+		},
+		duckdbCase{name: "CorrelatedExistsUnprojectedOuterCol",
+			sql: `SELECT COUNT(*) AS n FROM customer c1
+				WHERE EXISTS (SELECT 1 FROM customer c2
+					WHERE c2.c_nationkey < c1.c_nationkey AND c2.c_acctbal > 9000)`,
+			knownBugArm: armDAG,
+			knownBug:    "the stage DAG fails the task: EXISTS subquery requires a SubqueryRunner",
+		},
+		duckdbCase{name: "CorrelatedNotExistsUnprojectedOuterCol",
+			sql: `SELECT COUNT(*) AS n FROM customer c1
+				WHERE NOT EXISTS (SELECT 1 FROM customer c2
+					WHERE c2.c_nationkey < c1.c_nationkey AND c2.c_acctbal > 9000)`,
+			knownBugArm: armDAG,
+			knownBug:    "the stage DAG fails the task: EXISTS subquery requires a SubqueryRunner",
+		},
+		// Two subqueries deep: c1 is bound by the OUTERMOST query and read
+		// inside the inner-inner SELECT, so the pruning walk, the correlation
+		// analysis and the value substitution all have to recurse.
+		duckdbCase{name: "CorrelatedNestedTwoDeep",
+			sql: `SELECT COUNT(*) AS n FROM customer c1
+				WHERE c1.c_acctbal > (SELECT AVG(c2.c_acctbal) FROM customer c2
+					WHERE c2.c_acctbal > (SELECT AVG(c3.c_acctbal) FROM customer c3
+						WHERE c3.c_nationkey < c1.c_nationkey))`,
+			knownBugArm: armDAG,
+			knownBug:    "the stage DAG answers 0 for any per-row correlated subquery (see above)",
+		},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

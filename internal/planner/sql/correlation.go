@@ -2,6 +2,7 @@ package sql
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -34,6 +35,41 @@ type outerRefScope struct {
 	// when no TableColumns resolver was available, in which case the weaker
 	// innerTables check below is all the shadowing protection there is.
 	innerCols map[string]bool
+	// resolve is kept so a subquery nested inside this one can build its own
+	// innerCols the same way.
+	resolve TableColumns
+}
+
+// nest returns the scope for a subquery nested inside this one. Both name
+// spaces accumulate: a reference the nested level resolves against ITS FROM,
+// or against the level that encloses it, is not a reference to the outermost
+// query — anything else still is, and has to be substituted from the outer
+// row just the same.
+func (s *outerRefScope) nest(info *SelectInfo) *outerRefScope {
+	inner := make(map[string]bool, len(s.innerTables)+4)
+	for t := range s.innerTables {
+		inner[t] = true
+	}
+	for t := range collectInnerTables(info) {
+		inner[t] = true
+	}
+	var cols map[string]bool
+	if nestedCols := collectInnerColumns(info, s.resolve); nestedCols != nil || s.innerCols != nil {
+		cols = make(map[string]bool, len(s.innerCols)+len(nestedCols))
+		for c := range s.innerCols {
+			cols[c] = true
+		}
+		for c := range nestedCols {
+			cols[c] = true
+		}
+	}
+	return &outerRefScope{
+		outerTables: s.outerTables,
+		innerTables: inner,
+		outerCols:   s.outerCols,
+		innerCols:   cols,
+		resolve:     s.resolve,
+	}
 }
 
 // FindCorrelatedRefs parses a subquery SQL string and returns any column
@@ -75,6 +111,7 @@ func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCo
 		innerTables: collectInnerTables(info),
 		outerCols:   outerCols,
 		innerCols:   collectInnerColumns(info, resolve),
+		resolve:     resolve,
 	}
 
 	var refs []OuterRef
@@ -181,6 +218,25 @@ func walkForOuterRefs(node Node, s *outerRefScope, refs *[]OuterRef) {
 				*refs = append(*refs, OuterRef{Table: tbl, Column: col})
 			}
 		}
+	// A subquery nested inside this one can correlate on the OUTERMOST
+	// query — `... WHERE c2.x > (SELECT AVG(y) FROM t c3 WHERE c3.k < c1.k)`
+	// binds c1 two levels up. The walk had no case for a subquery node, so
+	// such a reference was never reported as correlated at all, the
+	// evaluator never substituted it, and the inner SQL went to the runner
+	// naming a table that is not in its FROM.
+	case *SubqueryNode:
+		walkNestedForOuterRefs(n.SQL, s, refs)
+	case *ExistsNode:
+		walkNestedForOuterRefs(n.SQL, s, refs)
+	case *AnyAllExpr:
+		walkForOuterRefs(n.Left, s, refs)
+		for _, v := range n.Values {
+			walkForOuterRefs(v, s, refs)
+		}
+	case *TupleNode:
+		for _, e := range n.Elements {
+			walkForOuterRefs(e, s, refs)
+		}
 	case *BinaryOp:
 		walkForOuterRefs(n.Left, s, refs)
 		walkForOuterRefs(n.Right, s, refs)
@@ -231,6 +287,57 @@ func walkForOuterRefs(node Node, s *outerRefScope, refs *[]OuterRef) {
 	case *CastNode:
 		walkForOuterRefs(n.Inner, s, refs)
 	}
+}
+
+// walkNestedForOuterRefs analyses a subquery nested inside the one being
+// walked, under a scope where the enclosing level's names count as inner.
+// A subquery that does not parse contributes nothing: the compiler parses the
+// same text and declines to build a correlated evaluator for it.
+func walkNestedForOuterRefs(sql string, s *outerRefScope, refs *[]OuterRef) {
+	parsed, err := Parse(sql)
+	if err != nil {
+		return
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil || info == nil {
+		return
+	}
+	nested := s.nest(info)
+	if info.WhereExpr != nil {
+		walkForOuterRefs(info.WhereExpr, nested, refs)
+	}
+	if info.HavingExpr != nil {
+		walkForOuterRefs(info.HavingExpr, nested, refs)
+	}
+	for _, col := range info.Columns {
+		if col.ASTExpr != nil {
+			walkForOuterRefs(col.ASTExpr, nested, refs)
+		}
+	}
+}
+
+// rewriteNestedSubquery substitutes outer values inside a nested subquery's
+// own WHERE clause and returns its rebuilt SQL text.
+//
+// The second result is false when nothing changed — an unparseable subquery,
+// one with no WHERE, or one whose WHERE holds no reference this substitution
+// resolves. The caller then returns the ORIGINAL node untouched, so a
+// subquery that needs no substitution never round-trips through RebuildSQL
+// and its text is byte-for-byte what the user wrote.
+func rewriteNestedSubquery(sql string, rewrite func(Node) Node) (string, bool) {
+	parsed, err := Parse(sql)
+	if err != nil {
+		return "", false
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil || info == nil || info.WhereExpr == nil {
+		return "", false
+	}
+	rewritten := rewrite(info.WhereExpr)
+	if rewritten == nil || rewritten.String() == info.WhereExpr.String() {
+		return "", false
+	}
+	return RebuildSQL(info, rewritten), true
 }
 
 // RewriteOuterRefs returns a deep copy of the AST with correlated ColRef
@@ -321,6 +428,23 @@ func RewriteOuterRefs(node Node, outerTables map[string]bool, vals map[string]an
 		return cn
 	case *CastNode:
 		return &CastNode{Inner: RewriteOuterRefs(n.Inner, outerTables, vals), TypeName: n.TypeName}
+	// The substitution has to reach references two levels down, or the SQL
+	// handed to the runner still names the outermost table (see
+	// walkNestedForOuterRefs).
+	case *SubqueryNode:
+		if sql, ok := rewriteNestedSubquery(n.SQL, func(inner Node) Node {
+			return RewriteOuterRefs(inner, outerTables, vals)
+		}); ok {
+			return &SubqueryNode{SQL: sql}
+		}
+		return n
+	case *ExistsNode:
+		if sql, ok := rewriteNestedSubquery(n.SQL, func(inner Node) Node {
+			return RewriteOuterRefs(inner, outerTables, vals)
+		}); ok {
+			return &ExistsNode{Not: n.Not, SQL: sql}
+		}
+		return n
 	default:
 		return node
 	}
@@ -394,6 +518,20 @@ func RewriteUnqualifiedOuterRefs(node Node, unqualOuter map[string]string, vals 
 		}
 	case *CastNode:
 		return &CastNode{Inner: RewriteUnqualifiedOuterRefs(n.Inner, unqualOuter, vals), TypeName: n.TypeName}
+	case *SubqueryNode:
+		if sql, ok := rewriteNestedSubquery(n.SQL, func(inner Node) Node {
+			return RewriteUnqualifiedOuterRefs(inner, unqualOuter, vals)
+		}); ok {
+			return &SubqueryNode{SQL: sql}
+		}
+		return n
+	case *ExistsNode:
+		if sql, ok := rewriteNestedSubquery(n.SQL, func(inner Node) Node {
+			return RewriteUnqualifiedOuterRefs(inner, unqualOuter, vals)
+		}); ok {
+			return &ExistsNode{Not: n.Not, SQL: sql}
+		}
+		return n
 	default:
 		return node
 	}
@@ -531,4 +669,146 @@ func RebuildSQL(info *SelectInfo, rewrittenWhere Node) string {
 	}
 
 	return sb.String()
+}
+
+// OuterColumnCandidates returns the column names a subquery may read from the
+// query that ENCLOSES it: every reference it cannot resolve against its own
+// FROM clause. Subqueries nested inside it are walked too, so a correlation
+// two levels down is reported at the top.
+//
+// It exists for column pruning. A column a correlated subquery reads is a
+// column the outer query NEEDS, even when it appears nowhere in the outer
+// SELECT list or WHERE clause — and the pruning walk had no case for a
+// subquery node at all, so it never saw one. The outer batch then carried no
+// such column, readOuterValues substituted NULL for it, every comparison
+// against that NULL was UNKNOWN, and the query answered 0 rows with no
+// indication anything had gone wrong (issue #347).
+//
+// It is deliberately over-inclusive where it cannot be sure. An unqualified
+// name is reported even though the subquery's own FROM may well supply it,
+// because deciding that needs a catalog this package does not have. Naming a
+// column the outer relation does not have costs nothing — the caller filters
+// candidates against the scan's own schema (sanitizeScanNeeds) — while
+// missing one it does have is the wrong answer above. A reference qualified
+// by one of the subquery's own tables or aliases is the one case it can rule
+// out, and does.
+//
+// A subquery that does not parse yields no candidates: the expression
+// compiler parses the same text and declines to build a correlated evaluator
+// for it, and the runtime guard in readOuterValues fails loudly if one is
+// built anyway.
+func OuterColumnCandidates(subquerySQL string) []string {
+	seen := make(map[string]bool, 4)
+	collectOuterCandidates(subquerySQL, seen)
+	out := make([]string, 0, len(seen))
+	for c := range seen {
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func collectOuterCandidates(subquerySQL string, out map[string]bool) {
+	parsed, err := Parse(subquerySQL)
+	if err != nil {
+		return
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil || info == nil {
+		return
+	}
+	inner := collectInnerTables(info)
+	if info.WhereExpr != nil {
+		walkOuterCandidates(info.WhereExpr, inner, out)
+	}
+	if info.HavingExpr != nil {
+		walkOuterCandidates(info.HavingExpr, inner, out)
+	}
+	for _, col := range info.Columns {
+		if col.ASTExpr != nil {
+			walkOuterCandidates(col.ASTExpr, inner, out)
+		}
+	}
+}
+
+// walkOuterCandidates collects every column reference under node that is not
+// qualified by one of the subquery's own tables, recursing through nested
+// subqueries. Bare column names only: the caller matches against a scan's
+// schema, which stores columns unqualified.
+func walkOuterCandidates(node Node, inner map[string]bool, out map[string]bool) {
+	if node == nil {
+		return
+	}
+	switch n := node.(type) {
+	case *ColRef:
+		if n.Table != "" && inner[strings.ToLower(n.Table)] {
+			return // the subquery's own relation supplies it
+		}
+		out[strings.ToLower(n.Column)] = true
+	case *SubqueryNode:
+		// A reference the nested level attributes to ITS outer scope may
+		// belong to this level rather than to ours; keeping both is the
+		// over-inclusive direction and costs only a schema-filtered name.
+		collectOuterCandidates(n.SQL, out)
+	case *ExistsNode:
+		collectOuterCandidates(n.SQL, out)
+	case *AnyAllExpr:
+		walkOuterCandidates(n.Left, inner, out)
+		for _, v := range n.Values {
+			walkOuterCandidates(v, inner, out)
+		}
+	case *TupleNode:
+		for _, e := range n.Elements {
+			walkOuterCandidates(e, inner, out)
+		}
+	case *BinaryOp:
+		walkOuterCandidates(n.Left, inner, out)
+		walkOuterCandidates(n.Right, inner, out)
+	case *UnaryOp:
+		walkOuterCandidates(n.Inner, inner, out)
+	case *CmpExpr:
+		walkOuterCandidates(n.Left, inner, out)
+		walkOuterCandidates(n.Right, inner, out)
+	case *AndNode:
+		walkOuterCandidates(n.Left, inner, out)
+		walkOuterCandidates(n.Right, inner, out)
+	case *OrNode:
+		walkOuterCandidates(n.Left, inner, out)
+		walkOuterCandidates(n.Right, inner, out)
+	case *NotNode:
+		walkOuterCandidates(n.Inner, inner, out)
+	case *ParenNode:
+		walkOuterCandidates(n.Inner, inner, out)
+	case *FuncCallNode:
+		for _, arg := range n.Args {
+			walkOuterCandidates(arg, inner, out)
+		}
+	case *InExpr:
+		walkOuterCandidates(n.Left, inner, out)
+		for _, v := range n.Values {
+			walkOuterCandidates(v, inner, out)
+		}
+	case *BetweenExpr:
+		walkOuterCandidates(n.Left, inner, out)
+		walkOuterCandidates(n.Low, inner, out)
+		walkOuterCandidates(n.High, inner, out)
+	case *LikeExpr:
+		walkOuterCandidates(n.Left, inner, out)
+		walkOuterCandidates(n.Pattern, inner, out)
+	case *IsExpr:
+		walkOuterCandidates(n.Left, inner, out)
+	case *CaseNode:
+		if n.Subject != nil {
+			walkOuterCandidates(n.Subject, inner, out)
+		}
+		for _, w := range n.Whens {
+			walkOuterCandidates(w.Cond, inner, out)
+			walkOuterCandidates(w.Result, inner, out)
+		}
+		if n.Else != nil {
+			walkOuterCandidates(n.Else, inner, out)
+		}
+	case *CastNode:
+		walkOuterCandidates(n.Inner, inner, out)
+	}
 }

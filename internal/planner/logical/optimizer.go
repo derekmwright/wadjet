@@ -738,6 +738,34 @@ func collectASTColumnRefs(node plansql.Node, refs map[string]bool) {
 		if n.Else != nil {
 			collectASTColumnRefs(n.Else, refs)
 		}
+	// A subquery that survives decorrelation is evaluated per outer row, and
+	// the outer columns it correlates on are read out of the outer batch. They
+	// are as required as any column the SELECT list names — and the walk used
+	// to have no case for a subquery node at all, so it kept none of them
+	// (#347). See plansql.OuterColumnCandidates for what counts as one.
+	case *plansql.SubqueryNode:
+		collectSubqueryOuterRefs(n.SQL, refs)
+	case *plansql.ExistsNode:
+		collectSubqueryOuterRefs(n.SQL, refs)
+	case *plansql.AnyAllExpr:
+		collectASTColumnRefs(n.Left, refs)
+		for _, v := range n.Values {
+			collectASTColumnRefs(v, refs)
+		}
+	case *plansql.TupleNode:
+		for _, e := range n.Elements {
+			collectASTColumnRefs(e, refs)
+		}
+	}
+}
+
+// collectSubqueryOuterRefs adds the outer-query columns a correlated subquery
+// reads to the needs set. Over-inclusive by design: a name the scan's schema
+// does not have is dropped by sanitizeScanNeeds, while a name it does have
+// and pruning discards is a correlated reference that resolves to nothing.
+func collectSubqueryOuterRefs(sql string, refs map[string]bool) {
+	for _, col := range plansql.OuterColumnCandidates(sql) {
+		refs[col] = true
 	}
 }
 

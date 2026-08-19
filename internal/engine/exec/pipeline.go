@@ -36,11 +36,37 @@ type Pipeline struct {
 	Workers int // number of parallel workers (0 or 1 = serial)
 }
 
+// FatalEvalPanic marks a panic value that carries a query ERROR rather than a
+// bug: an expression that cannot produce a correct answer and must not fall
+// back to NULL. Expression evaluation has no error return (Expr.Eval yields a
+// value and nothing else), so the one such condition — a correlated subquery
+// whose outer column is not in the batch, issue #347 — raises a panic carrying
+// a value that implements this, and the pipeline drivers convert it back into
+// an error. Panics that do not implement it are re-raised untouched.
+type FatalEvalPanic interface {
+	error
+	FatalEvalError() error
+}
+
+// recoverFatalEval turns a FatalEvalPanic recovered from r into an error, and
+// re-panics anything else. Call it only with a non-nil recover() result.
+func recoverFatalEval(r any) error {
+	if fe, ok := r.(FatalEvalPanic); ok {
+		return fe.FatalEvalError()
+	}
+	panic(r)
+}
+
 // Run executes the pipeline by pulling from source, transforming through
 // operators, and pushing to sink. When Workers > 1 and all operators
 // implement Cloneable, batches are processed by multiple goroutines
 // concurrently. Otherwise falls back to serial execution.
-func (p *Pipeline) Run(ctx context.Context) error {
+func (p *Pipeline) Run(ctx context.Context) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = recoverFatalEval(r)
+		}
+	}()
 	if err := p.Source.Init(ctx); err != nil {
 		return fmt.Errorf("source init: %w", err)
 	}
@@ -445,6 +471,16 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		wg.Add(1)
 		go func(workerID int, ops []UnaryOperator) {
 			defer wg.Done()
+			// A FatalEvalPanic raised here would escape Run's own recover —
+			// it happens on this goroutine, not the caller's — and take the
+			// process with it. Convert it to the first error and cancel; any
+			// other panic is re-raised as before.
+			defer func() {
+				if r := recover(); r != nil {
+					firstErr.CompareAndSwap(nil, recoverFatalEval(r))
+					cancel()
+				}
+			}()
 			// Each worker uses its own sink when MergeableSink, else shared sink
 			var sink Sink
 			if workerSinks != nil {

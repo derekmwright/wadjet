@@ -2670,6 +2670,61 @@ func twoPathCorpus() []twoPathQuery {
 		twoPathQuery{name: "TimestampCastComparison", cmp: cmpUnordered,
 			sql: `SELECT COUNT(*) AS c FROM lineitem
 				WHERE CAST(l_shipdate AS TIMESTAMP) < TIMESTAMP '1994-01-01 00:00:00'`},
+
+		// Correlated subqueries reading an outer column the outer query
+		// mentions nowhere else. Column pruning dropped it — the pruning walk
+		// had no case for a subquery node — the per-row evaluator found no
+		// such column in the batch and substituted NULL, and every comparison
+		// went UNKNOWN (#347). Arm A answered 0, arm B answered 0, so the
+		// two-arm compare alone would have passed all of them: every entry
+		// carries an absolute assertion recomputed from the fixture rows.
+		//
+		// The correlation is NON-EQUI on purpose. An `=` correlation is
+		// decorrelated into a join before pruning runs and never executes per
+		// row, so an equality version of any of these passes with the bug
+		// present and proves nothing.
+		//
+		// All five are pinned for a SEPARATE, pre-existing defect: the stage
+		// DAG cannot run a per-row correlated subquery at all. A worker
+		// compiles its fragment's filter without a SubqueryRunner, so EXISTS
+		// fails the task outright and a correlated scalar answers 0 — arm B
+		// returns 0 even for CorrelatedScalarProjectedOuterCol, which has
+		// nothing to do with pruning and which arm A has always answered
+		// correctly (verified on the pre-fix tree). #347's own gate is the
+		// arm-A half of TestDuckDBCompare plus
+		// TestCorrelatedOuterColumnPruning; the assertions here stand ready
+		// for the day the DAG grows a runner.
+		twoPathQuery{name: "CorrelatedScalarUnprojectedOuterCol", cmp: cmpUnordered, expectRows: true,
+			knownBug: "the stage DAG answers 0 for any per-row correlated subquery: the worker " +
+				"compiles its fragment's filter with no SubqueryRunner",
+			sql: `SELECT COUNT(*) AS n FROM customer c1
+				WHERE c1.c_acctbal > (SELECT AVG(c_acctbal) FROM customer c2
+					WHERE c2.c_nationkey < c1.c_nationkey)`,
+			assertA: assertCorrelatedScalarCount("c_nationkey is read only by the subquery")},
+		// The control: same correlation, outer column forced into a
+		// projection so pruning cannot drop it. Correct before the fix and
+		// after — the pair is what localizes the defect to pruning.
+		twoPathQuery{name: "CorrelatedScalarProjectedOuterCol", cmp: cmpUnordered, expectRows: true,
+			knownBug: "the stage DAG answers 0 for any per-row correlated subquery (see above)",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT c_nationkey, c_acctbal FROM customer) c1
+				WHERE c1.c_acctbal > (SELECT AVG(c_acctbal) FROM customer c2
+					WHERE c2.c_nationkey < c1.c_nationkey)`,
+			assertA: assertCorrelatedScalarCount("the same correlation with the column projected")},
+		twoPathQuery{name: "CorrelatedExistsUnprojectedOuterCol", cmp: cmpUnordered, expectRows: true,
+			knownBug: "the stage DAG fails the task: EXISTS subquery requires a SubqueryRunner",
+			sql: `SELECT COUNT(*) AS n FROM customer c1
+				WHERE EXISTS (SELECT 1 FROM customer c2
+					WHERE c2.c_nationkey < c1.c_nationkey AND c2.c_acctbal > 9000)`,
+			assertA: assertCorrelatedExistsCount("EXISTS over an unprojected correlation", false)},
+		// The complement, and the reason a row count is not a check: the
+		// NULL substitution made this one return the WHOLE table rather than
+		// nothing, which looks entirely plausible.
+		twoPathQuery{name: "CorrelatedNotExistsUnprojectedOuterCol", cmp: cmpUnordered, expectRows: true,
+			knownBug: "the stage DAG fails the task: EXISTS subquery requires a SubqueryRunner",
+			sql: `SELECT COUNT(*) AS n FROM customer c1
+				WHERE NOT EXISTS (SELECT 1 FROM customer c2
+					WHERE c2.c_nationkey < c1.c_nationkey AND c2.c_acctbal > 9000)`,
+			assertA: assertCorrelatedExistsCount("NOT EXISTS over an unprojected correlation", true)},
 	)
 
 	return out
@@ -3007,4 +3062,72 @@ func argMinMaxReference(tb testing.TB, table, valueCol, orderCol string) (atMin,
 		}
 	}
 	return atMin, atMax
+}
+
+// assertCorrelatedScalarCount recomputes
+//
+//	SELECT COUNT(*) FROM customer c1
+//	WHERE c1.c_acctbal > (SELECT AVG(c_acctbal) FROM customer c2
+//	                      WHERE c2.c_nationkey < c1.c_nationkey)
+//
+// over the fixture rows themselves rather than pinning a copied number, the
+// same way every other absolute assertion in this file does. An empty inner
+// set makes AVG NULL and the comparison UNKNOWN, so nationkey 0 contributes
+// nothing — that rule is half the answer and stating it here is the point.
+func assertCorrelatedScalarCount(why string) func(testing.TB, []map[string]any) {
+	return func(tb testing.TB, rows []map[string]any) {
+		tb.Helper()
+		if len(rows) != 1 {
+			tb.Fatalf("%d rows, want 1 (%s)", len(rows), why)
+		}
+		cust := sf001Table(tb, "customer")
+		want := 0
+		for _, r := range cust {
+			key := toFloat(r["c_nationkey"])
+			sum, n := 0.0, 0
+			for _, o := range cust {
+				if toFloat(o["c_nationkey"]) < key {
+					sum += toFloat(o["c_acctbal"])
+					n++
+				}
+			}
+			if n > 0 && toFloat(r["c_acctbal"]) > sum/float64(n) {
+				want++
+			}
+		}
+		if got := cellNum(rows[0], "n"); got != float64(want) {
+			tb.Errorf("n = %v, want %d — %s (recomputed over the fixture rows)", got, want, why)
+		}
+	}
+}
+
+// assertCorrelatedExistsCount recomputes the EXISTS / NOT EXISTS pair over the
+// fixture rows. The two are complements over the whole table, which is what
+// makes the NOT form worth its own entry: the NULL substitution of #347 made
+// it return every row, and a row count alone calls that plausible.
+func assertCorrelatedExistsCount(why string, not bool) func(testing.TB, []map[string]any) {
+	return func(tb testing.TB, rows []map[string]any) {
+		tb.Helper()
+		if len(rows) != 1 {
+			tb.Fatalf("%d rows, want 1 (%s)", len(rows), why)
+		}
+		cust := sf001Table(tb, "customer")
+		want := 0
+		for _, r := range cust {
+			key := toFloat(r["c_nationkey"])
+			found := false
+			for _, o := range cust {
+				if toFloat(o["c_nationkey"]) < key && toFloat(o["c_acctbal"]) > 9000 {
+					found = true
+					break
+				}
+			}
+			if found != not {
+				want++
+			}
+		}
+		if got := cellNum(rows[0], "n"); got != float64(want) {
+			tb.Errorf("n = %v, want %d — %s (recomputed over the fixture rows)", got, want, why)
+		}
+	}
 }

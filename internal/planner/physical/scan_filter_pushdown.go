@@ -289,5 +289,27 @@ func collectASTCols(n plansql.Node, out map[string]bool) {
 		}
 	case *plansql.CastNode:
 		collectASTCols(t.Inner, out)
+	// A residual conjunct holding a correlated subquery reads the outer
+	// columns that subquery correlates on, per row, out of the batch. Missing
+	// them here lets the drop pass below strip a column another conjunct
+	// happened to push into the scan filter — the same disappearing
+	// correlated reference as #347, one layer down.
+	case *plansql.SubqueryNode:
+		for _, c := range plansql.OuterColumnCandidates(t.SQL) {
+			out[c] = true
+		}
+	case *plansql.ExistsNode:
+		for _, c := range plansql.OuterColumnCandidates(t.SQL) {
+			out[c] = true
+		}
+	case *plansql.AnyAllExpr:
+		collectASTCols(t.Left, out)
+		for _, v := range t.Values {
+			collectASTCols(v, out)
+		}
+	case *plansql.TupleNode:
+		for _, e := range t.Elements {
+			collectASTCols(e, out)
+		}
 	}
 }
