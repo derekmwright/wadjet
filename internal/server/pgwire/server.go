@@ -239,6 +239,7 @@ type pgConn struct {
 	describeResult  *wadjet.QueryResult     // cached Describe result for Execute reuse
 	describeStream  coordinator.BatchStream // columnar half of describeResult (coord path)
 	describeErr     error                   // cached Describe-time execution failure for Execute replay
+	describeCancel  string                  // set when that failure was a cancellation: the 57014 message to replay
 	describeSynth   *synthAnswer            // cached Describe-time introspection answer
 	describedSQL    string                  // statement the three caches above belong to
 
@@ -1129,6 +1130,11 @@ func (c *pgConn) describeSQL(sql string) {
 		// re-execution hung to the query timeout on lost task results).
 		c.closeDescribeCache()
 		c.describeErr = err
+		// Remember WHY it failed while the statement context still exists.
+		// Execute replays this error after that context is gone, so a
+		// cancelled statement would otherwise replay as a generic error and
+		// the client would see its own stop button as a query failure.
+		c.describeCancel = canceledMessage(ctx)
 		c.describedSQL = sql
 		// The client now has NoData for this statement; if a later Execute
 		// nevertheless produces rows, drivers fail with "tuples but no
@@ -1248,7 +1254,18 @@ func (c *pgConn) handleExecute(payload []byte) {
 	// that error to the client, not to run the query again.
 	if c.describeErr != nil {
 		err := c.describeErr
-		c.describeErr = nil
+		cancelMsg := c.describeCancel
+		c.describeErr, c.describeCancel = nil, ""
+		// A statement cancelled during Describe must still report 57014 when
+		// Execute replays its failure. Replaying the raw error made a
+		// cancelled query surface as a generic 42000 "native DAG: context
+		// canceled", which a client reads as a broken query rather than as
+		// the cancellation it asked for — DataGrip showed an error dialog
+		// for its own stop button.
+		if cancelMsg != "" {
+			c.sendError("ERROR", sqlstateQueryCanceled, cancelMsg)
+			return
+		}
 		c.sendError("ERROR", "42000", err.Error())
 		return
 	}
