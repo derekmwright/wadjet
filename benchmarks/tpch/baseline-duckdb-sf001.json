@@ -1069,6 +1069,66 @@
       ],
       "fine": "46b9d3a6b5937182",
       "coarse": "46b9d3a6b5937182"
+    },
+    "WindowLastValueExplicitFrame": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "lv"
+      ],
+      "fine": "4ad002400c931b7d",
+      "coarse": "4ad002400c931b7d"
+    },
+    "WindowRankFamily": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "rn",
+        "rk",
+        "drk",
+        "nt",
+        "running_count"
+      ],
+      "fine": "ca7be4c2b6c89388",
+      "coarse": "ca7be4c2b6c89388"
+    },
+    "WindowValueFunctionsDateAndInt": {
+      "source": "duckdb",
+      "row_count": 55,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "o_orderkey",
+        "o_orderdate",
+        "prev_date",
+        "first_date",
+        "prev_cust"
+      ],
+      "fine": "deb0dc97e64e2033",
+      "coarse": "deb0dc97e64e2033"
+    },
+    "WindowValueFunctionsString": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "n_name",
+        "lag_name",
+        "lead_name",
+        "first_name",
+        "last_name",
+        "nth_comment"
+      ],
+      "fine": "9e0984186724b8ab",
+      "coarse": "9e0984186724b8ab"
     }
   }
 }
