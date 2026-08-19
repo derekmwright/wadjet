@@ -11,10 +11,56 @@ type OuterRef struct {
 	Column string // column name (lowercased)
 }
 
+// TableColumns reports the column names of a table named in a subquery's FROM
+// clause, or nil when the table is unknown (a CTE, a table function, a planner
+// with no catalog). It is what lets correlation analysis apply the SQL scoping
+// rule: an unqualified name inside a subquery is resolved against the
+// subquery's own FROM first, and only a name that does NOT resolve there is a
+// reference to the outer query.
+type TableColumns func(table string) []string
+
+// outerRefScope carries the name-resolution context for one correlation
+// analysis. It is threaded through walkForOuterRefs so the recursion does not
+// have to pass four parallel maps at every node.
+type outerRefScope struct {
+	// outerTables holds the enclosing query's table names and aliases.
+	outerTables map[string]bool
+	// innerTables holds the subquery's own table names and aliases.
+	innerTables map[string]bool
+	// outerCols maps an unqualified column name to the identifier (alias, or
+	// name when unaliased) of the outer table that supplies it.
+	outerCols map[string]string
+	// innerCols holds the columns the subquery's own FROM supplies. Empty
+	// when no TableColumns resolver was available, in which case the weaker
+	// innerTables check below is all the shadowing protection there is.
+	innerCols map[string]bool
+}
+
 // FindCorrelatedRefs parses a subquery SQL string and returns any column
 // references that refer to tables in outerTables but not to tables defined
 // within the subquery itself. An empty result means the subquery is uncorrelated.
 func FindCorrelatedRefs(subquerySQL string, outerTables map[string]bool) ([]OuterRef, error) {
+	return findCorrelatedRefs(subquerySQL, outerTables, nil, nil)
+}
+
+// FindCorrelatedRefsWithColumns is like FindCorrelatedRefs but also accepts
+// a column-to-table mapping for resolving unqualified column references.
+func FindCorrelatedRefsWithColumns(subquerySQL string, outerTables map[string]bool, outerCols map[string]string) ([]OuterRef, error) {
+	return findCorrelatedRefs(subquerySQL, outerTables, outerCols, nil)
+}
+
+// FindCorrelatedRefsWithScope is FindCorrelatedRefsWithColumns plus the
+// subquery's own column namespace, supplied by innerCols. With it, an
+// unqualified name that the subquery's FROM supplies is resolved there and is
+// not reported as correlated — the actual SQL rule. Without it the analysis
+// falls back to comparing table identifiers, which only rejects the outer
+// reference when the outer table's identifier happens to be spelled the same
+// as one of the subquery's tables (issue #334).
+func FindCorrelatedRefsWithScope(subquerySQL string, outerTables map[string]bool, outerCols map[string]string, innerCols TableColumns) ([]OuterRef, error) {
+	return findCorrelatedRefs(subquerySQL, outerTables, outerCols, innerCols)
+}
+
+func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCols map[string]string, resolve TableColumns) ([]OuterRef, error) {
 	parsed, err := Parse(subquerySQL)
 	if err != nil {
 		return nil, err
@@ -24,21 +70,26 @@ func FindCorrelatedRefs(subquerySQL string, outerTables map[string]bool) ([]Oute
 		return nil, err
 	}
 
-	innerTables := collectInnerTables(info)
+	scope := &outerRefScope{
+		outerTables: outerTables,
+		innerTables: collectInnerTables(info),
+		outerCols:   outerCols,
+		innerCols:   collectInnerColumns(info, resolve),
+	}
 
 	var refs []OuterRef
 	// Walk WHERE
 	if info.WhereExpr != nil {
-		walkForOuterRefs(info.WhereExpr, outerTables, innerTables, nil, &refs)
+		walkForOuterRefs(info.WhereExpr, scope, &refs)
 	}
 	// Walk HAVING
 	if info.HavingExpr != nil {
-		walkForOuterRefs(info.HavingExpr, outerTables, innerTables, nil, &refs)
+		walkForOuterRefs(info.HavingExpr, scope, &refs)
 	}
 	// Walk SELECT columns
 	for _, col := range info.Columns {
 		if col.ASTExpr != nil {
-			walkForOuterRefs(col.ASTExpr, outerTables, innerTables, nil, &refs)
+			walkForOuterRefs(col.ASTExpr, scope, &refs)
 		}
 	}
 
@@ -63,6 +114,34 @@ func collectInnerTables(info *SelectInfo) map[string]bool {
 	return m
 }
 
+// collectInnerColumns returns the column namespace of the subquery's own FROM
+// clause: the union of the columns of every table it names. Returns nil when
+// no resolver was supplied or none of the tables could be resolved.
+func collectInnerColumns(info *SelectInfo, resolve TableColumns) map[string]bool {
+	if resolve == nil {
+		return nil
+	}
+	var m map[string]bool
+	add := func(table string) {
+		if table == "" {
+			return
+		}
+		for _, col := range resolve(table) {
+			if m == nil {
+				m = make(map[string]bool)
+			}
+			m[strings.ToLower(col)] = true
+		}
+	}
+	for _, t := range info.Tables {
+		add(t.Name)
+	}
+	for _, j := range info.Joins {
+		add(j.RightTable)
+	}
+	return m
+}
+
 func dedup(refs []OuterRef) []OuterRef {
 	seen := make(map[string]bool, len(refs))
 	var out []OuterRef
@@ -76,40 +155,9 @@ func dedup(refs []OuterRef) []OuterRef {
 	return out
 }
 
-// FindCorrelatedRefsWithColumns is like FindCorrelatedRefs but also accepts
-// a column-to-table mapping for resolving unqualified column references.
-func FindCorrelatedRefsWithColumns(subquerySQL string, outerTables map[string]bool, outerCols map[string]string) ([]OuterRef, error) {
-	parsed, err := Parse(subquerySQL)
-	if err != nil {
-		return nil, err
-	}
-	info, err := ExtractSelect(parsed)
-	if err != nil {
-		return nil, err
-	}
-
-	innerTables := collectInnerTables(info)
-
-	var refs []OuterRef
-	if info.WhereExpr != nil {
-		walkForOuterRefs(info.WhereExpr, outerTables, innerTables, outerCols, &refs)
-	}
-	if info.HavingExpr != nil {
-		walkForOuterRefs(info.HavingExpr, outerTables, innerTables, outerCols, &refs)
-	}
-	for _, col := range info.Columns {
-		if col.ASTExpr != nil {
-			walkForOuterRefs(col.ASTExpr, outerTables, innerTables, outerCols, &refs)
-		}
-	}
-
-	return dedup(refs), nil
-}
-
-// walkForOuterRefs recursively walks an AST node and appends any ColRef whose
-// Table qualifier is in outerTables but not in innerTables.
-// outerCols maps unqualified column names to their source table for resolution.
-func walkForOuterRefs(node Node, outerTables, innerTables map[string]bool, outerCols map[string]string, refs *[]OuterRef) {
+// walkForOuterRefs recursively walks an AST node and appends any ColRef that
+// resolves to the enclosing query rather than to the subquery itself.
+func walkForOuterRefs(node Node, s *outerRefScope, refs *[]OuterRef) {
 	if node == nil {
 		return
 	}
@@ -117,64 +165,71 @@ func walkForOuterRefs(node Node, outerTables, innerTables map[string]bool, outer
 	case *ColRef:
 		if n.Table != "" {
 			tbl := strings.ToLower(n.Table)
-			if outerTables[tbl] && !innerTables[tbl] {
+			if s.outerTables[tbl] && !s.innerTables[tbl] {
 				*refs = append(*refs, OuterRef{Table: tbl, Column: strings.ToLower(n.Column)})
 			}
-		} else if outerCols != nil {
+		} else if s.outerCols != nil {
 			col := strings.ToLower(n.Column)
-			if tbl, ok := outerCols[col]; ok && !innerTables[tbl] {
+			// SQL scoping: an unqualified name binds to the innermost scope
+			// that supplies it. If the subquery's own FROM has this column,
+			// the name is the subquery's own and says nothing about the outer
+			// query — however the outer table happens to be aliased.
+			if s.innerCols[col] {
+				return
+			}
+			if tbl, ok := s.outerCols[col]; ok && !s.innerTables[tbl] {
 				*refs = append(*refs, OuterRef{Table: tbl, Column: col})
 			}
 		}
 	case *BinaryOp:
-		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
-		walkForOuterRefs(n.Right, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Left, s, refs)
+		walkForOuterRefs(n.Right, s, refs)
 	case *UnaryOp:
-		walkForOuterRefs(n.Inner, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Inner, s, refs)
 	case *CmpExpr:
-		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
-		walkForOuterRefs(n.Right, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Left, s, refs)
+		walkForOuterRefs(n.Right, s, refs)
 	case *AndNode:
-		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
-		walkForOuterRefs(n.Right, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Left, s, refs)
+		walkForOuterRefs(n.Right, s, refs)
 	case *OrNode:
-		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
-		walkForOuterRefs(n.Right, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Left, s, refs)
+		walkForOuterRefs(n.Right, s, refs)
 	case *NotNode:
-		walkForOuterRefs(n.Inner, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Inner, s, refs)
 	case *ParenNode:
-		walkForOuterRefs(n.Inner, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Inner, s, refs)
 	case *FuncCallNode:
 		for _, arg := range n.Args {
-			walkForOuterRefs(arg, outerTables, innerTables, outerCols, refs)
+			walkForOuterRefs(arg, s, refs)
 		}
 	case *InExpr:
-		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Left, s, refs)
 		for _, v := range n.Values {
-			walkForOuterRefs(v, outerTables, innerTables, outerCols, refs)
+			walkForOuterRefs(v, s, refs)
 		}
 	case *BetweenExpr:
-		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
-		walkForOuterRefs(n.Low, outerTables, innerTables, outerCols, refs)
-		walkForOuterRefs(n.High, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Left, s, refs)
+		walkForOuterRefs(n.Low, s, refs)
+		walkForOuterRefs(n.High, s, refs)
 	case *LikeExpr:
-		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
-		walkForOuterRefs(n.Pattern, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Left, s, refs)
+		walkForOuterRefs(n.Pattern, s, refs)
 	case *IsExpr:
-		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Left, s, refs)
 	case *CaseNode:
 		if n.Subject != nil {
-			walkForOuterRefs(n.Subject, outerTables, innerTables, outerCols, refs)
+			walkForOuterRefs(n.Subject, s, refs)
 		}
 		for _, w := range n.Whens {
-			walkForOuterRefs(w.Cond, outerTables, innerTables, outerCols, refs)
-			walkForOuterRefs(w.Result, outerTables, innerTables, outerCols, refs)
+			walkForOuterRefs(w.Cond, s, refs)
+			walkForOuterRefs(w.Result, s, refs)
 		}
 		if n.Else != nil {
-			walkForOuterRefs(n.Else, outerTables, innerTables, outerCols, refs)
+			walkForOuterRefs(n.Else, s, refs)
 		}
 	case *CastNode:
-		walkForOuterRefs(n.Inner, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Inner, s, refs)
 	}
 }
 

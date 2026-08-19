@@ -83,10 +83,6 @@ var errTooLarge = errors.New("reference result exceeds the harness row cap")
 //	<set-op> ... ORDER BY        → ORDER BY dropped; UNION across differently
 //	                               named columns also loses one arm's values
 //	ORDER BY x DESC NULLS LAST   → NULLs come back first
-//	col > (SELECT AGG(col) FROM t) where the inner name also resolves in the
-//	                               outer scope → treated as correlated, then
-//	                               re-planned from the parallel pipeline:
-//	                               "fatal error: concurrent map writes"
 //
 // The two below CANNOT be kept out of the generator without deleting the
 // shapes they live in, so they are recognised structurally and skipped. Delete

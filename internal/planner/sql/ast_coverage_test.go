@@ -1518,6 +1518,7 @@ func TestWalkForOuterRefs_AllNodeTypes(t *testing.T) {
 	outer := map[string]bool{"events": true}
 	inner := map[string]bool{}
 	outerCols := map[string]string{"status": "events"}
+	sc := &outerRefScope{outerTables: outer, innerTables: inner, outerCols: outerCols}
 
 	// BinaryOp with outer ref in Left
 	var refs []OuterRef
@@ -1525,14 +1526,14 @@ func TestWalkForOuterRefs_AllNodeTypes(t *testing.T) {
 		Left:  &ColRef{Table: "events", Column: "id"},
 		Op:    "+",
 		Right: &Lit{Value: "1", Kind: LitNumber},
-	}, outer, inner, outerCols, &refs)
+	}, sc, &refs)
 	if len(refs) != 1 || refs[0].Column != "id" {
 		t.Errorf("BinaryOp: expected ref to id, got %+v", refs)
 	}
 
 	// UnaryOp
 	refs = nil
-	walkForOuterRefs(&UnaryOp{Op: "-", Inner: &ColRef{Table: "events", Column: "x"}}, outer, inner, outerCols, &refs)
+	walkForOuterRefs(&UnaryOp{Op: "-", Inner: &ColRef{Table: "events", Column: "x"}}, sc, &refs)
 	if len(refs) != 1 {
 		t.Errorf("UnaryOp: expected 1 ref, got %d", len(refs))
 	}
@@ -1542,28 +1543,28 @@ func TestWalkForOuterRefs_AllNodeTypes(t *testing.T) {
 	walkForOuterRefs(&OrNode{
 		Left:  &ColRef{Table: "events", Column: "a"},
 		Right: &ColRef{Table: "events", Column: "b"},
-	}, outer, inner, outerCols, &refs)
+	}, sc, &refs)
 	if len(refs) != 2 {
 		t.Errorf("OrNode: expected 2 refs, got %d", len(refs))
 	}
 
 	// NotNode
 	refs = nil
-	walkForOuterRefs(&NotNode{Inner: &ColRef{Table: "events", Column: "c"}}, outer, inner, outerCols, &refs)
+	walkForOuterRefs(&NotNode{Inner: &ColRef{Table: "events", Column: "c"}}, sc, &refs)
 	if len(refs) != 1 {
 		t.Errorf("NotNode: expected 1 ref, got %d", len(refs))
 	}
 
 	// ParenNode
 	refs = nil
-	walkForOuterRefs(&ParenNode{Inner: &ColRef{Table: "events", Column: "d"}}, outer, inner, outerCols, &refs)
+	walkForOuterRefs(&ParenNode{Inner: &ColRef{Table: "events", Column: "d"}}, sc, &refs)
 	if len(refs) != 1 {
 		t.Errorf("ParenNode: expected 1 ref, got %d", len(refs))
 	}
 
 	// FuncCallNode
 	refs = nil
-	walkForOuterRefs(&FuncCallNode{Name: "upper", Args: []Node{&ColRef{Table: "events", Column: "e"}}}, outer, inner, outerCols, &refs)
+	walkForOuterRefs(&FuncCallNode{Name: "upper", Args: []Node{&ColRef{Table: "events", Column: "e"}}}, sc, &refs)
 	if len(refs) != 1 {
 		t.Errorf("FuncCallNode: expected 1 ref, got %d", len(refs))
 	}
@@ -1573,7 +1574,7 @@ func TestWalkForOuterRefs_AllNodeTypes(t *testing.T) {
 	walkForOuterRefs(&InExpr{
 		Left:   &ColRef{Table: "events", Column: "f"},
 		Values: []Node{&ColRef{Table: "events", Column: "g"}},
-	}, outer, inner, outerCols, &refs)
+	}, sc, &refs)
 	if len(refs) != 2 {
 		t.Errorf("InExpr: expected 2 refs, got %d", len(refs))
 	}
@@ -1584,7 +1585,7 @@ func TestWalkForOuterRefs_AllNodeTypes(t *testing.T) {
 		Left: &ColRef{Table: "events", Column: "h"},
 		Low:  &ColRef{Table: "events", Column: "lo"},
 		High: &ColRef{Table: "events", Column: "hi"},
-	}, outer, inner, outerCols, &refs)
+	}, sc, &refs)
 	if len(refs) != 3 {
 		t.Errorf("BetweenExpr: expected 3 refs, got %d", len(refs))
 	}
@@ -1594,14 +1595,14 @@ func TestWalkForOuterRefs_AllNodeTypes(t *testing.T) {
 	walkForOuterRefs(&LikeExpr{
 		Left:    &ColRef{Table: "events", Column: "i"},
 		Pattern: &ColRef{Table: "events", Column: "pat"},
-	}, outer, inner, outerCols, &refs)
+	}, sc, &refs)
 	if len(refs) != 2 {
 		t.Errorf("LikeExpr: expected 2 refs, got %d", len(refs))
 	}
 
 	// IsExpr
 	refs = nil
-	walkForOuterRefs(&IsExpr{Left: &ColRef{Table: "events", Column: "j"}}, outer, inner, outerCols, &refs)
+	walkForOuterRefs(&IsExpr{Left: &ColRef{Table: "events", Column: "j"}}, sc, &refs)
 	if len(refs) != 1 {
 		t.Errorf("IsExpr: expected 1 ref, got %d", len(refs))
 	}
@@ -1614,14 +1615,14 @@ func TestWalkForOuterRefs_AllNodeTypes(t *testing.T) {
 			{Cond: &ColRef{Table: "events", Column: "cond"}, Result: &Lit{Value: "1"}},
 		},
 		Else: &ColRef{Table: "events", Column: "els"},
-	}, outer, inner, outerCols, &refs)
+	}, sc, &refs)
 	if len(refs) != 3 {
 		t.Errorf("CaseNode: expected 3 refs, got %d", len(refs))
 	}
 
 	// CastNode
 	refs = nil
-	walkForOuterRefs(&CastNode{Inner: &ColRef{Table: "events", Column: "m"}, TypeName: "int"}, outer, inner, outerCols, &refs)
+	walkForOuterRefs(&CastNode{Inner: &ColRef{Table: "events", Column: "m"}, TypeName: "int"}, sc, &refs)
 	if len(refs) != 1 {
 		t.Errorf("CastNode: expected 1 ref, got %d", len(refs))
 	}
@@ -1632,7 +1633,7 @@ func TestWalkForOuterRefs_AllNodeTypes(t *testing.T) {
 		Left:  &ColRef{Table: "events", Column: "n"},
 		Op:    "=",
 		Right: &Lit{Value: "1"},
-	}, outer, inner, outerCols, &refs)
+	}, sc, &refs)
 	if len(refs) != 1 {
 		t.Errorf("CmpExpr: expected 1 ref, got %d", len(refs))
 	}
@@ -1642,21 +1643,21 @@ func TestWalkForOuterRefs_AllNodeTypes(t *testing.T) {
 	walkForOuterRefs(&AndNode{
 		Left:  &ColRef{Table: "events", Column: "o"},
 		Right: &ColRef{Table: "events", Column: "p"},
-	}, outer, inner, outerCols, &refs)
+	}, sc, &refs)
 	if len(refs) != 2 {
 		t.Errorf("AndNode: expected 2 refs, got %d", len(refs))
 	}
 
 	// Unqualified column reference resolved via outerCols
 	refs = nil
-	walkForOuterRefs(&ColRef{Column: "status"}, outer, inner, outerCols, &refs)
+	walkForOuterRefs(&ColRef{Column: "status"}, sc, &refs)
 	if len(refs) != 1 || refs[0].Table != "events" {
 		t.Errorf("unqualified ColRef: expected ref to events.status, got %+v", refs)
 	}
 
 	// nil node
 	refs = nil
-	walkForOuterRefs(nil, outer, inner, outerCols, &refs)
+	walkForOuterRefs(nil, sc, &refs)
 	if len(refs) != 0 {
 		t.Error("nil node should produce no refs")
 	}
@@ -2024,7 +2025,7 @@ func TestReplaceAllAggregates_CaseNode(t *testing.T) {
 		Else: &FuncCallNode{Name: "min", Args: []Node{&ColRef{Column: "y"}}},
 	}
 	replacements := map[string]string{
-		strings.ToLower(inner.String()):    "max_col",
+		strings.ToLower(inner.String()):   "max_col",
 		strings.ToLower(cn.Else.String()): "min_col",
 	}
 	replaced := ReplaceAllAggregates(cn, replacements)

@@ -694,14 +694,20 @@ func (g *Gen) genSubqueryPred(q *Query) {
 	t := g.s.Tables[g.pick(len(g.s.Tables))]
 	switch g.pick(3) {
 	case 0:
-		// Scalar threshold from the same column's own table. The subquery
-		// aliases its table and qualifies the aggregate's argument: an
-		// UNQUALIFIED inner name that also exists in the outer scope binds to
-		// the OUTER query, which turns this into a correlated subquery — and a
-		// correlated subquery re-planned from the parallel pipeline crashes the
-		// process with "concurrent map writes" (reported; not generated).
-		q.Where = append(q.Where, fmt.Sprintf("%s > (SELECT AVG(sq.%s) FROM %s sq)",
-			g.name(r), r.col.Name, r.table))
+		// Scalar threshold from the same column's own table, in both spellings.
+		// The unqualified form is the one that found issue #334: an unqualified
+		// inner name that also exists in the outer scope used to bind to the
+		// OUTER query, making an uncorrelated subquery correlated — re-planned
+		// per row from the parallel pipeline, which killed the process with
+		// "concurrent map writes". It is generated again now that an inner name
+		// resolves against the inner FROM first.
+		if g.chance(0.5) {
+			q.Where = append(q.Where, fmt.Sprintf("%s > (SELECT AVG(%s) FROM %s)",
+				g.name(r), r.col.Name, r.table))
+		} else {
+			q.Where = append(q.Where, fmt.Sprintf("%s > (SELECT AVG(sq.%s) FROM %s sq)",
+				g.name(r), r.col.Name, r.table))
+		}
 	case 1:
 		// IN (SELECT pk FROM t WHERE ...)
 		pk := t.PK[0]

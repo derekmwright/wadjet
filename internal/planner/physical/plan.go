@@ -477,8 +477,7 @@ type Planner struct {
 	QueryLimits    *config.QueryLimits         // cost-based query guard (nil = no limits)
 	cteCache       map[string]*cteMaterialized // materialized CTE results
 	scanCache      map[string]*scanCached      // cached scan results for duplicate table scans
-	spillMgr       *memory.SpillManager        // shared per-query spill manager (lazy-initialized)
-	memTracker     *memory.Tracker             // shared per-query memory tracker (lazy-initialized)
+	res            *queryResources             // per-query spill manager + memory tracker (lazy, shared with child planners)
 	WorkerCount    int                         // number of distributed workers (for shuffle partitioning)
 
 	// BroadcastBytesThreshold is the maximum estimated build-side size for
@@ -540,7 +539,12 @@ type Planner struct {
 	// workers while build tables read all files. Keyed by scan alias.
 	ScanFileFilter map[string][]string
 
-	scanCounter map[string]int // tracks N-th scan of each table for alias resolution
+	// scanCounter tracks the N-th scan of each table for alias resolution.
+	// It is per-BUILD scratch, not query state: it numbers the scans of one
+	// pipeline build so MaterializedInputs / StreamingSources / ScanFileFilter
+	// lookups hit the right "table" / "table:N" key. forSubquery gives every
+	// subquery build a fresh one.
+	scanCounter map[string]int
 
 	// scalarPlaceholderSeq allocates unique ":scalar_N" placeholder names
 	// across a single query when resolveFilterSubqueries defers CTE-
@@ -557,6 +561,33 @@ type Planner struct {
 	ctePlannedTerminal map[string]string
 }
 
+// queryResources holds the spill manager and memory tracker for one query.
+// They belong to the QUERY, not to a single pipeline build: the root planner
+// and every child planner spawned by forSubquery share one instance, so a
+// query has exactly one budget and exactly one spill directory for Plan's
+// Cleanup to sweep.
+//
+// mu guards the lazy construction. A correlated subquery builds its pipeline
+// from the execution goroutines (exec.Pipeline.runParallel), so two builds can
+// otherwise race to create the manager — and each would create its own spill
+// directory that nothing releases.
+type queryResources struct {
+	mu         sync.Mutex
+	spillMgr   *memory.SpillManager
+	memTracker *memory.Tracker
+}
+
+// resources returns this planner's shared per-query resources, allocating the
+// holder if a caller constructed the Planner as a bare struct literal rather
+// than through NewPlanner. Both NewPlanner and Plan set it, so on every real
+// path the holder exists well before any goroutine fan-out.
+func (p *Planner) resources() *queryResources {
+	if p.res == nil {
+		p.res = &queryResources{}
+	}
+	return p.res
+}
+
 // getSpillManager returns a shared per-query spill manager, creating it on
 // first call. Uses MemoryBudget if set, otherwise auto-detects from system
 // memory (cgroup or physical). Returns nil if no memory limit can be determined.
@@ -566,8 +597,11 @@ func (p *Planner) getSpillManager() *memory.SpillManager {
 	if p.SharedSpillMgr != nil {
 		return p.SharedSpillMgr
 	}
-	if p.spillMgr != nil {
-		return p.spillMgr
+	r := p.resources()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.spillMgr != nil {
+		return r.spillMgr
 	}
 	budget := p.MemoryBudget
 	if budget <= 0 {
@@ -582,16 +616,17 @@ func (p *Planner) getSpillManager() *memory.SpillManager {
 	if budget <= 0 {
 		return nil
 	}
-	p.memTracker = memory.NewTracker("query", budget)
+	tracker := memory.NewTracker("query", budget)
 	dir := p.SpillDir
 	if dir == "" {
 		dir = os.TempDir()
 	}
-	sm, err := memory.NewSpillManager(dir, p.memTracker)
+	sm, err := memory.NewSpillManager(dir, tracker)
 	if err != nil {
 		return nil
 	}
-	p.spillMgr = sm
+	r.memTracker = tracker
+	r.spillMgr = sm
 	return sm
 }
 
@@ -602,7 +637,18 @@ func (p *Planner) getMemTracker() *memory.Tracker {
 	if p.SharedTracker != nil {
 		return p.SharedTracker
 	}
-	return p.memTracker
+	r := p.resources()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.memTracker
+}
+
+// spillManagerIfSet returns the per-query spill manager without creating one.
+func (p *Planner) spillManagerIfSet() *memory.SpillManager {
+	r := p.resources()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.spillMgr
 }
 
 // cteMaterialized stores the pre-computed results of a CTE in one of two
@@ -649,7 +695,7 @@ type scanCached struct {
 
 // NewPlanner creates a new physical planner.
 func NewPlanner(cat *catalog.Catalog) *Planner {
-	p := &Planner{catalog: cat}
+	p := &Planner{catalog: cat, res: &queryResources{}}
 	// Create a subquery runner that re-uses this planner for nested queries
 	p.subqueryRunner = p.makeSubqueryRunner()
 	return p
@@ -658,14 +704,70 @@ func NewPlanner(cat *catalog.Catalog) *Planner {
 // makeSubqueryRunner creates a SubqueryRunner that executes SQL via this planner.
 // Uses the planCtx stored during Plan() so subqueries respect the parent context's
 // cancellation and timeout.
+//
+// Each call gets its own child planner. This is the runner baked into every
+// compiled expression, so a correlated subquery reaches it once per row from
+// every parallel pipeline goroutine — see forSubquery for why sharing the
+// parent's build scratch across those goroutines is not an option.
 func (p *Planner) makeSubqueryRunner() expr.SubqueryRunner {
 	return func(sql string) ([]map[string]any, error) {
 		ctx := p.planCtx
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		return p.executeSubquery(ctx, sql)
+		return p.forSubquery().executeSubquery(ctx, sql)
 	}
+}
+
+// forSubquery returns a child planner for building and running ONE subquery
+// pipeline.
+//
+// A correlated subquery is executed per row from the pipeline's parallel
+// worker goroutines (exec.Pipeline.runParallel), and each execution runs a
+// full physical build. Those builds must not share the parent's per-build
+// scratch, for two independent reasons:
+//
+//   - It is a data race. scanCounter is a plain map written by buildScan, so
+//     concurrent builds crash the process with "fatal error: concurrent map
+//     writes" — an unrecoverable throw that takes down every other connection
+//     in server mode (issue #334).
+//   - It is wrong even when serialized. scanCounter numbers the scans of one
+//     build; letting the outer build's count leak in makes a subquery's first
+//     scan of customer resolve as alias "customer:1", so the ScanFileFilter /
+//     MaterializedInputs / StreamingSources lookups keyed by that alias miss.
+//     A mutex would hide the crash and keep the mis-keying.
+//
+// So the child gets fresh build scratch, and shares everything that genuinely
+// belongs to the query: the catalog, the CTE definitions and their
+// materialized cache, the scan cache, the memory/spill resources, and all
+// configuration. Sharing those is what keeps one budget, one spill directory,
+// and one materialization of each CTE per query; a per-goroutine copy would
+// leak spill directories that Plan's Cleanup never sees.
+//
+// The shared maps (cteCache, scanCache) are populated by Plan before execution
+// begins and are read-only from here on; scanCached carries its own mutex for
+// the concurrent-replay case.
+//
+// The scan-alias injections (MaterializedInputs, StreamingSources,
+// ScanFileFilter) are dropped. They describe the ENCLOSING fragment's scans —
+// a worker's probe-split file slice, a scan-split pre-scan — keyed by that
+// plan's aliases. A subquery is its own query over the catalog and must see
+// the whole table; binding it to the fragment's file slice would answer it
+// from one worker's shard. Today they are missed only because the shared
+// counter happens to push the subquery's aliases past the injected keys, so
+// dropping them makes the existing behavior explicit rather than incidental.
+func (p *Planner) forSubquery() *Planner {
+	sub := *p
+	sub.scanCounter = nil
+	sub.ctePlannedTerminal = nil
+	sub.scalarPlaceholderSeq = 0
+	sub.MaterializedInputs = nil
+	sub.StreamingSources = nil
+	sub.ScanFileFilter = nil
+	sub.res = p.resources()
+	// Nested subqueries inside this one recurse through the same rule.
+	sub.subqueryRunner = sub.makeSubqueryRunner()
+	return &sub
 }
 
 // buildSubqueryPipeline parses, plans, and builds (but does not run) the
@@ -1781,11 +1883,10 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 
 // Plan converts a logical plan to a physical plan for local execution.
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
-	p.planCtx = ctx      // store for subquery runner context propagation
-	p.releaseScanCache() // reset per-query scan cache (drops tracker reservation)
-	p.spillMgr = nil     // reset per-query spill manager
-	p.memTracker = nil
-	p.releaseCTECache() // reset per-query CTE cache (frees stale spill scratch)
+	p.planCtx = ctx           // store for subquery runner context propagation
+	p.releaseScanCache()      // reset per-query scan cache (drops tracker reservation)
+	p.res = &queryResources{} // reset per-query spill manager + memory tracker
+	p.releaseCTECache()       // reset per-query CTE cache (frees stale spill scratch)
 	// Propagate CTE definitions from the logical plan so scalar subqueries
 	// (e.g., in WHERE/HAVING) can resolve CTE table references.
 	if len(node.CTEs) > 0 {
@@ -1844,7 +1945,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// scan cache release matters most on the shared-tracker path: its
 	// reservation would otherwise outlive the query as a permanent
 	// phantom on the worker-lifetime tracker.
-	if sm := p.spillMgr; sm != nil {
+	if sm := p.spillManagerIfSet(); sm != nil {
 		plan.Cleanup = func() {
 			p.releaseCTECache()
 			p.releaseScanCache()
@@ -6060,7 +6161,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			var compErr error
 			if len(outerTables) > 0 {
 				if len(outerCols) > 0 {
-					compiled, compErr = expr.CompileWithFullScope(proj.ASTExpr, p.subqueryRunner, outerTables, outerCols)
+					compiled, compErr = expr.CompileWithScopeResolver(proj.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns())
 				} else {
 					compiled, compErr = expr.CompileWithScope(proj.ASTExpr, p.subqueryRunner, outerTables)
 				}
@@ -7891,7 +7992,7 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 		var err error
 		if len(outerTables) > 0 {
 			if len(outerCols) > 0 {
-				compiled, err = expr.CompileWithFullScope(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols)
+				compiled, err = expr.CompileWithScopeResolver(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols, p.subqueryInnerColumns())
 			} else {
 				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables)
 			}
@@ -8504,6 +8605,38 @@ func collectOuterColumns(node *logical.Node) map[string]string {
 	}
 	walk(node)
 	return colMap
+}
+
+// subqueryInnerColumns returns a resolver that reports a table's columns from
+// the catalog, so correlation analysis can bind an unqualified name inside a
+// subquery to the subquery's own FROM before considering the outer query —
+// the SQL scoping rule. Without it, a name that also exists in the outer
+// scope is claimed by the outer scope unless the outer table's identifier
+// happens to be spelled the same as an inner table, which turns an ordinary
+// uncorrelated subquery into a per-row correlated one (issue #334).
+//
+// Unknown tables (CTEs, table functions) resolve to nil, which leaves the
+// name to the identifier-comparison fallback rather than silently declaring
+// it inner.
+func (p *Planner) subqueryInnerColumns() plansql.TableColumns {
+	if p.catalog == nil {
+		return nil
+	}
+	ctx := p.planCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return func(table string) []string {
+		t, err := p.catalog.GetTable(ctx, table)
+		if err != nil || t == nil {
+			return nil
+		}
+		cols := make([]string, len(t.Schema.Columns))
+		for i, c := range t.Schema.Columns {
+			cols[i] = c.Name
+		}
+		return cols
+	}
 }
 
 func parseSimplePredicate(raw string) exec.UnaryOperator {

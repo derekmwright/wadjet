@@ -43,6 +43,16 @@ jobs:
         # for seven weeks.
         run: go test -short -p 2 ./internal/... ./wadjet/ ./test/ -timeout 8m
 
+      - name: Race Detector (planner + executor concurrency)
+        # Nothing ran under -race before issue #334, and that is how a plain
+        # scalar-subquery query shipped able to kill the process: a shared
+        # planner map written from the parallel pipeline's goroutines, which
+        # the runtime turns into an uncatchable "fatal error: concurrent map
+        # writes". The race detector reports it in under a second.
+        # Scoped to the packages that fan out across goroutines rather than
+        # the whole tree, so the step stays cheap enough to always run.
+        run: go test -race -run 'Concurrent|Parallel|Race' ./internal/planner/... ./internal/engine/exec/ -timeout 10m
+
       - name: TPC-H Correctness (SF0.01)
         run: go test -v -run TestTPCHQueries ./benchmarks/tpch/ -timeout 5m
 

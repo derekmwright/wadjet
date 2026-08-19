@@ -11,8 +11,9 @@ import (
 // compileContext holds optional state for expression compilation.
 type compileContext struct {
 	runner      SubqueryRunner
-	outerTables map[string]bool   // table aliases from the outer query scope
-	outerCols   map[string]string // column name → table mapping for unqualified resolution
+	outerTables map[string]bool      // table aliases from the outer query scope
+	outerCols   map[string]string    // column name → table mapping for unqualified resolution
+	innerCols   plansql.TableColumns // a subquery's own column namespace, for scoping unqualified names
 }
 
 // Compile converts our AST Node into an Expr tree.
@@ -36,7 +37,22 @@ func CompileWithScope(node plansql.Node, runner SubqueryRunner, outerTables map[
 // CompileWithFullScope is like CompileWithScope but also accepts a column-to-table
 // mapping for resolving unqualified column references in correlated subqueries.
 func CompileWithFullScope(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool, outerCols map[string]string) (Expr, error) {
-	return compileWithCtx(node, &compileContext{runner: runner, outerTables: outerTables, outerCols: outerCols})
+	return CompileWithScopeResolver(node, runner, outerTables, outerCols, nil)
+}
+
+// CompileWithScopeResolver is CompileWithFullScope plus a resolver for the
+// column namespace of a subquery's own FROM clause. It is what makes an
+// unqualified name inside a subquery bind to the subquery first, so a name
+// that merely also exists in the outer query does not turn an uncorrelated
+// subquery into a per-row correlated one (issue #334). A nil resolver keeps
+// the weaker table-identifier heuristic.
+func CompileWithScopeResolver(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool, outerCols map[string]string, innerCols plansql.TableColumns) (Expr, error) {
+	return compileWithCtx(node, &compileContext{
+		runner:      runner,
+		outerTables: outerTables,
+		outerCols:   outerCols,
+		innerCols:   innerCols,
+	})
 }
 
 func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
@@ -151,7 +167,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					var refs []plansql.OuterRef
 					var err error
 					if len(ctx.outerCols) > 0 {
-						refs, err = plansql.FindCorrelatedRefsWithColumns(sq.SQL, ctx.outerTables, ctx.outerCols)
+						refs, err = plansql.FindCorrelatedRefsWithScope(sq.SQL, ctx.outerTables, ctx.outerCols, ctx.innerCols)
 					} else {
 						refs, err = plansql.FindCorrelatedRefs(sq.SQL, ctx.outerTables)
 					}
@@ -294,7 +310,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			var refs []plansql.OuterRef
 			var err error
 			if len(ctx.outerCols) > 0 {
-				refs, err = plansql.FindCorrelatedRefsWithColumns(n.SQL, ctx.outerTables, ctx.outerCols)
+				refs, err = plansql.FindCorrelatedRefsWithScope(n.SQL, ctx.outerTables, ctx.outerCols, ctx.innerCols)
 			} else {
 				refs, err = plansql.FindCorrelatedRefs(n.SQL, ctx.outerTables)
 			}
@@ -322,7 +338,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			var refs []plansql.OuterRef
 			var err error
 			if len(ctx.outerCols) > 0 {
-				refs, err = plansql.FindCorrelatedRefsWithColumns(n.SQL, ctx.outerTables, ctx.outerCols)
+				refs, err = plansql.FindCorrelatedRefsWithScope(n.SQL, ctx.outerTables, ctx.outerCols, ctx.innerCols)
 			} else {
 				refs, err = plansql.FindCorrelatedRefs(n.SQL, ctx.outerTables)
 			}
