@@ -1739,6 +1739,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 			OutputCol:  a.OutputCol,
 			InputExpr:  a.InputExpr,
 			OutputType: int(a.OutputType),
+			InputType:  int(a.InputType),
 		})
 	}
 	aggs = decomposeAvg(aggs)
@@ -2510,6 +2511,7 @@ func (c *Coordinator) dispatchComputeStage(
 				OutputCol:  a.OutputCol,
 				InputExpr:  a.InputExpr,
 				OutputType: int(a.OutputType),
+				InputType:  int(a.InputType),
 			})
 		}
 		aggs = decomposeAvg(aggs)
@@ -2601,6 +2603,7 @@ func (c *Coordinator) dispatchComputeStage(
 					OutputCol:  a.OutputCol,
 					InputExpr:  a.InputExpr,
 					OutputType: int(a.OutputType),
+					InputType:  int(a.InputType),
 				})
 			}
 			chainedOps = append(chainedOps, distributed.OpSpec{
@@ -3699,6 +3702,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 			OutputCol:  a.OutputCol,
 			InputExpr:  a.InputExpr,
 			OutputType: int(a.OutputType),
+			InputType:  int(a.InputType),
 		})
 	}
 	// Decompose AVG specs into (SUM, COUNT) pairs. Both intermediates

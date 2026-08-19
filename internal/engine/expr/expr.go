@@ -2672,13 +2672,19 @@ func fnSign(args []any) any {
 	}
 }
 
+// fnGreatest and fnLeast order their arguments through compare, the same
+// type-aware comparison =, < and > use — not ToFloat64, which is 0 for every
+// string and therefore ranked every string argument equal, so GREATEST over
+// two string columns always answered with argument 0. That was invisible while
+// the projection was typed numeric and printed 0 for all of them (#333); with
+// the type right, the ordering is what is left to be wrong.
 func fnGreatest(args []any) any {
 	var best any
 	for _, a := range args {
 		if a == nil {
 			continue
 		}
-		if best == nil || ToFloat64(a) > ToFloat64(best) {
+		if best == nil || compare(a, best, CmpGt) {
 			best = a
 		}
 	}
@@ -2691,7 +2697,7 @@ func fnLeast(args []any) any {
 		if a == nil {
 			continue
 		}
-		if best == nil || ToFloat64(a) < ToFloat64(best) {
+		if best == nil || compare(a, best, CmpLt) {
 			best = a
 		}
 	}

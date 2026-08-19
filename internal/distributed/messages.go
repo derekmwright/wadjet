@@ -510,6 +510,15 @@ type AggSpec struct {
 	// column, and are declared only when it resolves to exactly one
 	// catalog column type.
 	OutputType int `json:"output_type,omitempty"`
+	// InputType is the plan-time parquet.TypeID of the vector InputExpr
+	// evaluates into, carried the same way and for the same reason: the
+	// worker compiles InputExpr from its text and has no catalog to
+	// resolve the columns in it. Zero means "not declared" (no derived
+	// input, or an older coordinator), and the worker keeps its numeric
+	// default. Getting it wrong is silent — MAX(COALESCE(a, b)) over two
+	// string columns wrote strings into a Float64 vector and the
+	// aggregate saw zeros (#333).
+	InputType int `json:"input_type,omitempty"`
 }
 
 // GatherBatchMsg is the NATS message body the worker publishes to the

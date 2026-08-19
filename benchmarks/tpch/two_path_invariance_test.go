@@ -1084,6 +1084,79 @@ func twoPathCorpus() []twoPathQuery {
 				}
 			}},
 	)
+
+	// #333: a string column through a polymorphic function — coalesce,
+	// nullif, greatest, least — was typed numeric and came back as the
+	// integer 0 on every row. Both arms were wrong the same way, so the
+	// compare alone would have passed the whole bug; every entry here
+	// carries an assertA that pins the answer absolutely.
+	//
+	// The typing is decided once, in the physical planner, and the DAG
+	// carries that answer on ProjectSpec.Type — so these are also what
+	// catches a fix that reaches only one of the two places the planner
+	// computes it (buildProject for arm A, attachScanSelectProjections for
+	// the DAG's scan fragments).
+	assertNoNumericCell := func(cols ...string) func(testing.TB, []map[string]any) {
+		return func(tb testing.TB, rows []map[string]any) {
+			tb.Helper()
+			for i, r := range rows {
+				for _, c := range cols {
+					v := cellText(r, c)
+					if v == "<nil>" {
+						continue
+					}
+					if _, err := strconv.ParseFloat(v, 64); err == nil {
+						tb.Errorf("row %d: %s = %q — a number, so the string column was typed "+
+							"numeric and its values were dropped on the way out", i, c, v)
+						return
+					}
+				}
+			}
+		}
+	}
+	out = append(out,
+		// The four broken shapes and the one that already worked, side by
+		// side so a fix that reaches only some of them is visible.
+		twoPathQuery{name: "PolymorphicStringColumns", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT n_nationkey, COALESCE(n_name) AS c1, COALESCE(n_name, n_comment) AS c2,
+				GREATEST(n_name, n_comment) AS g, LEAST(n_name, n_comment) AS l,
+				IFNULL(n_name, n_comment) AS i FROM nation`,
+			assertA: assertNoNumericCell("c1", "c2", "g", "l", "i")},
+		// nullif on its own: its NULL row is the one cell that is legitimately
+		// empty, and the rest must be names.
+		twoPathQuery{name: "PolymorphicNullifString", cmp: cmpUnordered, expectRows: true,
+			sql:     "SELECT n_nationkey, NULLIF(n_name, 'ALGERIA') AS nu FROM nation",
+			assertA: assertNoNumericCell("nu")},
+		// The constraint that ruled out flipping those declarations to
+		// String. Values, not types, are what both arms must agree on here —
+		// and the absolute assertion is that they are the region keys.
+		twoPathQuery{name: "PolymorphicNumericColumns", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT n_nationkey, NULLIF(n_nationkey, 1) AS nu, COALESCE(n_regionkey, 0) AS c,
+				GREATEST(n_nationkey, n_regionkey) AS g FROM nation`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				for i, r := range rows {
+					key := cellNum(r, "n_nationkey")
+					if got := cellNum(r, "g"); got < key {
+						tb.Errorf("row %d: GREATEST(n_nationkey, n_regionkey) = %v, less than n_nationkey = %v", i, got, key)
+						return
+					}
+					if v := cellText(r, "c"); v == "<nil>" {
+						tb.Errorf("row %d: COALESCE(n_regionkey, 0) is NULL", i)
+						return
+					}
+				}
+			}},
+		// The same family as a GROUP BY key and as an aggregate input. Both
+		// are typed in a second place on the DAG — the worker's
+		// buildAggInputProjection — so they are where a planner-only fix
+		// shows up as a two-path divergence.
+		twoPathQuery{name: "PolymorphicGroupKey", cmp: cmpUnordered, expectRows: true,
+			sql:     "SELECT COALESCE(n_name, n_comment) AS k, COUNT(*) AS c FROM nation GROUP BY COALESCE(n_name, n_comment)",
+			assertA: assertNoNumericCell("k")},
+		twoPathQuery{name: "PolymorphicAggregateInput", cmp: cmpUnordered, expectRows: true,
+			sql:     "SELECT n_regionkey, MAX(COALESCE(n_name, n_comment)) AS m FROM nation GROUP BY n_regionkey",
+			assertA: assertNoNumericCell("m")},
+	)
 	return out
 }
 

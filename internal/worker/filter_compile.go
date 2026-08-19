@@ -182,9 +182,21 @@ func buildAggInputProjection(
 		}
 		seen[a.InputCol] = true
 		e := compiled
+		// The planner's answer, carried on the spec. Float64 is only the
+		// default for an aggregate input, not a fact about it —
+		// MAX(UPPER(c)) is a string (#310) and so is
+		// MAX(COALESCE(a, b)) over two string columns (#333), and writing
+		// either into a Float64 vector drops every value in silence. The
+		// planner resolves it against the catalog; this side has the
+		// expression's text and nothing else, so it can only carry the
+		// answer. Zero = an older coordinator that did not declare one.
+		inTyp := parquet.TypeID(a.InputType)
+		if inTyp == 0 {
+			inTyp = parquet.TypeFloat64
+		}
 		projCols = append(projCols, exec.ProjectColumn{
 			Name: a.InputCol,
-			Type: parquet.TypeFloat64, // arithmetic expressions yield float64 at runtime; Project resolves to actual type on first batch.
+			Type: inTyp,
 			Expr: func(b *batch.RecordBatch, row int) any {
 				return e.Eval(b, row)
 			},

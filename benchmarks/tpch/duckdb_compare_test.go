@@ -391,6 +391,43 @@ func duckdbCorpus() []duckdbCase {
 			COALESCE(NULLIF(n_regionkey, 0), -1) AS numeric_fallback,
 			NULLIF(n_regionkey, 1) + 1 AS plus, NULLIF(n_name, 'ALGERIA') || '!' AS cat
 			FROM nation ORDER BY n_nationkey`},
+		// The same family with nothing but bare columns inside the call, so
+		// no literal is present to rescue the type. Every column here came
+		// back as the integer 0 (#333): coalesce, nullif, greatest and least
+		// declare a numeric fallback, a bare column reference decided
+		// nothing, and the fallback stood — a string column typed Float64,
+		// whose writes were dropped. ifnull_str is the control that was
+		// already right, because ifnull alone declares its fallback String.
+		duckdbCase{name: "PolymorphicOverStringColumns", sql: `SELECT n_nationkey,
+			NULLIF(n_name, 'ALGERIA') AS nullif_str,
+			COALESCE(n_name) AS coalesce_one,
+			COALESCE(n_name, n_comment) AS coalesce_two,
+			GREATEST(n_name, n_comment) AS greatest_str,
+			LEAST(n_name, n_comment) AS least_str,
+			IFNULL(n_name, n_comment) AS ifnull_str
+			FROM nation ORDER BY n_nationkey`},
+		// The constraint that ruled out fixing the above by flipping those
+		// declarations to String: the same functions over numeric columns
+		// stay numeric. mixed_literal is the debatable case — an int column
+		// beside a string literal — where wadjet follows the first argument
+		// that decides, which is the column. DuckDB agrees:
+		// typeof(COALESCE(42, 'text')) is INTEGER.
+		duckdbCase{name: "PolymorphicOverNumericColumns", sql: `SELECT n_nationkey,
+			NULLIF(n_nationkey, 1) AS nullif_int,
+			COALESCE(n_regionkey, 0) AS coalesce_int,
+			GREATEST(n_nationkey, n_regionkey) AS greatest_int,
+			LEAST(n_nationkey, n_regionkey) AS least_int,
+			COALESCE(n_regionkey, 'text') AS mixed_literal
+			FROM nation ORDER BY n_nationkey`},
+		// A float column must keep its float, and the fractions are the
+		// point: COALESCE(ps_supplycost, 0) answered 771 for 771.64, because
+		// the literal 0 was the first argument that decided anything and the
+		// column beside it decided nothing at all.
+		duckdbCase{name: "PolymorphicOverFloatColumns", sql: `SELECT ps_partkey, ps_suppkey,
+			COALESCE(ps_supplycost, 0) AS coalesce_float,
+			GREATEST(ps_supplycost, ps_availqty) AS greatest_mixed,
+			LEAST(ps_supplycost, ps_availqty) AS least_mixed
+			FROM partsupp WHERE ps_partkey <= 20 ORDER BY ps_partkey, ps_suppkey`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

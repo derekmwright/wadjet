@@ -367,6 +367,13 @@ type AggSpec struct {
 	// only produced for a MIN/MAX whose input column does not resolve to
 	// a catalog type; see aggSpecOutputType.
 	OutputType parquet.TypeID
+	// InputType is the plan-time type of the vector InputExpr evaluates
+	// into, mirrored onto distributed.AggSpec at dispatch. Zero when
+	// there is no derived input. The worker hardcoded Float64 here, which
+	// is the projection-typing defect of #310/#333 living in a second
+	// place: MAX(COALESCE(a, b)) over two string columns wrote strings
+	// into a Float64 vector and the aggregate saw zeros.
+	InputType parquet.TypeID
 }
 
 // SortKeySpec defines a sort key in a stage.
@@ -2069,9 +2076,22 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 // this pass owns it: it runs last, and only it knows whether the producing
 // fragment will carry an alias-naming OpProject.
 func attachScanSelectProjections(root *logical.Node, stages []Stage) {
-	proj := findOutputProjectionsForRename(root)
+	projNode := findOutputProjectionNode(root)
+	if projNode == nil {
+		return
+	}
+	proj := projNode.Projections
 	if len(proj) == 0 {
 		return
+	}
+	// The types these specs carry are the DAG's only answer for a computed
+	// output column — the worker's buildSelectProjection copies them straight
+	// onto exec.ProjectColumn.Type. Resolving bare column references against
+	// the catalog has to happen here too, or COALESCE(n_name, n_comment)
+	// stays Float64 on arm B alone (#333).
+	var colTypes map[string]parquet.TypeID
+	if len(projNode.Children) == 1 {
+		colTypes = inputColTypes(projNode.Children[0])
 	}
 	hasExpr := false
 	specs := make([]ProjectExprSpec, 0, len(proj))
@@ -2093,7 +2113,7 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 				return // wrapped aggregate — evaluated at the gather
 			}
 			hasExpr = true
-			typ = inferProjectionType(p.ASTExpr, parquet.TypeString)
+			typ = inferProjectionTypeCols(p.ASTExpr, parquet.TypeString, nil, colTypes)
 		}
 		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ})
 	}
@@ -2455,10 +2475,20 @@ func firstColRefName(n plansql.Node) string {
 // the outermost emitting node is not a projection (e.g., a top-level scan or
 // aggregate without a SELECT-list rename layer).
 func findOutputProjectionsForRename(n *logical.Node) []logical.Projection {
+	if p := findOutputProjectionNode(n); p != nil {
+		return p.Projections
+	}
+	return nil
+}
+
+// findOutputProjectionNode is findOutputProjectionsForRename returning the
+// Project node itself, for callers that also need what feeds it — typing a
+// projection expression takes the input's column types (inputColTypes).
+func findOutputProjectionNode(n *logical.Node) *logical.Node {
 	for n != nil {
 		switch n.Type {
 		case logical.NodeProject:
-			return n.Projections
+			return n
 		case logical.NodeSort, logical.NodeLimit, logical.NodeFilter, logical.NodeDistinct:
 			// Descend through Distinct too: the gather must project to the
 			// SELECT-list columns (the Project under the Distinct) so the
@@ -3845,6 +3875,14 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			if agg.InputExpr != nil {
 				if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
 					spec.InputExpr = agg.InputExpr.String()
+					// And the type that expression evaluates into, since
+					// the worker builds the pre-aggregate projection from
+					// the text alone and has no catalog to consult.
+					var child *logical.Node
+					if len(node.Children) > 0 {
+						child = node.Children[0]
+					}
+					spec.InputType = inferProjectionTypeCols(agg.InputExpr, parquet.TypeFloat64, nil, inputColTypes(child))
 				}
 			}
 			aggSpecs = append(aggSpecs, spec)
@@ -4384,7 +4422,7 @@ func absorbSecurityBarrier(node, scan *logical.Node, stages *[]Stage) {
 		}
 		var typ parquet.TypeID
 		if isExpr {
-			typ = inferProjectionType(pr.ASTExpr, parquet.TypeString)
+			typ = inferProjectionTypeCols(pr.ASTExpr, parquet.TypeString, nil, scan.ScanColTypes)
 		}
 		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ})
 	}
@@ -5922,6 +5960,18 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		}
 	}
 
+	// Catalog types of what feeds these projections, resolved once for the
+	// whole list: a bare column reference inside a projection expression
+	// decides its type from them (see nodeDeclaredType, #333). The second
+	// map is for a SELECT expression that maps to a synthetic group column —
+	// a rename of a value computed BELOW the aggregate, so it types against
+	// the aggregate's input rather than its output.
+	childColTypes := inputColTypes(child)
+	var aggInputColTypes map[string]parquet.TypeID
+	if isOverAggregate && len(aggNode.Children) > 0 {
+		aggInputColTypes = inputColTypes(aggNode.Children[0])
+	}
+
 	var projCols []exec.ProjectColumn
 	for _, proj := range node.Projections {
 		colRef := proj.Column
@@ -6038,12 +6088,14 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// against the aggregate's input, or the declared Float64
 			// coerces the pre-projected int64 keys on the copy (#297).
 			strictInt := strictIntArithCols(child)
+			colTypes := childColTypes
 			if isOverAggregate {
 				if _, ok := gbExprToSyn[proj.ASTExpr.String()]; ok {
 					strictInt = strictIntArithCols(aggNode.Children[0])
+					colTypes = aggInputColTypes
 				}
 			}
-			outType = inferProjectionTypeCols(proj.ASTExpr, outType, strictInt)
+			outType = inferProjectionTypeCols(proj.ASTExpr, outType, strictInt, colTypes)
 		}
 
 		pc := exec.ProjectColumn{
@@ -6161,8 +6213,10 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					// fallback — but MAX(UPPER(c)) is not, and declaring it
 					// Float64 handed vecUpper a vector with no BytesData to
 					// write into: the same process-killing mismatch as the
-					// projection path (#310).
-					Type: inferProjectionType(agg.InputExpr, parquet.TypeFloat64),
+					// projection path (#310). MAX(COALESCE(a, b)) needs the
+					// input's column types on top of that, or the polymorphic
+					// declaration falls back to the same wrong Float64 (#333).
+					Type: inferProjectionTypeCols(agg.InputExpr, parquet.TypeFloat64, nil, inputColTypes(node.Children[0])),
 					Expr: wrapExpr(compiled),
 				}
 				// Use general vectorized evaluation when available.
@@ -6248,6 +6302,11 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		aggCols = append(aggCols, ac)
 	}
 
+	// Catalog types of the aggregate's input, for typing derived GROUP BY
+	// key expressions (see nodeDeclaredType, #333). Resolved once.
+	aggChildStrictInt := strictIntArithCols(node.Children[0])
+	aggChildColTypes := inputColTypes(node.Children[0])
+
 	groupByCols := make([]string, len(node.GroupBy))
 	for i, gb := range node.GroupBy {
 		// Preserve table qualifiers for self-join disambiguation (e.g., n1.n_name vs n2.n_name).
@@ -6295,7 +6354,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				}
 				litPostOps = append(litPostOps, &aggPreProject{computed: []exec.ProjectColumn{{
 					Name: fmt.Sprintf("__gb_expr_%d", i),
-					Type: inferProjectionTypeCols(gbExpr, parquet.TypeString, strictIntArithCols(node.Children[0])),
+					Type: inferProjectionTypeCols(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes),
 					Expr: wrapExpr(compiled),
 				}}})
 				litElided[i] = true
@@ -6320,7 +6379,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 						// Numeric expressions (abs(x), x-1, …) must get a
 						// numeric synthetic column: SetValue on a String
 						// vector mangles float group keys.
-						Type: inferProjectionTypeCols(gbExpr, parquet.TypeString, strictIntArithCols(node.Children[0])),
+						Type: inferProjectionTypeCols(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes),
 						Expr: wrapExpr(compiled),
 					}
 					// Batched evaluation when available — beyond the vec
@@ -6435,21 +6494,23 @@ func replaceAggWithColRef(node plansql.Node, target *plansql.FuncCallNode, colNa
 	}
 }
 
-// binOpInvolvesInterval returns true if either operand of a BinaryOp is an
-// IntervalLit or a date/timestamp function (current_date, current_timestamp).
-// Date ± interval produces a date string, not a numeric value.
-// inferProjectionType infers the output parquet type from an AST expression node.
-// Returns the inferred type, or the fallback if inference isn't possible.
-// inferProjectionTypeCols is inferProjectionType with scan column types in
-// hand: integer-preserving arithmetic (+, -, *, % over strictly-int columns
-// and integer literals) declares Int64 instead of the blanket Float64,
-// keeping derived GROUP BY keys on the typed-int aggregation paths (#297;
-// ClickBench Q36's four ClientIP-derived keys). The rule mirrors
-// expr.BinOpNumeric's runtime mode resolution and MUST stay a strict
-// subset of it: a declared-int column over a float-mode expression reads
-// NULL through the typed getter. The reverse direction (declared float,
-// runtime int) is the pre-existing safe coercion.
-func inferProjectionTypeCols(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool) parquet.TypeID {
+// inferProjectionTypeCols is inferProjectionType with the input's column types
+// in hand, in the two shapes the planner can supply them.
+//
+// strictInt marks scan columns whose vectors are plain Int64/Int32:
+// integer-preserving arithmetic (+, -, *, % over those columns and integer
+// literals) declares Int64 instead of the blanket Float64, keeping derived
+// GROUP BY keys on the typed-int aggregation paths (#297; ClickBench Q36's
+// four ClientIP-derived keys). The rule mirrors expr.BinOpNumeric's runtime
+// mode resolution and MUST stay a strict subset of it: a declared-int column
+// over a float-mode expression reads NULL through the typed getter. The
+// reverse direction (declared float, runtime int) is the pre-existing safe
+// coercion.
+//
+// colTypes (inputColTypes) is the full column→catalog-type map, and it is what
+// lets a bare column reference INSIDE the expression decide a type rather than
+// leaving the polymorphic declarations to fall back to Float64 (#333).
+func inferProjectionTypeCols(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool, colTypes map[string]parquet.TypeID) parquet.TypeID {
 	if strictInt != nil && expr.IntArithOn() {
 		inner := node
 		for {
@@ -6463,7 +6524,23 @@ func inferProjectionTypeCols(node plansql.Node, fallback parquet.TypeID, strictI
 			return parquet.TypeInt64
 		}
 	}
-	return inferProjectionType(node, fallback)
+	if !isComputedProjection(node) {
+		// A bare column reference is a copy, and exec.Project types that
+		// output from the column it copies — the input schema is the
+		// authority there, and it sees renames and derived inputs the
+		// catalog cannot. Withholding colTypes keeps the answer Undecided,
+		// so this projection is typed by the caller's fallback exactly as
+		// before. #333 is about the arguments INSIDE an expression, where
+		// the output is computed and no input column describes it.
+		colTypes = nil
+	}
+	// A guess is still the answer here: nothing is left to consult, and a
+	// polymorphic function's fallback is what types SELECT NULLIF(int_col, 1)
+	// numeric. Only expr.Undecided leaves the type to the caller.
+	if t, c := nodeDeclaredType(node, colTypes); c != expr.Undecided {
+		return t
+	}
+	return fallback
 }
 
 // intArithAllInt mirrors expr.operandIsInt over the AST: int-typed scan
@@ -6514,27 +6591,122 @@ func strictIntArithCols(n *logical.Node) map[string]bool {
 	return nil
 }
 
-func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.TypeID {
-	// A guess is still the answer here: nothing is left to consult, and a
-	// polymorphic function's fallback is what types SELECT NULLIF(int_col, 1)
-	// numeric. Only expr.Undecided leaves the type to the caller.
-	if t, c := nodeDeclaredType(node); c != expr.Undecided {
-		return t
+// inputColTypes reports the catalog types of the columns visible at n's
+// OUTPUT, keyed by lower-cased name, or nil when they cannot be known. It is
+// what lets a bare column reference inside an expression decide a type
+// (nodeDeclaredType) instead of leaving the polymorphic declarations —
+// coalesce, nullif, greatest, least — to answer with the numeric fallback that
+// typed SELECT COALESCE(n_name, n_comment) Float64 and dropped every string
+// (#333). The map is logical.Node.ScanColTypes, populated by
+// AnnotateScanColumns, and is READ-ONLY: the scan's own map is returned
+// directly when there is only one.
+//
+// The walk is deliberately narrower than scanColumnType's, which searches
+// every scan below a node for one name. This describes a node's output, so it
+// stops at anything that can rebind a name to a different value — Project,
+// Aggregate, Window, the set operators. Descending past one of those would
+// answer
+//
+//	SELECT COALESCE(n_name) FROM (SELECT n_nationkey AS n_name FROM nation) t
+//
+// with the scan's string type for a value that arrives as an int64, which is
+// the same silent-drop corruption pointing the other way. For the same reason
+// a scan whose columns were never annotated (a table function, a catalog miss)
+// makes the whole answer nil rather than a partial map: a name missing from a
+// partial map is indistinguishable from a name that is not a column at all.
+func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
+	if n == nil {
+		return nil
 	}
-	return fallback
+	switch n.Type {
+	case logical.NodeScan:
+		return n.ScanColTypes
+	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
+		if len(n.Children) != 1 {
+			return nil
+		}
+		return inputColTypes(n.Children[0])
+	case logical.NodeJoin:
+		if len(n.Children) != 2 {
+			return nil
+		}
+		left, right := inputColTypes(n.Children[0]), inputColTypes(n.Children[1])
+		if left == nil || right == nil {
+			return nil
+		}
+		merged := make(map[string]parquet.TypeID, len(left)+len(right))
+		for c, t := range left {
+			merged[c] = t
+		}
+		for c, t := range right {
+			if prev, dup := merged[c]; dup && prev != t {
+				// Two sides carry the name at different types — a self-join
+				// is not the only way to reach one. Drop it rather than pick
+				// a side; the caller's fallback is the honest answer.
+				delete(merged, c)
+				continue
+			}
+			merged[c] = t
+		}
+		return merged
+	}
+	return nil
+}
+
+// colRefDeclaredType resolves a bare column reference against the catalog
+// types of its input (inputColTypes). Undecided — today's answer, and the
+// caller's fallback with it — for a name no scan carries, a name two scans
+// disagree on, and anything that is not a scan column at all: an aggregate
+// output, a synthetic sort or group key. #331's machinery propagates a
+// decision as fact, so a wrong confident answer here is worse than the guess
+// it replaces.
+//
+// A qualified reference matches on its Column alone: the parser keeps the
+// qualifier in Table, and a delimited identifier that contains a dot
+// ("id.orig_h", a flat Zeek JSON column) is one name that must not be split.
+func colRefDeclaredType(n *plansql.ColRef, colTypes map[string]parquet.TypeID) (parquet.TypeID, expr.Confidence) {
+	t, ok := colTypes[strings.ToLower(n.Column)]
+	if !ok {
+		return 0, expr.Undecided
+	}
+	switch t {
+	case parquet.TypeDecimal, parquet.TypeVector, parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
+		// Parameterized types: the catalog map carries the TypeID and
+		// nothing else, and a projection declared DECIMAL without its
+		// scale, VECTOR without its dimension, or ARRAY without its element
+		// type builds an output vector that reads back wrong. funcReturnType
+		// declines the nested types for the same reason.
+		return 0, expr.Undecided
+	}
+	return t, expr.Decided
+}
+
+// inferProjectionType infers the output parquet type from an AST expression
+// node with nothing known about its input, returning the fallback when
+// inference isn't possible.
+func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.TypeID {
+	return inferProjectionTypeCols(node, fallback, nil, nil)
 }
 
 // nodeDeclaredType reports the type an expression decides on its own, and how
-// confidently. A bare column reference decides nothing — its type is resolved
-// at runtime from the input schema — which is both what the caller's fallback
-// is for and what a polymorphic function declaration needs to know before
-// moving on to its next candidate argument.
+// confidently.
+//
+// colTypes (inputColTypes) resolves a bare column reference to its catalog
+// type. Without it — and for a name it does not carry — a column reference
+// decides nothing, which is both what the caller's fallback is for and what a
+// polymorphic function declaration needs to know before moving on to its next
+// candidate argument. That was the whole answer until #333: nothing in
+// COALESCE(n_name, n_comment) decided anything, so coalesce's numeric fallback
+// stood, the projection allocated a Float64 vector, and every string write was
+// dropped for the integer 0.
 //
 // The confidence matters only inside a nested call: everything below returns a
 // type it decides outright, but a function call may return one it merely
 // guessed, and its caller must keep looking (see expr.Confidence, #331).
-func nodeDeclaredType(node plansql.Node) (parquet.TypeID, expr.Confidence) {
+func nodeDeclaredType(node plansql.Node, colTypes map[string]parquet.TypeID) (parquet.TypeID, expr.Confidence) {
 	switch n := node.(type) {
+	case *plansql.ColRef:
+		return colRefDeclaredType(n, colTypes)
 	case *plansql.BinaryOp:
 		if n.Op == "||" {
 			// String concatenation, not arithmetic. Declaring it Float64
@@ -6546,7 +6718,7 @@ func nodeDeclaredType(node plansql.Node) (parquet.TypeID, expr.Confidence) {
 			return parquet.TypeFloat64, expr.Decided
 		}
 	case *plansql.FuncCallNode:
-		return funcReturnType(n)
+		return funcReturnType(n, colTypes)
 	case *plansql.CastNode:
 		return inferCastType(n.TypeName), expr.Decided
 	case *plansql.Lit:
@@ -6591,9 +6763,9 @@ func nodeDeclaredType(node plansql.Node) (parquet.TypeID, expr.Confidence) {
 // CALLING function still holding a candidate of its own must prefer that one —
 // which is the whole of #331, where coalesce took a nested nullif's numeric
 // fallback for fact and never asked the string literal beside it.
-func funcReturnType(n *plansql.FuncCallNode) (parquet.TypeID, expr.Confidence) {
+func funcReturnType(n *plansql.FuncCallNode, colTypes map[string]parquet.TypeID) (parquet.TypeID, expr.Confidence) {
 	t, c := expr.DefaultRegistry.ReturnType(n.Name).Resolve(len(n.Args), func(i int) (parquet.TypeID, expr.Confidence) {
-		return nodeDeclaredType(n.Args[i])
+		return nodeDeclaredType(n.Args[i], colTypes)
 	})
 	if c == expr.Undecided {
 		return 0, expr.Undecided
@@ -6623,6 +6795,9 @@ func inferCastType(typeName string) parquet.TypeID {
 	}
 }
 
+// binOpInvolvesInterval reports whether either operand of a BinaryOp is an
+// IntervalLit or a date/timestamp function (current_date, current_timestamp).
+// Date ± interval produces a date string, not a numeric value.
 func binOpInvolvesInterval(b *plansql.BinaryOp) bool {
 	return nodeIsDateOrInterval(b.Left) || nodeIsDateOrInterval(b.Right)
 }

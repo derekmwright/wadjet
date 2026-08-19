@@ -256,6 +256,54 @@
       "fine": "1485e2b4983b2e15",
       "coarse": "1485e2b4983b2e15"
     },
+    "PolymorphicOverFloatColumns": {
+      "source": "duckdb",
+      "row_count": 80,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "ps_partkey",
+        "ps_suppkey",
+        "coalesce_float",
+        "greatest_mixed",
+        "least_mixed"
+      ],
+      "fine": "cdf53a24233dd7c2",
+      "coarse": "2c2139eab1e060be"
+    },
+    "PolymorphicOverNumericColumns": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "nullif_int",
+        "coalesce_int",
+        "greatest_int",
+        "least_int",
+        "mixed_literal"
+      ],
+      "fine": "16444cfae039ae98",
+      "coarse": "16444cfae039ae98"
+    },
+    "PolymorphicOverStringColumns": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "nullif_str",
+        "coalesce_one",
+        "coalesce_two",
+        "greatest_str",
+        "least_str",
+        "ifnull_str"
+      ],
+      "fine": "5d8c8ad8996b2493",
+      "coarse": "5d8c8ad8996b2493"
+    },
     "Q01": {
       "source": "duckdb",
       "row_count": 4,
