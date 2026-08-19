@@ -388,16 +388,18 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 		return nil
 	}
 
-	// Date ± interval arithmetic
+	// Date ± interval arithmetic. Subtraction is not commutative, so only the
+	// date-on-the-left form takes an interval on the right; `interval + date`
+	// is the one reversed shape that means anything.
 	if e.Op == "+" || e.Op == "-" {
 		if iv, ok := rv.(IntervalValue); ok {
-			if ds, ok := lv.(string); ok {
-				return dateAddInterval(ds, iv, e.Op == "-")
+			if dv, ok := temporalOperand(b, row, e.Left, lv); ok {
+				return intervalShift(dv, iv, e.Op == "-")
 			}
 		}
 		if iv, ok := lv.(IntervalValue); ok && e.Op == "+" {
-			if ds, ok := rv.(string); ok {
-				return dateAddInterval(ds, iv, false)
+			if dv, ok := temporalOperand(b, row, e.Right, rv); ok {
+				return intervalShift(dv, iv, false)
 			}
 		}
 	}
@@ -1335,6 +1337,47 @@ func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any
 			args[i] = t
 		}
 	}
+}
+
+// temporalOperand resolves the date side of `date ± interval` to a value
+// intervalShift can read, and reports whether the operand is a date at all.
+//
+// It is resolveTemporalArgs for the binary-operator path, and it exists for
+// the same reason: ColRef.Eval boxes a DATE column as its epoch-DAY number and
+// a TIMESTAMP column as its epoch-MILLISECOND number, and a bare number has
+// lost the unit that says which. Recovering it here — where the operand is
+// still a column reference whose vector knows its declared type — is what
+// #322 did for date_add/date_sub arguments; the operator never got it, so
+// `o_orderdate - INTERVAL '90' DAY` fell through to the numeric path and
+// projected the raw day number (issue #332). A resolved DATE is tagged
+// civilDate for the same reason it is there: the result renders, and a whole
+// day must render as a calendar date.
+//
+// Text passes through as text, keeping the string path's own rendering.
+// Everything else — a bare integer, a computed expression, a column of any
+// other type — declines, and the caller's numeric arithmetic runs unchanged.
+func temporalOperand(b *batch.RecordBatch, row int, e Expr, v any) (any, bool) {
+	if s, ok := v.(string); ok {
+		return s, true
+	}
+	cr, ok := e.(*ColRef)
+	if !ok || cr.structField != "" {
+		return nil, false
+	}
+	if cr.typ != batch.TypeDate && cr.typ != batch.TypeTimestamp {
+		return nil, false
+	}
+	if cr.idx < 0 || cr.idx >= len(b.Columns) {
+		return nil, false
+	}
+	t, ok := columnInstant(b.Columns[cr.idx], row)
+	if !ok {
+		return nil, false
+	}
+	if cr.typ == batch.TypeDate {
+		return civilDate{t: t}, true
+	}
+	return t, true
 }
 
 func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
@@ -2956,24 +2999,16 @@ func fnDateSub(args []any) any { return dateShift(args, true) }
 // functions formatted the result "2006-01-02" unconditionally, so a TIMESTAMP
 // argument silently lost its clock on the way out. A whole-day argument still
 // renders as a calendar date.
+//
+// The interval branch is intervalShift, shared verbatim with `date ± INTERVAL`
+// in BinOp.Eval so date_sub(d, INTERVAL '90' DAY) and d - INTERVAL '90' DAY
+// cannot disagree (issue #332).
 func dateShift(args []any, subtract bool) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
 	if iv, ok := args[1].(IntervalValue); ok {
-		// A text argument keeps the string path's own rendering, which
-		// `date ± INTERVAL` in BinOp.Eval shares.
-		if ds, ok := args[0].(string); ok {
-			return dateAddInterval(ds, iv, subtract)
-		}
-		t, dateOnly, ok := parseDateArg(args[0])
-		if !ok {
-			return nil
-		}
-		// An interval carrying a time component makes the result an
-		// instant even when the input was a whole day.
-		dateOnly = dateOnly && iv.Hours == 0 && iv.Minutes == 0 && iv.Seconds == 0
-		return formatDateResult(addInterval(t, iv, subtract), dateOnly)
+		return intervalShift(args[0], iv, subtract)
 	}
 	t, dateOnly, ok := parseDateArg(args[0])
 	if !ok {
@@ -2984,6 +3019,32 @@ func dateShift(args []any, subtract bool) any {
 		days = -days
 	}
 	return formatDateResult(t.AddDate(0, 0, days), dateOnly)
+}
+
+// intervalShift applies an INTERVAL to a date-valued operand. It is the shared
+// body of `date ± INTERVAL` (BinOp.Eval) and date_add / date_sub with an
+// interval argument (dateShift) — one function, so the operator and the
+// function family cannot answer the same question differently (issue #332).
+//
+// Two instant renderers already coexist, and this deliberately keeps it at two:
+// a TEXT operand goes on rendering RFC3339 through dateAddInterval (TPC-H Q1's
+// `DATE '1998-12-01' - INTERVAL '90' DAY` is a text operand and its output is
+// pinned), while a resolved temporal COLUMN renders through formatDateResult —
+// batch.FormatTimestamp, the engine's one timestamp renderer, which is what
+// #322 settled for date_add over a TIMESTAMP column. A third renderer here
+// would make the output format depend on how the value reached the operator.
+func intervalShift(v any, iv IntervalValue, subtract bool) any {
+	if ds, ok := v.(string); ok {
+		return dateAddInterval(ds, iv, subtract)
+	}
+	t, dateOnly, ok := parseDateArg(v)
+	if !ok {
+		return nil
+	}
+	// An interval carrying a time component makes the result an instant even
+	// when the input was a whole day.
+	dateOnly = dateOnly && iv.Hours == 0 && iv.Minutes == 0 && iv.Seconds == 0
+	return formatDateResult(addInterval(t, iv, subtract), dateOnly)
 }
 
 // parseDateArg resolves a date-arithmetic argument to the instant it denotes,

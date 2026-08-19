@@ -1023,6 +1023,67 @@ func twoPathCorpus() []twoPathQuery {
 				})
 			}},
 	)
+
+	// #332: a temporal COLUMN plus or minus an INTERVAL. The operator read its
+	// date only from a STRING operand, so a literal worked while a DATE column
+	// fell through to numeric arithmetic that discards the interval — the
+	// projection carried the column's raw epoch-day number. TPC-H writes every
+	// interval against a literal (`DATE '1996-01-01' - INTERVAL '90' DAY`),
+	// which is why 22 queries of coverage never reach the column form.
+	//
+	// Both arms were wrong the same way, so the compare would have passed
+	// throughout: assertA owns the answer here, recomputed from the
+	// o_orderdate each row carries.
+	shiftedDate := func(tb testing.TB, r map[string]any, col string) (time.Time, bool) {
+		tb.Helper()
+		v := cellText(r, col)
+		// A whole-day result renders YYYY-MM-DD; anything else means the
+		// interval turned a date into an instant, which none of these do.
+		t, err := time.Parse("2006-01-02", v)
+		if err != nil {
+			tb.Errorf("%s = %q, want a calendar date — a DATE column shifted by a "+
+				"whole-day interval is still a date (%v)", col, v, err)
+			return time.Time{}, false
+		}
+		return t, true
+	}
+	out = append(out,
+		twoPathQuery{name: "ColumnIntervalArithmetic", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT o_orderkey, o_orderdate,
+					o_orderdate - INTERVAL '90' DAY  AS minus90,
+					o_orderdate + INTERVAL '1' MONTH AS plus1m,
+					INTERVAL '1' YEAR + o_orderdate  AS plus1y
+				FROM orders WHERE o_orderkey < 100 ORDER BY o_orderkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				for i, r := range rows {
+					base, ok := shiftedDate(tb, r, "o_orderdate")
+					if !ok {
+						return
+					}
+					for _, tc := range []struct {
+						col  string
+						want time.Time
+					}{
+						{"minus90", base.AddDate(0, 0, -90)},
+						// A month and a year are CALENDAR arithmetic: the same
+						// day number of the next month, not 30 days on.
+						{"plus1m", base.AddDate(0, 1, 0)},
+						{"plus1y", base.AddDate(1, 0, 0)},
+					} {
+						got, ok := shiftedDate(tb, r, tc.col)
+						if !ok {
+							return
+						}
+						if !got.Equal(tc.want) {
+							tb.Errorf("row %d: o_orderdate = %s, %s = %s, want %s",
+								i, base.Format("2006-01-02"), tc.col,
+								got.Format("2006-01-02"), tc.want.Format("2006-01-02"))
+							return
+						}
+					}
+				}
+			}},
+	)
 	return out
 }
 

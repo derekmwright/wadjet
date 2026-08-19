@@ -471,6 +471,17 @@ func isProvablyFloat64(e Expr) bool {
 // compileBinOp creates a typed BinOp when both sides implement typed interfaces,
 // falling back to the generic BinOp otherwise.
 func compileBinOp(left, right Expr, op string) Expr {
+	// `date ± INTERVAL` is not arithmetic, and nothing below can tell: an
+	// interval Lit satisfies Float64Expr like any other literal (ToFloat64 of
+	// an IntervalValue is 0), so the typed nodes took the expression and
+	// silently dropped the interval — `o_orderdate - INTERVAL '90' DAY`
+	// projected the column's raw epoch-day number, and a string date column
+	// projected NULL (issue #332). Only the generic BinOp knows this shape,
+	// so route it there. A date LITERAL already arrived here as a CastNode,
+	// which is not a Float64Expr, which is why that form always worked.
+	if isIntervalLit(left) || isIntervalLit(right) {
+		return &BinOp{Left: left, Right: right, Op: op}
+	}
 	// Try float64 typed path (covers float64 columns, int64 columns via promotion, and literals)
 	lf, lfOk := left.(Float64Expr)
 	rf, rfOk := right.(Float64Expr)
@@ -495,6 +506,17 @@ func compileBinOp(left, right Expr, op string) Expr {
 		return &BinOpFloat64{Left: lf, Right: rf, Op: op}
 	}
 	return &BinOp{Left: left, Right: right, Op: op}
+}
+
+// isIntervalLit reports whether an operand is an INTERVAL literal — the one
+// operand shape that makes a binary + or - date arithmetic rather than numeric.
+func isIntervalLit(e Expr) bool {
+	l, ok := e.(*Lit)
+	if !ok {
+		return false
+	}
+	_, ok = l.Val.(IntervalValue)
+	return ok
 }
 
 // possiblyIntAtRuntime reports whether an operand might turn out integer
