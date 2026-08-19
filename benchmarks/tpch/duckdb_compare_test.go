@@ -320,10 +320,20 @@ func duckdbCorpus() []duckdbCase {
 		// A LEFT JOIN that misses: the right side's columns are NULL, and
 		// COUNT(right_col) must not count them. This is how real data grows
 		// NULLs even when no column is nullable.
+		//
+		// The miss is spelled as a COLUMN comparison that cannot match (no
+		// nation shares a name with a region). It used to be spelled
+		// `n.n_regionkey = r.r_regionkey + 100`, which produced the right
+		// answer for the wrong reason: the expression reached the executor
+		// as a column name, resolved to nothing, and matched nothing — the
+		// #351 defect, correct at +100 and wrong at +3. That shape is now
+		// refused on an outer join (OuterJoinExpressionKey below pins the
+		// refusal), so the NULL semantics this pair exists for are asserted
+		// through a miss the planner can actually represent.
 		duckdbCase{name: "LeftJoinMissIsNull", sql: `SELECT n.n_name, r.r_name FROM nation n
-			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey + 100 ORDER BY n.n_name`},
+			LEFT JOIN region r ON n.n_name = r.r_name ORDER BY n.n_name`},
 		duckdbCase{name: "LeftJoinMissCount", sql: `SELECT COUNT(*) AS rows_out, COUNT(r.r_name) AS matched
-			FROM nation n LEFT JOIN region r ON n.n_regionkey = r.r_regionkey + 100`},
+			FROM nation n LEFT JOIN region r ON n.n_name = r.r_name`},
 		// NULL propagates through arithmetic and string building rather than
 		// being treated as an identity element.
 		// Two aliases of one table, both string columns projected — the #314
@@ -621,15 +631,16 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "LeftJoinEmptyBuildSide", sql: `SELECT COUNT(*) AS c FROM nation n
 			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0`},
 		// An expression on one side of an ON equality — the join key the
-		// physical planner cannot represent either. parseJoinKeys splits the
-		// condition on "=" and hands the executor "r.r_regionkey + 3" as a
-		// COLUMN NAME; nothing resolves, so the join matches nothing. Both
-		// arms, and visible only as a wrong count.
+		// physical planner could not represent either. parseJoinKeys split
+		// the condition on "=" and handed the executor "r.r_regionkey + 3"
+		// as a COLUMN NAME; nothing resolved, so the join matched nothing.
+		// Both arms, and visible only as a wrong count: 0 rows for 10.
+		// Fixed in #351 — parseJoinKeys reads the condition structurally,
+		// and an operand that is not a bare column is lifted into the filter
+		// above the join instead of being passed off as a column name. The
+		// rest of the shape is grouped at the end of this corpus.
 		duckdbCase{name: "ExpressionJoinKey", sql: `SELECT COUNT(*) AS c FROM nation n
-			JOIN region r ON n.n_regionkey = r.r_regionkey + 3`,
-			knownBugArm: armBoth,
-			knownBug: "an ON equality whose operand is an expression rather than a bare column matches nothing: " +
-				"parseJoinKeys passes 'r.r_regionkey + 3' to the executor as a column name. 0 rows, want 10"},
+			JOIN region r ON n.n_regionkey = r.r_regionkey + 3`},
 
 		// #336 — an ON conjunct comparing two COLUMNS. The physical planner
 		// represents a join condition as key pairs: parseJoinKeys keeps the
@@ -661,15 +672,18 @@ func duckdbCorpus() []duckdbCase {
 		// case is — it would delete the unmatched rows the join exists to
 		// preserve. Carrying it would need a residual predicate on the
 		// executor's outer-join probe, which does not exist: HashJoin
-		// applies SemiAntiFilter on the semi/anti path only. Both arms drop
-		// it identically, so this stays pinned until that lands.
+		// applies SemiAntiFilter on the semi/anti path only. Both arms used
+		// to DROP it identically and answer anyway; since #351 both refuse
+		// the query outright, which is the same gap said out loud. Pinned
+		// either way until the residual probe lands.
 		duckdbCase{name: "OuterJoinOnResidual", sql: `SELECT COUNT(*) AS c FROM nation n
 			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey
 			WHERE r.r_name IS NULL`,
 			knownBugArm: armBoth,
-			knownBug: "a non-equi ON conjunct spanning both sides of an OUTER join is still dropped: it cannot " +
-				"move above the join (that would delete the unmatched rows) and the executor has no residual " +
-				"predicate on an outer join's probe. #336 fixed the inner-join half only"},
+			knownBug: "a non-equi ON conjunct spanning both sides of an OUTER join has no representation: it " +
+				"cannot move above the join (that would delete the unmatched rows) and the executor has no " +
+				"residual predicate on an outer join's probe. #336 fixed the inner-join half only; since " +
+				"#351 both arms REFUSE the query rather than answering it with the conjunct dropped"},
 		// Window VALUE functions over a non-float column (#345). LAG, LEAD,
 		// FIRST_VALUE, LAST_VALUE and NTH_VALUE return a value taken FROM
 		// their input column, so the output type is that column's type — and
@@ -826,9 +840,11 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "FullJoinOnConjunctBuildSide", sql: `SELECT COUNT(*) AS c FROM nation n
 			FULL OUTER JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3`,
 			knownBugArm: armBoth,
-			knownBug: "an ON conjunct over one side of a FULL OUTER join is pushed into that side's scan, " +
-				"deleting the rows the join would have emitted unmatched: 25 rows against DuckDB's 27. " +
-				"Legal for LEFT (LeftJoinOnConjunctBuildSide below stays correct), wrong for FULL"},
+			knownBug: "an ON conjunct over one side of a FULL OUTER join has nowhere legal to go: pushing it " +
+				"into that side's scan deletes the rows the join would have emitted unmatched (25 rows " +
+				"against DuckDB's 27, the answer before #351), and it cannot be lifted above the join " +
+				"either. Both arms now refuse the query instead. Legal for LEFT " +
+				"(LeftJoinOnConjunctBuildSide below stays correct), wrong for FULL"},
 		duckdbCase{name: "LeftJoinOnConjunctBuildSide", sql: `SELECT COUNT(*) AS c FROM nation n
 			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3`},
 		// #353 — the aggregates that #339 left holding a finished value on
@@ -965,6 +981,111 @@ func duckdbCorpus() []duckdbCase {
 			FROM orders JOIN customer ON o_custkey = c_custkey
 			JOIN nation ON c_nationkey = n_nationkey
 			GROUP BY n_name ORDER BY k`},
+
+		// #351 — an ON equality whose operand is an EXPRESSION. The key
+		// parser split the condition TEXT on "=" and handed the executor
+		// "r.r_regionkey + 3" as a COLUMN NAME; an unresolvable name hashes
+		// as a constant, so the join matched nothing when the other side was
+		// a real column and EVERYTHING when neither was. ExpressionJoinKey
+		// above is the reported form; these are the rest of the shape.
+		duckdbCase{name: "ExpressionJoinKeyLeftOperand", sql: `SELECT COUNT(*) AS c FROM nation n
+			JOIN region r ON n.n_regionkey + 3 = r.r_regionkey`},
+		// Neither side a column: 125 rows, the full cross product, for a
+		// 20-row query — the "matches everything" half of the same defect.
+		duckdbCase{name: "ExpressionJoinKeyBothOperands", sql: `SELECT COUNT(*) AS c FROM nation n
+			JOIN region r ON n.n_regionkey + 1 = r.r_regionkey + 2`},
+		// An equality against a LITERAL is the same shape reached without
+		// arithmetic. extractJoinCondPredicates would have pushed it to the
+		// owning child, but it declines a single-conjunct ON — so this one
+		// went all the way to the executor as the key column "1".
+		duckdbCase{name: "LiteralJoinKey", sql: `SELECT COUNT(*) AS c FROM nation n
+			JOIN region r ON n.n_regionkey = 1`},
+		// The values, not just the count: a wrong key set is invisible in a
+		// COUNT when the cardinalities happen to agree.
+		duckdbCase{name: "ExpressionJoinKeyValues", sql: `SELECT n.n_name, r.r_name FROM nation n
+			JOIN region r ON n.n_regionkey = r.r_regionkey + 3 ORDER BY n.n_name`},
+		// The expression key inside a three-table join, where the residual
+		// filter has to survive join reordering.
+		duckdbCase{name: "ExpressionJoinKeyThreeTable", sql: `SELECT COUNT(*) AS c FROM nation n
+			JOIN region r ON n.n_regionkey = r.r_regionkey + 3
+			JOIN supplier s ON s.s_nationkey = n.n_nationkey`},
+		// A non-equi operator that CONTAINS an "=". The text split found that
+		// "=" and produced the column name "a.x <". The inner-join forms are
+		// lifted into the filter above the join (#336's machinery), so these
+		// must simply be right.
+		duckdbCase{name: "OnClauseLessOrEqual", sql: `SELECT COUNT(*) AS c FROM nation n
+			JOIN region r ON n.n_regionkey <= r.r_regionkey`},
+		duckdbCase{name: "OnClauseGreaterOrEqual", sql: `SELECT COUNT(*) AS c FROM nation n
+			JOIN region r ON n.n_regionkey >= r.r_regionkey`},
+		duckdbCase{name: "OnClauseNotEqual", sql: `SELECT COUNT(*) AS c FROM nation n
+			JOIN region r ON n.n_regionkey != r.r_regionkey`},
+		// Control: the `1 = 1` ON-TRUE sentinel the optimizer writes when
+		// every ON conjunct has been pushed to a child. It is not a column
+		// reference and must NOT be refused — it means the cross product.
+		duckdbCase{name: "OnClauseAllConjunctsPushed", sql: `SELECT COUNT(*) AS c FROM nation n
+			JOIN region r ON r.r_regionkey = 1 AND r.r_name = 'AMERICA'`},
+		// The OUTER-join half of #351 has no fix, only a loud failure. The
+		// inner-join route — lift the conjunct into a filter above the join —
+		// is not available here: an outer join's ON is evaluated BEFORE the
+		// NULL-padding, so a residual moved above the join would delete the
+		// rows the join exists to preserve. Both arms now REFUSE the query.
+		// The old behavior was worse and quieter: the expression reached the
+		// executor as a column name, matched nothing, and every left row came
+		// back padded — the answer to `+ 100` by luck and wrong for `+ 3`.
+		duckdbCase{name: "OuterJoinExpressionKey", sql: `SELECT n.n_name, r.r_name FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey + 3 ORDER BY n.n_name`,
+			knownBugArm: armBoth,
+			knownBug: "an ON equality whose operand is an expression has no representation on an OUTER join: " +
+				"the executor matches on column names and the conjunct cannot be lifted above the join " +
+				"without deleting the padded rows. Both arms refuse it rather than answering with the " +
+				"expression treated as a column (#351)"},
+
+		// #355 — an aggregate over a RENAMED subquery column. walkStages
+		// treats a Project as a passthrough, so the rename never happens on
+		// the DAG: the scan read o_custkey, the aggregate asked for `n`, and
+		// exec.HashAggregate answered the column it could not resolve with
+		// NULL. Not aggregate-specific, so all four of them.
+		duckdbCase{name: "MaxOverRenamedSubqueryColumn",
+			sql: "SELECT MAX(n) AS m FROM (SELECT o_custkey AS n FROM orders)"},
+		duckdbCase{name: "MinOverRenamedSubqueryColumn",
+			sql: "SELECT MIN(n) AS m FROM (SELECT o_custkey AS n FROM orders)"},
+		duckdbCase{name: "SumOverRenamedSubqueryColumn",
+			sql: "SELECT SUM(n) AS m FROM (SELECT o_custkey AS n FROM orders)"},
+		duckdbCase{name: "CountOverRenamedSubqueryColumn",
+			sql: "SELECT COUNT(n) AS m FROM (SELECT o_custkey AS n FROM orders)"},
+		// A CTE rename reaches the same aggregate by a different route.
+		duckdbCase{name: "MaxOverRenamedCTEColumn",
+			sql: "WITH t AS (SELECT o_custkey AS n FROM orders) SELECT MAX(n) AS m FROM t"},
+		// The alias over an EXPRESSION, where there is no source column to
+		// read and the value has to be projected before aggregating.
+		duckdbCase{name: "MaxOverRenamedSubqueryExpression",
+			sql: "SELECT MAX(n) AS m FROM (SELECT o_custkey * 2 AS n FROM orders)"},
+		// A POLYMORPHIC expression under the alias. Its type is only
+		// decidable from the columns it reads, which live below the Project,
+		// so typing it against the Project's own output leaves the Float64
+		// fallback and drops every string — the #333 shape reached through
+		// #355's rename.
+		duckdbCase{name: "MinOverRenamedSubqueryPolymorphicExpression",
+			sql: "SELECT MIN(u) AS m FROM (SELECT COALESCE(n_name, n_comment) AS u FROM nation)"},
+		// A GROUP BY key naming a subquery's computed alias: the key is
+		// dispatched under the expression text, which is the spelling the
+		// worker's pre-aggregate projection compiles and emits.
+		duckdbCase{name: "GroupByRenamedSubqueryExpression", sql: `SELECT k, COUNT(*) AS c
+			FROM (SELECT UPPER(o_orderstatus) AS k FROM orders) GROUP BY k ORDER BY k`},
+		// A renamed GROUP BY key is the louder half: an unresolvable key
+		// serializes as a NULL key, so all 15000 rows collapsed into one
+		// group named NULL instead of the three o_orderstatus values.
+		duckdbCase{name: "GroupByRenamedSubqueryColumn", sql: `SELECT k, COUNT(*) AS c
+			FROM (SELECT o_orderstatus AS k FROM orders) GROUP BY k ORDER BY k`},
+		duckdbCase{name: "GroupByAndAggregateRenamed", sql: `SELECT k, MAX(n) AS m, COUNT(*) AS c
+			FROM (SELECT o_orderstatus AS k, o_custkey AS n FROM orders) GROUP BY k ORDER BY k`},
+		// A two-column aggregate reads InputCol2 through the same lookup.
+		duckdbCase{name: "CorrOverRenamedSubqueryColumns", sql: `SELECT CORR(a, b) AS c
+			FROM (SELECT o_totalprice AS a, o_custkey AS b FROM orders)`},
+		// Control: the same subquery WITHOUT the rename was always correct,
+		// which is what made the rename the whole of the defect.
+		duckdbCase{name: "MaxOverUnrenamedSubqueryColumn",
+			sql: "SELECT MAX(o_custkey) AS m FROM (SELECT o_custkey FROM orders)"},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

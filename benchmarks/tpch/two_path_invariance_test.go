@@ -2250,8 +2250,201 @@ func twoPathCorpus() []twoPathQuery {
 						"(%d bytes of values + %d separators of 2)", got, want, total, n-1)
 				}
 			}},
+
+		// #351 — an ON equality whose operand is an EXPRESSION. Both arms
+		// were wrong, so the two-arm compare alone would have passed them:
+		// each assertA carries the absolute answer.
+		//
+		// nation has 5 rows per regionkey 0..4 and region has regionkeys
+		// 0..4, so `n_regionkey = r_regionkey + 3` matches regionkeys 3 and
+		// 4 — 10 rows. The engine answered 0: the key parser split the text
+		// on "=" and gave the executor "r.r_regionkey + 3" as a column name,
+		// which resolves to nothing.
+		twoPathQuery{name: "ExpressionJoinKeyRight", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n JOIN region r ON n.n_regionkey = r.r_regionkey + 3`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCount(tb, rows, "c", 10)
+			}},
+		twoPathQuery{name: "ExpressionJoinKeyLeft", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n JOIN region r ON n.n_regionkey + 3 = r.r_regionkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCount(tb, rows, "c", 10)
+			}},
+		// Neither operand a column. Both keys resolve to nothing, both hash
+		// as the same constant, and every probe row matched every build row:
+		// 125 rows — the full cross product — for a 20-row query.
+		twoPathQuery{name: "ExpressionJoinKeyBoth", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n JOIN region r ON n.n_regionkey + 1 = r.r_regionkey + 2`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCount(tb, rows, "c", 20)
+			}},
+		// An equality against a LITERAL, the same shape without arithmetic.
+		// Five nations carry regionkey 1, and every one of the 5 regions
+		// joins to each: 25.
+		twoPathQuery{name: "LiteralJoinKey", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n JOIN region r ON n.n_regionkey = 1`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCount(tb, rows, "c", 25)
+			}},
+		// The VALUES, since a count can agree by accident.
+		twoPathQuery{name: "ExpressionJoinKeyValues", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n.n_name, r.r_name FROM nation n JOIN region r ON n.n_regionkey = r.r_regionkey + 3
+				ORDER BY n.n_name`,
+			wantRows: 10},
+		// The expression key inside a three-table join: the residual filter
+		// has to survive join reordering, and the remaining real equi-join
+		// still has to be planned as one.
+		twoPathQuery{name: "ExpressionJoinKeyThreeTable", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n JOIN region r ON n.n_regionkey = r.r_regionkey + 3
+				JOIN supplier s ON s.s_nationkey = n.n_nationkey`},
+		// A non-equi operator that CONTAINS an "=". The text split found
+		// that "=" and produced the column name "a.x <". For an inner join
+		// the conjunct lifts into the filter above, so the answer is exact:
+		// sum over regionkey k of (5 nations x (5-k) regions) = 75.
+		twoPathQuery{name: "OnClauseLessOrEqual", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n JOIN region r ON n.n_regionkey <= r.r_regionkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCount(tb, rows, "c", 75)
+			}},
+		twoPathQuery{name: "OnClauseGreaterOrEqual", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n JOIN region r ON n.n_regionkey >= r.r_regionkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCount(tb, rows, "c", 75)
+			}},
+		// 125 pairs less the 25 with equal keys.
+		twoPathQuery{name: "OnClauseNotEqual", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n JOIN region r ON n.n_regionkey != r.r_regionkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCount(tb, rows, "c", 100)
+			}},
+		// Control: the `1 = 1` ON-TRUE sentinel the optimizer writes when
+		// every ON conjunct has been pushed to a child. Not a column
+		// reference, and must NOT be refused — region filters to the one
+		// AMERICA row and the join is the cross product with it.
+		twoPathQuery{name: "OnClauseAllConjunctsPushed", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n JOIN region r ON r.r_regionkey = 1 AND r.r_name = 'AMERICA'`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCount(tb, rows, "c", 25)
+			}},
+
+		// #355 — an aggregate over a RENAMED subquery column. DAG-only: a
+		// Project emits no stage there, so the rename never happened, the
+		// aggregate asked for a column the batch did not have, and
+		// HashAggregate answered NULL. o_custkey runs 1..1499 at SF0.01.
+		twoPathQuery{name: "MaxOverRenamedSubqueryColumn", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT MAX(n) AS m FROM (SELECT o_custkey AS n FROM orders)",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				_, hi := sf001Extent(tb, "orders", "o_custkey")
+				assertSingleCount(tb, rows, "m", hi)
+			}},
+		twoPathQuery{name: "MinOverRenamedSubqueryColumn", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT MIN(n) AS m FROM (SELECT o_custkey AS n FROM orders)",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				lo, _ := sf001Extent(tb, "orders", "o_custkey")
+				assertSingleCount(tb, rows, "m", lo)
+			}},
+		twoPathQuery{name: "CountOverRenamedSubqueryColumn", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT COUNT(n) AS m FROM (SELECT o_custkey AS n FROM orders)",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCount(tb, rows, "m", float64(len(sf001Table(tb, "orders"))))
+			}},
+		twoPathQuery{name: "SumOverRenamedSubqueryColumn", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT SUM(n) AS m FROM (SELECT o_custkey AS n FROM orders)",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				var want float64
+				for _, r := range sf001Table(tb, "orders") {
+					want += toFloat(r["o_custkey"])
+				}
+				assertSingleCount(tb, rows, "m", want)
+			}},
+		// A CTE rename reaches the same aggregate by a different route.
+		twoPathQuery{name: "MaxOverRenamedCTEColumn", cmp: cmpUnordered, expectRows: true,
+			sql: "WITH t AS (SELECT o_custkey AS n FROM orders) SELECT MAX(n) AS m FROM t",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				_, hi := sf001Extent(tb, "orders", "o_custkey")
+				assertSingleCount(tb, rows, "m", hi)
+			}},
+		// The alias over an EXPRESSION: no source column to read, so the
+		// value has to be projected before the aggregate sees it.
+		twoPathQuery{name: "MaxOverRenamedSubqueryExpression", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT MAX(n) AS m FROM (SELECT o_custkey * 2 AS n FROM orders)",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				_, hi := sf001Extent(tb, "orders", "o_custkey")
+				assertSingleCount(tb, rows, "m", 2*hi)
+			}},
+		// A POLYMORPHIC expression under the alias. Its type is decidable
+		// only from the columns it reads, which live below the Project, so
+		// typing it against the Project's own output leaves the Float64
+		// fallback and every string is dropped — the DAG answered 0 for a
+		// nation name (#333's shape reached through #355's rename).
+		twoPathQuery{name: "MinOverRenamedSubqueryPolymorphicExpression", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT MIN(u) AS m FROM (SELECT COALESCE(n_name, n_comment) AS u FROM nation)",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				if got := cellText(rows[0], "m"); got != "ALGERIA" {
+					tb.Errorf("MIN = %q, want %q — a numeric fallback type drops every string", got, "ALGERIA")
+				}
+			}},
+		// A GROUP BY key naming a subquery's COMPUTED alias.
+		twoPathQuery{name: "GroupByRenamedSubqueryExpression", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT k, COUNT(*) AS c FROM (SELECT UPPER(o_orderstatus) AS k FROM orders)
+				GROUP BY k ORDER BY k`,
+			wantCols: []string{"k", "c"}, wantRows: 3},
+		// A renamed GROUP BY key is the louder half of the same miss: an
+		// unresolvable key serializes as a NULL key, so all 15000 rows
+		// collapsed into one group named NULL. wantCols pins the OUTPUT
+		// name too — resolving the key to its source column must not leak
+		// o_orderstatus into the result schema in place of the alias.
+		twoPathQuery{name: "GroupByRenamedSubqueryColumn", cmp: cmpOrdered, expectRows: true,
+			sql:      `SELECT k, COUNT(*) AS c FROM (SELECT o_orderstatus AS k FROM orders) GROUP BY k ORDER BY k`,
+			wantCols: []string{"k", "c"}, wantRows: 3},
+		twoPathQuery{name: "GroupByAndAggregateRenamed", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT k, MAX(n) AS m, COUNT(*) AS c
+				FROM (SELECT o_orderstatus AS k, o_custkey AS n FROM orders) GROUP BY k ORDER BY k`,
+			wantCols: []string{"k", "m", "c"}, wantRows: 3},
+		// A two-column aggregate reads InputCol2 through the same lookup.
+		twoPathQuery{name: "CorrOverRenamedSubqueryColumns", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT CORR(a, b) AS c FROM (SELECT o_totalprice AS a, o_custkey AS b FROM orders)`},
+		// Control: the same subquery without the rename was always correct.
+		twoPathQuery{name: "MaxOverUnrenamedSubqueryColumn", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT MAX(o_custkey) AS m FROM (SELECT o_custkey FROM orders)",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				_, hi := sf001Extent(tb, "orders", "o_custkey")
+				assertSingleCount(tb, rows, "m", hi)
+			}},
 	)
 	return out
+}
+
+// assertSingleCount holds a one-row, one-number answer against the value the
+// fixture determines. The two-arm compare cannot do this on its own: a defect
+// that hits both engines the same way passes it, and #351 was exactly that
+// shape — both arms answered 0 for a 10-row join.
+func sf001Extent(tb testing.TB, table, col string) (lo, hi float64) {
+	tb.Helper()
+	vals := sf001Column(tb, table, col)
+	lo, hi = vals[0], vals[0]
+	for _, v := range vals[1:] {
+		if v < lo {
+			lo = v
+		}
+		if v > hi {
+			hi = v
+		}
+	}
+	return lo, hi
+}
+
+func assertSingleCount(tb testing.TB, rows []map[string]any, col string, want float64) {
+	tb.Helper()
+	if len(rows) != 1 {
+		tb.Fatalf("%d rows, want 1", len(rows))
+	}
+	if got := cellNum(rows[0], col); got != want {
+		tb.Errorf("%s = %v, want %v", col, got, want)
+	}
 }
 
 // assertFirstKeyAndCount pins a page: which row it starts at and how many

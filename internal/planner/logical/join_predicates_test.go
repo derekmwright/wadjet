@@ -172,10 +172,36 @@ func TestLiftInnerJoinOnResiduals(t *testing.T) {
 		}
 	})
 
-	t.Run("a column-vs-literal conjunct is left to extractJoinCondPredicates", func(t *testing.T) {
+	// #351 widened the residual test from "is an equality" to "is an
+	// equality between two BARE COLUMNS". An operand that is not a column
+	// has no representation in the executor's name-matched key lists, so it
+	// leaves JoinCond by the same route the non-equalities do.
+	t.Run("an equality whose operand is an expression is lifted", func(t *testing.T) {
+		got := liftInnerJoinOnResiduals(build("inner", "a.s_nationkey = b.s_nationkey + 1"))
+		if got.Type != NodeFilter {
+			t.Fatalf("expected a filter above the join, got %s — 'b.s_nationkey + 1' would reach the "+
+				"executor as a column name, resolve to nothing, and match nothing", got.Type)
+		}
+		join := got.Children[0]
+		if join.JoinCond != "" || joinKind(join.JoinType) != "cross" {
+			t.Errorf("join = %q ON %q, want a cross join with no condition", join.JoinType, join.JoinCond)
+		}
+	})
+
+	t.Run("an equality whose operand is a literal is lifted", func(t *testing.T) {
+		// extractJoinCondPredicates would push this one to the child that
+		// owns it, which lands it in the same filter. Routing it here too
+		// covers the single-conjunct case that pass declines (it needs at
+		// least two conjuncts to split), which was its own 0-row answer.
 		got := liftInnerJoinOnResiduals(build("inner", "a.s_nationkey = b.s_nationkey AND a.s_suppkey = 5"))
-		if got.Type != NodeJoin {
-			t.Fatalf("expected the join unchanged, got %s", got.Type)
+		if got.Type != NodeFilter {
+			t.Fatalf("expected a filter above the join, got %s", got.Type)
+		}
+		if len(got.Predicates) != 1 || !strings.Contains(got.Predicates[0].Raw, "5") {
+			t.Errorf("lifted predicates = %+v, want the literal equality", got.Predicates)
+		}
+		if join := got.Children[0]; join.JoinCond != "a.s_nationkey = b.s_nationkey" {
+			t.Errorf("JoinCond = %q, want the column equality alone", join.JoinCond)
 		}
 	})
 

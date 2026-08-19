@@ -357,21 +357,64 @@ func TestMapExecJoinType(t *testing.T) {
 
 func TestParseJoinKeys(t *testing.T) {
 	tests := []struct {
-		cond   string
-		leftN  int
-		rightN int
+		cond     string
+		leftN    int
+		rightN   int
+		residual int
 	}{
-		{"e.user_id = u.user_id", 1, 1},
-		{"e.a = u.a AND e.b = u.b", 2, 2},
-		{"a = b", 1, 1},
-		{"no equals here", 0, 0},
+		{cond: "e.user_id = u.user_id", leftN: 1, rightN: 1},
+		{cond: "e.a = u.a AND e.b = u.b", leftN: 2, rightN: 2},
+		{cond: "a = b", leftN: 1, rightN: 1},
+		{cond: "no equals here", residual: 1},
+		// The `1 = 1` sentinel extractJoinCondPredicates writes when every
+		// ON conjunct has been pushed to a child: ON TRUE, not a refusal.
+		{cond: "1 = 1", leftN: 1, rightN: 1},
 	}
 	for _, tt := range tests {
-		left, right := parseJoinKeys(tt.cond)
-		if len(left) != tt.leftN || len(right) != tt.rightN {
-			t.Errorf("parseJoinKeys(%q) = left=%v, right=%v, want %d left, %d right",
-				tt.cond, left, right, tt.leftN, tt.rightN)
+		left, right, residual := parseJoinKeys(tt.cond)
+		if len(left) != tt.leftN || len(right) != tt.rightN || len(residual) != tt.residual {
+			t.Errorf("parseJoinKeys(%q) = left=%v, right=%v, residual=%v, want %d left, %d right, %d residual",
+				tt.cond, left, right, residual, tt.leftN, tt.rightN, tt.residual)
 		}
+	}
+}
+
+// TestParseJoinKeysRefusesUnrepresentable is #351: the key parser used to
+// split the condition TEXT on "=" and hand whatever fell either side to the
+// executor as a column name. An operand that is not a bare column resolves to
+// nothing there, and an unresolvable key hashes as a constant — so the join
+// matched no rows when one side was real and every row when neither was.
+// Each of these must come back as a residual the caller refuses, never as a
+// key.
+func TestParseJoinKeysRefusesUnrepresentable(t *testing.T) {
+	tests := []struct {
+		name string
+		cond string
+	}{
+		{"expression on the right", "n.n_regionkey = r.r_regionkey + 3"},
+		{"expression on the left", "n.n_regionkey + 3 = r.r_regionkey"},
+		{"expression on both sides", "n.n_regionkey + 1 = r.r_regionkey + 2"},
+		{"function operand", "n.n_regionkey = ABS(r.r_regionkey)"},
+		{"literal operand", "n.n_regionkey = 1"},
+		// The lexical split found the "=" INSIDE these operators and
+		// produced the column name "a.x <".
+		{"less-or-equal", "a.x <= b.y"},
+		{"greater-or-equal", "a.x >= b.y"},
+		{"not-equal", "a.x != b.y"},
+		{"disjunction", "a.x = b.y OR a.z = b.w"},
+		// A key conjunct alongside an unrepresentable one: the good half
+		// must not launder the bad half through.
+		{"mixed with a real key", "a.k = b.k AND a.x = b.y + 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, residual := parseJoinKeys(tt.cond)
+			if len(residual) == 0 {
+				left, right, _ := parseJoinKeys(tt.cond)
+				t.Fatalf("parseJoinKeys(%q) reported no residual; it produced keys left=%v right=%v, "+
+					"which the executor would look up as column names", tt.cond, left, right)
+			}
+		})
 	}
 }
 
@@ -379,10 +422,10 @@ func TestParseJoinKeys(t *testing.T) {
 
 func TestMatchesPartitionFilter(t *testing.T) {
 	tests := []struct {
-		name      string
-		partVals  map[string]string
-		filter    map[string]string
-		want      bool
+		name     string
+		partVals map[string]string
+		filter   map[string]string
+		want     bool
 	}{
 		{"match", map[string]string{"year": "2026"}, map[string]string{"year": "2026"}, true},
 		{"no match", map[string]string{"year": "2025"}, map[string]string{"year": "2026"}, false},
@@ -486,8 +529,8 @@ func TestDecimalFromBytes(t *testing.T) {
 	}{
 		{"empty", nil, true},
 		{"zero", []byte{0}, false},
-		{"small positive", []byte{0x00, 0x0A}, false},           // 10
-		{"small negative", []byte{0xFF, 0xF6}, false},           // -10 (sign-extended)
+		{"small positive", []byte{0x00, 0x0A}, false},                 // 10
+		{"small negative", []byte{0xFF, 0xF6}, false},                 // -10 (sign-extended)
 		{"large positive", []byte{0, 0, 0, 0, 0, 0, 0, 0, 42}, false}, // 42 in 9 bytes
 	}
 	for _, tt := range tests {

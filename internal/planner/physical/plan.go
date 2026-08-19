@@ -625,6 +625,32 @@ type Planner struct {
 	// and no merge, which returned ONE arm's raw output as the query's
 	// answer (#346). Reset at the start of generateStages.
 	setOpErr error
+
+	// joinCondErr records an ON clause parseJoinKeys cannot represent as a
+	// key pair, parked for the same reason setOpErr is: walkStages has no
+	// error return. Refusing is the point — the alternative it replaces was
+	// passing the unrepresentable operand to the executor AS A COLUMN NAME,
+	// which resolves to nothing and silently matches either no rows or every
+	// row (#351). Reset at the start of generateStages.
+	joinCondErr error
+
+	// aggStageRenames maps a name an Aggregate node reads in the LOGICAL plan
+	// to the name the aggregate STAGE emits for it, for every group key
+	// walkStages had to resolve through a subquery's rename (#355). The
+	// gather's output renames are rewritten through it, or a query grouping
+	// on a renamed column answers under the source column's name while the
+	// single-process path answers under the alias. Reset at the start of
+	// generateStages.
+	aggStageRenames map[string]string
+}
+
+// refuseJoin parks the first refusal; PlanDistributed returns it. First one
+// wins so a nested join's specific message is not overwritten by an outer
+// one's.
+func (p *Planner) refuseJoin(err error) {
+	if p.joinCondErr == nil {
+		p.joinCondErr = err
+	}
 }
 
 // queryResources holds the spill manager and memory tracker for one query.
@@ -2052,6 +2078,9 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if p.setOpErr != nil {
 		return nil, p.setOpErr
 	}
+	if p.joinCondErr != nil {
+		return nil, p.joinCondErr
+	}
 	if err := p.enforceQueryLimits(stages, node); err != nil {
 		return nil, err
 	}
@@ -2211,6 +2240,14 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// be lost (e.g., "n1.n_name" -> "supp_nation", "substr(l_shipdate, 1, 4)"
 	// -> "l_year"). Gather drives the result schema under native-DAG.
 	if renames := extractOutputRenames(node); len(renames) > 0 {
+		// A group key walkStages had to resolve through a subquery's rename
+		// is emitted under the SOURCE column, so the rename that names the
+		// result has to read from there (#355).
+		for i := range renames {
+			if src, ok := p.aggStageRenames[strings.ToLower(renames[i].From)]; ok {
+				renames[i].From = src
+			}
+		}
 		for i := range stages {
 			if stages[i].Type == StageExchangeGather {
 				stages[i].OutputRenames = renames
@@ -3304,6 +3341,8 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	// scalar subquery, which would otherwise double-compute the CTE).
 	p.ctePlannedTerminal = make(map[string]string)
 	p.setOpErr = nil
+	p.joinCondErr = nil
+	p.aggStageRenames = nil
 	p.walkStages(node, &stages, nil)
 	// Resolve cte-alias phantoms emitted by walkStages dedup. Must happen
 	// before fuseJoinStages so fusion sees real stage IDs everywhere.
@@ -3804,6 +3843,116 @@ func resolveShuffleKey(key string, child *logical.Node) string {
 	return key
 }
 
+// resolveAggInputName maps a name an aggregate stage READS — an aggregate
+// argument, or a GROUP BY key — back to what the stage below it actually
+// emits, following the SELECT-list renames of any Project in between.
+//
+// walkStages treats an ordinary Project as a passthrough: it emits no stage,
+// so a subquery's rename never happens on the DAG. `SELECT MAX(n) FROM
+// (SELECT o_custkey AS n FROM orders)` therefore dispatched a scan reading
+// o_custkey and an aggregate asking for `n`, and exec.HashAggregate answers a
+// column it cannot resolve with NULL — 1499 on the single-process path and on
+// DuckDB, NULL on the DAG (#355). A renamed GROUP BY key is the louder half of
+// the same defect: an unresolvable key serializes as a NULL key, so every row
+// collapses into one NULL group.
+//
+// This is the aggregate's version of what resolveShuffleKey does for join keys
+// and resolveSortKeyColumn for ORDER BY terms — the same root cause, patched
+// per consumer because the passthrough is what all three share.
+//
+// Three outcomes:
+//
+//	name unchanged, alias false — not a rename; the name is whatever the
+//	  child already emits, which is the overwhelmingly common case.
+//	name rewritten, alias true — the Project renamed a plain column; the
+//	  aggregate reads the source column instead.
+//	expr non-nil, alias true — the Project computed an EXPRESSION under this
+//	  name (`SELECT o_custkey * 2 AS n`). There is no column to read; the
+//	  caller attaches it as the aggregate's derived InputExpr, which the
+//	  worker projects before aggregating. exprInput is then the node that
+//	  Project reads, which is what the expression's column references are
+//	  written against — the caller types the expression there, because the
+//	  Project's OWN output does not carry them and a polymorphic declaration
+//	  (COALESCE, NULLIF, GREATEST, LEAST) falls back to Float64 without them
+//	  and drops every string (#333).
+//
+// It stops at an Aggregate: that node's outputs are its own GroupBy and
+// OutputCol names, which the parent reads directly, and descending past it
+// would resolve a name against the wrong schema.
+func resolveAggInputName(name string, child *logical.Node) (resolved string, expr plansql.Node, exprInput *logical.Node, alias bool) {
+	resolved = name
+	if child == nil || name == "" {
+		return resolved, nil, nil, false
+	}
+	// A projection list is simultaneous, so `b AS a, a AS b` must not chase
+	// itself: each Project substitutes at most once, and the walk is finite
+	// because it only ever descends.
+	for n := child; n != nil; {
+		switch {
+		case n.Type == logical.NodeProject:
+			for _, proj := range n.Projections {
+				if !strings.EqualFold(proj.Alias, resolved) || proj.Alias == "" {
+					continue
+				}
+				switch {
+				case proj.Column != "" && !strings.EqualFold(proj.Column, resolved):
+					resolved, alias = proj.Column, true
+				case proj.Column == "" && !proj.IsAgg && proj.ASTExpr != nil:
+					var below *logical.Node
+					if len(n.Children) == 1 {
+						below = n.Children[0]
+					}
+					return resolved, proj.ASTExpr, below, true
+				}
+				break
+			}
+		case n.Type == logical.NodeAggregate:
+			return resolved, nil, nil, alias
+		case n.Type == logical.NodeJoin && len(n.Children) == 2:
+			// Mirror resolveShuffleKey: a rename can sit under either arm.
+			left, lexpr, lin, lok := resolveAggInputName(resolved, n.Children[0])
+			if lok {
+				return left, lexpr, lin, true
+			}
+			jt := strings.ToLower(n.JoinType)
+			if jt == "semi" || jt == "anti" {
+				return resolved, nil, nil, alias
+			}
+			right, rexpr, rin, rok := resolveAggInputName(resolved, n.Children[1])
+			if rok {
+				return right, rexpr, rin, true
+			}
+			return resolved, nil, nil, alias
+		}
+		if len(n.Children) == 1 {
+			n = n.Children[0]
+			continue
+		}
+		break
+	}
+	return resolved, expr, exprInput, alias
+}
+
+// aggStageGroupKey reports the name the aggregate STAGE will emit for a
+// logical GROUP BY key, and whether that differs from the key as written.
+//
+// A key naming a subquery's rename is dispatched under the source column; a
+// key naming a subquery's computed alias is dispatched under the EXPRESSION
+// TEXT, which is the spelling the worker's pre-aggregate projection already
+// compiles and emits (buildAggInputProjection treats a group-by entry that
+// does not parse as a bare column reference as derived). Both walkStages and
+// the sort's aggregateOutputName have to agree on it, so both call this.
+func aggStageGroupKey(key string, child *logical.Node) (string, bool) {
+	resolved, expr, _, renamed := resolveAggInputName(key, child)
+	if !renamed {
+		return key, false
+	}
+	if expr != nil {
+		return expr.String(), true
+	}
+	return resolved, true
+}
+
 // resolveSortKeyColumn maps an ORDER BY key that names a SELECT-list alias
 // back to the name the aggregate stage below it actually emits.
 //
@@ -3883,9 +4032,19 @@ func resolveSortKeyColumn(key string, child *logical.Node) string {
 // aggregateOutputName reports the name an Aggregate node emits for col — its
 // own spelling of the matching group key or aggregate output — so a sort key
 // resolved through a rename lands on a column the stage really produces.
+//
+// A group key is reported the way walkStages will EMIT it, which is through
+// resolveAggInputName: a key naming a subquery's rename is dispatched under
+// the source column, because the Project that would have created the alias
+// emits no stage (#355).
 func aggregateOutputName(n *logical.Node, col string) (string, bool) {
 	for _, g := range n.GroupBy {
 		if strings.EqualFold(g, col) {
+			if len(n.Children) == 1 {
+				if resolved, renamed := aggStageGroupKey(g, n.Children[0]); renamed {
+					return resolved, true
+				}
+			}
 			return g, true
 		}
 	}
@@ -4020,9 +4179,46 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		for _, child := range node.Children {
 			p.walkStages(child, stages, nil)
 		}
+		// A Project below an aggregate emits no stage (walkStages treats it
+		// as a passthrough), so its SELECT-list renames never happen on the
+		// DAG. Every name this aggregate reads is therefore resolved back to
+		// what the stage below it emits, or the aggregate asks for a column
+		// the batch does not have and HashAggregate answers NULL (#355).
+		var aggChild *logical.Node
+		if len(node.Children) > 0 {
+			aggChild = node.Children[0]
+		}
 		var aggSpecs []AggSpec
 		hasDistinctAgg := false
 		for _, agg := range node.AggExprs {
+			// Resolved before the spec is built so aggSpecOutputType and the
+			// derived-expression branch below both see the real column: the
+			// type lookup misses on an alias too, and an undeclared type
+			// makes MAX come back float64 where the column is INT64.
+			inputExpr := agg.InputExpr
+			exprCols := aggChild
+			if resolved, expr, exprInput, renamed := resolveAggInputName(agg.InputCol, aggChild); renamed {
+				if expr != nil {
+					// The alias named an EXPRESSION, not a column. There is
+					// nothing to read; hand the worker the expression and let
+					// it project the value under the alias before
+					// aggregating — the same route a derived aggregate
+					// argument (`SUM(a * (1 - b))`) already takes, and it
+					// names its projected column InputCol, so the alias has
+					// to stay. Its column references are written against the
+					// Project's INPUT, which is where the type has to be
+					// resolved.
+					inputExpr, exprCols = expr, exprInput
+				} else {
+					agg.InputCol = resolved
+					if _, bare := inputExpr.(*plansql.ColRef); bare || inputExpr == nil {
+						inputExpr = &plansql.ColRef{Column: resolved}
+					}
+				}
+			}
+			if resolved, expr, _, renamed := resolveAggInputName(agg.InputCol2, aggChild); renamed && expr == nil {
+				agg.InputCol2 = resolved
+			}
 			spec := AggSpec{
 				Func:       agg.Func,
 				InputCol:   agg.InputCol,
@@ -4032,6 +4228,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				Separator:  agg.Separator,
 				Percentile: agg.Percentile,
 			}
+			agg.InputExpr = inputExpr
 			// DISTINCT rides the canonical Func string the worker already
 			// maps to exec.AggCountDistinct (#291: the flag used to be
 			// dropped here, so distributed COUNT(DISTINCT x) degenerated
@@ -4053,17 +4250,26 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					// And the type that expression evaluates into, since
 					// the worker builds the pre-aggregate projection from
 					// the text alone and has no catalog to consult.
-					var child *logical.Node
-					if len(node.Children) > 0 {
-						child = node.Children[0]
-					}
-					spec.InputType = inferProjectionTypeCols(agg.InputExpr, parquet.TypeFloat64, nil, inputColTypes(child))
+					spec.InputType = inferProjectionTypeCols(agg.InputExpr, parquet.TypeFloat64, nil, inputColTypes(exprCols))
 				}
 			}
 			aggSpecs = append(aggSpecs, spec)
 		}
 		groupBy := make([]string, len(node.GroupBy))
 		copy(groupBy, node.GroupBy)
+		// Same resolution for the GROUP BY keys, and the same defect without
+		// it: an unresolvable key serializes as NULL rather than failing, so
+		// `GROUP BY k` over `SELECT o_orderstatus AS k` collapsed 3 groups
+		// into one NULL group of every row.
+		for i, key := range groupBy {
+			if resolved, renamed := aggStageGroupKey(key, aggChild); renamed {
+				groupBy[i] = resolved
+				if p.aggStageRenames == nil {
+					p.aggStageRenames = make(map[string]string)
+				}
+				p.aggStageRenames[strings.ToLower(key)] = resolved
+			}
+		}
 
 		// Optimization: fuse aggregation into scan when the only child
 		// stages are scans (no joins or sorts in between). This eliminates
@@ -4270,7 +4476,15 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			buildNaming = subtreeNamingOf(node.Children[1])
 		}
 		if jt != "cross" {
-			leftKeys, rightKeys = parseJoinKeys(node.JoinCond)
+			var residual []string
+			leftKeys, rightKeys, residual = parseJoinKeys(node.JoinCond)
+			if len(residual) > 0 {
+				// walkStages has no error return; park the refusal the way
+				// a set-operation refusal is parked (#346) and let
+				// PlanDistributed raise it. Emitting a join keyed on a name
+				// that is not a column is what made this silent.
+				p.refuseJoin(refuseJoinCond(jt, node.JoinCond, residual))
+			}
 			// parseJoinKeys assigns left/right based on position in the "="
 			// expression, not based on which child subtree owns the column.
 			// Fix the assignment so leftKeys are from the probe (left) child
@@ -4990,7 +5204,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// Parse join condition to extract key columns (cross joins have no ON clause)
 	var leftKeys, rightKeys []string
 	if jt != "cross" {
-		leftKeys, rightKeys = parseJoinKeys(node.JoinCond)
+		var residual []string
+		leftKeys, rightKeys, residual = parseJoinKeys(node.JoinCond)
+		if len(residual) > 0 {
+			return nil, nil, nil, refuseJoinCond(jt, node.JoinCond, residual)
+		}
 		if len(leftKeys) == 0 {
 			return nil, nil, nil, fmt.Errorf("could not extract join keys from: %s", node.JoinCond)
 		}
@@ -6046,30 +6264,138 @@ func (ps *pipelineSource) Close() error {
 	return err
 }
 
-// parseJoinKeys extracts left and right key columns from a join condition.
-// Handles patterns like "e.user_id = u.user_id" or "user_id = user_id".
-func parseJoinKeys(cond string) (leftKeys, rightKeys []string) {
-	// Split on " and " for compound keys
-	parts := strings.Split(strings.ToLower(cond), " and ")
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		eqParts := strings.SplitN(part, "=", 2)
-		if len(eqParts) != 2 {
+// parseJoinKeys reads a join condition STRUCTURALLY and returns the equi-join
+// key columns, plus every conjunct it cannot represent as a key pair.
+//
+// The join executor takes a condition as two parallel lists of COLUMN NAMES,
+// so the only ON conjunct it can express is an equality between two bare
+// column references. Anything else — an expression operand
+// (`r.r_regionkey + 3`), a literal operand (`n.n_regionkey = 1`), a non-equi
+// operator, a disjunction — comes back in residual, and the caller refuses the
+// plan rather than handing the executor a name that is not a column.
+//
+// This used to split the TEXT on " and " and then on the first "=", passing
+// whatever fell either side through as a column name. An unresolvable name
+// resolves to index -1 in the executor, which hashes as a constant, so the two
+// failure modes were a join that matched NOTHING (one side a real column, the
+// other not: `n.n_regionkey = r.r_regionkey + 3` answered 0 for a 10-row
+// query) and a join that matched EVERYTHING (neither side real: a silent cross
+// product). `a.x <= b.y` split on its own "=" and produced the column name
+// "a.x <" — the splitting was lexical where the condition is structural
+// (#351). Both are the shape this codebase keeps relearning: a key that does
+// not resolve must error or fall back, never silently match nothing.
+//
+// Table qualifiers are preserved ("n1.n_regionkey") so that probe-side lookups
+// against a self-join chain's qualified output schema resolve directly. The
+// columnIndexFallback in the join executor strips the qualifier on miss, so
+// unqualified scan-source schemas still resolve. Stripping here would force
+// the executor to suffix-match a qualified column from {n1.X, n2.X}, which is
+// ambiguous and returns -1 → 0 rows from the join.
+//
+// A conjunct comparing two CONSTANTS is passed through as a key pair
+// unchanged. That is the optimizer's `1 = 1` sentinel, written into JoinCond
+// when every ON conjunct has been pushed to a child (optimizer.go,
+// extractJoinCondPredicates): it means ON TRUE, and a constant on both sides
+// puts every row in one hash bucket, which is the cross product it asks for.
+func parseJoinKeys(cond string) (leftKeys, rightKeys, residual []string) {
+	cond = strings.TrimSpace(cond)
+	if cond == "" {
+		return nil, nil, nil
+	}
+	expr := parseJoinCondExpr(cond)
+	if expr == nil {
+		// Unparseable. Refuse it: the lexical split used to invent column
+		// names out of whatever text sat either side of an "=".
+		return nil, nil, []string{cond}
+	}
+	for _, conj := range flattenJoinConjuncts(expr) {
+		left, right, ok := joinKeyPair(conj)
+		if !ok {
+			residual = append(residual, conj.String())
 			continue
 		}
-		// Preserve table qualifiers ("n1.n_regionkey") so that probe-side
-		// lookups against a self-join chain's qualified output schema
-		// resolve directly. The columnIndexFallback in the join executor
-		// strips the qualifier on miss, so unqualified scan-source schemas
-		// still resolve. Stripping here would force the executor to
-		// suffix-match a qualified column from {n1.X, n2.X}, which is
-		// ambiguous and returns -1 → 0 rows from the join.
-		left := strings.TrimSpace(eqParts[0])
-		right := strings.TrimSpace(eqParts[1])
 		leftKeys = append(leftKeys, left)
 		rightKeys = append(rightKeys, right)
 	}
-	return
+	return leftKeys, rightKeys, residual
+}
+
+// parseJoinCondExpr parses a join condition into an expression AST. It borrows
+// the WHERE slot of a dummy SELECT, the same trick logical.tryParseExpr uses.
+func parseJoinCondExpr(cond string) plansql.Node {
+	parsed, err := plansql.Parse("SELECT 1 FROM _dummy WHERE " + cond)
+	if err != nil {
+		return nil
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil || info == nil {
+		return nil
+	}
+	return info.WhereExpr
+}
+
+// flattenJoinConjuncts splits an ON expression on its top-level ANDs. Unlike
+// the string split it replaces, it cannot be fooled by an " and " inside a
+// string literal or under an OR.
+func flattenJoinConjuncts(expr plansql.Node) []plansql.Node {
+	switch e := expr.(type) {
+	case *plansql.ParenNode:
+		return flattenJoinConjuncts(e.Inner)
+	case *plansql.AndNode:
+		return append(flattenJoinConjuncts(e.Left), flattenJoinConjuncts(e.Right)...)
+	}
+	return []plansql.Node{expr}
+}
+
+// joinKeyPair reports the two key column names of one ON conjunct, and whether
+// the conjunct is expressible as a key pair at all.
+func joinKeyPair(conj plansql.Node) (left, right string, ok bool) {
+	if p, isParen := conj.(*plansql.ParenNode); isParen {
+		return joinKeyPair(p.Inner)
+	}
+	cmp, isCmp := conj.(*plansql.CmpExpr)
+	if !isCmp || cmp.Op != "=" {
+		return "", "", false
+	}
+	lName, lIsCol := joinKeyName(cmp.Left)
+	rName, rIsCol := joinKeyName(cmp.Right)
+	switch {
+	case lIsCol && rIsCol:
+		return lName, rName, true
+	case !lIsCol && !rIsCol && lName != "" && rName != "":
+		// Neither side names a column: the `1 = 1` ON-TRUE sentinel.
+		return lName, rName, true
+	}
+	return "", "", false
+}
+
+// joinKeyName renders an ON operand the way the executor spells a column —
+// qualifier kept, lowercased, which is what the text split produced. The bool
+// reports whether the operand IS a bare column reference; a constant comes
+// back with it false and its literal text as the name.
+func joinKeyName(n plansql.Node) (string, bool) {
+	switch e := n.(type) {
+	case *plansql.ParenNode:
+		return joinKeyName(e.Inner)
+	case *plansql.ColRef:
+		if e.Table != "" {
+			return strings.ToLower(e.Table + "." + e.Column), true
+		}
+		return strings.ToLower(e.Column), true
+	case *plansql.Lit:
+		return strings.ToLower(e.String()), false
+	}
+	return "", false
+}
+
+// refuseJoinCond is the error a join whose ON clause the key representation
+// cannot express. Both planning entry points raise it rather than let an
+// unrepresentable conjunct reach the executor as a column name.
+func refuseJoinCond(joinType, cond string, residual []string) error {
+	return fmt.Errorf("join ON %q: %s cannot be represented as an equi-join key "+
+		"(the %s join executor matches on column names, and only an equality between two "+
+		"bare columns is one); it must be lifted into a filter above the join, which is legal "+
+		"for an inner join only", cond, strings.Join(residual, ", "), joinType)
 }
 
 func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {

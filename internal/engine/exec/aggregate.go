@@ -1082,7 +1082,9 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 
 	// Resolve column indices and typed updaters once
 	if !h.resolved {
-		h.resolveIndices(b)
+		if err := h.resolveIndices(b); err != nil {
+			return err
+		}
 		// Cooperative-spill registration. resolveIndices populates the path
 		// flags (useIntGroupKey etc.) that canUseExternalMerge inspects, so
 		// register only after they've been set. Inspect reports SpillableBytes
@@ -1216,7 +1218,39 @@ func columnIndexFallback(b *batch.RecordBatch, name string) int {
 	return match
 }
 
-func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
+// unresolvedAggColumn is the error a name the aggregate reads but the input
+// batch does not carry. Answering it with NULL is what #355 was: `SELECT
+// MAX(n) FROM (SELECT o_custkey AS n FROM orders)` came back NULL on the
+// stage DAG, because the subquery's rename emits no stage there and the
+// aggregate asked for a column nothing produced. The same miss on a GROUP BY
+// key is louder still — an unresolvable key serializes as a NULL key, so every
+// row collapses into one group.
+//
+// The planner is where a rename is meant to be resolved (physical.
+// resolveAggInputName). This is the backstop that stops the next one being a
+// wrong answer instead of a failure.
+func unresolvedAggColumn(role, col string, b *batch.RecordBatch) error {
+	have := make([]string, len(b.Schema))
+	for i, c := range b.Schema {
+		have[i] = c.Name
+	}
+	return fmt.Errorf("hash aggregate: %s %q is not a column of its input (input has: %s)",
+		role, col, strings.Join(have, ", "))
+}
+
+// readsSecondColumn reports whether an aggregate function reads InputCol2 per
+// row. The *StateMerge pair does not: it consumes the encoded state its
+// partial emitted, and carries InputCol2 only because the spec is copied
+// whole.
+func readsSecondColumn(fn AggFunc) bool {
+	switch fn {
+	case AggCorr, AggCovarSamp, AggCovarPop, AggCovarState, AggMinBy, AggMaxBy:
+		return true
+	}
+	return false
+}
+
+func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 	// GroupByAll resolves the key set from the live schema, so every
 	// downstream decision (fast-path selection, output schema, spill merge)
 	// sees a concrete column list exactly as if the planner had named them.
@@ -1233,11 +1267,12 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	for i, col := range h.GroupByCols {
 		idx := columnIndexFallback(b, col)
 		h.groupColIdx[i] = idx
-		if idx >= 0 {
-			h.groupColTypes[i] = b.Columns[idx].Type
-			if idx < len(b.Schema) {
-				h.groupColMeta[i] = b.Schema[idx]
-			}
+		if idx < 0 {
+			return unresolvedAggColumn("GROUP BY key", col, b)
+		}
+		h.groupColTypes[i] = b.Columns[idx].Type
+		if idx < len(b.Schema) {
+			h.groupColMeta[i] = b.Schema[idx]
 		}
 	}
 	h.aggColIdx = make([]int, len(h.Aggs))
@@ -1251,6 +1286,9 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		if agg.Func == AggCountDistinct || agg.Func == AggApproxDistinct {
 			if agg.InputCol != "" {
 				h.aggColIdx[i] = columnIndexFallback(b, agg.InputCol)
+				if h.aggColIdx[i] < 0 {
+					return unresolvedAggColumn("aggregate input", agg.InputCol, b)
+				}
 			} else {
 				h.aggColIdx[i] = -1
 			}
@@ -1264,11 +1302,12 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			// chain's QualifyAllBuildCols renamed the column.
 			idx := columnIndexFallback(b, agg.InputCol)
 			h.aggColIdx[i] = idx
-			if idx >= 0 {
-				h.aggInputTypes[i] = b.Columns[idx].Type
-				h.aggUpdaters[i] = resolveAggUpdater(agg.Func, b.Columns[idx].Type)
-				h.aggUpdatersNoNull[i] = resolveAggUpdaterNoNull(agg.Func, b.Columns[idx].Type)
+			if idx < 0 {
+				return unresolvedAggColumn("aggregate input", agg.InputCol, b)
 			}
+			h.aggInputTypes[i] = b.Columns[idx].Type
+			h.aggUpdaters[i] = resolveAggUpdater(agg.Func, b.Columns[idx].Type)
+			h.aggUpdatersNoNull[i] = resolveAggUpdaterNoNull(agg.Func, b.Columns[idx].Type)
 		} else {
 			h.aggColIdx[i] = -1
 			if agg.Func == AggCount {
@@ -1279,6 +1318,13 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		// Resolve second column index for two-column aggregates
 		if agg.InputCol2 != "" {
 			h.aggColIdx2[i] = columnIndexFallback(b, agg.InputCol2)
+			// Loud only for the functions that READ it. A partial/final
+			// split leaves InputCol2 naming the original column on the
+			// FINAL, whose input is the partial's encoded state column and
+			// carries neither operand — stale metadata, not a lookup.
+			if h.aggColIdx2[i] < 0 && readsSecondColumn(agg.Func) {
+				return unresolvedAggColumn("aggregate input", agg.InputCol2, b)
+			}
 		}
 	}
 
@@ -1656,6 +1702,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			}
 		}
 	}
+	return nil
 }
 
 func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
@@ -3694,7 +3741,9 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 			// The spilled batch uses h.inputSchema (same column order as
 			// the original), so re-resolution is unnecessary.
 			if !h.resolved {
-				h.resolveIndices(b)
+				if err := h.resolveIndices(b); err != nil {
+					return err
+				}
 			}
 			h.consumeBatch(b)
 		}
@@ -3706,7 +3755,9 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 		if len(h.spillBuffer) > 0 {
 			b := batch.FromRows(h.inputSchema, h.spillBuffer)
 			if !h.resolved {
-				h.resolveIndices(b)
+				if err := h.resolveIndices(b); err != nil {
+					return err
+				}
 			}
 			h.consumeBatch(b)
 			if h.Spill != nil {
