@@ -44,7 +44,10 @@ tiny-scale TPC-H suite runs row-identical through either path).
 Facts that matter when touching this:
 - Both paths consume the **identical optimized logical plan** (post
   RLS-injection, post `logical.Optimize`) — result and policy parity is by
-  construction. Any local plan/execute error falls back to the DAG.
+  construction. A local PLAN error falls back to the DAG (which covers
+  shapes the local pipeline declines); an EXECUTION error falls back only
+  when it is unrelated to the query's meaning — see `classifyLocalFailure`
+  and `FastPathStrict` in coordinator/local_fastpath.go (#308).
 - Unestimable plans (unknown table = table functions, residual subquery
   expressions in Raw predicate/projection text) route to the DAG.
 - Concurrency-capped (`localSem`); overflow routes to the DAG, never queues.

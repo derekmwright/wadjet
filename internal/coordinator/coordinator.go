@@ -216,6 +216,10 @@ type Coordinator struct {
 	localSem   chan struct{}                 // limits concurrent local fast-path executions
 	localHits  atomic.Int64                  // queries served by the local fast path
 	localBails atomic.Int64                  // local runs aborted over result budget, re-dispatched as DAG
+	// local executions reported to the client instead of retried on the
+	// DAG (#308) — every increment is a query the two paths might have
+	// answered differently.
+	localStrictFails atomic.Int64
 	// localResultBudgetOverride replaces localResultBudget's derivation in
 	// tests (0 = derive from the routing threshold).
 	localResultBudgetOverride int64
@@ -819,10 +823,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	// costs (task dispatch, object-store materialization per stage
 	// boundary) dominate small queries; the local pipeline answers in
 	// milliseconds. Both paths consume the identical optimized logical
-	// plan, so results and policy enforcement match by construction. Any
-	// local failure falls through to the DAG.
-	if res, handled := c.tryLocalFastPath(ctx, queryID, logicalPlan, planStr, start); handled {
-		return res, nil
+	// plan, so results and policy enforcement match by construction. A
+	// local failure falls through to the DAG only when it says nothing
+	// about the query's meaning (#308) — see FastPathStrict.
+	if res, handled, err := c.tryLocalFastPath(ctx, queryID, logicalPlan, planStr, start); handled {
+		return res, err
 	}
 
 	planner := physical.NewPlanner(c.catalog)

@@ -6,9 +6,68 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
+
+// FastPathStrict makes a local execution FAILURE final instead of retrying
+// the query on the distributed DAG (#308). Retry is kept only for failures
+// that say nothing about the query's meaning — the deliberate result-budget
+// bail-out, a local memory budget a worker fleet would not hit, and
+// object-store unavailability. Every other execution error is deterministic:
+// re-running it on the DAG either reproduces it (wasted work) or, when the
+// two paths disagree, silently returns rows the local path considered
+// impossible to produce. That second case is precisely the class of defect
+// #312 was — a fallback would have shipped its wrong answer instead of
+// surfacing anything. Kill switch: WADJET_FASTPATH_STRICT=0 restores the
+// unconditional fallback.
+//
+// Routing and PLANNING failures are unaffected: no query semantics have been
+// evaluated at that point, and the DAG legitimately covers plan shapes the
+// local pipeline declines.
+var FastPathStrict = optswitch.Register("fastpath-strict", "WADJET_FASTPATH_STRICT",
+	"report a local fast-path execution failure instead of retrying it on the DAG")
+
+// localOutcome is what a local execution failure means for the query.
+type localOutcome int
+
+const (
+	// retryOnDAG: the failure says nothing about the query's meaning.
+	retryOnDAG localOutcome = iota
+	// reportToClient: the failure IS the query's outcome.
+	reportToClient
+)
+
+// classifyLocalFailure decides whether a failed local execution may be
+// retried on the DAG. ctxErr is the statement context's error, which
+// outranks everything: a caller who cancelled is not asking for a second
+// attempt. Pure so every branch is testable without a cluster.
+func classifyLocalFailure(err, ctxErr error, strict bool) localOutcome {
+	switch {
+	case ctxErr != nil:
+		// Cancelled or timed out. Re-dispatching runs the whole query
+		// again under a context that is already dead, and reports the
+		// cancellation as a DAG failure — which is how a client's stop
+		// button surfaced as "native DAG: context canceled".
+		return reportToClient
+	case errors.Is(err, exec.ErrCollectBudget):
+		// By design: the result outgrew the local budget and the DAG's
+		// gather spills it to scratch. Reads are idempotent.
+		return retryOnDAG
+	case errors.Is(err, memory.ErrMemoryExceeded):
+		// The coordinator budgets one process; the fleet has more.
+		return retryOnDAG
+	case errors.Is(err, objstore.ErrCircuitOpen):
+		// S3 unavailable to THIS process — a worker may still reach it.
+		return retryOnDAG
+	case strict:
+		return reportToClient
+	}
+	return retryOnDAG
+}
 
 // DefaultLocalFastPathBytes is the default routing threshold: a query whose
 // total post-pruning catalog scan bytes stay under this executes in-process
@@ -57,34 +116,41 @@ func (c *Coordinator) localResultBudget(threshold int64) int64 {
 	return 8 * threshold
 }
 
+// LocalFastPathStrictFailures reports how many local executions were
+// reported to the client instead of retried on the DAG.
+func (c *Coordinator) LocalFastPathStrictFailures() int64 {
+	return c.localStrictFails.Load()
+}
+
 // tryLocalFastPath routes a small query onto the coordinator-local
-// single-process pipeline. Returns (result, true) when the query was
-// executed locally; (nil, false) when the caller should proceed with the
-// distributed DAG — because the fast path is disabled, the concurrency cap
-// is saturated, the plan's input size is unestimable or over threshold, or
-// local planning/execution failed (any local error falls back to the DAG,
-// which is the reliability path).
+// single-process pipeline. Returns handled=true when the fast path produced
+// the query's definitive outcome — a result, or (under FastPathStrict) an
+// execution error the DAG must not be given a second opinion on. It returns
+// handled=false when the caller should proceed with the distributed DAG:
+// the fast path is disabled, the concurrency cap is saturated, the plan's
+// input size is unestimable or over threshold, local PLANNING failed, or
+// execution failed in a way unrelated to the query's meaning.
 //
 // The logical plan passed here is the final optimized plan — identical to
 // what PlanDistributed would consume — so both paths see the same RLS row
 // filters and rewrites, and answer identically by construction.
-func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time) (*SQLResult, bool) {
+func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time) (*SQLResult, bool, error) {
 	threshold := c.localFastPathBytes()
 	if threshold <= 0 {
-		return nil, false
+		return nil, false, nil
 	}
 	select {
 	case c.localSem <- struct{}{}:
 		defer func() { <-c.localSem }()
 	default:
 		c.logger.Debug("local fast path saturated, routing to DAG", "query", queryID)
-		return nil, false
+		return nil, false, nil
 	}
 
 	planner := physical.NewPlanner(c.catalog)
 	estBytes, ok := planner.EstimatePlanScanBytes(ctx, logicalPlan)
 	if !ok || estBytes > threshold {
-		return nil, false
+		return nil, false, nil
 	}
 
 	// Pipeline breakers spill past the budget; the budget only bounds
@@ -97,7 +163,7 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 	if err != nil {
 		c.logger.Warn("local fast path plan failed, routing to DAG",
 			"query", queryID, "error", err)
-		return nil, false
+		return nil, false, nil
 	}
 	if physPlan.Cleanup != nil {
 		defer physPlan.Cleanup()
@@ -108,7 +174,7 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		pipeline.Close()
 		c.logger.Warn("local fast path: unexpected sink type, routing to DAG",
 			"query", queryID)
-		return nil, false
+		return nil, false, nil
 	}
 	// Keep the result columnar: Finalize would otherwise box every row into
 	// map[string]any and release the batches. The collected batches are
@@ -123,6 +189,17 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 	sink.MaxBytes = c.localResultBudget(threshold)
 	if err := pipeline.Run(ctx); err != nil {
 		pipeline.Close()
+		if classifyLocalFailure(err, ctx.Err(), FastPathStrict.On()) == reportToClient {
+			// The DAG would either reproduce this or disagree with it, and
+			// a disagreement is a defect to surface, not an answer to
+			// serve. Logged at ERROR: this is the seam where the two paths
+			// would have parted company.
+			c.localStrictFails.Add(1)
+			c.logger.Error("local fast path execution failed, reporting to client",
+				"query", queryID, "error", err,
+				"note", "set WADJET_FASTPATH_STRICT=0 to retry such failures on the DAG")
+			return nil, true, err
+		}
 		if errors.Is(err, exec.ErrCollectBudget) {
 			c.localBails.Add(1)
 			c.logger.Info("local fast path result over budget, re-dispatching as DAG",
@@ -131,7 +208,7 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 			c.logger.Warn("local fast path execution failed, routing to DAG",
 				"query", queryID, "error", err)
 		}
-		return nil, false
+		return nil, false, nil
 	}
 	defer pipeline.Close()
 	batches := sink.Batches()
@@ -155,5 +232,5 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		TotalRows: totalRows,
 		Elapsed:   time.Since(start),
 		Plan:      planStr,
-	}, true
+	}, true, nil
 }

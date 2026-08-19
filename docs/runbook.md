@@ -107,7 +107,11 @@ Defaults are already the validated memory-tight profile:
 - `--local-fastpath-bytes` (default 64 MiB): queries whose post-pruning
   scan bytes fit under it run in-process on the coordinator, skipping
   the stage DAG entirely (measured 2-12× on small/top-N queries). 0
-  disables. Failures fall back to the DAG.
+  disables. Routing and planning failures fall back to the DAG; so do
+  execution failures unrelated to the query's meaning (result budget,
+  memory budget, S3 unreachable). A deterministic execution failure is
+  reported to the client — `WADJET_FASTPATH_STRICT=0` restores the
+  unconditional fallback. `LocalFastPathStrictFailures()` counts them.
 - `--streaming-exchange` (default **true**): consumers fetch stage
   outputs from producer workers' local disk over gRPC with async S3
   upload; any failure falls back to the durable S3 path. Validated
