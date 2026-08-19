@@ -56,6 +56,86 @@
       "fine": "7acb3a2c420e587c",
       "coarse": "ea8c575af23c539f"
     },
+    "EmptyBuildAntiJoin": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "64aeb9975f234bec",
+      "coarse": "64aeb9975f234bec"
+    },
+    "EmptyBuildInnerJoin": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "9a271f2a916b0b6e",
+      "coarse": "9a271f2a916b0b6e"
+    },
+    "EmptyBuildLeftJoinCountCol": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "rows_out",
+        "matched_str",
+        "matched_int"
+      ],
+      "fine": "455551887e51b19f",
+      "coarse": "455551887e51b19f"
+    },
+    "EmptyBuildLeftJoinIsNotNull": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "9a271f2a916b0b6e",
+      "coarse": "9a271f2a916b0b6e"
+    },
+    "EmptyBuildLeftJoinIsNull": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "64aeb9975f234bec",
+      "coarse": "64aeb9975f234bec"
+    },
+    "EmptyBuildLeftJoinValues": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "r_name"
+      ],
+      "fine": "d62ab7baf1d7440e",
+      "coarse": "d62ab7baf1d7440e"
+    },
+    "EmptyBuildSemiJoin": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "9a271f2a916b0b6e",
+      "coarse": "9a271f2a916b0b6e"
+    },
     "EmptyJoinUngroupedCount": {
       "source": "duckdb",
       "row_count": 1,
@@ -78,6 +158,18 @@
       "fine": "fa4d91d2941621e2",
       "coarse": "fa4d91d2941621e2"
     },
+    "EmptyProbeRightJoin": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c",
+        "m"
+      ],
+      "fine": "eaeb40b8ba9351b3",
+      "coarse": "eaeb40b8ba9351b3"
+    },
     "EmptyScanUngroupedSum": {
       "source": "duckdb",
       "row_count": 1,
@@ -99,6 +191,42 @@
       ],
       "fine": "917df3320d778ddb",
       "coarse": "917df3320d778ddb"
+    },
+    "FullJoinOnConjunctBuildSide": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "932ab0a0e4191d32",
+      "coarse": "932ab0a0e4191d32"
+    },
+    "FullJoinUnmatchedBothSides": {
+      "source": "duckdb",
+      "row_count": 30,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "r_name"
+      ],
+      "fine": "08fb2c2f83e33d64",
+      "coarse": "08fb2c2f83e33d64"
+    },
+    "FullJoinUnmatchedBothSidesCount": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c",
+        "n_rows",
+        "r_rows"
+      ],
+      "fine": "9fbc40d329d3ab8e",
+      "coarse": "9fbc40d329d3ab8e"
     },
     "FullJoinWhereAntiJoinIdiom": {
       "source": "duckdb",
@@ -145,6 +273,29 @@
       "fine": "f0b5c2c2211c8d67",
       "coarse": "f0b5c2c2211c8d67"
     },
+    "KeylessCrossJoinFilter": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "e00e6031fc5e7ef9",
+      "coarse": "e00e6031fc5e7ef9"
+    },
+    "KeylessCrossJoinValues": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "r_name",
+        "n_name"
+      ],
+      "fine": "7d0df22b8db8857c",
+      "coarse": "7d0df22b8db8857c"
+    },
     "LeftJoinEmptyBuildSide": {
       "source": "duckdb",
       "row_count": 1,
@@ -179,6 +330,17 @@
       ],
       "fine": "d62ab7baf1d7440e",
       "coarse": "d62ab7baf1d7440e"
+    },
+    "LeftJoinOnConjunctBuildSide": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "64aeb9975f234bec",
+      "coarse": "64aeb9975f234bec"
     },
     "LimitThenOffset": {
       "source": "duckdb",
@@ -939,6 +1101,29 @@
       "ordered": true,
       "tolerance": 4,
       "why": "row membership turns on a float threshold; borderline rows shift with accumulation order"
+    },
+    "RightJoinNoMatchAtAll": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "64aeb9975f234bec",
+      "coarse": "64aeb9975f234bec"
+    },
+    "RightJoinUnmatchedValues": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "r_name"
+      ],
+      "fine": "e4912ddcfe18ded1",
+      "coarse": "e4912ddcfe18ded1"
     },
     "RightJoinWhereAntiJoinIdiom": {
       "source": "duckdb",

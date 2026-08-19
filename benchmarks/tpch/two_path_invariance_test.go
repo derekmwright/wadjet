@@ -1690,15 +1690,16 @@ func twoPathCorpus() []twoPathQuery {
 			assertA: assertCount("c", 50)},
 		// Two divergences this suite found while the above were being
 		// written. Neither is a predicate defect — both appear with no WHERE
-		// at all — and both are the DAG losing an outer join's NULL-padded
-		// rows, so they are pinned rather than fixed here.
+		// at all — and both were the DAG losing an outer join's NULL-padded
+		// rows. Fixed in #352 and #348 respectively; see the block at the end
+		// of this corpus for the rest of that family.
 		twoPathQuery{name: "RightJoinUnmatchedRows", cmp: cmpUnordered, expectRows: true,
-			sql:      "SELECT COUNT(*) AS c FROM region r RIGHT JOIN nation n ON r.r_regionkey = n.n_nationkey",
-			knownBug: "the stage DAG answers 5 where the preserved side has 25 rows — a RIGHT JOIN's unmatched rows are dropped"},
+			sql:     "SELECT COUNT(*) AS c FROM region r RIGHT JOIN nation n ON r.r_regionkey = n.n_nationkey",
+			assertA: assertCount("c", 25)},
 		twoPathQuery{name: "LeftJoinEmptyBuildSide", cmp: cmpUnordered, expectRows: true,
 			sql: `SELECT COUNT(*) AS c FROM nation n LEFT JOIN region r
 				ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0`,
-			knownBug: "the stage DAG answers 0 for a LEFT JOIN with an empty build side, where all 25 preserved rows must survive"},
+			assertA: assertCount("c", 25)},
 	)
 
 	// #345: a window VALUE function over a non-float column. LAG, LEAD,
@@ -1903,6 +1904,177 @@ func twoPathCorpus() []twoPathQuery {
 			sql: `SELECT o_orderkey, o_totalprice,
 				SUM(o_totalprice) OVER (ORDER BY o_orderkey ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS w
 				FROM orders WHERE o_orderkey <= 500 ORDER BY o_orderkey`},
+	)
+
+	// #348/#352 — an outer join over an EMPTY side, and a join with no keys
+	// at all. What makes these two-path cases rather than plain correctness
+	// cases is that the DAG and the single-process pipeline lose the rows for
+	// DIFFERENT reasons: the worker's empty-build short-circuit dropped every
+	// probe row where the in-process join dropped only the build side's
+	// COLUMNS, and only the in-process path had any code that emitted a
+	// RIGHT/FULL join's unmatched build rows at all.
+	//
+	// Every entry is held absolutely as well as arm-against-arm — by an
+	// assertA, or by wantRows/wantCols where the answer is a row set: the
+	// compare alone is satisfied by both arms answering 0, which is exactly
+	// what several of these did.
+	countNulls := func(col string, wantNull, wantNonNull int) func(testing.TB, []map[string]any) {
+		return func(tb testing.TB, rows []map[string]any) {
+			tb.Helper()
+			var nulls, nonNulls int
+			for _, r := range rows {
+				v, ok := lookupCell(r, col)
+				if !ok {
+					tb.Fatalf("result has no column %q: %v — an empty join side must leave its "+
+						"columns PRESENT and NULL, not absent", col, r)
+				}
+				if v == nil {
+					nulls++
+				} else {
+					nonNulls++
+				}
+			}
+			if nulls != wantNull || nonNulls != wantNonNull {
+				tb.Errorf("column %s: %d NULL / %d non-NULL cells, want %d / %d",
+					col, nulls, nonNulls, wantNull, wantNonNull)
+			}
+		}
+	}
+	out = append(out,
+		// COUNT(*) beside COUNT(col) over the empty build: the pair that
+		// separates "the column is NULL" from "the column is absent". The
+		// second was 25 on the single-process arm, because an absent column
+		// makes COUNT(col) degenerate into COUNT(*).
+		twoPathQuery{name: "EmptyBuildLeftJoinCountCol", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c, COUNT(r.r_name) AS m FROM nation n
+				LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				if got := cellNum(rows[0], "c"); got != 25 {
+					tb.Errorf("COUNT(*) = %v, want 25 — every preserved row survives an empty build", got)
+				}
+				if got := cellNum(rows[0], "m"); got != 0 {
+					tb.Errorf("COUNT(r.r_name) = %v, want 0 — the build column is NULL on every row, "+
+						"and COUNT(col) skips NULLs", got)
+				}
+			}},
+		// The same join's values: 25 rows, and the build column PRESENT and
+		// NULL on all of them. wantCols pins the column list absolutely,
+		// since an absent column is precisely the defect.
+		twoPathQuery{name: "EmptyBuildLeftJoinValues", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n.n_name, r.r_name FROM nation n
+				LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0
+				ORDER BY n.n_name`,
+			wantRows: 25, wantCols: []string{"n_name", "r_name"},
+			assertA: countNulls("r_name", 25, 0)},
+		// The anti-join idiom over the empty build — how a query ASKS for the
+		// unmatched rows, and the shape a careless fix breaks. Both arms
+		// answered 0 against 25 before, because IS NULL cannot match a column
+		// that is not there.
+		twoPathQuery{name: "EmptyBuildLeftJoinIsNull", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n
+				LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0
+				WHERE r.r_regionkey IS NULL`,
+			assertA: assertCount("c", 25)},
+		twoPathQuery{name: "EmptyBuildLeftJoinIsNotNull", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n
+				LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0
+				WHERE r.r_regionkey IS NOT NULL`,
+			assertA: assertCount("c", 0)},
+		// The other three join types over the same empty build. INNER and
+		// SEMI answer nothing and always did — the short-circuit the LEFT fix
+		// narrowed is correct for them. ANTI answers everything and was lost
+		// with LEFT: it preserves probe rows the build never matched too.
+		twoPathQuery{name: "EmptyBuildInnerJoin", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n
+				JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0`,
+			assertA: assertCount("c", 0)},
+		twoPathQuery{name: "EmptyBuildSemiJoin", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n WHERE EXISTS (
+				SELECT 1 FROM region r WHERE r.r_regionkey = n.n_regionkey AND r.r_regionkey < 0)`,
+			assertA: assertCount("c", 0)},
+		twoPathQuery{name: "EmptyBuildAntiJoin", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n WHERE NOT EXISTS (
+				SELECT 1 FROM region r WHERE r.r_regionkey = n.n_regionkey AND r.r_regionkey < 0)`,
+			assertA: assertCount("c", 25)},
+		// A RIGHT JOIN's preserved rows, by value. The count was right on the
+		// single-process arm all along and the values were not: the flush was
+		// handed the join's OUTPUT schema as though it were the probe's, so
+		// the preserved side's own columns mapped onto the NULL half and
+		// every unmatched nation came back nameless.
+		twoPathQuery{name: "RightJoinUnmatchedValues", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n.n_name, r.r_name FROM region r
+				RIGHT JOIN nation n ON r.r_regionkey = n.n_nationkey ORDER BY n.n_name`,
+			wantRows: 25, wantCols: []string{"n_name", "r_name"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				// The preserved side is never NULL; the other side is NULL on
+				// exactly the 20 nations with no region of that key.
+				countNulls("n_name", 0, 25)(tb, rows)
+				countNulls("r_name", 20, 5)(tb, rows)
+			}},
+		// A RIGHT JOIN where NOTHING matches: the probe emits no output batch
+		// at all, which is what skipped the unmatched flush entirely.
+		twoPathQuery{name: "RightJoinNoMatchAtAll", cmp: cmpUnordered, expectRows: true,
+			sql:     "SELECT COUNT(*) AS c FROM region r RIGHT JOIN nation n ON r.r_name = n.n_name",
+			assertA: assertCount("c", 25)},
+		// The mirror of the empty-build case: a RIGHT JOIN whose PROBE side
+		// is empty. On the DAG this is the ordinary shape of a shuffle
+		// partition that holds build rows and no probe rows.
+		twoPathQuery{name: "EmptyProbeRightJoin", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c, COUNT(r.r_name) AS m FROM region r
+				RIGHT JOIN nation n ON r.r_regionkey = n.n_nationkey AND r.r_regionkey < 0`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				if got := cellNum(rows[0], "c"); got != 25 {
+					tb.Errorf("COUNT(*) = %v, want 25 — the preserved side survives an empty probe", got)
+				}
+				if got := cellNum(rows[0], "m"); got != 0 {
+					tb.Errorf("COUNT(r.r_name) = %v, want 0", got)
+				}
+			}},
+		// FULL OUTER carries both halves at once: 25 nations and 5 regions,
+		// none matched, 30 rows each NULL-padded on one side.
+		twoPathQuery{name: "FullJoinUnmatchedBothSides", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c, COUNT(n.n_name) AS n_rows, COUNT(r.r_name) AS r_rows
+				FROM nation n FULL OUTER JOIN region r ON n.n_name = r.r_name`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				for col, want := range map[string]float64{"c": 30, "n_rows": 25, "r_rows": 5} {
+					if got := cellNum(rows[0], col); got != want {
+						tb.Errorf("%s = %v, want %v", col, got, want)
+					}
+				}
+			}},
+		twoPathQuery{name: "FullJoinUnmatchedBothSidesValues", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n.n_name, r.r_name FROM nation n FULL OUTER JOIN region r
+				ON n.n_name = r.r_name ORDER BY n.n_name, r.r_name`,
+			wantRows: 30, wantCols: []string{"n_name", "r_name"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				countNulls("n_name", 5, 25)(tb, rows)
+				countNulls("r_name", 25, 5)(tb, rows)
+			}},
+		// #352.2 — a keyless join. A comma join whose only condition is an
+		// inequality is a Cartesian product with a filter above it; the DAG
+		// had no operator for a join without equality keys and failed the
+		// task outright.
+		twoPathQuery{name: "KeylessCrossJoinFilter", cmp: cmpUnordered, expectRows: true,
+			sql:     "SELECT COUNT(*) AS c FROM region a, nation b WHERE a.r_regionkey < b.n_nationkey",
+			assertA: assertCount("c", 110)},
+		twoPathQuery{name: "KeylessCrossJoinValues", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT a.r_name, b.n_name FROM region a, nation b
+				WHERE a.r_regionkey < b.n_nationkey AND b.n_nationkey < 3 ORDER BY a.r_name, b.n_name`,
+			wantRows: 3, wantCols: []string{"r_name", "n_name"}},
 	)
 	return out
 }

@@ -106,7 +106,7 @@ the embedded engine per policy shape.
 | Logical node | Emits | Notes |
 |---|---|---|
 | `NodeScan` | `scan` stage (tasks = file/row-group split) | `buildScan` is the single-process analog |
-| `NodeJoin` | `hash_join`/`broadcast_join` (+ `exchange-repartition` shuffles for non-broadcast) | keys parsed at plan time (`plan.go:3145+`) |
+| `NodeJoin` | `hash_join`/`broadcast_join` (+ `exchange-repartition` shuffles for non-broadcast) | keys parsed at plan time (`plan.go:3145+`); RIGHT/FULL never broadcast — see §Outer joins |
 | `NodeAggregate` | `aggregate` (partial) → `final_aggregate` | two-phase (`plan.go:3034-3103`); the distribution pass adds the exchange |
 | `NodeSort` | `sort` → merge-sort tree | `plan.go:3105` |
 | `NodeWindow` | `window` | `plan.go:3384`. One task per PARTITION BY partition when the input already arrives clustered on those keys; Singleton otherwise — see §Window. |
@@ -131,6 +131,54 @@ Worker side: `buildFragmentUnary` (`worker/executor_fragment.go:952`) and
 requires `len(GroupByCols)>0 || len(Aggregates)>0` and has **no `GroupByAll`**
 — the single-process `buildDistinct` (`plan.go:5583`) uses
 `HashAggregate.GroupByAll=true`, which has no distributed equivalent yet.
+
+## Outer joins: the rows an empty side still owes
+
+An outer join's defining rows are the ones its data does NOT produce — the
+preserved side padded with NULLs — so both halves of that shape are decided by
+plan-time declarations and by which side each task owns, not by what arrives.
+
+**Declared side schemas.** `Stage.JoinProbeSchema` / `Stage.JoinBuildSchema`
+(`physical.declaredJoinSchema`, derived from the scans' `ScanColumns` +
+`ScanColTypes` narrowed to `NeededColumns` + keys) ride to the worker as
+`OpSpec.ProbeSchema` / `OpSpec.BuildSchema` and land on
+`exec.HashJoin.ProbeSchemaHint` / `BuildSchemaHint`. They are read **only**
+when that side delivers no batch at all: a real batch's schema always wins.
+Without them `buildSchema` stayed nil and the joined schema carried only the
+preserved side — values still read NULL through the projection's missing-name
+fallback, but `COUNT(col)` degenerated to `COUNT(*)` and `IS NULL` matched
+nothing (#348, same declare-on-the-wire shape as #329's `AggSpec.OutputType`).
+
+**Empty-side short circuits.** Two exist and both had to learn the join type:
+
+- `buildFragmentJoinProbe` (`worker/executor_fragment.go`) replaces the whole
+  op chain with a drop-everything filter when `BuildFiles` is empty. Correct
+  for inner/semi/right/cross; for LEFT/FULL/ANTI it deleted every preserved
+  row (`preservesProbeSide`), so those build an empty hash table instead.
+- `executeFragment`'s empty-`InputFiles` return does the same to the PROBE
+  side. A RIGHT/FULL join whose probe partition is empty still owes all of its
+  build rows — the ordinary shape of one shuffle partition — so it falls
+  through on `emptyFragmentSource{}` (`preservesBuildSide`).
+
+**Unmatched build rows.** `HashJoinProbe.FlushUnmatchedRows` emits them once
+per join, guarded on the shared `HashJoin` because every clone drains
+`FlushableOperator`. Both drivers go through it: `physical.joinFlushSource`
+(single process) and the worker's `drainFlushableOps`. The worker had no
+equivalent at all before #352, so a distributed RIGHT/FULL join answered with
+its matched rows only.
+
+**Why RIGHT/FULL never broadcast.** Any layout that REPLICATES the build side
+across tasks is unsound for them: each task holds the whole build and sees one
+slice of the probe, so each emits the same unmatched rows (25 → 75 on three
+workers). `walkStages` therefore refuses broadcast for those join types,
+`fuseStageChains` refuses them as chained consumers, and
+`planSkewSplitTasks` already refused to split them. The hash-shuffle layout is
+sound: a partition's build and probe rows land on the same task.
+
+**Keyless joins.** `FROM a, b WHERE a.x < b.y` plans as `jt == "cross"` with no
+keys. `buildFragmentJoinProbe` demands keys for every other join type and used
+to demand them here too, failing the task; the cross-join probe path handles
+it, with the inequality riding as the stage's post-filter.
 
 ## Shuffle internals
 

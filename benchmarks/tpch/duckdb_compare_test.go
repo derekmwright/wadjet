@@ -384,43 +384,32 @@ func duckdbCorpus() []duckdbCase {
 		// nation's 25 and were green throughout), which is why the whole
 		// SF0.01 corpus missed it.
 		//
-		// Arm B is exempt for a DIFFERENT defect this reduction runs into: on
-		// the stage DAG a LEFT JOIN whose build side is empty returns no rows
+		// Arm B was exempt for a DIFFERENT defect this reduction runs into: on
+		// the stage DAG a LEFT JOIN whose build side is empty returned no rows
 		// at all — `SELECT COUNT(*) FROM customer LEFT JOIN orders ON ... AND
-		// o_orderkey < 0` answers 0 where the truth is 1500, so the outer join
-		// degenerates to an inner one. That is not this bug and not fixed
-		// here; the exemption self-expires the moment arm B agrees.
+		// o_orderkey < 0` answered 0 where the truth is 1500, so the outer
+		// join degenerated to an inner one. Fixed in #348: the worker's
+		// empty-build short-circuit dropped every probe row, which is right
+		// for an inner/semi join and destroys a LEFT/FULL/ANTI one.
 		duckdbCase{name: "NullGroupKeyEmptyLeftJoin", sql: `SELECT o.o_orderstatus AS s, COUNT(*) AS c
 			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0
-			GROUP BY o.o_orderstatus`,
-			knownBugArm: armDAG,
-			knownBug: "on the stage DAG a LEFT JOIN with an empty build side returns no rows at all " +
-				"(the outer join degenerates to an inner one), so the query answers 0 rows instead of one NULL group"},
+			GROUP BY o.o_orderstatus`},
 		// The same shape keyed on an INT column, so the fix cannot be
 		// specific to the string group-key path.
 		duckdbCase{name: "NullGroupKeyEmptyLeftJoinInt", sql: `SELECT o.o_shippriority AS s, COUNT(*) AS c
 			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0
-			GROUP BY o.o_shippriority`,
-			knownBugArm: armDAG,
-			knownBug:    "same empty-build LEFT JOIN defect on the DAG as NullGroupKeyEmptyLeftJoin",
-		},
+			GROUP BY o.o_shippriority`},
 		// Multi-column, with one key column NULL and one not: a fix narrowed
 		// to "the whole key is NULL" leaves these five groups split.
 		duckdbCase{name: "NullGroupKeyEmptyLeftJoinPartialNull", sql: `SELECT c.c_mktsegment AS m,
 			o.o_orderstatus AS s, COUNT(*) AS c
 			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0
-			GROUP BY c.c_mktsegment, o.o_orderstatus`,
-			knownBugArm: armDAG,
-			knownBug:    "same empty-build LEFT JOIN defect on the DAG as NullGroupKeyEmptyLeftJoin",
-		},
+			GROUP BY c.c_mktsegment, o.o_orderstatus`},
 		// DISTINCT over the same all-NULL column: one NULL row, on the
 		// GroupByAll path that partitioned aggregation never takes, so the
 		// merge alone has to be right.
 		duckdbCase{name: "NullGroupKeyEmptyLeftJoinDistinct", sql: `SELECT DISTINCT o.o_orderstatus AS s
-			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0`,
-			knownBugArm: armDAG,
-			knownBug:    "same empty-build LEFT JOIN defect on the DAG as NullGroupKeyEmptyLeftJoin",
-		},
+			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0`},
 		// The partially-matching sibling, gated on BOTH arms: the join keeps
 		// four orders, so the NULL group is aggregated next to real ones and
 		// the DAG answers it correctly. This is the control that says the
@@ -619,28 +608,18 @@ func duckdbCorpus() []duckdbCase {
 		// gate found that the stage DAG loses a RIGHT JOIN's unmatched rows
 		// outright — 0 of the 20 unmatched nations, and 5 rows instead of 25
 		// for the same join with no WHERE at all. That is not a predicate
-		// defect: it needs no WHERE to appear, and the single-process arm is
-		// correct in both forms. Pinned on arm B alone; #335's own fix is
-		// gated by the arm-A comparison above it.
+		// defect: it needs no WHERE to appear, and the single-process arm was
+		// correct in both forms. Fixed in #352: the worker's fragment path
+		// had no equivalent of the single-process joinFlushSource, so nothing
+		// ever emitted a RIGHT/FULL join's unmatched build rows.
 		duckdbCase{name: "RightJoinWhereAntiJoinIdiom", sql: `SELECT n.n_name FROM region r
-			RIGHT JOIN nation n ON r.r_regionkey = n.n_nationkey WHERE r.r_regionkey IS NULL ORDER BY n.n_name`,
-			knownBugArm: armDAG,
-			knownBug: "the stage DAG drops a RIGHT JOIN's unmatched (NULL-padded) rows: it answers this with 0 " +
-				"rows where the single-process arm and DuckDB both return 20, and answers the same join without " +
-				"any WHERE with 5 rows instead of 25"},
+			RIGHT JOIN nation n ON r.r_regionkey = n.n_nationkey WHERE r.r_regionkey IS NULL ORDER BY n.n_name`},
 		// A LEFT JOIN whose build side comes back EMPTY still preserves every
-		// left row. The DAG returns none of them — the same "NULL-padded
+		// left row. The DAG returned none of them — the same "NULL-padded
 		// rows are lost" family as the RIGHT JOIN entry above, reached
-		// without a RIGHT JOIN. On the single-process arm the join itself is
-		// right, but a WHERE naming a build-side column over that join
-		// (`... WHERE r.r_regionkey IS NULL`, the anti-join idiom) then
-		// returns 0 rather than 25, so the empty build costs the padded
-		// columns their identity there too.
+		// without a RIGHT JOIN. Both halves fixed in #348.
 		duckdbCase{name: "LeftJoinEmptyBuildSide", sql: `SELECT COUNT(*) AS c FROM nation n
-			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0`,
-			knownBugArm: armDAG,
-			knownBug: "the stage DAG returns 0 rows for a LEFT JOIN whose build side is empty, where the " +
-				"preserved side's 25 rows must all survive NULL-padded"},
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0`},
 		// An expression on one side of an ON equality — the join key the
 		// physical planner cannot represent either. parseJoinKeys splits the
 		// condition on "=" and hands the executor "r.r_regionkey + 3" as a
@@ -753,6 +732,105 @@ func duckdbCorpus() []duckdbCase {
 			knownBugArm: armBoth,
 			knownBug:    "LAST_VALUE ignores an explicit frame and returns the current row's value (#350)",
 		},
+
+		// #348/#352 — an outer join over an EMPTY side. The rows it exists to
+		// preserve are exactly the ones neither side's data can produce, so
+		// the engine has to know what an absent side's columns are CALLED.
+		//
+		// COUNT(*) beside COUNT(col) is the discriminating pair: an empty
+		// build used to leave the build columns ABSENT from the joined schema
+		// rather than NULL, and an absent column reads as NULL through the
+		// projection's missing-name fallback while COUNT(col) degenerates to
+		// COUNT(*) — 1500 for an answer of 0, on the single-process arm,
+		// looking entirely plausible. Both spellings of the column type,
+		// because the fallback is per-type.
+		duckdbCase{name: "EmptyBuildLeftJoinCountCol", sql: `SELECT COUNT(*) AS rows_out,
+			COUNT(o.o_orderstatus) AS matched_str, COUNT(o.o_orderkey) AS matched_int
+			FROM customer c LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0`},
+		// The same join asked for its values: 25 preserved rows, every
+		// build-side cell NULL. A count alone cannot tell a NULL-padded row
+		// from a matched one.
+		duckdbCase{name: "EmptyBuildLeftJoinValues", sql: `SELECT n.n_name, r.r_name FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0 ORDER BY n.n_name`},
+		// The anti-join idiom over the empty build, which is how a query ASKS
+		// for the unmatched rows and the shape a careless fix breaks: the
+		// column has to be NULL, not missing, for IS NULL to find it. 0 on
+		// both arms before the fix, against 25.
+		duckdbCase{name: "EmptyBuildLeftJoinIsNull", sql: `SELECT COUNT(*) AS c FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0
+			WHERE r.r_regionkey IS NULL`},
+		// Its complement, which must stay 0: a fix that made IS NULL match by
+		// making the column always-NULL-looking would keep this at 0 too, so
+		// it is the values entry above that separates them.
+		duckdbCase{name: "EmptyBuildLeftJoinIsNotNull", sql: `SELECT COUNT(*) AS c FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0
+			WHERE r.r_regionkey IS NOT NULL`},
+		// The other three join types over the same empty build. INNER and
+		// SEMI (EXISTS) legitimately answer nothing — the empty-build
+		// short-circuit is CORRECT for them and the fix must not cost them —
+		// while ANTI (NOT EXISTS) keeps all 25 and was lost with LEFT, since
+		// it preserves probe rows the build never matched for the same
+		// reason.
+		duckdbCase{name: "EmptyBuildInnerJoin", sql: `SELECT COUNT(*) AS c FROM nation n
+			JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0`},
+		duckdbCase{name: "EmptyBuildSemiJoin", sql: `SELECT COUNT(*) AS c FROM nation n
+			WHERE EXISTS (SELECT 1 FROM region r WHERE r.r_regionkey = n.n_regionkey AND r.r_regionkey < 0)`},
+		duckdbCase{name: "EmptyBuildAntiJoin", sql: `SELECT COUNT(*) AS c FROM nation n
+			WHERE NOT EXISTS (SELECT 1 FROM region r WHERE r.r_regionkey = n.n_regionkey AND r.r_regionkey < 0)`},
+		// The RIGHT JOIN's preserved rows with their VALUES, not their count.
+		// The count was right on the single-process arm all along; the values
+		// were not — every unmatched nation came back with n_name NULL,
+		// because the flush was handed the join's OUTPUT schema as though it
+		// were the probe's and mapped the preserved columns onto the NULL
+		// half.
+		duckdbCase{name: "RightJoinUnmatchedValues", sql: `SELECT n.n_name, r.r_name FROM region r
+			RIGHT JOIN nation n ON r.r_regionkey = n.n_nationkey ORDER BY n.n_name`},
+		// A RIGHT JOIN where NOTHING matches (two disjoint string columns):
+		// the probe emits no output batch at all, which is what used to skip
+		// the unmatched flush entirely — 0 rows for an answer of 25.
+		duckdbCase{name: "RightJoinNoMatchAtAll", sql: `SELECT COUNT(*) AS c FROM region r
+			RIGHT JOIN nation n ON r.r_name = n.n_name`},
+		// A RIGHT JOIN whose PROBE side is empty: the ON conjunct narrows
+		// region to nothing, and all 25 nations survive with the region
+		// columns NULL. On the DAG this is the shape where a shuffle
+		// partition holds build rows and no probe rows — the ordinary case,
+		// not a degenerate one.
+		duckdbCase{name: "EmptyProbeRightJoin", sql: `SELECT COUNT(*) AS c, COUNT(r.r_name) AS m
+			FROM region r RIGHT JOIN nation n ON r.r_regionkey = n.n_nationkey AND r.r_regionkey < 0`},
+		// FULL OUTER carries both halves at once: 25 nations and 5 regions,
+		// none of them matched, so the answer is 30 rows of which every one
+		// is NULL-padded on one side. Values, so a fix that lost the
+		// preserved side's identity fails here.
+		duckdbCase{name: "FullJoinUnmatchedBothSides", sql: `SELECT n.n_name, r.r_name FROM nation n
+			FULL OUTER JOIN region r ON n.n_name = r.r_name ORDER BY n.n_name, r.r_name`},
+		duckdbCase{name: "FullJoinUnmatchedBothSidesCount", sql: `SELECT COUNT(*) AS c,
+			COUNT(n.n_name) AS n_rows, COUNT(r.r_name) AS r_rows FROM nation n
+			FULL OUTER JOIN region r ON n.n_name = r.r_name`},
+		// #352.2 — a keyless join: a comma join whose only condition is an
+		// inequality. Legal SQL the single-process path runs as a Cartesian
+		// product with the predicate above it; the DAG had no operator for a
+		// join with no equality keys and failed the task outright with
+		// "hash_join_probe: LeftKeys and RightKeys required".
+		duckdbCase{name: "KeylessCrossJoinFilter", sql: `SELECT COUNT(*) AS c FROM region a, nation b
+			WHERE a.r_regionkey < b.n_nationkey`},
+		duckdbCase{name: "KeylessCrossJoinValues", sql: `SELECT a.r_name, b.n_name FROM region a, nation b
+			WHERE a.r_regionkey < b.n_nationkey AND b.n_nationkey < 3 ORDER BY a.r_name, b.n_name`},
+		// Found while fixing the above, NOT fixed here and pinned on both
+		// arms: an ON conjunct restricting one side of a FULL OUTER join is
+		// pushed into that side's scan. For a LEFT join that is legal — a
+		// build row that fails the conjunct simply never matches, and the
+		// build side is not preserved — but a FULL join preserves it, so
+		// removing it at the scan deletes rows the join owes. Regions 3 and 4
+		// vanish instead of arriving unmatched: 25 rows for an answer of 27.
+		// The LEFT-join control beside it must not move.
+		duckdbCase{name: "FullJoinOnConjunctBuildSide", sql: `SELECT COUNT(*) AS c FROM nation n
+			FULL OUTER JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3`,
+			knownBugArm: armBoth,
+			knownBug: "an ON conjunct over one side of a FULL OUTER join is pushed into that side's scan, " +
+				"deleting the rows the join would have emitted unmatched: 25 rows against DuckDB's 27. " +
+				"Legal for LEFT (LeftJoinOnConjunctBuildSide below stays correct), wrong for FULL"},
+		duckdbCase{name: "LeftJoinOnConjunctBuildSide", sql: `SELECT COUNT(*) AS c FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

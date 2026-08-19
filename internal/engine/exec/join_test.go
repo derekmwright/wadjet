@@ -137,10 +137,12 @@ func TestRightJoin(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// FlushUnmatched to get unmatched right rows
-	unmatched := probe.FlushUnmatched(leftSchema)
-	if unmatched != nil {
-		sink.Rows = append(sink.Rows, unmatched.ToRows()...)
+	// The unmatched build rows arrive through the pipeline itself: the probe
+	// is a FlushableOperator and Pipeline drains it, so carol is already in
+	// the sink. A second FlushUnmatchedRows is a no-op — the flush happens
+	// exactly once per join, whichever driver reaches it first (#352).
+	if again := probe.FlushUnmatchedRows(); again != nil {
+		t.Fatalf("unmatched rows flushed twice: %d extra rows", again.Len)
 	}
 
 	// Right join: all right rows preserved. alice and bob match, carol has null left columns.
@@ -198,10 +200,10 @@ func TestFullOuterJoin(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// FlushUnmatched to get unmatched right rows
-	unmatched := probe.FlushUnmatched(leftSchema)
-	if unmatched != nil {
-		sink.Rows = append(sink.Rows, unmatched.ToRows()...)
+	// As in TestRightJoin: the pipeline drains the unmatched build rows
+	// itself, and a second flush is a no-op.
+	if again := probe.FlushUnmatchedRows(); again != nil {
+		t.Fatalf("unmatched rows flushed twice: %d extra rows", again.Len)
 	}
 
 	// Full outer join: alice matches, unknown has null right, carol has null left => 3 rows

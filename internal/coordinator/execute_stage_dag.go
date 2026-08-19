@@ -2552,6 +2552,7 @@ func (c *Coordinator) dispatchComputeStage(
 				BuildColOrigins: fj.BuildColOrigins,
 				JoinFilter:      fj.JoinFilter,
 				FilterExprs:     append([]string(nil), fj.FilterExprs...),
+				BuildSchema:     wireColumnSpecs(fj.JoinBuildSchema),
 			})
 		}
 		// Translate ChainedJoins (stage-chain fusion; docs/design/
@@ -2592,6 +2593,7 @@ func (c *Coordinator) dispatchComputeStage(
 				QualifyAllBuildCols: cj.QualifyAllBuildCols,
 				OutputColumns:       append([]string(nil), cj.Columns...),
 				LateMaterialize:     c.config.LateMaterialization,
+				BuildSchema:         wireColumnSpecs(cj.JoinBuildSchema),
 			})
 			if len(cj.FilterExprs) > 0 {
 				chainedOps = append(chainedOps, distributed.OpSpec{
@@ -2642,6 +2644,8 @@ func (c *Coordinator) dispatchComputeStage(
 			BuildColOrigins:     stage.BuildColOrigins,
 			JoinFilter:          stage.JoinFilter,
 			BuildFilterExprs:    append([]string(nil), stage.BuildFilterExprs...),
+			JoinProbeSchema:     wireColumnSpecs(stage.JoinProbeSchema),
+			JoinBuildSchema:     wireColumnSpecs(stage.JoinBuildSchema),
 			FusedJoins:          wireFused,
 			GroupByCols:         stage.GroupByCols,
 			Aggregates:          aggs,
@@ -3241,6 +3245,7 @@ func buildJoinFragment(
 			BuildBucket:     t.DataBucket,
 			JoinFilter:      fj.JoinFilter,
 			LateMaterialize: lateMat,
+			BuildSchema:     append([]distributed.ColumnSpec(nil), fj.BuildSchema...),
 		})
 		// The absorbed stage's own predicates, applied where that stage
 		// would have applied them: immediately after its probe. The planner
@@ -3278,6 +3283,8 @@ func buildJoinFragment(
 		BuildColOrigins:     t.BuildColOrigins,
 		OutputColumns:       append([]string(nil), t.Columns...),
 		LateMaterialize:     lateMat,
+		BuildSchema:         append([]distributed.ColumnSpec(nil), t.JoinBuildSchema...),
+		ProbeSchema:         append([]distributed.ColumnSpec(nil), t.JoinProbeSchema...),
 	})
 	// Residual post-join filters (semi/anti residual or compute-stage
 	// HAVING-equivalent) compile to an OpFilter applied AFTER the probe and

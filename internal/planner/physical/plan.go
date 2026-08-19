@@ -122,6 +122,14 @@ type Stage struct {
 	// identical to filtering at the dropped scan.
 	BuildFilterExprs []string
 
+	// JoinProbeSchema / JoinBuildSchema are the plan-declared columns of each
+	// join side (physical.declaredJoinSchema). The worker reads them only for
+	// the side that turns out to be empty, where there is no batch to learn a
+	// schema from and an outer join still owes the rows that side shapes
+	// (#348/#352).
+	JoinProbeSchema []parquet.Column
+	JoinBuildSchema []parquet.Column
+
 	// Fused broadcast joins absorbed into this stage (avoids separate
 	// shuffle+join stages for small dimension tables like nation, region).
 	FusedJoins []FusedJoinSpec
@@ -353,6 +361,10 @@ type FusedJoinSpec struct {
 	BuildColOrigins map[string]string // bare build col → owning scan alias (multi-table builds only)
 	JoinFilter      string
 	FilterExprs     []string
+	// JoinBuildSchema is the absorbed join's declared build columns, read
+	// only when that build turns out to be empty — an absorbed LEFT join
+	// owes the same NULL-padded columns a standalone one does (#348).
+	JoinBuildSchema []parquet.Column
 }
 
 // ChainedJoinSpec describes a 1:1 downstream join absorbed into an upstream
@@ -377,6 +389,9 @@ type ChainedJoinSpec struct {
 	// chained probe's OutputFilter so the fused stage emits exactly what
 	// the absorbed stage emitted.
 	Columns []string
+	// JoinBuildSchema is the absorbed join's declared build columns, read
+	// only when that build turns out to be empty (#348).
+	JoinBuildSchema []parquet.Column
 	// Partitioned marks a hash-partitioned 1:1 build input (the absorbed
 	// stage was a hash_join): task i reads build partition i. False means
 	// a replicated broadcast build read whole by every task.
@@ -3635,6 +3650,7 @@ func fuseJoinStages(stages []Stage) []Stage {
 			BuildColOrigins: s.BuildColOrigins,
 			JoinFilter:      s.JoinFilter,
 			FilterExprs:     s.FilterExprs,
+			JoinBuildSchema: s.JoinBuildSchema,
 		}
 		merged := make([]FusedJoinSpec, 0, len(s.FusedJoins)+1+len(consumer.FusedJoins))
 		merged = append(merged, s.FusedJoins...)
@@ -4201,7 +4217,20 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			p.walkStages(child, stages, nil)
 			childLeaves = append(childLeaves, leafStages((*stages)[childStart:]))
 		}
-		isBroadcast := p.isBroadcastCandidate(node)
+		// Map logical join type to canonical short form. Needed before the
+		// broadcast decision: a join that preserves its BUILD side cannot
+		// replicate it.
+		jt := mapJoinType(node.JoinType)
+
+		// Broadcast replicates the build side to every task and splits the
+		// probe across them. A RIGHT or FULL join emits its UNMATCHED build
+		// rows, and no task can tell whether another task matched a given
+		// build row — every task would emit all of them, so a 25-row answer
+		// came back 75 rows on a 3-worker cluster. Those join types take the
+		// hash-shuffle path instead, where both sides are co-partitioned and
+		// each task owns a disjoint slice of the build. Same rule
+		// planSkewSplitTasks already applies for the same reason.
+		isBroadcast := !preservesBuildSide(jt) && p.isBroadcastCandidate(node)
 		joinType := "hash_join"
 		if isBroadcast {
 			joinType = "broadcast_join"
@@ -4215,9 +4244,6 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		if len(childLeaves) >= 2 && len(childLeaves[1]) > 0 {
 			rightDep = childLeaves[1][len(childLeaves[1])-1]
 		}
-
-		// Map logical join type to canonical short form
-		jt := mapJoinType(node.JoinType)
 
 		// Extract join keys from condition (cross joins have no ON clause)
 		var leftKeys, rightKeys []string
@@ -4339,6 +4365,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			joinTasks = p.WorkerCount
 		}
 		stageID := fmt.Sprintf("join-%d", len(*stages))
+		probeSchema, buildSchema := joinSideSchemas(node, leftKeys, rightKeys)
 		stage := Stage{
 			ID:                 stageID,
 			Type:               joinType,
@@ -4350,6 +4377,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			LeftDepStage:       leftDep,
 			RightDepStage:      rightDep,
 			JoinPartitionCount: numPartitions,
+			JoinProbeSchema:    probeSchema,
+			JoinBuildSchema:    buildSchema,
 		}
 		// Propagate build-side table alias for column disambiguation in self-joins
 		// (e.g., nation n1 JOIN nation n2 — prevents duplicate columns from being dropped).
@@ -5017,6 +5046,12 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).buildColOrigins()
 	}
 
+	// Plan-declared schemas for the two sides, read only when a side delivers
+	// no batch at all: an outer join still owes the rows the empty side
+	// shapes and cannot name their columns without this (#348/#352). Computed
+	// after the semi/anti swap above so the sides are final.
+	hj.ProbeSchemaHint, hj.BuildSchemaHint = joinSideSchemas(node, hj.LeftKeys, hj.RightKeys)
+
 	// For semi/anti joins without a filter, enable key-only build:
 	// only build the key index and bloom filter, skip batch storage and arena refs.
 	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter == "" {
@@ -5456,7 +5491,6 @@ type joinFlushSource struct {
 	inner      exec.Source
 	innerOps   []exec.UnaryOperator
 	probe      *exec.HashJoinProbe
-	leftSchema []parquet.Column
 	pipeline   *pipelineSource
 	flushed    bool
 	flushBatch *batch.RecordBatch
@@ -5474,17 +5508,17 @@ func (s *joinFlushSource) Next(ctx context.Context) (*batch.RecordBatch, error) 
 			return nil, err
 		}
 		if b != nil {
-			// Capture left-side schema from first result batch
-			if s.leftSchema == nil && len(b.Schema) > 0 {
-				s.leftSchema = b.Schema
-			}
 			return b, nil
 		}
-		// Probe exhausted — flush unmatched build-side rows
+		// Probe exhausted — flush unmatched build-side rows. The probe names
+		// the probe half of those rows itself: this source only sees the
+		// join's OUTPUT batches, and passing one of those as the probe schema
+		// mapped every preserved column onto the NULL side (a RIGHT JOIN's
+		// unmatched rows came back with the preserved side blank). A join that
+		// emitted no output batch at all — nothing matched — used to skip the
+		// flush entirely and lose all of them.
 		s.flushed = true
-		if s.leftSchema != nil {
-			s.flushBatch = s.probe.FlushUnmatched(s.leftSchema)
-		}
+		s.flushBatch = s.probe.FlushUnmatchedRows()
 	}
 	if s.flushBatch != nil {
 		b := s.flushBatch
@@ -5571,6 +5605,20 @@ func mapJoinType(vt string) string {
 	default:
 		return "inner"
 	}
+}
+
+// preservesBuildSide reports whether a canonical join kind emits build-side
+// rows that found no probe partner — the rows a RIGHT or FULL join exists to
+// preserve, produced after probing by HashJoinProbe.FlushUnmatchedRows.
+//
+// Every distributed layout that REPLICATES the build side across tasks is
+// unsound for these: each task holds the whole build and sees only its slice
+// of the probe, so each would emit the same unmatched rows. Broadcast
+// (walkStages) and skew-split (coordinator.planSkewSplitTasks) both gate on
+// this; the hash-shuffle layout is sound because a partition's build and
+// probe rows land on the same task.
+func preservesBuildSide(jt string) bool {
+	return jt == "right" || jt == "full"
 }
 
 // mapExecJoinType converts a canonical join type string to exec.JoinType.

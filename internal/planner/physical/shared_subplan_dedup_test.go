@@ -344,6 +344,9 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		"ID": "excluded", "ScanAlias": "excluded", "Columns": "excluded",
 		"OutputColumns": "excluded", "ScanFileSizes": "excluded",
 		"EstimatedBytes": "excluded", "EstimatedRows": "excluded",
+		// Projection-derived like Columns, and advisory: the declared side
+		// schemas are read only when a join side is empty (#348/#352).
+		"JoinProbeSchema": "excluded", "JoinBuildSchema": "excluded",
 		// Stage-reference fields: slot-resolved in the fingerprint, walked
 		// by stageEdgeRefs, rewritten by rewireEdges.
 		"Dependencies": "reference", "LeftDepStage": "reference",

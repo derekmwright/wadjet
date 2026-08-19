@@ -1173,9 +1173,26 @@ func (h *HashJoin) indexBuildBatchKeyOnly(b *batch.RecordBatch) {
 
 // ---- FlushableOperator implementation for HashJoinProbe ----
 
+// hasPendingUnmatched reports whether this join still owes a RIGHT/FULL
+// join's unmatched build rows. It is true before the first flush attempt even
+// when there turn out to be none — the attempt itself is what settles that,
+// and it is idempotent.
+func (p *HashJoinProbe) hasPendingUnmatched() bool {
+	h := p.join
+	if h.JoinType != RightJoin && h.JoinType != FullOuterJoin {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return !h.unmatchedFlushed
+}
+
 // HasPendingFlush returns true if there are spilled partitions still left to
-// process.
+// process, or if a RIGHT/FULL join still owes its unmatched build rows.
 func (p *HashJoinProbe) HasPendingFlush() bool {
+	if p.hasPendingUnmatched() {
+		return true
+	}
 	ss := p.join.spillState
 	if ss == nil {
 		return false
@@ -1201,7 +1218,9 @@ func (p *HashJoinProbe) HasPendingFlush() bool {
 func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, error) {
 	ss := p.join.spillState
 	if ss == nil {
-		return nil, nil
+		// No spill: the only thing a drained probe still owes is a RIGHT or
+		// FULL join's unmatched build rows.
+		return p.FlushUnmatchedRows(), nil
 	}
 
 	// One-time init: collect partition IDs and close probe + build writers so
@@ -1237,9 +1256,10 @@ func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, erro
 		// If we don't have an open partition, advance to the next one.
 		if p.spillFlushTmpJoin == nil {
 			if p.spillFlushPartIdx >= len(p.spillFlushPartIDs) {
-				// All partitions consumed.
+				// All partitions consumed. The in-memory partitions' own
+				// unmatched build rows are still owed for RIGHT/FULL.
 				ss.cleanup()
-				return nil, nil
+				return p.FlushUnmatchedRows(), nil
 			}
 			if err := p.openNextSpillPartition(ctx); err != nil {
 				return nil, err

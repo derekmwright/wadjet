@@ -5,6 +5,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // OutputKind describes how a stage's output is distributed across S3 keys.
@@ -172,6 +173,20 @@ func partitionRangeForWorker(numPartitions, w, workerCount int) (start, end int)
 		end = numPartitions
 	}
 	return start, end
+}
+
+// wireColumnSpecs converts a plan-declared schema to its wire form. Nil in,
+// nil out — an absent declaration is the normal case for every join whose
+// sides the planner could not type.
+func wireColumnSpecs(cols []parquet.Column) []distributed.ColumnSpec {
+	if len(cols) == 0 {
+		return nil
+	}
+	out := make([]distributed.ColumnSpec, len(cols))
+	for i, c := range cols {
+		out[i] = distributed.ColumnSpec{Name: c.Name, Type: int(c.Type)}
+	}
+	return out
 }
 
 // flattenStageFiles returns all output files in a single flat list,

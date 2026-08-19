@@ -342,9 +342,34 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	// it, which emits the row instead — and one mistyped partial poisons the
 	// merge for every sibling (a float64-typed NULL min among string-typed
 	// partials broke the skew-parity left join before this gate).
+	//
+	// Exception: a RIGHT or FULL join whose PROBE partition is empty. Its
+	// build rows are all unmatched by construction, and they are the rows the
+	// join exists to preserve — one shuffle partition holding build rows and
+	// no probe rows is the ordinary case, not a degenerate one. Falling
+	// through builds the hash table, probes nothing, and lets the flush emit
+	// them NULL-padded on the probe side, using the declared ProbeSchema for
+	// their names (#352).
 	emptyScalarAgg := false
+	emptyProbeOuterJoin := false
 	_, eagerSource := task.EagerInputs[sourceSpec.InputAlias]
 	if len(sourceSpec.InputFiles) == 0 && !eagerSource {
+		for _, m := range middle {
+			if m.Type != distributed.OpHashJoinProbe && m.Type != distributed.OpBroadcastProbe {
+				continue
+			}
+			if !preservesBuildSide(mapJoinTypeString(m.JoinType)) {
+				continue
+			}
+			// A build with nothing to read owes nothing either; an eager
+			// build's file list is empty BY CONSTRUCTION and carries no
+			// emptiness signal at all (see eagerInputFor).
+			_, eagerBuild := task.EagerInputs[m.BuildAlias]
+			if len(m.BuildFiles) > 0 || eagerBuild {
+				emptyProbeOuterJoin = true
+				break
+			}
+		}
 		for i, m := range middle {
 			if m.Type != distributed.OpHashAggregate || len(m.GroupByCols) != 0 || m.GroupByAll {
 				continue
@@ -380,7 +405,7 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 			}
 			break
 		}
-		if !emptyScalarAgg {
+		if !emptyScalarAgg && !emptyProbeOuterJoin {
 			if sinkSpec.Type == distributed.OpGatherSink {
 				sink, err := e.openFragmentSink(task, sinkSpec)
 				if err != nil {
@@ -398,7 +423,7 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	// Build the source.
 	var src exec.Source
 	var err error
-	if emptyScalarAgg {
+	if emptyScalarAgg || emptyProbeOuterJoin {
 		src = emptyFragmentSource{}
 	} else {
 		src, err = e.buildFragmentSource(task, sourceSpec)
@@ -2461,7 +2486,12 @@ func eagerInputFor(task distributed.Task, alias string, frozenFiles []string) (d
 }
 
 func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.Task, spec distributed.OpSpec) ([]exec.UnaryOperator, func(), error) {
-	if len(spec.LeftKeys) == 0 || len(spec.RightKeys) == 0 {
+	joinType := mapJoinTypeString(spec.JoinType)
+	// A CROSS join has no ON clause and therefore no keys: `FROM a, b WHERE
+	// a.x < b.y` is legal SQL that the single-process path runs as a
+	// Cartesian product with the predicate above it. Every other join type
+	// is an equi-join here and its keys are mandatory.
+	if joinType != exec.CrossJoin && (len(spec.LeftKeys) == 0 || len(spec.RightKeys) == 0) {
 		return nil, nil, fmt.Errorf("hash_join_probe: LeftKeys and RightKeys required")
 	}
 	// Eager consumer dispatch: a build alias registered in task.EagerInputs
@@ -2476,11 +2506,18 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	// primary build side and made it a pass-through (Q18 §14.2: 70 → 100
 	// rows via LIMIT-masked value corruption).
 	eagerBuild, buildIsEager := eagerInputFor(task, spec.BuildAlias, spec.BuildFiles)
-	if len(spec.BuildFiles) == 0 && !buildIsEager {
-		// Empty build → inner/semi joins emit no rows; upstream planner may
-		// have decided this fragment should not run, but we treat empty
-		// build as "no output". Returning an op chain that drops every row
-		// keeps the pipeline well-formed without special-casing the runner.
+	if len(spec.BuildFiles) == 0 && !buildIsEager && !preservesProbeSide(joinType) {
+		// Empty build → inner/semi/right/cross joins emit no rows at all.
+		// Returning an op chain that drops every row keeps the pipeline
+		// well-formed without special-casing the runner.
+		//
+		// LEFT, FULL and ANTI are NOT in that set: they preserve probe rows
+		// the build never matched, which is every probe row when the build is
+		// empty. Dropping them turned a LEFT JOIN into an inner one on the
+		// DAG — `customer LEFT JOIN orders ON ... AND o_orderkey < 0`
+		// answered 0 where the truth is 1500 (#348). Those types fall through
+		// and build an EMPTY hash table instead, whose declared BuildSchema
+		// gives the join the NULL-padded build columns it owes.
 		return []exec.UnaryOperator{exec.NewFilter(func(_ *batch.RecordBatch, _ int) bool {
 			return false
 		})}, nil, nil
@@ -2502,13 +2539,19 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	// partition) so they take the direct path.
 	buildHJ := func() (*exec.HashJoin, error) {
 		var src exec.Source
-		if buildIsEager {
+		switch {
+		case buildIsEager:
 			// Manifest-fed build: HashJoin.Build drains the source, which
 			// blocks between manifests until every producer candidate
 			// resolves — the build completes exactly when the producer
 			// side's files for this task's partition range all arrived.
 			src = newManifestStreamSource(e, task.QueryID, bucket, eagerBuild)
-		} else {
+		case len(spec.BuildFiles) == 0:
+			// A probe-preserving join over an empty build (the branch above
+			// let it through): there is nothing to read, but the join still
+			// runs so every probe row survives with NULL build columns.
+			src = emptyFragmentSource{}
+		default:
 			var err error
 			src, err = e.sourceForAlias(task.QueryID, bucket, spec.BuildAlias, spec.BuildFiles)
 			if err != nil {
@@ -2533,10 +2576,13 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			src = &filteredSource{Source: src, ops: fops}
 		}
 
-		hj := exec.NewHashJoin(mapJoinTypeString(spec.JoinType), spec.LeftKeys, spec.RightKeys)
+		hj := exec.NewHashJoin(joinType, spec.LeftKeys, spec.RightKeys)
 		hj.BuildTableAlias = spec.BuildAlias
 		hj.QualifyAllBuildCols = spec.QualifyAllBuildCols
 		hj.BuildColOrigins = spec.BuildColOrigins
+		// Plan-declared side schemas, read only when a side is empty.
+		hj.BuildSchemaHint = execColumns(spec.BuildSchema)
+		hj.ProbeSchemaHint = execColumns(spec.ProbeSchema)
 		if spec.BuildRowHint > 0 {
 			hj.BuildRowHint = spec.BuildRowHint
 		}

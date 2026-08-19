@@ -592,3 +592,33 @@ func mapJoinTypeString(jt string) exec.JoinType {
 		return exec.InnerJoin
 	}
 }
+
+// preservesProbeSide reports whether a join emits probe rows the build never
+// matched. Those joins must run even over an EMPTY build side — every probe
+// row is unmatched then, and dropping them turns the outer join into an inner
+// one (#348).
+func preservesProbeSide(jt exec.JoinType) bool {
+	return jt == exec.LeftJoin || jt == exec.FullOuterJoin || jt == exec.AntiJoin
+}
+
+// preservesBuildSide reports whether a join emits build rows the probe never
+// matched, which HashJoinProbe.FlushUnmatchedRows produces after probing.
+// Those joins must run even over an EMPTY probe side (#352). Mirrors
+// planner/physical.preservesBuildSide.
+func preservesBuildSide(jt exec.JoinType) bool {
+	return jt == exec.RightJoin || jt == exec.FullOuterJoin
+}
+
+// execColumns converts a wire-declared schema into exec/parquet columns. The
+// declaration exists for the case a join side turns out to be empty; see
+// distributed.OpSpec.BuildSchema.
+func execColumns(specs []distributed.ColumnSpec) []parquet.Column {
+	if len(specs) == 0 {
+		return nil
+	}
+	out := make([]parquet.Column, len(specs))
+	for i, s := range specs {
+		out[i] = parquet.Column{Name: s.Name, Type: parquet.TypeID(s.Type), Nullable: true}
+	}
+	return out
+}

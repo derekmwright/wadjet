@@ -89,6 +89,13 @@ func chainConsumerEligible(c, p *Stage) bool {
 	if c.Type != StageHashJoin && c.Type != StageBroadcastJoin {
 		return false
 	}
+	// A RIGHT/FULL consumer emits its unmatched BUILD rows after probing.
+	// Absorbed, its build rides the producer's tasks as a chained spec —
+	// whole for a broadcast build — and every task would emit the same
+	// unmatched rows. Left un-fused it keeps its own co-partitioned stage.
+	if preservesBuildSide(c.JoinType) {
+		return false
+	}
 	if c.LeftDepStage != p.ID || c.RightDepStage == p.ID || c.RightDepStage == "" {
 		return false
 	}
@@ -195,6 +202,7 @@ func fuseOneChainLink(stages []Stage) ([]Stage, bool) {
 				BuildColOrigins: fj.BuildColOrigins,
 				JoinFilter:      fj.JoinFilter,
 				FilterExprs:     fj.FilterExprs,
+				JoinBuildSchema: fj.JoinBuildSchema,
 			})
 		}
 		p.ChainedJoins = append(p.ChainedJoins, ChainedJoinSpec{
@@ -210,6 +218,7 @@ func fuseOneChainLink(stages []Stage) ([]Stage, bool) {
 			QualifyAllBuildCols: c.QualifyAllBuildCols,
 			Columns:             c.Columns,
 			Partitioned:         c.Type == StageHashJoin,
+			JoinBuildSchema:     c.JoinBuildSchema,
 		})
 		p.ChainedJoins = append(p.ChainedJoins, c.ChainedJoins...)
 		p.Dependencies = append(p.Dependencies, cBuildDeps...)

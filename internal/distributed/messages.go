@@ -162,6 +162,10 @@ type Task struct {
 	// BuildFilterExprs filter the build input rows before hash-table
 	// insertion (exchange subsumption dedup).
 	BuildFilterExprs []string `json:"build_filter_exprs,omitempty"`
+	// JoinBuildSchema / JoinProbeSchema are the plan-declared columns of the
+	// two join sides, used only when a side is empty (see OpSpec.BuildSchema).
+	JoinBuildSchema []ColumnSpec `json:"join_build_schema,omitempty"`
+	JoinProbeSchema []ColumnSpec `json:"join_probe_schema,omitempty"`
 
 	// Fused join: additional broadcast joins absorbed into a single task.
 	// The worker builds hash tables for each fused join, then chains probes
@@ -409,6 +413,14 @@ type OpSpec struct {
 	BuildColOrigins     map[string]string `json:"build_col_origins,omitempty"` // bare build col → owning scan alias (multi-table builds only)
 	OutputColumns       []string          `json:"output_columns,omitempty"`    // OutputFilter for primary probe
 	LateMaterialize     bool              `json:"late_materialize,omitempty"`  // emit view-column join output (deferred gather)
+	// BuildSchema / ProbeSchema are the plan-declared columns of each side,
+	// read ONLY when that side turns out to be empty — an outer join still
+	// owes the rows the empty side shapes and cannot name their columns
+	// otherwise. Same idea as AggSpec.OutputType (#329): declare on the wire
+	// what the worker can no longer read off a batch. See
+	// physical.declaredJoinSchema, exec.HashJoin.BuildSchemaHint.
+	BuildSchema []ColumnSpec `json:"build_schema,omitempty"`
+	ProbeSchema []ColumnSpec `json:"probe_schema,omitempty"`
 
 	// OpExchangeSender (sink).
 	ShuffleKeys   []string `json:"shuffle_keys,omitempty"`
@@ -474,6 +486,13 @@ type PreComputedAggregate struct {
 	GroupByCols []string  `json:"group_by_cols"`
 	AggSpecs    []AggSpec `json:"agg_specs"`
 	CacheFiles  []string  `json:"cache_files"`
+}
+
+// ColumnSpec is one column of a plan-declared schema on the wire: the name
+// and the parquet.TypeID as an int, matching AggSpec.OutputType's encoding.
+type ColumnSpec struct {
+	Name string `json:"name"`
+	Type int    `json:"type"`
 }
 
 // ProjectSpec is one output column of an OpProject: Name is the emitted
@@ -649,6 +668,9 @@ type FusedJoinSpec struct {
 	BuildColOrigins map[string]string `json:"build_col_origins,omitempty"` // bare build col → owning scan alias (multi-table builds only)
 	JoinFilter      string            `json:"join_filter,omitempty"`
 	FilterExprs     []string          `json:"filter_exprs,omitempty"` // post-join filters for this step
+	// BuildSchema declares this fused build's columns, read only when its
+	// file list turns out to be empty (see OpSpec.BuildSchema).
+	BuildSchema []ColumnSpec `json:"build_schema,omitempty"`
 }
 
 // ResultNotification is sent by workers when a task completes.

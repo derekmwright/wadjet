@@ -143,6 +143,37 @@ type HashJoin struct {
 	// When set, the arena and hash table are pre-allocated to avoid repeated growth.
 	BuildRowHint int64
 
+	// BuildSchemaHint / ProbeSchemaHint declare each side's output columns at
+	// PLAN time, for the case where that side delivers no batch at all and the
+	// runtime therefore never learns its schema.
+	//
+	// An outer join still owes rows when one side is empty — a LEFT JOIN emits
+	// every probe row with the build columns NULL, a RIGHT/FULL JOIN emits
+	// every build row with the probe columns NULL — and it cannot name those
+	// columns without a schema. buildSchema left nil produced a join output
+	// carrying ONLY the preserved side: the values still read as NULL through
+	// the projection's missing-column fallback, but the column was ABSENT
+	// rather than NULL, so `COUNT(o.o_orderstatus)` counted 1500 of them and
+	// `WHERE r.r_regionkey IS NULL` matched none (#348).
+	//
+	// The hints are only consulted when the side produced nothing; a real
+	// batch's schema always wins, so an imprecise hint cannot corrupt a
+	// non-empty join.
+	BuildSchemaHint []parquet.Column
+	ProbeSchemaHint []parquet.Column
+
+	// probeSchema is the probe input schema as the probe actually saw it,
+	// recorded on the first Execute across all clones. FlushUnmatched needs
+	// the PROBE-side schema to name the NULL half of an unmatched build row,
+	// and its caller (the pipeline driver) only has the join's OUTPUT schema.
+	probeSchema []parquet.Column
+
+	// unmatchedFlushed guards the RIGHT/FULL unmatched-build-row emission so
+	// it happens exactly once per join, whichever probe clone gets there
+	// first. Every clone shares this HashJoin, and every clone's driver
+	// drains FlushableOperator at the end.
+	unmatchedFlushed bool
+
 	// Bloom filter for fast negative lookups during probe phase.
 	// When the build side is small relative to expected probe volume,
 	// this rejects non-matching probe rows without touching the hash table.
@@ -1100,8 +1131,22 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	h.reconcileHashMemory()
 
 	h.warmBuildNullBitmaps()
+	h.applyBuildSchemaHint()
 	h.buildDone = true
 	return nil
+}
+
+// applyBuildSchemaHint adopts the plan-declared build schema when the build
+// side delivered no batch at all. Everything downstream — the output schema,
+// the probe's column mapping, the NULL padding an outer join emits — reads
+// buildSchema, so a nil one silently drops the build side's columns from the
+// join's output rather than emitting them as NULL (#348).
+func (h *HashJoin) applyBuildSchemaHint() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.buildSchema == nil && len(h.BuildSchemaHint) > 0 {
+		h.buildSchema = append([]parquet.Column(nil), h.BuildSchemaHint...)
+	}
 }
 
 // buildParallelKeyOnly is a parallel build path for semi/anti joins that only
@@ -2238,6 +2283,7 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 	// Cache output schema and column mapping on first batch (avoids per-batch allocation)
 	if p.cachedSchema == nil {
 		p.cachedSchema, p.cachedMapping = p.outputSchemaWithMapping(in.Schema)
+		p.recordProbeSchema(in.Schema)
 	}
 
 	p.beginResume(in)
@@ -3507,8 +3553,50 @@ func (p *HashJoinProbe) FlushAntiMatched() *batch.RecordBatch {
 	return out
 }
 
+// recordProbeSchema remembers the probe input schema for FlushUnmatched. Every
+// clone shares one HashJoin, so the first to run wins and the rest are no-ops.
+func (p *HashJoinProbe) recordProbeSchema(schema []parquet.Column) {
+	h := p.join
+	h.mu.Lock()
+	if h.probeSchema == nil && len(schema) > 0 {
+		h.probeSchema = schema
+	}
+	h.mu.Unlock()
+}
+
+// FlushUnmatchedRows emits a RIGHT/FULL join's unmatched build rows exactly
+// once per join, whichever probe clone reaches it first, and names the probe
+// half of each row from the schema the probe itself observed.
+//
+// It is the single entry point for the two drivers that own the end of a probe
+// pipeline: physical.joinFlushSource (single process) and the worker's
+// FlushableOperator drain (stage DAG). Before it existed only the first of
+// those flushed at all, so every unmatched row of a distributed RIGHT or FULL
+// join was dropped (#352) — and the caller passed the join's OUTPUT schema
+// where the PROBE schema was wanted, so on the shapes where it did run the
+// preserved side came back NULL.
+func (p *HashJoinProbe) FlushUnmatchedRows() *batch.RecordBatch {
+	h := p.join
+	if h.JoinType != RightJoin && h.JoinType != FullOuterJoin {
+		return nil
+	}
+	h.mu.Lock()
+	if h.unmatchedFlushed {
+		h.mu.Unlock()
+		return nil
+	}
+	h.unmatchedFlushed = true
+	h.mu.Unlock()
+	return p.FlushUnmatched(nil)
+}
+
 // FlushUnmatched returns a RecordBatch containing build-side rows that were never
 // matched during probing. For RightJoin and FullOuterJoin only.
+//
+// leftSchema is a fallback for the probe-side schema: the probe's own cached
+// mapping is preferred (it is what its output batches were built from), then
+// the schema recorded on the first Execute, then the plan-declared
+// ProbeSchemaHint. A caller with nothing better may pass nil.
 func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.RecordBatch {
 	if p.join.JoinType != RightJoin && p.join.JoinType != FullOuterJoin {
 		return nil
@@ -3540,7 +3628,19 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 	}
 	refs = unique
 
-	outSchema, mapping := p.outputSchemaWithMapping(leftSchema)
+	outSchema, mapping := p.cachedSchema, p.cachedMapping
+	if outSchema == nil {
+		probeSchema := leftSchema
+		if probeSchema == nil {
+			p.join.mu.Lock()
+			probeSchema = p.join.probeSchema
+			if probeSchema == nil {
+				probeSchema = p.join.ProbeSchemaHint
+			}
+			p.join.mu.Unlock()
+		}
+		outSchema, mapping = p.outputSchemaWithMapping(probeSchema)
+	}
 	out := batch.NewRecordBatch(outSchema, len(refs))
 
 	for outColIdx, m := range mapping {
