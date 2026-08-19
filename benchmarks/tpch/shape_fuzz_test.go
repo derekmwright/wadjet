@@ -236,7 +236,14 @@ func fuzzDuckDB(setup, sql string) ([]map[string]string, []string, error) {
 	// implementation-defined. Configuring the oracle keeps every row
 	// compared; exempting the entries would blind the gate to real
 	// ordering bugs in the same queries.
-	setup = "SET default_null_order='nulls_last_on_asc_first_on_desc';\n" + setup
+	// Bound the oracle. A generated query can ask for a cartesian product
+	// that is astronomically large even over the SF0.01 fixture: on
+	// 2026-08-19 one reached 30 GB RSS and DuckDB invoked the OOM killer,
+	// which killed DuckDB and capped two 1500-seed sweeps at the same seed.
+	// A differential harness must not be able to take the machine down —
+	// an oracle that ERRORS on an unreasonable query is still a usable
+	// oracle, and the fuzzer already treats an oracle error as "skip".
+	setup = "SET memory_limit='4GB';\nSET default_null_order='nulls_last_on_asc_first_on_desc';\n" + setup
 	script := setup + "\n.mode csv\n.headers on\n.nullvalue <NULL>\n" + sql + ";\n"
 	cmd := exec.Command(fuzzDuckDBBin)
 	cmd.Stdin = strings.NewReader(script)
