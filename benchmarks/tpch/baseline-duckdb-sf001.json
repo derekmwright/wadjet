@@ -1,90 +1,473 @@
 {
-  "1": {
-    "row_count": 4,
-    "checksum": "a8366fe6e44ddc5b"
-  },
-  "10": {
-    "row_count": 20,
-    "checksum": "e1f6858e3965d339"
-  },
-  "11": {
-    "row_count": 359,
-    "checksum": "3fd7739829704fe6"
-  },
-  "12": {
-    "row_count": 2,
-    "checksum": "656ef994c163a2b7"
-  },
-  "13": {
-    "row_count": 100,
-    "checksum": "271f9d98a419193a"
-  },
-  "14": {
-    "row_count": 1,
-    "checksum": "808b46963160b98e"
-  },
-  "15": {
-    "row_count": 1,
-    "checksum": "b63a98110f43ed75"
-  },
-  "16": {
-    "row_count": 296,
-    "checksum": "3ab3cf9ff3502389"
-  },
-  "17": {
-    "row_count": 1,
-    "checksum": "558de09e2f6dacfa"
-  },
-  "18": {
-    "row_count": 2,
-    "checksum": "4af03a3cf19bb07f"
-  },
-  "19": {
-    "row_count": 1,
-    "checksum": "b8c49e8eef9e1b66"
-  },
-  "2": {
-    "row_count": 4,
-    "checksum": "823e31da9aa92f78"
-  },
-  "20": {
-    "row_count": 1,
-    "checksum": "6dec553ae76d0380"
-  },
-  "21": {
-    "row_count": 1,
-    "checksum": "be74fa07155c3b82"
-  },
-  "22": {
-    "row_count": 7,
-    "checksum": "efa214e289a5fb0a"
-  },
-  "3": {
-    "row_count": 10,
-    "checksum": "979ffa23463cbc0f"
-  },
-  "4": {
-    "row_count": 5,
-    "checksum": "ea749e310f762c4a"
-  },
-  "5": {
-    "row_count": 5,
-    "checksum": "12efb60cfed6014f"
-  },
-  "6": {
-    "row_count": 1,
-    "checksum": "f87fc12b7a900ce2"
-  },
-  "7": {
-    "row_count": 4,
-    "checksum": "d98f66ea9447c81b"
-  },
-  "8": {
-    "row_count": 2,
-    "checksum": "413bec561f3868e8"
-  },
-  "9": {
-    "row_count": 173,
-    "checksum": "bef6ecf1e44e2b2c"
+  "generator": "duckdb v1.4.1 (Andium) b390a7c376 over duckdb-data (WADJET_REGENERATE_DUCKDB_BASELINE=1)",
+  "note": "Ground truth. Every entry is DuckDB output; nothing here is derived from Wadjet.",
+  "queries": {
+    "AliasedGroupKeyOrderBy": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "p",
+        "c"
+      ],
+      "fine": "06be98584e109e92",
+      "coarse": "06be98584e109e92"
+    },
+    "AliasedSortNoAggregate": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "p"
+      ],
+      "fine": "41f158f908cc8de4",
+      "coarse": "41f158f908cc8de4"
+    },
+    "BareLimit": {
+      "source": "duckdb",
+      "row_count": 7,
+      "compare": "count",
+      "ordered": false,
+      "limit": 7,
+      "why": "a LIMIT with no ORDER BY picks arbitrary rows by definition"
+    },
+    "CrossTableEqualityFilter": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "53abae0399c4531d",
+      "coarse": "53abae0399c4531d"
+    },
+    "CrossTableEqualityRevenue": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "revenue"
+      ],
+      "fine": "7acb3a2c420e587c",
+      "coarse": "ea8c575af23c539f"
+    },
+    "EmptyJoinUngroupedCount": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "9a271f2a916b0b6e",
+      "coarse": "9a271f2a916b0b6e"
+    },
+    "EmptyJoinUngroupedSum": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "s"
+      ],
+      "fine": "fa4d91d2941621e2",
+      "coarse": "fa4d91d2941621e2"
+    },
+    "EmptyScanUngroupedSum": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "s"
+      ],
+      "fine": "fa4d91d2941621e2",
+      "coarse": "fa4d91d2941621e2"
+    },
+    "GroupNoOrderBy": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n_regionkey",
+        "c"
+      ],
+      "fine": "bac970a54e205dd1",
+      "coarse": "bac970a54e205dd1"
+    },
+    "NullAndEmptyString": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "mixed"
+      ],
+      "fine": "5a51dcadfb7e83ab",
+      "coarse": "5a51dcadfb7e83ab"
+    },
+    "OrderByExpression": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "n_nationkey"
+      ],
+      "fine": "1485e2b4983b2e15",
+      "coarse": "1485e2b4983b2e15"
+    },
+    "Q01": {
+      "source": "duckdb",
+      "row_count": 4,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "l_returnflag",
+        "l_linestatus",
+        "sum_qty",
+        "sum_base_price",
+        "sum_disc_price",
+        "sum_charge",
+        "avg_qty",
+        "avg_price",
+        "avg_disc",
+        "count_order"
+      ],
+      "fine": "1a75adf99e214b44",
+      "coarse": "306538feb683cbe0"
+    },
+    "Q02": {
+      "source": "duckdb",
+      "row_count": 4,
+      "compare": "count",
+      "ordered": true,
+      "tolerance": 4,
+      "limit": 100,
+      "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
+    },
+    "Q02_nolimit": {
+      "source": "duckdb",
+      "row_count": 4,
+      "compare": "count",
+      "ordered": true,
+      "tolerance": 4,
+      "why": "row membership turns on a float threshold; borderline rows shift with accumulation order"
+    },
+    "Q03": {
+      "source": "duckdb",
+      "row_count": 10,
+      "compare": "count",
+      "ordered": true,
+      "limit": 10,
+      "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
+    },
+    "Q03_nolimit": {
+      "source": "duckdb",
+      "row_count": 138,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "l_orderkey",
+        "revenue",
+        "o_orderdate",
+        "o_shippriority"
+      ],
+      "fine": "2c1138a9f3fecbba",
+      "coarse": "c4c35aec6b1c7150"
+    },
+    "Q04": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "o_orderpriority",
+        "order_count"
+      ],
+      "fine": "4dbc238e856c565d",
+      "coarse": "4dbc238e856c565d"
+    },
+    "Q05": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "revenue"
+      ],
+      "fine": "f9eb6a415f80cc2f",
+      "coarse": "4b5cdcd9f5e0c939"
+    },
+    "Q06": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "revenue"
+      ],
+      "fine": "ab63fca98d125e18",
+      "coarse": "daef02972d719ca5"
+    },
+    "Q07": {
+      "source": "duckdb",
+      "row_count": 4,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "supp_nation",
+        "cust_nation",
+        "l_year",
+        "revenue"
+      ],
+      "fine": "48850a88008ac56a",
+      "coarse": "51b19ac8cc74c319"
+    },
+    "Q08": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "o_year",
+        "brazil_revenue",
+        "total_revenue"
+      ],
+      "fine": "500b3324f9678805",
+      "coarse": "23499b7275ae186a"
+    },
+    "Q09": {
+      "source": "duckdb",
+      "row_count": 173,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "nation",
+        "o_year",
+        "sum_profit"
+      ],
+      "fine": "bb943df4f1bfd1b3",
+      "coarse": "9bf0f62e54220705"
+    },
+    "Q10": {
+      "source": "duckdb",
+      "row_count": 20,
+      "compare": "count",
+      "ordered": true,
+      "limit": 20,
+      "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
+    },
+    "Q10_nolimit": {
+      "source": "duckdb",
+      "row_count": 399,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "c_custkey",
+        "c_name",
+        "revenue",
+        "c_acctbal",
+        "n_name",
+        "c_address",
+        "c_phone",
+        "c_comment"
+      ],
+      "fine": "44b97e02d8ea061e",
+      "coarse": "030f088d1e48d8c8"
+    },
+    "Q11": {
+      "source": "duckdb",
+      "row_count": 359,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "ps_partkey",
+        "value"
+      ],
+      "fine": "0059d69e3491c66e",
+      "coarse": "1962812b9f2b0cee"
+    },
+    "Q12": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "l_shipmode",
+        "high_line_count",
+        "low_line_count"
+      ],
+      "fine": "f5eb3beeadf2bed8",
+      "coarse": "f5eb3beeadf2bed8"
+    },
+    "Q13": {
+      "source": "duckdb",
+      "row_count": 100,
+      "compare": "count",
+      "ordered": true,
+      "limit": 100,
+      "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
+    },
+    "Q13_nolimit": {
+      "source": "duckdb",
+      "row_count": 1500,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "c_custkey",
+        "c_count"
+      ],
+      "fine": "e0db1ab6c7e9820d",
+      "coarse": "e0db1ab6c7e9820d"
+    },
+    "Q14": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "promo_revenue",
+        "total_revenue"
+      ],
+      "fine": "96ddaf40017a619e",
+      "coarse": "7fcf5aacef55f03d"
+    },
+    "Q15": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "s_suppkey",
+        "s_name",
+        "s_address",
+        "s_phone",
+        "total_revenue"
+      ],
+      "fine": "6ce593ec4d539bb6",
+      "coarse": "095be8c4e6cb6e4a"
+    },
+    "Q16": {
+      "source": "duckdb",
+      "row_count": 296,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "p_brand",
+        "p_type",
+        "p_size",
+        "supplier_cnt"
+      ],
+      "fine": "edb101931d473445",
+      "coarse": "edb101931d473445"
+    },
+    "Q17": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "avg_yearly"
+      ],
+      "fine": "fa4d91d2941621e2",
+      "coarse": "fa4d91d2941621e2"
+    },
+    "Q18": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "count",
+      "ordered": true,
+      "limit": 100,
+      "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
+    },
+    "Q18_nolimit": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "c_name",
+        "c_custkey",
+        "o_orderkey",
+        "o_orderdate",
+        "o_totalprice",
+        "total_qty"
+      ],
+      "fine": "bc5a04abe324bd15",
+      "coarse": "f7c970031fab0670"
+    },
+    "Q19": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "revenue"
+      ],
+      "fine": "3672b2390594f3f5",
+      "coarse": "edd80e16acda74d8"
+    },
+    "Q20": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "s_name",
+        "s_address"
+      ],
+      "fine": "2cad260f710ee8b5",
+      "coarse": "2cad260f710ee8b5"
+    },
+    "Q21": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "count",
+      "ordered": true,
+      "limit": 100,
+      "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
+    },
+    "Q21_nolimit": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "s_name",
+        "numwait"
+      ],
+      "fine": "3c350ba996bea4e4",
+      "coarse": "3c350ba996bea4e4"
+    },
+    "Q22": {
+      "source": "duckdb",
+      "row_count": 7,
+      "compare": "count",
+      "ordered": true,
+      "tolerance": 4,
+      "why": "row membership turns on a float threshold; borderline rows shift with accumulation order"
+    },
+    "SelfJoinAliases": {
+      "source": "duckdb",
+      "row_count": 14,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "supp_nation",
+        "cust_nation"
+      ],
+      "fine": "0540d2f4fc275014",
+      "coarse": "0540d2f4fc275014"
+    }
   }
 }

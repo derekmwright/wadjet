@@ -177,6 +177,16 @@ func Canonicalize(res *Result) *Canon {
 // the row SEQUENCE part of the answer — comparing sorted canonical forms
 // there would accept a result that lost its ordering.
 func CanonicalizeOrdered(res *Result) *Canon {
+	return canonRowsWith(res, canonCell)
+}
+
+// canonRowsWith renders every row to its two precisions with the supplied
+// cell rule. It is the one rendering pipeline: Canonicalize/
+// CanonicalizeOrdered drive it with canonCell (intra-engine comparison) and
+// the cross-engine fingerprint drives it with fingerprintCell. Columns are
+// visited in Columns order, so a column the result does not carry renders
+// as <null> and a reordered SELECT list is a different canonical row.
+func canonRowsWith(res *Result, cell func(any) (string, string)) *Canon {
 	rows := make([]string, len(res.Rows))
 	coarse := make([]string, len(res.Rows))
 	var sb, csb strings.Builder
@@ -188,7 +198,7 @@ func CanonicalizeOrdered(res *Result) *Canon {
 				sb.WriteByte('|')
 				csb.WriteByte('|')
 			}
-			fine, rough := canonCell(row[col])
+			fine, rough := cell(row[col])
 			sb.WriteString(fine)
 			csb.WriteString(rough)
 		}

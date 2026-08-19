@@ -19,22 +19,53 @@ against. We use it as the source of truth.
 
 ## How the test runs
 
-The default `TestDuckDBCompare` mode runs Wadjet against the committed
-parquet fixtures and gates each query's output checksum against
+The default `TestDuckDBCompare` mode runs every corpus query on **both**
+Wadjet execution paths against the committed parquet fixtures and holds
+each answer against a fingerprint of DuckDB's answer stored in
 `benchmarks/tpch/baseline-duckdb-sf001.json` — no DuckDB binary required,
 and no environment variables. This is the CI gate for cross-engine
 correctness drift.
 
+- **arm A** — the single-process engine (`wadjet.DB`, the same planner and
+  pipeline the coordinator's local fast path runs)
+- **arm B** — the distributed stage DAG (embedded NATS + three workers,
+  `LocalFastPathBytes=0` so nothing routes around it)
+
+Arm B exists because the gate used to have only arm A: Q05's ~25x inflated
+revenues (#312) were DAG-only, so DuckDB truth existed the whole time and
+never saw the bug.
+
+The fingerprint (`internal/oracle.Fingerprint`) covers **every** column,
+strings and NULLs included (NULL renders distinctly from the empty
+string), and is **order-sensitive exactly when the query has a top-level
+ORDER BY**. A query with a trailing `LIMIT` is gated twice: the stripped
+form row for row, and the verbatim form by row count, because rows tied at
+the cut are interchangeable. A bare `LIMIT` with no `ORDER BY` is
+count-only — SQL does not say which rows come back. Floats are digested at
+two precisions and a match at either counts, so accumulation-order noise
+does not register while real value errors do.
+
+Every stored entry carries `"source": "duckdb"`; the loader refuses the
+file if any entry does not, because an expectation that cannot be traced
+to DuckDB is exactly how a wrong answer once became the baseline.
+
 ```bash
-# Default — Wadjet vs stored DuckDB checksums (no DuckDB binary needed):
+# Default — both arms vs the stored DuckDB fingerprints (no DuckDB binary):
 go test -run TestDuckDBCompare ./benchmarks/tpch/
 
-# Live cross-engine compare (also runs DuckDB and verifies cell-by-cell):
+# Live cross-engine compare: also runs DuckDB, verifies the STORED
+# fingerprint still equals live DuckDB output, and prints a cell-by-cell
+# diff when an arm disagrees.
 WADJET_DUCKDB_COMPARE=1 go test -run TestDuckDBCompare ./benchmarks/tpch/
 
-# Regenerate the stored baseline (after intentional output change OR
-# DuckDB version bump). Requires /tmp/duckdb.
+# Regenerate the stored baseline from DuckDB (after a corpus change OR a
+# DuckDB version bump). Requires /tmp/duckdb. This is the only writer of
+# the file, and it writes only DuckDB output.
 WADJET_REGENERATE_DUCKDB_BASELINE=1 go test -run TestDuckDBCompare ./benchmarks/tpch/
+
+# The gate's proof of work: reconstructs each 2026-08-17 wrong-answer bug
+# at the level of the result and requires the fingerprint to reject it.
+go test -run TestGateCatchesHistoricalBugs ./benchmarks/tpch/
 ```
 
 ## Regenerating the parquet fixtures

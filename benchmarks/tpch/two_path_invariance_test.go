@@ -443,16 +443,55 @@ func trailingLimit(sql string) int {
 	return n
 }
 
-// hasTopLevelOrderBy reports whether the query's last ORDER BY is the
-// statement's own and not a subquery's — a subquery's is always followed by
-// the ')' that closes it, a top-level one never is.
+// hasTopLevelOrderBy reports whether the statement has an ORDER BY of its
+// own: one at paren depth 0. A subquery's sits inside the parens that close
+// it, and text inside a string literal is not SQL at all.
+//
+// The decision matters beyond this suite — the DuckDB ground-truth gate uses
+// it to choose an order-sensitive fingerprint — so it is decided by
+// structure and not by "is there a ')' after it": `ORDER BY LENGTH(n_name)`
+// is a top-level ORDER BY whose own parens would fool that test into calling
+// the row sequence meaningless, which is exactly the blind spot #320 shipped
+// through.
 func hasTopLevelOrderBy(sql string) bool {
-	locs := orderByRe.FindAllStringIndex(sql, -1)
-	if len(locs) == 0 {
-		return false
+	depth := parenDepths(sql)
+	for _, loc := range orderByRe.FindAllStringIndex(sql, -1) {
+		if depth[loc[0]] == 0 {
+			return true
+		}
 	}
-	last := locs[len(locs)-1]
-	return !strings.Contains(sql[last[1]:], ")")
+	return false
+}
+
+// parenDepths returns each byte's paren nesting depth, with bytes inside a
+// single-quoted string literal marked -1 so neither their parens nor their
+// text count as SQL.
+func parenDepths(sql string) []int {
+	out := make([]int, len(sql))
+	depth := 0
+	inString := false
+	for i := 0; i < len(sql); i++ {
+		c := sql[i]
+		if inString {
+			out[i] = -1
+			if c == '\'' {
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inString = true
+			out[i] = -1
+			continue
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+		out[i] = depth
+	}
+	return out
 }
 
 // twoPathCorpus is the TPC-H corpus plus the shapes it lacks.
@@ -869,11 +908,22 @@ func stripTrailingOrderBy(sql string) string {
 	return strings.TrimRight(sql[:last[0]], " \t\n")
 }
 
-// setupTwoPathCluster stands up one embedded NATS + MemStore + NATS-KV
-// catalog + three workers, loads TPC-H at SF0.01, and returns two
+// setupTwoPathCluster stands up the cluster over the generated SF0.01
+// fixture. See setupCluster.
+func setupTwoPathCluster(tb testing.TB, ctx context.Context) (fast, dag *coordinator.Coordinator) {
+	tb.Helper()
+	return setupCluster(tb, ctx, Generate(SF001))
+}
+
+// setupCluster stands up one embedded NATS + MemStore + NATS-KV catalog +
+// three workers, loads the supplied table rows, and returns two
 // coordinators over that one cluster: fast (fast path enabled, arm A) and
 // dag (LocalFastPathBytes=0, so every query takes the stage DAG, arm B).
-func setupTwoPathCluster(tb testing.TB, ctx context.Context) (fast, dag *coordinator.Coordinator) {
+//
+// data is keyed by table name. The DuckDB ground-truth gate passes the rows
+// it read out of the committed DuckDB-written parquet, so its distributed
+// arm runs over the same bytes its fingerprints were computed from.
+func setupCluster(tb testing.TB, ctx context.Context, data map[string][]map[string]any) (fast, dag *coordinator.Coordinator) {
 	tb.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
@@ -910,7 +960,7 @@ func setupTwoPathCluster(tb testing.TB, ctx context.Context) (fast, dag *coordin
 	if err := cat.Init(ctx); err != nil {
 		tb.Fatalf("catalog init: %v", err)
 	}
-	loadTPCHIntoCatalog(tb, ctx, cat, store)
+	loadTPCHIntoCatalog(tb, ctx, cat, store, data)
 
 	const workers = 3
 	ids := make([]string, workers)
@@ -973,13 +1023,12 @@ func setupTwoPathCluster(tb testing.TB, ctx context.Context) (fast, dag *coordin
 	return fast, dag
 }
 
-// loadTPCHIntoCatalog writes every TPC-H table at SF0.01 into the object
-// store as several parquet files apiece and registers them in the catalog.
-// Multiple files per table so the DAG really fans scans out across tasks —
-// a single-file table could hide a per-task bug by accident.
-func loadTPCHIntoCatalog(tb testing.TB, ctx context.Context, cat *catalog.Catalog, store objstore.Store) {
+// loadTPCHIntoCatalog writes every TPC-H table into the object store as
+// several parquet files apiece and registers them in the catalog. Multiple
+// files per table so the DAG really fans scans out across tasks — a
+// single-file table could hide a per-task bug by accident.
+func loadTPCHIntoCatalog(tb testing.TB, ctx context.Context, cat *catalog.Catalog, store objstore.Store, data map[string][]map[string]any) {
 	tb.Helper()
-	data := Generate(SF001)
 
 	names := make([]string, 0, len(AllTables))
 	for name := range AllTables {
