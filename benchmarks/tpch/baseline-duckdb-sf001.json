@@ -89,6 +89,39 @@
       "fine": "fa4d91d2941621e2",
       "coarse": "fa4d91d2941621e2"
     },
+    "ExpressionJoinKey": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "917df3320d778ddb",
+      "coarse": "917df3320d778ddb"
+    },
+    "FullJoinWhereAntiJoinIdiom": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "5378796307535df3",
+      "coarse": "5378796307535df3"
+    },
+    "FullJoinWhereOnNullSupplyingSide": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "f0b5c2c2211c8d67",
+      "coarse": "f0b5c2c2211c8d67"
+    },
     "GroupNoOrderBy": {
       "source": "duckdb",
       "row_count": 5,
@@ -100,6 +133,28 @@
       ],
       "fine": "bac970a54e205dd1",
       "coarse": "bac970a54e205dd1"
+    },
+    "InnerWhereSamePredicate": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "f0b5c2c2211c8d67",
+      "coarse": "f0b5c2c2211c8d67"
+    },
+    "LeftJoinEmptyBuildSide": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "64aeb9975f234bec",
+      "coarse": "64aeb9975f234bec"
     },
     "LeftJoinMissCount": {
       "source": "duckdb",
@@ -356,6 +411,52 @@
       "fine": "c1f5358e908e5d30",
       "coarse": "c1f5358e908e5d30"
     },
+    "OnClauseColumnConjunct": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "46b9d3a6b5937182",
+      "coarse": "46b9d3a6b5937182"
+    },
+    "OnClauseColumnConjunctValues": {
+      "source": "duckdb",
+      "row_count": 9,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "lo",
+        "hi"
+      ],
+      "fine": "352590bcd681435a",
+      "coarse": "352590bcd681435a"
+    },
+    "OnClauseColumnVsLiteral": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "a1fb50e6c86fae16",
+      "coarse": "a1fb50e6c86fae16"
+    },
+    "OnClauseCrossTableInequality": {
+      "source": "duckdb",
+      "row_count": 22,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "r_name"
+      ],
+      "fine": "1027c8c630ef91c0",
+      "coarse": "1027c8c630ef91c0"
+    },
     "OrderByExpression": {
       "source": "duckdb",
       "row_count": 25,
@@ -367,6 +468,97 @@
       ],
       "fine": "1485e2b4983b2e15",
       "coarse": "1485e2b4983b2e15"
+    },
+    "OuterJoinOnResidual": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "1121cfccd5913f0a",
+      "coarse": "1121cfccd5913f0a"
+    },
+    "OuterWhereAntiJoinIdiom": {
+      "source": "duckdb",
+      "row_count": 10,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name"
+      ],
+      "fine": "c9bb1d754ac39cff",
+      "coarse": "c9bb1d754ac39cff"
+    },
+    "OuterWhereAntiJoinIdiomEmpty": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "9a271f2a916b0b6e",
+      "coarse": "9a271f2a916b0b6e"
+    },
+    "OuterWhereCoalesce": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "917df3320d778ddb",
+      "coarse": "917df3320d778ddb"
+    },
+    "OuterWhereNullTolerantOr": {
+      "source": "duckdb",
+      "row_count": 15,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "r_name"
+      ],
+      "fine": "2be98287a0d41b72",
+      "coarse": "2be98287a0d41b72"
+    },
+    "OuterWhereOnNullSupplyingSide": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "f0b5c2c2211c8d67",
+      "coarse": "f0b5c2c2211c8d67"
+    },
+    "OuterWhereOnNullSupplyingSideValues": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "r_name"
+      ],
+      "fine": "069f9fc202825fe7",
+      "coarse": "069f9fc202825fe7"
+    },
+    "OuterWhereOnPreservedSide": {
+      "source": "duckdb",
+      "row_count": 4,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "r_name"
+      ],
+      "fine": "1e58f51ccd9d9e2b",
+      "coarse": "1e58f51ccd9d9e2b"
     },
     "PolymorphicOverFloatColumns": {
       "source": "duckdb",
@@ -748,6 +940,28 @@
       "tolerance": 4,
       "why": "row membership turns on a float threshold; borderline rows shift with accumulation order"
     },
+    "RightJoinWhereAntiJoinIdiom": {
+      "source": "duckdb",
+      "row_count": 20,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name"
+      ],
+      "fine": "399aaeb1ae27a929",
+      "coarse": "399aaeb1ae27a929"
+    },
+    "RightJoinWhereOnNullSupplyingSide": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "f0b5c2c2211c8d67",
+      "coarse": "f0b5c2c2211c8d67"
+    },
     "SelfJoinAliases": {
       "source": "duckdb",
       "row_count": 14,
@@ -844,6 +1058,17 @@
       ],
       "fine": "873548e517f1c93b",
       "coarse": "84c8832660ec5208"
+    },
+    "WhereClauseColumnConjunct": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "46b9d3a6b5937182",
+      "coarse": "46b9d3a6b5937182"
     }
   }
 }
