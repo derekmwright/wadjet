@@ -221,10 +221,38 @@ func sortKeyCarried(key string, outputs []string, starOnly bool, ast plansql.Nod
 // lookup does: case-insensitively, and tolerating one side carrying a table
 // qualifier the other omits (columnIndexFallback).
 func namesSameColumn(a, b string) bool {
+	aq, bq := isQuotedIdent(a), isQuotedIdent(b)
+	a, b = unquoteIdent(a), unquoteIdent(b)
 	if strings.EqualFold(a, b) {
 		return true
 	}
+	// A quoted identifier may legitimately CONTAIN a dot — Zeek's `id.orig_h`
+	// is one column, not a qualified reference (#304) — so the qualifier
+	// fallback only applies to spellings that were not quoted. Without this,
+	// ORDER BY "id.orig_h" over GROUP BY "id.orig_h" compared orig_h against
+	// id.orig_h, matched nothing, and the new unresolvable-key guard rejected
+	// a query that had always worked.
+	if aq || bq {
+		return false
+	}
 	return strings.EqualFold(bareColumn(a), bareColumn(b))
+}
+
+// unquoteIdent strips one layer of double quotes from an identifier, leaving
+// unquoted text untouched.
+func unquoteIdent(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+// isQuotedIdent reports whether a spelling arrived double-quoted, which is
+// what makes a dot part of the name rather than a qualifier separator.
+func isQuotedIdent(s string) bool {
+	s = strings.TrimSpace(s)
+	return len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"'
 }
 
 func bareColumn(s string) string {
