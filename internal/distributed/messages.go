@@ -190,7 +190,7 @@ type Task struct {
 	// downstream.
 	PartialAggKeys  []string  `json:"partial_agg_keys,omitempty"`
 	PartialAggSpecs []AggSpec `json:"partial_agg_specs,omitempty"`
-	PartitionID   int      `json:"partition_id,omitempty"`   // which partition this join task handles
+	PartitionID     int       `json:"partition_id,omitempty"` // which partition this join task handles
 
 	// Dynamic filters carried at the top level for non-fragment task shapes
 	// (TaskTypeShuffle). Fragment tasks carry the same data in OpSpec.DynamicFilters
@@ -390,23 +390,23 @@ type OpSpec struct {
 	Projections []ProjectSpec `json:"projections,omitempty"`
 
 	// OpHashJoinProbe / OpBroadcastProbe.
-	JoinType            string   `json:"join_type,omitempty"`  // inner, left, semi, anti, …
-	LeftKeys            []string `json:"left_keys,omitempty"`  // probe-side keys
-	RightKeys           []string `json:"right_keys,omitempty"` // build-side keys
-	BuildAlias          string   `json:"build_alias,omitempty"`
-	BuildFiles          []string `json:"build_files,omitempty"`  // build-side input files
-	BuildBucket         string   `json:"build_bucket,omitempty"` // bucket override for build files
-	JoinFilter          string   `json:"join_filter,omitempty"`
-	BuildRowHint        int64    `json:"build_row_hint,omitempty"`
-	SemiAntiKeyOnly     bool     `json:"semi_anti_key_only,omitempty"`
+	JoinType        string   `json:"join_type,omitempty"`  // inner, left, semi, anti, …
+	LeftKeys        []string `json:"left_keys,omitempty"`  // probe-side keys
+	RightKeys       []string `json:"right_keys,omitempty"` // build-side keys
+	BuildAlias      string   `json:"build_alias,omitempty"`
+	BuildFiles      []string `json:"build_files,omitempty"`  // build-side input files
+	BuildBucket     string   `json:"build_bucket,omitempty"` // bucket override for build files
+	JoinFilter      string   `json:"join_filter,omitempty"`
+	BuildRowHint    int64    `json:"build_row_hint,omitempty"`
+	SemiAntiKeyOnly bool     `json:"semi_anti_key_only,omitempty"`
 	// BuildFilterExprs filter the BUILD input rows before hash-table
 	// insertion (exchange subsumption dedup: the dropped exchange's scan
 	// filter — or its computed flag column — applied at build read).
-	BuildFilterExprs []string `json:"build_filter_exprs,omitempty"`
+	BuildFilterExprs    []string          `json:"build_filter_exprs,omitempty"`
 	QualifyAllBuildCols bool              `json:"qualify_all_build_cols,omitempty"`
 	BuildColOrigins     map[string]string `json:"build_col_origins,omitempty"` // bare build col → owning scan alias (multi-table builds only)
 	OutputColumns       []string          `json:"output_columns,omitempty"`    // OutputFilter for primary probe
-	LateMaterialize     bool     `json:"late_materialize,omitempty"` // emit view-column join output (deferred gather)
+	LateMaterialize     bool              `json:"late_materialize,omitempty"`  // emit view-column join output (deferred gather)
 
 	// OpExchangeSender (sink).
 	ShuffleKeys   []string `json:"shuffle_keys,omitempty"`
@@ -422,6 +422,21 @@ type OpSpec struct {
 	MergeMode    bool      `json:"merge_mode,omitempty"`    // input is already partial-aggregated; rewrite InputCol → OutputCol and COUNT → SUM
 	FoldAvg      bool      `json:"fold_avg,omitempty"`      // collapse __avg_sum#X / __avg_count#X synthetics into AVG output (final aggregate only)
 	BuildProject bool      `json:"build_project,omitempty"` // construct a derived-input projection before the aggregate (skipped in merge mode — partial output already has OutputCol)
+	// EmitEmptyIdentity marks THE aggregate whose one row is the query's
+	// answer for these aggregates: the ungrouped final. SQL gives an
+	// ungrouped aggregate exactly one row over any input including none
+	// (SUM over the empty set is NULL, COUNT is 0), so when this
+	// fragment's input turns out to be empty the worker must still build
+	// the pipeline and let the aggregate finalize its identity row
+	// instead of short-circuiting to zero output.
+	//
+	// Set only on the ungrouped final_aggregate, which the planner
+	// distributes as a Singleton — exactly one task, so exactly one
+	// identity row. Partial and merge_aggregate stages leave it false:
+	// their empty output is absorbed by the final above them, and an
+	// identity partial among typed siblings is what the merge cannot
+	// take (see AggSpec.OutputType).
+	EmitEmptyIdentity bool `json:"emit_empty_identity,omitempty"`
 
 	// OpSort (pipeline-breaker).
 	SortKeySpecs []SortKeySpec `json:"sort_key_specs,omitempty"` // ordered key columns
@@ -478,6 +493,23 @@ type AggSpec struct {
 	// before the aggregate so HashAggregate sees a column named
 	// InputCol.
 	InputExpr string `json:"input_expr,omitempty"`
+	// OutputType is the plan-time parquet.TypeID of this aggregate's
+	// output column, carried as an int so the wire package stays free
+	// of the storage dependency.
+	//
+	// Zero means "the planner did not declare one" — either an older
+	// coordinator that predates the field, or a MIN/MAX whose input
+	// column the planner could not resolve to a catalog type. Workers
+	// fall back to deriving the type from Func alone in that case, and
+	// any decision that needs a TRUSTWORTHY type (emitting an ungrouped
+	// aggregate's identity row over zero input, where there is no input
+	// schema to read it from) must decline rather than guess.
+	//
+	// COUNT-family, SUM and AVG are input-independent in this engine, so
+	// the planner always declares them. MIN/MAX follow their input
+	// column, and are declared only when it resolves to exactly one
+	// catalog column type.
+	OutputType int `json:"output_type,omitempty"`
 }
 
 // GatherBatchMsg is the NATS message body the worker publishes to the
@@ -569,8 +601,8 @@ type ResultNotification struct {
 	// Keys leave pending via UploadComplete. Absent (older worker or
 	// synchronous upload) = nothing pending — grace disengages.
 	UploadPendingKeys []string `json:"upload_pending_keys,omitempty"`
-	NumRows     int64    `json:"num_rows"`
-	SizeBytes   int64    `json:"size_bytes"`
+	NumRows           int64    `json:"num_rows"`
+	SizeBytes         int64    `json:"size_bytes"`
 
 	// Per-partition output accounting for partition-writing tasks (shuffle
 	// tasks and fragment tasks with an exchange-sender sink), indexed by
@@ -654,11 +686,11 @@ type ProducerTaskManifest struct {
 // already published before this task was built, so the subscribe-then-
 // replay contract never loses a completion.
 type EagerInput struct {
-	RootQueryID     string                `json:"root_query_id"`
-	StageID         string                `json:"stage_id"` // producer stage
-	ProducerTaskIDs []string              `json:"producer_task_ids"`
-	PartitionStart  int                   `json:"partition_start"` // inclusive
-	PartitionEnd    int                   `json:"partition_end"`   // inclusive
+	RootQueryID     string                 `json:"root_query_id"`
+	StageID         string                 `json:"stage_id"` // producer stage
+	ProducerTaskIDs []string               `json:"producer_task_ids"`
+	PartitionStart  int                    `json:"partition_start"` // inclusive
+	PartitionEnd    int                    `json:"partition_end"`   // inclusive
 	Replay          []ProducerTaskManifest `json:"replay,omitempty"`
 }
 
@@ -697,20 +729,20 @@ type OperatorPeak struct {
 
 // WorkerHeartbeat is periodically sent by workers.
 type WorkerHeartbeat struct {
-	WorkerID      string    `json:"worker_id"`
-	ClusterID     string    `json:"cluster_id,omitempty"`     // cluster this worker belongs to
-	MaxConcurrent int       `json:"max_concurrent,omitempty"` // worker's effective task slot count (after auto-tuning); 0 = unknown
-	ActiveTasks   int       `json:"active_tasks"`
-	ActiveTaskIDs []string  `json:"active_task_ids,omitempty"` // task IDs currently executing
-	MemoryUsed    int64     `json:"memory_used"`
-	MemoryTotal   int64     `json:"memory_total"`
-	PoolUsed      int64     `json:"pool_used,omitempty"`   // bytes Reserved in the worker's shared memory pool
-	PoolBudget    int64     `json:"pool_budget,omitempty"` // shared memory pool capacity in bytes; pressure = PoolUsed/PoolBudget
-	RSS           int64     `json:"rss,omitempty"`         // process RSS from /proc/self/status
-	NumGoroutines int       `json:"num_goroutines,omitempty"`
-	Mallocs       uint64    `json:"mallocs,omitempty"`         // cumulative allocation count from runtime.MemStats
-	SpillDiskUsed int64     `json:"spill_disk_used,omitempty"` // bytes used in spill directory
-	Draining      bool      `json:"draining,omitempty"`        // true when worker is draining
+	WorkerID      string   `json:"worker_id"`
+	ClusterID     string   `json:"cluster_id,omitempty"`     // cluster this worker belongs to
+	MaxConcurrent int      `json:"max_concurrent,omitempty"` // worker's effective task slot count (after auto-tuning); 0 = unknown
+	ActiveTasks   int      `json:"active_tasks"`
+	ActiveTaskIDs []string `json:"active_task_ids,omitempty"` // task IDs currently executing
+	MemoryUsed    int64    `json:"memory_used"`
+	MemoryTotal   int64    `json:"memory_total"`
+	PoolUsed      int64    `json:"pool_used,omitempty"`   // bytes Reserved in the worker's shared memory pool
+	PoolBudget    int64    `json:"pool_budget,omitempty"` // shared memory pool capacity in bytes; pressure = PoolUsed/PoolBudget
+	RSS           int64    `json:"rss,omitempty"`         // process RSS from /proc/self/status
+	NumGoroutines int      `json:"num_goroutines,omitempty"`
+	Mallocs       uint64   `json:"mallocs,omitempty"`         // cumulative allocation count from runtime.MemStats
+	SpillDiskUsed int64    `json:"spill_disk_used,omitempty"` // bytes used in spill directory
+	Draining      bool     `json:"draining,omitempty"`        // true when worker is draining
 	// PeerAddr is the worker's dialable peer-exchange (FetchShuffle)
 	// address. Empty when the worker doesn't serve peer fetches — the
 	// coordinator then simply emits no location hints referencing it,

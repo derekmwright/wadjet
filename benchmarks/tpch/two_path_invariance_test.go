@@ -75,6 +75,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"regexp"
 	"sort"
@@ -711,6 +712,135 @@ func twoPathCorpus() []twoPathQuery {
 		// ordered compare that regressed to unordered would still pass Q07, and
 		// this entry would not.
 		twoPathQuery{name: "Q07_noorder", cmp: cmpUnordered, sql: stripTrailingOrderBy(TPCHQueries[7].SQL)},
+	)
+
+	// #329: an UNGROUPED aggregate returns exactly one row for any input,
+	// including none — SUM over the empty set is NULL, and SQL has no reading
+	// under which the answer is zero rows. The stage DAG lost that row when
+	// the aggregate's input was an empty JOIN result: the fragment
+	// short-circuited on "no input files" before building a pipeline, and the
+	// carve-out that let COUNT through covered nothing else, because the wire
+	// AggSpec carried no output type and a mistyped identity row is worse than
+	// none. Q17 came back with 0 rows against a fixture whose part predicate
+	// matched nothing.
+	//
+	// The compare is the assertion (arm A was right all along), and every
+	// entry also carries an absolute assertA: "the paths agree" would be
+	// satisfied by both returning nothing, which is exactly the wrong answer.
+	// The cluster runs three workers over three chunks per table, so ONE row
+	// out is also the statement that N workers did not each contribute one.
+	emptyJoin := func(selectList string) string {
+		return "SELECT " + selectList + " FROM orders JOIN customer ON o_custkey = c_custkey WHERE c_nationkey = 999"
+	}
+	assertOneRow := func(tb testing.TB, rows []map[string]any, check func(testing.TB, map[string]any)) {
+		tb.Helper()
+		if len(rows) != 1 {
+			tb.Fatalf("arm A (single-process) returned %d rows; an ungrouped aggregate owes SQL exactly one row over any input, including none", len(rows))
+		}
+		check(tb, rows[0])
+	}
+	assertNull := func(tb testing.TB, row map[string]any, cols ...string) {
+		tb.Helper()
+		for _, c := range cols {
+			v, ok := lookupCell(row, c)
+			if !ok {
+				tb.Errorf("result has no column %q: %v", c, row)
+				continue
+			}
+			if v != nil {
+				tb.Errorf("%s over the empty set = %v, want NULL", c, v)
+			}
+		}
+	}
+	out = append(out,
+		// The issue's shape, reduced: SUM over a join that matches nothing.
+		twoPathQuery{name: "EmptyJoinUngroupedSum", cmp: cmpUnordered,
+			sql: emptyJoin("SUM(o_totalprice) AS s"),
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOneRow(tb, rows, func(tb testing.TB, r map[string]any) { assertNull(tb, r, "s") })
+			}},
+		// Every family at once. This is also the shape the old carve-out
+		// failed hardest on: one SUM disqualified the whole fragment, so even
+		// the COUNT came back missing instead of 0.
+		twoPathQuery{name: "EmptyJoinAggregateFamilies", cmp: cmpUnordered,
+			sql: emptyJoin("SUM(o_totalprice) AS s, MIN(o_totalprice) AS mn, MAX(o_totalprice) AS mx, AVG(o_totalprice) AS av, COUNT(*) AS c"),
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOneRow(tb, rows, func(tb testing.TB, r map[string]any) {
+					assertNull(tb, r, "s", "mn", "mx", "av")
+					if got := cellNum(r, "c"); got != 0 {
+						tb.Errorf("COUNT(*) over the empty set = %v, want 0 (never NULL)", r["c"])
+					}
+					if r["c"] == nil {
+						tb.Error("COUNT(*) over the empty set is NULL, want 0")
+					}
+				})
+			}},
+		// MIN over a STRING column: its output type follows the input, which
+		// is why the planner has to resolve it from the catalog rather than
+		// derive it from the function name.
+		twoPathQuery{name: "EmptyJoinUngroupedMinString", cmp: cmpUnordered,
+			sql: emptyJoin("MIN(c_name) AS m"),
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOneRow(tb, rows, func(tb testing.TB, r map[string]any) { assertNull(tb, r, "m") })
+			}},
+		// Control: COUNT alone was always correct, and must stay so.
+		twoPathQuery{name: "EmptyJoinUngroupedCount", cmp: cmpUnordered,
+			sql: emptyJoin("COUNT(*) AS c"),
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOneRow(tb, rows, func(tb testing.TB, r map[string]any) {
+					if got := cellNum(r, "c"); got != 0 || r["c"] == nil {
+						tb.Errorf("COUNT(*) over the empty set = %v, want 0", r["c"])
+					}
+				})
+			}},
+		// Control: the same SUM emptied by a WHERE instead of a join. This
+		// shape was correct on every path — the aggregate's fragment had input
+		// files, just no surviving rows — and localises the defect to the
+		// empty-file-set short-circuit rather than to aggregation itself.
+		twoPathQuery{name: "EmptyWhereUngroupedSum", cmp: cmpUnordered,
+			sql: "SELECT SUM(o_totalprice) AS s FROM orders WHERE o_custkey = -1",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOneRow(tb, rows, func(tb testing.TB, r map[string]any) { assertNull(tb, r, "s") })
+			}},
+		// Control on the other side: a GROUPED aggregate over the same empty
+		// join owes NO rows. Only the ungrouped one has a row to lose, so a
+		// fix that emitted unconditionally would break this.
+		twoPathQuery{name: "EmptyJoinGroupedSum", cmp: cmpUnordered,
+			sql: "SELECT c_nationkey AS nk, SUM(o_totalprice) AS s FROM orders JOIN customer ON o_custkey = c_custkey WHERE c_nationkey = 999 GROUP BY c_nationkey",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 0 {
+					tb.Errorf("arm A returned %d rows for a GROUP BY over an empty join, want 0 — no input rows, no groups", len(rows))
+				}
+			}},
+		// Q17 itself, the query the issue was reported against, with a part
+		// brand no row carries — which is what makes its lineitem⋈part join
+		// empty and its `SUM(...) / 7.0` an ungrouped aggregate over nothing.
+		// The corpus's own Q17 keeps the verbatim Brand#23, which this
+		// fixture DOES match; that is precisely why 22 queries of coverage
+		// never reached the shape.
+		twoPathQuery{name: "Q17EmptyPartFilter", cmp: cmpUnordered,
+			sql: strings.ReplaceAll(TPCHQueries[17].SQL, "Brand#23", "Brand#99"),
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOneRow(tb, rows, func(tb testing.TB, r map[string]any) { assertNull(tb, r, "avg_yearly") })
+			}},
+		// Multi-task, partially empty: the join matches one customer, so most
+		// of the fan-out contributes nothing while one task carries the whole
+		// answer. Exactly one row out, with the fixture's real values — a
+		// double-counted identity row would show up here as an inflated
+		// count, and a lost one as a missing row.
+		twoPathQuery{name: "SparseJoinUngroupedAggregate", cmp: cmpUnordered,
+			sql: `SELECT SUM(o_totalprice) AS s, COUNT(*) AS c
+				FROM orders JOIN customer ON o_custkey = c_custkey WHERE c_custkey = 7`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOneRow(tb, rows, func(tb testing.TB, r map[string]any) {
+					if got := cellNum(r, "c"); got != 17 {
+						tb.Errorf("COUNT(*) = %v, want 17 (customer 7's orders at SF0.01)", r["c"])
+					}
+					if got := cellNum(r, "s"); math.Abs(got-4065944.86) > 0.01 {
+						tb.Errorf("SUM(o_totalprice) = %v, want 4065944.86", r["s"])
+					}
+				})
+			}},
 	)
 
 	// #320: ORDER BY over anything that is not a plain SELECT-list column.

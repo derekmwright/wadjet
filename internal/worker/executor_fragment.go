@@ -313,37 +313,69 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	// manifests — so "no frozen files" carries no emptiness signal at all.
 	// Short-circuiting here silently dropped the entire input (0 rows,
 	// task success) when eager dispatch first went end-to-end.
-	// Exception: a SCALAR COUNT-family aggregate fragment (ungrouped
-	// OpHashAggregate, every aggregate count/count_distinct). SQL requires
-	// it to emit its identity row over zero input — COUNT()=0 — and a
-	// downstream consumer (scalar-subquery substitution, #292) blocks on
-	// that row existing. Fall through with an empty source so the
-	// aggregate finalizes and the row is written.
+	// Exception: an UNGROUPED aggregate fragment that owes SQL its identity
+	// row. An ungrouped aggregate returns exactly one row for any input,
+	// including none — COUNT()=0, SUM/MIN/MAX/AVG=NULL — and a downstream
+	// consumer (scalar-subquery substitution, #292) blocks on that row
+	// existing. Fall through with an empty source so the aggregate
+	// finalizes and the row is written.
 	//
-	// COUNT-family ONLY: their output type (int64) is input-independent.
-	// MIN/MAX/SUM output types follow the input column, which is unknowable
-	// here (zero input files = no schema), so an identity row would guess a
-	// type — and one mistyped partial poisons the merge for every sibling
-	// (a float64-typed NULL min among string-typed partials broke the
-	// skew-parity left join before this gate). Those shapes keep the
-	// empty-output short-circuit.
+	// Two shapes qualify, and the difference is whose type the row wears.
+	//
+	//  1. COUNT-family, at ANY stage: their output type (int64) is
+	//     input-independent, so a partial identity row is typed the same as
+	//     every sibling's and merges cleanly.
+	//
+	//  2. Anything else, ONLY on the ungrouped final (EmitEmptyIdentity) and
+	//     ONLY when the planner declared every aggregate's output type
+	//     (AggSpec.OutputType). MIN/MAX types follow the input column, which
+	//     cannot be read here — zero input files, no schema — so without the
+	//     declaration the row would guess. The final is also where guessing
+	//     costs the least even if the declaration were wrong: its input being
+	//     empty means there are no sibling partials to merge against, and the
+	//     planner makes it a Singleton, so the identity row it emits is the
+	//     one row of the answer, not one of N (#329).
+	//
+	// Everything else keeps the empty-output short-circuit: a partial or
+	// merge_aggregate that produces nothing is absorbed by the final above
+	// it, which emits the row instead — and one mistyped partial poisons the
+	// merge for every sibling (a float64-typed NULL min among string-typed
+	// partials broke the skew-parity left join before this gate).
 	emptyScalarAgg := false
 	_, eagerSource := task.EagerInputs[sourceSpec.InputAlias]
 	if len(sourceSpec.InputFiles) == 0 && !eagerSource {
-		for _, m := range middle {
+		for i, m := range middle {
 			if m.Type != distributed.OpHashAggregate || len(m.GroupByCols) != 0 || m.GroupByAll {
 				continue
 			}
-			countOnly := len(m.Aggregates) > 0
+			if len(m.Aggregates) == 0 {
+				break
+			}
+			countOnly, typed := true, m.EmitEmptyIdentity
 			for _, a := range m.Aggregates {
 				switch strings.ToLower(strings.TrimSpace(a.Func)) {
 				case "count", "count_distinct", "approx_distinct":
 				default:
 					countOnly = false
 				}
+				if a.OutputType == 0 {
+					typed = false
+				}
 			}
-			if countOnly {
+			if countOnly || typed {
 				emptyScalarAgg = true
+				// There is nothing to merge, and merge mode would cost the
+				// identity row its COUNT: the merge rewrite turns COUNT into
+				// SUM over the partial counts, whose identity is NULL, not 0.
+				// Drop it for this run only — over zero input the rewrite has
+				// no other effect, since neither InputCol nor OutputCol is
+				// ever read. specs is task.Operators' backing array, so copy
+				// before writing (a redelivered task re-reads it).
+				if m.MergeMode {
+					specs = append([]distributed.OpSpec(nil), specs...)
+					middle = specs[1 : len(specs)-1]
+					middle[i].MergeMode = false
+				}
 			}
 			break
 		}
@@ -2095,7 +2127,7 @@ func (e *Executor) buildFragmentHashAggregate(spec distributed.OpSpec) (*exec.Ha
 			Func:       fn,
 			InputCol:   inputCol,
 			OutputCol:  a.OutputCol,
-			OutputType: aggOutputTypeString(a.Func),
+			OutputType: aggSpecOutputType(a),
 		}
 	}
 	hashAgg := exec.NewHashAggregate(spec.GroupByCols, aggCols)

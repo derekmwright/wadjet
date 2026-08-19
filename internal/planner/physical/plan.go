@@ -362,6 +362,11 @@ type AggSpec struct {
 	// Project operator before the aggregate so HashAggregate sees a
 	// column whose name matches InputCol.
 	InputExpr string
+	// OutputType is the plan-time output type of this aggregate, mirrored
+	// onto distributed.AggSpec at dispatch. Zero = undeclared, which is
+	// only produced for a MIN/MAX whose input column does not resolve to
+	// a catalog type; see aggSpecOutputType.
+	OutputType parquet.TypeID
 }
 
 // SortKeySpec defines a sort key in a stage.
@@ -966,8 +971,10 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 		if err == nil {
 			cols := make([]string, len(table.Schema.Columns))
 			intCols := make(map[string]bool, len(table.Schema.Columns))
+			colTypes := make(map[string]parquet.TypeID, len(table.Schema.Columns))
 			for i, c := range table.Schema.Columns {
 				cols[i] = c.Name
+				colTypes[strings.ToLower(c.Name)] = c.Type
 				switch c.Type {
 				case parquet.TypeInt64, parquet.TypeInt32, parquet.TypeTimestamp,
 					parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration,
@@ -985,6 +992,7 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 			node.ScanColumns = cols
 			node.ScanIntCols = intCols
 			node.ScanStrictIntCols = strictInt
+			node.ScanColTypes = colTypes
 		}
 		// Estimate row count from manifest for join reordering
 		if manifest, err := p.catalog.GetManifest(ctx, node.TableName); err == nil {
@@ -3814,9 +3822,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		hasDistinctAgg := false
 		for _, agg := range node.AggExprs {
 			spec := AggSpec{
-				Func:      agg.Func,
-				InputCol:  agg.InputCol,
-				OutputCol: agg.OutputCol,
+				Func:       agg.Func,
+				InputCol:   agg.InputCol,
+				OutputCol:  agg.OutputCol,
+				OutputType: aggSpecOutputType(node, agg),
 			}
 			// DISTINCT rides the canonical Func string the worker already
 			// maps to exec.AggCountDistinct (#291: the flag used to be
@@ -6196,11 +6205,21 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		if synName, ok := syntheticNames[i]; ok {
 			inputCol = synName
 		}
+		// Prefer the resolved declaration (MIN/MAX carry their input
+		// column's type) so this pipeline and the stage DAG declare the
+		// same thing for the same query. exec.HashAggregate overrides
+		// MIN/MAX from the vector it observes anyway, so this only decides
+		// the type of the identity row an empty input produces — which is
+		// exactly where the two paths would otherwise disagree.
+		outType := aggSpecOutputType(node, agg)
+		if outType == 0 {
+			outType = aggOutputType(agg.Func, agg.Distinct)
+		}
 		ac := exec.AggColumn{
 			Func:       fn,
 			InputCol:   inputCol,
 			OutputCol:  agg.OutputCol,
-			OutputType: aggOutputType(agg.Func, agg.Distinct),
+			OutputType: outType,
 		}
 		// Parse STRING_AGG separator from InputCol (format: "col, 'sep'")
 		if fn == exec.AggStringAgg && strings.Contains(inputCol, ",") {
@@ -8525,7 +8544,7 @@ func windowOutputType(funcName string) parquet.TypeID {
 
 func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 	switch strings.ToLower(funcName) {
-	case "count", "approx_distinct":
+	case "count", "count_distinct", "approx_distinct":
 		return parquet.TypeInt64
 	case "string_agg":
 		return parquet.TypeString
@@ -8534,6 +8553,97 @@ func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 	default:
 		return parquet.TypeFloat64
 	}
+}
+
+// aggSpecOutputType declares the output type of one aggregate over the
+// subtree rooted at the Aggregate node that owns it.
+//
+// Every family except MIN/MAX is input-independent in this engine — SUM and
+// AVG finalize to float64 whatever they summed, COUNT to int64 — so
+// aggOutputType alone is exact, and it is the same declaration the
+// single-process pipeline compiles into exec.AggColumn.OutputType.
+//
+// MIN/MAX are the exception: their output IS their input's type, which
+// exec.HashAggregate resolves from the vector it observes at Consume. To
+// declare the same thing at plan time the input column has to resolve to a
+// catalog type, so this walks the aggregate's inputs for it and returns 0 —
+// undeclared — when it cannot: a derived-expression argument, a column no
+// scan below carries, or two scans carrying it at different types.
+func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) parquet.TypeID {
+	fn := strings.ToLower(strings.TrimSpace(agg.Func))
+	if fn != "min" && fn != "max" {
+		return aggOutputType(agg.Func, agg.Distinct)
+	}
+	if agg.InputExpr != nil {
+		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
+			return 0
+		}
+	}
+	in, ok := scanColumnType(node, agg.InputCol)
+	if !ok {
+		return 0
+	}
+	return minMaxDeclaredType(in)
+}
+
+// minMaxDeclaredType maps a MIN/MAX input column type to the output type
+// exec.HashAggregate emits for it. It mirrors exec.minMaxOutputType, whose
+// "0" answer means "keep what the planner declared" — float64 — so that
+// case is spelled out here as float64 rather than propagated as undeclared.
+func minMaxDeclaredType(in parquet.TypeID) parquet.TypeID {
+	switch in {
+	case parquet.TypeString, parquet.TypeBytes:
+		return parquet.TypeString
+	case parquet.TypeDate:
+		return parquet.TypeDate
+	case parquet.TypeTimestamp:
+		return parquet.TypeTimestamp
+	case parquet.TypeIPv4:
+		return parquet.TypeIPv4
+	case parquet.TypeInt64, parquet.TypeInt32:
+		return parquet.TypeInt64
+	}
+	return parquet.TypeFloat64
+}
+
+// scanColumnType resolves a column name to its catalog type by searching
+// the scans below node (ScanColTypes, populated by AnnotateScanColumns).
+// A qualified name matches on its bare suffix, since a scan's schema
+// carries unqualified names. Two scans that disagree on the type — a
+// self-join is not the only way to reach one — report not-found rather
+// than picking a side.
+func scanColumnType(node *logical.Node, col string) (parquet.TypeID, bool) {
+	if node == nil || col == "" {
+		return 0, false
+	}
+	if dot := strings.LastIndexByte(col, '.'); dot >= 0 {
+		col = col[dot+1:]
+	}
+	col = strings.ToLower(col)
+	var found parquet.TypeID
+	ok := false
+	var walk func(n *logical.Node) bool
+	walk = func(n *logical.Node) bool {
+		if n == nil {
+			return true
+		}
+		if t, present := n.ScanColTypes[col]; present {
+			if ok && t != found {
+				return false
+			}
+			found, ok = t, true
+		}
+		for _, c := range n.Children {
+			if !walk(c) {
+				return false
+			}
+		}
+		return true
+	}
+	if !walk(node) {
+		return 0, false
+	}
+	return found, ok
 }
 
 // hasAggregateAncestor checks if a node is an Aggregate, or if it's a

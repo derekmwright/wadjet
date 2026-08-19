@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // ScanColumnStats holds aggregated column statistics from the catalog.
@@ -90,24 +91,29 @@ type Node struct {
 	// Scan
 	TableName       string
 	TableAlias      string
-	ScanColumns     []string          // column names available from this scan (populated by physical planner)
-	RequiredColumns []string          // columns actually needed from this scan (set by optimizer column pruning)
-	PartitionFilter map[string]string // extracted partition key filters (year, month, day, hour)
-	ScanPredicates  []Predicate       // pushed-down filter predicates for row group pruning
-	ScanRowEstimate int64             // estimated row count from manifest (0 = unknown)
+	ScanColumns     []string                   // column names available from this scan (populated by physical planner)
+	RequiredColumns []string                   // columns actually needed from this scan (set by optimizer column pruning)
+	PartitionFilter map[string]string          // extracted partition key filters (year, month, day, hour)
+	ScanPredicates  []Predicate                // pushed-down filter predicates for row group pruning
+	ScanRowEstimate int64                      // estimated row count from manifest (0 = unknown)
 	ScanColStats    map[string]ScanColumnStats // aggregated column stats from catalog (nil = unavailable)
-	FilterOnlyColumns []string        // columns needed ONLY by the filter directly above this scan (candidates for scan-level filter evaluation without materialization)
-	ShapeOnlyColumns  []string        // byte-array columns whose EVERY use in the plan reads shape, not contents (LENGTH/IS NULL/= ''/COUNT) — the scan decodes them as lengths, see shape_only_columns.go
-	SampleMethod    string            // TABLESAMPLE method: BERNOULLI, SYSTEM
-	SamplePercent   float64           // percentage for TABLESAMPLE (0-100)
+	// ScanColTypes maps this scan's lower-cased column names to their
+	// catalog types (populated by physical.AnnotateScanColumns alongside
+	// ScanColumns). It is what lets the planner declare a MIN/MAX output
+	// type, which follows the input column rather than the function.
+	ScanColTypes      map[string]parquet.TypeID
+	FilterOnlyColumns []string // columns needed ONLY by the filter directly above this scan (candidates for scan-level filter evaluation without materialization)
+	ShapeOnlyColumns  []string // byte-array columns whose EVERY use in the plan reads shape, not contents (LENGTH/IS NULL/= ''/COUNT) — the scan decodes them as lengths, see shape_only_columns.go
+	SampleMethod      string   // TABLESAMPLE method: BERNOULLI, SYSTEM
+	SamplePercent     float64  // percentage for TABLESAMPLE (0-100)
 
 	// Table Function (e.g., read_json, read_csv, unnest)
-	IsTableFunc     bool              // true if this scan reads from a table function
-	FuncName        string            // function name (e.g., "read_json")
-	FuncArgs        []string          // positional arguments (e.g., URL/path)
-	FuncNamedArgs   map[string]string // named arguments (e.g., delimiter="|")
-	WithOrdinality  bool              // UNNEST(...) WITH ORDINALITY
-	FuncColAliases  []string          // AS alias(col1, col2, ...)
+	IsTableFunc    bool              // true if this scan reads from a table function
+	FuncName       string            // function name (e.g., "read_json")
+	FuncArgs       []string          // positional arguments (e.g., URL/path)
+	FuncNamedArgs  map[string]string // named arguments (e.g., delimiter="|")
+	WithOrdinality bool              // UNNEST(...) WITH ORDINALITY
+	FuncColAliases []string          // AS alias(col1, col2, ...)
 
 	// Filter
 	Predicates []Predicate
@@ -190,7 +196,7 @@ type Predicate struct {
 	Column  string
 	Op      string // =, !=, <, <=, >, >=, is_null, is_not_null, in, between
 	Value   any
-	Raw     string         // raw SQL expression
+	Raw     string       // raw SQL expression
 	ASTExpr plansql.Node // compiled AST expression node
 	// PruneOnly marks predicates attached solely for storage-level pruning
 	// (row-group stats / dictionary probes). The cardinality estimator
@@ -222,8 +228,8 @@ type AggExpr struct {
 	Func      string // sum, count, min, max, avg
 	InputCol  string
 	OutputCol string
-	Distinct  bool           // COUNT(DISTINCT col)
-	InputExpr plansql.Node   // AST for aggregate argument (nil for simple column refs)
+	Distinct  bool         // COUNT(DISTINCT col)
+	InputExpr plansql.Node // AST for aggregate argument (nil for simple column refs)
 }
 
 // WindowFrameSpec describes a window frame specification.
@@ -597,10 +603,10 @@ func (n *Node) PrettyPrint(indent int) string {
 		aggs := make([]string, len(n.AggExprs))
 		for i, a := range n.AggExprs {
 			distinct := ""
-		if a.Distinct {
-			distinct = "DISTINCT "
-		}
-		aggs[i] = fmt.Sprintf("%s(%s%s) AS %s", a.Func, distinct, a.InputCol, a.OutputCol)
+			if a.Distinct {
+				distinct = "DISTINCT "
+			}
+			aggs[i] = fmt.Sprintf("%s(%s%s) AS %s", a.Func, distinct, a.InputCol, a.OutputCol)
 		}
 		s = fmt.Sprintf("%sAggregate: group_by=%v aggs=%v", prefix, n.GroupBy, aggs)
 	case NodeSort:

@@ -1734,10 +1734,11 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	var aggs []distributed.AggSpec
 	for _, a := range stage.FusedAggSpecs {
 		aggs = append(aggs, distributed.AggSpec{
-			Func:      a.Func,
-			InputCol:  a.InputCol,
-			OutputCol: a.OutputCol,
-			InputExpr: a.InputExpr,
+			Func:       a.Func,
+			InputCol:   a.InputCol,
+			OutputCol:  a.OutputCol,
+			InputExpr:  a.InputExpr,
+			OutputType: int(a.OutputType),
 		})
 	}
 	aggs = decomposeAvg(aggs)
@@ -2504,10 +2505,11 @@ func (c *Coordinator) dispatchComputeStage(
 		var aggs []distributed.AggSpec
 		for _, a := range stage.AggSpecs {
 			aggs = append(aggs, distributed.AggSpec{
-				Func:      a.Func,
-				InputCol:  a.InputCol,
-				OutputCol: a.OutputCol,
-				InputExpr: a.InputExpr,
+				Func:       a.Func,
+				InputCol:   a.InputCol,
+				OutputCol:  a.OutputCol,
+				InputExpr:  a.InputExpr,
+				OutputType: int(a.OutputType),
 			})
 		}
 		aggs = decomposeAvg(aggs)
@@ -2594,10 +2596,11 @@ func (c *Coordinator) dispatchComputeStage(
 			var chainAggs []distributed.AggSpec
 			for _, a := range stage.ChainedAggSpecs {
 				chainAggs = append(chainAggs, distributed.AggSpec{
-					Func:      a.Func,
-					InputCol:  a.InputCol,
-					OutputCol: a.OutputCol,
-					InputExpr: a.InputExpr,
+					Func:       a.Func,
+					InputCol:   a.InputCol,
+					OutputCol:  a.OutputCol,
+					InputExpr:  a.InputExpr,
+					OutputType: int(a.OutputType),
 				})
 			}
 			chainedOps = append(chainedOps, distributed.OpSpec{
@@ -3402,6 +3405,14 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 		// no AVG synthetics to fold — keep both off regardless of stage role.
 		FoldAvg:      stage.Type == "final_aggregate" && !stage.GroupByAll,
 		BuildProject: !mergeMode && !stage.GroupByAll,
+		// An UNGROUPED final aggregate owes SQL one row over any input,
+		// including none — see distributed.OpSpec.EmitEmptyIdentity. It is
+		// the only aggregate in the DAG that does: a partial or
+		// merge_aggregate that produces nothing is absorbed by the final
+		// above it, and this stage is the one the planner distributes as a
+		// Singleton, so the row it emits cannot be duplicated across tasks.
+		EmitEmptyIdentity: stage.Type == "final_aggregate" &&
+			len(stage.GroupByCols) == 0 && !stage.GroupByAll,
 	})
 	if len(t.PostFilterExprs) > 0 {
 		ops = append(ops, distributed.OpSpec{
@@ -3683,10 +3694,11 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	aggs := make([]distributed.AggSpec, 0, len(stage.AggSpecs))
 	for _, a := range stage.AggSpecs {
 		aggs = append(aggs, distributed.AggSpec{
-			Func:      a.Func,
-			InputCol:  a.InputCol,
-			OutputCol: a.OutputCol,
-			InputExpr: a.InputExpr,
+			Func:       a.Func,
+			InputCol:   a.InputCol,
+			OutputCol:  a.OutputCol,
+			InputExpr:  a.InputExpr,
+			OutputType: int(a.OutputType),
 		})
 	}
 	// Decompose AVG specs into (SUM, COUNT) pairs. Both intermediates

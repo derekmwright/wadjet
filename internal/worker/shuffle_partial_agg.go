@@ -85,7 +85,7 @@ func newCappedPartialAggPartitioned(keys []string, specs []distributed.AggSpec, 
 			Func:       parseAggFuncString(s.Func),
 			InputCol:   s.InputCol,
 			OutputCol:  s.OutputCol,
-			OutputType: aggOutputTypeString(s.Func),
+			OutputType: aggSpecOutputType(s),
 		}
 	}
 	return &cappedPartialAgg{groupBy: keys, aggs: aggs, capBytes: capBytes, partitionKeys: partitionKeys}

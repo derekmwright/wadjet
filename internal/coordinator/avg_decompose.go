@@ -5,6 +5,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // avgSumPrefix and avgCountPrefix name the two synthetic columns that
@@ -53,9 +54,15 @@ func decomposeAvg(specs []distributed.AggSpec) []distributed.AggSpec {
 		sumSpec := a
 		sumSpec.Func = "sum"
 		sumSpec.OutputCol = avgSumPrefix + a.OutputCol
+		sumSpec.OutputType = int(parquet.TypeFloat64)
 		countSpec := a
 		countSpec.Func = "count"
 		countSpec.OutputCol = avgCountPrefix + a.OutputCol
+		// The count leg is int64 whatever AVG's own type is, and
+		// applyAvgFold reads it straight out of Int64Data — inheriting
+		// AVG's float64 declaration here would hand the fold the wrong
+		// vector.
+		countSpec.OutputType = int(parquet.TypeInt64)
 		out = append(out, sumSpec, countSpec)
 	}
 	return out
@@ -84,9 +91,11 @@ func decomposeAvgPhysical(specs []physical.AggSpec) []physical.AggSpec {
 		sumSpec := a
 		sumSpec.Func = "sum"
 		sumSpec.OutputCol = avgSumPrefix + a.OutputCol
+		sumSpec.OutputType = parquet.TypeFloat64
 		countSpec := a
 		countSpec.Func = "count"
 		countSpec.OutputCol = avgCountPrefix + a.OutputCol
+		countSpec.OutputType = parquet.TypeInt64
 		out = append(out, sumSpec, countSpec)
 	}
 	return out

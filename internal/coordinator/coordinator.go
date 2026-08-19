@@ -1007,7 +1007,7 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 		for _, m := range stage.PreComputedAggregates {
 			specs := make([]distributed.AggSpec, len(m.AggSpecs))
 			for i, s := range m.AggSpecs {
-				specs[i] = distributed.AggSpec{Func: s.Func, InputCol: s.InputCol, OutputCol: s.OutputCol}
+				specs[i] = distributed.AggSpec{Func: s.Func, InputCol: s.InputCol, OutputCol: s.OutputCol, OutputType: int(s.OutputType)}
 			}
 			precomp = append(precomp, distributed.PreComputedAggregate{
 				InputTable:  m.InputTable,

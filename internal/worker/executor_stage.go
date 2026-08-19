@@ -201,10 +201,24 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 	return nil
 }
 
-// aggOutputTypeString mirrors planner/physical.aggOutputType. The native
-// AggSpec doesn't carry an output type; the worker derives it from the
-// function name. Default (sum/min/max/avg) → float64, matching the
-// coordinator's planner convention.
+// aggSpecOutputType returns the output type to declare for one wire
+// AggSpec: the planner's declaration when it made one, else the
+// function-name derivation below. The planner is the better source
+// because MIN/MAX follow their INPUT column, which the function name
+// cannot tell you — exec.HashAggregate patches that up from the vector it
+// observes at Consume, but an empty input has no vector to observe.
+func aggSpecOutputType(a distributed.AggSpec) parquet.TypeID {
+	if a.OutputType != 0 {
+		return parquet.TypeID(a.OutputType)
+	}
+	return aggOutputTypeString(a.Func)
+}
+
+// aggOutputTypeString mirrors planner/physical.aggOutputType. It is the
+// fallback for an AggSpec that carries no declared output type (an older
+// coordinator, or a MIN/MAX the planner could not resolve). Default
+// (sum/min/max/avg) → float64, matching the coordinator's planner
+// convention.
 func aggOutputTypeString(funcName string) parquet.TypeID {
 	switch strings.ToLower(strings.TrimSpace(funcName)) {
 	case "count", "count_distinct", "approx_distinct":
