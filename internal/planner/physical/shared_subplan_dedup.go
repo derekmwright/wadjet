@@ -217,6 +217,9 @@ func stageEdgeRefs(s *Stage) []string {
 	for i := range s.ConsumeDynamicFilters {
 		add(s.ConsumeDynamicFilters[i].SourceStageID)
 	}
+	for i := range s.UnionArms {
+		add(s.UnionArms[i].DepStage)
+	}
 	return refs
 }
 
@@ -251,6 +254,15 @@ func rewireEdges(s *Stage, from, to string) {
 	for i := range s.ConsumeDynamicFilters {
 		if s.ConsumeDynamicFilters[i].SourceStageID == from {
 			s.ConsumeDynamicFilters[i].SourceStageID = to
+		}
+	}
+	// A union stage dispatches arm i as task i reading Dependencies[i], so
+	// its arms must be rewired in lockstep with its Dependencies — leaving
+	// one behind runs an arm's projection over another arm's rows.
+	// ValidateNativeDAGShape asserts the alignment.
+	for i := range s.UnionArms {
+		if s.UnionArms[i].DepStage == from {
+			s.UnionArms[i].DepStage = to
 		}
 	}
 }
@@ -292,9 +304,14 @@ func (d *subplanDeduper) fingerprintAs(id, joinTypeOverride string) (string, boo
 	// Fields that would need semantics this pass doesn't model: refuse to
 	// fingerprint rather than risk a false match. All are either set by
 	// later passes (dynamic filters) or never appear on these stage types.
+	// UnionArms rides here rather than in the slot resolution below because
+	// StageUnion is not fingerprintable in the first place; the explicit
+	// clause is what keeps that from becoming an unnoticed gap if the
+	// fingerprintable set ever widens.
 	if len(s.ScalarDependencies) > 0 || len(s.OutputRenames) > 0 ||
 		len(s.EmitDynamicFilters) > 0 || len(s.ConsumeDynamicFilters) > 0 ||
-		len(s.PreComputedAggregates) > 0 || len(s.BuildCachePreScans) > 0 {
+		len(s.PreComputedAggregates) > 0 || len(s.BuildCachePreScans) > 0 ||
+		len(s.UnionArms) > 0 {
 		return "", false
 	}
 

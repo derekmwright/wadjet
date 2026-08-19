@@ -367,6 +367,14 @@ func OutputDistribution(stage Stage, deps map[string]Distribution, workerCount i
 			}
 		}
 		return Distribution{Kind: DistSingleton}
+	case StageUnion:
+		// One task per arm, each emitting that arm's rows whole — no key
+		// clustering across the outputs, which is exactly RoundRobin.
+		// dispatchComputeStage derives the task count from UnionArms (not
+		// from this label) and flattens the per-task files into one
+		// OutputSinglePart list, so every downstream consumer reads the
+		// whole concatenation.
+		return Distribution{Kind: DistRoundRobin}
 	case StageWindow, StagePipeline, "table_func":
 		return Distribution{Kind: DistSingleton}
 	default:

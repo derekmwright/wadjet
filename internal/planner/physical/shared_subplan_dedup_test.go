@@ -350,6 +350,12 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		"RightDepStage": "reference", "FusedJoins": "reference",
 		"ChainedJoins": "reference", "ScalarDependencies": "reference",
 		"ConsumeDynamicFilters": "reference",
+		// UnionArms[i].DepStage must stay index-aligned with Dependencies[i]
+		// (dispatch pairs them), so rewireEdges rewrites both. It also joins
+		// the refuse list in fingerprintAs: StageUnion is not fingerprintable
+		// today, and the explicit clause keeps that from becoming a silent
+		// gap if the fingerprintable set widens.
+		"UnionArms": "reference",
 		// Refuse-to-fingerprint fields (later passes / non-whitelisted
 		// stage types only).
 		"OutputRenames": "refused", "EmitDynamicFilters": "refused",

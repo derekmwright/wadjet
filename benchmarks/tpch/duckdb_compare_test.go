@@ -467,30 +467,24 @@ func duckdbCorpus() []duckdbCase {
 		// literal "1", matched no column, and the rows came back in arrival
 		// order with no error.
 		//
-		// Pinned on the DAG for a defect that predates this and is not a
-		// parser question: walkStages emits no merge stage for UNION /
-		// INTERSECT / EXCEPT (physical/plan.go: "each side runs
-		// independently; merge results at the end" — nothing merges), so a
-		// set operation on the stage DAG returns one arm's raw scan with all
-		// of that table's columns. Arm A is fully gated here.
+		// These were pinned on the DAG until #346: walkStages emitted each
+		// arm's stages and no merge ("each side runs independently; merge
+		// results at the end" — nothing merged), so the gather attached to
+		// whichever arm was emitted last and the answer was that arm's raw
+		// scan, at half the rows and its table's full width. Both arms are
+		// gated now — the DAG emits a union stage that projects each arm
+		// onto the result columns and concatenates them, and a UNION's
+		// dedup rides a GroupByAll aggregate above it.
 		duckdbCase{name: "UnionAllOrderByOrdinal",
-			sql:         "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region ORDER BY 1",
-			knownBugArm: armDAG,
-			knownBug:    "the stage DAG emits no merge stage for a set operation, so it returns one arm's raw scan"},
+			sql: "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region ORDER BY 1"},
 		duckdbCase{name: "UnionAllOrderByOrdinalLimit",
-			sql:         "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region ORDER BY 1 LIMIT 3",
-			knownBugArm: armDAG,
-			knownBug:    "the stage DAG emits no merge stage for a set operation, so it returns one arm's raw scan"},
+			sql: "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region ORDER BY 1 LIMIT 3"},
 		duckdbCase{name: "UnionOrderByOrdinal",
 			sql: "SELECT n_regionkey FROM nation WHERE n_nationkey < 5 UNION " +
-				"SELECT n_regionkey FROM nation WHERE n_nationkey >= 5 ORDER BY 1",
-			knownBugArm: armDAG,
-			knownBug:    "the stage DAG emits no merge stage for a set operation, so it returns one arm's raw scan"},
+				"SELECT n_regionkey FROM nation WHERE n_nationkey >= 5 ORDER BY 1"},
 		duckdbCase{name: "UnionOrderByOrdinalLimit",
 			sql: "SELECT n_regionkey FROM nation WHERE n_nationkey < 5 UNION " +
-				"SELECT n_regionkey FROM nation WHERE n_nationkey >= 5 ORDER BY 1 LIMIT 2",
-			knownBugArm: armDAG,
-			knownBug:    "the stage DAG emits no merge stage for a set operation, so it returns one arm's raw scan"},
+				"SELECT n_regionkey FROM nation WHERE n_nationkey >= 5 ORDER BY 1 LIMIT 2"},
 		duckdbCase{name: "NullPropagatesThroughExpressions", sql: `SELECT n_nationkey,
 			COALESCE(NULLIF(n_name, 'ALGERIA'), 'fallback') AS coalesced,
 			COALESCE(NULLIF(NULLIF(n_name, 'ALGERIA'), 'BRAZIL'), 'twice') AS nested_twice,

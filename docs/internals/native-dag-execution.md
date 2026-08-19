@@ -111,6 +111,7 @@ the embedded engine per policy shape.
 | `NodeSort` | `sort` → merge-sort tree | `plan.go:3105` |
 | `NodeWindow` | `window` | `plan.go:3384` |
 | `NodeFilter` | pushes predicates onto child stage | `plan.go:3323` |
+| `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. `NodeIntersect` / `NodeExcept` are **refused** (`Planner.setOpErr` → `PlanDistributed` error) — see §Set operations. |
 | **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. Top-level DISTINCT never reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns it into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages. Remaining NodeDistincts (semi/anti build-side dedup, fallback shapes) stay passthrough. |
 | **`NodeProject`** | **nothing — passthrough** | same `default` case; aliases recovered at gather |
 
@@ -145,6 +146,67 @@ requires `len(GroupByCols)>0 || len(Aggregates)>0` and has **no `GroupByAll`**
 - **Bare GROUP BY (no agg fn):** same stages as aggregates — the fused scan runs the partial dedup and hash-partitions on the group keys; the `final_aggregate` fans out one task per disjoint partition. The dispatch gate that routes a fused scan into `dispatchScanAggregateStage` accepts `FusedAggGroupBy`-only stages (`execute_stage_dag.go`, was `FusedAggSpecs`-only — issue #166). ✅ sharded.
 - **Top-level DISTINCT:** rewritten at logical-optimize time to an aggregate-free GROUP BY over the SELECT list (`logical.rewriteDistinctAsGroupBy`, `planner/logical/distinct_rewrite.go`) — bare columns AND scalar expressions (derived group-bys are evaluated by the worker's `buildAggInputProjection`). Rides the sharded path above; the coordinator does no dedup (`MergeInfo.HasDistinct` is false post-rewrite). ✅ sharded.
 - **DISTINCT fallback shapes** (`SELECT DISTINCT *`, DISTINCT with aggregate projections, subquery expressions): not rewritten; `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`). Correct but single-node at the coordinator.
+
+## Set operations
+
+`planner/physical/set_op_stages.go`. Until #346 `walkStages` walked both arms
+of a set operation and emitted nothing else, on the comment *"each side runs
+independently; merge results at the end"* — and nothing merged. The terminal
+gather attached to whichever arm was emitted last, so a union answered with
+ONE arm's raw, unprojected scan: half the rows, and that table's full column
+list.
+
+**`UNION ALL` → `StageUnion`** (`exchange.go`), Dependencies = the arms in SQL
+order, `Tasks = len(UnionArms)`. Task *i* reads arm *i*'s output **whole** (not
+a partition slice) and its fragment is
+`[OpShuffleSource, OpProject(arm→result columns), OpFilter?, sink]`
+(`coordinator/execute_stage_dag.go buildUnionFragment`). Three things make the
+concatenation well-formed:
+
+- **Names.** SQL takes the result columns from the first arm; every arm is
+  projected onto them. Without the projection a pass-through parquet scan arm
+  reaches the consumer carrying every column of its table.
+- **Types.** The arms' outputs are separate `.wshf` files read as one stream, so
+  a column declared FLOAT64 by one arm and INT32 by another is a decoding
+  error, not a union — it panicked the gather task writing the second arm's
+  chunk. `reconcileSetOpArmTypes` widens numerics (INT32 → INT64 → FLOAT64) with
+  a `CAST` on the narrower arms and refuses anything else.
+- **Output shape.** `dispatchComputeStage` collapses the per-task files into one
+  `OutputSinglePart` list (the `probeSplit` / `rrAggGroups` branch) — a
+  consumer reading `Files[0]` alone would get one arm.
+
+`Distribution` is `DistRoundRobin` (N outputs, no key clustering); the task
+count comes from `UnionArms`, not from the label. `UnionArm.DepStage` must stay
+index-aligned with `Dependencies[i]` — `ValidateNativeDAGShape` asserts it, and
+`rewireEdges` (shared-subplan dedup) rewrites both together.
+
+**`UNION` (distinct)** appends a `final_aggregate` with `GroupByAll` above the
+union. Singleton: one task holds the whole distinct set. That is a scalability
+bound, not a correctness one, and the same bound the coordinator's DISTINCT
+fallback carries. Sharding it means a hash exchange on all output columns
+feeding N per-partition dedups — sound because identical rows hash identically
+(see §Shuffle internals, collision-safety).
+
+**Refused, loudly** (planning error, never a partial answer):
+
+- `INTERSECT` / `EXCEPT` (and their `ALL` forms). Each needs the multiset of one
+  arm matched against the whole of the OTHER — a shuffle on the full row then a
+  per-partition semi/anti pass. That is a distributed operation, not a filter
+  over a concatenation, so there is nothing here to reuse.
+- An arm whose SELECT list is an **aggregate** (`SELECT COUNT(*) … UNION ALL …`):
+  the arm's aggregate stage names its own output, so the union's projection
+  would have to guess that name.
+- Arms whose column **types** do not widen into one another, or whose **arity**
+  differs.
+
+All of these answer correctly on the single-process path, so they are a
+two-path divergence of the "errors on one arm" kind — which is the honest
+shape. Returning one arm is the wrong answer that looks like a right one.
+
+Coverage: `physical/set_op_stages_test.go` (plan shape + every refusal),
+`benchmarks/tpch/two_path_invariance_test.go` (`Union*`, asserting row count
+AND column list absolutely on both arms), `duckdb_compare_test.go` +
+`pagination_test.go` (values and sequence against DuckDB).
 
 ## Query cancellation (and `statement_timeout`)
 

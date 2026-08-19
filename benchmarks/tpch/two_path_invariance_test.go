@@ -147,6 +147,16 @@ type twoPathQuery struct {
 	// stage DAG, so the arms agreed on an arbitrary order. Every entry whose
 	// bug could be symmetric carries one of these.
 	assertA func(tb testing.TB, rows []map[string]any)
+	// wantCols is the exact column list BOTH arms must return, and wantRows
+	// the exact row count (0 = unasserted). The two-arm compare cannot stand
+	// in for either: it realigns arm B onto arm A's columns, so an arm B
+	// carrying EXTRA columns passes it, and a count both arms get wrong the
+	// same way passes it too. #346 needed both halves — the DAG returned one
+	// arm of a union, which is the wrong row count AND that table's full
+	// width, and the earlier pinning of it nearly retired itself because a
+	// two-row wrong answer happened to carry the right two values.
+	wantCols []string
+	wantRows int
 }
 
 // assertOrderedBy checks that rows really are in the order the query asked
@@ -432,6 +442,16 @@ func compareArms(t *testing.T, q twoPathQuery, localRows []map[string]any, local
 					arm, c, localCols, q.sql)
 			}
 		}
+		if len(q.wantCols) > 0 && !sameColumns(cols, q.wantCols) {
+			t.Errorf("arm %s returned columns %v, the query selects %v\n  SQL: %s", arm, cols, q.wantCols, q.sql)
+		}
+	}
+	if q.wantRows > 0 {
+		for arm, rows := range map[string]int{"A (single-process)": len(localRows), "B (stage DAG)": len(dagRows)} {
+			if rows != q.wantRows {
+				t.Errorf("arm %s returned %d rows, want %d\n  SQL: %s", arm, rows, q.wantRows, q.sql)
+			}
+		}
 	}
 
 	if q.cmp == cmpCount {
@@ -476,6 +496,27 @@ func compareArms(t *testing.T, q twoPathQuery, localRows []map[string]any, local
 	if diff := canonA.Diff(canonB, oracle.Query{Name: q.name}); diff != "" {
 		t.Errorf("arms disagree (baseline = A, single-process; got = B, stage DAG)\n  SQL: %s\n%s", q.sql, diff)
 	}
+}
+
+// sameColumns compares a result's column list against the one the query
+// selects, case-insensitively and allowing the DAG's table-qualified
+// spelling ("nation.n_name" for "n_name"). Order and count must match: an
+// extra column is a planner artefact reaching the client.
+func sameColumns(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		g, w := strings.ToLower(got[i]), strings.ToLower(want[i])
+		if g == w {
+			continue
+		}
+		if dot := strings.LastIndexByte(g, '.'); dot >= 0 && g[dot+1:] == w {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // realign re-keys rows onto the requested column names. The two paths
@@ -819,6 +860,75 @@ func twoPathCorpus() []twoPathQuery {
 		// ordered compare that regressed to unordered would still pass Q07, and
 		// this entry would not.
 		twoPathQuery{name: "Q07_noorder", cmp: cmpUnordered, sql: stripTrailingOrderBy(TPCHQueries[7].SQL)},
+
+		// Set operations (#346). walkStages emitted each arm's stages and no
+		// merge — "each side runs independently; merge results at the end",
+		// with nothing merging — so the terminal gather attached to whichever
+		// arm was emitted last and the DAG answered a union with ONE arm's
+		// raw, unprojected scan: half the rows, and that table's full column
+		// list. Both halves are asserted absolutely below (wantRows and
+		// wantCols), because the arm-vs-arm compare alone would accept an
+		// extra column and, on the ORDER BY entry, a wrong answer that
+		// happens to carry the right values.
+		//
+		// The plain concatenation: same table twice, so the count is the
+		// whole assertion — five rows is one arm, ten is the union.
+		twoPathQuery{name: "UnionAll", cmp: cmpUnordered,
+			sql:      "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region",
+			wantCols: []string{"r_regionkey"}, wantRows: 10},
+		// A projection over the union: each arm's SELECT list has to be
+		// APPLIED, not merely renamed at the gather. The arms also disagree
+		// on type here — arm 1 computes a float, arm 2 copies an int32 — and
+		// two .wshf files declaring different types for one column is a
+		// decoding error, not a union: this panicked the gather task before
+		// the planner reconciled the arms.
+		twoPathQuery{name: "UnionAllProjection", cmp: cmpUnordered,
+			sql:      "SELECT r_regionkey + 100 AS k FROM region UNION ALL SELECT n_nationkey AS k FROM nation",
+			wantCols: []string{"k"}, wantRows: 30},
+		// ORDER BY over the WHOLE set operation, keyed on a column only the
+		// first arm computes. assertA pins the sequence absolutely: an
+		// ordering both arms lost would satisfy the compare.
+		twoPathQuery{name: "UnionAllOrderBy", cmp: cmpOrdered,
+			sql:      "SELECT UPPER(r_name) AS nm FROM region UNION ALL SELECT n_name FROM nation ORDER BY nm",
+			wantCols: []string{"nm"}, wantRows: 30,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "nm over both arms", func(r map[string]any) string {
+					return cellText(r, "nm")
+				})
+			}},
+		// LIMIT over the set operation, in both forms: the stripped query
+		// compared row for row (and counted absolutely), the verbatim one
+		// count-compared, which is what pins the limit itself. Ten rows back
+		// from a LIMIT 4 is the un-limited concatenation; five is one arm.
+		twoPathQuery{name: "UnionAllOrderByLimit_nolimit", cmp: cmpOrdered,
+			sql:      "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region ORDER BY 1",
+			wantCols: []string{"r_regionkey"}, wantRows: 10},
+		twoPathQuery{name: "UnionAllOrderByLimit", cmp: cmpCount, limit: 4, expectRows: true,
+			sql:      "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region ORDER BY 1 LIMIT 4",
+			wantCols: []string{"r_regionkey"}, wantRows: 4},
+		// UNION without ALL: the dedup runs ACROSS the arms, so returning
+		// each arm's own distinct set is not enough. The two halves partition
+		// nation's 25 rows, whose five region keys each appear on both sides
+		// of the split — 5 rows is the answer, 10 is per-arm dedup.
+		twoPathQuery{name: "UnionDistinct", cmp: cmpUnordered,
+			sql: "SELECT n_regionkey FROM nation WHERE n_nationkey < 5 UNION " +
+				"SELECT n_regionkey FROM nation WHERE n_nationkey >= 5",
+			wantCols: []string{"n_regionkey"}, wantRows: 5},
+		// A WHERE above the set operation. walkStages pushes a Filter onto
+		// the stage it just emitted, which is now the union stage — if that
+		// stage's fragment does not run the predicate it is silently dropped
+		// and the whole concatenation comes back (30 rows, not 6).
+		twoPathQuery{name: "UnionAllFilteredAbove", cmp: cmpUnordered,
+			sql: "SELECT k FROM (SELECT r_regionkey AS k FROM region UNION ALL " +
+				"SELECT n_nationkey AS k FROM nation) u WHERE k < 3",
+			wantCols: []string{"k"}, wantRows: 6},
+		// Three arms: SQL parses the chain left-deep, so the outer union's
+		// first arm is another union with no SELECT list of its own. The
+		// result names come from the leftmost arm of the whole chain.
+		twoPathQuery{name: "UnionAllThreeArms", cmp: cmpUnordered,
+			sql: "SELECT r_regionkey FROM region UNION ALL SELECT n_regionkey FROM nation " +
+				"UNION ALL SELECT r_regionkey FROM region",
+			wantCols: []string{"r_regionkey"}, wantRows: 35},
 	)
 
 	// #329: an UNGROUPED aggregate returns exactly one row for any input,

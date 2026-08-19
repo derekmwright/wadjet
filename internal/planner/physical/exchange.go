@@ -17,6 +17,14 @@ const (
 	StageSortMergeJoin = "sort_merge_join"
 	StageWindow        = "window"
 	StagePipeline      = "pipeline"
+	// StageUnion concatenates the arms of a UNION ALL. One task per arm:
+	// task i reads arm i's whole output and projects it onto the result
+	// column names (SQL takes those from the first arm), so every task
+	// emits the same schema and the stage's files ARE the concatenation.
+	// Nothing merges across tasks — concatenation is exactly the absence
+	// of a merge, which is what makes UNION ALL the tractable set
+	// operation on the DAG. See Stage.UnionArms.
+	StageUnion = "union"
 
 	// Exchange stages — inserted by EnsureDistribution.
 	// Repartition is the rename of the legacy "shuffle" type; the string

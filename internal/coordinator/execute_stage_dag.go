@@ -2374,6 +2374,17 @@ func (c *Coordinator) dispatchComputeStage(
 		// Unknown distribution — fall back to 1 rather than workerCount.
 		numTasks = 1
 	}
+	// A union stage's task count is its ARM count, not a distribution
+	// property: task i reads arm i. Its RoundRobin label says only that the
+	// outputs carry no key clustering.
+	unionStage := stage.Type == physical.StageUnion
+	if unionStage {
+		if len(stage.UnionArms) < 2 {
+			return StageOutput{}, fmt.Errorf("stage %s: union stage has %d arms, expected at least 2",
+				stage.ID, len(stage.UnionArms))
+		}
+		numTasks = len(stage.UnionArms)
+	}
 	// Probe-split for broadcast_join: when the planner picks DistSingleton
 	// (because probe upstream is a leaf scan with DistSingleton output), the
 	// join would otherwise run as a single task on one worker — the entire
@@ -2814,6 +2825,25 @@ func (c *Coordinator) dispatchComputeStage(
 			}
 			t.Operators = ops
 		}
+		// Union migration: one arm per task, always on the fragment path.
+		// There is no legacy single-op execution for a union stage, so an
+		// unclaimed one would silently dispatch as a no-op pipe that
+		// re-emits its arm's raw input — precisely the #346 symptom. Fail
+		// instead.
+		if unionStage {
+			if t.Operators != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: union stage already claimed by another migration", stage.ID)
+			}
+			var fusedSubject string
+			if fusion != nil {
+				fusedSubject = fusion.replySubject
+			}
+			ops, ferr := buildUnionFragment(stage, &t, taskInputs, w, fusedSubject)
+			if ferr != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: build union fragment: %w", stage.ID, ferr)
+			}
+			t.Operators = ops
+		}
 		// Output-side dynamic-filter emits (markSemiAntiBuildFilters): ride
 		// the fragment's terminal sink OpSpec so the worker accumulates the
 		// bloom over this stage's OUTPUT stream. Legacy single-op tasks
@@ -3093,14 +3123,18 @@ func (c *Coordinator) dispatchComputeStage(
 	case physical.DistBroadcast:
 		kind = OutputReplicated
 	}
-	if probeSplit || rrAggGroups != nil {
-		// Probe-split and partial-aggregate fan-out keep the planner's
-		// labelling (DistSingleton / DistRoundRobin) but produce N physical
-		// files (one per task). Collapse all per-task files into Files[0]
-		// so OutputSinglePart consumers (which read only Files[0]) see the
-		// full result. Downstream parallelism is preserved by
+	if probeSplit || rrAggGroups != nil || unionStage {
+		// Probe-split, partial-aggregate fan-out and union keep the
+		// planner's labelling (DistSingleton / DistRoundRobin) but produce
+		// N physical files (one per task). Collapse all per-task files into
+		// Files[0] so OutputSinglePart consumers (which read only Files[0])
+		// see the full result. Downstream parallelism is preserved by
 		// finalAggregateFanoutCandidate / flattenStageFiles callers that
 		// iterate every Files[i].
+		//
+		// For a union this collapse IS the concatenation: every consumer
+		// must see both arms, and reading Files[0] alone would hand it one
+		// arm — the shape of the bug this stage exists to fix (#346).
 		flat := make([]string, 0)
 		for _, f := range files {
 			flat = append(flat, f...)
@@ -3439,6 +3473,59 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 		ops = append(ops, distributed.OpSpec{
 			Type: distributed.OpUnpartitionedSink,
 		})
+	}
+	return ops, nil
+}
+
+// buildUnionFragment translates one arm of a union stage into a fragment:
+//
+//	[OpShuffleSource(arm's whole output), OpProject(arm → result columns), <sink>]
+//
+// The projection is what makes the arms concatenable — it narrows each arm to
+// the set operation's result columns and names them identically, so the N
+// tasks emit one schema between them. A pass-through parquet scan arm reaches
+// here carrying every column of its table; without the OpProject the union's
+// output would be that arm's raw table width (#346).
+func buildUnionFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, armIdx int, gatherReplySubject string) ([]distributed.OpSpec, error) {
+	if armIdx < 0 || armIdx >= len(stage.UnionArms) {
+		return nil, fmt.Errorf("union fragment: task %d has no arm (stage has %d)", armIdx, len(stage.UnionArms))
+	}
+	arm := stage.UnionArms[armIdx]
+	files, ok := taskInputs[arm.DepStage]
+	if !ok {
+		return nil, fmt.Errorf("union fragment: arm %d input %q missing from task inputs", armIdx, arm.DepStage)
+	}
+	projectOp, ok := projectOpFromSpecs(arm.Projections)
+	if !ok {
+		return nil, fmt.Errorf("union fragment: arm %d carries no projection", armIdx)
+	}
+	ops := []distributed.OpSpec{
+		{
+			Type:        distributed.OpShuffleSource,
+			InputAlias:  arm.DepStage,
+			InputFiles:  files,
+			InputBucket: t.DataBucket,
+		},
+		projectOp,
+	}
+	// A WHERE above the set operation lands on this stage (walkStages pushes
+	// a Filter onto the stage it just emitted). It names the set operation's
+	// OUTPUT columns, so it runs after the projection — and it has to run at
+	// all: without this op the predicate is silently dropped and the query
+	// returns the whole concatenation.
+	if len(t.PostFilterExprs) > 0 {
+		ops = append(ops, distributed.OpSpec{
+			Type:       distributed.OpFilter,
+			Predicates: append([]string(nil), t.PostFilterExprs...),
+		})
+	}
+	if gatherReplySubject != "" {
+		ops = append(ops, distributed.OpSpec{
+			Type:         distributed.OpGatherSink,
+			ReplySubject: gatherReplySubject,
+		})
+	} else {
+		ops = append(ops, distributed.OpSpec{Type: distributed.OpUnpartitionedSink})
 	}
 	return ops, nil
 }
@@ -4011,6 +4098,16 @@ func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOut
 		// Fused-build deps are intentionally NOT added to inputs[]; their
 		// files flow through task.FusedJoins[i].BuildFiles, populated by
 		// dispatchComputeStage from the upstream stage outputs.
+	case physical.StageUnion:
+		// Task w IS arm w: it reads that arm's output WHOLE (not a
+		// partition slice of it) and projects it onto the result columns.
+		// The stage's concatenation is the union of what its tasks emit.
+		if workerIdx < 0 || workerIdx >= len(stage.UnionArms) {
+			return nil, fmt.Errorf("union stage %s: task %d has no arm (stage has %d)",
+				stage.ID, workerIdx, len(stage.UnionArms))
+		}
+		dep := stage.UnionArms[workerIdx].DepStage
+		inputs[dep] = flattenStageFiles(upstreams[dep])
 	default:
 		if len(stage.Dependencies) == 0 {
 			return nil, fmt.Errorf("stage %s has no dependencies and no ScanFiles", stage.ID)

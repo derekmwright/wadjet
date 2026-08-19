@@ -58,13 +58,15 @@ type paginationCase struct {
 	// "no rows", which is a real answer and not the same as "all of them".
 	col  string
 	want []int
-	// dagDefect pins the stage DAG's known disagreement, which predates this
-	// fix and is not a parser question: walkStages emits no merge stage for
-	// UNION / INTERSECT / EXCEPT (physical/plan.go, "each side runs
-	// independently; merge results at the end" — nothing merges), so a set
-	// operation on the DAG returns one arm's raw scan, unprojected. Arm A
-	// stays fully gated. The arm is still compared here, so this subtest
-	// FAILS the moment the DAG starts agreeing and the pin has to go.
+	// dagDefect pins a stage-DAG disagreement that is not a parser question.
+	// Arm A stays fully gated; the DAG arm is still compared, so a subtest
+	// FAILS the moment that arm starts agreeing and the pin has to go.
+	//
+	// Empty on every case today. The six set-operation cases below carried
+	// one until #346: walkStages emitted each arm's stages and no merge
+	// ("each side runs independently; merge results at the end" — nothing
+	// merged), so a set operation on the DAG returned one arm's raw,
+	// unprojected scan. Both arms are gated on them now.
 	dagDefect string
 }
 
@@ -90,7 +92,6 @@ func paginationCases() []paginationCase {
 			name: "UnionAllOrderBy",
 			sql:  "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region ORDER BY 1",
 			col:  "r_regionkey", want: []int{0, 0, 1, 1, 2, 2, 3, 3, 4, 4},
-			dagDefect: "the stage DAG emits no merge stage for a set operation",
 		},
 		{
 			// PostgreSQL and DuckDB both reject this: an arm's own LIMIT
@@ -169,34 +170,29 @@ func paginationCases() []paginationCase {
 			name: "UnionAllOrderByLimit",
 			sql:  "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region ORDER BY 1 LIMIT 3",
 			col:  "r_regionkey", want: []int{0, 0, 1},
-			dagDefect: "the stage DAG emits no merge stage for a set operation",
 		},
 		{
 			name: "UnionOrderBy",
 			sql: "SELECT n_regionkey FROM nation WHERE n_nationkey < 5 UNION " +
 				"SELECT n_regionkey FROM nation WHERE n_nationkey >= 5 ORDER BY 1",
 			col: "n_regionkey", want: []int{0, 1, 2, 3, 4},
-			dagDefect: "the stage DAG emits no merge stage for a set operation",
 		},
 		{
 			name: "UnionOrderByLimit",
 			sql: "SELECT n_regionkey FROM nation WHERE n_nationkey < 5 UNION " +
 				"SELECT n_regionkey FROM nation WHERE n_nationkey >= 5 ORDER BY 1 LIMIT 2",
 			col: "n_regionkey", want: []int{0, 1},
-			dagDefect: "the stage DAG emits no merge stage for a set operation",
 		},
 		{
 			name: "UnionAllOrderByDesc",
 			sql:  "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region ORDER BY 1 DESC",
 			col:  "r_regionkey", want: []int{4, 4, 3, 3, 2, 2, 1, 1, 0, 0},
-			dagDefect: "the stage DAG emits no merge stage for a set operation",
 		},
 		{
 			name: "UnionAllOrderByOffset",
 			sql: "SELECT r_regionkey FROM region UNION ALL SELECT r_regionkey FROM region " +
 				"ORDER BY 1 OFFSET 6",
 			col: "r_regionkey", want: []int{3, 3, 4, 4},
-			dagDefect: "the stage DAG emits no merge stage for a set operation",
 		},
 	}
 }

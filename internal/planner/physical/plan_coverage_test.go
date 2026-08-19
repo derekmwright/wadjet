@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/config"
@@ -588,29 +589,49 @@ func TestPlanDistributed_LimitSort(t *testing.T) {
 	}
 }
 
+// This used to assert only "2 scan stages for a union", which is exactly the
+// #346 shape: both arms planned, nothing merging them, and the gather left
+// reading whichever arm came last. A union must now emit a stage that
+// consumes BOTH arms.
 func TestPlanDistributed_UnionSetOp(t *testing.T) {
 	cat, ctx := setupCatalogWithUsers(t)
 	planner := NewPlanner(cat)
 
-	left := logical.NewScan("events", "e")
-	right := logical.NewScan("users", "u")
+	// Both arms scan `users`: a set operation's arms must agree on arity,
+	// and events/users do not.
+	left := logical.NewScan("users", "u1")
+	right := logical.NewScan("users", "u2")
+	planner.AnnotateScanColumns(ctx, left)
+	planner.AnnotateScanColumns(ctx, right)
 	union := logical.NewUnion(left, right, true)
 	stages, err := planner.PlanDistributed(ctx, union)
 	if err != nil {
 		t.Fatalf("PlanDistributed: %v", err)
 	}
-	// Should have scan stages for both children
 	scanCount := 0
-	for _, s := range stages {
-		if s.Type == "scan" {
+	var unionStage *Stage
+	for i, s := range stages {
+		if s.Type == StageScan {
 			scanCount++
+		}
+		if s.Type == StageUnion {
+			unionStage = &stages[i]
 		}
 	}
 	if scanCount != 2 {
 		t.Errorf("expected 2 scan stages for union, got %d", scanCount)
 	}
+	if unionStage == nil {
+		t.Fatal("no union stage: both arms were planned and nothing merged them")
+	}
+	if len(unionStage.Dependencies) != 2 {
+		t.Errorf("union stage depends on %v, want both arms", unionStage.Dependencies)
+	}
 }
 
+// INTERSECT and EXCEPT need set semantics across the arms, which the stage
+// DAG has no operator for. They used to plan "successfully" and answer with
+// one arm's rows; refusing is the fix (#346).
 func TestPlanDistributed_IntersectSetOp(t *testing.T) {
 	cat, ctx := setupCatalogWithUsers(t)
 	planner := NewPlanner(cat)
@@ -618,12 +639,10 @@ func TestPlanDistributed_IntersectSetOp(t *testing.T) {
 	left := logical.NewScan("events", "e")
 	right := logical.NewScan("users", "u")
 	intersect := logical.NewIntersect(left, right, false)
-	stages, err := planner.PlanDistributed(ctx, intersect)
-	if err != nil {
-		t.Fatalf("PlanDistributed: %v", err)
-	}
-	if len(stages) < 2 {
-		t.Fatalf("expected at least 2 stages, got %d", len(stages))
+	if _, err := planner.PlanDistributed(ctx, intersect); err == nil {
+		t.Fatal("INTERSECT planned on the stage DAG; it must be refused, not answered with one arm")
+	} else if !strings.Contains(err.Error(), "INTERSECT") {
+		t.Errorf("error %q does not name the operation", err)
 	}
 }
 
@@ -634,12 +653,10 @@ func TestPlanDistributed_ExceptSetOp(t *testing.T) {
 	left := logical.NewScan("events", "e")
 	right := logical.NewScan("users", "u")
 	except := logical.NewExcept(left, right, true)
-	stages, err := planner.PlanDistributed(ctx, except)
-	if err != nil {
-		t.Fatalf("PlanDistributed: %v", err)
-	}
-	if len(stages) < 2 {
-		t.Fatalf("expected at least 2 stages, got %d", len(stages))
+	if _, err := planner.PlanDistributed(ctx, except); err == nil {
+		t.Fatal("EXCEPT ALL planned on the stage DAG; it must be refused, not answered with one arm")
+	} else if !strings.Contains(err.Error(), "EXCEPT ALL") {
+		t.Errorf("error %q does not name the operation", err)
 	}
 }
 

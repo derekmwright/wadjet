@@ -57,6 +57,25 @@ func ValidateNativeDAGShape(stages []Stage) error {
 				return fmt.Errorf("native-DAG: %s stage %s has %d dependencies, expected 1",
 					s.Type, s.ID, len(s.Dependencies))
 			}
+		case StageUnion:
+			// Arm i is dispatched as task i reading Dependencies[i], so the
+			// two lists must stay index-aligned. A pass that rewired one
+			// without the other would silently pair an arm's projection
+			// with another arm's rows.
+			if len(s.UnionArms) != len(s.Dependencies) {
+				return fmt.Errorf("native-DAG: union stage %s has %d arms and %d dependencies",
+					s.ID, len(s.UnionArms), len(s.Dependencies))
+			}
+			if len(s.UnionArms) < 2 {
+				return fmt.Errorf("native-DAG: union stage %s has %d arms, expected at least 2",
+					s.ID, len(s.UnionArms))
+			}
+			for i, arm := range s.UnionArms {
+				if arm.DepStage != s.Dependencies[i] {
+					return fmt.Errorf("native-DAG: union stage %s arm %d names producer %q but Dependencies[%d] is %q",
+						s.ID, i, arm.DepStage, i, s.Dependencies[i])
+				}
+			}
 		}
 		if s.MergeGroupCount > 0 {
 			return fmt.Errorf("native-DAG: stage %s has MergeGroupCount=%d (intermediate tier of a merge tree); collapseMergeTreesForNativeDAG should have flattened it",

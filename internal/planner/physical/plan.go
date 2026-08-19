@@ -145,6 +145,12 @@ type Stage struct {
 	ChainedAggGroupBy []string
 	ChainedAggSpecs   []AggSpec
 
+	// UnionArms describes each arm of a StageUnion, in SQL order. Arm i is
+	// produced by Dependencies[i] and dispatched as task i; Projections is
+	// the OpProject that normalizes that arm's output onto the result
+	// column names. Empty on every other stage type.
+	UnionArms []UnionArm
+
 	// Window metadata
 	WindowCols []WindowColSpec
 
@@ -299,6 +305,16 @@ type ProjectExprSpec struct {
 	Expr string
 	Name string
 	Type parquet.TypeID
+}
+
+// UnionArm is one arm of a StageUnion: the stage producing it, and the
+// projection that puts its output under the set operation's result column
+// names. The projection is what makes the arms concatenable — without it
+// each arm reaches the union under its own names (and a raw-parquet
+// pass-through scan arm reaches it carrying every column of its table).
+type UnionArm struct {
+	DepStage    string
+	Projections []ProjectExprSpec
 }
 
 // WindowColSpec defines a window function column in a stage.
@@ -559,6 +575,15 @@ type Planner struct {
 	// Q15 ~50% under multi-file scans (project_q15_dual_chain_float_drift).
 	// Reset at the start of generateStages so each query gets a fresh map.
 	ctePlannedTerminal map[string]string
+
+	// setOpErr records a set operation walkStages cannot lower to stages.
+	// walkStages has no error return (it is recursive over ~20 node kinds
+	// and every other case is total), so the refusal is parked here and
+	// PlanDistributed turns it into a planning error. Refusing is the
+	// point: the alternative this replaces was emitting each arm's stages
+	// and no merge, which returned ONE arm's raw output as the query's
+	// answer (#346). Reset at the start of generateStages.
+	setOpErr error
 }
 
 // queryResources holds the spill manager and memory tracker for one query.
@@ -1983,6 +2008,9 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// to assign shuffle keys to the correct child side.
 	p.AnnotateScanColumns(ctx, node)
 	stages := p.generateStages(node)
+	if p.setOpErr != nil {
+		return nil, p.setOpErr
+	}
 	if err := p.enforceQueryLimits(stages, node); err != nil {
 		return nil, err
 	}
@@ -3234,6 +3262,7 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	// (typically when emitScalarProducerStages re-walks a CTE-referencing
 	// scalar subquery, which would otherwise double-compute the CTE).
 	p.ctePlannedTerminal = make(map[string]string)
+	p.setOpErr = nil
 	p.walkStages(node, &stages, nil)
 	// Resolve cte-alias phantoms emitted by walkStages dedup. Must happen
 	// before fuseJoinStages so fusion sees real stage IDs everywhere.
@@ -4330,10 +4359,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		*stages = append(*stages, stage)
 
 	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
-		// Each side of the set operation runs independently; merge results at the end.
-		for _, child := range node.Children {
-			p.walkStages(child, stages, parentID)
-		}
+		p.emitSetOpStages(node, stages)
 
 	case logical.NodeDual:
 		// Table-less SELECT: single-row source, runs locally on coordinator.
@@ -7515,15 +7541,26 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 			return nil, fmt.Errorf("executing %s right side: %w", u.op, err)
 		}
 
+		// SQL says the arms of a set operation correspond BY POSITION and
+		// the result takes the FIRST arm's column names. These rows are
+		// keyed maps, so an arm whose columns are spelled differently has
+		// to be re-keyed before anything compares or concatenates them —
+		// `SELECT n_regionkey FROM nation UNION SELECT r_regionkey FROM
+		// region` deduped nothing (every row of one arm was a distinct map
+		// from every row of the other) and batch.FromRows then read the
+		// right arm's values under names it does not carry and wrote NULLs.
+		leftRows := leftSink.ToRows()
+		rightRows := alignSetOpRows(leftSink.Schema(), rightSink.Schema(), rightSink.ToRows())
+
 		var resultRows []map[string]any
 
 		switch u.op {
 		case "intersect":
-			resultRows = intersectRows(leftSink.ToRows(), rightSink.ToRows(), u.all)
+			resultRows = intersectRows(leftRows, rightRows, u.all)
 		case "except":
-			resultRows = exceptRows(leftSink.ToRows(), rightSink.ToRows(), u.all)
+			resultRows = exceptRows(leftRows, rightRows, u.all)
 		default: // "union"
-			resultRows = append(leftSink.ToRows(), rightSink.ToRows()...)
+			resultRows = append(leftRows, rightRows...)
 			if !u.all {
 				resultRows = deduplicateRows(resultRows)
 			}
@@ -7650,6 +7687,41 @@ func exceptRows(left, right []map[string]any, all bool) []map[string]any {
 		}
 	}
 	return result
+}
+
+// alignSetOpRows re-keys one set-operation arm's rows onto the column names
+// of the arm that decides the result schema (the first one). Arms correspond
+// by POSITION in SQL, but these rows are name-keyed maps, so an arm selecting
+// differently-spelled columns is invisible to rowHashKey and to
+// batch.FromRows unless its keys are rewritten first.
+//
+// Returns rows unchanged when the schemas already agree, when either is
+// unknown (an arm that produced nothing has no schema), or when the widths
+// differ — a width mismatch is a malformed set operation, not something to
+// paper over here.
+func alignSetOpRows(want, have []parquet.Column, rows []map[string]any) []map[string]any {
+	if len(want) == 0 || len(want) != len(have) {
+		return rows
+	}
+	aligned := false
+	for i := range want {
+		if want[i].Name != have[i].Name {
+			aligned = true
+			break
+		}
+	}
+	if !aligned {
+		return rows
+	}
+	out := make([]map[string]any, len(rows))
+	for i, row := range rows {
+		re := make(map[string]any, len(want))
+		for j := range want {
+			re[want[j].Name] = row[have[j].Name]
+		}
+		out[i] = re
+	}
+	return out
 }
 
 // deduplicateRows removes duplicate rows from a slice of row maps.
