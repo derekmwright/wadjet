@@ -1184,6 +1184,14 @@ type FuncCall struct {
 
 	vecOnce sync.Once
 	vecFn   VecScalarFunc
+	// The declared return type, resolved with vecFn: it names the typed
+	// slice the kernel writes, which EvalVec checks the output vector can
+	// actually hold before handing it over.
+	vecRet   batch.TypeID
+	vecRetOK bool
+	// This function reads its arguments as text (stringInputFuncs), so a
+	// non-byte-array argument-0 column has no bytes for the kernel to read.
+	vecTextFn bool
 
 	// Compile-once state for literal-argument regexp_replace (see
 	// regexp_prepared.go). Built lazily under prepOnce; nil when the call
@@ -1326,6 +1334,8 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 	e.vecOnce.Do(func() {
 		e.vecFn = DefaultRegistry.LookupVec(e.Name)
+		e.vecRet, e.vecRetOK = DefaultRegistry.ReturnType(e.Name).Resolve(0, nil)
+		e.vecTextFn = stringInputFuncs[strings.ToLower(e.Name)]
 	})
 	if e.vecFn == nil {
 		if e.tryEvalMemoized(b, out, n) {
@@ -1350,8 +1360,13 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 			}
 			// String-input vec kernels read BytesData; a TypeDate column
 			// has none and must render through the (fixed) per-row path
-			// (issue #273).
-			if a.typ == batch.TypeDate && stringInputFuncs[strings.ToLower(e.Name)] {
+			// (issue #273). The same is true of an argument-0 column that
+			// is not stored as a byte array at all: `SELECT UPPER(int_col)`
+			// indexed a nil offsets array and killed the process. Only
+			// position 0 is checked because it is the one argument every
+			// function in stringInputFuncs reads as text — substr's 2nd and
+			// 3rd are integers by design and must keep the vec path.
+			if e.vecTextFn && (a.typ == batch.TypeDate || (i == 0 && !vecTextReadable(b.Columns[a.idx], n))) {
 				e.evalVecPerRow(b, out, n)
 				return
 			}
@@ -1372,7 +1387,58 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 		}
 	}
 
+	// A vec kernel writes a typed slice of out directly — out.Float64Data[i],
+	// out.BoolData[i], out.BytesData.Set(i, …) — and which slice is fixed by
+	// the function's declared return type. When out cannot hold that type the
+	// write runs off the end of a zero-length slice and panics the whole
+	// process, every connection with it: four separate functions shipped that
+	// way (#310). The declaration is now what types the projection, so the
+	// two agree by construction; this guard is what makes that structural
+	// rather than a promise, for every kernel at once and every caller that
+	// hands a vec expression an output vector of its own choosing. A mismatch
+	// costs the per-row path — a slower answer, not a dead server.
+	if !vecOutputHolds(out, e.vecRet, e.vecRetOK, n) {
+		e.evalVecPerRow(b, out, n)
+		return
+	}
+
 	e.vecFn(argVecs, out, n)
+}
+
+// vecTextReadable reports whether a kernel that reads its argument as text can
+// read this vector's bytes directly: values stored as a plain byte array, with
+// an offsets array covering the batch. Anything else — an int column, a
+// dictionary view whose typed slices are nil — goes through the per-row path,
+// which is view- and type-aware.
+func vecTextReadable(v *batch.Vector, n int) bool {
+	return v != nil && byteArrayShaped(v) && len(v.BytesData.Offsets) > n
+}
+
+// vecOutputHolds reports whether out is backed by the storage a kernel
+// declared to return t writes into. ok=false (a dynamic declaration) can never
+// be safe: nothing says which slice the kernel writes.
+func vecOutputHolds(out *batch.Vector, t batch.TypeID, ok bool, n int) bool {
+	if out == nil || !ok {
+		return false
+	}
+	switch t {
+	case batch.TypeBool:
+		return len(out.BoolData) >= n
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return len(out.Int32Data) >= n
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return len(out.Int64Data) >= n
+	case batch.TypeFloat32:
+		return len(out.Float32Data) >= n
+	case batch.TypeFloat64:
+		return len(out.Float64Data) >= n
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		return len(out.BytesData.Offsets) > n
+	case batch.TypeVector:
+		return out.Type == batch.TypeVector && out.VectorDim > 0 &&
+			len(out.Float32Data) >= n*out.VectorDim
+	}
+	return out.Type == t
 }
 
 // memoizableFuncs: deterministic, per-row-expensive string→scalar
@@ -1626,6 +1692,7 @@ type VecScalarFunc func(args []*batch.Vector, out *batch.Vector, n int)
 type FuncRegistry struct {
 	mu         sync.RWMutex
 	funcs      map[string]ScalarFunc
+	rets       map[string]Ret // declared return type, one per registered function
 	vecFuncs   map[string]VecScalarFunc
 	vecReturns map[string]func() int // funcs returning VECTOR; value yields the dimension
 }
@@ -1634,15 +1701,24 @@ type FuncRegistry struct {
 func NewFuncRegistry() *FuncRegistry {
 	return &FuncRegistry{
 		funcs:      make(map[string]ScalarFunc),
+		rets:       make(map[string]Ret),
 		vecFuncs:   make(map[string]VecScalarFunc),
 		vecReturns: make(map[string]func() int),
 	}
 }
 
-// Register adds or replaces a scalar function.
-func (r *FuncRegistry) Register(name string, fn ScalarFunc) {
+// Register adds or replaces a scalar function. ret declares the type the
+// function's results are stored as; the planner types projections from it (see
+// Ret). Registering without a declaration does not compile, and registering
+// the zero value panics here rather than letting a mistyped output vector
+// reach a kernel.
+func (r *FuncRegistry) Register(name string, fn ScalarFunc, ret Ret) {
+	if !ret.Declared() {
+		panic(fmt.Sprintf("expr: function %q registered without a declared return type", name))
+	}
 	r.mu.Lock()
 	r.funcs[strings.ToLower(name)] = fn
+	r.rets[strings.ToLower(name)] = ret
 	r.mu.Unlock()
 }
 
@@ -1651,8 +1727,19 @@ func (r *FuncRegistry) Unregister(name string) bool {
 	r.mu.Lock()
 	_, existed := r.funcs[strings.ToLower(name)]
 	delete(r.funcs, strings.ToLower(name))
+	delete(r.rets, strings.ToLower(name))
 	r.mu.Unlock()
 	return existed
+}
+
+// ReturnType returns the declared return type of a function. An unregistered
+// name yields the zero Ret, which reports Declared() == false and resolves to
+// "caller keeps its fallback".
+func (r *FuncRegistry) ReturnType(name string) Ret {
+	r.mu.RLock()
+	ret := r.rets[strings.ToLower(name)]
+	r.mu.RUnlock()
+	return ret
 }
 
 // Lookup returns the function with the given name, or nil if not found.
@@ -1663,9 +1750,17 @@ func (r *FuncRegistry) Lookup(name string) ScalarFunc {
 	return fn
 }
 
-// RegisterVec adds a vectorized implementation for a scalar function.
+// RegisterVec adds a vectorized implementation for a scalar function. A vec
+// kernel writes a typed slice of the output vector, so the function it
+// accelerates must already be registered with the return type that names that
+// slice — registering a kernel for an undeclared function is the exact setup
+// that panicked the server four times, and panics here instead.
 func (r *FuncRegistry) RegisterVec(name string, fn VecScalarFunc) {
 	r.mu.Lock()
+	if !r.rets[strings.ToLower(name)].Declared() {
+		r.mu.Unlock()
+		panic(fmt.Sprintf("expr: vec kernel registered for %q before its return type was declared", name))
+	}
 	r.vecFuncs[strings.ToLower(name)] = fn
 	r.mu.Unlock()
 }
@@ -1721,444 +1816,455 @@ func (r *FuncRegistry) Names() []string {
 // DefaultRegistry is the global function registry used by the expression engine.
 var DefaultRegistry = NewFuncRegistry()
 
+// builtin pairs an implementation with its declared return type. Both fields
+// are positional in the table below, so an entry that names an implementation
+// without saying what it returns does not compile — which is the point: the
+// planner reads these declarations to type projections, and for four
+// generations of this bug the two lived in different files with nothing
+// linking them (#310).
+type builtin struct {
+	fn  ScalarFunc
+	ret Ret
+}
+
 func init() {
-	builtins := map[string]ScalarFunc{
+	builtins := map[string]builtin{
 		// String functions
-		"upper":  fnUpper,
-		"lower":  fnLower,
-		"concat": fnConcat,
-		"length": fnLength,
-		"len":    fnLength,
+		"upper":  {fnUpper, RetString},
+		"lower":  {fnLower, RetString},
+		"concat": {fnConcat, RetString},
+		"length": {fnLength, RetFloat64},
+		"len":    {fnLength, RetFloat64},
 		// length() has always counted BYTES here (see fnLength), so
 		// octet_length is an exact alias and bit_length is 8x. The rune-counting
 		// member of the family is char_length/character_length below. These
-		// three names were reachable from the parser and listed in
-		// isNumericFunc but had no implementation, so they evaluated to NULL.
-		"octet_length": fnOctetLength,
-		"bit_length":   fnBitLength,
-		"substr":       fnSubstr,
-		"substring":    fnSubstr,
-		"trim":         fnTrim,
-		"ltrim":        fnLTrim,
-		"rtrim":        fnRTrim,
-		"replace":      fnReplace,
-		"reverse":      fnReverse,
-		"left":         fnLeft,
-		"right":        fnRight,
+		// three names were reachable from the parser and typed numeric by the
+		// planner but had no implementation, so they evaluated to NULL.
+		"octet_length": {fnOctetLength, RetFloat64},
+		"bit_length":   {fnBitLength, RetFloat64},
+		"substr":       {fnSubstr, RetString},
+		"substring":    {fnSubstr, RetString},
+		"trim":         {fnTrim, RetString},
+		"ltrim":        {fnLTrim, RetString},
+		"rtrim":        {fnRTrim, RetString},
+		"replace":      {fnReplace, RetString},
+		"reverse":      {fnReverse, RetString},
+		"left":         {fnLeft, RetString},
+		"right":        {fnRight, RetString},
 
 		// Math functions
-		"abs":   fnAbs,
-		"ceil":  fnCeil,
-		"floor": fnFloor,
-		"round": fnRound,
-		"pow":   fnPow,
-		"power": fnPow,
-		"sqrt":  fnSqrt,
-		"mod":   fnMod,
-		"log":   fnLog,
-		"ln":    fnLn,
-		"exp":   fnExp,
+		"abs":   {fnAbs, RetFloat64},
+		"ceil":  {fnCeil, RetFloat64},
+		"floor": {fnFloor, RetFloat64},
+		"round": {fnRound, RetFloat64},
+		"pow":   {fnPow, RetFloat64},
+		"power": {fnPow, RetFloat64},
+		"sqrt":  {fnSqrt, RetFloat64},
+		"mod":   {fnMod, RetFloat64},
+		"log":   {fnLog, RetFloat64},
+		"ln":    {fnLn, RetFloat64},
+		"exp":   {fnExp, RetFloat64},
 
 		// Conditional
-		"coalesce": fnCoalesce,
-		"nullif":   fnNullIf,
-		"ifnull":   fnIfNull,
-		"if":       fnIf,
+		"coalesce": {fnCoalesce, RetSameAsArg(batch.TypeFloat64)},
+		"nullif":   {fnNullIf, RetSameAsArg(batch.TypeFloat64, 0)},
+		"ifnull":   {fnIfNull, RetSameAsArg(batch.TypeString, 0, 1)},
+		"if":       {fnIf, RetSameAsArg(batch.TypeString, 1, 2)},
 
 		// Type casting
-		"cast_int":    fnCastInt,
-		"cast_float":  fnCastFloat,
-		"cast_string": fnCastString,
+		"cast_int":    {fnCastInt, RetInt64},
+		"cast_float":  {fnCastFloat, RetFloat64},
+		"cast_string": {fnCastString, RetString},
 
 		// Network functions
-		"ip_to_string":  fnIPToString,
-		"cidr_contains": fnCIDRContains,
-		"ip_version":    fnIPVersion,
-		"mask_ip":       fnMaskIP,
-		"mac_to_string": fnMACToString,
-		"ip_subnet":     fnIPSubnet,
-		"ip_netmask":    fnIPNetmask,
+		"ip_to_string":  {fnIPToString, RetString},
+		"cidr_contains": {fnCIDRContains, RetBool},
+		"ip_version":    {fnIPVersion, RetFloat64},
+		"mask_ip":       {fnMaskIP, RetString},
+		"mac_to_string": {fnMACToString, RetString},
+		"ip_subnet":     {fnIPSubnet, RetString},
+		"ip_netmask":    {fnIPNetmask, RetString},
 
 		// Date/time functions
-		"now":          fnNow,
-		"year":         fnYear,
-		"month":        fnMonth,
-		"day":          fnDay,
-		"hour":         fnHour,
-		"minute":       fnMinute,
-		"date_trunc":   fnDateTrunc,
-		"extract":      fnExtract,
-		"current_date": fnCurrentDate,
-		"date_diff":    fnDateDiff,
+		"now":          {fnNow, RetString},
+		"year":         {fnYear, RetFloat64},
+		"month":        {fnMonth, RetFloat64},
+		"day":          {fnDay, RetFloat64},
+		"hour":         {fnHour, RetFloat64},
+		"minute":       {fnMinute, RetFloat64},
+		"date_trunc":   {fnDateTrunc, RetString},
+		"extract":      {fnExtract, RetFloat64},
+		"current_date": {fnCurrentDate, RetString},
+		"date_diff":    {fnDateDiff, RetFloat64},
 
 		// Session / catalog information (see the SessionUser block below)
-		"current_user":     fnCurrentUser,
-		"session_user":     fnCurrentUser,
-		"user":             fnCurrentUser,
-		"current_role":     fnCurrentUser,
-		"current_catalog":  fnCurrentCatalog,
-		"current_database": fnCurrentCatalog,
-		"current_schema":   fnCurrentSchema,
-		"current_schemas":  fnCurrentSchemas,
-		"version":          fnVersion,
+		"current_user":     {fnCurrentUser, RetString},
+		"session_user":     {fnCurrentUser, RetString},
+		"user":             {fnCurrentUser, RetString},
+		"current_role":     {fnCurrentUser, RetString},
+		"current_catalog":  {fnCurrentCatalog, RetString},
+		"current_database": {fnCurrentCatalog, RetString},
+		"current_schema":   {fnCurrentSchema, RetString},
+		"current_schemas":  {fnCurrentSchemas, RetString},
+		"version":          {fnVersion, RetString},
 
-		"date_add": fnDateAdd,
-		"date_sub": fnDateSub,
-		"to_date":  fnToDate,
+		"date_add": {fnDateAdd, RetString},
+		"date_sub": {fnDateSub, RetString},
+		"to_date":  {fnToDate, RetString},
 
 		// UUID functions
-		"uuid_version":   fnUUIDVersion,
-		"uuid_to_string": fnUUIDToString,
+		"uuid_version":   {fnUUIDVersion, RetFloat64},
+		"uuid_to_string": {fnUUIDToString, RetString},
 
 		// Additional string functions
-		"starts_with": fnStartsWith,
-		"ends_with":   fnEndsWith,
-		"contains":    fnContains,
-		"repeat":      fnRepeat,
+		"starts_with": {fnStartsWith, RetBool},
+		"ends_with":   {fnEndsWith, RetBool},
+		"contains":    {fnContains, RetBool},
+		"repeat":      {fnRepeat, RetString},
 
 		// Additional math functions
-		"sign":     fnSign,
-		"greatest": fnGreatest,
-		"least":    fnLeast,
+		"sign":     {fnSign, RetFloat64},
+		"greatest": {fnGreatest, RetSameAsArg(batch.TypeFloat64)},
+		"least":    {fnLeast, RetSameAsArg(batch.TypeFloat64)},
 
 		// Additional date/time functions
-		"second": fnSecond,
+		"second": {fnSecond, RetFloat64},
 
 		// String: regex and parsing
-		"split_part":     fnSplitPart,
-		"strpos":         fnStrPos,
-		"position":       fnStrPos,
-		"regexp_like":    fnRegexpLike,
-		"regexp_extract": fnRegexpExtract,
-		"regexp_replace": fnRegexpReplace,
+		"split_part":     {fnSplitPart, RetString},
+		"strpos":         {fnStrPos, RetFloat64},
+		"position":       {fnStrPos, RetFloat64},
+		"regexp_like":    {fnRegexpLike, RetBool},
+		"regexp_extract": {fnRegexpExtract, RetString},
+		"regexp_replace": {fnRegexpReplace, RetString},
 
 		// Encoding
-		"to_hex":      fnToHex,
-		"from_hex":    fnFromHex,
-		"to_base64":   fnToBase64,
-		"from_base64": fnFromBase64,
+		"to_hex":      {fnToHex, RetString},
+		"from_hex":    {fnFromHex, RetFloat64},
+		"to_base64":   {fnToBase64, RetString},
+		"from_base64": {fnFromBase64, RetString},
 
 		// Date/time conversion
-		"from_unixtime": fnFromUnixtime,
-		"to_unixtime":   fnToUnixtime,
-		"date_format":   fnDateFormat,
-		"date_parse":    fnDateParse,
+		"from_unixtime": {fnFromUnixtime, RetString},
+		"to_unixtime":   {fnToUnixtime, RetFloat64},
+		"date_format":   {fnDateFormat, RetString},
+		"date_parse":    {fnDateParse, RetString},
 
 		// Hash
-		"md5":    fnMD5,
-		"sha256": fnSHA256,
-		"sha512": fnSHA512,
+		"md5":    {fnMD5, RetString},
+		"sha256": {fnSHA256, RetString},
+		"sha512": {fnSHA512, RetString},
 
 		// Bitwise
-		"bitwise_and": fnBitwiseAnd,
-		"bitwise_or":  fnBitwiseOr,
-		"bitwise_xor": fnBitwiseXor,
-		"bitwise_not": fnBitwiseNot,
+		"bitwise_and": {fnBitwiseAnd, RetFloat64},
+		"bitwise_or":  {fnBitwiseOr, RetFloat64},
+		"bitwise_xor": {fnBitwiseXor, RetFloat64},
+		"bitwise_not": {fnBitwiseNot, RetFloat64},
 
 		// String: padding and character
-		"lpad":             fnLPad,
-		"rpad":             fnRPad,
-		"chr":              fnChr,
-		"codepoint":        fnCodepoint,
-		"concat_ws":        fnConcatWS,
-		"char_length":      fnCharLength,
-		"character_length": fnCharLength,
-		"translate":        fnTranslate,
+		"lpad":             {fnLPad, RetString},
+		"rpad":             {fnRPad, RetString},
+		"chr":              {fnChr, RetString},
+		"codepoint":        {fnCodepoint, RetFloat64},
+		"concat_ws":        {fnConcatWS, RetString},
+		"char_length":      {fnCharLength, RetFloat64},
+		"character_length": {fnCharLength, RetFloat64},
+		"translate":        {fnTranslate, RetString},
 
 		// Math: trigonometry
-		"pi":       fnPi,
-		"degrees":  fnDegrees,
-		"radians":  fnRadians,
-		"sin":      fnSin,
-		"cos":      fnCos,
-		"tan":      fnTan,
-		"asin":     fnAsin,
-		"acos":     fnAcos,
-		"atan":     fnAtan,
-		"atan2":    fnAtan2,
-		"cbrt":     fnCbrt,
-		"log2":     fnLog2,
-		"truncate": fnTruncate,
-		"rand":     fnRandom,
-		"random":   fnRandom,
+		"pi":       {fnPi, RetFloat64},
+		"degrees":  {fnDegrees, RetFloat64},
+		"radians":  {fnRadians, RetFloat64},
+		"sin":      {fnSin, RetFloat64},
+		"cos":      {fnCos, RetFloat64},
+		"tan":      {fnTan, RetFloat64},
+		"asin":     {fnAsin, RetFloat64},
+		"acos":     {fnAcos, RetFloat64},
+		"atan":     {fnAtan, RetFloat64},
+		"atan2":    {fnAtan2, RetFloat64},
+		"cbrt":     {fnCbrt, RetFloat64},
+		"log2":     {fnLog2, RetFloat64},
+		"truncate": {fnTruncate, RetFloat64},
+		"rand":     {fnRandom, RetFloat64},
+		"random":   {fnRandom, RetFloat64},
 
 		// JSON
-		"json_extract":        fnJSONExtract,
-		"json_extract_scalar": fnJSONExtractScalar,
-		"json_array_length":   fnJSONArrayLength,
-		"json_valid":          fnJSONValid,
+		"json_extract":        {fnJSONExtract, RetDynamic},
+		"json_extract_scalar": {fnJSONExtractScalar, RetDynamic},
+		"json_array_length":   {fnJSONArrayLength, RetFloat64},
+		"json_valid":          {fnJSONValid, RetBool},
 
 		// URL
-		"url_extract_host":      fnURLExtractHost,
-		"url_extract_port":      fnURLExtractPort,
-		"url_extract_path":      fnURLExtractPath,
-		"url_extract_protocol":  fnURLExtractProtocol,
-		"url_extract_query":     fnURLExtractQuery,
-		"url_extract_parameter": fnURLExtractParameter,
+		"url_extract_host":      {fnURLExtractHost, RetString},
+		"url_extract_port":      {fnURLExtractPort, RetFloat64},
+		"url_extract_path":      {fnURLExtractPath, RetString},
+		"url_extract_protocol":  {fnURLExtractProtocol, RetString},
+		"url_extract_query":     {fnURLExtractQuery, RetString},
+		"url_extract_parameter": {fnURLExtractParameter, RetString},
 
 		// Type introspection
-		"typeof": fnTypeof,
+		"typeof": {fnTypeof, RetString},
 
 		// String: distance and utility
-		"soundex":              fnSoundex,
-		"levenshtein_distance": fnLevenshtein,
-		"hamming_distance":     fnHamming,
-		"normalize":            fnNormalize,
-		"format":               fnFormat,
-		"lcase":                fnLower,
-		"ucase":                fnUpper,
-		"to_utf8":              fnToUTF8,
-		"from_utf8":            fnFromUTF8,
+		"soundex":              {fnSoundex, RetString},
+		"levenshtein_distance": {fnLevenshtein, RetFloat64},
+		"hamming_distance":     {fnHamming, RetFloat64},
+		"normalize":            {fnNormalize, RetString},
+		"format":               {fnFormat, RetString},
+		"lcase":                {fnLower, RetString},
+		"ucase":                {fnUpper, RetString},
+		"to_utf8":              {fnToUTF8, RetBytes},
+		"from_utf8":            {fnFromUTF8, RetString},
 
 		// Math: IEEE 754 and utility
-		"e":            fnE,
-		"log10":        fnLog10,
-		"infinity":     fnInfinity,
-		"nan":          fnNaN,
-		"is_nan":       fnIsNaN,
-		"is_finite":    fnIsFinite,
-		"is_infinite":  fnIsInfinite,
-		"width_bucket": fnWidthBucket,
-		"from_base":    fnFromBase,
-		"to_base":      fnToBase,
-		"bit_count":    fnBitCount,
+		"e":            {fnE, RetFloat64},
+		"log10":        {fnLog10, RetFloat64},
+		"infinity":     {fnInfinity, RetFloat64},
+		"nan":          {fnNaN, RetFloat64},
+		"is_nan":       {fnIsNaN, RetBool},
+		"is_finite":    {fnIsFinite, RetBool},
+		"is_infinite":  {fnIsInfinite, RetBool},
+		"width_bucket": {fnWidthBucket, RetFloat64},
+		"from_base":    {fnFromBase, RetFloat64},
+		"to_base":      {fnToBase, RetString},
+		"bit_count":    {fnBitCount, RetFloat64},
 
 		// Hash: additional
-		"sha1":        fnSHA1,
-		"crc32":       fnCRC32,
-		"hmac_sha256": fnHMACSHA256,
-		"hmac_sha512": fnHMACSHA512,
+		"sha1":        {fnSHA1, RetString},
+		"crc32":       {fnCRC32, RetFloat64},
+		"hmac_sha256": {fnHMACSHA256, RetString},
+		"hmac_sha512": {fnHMACSHA512, RetString},
 
 		// Date: additional accessors
-		"quarter":           fnQuarter,
-		"week":              fnWeek,
-		"day_of_week":       fnDayOfWeek,
-		"day_of_year":       fnDayOfYear,
-		"last_day_of_month": fnLastDayOfMonth,
-		"current_timestamp": fnCurrentTimestamp,
-		"at_timezone":       fnAtTimezone,
+		"quarter":           {fnQuarter, RetFloat64},
+		"week":              {fnWeek, RetFloat64},
+		"day_of_week":       {fnDayOfWeek, RetFloat64},
+		"day_of_year":       {fnDayOfYear, RetFloat64},
+		"last_day_of_month": {fnLastDayOfMonth, RetString},
+		"current_timestamp": {fnCurrentTimestamp, RetString},
+		"at_timezone":       {fnAtTimezone, RetString},
 		// epoch: the rewrite target of EXTRACT(EPOCH FROM ts).
 		// timezone: the rewrite target of `ts AT TIME ZONE zone`, zone first,
 		// matching PostgreSQL's own canonical form.
-		"epoch":                    fnEpoch,
-		"timezone":                 fnTimezone,
-		"pg_postmaster_start_time": fnPgPostmasterStartTime,
-		"human_readable_seconds":   fnHumanReadableSeconds,
+		"epoch":                    {fnEpoch, RetFloat64},
+		"timezone":                 {fnTimezone, RetString},
+		"pg_postmaster_start_time": {fnPgPostmasterStartTime, RetString},
+		"human_readable_seconds":   {fnHumanReadableSeconds, RetString},
 
 		// Network: analytics
-		"is_private_ip":  fnIsPrivateIP,
-		"is_loopback_ip": fnIsLoopbackIP,
-		"ip_to_int":      fnIPToInt,
-		"int_to_ip":      fnIntToIP,
-		"is_ipv4":        fnIsIPv4,
-		"is_ipv6":        fnIsIPv6,
+		"is_private_ip":  {fnIsPrivateIP, RetBool},
+		"is_loopback_ip": {fnIsLoopbackIP, RetBool},
+		"ip_to_int":      {fnIPToInt, RetFloat64},
+		"int_to_ip":      {fnIntToIP, RetString},
+		"is_ipv4":        {fnIsIPv4, RetBool},
+		"is_ipv6":        {fnIsIPv6, RetBool},
 
 		// Network: CIDR / subnet operations
-		"network_address":   fnNetworkAddress,
-		"broadcast_address": fnBroadcastAddress,
-		"prefix_length":     fnPrefixLength,
-		"cidr_to_range":     fnCIDRToRange,
-		"hosts_in_cidr":     fnHostsInCIDR,
-		"cidr_overlap":      fnCIDROverlap,
-		"ip_in_range":       fnIPInRange,
-		"same_subnet":       fnSameSubnet,
+		"network_address":   {fnNetworkAddress, RetString},
+		"broadcast_address": {fnBroadcastAddress, RetString},
+		"prefix_length":     {fnPrefixLength, RetInt64},
+		"cidr_to_range":     {fnCIDRToRange, RetString},
+		"hosts_in_cidr":     {fnHostsInCIDR, RetInt64},
+		"cidr_overlap":      {fnCIDROverlap, RetBool},
+		"ip_in_range":       {fnIPInRange, RetBool},
+		"same_subnet":       {fnSameSubnet, RetBool},
 
 		// Network: IP manipulation
-		"ip_add":           fnIPAdd,
-		"ip_subtract":      fnIPSubtract,
-		"ip_diff":          fnIPDiff,
-		"ip_between":       fnIPBetween,
-		"reverse_dns":      fnReverseDNS,
-		"is_multicast_ip":  fnIsMulticastIP,
-		"is_link_local_ip": fnIsLinkLocalIP,
-		"is_reserved_ip":   fnIsReservedIP,
-		"ip_to_hex":        fnIPToHex,
+		"ip_add":           {fnIPAdd, RetString},
+		"ip_subtract":      {fnIPSubtract, RetString},
+		"ip_diff":          {fnIPDiff, RetInt64},
+		"ip_between":       {fnIPBetween, RetBool},
+		"reverse_dns":      {fnReverseDNS, RetString},
+		"is_multicast_ip":  {fnIsMulticastIP, RetBool},
+		"is_link_local_ip": {fnIsLinkLocalIP, RetBool},
+		"is_reserved_ip":   {fnIsReservedIP, RetBool},
+		"ip_to_hex":        {fnIPToHex, RetString},
 
 		// Network: MAC operations
-		"mac_vendor_oui": fnMACVendorOUI,
-		"mac_is_unicast": fnMACIsUnicast,
-		"mac_is_local":   fnMACIsLocal,
-		"mac_format":     fnMACFormat,
+		"mac_vendor_oui": {fnMACVendorOUI, RetString},
+		"mac_is_unicast": {fnMACIsUnicast, RetBool},
+		"mac_is_local":   {fnMACIsLocal, RetBool},
+		"mac_format":     {fnMACFormat, RetString},
 
 		// Network: port classification
-		"port_name":          fnPortName,
-		"is_well_known_port": fnIsWellKnownPort,
-		"is_registered_port": fnIsRegisteredPort,
-		"is_ephemeral_port":  fnIsEphemeralPort,
-		"port_class":         fnPortClass,
+		"port_name":          {fnPortName, RetString},
+		"is_well_known_port": {fnIsWellKnownPort, RetBool},
+		"is_registered_port": {fnIsRegisteredPort, RetBool},
+		"is_ephemeral_port":  {fnIsEphemeralPort, RetBool},
+		"port_class":         {fnPortClass, RetString},
 
 		// Network: protocol
-		"protocol_name":   fnProtocolName,
-		"protocol_number": fnProtocolNumber,
+		"protocol_name":   {fnProtocolName, RetString},
+		"protocol_number": {fnProtocolNumber, RetInt64},
 
 		// Deep inspection: TCP
-		"tcp_flags_to_string":   fnTCPFlagsToString,
-		"has_tcp_flag":          fnHasTCPFlag,
-		"tcp_flags_from_string": fnTCPFlagsFromString,
-		"is_tcp_handshake":      fnIsTCPHandshake,
-		"is_tcp_reset":          fnIsTCPReset,
-		"tcp_session_id":        fnTCPSessionID,
-		"flow_direction":        fnFlowDirection,
+		"tcp_flags_to_string":   {fnTCPFlagsToString, RetString},
+		"has_tcp_flag":          {fnHasTCPFlag, RetBool},
+		"tcp_flags_from_string": {fnTCPFlagsFromString, RetInt64},
+		"is_tcp_handshake":      {fnIsTCPHandshake, RetBool},
+		"is_tcp_reset":          {fnIsTCPReset, RetBool},
+		"tcp_session_id":        {fnTCPSessionID, RetString},
+		"flow_direction":        {fnFlowDirection, RetString},
 
 		// Deep inspection: DNS
-		"dns_query_name":     fnDNSQueryName,
-		"dns_query_type":     fnDNSQueryType,
-		"dns_is_response":    fnDNSIsResponse,
-		"dns_response_code":  fnDNSResponseCode,
-		"dns_question_count": fnDNSQuestionCount,
-		"dns_answer_count":   fnDNSAnswerCount,
-		"dns_transaction_id": fnDNSTransactionID,
+		"dns_query_name":     {fnDNSQueryName, RetString},
+		"dns_query_type":     {fnDNSQueryType, RetString},
+		"dns_is_response":    {fnDNSIsResponse, RetBool},
+		"dns_response_code":  {fnDNSResponseCode, RetString},
+		"dns_question_count": {fnDNSQuestionCount, RetInt64},
+		"dns_answer_count":   {fnDNSAnswerCount, RetInt64},
+		"dns_transaction_id": {fnDNSTransactionID, RetInt64},
 
 		// Deep inspection: TLS
-		"tls_sni":             fnTLSSNI,
-		"tls_version":         fnTLSVersion,
-		"tls_record_type":     fnTLSRecordType,
-		"is_tls_client_hello": fnIsTLSClientHello,
-		"tls_handshake_type":  fnTLSHandshakeType,
+		"tls_sni":             {fnTLSSNI, RetString},
+		"tls_version":         {fnTLSVersion, RetString},
+		"tls_record_type":     {fnTLSRecordType, RetString},
+		"is_tls_client_hello": {fnIsTLSClientHello, RetBool},
+		"tls_handshake_type":  {fnTLSHandshakeType, RetString},
 
 		// Deep inspection: HTTP
-		"http_method":         fnHTTPMethod,
-		"http_path":           fnHTTPPath,
-		"http_host":           fnHTTPHost,
-		"http_status_code":    fnHTTPStatusCode,
-		"http_status_class":   fnHTTPStatusClass,
-		"http_content_type":   fnHTTPContentType,
-		"http_content_length": fnHTTPContentLength,
-		"http_user_agent":     fnHTTPUserAgent,
-		"http_header":         fnHTTPHeader,
-		"http_version":        fnHTTPVersion,
-		"is_http_request":     fnIsHTTPRequest,
-		"is_http_response":    fnIsHTTPResponse,
+		"http_method":         {fnHTTPMethod, RetString},
+		"http_path":           {fnHTTPPath, RetString},
+		"http_host":           {fnHTTPHost, RetString},
+		"http_status_code":    {fnHTTPStatusCode, RetInt64},
+		"http_status_class":   {fnHTTPStatusClass, RetString},
+		"http_content_type":   {fnHTTPContentType, RetString},
+		"http_content_length": {fnHTTPContentLength, RetInt64},
+		"http_user_agent":     {fnHTTPUserAgent, RetString},
+		"http_header":         {fnHTTPHeader, RetString},
+		"http_version":        {fnHTTPVersion, RetString},
+		"is_http_request":     {fnIsHTTPRequest, RetBool},
+		"is_http_response":    {fnIsHTTPResponse, RetBool},
 
 		// Deep inspection: packet headers
-		"ip_header_length": fnIPHeaderLength,
-		"ip_ttl":           fnIPTTL,
-		"ip_total_length":  fnIPTotalLength,
-		"ip_dscp":          fnIPDSCP,
-		"ether_type":       fnEtherType,
-		"vlan_id":          fnVLANID,
+		"ip_header_length": {fnIPHeaderLength, RetInt64},
+		"ip_ttl":           {fnIPTTL, RetInt64},
+		"ip_total_length":  {fnIPTotalLength, RetInt64},
+		"ip_dscp":          {fnIPDSCP, RetInt64},
+		"ether_type":       {fnEtherType, RetString},
+		"vlan_id":          {fnVLANID, RetInt64},
 
 		// Deep inspection: payload analysis
-		"payload_entropy":  fnPayloadEntropy,
-		"payload_hex_dump": fnPayloadHexDump,
+		"payload_entropy":  {fnPayloadEntropy, RetFloat64},
+		"payload_hex_dump": {fnPayloadHexDump, RetString},
 
 		// ICMP
-		"icmp_type_name": fnICMPTypeName,
-		"icmp_code_name": fnICMPCodeName,
-		"is_icmp_echo":   fnIsICMPEcho,
-		"icmp_parse":     fnICMPParse,
-		"icmp_type":      fnICMPType,
-		"icmp_code":      fnICMPCode,
+		"icmp_type_name": {fnICMPTypeName, RetString},
+		"icmp_code_name": {fnICMPCodeName, RetString},
+		"is_icmp_echo":   {fnIsICMPEcho, RetBool},
+		"icmp_parse":     {fnICMPParse, RetString},
+		"icmp_type":      {fnICMPType, RetInt64},
+		"icmp_code":      {fnICMPCode, RetInt64},
 
 		// IPv6
-		"ipv6_scope":     fnIPv6Scope,
-		"ipv6_expand":    fnIPv6Expand,
-		"ipv6_compress":  fnIPv6Compress,
-		"ipv6_to_eui64":  fnIPv6ToEUI64,
-		"is_6to4":        fnIs6to4,
-		"is_teredo":      fnIsTeredo,
-		"teredo_server":  fnTeredoServer,
-		"teredo_client":  fnTeredoClient,
-		"sixto4_gateway": fnSixto4Gateway,
+		"ipv6_scope":     {fnIPv6Scope, RetString},
+		"ipv6_expand":    {fnIPv6Expand, RetString},
+		"ipv6_compress":  {fnIPv6Compress, RetString},
+		"ipv6_to_eui64":  {fnIPv6ToEUI64, RetString},
+		"is_6to4":        {fnIs6to4, RetBool},
+		"is_teredo":      {fnIsTeredo, RetBool},
+		"teredo_server":  {fnTeredoServer, RetString},
+		"teredo_client":  {fnTeredoClient, RetString},
+		"sixto4_gateway": {fnSixto4Gateway, RetString},
 
 		// JA3 TLS fingerprinting
-		"ja3_fingerprint":  fnJA3Fingerprint,
-		"ja3_string":       fnJA3String,
-		"ja3s_fingerprint": fnJA3SFingerprint,
-		"ja3s_string":      fnJA3SString,
+		"ja3_fingerprint":  {fnJA3Fingerprint, RetString},
+		"ja3_string":       {fnJA3String, RetString},
+		"ja3s_fingerprint": {fnJA3SFingerprint, RetString},
+		"ja3s_string":      {fnJA3SString, RetString},
 
 		// Payload search
-		"payload_contains": fnPayloadContains,
-		"payload_matches":  fnPayloadMatches,
-		"payload_offset":   fnPayloadOffset,
-		"payload_length":   fnPayloadLength,
+		"payload_contains": {fnPayloadContains, RetBool},
+		"payload_matches":  {fnPayloadMatches, RetBool},
+		"payload_offset":   {fnPayloadOffset, RetString},
+		"payload_length":   {fnPayloadLength, RetInt64},
 
 		// Regex: additional
-		"regexp_count":       fnRegexpCount,
-		"regexp_extract_all": fnRegexpExtractAll,
-		"regexp_split":       fnRegexpSplit,
+		"regexp_count":       {fnRegexpCount, RetInt64},
+		"regexp_extract_all": {fnRegexpExtractAll, RetString},
+		"regexp_split":       {fnRegexpSplit, RetString},
 
 		// String: additional
-		"split": fnSplit,
+		"split": {fnSplit, RetString},
 
 		// Bitwise: shifts
-		"bitwise_left_shift":             fnBitwiseLeftShift,
-		"bitwise_right_shift":            fnBitwiseRightShift,
-		"bitwise_arithmetic_shift_right": fnBitwiseArithmeticShiftRight,
+		"bitwise_left_shift":             {fnBitwiseLeftShift, RetInt64},
+		"bitwise_right_shift":            {fnBitwiseRightShift, RetInt64},
+		"bitwise_arithmetic_shift_right": {fnBitwiseArithmeticShiftRight, RetInt64},
 
 		// UUID: generation
-		"uuid": fnUUID,
+		"uuid": {fnUUID, RetString},
 
 		// Encoding: additional
-		"to_base32":   fnToBase32,
-		"from_base32": fnFromBase32,
-		"xxhash64":    fnXXHash64,
-		"murmur3":     fnMurmur3,
+		"to_base32":   {fnToBase32, RetString},
+		"from_base32": {fnFromBase32, RetString},
+		"xxhash64":    {fnXXHash64, RetString},
+		"murmur3":     {fnMurmur3, RetString},
 
 		// Date/time: ISO 8601
-		"from_iso8601_timestamp": fnFromISO8601Timestamp,
-		"from_iso8601_date":      fnFromISO8601Date,
-		"to_iso8601":             fnToISO8601,
-		"to_milliseconds":        fnToMilliseconds,
-		"timezone_hour":          fnTimezoneHour,
-		"timezone_minute":        fnTimezoneMinute,
+		"from_iso8601_timestamp": {fnFromISO8601Timestamp, RetInt64},
+		"from_iso8601_date":      {fnFromISO8601Date, RetString},
+		"to_iso8601":             {fnToISO8601, RetString},
+		"to_milliseconds":        {fnToMilliseconds, RetInt64},
+		"timezone_hour":          {fnTimezoneHour, RetInt64},
+		"timezone_minute":        {fnTimezoneMinute, RetInt64},
 
 		// Formatting
-		"format_number": fnFormatNumber,
+		"format_number": {fnFormatNumber, RetString},
 
 		// GeoIP / ASN lookup (requires MaxMind MMDB databases)
-		"geoip_country":      fnGeoipCountry,
-		"geoip_country_name": fnGeoipCountryName,
-		"geoip_city":         fnGeoipCity,
-		"geoip_subdivision":  fnGeoipSubdivision,
-		"geoip_postal_code":  fnGeoipPostalCode,
-		"geoip_latitude":     fnGeoipLatitude,
-		"geoip_longitude":    fnGeoipLongitude,
-		"geoip_timezone":     fnGeoipTimezone,
-		"geoip_continent":    fnGeoipContinent,
-		"geoip_asn":          fnGeoipASN,
-		"geoip_org":          fnGeoipOrg,
+		"geoip_country":      {fnGeoipCountry, RetString},
+		"geoip_country_name": {fnGeoipCountryName, RetString},
+		"geoip_city":         {fnGeoipCity, RetString},
+		"geoip_subdivision":  {fnGeoipSubdivision, RetString},
+		"geoip_postal_code":  {fnGeoipPostalCode, RetString},
+		"geoip_latitude":     {fnGeoipLatitude, RetFloat64},
+		"geoip_longitude":    {fnGeoipLongitude, RetFloat64},
+		"geoip_timezone":     {fnGeoipTimezone, RetString},
+		"geoip_continent":    {fnGeoipContinent, RetString},
+		"geoip_asn":          {fnGeoipASN, RetInt64},
+		"geoip_org":          {fnGeoipOrg, RetString},
 
 		// Byte/rate formatting
-		"format_bytes": fnFormatBytes,
-		"parse_bytes":  fnParseBytes,
-		"format_rate":  fnFormatRate,
-		"parse_rate":   fnParseRate,
+		"format_bytes": {fnFormatBytes, RetString},
+		"parse_bytes":  {fnParseBytes, RetInt64},
+		"format_rate":  {fnFormatRate, RetString},
+		"parse_rate":   {fnParseRate, RetInt64},
 
 		// Array/nested type functions (Trino-compatible)
-		"cardinality":    fnCardinality,
-		"array_length":   fnCardinality,
-		"element_at":     fnElementAt,
-		"array_contains": fnArrayContains,
-		"array_join":     fnArrayJoin,
-		"array_min":      fnArrayMin,
-		"array_max":      fnArrayMax,
+		"cardinality":    {fnCardinality, RetInt64},
+		"array_length":   {fnCardinality, RetInt64},
+		"element_at":     {fnElementAt, RetDynamic},
+		"array_contains": {fnArrayContains, RetBool},
+		"array_join":     {fnArrayJoin, RetString},
+		"array_min":      {fnArrayMin, RetDynamic},
+		"array_max":      {fnArrayMax, RetDynamic},
 
 		// ROW/struct functions
-		"row_field":    fnRowField,
-		"struct_field": fnRowField,
+		"row_field":    {fnRowField, RetDynamic},
+		"struct_field": {fnRowField, RetDynamic},
 
 		// Domain parsing (DNS threat hunting)
-		"registered_domain": fnRegisteredDomain,
-		"tld":               fnTLD,
-		"subdomain":         fnSubdomain,
-		"domain_depth":      fnDomainDepth,
+		"registered_domain": {fnRegisteredDomain, RetString},
+		"tld":               {fnTLD, RetString},
+		"subdomain":         {fnSubdomain, RetString},
+		"domain_depth":      {fnDomainDepth, RetFloat64},
 
 		// URL encoding/decoding
-		"url_encode": fnURLEncode,
-		"url_decode": fnURLDecode,
+		"url_encode": {fnURLEncode, RetString},
+		"url_decode": {fnURLDecode, RetString},
 
 		// String analysis
-		"entropy": fnEntropy,
+		"entropy": {fnEntropy, RetFloat64},
 
 		// MAP functions
-		"map_keys":         fnMapKeys,
-		"map_values":       fnMapValues,
-		"map_entries":      fnMapEntries,
-		"map_from_entries": fnMapFromEntries,
+		"map_keys":         {fnMapKeys, RetArray},
+		"map_values":       {fnMapValues, RetArray},
+		"map_entries":      {fnMapEntries, RetArray},
+		"map_from_entries": {fnMapFromEntries, RetMap},
 	}
-	for name, fn := range builtins {
-		DefaultRegistry.funcs[name] = fn
+	for name, b := range builtins {
+		DefaultRegistry.Register(name, b.fn, b.ret)
 	}
 
 	// Vectorized implementations: operate on entire columns instead of per-row.
@@ -2196,13 +2302,14 @@ func init() {
 		"extract":          vecExtract,
 	}
 	for name, fn := range vecBuiltins {
-		DefaultRegistry.vecFuncs[name] = fn
+		DefaultRegistry.RegisterVec(name, fn)
 	}
 }
 
 // RegisterFunc registers a custom scalar function in the default registry.
-func RegisterFunc(name string, fn ScalarFunc) {
-	DefaultRegistry.Register(name, fn)
+// ret declares what the function returns; see Ret.
+func RegisterFunc(name string, fn ScalarFunc, ret Ret) {
+	DefaultRegistry.Register(name, fn, ret)
 }
 
 // --- String function implementations ---

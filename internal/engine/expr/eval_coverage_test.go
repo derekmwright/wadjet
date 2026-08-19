@@ -796,7 +796,7 @@ func TestFuncRegistryOperations(t *testing.T) {
 	reg := NewFuncRegistry()
 
 	// Register
-	reg.Register("MyFunc", func(args []any) any { return "ok" })
+	reg.Register("MyFunc", func(args []any) any { return "ok" }, RetString)
 	if !reg.Has("myfunc") {
 		t.Error("expected function to be registered (case-insensitive)")
 	}

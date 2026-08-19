@@ -504,7 +504,7 @@ func TestRegisterFunc(t *testing.T) {
 			return nil
 		}
 		return ToFloat64(args[0]) * 2
-	})
+	}, RetFloat64)
 	b := testBatch()
 	e := &FuncCall{Name: "double", Args: []Expr{&ColRef{Name: "amount"}}}
 	v := e.Eval(b, 0)

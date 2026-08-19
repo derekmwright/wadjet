@@ -636,7 +636,20 @@ func (v *Vector) SetValue(i int, val any) {
 	v.Nulls.SetValid(i)
 	switch v.Type {
 	case TypeBool:
-		v.BoolData[i] = val.(bool)
+		// Checked, not val.(bool): every other case here tolerates a value of
+		// the wrong shape, and an unchecked assertion made this one case a
+		// process-wide panic instead — the same "a wrong type may cost a
+		// wrong answer, never the server" rule the vec kernels follow (#310).
+		switch tv := val.(type) {
+		case bool:
+			v.BoolData[i] = tv
+		case int64:
+			v.BoolData[i] = tv != 0
+		case float64:
+			v.BoolData[i] = tv != 0
+		default:
+			v.Nulls.SetNull(i)
+		}
 	case TypeInt32:
 		switch tv := val.(type) {
 		case int32:
@@ -688,7 +701,15 @@ func (v *Vector) SetValue(i int, val any) {
 			v.BytesData.Set(i, []byte(fmt.Sprint(val)))
 		}
 	case TypeBytes:
-		v.BytesData.Set(i, val.([]byte))
+		// Checked for the same reason as TypeBool above.
+		switch tv := val.(type) {
+		case []byte:
+			v.BytesData.Set(i, tv)
+		case string:
+			v.BytesData.Set(i, []byte(tv))
+		default:
+			v.BytesData.Set(i, []byte(fmt.Sprint(val)))
+		}
 	case TypeIPv4:
 		switch tv := val.(type) {
 		case string:

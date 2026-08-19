@@ -30,15 +30,16 @@ func GetProvider() Provider {
 
 // RegisterFunctions registers embed() and embed_dim() in the expression registry.
 func RegisterFunctions() {
-	expr.DefaultRegistry.Register("embed", fnEmbed)
-	expr.DefaultRegistry.Register("embed_model", fnEmbedModel)
-	expr.DefaultRegistry.Register("embed_dim", fnEmbedDim)
+	expr.DefaultRegistry.Register("embed", fnEmbed, expr.RetVector)
+	expr.DefaultRegistry.Register("embed_model", fnEmbedModel, expr.RetString)
+	expr.DefaultRegistry.Register("embed_dim", fnEmbedDim, expr.RetInt64)
 
 	// SQL-level batching: the vectorized path collects every text in a record
 	// batch into a single provider.Embed() call instead of one call per row.
 	expr.DefaultRegistry.RegisterVec("embed", vecEmbed)
-	// Tell the planner embed() produces a VECTOR so the output column is typed
-	// correctly (and the batched VecEval path fires) rather than stringified.
+	// embed() declares VECTOR above; its output *dimension* is the dynamic
+	// half — it comes from the live provider, so the planner asks for it here
+	// at plan time rather than reading it off a constant.
 	expr.DefaultRegistry.RegisterVecReturn("embed", func() int {
 		if p := GetProvider(); p != nil {
 			return p.Dimension()

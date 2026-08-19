@@ -206,3 +206,175 @@ func TestLengthFamilyOverStringColumn(t *testing.T) {
 		}
 	}
 }
+
+// Query shapes that killed the whole server process — every connection, not
+// just the session that asked — because a projection's output vector could not
+// hold what the function's vec kernel wrote into it. The output type is now
+// declared where the function is registered (#310) instead of in a
+// hand-maintained list in the planner.
+
+// starts_with/contains/ends_with write BoolData. Missing from the old list,
+// they were typed String, so the projection allocated a Bytes vector: the
+// fourth instance of the mismatch, after the temporal extractors, the vector
+// distance functions and the length family.
+func TestPredicateFunctionsOverStringColumn(t *testing.T) {
+	ctx, db := newClientShapeDB(t)
+
+	res, err := db.Query(ctx, "SELECT starts_with(name, 'r') AS s, contains(name, '0') AS c, "+
+		"ends_with(name, '9') AS e FROM items WHERE id = 9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(res.Rows))
+	}
+	// itemName(9) is "r09".
+	for col, want := range map[string]bool{"s": true, "c": true, "e": true} {
+		got, ok := res.Rows[0][col].(bool)
+		if !ok {
+			t.Fatalf("%s = %v (%T), want a bool", col, res.Rows[0][col], res.Rows[0][col])
+		}
+		if got != want {
+			t.Errorf("%s = %v, want %v", col, got, want)
+		}
+	}
+}
+
+// The pre-aggregate projection for an expression-valued aggregate input
+// declared Float64 unconditionally, so a string-valued input handed vecUpper a
+// vector with no BytesData: MAX(UPPER(c)) panicked. It is typed from the same
+// declaration as any other projection now.
+func TestAggregateOverStringFunction(t *testing.T) {
+	ctx, db := newClientShapeDB(t)
+
+	res, err := db.Query(ctx, "SELECT MAX(UPPER(name)) AS m, MIN(SUBSTR(name, 1, 2)) AS s FROM items")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(res.Rows))
+	}
+	if got, want := fmt.Sprint(res.Rows[0]["m"]), strings.ToUpper(itemName(9)); got != want {
+		t.Errorf("MAX(UPPER(name)) = %q, want %q", got, want)
+	}
+	if got := fmt.Sprint(res.Rows[0]["s"]); got != "r0" {
+		t.Errorf("MIN(SUBSTR(name,1,2)) = %q, want \"r0\"", got)
+	}
+}
+
+// A GROUP BY over a boolean-valued expression needs a BOOL key column, and the
+// aggregate read a BOOL group key as "type not resolved" — TypeBool is the
+// zero TypeID — handing the key decoder a String output column to write
+// BoolData into.
+func TestGroupByBooleanKey(t *testing.T) {
+	ctx, db := newClientShapeDB(t)
+
+	res, err := db.Query(ctx, "SELECT starts_with(name, 'r') AS s, count(*) AS c "+
+		"FROM items GROUP BY starts_with(name, 'r')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(res.Rows))
+	}
+	if got, ok := res.Rows[0]["s"].(bool); !ok || !got {
+		t.Errorf("group key = %v (%T), want true", res.Rows[0]["s"], res.Rows[0]["s"])
+	}
+}
+
+// The same defect with no function involved at all: GROUP BY over a plain BOOL
+// column panicked the process.
+func TestGroupByBooleanColumn(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "flag", Type: parquet.TypeBool},
+	}}
+	if err := db.CreateTable(ctx, "flags", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]map[string]any, 0, 6)
+	for i := 0; i < 6; i++ {
+		rows = append(rows, map[string]any{"id": int64(i), "flag": i%2 == 0})
+	}
+	ing := db.NewIngester("flags", schema, nil, ingest.Config{MaxBufferRows: 100})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := db.Query(ctx, "SELECT flag, count(*) AS c FROM flags GROUP BY flag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(res.Rows))
+	}
+	counts := map[bool]int64{}
+	for _, row := range res.Rows {
+		flag, ok := row["flag"].(bool)
+		if !ok {
+			t.Fatalf("group key = %v (%T), want a bool", row["flag"], row["flag"])
+		}
+		switch c := row["c"].(type) {
+		case int64:
+			counts[flag] = c
+		case float64:
+			counts[flag] = int64(c)
+		}
+	}
+	if counts[true] != 3 || counts[false] != 3 {
+		t.Errorf("counts = %v, want 3 each", counts)
+	}
+}
+
+// The input-side twin: a string function over a non-string column reached a
+// kernel that reads the column's byte offsets, which an int column does not
+// have. `SELECT UPPER(id)` walked off a nil slice and took the process down.
+// A wrong argument type may cost a slower answer through the per-row path; it
+// may not kill every session.
+func TestStringFunctionOverIntColumn(t *testing.T) {
+	ctx, db := newClientShapeDB(t)
+
+	for _, q := range []string{
+		"SELECT upper(id) AS v FROM items WHERE id = 7",
+		"SELECT substr(id, 1, 1) AS v FROM items WHERE id = 7",
+		"SELECT starts_with(id, '7') AS v FROM items WHERE id = 7",
+		"SELECT length(id) AS v FROM items WHERE id = 7",
+	} {
+		res, err := db.Query(ctx, q)
+		if err != nil {
+			t.Errorf("%s: %v", q, err)
+			continue
+		}
+		if len(res.Rows) != 1 {
+			t.Errorf("%s: got %d rows, want 1", q, len(res.Rows))
+		}
+	}
+}
+
+// coalesce returns its argument's type, which the planner reads off the first
+// argument it can decide. Declaring it Float64 unconditionally — what the old
+// name list did — coerced a string coalesce to 0.
+func TestCoalesceKeepsItsArgumentType(t *testing.T) {
+	ctx, db := newClientShapeDB(t)
+
+	res, err := db.Query(ctx, "SELECT coalesce(name, 'x') AS c FROM items WHERE id = 3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(res.Rows))
+	}
+	if got := fmt.Sprint(res.Rows[0]["c"]); got != itemName(3) {
+		t.Errorf("coalesce(name, 'x') = %q, want %q", got, itemName(3))
+	}
+}

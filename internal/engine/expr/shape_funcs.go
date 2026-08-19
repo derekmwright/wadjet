@@ -80,8 +80,10 @@ func vecShapeLenScaled(args []*batch.Vector, out *batch.Vector, n int, mul int) 
 		// anyway indexed off the end of a zero-length slice and panicked the
 		// whole server process: `SELECT LENGTH(c) FROM t` killed every
 		// connection, not just the one that asked. Degrade to a typed write
-		// so the query answers instead of the server dying; the declared
-		// type is fixed in the planner (isNumericFunc).
+		// so the query answers instead of the server dying. FuncCall.EvalVec
+		// now keeps a mismatched vector away from every kernel (the output
+		// type comes from the registry's declared return type, #310); this
+		// guard stays because ColShapeLen calls straight in.
 		vecShapeLenAny(src, out, n, mul)
 		return
 	}

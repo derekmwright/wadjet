@@ -7,15 +7,19 @@ import (
 )
 
 func init() {
-	fns := map[string]ScalarFunc{
-		"cosine_similarity": fnCosineSimilarity,
-		"l2_distance":       fnL2Distance,
-		"dot_product":       fnDotProduct,
-		"vector_norm":       fnVectorNorm,
-		"vector_dims":       fnVectorDims,
+	// The distance functions return a float64 score; vector_dims a count.
+	// The vec kernels below write out.Float64Data, so a String declaration
+	// here is a process-killing panic (it was one, until the declaration
+	// moved next to the registration — #310).
+	fns := map[string]builtin{
+		"cosine_similarity": {fnCosineSimilarity, RetFloat64},
+		"l2_distance":       {fnL2Distance, RetFloat64},
+		"dot_product":       {fnDotProduct, RetFloat64},
+		"vector_norm":       {fnVectorNorm, RetFloat64},
+		"vector_dims":       {fnVectorDims, RetInt64},
 	}
-	for name, fn := range fns {
-		DefaultRegistry.Register(name, fn)
+	for name, b := range fns {
+		DefaultRegistry.Register(name, b.fn, b.ret)
 	}
 
 	vecFns := map[string]VecScalarFunc{

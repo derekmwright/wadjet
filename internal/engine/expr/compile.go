@@ -575,7 +575,12 @@ func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, er
 			return &ColShapeLen{Col: col, Mul: mul, Fallback: fc}, nil
 		}
 	}
-	if isNumericFunc(name) {
+	// A function that always returns a number is wrapped so it satisfies
+	// Float64Expr/Int64Expr and binary operators over it take the typed path.
+	// This used to be a second hand-maintained name list, which had drifted
+	// from the first: it carried `date_part` and `ascii`, neither of which is
+	// registered at all, and missed every numeric function added since.
+	if DefaultRegistry.ReturnType(name).Numeric() {
 		return &numericFuncCall{fc}, nil
 	}
 	return fc, nil
@@ -589,30 +594,6 @@ var shapeLenMul = map[string]int{
 	"len":          1,
 	"octet_length": 1,
 	"bit_length":   8,
-}
-
-// isNumericFunc returns true if the function is known to return a numeric value.
-// These functions get wrapped in numericFuncCall to implement Float64Expr/Int64Expr,
-// enabling compileBinOp to produce typed BinOpFloat64 when they are operands.
-func isNumericFunc(name string) bool {
-	switch name {
-	case "extract", "year", "month", "day", "hour", "minute", "second",
-		"length", "char_length", "character_length", "octet_length", "bit_length",
-		"abs", "ceil", "ceiling", "floor", "round", "truncate", "trunc",
-		"sign", "sqrt", "cbrt", "exp", "ln", "log", "log2", "log10",
-		"power", "pow", "mod",
-		"sin", "cos", "tan", "asin", "acos", "atan", "atan2",
-		"degrees", "radians", "pi",
-		"position", "strpos",
-		"ascii", "crc32",
-		"random",
-		"epoch", "date_part",
-		"width_bucket",
-		"greatest", "least",
-		"coalesce": // coalesce of numbers returns numbers
-		return true
-	}
-	return false
 }
 
 func compileCaseNode(n *plansql.CaseNode, ctx *compileContext) (Expr, error) {

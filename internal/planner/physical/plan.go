@@ -6143,7 +6143,12 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			if compErr == nil {
 				pc := exec.ProjectColumn{
 					Name: synName,
-					Type: parquet.TypeFloat64,
+					// Aggregate inputs are usually numeric, so Float64 is the
+					// fallback — but MAX(UPPER(c)) is not, and declaring it
+					// Float64 handed vecUpper a vector with no BytesData to
+					// write into: the same process-killing mismatch as the
+					// projection path (#310).
+					Type: inferProjectionType(agg.InputExpr, parquet.TypeFloat64),
 					Expr: wrapExpr(compiled),
 				}
 				// Use general vectorized evaluation when available.
@@ -6486,23 +6491,27 @@ func strictIntArithCols(n *logical.Node) map[string]bool {
 }
 
 func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.TypeID {
+	if t, ok := nodeDeclaredType(node); ok {
+		return t
+	}
+	return fallback
+}
+
+// nodeDeclaredType reports the type an expression decides on its own, and
+// whether it decides one at all. A bare column reference decides nothing —
+// its type is resolved at runtime from the input schema — which is both what
+// the caller's fallback is for and what a polymorphic function declaration
+// needs to know before moving on to its next candidate argument.
+func nodeDeclaredType(node plansql.Node) (parquet.TypeID, bool) {
 	switch n := node.(type) {
 	case *plansql.BinaryOp:
 		if !binOpInvolvesInterval(n) {
-			return parquet.TypeFloat64
+			return parquet.TypeFloat64, true
 		}
 	case *plansql.FuncCallNode:
-		if strings.EqualFold(n.Name, "vector_dims") {
-			return parquet.TypeInt64
-		}
-		if isNumericFunc(n.Name) {
-			return parquet.TypeFloat64
-		}
-		if _, ok := expr.DefaultRegistry.VecReturnDim(n.Name); ok {
-			return parquet.TypeVector
-		}
+		return funcReturnType(n)
 	case *plansql.CastNode:
-		return inferCastType(n.TypeName)
+		return inferCastType(n.TypeName), true
 	case *plansql.Lit:
 		// Literal projections (e.g., SELECT 13, SELECT 'x') need a typed
 		// output column so the runtime stores the value in the matching
@@ -6512,56 +6521,51 @@ func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.Typ
 		switch n.Kind {
 		case plansql.LitNumber:
 			if _, err := strconv.ParseInt(n.Value, 10, 64); err == nil {
-				return parquet.TypeInt64
+				return parquet.TypeInt64, true
 			}
-			return parquet.TypeFloat64
+			return parquet.TypeFloat64, true
 		case plansql.LitBool:
-			return parquet.TypeBool
-		case plansql.LitNull:
-			// Type unknown; let fallback decide.
-			return fallback
+			return parquet.TypeBool, true
 		case plansql.LitString:
-			return parquet.TypeString
+			return parquet.TypeString, true
 		}
+		// LitNull: type unknown; let the fallback decide.
 	}
-	return fallback
+	return 0, false
 }
 
-// isNumericFunc returns true for scalar functions known to return numeric output.
-func isNumericFunc(name string) bool {
-	switch strings.ToLower(name) {
-	case "round", "abs", "ceil", "ceiling", "floor", "sqrt", "ln", "log", "log2",
-		"log10", "exp", "pow", "power", "sign", "trunc", "truncate",
-		"sin", "cos", "tan", "asin", "acos", "atan", "atan2",
-		"radians", "degrees", "pi", "mod", "greatest", "least",
-		"coalesce", "nullif", "random",
-		// Temporal part extractors return float64. Typing them String made
-		// the projection allocate a Bytes output vector, which the
-		// Float64Data-writing vec kernels then panicked on (hour()) or
-		// nulled out (extract()) — ClickBench Q19/Q43.
-		"year", "month", "day", "hour", "minute", "second", "quarter",
-		"extract", "epoch", "day_of_week", "day_of_year", "week",
-		"dayofweek", "dayofyear", "millisecond", "microsecond",
-		// Vector distance/norm functions return float64. Same
-		// String-typed-output panic class as the temporal extractors
-		// above: vecCosineSimilarity writes out.Float64Data, which a
-		// Bytes output vector doesn't have — every vector distance
-		// query panicked once the vec kernels landed. (vector_dims
-		// returns int64 and is typed separately in inferProjectionType.)
-		"cosine_similarity", "l2_distance", "dot_product", "vector_norm",
-		// The length family returns a count. Typing it String gave the
-		// projection a Bytes output vector, and vecShapeLenScaled — which
-		// writes out.Float64Data — indexed off the end of a zero-length
-		// slice: `SELECT LENGTH(c) FROM t` panicked the whole server
-		// process, taking every connection with it. Third instance of this
-		// exact mismatch (see the two comments above); #310 tracks making
-		// the return type declared once, at registration, instead of
-		// re-listed here.
-		"length", "octet_length", "bit_length", "char_length",
-		"character_length", "strlen":
-		return true
+// funcReturnType types a function call from the return type declared where the
+// function is registered — the same declaration its vec kernel writes through.
+//
+// This replaces isNumericFunc, a hand-maintained list of function names that
+// had to be remembered separately from the 273+ registrations in
+// internal/engine/expr. Four times a function was missing from it, was
+// therefore typed String, and its kernel wrote Float64Data or BoolData into a
+// Bytes output vector — killing the server process for every connection, not
+// just the session that asked: the temporal extractors (ClickBench Q19/Q43),
+// the vector distance functions, the length family (`SELECT LENGTH(c) FROM t`),
+// and starts_with/contains/ends_with. The list also carried names that are
+// registered nowhere (date_part, strlen, ceiling, trunc), which is the same
+// drift pointing the other way.
+//
+// ok=false means the declaration does not decide and the caller keeps its own
+// fallback.
+func funcReturnType(n *plansql.FuncCallNode) (parquet.TypeID, bool) {
+	t, ok := expr.DefaultRegistry.ReturnType(n.Name).Resolve(len(n.Args), func(i int) (parquet.TypeID, bool) {
+		return nodeDeclaredType(n.Args[i])
+	})
+	if !ok {
+		return 0, false
 	}
-	return false
+	switch t {
+	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
+		// map_keys() really does return an ARRAY, and the declaration says
+		// so, but a projection has no element type to size the child vector
+		// with and an ARRAY column built without one reads back empty. Keep
+		// the string fallback until a projection can carry a nested type.
+		return 0, false
+	}
+	return t, true
 }
 
 // inferCastType maps SQL type names to parquet types for CAST expressions.

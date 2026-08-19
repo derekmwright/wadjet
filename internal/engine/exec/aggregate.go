@@ -4002,7 +4002,13 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 
 	for i, name := range outNames {
 		typ := parquet.TypeString // default fallback
-		if i < len(h.groupColTypes) && h.groupColTypes[i] != 0 {
+		// Resolution is groupColIdx >= 0, NOT a non-zero type: TypeBool IS
+		// zero, so a BOOL group key read as "unresolved" and got a String
+		// output column — while the key decoder, reading groupColTypes,
+		// wrote BoolData into it and killed the process. `GROUP BY
+		// bool_col` panicked on its own; declared function return types
+		// (#310) also route `GROUP BY starts_with(c, 'x')` through here.
+		if i < len(h.groupColTypes) && i < len(h.groupColIdx) && h.groupColIdx[i] >= 0 {
 			typ = parquet.TypeID(h.groupColTypes[i])
 		}
 		out := parquet.Column{Name: name, Type: typ, Nullable: true}

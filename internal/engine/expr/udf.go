@@ -169,7 +169,11 @@ func (s *UDFStore) Register(def UDFDef, isAdmin bool) error {
 	s.persist()
 	s.mu.Unlock()
 
-	DefaultRegistry.Register(def.Name, s.makeScalarFunc(def.Name))
+	// A UDF's return type is whatever its body evaluates to, and the body is
+	// arbitrary SQL over the call's arguments — RetDynamic says so, and the
+	// planner keeps its own fallback for the projection. A UDF has no vec
+	// kernel, so nothing writes a typed slice on the strength of this.
+	DefaultRegistry.Register(def.Name, s.makeScalarFunc(def.Name), RetDynamic)
 
 	return nil
 }
