@@ -228,6 +228,14 @@ func fuzzQueryWadjet(ctx context.Context, db *wadjet.DB, sql string) (out fuzzRe
 // and materializing DuckDB's 17.8M-row answer to one took the whole test
 // process down with the OOM killer — a result that size is not a repro anyone
 // wants reported anyway.
+
+// fuzzOracleTimeout bounds ONE oracle query. A generated query can ask for an
+// astronomically large cartesian product even over the SF0.01 fixture, and the
+// fuzzer treats an oracle error as "skip" — so a bounded oracle loses only
+// queries nobody could answer, and keeps the sweep moving instead of wedging
+// it at one seed.
+const fuzzOracleTimeout = 90 * time.Second
+
 func fuzzDuckDB(setup, sql string) ([]map[string]string, []string, error) {
 	// PostgreSQL null placement, which is what wadjet implements:
 	// NULLS LAST for ASC, NULLS FIRST for DESC. DuckDB defaults to
@@ -245,7 +253,18 @@ func fuzzDuckDB(setup, sql string) ([]map[string]string, []string, error) {
 	// oracle, and the fuzzer already treats an oracle error as "skip".
 	setup = "SET memory_limit='4GB';\nSET default_null_order='nulls_last_on_asc_first_on_desc';\n" + setup
 	script := setup + "\n.mode csv\n.headers on\n.nullvalue <NULL>\n" + sql + ";\n"
-	cmd := exec.Command(fuzzDuckDBBin)
+	// Bound the oracle in WALL TIME, not just memory. `SET memory_limit`
+	// governs DuckDB's buffer manager and did NOT stop a generated
+	// cartesian product reaching 28.9 GB RSS: on 2026-08-19 that first
+	// OOM-killed the machine, and with the memory limit in place it simply
+	// ran for 36+ minutes instead, wedging the sweep at the same seed both
+	// times. A killed child also has to release the parent — cmd.Output()
+	// waits on the stdout pipe, so killing the process by hand did not
+	// unblock the harness. CommandContext closes both paths.
+	ctx, cancel := context.WithTimeout(context.Background(), fuzzOracleTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, fuzzDuckDBBin)
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stdin = strings.NewReader(script)
 	// DuckDB spills to a .tmp directory under its working directory; without
 	// this it litters the repo. The view definitions use absolute paths, so
