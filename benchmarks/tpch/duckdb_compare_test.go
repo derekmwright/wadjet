@@ -567,6 +567,136 @@ func duckdbCorpus() []duckdbCase {
 		// way on this column, which is what tells accumulated noise apart
 		// from a constant sample/population factor.
 		duckdbCase{name: "StddevSmallSpread", sql: "SELECT STDDEV(l_discount) AS s, VAR_POP(l_discount) AS vp FROM lineitem"},
+		// #335 — a WHERE predicate over the NULL-supplying side of an outer
+		// join. pushFilterThroughJoin pushed it to whichever child owned its
+		// columns without looking at the join type, so the predicate ran
+		// BELOW the padding: region was filtered to one row and every
+		// unmatched nation was then padded back in. 25 rows for a 5-row
+		// answer, on both arms, and 25 again for the IS NULL form whose
+		// answer is 0. Reported as a count first (unmissable) and then with
+		// values, since a demotion that dropped the right columns instead
+		// would keep the count.
+		duckdbCase{name: "OuterWhereOnNullSupplyingSide", sql: `SELECT COUNT(*) AS c FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey WHERE r.r_regionkey = 2`},
+		duckdbCase{name: "OuterWhereOnNullSupplyingSideValues", sql: `SELECT n.n_name, r.r_name FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey WHERE r.r_name = 'EUROPE' ORDER BY n.n_name`},
+		// The anti-join idiom, which is the case a careless fix for the
+		// above breaks: IS NULL is how a query ASKS for the unmatched rows,
+		// so it must neither push below the join nor demote it. The ON's
+		// second conjunct narrows region to three of its five rows, so ten
+		// nations come back unmatched.
+		duckdbCase{name: "OuterWhereAntiJoinIdiom", sql: `SELECT n.n_name FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3
+			WHERE r.r_regionkey IS NULL ORDER BY n.n_name`},
+		// The same idiom over a join that matches everything: 0 rows, which
+		// is what the pre-fix engine answered with 25.
+		duckdbCase{name: "OuterWhereAntiJoinIdiomEmpty", sql: `SELECT COUNT(*) AS c FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey WHERE r.r_regionkey IS NULL`},
+		// A predicate over the null-supplying side that is neither rejecting
+		// nor a bare IS NULL. Both must stay above the join: the OR because
+		// one tolerant arm makes the whole thing tolerant, COALESCE because
+		// it is not strict in the column it wraps. The ON restricts region to
+		// three rows, so the answers mix matched and padded rows — pushing
+		// either predicate down would return all 25.
+		duckdbCase{name: "OuterWhereNullTolerantOr", sql: `SELECT n.n_name, r.r_name FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3
+			WHERE r.r_regionkey IS NULL OR r.r_regionkey = 1 ORDER BY n.n_name, r.r_name`},
+		duckdbCase{name: "OuterWhereCoalesce", sql: `SELECT COUNT(*) AS c FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3
+			WHERE COALESCE(r.r_name, 'none') = 'none'`},
+		// Controls that must not move: the same predicate over an INNER
+		// join, and a predicate over the PRESERVED side of the outer join.
+		// Both were correct before the fix and stay correct after it.
+		duckdbCase{name: "InnerWhereSamePredicate", sql: `SELECT COUNT(*) AS c FROM nation n
+			JOIN region r ON n.n_regionkey = r.r_regionkey WHERE r.r_regionkey = 2`},
+		duckdbCase{name: "OuterWhereOnPreservedSide", sql: `SELECT n.n_name, r.r_name FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey WHERE n.n_nationkey < 4 ORDER BY n.n_name`},
+		// RIGHT and FULL carry the same rule with the sides exchanged: a
+		// RIGHT JOIN pads its LEFT input, and a FULL JOIN pads both, so a
+		// null-rejecting WHERE demotes FULL to the outer join on the other
+		// side rather than straight to inner.
+		duckdbCase{name: "RightJoinWhereOnNullSupplyingSide", sql: `SELECT COUNT(*) AS c FROM region r
+			RIGHT JOIN nation n ON n.n_regionkey = r.r_regionkey WHERE r.r_regionkey = 2`},
+		duckdbCase{name: "FullJoinWhereOnNullSupplyingSide", sql: `SELECT COUNT(*) AS c FROM nation n
+			FULL OUTER JOIN region r ON n.n_regionkey = r.r_regionkey WHERE r.r_regionkey = 2`},
+		duckdbCase{name: "FullJoinWhereAntiJoinIdiom", sql: `SELECT COUNT(*) AS c FROM nation n
+			FULL OUTER JOIN region r ON r.r_regionkey = n.n_nationkey WHERE r.r_regionkey IS NULL`},
+		// The RIGHT JOIN mirror of the anti-join idiom, which is where the
+		// gate found that the stage DAG loses a RIGHT JOIN's unmatched rows
+		// outright — 0 of the 20 unmatched nations, and 5 rows instead of 25
+		// for the same join with no WHERE at all. That is not a predicate
+		// defect: it needs no WHERE to appear, and the single-process arm is
+		// correct in both forms. Pinned on arm B alone; #335's own fix is
+		// gated by the arm-A comparison above it.
+		duckdbCase{name: "RightJoinWhereAntiJoinIdiom", sql: `SELECT n.n_name FROM region r
+			RIGHT JOIN nation n ON r.r_regionkey = n.n_nationkey WHERE r.r_regionkey IS NULL ORDER BY n.n_name`,
+			knownBugArm: armDAG,
+			knownBug: "the stage DAG drops a RIGHT JOIN's unmatched (NULL-padded) rows: it answers this with 0 " +
+				"rows where the single-process arm and DuckDB both return 20, and answers the same join without " +
+				"any WHERE with 5 rows instead of 25"},
+		// A LEFT JOIN whose build side comes back EMPTY still preserves every
+		// left row. The DAG returns none of them — the same "NULL-padded
+		// rows are lost" family as the RIGHT JOIN entry above, reached
+		// without a RIGHT JOIN. On the single-process arm the join itself is
+		// right, but a WHERE naming a build-side column over that join
+		// (`... WHERE r.r_regionkey IS NULL`, the anti-join idiom) then
+		// returns 0 rather than 25, so the empty build costs the padded
+		// columns their identity there too.
+		duckdbCase{name: "LeftJoinEmptyBuildSide", sql: `SELECT COUNT(*) AS c FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0`,
+			knownBugArm: armDAG,
+			knownBug: "the stage DAG returns 0 rows for a LEFT JOIN whose build side is empty, where the " +
+				"preserved side's 25 rows must all survive NULL-padded"},
+		// An expression on one side of an ON equality — the join key the
+		// physical planner cannot represent either. parseJoinKeys splits the
+		// condition on "=" and hands the executor "r.r_regionkey + 3" as a
+		// COLUMN NAME; nothing resolves, so the join matches nothing. Both
+		// arms, and visible only as a wrong count.
+		duckdbCase{name: "ExpressionJoinKey", sql: `SELECT COUNT(*) AS c FROM nation n
+			JOIN region r ON n.n_regionkey = r.r_regionkey + 3`,
+			knownBugArm: armBoth,
+			knownBug: "an ON equality whose operand is an expression rather than a bare column matches nothing: " +
+				"parseJoinKeys passes 'r.r_regionkey + 3' to the executor as a column name. 0 rows, want 10"},
+
+		// #336 — an ON conjunct comparing two COLUMNS. The physical planner
+		// represents a join condition as key pairs: parseJoinKeys keeps the
+		// conjuncts containing "=" and discards the rest without a word, so
+		// the self-join deduplication idiom (`a.id < b.id`, one row per
+		// unordered pair) answered as if its second conjunct were absent —
+		// 494 rows for a 197-row query.
+		duckdbCase{name: "OnClauseColumnConjunct", sql: `SELECT COUNT(*) AS c FROM supplier a
+			JOIN supplier b ON a.s_nationkey = b.s_nationkey AND a.s_suppkey < b.s_suppkey`},
+		duckdbCase{name: "OnClauseColumnConjunctValues", sql: `SELECT a.s_suppkey AS lo, b.s_suppkey AS hi
+			FROM supplier a JOIN supplier b ON a.s_nationkey = b.s_nationkey AND a.s_suppkey < b.s_suppkey
+			WHERE a.s_suppkey < 6 ORDER BY lo, hi`},
+		// The same across two tables, so the defect is not specific to a
+		// self-join's column qualification.
+		duckdbCase{name: "OnClauseCrossTableInequality", sql: `SELECT n.n_name, r.r_name FROM nation n
+			JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey ORDER BY n.n_name`},
+		// Controls: a column-vs-LITERAL conjunct in ON was always honoured
+		// (extractJoinCondPredicates pushes it to the child that owns it),
+		// and the same column-vs-column conjunct in WHERE was always
+		// honoured. The fix makes ON agree with WHERE; it must not move
+		// either control.
+		duckdbCase{name: "OnClauseColumnVsLiteral", sql: `SELECT COUNT(*) AS c FROM supplier a
+			JOIN supplier b ON a.s_nationkey = b.s_nationkey AND a.s_suppkey < 5`},
+		duckdbCase{name: "WhereClauseColumnConjunct", sql: `SELECT COUNT(*) AS c FROM supplier a
+			JOIN supplier b ON a.s_nationkey = b.s_nationkey WHERE a.s_suppkey < b.s_suppkey`},
+		// The residual on an OUTER join is a DIFFERENT defect and is still
+		// open. An outer join's ON is evaluated BEFORE the NULL-padding, so
+		// the residual cannot be lifted above the join the way the inner
+		// case is — it would delete the unmatched rows the join exists to
+		// preserve. Carrying it would need a residual predicate on the
+		// executor's outer-join probe, which does not exist: HashJoin
+		// applies SemiAntiFilter on the semi/anti path only. Both arms drop
+		// it identically, so this stays pinned until that lands.
+		duckdbCase{name: "OuterJoinOnResidual", sql: `SELECT COUNT(*) AS c FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey
+			WHERE r.r_name IS NULL`,
+			knownBugArm: armBoth,
+			knownBug: "a non-equi ON conjunct spanning both sides of an OUTER join is still dropped: it cannot " +
+				"move above the join (that would delete the unmatched rows) and the executor has no residual " +
+				"predicate on an outer join's probe. #336 fixed the inner-join half only"},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

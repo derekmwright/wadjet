@@ -1502,6 +1502,94 @@ func twoPathCorpus() []twoPathQuery {
 				}
 			}},
 	)
+
+	// #335 and #336: the two places a join predicate went missing. Both were
+	// planner defects, so both arms were wrong identically and the compare
+	// alone could never have caught them — every entry here carries an
+	// absolute assertA naming the number DuckDB gives for the same fixture.
+	// What the compare adds is that the two paths must not disagree about
+	// them, and they did: `WHERE r.r_regionkey IS NULL` over a LEFT JOIN came
+	// back as 25 on the single-process arm and 0 on the DAG, from the same
+	// dropped predicate reached through two different plans.
+	assertCount := func(col string, want float64) func(testing.TB, []map[string]any) {
+		return func(tb testing.TB, rows []map[string]any) {
+			tb.Helper()
+			if len(rows) != 1 {
+				tb.Fatalf("arm A (single-process) returned %d rows, want exactly 1", len(rows))
+			}
+			if got := cellNum(rows[0], col); got != want {
+				tb.Errorf("arm A (single-process) %s = %v, want %v (DuckDB over the same fixture)", col, got, want)
+			}
+		}
+	}
+	out = append(out,
+		// The issue verbatim: a WHERE over the null-supplying side of a LEFT
+		// JOIN was pushed BELOW the NULL-padding, so region was filtered to
+		// one row and every unmatched nation padded back in.
+		twoPathQuery{name: "OuterWhereOnNullSupplyingSide", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n LEFT JOIN region r
+				ON n.n_regionkey = r.r_regionkey WHERE r.r_regionkey = 2`,
+			assertA: assertCount("c", 5)},
+		// The anti-join idiom, which the same push destroys in the other
+		// direction: IS NULL must stay above a join that stays outer.
+		twoPathQuery{name: "OuterWhereAntiJoinIdiom", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n LEFT JOIN region r
+				ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3 WHERE r.r_regionkey IS NULL`,
+			assertA: assertCount("c", 10)},
+		// The same predicate over an INNER join, and over the PRESERVED side
+		// of the outer one: the two controls that were correct before the fix
+		// and must not move.
+		twoPathQuery{name: "InnerWhereSamePredicate", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n JOIN region r
+				ON n.n_regionkey = r.r_regionkey WHERE r.r_regionkey = 2`,
+			assertA: assertCount("c", 5)},
+		twoPathQuery{name: "OuterWhereOnPreservedSide", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n LEFT JOIN region r
+				ON n.n_regionkey = r.r_regionkey WHERE n.n_nationkey < 4`,
+			assertA: assertCount("c", 4)},
+		// RIGHT and FULL carry the rule with the sides exchanged.
+		twoPathQuery{name: "RightJoinWhereOnNullSupplyingSide", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM region r RIGHT JOIN nation n
+				ON n.n_regionkey = r.r_regionkey WHERE r.r_regionkey = 2`,
+			assertA: assertCount("c", 5)},
+		twoPathQuery{name: "FullJoinWhereOnNullSupplyingSide", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n FULL OUTER JOIN region r
+				ON n.n_regionkey = r.r_regionkey WHERE r.r_regionkey = 2`,
+			assertA: assertCount("c", 5)},
+		// #336: the self-join deduplication idiom. `a.id < b.id` in ON was
+		// dropped by the key parser, so every unordered pair came back twice
+		// plus the diagonal.
+		// Over nation, not supplier: this suite generates its own fact-table
+		// data, so only the fixed TPC-H dimension tables carry a count that
+		// can be written down. 5 regions of 5 nations each, one row per
+		// unordered same-region pair.
+		twoPathQuery{name: "OnClauseColumnConjunct", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a JOIN nation b
+				ON a.n_regionkey = b.n_regionkey AND a.n_nationkey < b.n_nationkey`,
+			assertA: assertCount("c", 50)},
+		// Its two controls: a column-vs-LITERAL conjunct in ON was honoured,
+		// and so was the same column-vs-column conjunct in WHERE. The fix
+		// makes ON agree with WHERE; neither control may move.
+		twoPathQuery{name: "OnClauseColumnVsLiteral", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a JOIN nation b
+				ON a.n_regionkey = b.n_regionkey AND a.n_nationkey < 5`,
+			assertA: assertCount("c", 25)},
+		twoPathQuery{name: "WhereClauseColumnConjunct", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a JOIN nation b
+				ON a.n_regionkey = b.n_regionkey WHERE a.n_nationkey < b.n_nationkey`,
+			assertA: assertCount("c", 50)},
+		// Two divergences this suite found while the above were being
+		// written. Neither is a predicate defect — both appear with no WHERE
+		// at all — and both are the DAG losing an outer join's NULL-padded
+		// rows, so they are pinned rather than fixed here.
+		twoPathQuery{name: "RightJoinUnmatchedRows", cmp: cmpUnordered, expectRows: true,
+			sql:      "SELECT COUNT(*) AS c FROM region r RIGHT JOIN nation n ON r.r_regionkey = n.n_nationkey",
+			knownBug: "the stage DAG answers 5 where the preserved side has 25 rows — a RIGHT JOIN's unmatched rows are dropped"},
+		twoPathQuery{name: "LeftJoinEmptyBuildSide", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation n LEFT JOIN region r
+				ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 0`,
+			knownBug: "the stage DAG answers 0 for a LEFT JOIN with an empty build side, where all 25 preserved rows must survive"},
+	)
 	return out
 }
 

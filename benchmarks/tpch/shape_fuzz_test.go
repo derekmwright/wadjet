@@ -87,48 +87,45 @@ var errTooLarge = errors.New("reference result exceeds the harness row cap")
 // The two below CANNOT be kept out of the generator without deleting the
 // shapes they live in, so they are recognised structurally and skipped. Delete
 // the matcher when the fix lands — that is the whole of "the fix landed".
+//
+// left-join-where-dropped (#335) and on-clause-column-conjunct-dropped (#336)
+// used to live here and are gone: the first covered 63 of 400 generated
+// queries, the second 8, and between them they were most of what this harness
+// declined to look at. What replaced the second is bugOuterOnResidual, which
+// is the part of #336 the planner cannot fix on its own — see below.
 const (
-	bugLeftJoinWhere = "left-join-where-dropped"
-	bugOnConjunct    = "on-clause-column-conjunct-dropped"
-	bugHiddenSortKey = "hidden-sort-key-with-filter"
+	// An ON conjunct spanning both sides of an OUTER join is still dropped.
+	// #336 fixed the inner-join half by lifting the residual into a filter
+	// above the join, which is exact only because ON and WHERE mean the same
+	// thing for an inner join. An outer join evaluates its ON BEFORE the
+	// NULL-padding, so the same move would delete the unmatched rows the join
+	// exists to preserve, and the executor has no residual predicate on an
+	// outer join's probe to carry it instead (HashJoin applies SemiAntiFilter
+	// on the semi/anti path only). Gated as a corpus entry —
+	// OuterJoinOnResidual in duckdb_compare_test.go — so the pin cannot
+	// outlive the bug.
+	bugOuterOnResidual = "outer-join-on-residual-dropped"
+	bugHiddenSortKey   = "hidden-sort-key-with-filter"
 )
 
 // fuzzKnownDivergence reports which filed defect a query is guaranteed to hit,
 // or "" when the query is fair game.
 func fuzzKnownDivergence(s *shapegen.Schema, q *shapegen.Query) string {
-	// A WHERE predicate over a table reached by LEFT JOIN is dropped outright:
+	// A conjunct comparing two COLUMNS in an OUTER join's ON clause is
+	// dropped, so the join matches rows it should not and their partners
+	// arrive populated where they owe NULLs:
 	//   SELECT COUNT(*) FROM nation n LEFT JOIN region r
-	//     ON n.n_regionkey = r.r_regionkey WHERE r.r_regionkey = 2
-	//   → Wadjet 25 (every left row), DuckDB 5.
+	//     ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey
+	//     WHERE r.r_name IS NULL
+	//   → Wadjet 0, DuckDB 3.
+	// The inner-join form of the same ON clause is fixed and generated.
 	for _, f := range q.From {
-		if f.Join != "LEFT JOIN" {
+		if !strings.Contains(f.On, " AND ") {
 			continue
 		}
-		names := []string{f.Alias + "."}
-		for _, tbl := range s.Tables {
-			if tbl.Name != f.Table {
-				continue
-			}
-			for _, c := range tbl.Cols {
-				names = append(names, c.Name)
-			}
-		}
-		for _, w := range q.Where {
-			for _, n := range names {
-				if strings.Contains(w, n) {
-					return bugLeftJoinWhere
-				}
-			}
-		}
-	}
-	// A conjunct comparing two COLUMNS in an ON clause is dropped (a
-	// column-vs-literal conjunct is honoured):
-	//   SELECT COUNT(*) FROM supplier a JOIN supplier b
-	//     ON a.s_nationkey = b.s_nationkey AND a.s_suppkey < b.s_suppkey
-	//   → Wadjet 494 (as if the second conjunct were absent), DuckDB 197.
-	for _, f := range q.From {
-		if strings.Contains(f.On, " AND ") {
-			return bugOnConjunct
+		switch j := strings.ToUpper(f.Join); {
+		case strings.Contains(j, "LEFT"), strings.Contains(j, "RIGHT"), strings.Contains(j, "FULL"):
+			return bugOuterOnResidual
 		}
 	}
 	// A WHERE filter combined with an ORDER BY over a column the SELECT list

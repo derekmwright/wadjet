@@ -41,6 +41,11 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	}
 	plan = decorrelateScalarSubqueries(plan)
 	plan = extractCommonORPredicates(plan)
+	// Before pushdownPredicates: an ON conjunct the join cannot represent
+	// becomes a filter above it, and pushdown is then what puts the
+	// single-sided ones back down. Running it after would leave them
+	// stranded above the join (#336).
+	plan = liftInnerJoinOnResiduals(plan)
 	plan = pushdownPredicates(plan)
 	// Move WHERE equalities onto comma-FROM cross joins (issue #281) so
 	// semi pushdown and reorderJoins see real join conditions. After
@@ -1425,6 +1430,15 @@ func pushFilterThroughJoin(filter, join *Node) *Node {
 		allColMap[k] = v
 	}
 
+	// A WHERE predicate sits ABOVE the join, so it sees whatever the join
+	// emitted — including the NULLs an outer join manufactures for a row
+	// that found no partner. Pushing it below that padding is legal only
+	// once the predicate is proven to reject those NULLs, and then the join
+	// itself simplifies, because no padded row can survive (#335).
+	kind := joinKind(join.JoinType)
+	leftPadded, rightPadded := nullSupplyingSides(kind)
+	demoteLeft, demoteRight := false, false
+
 	var leftPreds, rightPreds, remainingPreds []Predicate
 	for _, pred := range flatPreds {
 		refs := predicateTableRefs(pred, allColMap)
@@ -1444,13 +1458,34 @@ func pushFilterThroughJoin(filter, join *Node) *Node {
 			}
 		}
 
-		if allLeft {
-			leftPreds = append(leftPreds, pred)
-		} else if allRight {
-			rightPreds = append(rightPreds, pred)
-		} else {
+		switch {
+		case allLeft:
+			switch {
+			case !leftPadded:
+				leftPreds = append(leftPreds, pred)
+			case rejectsNulls(pred):
+				leftPreds = append(leftPreds, pred)
+				demoteLeft = true
+			default:
+				remainingPreds = append(remainingPreds, pred)
+			}
+		case allRight:
+			switch {
+			case !rightPadded:
+				rightPreds = append(rightPreds, pred)
+			case rejectsNulls(pred):
+				rightPreds = append(rightPreds, pred)
+				demoteRight = true
+			default:
+				remainingPreds = append(remainingPreds, pred)
+			}
+		default:
 			remainingPreds = append(remainingPreds, pred)
 		}
+	}
+
+	if demoteLeft || demoteRight {
+		join.JoinType = demoteJoinKind(kind, demoteLeft, demoteRight)
 	}
 
 	if len(leftPreds) > 0 {
@@ -2354,8 +2389,8 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	flattenASTNodes(info.WhereExpr, &whereNodes)
 
 	// Classify each condition
-	var eqKeys []string     // equality: "outer_col = inner_col" for hash join keys
-	var filterConds []string // non-equality correlated: "outer_col != inner_col"
+	var eqKeys []string                 // equality: "outer_col = inner_col" for hash join keys
+	var filterConds []string            // non-equality correlated: "outer_col != inner_col"
 	var innerFilterNodes []plansql.Node // inner-only conditions for scan filter
 
 	for _, node := range whereNodes {
@@ -3350,7 +3385,6 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 
 	return dp[fullMask].plan, dp[fullMask].bushyJoins
 }
-
 
 // hasSelectiveFilter checks whether a relation subtree contains a filter
 // (NodeFilter or scan predicates) that reduces its output. Filtered relations
