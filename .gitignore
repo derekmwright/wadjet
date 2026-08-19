@@ -1,19 +1,12 @@
-# Binaries
-/unifi-ingest
-/tpch-seed
-/wadjet
-/wadjet_bin
-/wadjet-arm64
-/wadjet-amd64
-/tpch-bench
-/tpch-bench-arm64
-/tpch-bench-local
-/tpch-harness
-/tpch-harness-bin
-/plan-repro
-/wadjet-bin
-/s3probe
-/security-bench
+# Build output. Every binary goes to dist/ (see Taskfile.yml) — one entry
+# instead of a per-binary list that has to be maintained.
+#
+# /wadjet used to be listed here, because `go build -o wadjet` writes INTO
+# the wadjet/ package directory rather than refusing. That entry then hid
+# every NEW source file in that package from `git status`, and two test
+# files were written and lost to it before anyone noticed. Do not add a
+# bare /wadjet back.
+/dist/
 /harness-*.json
 
 # Terraform

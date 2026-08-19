@@ -5,9 +5,15 @@ Columnar analytics engine in Go with network-native operations, distributed exec
 ## Build & Test
 
 ```bash
-# Build — NEVER -o wadjet: wadjet/ is the API package directory, the
-# binary would land inside it (and /wadjet in .gitignore hides it)
-go build -o wadjet-bin ./cmd/wadjet
+# Build — every binary goes to dist/ (gitignored). Use the Taskfile:
+task build          # dist/wadjet
+task build-all      # every ./cmd/... into dist/
+task clean          # remove dist/
+#
+# Never `go build -o wadjet`: wadjet/ is the API package directory and go
+# writes the binary INTO it rather than refusing. That is why /wadjet was
+# once gitignored — which hid new source files in that package from
+# `git status` and lost two test files.
 
 # Unit tests
 go test ./internal/...

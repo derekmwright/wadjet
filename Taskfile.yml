@@ -1,15 +1,38 @@
 version: "3"
 
+# Every binary this repo builds lands in dist/, which is the only build
+# artifact path .gitignore hides. Building to the repo root is what put a
+# 59 MB binary inside the wadjet/ PACKAGE directory (go writes into a
+# directory of that name rather than refusing) and required ignoring
+# /wadjet — which then hid new source files in that package from
+# `git status` entirely. Two test files were written, never shown as
+# untracked, and never committed before that was noticed.
+vars:
+  DIST: dist
+
 tasks:
   build:
-    desc: Build the wadjet binary
+    desc: Build the wadjet binary into dist/
     cmds:
-      - go build -o wadjet ./cmd/wadjet
+      - mkdir -p {{.DIST}}
+      - go build -o {{.DIST}}/wadjet ./cmd/wadjet
+
+  build-all:
+    desc: Build every command into dist/
+    cmds:
+      - mkdir -p {{.DIST}}
+      - go build -o {{.DIST}}/ ./cmd/...
 
   build-ingest:
-    desc: Build the unifi-ingest binary
+    desc: Build the unifi-ingest binary into dist/
     cmds:
-      - go build -o unifi-ingest ./cmd/unifi-ingest
+      - mkdir -p {{.DIST}}
+      - go build -o {{.DIST}}/unifi-ingest ./cmd/unifi-ingest
+
+  clean:
+    desc: Remove built binaries
+    cmds:
+      - rm -rf {{.DIST}}
 
   vet:
     desc: Run go vet
@@ -99,26 +122,27 @@ tasks:
   harness:build:
     desc: Build the tpch-harness and wadjet binaries
     cmds:
-      - go build -o tpch-harness ./cmd/tpch-harness
-      - go build -o wadjet ./cmd/wadjet
+      - mkdir -p {{.DIST}}
+      - go build -o {{.DIST}}/tpch-harness ./cmd/tpch-harness
+      - go build -o {{.DIST}}/wadjet ./cmd/wadjet
 
   harness:smoke:
     desc: Real-cluster smoke test against SF0.01 fixture (~30s)
     deps: [harness:build]
     cmds:
-      - ./tpch-harness --mode=local --slice=small --no-compare --queries=q01,q06
+      - "{{.DIST}}/tpch-harness --mode=local --slice=small --no-compare --queries=q01,q06 --wadjet-bin={{.DIST}}/wadjet"
 
   harness:local:
     desc: Local fast gate using the small slice (~1-2 min)
     deps: [harness:build]
     cmds:
-      - ./tpch-harness --mode=local --slice=small
+      - "{{.DIST}}/tpch-harness --mode=local --slice=small --wadjet-bin={{.DIST}}/wadjet"
 
   harness:large:
     desc: Local pre-merge gate using the large slice (forces spill, ~5-10 min)
     deps: [harness:build]
     cmds:
-      - ./tpch-harness --mode=local --slice=large
+      - "{{.DIST}}/tpch-harness --mode=local --slice=large --wadjet-bin={{.DIST}}/wadjet"
 
   harness:golden:
     desc: Run against an existing EC2 cluster (requires COORD_URL)
@@ -126,10 +150,10 @@ tasks:
     requires:
       vars: [COORD_URL]
     cmds:
-      - ./tpch-harness --mode=golden --coord-url={{.COORD_URL}} --update-baseline
+      - "{{.DIST}}/tpch-harness --mode=golden --coord-url={{.COORD_URL}} --update-baseline"
 
   harness:clean:
     desc: Remove all harness run dirs and built binaries
     cmds:
       - rm -rf /tmp/wadjet-harness
-      - rm -f tpch-harness
+      - rm -rf {{.DIST}}
