@@ -519,8 +519,16 @@ func TestWindowGlobal_StreamingBoundsMemory(t *testing.T) {
 		t.Fatalf("outstanding charge after drain: %d, want 0", cur)
 	}
 	// Streaming bound: a handful of batches, never the whole input.
-	if peak > 4*maxBatchBytes {
-		t.Fatalf("peak pending charge %d exceeds 4x max batch (%d) — not streaming (total input %d)", peak, maxBatchBytes, totalBytes)
+	//
+	// The group's SUM has an ORDER BY, so its frame ends at the end of each
+	// row's peer group and the streamer holds the OPEN group back until it
+	// closes (#350). Emission is batch-granular, so even with the unique
+	// keys used here — where the open group is a single row — the batch
+	// holding that row waits for the next one. That is one extra batch on
+	// top of the augmented batch already in flight, not a step toward
+	// accumulating the input, which is what this bound is here to catch.
+	if peak > 8*maxBatchBytes {
+		t.Fatalf("peak pending charge %d exceeds 8x max batch (%d) — not streaming (total input %d)", peak, maxBatchBytes, totalBytes)
 	}
 }
 

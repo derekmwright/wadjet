@@ -1887,23 +1887,34 @@ func twoPathCorpus() []twoPathQuery {
 		// reaches the worker and the stage runs, which is what #349 is
 		// about, and both paths must return the same column.
 		//
-		// There is deliberately no assertA. `ROWS BETWEEN 1 PRECEDING AND
-		// CURRENT ROW` should make w this row's price plus the previous
-		// row's; Wadjet returns the running total from the start of the
-		// partition on BOTH paths, because exec.Window never reads
-		// WindowColumn.Frame at all — #350, an operator defect this fix
-		// does not touch. Asserting the arithmetic here would fail on arm A
-		// for a reason that has nothing to do with the stage DAG, and
-		// asserting what the engine currently returns would pin the wrong
-		// answer. #350's absolute gate lives in duckdbCorpus
-		// (WindowLastValueExplicitFrame, held against DuckDB, pinned on
-		// both arms). What this entry proves is that the frame is on the
-		// wire and the DAG agrees with the single-process path about it —
-		// so when #350 lands, either both paths move or this entry fails.
+		// This entry carried no assertA while #350 was open — the frame was
+		// on the wire and both paths agreed, on the running total from the
+		// start of the partition, because exec.Window never read
+		// WindowColumn.Frame. Now that it does, the arithmetic is asserted:
+		// `ROWS BETWEEN 1 PRECEDING AND CURRENT ROW` is this row's price
+		// plus the previous row's, and the first row's frame holds only
+		// itself.
 		twoPathQuery{name: "WindowSumExplicitFrame", cmp: cmpOrdered, expectRows: true,
 			sql: `SELECT o_orderkey, o_totalprice,
 				SUM(o_totalprice) OVER (ORDER BY o_orderkey ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS w
-				FROM orders WHERE o_orderkey <= 500 ORDER BY o_orderkey`},
+				FROM orders WHERE o_orderkey <= 500 ORDER BY o_orderkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) < 2 {
+					tb.Fatalf("%d rows, want at least 2", len(rows))
+				}
+				for i, r := range rows {
+					want := cellNum(r, "o_totalprice")
+					if i > 0 {
+						want += cellNum(rows[i-1], "o_totalprice")
+					}
+					if got := cellNum(r, "w"); math.Abs(got-want) > 1e-6 {
+						tb.Fatalf("row %d: SUM() OVER (ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) = %v, "+
+							"want %v — the frame holds this row and the one before it, not the "+
+							"partition so far", i, got, want)
+					}
+				}
+			}},
 	)
 
 	// #348/#352 — an outer join over an EMPTY side, and a join with no keys
@@ -2413,6 +2424,160 @@ func twoPathCorpus() []twoPathQuery {
 			assertA: func(tb testing.TB, rows []map[string]any) {
 				_, hi := sf001Extent(tb, "orders", "o_custkey")
 				assertSingleCount(tb, rows, "m", hi)
+			}},
+	)
+
+	// #343 — an explicit NULLS FIRST / NULLS LAST, and #350 — an explicit
+	// window frame. Both are "the clause the user wrote is discarded", and
+	// both are shapes where the two arms AGREEING proves nothing: before the
+	// fixes each path discarded the clause the same way, so every entry here
+	// carries an assertA that holds the answer absolutely.
+	//
+	// The null-placement entries need NULLs the fixture does not contain, so
+	// they build them: NULLIF for a key, and a LEFT JOIN that misses for the
+	// #343 issue query itself.
+	firstNonNull := func(col string) func(testing.TB, []map[string]any) {
+		return func(tb testing.TB, rows []map[string]any) {
+			tb.Helper()
+			if len(rows) == 0 {
+				tb.Fatal("no rows")
+			}
+			if v, _ := lookupCell(rows[0], col); v == nil {
+				tb.Errorf("first row's %s is NULL, want a value — NULLS LAST puts NULLs at the END, "+
+					"and a DESC key does not reverse that", col)
+			}
+		}
+	}
+	firstNull := func(col string) func(testing.TB, []map[string]any) {
+		return func(tb testing.TB, rows []map[string]any) {
+			tb.Helper()
+			if len(rows) == 0 {
+				tb.Fatal("no rows")
+			}
+			if v, _ := lookupCell(rows[0], col); v != nil {
+				tb.Errorf("first row's %s is %v, want NULL — NULLS FIRST puts NULLs at the FRONT, "+
+					"and a DESC key does not reverse that", col, v)
+			}
+		}
+	}
+	out = append(out,
+		twoPathQuery{name: "NullsLastOnDescKey", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation
+				ORDER BY k DESC NULLS LAST, n_name`,
+			assertA: firstNonNull("k")},
+		twoPathQuery{name: "NullsFirstOnDescKey", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation
+				ORDER BY k DESC NULLS FIRST, n_name`,
+			assertA: firstNull("k")},
+		twoPathQuery{name: "NullsLastOnAscKey", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation
+				ORDER BY k ASC NULLS LAST, n_name`,
+			assertA: firstNonNull("k")},
+		twoPathQuery{name: "NullsFirstOnAscKey", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation
+				ORDER BY k ASC NULLS FIRST, n_name`,
+			assertA: firstNull("k")},
+		// #343's own query: the NULLs come from a LEFT JOIN that misses, and
+		// the key is a string, so the harness value signature is blind to it.
+		twoPathQuery{name: "NullsLastLeftJoinMiss", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT o.o_orderstatus AS s, c.c_custkey FROM customer c
+				LEFT JOIN orders o ON c.c_custkey = o.o_custkey AND o.o_orderkey < 40
+				ORDER BY o.o_orderstatus DESC NULLS LAST, c.c_custkey`,
+			assertA: firstNonNull("s")},
+
+		// #350 — LAST_VALUE over an explicit whole-partition frame is the
+		// partition's last value; without the frame it is the current row's,
+		// and both are pinned so a fix cannot trade one for the other.
+		twoPathQuery{name: "WindowLastValueFramePair", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey, n_name,
+				LAST_VALUE(n_name) OVER (ORDER BY n_nationkey
+				  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS lv_all,
+				LAST_VALUE(n_name) OVER (ORDER BY n_nationkey) AS lv_default
+				FROM nation ORDER BY n_nationkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 25 {
+					tb.Fatalf("%d rows, want 25", len(rows))
+				}
+				last := cellText(rows[len(rows)-1], "n_name")
+				for i, r := range rows {
+					if got := cellText(r, "lv_all"); got != last {
+						tb.Fatalf("row %d: LAST_VALUE over UNBOUNDED FOLLOWING = %q, want %q — "+
+							"the explicit frame reaches the partition's end", i, got, last)
+					}
+					if got, want := cellText(r, "lv_default"), cellText(r, "n_name"); got != want {
+						tb.Fatalf("row %d: LAST_VALUE with no frame = %q, want %q — the DEFAULT "+
+							"frame ends at the current row and must not change", i, got, want)
+					}
+				}
+			}},
+		// A running total against the partition total: the same SUM, the
+		// frame the only difference, and a wrong answer is a plausible
+		// number rather than an error.
+		twoPathQuery{name: "WindowSumFramePair", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey, n_regionkey,
+				SUM(n_regionkey) OVER (ORDER BY n_nationkey) AS running,
+				SUM(n_regionkey) OVER (ORDER BY n_nationkey
+				  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS total
+				FROM nation ORDER BY n_nationkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 25 {
+					tb.Fatalf("%d rows, want 25", len(rows))
+				}
+				var run float64
+				for _, r := range rows {
+					run += cellNum(r, "n_regionkey")
+				}
+				var acc float64
+				for i, r := range rows {
+					acc += cellNum(r, "n_regionkey")
+					if got := cellNum(r, "running"); math.Abs(got-acc) > 1e-6 {
+						tb.Fatalf("row %d: running SUM = %v, want %v", i, got, acc)
+					}
+					if got := cellNum(r, "total"); math.Abs(got-run) > 1e-6 {
+						tb.Fatalf("row %d: SUM over UNBOUNDED FOLLOWING = %v, want the partition "+
+							"total %v", i, got, run)
+					}
+				}
+			}},
+		// FIRST_VALUE with a moving lower bound and NTH_VALUE whose frame is
+		// too narrow to hold its N — the two shapes that agree with the old
+		// frame-blind answer under a whole-partition frame and disagree
+		// everywhere else.
+		twoPathQuery{name: "WindowMovingLowerBoundFrame", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey, n_name,
+				FIRST_VALUE(n_name) OVER (ORDER BY n_nationkey
+				  ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS fv,
+				NTH_VALUE(n_name, 2) OVER (ORDER BY n_nationkey
+				  ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS nv
+				FROM nation ORDER BY n_nationkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 25 {
+					tb.Fatalf("%d rows, want 25", len(rows))
+				}
+				for i, r := range rows {
+					wantFV := cellText(r, "n_name")
+					if i > 0 {
+						wantFV = cellText(rows[i-1], "n_name")
+					}
+					if got := cellText(r, "fv"); got != wantFV {
+						tb.Fatalf("row %d: FIRST_VALUE over 1 PRECEDING = %q, want %q", i, got, wantFV)
+					}
+					v, _ := lookupCell(r, "nv")
+					if i == 0 {
+						if v != nil {
+							tb.Fatalf("row 0: NTH_VALUE(n_name, 2) = %v, want NULL — its frame "+
+								"holds one row", v)
+						}
+						continue
+					}
+					if got, want := cellText(r, "nv"), cellText(r, "n_name"); got != want {
+						tb.Fatalf("row %d: NTH_VALUE(n_name, 2) = %q, want %q — the second row of "+
+							"a two-row frame is the current one", i, got, want)
+					}
+				}
 			}},
 	)
 	return out

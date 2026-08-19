@@ -61,9 +61,16 @@ func TestWindowValueFunctionsOverTypedColumns(t *testing.T) {
 		{"last_value over a string column",
 			"SELECT LAST_VALUE(s) OVER (ORDER BY k) AS x FROM w ORDER BY k",
 			[]any{"alpha", "bravo", "charlie", "delta"}},
+		// No explicit frame, so the frame is the SQL default: RANGE BETWEEN
+		// UNBOUNDED PRECEDING AND CURRENT ROW. Row 0 sees one row and has no
+		// second one. This case wanted "bravo" on every row while the engine
+		// evaluated NTH_VALUE over the whole partition whatever frame it was
+		// given (#350); the explicit whole-partition spelling below is the
+		// one that means every row (and DuckDB agrees on both — see
+		// benchmarks/tpch's WindowNthValueFrames).
 		{"nth_value over a string column",
 			"SELECT NTH_VALUE(s, 2) OVER (ORDER BY k) AS x FROM w ORDER BY k",
-			[]any{"bravo", "bravo", "bravo", "bravo"}},
+			[]any{nil, "bravo", "bravo", "bravo"}},
 
 		// ---- The extra arguments share the column's argument string. ----
 		// Column pruning read that whole string as the column name, so "s"

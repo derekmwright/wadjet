@@ -436,7 +436,7 @@ func chunkBatch(b *batch.RecordBatch, size int) []*batch.RecordBatch {
 // a single new run (the pass preserves the merge's sort order). Consumed runs
 // are deleted. Returns the new run list and the augmented schema.
 func windowDiskPass(dir string, schema []parquet.Column, runs []string, g windowSpecGroup, charge func(int64)) ([]string, []parquet.Column, error) {
-	if len(g.partitionBy) == 0 {
+	if len(g.partitionBy) == 0 && !groupNeedsMaterializedFrame(g) {
 		// Empty PARTITION BY: the walker would accumulate the whole input
 		// as one partition. Stream it twice instead (window_global.go).
 		return globalWindowDiskPass(dir, schema, runs, g, charge)

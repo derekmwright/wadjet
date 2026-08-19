@@ -319,8 +319,8 @@ func TestParseDescribe(t *testing.T) {
 		{"describe users;", "users"},
 		{"SHOW COLUMNS FROM events", "events"},
 		{"show columns from users;", "users"},
-		{"DESCRIBE Events", "events"},     // case normalization
-		{"DESC Findings", "findings"},     // case normalization
+		{"DESCRIBE Events", "events"},            // case normalization
+		{"DESC Findings", "findings"},            // case normalization
 		{"SHOW COLUMNS FROM MyTable", "mytable"}, // case normalization
 	}
 
@@ -1570,8 +1570,8 @@ func TestSimilarTo(t *testing.T) {
 
 func TestCreateView(t *testing.T) {
 	tests := []struct {
-		name    string
-		sql     string
+		name     string
+		sql      string
 		wantName string
 		wantSQL  string
 		replace  bool
@@ -1636,9 +1636,9 @@ func TestDropView(t *testing.T) {
 
 func TestQualify(t *testing.T) {
 	tests := []struct {
-		name    string
-		sql     string
-		wantQ   string
+		name  string
+		sql   string
+		wantQ string
 	}{
 		{"basic qualify", "SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM t QUALIFY rn = 1", "rn = 1"},
 		{"qualify with partition", "SELECT * FROM t QUALIFY ROW_NUMBER() OVER (PARTITION BY grp ORDER BY id) <= 3",
@@ -2293,5 +2293,89 @@ func TestParseCreateSnapshot(t *testing.T) {
 	}
 	if pq.CreateSnapshot == nil {
 		t.Fatal("CreateSnapshot is nil")
+	}
+}
+
+// TestParseWindowFrameBounds covers every bound spelling the executor has to
+// resolve, and the one spelling it refuses.
+//
+// A RANGE bound with a VALUE offset (`RANGE BETWEEN 5 PRECEDING …`) measures
+// in ORDER-BY values, not rows: it selects every row whose key is within 5 of
+// this row's, which is a different set from the 5 rows before it whenever
+// keys repeat or skip. exec.Window resolves RANGE bounds by peer group and
+// has no value arithmetic, so accepting the spelling would answer the query
+// with a frame it did not ask for — the shape of #350, where a frame the
+// query spelled out was replaced by the default one. It is rejected instead.
+func TestParseWindowFrameBounds(t *testing.T) {
+	ok := []struct {
+		name string
+		sql  string
+		mode FrameMode
+		want [2]FrameBoundType
+	}{
+		{"rows unbounded both ends",
+			"SELECT LAST_VALUE(v) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM t",
+			FrameRows, [2]FrameBoundType{BoundUnboundedPreceding, BoundUnboundedFollowing}},
+		{"rows offsets both ends",
+			"SELECT SUM(v) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND 3 FOLLOWING) FROM t",
+			FrameRows, [2]FrameBoundType{BoundPreceding, BoundFollowing}},
+		{"rows single bound defaults end to CURRENT ROW",
+			"SELECT SUM(v) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING) FROM t",
+			FrameRows, [2]FrameBoundType{BoundUnboundedPreceding, BoundCurrentRow}},
+		{"range current row to unbounded following",
+			"SELECT SUM(v) OVER (ORDER BY id RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM t",
+			FrameRange, [2]FrameBoundType{BoundCurrentRow, BoundUnboundedFollowing}},
+		{"range whole partition",
+			"SELECT SUM(v) OVER (ORDER BY id RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM t",
+			FrameRange, [2]FrameBoundType{BoundUnboundedPreceding, BoundUnboundedFollowing}},
+	}
+	for _, tc := range ok {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := Parse(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := ExtractSelect(parsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(info.Windows) != 1 {
+				t.Fatalf("expected 1 window, got %d", len(info.Windows))
+			}
+			f := info.Windows[0].Frame
+			if f == nil {
+				t.Fatal("expected frame spec")
+			}
+			if f.Mode != tc.mode {
+				t.Errorf("mode = %v, want %v", f.Mode, tc.mode)
+			}
+			if f.Start.Type != tc.want[0] {
+				t.Errorf("start = %v, want %v", f.Start.Type, tc.want[0])
+			}
+			end := FrameBound{Type: BoundCurrentRow}
+			if f.End != nil {
+				end = *f.End
+			}
+			if end.Type != tc.want[1] {
+				t.Errorf("end = %v, want %v", end.Type, tc.want[1])
+			}
+		})
+	}
+
+	rejected := []struct {
+		name string
+		sql  string
+	}{
+		{"range offset start", "SELECT SUM(v) OVER (ORDER BY id RANGE BETWEEN 5 PRECEDING AND CURRENT ROW) FROM t"},
+		{"range offset end", "SELECT SUM(v) OVER (ORDER BY id RANGE BETWEEN CURRENT ROW AND 5 FOLLOWING) FROM t"},
+		{"range offset single bound", "SELECT SUM(v) OVER (ORDER BY id RANGE 5 PRECEDING) FROM t"},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Parse(tc.sql); err == nil {
+				t.Error("expected a RANGE value-offset frame to be rejected, not answered with a " +
+					"row-count frame the query did not ask for")
+			}
+		})
 	}
 }

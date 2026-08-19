@@ -1943,7 +1943,27 @@ func (p *selectParser) parseWindowFrame() (*WindowFrame, error) {
 		frame.Start = start
 	}
 
+	// A RANGE bound with a value offset (`RANGE BETWEEN 5 PRECEDING …`)
+	// measures in ORDER-BY VALUES, not rows: it selects every row whose key
+	// is within 5 of this row's key, which is a different set from the 5
+	// rows before it whenever keys repeat or skip. The executor resolves
+	// RANGE bounds by peer group and has no value arithmetic, so it would
+	// answer this query with a frame the query did not ask for. Say so
+	// instead — a rejected query is recoverable, a plausible wrong number
+	// is not.
+	if frame.Mode == FrameRange {
+		if rangeOffsetBound(frame.Start) || (frame.End != nil && rangeOffsetBound(*frame.End)) {
+			return nil, fmt.Errorf("RANGE frame with a value offset is not supported; use ROWS for a row-count frame")
+		}
+	}
+
 	return frame, nil
+}
+
+// rangeOffsetBound reports whether b is a PRECEDING/FOLLOWING bound carrying
+// an offset, the spelling RANGE mode cannot evaluate.
+func rangeOffsetBound(b FrameBound) bool {
+	return b.Type == BoundPreceding || b.Type == BoundFollowing
 }
 
 // parseFrameBound parses a single frame bound:

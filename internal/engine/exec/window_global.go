@@ -23,20 +23,34 @@ import (
 // the golden A/B tests enforce value-identity with the in-memory path):
 //
 //   row_number, rank, dense_rank, percent_rank   prev-row peer compare
-//   sum/count/avg/min/max WITH order by           running state
+//   sum/count/avg/min/max WITH order by           running state, peer-close
 //   sum/count/avg/min/max WITHOUT order by        pass-1 scalar
-//   first_value, nth_value, last_value (no OB)    pass-1 scalar
-//   last_value (with OB)                          current row
+//   first_value                                   pass-1 scalar
+//   nth_value, last_value (no order by)           pass-1 scalar
+//   nth_value, last_value (with order by)         peer-close
 //   ntile                                         counter state + n
 //   lag(k)                                        k-slot ring buffer
 //   lead(k)                                       k-row lookahead
 //   cume_dist                                     peer-group lookahead
 //
-// Only lead and cume_dist hold rows back; everything else resolves the row
-// the moment it arrives. Memory is bounded by max lead offset plus the
-// largest ORDER-BY peer group when cume_dist is used (an all-equal-keys
-// input degenerates to the full partition for cume_dist specifically —
-// documented bound, charged to the tracker).
+// "peer-close" is the frame: with an ORDER BY and no explicit ROWS/RANGE
+// clause, the frame is RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW,
+// which ends at the end of the row's ORDER-BY PEER GROUP — so every row of a
+// group takes the same value and that value is known the moment the group
+// closes (backfillPeerFrame). Writing the running per-row value instead is
+// the same answer only when no two rows tie, which is what this path used to
+// do (#350).
+//
+// Lead, cume_dist and the peer-close columns hold rows back; everything else
+// resolves the row the moment it arrives. Memory is bounded by max lead
+// offset plus the largest ORDER-BY peer group (an all-equal-keys input
+// degenerates to the full partition — documented bound, charged to the
+// tracker).
+//
+// An EXPLICIT frame does not come here at all: it can reach forward or move
+// its lower end, which needs rows this pass has not produced or has already
+// dropped, so groupNeedsMaterializedFrame routes those to the
+// partition-at-a-time walker instead.
 
 // globalWindowStats carries the pass-1 partition-level scalars.
 type globalWindowStats struct {
@@ -181,11 +195,17 @@ type globalWindowStreamer struct {
 	prevRow int
 
 	// lookahead
-	maxLead      int   // max lead offset across cols (0 = none)
+	maxLead      int     // max lead offset across cols (0 = none)
 	leadCursor   []int64 // per col, next global row still needing its lead value
 	needCumeDist bool
 	peerStart    int64 // global row index where the open peer group began
 	cdCursor     int64 // next global row still needing its cume_dist value
+	// holdPeers is set when a frame-sensitive column has an ORDER BY. The
+	// default frame ends at CURRENT ROW in RANGE mode, i.e. at the end of
+	// the row's ORDER-BY PEER GROUP, so those rows cannot be answered until
+	// the group closes — the same hold cume_dist already needed, now general.
+	holdPeers  bool
+	peerCursor int64 // next global row still needing its frame value
 
 	pending  []*pendingGlobalBatch
 	emitFrom int // pending[:emitFrom] fully resolved, ready to emit
@@ -228,6 +248,9 @@ func newGlobalWindowStreamer(m *runMerger, schema []parquet.Column, g windowSpec
 			}
 		case WinCumeDist:
 			s.needCumeDist = true
+		}
+		if peerDeferred(wc.Func) && len(wc.OrderBy) > 0 {
+			s.holdPeers = true
 		}
 	}
 	// ORDER BY column indices + null-aware compare kernels (group-level:
@@ -356,6 +379,11 @@ func (s *globalWindowStreamer) ingest(nb *batch.RecordBatch) {
 		if i64 > 0 && newPeer {
 			s.rank = i64 + 1
 			s.denseRank++
+			if s.holdPeers {
+				// Peer group [peerCursor, i64) closed: its rows' frames end
+				// here, and the running state now covers exactly them.
+				s.backfillPeerFrame(i64)
+			}
 			if s.needCumeDist {
 				// Peer group [peerStart, i64) closed: cume_dist = i64/n.
 				s.backfillCumeDist(i64)
@@ -405,31 +433,32 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 		}
 		vec.Nulls.SetValid(r)
 
+	// The frame-sensitive aggregates with an ORDER BY only ACCUMULATE here.
+	// Their frame ends at the end of the row's peer group, so the value is
+	// written by backfillPeerFrame once that group closes; writing the
+	// running value per row is the same answer only when no two rows tie.
 	case WinSum:
 		if len(wc.OrderBy) > 0 {
 			s.runSum[i] += vecFloat64(inVec, r)
-			vec.Float64Data[r] = s.runSum[i]
-		} else {
-			vec.Float64Data[r] = s.stats.sum[i]
+			return
 		}
+		vec.Float64Data[r] = s.stats.sum[i]
 		vec.Nulls.SetValid(r)
 
 	case WinCount:
 		if len(wc.OrderBy) > 0 {
 			s.runCount[i]++
-			vec.Int64Data[r] = s.runCount[i]
-		} else {
-			vec.Int64Data[r] = n
+			return
 		}
+		vec.Int64Data[r] = n
 		vec.Nulls.SetValid(r)
 
 	case WinAvg:
 		if len(wc.OrderBy) > 0 {
 			s.runSum[i] += vecFloat64(inVec, r)
-			vec.Float64Data[r] = s.runSum[i] / float64(rowIdx+1)
-		} else {
-			vec.Float64Data[r] = s.stats.sum[i] / float64(n)
+			return
 		}
+		vec.Float64Data[r] = s.stats.sum[i] / float64(n)
 		vec.Nulls.SetValid(r)
 
 	case WinMin:
@@ -441,10 +470,9 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 			if s.runMin[i] == nil || (v != nil && compareAny(v, s.runMin[i]) < 0) {
 				s.runMin[i] = v
 			}
-			vec.SetValue(r, s.runMin[i])
-		} else {
-			vec.SetValue(r, s.stats.minV[i])
+			return
 		}
+		vec.SetValue(r, s.stats.minV[i])
 
 	case WinMax:
 		if len(wc.OrderBy) > 0 {
@@ -455,10 +483,9 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 			if s.runMax[i] == nil || (v != nil && compareAny(v, s.runMax[i]) > 0) {
 				s.runMax[i] = v
 			}
-			vec.SetValue(r, s.runMax[i])
-		} else {
-			vec.SetValue(r, s.stats.maxV[i])
+			return
 		}
+		vec.SetValue(r, s.stats.maxV[i])
 
 	case WinLag:
 		off := wc.LagLeadOffset
@@ -489,14 +516,9 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 
 	case WinLastValue:
 		if len(wc.OrderBy) > 0 {
-			var v any
-			if inVec != nil {
-				v = inVec.GetValue(r)
-			}
-			vec.SetValue(r, v)
-		} else {
-			vec.SetValue(r, s.stats.last[i])
+			return // backfillPeerFrame: the last row of the peer group
 		}
+		vec.SetValue(r, s.stats.last[i])
 
 	case WinNtile:
 		buckets := wc.NtileBuckets
@@ -531,6 +553,9 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 		// resolved by backfillCumeDist / finishEOF
 
 	case WinNthValue:
+		if len(wc.OrderBy) > 0 {
+			return // backfillPeerFrame: NULL until the frame reaches n rows
+		}
 		nth := wc.NthValueN
 		if nth <= 0 {
 			nth = 1
@@ -541,6 +566,83 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 			vec.SetValue(r, nil)
 		}
 	}
+}
+
+// peerDeferred reports whether f's value under the DEFAULT frame depends on
+// where the row's ORDER-BY peer group ENDS, and so cannot be written until
+// that group closes.
+//
+// FIRST_VALUE is the frame-sensitive function that is NOT on this list: the
+// default frame always starts at the partition's first row, so its answer is
+// a pass-1 scalar no matter where the peer group ends.
+func peerDeferred(f WindowFunc) bool {
+	switch f {
+	case WinSum, WinCount, WinAvg, WinMin, WinMax, WinLastValue, WinNthValue:
+		return true
+	}
+	return false
+}
+
+// backfillPeerFrame writes the deferred columns for the peer group
+// [peerCursor, end).
+//
+// Every row of a peer group sees the SAME frame under the default spec —
+// RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ends at the group's last
+// row for all of them — so one value per group serves the whole group, and it
+// is exactly known the moment the group closes: the carried running state has
+// consumed rows [0, end) and nothing else.
+//
+// Writes go out in ascending row order, per column, across successive calls,
+// which is what a variable-length output vector's offsets require.
+func (s *globalWindowStreamer) backfillPeerFrame(end int64) {
+	numInput := len(s.schema)
+	for i, wc := range s.g.cols {
+		if !peerDeferred(wc.Func) || len(wc.OrderBy) == 0 {
+			continue
+		}
+		var val any
+		switch wc.Func {
+		case WinLastValue:
+			if pb, lr := s.locate(end - 1); pb != nil {
+				if ii := s.inputIdxs[i]; ii >= 0 && ii < numInput {
+					val = pb.b.Columns[ii].GetValue(lr)
+				}
+			}
+		case WinNthValue:
+			nth := wc.NthValueN
+			if nth <= 0 {
+				nth = 1
+			}
+			if int64(nth) <= end {
+				val = s.stats.nth[i]
+			}
+		case WinMin:
+			val = s.runMin[i]
+		case WinMax:
+			val = s.runMax[i]
+		}
+		for row := s.peerCursor; row < end; row++ {
+			pb, lr := s.locate(row)
+			if pb == nil {
+				continue
+			}
+			vec := pb.outVec(numInput, i)
+			switch wc.Func {
+			case WinSum:
+				vec.Float64Data[lr] = s.runSum[i]
+				vec.Nulls.SetValid(lr)
+			case WinCount:
+				vec.Int64Data[lr] = s.runCount[i]
+				vec.Nulls.SetValid(lr)
+			case WinAvg:
+				vec.Float64Data[lr] = s.runSum[i] / float64(end)
+				vec.Nulls.SetValid(lr)
+			default:
+				vec.SetValue(lr, val)
+			}
+		}
+	}
+	s.peerCursor = end
 }
 
 // resolveLeads fills lead values for rows whose lookahead target has
@@ -640,6 +742,9 @@ func (s *globalWindowStreamer) finishEOF() {
 			s.leadCursor[i]++
 		}
 	}
+	if s.holdPeers && s.rowIdx > s.peerCursor {
+		s.backfillPeerFrame(s.rowIdx) // final peer group closes at EOF
+	}
 	if s.needCumeDist && s.rowIdx > s.cdCursor {
 		s.backfillCumeDist(s.rowIdx) // final group: cd = n/n = 1
 	}
@@ -656,6 +761,9 @@ func (s *globalWindowStreamer) markResolved() {
 	}
 	if s.needCumeDist && s.cdCursor < frontier {
 		frontier = s.cdCursor
+	}
+	if s.holdPeers && s.peerCursor < frontier {
+		frontier = s.peerCursor
 	}
 	for s.emitFrom < len(s.pending) {
 		pb := s.pending[s.emitFrom]

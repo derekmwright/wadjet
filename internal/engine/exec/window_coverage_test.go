@@ -928,11 +928,27 @@ func TestWindowNthValueCoverage(t *testing.T) {
 
 	b, _ := win.Next(ctx)
 	result := b.ToRows()
-	// NTH_VALUE(val, 2) = 20.0 for all rows
-	for _, row := range result {
-		nth := row["nth"].(float64)
-		if nth != 20.0 {
-			t.Errorf("expected nth=20.0, got %f", nth)
+	// NTH_VALUE(val, 2) is evaluated over the FRAME, and the frame here is
+	// the SQL default for a spec with an ORDER BY: RANGE BETWEEN UNBOUNDED
+	// PRECEDING AND CURRENT ROW. Row 0 therefore sees one row and has no
+	// second one, so its answer is NULL, not 20.0 — this test asserted 20.0
+	// for every row while the engine evaluated NTH_VALUE over the whole
+	// partition regardless of frame (#350). DuckDB agrees: the corpus entry
+	// WindowNthValueDefaultFrame pins the same NULL.
+	want := []any{nil, 20.0, 20.0}
+	if len(result) != len(want) {
+		t.Fatalf("got %d rows, want %d", len(result), len(want))
+	}
+	for i, row := range result {
+		if want[i] == nil {
+			if row["nth"] != nil {
+				t.Errorf("row %d: expected nth=NULL, got %v", i, row["nth"])
+			}
+			continue
+		}
+		nth, ok := row["nth"].(float64)
+		if !ok || nth != want[i] {
+			t.Errorf("row %d: expected nth=%v, got %v", i, want[i], row["nth"])
 		}
 	}
 }

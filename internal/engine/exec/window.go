@@ -404,7 +404,7 @@ func (w *Window) finalizeExternal() error {
 			return err
 		}
 	}
-	if len(last.partitionBy) == 0 {
+	if len(last.partitionBy) == 0 && !groupNeedsMaterializedFrame(last) {
 		// Final group with no PARTITION BY: two-pass streaming instead of
 		// accumulating the whole input as one partition (window_global.go).
 		merger, runs, err := openRunMerger(dir, passSchema, last.sortKeys, runs)
@@ -1046,6 +1046,246 @@ func computeWindowColumnar(combined *batch.RecordBatch, winVecIdx int, wc Window
 	}
 }
 
+// --- Window frames ---
+//
+// A frame narrows what one row SEES inside its partition. WindowColumn.Frame
+// was parsed, carried through the logical plan, put on the exec spec and on
+// the wire — and then read by nothing: every value and aggregate function
+// decided on `len(orderIdxs) > 0` alone, so an explicit ROWS/RANGE clause was
+// discarded on BOTH execution paths (#350). LAST_VALUE over an explicit
+// whole-partition frame returned the current row's value, and SUM over one
+// returned a running total instead of the partition total — a wrong number
+// that looks exactly like a right one.
+//
+// The frame is resolved once per partition into per-row half-open [lo, hi)
+// row ranges, and every frame-sensitive function reads its rows from there.
+// The default frame is not a special case: it is a real frame that happens to
+// be the one SQL supplies.
+
+// defaultWindowFrame is what a window spec with no ROWS/RANGE clause gets:
+// RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.
+//
+// One spec covers both shapes the old code branched on. RANGE's CURRENT ROW
+// means "through the end of this row's ORDER-BY peer group", so with an ORDER
+// BY this is the running frame — which is why LAST_VALUE with a bare ORDER BY
+// legitimately answers with the current row, and why that is NOT the bug in
+// #350. With no ORDER BY every row is a peer of every other, so the same
+// spec widens to the whole partition on its own.
+var defaultWindowFrame = WindowFrameSpec{
+	Mode:  "range",
+	Start: WindowBound{Type: "unbounded_preceding"},
+	End:   WindowBound{Type: "current_row"},
+}
+
+// frameSensitive reports whether the frame changes f's answer. The aggregates
+// and the three positional value functions read the frame; the rank family,
+// NTILE, PERCENT_RANK, CUME_DIST, LAG and LEAD are defined against the
+// partition and its ORDER BY and ignore it, which is why an engine can carry
+// a Frame field for years and pass its window tests.
+func frameSensitive(f WindowFunc) bool {
+	switch f {
+	case WinSum, WinCount, WinAvg, WinMin, WinMax, WinFirstValue, WinLastValue, WinNthValue:
+		return true
+	}
+	return false
+}
+
+// groupNeedsMaterializedFrame reports whether g asks for an EXPLICIT frame.
+//
+// The streaming empty-PARTITION-BY evaluator (window_global.go) resolves each
+// row from O(1) carried state plus a one-pass scan, which answers the default
+// frame and nothing else: a frame that reaches FORWARD (UNBOUNDED FOLLOWING,
+// `k FOLLOWING`) or whose lower end MOVES needs rows the stream has not
+// produced or has already dropped. Rather than answer such a query with the
+// default frame — the shape of #350 — the group falls back to the
+// partition-at-a-time walker, which materializes the partition and goes
+// through computePartitionColumnar like every other path.
+func groupNeedsMaterializedFrame(g windowSpecGroup) bool {
+	for _, wc := range g.cols {
+		if wc.Frame != nil && frameSensitive(wc.Func) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolvedFrame answers "which rows does row i see" for one partition, as a
+// half-open [lo, hi) range of PARTITION-RELATIVE indices. hi <= lo is an
+// empty frame, whose answer is NULL for every function.
+//
+// peerLo/peerHi are the ORDER-BY peer-group bounds each row belongs to, built
+// only in RANGE mode with an ORDER BY. Nil peer arrays mean "every row is a
+// peer" — the no-ORDER-BY case — which reads as [0, n).
+type resolvedFrame struct {
+	n      int
+	rows   bool // ROWS mode: bounds count rows. RANGE mode: bounds move by peer group.
+	start  WindowBound
+	end    WindowBound
+	peerLo []int32
+	peerHi []int32
+}
+
+// resolveFrame builds the frame for one partition. peerGroups is called only
+// when it is needed — RANGE mode with an ORDER BY — and must return, per row,
+// the half-open bounds of that row's peer group.
+func resolveFrame(wc WindowColumn, n int, hasOrderBy bool, peerGroups func() ([]int32, []int32)) resolvedFrame {
+	spec := defaultWindowFrame
+	if wc.Frame != nil {
+		spec = *wc.Frame
+	}
+	f := resolvedFrame{n: n, rows: spec.Mode == "rows", start: spec.Start, end: spec.End}
+	if !f.rows && hasOrderBy {
+		f.peerLo, f.peerHi = peerGroups()
+	}
+	return f
+}
+
+func (f resolvedFrame) peerLoAt(i int) int {
+	if f.peerLo == nil {
+		return 0
+	}
+	return int(f.peerLo[i])
+}
+
+func (f resolvedFrame) peerHiAt(i int) int {
+	if f.peerHi == nil {
+		return f.n
+	}
+	return int(f.peerHi[i])
+}
+
+// bounds returns the half-open row range row i sees, clamped to the
+// partition. hi <= lo means the frame is empty.
+//
+// RANGE mode with a VALUE offset (`RANGE BETWEEN 5 PRECEDING …`) never
+// reaches here: the parser rejects that spelling rather than answer it with
+// row offsets, which is a different query. The peer-bound fallbacks below
+// keep the switch total.
+func (f resolvedFrame) bounds(i int) (int, int) {
+	var lo int
+	switch f.start.Type {
+	case "unbounded_preceding":
+		lo = 0
+	case "preceding":
+		if f.rows {
+			lo = i - f.start.Offset
+		} else {
+			lo = f.peerLoAt(i)
+		}
+	case "current_row":
+		if f.rows {
+			lo = i
+		} else {
+			lo = f.peerLoAt(i)
+		}
+	case "following":
+		if f.rows {
+			lo = i + f.start.Offset
+		} else {
+			lo = f.peerHiAt(i)
+		}
+	case "unbounded_following":
+		lo = f.n
+	}
+
+	var hi int
+	switch f.end.Type {
+	case "unbounded_preceding":
+		hi = 0
+	case "preceding":
+		if f.rows {
+			hi = i - f.end.Offset + 1
+		} else {
+			hi = f.peerLoAt(i)
+		}
+	case "current_row":
+		if f.rows {
+			hi = i + 1
+		} else {
+			hi = f.peerHiAt(i)
+		}
+	case "following":
+		if f.rows {
+			hi = i + f.end.Offset + 1
+		} else {
+			hi = f.peerHiAt(i)
+		}
+	case "unbounded_following":
+		hi = f.n
+	}
+
+	// Clamp both ends into the partition. Clamping preserves the property
+	// every caller relies on — each end is non-decreasing in i — which is
+	// what lets the aggregates slide instead of rescanning.
+	lo = min(max(lo, 0), f.n)
+	hi = min(max(hi, 0), f.n)
+	return lo, hi
+}
+
+// columnarPeerGroups labels every row of a partition with its ORDER-BY peer
+// group. The partition is already sorted by the order keys, so peers are
+// contiguous and one linear pass finds them — the same walk WinCumeDist does.
+func columnarPeerGroups(combined *batch.RecordBatch, start, n int, orderIdxs []int) ([]int32, []int32) {
+	lo := make([]int32, n)
+	hi := make([]int32, n)
+	for i := 0; i < n; {
+		j := i + 1
+		for j < n && sameColumnar(combined, start+i, start+j, orderIdxs) {
+			j++
+		}
+		for k := i; k < j; k++ {
+			lo[k], hi[k] = int32(i), int32(j)
+		}
+		i = j
+	}
+	return lo, hi
+}
+
+// frameMinMaxDeque tracks the min (or max) of a sliding frame in amortized
+// O(1) per row. Frame bounds only ever move forward — every bound type is a
+// non-decreasing function of the row index — so a monotonic deque of
+// candidate indices is enough: values that can never win again are dropped on
+// arrival, and the front is evicted once it falls out of the frame.
+//
+// The alternative, rescanning the frame per row, is O(n·width): fine for `1
+// PRECEDING AND 1 FOLLOWING`, quadratic for a frame a user writes wide.
+type frameMinMaxDeque struct {
+	idx  []int
+	want int // -1 = keep minimum, +1 = keep maximum
+	get  func(i int) any
+	next int // next partition-relative row not yet pushed
+}
+
+func (d *frameMinMaxDeque) advance(lo, hi int) {
+	for ; d.next < hi; d.next++ {
+		v := d.get(d.next)
+		if v == nil {
+			continue // SQL MIN/MAX skip NULLs
+		}
+		for len(d.idx) > 0 {
+			back := d.get(d.idx[len(d.idx)-1])
+			if back != nil && compareAny(v, back)*d.want < 0 {
+				break
+			}
+			d.idx = d.idx[:len(d.idx)-1]
+		}
+		d.idx = append(d.idx, d.next)
+	}
+	for len(d.idx) > 0 && d.idx[0] < lo {
+		d.idx = d.idx[1:]
+	}
+}
+
+// value returns the extreme value over [lo, hi), or nil when the frame holds
+// no non-NULL value.
+func (d *frameMinMaxDeque) value(lo, hi int) any {
+	d.advance(lo, hi)
+	if len(d.idx) == 0 {
+		return nil
+	}
+	return d.get(d.idx[0])
+}
+
 // computePartitionColumnar computes the window function for a single partition.
 // Operates directly on column vectors rather than row maps.
 func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector, start, end int, wc WindowColumn, inputIdx int, orderIdxs []int) {
@@ -1066,6 +1306,15 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			// and partition-at-a-time path catching up.
 			return
 		}
+	}
+
+	// The frame-sensitive functions all read their rows from fr; the rest
+	// never build one.
+	var fr resolvedFrame
+	if frameSensitive(wc.Func) {
+		fr = resolveFrame(wc, n, len(orderIdxs) > 0, func() ([]int32, []int32) {
+			return columnarPeerGroups(combined, start, n, orderIdxs)
+		})
 	}
 
 	switch wc.Func {
@@ -1095,104 +1344,64 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			winVec.Nulls.SetValid(start + i)
 		}
 
+	// SUM and AVG slide one accumulator across the partition: the frame's
+	// ends only move forward, so each row is added once and removed once.
+	// With the default frame the lower end never moves, so nothing is ever
+	// subtracted and the arithmetic is the same running total, in the same
+	// order, that this branch computed before frames existed.
 	case WinSum:
-		if len(orderIdxs) > 0 {
-			var sum float64
-			for i := 0; i < n; i++ {
-				sum += vecFloat64(inputVec, start+i)
-				winVec.Float64Data[start+i] = sum
-				winVec.Nulls.SetValid(start + i)
+		var sum float64
+		curLo, curHi := 0, 0
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			curLo, curHi = slideFrameSum(inputVec, start, lo, hi, curLo, curHi, &sum)
+			if hi <= lo {
+				continue // empty frame: SUM is NULL, and winVec starts all-null
 			}
-		} else {
-			var sum float64
-			for i := 0; i < n; i++ {
-				sum += vecFloat64(inputVec, start+i)
-			}
-			for i := 0; i < n; i++ {
-				winVec.Float64Data[start+i] = sum
-				winVec.Nulls.SetValid(start + i)
-			}
+			winVec.Float64Data[start+i] = sum
+			winVec.Nulls.SetValid(start + i)
 		}
 
+	// COUNT is the one aggregate an empty frame does not make NULL: it
+	// counts the rows it can see, and seeing none is 0.
 	case WinCount:
-		if len(orderIdxs) > 0 {
-			var count int64
-			for i := 0; i < n; i++ {
-				count++
-				winVec.Int64Data[start+i] = count
-				winVec.Nulls.SetValid(start + i)
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			if hi < lo {
+				hi = lo
 			}
-		} else {
-			count := int64(n)
-			for i := 0; i < n; i++ {
-				winVec.Int64Data[start+i] = count
-				winVec.Nulls.SetValid(start + i)
-			}
+			winVec.Int64Data[start+i] = int64(hi - lo)
+			winVec.Nulls.SetValid(start + i)
 		}
 
 	case WinAvg:
-		if len(orderIdxs) > 0 {
-			var sum float64
-			for i := 0; i < n; i++ {
-				sum += vecFloat64(inputVec, start+i)
-				winVec.Float64Data[start+i] = sum / float64(i+1)
-				winVec.Nulls.SetValid(start + i)
+		var sum float64
+		curLo, curHi := 0, 0
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			curLo, curHi = slideFrameSum(inputVec, start, lo, hi, curLo, curHi, &sum)
+			if hi <= lo {
+				continue
 			}
-		} else {
-			var sum float64
-			for i := 0; i < n; i++ {
-				sum += vecFloat64(inputVec, start+i)
-			}
-			avg := sum / float64(n)
-			for i := 0; i < n; i++ {
-				winVec.Float64Data[start+i] = avg
-				winVec.Nulls.SetValid(start + i)
-			}
+			winVec.Float64Data[start+i] = sum / float64(hi-lo)
+			winVec.Nulls.SetValid(start + i)
 		}
 
-	case WinMin:
-		if len(orderIdxs) > 0 {
-			var minVal any
-			for i := 0; i < n; i++ {
-				v := inputVec.GetValue(start + i)
-				if minVal == nil || (v != nil && compareAny(v, minVal) < 0) {
-					minVal = v
-				}
-				winVec.SetValue(start+i, minVal)
-			}
-		} else {
-			var minVal any
-			for i := 0; i < n; i++ {
-				v := inputVec.GetValue(start + i)
-				if minVal == nil || (v != nil && compareAny(v, minVal) < 0) {
-					minVal = v
-				}
-			}
-			for i := 0; i < n; i++ {
-				winVec.SetValue(start+i, minVal)
-			}
+	case WinMin, WinMax:
+		want := -1
+		if wc.Func == WinMax {
+			want = 1
 		}
-
-	case WinMax:
-		if len(orderIdxs) > 0 {
-			var maxVal any
-			for i := 0; i < n; i++ {
-				v := inputVec.GetValue(start + i)
-				if maxVal == nil || (v != nil && compareAny(v, maxVal) > 0) {
-					maxVal = v
-				}
-				winVec.SetValue(start+i, maxVal)
+		d := &frameMinMaxDeque{want: want, get: func(i int) any { return inputVec.GetValue(start + i) }}
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			if hi < lo {
+				hi = lo
 			}
-		} else {
-			var maxVal any
-			for i := 0; i < n; i++ {
-				v := inputVec.GetValue(start + i)
-				if maxVal == nil || (v != nil && compareAny(v, maxVal) > 0) {
-					maxVal = v
-				}
-			}
-			for i := 0; i < n; i++ {
-				winVec.SetValue(start+i, maxVal)
+			if v := d.value(lo, hi); v != nil {
+				winVec.SetValue(start+i, v)
+			} else {
+				winVec.WriteNullAt(start + i)
 			}
 		}
 
@@ -1233,34 +1442,38 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			}
 		}
 
+	// The three value functions index into the FRAME, not the partition.
+	// Under the default frame that reproduces what they answered before —
+	// FIRST_VALUE the partition's first row, LAST_VALUE the current row —
+	// because the default frame's first row IS the partition's first and its
+	// last row IS the current row (or the last of its peer group). What
+	// changes is that an explicit frame is now obeyed: LAST_VALUE over
+	// UNBOUNDED FOLLOWING reaches the partition's end (#350).
 	case WinFirstValue:
-		if n > 0 {
-			first := inputVec.GetValue(start)
-			for i := 0; i < n; i++ {
-				if first != nil {
-					winVec.SetValue(start+i, first)
-				} else {
-					winVec.WriteNullAt(start + i)
-				}
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			var v any
+			if hi > lo {
+				v = inputVec.GetValue(start + lo)
+			}
+			if v != nil {
+				winVec.SetValue(start+i, v)
+			} else {
+				winVec.WriteNullAt(start + i)
 			}
 		}
 
 	case WinLastValue:
-		if len(orderIdxs) > 0 {
-			// With ORDER BY: running last value (current row's value)
-			for i := 0; i < n; i++ {
-				winVec.SetValue(start+i, inputVec.GetValue(start+i))
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			var v any
+			if hi > lo {
+				v = inputVec.GetValue(start + hi - 1)
 			}
-		} else {
-			if n > 0 {
-				last := inputVec.GetValue(start + n - 1)
-				for i := 0; i < n; i++ {
-					if last != nil {
-						winVec.SetValue(start+i, last)
-					} else {
-						winVec.WriteNullAt(start + i)
-					}
-				}
+			if v != nil {
+				winVec.SetValue(start+i, v)
+			} else {
+				winVec.WriteNullAt(start + i)
 			}
 		}
 
@@ -1328,21 +1541,39 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 		if nth <= 0 {
 			nth = 1
 		}
-		if nth <= n {
-			val := inputVec.GetValue(start + nth - 1)
-			for i := 0; i < n; i++ {
-				if val != nil {
-					winVec.SetValue(start+i, val)
-				} else {
-					winVec.WriteNullAt(start + i)
-				}
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			var v any
+			if pos := lo + nth - 1; pos < hi {
+				v = inputVec.GetValue(start + pos)
 			}
-		} else {
-			for i := 0; i < n; i++ {
+			if v != nil {
+				winVec.SetValue(start+i, v)
+			} else {
 				winVec.WriteNullAt(start + i)
 			}
 		}
 	}
+}
+
+// slideFrameSum advances a running sum from the frame [curLo, curHi) to the
+// frame [lo, hi) and returns the new position. Rows are added before any are
+// removed so the window never inverts on an empty frame (hi < lo), where the
+// rows added to reach lo are immediately subtracted again and the sum
+// correctly lands on zero.
+func slideFrameSum(inputVec *batch.Vector, start, lo, hi, curLo, curHi int, sum *float64) (int, int) {
+	if hi < lo {
+		hi = lo
+	}
+	for curHi < hi {
+		*sum += vecFloat64(inputVec, start+curHi)
+		curHi++
+	}
+	for curLo < lo {
+		*sum -= vecFloat64(inputVec, start+curLo)
+		curLo++
+	}
+	return curLo, curHi
 }
 
 // --- Row-oriented window computation (spill path) ---
@@ -1425,10 +1656,39 @@ func rowFloat64(row map[string]any, col string) float64 {
 	}
 }
 
+// rowPeerGroups labels every row of a partition with its ORDER-BY peer group,
+// the row-oriented twin of columnarPeerGroups.
+func rowPeerGroups(part []map[string]any, orderBy []SortKey) ([]int32, []int32) {
+	n := len(part)
+	lo := make([]int32, n)
+	hi := make([]int32, n)
+	for i := 0; i < n; {
+		j := i + 1
+		for j < n && sameOrderRows(part[i], part[j], orderBy) {
+			j++
+		}
+		for k := i; k < j; k++ {
+			lo[k], hi[k] = int32(i), int32(j)
+		}
+		i = j
+	}
+	return lo, hi
+}
+
 // computePartitionRowOriented computes a window function for one partition.
 func computePartitionRowOriented(part []map[string]any, wc WindowColumn) {
 	n := len(part)
 	outCol := wc.OutputCol
+
+	// Same frame resolution as computePartitionColumnar — the two paths owe
+	// the same answer, and the spill path silently disagreeing with the
+	// in-memory one is the failure mode nobody notices (#350).
+	var fr resolvedFrame
+	if frameSensitive(wc.Func) {
+		fr = resolveFrame(wc, n, len(wc.OrderBy) > 0, func() ([]int32, []int32) {
+			return rowPeerGroups(part, wc.OrderBy)
+		})
+	}
 
 	switch wc.Func {
 	case WinRowNumber:
@@ -1455,96 +1715,52 @@ func computePartitionRowOriented(part []map[string]any, wc WindowColumn) {
 		}
 
 	case WinSum:
-		if len(wc.OrderBy) > 0 {
-			var sum float64
-			for i := 0; i < n; i++ {
-				sum += rowFloat64(part[i], wc.InputCol)
-				part[i][outCol] = sum
+		var sum float64
+		curLo, curHi := 0, 0
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			curLo, curHi = slideRowSum(part, wc.InputCol, lo, hi, curLo, curHi, &sum)
+			if hi <= lo {
+				part[i][outCol] = nil
+				continue
 			}
-		} else {
-			var sum float64
-			for i := 0; i < n; i++ {
-				sum += rowFloat64(part[i], wc.InputCol)
-			}
-			for i := 0; i < n; i++ {
-				part[i][outCol] = sum
-			}
+			part[i][outCol] = sum
 		}
 
 	case WinCount:
-		if len(wc.OrderBy) > 0 {
-			for i := 0; i < n; i++ {
-				part[i][outCol] = int64(i + 1)
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			if hi < lo {
+				hi = lo
 			}
-		} else {
-			count := int64(n)
-			for i := 0; i < n; i++ {
-				part[i][outCol] = count
-			}
+			part[i][outCol] = int64(hi - lo)
 		}
 
 	case WinAvg:
-		if len(wc.OrderBy) > 0 {
-			var sum float64
-			for i := 0; i < n; i++ {
-				sum += rowFloat64(part[i], wc.InputCol)
-				part[i][outCol] = sum / float64(i+1)
+		var sum float64
+		curLo, curHi := 0, 0
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			curLo, curHi = slideRowSum(part, wc.InputCol, lo, hi, curLo, curHi, &sum)
+			if hi <= lo {
+				part[i][outCol] = nil
+				continue
 			}
-		} else {
-			var sum float64
-			for i := 0; i < n; i++ {
-				sum += rowFloat64(part[i], wc.InputCol)
-			}
-			avg := sum / float64(n)
-			for i := 0; i < n; i++ {
-				part[i][outCol] = avg
-			}
+			part[i][outCol] = sum / float64(hi-lo)
 		}
 
-	case WinMin:
-		if len(wc.OrderBy) > 0 {
-			var minVal any
-			for i := 0; i < n; i++ {
-				v := part[i][wc.InputCol]
-				if minVal == nil || (v != nil && compareAny(v, minVal) < 0) {
-					minVal = v
-				}
-				part[i][outCol] = minVal
-			}
-		} else {
-			var minVal any
-			for i := 0; i < n; i++ {
-				v := part[i][wc.InputCol]
-				if minVal == nil || (v != nil && compareAny(v, minVal) < 0) {
-					minVal = v
-				}
-			}
-			for i := 0; i < n; i++ {
-				part[i][outCol] = minVal
-			}
+	case WinMin, WinMax:
+		want := -1
+		if wc.Func == WinMax {
+			want = 1
 		}
-
-	case WinMax:
-		if len(wc.OrderBy) > 0 {
-			var maxVal any
-			for i := 0; i < n; i++ {
-				v := part[i][wc.InputCol]
-				if maxVal == nil || (v != nil && compareAny(v, maxVal) > 0) {
-					maxVal = v
-				}
-				part[i][outCol] = maxVal
+		d := &frameMinMaxDeque{want: want, get: func(i int) any { return part[i][wc.InputCol] }}
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			if hi < lo {
+				hi = lo
 			}
-		} else {
-			var maxVal any
-			for i := 0; i < n; i++ {
-				v := part[i][wc.InputCol]
-				if maxVal == nil || (v != nil && compareAny(v, maxVal) > 0) {
-					maxVal = v
-				}
-			}
-			for i := 0; i < n; i++ {
-				part[i][outCol] = maxVal
-			}
+			part[i][outCol] = d.value(lo, hi)
 		}
 
 	case WinLag:
@@ -1574,23 +1790,23 @@ func computePartitionRowOriented(part []map[string]any, wc WindowColumn) {
 		}
 
 	case WinFirstValue:
-		if n > 0 {
-			first := part[0][wc.InputCol]
-			for i := 0; i < n; i++ {
-				part[i][outCol] = first
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			if hi <= lo {
+				part[i][outCol] = nil
+				continue
 			}
+			part[i][outCol] = part[lo][wc.InputCol]
 		}
 
 	case WinLastValue:
-		if len(wc.OrderBy) > 0 {
-			for i := 0; i < n; i++ {
-				part[i][outCol] = part[i][wc.InputCol]
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			if hi <= lo {
+				part[i][outCol] = nil
+				continue
 			}
-		} else if n > 0 {
-			last := part[n-1][wc.InputCol]
-			for i := 0; i < n; i++ {
-				part[i][outCol] = last
-			}
+			part[i][outCol] = part[hi-1][wc.InputCol]
 		}
 
 	case WinNtile:
@@ -1653,11 +1869,29 @@ func computePartitionRowOriented(part []map[string]any, wc WindowColumn) {
 		if nth <= 0 {
 			nth = 1
 		}
-		if nth <= n {
-			val := part[nth-1][wc.InputCol]
-			for i := 0; i < n; i++ {
-				part[i][outCol] = val
+		for i := 0; i < n; i++ {
+			lo, hi := fr.bounds(i)
+			if pos := lo + nth - 1; pos < hi {
+				part[i][outCol] = part[pos][wc.InputCol]
+			} else {
+				part[i][outCol] = nil
 			}
 		}
 	}
+}
+
+// slideRowSum is slideFrameSum over row maps.
+func slideRowSum(part []map[string]any, inputCol string, lo, hi, curLo, curHi int, sum *float64) (int, int) {
+	if hi < lo {
+		hi = lo
+	}
+	for curHi < hi {
+		*sum += rowFloat64(part[curHi], inputCol)
+		curHi++
+	}
+	for curLo < lo {
+		*sum -= rowFloat64(part[curLo], inputCol)
+		curLo++
+	}
+	return curLo, curHi
 }

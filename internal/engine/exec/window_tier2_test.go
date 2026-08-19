@@ -166,10 +166,19 @@ func TestWindowNthValue(t *testing.T) {
 	b, _ := win.Next(ctx)
 	result := b.ToRows()
 
-	// All rows should have the 2nd value (20.0)
+	// NTH_VALUE reads the FRAME. With an ORDER BY and no explicit frame the
+	// frame is RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, so row 0
+	// sees one row and has no second one: NULL, then 20.0 once the frame is
+	// wide enough. This test asserted 20.0 everywhere while the engine
+	// evaluated NTH_VALUE over the whole partition regardless of frame
+	// (#350); DuckDB returns NULL for row 0.
+	want := []any{nil, 20.0, 20.0}
+	if len(result) != len(want) {
+		t.Fatalf("got %d rows, want %d", len(result), len(want))
+	}
 	for i, row := range result {
-		if row["second_val"] != 20.0 {
-			t.Errorf("row %d: nth_value=%v, want 20.0", i, row["second_val"])
+		if row["second_val"] != want[i] {
+			t.Errorf("row %d: nth_value=%v, want %v", i, row["second_val"], want[i])
 		}
 	}
 }
