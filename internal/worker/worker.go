@@ -12,9 +12,11 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/dataplane"
@@ -297,6 +299,7 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	if cfg.CacheBytes <= 0 {
 		cfg.CacheBytes = 256 * 1024 * 1024
 	}
+	cfg.SpillDir = resolveScratchDir(cfg.SpillDir, logger)
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -504,6 +507,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	// in-flight reader/writer would be holding an open fd into them.
 	if w.config.SpillDir != "" {
 		w.sweepStaleBuildCacheFiles()
+		w.sweepAbandonedScratchRoots()
 	}
 
 	// Filter subject is computed even in gRPC mode purely for the startup
@@ -1401,6 +1405,11 @@ func (w *Worker) sweepStaleBuildCacheFiles() {
 		//   build-cache-load-*.wshf  — read-side mmap source download
 		//   parquet-stream-*.parquet — read-side parquet mmap download
 		//   shuffle-<taskID>/        — partitioned shuffle sink output dirs
+		//   stage-<taskID>/          — fragment/stage operator scratch. Its
+		//     owning task RemoveAll's it, but a worker killed hard never
+		//     runs that defer; this is the only path that reclaims those.
+		//     "stage-cache" is the LocalStageCache root, not a task dir —
+		//     it manages its own lifetime and must survive.
 		//   wadjet-spill/            — SpillManager operator scratch (sort
 		//     runs, merge intermediates, window passes, join/agg spills);
 		//     normally deleted by the owning operator, but error paths can
@@ -1418,6 +1427,7 @@ func (w *Worker) sweepStaleBuildCacheFiles() {
 		case !isDir && strings.HasPrefix(name, "build-cache-") && strings.HasSuffix(name, ".wshf"):
 		case !isDir && strings.HasPrefix(name, "parquet-stream-") && strings.HasSuffix(name, ".parquet"):
 		case isDir && strings.HasPrefix(name, "shuffle-"):
+		case isDir && strings.HasPrefix(name, "stage-") && name != "stage-cache":
 		default:
 			continue
 		}
@@ -1436,6 +1446,99 @@ func (w *Worker) sweepStaleBuildCacheFiles() {
 		w.logger.Info("swept stale spill artifacts",
 			"dir", dir, "items", removed, "bytes_freed", bytesFreed)
 	}
+}
+
+// resolveScratchDir returns the directory a worker writes scratch into,
+// creating a per-process one under the system temp dir when the operator
+// configured none.
+//
+// Scratch used to default to the shared temp dir, where it could be neither
+// swept nor attributed: a worker killed hard (OOM kill, kill -9) never runs
+// the deferred cleanup on its stage directories — a 98 GB orphan filled a dev
+// box this way — and no later process could tell those from a LIVE worker's,
+// because every process wrote into the same directory. Owning a subdirectory
+// named for the pid makes an orphan attributable, which is what lets
+// sweepAbandonedScratchRoots reclaim it safely.
+//
+// A configured directory is returned unchanged: the operator picked it, often
+// a dedicated NVMe volume.
+func resolveScratchDir(configured string, logger *slog.Logger) string {
+	if configured != "" {
+		return configured
+	}
+	dir := filepath.Join(os.TempDir(), fmt.Sprintf("%s%d", scratchRootPrefix, os.Getpid()))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		// Fall back to the old shared-dir behavior rather than refusing to
+		// start: scratch placement is a hygiene concern, not a correctness
+		// one, and every writer already falls back to os.TempDir().
+		logger.Warn("creating worker scratch dir, falling back to the shared temp dir",
+			"dir", dir, "error", err)
+		return ""
+	}
+	return dir
+}
+
+// scratchRootPrefix names the per-process scratch directory a worker creates
+// under the system temp dir when no SpillDir is configured. The pid suffix is
+// what makes an abandoned directory attributable.
+const scratchRootPrefix = "wadjet-worker-"
+
+// sweepAbandonedScratchRoots removes per-process scratch roots left behind by
+// workers that are no longer running. A worker killed hard cannot run its own
+// cleanup, so without this the directories accumulate until the disk fills.
+//
+// Ownership is decided by asking the operating system whether the pid in the
+// name is still alive, not by age: a directory whose owner is running may be
+// receiving writes RIGHT NOW, and deleting it would break that worker's
+// query. Every uncertain case — unparseable name, pid still alive, signal
+// refused — leaves the directory alone, so the failure mode is a directory
+// that outlives its owner rather than one deleted from under a live worker.
+func (w *Worker) sweepAbandonedScratchRoots() {
+	root := os.TempDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	self := os.Getpid()
+	var removed int
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), scratchRootPrefix) {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimPrefix(e.Name(), scratchRootPrefix))
+		if err != nil || pid <= 0 || pid == self {
+			continue
+		}
+		if processAlive(pid) {
+			continue
+		}
+		full := filepath.Join(root, e.Name())
+		if rmErr := os.RemoveAll(full); rmErr != nil {
+			w.logger.Warn("removing abandoned worker scratch root", "path", full, "error", rmErr)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		w.logger.Info("swept abandoned worker scratch roots", "dir", root, "roots", removed)
+	}
+}
+
+// processAlive reports whether a process with this pid exists. Signal 0
+// performs the permission and existence checks without delivering anything.
+// A process owned by another user answers EPERM, which is still proof it
+// EXISTS — the conservative reading, and the one that keeps this from
+// deleting a live worker's scratch.
+func processAlive(pid int) bool {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = p.Signal(syscall.Signal(0))
+	if err == nil {
+		return true
+	}
+	return errors.Is(err, os.ErrPermission)
 }
 
 // sweepDirContents removes every entry inside dir (keeping dir itself) and
