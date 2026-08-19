@@ -33,6 +33,45 @@
       "limit": 7,
       "why": "a LIMIT with no ORDER BY picks arbitrary rows by definition"
     },
+    "CorrOverJoin": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "c"
+      ],
+      "fine": "0204a38b568c646e",
+      "coarse": "81568273d4bb7fd3"
+    },
+    "CovarianceFamily": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c",
+        "cs",
+        "cp"
+      ],
+      "fine": "719b01197e7fe051",
+      "coarse": "dcd3d8a1fc91fae9"
+    },
+    "CovarianceGrouped": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "c",
+        "cp",
+        "n"
+      ],
+      "fine": "55496c76d91900eb",
+      "coarse": "08123f656f6b3dc0"
+    },
     "CrossTableEqualityFilter": {
       "source": "duckdb",
       "row_count": 1,
@@ -352,6 +391,130 @@
       ],
       "fine": "c1f5358e908e5d30",
       "coarse": "c1f5358e908e5d30"
+    },
+    "MedianGrouped": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "m",
+        "n"
+      ],
+      "fine": "7d9d03764c942255",
+      "coarse": "b3bb53fcbb13435b"
+    },
+    "MedianOverJoin": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "m",
+        "cheapest",
+        "n"
+      ],
+      "fine": "3dc0e18bd92dc529",
+      "coarse": "f44c0c01ca2209c3"
+    },
+    "MedianUngrouped": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "m"
+      ],
+      "fine": "0478d4040c4a02ab",
+      "coarse": "4cc2c63aa167a271"
+    },
+    "MedianWithHaving": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "m"
+      ],
+      "fine": "c2f940882cc01ed8",
+      "coarse": "62b346e081fbefef"
+    },
+    "MinByMaxBy": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "mn",
+        "mx"
+      ],
+      "fine": "8b4ee054578ee19b",
+      "coarse": "8b4ee054578ee19b"
+    },
+    "MinByMaxByGrouped": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "mn",
+        "mx"
+      ],
+      "fine": "a50ccf93b103d142",
+      "coarse": "a50ccf93b103d142"
+    },
+    "MinByMaxByTie": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "mn",
+        "mx",
+        "n"
+      ],
+      "fine": "7edef1e368d2538f",
+      "coarse": "7edef1e368d2538f"
+    },
+    "ModeGrouped": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "m",
+        "n"
+      ],
+      "fine": "9e00046352af5bd2",
+      "coarse": "9e00046352af5bd2"
+    },
+    "ModeNumeric": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "m"
+      ],
+      "fine": "4355a46b19d348dc",
+      "coarse": "4355a46b19d348dc"
+    },
+    "ModeString": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "m"
+      ],
+      "fine": "4ea49ce99b803b6c",
+      "coarse": "4ea49ce99b803b6c"
     },
     "NullAggregatesSkipNulls": {
       "source": "duckdb",
@@ -721,6 +884,32 @@
       ],
       "fine": "1e58f51ccd9d9e2b",
       "coarse": "1e58f51ccd9d9e2b"
+    },
+    "PercentileGrouped": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "p75",
+        "d25"
+      ],
+      "fine": "c3c4c86f913a33ae",
+      "coarse": "43ae80b7cb43e7d9"
+    },
+    "PercentileUngrouped": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "p90",
+        "d90",
+        "p10"
+      ],
+      "fine": "18cdc5132952bc55",
+      "coarse": "060f183f1706c291"
     },
     "PolymorphicOverFloatColumns": {
       "source": "duckdb",
@@ -1183,6 +1372,30 @@
       ],
       "fine": "c2a596d1f729fee8",
       "coarse": "e2012d9534d82687"
+    },
+    "StringAggGrouped": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "s",
+        "n"
+      ],
+      "fine": "1620cbd22f2d120e",
+      "coarse": "1620cbd22f2d120e"
+    },
+    "StringAggSeparatorLength": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "808e0925ecaf2edd",
+      "coarse": "808e0925ecaf2edd"
     },
     "UnionAllOrderByOrdinal": {
       "source": "duckdb",

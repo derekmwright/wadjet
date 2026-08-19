@@ -80,15 +80,30 @@ func newCappedPartialAggPartitioned(keys []string, specs []distributed.AggSpec, 
 		capBytes = defaultPartialAggCapBytes
 	}
 	aggs := make([]exec.AggColumn, len(specs))
+	unknown := false
 	for i, s := range specs {
+		fn, known := parseAggFuncString(s.Func)
+		if !known {
+			// This operator is an optimization — pre-combining rows in the
+			// shuffle sender — so an unrecognized function means "don't",
+			// not "sum it instead" (#353). markExchangePartialAgg only
+			// marks bare SUM/MIN/MAX today, so this is belt-and-braces.
+			unknown = true
+		}
 		aggs[i] = exec.AggColumn{
-			Func:       parseAggFuncString(s.Func),
+			Func:       fn,
 			InputCol:   s.InputCol,
+			InputCol2:  s.InputCol2,
+			Separator:  s.Separator,
+			Percentile: s.Percentile,
 			OutputCol:  s.OutputCol,
 			OutputType: aggSpecOutputType(s),
 		}
 	}
-	return &cappedPartialAgg{groupBy: keys, aggs: aggs, capBytes: capBytes, partitionKeys: partitionKeys}
+	return &cappedPartialAgg{
+		groupBy: keys, aggs: aggs, capBytes: capBytes, partitionKeys: partitionKeys,
+		resolved: unknown, disabled: unknown,
+	}
 }
 
 // resolveAgainst intersects the configured keys/specs with the actual

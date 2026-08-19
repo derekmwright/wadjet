@@ -157,7 +157,7 @@ type LiteralPlaceholder struct {
 	Name string
 }
 
-func (*LiteralPlaceholder) nodeTag() {}
+func (*LiteralPlaceholder) nodeTag()         {}
 func (l *LiteralPlaceholder) String() string { return ":" + l.Name }
 
 // StarNode represents * or table.* in SELECT.
@@ -550,20 +550,20 @@ func (n *WindowFuncNode) String() string {
 
 // knownAggregates is the set of standard aggregate function names.
 var knownAggregates = map[string]bool{
-	"sum":        true,
-	"count":      true,
-	"avg":        true,
-	"min":        true,
-	"max":        true,
-	"grouping":   true,
-	"string_agg": true,
-	"bool_and":   true,
-	"bool_or":    true,
-	"every":      true,
-	"stddev":     true,
-	"stddev_samp": true,
-	"stddev_pop": true,
-	"variance":   true,
+	"sum":             true,
+	"count":           true,
+	"avg":             true,
+	"min":             true,
+	"max":             true,
+	"grouping":        true,
+	"string_agg":      true,
+	"bool_and":        true,
+	"bool_or":         true,
+	"every":           true,
+	"stddev":          true,
+	"stddev_samp":     true,
+	"stddev_pop":      true,
+	"variance":        true,
 	"var_samp":        true,
 	"var_pop":         true,
 	"approx_distinct": true,
@@ -572,10 +572,18 @@ var knownAggregates = map[string]bool{
 	"covar_pop":       true,
 	"percentile_cont": true,
 	"percentile_disc": true,
-	"mode":            true,
-	"min_by":          true,
-	"max_by":          true,
-	"median":          true,
+	// quantile_cont / quantile_disc are DuckDB's spelling of the same two
+	// functions with the arguments the other way round — (column,
+	// fraction). Accepted so the same SQL text runs on both engines, which
+	// is what lets the DuckDB ground-truth gate cover the percentile family
+	// at all: DuckDB's percentile_cont is ordered-set syntax
+	// (WITHIN GROUP), which this parser does not accept.
+	"quantile_cont": true,
+	"quantile_disc": true,
+	"mode":          true,
+	"min_by":        true,
+	"max_by":        true,
+	"median":        true,
 }
 
 // IsAggregate returns true if the function name is a known aggregate.

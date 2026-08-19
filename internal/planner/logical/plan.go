@@ -231,6 +231,18 @@ type AggExpr struct {
 	OutputCol string
 	Distinct  bool         // COUNT(DISTINCT col)
 	InputExpr plansql.Node // AST for aggregate argument (nil for simple column refs)
+	// InputCol2, Separator and Percentile hold the arguments after the
+	// first, for the functions that take more than one: the second column
+	// of CORR/COVAR_SAMP/COVAR_POP and the ordering column of
+	// MIN_BY/MAX_BY, STRING_AGG's separator literal, and
+	// PERCENTILE_CONT/PERCENTILE_DISC's fraction. See parseAggExtraArgs.
+	//
+	// InputCol stays a single column name throughout: column pruning and
+	// requiredColumns read it as one, and InputCol2 is registered beside
+	// it rather than packed into the same string.
+	InputCol2  string
+	Separator  string
+	Percentile float64
 }
 
 // WindowFrameSpec describes a window frame specification.

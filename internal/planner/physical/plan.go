@@ -421,6 +421,16 @@ type AggSpec struct {
 	// place: MAX(COALESCE(a, b)) over two string columns wrote strings
 	// into a Float64 vector and the aggregate saw zeros.
 	InputType parquet.TypeID
+	// InputCol2, Separator and Percentile carry the aggregate arguments
+	// past the first one — the second column of CORR/COVAR_*/MIN_BY/MAX_BY,
+	// STRING_AGG's delimiter, PERCENTILE_CONT/DISC's fraction. They are
+	// mirrored onto distributed.AggSpec at dispatch. Before #353 nothing
+	// carried them at all: the parser kept only Args[0], so MIN_BY had no
+	// ordering column and answered NULL, STRING_AGG ignored the separator
+	// the query asked for, and PERCENTILE_CONT read its fraction as 0.
+	InputCol2  string
+	Separator  string
+	Percentile float64
 }
 
 // SortKeySpec defines a sort key in a stage.
@@ -4018,6 +4028,9 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				InputCol:   agg.InputCol,
 				OutputCol:  agg.OutputCol,
 				OutputType: aggSpecOutputType(node, agg),
+				InputCol2:  agg.InputCol2,
+				Separator:  agg.Separator,
+				Percentile: agg.Percentile,
 			}
 			// DISTINCT rides the canonical Func string the worker already
 			// maps to exec.AggCountDistinct (#291: the flag used to be
@@ -4066,7 +4079,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// exact by construction (grouped finals declare clustering on the
 		// group keys, so the distribution pass hash-partitions raw input
 		// into disjoint groups; ungrouped finals collapse to Singleton).
-		if hasDistinctAgg {
+		//
+		// MEDIAN, PERCENTILE_*, MODE, MIN_BY/MAX_BY and STRING_AGG take the
+		// same route for the same reason and at the same cost — none of
+		// them is a valid input to itself, and none has a bounded summary
+		// that merges (agg_whole_input.go, #353).
+		if hasDistinctAgg || anyAggNeedsWholeInput(aggSpecs) {
 			finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
 			*stages = append(*stages, Stage{
 				ID:                finalStageID,
@@ -6495,35 +6513,19 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		if outType == 0 {
 			outType = aggOutputType(agg.Func, agg.Distinct)
 		}
+		// The arguments past the first arrive as their own fields
+		// (logical/agg_extra_args.go). They used to be recovered by
+		// splitting InputCol on a comma, which only worked if something
+		// had packed them there — nothing had, because the SELECT parser
+		// dropped every argument after the first (#353).
 		ac := exec.AggColumn{
 			Func:       fn,
 			InputCol:   inputCol,
+			InputCol2:  agg.InputCol2,
+			Separator:  agg.Separator,
+			Percentile: agg.Percentile,
 			OutputCol:  agg.OutputCol,
 			OutputType: outType,
-		}
-		// Parse STRING_AGG separator from InputCol (format: "col, 'sep'")
-		if fn == exec.AggStringAgg && strings.Contains(inputCol, ",") {
-			parts := strings.SplitN(inputCol, ",", 2)
-			ac.InputCol = strings.TrimSpace(parts[0])
-			sep := strings.TrimSpace(parts[1])
-			sep = strings.Trim(sep, "'\"")
-			ac.Separator = sep
-		}
-		// Parse two-column aggregates (format: "col1, col2")
-		if (fn == exec.AggCorr || fn == exec.AggCovarSamp || fn == exec.AggCovarPop ||
-			fn == exec.AggMinBy || fn == exec.AggMaxBy) && strings.Contains(inputCol, ",") {
-			parts := strings.SplitN(inputCol, ",", 2)
-			ac.InputCol = strings.TrimSpace(parts[0])
-			ac.InputCol2 = strings.TrimSpace(parts[1])
-		}
-		// Parse percentile value (format: "percentile, col") — e.g., percentile_cont(0.5, amount)
-		if (fn == exec.AggPercentileCont || fn == exec.AggPercentileDisc) && strings.Contains(inputCol, ",") {
-			parts := strings.SplitN(inputCol, ",", 2)
-			pctStr := strings.TrimSpace(parts[0])
-			if pv, err := strconv.ParseFloat(pctStr, 64); err == nil {
-				ac.Percentile = pv
-				ac.InputCol = strings.TrimSpace(parts[1])
-			}
 		}
 		aggCols = append(aggCols, ac)
 	}
@@ -8918,9 +8920,9 @@ func parseAggFunc(s string) exec.AggFunc {
 		return exec.AggCovarSamp
 	case "covar_pop":
 		return exec.AggCovarPop
-	case "percentile_cont":
+	case "percentile_cont", "quantile_cont":
 		return exec.AggPercentileCont
-	case "percentile_disc":
+	case "percentile_disc", "quantile_disc":
 		return exec.AggPercentileDisc
 	case "mode":
 		return exec.AggMode
@@ -9126,15 +9128,18 @@ func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 // aggOutputType alone is exact, and it is the same declaration the
 // single-process pipeline compiles into exec.AggColumn.OutputType.
 //
-// MIN/MAX are the exception: their output IS their input's type, which
-// exec.HashAggregate resolves from the vector it observes at Consume. To
-// declare the same thing at plan time the input column has to resolve to a
-// catalog type, so this walks the aggregate's inputs for it and returns 0 —
-// undeclared — when it cannot: a derived-expression argument, a column no
-// scan below carries, or two scans carrying it at different types.
+// MIN/MAX are the exception, and MIN_BY/MAX_BY with them: their output IS
+// their (first) input's type, which exec.HashAggregate resolves from the
+// vector it observes at Consume. To declare the same thing at plan time the
+// input column has to resolve to a catalog type, so this walks the
+// aggregate's inputs for it and returns 0 — undeclared — when it cannot: a
+// derived-expression argument, a column no scan below carries, or two scans
+// carrying it at different types.
 func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) parquet.TypeID {
 	fn := strings.ToLower(strings.TrimSpace(agg.Func))
-	if fn != "min" && fn != "max" {
+	switch fn {
+	case "min", "max", "min_by", "max_by":
+	default:
 		return aggOutputType(agg.Func, agg.Distinct)
 	}
 	if agg.InputExpr != nil {

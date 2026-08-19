@@ -1969,11 +1969,12 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 			}
 		}
 		// Partial-state fold, FINAL stage only: __avg_sum#X / __avg_count#X
-		// collapse into the single AVG column X, and __var_state#kind#X
-		// (the STDDEV/VARIANCE (count, mean, M2) triple) into X. Both
-		// synthetics have to survive intermediate merge_aggregate stages
-		// intact, which is what spec.FoldAvg gates. Wrap the slice-taking
-		// helpers as one per-batch transform.
+		// collapse into the single AVG column X, __var_state#kind#X (the
+		// STDDEV/VARIANCE (count, mean, M2) triple) into X, and
+		// __covar_state#kind#X (the CORR/COVAR sextuple) into X. Every one
+		// of those synthetics has to survive intermediate merge_aggregate
+		// stages intact, which is what spec.FoldAvg gates. Wrap the
+		// slice-taking helpers as one per-batch transform.
 		if spec.FoldAvg {
 			fb.DrainXform = func(b *batch.RecordBatch) (*batch.RecordBatch, error) {
 				folded, ferr := applyAvgFold([]*batch.RecordBatch{b})
@@ -1981,6 +1982,10 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 					return nil, ferr
 				}
 				folded, ferr = applyVarFold(folded)
+				if ferr != nil {
+					return nil, ferr
+				}
+				folded, ferr = applyCovarFold(folded)
 				if ferr != nil {
 					return nil, ferr
 				}
@@ -2223,7 +2228,13 @@ func (e *Executor) buildFragmentHashAggregate(spec distributed.OpSpec) (*exec.Ha
 	aggCols := make([]exec.AggColumn, len(spec.Aggregates))
 	for i, a := range spec.Aggregates {
 		inputCol := a.InputCol
-		fn := parseAggFuncString(a.Func)
+		fn, known := parseAggFuncString(a.Func)
+		if !known {
+			// Refusing is the point: the old default was AggSum, so an
+			// aggregate this worker had no case for answered with the sum
+			// of its input and nothing said a word (#353).
+			return nil, fmt.Errorf("hash_aggregate: unknown aggregate function %q for output column %q", a.Func, a.OutputCol)
+		}
 		if spec.MergeMode {
 			if a.OutputCol != "" {
 				inputCol = a.OutputCol
@@ -2238,10 +2249,16 @@ func (e *Executor) buildFragmentHashAggregate(spec distributed.OpSpec) (*exec.Ha
 			if fn == exec.AggVarState {
 				fn = exec.AggVarStateMerge
 			}
+			if fn == exec.AggCovarState {
+				fn = exec.AggCovarStateMerge
+			}
 		}
 		aggCols[i] = exec.AggColumn{
 			Func:       fn,
 			InputCol:   inputCol,
+			InputCol2:  a.InputCol2,
+			Separator:  a.Separator,
+			Percentile: a.Percentile,
 			OutputCol:  a.OutputCol,
 			OutputType: aggSpecOutputType(a),
 		}

@@ -96,7 +96,7 @@ func TestApplyVarFoldPassThrough(t *testing.T) {
 		t.Error("a batch with no state column should be returned as-is")
 	}
 
-	if cols := findVarFoldCols([]parquet.Column{{Name: varStatePrefix + "nokind", Type: parquet.TypeString}}); len(cols) != 0 {
+	if cols := findStateFoldCols([]parquet.Column{{Name: varStatePrefix + "nokind", Type: parquet.TypeString}}, varStatePrefix); len(cols) != 0 {
 		t.Errorf("a synthetic name with no kind separator was folded anyway: %+v", cols)
 	}
 }

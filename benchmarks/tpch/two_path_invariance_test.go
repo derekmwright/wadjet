@@ -2076,6 +2076,181 @@ func twoPathCorpus() []twoPathQuery {
 				WHERE a.r_regionkey < b.n_nationkey AND b.n_nationkey < 3 ORDER BY a.r_name, b.n_name`,
 			wantRows: 3, wantCols: []string{"r_name", "n_name"}},
 	)
+
+	// #353: the rest of the aggregates that hold extraState — the residual
+	// #339 left behind. Two different defects, one per group.
+	//
+	//	CORR/COVAR_*  decompose exactly, like the variance family, and now
+	//	              ship their (count, meanX, meanY, C, M2x, M2y) sextuple
+	//	              across the wire (covar_decompose.go).
+	//	MEDIAN, PERCENTILE_*, MODE, MIN_BY/MAX_BY, STRING_AGG
+	//	              do not decompose at all, and are gated to a
+	//	              RawInputAggregate final: one task per group
+	//	              (agg_whole_input.go).
+	//
+	// Every entry carries an assertA computed here from the fixture, because
+	// the two arms AGREEING is not the property that matters: before the
+	// fix, MODE and MIN_BY agreed on NULL and STRING_AGG agreed on the wrong
+	// separator. Arm B additionally answered most of these with the SUM of
+	// their first argument, which is what the worker's `default: AggSum`
+	// does to a function name it has no case for.
+	out = append(out,
+		twoPathQuery{name: "CorrCovarFamily", cmp: cmpUnordered,
+			sql: `SELECT CORR(o_totalprice, o_custkey) AS c, COVAR_SAMP(o_totalprice, o_custkey) AS cs,
+				COVAR_POP(o_totalprice, o_custkey) AS cp FROM orders`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				xs := sf001Column(tb, "orders", "o_totalprice")
+				ys := sf001Column(tb, "orders", "o_custkey")
+				corr, cs, cp := covarReference(xs, ys)
+				assertClose(tb, rows[0], "c", corr, "CORR")
+				assertClose(tb, rows[0], "cs", cs, "COVAR_SAMP")
+				assertClose(tb, rows[0], "cp", cp, "COVAR_POP")
+			}},
+		// Grouped, so states combine per key rather than into one global
+		// accumulator — the shape a distributed shuffle produces.
+		twoPathQuery{name: "CorrGrouped", cmp: cmpOrdered,
+			sql: `SELECT o_orderstatus AS k, CORR(o_totalprice, o_custkey) AS c
+				FROM orders GROUP BY o_orderstatus ORDER BY k`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				byKey := map[string][2][]float64{}
+				for _, r := range sf001Table(tb, "orders") {
+					k := fmt.Sprint(r["o_orderstatus"])
+					cur := byKey[k]
+					byKey[k] = [2][]float64{
+						append(cur[0], toFloat(r["o_totalprice"])),
+						append(cur[1], toFloat(r["o_custkey"])),
+					}
+				}
+				if len(rows) != len(byKey) {
+					tb.Fatalf("%d groups, fixture has %d", len(rows), len(byKey))
+				}
+				for _, r := range rows {
+					k := cellText(r, "k")
+					pair, ok := byKey[k]
+					if !ok {
+						tb.Errorf("result carries group %q, which the fixture does not", k)
+						continue
+					}
+					corr, _, _ := covarReference(pair[0], pair[1])
+					assertClose(tb, r, "c", corr, "CORR group "+k)
+				}
+			}},
+		// CORR over one row is NULL (it needs two), and CORR of a column
+		// with itself is exactly 1 — a value no accumulation-order
+		// difference can drift off.
+		twoPathQuery{name: "CorrDegenerate", cmp: cmpUnordered,
+			sql: `SELECT CORR(o_totalprice, o_totalprice) AS self,
+				COVAR_POP(o_totalprice, o_custkey) AS cp FROM orders WHERE o_orderkey = 1`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				if v, _ := lookupCell(rows[0], "self"); v != nil {
+					tb.Errorf("CORR over one row = %v, want NULL", v)
+				}
+				if v, _ := lookupCell(rows[0], "cp"); v == nil || cellNum(rows[0], "cp") != 0 {
+					tb.Errorf("COVAR_POP over one row = %v, want 0", v)
+				}
+			}},
+		twoPathQuery{name: "MedianUngrouped", cmp: cmpUnordered,
+			sql: "SELECT MEDIAN(o_totalprice) AS m FROM orders",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				want := quantileReference(sf001Column(tb, "orders", "o_totalprice"), 0.5)
+				assertClose(tb, rows[0], "m", want, "MEDIAN")
+			}},
+		twoPathQuery{name: "PercentileFamily", cmp: cmpUnordered,
+			sql: `SELECT PERCENTILE_CONT(0.9, o_totalprice) AS p90,
+				quantile_cont(o_totalprice, 0.9) AS q90 FROM orders`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				want := quantileReference(sf001Column(tb, "orders", "o_totalprice"), 0.9)
+				assertClose(tb, rows[0], "p90", want, "PERCENTILE_CONT(0.9)")
+				// The two spellings are the same function with the
+				// arguments the other way round, so they must not differ.
+				assertClose(tb, rows[0], "q90", want, "quantile_cont(0.9)")
+			}},
+		// MODE over l_linenumber: the winner (1, on every order's first
+		// line) beats the runner-up by thousands, so no tie decides it.
+		twoPathQuery{name: "ModeNumeric", cmp: cmpUnordered,
+			sql: "SELECT MODE(l_linenumber) AS m FROM lineitem",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				want := modeReference(sf001Column(tb, "lineitem", "l_linenumber"))
+				if got := cellNum(rows[0], "m"); got != want {
+					tb.Errorf("MODE(l_linenumber) = %v, want %v (most frequent value over the fixture)", got, want)
+				}
+			}},
+		twoPathQuery{name: "MinByMaxBy", cmp: cmpUnordered,
+			sql: `SELECT MIN_BY(o_orderpriority, o_totalprice) AS mn,
+				MAX_BY(o_orderpriority, o_totalprice) AS mx FROM orders`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				lo, hi := argMinMaxReference(tb, "orders", "o_orderpriority", "o_totalprice")
+				if got := cellText(rows[0], "mn"); got != lo {
+					tb.Errorf("MIN_BY = %q, want %q (the priority on the cheapest order)", got, lo)
+				}
+				if got := cellText(rows[0], "mx"); got != hi {
+					tb.Errorf("MAX_BY = %q, want %q (the priority on the dearest order)", got, hi)
+				}
+			}},
+		// The deliberate tie: o_shippriority is 0 on all 15000 rows, so
+		// every row is tied for both extremes and each partial holds a
+		// different candidate. The value column is the group key, so all
+		// the tied candidates carry the same value and the answer stays
+		// determined — what this pins is that a tie resolves to a tied
+		// row's value rather than to NULL, to 0, or to another group's.
+		twoPathQuery{name: "MinByMaxByTie", cmp: cmpOrdered,
+			sql: `SELECT o_orderpriority AS k, MIN_BY(o_orderpriority, o_shippriority) AS mn,
+				MAX_BY(o_orderpriority, o_shippriority) AS mx
+				FROM orders GROUP BY o_orderpriority ORDER BY k`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) == 0 {
+					tb.Fatal("no rows")
+				}
+				for _, r := range rows {
+					k := cellText(r, "k")
+					if got := cellText(r, "mn"); got != k {
+						tb.Errorf("group %q: MIN_BY = %q; every row of the group is tied and carries %q", k, got, k)
+					}
+					if got := cellText(r, "mx"); got != k {
+						tb.Errorf("group %q: MAX_BY = %q; every row of the group is tied and carries %q", k, got, k)
+					}
+				}
+			}},
+		// STRING_AGG's separator. LENGTH makes it order-independent: the
+		// concatenation order of 15000 unordered rows is not part of the
+		// answer, but its total length is, and a dropped two-character
+		// separator is 14999 characters short.
+		twoPathQuery{name: "StringAggSeparator", cmp: cmpUnordered,
+			sql: "SELECT LENGTH(STRING_AGG(o_orderpriority, '::')) AS n FROM orders",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				total, n := 0, 0
+				for _, r := range sf001Table(tb, "orders") {
+					total += len(fmt.Sprint(r["o_orderpriority"]))
+					n++
+				}
+				want := float64(total + 2*(n-1))
+				if got := cellNum(rows[0], "n"); got != want {
+					tb.Errorf("LENGTH(STRING_AGG(o_orderpriority, '::')) = %v, want %v "+
+						"(%d bytes of values + %d separators of 2)", got, want, total, n-1)
+				}
+			}},
+	)
 	return out
 }
 
@@ -2276,4 +2451,110 @@ func loadTPCHIntoCatalog(tb testing.TB, ctx context.Context, cat *catalog.Catalo
 			}
 		}
 	}
+}
+
+// assertClose fails unless row[col] is within a relative 1e-9 of want.
+// Aggregates that combine partial states differ from a single-pass
+// reference only by accumulation order, which is orders of magnitude below
+// this — the defects it guards were 4 to 13 significant figures out.
+func assertClose(tb testing.TB, row map[string]any, col string, want float64, what string) {
+	tb.Helper()
+	v, ok := lookupCell(row, col)
+	if !ok || v == nil {
+		tb.Errorf("%s = NULL, want %.17g", what, want)
+		return
+	}
+	got := cellNum(row, col)
+	denom := math.Abs(want)
+	if denom == 0 {
+		if got != 0 {
+			tb.Errorf("%s = %.17g, want 0", what, got)
+		}
+		return
+	}
+	if math.Abs(got-want)/denom > 1e-9 {
+		tb.Errorf("%s = %.17g, want %.17g", what, got, want)
+	}
+}
+
+// covarReference is a single-pass online covariance over the fixture,
+// returning (correlation, covar_samp, covar_pop). Independent of the
+// engine's own accumulator by construction: it is written here, over the
+// values the fixture holds.
+func covarReference(xs, ys []float64) (corr, covarSamp, covarPop float64) {
+	var n int64
+	var meanX, meanY, c, m2x, m2y float64
+	for i := range xs {
+		n++
+		fn := float64(n)
+		dx := xs[i] - meanX
+		meanX += dx / fn
+		dy := ys[i] - meanY
+		meanY += dy / fn
+		c += dx * (ys[i] - meanY)
+		m2x += dx * (xs[i] - meanX)
+		m2y += dy * (ys[i] - meanY)
+	}
+	if n == 0 {
+		return 0, 0, 0
+	}
+	covarPop = c / float64(n)
+	if n >= 2 {
+		covarSamp = c / float64(n-1)
+	}
+	if m2x != 0 && m2y != 0 {
+		corr = c / math.Sqrt(m2x*m2y)
+	}
+	return corr, covarSamp, covarPop
+}
+
+// quantileReference is the linear-interpolation quantile of vals, the
+// definition PERCENTILE_CONT and DuckDB's quantile_cont both use.
+func quantileReference(vals []float64, p float64) float64 {
+	if len(vals) == 0 {
+		return 0
+	}
+	sorted := append([]float64(nil), vals...)
+	sort.Float64s(sorted)
+	pos := p * float64(len(sorted)-1)
+	lo := int(math.Floor(pos))
+	hi := int(math.Ceil(pos))
+	if lo == hi {
+		return sorted[lo]
+	}
+	return sorted[lo] + (pos-float64(lo))*(sorted[hi]-sorted[lo])
+}
+
+// modeReference is the most frequent value in vals, lowest value winning a
+// tie. Callers must pick a column whose winner is unambiguous — a tie is
+// not something two engines have to agree about.
+func modeReference(vals []float64) float64 {
+	counts := map[float64]int{}
+	for _, v := range vals {
+		counts[v]++
+	}
+	best, bestN := math.NaN(), -1
+	for v, n := range counts {
+		if n > bestN || (n == bestN && v < best) {
+			best, bestN = v, n
+		}
+	}
+	return best
+}
+
+// argMinMaxReference returns the valueCol of the fixture rows carrying the
+// smallest and largest orderCol.
+func argMinMaxReference(tb testing.TB, table, valueCol, orderCol string) (atMin, atMax string) {
+	tb.Helper()
+	lo, hi := math.Inf(1), math.Inf(-1)
+	for _, r := range sf001Table(tb, table) {
+		k := toFloat(r[orderCol])
+		if k < lo {
+			lo, atMin = k, fmt.Sprint(r[valueCol])
+		}
+		if k > hi {
+			hi, atMax = k, fmt.Sprint(r[valueCol])
+		}
+	}
+	return atMin, atMax
 }

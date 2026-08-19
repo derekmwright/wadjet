@@ -1731,18 +1731,8 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	// worker's avg-fold step (executor_stage.go in package worker) folds
 	// the synthetic columns back into AVG after the downstream
 	// final_aggregate stage merges the partials.
-	var aggs []distributed.AggSpec
-	for _, a := range stage.FusedAggSpecs {
-		aggs = append(aggs, distributed.AggSpec{
-			Func:       a.Func,
-			InputCol:   a.InputCol,
-			OutputCol:  a.OutputCol,
-			InputExpr:  a.InputExpr,
-			OutputType: int(a.OutputType),
-			InputType:  int(a.InputType),
-		})
-	}
-	aggs = decomposeVar(decomposeAvg(aggs))
+	aggs := wireAggSpecs(stage.FusedAggSpecs)
+	aggs = decomposeCovar(decomposeVar(decomposeAvg(aggs)))
 
 	tasks := make([]distributed.Task, 0, actualTasks)
 	for shardIdx, files := range fileSets {
@@ -2514,18 +2504,8 @@ func (c *Coordinator) dispatchComputeStage(
 		// into (SUM, COUNT) pairs so the merge step sees only mergable
 		// aggregates. The worker's avg-fold (executor_stage.go) reads
 		// the synthetic columns and emits the original AVG output names.
-		var aggs []distributed.AggSpec
-		for _, a := range stage.AggSpecs {
-			aggs = append(aggs, distributed.AggSpec{
-				Func:       a.Func,
-				InputCol:   a.InputCol,
-				OutputCol:  a.OutputCol,
-				InputExpr:  a.InputExpr,
-				OutputType: int(a.OutputType),
-				InputType:  int(a.InputType),
-			})
-		}
-		aggs = decomposeVar(decomposeAvg(aggs))
+		aggs := wireAggSpecs(stage.AggSpecs)
+		aggs = decomposeCovar(decomposeVar(decomposeAvg(aggs)))
 		// Convert stage.SortKeys → distributed.SortKeySpec.
 		var sorts []distributed.SortKeySpec
 		for _, s := range stage.SortKeys {
@@ -2608,21 +2588,11 @@ func (c *Coordinator) dispatchComputeStage(
 		// (SUM, COUNT) exactly as the dropped stage's dispatch did, so
 		// the downstream final's merge and avg-fold see identical specs.
 		if len(stage.ChainedAggSpecs) > 0 || len(stage.ChainedAggGroupBy) > 0 {
-			var chainAggs []distributed.AggSpec
-			for _, a := range stage.ChainedAggSpecs {
-				chainAggs = append(chainAggs, distributed.AggSpec{
-					Func:       a.Func,
-					InputCol:   a.InputCol,
-					OutputCol:  a.OutputCol,
-					InputExpr:  a.InputExpr,
-					OutputType: int(a.OutputType),
-					InputType:  int(a.InputType),
-				})
-			}
+			chainAggs := wireAggSpecs(stage.ChainedAggSpecs)
 			chainedOps = append(chainedOps, distributed.OpSpec{
 				Type:        distributed.OpHashAggregate,
 				GroupByCols: append([]string(nil), stage.ChainedAggGroupBy...),
-				Aggregates:  decomposeVar(decomposeAvg(chainAggs)),
+				Aggregates:  decomposeCovar(decomposeVar(decomposeAvg(chainAggs))),
 				// Derived group-bys / agg inputs (SUBSTR(...), price*(1-disc))
 				// need the worker's input projection ahead of the aggregate —
 				// without it the expression column doesn't exist and groups
@@ -3901,22 +3871,13 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 		"intermediate_tasks", N)
 
 	aggs := make([]distributed.AggSpec, 0, len(stage.AggSpecs))
-	for _, a := range stage.AggSpecs {
-		aggs = append(aggs, distributed.AggSpec{
-			Func:       a.Func,
-			InputCol:   a.InputCol,
-			OutputCol:  a.OutputCol,
-			InputExpr:  a.InputExpr,
-			OutputType: int(a.OutputType),
-			InputType:  int(a.InputType),
-		})
-	}
+	aggs = append(aggs, wireAggSpecs(stage.AggSpecs)...)
 	// Decompose AVG specs into (SUM, COUNT) pairs. Both intermediates
 	// and the final task get the decomposed list; the worker's avg-fold
 	// step reconstructs AVG only on the FINAL task (mergeMode), so
 	// intermediate output schemas carry the synthetic columns end-to-
 	// end up to the final's fold.
-	aggs = decomposeVar(decomposeAvg(aggs))
+	aggs = decomposeCovar(decomposeVar(decomposeAvg(aggs)))
 
 	// Phase 1: intermediates. Each consumes a slice of upstream files,
 	// re-aggregates in merge mode, and emits its own partial output.

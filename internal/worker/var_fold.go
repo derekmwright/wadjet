@@ -9,33 +9,42 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// varStatePrefix mirrors the synthetic naming the coordinator's decomposeVar
-// emits (var_decompose.go): __var_state#<kind>#<original output name>. The
-// column holds one encoded (count, mean, M2) triple per group — the partial
-// state of a STDDEV/VARIANCE, which unlike a finished standard deviation
-// can be merged. applyVarFold turns it back into the value the query asked
-// for, on the FINAL aggregate stage only.
+// varStatePrefix and covarStatePrefix mirror the synthetic naming the
+// coordinator's decomposeVar / decomposeCovar emit (var_decompose.go,
+// covar_decompose.go):
+//
+//	__var_state#<kind>#<original output name>
+//	__covar_state#<kind>#<original output name>
+//
+// The column holds one encoded state per group — the (count, mean, M2)
+// triple of a STDDEV/VARIANCE, or the (count, meanX, meanY, C, M2x, M2y)
+// sextuple of a CORR/COVAR — which, unlike the finished statistic, can be
+// merged. applyVarFold / applyCovarFold turn it back into the value the
+// query asked for, on the FINAL aggregate stage only.
 //
 // "#" is invalid in a SQL identifier, so no user column name collides.
-const varStatePrefix = "__var_state#"
+const (
+	varStatePrefix   = "__var_state#"
+	covarStatePrefix = "__covar_state#"
+)
 
-// varFoldCol is one state column to finish.
-type varFoldCol struct {
-	stateIdx  int    // column index of __var_state#kind#X in the input schema
-	kind      string // stddev_samp | var_samp | stddev_pop | var_pop
+// stateFoldCol is one state column to finish.
+type stateFoldCol struct {
+	stateIdx  int    // column index of the synthetic in the input schema
+	kind      string // stddev_samp | var_samp | … | corr | covar_samp | covar_pop
 	outputCol string // original output name X
 }
 
-// findVarFoldCols scans the schema for decomposed variance columns.
-// Returns nil when none are present (the hot path pays one prefix test per
-// column).
-func findVarFoldCols(schema []parquet.Column) []varFoldCol {
-	var out []varFoldCol
+// findStateFoldCols scans the schema for decomposed state columns carrying
+// the given prefix. Returns nil when none are present (the hot path pays
+// one prefix test per column).
+func findStateFoldCols(schema []parquet.Column, prefix string) []stateFoldCol {
+	var out []stateFoldCol
 	for i, c := range schema {
-		if !strings.HasPrefix(c.Name, varStatePrefix) {
+		if !strings.HasPrefix(c.Name, prefix) {
 			continue
 		}
-		rest := c.Name[len(varStatePrefix):]
+		rest := c.Name[len(prefix):]
 		sep := strings.IndexByte(rest, '#')
 		if sep < 0 {
 			// Malformed synthetic: leave it alone rather than guess a
@@ -43,7 +52,7 @@ func findVarFoldCols(schema []parquet.Column) []varFoldCol {
 			// silently wrong number.
 			continue
 		}
-		out = append(out, varFoldCol{stateIdx: i, kind: rest[:sep], outputCol: rest[sep+1:]})
+		out = append(out, stateFoldCol{stateIdx: i, kind: rest[:sep], outputCol: rest[sep+1:]})
 	}
 	return out
 }
@@ -57,16 +66,32 @@ func findVarFoldCols(schema []parquet.Column) []varFoldCol {
 // shipping the state, or the stage above them would be re-aggregating
 // finished values again — the defect this decomposition exists to remove.
 func applyVarFold(batches []*batch.RecordBatch) ([]*batch.RecordBatch, error) {
+	return applyStateFold(batches, varStatePrefix, exec.FinalizeVarianceState)
+}
+
+// applyCovarFold does the same for __covar_state#kind#X — the CORR,
+// COVAR_SAMP and COVAR_POP partial state (#353).
+func applyCovarFold(batches []*batch.RecordBatch) ([]*batch.RecordBatch, error) {
+	return applyStateFold(batches, covarStatePrefix, exec.FinalizeCovarianceState)
+}
+
+// applyStateFold is the shared body: find the synthetics carrying prefix,
+// and rewrite each into a Float64 column holding finalize's answer.
+func applyStateFold(
+	batches []*batch.RecordBatch,
+	prefix string,
+	finalize func(encoded, kind string) (float64, bool),
+) ([]*batch.RecordBatch, error) {
 	if len(batches) == 0 {
 		return batches, nil
 	}
-	cols := findVarFoldCols(batches[0].Schema)
+	cols := findStateFoldCols(batches[0].Schema, prefix)
 	if len(cols) == 0 {
 		return batches, nil
 	}
 	out := make([]*batch.RecordBatch, len(batches))
 	for i, b := range batches {
-		fb, err := foldOneVarBatch(b, cols)
+		fb, err := foldOneStateBatch(b, cols, finalize)
 		if err != nil {
 			return nil, err
 		}
@@ -75,13 +100,17 @@ func applyVarFold(batches []*batch.RecordBatch) ([]*batch.RecordBatch, error) {
 	return out, nil
 }
 
-// foldOneVarBatch builds a new RecordBatch with each state column replaced
+// foldOneStateBatch builds a new RecordBatch with each state column replaced
 // by its finished value, in place (same position, original name).
-func foldOneVarBatch(in *batch.RecordBatch, cols []varFoldCol) (*batch.RecordBatch, error) {
+func foldOneStateBatch(
+	in *batch.RecordBatch,
+	cols []stateFoldCol,
+	finalize func(encoded, kind string) (float64, bool),
+) (*batch.RecordBatch, error) {
 	if in == nil {
 		return nil, nil
 	}
-	byIdx := make(map[int]varFoldCol, len(cols))
+	byIdx := make(map[int]stateFoldCol, len(cols))
 	for _, c := range cols {
 		byIdx[c.stateIdx] = c
 	}
@@ -104,17 +133,23 @@ func foldOneVarBatch(in *batch.RecordBatch, cols []varFoldCol) (*batch.RecordBat
 			out.Columns[i] = in.Columns[i]
 			continue
 		}
-		if err := writeVarColumn(out.Columns[i], in.Columns[c.stateIdx], c.kind, in.Len); err != nil {
-			return nil, fmt.Errorf("var-fold column %q: %w", c.outputCol, err)
+		if err := writeStateColumn(out.Columns[i], in.Columns[c.stateIdx], c.kind, in.Len, finalize); err != nil {
+			return nil, fmt.Errorf("state-fold column %q: %w", c.outputCol, err)
 		}
 	}
 	return out, nil
 }
 
-// writeVarColumn decodes each row's partial state and writes the finished
+// writeStateColumn decodes each row's partial state and writes the finished
 // value. A NULL, unparseable, or too-small state is SQL NULL — STDDEV over
-// fewer than two rows has no sample answer, and over none no answer at all.
-func writeVarColumn(dst, stateCol *batch.Vector, kind string, n int) error {
+// fewer than two rows has no sample answer, and over none no answer at all;
+// CORR and COVAR_SAMP apply the same thresholds.
+func writeStateColumn(
+	dst, stateCol *batch.Vector,
+	kind string,
+	n int,
+	finalize func(encoded, kind string) (float64, bool),
+) error {
 	if stateCol.Type != parquet.TypeString {
 		return fmt.Errorf("expected an encoded state string, got %v", stateCol.Type)
 	}
@@ -123,7 +158,7 @@ func writeVarColumn(dst, stateCol *batch.Vector, kind string, n int) error {
 			dst.Nulls.SetNull(i)
 			continue
 		}
-		v, ok := exec.FinalizeVarianceState(stateCol.BytesData.StringValue(i), kind)
+		v, ok := finalize(stateCol.BytesData.StringValue(i), kind)
 		if !ok {
 			dst.Nulls.SetNull(i)
 			continue

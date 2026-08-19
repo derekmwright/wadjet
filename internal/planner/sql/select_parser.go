@@ -436,6 +436,7 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 		} else if len(fn.Args) > 0 {
 			col.AggArg = fn.Args[0].String()
 			col.AggArgExpr = fn.Args[0]
+			col.AggArgs = fn.Args
 		}
 	} else if fn := FindNestedAggregate(expr); fn != nil {
 		// Aggregate nested inside a binary expression (e.g., SUM(x) * 0.0001)
@@ -447,6 +448,7 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 		} else if len(fn.Args) > 0 {
 			col.AggArg = fn.Args[0].String()
 			col.AggArgExpr = fn.Args[0]
+			col.AggArgs = fn.Args
 		}
 	}
 

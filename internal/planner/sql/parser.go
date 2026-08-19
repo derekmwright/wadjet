@@ -398,6 +398,7 @@ type SelectColumn struct {
 	AggFunc     string
 	AggArg      string
 	AggArgExpr  Node        // AST for aggregate argument expression
+	AggArgs     []Node      // EVERY argument, AggArgExpr included (#353)
 	AggDistinct bool        // COUNT(DISTINCT col)
 	IsWindow    bool        // true if this is a window function
 	WindowSpec  *WindowSpec // window function details

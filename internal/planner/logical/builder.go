@@ -192,13 +192,17 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 							aggInputCol = ""
 						}
 
-						aggs = append(aggs, AggExpr{
+						ae := AggExpr{
 							Func:      funcName,
 							InputCol:  aggInputCol,
 							OutputCol: syntheticName,
 							Distinct:  agg.Distinct,
 							InputExpr: aggInputExpr,
-						})
+						}
+						if err := parseAggExtraArgs(&ae, agg.Args); err != nil {
+							return nil, err
+						}
+						aggs = append(aggs, ae)
 
 						replacements[aggKey] = syntheticName
 						aggSyntheticNames[aggKey] = syntheticName
@@ -214,13 +218,17 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 					if outputCol == "" {
 						outputCol = col.Expr
 					}
-					aggs = append(aggs, AggExpr{
+					ae := AggExpr{
 						Func:      col.AggFunc,
 						InputCol:  inputCol,
 						OutputCol: outputCol,
 						Distinct:  col.AggDistinct,
 						InputExpr: col.AggArgExpr,
-					})
+					}
+					if err := parseAggExtraArgs(&ae, col.AggArgs); err != nil {
+						return nil, err
+					}
+					aggs = append(aggs, ae)
 					aggCounter++
 				}
 			}
@@ -261,13 +269,17 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 					if funcName == "count" && (aggInputCol == "*" || aggInputCol == "") {
 						aggInputCol = ""
 					}
-					aggs = append(aggs, AggExpr{
+					ae := AggExpr{
 						Func:      funcName,
 						InputCol:  aggInputCol,
 						OutputCol: synName,
 						Distinct:  hAgg.Distinct,
 						InputExpr: aggInputExpr,
-					})
+					}
+					if err := parseAggExtraArgs(&ae, hAgg.Args); err != nil {
+						return nil, err
+					}
+					aggs = append(aggs, ae)
 					havingReplacements[hKey] = synName
 				}
 			}

@@ -58,6 +58,15 @@ const (
 	// (worker/var_fold.go) decodes the triple into the value <kind> asks for.
 	AggVarState
 	AggVarStateMerge
+	// AggCovarState and AggCovarStateMerge do the same for CORR, COVAR_SAMP
+	// and COVAR_POP, whose state is the (count, meanX, meanY, C, M2x, M2y)
+	// sextuple and which combine by the same pairwise rule
+	// (covarianceState.merge). Before #353 the DAG had no case for these
+	// function names at all, so they fell to the worker's `default: AggSum`
+	// and CORR(o_totalprice, o_custkey) answered 2.127e9 — the sum of its
+	// first argument.
+	AggCovarState
+	AggCovarStateMerge
 )
 
 // AggColumn defines an aggregation to perform.
@@ -795,6 +804,85 @@ func (s *covarianceState) correlation() float64 {
 	return s.c / math.Sqrt(s.m2x*s.m2y)
 }
 
+// covarianceStateWidth is the encoded width of a covariance partial state:
+// count (int64) + meanX + meanY + C + M2x + M2y (five float64s) = 48 bytes,
+// hex-encoded to 96 ASCII characters. Same reasoning as
+// varianceStateWidth — the state travels as a string column through
+// parquet, .wshf and NATS, and float64 bits round-trip exactly through hex.
+const covarianceStateWidth = 96
+
+func (s *covarianceState) encode() string {
+	var buf [48]byte
+	binary.BigEndian.PutUint64(buf[0:8], uint64(s.count))
+	binary.BigEndian.PutUint64(buf[8:16], math.Float64bits(s.meanX))
+	binary.BigEndian.PutUint64(buf[16:24], math.Float64bits(s.meanY))
+	binary.BigEndian.PutUint64(buf[24:32], math.Float64bits(s.c))
+	binary.BigEndian.PutUint64(buf[32:40], math.Float64bits(s.m2x))
+	binary.BigEndian.PutUint64(buf[40:48], math.Float64bits(s.m2y))
+	return hex.EncodeToString(buf[:])
+}
+
+// decodeCovarianceState parses encode's output. ok=false for anything else,
+// which the caller treats as "no rows to merge" rather than as a valid empty
+// partial.
+func decodeCovarianceState(s string) (covarianceState, bool) {
+	if len(s) != covarianceStateWidth {
+		return covarianceState{}, false
+	}
+	var full [48]byte
+	if _, err := hex.Decode(full[:], []byte(s)); err != nil {
+		return covarianceState{}, false
+	}
+	return covarianceState{
+		count: int64(binary.BigEndian.Uint64(full[0:8])),
+		meanX: math.Float64frombits(binary.BigEndian.Uint64(full[8:16])),
+		meanY: math.Float64frombits(binary.BigEndian.Uint64(full[16:24])),
+		c:     math.Float64frombits(binary.BigEndian.Uint64(full[24:32])),
+		m2x:   math.Float64frombits(binary.BigEndian.Uint64(full[32:40])),
+		m2y:   math.Float64frombits(binary.BigEndian.Uint64(full[40:48])),
+	}, true
+}
+
+// Covariance-family kinds, carried in the synthetic column's name exactly
+// as the variance kinds are: one state serves all three, and which function
+// finishes it is decided once, after the last merge.
+const (
+	CovarKindCorr      = "corr"
+	CovarKindCovarSamp = "covar_samp"
+	CovarKindCovarPop  = "covar_pop"
+)
+
+// FinalizeCovarianceState decodes a merged partial state and finishes it as
+// the named kind. ok=false means SQL NULL, on the same thresholds the
+// single-process finalization applies: fewer than two rows for CORR and
+// COVAR_SAMP, no rows at all for COVAR_POP.
+//
+// Used by the distributed final-aggregate fold (worker/var_fold.go).
+func FinalizeCovarianceState(encoded, kind string) (float64, bool) {
+	st, ok := decodeCovarianceState(encoded)
+	if !ok {
+		return 0, false
+	}
+	switch kind {
+	case CovarKindCorr:
+		if st.count < 2 {
+			return 0, false
+		}
+		return st.correlation(), true
+	case CovarKindCovarSamp:
+		if st.count < 2 {
+			return 0, false
+		}
+		return st.covarSamp(), true
+	case CovarKindCovarPop:
+		if st.count == 0 {
+			return 0, false
+		}
+		return st.covarPop(), true
+	}
+	return 0, false
+}
+
 // Variance-family kinds. A decomposed partial carries the same (count,
 // mean, M2) triple whatever the caller asked for, so the kind travels
 // beside it (in the synthetic column's name) and is applied once, by
@@ -872,7 +960,11 @@ func resolveFloat64Extractor(typ batch.TypeID) float64Extractor {
 	switch typ {
 	case batch.TypeInt64, batch.TypeTimestamp:
 		return func(v *batch.Vector, row int) float64 { return float64(v.Int64Data[row]) }
-	case batch.TypeInt32:
+	case batch.TypeInt32, batch.TypeDate:
+		// TypeDate is days-since-epoch in Int32Data, so it orders and
+		// interpolates like the integer it is. Its absence here made
+		// MIN_BY(x, a_date_column) answer NULL: the extractor came back
+		// nil and updateGroup skipped every row (#353).
 		return func(v *batch.Vector, row int) float64 { return float64(v.Int32Data[row]) }
 	case batch.TypeFloat64:
 		return func(v *batch.Vector, row int) float64 { return v.Float64Data[row] }
@@ -1204,7 +1296,9 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			if idx := h.aggColIdx[i]; idx >= 0 {
 				h.aggF64Extract[i] = resolveFloat64Extractor(b.Columns[idx].Type)
 			}
-		case AggCorr, AggCovarSamp, AggCovarPop:
+		case AggCorr, AggCovarSamp, AggCovarPop, AggCovarState:
+			// AggCovarStateMerge is absent for the same reason
+			// AggVarStateMerge is: its input is an encoded state string.
 			if idx := h.aggColIdx[i]; idx >= 0 {
 				h.aggF64Extract[i] = resolveFloat64Extractor(b.Columns[idx].Type)
 			}
@@ -1232,6 +1326,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		case AggStringAgg, AggStddev, AggVariance, AggStddevPop, AggVarPop,
 			AggVarState, AggVarStateMerge,
 			AggBoolAnd, AggBoolOr, AggCorr, AggCovarSamp, AggCovarPop,
+			AggCovarState, AggCovarStateMerge,
 			AggPercentileCont, AggPercentileDisc, AggMedian,
 			AggMinBy, AggMaxBy:
 			allSimpleAggs = false
@@ -3269,7 +3364,8 @@ func (h *HashAggregate) initGroupState(ext *groupStateExtras, b *batch.RecordBat
 			ext.extraState[i] = true
 		case AggBoolOr:
 			ext.extraState[i] = false
-		case AggCorr, AggCovarSamp, AggCovarPop:
+		case AggCorr, AggCovarSamp, AggCovarPop,
+			AggCovarState, AggCovarStateMerge:
 			ext.extraState[i] = &covarianceState{}
 		case AggPercentileCont, AggPercentileDisc, AggMode, AggMedian:
 			ext.extraState[i] = &collectState{}
@@ -3426,7 +3522,28 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 				}
 			}
 
-		case AggCorr, AggCovarSamp, AggCovarPop:
+		case AggCovarStateMerge:
+			// One input row is one upstream partial's encoded sextuple —
+			// combined pairwise, never re-correlated. A CORR of per-task
+			// CORR values is the correlation of a handful of numbers that
+			// have nothing to do with the question.
+			idx := h.aggColIdx[i]
+			if idx < 0 {
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				continue
+			}
+			s, ok := v.GetValue(row).(string)
+			if !ok {
+				continue
+			}
+			if partial, ok := decodeCovarianceState(s); ok {
+				ext.extraState[i].(*covarianceState).merge(&partial)
+			}
+
+		case AggCorr, AggCovarSamp, AggCovarPop, AggCovarState:
 			idx1 := h.aggColIdx[i]
 			idx2 := h.aggColIdx2[i]
 			if idx1 < 0 || idx2 < 0 {
@@ -4086,6 +4203,11 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 				} else {
 					out.Columns[colIdx].SetValue(i, state.covarPop())
 				}
+			case AggCovarState, AggCovarStateMerge:
+				// Partial output: the state itself, for the merge stage
+				// above (or the final stage's fold) to combine.
+				state := ext.extraState[j].(*covarianceState)
+				out.Columns[colIdx].SetValue(i, state.encode())
 			case AggPercentileCont:
 				state := ext.extraState[j].(*collectState)
 				out.Columns[colIdx].SetValue(i, computePercentileCont(state.values, agg.Percentile))
@@ -4250,7 +4372,14 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 		// (it has no resolved input types); override from the type observed
 		// at Consume so MIN(url) emits a string and MIN(date) stays a date
 		// instead of surfacing raw epoch days.
-		if (agg.Func == AggMin || agg.Func == AggMax) && i < len(h.aggInputTypes) {
+		// MIN_BY/MAX_BY return a value taken from their FIRST argument, so
+		// they follow it the same way — the ordering column decides which
+		// row, never the type. Declared float64, MIN_BY(o_orderpriority,
+		// o_totalprice) wrote its string into a Float64 vector and came
+		// back as 0 on every row (#353), which is #345's window-value
+		// defect in the aggregate.
+		if (agg.Func == AggMin || agg.Func == AggMax ||
+			agg.Func == AggMinBy || agg.Func == AggMaxBy) && i < len(h.aggInputTypes) {
 			if t := minMaxOutputType(h.aggInputTypes[i]); t != 0 {
 				typ = t
 			}

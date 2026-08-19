@@ -223,9 +223,11 @@ func aggOutputTypeString(funcName string) parquet.TypeID {
 	switch strings.ToLower(strings.TrimSpace(funcName)) {
 	case "count", "count_distinct", "approx_distinct":
 		return parquet.TypeInt64
-	case "string_agg", "var_state", "var_state_merge":
+	case "string_agg", "var_state", "var_state_merge",
+		"covar_state", "covar_state_merge":
 		// A variance partial ships its (count, mean, M2) triple as an
-		// encoded string; only the final fold produces a float.
+		// encoded string, a covariance partial its (count, meanX, meanY, C,
+		// M2x, M2y) sextuple; only the final fold produces a float.
 		return parquet.TypeString
 	case "bool_and", "every", "bool_or":
 		return parquet.TypeBool
@@ -238,40 +240,72 @@ func aggOutputTypeString(funcName string) parquet.TypeID {
 // distributed.AggSpec.Func into exec.AggFunc. Mirrors
 // planner/physical.parseAggFunc; duplicated here to avoid importing the
 // planner into the worker executor path.
-func parseAggFuncString(s string) exec.AggFunc {
+//
+// ok is false for a name this worker does not know. It used to return
+// exec.AggSum for those, which is how MEDIAN, MODE, PERCENTILE_CONT/DISC,
+// CORR and COVAR_* answered on the stage DAG with the SUM of their first
+// argument — 2.127e9 for `MEDIAN(o_totalprice)` at SF0.01, against a true
+// 135698.6 (#353). stddev_pop and var_pop had already been caught by the
+// same default (#339). Callers must refuse the task rather than aggregate
+// with a function nobody asked for.
+func parseAggFuncString(s string) (exec.AggFunc, bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "sum":
-		return exec.AggSum
+		return exec.AggSum, true
 	case "count":
-		return exec.AggCount
+		return exec.AggCount, true
 	case "min":
-		return exec.AggMin
+		return exec.AggMin, true
 	case "max":
-		return exec.AggMax
+		return exec.AggMax, true
 	case "avg":
-		return exec.AggAvg
+		return exec.AggAvg, true
 	case "count_distinct":
-		return exec.AggCountDistinct
+		return exec.AggCountDistinct, true
+	case "approx_distinct":
+		return exec.AggApproxDistinct, true
 	case "string_agg":
-		return exec.AggStringAgg
+		return exec.AggStringAgg, true
 	case "bool_and", "every":
-		return exec.AggBoolAnd
+		return exec.AggBoolAnd, true
 	case "bool_or":
-		return exec.AggBoolOr
+		return exec.AggBoolOr, true
 	case "stddev", "stddev_samp":
-		return exec.AggStddev
+		return exec.AggStddev, true
 	case "variance", "var_samp":
-		return exec.AggVariance
+		return exec.AggVariance, true
 	case "stddev_pop":
-		return exec.AggStddevPop
+		return exec.AggStddevPop, true
 	case "var_pop":
-		return exec.AggVarPop
+		return exec.AggVarPop, true
 	case "var_state":
-		return exec.AggVarState
+		return exec.AggVarState, true
 	case "var_state_merge":
-		return exec.AggVarStateMerge
+		return exec.AggVarStateMerge, true
+	case "covar_state":
+		return exec.AggCovarState, true
+	case "covar_state_merge":
+		return exec.AggCovarStateMerge, true
+	case "corr":
+		return exec.AggCorr, true
+	case "covar_samp":
+		return exec.AggCovarSamp, true
+	case "covar_pop":
+		return exec.AggCovarPop, true
+	case "median":
+		return exec.AggMedian, true
+	case "percentile_cont", "quantile_cont":
+		return exec.AggPercentileCont, true
+	case "percentile_disc", "quantile_disc":
+		return exec.AggPercentileDisc, true
+	case "mode":
+		return exec.AggMode, true
+	case "min_by":
+		return exec.AggMinBy, true
+	case "max_by":
+		return exec.AggMaxBy, true
 	default:
-		return exec.AggSum
+		return exec.AggSum, false
 	}
 }
 

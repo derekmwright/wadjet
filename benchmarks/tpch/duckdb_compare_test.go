@@ -831,6 +831,140 @@ func duckdbCorpus() []duckdbCase {
 				"Legal for LEFT (LeftJoinOnConjunctBuildSide below stays correct), wrong for FULL"},
 		duckdbCase{name: "LeftJoinOnConjunctBuildSide", sql: `SELECT COUNT(*) AS c FROM nation n
 			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3`},
+		// #353 — the aggregates that #339 left holding a finished value on
+		// the stage DAG. Every entry below runs over orders (15000 rows) or
+		// lineitem (60175), never nation: at 25 rows one partial covers the
+		// whole input and the answer is right whether or not the partials
+		// merge, which is the shape that would pass either way.
+		//
+		// What arm B actually answered before the fix is worth stating,
+		// because it is not the "median of medians" the issue predicted: the
+		// worker's parseAggFuncString had no case for any of these names, so
+		// they fell to its `default: AggSum` and every one of them returned
+		// the SUM of its first argument. MEDIAN(o_totalprice) came back
+		// 2.127e9 against a true 135698.6.
+		//
+		// CORR and COVAR now decompose across the wire the way STDDEV does
+		// (covar_decompose.go): the partial ships its (count, meanX, meanY,
+		// C, M2x, M2y) sextuple, merge stages combine them pairwise, the
+		// final stage folds. Both arms were wrong here before — arm A
+		// answered NULL, because the SELECT parser dropped the second
+		// argument and the covariance state was never updated.
+		duckdbCase{name: "CovarianceFamily", sql: `SELECT CORR(o_totalprice, o_custkey) AS c,
+			COVAR_SAMP(o_totalprice, o_custkey) AS cs, COVAR_POP(o_totalprice, o_custkey) AS cp
+			FROM orders`},
+		// Grouped, so states combine per key — the shape a shuffle produces.
+		duckdbCase{name: "CovarianceGrouped", sql: `SELECT o_orderstatus AS k,
+			CORR(o_totalprice, o_custkey) AS c, COVAR_POP(o_totalprice, o_custkey) AS cp, COUNT(*) AS n
+			FROM orders GROUP BY o_orderstatus ORDER BY k`},
+
+		// MEDIAN and the percentile family. These do NOT decompose, so they
+		// are gated to a RawInputAggregate final (agg_whole_input.go): one
+		// task per group, every row of a group aggregated exactly once.
+		duckdbCase{name: "MedianUngrouped", sql: "SELECT MEDIAN(o_totalprice) AS m FROM orders"},
+		duckdbCase{name: "MedianGrouped", sql: `SELECT o_orderstatus AS k, MEDIAN(o_totalprice) AS m, COUNT(*) AS n
+			FROM orders GROUP BY o_orderstatus ORDER BY k`},
+		// QUANTILE_CONT/QUANTILE_DISC is DuckDB's spelling of
+		// PERCENTILE_CONT/PERCENTILE_DISC with the arguments reversed, and
+		// the only spelling of the percentile family both engines accept:
+		// DuckDB's PERCENTILE_CONT is ordered-set syntax (WITHIN GROUP),
+		// which this parser does not take, and Wadjet's two-argument form
+		// DuckDB does not. Both names now plan to the same aggregate, so
+		// this entry is ground truth for PERCENTILE_CONT/_DISC as well.
+		//
+		// The two functions must not agree: _cont interpolates between the
+		// two straddling values (255771.439) and _disc returns an actual
+		// member of the input (255762.04).
+		duckdbCase{name: "PercentileUngrouped", sql: `SELECT quantile_cont(o_totalprice, 0.9) AS p90,
+			quantile_disc(o_totalprice, 0.9) AS d90, quantile_cont(o_totalprice, 0.1) AS p10 FROM orders`},
+		duckdbCase{name: "PercentileGrouped", sql: `SELECT o_orderstatus AS k,
+			quantile_cont(o_totalprice, 0.75) AS p75, quantile_disc(o_totalprice, 0.25) AS d25
+			FROM orders GROUP BY o_orderstatus ORDER BY k`},
+
+		// MODE over l_linenumber: 60175 rows, and the winner (1, on every
+		// order's first line) beats the runner-up by thousands, so no tie
+		// decides the answer. MODE(o_custkey) would have been useless here —
+		// 32 different customers tie at 32 orders each and the two engines
+		// pick different ones, which is not a divergence either of them is
+		// wrong about.
+		duckdbCase{name: "ModeNumeric", sql: "SELECT MODE(l_linenumber) AS m FROM lineitem"},
+		duckdbCase{name: "ModeGrouped", sql: `SELECT l_returnflag AS k, MODE(l_linenumber) AS m, COUNT(*) AS n
+			FROM lineitem GROUP BY l_returnflag ORDER BY k`},
+		// MODE over a STRING column is a separate, pre-existing gap and is
+		// pinned rather than fixed: collectState holds float64 values and
+		// the resolved extractor for a string column is nil, so nothing is
+		// ever collected. Both arms return NULL together, so this is not the
+		// distribution defect #353 is about — but it is silent, so it is
+		// gated here against DuckDB's answer and the pin fails the moment it
+		// starts working.
+		duckdbCase{name: "ModeString", sql: "SELECT MODE(o_orderpriority) AS m FROM orders",
+			knownBugArm: armBoth,
+			knownBug: "MODE over a non-numeric column returns NULL: collectState accumulates float64 and " +
+				"resolveFloat64Extractor has no case for a string column, so no value is ever collected. " +
+				"Numeric MODE is correct (ModeNumeric above)",
+		},
+
+		// MIN_BY/MAX_BY return a value taken from their FIRST argument,
+		// selected by their second. Both arguments were broken: the second
+		// never reached the planner at all (NULL on both arms), and once it
+		// did the output column was still declared float64, so the string it
+		// selected was dropped and every row came back 0 — #345's window
+		// defect in the aggregate.
+		duckdbCase{name: "MinByMaxBy", sql: `SELECT MIN_BY(o_orderpriority, o_totalprice) AS mn,
+			MAX_BY(o_orderpriority, o_totalprice) AS mx FROM orders`},
+		duckdbCase{name: "MinByMaxByGrouped", sql: `SELECT o_orderstatus AS k,
+			MIN_BY(o_orderpriority, o_totalprice) AS mn, MAX_BY(o_orderpriority, o_totalprice) AS mx
+			FROM orders GROUP BY o_orderstatus ORDER BY k`},
+		// The deliberate tie: o_shippriority is 0 on all 15000 rows, so
+		// EVERY row of every group is tied for both the minimum and the
+		// maximum and each partial holds a different candidate. The answer
+		// stays determined because the value column is the group key, so all
+		// the tied candidates carry the same value — which is what makes
+		// this comparable across engines at all: SQL does not say which of
+		// several tied rows MIN_BY returns, so a tie whose candidates differ
+		// in value has no cross-engine answer to hold anything to. What it
+		// pins is that a tie resolves to a tied row's value rather than to
+		// NULL, to 0, or to a value the merge invented.
+		duckdbCase{name: "MinByMaxByTie", sql: `SELECT o_orderpriority AS k,
+			MIN_BY(o_orderpriority, o_shippriority) AS mn, MAX_BY(o_orderpriority, o_shippriority) AS mx,
+			COUNT(*) AS n FROM orders GROUP BY o_orderpriority ORDER BY k`},
+
+		// STRING_AGG. The separator argument was dropped with every other
+		// second argument, so a query asking for '::' got ',' — 14999
+		// characters short over orders, and no row count or NULL check sees
+		// it. LENGTH() makes the ungrouped case order-independent, which it
+		// has to be: STRING_AGG without an ORDER BY concatenates in whatever
+		// order rows arrive, and two correct engines need not agree on that.
+		duckdbCase{name: "StringAggSeparatorLength",
+			sql: "SELECT LENGTH(STRING_AGG(o_orderpriority, '::')) AS n FROM orders"},
+		// The grouped case compares the STRING itself, order and all, by
+		// aggregating the group key: every value in a group is then
+		// identical, so the concatenation is the same string whatever order
+		// the 15000 rows arrive in — while still pinning the separator, the
+		// element count and the values.
+		duckdbCase{name: "StringAggGrouped", sql: `SELECT o_orderstatus AS k,
+			STRING_AGG(o_orderstatus, '::') AS s, COUNT(*) AS n
+			FROM orders GROUP BY o_orderstatus ORDER BY k`},
+
+		// The gated route over a JOIN rather than a bare scan: the raw rows
+		// the final aggregate consumes arrive through an exchange, and the
+		// group keys come from a third table. 25 groups over 15000 joined
+		// rows, so every group's rows are spread across the exchange's
+		// partitions. HAVING on top, since PostFilterExprs run on the final
+		// task only and a gated final IS the only task.
+		duckdbCase{name: "MedianOverJoin", sql: `SELECT n_name AS k, MEDIAN(o_totalprice) AS m,
+			MIN_BY(o_orderpriority, o_totalprice) AS cheapest, COUNT(*) AS n
+			FROM orders JOIN customer ON o_custkey = c_custkey
+			JOIN nation ON c_nationkey = n_nationkey
+			GROUP BY n_name ORDER BY k`},
+		duckdbCase{name: "MedianWithHaving", sql: `SELECT o_orderstatus AS k, MEDIAN(o_totalprice) AS m
+			FROM orders GROUP BY o_orderstatus HAVING COUNT(*) > 1000 ORDER BY k`},
+		// CORR through the same join, where the decomposed state has to
+		// survive an exchange as well as the partial/final split.
+		duckdbCase{name: "CorrOverJoin", sql: `SELECT n_name AS k, CORR(o_totalprice, o_custkey) AS c
+			FROM orders JOIN customer ON o_custkey = c_custkey
+			JOIN nation ON c_nationkey = n_nationkey
+			GROUP BY n_name ORDER BY k`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

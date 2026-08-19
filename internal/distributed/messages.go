@@ -544,6 +544,17 @@ type AggSpec struct {
 	// string columns wrote strings into a Float64 vector and the
 	// aggregate saw zeros (#333).
 	InputType int `json:"input_type,omitempty"`
+	// InputCol2 is the second column argument of a two-column aggregate:
+	// CORR(x, y), COVAR_SAMP/POP(x, y) and MIN_BY/MAX_BY(value, ordering).
+	// Empty for every other function.
+	InputCol2 string `json:"input_col2,omitempty"`
+	// Separator is STRING_AGG's delimiter literal. Empty means the default
+	// "," — the same fallback exec.HashAggregate applies.
+	Separator string `json:"separator,omitempty"`
+	// Percentile is PERCENTILE_CONT/PERCENTILE_DISC's fraction in [0,1].
+	// Zero for every other function (and a legal fraction for those two,
+	// which is why nothing reads it as "unset").
+	Percentile float64 `json:"percentile,omitempty"`
 }
 
 // GatherBatchMsg is the NATS message body the worker publishes to the

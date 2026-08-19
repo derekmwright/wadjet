@@ -626,6 +626,14 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 			if agg.InputCol != "" && agg.InputCol != "*" {
 				refs[strings.ToLower(agg.InputCol)] = true
 			}
+			// The second column of CORR/COVAR_* and the ordering column of
+			// MIN_BY/MAX_BY are read per row exactly as InputCol is, so they
+			// have to survive pruning the same way. A pruned ordering column
+			// is not a missing column downstream — HashAggregate resolves it
+			// to -1 and skips every row, which is a NULL answer.
+			if agg.InputCol2 != "" {
+				refs[strings.ToLower(agg.InputCol2)] = true
+			}
 			if agg.InputExpr != nil {
 				collectASTColumnRefs(agg.InputExpr, refs)
 			}
@@ -956,6 +964,13 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 		InputCol:  aggInputCol,
 		OutputCol: aggOutputCol,
 		Distinct:  aggFunc.Distinct,
+	}
+	// Arguments past the first (CORR's second column, STRING_AGG's
+	// separator, PERCENTILE's fraction). Decline the rewrite rather than
+	// plan an aggregate missing one of them — the general builder path
+	// carries them and answers correctly (#353).
+	if err := parseAggExtraArgs(&aggExpr, aggFunc.Args); err != nil {
+		return nil, pred, false
 	}
 
 	// GROUP BY the inner correlation columns
@@ -1301,12 +1316,19 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 			if outputCol == "" {
 				outputCol = info.Columns[0].Expr
 			}
-			aggs = append(aggs, AggExpr{
+			ae := AggExpr{
 				Func:      info.Columns[0].AggFunc,
 				InputCol:  inputCol,
 				OutputCol: outputCol,
 				Distinct:  info.Columns[0].AggDistinct,
-			})
+			}
+			// See the note in tryDecorrelateScalarSubquery: an aggregate
+			// whose extra arguments this rewrite cannot carry declines the
+			// rewrite instead of losing them (#353).
+			if err := parseAggExtraArgs(&ae, info.Columns[0].AggArgs); err != nil {
+				return nil
+			}
+			aggs = append(aggs, ae)
 			aggCounter++
 		}
 
@@ -1331,13 +1353,17 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 					aggInputCol = ""
 				}
 
-				aggs = append(aggs, AggExpr{
+				ae := AggExpr{
 					Func:      funcName,
 					InputCol:  aggInputCol,
 					OutputCol: synName,
 					Distinct:  agg.Distinct,
 					InputExpr: aggInputExpr,
-				})
+				}
+				if err := parseAggExtraArgs(&ae, agg.Args); err != nil {
+					return nil
+				}
+				aggs = append(aggs, ae)
 				replacements[strings.ToLower(agg.String())] = synName
 			}
 
