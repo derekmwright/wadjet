@@ -9856,15 +9856,22 @@ func emitMergeSortTree(stages *[]Stage, sortStageID string, sortKeys []SortKeySp
 
 // resolveNullsLast determines whether nulls should sort last for a given order
 // expression. An explicit NULLS FIRST / NULLS LAST always wins; otherwise the
-// engine default applies, which is NULLS LAST in BOTH directions — DuckDB's
-// default_null_order, and the placement the engine has always emitted. See
-// distributed.SortKeySpec.PlaceNullsLast, which has to agree with this
+// engine default applies: NULLS LAST for ASC, NULLS FIRST for DESC.
+//
+// That is PostgreSQL's rule, chosen deliberately. SQL leaves the default
+// implementation-defined and DuckDB picks NULLS LAST in both directions, but
+// wadjet speaks the PostgreSQL wire protocol, so a psql/DataGrip/Superset user
+// writing ORDER BY x DESC expects PostgreSQL's placement. The DuckDB gate is
+// held to the same rule by setting default_null_order in the oracle rather
+// than by exempting entries, so the comparison keeps its full strength.
+//
+// See distributed.SortKeySpec.PlaceNullsLast, which has to agree with this
 // function key for key or the two execution paths sort differently.
 func resolveNullsLast(ob logical.OrderExpr) bool {
 	if ob.NullsFirst != nil {
 		return !*ob.NullsFirst // NullsFirst=true => NullsLast=false, and vice versa
 	}
-	return true
+	return !ob.Desc
 }
 
 // isComputedProjection reports whether a SELECT item's value is COMPUTED

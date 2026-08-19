@@ -19,12 +19,13 @@ func TestSortKeyNullPlacement(t *testing.T) {
 		spec distributed.SortKeySpec
 		want bool // NullsLast
 	}{
-		// No explicit placement: the engine default, NULLS LAST in both
-		// directions (DuckDB's default_null_order — see
-		// SortKeySpec.PlaceNullsLast for why it is not PostgreSQL's rule).
-		// This is also what a spec written before the field existed means.
+		// No explicit placement: the engine default is PostgreSQL's rule —
+		// NULLS LAST for ASC, NULLS FIRST for DESC (see
+		// SortKeySpec.PlaceNullsLast). This is also the only safe reading of
+		// a spec written before the field existed, since that default is
+		// what the SQL asked for.
 		{"ascending default", distributed.SortKeySpec{Column: "k"}, true},
-		{"descending default", distributed.SortKeySpec{Column: "k", Desc: true}, true},
+		{"descending default", distributed.SortKeySpec{Column: "k", Desc: true}, false},
 		// Explicit placement wins in both directions. The DESC pair is
 		// #343's: both spellings reached the executor intact and were then
 		// inverted by the comparator's direction negation.

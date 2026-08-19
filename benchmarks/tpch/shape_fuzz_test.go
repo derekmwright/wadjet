@@ -229,6 +229,14 @@ func fuzzQueryWadjet(ctx context.Context, db *wadjet.DB, sql string) (out fuzzRe
 // process down with the OOM killer — a result that size is not a repro anyone
 // wants reported anyway.
 func fuzzDuckDB(setup, sql string) ([]map[string]string, []string, error) {
+	// PostgreSQL null placement, which is what wadjet implements:
+	// NULLS LAST for ASC, NULLS FIRST for DESC. DuckDB defaults to
+	// NULLS LAST in both directions, and that is a SEMANTIC difference
+	// rather than a defect in either engine — SQL leaves the default
+	// implementation-defined. Configuring the oracle keeps every row
+	// compared; exempting the entries would blind the gate to real
+	// ordering bugs in the same queries.
+	setup = "SET default_null_order='nulls_last_on_asc_first_on_desc';\n" + setup
 	script := setup + "\n.mode csv\n.headers on\n.nullvalue <NULL>\n" + sql + ";\n"
 	cmd := exec.Command(fuzzDuckDBBin)
 	cmd.Stdin = strings.NewReader(script)

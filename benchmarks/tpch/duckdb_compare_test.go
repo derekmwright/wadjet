@@ -1558,6 +1558,14 @@ func runWadjet(ctx context.Context, db *wadjet.DB, sql string) ([]map[string]any
 // encoding/csv reader skips records with zero fields, which it treats a bare
 // "\r\n" as — and so an empty field means the empty STRING and nothing else.
 func runDuckDB(setup, sql string) ([]map[string]string, []string, error) {
+	// PostgreSQL null placement, which is what wadjet implements:
+	// NULLS LAST for ASC, NULLS FIRST for DESC. DuckDB defaults to
+	// NULLS LAST in both directions, and that is a SEMANTIC difference
+	// rather than a defect in either engine — SQL leaves the default
+	// implementation-defined. Configuring the oracle keeps every row
+	// compared; exempting the entries would blind the gate to real
+	// ordering bugs in the same queries.
+	setup = "SET default_null_order='nulls_last_on_asc_first_on_desc';\n" + setup
 	script := setup + "\n.mode csv\n.headers on\n.nullvalue " + duckdbNull + "\n" + sql + ";\n"
 	cmd := exec.Command(duckdbBin)
 	cmd.Stdin = strings.NewReader(script)

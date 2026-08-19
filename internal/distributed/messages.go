@@ -595,24 +595,24 @@ type SortKeySpec struct {
 //
 // The default is NULLS LAST in BOTH directions, which is DuckDB's
 // default_null_order and the placement this engine has always emitted. It is
-// deliberately not PostgreSQL's rule (NULLS LAST for ASC, NULLS FIRST for
-// DESC): SQL leaves the default implementation-defined, DuckDB is this
-// repo's correctness oracle, and benchmarks/tpch's stored DuckDB
-// fingerprints pin the DESC default to NULLS LAST. A query that needs the
-// other placement spells it out, and as of #343 the explicit clause is
-// honoured in both directions.
+// PostgreSQL's rule: NULLS LAST for ASC, NULLS FIRST for DESC. SQL leaves
+// the default implementation-defined and DuckDB picks NULLS LAST in both
+// directions, but wadjet speaks the PostgreSQL wire protocol and a client
+// writing ORDER BY x DESC expects PostgreSQL's placement. The DuckDB gate
+// sets default_null_order on the oracle so the comparison still holds.
 //
-// The declared default used to read `!s.Desc` here and in the planner's
-// resolveNullsLast, but no query ever saw it: the DESC comparator negated
-// the kernel's null handling along with its value comparison, so a nominal
-// NULLS FIRST for DESC came out of the engine as NULLS LAST. #343 removed
-// that negation, and this constant records what the engine actually emits
-// rather than what the comment used to claim.
+// This default was unreachable before #343: the DESC comparator negated the
+// kernel's null handling along with its value comparison, so a nominal NULLS
+// FIRST for DESC came out of the engine as NULLS LAST. With that negation
+// gone the declaration is what the engine emits.
+//
+// Must agree with the planner's resolveNullsLast key for key, or the two
+// execution paths sort differently.
 func (s SortKeySpec) PlaceNullsLast() bool {
 	if s.NullsLast != nil {
 		return *s.NullsLast
 	}
-	return true
+	return !s.Desc
 }
 
 // NullsLastPtr returns a pointer suitable for SortKeySpec.NullsLast.

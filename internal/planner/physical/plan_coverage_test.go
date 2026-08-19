@@ -813,17 +813,24 @@ func TestResolveNullsLast(t *testing.T) {
 		ob   logical.OrderExpr
 		want bool
 	}{
-		// The engine default is NULLS LAST in BOTH directions — DuckDB's
-		// default_null_order, and the placement this engine has always
-		// emitted. It used to be declared here as `!ob.Desc` (PostgreSQL's
-		// rule) but no query ever saw that: the DESC comparator negated the
-		// kernel's null handling along with its values, so a nominal NULLS
-		// FIRST for DESC left the engine as NULLS LAST. #343 removed the
-		// negation, and this constant records what the engine emits rather
-		// than what the comment claimed — the stored DuckDB fingerprints in
-		// benchmarks/tpch pin the DESC default to NULLS LAST.
+		// The engine default is PostgreSQL's rule: NULLS LAST for ASC,
+		// NULLS FIRST for DESC. SQL leaves the default
+		// implementation-defined; wadjet speaks the PostgreSQL wire
+		// protocol, so a psql/DataGrip/Superset client writing ORDER BY x
+		// DESC gets PostgreSQL's placement.
+		//
+		// This default was unreachable before #343 — the DESC comparator
+		// negated the kernel's null handling along with its values, so a
+		// nominal NULLS FIRST for DESC left the engine as NULLS LAST. With
+		// that negation gone the declaration is what the engine emits.
+		//
+		// DuckDB defaults the other way (NULLS LAST in both directions), so
+		// the differential gate runs the oracle with
+		// default_null_order='nulls_last_on_asc_first_on_desc' rather than
+		// exempting the ordering entries — a configured oracle still
+		// compares every row, an exemption would not.
 		{"ASC default", logical.OrderExpr{Column: "id"}, true},
-		{"DESC default", logical.OrderExpr{Column: "id", Desc: true}, true},
+		{"DESC default", logical.OrderExpr{Column: "id", Desc: true}, false},
 		// An explicit clause wins in BOTH directions. DESC was the broken
 		// pair — both spellings came out inverted (#343).
 		{"ASC NULLS FIRST", logical.OrderExpr{Column: "id", NullsFirst: &yes}, false},
