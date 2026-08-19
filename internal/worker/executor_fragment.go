@@ -1942,12 +1942,19 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 				fb.PrependOps = append(fb.PrependOps, project)
 			}
 		}
-		// AVG-fold collapses __avg_sum#X / __avg_count#X synthetics into the
-		// single AVG output column on the FINAL stage only. Wrap the slice-
-		// taking applyAvgFold helper as a per-batch transform.
+		// Partial-state fold, FINAL stage only: __avg_sum#X / __avg_count#X
+		// collapse into the single AVG column X, and __var_state#kind#X
+		// (the STDDEV/VARIANCE (count, mean, M2) triple) into X. Both
+		// synthetics have to survive intermediate merge_aggregate stages
+		// intact, which is what spec.FoldAvg gates. Wrap the slice-taking
+		// helpers as one per-batch transform.
 		if spec.FoldAvg {
 			fb.DrainXform = func(b *batch.RecordBatch) (*batch.RecordBatch, error) {
 				folded, ferr := applyAvgFold([]*batch.RecordBatch{b})
+				if ferr != nil {
+					return nil, ferr
+				}
+				folded, ferr = applyVarFold(folded)
 				if ferr != nil {
 					return nil, ferr
 				}
@@ -2121,6 +2128,13 @@ func (e *Executor) buildFragmentHashAggregate(spec distributed.OpSpec) (*exec.Ha
 			}
 			if fn == exec.AggCount {
 				fn = exec.AggSum
+			}
+			// The partial emitted an encoded (count, mean, M2) triple per
+			// group; merging reads those triples and combines them pairwise
+			// instead of accumulating raw values (which is what AggVarState
+			// would do to a 48-char hex string: nothing).
+			if fn == exec.AggVarState {
+				fn = exec.AggVarStateMerge
 			}
 		}
 		aggCols[i] = exec.AggColumn{

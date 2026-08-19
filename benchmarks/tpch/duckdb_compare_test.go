@@ -428,6 +428,38 @@ func duckdbCorpus() []duckdbCase {
 			GREATEST(ps_supplycost, ps_availqty) AS greatest_mixed,
 			LEAST(ps_supplycost, ps_availqty) AS least_mixed
 			FROM partsupp WHERE ps_partkey <= 20 ORDER BY ps_partkey, ps_suppkey`},
+		// The variance family (#339). Both arms answered these with numbers
+		// that look like standard deviations — arm A from a fraction of the
+		// rows (a partial's state was dropped at every parallel merge, so
+		// 143940.6 against a true 144048.14), arm B by re-aggregating the
+		// per-task STDDEV values (531.79). A wrong-but-plausible float is
+		// exactly what a cross-engine fingerprint is for: the row count is
+		// right in both cases and only the value gives it away.
+		//
+		// o_totalprice is the discriminating column — mean ~2.5e5 against a
+		// spread of ~1.4e5, where a sum-of-squares accumulator cancels away
+		// its leading digits. The 0.07% error the merge defect produced is
+		// visible at both fingerprint precisions (1.43941e+05 / 1.439e+05
+		// against 1.44048e+05 / 1.44e+05), so the entry fails on the old
+		// implementation rather than passing inside the float tolerance.
+		//
+		// All six spellings in one row also pins the semantics: DuckDB reads
+		// bare STDDEV and VARIANCE as the SAMPLE forms, and the stored
+		// fingerprint is DuckDB's, so a Wadjet that switched to population
+		// would fail here — the n/(n-1) factor is 1.00003 at 15000 rows,
+		// which survives the 6-digit fine precision.
+		duckdbCase{name: "VarianceFamily", sql: `SELECT STDDEV(o_totalprice) AS s, STDDEV_SAMP(o_totalprice) AS ss,
+			STDDEV_POP(o_totalprice) AS sp, VARIANCE(o_totalprice) AS v,
+			VAR_SAMP(o_totalprice) AS vs, VAR_POP(o_totalprice) AS vp FROM orders`},
+		// Grouped, so partial states combine per key rather than into one
+		// global accumulator — the shape a distributed shuffle produces.
+		duckdbCase{name: "StddevGrouped", sql: `SELECT o_orderstatus AS k, STDDEV(o_totalprice) AS s, COUNT(*) AS c
+			FROM orders GROUP BY o_orderstatus ORDER BY k`},
+		// The other end of the scale: l_discount runs 0..0.10, so its spread
+		// is the same order as its mean. The reported error went the other
+		// way on this column, which is what tells accumulated noise apart
+		// from a constant sample/population factor.
+		duckdbCase{name: "StddevSmallSpread", sql: "SELECT STDDEV(l_discount) AS s, VAR_POP(l_discount) AS vp FROM lineitem"},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

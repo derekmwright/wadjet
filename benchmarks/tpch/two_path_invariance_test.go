@@ -81,6 +81,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -215,6 +216,112 @@ func cellNum(row map[string]any, col string) float64 {
 		return 0
 	}
 	return f
+}
+
+// The variance-family reference (#339). Nothing below reads a constant: the
+// expected value is a Welford pass computed here, in the test, over the very
+// rows the fixture generator produced for the arm under test. A hand-copied
+// number would have to be re-derived whenever the fixture changes, and the
+// original defect was precisely a plausible-looking number.
+
+// sf001Fixture is the deterministic SF0.01 fixture the two-path cluster is
+// loaded from (Generate seeds off the scale factor), materialized once.
+var sf001Fixture = sync.OnceValue(func() map[string][]map[string]any { return Generate(SF001) })
+
+func sf001Table(tb testing.TB, table string) []map[string]any {
+	tb.Helper()
+	rows := sf001Fixture()[table]
+	if len(rows) == 0 {
+		tb.Fatalf("fixture has no rows for table %q", table)
+	}
+	return rows
+}
+
+// sf001Column pulls one numeric column out of the fixture.
+func sf001Column(tb testing.TB, table, col string) []float64 {
+	tb.Helper()
+	rows := sf001Table(tb, table)
+	out := make([]float64, 0, len(rows))
+	for _, r := range rows {
+		v, ok := r[col]
+		if !ok {
+			tb.Fatalf("fixture table %q has no column %q", table, col)
+		}
+		out = append(out, toFloat(v))
+	}
+	return out
+}
+
+func toFloat(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case int32:
+		return float64(n)
+	case int:
+		return float64(n)
+	}
+	f, _ := strconv.ParseFloat(fmt.Sprint(v), 64)
+	return f
+}
+
+// varSamp / varPop select the divisor: n-1 for the sample form (what
+// STDDEV and VARIANCE mean), n for the population form.
+const (
+	varSamp = true
+	varPop  = false
+)
+
+// welfordVariance is the reference accumulator: Welford's online algorithm,
+// one sequential pass, no partials and therefore no merge to get wrong.
+func welfordVariance(vals []float64, sample bool) float64 {
+	var n int64
+	var mean, m2 float64
+	for _, x := range vals {
+		n++
+		d := x - mean
+		mean += d / float64(n)
+		m2 += d * (x - mean)
+	}
+	if sample {
+		if n < 2 {
+			return math.NaN()
+		}
+		return m2 / float64(n-1)
+	}
+	if n == 0 {
+		return math.NaN()
+	}
+	return m2 / float64(n)
+}
+
+func identityFloat(f float64) float64 { return f }
+
+// assertVarianceValue checks one result cell against the reference pass over
+// the fixture column. finish is math.Sqrt for a STDDEV and identityFloat for
+// a VARIANCE.
+func assertVarianceValue(tb testing.TB, rows []map[string]any, col string, sample bool,
+	finish func(float64) float64, table, fixtureCol string) {
+	tb.Helper()
+	if len(rows) != 1 {
+		tb.Fatalf("%d rows, want 1", len(rows))
+	}
+	vals := sf001Column(tb, table, fixtureCol)
+	want := finish(welfordVariance(vals, sample))
+	got := cellNum(rows[0], col)
+	if rel := math.Abs(got-want) / math.Abs(want); rel > 1e-9 {
+		form := "sample"
+		if !sample {
+			form = "population"
+		}
+		tb.Errorf("%s = %.17g, want %.17g (%s, Welford over the %d fixture values of %s.%s; rel err %g)\n"+
+			"  a merge that keeps only one partial's state lands a few tenths of a percent off",
+			col, got, want, form, len(vals), table, fixtureCol, rel)
+	}
 }
 
 // nationOfComment recovers a nation's name from the fixture's n_comment
@@ -840,6 +947,118 @@ func twoPathCorpus() []twoPathQuery {
 						tb.Errorf("SUM(o_totalprice) = %v, want 4065944.86", r["s"])
 					}
 				})
+			}},
+	)
+
+	// #339: the variance family, whose partial state is a (count, mean, M2)
+	// triple rather than a single number, so BOTH merges the engine performs
+	// had to be taught to combine it:
+	//
+	//	arm A — morsel-parallel clones merged into one parent. The clone's
+	//	        extraState was dropped, so the parent answered from the rows
+	//	        the FIRST clone happened to see: STDDEV(o_totalprice) came
+	//	        back 143940.6 (later 144224.1, since which clone wins is a
+	//	        scheduling detail) against a true 144048.14.
+	//	arm B — partial tasks emitted finished STDDEV values and the final
+	//	        stage ran STDDEV again over THOSE: 531.79, the spread of
+	//	        three nearly identical numbers.
+	//
+	// Neither is catchable by a row count, a NULL check, or the arms
+	// agreeing with each other, so every entry carries an assertA against a
+	// Welford pass computed here over the same fixture. o_totalprice is the
+	// discriminating column: mean ~2.5e5 against a spread of ~1.4e5, which
+	// is where a sum-of-squares accumulator loses its digits.
+	out = append(out,
+		twoPathQuery{name: "StddevBigMean", cmp: cmpUnordered,
+			sql: "SELECT STDDEV(o_totalprice) AS s FROM orders",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertVarianceValue(tb, rows, "s", varSamp, math.Sqrt, "orders", "o_totalprice")
+			}},
+		// The whole family in one row, so the sample/population split is
+		// pinned by construction rather than by four separate numbers:
+		// STDDEV and VARIANCE are the SAMPLE forms (as in DuckDB and
+		// PostgreSQL), _pop the population ones, and each stddev is the
+		// square root of its own variance.
+		twoPathQuery{name: "VarianceFamilySemantics", cmp: cmpUnordered,
+			sql: `SELECT STDDEV(o_totalprice) AS s, STDDEV_SAMP(o_totalprice) AS ss,
+				STDDEV_POP(o_totalprice) AS sp, VARIANCE(o_totalprice) AS v,
+				VAR_SAMP(o_totalprice) AS vs, VAR_POP(o_totalprice) AS vp FROM orders`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				assertVarianceValue(tb, rows, "s", varSamp, math.Sqrt, "orders", "o_totalprice")
+				assertVarianceValue(tb, rows, "ss", varSamp, math.Sqrt, "orders", "o_totalprice")
+				assertVarianceValue(tb, rows, "sp", varPop, math.Sqrt, "orders", "o_totalprice")
+				assertVarianceValue(tb, rows, "v", varSamp, identityFloat, "orders", "o_totalprice")
+				assertVarianceValue(tb, rows, "vs", varSamp, identityFloat, "orders", "o_totalprice")
+				assertVarianceValue(tb, rows, "vp", varPop, identityFloat, "orders", "o_totalprice")
+				// Sample > population, always, and by the exact factor
+				// n/(n-1) — which is 1.00003 at 15000 rows, three orders of
+				// magnitude smaller than the defect. Stating it here is what
+				// rules out "wadjet just returns the other definition".
+				r := rows[0]
+				vs, vp := cellNum(r, "vs"), cellNum(r, "vp")
+				n := float64(len(sf001Column(tb, "orders", "o_totalprice")))
+				if want := vp * n / (n - 1); math.Abs(vs-want)/want > 1e-9 {
+					tb.Errorf("VAR_SAMP/VAR_POP = %v/%v; sample must be population × n/(n-1) = %v", vs, vp, want)
+				}
+			}},
+		// A column at the other end of the scale: l_discount is 0..0.10, so
+		// its spread is the same order as its mean. The reported error went
+		// the OTHER way here (0.031507 against 0.0316120), which is what
+		// distinguishes accumulated noise from a constant sample/population
+		// factor.
+		twoPathQuery{name: "StddevSmallSpread", cmp: cmpUnordered,
+			sql: "SELECT STDDEV(l_discount) AS s FROM lineitem",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertVarianceValue(tb, rows, "s", varSamp, math.Sqrt, "lineitem", "l_discount")
+			}},
+		// Grouped, so the merge combines states PER KEY rather than into one
+		// global accumulator — the path a distributed shuffle takes.
+		twoPathQuery{name: "StddevGrouped", cmp: cmpOrdered,
+			sql: `SELECT o_orderstatus AS k, STDDEV(o_totalprice) AS s, COUNT(*) AS c
+				FROM orders GROUP BY o_orderstatus ORDER BY k`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) == 0 {
+					tb.Fatal("no rows")
+				}
+				byStatus := map[string][]float64{}
+				for _, r := range sf001Table(tb, "orders") {
+					byStatus[fmt.Sprint(r["o_orderstatus"])] = append(
+						byStatus[fmt.Sprint(r["o_orderstatus"])], toFloat(r["o_totalprice"]))
+				}
+				for _, r := range rows {
+					k := cellText(r, "k")
+					vals, ok := byStatus[k]
+					if !ok {
+						tb.Errorf("result carries group %q, which the fixture does not", k)
+						continue
+					}
+					if got := int(cellNum(r, "c")); got != len(vals) {
+						tb.Errorf("group %q: COUNT(*) = %d, fixture has %d rows", k, got, len(vals))
+					}
+					want := math.Sqrt(welfordVariance(vals, varSamp))
+					if got := cellNum(r, "s"); math.Abs(got-want)/want > 1e-9 {
+						tb.Errorf("group %q: STDDEV = %.17g, want %.17g (Welford over the group's %d fixture rows)",
+							k, got, want, len(vals))
+					}
+				}
+			}},
+		// STDDEV over one row has no sample answer: NULL, not 0. The
+		// population form of the same one row is 0, not NULL.
+		twoPathQuery{name: "StddevSingleRow", cmp: cmpUnordered,
+			sql: "SELECT STDDEV(o_totalprice) AS s, STDDEV_POP(o_totalprice) AS sp FROM orders WHERE o_orderkey = 1",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				if v, _ := lookupCell(rows[0], "s"); v != nil {
+					tb.Errorf("STDDEV over one row = %v, want NULL", v)
+				}
+				if v, _ := lookupCell(rows[0], "sp"); v == nil || cellNum(rows[0], "sp") != 0 {
+					tb.Errorf("STDDEV_POP over one row = %v, want 0", v)
+				}
 			}},
 	)
 

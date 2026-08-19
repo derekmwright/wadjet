@@ -223,7 +223,9 @@ func aggOutputTypeString(funcName string) parquet.TypeID {
 	switch strings.ToLower(strings.TrimSpace(funcName)) {
 	case "count", "count_distinct", "approx_distinct":
 		return parquet.TypeInt64
-	case "string_agg":
+	case "string_agg", "var_state", "var_state_merge":
+		// A variance partial ships its (count, mean, M2) triple as an
+		// encoded string; only the final fold produces a float.
 		return parquet.TypeString
 	case "bool_and", "every", "bool_or":
 		return parquet.TypeBool
@@ -260,6 +262,14 @@ func parseAggFuncString(s string) exec.AggFunc {
 		return exec.AggStddev
 	case "variance", "var_samp":
 		return exec.AggVariance
+	case "stddev_pop":
+		return exec.AggStddevPop
+	case "var_pop":
+		return exec.AggVarPop
+	case "var_state":
+		return exec.AggVarState
+	case "var_state_merge":
+		return exec.AggVarStateMerge
 	default:
 		return exec.AggSum
 	}

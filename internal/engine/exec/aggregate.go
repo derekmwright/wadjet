@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"os"
@@ -46,6 +47,17 @@ const (
 	AggMinBy
 	AggMaxBy
 	AggMedian
+	// AggVarState and AggVarStateMerge carry the variance family across a
+	// partial/final aggregate split. A finished STDDEV/VARIANCE cannot be
+	// re-aggregated — combining partials needs the (count, mean, M2) triple,
+	// not the scalar each partial reports — so a distributed plan replaces
+	// STDDEV(c) AS x with VAR_STATE(c) AS __var_state#<kind>#x on the partial
+	// stage (emits the encoded triple, see varianceState.encode) and
+	// VAR_STATE_MERGE on every merge stage above it (pairwise-combines the
+	// encoded triples and re-emits one). The final stage's fold
+	// (worker/var_fold.go) decodes the triple into the value <kind> asks for.
+	AggVarState
+	AggVarStateMerge
 )
 
 // AggColumn defines an aggregation to perform.
@@ -596,7 +608,18 @@ type stringAggState struct {
 	parts []string
 }
 
-// varianceState tracks running variance using Welford's online algorithm.
+// varianceState tracks running variance using Welford's online algorithm:
+// the running (count, mean, M2) triple, updated one value at a time and
+// combined pairwise by merge. Welford accumulates the deviations directly
+// instead of subtracting E[x]² from E[x²], so no digits are lost to
+// cancellation when the mean dwarfs the spread — the case that breaks a
+// sum-of-squares accumulator (o_totalprice: mean 2.5e5, spread 1.4e5, so
+// the two terms agree to five digits before the subtraction).
+//
+// The triple is the whole state, which is what makes it mergeable: partial
+// aggregates computed over disjoint row sets combine exactly (see merge),
+// so the same accumulator serves the single-process pipeline, the
+// morsel-parallel clone merge, and the distributed partial/final split.
 type varianceState struct {
 	count int64
 	mean  float64
@@ -609,6 +632,74 @@ func (v *varianceState) update(x float64) {
 	v.mean += delta / float64(v.count)
 	delta2 := x - v.mean
 	v.m2 += delta * delta2
+}
+
+// merge folds another partial's state into this one — Chan, Golub and
+// LeVeque's pairwise combination:
+//
+//	M2 = M2_a + M2_b + delta² · n_a·n_b / n
+//
+// The delta² term is the between-partial contribution. Dropping it (summing
+// M2 alone) leaves only the within-partial variance, and re-aggregating the
+// partials' finished STDDEV values instead is not an approximation at all —
+// it is the standard deviation of a handful of nearly identical numbers.
+// Both were live before #339.
+//
+// mean is combined by the same weighting rather than recomputed from the
+// two means' midpoint, so a small partial merged into a large one moves the
+// mean by its own weight.
+func (v *varianceState) merge(o *varianceState) {
+	if o == nil || o.count == 0 {
+		return
+	}
+	if v.count == 0 {
+		*v = *o
+		return
+	}
+	na, nb := float64(v.count), float64(o.count)
+	n := na + nb
+	delta := o.mean - v.mean
+	v.mean += delta * nb / n
+	v.m2 += o.m2 + delta*delta*na*nb/n
+	v.count += o.count
+}
+
+// varianceStateWidth is the encoded width of a variance partial state:
+// count (int64) + mean (float64) + M2 (float64) = 24 bytes, hex-encoded to
+// 48 ASCII characters. Hex rather than raw bytes because the encoded state
+// travels as a string column through parquet, the .wshf shuffle format and
+// the NATS gather — every one of which is happier with text than with
+// arbitrary bytes — and float64 bits round-trip exactly through it.
+const varianceStateWidth = 48
+
+// encode renders the state as a fixed-width hex string for a partial
+// aggregate's output column. Exact: the float64s go over as their IEEE-754
+// bit patterns, so a merge stage reads back the identical triple.
+func (v *varianceState) encode() string {
+	var buf [24]byte
+	binary.BigEndian.PutUint64(buf[0:8], uint64(v.count))
+	binary.BigEndian.PutUint64(buf[8:16], math.Float64bits(v.mean))
+	binary.BigEndian.PutUint64(buf[16:24], math.Float64bits(v.m2))
+	return hex.EncodeToString(buf[:])
+}
+
+// decodeVarianceState parses encode's output. Reports ok=false for anything
+// else, which the caller treats as "no rows to merge" rather than as a
+// silent zero — a state column that lost its encoding must not read as a
+// valid empty partial.
+func decodeVarianceState(s string) (varianceState, bool) {
+	if len(s) != varianceStateWidth {
+		return varianceState{}, false
+	}
+	var full [24]byte
+	if _, err := hex.Decode(full[:], []byte(s)); err != nil {
+		return varianceState{}, false
+	}
+	return varianceState{
+		count: int64(binary.BigEndian.Uint64(full[0:8])),
+		mean:  math.Float64frombits(binary.BigEndian.Uint64(full[8:16])),
+		m2:    math.Float64frombits(binary.BigEndian.Uint64(full[16:24])),
+	}, true
 }
 
 func (v *varianceState) variancePop() float64 {
@@ -647,6 +738,34 @@ func (s *covarianceState) update(x, y float64) {
 	s.m2y += dy * (y - s.meanY)
 }
 
+// merge folds another partial's co-moments into this one. Same pairwise
+// combination as varianceState.merge, extended to the cross term:
+//
+//	C = C_a + C_b + dx·dy · n_a·n_b / n
+//
+// CORR/COVAR share varianceState's exposure to a dropped merge (they ride
+// the same extraState slot), so they are combined here rather than left for
+// the next report of the same defect.
+func (s *covarianceState) merge(o *covarianceState) {
+	if o == nil || o.count == 0 {
+		return
+	}
+	if s.count == 0 {
+		*s = *o
+		return
+	}
+	na, nb := float64(s.count), float64(o.count)
+	n := na + nb
+	dx := o.meanX - s.meanX
+	dy := o.meanY - s.meanY
+	s.c += o.c + dx*dy*na*nb/n
+	s.m2x += o.m2x + dx*dx*na*nb/n
+	s.m2y += o.m2y + dy*dy*na*nb/n
+	s.meanX += dx * nb / n
+	s.meanY += dy * nb / n
+	s.count += o.count
+}
+
 func (s *covarianceState) covarPop() float64 {
 	if s.count == 0 {
 		return 0
@@ -666,6 +785,58 @@ func (s *covarianceState) correlation() float64 {
 		return 0
 	}
 	return s.c / math.Sqrt(s.m2x*s.m2y)
+}
+
+// Variance-family kinds. A decomposed partial carries the same (count,
+// mean, M2) triple whatever the caller asked for, so the kind travels
+// beside it (in the synthetic column's name) and is applied once, by
+// FinalizeVarianceState, after the last merge.
+//
+// STDDEV and VARIANCE without a suffix are the SAMPLE forms, matching
+// DuckDB and PostgreSQL.
+const (
+	VarKindStddevSamp = "stddev_samp"
+	VarKindVarSamp    = "var_samp"
+	VarKindStddevPop  = "stddev_pop"
+	VarKindVarPop     = "var_pop"
+)
+
+// FinalizeVarianceState decodes a merged partial state and finishes it as
+// the named kind. ok=false means the result is SQL NULL: an unparseable or
+// absent state, fewer than two rows for a sample form, or no rows at all
+// for a population form — the same thresholds the single-process
+// finalization applies.
+//
+// Used by the distributed final-aggregate fold (worker/var_fold.go), which
+// is the only consumer outside this package.
+func FinalizeVarianceState(encoded, kind string) (float64, bool) {
+	st, ok := decodeVarianceState(encoded)
+	if !ok {
+		return 0, false
+	}
+	switch kind {
+	case VarKindStddevSamp:
+		if st.count < 2 {
+			return 0, false
+		}
+		return math.Sqrt(st.varianceSamp()), true
+	case VarKindVarSamp:
+		if st.count < 2 {
+			return 0, false
+		}
+		return st.varianceSamp(), true
+	case VarKindStddevPop:
+		if st.count == 0 {
+			return 0, false
+		}
+		return math.Sqrt(st.variancePop()), true
+	case VarKindVarPop:
+		if st.count == 0 {
+			return 0, false
+		}
+		return st.variancePop(), true
+	}
+	return 0, false
 }
 
 // collectState accumulates raw float64 values for percentile/mode/median.
@@ -1018,8 +1189,10 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	h.aggF64Extract2 = make([]float64Extractor, len(h.Aggs))
 	for i, agg := range h.Aggs {
 		switch agg.Func {
-		case AggStddev, AggVariance, AggStddevPop, AggVarPop,
+		case AggStddev, AggVariance, AggStddevPop, AggVarPop, AggVarState,
 			AggPercentileCont, AggPercentileDisc, AggMedian, AggMode:
+			// AggVarStateMerge is deliberately absent: its input is an
+			// encoded state string, not a number to convert.
 			if idx := h.aggColIdx[i]; idx >= 0 {
 				h.aggF64Extract[i] = resolveFloat64Extractor(b.Columns[idx].Type)
 			}
@@ -1049,6 +1222,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			allSimpleAggs = false
 			h.needsDistinct = true
 		case AggStringAgg, AggStddev, AggVariance, AggStddevPop, AggVarPop,
+			AggVarState, AggVarStateMerge,
 			AggBoolAnd, AggBoolOr, AggCorr, AggCovarSamp, AggCovarPop,
 			AggPercentileCont, AggPercentileDisc, AggMedian,
 			AggMinBy, AggMaxBy:
@@ -2948,40 +3122,7 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 		ext.extraState = make([]any, len(h.Aggs))
 		h.extraStateBytes += int64(len(h.Aggs)) * 80
 	}
-	for i, agg := range h.Aggs {
-		switch agg.Func {
-		case AggCountDistinct:
-			if ext.distinctSets != nil {
-				ext.distinctSets[i] = newDistinctSetFor(h.distinctColType(b, i))
-				h.distinctBytes += 48
-			}
-		case AggStringAgg:
-			sep := agg.Separator
-			if sep == "" {
-				sep = ","
-			}
-			ext.extraState[i] = &stringAggState{sep: sep}
-		case AggStddev, AggVariance, AggStddevPop, AggVarPop:
-			ext.extraState[i] = &varianceState{}
-		case AggBoolAnd:
-			ext.extraState[i] = true
-		case AggBoolOr:
-			ext.extraState[i] = false
-		case AggApproxDistinct:
-			if ext.distinctSets != nil {
-				ext.distinctSets[i] = newDistinctSetFor(h.distinctColType(b, i))
-				h.distinctBytes += 48
-			}
-		case AggCorr, AggCovarSamp, AggCovarPop:
-			ext.extraState[i] = &covarianceState{}
-		case AggPercentileCont, AggPercentileDisc, AggMode, AggMedian:
-			ext.extraState[i] = &collectState{}
-		case AggMinBy:
-			ext.extraState[i] = &minMaxByState{isMin: true}
-		case AggMaxBy:
-			ext.extraState[i] = &minMaxByState{isMin: false}
-		}
-	}
+	h.initGroupState(ext, b)
 	h.strGroupStates = append(h.strGroupStates, gs)
 	h.keys = append(h.keys, keyVals)
 	h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
@@ -3054,40 +3195,54 @@ func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
 			ext.extraState = make([]any, len(h.Aggs))
 			h.extraStateBytes += int64(len(h.Aggs)) * 80
 		}
-		for i, agg := range h.Aggs {
-			switch agg.Func {
-			case AggCountDistinct, AggApproxDistinct:
-				if ext.distinctSets != nil {
-					ext.distinctSets[i] = newDistinctSetFor(h.distinctColType(b, i))
-					h.distinctBytes += 48
-				}
-			case AggStringAgg:
-				sep := agg.Separator
-				if sep == "" {
-					sep = ","
-				}
-				ext.extraState[i] = &stringAggState{sep: sep}
-			case AggStddev, AggVariance, AggStddevPop, AggVarPop:
-				ext.extraState[i] = &varianceState{}
-			case AggBoolAnd:
-				ext.extraState[i] = true
-			case AggBoolOr:
-				ext.extraState[i] = false
-			case AggCorr, AggCovarSamp, AggCovarPop:
-				ext.extraState[i] = &covarianceState{}
-			case AggPercentileCont, AggPercentileDisc, AggMode, AggMedian:
-				ext.extraState[i] = &collectState{}
-			case AggMinBy:
-				ext.extraState[i] = &minMaxByState{isMin: true}
-			case AggMaxBy:
-				ext.extraState[i] = &minMaxByState{isMin: false}
-			}
-		}
+		h.initGroupState(ext, b)
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.keys = append(h.keys, keyVals)
 		h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
 		h.serializedKeyBytes += int64(len(h.keyBuf))
 		h.updateGroup(gs, b, row)
+	}
+}
+
+// initGroupState fills a freshly allocated group's distinct sets and
+// extraState, one entry per aggregate. Shared by processRow and
+// processRowGroupingSets: they used to carry a copy each, and a copy that
+// falls behind hands updateGroup a nil state to type-assert (the panic
+// AggVarState hit on its first distributed run).
+//
+// Callers must have allocated ext.distinctSets / ext.extraState already —
+// whether either is needed is decided once, at resolution, by
+// h.needsDistinct / h.needsExtra.
+func (h *HashAggregate) initGroupState(ext *groupStateExtras, b *batch.RecordBatch) {
+	for i, agg := range h.Aggs {
+		switch agg.Func {
+		case AggCountDistinct, AggApproxDistinct:
+			if ext.distinctSets != nil {
+				ext.distinctSets[i] = newDistinctSetFor(h.distinctColType(b, i))
+				h.distinctBytes += 48
+			}
+		case AggStringAgg:
+			sep := agg.Separator
+			if sep == "" {
+				sep = ","
+			}
+			ext.extraState[i] = &stringAggState{sep: sep}
+		case AggStddev, AggVariance, AggStddevPop, AggVarPop,
+			AggVarState, AggVarStateMerge:
+			ext.extraState[i] = &varianceState{}
+		case AggBoolAnd:
+			ext.extraState[i] = true
+		case AggBoolOr:
+			ext.extraState[i] = false
+		case AggCorr, AggCovarSamp, AggCovarPop:
+			ext.extraState[i] = &covarianceState{}
+		case AggPercentileCont, AggPercentileDisc, AggMode, AggMedian:
+			ext.extraState[i] = &collectState{}
+		case AggMinBy:
+			ext.extraState[i] = &minMaxByState{isMin: true}
+		case AggMaxBy:
+			ext.extraState[i] = &minMaxByState{isMin: false}
+		}
 	}
 }
 
@@ -3178,7 +3333,7 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			current := ext.extraState[i].(bool)
 			ext.extraState[i] = current || boolVal
 
-		case AggStddev, AggVariance, AggStddevPop, AggVarPop:
+		case AggStddev, AggVariance, AggStddevPop, AggVarPop, AggVarState:
 			idx := h.aggColIdx[i]
 			if idx < 0 {
 				continue
@@ -3192,6 +3347,27 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 				continue
 			}
 			ext.extraState[i].(*varianceState).update(extract(v, row))
+
+		case AggVarStateMerge:
+			// One input row is one upstream partial's encoded (count, mean,
+			// M2) triple. Combining them pairwise is the whole point of the
+			// column: re-aggregating finished STDDEV values here would be
+			// the standard deviation of a handful of near-identical numbers.
+			idx := h.aggColIdx[i]
+			if idx < 0 {
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				continue
+			}
+			s, ok := v.GetValue(row).(string)
+			if !ok {
+				continue
+			}
+			if partial, ok := decodeVarianceState(s); ok {
+				ext.extraState[i].(*varianceState).merge(&partial)
+			}
 
 		case AggApproxDistinct:
 			idx := h.aggColIdx[i]
@@ -3846,6 +4022,12 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 				} else {
 					out.Columns[colIdx].SetValue(i, state.variancePop())
 				}
+			case AggVarState, AggVarStateMerge:
+				// Partial output: the state itself, for the merge stage
+				// above (or the final stage's fold) to combine. Never a
+				// finished STDDEV — that is not re-aggregatable.
+				state := ext.extraState[j].(*varianceState)
+				out.Columns[colIdx].SetValue(i, state.encode())
 			case AggApproxDistinct:
 				out.Columns[colIdx].SetValue(i, int64(ext.distinctSets[j].count()))
 			case AggCorr:
@@ -4254,6 +4436,16 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 			for j := range ext.accs {
 				ext.accs[j].Merge(&oExt.accs[j])
 			}
+			// STDDEV/VARIANCE/CORR/COVAR/STRING_AGG/MEDIAN/PERCENTILE/
+			// MODE/MIN_BY/MAX_BY/BOOL_AND/BOOL_OR keep their state in
+			// extraState, not in accs. Without this merge a group split
+			// across morsel-parallel clones kept only the FIRST clone's
+			// partial — the primary starts empty, adopts clone 1 wholesale
+			// (adoptStateFrom), and every later clone's state was dropped
+			// here. STDDEV(o_totalprice) over 15000 rows answered from
+			// 3750 of them (#339): a plausible-looking number, wrong in the
+			// fourth digit, that no row count or NULL check can catch.
+			h.mergeExtraState(ext, oExt)
 			// COUNT(DISTINCT) state lives in distinctSets, not accs. Without
 			// this merge, parallel workers' partial distinct sets aren't
 			// combined and COUNT(DISTINCT) under-counts whenever a group is
@@ -4287,6 +4479,79 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 			h.keys = append(h.keys, oExt.keyValues)
 			h.serializedKeys = append(h.serializedKeys, key)
 			h.serializedKeyBytes += int64(len(key))
+		}
+	}
+}
+
+// mergeExtraState folds one group's extraState from a clone (src) into the
+// primary's (dst). Every kind is combined by its own algebra: the variance
+// and covariance families pairwise (see varianceState.merge), the
+// value-collecting kinds by concatenation, MIN_BY/MAX_BY by keeping the
+// better comparison value, and the boolean kinds by their operator.
+//
+// Missing or short slices are tolerated rather than indexed blindly: a
+// clone that never consumed a row for this group has no state to give.
+func (h *HashAggregate) mergeExtraState(dst, src *groupStateExtras) {
+	if dst == nil || src == nil || src.extraState == nil || dst.extraState == nil {
+		return
+	}
+	for j := range dst.extraState {
+		if j >= len(src.extraState) || src.extraState[j] == nil || j >= len(h.Aggs) {
+			continue
+		}
+		switch s := src.extraState[j].(type) {
+		case *varianceState:
+			if d, ok := dst.extraState[j].(*varianceState); ok {
+				d.merge(s)
+			} else {
+				dst.extraState[j] = s
+			}
+		case *covarianceState:
+			if d, ok := dst.extraState[j].(*covarianceState); ok {
+				d.merge(s)
+			} else {
+				dst.extraState[j] = s
+			}
+		case *stringAggState:
+			// Concatenation order across parallel clones is the order the
+			// clones merge in, which is as defined as STRING_AGG without an
+			// ORDER BY ever is.
+			if d, ok := dst.extraState[j].(*stringAggState); ok {
+				d.parts = append(d.parts, s.parts...)
+			} else {
+				dst.extraState[j] = s
+			}
+		case *collectState:
+			// PERCENTILE/MEDIAN/MODE sort or tally the pooled values at
+			// finalize, so appending is exact.
+			if d, ok := dst.extraState[j].(*collectState); ok {
+				d.values = append(d.values, s.values...)
+			} else {
+				dst.extraState[j] = s
+			}
+		case *minMaxByState:
+			d, ok := dst.extraState[j].(*minMaxByState)
+			if !ok {
+				dst.extraState[j] = s
+				continue
+			}
+			if !s.hasValue {
+				continue
+			}
+			if !d.hasValue || (d.isMin && s.bestCmp < d.bestCmp) || (!d.isMin && s.bestCmp > d.bestCmp) {
+				d.bestVal, d.bestCmp, d.hasValue = s.bestVal, s.bestCmp, true
+			}
+		case bool:
+			d, ok := dst.extraState[j].(bool)
+			if !ok {
+				dst.extraState[j] = s
+				continue
+			}
+			if h.Aggs[j].Func == AggBoolAnd {
+				dst.extraState[j] = d && s
+			} else {
+				dst.extraState[j] = d || s
+			}
 		}
 	}
 }

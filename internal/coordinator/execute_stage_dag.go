@@ -1742,7 +1742,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 			InputType:  int(a.InputType),
 		})
 	}
-	aggs = decomposeAvg(aggs)
+	aggs = decomposeVar(decomposeAvg(aggs))
 
 	tasks := make([]distributed.Task, 0, actualTasks)
 	for shardIdx, files := range fileSets {
@@ -2514,7 +2514,7 @@ func (c *Coordinator) dispatchComputeStage(
 				InputType:  int(a.InputType),
 			})
 		}
-		aggs = decomposeAvg(aggs)
+		aggs = decomposeVar(decomposeAvg(aggs))
 		// Convert stage.SortKeys → distributed.SortKeySpec.
 		var sorts []distributed.SortKeySpec
 		for _, s := range stage.SortKeys {
@@ -2609,7 +2609,7 @@ func (c *Coordinator) dispatchComputeStage(
 			chainedOps = append(chainedOps, distributed.OpSpec{
 				Type:        distributed.OpHashAggregate,
 				GroupByCols: append([]string(nil), stage.ChainedAggGroupBy...),
-				Aggregates:  decomposeAvg(chainAggs),
+				Aggregates:  decomposeVar(decomposeAvg(chainAggs)),
 				// Derived group-bys / agg inputs (SUBSTR(...), price*(1-disc))
 				// need the worker's input projection ahead of the aggregate —
 				// without it the expression column doesn't exist and groups
@@ -3710,7 +3710,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	// step reconstructs AVG only on the FINAL task (mergeMode), so
 	// intermediate output schemas carry the synthetic columns end-to-
 	// end up to the final's fold.
-	aggs = decomposeAvg(aggs)
+	aggs = decomposeVar(decomposeAvg(aggs))
 
 	// Phase 1: intermediates. Each consumes a slice of upstream files,
 	// re-aggregates in merge mode, and emits its own partial output.
