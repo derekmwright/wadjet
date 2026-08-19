@@ -232,15 +232,16 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 	case StageSort, "merge_sort":
 		return RequiredDistribution{Kind: RequiredAny}
 	case StageWindow:
-		// If any window column declares a PartitionBy, the input must be
-		// clustered on those keys. Take the first PartitionBy as the
-		// requirement (today's planner emits a single window stage per
-		// partition spec; multiple PartitionBy clauses become separate
-		// window stages).
-		for _, wc := range stage.WindowCols {
-			if len(wc.PartitionBy) > 0 {
-				return RequiredDistribution{Kind: RequiredClusteredOn, Keys: wc.PartitionBy}
-			}
+		// A window over PARTITION BY k is computable one partition at a
+		// time, so clustering on k is exactly what lets the stage fan out.
+		// windowPartitionKeys declines the shapes where that is not true —
+		// a column with no PARTITION BY (global: every row must meet), or
+		// two columns partitioned on different keys (one exchange cannot
+		// cluster both, and clustering on the first would slice the second
+		// one's partitions across tasks). Those run Singleton, where
+		// RequiredAny is honest: one task reads everything.
+		if keys, ok := windowPartitionKeys(stage); ok {
+			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: keys}
 		}
 		return RequiredDistribution{Kind: RequiredAny}
 	case StagePipeline, "table_func":
@@ -375,11 +376,72 @@ func OutputDistribution(stage Stage, deps map[string]Distribution, workerCount i
 		// OutputSinglePart list, so every downstream consumer reads the
 		// whole concatenation.
 		return Distribution{Kind: DistRoundRobin}
-	case StageWindow, StagePipeline, "table_func":
+	case StageWindow:
+		// Partition-parallel window: when the input already arrives
+		// hash-partitioned on exactly this stage's PARTITION BY keys, every
+		// partition of every window group is whole inside one input
+		// partition, so task w windows its slice and emits it — the output
+		// keeps the input's partitioning. Mirrors the grouped-final rule
+		// above, and for the same reason: disjoint keys make per-partition
+		// computation exact.
+		//
+		// Everything else is Singleton — one task holding all the rows.
+		// That is the honest label for a GLOBAL window (no PARTITION BY:
+		// ROW_NUMBER() OVER (ORDER BY x) numbers rows against every other
+		// row) and for a stage whose columns disagree on their partition
+		// keys. It is a scalability bound, not a correctness one: a
+		// Singleton stage's single task reads every partition of its input
+		// (partitionFilesForWorker with workerCount==1), so the answer is
+		// the same one the single-process pipeline gives.
+		if keys, ok := windowPartitionKeys(stage); ok && len(stage.Dependencies) == 1 {
+			if depDist, ok := deps[stage.Dependencies[0]]; ok &&
+				depDist.Kind == DistHashPartitioned &&
+				keysEqual(depDist.Keys, keys) {
+				return depDist
+			}
+		}
+		return Distribution{Kind: DistSingleton}
+	case StagePipeline, "table_func":
 		return Distribution{Kind: DistSingleton}
 	default:
 		return Distribution{Kind: DistSingleton}
 	}
+}
+
+// windowPartitionKeys returns the PARTITION BY keys the whole window stage
+// can be distributed on, and ok=false when the stage has no such key set.
+//
+// A window function's partition is its universe: PARTITION BY k means row r's
+// value depends only on rows sharing r's k, so hash-partitioning the input on
+// k makes each task's slice self-sufficient. Two conditions break that, and
+// both answer ok=false rather than picking a key set that is right for part
+// of the stage:
+//
+//   - A column with NO PARTITION BY is a global window — its universe is the
+//     entire input, and no exchange makes a task self-sufficient.
+//   - Columns partitioned on DIFFERENT keys cannot share one exchange:
+//     clustering on the first spec's keys spreads the second spec's
+//     partitions across tasks, and each task would then compute the second
+//     column over a fragment of its partition. That is a wrong answer, not a
+//     slow one.
+//
+// One window stage can carry several columns with different OVER clauses
+// (exec.Window groups them by PartitionBy+OrderBy internally), so the mixed
+// case is a real shape, not a theoretical one.
+func windowPartitionKeys(stage Stage) ([]string, bool) {
+	if len(stage.WindowCols) == 0 {
+		return nil, false
+	}
+	keys := stage.WindowCols[0].PartitionBy
+	if len(keys) == 0 {
+		return nil, false
+	}
+	for _, wc := range stage.WindowCols[1:] {
+		if !keysEqual(wc.PartitionBy, keys) {
+			return nil, false
+		}
+	}
+	return keys, true
 }
 
 // assignStageDistributions walks the stages slice in dependency order and

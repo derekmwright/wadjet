@@ -225,6 +225,38 @@ func TestRequiredChildDistribution(t *testing.T) {
 			want: RequiredDistribution{Kind: RequiredAny},
 		},
 		{
+			// One window stage can carry several OVER clauses. Clustering
+			// on the first column's keys would slice the SECOND column's
+			// partitions across tasks, and each task would compute it over
+			// a fragment of its partition — a wrong answer, so the stage
+			// asks for nothing and runs Singleton instead.
+			name: "window with disagreeing PartitionBy requires any",
+			stage: Stage{
+				ID: "window-0", Type: "window",
+				WindowCols: []WindowColSpec{
+					{Func: "row_number", PartitionBy: []string{"o_custkey"}},
+					{Func: "rank", PartitionBy: []string{"o_orderstatus"}},
+				},
+			},
+			slot: 0,
+			want: RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			// A global window mixed in has the same effect for a stronger
+			// reason: its universe is every row, so no exchange makes a
+			// task self-sufficient.
+			name: "window with one global column requires any",
+			stage: Stage{
+				ID: "window-0", Type: "window",
+				WindowCols: []WindowColSpec{
+					{Func: "row_number", PartitionBy: []string{"o_custkey"}},
+					{Func: "rank"},
+				},
+			},
+			slot: 0,
+			want: RequiredDistribution{Kind: RequiredAny},
+		},
+		{
 			name:  "pipeline requires any",
 			stage: Stage{ID: "pipeline-0", Type: "pipeline"},
 			slot:  0,
@@ -384,6 +416,68 @@ func TestOutputDistribution(t *testing.T) {
 			stage: Stage{ID: "window-0", Type: "window"},
 			deps:  nil,
 			want:  Distribution{Kind: DistSingleton},
+		},
+		{
+			// The partition-parallel shape: the input already arrives
+			// hash-partitioned on exactly the PARTITION BY keys, so every
+			// window partition is whole inside one input partition and the
+			// stage fans out to one task per partition.
+			name: "window over a matching hash exchange mirrors it",
+			stage: Stage{
+				ID: "window-0", Type: "window",
+				Dependencies: []string{"ex-1"},
+				WindowCols: []WindowColSpec{
+					{Func: "row_number", PartitionBy: []string{"o_custkey"}},
+					{Func: "sum", InputCol: "o_totalprice", PartitionBy: []string{"o_custkey"}},
+				},
+			},
+			deps: map[string]Distribution{
+				"ex-1": {Kind: DistHashPartitioned, Keys: []string{"o_custkey"}, Count: 8},
+			},
+			want: Distribution{Kind: DistHashPartitioned, Keys: []string{"o_custkey"}, Count: 8},
+		},
+		{
+			name: "window over an exchange on other keys stays singleton",
+			stage: Stage{
+				ID: "window-0", Type: "window",
+				Dependencies: []string{"ex-1"},
+				WindowCols:   []WindowColSpec{{Func: "row_number", PartitionBy: []string{"o_custkey"}}},
+			},
+			deps: map[string]Distribution{
+				"ex-1": {Kind: DistHashPartitioned, Keys: []string{"o_orderkey"}, Count: 8},
+			},
+			want: Distribution{Kind: DistSingleton},
+		},
+		{
+			// The gate that keeps a mixed stage correct: even over an
+			// exchange matching the FIRST column's keys, the stage stays
+			// Singleton — one task reads every partition, which is the
+			// only grain that serves both OVER clauses.
+			name: "window with disagreeing PartitionBy stays singleton over a matching exchange",
+			stage: Stage{
+				ID: "window-0", Type: "window",
+				Dependencies: []string{"ex-1"},
+				WindowCols: []WindowColSpec{
+					{Func: "row_number", PartitionBy: []string{"o_custkey"}},
+					{Func: "rank", PartitionBy: []string{"o_orderstatus"}},
+				},
+			},
+			deps: map[string]Distribution{
+				"ex-1": {Kind: DistHashPartitioned, Keys: []string{"o_custkey"}, Count: 8},
+			},
+			want: Distribution{Kind: DistSingleton},
+		},
+		{
+			name: "global window stays singleton over a hash exchange",
+			stage: Stage{
+				ID: "window-0", Type: "window",
+				Dependencies: []string{"ex-1"},
+				WindowCols:   []WindowColSpec{{Func: "row_number"}},
+			},
+			deps: map[string]Distribution{
+				"ex-1": {Kind: DistHashPartitioned, Keys: []string{"o_custkey"}, Count: 8},
+			},
+			want: Distribution{Kind: DistSingleton},
 		},
 		{
 			name:  "pipeline emits singleton",

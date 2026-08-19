@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -32,6 +33,56 @@ const (
 	WinCumeDist
 	WinNthValue
 )
+
+// ParseWindowFunc maps a SQL window function name (case-insensitive) onto its
+// WindowFunc constant. ok is false for a name this operator does not
+// implement, and the returned WindowFunc is then WinRowNumber — the zero
+// value, which the single-process planner has always fallen back to. A caller
+// that ships the spec somewhere else (the distributed fragment builder) should
+// refuse on !ok instead: computing ROW_NUMBER for a function nobody
+// recognized is a wrong answer with no error attached.
+//
+// It lives here rather than in the planner because both the planner and the
+// worker turn a name into this package's constant, and two switch statements
+// are two chances to disagree.
+func ParseWindowFunc(s string) (WindowFunc, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "row_number":
+		return WinRowNumber, true
+	case "rank":
+		return WinRank, true
+	case "dense_rank":
+		return WinDenseRank, true
+	case "sum":
+		return WinSum, true
+	case "count":
+		return WinCount, true
+	case "avg":
+		return WinAvg, true
+	case "min":
+		return WinMin, true
+	case "max":
+		return WinMax, true
+	case "lag":
+		return WinLag, true
+	case "lead":
+		return WinLead, true
+	case "first_value":
+		return WinFirstValue, true
+	case "last_value":
+		return WinLastValue, true
+	case "ntile":
+		return WinNtile, true
+	case "percent_rank":
+		return WinPercentRank, true
+	case "cume_dist":
+		return WinCumeDist, true
+	case "nth_value":
+		return WinNthValue, true
+	default:
+		return WinRowNumber, false
+	}
+}
 
 // WindowFrameSpec describes a window frame specification for execution.
 type WindowFrameSpec struct {

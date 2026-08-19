@@ -317,14 +317,30 @@ type UnionArm struct {
 	Projections []ProjectExprSpec
 }
 
-// WindowColSpec defines a window function column in a stage.
+// WindowColSpec defines a window function column in a stage. Every field is
+// resolved by windowExecColumn — the same resolution the single-process
+// pipeline compiles into exec.WindowColumn — so the stage carries a spec the
+// worker can execute without a catalog or a logical plan.
 type WindowColSpec struct {
-	Func        string
-	InputCol    string
-	OutputCol   string
+	Func string
+	// InputCol is the column the function reads, alone: the offset, default
+	// and N that share a SQL argument list are parsed out into the fields
+	// below at plan time (logical.WindowExpr.InputCol keeps the raw list).
+	InputCol   string
+	OutputCol  string
+	OutputType parquet.TypeID
+	// PartitionBy is what makes a window distributable: rows of one
+	// partition can be windowed without seeing any other partition, so a
+	// hash exchange on these keys turns the stage into N independent tasks.
+	// Empty = a global window, which needs every row in one place.
 	PartitionBy []string
 	OrderBy     []SortKeySpec
 	Frame       *logical.WindowFrameSpec
+	// Function-specific arguments (see InputCol).
+	LagLeadOffset  int
+	LagLeadDefault any
+	NtileBuckets   int
+	NthValueN      int
 }
 
 // FusedJoinSpec describes a broadcast join absorbed into a parent join stage.
@@ -4452,22 +4468,32 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		stageID := fmt.Sprintf("window-%d", len(*stages))
 		var winCols []WindowColSpec
 		for _, we := range node.WindowExprs {
+			// Resolved by the same helper buildWindow uses, so the stage
+			// spec and the single-process operator describe one computation
+			// — including the output type, which nothing downstream of the
+			// worker can correct (#345).
+			ec := windowExecColumn(node, we)
 			var orderBy []SortKeySpec
 			for _, ob := range we.OrderBy {
 				orderBy = append(orderBy, SortKeySpec{Column: ob.Column, Desc: ob.Desc, NullsLast: resolveNullsLast(ob)})
 			}
 			winCols = append(winCols, WindowColSpec{
-				Func:        we.Func,
-				InputCol:    we.InputCol,
-				OutputCol:   we.OutputCol,
-				PartitionBy: we.PartitionBy,
-				OrderBy:     orderBy,
-				Frame:       we.Frame,
+				Func:           we.Func,
+				InputCol:       ec.InputCol,
+				OutputCol:      ec.OutputCol,
+				OutputType:     ec.OutputType,
+				PartitionBy:    ec.PartitionBy,
+				OrderBy:        orderBy,
+				Frame:          we.Frame,
+				LagLeadOffset:  ec.LagLeadOffset,
+				LagLeadDefault: ec.LagLeadDefault,
+				NtileBuckets:   ec.NtileBuckets,
+				NthValueN:      ec.NthValueN,
 			})
 		}
 		stage := Stage{
 			ID:         stageID,
-			Type:       "window",
+			Type:       StageWindow,
 			Tasks:      1,
 			WindowCols: winCols,
 		}
@@ -7355,74 +7381,7 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 
 	var winCols []exec.WindowColumn
 	for _, we := range node.WindowExprs {
-		var orderKeys []exec.SortKey
-		for _, ob := range we.OrderBy {
-			order := exec.Ascending
-			if ob.Desc {
-				order = exec.Descending
-			}
-			orderKeys = append(orderKeys, exec.SortKey{
-				Column:    ob.Column,
-				Order:     order,
-				NullsLast: resolveNullsLast(ob),
-			})
-		}
-		wc := exec.WindowColumn{
-			Func: parseWindowFunc(we.Func),
-			// InputColumn drops the offset/default/N that share the
-			// argument string, so cleanExpr sees a column reference and
-			// nothing else. Applied the other way round, a float default
-			// (LAG(x, 1, 1.5)) looked like a qualified name and cleanExpr
-			// returned "5" as the input column.
-			InputCol:    cleanExpr(we.InputColumn()),
-			OutputCol:   we.OutputCol,
-			OutputType:  windowSpecOutputType(node, we),
-			PartitionBy: we.PartitionBy,
-			OrderBy:     orderKeys,
-		}
-		if we.Frame != nil {
-			wc.Frame = &exec.WindowFrameSpec{
-				Mode:  we.Frame.Mode,
-				Start: exec.WindowBound{Type: we.Frame.Start.Type, Offset: we.Frame.Start.Offset},
-				End:   exec.WindowBound{Type: we.Frame.End.Type, Offset: we.Frame.End.Offset},
-			}
-		}
-		// Parse the function-specific arguments out of the rest of the
-		// argument string (InputCol carries the whole list verbatim).
-		fn := strings.ToLower(we.Func)
-		if fn == "ntile" {
-			if n, err := strconv.Atoi(strings.TrimSpace(we.InputCol)); err == nil {
-				wc.NtileBuckets = n
-			}
-		} else if fn == "nth_value" {
-			if parts := strings.SplitN(we.InputCol, ",", 2); len(parts) >= 2 {
-				if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
-					wc.NthValueN = n
-				}
-			}
-		} else if fn == "lag" || fn == "lead" {
-			parts := strings.SplitN(we.InputCol, ",", 3)
-			if len(parts) >= 2 {
-				if offset, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
-					wc.LagLeadOffset = offset
-				}
-			}
-			if len(parts) >= 3 {
-				defStr := strings.TrimSpace(parts[2])
-				if v, err := strconv.ParseFloat(defStr, 64); err == nil {
-					wc.LagLeadDefault = v
-				} else {
-					// A string default arrives as SQL source, quotes and
-					// all; passing it through wrote 'none' — with the
-					// quotes — into the result column.
-					if len(defStr) >= 2 && strings.HasPrefix(defStr, "'") && strings.HasSuffix(defStr, "'") {
-						defStr = strings.ReplaceAll(defStr[1:len(defStr)-1], "''", "'")
-					}
-					wc.LagLeadDefault = defStr
-				}
-			}
-		}
-		winCols = append(winCols, wc)
+		winCols = append(winCols, windowExecColumn(node, we))
 	}
 
 	winOp := exec.NewWindow(winCols)
@@ -8897,43 +8856,14 @@ func parseAggFunc(s string) exec.AggFunc {
 	}
 }
 
+// parseWindowFunc maps a SQL window function name onto its operator constant,
+// falling back to ROW_NUMBER for a name exec does not implement. The fallback
+// is the single-process pipeline's long-standing behavior and is left alone
+// here; callers that can afford to refuse an unknown name (the worker's
+// fragment builder) use exec.ParseWindowFunc's ok directly.
 func parseWindowFunc(s string) exec.WindowFunc {
-	switch strings.ToLower(s) {
-	case "row_number":
-		return exec.WinRowNumber
-	case "rank":
-		return exec.WinRank
-	case "dense_rank":
-		return exec.WinDenseRank
-	case "sum":
-		return exec.WinSum
-	case "count":
-		return exec.WinCount
-	case "avg":
-		return exec.WinAvg
-	case "min":
-		return exec.WinMin
-	case "max":
-		return exec.WinMax
-	case "lag":
-		return exec.WinLag
-	case "lead":
-		return exec.WinLead
-	case "first_value":
-		return exec.WinFirstValue
-	case "last_value":
-		return exec.WinLastValue
-	case "ntile":
-		return exec.WinNtile
-	case "percent_rank":
-		return exec.WinPercentRank
-	case "cume_dist":
-		return exec.WinCumeDist
-	case "nth_value":
-		return exec.WinNthValue
-	default:
-		return exec.WinRowNumber
-	}
+	fn, _ := exec.ParseWindowFunc(s)
+	return fn
 }
 
 // windowOutputType declares the output type of an INPUT-INDEPENDENT window
@@ -9012,6 +8942,88 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) parquet.Typ
 		return windowOutputType(fn)
 	}
 	return t
+}
+
+// windowExecColumn resolves one logical WindowExpr into the executable
+// column spec, over the Window node that owns it.
+//
+// It is the single place window arguments are read: the column out of the
+// argument list, the offset/default/N that share it, the frame, and the
+// output type. Both consumers go through it — the single-process pipeline
+// (buildWindow) builds exec.WindowColumn directly, and walkStages copies the
+// resolved values into the stage spec the DAG ships to workers. A worker has
+// no catalog and no logical plan, so a second implementation there would be a
+// second answer; the arguments are parsed once, here, where the types resolve
+// (#345's shape, and #329/#333's).
+func windowExecColumn(node *logical.Node, we logical.WindowExpr) exec.WindowColumn {
+	var orderKeys []exec.SortKey
+	for _, ob := range we.OrderBy {
+		order := exec.Ascending
+		if ob.Desc {
+			order = exec.Descending
+		}
+		orderKeys = append(orderKeys, exec.SortKey{
+			Column:    ob.Column,
+			Order:     order,
+			NullsLast: resolveNullsLast(ob),
+		})
+	}
+	wc := exec.WindowColumn{
+		Func: parseWindowFunc(we.Func),
+		// InputColumn drops the offset/default/N that share the
+		// argument string, so cleanExpr sees a column reference and
+		// nothing else. Applied the other way round, a float default
+		// (LAG(x, 1, 1.5)) looked like a qualified name and cleanExpr
+		// returned "5" as the input column.
+		InputCol:    cleanExpr(we.InputColumn()),
+		OutputCol:   we.OutputCol,
+		OutputType:  windowSpecOutputType(node, we),
+		PartitionBy: we.PartitionBy,
+		OrderBy:     orderKeys,
+	}
+	if we.Frame != nil {
+		wc.Frame = &exec.WindowFrameSpec{
+			Mode:  we.Frame.Mode,
+			Start: exec.WindowBound{Type: we.Frame.Start.Type, Offset: we.Frame.Start.Offset},
+			End:   exec.WindowBound{Type: we.Frame.End.Type, Offset: we.Frame.End.Offset},
+		}
+	}
+	// Parse the function-specific arguments out of the rest of the
+	// argument string (WindowExpr.InputCol carries the whole list verbatim).
+	fn := strings.ToLower(we.Func)
+	if fn == "ntile" {
+		if n, err := strconv.Atoi(strings.TrimSpace(we.InputCol)); err == nil {
+			wc.NtileBuckets = n
+		}
+	} else if fn == "nth_value" {
+		if parts := strings.SplitN(we.InputCol, ",", 2); len(parts) >= 2 {
+			if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+				wc.NthValueN = n
+			}
+		}
+	} else if fn == "lag" || fn == "lead" {
+		parts := strings.SplitN(we.InputCol, ",", 3)
+		if len(parts) >= 2 {
+			if offset, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+				wc.LagLeadOffset = offset
+			}
+		}
+		if len(parts) >= 3 {
+			defStr := strings.TrimSpace(parts[2])
+			if v, err := strconv.ParseFloat(defStr, 64); err == nil {
+				wc.LagLeadDefault = v
+			} else {
+				// A string default arrives as SQL source, quotes and
+				// all; passing it through wrote 'none' — with the
+				// quotes — into the result column.
+				if len(defStr) >= 2 && strings.HasPrefix(defStr, "'") && strings.HasSuffix(defStr, "'") {
+					defStr = strings.ReplaceAll(defStr[1:len(defStr)-1], "''", "'")
+				}
+				wc.LagLeadDefault = defStr
+			}
+		}
+	}
+	return wc
 }
 
 func aggOutputType(funcName string, distinct bool) parquet.TypeID {

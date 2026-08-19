@@ -250,7 +250,7 @@ func TestEagerEligibleConsumer(t *testing.T) {
 			s.Type = physical.StageHashJoin
 			s.Dependencies = []string{"ex-1"}
 		}), "", 3, false},
-		{"window not migrated", mutate(func(s *physical.Stage) { s.Type = physical.StageWindow }), "", 3, false},
+		{"window not eager-fed", mutate(func(s *physical.Stage) { s.Type = physical.StageWindow }), "", 3, false},
 		{"scalar deps keep barrier", mutate(func(s *physical.Stage) {
 			s.ScalarDependencies = map[string]string{":scalar_1": "prod-1"}
 		}), "", 3, false},

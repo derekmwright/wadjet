@@ -708,6 +708,10 @@ func eagerEligibleConsumer(s physical.Stage, stageByID map[string]physical.Stage
 			return false
 		}
 	default:
+		// Window is fragment-migrated and single-input (#349) but stays
+		// out: this list is an opt-in, and a new consumer type earns its
+		// place with its own manifest-feed reasoning, not by resembling
+		// one already here.
 		return false
 	}
 	dep, ok := stageByID[s.Dependencies[0]]

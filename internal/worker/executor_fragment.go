@@ -22,6 +22,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // fragmentBackpressurePauseMS is how long the consume loop sleeps when
@@ -1989,6 +1990,21 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 		}
 		return fb, nil
 
+	case distributed.OpWindow:
+		win, err := e.buildFragmentWindow(spec)
+		if err != nil {
+			return nil, err
+		}
+		if err := win.Init(ctx); err != nil {
+			win.Close()
+			return nil, fmt.Errorf("window init: %w", err)
+		}
+		return &fragmentBreaker{
+			Op:      win,
+			Label:   "window",
+			Cleanup: func() { win.Close() },
+		}, nil
+
 	case distributed.OpSortMergeJoin:
 		return e.buildFragmentSortMergeJoin(ctx, task, spec)
 
@@ -2108,6 +2124,67 @@ func (e *Executor) buildFragmentSort(spec distributed.OpSpec) (*exec.Sort, error
 		sorter.Spill = e.sharedSpill
 	}
 	return sorter, nil
+}
+
+// buildFragmentWindow constructs an exec.Window from an OpSpec. Every value
+// it needs was resolved by the planner (distributed.WindowColSpec), so this
+// is a translation: an unknown function name or an empty column list is a
+// coordinator bug and fails the task rather than computing something.
+//
+// A nil OutputType means the coordinator declared none — an older
+// coordinator, or a value function whose input column it declined to type. The
+// conservative float64 the planner itself falls back to is what the operator
+// then gets, and exec.Window re-types the five value functions from the
+// vector it actually reads (#345). Spill is wired from the executor's shared
+// manager: a window's peak is its largest partition, and that is exactly the
+// bound the spill path exists to survive.
+func (e *Executor) buildFragmentWindow(spec distributed.OpSpec) (*exec.Window, error) {
+	if len(spec.WindowCols) == 0 {
+		return nil, fmt.Errorf("window: WindowCols required")
+	}
+	cols := make([]exec.WindowColumn, len(spec.WindowCols))
+	for i, wc := range spec.WindowCols {
+		fn, ok := exec.ParseWindowFunc(wc.Func)
+		if !ok {
+			return nil, fmt.Errorf("window: unsupported function %q for output column %q", wc.Func, wc.OutputCol)
+		}
+		var orderBy []exec.SortKey
+		for _, k := range wc.OrderBy {
+			order := exec.Ascending
+			if k.Desc {
+				order = exec.Descending
+			}
+			orderBy = append(orderBy, exec.SortKey{Column: k.Column, Order: order, NullsLast: k.PlaceNullsLast()})
+		}
+		outType := parquet.TypeFloat64
+		if wc.OutputType != nil {
+			outType = parquet.TypeID(*wc.OutputType)
+		}
+		cols[i] = exec.WindowColumn{
+			Func:           fn,
+			InputCol:       wc.InputCol,
+			OutputCol:      wc.OutputCol,
+			OutputType:     outType,
+			PartitionBy:    append([]string(nil), wc.PartitionBy...),
+			OrderBy:        orderBy,
+			LagLeadOffset:  wc.LagLeadOffset,
+			LagLeadDefault: wc.LagLeadDefault,
+			NtileBuckets:   wc.NtileBuckets,
+			NthValueN:      wc.NthValueN,
+		}
+		if wc.Frame != nil {
+			cols[i].Frame = &exec.WindowFrameSpec{
+				Mode:  wc.Frame.Mode,
+				Start: exec.WindowBound{Type: wc.Frame.Start.Type, Offset: wc.Frame.Start.Offset},
+				End:   exec.WindowBound{Type: wc.Frame.End.Type, Offset: wc.Frame.End.Offset},
+			}
+		}
+	}
+	win := exec.NewWindow(cols)
+	if e.sharedSpill != nil {
+		win.Spill = e.sharedSpill
+	}
+	return win, nil
 }
 
 // buildFragmentHashAggregate constructs an exec.HashAggregate from an OpSpec.
@@ -2274,7 +2351,8 @@ func isFragmentSinkOp(t distributed.OpType) bool {
 }
 
 func isFragmentBreakerOp(t distributed.OpType) bool {
-	return t == distributed.OpHashAggregate || t == distributed.OpSort || t == distributed.OpSortMergeJoin
+	return t == distributed.OpHashAggregate || t == distributed.OpSort ||
+		t == distributed.OpSortMergeJoin || t == distributed.OpWindow
 }
 
 // emptyFragmentSource is the zero-input source for a scalar-aggregate

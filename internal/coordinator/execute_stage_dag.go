@@ -2825,6 +2825,24 @@ func (c *Coordinator) dispatchComputeStage(
 			}
 			t.Operators = ops
 		}
+		// Window migration: always on the fragment path. There is no legacy
+		// single-op window handler in the worker — a window stage that
+		// reaches dispatch unclaimed ships with Operators == nil and dies
+		// in executeStage, which is the whole of #349.
+		if stage.Type == physical.StageWindow {
+			if t.Operators != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: window stage already claimed by another migration", stage.ID)
+			}
+			var fusedSubject string
+			if fusion != nil {
+				fusedSubject = fusion.replySubject
+			}
+			ops, ferr := buildWindowFragment(stage, &t, taskInputs, fusedSubject)
+			if ferr != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: build window fragment: %w", stage.ID, ferr)
+			}
+			t.Operators = ops
+		}
 		// Union migration: one arm per task, always on the fragment path.
 		// There is no legacy single-op execution for a union stage, so an
 		// unclaimed one would silently dispatch as a no-op pipe that
@@ -3513,6 +3531,100 @@ func buildUnionFragment(stage physical.Stage, t *distributed.Task, taskInputs ma
 	// OUTPUT columns, so it runs after the projection — and it has to run at
 	// all: without this op the predicate is silently dropped and the query
 	// returns the whole concatenation.
+	if len(t.PostFilterExprs) > 0 {
+		ops = append(ops, distributed.OpSpec{
+			Type:       distributed.OpFilter,
+			Predicates: append([]string(nil), t.PostFilterExprs...),
+		})
+	}
+	if gatherReplySubject != "" {
+		ops = append(ops, distributed.OpSpec{
+			Type:         distributed.OpGatherSink,
+			ReplySubject: gatherReplySubject,
+		})
+	} else {
+		ops = append(ops, distributed.OpSpec{Type: distributed.OpUnpartitionedSink})
+	}
+	return ops, nil
+}
+
+// buildWindowFragment translates a window stage's task into a fragment:
+//
+//	[OpShuffleSource, OpWindow, OpFilter?(a predicate above the window), <sink>]
+//
+// There is no OpSort ahead of the window. A window's ORDER BY defines its
+// FRAME, not the stream: exec.Window groups its input by (PARTITION BY,
+// ORDER BY) and sorts each group itself, exactly as the single-process
+// pipeline's windowSourceAdapter does. Sorting the fragment's input would be
+// redundant work, and for a stage carrying two OVER clauses with different
+// ORDER BYs it could not serve both anyway.
+//
+// Every spec field is resolved at plan time (physical.WindowColSpec); this is
+// a translation, not a decision — see distributed.WindowColSpec.OutputType.
+//
+// gatherReplySubject is accepted for symmetry with the other fragment
+// builders and is empty today: canFuseGather fuses only aggregate and sort
+// deps, so a window stage always writes its output and lets a separate
+// gather stage read it.
+func buildWindowFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, gatherReplySubject string) ([]distributed.OpSpec, error) {
+	if len(taskInputs) != 1 {
+		return nil, fmt.Errorf("window fragment: expected 1 input alias, got %d", len(taskInputs))
+	}
+	if len(stage.WindowCols) == 0 {
+		return nil, fmt.Errorf("window fragment: stage carries no window columns")
+	}
+	var alias string
+	var files []string
+	for k, v := range taskInputs {
+		alias = k
+		files = v
+		break
+	}
+	winCols := make([]distributed.WindowColSpec, len(stage.WindowCols))
+	for i, wc := range stage.WindowCols {
+		var orderBy []distributed.SortKeySpec
+		for _, ob := range wc.OrderBy {
+			orderBy = append(orderBy, distributed.SortKeySpec{
+				Column:    ob.Column,
+				Desc:      ob.Desc,
+				NullsLast: distributed.NullsLastPtr(ob.NullsLast),
+			})
+		}
+		winCols[i] = distributed.WindowColSpec{
+			Func:           wc.Func,
+			InputCol:       wc.InputCol,
+			OutputCol:      wc.OutputCol,
+			OutputType:     distributed.WindowTypePtr(int(wc.OutputType)),
+			PartitionBy:    append([]string(nil), wc.PartitionBy...),
+			OrderBy:        orderBy,
+			LagLeadOffset:  wc.LagLeadOffset,
+			LagLeadDefault: wc.LagLeadDefault,
+			NtileBuckets:   wc.NtileBuckets,
+			NthValueN:      wc.NthValueN,
+		}
+		if wc.Frame != nil {
+			winCols[i].Frame = &distributed.WindowFrameSpec{
+				Mode:  wc.Frame.Mode,
+				Start: distributed.WindowBoundSpec{Type: wc.Frame.Start.Type, Offset: wc.Frame.Start.Offset},
+				End:   distributed.WindowBoundSpec{Type: wc.Frame.End.Type, Offset: wc.Frame.End.Offset},
+			}
+		}
+	}
+	ops := []distributed.OpSpec{
+		{
+			Type:        distributed.OpShuffleSource,
+			InputAlias:  alias,
+			InputFiles:  files,
+			InputBucket: t.DataBucket,
+		},
+		{
+			Type:       distributed.OpWindow,
+			WindowCols: winCols,
+		},
+	}
+	// A predicate walkStages pushed onto this stage names the window's
+	// OUTPUT columns, so it runs after the operator — and it has to run at
+	// all: an unemitted filter is a silently unfiltered answer.
 	if len(t.PostFilterExprs) > 0 {
 		ops = append(ops, distributed.OpSpec{
 			Type:       distributed.OpFilter,

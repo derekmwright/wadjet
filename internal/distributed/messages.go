@@ -168,9 +168,6 @@ type Task struct {
 	// batch-by-batch: probe → join1 → join2 → ... → output.
 	FusedJoins []FusedJoinSpec `json:"fused_joins,omitempty"`
 
-	// Window-specific
-	WindowCols []WindowColSpec `json:"window_cols,omitempty"`
-
 	// Shuffle-specific
 	ShuffleKeys   []string `json:"shuffle_keys,omitempty"`   // columns to hash-partition on
 	NumPartitions int      `json:"num_partitions,omitempty"` // number of output partitions
@@ -359,6 +356,11 @@ const (
 	// chained breakers (e.g. aggregate + sort) need a follow-up extension.
 	OpHashAggregate OpType = "hash_aggregate" // group-by + aggregates; partial or merge mode
 	OpSort          OpType = "sort"           // ordered sort, optional top-N limit
+	// OpWindow computes window function columns (exec.Window). The operator
+	// partitions and sorts its own input, so the fragment does NOT need an
+	// OpSort ahead of it: a window's ORDER BY defines the frame, not the
+	// stream, and exec.Window orders each partition itself.
+	OpWindow OpType = "window"
 
 	// Sinks (must be last in Operators).
 	OpExchangeSender    OpType = "exchange_sender"    // partitionedShuffleSink: hash-partition into N output files
@@ -441,6 +443,10 @@ type OpSpec struct {
 	// OpSort (pipeline-breaker).
 	SortKeySpecs []SortKeySpec `json:"sort_key_specs,omitempty"` // ordered key columns
 	SortLimit    int           `json:"sort_limit,omitempty"`     // 0 = no limit; > 0 = top-N truncation after sort
+
+	// OpWindow (pipeline-breaker). One entry per window column; the
+	// operator appends them to its input's columns in this order.
+	WindowCols []WindowColSpec `json:"window_cols,omitempty"`
 
 	// OpScan (build-side, dynamic-filter producer). Each Emit makes the scan
 	// task compute a partial bloom+range over the named column and upload it
@@ -567,13 +573,68 @@ func (s SortKeySpec) PlaceNullsLast() bool {
 // NullsLastPtr returns a pointer suitable for SortKeySpec.NullsLast.
 func NullsLastPtr(v bool) *bool { return &v }
 
-// WindowColSpec defines a window function column in a task.
+// WindowColSpec defines one window function column of an OpWindow fragment
+// operator. Every field the operator needs is resolved at PLAN TIME and
+// carried here: the worker has no catalog and no logical plan, so anything it
+// would have to derive itself (the output type, an offset buried in the
+// argument list) is a decision the coordinator already made — the shape
+// AggSpec.OutputType (#329) and AggSpec.InputType (#333) settled for
+// aggregates.
 type WindowColSpec struct {
-	Func        string        `json:"func"`      // row_number, rank, dense_rank, sum, count, avg, min, max
-	InputCol    string        `json:"input_col"` // for aggregate window functions
-	OutputCol   string        `json:"output_col"`
+	Func string `json:"func"` // row_number, rank, dense_rank, sum, count, avg, min, max, lag, lead, …
+	// InputCol is the COLUMN the function reads, alone — not the argument
+	// list. LAG, LEAD and NTH_VALUE spell their column alongside an offset,
+	// a default or an N ("n_name, 2"); those extra arguments are parsed at
+	// plan time into the LagLead*/NthValueN/NtileBuckets fields below, so
+	// this field is always a name the input batch can be looked up by.
+	InputCol  string `json:"input_col,omitempty"`
+	OutputCol string `json:"output_col"`
+	// OutputType is the plan-time parquet.TypeID of this column's output
+	// vector, carried as a plain int so the wire package stays free of the
+	// storage dependency.
+	//
+	// Nil means "the planner did not declare one" — an older coordinator,
+	// or a value function whose input column it could not resolve to a
+	// catalog type. The worker then keeps the conservative declaration
+	// (float64, which is what windowOutputType returns for anything it
+	// cannot name), and exec.Window's retypeValueColumns still corrects the
+	// five value functions from the vector it actually reads. Declaring it
+	// is what covers the functions retyping cannot reach.
+	//
+	// A POINTER, unlike AggSpec.OutputType, because parquet.TypeID's zero
+	// value is BOOL: LAG over a boolean column declares 0, and an int field
+	// cannot tell that from an absent declaration. Silently reading a
+	// declared BOOL as "undeclared" reinstates #345 for exactly one type,
+	// which is the kind of hole that goes unnoticed. SortKeySpec.NullsLast
+	// carries a pointer for the same reason.
+	OutputType  *int          `json:"output_type,omitempty"`
 	PartitionBy []string      `json:"partition_by,omitempty"`
 	OrderBy     []SortKeySpec `json:"order_by,omitempty"`
+	// Frame is the explicit ROWS/RANGE frame, nil for the SQL default.
+	Frame *WindowFrameSpec `json:"frame,omitempty"`
+	// Function-specific arguments, parsed out of the SQL argument list by
+	// the planner (see InputCol).
+	LagLeadOffset  int `json:"lag_lead_offset,omitempty"`
+	LagLeadDefault any `json:"lag_lead_default,omitempty"`
+	NtileBuckets   int `json:"ntile_buckets,omitempty"`
+	NthValueN      int `json:"nth_value_n,omitempty"`
+}
+
+// WindowTypePtr returns a pointer suitable for WindowColSpec.OutputType.
+func WindowTypePtr(v int) *int { return &v }
+
+// WindowFrameSpec describes a window frame on the wire. Mirrors
+// exec.WindowFrameSpec / logical.WindowFrameSpec field for field.
+type WindowFrameSpec struct {
+	Mode  string          `json:"mode"` // "rows" or "range"
+	Start WindowBoundSpec `json:"start"`
+	End   WindowBoundSpec `json:"end"`
+}
+
+// WindowBoundSpec is one end of a WindowFrameSpec.
+type WindowBoundSpec struct {
+	Type   string `json:"type"` // unbounded_preceding, preceding, current_row, following, unbounded_following
+	Offset int    `json:"offset,omitempty"`
 }
 
 // FusedJoinSpec describes an additional broadcast join absorbed into a task.

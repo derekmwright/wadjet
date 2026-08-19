@@ -57,6 +57,19 @@ func ValidateNativeDAGShape(stages []Stage) error {
 				return fmt.Errorf("native-DAG: %s stage %s has %d dependencies, expected 1",
 					s.Type, s.ID, len(s.Dependencies))
 			}
+		case StageWindow:
+			// buildWindowFragment reads exactly one input alias and needs a
+			// column list to build an operator from; a stage that violates
+			// either ships as a task that cannot run. Fail at plan time,
+			// where the shape is visible, rather than three dispatch
+			// attempts later (#349).
+			if len(s.Dependencies) != 1 {
+				return fmt.Errorf("native-DAG: window stage %s has %d dependencies, expected 1",
+					s.ID, len(s.Dependencies))
+			}
+			if len(s.WindowCols) == 0 {
+				return fmt.Errorf("native-DAG: window stage %s carries no window columns", s.ID)
+			}
 		case StageUnion:
 			// Arm i is dispatched as task i reading Dependencies[i], so the
 			// two lists must stay index-aligned. A pass that rewired one

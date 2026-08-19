@@ -706,9 +706,10 @@ func duckdbCorpus() []duckdbCase {
 		// column pruning read the whole argument string ("n_name, 2") as the
 		// column name, so the real column was never marked required.
 		//
-		// Pinned on arm B: the stage DAG cannot execute a window stage at all
-		// (#349) — walkStages emits one and nothing converts it to a
-		// fragment, so the task fails outright. Arm A is fully gated.
+		// Both arms are gated. These were pinned on arm B until the stage
+		// DAG grew a window operator (#349): walkStages emitted a window
+		// stage, nothing converted it to a fragment, and the task failed
+		// outright with "empty Operators".
 		duckdbCase{name: "WindowValueFunctionsString", sql: `SELECT n_nationkey, n_name,
 			LAG(n_name) OVER (ORDER BY n_nationkey) AS lag_name,
 			LEAD(n_name) OVER (ORDER BY n_nationkey) AS lead_name,
@@ -717,9 +718,6 @@ func duckdbCorpus() []duckdbCase {
 			NTH_VALUE(n_comment, 2) OVER (ORDER BY n_nationkey
 			  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS nth_comment
 			FROM nation ORDER BY n_nationkey`,
-			knownBugArm: armDAG,
-			knownBug: "the stage DAG cannot execute a window stage at all (#349): walkStages emits one, " +
-				"nothing converts it to a fragment, and the task fails with \"empty Operators\"",
 		},
 		// The same five over a DATE column and an INT column, partitioned.
 		// The numeric control is not a formality: Float64.SetValue has no
@@ -730,8 +728,6 @@ func duckdbCorpus() []duckdbCase {
 			FIRST_VALUE(o_orderdate) OVER (PARTITION BY o_orderstatus ORDER BY o_orderkey) AS first_date,
 			LAG(o_custkey) OVER (PARTITION BY o_orderstatus ORDER BY o_orderkey) AS prev_cust
 			FROM orders WHERE o_orderkey <= 200 ORDER BY o_orderkey`,
-			knownBugArm: armDAG,
-			knownBug:    "same missing DAG window operator as WindowValueFunctionsString (#349)",
 		},
 		// The rank family, which is genuinely input-independent and is the
 		// half of the name list that stays hand-maintained. It was correct
@@ -743,8 +739,6 @@ func duckdbCorpus() []duckdbCase {
 			NTILE(4) OVER (ORDER BY n_nationkey) AS nt,
 			COUNT(*) OVER (ORDER BY n_nationkey) AS running_count
 			FROM nation ORDER BY n_nationkey`,
-			knownBugArm: armDAG,
-			knownBug:    "same missing DAG window operator as WindowValueFunctionsString (#349)",
 		},
 		// LAST_VALUE with an explicit whole-partition frame, pinned on BOTH
 		// arms: Wadjet returns the CURRENT row's value whatever frame the
@@ -757,8 +751,7 @@ func duckdbCorpus() []duckdbCase {
 			  ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS lv
 			FROM nation ORDER BY n_nationkey`,
 			knownBugArm: armBoth,
-			knownBug: "LAST_VALUE ignores an explicit frame and returns the current row's value (#350); " +
-				"arm B additionally cannot execute a window stage at all (#349)",
+			knownBug:    "LAST_VALUE ignores an explicit frame and returns the current row's value (#350)",
 		},
 	)
 	// The hand-written entries above declare `ordered` implicitly through

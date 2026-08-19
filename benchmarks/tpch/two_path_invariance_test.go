@@ -1712,11 +1712,10 @@ func twoPathCorpus() []twoPathQuery {
 	// Every entry carries an assertA: the compare would be satisfied by both
 	// arms returning zeros, which is exactly the bug.
 	//
-	// knownBug #349 on all of them: the stage DAG cannot execute a window
-	// stage AT ALL — walkStages emits one, nothing converts it to a fragment,
-	// and the task fails with "empty Operators". Arm A is gated absolutely by
-	// assertA here and against DuckDB in TestDuckDBCompare; these entries turn
-	// on the day arm B can answer.
+	// These were pinned knownBug #349 until the stage DAG grew a window
+	// operator: walkStages emitted a window stage, nothing converted it to a
+	// fragment, and the task failed with "empty Operators" — so arm B could
+	// not answer a window query of any shape. Both arms are gated now.
 	assertNoZeroedColumn := func(col string) func(testing.TB, []map[string]any) {
 		return func(tb testing.TB, rows []map[string]any) {
 			tb.Helper()
@@ -1740,40 +1739,40 @@ func twoPathCorpus() []twoPathQuery {
 		}
 	}
 	out = append(out,
-		twoPathQuery{name: "WindowLagString", cmp: cmpOrdered, knownBug: "#349",
+		twoPathQuery{name: "WindowLagString", cmp: cmpOrdered,
 			sql:     "SELECT n_nationkey, n_name, LAG(n_name) OVER (ORDER BY n_nationkey) AS w FROM nation ORDER BY n_nationkey",
 			assertA: assertNoZeroedColumn("w")},
-		twoPathQuery{name: "WindowLeadString", cmp: cmpOrdered, knownBug: "#349",
+		twoPathQuery{name: "WindowLeadString", cmp: cmpOrdered,
 			sql:     "SELECT n_nationkey, n_name, LEAD(n_name) OVER (ORDER BY n_nationkey) AS w FROM nation ORDER BY n_nationkey",
 			assertA: assertNoZeroedColumn("w")},
-		twoPathQuery{name: "WindowFirstValueString", cmp: cmpOrdered, knownBug: "#349",
+		twoPathQuery{name: "WindowFirstValueString", cmp: cmpOrdered,
 			sql:     "SELECT n_nationkey, n_name, FIRST_VALUE(n_name) OVER (ORDER BY n_nationkey) AS w FROM nation ORDER BY n_nationkey",
 			assertA: assertNoZeroedColumn("w")},
-		twoPathQuery{name: "WindowLastValueString", cmp: cmpOrdered, knownBug: "#349",
+		twoPathQuery{name: "WindowLastValueString", cmp: cmpOrdered,
 			sql:     "SELECT n_nationkey, n_name, LAST_VALUE(n_name) OVER (PARTITION BY n_regionkey ORDER BY n_nationkey) AS w FROM nation ORDER BY n_nationkey",
 			assertA: assertNoZeroedColumn("w")},
 		// NTH_VALUE with an explicit frame, and the column named nowhere else
 		// in the SELECT list: column pruning read the whole argument string
 		// ("n_name, 2") as the column name, so n_name was never marked
 		// required and the operator found no input vector to read.
-		twoPathQuery{name: "WindowNthValueStringFramed", cmp: cmpOrdered, knownBug: "#349",
+		twoPathQuery{name: "WindowNthValueStringFramed", cmp: cmpOrdered,
 			sql: `SELECT n_nationkey, NTH_VALUE(n_name, 2) OVER (ORDER BY n_nationkey
 				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w
 				FROM nation ORDER BY n_nationkey`,
 			assertA: assertNoZeroedColumn("w")},
 		// A DATE column: its RENDERING is what the declared type buys, so a
 		// date typed float64 is not a mis-scaled date, it is 0.
-		twoPathQuery{name: "WindowFirstValueDate", cmp: cmpOrdered, knownBug: "#349",
+		twoPathQuery{name: "WindowFirstValueDate", cmp: cmpOrdered,
 			sql:     "SELECT o_orderkey, FIRST_VALUE(o_orderdate) OVER (ORDER BY o_orderkey) AS w FROM orders ORDER BY o_orderkey",
 			assertA: assertNoZeroedColumn("w")},
 		// The numeric control: Float64.SetValue has no int32 case either, so
 		// a narrow int was dropped exactly like a string.
-		twoPathQuery{name: "WindowLagNumeric", cmp: cmpOrdered, knownBug: "#349",
+		twoPathQuery{name: "WindowLagNumeric", cmp: cmpOrdered,
 			sql:     "SELECT n_nationkey, LAG(n_nationkey) OVER (ORDER BY n_nationkey DESC) AS w FROM nation ORDER BY n_nationkey",
 			assertA: assertNoZeroedColumn("w")},
 		// The rank family is input-independent and must be untouched by the
 		// fix — it is the half of the name list that stays hand-maintained.
-		twoPathQuery{name: "WindowRankFamily", cmp: cmpOrdered, knownBug: "#349",
+		twoPathQuery{name: "WindowRankFamily", cmp: cmpOrdered,
 			sql: `SELECT n_nationkey, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn,
 				RANK() OVER (ORDER BY n_regionkey) AS rk FROM nation ORDER BY n_nationkey`,
 			assertA: func(tb testing.TB, rows []map[string]any) {
@@ -1788,6 +1787,122 @@ func twoPathCorpus() []twoPathQuery {
 					}
 				}
 			}},
+	)
+
+	// #349: the stage DAG had no window operator at all, so the shapes the
+	// #345 entries above happen not to use were untested on arm B — every
+	// one of them failed identically ("empty Operators"), which is exactly
+	// why a suite of value-function queries was not coverage of the window
+	// stage. These are the missing axes: a PARTITION BY (the partition is
+	// the unit a distributed window can be split on, so getting it wrong is
+	// the scalability decision showing up as a wrong answer), an AGGREGATE
+	// window function, and an explicit FRAME.
+	//
+	// Each carries an assertA computed from the query's own other columns,
+	// so the assertion says what the answer IS rather than that two engines
+	// agree — the compare alone would pass on two identically wrong arms.
+	out = append(out,
+		// ROW_NUMBER within a partition: 25 nations across 5 regions, so
+		// every region's numbers must be exactly 1..5. A window computed
+		// over the wrong grain — the whole input, or a fragment of a
+		// partition — cannot produce that.
+		twoPathQuery{name: "WindowRowNumberPartitioned", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey, n_regionkey,
+				ROW_NUMBER() OVER (PARTITION BY n_regionkey ORDER BY n_nationkey) AS rn
+				FROM nation ORDER BY n_regionkey, n_nationkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				seen := map[float64]map[float64]bool{}
+				for _, r := range rows {
+					region, rn := cellNum(r, "n_regionkey"), cellNum(r, "rn")
+					if seen[region] == nil {
+						seen[region] = map[float64]bool{}
+					}
+					if seen[region][rn] {
+						tb.Errorf("region %v: ROW_NUMBER %v repeats — the partition was split across tasks", region, rn)
+						return
+					}
+					seen[region][rn] = true
+				}
+				if len(seen) != 5 {
+					tb.Errorf("got %d regions, want 5", len(seen))
+					return
+				}
+				for region, nums := range seen {
+					for want := 1; want <= len(nums); want++ {
+						if !nums[float64(want)] {
+							tb.Errorf("region %v: ROW_NUMBER %d missing from %d rows", region, want, len(nums))
+							return
+						}
+					}
+				}
+			}},
+		// RANK partitioned on the same column it orders by: every row of a
+		// partition ties, so RANK is 1 on all 25 rows. The assertion is
+		// sharper than it looks — RANK skips over the rows it ties with, so
+		// computing this over the whole input instead of per partition
+		// gives 1, 6, 11, 16, 21, and computing ROW_NUMBER semantics by
+		// mistake gives 1..5. Only the right function at the right grain
+		// answers 1 everywhere.
+		twoPathQuery{name: "WindowRankPartitioned", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey, n_regionkey,
+				RANK() OVER (PARTITION BY n_regionkey ORDER BY n_regionkey) AS rk
+				FROM nation ORDER BY n_regionkey, n_nationkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				for i, r := range rows {
+					if got := cellNum(r, "rk"); got != 1 {
+						tb.Errorf("row %d: RANK() = %v over an all-tied partition, want 1", i, got)
+						return
+					}
+				}
+			}},
+		// An AGGREGATE window function over a partition: the value is the
+		// partition's whole sum, repeated on each of its rows. Checked
+		// against the sum of the same rows' o_totalprice, so the assertion
+		// is arithmetic on the query's own output.
+		twoPathQuery{name: "WindowSumPartitioned", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT o_orderkey, o_orderstatus, o_totalprice,
+				SUM(o_totalprice) OVER (PARTITION BY o_orderstatus) AS w
+				FROM orders WHERE o_orderkey <= 500 ORDER BY o_orderkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				totals := map[string]float64{}
+				for _, r := range rows {
+					s, _ := lookupCell(r, "o_orderstatus")
+					totals[fmt.Sprint(s)] += cellNum(r, "o_totalprice")
+				}
+				for i, r := range rows {
+					s, _ := lookupCell(r, "o_orderstatus")
+					want, got := totals[fmt.Sprint(s)], cellNum(r, "w")
+					if math.Abs(got-want) > 0.01 {
+						tb.Errorf("row %d (status %v): SUM() OVER = %v, want the partition total %v",
+							i, s, got, want)
+						return
+					}
+				}
+			}},
+		// An explicit FRAME, carried end to end: the two-row window spec
+		// reaches the worker and the stage runs, which is what #349 is
+		// about, and both paths must return the same column.
+		//
+		// There is deliberately no assertA. `ROWS BETWEEN 1 PRECEDING AND
+		// CURRENT ROW` should make w this row's price plus the previous
+		// row's; Wadjet returns the running total from the start of the
+		// partition on BOTH paths, because exec.Window never reads
+		// WindowColumn.Frame at all — #350, an operator defect this fix
+		// does not touch. Asserting the arithmetic here would fail on arm A
+		// for a reason that has nothing to do with the stage DAG, and
+		// asserting what the engine currently returns would pin the wrong
+		// answer. #350's absolute gate lives in duckdbCorpus
+		// (WindowLastValueExplicitFrame, held against DuckDB, pinned on
+		// both arms). What this entry proves is that the frame is on the
+		// wire and the DAG agrees with the single-process path about it —
+		// so when #350 lands, either both paths move or this entry fails.
+		twoPathQuery{name: "WindowSumExplicitFrame", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT o_orderkey, o_totalprice,
+				SUM(o_totalprice) OVER (ORDER BY o_orderkey ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS w
+				FROM orders WHERE o_orderkey <= 500 ORDER BY o_orderkey`},
 	)
 	return out
 }

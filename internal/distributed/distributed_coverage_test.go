@@ -165,28 +165,69 @@ func TestTaskWithAllTypesRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name: "window task",
+			// A window stage travels as a fragment, so its spec rides the
+			// OpWindow OpSpec — not the Task. Task.WindowCols existed and
+			// was assigned nowhere outside this test (#349).
+			name: "window stage task",
 			task: Task{
-				ID:      "win-1",
-				QueryID: "q-4",
-				StageID: "s-1",
-				Type:    TaskType("window"),
-				WindowCols: []WindowColSpec{
+				ID:        "win-1",
+				QueryID:   "q-4",
+				StageID:   "s-1",
+				Type:      TaskTypeStage,
+				StageType: "window",
+				Operators: []OpSpec{
 					{
-						Func:        "row_number",
-						OutputCol:   "rn",
-						PartitionBy: []string{"department"},
-						OrderBy:     []SortKeySpec{{Column: "salary", Desc: true}},
+						Type:       OpShuffleSource,
+						InputAlias: "scan-0",
+						InputFiles: []string{"employees.parquet"},
 					},
 					{
-						Func:        "sum",
-						InputCol:    "salary",
-						OutputCol:   "running_total",
-						PartitionBy: []string{"department"},
-						OrderBy:     []SortKeySpec{{Column: "hire_date", Desc: false}},
+						Type: OpWindow,
+						WindowCols: []WindowColSpec{
+							{
+								Func:        "row_number",
+								OutputCol:   "rn",
+								OutputType:  WindowTypePtr(6),
+								PartitionBy: []string{"department"},
+								OrderBy:     []SortKeySpec{{Column: "salary", Desc: true}},
+							},
+							{
+								Func:        "sum",
+								InputCol:    "salary",
+								OutputCol:   "running_total",
+								OutputType:  WindowTypePtr(9),
+								PartitionBy: []string{"department"},
+								OrderBy:     []SortKeySpec{{Column: "hire_date", Desc: false}},
+								Frame: &WindowFrameSpec{
+									Mode:  "rows",
+									Start: WindowBoundSpec{Type: "unbounded_preceding"},
+									End:   WindowBoundSpec{Type: "current_row"},
+								},
+							},
+							{
+								Func:          "lag",
+								InputCol:      "salary",
+								OutputCol:     "prev_salary",
+								OutputType:    WindowTypePtr(9),
+								OrderBy:       []SortKeySpec{{Column: "hire_date"}},
+								LagLeadOffset: 2,
+								// A string default: it round-trips through
+								// `any`, which is the field's whole risk.
+								LagLeadDefault: "none",
+							},
+							{
+								Func:         "nth_value",
+								InputCol:     "salary",
+								OutputCol:    "second_salary",
+								OutputType:   WindowTypePtr(9),
+								OrderBy:      []SortKeySpec{{Column: "hire_date"}},
+								NthValueN:    2,
+								NtileBuckets: 0,
+							},
+						},
 					},
+					{Type: OpUnpartitionedSink},
 				},
-				InputFiles:   []string{"employees.parquet"},
 				ResultBucket: "results",
 				ResultPrefix: "queries/q-4/s-1/",
 				CreatedAt:    time.Now().UTC().Truncate(time.Second),

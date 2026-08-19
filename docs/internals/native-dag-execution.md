@@ -109,7 +109,7 @@ the embedded engine per policy shape.
 | `NodeJoin` | `hash_join`/`broadcast_join` (+ `exchange-repartition` shuffles for non-broadcast) | keys parsed at plan time (`plan.go:3145+`) |
 | `NodeAggregate` | `aggregate` (partial) → `final_aggregate` | two-phase (`plan.go:3034-3103`); the distribution pass adds the exchange |
 | `NodeSort` | `sort` → merge-sort tree | `plan.go:3105` |
-| `NodeWindow` | `window` | `plan.go:3384` |
+| `NodeWindow` | `window` | `plan.go:3384`. One task per PARTITION BY partition when the input already arrives clustered on those keys; Singleton otherwise — see §Window. |
 | `NodeFilter` | pushes predicates onto child stage | `plan.go:3323` |
 | `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. `NodeIntersect` / `NodeExcept` are **refused** (`Planner.setOpErr` → `PlanDistributed` error) — see §Set operations. |
 | **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. Top-level DISTINCT never reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns it into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages. Remaining NodeDistincts (semi/anti build-side dedup, fallback shapes) stay passthrough. |
@@ -207,6 +207,68 @@ Coverage: `physical/set_op_stages_test.go` (plan shape + every refusal),
 `benchmarks/tpch/two_path_invariance_test.go` (`Union*`, asserting row count
 AND column list absolutely on both arms), `duckdb_compare_test.go` +
 `pagination_test.go` (values and sequence against DuckDB).
+
+## Window
+
+`walkStages` has always emitted a `window` stage, and until #349 nothing
+converted it into a fragment: there was no `OpWindow`, no
+`buildWindowFragment`, and `dispatchPipelineStage`'s migrations covered joins,
+aggregates and sorts only. The task shipped with `Operators == nil` and the
+worker rejected it (`executeStage: empty Operators … StageType="window"`), so
+**every** window query failed on the DAG, `ROW_NUMBER()` included.
+`distributed.Task.WindowCols` was dead wiring — assigned nowhere outside a
+round-trip test — and has been deleted; the spec rides
+`OpSpec.WindowCols` like every other fragment operator's configuration.
+
+**Fragment shape** (`coordinator/execute_stage_dag.go buildWindowFragment`):
+
+```
+[OpShuffleSource, OpWindow, OpFilter?(predicate above the window), <sink>]
+```
+
+There is deliberately **no `OpSort`** ahead of the window. A window's ORDER BY
+defines its FRAME, not the stream: `exec.Window` groups its input by
+(PARTITION BY, ORDER BY) and sorts each group itself, which is also why one
+stage can carry two OVER clauses that order differently — a single pre-sort
+could not serve both.
+
+**Distribution** (`physical/distribution.go`, `windowPartitionKeys`):
+
+- A window over `PARTITION BY k` is computable one partition at a time, so
+  the stage requires `ClusteredOn(k)` and — when its input actually arrives
+  `DistHashPartitioned` on exactly `k` — **mirrors that distribution**: one
+  task per partition, each running the whole operator over its slice. This is
+  the shape that scales, and it engages on real plans: a window over a
+  shuffled hash join partitioned on the join key inherits the join's
+  partitioning, and a window partitioned on some other column gets an
+  `exchange-repartition` spliced in by `EnsureDistribution`
+  (`coordinator/window_distributed_test.go` runs one over a 3-worker cluster
+  and asserts each partition is numbered 1..n).
+- Everything else is **Singleton**: no `PARTITION BY` (a global window's
+  universe is every row), or window columns that disagree on their partition
+  keys (one exchange cannot cluster both, and clustering on the first spec's
+  keys would compute the second over a fragment of its partition — a wrong
+  answer, not a slow one). A Singleton stage's single task reads *every*
+  partition of its input (`partitionFilesForWorker` with `workerCount == 1`),
+  so it is a scalability bound only. **A window over a leaf scan is always
+  this case** — a scan is Singleton, which already satisfies clustered-on —
+  so today's common shape is one task holding all the rows.
+
+**Spec resolution.** `physical.WindowColSpec` is filled by `windowExecColumn`,
+the same helper `buildWindow` compiles the single-process operator from: the
+column out of the argument list, the offset/default/N that share it, the
+frame, and `OutputType`. The worker has no catalog and no logical plan, so
+anything left unresolved would be a second implementation there — and a
+window value function's output type IS its input column's type (#345), which
+nothing downstream of the operator corrects. A nil `OutputType` means "not
+declared" (older coordinator, or a type the planner declined) and the worker
+keeps the conservative float64, which `exec.Window.retypeValueColumns` still
+fixes for the five value functions. It is a **pointer**, unlike
+`AggSpec.OutputType`, because `parquet.TypeID`'s zero value is BOOL — an int
+field cannot tell `LAG(bool_col)` from a spec that declares nothing.
+
+**Not covered:** frames are carried end to end but `exec.Window` never reads
+`WindowColumn.Frame` at all (#350) — an operator defect both paths share.
 
 ## Query cancellation (and `statement_timeout`)
 
