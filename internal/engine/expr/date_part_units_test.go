@@ -232,10 +232,10 @@ func TestDatePartsUnknownUnit(t *testing.T) {
 // on top of rather than replacing. Boxing a DATE as time.Time or as its ISO
 // string would have been unambiguous, but ColRef.Eval's box feeds comparison
 // (compare()'s parseTemporalInt64 infers days-vs-milliseconds from the
-// MAGNITUDE of this int64), arithmetic, date_diff/date_add (parseDateValue
-// reads an int64 as days) and Vector.SetValue on materialization — none of
-// which accept a time.Time. The unit is restored at the date-part boundary
-// instead, where the column's type is still in hand.
+// MAGNITUDE of this int64), arithmetic and Vector.SetValue on materialization
+// — none of which accept a time.Time. The unit is restored at the function
+// boundary instead, where the column's type is still in hand: for the
+// date-part family here, and for the date-arithmetic family in #322.
 func TestTemporalColumnBoxingUnchanged(t *testing.T) {
 	b := temporalBatch(t)
 	if v := (&ColRef{Name: "d"}).Eval(b, 0); v != int64(testEpochDay) {
@@ -273,9 +273,15 @@ func TestTemporalInputFuncsCoverage(t *testing.T) {
 			t.Errorf("temporalInputFuncs lists %q, which is not registered", name)
 		}
 	}
-	// The family table above must exercise every listed name.
+	// The family tables must exercise every listed name: the date-part
+	// table above, or the date-arithmetic table in date_arith_units_test.go
+	// (issue #322), whose members render a result instead of extracting a
+	// part of one.
 	covered := map[string]bool{}
 	for _, c := range datePartFamily() {
+		covered[c.fn] = true
+	}
+	for _, c := range dateArithFamily() {
 		covered[c.fn] = true
 	}
 	for name := range temporalInputFuncs {

@@ -346,20 +346,25 @@ type IntervalValue struct {
 	Seconds int
 }
 
+// addInterval applies an interval to an instant.
+func addInterval(t time.Time, iv IntervalValue, subtract bool) time.Time {
+	sign := 1
+	if subtract {
+		sign = -1
+	}
+	t = t.AddDate(sign*iv.Years, sign*iv.Months, sign*iv.Days)
+	return t.Add(time.Duration(sign) * (time.Duration(iv.Hours)*time.Hour +
+		time.Duration(iv.Minutes)*time.Minute +
+		time.Duration(iv.Seconds)*time.Second))
+}
+
 // dateAddInterval applies an interval to a date/timestamp string.
 func dateAddInterval(dateStr string, iv IntervalValue, subtract bool) string {
 	t := parseDateValue(dateStr)
 	if t.IsZero() {
 		return ""
 	}
-	sign := 1
-	if subtract {
-		sign = -1
-	}
-	t = t.AddDate(sign*iv.Years, sign*iv.Months, sign*iv.Days)
-	t = t.Add(time.Duration(sign) * (time.Duration(iv.Hours)*time.Hour +
-		time.Duration(iv.Minutes)*time.Minute +
-		time.Duration(iv.Seconds)*time.Second))
+	t = addInterval(t, iv, subtract)
 	// Return date format if no time component, otherwise RFC3339.
 	if iv.Hours == 0 && iv.Minutes == 0 && iv.Seconds == 0 &&
 		t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 {
@@ -1178,9 +1183,12 @@ type FuncCall struct {
 	fn     ScalarFunc
 	// Argument-family flags, resolved with fn under fnOnce: this function
 	// reads its arguments as text (stringInputFuncs) / as instants
-	// (temporalInputFuncs). Resolved once rather than re-looked-up per row.
-	wantsText    bool
-	wantsInstant bool
+	// (temporalInputFuncs) / as instants that must remember whether they
+	// came from a DATE or a TIMESTAMP column (dateArithFuncs, which render
+	// their result). Resolved once rather than re-looked-up per row.
+	wantsText     bool
+	wantsInstant  bool
+	wantsDateKind bool
 
 	vecOnce sync.Once
 	vecFn   VecScalarFunc
@@ -1237,8 +1245,9 @@ func (e *FuncCall) formatTemporalArgs(args []any) {
 }
 
 // temporalInputFuncs are the scalar functions that read an argument as an
-// INSTANT — every function whose body reaches parseTime/toTime. They are the
-// counterpart of stringInputFuncs and exist for the same reason: ColRef.Eval
+// INSTANT — every function whose body reaches parseTime/toTime/parseDateArg.
+// They are the counterpart of stringInputFuncs and exist for the same reason:
+// ColRef.Eval
 // boxes a temporal column as a bare number (epoch DAYS for TypeDate, epoch
 // MILLISECONDS for TypeTimestamp), and a bare number has lost its unit.
 // parseTime reads an int64 as SECONDS, so 9568 days became 9568 seconds and
@@ -1252,10 +1261,8 @@ func (e *FuncCall) formatTemporalArgs(args []any) {
 // its column arguments through columnInstant before the function runs.
 //
 // Keyed lowercase, the registry's convention. Deliberately excluded:
-// date_diff / date_add / date_sub, which read a date through parseDateValue
-// (int64 = DAYS, the unit a TypeDate column already boxes) and are correct as
-// they stand; and from_unixtime / timezone_hour / timezone_minute, whose
-// argument is a number in its own right, not a column instant.
+// from_unixtime / timezone_hour / timezone_minute, whose argument is a number
+// in its own right, not a column instant.
 var temporalInputFuncs = map[string]bool{
 	"year": true, "month": true, "day": true,
 	"hour": true, "minute": true, "second": true,
@@ -1265,7 +1272,30 @@ var temporalInputFuncs = map[string]bool{
 	"date_trunc":        true, "extract": true,
 	"epoch": true, "to_unixtime": true, "date_format": true,
 	"at_timezone": true, "timezone": true,
+	// The date-arithmetic family, held back from the #319 fix and settled
+	// by issue #322. It reads its date through parseDateValue, which takes
+	// a bare int64 as epoch DAYS: right for a DATE column, and off by a
+	// factor of ~86.4 million for a TIMESTAMP column, which boxes epoch
+	// MILLISECONDS. Resolving the column here retires the guess for good.
+	"date_add": true, "date_sub": true, "date_diff": true, "to_date": true,
 }
+
+// dateArithFuncs is the subset of temporalInputFuncs whose RESULT format
+// depends on WHICH temporal type the argument came from: date_add over a DATE
+// renders a calendar date, over a TIMESTAMP it renders an instant with the
+// input's time-of-day intact. The date-part family needs no such distinction
+// — the year of a day and the year of an instant are the same number — so
+// only these calls tag a resolved DATE column as a civilDate.
+var dateArithFuncs = map[string]bool{
+	"date_add": true, "date_sub": true, "date_diff": true, "to_date": true,
+}
+
+// civilDate is a DATE column's value resolved to the instant it denotes (UTC
+// midnight of that day), carrying the one fact the instant alone cannot: its
+// column has no time-of-day to preserve. Only resolveTemporalArgs mints one,
+// and only parseDateArg / parseDateValue read it; every other consumer sees a
+// plain time.Time, so this stays inside the date-arithmetic family.
+type civilDate struct{ t time.Time }
 
 // resolveTemporalArgs rewrites a boxed DATE/TIMESTAMP column argument to the
 // instant it denotes, so the function body's parseTime sees an unambiguous
@@ -1278,6 +1308,10 @@ var temporalInputFuncs = map[string]bool{
 // computed value already carries its own unambiguous form (text, or a number
 // that means seconds). Columns of any other type are left alone, so
 // year(int_col) keeps reading its int64 as epoch seconds exactly as before.
+//
+// For the date-arithmetic family a resolved DATE column is tagged civilDate,
+// because those functions render their result and a DATE must render as a
+// calendar date (issue #322).
 func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any) {
 	for i, a := range e.Args {
 		if args[i] == nil {
@@ -1294,6 +1328,10 @@ func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any
 			continue
 		}
 		if t, ok := columnInstant(b.Columns[cr.idx], row); ok {
+			if e.wantsDateKind && cr.typ == batch.TypeDate {
+				args[i] = civilDate{t: t}
+				continue
+			}
 			args[i] = t
 		}
 	}
@@ -1307,6 +1345,7 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 		e.fn = DefaultRegistry.Lookup(e.Name)
 		e.wantsText = stringInputFuncs[lower]
 		e.wantsInstant = temporalInputFuncs[lower]
+		e.wantsDateKind = dateArithFuncs[lower]
 	})
 	if e.fn == nil {
 		return nil
@@ -2865,63 +2904,129 @@ func fnCurrentSchemas(args []any) any {
 	return "{" + SessionSchema + "}"
 }
 
-// fnDateDiff returns the number of days between two dates.
+// fnDateDiff returns the number of whole days between two instants.
 // Usage: date_diff(date1, date2) → integer
+//
+// The difference is taken in integer milliseconds, so no day count rounds
+// through a float64, and a partial day truncates toward the PAST rather than
+// toward zero — otherwise a negative difference would round the other way
+// from a positive one, and the same pair of instants would answer differently
+// on either side of the epoch.
 func fnDateDiff(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	t1 := parseDateValue(args[0])
-	t2 := parseDateValue(args[1])
-	if t1.IsZero() || t2.IsZero() {
+	t1, _, ok1 := parseDateArg(args[0])
+	t2, _, ok2 := parseDateArg(args[1])
+	if !ok1 || !ok2 {
 		return nil
 	}
-	return float64(int(t1.Sub(t2).Hours() / 24))
+	const msPerDay = 24 * 60 * 60 * 1000
+	diff := t1.UnixMilli() - t2.UnixMilli()
+	days := diff / msPerDay
+	if diff < 0 && diff%msPerDay != 0 {
+		days--
+	}
+	return float64(days)
 }
 
-// fnDateAdd adds days (or an interval) to a date.
+// fnDateAdd adds days (or an interval) to a date or timestamp.
 // Usage: date_add(date, days) → date string
 //
 //	date_add(date, interval) → date string
-func fnDateAdd(args []any) any {
-	if len(args) < 2 || args[0] == nil || args[1] == nil {
-		return nil
-	}
-	if iv, ok := args[1].(IntervalValue); ok {
-		if ds, ok := args[0].(string); ok {
-			return dateAddInterval(ds, iv, false)
-		}
-	}
-	t := parseDateValue(args[0])
-	if t.IsZero() {
-		return nil
-	}
-	days := int(ToFloat64(args[1]))
-	return t.AddDate(0, 0, days).Format("2006-01-02")
-}
+func fnDateAdd(args []any) any { return dateShift(args, false) }
 
-// fnDateSub subtracts days (or an interval) from a date.
+// fnDateSub subtracts days (or an interval) from a date or timestamp.
 // Usage: date_sub(date, days) → date string
 //
 //	date_sub(date, interval) → date string
-func fnDateSub(args []any) any {
+func fnDateSub(args []any) any { return dateShift(args, true) }
+
+// dateShift is the shared body of date_add / date_sub.
+//
+// A numeric second argument counts DAYS — what a DATE argument has always
+// meant here, and what Spark/Hive date_add means; an INTERVAL keeps its own
+// unit. The result preserves the input's time-of-day: before issue #322 both
+// functions formatted the result "2006-01-02" unconditionally, so a TIMESTAMP
+// argument silently lost its clock on the way out. A whole-day argument still
+// renders as a calendar date.
+func dateShift(args []any, subtract bool) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
 	if iv, ok := args[1].(IntervalValue); ok {
+		// A text argument keeps the string path's own rendering, which
+		// `date ± INTERVAL` in BinOp.Eval shares.
 		if ds, ok := args[0].(string); ok {
-			return dateAddInterval(ds, iv, true)
+			return dateAddInterval(ds, iv, subtract)
 		}
+		t, dateOnly, ok := parseDateArg(args[0])
+		if !ok {
+			return nil
+		}
+		// An interval carrying a time component makes the result an
+		// instant even when the input was a whole day.
+		dateOnly = dateOnly && iv.Hours == 0 && iv.Minutes == 0 && iv.Seconds == 0
+		return formatDateResult(addInterval(t, iv, subtract), dateOnly)
 	}
-	t := parseDateValue(args[0])
-	if t.IsZero() {
+	t, dateOnly, ok := parseDateArg(args[0])
+	if !ok {
 		return nil
 	}
 	days := int(ToFloat64(args[1]))
-	return t.AddDate(0, 0, -days).Format("2006-01-02")
+	if subtract {
+		days = -days
+	}
+	return formatDateResult(t.AddDate(0, 0, days), dateOnly)
 }
 
-// fnToDate converts a string to a date.
+// parseDateArg resolves a date-arithmetic argument to the instant it denotes,
+// and reports whether that instant is a whole DAY — which is what decides how
+// the result renders (see formatDateResult).
+//
+// A temporal COLUMN arrives here already resolved, as a time.Time (TIMESTAMP)
+// or a civilDate (DATE), because resolveTemporalArgs converts it while the
+// declared column type is still in hand. So a bare number reaching this point
+// is genuinely a bare number, and keeps the days-since-epoch reading it has
+// always had in this family — unchanged by #319, and unchanged here.
+func parseDateArg(v any) (time.Time, bool, bool) {
+	switch tv := v.(type) {
+	case civilDate:
+		return tv.t, true, true
+	case time.Time:
+		return tv, false, true
+	case string:
+		// A bare "2006-01-02" is a whole day; any layout with a clock is
+		// an instant whose clock the result keeps.
+		if t, err := time.Parse("2006-01-02", tv); err == nil {
+			return t, true, true
+		}
+		t := parseDateValue(tv)
+		if t.IsZero() {
+			return time.Time{}, false, false
+		}
+		return t, false, true
+	}
+	t := parseDateValue(v)
+	if t.IsZero() {
+		return time.Time{}, false, false
+	}
+	return t, true, true
+}
+
+// formatDateResult renders a date-arithmetic result. A whole day stays a
+// calendar date; an instant goes through batch.FormatTimestamp, the engine's
+// one timestamp renderer, so date_add over a TIMESTAMP column reads exactly
+// the way the column itself does.
+func formatDateResult(t time.Time, dateOnly bool) string {
+	t = t.UTC()
+	if dateOnly {
+		return t.Format("2006-01-02")
+	}
+	return batch.FormatTimestamp(t.UnixMilli())
+}
+
+// fnToDate converts a date, a timestamp or a string to a calendar date.
 func fnToDate(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
@@ -2934,8 +3039,16 @@ func fnToDate(args []any) any {
 }
 
 // parseDateValue parses a date from various formats.
+//
+// A temporal column argument arrives already resolved to its instant (see
+// resolveTemporalArgs), as a time.Time or — for a DATE column — a civilDate;
+// a bare number is a bare number, and still reads as days since the epoch.
 func parseDateValue(v any) time.Time {
 	switch tv := v.(type) {
+	case time.Time:
+		return tv
+	case civilDate:
+		return tv.t
 	case string:
 		for _, layout := range []string{"2006-01-02", time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
 			if t, err := time.Parse(layout, tv); err == nil {
