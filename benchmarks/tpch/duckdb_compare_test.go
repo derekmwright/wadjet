@@ -39,6 +39,11 @@ var duckdbTables = []string{"region", "nation", "supplier", "part", "partsupp", 
 const (
 	armLocal = "A (single-process)"
 	armDAG   = "B (stage DAG)"
+	// armBoth pins a divergence present on BOTH arms — an engine-wide bug
+	// rather than a distribution one. Each arm is still compared, so the
+	// subtest fails as soon as either starts agreeing and the pin has to be
+	// narrowed or deleted.
+	armBoth = "both arms"
 )
 
 // emptyJoinAggregateBug is the divergence this gate found on the day it
@@ -56,6 +61,20 @@ const (
 // DAG was held to ground truth — and the generated SF0.01 fixture the
 // two-path suite uses has parts matching Q17's predicate, so its join is not
 // empty there and the shape never arises.
+// dagNullOrderingBug: distributed.SortKeySpec carries Column and Desc and
+// nothing about null placement, so the DAG sorts NULLs first regardless of
+// what the SQL asked for. ASC is wrong (SQL says NULLS LAST); DESC is right
+// by accident, which is why only the ascending entries below fail.
+const dagNullOrderingBug = "the stage DAG ignores NULLS FIRST/LAST and sorts NULLs first unconditionally: " +
+	"ascending order is wrong, descending is correct by accident, and an explicit NULLS LAST is dropped. " +
+	"Single-process is correct. Tracked as #330."
+
+// coalesceNestedTypeBug: Ret.Resolve reports a same-as-argument FALLBACK as a
+// confident answer, so NULLIF tells COALESCE it is Float64 and COALESCE never
+// consults the string literal that would have decided it.
+const coalesceNestedTypeBug = "COALESCE over a computed string argument is typed numeric, so every row comes back as 0. " +
+	"Both arms. Tracked as #331."
+
 const emptyJoinAggregateBug = "an ungrouped aggregate over an EMPTY JOIN loses its mandatory single row on the stage DAG " +
 	"(SUM: 0 rows, want 1 row of NULL; COUNT over the same join is correct, and so is the same SUM emptied by a filter). " +
 	"Single-process is correct. Tracked as #329."
@@ -304,6 +323,49 @@ func duckdbCorpus() []duckdbCase {
 		// renderer that folds "" into NULL would call these two answers the
 		// same.
 		duckdbCase{name: "NullAndEmptyString", sql: "SELECT n_nationkey, CASE WHEN n_nationkey % 3 = 0 THEN NULL WHEN n_nationkey % 3 = 1 THEN '' ELSE n_name END AS mixed FROM nation ORDER BY n_nationkey"},
+		// NULL semantics. TPC-H contains no NULLs at all, so every rule
+		// below is untested by the 22 queries — and each is a rule an engine
+		// can get wrong while returning a plausible-looking answer.
+		//
+		// Aggregates SKIP nulls, and COUNT(col) is not COUNT(*).
+		duckdbCase{name: "NullAggregatesSkipNulls", sql: `SELECT COUNT(*) AS all_rows, COUNT(NULLIF(n_regionkey, 1)) AS non_null,
+			SUM(NULLIF(n_regionkey, 1)) AS s, AVG(NULLIF(n_regionkey, 1)) AS a,
+			MIN(NULLIF(n_regionkey, 1)) AS mn, MAX(NULLIF(n_regionkey, 1)) AS mx FROM nation`},
+		// An aggregate over an all-NULL input is NULL, not zero and not
+		// "no rows" — except COUNT, which is 0.
+		duckdbCase{name: "NullAllNullAggregate", sql: `SELECT SUM(NULLIF(n_regionkey, n_regionkey)) AS s,
+			AVG(NULLIF(n_regionkey, n_regionkey)) AS a, MIN(NULLIF(n_regionkey, n_regionkey)) AS mn,
+			COUNT(NULLIF(n_regionkey, n_regionkey)) AS c FROM nation`},
+		// NULLs form ONE group, and it survives GROUP BY.
+		duckdbCase{name: "NullGroupsTogether", sql: `SELECT NULLIF(n_regionkey, 1) AS k, COUNT(*) AS c
+			FROM nation GROUP BY NULLIF(n_regionkey, 1) ORDER BY k`, knownBugArm: armDAG, knownBug: dagNullOrderingBug},
+		// Sort placement: PostgreSQL and DuckDB put NULLS LAST for ASC and
+		// NULLS FIRST for DESC. Both directions, because a single default
+		// can be right by accident.
+		duckdbCase{name: "NullOrderingAsc", sql: "SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation ORDER BY k, n_name", knownBugArm: armDAG, knownBug: dagNullOrderingBug},
+		duckdbCase{name: "NullOrderingDesc", sql: "SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation ORDER BY k DESC, n_name"},
+		// DISTINCT treats NULLs as equal to each other — the one place SQL
+		// does — so exactly one NULL comes back.
+		duckdbCase{name: "NullDistinct", sql: "SELECT DISTINCT NULLIF(n_regionkey, 1) AS k FROM nation ORDER BY k", knownBugArm: armDAG, knownBug: dagNullOrderingBug},
+		// A comparison against NULL is UNKNOWN, so it neither matches nor
+		// anti-matches; only IS NULL finds those rows.
+		duckdbCase{name: "NullComparisonNeverMatches", sql: `SELECT
+			COUNT(*) FILTER (WHERE NULLIF(n_regionkey, 1) = 1) AS eq,
+			COUNT(*) FILTER (WHERE NULLIF(n_regionkey, 1) <> 1) AS ne,
+			COUNT(*) FILTER (WHERE NULLIF(n_regionkey, 1) IS NULL) AS isnull FROM nation`},
+		// A LEFT JOIN that misses: the right side's columns are NULL, and
+		// COUNT(right_col) must not count them. This is how real data grows
+		// NULLs even when no column is nullable.
+		duckdbCase{name: "LeftJoinMissIsNull", sql: `SELECT n.n_name, r.r_name FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey + 100 ORDER BY n.n_name`},
+		duckdbCase{name: "LeftJoinMissCount", sql: `SELECT COUNT(*) AS rows_out, COUNT(r.r_name) AS matched
+			FROM nation n LEFT JOIN region r ON n.n_regionkey = r.r_regionkey + 100`},
+		// NULL propagates through arithmetic and string building rather than
+		// being treated as an identity element.
+		duckdbCase{name: "NullPropagatesThroughExpressions", sql: `SELECT n_nationkey,
+			NULLIF(n_regionkey, 1) + 1 AS plus, NULLIF(n_name, 'ALGERIA') || '!' AS cat,
+			COALESCE(NULLIF(n_name, 'ALGERIA'), 'fallback') AS coalesced
+			FROM nation ORDER BY n_nationkey`, knownBugArm: armBoth, knownBug: coalesceNestedTypeBug},
 		// Two aliases of one table, both string columns projected — the #314
 		// shape, where the DAG returned NULL for the alias that landed on the
 		// probe side.
@@ -366,7 +428,7 @@ func checkArm(t *testing.T, arm string, c duckdbCase, want duckdbBaselineEntry, 
 	t.Helper()
 	ok, detail := compareToDuckDB(c, want, rows, cols)
 
-	if c.knownBugArm == arm {
+	if c.knownBugArm == arm || c.knownBugArm == armBoth {
 		if ok {
 			t.Errorf("arm %s now agrees with DuckDB, so this known divergence is FIXED:\n  %s\n"+
 				"Delete the knownBugArm/knownBug fields on %s in duckdbCorpus so the arm is gated again.",

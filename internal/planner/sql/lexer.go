@@ -278,6 +278,10 @@ type token struct {
 	typ TokenType
 	val string
 	pos int // byte offset in original input
+	// raw is the ORIGINAL spelling of a keyword token, whose val is
+	// uppercased for comparison. Empty for every other token, where val is
+	// already verbatim.
+	raw string
 	// quoted marks a TokenIdent that came from a double-quoted
 	// ("delimited") identifier. Such a token is always exactly one
 	// identifier: its value is taken verbatim between the quotes, so any
@@ -809,7 +813,12 @@ func lexIdentOrKeyword(l *lexer) stateFn {
 	upper := strings.ToUpper(word)
 
 	if kwType, ok := keywords[upper]; ok {
+		// val is uppercased so keyword comparisons can be exact; raw keeps
+		// the spelling the user wrote, which matters where a keyword is
+		// accepted as a NAME (an alias after AS) and the name is echoed back
+		// to the client as a result column.
 		l.emitVal(kwType, upper)
+		l.pending.raw = word
 	} else {
 		l.emit(TokenIdent)
 	}

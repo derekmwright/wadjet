@@ -101,6 +101,60 @@
       "fine": "bac970a54e205dd1",
       "coarse": "bac970a54e205dd1"
     },
+    "LeftJoinMissCount": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "rows_out",
+        "matched"
+      ],
+      "fine": "eaeb40b8ba9351b3",
+      "coarse": "eaeb40b8ba9351b3"
+    },
+    "LeftJoinMissIsNull": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "r_name"
+      ],
+      "fine": "d62ab7baf1d7440e",
+      "coarse": "d62ab7baf1d7440e"
+    },
+    "NullAggregatesSkipNulls": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "all_rows",
+        "non_null",
+        "s",
+        "a",
+        "mn",
+        "mx"
+      ],
+      "fine": "a79e3c729a8451c0",
+      "coarse": "a79e3c729a8451c0"
+    },
+    "NullAllNullAggregate": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "s",
+        "a",
+        "mn",
+        "c"
+      ],
+      "fine": "6d98093941074323",
+      "coarse": "6d98093941074323"
+    },
     "NullAndEmptyString": {
       "source": "duckdb",
       "row_count": 25,
@@ -112,6 +166,80 @@
       ],
       "fine": "5a51dcadfb7e83ab",
       "coarse": "5a51dcadfb7e83ab"
+    },
+    "NullComparisonNeverMatches": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "eq",
+        "ne",
+        "isnull"
+      ],
+      "fine": "676a00b1576261c1",
+      "coarse": "676a00b1576261c1"
+    },
+    "NullDistinct": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k"
+      ],
+      "fine": "72c680d4f4ec0896",
+      "coarse": "72c680d4f4ec0896"
+    },
+    "NullGroupsTogether": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "c"
+      ],
+      "fine": "cca5ab839b16974b",
+      "coarse": "cca5ab839b16974b"
+    },
+    "NullOrderingAsc": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "n_name"
+      ],
+      "fine": "b8d441ac7cc77753",
+      "coarse": "b8d441ac7cc77753"
+    },
+    "NullOrderingDesc": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "n_name"
+      ],
+      "fine": "a0460dfd786110df",
+      "coarse": "a0460dfd786110df"
+    },
+    "NullPropagatesThroughExpressions": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "plus",
+        "cat",
+        "coalesced"
+      ],
+      "fine": "f371addd5fc4ac8a",
+      "coarse": "f371addd5fc4ac8a"
     },
     "OrderByExpression": {
       "source": "duckdb",

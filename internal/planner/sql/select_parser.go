@@ -414,11 +414,11 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 	// Check for AS alias
 	if p.isKeyword(TokenKWAs) {
 		p.advance()
-		aliasTok, err := p.expect(TokenIdent)
-		if err != nil {
+		alias, ok := p.takeAliasAfterAs()
+		if !ok {
 			return SelectColumn{}, fmt.Errorf("expected alias after AS")
 		}
-		col.Alias = aliasTok.val
+		col.Alias = alias
 	} else if p.peek() == TokenIdent && !p.isFromKeyword() {
 		// Implicit alias (no AS keyword)
 		col.Alias = p.advance().val
@@ -433,6 +433,33 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 	}
 
 	return col, nil
+}
+
+// takeAliasAfterAs consumes the alias in an explicit `AS <alias>` position
+// and reports whether there was one.
+//
+// A KEYWORD is a legal alias there. That is PostgreSQL's own rule — writing
+// AS is what removes the ambiguity that makes a word reserved — and it is not
+// exotic: `COUNT(*) AS rows` and `COUNT(x) AS matched` both failed to parse
+// with "expected alias after AS", and a BI tool naming an output column after
+// a source column called `rows`, `value`, `key` or `end` hits it immediately.
+//
+// The keyword's original spelling is restored: the lexer uppercases val for
+// comparison, so taking it verbatim would rename the user's column to
+// MATCHED. Implicit aliases (no AS) are unchanged — there the reserved-word
+// check is what stops the parser swallowing FROM.
+func (p *selectParser) takeAliasAfterAs() (string, bool) {
+	tok := p.cur
+	if tok.typ != TokenIdent {
+		if _, isKeyword := keywords[tok.val]; !isKeyword {
+			return "", false
+		}
+	}
+	p.advance()
+	if tok.raw != "" {
+		return tok.raw, true
+	}
+	return tok.val, true
 }
 
 // isFromKeyword returns true if the current token is a keyword that
