@@ -9,6 +9,10 @@ version: "3"
 # untracked, and never committed before that was noticed.
 vars:
   DIST: dist
+  # PostgreSQL differential oracle — see the pg-oracle:* tasks.
+  PG_ORACLE_CONTAINER: wadjet-pg-oracle
+  PG_ORACLE_PORT: 55432
+  PG_ORACLE_IMAGE: postgres:17-alpine
 
 tasks:
   build:
@@ -157,3 +161,50 @@ tasks:
     cmds:
       - rm -rf /tmp/wadjet-harness
       - rm -rf {{.DIST}}
+
+  # --- PostgreSQL differential oracle (benchmarks/tpch/postgres_*_test.go) ---
+  #
+  # PostgreSQL is the authority on SEMANTICS for this engine, because Wadjet
+  # ships the PostgreSQL wire protocol. The suite has two arms: the corpus
+  # compared value-for-value, and the SAME SQL compared at the WIRE (type OIDs,
+  # format codes, RowDescription, NULL representation, SQLSTATE, command tag).
+  #
+  # `task pg-oracle:test` needs no setup at all when the postgres image is on
+  # the machine — the test starts and tears down its own container. These
+  # targets are for keeping ONE server across many runs, which is what you want
+  # while iterating on a fix.
+  #
+  # The database is initdb'd --locale=C on purpose: Wadjet compares strings by
+  # BYTES and a default en_US database compares them by locale, which would
+  # report every correct string ORDER BY as a divergence. See postgresCollation
+  # in benchmarks/tpch/postgres_oracle_test.go.
+
+  pg-oracle:up:
+    desc: Start a PostgreSQL oracle container and print its DSN
+    cmds:
+      - docker rm -f {{.PG_ORACLE_CONTAINER}} 2>/dev/null || true
+      - >
+        docker run -d --name {{.PG_ORACLE_CONTAINER}}
+        -e POSTGRES_USER=wadjet -e POSTGRES_PASSWORD=wadjet -e POSTGRES_DB=wadjet_oracle
+        -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8"
+        -p 127.0.0.1:{{.PG_ORACLE_PORT}}:5432 {{.PG_ORACLE_IMAGE}}
+        -c fsync=off -c full_page_writes=off -c synchronous_commit=off
+      - until docker exec {{.PG_ORACLE_CONTAINER}} pg_isready -U wadjet -q; do sleep 1; done
+      - 'echo "WADJET_PG_DSN=postgres://wadjet:wadjet@127.0.0.1:{{.PG_ORACLE_PORT}}/wadjet_oracle?sslmode=disable"'
+
+  pg-oracle:down:
+    desc: Remove the PostgreSQL oracle container
+    cmds:
+      - docker rm -f {{.PG_ORACLE_CONTAINER}} 2>/dev/null || true
+
+  pg-oracle:test:
+    desc: Run the PostgreSQL differential oracle (SF0.01; starts its own container if none is given)
+    cmds:
+      - go test -v -run 'TestPostgresOracle$' -timeout 30m ./benchmarks/tpch/
+
+  pg-oracle:test-large:
+    desc: 'Run the oracle at a larger tier, e.g. task pg-oracle:test-large SCALE=1 (SF1 loads ~7.7M rows)'
+    vars:
+      SCALE: '{{.SCALE | default "0.1"}}'
+    cmds:
+      - WADJET_PG_SCALE={{.SCALE}} go test -v -run 'TestPostgresOracle$' -timeout 120m ./benchmarks/tpch/

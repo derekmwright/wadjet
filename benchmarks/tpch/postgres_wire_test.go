@@ -1,0 +1,1013 @@
+package tpch
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"math"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/derekmwright/wadjet/internal/server/pgwire"
+)
+
+// The PROTOCOL arm: the same SQL through the same PostgreSQL client library
+// against Wadjet's pgwire endpoint and against a real PostgreSQL, comparing
+// what the WIRE carries rather than what the values mean.
+//
+// This is the arm DuckDB cannot provide at all, and the gap is not theoretical.
+// Eight defects were found in this layer BY HAND on 2026-08-18, every one of
+// them invisible to a value oracle because the values were right:
+//
+//   - RowDescription declared OID 25 (text) for every column, so DataGrip read
+//     an int4 as text and reported "Bad value for type int : f";
+//   - a DATE column under a BINARY result format wrote its rendered TEXT bytes
+//     beneath the declared OID 1082, whose value is a 4-byte day count;
+//   - a cancelled statement reported SQLSTATE 42000 (syntax error) instead of
+//     57014 (query_canceled), so a client could not tell "you cancelled this"
+//     from "your SQL is wrong".
+//
+// Nothing tested any of it. A value comparison cannot: the rows were correct in
+// every one of those cases.
+//
+// Comparison is per PROPERTY, not per query, so a pin says exactly which
+// property is not gated and the rest of the query stays gated. See wireCase.
+func runPostgresWireArm(t *testing.T, ctx context.Context, o *postgresOracle) {
+	// Wadjet's pgwire, over the same *wadjet.DB the semantics arm queried, so
+	// both arms are looking at the same rows.
+	srv := pgwire.NewServer(o.db, pgwire.Config{}, slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})))
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("starting wadjet pgwire: %v", err)
+	}
+	// Shutdown is BOUNDED, and the bound is not defensive padding: Server.
+	// Shutdown does wg.Wait() over its connection handlers, and the
+	// cancellation subtest deliberately leaves one running a statement the
+	// server would not cancel (#368). Waiting on it would make the suite hang
+	// on the very defect it just reported.
+	t.Cleanup(func() {
+		stopped := make(chan struct{})
+		go func() { srv.Shutdown(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(30 * time.Second):
+			t.Logf("wadjet pgwire Shutdown did not return within 30s: a connection handler is still executing " +
+				"the statement the CancelRequest failed to stop (#368). Not waiting further.")
+		}
+	})
+
+	wadjetDSN := fmt.Sprintf("postgres://wadjet:wadjet@%s/wadjet?sslmode=disable", srv.Addr())
+
+	wConn, err := pgconn.Connect(ctx, wadjetDSN)
+	if err != nil {
+		t.Fatalf("pgconn to wadjet pgwire at %s: %v", srv.Addr(), err)
+	}
+	t.Cleanup(func() { wConn.Close(context.Background()) })
+
+	pConn, err := pgconn.Connect(ctx, o.dsn)
+	if err != nil {
+		t.Fatalf("pgconn to PostgreSQL at %s: %v", redactDSN(o.dsn), err)
+	}
+	t.Cleanup(func() { pConn.Close(context.Background()) })
+
+	t.Run("Metadata", func(t *testing.T) { runWireMetadata(t, ctx, wConn, pConn) })
+	t.Run("Errors", func(t *testing.T) { runWireErrors(t, ctx, wConn, pConn) })
+	t.Run("CommandTags", func(t *testing.T) { runWireCommandTags(t, ctx, wConn, pConn) })
+	t.Run("Cancellation", func(t *testing.T) { runWireCancellation(t, ctx, wadjetDSN, o.dsn) })
+}
+
+// wireCase is one statement compared at the protocol level.
+type wireCase struct {
+	name string
+	sql  string
+	// paramOIDs / params bind a parameter by its DECLARED type. Empty means an
+	// unparameterized statement.
+	paramOIDs []uint32
+	params    [][]byte
+	// pins maps a PROPERTY name (one of the wireProp* constants) to the reason
+	// it is not gated. Every other property of the same statement stays gated,
+	// and a pinned property that starts AGREEING fails the subtest — deleting
+	// the entry is the proof the fix landed.
+	pins map[string]string
+}
+
+// The properties compared. Each is something a PostgreSQL client reads and
+// acts on; naming them individually is what lets a pin be narrow.
+const (
+	wirePropFieldCount   = "field_count"        // number of columns in RowDescription
+	wirePropFieldNames   = "field_names"        // the names a client shows and binds by
+	wirePropTypeOIDs     = "type_oids"          // the OID a driver picks its Java/Go/Python type from
+	wirePropTypeSizes    = "type_sizes"         // the declared size, which must agree with the OID
+	wirePropTypeMods     = "type_modifiers"     // atttypmod (precision/scale/length)
+	wirePropTextFormat   = "text_format_codes"  // the server must honour a text result format request
+	wirePropBinFormat    = "binary_format_code" // ... and a binary one, or say it did not
+	wirePropValuesText   = "values_text"        // the cell bytes under a text result format
+	wirePropFloatRender  = "float_text_render"  // same number, different spelling
+	wirePropNullRep      = "null_representation"
+	wirePropBinaryDecode = "binary_decode" // binary bytes must decode under the declared OID
+	wirePropCommandTag   = "command_tag"
+	wirePropParamOIDs    = "param_oids" // ParameterDescription
+	wirePropSQLState     = "sqlstate"
+)
+
+// runWireMetadata compares RowDescription, result-format handling, cell bytes
+// and ParameterDescription for every statement in the wire corpus.
+func runWireMetadata(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgConn) {
+	for _, c := range wireCorpus() {
+		t.Run(c.name, func(t *testing.T) {
+			cmp := &wireComparison{t: t, c: c}
+
+			// --- Describe: what the server PROMISES before any row moves ----
+			wDesc, wErr := wConn.Prepare(ctx, "", c.sql, c.paramOIDs)
+			pDesc, pErr := pConn.Prepare(ctx, "", c.sql, c.paramOIDs)
+			if pErr != nil {
+				t.Fatalf("the ORACLE refused to describe this statement: %v\n  SQL: %s", pErr, c.sql)
+			}
+			if wErr != nil {
+				cmp.diverged(wirePropFieldCount, fmt.Sprintf("wadjet cannot describe the statement: %v", wErr))
+				return
+			}
+			cmp.compareFields(wDesc.Fields, pDesc.Fields)
+			cmp.compareParamOIDs(wDesc.ParamOIDs, pDesc.ParamOIDs)
+
+			// --- Text result format -----------------------------------------
+			wText := readOne(ctx, wConn, c, textFormats(len(pDesc.Fields)))
+			pText := readOne(ctx, pConn, c, textFormats(len(pDesc.Fields)))
+			if pText.Err != nil {
+				t.Fatalf("the ORACLE refused to execute this statement: %v\n  SQL: %s", pText.Err, c.sql)
+			}
+			if wText.Err != nil {
+				cmp.diverged(wirePropValuesText, fmt.Sprintf("wadjet cannot execute the statement: %v", wText.Err))
+				return
+			}
+			cmp.compareFormats(wirePropTextFormat, wText.FieldDescriptions, 0)
+			cmp.compareCells(wText, pText)
+			cmp.compareTag(wText.CommandTag, pText.CommandTag)
+
+			// --- Binary result format ---------------------------------------
+			//
+			// The half that found the DATE defect. Asking for binary and being
+			// handed the text rendering under a fixed-width OID is not a value
+			// error — every value is "right" — and it makes a typed client
+			// decode whatever the string happened to contain.
+			wBin := readOne(ctx, wConn, c, binaryFormats(len(pDesc.Fields)))
+			pBin := readOne(ctx, pConn, c, binaryFormats(len(pDesc.Fields)))
+			if pBin.Err != nil {
+				t.Fatalf("the ORACLE refused a binary-format execute: %v\n  SQL: %s", pBin.Err, c.sql)
+			}
+			if wBin.Err != nil {
+				cmp.diverged(wirePropBinaryDecode, fmt.Sprintf("wadjet cannot execute under a binary result format: %v", wBin.Err))
+				return
+			}
+			// Sanity: the expectation being held against Wadjet is one
+			// PostgreSQL itself meets, or the check is measuring the harness.
+			for i, f := range pBin.FieldDescriptions {
+				if f.Format != 1 {
+					t.Fatalf("the ORACLE answered field %d with format code %d after a binary request, so "+
+						"the expectation this arm holds Wadjet to is wrong", i, f.Format)
+				}
+			}
+			cmp.compareFormats(wirePropBinFormat, wBin.FieldDescriptions, 1)
+			cmp.compareBinaryDecode(wBin, pBin)
+
+			cmp.finish()
+		})
+	}
+}
+
+// wireComparison accumulates per-property verdicts so a pin can be narrow and
+// so a pin that stopped being true fails.
+type wireComparison struct {
+	t             *testing.T
+	c             wireCase
+	divergedProps map[string]bool
+	compared      map[string]bool
+}
+
+func (w *wireComparison) note(prop string) {
+	if w.compared == nil {
+		w.compared = map[string]bool{}
+	}
+	w.compared[prop] = true
+}
+
+// diverged records that prop differs. A pinned property is logged; an unpinned
+// one fails.
+func (w *wireComparison) diverged(prop, detail string) {
+	w.t.Helper()
+	w.note(prop)
+	if w.divergedProps == nil {
+		w.divergedProps = map[string]bool{}
+	}
+	w.divergedProps[prop] = true
+	if reason, pinned := w.c.pins[prop]; pinned {
+		w.t.Logf("known divergence, NOT gated [%s]: %s\n  %s", prop, detail, reason)
+		return
+	}
+	w.t.Errorf("wire divergence [%s]: %s\n  SQL: %s", prop, detail, w.c.sql)
+}
+
+// finish fails any pin whose property agreed after all — the pin's deletion is
+// the fix's proof, so an outdated pin has to be loud.
+func (w *wireComparison) finish() {
+	w.t.Helper()
+	for prop, reason := range w.c.pins {
+		if !w.compared[prop] {
+			w.t.Errorf("pin on [%s] names a property this statement never compares — "+
+				"either the property name is wrong or the pin belongs on another entry:\n  %s", prop, reason)
+			continue
+		}
+		if !w.divergedProps[prop] {
+			w.t.Errorf("wadjet now agrees with PostgreSQL on [%s], so this known divergence is FIXED:\n  %s\n"+
+				"Delete the pin on %s in wireCorpus so the property is gated again.", prop, reason, w.c.name)
+		}
+	}
+}
+
+func (w *wireComparison) compareFields(got, want []pgconn.FieldDescription) {
+	w.t.Helper()
+	w.note(wirePropFieldCount)
+	if len(got) != len(want) {
+		w.diverged(wirePropFieldCount, fmt.Sprintf("%d fields, PostgreSQL %d", len(got), len(want)))
+		return
+	}
+	w.note(wirePropFieldNames)
+	w.note(wirePropTypeOIDs)
+	w.note(wirePropTypeSizes)
+	w.note(wirePropTypeMods)
+	for i := range want {
+		if got[i].Name != want[i].Name {
+			w.diverged(wirePropFieldNames, fmt.Sprintf("field %d named %q, PostgreSQL %q", i, got[i].Name, want[i].Name))
+		}
+		if got[i].DataTypeOID != want[i].DataTypeOID {
+			w.diverged(wirePropTypeOIDs, fmt.Sprintf("field %d (%s) declared OID %d (%s), PostgreSQL %d (%s)",
+				i, want[i].Name, got[i].DataTypeOID, oidName(got[i].DataTypeOID),
+				want[i].DataTypeOID, oidName(want[i].DataTypeOID)))
+		}
+		if got[i].DataTypeSize != want[i].DataTypeSize {
+			w.diverged(wirePropTypeSizes, fmt.Sprintf("field %d (%s) declared size %d, PostgreSQL %d",
+				i, want[i].Name, got[i].DataTypeSize, want[i].DataTypeSize))
+		}
+		if got[i].TypeModifier != want[i].TypeModifier {
+			w.diverged(wirePropTypeMods, fmt.Sprintf("field %d (%s) type modifier %d, PostgreSQL %d",
+				i, want[i].Name, got[i].TypeModifier, want[i].TypeModifier))
+		}
+	}
+	// TableOID and TableAttributeNumber are NOT compared. The protocol defines
+	// 0 as "this column is not a simple reference to a table column", and
+	// Wadjet answers 0 everywhere because its tables have no pg_class row a
+	// client could look up. That is a legal and deliberate difference; a client
+	// uses the pair only for updatable result sets, which Wadjet does not offer.
+}
+
+func (w *wireComparison) compareParamOIDs(got, want []uint32) {
+	w.t.Helper()
+	if len(w.c.paramOIDs) == 0 && len(want) == 0 {
+		return
+	}
+	w.note(wirePropParamOIDs)
+	if len(got) != len(want) {
+		w.diverged(wirePropParamOIDs, fmt.Sprintf("ParameterDescription has %d OIDs %v, PostgreSQL %d %v",
+			len(got), got, len(want), want))
+		return
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			w.diverged(wirePropParamOIDs, fmt.Sprintf("parameter $%d declared OID %d (%s), PostgreSQL %d (%s)",
+				i+1, got[i], oidName(got[i]), want[i], oidName(want[i])))
+		}
+	}
+}
+
+// compareFormats checks the server honoured the result format the client asked
+// for. A server that ignores the request and sends text under a binary format
+// code is the DATE defect's shape.
+func (w *wireComparison) compareFormats(prop string, fields []pgconn.FieldDescription, want int16) {
+	w.t.Helper()
+	w.note(prop)
+	for i, f := range fields {
+		if f.Format != want {
+			w.diverged(prop, fmt.Sprintf("field %d (%s) came back with format code %d after the client asked for %d",
+				i, f.Name, f.Format, want))
+			return
+		}
+	}
+}
+
+// compareCells compares the text-format bytes cell by cell, separating three
+// things a single "values differ" would blur: a different VALUE, a different
+// SPELLING of the same number, and NULL rendered as something other than a
+// negative length.
+func (w *wireComparison) compareCells(got, want *pgconn.Result) {
+	w.t.Helper()
+	w.note(wirePropValuesText)
+	w.note(wirePropNullRep)
+	w.note(wirePropFloatRender)
+	if len(got.Rows) != len(want.Rows) {
+		w.diverged(wirePropValuesText, fmt.Sprintf("%d rows, PostgreSQL %d", len(got.Rows), len(want.Rows)))
+		return
+	}
+	for i := range want.Rows {
+		if len(got.Rows[i]) != len(want.Rows[i]) {
+			w.diverged(wirePropValuesText, fmt.Sprintf("row %d has %d cells, PostgreSQL %d",
+				i, len(got.Rows[i]), len(want.Rows[i])))
+			return
+		}
+		for j := range want.Rows[i] {
+			g, p := got.Rows[i][j], want.Rows[i][j]
+			// NULL is a negative length on the wire, which pgconn surfaces as a
+			// nil slice. The empty string is a zero length, a non-nil empty
+			// slice. Conflating them is how a NULLed column reads as blank.
+			if (g == nil) != (p == nil) {
+				w.diverged(wirePropNullRep, fmt.Sprintf("row %d col %d: wadjet sent %s, PostgreSQL sent %s",
+					i, j, describeCell(g), describeCell(p)))
+				continue
+			}
+			if g == nil {
+				continue
+			}
+			if string(g) == string(p) {
+				continue
+			}
+			if gf, gok := parseFloat(string(g)); gok {
+				if pf, pok := parseFloat(string(p)); pok && nearlyEqual(gf, pf) {
+					w.diverged(wirePropFloatRender, fmt.Sprintf("row %d col %d: wadjet spelled %q, PostgreSQL %q (same number)",
+						i, j, g, p))
+					continue
+				}
+			}
+			w.diverged(wirePropValuesText, fmt.Sprintf("row %d col %d: wadjet %q, PostgreSQL %q", i, j, g, p))
+			return
+		}
+	}
+}
+
+// compareBinaryDecode decodes both servers' binary bytes UNDER THE OID EACH
+// DECLARED and compares the results. This is the check that catches text bytes
+// shipped beneath a fixed-width OID: the value is not wrong, the encoding is,
+// and only a decode says so.
+func (w *wireComparison) compareBinaryDecode(got, want *pgconn.Result) {
+	w.t.Helper()
+	w.note(wirePropBinaryDecode)
+	m := pgtype.NewMap()
+	if len(got.Rows) != len(want.Rows) {
+		w.diverged(wirePropBinaryDecode, fmt.Sprintf("%d rows under a binary format, PostgreSQL %d",
+			len(got.Rows), len(want.Rows)))
+		return
+	}
+	for i := range want.Rows {
+		for j := range want.Rows[i] {
+			if j >= len(got.Rows[i]) || j >= len(got.FieldDescriptions) || j >= len(want.FieldDescriptions) {
+				return
+			}
+			gf, pf := got.FieldDescriptions[j], want.FieldDescriptions[j]
+			gv, gErr := decodeCell(m, gf, got.Rows[i][j])
+			pv, pErr := decodeCell(m, pf, want.Rows[i][j])
+			if pErr != nil {
+				w.t.Fatalf("the ORACLE's own binary output does not decode under its declared OID %d: %v",
+					pf.DataTypeOID, pErr)
+			}
+			if gErr != nil {
+				w.diverged(wirePropBinaryDecode, fmt.Sprintf("row %d col %d (%s): wadjet's bytes %q do not decode "+
+					"under the OID %d (%s) it declared, format %d: %v",
+					i, j, gf.Name, got.Rows[i][j], gf.DataTypeOID, oidName(gf.DataTypeOID), gf.Format, gErr))
+				return
+			}
+			if !sameDecoded(gv, pv) {
+				w.diverged(wirePropBinaryDecode, fmt.Sprintf("row %d col %d (%s): wadjet's binary decodes to %#v, PostgreSQL's to %#v",
+					i, j, gf.Name, gv, pv))
+				return
+			}
+		}
+	}
+}
+
+func (w *wireComparison) compareTag(got, want pgconn.CommandTag) {
+	w.t.Helper()
+	w.note(wirePropCommandTag)
+	if got.String() != want.String() {
+		w.diverged(wirePropCommandTag, fmt.Sprintf("CommandComplete %q, PostgreSQL %q", got.String(), want.String()))
+	}
+}
+
+func decodeCell(m *pgtype.Map, f pgconn.FieldDescription, raw []byte) (any, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	var v any
+	if err := m.Scan(f.DataTypeOID, f.Format, raw, &v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// sameDecoded compares two decoded values across the type each server chose.
+// A different OID is reported by compareFields; here only the VALUE matters,
+// so both sides render through the same canonicalization the value oracle uses.
+func sameDecoded(got, want any) bool {
+	if got == nil || want == nil {
+		return got == nil && want == nil
+	}
+	gs, ps := canonicalString(normalizePostgresValue(got)), canonicalString(normalizePostgresValue(want))
+	if gs == ps {
+		return true
+	}
+	gf, gok := parseFloat(gs)
+	pf, pok := parseFloat(ps)
+	return gok && pok && nearlyEqual(gf, pf)
+}
+
+// nearlyEqual is the relative-difference test the DuckDB arm's cellEqual
+// already applies, at the same floatEps: one ULP of accumulation noise is not a
+// wire divergence.
+func nearlyEqual(a, b float64) bool {
+	if a == b {
+		return true
+	}
+	denom := math.Max(math.Abs(a), math.Abs(b))
+	if denom == 0 {
+		return false
+	}
+	return math.Abs(a-b)/denom < floatEps
+}
+
+func describeCell(b []byte) string {
+	if b == nil {
+		return "NULL (negative length)"
+	}
+	if len(b) == 0 {
+		return `"" (zero length)`
+	}
+	return strconv.Quote(string(b))
+}
+
+func readOne(ctx context.Context, conn *pgconn.PgConn, c wireCase, resultFormats []int16) *pgconn.Result {
+	paramFormats := make([]int16, len(c.params)) // all text unless a case says otherwise
+	return conn.ExecParams(ctx, c.sql, c.params, c.paramOIDs, paramFormats, resultFormats).Read()
+}
+
+func textFormats(n int) []int16 { return make([]int16, n) }
+func binaryFormats(n int) []int16 {
+	out := make([]int16, n)
+	for i := range out {
+		out[i] = 1
+	}
+	return out
+}
+
+// oidName renders the handful of OIDs this arm can produce, so a failure reads
+// as "int4 against text" rather than "23 against 25".
+func oidName(oid uint32) string {
+	switch oid {
+	case 0:
+		return "unspecified"
+	case 16:
+		return "bool"
+	case 20:
+		return "int8"
+	case 21:
+		return "int2"
+	case 23:
+		return "int4"
+	case 25:
+		return "text"
+	case 700:
+		return "float4"
+	case 701:
+		return "float8"
+	case 705:
+		return "unknown"
+	case 1042:
+		return "bpchar"
+	case 1043:
+		return "varchar"
+	case 1082:
+		return "date"
+	case 1114:
+		return "timestamp"
+	case 1184:
+		return "timestamptz"
+	case 1700:
+		return "numeric"
+	default:
+		return "oid " + strconv.FormatUint(uint64(oid), 10)
+	}
+}
+
+// int4Text encodes an int32 the way a client sends a parameter under the TEXT
+// parameter format, which is what pgx sends for a value it did not pre-encode.
+func int4Text(v int32) []byte { return []byte(strconv.FormatInt(int64(v), 10)) }
+
+// The pins the wire corpus shares, written once so the same defect cannot
+// acquire two descriptions.
+const (
+	// binaryFormatPin is the finding this arm was built to be able to see:
+	// Wadjet ENCODES the values in binary when the Bind message asks for
+	// binary, and then describes the portal as text anyway.
+	binaryFormatPin = "WADJET BUG (pgwire): a portal bound with binary result formats gets binary-encoded " +
+		"DataRows and a RowDescription that still declares format code 0 (text). The bytes are right — " +
+		"an int4 arrives as four big-endian bytes — but the client is told to read them as text, so pgx " +
+		"reports `strconv.ParseInt: parsing \"\\x00\\x00\\x00\\a\"`. Per the protocol, a Describe of a " +
+		"PORTAL carries the format codes the Bind chose; only a Describe of a STATEMENT is always text. " +
+		"This is the same family as the OID-1082 defect found by hand: the bytes and the declaration " +
+		"disagree, and every value is 'correct' the whole time. (#362)"
+	binaryDecodePin = "WADJET BUG (pgwire): consequence of the format-code defect above — the binary bytes " +
+		"cannot decode under the declared OID, because the declaration says they are text. (#362)"
+
+	// noExactNumericPin is a DELIBERATE difference, documented rather than
+	// fixed: the engine has one numeric tower and it is float64.
+	noExactNumericPin = "DELIBERATE: Wadjet has no exact numeric type. PostgreSQL promotes SUM(int4) to " +
+		"int8 and AVG(int4) to numeric so neither can lose a digit; Wadjet computes both in float64 and " +
+		"declares OID 701. benchmarks/tpch/schema.go states the position for the fixture itself " +
+		"(\"monetary values use FLOAT64\"), and the engine has no DECIMAL kernel to promote into. Pinned, " +
+		"not exempted: the day a NUMERIC type lands, this entry fails and says so. The client-visible " +
+		"cost is real — a JDBC client reads a BigDecimal column as a Double, and a SUM past 2^53 loses " +
+		"low digits"
+)
+
+// wireCorpus is the statement set the protocol arm compares. Each entry is
+// chosen for the TYPE it forces into the RowDescription, not for its rows: the
+// answer is usually two or three rows, because the wire metadata is the subject.
+func wireCorpus() []wireCase {
+	return []wireCase{
+		// The shape that broke DataGrip: a plain projection of an int, a text
+		// and an int. Every column used to be declared OID 25; the OIDs are
+		// right now, and this entry is what keeps them right.
+		{name: "IntTextInt", sql: `SELECT n_nationkey, n_name, n_regionkey FROM nation ORDER BY n_nationkey LIMIT 3`,
+			pins: map[string]string{
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
+			}},
+		// A float column, where the declared OID and the text spelling of the
+		// value are separate questions.
+		{name: "Float8Column", sql: `SELECT o_orderkey, o_totalprice FROM orders ORDER BY o_orderkey LIMIT 3`,
+			pins: map[string]string{
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
+			}},
+		// COUNT(*) is int8 in PostgreSQL, and a driver that reads it as int4
+		// truncates silently past 2^31. Wadjet agrees on the OID here.
+		{name: "CountStar", sql: `SELECT COUNT(*) AS c FROM nation`,
+			pins: map[string]string{
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
+			}},
+		// SUM over an int4 column is int8 in PostgreSQL and AVG is numeric.
+		{name: "SumAvgOverInteger", sql: `SELECT SUM(n_regionkey) AS s, AVG(n_regionkey) AS a FROM nation`,
+			pins: map[string]string{
+				wirePropTypeOIDs: noExactNumericPin,
+				wirePropTypeSizes: noExactNumericPin + " — the declared SIZE follows the OID: 8 for float8, " +
+					"-1 for a variable-length numeric",
+				wirePropFloatRender: "DELIBERATE, same cause: PostgreSQL renders a NUMERIC average with its " +
+					"full scale (\"2.0000000000000000\") and Wadjet renders a float64 (\"2\"). Same number, " +
+					"and any client that parses it gets the same value; a client that string-compares does not",
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
+			}},
+		// A literal of each basic type, which is how a client probes a server.
+		{name: "LiteralTypes", sql: `SELECT 1 AS i, 'x' AS t, TRUE AS b, 1.5 AS f`,
+			pins: map[string]string{
+				wirePropTypeOIDs: "DELIBERATE for the integer, deliberate-by-consequence for the decimal: " +
+					"Wadjet widens every integer literal to INT64 (OID 20) where PostgreSQL types it int4 " +
+					"(23), and types 1.5 as float8 (701) where PostgreSQL uses numeric (1700). The integer " +
+					"widening is safe in one direction only — a client asking for an Integer column gets a " +
+					"Long — and the decimal is the no-exact-numeric position again",
+				wirePropTypeSizes:    "DELIBERATE, follows the OIDs above (8 for int8/float8, 4 and -1 in PostgreSQL)",
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
+			}},
+		// NULL beside the empty string: the wire tells them apart by length,
+		// and a renderer that does not is invisible to a value comparison.
+		// Wadjet gets this right — the entry exists to keep it right.
+		{name: "NullAndEmpty", sql: `SELECT NULL AS nul, '' AS empty, 'x' AS filled`,
+			pins: map[string]string{wirePropBinFormat: binaryFormatPin}},
+		// A NULL in a typed column, rather than a bare NULL literal.
+		{name: "NullInTypedColumn", sql: `SELECT n_nationkey, NULLIF(n_regionkey, 1) AS k FROM nation ORDER BY n_nationkey LIMIT 6`,
+			pins: map[string]string{
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
+			}},
+		// A DATE expression. The engine boxes a date as its rendered text and
+		// the wire declares that text, so a client is never told it is a date.
+		{name: "DateColumn", sql: `SELECT CAST('1996-01-10' AS date) AS d`,
+			pins: map[string]string{
+				wirePropTypeOIDs: "WADJET BUG (pgwire): CAST(x AS date) is declared OID 25 (text), not 1082 " +
+					"(date). The VALUE is right — '1996-01-10' — which is why no value oracle sees it, and " +
+					"the client is simply never told the column is a date: DataGrip shows a string, a JDBC " +
+					"getDate() fails, and an ORDER BY on the client side sorts lexically. Note a DATE-typed " +
+					"COLUMN is declared 1082 correctly (pgTypeOID has the case); it is the CAST expression's " +
+					"declared type that arrives as STRING. (#363)",
+				wirePropTypeSizes: "WADJET BUG (pgwire): consequence of the OID above — -1 (variable) where a " +
+					"date is 4. (#363)",
+				wirePropBinFormat: binaryFormatPin,
+				wirePropBinaryDecode: "WADJET BUG (pgwire): consequence of the OID above — the bytes decode " +
+					"to the STRING \"1996-01-10\" where PostgreSQL's decode to a date. (#363)",
+			}},
+		{name: "TimestampColumn", sql: `SELECT CAST('1996-01-10 12:34:56' AS timestamp) AS ts`,
+			pins: map[string]string{
+				wirePropTypeOIDs: "WADJET BUG (pgwire): CAST(x AS timestamp) is declared OID 20 (int8) and " +
+					"the value sent is the epoch-millisecond integer 821277296000. The engine boxes a " +
+					"timestamp as epoch millis — correct for every compute path — and server.go's " +
+					"sendColumnTypes exists precisely to convert it on the way out (#321), but it keys off a " +
+					"column DECLARED timestamp, and this CAST expression is declared INT64. So the " +
+					"conversion never fires and a client is handed a bigint. (#363)",
+				wirePropValuesText: "WADJET BUG (pgwire): consequence of the OID above — \"821277296000\" " +
+					"where PostgreSQL sends \"1996-01-10 12:34:56\". (#363)",
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
+			}},
+		// A boolean expression, whose PostgreSQL text form is 't'/'f' and
+		// whose binary form is one byte.
+		{name: "BooleanExpression", sql: `SELECT (n_regionkey = 1) AS is_one FROM nation ORDER BY n_nationkey LIMIT 4`,
+			pins: map[string]string{
+				wirePropTypeOIDs: "WADJET BUG (pgwire): a boolean-valued expression is declared OID 25 " +
+					"(text). PostgreSQL declares 16 (bool), and every client maps that to its own boolean " +
+					"type; under OID 25 a `SELECT x = 1 AS flag` column arrives as a string. (#364)",
+				wirePropTypeSizes: "WADJET BUG (pgwire): consequence of the OID above — -1 where a bool is 1. (#364)",
+				wirePropValuesText: "WADJET BUG (pgwire): the value is rendered Go-style as \"false\"/\"true\" " +
+					"where PostgreSQL's boolean output is 'f'/'t'. pgx's text bool decoder accepts only " +
+					"'t'/'f', so even a client told the column were bool could not read it. (#364)",
+				wirePropBinFormat: binaryFormatPin,
+			}},
+		// A parameter bound by its DECLARED type rather than as a string —
+		// the shape of the 4a25af0 fix, and the one that exercises
+		// ParameterDescription.
+		{name: "ParamInt4Text", sql: `SELECT n_nationkey, n_name FROM nation WHERE n_nationkey = $1`,
+			paramOIDs: []uint32{23}, params: [][]byte{int4Text(7)},
+			pins: map[string]string{
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
+			}},
+		// The same statement with the OID NOT declared, which is what a client
+		// that lets the server infer parameter types sends — and the shape
+		// behind DataGrip's "Bad value for type int : f".
+		{name: "ParamInt4Inferred", sql: `SELECT n_nationkey, n_name FROM nation WHERE n_nationkey = $1`,
+			params: [][]byte{int4Text(7)},
+			pins: map[string]string{
+				wirePropParamOIDs: "WADJET BUG (pgwire): ParameterDescription answers OID 0 (unspecified) " +
+					"where PostgreSQL infers int4 from the comparison. OID 0 is legal in the protocol, but " +
+					"it makes the client choose the encoding, and the row below shows Wadjet then " +
+					"misreads what it chose. (#365)",
+				wirePropValuesText: "WADJET BUG (pgwire): with the parameter's type undeclared, the bound " +
+					"value 7 matches n_nationkey = 0 — a WRONG ROW, not an error. The declared-OID entry " +
+					"beside it (ParamInt4Text) answers correctly, which localizes this to the inference " +
+					"path and not to parameter binding in general. (#365)",
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
+			}},
+		{name: "ParamText", sql: `SELECT n_nationkey FROM nation WHERE n_name = $1`,
+			paramOIDs: []uint32{25}, params: [][]byte{[]byte("BRAZIL")},
+			pins: map[string]string{
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
+			}},
+		// An aggregate over a parameterized filter, so the parameter has to
+		// survive into a plan rather than only into a scan predicate.
+		{name: "ParamInAggregate", sql: `SELECT COUNT(*) AS c FROM nation WHERE n_regionkey = $1`,
+			paramOIDs: []uint32{23}, params: [][]byte{int4Text(1)},
+			pins: map[string]string{
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
+			}},
+	}
+}
+
+// runWireErrors compares the SQLSTATE a client is handed for statements that
+// cannot succeed. A client branches on this code: 42P01 sends it to look up a
+// table name, 22012 to report a data error, 57014 to say "cancelled" rather
+// than "your SQL is broken".
+func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgConn) {
+	// The SQLSTATE granularity defect, shared by every entry that reaches an
+	// error at all. 42000 is a CLASS, not a code.
+	const sqlstateClassPin = "WADJET BUG (pgwire): every failure is reported as SQLSTATE 42000. That is the " +
+		"CLASS \"syntax error or access rule violation\", not a code, and a client branches on the code: " +
+		"42P01 sends it to re-resolve a table name, 42703 to re-resolve a column, 42883 to look for a " +
+		"function, 22012 to report a data error. Under one blanket code an ORM cannot tell a typo'd column " +
+		"from a broken connection, and 57014 — the one that means 'you cancelled this' — is in the same " +
+		"blanket. (#366)"
+	// The other half, which is not about the code at all: PostgreSQL REFUSES
+	// these and Wadjet answers them.
+	const missingValidationPin = "WADJET BUG: PostgreSQL refuses this statement and Wadjet ANSWERS it. A " +
+		"silent answer to a statement the standard calls invalid is worse than a wrong code: the client " +
+		"gets rows it will treat as the truth. (#367)"
+
+	cases := []struct {
+		name string
+		sql  string
+		pin  string
+	}{
+		{name: "UndefinedTable", sql: `SELECT * FROM no_such_table_here`,
+			pin: missingValidationPin + " Here a SELECT against a table that does not exist returns an empty " +
+				"result instead of 42P01 undefined_table — so a typo'd or not-yet-created table reads as " +
+				"'no matching rows'"},
+		{name: "UndefinedColumn", sql: `SELECT no_such_column FROM nation`, pin: sqlstateClassPin},
+		{name: "SyntaxError", sql: `SELECT FROM WHERE`, pin: sqlstateClassPin},
+		{name: "DivisionByZero", sql: `SELECT 1/0`,
+			pin: missingValidationPin + " Here 1/0 produces a value instead of 22012 division_by_zero"},
+		{name: "InvalidTextRepresentation", sql: `SELECT CAST('abc' AS integer)`,
+			pin: missingValidationPin + " Here a cast of non-numeric text to integer succeeds instead of " +
+				"raising 22P02 invalid_text_representation"},
+		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`, pin: sqlstateClassPin},
+		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`,
+			pin: missingValidationPin + " Here a bare column beside an aggregate with no GROUP BY is " +
+				"answered instead of raising 42803 grouping_error. The query has no defined answer: which " +
+				"n_name should the single aggregate row carry?"},
+		{name: "AmbiguousColumn", sql: `SELECT n_nationkey FROM nation a JOIN nation b ON a.n_nationkey = b.n_nationkey`,
+			pin: missingValidationPin + " Here an unqualified column that two aliases both provide is " +
+				"resolved silently instead of raising 42702 ambiguous_column — the engine picks one side " +
+				"and the client never learns a choice was made"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pState, pErr := execSQLState(ctx, pConn, c.sql)
+			if pErr == nil {
+				t.Fatalf("the ORACLE accepted a statement this entry exists to see refused: %s", c.sql)
+			}
+			wState, wErr := execSQLState(ctx, wConn, c.sql)
+			if wErr == nil {
+				res := wConn.ExecParams(ctx, c.sql, nil, nil, nil, nil).Read()
+				detail := fmt.Sprintf("wadjet ACCEPTED the statement and answered %d row(s) %v; PostgreSQL refused it with SQLSTATE %s (%s)",
+					len(res.Rows), firstWireRow(res), pState, sqlstateName(pState))
+				if c.pin != "" {
+					t.Logf("known divergence, NOT gated [%s]: %s\n  %s", wirePropSQLState, detail, c.pin)
+					return
+				}
+				t.Errorf("wire divergence [%s]: %s\n  SQL: %s", wirePropSQLState, detail, c.sql)
+				return
+			}
+			if wState == pState {
+				if c.pin != "" {
+					t.Errorf("wadjet now reports SQLSTATE %s like PostgreSQL, so this known divergence is FIXED:\n  %s\n"+
+						"Delete the pin on %s in runWireErrors.", wState, c.pin, c.name)
+				}
+				return
+			}
+			detail := fmt.Sprintf("SQLSTATE %s (%s), PostgreSQL %s (%s)\n  wadjet: %v\n  postgres: %v",
+				wState, sqlstateName(wState), pState, sqlstateName(pState), wErr, pErr)
+			if c.pin != "" {
+				t.Logf("known divergence, NOT gated [%s]: %s\n  %s", wirePropSQLState, detail, c.pin)
+				return
+			}
+			t.Errorf("wire divergence [%s]: %s\n  SQL: %s", wirePropSQLState, detail, c.sql)
+		})
+	}
+}
+
+// firstWireRow renders a result's first row for a failure message, so "wadjet
+// accepted it" says WHAT it answered.
+func firstWireRow(res *pgconn.Result) []string {
+	if len(res.Rows) == 0 {
+		return nil
+	}
+	out := make([]string, len(res.Rows[0]))
+	for i, cell := range res.Rows[0] {
+		out[i] = describeCell(cell)
+	}
+	return out
+}
+
+// execSQLState runs sql and returns the SQLSTATE of the error it produced.
+func execSQLState(ctx context.Context, conn *pgconn.PgConn, sql string) (string, error) {
+	res := conn.ExecParams(ctx, sql, nil, nil, nil, nil).Read()
+	if res.Err == nil {
+		return "", nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(res.Err, &pgErr) {
+		return pgErr.Code, res.Err
+	}
+	return "<not a PostgreSQL error>", res.Err
+}
+
+func sqlstateName(code string) string {
+	switch code {
+	case "":
+		return "no error"
+	case "22012":
+		return "division_by_zero"
+	case "22P02":
+		return "invalid_text_representation"
+	case "42601":
+		return "syntax_error"
+	case "42702":
+		return "ambiguous_column"
+	case "42703":
+		return "undefined_column"
+	case "42883":
+		return "undefined_function"
+	case "42P01":
+		return "undefined_table"
+	case "42803":
+		return "grouping_error"
+	case "42000":
+		return "syntax_error_or_access_rule_violation, the CLASS not a code"
+	case "57014":
+		return "query_canceled"
+	case "XX000":
+		return "internal_error"
+	default:
+		return "unclassified"
+	}
+}
+
+// runWireCommandTags compares the CommandComplete tag, which a client uses for
+// its "n rows affected" report and, for some drivers, to decide whether a
+// result set follows at all.
+func runWireCommandTags(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgConn) {
+	cases := []struct {
+		name string
+		sql  string
+		pin  string
+	}{
+		{name: "SelectRows", sql: `SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3`},
+		{name: "SelectZeroRows", sql: `SELECT n_nationkey FROM nation WHERE n_nationkey < 0`},
+		{name: "SelectOneRow", sql: `SELECT COUNT(*) FROM nation`},
+		{name: "Begin", sql: `BEGIN`},
+		{name: "Commit", sql: `COMMIT`},
+		{name: "Set", sql: `SET extra_float_digits = 3`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pRes := pConn.ExecParams(ctx, c.sql, nil, nil, nil, nil).Read()
+			if pRes.Err != nil {
+				t.Fatalf("the ORACLE refused %q: %v", c.sql, pRes.Err)
+			}
+			wRes := wConn.ExecParams(ctx, c.sql, nil, nil, nil, nil).Read()
+			if wRes.Err != nil {
+				detail := fmt.Sprintf("wadjet refused a statement PostgreSQL tagged %q: %v", pRes.CommandTag.String(), wRes.Err)
+				if c.pin != "" {
+					t.Logf("known divergence, NOT gated [%s]: %s\n  %s", wirePropCommandTag, detail, c.pin)
+					return
+				}
+				t.Errorf("wire divergence [%s]: %s\n  SQL: %s", wirePropCommandTag, detail, c.sql)
+				return
+			}
+			got, want := wRes.CommandTag.String(), pRes.CommandTag.String()
+			if got == want {
+				if c.pin != "" {
+					t.Errorf("wadjet now sends the tag %q like PostgreSQL, so this known divergence is FIXED:\n  %s\n"+
+						"Delete the pin on %s in runWireCommandTags.", got, c.pin, c.name)
+				}
+				return
+			}
+			detail := fmt.Sprintf("CommandComplete %q, PostgreSQL %q", got, want)
+			if c.pin != "" {
+				t.Logf("known divergence, NOT gated [%s]: %s\n  %s", wirePropCommandTag, detail, c.pin)
+				return
+			}
+			t.Errorf("wire divergence [%s]: %s\n  SQL: %s", wirePropCommandTag, detail, c.sql)
+		})
+	}
+}
+
+// runWireCancellation sends a CancelRequest mid-query on a dedicated connection
+// per server and compares the SQLSTATE the cancelled statement reports.
+//
+// PostgreSQL answers 57014 (query_canceled), and a client shows "cancelled"
+// only because of that code. Wadjet reported 42000 — the syntax-error class —
+// so a cancelled query was indistinguishable from broken SQL. Nothing tested
+// it, and no value oracle could: a cancelled query has no values.
+func runWireCancellation(t *testing.T, ctx context.Context, wadjetDSN, pgDSN string) {
+	// A query slow enough to still be running after the cancel is sent: a
+	// keyless self-join whose predicate cannot become a hash key, so both
+	// engines walk the cross product, with per-pair string work on top.
+	//
+	// Two properties it has to have, and both are about the BUGGY outcome
+	// rather than the correct one:
+	//
+	//   - the o_orderkey bound caps the row set at 15,000 on every tier, so
+	//     the work does not grow with the fixture. A server that stops for the
+	//     cancel never notices; a server that does not runs the whole thing.
+	//   - it must still TERMINATE on its own in tens of seconds, because
+	//     pgwire's Shutdown waits on its connection handlers (see the cleanup
+	//     in runPostgresWireArm). Unbounded, the abandoned statement at SF0.1
+	//     held the suite for minutes after the finding was already reported.
+	//
+	// The test itself never waits for it to finish: the statement is given a
+	// grace window after the cancel, and "still running" IS the finding.
+	const slow = `SELECT COUNT(*) AS c FROM orders a, orders b
+		WHERE a.o_orderkey <= 15000 AND b.o_orderkey <= 15000 AND a.o_orderkey < b.o_orderkey
+		  AND LENGTH(a.o_comment || b.o_comment) > 0`
+
+	// The cancel is sent this long after the statement starts. A statement that
+	// finishes sooner says nothing either way and is skipped.
+	const cancelAfter = 300 * time.Millisecond
+
+	// How long a correct server may take to act on the cancel. PostgreSQL
+	// answers within milliseconds; anything past this window has not acted.
+	const graceAfterCancel = 20 * time.Second
+
+	// One pin, on Wadjet. PostgreSQL is unpinned on purpose: it is the
+	// reference, and a reference that stopped answering 57014 would mean the
+	// probe had stopped measuring cancellation at all.
+	pins := map[string]string{
+		"Wadjet": "WADJET BUG (pgwire): a CancelRequest is accepted on the wire — the cancel connection is " +
+			"served and returns no error — and the running statement is not stopped. Measured at SF0.01: the " +
+			"keyless self-join this subtest runs completed normally 3 seconds after the cancel arrived, and " +
+			"unbounded it ran for 11 seconds past it. " +
+			"Nothing the client can do gets the query back: a psql ^C, a DataGrip stop button and a " +
+			"driver-level cancel all send exactly this message. PostgreSQL aborts within milliseconds and " +
+			"reports 57014. This is upstream of the SQLSTATE question (#366): there is no error to give a " +
+			"code to. (#368)",
+	}
+
+	for _, s := range []struct{ name, dsn string }{{"PostgreSQL", pgDSN}, {"Wadjet", wadjetDSN}} {
+		t.Run(s.name, func(t *testing.T) {
+			runCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+			defer cancel()
+
+			conn, err := pgconn.Connect(runCtx, s.dsn)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			// The close is DEADLINED, which matters only here: pgconn.Close
+			// sends Terminate and waits for the server to close the socket, and
+			// a server still grinding through the abandoned statement never
+			// reads it. With context.Background() that wait is unbounded, so
+			// the subtest that reports "the cancel did nothing" would then hang
+			// on the same defect it just reported. The deadline makes the
+			// context watcher drop the socket instead.
+			defer func() {
+				closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer closeCancel()
+				conn.Close(closeCtx)
+			}()
+
+			type outcome struct {
+				state   string
+				err     error
+				elapsed time.Duration
+			}
+			done := make(chan outcome, 1)
+			start := time.Now()
+			go func() {
+				state, err := execSQLState(runCtx, conn, slow)
+				done <- outcome{state, err, time.Since(start)}
+			}()
+
+			time.Sleep(cancelAfter)
+			if err := conn.CancelRequest(runCtx); err != nil {
+				t.Fatalf("CancelRequest: %v", err)
+			}
+			sentAt := time.Since(start)
+
+			report := func(format string, args ...any) {
+				detail := fmt.Sprintf(format, args...)
+				if pin, ok := pins[s.name]; ok {
+					t.Logf("known divergence, NOT gated [%s]: %s\n  %s", wirePropSQLState, detail, pin)
+					return
+				}
+				t.Errorf("wire divergence [%s]: %s\n  SQL: %s", wirePropSQLState, detail, slow)
+			}
+
+			var got outcome
+			select {
+			case got = <-done:
+			case <-time.After(graceAfterCancel):
+				// Neither an error nor a result within the grace window. The
+				// server took the cancel and kept going, which is the finding —
+				// waiting for the statement to end would only measure how long
+				// a cross product takes at this tier.
+				report("%s was still running the statement %s after a CancelRequest, which it accepted without "+
+					"error. PostgreSQL aborts within milliseconds and answers 57014. The connection is dropped "+
+					"here rather than waited on, because a cancel that does nothing has no end to wait for",
+					s.name, graceAfterCancel)
+				return
+			case <-runCtx.Done():
+				t.Fatalf("%s never answered the cancelled statement", s.name)
+			}
+
+			switch {
+			case got.err == nil && got.elapsed < sentAt:
+				t.Skipf("the statement finished in %s, before the cancel was sent at %s, so this run says "+
+					"nothing about cancellation on %s", got.elapsed.Round(time.Millisecond),
+					sentAt.Round(time.Millisecond), s.name)
+			case got.err == nil:
+				// Still running when the cancel arrived, and it finished
+				// anyway. The request was received (CancelRequest returned no
+				// error) and had no effect.
+				report("%s ran the statement to COMPLETION in %s despite a CancelRequest sent at %s — the "+
+					"cancel was accepted on the wire and did not stop the query. PostgreSQL aborts it and "+
+					"answers 57014",
+					s.name, got.elapsed.Round(time.Millisecond), sentAt.Round(time.Millisecond))
+			case got.state == "57014":
+				t.Logf("%s aborted the statement after %s and reported SQLSTATE 57014 (query_canceled), which "+
+					"is the answer a client needs", s.name, got.elapsed.Round(time.Millisecond))
+				if pin, pinned := pins[s.name]; pinned {
+					t.Errorf("%s now answers a cancelled statement with 57014, so this known divergence is "+
+						"FIXED:\n  %s\nDelete the pin on %s in runWireCancellation.", s.name, pin, s.name)
+				}
+			default:
+				report("%s answered a cancelled statement with SQLSTATE %s (%s) after %s: %v. PostgreSQL "+
+					"defines 57014 query_canceled, and a client tells 'you cancelled this' from 'your SQL is "+
+					"wrong' by exactly that code",
+					s.name, got.state, sqlstateName(got.state), got.elapsed.Round(time.Millisecond), got.err)
+			}
+		})
+	}
+}

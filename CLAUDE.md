@@ -184,6 +184,12 @@ refactor(scan): extract predicate pushdown into separate module
   WADJET_HITS_PART=/path/to/hits_0.parquet go test -run TestHitsOptimizationInvariance ./benchmarks/clickbench/
   ```
   A divergence names the disabled toggle — that is the defect localization. Registering the switch extends the oracle for free; this is part of the definition of done for optimization work (#287).
+- **PostgreSQL is the authority on SEMANTICS; DuckDB is the performance goal and a second correctness oracle.** Wadjet ships the PostgreSQL wire protocol, so "is this what a PostgreSQL client expects" is a question only PostgreSQL can answer. Changes to expression semantics, NULL handling, type resolution, error reporting or anything in `internal/server/pgwire/` run the PostgreSQL differential oracle:
+  ```bash
+  task pg-oracle:test                      # SF0.01, ~15s; starts and tears down its own postgres:17-alpine
+  task pg-oracle:test-large SCALE=0.1      # generated tier (~60s), one source feeds both engines
+  ```
+  Two arms: `EngineSemantics` compares values through the embedded API, and `WireProtocol` compares what the WIRE carries (type OIDs, result format codes, RowDescription, NULL representation, SQLSTATE, command tag, CancelRequest) through pgx against both servers. The wire arm is the one DuckDB cannot provide — a value oracle cannot see a right value under a wrong OID. It **skips** when no server is reachable, so CI is unaffected. Divergences are pinned per entry (`knownBug`) or per wire PROPERTY (`pins`), and a pin that starts agreeing FAILS — deleting it is the fix's proof. Never exempt a divergence by narrowing the corpus: configure the oracle instead (the fixture is loaded into a `--locale=C` database with `COLLATE "C"` text columns, because wadjet compares strings by bytes; `TestPostgresOracleIsConfiguredForByteCollation` guards that and runs without a server).
 - **Test patterns**: Table-driven tests preferred. Use `tb.Helper()` in test helpers. Use `objstore.NewMemStore()` for storage in tests (no real S3).
 
 ### Code Style
