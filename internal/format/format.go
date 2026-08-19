@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Format identifies an output format.
@@ -32,8 +35,26 @@ func ParseFormat(s string) (Format, error) {
 	}
 }
 
-// Write formats columns and rows to the writer in the given format.
+// Write formats columns and rows to the writer in the given format, with no
+// column type information. Values render as the engine boxes them, so a
+// TIMESTAMP column prints as its raw epoch integer; prefer WriteTyped
+// wherever the result's column metadata is on hand.
 func Write(w io.Writer, f Format, columns []string, rows []map[string]any) error {
+	return WriteTyped(w, f, columns, nil, rows)
+}
+
+// WriteTyped is Write with the declared type of each column, positionally
+// aligned with columns (a short or nil slice just means "unknown" for the
+// remainder).
+//
+// The engine boxes a TIMESTAMP as epoch milliseconds because every compute
+// path that shares that boxing reads it as a number; only a renderer holding
+// the column's declared type can turn it back into an instant, so the type
+// has to reach this far (#321).
+func WriteTyped(w io.Writer, f Format, columns []string, types []parquet.TypeID, rows []map[string]any) error {
+	if rendered := renderTemporal(columns, types, rows); rendered != nil {
+		rows = rendered
+	}
 	switch f {
 	case Table:
 		return writeTable(w, columns, rows)
@@ -44,6 +65,40 @@ func Write(w io.Writer, f Format, columns []string, rows []map[string]any) error
 	default:
 		return writeTable(w, columns, rows)
 	}
+}
+
+// renderTemporal returns a copy of rows with every TIMESTAMP column replaced
+// by its rendered form, or nil when there is nothing to render.
+//
+// It copies rather than mutating in place because the caller's rows may be
+// the query result the program goes on to use for something other than
+// display; formatting is this package's business, not a side effect it
+// should impose on the result. Only the maps are rebuilt, and only when a
+// timestamp column is actually present.
+func renderTemporal(columns []string, types []parquet.TypeID, rows []map[string]any) []map[string]any {
+	var tsCols []string
+	for i, col := range columns {
+		if i < len(types) && types[i] == parquet.TypeTimestamp {
+			tsCols = append(tsCols, col)
+		}
+	}
+	if len(tsCols) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, len(rows))
+	for i, row := range rows {
+		cp := make(map[string]any, len(row))
+		for k, v := range row {
+			cp[k] = v
+		}
+		for _, col := range tsCols {
+			if ms, ok := cp[col].(int64); ok {
+				cp[col] = batch.FormatTimestamp(ms)
+			}
+		}
+		out[i] = cp
+	}
+	return out
 }
 
 const maxColWidth = 40

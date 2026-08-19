@@ -57,7 +57,7 @@ func TestSendResultRows_PerBatch(t *testing.T) {
 	c := &pgConn{conn: rc}
 
 	batches := []*batch.RecordBatch{mk(1, 2, 3), mk(4, 5)}
-	sent, err := c.sendResultRows(context.Background(), []string{"n"}, coordinator.NewSliceStream(batches), nil, nil)
+	sent, err := c.sendResultRows(context.Background(), []string{"n"}, coordinator.NewSliceStream(batches), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("sendResultRows: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestSendResultRows_LegacyRows(t *testing.T) {
 	c := &pgConn{conn: rc}
 
 	rows := []map[string]any{{"n": int64(1)}, {"n": int64(2)}}
-	sent, err := c.sendResultRows(context.Background(), []string{"n"}, nil, rows, nil)
+	sent, err := c.sendResultRows(context.Background(), []string{"n"}, nil, rows, nil, nil)
 	if err != nil {
 		t.Fatalf("sendResultRows: %v", err)
 	}

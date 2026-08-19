@@ -43,6 +43,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/compaction"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/internal/telemetry"
 	"github.com/derekmwright/wadjet/internal/worker"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -559,7 +560,7 @@ func queryCmd() *cobra.Command {
 				return err
 			}
 
-			return format.Write(os.Stdout, f, result.Columns, result.Rows)
+			return format.WriteTyped(os.Stdout, f, result.Columns, columnTypes(result), result.Rows)
 		},
 	}
 
@@ -775,6 +776,21 @@ func historyPath() string {
 	return filepath.Join(dir, "history")
 }
 
+// columnTypes returns the declared type of each result column, positionally
+// aligned with result.Columns, or nil when the query carried no typed
+// metadata (introspection answers). The formatter needs it to render
+// TIMESTAMP columns, which the engine boxes as epoch milliseconds.
+func columnTypes(result *wadjet.QueryResult) []parquet.TypeID {
+	if result == nil || len(result.ColumnMetas) == 0 {
+		return nil
+	}
+	types := make([]parquet.TypeID, len(result.ColumnMetas))
+	for i, m := range result.ColumnMetas {
+		types[i] = m.TypeID
+	}
+	return types
+}
+
 func runShell(ctx context.Context, db *wadjet.DB, f format.Format) error {
 	line := liner.NewLiner()
 	defer line.Close()
@@ -871,7 +887,7 @@ func runShell(ctx context.Context, db *wadjet.DB, f format.Format) error {
 			continue
 		}
 
-		format.Write(os.Stdout, f, result.Columns, result.Rows)
+		format.WriteTyped(os.Stdout, f, result.Columns, columnTypes(result), result.Rows)
 	}
 
 	return nil

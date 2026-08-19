@@ -66,6 +66,18 @@ func CanDictPruneRowGroup(fr *pqt.FileReader, rgIdx int, probes []EqProbe) bool 
 		if colIdx < 0 {
 			continue
 		}
+		// Dictionary entries are RAW FILE values, but the probe is an
+		// engine value. For a micro/nano TIMESTAMP column those live in
+		// different units, and unlike the min/max bounds this test cannot
+		// be rescaled into agreement: the engine value is a truncated
+		// millisecond, so it matches a whole 1000-wide band of stored
+		// micros rather than one dictionary entry. An exact-match probe
+		// would find nothing and prune the row group — dropping rows that
+		// do match. Decline instead; the row filter still evaluates the
+		// predicate on decoded, rescaled values.
+		if pqt.TimestampDivisorFromSchemaNode(leaves[colIdx]) != 1 {
+			continue
+		}
 		if dictProbeAbsent(fr, rgIdx, colIdx, p.Value) {
 			dictPrunedRowGroups.Add(1)
 			return true

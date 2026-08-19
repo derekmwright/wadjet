@@ -546,6 +546,16 @@ func (v *Vector) GetValue(i int) any {
 	// Hot types first as if-chain for better branch prediction
 	switch v.Type {
 	case TypeInt64, TypeTimestamp:
+		// TIMESTAMP stays a bare int64 of epoch milliseconds here, unlike
+		// DATE below. This box is NOT a display boundary: it is also the
+		// GROUP BY key (aggregate.go's keyValues -> serializeKey), the
+		// aggregate/window spill row encoding, the window comparator, and
+		// the row map an UPDATE mutates and re-ingests. Every one of those
+		// type-switches on int64 and silently degrades on anything else —
+		// a formatted value would collapse distinct timestamps into one
+		// group, order a window arbitrarily, and rewrite updated rows as
+		// epoch 0. Rendering happens at the renderers instead, which still
+		// hold the column's declared type: see FormatTimestamp.
 		return v.Int64Data[i]
 	case TypeFloat64:
 		return v.Float64Data[i]
@@ -1187,6 +1197,29 @@ var epochDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
 func FormatDate(days int32) string {
 	t := epochDate.AddDate(0, 0, int(days))
 	return t.Format("2006-01-02")
+}
+
+// FormatTimestamp renders epoch MILLISECONDS — the engine's one timestamp
+// unit — the way PostgreSQL renders a `timestamp` (OID 1114): UTC,
+// "2006-01-02 15:04:05", with a fractional part only when the millisecond
+// component is non-zero.
+//
+// This is the display half of a deliberate split. The COMPUTE half boxes a
+// TIMESTAMP column as a bare int64 (ColRef.Eval, pinned by
+// TestTemporalColumnBoxingUnchanged) because comparison, arithmetic,
+// GROUP BY key serialization, spill codecs and the UPDATE read-modify-write
+// path all read it as a number; Vector.GetValue keeps that same int64 for
+// exactly those consumers. The two halves agree because they are the same
+// value in the same unit — one rendered, one raw — and the conversion
+// between them lives here, applied by renderers that still hold the
+// column's declared type. Formatting inside GetValue instead would push the
+// rendered form into every compute path that shares that boxing.
+func FormatTimestamp(ms int64) string {
+	t := time.UnixMilli(ms).UTC()
+	if ms%1000 != 0 {
+		return t.Format("2006-01-02 15:04:05.000")
+	}
+	return t.Format("2006-01-02 15:04:05")
 }
 
 // parseDateString parses "2006-01-02" to days since epoch.

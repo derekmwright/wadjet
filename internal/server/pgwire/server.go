@@ -21,6 +21,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/coordinator"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -875,7 +876,7 @@ func (c *pgConn) handleQuery(sql string) {
 
 	// Send DataRow for each row — coord-path batches are boxed and sent
 	// one batch at a time, never materialized as a whole.
-	sent, sendErr := c.sendResultRows(ctx, columns, stream, result.Rows, nil)
+	sent, sendErr := c.sendResultRows(ctx, columns, stream, result.Rows, nil, result.ColumnMetas)
 	if sendErr != nil {
 		// Partial DataRows followed by ErrorResponse is legal in the v3
 		// protocol; the client discards the partial result.
@@ -1334,7 +1335,7 @@ func (c *pgConn) handleExecute(payload []byte) {
 	// Extended query protocol: Execute sends only DataRow + CommandComplete.
 	// RowDescription was already sent by Describe. Do NOT send it again.
 	// Coord-path batches are boxed and sent one batch at a time.
-	sent, sendErr := c.sendResultRows(ctx, columns, stream, result.Rows, c.resultFmtCodes)
+	sent, sendErr := c.sendResultRows(ctx, columns, stream, result.Rows, c.resultFmtCodes, result.ColumnMetas)
 	if sendErr != nil {
 		c.sendQueryError(ctx, "58030", fmt.Errorf("reading result batches: %w", sendErr))
 		return
@@ -1891,9 +1892,11 @@ func (c *pgConn) sendSynthRowDescription(ans *synthAnswer) {
 func (c *pgConn) sendSynthRows(ans *synthAnswer, fmtCodes []int16) {
 	for _, row := range ans.rows {
 		if len(fmtCodes) > 0 {
-			c.sendDataRowFormatted(ans.cols, row, fmtCodes)
+			// Synthetic catalog answers carry no typed metas, so there is
+			// no timestamp column to convert.
+			c.sendDataRowFormatted(ans.cols, row, fmtCodes, nil)
 		} else {
-			c.sendDataRow(ans.cols, row)
+			c.sendDataRow(ans.cols, row, nil)
 		}
 	}
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(ans.rows)))
@@ -2612,13 +2615,64 @@ func pgTypeSize(oid int) int16 {
 	}
 }
 
-func (c *pgConn) sendDataRow(columns []string, row map[string]any) {
+// timestampColumns returns a mask over columns marking those the
+// RowDescription declared as TIMESTAMP (OID 1114).
+//
+// The engine boxes a timestamp as epoch milliseconds — the right thing for
+// every compute path that shares that boxing — but a client reads the value
+// according to the OID we already told it, so the send path has to convert.
+// Without this the wire carried "826727136000" under a declared `timestamp`,
+// which psql prints back verbatim and a typed client (pgJDBC, DataGrip,
+// SQLAlchemy) fails to parse (#321).
+//
+// Returns nil when no column is a timestamp, so the common query pays one
+// nil check and nothing else. Metas normally arrive in column order; the
+// name lookup is the fallback for callers that reorder or rename.
+func timestampColumns(columns []string, metas []wadjet.ColumnMeta) []bool {
+	if len(metas) == 0 {
+		return nil
+	}
+	var mask []bool
+	for i, col := range columns {
+		var m wadjet.ColumnMeta
+		switch {
+		case i < len(metas) && metas[i].Name == col:
+			m = metas[i]
+		default:
+			found := false
+			for _, cand := range metas {
+				if cand.Name == col {
+					m, found = cand, true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		if m.TypeID != parquet.TypeTimestamp {
+			continue
+		}
+		if mask == nil {
+			mask = make([]bool, len(columns))
+		}
+		mask[i] = true
+	}
+	return mask
+}
+
+// pgEpochOffsetMicros is the gap between the Unix epoch and PostgreSQL's
+// timestamp epoch (2000-01-01T00:00:00Z), in microseconds. Binary-format
+// `timestamp` values are microseconds relative to the latter.
+const pgEpochOffsetMicros = 946684800 * 1_000_000
+
+func (c *pgConn) sendDataRow(columns []string, row map[string]any, tsCols []bool) {
 	c.buf = c.buf[:0]
 
 	// Column count (int16)
 	c.buf = appendInt16(c.buf, int16(len(columns)))
 
-	for _, col := range columns {
+	for i, col := range columns {
 		val, ok := row[col]
 		if !ok || val == nil {
 			// NULL: length = -1
@@ -2626,6 +2680,11 @@ func (c *pgConn) sendDataRow(columns []string, row map[string]any) {
 			continue
 		}
 		s := formatPgValue(val)
+		if i < len(tsCols) && tsCols[i] {
+			if ms, ok := val.(int64); ok {
+				s = batch.FormatTimestamp(ms)
+			}
+		}
 		c.buf = appendInt32(c.buf, int32(len(s)))
 		c.buf = append(c.buf, s...)
 	}
@@ -2636,7 +2695,7 @@ func (c *pgConn) sendDataRow(columns []string, row map[string]any) {
 // sendDataRowFormatted sends a DataRow using the format codes from Bind.
 // Columns with format code 1 (binary) get binary-encoded values.
 // metas provides type info for correct binary encoding (may be nil for text-only).
-func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtCodes []int16) {
+func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtCodes []int16, tsCols []bool) {
 	c.buf = c.buf[:0]
 	c.buf = appendInt16(c.buf, int16(len(columns)))
 
@@ -2655,16 +2714,48 @@ func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtC
 			binary = fmtCodes[i] == 1
 		}
 
-		if binary {
+		isTS := i < len(tsCols) && tsCols[i]
+		ms, msOK := val.(int64)
+
+		switch {
+		case binary && isTS && msOK:
+			// Binary `timestamp` is microseconds since 2000-01-01, not the
+			// engine's milliseconds since 1970. Emitting the raw int64 kept
+			// the declared 8-byte width, so the client parsed it happily
+			// and landed ~30000 years off.
+			c.buf = appendBinaryTimestamp(c.buf, ms)
+		case binary:
 			c.buf = appendBinaryValue(c.buf, val)
-		} else {
+		default:
 			s := formatPgValue(val)
+			if isTS && msOK {
+				s = batch.FormatTimestamp(ms)
+			}
 			c.buf = appendInt32(c.buf, int32(len(s)))
 			c.buf = append(c.buf, s...)
 		}
 	}
 
 	c.sendMsg('D', c.buf)
+}
+
+// appendBinaryTimestamp encodes epoch milliseconds as a PostgreSQL binary
+// `timestamp` (OID 1114): int64 microseconds since 2000-01-01T00:00:00Z.
+//
+// Values whose microsecond form would overflow int64 are sent as NULL rather
+// than as a wrapped-around instant: the field is fixed at 8 bytes, so there
+// is no way to signal "out of range" other than absence, and a silently
+// wrapped date is exactly the failure mode this whole change is closing.
+func appendBinaryTimestamp(buf []byte, ms int64) []byte {
+	const maxMillis = (math.MaxInt64 - pgEpochOffsetMicros) / 1000
+	const minMillis = (math.MinInt64 + pgEpochOffsetMicros) / 1000
+	if ms > maxMillis || ms < minMillis {
+		return appendInt32(buf, -1)
+	}
+	us := ms*1000 - pgEpochOffsetMicros
+	buf = appendInt32(buf, 8)
+	return append(buf, byte(us>>56), byte(us>>48), byte(us>>40), byte(us>>32),
+		byte(us>>24), byte(us>>16), byte(us>>8), byte(us))
 }
 
 // appendBinaryValue appends a value in PostgreSQL binary format.

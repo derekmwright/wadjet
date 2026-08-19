@@ -265,8 +265,12 @@ func (f *FileReader) RowGroupStats(index int) RowGroupStats {
 
 			// Extract typed min/max from raw statistics bytes.
 			var physType PhysicalType
-			if i < len(f.leaves) && f.leaves[i].Type != nil {
-				physType = *f.leaves[i].Type
+			var leaf *SchemaNode
+			if i < len(f.leaves) {
+				leaf = f.leaves[i]
+			}
+			if leaf != nil && leaf.Type != nil {
+				physType = *leaf.Type
 			} else {
 				physType = cm.Type
 			}
@@ -280,6 +284,27 @@ func (f *FileReader) RowGroupStats(index int) RowGroupStats {
 				cs.MaxValue = statsToNative(s.MaxValue, physType)
 			} else if len(s.Max) > 0 {
 				cs.MaxValue = statsToNative(s.Max, physType)
+			}
+
+			// Statistics are raw file values, so a micro/nano TIMESTAMP
+			// column hands out bounds 1000x-1000000x away from the engine
+			// unit the query literal is in. Every consumer of ColumnStats
+			// compares against engine values — zone-map and dynamic-range
+			// row-group pruning, bloom pruning, the footer-answered
+			// MIN/MAX, and the catalog's persisted per-file stats — and
+			// none of them can see the schema, so the unit has to be
+			// resolved here, at the one place that still holds the leaf.
+			//
+			// Flooring keeps the bounds sound: it is monotonic, so the
+			// scaled [min,max] still contains every scaled value in the
+			// row group and pruning can never drop a matching row.
+			if div := TimestampDivisorFromSchemaNode(leaf); div != 1 {
+				if mn, ok := cs.MinValue.(int64); ok {
+					cs.MinValue = TimestampToEngineMillis(mn, div)
+				}
+				if mx, ok := cs.MaxValue.(int64); ok {
+					cs.MaxValue = TimestampToEngineMillis(mx, div)
+				}
 			}
 		}
 		stats.Columns[colName] = cs
@@ -401,6 +426,78 @@ func nodeToColumn(n *SchemaNode) Column {
 	}
 }
 
+// TimestampDivisorFromSchemaNode reports the divisor that converts values
+// stored under this leaf's TIMESTAMP unit into the engine unit, epoch
+// MILLISECONDS: 1 for MILLIS, 1_000 for MICROS, 1_000_000 for NANOS.
+//
+// The engine has exactly one timestamp unit — file_writer.go emits MILLIS and
+// the expression layer's parseTemporalInt64 reads MILLIS — but parquet files
+// written elsewhere carry whichever unit their producer chose (MICROS is the
+// PyArrow, Spark and Iceberg default; NANOS is common from pandas). Decoding
+// those verbatim puts every instant off by 1000x or 1000000x, silently. Any
+// path that lifts a raw int64 out of a TIMESTAMP column — page values or
+// footer statistics — must divide by this first.
+//
+// Returns 1 for every non-timestamp node, so callers may apply it
+// unconditionally.
+func TimestampDivisorFromSchemaNode(n *SchemaNode) int64 {
+	if n == nil {
+		return 1
+	}
+	if n.LogicalType != nil {
+		switch n.LogicalType.Type {
+		case LogicalTimestampMicros:
+			return 1_000
+		case LogicalTimestampNanos:
+			return 1_000_000
+		case LogicalTimestampMillis:
+			return 1
+		}
+	}
+	// Old-style ConvertedType files (parquet-mr before the LogicalType
+	// union, and anything writing for maximum compatibility) carry only
+	// TIMESTAMP_MICROS / TIMESTAMP_MILLIS. There is no NANOS spelling in
+	// ConvertedType, which is why NANOS files always set a LogicalType.
+	if n.ConvertedType != nil && *n.ConvertedType == ConvertedTimestampMicros {
+		return 1_000
+	}
+	return 1
+}
+
+// TimestampToEngineMillis converts one stored timestamp value to the engine
+// unit given the divisor from TimestampDivisorFromSchemaNode.
+//
+// Sub-millisecond precision cannot survive the trip, so the instant is
+// reported as the millisecond that CONTAINS it — division truncating toward
+// the PAST, not toward zero. Go's `/` truncates toward zero, which would move
+// pre-1970 instants FORWARD in time and break the invariant that a stored
+// value never decodes to a later millisecond than one that follows it in the
+// same column. That asymmetry is exactly the kind of silent, sign-dependent
+// skew this whole conversion exists to prevent.
+func TimestampToEngineMillis(v, div int64) int64 {
+	if div == 1 {
+		return v
+	}
+	q := v / div
+	if v%div != 0 && v < 0 {
+		q--
+	}
+	return q
+}
+
+// ScaleTimestampsToEngine rescales a decoded run of TIMESTAMP values in
+// place. Null slots may hold arbitrary residue from a pooled vector; scaling
+// them is harmless because Nulls gates every read, and skipping them would
+// cost a per-row branch on the scan hot path.
+func ScaleTimestampsToEngine(vals []int64, div int64) {
+	if div == 1 {
+		return
+	}
+	for i, v := range vals {
+		vals[i] = TimestampToEngineMillis(v, div)
+	}
+}
+
 // TypeIDFromSchemaNode maps a schema node's physical + logical type to Wadjet TypeID.
 func TypeIDFromSchemaNode(n *SchemaNode) TypeID {
 	if n.LogicalType != nil {
@@ -410,7 +507,22 @@ func TypeIDFromSchemaNode(n *SchemaNode) TypeID {
 		case LogicalDate:
 			return TypeDate
 		case LogicalTimestampMillis, LogicalTimestampMicros, LogicalTimestampNanos:
+			// All three precisions land on the one engine timestamp unit;
+			// the decode paths divide by TimestampDivisorFromSchemaNode to
+			// get there.
 			return TypeTimestamp
+		case LogicalTimeMillis:
+			// TIME is time-of-day with no date, which the engine's 22 types
+			// cannot express. Rather than pretend it is an instant, it stays
+			// the file's own integer IN THE FILE'S OWN UNIT: TIME_MILLIS is
+			// physical INT32, TIME_MICROS is INT64. Rescaling to a common
+			// unit would silently discard sub-millisecond precision from a
+			// column whose declared type never promised milliseconds, and
+			// there is no TypeTime for the result to mean anything as. Add a
+			// real TIME type before changing this.
+			return TypeInt32
+		case LogicalTimeMicros:
+			return TypeInt64
 		case LogicalDecimal:
 			return TypeDecimal
 		case LogicalInteger:

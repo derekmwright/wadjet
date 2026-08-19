@@ -301,6 +301,18 @@ func readLeafColumn(fr *FileReader, rgIdx, colIdx int) (leafColumnData, error) {
 		page.Release()
 	}
 
+	// Nested (ARRAY/MAP/ROW) leaves come through here too, so this is the
+	// scaling point for a timestamp buried inside a struct or list.
+	if typeID == TypeTimestamp {
+		if div := TimestampDivisorFromSchemaNode(leaf); div != 1 {
+			for i, v := range lcd.values {
+				if iv, ok := v.(int64); ok {
+					lcd.values[i] = TimestampToEngineMillis(iv, div)
+				}
+			}
+		}
+	}
+
 	return lcd, nil
 }
 
@@ -754,6 +766,18 @@ func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, typeID TypeID) 
 		}
 		offset += n
 		page.Release()
+	}
+
+	// A micro/nano TIMESTAMP column decodes to the file's unit; the engine
+	// speaks milliseconds. See TimestampDivisorFromSchemaNode.
+	if typeID == TypeTimestamp && colIdx < len(leaves) {
+		if div := TimestampDivisorFromSchemaNode(leaves[colIdx]); div != 1 {
+			for i, v := range values {
+				if iv, ok := v.(int64); ok {
+					values[i] = TimestampToEngineMillis(iv, div)
+				}
+			}
+		}
 	}
 	return values, nil
 }

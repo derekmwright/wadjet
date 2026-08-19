@@ -400,6 +400,23 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		page.Release()
 	}
 
+	// A TIMESTAMP column written elsewhere may be in MICROS or NANOS; the
+	// engine unit is MILLIS. Rescale the whole chunk once, after the page
+	// loop, rather than per page: it is one linear pass over data that is
+	// still hot in cache, it cannot be confused by dictionary pages (whose
+	// shared buffers must not be mutated), and it treats the direct and
+	// scatter copies identically. Millis files divide by 1 and return
+	// immediately, so our own files pay nothing.
+	if catalogType == pqt.TypeTimestamp && colIdx < len(leaves) && offset > 0 {
+		if div := pqt.TimestampDivisorFromSchemaNode(leaves[colIdx]); div != 1 {
+			n := offset
+			if n > len(vec.Int64Data) {
+				n = len(vec.Int64Data)
+			}
+			pqt.ScaleTimestampsToEngine(vec.Int64Data[:n], div)
+		}
+	}
+
 	return nil
 }
 

@@ -82,13 +82,17 @@ func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryRe
 // ErrorResponse after the partial DataRows (legal in the v3 protocol).
 // ctx is the statement's context: a CancelRequest (or statement_timeout)
 // mid-send stops the stream instead of sending the remaining rows.
-func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream coordinator.BatchStream, rows []map[string]any, fmtCodes []int16) (int, error) {
+func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream coordinator.BatchStream, rows []map[string]any, fmtCodes []int16, metas []wadjet.ColumnMeta) (int, error) {
 	sent := 0
+	// Resolved once per result, not per row: the value a client reads has
+	// to match the type the RowDescription declared, and only the metas
+	// carry that (see timestampColumns).
+	tsCols := timestampColumns(columns, metas)
 	send := func(row map[string]any) {
 		if len(fmtCodes) > 0 {
-			c.sendDataRowFormatted(columns, row, fmtCodes)
+			c.sendDataRowFormatted(columns, row, fmtCodes, tsCols)
 		} else {
-			c.sendDataRow(columns, row)
+			c.sendDataRow(columns, row, tsCols)
 		}
 		sent++
 	}
