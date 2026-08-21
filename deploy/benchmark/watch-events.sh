@@ -19,8 +19,8 @@
 #                      (default 0 = wait forever)
 #
 # Output: one line per event, "<local HH:MM:SS> <event JSON>". Messages are
-# deleted as they are printed, so two watchers on one queue SPLIT the stream —
-# run one.
+# deleted (one delete-message-batch call) BEFORE they are printed, so two
+# watchers on one queue SPLIT the stream — run one.
 #
 # Exit: 0 on suite_completed, 1 on fatal, 2 on MAX_IDLE_MIN with no terminal
 # event (the teardown signal).
@@ -39,6 +39,25 @@
 # doing a naive `grep -q "suite_completed\|fatal"` over this script's output
 # fires immediately on startup, before any real event. Match the JSON event
 # line instead, e.g. `grep -q '"event":"suite_completed"\|"event":"fatal"'`.
+#
+# Delete-after-visibility-expiry trap (#388): the first release-run use of
+# this script deleted every message with `aws sqs delete-message`, one CLI
+# invocation per handle, called AFTER the whole batch had already been
+# parsed and printed. Each `aws` invocation is a fresh process (SSO/STS
+# credential resolution, TLS handshake, no connection reuse), so a batch of
+# 10 could easily spend several seconds just parsing+printing before the
+# delete loop even started, then several more running 10 serial deletes.
+# SQS's --visibility-timeout clock starts the moment receive-message
+# returns; once it expires the message is redelivered to the next
+# long-poll, which mints it a NEW receipt handle. A delete-message call
+# using the OLD (now-stale) handle after that point returns HTTP 200 —
+# success — but deletes nothing, silently. That is exactly what was
+# observed: every `aws sqs delete-message` exited 0, yet the queue kept
+# redelivering every ~30s, indefinitely. Two changes close this: delete
+# happens as ONE delete-message-batch call immediately after receive
+# returns (before any parsing/printing work), and the batch response's
+# `Failed` list — which single delete-message has no equivalent of — is
+# checked, so a stale-handle no-op is now loud instead of invisible.
 
 set -uo pipefail
 
@@ -69,47 +88,66 @@ while true; do
     continue
   }
 
-  rm -f "$WORK/handles" "$WORK/terminal"
+  rm -f "$WORK/entries.json" "$WORK/lines" "$WORK/terminal"
   if [ -n "$RESP" ]; then
+    # Parse once: build the delete-batch entries (Id/ReceiptHandle pairs)
+    # and the buffered print lines in the same pass, but do NOT print here
+    # — printing happens after the delete below, per the trap above.
     printf '%s' "$RESP" | python3 -c '
 import json, sys, time
 raw = sys.stdin.read().strip()
 resp = json.loads(raw) if raw else {}
-handles, terminal = [], None
-for m in resp.get("Messages", []):
-    handles.append(m["ReceiptHandle"])
+entries, lines, terminal = [], [], None
+for i, m in enumerate(resp.get("Messages", [])):
+    entries.append({"Id": str(i), "ReceiptHandle": m["ReceiptHandle"]})
     body = m.get("Body", "")
     try:
         ev = json.loads(body)
     except ValueError:
-        print(time.strftime("%H:%M:%S"), "UNPARSEABLE", body)
+        lines.append(time.strftime("%H:%M:%S") + " UNPARSEABLE " + body)
         continue
     # Reprint compactly: the producer already emits one line, this just
     # normalizes whitespace and drops any key ordering surprise.
-    print(time.strftime("%H:%M:%S"), json.dumps(ev, separators=(",", ":")))
+    lines.append(time.strftime("%H:%M:%S") + " " + json.dumps(ev, separators=(",", ":")))
     name = ev.get("event")
     if name in ("suite_completed", "fatal"):
         terminal = name
-sys.stdout.flush()
 with open(sys.argv[1], "w") as f:
-    f.write("\n".join(handles))
+    json.dump(entries, f)
+with open(sys.argv[2], "w") as f:
+    for line in lines:
+        f.write(line + "\n")
 if terminal:
-    with open(sys.argv[2], "w") as f:
+    with open(sys.argv[3], "w") as f:
         f.write(terminal)
-' "$WORK/handles" "$WORK/terminal"
+' "$WORK/entries.json" "$WORK/lines" "$WORK/terminal"
   fi
 
-  # Delete before acting on a terminal event so a re-run of this script
-  # does not replay the finished suite.
-  if [ -s "$WORK/handles" ]; then
+  # Delete FIRST, in one batch call, before printing anything or acting on a
+  # terminal event — see the #388 trap above. delete-message-batch also
+  # reports failures in its response, unlike single delete-message, so a
+  # stale-handle no-op is caught here instead of vanishing.
+  if [ -s "$WORK/entries.json" ] && [ "$(cat "$WORK/entries.json")" != "[]" ]; then
     LAST_EVENT=$SECONDS
-    while IFS= read -r h; do
-      [ -n "$h" ] || continue
-      aws sqs delete-message --profile "$PROFILE" --region "$REGION" \
-        --queue-url "$QUEUE_URL" --receipt-handle "$h" >/dev/null 2>&1 ||
-        echo "WARNING: delete-message failed (event will redeliver in 30s)" >&2
-    done < "$WORK/handles"
+    DELRESP=$(aws sqs delete-message-batch --profile "$PROFILE" --region "$REGION" \
+      --queue-url "$QUEUE_URL" --entries "file://$WORK/entries.json" \
+      --output json 2>"$WORK/delerr") || {
+      echo "WARNING: delete-message-batch failed: $(cat "$WORK/delerr") (events will redeliver in 30s)" >&2
+      DELRESP=""
+    }
+    if [ -n "$DELRESP" ]; then
+      FAILED=$(printf '%s' "$DELRESP" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(json.dumps(d.get("Failed", [])))
+')
+      if [ "$FAILED" != "[]" ]; then
+        echo "WARNING: delete-message-batch reported failed deletions (events will redeliver in 30s): $FAILED" >&2
+      fi
+    fi
   fi
+
+  [ -s "$WORK/lines" ] && cat "$WORK/lines"
 
   if [ -s "$WORK/terminal" ]; then
     TERMINAL=$(cat "$WORK/terminal")

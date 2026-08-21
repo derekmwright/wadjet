@@ -85,8 +85,9 @@ deploy/benchmark/watch-events.sh \
 
 One line per event, `<time> <JSON>`. Exits 0 on `suite_completed`, 1 on
 `fatal`, 2 on `MAX_IDLE_MIN=<n>` with no event (the teardown signal). Messages
-are deleted as they print — run **one** watcher per queue, or two will split
-the stream. Event schema: the package comment in `internal/benchnotify`.
+are deleted (one batch call) before they print — run **one** watcher per
+queue, or two will split the stream. Event schema: the package comment in
+`internal/benchnotify`.
 
 Emission is fire-and-forget: a missing or broken queue costs events, never the
 benchmark, and `--notify-sqs-url` unset (the default) is exactly the old
