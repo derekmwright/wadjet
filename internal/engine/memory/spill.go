@@ -89,6 +89,11 @@ type SpillManager struct {
 	// unconditionally while TrackBatch/ReleaseTracking still charge the
 	// shared tracker. See TrackingOnlyView.
 	trackingOnly bool
+
+	// degradedBudget, when > 0, replaces the tracker's budget in
+	// ShouldSpillFor/ShouldSpill threshold decisions. Set only on views
+	// created by DegradedView for poison-suspect retries (#318).
+	degradedBudget int64
 }
 
 // defaultSpillCheapFraction is the fraction of the floating operator budget at
@@ -160,6 +165,46 @@ func (sm *SpillManager) TrackingOnlyView() *SpillManager {
 		trackingOnly:  true,
 	}
 }
+
+// DegradedView returns a SpillManager view for a poison-suspect retry
+// (#318): it shares sm's spill directory and tracker (charges land on the
+// shared pool exactly as before), but its spill DECISIONS threshold against
+// budgetCap instead of the full pool budget. With a deliberately small cap,
+// every registered operator spills early and keeps its in-memory state
+// bounded — the ADR-0006 machinery engages far below the heap ceiling that
+// killed the previous attempt, instead of at 40% of a budget the task
+// already proved it can blow through.
+//
+// Like TrackingOnlyView, the view keeps its own AccountedOperator registry:
+// the degraded task's operators are invisible to the parent manager's
+// relief targeting. That is acceptable here by construction — the low
+// thresholds keep their footprints too small to be useful relief victims.
+func (sm *SpillManager) DegradedView(budgetCap int64) *SpillManager {
+	return &SpillManager{
+		dir:            sm.dir,
+		tracker:        sm.tracker,
+		cheapFrac:      sm.cheapFrac,
+		accountedPeak:  make(map[uint64]int64),
+		lastReliefAt:   make(map[uint64]time.Time),
+		degradedBudget: budgetCap,
+	}
+}
+
+// DegradedBudget returns the reduced budget this view thresholds against,
+// or 0 for a normal manager.
+func (sm *SpillManager) DegradedBudget() int64 { return sm.degradedBudget }
+
+// SpillBudget is the budget operators should size their own spill decisions
+// against (drain floors, relief targets): the tracker's budget, unless this
+// is a DegradedView whose reduced cap wins. Exported so operators do not
+// reach for Tracker().Budget() and miss the degradation.
+func (sm *SpillManager) SpillBudget() int64 { return sm.effectiveBudget() }
+
+// IsTrackingOnly reports whether this manager is a TrackingOnlyView — a
+// clone-partial accounting view whose operators must never spill (there is
+// no concurrent spill format). The #326 drain-instead-of-sleep valve checks
+// it so a clone under heap pressure sleeps rather than drains.
+func (sm *SpillManager) IsTrackingOnly() bool { return sm.trackingOnly }
 
 // departedFootprint is the per-Name aggregate of closed operators' final
 // snapshots: the max-peak instance's footprint plus how many instances closed
@@ -286,9 +331,9 @@ func (sm *SpillManager) ShouldSpillFor(urgency SpillUrgency) bool {
 		}
 		return heapPressureExceeded()
 	}
-	if sm.tracker != nil && sm.tracker.Budget() > 0 {
+	if sm.tracker != nil && sm.effectiveBudget() > 0 {
 		used := sm.tracker.Used()
-		budget := sm.tracker.Budget()
+		budget := sm.effectiveBudget()
 		var threshold int64
 		switch urgency {
 		case SpillExpensive:
@@ -301,6 +346,18 @@ func (sm *SpillManager) ShouldSpillFor(urgency SpillUrgency) bool {
 		}
 	}
 	return heapPressureExceeded()
+}
+
+// effectiveBudget is the budget spill decisions threshold against: the
+// tracker's, unless this is a DegradedView (#318), whose reduced cap wins.
+func (sm *SpillManager) effectiveBudget() int64 {
+	if sm.degradedBudget > 0 {
+		return sm.degradedBudget
+	}
+	if sm.tracker == nil {
+		return 0
+	}
+	return sm.tracker.Budget()
 }
 
 // ShouldSpill returns true when the operator should spill to disk.
@@ -328,8 +385,8 @@ func (sm *SpillManager) ShouldSpill() bool {
 	if sm.trackingOnly {
 		return false
 	}
-	if sm.tracker != nil && sm.tracker.Budget() > 0 &&
-		sm.tracker.Used() > sm.tracker.Budget()*60/100 {
+	if sm.tracker != nil && sm.effectiveBudget() > 0 &&
+		sm.tracker.Used() > sm.effectiveBudget()*60/100 {
 		return true
 	}
 	return heapPressureExceeded()
@@ -495,9 +552,43 @@ func RawHeapBackpressureActive() bool {
 	return raw
 }
 
+// heapBackpressureOverride is a test seam: >0 forces both gauges on, <0
+// forces them off, 0 (default) reads the real heap. The valve's inputs
+// (GOMEMLIMIT, live heap) cannot be set deterministically from a unit
+// test, and the #326 drain-instead-of-sleep behavior needs the valve
+// held open for a whole pipeline run.
+var heapBackpressureOverride atomic.Int32
+
+// SetHeapBackpressureForTesting forces the heap-backpressure gauges: v>0
+// forces active, v<0 forces inactive, v==0 restores real measurement.
+// Test-only; callers must restore 0 via defer.
+func SetHeapBackpressureForTesting(v int32) {
+	heapBackpressureOverride.Store(v)
+}
+
+// HeapBackpressureThresholdBytes returns the byte threshold at which the
+// heap-backpressure valve fires (heapBackpressureRatio × GOMEMLIMIT), or 0
+// when no GOMEMLIMIT is set (valve disabled). Callers use it to judge
+// whether an operator's own footprint is a material share of the pressure
+// ceiling (#326).
+func HeapBackpressureThresholdBytes() int64 {
+	ratio := effectiveHeapBackpressureRatio()
+	if ratio <= 0 {
+		return 0
+	}
+	limit := cachedMemLimit()
+	if limit <= 0 || limit == math.MaxInt64 {
+		return 0
+	}
+	return int64(float64(limit) * ratio)
+}
+
 // heapBackpressureVals returns (raw, reclaimable-adjusted) backpressure,
 // refreshing both cached values together under the CAS election.
 func heapBackpressureVals() (raw, adj bool) {
+	if v := heapBackpressureOverride.Load(); v != 0 {
+		return v > 0, v > 0
+	}
 	ratio := effectiveHeapBackpressureRatio()
 	if ratio <= 0 {
 		return false, false
@@ -823,6 +914,30 @@ func (sm *SpillManager) Cleanup() error {
 		}
 	}
 	return firstErr
+}
+
+// RemoveSpilled unlinks one SpillRows file and drops it from the manager's
+// file list. Operators that consumed a spilled-rows file call this instead
+// of a bare os.Remove so the bookkeeping shrinks with the directory.
+//
+// This matters on the SHARED (worker-injected) manager path (#324): there
+// plan.Cleanup never calls sm.Cleanup() — doing so would unlink concurrent
+// queries' files — so a SpillRows file nobody removes individually outlives
+// the query for the worker's lifetime, and sm.files would accumulate stale
+// paths at one entry per spill forever.
+func (sm *SpillManager) RemoveSpilled(path string) {
+	if path == "" {
+		return
+	}
+	sm.mu.Lock()
+	for i, f := range sm.files {
+		if f == path {
+			sm.files = append(sm.files[:i], sm.files[i+1:]...)
+			break
+		}
+	}
+	sm.mu.Unlock()
+	os.Remove(path)
 }
 
 // SpillDir returns the directory used for spill files.

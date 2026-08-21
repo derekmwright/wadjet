@@ -43,6 +43,13 @@ type Task struct {
 	// with the same ID and a bumped Attempt (coordinator.taskRetrier).
 	// 0 means unset (pre-retry senders); treat as attempt 1.
 	Attempt int `json:"attempt,omitempty"`
+	// DegradedMemory is a WORKER-LOCAL flag, never serialized: the poison-
+	// task defense (#318) sets it before executing a redelivery whose prior
+	// attempt coincided with a worker death. The executor then wires the
+	// task's operators to a reduced-budget spill view so the never-OOM
+	// machinery (ADR-0006: spill early, degrade gracefully) engages far
+	// below the heap ceiling that killed the previous attempt.
+	DegradedMemory bool `json:"-"`
 	// EstimatedBytes is the coordinator's estimate of this task's input
 	// footprint, used for memory-aware admission (worker holds the task
 	// start until the shared pool has room for it) and coordinator-side

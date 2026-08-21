@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
-	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -273,9 +272,11 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 		// Heap-aware backpressure: when process heap is approaching
 		// GOMEMLIMIT, pause briefly so GC can reclaim before pulling more
 		// data. Cheap (cached check) when no pressure; sleeps 50ms when
-		// fired. See memory.HeapBackpressureActive for rationale.
+		// fired. See memory.HeapBackpressureActive for rationale. A
+		// spill-capable breaker sink holding the dominant tracked share
+		// drains instead of sleeping (#326, see pressure_drain.go).
 		if !drainPhase {
-			if err := memory.PauseOnHeapBackpressure(ctx); err != nil {
+			if err := PauseOrDrainOnHeapBackpressure(ctx, p.Sink); err != nil {
 				return err
 			}
 		}
@@ -581,8 +582,12 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 				// Heap-aware backpressure (parallel variant). All workers
 				// pause concurrently when fired, so the system-wide pause
 				// is the same 50ms regardless of Workers count. Drain-phase
-				// pipelines are exempt (see HeldStateSource).
-				if err := memory.PauseOnHeapBackpressureUnless(workerCtx, drainPhase); err != nil {
+				// pipelines are exempt (see HeldStateSource). A breaker
+				// sink holding the dominant tracked share drains instead
+				// of sleeping (#326) — its DrainOnHeapPressure serializes
+				// on the operator mutex, so concurrent workers cannot
+				// double-drain.
+				if err := pauseOrDrainUnless(workerCtx, drainPhase, sink); err != nil {
 					if workerCtx.Err() == nil {
 						firstErr.CompareAndSwap(nil, err)
 						cancel()

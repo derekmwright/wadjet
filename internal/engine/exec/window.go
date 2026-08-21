@@ -605,6 +605,11 @@ func (w *Window) finalizeWithSpill() error {
 		if err != nil {
 			return err
 		}
+		// Consumed for good — unlink now rather than relying on
+		// SpillManager.Cleanup, which the shared (worker-injected) manager
+		// path never calls (#324). Files not yet reached when an error
+		// aborts this loop stay in w.spillFiles for Close's backstop.
+		w.Spill.RemoveSpilled(f)
 		allRows = append(allRows, spilled...)
 	}
 	w.spillFiles = nil
@@ -665,9 +670,18 @@ func (w *Window) Close() error {
 	}
 	removeRunFiles(w.runFiles)
 	w.runFiles = nil
-	if w.Spill != nil && w.trackedMem > 0 {
-		w.Spill.ReleaseTracking(w.trackedMem)
-		w.trackedMem = 0
+	if w.Spill != nil {
+		if w.trackedMem > 0 {
+			w.Spill.ReleaseTracking(w.trackedMem)
+			w.trackedMem = 0
+		}
+		// Row-oriented spill files never consumed by finalizeWithSpill
+		// (error or early-cancel path). Nothing else removes them on the
+		// shared-manager path (#324).
+		for _, f := range w.spillFiles {
+			w.Spill.RemoveSpilled(f)
+		}
+		w.spillFiles = nil
 	}
 	w.mu.Unlock()
 	if w.unregisterAccounted != nil {

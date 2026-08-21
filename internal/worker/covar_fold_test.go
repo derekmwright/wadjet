@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"math"
 	"testing"
 
@@ -146,7 +147,7 @@ func TestParseAggFuncStringKnowsEveryPlannedName(t *testing.T) {
 // reach the task, not just the parse helper.
 func TestBuildFragmentHashAggregateRefusesUnknownFunc(t *testing.T) {
 	e := &Executor{}
-	_, err := e.buildFragmentHashAggregate(distributed.OpSpec{
+	_, err := e.buildFragmentHashAggregate(context.Background(), distributed.OpSpec{
 		GroupByCols: []string{"g"},
 		Aggregates:  []distributed.AggSpec{{Func: "no_such_agg", InputCol: "v", OutputCol: "x"}},
 	})
@@ -160,7 +161,7 @@ func TestBuildFragmentHashAggregateRefusesUnknownFunc(t *testing.T) {
 // or the worker aggregates something other than what was planned.
 func TestBuildFragmentHashAggregateCarriesExtraArgs(t *testing.T) {
 	e := &Executor{}
-	agg, err := e.buildFragmentHashAggregate(distributed.OpSpec{
+	agg, err := e.buildFragmentHashAggregate(context.Background(), distributed.OpSpec{
 		Aggregates: []distributed.AggSpec{
 			{Func: "min_by", InputCol: "label", InputCol2: "k", OutputCol: "mn"},
 			{Func: "string_agg", InputCol: "p", Separator: "::", OutputCol: "s"},
@@ -188,7 +189,7 @@ func TestBuildFragmentHashAggregateCarriesExtraArgs(t *testing.T) {
 // accumulates nothing.
 func TestBuildFragmentHashAggregateMergesCovarState(t *testing.T) {
 	e := &Executor{}
-	agg, err := e.buildFragmentHashAggregate(distributed.OpSpec{
+	agg, err := e.buildFragmentHashAggregate(context.Background(), distributed.OpSpec{
 		MergeMode:   true,
 		GroupByCols: []string{"g"},
 		Aggregates: []distributed.AggSpec{

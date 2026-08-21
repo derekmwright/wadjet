@@ -166,7 +166,7 @@ func TestBuildFragmentWindow_Translation(t *testing.T) {
 
 	t.Run("full spec", func(t *testing.T) {
 		nullsFirst := false
-		win, err := e.buildFragmentWindow(distributed.OpSpec{
+		win, err := e.buildFragmentWindow(context.Background(), distributed.OpSpec{
 			Type: distributed.OpWindow,
 			WindowCols: []distributed.WindowColSpec{{
 				Func:        "lag",
@@ -225,7 +225,7 @@ func TestBuildFragmentWindow_Translation(t *testing.T) {
 	})
 
 	t.Run("undeclared type keeps the conservative float64", func(t *testing.T) {
-		win, err := e.buildFragmentWindow(distributed.OpSpec{
+		win, err := e.buildFragmentWindow(context.Background(), distributed.OpSpec{
 			Type:       distributed.OpWindow,
 			WindowCols: []distributed.WindowColSpec{{Func: "row_number", OutputCol: "rn"}},
 		})
@@ -245,7 +245,7 @@ func TestBuildFragmentWindow_Translation(t *testing.T) {
 		// not tell LAG(bool_col) from a spec that declares nothing — and
 		// the operator would allocate a Float64 vector and drop every
 		// write, which is #345 for exactly one type.
-		win, err := e.buildFragmentWindow(distributed.OpSpec{
+		win, err := e.buildFragmentWindow(context.Background(), distributed.OpSpec{
 			Type: distributed.OpWindow,
 			WindowCols: []distributed.WindowColSpec{{
 				Func:       "lag",
@@ -263,7 +263,7 @@ func TestBuildFragmentWindow_Translation(t *testing.T) {
 	})
 
 	t.Run("unknown function fails", func(t *testing.T) {
-		_, err := e.buildFragmentWindow(distributed.OpSpec{
+		_, err := e.buildFragmentWindow(context.Background(), distributed.OpSpec{
 			Type:       distributed.OpWindow,
 			WindowCols: []distributed.WindowColSpec{{Func: "median_over_the_moon", OutputCol: "x"}},
 		})
@@ -274,7 +274,7 @@ func TestBuildFragmentWindow_Translation(t *testing.T) {
 	})
 
 	t.Run("no columns fails", func(t *testing.T) {
-		if _, err := e.buildFragmentWindow(distributed.OpSpec{Type: distributed.OpWindow}); err == nil {
+		if _, err := e.buildFragmentWindow(context.Background(), distributed.OpSpec{Type: distributed.OpWindow}); err == nil {
 			t.Fatal("expected an error for an OpWindow carrying no columns")
 		}
 	})

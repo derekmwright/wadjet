@@ -254,6 +254,10 @@ type Worker struct {
 	cancelledMu sync.RWMutex
 	cancelled   map[string]time.Time // queryID → cancellation time
 
+	// attempts persists per-task delivery breadcrumbs outside this process
+	// for the #318 poison-task defense. nil = defense disabled.
+	attempts attemptStore
+
 	activeTasksMu sync.RWMutex
 	activeTasks   map[string]struct{} // task IDs currently executing
 
@@ -508,6 +512,20 @@ func (w *Worker) Start(ctx context.Context) error {
 	if w.config.SpillDir != "" {
 		w.sweepStaleBuildCacheFiles()
 		w.sweepAbandonedScratchRoots()
+	}
+
+	// #318 poison defense: attempt breadcrumbs live in NATS KV so they
+	// survive the worker death they exist to detect (same JetStream store
+	// whose task replay causes the crash loop). Fallback to an in-process
+	// store keeps the defense alive within one process lifetime.
+	if !poisonDefenseDisabled && w.attempts == nil {
+		if store, kvErr := newKVAttemptStore(ctx, w.js); kvErr != nil {
+			w.logger.Warn("poison defense: KV bucket unavailable; using in-process attempt store",
+				"error", kvErr)
+			w.attempts = newMemAttemptStore()
+		} else {
+			w.attempts = store
+		}
 	}
 
 	// Filter subject is computed even in gRPC mode purely for the startup
@@ -1747,19 +1765,32 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	// Execution stays safe either way — task outputs are
 	// TaskID-idempotent and the coordinator ignores duplicate terminal
 	// results — but the event must not be silent.
-	if meta, mErr := msg.Metadata(); mErr == nil && meta.NumDelivered > 1 {
-		w.logger.Warn("task redelivered — prior delivery lost or unacked",
-			"task_id", task.ID, "query_id", task.QueryID,
-			"num_delivered", meta.NumDelivered,
-			"stream_seq", meta.Sequence.Stream)
+	delivery := uint64(1)
+	if meta, mErr := msg.Metadata(); mErr == nil {
+		delivery = meta.NumDelivered
+		if meta.NumDelivered > 1 {
+			w.logger.Warn("task redelivered — prior delivery lost or unacked",
+				"task_id", task.ID, "query_id", task.QueryID,
+				"num_delivered", meta.NumDelivered,
+				"stream_seq", meta.Sequence.Stream)
+		}
 	}
-	w.executeIncomingTask(ctx, task, jetstreamAcker{msg: msg})
+	w.executeIncomingTaskDelivery(ctx, task, jetstreamAcker{msg: msg}, delivery)
 }
 
 // executeIncomingTask runs a task previously parsed from either the
 // JetStream consumer or the gRPC data-plane stream. The acker bridges
-// the two paths' control surfaces.
+// the two paths' control surfaces. Callers without a JetStream delivery
+// count (gRPC data plane: coord owns retry, no redelivery model) come
+// through here with delivery 1, which keeps the #318 poison defense
+// dormant on that path.
 func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task, msg taskAcker) {
+	w.executeIncomingTaskDelivery(ctx, task, msg, 1)
+}
+
+// executeIncomingTaskDelivery is executeIncomingTask with the JetStream
+// delivery number, which drives the #318 poison-task defense.
+func (w *Worker) executeIncomingTaskDelivery(ctx context.Context, task distributed.Task, msg taskAcker, delivery uint64) {
 	// Skip tasks for cancelled queries (local cache from broadcast).
 	// Cancellation arrives via the wadjet.cancel.> pubsub at line 194; if
 	// a task races ahead of the broadcast and starts executing, the
@@ -1780,6 +1811,26 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 	if w.taskCancelled(task.QueryID, rootQueryID) {
 		w.logger.Debug("skipping task for cancelled query",
 			"task_id", task.ID, "query_id", task.QueryID, "root_query_id", rootQueryID)
+		msg.Term()
+		return
+	}
+
+	// Poison-task defense (#318): decide the rung for this delivery and
+	// write the attempt breadcrumb BEFORE executing, so a task that kills
+	// this process leaves evidence for the next delivery. A quarantined
+	// task publishes its terminal failure and Terms the message — the one
+	// outcome that stops an OOM crash loop.
+	if quarantine := w.applyPoisonDefense(ctx, &task, delivery); quarantine != nil {
+		subject := distributed.ResultSubject(task.QueryID, task.StageID, task.ID)
+		if data, mErr := distributed.Marshal(*quarantine); mErr == nil {
+			if _, pubErr := w.nc.Request(subject, data, 10*time.Second); pubErr != nil {
+				// Nobody waiting (the #318 replay case: the client died with
+				// the previous process) — the Term below still ends the loop.
+				w.logger.Warn("quarantine result publish unanswered",
+					"task_id", task.ID, "error", pubErr)
+			}
+		}
+		w.publishDLQ(task, "poison_quarantine", quarantine.Error)
 		msg.Term()
 		return
 	}
@@ -1958,6 +2009,12 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 		result = w.executor.Execute(taskCtx, task, w.config.WorkerID)
 	}()
 	executeDone.Store(true)
+
+	// The worker survived the task — whatever the outcome, this was not a
+	// process-killing attempt, so the poison breadcrumb comes off before
+	// result delivery. (A failed publish then Naks and redelivers, and the
+	// next delivery correctly reads as "prior delivery lost", not poison.)
+	w.clearPoisonRecord(task.ID)
 
 	// Propagate trace context to result notification
 	result.TraceID = task.TraceID

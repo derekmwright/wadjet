@@ -402,6 +402,64 @@ func (e *Executor) SetMemoryBudget(budget int64, spillDir string) {
 	}
 }
 
+// degradedSpillKey carries a task-scoped reduced-budget SpillManager view
+// through the context for a #318 poison-suspect retry.
+type degradedSpillKey struct{}
+
+// degradedBudgetDivisor sizes the degraded retry's spill budget as
+// sharedBudget/divisor (floored at degradedBudgetFloor). A var for tests.
+var degradedBudgetDivisor int64 = 4
+
+const degradedBudgetFloor = 64 << 20
+
+// DegradedTaskBudget returns the reduced spill budget a poison-suspect
+// retry runs under on this executor, or 0 when no pool is configured (no
+// degradation possible — the quarantine rung still applies).
+func (e *Executor) DegradedTaskBudget() int64 {
+	full := e.memoryBudget
+	if e.sharedTracker != nil {
+		full = e.sharedTracker.Budget()
+	}
+	if full <= 0 {
+		return 0
+	}
+	b := full / degradedBudgetDivisor
+	if b < degradedBudgetFloor {
+		b = degradedBudgetFloor
+	}
+	if b > full {
+		b = full
+	}
+	return b
+}
+
+// withTaskSpill installs a reduced-budget spill view on the context when
+// the task is flagged for a degraded retry (#318). One view per task, so
+// all its operators share one registry and one set of thresholds.
+func (e *Executor) withTaskSpill(ctx context.Context, task distributed.Task) context.Context {
+	if !task.DegradedMemory || e.sharedSpill == nil {
+		return ctx
+	}
+	budget := e.DegradedTaskBudget()
+	if budget <= 0 {
+		return ctx
+	}
+	e.logger.Warn("executing task under a degraded memory budget (poison-suspect retry)",
+		"task_id", task.ID, "query_id", task.QueryID,
+		"degraded_budget_mb", budget/(1<<20))
+	return context.WithValue(ctx, degradedSpillKey{}, e.sharedSpill.DegradedView(budget))
+}
+
+// spillFor resolves the spill manager a task's operators should use: the
+// context's degraded view when the #318 defense installed one, otherwise
+// the worker-shared manager.
+func (e *Executor) spillFor(ctx context.Context) *memory.SpillManager {
+	if sm, ok := ctx.Value(degradedSpillKey{}).(*memory.SpillManager); ok {
+		return sm
+	}
+	return e.sharedSpill
+}
+
 // SharedPoolStats returns (used, budget) bytes for the worker-wide
 // memory pool, or (0, 0) if no pool is configured. Used by the worker
 // heartbeat loop to publish pool pressure for coord-side dispatch
@@ -682,6 +740,13 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	// input is opened. No-op without --streaming-exchange.
 	e.peers.registerTask(&task)
 
+	// Poison-suspect retry (#318): run this task's operators against a
+	// reduced-budget spill view so they spill early instead of rebuilding
+	// the heap profile that killed the previous attempt's worker. The view
+	// rides the context; e.spillFor(ctx) resolves it at every operator
+	// wiring site.
+	ctx = e.withTaskSpill(ctx, task)
+
 	// Worker-side ABAC enforcement: validate column access policies before execution.
 	if err := e.enforcePolicyDecision(task); err != nil {
 		result.Duration = time.Since(start)
@@ -949,8 +1014,8 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	if e.sharedTracker != nil {
 		planner.SharedTracker = e.sharedTracker
 	}
-	if e.sharedSpill != nil {
-		planner.SharedSpillMgr = e.sharedSpill
+	if sm := e.spillFor(ctx); sm != nil {
+		planner.SharedSpillMgr = sm
 	}
 
 	// Scan-split pipeline mode: create lazy streaming sources for pre-scanned

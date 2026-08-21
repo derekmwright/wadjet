@@ -3718,6 +3718,12 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 			if err != nil {
 				return err
 			}
+			// A consumed file is done for good — unlink it here rather than
+			// leaving it for SpillManager.Cleanup, which the shared
+			// (worker-injected) manager path never calls (#324). Files not
+			// yet reached when an error aborts this loop stay in
+			// h.spillFiles for Close's backstop removal.
+			h.Spill.RemoveSpilled(f)
 			if len(rows) == 0 {
 				continue
 			}
@@ -3812,6 +3818,14 @@ func (h *HashAggregate) Close() error {
 			h.Spill.ReleaseTracking(h.spillBufferBytes)
 			h.spillBufferBytes = 0
 		}
+		// Legacy raw-row spill files never consumed by Finalize (error or
+		// early-cancel path). On the shared-manager path nothing else
+		// removes them (#324); on the owned path this merely beats
+		// SpillManager.Cleanup to the unlink.
+		for _, f := range h.spillFiles {
+			h.Spill.RemoveSpilled(f)
+		}
+		h.spillFiles = nil
 	}
 	// Close the streaming merger (if any) and remove its spill files. This
 	// is the backstop for early-termination paths (cancellation, error
@@ -3956,10 +3970,11 @@ func (h *HashAggregate) selfSpillReliefTarget() int64 {
 		return 0
 	}
 	t := h.Spill.Tracker()
-	if t == nil || t.Budget() <= 0 {
+	if t == nil || h.Spill.SpillBudget() <= 0 {
 		return 0
 	}
-	threshold := t.Budget() * 55 / 100
+	// SpillBudget: honors a #318 degraded-retry view's reduced cap.
+	threshold := h.Spill.SpillBudget() * 55 / 100
 	relief := t.Used() - threshold
 	if relief <= 0 {
 		return 0

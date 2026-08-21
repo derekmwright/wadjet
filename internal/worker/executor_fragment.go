@@ -64,6 +64,10 @@ type fragmentProgress struct {
 	// worker logs make slow-task root cause obvious without per-pause spam.
 	backpressureCount   atomic.Int64
 	backpressurePauseMS atomic.Int64
+	// pressureDrains counts valve firings a breaker sink answered by
+	// draining (or by declining to sleep over live state) instead of the
+	// 50ms pause — the #326 drain-instead-of-sleep path.
+	pressureDrains atomic.Int64
 
 	// srcAcq, when set by the runner, folds the source's per-tier file
 	// acquisition tallies (src_acq_stats.go) into the phases line — the
@@ -217,6 +221,25 @@ func (t *timedSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
 // / runParallel) so single-process queries and breaker-phase consumes get
 // it for free. This wrapper exists for the linear/breaker-final loops that
 // don't go through Pipeline, and adds per-task counters + occasional logs.
+// applyBackpressureSink is the sink-aware variant for consume loops feeding
+// a pipeline breaker (#326): when the valve fires and the sink is a
+// spill-capable breaker holding the dominant tracked share, its spill path
+// runs instead of the 50ms sleep — sleeping the holder of live state
+// reclaims nothing. Clone sinks (tracking-only spill views) and sinks that
+// hold little fall through to the ordinary pause.
+func (p *fragmentProgress) applyBackpressureSink(ctx context.Context, sink exec.Sink) error {
+	if !memory.HeapBackpressureActive() {
+		return nil
+	}
+	if handled, err := exec.TryPressureDrain(ctx, sink); handled || err != nil {
+		if err == nil {
+			p.pressureDrains.Add(1)
+		}
+		return err
+	}
+	return p.applyBackpressure(ctx)
+}
+
 func (p *fragmentProgress) applyBackpressure(ctx context.Context) error {
 	if !memory.HeapBackpressureActive() {
 		return nil
@@ -244,6 +267,7 @@ func (p *fragmentProgress) applyBackpressure(ctx context.Context) error {
 			"stage_type", p.stageType,
 			"count", p.backpressureCount.Load(),
 			"total_paused_ms", p.backpressurePauseMS.Load(),
+			"pressure_drains", p.pressureDrains.Load(),
 		}
 		if p.exec != nil {
 			used, budget := p.exec.SharedPoolStats()
@@ -1468,8 +1492,8 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	// idempotent about it — post-merge the clone's charge is zero for Sort
 	// and released-once for HashAggregate).
 	var trackingSpill *memory.SpillManager
-	if e.sharedSpill != nil {
-		trackingSpill = e.sharedSpill.TrackingOnlyView()
+	if sm := e.spillFor(ctx); sm != nil {
+		trackingSpill = sm.TrackingOnlyView()
 	}
 	chains := make([][]exec.UnaryOperator, 1, k)
 	chains[0] = ops
@@ -1550,9 +1574,13 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	g, gctx := errgroup.WithContext(ctx)
 	for i := 0; i < k; i++ {
 		driver := drivers[i]
+		// Worker 0 feeds the spill-armed primary, which may answer heap
+		// pressure by draining (#326); clones hold tracking-only spill
+		// views and always fall through to the pause.
+		consumerSink := sinks[i]
 		g.Go(func() error {
 			return consumeMorsels(gctx, d, gate, func(m morsel) error {
-				if err := fp.applyBackpressure(gctx); err != nil {
+				if err := fp.applyBackpressureSink(gctx, consumerSink); err != nil {
 					m.retire()
 					return err
 				}
@@ -1596,7 +1624,7 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	// the input through the ORIGINAL chain into the primary, whose own
 	// spill machinery now governs memory exactly like the serial path.
 	for m := range d.ch {
-		if err := fp.applyBackpressure(ctx); err != nil {
+		if err := fp.applyBackpressureSink(ctx, sink); err != nil {
 			m.retire()
 			return err
 		}
@@ -1906,8 +1934,10 @@ func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch
 	})
 	for {
 		// Heap-aware backpressure between batches; mirrors the runFragment*
-		// callers and the engine-level Pipeline.Run hook.
-		if err := memory.PauseOnHeapBackpressure(ctx); err != nil {
+		// callers and the engine-level Pipeline.Run hook. The breaker sink
+		// drains instead of sleeping when it holds the dominant tracked
+		// share (#326).
+		if err := exec.PauseOrDrainOnHeapBackpressure(ctx, sink); err != nil {
 			return err
 		}
 		b, err := src.Next(ctx)
@@ -1943,7 +1973,7 @@ func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch
 func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Task, spec distributed.OpSpec) (*fragmentBreaker, error) {
 	switch spec.Type {
 	case distributed.OpHashAggregate:
-		hashAgg, err := e.buildFragmentHashAggregate(spec)
+		hashAgg, err := e.buildFragmentHashAggregate(ctx, spec)
 		if err != nil {
 			return nil, err
 		}
@@ -1998,7 +2028,7 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 		return fb, nil
 
 	case distributed.OpSort:
-		sorter, err := e.buildFragmentSort(spec)
+		sorter, err := e.buildFragmentSort(ctx, spec)
 		if err != nil {
 			return nil, err
 		}
@@ -2021,7 +2051,7 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 		return fb, nil
 
 	case distributed.OpWindow:
-		win, err := e.buildFragmentWindow(spec)
+		win, err := e.buildFragmentWindow(ctx, spec)
 		if err != nil {
 			return nil, err
 		}
@@ -2085,8 +2115,8 @@ func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distribu
 		}
 		j.OutputFilter = filter
 	}
-	if e.sharedSpill != nil {
-		j.Spill = e.sharedSpill
+	if sm := e.spillFor(ctx); sm != nil {
+		j.Spill = sm
 	}
 
 	// Build source: this task's partition of the build-side exchange. Empty
@@ -2137,7 +2167,7 @@ func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distribu
 // defaults to what the SQL means for the direction rather than to Go's zero
 // value — the zero value put NULLs first in ascending order (#330). Spill is
 // wired from the executor's shared spill manager when present.
-func (e *Executor) buildFragmentSort(spec distributed.OpSpec) (*exec.Sort, error) {
+func (e *Executor) buildFragmentSort(ctx context.Context, spec distributed.OpSpec) (*exec.Sort, error) {
 	if len(spec.SortKeySpecs) == 0 {
 		return nil, fmt.Errorf("sort: SortKeySpecs required")
 	}
@@ -2150,8 +2180,8 @@ func (e *Executor) buildFragmentSort(spec distributed.OpSpec) (*exec.Sort, error
 		keys[i] = exec.SortKey{Column: k.Column, Order: order, NullsLast: k.PlaceNullsLast()}
 	}
 	sorter := exec.NewSort(keys)
-	if e.sharedSpill != nil {
-		sorter.Spill = e.sharedSpill
+	if sm := e.spillFor(ctx); sm != nil {
+		sorter.Spill = sm
 	}
 	return sorter, nil
 }
@@ -2168,7 +2198,7 @@ func (e *Executor) buildFragmentSort(spec distributed.OpSpec) (*exec.Sort, error
 // vector it actually reads (#345). Spill is wired from the executor's shared
 // manager: a window's peak is its largest partition, and that is exactly the
 // bound the spill path exists to survive.
-func (e *Executor) buildFragmentWindow(spec distributed.OpSpec) (*exec.Window, error) {
+func (e *Executor) buildFragmentWindow(ctx context.Context, spec distributed.OpSpec) (*exec.Window, error) {
 	if len(spec.WindowCols) == 0 {
 		return nil, fmt.Errorf("window: WindowCols required")
 	}
@@ -2211,8 +2241,8 @@ func (e *Executor) buildFragmentWindow(spec distributed.OpSpec) (*exec.Window, e
 		}
 	}
 	win := exec.NewWindow(cols)
-	if e.sharedSpill != nil {
-		win.Spill = e.sharedSpill
+	if sm := e.spillFor(ctx); sm != nil {
+		win.Spill = sm
 	}
 	return win, nil
 }
@@ -2221,7 +2251,7 @@ func (e *Executor) buildFragmentWindow(spec distributed.OpSpec) (*exec.Window, e
 // In merge mode the spec's Aggregates are rewritten so InputCol = OutputCol
 // (the partial-output column) and COUNT becomes SUM (counting partial rows
 // re-counts groups, not source rows).
-func (e *Executor) buildFragmentHashAggregate(spec distributed.OpSpec) (*exec.HashAggregate, error) {
+func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distributed.OpSpec) (*exec.HashAggregate, error) {
 	if !spec.GroupByAll && len(spec.Aggregates) == 0 && len(spec.GroupByCols) == 0 {
 		return nil, fmt.Errorf("hash_aggregate: at least one of GroupByCols, Aggregates, or GroupByAll is required")
 	}
@@ -2265,8 +2295,8 @@ func (e *Executor) buildFragmentHashAggregate(spec distributed.OpSpec) (*exec.Ha
 	}
 	hashAgg := exec.NewHashAggregate(spec.GroupByCols, aggCols)
 	hashAgg.GroupByAll = spec.GroupByAll
-	if e.sharedSpill != nil {
-		hashAgg.Spill = e.sharedSpill
+	if sm := e.spillFor(ctx); sm != nil {
+		hashAgg.Spill = sm
 	}
 	return hashAgg, nil
 }
@@ -2651,7 +2681,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			// pressure heuristic: the stale 30% snapshot used to leave shuffle
 			// builds on the flat path, which could then need an O(total)
 			// reactive repartition under pressure (the Q17/Q18 mc=4 killer).
-			hj.Spill = e.sharedSpill
+			hj.Spill = e.spillFor(ctx)
 			hj.MemTracker = e.sharedTracker
 		}
 		if err := hj.Build(ctx, src); err != nil {

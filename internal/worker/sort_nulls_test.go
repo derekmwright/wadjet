@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
@@ -40,7 +41,7 @@ func TestSortKeyNullPlacement(t *testing.T) {
 				t.Errorf("PlaceNullsLast() = %v, want %v", got, tc.want)
 			}
 			e := &Executor{}
-			sorter, err := e.buildFragmentSort(distributed.OpSpec{
+			sorter, err := e.buildFragmentSort(context.Background(), distributed.OpSpec{
 				Type:         distributed.OpSort,
 				SortKeySpecs: []distributed.SortKeySpec{tc.spec},
 			})

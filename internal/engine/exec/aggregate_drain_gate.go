@@ -61,7 +61,11 @@ func (h *HashAggregate) minDrainBytes() int64 {
 	if t == nil {
 		return 0
 	}
-	budget := t.Budget()
+	// SpillBudget, not Tracker().Budget(): a #318 degraded-retry view
+	// carries a deliberately reduced budget, and the gate's floor must
+	// shrink with it or the gate would hold back the early drains the
+	// degradation exists to force.
+	budget := h.Spill.SpillBudget()
 	if budget <= 0 || drainFloorDivisor <= 0 {
 		return 0
 	}
