@@ -12,7 +12,8 @@ import (
 // TestCollectProfileEnvelope_BlockMutexGated verifies the WorkerProfile
 // envelope carries block/mutex profiles only when the runtime samplers are
 // enabled (the WADJET_BLOCK_PROFILE_RATE / WADJET_MUTEX_PROFILE_FRACTION
-// path), and that heap is always present.
+// path), and that heap and goroutine are always present regardless of
+// sampler state — goroutine profiling needs no runtime sampler.
 func TestCollectProfileEnvelope_BlockMutexGated(t *testing.T) {
 	w := &Worker{
 		config: Config{WorkerID: "test-worker"},
@@ -27,6 +28,9 @@ func TestCollectProfileEnvelope_BlockMutexGated(t *testing.T) {
 	}
 	if len(env.Heap) == 0 {
 		t.Fatal("heap profile missing from envelope")
+	}
+	if len(env.Goroutine) == 0 {
+		t.Fatal("goroutine profile missing from envelope with samplers off")
 	}
 	if len(env.Block) != 0 || len(env.Mutex) != 0 {
 		t.Fatalf("block/mutex present with samplers off: block=%d mutex=%d",

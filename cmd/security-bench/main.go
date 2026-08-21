@@ -525,6 +525,21 @@ func collectWorkerProfiles(nc *nats.Conn, workerCount int, profDir string) {
 			os.WriteFile(path, wp.Heap, 0644)
 			log.Printf("Saved worker heap profile: %s (%d bytes)", path, len(wp.Heap))
 		}
+		if len(wp.Block) > 0 {
+			path := filepath.Join(profDir, fmt.Sprintf("worker-%s-block.prof", wp.WorkerID))
+			os.WriteFile(path, wp.Block, 0644)
+			log.Printf("Saved worker block profile: %s (%d bytes)", path, len(wp.Block))
+		}
+		if len(wp.Mutex) > 0 {
+			path := filepath.Join(profDir, fmt.Sprintf("worker-%s-mutex.prof", wp.WorkerID))
+			os.WriteFile(path, wp.Mutex, 0644)
+			log.Printf("Saved worker mutex profile: %s (%d bytes)", path, len(wp.Mutex))
+		}
+		if len(wp.Goroutine) > 0 {
+			path := filepath.Join(profDir, fmt.Sprintf("worker-%s-goroutine.prof", wp.WorkerID))
+			os.WriteFile(path, wp.Goroutine, 0644)
+			log.Printf("Saved worker goroutine profile: %s (%d bytes)", path, len(wp.Goroutine))
+		}
 		collected++
 	}
 	log.Printf("Collected profiles from %d/%d workers", collected, workerCount)

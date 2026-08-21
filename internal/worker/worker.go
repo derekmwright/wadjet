@@ -2517,11 +2517,12 @@ func (w *Worker) reapCancelled(maxAge time.Duration) {
 
 // WorkerProfile is the JSON envelope for profile data sent over NATS.
 type WorkerProfile struct {
-	WorkerID string `json:"worker_id"`
-	CPU      []byte `json:"cpu,omitempty"`   // pprof CPU profile (gzip-compressed)
-	Heap     []byte `json:"heap,omitempty"`  // pprof heap profile (gzip-compressed)
-	Block    []byte `json:"block,omitempty"` // pprof block profile; empty unless WADJET_BLOCK_PROFILE_RATE set
-	Mutex    []byte `json:"mutex,omitempty"` // pprof mutex profile; empty unless WADJET_MUTEX_PROFILE_FRACTION set
+	WorkerID  string `json:"worker_id"`
+	CPU       []byte `json:"cpu,omitempty"`       // pprof CPU profile (gzip-compressed)
+	Heap      []byte `json:"heap,omitempty"`      // pprof heap profile (gzip-compressed)
+	Block     []byte `json:"block,omitempty"`     // pprof block profile; empty unless WADJET_BLOCK_PROFILE_RATE set
+	Mutex     []byte `json:"mutex,omitempty"`     // pprof mutex profile; empty unless WADJET_MUTEX_PROFILE_FRACTION set
+	Goroutine []byte `json:"goroutine,omitempty"` // pprof goroutine profile; always present — no runtime sampler required
 }
 
 // handleProfileStart begins CPU profiling to an in-memory buffer.
@@ -2545,8 +2546,8 @@ func (w *Worker) handleProfileStart(msg *nats.Msg) {
 	msg.Respond([]byte("ok"))
 }
 
-// handleProfileCollect stops CPU profiling, collects a heap snapshot,
-// and responds with both profiles as JSON.
+// handleProfileCollect stops CPU profiling, collects heap/block/mutex/
+// goroutine snapshots, and responds with the full envelope as JSON.
 func (w *Worker) handleProfileCollect(msg *nats.Msg) {
 	resp := w.collectProfileEnvelope()
 	data, err := json.Marshal(resp)
@@ -2558,7 +2559,7 @@ func (w *Worker) handleProfileCollect(msg *nats.Msg) {
 }
 
 // collectProfileEnvelope stops any in-flight CPU profile and snapshots
-// heap, block, and mutex profiles into a WorkerProfile envelope.
+// heap, block, mutex, and goroutine profiles into a WorkerProfile envelope.
 func (w *Worker) collectProfileEnvelope() WorkerProfile {
 	w.profMu.Lock()
 	defer w.profMu.Unlock()
@@ -2587,11 +2588,23 @@ func (w *Worker) collectProfileEnvelope() WorkerProfile {
 		p.WriteTo(&mutexBuf, 0)
 	}
 
+	// Goroutine snapshot: unlike block/mutex, this needs no runtime
+	// sampler to be enabled first — the scheduler always knows every live
+	// goroutine's stack, so it's captured unconditionally. This is the
+	// wait-side complement to block/mutex: block/mutex says WHERE
+	// contention accumulated over the run, goroutine says WHO is
+	// currently parked and on what, at the moment of collection.
+	var goroutineBuf bytes.Buffer
+	if p := pprof.Lookup("goroutine"); p != nil {
+		p.WriteTo(&goroutineBuf, 0)
+	}
+
 	return WorkerProfile{
-		WorkerID: w.config.WorkerID,
-		CPU:      cpuData,
-		Heap:     heapBuf.Bytes(),
-		Block:    blockBuf.Bytes(),
-		Mutex:    mutexBuf.Bytes(),
+		WorkerID:  w.config.WorkerID,
+		CPU:       cpuData,
+		Heap:      heapBuf.Bytes(),
+		Block:     blockBuf.Bytes(),
+		Mutex:     mutexBuf.Bytes(),
+		Goroutine: goroutineBuf.Bytes(),
 	}
 }

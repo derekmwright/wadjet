@@ -75,3 +75,20 @@ upload_pace_mbps          = 150
 # stall-watchdog firings in the zstd arm vs 13 (5 SIGABRT) in the
 # same-window s2 arm. Set 0 to reproduce s2/WSHC baselines.
 exchange_zstd             = 1
+# Contention profiling (block/mutex + goroutine), on by default for every
+# SF100 release run: the suite runs at ~35% CPU (wait-bound), so CPU
+# profiles alone can't tell the wait-side story. Per-worker CPU/heap
+# profiles were already banked to S3 (results/<run_id>/profiles/);
+# block/mutex + an always-on goroutine snapshot ride the same
+# collectWorkerProfiles path and land beside them as
+# worker-<id>-{block,mutex,goroutine}.prof. Rates chosen to be safe for a
+# full release run rather than maximally precise: block ~10000ns (1 event
+# per 10us of blocking sampled, not every event) keeps per-sample overhead
+# low on a hot lock/channel path; mutex 1-in-5 keeps the profile buffer
+# bounded without needing every contention event. Both
+# default off (runtime.SetBlockProfileRate/SetMutexProfileFraction are
+# no-ops at "") in cmd/wadjet's normal serve path — this is a bench-only
+# opt-in via these two terraform vars, not a change to production defaults.
+# Set either to "" / "0" to reproduce a sampler-off baseline.
+block_profile_rate        = "10000"
+mutex_profile_fraction    = "5"

@@ -391,10 +391,11 @@ func main() {
 		collectWorkerProfiles(nc, *workers, *profDir)
 	}
 
-	// Coordinator-side block/mutex profiles (records exist only when the
-	// env-gated samplers are on).
+	// Coordinator-side block/mutex/goroutine profiles. block/mutex records
+	// exist only when the env-gated samplers are on (Count()==0 otherwise,
+	// skipped); goroutine needs no sampler and is always non-empty.
 	if *profDir != "" {
-		for _, name := range []string{"block", "mutex"} {
+		for _, name := range []string{"block", "mutex", "goroutine"} {
 			p := pprof.Lookup(name)
 			if p == nil || p.Count() == 0 {
 				continue
@@ -1084,7 +1085,7 @@ func startWorkerProfiling(nc *nats.Conn) {
 }
 
 // collectWorkerProfiles stops CPU profiling on all workers and saves their
-// CPU + heap profiles to profDir.
+// CPU, heap, block, mutex, and goroutine profiles to profDir.
 func collectWorkerProfiles(nc *nats.Conn, workerCount int, profDir string) {
 	inbox := nats.NewInbox()
 	sub, err := nc.SubscribeSync(inbox)
@@ -1126,6 +1127,11 @@ func collectWorkerProfiles(nc *nats.Conn, workerCount int, profDir string) {
 			path := filepath.Join(profDir, fmt.Sprintf("worker-%s-mutex.prof", wp.WorkerID))
 			os.WriteFile(path, wp.Mutex, 0644)
 			log.Printf("Saved worker mutex profile: %s (%d bytes)", path, len(wp.Mutex))
+		}
+		if len(wp.Goroutine) > 0 {
+			path := filepath.Join(profDir, fmt.Sprintf("worker-%s-goroutine.prof", wp.WorkerID))
+			os.WriteFile(path, wp.Goroutine, 0644)
+			log.Printf("Saved worker goroutine profile: %s (%d bytes)", path, len(wp.Goroutine))
 		}
 		collected++
 	}
