@@ -7327,6 +7327,20 @@ func nodeDeclaredType(node plansql.Node, colTypes map[string]parquet.TypeID) (pa
 		}
 	case *plansql.FuncCallNode:
 		return funcReturnType(n, colTypes)
+	case *plansql.ParenNode:
+		return nodeDeclaredType(n.Inner, colTypes)
+	case *plansql.CaseNode:
+		return caseDeclaredType(n, colTypes)
+	case *plansql.CmpExpr, *plansql.AndNode, *plansql.OrNode, *plansql.NotNode,
+		*plansql.IsExpr, *plansql.LikeExpr, *plansql.BetweenExpr,
+		*plansql.InExpr, *plansql.ExistsNode, *plansql.AnyAllExpr:
+		// Predicates are boolean whatever their operands. Before #371 none
+		// of these decided anything, so an aggregate over one — the
+		// pre-aggregate projection has no runtime re-typing, unlike
+		// exec.Project — fell back to Float64, the comparison kernel's
+		// boolean writes were dropped, and BOOL_AND/BOOL_OR read 0 (false)
+		// on every row.
+		return parquet.TypeBool, expr.Decided
 	case *plansql.CastNode:
 		return inferCastType(n.TypeName), expr.Decided
 	case *plansql.Lit:
@@ -7347,6 +7361,53 @@ func nodeDeclaredType(node plansql.Node, colTypes map[string]parquet.TypeID) (pa
 			return parquet.TypeString, expr.Decided
 		}
 		// LitNull: type unknown; let the fallback decide.
+	}
+	return 0, expr.Undecided
+}
+
+// caseDeclaredType types a CASE from its result branches: the THEN
+// expressions and the ELSE, which are the values the CASE can evaluate to
+// (the WHEN conditions and a simple CASE's subject only steer). SQL requires
+// the branches to share a type, so the first branch that decides one answers
+// for the expression; a branch that only guesses (a polymorphic call whose
+// arguments decided nothing, see expr.Confidence/#331) is kept as the
+// fallback answer and reported Guessed, so a caller holding a candidate of
+// its own can still prefer it. A missing ELSE is an implicit NULL and
+// decides nothing, like LitNull.
+//
+// Before #372 CaseNode had no arm here at all, so MIN/MAX over a string
+// CASE aggregated a Float64-declared projection that dropped every string
+// write and answered the integer 0 — while the same CASE projected was
+// correct, because exec.Project re-types from its input and the
+// pre-aggregate projection does not.
+func caseDeclaredType(n *plansql.CaseNode, colTypes map[string]parquet.TypeID) (parquet.TypeID, expr.Confidence) {
+	var guess parquet.TypeID
+	guessed := false
+	consider := func(branch plansql.Node) (parquet.TypeID, bool) {
+		if branch == nil {
+			return 0, false
+		}
+		t, c := nodeDeclaredType(branch, colTypes)
+		switch c {
+		case expr.Decided:
+			return t, true
+		case expr.Guessed:
+			if !guessed {
+				guess, guessed = t, true
+			}
+		}
+		return 0, false
+	}
+	for _, w := range n.Whens {
+		if t, ok := consider(w.Result); ok {
+			return t, expr.Decided
+		}
+	}
+	if t, ok := consider(n.Else); ok {
+		return t, expr.Decided
+	}
+	if guessed {
+		return guess, expr.Guessed
 	}
 	return 0, expr.Undecided
 }
@@ -9455,12 +9516,13 @@ func parseWindowFunc(s string) exec.WindowFunc {
 // exec.Project) had no runtime correction, so every string write was dropped
 // for the integer 0 (#345). windowSpecOutputType resolves them instead.
 //
-// MIN/MAX over a window are the one input-dependent family still answered
-// from this list, and they still land on the float64 default: MIN(a_string)
-// OVER (...) has #345's symptom for the same reason. Fixing it needs the
-// aggregate side's minMaxDeclaredType plus a check of the window operator's
-// compareAny and spill paths against the non-numeric types, so it is left to
-// its own change rather than folded in here (see exec.windowValueFunc).
+// MIN/MAX over a window were the last input-dependent family answered from
+// this list, and landed on the float64 default: MIN(a_string) OVER (...)
+// and MIN(int32_col) OVER (...) had #345's symptom for the same reason
+// (#361). They now resolve from the input column like the value functions —
+// but only across the types the operator's compare-and-copy path
+// (compareAny over Vector.GetValue values) orders correctly, which
+// windowMinMaxType vets; anything else keeps this list's float64.
 func windowOutputType(funcName string) parquet.TypeID {
 	switch strings.ToLower(funcName) {
 	case "row_number", "rank", "dense_rank", "count", "ntile":
@@ -9504,7 +9566,8 @@ func windowValueFunc(fn string) bool {
 // nothing downstream corrects a declaration, which is the whole of #345.
 func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) parquet.TypeID {
 	fn := strings.ToLower(strings.TrimSpace(we.Func))
-	if !windowValueFunc(fn) {
+	minMax := fn == "min" || fn == "max"
+	if !windowValueFunc(fn) && !minMax {
 		return windowOutputType(fn)
 	}
 	// The same spelling buildWindow hands exec as the input column, so the
@@ -9516,6 +9579,17 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) parquet.Typ
 	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, inputColTypes(node.Children[0]))
 	if conf != expr.Decided {
 		return windowOutputType(fn)
+	}
+	if minMax {
+		// MIN/MAX copy an input value through the same GetValue/SetValue
+		// route as the value functions, but their answer is chosen by
+		// compareAny — so only the types that path orders correctly may
+		// re-declare (#361); the rest keep the float64 fallback.
+		out, ok := exec.WindowMinMaxType(t)
+		if !ok {
+			return windowOutputType(fn)
+		}
+		return out
 	}
 	return t
 }

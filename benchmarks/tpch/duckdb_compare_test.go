@@ -1357,6 +1357,35 @@ func duckdbCorpus() []duckdbCase {
 				WHERE t1.ps_partkey > 500
 				ORDER BY t1.ps_suppkey`,
 		},
+		// BOOL_AND/BOOL_OR answered false whatever their input (#371): the
+		// boolean predicate projected for the aggregate carried no declared
+		// type, fell back to Float64, and dropped every write. Both arms
+		// were wrong the same way, which is exactly what DuckDB truth is
+		// for.
+		duckdbCase{name: "BoolAggregates",
+			sql: `SELECT BOOL_AND(n_nationkey >= 0) AS all_nonneg,
+				BOOL_OR(n_nationkey > 3) AS any_big,
+				BOOL_AND(n_nationkey > 3) AS all_big FROM nation`},
+		duckdbCase{name: "BoolAggregatesGrouped",
+			sql: `SELECT n_regionkey, BOOL_AND(n_nationkey > 2) AS all_late,
+				BOOL_OR(n_nationkey > 20) AS any_tail
+				FROM nation GROUP BY n_regionkey ORDER BY n_regionkey`},
+		// MIN/MAX over a string CASE answered the integer 0 (#372); the
+		// three control columns localize the trigger to the CASE alone.
+		duckdbCase{name: "MinMaxOverStringCase",
+			sql: `SELECT MIN(n_name) AS bare, MIN(LOWER(n_name)) AS fn,
+				MIN(n_name || 'x') AS cat,
+				MIN(CASE WHEN n_regionkey = 0 THEN n_name ELSE n_name END) AS case_expr
+				FROM nation`},
+		// Window MIN/MAX over a narrow INT column answered 0 on every row
+		// (#361): the float64-declared output vector had no int32 arm in
+		// Vector.SetValue. The window corpus uses a float column on
+		// purpose; n_nationkey is INT32 and reaches the dropped write.
+		duckdbCase{name: "WindowMinMaxNarrowInt",
+			sql: `SELECT n_nationkey,
+				MAX(n_nationkey) OVER (PARTITION BY n_regionkey ORDER BY n_nationkey) AS mx,
+				MIN(n_name) OVER (ORDER BY n_nationkey) AS mn
+				FROM nation ORDER BY n_nationkey`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

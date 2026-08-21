@@ -262,3 +262,73 @@ func TestWindowValueFunctionsRetypeUnderSpill(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// MIN/MAX joined the input-resolved functions in #361, so their retype has
+// to hold on the spill path too. The narrow-int MAX is the issue's exact
+// shape (Vector.SetValue had no int32 arm for a Float64 destination); the
+// string MIN is the #345 symptom reached through a comparison rather than a
+// positional lift. Declarations are float64 on purpose, as above.
+func TestWindowMinMaxRetypeUnderSpill(t *testing.T) {
+	forceTinyRuns(t)
+	schema := []parquet.Column{
+		{Name: "grp", Type: parquet.TypeInt64},
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "s", Type: parquet.TypeString},
+		{Name: "i32", Type: parquet.TypeInt32},
+	}
+	const n = 300
+	rows := make([]map[string]any, n)
+	for i := range rows {
+		rows[i] = map[string]any{
+			"grp": int64(i % 3), "k": int64(i),
+			"s": fmt.Sprintf("s%03d", i), "i32": int32(i),
+		}
+	}
+
+	w := newWindowSpillHarness(t, []WindowColumn{
+		{Func: WinMin, InputCol: "s", OutputCol: "mn", OutputType: parquet.TypeFloat64,
+			PartitionBy: []string{"grp"}, OrderBy: []SortKey{{Column: "k", Order: Ascending}}},
+		{Func: WinMax, InputCol: "i32", OutputCol: "mx", OutputType: parquet.TypeFloat64,
+			PartitionBy: []string{"grp"}, OrderBy: []SortKey{{Column: "k", Order: Ascending}}},
+	}, 512)
+
+	ctx := context.Background()
+	for i := 0; i < n; i += 16 {
+		end := i + 16
+		if end > n {
+			end = n
+		}
+		if err := w.Consume(ctx, batch.FromRows(schema, rows[i:end])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(w.runFiles) == 0 {
+		t.Fatal("window run-spill path was never exercised; budget/floor setup is wrong")
+	}
+	if err := w.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := drainWindowRows(t, w)
+	if len(got) != n {
+		t.Fatalf("got %d rows, want %d", len(got), n)
+	}
+	byKey := make(map[int64]map[string]any, len(got))
+	for _, r := range got {
+		byKey[r["k"].(int64)] = r
+	}
+	for i := 0; i < n; i++ {
+		r := byKey[int64(i)]
+		// s increases with k, so the running MIN is the partition's first
+		// value and the running MAX of i32 is the row's own value — a
+		// flat-zero column cannot pass either.
+		if want := fmt.Sprintf("s%03d", i%3); r["mn"] != want {
+			t.Fatalf("k=%d: MIN is %#v, want %q — a spilled string MIN column came back numeric", i, r["mn"], want)
+		}
+		if want := int32(i); r["mx"] != want {
+			t.Fatalf("k=%d: MAX is %#v (%T), want %v — the narrow-int write was dropped", i, r["mx"], r["mx"], want)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

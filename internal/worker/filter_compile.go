@@ -198,10 +198,12 @@ func buildAggInputProjection(
 		// either into a Float64 vector drops every value in silence. The
 		// planner resolves it against the catalog; this side has the
 		// expression's text and nothing else, so it can only carry the
-		// answer. Zero = an older coordinator that did not declare one.
-		inTyp := parquet.TypeID(a.InputType)
-		if inTyp == 0 {
-			inTyp = parquet.TypeFloat64
+		// answer. Nil = an older coordinator that did not declare one —
+		// a POINTER because a declared BOOL is TypeID zero (#371), which
+		// the old plain-int convention read as undeclared.
+		inTyp := parquet.TypeFloat64
+		if a.InputType != nil {
+			inTyp = parquet.TypeID(*a.InputType)
 		}
 		projCols = append(projCols, exec.ProjectColumn{
 			Name: a.InputCol,

@@ -252,6 +252,38 @@ func TestNodeDeclaredTypeFromColumnTypes(t *testing.T) {
 		// TestInferProjectionTypeColsWithholdsTheCatalogFromACopy.
 		{"a bare column decides once the catalog is in hand", "n_name",
 			parquet.TypeString, expr.Decided},
+
+		// A CASE decides from its result branches (#372). Before, it decided
+		// NOTHING, so MIN over a string CASE aggregated a Float64-declared
+		// projection and answered the integer 0.
+		{"case over string branches", "CASE WHEN n_regionkey = 0 THEN n_name ELSE n_comment END",
+			parquet.TypeString, expr.Decided},
+		{"case without else", "CASE WHEN n_regionkey = 0 THEN n_name END",
+			parquet.TypeString, expr.Decided},
+		{"a null branch decides nothing and does not stop the search",
+			"CASE WHEN n_regionkey = 0 THEN NULL ELSE n_name END",
+			parquet.TypeString, expr.Decided},
+		{"case over int branches stays numeric",
+			"CASE WHEN n_regionkey = 0 THEN n_nationkey ELSE n_regionkey END",
+			parquet.TypeInt64, expr.Decided},
+		{"case whose branches carry function calls",
+			"CASE WHEN n_regionkey = 0 THEN LOWER(n_name) ELSE n_name || '_x' END",
+			parquet.TypeString, expr.Decided},
+		{"parentheses are transparent", "(CASE WHEN n_regionkey = 0 THEN n_name END)",
+			parquet.TypeString, expr.Decided},
+
+		// Predicates are boolean whatever their operands (#371). Before,
+		// none of these decided, so BOOL_AND over one aggregated a Float64
+		// projection whose boolean writes were all dropped — always false.
+		{"a comparison is boolean", "n_regionkey = 0", parquet.TypeBool, expr.Decided},
+		{"an AND of comparisons is boolean", "n_regionkey >= 0 AND n_nationkey < 5",
+			parquet.TypeBool, expr.Decided},
+		{"an OR is boolean", "n_regionkey = 0 OR n_regionkey = 1", parquet.TypeBool, expr.Decided},
+		{"a NOT is boolean", "NOT (n_regionkey = 0)", parquet.TypeBool, expr.Decided},
+		{"IS NULL is boolean", "n_name IS NULL", parquet.TypeBool, expr.Decided},
+		{"LIKE is boolean", "n_name LIKE 'A%'", parquet.TypeBool, expr.Decided},
+		{"BETWEEN is boolean", "n_regionkey BETWEEN 1 AND 3", parquet.TypeBool, expr.Decided},
+		{"IN is boolean", "n_regionkey IN (1, 2)", parquet.TypeBool, expr.Decided},
 	}
 	for _, tc := range tests {
 		node, err := plansql.ParseExpression(tc.sql)
@@ -412,6 +444,19 @@ func TestWindowSpecOutputType(t *testing.T) {
 		{"cume_dist", win(scan(nation)), "cume_dist", "", parquet.TypeFloat64},
 		{"count", win(scan(nation)), "count", "n_name", parquet.TypeInt64},
 		{"sum finalizes to float64 whatever it summed", win(scan(nation)), "sum", "n_nationkey", parquet.TypeFloat64},
+
+		// MIN/MAX resolve from the input column since #361, across the
+		// compareAny-vetted types; #345 had left them on the name list.
+		{"min over a narrow int stays narrow", win(scan(nation)), "min", "n_nationkey", parquet.TypeInt32},
+		{"max over a narrow int stays narrow", win(scan(nation)), "MAX", "n_nationkey", parquet.TypeInt32},
+		{"min over a string column", win(scan(nation)), "min", "n_name", parquet.TypeString},
+		{"max over a DATE column keeps its rendering", win(scan(nation)), "max", "n_founded", parquet.TypeDate},
+		{"min over a TIMESTAMP column", win(scan(nation)), "min", "n_seen_at", parquet.TypeTimestamp},
+		// Types compareAny does not order correctly keep the float64
+		// fallback, where the SetValue guard reports rather than drops.
+		{"min over a DECIMAL declines", win(scan(nation)), "min", "n_rate", parquet.TypeFloat64},
+		{"min over an ARRAY declines", win(scan(nation)), "min", "n_tags", parquet.TypeFloat64},
+		{"min over a computed argument declines", win(scan(nation)), "min", "UPPER(n_name)", parquet.TypeFloat64},
 
 		// Declines. Each keeps the pre-#345 float64, which is what every
 		// caller's fallback already handles.

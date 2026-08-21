@@ -3407,10 +3407,11 @@ func (h *HashAggregate) initGroupState(ext *groupStateExtras, b *batch.RecordBat
 		case AggStddev, AggVariance, AggStddevPop, AggVarPop,
 			AggVarState, AggVarStateMerge:
 			ext.extraState[i] = &varianceState{}
-		case AggBoolAnd:
-			ext.extraState[i] = true
-		case AggBoolOr:
-			ext.extraState[i] = false
+		case AggBoolAnd, AggBoolOr:
+			// Deliberately left nil: the state is seeded by the first
+			// non-NULL input (updateGroup), so a group that never sees one
+			// finalizes to NULL per SQL — an eager identity value (true for
+			// AND) answered `true` over an all-NULL group.
 		case AggCorr, AggCovarSamp, AggCovarPop,
 			AggCovarState, AggCovarStateMerge:
 			ext.extraState[i] = &covarianceState{}
@@ -3467,7 +3468,7 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			state := ext.extraState[i].(*stringAggState)
 			state.parts = append(state.parts, fmt.Sprint(v.GetValue(row)))
 
-		case AggBoolAnd:
+		case AggBoolAnd, AggBoolOr:
 			idx := h.aggColIdx[i]
 			if idx < 0 {
 				continue
@@ -3486,30 +3487,19 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			case float64:
 				boolVal = tv != 0
 			}
-			current := ext.extraState[i].(bool)
-			ext.extraState[i] = current && boolVal
-
-		case AggBoolOr:
-			idx := h.aggColIdx[i]
-			if idx < 0 {
-				continue
+			// The first non-NULL input seeds the state; nil means "no
+			// input yet" so an all-NULL group finalizes to NULL (SQL's
+			// rule). mergeSinkState and the finalize write share the
+			// convention.
+			if current, ok := ext.extraState[i].(bool); ok {
+				if agg.Func == AggBoolAnd {
+					ext.extraState[i] = current && boolVal
+				} else {
+					ext.extraState[i] = current || boolVal
+				}
+			} else {
+				ext.extraState[i] = boolVal
 			}
-			v := b.Columns[idx]
-			if v.Nulls.IsNullFast(row) {
-				continue
-			}
-			val := v.GetValue(row)
-			boolVal := false
-			switch tv := val.(type) {
-			case bool:
-				boolVal = tv
-			case int64:
-				boolVal = tv != 0
-			case float64:
-				boolVal = tv != 0
-			}
-			current := ext.extraState[i].(bool)
-			ext.extraState[i] = current || boolVal
 
 		case AggStddev, AggVariance, AggStddevPop, AggVarPop, AggVarState:
 			idx := h.aggColIdx[i]
@@ -4196,7 +4186,12 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 					out.Columns[colIdx].SetValue(i, strings.Join(state.parts, state.sep))
 				}
 			case AggBoolAnd, AggBoolOr:
-				out.Columns[colIdx].SetValue(i, ext.extraState[j].(bool))
+				// nil state = the group never saw a non-NULL input → NULL.
+				if v, ok := ext.extraState[j].(bool); ok {
+					out.Columns[colIdx].SetValue(i, v)
+				} else {
+					out.Columns[colIdx].SetValue(i, nil)
+				}
 			case AggStddev:
 				state := ext.extraState[j].(*varianceState)
 				if state.count < 2 {

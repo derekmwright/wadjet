@@ -1509,6 +1509,18 @@ func (p *selectParser) parsePrimary() (Node, error) {
 	case TokenKWCase:
 		return p.parseCaseExpr()
 
+	case TokenKWEvery:
+		// EVERY is a lexer keyword only for CREATE ALERT's schedule clause.
+		// In an expression, EVERY(...) is SQL's spelling of the BOOL_AND
+		// aggregate — the planner already maps "every", but the keyword
+		// token never reached the function-call path, so the spelling
+		// failed to parse at all (#371).
+		if p.peekN(1) == TokenLParen {
+			p.advance() // consume EVERY
+			return p.parseFuncCall("every")
+		}
+		return nil, fmt.Errorf("unexpected token %q at position %d", p.cur.val, p.cur.pos)
+
 	case TokenKWCast:
 		return p.parseCastExpr()
 

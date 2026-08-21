@@ -2770,6 +2770,96 @@ func twoPathCorpus() []twoPathQuery {
 				}
 				assertOrderedBy(tb, rows, false, "c6", func(r map[string]any) float64 { return cellNum(r, "c6") })
 			}},
+		// BOOL_AND/BOOL_OR answered false regardless of input (#371): no
+		// boolean-valued node declared a type, so the pre-aggregate
+		// projection fell back to Float64 and dropped every boolean write —
+		// on BOTH engines, which is why the absolute assertion carries the
+		// weight here and the two-arm compare alone would have passed.
+		twoPathQuery{name: "BoolAggregates", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT BOOL_AND(n_nationkey >= 0) AS all_nonneg,
+				BOOL_OR(n_nationkey > 3) AS any_big,
+				BOOL_AND(n_nationkey > 3) AS all_big FROM nation`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("got %d rows, want 1", len(rows))
+				}
+				if got := cellText(rows[0], "all_nonneg"); got != "true" {
+					tb.Errorf("all_nonneg = %s, want true (every n_nationkey is >= 0)", got)
+				}
+				if got := cellText(rows[0], "any_big"); got != "true" {
+					tb.Errorf("any_big = %s, want true (n_nationkey reaches 24)", got)
+				}
+				if got := cellText(rows[0], "all_big"); got != "false" {
+					tb.Errorf("all_big = %s, want false (n_nationkey 0 exists)", got)
+				}
+			}},
+		// The grouped form drives the DAG's partial/final merge of the
+		// boolean accumulators (mergeSinkState's bool arm).
+		twoPathQuery{name: "BoolAggregatesGrouped", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_regionkey, BOOL_AND(n_nationkey > 2) AS all_late,
+				BOOL_OR(n_nationkey > 20) AS any_tail
+				FROM nation GROUP BY n_regionkey ORDER BY n_regionkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 5 {
+					tb.Fatalf("got %d rows, want 5 regions", len(rows))
+				}
+				// Region 0 holds ALGERIA (n_nationkey 0): all_late false.
+				// Region 3 (EUROPE) is {6,7,19,22,23}: all_late true and
+				// any_tail true (22, 23).
+				if got := cellText(rows[0], "all_late"); got != "false" {
+					tb.Errorf("region 0 all_late = %s, want false", got)
+				}
+				if got := cellText(rows[3], "all_late"); got != "true" {
+					tb.Errorf("region 3 all_late = %s, want true", got)
+				}
+				if got := cellText(rows[3], "any_tail"); got != "true" {
+					tb.Errorf("region 3 any_tail = %s, want true", got)
+				}
+			}},
+		// MIN/MAX over a string CASE answered the integer 0 (#372): a CASE
+		// declared no type, the aggregate's input projection fell back to
+		// Float64, and the string branches were dropped. The three control
+		// columns were always correct, which localizes the trigger.
+		twoPathQuery{name: "MinMaxOverStringCase", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT MIN(n_name) AS bare, MIN(LOWER(n_name)) AS fn,
+				MIN(n_name || 'x') AS cat,
+				MIN(CASE WHEN n_regionkey = 0 THEN n_name ELSE n_name END) AS case_expr
+				FROM nation`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 1 {
+					tb.Fatalf("got %d rows, want 1", len(rows))
+				}
+				for col, want := range map[string]string{
+					"bare": "ALGERIA", "fn": "algeria", "cat": "ALGERIAx", "case_expr": "ALGERIA",
+				} {
+					if got := cellText(rows[0], col); got != want {
+						tb.Errorf("%s = %q, want %q", col, got, want)
+					}
+				}
+			}},
+		// MIN/MAX over a window resolve from the input column since #361;
+		// n_nationkey is INT32, the exact width whose values Vector.SetValue
+		// dropped into the old float64-declared output (0 on every row).
+		// The running MAX over the ordering key equals the key itself, so a
+		// flat-zero column cannot pass the assertion.
+		twoPathQuery{name: "WindowMinMaxNarrowInt", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey,
+				MAX(n_nationkey) OVER (PARTITION BY n_regionkey ORDER BY n_nationkey) AS mx,
+				MIN(n_name) OVER (ORDER BY n_nationkey) AS mn
+				FROM nation ORDER BY n_nationkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				if len(rows) != 25 {
+					tb.Fatalf("got %d rows, want 25", len(rows))
+				}
+				for i, r := range rows {
+					if key, mx := cellNum(r, "n_nationkey"), cellNum(r, "mx"); mx != key {
+						tb.Errorf("row %d: running MAX over the ordering key = %v, want %v", i, mx, key)
+					}
+					if got := cellText(r, "mn"); got != "ALGERIA" {
+						tb.Errorf("row %d: mn = %q, want ALGERIA", i, got)
+					}
+				}
+			}},
 	)
 
 	return out

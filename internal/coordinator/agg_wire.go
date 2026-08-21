@@ -18,17 +18,25 @@ func wireAggSpecs(specs []physical.AggSpec) []distributed.AggSpec {
 	}
 	out := make([]distributed.AggSpec, 0, len(specs))
 	for _, a := range specs {
-		out = append(out, distributed.AggSpec{
+		spec := distributed.AggSpec{
 			Func:       a.Func,
 			InputCol:   a.InputCol,
 			OutputCol:  a.OutputCol,
 			InputExpr:  a.InputExpr,
 			OutputType: int(a.OutputType),
-			InputType:  int(a.InputType),
 			InputCol2:  a.InputCol2,
 			Separator:  a.Separator,
 			Percentile: a.Percentile,
-		})
+		}
+		// Declared exactly when there is a derived input to type: the
+		// planner always resolves InputType alongside InputExpr (its
+		// fallback is Float64, never absence). Keying on the expression
+		// rather than a nonzero type is what lets a BOOL declaration —
+		// TypeID zero — survive the wire (#371).
+		if a.InputExpr != "" {
+			spec.InputType = distributed.WindowTypePtr(int(a.InputType))
+		}
+		out = append(out, spec)
 	}
 	return out
 }

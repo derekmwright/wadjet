@@ -538,12 +538,18 @@ type AggSpec struct {
 	// InputType is the plan-time parquet.TypeID of the vector InputExpr
 	// evaluates into, carried the same way and for the same reason: the
 	// worker compiles InputExpr from its text and has no catalog to
-	// resolve the columns in it. Zero means "not declared" (no derived
+	// resolve the columns in it. Nil means "not declared" (no derived
 	// input, or an older coordinator), and the worker keeps its numeric
 	// default. Getting it wrong is silent — MAX(COALESCE(a, b)) over two
 	// string columns wrote strings into a Float64 vector and the
 	// aggregate saw zeros (#333).
-	InputType int `json:"input_type,omitempty"`
+	//
+	// A POINTER since #371, for WindowColSpec.OutputType's reason:
+	// parquet.TypeID's zero value is BOOL, so the plain int this used to be
+	// could not tell BOOL_AND's boolean predicate input from an absent
+	// declaration — the DAG read it as undeclared, projected the predicate
+	// into a Float64 vector, and the accumulator never saw a true value.
+	InputType *int `json:"input_type,omitempty"`
 	// InputCol2 is the second column argument of a two-column aggregate:
 	// CORR(x, y), COVAR_SAMP/POP(x, y) and MIN_BY/MAX_BY(value, ordering).
 	// Empty for every other function.
@@ -665,7 +671,9 @@ type WindowColSpec struct {
 	NthValueN      int `json:"nth_value_n,omitempty"`
 }
 
-// WindowTypePtr returns a pointer suitable for WindowColSpec.OutputType.
+// WindowTypePtr returns a pointer suitable for the pointer-typed TypeID
+// fields — WindowColSpec.OutputType, and since #371 AggSpec.InputType, which
+// went pointer for the same BOOL-is-zero reason.
 func WindowTypePtr(v int) *int { return &v }
 
 // WindowFrameSpec describes a window frame on the wire. Mirrors

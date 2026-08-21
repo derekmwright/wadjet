@@ -119,18 +119,49 @@ type WindowColumn struct {
 // typed backing array directly (Int64Data for the ranks, Float64Data for
 // SUM/AVG), so re-typing one of those would panic instead of correcting it.
 //
-// WinMin/WinMax are the near miss: they also copy an input value through
-// SetValue, but they are left on the planner's float64 declaration here
-// because their comparison path (compareAny) and their spill/merge behavior
-// have not been checked against the non-numeric types. MIN/MAX over a string
-// window column has the same silent-zero symptom as #345 and needs its own
-// fix.
+// WinMin/WinMax also copy an input value through SetValue, and were the last
+// input-dependent functions left on the planner's float64 declaration —
+// MIN(int32_col) OVER and MIN(a_string) OVER answered 0 on every row, #345's
+// symptom reached through a different name (#361). They are not on THIS
+// list because their answer is chosen by compareAny rather than lifted by
+// position: retyping is only sound for the input types that comparison
+// orders correctly on Vector.GetValue's representation, which is
+// WindowMinMaxType's decision.
 func windowValueFunc(f WindowFunc) bool {
 	switch f {
 	case WinLag, WinLead, WinFirstValue, WinLastValue, WinNthValue:
 		return true
 	}
 	return false
+}
+
+// WindowMinMaxType is the output type MIN/MAX over a window declare for an
+// input column of type in, and whether they may re-declare at all.
+//
+// The vetted set is exactly the types whose Vector.GetValue representation
+// compareAny orders correctly — the ints and floats, strings (byte order),
+// TIMESTAMP/DURATION (bare int64), DATE (its ISO string form is
+// byte-ordered), PORT/PROTOCOL (int32). The output type is the input type:
+// MIN/MAX return one of their input's values untouched.
+//
+// ok=false declines: BYTES compares as 0-everywhere under compareAny (no
+// []byte arm), the network types and UUID surface display strings whose
+// byte order is not their value order ("9.x" > "10.x"), and DECIMAL
+// surfaces a formatted string with the same problem. Those keep the
+// planner's float64 declaration, where Vector.SetValue's type guard now
+// reports the write it cannot perform instead of dropping it — an error,
+// not a silently wrong ordering.
+//
+// Exported because the physical planner declares from the catalog with this
+// same function; two vetting lists would drift.
+func WindowMinMaxType(in parquet.TypeID) (parquet.TypeID, bool) {
+	switch in {
+	case batch.TypeInt32, batch.TypeInt64, batch.TypeFloat32, batch.TypeFloat64,
+		batch.TypeString, batch.TypeTimestamp, batch.TypeDate,
+		batch.TypeDuration, batch.TypePort, batch.TypeProtocol:
+		return in, true
+	}
+	return 0, false
 }
 
 // retypeValueColumns re-declares each value function's output type from the
@@ -153,17 +184,30 @@ func (w *Window) retypeValueColumns() bool {
 	changed := false
 	for i := range w.Columns {
 		wc := &w.Columns[i]
-		if !windowValueFunc(wc.Func) || wc.InputCol == "" {
+		minMax := wc.Func == WinMin || wc.Func == WinMax
+		if (!windowValueFunc(wc.Func) && !minMax) || wc.InputCol == "" {
 			continue
 		}
 		for _, col := range w.schema {
-			if col.Name == wc.InputCol {
-				if wc.OutputType != col.Type {
-					wc.OutputType = col.Type
-					changed = true
-				}
-				break
+			if col.Name != wc.InputCol {
+				continue
 			}
+			t := col.Type
+			if minMax {
+				// Only the compareAny-vetted types may re-declare (#361);
+				// the rest keep the planner's declaration, whose wrong
+				// writes SetValue now reports instead of dropping.
+				vetted, ok := WindowMinMaxType(t)
+				if !ok {
+					break
+				}
+				t = vetted
+			}
+			if wc.OutputType != t {
+				wc.OutputType = t
+				changed = true
+			}
+			break
 		}
 	}
 	return changed

@@ -622,17 +622,17 @@ func wireCorpus() []wireCase {
 				wirePropBinaryDecode: binaryDecodePin,
 			}},
 		// A boolean expression, whose PostgreSQL text form is 't'/'f' and
-		// whose binary form is one byte.
+		// whose binary form is one byte. #364's three pins (OID 25, size
+		// -1, "false"/"true" text) came out with #371's typing fix: a
+		// predicate now DECLARES bool, so the projection is a bool vector
+		// and pgwire renders it as one. That same fix put this entry on
+		// #362's path — a real bool column binary-encodes to one byte, and
+		// the RowDescription still says text — so it now carries the
+		// binary_decode pin its int-columned neighbors always had.
 		{name: "BooleanExpression", sql: `SELECT (n_regionkey = 1) AS is_one FROM nation ORDER BY n_nationkey LIMIT 4`,
 			pins: map[string]string{
-				wirePropTypeOIDs: "WADJET BUG (pgwire): a boolean-valued expression is declared OID 25 " +
-					"(text). PostgreSQL declares 16 (bool), and every client maps that to its own boolean " +
-					"type; under OID 25 a `SELECT x = 1 AS flag` column arrives as a string. (#364)",
-				wirePropTypeSizes: "WADJET BUG (pgwire): consequence of the OID above — -1 where a bool is 1. (#364)",
-				wirePropValuesText: "WADJET BUG (pgwire): the value is rendered Go-style as \"false\"/\"true\" " +
-					"where PostgreSQL's boolean output is 'f'/'t'. pgx's text bool decoder accepts only " +
-					"'t'/'f', so even a client told the column were bool could not read it. (#364)",
-				wirePropBinFormat: binaryFormatPin,
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
 			}},
 		// A parameter bound by its DECLARED type rather than as a string —
 		// the shape of the 4a25af0 fix, and the one that exercises

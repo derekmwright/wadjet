@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/wadjet/wadjet"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // setupTPCH creates a Wadjet DB loaded with TPC-H data at the given scale factor.
@@ -193,11 +193,11 @@ func TestTPCHQueries(t *testing.T) {
 			// Validate row count against expected
 			if expected, ok := expectedRowsSF001[qNum]; ok {
 				// Q02/Q22: float-threshold comparisons where non-deterministic
-			// accumulation order shifts borderline rows in/out.
-			tolerance := 0
-			if qNum == 2 || qNum == 22 {
-				tolerance = 4
-			}
+				// accumulation order shifts borderline rows in/out.
+				tolerance := 0
+				if qNum == 2 || qNum == 22 {
+					tolerance = 4
+				}
 				diff := len(result.Rows) - expected
 				if diff < -tolerance || diff > tolerance {
 					t.Errorf("Q%02d row count: got %d, want %d (±%d)", qNum, len(result.Rows), expected, tolerance)

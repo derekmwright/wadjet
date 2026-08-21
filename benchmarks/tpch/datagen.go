@@ -21,8 +21,8 @@ const (
 func (sf ScaleFactor) RowCounts() TableCounts {
 	f := float64(sf)
 	return TableCounts{
-		Region:   5,           // fixed
-		Nation:   25,          // fixed
+		Region:   5,  // fixed
+		Nation:   25, // fixed
 		Supplier: max(10, int(10000*f)),
 		Part:     max(20, int(200000*f)),
 		PartSupp: max(80, int(800000*f)),
@@ -59,7 +59,7 @@ var containers = []string{"SM CASE", "SM BOX", "SM PACK", "SM PKG", "SM JAR", "S
 	"LG CASE", "LG BOX", "LG PACK", "LG PKG", "LG JAR", "LG CAN",
 	"JUMBO BAG", "JUMBO BOX", "JUMBO PACK", "JUMBO PKG", "JUMBO JAR", "JUMBO CAN",
 	"WRAP CASE", "WRAP BOX", "WRAP PACK", "WRAP PKG", "WRAP JAR", "WRAP CAN"}
-var brands    []string
+var brands []string
 var partTypes []string
 
 func init() {
@@ -165,7 +165,9 @@ func GenerateChunked(sf ScaleFactor, chunkSize int, emit func(table string, rows
 		{"partsupp", func(e *chunkEmitter) { streamPartSupp(rng, counts.Part, counts.Supplier, counts.PartSupp, e) }},
 		{"customer", func(e *chunkEmitter) { streamCustomer(rng, counts.Customer, e) }},
 		{"orders", func(e *chunkEmitter) { streamOrders(rng, counts.Orders, counts.Customer, e) }},
-		{"lineitem", func(e *chunkEmitter) { streamLineItem(rng, counts.Orders, counts.LineItem, counts.Part, counts.Supplier, e) }},
+		{"lineitem", func(e *chunkEmitter) {
+			streamLineItem(rng, counts.Orders, counts.LineItem, counts.Part, counts.Supplier, e)
+		}},
 	}
 
 	for _, tbl := range tables {
@@ -290,15 +292,15 @@ func genOrders(rng *rand.Rand, count, numCusts int) []map[string]any {
 		month := rng.Intn(12) + 1
 		day := rng.Intn(28) + 1
 		rows[i] = map[string]any{
-			"o_orderkey":     int32(i + 1),
-			"o_custkey":      int32(rng.Intn(custRange) + 1),
-			"o_orderstatus":  statuses[rng.Intn(3)],
-			"o_totalprice":   randFloat(rng, 1000.0, 500000.0),
-			"o_orderdate":    fmt.Sprintf("%04d-%02d-%02d", year, month, day),
+			"o_orderkey":      int32(i + 1),
+			"o_custkey":       int32(rng.Intn(custRange) + 1),
+			"o_orderstatus":   statuses[rng.Intn(3)],
+			"o_totalprice":    randFloat(rng, 1000.0, 500000.0),
+			"o_orderdate":     fmt.Sprintf("%04d-%02d-%02d", year, month, day),
 			"o_orderpriority": priorities[rng.Intn(len(priorities))],
-			"o_clerk":        fmt.Sprintf("Clerk#%09d", rng.Intn(max(1, count/1000))+1),
-			"o_shippriority": int32(0),
-			"o_comment":      randString(rng, 20, 60),
+			"o_clerk":         fmt.Sprintf("Clerk#%09d", rng.Intn(max(1, count/1000))+1),
+			"o_shippriority":  int32(0),
+			"o_comment":       randString(rng, 20, 60),
 		}
 	}
 	return rows
@@ -326,33 +328,33 @@ func genLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int) []map
 			month := rng.Intn(12) + 1
 			day := rng.Intn(28) + 1
 			orderDate := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
-			commitDate := orderDate.AddDate(0, 0, rng.Intn(116)+5)     // +5..120 days
-			shipDate := commitDate.AddDate(0, 0, rng.Intn(51)-10)      // -10..+40 days
-			receiptDate := shipDate.AddDate(0, 0, rng.Intn(30)+1)      // +1..30 days
+			commitDate := orderDate.AddDate(0, 0, rng.Intn(116)+5) // +5..120 days
+			shipDate := commitDate.AddDate(0, 0, rng.Intn(51)-10)  // -10..+40 days
+			receiptDate := shipDate.AddDate(0, 0, rng.Intn(30)+1)  // +1..30 days
 
 			// Derive suppkey from partkey using same formula as partsupp,
 			// ensuring lineitem's (l_partkey, l_suppkey) has matching rows in partsupp.
-			partKey := rng.Intn(numParts)                          // 0-based
-			suppIdx := rng.Intn(4)                                 // pick one of 4 suppliers for this part
-			suppKey := (partKey*4 + suppIdx) % numSupps + 1
+			partKey := rng.Intn(numParts) // 0-based
+			suppIdx := rng.Intn(4)        // pick one of 4 suppliers for this part
+			suppKey := (partKey*4+suppIdx)%numSupps + 1
 
 			rows = append(rows, map[string]any{
-				"l_orderkey":     int32(orderKey),
-				"l_partkey":      int32(partKey + 1),
-				"l_suppkey":      int32(suppKey),
-				"l_linenumber":   int32(ln),
-				"l_quantity":     quantity,
+				"l_orderkey":      int32(orderKey),
+				"l_partkey":       int32(partKey + 1),
+				"l_suppkey":       int32(suppKey),
+				"l_linenumber":    int32(ln),
+				"l_quantity":      quantity,
 				"l_extendedprice": price,
-				"l_discount":     discount,
-				"l_tax":          tax,
-				"l_returnflag":   flags[rng.Intn(3)],
-				"l_linestatus":   lineStatuses[rng.Intn(2)],
-				"l_shipdate":     shipDate.Format("2006-01-02"),
-				"l_commitdate":   commitDate.Format("2006-01-02"),
-				"l_receiptdate":  receiptDate.Format("2006-01-02"),
-				"l_shipinstruct": shipInstructs[rng.Intn(len(shipInstructs))],
-				"l_shipmode":     shipModes[rng.Intn(len(shipModes))],
-				"l_comment":      randString(rng, 10, 40),
+				"l_discount":      discount,
+				"l_tax":           tax,
+				"l_returnflag":    flags[rng.Intn(3)],
+				"l_linestatus":    lineStatuses[rng.Intn(2)],
+				"l_shipdate":      shipDate.Format("2006-01-02"),
+				"l_commitdate":    commitDate.Format("2006-01-02"),
+				"l_receiptdate":   receiptDate.Format("2006-01-02"),
+				"l_shipinstruct":  shipInstructs[rng.Intn(len(shipInstructs))],
+				"l_shipmode":      shipModes[rng.Intn(len(shipModes))],
+				"l_comment":       randString(rng, 10, 40),
 			})
 		}
 	}
@@ -513,14 +515,14 @@ func streamLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int, e 
 			month := rng.Intn(12) + 1
 			day := rng.Intn(28) + 1
 			orderDate := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
-			commitDate := orderDate.AddDate(0, 0, rng.Intn(116)+5)     // +5..120 days
-			shipDate := commitDate.AddDate(0, 0, rng.Intn(51)-10)      // -10..+40 days
-			receiptDate := shipDate.AddDate(0, 0, rng.Intn(30)+1)      // +1..30 days
+			commitDate := orderDate.AddDate(0, 0, rng.Intn(116)+5) // +5..120 days
+			shipDate := commitDate.AddDate(0, 0, rng.Intn(51)-10)  // -10..+40 days
+			receiptDate := shipDate.AddDate(0, 0, rng.Intn(30)+1)  // +1..30 days
 
 			// Derive suppkey from partkey using same formula as partsupp
-			partKey := rng.Intn(numParts)                          // 0-based
-			suppIdx := rng.Intn(4)                                 // pick one of 4 suppliers for this part
-			suppKey := (partKey*4 + suppIdx) % numSupps + 1
+			partKey := rng.Intn(numParts) // 0-based
+			suppIdx := rng.Intn(4)        // pick one of 4 suppliers for this part
+			suppKey := (partKey*4+suppIdx)%numSupps + 1
 
 			e.add(map[string]any{
 				"l_orderkey":      int32(orderKey),

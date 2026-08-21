@@ -327,13 +327,6 @@ func postgresSemanticsCases() []pgCase {
 	// pinned entry is not a comparison.
 
 	// The aggregate-over-CASE defect, shared by the two entries below.
-	const minMaxOverCaseBug = pgBugWadjet + " MIN/MAX over a CASE expression whose branches are STRINGS " +
-		"returns the integer 0. The same aggregate over the bare column, over LOWER(col) and over col || 'x' " +
-		"is correct, and a PROJECTED string CASE is correct too (CaseWhenTypeResolution passes) — so it is " +
-		"specifically the aggregate's view of a CASE. This is the #333/#345 family: the output vector is " +
-		"allocated at a declared type, nothing in a CASE decides one, the Float64 fallback stands, and every " +
-		"string write is dropped without an error."
-
 	const mixedCase = `CASE WHEN n_nationkey % 4 = 0 THEN LOWER(n_name)
 			WHEN n_nationkey % 4 = 1 THEN n_name
 			WHEN n_nationkey % 4 = 2 THEN '_' || n_name
@@ -341,20 +334,15 @@ func postgresSemanticsCases() []pgCase {
 	out = append(out,
 		pgCase{name: "StringOrderMixedCase", sql: `SELECT n_nationkey, ` + mixedCase + ` AS v FROM nation ORDER BY v, n_nationkey`},
 		pgCase{name: "StringOrderMixedCaseDesc", sql: `SELECT n_nationkey, ` + mixedCase + ` AS v FROM nation ORDER BY v DESC, n_nationkey`},
-		pgCase{name: "StringMinMaxCollation", sql: `SELECT MIN(` + mixedCase + `) AS mn, MAX(` + mixedCase + `) AS mx FROM nation`,
-			knownBug: minMaxOverCaseBug + " Here MIN and MAX over a CASE whose branches are strings both " +
-				"answer the integer 0, against PostgreSQL's ' canada' and 'united states'",
-			issue: "#372"},
-		// The control that names the trigger exactly. bare, fn and cat are all
-		// CORRECT — so it is neither "MIN over strings" nor "MIN over an
-		// expression"; only the CASE arm drops its value.
+		pgCase{name: "StringMinMaxCollation", sql: `SELECT MIN(` + mixedCase + `) AS mn, MAX(` + mixedCase + `) AS mx FROM nation`},
+		// The control that names the trigger exactly (#372's localization):
+		// bare, fn and cat were always correct; only the CASE arm dropped
+		// its value, because a CASE was the one string-valued expression
+		// whose type the aggregate did not resolve (nodeDeclaredType had no
+		// CaseNode arm).
 		pgCase{name: "MinMaxOverStringExpression", sql: `SELECT MIN(n_name) AS bare, MIN(LOWER(n_name)) AS fn,
 			MIN(n_name || 'x') AS cat, MIN(CASE WHEN n_regionkey = 0 THEN n_name ELSE n_name END) AS case_expr
-			FROM nation`,
-			knownBug: minMaxOverCaseBug + " Here bare, fn and cat agree with PostgreSQL and case_expr alone " +
-				"answers 0 — which is the localization: a CASE is the one string-valued expression whose " +
-				"type the aggregate does not resolve",
-			issue: "#372"},
+			FROM nation`},
 		pgCase{name: "StringComparisonCollation", sql: `SELECT ('B' < 'a') AS upper_first, ('a' < 'b') AS same_case, ('' < 'a') AS empty_first`},
 		// An ordering over real fixture data, where the values differ only
 		// after several characters.
@@ -531,15 +519,12 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "VarianceFamilyNaming", sql: `SELECT STDDEV(o_totalprice) AS s, STDDEV_SAMP(o_totalprice) AS ss,
 			STDDEV_POP(o_totalprice) AS sp, VARIANCE(o_totalprice) AS v,
 			VAR_SAMP(o_totalprice) AS vs, VAR_POP(o_totalprice) AS vp FROM orders`},
+		// #371's shape: the accumulator was fine, its INPUT was not — no
+		// boolean-valued node (comparison, AND/OR/NOT, IS, LIKE, BETWEEN,
+		// IN) declared a type, so the pre-aggregate projection fell back to
+		// Float64 and dropped every boolean write.
 		pgCase{name: "BoolAggregates", sql: `SELECT BOOL_AND(n_regionkey >= 0) AS all_nonneg, BOOL_OR(n_regionkey > 3) AS any_big,
-			BOOL_AND(n_regionkey > 3) AS all_big FROM nation`,
-			knownBug: pgBugWadjet + " BOOL_AND and BOOL_OR answer FALSE regardless of their input: over " +
-				"nation, BOOL_AND(n_regionkey >= 0) is false against a true answer and " +
-				"BOOL_OR(n_regionkey > 3) is false against a true answer. The one column that agrees " +
-				"(BOOL_AND(n_regionkey > 3), genuinely false) is what says the accumulator never sees a true " +
-				"value rather than getting the logic backwards. Both aggregates return a plausible boolean, " +
-				"so nothing but a value comparison sees it",
-			issue: "#371"},
+			BOOL_AND(n_regionkey > 3) AS all_big FROM nation`},
 		// The default window frame is RANGE, so a running total over a TIED
 		// ORDER BY key advances by peer group and not by row. Getting it wrong
 		// is a plausible number, never an error.

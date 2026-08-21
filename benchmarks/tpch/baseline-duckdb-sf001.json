@@ -33,6 +33,32 @@
       "limit": 7,
       "why": "a LIMIT with no ORDER BY picks arbitrary rows by definition"
     },
+    "BoolAggregates": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "all_nonneg",
+        "any_big",
+        "all_big"
+      ],
+      "fine": "76ff5c8913f035af",
+      "coarse": "76ff5c8913f035af"
+    },
+    "BoolAggregatesGrouped": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_regionkey",
+        "all_late",
+        "any_tail"
+      ],
+      "fine": "3101a4471015045b",
+      "coarse": "3101a4471015045b"
+    },
     "CorrOverJoin": {
       "source": "duckdb",
       "row_count": 25,
@@ -772,6 +798,20 @@
       ],
       "fine": "7edef1e368d2538f",
       "coarse": "7edef1e368d2538f"
+    },
+    "MinMaxOverStringCase": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "bare",
+        "fn",
+        "cat",
+        "case_expr"
+      ],
+      "fine": "52d03a0cbdd0134b",
+      "coarse": "52d03a0cbdd0134b"
     },
     "MinOverRenamedSubqueryColumn": {
       "source": "duckdb",
@@ -2063,6 +2103,19 @@
       ],
       "fine": "e2b7d096c9bcfbbd",
       "coarse": "b5eac768cc22f01d"
+    },
+    "WindowMinMaxNarrowInt": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "mx",
+        "mn"
+      ],
+      "fine": "524e8e3030c97b14",
+      "coarse": "524e8e3030c97b14"
     },
     "WindowNthValueFrames": {
       "source": "duckdb",
