@@ -719,7 +719,16 @@ func (r *SQLResult) Rows() ([]map[string]any, error) {
 }
 
 // ExecuteSQL parses SQL, plans, distributes across workers, and collects results.
-func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, error) {
+func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResult, err error) {
+	// Panics carrying a query error (exec.FatalEvalPanic, including
+	// batch.TypeMismatchError — #361's silent-write guard) become that
+	// error: coordinator-side merge and gather write batches outside
+	// Pipeline.Run's recover, and pgwire sits directly above this entry.
+	defer func() {
+		if r := recover(); r != nil {
+			err = exec.RecoverFatalEval(r)
+		}
+	}()
 	if !c.isLeaderOrStandalone() {
 		leaderID := ""
 		if c.leader != nil {
@@ -922,7 +931,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		}
 	}
 
-	res := &SQLResult{
+	res = &SQLResult{
 		QueryID:   queryID,
 		Columns:   gr.columns,
 		TotalRows: gr.totalRows,

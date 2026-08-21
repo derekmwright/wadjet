@@ -83,6 +83,12 @@ func probeArgs(t *testing.T, rows int) [][]*batch.Vector {
 // the assumption that the planner is the only way one can arise. It goes
 // through FuncCall.EvalVec, which is the only path the engine ever calls a
 // kernel by (see plan.go's pc.VecEval and project.go).
+//
+// Since #361 one panic is sanctioned: *batch.TypeMismatchError, the
+// silent-write guard's typed refusal, which rides the exec.FatalEvalPanic
+// contract and comes back to the client as a query error. The invariant
+// this sweep holds is unchanged — nothing here may kill the server — but
+// "cannot store X into Y" is now an error by design, not a survival bug.
 func TestVecFuncsSurviveEveryOutputType(t *testing.T) {
 	const rows = 4
 	shapes := probeArgs(t, rows)
@@ -90,6 +96,15 @@ func TestVecFuncsSurviveEveryOutputType(t *testing.T) {
 	evalPanic := func(name string, args []*batch.Vector, outType batch.TypeID) (msg string) {
 		defer func() {
 			if r := recover(); r != nil {
+				// batch.TypeMismatchError is the #361 silent-write guard:
+				// a SANCTIONED loud refusal. It implements the
+				// exec.FatalEvalPanic contract, so every pipeline driver
+				// converts it into a query error — the server survives,
+				// which is the whole of this test's invariant. Any other
+				// panic (a slice overrun, a nil deref) still fails here.
+				if _, ok := r.(*batch.TypeMismatchError); ok {
+					return
+				}
 				msg = fmt.Sprint(r)
 			}
 		}()

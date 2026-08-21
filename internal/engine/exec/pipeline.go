@@ -66,6 +66,15 @@ func (f fatalEvalError) Error() string { return f.err.Error() }
 // FatalEvalError satisfies FatalEvalPanic.
 func (f fatalEvalError) FatalEvalError() error { return f.err }
 
+// RecoverFatalEval is recoverFatalEval for the drivers that live outside
+// this package: the embedded API's Query/Execute and the coordinator's
+// ExecuteSQL, which reach batch-writing code (DML row building, result
+// merging) without ever entering Pipeline.Run. batch.TypeMismatchError
+// (#361's silent-write guard) rides this contract too, so those entries
+// must convert it the same way. Call only with a non-nil recover() result;
+// anything that is not a FatalEvalPanic is re-raised untouched.
+func RecoverFatalEval(r any) error { return recoverFatalEval(r) }
+
 // Run executes the pipeline by pulling from source, transforming through
 // operators, and pushing to sink. When Workers > 1 and all operators
 // implement Cloneable, batches are processed by multiple goroutines

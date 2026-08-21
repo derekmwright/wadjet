@@ -27,16 +27,16 @@ import (
 
 // DB is the main entry point for embedded usage of Wadjet.
 type DB struct {
-	store              objstore.Store
-	catalog            *catalog.Catalog
-	bucket             string
-	memoryBudget       int64
-	spillDir           string
-	logger             *slog.Logger
-	authProvider       *auth.Provider    // nil = no auth enforcement
-	alertScheduler     *alerts.Scheduler // non-nil when EnableAlerts is set
-	alertSchedulerStop context.CancelFunc
-	sortMergeJoinBytes int64
+	store               objstore.Store
+	catalog             *catalog.Catalog
+	bucket              string
+	memoryBudget        int64
+	spillDir            string
+	logger              *slog.Logger
+	authProvider        *auth.Provider    // nil = no auth enforcement
+	alertScheduler      *alerts.Scheduler // non-nil when EnableAlerts is set
+	alertSchedulerStop  context.CancelFunc
+	sortMergeJoinBytes  int64
 	lateMaterialization bool
 }
 
@@ -85,14 +85,14 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 	}
 
 	db := &DB{
-		store:              cfg.Store,
-		catalog:            cat,
-		bucket:             cfg.Bucket,
-		memoryBudget:       cfg.MemoryBudget,
-		spillDir:           cfg.SpillDir,
-		logger:             cfg.Logger,
-		authProvider:       cfg.AuthProvider,
-		sortMergeJoinBytes: cfg.SortMergeJoinBytes,
+		store:               cfg.Store,
+		catalog:             cat,
+		bucket:              cfg.Bucket,
+		memoryBudget:        cfg.MemoryBudget,
+		spillDir:            cfg.SpillDir,
+		logger:              cfg.Logger,
+		authProvider:        cfg.AuthProvider,
+		sortMergeJoinBytes:  cfg.SortMergeJoinBytes,
 		lateMaterialization: cfg.LateMaterialization,
 	}
 
@@ -212,7 +212,17 @@ type QueryResult struct {
 }
 
 // Query executes a SQL query and returns the results.
-func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
+func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err error) {
+	// Panics that carry a query ERROR (exec.FatalEvalPanic — including
+	// batch.TypeMismatchError, #361's silent-write guard) become that error
+	// here: this entry reaches batch-writing code outside Pipeline.Run's
+	// own recover (result assembly, catalog-backed synthetic tables), and
+	// the embedded caller must get an error, never a process exit.
+	defer func() {
+		if r := recover(); r != nil {
+			err = exec.RecoverFatalEval(r)
+		}
+	}()
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
 		return nil, fmt.Errorf("parsing SQL: %w", err)

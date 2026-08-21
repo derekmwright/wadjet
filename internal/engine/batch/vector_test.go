@@ -8,8 +8,8 @@ import (
 
 func TestNewVectorTypes(t *testing.T) {
 	types := []struct {
-		typ    TypeID
-		name   string
+		typ  TypeID
+		name string
 	}{
 		{TypeBool, "bool"},
 		{TypeInt32, "int32"},
@@ -355,14 +355,30 @@ func TestSetValueStringCoercion(t *testing.T) {
 	}
 }
 
+// mustPanicMismatch asserts fn raises the #361 silent-write guard. The
+// network-type edge tests below used to assert the DROP itself (an
+// unholdable value quietly kept the zero value); the guard made that shape
+// loud, so they now assert the panic.
+func mustPanicMismatch(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected *TypeMismatchError panic, got none")
+		} else if _, ok := r.(*TypeMismatchError); !ok {
+			t.Fatalf("expected *TypeMismatchError, got %T (%v)", r, r)
+		}
+	}()
+	fn()
+}
+
 func TestSetValueIPv4Edge(t *testing.T) {
 	v := NewVector(TypeIPv4, 3)
-	// Invalid IP
+	// Invalid IP: a value-level failure, not a type mismatch — no panic.
 	v.SetValue(0, "not-an-ip")
 	// Int32 input
 	v.SetValue(1, int32(100))
-	// Unknown type input
-	v.SetValue(2, true) // bool is not handled
+	// A type IPv4 cannot hold raises the guard (#361).
+	mustPanicMismatch(t, func() { v.SetValue(2, true) })
 
 	if v.Int64Data[1] != 100 {
 		t.Fatalf("expected 100, got %d", v.Int64Data[1])
@@ -371,25 +387,25 @@ func TestSetValueIPv4Edge(t *testing.T) {
 
 func TestSetValueIPv6NonString(t *testing.T) {
 	v := NewVector(TypeIPv6, 2)
-	// Non-string should set nil bytes
-	v.SetValue(0, int64(42))
+	// Non-string, non-bytes raises the guard (#361).
+	mustPanicMismatch(t, func() { v.SetValue(0, int64(42)) })
 
-	// Invalid IP string
+	// Invalid IP string: value-level, stays a nil write.
 	v.SetValue(1, "not-an-ip")
 }
 
 func TestSetValueCIDRNonString(t *testing.T) {
 	v := NewVector(TypeCIDR, 1)
-	v.SetValue(0, int64(42))
-	// non-string goes to the nil path
+	// Non-string raises the guard (#361).
+	mustPanicMismatch(t, func() { v.SetValue(0, int64(42)) })
 }
 
 func TestSetValueMACEdge(t *testing.T) {
 	v := NewVector(TypeMAC, 2)
-	// Invalid MAC
+	// Invalid MAC: value-level, no panic.
 	v.SetValue(0, "not-a-mac")
-	// Unknown type
-	v.SetValue(1, true)
+	// A type MAC cannot hold raises the guard (#361).
+	mustPanicMismatch(t, func() { v.SetValue(1, true) })
 }
 
 func TestSetValueDuration(t *testing.T) {
@@ -429,8 +445,8 @@ func TestSetValueUUIDBytes(t *testing.T) {
 		raw[i] = byte(i)
 	}
 	v.SetValue(0, raw)
-	// Non-string, non-bytes
-	v.SetValue(1, int64(42))
+	// Non-string, non-bytes raises the guard (#361).
+	mustPanicMismatch(t, func() { v.SetValue(1, int64(42)) })
 }
 
 func TestSetValueArrayMap(t *testing.T) {
@@ -456,16 +472,18 @@ func TestSetValueArrayMap(t *testing.T) {
 	t.Run("UnsupportedInput", func(t *testing.T) {
 		v := NewVector(TypeArray, 1)
 		v.Child = NewVector(TypeInt64, 0)
-		v.SetValue(0, "not-an-array")
-		// Should not panic
+		// Raises the guard (#361): the old silent return did not even
+		// advance Offsets, so later rows read back shifted.
+		mustPanicMismatch(t, func() { v.SetValue(0, "not-an-array") })
 	})
 }
 
 func TestSetValueRowEdge(t *testing.T) {
 	t.Run("NonMapInput", func(t *testing.T) {
 		v := NewRowVector(1, []string{"name"}, []TypeID{TypeString})
-		v.SetValue(0, "not-a-map")
-		// Should not panic
+		// Raises the guard (#361): the old silent return skipped every
+		// child's slot for the row.
+		mustPanicMismatch(t, func() { v.SetValue(0, "not-a-map") })
 	})
 
 	t.Run("NilChildren", func(t *testing.T) {

@@ -327,7 +327,20 @@ func (s *jsonScanner) skipValue() {
 }
 
 // parseColumnarDirect reads all JSON objects directly into typed column vectors.
-func parseColumnarDirect(data []byte, isArray bool, schema []parquet.Column, colIdx map[string]int) ([]*batch.RecordBatch, error) {
+func parseColumnarDirect(data []byte, isArray bool, schema []parquet.Column, colIdx map[string]int) (out []*batch.RecordBatch, err error) {
+	// This is user data crossing Vector.SetValue (the nested-column path):
+	// a JSON value the schema's vector cannot hold raises #361's typed
+	// panic, and an ingest of malformed data must answer with a decode
+	// error, never take the process down.
+	defer func() {
+		if r := recover(); r != nil {
+			te, ok := r.(*batch.TypeMismatchError)
+			if !ok {
+				panic(r)
+			}
+			out, err = nil, fmt.Errorf("decoding JSON row: %w", te)
+		}
+	}()
 	sc := &jsonScanner{data: data}
 
 	if isArray {
@@ -455,8 +468,21 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 				if err := json.Unmarshal(raw, &decoded); err != nil {
 					vec.WriteNullAt(row)
 				} else {
-					vec.Nulls.SetValid(row)
-					vec.SetValue(row, decoded)
+					// Coerced per the inferred schema BEFORE the write:
+					// Vector.SetValue guards against values it cannot hold
+					// (#361), and inference is best-effort — a later row
+					// may not match the type an earlier row taught it.
+					// Timestamp strings inside nested values parse here
+					// exactly as the scalar path parses them (they used to
+					// be dropped for 0); a genuinely unholdable value
+					// becomes NULL, the same answer a missing key gets.
+					decoded = coerceToColumn(decoded, schema[colI])
+					if decoded == nil {
+						vec.WriteNullAt(row)
+					} else {
+						vec.Nulls.SetValid(row)
+						vec.SetValue(row, decoded)
+					}
 				}
 			} else {
 				// Schema says scalar but JSON has nested — store as JSON string
@@ -480,6 +506,98 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 	}
 
 	return nil
+}
+
+// coerceToColumn makes a json.Unmarshal'd value storable in col's vector,
+// or returns nil for NULL. It exists because Vector.SetValue no longer
+// swallows a value the vector cannot hold (#361) — before the guard a
+// mismatched nested cell silently became 0 AND, for ARRAY/ROW shapes,
+// desynced the column's offsets so later rows read back shifted.
+//
+// Policy: inference is best-effort (a column is typed from the rows the
+// sampler saw), so a later value of an incompatible type is the CELL's
+// problem, not the ingest's — it becomes NULL, the same answer a missing
+// key gets. Values SetValue can already convert pass through untouched.
+// TIMESTAMP strings are the one enrichment: they parse with the same
+// patterns the scalar path uses; they used to be dropped for 0.
+func coerceToColumn(val any, col parquet.Column) any {
+	if val == nil {
+		return nil
+	}
+	switch col.Type {
+	case parquet.TypeArray:
+		elems, ok := val.([]any)
+		if !ok {
+			return nil
+		}
+		if col.ElementType == nil {
+			return elems
+		}
+		out := make([]any, len(elems))
+		for i, e := range elems {
+			out[i] = coerceToColumn(e, *col.ElementType)
+		}
+		return out
+	case parquet.TypeRow:
+		m, ok := val.(map[string]any)
+		if !ok {
+			return nil
+		}
+		if len(col.Fields) == 0 {
+			return m
+		}
+		out := make(map[string]any, len(m))
+		for _, f := range col.Fields {
+			if fv, present := m[f.Name]; present {
+				out[f.Name] = coerceToColumn(fv, f)
+			}
+		}
+		return out
+	case parquet.TypeString, parquet.TypeBytes:
+		return val // SetValue coerces anything through its string form
+	case parquet.TypeBool:
+		switch val.(type) {
+		case bool, float64:
+			return val
+		}
+		return nil
+	case parquet.TypeTimestamp:
+		switch tv := val.(type) {
+		case float64:
+			return val
+		case string:
+			for _, layout := range timestampPatterns {
+				if t, err := time.Parse(layout, tv); err == nil {
+					return t.UnixMicro() // the scalar path's unit
+				}
+			}
+			return nil
+		}
+		return nil
+	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypeFloat32, parquet.TypeFloat64,
+		parquet.TypePort, parquet.TypeProtocol, parquet.TypeDuration, parquet.TypeDecimal:
+		if _, ok := val.(float64); ok { // every JSON number
+			return val
+		}
+		if col.Type == parquet.TypeDecimal {
+			if _, ok := val.(string); ok {
+				return val
+			}
+		}
+		return nil
+	case parquet.TypeDate, parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR,
+		parquet.TypeMAC, parquet.TypeUUID:
+		// String forms only: SetValue parses them, and a parse failure is a
+		// value-level miss, not a type mismatch. A JSON number has no
+		// agreed meaning for any of these.
+		if _, ok := val.(string); ok {
+			return val
+		}
+		return nil
+	}
+	// TypeMap, TypeVector and anything else only arrive via an explicit
+	// caller schema; pass through and let the guard name a mismatch.
+	return val
 }
 
 func writeStringValue(sc *jsonScanner, vec *batch.Vector, row int, colType parquet.TypeID) {

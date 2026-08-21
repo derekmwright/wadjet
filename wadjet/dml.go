@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -26,7 +27,15 @@ type ExecResult struct {
 }
 
 // Execute runs a DML statement (INSERT/UPDATE/DELETE) and returns the result.
-func (db *DB) Execute(ctx context.Context, sql string) (*ExecResult, error) {
+func (db *DB) Execute(ctx context.Context, sql string) (res *ExecResult, err error) {
+	// Same seam as DB.Query: DML builds row batches (batch.FromRows) with
+	// user-supplied values, so batch.TypeMismatchError (#361's guard) must
+	// come back as an error, never a process exit.
+	defer func() {
+		if r := recover(); r != nil {
+			err = exec.RecoverFatalEval(r)
+		}
+	}()
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
 		return nil, fmt.Errorf("parsing SQL: %w", err)

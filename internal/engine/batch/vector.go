@@ -70,20 +70,20 @@ const (
 	TypeString    = parquet.TypeString
 	TypeBytes     = parquet.TypeBytes
 	TypeTimestamp = parquet.TypeTimestamp
-	TypeIPv4     = parquet.TypeIPv4
-	TypeIPv6     = parquet.TypeIPv6
-	TypeCIDR     = parquet.TypeCIDR
-	TypeMAC      = parquet.TypeMAC
-	TypePort     = parquet.TypePort
-	TypeProtocol = parquet.TypeProtocol
-	TypeDuration = parquet.TypeDuration
-	TypeUUID     = parquet.TypeUUID
-	TypeDate     = parquet.TypeDate
-	TypeDecimal  = parquet.TypeDecimal
-	TypeArray    = parquet.TypeArray
-	TypeRow      = parquet.TypeRow
-	TypeMap      = parquet.TypeMap
-	TypeVector   = parquet.TypeVector
+	TypeIPv4      = parquet.TypeIPv4
+	TypeIPv6      = parquet.TypeIPv6
+	TypeCIDR      = parquet.TypeCIDR
+	TypeMAC       = parquet.TypeMAC
+	TypePort      = parquet.TypePort
+	TypeProtocol  = parquet.TypeProtocol
+	TypeDuration  = parquet.TypeDuration
+	TypeUUID      = parquet.TypeUUID
+	TypeDate      = parquet.TypeDate
+	TypeDecimal   = parquet.TypeDecimal
+	TypeArray     = parquet.TypeArray
+	TypeRow       = parquet.TypeRow
+	TypeMap       = parquet.TypeMap
+	TypeVector    = parquet.TypeVector
 )
 
 // BytesColumn stores variable-length byte data (strings, binary) with zero
@@ -633,6 +633,13 @@ func (v *Vector) GetValue(i int) any {
 
 // SetValue sets the value at position i from an interface{}.
 // For string/bytes types, values must be set in sequential order (i = 0, 1, 2, ...).
+//
+// A non-nil value whose type has no conversion into this vector's storage
+// PANICS with *TypeMismatchError (#361) instead of silently keeping the
+// zero value — see that type's doc for the contract and the seams that
+// convert the panic into a query error. nil is a NULL; STRING/BYTES coerce
+// everything through its string form; a parseable-type string that fails to
+// parse (IPv4, MAC, UUID) keeps its historical value-level behavior.
 func (v *Vector) SetValue(i int, val any) {
 	if val == nil {
 		// WriteNullAt advances variable-length bookkeeping for EVERY shape —
@@ -646,19 +653,24 @@ func (v *Vector) SetValue(i int, val any) {
 	v.Nulls.SetValid(i)
 	switch v.Type {
 	case TypeBool:
-		// Checked, not val.(bool): every other case here tolerates a value of
-		// the wrong shape, and an unchecked assertion made this one case a
-		// process-wide panic instead — the same "a wrong type may cost a
-		// wrong answer, never the server" rule the vec kernels follow (#310).
+		// A value-shape mismatch here used to write NULL, and before that an
+		// unchecked assertion killed the process; it now raises the #361
+		// guard, which the pipeline seams convert into a query error — the
+		// #310 rule ("a wrong type may cost a wrong answer, never the
+		// server") upgraded to "an error, never the server".
 		switch tv := val.(type) {
 		case bool:
 			v.BoolData[i] = tv
 		case int64:
 			v.BoolData[i] = tv != 0
+		case int:
+			v.BoolData[i] = tv != 0
+		case int32:
+			v.BoolData[i] = tv != 0
 		case float64:
 			v.BoolData[i] = tv != 0
 		default:
-			v.Nulls.SetNull(i)
+			v.mismatch(val)
 		}
 	case TypeInt32:
 		switch tv := val.(type) {
@@ -670,6 +682,8 @@ func (v *Vector) SetValue(i int, val any) {
 			v.Int32Data[i] = int32(tv)
 		case float64:
 			v.Int32Data[i] = int32(tv)
+		default:
+			v.mismatch(val)
 		}
 	case TypeInt64, TypeTimestamp:
 		switch tv := val.(type) {
@@ -681,6 +695,8 @@ func (v *Vector) SetValue(i int, val any) {
 			v.Int64Data[i] = int64(tv)
 		case float64:
 			v.Int64Data[i] = int64(tv)
+		default:
+			v.mismatch(val)
 		}
 	case TypeFloat32:
 		switch tv := val.(type) {
@@ -688,6 +704,14 @@ func (v *Vector) SetValue(i int, val any) {
 			v.Float32Data[i] = tv
 		case float64:
 			v.Float32Data[i] = float32(tv)
+		case int64:
+			v.Float32Data[i] = float32(tv)
+		case int:
+			v.Float32Data[i] = float32(tv)
+		case int32:
+			v.Float32Data[i] = float32(tv)
+		default:
+			v.mismatch(val)
 		}
 	case TypeFloat64:
 		switch tv := val.(type) {
@@ -699,6 +723,12 @@ func (v *Vector) SetValue(i int, val any) {
 			v.Float64Data[i] = float64(tv)
 		case int:
 			v.Float64Data[i] = float64(tv)
+		case int32:
+			// The lossless widening #361's shape wanted: MIN(int32_col)
+			// OVER a float64-declared window dropped every value here.
+			v.Float64Data[i] = float64(tv)
+		default:
+			v.mismatch(val)
 		}
 	case TypeString:
 		switch tv := val.(type) {
@@ -711,7 +741,8 @@ func (v *Vector) SetValue(i int, val any) {
 			v.BytesData.Set(i, []byte(fmt.Sprint(val)))
 		}
 	case TypeBytes:
-		// Checked for the same reason as TypeBool above.
+		// Coerces like TypeString above: any value has a string form, so a
+		// bytes destination can always hold it. Deliberately NOT guarded.
 		switch tv := val.(type) {
 		case []byte:
 			v.BytesData.Set(i, tv)
@@ -737,26 +768,27 @@ func (v *Vector) SetValue(i int, val any) {
 		case int32:
 			v.Int64Data[i] = int64(tv)
 		default:
-			return
+			v.mismatch(val)
 		}
 	case TypeIPv6:
-		s, ok := val.(string)
-		if !ok {
-			v.BytesData.Set(i, nil)
-			return
+		switch tv := val.(type) {
+		case string:
+			ip := net.ParseIP(tv)
+			if ip == nil {
+				v.BytesData.Set(i, nil)
+				return
+			}
+			v.BytesData.Set(i, []byte(ip.To16()))
+		case []byte:
+			// Raw 16-byte form, the vector's own storage representation.
+			v.BytesData.Set(i, tv)
+		default:
+			v.mismatch(val)
 		}
-		ip := net.ParseIP(s)
-		if ip == nil {
-			v.BytesData.Set(i, nil)
-			return
-		}
-		ip6 := ip.To16()
-		v.BytesData.Set(i, []byte(ip6))
 	case TypeCIDR:
 		s, ok := val.(string)
 		if !ok {
-			v.BytesData.Set(i, nil)
-			return
+			v.mismatch(val)
 		}
 		v.BytesData.Set(i, []byte(s))
 	case TypeMAC:
@@ -774,7 +806,7 @@ func (v *Vector) SetValue(i int, val any) {
 		case int64:
 			v.Int64Data[i] = tv
 		default:
-			return
+			v.mismatch(val)
 		}
 	case TypePort, TypeProtocol:
 		switch tv := val.(type) {
@@ -786,6 +818,8 @@ func (v *Vector) SetValue(i int, val any) {
 			v.Int32Data[i] = int32(tv)
 		case float64:
 			v.Int32Data[i] = int32(tv)
+		default:
+			v.mismatch(val)
 		}
 	case TypeDuration:
 		switch tv := val.(type) {
@@ -797,6 +831,8 @@ func (v *Vector) SetValue(i int, val any) {
 			v.Int64Data[i] = int64(tv)
 		case float64:
 			v.Int64Data[i] = int64(tv)
+		default:
+			v.mismatch(val)
 		}
 	case TypeUUID:
 		switch tv := val.(type) {
@@ -806,7 +842,7 @@ func (v *Vector) SetValue(i int, val any) {
 		case []byte:
 			v.BytesData.Set(i, tv)
 		default:
-			v.BytesData.Set(i, nil)
+			v.mismatch(val)
 		}
 	case TypeDate:
 		switch tv := val.(type) {
@@ -818,6 +854,8 @@ func (v *Vector) SetValue(i int, val any) {
 			v.Int32Data[i] = int32(tv)
 		case string:
 			v.Int32Data[i] = parseDateString(tv)
+		default:
+			v.mismatch(val)
 		}
 	case TypeDecimal:
 		switch tv := val.(type) {
@@ -835,6 +873,8 @@ func (v *Vector) SetValue(i int, val any) {
 			v.DecimalData.Data[i] = Int128FromFloat64(float64(tv), v.DecimalData.Scale)
 		case string:
 			v.DecimalData.Data[i] = ParseDecimalString(tv, v.DecimalData.Scale)
+		default:
+			v.mismatch(val)
 		}
 	case TypeVector:
 		if v.VectorDim <= 0 {
@@ -855,6 +895,8 @@ func (v *Vector) SetValue(i int, val any) {
 					v.Float32Data[off+j] = float32(fv)
 				}
 			}
+		default:
+			v.mismatch(val)
 		}
 	case TypeArray, TypeMap:
 		if v.Child == nil {
@@ -879,7 +921,10 @@ func (v *Vector) SetValue(i int, val any) {
 				}
 			}
 		default:
-			return
+			// The guard matters doubly here: the old silent `return` did
+			// not even advance Offsets, so every LATER row of the column
+			// read back shifted — the wrong value became someone else's.
+			v.mismatch(val)
 		}
 		start := v.Child.Len
 		for _, elem := range elems {
@@ -888,9 +933,14 @@ func (v *Vector) SetValue(i int, val any) {
 		v.Offsets[i] = int32(start)
 		v.Offsets[i+1] = int32(v.Child.Len)
 	case TypeRow:
-		row, ok := val.(map[string]any)
-		if !ok || v.Children == nil {
+		if v.Children == nil {
 			return
+		}
+		row, ok := val.(map[string]any)
+		if !ok {
+			// Same double stake as ARRAY/MAP above: the old silent return
+			// skipped every child's slot for this row.
+			v.mismatch(val)
 		}
 		for j, child := range v.Children {
 			name := ""
