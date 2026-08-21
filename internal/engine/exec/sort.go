@@ -389,6 +389,15 @@ func (s *Sort) CloneSink() SinkSource {
 // single-process planner path).
 func (s *Sort) MergeSink(other SinkSource) {
 	o := other.(*Sort)
+	// A primary that never consumed a batch itself (warmup filtered out,
+	// every source batch claimed by a clone worker — a scheduling race) has
+	// no schema, and finalize would gather the merged rows into ZERO output
+	// columns: right row count, rows with no columns at all, varying run to
+	// run with goroutine scheduling (#378). Inherit the clone's schema the
+	// way HashAggregate.mergeSinkState inherits resolved column state.
+	if s.schema == nil {
+		s.schema = o.schema
+	}
 	s.batches = append(s.batches, o.batches...)
 	s.totalRows += o.totalRows
 	o.batches = nil
