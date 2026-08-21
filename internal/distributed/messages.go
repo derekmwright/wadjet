@@ -439,12 +439,23 @@ type OpSpec struct {
 	ReplySubject string `json:"reply_subject,omitempty"`
 
 	// OpHashAggregate (pipeline-breaker).
-	GroupByCols  []string  `json:"group_by_cols,omitempty"` // empty = scalar aggregate
-	Aggregates   []AggSpec `json:"aggregates,omitempty"`    // per-column aggregations
-	GroupByAll   bool      `json:"group_by_all,omitempty"`  // DISTINCT: group by every input column, key set resolved at runtime
-	MergeMode    bool      `json:"merge_mode,omitempty"`    // input is already partial-aggregated; rewrite InputCol → OutputCol and COUNT → SUM
-	FoldAvg      bool      `json:"fold_avg,omitempty"`      // collapse __avg_sum#X / __avg_count#X synthetics into AVG output (final aggregate only)
-	BuildProject bool      `json:"build_project,omitempty"` // construct a derived-input projection before the aggregate (skipped in merge mode — partial output already has OutputCol)
+	GroupByCols []string `json:"group_by_cols,omitempty"` // empty = scalar aggregate
+	// GroupByTypes carries the plan-time parquet.TypeID (as int) of each
+	// DERIVED GROUP BY key expression, keyed by the exact key text in
+	// GroupByCols. Carried for AggSpec.InputType's reason (#333): the
+	// worker compiles a derived key from its SQL text and has no catalog
+	// to resolve the columns in it, so a schema-blind inference typed
+	// COALESCE(l_extendedprice, 0) Int64 from the literal alone and the
+	// pre-aggregate projection truncated every float price into the key
+	// vector — a fifth of the distinct groups silently vanished, on the
+	// DAG only (#379). A key absent from the map (bare column keys, older
+	// coordinators) keeps the worker's own inference and fallback.
+	GroupByTypes map[string]int `json:"group_by_types,omitempty"`
+	Aggregates   []AggSpec      `json:"aggregates,omitempty"`    // per-column aggregations
+	GroupByAll   bool           `json:"group_by_all,omitempty"`  // DISTINCT: group by every input column, key set resolved at runtime
+	MergeMode    bool           `json:"merge_mode,omitempty"`    // input is already partial-aggregated; rewrite InputCol → OutputCol and COUNT → SUM
+	FoldAvg      bool           `json:"fold_avg,omitempty"`      // collapse __avg_sum#X / __avg_count#X synthetics into AVG output (final aggregate only)
+	BuildProject bool           `json:"build_project,omitempty"` // construct a derived-input projection before the aggregate (skipped in merge mode — partial output already has OutputCol)
 	// EmitEmptyIdentity marks THE aggregate whose one row is the query's
 	// answer for these aggregates: the ungrouped final. SQL gives an
 	// ungrouped aggregate exactly one row over any input including none

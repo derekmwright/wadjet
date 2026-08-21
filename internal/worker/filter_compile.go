@@ -82,10 +82,17 @@ func wrapCompiledFilter(e expr.Expr) exec.Predicate {
 // The referenced-columns list is the union of all bare columns each
 // derived expression reads; callers extend the source projection hint
 // with these so parquet readers don't prune them.
+// groupByTypes is the plan-time type of each derived key, keyed by its
+// exact GroupByCols text (OpSpec.GroupByTypes). It overrides the
+// schema-blind ProjectionOutputType inference below, which has no catalog
+// and typed COALESCE(l_extendedprice, 0) Int64 from the literal alone —
+// truncating every float group key on write (#379). Absent entries (bare
+// keys, older coordinators) keep the inference.
 func buildAggInputProjection(
 	groupBy []string,
 	aggs []distributed.AggSpec,
 	filterCols []string,
+	groupByTypes map[string]int,
 ) (*exec.Project, []string, error) {
 	// Detect derived inputs. An aggregate can carry InputExpr explicitly;
 	// a GROUP BY column is "derived" when parsing it yields anything
@@ -151,6 +158,14 @@ func buildAggInputProjection(
 			}
 			seen[c] = true
 			e := compiled
+			// The planner's declared type wins over the schema-blind
+			// inference: with no catalog here, a polymorphic key like
+			// COALESCE(l_extendedprice, 0) infers Int64 from its literal
+			// and the float keys truncate on write (#379).
+			outType := physical.ProjectionOutputType(node, parquet.TypeString)
+			if t, ok := groupByTypes[c]; ok {
+				outType = parquet.TypeID(t)
+			}
 			projCols = append(projCols, exec.ProjectColumn{
 				Name: c,
 				// The planner's rule for the same expression. Nothing
@@ -161,7 +176,7 @@ func buildAggInputProjection(
 				// epoch-day number and grouped as the digits of that number
 				// (#340). String stays the fallback for anything the rule
 				// leaves undecided, which is what it was standing in for.
-				Type: physical.ProjectionOutputType(node, parquet.TypeString),
+				Type: outType,
 				Expr: func(b *batch.RecordBatch, row int) any {
 					return e.Eval(b, row)
 				},

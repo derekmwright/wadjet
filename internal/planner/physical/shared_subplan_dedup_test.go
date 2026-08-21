@@ -377,6 +377,10 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		"BuildTableAlias": "hashed", "BuildColOrigins": "hashed",
 		"JoinFilter": "hashed", "BuildFilterExprs": "hashed",
 		"ChainedAggGroupBy": "hashed", "ChainedAggSpecs": "hashed",
+		// Derived group-key types (#379) are a pure function of GroupByCols
+		// plus the input schema, so identical subtrees carry identical maps
+		// and hashing is the safe default (encoding/json sorts map keys).
+		"GroupByTypes": "hashed",
 		"WindowCols": "hashed", "JoinPartitionCount": "hashed",
 		"FusedAggGroupBy": "hashed", "FusedAggSpecs": "hashed",
 		"RawInputAggregate": "hashed",

@@ -3,7 +3,24 @@ package coordinator
 import (
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
+
+// wireGroupByTypes converts the planner's derived-group-key types to their
+// wire form (OpSpec.GroupByTypes). One function for wireAggSpecs's reason:
+// every partial-aggregate dispatch path needs it or the group key vector is
+// typed by schema-blind inference on exactly the path a query happens to
+// take (#379).
+func wireGroupByTypes(m map[string]parquet.TypeID) map[string]int {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(m))
+	for k, v := range m {
+		out[k] = int(v)
+	}
+	return out
+}
 
 // wireAggSpecs converts planner aggregate specs to their wire form.
 //

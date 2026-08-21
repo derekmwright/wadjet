@@ -66,7 +66,17 @@ type Stage struct {
 
 	// Aggregate metadata
 	GroupByCols []string
-	AggSpecs    []AggSpec
+	// GroupByTypes is the plan-time output type of each DERIVED (non-bare)
+	// GROUP BY key expression, keyed by the exact GroupByCols text — the
+	// same inferProjectionTypeCols answer the single-process pre-aggregate
+	// projection types its synthetic key columns with. Dispatch ships it as
+	// OpSpec.GroupByTypes so the worker's buildAggInputProjection declares
+	// the same vector type instead of inferring from the expression text
+	// with no catalog (#379: COALESCE(l_extendedprice, 0) inferred Int64
+	// from the literal and truncated every float group key). Bare column
+	// keys are absent — their vectors come from the input schema.
+	GroupByTypes map[string]parquet.TypeID
+	AggSpecs     []AggSpec
 	// GroupByAll marks a keys-only hash aggregate over EVERY input column —
 	// the DISTINCT shape. The key set is resolved at runtime from the input
 	// schema (no plan-time column list), matching exec.HashAggregate.GroupByAll
@@ -4006,6 +4016,44 @@ func aggStageGroupKey(key string, child *logical.Node) (string, bool) {
 	return resolved, true
 }
 
+// derivedGroupKeyTypes types every DERIVED (non-bare) GROUP BY key for the
+// wire (Stage.GroupByTypes): the same inferProjectionTypeCols call, over the
+// same input column types, that the single-process pre-aggregate projection
+// uses for its synthetic key columns — so both engines store one key
+// expression in one vector type. Keys that parse as bare column references
+// (or not at all) are omitted; the worker passes those through untyped.
+//
+// The map is keyed by the exact dispatched key text (post-aggStageGroupKey),
+// because that text is what the worker parses and looks up (#379).
+func derivedGroupKeyTypes(groupBy []string, child *logical.Node) map[string]parquet.TypeID {
+	var out map[string]parquet.TypeID
+	var colTypes map[string]parquet.TypeID
+	var strictInt map[string]bool
+	resolved := false
+	for _, key := range groupBy {
+		if key == "" {
+			continue
+		}
+		node, err := plansql.ParseExpression(key)
+		if err != nil {
+			continue
+		}
+		if _, bare := node.(*plansql.ColRef); bare {
+			continue
+		}
+		if !resolved {
+			colTypes = inputColTypes(child)
+			strictInt = strictIntArithCols(child)
+			resolved = true
+		}
+		if out == nil {
+			out = make(map[string]parquet.TypeID)
+		}
+		out[key] = inferProjectionTypeCols(node, parquet.TypeString, strictInt, colTypes)
+	}
+	return out
+}
+
 // resolveSortKeyColumn maps an ORDER BY key that names a SELECT-list alias
 // back to the name the aggregate stage below it actually emits.
 //
@@ -4323,6 +4371,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				p.aggStageRenames[strings.ToLower(key)] = resolved
 			}
 		}
+		// Plan-time types for the derived keys, computed here where the
+		// aggregate's input schema is still known (#379); every stage
+		// shape below carries the same map.
+		groupByTypes := derivedGroupKeyTypes(groupBy, aggChild)
 
 		// Optimization: fuse aggregation into scan when the only child
 		// stages are scans (no joins or sorts in between). This eliminates
@@ -4350,6 +4402,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				Type:              "final_aggregate",
 				Tasks:             1,
 				GroupByCols:       groupBy,
+				GroupByTypes:      groupByTypes,
 				AggSpecs:          aggSpecs,
 				RawInputAggregate: true,
 				Dependencies:      leafStages(childStages),
@@ -4361,6 +4414,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				}
 				if (*stages)[i].Type == "scan" {
 					(*stages)[i].FusedAggGroupBy = groupBy
+					(*stages)[i].GroupByTypes = groupByTypes
 					(*stages)[i].FusedAggSpecs = aggSpecs
 					// The scan's RequiredColumns carry the aggregate OUTPUT
 					// names (e.g. __having_0) because ancestors reference
@@ -4384,11 +4438,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// Standard two-phase distributed aggregation
 			stageID := fmt.Sprintf("aggregate-%d", len(*stages))
 			stage := Stage{
-				ID:          stageID,
-				Type:        "aggregate",
-				Tasks:       1,
-				GroupByCols: groupBy,
-				AggSpecs:    aggSpecs,
+				ID:           stageID,
+				Type:         "aggregate",
+				Tasks:        1,
+				GroupByCols:  groupBy,
+				GroupByTypes: groupByTypes,
+				AggSpecs:     aggSpecs,
 			}
 			stage.Dependencies = leafStages(childStages)
 			*stages = append(*stages, stage)
@@ -4399,6 +4454,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				Type:         "final_aggregate",
 				Tasks:        1,
 				GroupByCols:  groupBy,
+				GroupByTypes: groupByTypes,
 				AggSpecs:     aggSpecs,
 				Dependencies: []string{stageID},
 			})

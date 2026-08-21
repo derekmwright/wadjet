@@ -252,6 +252,10 @@ func fuseOneChainLink(stages []Stage) ([]Stage, bool) {
 				continue
 			}
 			p.ChainedAggGroupBy = append([]string(nil), c.GroupByCols...)
+			// The absorbed stage's derived-key types ride along: the
+			// chain-terminal partial builds the same pre-aggregate
+			// projection the standalone stage would have (#379).
+			p.GroupByTypes = c.GroupByTypes
 			p.ChainedAggSpecs = append([]AggSpec(nil), c.AggSpecs...)
 			// Keep p.Distribution: the dropped stage's RoundRobin label
 			// only described its fan-out task count; adopting it would
