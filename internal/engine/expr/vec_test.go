@@ -237,6 +237,29 @@ func TestVecRound(t *testing.T) {
 	}
 }
 
+// TestVecRoundHalfEven holds the vectorized DOUBLE PRECISION rounding
+// kernel (#381) to the same half-to-even tie-break as its scalar
+// counterpart, fnRoundHalfEven.
+func TestVecRoundHalfEven(t *testing.T) {
+	n := 5
+	src := batch.NewVector(batch.TypeFloat64, n)
+	src.Float64Data[0] = 0.5
+	src.Float64Data[1] = 1.5
+	src.Float64Data[2] = 2.5
+	src.Float64Data[3] = -0.5
+	src.Float64Data[4] = -1.5
+
+	out := batch.NewVector(batch.TypeFloat64, n)
+	vecRoundHalfEven([]*batch.Vector{src}, out, n)
+
+	want := []float64{0, 2, 2, -0, -2}
+	for i, w := range want {
+		if out.Float64Data[i] != w {
+			t.Errorf("row %d: got %f, want %f", i, out.Float64Data[i], w)
+		}
+	}
+}
+
 func TestFuncCall_EvalVec(t *testing.T) {
 	// Test the full FuncCall.EvalVec path with upper(s)
 	vals := []string{"hello", "WORLD", "test"}

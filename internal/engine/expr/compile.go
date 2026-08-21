@@ -646,6 +646,19 @@ func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, er
 	}
 
 	fc := &FuncCall{Name: name, Args: args}
+	// ROUND on a DOUBLE PRECISION (or REAL/FLOAT — Wadjet's Cast collapses
+	// all three to the same runtime float64) operand rounds half TO EVEN in
+	// PostgreSQL; ROUND on NUMERIC — the default, no CAST at all — rounds
+	// half AWAY from zero, which fnRound already implements correctly. The
+	// two runtime values are indistinguishable bare float64s by the time a
+	// kernel would see them (no numeric tower), so the type distinction has
+	// to be caught here, from the immediate operand's own CAST, before that
+	// boxing happens (#381). This is independent of CAST(x AS integer)'s
+	// half-away-from-zero rounding rule (#373) — PostgreSQL specifies CAST
+	// and ROUND separately, and unifying them would be wrong for one of them.
+	if name == "round" && len(args) >= 1 && isBinaryFloatCast(args[0]) {
+		fc.Name = "round_half_even"
+	}
 	// Offsets-shape: length()/octet_length()/bit_length() over a bare column
 	// reference are offsets subtractions, not value reads (shape_funcs.go).
 	// The node carries fc as its fallback and takes it for every column that
@@ -664,6 +677,28 @@ func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, er
 		return &numericFuncCall{fc}, nil
 	}
 	return fc, nil
+}
+
+// isBinaryFloatCast reports whether e is an explicit CAST to one of
+// PostgreSQL's IEEE-754 binary floating-point types — double precision,
+// real, or float — as opposed to NUMERIC/DECIMAL or a bare literal/column.
+// It is the one signal left, post-parse, that an operand is declared
+// DOUBLE PRECISION rather than NUMERIC: Wadjet represents both as a plain
+// float64 at runtime (#381). Only the immediate operand is checked, matching
+// the reproduction this fixes (ROUND(CAST(x AS double precision))) — a cast
+// buried inside a larger expression (ROUND(CAST(x AS double precision) + 1))
+// is out of scope.
+func isBinaryFloatCast(e Expr) bool {
+	c, ok := e.(*Cast)
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(c.DestType) {
+	case "double", "real", "float":
+		return true
+	default:
+		return false
+	}
 }
 
 // shapeLenMul maps the byte-length family to its multiplier. char_length /

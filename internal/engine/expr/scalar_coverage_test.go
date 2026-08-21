@@ -371,6 +371,42 @@ func TestFnRound(t *testing.T) {
 	}
 }
 
+// TestFnRoundHalfEven pins PostgreSQL's DOUBLE PRECISION rounding rule
+// (#381): half TO EVEN, the opposite tie-break from fnRound's NUMERIC rule
+// (half away from zero, TestFnRound above).
+func TestFnRoundHalfEven(t *testing.T) {
+	if fnRoundHalfEven(nil) != nil {
+		t.Error("nil")
+	}
+	if fnRoundHalfEven([]any{nil}) != nil {
+		t.Error("nil arg")
+	}
+	cases := []struct {
+		v    float64
+		want float64
+	}{
+		{0.5, 0.0},
+		{1.5, 2.0},
+		{2.5, 2.0},
+		{-0.5, -0.0},
+		{-1.5, -2.0},
+	}
+	for _, c := range cases {
+		if got := fnRoundHalfEven([]any{c.v}); got != c.want {
+			t.Errorf("fnRoundHalfEven(%v) = %v, want %v", c.v, got, c.want)
+		}
+	}
+	// With precision, at another exact tie (0.125 * 100 = 12.5, half to
+	// even rounds to 12): 0.375 * 100 = 37.5 rounds to 38, the other
+	// direction, since 38 is the even neighbor this time.
+	if got := fnRoundHalfEven([]any{0.125, int64(2)}); got != 0.12 {
+		t.Errorf("fnRoundHalfEven(0.125, 2) = %v, want 0.12", got)
+	}
+	if got := fnRoundHalfEven([]any{0.375, int64(2)}); got != 0.38 {
+		t.Errorf("fnRoundHalfEven(0.375, 2) = %v, want 0.38", got)
+	}
+}
+
 func TestFnCardinality(t *testing.T) {
 	if fnCardinality(nil) != nil {
 		t.Error("nil")

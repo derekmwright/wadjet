@@ -2314,13 +2314,18 @@ func init() {
 		"ceil":  {fnCeil, RetFloat64},
 		"floor": {fnFloor, RetFloat64},
 		"round": {fnRound, RetFloat64},
-		"pow":   {fnPow, RetFloat64},
-		"power": {fnPow, RetFloat64},
-		"sqrt":  {fnSqrt, RetFloat64},
-		"mod":   {fnMod, RetFloat64},
-		"log":   {fnLog, RetFloat64},
-		"ln":    {fnLn, RetFloat64},
-		"exp":   {fnExp, RetFloat64},
+		// Half-to-even ROUND for a DOUBLE PRECISION/REAL/FLOAT operand
+		// (#381). compileFuncCallNode rewrites ROUND(CAST(x AS double
+		// precision)) to call this instead; it is not part of ROUND's
+		// documented surface but is harmless to reach directly by name.
+		"round_half_even": {fnRoundHalfEven, RetFloat64},
+		"pow":             {fnPow, RetFloat64},
+		"power":           {fnPow, RetFloat64},
+		"sqrt":            {fnSqrt, RetFloat64},
+		"mod":             {fnMod, RetFloat64},
+		"log":             {fnLog, RetFloat64},
+		"ln":              {fnLn, RetFloat64},
+		"exp":             {fnExp, RetFloat64},
 
 		// Conditional
 		"coalesce": {fnCoalesce, RetSameAsArg(batch.TypeFloat64)},
@@ -2752,6 +2757,7 @@ func init() {
 		"ceil":             vecCeil,
 		"floor":            vecFloor,
 		"round":            vecRound,
+		"round_half_even":  vecRoundHalfEven,
 		"year":             vecYear,
 		"month":            vecMonth,
 		"day":              vecDay,
@@ -2985,6 +2991,34 @@ func fnRound(args []any) any {
 	}
 	pow := math.Pow(10, float64(precision))
 	return math.Round(v*pow) / pow
+}
+
+// fnRoundHalfEven is ROUND for a DOUBLE PRECISION (and REAL/FLOAT) operand.
+// PostgreSQL rounds NUMERIC half AWAY from zero — fnRound's math.Round,
+// above — but rounds DOUBLE PRECISION half TO EVEN ("banker's rounding"),
+// which is what distinguishes ROUND(0.5) = 1 from ROUND(CAST(0.5 AS double
+// precision)) = 0 (#381). compileFuncCallNode routes here when ROUND's
+// argument is an explicit CAST to a binary float type; fnRound alone can't
+// make this decision because Wadjet has no numeric tower — a NUMERIC
+// literal and a DOUBLE PRECISION value are both a bare float64 by the time
+// either kernel sees them, so the type distinction has to be resolved by
+// the caller, before that boxing.
+//
+// This is unrelated to CAST(x AS integer)'s own rounding rule (#373, half
+// away from zero): PostgreSQL specifies CAST and ROUND independently, and a
+// tie-breaking rule chosen for one operation says nothing about the other —
+// don't be tempted to unify them.
+func fnRoundHalfEven(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	v := ToFloat64(args[0])
+	precision := 0
+	if len(args) >= 2 && args[1] != nil {
+		precision = int(ToFloat64(args[1]))
+	}
+	pow := math.Pow(10, float64(precision))
+	return math.RoundToEven(v*pow) / pow
 }
 
 func fnPow(args []any) any {
@@ -9139,6 +9173,25 @@ func vecRound(args []*batch.Vector, out *batch.Vector, n int) {
 			continue
 		}
 		out.Float64Data[i] = math.Round(vecReadFloat64(src, i)*pow) / pow
+	}
+}
+
+// vecRoundHalfEven is the vectorized counterpart of fnRoundHalfEven — see
+// its comment for the DOUBLE PRECISION half-to-even rule (#381).
+func vecRoundHalfEven(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	precision := 0
+	if len(args) >= 2 {
+		precision = int(vecReadFloat64(args[1], 0))
+	}
+	pow := math.Pow(10, float64(precision))
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = math.RoundToEven(vecReadFloat64(src, i)*pow) / pow
 	}
 }
 
