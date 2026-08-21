@@ -45,7 +45,7 @@ func TestConstArithAggRewrite(t *testing.T) {
 	}
 
 	q := `SELECT SUM(v + 10) AS a, SUM(v - 3) AS b, SUM(2 * v) AS c,
-	             SUM(v / 2) AS d, AVG(v + 1) AS e, MIN(v + 5) AS f,
+	             SUM(v / 2) AS d, SUM(v / 2.0) AS d2, AVG(v + 1) AS e, MIN(v + 5) AS f,
 	             MAX(v - 1) AS g2, MIN(10 - v) AS h, SUM(10 - v) AS i,
 	             COUNT(*) AS n FROM t`
 	res, err := db.Query(ctx, q)
@@ -57,10 +57,15 @@ func TestConstArithAggRewrite(t *testing.T) {
 	}
 	r := res.Rows[0]
 	want := map[string]float64{
-		"a":  27 + 10*6, // 87
-		"b":  27 - 3*6,  // 9
-		"c":  54,
-		"d":  13.5,
+		"a": 27 + 10*6, // 87
+		"b": 27 - 3*6,  // 9
+		"c": 54,
+		// v / 2 is INTEGER division per row (#369, PostgreSQL semantics):
+		// 0+1+2+2+3+4. The SUM(x/k)→SUM(x)/k rewrite must therefore NOT
+		// fire for an integer divisor — 27/2 would answer 13 — which is
+		// exactly what d2, the float-divisor control, still exercises.
+		"d":  12,
+		"d2": 13.5,
 		"e":  5.5,
 		"f":  6,
 		"g2": 7,

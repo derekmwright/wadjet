@@ -268,10 +268,11 @@ func TestNullPropagation(t *testing.T) {
 
 func TestCast(t *testing.T) {
 	b := testBatch()
-	// CAST(amount AS int)
+	// CAST(amount AS int): 100.5 ROUNDS to 101, half away from zero —
+	// PostgreSQL's numeric→int rule (#373); TRUNC() is the truncating form.
 	e := &Cast{Operand: &ColRef{Name: "amount"}, DestType: "int"}
-	if v := e.Eval(b, 0); v != int64(100) {
-		t.Fatalf("expected 100, got %v", v)
+	if v := e.Eval(b, 0); v != int64(101) {
+		t.Fatalf("expected 101, got %v", v)
 	}
 	// CAST(id AS string)
 	e2 := &Cast{Operand: &ColRef{Name: "id"}, DestType: "string"}

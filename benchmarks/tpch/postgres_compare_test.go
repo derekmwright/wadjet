@@ -378,19 +378,13 @@ func postgresSemanticsCases() []pgCase {
 	// PostgreSQL's `/` between two integers is INTEGER division, truncating
 	// toward zero, and `%` takes the sign of the dividend. An engine that
 	// promotes to float here answers 2.5 where every PostgreSQL client reads
-	// 2, and no row count or NULL check sees it.
-	const intDivBug = pgBugWadjet + " `/` between two integers evaluates as FLOAT division. " +
-		"7/2 answers 3.5 where PostgreSQL — and every SQL engine with an integer type — answers 3, and " +
-		"n_nationkey/4 answers 0.25 where PostgreSQL answers 0. The result is a plausible number, so no row " +
-		"count, NULL check or type assertion sees it; a client doing key/bucket arithmetic gets fractions. " +
-		"`%` is already correct (IntegerModulo below passes), which localizes this to the division kernel's " +
-		"type resolution and not to integer arithmetic in general"
+	// 2, and no row count or NULL check sees it. (#369 was exactly that
+	// engine; the fix spans the literal, column, and generic arithmetic
+	// kernels.)
 	out = append(out,
-		pgCase{name: "IntegerDivision", sql: `SELECT 7/2 AS a, (-7)/2 AS b, 7/(-2) AS c, (-7)/(-2) AS d`,
-			knownBug: intDivBug, issue: "#369"},
+		pgCase{name: "IntegerDivision", sql: `SELECT 7/2 AS a, (-7)/2 AS b, 7/(-2) AS c, (-7)/(-2) AS d`},
 		pgCase{name: "IntegerModulo", sql: `SELECT 7%3 AS a, (-7)%3 AS b, 7%(-3) AS c, (-7)%(-3) AS d`},
-		pgCase{name: "IntegerDivisionOverColumn", sql: `SELECT n_nationkey, n_nationkey/4 AS q, n_nationkey%4 AS r FROM nation ORDER BY n_nationkey`,
-			knownBug: intDivBug, issue: "#369"},
+		pgCase{name: "IntegerDivisionOverColumn", sql: `SELECT n_nationkey, n_nationkey/4 AS q, n_nationkey%4 AS r FROM nation ORDER BY n_nationkey`},
 		// A float operand makes it float division in both engines; the pair is
 		// what localizes a divergence to the INTEGER rule.
 		pgCase{name: "FloatDivisionControl", sql: `SELECT 7.0/2 AS a, 7/2.0 AS b`},
@@ -418,31 +412,19 @@ func postgresSemanticsCases() []pgCase {
 	// answer.
 	// SQL's logic is THREE-valued, and the third value is the one an engine
 	// built on Go booleans does not have. A comparison against NULL is
-	// UNKNOWN: it does not match, and it does not anti-match either.
-	const threeValuedLogicBug = pgBugWadjet + ` SQL's comparison and boolean operators are THREE-valued and ` +
-		`Wadjet's are two-valued: anything involving a NULL operand collapses to FALSE instead of producing ` +
-		`NULL/UNKNOWN. The row-level form of this rule is already right — NullComparisonNeverMatches in the ` +
-		`DuckDB corpus passes, because a WHERE keeps neither UNKNOWN nor FALSE rows — so the defect is ` +
-		`invisible until the predicate's VALUE is projected or fed into another operator.`
+	// UNKNOWN: it does not match, and it does not anti-match either. (#370
+	// added the UNKNOWN — expr.BoolNullExpr — after every operator here
+	// collapsed it to false, and `1 NOT IN (2, NULL)` to true.)
 	out = append(out,
 		// Three-valued logic. `1 IN (2, NULL)` is UNKNOWN, not false, and
 		// `NOT IN` with a NULL in the list is UNKNOWN for every probe — the
 		// trap that silently empties a result.
 		pgCase{name: "NullInList", sql: `SELECT (1 IN (2, NULL)) AS in_null, (1 IN (1, NULL)) AS in_match,
-			(1 NOT IN (2, NULL)) AS notin_null, (1 NOT IN (2, 3)) AS notin_plain`,
-			knownBug: threeValuedLogicBug + ` Here: 1 IN (2, NULL) answers false where PostgreSQL answers ` +
-				`NULL, and 1 NOT IN (2, NULL) answers TRUE where PostgreSQL answers NULL — the NOT IN form is ` +
-				`the dangerous one, because a row that SQL says must be excluded is admitted`,
-			issue: "#370"},
+			(1 NOT IN (2, NULL)) AS notin_null, (1 NOT IN (2, 3)) AS notin_plain`},
 		pgCase{name: "NullThreeValuedLogic", sql: `SELECT (NULL = NULL) AS eq, (NULL <> NULL) AS ne,
 			(NULL IS NULL) AS isnull, (NULL IS NOT NULL) AS isnotnull,
 			(TRUE OR NULL) AS or_true, (FALSE OR NULL) AS or_false,
-			(TRUE AND NULL) AS and_true, (FALSE AND NULL) AS and_false`,
-			knownBug: threeValuedLogicBug + ` Here: NULL = NULL, NULL <> NULL, FALSE OR NULL and TRUE AND ` +
-				`NULL all answer FALSE where PostgreSQL answers NULL. The two that agree — TRUE OR NULL and ` +
-				`FALSE AND NULL — are the ones a short-circuit gets right by accident, which is what says the ` +
-				`operators have no UNKNOWN at all rather than a wrong truth table`,
-			issue: "#370"},
+			(TRUE AND NULL) AS and_true, (FALSE AND NULL) AS and_false`},
 		pgCase{name: "NullIsDistinctFrom", sql: `SELECT (NULL IS DISTINCT FROM NULL) AS a, (1 IS DISTINCT FROM NULL) AS b,
 			(1 IS NOT DISTINCT FROM 1) AS c`,
 			knownBug: pgBugUnsupported + " IS [NOT] DISTINCT FROM is not parsed (\"expected NULL, TRUE, or " +
@@ -516,13 +498,7 @@ func postgresSemanticsCases() []pgCase {
 	// answer a client will hold the engine to.
 	out = append(out,
 		pgCase{name: "SubstrOneBased", sql: `SELECT SUBSTR('abcdef', 1, 3) AS a, SUBSTR('abcdef', 3) AS b,
-			SUBSTR('abcdef', 0, 3) AS zero_start, SUBSTR('abcdef', 4, 100) AS past_end`,
-			knownBug: pgBugWadjet + " SUBSTR with a start position below 1 counts the LENGTH from the clamped " +
-				"start instead of from the requested one: SUBSTR('abcdef', 0, 3) answers 'abc' where " +
-				"PostgreSQL answers 'ab'. The standard defines the result as the characters whose positions " +
-				"fall in [start, start+length), so positions 0,1,2 select two characters and not three. The " +
-				"in-range spellings beside it are correct, which is what makes this the clamp and nothing else",
-			issue: "#373"},
+			SUBSTR('abcdef', 0, 3) AS zero_start, SUBSTR('abcdef', 4, 100) AS past_end`},
 		pgCase{name: "StringLengthFunctions", sql: `SELECT LENGTH('abc') AS l, CHAR_LENGTH('abc') AS cl,
 			OCTET_LENGTH('abc') AS ol, LENGTH('') AS empty`},
 		pgCase{name: "TrimFamily", sql: `SELECT TRIM('  pad  ') AS t, LTRIM('  pad  ') AS l, RTRIM('  pad  ') AS r,
@@ -538,10 +514,7 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "LikePatterns", sql: `SELECT n_name, (n_name LIKE 'A%') AS pre, (n_name LIKE '%A') AS suf,
 			(n_name LIKE '_RAZIL') AS underscore, (n_name LIKE '%AN%') AS mid, (n_name NOT LIKE 'A%') AS neg
 			FROM nation ORDER BY n_name`},
-		pgCase{name: "LikeWithNull", sql: `SELECT (NULL LIKE 'a%') AS null_left, ('a' LIKE NULL) AS null_right`,
-			knownBug: threeValuedLogicBug + ` Here: LIKE with a NULL on either side answers FALSE where ` +
-				`PostgreSQL answers NULL`,
-			issue: "#370"},
+		pgCase{name: "LikeWithNull", sql: `SELECT (NULL LIKE 'a%') AS null_left, ('a' LIKE NULL) AS null_right`},
 	)
 
 	// --- Aggregate and window semantics ------------------------------------
@@ -648,16 +621,10 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "CastFamily", sql: `SELECT CAST('42' AS integer) AS i, CAST(42 AS text) AS s,
 			CAST('1996-01-10' AS date) AS d`},
 		// A cast from a fractional number to an integer. PostgreSQL ROUNDS
-		// (half away from zero); most engines truncate, and Wadjet truncates.
-		// Kept as its own entry so the casts above stay gated.
+		// (half away from zero); most engines truncate, and Wadjet did until
+		// #373. Kept as its own entry so the casts above stay gated.
 		pgCase{name: "CastFloatToInteger", sql: `SELECT CAST(4.7 AS integer) AS up, CAST(4.2 AS integer) AS down,
-			CAST(-4.7 AS integer) AS neg`,
-			knownBug: pgBugWadjet + " a cast from a fractional value to an integer TRUNCATES where " +
-				"PostgreSQL ROUNDS: CAST(4.7 AS integer) answers 4 against PostgreSQL's 5. PostgreSQL is " +
-				"the authority on this by the project's own decision, and the difference is one a client " +
-				"meets on every rounded-metric query. TRUNC() is how a caller asks for truncation, and it " +
-				"exists separately for that reason",
-			issue: "#373"},
+			CAST(-4.7 AS integer) AS neg`},
 		pgCase{name: "DateArithmetic", sql: `SELECT DATE '1996-01-10' - DATE '1996-01-01' AS gap,
 			CAST('1996-01-10' AS date) - 1 AS prev, CAST('1996-01-10' AS date) + 5 AS nxt`},
 		pgCase{name: "ExtractFromDate", sql: `SELECT EXTRACT(YEAR FROM DATE '1996-03-15') AS y,

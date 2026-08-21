@@ -39,9 +39,46 @@ type Expr interface {
 	Eval(b *batch.RecordBatch, row int) any
 }
 
-// BoolExpr evaluates a boolean expression (used for WHERE/HAVING/JOIN conditions).
+// BoolExpr evaluates a boolean expression (used for WHERE/HAVING/JOIN
+// conditions). SQL's logic is THREE-valued and EvalBool is the two-valued
+// COLLAPSE a filtering context applies: it answers true only for TRUE —
+// FALSE and UNKNOWN rows are both kept out of a WHERE. The third value is
+// carried by BoolNullExpr, and the two protocols must agree:
+// EvalBool ≡ (val && !null) of EvalBoolNull.
 type BoolExpr interface {
 	EvalBool(b *batch.RecordBatch, row int) bool
+}
+
+// BoolNullExpr is the three-valued boolean protocol (#370): val is the
+// answer and null reports UNKNOWN, in which case val is meaningless. Every
+// boolean operator implements it — it is what lets NOT distinguish UNKNOWN
+// (stays UNKNOWN, row excluded) from FALSE (becomes TRUE, row kept), and
+// what a projection boxes into SQL NULL.
+type BoolNullExpr interface {
+	EvalBoolNull(b *batch.RecordBatch, row int) (val, null bool)
+}
+
+// evalBoolNull evaluates any expression on the three-valued protocol.
+// Expressions without a native implementation (a boolean column, a function
+// call) go through the boxed path, where nil is the UNKNOWN.
+func evalBoolNull(e Expr, b *batch.RecordBatch, row int) (bool, bool) {
+	if te, ok := e.(BoolNullExpr); ok {
+		return te.EvalBoolNull(b, row)
+	}
+	v := e.Eval(b, row)
+	if v == nil {
+		return false, true
+	}
+	return toBoolVal(v), false
+}
+
+// boolNullBox is the one place the three-valued answer becomes a boxed SQL
+// value: UNKNOWN is NULL.
+func boolNullBox(val, null bool) any {
+	if null {
+		return nil
+	}
+	return val
 }
 
 // VecExpr evaluates an expression for an entire batch at once, writing results
@@ -419,6 +456,19 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 	case "*":
 		return lf * rf
 	case "/":
+		// int / int is INTEGER division, truncating toward zero (#369,
+		// PostgreSQL semantics per ADR-0012). This generic node is where
+		// operands without a typed protocol arrive — a CAST, a negated
+		// column — so the rule must hold here too, not only in the typed
+		// kernels. A float on either side keeps float division.
+		if li, lok := toInt64Safe(lv); lok {
+			if ri, rok := toInt64Safe(rv); rok {
+				if ri == 0 {
+					return nil
+				}
+				return li / ri
+			}
+		}
 		if rf == 0 {
 			// Both operands are non-NULL here (checked above), so this is a
 			// genuine zero divisor: PostgreSQL refuses it and so do we (#367).
@@ -800,10 +850,18 @@ func (e *UnaryOp) Eval(b *batch.RecordBatch, row int) any {
 	if v == nil {
 		return nil
 	}
+	// Negating an integer stays an integer (SQL and Go agree), which is what
+	// keeps `-int_col / 2` on the integer-division path (#369).
 	switch e.Op {
 	case "-":
+		if i, ok := toInt64Safe(v); ok {
+			return -i
+		}
 		return -ToFloat64(v)
 	case "+":
+		if i, ok := toInt64Safe(v); ok {
+			return i
+		}
 		return ToFloat64(v)
 	default:
 		return v
@@ -831,16 +889,25 @@ type Cmp struct {
 }
 
 func (e *Cmp) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
 }
 
 func (e *Cmp) EvalBool(b *batch.RecordBatch, row int) bool {
 	lv := e.Left.Eval(b, row)
 	rv := e.Right.Eval(b, row)
 	if lv == nil || rv == nil {
-		return false // NULL comparisons are false (SQL semantics)
+		return false // UNKNOWN: a filter keeps neither UNKNOWN nor FALSE
 	}
 	return compare(lv, rv, e.Op)
+}
+
+func (e *Cmp) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	lv := e.Left.Eval(b, row)
+	rv := e.Right.Eval(b, row)
+	if lv == nil || rv == nil {
+		return false, true // a comparison against NULL is UNKNOWN (#370)
+	}
+	return compare(lv, rv, e.Op), false
 }
 
 // CmpTemporalLit compares a bare column against a string literal that
@@ -862,10 +929,15 @@ type CmpTemporalLit struct {
 }
 
 func (e *CmpTemporalLit) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
 }
 
 func (e *CmpTemporalLit) EvalBool(b *batch.RecordBatch, row int) bool {
+	v, null := e.EvalBoolNull(b, row)
+	return v && !null
+}
+
+func (e *CmpTemporalLit) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	e.Col.resolve(b)
 	var lit int64
 	switch e.Col.typ {
@@ -880,7 +952,7 @@ func (e *CmpTemporalLit) EvalBool(b *batch.RecordBatch, row int) bool {
 	}
 	v, ok := e.Col.EvalInt64(b, row)
 	if !ok {
-		return false // NULL / unresolved — Cmp returns false for nil operands
+		return false, true // NULL / unresolved — a comparison against NULL is UNKNOWN
 	}
 	if lit == 0 && v != 0 {
 		// The generic guard (`bi != 0 || ai == 0`) treats an epoch-zero
@@ -894,30 +966,30 @@ func (e *CmpTemporalLit) EvalBool(b *batch.RecordBatch, row int) bool {
 	}
 	switch e.Op {
 	case CmpEq:
-		return a == bv
+		return a == bv, false
 	case CmpNe:
-		return a != bv
+		return a != bv, false
 	case CmpLt:
-		return a < bv
+		return a < bv, false
 	case CmpLe:
-		return a <= bv
+		return a <= bv, false
 	case CmpGt:
-		return a > bv
+		return a > bv, false
 	case CmpGe:
-		return a >= bv
+		return a >= bv, false
 	}
-	return false
+	return false, false
 }
 
-func (e *CmpTemporalLit) genericFallback(b *batch.RecordBatch, row int) bool {
+func (e *CmpTemporalLit) genericFallback(b *batch.RecordBatch, row int) (bool, bool) {
 	cv := e.Col.Eval(b, row)
 	if cv == nil {
-		return false
+		return false, true
 	}
 	if e.Flip {
-		return compare(e.Lit, cv, e.Op)
+		return compare(e.Lit, cv, e.Op), false
 	}
-	return compare(cv, e.Lit, e.Op)
+	return compare(cv, e.Lit, e.Op), false
 }
 
 // CmpInt64 is a typed comparison that operates on int64 without boxing.
@@ -927,7 +999,21 @@ type CmpInt64 struct {
 }
 
 func (e *CmpInt64) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
+}
+
+// EvalBoolNull: a not-ok typed operand is a NULL (the operands here are
+// provably int-typed at compile time), so the comparison is UNKNOWN.
+func (e *CmpInt64) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	lv, lok := e.Left.EvalInt64(b, row)
+	if !lok {
+		return false, true
+	}
+	rv, rok := e.Right.EvalInt64(b, row)
+	if !rok {
+		return false, true
+	}
+	return cmpInt64Op(lv, rv, e.Op), false
 }
 
 func (e *CmpInt64) EvalBool(b *batch.RecordBatch, row int) bool {
@@ -939,7 +1025,11 @@ func (e *CmpInt64) EvalBool(b *batch.RecordBatch, row int) bool {
 	if !rok {
 		return false
 	}
-	switch e.Op {
+	return cmpInt64Op(lv, rv, e.Op)
+}
+
+func cmpInt64Op(lv, rv int64, op CmpOp) bool {
+	switch op {
 	case CmpEq:
 		return lv == rv
 	case CmpNe:
@@ -964,7 +1054,21 @@ type CmpFloat64 struct {
 }
 
 func (e *CmpFloat64) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
+}
+
+// EvalBoolNull: a not-ok typed operand is a NULL (the operands here are
+// provably float-typed at compile time), so the comparison is UNKNOWN.
+func (e *CmpFloat64) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	lv, lok := e.Left.EvalFloat64(b, row)
+	if !lok {
+		return false, true
+	}
+	rv, rok := e.Right.EvalFloat64(b, row)
+	if !rok {
+		return false, true
+	}
+	return cmpFloat64Op(lv, rv, e.Op), false
 }
 
 func (e *CmpFloat64) EvalBool(b *batch.RecordBatch, row int) bool {
@@ -976,7 +1080,11 @@ func (e *CmpFloat64) EvalBool(b *batch.RecordBatch, row int) bool {
 	if !rok {
 		return false
 	}
-	switch e.Op {
+	return cmpFloat64Op(lv, rv, e.Op)
+}
+
+func cmpFloat64Op(lv, rv float64, op CmpOp) bool {
+	switch op {
 	case CmpEq:
 		return lv == rv
 	case CmpNe:
@@ -1012,7 +1120,48 @@ func (e *IsNull) EvalBool(b *batch.RecordBatch, row int) bool {
 	return v == nil
 }
 
+// EvalBoolNull: IS [NOT] NULL never answers UNKNOWN — it is the operator
+// SQL provides to ASK about NULL.
+func (e *IsNull) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	return e.EvalBool(b, row), false
+}
+
+// IsBool is `x IS [NOT] TRUE/FALSE`. Distinct from Cmp because it is a
+// NULL-test like IS NULL, not a comparison: NULL IS TRUE answers FALSE and
+// NULL IS NOT TRUE answers TRUE, where a comparison against NULL would be
+// UNKNOWN (#370 — the Cmp spelling was right only while Cmp itself had no
+// UNKNOWN).
+type IsBool struct {
+	Operand Expr
+	Want    bool // TRUE or FALSE spelling
+	Not     bool // IS NOT
+}
+
+func (e *IsBool) Eval(b *batch.RecordBatch, row int) any {
+	return e.EvalBool(b, row)
+}
+
+func (e *IsBool) EvalBool(b *batch.RecordBatch, row int) bool {
+	v, null := evalBoolNull(e.Operand, b, row)
+	match := !null && v == e.Want
+	if e.Not {
+		return !match
+	}
+	return match
+}
+
+func (e *IsBool) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	return e.EvalBool(b, row), false
+}
+
 // --- Logical operators ---
+//
+// The connectives implement Kleene's strong three-valued logic on the
+// EvalBoolNull protocol. Their EvalBool forms keep the original two-valued
+// short-circuits: collapsing UNKNOWN to false BEFORE the connective gives
+// the same filter answer as collapsing after it for AND and OR (min/max
+// logic), so the hot path pays nothing — NOT is the one operator where the
+// two orders disagree, and it evaluates on the three-valued protocol.
 
 // And is a logical AND.
 type And struct {
@@ -1020,11 +1169,28 @@ type And struct {
 }
 
 func (e *And) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
 }
 
 func (e *And) EvalBool(b *batch.RecordBatch, row int) bool {
 	return toBool(e.Left, b, row) && toBool(e.Right, b, row)
+}
+
+// EvalBoolNull: FALSE AND anything is FALSE; otherwise a NULL operand makes
+// it UNKNOWN. Short-circuits on a FALSE left operand.
+func (e *And) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	lv, lnull := evalBoolNull(e.Left, b, row)
+	if !lnull && !lv {
+		return false, false
+	}
+	rv, rnull := evalBoolNull(e.Right, b, row)
+	if !rnull && !rv {
+		return false, false
+	}
+	if lnull || rnull {
+		return false, true
+	}
+	return true, false
 }
 
 // Or is a logical OR.
@@ -1033,11 +1199,28 @@ type Or struct {
 }
 
 func (e *Or) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
 }
 
 func (e *Or) EvalBool(b *batch.RecordBatch, row int) bool {
 	return toBool(e.Left, b, row) || toBool(e.Right, b, row)
+}
+
+// EvalBoolNull: TRUE OR anything is TRUE; otherwise a NULL operand makes it
+// UNKNOWN. Short-circuits on a TRUE left operand.
+func (e *Or) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	lv, lnull := evalBoolNull(e.Left, b, row)
+	if !lnull && lv {
+		return true, false
+	}
+	rv, rnull := evalBoolNull(e.Right, b, row)
+	if !rnull && rv {
+		return true, false
+	}
+	if lnull || rnull {
+		return false, true
+	}
+	return false, false
 }
 
 // Not is a logical NOT.
@@ -1046,11 +1229,24 @@ type Not struct {
 }
 
 func (e *Not) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
 }
 
+// EvalBool: NOT must see the third value — collapsing first turned
+// NOT (UNKNOWN) into true and admitted rows SQL excludes, which was the
+// dangerous half of #370 (`1 NOT IN (2, NULL)` answering true).
 func (e *Not) EvalBool(b *batch.RecordBatch, row int) bool {
-	return !toBool(e.Operand, b, row)
+	v, null := e.EvalBoolNull(b, row)
+	return v && !null
+}
+
+// EvalBoolNull: NOT UNKNOWN stays UNKNOWN.
+func (e *Not) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	v, null := evalBoolNull(e.Operand, b, row)
+	if null {
+		return false, true
+	}
+	return !v, false
 }
 
 // --- Special SQL expressions ---
@@ -1063,21 +1259,39 @@ type In struct {
 }
 
 func (e *In) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
 }
 
 func (e *In) EvalBool(b *batch.RecordBatch, row int) bool {
+	v, null := e.EvalBoolNull(b, row)
+	return v && !null
+}
+
+// EvalBoolNull: `x IN (a, b, NULL)` is the chained OR of comparisons, so a
+// match answers TRUE, and a miss with a NULL anywhere in the list is
+// UNKNOWN — never FALSE. NOT IN is its Kleene negation, which is why
+// `1 NOT IN (2, NULL)` must not answer true: PostgreSQL's reading is "I
+// don't know, so no" (#370).
+func (e *In) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	lv := e.Expr.Eval(b, row)
 	if lv == nil {
-		return false
+		return false, true
 	}
+	sawNull := false
 	for _, v := range e.Values {
 		rv := v.Eval(b, row)
-		if rv != nil && compare(lv, rv, CmpEq) {
-			return !e.Not
+		if rv == nil {
+			sawNull = true
+			continue
+		}
+		if compare(lv, rv, CmpEq) {
+			return !e.Not, false
 		}
 	}
-	return e.Not
+	if sawNull {
+		return false, true
+	}
+	return e.Not, false
 }
 
 // Between checks if a value is between two bounds.
@@ -1088,21 +1302,37 @@ type Between struct {
 }
 
 func (e *Between) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
 }
 
 func (e *Between) EvalBool(b *batch.RecordBatch, row int) bool {
+	v, null := e.EvalBoolNull(b, row)
+	return v && !null
+}
+
+// EvalBoolNull: BETWEEN is defined as (x >= lo AND x <= hi), so a NULL
+// bound does not force UNKNOWN — the other half can still answer FALSE
+// (`5 BETWEEN NULL AND 2` is false, and NOT BETWEEN flips it to true).
+func (e *Between) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	v := e.Expr.Eval(b, row)
+	if v == nil {
+		return false, true
+	}
 	lo := e.Low.Eval(b, row)
 	hi := e.Hi.Eval(b, row)
-	if v == nil || lo == nil || hi == nil {
-		return false
+	// Three-valued AND over the two half-comparisons.
+	geNull := lo == nil
+	leNull := hi == nil
+	if !geNull && !compare(v, lo, CmpGe) {
+		return e.Not, false
 	}
-	result := compare(v, lo, CmpGe) && compare(v, hi, CmpLe)
-	if e.Not {
-		return !result
+	if !leNull && !compare(v, hi, CmpLe) {
+		return e.Not, false
 	}
-	return result
+	if geNull || leNull {
+		return false, true
+	}
+	return !e.Not, false
 }
 
 // Like performs SQL LIKE pattern matching.
@@ -1113,20 +1343,27 @@ type Like struct {
 }
 
 func (e *Like) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
 }
 
 func (e *Like) EvalBool(b *batch.RecordBatch, row int) bool {
+	v, null := e.EvalBoolNull(b, row)
+	return v && !null
+}
+
+// EvalBoolNull: LIKE with NULL on either side is UNKNOWN, and NOT LIKE
+// stays UNKNOWN with it (#370).
+func (e *Like) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	v := e.Expr.Eval(b, row)
 	p := e.Pattern.Eval(b, row)
 	if v == nil || p == nil {
-		return false
+		return false, true
 	}
 	result := matchLike(toString(v), toString(p))
 	if e.Not {
-		return !result
+		return !result, false
 	}
-	return result
+	return result, false
 }
 
 // Case is a CASE WHEN ... THEN ... ELSE ... END expression.
@@ -2532,21 +2769,45 @@ func fnSubstr(args []any) any {
 	}
 	s := toString(args[0])
 	start := int(ToFloat64(args[1])) - 1 // SQL is 1-indexed
+	if len(args) >= 3 && args[2] != nil {
+		length := int(ToFloat64(args[2]))
+		lo, hi := substrWindow(start, length, len(s))
+		return s[lo:hi]
+	}
 	if start < 0 {
 		start = 0
 	}
 	if start >= len(s) {
 		return ""
 	}
-	if len(args) >= 3 && args[2] != nil {
-		length := int(ToFloat64(args[2]))
-		end := start + length
-		if end > len(s) {
-			end = len(s)
-		}
-		return s[start:end]
-	}
 	return s[start:]
+}
+
+// substrWindow clamps SUBSTR's [start, start+length) character window (both
+// 0-based here) into valid slice bounds for a string of length n. The window
+// rule is PostgreSQL's (#373): a start below position 1 consumes part of the
+// length before the string begins — SUBSTR('abcdef', 0, 3) selects positions
+// 0,1,2 of which only 1 and 2 exist, so 'ab' and not 'abc'. A non-positive
+// or overflowed window is empty rather than an error (PostgreSQL errors only
+// on a negative LENGTH, which this engine's scalar layer cannot raise).
+func substrWindow(start, length, n int) (int, int) {
+	end := start + length
+	if length < 0 || end < start { // negative length or overflow
+		end = start
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start > n {
+		start = n
+	}
+	if end < start {
+		end = start
+	}
+	if end > n {
+		end = n
+	}
+	return start, end
 }
 
 func fnTrim(args []any) any {
@@ -2843,7 +3104,11 @@ func fnCastInt(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	return int64(ToFloat64(args[0]))
+	// Same rule as CAST(x AS integer): round half away from zero (#373).
+	if i, ok := toInt64Safe(args[0]); ok {
+		return i
+	}
+	return int64(math.Round(ToFloat64(args[0])))
 }
 
 func fnCastFloat(args []any) any {
@@ -3865,22 +4130,31 @@ type InSubquery struct {
 	Runner SubqueryRunner
 	Not    bool
 	cached bool
-	intSet map[int64]struct{}
-	strSet map[string]struct{}
-	fltSet map[float64]struct{}
-	vals   []any // fallback for mixed types
+	// setNull records a NULL in the subquery's result set: a probe that
+	// misses such a set is UNKNOWN, not false — the `NOT IN (SELECT
+	// nullable_col ...)` trap (#370).
+	setNull bool
+	intSet  map[int64]struct{}
+	strSet  map[string]struct{}
+	fltSet  map[float64]struct{}
+	vals    []any // fallback for mixed types
 }
 
 func (e *InSubquery) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
 }
 
 func (e *InSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
+	v, null := e.EvalBoolNull(b, row)
+	return v && !null
+}
+
+func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if !e.cached {
 		e.cached = true
 		rows, err := e.Runner(e.SQL)
 		if err != nil {
-			return e.Not
+			return e.Not, false
 		}
 		// Collect values and detect predominant type for hash set
 		var rawVals []any
@@ -3888,6 +4162,8 @@ func (e *InSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 			for _, v := range r {
 				if v != nil {
 					rawVals = append(rawVals, v)
+				} else {
+					e.setNull = true
 				}
 				break // first column only
 			}
@@ -3935,34 +4211,49 @@ func (e *InSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 	}
 	lv := e.Expr.Eval(b, row)
 	if lv == nil {
-		return false
+		return false, true
 	}
 	// Fast path: typed hash lookup
 	if e.intSet != nil {
 		if iv, ok := toInt64Safe(lv); ok {
-			_, found := e.intSet[iv]
-			return found != e.Not
+			if _, found := e.intSet[iv]; found {
+				return !e.Not, false
+			}
+			return e.missAnswer()
 		}
 	}
 	if e.strSet != nil {
 		if sv, ok := lv.(string); ok {
-			_, found := e.strSet[sv]
-			return found != e.Not
+			if _, found := e.strSet[sv]; found {
+				return !e.Not, false
+			}
+			return e.missAnswer()
 		}
 	}
 	if e.fltSet != nil {
 		if fv, ok := toFloat64Safe(lv); ok {
-			_, found := e.fltSet[fv]
-			return found != e.Not
+			if _, found := e.fltSet[fv]; found {
+				return !e.Not, false
+			}
+			return e.missAnswer()
 		}
 	}
 	// Fallback: linear scan for mixed types
 	for _, rv := range e.vals {
 		if rv != nil && compare(lv, rv, CmpEq) {
-			return !e.Not
+			return !e.Not, false
 		}
 	}
-	return e.Not
+	return e.missAnswer()
+}
+
+// missAnswer is the IN answer for a probe the set does not contain: FALSE
+// (or TRUE under NOT) for a NULL-free set, UNKNOWN when the set held a NULL.
+func (e *InSubquery) missAnswer() (bool, bool) {
+	if e.setNull {
+		return false, true
+	}
+	return e.Not, false
 }
 
 // ExistsSubquery evaluates to true if a subquery returns any rows.
@@ -4015,10 +4306,13 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// A string that does not read as a number is refused, not coerced to
 		// 0: PostgreSQL raises 22P02 invalid_text_representation and ADR-0012
 		// makes it the authority on error-versus-not. The per-row error
-		// channel #340 lacked (it chose NULL for unparseable CAST-to-date on
-		// that ground) exists now — FatalEvalPanic, #347 — which is what this
-		// raise rides. Numeric strings keep their existing lenient path
-		// (fractions truncate; #373 tracks that divergence).
+		// channel #340 lacked exists now — FatalEvalPanic, #347 — which is
+		// what this raise rides.
+		//
+		// A value that DOES read as a number then follows PostgreSQL's other
+		// rule (#373): a fractional cast to an integer type ROUNDS, half away
+		// from zero. TRUNC() is how a caller asks for truncation. An
+		// already-integral value passes through untouched.
 		if s, ok := stringOperand(v); ok {
 			f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 			if err != nil {
@@ -4028,9 +4322,12 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 				}
 				raiseInvalidTextRepresentation(typ, s)
 			}
-			return int64(f)
+			return int64(math.Round(f))
 		}
-		return int64(ToFloat64(v))
+		if i, ok := toInt64Safe(v); ok {
+			return i
+		}
+		return int64(math.Round(ToFloat64(v)))
 	case "float", "double", "real":
 		return ToFloat64(v)
 	case "decimal", "numeric":
@@ -8564,6 +8861,12 @@ func vecSubstr(args []*batch.Vector, out *batch.Vector, n int) {
 		}
 		b := src.BytesData.Value(i)
 		start := int(vecReadFloat64(args[1], i)) - 1 // SQL is 1-indexed
+		if hasLen {
+			// PostgreSQL's window rule; must match fnSubstr (#373).
+			lo, hi := substrWindow(start, int(vecReadFloat64(args[2], i)), len(b))
+			out.BytesData.Set(i, b[lo:hi])
+			continue
+		}
 		if start < 0 {
 			start = 0
 		}
@@ -8571,15 +8874,7 @@ func vecSubstr(args []*batch.Vector, out *batch.Vector, n int) {
 			out.BytesData.Set(i, nil)
 			continue
 		}
-		end := len(b)
-		if hasLen {
-			length := int(vecReadFloat64(args[2], i))
-			end = start + length
-			if end > len(b) {
-				end = len(b)
-			}
-		}
-		out.BytesData.Set(i, b[start:end])
+		out.BytesData.Set(i, b[start:])
 	}
 }
 

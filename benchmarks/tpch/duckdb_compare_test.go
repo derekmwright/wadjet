@@ -140,7 +140,7 @@ func TestDuckDBCompare(t *testing.T) {
 				// with the engine it claims to come from is itself checked
 				// whenever DuckDB is available: this is what would have
 				// caught a baseline frozen around a wrong answer.
-				dRows, dCols, err := runDuckDB(duckdbSetup, c.sql)
+				dRows, dCols, err := runDuckDB(duckdbSetup, c.duckSQL())
 				if err != nil {
 					t.Fatalf("duckdb: %v", err)
 				}
@@ -162,7 +162,7 @@ func TestDuckDBCompare(t *testing.T) {
 			}
 
 			if t.Failed() && liveCompare {
-				dRows, dCols, err := runDuckDB(duckdbSetup, c.sql)
+				dRows, dCols, err := runDuckDB(duckdbSetup, c.duckSQL())
 				if err == nil {
 					t.Logf("--- %s: arm A vs live DuckDB, cell by cell ---", c.name)
 					reportLiveDiff(t, c.name, aRows, dRows, aCols, dCols)
@@ -212,6 +212,25 @@ type duckdbCase struct {
 	// whole of "the fix landed"; the assertion below is untouched.
 	knownBugArm string
 	knownBug    string
+	// duckdbSQL is the DuckDB-dialect spelling of the same question, for
+	// the rare entry whose sql MEANS something different in the two
+	// engines. ADR-0012 rule 3: on a semantic divergence, configure the
+	// oracle — never exempt the entry, which would blind the arm to real
+	// bugs in exactly the queries most likely to carry them. Integer
+	// division is the case in point: `/` between integers truncates in
+	// PostgreSQL (and Wadjet, #369) but stays float in DuckDB, whose
+	// truncating spelling is `//`. Empty means sql runs on both engines
+	// unchanged.
+	duckdbSQL string
+}
+
+// duckSQL is the spelling the DuckDB side runs — sql itself unless the
+// entry carries a dialect override.
+func (c duckdbCase) duckSQL() string {
+	if c.duckdbSQL != "" {
+		return c.duckdbSQL
+	}
+	return c.sql
 }
 
 // duckdbCorpus is the 22 TPC-H queries plus the shapes they lack, each
@@ -282,6 +301,17 @@ func duckdbCorpus() []duckdbCase {
 		// #320 shape. Note this is why hasTopLevelOrderBy has to be paren
 		// aware: the parens belong to LENGTH(), not to a subquery.
 		duckdbCase{name: "OrderByExpression", sql: "SELECT n_name, n_nationkey FROM nation ORDER BY LENGTH(n_name), n_name"},
+		// Integer division truncates toward zero (#369, PostgreSQL
+		// semantics per ADR-0012). DuckDB's `/` stays float — its
+		// truncating spelling is `//`, with the same toward-zero rule on
+		// every sign combination — so this is a semantic divergence of
+		// DIALECT, and the duckdbSQL override asks DuckDB the same
+		// question in its own spelling instead of exempting the entry.
+		duckdbCase{name: "IntegerDivisionDialect",
+			sql: `SELECT n_nationkey, n_nationkey/4 AS q, (0 - n_nationkey)/4 AS neg,
+				7/2 AS a, (-7)/2 AS b, 7.0/2 AS float_control FROM nation ORDER BY n_nationkey`,
+			duckdbSQL: `SELECT n_nationkey, n_nationkey//4 AS q, (0 - n_nationkey)//4 AS neg,
+				7//2 AS a, (-7)//2 AS b, 7.0/2 AS float_control FROM nation ORDER BY n_nationkey`},
 		// NULL and the empty string in one string column: the value
 		// signature that gated #314 skips string columns entirely, and a
 		// renderer that folds "" into NULL would call these two answers the
@@ -1438,7 +1468,7 @@ func regenerateDuckDBBaseline(t *testing.T, corpus []duckdbCase) {
 
 	entries := make(map[string]duckdbBaselineEntry, len(corpus))
 	for _, c := range corpus {
-		dRows, dCols, err := runDuckDB(setup, c.sql)
+		dRows, dCols, err := runDuckDB(setup, c.duckSQL())
 		if err != nil {
 			t.Fatalf("%s: duckdb: %v", c.name, err)
 		}

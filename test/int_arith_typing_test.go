@@ -16,7 +16,8 @@ import (
 // Float64 vectors and fell off the typed-int aggregation paths — and
 // results surfaced as floats. With schema-aware typing, `ip - 1` over an
 // int column is an Int64 output end to end (SQL integer arithmetic;
-// DuckDB agrees), while division and float operands keep the float path.
+// DuckDB agrees), while float operands keep the float path. Integer
+// DIVISION is integer too since #369 (PostgreSQL semantics, ADR-0012).
 func TestIntArithProjectionTyping(t *testing.T) {
 	ctx := context.Background()
 	db, err := wadjet.Open(ctx, wadjet.Config{Store: objstore.NewMemStore(), Bucket: "test"})
@@ -84,15 +85,25 @@ func TestIntArithProjectionTyping(t *testing.T) {
 		}
 	}
 
-	// Division stays float (DuckDB semantics), and float operands demote.
-	r, err = db.Query(ctx, "SELECT ip / 2 AS d, f + 1 AS g FROM events LIMIT 1")
+	// int / int is INTEGER division (#369, PostgreSQL semantics per
+	// ADR-0012 — this entry used to pin DuckDB's float `/`, which that ADR
+	// overturns): truncated value, int64 all the way out. Float operands
+	// still demote the whole expression to float.
+	r, err = db.Query(ctx, "SELECT ip / 2 AS d, f + 1 AS g, f / 2 AS h FROM events WHERE ip = 1001 LIMIT 1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := r.Rows[0]["d"].(float64); !ok {
-		t.Fatalf("division result is %T (%v), want float64", r.Rows[0]["d"], r.Rows[0]["d"])
+	d, ok := r.Rows[0]["d"].(int64)
+	if !ok {
+		t.Fatalf("int division result is %T (%v), want int64", r.Rows[0]["d"], r.Rows[0]["d"])
+	}
+	if d != 500 { // 1001/2 truncates toward zero
+		t.Fatalf("1001 / 2 = %d, want 500", d)
 	}
 	if _, ok := r.Rows[0]["g"].(float64); !ok {
 		t.Fatalf("float-operand result is %T (%v), want float64", r.Rows[0]["g"], r.Rows[0]["g"])
+	}
+	if _, ok := r.Rows[0]["h"].(float64); !ok {
+		t.Fatalf("float division result is %T (%v), want float64", r.Rows[0]["h"], r.Rows[0]["h"])
 	}
 }

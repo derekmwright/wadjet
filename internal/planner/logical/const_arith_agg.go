@@ -136,6 +136,13 @@ func rewriteOneAgg(fn *plansql.FuncCallNode) plansql.Node {
 		if constFirst || k == 0 {
 			return nil // k/x is not linear; /0 keeps original semantics
 		}
+		// An INTEGER literal divisor may mean integer division (#369): over
+		// an integer column, x/k truncates PER ROW, so SUM(x/k) ≠ SUM(x)/k
+		// and AVG(x/k) ≠ AVG(x)/k. The column's type is unknown at this
+		// stage, so decline unless the literal itself pins float division.
+		if _, err := strconv.ParseInt(kNode.Value, 10, 64); err == nil {
+			return nil
+		}
 		if name == "min" || name == "max" {
 			if k < 0 {
 				return nil

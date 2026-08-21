@@ -291,8 +291,8 @@ func (e *ColShapeLen) fastCol(b *batch.RecordBatch) (*batch.Vector, bool) {
 // TypeBytes column boxes []byte, which compare() handles through a
 // different branch, and the network/UUID types render their bytes).
 //
-// NULL handling matches Cmp.EvalBool exactly: a NULL operand makes the
-// comparison false for BOTH = and <>.
+// NULL handling matches Cmp exactly: a NULL operand makes the comparison
+// UNKNOWN for BOTH = and <> — nil on the boxed path, excluded by EvalBool.
 type ColEmptyStr struct {
 	Col      *ColRef
 	Not      bool // true for <>
@@ -300,26 +300,31 @@ type ColEmptyStr struct {
 }
 
 func (e *ColEmptyStr) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
 }
 
 func (e *ColEmptyStr) EvalBool(b *batch.RecordBatch, row int) bool {
+	v, null := e.EvalBoolNull(b, row)
+	return v && !null
+}
+
+func (e *ColEmptyStr) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	e.Col.resolve(b)
 	if e.Col.idx < 0 || e.Col.idx >= len(b.Columns) || e.Col.structField != "" {
-		return e.Fallback.EvalBool(b, row)
+		return e.Fallback.EvalBoolNull(b, row)
 	}
 	v := b.Columns[e.Col.idx]
 	if v.Type != batch.TypeString || len(v.BytesData.Offsets) <= b.Len {
-		return e.Fallback.EvalBool(b, row)
+		return e.Fallback.EvalBoolNull(b, row)
 	}
 	if v.Nulls.IsNullFast(row) {
-		return false
+		return false, true
 	}
 	empty := v.BytesData.LengthAt(row) == 0
 	if e.Not {
-		return !empty
+		return !empty, false
 	}
-	return empty
+	return empty, false
 }
 
 // ColIsNull evaluates `col IS [NOT] NULL` off the null bitmap for a
@@ -354,4 +359,9 @@ func (e *ColIsNull) EvalBool(b *batch.RecordBatch, row int) bool {
 		return !isNull
 	}
 	return isNull
+}
+
+// EvalBoolNull: IS [NOT] NULL never answers UNKNOWN.
+func (e *ColIsNull) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	return e.EvalBool(b, row), false
 }

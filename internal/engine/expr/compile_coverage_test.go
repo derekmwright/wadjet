@@ -122,14 +122,31 @@ func TestCompileLitDefault(t *testing.T) {
 }
 
 func TestCompileUnaryOp(t *testing.T) {
+	// A negated numeric literal folds into the literal (#369): the operand
+	// keeps its int64 identity, which is what routes (-7)/2 onto the
+	// integer-division path.
 	node := &plansql.UnaryOp{Op: "-", Inner: &plansql.Lit{Value: "5", Kind: plansql.LitNumber}}
 	e, err := Compile(node)
 	if err != nil {
 		t.Fatal(err)
 	}
-	uo, ok := e.(*UnaryOp)
+	lit, ok := e.(*Lit)
 	if !ok {
-		t.Fatal("expected UnaryOp")
+		t.Fatalf("expected folded Lit, got %T", e)
+	}
+	if lit.Val != int64(-5) {
+		t.Fatalf("expected -5, got %v", lit.Val)
+	}
+
+	// A non-literal operand keeps the UnaryOp node.
+	node2 := &plansql.UnaryOp{Op: "-", Inner: &plansql.ColRef{Column: "x"}}
+	e2, err := Compile(node2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uo, ok := e2.(*UnaryOp)
+	if !ok {
+		t.Fatalf("expected UnaryOp, got %T", e2)
 	}
 	if uo.Op != "-" {
 		t.Fatalf("expected -, got %s", uo.Op)
@@ -247,8 +264,9 @@ func TestCompileBinOpFloat64(t *testing.T) {
 	}
 }
 
-func TestCompileBinOpDivAlwaysFloat(t *testing.T) {
-	// Division of two ints should produce BinOpFloat64 (not BinOpInt64)
+func TestCompileBinOpDivision(t *testing.T) {
+	// Division of two int literals is INTEGER division (#369, ADR-0012):
+	// BinOpInt64, truncating toward zero.
 	node := &plansql.BinaryOp{
 		Left:  &plansql.Lit{Value: "10", Kind: plansql.LitNumber},
 		Op:    "/",
@@ -258,8 +276,22 @@ func TestCompileBinOpDivAlwaysFloat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := e.(*BinOpFloat64); !ok {
-		t.Fatalf("expected BinOpFloat64 for division, got %T", e)
+	if _, ok := e.(*BinOpInt64); !ok {
+		t.Fatalf("expected BinOpInt64 for int/int division, got %T", e)
+	}
+
+	// A float literal on either side keeps float division.
+	nodeF := &plansql.BinaryOp{
+		Left:  &plansql.Lit{Value: "10.0", Kind: plansql.LitNumber},
+		Op:    "/",
+		Right: &plansql.Lit{Value: "3", Kind: plansql.LitNumber},
+	}
+	ef, err := Compile(nodeF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ef.(*BinOpFloat64); !ok {
+		t.Fatalf("expected BinOpFloat64 for float/int division, got %T", ef)
 	}
 }
 
@@ -286,17 +318,16 @@ func TestCompileBinOpGeneric(t *testing.T) {
 }
 
 func TestCompileIsTrue(t *testing.T) {
+	// IS [NOT] TRUE/FALSE compiles to the NULL-test node IsBool, not a
+	// comparison: NULL IS TRUE is false, never UNKNOWN (#370).
 	node := &plansql.IsExpr{Left: &plansql.ColRef{Column: "x"}, Check: "true", Not: false}
 	e, err := Compile(node)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmp := e.(*Cmp)
-	if cmp.Op != CmpEq {
-		t.Fatal("expected CmpEq for IS TRUE")
-	}
-	if cmp.Right.(*Lit).Val != true {
-		t.Fatal("expected true literal")
+	ib := e.(*IsBool)
+	if !ib.Want || ib.Not {
+		t.Fatalf("expected IsBool{Want: true, Not: false}, got %+v", ib)
 	}
 }
 
@@ -306,9 +337,9 @@ func TestCompileIsNotTrue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmp := e.(*Cmp)
-	if cmp.Op != CmpNe {
-		t.Fatal("expected CmpNe for IS NOT TRUE")
+	ib := e.(*IsBool)
+	if !ib.Want || !ib.Not {
+		t.Fatalf("expected IsBool{Want: true, Not: true}, got %+v", ib)
 	}
 }
 
@@ -318,12 +349,9 @@ func TestCompileIsFalse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmp := e.(*Cmp)
-	if cmp.Op != CmpEq {
-		t.Fatal("expected CmpEq")
-	}
-	if cmp.Right.(*Lit).Val != false {
-		t.Fatal("expected false literal")
+	ib := e.(*IsBool)
+	if ib.Want || ib.Not {
+		t.Fatalf("expected IsBool{Want: false, Not: false}, got %+v", ib)
 	}
 }
 
@@ -333,9 +361,9 @@ func TestCompileIsNotFalse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmp := e.(*Cmp)
-	if cmp.Op != CmpNe {
-		t.Fatal("expected CmpNe for IS NOT FALSE")
+	ib := e.(*IsBool)
+	if ib.Want || !ib.Not {
+		t.Fatalf("expected IsBool{Want: false, Not: true}, got %+v", ib)
 	}
 }
 

@@ -122,6 +122,19 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Fold a negated numeric literal into the literal itself, so `(-7)/2`
+		// carries an int64 operand and takes the integer-division path (#369)
+		// exactly as `7/2` does. Value-identical for floats.
+		if n.Op == "-" {
+			if lit, ok := operand.(*Lit); ok {
+				switch v := lit.Val.(type) {
+				case int64:
+					return &Lit{Val: -v}, nil
+				case float64:
+					return &Lit{Val: -v}, nil
+				}
+			}
+		}
 		return &UnaryOp{Operand: operand, Op: n.Op}, nil
 
 	case *plansql.CmpExpr:
@@ -243,15 +256,13 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			}
 			return isNull, nil
 		case "true":
-			if n.Not {
-				return &Cmp{Left: operand, Right: &Lit{Val: true}, Op: CmpNe}, nil
-			}
-			return &Cmp{Left: operand, Right: &Lit{Val: true}, Op: CmpEq}, nil
+			// IS [NOT] TRUE/FALSE is a NULL-test, not a comparison: it
+			// never answers UNKNOWN (NULL IS TRUE → false, NULL IS NOT
+			// TRUE → true). The old Cmp spelling was equivalent only while
+			// Cmp itself collapsed NULL to false (#370).
+			return &IsBool{Operand: operand, Want: true, Not: n.Not}, nil
 		case "false":
-			if n.Not {
-				return &Cmp{Left: operand, Right: &Lit{Val: false}, Op: CmpNe}, nil
-			}
-			return &Cmp{Left: operand, Right: &Lit{Val: false}, Op: CmpEq}, nil
+			return &IsBool{Operand: operand, Want: false, Not: n.Not}, nil
 		default:
 			return nil, fmt.Errorf("unsupported IS check: %s", n.Check)
 		}
@@ -502,27 +513,31 @@ func compileBinOp(left, right Expr, op string) Expr {
 	lf, lfOk := left.(Float64Expr)
 	rf, rfOk := right.(Float64Expr)
 	if lfOk && rfOk {
-		// Prefer int64 path if both sides are native int64 (not float literals)
+		// Prefer int64 path if both sides are native int64 (not float
+		// literals). This includes `/`: integer division truncates toward
+		// zero, PostgreSQL's rule (#369, ADR-0012 — the previous float-`/`
+		// pin followed DuckDB, which ADR-0012 overturns).
 		li, liOk := left.(Int64Expr)
 		ri, riOk := right.(Int64Expr)
-		if liOk && riOk && op != "/" && isIntNative(left) && isIntNative(right) {
+		if liOk && riOk && isIntNative(left) && isIntNative(right) {
 			return &BinOpInt64{Left: li, Right: ri, Op: op}
 		}
 		// Column operands: their types resolve on the first batch, so the
 		// int-vs-float decision defers there (BinOpNumeric). Only when both
 		// sides COULD be integers at runtime — a compile-time float operand
 		// pins the whole expression float, so keep the direct float node.
-		// Division stays float unconditionally.
 		ln, lnOk := left.(numericOperand)
 		rn, rnOk := right.(numericOperand)
 		// The int-arith kill switch is read inside resolveMode rather than
 		// here, so which NODE is built no longer depends on it: a disabled
 		// switch means BinOpNumeric resolves to its float delegate, which is
-		// bit-identical to the BinOpFloat64 below. Keeping the node choice
+		// bit-identical to the BinOpFloat64 below (integer DIVISION keeps its
+		// truncation on both settings — semantics never ride a kill switch;
+		// see BinOpNumeric.divTrunc). Keeping the node choice
 		// switch-independent is what keeps `date_col - date_col` (resolved in
 		// the same place, from the same column types — #340) answering the
 		// same on both settings.
-		if lnOk && rnOk && op != "/" &&
+		if lnOk && rnOk &&
 			possiblyIntAtRuntime(left) && possiblyIntAtRuntime(right) {
 			return &BinOpNumeric{Left: ln, Right: rn, Op: op}
 		}

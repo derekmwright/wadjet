@@ -533,6 +533,22 @@
       "fine": "f0b5c2c2211c8d67",
       "coarse": "f0b5c2c2211c8d67"
     },
+    "IntegerDivisionDialect": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "q",
+        "neg",
+        "a",
+        "b",
+        "float_control"
+      ],
+      "fine": "25a39c741a646aa3",
+      "coarse": "25a39c741a646aa3"
+    },
     "KeylessCrossJoinFilter": {
       "source": "duckdb",
       "row_count": 1,

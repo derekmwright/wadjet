@@ -58,13 +58,21 @@ type CorrelatedInSubquery struct {
 }
 
 func (e *CorrelatedInSubquery) Eval(b *batch.RecordBatch, row int) any {
-	return e.EvalBool(b, row)
+	return boolNullBox(e.EvalBoolNull(b, row))
 }
 
 func (e *CorrelatedInSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
+	v, null := e.EvalBoolNull(b, row)
+	return v && !null
+}
+
+// EvalBoolNull carries SQL's three-valued IN (#370): a NULL probe is
+// UNKNOWN, and a miss against a result set containing a NULL is UNKNOWN —
+// the NOT IN trap, same rule as the uncorrelated InSubquery.
+func (e *CorrelatedInSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	lv := e.Expr.Eval(b, row)
 	if lv == nil {
-		return false
+		return false, true
 	}
 
 	sql, err := e.buildSQL(b, row)
@@ -73,18 +81,24 @@ func (e *CorrelatedInSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 	}
 	rows, runErr := e.Runner(sql)
 	if runErr != nil {
-		return e.Not
+		return e.Not, false
 	}
 
+	sawNull := false
 	for _, r := range rows {
 		for _, v := range r {
-			if v != nil && compare(lv, v, CmpEq) {
-				return !e.Not
+			if v == nil {
+				sawNull = true
+			} else if compare(lv, v, CmpEq) {
+				return !e.Not, false
 			}
 			break // first column only
 		}
 	}
-	return e.Not
+	if sawNull {
+		return false, true
+	}
+	return e.Not, false
 }
 
 func (e *CorrelatedInSubquery) buildSQL(b *batch.RecordBatch, row int) (string, error) {

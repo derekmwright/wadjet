@@ -129,13 +129,17 @@ func TestPolymorphicFunctionsOverUnresolvableColumns(t *testing.T) {
 			want: []any{"ALGERIA", "ARGENTINA", "BRAZIL"},
 		},
 		{
-			// No scan carries "max(n_nationkey)", so the fallback stands and
-			// the output is the declared Float64 — the residual this change
-			// deliberately does not reach, pinned so it cannot become a wrong
-			// CONFIDENT answer without a test noticing.
+			// No scan carries "max(n_nationkey)", so the aggregate argument
+			// cannot decide — the literal beside it does. `-1` decides Int64
+			// exactly as `1` always has, now that unary ± carries its
+			// operand's numeric type through nodeDeclaredType (#369):
+			// PostgreSQL types this int, and before that rule the sign alone
+			// demoted it to the Float64 fallback. The aggregate-output
+			// residual itself is unchanged — an aggregate arg still answers
+			// "undecided", which is what this entry pins.
 			name: "an aggregate output is not a scan column",
 			sql:  `SELECT COALESCE(MAX(n_nationkey), -1) AS x FROM nation`,
-			want: []any{float64(2)},
+			want: []any{int64(2)},
 		},
 	}
 	for _, tc := range tests {

@@ -7104,13 +7104,16 @@ func inferProjectionTypeCols(node plansql.Node, fallback parquet.TypeID, strictI
 }
 
 // intArithAllInt mirrors expr.operandIsInt over the AST: int-typed scan
-// columns, integer literals, and nested integer arithmetic. Division and
-// anything unrecognized decline (Float64 declaration = today's behavior).
+// columns, integer literals, and nested integer arithmetic. Anything
+// unrecognized declines (Float64 declaration = today's behavior). `/` is
+// integer division over integer operands (#369, ADR-0012), so it declares
+// Int64 exactly as +,-,*,% do — mirroring expr.BinOpNumeric's runtime mode,
+// of which this must stay a strict subset.
 func intArithAllInt(node plansql.Node, strictInt map[string]bool) bool {
 	switch n := node.(type) {
 	case *plansql.BinaryOp:
 		switch n.Op {
-		case "+", "-", "*", "%":
+		case "+", "-", "*", "%", "/":
 		default:
 			return false
 		}
@@ -7304,6 +7307,23 @@ func nodeDeclaredType(node plansql.Node, colTypes map[string]parquet.TypeID) (pa
 		}
 		if !binOpInvolvesInterval(n) {
 			return parquet.TypeFloat64, expr.Decided
+		}
+	case *plansql.UnaryOp:
+		// Unary ± preserves its operand's numeric type (expr.UnaryOp.Eval
+		// negates int64 as int64 since #369). Declaring it — instead of the
+		// String fallback — is what lets `ORDER BY -col` sort numerically:
+		// the hidden key materializes into a typed vector rather than into
+		// text, where "-0" vs "0" rendering used to decide the order.
+		if n.Op == "-" || n.Op == "+" {
+			t, c := nodeDeclaredType(n.Inner, colTypes)
+			if c != expr.Undecided {
+				switch t {
+				case parquet.TypeInt64, parquet.TypeInt32:
+					return parquet.TypeInt64, c
+				case parquet.TypeFloat64, parquet.TypeFloat32:
+					return parquet.TypeFloat64, c
+				}
+			}
 		}
 	case *plansql.FuncCallNode:
 		return funcReturnType(n, colTypes)
