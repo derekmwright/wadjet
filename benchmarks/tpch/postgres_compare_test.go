@@ -497,17 +497,15 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "TrimFamily", sql: `SELECT TRIM('  pad  ') AS t, LTRIM('  pad  ') AS l, RTRIM('  pad  ') AS r,
 			UPPER('MiXeD') AS u, LOWER('MiXeD') AS lo`},
 		// POSITION(needle IN haystack) itself parses since #374; REPLACE in
-		// the same statement is a separate, unrelated gap #374's own pin
+		// the same statement was a separate, unrelated gap #374's own pin
 		// never named — it only reached REPLACE once POSITION stopped
-		// failing first. REPLACE is a reserved lexer keyword that never
-		// reaches the generic function-call dispatch, the same shape #371
-		// fixed for EVERY; the scalar function itself (fnReplace) is
-		// already implemented.
+		// failing first. REPLACE was a reserved lexer keyword that never
+		// reached the generic function-call dispatch (the same shape #371
+		// fixed for EVERY); parsePrimary now special-cases it the same way,
+		// gated on a following '(' so CREATE OR REPLACE is unaffected
+		// (#382, fixed).
 		pgCase{name: "PositionAndReplace", sql: `SELECT POSITION('cd' IN 'abcdef') AS p, POSITION('zz' IN 'abcdef') AS missing,
-			REPLACE('abcabc', 'b', 'X') AS r`,
-			knownBug: pgBugUnsupported + " REPLACE(...) does not parse as a function call: REPLACE is a reserved " +
-				"keyword (presumably for CREATE OR REPLACE) that never reaches the function-call dispatch",
-			issue: "#382"},
+			REPLACE('abcabc', 'b', 'X') AS r`},
 		pgCase{name: "ConcatOperator", sql: `SELECT 'a' || 'b' AS ab, 'a' || NULL AS a_null, NULL || 'b' AS null_b`},
 		// LIKE: % and _ , and the anchoring TPC-H exercises only in one shape.
 		pgCase{name: "LikePatterns", sql: `SELECT n_name, (n_name LIKE 'A%') AS pre, (n_name LIKE '%A') AS suf,

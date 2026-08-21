@@ -242,3 +242,60 @@ func TestPositionFunctionEngine(t *testing.T) {
 		t.Errorf("POSITION('world' IN s) = %v, want 7", res2.Rows[0]["p"])
 	}
 }
+
+// TestReplaceFunctionEngine is the #382 engine-level regression: REPLACE(...)
+// now parses as a function call (the same keyword-dispatch gap #371 fixed
+// for EVERY), and fnReplace/vecReplace — already implemented and registered
+// — answer correctly over both literals and columns. Also exercises
+// POSITION and REPLACE in the same statement, the exact shape the oracle's
+// PositionAndReplace entry reproduces.
+func TestReplaceFunctionEngine(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	res, err := db.Query(ctx, `SELECT
+		REPLACE('abcabc', 'b', 'X') AS r,
+		REPLACE('abcabc', 'z', 'X') AS no_match,
+		POSITION('cd' IN 'abcdef') AS p,
+		POSITION('zz' IN 'abcdef') AS missing`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	row := res.Rows[0]
+	if row["r"] != "aXcaXc" {
+		t.Errorf("r = %v, want aXcaXc", row["r"])
+	}
+	if row["no_match"] != "abcabc" {
+		t.Errorf("no_match = %v, want abcabc (unchanged)", row["no_match"])
+	}
+	wantFloat := map[string]float64{"p": 3, "missing": 0}
+	for col, w := range wantFloat {
+		got, ok := row[col].(float64)
+		if !ok || got != w {
+			t.Errorf("%s = %v (%T), want %v", col, row[col], row[col], w)
+		}
+	}
+
+	schema := parquet.Schema{Columns: []parquet.Column{{Name: "s", Type: parquet.TypeString}}}
+	if err := db.CreateTable(ctx, "replace_strs", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	ing := db.NewIngester("replace_strs", schema, nil, ingest.Config{MaxBufferRows: 100})
+	if err := ing.Ingest(ctx, []map[string]any{{"s": "hello world"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	res2, err := db.Query(ctx, `SELECT REPLACE(s, 'world', 'there') AS r FROM replace_strs`)
+	if err != nil {
+		t.Fatalf("column query: %v", err)
+	}
+	if res2.Rows[0]["r"] != "hello there" {
+		t.Errorf("REPLACE(s, 'world', 'there') = %v, want %q", res2.Rows[0]["r"], "hello there")
+	}
+}

@@ -162,3 +162,58 @@ func TestPositionDoesNotSwallowSetMembershipIn(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 }
+
+// TestReplaceFunction pins #382: REPLACE is a lexer keyword reserved for
+// CREATE OR REPLACE, so REPLACE(...) as a scalar function call never
+// reached the generic function-call dispatch in parsePrimary — the same
+// shape #371 fixed for EVERY. Gated on a following '(', exactly like EVERY.
+func TestReplaceFunction(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{"three args", `SELECT REPLACE('abcabc', 'b', 'X')`, "replace('abcabc', 'b', 'X')"},
+		{"column haystack", `SELECT REPLACE(col, 'a', 'b')`, "replace(col, 'a', 'b')"},
+		{"lowercase spelling", `SELECT replace('abc', 'a', 'z')`, "replace('abc', 'a', 'z')"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := selectExprString(t, tt.sql)
+			if got != tt.want {
+				t.Errorf("%s = %q, want %q", tt.sql, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestReplaceAndPositionTogether pins the exact reproduction from #382's
+// oracle case: POSITION and REPLACE in the same statement, so unblocking
+// POSITION (#374) alone isn't enough to also parse REPLACE.
+func TestReplaceAndPositionTogether(t *testing.T) {
+	_, err := Parse(`SELECT POSITION('cd' IN 'abcdef') AS p, POSITION('zz' IN 'abcdef') AS missing,
+		REPLACE('abcabc', 'b', 'X') AS r`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+}
+
+// TestCreateOrReplaceStillParses guards the reason REPLACE is a lexer
+// keyword at all: CREATE OR REPLACE VIEW must keep working once REPLACE(...)
+// is also reachable as a function call. lexParseCreate consumes REPLACE at
+// the raw-token level before parsePrimary ever runs, so the two don't
+// compete — this test is the regression guard for that staying true.
+func TestCreateOrReplaceStillParses(t *testing.T) {
+	tests := []string{
+		`CREATE OR REPLACE VIEW v AS SELECT 1`,
+		`CREATE VIEW v AS SELECT REPLACE('ab', 'a', 'z')`,
+		`CREATE OR REPLACE VIEW v AS SELECT REPLACE(col, 'a', 'z') FROM t`,
+	}
+	for _, sql := range tests {
+		t.Run(sql, func(t *testing.T) {
+			if _, err := Parse(sql); err != nil {
+				t.Fatalf("Parse(%q): %v", sql, err)
+			}
+		})
+	}
+}

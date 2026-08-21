@@ -1671,6 +1671,20 @@ func (p *selectParser) parsePrimary() (Node, error) {
 		}
 		return nil, fmt.Errorf("unexpected token %q at position %d", p.cur.val, p.cur.pos)
 
+	case TokenKWReplace:
+		// REPLACE is a lexer keyword only for CREATE OR REPLACE. In an
+		// expression, REPLACE(...) is the standard SQL string function —
+		// fnReplace/vecReplace are already registered as "replace" — but the
+		// keyword token never reached the function-call path, so the
+		// spelling failed to parse at all (#382, same shape as #371's EVERY
+		// fix). Gated on a following '(' the same way, so CREATE OR REPLACE
+		// (REPLACE with no '(' after it) is unaffected.
+		if p.peekN(1) == TokenLParen {
+			p.advance() // consume REPLACE
+			return p.parseFuncCall("replace")
+		}
+		return nil, fmt.Errorf("unexpected token %q at position %d", p.cur.val, p.cur.pos)
+
 	case TokenKWCast:
 		return p.parseCastExpr()
 
