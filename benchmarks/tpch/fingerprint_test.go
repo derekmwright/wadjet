@@ -301,13 +301,10 @@ func TestSignatureSnapsNearIntegers(t *testing.T) {
 	onInteger := row(48051445)
 	offByAnUlp := row(48051444.999999993)
 
-	// Without the remedy these disagree at both precisions — the property
-	// that made the gate flake.
-	rawA := oracle.FingerprintOf(onInteger, true)
-	rawB := oracle.FingerprintOf(offByAnUlp, true)
-	if rawA.Fine == rawB.Fine || rawA.Coarse == rawB.Coarse {
-		t.Fatal("the rendering discontinuity this remedy exists for is gone; simplify SignatureOf instead of keeping the snap")
-	}
+	// The discontinuity is now fixed at its source — internal/oracle's
+	// fingerprintFloat snaps near-integers (#377), with its own regression
+	// test there — so SignatureOf no longer carries a local remedy and this
+	// test keeps only the end-to-end property the gate depends on.
 
 	entry := NewEntry("duckdb", "v1.4.1", "s3://bucket/tables/", "2026-08-19T00:00:00Z", q, SignatureOf(onInteger, q))
 	if ok, detail := entry.Match(SignatureOf(offByAnUlp, q)); !ok {

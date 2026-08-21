@@ -52,8 +52,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
-	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -308,73 +306,8 @@ func hasTrailingOrderBy(sql string) bool {
 	return !strings.ContainsAny(sql[i:], ")")
 }
 
-// snapEpsilon is how close to a whole number a float cell must sit before a
-// signature treats it as that whole number. It sits midway on a log scale
-// between the worst accumulation noise measured at SF1 (2.9e-12) and the fine
-// digest's own quantum (1e-6) — three orders of margin on each side — so it
-// separates "the same answer computed in a different order" from "a different
-// answer" with room to spare.
-const snapEpsilon = 1e-9
-
-// snapNearIntegers returns res with every float cell within snapEpsilon
-// (relative) of a whole number replaced by that whole number.
-//
-// It exists because the cell rendering has one DISCONTINUITY: an exact integer
-// renders as its full digits ("48051445") while every other value quantizes
-// ("4.80514e+07"). That branch is needed — a large integer SUM that one engine
-// reports as text and the other as float64 has to agree, and large keys must
-// stay distinguishable — but it means two values ONE ULP apart can render
-// differently at EVERY precision, which is the one thing the dual-precision
-// policy cannot absorb.
-//
-// This is not hypothetical: at SF1, q09's sum_profit lands exactly on a whole
-// number under one aggregation order and ~1e-15 away under another, and both
-// digests moved with it (docs/design/sf100-value-fingerprints.md). Snapping
-// removes the discontinuity from both sides — the reference engine's answer is
-// digested through this same function — and cannot mask a real error, since
-// the fine quantum already absorbs a thousand times more.
-func snapNearIntegers(res *oracle.Result) *oracle.Result {
-	out := &oracle.Result{Columns: res.Columns, Rows: make([]map[string]any, len(res.Rows))}
-	for i, row := range res.Rows {
-		// Copy on first change only: the caller's rows are never mutated,
-		// and a result with nothing to snap costs no allocation.
-		target, copied := row, false
-		for _, col := range res.Columns {
-			f, ok := row[col].(float64)
-			if !ok {
-				continue
-			}
-			snapped, changed := snapFloat(f)
-			if !changed {
-				continue
-			}
-			if !copied {
-				target, copied = maps.Clone(row), true
-			}
-			target[col] = snapped
-		}
-		out.Rows[i] = target
-	}
-	return out
-}
-
-func snapFloat(f float64) (float64, bool) {
-	if f == 0 || math.IsNaN(f) || math.IsInf(f, 0) || math.Abs(f) >= 1<<53 {
-		return f, false
-	}
-	r := math.Round(f)
-	if r == f || r == 0 {
-		return f, false
-	}
-	if math.Abs(f-r) <= snapEpsilon*math.Abs(f) {
-		return r, true
-	}
-	return f, false
-}
-
 // SignatureOf digests one result under q's comparison mode.
 func SignatureOf(res *oracle.Result, q FPQuery) Signature {
-	res = snapNearIntegers(res)
 	sig := Signature{Mode: q.Mode, Columns: append([]string(nil), res.Columns...)}
 	switch q.Mode {
 	case ModeMultisetKeySeq:
