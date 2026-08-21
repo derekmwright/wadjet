@@ -3078,7 +3078,102 @@ func twoPathCorpus() []twoPathQuery {
 			assertA: assertRowCount(3)},
 	)
 
+	// #379: DISTINCT over a derived key whose polymorphic type needs the
+	// catalog. COALESCE(l_extendedprice, 0) is Float64 because the column
+	// is; typed from the expression text alone, the literal decides Int64
+	// and the DAG's pre-aggregate projection truncates every float price
+	// into the key vector — a fifth of the distinct groups vanish, on the
+	// DAG only (fast path 59828 vs DAG 45000 on this fixture; DuckDB truth
+	// over the committed bytes is pinned by the DistinctCoalesce* twins in
+	// duckdbCorpus). The two-arm compare would catch a recurrence on either
+	// arm; the absolute assertion recomputes the distinct set from the
+	// fixture rows so a defect that hits both engines the same way cannot
+	// slip past as agreement.
+	out = append(out,
+		// The minimal trigger: no join at all. Exercises the fused
+		// scan-aggregate dispatch path.
+		twoPathQuery{name: "DistinctCoalesceLiteralScan", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT DISTINCT COALESCE(l_extendedprice, 0) AS c1 FROM lineitem`,
+			wantCols: []string{"c1"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				want := map[float64]bool{}
+				for _, r := range sf001Table(tb, "lineitem") {
+					want[toFloat(r["l_extendedprice"])] = true
+				}
+				assertDistinctSet(tb, rows, "c1", want)
+			}},
+		// The shape the fuzzer found (#379, seed 95): the same key above a
+		// LEFT JOIN whose NULL-padded side is what the COALESCE is for.
+		// Exercises the chain-terminal partial aggregate (join-fused), so
+		// both partial-aggregate dispatch paths stay pinned.
+		twoPathQuery{name: "DistinctCoalesceOverLeftJoin", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT DISTINCT COALESCE(t2.l_extendedprice, 0) AS c1
+				FROM customer t0
+				JOIN orders t1 ON t0.c_custkey = t1.o_custkey
+				LEFT JOIN lineitem t2 ON t1.o_orderkey = t2.l_orderkey`,
+			wantCols: []string{"c1"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				// LEFT JOIN semantics recomputed from the fixture: prices
+				// of lineitems whose order has a customer, plus 0 if any
+				// such order has no lineitem at all.
+				custKeys := map[float64]bool{}
+				for _, r := range sf001Table(tb, "customer") {
+					custKeys[toFloat(r["c_custkey"])] = true
+				}
+				orderKeys := map[float64]bool{}
+				for _, r := range sf001Table(tb, "orders") {
+					if custKeys[toFloat(r["o_custkey"])] {
+						orderKeys[toFloat(r["o_orderkey"])] = true
+					}
+				}
+				want := map[float64]bool{}
+				matched := map[float64]bool{}
+				for _, r := range sf001Table(tb, "lineitem") {
+					ok := toFloat(r["l_orderkey"])
+					if orderKeys[ok] {
+						want[toFloat(r["l_extendedprice"])] = true
+						matched[ok] = true
+					}
+				}
+				if len(matched) < len(orderKeys) {
+					want[0] = true // NULL-padded rows COALESCE to 0
+				}
+				assertDistinctSet(tb, rows, "c1", want)
+			}},
+	)
+
 	return out
+}
+
+// assertDistinctSet holds a one-column distinct result against the exact
+// value set the fixture determines: same cardinality, every returned value a
+// member, no value repeated. Values are compared numerically — the engines
+// may render the column as float or string, but a truncated key (the #379
+// defect) changes the VALUES and fails membership.
+func assertDistinctSet(tb testing.TB, rows []map[string]any, col string, want map[float64]bool) {
+	tb.Helper()
+	if len(rows) != len(want) {
+		tb.Errorf("arm A (single-process) returned %d distinct rows, want %d", len(rows), len(want))
+	}
+	seen := map[float64]bool{}
+	for i, r := range rows {
+		v, ok := lookupCell(r, col)
+		if !ok {
+			tb.Fatalf("row %d carries no %s column", i, col)
+		}
+		f := toFloat(v)
+		if !want[f] {
+			tb.Errorf("row %d: %s = %v is not in the fixture's distinct set", i, col, v)
+			return
+		}
+		if seen[f] {
+			tb.Errorf("row %d: %s = %v returned twice — DISTINCT did not dedup", i, col, v)
+			return
+		}
+		seen[f] = true
+	}
 }
 
 // assertSingleCount holds a one-row, one-number answer against the value the

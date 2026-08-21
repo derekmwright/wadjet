@@ -272,6 +272,28 @@
       "fine": "b2c1939226a69e44",
       "coarse": "b2c1939226a69e44"
     },
+    "DistinctCoalesceLiteralScan": {
+      "source": "duckdb",
+      "row_count": 35921,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c1"
+      ],
+      "fine": "31a63e4f2c83a0c1",
+      "coarse": "bc66b13408984871"
+    },
+    "DistinctCoalesceOverLeftJoin": {
+      "source": "duckdb",
+      "row_count": 35921,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c1"
+      ],
+      "fine": "31a63e4f2c83a0c1",
+      "coarse": "bc66b13408984871"
+    },
     "EmptyBuildAntiJoin": {
       "source": "duckdb",
       "row_count": 1,

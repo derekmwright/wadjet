@@ -1416,6 +1416,26 @@ func duckdbCorpus() []duckdbCase {
 			sql: `SELECT c_custkey, CAST((SELECT AVG(c_acctbal) FROM customer c2
 					WHERE c2.c_nationkey < c1.c_nationkey) AS DOUBLE) AS below_avg
 				FROM customer c1 WHERE c1.c_custkey <= 25 ORDER BY c_custkey`},
+		// #379: DISTINCT over an expression whose polymorphic type resolution
+		// needs the CATALOG — COALESCE(float_col, 0) is Float64 because the
+		// column is, and only the literal Int64 without it. The stage DAG's
+		// pre-aggregate projection used to type the derived group key from
+		// the expression text alone, truncating every float price into an
+		// Int64 key vector: 28634 rows where DuckDB says 35921, on the DAG
+		// only. The fix ships the planner's resolved type on the wire
+		// (OpSpec.GroupByTypes). The corpus had no DISTINCT-over-expression
+		// entry, which is why 175 gated entries never saw it.
+		duckdbCase{name: "DistinctCoalesceLiteralScan",
+			sql: `SELECT DISTINCT COALESCE(l_extendedprice, 0) AS c1 FROM lineitem`},
+		// The shape the fuzzer found it in (seed 95): the same key above a
+		// LEFT JOIN whose NULL-padded side is what the COALESCE is for.
+		// Exercises the chain-terminal partial aggregate (join-fused) rather
+		// than the fused scan-aggregate, so both dispatch paths stay pinned.
+		duckdbCase{name: "DistinctCoalesceOverLeftJoin",
+			sql: `SELECT DISTINCT COALESCE(t2.l_extendedprice, 0) AS c1
+				FROM customer t0
+				JOIN orders t1 ON t0.c_custkey = t1.o_custkey
+				LEFT JOIN lineitem t2 ON t1.o_orderkey = t2.l_orderkey`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can
