@@ -27,9 +27,6 @@ func TestIntegerDivisionLiterals(t *testing.T) {
 		{"7.0/2", 3.5},
 		{"7/2.0", 3.5},
 		{"7.0/2.0", 3.5},
-		// Division by zero stays NULL (wadjet has no error channel here;
-		// PostgreSQL raises 22012, pinned separately on the wire arm).
-		{"7/0", nil},
 	}
 	for _, c := range cases {
 		t.Run(c.sql, func(t *testing.T) {
@@ -80,7 +77,9 @@ func TestIntegerDivisionOverColumns(t *testing.T) {
 		{"a / b", 0, int64(3)},
 		{"a / b", 1, int64(-3)},
 		{"(a + 1) / 2", 0, int64(4)},
-		{"a / 0", 0, nil}, // division by zero → NULL
+		// "a / 0" moved to TestIntegerDivisionByZeroRaises: a genuine zero
+		// divisor raises 22012 (#367), while a NULL operand stays NULL —
+		// the next row pins that half.
 		// Float operand on either side: float division, unchanged.
 		{"f / 2", 0, 3.5},
 		{"a / 2.0", 0, 3.5},
@@ -155,4 +154,19 @@ func TestGenericBinOpIntegerDivision(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIntegerDivisionByZeroRaises pins PostgreSQL's 22012: a GENUINE zero
+// divisor raises through the FatalEvalPanic channel (#347/#367); a NULL
+// divisor stays NULL (three-valued arithmetic). The two must not be
+// conflated — the raise rides ok=true zero, the NULL rides ok=false.
+func TestIntegerDivisionByZeroRaises(t *testing.T) {
+	b := testBatch()
+	e := compileExprSQL(t, "7/0")
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("7/0 evaluated without raising; PostgreSQL raises 22012")
+		}
+	}()
+	_ = e.Eval(b, 0)
 }

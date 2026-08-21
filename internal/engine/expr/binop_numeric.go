@@ -200,15 +200,18 @@ func (e *BinOpNumeric) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 		return lv * rv, true
 	case "/":
 		// Integer division truncates toward zero (#369, PostgreSQL
-		// semantics per ADR-0012). Division by zero is NULL — this layer
-		// has no error channel; the missing 22012 is pinned on the wire arm.
+		// semantics per ADR-0012). A GENUINE zero divisor raises 22012 —
+		// NULL divisors already exited above with ok=false, and the
+		// FatalEvalPanic channel (#347) carries the error from any depth,
+		// so "this layer has no error channel" stopped being true when
+		// that mechanism landed (#367 uses it for the literal 1/0).
 		if rv == 0 {
-			return 0, false
+			raiseDivisionByZero()
 		}
 		return lv / rv, true
 	case "%":
 		if rv == 0 {
-			return 0, false
+			raiseDivisionByZero()
 		}
 		return lv % rv, true
 	}

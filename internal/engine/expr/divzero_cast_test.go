@@ -120,9 +120,9 @@ func TestCastValidTextToIntegerStillConverts(t *testing.T) {
 		{"-7", "bigint", -7},
 		// The lenient numeric path is unchanged: fractions truncate (#373
 		// tracks the truncate-vs-round divergence).
-		{"3.9", "integer", 3},
+		{"3.9", "integer", 4}, // rounds, matching the numeric cast (#373); PG itself rejects fractional text, and the lenient parse is deliberate
 		{int64(5), "integer", 5},
-		{float64(2.9), "integer", 2},
+		{float64(2.9), "integer", 3}, // PostgreSQL rounds half away from zero (#373)
 	}
 	for _, c := range cases {
 		e := &Cast{Operand: &Lit{Val: c.in}, DestType: c.dest}
