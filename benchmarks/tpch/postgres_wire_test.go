@@ -612,26 +612,14 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		sql  string
 		pin  string
 	}{
-		{name: "UndefinedTable", sql: `SELECT * FROM no_such_table_here`,
-			pin: missingValidationPin + " Here a SELECT against a table that does not exist returns an empty " +
-				"result instead of 42P01 undefined_table — so a typo'd or not-yet-created table reads as " +
-				"'no matching rows'"},
-		{name: "UndefinedColumn", sql: `SELECT no_such_column FROM nation`, pin: sqlstateClassPin},
-		{name: "SyntaxError", sql: `SELECT FROM WHERE`, pin: sqlstateClassPin},
-		{name: "DivisionByZero", sql: `SELECT 1/0`,
-			pin: missingValidationPin + " Here 1/0 produces a value instead of 22012 division_by_zero"},
-		{name: "InvalidTextRepresentation", sql: `SELECT CAST('abc' AS integer)`,
-			pin: missingValidationPin + " Here a cast of non-numeric text to integer succeeds instead of " +
-				"raising 22P02 invalid_text_representation"},
-		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`, pin: sqlstateClassPin},
-		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`,
-			pin: missingValidationPin + " Here a bare column beside an aggregate with no GROUP BY is " +
-				"answered instead of raising 42803 grouping_error. The query has no defined answer: which " +
-				"n_name should the single aggregate row carry?"},
-		{name: "AmbiguousColumn", sql: `SELECT n_nationkey FROM nation a JOIN nation b ON a.n_nationkey = b.n_nationkey`,
-			pin: missingValidationPin + " Here an unqualified column that two aliases both provide is " +
-				"resolved silently instead of raising 42702 ambiguous_column — the engine picks one side " +
-				"and the client never learns a choice was made"},
+		{name: "UndefinedTable", sql: `SELECT * FROM no_such_table_here`},
+		{name: "UndefinedColumn", sql: `SELECT no_such_column FROM nation`},
+		{name: "SyntaxError", sql: `SELECT FROM WHERE`},
+		{name: "DivisionByZero", sql: `SELECT 1/0`},
+		{name: "InvalidTextRepresentation", sql: `SELECT CAST('abc' AS integer)`},
+		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`},
+		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`},
+		{name: "AmbiguousColumn", sql: `SELECT n_nationkey FROM nation a JOIN nation b ON a.n_nationkey = b.n_nationkey`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
