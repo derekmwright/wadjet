@@ -7,19 +7,26 @@ import (
 	"testing"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// fakeCatalog is a minimal tableColumnSource for binder tests.
+// fakeCatalog is a minimal tableColumnSource for binder tests. A missing
+// table answers the same sentinel the real catalog does (a confirmed miss);
+// set `unreachable` to model a transport failure instead.
 type fakeCatalog struct {
-	tables map[string][]string
+	tables      map[string][]string
+	unreachable bool
 }
 
 func (f *fakeCatalog) GetTable(_ context.Context, name string) (*catalog.TableMeta, error) {
+	if f.unreachable {
+		return nil, fmt.Errorf("kv get: connection refused")
+	}
 	cols, ok := f.tables[strings.ToLower(name)]
 	if !ok {
-		return nil, fmt.Errorf("table %q not found", name)
+		return nil, fmt.Errorf("table %q %w", name, catalog.ErrTableNotFound)
 	}
 	schema := parquet.Schema{}
 	for _, c := range cols {
@@ -85,9 +92,11 @@ func TestValidateColumns(t *testing.T) {
 		{"join condition valid", "SELECT a.id FROM events a JOIN other b ON a.id = b.eid", false},
 		{"join condition subquery typo", "SELECT a.id FROM events a JOIN other b ON a.id = b.eid AND a.amount > (SELECT max(nope) FROM other)", true},
 
-		// --- open schema (escape hatch) ---
-		{"unregistered table is open", "SELECT anything FROM mystery_table", false},
-		{"unregistered table qualified", "SELECT m.anything FROM mystery_table m", false},
+		// --- unknown table (#367: a confirmed catalog miss is 42P01, no
+		// longer an open scope; the transport-failure escape hatch is
+		// TestValidateUnreachableCatalogStaysOpen) ---
+		{"unregistered table errors", "SELECT anything FROM mystery_table", true},
+		{"unregistered table qualified errors", "SELECT m.anything FROM mystery_table m", true},
 
 		// --- CTEs ---
 		{"cte output valid", "WITH c AS (SELECT id FROM events) SELECT id FROM c", false},
@@ -134,5 +143,107 @@ func TestValidateColumnsErrorNamesColumn(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "typocol") {
 		t.Errorf("error should name the column, got: %v", err)
+	}
+}
+
+// TestValidateRejections pins the plan-time refusals of #367 and #380: each
+// statement PostgreSQL refuses gets an error carrying PostgreSQL's SQLSTATE
+// and naming the offender — never a silent answer. The lookalike rows pin the
+// legitimate shapes each refusal must NOT catch.
+func TestValidateRejections(t *testing.T) {
+	cat := &fakeCatalog{tables: map[string][]string{
+		"events": {"id", "ts", "attrs", "region", "amount"},
+		"other":  {"eid", "val"},
+		"dup":    {"id", "score"},
+		"zeek":   {"id.orig_h", "uid"},
+	}}
+
+	tests := []struct {
+		name      string
+		sql       string
+		wantState string // "" = must validate cleanly
+		wantIn    string // substring the error must contain (the offender)
+	}{
+		// --- #367: unknown table → 42P01 undefined_table ---
+		{"unknown table", "SELECT * FROM no_such_table_here", "42P01", `"no_such_table_here"`},
+		{"unknown table in join", "SELECT id FROM events JOIN nope ON id = x", "42P01", `"nope"`},
+		{"unknown table in subquery", "SELECT id FROM events WHERE id IN (SELECT x FROM nope)", "42P01", `"nope"`},
+		{"unknown table in cte body", "WITH c AS (SELECT x FROM nope) SELECT 1 FROM c", "42P01", `"nope"`},
+
+		// --- #380: qualifier naming no FROM entry → 42P01 missing FROM-clause entry ---
+		{"undefined alias in where", "SELECT t0.id FROM events t0 WHERE t1.eid BETWEEN 10 AND 150", "42P01", `"t1"`},
+		{"undefined alias in select", "SELECT t1.id FROM events t0", "42P01", `"t1"`},
+		{"table name qualifier when aliased", "SELECT events.id FROM events e", "42P01", `"events"`},
+
+		// #380 lookalikes that must keep validating:
+		{"delimited dotted name", `SELECT "id.orig_h" FROM zeek`, "", ""},
+		{"row field path", "SELECT attrs.score FROM events", "", ""},
+		{"row field in where", "SELECT id FROM events WHERE attrs.score > 1", "", ""},
+		{"correlated outer alias", "SELECT id FROM events e WHERE EXISTS (SELECT 1 FROM other o WHERE o.eid = e.id)", "", ""},
+		{"correlated outer alias two deep", "SELECT id FROM events e WHERE EXISTS (SELECT 1 FROM other o WHERE EXISTS (SELECT 1 FROM dup d WHERE d.id = e.id AND d.score = o.val))", "", ""},
+		{"lateral sees left alias", "SELECT e.id FROM events e JOIN LATERAL (SELECT o.val FROM other o WHERE o.eid = e.id) l ON 1 = 1", "", ""},
+
+		// --- #367: ambiguous unqualified column → 42702 ---
+		{"ambiguous across join", "SELECT id FROM events a JOIN dup b ON a.id = b.id", "42702", `"id"`},
+		{"ambiguous self join", "SELECT id FROM events a JOIN events b ON a.id = b.id", "42702", `"id"`},
+		{"ambiguous in where", "SELECT a.id FROM events a JOIN dup b ON a.id = b.id WHERE id > 1", "42702", `"id"`},
+		{"ambiguous in order by", "SELECT a.id AS k FROM events a JOIN dup b ON a.id = b.id ORDER BY id", "42702", `"id"`},
+
+		// 42702 lookalikes:
+		{"qualified resolves ambiguity", "SELECT a.id, b.id FROM events a JOIN dup b ON a.id = b.id", "", ""},
+		{"unique bare col across join", "SELECT region, score FROM events a JOIN dup b ON a.id = b.id", "", ""},
+		{"output alias shadows ambiguous input", "SELECT a.id AS id FROM events a JOIN dup b ON a.id = b.id ORDER BY id", "", ""},
+		{"inner shadows outer silently", "SELECT id FROM events e WHERE EXISTS (SELECT id FROM dup)", "", ""},
+
+		// --- #367: bare column beside aggregate, no GROUP BY → 42803 ---
+		{"bare column beside aggregate", "SELECT region, count(*) FROM events", "42803", `"region"`},
+		{"bare column in expression beside aggregate", "SELECT region || 'x', count(*) FROM events", "42803", `"region"`},
+		{"qualified column beside aggregate", "SELECT e.region, max(e.amount) FROM events e", "42803", `"e.region"`},
+
+		// 42803 lookalikes:
+		{"grouped column beside aggregate", "SELECT region, count(*) FROM events GROUP BY region", "", ""},
+		{"group by ordinal", "SELECT region, count(*) FROM events GROUP BY 1", "", ""},
+		{"literal beside aggregate", "SELECT 1 + 1, count(*) FROM events", "", ""},
+		{"window beside bare column", "SELECT region, count(*) OVER () FROM events", "", ""},
+		{"aggregate only", "SELECT count(*), max(amount) - min(amount) FROM events", "", ""},
+		{"scalar subquery beside aggregate", "SELECT (SELECT max(val) FROM other), count(*) FROM events", "", ""},
+		{"outer ref beside aggregate in subquery", "SELECT id FROM events e WHERE amount > (SELECT max(o.val) FROM other o WHERE o.eid = e.id)", "", ""},
+
+		// --- undefined column now carries 42703 ---
+		{"unknown column carries 42703", "SELECT no_such_column FROM events", "42703", `"no_such_column"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := mustExtract(t, tt.sql)
+			err := validateColumns(context.Background(), cat, info)
+			if tt.wantState == "" {
+				if err != nil {
+					t.Fatalf("expected %q to validate, got: %v", tt.sql, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected a %s rejection for %q, got nil — the statement would be answered silently", tt.wantState, tt.sql)
+			}
+			if got := sqlerr.StateOf(err); got != tt.wantState {
+				t.Errorf("SQLSTATE = %q, want %s (err: %v)", got, tt.wantState, err)
+			}
+			if tt.wantIn != "" && !strings.Contains(err.Error(), tt.wantIn) {
+				t.Errorf("error must name the offender %s, got: %v", tt.wantIn, err)
+			}
+		})
+	}
+}
+
+// TestValidateUnreachableCatalogStaysOpen pins the boundary of the 42P01
+// rejection: when the catalog cannot be REACHED, the table's existence is
+// unknown and the binder must stay conservative rather than refuse a query
+// that may be perfectly valid.
+func TestValidateUnreachableCatalogStaysOpen(t *testing.T) {
+	cat := &fakeCatalog{unreachable: true}
+	info := mustExtract(t, "SELECT anything FROM events")
+	if err := validateColumns(context.Background(), cat, info); err != nil {
+		t.Fatalf("a transport failure must not reject the query, got: %v", err)
 	}
 }

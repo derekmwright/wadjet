@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // cancelRequestCode is the protocol version field of a CancelRequest
@@ -189,12 +191,18 @@ func canceledMessage(ctx context.Context) string {
 // sendQueryError surfaces a statement failure. A statement whose context was
 // cancelled — by a CancelRequest or by statement_timeout — reports SQLSTATE
 // 57014 (query_canceled) with PostgreSQL's message, which is what clients
-// match on to distinguish "you stopped it" from "your SQL is wrong";
-// everything else keeps the generic code the caller chose.
+// match on to distinguish "you stopped it" from "your SQL is wrong". An error
+// that carries its own SQLSTATE (sqlerr.StateOf — plan-time rejections like
+// 42P01/42702/42803, runtime data errors like 22012) reports that code;
+// everything else keeps the generic code the caller chose (#366 tracks the
+// remaining blanket 42000s).
 func (c *pgConn) sendQueryError(ctx context.Context, code string, err error) {
 	if msg := canceledMessage(ctx); msg != "" {
 		c.sendError("ERROR", sqlstateQueryCanceled, msg)
 		return
+	}
+	if s := sqlerr.StateOf(err); s != "" {
+		code = s
 	}
 	c.sendError("ERROR", code, err.Error())
 }

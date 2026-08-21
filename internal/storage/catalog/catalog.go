@@ -12,6 +12,7 @@ package catalog
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -285,12 +286,18 @@ func (c *Catalog) CreateTable(_ context.Context, name string, schema parquet.Sch
 	return c.putJSON(c.key("meta"), meta)
 }
 
+// ErrTableNotFound marks a GetTable miss: the catalog was reachable and the
+// table is definitely absent. Callers distinguish it (errors.Is) from a
+// transport failure, where the table's existence is unknown — the planner
+// rejects a query on the former (42P01) and stays conservative on the latter.
+var ErrTableNotFound = errors.New("not found")
+
 // GetTable returns the metadata for a table.
 func (c *Catalog) GetTable(_ context.Context, name string) (*TableMeta, error) {
 	var meta TableMeta
 	if err := c.getJSON(c.key("table."+name), &meta); err != nil {
 		if err == ErrKeyNotFound {
-			return nil, fmt.Errorf("table %q not found", name)
+			return nil, fmt.Errorf("table %q %w", name, ErrTableNotFound)
 		}
 		return nil, err
 	}

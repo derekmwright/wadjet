@@ -74,15 +74,13 @@ func TestBinOp(t *testing.T) {
 	if v := e2.Eval(b, 1); v != 400.0 {
 		t.Fatalf("expected 400, got %v", v)
 	}
-	// division by zero
+	// division by zero raises 22012 (#367); see TestDivideByZeroRaises22012.
 	e3 := &BinOp{
 		Left:  &ColRef{Name: "amount"},
 		Right: &Lit{Val: float64(0)},
 		Op:    "/",
 	}
-	if v := e3.Eval(b, 0); v != nil {
-		t.Fatalf("expected nil for div by zero, got %v", v)
-	}
+	wantSQLStateRaise(t, "22012", func() { e3.Eval(b, 0) })
 }
 
 func TestComparison(t *testing.T) {

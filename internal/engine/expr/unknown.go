@@ -129,6 +129,11 @@ func (e *UnknownFuncError) Error() string {
 	return fmt.Sprintf("unknown function: %s", e.Name)
 }
 
+// SQLState returns PostgreSQL's undefined_function code. sqlerr.StateOf picks
+// it up through the Coder interface so the wire reports 42883 rather than the
+// blanket 42000 (#366).
+func (e *UnknownFuncError) SQLState() string { return "42883" }
+
 // IsUnknownFunc reports whether err is, or wraps, an UnknownFuncError.
 func IsUnknownFunc(err error) bool {
 	var ufe *UnknownFuncError

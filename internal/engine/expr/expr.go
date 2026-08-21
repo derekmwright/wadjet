@@ -420,12 +420,14 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 		return lf * rf
 	case "/":
 		if rf == 0 {
-			return nil
+			// Both operands are non-NULL here (checked above), so this is a
+			// genuine zero divisor: PostgreSQL refuses it and so do we (#367).
+			raiseDivisionByZero()
 		}
 		return lf / rf
 	case "%":
 		if rf == 0 {
-			return nil
+			raiseDivisionByZero()
 		}
 		return float64(int64(lf) % int64(rf))
 	default:
@@ -480,12 +482,13 @@ func (e *BinOpFloat64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool
 		return lf * rf, true
 	case arithDiv:
 		if rf == 0 {
-			return 0, false
+			// A NULL divisor returned above already; a zero here is genuine.
+			raiseDivisionByZero()
 		}
 		return lf / rf, true
 	case arithMod:
 		if rf == 0 {
-			return 0, false
+			raiseDivisionByZero()
 		}
 		return float64(int64(lf) % int64(rf)), true
 	default:
@@ -581,16 +584,34 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 			dst[i] = tmp[i] * dst[i]
 		}
 	case arithDiv:
+		// A zero divisor slot is either a NULL row (whose placeholder is 0)
+		// or a genuine zero. This loop cannot tell the two apart, so it
+		// reports "has nulls" and lets the caller's per-row pass decide:
+		// EvalFloat64 answers NULL for the NULL row and raises 22012
+		// (division by zero) for the genuine one. Before this, a zero
+		// divisor silently produced 0 (#367).
+		sawZero := false
 		for i := 0; i < n; i++ {
 			if dst[i] != 0 {
 				dst[i] = tmp[i] / dst[i]
+			} else {
+				sawZero = true
 			}
 		}
+		if sawZero {
+			return true
+		}
 	case arithMod:
+		sawZero := false
 		for i := 0; i < n; i++ {
 			if dst[i] != 0 {
 				dst[i] = float64(int64(tmp[i]) % int64(dst[i]))
+			} else {
+				sawZero = true
 			}
+		}
+		if sawZero {
+			return true
 		}
 	}
 
@@ -746,12 +767,15 @@ func (e *BinOpInt64) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 		return lv * rv, true
 	case arithDiv:
 		if rv == 0 {
-			return 0, false
+			// Operands are non-NULL here, so this is a genuine zero divisor.
+			// (compileBinOp keeps "/" off the integer node today; this raise
+			// is here so #369's integer division inherits it.)
+			raiseDivisionByZero()
 		}
 		return lv / rv, true
 	case arithMod:
 		if rv == 0 {
-			return 0, false
+			raiseDivisionByZero()
 		}
 		return lv % rv, true
 	default:
@@ -3988,6 +4012,24 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	}
 	switch dest {
 	case "int", "integer", "bigint", "signed":
+		// A string that does not read as a number is refused, not coerced to
+		// 0: PostgreSQL raises 22P02 invalid_text_representation and ADR-0012
+		// makes it the authority on error-versus-not. The per-row error
+		// channel #340 lacked (it chose NULL for unparseable CAST-to-date on
+		// that ground) exists now — FatalEvalPanic, #347 — which is what this
+		// raise rides. Numeric strings keep their existing lenient path
+		// (fractions truncate; #373 tracks that divergence).
+		if s, ok := stringOperand(v); ok {
+			f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+			if err != nil {
+				typ := "integer"
+				if dest == "bigint" {
+					typ = "bigint"
+				}
+				raiseInvalidTextRepresentation(typ, s)
+			}
+			return int64(f)
+		}
 		return int64(ToFloat64(v))
 	case "float", "double", "real":
 		return ToFloat64(v)
@@ -3998,6 +4040,18 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	default:
 		return v
 	}
+}
+
+// stringOperand reports v's text when it is a string or byte slice — the two
+// shapes a text column or literal reaches Cast.Eval in.
+func stringOperand(v any) (string, bool) {
+	switch s := v.(type) {
+	case string:
+		return s, true
+	case []byte:
+		return string(s), true
+	}
+	return "", false
 }
 
 // --- String: regex and parsing ---
@@ -9104,11 +9158,15 @@ func castTemporalKindLower(dest string) castTemporalKindT {
 // parses a column value itself, so the cast cannot disagree with date_add,
 // date_diff or `date ± INTERVAL` about what a column means.
 //
-// An operand that resolves to no instant at all becomes NULL. The expression
-// layer has no per-row error channel — every other coercion failure in this
-// file answers NULL — so a silent pass-through of the original value (which is
-// what #340 was) is the one outcome ruled out. DuckDB raises here and its
-// TRY_CAST returns NULL; this is TRY_CAST's rule.
+// An operand that resolves to no instant at all becomes NULL. When #340 chose
+// that, the expression layer had no per-row error channel; it has one now
+// (FatalEvalPanic, #347), and the numeric casts use it — CAST('abc' AS
+// integer) raises 22P02 per ADR-0012's PostgreSQL-decides-error-versus-not
+// rule (#367). The temporal casts deliberately keep NULL for the moment:
+// their unparseable inputs are pinned across date_cast_test.go and the
+// change is a semantics flip of its own, to be made on its own issue rather
+// than as a rider. Until then this is TRY_CAST's rule (DuckDB raises; its
+// TRY_CAST returns NULL) and a documented divergence from PostgreSQL.
 func castTemporal(b *batch.RecordBatch, row int, operand Expr, v any, kind castTemporalKindT) any {
 	src, ok := temporalOperand(b, row, operand, v)
 	if !ok {

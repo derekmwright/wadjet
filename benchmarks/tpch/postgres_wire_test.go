@@ -682,45 +682,27 @@ func wireCorpus() []wireCase {
 // table name, 22012 to report a data error, 57014 to say "cancelled" rather
 // than "your SQL is broken".
 func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgConn) {
-	// The SQLSTATE granularity defect, shared by every entry that reaches an
-	// error at all. 42000 is a CLASS, not a code.
-	const sqlstateClassPin = "WADJET BUG (pgwire): every failure is reported as SQLSTATE 42000. That is the " +
-		"CLASS \"syntax error or access rule violation\", not a code, and a client branches on the code: " +
-		"42P01 sends it to re-resolve a table name, 42703 to re-resolve a column, 42883 to look for a " +
-		"function, 22012 to report a data error. Under one blanket code an ORM cannot tell a typo'd column " +
-		"from a broken connection, and 57014 — the one that means 'you cancelled this' — is in the same " +
-		"blanket. (#366)"
-	// The other half, which is not about the code at all: PostgreSQL REFUSES
-	// these and Wadjet answers them.
-	const missingValidationPin = "WADJET BUG: PostgreSQL refuses this statement and Wadjet ANSWERS it. A " +
-		"silent answer to a statement the standard calls invalid is worse than a wrong code: the client " +
-		"gets rows it will treat as the truth. (#367)"
-
+	// Every entry below is GATED: wadjet must refuse the statement with the
+	// same SQLSTATE PostgreSQL reports. Two defect classes used to live here
+	// as pins and are fixed: #367 (five statements PostgreSQL refuses were
+	// ANSWERED — unknown table as 0 rows, 1/0 as 0, CAST('abc' AS integer)
+	// as 0, a bare column beside an aggregate as NULL, an ambiguous column
+	// resolved silently) and the #366 entries this fix's SQLSTATE plumbing
+	// (internal/sqlerr) covered — 42703/42601/42883 replacing the blanket
+	// class 42000. A future divergence can be pinned again via the pin field.
 	cases := []struct {
 		name string
 		sql  string
 		pin  string
 	}{
-		{name: "UndefinedTable", sql: `SELECT * FROM no_such_table_here`,
-			pin: missingValidationPin + " Here a SELECT against a table that does not exist returns an empty " +
-				"result instead of 42P01 undefined_table — so a typo'd or not-yet-created table reads as " +
-				"'no matching rows'"},
-		{name: "UndefinedColumn", sql: `SELECT no_such_column FROM nation`, pin: sqlstateClassPin},
-		{name: "SyntaxError", sql: `SELECT FROM WHERE`, pin: sqlstateClassPin},
-		{name: "DivisionByZero", sql: `SELECT 1/0`,
-			pin: missingValidationPin + " Here 1/0 produces a value instead of 22012 division_by_zero"},
-		{name: "InvalidTextRepresentation", sql: `SELECT CAST('abc' AS integer)`,
-			pin: missingValidationPin + " Here a cast of non-numeric text to integer succeeds instead of " +
-				"raising 22P02 invalid_text_representation"},
-		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`, pin: sqlstateClassPin},
-		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`,
-			pin: missingValidationPin + " Here a bare column beside an aggregate with no GROUP BY is " +
-				"answered instead of raising 42803 grouping_error. The query has no defined answer: which " +
-				"n_name should the single aggregate row carry?"},
-		{name: "AmbiguousColumn", sql: `SELECT n_nationkey FROM nation a JOIN nation b ON a.n_nationkey = b.n_nationkey`,
-			pin: missingValidationPin + " Here an unqualified column that two aliases both provide is " +
-				"resolved silently instead of raising 42702 ambiguous_column — the engine picks one side " +
-				"and the client never learns a choice was made"},
+		{name: "UndefinedTable", sql: `SELECT * FROM no_such_table_here`},
+		{name: "UndefinedColumn", sql: `SELECT no_such_column FROM nation`},
+		{name: "SyntaxError", sql: `SELECT FROM WHERE`},
+		{name: "DivisionByZero", sql: `SELECT 1/0`},
+		{name: "InvalidTextRepresentation", sql: `SELECT CAST('abc' AS integer)`},
+		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`},
+		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`},
+		{name: "AmbiguousColumn", sql: `SELECT n_nationkey FROM nation a JOIN nation b ON a.n_nationkey = b.n_nationkey`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

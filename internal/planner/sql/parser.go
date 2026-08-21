@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // alertIntervalFloor is the minimum allowed interval for CREATE ALERT.
@@ -233,6 +235,18 @@ const (
 
 // Parse parses a SQL string into a ParsedQuery.
 func Parse(sql string) (*ParsedQuery, error) {
+	q, err := parseDispatch(sql)
+	if err != nil {
+		// A statement this parser cannot read is a syntax error from this
+		// server's point of view, and 42601 is what a client branches on to
+		// show "your SQL is broken" rather than a connection problem. The
+		// original error chain is preserved (sqlerr.Wrap unwraps to it).
+		return nil, sqlerr.Wrap("42601", err)
+	}
+	return q, nil
+}
+
+func parseDispatch(sql string) (*ParsedQuery, error) {
 	trimmed := strings.TrimSpace(sql)
 	// Strip trailing semicolons
 	trimmed = strings.TrimRight(trimmed, ";")

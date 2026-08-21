@@ -231,17 +231,14 @@ func TestBinOpModulo(t *testing.T) {
 }
 
 func TestBinOpDivideByZero(t *testing.T) {
+	// A genuine zero divisor raises 22012 (PostgreSQL refuses it, #367); the
+	// old behavior — answer NULL — is pinned as gone. NULL divisors still
+	// answer NULL (TestDivideByNullStaysNull).
 	binop := &BinOp{Left: &Lit{Val: float64(10)}, Right: &Lit{Val: float64(0)}, Op: "/"}
-	result := binop.Eval(nil, 0)
-	if result != nil {
-		t.Errorf("expected nil for divide by zero, got %v", result)
-	}
+	wantSQLStateRaise(t, "22012", func() { binop.Eval(nil, 0) })
 
 	modop := &BinOp{Left: &Lit{Val: int64(10)}, Right: &Lit{Val: int64(0)}, Op: "%"}
-	result = modop.Eval(nil, 0)
-	if result != nil {
-		t.Errorf("expected nil for mod by zero, got %v", result)
-	}
+	wantSQLStateRaise(t, "22012", func() { modop.Eval(nil, 0) })
 }
 
 func TestBinOpNullOperand(t *testing.T) {
@@ -278,8 +275,7 @@ func TestBinOpInt64AllOps(t *testing.T) {
 		{"*", 10, 3, 30, true},
 		{"/", 10, 3, 3, true},
 		{"%", 10, 3, 1, true},
-		{"/", 10, 0, 0, false},
-		{"%", 10, 0, 0, false},
+		// x/0 and x%0 raise 22012 now — see TestDivideByZeroRaises22012.
 		{"^", 10, 3, 0, false},
 	}
 	for _, tt := range tests {
@@ -328,8 +324,7 @@ func TestBinOpFloat64AllOps(t *testing.T) {
 		{"-", 10.5, 3.5, 7.0, true},
 		{"*", 10.0, 3.0, 30.0, true},
 		{"/", 10.0, 4.0, 2.5, true},
-		{"/", 10.0, 0.0, 0, false},
-		{"%", 10.0, 0.0, 0, false},
+		// x/0 and x%0 raise 22012 now — see TestDivideByZeroRaises22012.
 		{"^", 1.0, 2.0, 0, false},
 	}
 	for _, tt := range tests {

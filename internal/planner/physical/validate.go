@@ -2,11 +2,12 @@ package physical
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sort"
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 )
 
@@ -44,25 +45,44 @@ func validateColumns(ctx context.Context, src tableColumnSource, info *plansql.S
 
 // colScope is the set of columns visible at a point in a query. `cols` holds
 // every bare (unqualified) column name; `quals` maps a qualifier (table name or
-// alias) to its column set for qualified resolution. `open` means an
-// unenumerable source is present, so no reference can be proven absent.
+// alias) to its column set for qualified resolution; `srcCount` counts how many
+// of this block's OWN FROM sources provide each bare name (outer scopes never
+// contribute — an inner name shadows an outer one silently, per PostgreSQL).
+// `open` means an unenumerable source is present, so no reference can be proven
+// absent.
 type colScope struct {
-	open  bool
-	cols  map[string]bool
-	quals map[string]map[string]bool
+	open     bool
+	cols     map[string]bool
+	quals    map[string]map[string]bool
+	srcCount map[string]int
 }
 
 func newColScope() *colScope {
-	return &colScope{cols: map[string]bool{}, quals: map[string]map[string]bool{}}
+	return &colScope{cols: map[string]bool{}, quals: map[string]map[string]bool{}, srcCount: map[string]int{}}
 }
 
 func (s *colScope) addColumn(col string) {
 	s.cols[strings.ToLower(col)] = true
 }
 
+// addOutputColumn adds a SELECT output alias. An output name resolves before
+// input columns in ORDER BY / GROUP BY / HAVING, so it also clears any input
+// ambiguity the same name carries.
+func (s *colScope) addOutputColumn(col string) {
+	c := strings.ToLower(col)
+	s.cols[c] = true
+	if s.srcCount[c] > 1 {
+		s.srcCount[c] = 1
+	}
+}
+
+// addQualified registers one column of one FROM source. Each call site invokes
+// it once per column per source, so it doubles as the ambiguity census: a bare
+// name two sources provide reaches srcCount 2.
 func (s *colScope) addQualified(qual, col string) {
 	c := strings.ToLower(col)
 	s.cols[c] = true
+	s.srcCount[c]++
 	if qual == "" {
 		return
 	}
@@ -73,6 +93,9 @@ func (s *colScope) addQualified(qual, col string) {
 	s.quals[q][c] = true
 }
 
+// merge folds an OUTER (or sibling) scope into s for resolution only: names
+// and qualifiers become visible, but srcCount is untouched — outer columns
+// never make an inner reference ambiguous.
 func (s *colScope) merge(o *colScope) {
 	if o == nil {
 		return
@@ -96,33 +119,65 @@ func (s *colScope) merge(o *colScope) {
 func (s *colScope) clone() *colScope {
 	c := newColScope()
 	c.merge(s)
+	for col, n := range s.srcCount {
+		c.srcCount[col] = n
+	}
 	return c
 }
 
-// misses reports whether ref is a *certain* miss against this scope — i.e. it can
-// be proven to resolve to no available column. Returns false (skip) for every
-// ambiguous case so the caller never errors on a query it can't be sure about.
-func (s *colScope) misses(ref *plansql.ColRef) bool {
+// resolveRef resolves ref against this scope, returning nil when it resolves
+// (or when the scope is too uncertain to judge) and a SQLSTATE-carrying error
+// for the three refusals PostgreSQL makes at analysis time: an unknown column
+// (42703), a qualifier no FROM entry provides (42P01, #380), and a bare name
+// two sources both provide (42702, #367). Every uncertain case resolves —
+// a false positive breaks a working query; a false negative merely lets a
+// typo through to the existing runtime check.
+func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 	if s == nil || s.open {
-		return false
+		return nil
 	}
 	col := strings.ToLower(ref.Column)
 	if ref.Table != "" {
 		q := strings.ToLower(ref.Table)
 		if cols, ok := s.quals[q]; ok {
 			// Qualifier is a known table/alias: a miss iff the column is absent.
-			return !cols[col]
+			if cols[col] {
+				return nil
+			}
+			return s.unknownColumn(ref)
 		}
 		if s.cols[q] {
 			// Qualifier is itself a column → dotted ROW/struct field access
 			// (e.g. attrs.score). Field existence is checked at runtime.
-			return false
+			return nil
 		}
-		// Unknown qualifier: could be an alias we failed to track or a
-		// correlated outer reference. Conservative: skip.
-		return false
+		if strings.Contains(q, ".") {
+			// Multi-part qualifier (catalog.schema.table) — not modeled here.
+			return nil
+		}
+		// Every FROM source either registers its qualifier or opens the scope,
+		// and outer aliases arrive via merge — so an unmatched qualifier in a
+		// closed scope provably names no FROM entry. Answering such a query
+		// with rows was #380's silent-empty-result defect.
+		return sqlerr.New("42P01", "missing FROM-clause entry for table %q", ref.Table)
 	}
-	return !s.cols[col]
+	if !s.cols[col] {
+		return s.unknownColumn(ref)
+	}
+	if s.srcCount[col] > 1 {
+		// Two of this block's sources both provide the name. Resolving it
+		// silently would pick a side the client never learns about.
+		return sqlerr.New("42702", "column reference %q is ambiguous", ref.Column)
+	}
+	return nil
+}
+
+// unknownColumn builds the 42703 undefined_column error for ref.
+func (s *colScope) unknownColumn(ref *plansql.ColRef) error {
+	if avail := s.available(); len(avail) > 0 {
+		return sqlerr.New("42703", "unknown column %q (available: %s)", ref.String(), strings.Join(avail, ", "))
+	}
+	return sqlerr.New("42703", "unknown column %q", ref.String())
 }
 
 // available returns up to a handful of sorted column names for an error message.
@@ -205,7 +260,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		withOut.open = true
 	}
 	for _, n := range outNames {
-		withOut.addColumn(n)
+		withOut.addOutputColumn(n)
 	}
 
 	// WHERE
@@ -232,6 +287,11 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		if err := b.checkExpr(col.AggArgExpr, resolve); err != nil {
 			return err
 		}
+	}
+	// A bare column beside an aggregate with no GROUP BY has no defined
+	// answer — which n_name should the single aggregate row carry?
+	if err := checkUngrouped(info, from); err != nil {
+		return err
 	}
 	// GROUP BY expressions
 	for _, gb := range info.GroupByExprs {
@@ -273,7 +333,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	return nil
 }
 
-// checkExpr errors on the first certain-miss column reference in expr.
+// checkExpr errors on the first column reference the scope refuses.
 func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 	if expr == nil || scope == nil || scope.open {
 		return nil
@@ -284,12 +344,8 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 		if pgSystemColumns[strings.ToLower(r.Column)] {
 			continue
 		}
-		if scope.misses(r) {
-			avail := scope.available()
-			if len(avail) > 0 {
-				return fmt.Errorf("unknown column %q (available: %s)", r.String(), strings.Join(avail, ", "))
-			}
-			return fmt.Errorf("unknown column %q", r.String())
+		if err := scope.resolveRef(r); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -345,12 +401,22 @@ func (b *binder) resolveSource(ctx context.Context, tr plansql.TableRef, lateral
 		return nil
 	}
 
-	// Base table. Use the original-case name (matching AnnotateScanColumns); a
-	// lookup failure means the table is unregistered or genuinely missing — in
-	// either case treat as open so we never produce a false column error (a
-	// "table not found" surfaces from the executor instead).
+	// Base table. Use the original-case name (matching AnnotateScanColumns).
+	// A confirmed miss — the catalog was reachable and says the table does not
+	// exist — is 42P01: nothing downstream can answer this query, and before
+	// this check nothing refused it either, so a typo'd table read as "no
+	// matching rows" (#367). A transport failure keeps the old open-scope
+	// stance: the table's existence is unknown, and a false rejection breaks
+	// a working query.
 	meta, err := b.src.GetTable(ctx, tr.Name)
-	if err != nil || meta == nil {
+	if err != nil {
+		if errors.Is(err, catalog.ErrTableNotFound) {
+			return sqlerr.New("42P01", "relation %q does not exist", tr.Name)
+		}
+		into.open = true
+		return nil
+	}
+	if meta == nil {
 		into.open = true
 		return nil
 	}
@@ -388,6 +454,55 @@ func (b *binder) registerCTE(ctx context.Context, cte plansql.CTEDef) error {
 		b.ctes[name] = cteEntry{cols: names}
 	}
 	return b.validateBlock(ctx, body, nil)
+}
+
+// checkUngrouped rejects a bare column in the SELECT list beside an aggregate
+// when the block has no GROUP BY at all — PostgreSQL's 42803 grouping_error
+// for the shape `SELECT n_name, COUNT(*) FROM nation` (#367). The check is
+// deliberately narrow: with a GROUP BY (or GROUPING SETS) present the legal
+// forms are richer (expressions over grouped columns, matching grouping
+// expressions), so those stay unchecked. A ref that does not certainly resolve
+// to one of this block's OWN sources is skipped too — it may be a correlated
+// outer reference (constant per invocation) or a niladic the parser reads as a
+// column — as is the whole check when any source is unenumerable.
+func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
+	if from == nil || from.open || len(info.GroupBy) > 0 || len(info.GroupingSets) > 0 {
+		return nil
+	}
+	hasAgg := false
+	for i := range info.Columns {
+		if info.Columns[i].IsAgg && !info.Columns[i].IsWindow {
+			hasAgg = true
+			break
+		}
+	}
+	if !hasAgg {
+		return nil
+	}
+	for i := range info.Columns {
+		col := info.Columns[i]
+		if col.IsAgg || col.IsWindow || col.Star {
+			continue
+		}
+		var refs []*plansql.ColRef
+		walkExpr(col.ASTExpr, &refs, nil)
+		for _, r := range refs {
+			c := strings.ToLower(r.Column)
+			if pgSystemColumns[c] {
+				continue
+			}
+			if r.Table != "" {
+				q := strings.ToLower(r.Table)
+				if cols, ok := from.quals[q]; !ok || !cols[c] {
+					continue
+				}
+			} else if !from.cols[c] {
+				continue
+			}
+			return sqlerr.New("42803", "column %q must appear in the GROUP BY clause or be used in an aggregate function", r.String())
+		}
+	}
+	return nil
 }
 
 // blockSubqueries collects the raw SQL of every subquery embedded in a block's

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -620,11 +621,23 @@ func TestArithExprDivByZero(t *testing.T) {
 		{"a": 10.0, "b": 0.0},
 	})
 
+	// A genuine zero divisor raises 22012 as a FatalEvalPanic the pipeline
+	// drivers convert to a query error (#367); NULL is only for NULL inputs.
 	expr := ArithExpr(ColumnRef("a"), ColumnRef("b"), "/")
-	result := expr(b, 0)
-	if result != nil {
-		t.Fatalf("expected nil for divide by zero, got %v", result)
-	}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected a FatalEvalPanic for divide by zero; evaluation returned normally")
+		}
+		fe, ok := r.(FatalEvalPanic)
+		if !ok {
+			t.Fatalf("panic value %T does not implement FatalEvalPanic", r)
+		}
+		if got := sqlerr.StateOf(fe.FatalEvalError()); got != "22012" {
+			t.Fatalf("SQLSTATE = %q, want 22012", got)
+		}
+	}()
+	expr(b, 0)
 }
 
 func TestArithExprNullInput(t *testing.T) {

@@ -57,6 +57,15 @@ func recoverFatalEval(r any) error {
 	panic(r)
 }
 
+// fatalEvalError is exec's own FatalEvalPanic carrier, for the closure-based
+// evaluators this package still owns (ArithExpr). expr has its twin.
+type fatalEvalError struct{ err error }
+
+func (f fatalEvalError) Error() string { return f.err.Error() }
+
+// FatalEvalError satisfies FatalEvalPanic.
+func (f fatalEvalError) FatalEvalError() error { return f.err }
+
 // Run executes the pipeline by pulling from source, transforming through
 // operators, and pushing to sink. When Workers > 1 and all operators
 // implement Cloneable, batches are processed by multiple goroutines
@@ -145,7 +154,19 @@ func (d *ChainDriver) Inspect(fn func(opIdx int, op UnaryOperator, out *batch.Re
 
 // Push runs b through the whole chain. The bool result is the pipeline's
 // `exhausted` signal: a DoneSignaler operator (LIMIT) reported satisfaction.
-func (d *ChainDriver) Push(ctx context.Context, b *batch.RecordBatch) (bool, error) {
+//
+// A FatalEvalPanic raised by an expression inside the chain is converted to
+// an error here, the same contract Pipeline.Run provides. ChainDriver's
+// callers (the worker's fragment drivers) run on errgroup goroutines with no
+// recover of their own, so without this a runtime query error — 22012
+// division by zero, 22P02 invalid cast — would take the worker process down
+// instead of failing the query.
+func (d *ChainDriver) Push(ctx context.Context, b *batch.RecordBatch) (exhausted bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = recoverFatalEval(r)
+		}
+	}()
 	return d.push(ctx, 0, b)
 }
 

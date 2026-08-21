@@ -23,6 +23,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/coordinator"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -1267,7 +1268,11 @@ func (c *pgConn) handleExecute(payload []byte) {
 			c.sendError("ERROR", sqlstateQueryCanceled, cancelMsg)
 			return
 		}
-		c.sendError("ERROR", "42000", err.Error())
+		code := "42000"
+		if s := sqlerr.StateOf(err); s != "" {
+			code = s
+		}
+		c.sendError("ERROR", code, err.Error())
 		return
 	}
 

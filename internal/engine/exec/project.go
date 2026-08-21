@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -485,7 +486,9 @@ func ArithExpr(left, right Expression, op string) Expression {
 			return lf * rf
 		case "/":
 			if rf == 0 {
-				return nil
+				// Operands are non-NULL here: a genuine zero divisor is a
+				// query error (SQLSTATE 22012), not a NULL (#367).
+				panic(fatalEvalError{sqlerr.New("22012", "division by zero")})
 			}
 			return lf / rf
 		default:
