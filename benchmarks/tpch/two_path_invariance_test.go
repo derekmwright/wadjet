@@ -2725,6 +2725,51 @@ func twoPathCorpus() []twoPathQuery {
 				WHERE NOT EXISTS (SELECT 1 FROM customer c2
 					WHERE c2.c_nationkey < c1.c_nationkey AND c2.c_acctbal > 9000)`,
 			assertA: assertCorrelatedExistsCount("NOT EXISTS over an unprojected correlation", true)},
+
+		// #375: a five-table join chain whose unqualified WHERE compares
+		// columns of DIFFERENT types across the chain (o_totalprice is
+		// FLOAT64, r_regionkey INT32). The vectorized col-col filter kernel
+		// resolved from the LEFT column's type only and read the right
+		// vector's empty Float64Data — a panic, `index out of range [i] with
+		// length 0`. The QUALIFIED spelling of the same WHERE never saw the
+		// kernel (dotted names take the row-at-a-time path), which is why the
+		// unqualified form is load-bearing here. The absolute answer is
+		// pinned against DuckDB by this entry's twin in duckdbCorpus (this
+		// suite runs on its own generated data, so no row count is pinned
+		// here); pre-fix, BOTH arms panicked, so expectRows plus the two-arm
+		// row compare is what this entry holds.
+		twoPathQuery{name: "MixedTypeCrossTableFilterJoinChain", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT t4.o_orderkey AS c8
+				FROM customer t0
+				JOIN nation   t1 ON t0.c_nationkey = t1.n_nationkey
+				JOIN region   t2 ON t1.n_regionkey = t2.r_regionkey
+				JOIN supplier t3 ON t1.n_nationkey = t3.s_nationkey
+				LEFT JOIN orders t4 ON t0.c_custkey = t4.o_custkey
+				WHERE o_totalprice <> r_regionkey`},
+		// #378: ORDER BY an aliased column that is also the projected column.
+		// In a parallel pipeline the primary Sort could finish having
+		// consumed nothing itself (warmup batch fully filtered, every source
+		// batch claimed by a clone worker), and MergeSink handed it the
+		// clones' batches but not their schema — finalize then gathered the
+		// merged rows into ZERO output columns: right row count, rows with no
+		// columns at all, varying run to run with goroutine scheduling. The
+		// assertA half holds even when both arms fail alike: every row must
+		// CARRY the projected column, in the asked-for order.
+		twoPathQuery{name: "OrderByAliasedJoinColumnAlsoProjected", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT t1.ps_suppkey AS c6
+				FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey
+				WHERE t1.ps_partkey > 500
+				ORDER BY t1.ps_suppkey`,
+			wantCols: []string{"c6"}, wantRows: 6000,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				for i, r := range rows {
+					if _, ok := r["c6"]; !ok {
+						tb.Fatalf("row %d carries no c6 column (%v) — the #378 rows-with-no-columns mode", i, r)
+					}
+				}
+				assertOrderedBy(tb, rows, false, "c6", func(r map[string]any) float64 { return cellNum(r, "c6") })
+			}},
 	)
 
 	return out

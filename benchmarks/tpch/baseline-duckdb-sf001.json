@@ -779,6 +779,17 @@
       "fine": "839747bbade0bd4a",
       "coarse": "839747bbade0bd4a"
     },
+    "MixedTypeCrossTableFilterJoinChain": {
+      "source": "duckdb",
+      "row_count": 58711,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c8"
+      ],
+      "fine": "ce52b8bdc88ee1ab",
+      "coarse": "ce52b8bdc88ee1ab"
+    },
     "ModeGrouped": {
       "source": "duckdb",
       "row_count": 3,
@@ -1196,6 +1207,17 @@
       ],
       "fine": "eea8254c7500ba3d",
       "coarse": "eea8254c7500ba3d"
+    },
+    "OrderByAliasedJoinColumnAlsoProjected": {
+      "source": "duckdb",
+      "row_count": 6000,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "c6"
+      ],
+      "fine": "e5f302e364ebd502",
+      "coarse": "e5f302e364ebd502"
     },
     "OrderByExpression": {
       "source": "duckdb",

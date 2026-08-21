@@ -1299,6 +1299,34 @@ func duckdbCorpus() []duckdbCase {
 			knownBugArm: armDAG,
 			knownBug:    "the stage DAG answers 0 for any per-row correlated subquery (see above)",
 		},
+		// #375: an unqualified WHERE comparing columns of DIFFERENT types
+		// (FLOAT64 o_totalprice <> INT32 r_regionkey) across a five-table
+		// join chain ending in a LEFT JOIN. The col-col filter kernel
+		// resolved from the left column's type only and panicked indexing
+		// the right vector's empty typed slice; the qualified spelling never
+		// saw the kernel, which is what made the unqualified form
+		// load-bearing.
+		duckdbCase{name: "MixedTypeCrossTableFilterJoinChain",
+			sql: `SELECT t4.o_orderkey AS c8
+				FROM customer t0
+				JOIN nation   t1 ON t0.c_nationkey = t1.n_nationkey
+				JOIN region   t2 ON t1.n_regionkey = t2.r_regionkey
+				JOIN supplier t3 ON t1.n_nationkey = t3.s_nationkey
+				LEFT JOIN orders t4 ON t0.c_custkey = t4.o_custkey
+				WHERE o_totalprice <> r_regionkey`,
+		},
+		// #378: ORDER BY an aliased join column that is also the projected
+		// column. The parallel Sort's MergeSink dropped the clones' schema
+		// when the primary consumed nothing itself, so the sorted result
+		// came back as rows with no columns at all — right row count,
+		// scheduling-dependent. Ordered content compare against DuckDB pins
+		// both the values and the sequence.
+		duckdbCase{name: "OrderByAliasedJoinColumnAlsoProjected",
+			sql: `SELECT t1.ps_suppkey AS c6
+				FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey
+				WHERE t1.ps_partkey > 500
+				ORDER BY t1.ps_suppkey`,
+		},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can
