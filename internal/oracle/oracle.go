@@ -211,14 +211,27 @@ func canonRowsWith(res *Result, cell func(any) (string, string)) *Canon {
 // Rows returns the number of canonical rows.
 func (b *Canon) Rows() int { return len(b.rows) }
 
+// canonCell renders floats through fingerprintFloat, not canonFloat
+// directly, for the same reason fingerprintCell does (see its doc comment):
+// an exact integer must render at full precision regardless of which Go
+// type carries it. That was designed for the CROSS-engine comparison, but
+// an optimization kill switch can move a same-engine value between int64
+// and float64 too — WADJET_INT_ARITH=0 deliberately falls arithmetic like
+// `ClientIP - 1` back to the float64 path, same value, different Go type
+// (see BinOpNumeric's doc comment in internal/engine/expr/binop_numeric.go)
+// — so the intra-engine comparison needs the same integer-exactness
+// handling the inter-engine one already has (#301). Quantizing an exact
+// integer to 6 significant digits truncated real digits and manufactured a
+// divergence between two settings that both computed -1000213612 exactly;
+// it never was a value or typing bug.
 func canonCell(v any) (fine, rough string) {
 	switch tv := v.(type) {
 	case nil:
 		return "<null>", "<null>"
 	case float64:
-		return canonFloat(tv, 6), canonFloat(tv, 4)
+		return fingerprintFloat(tv, 6), fingerprintFloat(tv, 4)
 	case float32:
-		return canonFloat(float64(tv), 6), canonFloat(float64(tv), 4)
+		return fingerprintFloat(float64(tv), 6), fingerprintFloat(float64(tv), 4)
 	case []byte:
 		s := string(tv)
 		return s, s
