@@ -403,12 +403,27 @@ func TestShuffleDecodeAhead_PressureFlaps(t *testing.T) {
 
 // waitTokenStalled polls until the reader's scanner parks in admit's token
 // wait — the only state in which §2.2 donations are accepted.
+//
+// Requires undelivered > 0 alongside tokenStalled, not tokenStalled alone.
+// A caller that has already pulled one batch (opening the file, or any
+// other prior Next) has one delivery credit in flight: when that credit's
+// Broadcast lands, undelivered drops to 0 immediately, but the parked
+// scanner goroutine only clears tokenStalled once it actually resumes and
+// re-enters admit's loop — an OS-scheduling-dependent delay, worse under
+// contention. In that gap tokenStalled reads true while the scanner is
+// already committed to falling through to the cursor-exempt branch on
+// resume (needing no token at all), so a donation attempted in the gap is
+// refused once the scanner catches up: gate.donations stays 0. undelivered
+// > 0 rules that gap out — the two fields can only read true together while
+// the scanner is durably parked on a real token need, because nothing
+// besides a delivery credit (already accounted for by the caller's prior
+// Next) can move undelivered without going through admit's same lock.
 func waitTokenStalled(tb testing.TB, d *shuffleDecodeAhead) {
 	tb.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		d.mu.Lock()
-		stalled := d.tokenStalled
+		stalled := d.tokenStalled && d.undelivered > 0
 		d.mu.Unlock()
 		if stalled {
 			return
