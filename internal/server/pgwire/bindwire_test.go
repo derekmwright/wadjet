@@ -355,12 +355,15 @@ func TestParameterDescription(t *testing.T) {
 			want:   []uint32{oidInt8},
 		},
 		{
-			// Nothing declared: one entry per placeholder, all unknown. A
-			// count of zero would have been a lie about the statement.
-			name:   "undeclared parameters report unknown",
+			// Nothing declared: one entry per placeholder, INFERRED from the
+			// comparison each stands in (#365). A count of zero would have
+			// been a lie about the statement, and OID 0 for a parameter whose
+			// use decides a type left the client and server free to disagree
+			// about the encoding.
+			name:   "undeclared parameters infer from their comparisons",
 			sql:    "SELECT id FROM users WHERE id = $1 AND name = $2",
 			params: []boundParam{textParam(oidUnknown, "2"), textParam(oidUnknown, "bob")},
-			want:   []uint32{oidUnknown, oidUnknown},
+			want:   []uint32{oidInt4, oidText},
 		},
 		{
 			name:   "no parameters",
@@ -369,11 +372,12 @@ func TestParameterDescription(t *testing.T) {
 			want:   []uint32{},
 		},
 		{
-			// A repeated placeholder is one parameter, not two.
+			// A repeated placeholder is one parameter, not two. Both uses
+			// compare against int columns, so it infers int4.
 			name:   "repeated placeholder counts once",
 			sql:    "SELECT id FROM users WHERE id = $1 OR visits = $1",
 			params: []boundParam{textParam(oidUnknown, "2")},
-			want:   []uint32{oidUnknown},
+			want:   []uint32{oidInt4},
 		},
 	}
 
@@ -430,8 +434,10 @@ func TestParameterDescriptionCountsPlaceholdersNotDeclarations(t *testing.T) {
 			break
 		}
 	}
-	if len(oids) != 2 || oids[0] != oidInt4 || oids[1] != oidUnknown {
-		t.Fatalf("ParameterDescription = %v, want [%d %d]", oids, oidInt4, oidUnknown)
+	// The declared type comes first; the undeclared second placeholder is
+	// inferred from its comparison against the text column (#365).
+	if len(oids) != 2 || oids[0] != oidInt4 || oids[1] != oidText {
+		t.Fatalf("ParameterDescription = %v, want [%d %d]", oids, oidInt4, oidText)
 	}
 }
 
@@ -709,8 +715,9 @@ func TestPgxAndLibPQTextParams(t *testing.T) {
 }
 
 // TestPgxDescribeReportsParameterCount checks the count a driver sees for a
-// statement it has not declared types for: one entry per placeholder, each
-// unknown. pgx surfaces it as StatementDescription.ParamOIDs.
+// statement it has not declared types for: one entry per placeholder — the
+// count is the property here, whatever type each entry inferred (#365).
+// pgx surfaces it as StatementDescription.ParamOIDs.
 func TestPgxDescribeReportsParameterCount(t *testing.T) {
 	_, srv := setupRealDB(t)
 	ctx := context.Background()
@@ -741,10 +748,11 @@ func TestPgxDescribeReportsParameterCount(t *testing.T) {
 			if len(sd.ParamOIDs) != tt.want {
 				t.Fatalf("ParamOIDs = %v, want %d entries", sd.ParamOIDs, tt.want)
 			}
+			// Every placeholder here stands against a users column, so each
+			// entry is inferred rather than unknown (#365).
 			for i, oid := range sd.ParamOIDs {
-				if oid != oidUnknown {
-					t.Errorf("parameter %d OID = %d, want %d (unknown — this "+
-						"server infers no parameter types)", i, oid, oidUnknown)
+				if oid == oidUnknown {
+					t.Errorf("parameter %d OID = 0 (unknown), want the type inferred from its comparison", i)
 				}
 			}
 		})

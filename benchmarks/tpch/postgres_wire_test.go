@@ -574,21 +574,11 @@ func wireCorpus() []wireCase {
 			paramOIDs: []uint32{23}, params: [][]byte{int4Text(7)}},
 		// The same statement with the OID NOT declared, which is what a client
 		// that lets the server infer parameter types sends — and the shape
-		// behind DataGrip's "Bad value for type int : f".
+		// behind DataGrip's "Bad value for type int : f". The server must
+		// infer int4 from the comparison for ParameterDescription AND bind the
+		// value to the same row the declared path binds to (#365).
 		{name: "ParamInt4Inferred", sql: `SELECT n_nationkey, n_name FROM nation WHERE n_nationkey = $1`,
-			params: [][]byte{int4Text(7)},
-			pins: map[string]string{
-				wirePropParamOIDs: "WADJET BUG (pgwire): ParameterDescription answers OID 0 (unspecified) " +
-					"where PostgreSQL infers int4 from the comparison. OID 0 is legal in the protocol, but " +
-					"it makes the client choose the encoding, and the row below shows Wadjet then " +
-					"misreads what it chose. (#365)",
-				wirePropValuesText: "WADJET BUG (pgwire): with the parameter's type undeclared, the bound " +
-					"value 7 matches n_nationkey = 0 — a WRONG ROW, not an error. The declared-OID entry " +
-					"beside it (ParamInt4Text) answers correctly, which localizes this to the inference " +
-					"path and not to parameter binding in general. (#365)",
-				wirePropBinaryDecode: "WADJET BUG (pgwire): the same wrong row under a binary result " +
-					"format — the bytes decode fine, to the values of n_nationkey = 0. (#365)",
-			}},
+			params: [][]byte{int4Text(7)}},
 		{name: "ParamText", sql: `SELECT n_nationkey FROM nation WHERE n_name = $1`,
 			paramOIDs: []uint32{25}, params: [][]byte{[]byte("BRAZIL")}},
 		// An aggregate over a parameterized filter, so the parameter has to

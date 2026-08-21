@@ -244,6 +244,7 @@ type pgConn struct {
 	describeCancel  string                  // set when that failure was a cancellation: the 57014 message to replay
 	describeSynth   *synthAnswer            // cached Describe-time introspection answer
 	describedSQL    string                  // statement the three caches above belong to
+	paramOIDCache   map[string][]uint32     // per-statement inferred parameter OIDs (see paraminfer.go)
 
 	// Transaction state: 'I' = idle, 'T' = in transaction, 'E' = failed
 	txState byte
@@ -951,6 +952,14 @@ func (c *pgConn) handleBind(payload []byte) {
 		}
 	}
 
+	// Fill in the parameter types the client left to the server. An OID-0
+	// parameter's text bytes used to render as a quoted string, so an int
+	// column compared against '7' matched the wrong row (#365). Inference
+	// gives renderParam the same OID ParameterDescription reports.
+	if inferred := c.inferParamOIDs(sql, oids); len(inferred) >= len(oids) {
+		oids = inferred
+	}
+
 	// Read the parameters and render each as the SQL literal that stands in
 	// for it. The planner takes SQL text, not bound values, so substitution
 	// is how a parameter reaches it — and the literal has to carry the
@@ -1047,17 +1056,16 @@ func (c *pgConn) handleDescribe(payload []byte) {
 		}
 
 		// ParameterDescription: one OID per placeholder (issue #305 item 9).
-		// A client that declared types at Parse gets them echoed back. For
-		// the ones it left to the server — and for a statement that declared
-		// none at all — the answer is OID 0, "unknown". Wadjet infers no
-		// parameter types, so 0 is the honest report and every driver
-		// understands it; claiming zero parameters for a statement that has
-		// three was not honest, and pgJDBC reads the count to size its
-		// parameter list.
-		if n := countParamPlaceholders(sql); n > len(oids) {
-			padded := make([]uint32, n)
-			copy(padded, oids)
-			oids = padded
+		// A client that declared types at Parse gets them echoed back. The
+		// ones it left to the server are INFERRED from their comparison
+		// context where possible (#365) — the same answer Bind renders by,
+		// so the client's encoding and the server's reading cannot disagree.
+		// A placeholder inference cannot type stays OID 0, "unknown", which
+		// every driver understands; claiming zero parameters for a statement
+		// that has three was not honest, and pgJDBC reads the count to size
+		// its parameter list.
+		if inferred := c.inferParamOIDs(sql, oids); len(inferred) >= len(oids) {
+			oids = inferred
 		}
 		c.buf = c.buf[:0]
 		c.buf = appendInt16(c.buf, int16(len(oids)))
