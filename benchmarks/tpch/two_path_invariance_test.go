@@ -3335,9 +3335,10 @@ func twoPathCorpus() []twoPathQuery {
 		// the same way (resolveJoinNeededColumns). wantCols is the load-
 		// bearing assertion — the two-arm compare realigns arm B onto arm
 		// A's columns, so extra columns and wrong names slide through it.
-		// Entries stay unordered where the ORDER BY would key on the
-		// renamed alias: that face of the passthrough is #386, pinned in
-		// the DuckDB corpus.
+		// Entries here stay unordered where the ORDER BY would key on the
+		// renamed alias: that face of the passthrough was #386, fixed in
+		// attachScanSelectProjections and asserted with explicit order
+		// checks in its own block below.
 		twoPathQuery{name: "SubqueryRenamedBare", cmp: cmpUnordered, expectRows: true,
 			sql:      `SELECT k FROM (SELECT r_regionkey AS k FROM region) t`,
 			wantRows: 5, wantCols: []string{"k"}},
@@ -3376,6 +3377,84 @@ func twoPathCorpus() []twoPathQuery {
 						tb.Errorf("r_name value %q looks like the REAL r_name, not the aliased r_comment", s)
 					}
 				}
+			}},
+
+		// --- #386: ORDER BY on a nested subquery rename no-oped on the DAG ---
+		//
+		// Same passthrough as #385, order face: the sort stage keyed on the
+		// alias, no stage emitted it, and exec.Sort silently skipped the
+		// unresolvable key — rows came back in scan order, so every ASC
+		// spelling over an already-sorted fixture column passed by luck.
+		// Fixed by materializing the alias at the producing fragment
+		// (attachScanSelectProjections resolves each forwarded name through
+		// nested rename-only Projects), and exec.Sort now ERRORS on a key
+		// that resolves to no column instead of skipping it. The absolute
+		// order assertions below are chosen so scan order cannot satisfy
+		// them.
+		twoPathQuery{name: "SubqueryRenamedOrderDesc", cmp: cmpOrdered, expectRows: true,
+			sql:      `SELECT k FROM (SELECT r_regionkey AS k FROM region) t ORDER BY k DESC`,
+			wantRows: 5, wantCols: []string{"k"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, true, "k", func(r map[string]any) float64 {
+					return cellNum(r, "k")
+				})
+			}},
+		// n_regionkey's scan order (0,1,1,1,4,0,3,...) is NOT ascending, so
+		// this ASC face cannot pass by scan-order luck.
+		twoPathQuery{name: "SubqueryRenamedOrderAsc", cmp: cmpOrdered, expectRows: true,
+			sql:      `SELECT k FROM (SELECT n_regionkey AS k FROM nation) t ORDER BY k`,
+			wantRows: 25, wantCols: []string{"k"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "k", func(r map[string]any) float64 {
+					return cellNum(r, "k")
+				})
+			}},
+		twoPathQuery{name: "SubqueryRenamedChainedOrder", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT a FROM (SELECT b AS a FROM (SELECT r_regionkey AS b FROM region) u) t
+				ORDER BY a DESC`,
+			wantRows: 5, wantCols: []string{"a"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, true, "a", func(r map[string]any) float64 {
+					return cellNum(r, "a")
+				})
+			}},
+		// LIMIT rides the sort: the top 3 keys DESC are exactly 4,3,2 — a
+		// no-oped sort would keep the first three scan rows (0,1,2) instead.
+		// Row-level ordered compare is sound here: the keys are distinct, so
+		// no tie sits at the cut.
+		twoPathQuery{name: "SubqueryRenamedOrderLimit", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT k FROM (SELECT r_regionkey AS k FROM region) t
+				ORDER BY k DESC LIMIT 3`,
+			wantRows: 3, wantCols: []string{"k"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				want := []float64{4, 3, 2}
+				for i, w := range want {
+					if i < len(rows) && cellNum(rows[i], "k") != w {
+						tb.Errorf("row %d: k = %v, want %v", i, rows[i]["k"], w)
+					}
+				}
+			}},
+		// The alias n_name shadows the REAL n_name and carries n_regionkey
+		// values: sorting by the real column (the pre-fix defect) yields
+		// alphabetical scan order (0,1,1,1,4,...), not ascending values.
+		twoPathQuery{name: "SubqueryRenamedShadowOrder", cmp: cmpOrdered, expectRows: true,
+			sql:      `SELECT n_name FROM (SELECT n_regionkey AS n_name FROM nation) t ORDER BY n_name`,
+			wantRows: 25, wantCols: []string{"n_name"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "n_name", func(r map[string]any) float64 {
+					return cellNum(r, "n_name")
+				})
+			}},
+		// The rename forwarded through a join, sort keyed on it first.
+		twoPathQuery{name: "SubqueryRenamedJoinOrder", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_name, k FROM nation JOIN (SELECT r_regionkey AS k FROM region) t
+				ON n_regionkey = k ORDER BY k DESC, n_name`,
+			wantRows: 25, wantCols: []string{"n_name", "k"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, true, "k", func(r map[string]any) float64 {
+					return cellNum(r, "k")
+				})
 			}},
 	)
 	return out

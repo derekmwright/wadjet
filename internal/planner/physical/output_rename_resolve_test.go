@@ -155,8 +155,11 @@ func TestPlanDistributed_NestedRenameResolvesGatherSource(t *testing.T) {
 		sql  string
 		want map[string]string // From -> To
 	}{
+		// No ORDER BY: with a sort in the plan the #386 pass materializes
+		// the alias at the scan and re-points the rename to {k -> k}
+		// instead (covered by TestAttachScanSelectProjections_NestedRename).
 		{name: "bare forward",
-			sql:  `SELECT k FROM (SELECT r_regionkey AS k FROM region) t ORDER BY k`,
+			sql:  `SELECT k FROM (SELECT r_regionkey AS k FROM region) t`,
 			want: map[string]string{"r_regionkey": "k"}},
 		{name: "multi rename",
 			sql:  `SELECT k1, k2 FROM (SELECT r_regionkey AS k1, r_name AS k2 FROM region) t`,

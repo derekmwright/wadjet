@@ -2398,9 +2398,42 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		}
 		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ})
 	}
+	// #386: a NESTED subquery rename never trips anyRenamed — the outer list
+	// merely forwards the alias (`SELECT k FROM (SELECT r_regionkey AS k FROM
+	// region) t ORDER BY k DESC`), so the pass declined, the sort keyed on a
+	// column no stage emits, and the ORDER BY silently no-oped (ASC spellings
+	// passed only by scan-order luck; an alias shadowing a real column sorted
+	// by the WRONG one). Resolve each simple column reference through nested
+	// rename-only Projects (the #385 walk): the spec's Expr becomes the
+	// SOURCE column the streams actually carry, its Name keeps the outer
+	// spelling, and the substitution itself is a trigger for the pass.
+	var renameChild *logical.Node
+	if len(projNode.Children) == 1 {
+		renameChild = projNode.Children[0]
+	}
+	anyNestedRename := false
+	for j := range specs {
+		if proj[j].ASTExpr != nil && !isSimpleColRefForRename(proj[j].ASTExpr) {
+			continue // an expression's refs need AST substitution, not a name swap (#387)
+		}
+		src := resolveOutputRenameSource(specs[j].Name, renameChild)
+		if strings.EqualFold(src, specs[j].Name) && strings.Contains(specs[j].Name, ".") {
+			// Qualified spelling: the nested Project's alias is bare — the
+			// same qualified↔bare fallback the gather applies.
+			if bare := specs[j].Name[strings.LastIndexByte(specs[j].Name, '.')+1:]; bare != "" {
+				if r := resolveOutputRenameSource(bare, renameChild); !strings.EqualFold(r, bare) {
+					src = r
+				}
+			}
+		}
+		if !strings.EqualFold(src, specs[j].Name) {
+			specs[j].Expr = src
+			anyNestedRename = true
+		}
+	}
 	// The other trigger is a sort key naming an alias, which needs the target
 	// stage's keys — decided below, once the target is known.
-	if !hasExpr && !anyRenamed(proj, specs) {
+	if !hasExpr && !anyRenamed(proj, specs) && !anyNestedRename {
 		return
 	}
 	var gather *Stage
@@ -2551,17 +2584,21 @@ func anyRenamed(proj []logical.Projection, specs []ProjectExprSpec) bool {
 
 // sortKeysNeedAlias reports whether any sort key names a SELECT-list alias
 // that the producing stage does not emit under that name — the #316
-// condition. specs[j] carries the name the stage emits without an
-// alias-naming projection (the column or expression text); aliased[j] carries
-// the user's alias. A key matching an alias whose source is spelled
-// differently would find no column at all, or — when the alias shadows
-// another column of the input — the WRONG one, so the sort must be given the
-// projection that materializes the alias.
+// condition. specs[j].Expr carries what the stage emits without an
+// alias-naming projection (the source column after nested-rename resolution,
+// or the expression text); aliased[j] carries the user's alias. A key
+// matching an alias whose source is spelled differently would find no column
+// at all, or — when the alias shadows another column of the input — the
+// WRONG one, so the sort must be given the projection that materializes the
+// alias. Comparing the key against Expr rather than Name is what lets a
+// NESTED rename trip the condition (#386): there the outer list has no alias
+// of its own, so Name equals the key, but the stream carries the resolved
+// source column.
 func sortKeysNeedAlias(sortKeys []SortKeySpec, specs, aliased []ProjectExprSpec) bool {
 	for _, k := range sortKeys {
 		for j := range aliased {
 			if strings.EqualFold(aliased[j].Name, k.Column) &&
-				!strings.EqualFold(specs[j].Name, k.Column) {
+				!strings.EqualFold(specs[j].Expr, k.Column) {
 				return true
 			}
 		}

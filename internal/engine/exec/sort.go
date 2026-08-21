@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -77,6 +78,18 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.schema == nil {
+		// A key that resolves to no column is a planner bug, and skipping it
+		// is how that bug stays invisible: the sort "succeeds" and the rows
+		// come back in arbitrary order (#313/#314/#316/#386 all wore this
+		// face). Fail the first batch instead — the same loud contract the
+		// sort-merge join adopted. Checked once per input, here, because
+		// every downstream resolution (top-K compaction, spill runs, the
+		// final columnar sort) shares this schema.
+		for _, k := range s.Keys {
+			if columnIndexFallback(b, k.Column) < 0 {
+				return fmt.Errorf("sort: key column %q does not exist in the input schema", k.Column)
+			}
+		}
 		s.schema = b.Schema
 		// Register on first Consume when a SpillManager is configured. We
 		// don't register in Init because (1) Init runs before any state

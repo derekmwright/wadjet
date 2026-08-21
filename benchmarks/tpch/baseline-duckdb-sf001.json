@@ -2339,6 +2339,17 @@
       "fine": "026d8ad3dfa1f2aa",
       "coarse": "026d8ad3dfa1f2aa"
     },
+    "SubqueryRenamedChainedOrder": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "a"
+      ],
+      "fine": "09bf9f1926b11d4e",
+      "coarse": "09bf9f1926b11d4e"
+    },
     "SubqueryRenamedComputedMix": {
       "source": "duckdb",
       "row_count": 5,
@@ -2362,6 +2373,18 @@
       ],
       "fine": "34c88d2d37d71bbe",
       "coarse": "34c88d2d37d71bbe"
+    },
+    "SubqueryRenamedJoinOrder": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "k"
+      ],
+      "fine": "d08567e56c9b11f5",
+      "coarse": "d08567e56c9b11f5"
     },
     "SubqueryRenamedJoinProbe": {
       "source": "duckdb",
@@ -2387,6 +2410,17 @@
       "fine": "26b791d435a9eb1a",
       "coarse": "26b791d435a9eb1a"
     },
+    "SubqueryRenamedOrderAsc": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k"
+      ],
+      "fine": "ccf44a2772abb4d8",
+      "coarse": "ccf44a2772abb4d8"
+    },
     "SubqueryRenamedOrderDesc": {
       "source": "duckdb",
       "row_count": 5,
@@ -2394,6 +2428,28 @@
       "ordered": true,
       "columns": [
         "k"
+      ],
+      "fine": "09bf9f1926b11d4e",
+      "coarse": "09bf9f1926b11d4e"
+    },
+    "SubqueryRenamedOrderLimit": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k"
+      ],
+      "fine": "e7ed2d168a49164f",
+      "coarse": "e7ed2d168a49164f"
+    },
+    "SubqueryRenamedOuterAliasOrder": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "j"
       ],
       "fine": "09bf9f1926b11d4e",
       "coarse": "09bf9f1926b11d4e"
@@ -2408,6 +2464,17 @@
       ],
       "fine": "05b51c21305797da",
       "coarse": "05b51c21305797da"
+    },
+    "SubqueryRenamedShadowOrder": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name"
+      ],
+      "fine": "ccf44a2772abb4d8",
+      "coarse": "ccf44a2772abb4d8"
     },
     "SubqueryRenamedWhere": {
       "source": "duckdb",

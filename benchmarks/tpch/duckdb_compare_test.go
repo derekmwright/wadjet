@@ -1631,12 +1631,34 @@ func duckdbCorpus() []duckdbCase {
 			FROM (SELECT b AS a FROM (SELECT r_regionkey AS b FROM region) u) t`},
 		duckdbCase{name: "SubqueryRenamedShadow", sql: `SELECT r_name
 			FROM (SELECT r_comment AS r_name FROM region) t`},
+		// #386's family: ORDER BY on a nested subquery rename. The DESC face
+		// exposed the silent sort no-op; the ASC face sorts n_regionkey,
+		// whose scan order (0,1,1,1,4,0,3,...) is NOT ascending, so it
+		// asserts an order scan luck cannot supply (single column, so tied
+		// rows are identical and the ordered digest stays deterministic);
+		// the shadow face must sort by the ALIASED source (r_comment), not
+		// the real r_name the stream also carries; plus chained rename,
+		// LIMIT, and a rename forwarded through a join.
 		duckdbCase{name: "SubqueryRenamedOrderDesc", sql: `SELECT k
-			FROM (SELECT r_regionkey AS k FROM region) t ORDER BY k DESC`,
-			knownBugArm: armDAG,
-			knownBug: "#386: the DAG's sort stage keys on the subquery's alias, which no stage " +
-				"emits (the rename-only Project is a passthrough), so the sort silently no-ops — " +
-				"ASC spellings pass only by scan-order luck; DESC exposes it"},
+			FROM (SELECT r_regionkey AS k FROM region) t ORDER BY k DESC`},
+		duckdbCase{name: "SubqueryRenamedOrderAsc", sql: `SELECT k
+			FROM (SELECT n_regionkey AS k FROM nation) t ORDER BY k`},
+		duckdbCase{name: "SubqueryRenamedOuterAliasOrder", sql: `SELECT k AS j
+			FROM (SELECT r_regionkey AS k FROM region) t ORDER BY j DESC`},
+		duckdbCase{name: "SubqueryRenamedChainedOrder", sql: `SELECT a
+			FROM (SELECT b AS a FROM (SELECT r_regionkey AS b FROM region) u) t ORDER BY a DESC`},
+		duckdbCase{name: "SubqueryRenamedOrderLimit", sql: `SELECT k
+			FROM (SELECT r_regionkey AS k FROM region) t ORDER BY k DESC LIMIT 3`},
+		// Shadow with misaligned orders: the alias n_name carries
+		// n_regionkey values (0,1,1,1,4,...) while the REAL n_name sorts in
+		// scan order — keying the sort on the real column instead of the
+		// aliased source produces a different sequence, so this face cannot
+		// pass by luck (r_comment/r_name would sort identically).
+		duckdbCase{name: "SubqueryRenamedShadowOrder", sql: `SELECT n_name
+			FROM (SELECT n_regionkey AS n_name FROM nation) t ORDER BY n_name`},
+		duckdbCase{name: "SubqueryRenamedJoinOrder", sql: `SELECT n_name, k
+			FROM nation JOIN (SELECT r_regionkey AS k FROM region) t
+			ON n_regionkey = k ORDER BY k DESC, n_name`},
 		duckdbCase{name: "SubqueryRenamedComputedMix", sql: `SELECT k, k + 1 AS m
 			FROM (SELECT r_regionkey AS k FROM region) t ORDER BY k`,
 			knownBugArm: armDAG,
