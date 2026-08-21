@@ -1731,8 +1731,8 @@
         "avg_disc",
         "count_order"
       ],
-      "fine": "1a75adf99e214b44",
-      "coarse": "306538feb683cbe0"
+      "fine": "7c8b0aa794ade990",
+      "coarse": "d6c5f8e287ef4d5d"
     },
     "Q02": {
       "source": "duckdb",
@@ -1883,8 +1883,8 @@
         "ps_partkey",
         "value"
       ],
-      "fine": "0059d69e3491c66e",
-      "coarse": "1962812b9f2b0cee"
+      "fine": "b7102665d99c7b2f",
+      "coarse": "32b7d38d2bbe5ceb"
     },
     "Q12": {
       "source": "duckdb",
@@ -2280,8 +2280,8 @@
         "vs",
         "vp"
       ],
-      "fine": "873548e517f1c93b",
-      "coarse": "84c8832660ec5208"
+      "fine": "bb2954625dd80583",
+      "coarse": "5af5f97ecc9e3411"
     },
     "WhereClauseColumnConjunct": {
       "source": "duckdb",

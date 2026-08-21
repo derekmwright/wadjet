@@ -201,6 +201,38 @@ func TestTextCell(t *testing.T) {
 	}
 }
 
+// TestFingerprintSnapsNearIntegers pins the #377 remedy, ported from
+// benchmarks/tpch/fingerprint.go's TestSignatureSnapsNearIntegers: a float
+// sum that lands exactly on a whole number under one accumulation order and
+// an ULP away under another renders as "48051445" versus "4.80514e+07" — a
+// difference at EVERY precision, which is the one thing the dual-precision
+// policy cannot absorb. It is q09's failure mode at SF1 (two of thirteen
+// samples measured).
+func TestFingerprintSnapsNearIntegers(t *testing.T) {
+	cols := []string{"nation", "o_year", "sum_profit"}
+	row := func(v float64) []map[string]any {
+		return []map[string]any{{"nation": "ALGERIA", "o_year": "1998", "sum_profit": v}}
+	}
+
+	// The same answer, computed in two accumulation orders: one lands on
+	// the whole number, the other is 7e-9 below it (1.5e-16 relative).
+	onInteger := row(48051445)
+	offByAnUlp := row(48051444.999999993)
+
+	onFP := fp(cols, onInteger, true)
+	offFP := fp(cols, offByAnUlp, true)
+	if ok, detail := onFP.Match(offFP); !ok {
+		t.Fatalf("one ULP of accumulation noise around a whole number still breaks the digest: %s", detail)
+	}
+
+	// And the remedy must not swallow a real difference: 0.12 on 4.8e7 is
+	// 2.5e-9 relative, an order of magnitude past the snap window.
+	off := fp(cols, row(48051445.12), true)
+	if ok, _ := onFP.Match(off); ok {
+		t.Error("snapping swallowed a value that is not the same number")
+	}
+}
+
 func TestFingerprintEmptyResult(t *testing.T) {
 	empty := fp([]string{"a"}, nil, true)
 	if empty.Rows != 0 {

@@ -124,10 +124,51 @@ func fingerprintCell(v any) (fine, rough string) {
 	}
 }
 
+// snapEpsilon is how close to a whole number a float must sit (relative)
+// before fingerprintFloat treats it as that whole number. It sits midway on
+// a log scale between the worst accumulation noise measured at SF1
+// (2.9e-12) and the fine digest's own quantum (1e-6) — three orders of
+// margin on each side. Ported unchanged from
+// benchmarks/tpch/fingerprint.go's snapEpsilon/snapFloat (#377): that file
+// proved the remedy for its SF100 signatures first and scoped it there to
+// avoid blast radius on the then-175 committed SF0.01 baselines; this port
+// closes the same hole in the SF0.01 gate every one of those baselines
+// runs through.
+const snapEpsilon = 1e-9
+
+// snapNearInteger returns f rounded to the nearest whole number when f sits
+// within snapEpsilon (relative) of one, and f unchanged otherwise.
+//
+// fingerprintFloat's exact-integer branch is a DISCONTINUITY: an exact
+// integer renders as its full digits ("48051445") while every other value
+// quantizes ("4.80514e+07"), so two floats one ULP apart — the same answer,
+// computed in a different accumulation order, straddling a whole number —
+// can render differently at EVERY precision, which is the one thing the
+// dual-precision policy (match at 6 OR 4 significant digits) cannot absorb.
+// Snapping first removes the discontinuity from both sides — the reference
+// engine's answer renders through this same function — and cannot mask a
+// real error, since the fine quantum already absorbs a thousand times more.
+func snapNearInteger(f float64) float64 {
+	if f == 0 || math.IsNaN(f) || math.IsInf(f, 0) || math.Abs(f) >= 1<<53 {
+		return f
+	}
+	r := math.Round(f)
+	if r == f || r == 0 {
+		return f
+	}
+	if math.Abs(f-r) <= snapEpsilon*math.Abs(f) {
+		return r
+	}
+	return f
+}
+
 // fingerprintFloat renders an exact integer as its digits (so a SUM one
 // engine reports as BIGINT and the other as DOUBLE agree) and quantizes
-// everything else to prec significant digits.
+// everything else to prec significant digits. A value within snapEpsilon of
+// a whole number is snapped to it first (#377), so accumulation-order noise
+// straddling an integer boundary cannot flip which branch a cell takes.
 func fingerprintFloat(f float64, prec int) string {
+	f = snapNearInteger(f)
 	if f == math.Trunc(f) && math.Abs(f) < 1<<53 {
 		return strconv.FormatInt(int64(f), 10) // also collapses -0
 	}
