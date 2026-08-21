@@ -2,7 +2,321 @@
   "version": 1,
   "kind": "ground-truth",
   "scale": "SF100",
-  "generator": "",
-  "note": "SF100 VALUE-level gate: opaque per-query fingerprints (internal/oracle.Fingerprint) of the correctness variants in benchmarks/tpch/fingerprint.go. Deliberately carries NO result values — row counts and column names are structural, everything else is a truncated SHA-256 digest at 6 and 4 significant float digits. NOT YET POPULATED: every entry must come from an external reference engine (duckdb or trino) reading the SAME parquet the benchmark reads (s3://wadjet-bench-sf100-use2/tables/), which is a 280 GiB in-region job — see docs/design/sf100-value-fingerprints.md for the generator and how to run it during a benchmark window. Wadjet-produced fingerprints belong in a separate kind=\"regression\" file (tpch-bench --fingerprint-out) and are refused here by name; a self-fingerprint detects that an answer changed, it cannot establish that an answer is right.",
-  "queries": {}
+  "generator": "duckdb v1.3.2 (Ossivalis) 0b83e5d2f6 over s3://wadjet-bench-sf100-use2/, captured 2026-08-21T21:18:43Z (WADJET_FP_GENERATE=1)",
+  "note": "Ground truth. Every entry is DuckDB output over the parquet the benchmark reads; nothing here is derived from Wadjet, and the loader refuses an entry stamped otherwise. Values are deliberately absent: only row counts, column names, and opaque digests are stored.",
+  "queries": {
+    "q01": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 10,
+      "fine": "5dcce056df845ade",
+      "coarse": "5dcce056df845ade",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q02": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 106,
+      "fine": "89b1229dea6c929c",
+      "coarse": "e8cd6fb139fa919d",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q03": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "tiebreak": "l_orderkey",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 16,
+      "fine": "f2d440bb5e012839",
+      "coarse": "f2d440bb5e012839",
+      "why": "ORDER BY revenue DESC, o_orderdate ties when two orders shipped the same day for equal revenue; l_orderkey is the GROUP BY key and is projected"
+    },
+    "q04": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 11,
+      "fine": "16549bf41ce35325",
+      "coarse": "16549bf41ce35325",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q05": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "tiebreak": "n_name",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 11,
+      "fine": "498c953887722ee8",
+      "coarse": "498c953887722ee8",
+      "why": "ORDER BY revenue DESC alone; n_name is the GROUP BY key and is projected"
+    },
+    "q06": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 7,
+      "fine": "d53b31161bf69a24",
+      "coarse": "d53b31161bf69a24",
+      "why": "single-row result, no ORDER BY: the sequence is trivially total"
+    },
+    "q07": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 10,
+      "fine": "08ccd8658f6ce633",
+      "coarse": "08ccd8658f6ce633",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q08": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 8,
+      "fine": "66db5e943a5acbfb",
+      "coarse": "66db5e943a5acbfb",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q09": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 181,
+      "fine": "700c332071a54b38",
+      "coarse": "700c332071a54b38",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q10": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "tiebreak": "c_custkey",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 26,
+      "fine": "a42673760bc1478d",
+      "coarse": "a42673760bc1478d",
+      "why": "ORDER BY revenue DESC alone; c_custkey is the GROUP BY key and is projected"
+    },
+    "q11": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "tiebreak": "ps_partkey",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 92704,
+      "fine": "02fce5161fddf3b9",
+      "coarse": "02fce5161fddf3b9",
+      "why": "ORDER BY value DESC alone over ~93k rows at SF100; ps_partkey is the GROUP BY key and is projected"
+    },
+    "q12": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 8,
+      "fine": "ea2ee69f5488701a",
+      "coarse": "ea2ee69f5488701a",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q13": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 106,
+      "fine": "b395b49621c49d7f",
+      "coarse": "b395b49621c49d7f",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q14": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 7,
+      "fine": "231fd7b514184b4f",
+      "coarse": "231fd7b514184b4f",
+      "why": "single-row result, no ORDER BY: the sequence is trivially total"
+    },
+    "q15": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 7,
+      "fine": "d893397326cdd0b9",
+      "coarse": "d893397326cdd0b9",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q16": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 27846,
+      "fine": "63171b3ed378e202",
+      "coarse": "63171b3ed378e202",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q17": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 7,
+      "fine": "6fd704614f372a94",
+      "coarse": "6fd704614f372a94",
+      "why": "single-row result, no ORDER BY: the sequence is trivially total"
+    },
+    "q18": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "tiebreak": "o_orderkey",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 106,
+      "fine": "12b689f154f436a2",
+      "coarse": "12b689f154f436a2",
+      "why": "ORDER BY o_totalprice DESC, o_orderdate ties when one customer's orders share a total; o_orderkey is the GROUP BY key and is projected"
+    },
+    "q19": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 7,
+      "fine": "f291d0b848736007",
+      "coarse": "f291d0b848736007",
+      "why": "single-row result, no ORDER BY: the sequence is trivially total"
+    },
+    "q20": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 17977,
+      "fine": "d1a916ad4f7075c4",
+      "coarse": "d1a916ad4f7075c4",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q21": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 106,
+      "fine": "51e2c42be4135c54",
+      "coarse": "51e2c42be4135c54",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    },
+    "q22": {
+      "engine": "duckdb",
+      "engine_version": "v1.3.2 (Ossivalis) 0b83e5d2f6",
+      "dataset": "s3://wadjet-bench-sf100-use2/",
+      "captured_at": "2026-08-21T21:18:43Z",
+      "mode": "ordered-total",
+      "columns": [
+        "┌─────────┐"
+      ],
+      "row_count": 13,
+      "fine": "05146664f7c57b27",
+      "coarse": "05146664f7c57b27",
+      "why": "canonical ORDER BY already includes a unique key of the result"
+    }
+  }
 }
