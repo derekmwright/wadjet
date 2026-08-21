@@ -199,6 +199,43 @@ func TestEagerDispatchE2E(t *testing.T) {
 	}
 	edgesBefore := EagerEdgesPlanned.Load()
 	manifestsBefore := EagerManifestsPublished.Load()
+
+	// execute_stage_dag.go races each eager-capable dependency's real
+	// completion (done[depID]) against its task dispatch (f.dispatched) --
+	// real work, so dispatch almost always wins. SF001 producers finish in
+	// single-digit milliseconds, so under CPU contention (e.g. a parallel
+	// `go test -p 4 ./internal/...` load) the consumer's own
+	// per-dependency loop can be scheduled late enough that BOTH channels
+	// are already closed by the time it checks; Go's select then picks
+	// between two ready cases at random, so the eager path can lose even
+	// though nothing was actually wrong (#298: "eager engaged: edges=0
+	// manifests=0" reproduced under exactly this load).
+	//
+	// Holding EVERY stage's completion open (tried first) does not fix
+	// this: it also delays how long the consumer's own loop takes to walk
+	// its OTHER, non-eager dependencies before reaching the one that
+	// matters, so the producer gets the same extra time back and the race
+	// just moves, not resolves (confirmed empirically -- even a 1s
+	// across-the-board hold still lost the race under sustained
+	// contention). Gating on f.dispatched's own readiness targets only
+	// stages that are actually eager-feed producers (dispatch always
+	// happens before done for those, so the hook safely reads it after
+	// the fact) and leaves every other stage -- including the ones the
+	// consumer's loop visits first -- at full speed, so only the specific
+	// race this test cares about gets pushed, not the whole DAG's timing.
+	eagerDispatchStageCompletionHook = func(c *Coordinator, queryID, stageID string) {
+		f := c.eagerFeedHandle(queryID, stageID)
+		if f == nil {
+			return
+		}
+		select {
+		case <-f.dispatched:
+		default:
+			return // not an eager-feed producer stage -- nothing races here
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Cleanup(func() { eagerDispatchStageCompletionHook = nil })
 	treatment := runEagerE2EQuery(ctx, t, newCoord(true), sql, "eager")
 
 	assertEagerArmsIdentical(t, control, treatment)
