@@ -1599,11 +1599,50 @@ func duckdbCorpus() []duckdbCase {
 		// NULL-producing expression filters the NULL rows on both arms).
 		duckdbCase{name: "SubqueryRenamedWhere", sql: `SELECT k
 			FROM (SELECT r_regionkey AS k FROM region) t
-			WHERE k > 1 ORDER BY k`,
+			WHERE k > 1 ORDER BY k`},
+		// #385: walkStages treats a rename-only subquery Project as a
+		// passthrough, so no stage ever emits the alias — the gather's
+		// OutputRenames sourced the alias name, resolved nothing, and fell
+		// back to passing the full upstream width through under SOURCE
+		// names. Fixed by chasing each rename's source through nested
+		// Projects (resolveOutputRenameSource) and resolving a join's
+		// NeededColumns the same way (resolveJoinNeededColumns). The faces
+		// below cover the family: bare forward (full-width symptom),
+		// multi-rename, rename through a join (either side), rename above
+		// an aggregate subquery, chained renames, and an alias shadowing a
+		// real column of the same table (wrong-VALUES symptom: the DAG
+		// answered with the REAL r_name). Unordered entries stay unordered
+		// so they hold regardless of #386 (the ORDER-BY face of the same
+		// passthrough, pinned below).
+		duckdbCase{name: "SubqueryRenamedBare", sql: `SELECT k
+			FROM (SELECT r_regionkey AS k FROM region) t ORDER BY k`},
+		duckdbCase{name: "SubqueryRenamedMulti", sql: `SELECT k1, k2
+			FROM (SELECT r_regionkey AS k1, r_name AS k2 FROM region) t ORDER BY k1`},
+		duckdbCase{name: "SubqueryRenamedJoinBuild", sql: `SELECT n_name, k
+			FROM nation JOIN (SELECT r_regionkey AS k FROM region) t
+			ON n_regionkey = k ORDER BY n_name`},
+		duckdbCase{name: "SubqueryRenamedJoinProbe", sql: `SELECT k, r_name
+			FROM (SELECT n_regionkey AS k, n_name FROM nation) t JOIN region
+			ON k = r_regionkey ORDER BY r_name, k`},
+		duckdbCase{name: "SubqueryRenamedAboveAgg", sql: `SELECT k
+			FROM (SELECT n_regionkey AS k, COUNT(*) AS c FROM nation GROUP BY n_regionkey) t
+			ORDER BY k`},
+		duckdbCase{name: "SubqueryRenamedChained", sql: `SELECT a
+			FROM (SELECT b AS a FROM (SELECT r_regionkey AS b FROM region) u) t`},
+		duckdbCase{name: "SubqueryRenamedShadow", sql: `SELECT r_name
+			FROM (SELECT r_comment AS r_name FROM region) t`},
+		duckdbCase{name: "SubqueryRenamedOrderDesc", sql: `SELECT k
+			FROM (SELECT r_regionkey AS k FROM region) t ORDER BY k DESC`,
 			knownBugArm: armDAG,
-			knownBug: "#385: the DAG drops a rename-only subquery projection — rows and values are " +
-				"right (the #384 substitution holds on both arms) but the output column keeps its " +
-				"SOURCE name r_regionkey; the bare no-WHERE shape even returns full scan width"},
+			knownBug: "#386: the DAG's sort stage keys on the subquery's alias, which no stage " +
+				"emits (the rename-only Project is a passthrough), so the sort silently no-ops — " +
+				"ASC spellings pass only by scan-order luck; DESC exposes it"},
+		duckdbCase{name: "SubqueryRenamedComputedMix", sql: `SELECT k, k + 1 AS m
+			FROM (SELECT r_regionkey AS k FROM region) t ORDER BY k`,
+			knownBugArm: armDAG,
+			knownBug: "#387: attachScanSelectProjections writes the outer SELECT list against the " +
+				"subquery's OUTPUT schema (references alias k), but the scan fragment carries the " +
+				"SOURCE name r_regionkey — the DAG errors with 'column \"k\" does not exist'"},
 		duckdbCase{name: "SubqueryComputedWhereMixed", sql: `SELECT r_regionkey, rk2
 			FROM (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) t
 			WHERE rk2 >= r_regionkey ORDER BY r_regionkey`},

@@ -2304,10 +2304,22 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if renames := extractOutputRenames(node); len(renames) > 0 {
 		// A group key walkStages had to resolve through a subquery's rename
 		// is emitted under the SOURCE column, so the rename that names the
-		// result has to read from there (#355).
+		// result has to read from there (#355). The general case of the same
+		// passthrough (#385): a source naming a NESTED Project's alias —
+		// the outer SELECT merely forwarding a subquery's rename — is chased
+		// to the column the streams actually carry, because no stage ever
+		// applies the rename itself.
+		var renameChild *logical.Node
+		if pn := findOutputProjectionNode(node); pn != nil && len(pn.Children) == 1 {
+			renameChild = pn.Children[0]
+		}
 		for i := range renames {
 			if src, ok := p.aggStageRenames[strings.ToLower(renames[i].From)]; ok {
 				renames[i].From = src
+				continue
+			}
+			if renames[i].Expr == nil {
+				renames[i].From = resolveOutputRenameSource(renames[i].From, renameChild)
 			}
 		}
 		for i := range stages {
@@ -4753,7 +4765,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			ID:                 stageID,
 			Type:               joinType,
 			Tasks:              joinTasks,
-			Columns:            node.NeededColumns,
+			Columns:            resolveJoinNeededColumns(node),
 			JoinType:           jt,
 			JoinLeftKeys:       leftKeys,
 			JoinRightKeys:      rightKeys,

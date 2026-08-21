@@ -2306,6 +2306,109 @@
       "fine": "03b841b1875ce8c6",
       "coarse": "03b841b1875ce8c6"
     },
+    "SubqueryRenamedAboveAgg": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k"
+      ],
+      "fine": "026d8ad3dfa1f2aa",
+      "coarse": "026d8ad3dfa1f2aa"
+    },
+    "SubqueryRenamedBare": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k"
+      ],
+      "fine": "026d8ad3dfa1f2aa",
+      "coarse": "026d8ad3dfa1f2aa"
+    },
+    "SubqueryRenamedChained": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "a"
+      ],
+      "fine": "026d8ad3dfa1f2aa",
+      "coarse": "026d8ad3dfa1f2aa"
+    },
+    "SubqueryRenamedComputedMix": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "m"
+      ],
+      "fine": "c90e81412b476885",
+      "coarse": "c90e81412b476885"
+    },
+    "SubqueryRenamedJoinBuild": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "k"
+      ],
+      "fine": "34c88d2d37d71bbe",
+      "coarse": "34c88d2d37d71bbe"
+    },
+    "SubqueryRenamedJoinProbe": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "r_name"
+      ],
+      "fine": "9cab115e84e90325",
+      "coarse": "9cab115e84e90325"
+    },
+    "SubqueryRenamedMulti": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k1",
+        "k2"
+      ],
+      "fine": "26b791d435a9eb1a",
+      "coarse": "26b791d435a9eb1a"
+    },
+    "SubqueryRenamedOrderDesc": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k"
+      ],
+      "fine": "09bf9f1926b11d4e",
+      "coarse": "09bf9f1926b11d4e"
+    },
+    "SubqueryRenamedShadow": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "r_name"
+      ],
+      "fine": "05b51c21305797da",
+      "coarse": "05b51c21305797da"
+    },
     "SubqueryRenamedWhere": {
       "source": "duckdb",
       "row_count": 3,

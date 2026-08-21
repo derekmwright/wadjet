@@ -3323,6 +3323,60 @@ func twoPathCorpus() []twoPathQuery {
 			sql: `SELECT r_regionkey, rk2 FROM (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) t
 				WHERE rk2 >= r_regionkey ORDER BY r_regionkey`,
 			wantRows: 4, wantCols: []string{"r_regionkey", "rk2"}},
+
+		// --- #385: rename-only subquery projection dropped on the DAG ---
+		//
+		// walkStages treats a rename-only Project as a passthrough, so no
+		// stage ever emitted the subquery's alias: the gather's
+		// OutputRenames sourced the alias, resolved nothing, and passed the
+		// FULL upstream width through under SOURCE names. Fixed by chasing
+		// each rename's source through nested Projects
+		// (resolveOutputRenameSource) and resolving a join's NeededColumns
+		// the same way (resolveJoinNeededColumns). wantCols is the load-
+		// bearing assertion — the two-arm compare realigns arm B onto arm
+		// A's columns, so extra columns and wrong names slide through it.
+		// Entries stay unordered where the ORDER BY would key on the
+		// renamed alias: that face of the passthrough is #386, pinned in
+		// the DuckDB corpus.
+		twoPathQuery{name: "SubqueryRenamedBare", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT k FROM (SELECT r_regionkey AS k FROM region) t`,
+			wantRows: 5, wantCols: []string{"k"}},
+		twoPathQuery{name: "SubqueryRenamedWhere", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT k FROM (SELECT r_regionkey AS k FROM region) t WHERE k > 1`,
+			wantRows: 3, wantCols: []string{"k"}},
+		twoPathQuery{name: "SubqueryRenamedMulti", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT k1, k2 FROM (SELECT r_regionkey AS k1, r_name AS k2 FROM region) t`,
+			wantRows: 5, wantCols: []string{"k1", "k2"}},
+		twoPathQuery{name: "SubqueryRenamedJoinBuild", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_name, k FROM nation JOIN (SELECT r_regionkey AS k FROM region) t
+				ON n_regionkey = k ORDER BY n_name`,
+			wantRows: 25, wantCols: []string{"n_name", "k"}},
+		twoPathQuery{name: "SubqueryRenamedJoinProbe", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT k, r_name FROM (SELECT n_regionkey AS k, n_name FROM nation) t
+				JOIN region ON k = r_regionkey ORDER BY r_name, k`,
+			wantRows: 25, wantCols: []string{"k", "r_name"}},
+		twoPathQuery{name: "SubqueryRenamedAboveAgg", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT k FROM (SELECT n_regionkey AS k, COUNT(*) AS c FROM nation
+				GROUP BY n_regionkey) t ORDER BY k`,
+			wantRows: 5, wantCols: []string{"k"}},
+		twoPathQuery{name: "SubqueryRenamedChained", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT a FROM (SELECT b AS a FROM (SELECT r_regionkey AS b FROM region) u) t`,
+			wantRows: 5, wantCols: []string{"a"}},
+		// The alias shadows a REAL column of the same table. Pre-fix the DAG
+		// answered with the real r_name — right shape, wrong VALUES — so the
+		// absolute assertion pins which column the values came from: region
+		// names are short (AFRICA), comments are prose.
+		twoPathQuery{name: "SubqueryRenamedShadow", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT r_name FROM (SELECT r_comment AS r_name FROM region) t`,
+			wantRows: 5, wantCols: []string{"r_name"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				for _, r := range rows {
+					if s, ok := r["r_name"].(string); ok && len(s) < 16 {
+						tb.Errorf("r_name value %q looks like the REAL r_name, not the aliased r_comment", s)
+					}
+				}
+			}},
 	)
 	return out
 }
