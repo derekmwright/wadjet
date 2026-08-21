@@ -2421,6 +2421,14 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		if s.ID != targetID {
 			continue
 		}
+		// A scan already carrying a projection (a computed subquery column
+		// materialized by absorbComputedSubqueryProjection, #383) keeps it:
+		// overwriting would drop the computed column the sort keys on, and
+		// these SELECT-list specs are written against the subquery's
+		// OUTPUT, not the scan's schema.
+		if len(s.ProjectExprs) > 0 {
+			return
+		}
 		isPlainScan := s.Type == StageScan && len(s.FusedAggGroupBy) == 0 && len(s.FusedAggSpecs) == 0
 		isJoin := (s.Type == StageHashJoin || s.Type == StageBroadcastJoin || s.Type == StageSortMergeJoin) &&
 			len(s.GroupByCols) == 0
@@ -4465,6 +4473,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		for _, child := range node.Children {
 			p.walkStages(child, stages, nil)
 		}
+		// Same materialization for a sort over a computed subquery column
+		// (#383): the sort keys on the alias, which otherwise names no
+		// column anywhere on the DAG and the ORDER BY is silently lost.
+		if len(node.Children) == 1 {
+			absorbComputedSubqueryProjection(node.Children[0], (*stages)[preCount:], true)
+		}
 		sortStageID := fmt.Sprintf("sort-%d", len(*stages))
 		var sortKeys []SortKeySpec
 		var sortChild *logical.Node
@@ -4548,6 +4562,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		for _, child := range node.Children {
 			childStart := len(*stages)
 			p.walkStages(child, stages, nil)
+			// A join input that is a subquery with a COMPUTED projection
+			// must materialize the computed column into its producing scan
+			// fragment, or the build/probe files never carry it and every
+			// downstream read — the ON residual, the projected output —
+			// sees NULL (#383).
+			absorbComputedSubqueryProjection(child, (*stages)[childStart:], false)
 			childLeaves = append(childLeaves, leafStages((*stages)[childStart:]))
 		}
 		// Map logical join type to canonical short form. Needed before the

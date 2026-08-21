@@ -1486,12 +1486,7 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "LeftJoinResidualNullEval", sql: `SELECT n.n_name, r.rk2 FROM nation n
 			LEFT JOIN (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) r
 			ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.rk2
-			ORDER BY n.n_name`,
-			knownBugArm: armDAG,
-			knownBug: "not a #358 defect: the stage DAG treats the build subquery's Project as a passthrough, " +
-				"so the computed rk2 column never materializes and the join answers with the raw scan " +
-				"columns instead — the #355 shape, fixed for aggregate inputs but still open for a join " +
-				"input. Arm A carries the NULL-evaluation semantics this entry pins"},
+			ORDER BY n.n_name`},
 		// The keyless residual on the flush side: an expression-operand
 		// equality leaves NO key conjunct, so every build row is a
 		// candidate and the residual does all of the matching — RIGHT and
@@ -1545,6 +1540,64 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "CommaJoinMixtureWhereFilter", sql: `SELECT COUNT(*) AS c
 			FROM region t0 JOIN nation t1 ON t0.r_regionkey = t1.n_regionkey, supplier t2
 			WHERE t1.n_nationkey = t2.s_nationkey`},
+
+		// --- #383: a computed subquery projection feeding a join input ---
+		//
+		// walkStages treats a subquery's Project as a passthrough, so a
+		// COMPUTED column existed nowhere on the DAG: the scan's phantom
+		// read of it fell back to full width, the build/probe files never
+		// carried it, and every downstream read — an ON residual
+		// (LeftJoinResidualNullEval above), the projected output, a sort
+		// key — saw NULL or a missing column, silently. Renames were
+		// already resolved-through per consumer (#355/#313); a computed
+		// value has no source column to resolve TO, so it materializes at
+		// the source instead (absorbComputedSubqueryProjection). One face
+		// per entry, both join sides, plus the consumers above the join.
+		duckdbCase{name: "JoinBuildComputedProjected", sql: `SELECT n.n_name, r.rk2
+			FROM nation n JOIN (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) r
+			ON n.n_regionkey = r.r_regionkey ORDER BY n.n_name`},
+		duckdbCase{name: "JoinProbeComputedProjected", sql: `SELECT nx.n_name, nx.nk2, r.r_name
+			FROM (SELECT n_name, n_regionkey, NULLIF(n_nationkey, 3) AS nk2 FROM nation) nx
+			JOIN region r ON nx.n_regionkey = r.r_regionkey ORDER BY nx.n_name`},
+		// Probe-side symmetry of the pinned build-side case: the residual
+		// reads a computed PROBE column ("join residual column resolves on
+		// neither side" was the pre-fix warning, and every LEFT row came
+		// back padded).
+		duckdbCase{name: "JoinProbeComputedResidual", sql: `SELECT nx.n_name, r.r_name
+			FROM (SELECT n_name, n_regionkey, NULLIF(n_nationkey, 3) AS nk2 FROM nation) nx
+			LEFT JOIN region r ON nx.n_regionkey = r.r_regionkey AND nx.nk2 > r.r_regionkey
+			ORDER BY nx.n_name, r.r_name`},
+		duckdbCase{name: "JoinBuildComputedOrderBy", sql: `SELECT n.n_name, r.rk2
+			FROM nation n JOIN (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) r
+			ON n.n_regionkey = r.r_regionkey ORDER BY r.rk2, n.n_name`},
+		// The aggregate face rides #355's resolve-through (InputExpr) —
+		// this pins that the two mechanisms compose over a join.
+		duckdbCase{name: "JoinBuildComputedAggAbove", sql: `SELECT SUM(r.rk2) AS s
+			FROM nation n JOIN (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) r
+			ON n.n_regionkey = r.r_regionkey`},
+		// No join at all: a sort keyed on the computed alias, which named
+		// no column anywhere on the DAG (the scan emitted raw full width).
+		duckdbCase{name: "SubqueryComputedOrderBy", sql: `SELECT rk2
+			FROM (SELECT NULLIF(r_regionkey, 2) AS rk2 FROM region) t ORDER BY rk2`},
+		// The WHERE faces are NOT the DAG passthrough: pushdownPredicates'
+		// Filter-Project swap pushes the predicate below the Project
+		// without substituting the computed alias, so the single-process
+		// path errors and the DAG filters everything out — both arms,
+		// #384. The pins fail the moment the arms start agreeing.
+		duckdbCase{name: "SubqueryComputedWhere", sql: `SELECT rk2
+			FROM (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) t
+			WHERE rk2 > 1 ORDER BY rk2`,
+			knownBugArm: armBoth,
+			knownBug: "#384: the Filter-Project pushdown swap moves WHERE rk2 > 1 below the Project " +
+				"that computes rk2, unsubstituted — the single-process filter errors on the missing " +
+				"column and the DAG's scan-stage filter matches nothing"},
+		duckdbCase{name: "JoinBuildComputedWhereAbove", sql: `SELECT n.n_name, r.rk2
+			FROM nation n JOIN (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) r
+			ON n.n_regionkey = r.r_regionkey WHERE r.rk2 > 1 ORDER BY n.n_name`,
+			knownBugArm: armBoth,
+			knownBug: "#384, the join spelling: the WHERE above the join is pushed into the build " +
+				"subquery below its computing Project, unsubstituted — both arms break the same way " +
+				"as SubqueryComputedWhere"},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

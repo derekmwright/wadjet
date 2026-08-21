@@ -44,6 +44,13 @@ func pruneScanOutputColumns(stages []Stage) {
 		if s.Type != StageScan || len(s.ScanFiles) == 0 || len(s.Columns) == 0 {
 			continue
 		}
+		// A projection-carrying scan (absorbComputedSubqueryProjection,
+		// #383) emits columns that are not in its read set — the computed
+		// aliases — and OpColumnPrune runs AFTER OpProject, so a prune
+		// derived from the read set would drop exactly them.
+		if len(s.ProjectExprs) > 0 {
+			continue
+		}
 		cons := consumers[s.ID]
 		if len(cons) == 0 {
 			continue

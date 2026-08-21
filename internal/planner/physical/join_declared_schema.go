@@ -55,6 +55,35 @@ func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
 		if cur == nil {
 			return
 		}
+		if cur.Type == logical.NodeProject {
+			// A COMPUTED projection column exists only here — no scan
+			// carries it. Declare it under its alias with the same type the
+			// materializing projection emits it as
+			// (absorbComputedSubqueryProjection, #383), so an empty side
+			// still shapes it correctly. Bare columns and renames fall
+			// through to the scans below, source-named as the DAG spells
+			// them.
+			var colTypes map[string]parquet.TypeID
+			for _, pr := range cur.Projections {
+				if pr.IsAgg || pr.Column != "" || pr.Alias == "" ||
+					pr.ASTExpr == nil || isSimpleColRefForRename(pr.ASTExpr) {
+					continue
+				}
+				lc := strings.ToLower(pr.Alias)
+				if seen[lc] || (len(wantSet) > 0 && !wantSet[lc]) {
+					continue
+				}
+				if colTypes == nil && len(cur.Children) == 1 {
+					colTypes = inputColTypes(cur.Children[0])
+				}
+				seen[lc] = true
+				out = append(out, parquet.Column{
+					Name:     pr.Alias,
+					Type:     inferProjectionTypeCols(pr.ASTExpr, parquet.TypeString, nil, colTypes),
+					Nullable: true,
+				})
+			}
+		}
 		if cur.Type == logical.NodeScan {
 			for _, name := range cur.ScanColumns {
 				lc := strings.ToLower(name)

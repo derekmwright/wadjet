@@ -3244,6 +3244,53 @@ func twoPathCorpus() []twoPathQuery {
 				JOIN nation t1 ON t0.r_regionkey = t1.n_regionkey, supplier t2
 				WHERE t1.n_nationkey = t2.s_nationkey`,
 			assertA: assertCount("c", 100)},
+
+		// --- #383: a computed subquery projection feeding a join input ---
+		//
+		// walkStages treats a subquery's Project as a passthrough, so a
+		// COMPUTED column existed nowhere on the DAG — the build/probe
+		// files never carried it, and the residual (or the projected
+		// output, or a sort key) read NULL, silently. Fixed by
+		// materializing it into the producing scan fragment
+		// (absorbComputedSubqueryProjection); renames still resolve
+		// through per consumer.
+		twoPathQuery{name: "JoinBuildComputedResidual", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n.n_name, r.rk2 FROM nation n
+				LEFT JOIN (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) r
+				ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.rk2
+				ORDER BY n.n_name`,
+			wantRows: 25, wantCols: []string{"n_name", "rk2"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				// A NULL residual is a REJECTION (UNKNOWN is not TRUE): the
+				// five region-2 nations pad because rk2 is NULL there, and
+				// ALGERIA (0 > 0), ARGENTINA (1 > 1) and EGYPT (4 > 4) pad
+				// because the residual is plainly false.
+				countNulls("rk2", 8, 17)(tb, rows)
+			}},
+		twoPathQuery{name: "JoinProbeComputedProjected", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT nx.n_name, nx.nk2, r.r_name
+				FROM (SELECT n_name, n_regionkey, NULLIF(n_nationkey, 3) AS nk2 FROM nation) nx
+				JOIN region r ON nx.n_regionkey = r.r_regionkey ORDER BY nx.n_name`,
+			wantRows: 25, wantCols: []string{"n_name", "nk2", "r_name"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				// Exactly CANADA's nationkey is NULLIF'd away.
+				countNulls("nk2", 1, 24)(tb, rows)
+			}},
+		twoPathQuery{name: "SubqueryComputedOrderBy", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT rk2 FROM (SELECT NULLIF(r_regionkey, 2) AS rk2 FROM region) t
+				ORDER BY rk2`,
+			wantRows: 5, wantCols: []string{"rk2"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				countNulls("rk2", 1, 4)(tb, rows)
+				// The sort must actually key on the materialized alias:
+				// ascending, NULL last (PostgreSQL default).
+				if len(rows) == 5 && rows[4]["rk2"] != nil {
+					tb.Errorf("last row rk2 = %v, want NULL last — the ORDER BY did not bind", rows[4]["rk2"])
+				}
+			}},
 	)
 	return out
 }
