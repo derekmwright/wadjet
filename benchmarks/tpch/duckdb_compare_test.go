@@ -356,10 +356,11 @@ func duckdbCorpus() []duckdbCase {
 		// `n.n_regionkey = r.r_regionkey + 100`, which produced the right
 		// answer for the wrong reason: the expression reached the executor
 		// as a column name, resolved to nothing, and matched nothing — the
-		// #351 defect, correct at +100 and wrong at +3. That shape is now
-		// refused on an outer join (OuterJoinExpressionKey below pins the
-		// refusal), so the NULL semantics this pair exists for are asserted
-		// through a miss the planner can actually represent.
+		// #351 defect, correct at +100 and wrong at +3. That shape now runs
+		// as a keyless outer join with the expression as its probe residual
+		// (#358; OuterJoinExpressionKey below carries it), so the NULL
+		// semantics this pair exists for are asserted through a plain miss
+		// as well.
 		duckdbCase{name: "LeftJoinMissIsNull", sql: `SELECT n.n_name, r.r_name FROM nation n
 			LEFT JOIN region r ON n.n_name = r.r_name ORDER BY n.n_name`},
 		duckdbCase{name: "LeftJoinMissCount", sql: `SELECT COUNT(*) AS rows_out, COUNT(r.r_name) AS matched
@@ -709,7 +710,6 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "OuterJoinOnResidual", sql: `SELECT COUNT(*) AS c FROM nation n
 			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey
 			WHERE r.r_name IS NULL`,
-			knownBugArm: armBoth,
 			knownBug: "a non-equi ON conjunct spanning both sides of an OUTER join has no representation: it " +
 				"cannot move above the join (that would delete the unmatched rows) and the executor has no " +
 				"residual predicate on an outer join's probe. #336 fixed the inner-join half only; since " +
@@ -863,7 +863,6 @@ func duckdbCorpus() []duckdbCase {
 		// The LEFT-join control beside it must not move.
 		duckdbCase{name: "FullJoinOnConjunctBuildSide", sql: `SELECT COUNT(*) AS c FROM nation n
 			FULL OUTER JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3`,
-			knownBugArm: armBoth,
 			knownBug: "an ON conjunct over one side of a FULL OUTER join has nowhere legal to go: pushing it " +
 				"into that side's scan deletes the rows the join would have emitted unmatched (25 rows " +
 				"against DuckDB's 27, the answer before #351), and it cannot be lifted above the join " +
@@ -1058,7 +1057,6 @@ func duckdbCorpus() []duckdbCase {
 		// back padded — the answer to `+ 100` by luck and wrong for `+ 3`.
 		duckdbCase{name: "OuterJoinExpressionKey", sql: `SELECT n.n_name, r.r_name FROM nation n
 			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey + 3 ORDER BY n.n_name`,
-			knownBugArm: armBoth,
 			knownBug: "an ON equality whose operand is an expression has no representation on an OUTER join: " +
 				"the executor matches on column names and the conjunct cannot be lifted above the join " +
 				"without deleting the padded rows. Both arms refuse it rather than answering with the " +
@@ -1436,6 +1434,117 @@ func duckdbCorpus() []duckdbCase {
 				FROM customer t0
 				JOIN orders t1 ON t0.c_custkey = t1.o_custkey
 				LEFT JOIN lineitem t2 ON t1.o_orderkey = t2.l_orderkey`},
+		// --- #358: the outer-join ON residual, per join type ---
+		//
+		// The three formerly pinned entries above (OuterJoinOnResidual,
+		// FullJoinOnConjunctBuildSide, OuterJoinExpressionKey) carry the
+		// original defect shapes; these pin the semantics the fix must hold
+		// on every disposition. The rule under test: the residual runs on
+		// the COMBINED row before a match is accepted, a probe row whose
+		// candidates all fail is UNMATCHED (LEFT/FULL still emit it padded,
+		// never drop it), and a build row is matched only when some probe
+		// row passed key AND residual — the bit the RIGHT/FULL unmatched
+		// flush reads. On the DAG these also police the replicated-build
+		// hazard: RIGHT/FULL never broadcast, so a fix that broke that gate
+		// triples the unmatched rows on the three-worker arm B.
+		//
+		// VALUES, not counts: a count cannot tell a padded row from a
+		// matched one.
+		duckdbCase{name: "LeftJoinResidualCrossSideValues", sql: `SELECT n.n_name, r.r_name FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey
+			ORDER BY n.n_name`},
+		// A probe-side-only residual conjunct: extractJoinCondPredicates
+		// must NOT push it into the probe scan (that deletes the rows a
+		// LEFT join preserves) — it rides the residual instead, and the
+		// failing rows come back padded.
+		duckdbCase{name: "LeftJoinResidualProbeSideValues", sql: `SELECT n.n_name, r.r_name FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > 10
+			ORDER BY n.n_name`},
+		// RIGHT: the preserved side is the BUILD, so the unmatched flush is
+		// what carries the residual-failed rows. COUNT(r.r_name) beside the
+		// values separates "padded" from "matched" the #348 way.
+		duckdbCase{name: "RightJoinResidualValues", sql: `SELECT n.n_name, r.r_name FROM region r
+			RIGHT JOIN nation n ON r.r_regionkey = n.n_regionkey AND n.n_nationkey > r.r_regionkey
+			ORDER BY n.n_name, r.r_name`},
+		duckdbCase{name: "RightJoinResidualCount", sql: `SELECT COUNT(*) AS c, COUNT(r.r_name) AS matched
+			FROM region r RIGHT JOIN nation n ON r.r_regionkey = n.n_regionkey AND n.n_nationkey > r.r_regionkey`},
+		// FULL: both directions at once — probe rows whose candidates all
+		// fail come back padded AND build rows nothing accepted flush
+		// padded on the other side.
+		duckdbCase{name: "FullJoinResidualBothSides", sql: `SELECT n.n_name, r.r_name FROM nation n
+			FULL OUTER JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey
+			ORDER BY n.n_name, r.r_name`},
+		// A residual that evaluates to NULL is a REJECTION (UNKNOWN is not
+		// TRUE), not an error and not a match: the derived build column rk2
+		// is NULL exactly for region 2, so every region-2 nation comes back
+		// padded — while a residual that read NULL as "false-so-what" for
+		// the OTHER regions, or errored on it, moves rows the fingerprint
+		// pins. TPC-H holds no NULLs, so the NULL reaches the residual
+		// through a subquery NULLIF, cross-side so it cannot be pushed into
+		// the build scan. exec's unit grid covers the same rule over
+		// hand-built NULLs.
+		duckdbCase{name: "LeftJoinResidualNullEval", sql: `SELECT n.n_name, r.rk2 FROM nation n
+			LEFT JOIN (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) r
+			ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.rk2
+			ORDER BY n.n_name`,
+			knownBugArm: armDAG,
+			knownBug: "not a #358 defect: the stage DAG treats the build subquery's Project as a passthrough, " +
+				"so the computed rk2 column never materializes and the join answers with the raw scan " +
+				"columns instead — the #355 shape, fixed for aggregate inputs but still open for a join " +
+				"input. Arm A carries the NULL-evaluation semantics this entry pins"},
+		// The keyless residual on the flush side: an expression-operand
+		// equality leaves NO key conjunct, so every build row is a
+		// candidate and the residual does all of the matching — RIGHT and
+		// FULL exercise the unmatched flush over that degenerate chain
+		// (LEFT is OuterJoinExpressionKey above).
+		duckdbCase{name: "RightJoinExpressionKeyCount", sql: `SELECT COUNT(*) AS c, COUNT(r.r_name) AS matched
+			FROM region r RIGHT JOIN nation n ON r.r_regionkey = n.n_nationkey - 20`},
+		duckdbCase{name: "FullJoinExpressionKeyCount", sql: `SELECT COUNT(*) AS c,
+			COUNT(n.n_name) AS n_rows, COUNT(r.r_name) AS r_rows FROM nation n
+			FULL OUTER JOIN region r ON n.n_regionkey = r.r_regionkey + 3`},
+		// Controls that must not move: the same residual on an INNER join
+		// takes the #336 lift path and the two must agree with each other
+		// through DuckDB; the anti-join IS NULL idiom over a plain
+		// (residual-free) LEFT join keeps its answer.
+		duckdbCase{name: "InnerJoinResidualControl", sql: `SELECT COUNT(*) AS c FROM nation n
+			JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey`},
+		duckdbCase{name: "PlainLeftJoinIsNullControl", sql: `SELECT COUNT(*) AS c FROM nation n
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey WHERE r.r_name IS NULL`},
+
+		// --- #376: a comma cross join mixed with an ON join ---
+		//
+		// Each half always planned alone; only the MIXTURE failed — the
+		// comma-joined relation contributes no ON clause, and the join
+		// reorderer spelled the disconnected relation as an inner join with
+		// an EMPTY condition, which key extraction refused ("could not
+		// extract join keys from:" with nothing after the colon) and the
+		// DAG emitted as a keyless hash_join the worker rejects. An absent
+		// condition IS a cross join; the executor has had the Cartesian
+		// path since #352.
+		duckdbCase{name: "CommaJoinAfterOnJoin", sql: `SELECT COUNT(*) AS c
+			FROM region t0 JOIN nation t1 ON t0.r_regionkey = t1.n_regionkey, supplier t2`},
+		duckdbCase{name: "CommaJoinAfterOnJoinValues", sql: `SELECT t1.n_name, t2.s_suppkey AS c4
+			FROM region t0 JOIN nation t1 ON t0.r_regionkey = t1.n_regionkey, supplier t2
+			WHERE t2.s_suppkey <= 2 AND t1.n_nationkey <= 3 ORDER BY t1.n_name, c4`},
+		// The fuzzer's second seed: two ON joins then the comma relation,
+		// reduced to an aggregate so a wrong cross-product multiplicity is
+		// unmissable (DuckDB: 13.22).
+		duckdbCase{name: "CommaJoinAfterTwoOnJoins", sql: `SELECT AVG(t1.s_nationkey) AS c3
+			FROM partsupp t0 JOIN supplier t1 ON t0.ps_suppkey = t1.s_suppkey
+			JOIN part t2 ON t0.ps_partkey = t2.p_partkey, nation t3`},
+		// The comma relation FIRST, and an explicit CROSS JOIN spelling of
+		// the same mixture — the issue's "worth checking" pair.
+		duckdbCase{name: "CommaJoinBeforeOnJoin", sql: `SELECT COUNT(*) AS c
+			FROM region t0, nation t1 JOIN supplier t2 ON t1.n_nationkey = t2.s_nationkey`},
+		duckdbCase{name: "CrossJoinMixedWithOnJoin", sql: `SELECT COUNT(*) AS c
+			FROM region t0 JOIN nation t1 ON t0.r_regionkey = t1.n_regionkey CROSS JOIN supplier t2`},
+		// A WHERE above the mixture supplying the cross-product filter: the
+		// comma-lift pass turns it into a real join condition, which is the
+		// path that must keep working once the reorderer spells the
+		// leftover cross joins as such.
+		duckdbCase{name: "CommaJoinMixtureWhereFilter", sql: `SELECT COUNT(*) AS c
+			FROM region t0 JOIN nation t1 ON t0.r_regionkey = t1.n_regionkey, supplier t2
+			WHERE t1.n_nationkey = t2.s_nationkey`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

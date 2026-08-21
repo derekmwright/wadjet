@@ -73,6 +73,31 @@ type HashJoin struct {
 	// This enables non-equality join conditions (e.g., "!=") from decorrelated EXISTS.
 	SemiAntiFilter func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool
 
+	// Residual is the ON-clause residual predicate of a LEFT, RIGHT or FULL
+	// OUTER join (#358): every ON conjunct that is not an equi-join key,
+	// evaluated on the COMBINED row (probe row + candidate build row) before a
+	// key match is accepted. An outer join's ON runs BEFORE the NULL-padding,
+	// so this cannot be a filter above the join: a probe row whose candidates
+	// all fail the residual is UNMATCHED — a LEFT/FULL join still emits it
+	// NULL-padded rather than dropping it — and a build row counts as matched
+	// only when some probe row passed BOTH key and residual, which is what
+	// FlushUnmatched consults for RIGHT/FULL. A residual returning false OR
+	// NULL rejects the candidate (the compiled evaluator folds UNKNOWN to
+	// false, which is the SQL ON semantics).
+	//
+	// With no join keys at all (`LEFT JOIN r ON n.x = r.y + 3` — no conjunct
+	// is a bare-column equality) the build degenerates to a single empty-key
+	// chain holding every build row, so each probe row's candidate set is the
+	// whole build side and the residual does all of the work.
+	Residual func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool
+
+	// rowMatched tracks matched build rows per (batchIdx, rowIdx) when
+	// Residual is active on a RIGHT/FULL join. arenaMatched cannot carry
+	// this: markKeyMatched marks a whole key CHAIN, while a residual accepts
+	// or rejects individual candidates of that chain. Allocated lazily on
+	// first mark; guarded by mu like arenaMatched.
+	rowMatched [][]bool
+
 	// BuildTableAlias is the table alias of the build side. When set, duplicate
 	// column names in the output schema are qualified as "alias.column" to avoid
 	// ambiguity (e.g., self-joins like nation n1 JOIN nation n2).
@@ -2117,6 +2142,11 @@ type probeResume struct {
 	pos    int                // next probe position (index into in.Sel, else row index)
 	ref    int32              // cursor within the current probe row's matches
 	mid    bool               // ref is live: resume inside pos's match chain
+	// accepted carries, across a mid-chain suspension, whether the suspended
+	// probe row has had any candidate pass the Residual so far — the bit that
+	// decides whether a LEFT/FULL join owes the row a NULL-padded emission
+	// once its chain is exhausted.
+	accepted bool
 
 	// Cross-join cursor: which build batch, and which row within it.
 	crossSchema []parquet.Column
@@ -2159,6 +2189,31 @@ func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
 	}
 }
 
+// markRowMatched records that ONE build row was matched under key AND
+// residual. Must be called with h.mu held. Complements arenaMatched for the
+// Residual path — see the field docs.
+func (h *HashJoin) markRowMatched(ref buildRef) {
+	if h.rowMatched == nil {
+		h.rowMatched = make([][]bool, len(h.buildBatches))
+	}
+	rm := h.rowMatched[ref.batchIdx]
+	if rm == nil {
+		rm = make([]bool, h.buildBatches[ref.batchIdx].Len)
+		h.rowMatched[ref.batchIdx] = rm
+	}
+	rm[ref.rowIdx] = true
+}
+
+// refMatched reports whether a build row was residual-matched. Callers hold
+// h.mu or run after all probing completed (the flush paths).
+func (h *HashJoin) refMatched(ref buildRef) bool {
+	if int(ref.batchIdx) >= len(h.rowMatched) {
+		return false
+	}
+	rm := h.rowMatched[ref.batchIdx]
+	return rm != nil && rm[ref.rowIdx]
+}
+
 // AcceptsViews marks the probe view-aware: Execute self-manages view input
 // via prepareViewInput — key columns (the only probe-side columns the probe
 // reads positionally) are flattened individually, pass-through columns stay
@@ -2178,7 +2233,7 @@ func (p *HashJoinProbe) prepareViewInput(in *batch.RecordBatch) {
 	// whole probe rows to spill files; right/full outer take the eager
 	// gather path (they never emit views); inner/left without the flag
 	// likewise gather eagerly.
-	lazyKeys := h.SemiAntiFilter == nil &&
+	lazyKeys := h.SemiAntiFilter == nil && h.Residual == nil &&
 		!(h.spillState != nil && len(h.spillState.spilledParts) > 0) &&
 		((p.LateMaterialize && (h.JoinType == InnerJoin || h.JoinType == LeftJoin)) ||
 			h.JoinType == SemiJoin || h.JoinType == AntiJoin ||
@@ -2315,8 +2370,8 @@ func (p *HashJoinProbe) nextProbeChunk(_ context.Context) (*batch.RecordBatch, e
 	// Fast path: single int key inner join without right/full outer tracking.
 	// Inlines hash table lookup + typed data access, eliminating 4 levels of
 	// per-row function calls (probeRow → lookupBuild → intProbeKey → intKeyFromVector).
-	inlineInt := h.useIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil
-	inlineDual := !inlineInt && h.useDualIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil
+	inlineInt := h.useIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil && h.Residual == nil
+	inlineDual := !inlineInt && h.useDualIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil && h.Residual == nil
 	if inlineInt || inlineDual {
 		h.resolveProbeKeyIdx(in)
 	}
@@ -3044,13 +3099,17 @@ func (p *HashJoinProbe) genericProbe(in *batch.RecordBatch, pairs []matchPair, l
 		n = len(sel)
 	}
 	// start is the index into this row's match list to resume at; it is reset
-	// to 0 as soon as the suspended row is finished.
+	// to 0 as soon as the suspended row is finished. accepted rides with it
+	// on the Residual path — see probeResume.accepted.
 	start := 0
+	accepted := false
 	if p.res.mid {
 		start = int(p.res.ref)
+		accepted = p.res.accepted
 		p.res.mid = false
 	}
 
+	residual := h.Residual
 	for pos := p.res.pos; pos < n; pos++ {
 		row := pos
 		if sel != nil {
@@ -3061,12 +3120,47 @@ func (p *HashJoinProbe) genericProbe(in *batch.RecordBatch, pairs []matchPair, l
 		if len(buildMatches) == 0 {
 			if h.JoinType == LeftJoin || h.JoinType == FullOuterJoin {
 				if len(pairs) >= limit {
-					p.res.pos, p.res.ref, p.res.mid = pos, 0, true
+					p.res.pos, p.res.ref, p.res.mid, p.res.accepted = pos, 0, true, false
 					return pairs, false
 				}
 				pairs = append(pairs, matchPair{probeRow: int32(row)})
 			}
 			start = 0
+			continue
+		}
+
+		if residual != nil {
+			// ON-residual path (#358): each key candidate must also pass the
+			// residual on the combined row. A rejected candidate emits
+			// nothing; a probe row whose whole chain was rejected is
+			// UNMATCHED, which for LEFT/FULL means one NULL-padded emission.
+			for i := start; i < len(buildMatches); i++ {
+				ref := buildMatches[i]
+				if !residual(in, row, h.buildBatches[ref.batchIdx], int(ref.rowIdx)) {
+					continue
+				}
+				if len(pairs) >= limit {
+					p.res.pos, p.res.ref, p.res.mid, p.res.accepted = pos, int32(i), true, accepted
+					return pairs, false
+				}
+				pairs = append(pairs, matchPair{probeRow: int32(row), ref: ref, matched: true})
+				accepted = true
+				if h.arenaMatched != nil {
+					// RIGHT/FULL unmatched tracking is per accepted build ROW,
+					// not per key chain — see rowMatched.
+					h.mu.Lock()
+					h.markRowMatched(ref)
+					h.mu.Unlock()
+				}
+			}
+			if !accepted && (h.JoinType == LeftJoin || h.JoinType == FullOuterJoin) {
+				if len(pairs) >= limit {
+					p.res.pos, p.res.ref, p.res.mid, p.res.accepted = pos, int32(len(buildMatches)), true, false
+					return pairs, false
+				}
+				pairs = append(pairs, matchPair{probeRow: int32(row)})
+			}
+			start, accepted = 0, false
 			continue
 		}
 
@@ -3602,13 +3696,24 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 		return nil
 	}
 
-	// Collect unmatched build refs from arena
+	// Collect unmatched build refs from arena. With a Residual active the
+	// matched bit lives per build ROW (rowMatched), because a residual accepts
+	// individual chain candidates; without one it lives per arena entry.
 	var refs []buildRef
-	for i, ref := range p.join.arena {
-		if p.join.arenaMatched != nil && p.join.arenaMatched[i] {
-			continue
+	if p.join.Residual != nil {
+		for _, ref := range p.join.arena {
+			if p.join.refMatched(ref) {
+				continue
+			}
+			refs = append(refs, ref)
 		}
-		refs = append(refs, ref)
+	} else {
+		for i, ref := range p.join.arena {
+			if p.join.arenaMatched != nil && p.join.arenaMatched[i] {
+				continue
+			}
+			refs = append(refs, ref)
+		}
 	}
 
 	if len(refs) == 0 {
@@ -3691,6 +3796,7 @@ func (h *HashJoin) Close() error {
 	h.buildBatches = nil
 	h.arena = nil
 	h.arenaNext = nil
+	h.rowMatched = nil
 	h.intIndex = nil
 	h.strIndex = nil
 	h.bloom = nil

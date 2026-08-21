@@ -300,6 +300,78 @@ func takeJoinCondResiduals(join *Node) []Predicate {
 	return residuals
 }
 
+// routeOuterJoinOnResiduals moves every ON-clause conjunct of a LEFT, RIGHT
+// or FULL OUTER join that is not a bare-column equality out of JoinCond and
+// into JoinFilter — the join's residual predicate, evaluated by the executor
+// on the combined (probe row + candidate build row) BEFORE a key match is
+// accepted (#358).
+//
+// This is the placement liftInnerJoinOnResiduals explicitly could not use:
+// an outer join's ON runs before the NULL-padding, so a residual lifted above
+// the join deletes the very rows the join preserves, and one pushed into a
+// preserved side's scan deletes the rows owed back unmatched (the
+// FullJoinOnConjunctBuildSide shape). On the probe it is exact for every
+// disposition: a probe row whose candidates all fail the residual is simply
+// unmatched — LEFT/FULL still emit it NULL-padded — and a build row counts as
+// matched only when some probe row passed key AND residual, which is what the
+// RIGHT/FULL unmatched flush consults.
+//
+// Runs AFTER pushdownPredicates so extractJoinCondPredicates has already
+// pushed the conjuncts that have a strictly better home (a LEFT join's
+// build-side conjunct filters that scan directly; same for a RIGHT join's
+// probe side). What remains is exactly what had no legal home before:
+// cross-side non-equalities, expression-operand equalities, and any single-
+// sided conjunct of a FULL join. Conjuncts that fail to parse stay in
+// JoinCond, where the physical planner's key parser still refuses them
+// loudly.
+//
+// When no conjunct survives as a key pair the join becomes keyless: JoinCond
+// empties and the executor degenerates to one all-rows candidate chain, with
+// the residual doing the whole of the work (`LEFT JOIN r ON n.x = r.y + 3`).
+func routeOuterJoinOnResiduals(n *Node) *Node {
+	if n == nil {
+		return nil
+	}
+	for i, child := range n.Children {
+		n.Children[i] = routeOuterJoinOnResiduals(child)
+	}
+	if n.Type != NodeJoin || len(n.Children) != 2 || strings.TrimSpace(n.JoinCond) == "" {
+		return n
+	}
+	switch joinKind(n.JoinType) {
+	case "left", "right", "full":
+	default:
+		return n
+	}
+
+	parts := splitOnAnd(n.JoinCond, strings.ToUpper(n.JoinCond))
+	var keyParts, residuals []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		expr := tryParseExpr(part)
+		if expr == nil || isJoinKeyEquality(expr) {
+			keyParts = append(keyParts, part)
+			continue
+		}
+		residuals = append(residuals, part)
+	}
+	if len(residuals) == 0 {
+		return n
+	}
+
+	n.JoinCond = strings.Join(keyParts, " AND ")
+	res := strings.Join(residuals, " AND ")
+	if n.JoinFilter != "" {
+		n.JoinFilter = n.JoinFilter + " AND " + res
+	} else {
+		n.JoinFilter = res
+	}
+	return n
+}
+
 // isJoinKeyEquality reports whether a top-level ON conjunct is an equality
 // between two BARE COLUMN REFERENCES — the only shape parseJoinKeys turns
 // into a key pair, and so the only shape that survives being left in

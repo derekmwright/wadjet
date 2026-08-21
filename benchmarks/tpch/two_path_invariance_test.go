@@ -3144,6 +3144,107 @@ func twoPathCorpus() []twoPathQuery {
 			}},
 	)
 
+	// #358 — the outer-join ON residual: the non-key conjunct runs on the
+	// combined row BEFORE the match is accepted, a probe row whose
+	// candidates all fail comes back NULL-padded rather than dropped, and a
+	// build row is matched only when some probe row passed key AND residual
+	// (the RIGHT/FULL unmatched flush reads that bit). Both arms REFUSED
+	// every one of these between #351 and #358, so the assertA fixture
+	// truths — DuckDB-verified in the cross-engine gate — are what pin the
+	// semantics, not mere agreement. The DAG arm additionally polices the
+	// replicated-build hazard: RIGHT/FULL never broadcast, and a fix that
+	// broke that gate multiplies the unmatched rows by the worker count.
+	//
+	// #376 — a comma cross join mixed with an ON join: the comma relation
+	// contributes no ON clause, and the reorderer's disconnected-relation
+	// arm spelled it as an inner join with an EMPTY condition, refused at
+	// key extraction on arm A and dispatched as a keyless hash_join arm B's
+	// worker rejects. An absent condition IS a cross join (#352 gave the
+	// DAG the Cartesian path).
+	out = append(out,
+		twoPathQuery{name: "OuterJoinResidualLeft", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c, COUNT(r.r_name) AS matched FROM nation n
+				LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey`,
+			// Every nation is preserved; it carries its region only when the
+			// residual held, so `matched` is the fixture count of nations
+			// with n_nationkey > n_regionkey.
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				nk := sf001Column(tb, "nation", "n_nationkey")
+				rk := sf001Column(tb, "nation", "n_regionkey")
+				matched := 0
+				for i := range nk {
+					if nk[i] > rk[i] {
+						matched++
+					}
+				}
+				if got := int(cellNum(rows[0], "c")); got != len(nk) {
+					tb.Errorf("c = %d, want %d (every probe row preserved)", got, len(nk))
+				}
+				if got := int(cellNum(rows[0], "matched")); got != matched {
+					tb.Errorf("matched = %d, want %d", got, matched)
+				}
+			}},
+		twoPathQuery{name: "OuterJoinResidualRightFlush", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c, COUNT(r.r_name) AS matched FROM region r
+				RIGHT JOIN nation n ON r.r_regionkey = n.n_regionkey AND n.n_nationkey > r.r_regionkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				nk := sf001Column(tb, "nation", "n_nationkey")
+				rk := sf001Column(tb, "nation", "n_regionkey")
+				matched := 0
+				for i := range nk {
+					if nk[i] > rk[i] {
+						matched++
+					}
+				}
+				if got := int(cellNum(rows[0], "c")); got != len(nk) {
+					tb.Errorf("c = %d, want %d (RIGHT preserves every nation)", got, len(nk))
+				}
+				if got := int(cellNum(rows[0], "matched")); got != matched {
+					tb.Errorf("matched = %d, want %d (a 3× answer here is the replicated-build hazard)",
+						got, matched)
+				}
+			}},
+		twoPathQuery{name: "OuterJoinResidualFullBothSides", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n.n_name, r.r_name FROM nation n
+				FULL OUTER JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey
+				ORDER BY n.n_name, r.r_name`,
+			wantCols: []string{"n_name", "r_name"}},
+		twoPathQuery{name: "OuterJoinResidualKeyless", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n.n_name, r.r_name FROM nation n
+				LEFT JOIN region r ON n.n_regionkey = r.r_regionkey + 3 ORDER BY n.n_name`,
+			wantRows: 25, wantCols: []string{"n_name", "r_name"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				// Regions 0 and 1 match nations of regionkey 3 and 4 — ten
+				// matches, fifteen padded rows.
+				countNulls("r_name", 15, 10)(tb, rows)
+			}},
+		twoPathQuery{name: "CommaJoinAfterOnJoin", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM region t0
+				JOIN nation t1 ON t0.r_regionkey = t1.n_regionkey, supplier t2`,
+			assertA: assertCount("c", 2500)},
+		twoPathQuery{name: "CommaJoinBeforeOnJoin", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM region t0,
+				nation t1 JOIN supplier t2 ON t1.n_nationkey = t2.s_nationkey`,
+			assertA: assertCount("c", 500)},
+		twoPathQuery{name: "CrossJoinMixedWithOnJoin", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM region t0
+				JOIN nation t1 ON t0.r_regionkey = t1.n_regionkey CROSS JOIN supplier t2`,
+			assertA: assertCount("c", 2500)},
+		twoPathQuery{name: "CommaJoinMixtureWhereFilter", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM region t0
+				JOIN nation t1 ON t0.r_regionkey = t1.n_regionkey, supplier t2
+				WHERE t1.n_nationkey = t2.s_nationkey`,
+			assertA: assertCount("c", 100)},
+	)
 	return out
 }
 

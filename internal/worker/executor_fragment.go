@@ -2516,9 +2516,14 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	joinType := mapJoinTypeString(spec.JoinType)
 	// A CROSS join has no ON clause and therefore no keys: `FROM a, b WHERE
 	// a.x < b.y` is legal SQL that the single-process path runs as a
-	// Cartesian product with the predicate above it. Every other join type
-	// is an equi-join here and its keys are mandatory.
-	if joinType != exec.CrossJoin && (len(spec.LeftKeys) == 0 || len(spec.RightKeys) == 0) {
+	// Cartesian product with the predicate above it. An OUTER join whose ON
+	// held no bare-column equality is keyless too — its JoinFilter residual
+	// does all of the matching (#358). Every other join type is an equi-join
+	// here and its keys are mandatory.
+	keylessOuterResidual := spec.JoinFilter != "" &&
+		(joinType == exec.LeftJoin || joinType == exec.RightJoin || joinType == exec.FullOuterJoin)
+	if joinType != exec.CrossJoin && !keylessOuterResidual &&
+		(len(spec.LeftKeys) == 0 || len(spec.RightKeys) == 0) {
 		return nil, nil, fmt.Errorf("hash_join_probe: LeftKeys and RightKeys required")
 	}
 	// Eager consumer dispatch: a build alias registered in task.EagerInputs
@@ -2614,7 +2619,18 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			hj.BuildRowHint = spec.BuildRowHint
 		}
 		hj.SemiAntiKeyOnly = spec.SemiAntiKeyOnly
-		if spec.JoinFilter != "" {
+		switch {
+		case spec.JoinFilter != "" &&
+			(joinType == exec.LeftJoin || joinType == exec.RightJoin || joinType == exec.FullOuterJoin):
+			// Outer-join ON residual (#358): evaluated on the combined row
+			// per key candidate, with the unmatched semantics that keeps a
+			// residual-failed probe row NULL-padded. NOT SemiAntiFilter —
+			// that one only runs on the semi/anti probe path.
+			hj.Residual = physical.BuildJoinResidualFilter(spec.JoinFilter, spec.BuildAlias)
+			if hj.Residual == nil {
+				return nil, fmt.Errorf("hash_join_probe: join residual %q is not evaluable", spec.JoinFilter)
+			}
+		case spec.JoinFilter != "":
 			hj.SemiAntiFilter = physical.BuildSemiAntiFilter(spec.JoinFilter)
 			// Filtered semi/anti builds store only keys + filter columns —
 			// the worker has no post-build prune at all, so without this a

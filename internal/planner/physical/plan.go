@@ -4554,6 +4554,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// broadcast decision: a join that preserves its BUILD side cannot
 		// replicate it.
 		jt := mapJoinType(node.JoinType)
+		// An inner join with no condition at all IS a cross join (#376) —
+		// same normalization as buildJoin, or the stage below would carry a
+		// keyless hash_join the worker rejects.
+		if jt == "inner" && strings.TrimSpace(node.JoinCond) == "" && node.JoinFilter == "" {
+			jt = "cross"
+		}
 
 		// Broadcast replicates the build side to every task and splits the
 		// probe across them. A RIGHT or FULL join emits its UNMATCHED build
@@ -4593,6 +4599,22 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				// PlanDistributed raise it. Emitting a join keyed on a name
 				// that is not a column is what made this silent.
 				p.refuseJoin(refuseJoinCond(jt, node.JoinCond, residual))
+			}
+			// An outer join's ON residual (#358) rides stage.JoinFilter to the
+			// worker, which compiles it there. Compile-check it NOW so an
+			// unsupported expression refuses the plan instead of failing every
+			// task at run time.
+			if node.JoinFilter != "" && (jt == "left" || jt == "right" || jt == "full") {
+				alias := ""
+				if len(node.Children) >= 2 {
+					alias = findScanAlias(node.Children[1])
+				}
+				if BuildJoinResidualFilter(node.JoinFilter, alias) == nil {
+					p.refuseJoin(fmt.Errorf("join ON residual %q on a %s join: "+
+						"not evaluable as a probe residual (columns, literals, arithmetic and "+
+						"comparisons are; function calls and subqueries are not)",
+						node.JoinFilter, jt))
+				}
 			}
 			// parseJoinKeys assigns left/right based on position in the "="
 			// expression, not based on which child subtree owns the column.
@@ -5308,7 +5330,18 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	}
 
 	jt := mapJoinType(node.JoinType)
+	// An inner join with no condition at all IS a cross join (#376): the
+	// join reorderer emits this shape for a comma-joined relation with no
+	// edge to the rest of the chain, and reading the absent condition as a
+	// failed key extraction refused legal SQL.
+	if jt == "inner" && strings.TrimSpace(node.JoinCond) == "" && node.JoinFilter == "" {
+		jt = "cross"
+	}
 	joinType := mapExecJoinType(jt)
+	// An outer join may carry an ON residual (#358) — routed there by
+	// logical.routeOuterJoinOnResiduals — and with it, zero key pairs.
+	outerResidual := node.JoinFilter != "" &&
+		(jt == "left" || jt == "right" || jt == "full")
 
 	// Parse join condition to extract key columns (cross joins have no ON clause)
 	var leftKeys, rightKeys []string
@@ -5318,7 +5351,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		if len(residual) > 0 {
 			return nil, nil, nil, refuseJoinCond(jt, node.JoinCond, residual)
 		}
-		if len(leftKeys) == 0 {
+		if len(leftKeys) == 0 && !outerResidual {
 			return nil, nil, nil, fmt.Errorf("could not extract join keys from: %s", node.JoinCond)
 		}
 		// Fix key assignment using plan-level column ownership: ensure left keys
@@ -5449,6 +5482,17 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		hj.SemiAntiFilter = BuildSemiAntiFilter(node.JoinFilter)
 		if pc, bc, ok := ParseSemiAntiNE(node.JoinFilter); ok {
 			hj.SemiAntiNEProbeCol, hj.SemiAntiNEBuildCol = pc, bc
+		}
+	}
+	if outerResidual {
+		hj.Residual = BuildJoinResidualFilter(node.JoinFilter, hj.BuildTableAlias)
+		if hj.Residual == nil {
+			// Refuse loudly rather than answer with the conjunct dropped —
+			// the pre-#358 failure mode this path replaced.
+			return nil, nil, nil, fmt.Errorf("join ON residual %q on a %s join: "+
+				"not evaluable as a probe residual (columns, literals, arithmetic and "+
+				"comparisons are; function calls and subqueries are not)",
+				node.JoinFilter, jt)
 		}
 	}
 

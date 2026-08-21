@@ -47,6 +47,11 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	// stranded above the join (#336).
 	plan = liftInnerJoinOnResiduals(plan)
 	plan = pushdownPredicates(plan)
+	// After pushdownPredicates: extractJoinCondPredicates has pushed the
+	// outer-join ON conjuncts that have a better home (a non-preserved
+	// side's scan); what remains un-representable as a key pair becomes the
+	// join's residual predicate, evaluated on the probe (#358).
+	plan = routeOuterJoinOnResiduals(plan)
 	// Move WHERE equalities onto comma-FROM cross joins (issue #281) so
 	// semi pushdown and reorderJoins see real join conditions. After
 	// pushdownPredicates: single-table predicates are already on scans,
@@ -770,8 +775,21 @@ func collectSubqueryOuterRefs(sql string, refs map[string]bool) {
 }
 
 // extractJoinColumnRefs parses a join condition string (e.g. "a = b AND c != d")
-// and adds column references to the set. Handles all comparison operators.
+// and adds column references to the set.
+//
+// Structural first: the condition is parsed and its ColRefs collected the
+// same way WHERE predicates are (bare and qualified spellings both;
+// sanitizeScanNeeds resolves or drops them per scan). The lexical fallback
+// below split on operators and passed each SIDE through as a name, which for
+// an expression operand invented a "column" like "r_regionkey + 3" — the
+// scan kept the fiction and dropped the real r_regionkey, so an outer join's
+// residual (#358) read NULL for a column the file held. The fallback remains
+// for text no expression parser accepts.
 func extractJoinColumnRefs(cond string, refs map[string]bool) {
+	if expr := tryParseExpr(cond); expr != nil {
+		collectASTColumnRefs(expr, refs)
+		return
+	}
 	parts := strings.Split(strings.ToLower(cond), " and ")
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
@@ -3152,6 +3170,21 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 					plan.JoinCond = e.joinCond
 				}
 			}
+		}
+	}
+
+	// A disconnected relation joined the spine as an inner join with an EMPTY
+	// condition (the "no connected relation found" arm above). An absent
+	// condition IS a cross join — the physical planner has a Cartesian path
+	// for it (#352) — but spelled "inner" it reached key extraction, which
+	// refused the plan on the single-process path and emitted a keyless
+	// hash_join the worker rejects on the DAG (#376: `FROM region t0 JOIN
+	// nation t1 ON ..., supplier t2` — the comma relation contributes no ON
+	// clause, each half planned alone, only the mixture failed). Walk only
+	// the spine this function built; leaves are the caller's relations.
+	for j := plan; j != nil && j.Type == NodeJoin && isInnerJoin(j); j = j.Children[0] {
+		if strings.TrimSpace(j.JoinCond) == "" && j.JoinFilter == "" {
+			j.JoinType = "cross"
 		}
 	}
 

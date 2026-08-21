@@ -969,6 +969,7 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 		LeftKeys:        h.LeftKeys,
 		RightKeys:       h.RightKeys,
 		SemiAntiFilter:  h.SemiAntiFilter,
+		Residual:        h.Residual,
 		SemiAntiKeyOnly: h.SemiAntiKeyOnly,
 		BuildTableAlias: h.BuildTableAlias,
 		keyBuf:          make([]byte, 0, 128),
