@@ -47,9 +47,10 @@ func runPostgresWireArm(t *testing.T, ctx context.Context, o *postgresOracle) {
 	}
 	// Shutdown is BOUNDED, and the bound is not defensive padding: Server.
 	// Shutdown does wg.Wait() over its connection handlers, and the
-	// cancellation subtest deliberately leaves one running a statement the
-	// server would not cancel (#368). Waiting on it would make the suite hang
-	// on the very defect it just reported.
+	// cancellation subtest once left one running a statement the server would
+	// not cancel (#368, fixed — the executor now polls the statement context
+	// between batches). The bound stays so a regression fails the suite
+	// instead of hanging it on the very defect it would be reporting.
 	t.Cleanup(func() {
 		stopped := make(chan struct{})
 		go func() { srv.Shutdown(); close(stopped) }()
@@ -57,7 +58,7 @@ func runPostgresWireArm(t *testing.T, ctx context.Context, o *postgresOracle) {
 		case <-stopped:
 		case <-time.After(30 * time.Second):
 			t.Logf("wadjet pgwire Shutdown did not return within 30s: a connection handler is still executing " +
-				"the statement the CancelRequest failed to stop (#368). Not waiting further.")
+				"a statement a CancelRequest should have stopped (#368 regressed?). Not waiting further.")
 		}
 	})
 
@@ -801,19 +802,14 @@ func runWireCancellation(t *testing.T, ctx context.Context, wadjetDSN, pgDSN str
 	// answers within milliseconds; anything past this window has not acted.
 	const graceAfterCancel = 20 * time.Second
 
-	// One pin, on Wadjet. PostgreSQL is unpinned on purpose: it is the
+	// No pins: both servers answer a cancelled statement with 57014. The Wadjet
+	// pin (#368 — a CancelRequest was accepted and the statement ran 11 more
+	// seconds to a normal completion) was deleted when the executor learned to
+	// poll the statement context between output batches
+	// (exec.ChainDriver.push); PostgreSQL stays unpinned on purpose: it is the
 	// reference, and a reference that stopped answering 57014 would mean the
 	// probe had stopped measuring cancellation at all.
-	pins := map[string]string{
-		"Wadjet": "WADJET BUG (pgwire): a CancelRequest is accepted on the wire — the cancel connection is " +
-			"served and returns no error — and the running statement is not stopped. Measured at SF0.01: the " +
-			"keyless self-join this subtest runs completed normally 3 seconds after the cancel arrived, and " +
-			"unbounded it ran for 11 seconds past it. " +
-			"Nothing the client can do gets the query back: a psql ^C, a DataGrip stop button and a " +
-			"driver-level cancel all send exactly this message. PostgreSQL aborts within milliseconds and " +
-			"reports 57014. This is upstream of the SQLSTATE question (#366): there is no error to give a " +
-			"code to. (#368)",
-	}
+	pins := map[string]string{}
 
 	for _, s := range []struct{ name, dsn string }{{"PostgreSQL", pgDSN}, {"Wadjet", wadjetDSN}} {
 		t.Run(s.name, func(t *testing.T) {

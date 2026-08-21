@@ -202,6 +202,17 @@ func (d *ChainDriver) push(ctx context.Context, i int, b *batch.RecordBatch) (bo
 			}
 			break
 		}
+		// A cancelled statement must stop BETWEEN output batches, here in the
+		// fan-out loop and not only at the source pull: a keyless join's
+		// fan-out for one input batch is quadratic work (#368 — a CancelRequest
+		// was accepted and the cross product ran 11 more seconds to a normal
+		// completion, because the pump only polls per SOURCE batch and the
+		// whole join lived under a handful of those). One atomic load per
+		// output batch of ≤2048 rows is noise.
+		if cerr := ctx.Err(); cerr != nil {
+			err = fmt.Errorf("operator chain cancelled: %w", cerr)
+			break
+		}
 		if d.inspect != nil {
 			d.inspect(i, op, out)
 		}
@@ -243,7 +254,6 @@ func (p *Pipeline) allOpsCloneable() bool {
 func (p *Pipeline) runSerial(ctx context.Context) error {
 	progress := ProgressReporterFromContext(ctx)
 	drainPhase := sourceServesHeldState(p.Source)
-	batchCount := 0
 	driver := NewChainDriver(p.Ops, func(ctx context.Context, b *batch.RecordBatch) error {
 		FlattenForConsumer(b, p.Sink)
 		if err := p.Sink.Consume(ctx, b); err != nil {
@@ -253,12 +263,12 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 		return nil
 	}).ReleaseInputs()
 	for {
-		if batchCount&63 == 0 {
-			if err := ctx.Err(); err != nil {
-				return fmt.Errorf("pipeline cancelled: %w", err)
-			}
+		// Per-batch, not per-64: a batch is ≥3 orders of magnitude more work
+		// than this atomic load, and a CancelRequest must be observed between
+		// batches everywhere (#368).
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("pipeline cancelled: %w", err)
 		}
-		batchCount++
 
 		// Heap-aware backpressure: when process heap is approaching
 		// GOMEMLIMIT, pause briefly so GC can reclaim before pulling more
@@ -595,6 +605,15 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 
 				exhausted, err := driver.Push(workerCtx, b)
 				if err != nil {
+					// The chain driver now fails fast on a cancelled context
+					// (#368). When only workerCtx is cancelled — another
+					// worker hit LIMIT and called cancel() — that is the
+					// pipeline stopping itself, not a failure. A cancelled
+					// PARENT context stays an error: the caller must never
+					// see a silently truncated result as success.
+					if workerCtx.Err() != nil && ctx.Err() == nil {
+						return
+					}
 					firstErr.CompareAndSwap(nil, err)
 					cancel()
 					return
@@ -613,6 +632,13 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 	// Check for worker errors.
 	if v := firstErr.Load(); v != nil {
 		return v.(error)
+	}
+	// Workers that noticed a cancelled parent context return silently, so a
+	// CancelRequest used to yield whatever the workers had collected, with a
+	// nil error — the pgwire layer had to defend against rows from a cancelled
+	// statement (#368). Surface the cancellation as the error it is.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("pipeline cancelled: %w", err)
 	}
 
 	// A batch the router could not hash was consumed whole by the worker

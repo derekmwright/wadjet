@@ -379,6 +379,12 @@ func (s *Scanner) decodeRowGroupsNative(ctx context.Context, fr *pqt.FileReader,
 
 	var batches []*batch.RecordBatch
 	for rgIdx := 0; rgIdx < numRGs; rgIdx++ {
+		// A file's whole decode happens under one Source.Next call, so this
+		// loop is where a cancelled statement is observed for large files —
+		// the per-file check at the top of Next is too coarse (#368).
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("scan cancelled: %w", err)
+		}
 		if len(s.statsPredicates) > 0 && StatsPrune.On() {
 			rgStats := fr.RowGroupStats(rgIdx)
 			pruned := false
