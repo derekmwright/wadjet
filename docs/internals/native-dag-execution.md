@@ -293,6 +293,57 @@ duplicates-within-arm, NULL membership, empty arms, type widening, stacked
 ORDER BY/LIMIT/WHERE), `duckdb_compare_test.go` + `pagination_test.go`
 (values and sequence against DuckDB).
 
+## Correlated subqueries (refused → routed local)
+
+A subquery whose correlation SURVIVES decorrelation (a non-equi correlation —
+equality correlations become joins in the logical optimizer, TPC-H
+Q17/Q20/Q22) must re-execute once per outer row. The DAG has no distributed
+lowering for that: a worker fragment compiles filters and projections with no
+`SubqueryRunner` (`worker/filter_compile.go`), and per-row execution on
+workers would need catalog access, outer-scope shipping on the wire, and would
+multiply the single-process slow path across the cluster without distributing
+anything. Before #359, a correlated EXISTS failed the task loudly while a
+correlated SCALAR was **mis-deferred** by `resolveFilterSubqueries` to a
+producer stage whose dangling outer reference evaluated NULL — the query
+answered **0, silently**, distributed-only.
+
+Mechanism (same refuse-loudly shape as set operations):
+
+- `Planner.refuseCorrelatedSubqueries` (`physical/correlated_refusal.go`) —
+  pre-pass over the optimized logical plan, run at the top of
+  `PlanDistributed`. Scope per expression is derived exactly as the
+  single-process pipeline derives it when it DECIDES correlation
+  (`collectTableAliases`/`collectOuterColumns` + the #334 inner-column
+  resolver), so the two paths classify identically by construction. Covers
+  filter predicates and SELECT-list projections; scalar, EXISTS/NOT EXISTS,
+  IN, ANY/ALL; nesting via `FindCorrelatedRefsWithScope`'s recursion.
+- Typed error `physical.ErrCorrelatedSubqueryDistributed`; the coordinator
+  matches it after `PlanDistributed` and answers on the coordinator-local
+  single-process pipeline (`Coordinator.runCorrelatedLocal`,
+  `coordinator/correlated_local.go`) — a ROUTE, not a fallback: no DAG plan
+  exists, every local failure (including the result budget) is the query's
+  outcome. No byte-threshold gate (these plans are unestimable); memory and
+  result budgets still bound it. Counter: `CorrelatedLocalRoutes()`.
+- Backstop at the deferral seam: `resolveSubqueryAST` refuses to defer or
+  eagerly execute a subquery that is not self-contained
+  (`plansql.DanglingTableRefs`), parking `correlatedErr` the way `setOpErr`
+  is parked — this is what makes the silent 0 structurally impossible even
+  for an expression the pre-pass never visited (e.g. inside a scalar
+  producer's own re-walk).
+
+Coverage: `physical/correlated_refusal_test.go` (refusal + the shapes that
+must KEEP planning: uncorrelated deferral, #334 inner-scope binding, equality
+decorrelation), `coordinator/correlated_subquery_e2e_test.go` (five shapes
+end-to-end on a DAG-forced cluster, route counters, over-budget fails loudly),
+`benchmarks/tpch/two_path_invariance_test.go` (`Correlated*` entries with
+`localRoute: true` — the runner asserts the route engages for exactly those
+entries and no others), `duckdb_compare_test.go` (`Correlated*` against DuckDB
+ground truth, both arms gated).
+
+The real distributed algorithm for this shape is a dependent join / general
+non-equi decorrelation — a separate feature, exactly as #346 grew
+INTERSECT/EXCEPT stages after their refusal landed.
+
 ## Window
 
 `walkStages` has always emitted a `window` stage, and until #349 nothing

@@ -1301,8 +1301,6 @@ func duckdbCorpus() []duckdbCase {
 			sql: `SELECT COUNT(*) AS n FROM (SELECT c_nationkey, c_acctbal FROM customer) c1
 				WHERE c1.c_acctbal > (SELECT AVG(c_acctbal) FROM customer c2
 					WHERE c2.c_nationkey < c1.c_nationkey)`,
-			knownBugArm: armDAG,
-			knownBug:    "the stage DAG answers 0 for any per-row correlated subquery (see above)",
 		},
 		duckdbCase{name: "CorrelatedExistsUnprojectedOuterCol",
 			sql: `SELECT COUNT(*) AS n FROM customer c1
@@ -1415,6 +1413,17 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "IntersectWidenedOrdered",
 			sql: `SELECT n_regionkey + 100 AS k FROM nation INTERSECT
 				SELECT r_regionkey + 100.0 AS k FROM region ORDER BY k`},
+		// #359's SELECT-list arm: a correlated scalar PROJECTED rather than
+		// filtered. Pre-fix the stage DAG failed the task at projection
+		// compile ("subqueries require a SubqueryRunner"); it now rides the
+		// refusal → coordinator-local route like the Correlated* family
+		// above. The CAST pins the output as a number on both engines — the
+		// single-process pipeline otherwise types a computed subquery column
+		// as a string, which the cross-engine fingerprint reads verbatim.
+		duckdbCase{name: "CorrelatedScalarInSelectList",
+			sql: `SELECT c_custkey, CAST((SELECT AVG(c_acctbal) FROM customer c2
+					WHERE c2.c_nationkey < c1.c_nationkey) AS DOUBLE) AS below_avg
+				FROM customer c1 WHERE c1.c_custkey <= 25 ORDER BY c_custkey`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

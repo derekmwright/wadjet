@@ -24,6 +24,13 @@ type TableColumns func(table string) []string
 // analysis. It is threaded through walkForOuterRefs so the recursion does not
 // have to pass four parallel maps at every node.
 type outerRefScope struct {
+	// anyOuter treats EVERY table identifier not defined by the subquery's
+	// own (possibly nested) FROM clauses as an outer table. It is what
+	// DanglingTableRefs runs on: a caller that has no outer table list but
+	// needs to know whether the subquery is self-contained. Only qualified
+	// references participate — an unqualified name says nothing without an
+	// outer column map.
+	anyOuter bool
 	// outerTables holds the enclosing query's table names and aliases.
 	outerTables map[string]bool
 	// innerTables holds the subquery's own table names and aliases.
@@ -64,6 +71,7 @@ func (s *outerRefScope) nest(info *SelectInfo) *outerRefScope {
 		}
 	}
 	return &outerRefScope{
+		anyOuter:    s.anyOuter,
 		outerTables: s.outerTables,
 		innerTables: inner,
 		outerCols:   s.outerCols,
@@ -94,6 +102,43 @@ func FindCorrelatedRefsWithColumns(subquerySQL string, outerTables map[string]bo
 // as one of the subquery's tables (issue #334).
 func FindCorrelatedRefsWithScope(subquerySQL string, outerTables map[string]bool, outerCols map[string]string, innerCols TableColumns) ([]OuterRef, error) {
 	return findCorrelatedRefs(subquerySQL, outerTables, outerCols, innerCols)
+}
+
+// DanglingTableRefs reports the qualified column references in subquerySQL
+// whose table identifier is not defined by any FROM clause within the subquery
+// itself, at any nesting depth. A non-empty result means the subquery is not
+// self-contained: executed standalone, the dangling reference resolves to no
+// column and evaluates NULL, which is how a mis-deferred correlated scalar
+// silently answered 0 on the stage DAG (#359). Unlike FindCorrelatedRefs it
+// needs no outer table list, so it can guard a site that has lost the outer
+// scope. Only qualified references are visible to it — unqualified correlation
+// needs the scoped analysis.
+func DanglingTableRefs(subquerySQL string) []OuterRef {
+	parsed, err := Parse(subquerySQL)
+	if err != nil {
+		return nil
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil || info == nil {
+		return nil
+	}
+	scope := &outerRefScope{
+		anyOuter:    true,
+		innerTables: collectInnerTables(info),
+	}
+	var refs []OuterRef
+	if info.WhereExpr != nil {
+		walkForOuterRefs(info.WhereExpr, scope, &refs)
+	}
+	if info.HavingExpr != nil {
+		walkForOuterRefs(info.HavingExpr, scope, &refs)
+	}
+	for _, col := range info.Columns {
+		if col.ASTExpr != nil {
+			walkForOuterRefs(col.ASTExpr, scope, &refs)
+		}
+	}
+	return dedup(refs)
 }
 
 func findCorrelatedRefs(subquerySQL string, outerTables map[string]bool, outerCols map[string]string, resolve TableColumns) ([]OuterRef, error) {
@@ -202,7 +247,7 @@ func walkForOuterRefs(node Node, s *outerRefScope, refs *[]OuterRef) {
 	case *ColRef:
 		if n.Table != "" {
 			tbl := strings.ToLower(n.Table)
-			if s.outerTables[tbl] && !s.innerTables[tbl] {
+			if (s.anyOuter || s.outerTables[tbl]) && !s.innerTables[tbl] {
 				*refs = append(*refs, OuterRef{Table: tbl, Column: strings.ToLower(n.Column)})
 			}
 		} else if s.outerCols != nil {

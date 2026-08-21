@@ -649,6 +649,17 @@ type Planner struct {
 	// row (#351). Reset at the start of generateStages.
 	joinCondErr error
 
+	// correlatedErr records a per-row correlated subquery found during stage
+	// generation (#359), parked for the same reason the two above are. The
+	// primary detection is refuseCorrelatedSubqueries, a pre-pass over the
+	// logical plan; this field is its structural backstop at the deferral
+	// seam — resolveSubqueryAST refuses to defer or eagerly execute a
+	// subquery that is not self-contained (plansql.DanglingTableRefs),
+	// because a producer stage executing it standalone evaluates the
+	// dangling outer reference to NULL and the query silently answers 0.
+	// Reset at the start of generateStages.
+	correlatedErr error
+
 	// aggStageRenames maps a name an Aggregate node reads in the LOGICAL plan
 	// to the name the aggregate STAGE emits for it, for every group key
 	// walkStages had to resolve through a subquery's rename (#355). The
@@ -1037,6 +1048,22 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 
 	switch n := node.(type) {
 	case *plansql.SubqueryNode:
+		// A subquery that is not self-contained must NOT be deferred to a
+		// producer stage or eagerly executed: standalone, its dangling outer
+		// reference resolves to no column, evaluates NULL, and the query
+		// silently answers 0 (#359). refuseCorrelatedSubqueries catches
+		// correlation before stage generation with full scope; this is the
+		// structural backstop for any expression that reaches deferral
+		// without having passed through that pre-pass (e.g. inside a scalar
+		// producer's own re-walk). Parked, not returned — walkStages has no
+		// error path — and PlanDistributed turns it into the typed refusal
+		// the coordinator routes on.
+		if dangling := plansql.DanglingTableRefs(n.SQL); len(dangling) > 0 {
+			p.refuseCorrelated(fmt.Errorf("%w: a scalar subquery references outer %s"+
+				" and cannot execute as a standalone producer stage",
+				ErrCorrelatedSubqueryDistributed, describeOuterRefs(dangling)))
+			return node
+		}
 		// Defer scalar subqueries to producer stages so they share the
 		// distributed accumulation path instead of running as a silent
 		// single-process pipeline on the coordinator at plan time (Q11's
@@ -2089,12 +2116,22 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// Ensure scan nodes have column metadata — needed by assignJoinKeySides
 	// to assign shuffle keys to the correct child side.
 	p.AnnotateScanColumns(ctx, node)
+	// Per-row correlated subqueries have no distributed lowering: refuse
+	// with a typed error BEFORE stage generation so the coordinator can
+	// route the query onto its local single-process engine instead of the
+	// scalar-deferral path silently answering 0 (#359).
+	if err := p.refuseCorrelatedSubqueries(node); err != nil {
+		return nil, err
+	}
 	stages := p.generateStages(node)
 	if p.setOpErr != nil {
 		return nil, p.setOpErr
 	}
 	if p.joinCondErr != nil {
 		return nil, p.joinCondErr
+	}
+	if p.correlatedErr != nil {
+		return nil, p.correlatedErr
 	}
 	if err := p.enforceQueryLimits(stages, node); err != nil {
 		return nil, err
@@ -3357,6 +3394,7 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	p.ctePlannedTerminal = make(map[string]string)
 	p.setOpErr = nil
 	p.joinCondErr = nil
+	p.correlatedErr = nil
 	p.aggStageRenames = nil
 	p.walkStages(node, &stages, nil)
 	// Resolve cte-alias phantoms emitted by walkStages dedup. Must happen

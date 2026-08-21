@@ -139,6 +139,14 @@ type twoPathQuery struct {
 	// result is a failure. Off for the TPC-H entries — Q18 legitimately
 	// returns 0 rows at this scale.
 	expectRows bool
+	// localRoute: arm B must answer this query via the #359 route — the
+	// stage DAG refuses a per-row correlated subquery
+	// (physical.ErrCorrelatedSubqueryDistributed) and the coordinator runs
+	// it on its local single-process pipeline. The runner asserts the route
+	// engaged for these entries AND for no others: an over-broad refusal
+	// silently downgrades distributed queries to single-process, and
+	// nothing else in this suite would notice (the answers stay right).
+	localRoute bool
 	// assertA is an ABSOLUTE assertion on arm A's rows, run in addition to
 	// the two-arm compare. The compare's contract is "the paths agree", not
 	// "the answer is right" — a defect that hits both engines the same way
@@ -372,7 +380,22 @@ func TestTwoPathInvariance(t *testing.T) {
 			}
 			hitsBefore := fast.LocalFastPathHits()
 			localRows, localCols, localErr := runArm(t, ctx, fast, q.sql)
+			routesBefore := dag.CorrelatedLocalRoutes()
 			dagRows, dagCols, dagErr := runArm(t, ctx, dag, q.sql)
+
+			// The #359 route must engage exactly for the entries that
+			// declare it. A correlated query running the stage DAG is the
+			// old silent-0 defect; a NON-correlated query taking the route
+			// is an over-broad refusal downgrading distributed execution to
+			// single-process — correct answers, so only this counter sees
+			// it.
+			routed := dag.CorrelatedLocalRoutes() - routesBefore
+			if q.localRoute && routed == 0 {
+				t.Errorf("arm B ran the stage DAG for a per-row correlated subquery — the #359 refusal did not fire")
+			}
+			if !q.localRoute && routed != 0 {
+				t.Errorf("arm B routed this query to the coordinator-local pipeline — the #359 refusal fired for a shape the stage DAG can run")
+			}
 
 			// The fast path declines any plan it cannot size-estimate —
 			// today that is every plan still carrying a subquery predicate
@@ -2684,19 +2707,20 @@ func twoPathCorpus() []twoPathQuery {
 		// row, so an equality version of any of these passes with the bug
 		// present and proves nothing.
 		//
-		// All five are pinned for a SEPARATE, pre-existing defect: the stage
-		// DAG cannot run a per-row correlated subquery at all. A worker
-		// compiles its fragment's filter without a SubqueryRunner, so EXISTS
-		// fails the task outright and a correlated scalar answers 0 — arm B
-		// returns 0 even for CorrelatedScalarProjectedOuterCol, which has
-		// nothing to do with pruning and which arm A has always answered
-		// correctly (verified on the pre-fix tree). #347's own gate is the
-		// arm-A half of TestDuckDBCompare plus
-		// TestCorrelatedOuterColumnPruning; the assertions here stand ready
-		// for the day the DAG grows a runner.
-		twoPathQuery{name: "CorrelatedScalarUnprojectedOuterCol", cmp: cmpUnordered, expectRows: true,
-			knownBug: "the stage DAG answers 0 for any per-row correlated subquery: the worker " +
-				"compiles its fragment's filter with no SubqueryRunner",
+		// These (and the Correlated* entries appended at the corpus end) run
+		// arm B through the #359 route: the stage DAG refuses a
+		// per-row correlated subquery (PlanDistributed returns
+		// physical.ErrCorrelatedSubqueryDistributed — there is no distributed
+		// lowering for a correlation that survives decorrelation) and the
+		// coordinator answers on its local single-process pipeline. The
+		// localRoute flag makes the runner assert that route engaged. Before
+		// it existed, EXISTS failed the task and a correlated scalar was
+		// mis-deferred to a producer stage whose dangling outer reference
+		// evaluated NULL — arm B answered 0 for every scalar form here,
+		// including CorrelatedScalarProjectedOuterCol, which has nothing to
+		// do with pruning. #347's own gate is the arm-A half of
+		// TestDuckDBCompare plus TestCorrelatedOuterColumnPruning.
+		twoPathQuery{name: "CorrelatedScalarUnprojectedOuterCol", cmp: cmpUnordered, expectRows: true, localRoute: true,
 			sql: `SELECT COUNT(*) AS n FROM customer c1
 				WHERE c1.c_acctbal > (SELECT AVG(c_acctbal) FROM customer c2
 					WHERE c2.c_nationkey < c1.c_nationkey)`,
@@ -2704,14 +2728,12 @@ func twoPathCorpus() []twoPathQuery {
 		// The control: same correlation, outer column forced into a
 		// projection so pruning cannot drop it. Correct before the fix and
 		// after — the pair is what localizes the defect to pruning.
-		twoPathQuery{name: "CorrelatedScalarProjectedOuterCol", cmp: cmpUnordered, expectRows: true,
-			knownBug: "the stage DAG answers 0 for any per-row correlated subquery (see above)",
+		twoPathQuery{name: "CorrelatedScalarProjectedOuterCol", cmp: cmpUnordered, expectRows: true, localRoute: true,
 			sql: `SELECT COUNT(*) AS n FROM (SELECT c_nationkey, c_acctbal FROM customer) c1
 				WHERE c1.c_acctbal > (SELECT AVG(c_acctbal) FROM customer c2
 					WHERE c2.c_nationkey < c1.c_nationkey)`,
 			assertA: assertCorrelatedScalarCount("the same correlation with the column projected")},
-		twoPathQuery{name: "CorrelatedExistsUnprojectedOuterCol", cmp: cmpUnordered, expectRows: true,
-			knownBug: "the stage DAG fails the task: EXISTS subquery requires a SubqueryRunner",
+		twoPathQuery{name: "CorrelatedExistsUnprojectedOuterCol", cmp: cmpUnordered, expectRows: true, localRoute: true,
 			sql: `SELECT COUNT(*) AS n FROM customer c1
 				WHERE EXISTS (SELECT 1 FROM customer c2
 					WHERE c2.c_nationkey < c1.c_nationkey AND c2.c_acctbal > 9000)`,
@@ -2719,8 +2741,7 @@ func twoPathCorpus() []twoPathQuery {
 		// The complement, and the reason a row count is not a check: the
 		// NULL substitution made this one return the WHOLE table rather than
 		// nothing, which looks entirely plausible.
-		twoPathQuery{name: "CorrelatedNotExistsUnprojectedOuterCol", cmp: cmpUnordered, expectRows: true,
-			knownBug: "the stage DAG fails the task: EXISTS subquery requires a SubqueryRunner",
+		twoPathQuery{name: "CorrelatedNotExistsUnprojectedOuterCol", cmp: cmpUnordered, expectRows: true, localRoute: true,
 			sql: `SELECT COUNT(*) AS n FROM customer c1
 				WHERE NOT EXISTS (SELECT 1 FROM customer c2
 					WHERE c2.c_nationkey < c1.c_nationkey AND c2.c_acctbal > 9000)`,
@@ -2860,6 +2881,63 @@ func twoPathCorpus() []twoPathQuery {
 					}
 				}
 			}},
+		// #359, the remaining correlated shapes. Both ride the same route as
+		// the Correlated* family above (PlanDistributed refusal → coordinator
+		// -local execution, asserted by localRoute). The SELECT-list form is
+		// the one that failed the task at PROJECTION compile pre-fix; the
+		// nested form makes the correlation analysis recurse two subqueries
+		// deep before it can refuse.
+		// The CAST pins the projected value as a number: the single-process
+		// pipeline otherwise types a computed subquery column as a STRING,
+		// and string cells compare byte-exact — the two arms' AVGs
+		// legitimately differ in the last float digits (their fixtures load
+		// in different chunk orders), which only the numeric comparison is
+		// allowed to absorb.
+		twoPathQuery{name: "CorrelatedScalarInSelectList", cmp: cmpOrdered, expectRows: true, localRoute: true,
+			sql: `SELECT c_custkey, c_nationkey,
+				CAST((SELECT AVG(c_acctbal) FROM customer c2
+					WHERE c2.c_nationkey < c1.c_nationkey) AS DOUBLE) AS below_avg
+				FROM customer c1 WHERE c1.c_custkey <= 25 ORDER BY c_custkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 25 {
+					tb.Fatalf("%d rows, want 25", len(rows))
+				}
+				cust := sf001Table(tb, "customer")
+				for i, r := range rows {
+					key := cellNum(r, "c_nationkey")
+					sum, n := 0.0, 0
+					for _, o := range cust {
+						if toFloat(o["c_nationkey"]) < key {
+							sum += toFloat(o["c_acctbal"])
+							n++
+						}
+					}
+					v, present := lookupCell(r, "below_avg")
+					if !present {
+						tb.Fatalf("row %d carries no below_avg column — the correlated projection was dropped", i)
+					}
+					if n == 0 {
+						// Empty inner set: AVG is NULL. The single-process
+						// pipeline types the computed column as a string, so
+						// NULL may surface as nil or as the empty string.
+						if v != nil && cellText(r, "below_avg") != "" {
+							tb.Errorf("row %d (nationkey %v): below_avg = %v, want NULL (empty inner set)", i, key, v)
+						}
+						continue
+					}
+					want := sum / float64(n)
+					if got := cellNum(r, "below_avg"); math.Abs(got-want) > 1e-6*math.Max(1, math.Abs(want)) {
+						tb.Errorf("row %d (nationkey %v): below_avg = %v, want %v", i, key, got, want)
+					}
+				}
+			}},
+		twoPathQuery{name: "CorrelatedNestedTwoDeep", cmp: cmpUnordered, expectRows: true, localRoute: true,
+			sql: `SELECT COUNT(*) AS n FROM customer c1
+				WHERE c1.c_acctbal > (SELECT AVG(c2.c_acctbal) FROM customer c2
+					WHERE c2.c_acctbal > (SELECT AVG(c3.c_acctbal) FROM customer c3
+						WHERE c3.c_nationkey < c1.c_nationkey))`,
+			assertA: assertCorrelatedNestedCount("the outermost row is read two subqueries deep")},
 	)
 
 	// INTERSECT / EXCEPT on the stage DAG (#346, second half). Until this
@@ -3365,6 +3443,48 @@ func assertCorrelatedScalarCount(why string) func(testing.TB, []map[string]any) 
 				}
 			}
 			if n > 0 && toFloat(r["c_acctbal"]) > sum/float64(n) {
+				want++
+			}
+		}
+		if got := cellNum(rows[0], "n"); got != float64(want) {
+			tb.Errorf("n = %v, want %d — %s (recomputed over the fixture rows)", got, want, why)
+		}
+	}
+}
+
+// assertCorrelatedNestedCount recomputes the two-deep correlation: the outer
+// row's nationkey bounds the inner-inner AVG, whose value filters the middle
+// AVG, whose value the outer row is compared against. An empty inner-inner set
+// makes the chain NULL end to end, so nationkey 0 contributes nothing.
+func assertCorrelatedNestedCount(why string) func(testing.TB, []map[string]any) {
+	return func(tb testing.TB, rows []map[string]any) {
+		tb.Helper()
+		if len(rows) != 1 {
+			tb.Fatalf("%d rows, want 1 (%s)", len(rows), why)
+		}
+		cust := sf001Table(tb, "customer")
+		want := 0
+		for _, r := range cust {
+			key := toFloat(r["c_nationkey"])
+			sum, n := 0.0, 0
+			for _, o := range cust {
+				if toFloat(o["c_nationkey"]) < key {
+					sum += toFloat(o["c_acctbal"])
+					n++
+				}
+			}
+			if n == 0 {
+				continue // inner-inner AVG is NULL → middle filter matches nothing → outer compare UNKNOWN
+			}
+			threshold := sum / float64(n)
+			mSum, m := 0.0, 0
+			for _, o := range cust {
+				if toFloat(o["c_acctbal"]) > threshold {
+					mSum += toFloat(o["c_acctbal"])
+					m++
+				}
+			}
+			if m > 0 && toFloat(r["c_acctbal"]) > mSum/float64(m) {
 				want++
 			}
 		}

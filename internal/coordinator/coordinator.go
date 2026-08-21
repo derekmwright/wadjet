@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -216,6 +217,10 @@ type Coordinator struct {
 	localSem   chan struct{}                 // limits concurrent local fast-path executions
 	localHits  atomic.Int64                  // queries served by the local fast path
 	localBails atomic.Int64                  // local runs aborted over result budget, re-dispatched as DAG
+	// localCorrelated counts queries whose plan the stage DAG refused
+	// (per-row correlated subquery, #359) and that were routed to the
+	// coordinator-local single-process pipeline instead.
+	localCorrelated atomic.Int64
 	// local executions reported to the client instead of retried on the
 	// DAG (#308) — every increment is a query the two paths might have
 	// answered differently.
@@ -850,6 +855,15 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	planner.DynamicFiltersEnabled = c.config.DynamicFilters
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
+		// A per-row correlated subquery has no distributed lowering — the
+		// planner refuses it with a typed error rather than letting the
+		// scalar-deferral path answer 0 silently (#359). Route it onto the
+		// coordinator-local single-process pipeline, which owns
+		// correlated-subquery semantics; any failure THERE is the query's
+		// outcome (no DAG plan exists to fall back to).
+		if errors.Is(err, physical.ErrCorrelatedSubqueryDistributed) {
+			return c.runCorrelatedLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}
 

@@ -115,6 +115,18 @@
       "fine": "2a62cf402cd3396a",
       "coarse": "2a62cf402cd3396a"
     },
+    "CorrelatedScalarInSelectList": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "c_custkey",
+        "below_avg"
+      ],
+      "fine": "98d049306e9f04f6",
+      "coarse": "23015f9f2368c9be"
+    },
     "CorrelatedScalarProjectedOuterCol": {
       "source": "duckdb",
       "row_count": 1,

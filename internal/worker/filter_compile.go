@@ -19,7 +19,13 @@ import (
 //
 // Subqueries in filter fragments have already been resolved to literals by
 // the planner (see plan.go resolveFilterSubqueries) before FilterExprs is
-// populated, so compile here runs with a nil subquery runner.
+// populated, so compile here runs with a nil subquery runner. A PER-ROW
+// correlated subquery can never reach this compile: PlanDistributed refuses
+// that shape (physical.ErrCorrelatedSubqueryDistributed) and the coordinator
+// answers it on its local single-process pipeline (#359). The nil-runner
+// compile error below is therefore a backstop, not a supported path — it
+// fails the task loudly rather than letting a subquery silently evaluate
+// wrong.
 func compileFilterExprs(exprs []string) ([]exec.UnaryOperator, []string, error) {
 	if len(exprs) == 0 {
 		return nil, nil, nil
