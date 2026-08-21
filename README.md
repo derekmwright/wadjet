@@ -183,29 +183,36 @@ cross-validation against DuckDB.
 
 Coordinator `c7g.2xlarge` + 3× `c7gd.4xlarge` workers (16 vCPU / 32 GB /
 NVMe each), SF100 Parquet on S3 (us-east-2), NATS control plane, gRPC
-streaming exchange with durable S3 fallback. Steady-state suite (run 4 of
-4; caches populated — cold run 1 of the same session was 3m21s).
-2026-08-16, `results/20260816-000900`.
+streaming exchange with durable S3 fallback. Steady-state suite (run 2 of
+2; caches populated — cold run 1 of the same session was 3m42s). Row
+counts are validated per run and the answers are additionally verifiable
+value-level against a committed DuckDB fingerprint ground truth
+(`benchmarks/tpch/fingerprint-sf100.json`, captured in-region).
+2026-08-21 at v0.16.0-correctness, `results/20260821-210755`.
 
 | Query | Time | | Query | Time |
 |---|---:|---|---|---:|
-| Q01 | 3.9s | | Q12 | 5.5s |
-| Q02 | 4.5s | | Q13 | 5.9s |
-| Q03 | 9.7s | | Q14 | 1.9s |
-| Q04 | 7.0s | | Q15 | 1.4s |
-| Q05 | 9.2s | | Q16 | 5.5s |
-| Q06 | 1.3s | | Q17 | 5.9s |
-| Q07 | 8.0s | | Q18 | 11.0s |
-| Q08 | 18.1s | | Q19 | 3.9s |
-| Q09 | 16.1s | | Q20 | 10.2s |
-| Q10 | 11.0s | | Q21 | 10.1s |
-| Q11 | 2.6s | | Q22 | 2.9s |
+| Q01 | 5.3s | | Q12 | 7.4s |
+| Q02 | 5.0s | | Q13 | 5.9s |
+| Q03 | 10.3s | | Q14 | 2.3s |
+| Q04 | 8.0s | | Q15 | 1.6s |
+| Q05 | 9.3s | | Q16 | 6.7s |
+| Q06 | 1.4s | | Q17 | 6.7s |
+| Q07 | 9.4s | | Q18 | 20.6s |
+| Q08 | 20.6s | | Q19 | 4.3s |
+| Q09 | 26.9s | | Q20 | 10.1s |
+| Q10 | 11.0s | | Q21 | 10.4s |
+| Q11 | 3.1s | | Q22 | 2.8s |
 
-**Suite total: 2m35.9s steady / 3m21s cold.** On identical hardware in a
-same-day paired run (2026-08-14), Wadjet's steady state beat Trino 470
-FTE by 10% on suite wall and 19% on per-query geomean, winning 12 of 22
-queries ([full comparison](docs/benchmarks/trino-comparison-2026-08-14.md));
-the numbers above include further improvements landed since that pairing.
+**Suite total: 3m09s steady / 3m42s cold.** These are the first numbers
+published after the v0.16.0 correctness campaign (~60 wrong-answer fixes;
+see the release notes) — some performance was deliberately traded for
+correct answers, and clawing it back under the new gates is the next arc.
+The best pre-campaign run on this configuration was 2m36s steady / 3m21s
+cold (2026-08-16, run 4 of 4). On identical hardware in a same-day paired
+run (2026-08-14), Wadjet's steady state beat Trino 470 FTE by 10% on
+suite wall and 19% on per-query geomean, winning 12 of 22 queries
+([full comparison](docs/benchmarks/trino-comparison-2026-08-14.md)).
 
 ### ClickBench, single node (official spec)
 
@@ -214,40 +221,42 @@ The full 43-query ClickBench suite on the official listing hardware —
 `hits` Parquet data in place (14.7 GB, no import step). Official
 methodology: page-cache drop before each query, cold + 2 hot tries,
 one process per query. Every query result is cell-exact against DuckDB
-on the same data (`benchmarks/clickbench/`). 2026-08-17,
-`benchmarks/clickbench/results-c6a-20260817-wave6.json`.
+on the same data (`benchmarks/clickbench/`). 2026-08-21 at
+v0.16.0-correctness, `benchmarks/clickbench/results-c6a-20260821-v0160.json`.
 
 | Query | Cold | Hot | Query | Cold | Hot |
 |---|---:|---:|---|---:|---:|
-| Q01 | 0.001s | 0.001s | Q23 | 21.45s | 4.36s |
-| Q02 | 0.093s | 0.054s | Q24 | 12.30s | 3.10s |
-| Q03 | 0.22s | 0.18s | Q25 | 0.98s | 0.93s |
-| Q04 | 0.30s | 0.19s | Q26 | 1.03s | 0.93s |
-| Q05 | 0.77s | 0.71s | Q27 | 1.00s | 0.94s |
-| Q06 | 1.72s | 1.59s | Q28 | 9.72s | 5.22s |
-| Q07 | 0.015s | 0.011s | Q29 | 13.21s | 13.52s |
-| Q08 | 0.16s | 0.12s | Q30 | 0.15s | 0.12s |
-| Q09 | 1.22s | 1.15s | Q31 | 2.01s | 0.99s |
-| Q10 | 2.80s | 2.60s | Q32 | 5.65s | 1.43s |
-| Q11 | 0.70s | 0.63s | Q33 | 17.09s | 16.76s |
-| Q12 | 0.80s | 0.71s | Q34 | 10.67s | 4.85s |
-| Q13 | 1.36s | 1.13s | Q35 | 14.38s | 8.37s |
-| Q14 | 3.12s | 2.65s | Q36 | 4.48s | 4.19s |
-| Q15 | 1.57s | 1.33s | Q37 | 0.35s | 0.18s |
-| Q16 | 0.96s | 0.89s | Q38 | 0.18s | 0.12s |
-| Q17 | 3.05s | 2.45s | Q39 | 0.16s | 0.073s |
-| Q18 | 2.54s | 2.15s | Q40 | 0.63s | 0.42s |
-| Q19 | 12.06s | 10.65s | Q41 | 0.079s | 0.040s |
-| Q20 | 0.15s | 0.056s | Q42 | 0.073s | 0.039s |
-| Q21 | 10.11s | 1.46s | Q43 | 0.21s | 0.17s |
-| Q22 | 11.15s | 1.95s |  |  |  |
+| Q01 | 0.005s | 0.001s | Q23 | 21.5s | 4.38s |
+| Q02 | 0.057s | 0.024s | Q24 | 12.3s | 3.14s |
+| Q03 | 0.23s | 0.19s | Q25 | 2.63s | 1.13s |
+| Q04 | 0.33s | 0.19s | Q26 | 1.02s | 0.94s |
+| Q05 | 0.83s | 0.76s | Q27 | 2.64s | 1.12s |
+| Q06 | 1.61s | 1.52s | Q28 | 9.69s | 4.03s |
+| Q07 | 0.018s | 0.012s | Q29 | 12.0s | 11.8s |
+| Q08 | 0.13s | 0.090s | Q30 | 0.16s | 0.12s |
+| Q09 | 1.27s | 1.17s | Q31 | 2.07s | 0.98s |
+| Q10 | 3.15s | 2.90s | Q32 | 5.70s | 1.39s |
+| Q11 | 0.71s | 0.61s | Q33 | 5.94s | 5.25s |
+| Q12 | 0.81s | 0.71s | Q34 | 10.7s | 4.73s |
+| Q13 | 1.24s | 1.07s | Q35 | 14.5s | 8.38s |
+| Q14 | 3.19s | 2.44s | Q36 | 4.50s | 4.12s |
+| Q15 | 1.50s | 1.33s | Q37 | 0.32s | 0.22s |
+| Q16 | 1.06s | 0.94s | Q38 | 0.19s | 0.12s |
+| Q17 | 2.85s | 2.47s | Q39 | 0.17s | 0.068s |
+| Q18 | 2.51s | 2.13s | Q40 | 0.72s | 0.43s |
+| Q19 | 12.2s | 10.6s | Q41 | 0.074s | 0.038s |
+| Q20 | 0.18s | 0.050s | Q42 | 0.072s | 0.038s |
+| Q21 | 10.1s | 1.45s | Q43 | 0.20s | 0.15s |
+| Q22 | 11.2s | 1.96s |  |  |  |
 
-**Suite sums: 2m51s cold / 1m39s hot (43/43, no failures).** By the
+**Suite sums: 2m42s cold / 1m25s hot (43/43, no failures).** By the
 official ClickBench formula (reproducible via
-`benchmarks/clickbench/rank.py`) this places Wadjet at combined #47,
-hot #67, and cold #18 of the 132 published `c6a.4xlarge` entries
-(as of 2026-08-17) — ahead of the Trino, Presto, Impala, Spark,
+`benchmarks/clickbench/rank.py`) this places Wadjet at combined #42,
+hot #66, and cold #19 of the 136 published `c6a.4xlarge` entries
+(as of 2026-08-21) — ahead of the Trino, Presto, Impala, Spark,
 Daft, GlareDB, and pg_duckdb Parquet entries on the same hardware.
+Unlike TPC-H SF100, ClickBench improved through the correctness
+campaign (cold −9s, hot −14s vs the 2026-08-17 run).
 The remaining hot spots (Q29, Q33, Q19, Q35 — regex-keyed grouping
 and high-cardinality aggregation) are the active optimization arc.
 Cold times for early large-read queries vary run-to-run with EBS gp2
