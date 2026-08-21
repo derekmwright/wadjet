@@ -1283,15 +1283,13 @@ func duckdbCorpus() []duckdbCase {
 		// subquery requires a SubqueryRunner") and a correlated scalar
 		// answers 0 — including for CorrelatedScalarProjectedOuterCol, which
 		// has nothing to do with pruning and which arm A has always answered
-		// correctly. Arm A stays fully gated, which is the #347 gate; the
-		// pins fail the moment the DAG learns to answer these.
+		// correctly. Both arms are fully gated since #359: the DAG refuses
+		// the shape and the coordinator routes it onto the local pipeline,
+		// so the answers below hold everywhere.
 		duckdbCase{name: "CorrelatedScalarUnprojectedOuterCol",
 			sql: `SELECT COUNT(*) AS n FROM customer c1
 				WHERE c1.c_acctbal > (SELECT AVG(c_acctbal) FROM customer c2
 					WHERE c2.c_nationkey < c1.c_nationkey)`,
-			knownBugArm: armDAG,
-			knownBug: "the stage DAG answers 0 for any per-row correlated subquery: " +
-				"the worker compiles its fragment's filter with no SubqueryRunner",
 		},
 		// The control: the identical correlation with the outer column
 		// forced into a projection, so pruning could never drop it. It was
@@ -1306,15 +1304,11 @@ func duckdbCorpus() []duckdbCase {
 			sql: `SELECT COUNT(*) AS n FROM customer c1
 				WHERE EXISTS (SELECT 1 FROM customer c2
 					WHERE c2.c_nationkey < c1.c_nationkey AND c2.c_acctbal > 9000)`,
-			knownBugArm: armDAG,
-			knownBug:    "the stage DAG fails the task: EXISTS subquery requires a SubqueryRunner",
 		},
 		duckdbCase{name: "CorrelatedNotExistsUnprojectedOuterCol",
 			sql: `SELECT COUNT(*) AS n FROM customer c1
 				WHERE NOT EXISTS (SELECT 1 FROM customer c2
 					WHERE c2.c_nationkey < c1.c_nationkey AND c2.c_acctbal > 9000)`,
-			knownBugArm: armDAG,
-			knownBug:    "the stage DAG fails the task: EXISTS subquery requires a SubqueryRunner",
 		},
 		// Two subqueries deep: c1 is bound by the OUTERMOST query and read
 		// inside the inner-inner SELECT, so the pruning walk, the correlation
@@ -1324,8 +1318,6 @@ func duckdbCorpus() []duckdbCase {
 				WHERE c1.c_acctbal > (SELECT AVG(c2.c_acctbal) FROM customer c2
 					WHERE c2.c_acctbal > (SELECT AVG(c3.c_acctbal) FROM customer c3
 						WHERE c3.c_nationkey < c1.c_nationkey))`,
-			knownBugArm: armDAG,
-			knownBug:    "the stage DAG answers 0 for any per-row correlated subquery (see above)",
 		},
 		// #375: an unqualified WHERE comparing columns of DIFFERENT types
 		// (FLOAT64 o_totalprice <> INT32 r_regionkey) across a five-table
