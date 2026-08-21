@@ -1527,23 +1527,28 @@ func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
 
 	// pg_catalog / information_schema introspection — return real catalog data
 	// for table/column discovery, empty results for everything else.
-	isPgCatalog := strings.Contains(normalized, "PG_CATALOG") ||
-		strings.Contains(normalized, "INFORMATION_SCHEMA") ||
-		strings.Contains(normalized, "PG_TYPE") ||
-		strings.Contains(normalized, "PG_NAMESPACE") ||
-		strings.Contains(normalized, "PG_CLASS") ||
-		strings.Contains(normalized, "PG_ATTRIBUTE") ||
-		strings.Contains(normalized, "PG_INDEX") ||
-		strings.Contains(normalized, "PG_CONSTRAINT") ||
-		strings.Contains(normalized, "PG_AM") ||
-		strings.Contains(normalized, "PG_ROLES") ||
-		strings.Contains(normalized, "PG_DESCRIPTION") ||
-		strings.Contains(normalized, "PG_PROC") ||
-		strings.Contains(normalized, "PG_TABLES") ||
-		strings.Contains(normalized, "PG_VIEWS") ||
-		strings.Contains(normalized, "PG_MATVIEWS") ||
-		strings.Contains(normalized, "PG_DATABASE") ||
-		c.readsSystemCatalog(normalized)
+	//
+	// A statement that reads relations is claimed if and only if one of them
+	// is a system relation (pg_ / information_schema) that is not a real
+	// table here. Substring matching claimed real queries: SELECT
+	// pg_typeof(id) FROM users contains "PG_TYPE" and was answered with a
+	// silent empty result (#305 item 8). A FROM-less statement has no
+	// relations to protect, so the text match stands for it: the pg_catalog
+	// functions clients call there include ones the engine deliberately does
+	// not implement (see pgcompat.go's ledger), and the empty-but-coherent
+	// answer keeps those clients moving.
+	var isPgCatalog bool
+	if refs := relationRefsAll(normalized); len(refs) > 0 {
+		isPgCatalog = c.claimsSystemRelations(refs)
+	} else {
+		isPgCatalog = strings.Contains(normalized, "PG_CATALOG") ||
+			strings.Contains(normalized, "INFORMATION_SCHEMA") ||
+			strings.Contains(normalized, "PG_TYPE") ||
+			strings.Contains(normalized, "PG_NAMESPACE") ||
+			strings.Contains(normalized, "PG_CLASS") ||
+			strings.Contains(normalized, "PG_ATTRIBUTE") ||
+			strings.Contains(normalized, "PG_DATABASE")
+	}
 
 	if isPgCatalog {
 		ctx, cancel := c.queryContext()
@@ -1568,13 +1573,13 @@ func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
 	return nil
 }
 
-// readsSystemCatalog reports whether the statement reads a relation in
-// PostgreSQL's reserved pg_ namespace (or information_schema) that this server
-// does not have as a real table.
+// claimsSystemRelations reports whether refs — the relations a statement
+// reads, at any depth — include one in PostgreSQL's reserved pg_ namespace
+// (or information_schema) that this server does not have as a real table.
 //
-// The intercept above is a list of catalog names spelled out one at a time,
-// which means every system relation nobody thought of reaches the query
-// engine, where it becomes a scan of a table that does not exist:
+// The intercept above once was a list of catalog names spelled out one at a
+// time, which meant every system relation nobody thought of reached the query
+// engine, where it became a scan of a table that does not exist:
 //
 //	select usesuper from pg_user where usename = current_user
 //	→ ERROR: stage scan-0 has no dependencies and no ScanFiles
@@ -1585,8 +1590,7 @@ func (c *pgConn) matchIntrospection(sql, upper string) *synthAnswer {
 // belongs to this layer — answered with real data where this server knows it,
 // and with an empty result of the right shape where it does not. The catalog
 // is still consulted, so a table that genuinely exists is never intercepted.
-func (c *pgConn) readsSystemCatalog(normalized string) bool {
-	refs := relationRefs(normalized)
+func (c *pgConn) claimsSystemRelations(refs []string) bool {
 	if len(refs) == 0 {
 		return false
 	}
@@ -1629,6 +1633,7 @@ func (c *pgConn) readsSystemCatalog(normalized string) bool {
 var catalogRank = map[string]int{
 	"PG_ATTRIBUTE": 5,
 	"PG_CLASS":     4,
+	"PG_TABLES":    4,
 	"PG_TYPE":      3,
 	"PG_DATABASE":  2,
 	"PG_NAMESPACE": 1,
@@ -1698,18 +1703,35 @@ func isCTEName(normalized, name string) bool {
 // relation — which turned DataGrip's startup-time query into an empty
 // intercepted answer. Only a top-level FROM introduces a relation.
 func relationRefs(normalized string) []string {
+	return scanRelationRefs(normalized, false)
+}
+
+// relationRefsAll is relationRefs at every paren depth: a subquery's FROM
+// reads a relation just as the outer one does, and the claim decision (does
+// this statement read a system catalog?) has to see it — pgJDBC's type query
+// joins pg_type against a subquery over pg_type. A token terminated by an
+// opening paren is a function call, never a relation, which is what keeps
+// `extract(epoch from pg_postmaster_start_time())` out of the refs here too.
+func relationRefsAll(normalized string) []string {
+	return scanRelationRefs(normalized, true)
+}
+
+func scanRelationRefs(normalized string, anyDepth bool) []string {
 	var refs []string
 	depth, tokDepth := 0, 0
 	inSingle, inDouble := false, false
 	start := -1
 	want := false
 
-	emit := func(tok string, d int) {
-		if d != 0 || tok == "" {
+	emit := func(tok string, d int, term byte) {
+		if (!anyDepth && d != 0) || tok == "" {
 			return
 		}
 		if want {
 			want = false
+			if term == '(' {
+				return // a function call: extract(epoch from f()), substring(x from f())
+			}
 			name := strings.TrimPrefix(tok, "PG_CATALOG.")
 			if name != "" {
 				refs = append(refs, name)
@@ -1746,7 +1768,7 @@ func relationRefs(normalized string) []string {
 			continue
 		}
 		if start >= 0 {
-			emit(normalized[start:i], tokDepth)
+			emit(normalized[start:i], tokDepth, ch)
 			start = -1
 		}
 		switch ch {
@@ -1837,43 +1859,57 @@ func (c *pgConn) matchSyntheticSelect(normalized string) *synthAnswer {
 	return nil
 }
 
-// matchShow answers SHOW statements from PostgreSQL clients.
+// showDefaults answers SHOW for a variable no SET has touched, under the
+// label PostgreSQL uses for it. server_version_num MUST parse as an integer —
+// pgJDBC calls Integer.parseInt on it, and answering "15.0" threw (#305
+// item 7). The values agree with what expr's session shims report.
+var showDefaults = map[string]struct{ label, value string }{
+	"transaction_isolation":       {"transaction_isolation", "read committed"},
+	"standard_conforming_strings": {"standard_conforming_strings", "on"},
+	"server_version":              {"server_version", "15.0"},
+	"server_version_num":          {"server_version_num", "150000"},
+	"server_encoding":             {"server_encoding", "UTF8"},
+	"client_encoding":             {"client_encoding", "UTF8"},
+	"datestyle":                   {"DateStyle", "ISO, MDY"},
+	"timezone":                    {"TimeZone", "UTC"},
+	"intervalstyle":               {"IntervalStyle", "postgres"},
+	"integer_datetimes":           {"integer_datetimes", "on"},
+	"is_superuser":                {"is_superuser", "off"},
+	"max_identifier_length":       {"max_identifier_length", "63"},
+	"search_path":                 {"search_path", `"$user", public`},
+	"application_name":            {"application_name", ""},
+}
+
+// matchShow answers SHOW statements from PostgreSQL clients. A variable the
+// session SET earlier answers with the stored value — SET search_path then
+// SHOW search_path used to come back "" because SHOW never consulted
+// sessionVars (#305 item 7).
 func (c *pgConn) matchShow(upper string) *synthAnswer {
-	switch {
-	case strings.Contains(upper, "TRANSACTION ISOLATION LEVEL"):
+	if strings.Contains(upper, "TRANSACTION ISOLATION LEVEL") {
 		return singleRow([]string{"transaction_isolation"}, map[string]any{
 			"transaction_isolation": "read committed",
 		})
-	case strings.Contains(upper, "STANDARD_CONFORMING_STRINGS"):
-		return singleRow([]string{"standard_conforming_strings"}, map[string]any{
-			"standard_conforming_strings": "on",
-		})
-	case strings.Contains(upper, "SERVER_VERSION"):
-		return singleRow([]string{"server_version"}, map[string]any{
-			"server_version": "15.0",
-		})
-	case strings.Contains(upper, "SERVER_ENCODING"):
-		return singleRow([]string{"server_encoding"}, map[string]any{
-			"server_encoding": "UTF8",
-		})
-	case strings.Contains(upper, "CLIENT_ENCODING"):
-		return singleRow([]string{"client_encoding"}, map[string]any{
-			"client_encoding": "UTF8",
-		})
-	case strings.Contains(upper, "DATESTYLE"):
-		return singleRow([]string{"DateStyle"}, map[string]any{
-			"DateStyle": "ISO, MDY",
-		})
-	case strings.HasPrefix(upper, "SHOW TABLES"), strings.HasPrefix(upper, "SHOW COLUMNS "):
+	}
+	if strings.HasPrefix(upper, "SHOW TABLES") || strings.HasPrefix(upper, "SHOW COLUMNS ") {
 		// Route SHOW TABLES and SHOW COLUMNS FROM through the query engine,
 		// which parses them as QueryShowTables / QueryDescribe respectively.
 		return nil
-	default:
-		// Unknown SHOW — return empty
-		return singleRow([]string{"setting"}, map[string]any{
-			"setting": "",
-		})
 	}
+	name := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(upper, "SHOW ")))
+	if v, ok := c.sessionVars[name]; ok {
+		label := name
+		if d, ok := showDefaults[name]; ok {
+			label = d.label
+		}
+		return singleRow([]string{label}, map[string]any{label: v})
+	}
+	if d, ok := showDefaults[name]; ok {
+		return singleRow([]string{d.label}, map[string]any{d.label: d.value})
+	}
+	// Unknown variable — empty value under its own label. PostgreSQL raises
+	// 42704 here; clients probe with SHOW enough that the empty answer is
+	// kept deliberately (it predates #305 and nothing depends on the error).
+	return singleRow([]string{name}, map[string]any{name: ""})
 }
 
 // sendSynthAnswer writes a complete simple-protocol result for ans:
@@ -2000,23 +2036,52 @@ func (c *pgConn) matchCatalogQuery(ctx context.Context, sql, normalized string) 
 
 	// pg_type — JDBC drivers query this to map OIDs to type names
 	if subject == "PG_TYPE" {
-		return c.matchPgType(normalized)
+		return c.matchPgType(sql, normalized)
 	}
 
-	// information_schema.alerts
-	if strings.Contains(normalized, "INFORMATION_SCHEMA") && strings.Contains(normalized, "ALERTS") {
+	// pg_tables — the user-facing table listing (SELECT * FROM pg_tables).
+	// An empty answer while tables exist is a wrong answer (#305 item 6).
+	if subject == "PG_TABLES" {
+		tables, err := c.db.ListTables(ctx)
+		if err != nil {
+			return nil
+		}
+		user := expr.SessionUser
+		if c.identity != nil {
+			user = c.identity.Name
+		}
+		if schema := extractParamValue(normalized, "SCHEMANAME"); schema != "" && schema != expr.SessionSchema {
+			tables = nil // every table here lives in the one schema
+		}
+		want := extractParamValue(normalized, "TABLENAME")
+		rows := make([]map[string]any, 0, len(tables))
+		for _, t := range tables {
+			if want == "" || want == t {
+				rows = append(rows, pgTablesAttrs(t, user))
+			}
+		}
+		return catalogRowsAnswer(sql, pgTablesAttrs("", user), rows,
+			[]string{"schemaname", "tablename", "tableowner", "tablespace",
+				"hasindexes", "hasrules", "hastriggers", "rowsecurity"})
+	}
+
+	// information_schema — branch on the relation the statement reads, not on
+	// a substring of its text: `... FROM information_schema.columns WHERE
+	// table_name = 'alerts'` contains the word ALERTS but asks about columns,
+	// and used to be answered with the alert listing (#305 item 8).
+	infoSchema := map[string]bool{}
+	for _, r := range relationRefsAll(normalized) {
+		if strings.HasPrefix(r, "INFORMATION_SCHEMA.") {
+			infoSchema[strings.TrimPrefix(r, "INFORMATION_SCHEMA.")] = true
+		}
+	}
+	switch {
+	case infoSchema["ALERTS"]:
 		return c.matchInfoSchemaAlerts(ctx)
-	}
-
-	// information_schema.tables
-	if strings.Contains(normalized, "INFORMATION_SCHEMA") && strings.Contains(normalized, "TABLES") &&
-		!strings.Contains(normalized, "COLUMNS") {
-		return c.matchInfoSchemaTables(ctx)
-	}
-
-	// information_schema.columns
-	if strings.Contains(normalized, "INFORMATION_SCHEMA") && strings.Contains(normalized, "COLUMNS") {
-		return c.matchInfoSchemaColumns(ctx, normalized)
+	case infoSchema["COLUMNS"]:
+		return c.matchInfoSchemaColumns(ctx, sql, normalized)
+	case infoSchema["TABLES"]:
+		return c.matchInfoSchemaTables(ctx, sql)
 	}
 
 	// Schema listing: SELECT nspname FROM pg_namespace (used by get_schema_names
@@ -2265,75 +2330,119 @@ func attributeShape() map[string]any {
 	}
 }
 
-// matchPgType returns rows from pg_type for JDBC/ODBC type mapping.
-// Drivers like pgjdbc query pg_type to map OIDs to Java types.
-func (c *pgConn) matchPgType(normalized string) *synthAnswer {
+// matchPgType returns rows from pg_type for JDBC/ODBC type mapping, shaped by
+// the client's own SELECT list — pgJDBC's TypeInfoCache reads columns by
+// position from the list it wrote, not from a fixed vocabulary (#305 item 2).
+// A SELECT list naming nothing this relation has falls back to the old
+// five-column answer rather than answering with a different shape.
+func (c *pgConn) matchPgType(sql, normalized string) *synthAnswer {
 	type pgType struct {
-		oid          string
-		typname      string
-		typlen       string
-		typtype      string
-		typnamespace string
+		oid     int
+		typname string
+		typlen  int
 	}
 
 	types := []pgType{
-		{"16", "bool", "1", "b", "11"},
-		{"17", "bytea", "-1", "b", "11"},
-		{"20", "int8", "8", "b", "11"},
-		{"21", "int2", "2", "b", "11"},
-		{"23", "int4", "4", "b", "11"},
-		{"25", "text", "-1", "b", "11"},
-		{"26", "oid", "4", "b", "11"},
-		{"700", "float4", "4", "b", "11"},
-		{"701", "float8", "8", "b", "11"},
-		{"1042", "bpchar", "-1", "b", "11"},
-		{"1043", "varchar", "-1", "b", "11"},
-		{"1082", "date", "4", "b", "11"},
-		{"1114", "timestamp", "8", "b", "11"},
-		{"1184", "timestamptz", "8", "b", "11"},
-		{"1700", "numeric", "-1", "b", "11"},
+		{16, "bool", 1},
+		{17, "bytea", -1},
+		{20, "int8", 8},
+		{21, "int2", 2},
+		{23, "int4", 4},
+		{25, "text", -1},
+		{26, "oid", 4},
+		{700, "float4", 4},
+		{701, "float8", 8},
+		{1042, "bpchar", -1},
+		{1043, "varchar", -1},
+		{1082, "date", 4},
+		{1114, "timestamp", 8},
+		{1184, "timestamptz", 8},
+		{1700, "numeric", -1},
 	}
 
-	// If query is looking for a specific OID, filter
-	specificOID := extractParamValue(normalized, "OID")
-
-	ans := &synthAnswer{cols: []string{"oid", "typname", "typlen", "typtype", "typnamespace"}}
-	for _, t := range types {
-		if specificOID != "" && t.oid != specificOID {
-			continue
-		}
-		ans.rows = append(ans.rows, map[string]any{
+	attrsFor := func(t pgType) map[string]any {
+		return map[string]any{
 			"oid":          t.oid,
 			"typname":      t.typname,
 			"typlen":       t.typlen,
-			"typtype":      t.typtype,
-			"typnamespace": t.typnamespace,
+			"typtype":      "b",
+			"typnamespace": 11,
+			"typelem":      0,
+			"typarray":     0,
+			"typdelim":     ",",
+			"typrelid":     0,
+			"typbasetype":  0,
+			"typtypmod":    -1,
+			"typnotnull":   false,
+			"typcollation": 0,
+			"typndims":     0,
+			"typisdefined": true,
+			// pg_namespace joined alongside: every one of these lives in pg_catalog.
+			"nspname": "pg_catalog",
+		}
+	}
+
+	// Narrowing predicates a driver sends: WHERE oid = 23 / typname = 'int4'.
+	specificOID := extractParamValue(normalized, "OID")
+	specificName := extractParamValue(normalized, "TYPNAME")
+
+	var rows []map[string]any
+	for _, t := range types {
+		if specificOID != "" && strconv.Itoa(t.oid) != specificOID {
+			continue
+		}
+		if specificName != "" && t.typname != specificName {
+			continue
+		}
+		rows = append(rows, attrsFor(t))
+	}
+
+	fallbackCols := []string{"oid", "typname", "typlen", "typtype", "typnamespace"}
+	if ans := catalogRowsAnswer(sql, attrsFor(pgType{}), rows, fallbackCols); ans != nil {
+		return ans
+	}
+	ans := &synthAnswer{cols: fallbackCols}
+	for _, r := range rows {
+		ans.rows = append(ans.rows, map[string]any{
+			"oid": r["oid"], "typname": r["typname"], "typlen": r["typlen"],
+			"typtype": r["typtype"], "typnamespace": r["typnamespace"],
 		})
 	}
 	return ans
 }
 
-// matchInfoSchemaTables returns information_schema.tables data.
-func (c *pgConn) matchInfoSchemaTables(ctx context.Context) *synthAnswer {
+// matchInfoSchemaTables returns information_schema.tables data, shaped by the
+// client's own SELECT list (getTables() asks for its columns by name and
+// label; a fixed vocabulary answered a different shape — #305 item 2).
+func (c *pgConn) matchInfoSchemaTables(ctx context.Context, sql string) *synthAnswer {
 	tables, err := c.db.ListTables(ctx)
 	if err != nil {
 		return nil
 	}
 
-	ans := &synthAnswer{cols: []string{"table_catalog", "table_schema", "table_name", "table_type"}}
+	fallbackCols := []string{"table_catalog", "table_schema", "table_name", "table_type"}
+	rows := make([]map[string]any, 0, len(tables))
 	for _, t := range tables {
-		ans.rows = append(ans.rows, map[string]any{
+		rows = append(rows, map[string]any{
 			"table_catalog": "wadjet",
 			"table_schema":  "public",
 			"table_name":    t,
 			"table_type":    "BASE TABLE",
 		})
 	}
-	return ans
+	shape := map[string]any{
+		"table_catalog": nil, "table_schema": nil, "table_name": nil, "table_type": nil,
+	}
+	if ans := catalogRowsAnswer(sql, shape, rows, fallbackCols); ans != nil {
+		return ans
+	}
+	return &synthAnswer{cols: fallbackCols, rows: rows}
 }
 
-// matchInfoSchemaColumns returns information_schema.columns data.
-func (c *pgConn) matchInfoSchemaColumns(ctx context.Context, normalized string) *synthAnswer {
+// matchInfoSchemaColumns returns information_schema.columns data, shaped by
+// the client's own SELECT list (#305 item 2), scoped to the table its WHERE
+// names.
+func (c *pgConn) matchInfoSchemaColumns(ctx context.Context, sql, normalized string) *synthAnswer {
 	tables, err := c.db.ListTables(ctx)
 	if err != nil {
 		return nil
@@ -2342,8 +2451,9 @@ func (c *pgConn) matchInfoSchemaColumns(ctx context.Context, normalized string) 
 	// Filter to specific table if referenced
 	targetTable := extractParamValue(normalized, "TABLE_NAME")
 
-	ans := &synthAnswer{cols: []string{"table_catalog", "table_schema", "table_name",
-		"column_name", "ordinal_position", "data_type", "is_nullable"}}
+	fallbackCols := []string{"table_catalog", "table_schema", "table_name",
+		"column_name", "ordinal_position", "data_type", "is_nullable"}
+	var rows []map[string]any
 	for _, tableName := range tables {
 		if targetTable != "" && tableName != targetTable {
 			continue
@@ -2352,27 +2462,47 @@ func (c *pgConn) matchInfoSchemaColumns(ctx context.Context, normalized string) 
 		if err != nil {
 			continue
 		}
-		for i, row := range table.Rows {
+		pos := 0
+		for _, row := range table.Rows {
 			colName, _ := row["column_name"].(string)
 			colType, _ := row["type"].(string)
 			nullable, _ := row["nullable"].(string)
 			if colName == "" || colName == "Partition Keys" {
 				continue
 			}
+			pos++
 			isNullable := "YES"
 			if nullable == "NO" {
 				isNullable = "NO"
 			}
-			ans.rows = append(ans.rows, map[string]any{
+			rows = append(rows, map[string]any{
 				"table_catalog":    "wadjet",
 				"table_schema":     "public",
 				"table_name":       tableName,
 				"column_name":      colName,
-				"ordinal_position": fmt.Sprintf("%d", i+1),
+				"ordinal_position": pos,
 				"data_type":        pgFormatType(colType),
 				"is_nullable":      isNullable,
+				"column_default":   nil,
+				"udt_name":         nil,
 			})
 		}
+	}
+	shape := map[string]any{
+		"table_catalog": nil, "table_schema": nil, "table_name": nil,
+		"column_name": nil, "ordinal_position": nil, "data_type": nil,
+		"is_nullable": nil, "column_default": nil, "udt_name": nil,
+	}
+	if ans := catalogRowsAnswer(sql, shape, rows, fallbackCols); ans != nil {
+		return ans
+	}
+	ans := &synthAnswer{cols: fallbackCols}
+	for _, r := range rows {
+		row := make(map[string]any, len(fallbackCols))
+		for _, col := range fallbackCols {
+			row[col] = r[col]
+		}
+		ans.rows = append(ans.rows, row)
 	}
 	return ans
 }
@@ -2452,6 +2582,17 @@ func extractParamValue(normalized, field string) string {
 		if end >= 0 {
 			return strings.ToLower(rest[1 : end+1])
 		}
+	}
+	// Unquoted numeric literal: pgJDBC inlines OIDs bare (attrelid = 16384),
+	// which used to be invisible here — so a request for one table's columns
+	// was answered with every table's (#305 item 4). Only digits are read: a
+	// bare identifier after = is a join condition, not a literal.
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end > 0 && (end == len(rest) || rest[end] == ' ' || rest[end] == ')' || rest[end] == ':' || rest[end] == ';') {
+		return rest[:end]
 	}
 	return ""
 }

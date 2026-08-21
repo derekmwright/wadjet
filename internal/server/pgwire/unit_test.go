@@ -161,6 +161,10 @@ func TestExtractParamValue(t *testing.T) {
 		{"no_match", "WHERE FOO = 'bar'", "RELNAME", ""},
 		{"no_quote", "WHERE RELNAME = abc", "RELNAME", ""},
 		{"equals_no_space", "WHERE RELNAME ='test'", "RELNAME", "test"},
+		{"numeric_unquoted", "WHERE ATTRELID = 16384 AND ATTNUM > 0", "ATTRELID", "16384"},
+		{"numeric_at_end", "WHERE OID = 23", "OID", "23"},
+		{"numeric_cast", "WHERE OID = 23::OID", "OID", "23"},
+		{"join_condition_is_not_a_literal", "WHERE ATTRELID = C.OID", "ATTRELID", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -488,7 +492,8 @@ func TestPGWireShowStatements(t *testing.T) {
 		{"SHOW server_encoding", "server_encoding", "UTF8"},
 		{"SHOW client_encoding", "client_encoding", "UTF8"},
 		{"SHOW DateStyle", "DateStyle", "ISO, MDY"},
-		{"SHOW some_unknown", "setting", ""},
+		{"SHOW server_version_num", "server_version_num", "150000"},
+		{"SHOW some_unknown", "some_unknown", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.sql, func(t *testing.T) {

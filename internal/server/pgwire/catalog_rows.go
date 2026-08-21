@@ -439,6 +439,23 @@ func pgClassAttrs(name string) map[string]any {
 	}
 }
 
+// pgTablesAttrs is the pg_tables row for one table: the user-facing listing
+// view over pg_class. Everything lives in the one schema, owned by the
+// connection's identity; the flag columns are the honest false — this server
+// has no indexes, rules, triggers or row security.
+func pgTablesAttrs(name, owner string) map[string]any {
+	return map[string]any{
+		"schemaname":  expr.SessionSchema,
+		"tablename":   name,
+		"tableowner":  owner,
+		"tablespace":  nil,
+		"hasindexes":  false,
+		"hasrules":    false,
+		"hastriggers": false,
+		"rowsecurity": false,
+	}
+}
+
 // stripSQLComments removes -- line comments and /* block */ comments (nested,
 // as PostgreSQL nests them), leaving a space where each stood so tokens do not
 // fuse. String literals and quoted identifiers are respected.
