@@ -20,7 +20,7 @@ import (
 func TestBuildAggregateFragment_EmitEmptyIdentity(t *testing.T) {
 	aggs := []distributed.AggSpec{{
 		Func: "sum", InputCol: "v", OutputCol: "total",
-		OutputType: int(parquet.TypeFloat64),
+		OutputType: distributed.WindowTypePtr(int(parquet.TypeFloat64)),
 	}}
 	tests := []struct {
 		name  string
@@ -70,19 +70,25 @@ func TestBuildAggregateFragment_EmitEmptyIdentity(t *testing.T) {
 func TestDecomposeAvg_LegOutputTypes(t *testing.T) {
 	in := []distributed.AggSpec{{
 		Func: "avg", InputCol: "v", OutputCol: "a",
-		OutputType: int(parquet.TypeFloat64),
+		OutputType: distributed.WindowTypePtr(int(parquet.TypeFloat64)),
 	}}
 	got := decomposeAvg(in)
 	if len(got) != 2 {
 		t.Fatalf("decomposeAvg produced %d specs, want 2 (sum, count): %+v", len(got), got)
 	}
-	if got[0].OutputCol != avgSumPrefix+"a" || got[0].OutputType != int(parquet.TypeFloat64) {
-		t.Errorf("sum leg: got %q type %v, want %q type %v",
-			got[0].OutputCol, parquet.TypeID(got[0].OutputType), avgSumPrefix+"a", parquet.TypeFloat64)
+	if got[0].OutputType == nil {
+		t.Fatalf("sum leg: OutputType is nil, want declared")
 	}
-	if got[1].OutputCol != avgCountPrefix+"a" || got[1].OutputType != int(parquet.TypeInt64) {
+	if got[0].OutputCol != avgSumPrefix+"a" || *got[0].OutputType != int(parquet.TypeFloat64) {
+		t.Errorf("sum leg: got %q type %v, want %q type %v",
+			got[0].OutputCol, parquet.TypeID(*got[0].OutputType), avgSumPrefix+"a", parquet.TypeFloat64)
+	}
+	if got[1].OutputType == nil {
+		t.Fatalf("count leg: OutputType is nil, want declared")
+	}
+	if got[1].OutputCol != avgCountPrefix+"a" || *got[1].OutputType != int(parquet.TypeInt64) {
 		t.Errorf("count leg: got %q type %v, want %q type %v",
-			got[1].OutputCol, parquet.TypeID(got[1].OutputType), avgCountPrefix+"a", parquet.TypeInt64)
+			got[1].OutputCol, parquet.TypeID(*got[1].OutputType), avgCountPrefix+"a", parquet.TypeInt64)
 	}
 
 	physIn := []physical.AggSpec{{

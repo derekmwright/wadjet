@@ -104,12 +104,12 @@ func TestExecuteFragment_EmptySourceUngroupedIdentityRow(t *testing.T) {
 		MergeMode: true,
 		FoldAvg:   true,
 		Aggregates: []distributed.AggSpec{
-			{Func: "sum", InputCol: "price", OutputCol: "s", OutputType: int(parquet.TypeFloat64)},
-			{Func: "min", InputCol: "name", OutputCol: "mn", OutputType: int(parquet.TypeString)},
-			{Func: "max", InputCol: "shipdate", OutputCol: "mx", OutputType: int(parquet.TypeDate)},
-			{Func: "sum", InputCol: "price", OutputCol: "__avg_sum#av", OutputType: int(parquet.TypeFloat64)},
-			{Func: "count", InputCol: "price", OutputCol: "__avg_count#av", OutputType: int(parquet.TypeInt64)},
-			{Func: "count", OutputCol: "c", OutputType: int(parquet.TypeInt64)},
+			{Func: "sum", InputCol: "price", OutputCol: "s", OutputType: distributed.WindowTypePtr(int(parquet.TypeFloat64))},
+			{Func: "min", InputCol: "name", OutputCol: "mn", OutputType: distributed.WindowTypePtr(int(parquet.TypeString))},
+			{Func: "max", InputCol: "shipdate", OutputCol: "mx", OutputType: distributed.WindowTypePtr(int(parquet.TypeDate))},
+			{Func: "sum", InputCol: "price", OutputCol: "__avg_sum#av", OutputType: distributed.WindowTypePtr(int(parquet.TypeFloat64))},
+			{Func: "count", InputCol: "price", OutputCol: "__avg_count#av", OutputType: distributed.WindowTypePtr(int(parquet.TypeInt64))},
+			{Func: "count", OutputCol: "c", OutputType: distributed.WindowTypePtr(int(parquet.TypeInt64))},
 		},
 		EmitEmptyIdentity: true,
 	})
@@ -189,7 +189,7 @@ func TestExecuteFragment_EmptySourceIdentityRowGates(t *testing.T) {
 	executor := NewExecutor(store, NewLRUCache(1<<20), nil)
 
 	typedSum := distributed.AggSpec{
-		Func: "sum", InputCol: "v", OutputCol: "s", OutputType: int(parquet.TypeFloat64),
+		Func: "sum", InputCol: "v", OutputCol: "s", OutputType: distributed.WindowTypePtr(int(parquet.TypeFloat64)),
 	}
 	untypedSum := distributed.AggSpec{Func: "sum", InputCol: "v", OutputCol: "s"}
 	untypedCount := distributed.AggSpec{Func: "count", OutputCol: "c"}

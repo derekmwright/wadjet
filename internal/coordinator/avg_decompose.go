@@ -54,7 +54,7 @@ func decomposeAvg(specs []distributed.AggSpec) []distributed.AggSpec {
 		sumSpec := a
 		sumSpec.Func = "sum"
 		sumSpec.OutputCol = avgSumPrefix + a.OutputCol
-		sumSpec.OutputType = int(parquet.TypeFloat64)
+		sumSpec.OutputType = distributed.WindowTypePtr(int(parquet.TypeFloat64))
 		countSpec := a
 		countSpec.Func = "count"
 		countSpec.OutputCol = avgCountPrefix + a.OutputCol
@@ -62,7 +62,7 @@ func decomposeAvg(specs []distributed.AggSpec) []distributed.AggSpec {
 		// applyAvgFold reads it straight out of Int64Data — inheriting
 		// AVG's float64 declaration here would hand the fold the wrong
 		// vector.
-		countSpec.OutputType = int(parquet.TypeInt64)
+		countSpec.OutputType = distributed.WindowTypePtr(int(parquet.TypeInt64))
 		out = append(out, sumSpec, countSpec)
 	}
 	return out

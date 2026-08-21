@@ -66,7 +66,7 @@ func decomposeCovar(specs []distributed.AggSpec) []distributed.AggSpec {
 		s := a
 		s.Func = covarStateFunc
 		s.OutputCol = covarStateColumn(kind, a.OutputCol)
-		s.OutputType = int(parquet.TypeString)
+		s.OutputType = distributed.WindowTypePtr(int(parquet.TypeString))
 		out = append(out, s)
 	}
 	return out

@@ -384,7 +384,7 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 				default:
 					countOnly = false
 				}
-				if a.OutputType == 0 {
+				if a.OutputType == nil {
 					typed = false
 				}
 			}

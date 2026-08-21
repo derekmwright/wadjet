@@ -545,10 +545,10 @@ type AggSpec struct {
 	// InputCol.
 	InputExpr string `json:"input_expr,omitempty"`
 	// OutputType is the plan-time parquet.TypeID of this aggregate's
-	// output column, carried as an int so the wire package stays free
+	// output column, carried as a plain int so the wire package stays free
 	// of the storage dependency.
 	//
-	// Zero means "the planner did not declare one" — either an older
+	// Nil means "the planner did not declare one" — either an older
 	// coordinator that predates the field, or a MIN/MAX whose input
 	// column the planner could not resolve to a catalog type. Workers
 	// fall back to deriving the type from Func alone in that case, and
@@ -560,7 +560,13 @@ type AggSpec struct {
 	// the planner always declares them. MIN/MAX follow their input
 	// column, and are declared only when it resolves to exactly one
 	// catalog column type.
-	OutputType int `json:"output_type,omitempty"`
+	//
+	// A POINTER since #354, for WindowColSpec.OutputType's reason:
+	// parquet.TypeID's zero value is BOOL, so the plain int this used to be
+	// could not tell a declared BOOL_AND/BOOL_OR output from an absent
+	// declaration — the DAG read it as undeclared and fell back to a guess,
+	// reinstating #345's silent-drop shape for exactly one type.
+	OutputType *int `json:"output_type,omitempty"`
 	// InputType is the plan-time parquet.TypeID of the vector InputExpr
 	// evaluates into, carried the same way and for the same reason: the
 	// worker compiles InputExpr from its text and has no catalog to
@@ -678,12 +684,13 @@ type WindowColSpec struct {
 	// five value functions from the vector it actually reads. Declaring it
 	// is what covers the functions retyping cannot reach.
 	//
-	// A POINTER, unlike AggSpec.OutputType, because parquet.TypeID's zero
-	// value is BOOL: LAG over a boolean column declares 0, and an int field
-	// cannot tell that from an absent declaration. Silently reading a
-	// declared BOOL as "undeclared" reinstates #345 for exactly one type,
-	// which is the kind of hole that goes unnoticed. SortKeySpec.NullsLast
-	// carries a pointer for the same reason.
+	// A POINTER, like AggSpec.OutputType (#354) and AggSpec.InputType
+	// (#371), because parquet.TypeID's zero value is BOOL: LAG over a
+	// boolean column declares 0, and an int field cannot tell that from an
+	// absent declaration. Silently reading a declared BOOL as "undeclared"
+	// reinstates #345 for exactly one type, which is the kind of hole that
+	// goes unnoticed. SortKeySpec.NullsLast carries a pointer for the same
+	// reason.
 	OutputType  *int          `json:"output_type,omitempty"`
 	PartitionBy []string      `json:"partition_by,omitempty"`
 	OrderBy     []SortKeySpec `json:"order_by,omitempty"`
@@ -698,8 +705,8 @@ type WindowColSpec struct {
 }
 
 // WindowTypePtr returns a pointer suitable for the pointer-typed TypeID
-// fields — WindowColSpec.OutputType, and since #371 AggSpec.InputType, which
-// went pointer for the same BOOL-is-zero reason.
+// fields — WindowColSpec.OutputType, AggSpec.InputType (#371), and since
+// #354 AggSpec.OutputType — all pointer for the same BOOL-is-zero reason.
 func WindowTypePtr(v int) *int { return &v }
 
 // WindowFrameSpec describes a window frame on the wire. Mirrors

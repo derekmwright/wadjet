@@ -29,7 +29,7 @@ func TestDecomposeVar_AllFourSpellings(t *testing.T) {
 		{" VAR_POP ", "var_pop"},
 	} {
 		got := decomposeVar([]distributed.AggSpec{{
-			Func: tc.fn, InputCol: "v", OutputCol: "s", OutputType: int(parquet.TypeFloat64),
+			Func: tc.fn, InputCol: "v", OutputCol: "s", OutputType: distributed.WindowTypePtr(int(parquet.TypeFloat64)),
 		}})
 		if len(got) != 1 {
 			t.Fatalf("%s: produced %d specs, want 1: %+v", tc.fn, len(got), got)
@@ -42,8 +42,8 @@ func TestDecomposeVar_AllFourSpellings(t *testing.T) {
 		}
 		// The partial ships an encoded state, not a number: a float64
 		// declaration here would hand the merge stage the wrong vector.
-		if got[0].OutputType != int(parquet.TypeString) {
-			t.Errorf("%s: output type %v, want %v", tc.fn, parquet.TypeID(got[0].OutputType), parquet.TypeString)
+		if got[0].OutputType == nil || *got[0].OutputType != int(parquet.TypeString) {
+			t.Errorf("%s: output type %v, want %v", tc.fn, got[0].OutputType, parquet.TypeString)
 		}
 		if got[0].InputCol != "v" {
 			t.Errorf("%s: input column %q, want the original %q", tc.fn, got[0].InputCol, "v")

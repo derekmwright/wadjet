@@ -25,7 +25,7 @@ func TestDecomposeCovar_AllThreeSpellings(t *testing.T) {
 	} {
 		got := decomposeCovar([]distributed.AggSpec{{
 			Func: tc.fn, InputCol: "x", InputCol2: "y", OutputCol: "c",
-			OutputType: int(parquet.TypeFloat64),
+			OutputType: distributed.WindowTypePtr(int(parquet.TypeFloat64)),
 		}})
 		if len(got) != 1 {
 			t.Fatalf("%s: produced %d specs, want 1: %+v", tc.fn, len(got), got)
@@ -37,8 +37,8 @@ func TestDecomposeCovar_AllThreeSpellings(t *testing.T) {
 			t.Errorf("%s: output column %q, want %q", tc.fn, got[0].OutputCol, want)
 		}
 		// The partial ships an encoded state, not a number.
-		if got[0].OutputType != int(parquet.TypeString) {
-			t.Errorf("%s: output type %v, want %v", tc.fn, parquet.TypeID(got[0].OutputType), parquet.TypeString)
+		if got[0].OutputType == nil || *got[0].OutputType != int(parquet.TypeString) {
+			t.Errorf("%s: output type %v, want %v", tc.fn, got[0].OutputType, parquet.TypeString)
 		}
 		// BOTH input columns have to survive: the state needs x and y per
 		// row, and a dropped second column is a NULL answer, not an error.
@@ -99,8 +99,8 @@ func TestWireAggSpecs_CarriesEveryArgument(t *testing.T) {
 	if got[0].InputCol2 != "k" {
 		t.Errorf("min_by ordering column %q, want \"k\"", got[0].InputCol2)
 	}
-	if got[0].OutputType != int(parquet.TypeString) {
-		t.Errorf("min_by output type %v, want %v", parquet.TypeID(got[0].OutputType), parquet.TypeString)
+	if got[0].OutputType == nil || *got[0].OutputType != int(parquet.TypeString) {
+		t.Errorf("min_by output type %v, want %v", got[0].OutputType, parquet.TypeString)
 	}
 	if got[1].Separator != "::" {
 		t.Errorf("string_agg separator %q, want \"::\"", got[1].Separator)

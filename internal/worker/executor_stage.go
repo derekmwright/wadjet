@@ -208,8 +208,8 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 // cannot tell you — exec.HashAggregate patches that up from the vector it
 // observes at Consume, but an empty input has no vector to observe.
 func aggSpecOutputType(a distributed.AggSpec) parquet.TypeID {
-	if a.OutputType != 0 {
-		return parquet.TypeID(a.OutputType)
+	if a.OutputType != nil {
+		return parquet.TypeID(*a.OutputType)
 	}
 	return aggOutputTypeString(a.Func)
 }
