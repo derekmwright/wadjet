@@ -188,6 +188,26 @@ func respondToResult(t *testing.T, nc *nats.Conn, task distributed.Task) *atomic
 	return captured
 }
 
+// awaitResult waits for respondToResult's capture. The wait is not optional:
+// the result subject is bound to the Results JetStream stream (nats_setup.go),
+// so the worker's core-NATS Request is answered by the STREAM'S pub-ack — a
+// reply that races the test subscription's own delivery of the message. The
+// worker can therefore return from its publish before the capture callback
+// has run; the message is guaranteed delivered, just not yet.
+func awaitResult(t *testing.T, captured *atomic.Pointer[distributed.ResultNotification]) *distributed.ResultNotification {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if rn := captured.Load(); rn != nil {
+			return rn
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestRedeliveryAfterWorkerDeathTakesDegradedRung is the #318 simulation:
 // the prior attempt "fatals mid-execution" — its breadcrumb was written and
 // never cleared, exactly the state a real OOM kill leaves in the KV — and
@@ -228,7 +248,7 @@ func TestRedeliveryAfterWorkerDeathTakesDegradedRung(t *testing.T) {
 	if acker.acks.Load() != 1 || acker.terms.Load() != 0 {
 		t.Errorf("acker: acks=%d terms=%d, want 1/0 (graceful completion)", acker.acks.Load(), acker.terms.Load())
 	}
-	if rn := captured.Load(); rn == nil {
+	if rn := awaitResult(t, captured); rn == nil {
 		t.Error("no result published for the degraded attempt")
 	} else if rn.Success {
 		t.Error("the bad-SQL task should have failed gracefully")
@@ -268,7 +288,7 @@ func TestDegradedAttemptDeathQuarantines(t *testing.T) {
 	if got := spy.recorded(); len(got) != 0 {
 		t.Errorf("quarantine must not write a fresh attempt record (it does not execute); got %d", len(got))
 	}
-	rn := captured.Load()
+	rn := awaitResult(t, captured)
 	if rn == nil {
 		t.Fatal("quarantine must publish a terminal failure result")
 	}
