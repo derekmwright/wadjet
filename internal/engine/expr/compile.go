@@ -146,6 +146,12 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
+		switch n.Op {
+		case "is distinct from":
+			return &IsDistinctFrom{Left: left, Right: right}, nil
+		case "is not distinct from":
+			return &IsDistinctFrom{Left: left, Right: right, Not: true}, nil
+		}
 		var op CmpOp
 		switch n.Op {
 		case "=":

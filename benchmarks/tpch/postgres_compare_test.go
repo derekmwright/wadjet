@@ -322,9 +322,12 @@ func postgresSemanticsCases() []pgCase {
 	// intended alarm and not a Wadjet defect — reportCollation says so before
 	// a single query runs.
 	//
-	// They are spelled over `nation` rather than over a VALUES list because
-	// Wadjet's parser has no VALUES-in-FROM (pinned separately below), and a
-	// pinned entry is not a comparison.
+	// They are spelled over `nation` rather than over a VALUES list because,
+	// when these were written, Wadjet's parser had no VALUES-in-FROM (see
+	// ValuesListInFrom below) — a pinned entry is not a comparison. VALUES
+	// works now (#374); left over `nation` rather than rewritten, since real
+	// fixture data is the stronger test and nothing here depended on the
+	// workaround.
 
 	// The aggregate-over-CASE defect, shared by the two entries below.
 	const mixedCase = `CASE WHEN n_nationkey % 4 = 0 THEN LOWER(n_name)
@@ -354,11 +357,7 @@ func postgresSemanticsCases() []pgCase {
 			UNION ALL SELECT r_name || '  ' FROM region ORDER BY 1`},
 		// VALUES as a table source, which is how a client writes a literal set
 		// and how the entries above would rather be spelled.
-		pgCase{name: "ValuesListInFrom", sql: `SELECT v FROM (VALUES ('Zebra'), ('apple'), ('Apple')) AS t(v) ORDER BY v`,
-			knownBug: pgBugUnsupported + " the parser has no VALUES list as a table source; it reads " +
-				"`FROM (` and then fails on the VALUES keyword with \"trailing input after the end of the " +
-				"statement\". Every literal-set query a client writes takes this form",
-			issue: "#374"},
+		pgCase{name: "ValuesListInFrom", sql: `SELECT v FROM (VALUES ('Zebra'), ('apple'), ('Apple')) AS t(v) ORDER BY v`},
 	)
 
 	// --- Integer arithmetic ---------------------------------------------
@@ -385,11 +384,16 @@ func postgresSemanticsCases() []pgCase {
 	// Both spellings, because getting one right by accident is easy.
 	out = append(out,
 		pgCase{name: "RoundHalfNumeric", sql: `SELECT ROUND(0.5) AS a, ROUND(1.5) AS b, ROUND(2.5) AS c, ROUND(-0.5) AS d, ROUND(-1.5) AS e`},
+		// The CAST(x AS double precision) spelling parses since #374; the
+		// double-precision VALUE it produces still rounds wrong. PostgreSQL
+		// rounds DOUBLE PRECISION half TO EVEN and NUMERIC half AWAY from
+		// zero; fnRound applies the NUMERIC rule (math.Round) to every
+		// operand regardless of its declared type. #374's own pin only
+		// covered the parse failure, which is what had hidden this.
 		pgCase{name: "RoundHalfDouble", sql: `SELECT ROUND(CAST(0.5 AS double precision)) AS a, ROUND(CAST(1.5 AS double precision)) AS b, ROUND(CAST(2.5 AS double precision)) AS c`,
-			knownBug: pgBugUnsupported + " parseCastExpr takes a SINGLE identifier as the type name, so every " +
-				"two-word PostgreSQL type spelling is a syntax error: `double precision`, `character varying`, " +
-				"`timestamp with time zone`. These are the spellings pg_dump, JDBC and SQLAlchemy emit",
-			issue: "#374"},
+			knownBug: pgBugWadjet + " ROUND rounds DOUBLE PRECISION half away from zero (the NUMERIC rule); " +
+				"PostgreSQL rounds it half to even",
+			issue: "#381"},
 		pgCase{name: "TruncAndFloorNegative", sql: `SELECT FLOOR(-1.5) AS f, CEIL(-1.5) AS c, ABS(-1.5) AS a`},
 	)
 
@@ -414,11 +418,7 @@ func postgresSemanticsCases() []pgCase {
 			(TRUE OR NULL) AS or_true, (FALSE OR NULL) AS or_false,
 			(TRUE AND NULL) AS and_true, (FALSE AND NULL) AS and_false`},
 		pgCase{name: "NullIsDistinctFrom", sql: `SELECT (NULL IS DISTINCT FROM NULL) AS a, (1 IS DISTINCT FROM NULL) AS b,
-			(1 IS NOT DISTINCT FROM 1) AS c`,
-			knownBug: pgBugUnsupported + " IS [NOT] DISTINCT FROM is not parsed (\"expected NULL, TRUE, or " +
-				"FALSE after IS [NOT]\"). It is the NULL-safe equality SQL offers, and the idiom an ORM emits " +
-				"for a nullable-column comparison",
-			issue: "#374"},
+			(1 IS NOT DISTINCT FROM 1) AS c`},
 		// NULL propagates through arithmetic and concatenation rather than
 		// acting as an identity element.
 		pgCase{name: "NullPropagation", sql: `SELECT n_nationkey,
@@ -499,12 +499,18 @@ func postgresSemanticsCases() []pgCase {
 			OCTET_LENGTH('abc') AS ol, LENGTH('') AS empty`},
 		pgCase{name: "TrimFamily", sql: `SELECT TRIM('  pad  ') AS t, LTRIM('  pad  ') AS l, RTRIM('  pad  ') AS r,
 			UPPER('MiXeD') AS u, LOWER('MiXeD') AS lo`},
+		// POSITION(needle IN haystack) itself parses since #374; REPLACE in
+		// the same statement is a separate, unrelated gap #374's own pin
+		// never named — it only reached REPLACE once POSITION stopped
+		// failing first. REPLACE is a reserved lexer keyword that never
+		// reaches the generic function-call dispatch, the same shape #371
+		// fixed for EVERY; the scalar function itself (fnReplace) is
+		// already implemented.
 		pgCase{name: "PositionAndReplace", sql: `SELECT POSITION('cd' IN 'abcdef') AS p, POSITION('zz' IN 'abcdef') AS missing,
 			REPLACE('abcabc', 'b', 'X') AS r`,
-			knownBug: pgBugUnsupported + " POSITION(needle IN haystack) is not parsed (\"expected ( after " +
-				"IN\"): the IN inside the call is read as the set-membership operator. It is the standard " +
-				"spelling of strpos and the one a portable client writes",
-			issue: "#374"},
+			knownBug: pgBugUnsupported + " REPLACE(...) does not parse as a function call: REPLACE is a reserved " +
+				"keyword (presumably for CREATE OR REPLACE) that never reaches the function-call dispatch",
+			issue: "#382"},
 		pgCase{name: "ConcatOperator", sql: `SELECT 'a' || 'b' AS ab, 'a' || NULL AS a_null, NULL || 'b' AS null_b`},
 		// LIKE: % and _ , and the anchoring TPC-H exercises only in one shape.
 		pgCase{name: "LikePatterns", sql: `SELECT n_name, (n_name LIKE 'A%') AS pre, (n_name LIKE '%A') AS suf,
@@ -609,8 +615,7 @@ func postgresSemanticsCases() []pgCase {
 			CASE WHEN n_regionkey = 0 THEN NULL ELSE n_name END AS nullable
 			FROM nation ORDER BY n_nationkey`},
 		// Casts a client writes constantly. The `double precision` spelling is
-		// pinned separately (RoundHalfDouble) so the rest of the family stays
-		// gated rather than being lost behind one parse failure.
+		// covered separately (RoundHalfDouble) rather than folded in here.
 		pgCase{name: "CastFamily", sql: `SELECT CAST('42' AS integer) AS i, CAST(42 AS text) AS s,
 			CAST('1996-01-10' AS date) AS d`},
 		// A cast from a fractional number to an integer. PostgreSQL ROUNDS

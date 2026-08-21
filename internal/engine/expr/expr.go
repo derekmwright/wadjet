@@ -1028,6 +1028,46 @@ func (e *CmpInt64) EvalBool(b *batch.RecordBatch, row int) bool {
 	return cmpInt64Op(lv, rv, e.Op)
 }
 
+// IsDistinctFrom implements PostgreSQL's NULL-safe (in)equality, IS [NOT]
+// DISTINCT FROM (#374). Unlike Cmp, it never answers UNKNOWN: NULL
+// participates as a value here rather than propagating, so two NULLs are
+// NOT DISTINCT (equal) and a NULL against a non-NULL value IS DISTINCT.
+// "NULL IS DISTINCT FROM NULL" is FALSE, never NULL — the one case a
+// COALESCE-based workaround gets wrong for a real sentinel value.
+type IsDistinctFrom struct {
+	Left, Right Expr
+	Not         bool // true for IS NOT DISTINCT FROM
+}
+
+func (e *IsDistinctFrom) Eval(b *batch.RecordBatch, row int) any {
+	return boolNullBox(e.EvalBoolNull(b, row))
+}
+
+func (e *IsDistinctFrom) EvalBool(b *batch.RecordBatch, row int) bool {
+	v, _ := e.EvalBoolNull(b, row)
+	return v
+}
+
+// EvalBoolNull always reports null=false: DISTINCT FROM is total over NULL
+// inputs, which is the entire point of the operator.
+func (e *IsDistinctFrom) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	lv := e.Left.Eval(b, row)
+	rv := e.Right.Eval(b, row)
+	var distinct bool
+	switch {
+	case lv == nil && rv == nil:
+		distinct = false
+	case lv == nil || rv == nil:
+		distinct = true
+	default:
+		distinct = !compare(lv, rv, CmpEq)
+	}
+	if e.Not {
+		return !distinct, false
+	}
+	return distinct, false
+}
+
 func cmpInt64Op(lv, rv int64, op CmpOp) bool {
 	switch op {
 	case CmpEq:

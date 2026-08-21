@@ -665,6 +665,12 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 }
 
 func (p *selectParser) parseTableRef() (TableRef, error) {
+	// Handle a VALUES row list as a table source: (VALUES (...), (...)) —
+	// standard SQL's literal-rows table constructor. Peek past the '(' to
+	// tell it from a subquery before consuming anything.
+	if p.peek() == TokenLParen && p.peekN(1) == TokenKWValues {
+		return p.parseValuesTableRef()
+	}
 	// Handle subquery: (SELECT ...)
 	if p.peek() == TokenLParen {
 		p.advance() // consume (
@@ -686,6 +692,130 @@ func (p *selectParser) parseTableRef() (TableRef, error) {
 		return tr, nil
 	}
 
+	return p.parseTableRefTail()
+}
+
+// parseValuesTableRef parses a VALUES row list used as a table source —
+// FROM (VALUES ('a'), ('b')) AS t(v) — and desugars it into the equivalent
+// UNION ALL of single-row SELECTs, reusing the derived-table subquery path
+// verbatim rather than teaching the planner a new node type. VALUES is
+// standard SQL's sugar for exactly that: a row constructor list is the same
+// answer as unioning one SELECT per row, and every engine downstream of the
+// parser already knows how to run that.
+//
+// PostgreSQL's default column names are column1, column2, ...; an explicit
+// AS alias(col, ...) list overrides them left to right, same as it does for
+// a table function's column aliases.
+func (p *selectParser) parseValuesTableRef() (TableRef, error) {
+	p.advance() // consume (
+	p.advance() // consume VALUES
+
+	var rows [][]Node
+	ncols := -1
+	for {
+		if _, err := p.expect(TokenLParen); err != nil {
+			return TableRef{}, fmt.Errorf("expected ( to start a VALUES row")
+		}
+		var row []Node
+		for {
+			expr, err := p.parseExpr()
+			if err != nil {
+				return TableRef{}, fmt.Errorf("parsing VALUES row: %w", err)
+			}
+			row = append(row, expr)
+			if p.peek() != TokenComma {
+				break
+			}
+			p.advance() // consume ,
+		}
+		if _, err := p.expect(TokenRParen); err != nil {
+			return TableRef{}, fmt.Errorf("expected ) to close a VALUES row")
+		}
+		if ncols == -1 {
+			ncols = len(row)
+		} else if len(row) != ncols {
+			return TableRef{}, fmt.Errorf("VALUES rows have differing column counts (%d vs %d)", len(row), ncols)
+		}
+		rows = append(rows, row)
+		if p.peek() != TokenComma {
+			break
+		}
+		p.advance() // consume , between rows
+	}
+	if _, err := p.expect(TokenRParen); err != nil {
+		return TableRef{}, fmt.Errorf("expected ) after VALUES list")
+	}
+
+	// Alias and optional column alias list — same grammar parseTableFunction
+	// accepts for AS alias(col1, col2, ...).
+	alias := ""
+	var colAliases []string
+	if p.isKeyword(TokenKWAs) {
+		p.advance()
+		aliasTok, err := p.expect(TokenIdent)
+		if err != nil {
+			return TableRef{}, fmt.Errorf("expected alias after AS")
+		}
+		alias = aliasTok.val
+		if p.peek() == TokenLParen {
+			p.advance()
+			for {
+				colTok, err := p.expect(TokenIdent)
+				if err != nil {
+					return TableRef{}, fmt.Errorf("expected column alias")
+				}
+				colAliases = append(colAliases, colTok.val)
+				if p.peek() != TokenComma {
+					break
+				}
+				p.advance()
+			}
+			if _, err := p.expect(TokenRParen); err != nil {
+				return TableRef{}, fmt.Errorf("expected ) after column aliases")
+			}
+		}
+	} else if p.peek() == TokenIdent && !p.isJoinKeyword() {
+		alias = p.advance().val
+	}
+	if len(colAliases) > ncols {
+		return TableRef{}, fmt.Errorf("VALUES has %d columns, but %d column aliases were given", ncols, len(colAliases))
+	}
+
+	colNames := make([]string, ncols)
+	for i := range colNames {
+		colNames[i] = fmt.Sprintf("column%d", i+1)
+	}
+	for i, a := range colAliases {
+		colNames[i] = a
+	}
+
+	var sb strings.Builder
+	for i, row := range rows {
+		if i > 0 {
+			sb.WriteString(" UNION ALL ")
+		}
+		sb.WriteString("SELECT ")
+		for j, expr := range row {
+			if j > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(expr.String())
+			sb.WriteString(" AS ")
+			sb.WriteString(colNames[j])
+		}
+	}
+
+	tr := TableRef{Name: "(" + sb.String() + ")", Alias: alias}
+	if tr.Alias == "" {
+		tr.Alias = tr.Name
+	}
+	return tr, nil
+}
+
+// parseTableRefTail parses everything after the initial "is this a VALUES
+// list or a parenthesized subquery" dispatch in parseTableRef: a bare or
+// qualified table name, a table function call, TABLESAMPLE, and the alias.
+func (p *selectParser) parseTableRefTail() (TableRef, error) {
 	nameTok, err := p.expect(TokenIdent)
 	if err != nil {
 		return TableRef{}, fmt.Errorf("expected table name")
@@ -1028,7 +1158,7 @@ func (p *selectParser) parseComparison() (Node, error) {
 		return nil, err
 	}
 
-	// IS [NOT] NULL / IS [NOT] TRUE / IS [NOT] FALSE
+	// IS [NOT] NULL / IS [NOT] TRUE / IS [NOT] FALSE / IS [NOT] DISTINCT FROM
 	if p.isKeyword(TokenKWIs) {
 		p.advance()
 		not := false
@@ -1046,8 +1176,27 @@ func (p *selectParser) parseComparison() (Node, error) {
 		case TokenKWFalse:
 			p.advance()
 			return &IsExpr{Left: left, Not: not, Check: "false"}, nil
+		case TokenKWDistinct:
+			// IS [NOT] DISTINCT FROM: SQL's NULL-safe (in)equality — the
+			// only correct way to write "these differ, counting NULL as a
+			// value" (#374). NULL IS DISTINCT FROM NULL is FALSE, never
+			// NULL/UNKNOWN, which is why this compiles to a comparison
+			// rather than reusing IsExpr's NULL/TRUE/FALSE check shape.
+			p.advance() // consume DISTINCT
+			if _, err := p.expect(TokenKWFrom); err != nil {
+				return nil, fmt.Errorf("expected FROM after IS [NOT] DISTINCT")
+			}
+			right, err := p.parseAddition()
+			if err != nil {
+				return nil, fmt.Errorf("parsing IS [NOT] DISTINCT FROM: %w", err)
+			}
+			op := "is distinct from"
+			if not {
+				op = "is not distinct from"
+			}
+			return &CmpExpr{Left: left, Op: op, Right: right}, nil
 		default:
-			return nil, fmt.Errorf("expected NULL, TRUE, or FALSE after IS [NOT]")
+			return nil, fmt.Errorf("expected NULL, TRUE, FALSE, or DISTINCT FROM after IS [NOT]")
 		}
 	}
 
@@ -1433,6 +1582,7 @@ func (p *selectParser) parsePostfix() (Node, error) {
 				return nil, fmt.Errorf("expected type name after ::")
 			}
 			typeName := strings.ToLower(typeTok.val)
+			typeName = p.maybeExtendTwoWordType(typeName)
 			// Optional precision: ::decimal(10,2)
 			if p.peek() == TokenLParen {
 				typeName += p.consumeTypeParams()
@@ -1614,6 +1764,17 @@ func (p *selectParser) parsePrimary() (Node, error) {
 		// TRIM with optional LEADING/TRAILING/BOTH syntax
 		if upper == "TRIM" && p.peekN(1) == TokenLParen {
 			return p.parseTrimExpr()
+		}
+
+		// POSITION(needle IN haystack) — the standard spelling of strpos
+		// (#374). The IN inside the call is this operator's own grammar,
+		// not set membership, so it cannot fall through to the generic
+		// function-call path: that reads a plain argument list and hands
+		// "needle" to the expression parser, which then reads IN as
+		// membership and expects "(" for a value list or subquery — the
+		// "expected ( after IN" error this rewrite exists to avoid.
+		if upper == "POSITION" && p.peekN(1) == TokenLParen {
+			return p.parsePositionExpr()
 		}
 
 		// ARRAY[...] literal
@@ -2070,6 +2231,29 @@ func (p *selectParser) parseCaseExpr() (Node, error) {
 	return c, nil
 }
 
+// maybeExtendTwoWordType consumes a second type-name word when typeName is
+// the first half of a PostgreSQL two-word spelling this engine treats as one
+// type — "double precision" and "character varying" — and returns the
+// merged, single-word canonical name the rest of the engine already
+// resolves. pg_dump, JDBC and SQLAlchemy all emit these spellings;
+// SQLAlchemy renders CAST(x AS DOUBLE PRECISION) for its Float type (#374).
+// Anything else passes through unchanged with nothing consumed. Shared by
+// both places a CAST type name is read: CAST(x AS t) and x::t.
+func (p *selectParser) maybeExtendTwoWordType(typeName string) string {
+	if p.peek() != TokenIdent || p.cur.quoted {
+		return typeName
+	}
+	switch {
+	case typeName == "double" && strings.EqualFold(p.cur.val, "precision"):
+		p.advance()
+		return "double"
+	case typeName == "character" && strings.EqualFold(p.cur.val, "varying"):
+		p.advance()
+		return "varchar"
+	}
+	return typeName
+}
+
 func (p *selectParser) parseCastExpr() (Node, error) {
 	p.advance() // consume CAST
 	if _, err := p.expect(TokenLParen); err != nil {
@@ -2091,6 +2275,7 @@ func (p *selectParser) parseCastExpr() (Node, error) {
 	}
 
 	typeName := strings.ToLower(typeTok.val)
+	typeName = p.maybeExtendTwoWordType(typeName)
 
 	// Handle parameterized types: ARRAY(...), ROW(...), MAP(...), DECIMAL(...)
 	if p.cur.typ == TokenLParen {
@@ -2137,6 +2322,35 @@ func (p *selectParser) parseExtractExpr() (Node, error) {
 		field = "day_of_year"
 	}
 	return &FuncCallNode{Name: field, Args: []Node{source}}, nil
+}
+
+// parsePositionExpr parses POSITION(needle IN haystack) and rewrites it to
+// strpos(haystack, needle) — the standard SQL spelling of strpos, with its
+// two arguments in the opposite order from how POSITION spells them (#374).
+// needle and haystack parse at addition precedence, the same level a
+// comparison's operands take: anything looser and IN would be swallowed as
+// this expression's own top-level operator instead of being left for this
+// function to consume explicitly.
+func (p *selectParser) parsePositionExpr() (Node, error) {
+	p.advance() // consume POSITION
+	if _, err := p.expect(TokenLParen); err != nil {
+		return nil, fmt.Errorf("expected ( after POSITION")
+	}
+	needle, err := p.parseAddition()
+	if err != nil {
+		return nil, fmt.Errorf("parsing POSITION needle: %w", err)
+	}
+	if _, err := p.expect(TokenKWIn); err != nil {
+		return nil, fmt.Errorf("expected IN in POSITION(needle IN haystack)")
+	}
+	haystack, err := p.parseAddition()
+	if err != nil {
+		return nil, fmt.Errorf("parsing POSITION haystack: %w", err)
+	}
+	if _, err := p.expect(TokenRParen); err != nil {
+		return nil, fmt.Errorf("expected ) after POSITION")
+	}
+	return &FuncCallNode{Name: "strpos", Args: []Node{haystack, needle}}, nil
 }
 
 // parseTrimExpr parses TRIM with optional LEADING/TRAILING/BOTH syntax.
