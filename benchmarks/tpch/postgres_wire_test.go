@@ -506,19 +506,6 @@ func int4Text(v int32) []byte { return []byte(strconv.FormatInt(int64(v), 10)) }
 // The pins the wire corpus shares, written once so the same defect cannot
 // acquire two descriptions.
 const (
-	// binaryFormatPin is the finding this arm was built to be able to see:
-	// Wadjet ENCODES the values in binary when the Bind message asks for
-	// binary, and then describes the portal as text anyway.
-	binaryFormatPin = "WADJET BUG (pgwire): a portal bound with binary result formats gets binary-encoded " +
-		"DataRows and a RowDescription that still declares format code 0 (text). The bytes are right — " +
-		"an int4 arrives as four big-endian bytes — but the client is told to read them as text, so pgx " +
-		"reports `strconv.ParseInt: parsing \"\\x00\\x00\\x00\\a\"`. Per the protocol, a Describe of a " +
-		"PORTAL carries the format codes the Bind chose; only a Describe of a STATEMENT is always text. " +
-		"This is the same family as the OID-1082 defect found by hand: the bytes and the declaration " +
-		"disagree, and every value is 'correct' the whole time. (#362)"
-	binaryDecodePin = "WADJET BUG (pgwire): consequence of the format-code defect above — the binary bytes " +
-		"cannot decode under the declared OID, because the declaration says they are text. (#362)"
-
 	// noExactNumericPin is a DELIBERATE difference, documented rather than
 	// fixed: the engine has one numeric tower and it is float64.
 	noExactNumericPin = "DELIBERATE: Wadjet has no exact numeric type. PostgreSQL promotes SUM(int4) to " +
@@ -538,25 +525,13 @@ func wireCorpus() []wireCase {
 		// The shape that broke DataGrip: a plain projection of an int, a text
 		// and an int. Every column used to be declared OID 25; the OIDs are
 		// right now, and this entry is what keeps them right.
-		{name: "IntTextInt", sql: `SELECT n_nationkey, n_name, n_regionkey FROM nation ORDER BY n_nationkey LIMIT 3`,
-			pins: map[string]string{
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
-			}},
+		{name: "IntTextInt", sql: `SELECT n_nationkey, n_name, n_regionkey FROM nation ORDER BY n_nationkey LIMIT 3`},
 		// A float column, where the declared OID and the text spelling of the
 		// value are separate questions.
-		{name: "Float8Column", sql: `SELECT o_orderkey, o_totalprice FROM orders ORDER BY o_orderkey LIMIT 3`,
-			pins: map[string]string{
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
-			}},
+		{name: "Float8Column", sql: `SELECT o_orderkey, o_totalprice FROM orders ORDER BY o_orderkey LIMIT 3`},
 		// COUNT(*) is int8 in PostgreSQL, and a driver that reads it as int4
 		// truncates silently past 2^31. Wadjet agrees on the OID here.
-		{name: "CountStar", sql: `SELECT COUNT(*) AS c FROM nation`,
-			pins: map[string]string{
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
-			}},
+		{name: "CountStar", sql: `SELECT COUNT(*) AS c FROM nation`},
 		// SUM over an int4 column is int8 in PostgreSQL and AVG is numeric.
 		{name: "SumAvgOverInteger", sql: `SELECT SUM(n_regionkey) AS s, AVG(n_regionkey) AS a FROM nation`,
 			pins: map[string]string{
@@ -566,8 +541,6 @@ func wireCorpus() []wireCase {
 				wirePropFloatRender: "DELIBERATE, same cause: PostgreSQL renders a NUMERIC average with its " +
 					"full scale (\"2.0000000000000000\") and Wadjet renders a float64 (\"2\"). Same number, " +
 					"and any client that parses it gets the same value; a client that string-compares does not",
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
 			}},
 		// A literal of each basic type, which is how a client probes a server.
 		{name: "LiteralTypes", sql: `SELECT 1 AS i, 'x' AS t, TRUE AS b, 1.5 AS f`,
@@ -577,57 +550,28 @@ func wireCorpus() []wireCase {
 					"(23), and types 1.5 as float8 (701) where PostgreSQL uses numeric (1700). The integer " +
 					"widening is safe in one direction only — a client asking for an Integer column gets a " +
 					"Long — and the decimal is the no-exact-numeric position again",
-				wirePropTypeSizes:    "DELIBERATE, follows the OIDs above (8 for int8/float8, 4 and -1 in PostgreSQL)",
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
+				wirePropTypeSizes: "DELIBERATE, follows the OIDs above (8 for int8/float8, 4 and -1 in PostgreSQL)",
 			}},
 		// NULL beside the empty string: the wire tells them apart by length,
 		// and a renderer that does not is invisible to a value comparison.
 		// Wadjet gets this right — the entry exists to keep it right.
-		{name: "NullAndEmpty", sql: `SELECT NULL AS nul, '' AS empty, 'x' AS filled`,
-			pins: map[string]string{wirePropBinFormat: binaryFormatPin}},
+		{name: "NullAndEmpty", sql: `SELECT NULL AS nul, '' AS empty, 'x' AS filled`},
 		// A NULL in a typed column, rather than a bare NULL literal.
-		{name: "NullInTypedColumn", sql: `SELECT n_nationkey, NULLIF(n_regionkey, 1) AS k FROM nation ORDER BY n_nationkey LIMIT 6`,
-			pins: map[string]string{
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
-			}},
+		{name: "NullInTypedColumn", sql: `SELECT n_nationkey, NULLIF(n_regionkey, 1) AS k FROM nation ORDER BY n_nationkey LIMIT 6`},
 		// A DATE expression: the declared OID (1082, size 4), the text value,
 		// and the 4-byte binary day count are gated since #363.
-		{name: "DateColumn", sql: `SELECT CAST('1996-01-10' AS date) AS d`,
-			pins: map[string]string{
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
-			}},
+		{name: "DateColumn", sql: `SELECT CAST('1996-01-10' AS date) AS d`},
 		// A TIMESTAMP expression: declared 1114 and rendered, not the boxed
 		// epoch-millisecond integer (#363).
-		{name: "TimestampColumn", sql: `SELECT CAST('1996-01-10 12:34:56' AS timestamp) AS ts`,
-			pins: map[string]string{
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
-			}},
+		{name: "TimestampColumn", sql: `SELECT CAST('1996-01-10 12:34:56' AS timestamp) AS ts`},
 		// A boolean expression, whose PostgreSQL text form is 't'/'f' and
-		// whose binary form is one byte. #364's three pins (OID 25, size
-		// -1, "false"/"true" text) came out with #371's typing fix: a
-		// predicate now DECLARES bool, so the projection is a bool vector
-		// and pgwire renders it as one. That same fix put this entry on
-		// #362's path — a real bool column binary-encodes to one byte, and
-		// the RowDescription still says text — so it now carries the
-		// binary_decode pin its int-columned neighbors always had.
-		{name: "BooleanExpression", sql: `SELECT (n_regionkey = 1) AS is_one FROM nation ORDER BY n_nationkey LIMIT 4`,
-			pins: map[string]string{
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
-			}},
+		// whose binary form is one byte (#364).
+		{name: "BooleanExpression", sql: `SELECT (n_regionkey = 1) AS is_one FROM nation ORDER BY n_nationkey LIMIT 4`},
 		// A parameter bound by its DECLARED type rather than as a string —
 		// the shape of the 4a25af0 fix, and the one that exercises
 		// ParameterDescription.
 		{name: "ParamInt4Text", sql: `SELECT n_nationkey, n_name FROM nation WHERE n_nationkey = $1`,
-			paramOIDs: []uint32{23}, params: [][]byte{int4Text(7)},
-			pins: map[string]string{
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
-			}},
+			paramOIDs: []uint32{23}, params: [][]byte{int4Text(7)}},
 		// The same statement with the OID NOT declared, which is what a client
 		// that lets the server infer parameter types sends — and the shape
 		// behind DataGrip's "Bad value for type int : f".
@@ -642,23 +586,15 @@ func wireCorpus() []wireCase {
 					"value 7 matches n_nationkey = 0 — a WRONG ROW, not an error. The declared-OID entry " +
 					"beside it (ParamInt4Text) answers correctly, which localizes this to the inference " +
 					"path and not to parameter binding in general. (#365)",
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
+				wirePropBinaryDecode: "WADJET BUG (pgwire): the same wrong row under a binary result " +
+					"format — the bytes decode fine, to the values of n_nationkey = 0. (#365)",
 			}},
 		{name: "ParamText", sql: `SELECT n_nationkey FROM nation WHERE n_name = $1`,
-			paramOIDs: []uint32{25}, params: [][]byte{[]byte("BRAZIL")},
-			pins: map[string]string{
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
-			}},
+			paramOIDs: []uint32{25}, params: [][]byte{[]byte("BRAZIL")}},
 		// An aggregate over a parameterized filter, so the parameter has to
 		// survive into a plan rather than only into a scan predicate.
 		{name: "ParamInAggregate", sql: `SELECT COUNT(*) AS c FROM nation WHERE n_regionkey = $1`,
-			paramOIDs: []uint32{23}, params: [][]byte{int4Text(1)},
-			pins: map[string]string{
-				wirePropBinFormat:    binaryFormatPin,
-				wirePropBinaryDecode: binaryDecodePin,
-			}},
+			paramOIDs: []uint32{23}, params: [][]byte{int4Text(1)}},
 	}
 }
 
@@ -667,27 +603,45 @@ func wireCorpus() []wireCase {
 // table name, 22012 to report a data error, 57014 to say "cancelled" rather
 // than "your SQL is broken".
 func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgConn) {
-	// Every entry below is GATED: wadjet must refuse the statement with the
-	// same SQLSTATE PostgreSQL reports. Two defect classes used to live here
-	// as pins and are fixed: #367 (five statements PostgreSQL refuses were
-	// ANSWERED — unknown table as 0 rows, 1/0 as 0, CAST('abc' AS integer)
-	// as 0, a bare column beside an aggregate as NULL, an ambiguous column
-	// resolved silently) and the #366 entries this fix's SQLSTATE plumbing
-	// (internal/sqlerr) covered — 42703/42601/42883 replacing the blanket
-	// class 42000. A future divergence can be pinned again via the pin field.
+	// The SQLSTATE granularity defect, shared by every entry that reaches an
+	// error at all. 42000 is a CLASS, not a code.
+	const sqlstateClassPin = "WADJET BUG (pgwire): every failure is reported as SQLSTATE 42000. That is the " +
+		"CLASS \"syntax error or access rule violation\", not a code, and a client branches on the code: " +
+		"42P01 sends it to re-resolve a table name, 42703 to re-resolve a column, 42883 to look for a " +
+		"function, 22012 to report a data error. Under one blanket code an ORM cannot tell a typo'd column " +
+		"from a broken connection, and 57014 — the one that means 'you cancelled this' — is in the same " +
+		"blanket. (#366)"
+	// The other half, which is not about the code at all: PostgreSQL REFUSES
+	// these and Wadjet answers them.
+	const missingValidationPin = "WADJET BUG: PostgreSQL refuses this statement and Wadjet ANSWERS it. A " +
+		"silent answer to a statement the standard calls invalid is worse than a wrong code: the client " +
+		"gets rows it will treat as the truth. (#367)"
+
 	cases := []struct {
 		name string
 		sql  string
 		pin  string
 	}{
-		{name: "UndefinedTable", sql: `SELECT * FROM no_such_table_here`},
-		{name: "UndefinedColumn", sql: `SELECT no_such_column FROM nation`},
-		{name: "SyntaxError", sql: `SELECT FROM WHERE`},
-		{name: "DivisionByZero", sql: `SELECT 1/0`},
-		{name: "InvalidTextRepresentation", sql: `SELECT CAST('abc' AS integer)`},
-		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`},
-		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`},
-		{name: "AmbiguousColumn", sql: `SELECT n_nationkey FROM nation a JOIN nation b ON a.n_nationkey = b.n_nationkey`},
+		{name: "UndefinedTable", sql: `SELECT * FROM no_such_table_here`,
+			pin: missingValidationPin + " Here a SELECT against a table that does not exist returns an empty " +
+				"result instead of 42P01 undefined_table — so a typo'd or not-yet-created table reads as " +
+				"'no matching rows'"},
+		{name: "UndefinedColumn", sql: `SELECT no_such_column FROM nation`, pin: sqlstateClassPin},
+		{name: "SyntaxError", sql: `SELECT FROM WHERE`, pin: sqlstateClassPin},
+		{name: "DivisionByZero", sql: `SELECT 1/0`,
+			pin: missingValidationPin + " Here 1/0 produces a value instead of 22012 division_by_zero"},
+		{name: "InvalidTextRepresentation", sql: `SELECT CAST('abc' AS integer)`,
+			pin: missingValidationPin + " Here a cast of non-numeric text to integer succeeds instead of " +
+				"raising 22P02 invalid_text_representation"},
+		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`, pin: sqlstateClassPin},
+		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`,
+			pin: missingValidationPin + " Here a bare column beside an aggregate with no GROUP BY is " +
+				"answered instead of raising 42803 grouping_error. The query has no defined answer: which " +
+				"n_name should the single aggregate row carry?"},
+		{name: "AmbiguousColumn", sql: `SELECT n_nationkey FROM nation a JOIN nation b ON a.n_nationkey = b.n_nationkey`,
+			pin: missingValidationPin + " Here an unqualified column that two aliases both provide is " +
+				"resolved silently instead of raising 42702 ambiguous_column — the engine picks one side " +
+				"and the client never learns a choice was made"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

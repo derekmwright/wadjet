@@ -870,9 +870,9 @@ func (c *pgConn) handleQuery(sql string) {
 		return
 	}
 	if len(result.ColumnMetas) > 0 {
-		c.sendTypedRowDescription(result.ColumnMetas)
+		c.sendTypedRowDescription(result.ColumnMetas, nil)
 	} else {
-		c.sendRowDescription(columns)
+		c.sendRowDescription(columns, nil)
 	}
 
 	// Send DataRow for each row — coord-path batches are boxed and sent
@@ -1066,16 +1066,20 @@ func (c *pgConn) handleDescribe(payload []byte) {
 		}
 		c.sendMsg('t', c.buf)
 
-		c.describeSQL(sql)
+		// A statement Describe is unconditionally text — only a PORTAL
+		// carries the Bind's result format codes (#362).
+		c.describeSQL(sql, nil)
 	} else {
-		// Portal describe — send RowDescription based on portal SQL
-		c.describeSQL(c.portalSQL)
+		// Portal describe — send RowDescription based on portal SQL, declaring
+		// the result format codes the portal's Bind requested (#362).
+		c.describeSQL(c.portalSQL, c.resultFmtCodes)
 	}
 }
 
 // describeSQL executes a SQL statement to discover its result columns
-// and sends either a typed RowDescription or NoData.
-func (c *pgConn) describeSQL(sql string) {
+// and sends either a typed RowDescription or NoData. fmtCodes are the result
+// format codes the RowDescription declares per field (see sendRowDescription).
+func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 	sql = strings.TrimSpace(sql)
 	sql = strings.TrimRight(sql, ";")
 	sql = strings.TrimSpace(sql)
@@ -1095,7 +1099,7 @@ func (c *pgConn) describeSQL(sql string) {
 		c.closeDescribeCache()
 		c.describeSynth = ans
 		c.describedSQL = sql
-		c.sendSynthRowDescription(ans)
+		c.sendSynthRowDescription(ans, fmtCodes)
 		c.described, c.describedFields = true, len(ans.cols)
 		return
 	}
@@ -1160,10 +1164,10 @@ func (c *pgConn) describeSQL(sql string) {
 	}
 
 	if len(result.ColumnMetas) > 0 {
-		c.sendTypedRowDescription(result.ColumnMetas)
+		c.sendTypedRowDescription(result.ColumnMetas, fmtCodes)
 		c.described, c.describedFields = true, len(result.ColumnMetas)
 	} else if len(result.Columns) > 0 {
-		c.sendRowDescription(result.Columns)
+		c.sendRowDescription(result.Columns, fmtCodes)
 		c.described, c.describedFields = true, len(result.Columns)
 	} else {
 		c.sendNoData()
@@ -1237,7 +1241,7 @@ func (c *pgConn) handleExecute(payload []byte) {
 		if !c.shapeAgrees(len(ans.cols), sql) {
 			return
 		}
-		c.ensureDescribed(ans.cols, nil)
+		c.ensureDescribed(ans.cols, nil, c.resultFmtCodes)
 		c.sendSynthRows(ans, c.resultFmtCodes)
 		return
 	}
@@ -1335,7 +1339,7 @@ func (c *pgConn) handleExecute(payload []byte) {
 		}
 		return
 	}
-	c.ensureDescribed(columns, result.ColumnMetas)
+	c.ensureDescribed(columns, result.ColumnMetas, c.resultFmtCodes)
 
 	// Extended query protocol: Execute sends only DataRow + CommandComplete.
 	// RowDescription was already sent by Describe. Do NOT send it again.
@@ -1372,15 +1376,15 @@ func (c *pgConn) introspectionAnswer(sql, upper string) *synthAnswer {
 // run, so the shape is only knowable once Bind has substituted them. Tuples
 // with no field structure are the one thing a driver cannot recover from, so
 // the structure goes out first.
-func (c *pgConn) ensureDescribed(cols []string, metas []wadjet.ColumnMeta) {
+func (c *pgConn) ensureDescribed(cols []string, metas []wadjet.ColumnMeta, fmtCodes []int16) {
 	if c.described {
 		return
 	}
 	if len(metas) > 0 {
-		c.sendTypedRowDescription(metas)
+		c.sendTypedRowDescription(metas, fmtCodes)
 		c.describedFields = len(metas)
 	} else {
-		c.sendRowDescription(cols)
+		c.sendRowDescription(cols, fmtCodes)
 		c.describedFields = len(cols)
 	}
 	c.described = true
@@ -1868,16 +1872,17 @@ func (c *pgConn) matchShow(upper string) *synthAnswer {
 // RowDescription, DataRows, CommandComplete. Simple-protocol results are
 // always in text format.
 func (c *pgConn) sendSynthAnswer(ans *synthAnswer) {
-	c.sendSynthRowDescription(ans)
+	c.sendSynthRowDescription(ans, nil)
 	c.sendSynthRows(ans, nil)
 }
 
 // sendSynthRowDescription writes the RowDescription for a synthetic answer with
-// each column's OID inferred from its values (see colOID). Format stays text.
-func (c *pgConn) sendSynthRowDescription(ans *synthAnswer) {
+// each column's OID inferred from its values (see colOID). fmtCodes: see
+// sendRowDescription — a portal Describe declares the Bind's format codes.
+func (c *pgConn) sendSynthRowDescription(ans *synthAnswer, fmtCodes []int16) {
 	c.buf = c.buf[:0]
 	c.buf = appendInt16(c.buf, int16(len(ans.cols)))
-	for _, col := range ans.cols {
+	for i, col := range ans.cols {
 		c.buf = append(c.buf, col...)
 		c.buf = append(c.buf, 0)
 		c.buf = appendInt32(c.buf, 0)
@@ -1886,7 +1891,7 @@ func (c *pgConn) sendSynthRowDescription(ans *synthAnswer) {
 		c.buf = appendInt32(c.buf, oid)
 		c.buf = appendInt16(c.buf, pgTypeSize(int(oid)))
 		c.buf = appendInt32(c.buf, -1)
-		c.buf = appendInt16(c.buf, 0)
+		c.buf = appendInt16(c.buf, fmtCodeAt(fmtCodes, i))
 	}
 	c.sendMsg('T', c.buf)
 }
@@ -2539,13 +2544,36 @@ func (c *pgConn) sendEmptyQuery() {
 	c.conn.Write([]byte{'I', 0, 0, 0, 4})
 }
 
-func (c *pgConn) sendRowDescription(columns []string) {
+// fmtCodeAt resolves the result format code for output column i under the
+// Bind message's format-code list: an empty list means every column is text,
+// a single code applies to all columns, otherwise the list is per-column.
+// This is the same resolution sendDataRowFormatted applies to the bytes, so
+// the RowDescription's declaration and the DataRow's encoding cannot drift
+// apart (#362).
+func fmtCodeAt(fmtCodes []int16, i int) int16 {
+	switch {
+	case len(fmtCodes) == 1:
+		return fmtCodes[0]
+	case i < len(fmtCodes):
+		return fmtCodes[i]
+	}
+	return 0
+}
+
+// sendRowDescription emits an untyped (all-text-OID) RowDescription.
+//
+// fmtCodes are the result format codes the portal's Bind requested — per the
+// protocol a Describe of a PORTAL carries them, while a Describe of a
+// STATEMENT (and the simple protocol) passes nil and declares text. Declaring
+// 0 for a portal whose DataRows were binary made pgx hand four big-endian
+// int4 bytes to its text parser (#362).
+func (c *pgConn) sendRowDescription(columns []string, fmtCodes []int16) {
 	c.buf = c.buf[:0]
 
 	// Field count (int16)
 	c.buf = appendInt16(c.buf, int16(len(columns)))
 
-	for _, col := range columns {
+	for i, col := range columns {
 		// Field name (null-terminated string)
 		c.buf = append(c.buf, col...)
 		c.buf = append(c.buf, 0)
@@ -2559,8 +2587,8 @@ func (c *pgConn) sendRowDescription(columns []string) {
 		c.buf = appendInt16(c.buf, -1)
 		// Type modifier (int32) = -1
 		c.buf = appendInt32(c.buf, -1)
-		// Format code (int16) = 0 (text)
-		c.buf = appendInt16(c.buf, 0)
+		// Format code (int16): what the Bind chose for this column
+		c.buf = appendInt16(c.buf, fmtCodeAt(fmtCodes, i))
 	}
 
 	c.sendMsg('T', c.buf)
@@ -2569,11 +2597,12 @@ func (c *pgConn) sendRowDescription(columns []string) {
 // sendTypedRowDescription emits a RowDescription ('T') message with correct
 // PostgreSQL type OIDs derived from ColumnMeta. This is critical for JDBC/ODBC
 // drivers that use OIDs to determine Java/C types for result columns.
-func (c *pgConn) sendTypedRowDescription(metas []wadjet.ColumnMeta) {
+// fmtCodes: see sendRowDescription.
+func (c *pgConn) sendTypedRowDescription(metas []wadjet.ColumnMeta, fmtCodes []int16) {
 	c.buf = c.buf[:0]
 	c.buf = appendInt16(c.buf, int16(len(metas)))
 
-	for _, m := range metas {
+	for i, m := range metas {
 		// Field name (null-terminated)
 		c.buf = append(c.buf, m.Name...)
 		c.buf = append(c.buf, 0)
@@ -2588,8 +2617,8 @@ func (c *pgConn) sendTypedRowDescription(metas []wadjet.ColumnMeta) {
 		c.buf = appendInt16(c.buf, pgTypeSize(oid))
 		// Type modifier (int32) = -1
 		c.buf = appendInt32(c.buf, -1)
-		// Format code (int16) = 0 (text)
-		c.buf = appendInt16(c.buf, 0)
+		// Format code (int16): what the Bind chose for this column
+		c.buf = appendInt16(c.buf, fmtCodeAt(fmtCodes, i))
 	}
 
 	c.sendMsg('T', c.buf)
@@ -2737,13 +2766,9 @@ func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtC
 			continue
 		}
 
-		// Determine format for this column
-		binary := false
-		if len(fmtCodes) == 1 {
-			binary = fmtCodes[0] == 1 // single code applies to all columns
-		} else if i < len(fmtCodes) {
-			binary = fmtCodes[i] == 1
-		}
+		// Determine format for this column — the same resolution the
+		// RowDescription declared (fmtCodeAt), so declaration and bytes agree.
+		binary := fmtCodeAt(fmtCodes, i) == 1
 
 		colType := columnTypeAt(colTypes, i)
 		isTS := colType == parquet.TypeTimestamp

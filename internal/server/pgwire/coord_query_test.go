@@ -92,7 +92,7 @@ func TestExecuteReplaysDescribeError(t *testing.T) {
 	c := &pgConn{conn: rc, db: db, stmts: map[string]string{}}
 	c.preparedSQL = "SELECT no_such_function(1) FROM (SELECT" // guaranteed parse failure
 
-	c.describeSQL(c.preparedSQL)
+	c.describeSQL(c.preparedSQL, nil)
 	if c.describeErr == nil {
 		t.Fatal("describeSQL on a failing query did not cache the failure")
 	}

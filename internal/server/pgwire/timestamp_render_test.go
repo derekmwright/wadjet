@@ -200,7 +200,7 @@ func TestTimestampTextMatchesDeclaredOID(t *testing.T) {
 
 	rc := &recordConn{}
 	c := &pgConn{conn: rc}
-	c.sendTypedRowDescription(tsMetas())
+	c.sendTypedRowDescription(tsMetas(), nil)
 	if !bytes.Contains(rc.buf.Bytes(), []byte{0, 0, 4, 90}) { // 1114 big-endian
 		t.Error("RowDescription does not declare OID 1114 for a TIMESTAMP column")
 	}
