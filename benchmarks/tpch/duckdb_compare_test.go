@@ -1580,24 +1580,36 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "SubqueryComputedOrderBy", sql: `SELECT rk2
 			FROM (SELECT NULLIF(r_regionkey, 2) AS rk2 FROM region) t ORDER BY rk2`},
 		// The WHERE faces are NOT the DAG passthrough: pushdownPredicates'
-		// Filter-Project swap pushes the predicate below the Project
+		// Filter-Project swap used to push the predicate below the Project
 		// without substituting the computed alias, so the single-process
-		// path errors and the DAG filters everything out — both arms,
-		// #384. The pins fail the moment the arms start agreeing.
+		// path errored and the DAG filtered everything out — both arms,
+		// #384. Fixed by substituting the alias's defining expression into
+		// the predicate at the swap (splitFilterForProjectPush); the
+		// substituted predicate then also rides scan pushdown.
 		duckdbCase{name: "SubqueryComputedWhere", sql: `SELECT rk2
 			FROM (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) t
-			WHERE rk2 > 1 ORDER BY rk2`,
-			knownBugArm: armBoth,
-			knownBug: "#384: the Filter-Project pushdown swap moves WHERE rk2 > 1 below the Project " +
-				"that computes rk2, unsubstituted — the single-process filter errors on the missing " +
-				"column and the DAG's scan-stage filter matches nothing"},
+			WHERE rk2 > 1 ORDER BY rk2`},
 		duckdbCase{name: "JoinBuildComputedWhereAbove", sql: `SELECT n.n_name, r.rk2
 			FROM nation n JOIN (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) r
-			ON n.n_regionkey = r.r_regionkey WHERE r.rk2 > 1 ORDER BY n.n_name`,
-			knownBugArm: armBoth,
-			knownBug: "#384, the join spelling: the WHERE above the join is pushed into the build " +
-				"subquery below its computing Project, unsubstituted — both arms break the same way " +
-				"as SubqueryComputedWhere"},
+			ON n.n_regionkey = r.r_regionkey WHERE r.rk2 > 1 ORDER BY n.n_name`},
+		// #384's sibling faces: the rename spelling (same substitution
+		// check, alias of a plain column), a predicate mixing a computed
+		// alias with a passthrough column, and a CASE-computed alias whose
+		// NULLs must survive substitution (three-valued logic: WHERE on a
+		// NULL-producing expression filters the NULL rows on both arms).
+		duckdbCase{name: "SubqueryRenamedWhere", sql: `SELECT k
+			FROM (SELECT r_regionkey AS k FROM region) t
+			WHERE k > 1 ORDER BY k`,
+			knownBugArm: armDAG,
+			knownBug: "#385: the DAG drops a rename-only subquery projection — rows and values are " +
+				"right (the #384 substitution holds on both arms) but the output column keeps its " +
+				"SOURCE name r_regionkey; the bare no-WHERE shape even returns full scan width"},
+		duckdbCase{name: "SubqueryComputedWhereMixed", sql: `SELECT r_regionkey, rk2
+			FROM (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) t
+			WHERE rk2 >= r_regionkey ORDER BY r_regionkey`},
+		duckdbCase{name: "SubqueryCaseComputedWhere", sql: `SELECT n_name, bucket
+			FROM (SELECT n_name, CASE WHEN n_regionkey < 2 THEN NULL ELSE n_regionkey END AS bucket FROM nation) t
+			WHERE bucket > 2 ORDER BY n_name`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

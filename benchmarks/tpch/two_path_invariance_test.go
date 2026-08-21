@@ -3291,6 +3291,38 @@ func twoPathCorpus() []twoPathQuery {
 					tb.Errorf("last row rk2 = %v, want NULL last — the ORDER BY did not bind", rows[4]["rk2"])
 				}
 			}},
+
+		// --- #384: WHERE on a computed subquery alias ---
+		//
+		// pushdownPredicates' Filter-Project swap used to push the
+		// predicate below the computing Project unsubstituted, so the
+		// filter named a column its input schema did not carry: the
+		// single-process arm errored and the DAG silently returned 0 rows.
+		// Fixed by substituting the alias's defining expression into the
+		// predicate at the swap (splitFilterForProjectPush). NULLIF keeps
+		// three-valued logic honest: rk2 is NULL for region 2, and
+		// `rk2 > 1` must reject that row (UNKNOWN is not TRUE), not pass
+		// it — 2 rows, not 3.
+		twoPathQuery{name: "SubqueryComputedWhere", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT rk2 FROM (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) t
+				WHERE rk2 > 1 ORDER BY rk2`,
+			wantRows: 2, wantCols: []string{"rk2"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				countNulls("rk2", 0, 2)(tb, rows)
+			}},
+		twoPathQuery{name: "JoinBuildComputedWhereAbove", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n.n_name, r.rk2 FROM nation n
+				JOIN (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) r
+				ON n.n_regionkey = r.r_regionkey WHERE r.rk2 > 1 ORDER BY n.n_name`,
+			wantRows: 10, wantCols: []string{"n_name", "rk2"}},
+		// A predicate mixing the computed alias with a passthrough source
+		// column: only the alias reference is substituted. r_regionkey 2
+		// drops (rk2 NULL), the rest satisfy rk2 >= r_regionkey.
+		twoPathQuery{name: "SubqueryComputedWhereMixed", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT r_regionkey, rk2 FROM (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) t
+				WHERE rk2 >= r_regionkey ORDER BY r_regionkey`,
+			wantRows: 4, wantCols: []string{"r_regionkey", "rk2"}},
 	)
 	return out
 }

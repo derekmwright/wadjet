@@ -2260,6 +2260,18 @@
       "fine": "808e0925ecaf2edd",
       "coarse": "808e0925ecaf2edd"
     },
+    "SubqueryCaseComputedWhere": {
+      "source": "duckdb",
+      "row_count": 10,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "bucket"
+      ],
+      "fine": "c8abe1737055f1d4",
+      "coarse": "c8abe1737055f1d4"
+    },
     "SubqueryComputedOrderBy": {
       "source": "duckdb",
       "row_count": 5,
@@ -2281,6 +2293,29 @@
       ],
       "fine": "1ddb914da9135a2d",
       "coarse": "1ddb914da9135a2d"
+    },
+    "SubqueryComputedWhereMixed": {
+      "source": "duckdb",
+      "row_count": 4,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "r_regionkey",
+        "rk2"
+      ],
+      "fine": "03b841b1875ce8c6",
+      "coarse": "03b841b1875ce8c6"
+    },
+    "SubqueryRenamedWhere": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k"
+      ],
+      "fine": "acfe4f5e5d1787e8",
+      "coarse": "acfe4f5e5d1787e8"
     },
     "SumOverRenamedSubqueryColumn": {
       "source": "duckdb",

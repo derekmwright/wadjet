@@ -1468,9 +1468,26 @@ func pushdownPredicates(n *Node) *Node {
 		// CTE — wrong results). Predicates stay above the fence and are
 		// applied to the replayed batches instead.
 		if child.Type == NodeProject && child.CTEName == "" {
-			// Filter-Project -> Project-Filter (push filter below project)
+			// Filter-Project -> Project-Filter (push filter below project).
+			// #384: the swap used to be unconditional, but a predicate
+			// referencing a column the Project COMPUTES (or renames) cannot
+			// cross unchanged — the schema below does not carry the alias
+			// (the single-process filter errored, the DAG's scan-stage
+			// filter matched nothing). Each predicate is pushed as-is,
+			// pushed with the alias's defining expression substituted in,
+			// or kept above the Project when substitution is unsound
+			// (aggregate outputs, volatile functions, subqueries). See
+			// filter_project_pushdown.go.
+			pushed, kept := splitFilterForProjectPush(n.Predicates, child.Projections)
+			if len(pushed) == 0 {
+				return n
+			}
+			n.Predicates = pushed
 			n.Children[0] = child.Children[0]
 			child.Children[0] = n
+			if len(kept) > 0 {
+				return NewFilter(child, kept)
+			}
 			return child
 		}
 		if child.Type == NodeJoin && len(child.Children) == 2 {
