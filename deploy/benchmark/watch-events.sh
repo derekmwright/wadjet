@@ -24,6 +24,21 @@
 #
 # Exit: 0 on suite_completed, 1 on fatal, 2 on MAX_IDLE_MIN with no terminal
 # event (the teardown signal).
+#
+# Delivery is at-least-once (standard SQS, not FIFO): a message can arrive
+# more than once, with no ordering guarantee. Observed directly on the first
+# SF100 run using this emitter (2026-08-19, run_id 20260819-112820) — one
+# run_started delivered twice, 30 seconds apart, same run_id, same ts. This
+# script only prints and deletes, so a duplicate is harmless here. Any OTHER
+# consumer that counts events, accumulates timings, or treats an event as an
+# edge (e.g. run_started resetting state) MUST dedupe on (run_id, event,
+# query) before acting — see internal/benchnotify's package doc.
+#
+# Wait-loop trap: this script's OWN startup banner (two lines up) contains
+# the literal words "suite_completed" and "fatal", so an external waiter
+# doing a naive `grep -q "suite_completed\|fatal"` over this script's output
+# fires immediately on startup, before any real event. Match the JSON event
+# line instead, e.g. `grep -q '"event":"suite_completed"\|"event":"fatal"'`.
 
 set -uo pipefail
 

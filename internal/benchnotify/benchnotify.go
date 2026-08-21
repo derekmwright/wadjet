@@ -35,6 +35,28 @@
 // query_completed per try, then one suite_completed. Either suite can end
 // on a fatal instead — a fatal is always terminal.
 //
+// # Delivery is at-least-once
+//
+// The queue is a standard SQS queue, so delivery is at-least-once, not
+// exactly-once: a message can arrive more than once, with no ordering
+// guarantee across messages. Observed directly on the first SF100 run using
+// this emitter (2026-08-19, run_id 20260819-112820) — one run_started
+// delivered twice, 30 seconds apart, same run_id, same ts:
+//
+//	07:28:36 {"run_id":"20260819-112820","event":"run_started","total_runs":1,"ts":"2026-08-19T11:28:20Z"}
+//	07:29:06 {"run_id":"20260819-112820","event":"run_started","total_runs":1,"ts":"2026-08-19T11:28:20Z"}
+//
+// That run also emitted 78 query_completed events for 22 distinct queries
+// across 1 run, so duplicates are not rare enough to ignore by hope.
+//
+// A consumer that only prints the stream (watch-events.sh) is unaffected.
+// Any consumer that counts events to track progress, accumulates timings,
+// or treats an event as an edge (e.g. run_started resetting state) MUST
+// dedupe on (RunID, Event, Query) before acting — Try additionally
+// distinguishes ClickBench's per-query retries. If a consumer needs
+// ordering as well as exactly-once delivery, use a FIFO queue with
+// content-based deduplication instead of a dedupe key.
+//
 // # Fire-and-forget
 //
 // Emission never affects the benchmark. Sends happen outside every timed
