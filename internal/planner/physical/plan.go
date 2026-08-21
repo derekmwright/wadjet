@@ -2414,7 +2414,26 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 	anyNestedRename := false
 	for j := range specs {
 		if proj[j].ASTExpr != nil && !isSimpleColRefForRename(proj[j].ASTExpr) {
-			continue // an expression's refs need AST substitution, not a name swap (#387)
+			// #387: an EXPRESSION referencing a nested rename (`k + 1` over
+			// `r_regionkey AS k`) was attached verbatim, so the fragment
+			// compiled it against a schema with no `k` and the task
+			// hard-failed. Substitute the references in the AST (a name
+			// swap on the string cannot see them), regenerate the compiled
+			// text, and re-infer the type against the SOURCE schema the
+			// rewritten expression now reads — the alias was invisible to
+			// inputColTypes, so the spec fell back to Float64 (#333's
+			// symptom one level down). The spec's NAME keeps the outer
+			// text: the gather's renames and the sort's alias keys are
+			// written against it. A declined rewrite (subquery/window
+			// bearing, unknown node) leaves the spec untouched, keeping
+			// today's loud failure over a silently different expression.
+			if rewritten, ok := substituteNestedRenameRefs(proj[j].ASTExpr, renameChild); ok && rewritten != proj[j].ASTExpr {
+				specs[j].Expr = rewritten.String()
+				specs[j].Type = inferProjectionTypeCols(rewritten, parquet.TypeString, nil,
+					sourceColTypesThroughRenames(renameChild))
+				anyNestedRename = true
+			}
+			continue
 		}
 		src := resolveOutputRenameSource(specs[j].Name, renameChild)
 		if strings.EqualFold(src, specs[j].Name) && strings.Contains(specs[j].Name, ".") {
@@ -2491,6 +2510,20 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 				return
 			}
 			s.ProjectExprs = specs
+			// #387: with a nested rename substituted into the specs, the
+			// fragment emits the outer SELECT's names ("k", "k + 1") — but
+			// the #385 resolution already pointed the gather's From at the
+			// SOURCE names the stream would have carried without this
+			// projection (r_regionkey), so the rename would miss and fall
+			// back to full width. Re-point each From at the name the
+			// fragment now emits, exactly as the aliased path below does.
+			if anyNestedRename && len(gather.OutputRenames) <= len(specs) {
+				for j := range gather.OutputRenames {
+					if gather.OutputRenames[j].Expr == nil {
+						gather.OutputRenames[j].From = specs[j].Name
+					}
+				}
+			}
 			return
 		}
 		// Join feeding the gather (the #169 class on the join path), or a
@@ -7436,6 +7469,26 @@ func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 		return merged
 	}
 	return nil
+}
+
+// sourceColTypesThroughRenames is inputColTypes for an expression whose
+// references were substituted through nested rename-only Projects (#387):
+// after substitution the expression names only SOURCE columns, so the types
+// visible BELOW the rename chain are the right ones — a plain rename rebinds
+// names, not values. The walk descends only Projects that are pure
+// column-forwarders (every item a plain column reference); a computed or
+// aggregate item stops it with nil, because past that point a name may be
+// rebound to a different value and inputColTypes' own warning applies.
+func sourceColTypesThroughRenames(n *logical.Node) map[string]parquet.TypeID {
+	for n != nil && n.Type == logical.NodeProject && len(n.Children) == 1 {
+		for _, p := range n.Projections {
+			if p.IsAgg || p.Column == "" {
+				return nil
+			}
+		}
+		n = n.Children[0]
+	}
+	return inputColTypes(n)
 }
 
 // colRefDeclaredType resolves a bare column reference against the catalog

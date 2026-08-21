@@ -1659,12 +1659,38 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "SubqueryRenamedJoinOrder", sql: `SELECT n_name, k
 			FROM nation JOIN (SELECT r_regionkey AS k FROM region) t
 			ON n_regionkey = k ORDER BY k DESC, n_name`},
+		// #387's family: an outer SELECT expression over a nested subquery
+		// rename. attachScanSelectProjections wrote the specs against the
+		// subquery's OUTPUT schema, so the scan fragment compiled `k + 1`
+		// against a schema carrying only r_regionkey and hard-errored;
+		// fixed by substituting the references through the rename
+		// (substituteNestedRenameRefs). Faces: with and without the sort,
+		// WHERE on the renamed column and on the computed alias, ORDER BY
+		// the computed alias, the expression over a CHAINED rename, a
+		// function call, and a CASE.
 		duckdbCase{name: "SubqueryRenamedComputedMix", sql: `SELECT k, k + 1 AS m
-			FROM (SELECT r_regionkey AS k FROM region) t ORDER BY k`,
-			knownBugArm: armDAG,
-			knownBug: "#387: attachScanSelectProjections writes the outer SELECT list against the " +
-				"subquery's OUTPUT schema (references alias k), but the scan fragment carries the " +
-				"SOURCE name r_regionkey — the DAG errors with 'column \"k\" does not exist'"},
+			FROM (SELECT r_regionkey AS k FROM region) t ORDER BY k`},
+		duckdbCase{name: "SubqueryRenamedComputedNoSort", sql: `SELECT k, k + 1 AS m
+			FROM (SELECT r_regionkey AS k FROM region) t`},
+		duckdbCase{name: "SubqueryRenamedComputedWhere", sql: `SELECT k, k + 1 AS m
+			FROM (SELECT r_regionkey AS k FROM region) t WHERE k > 1 ORDER BY k`},
+		duckdbCase{name: "SubqueryRenamedComputedWhereExpr", sql: `SELECT k, k + 1 AS m
+			FROM (SELECT r_regionkey AS k FROM region) t WHERE k + 1 > 2 ORDER BY k`},
+		duckdbCase{name: "SubqueryRenamedComputedOrderByAlias", sql: `SELECT k, k + 1 AS m
+			FROM (SELECT r_regionkey AS k FROM region) t ORDER BY m DESC`},
+		duckdbCase{name: "SubqueryRenamedComputedChained", sql: `SELECT a + 1 AS m
+			FROM (SELECT b AS a FROM (SELECT r_regionkey AS b FROM region) u) t ORDER BY m DESC`},
+		duckdbCase{name: "SubqueryRenamedComputedFunc", sql: `SELECT UPPER(nm) AS u
+			FROM (SELECT n_name AS nm FROM nation) t ORDER BY u DESC`},
+		duckdbCase{name: "SubqueryRenamedComputedCase", sql: `SELECT CASE WHEN k > 2 THEN k ELSE 0 END AS b
+			FROM (SELECT r_regionkey AS k FROM region) t ORDER BY b DESC`},
+		duckdbCase{name: "SubqueryRenamedComputedOrderByHidden", sql: `SELECT UPPER(nm) AS u
+			FROM (SELECT n_name AS nm FROM nation) t ORDER BY nm DESC`},
+		duckdbCase{name: "SubqueryRenamedComputedJoin", sql: `SELECT n_name, k + 1 AS m
+			FROM nation JOIN (SELECT r_regionkey AS k FROM region) t
+			ON n_regionkey = k ORDER BY m DESC, n_name`},
+		duckdbCase{name: "SubqueryRenamedComputedConcatShadow", sql: `SELECT n_name || '!' AS x
+			FROM (SELECT n_comment AS n_name FROM nation) t ORDER BY x`},
 		duckdbCase{name: "SubqueryComputedWhereMixed", sql: `SELECT r_regionkey, rk2
 			FROM (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) t
 			WHERE rk2 >= r_regionkey ORDER BY r_regionkey`},

@@ -3456,6 +3456,80 @@ func twoPathCorpus() []twoPathQuery {
 					return cellNum(r, "k")
 				})
 			}},
+
+		// --- #387: outer SELECT expression over a nested subquery rename ---
+		//
+		// attachScanSelectProjections wrote the SELECT list against the
+		// subquery's OUTPUT schema, so the scan fragment compiled `k + 1`
+		// against a schema carrying only r_regionkey and the DAG
+		// hard-errored (`column "k" does not exist`). Fixed by substituting
+		// the references through the rename in the spec's AST
+		// (substituteNestedRenameRefs). The m == k+1 assertions pin the
+		// VALUES, not just the shape — a spec bound to the wrong source
+		// column would still produce five rows.
+		twoPathQuery{name: "SubqueryRenamedComputedMix", cmp: cmpOrdered, expectRows: true,
+			sql:      `SELECT k, k + 1 AS m FROM (SELECT r_regionkey AS k FROM region) t ORDER BY k`,
+			wantRows: 5, wantCols: []string{"k", "m"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				for i, r := range rows {
+					if cellNum(r, "k") != float64(i) || cellNum(r, "m") != float64(i+1) {
+						tb.Errorf("row %d: (k=%v, m=%v), want (%d, %d)", i, r["k"], r["m"], i, i+1)
+					}
+				}
+			}},
+		// No ORDER BY: the direct scan→gather path, whose gather renames
+		// the #385 resolution had pointed at SOURCE names — without the
+		// re-point the rename misses the projected names and degrades to
+		// full width (wantCols catches exactly that).
+		twoPathQuery{name: "SubqueryRenamedComputedNoSort", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT k, k + 1 AS m FROM (SELECT r_regionkey AS k FROM region) t`,
+			wantRows: 5, wantCols: []string{"k", "m"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				for _, r := range rows {
+					if cellNum(r, "m") != cellNum(r, "k")+1 {
+						tb.Errorf("row (k=%v, m=%v): m must equal k+1", r["k"], r["m"])
+					}
+				}
+			}},
+		// WHERE on the renamed column rides #384's substitution below the
+		// rename while the SELECT expression rides #387's — both at once.
+		twoPathQuery{name: "SubqueryRenamedComputedWhere", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT k, k + 1 AS m FROM (SELECT r_regionkey AS k FROM region) t
+				WHERE k > 1 ORDER BY k`,
+			wantRows: 3, wantCols: []string{"k", "m"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				for i, r := range rows {
+					if cellNum(r, "k") != float64(i+2) {
+						tb.Errorf("row %d: k = %v, want %d", i, r["k"], i+2)
+					}
+				}
+			}},
+		// The sort keys on the COMPUTED alias itself.
+		twoPathQuery{name: "SubqueryRenamedComputedOrderByAlias", cmp: cmpOrdered, expectRows: true,
+			sql:      `SELECT k, k + 1 AS m FROM (SELECT r_regionkey AS k FROM region) t ORDER BY m DESC`,
+			wantRows: 5, wantCols: []string{"k", "m"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, true, "m", func(r map[string]any) float64 {
+					return cellNum(r, "m")
+				})
+			}},
+		// Multi-level: the expression's reference resolves through a
+		// CHAINED rename (a -> b -> r_regionkey).
+		twoPathQuery{name: "SubqueryRenamedComputedChained", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT a + 1 AS m FROM (SELECT b AS a FROM (SELECT r_regionkey AS b FROM region) u) t
+				ORDER BY m DESC`,
+			wantRows: 5, wantCols: []string{"m"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				for i, r := range rows {
+					if cellNum(r, "m") != float64(5-i) {
+						tb.Errorf("row %d: m = %v, want %d", i, r["m"], 5-i)
+					}
+				}
+			}},
 	)
 	return out
 }

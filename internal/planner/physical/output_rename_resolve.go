@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
 // resolveOutputRenameSource maps an OutputRename SOURCE that names a nested
@@ -89,6 +90,243 @@ func resolveOutputRenameSource(name string, child *logical.Node) string {
 		break
 	}
 	return resolved
+}
+
+// substituteNestedRenameRefs returns expr with every column reference that
+// names a NESTED subquery rename replaced by a reference to its source
+// column, resolved with the #385 walk (#387). attachScanSelectProjections
+// writes the outer SELECT list against the subquery's OUTPUT schema, but the
+// scan fragment it attaches to carries SOURCE names — walkStages drops the
+// rename-only Project as a passthrough — so `k + 1` over `r_regionkey AS k`
+// compiled against a schema with no `k` and the task hard-failed. Rewriting
+// the reference to `r_regionkey + 1` lets the fragment compute the value the
+// query means.
+//
+// Copy-on-write, mirroring the #384 predicate rewriter
+// (logical.substituteColRefs): shared unchanged subtrees are reused, and the
+// returned node is the input itself when nothing referenced a rename.
+// ok=false declines the whole rewrite — returned for subquery-bearing nodes
+// (their SQL re-parses in its own scope), window functions (evaluated by
+// their own stage), and any node kind this walk does not recognize. The
+// caller then leaves the spec untouched, which keeps today's LOUD failure
+// (the fragment errors on the unknown column) rather than inventing a
+// silently different expression.
+//
+// A rewritten reference drops its table qualifier: the qualifier named the
+// subquery alias, and the source column lives in the scan's own schema.
+func substituteNestedRenameRefs(expr plansql.Node, child *logical.Node) (plansql.Node, bool) {
+	if expr == nil || child == nil {
+		return expr, true
+	}
+	switch e := expr.(type) {
+	case *plansql.ColRef:
+		src := resolveOutputRenameSource(strings.ToLower(e.Column), child)
+		if strings.EqualFold(src, e.Column) {
+			return expr, true
+		}
+		return &plansql.ColRef{Column: src}, true
+	case *plansql.Lit, *plansql.IntervalLit, *plansql.LiteralPlaceholder, *plansql.StarNode:
+		return expr, true
+	case *plansql.CmpExpr:
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		r, rok := substituteNestedRenameRefs(e.Right, child)
+		if !lok || !rok {
+			return nil, false
+		}
+		if l == e.Left && r == e.Right {
+			return expr, true
+		}
+		return &plansql.CmpExpr{Left: l, Op: e.Op, Right: r}, true
+	case *plansql.AndNode:
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		r, rok := substituteNestedRenameRefs(e.Right, child)
+		if !lok || !rok {
+			return nil, false
+		}
+		if l == e.Left && r == e.Right {
+			return expr, true
+		}
+		return &plansql.AndNode{Left: l, Right: r}, true
+	case *plansql.OrNode:
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		r, rok := substituteNestedRenameRefs(e.Right, child)
+		if !lok || !rok {
+			return nil, false
+		}
+		if l == e.Left && r == e.Right {
+			return expr, true
+		}
+		return &plansql.OrNode{Left: l, Right: r}, true
+	case *plansql.BinaryOp:
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		r, rok := substituteNestedRenameRefs(e.Right, child)
+		if !lok || !rok {
+			return nil, false
+		}
+		if l == e.Left && r == e.Right {
+			return expr, true
+		}
+		return &plansql.BinaryOp{Left: l, Op: e.Op, Right: r}, true
+	case *plansql.UnaryOp:
+		in, ok := substituteNestedRenameRefs(e.Inner, child)
+		if !ok {
+			return nil, false
+		}
+		if in == e.Inner {
+			return expr, true
+		}
+		return &plansql.UnaryOp{Op: e.Op, Inner: in}, true
+	case *plansql.NotNode:
+		in, ok := substituteNestedRenameRefs(e.Inner, child)
+		if !ok {
+			return nil, false
+		}
+		if in == e.Inner {
+			return expr, true
+		}
+		return &plansql.NotNode{Inner: in}, true
+	case *plansql.ParenNode:
+		in, ok := substituteNestedRenameRefs(e.Inner, child)
+		if !ok {
+			return nil, false
+		}
+		if in == e.Inner {
+			return expr, true
+		}
+		return &plansql.ParenNode{Inner: in}, true
+	case *plansql.CastNode:
+		in, ok := substituteNestedRenameRefs(e.Inner, child)
+		if !ok {
+			return nil, false
+		}
+		if in == e.Inner {
+			return expr, true
+		}
+		return &plansql.CastNode{Inner: in, TypeName: e.TypeName}, true
+	case *plansql.FuncCallNode:
+		newArgs, changed, ok := substituteNestedRenameList(e.Args, child)
+		if !ok {
+			return nil, false
+		}
+		if !changed {
+			return expr, true
+		}
+		return &plansql.FuncCallNode{Name: e.Name, Args: newArgs, Distinct: e.Distinct, Star: e.Star}, true
+	case *plansql.InExpr:
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		newVals, changed, ok := substituteNestedRenameList(e.Values, child)
+		if !lok || !ok {
+			return nil, false
+		}
+		if l == e.Left && !changed {
+			return expr, true
+		}
+		return &plansql.InExpr{Left: l, Not: e.Not, Values: newVals}, true
+	case *plansql.BetweenExpr:
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		lo, look := substituteNestedRenameRefs(e.Low, child)
+		hi, hok := substituteNestedRenameRefs(e.High, child)
+		if !lok || !look || !hok {
+			return nil, false
+		}
+		if l == e.Left && lo == e.Low && hi == e.High {
+			return expr, true
+		}
+		return &plansql.BetweenExpr{Left: l, Not: e.Not, Low: lo, High: hi}, true
+	case *plansql.LikeExpr:
+		l, lok := substituteNestedRenameRefs(e.Left, child)
+		p, pok := substituteNestedRenameRefs(e.Pattern, child)
+		if !lok || !pok {
+			return nil, false
+		}
+		if l == e.Left && p == e.Pattern {
+			return expr, true
+		}
+		return &plansql.LikeExpr{Left: l, Not: e.Not, Pattern: p}, true
+	case *plansql.IsExpr:
+		l, ok := substituteNestedRenameRefs(e.Left, child)
+		if !ok {
+			return nil, false
+		}
+		if l == e.Left {
+			return expr, true
+		}
+		return &plansql.IsExpr{Left: l, Not: e.Not, Check: e.Check}, true
+	case *plansql.CaseNode:
+		changed := false
+		var subj plansql.Node
+		if e.Subject != nil {
+			s, ok := substituteNestedRenameRefs(e.Subject, child)
+			if !ok {
+				return nil, false
+			}
+			subj = s
+			changed = changed || s != e.Subject
+		}
+		whens := make([]plansql.WhenClause, len(e.Whens))
+		for i, w := range e.Whens {
+			c, cok := substituteNestedRenameRefs(w.Cond, child)
+			r, rok := substituteNestedRenameRefs(w.Result, child)
+			if !cok || !rok {
+				return nil, false
+			}
+			whens[i] = plansql.WhenClause{Cond: c, Result: r}
+			changed = changed || c != w.Cond || r != w.Result
+		}
+		var els plansql.Node
+		if e.Else != nil {
+			el, ok := substituteNestedRenameRefs(e.Else, child)
+			if !ok {
+				return nil, false
+			}
+			els = el
+			changed = changed || el != e.Else
+		}
+		if !changed {
+			return expr, true
+		}
+		return &plansql.CaseNode{Subject: subj, Whens: whens, Else: els}, true
+	case *plansql.TupleNode:
+		els, changed, ok := substituteNestedRenameList(e.Elements, child)
+		if !ok {
+			return nil, false
+		}
+		if !changed {
+			return expr, true
+		}
+		return &plansql.TupleNode{Elements: els}, true
+	case *plansql.ArrayLitNode:
+		els, changed, ok := substituteNestedRenameList(e.Elements, child)
+		if !ok {
+			return nil, false
+		}
+		if !changed {
+			return expr, true
+		}
+		return &plansql.ArrayLitNode{Elements: els}, true
+	default:
+		// SubqueryNode / ExistsNode / AnyAllExpr (nested SQL re-parses in
+		// its own scope), WindowFuncNode, and anything newer than this walk.
+		return nil, false
+	}
+}
+
+// substituteNestedRenameList applies substituteNestedRenameRefs to each
+// element; changed reports whether any element was rewritten.
+func substituteNestedRenameList(nodes []plansql.Node, child *logical.Node) ([]plansql.Node, bool, bool) {
+	out := make([]plansql.Node, len(nodes))
+	changed := false
+	for i, n := range nodes {
+		nn, ok := substituteNestedRenameRefs(n, child)
+		if !ok {
+			return nil, false, false
+		}
+		out[i] = nn
+		if nn != n {
+			changed = true
+		}
+	}
+	return out, changed, true
 }
 
 // resolveJoinNeededColumns maps each entry of a join node's NeededColumns

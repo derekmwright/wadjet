@@ -2350,6 +2350,62 @@
       "fine": "09bf9f1926b11d4e",
       "coarse": "09bf9f1926b11d4e"
     },
+    "SubqueryRenamedComputedCase": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "b"
+      ],
+      "fine": "bed1d13d6df648de",
+      "coarse": "bed1d13d6df648de"
+    },
+    "SubqueryRenamedComputedChained": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "m"
+      ],
+      "fine": "3e10ec699e14027e",
+      "coarse": "3e10ec699e14027e"
+    },
+    "SubqueryRenamedComputedConcatShadow": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "x"
+      ],
+      "fine": "a6b16130f7c2ffea",
+      "coarse": "a6b16130f7c2ffea"
+    },
+    "SubqueryRenamedComputedFunc": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "u"
+      ],
+      "fine": "cefac7e1f6929e8f",
+      "coarse": "cefac7e1f6929e8f"
+    },
+    "SubqueryRenamedComputedJoin": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "m"
+      ],
+      "fine": "d326bc31d8faa978",
+      "coarse": "d326bc31d8faa978"
+    },
     "SubqueryRenamedComputedMix": {
       "source": "duckdb",
       "row_count": 5,
@@ -2361,6 +2417,65 @@
       ],
       "fine": "c90e81412b476885",
       "coarse": "c90e81412b476885"
+    },
+    "SubqueryRenamedComputedNoSort": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "k",
+        "m"
+      ],
+      "fine": "c90e81412b476885",
+      "coarse": "c90e81412b476885"
+    },
+    "SubqueryRenamedComputedOrderByAlias": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "m"
+      ],
+      "fine": "d3bf8b963c377816",
+      "coarse": "d3bf8b963c377816"
+    },
+    "SubqueryRenamedComputedOrderByHidden": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "u"
+      ],
+      "fine": "cefac7e1f6929e8f",
+      "coarse": "cefac7e1f6929e8f"
+    },
+    "SubqueryRenamedComputedWhere": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "m"
+      ],
+      "fine": "555eb020b611b263",
+      "coarse": "555eb020b611b263"
+    },
+    "SubqueryRenamedComputedWhereExpr": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k",
+        "m"
+      ],
+      "fine": "555eb020b611b263",
+      "coarse": "555eb020b611b263"
     },
     "SubqueryRenamedJoinBuild": {
       "source": "duckdb",
