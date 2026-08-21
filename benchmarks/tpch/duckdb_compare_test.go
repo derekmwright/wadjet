@@ -1386,6 +1386,35 @@ func duckdbCorpus() []duckdbCase {
 				MAX(n_nationkey) OVER (PARTITION BY n_regionkey ORDER BY n_nationkey) AS mx,
 				MIN(n_name) OVER (ORDER BY n_nationkey) AS mn
 				FROM nation ORDER BY n_nationkey`},
+		// INTERSECT / EXCEPT (#346, second half): the stage DAG lowers them
+		// as grouped counting (tag each arm, shuffle on the full row, SUM
+		// tags, emit per the count rule). DuckDB truth is what pins the
+		// COUNT RULES themselves — the ALL forms differ from the distinct
+		// ones exactly when an arm holds duplicates, and nation carries
+		// every region key five times against region's once, so min(5,1)
+		// and max(0,5−1) each give an answer no other rule reproduces.
+		duckdbCase{name: "IntersectDistinct",
+			sql: `SELECT n_regionkey FROM nation INTERSECT SELECT r_regionkey FROM region`},
+		duckdbCase{name: "IntersectAllMinCounts",
+			sql: `SELECT n_regionkey FROM nation INTERSECT ALL SELECT r_regionkey FROM region`},
+		duckdbCase{name: "ExceptDistinctFiltered",
+			sql: `SELECT n_regionkey FROM nation EXCEPT
+				SELECT r_regionkey FROM region WHERE r_regionkey < 2`},
+		duckdbCase{name: "ExceptAllCountDiff",
+			sql: `SELECT n_regionkey FROM nation EXCEPT ALL SELECT r_regionkey FROM region`},
+		// NULL is a member and matches the other arm's NULL — GROUP BY
+		// equality, not predicate equality. Both arms send region key 1 to
+		// NULL; the intersection holds it once.
+		duckdbCase{name: "IntersectNullsMatch",
+			sql: `SELECT NULLIF(n_regionkey, 1) AS k FROM nation INTERSECT
+				SELECT NULLIF(r_regionkey, 1) AS k FROM region`},
+		// ORDER BY above the operation sorts the whole result (ordered
+		// compare pins the sequence); the arms disagree on type (int + 100
+		// vs float + 100.0), so the reconciling CAST is load-bearing on the
+		// DAG — without it the two arms' rows can never compare equal.
+		duckdbCase{name: "IntersectWidenedOrdered",
+			sql: `SELECT n_regionkey + 100 AS k FROM nation INTERSECT
+				SELECT r_regionkey + 100.0 AS k FROM region ORDER BY k`},
 	)
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can

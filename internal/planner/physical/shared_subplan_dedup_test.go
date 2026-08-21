@@ -379,7 +379,12 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		"ChainedAggGroupBy": "hashed", "ChainedAggSpecs": "hashed",
 		"WindowCols": "hashed", "JoinPartitionCount": "hashed",
 		"FusedAggGroupBy": "hashed", "FusedAggSpecs": "hashed",
-		"RawInputAggregate": "hashed", "ProbeSplitAlias": "hashed",
+		"RawInputAggregate": "hashed",
+		// The set-operation marker changes what the stage EMITS (intersect
+		// vs except vs plain aggregate; distinct vs ALL), so two subtrees
+		// differing here are never interchangeable.
+		"SetOp": "hashed", "SetOpAll": "hashed",
+		"ProbeSplitAlias": "hashed",
 		"ProbeSplitFiles": "hashed", "MergeGroup": "hashed",
 		"MergeGroupCount": "hashed", "Distribution": "hashed",
 		"Exchange": "hashed", "ProjectExprs": "hashed",

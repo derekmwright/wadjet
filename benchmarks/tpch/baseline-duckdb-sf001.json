@@ -385,6 +385,28 @@
       "fine": "fa4d91d2941621e2",
       "coarse": "fa4d91d2941621e2"
     },
+    "ExceptAllCountDiff": {
+      "source": "duckdb",
+      "row_count": 20,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n_regionkey"
+      ],
+      "fine": "8ed0a924c8dc0acb",
+      "coarse": "8ed0a924c8dc0acb"
+    },
+    "ExceptDistinctFiltered": {
+      "source": "duckdb",
+      "row_count": 3,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n_regionkey"
+      ],
+      "fine": "acfe4f5e5d1787e8",
+      "coarse": "acfe4f5e5d1787e8"
+    },
     "ExpressionJoinKey": {
       "source": "duckdb",
       "row_count": 1,
@@ -574,6 +596,50 @@
       ],
       "fine": "25a39c741a646aa3",
       "coarse": "25a39c741a646aa3"
+    },
+    "IntersectAllMinCounts": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n_regionkey"
+      ],
+      "fine": "026d8ad3dfa1f2aa",
+      "coarse": "026d8ad3dfa1f2aa"
+    },
+    "IntersectDistinct": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n_regionkey"
+      ],
+      "fine": "026d8ad3dfa1f2aa",
+      "coarse": "026d8ad3dfa1f2aa"
+    },
+    "IntersectNullsMatch": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "k"
+      ],
+      "fine": "72c680d4f4ec0896",
+      "coarse": "72c680d4f4ec0896"
+    },
+    "IntersectWidenedOrdered": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "k"
+      ],
+      "fine": "3ccdba7644026350",
+      "coarse": "3ccdba7644026350"
     },
     "KeylessCrossJoinFilter": {
       "source": "duckdb",

@@ -468,6 +468,14 @@ func postgresSemanticsCases() []pgCase {
 		// NULL on the other side.
 		pgCase{name: "UnionWithNulls", sql: `SELECT NULLIF(n_regionkey, 1) AS k FROM nation
 			UNION SELECT NULLIF(r_regionkey, 1) FROM region ORDER BY k`},
+		// The ALL forms carry multiplicity — min(countA, countB) and
+		// max(0, countA−countB) copies per row — and differ from the
+		// distinct forms exactly when an arm holds duplicates, which
+		// nation's five-nations-per-region guarantees (#346).
+		pgCase{name: "IntersectAllMultiplicity", sql: `SELECT n_regionkey FROM nation
+			INTERSECT ALL SELECT r_regionkey FROM region ORDER BY 1`},
+		pgCase{name: "ExceptAllMultiplicity", sql: `SELECT n_regionkey FROM nation
+			EXCEPT ALL SELECT r_regionkey FROM region ORDER BY 1`},
 	)
 
 	// --- Pagination ------------------------------------------------------

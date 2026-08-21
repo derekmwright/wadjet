@@ -2483,6 +2483,16 @@ func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task
 		}
 		return []exec.UnaryOperator{proj}, nil, nil
 
+	case distributed.OpSetOpEmit:
+		// INTERSECT/EXCEPT emit (#346): the counting aggregate's drain rows
+		// carry per-arm multiplicities; this op applies the operation's
+		// count rule and drops the count columns.
+		emit, err := exec.NewSetOpEmit(spec.SetOp, spec.SetOpAll, spec.SetOpLeftCol, spec.SetOpRightCol)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []exec.UnaryOperator{emit}, nil, nil
+
 	default:
 		return nil, nil, fmt.Errorf("unsupported unary op %q", spec.Type)
 	}

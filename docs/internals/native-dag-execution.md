@@ -111,7 +111,8 @@ the embedded engine per policy shape.
 | `NodeSort` | `sort` → merge-sort tree | `plan.go:3105` |
 | `NodeWindow` | `window` | `plan.go:3384`. One task per PARTITION BY partition when the input already arrives clustered on those keys; Singleton otherwise — see §Window. |
 | `NodeFilter` | pushes predicates onto child stage | `plan.go:3323` |
-| `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. `NodeIntersect` / `NodeExcept` are **refused** (`Planner.setOpErr` → `PlanDistributed` error) — see §Set operations. |
+| `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. |
+| `NodeIntersect` / `NodeExcept` | `union` (with per-arm tag columns) + a grouped counting `final_aggregate` | `set_op_stages.go` (#346). The distribution pass inserts an `exchange-repartition` on the full result row between them — see §Set operations. |
 | **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. Top-level DISTINCT never reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns it into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages. Remaining NodeDistincts (semi/anti build-side dedup, fallback shapes) stay passthrough. |
 | **`NodeProject`** | **nothing — passthrough** | same `default` case; aliases recovered at gather |
 
@@ -235,26 +236,62 @@ fallback carries. Sharding it means a hash exchange on all output columns
 feeding N per-partition dedups — sound because identical rows hash identically
 (see §Shuffle internals, collision-safety).
 
+**`INTERSECT` / `EXCEPT` (and their `ALL` forms)** lower as **grouped
+counting** (#346, second half — until then they were refused at plan time):
+
+```
+arm 0 stages ─┐
+              ├─ union (per-arm projections + TAG columns: arm 0 rows carry
+arm 1 stages ─┘         (1,0), arm 1 rows (0,1) — physical.SetOpLeftCountCol
+              │         / SetOpRightCountCol, literal Int64 projections)
+              ├─ exchange-repartition on the FULL result row   ← inserted by
+              │   EnsureDistribution: the union is DistRoundRobin and a
+              │   grouped final requires ClusteredOn(GroupByCols)
+              └─ final_aggregate {GroupByCols: result row, SUM(tagL),
+                  SUM(tagR), RawInputAggregate, SetOp: intersect|except,
+                  SetOpAll}
+```
+
+Each distinct result row therefore reaches exactly one task carrying
+(countA, countB) — its multiplicity in each arm — and the fragment appends an
+**`OpSetOpEmit`** (`exec.SetOpEmit`) right after the counting
+`OpHashAggregate` that applies the operation's count rule and drops the tags:
+INTERSECT 1 copy iff both counts > 0; INTERSECT ALL min(a,b); EXCEPT 1 copy
+iff a > 0 && b == 0; EXCEPT ALL max(0, a−b). Distinct forms emit via a
+selection vector (zero copy); ALL forms materialize (row replication has no
+selection representation). It runs before the stage's post-filter and any
+fused sort, both of which name the operation's OUTPUT columns.
+
+Everything else is reuse, which is what makes the shape sound end to end:
+co-partitioning is the ordinary exchange (identical rows hash identically —
+NULL cells hash a deterministic marker byte, see §Shuffle internals), NULL
+membership equality is HashAggregate's NULL-groups-equal rule (#338), spill
+is the aggregate's own, and the counting stage is **sharded** — it mirrors
+the exchange's partitioning, one task per partition, not a Singleton
+(`RawInputAggregate` keeps the dispatcher off the merge-mode spec rewrite and
+off `dispatchFinalAggregateFanout`). A sort/LIMIT folded in by
+`fuseSortIntoPredecessor` collapses it to Singleton via the same rules every
+grouped final follows: correct, serial.
+
 **Refused, loudly** (planning error, never a partial answer):
 
-- `INTERSECT` / `EXCEPT` (and their `ALL` forms). Each needs the multiset of one
-  arm matched against the whole of the OTHER — a shuffle on the full row then a
-  per-partition semi/anti pass. That is a distributed operation, not a filter
-  over a concatenation, so there is nothing here to reuse.
 - An arm whose SELECT list is an **aggregate** (`SELECT COUNT(*) … UNION ALL …`):
   the arm's aggregate stage names its own output, so the union's projection
   would have to guess that name.
 - Arms whose column **types** do not widen into one another, or whose **arity**
   differs.
 
-All of these answer correctly on the single-process path, so they are a
-two-path divergence of the "errors on one arm" kind — which is the honest
-shape. Returning one arm is the wrong answer that looks like a right one.
+These answer correctly on the single-process path, so they are a two-path
+divergence of the "errors on one arm" kind — which is the honest shape.
+Returning one arm is the wrong answer that looks like a right one.
 
 Coverage: `physical/set_op_stages_test.go` (plan shape + every refusal),
-`benchmarks/tpch/two_path_invariance_test.go` (`Union*`, asserting row count
-AND column list absolutely on both arms), `duckdb_compare_test.go` +
-`pagination_test.go` (values and sequence against DuckDB).
+`exec/set_op_emit_test.go` (the count rules),
+`benchmarks/tpch/two_path_invariance_test.go` (`Union*`, `Intersect*`,
+`Except*` — row count AND column list asserted absolutely on both arms;
+duplicates-within-arm, NULL membership, empty arms, type widening, stacked
+ORDER BY/LIMIT/WHERE), `duckdb_compare_test.go` + `pagination_test.go`
+(values and sequence against DuckDB).
 
 ## Window
 

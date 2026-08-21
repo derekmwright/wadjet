@@ -178,11 +178,26 @@ type Stage struct {
 	// from an exchange hash-partitioned on the group keys, not partial
 	// aggregates — set by rewireAggOverRawExchange when it rewires the
 	// final from a duplicate fused scan-agg leg onto a sibling raw
-	// exchange. Partition-disjoint keys make per-partition raw aggregation
-	// exact, so the dispatcher builds the fragment with MergeMode=false
-	// (no InputCol→OutputCol remap, no COUNT→SUM rewrite). AggSpecs carry
-	// the raw form (the dropped scan's FusedAggSpecs).
+	// exchange, and by emitSetOpCountingStage (whose input is the raw
+	// tagged concatenation). Partition-disjoint keys make per-partition
+	// raw aggregation exact, so the dispatcher builds the fragment with
+	// MergeMode=false (no InputCol→OutputCol remap, no COUNT→SUM
+	// rewrite). AggSpecs carry the raw form (the dropped scan's
+	// FusedAggSpecs).
 	RawInputAggregate bool
+
+	// SetOp marks a final_aggregate that computes an INTERSECT or EXCEPT
+	// (#346): the stage GROUP BYs the full result row and SUMs the two
+	// per-arm tag columns (SetOpLeftCountCol / SetOpRightCountCol), and
+	// its fragment appends an emit operator that turns each distinct
+	// row's (countA, countB) into the operation's answer — one copy when
+	// the distinct form's membership rule holds, min(countA, countB) /
+	// max(0, countA−countB) copies for the ALL forms — and drops the tag
+	// columns. Values: "intersect", "except"; "" on every other stage.
+	SetOp string
+	// SetOpAll distinguishes the multiset (ALL) form. Meaningful only
+	// when SetOp is set.
+	SetOpAll bool
 
 	// Probe-split pipeline: partition the probe table's files across workers.
 	// Each worker scans build tables in full and probes its file partition.

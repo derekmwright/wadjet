@@ -372,6 +372,15 @@ const (
 	OpGatherSink        OpType = "gather_sink"        // gatherReplySink: stream batches to ReplySubject
 
 	OpProject OpType = "project" // compute SELECT-list expressions (exec.Project); output = exactly Projections
+
+	// OpSetOpEmit turns a grouped-count batch into an INTERSECT/EXCEPT
+	// answer (exec.SetOpEmit): each input row is one distinct result row
+	// plus its per-arm multiplicities in the two count columns; the
+	// operator emits k copies per the operation's rule (distinct forms:
+	// 0 or 1; INTERSECT ALL: min(a,b); EXCEPT ALL: max(0, a−b)) and drops
+	// the count columns. Sits immediately after the counting
+	// OpHashAggregate in a set-operation final_aggregate fragment.
+	OpSetOpEmit OpType = "set_op_emit"
 )
 
 // OpSpec describes one operator within a fragment pipeline. Fields are
@@ -469,6 +478,12 @@ type OpSpec struct {
 	// stats from the upstream build-scan stage. Worker wires each into the
 	// row-group pruning path before the first S3 fetch.
 	DynamicFilters []DynamicFilterSpec `json:"dynamic_filters,omitempty"`
+
+	// OpSetOpEmit.
+	SetOp         string `json:"set_op,omitempty"`          // "intersect" | "except"
+	SetOpAll      bool   `json:"set_op_all,omitempty"`      // multiset (ALL) form
+	SetOpLeftCol  string `json:"set_op_left_col,omitempty"` // arm-A count column, dropped from output
+	SetOpRightCol string `json:"set_op_right_col,omitempty"`
 }
 
 // PreComputedAggregate identifies a derived aggregate whose result has

@@ -2862,6 +2862,144 @@ func twoPathCorpus() []twoPathQuery {
 			}},
 	)
 
+	// INTERSECT / EXCEPT on the stage DAG (#346, second half). Until this
+	// landed the DAG refused all four forms at plan time, so every entry
+	// here failed with "arm B failed while arm A returned N rows". The DAG
+	// lowering is grouped counting — tag each arm's rows, hash the full row
+	// across an exchange, SUM the tags per distinct row, emit per the
+	// operation's count rule — so what these entries pin is exactly the
+	// places that lowering could go quietly wrong: multiplicity (ALL vs
+	// distinct differ only when one arm holds duplicates), NULL membership
+	// (equal to NULL, like GROUP BY), positional column semantics, empty
+	// arms, cross-arm type widening, and operators stacked above the
+	// operation. Fixture facts the absolute assertions lean on: nation has
+	// 25 rows, exactly 5 per region key 0–4; region has one row per key.
+	assertRowCount := func(want int) func(testing.TB, []map[string]any) {
+		return func(tb testing.TB, rows []map[string]any) {
+			tb.Helper()
+			if len(rows) != want {
+				tb.Errorf("arm A (single-process) returned %d rows, want %d", len(rows), want)
+			}
+		}
+	}
+	out = append(out,
+		// Distinct forms collapse duplicates WITHIN the surviving arm too:
+		// nation carries every region key five times, and the answer holds
+		// each key once. The arms also name their columns differently — the
+		// result takes the FIRST arm's name, which wantCols pins on both
+		// arms (the compare alone realigns columns and would miss it).
+		twoPathQuery{name: "IntersectDistinct", cmp: cmpUnordered, expectRows: true,
+			sql:      "SELECT n_regionkey FROM nation INTERSECT SELECT r_regionkey FROM region",
+			wantCols: []string{"n_regionkey"}, wantRows: 5,
+			assertA: assertRowCount(5)},
+		// INTERSECT ALL is min(countA, countB) per row: 5 copies in nation,
+		// 1 in region → one copy each. 25 rows back is a missing min; 5 is
+		// the answer.
+		twoPathQuery{name: "IntersectAllMinCounts", cmp: cmpUnordered, expectRows: true,
+			sql:      "SELECT n_regionkey FROM nation INTERSECT ALL SELECT r_regionkey FROM region",
+			wantCols: []string{"n_regionkey"}, wantRows: 5,
+			assertA: assertRowCount(5)},
+		// EXCEPT is distinct rows of A absent from B: keys 0 and 1 are
+		// removed by the filtered region arm, keys 2–4 survive once each.
+		twoPathQuery{name: "ExceptDistinct", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT n_regionkey FROM nation EXCEPT " +
+				"SELECT r_regionkey FROM region WHERE r_regionkey < 2",
+			wantCols: []string{"n_regionkey"}, wantRows: 3,
+			assertA: assertRowCount(3)},
+		// EXCEPT ALL is max(0, countA−countB): 5−1 = 4 copies per key, 20
+		// rows. 5 rows is the distinct form leaking in; 25 is a dropped
+		// subtraction.
+		twoPathQuery{name: "ExceptAllCountDiff", cmp: cmpUnordered, expectRows: true,
+			sql:      "SELECT n_regionkey FROM nation EXCEPT ALL SELECT r_regionkey FROM region",
+			wantCols: []string{"n_regionkey"}, wantRows: 20,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				perKey := map[float64]int{}
+				for _, r := range rows {
+					perKey[cellNum(r, "n_regionkey")]++
+				}
+				for k := 0.0; k < 5; k++ {
+					if perKey[k] != 4 {
+						tb.Errorf("key %v appears %d times, want 4 (5 copies in nation − 1 in region)", k, perKey[k])
+					}
+				}
+			}},
+		// NULL is a member like any other and matches the other arm's NULL —
+		// the same equality GROUP BY uses, and on the DAG the same property
+		// the shuffle hash must preserve for the NULL-carrying rows to meet
+		// in one partition. NULLIF sends region key 1 to NULL in both arms:
+		// the intersection is {0, 2, 3, 4, NULL}.
+		twoPathQuery{name: "IntersectNullsMatch", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT NULLIF(n_regionkey, 1) AS k FROM nation INTERSECT " +
+				"SELECT NULLIF(r_regionkey, 1) AS k FROM region",
+			wantCols: []string{"k"}, wantRows: 5,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				nulls := 0
+				for _, r := range rows {
+					if v, ok := lookupCell(r, "k"); ok && v == nil {
+						nulls++
+					}
+				}
+				if nulls != 1 {
+					tb.Errorf("%d NULL rows, want exactly 1 — NULLs must match each other, once", nulls)
+				}
+			}},
+		// An empty arm: INTERSECT with nothing is nothing. wantRows cannot
+		// pin zero (0 means unasserted), so the absolute assertion does.
+		twoPathQuery{name: "IntersectEmptyArm", cmp: cmpUnordered,
+			sql: "SELECT n_regionkey FROM nation WHERE n_nationkey < 0 INTERSECT " +
+				"SELECT r_regionkey FROM region",
+			assertA: assertRowCount(0)},
+		// EXCEPT with an empty B is DISTINCT A — the subtraction of nothing
+		// still dedups.
+		twoPathQuery{name: "ExceptEmptyRight", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT n_regionkey FROM nation EXCEPT " +
+				"SELECT r_regionkey FROM region WHERE r_regionkey < 0",
+			wantCols: []string{"n_regionkey"}, wantRows: 5,
+			assertA: assertRowCount(5)},
+		// EXCEPT with an empty A is empty, whatever B holds.
+		twoPathQuery{name: "ExceptEmptyLeft", cmp: cmpUnordered,
+			sql: "SELECT n_regionkey FROM nation WHERE n_nationkey < 0 EXCEPT " +
+				"SELECT r_regionkey FROM region",
+			assertA: assertRowCount(0)},
+		// Cross-arm type widening (reconcileSetOpArmTypes): one arm computes
+		// an integer, the other a float. Without the reconciling CAST the
+		// arms' rows can never be equal on the DAG — two .wshf files
+		// declaring different types for one column don't even decode as one
+		// stream. Integral values on purpose: equality is the point, not
+		// float formatting.
+		twoPathQuery{name: "IntersectTypeWidening", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT n_regionkey + 100 AS k FROM nation INTERSECT " +
+				"SELECT r_regionkey + 100.0 AS k FROM region",
+			wantCols: []string{"k"}, wantRows: 5,
+			assertA: assertRowCount(5)},
+		// ORDER BY above the operation sorts the WHOLE result by the result
+		// column (the first arm's name).
+		twoPathQuery{name: "IntersectOrderBy", cmp: cmpOrdered, expectRows: true,
+			sql: "SELECT n_regionkey FROM nation INTERSECT SELECT r_regionkey FROM region " +
+				"ORDER BY n_regionkey",
+			wantCols: []string{"n_regionkey"}, wantRows: 5,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "n_regionkey", func(r map[string]any) float64 {
+					return cellNum(r, "n_regionkey")
+				})
+			}},
+		// LIMIT above the operation, verbatim (count-compared — a bare cut
+		// does not say WHICH rows) and with the limit binding on both arms.
+		twoPathQuery{name: "ExceptAllOrderByLimit", cmp: cmpCount, limit: 7, expectRows: true,
+			sql: "SELECT n_regionkey FROM nation EXCEPT ALL SELECT r_regionkey FROM region " +
+				"ORDER BY n_regionkey LIMIT 7",
+			wantCols: []string{"n_regionkey"}, wantRows: 7},
+		// A WHERE above the operation names the result column and must run
+		// over the operation's OUTPUT — after the counting, not inside an
+		// arm. INTERSECT ALL leaves one copy per key here, so the filter's
+		// answer is exactly the keys below 3.
+		twoPathQuery{name: "IntersectAllFilteredAbove", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT k FROM (SELECT n_regionkey AS k FROM nation INTERSECT ALL " +
+				"SELECT r_regionkey FROM region) u WHERE k < 3",
+			wantCols: []string{"k"}, wantRows: 3,
+			assertA: assertRowCount(3)},
+	)
+
 	return out
 }
 

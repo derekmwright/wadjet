@@ -3446,6 +3446,20 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 		EmitEmptyIdentity: stage.Type == "final_aggregate" &&
 			len(stage.GroupByCols) == 0 && !stage.GroupByAll,
 	})
+	// INTERSECT/EXCEPT counting stage (#346): the aggregate's drain is one
+	// row per distinct result row plus its per-arm counts; the emit operator
+	// applies the operation's count rule and drops the count columns. It
+	// runs BEFORE the post-filter and any fused sort, both of which name the
+	// operation's OUTPUT columns.
+	if stage.SetOp != "" {
+		ops = append(ops, distributed.OpSpec{
+			Type:          distributed.OpSetOpEmit,
+			SetOp:         stage.SetOp,
+			SetOpAll:      stage.SetOpAll,
+			SetOpLeftCol:  physical.SetOpLeftCountCol,
+			SetOpRightCol: physical.SetOpRightCountCol,
+		})
+	}
 	if len(t.PostFilterExprs) > 0 {
 		ops = append(ops, distributed.OpSpec{
 			Type:       distributed.OpFilter,

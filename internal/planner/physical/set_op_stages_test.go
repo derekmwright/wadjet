@@ -175,26 +175,6 @@ func TestSetOpRefusals(t *testing.T) {
 		want []string // substrings the error must carry
 	}{
 		{
-			name: "Intersect",
-			sql:  "SELECT r_regionkey FROM region INTERSECT SELECT n_regionkey FROM nation",
-			want: []string{"INTERSECT", "set semantics"},
-		},
-		{
-			name: "IntersectAll",
-			sql:  "SELECT r_regionkey FROM region INTERSECT ALL SELECT n_regionkey FROM nation",
-			want: []string{"INTERSECT ALL", "set semantics"},
-		},
-		{
-			name: "Except",
-			sql:  "SELECT r_regionkey FROM region EXCEPT SELECT n_regionkey FROM nation",
-			want: []string{"EXCEPT", "set semantics"},
-		},
-		{
-			name: "ExceptAll",
-			sql:  "SELECT r_regionkey FROM region EXCEPT ALL SELECT n_regionkey FROM nation",
-			want: []string{"EXCEPT ALL", "set semantics"},
-		},
-		{
 			// The arm's aggregate stage names its own output; the union
 			// stage's projection would have to guess that name.
 			name: "AggregateArm",
@@ -383,5 +363,144 @@ func TestAlignSetOpRows(t *testing.T) {
 	// A width mismatch is malformed, not something to paper over.
 	if got := alignSetOpRows(left, right[:1], rows); &got[0] != &rows[0] {
 		t.Error("mismatched widths were re-keyed")
+	}
+}
+
+// TestSetOpIntersectExceptPlanShape: INTERSECT and EXCEPT lower onto the DAG
+// as grouped counting (#346). Both arms concatenate through a StageUnion
+// whose per-arm projections append two literal tag columns (arm 0 tags
+// (1,0), arm 1 tags (0,1)); a grouped final_aggregate GROUP BYs the full
+// result row and SUMs the tags, so each distinct row arrives at exactly one
+// task carrying (countA, countB); the stage's SetOp marker makes the
+// fragment emit rows per the operation's count rule. The distribution pass
+// must insert an exchange-repartition on the full row between the two —
+// co-partitioning is what makes each partition independently answerable.
+func TestSetOpIntersectExceptPlanShape(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	cases := []struct {
+		name    string
+		sql     string
+		op      string
+		all     bool
+		outCols []string
+	}{
+		{
+			name:    "Intersect",
+			sql:     "SELECT r_regionkey FROM region INTERSECT SELECT n_regionkey FROM nation",
+			op:      "intersect",
+			outCols: []string{"r_regionkey"},
+		},
+		{
+			name:    "IntersectAll",
+			sql:     "SELECT r_regionkey FROM region INTERSECT ALL SELECT n_regionkey FROM nation",
+			op:      "intersect",
+			all:     true,
+			outCols: []string{"r_regionkey"},
+		},
+		{
+			name:    "Except",
+			sql:     "SELECT r_regionkey FROM region EXCEPT SELECT n_regionkey FROM nation",
+			op:      "except",
+			outCols: []string{"r_regionkey"},
+		},
+		{
+			name:    "ExceptAll",
+			sql:     "SELECT r_regionkey FROM region EXCEPT ALL SELECT n_regionkey FROM nation",
+			op:      "except",
+			all:     true,
+			outCols: []string{"r_regionkey"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stages, err := planSetOpStages(t, cat, ctx, tc.sql)
+			if err != nil {
+				t.Fatalf("PlanDistributed refused: %v", err)
+			}
+			union := onlyStageOfType(t, stages, StageUnion)
+			if len(union.UnionArms) != 2 {
+				t.Fatalf("union has %d arms, want 2", len(union.UnionArms))
+			}
+			// Each arm carries the result columns plus the two tag columns,
+			// and the tags are complementary constants: SUMming them per
+			// group yields (rows from arm A, rows from arm B).
+			for i, arm := range union.UnionArms {
+				wantProj := len(tc.outCols) + 2
+				if len(arm.Projections) != wantProj {
+					t.Fatalf("arm %d projects %d columns, want %d (result cols + 2 tags): %+v",
+						i, len(arm.Projections), wantProj, arm.Projections)
+				}
+				lTag := arm.Projections[len(tc.outCols)]
+				rTag := arm.Projections[len(tc.outCols)+1]
+				if lTag.Name != SetOpLeftCountCol || rTag.Name != SetOpRightCountCol {
+					t.Fatalf("arm %d tag columns are (%q, %q), want (%q, %q)",
+						i, lTag.Name, rTag.Name, SetOpLeftCountCol, SetOpRightCountCol)
+				}
+				wantL, wantR := "1", "0"
+				if i == 1 {
+					wantL, wantR = "0", "1"
+				}
+				if lTag.Expr != wantL || rTag.Expr != wantR {
+					t.Errorf("arm %d tags are (%s, %s), want (%s, %s) — swapped tags turn EXCEPT into its mirror",
+						i, lTag.Expr, rTag.Expr, wantL, wantR)
+				}
+			}
+
+			// The counting aggregate: grouped on the full result row, SetOp
+			// marker set, raw input (the exchange ships raw tagged rows, not
+			// partials).
+			var agg *Stage
+			for i := range stages {
+				if stages[i].SetOp != "" {
+					if agg != nil {
+						t.Fatalf("two SetOp stages in %v", stageTypeIDs(stages))
+					}
+					agg = &stages[i]
+				}
+			}
+			if agg == nil {
+				t.Fatalf("no SetOp counting stage in %v", stageTypeIDs(stages))
+			}
+			if agg.SetOp != tc.op || agg.SetOpAll != tc.all {
+				t.Errorf("counting stage is (%s, all=%v), want (%s, all=%v)", agg.SetOp, agg.SetOpAll, tc.op, tc.all)
+			}
+			if got := agg.GroupByCols; !keysEqual(got, tc.outCols) {
+				t.Errorf("counting stage groups by %v, want the full result row %v", got, tc.outCols)
+			}
+			if !agg.RawInputAggregate {
+				t.Error("counting stage is not RawInputAggregate — merge mode would remap the SUM specs")
+			}
+			if len(agg.AggSpecs) != 2 ||
+				agg.AggSpecs[0].InputCol != SetOpLeftCountCol || agg.AggSpecs[1].InputCol != SetOpRightCountCol {
+				t.Errorf("counting stage aggregates %+v, want SUM over the two tag columns", agg.AggSpecs)
+			}
+
+			// Co-partitioning: an exchange-repartition on exactly the result
+			// columns must sit between the union and the counting stage, so
+			// equal rows (NULLs included — the hash marks NULL
+			// deterministically) meet in one partition.
+			var exch *Stage
+			for i := range stages {
+				if stages[i].Type == StageExchangeRepartition &&
+					len(stages[i].Dependencies) == 1 && stages[i].Dependencies[0] == union.ID {
+					exch = &stages[i]
+				}
+			}
+			if exch == nil {
+				t.Fatalf("no exchange-repartition over the union in %v — the arms are not co-partitioned", stageTypeIDs(stages))
+			}
+			if exch.Exchange == nil || !keysEqual(exch.Exchange.Keys, tc.outCols) {
+				t.Errorf("exchange keys %v, want the full result row %v", exch.Exchange, tc.outCols)
+			}
+			if len(agg.Dependencies) != 1 || agg.Dependencies[0] != exch.ID {
+				t.Errorf("counting stage depends on %v, want the exchange %s", agg.Dependencies, exch.ID)
+			}
+
+			// The gather answers from the counting stage, not an arm.
+			gather := onlyStageOfType(t, stages, StageExchangeGather)
+			if len(gather.Dependencies) != 1 || gather.Dependencies[0] != agg.ID {
+				t.Errorf("gather depends on %v, want the counting stage %s", gather.Dependencies, agg.ID)
+			}
+		})
 	}
 }

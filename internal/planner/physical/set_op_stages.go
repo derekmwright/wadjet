@@ -8,6 +8,18 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
+// SetOpLeftCountCol / SetOpRightCountCol are the per-arm tag columns an
+// INTERSECT/EXCEPT lowering appends to each arm's projection: arm 0 tags
+// every row (1, 0), arm 1 tags (0, 1). SUMming them under a GROUP BY over
+// the full result row yields (rows in arm A, rows in arm B) per distinct
+// row — the entire state the operation's count rule needs. Exported because
+// the coordinator's fragment builder names the same columns in the emit
+// operator's OpSpec.
+const (
+	SetOpLeftCountCol  = "__setop_lcnt"
+	SetOpRightCountCol = "__setop_rcnt"
+)
+
 // emitSetOpStages lowers a set-operation node onto the stage DAG.
 //
 // walkStages used to walk both arms and emit nothing else, on the comment
@@ -27,28 +39,32 @@ import (
 //	             dedups the concatenation. The dedup is Singleton: correct,
 //	             but one task holds the whole distinct set (see the note on
 //	             emitSetOpDedup).
-//	INTERSECT  → refused.
-//	EXCEPT     → refused.
-//
-// INTERSECT and EXCEPT are refused rather than approximated because they are
-// not concatenations: each needs the multiset of one arm compared against the
-// multiset of the OTHER, which is a distributed operation (a shuffle on the
-// full row, then a per-partition semi/anti pass) and not a filter over a
-// concatenation. Returning one arm — what the code did before — is a wrong
-// answer that looks like a right one; a planning error is not.
+//	INTERSECT  → the same StageUnion with per-arm TAG columns appended
+//	EXCEPT       (arm 0 rows carry (1,0), arm 1 rows (0,1)), then a grouped
+//	             counting final_aggregate: GROUP BY the full result row,
+//	             SUM the tags. The distribution pass inserts an
+//	             exchange-repartition on the full row between the two
+//	             (StageUnion is RoundRobin, a grouped final requires
+//	             ClusteredOn its group keys), so equal rows from both arms
+//	             — NULLs included, the shuffle hash marks them
+//	             deterministically — meet in one partition and each
+//	             partition is independently answerable. The stage's SetOp
+//	             marker makes its fragment append an emit operator that
+//	             turns each group's (countA, countB) into rows per the
+//	             operation's rule and drops the tags. See
+//	             emitSetOpCountingStage.
 func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 	if len(node.Children) < 2 {
 		p.refuseSetOp(fmt.Errorf("distributed planning: %s has %d arms, expected at least 2",
 			setOpName(node), len(node.Children)))
 		return
 	}
-	if node.Type != logical.NodeUnion {
-		p.refuseSetOp(fmt.Errorf(
-			"%s is not supported by distributed (stage-DAG) execution: it needs set semantics "+
-				"ACROSS the arms (matching each row of one arm against the whole of the other), "+
-				"which the DAG has no operator for — unlike UNION [ALL], which is concatenation. "+
-				"UNION and UNION ALL are supported. See issue #346",
-			setOpName(node)))
+	counting := node.Type != logical.NodeUnion
+	if counting && len(node.Children) != 2 {
+		// INTERSECT/EXCEPT are built binary (left-deep chains nest as
+		// arms); anything else is a malformed plan, not a shape to guess at.
+		p.refuseSetOp(fmt.Errorf("distributed planning: %s has %d arms, expected exactly 2. See issue #346",
+			setOpName(node), len(node.Children)))
 		return
 	}
 
@@ -62,6 +78,16 @@ func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 				"arm has no resolvable output column list, so the arms cannot be projected onto a "+
 				"common schema. See issue #346", setOpName(node)))
 		return
+	}
+	if counting {
+		for _, n := range outNames {
+			if n == SetOpLeftCountCol || n == SetOpRightCountCol {
+				p.refuseSetOp(fmt.Errorf(
+					"%s: result column %q collides with the operation's internal count column. See issue #346",
+					setOpName(node), n))
+				return
+			}
+		}
 	}
 
 	plans := make([]setOpArmPlan, 0, len(node.Children))
@@ -94,6 +120,21 @@ func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 	for i := range plans {
 		arms[i] = UnionArm{DepStage: deps[i], Projections: plans[i].specs}
 	}
+	if counting {
+		// Tag columns ride AFTER the reconciled result columns so
+		// reconcileSetOpArmTypes' per-index bookkeeping above stays
+		// aligned. Complementary constants: SUM(left tag) per group is the
+		// row's multiplicity in arm A, SUM(right tag) in arm B.
+		for i := range arms {
+			l, r := "1", "0"
+			if i == 1 {
+				l, r = "0", "1"
+			}
+			arms[i].Projections = append(arms[i].Projections,
+				ProjectExprSpec{Expr: l, Name: SetOpLeftCountCol, Type: parquet.TypeInt64},
+				ProjectExprSpec{Expr: r, Name: SetOpRightCountCol, Type: parquet.TypeInt64})
+		}
+	}
 	unionID := fmt.Sprintf("union-%d", len(*stages))
 	*stages = append(*stages, Stage{
 		ID:           unionID,
@@ -103,9 +144,56 @@ func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 		UnionArms:    arms,
 	})
 
-	if !node.UnionAll {
+	switch {
+	case counting:
+		p.emitSetOpCountingStage(stages, unionID, node, outNames)
+	case !node.UnionAll:
 		p.emitSetOpDedup(stages, unionID)
 	}
+}
+
+// emitSetOpCountingStage appends the counting half of an INTERSECT/EXCEPT: a
+// grouped final_aggregate over the tagged concatenation, GROUP BY the full
+// result row, SUMming the two tag columns. RawInputAggregate because the
+// input is raw tagged rows (the exchange re-partitions the concatenation, it
+// does not pre-aggregate), so the dispatcher must not run the merge-mode
+// spec rewrite.
+//
+// The stage deliberately carries no SortKeys/Limit, which is what makes
+// RequiredChildDistribution demand ClusteredOn(GroupByCols) — the full
+// result row — and EnsureDistribution insert the co-partitioning
+// exchange-repartition over the union. OutputDistribution then mirrors the
+// exchange's partitioning, so dispatchComputeStage fans the counting out one
+// task per partition: the sharded path, not a Singleton bottleneck. (A sort
+// later folded in by fuseSortIntoPredecessor collapses the stage to
+// Singleton via the same rules that govern every grouped final — correct,
+// serial.)
+//
+// NULL semantics ride existing machinery end to end: the shuffle hash marks
+// NULL key cells with a deterministic byte (equal rows co-locate) and
+// HashAggregate groups NULLs as equal, which is exactly the membership rule
+// SQL gives set operations.
+func (p *Planner) emitSetOpCountingStage(stages *[]Stage, unionID string, node *logical.Node, outNames []string) {
+	op := "intersect"
+	if node.Type == logical.NodeExcept {
+		op = "except"
+	}
+	*stages = append(*stages, Stage{
+		ID:          fmt.Sprintf("final_aggregate-%d", len(*stages)),
+		Type:        "final_aggregate",
+		Tasks:       1,
+		GroupByCols: append([]string(nil), outNames...),
+		AggSpecs: []AggSpec{
+			{Func: "SUM", InputCol: SetOpLeftCountCol, OutputCol: SetOpLeftCountCol,
+				OutputType: parquet.TypeInt64},
+			{Func: "SUM", InputCol: SetOpRightCountCol, OutputCol: SetOpRightCountCol,
+				OutputType: parquet.TypeInt64},
+		},
+		RawInputAggregate: true,
+		SetOp:             op,
+		SetOpAll:          node.UnionAll,
+		Dependencies:      []string{unionID},
+	})
 }
 
 // emitSetOpDedup appends the DISTINCT half of a bare UNION: a keys-only hash
