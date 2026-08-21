@@ -328,7 +328,7 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	// Derive typed column metadata
 	var metas []ColumnMeta
 	if len(columns) > 0 {
-		metas = deriveColumnMetas(columns, rows, db.catalog)
+		metas = deriveColumnMetas(columns, rows, outSchema, db.catalog)
 	}
 
 	return &QueryResult{
@@ -626,9 +626,24 @@ func reconcileColumnName(name string, rows []map[string]any) string {
 	return name
 }
 
-// deriveColumnMetas infers column type metadata from result data and catalog schemas.
-func deriveColumnMetas(columns []string, rows []map[string]any, cat *catalog.Catalog) []ColumnMeta {
+// deriveColumnMetas infers column type metadata from the executed plan's
+// output schema, falling back to catalog schemas and then to the result data.
+//
+// outSchema is the authority when it names the column: it is the schema of the
+// vectors the values were STORED in, and it is the only source that keeps a
+// computed column's declared type. Value inference cannot — the row box loses
+// the distinction on purpose (a DATE boxes as its rendered text, a TIMESTAMP
+// as bare epoch milliseconds; see Vector.GetValue), so `CAST(x AS date)` was
+// reported STRING and `CAST(x AS timestamp)` INT64, and the wire declared
+// OID 25 / 20 where PostgreSQL declares 1082 / 1114 (#363).
+func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parquet.Column, cat *catalog.Catalog) []ColumnMeta {
 	metas := make([]ColumnMeta, len(columns))
+
+	// The executed output schema, keyed by column name.
+	outMap := make(map[string]parquet.TypeID, len(outSchema))
+	for _, c := range outSchema {
+		outMap[c.Name] = c.Type
+	}
 
 	// Try to match columns against catalog table schemas
 	ctx := context.Background()
@@ -648,7 +663,15 @@ func deriveColumnMetas(columns []string, rows []map[string]any, cat *catalog.Cat
 	for i, name := range columns {
 		metas[i] = ColumnMeta{Name: name, Nullable: true}
 
-		// Try catalog schema first
+		// The executed plan's output schema first — it is per-result rather
+		// than a cross-table name match, and it sees computed columns.
+		if tid, ok := outMap[name]; ok {
+			metas[i].TypeID = tid
+			metas[i].TypeName = tid.String()
+			continue
+		}
+
+		// Then the catalog schema
 		if tid, ok := schemaMap[name]; ok {
 			metas[i].TypeID = tid
 			metas[i].TypeName = tid.String()

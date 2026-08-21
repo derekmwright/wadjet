@@ -592,32 +592,17 @@ func wireCorpus() []wireCase {
 				wirePropBinFormat:    binaryFormatPin,
 				wirePropBinaryDecode: binaryDecodePin,
 			}},
-		// A DATE expression. The engine boxes a date as its rendered text and
-		// the wire declares that text, so a client is never told it is a date.
+		// A DATE expression: the declared OID (1082, size 4), the text value,
+		// and the 4-byte binary day count are gated since #363.
 		{name: "DateColumn", sql: `SELECT CAST('1996-01-10' AS date) AS d`,
 			pins: map[string]string{
-				wirePropTypeOIDs: "WADJET BUG (pgwire): CAST(x AS date) is declared OID 25 (text), not 1082 " +
-					"(date). The VALUE is right — '1996-01-10' — which is why no value oracle sees it, and " +
-					"the client is simply never told the column is a date: DataGrip shows a string, a JDBC " +
-					"getDate() fails, and an ORDER BY on the client side sorts lexically. Note a DATE-typed " +
-					"COLUMN is declared 1082 correctly (pgTypeOID has the case); it is the CAST expression's " +
-					"declared type that arrives as STRING. (#363)",
-				wirePropTypeSizes: "WADJET BUG (pgwire): consequence of the OID above — -1 (variable) where a " +
-					"date is 4. (#363)",
-				wirePropBinFormat: binaryFormatPin,
-				wirePropBinaryDecode: "WADJET BUG (pgwire): consequence of the OID above — the bytes decode " +
-					"to the STRING \"1996-01-10\" where PostgreSQL's decode to a date. (#363)",
+				wirePropBinFormat:    binaryFormatPin,
+				wirePropBinaryDecode: binaryDecodePin,
 			}},
+		// A TIMESTAMP expression: declared 1114 and rendered, not the boxed
+		// epoch-millisecond integer (#363).
 		{name: "TimestampColumn", sql: `SELECT CAST('1996-01-10 12:34:56' AS timestamp) AS ts`,
 			pins: map[string]string{
-				wirePropTypeOIDs: "WADJET BUG (pgwire): CAST(x AS timestamp) is declared OID 20 (int8) and " +
-					"the value sent is the epoch-millisecond integer 821277296000. The engine boxes a " +
-					"timestamp as epoch millis — correct for every compute path — and server.go's " +
-					"sendColumnTypes exists precisely to convert it on the way out (#321), but it keys off a " +
-					"column DECLARED timestamp, and this CAST expression is declared INT64. So the " +
-					"conversion never fires and a client is handed a bigint. (#363)",
-				wirePropValuesText: "WADJET BUG (pgwire): consequence of the OID above — \"821277296000\" " +
-					"where PostgreSQL sends \"1996-01-10 12:34:56\". (#363)",
 				wirePropBinFormat:    binaryFormatPin,
 				wirePropBinaryDecode: binaryDecodePin,
 			}},
