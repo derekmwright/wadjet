@@ -540,11 +540,11 @@ func (f *LikeFilter) Clone() UnaryOperator {
 // NullCheckFilter is a vectorized filter for IS NULL / IS NOT NULL predicates.
 // Scans the null bitmap directly — no per-row type switch or function call overhead.
 type NullCheckFilter struct {
-	ColName  string
+	ColName   string
 	CheckNull bool // true = IS NULL, false = IS NOT NULL
-	colIdx   int
-	outSel   []uint32
-	resolved bool
+	colIdx    int
+	outSel    []uint32
+	resolved  bool
 }
 
 func NewNullCheckFilter(colName string, checkNull bool) *NullCheckFilter {
@@ -880,11 +880,22 @@ type ColColFilter struct {
 	LeftCol  string
 	RightCol string
 	Op       CompareOp
-	leftIdx  int
-	rightIdx int
-	kern     kernel.ColColFilterKernel
-	outSel   []uint32
-	resolved bool
+	// RowFallback, when non-nil, evaluates the original comparison row-at-
+	// a-time. Used when the two columns resolve to DIFFERENT types: the
+	// typed kernel reads both sides through the left column's storage slice,
+	// so a FLOAT64-vs-INT32 comparison would index the right vector's empty
+	// Float64Data and panic (issue #375). The compiled expression coerces
+	// numeric types per SQL semantics, so it is the correct evaluator for
+	// the mixed-type case.
+	RowFallback Predicate
+
+	leftIdx     int
+	rightIdx    int
+	kern        kernel.ColColFilterKernel
+	outSel      []uint32
+	resolved    bool
+	useFallback bool
+	inner       *Filter
 }
 
 func NewColColFilter(leftCol, rightCol string, op CompareOp) *ColColFilter {
@@ -893,7 +904,7 @@ func NewColColFilter(leftCol, rightCol string, op CompareOp) *ColColFilter {
 
 func (f *ColColFilter) Init(_ context.Context) error { return nil }
 
-func (f *ColColFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+func (f *ColColFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
 		f.leftIdx = in.ColumnIndex(f.LeftCol)
 		if f.leftIdx < 0 && strings.Contains(f.LeftCol, ".") {
@@ -906,13 +917,26 @@ func (f *ColColFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch
 			f.rightIdx = in.ColumnIndex(parts[1])
 		}
 		if f.leftIdx >= 0 && f.rightIdx >= 0 {
-			typ := in.Columns[f.leftIdx].Type
-			f.kern = kernel.ResolveColColFilterKernel(typ, toKernelOp(f.Op))
+			lt, rt := in.Columns[f.leftIdx].Type, in.Columns[f.rightIdx].Type
+			if lt == rt {
+				f.kern = kernel.ResolveColColFilterKernel(lt, toKernelOp(f.Op))
+			} else if f.RowFallback != nil {
+				// Mixed-type comparison: the kernel would read the right
+				// vector through the left type's storage (issue #375).
+				f.useFallback = true
+				f.inner = NewFilter(f.RowFallback)
+			} else {
+				return nil, fmt.Errorf("ColColFilter: mismatched column types %s (%v) %v %s (%v) and no row fallback",
+					f.LeftCol, lt, f.Op, f.RightCol, rt)
+			}
 		}
 		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
 	}
 
+	if f.useFallback {
+		return f.inner.Execute(ctx, in)
+	}
 	if f.kern == nil {
 		return nil, fmt.Errorf("ColColFilter: could not resolve kernel for %s %v %s (leftIdx=%d, rightIdx=%d)",
 			f.LeftCol, f.Op, f.RightCol, f.leftIdx, f.rightIdx)
@@ -938,5 +962,5 @@ func (f *ColColFilter) Close() error { return nil }
 // Clone returns a new ColColFilter with the same parameters but fresh
 // resolution state and scratch buffers for concurrent Execute calls.
 func (f *ColColFilter) Clone() UnaryOperator {
-	return &ColColFilter{LeftCol: f.LeftCol, RightCol: f.RightCol, Op: f.Op}
+	return &ColColFilter{LeftCol: f.LeftCol, RightCol: f.RightCol, Op: f.Op, RowFallback: f.RowFallback}
 }

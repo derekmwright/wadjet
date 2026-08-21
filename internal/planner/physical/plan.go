@@ -8683,6 +8683,17 @@ func flattenAnds(e expr.Expr) []expr.Expr {
 // row-at-a-time fallback so ROW-field access works (the kernel resolves
 // qualified table refs by stripping the prefix, but cannot reach into ROW
 // children — issue #147).
+// colColFilterWithRowFallback builds a col-col kernel filter carrying the
+// compiled comparison as a row-at-a-time fallback. The kernel requires both
+// columns to share a storage type; when they differ (e.g. FLOAT64 <>
+// INT32), the fallback evaluates the comparison with SQL numeric coercion
+// instead of the kernel indexing the wrong typed slice (issue #375).
+func colColFilterWithRowFallback(left, right string, op exec.CompareOp, cmp expr.Expr) *exec.ColColFilter {
+	f := exec.NewColColFilter(left, right, op)
+	f.RowFallback = wrapPredicate(cmp)
+	return f
+}
+
 func kernelFilterWithRowFallback(name string, op exec.CompareOp, val any, cmp expr.Expr) *exec.KernelFilter {
 	kf := exec.NewKernelFilter(name, op, val)
 	if strings.Contains(name, ".") {
@@ -8703,7 +8714,7 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 					// evaluate it; leave this comparison row-at-a-time.
 					return nil
 				}
-				return []exec.UnaryOperator{exec.NewColColFilter(lc.Name, rc.Name, op)}
+				return []exec.UnaryOperator{colColFilterWithRowFallback(lc.Name, rc.Name, op, v)}
 			}
 		}
 		// col op const
@@ -8725,7 +8736,7 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 				if strings.Contains(lc.Name, ".") || strings.Contains(rc.Name, ".") {
 					return nil
 				}
-				return []exec.UnaryOperator{exec.NewColColFilter(lc.Name, rc.Name, op)}
+				return []exec.UnaryOperator{colColFilterWithRowFallback(lc.Name, rc.Name, op, v)}
 			}
 			if lit, rok := v.Right.(*expr.Lit); rok {
 				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit.Val, v)}
@@ -8738,7 +8749,7 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 				if strings.Contains(lc.Name, ".") || strings.Contains(rc.Name, ".") {
 					return nil
 				}
-				return []exec.UnaryOperator{exec.NewColColFilter(lc.Name, rc.Name, op)}
+				return []exec.UnaryOperator{colColFilterWithRowFallback(lc.Name, rc.Name, op, v)}
 			}
 			if lit, rok := v.Right.(*expr.Lit); rok {
 				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit.Val, v)}
