@@ -13,6 +13,38 @@ Terraform + scripts for running TPC-H benchmarks on dedicated Graviton3 (ARM) EC
 
 Graviton3 is ~20% cheaper than equivalent x86 (c6i) instances. Go compiles natively for arm64.
 
+## Staging binaries
+
+Terraform does not build on the instance — cloud-init pulls pre-built
+binaries from `s3://<bucket>/bin/<version>/...`. Cross-compile and upload
+with:
+
+```bash
+task bench:stage PROFILE=sf100-distributed
+# or directly:
+./deploy/benchmark/stage-binaries.sh <bucket> <region>
+```
+
+**Stage from a real checkout, not a `git worktree`.** A worktree's `.git`
+is a *file* (a pointer back to the main repo's git dir), not a directory,
+so `go build` cannot read VCS metadata there and silently omits
+`vcs.revision` — the staged binary's coordinator banner then prints
+`unknown` instead of the deployed sha, which breaks bisecting a run back
+to a commit. Stage from a real clone of the sha instead:
+
+```bash
+git clone --shared . /tmp/wadjet-stage && git -C /tmp/wadjet-stage checkout <sha>
+cd /tmp/wadjet-stage && ./deploy/benchmark/stage-binaries.sh <bucket> <region>
+```
+
+Verify before uploading (or on the staged output) that the stamp is
+present and clean:
+
+```bash
+go version -m dist/wadjet | grep vcs.revision
+# want: build   vcs.revision=<sha>   (and a vcs.modified=false line above it)
+```
+
 ## Quick Start
 
 ```bash

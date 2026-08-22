@@ -34,6 +34,28 @@ import (
 var prefetchAtInit = optswitch.Register("prefetch-at-init", "WADJET_PREFETCH_AT_INIT",
 	"start the scan file prefetcher at source Init so it overlaps the build load; off = start at the first file open")
 
+// prefetchCacheSkip gates the post-Get HasCachedPath re-probe in fetch:
+// when the store's Get call itself populated the base-table cache (a
+// peer-tier fetch, or a concurrent task's tee, spools the whole object
+// onto the cache volume before Get returns), the prefetcher skips instead
+// of copying the now-cache-resident file a second time into the spill dir
+// (see the comment on that probe for the full rationale — 283 MB write +
+// fsync per SF100 file, serialized behind the 256 MB window, for a copy
+// the consumer's cache tier already serves via in-place mmap).
+//
+// DEFAULT ON. OFF restores the pre-2026-08-22 behavior: fetch always
+// copies into spill regardless of what Get populated, so a peer-populated
+// file pays the redundant copy and the consumer opens the prefetch
+// spill-temp copy instead of the base-cache tier.
+//
+// Best-effort I/O overlap only — every skip here falls through to the
+// authoritative tiered open path in openNextFile, so the row set cannot
+// move. Registered anyway for EC2 bisectability against the same-commit
+// scheduler reorder (affinityBeforeLocality) and invariance-oracle
+// enumeration.
+var prefetchCacheSkip = optswitch.Register("prefetch-cache-skip", "WADJET_PREFETCH_CACHE_SKIP",
+	"skip the prefetcher's spill copy when Get already populated the base-table cache; off = always copy into spill")
+
 // Prefetch tuning. Vars (not consts) so tests can shrink them to exercise
 // the window/ordering machinery with small files.
 var (
@@ -213,9 +235,11 @@ func (p *filePrefetcher) fetch(ctx context.Context, s *cachedFileStreamSource, i
 	// copies — bought nothing the consumer's cache tier does not already
 	// give it with an in-place mmap. Skip, and let openNextFile take the
 	// base-cache tier (a concurrent eviction just falls through to the
-	// tiered path as every skip does).
-	if lps, ok := s.executor.store.(objstore.LocalPathStore); ok && lps.HasCachedPath(s.bucket, filePath) {
-		return &prefetchResult{skipped: true}
+	// tiered path as every skip does). Gated by prefetchCacheSkip.
+	if prefetchCacheSkip.On() {
+		if lps, ok := s.executor.store.(objstore.LocalPathStore); ok && lps.HasCachedPath(s.bucket, filePath) {
+			return &prefetchResult{skipped: true}
+		}
 	}
 
 	// Admit against the byte window using the object's advertised size.

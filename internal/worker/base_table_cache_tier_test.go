@@ -253,3 +253,91 @@ func TestBaseTableCacheTier_PeerPopulateSkipsPrefetchCopy(t *testing.T) {
 		t.Fatalf("peer ledger: %+v (want 3 hits with nonzero fetch time)", s)
 	}
 }
+
+// TestBaseTableCacheTier_PeerPopulateCopiesPrefetchWhenSkipOff is the same
+// shape as TestBaseTableCacheTier_PeerPopulateSkipsPrefetchCopy but with
+// prefetchCacheSkip OFF, proving the switch restores the pre-2026-08-22
+// behavior: the prefetcher copies a peer-populated file into the spill dir
+// a second time instead of noticing the cache became resident, so the
+// consumer opens the spill-temp copy (acqPrefetch) rather than the
+// base-cache tier in place (acqBaseCache).
+func TestBaseTableCacheTier_PeerPopulateCopiesPrefetchWhenSkipOff(t *testing.T) {
+	prev := prefetchCacheSkip.Set(false)
+	t.Cleanup(func() { prefetchCacheSkip.Set(prev) })
+
+	schema := parquet.Schema{Columns: []parquet.Column{{Name: "id", Type: parquet.TypeInt64}}}
+	ctx := context.Background()
+	owner := objstore.NewMemStore() // the peer's copy
+	inner := &getCountingStore{Store: objstore.NewMemStore()}
+	for _, st := range []objstore.Store{owner, inner} {
+		if err := st.MakeBucket(ctx, "b"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var files []string
+	const rowsPerFile = 50
+	for f := 0; f < 3; f++ {
+		var buf bytes.Buffer
+		w, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows := make([]map[string]any, rowsPerFile)
+		for i := range rows {
+			rows[i] = map[string]any{"id": int64(f*rowsPerFile + i)}
+		}
+		if err := w.WriteRows(rows); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		path := fmt.Sprintf("tables/t/chunk_%d.parquet", f)
+		for _, st := range []objstore.Store{owner, inner} {
+			if _, err := st.Put(ctx, "b", path, bytes.NewReader(buf.Bytes()), int64(buf.Len()), ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		files = append(files, path)
+	}
+
+	btc, err := objstore.NewBaseTableCache(inner, t.TempDir(), 1<<30, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := &memPeerFetcher{src: owner}
+	btc.SetPeerFetcher(peer)
+	ex := &Executor{store: btc, spillDir: t.TempDir()}
+
+	src := newCachedFileStreamSource(ex, "", "b", files)
+	if err := src.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows := 0
+	for {
+		b, err := src.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil {
+			break
+		}
+		rows += b.Len
+	}
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 3*rowsPerFile {
+		t.Fatalf("rows = %d, want %d", rows, 3*rowsPerFile)
+	}
+	// Old behavior: every file opens from the prefetch spill copy, never
+	// the base-cache tier in place. Close may reap the spill temps, so
+	// only the per-tier open counts are asserted (not the spill dir's
+	// contents).
+	if n := src.acq.files[acqPrefetch]; n != 3 {
+		t.Fatalf("prefetch opens = %d, want 3 (switch off must restore the old copy-into-spill behavior; stats %+v)", n, src.acq.files)
+	}
+	if n := src.acq.files[acqBaseCache]; n != 0 {
+		t.Fatalf("base-cache opens = %d, want 0 (stats %+v)", n, src.acq.files)
+	}
+}

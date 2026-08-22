@@ -236,6 +236,11 @@ shape:
 Kill switch: `WADJET_PROBE_SPLIT_AFFINITY=0` (coordinator side, registered
 in `internal/optswitch`; the bench `extra_env` seam reaches the
 coordinator since d97eed6). `WADJET_SCAN_AFFINITY=0` also disables it.
+Two riders landed the same day without their own switches until this
+follow-up: the scheduler's affinity-before-locality reorder
+(`WADJET_AFFINITY_BEFORE_LOCALITY=0` restores locality-then-affinity) and
+the worker's prefetch cache-skip (`WADJET_PREFETCH_CACHE_SKIP=0` restores
+the always-copy-into-spill behavior) — see below.
 
 ### The residual the peer tier left
 
@@ -274,8 +279,10 @@ fan-outs and the worker's peer tier use — one task per owner that holds
 any, byte-balance shedding on top when the pass-through carried catalog
 sizes (`StageOutput.ScanFileSizes`), and each task carries its owner as
 `Task.AffinityWorkerID`. The scheduler's existing affinity tier
-(`pickAffinityWorkerFrom`, ahead of locality under the same-batch cap)
-then puts the task on the cache that holds its files. No probe file
+(`pickAffinityWorkerFrom`, ahead of locality under the same-batch cap,
+tier order gated by `affinityBeforeLocality` /
+`WADJET_AFFINITY_BEFORE_LOCALITY`) then puts the task on the cache that
+holds its files. No probe file
 crosses the peer wire at task start; a shed file crosses it once and
 converges warm, as on scan stages.
 
@@ -311,8 +318,11 @@ wire (late-materialization gathers, builds, cold first touch):
 - The prefetcher no longer copies a file the cache populated during its
   own `Get` (peer fetch or concurrent tee) into the spill dir a second
   time — it re-probes `HasCachedPath` after the `Get` and skips, so the
-  consumer mmaps the cache file in place (`acq_basecache`). Regression:
-  `TestBaseTableCacheTier_PeerPopulateSkipsPrefetchCopy`.
+  consumer mmaps the cache file in place (`acq_basecache`). Gated by
+  `prefetchCacheSkip` / `WADJET_PREFETCH_CACHE_SKIP` (off restores the
+  always-copy-into-spill behavior). Regression:
+  `TestBaseTableCacheTier_PeerPopulateSkipsPrefetchCopy`,
+  `TestBaseTableCacheTier_PeerPopulateCopiesPrefetchWhenSkipOff`.
 - `BaseTableCache` ledgers peer fetch time (`peer_fetch_ms` on the stats
   line, one `base-table cache: peer fetch` line per transfer with bytes
   and ms) — the per-tier MB/s that tells a peer transfer from an S3 miss

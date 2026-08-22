@@ -31,7 +31,9 @@ fan-out).
    point only at its small, replicated broadcast build's single
    producer, while its bytes are the base-table probe slice — placing
    by locality first put the whole task on the build producer, off the
-   cache that holds what it actually reads.
+   cache that holds what it actually reads. Tier order is gated by
+   `affinityBeforeLocality` (`WADJET_AFFINITY_BEFORE_LOCALITY=0` restores
+   the pre-2026-08-22 locality-then-affinity order).
 3. **Input locality** (`--locality-placement`): a task whose
    streaming-exchange hints all point at one connected worker goes
    there. This is exactly the 1:1 stage-chain class (consumer task *i*

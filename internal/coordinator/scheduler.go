@@ -14,6 +14,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/dataplane"
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/nats-io/nats.go"
 )
 
@@ -292,6 +293,32 @@ func formatCounts(m map[string]int) string {
 	return b.String()
 }
 
+// affinityBeforeLocality gates the tier order in pickWorkerFor between
+// base-table cache affinity and input locality
+// (docs/adr/0008-task-placement-policy.md). A task whose base-table files
+// rendezvous-hash to one worker's NVMe cache carries Task.AffinityWorkerID;
+// a task whose streaming-exchange hints all point at one connected worker
+// qualifies for locality. Until 2026-08-22 locality ran first, which was
+// wrong for probe-split broadcast-join tasks: their InputLocations hints
+// point only at their (small, replicated) broadcast build's single
+// producer — never at their base-table probe files, which are never
+// hinted — so locality placed the whole task on the build producer, off
+// the cache that actually holds its bytes (the SF100 "straggler tier",
+// docs/design/scan-affinity.md §Probe-split affinity).
+//
+// DEFAULT ON: affinity ahead of locality (the 2026-08-22 order). OFF
+// restores the pre-2026-08-22 order (locality, then affinity).
+//
+// Both tiers are placement preferences over the same connected/live
+// worker set under the identical same-batch cap — a fallback placement
+// just misses the cache or the local mmap, exactly as before either tier
+// existed — so reordering them cannot change a row set. Registered as a
+// kill switch anyway: it is enumerated by the optimization-invariance
+// oracle and lets EC2 bisect this reorder independently of the same-
+// commit worker-side prefetch change (prefetchCacheSkip).
+var affinityBeforeLocality = optswitch.Register("affinity-before-locality", "WADJET_AFFINITY_BEFORE_LOCALITY",
+	"place a task on its base-table cache-affinity worker ahead of input locality; off = the pre-2026-08-22 order (locality, then affinity)")
+
 // pickWorkerFor selects a worker for one task. Memory-aware bin-packing
 // applies only when the task carries an estimate AND heartbeat pool stats
 // exist — otherwise placement is the pre-existing round-robin. Estimates
@@ -311,8 +338,10 @@ func formatCounts(m map[string]int) string {
 // them on one worker starves that worker's producer lanes (targeted gRPC
 // dispatch has no work stealing).
 //
-// The returned method ("eager" | "local" | "binpack" | "rr") feeds the
-// placement attr on the "published tasks" line.
+// The returned method ("eager" | "affine" | "local" | "binpack" | "rr")
+// feeds the placement attr on the "published tasks" line. The affinity
+// and locality tiers' relative order is controlled by
+// affinityBeforeLocality; see its doc for the rationale.
 func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]int, batchLen int) (workerID, method string, ok bool) {
 	connected := s.liveConnectedWorkers()
 	if len(t.EagerInputs) > 0 {
@@ -321,24 +350,37 @@ func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]i
 		}
 	}
 	// Scan affinity (docs/design/scan-affinity.md): a task whose base-table
-	// files rendezvous-hash to one worker's NVMe cache goes there AHEAD of
-	// locality. A probe-split broadcast-join task's InputLocations hints
-	// point only at its (small, replicated) broadcast build's single
-	// producer — never at its base-table probe files, which are never
-	// hinted — so locality would place the whole task on the build
-	// producer, off the cache that holds the task's actual bytes (the
-	// probe slice). Preference only — same-batch cap and connectivity
-	// checks as locality, and a fallback placement just misses the cache
-	// exactly as pre-affinity fan-out did; tasks without an affinity hint
-	// fall through to locality unchanged.
-	if t.AffinityWorkerID != "" {
+	// files rendezvous-hash to one worker's NVMe cache. Preference only —
+	// same-batch cap and connectivity checks as locality, and a fallback
+	// placement just misses the cache exactly as pre-affinity fan-out did;
+	// tasks without an affinity hint fall through unchanged.
+	tryAffinity := func() (string, string, bool) {
+		if t.AffinityWorkerID == "" {
+			return "", "", false
+		}
 		if id, ok := pickAffinityWorkerFrom(t.AffinityWorkerID, connected, batchAssigned, batchLen); ok {
 			return id, "affine", true
 		}
+		return "", "", false
 	}
-	if s.localityPlacement && s.registry != nil {
+	// Input locality (docs/design/locality-placement.md): a task whose
+	// streaming-exchange hints all point at one connected worker.
+	tryLocality := func() (string, string, bool) {
+		if !s.localityPlacement || s.registry == nil {
+			return "", "", false
+		}
 		if id, ok := pickLocalityWorkerFrom(t, connected, s.registry.ActiveWorkers(), batchAssigned, batchLen); ok {
 			return id, "local", true
+		}
+		return "", "", false
+	}
+	tiers := [...]func() (string, string, bool){tryAffinity, tryLocality}
+	if !affinityBeforeLocality.On() {
+		tiers = [...]func() (string, string, bool){tryLocality, tryAffinity}
+	}
+	for _, tier := range tiers {
+		if id, method, ok := tier(); ok {
+			return id, method, true
 		}
 	}
 	if t.EstimatedBytes > 0 && s.registry != nil {

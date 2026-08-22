@@ -90,6 +90,22 @@ func TestPickWorkerForAffinityBeforeLocality(t *testing.T) {
 	if id != "w-b" {
 		t.Errorf("workerID = %q, want %q", id, "w-b")
 	}
+
+	// affinityBeforeLocality OFF restores the pre-2026-08-22 order: the
+	// same task now places by locality (on w-a), not affinity.
+	prev := affinityBeforeLocality.Set(false)
+	t.Cleanup(func() { affinityBeforeLocality.Set(prev) })
+
+	id, method, ok = s.pickWorkerFor(task, nil, 1)
+	if !ok {
+		t.Fatal("pickWorkerFor returned ok=false")
+	}
+	if method != "local" {
+		t.Errorf("method = %q, want %q (switch off must restore the old order)", method, "local")
+	}
+	if id != "w-a" {
+		t.Errorf("workerID = %q, want %q", id, "w-a")
+	}
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) bool {
