@@ -111,3 +111,80 @@ Open residuals / follow-up levers, not blockers:
 - `unpartitionedStageSink.Consume` block only moved 601 s → 575 s: its
   sub-threshold coalescing appends still copy under one mutex. Candidate:
   striped accumulators, only if it ranks in a future profile.
+  **It ranked** — see "Producer-local stage-sink slabs" below.
+
+
+## Producer-local stage-sink slabs (2026-08-21)
+
+The residual above ranked. The first SF100 block/mutex profiles put
+`unpartitionedStageSink.Consume` at **32.6% of all worker mutex delay**,
+95.8% of it in the real `sync.Mutex.Unlock` handoff, **39–44 s of mutex
+delay per worker per suite run** — because `appendBatchRowsBulk` ran INSIDE
+the sink lock. Total serialized time is then bounded below by total copy
+time, so amortizing lock ACQUISITIONS (the `partitionedShuffleSink`
+consumer-local fix, e50fd1b, which drains a local slab into the shared
+per-partition accumulator) cannot fix it here: the copy itself has to leave
+the critical section.
+
+**Design** (`internal/worker/stage_sink_accum.go`, kill switch
+`WADJET_STAGE_SINK_ACCUM=0`, registered in `internal/optswitch` as
+`stage-sink-accum`):
+
+- A `Consume` checks a `stageSlab` out of a LIFO freelist and appends the
+  batch's active rows into it with **no sink lock held**. Slabs carry rows
+  between consumes; the freelist is explicit and registered (`slabAll`), not
+  a `sync.Pool`, because a GC-dropped entry would silently lose rows.
+- Because the unpartitioned sink has exactly ONE output stream (not
+  `numParts` accumulators), a filled slab is written as **its own chunk**
+  rather than copied a second time into a shared accumulator. The lock is
+  held only to take stream ownership (the existing `flushing` flag) and to
+  bump counters; encode + write stay outside it, as before.
+- **Chunk sizing is unchanged**: a slab flushes at the sink's own
+  `flushRows`/`flushBytesT`. LIFO checkout keeps a serial producer on one
+  slab, so serial output is byte-identical to the pre-change accumulator
+  (`TestUnpartitionedStageSink_SlabSerialParity` compares whole files).
+- **Memory**: the natural bound becomes (concurrent consumers × slab), so
+  the sink charges every append to a `bufferedBytes` counter at accumulate
+  time and flushes early once the total passes
+  `stageSlabBudgetFactor (4) × flushBytesT` — worst case ~64 MB per sink
+  (2× the old two-accumulator peak); chunks shrink only when high consumer
+  parallelism meets wide rows, which is exactly where the old bound would
+  have been blown instead.
+- **Finalize drains every registered slab** before the stream footer
+  (`drainAllSlabs`); `TestUnpartitionedStageSink_SlabFinalizeDrain` is the
+  row-loss gate (8 producers, random batch sizes, key-multiset comparison).
+- Durability/upload order is untouched: this sink never uploads inside
+  `Consume` — `uploadUnpartitionedSpill` runs after `Finalize`, so
+  `--shuffle-durability` behaviour is unchanged.
+- One shared read escapes the lock: `appendBatchRowsBulk` calls
+  `HasNulls()` on a view column's BASE, which for a post-join view is the
+  join's shared build batch, and `Bitmap.HasNulls` memoizes into a plain
+  field. Those bases are warmed under the sink lock (a handful of cached
+  loads) before the out-of-lock append.
+
+**Local measurement** (`BenchmarkUnpartitionedSinkConsume_Producers`,
+16 producers × 2048-row batches, tmpfs spill, 5900X): sink mutex delay
+**964 ms → 57 ms (−94%)**; total profiled mutex delay 966 ms → 358 ms, the
+remainder being runtime allocator locks from slab growth in a short run.
+Wall time is indistinguishable locally — an INTERLEAVED A/B at 8 producers
+(6 alternating pairs, same binary, `WADJET_STAGE_SINK_ACCUM=0` as control)
+gives control 44.4–69.8 µs/op vs treatment 50.7–62.2 µs/op, arms fully
+overlapping — because this box's sink is bound by the serialized write
+syscall, not the lock: the CPU profile puts 69% (control) of in-`Consume`
+samples in `syscall.write`, and throughput is independent of producer count
+in BOTH arms. (Non-interleaved runs on this box drift by up to 50% between
+samples of the SAME binary; only the interleaved pairs are usable.) A machine whose page-cache
+writes are faster than its row gather is the regime the change targets, so
+**the SF100 A/B (`WADJET_STAGE_SINK_ACCUM=0` as the control arm) is the
+verdict**, not the local wall clock.
+
+### Audit of the other sinks in `internal/worker`
+
+| Sink | Shape | Action |
+|---|---|---|
+| `unpartitionedStageSink` | row copy inside the sink mutex | **changed** (above) |
+| `partitionedShuffleSink` | per-partition locks + consumer-local slabs since e50fd1b (64% → 0.8% of worker mutex block) | unchanged — slab-as-chunk would need `numParts × consumers` chunk-sized buffers |
+| `shuffleStreamSink` (build-cache pre-scan) | chunk-per-consume ENCODE under one mutex, no accumulator | unchanged — nothing to localize; coalescing it changes chunk granularity for the build-cache reader and it did not rank in the profile |
+| `gatherReplySink` | no accumulator, publishes per consume; serialized by `fragmentGatherSink.mu` | unchanged — coordinator-reply volumes |
+| `fragmentExchangeSink` / `fragmentUnpartitionedSink` | adapters; lock only for lazy construction | unchanged |
+| `exec.CollectSink` / `exec.BatchSink` | hold their mutex across `FlattenForConsumer` + Sel copy — same "real work inside the lock" shape | unchanged, noted: not stage sinks and absent from the profile; a candidate if the fast-path/gather collector ever ranks |

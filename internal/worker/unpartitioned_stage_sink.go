@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/diskio"
@@ -27,9 +28,11 @@ import (
 // Memory bound is one batch in flight + the 256 KB bufio buffer, regardless
 // of stage output size.
 //
-// Concurrency: exec.Pipeline parallelises Consume across goroutines, so the
-// sink serialises writes through mu. The shuffleWriter and bufio.Writer are
-// not goroutine-safe.
+// Concurrency: exec.Pipeline parallelises Consume across goroutines. The
+// shuffleWriter and bufio.Writer are not goroutine-safe, so stream ownership
+// is handed over under mu (the `flushing` flag). The ROW COPY does not run
+// under mu — each consumer appends into a checked-out slab of its own
+// (stage_sink_accum.go); mu is taken only at chunk boundaries.
 type unpartitionedStageSink struct {
 	spillPath string
 
@@ -38,9 +41,23 @@ type unpartitionedStageSink struct {
 	bufFile   *bufio.Writer
 	writer    *shuffleWriter
 	numChunks uint32
-	totalRows int64
 	finalized bool
-	closed    bool
+
+	// totalRows and closed are read outside mu by the producer-local path
+	// (stage_sink_accum.go), which counts rows at accumulate time and
+	// checks for Consume-after-Close without touching the sink lock.
+	totalRows atomic.Int64
+	closed    atomic.Bool
+
+	// Producer-local accumulation (stage_sink_accum.go). slabAll is the
+	// registry Finalize drains; slabFree is the LIFO checkout freelist.
+	// bufferedBytes is the sum of rows resident in slabs, charged at
+	// accumulate time and released at chunk write, which bounds per-sink
+	// residency now that buffers are per consumer.
+	slabsMu       sync.Mutex
+	slabFree      []*stageSlab
+	slabAll       []*stageSlab
+	bufferedBytes atomic.Int64
 
 	// Chunk coalescing. A .wshf chunk is the downstream stage's batch AND
 	// its decode unit (one s2 block + crc per chunk), so chunk size must be
@@ -117,8 +134,9 @@ func newUnpartitionedStageSink(spillDir, taskID string) *unpartitionedStageSink 
 	return s
 }
 
-// AcceptsViews: Consume flattens own-null view columns under its lock and
-// the rest serialize through their indirection (writeChunk sel composition /
+// AcceptsViews: Consume flattens own-null view columns (in the consuming
+// goroutine — every batch is private to its Consume call) and the rest
+// serialize through their indirection (writeChunk sel composition /
 // appendBatchRowsBulk row translation) — the pipeline's defensive flatten
 // would just add the copy this sink exists to skip.
 func (s *unpartitionedStageSink) AcceptsViews() bool { return true }
@@ -167,9 +185,17 @@ func (s *unpartitionedStageSink) Consume(_ context.Context, b *batch.RecordBatch
 		batchSchemaIsFlat(b.Schema) {
 		return s.consumeDirectChunk(b, n)
 	}
+	// Producer-local accumulation: the row copy runs with no sink lock held
+	// and the lock is taken only to hand over stream ownership at a chunk
+	// boundary (stage_sink_accum.go). Flat schemas only, mirroring the
+	// coalesce gate below — nested schemas keep the legacy locked path, and
+	// the two never mix because the schema is constant for the sink.
+	if stageSinkAccum.On() && batchSchemaIsFlat(b.Schema) {
+		return s.consumeSlab(b, n)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed.Load() {
 		return fmt.Errorf("unpartitionedStageSink: Consume after Close")
 	}
 	// Own-null view columns (outer-join fill) can't ride writeChunk's sel
@@ -201,7 +227,7 @@ func (s *unpartitionedStageSink) Consume(_ context.Context, b *batch.RecordBatch
 			return fmt.Errorf("writing wshf chunk: %w", err)
 		}
 		s.numChunks++
-		s.totalRows += int64(n)
+		s.totalRows.Add(int64(n))
 		return nil
 	}
 
@@ -226,7 +252,7 @@ func (s *unpartitionedStageSink) Consume(_ context.Context, b *batch.RecordBatch
 	}
 	s.bufBytes += appendBatchRowsBulk(s.rowBuf, b, rows)
 	s.bufRows += n
-	s.totalRows += int64(n)
+	s.totalRows.Add(int64(n))
 	if s.bufRows < s.flushRows && s.bufBytes < s.flushBytesT {
 		return nil
 	}
@@ -287,7 +313,7 @@ func (s *unpartitionedStageSink) consumeDirectChunk(b *batch.RecordBatch, n int)
 		}
 	}
 	s.mu.Lock()
-	if s.closed {
+	if s.closed.Load() {
 		s.mu.Unlock()
 		return fmt.Errorf("unpartitionedStageSink: Consume after Close")
 	}
@@ -319,7 +345,7 @@ func (s *unpartitionedStageSink) consumeDirectChunk(b *batch.RecordBatch, n int)
 	s.flushCond.Broadcast()
 	if err == nil {
 		s.numChunks++
-		s.totalRows += int64(n)
+		s.totalRows.Add(int64(n))
 	}
 	s.mu.Unlock()
 	if err != nil {
@@ -388,11 +414,21 @@ func (s *unpartitionedStageSink) flushCoalescedLocked() error {
 // further Consume calls are valid after Finalize.
 func (s *unpartitionedStageSink) Finalize(_ context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.finalized {
+		s.mu.Unlock()
 		return nil
 	}
 	s.finalized = true
+	s.mu.Unlock()
+	// Drain every producer-local slab first: their residual rows become
+	// chunks in the stream. No Consume is in flight (pipeline contract), so
+	// no slab is concurrently appended to. Draining before the lock below
+	// matters — writeSlabChunk takes mu itself.
+	if err := s.drainAllSlabs(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	// Quiesce any in-flight double-buffered flush before touching the
 	// writer — the flusher owns it outside the lock until flushing clears.
 	for s.flushing {
@@ -436,10 +472,9 @@ func (s *unpartitionedStageSink) Finalize(_ context.Context) error {
 func (s *unpartitionedStageSink) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	s.closed = true
 	if s.file == nil {
 		return nil
 	}
@@ -455,7 +490,7 @@ func (s *unpartitionedStageSink) Path() string { return s.spillPath }
 func (s *unpartitionedStageSink) NumChunks() uint32 { return s.numChunks }
 
 // TotalRows returns the cumulative active-length of all consumed batches.
-func (s *unpartitionedStageSink) TotalRows() int64 { return s.totalRows }
+func (s *unpartitionedStageSink) TotalRows() int64 { return s.totalRows.Load() }
 
 // Schema returns the schema captured from the first non-empty batch, or nil
 // if no batches were consumed.
