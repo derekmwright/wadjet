@@ -505,14 +505,23 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 // BinOpFloat64 is a typed binary op that operates on float64 without boxing.
 // Uses a pre-resolved arithOp opcode for the hot EvalFloat64 path to avoid
 // per-row string comparison on the Op field. The opcode is resolved lazily
-// via opOnce so external callers can construct BinOpFloat64 directly with
-// only Op populated; concurrent pipeline workers see the same opCode after
-// the first call returns thanks to sync.Once's happens-before guarantee.
+// so external callers can construct BinOpFloat64 directly with only Op
+// populated.
+//
+// opReady is a double-checked atomic flag rather than sync.Once: Once.Do
+// builds a closure and loads the done flag on EVERY row, and that closure
+// keeps resolveOpCode too big to inline. This form is small enough that the
+// compiler inlines resolveOpCode straight into EvalFloat64 (verified with
+// -gcflags='-m'), the same guard BinOpNumeric.resolveMode and ColRef.resolve
+// already use. opReady publishes opCode: set last under opMu, read first
+// (and alone) by EvalFloat64 — concurrent pipeline workers share one
+// *BinOpFloat64 through a captured closure, same as those two.
 type BinOpFloat64 struct {
 	Left, Right Float64Expr
 	Op          string
 	opCode      arithOp
-	opOnce      sync.Once
+	opReady     atomic.Bool
+	opMu        sync.Mutex
 	vecBuf      []float64 // scratch buffer for vectorized evaluation
 }
 
@@ -524,10 +533,21 @@ func (e *BinOpFloat64) Eval(b *batch.RecordBatch, row int) any {
 	return v
 }
 
-// resolveOpCode populates opCode the first time it's called. Subsequent
-// calls are a single relaxed atomic load on the once.done flag.
 func (e *BinOpFloat64) resolveOpCode() {
-	e.opOnce.Do(func() { e.opCode = resolveArithOp(e.Op) })
+	if !e.opReady.Load() {
+		e.resolveOpCodeSlow()
+	}
+}
+
+// resolveOpCodeSlow runs exactly once per node.
+func (e *BinOpFloat64) resolveOpCodeSlow() {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+	if e.opReady.Load() {
+		return
+	}
+	e.opCode = resolveArithOp(e.Op)
+	e.opReady.Store(true)
 }
 
 func (e *BinOpFloat64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
@@ -793,18 +813,32 @@ func fusedColConstFloat64(b *batch.RecordBatch, cr *ColRef, c float64, op arithO
 }
 
 // BinOpInt64 is a typed binary op that operates on int64 without boxing.
-// opCode is resolved lazily via opOnce so external construction with only
-// Op populated stays safe; see BinOpFloat64 for the same pattern.
+// opCode is resolved lazily through the same double-checked atomic.Bool
+// guard as BinOpFloat64 — see that type for why sync.Once doesn't fit the
+// inliner and this does.
 type BinOpInt64 struct {
 	Left, Right Int64Expr
 	Op          string
 	opCode      arithOp
-	opOnce      sync.Once
+	opReady     atomic.Bool
+	opMu        sync.Mutex
 }
 
-// resolveOpCode populates opCode the first time it's called.
 func (e *BinOpInt64) resolveOpCode() {
-	e.opOnce.Do(func() { e.opCode = resolveArithOp(e.Op) })
+	if !e.opReady.Load() {
+		e.resolveOpCodeSlow()
+	}
+}
+
+// resolveOpCodeSlow runs exactly once per node.
+func (e *BinOpInt64) resolveOpCodeSlow() {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+	if e.opReady.Load() {
+		return
+	}
+	e.opCode = resolveArithOp(e.Op)
+	e.opReady.Store(true)
 }
 
 func (e *BinOpInt64) Eval(b *batch.RecordBatch, row int) any {
@@ -1498,15 +1532,24 @@ func (e *ArrayLitExpr) Eval(b *batch.RecordBatch, row int) any {
 // wrapped-expression paths) capture the same *FuncCall by pointer rather than
 // cloning it per worker, so concurrent goroutines stomped on the shared args
 // buffer and produced non-deterministic Q02 row counts at SF0.01 (and worse
-// at SF100). The fn / vecFn lookup caches are guarded by sync.Once so concurrent
-// first-time lookups don't race either.
+// at SF100). The vecFn / prepared lookup caches are still guarded by sync.Once
+// (resolved once per BATCH, off EvalVec — not once per row, so the guard
+// never sat in a row loop). fn is different: it is resolved off Eval, the
+// per-row entry point every one of the 273 scalar functions reaches, so it
+// uses the same double-checked atomic.Bool guard as BinOpFloat64/BinOpInt64's
+// opCode and BinOpNumeric's mode — small enough that resolveFn inlines into
+// Eval (verified with -gcflags='-m'), where sync.Once.Do's closure-plus-load
+// did not.
 type FuncCall struct {
 	Name string
 	Args []Expr
 
-	fnOnce sync.Once
-	fn     ScalarFunc
-	// Argument-family flags, resolved with fn under fnOnce: this function
+	// fnReady publishes fn and the argument-family flags below it: set last
+	// under fnMu, read first (and alone) by Eval.
+	fnReady atomic.Bool
+	fnMu    sync.Mutex
+	fn      ScalarFunc
+	// Argument-family flags, resolved with fn under fnReady: this function
 	// reads its arguments as text (stringInputFuncs) / as instants
 	// (temporalInputFuncs) / as instants that must remember whether they
 	// came from a DATE or a TIMESTAMP column (dateArithFuncs, which render
@@ -1766,16 +1809,30 @@ func temporalOperand(b *batch.RecordBatch, row int, e Expr, v any) (any, bool) {
 	return t, true
 }
 
+func (e *FuncCall) resolveFn() {
+	if !e.fnReady.Load() {
+		e.resolveFnSlow()
+	}
+}
+
+// resolveFnSlow runs exactly once per node: the registry lookup plus the
+// three argument-family flags derived from it.
+func (e *FuncCall) resolveFnSlow() {
+	e.fnMu.Lock()
+	defer e.fnMu.Unlock()
+	if e.fnReady.Load() {
+		return
+	}
+	lower := strings.ToLower(e.Name)
+	e.fn = DefaultRegistry.Lookup(e.Name)
+	e.wantsText = stringInputFuncs[lower]
+	e.wantsInstant = temporalInputFuncs[lower]
+	e.wantsDateKind = dateArithFuncs[lower]
+	e.fnReady.Store(true)
+}
+
 func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
-	// Cache function pointer to avoid RWMutex contention on every row.
-	// sync.Once ensures concurrent first-time lookups don't race.
-	e.fnOnce.Do(func() {
-		lower := strings.ToLower(e.Name)
-		e.fn = DefaultRegistry.Lookup(e.Name)
-		e.wantsText = stringInputFuncs[lower]
-		e.wantsInstant = temporalInputFuncs[lower]
-		e.wantsDateKind = dateArithFuncs[lower]
-	})
+	e.resolveFn()
 	if e.fn == nil {
 		return nil
 	}

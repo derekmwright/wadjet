@@ -48,10 +48,11 @@ func nullBearingBatch() *batch.RecordBatch {
 
 // TestLazyResolutionUnderConcurrency exercises the publication of the
 // lazily-resolved node state (ColRef's column index/type, BinOpNumeric's
-// arithmetic mode) from many goroutines at once, the way parallel pipeline
-// workers share one compiled expression through a captured closure. Run
-// under -race this is the guard on the double-checked resolution that
-// replaced sync.Once.
+// arithmetic mode, BinOpFloat64/BinOpInt64's opCode, FuncCall's fn) from
+// many goroutines at once, the way parallel pipeline workers share one
+// compiled expression through a captured closure. Run under -race this is
+// the guard on the double-checked resolution that replaced sync.Once at
+// each of those sites.
 func TestLazyResolutionUnderConcurrency(t *testing.T) {
 	for _, sql := range []string{
 		"n * 2 + 1",
@@ -59,6 +60,9 @@ func TestLazyResolutionUnderConcurrency(t *testing.T) {
 		"n / 3",
 		"d >= '1980-01-01'",
 		"n IN (5, 50, 500)",
+		"f * 2.5",   // BinOpFloat64, built directly by compileBinOp
+		"2 * 3 + 4", // BinOpInt64, built directly (both operands int-native)
+		"upper(s)",  // FuncCall.fnOnce
 	} {
 		t.Run(sql, func(t *testing.T) {
 			// Reference answers from a separate, serially-resolved tree.
@@ -99,5 +103,54 @@ func TestLazyResolutionUnderConcurrency(t *testing.T) {
 				t.Fatal(msg)
 			}
 		})
+	}
+}
+
+// TestBinOpInt64LazyResolutionUnderConcurrency covers BinOpInt64 with a
+// COLUMN operand racing its own opCode guard alongside the operand ColRef's
+// resolve guard — a shape compileBinOp never emits (isIntNative rejects a
+// bare ColRef; see BenchmarkBinOpInt64Eval in dispatch_bench_test.go), but
+// one the type itself does not forbid, and the one every other typed BinOp
+// in this file is exercised with. Built by hand since SQL compilation
+// cannot reach it.
+func TestBinOpInt64LazyResolutionUnderConcurrency(t *testing.T) {
+	newTree := func() Expr {
+		return &BinOpInt64{Left: &ColRef{Name: "n"}, Right: &Lit{Val: int64(7)}, Op: "+"}
+	}
+
+	ref := newTree()
+	refBatch := nullBearingBatch()
+	want := make([]any, refBatch.Len)
+	for row := range want {
+		want[row] = ref.Eval(refBatch, row)
+	}
+
+	e := newTree()
+	const workers = 16
+	var wg sync.WaitGroup
+	errs := make(chan string, workers)
+	start := make(chan struct{})
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b := nullBearingBatch()
+			<-start
+			for i := 0; i < 200; i++ {
+				for row := 0; row < b.Len; row++ {
+					if got := e.Eval(b, row); got != want[row] {
+						errs <- fmt.Sprintf("row %d: got %v (%T), want %v (%T)",
+							row, got, got, want[row], want[row])
+						return
+					}
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for msg := range errs {
+		t.Fatal(msg)
 	}
 }

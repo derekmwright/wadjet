@@ -168,3 +168,78 @@ var (
 	sinkInt   int64
 	sinkFloat float64
 )
+
+// BinOpFloat64/BinOpInt64 are the typed nodes compileBinOp emits directly
+// (not through BinOpNumeric's runtime mode resolution) once the operand
+// types are known at compile time — a float literal on either side pins
+// BinOpFloat64, and an all-int-literal expression pins BinOpInt64. Both
+// resolved their arithOp opcode through sync.Once.Do on every row before
+// this benchmark's baseline, the same guard-in-the-row-loop shape
+// BinOpNumeric.resolveMode and ColRef.resolve had.
+func BenchmarkBinOpFloat64Eval(b *testing.B) {
+	benchEvalLoop(b, "f * 2.5 + 1.0", &BinOpFloat64{})
+}
+
+func BenchmarkBinOpFloat64EvalFloat64(b *testing.B) {
+	rb := dispatchBenchBatch(2048)
+	e := compileExprSQL(b, "f * 2.5 + 1.0").(Float64Expr)
+	b.ReportAllocs()
+	b.ResetTimer()
+	var sink float64
+	for i := 0; i < b.N; i++ {
+		for row := 0; row < rb.Len; row++ {
+			v, _ := e.EvalFloat64(rb, row)
+			sink += v
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*rb.Len), "ns/row")
+	sinkFloat = sink
+}
+
+// compileBinOp only builds BinOpInt64 when BOTH operands are compile-time
+// int-native (isIntNative rejects a bare ColRef — column types aren't known
+// until a batch arrives), so a column-operand BinOpInt64 never reaches the
+// row loop through SQL compilation today. It is still the node's real
+// per-row shape — the type itself carries no such restriction — so these
+// benchmarks build it directly, the way BenchmarkBinOpNumericEvalInt64
+// reaches its typed protocol directly via a type assertion.
+func BenchmarkBinOpInt64Eval(b *testing.B) {
+	rb := dispatchBenchBatch(2048)
+	var e Expr = &BinOpInt64{Left: &ColRef{Name: "n"}, Right: &Lit{Val: int64(7)}, Op: "+"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for row := 0; row < rb.Len; row++ {
+			sinkAny = e.Eval(rb, row)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*rb.Len), "ns/row")
+}
+
+func BenchmarkBinOpInt64EvalInt64(b *testing.B) {
+	rb := dispatchBenchBatch(2048)
+	var e Int64Expr = &BinOpInt64{Left: &ColRef{Name: "n"}, Right: &Lit{Val: int64(7)}, Op: "+"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	var sink int64
+	for i := 0; i < b.N; i++ {
+		for row := 0; row < rb.Len; row++ {
+			v, _ := e.EvalInt64(rb, row)
+			sink += v
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*rb.Len), "ns/row")
+	sinkInt = sink
+}
+
+// FuncCall.fnOnce resolves the registry lookup (fn, wantsText, wantsInstant,
+// wantsDateKind) once per node on the same sync.Once.Do-per-row shape, paid
+// by every one of the 273 scalar functions since it sits in FuncCall.Eval
+// itself rather than a typed protocol. upper() is a cheap, allocation-light
+// representative.
+func BenchmarkFuncCallEval(b *testing.B) {
+	benchEvalLoop(b, "upper(s)", &FuncCall{})
+}
