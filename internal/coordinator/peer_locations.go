@@ -426,12 +426,19 @@ func (c *Coordinator) classifyFatalResult(r distributed.ResultNotification) bool
 // it. The tiers themselves live in fetchResultDataTiered (stage_read.go):
 // NATS KV, then the producing worker's local copy, then the durable store.
 //
+// The peer tier gets exactly one attempt, on the call below. If it (and KV
+// and S3) all miss, the re-poll loop underneath only asks kv → s3: the
+// producer was already asked once, and dialing it again every 500ms for up
+// to 15s buys nothing — either its local copy would have answered the
+// first time, or the wait is for the durable upload to land, which no
+// amount of re-asking the producer changes.
+//
 // What remains here is the durable-tier backstop. Every tier having missed
 // means the producer's Phase-B background upload hasn't landed AND its
 // local copy is unreachable — bounded re-poll, with a fast input-lost exit
 // when the producer is dead and the key never went durable.
 func (c *Coordinator) fetchStageOutputData(ctx context.Context, path string) ([]byte, coordReadTier, error) {
-	data, tier, err := c.fetchResultDataTiered(ctx, "", path)
+	data, tier, err := c.fetchResultDataTiered(ctx, "", path, true)
 	if err == nil || c.peerFiles == nil {
 		return data, tier, err
 	}
@@ -467,7 +474,8 @@ func (c *Coordinator) fetchStageOutputData(ctx context.Context, path string) ([]
 			return nil, coordReadS3, ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
-		if data, tier, err = c.fetchResultDataTiered(ctx, "", path); err == nil {
+		// tryPeer=false: the initial call above already asked the producer.
+		if data, tier, err = c.fetchResultDataTiered(ctx, "", path, false); err == nil {
 			return data, tier, nil
 		}
 	}

@@ -1467,10 +1467,12 @@ func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []s
 // fetchResultData retrieves a result blob through the tiered
 // coordinator-side read path (NATS KV → producing worker → S3, see
 // stage_read.go). Used by readFinalResults / probe-split merge when results
-// exceed the inline threshold, and — via fetchStageOutputData — by
-// scalar-subquery extraction.
+// exceed the inline threshold — a single-shot read with no re-poll, unlike
+// fetchStageOutputData (peer_locations.go), which calls
+// fetchResultDataTiered directly so its re-poll loop can ask for the peer
+// tier only on the first attempt.
 func (c *Coordinator) fetchResultData(ctx context.Context, queryID, path string) ([]byte, error) {
-	data, _, err := c.fetchResultDataTiered(ctx, queryID, path)
+	data, _, err := c.fetchResultDataTiered(ctx, queryID, path, true)
 	return data, err
 }
 

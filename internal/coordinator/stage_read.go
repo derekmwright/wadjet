@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/optswitch"
@@ -51,6 +52,19 @@ func (t coordReadTier) String() string {
 var coordPeerReads = optswitch.Register("coord-peer-reads", "WADJET_COORD_PEER_READS",
 	"coordinator-side stage-output reads try the producing worker's local copy (peer tier) before S3")
 
+// peerStageReadTimeout bounds one coordinator-side peer fetch: dial the
+// producing worker, open the FetchShuffle stream, and read the whole
+// payload. This tier only ever serves what the coordinator itself reads —
+// an ~80-byte scalar, occasionally a few-MB stage/probe-split result — and
+// the read sits on the query's dispatch-blocking critical path, so it must
+// fail fast rather than borrow a bound sized for full shuffle transfers.
+// For scale: dataplane.peerServeAcquireTimeout (the producer's serve-slot
+// wait) is 10s and dataplane.PeerFetchIdleTimeout (the per-chunk stall
+// bound) is 15s — both far above what reading a handful of KB should ever
+// cost. On expiry this is an ordinary miss, same as any other fetch
+// failure: the caller falls through to S3. var so tests can shrink it.
+var peerStageReadTimeout = 2 * time.Second
+
 // fetchResultDataTiered retrieves one stage-output / result blob for
 // coordinator-side consumption and reports which tier served it.
 //
@@ -75,16 +89,26 @@ var coordPeerReads = optswitch.Register("coord-peer-reads", "WADJET_COORD_PEER_R
 //
 // queryID is unused (it always was): the peer tier derives the root from the
 // key's "queries/<id>/" prefix, which is the identity both sides agree on.
-func (c *Coordinator) fetchResultDataTiered(ctx context.Context, _ string, path string) ([]byte, coordReadTier, error) {
+//
+// tryPeer gates the peer tier for this call. fetchStageOutputData's re-poll
+// loop (peer_locations.go) passes false on every iteration after the first:
+// the producer was already asked once, and re-dialing it every 500ms for up
+// to 15s buys nothing — either its local copy answers on the first try, or
+// the re-poll's job is waiting out the durable upload, not the producer.
+// Every other caller (the initial call in that same loop, and
+// fetchResultData's single-shot reads) passes true.
+func (c *Coordinator) fetchResultDataTiered(ctx context.Context, _ string, path string, tryPeer bool) ([]byte, coordReadTier, error) {
 	if c.resultKV != nil {
 		if entry, err := c.resultKV.Get(ctx, natsKVKey(path)); err == nil {
 			c.noteStageReadTier(coordReadKV)
 			return entry.Value(), coordReadKV, nil
 		}
 	}
-	if data, ok := c.fetchFromProducerPeer(ctx, path); ok {
-		c.noteStageReadTier(coordReadPeer)
-		return data, coordReadPeer, nil
+	if tryPeer {
+		if data, ok := c.fetchFromProducerPeer(ctx, path); ok {
+			c.noteStageReadTier(coordReadPeer)
+			return data, coordReadPeer, nil
+		}
 	}
 	store := c.catalog.Store()
 	reader, _, err := store.Get(ctx, c.config.ResultBucket, path)
@@ -103,9 +127,10 @@ func (c *Coordinator) fetchResultDataTiered(ctx context.Context, _ string, path 
 // fetchFromProducerPeer streams one stage-output object from the worker that
 // produced it, over the PeerExchange data plane. ok=false means "this tier
 // declined" — switch off, no registry, not query scratch, streaming
-// disabled for the query, no minted token, unknown or dead producer, or any
-// fetch/stream failure — and the caller must fall through to the durable
-// copy. Nothing in here may turn a readable object into an error.
+// disabled for the query, no minted token, unknown or dead producer, a
+// fetch/stream failure, a timeout, or a payload with the wrong magic — and
+// the caller must fall through to the durable copy. Nothing in here may
+// turn a readable object into an error.
 //
 // The token is the query's fetch token, minted by annotateTaskPeerLocations
 // for the same root and recorded by every worker that ran one of its tasks;
@@ -133,7 +158,9 @@ func (c *Coordinator) fetchFromProducerPeer(ctx context.Context, path string) ([
 	if addr == "" {
 		return nil, false
 	}
-	rc, err := c.peerClient.FetchShuffle(ctx, addr, root, path, token)
+	fetchCtx, cancel := context.WithTimeout(ctx, peerStageReadTimeout)
+	defer cancel()
+	rc, err := c.peerClient.FetchShuffle(fetchCtx, addr, root, path, token)
 	if err != nil {
 		c.stageReadPeerMisses.Add(1)
 		c.logger.Debug("coordinator peer read declined; falling through to the durable copy",
@@ -148,7 +175,45 @@ func (c *Coordinator) fetchFromProducerPeer(ctx context.Context, path string) ([
 			"key", path, "producer", workerID, "addr", addr, "error", err)
 		return nil, false
 	}
+	if !isPeerStagePayload(data) {
+		c.stageReadPeerMisses.Add(1)
+		magic := data
+		if len(magic) > 4 {
+			magic = magic[:4]
+		}
+		c.logger.Debug("coordinator peer read returned a non-shuffle payload; falling through to the durable copy",
+			"key", path, "producer", workerID, "addr", addr, "magic", magic)
+		return nil, false
+	}
 	return data, true
+}
+
+// isPeerStagePayload reports whether data starts with a magic the
+// coordinator's decode paths actually handle: raw WSHF (readShuffleBatches)
+// or an s2-wrapped WSHC envelope (decompressShuffleData unwraps it first).
+// Mirrors the worker's codecForMagic (internal/worker/shuffle_format.go)
+// without importing it — dataplane wire magics are a cross-package
+// contract, not worker-owned (dataplane/peer_server.go keeps its own copy
+// of the same four bytes for the same reason).
+//
+// WSHZ (zstd) is deliberately excluded: it is the S3-upload envelope
+// (docs/design/exchange-zstd-wire.md — chosen only when
+// WADJET_EXCHANGE_ZSTD=1 uploads to S3; peer-wire compression stays s2 and
+// on-disk stays raw WSHF), so a peer serving it — or garbage, or a short
+// read — means the local copy is not what this tier expects. That is a
+// tier failure to fall through on, never a payload for decode to choke on:
+// turning a readable-but-wrong-format object into a query error is exactly
+// what this check exists to prevent.
+func isPeerStagePayload(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	switch string(data[:4]) {
+	case "WSHF", "WSHC":
+		return true
+	default:
+		return false
+	}
 }
 
 // noteStageReadTier tallies one served coordinator-side stage read.
