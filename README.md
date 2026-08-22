@@ -188,7 +188,7 @@ runs 2-4 of 4; caches populated — cold run 1 of the same session was
 2m59s). Row counts are validated per run and the answers are additionally
 verifiable value-level against a committed DuckDB fingerprint ground
 truth (`benchmarks/tpch/fingerprint-sf100.json`, captured in-region).
-2026-08-22 at v0.17.0, `results/20260822-055421` (same-window baseline
+2026-08-22 at v0.17.0-clawback, `results/20260822-055421` (same-window baseline
 `results/20260822-053854`, engine `23abd8e` / v0.16.0-correctness).
 
 | Query | Time | | Query | Time |
@@ -227,7 +227,7 @@ probe emit path (`WADJET_VECTOR_REUSE`). Full attribution:
 [profile-attribution-2026-08-21.md](docs/benchmarks/profile-attribution-2026-08-21.md),
 [sf100-window-analysis-2026-08-22.md](docs/benchmarks/sf100-window-analysis-2026-08-22.md),
 [sf100-window2-analysis-2026-08-22.md](docs/benchmarks/sf100-window2-analysis-2026-08-22.md),
-and sf100-window3-analysis-2026-08-22.md (landing shortly). On identical
+and [sf100-window3-analysis-2026-08-22.md](docs/benchmarks/sf100-window3-analysis-2026-08-22.md). On identical
 hardware in a same-day paired run (2026-08-14), Wadjet's steady state beat
 Trino 470 FTE by 10% on suite wall and 19% on per-query geomean, winning
 12 of 22 queries
@@ -241,7 +241,7 @@ The full 43-query ClickBench suite on the official listing hardware —
 methodology: page-cache drop before each query, cold + 2 hot tries,
 one process per query. Every query result is cell-exact against DuckDB
 on the same data (`benchmarks/clickbench/`). 2026-08-22 at
-v0.17.0, `benchmarks/clickbench/results-c6a-20260822-v0170.json`.
+v0.17.0-clawback, `benchmarks/clickbench/results-c6a-20260822-v0170.json`.
 
 | Query | Cold | Hot | Query | Cold | Hot |
 |---|---:|---:|---|---:|---:|
