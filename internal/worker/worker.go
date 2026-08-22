@@ -2303,16 +2303,32 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 			// will MADV-relieve.
 			driftMB, driftPct, mmapMB := computeStatsGauges(heapInuse, rss, w.executor.HeapDrift(heapInuse))
 
-			w.logger.Info("worker stats",
-				"alloc_mb", alloc/1024/1024,
-				"rss_mb", rss/1024/1024,
-				"heap_inuse_mb", heapInuse/(1<<20),
+			statsArgs := []any{
+				"alloc_mb", alloc / 1024 / 1024,
+				"rss_mb", rss / 1024 / 1024,
+				"heap_inuse_mb", heapInuse / (1 << 20),
 				"mmap_rss_mb", mmapMB,
 				"accounting_drift_mb", driftMB,
-				"accounting_drift_pct", int64(driftPct*100),
+				"accounting_drift_pct", int64(driftPct * 100),
 				"goroutines", ng,
 				"gc_delta", gcDelta,
-				"gc_pause_delta_ms", pauseDeltaNs/1_000_000)
+				"gc_pause_delta_ms", pauseDeltaNs / 1_000_000,
+			}
+			// CPU-token admission counters (cpu_tokens.go), same field names
+			// as logFinalScanStats()'s "cpu token admission stats (final)"
+			// line. That line only fires from Stop()/Drain, so a benchmark
+			// harness that captures worker journals before drain (as the
+			// 2026-08-22 SF100 window 2 run did) never observes it — the
+			// counters built to verify the admission change went uncaptured.
+			// Riding the existing 30s "worker stats" tick means every run
+			// gets at least one sample regardless of drain timing.
+			if cap, reserve, admits, bypasses, holdbacks := w.executor.CPUTokenAdmissionStats(); cap > 0 {
+				statsArgs = append(statsArgs,
+					"capacity", cap, "decode_reserve", reserve,
+					"decode_admits", admits, "decode_bypasses", bypasses,
+					"decode_holdbacks", holdbacks)
+			}
+			w.logger.Info("worker stats", statsArgs...)
 
 			// Decoded-chunk cache pressure yield (doc §9.3): while either
 			// pressure channel is active, shed the cache to half its cap.
