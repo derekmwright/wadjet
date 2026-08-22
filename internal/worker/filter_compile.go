@@ -42,31 +42,13 @@ func compileFilterExprs(exprs []string) ([]exec.UnaryOperator, []string, error) 
 		if err != nil {
 			return nil, nil, fmt.Errorf("compile filter %q: %w", s, err)
 		}
-		ops = append(ops, exec.NewFilter(wrapCompiledFilter(compiled)))
+		ops = append(ops, exec.NewFilter(expr.FilterPredicate(compiled)))
 	}
 	cols := make([]string, 0, len(colSet))
 	for c := range colSet {
 		cols = append(cols, c)
 	}
 	return ops, cols, nil
-}
-
-func wrapCompiledFilter(e expr.Expr) exec.Predicate {
-	if be, ok := e.(expr.BoolExpr); ok {
-		return func(b *batch.RecordBatch, row int) bool {
-			return be.EvalBool(b, row)
-		}
-	}
-	return func(b *batch.RecordBatch, row int) bool {
-		v := e.Eval(b, row)
-		if v == nil {
-			return false
-		}
-		if bv, ok := v.(bool); ok {
-			return bv
-		}
-		return false
-	}
 }
 
 // buildAggInputProjection returns a Project operator that materializes

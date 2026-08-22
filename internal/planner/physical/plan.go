@@ -11163,24 +11163,11 @@ func wrapExpr(e expr.Expr) exec.Expression {
 	}
 }
 
-// wrapPredicate adapts an expr.Expr into an exec.Predicate function.
-// Uses BoolExpr.EvalBool() when available to avoid interface{} boxing.
+// wrapPredicate adapts an expr.Expr into an exec.Predicate function. The
+// typed protocol and its two-valued collapse are chosen once, in
+// expr.FilterPredicate, so the row loop neither boxes nor re-dispatches.
 func wrapPredicate(e expr.Expr) exec.Predicate {
-	if be, ok := e.(expr.BoolExpr); ok {
-		return func(b *batch.RecordBatch, row int) bool {
-			return be.EvalBool(b, row)
-		}
-	}
-	return func(b *batch.RecordBatch, row int) bool {
-		v := e.Eval(b, row)
-		if v == nil {
-			return false
-		}
-		if bv, ok := v.(bool); ok {
-			return bv
-		}
-		return false
-	}
+	return expr.FilterPredicate(e)
 }
 
 // expandStarProjections runs logical star expansion on a plan that reached the
