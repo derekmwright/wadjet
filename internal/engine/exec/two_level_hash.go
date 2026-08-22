@@ -71,9 +71,20 @@ import (
 // measure 1.50 either way. The low window is the only one that inherits the
 // flat table's guarantees instead of replacing them with new ones.
 //
+// # Layout is decided at construction where the sink's bounds allow it
+//
+// Before any of the adaptive machinery below runs, a sink whose OWNER
+// finalizes and rebuilds it on a byte cap — the shuffle sender's exchange
+// partial aggregation, worker.cappedPartialAgg — is born FLAT and never
+// converts. Such a sink's index cannot outlive one epoch, so a conversion
+// has nothing after it to amortize against; see twoLevelBoundedMinGroups for
+// the rule, its derivation and its measurements. Everything below applies to
+// UNBOUNDED sinks (final/standalone aggregates), which is where the
+// structure's measured wins are.
+//
 // # Adaptive conversion, not construction
 //
-// A sink starts FLAT, exactly as before, and converts AT THE POINT WHERE THE
+// An unbounded sink starts FLAT, and converts AT THE POINT WHERE THE
 // FLAT TABLE WOULD HAVE REHASHED ITSELF ANYWAY — see convertsToTwoLevel
 // (aggregate.go) for the two tests and twoLevelConvertAt for the measured
 // curve behind the size one. The decision runs once per BATCH, never per row:
@@ -135,12 +146,64 @@ import (
 var twoLevelToggle = optswitch.Register("two-level-ht", "WADJET_TWO_LEVEL_HT",
 	"256-bucket two-level group index past twoLevelConvertAt keys (per-bucket rehash instead of whole-table)")
 
-// TwoLevelConversions counts flat→bucketed conversions and
-// TwoLevelDirectBuilds counts indexes built bucketed from an NDV hint
-// (observability + test assertions).
+// bornFlatToggle is the kill switch for the construction-time layout
+// decision (twoLevelBoundedMinGroups / HashAggregate.boundedIndexStaysFlat).
+// Off = the pre-2026-08-22 behavior: every sink starts flat and converts at
+// runtime whenever convertsToTwoLevel says so, epoch cap or not.
+var bornFlatToggle = optswitch.Register("two-level-born-flat", "WADJET_TWO_LEVEL_BORN_FLAT",
+	"epoch-capped (bounded) aggregates build a flat group index and never convert")
+
+// twoLevelBoundedMinGroups is G* — the group count a BOUNDED sink's epoch
+// must be able to reach before the bucketed layout is allowed at all.
+//
+// A bounded sink is one whose owner finalizes it and builds a fresh one
+// every C bytes of state (worker.cappedPartialAgg, C = 128 MB). Its index
+// never outlives one epoch, so a conversion has nothing after it to
+// amortize against: the flat→bucketed rehash is paid once per epoch, in
+// full, near the epoch's end, on a table that is about to be thrown away.
+// That is not a threshold to tune — it is a property of the operator's
+// configuration, and it is known before the first row arrives.
+//
+// DERIVATION (SF100 TPC-H Q18, three same-window arms 2026-08-22,
+// scratchpad/window-analysis-2026-08-22.md §1; ClickBench 3-arm run):
+//
+//		Gmax = C / s, s = per-group state (perGroupStateBytes)
+//
+//	  - Q18's exchange partial aggregate: C = 128 MB, s ≈ 46 B
+//	    ⇒ Gmax ≈ 2.9 M. Measured groups per flush on the arm with the
+//	    bucketed layout DISABLED: 12 497 812 out_rows / 5 flushes = 2.50 M.
+//	    At that Gmax the bucketed layout costs the stage 3-4×: mean task
+//	    2.25 s (flat) → 6.96 s (old gate) → 10.13 s (load-factor gate), and
+//	    the conversion itself measures ~675 ns per live entry in production
+//	    — 22-27× the 25-30 ns the structure was calibrated on, because 8-10
+//	    tasks run the scatter concurrently against one shared L3.
+//	  - The bucketed layout's measured wins are all UNBOUNDED sinks that keep
+//	    one index for the whole input: ClickBench's high-cardinality GROUP BYs
+//	    (~6 M groups per partitioned sink on Q33) and the 16 M near-unique
+//	    arm of BenchmarkAggIntCardinalitySweep (−4.1 % vs flat). At 4 M groups
+//	    the same sweep measures the bucketed arm +31 % — a LOSS — so 4 M is a
+//	    floor on where bucketing could pay even with a full unbounded tail to
+//	    amortize against, and a bounded sink has no tail at all.
+//
+// So G* = 4 M: at or below it every measurement of the bucketed layout is a
+// loss or a wash, and only above it is there a measured win. With today's
+// 128 MB cap no bounded sink reaches it (Gmax tops out around 3.5 M for the
+// cheapest possible per-group state), which makes the rule equivalent to
+// "bounded ⇒ flat" in production while keeping the door open for a future
+// larger C. It is deliberately NOT compared against twoLevelConvertAt (1 M):
+// that is a live-count crossover for a table that will keep growing, and a
+// bounded sink's table by construction will not.
+const twoLevelBoundedMinGroups = 4 << 20
+
+// TwoLevelConversions counts flat→bucketed conversions, TwoLevelDirectBuilds
+// counts indexes built bucketed from an NDV hint, and TwoLevelBornFlat counts
+// sinks whose layout was decided FLAT at construction because their epoch cap
+// bounds them below twoLevelBoundedMinGroups (observability + test
+// assertions; exported into the worker's task logs).
 var (
 	TwoLevelConversions  atomic.Int64
 	TwoLevelDirectBuilds atomic.Int64
+	TwoLevelBornFlat     atomic.Int64
 )
 
 const (
@@ -306,10 +369,14 @@ type intTwoLevelTable struct {
 	subs [twoLevelBuckets]intSubTable
 	reg  *memory.OffheapRegistry
 	// arena is the one off-heap reservation the 256 buckets were carved
-	// from (offheapSubMinBytes), and arenaLive counts how many still slice
-	// it. It is released the moment the last one grows out.
-	arena     []intHashEntry
-	arenaLive int
+	// from (offheapSubMinBytes) and arenaLive counts how many still slice
+	// it. A bucket that grows out hands its pages back to the kernel;
+	// arenaFreed is how many bytes of the mapping that returned, so
+	// MemoryUsage charges the arena by what is still resident. The mapping
+	// itself is released when the last bucket leaves.
+	arena      []intHashEntry
+	arenaLive  int
+	arenaFreed int64
 }
 
 // newIntTwoLevelTable builds an empty bucketed index pre-sized for n TOTAL
@@ -362,14 +429,30 @@ func allocOffheapArena[T any](reg *memory.OffheapRegistry, n int) ([]T, bool) {
 
 // releaseArenaSlot records that one bucket has left the shared reservation
 // and unmaps it once none are left. Called from growSub, the only path that
-// replaces a bucket's entry array.
-func (t *intTwoLevelTable) releaseArenaSlot() {
+// replaces a bucket's entry array; old is the departing bucket's slice.
+//
+// The departing bucket's PAGES go back to the kernel immediately, and the
+// bytes that actually went back are subtracted from the arena's charge.
+// Without that the mapping keeps every vacated bucket resident until the
+// last one leaves, so a table mid-growth really does hold the old arena AND
+// the new arrays — up to twice its live slot count — and MemoryUsage charges
+// it, correctly, against the owner's budget. That is what made a conversion
+// (which grows buckets inside its own loop) cost a capped aggregate's epoch
+// budget twice over: returning the pages is the fix, and the accounting only
+// follows it.
+//
+// madvise works in whole pages, so a bucket that does not own one returns
+// nothing and stays charged. The arena gate (offheapSubMinBytes: 2 MiB
+// across 256 buckets) puts the production floor at 8 KiB per bucket, so
+// every bucket that can reach this path owns whole pages.
+func (t *intTwoLevelTable) releaseArenaSlot(old []intHashEntry) {
+	t.arenaFreed += memory.DiscardSlice(old)
 	t.arenaLive--
 	if t.arenaLive > 0 || t.arena == nil {
 		return
 	}
 	t.reg.Release(unsafe.Pointer(unsafe.SliceData(t.arena)))
-	t.arena = nil
+	t.arena, t.arenaFreed = nil, 0
 }
 
 // subCapFor returns the power-of-two slot count one bucket needs to hold
@@ -523,17 +606,19 @@ func (t *intTwoLevelTable) Len() int {
 }
 
 // MemoryUsage returns the bytes held by every bucket's entry array plus the
-// bucket header array itself. Arena-backed buckets are counted through the
-// arena, in full and once, so a partially-vacated arena still charges the
-// bytes it is still holding.
+// bucket header array itself. The shared arena is charged as the mapping
+// minus the pages releaseArenaSlot has already handed back, so a
+// partially-vacated arena is charged for exactly what is still resident —
+// never the whole mapping ON TOP OF the departed buckets' new arrays.
 func (t *intTwoLevelTable) MemoryUsage() int64 {
-	n := int64(len(t.arena))
+	const entryBytes = int64(unsafe.Sizeof(intHashEntry{}))
+	n := int64(len(t.arena))*entryBytes - t.arenaFreed
 	for i := range t.subs {
 		if !t.subs[i].arena {
-			n += int64(cap(t.subs[i].entries))
+			n += int64(cap(t.subs[i].entries)) * entryBytes
 		}
 	}
-	return n*int64(unsafe.Sizeof(intHashEntry{})) + int64(unsafe.Sizeof(t.subs))
+	return n + int64(unsafe.Sizeof(t.subs))
 }
 
 // ForEach iterates every live entry, bucket by bucket. Order differs from
@@ -630,9 +715,9 @@ func (t *intTwoLevelTable) growSub(b uint64) {
 	s.mask = newMask
 	switch {
 	case oldArena:
-		// Not this bucket's mapping to return — the arena is released when
-		// the last bucket has left it.
-		t.releaseArenaSlot()
+		// Not this bucket's mapping to unmap — its pages go back now, the
+		// mapping itself when the last bucket has left it.
+		t.releaseArenaSlot(old)
 	case oldOffheap:
 		t.reg.Release(unsafe.Pointer(unsafe.SliceData(old)))
 	}
@@ -654,10 +739,11 @@ type packedSubTable struct {
 // conventions: 128-bit key inline in the entry, val == packedHashEmpty
 // marks a free slot, 70% load, caller-paired CheckGrowAt.
 type packedTwoLevelTable struct {
-	subs      [twoLevelBuckets]packedSubTable
-	reg       *memory.OffheapRegistry
-	arena     []packedHashEntry // see intTwoLevelTable.arena
-	arenaLive int
+	subs       [twoLevelBuckets]packedSubTable
+	reg        *memory.OffheapRegistry
+	arena      []packedHashEntry // see intTwoLevelTable.arena
+	arenaLive  int
+	arenaFreed int64
 }
 
 func newPackedTwoLevelTable(n int, reg *memory.OffheapRegistry) *packedTwoLevelTable {
@@ -689,13 +775,14 @@ func newPackedTwoLevelTableSub(capPerSub int, reg *memory.OffheapRegistry) *pack
 }
 
 // releaseArenaSlot is intTwoLevelTable.releaseArenaSlot for the packed mode.
-func (t *packedTwoLevelTable) releaseArenaSlot() {
+func (t *packedTwoLevelTable) releaseArenaSlot(old []packedHashEntry) {
+	t.arenaFreed += memory.DiscardSlice(old)
 	t.arenaLive--
 	if t.arenaLive > 0 || t.arena == nil {
 		return
 	}
 	t.reg.Release(unsafe.Pointer(unsafe.SliceData(t.arena)))
-	t.arena = nil
+	t.arena, t.arenaFreed = nil, 0
 }
 
 func allocPackedSubEntries(reg *memory.OffheapRegistry, n int) ([]packedHashEntry, bool) {
@@ -794,14 +881,16 @@ func (t *packedTwoLevelTable) Len() int {
 	return n
 }
 
+// MemoryUsage is intTwoLevelTable.MemoryUsage for the packed mode.
 func (t *packedTwoLevelTable) MemoryUsage() int64 {
-	n := int64(len(t.arena))
+	const entryBytes = int64(unsafe.Sizeof(packedHashEntry{}))
+	n := int64(len(t.arena))*entryBytes - t.arenaFreed
 	for i := range t.subs {
 		if !t.subs[i].arena {
-			n += int64(cap(t.subs[i].entries))
+			n += int64(cap(t.subs[i].entries)) * entryBytes
 		}
 	}
-	return n*int64(unsafe.Sizeof(packedHashEntry{})) + int64(unsafe.Sizeof(t.subs))
+	return n + int64(unsafe.Sizeof(t.subs))
 }
 
 func (t *packedTwoLevelTable) ForEach(fn func(lo, hi uint64, val int32)) {
@@ -843,7 +932,7 @@ func (t *packedTwoLevelTable) growSub(b uint64) {
 	s.mask = newMask
 	switch {
 	case oldArena:
-		t.releaseArenaSlot()
+		t.releaseArenaSlot(old)
 	case oldOffheap:
 		t.reg.Release(unsafe.Pointer(unsafe.SliceData(old)))
 	}

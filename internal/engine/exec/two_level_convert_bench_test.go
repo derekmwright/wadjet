@@ -118,10 +118,22 @@ func BenchmarkAggIntCardinalitySweep(b *testing.B) {
 // benchCappedEpochs mirrors worker.cappedPartialAgg: consume until state
 // passes capBytes, then finalize + drain + restart. Returns the epoch count
 // so a caller can assert the shape actually cycled.
+//
+// It DECLARES the cap to the aggregate exactly as the operator does
+// (SetEpochByteCap before Init), because that declaration is what decides
+// the group-index layout: a sink rebuilt every epoch is born flat and never
+// converts (two_level_hash.go, twoLevelBoundedMinGroups). Set
+// WADJET_TWO_LEVEL_BORN_FLAT=0 to run the same benchmark under the old
+// runtime-conversion behavior.
 func benchCappedEpochs(tb testing.TB, ctx context.Context, batches []*batch.RecordBatch, capBytes int64) int {
 	tb.Helper()
 	epochs := 0
-	agg := NewHashAggregate([]string{"k"}, benchAggCols())
+	newEpoch := func() *HashAggregate {
+		a := NewHashAggregate([]string{"k"}, benchAggCols())
+		a.SetEpochByteCap(capBytes)
+		return a
+	}
+	agg := newEpoch()
 	if err := agg.Init(ctx); err != nil {
 		tb.Fatal(err)
 	}
@@ -149,7 +161,7 @@ func benchCappedEpochs(tb testing.TB, ctx context.Context, batches []*batch.Reco
 			continue
 		}
 		flush()
-		agg = NewHashAggregate([]string{"k"}, benchAggCols())
+		agg = newEpoch()
 		if err := agg.Init(ctx); err != nil {
 			tb.Fatal(err)
 		}
@@ -163,14 +175,26 @@ func benchCappedEpochs(tb testing.TB, ctx context.Context, batches []*batch.Reco
 // restarted every capBytes of state. Every epoch crosses the conversion
 // threshold on its own, so this is where a conversion that replaces nothing
 // is paid over and over.
+//
+// Three arms, interleaved in one window:
+//
+//	flat              the kill switch off - the floor
+//	twolevel          the shipped layout rule: the cap is declared, the
+//	                  sink is born flat, conv/op must be 0 and the time
+//	                  must sit on the flat arm
+//	twolevel-convert  the same binary with the layout rule disabled
+//	                  (WADJET_TWO_LEVEL_BORN_FLAT=0), i.e. the runtime
+//	                  conversion this shape used to pay every epoch
 func BenchmarkAggIntCappedEpochs(b *testing.B) {
 	const rows = 16 << 20
 	ctx := context.Background()
 	for _, groups := range []int{rows, 1 << 20} {
 		batches := benchAggIntBatches(rows, groups)
-		run := func(b *testing.B, on bool) {
+		run := func(b *testing.B, on, bornFlat bool) {
 			prev := twoLevelToggle.Set(on)
 			defer twoLevelToggle.Set(prev)
+			prevFlat := bornFlatToggle.Set(bornFlat)
+			defer bornFlatToggle.Set(prevFlat)
 			b.ReportAllocs()
 			b.ResetTimer()
 			epochs := 0
@@ -181,8 +205,12 @@ func BenchmarkAggIntCappedEpochs(b *testing.B) {
 			b.ReportMetric(float64(epochs), "epochs")
 			b.ReportMetric(float64(TwoLevelConversions.Load()-conversions)/float64(b.N), "conv/op")
 		}
-		b.Run(fmt.Sprintf("groups=%d/flat", groups), func(b *testing.B) { run(b, false) })
-		b.Run(fmt.Sprintf("groups=%d/twolevel", groups), func(b *testing.B) { run(b, true) })
+		b.Run(fmt.Sprintf("groups=%d/flat", groups),
+			func(b *testing.B) { run(b, false, true) })
+		b.Run(fmt.Sprintf("groups=%d/twolevel", groups),
+			func(b *testing.B) { run(b, true, true) })
+		b.Run(fmt.Sprintf("groups=%d/twolevel-convert", groups),
+			func(b *testing.B) { run(b, true, false) })
 	}
 }
 

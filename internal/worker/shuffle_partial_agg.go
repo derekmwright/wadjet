@@ -41,6 +41,14 @@ type cappedPartialAgg struct {
 	outRows int64
 	flushes int64
 
+	// Group-index observability, summed across epochs: how many
+	// flat->bucketed conversions this operator paid, whether its layout was
+	// pinned flat at construction, and the group ceiling that pinned it.
+	// Logged per task by the shuffle executor.
+	conversions  int
+	bornFlat     bool
+	groupCeiling int64
+
 	// resolved/disabled implement first-batch schema intersection: the
 	// planner's PartialAggKeys derive from the exchange's DECLARED payload,
 	// which is an over-approximated union by planner convention ("the
@@ -152,6 +160,12 @@ func (p *cappedPartialAgg) ensureAgg(ctx context.Context, b *batch.RecordBatch) 
 		return nil
 	}
 	p.agg = exec.NewHashAggregate(p.groupBy, p.aggs)
+	// Declare the epoch bound BEFORE Init: this operator finalizes and
+	// rebuilds the aggregate every capBytes, so its group index cannot
+	// outlive one epoch and must not bet on a runtime flat->bucketed
+	// conversion it can never amortize (exec/two_level_hash.go,
+	// twoLevelBoundedMinGroups; SF100 Q18 measured 3-4x on the stage).
+	p.agg.SetEpochByteCap(p.capBytes)
 	if err := p.agg.Init(ctx); err != nil {
 		p.agg = nil
 		return fmt.Errorf("partial agg init: %w", err)
@@ -208,6 +222,9 @@ func (p *cappedPartialAgg) flush(ctx context.Context) ([]*batch.RecordBatch, err
 		p.outRows += int64(b.ActiveLen())
 		out = append(out, b)
 	}
+	p.conversions += p.agg.IndexConversions()
+	p.bornFlat = p.agg.IndexBornFlat()
+	p.groupCeiling = p.agg.GroupCeiling()
 	if err := p.agg.Close(); err != nil {
 		return nil, fmt.Errorf("partial agg close: %w", err)
 	}

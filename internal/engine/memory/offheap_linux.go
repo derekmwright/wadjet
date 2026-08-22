@@ -124,6 +124,48 @@ func (r *OffheapRegistry) Close() {
 	}
 }
 
+// DiscardSlice returns the physical pages backing s to the kernel without
+// unmapping anything: MADV_DONTNEED on an anonymous MAP_PRIVATE mapping
+// drops the pages, and a later touch faults in a fresh zero page.
+//
+// It exists for the two-level group index's shared bucket arena
+// (exec/two_level_hash.go): 256 buckets are carved out of ONE reservation,
+// and a bucket that grows out of it abandons its slice while the mapping
+// stays put until the LAST bucket has left. Without this the vacated bytes
+// stay resident — real RSS, honestly charged by MemoryUsage, and dead —
+// which is what let a partially-vacated arena cost a capped aggregate's
+// epoch budget twice over.
+//
+// Only whole pages strictly inside s are discarded — a slice that does not
+// own a whole page gets nothing back and nothing outside s is ever touched —
+// so it returns the byte count actually handed over, which is what an owner
+// charges itself against. The caller must have dropped every reference into
+// s first: those bytes read back as zero, not as what was written.
+func DiscardSlice[T any](s []T) int64 {
+	if len(s) == 0 {
+		return 0
+	}
+	var zero T
+	n := uintptr(len(s)) * unsafe.Sizeof(zero)
+	base := unsafe.Pointer(unsafe.SliceData(s))
+	ps := uintptr(syscall.Getpagesize())
+	// Bytes from base up to the next page boundary belong to a page this
+	// slice does not fully own.
+	head := (ps - uintptr(base)%ps) % ps
+	if head >= n {
+		return 0
+	}
+	usable := (n - head) &^ (ps - 1)
+	if usable == 0 {
+		return 0
+	}
+	if err := syscall.Madvise(unsafe.Slice((*byte)(unsafe.Add(base, head)), usable),
+		syscall.MADV_DONTNEED); err != nil {
+		return 0
+	}
+	return int64(usable)
+}
+
 // Mappings reports how many reservations are live (tests/diagnostics).
 func (r *OffheapRegistry) Mappings() int {
 	if r == nil {

@@ -148,6 +148,91 @@ right. The emit phase is single-threaded and 16-35% of WALL clock
   the remainder is per-bucket GROWTH, which still lands on the heap and is
   the obvious next repair: an arena per generation).
 
+
+  **Corrected again 2026-08-22: the layout is decided at CONSTRUCTION for
+  bounded sinks.** The 08-21 fix moved the conversion point; it did not ask
+  whether the conversion should exist. A same-window three-arm SF100 run
+  (`scratchpad/window-analysis-2026-08-22.md`, base `23abd8e` / cand
+  `1441ca4` / cand with `WADJET_TWO_LEVEL_HT=0`) shows Q18 at **18.8 / 24.7 /
+  10.9 s** steady, i.e. the whole structure is a 2-4x loss on that query's
+  one stage and turning it off restores the 08-16 record. The stage is the
+  exchange-repartition's `worker.cappedPartialAgg`, which finalizes and
+  REBUILDS its `HashAggregate` every 128 MB of state. Per-task numbers on the
+  identical 50 000 000-row task: mean task 2.25 s flat, 6.96 s under the old
+  gate, 10.13 s under the load-factor gate, with 5 / 8 / 9 epochs.
+
+  Two facts make this a design defect rather than a tuning one:
+
+  - The conversion costs **~675 ns per live entry in production** (derived
+    independently from two arms: (6.96-2.25)/7/1.00M and
+    (10.13-2.25)/8/1.47M, agreeing to 0.5%), against the 25-30 ns the policy
+    was calibrated on. The calibration came from a single-table micro-bench
+    on an idle desktop; in production 8-10 tasks run the scatter
+    concurrently against one shared 32 MB L3, so it is DRAM/TLB-bound, not a
+    cache-resident rehash. This reproduces: on a 5900X the same shape shows
+    NO wall difference between converting and not (p=0.38, n=7 interleaved
+    processes) -- the local machine cannot see the cost at all.
+  - A sink that is torn down every epoch has **nothing to amortize the
+    conversion against**. It fires near the end of an epoch and the table
+    dies immediately after. No placement of the conversion point repairs
+    that; the old gate converts too early and pays it 8 times, the new gate
+    converts later and pays 1.5x as much 9 times, and both lose to never
+    converting.
+
+  **The rule (`twoLevelBoundedMinGroups`, `HashAggregate.SetEpochByteCap`).**
+  A sink whose owner finalizes and rebuilds it on a byte cap C is born FLAT
+  and never converts when its group ceiling `Gmax = C / s` is below
+  `G* = 4M`, where `s` is a lower bound on per-group state (index entry at
+  the 70% load factor + key SoA + one flat-accumulator element per
+  aggregate; `perGroupStateBytes`). A lower bound on `s` gives an UPPER bound
+  on `Gmax`, so the layout is pinned flat only when even the most optimistic
+  group count stays under G*.
+
+  Calibration, from the two measurements and nothing else: Q18's partial
+  aggregate has C = 128 MB and s ~= 46 B, so Gmax ~= 2.9M -- and the
+  bisect arm measures 12 497 812 out_rows / 5 flushes = **2.50M groups per
+  epoch**, which is the same number. At that scale the bucketed layout is a
+  3-4x loss. In the other direction, every measured WIN for the bucketed
+  layout is an unbounded sink: ClickBench's high-cardinality GROUP BYs
+  (~6M groups per partitioned sink on Q33) and the 16M near-unique arm of
+  `BenchmarkAggIntCardinalitySweep` (-11% vs flat on a 5900X). At 4M groups
+  that same sweep measures the bucketed arm **+25%** -- a loss -- so 4M is a
+  floor on where bucketing could pay even WITH an unbounded tail, and a
+  bounded sink has none. With today's 128 MB cap nothing bounded reaches G*
+  (the cheapest possible per-group state tops out near 3.5M), so the rule is
+  equivalent to "bounded => flat" in production while leaving the door open
+  for a larger C. `twoLevelConvertAt` (1M) is deliberately NOT the comparand:
+  it is a live-count crossover for a table that will keep growing.
+
+  Measured on the capped shape (`BenchmarkAggIntCappedEpochs`, near-unique
+  16M, 128 MB epochs, 7 process-interleaved rounds per arm): conversions
+  **8 -> 0**, allocation **912 MiB -> 400 MiB per op (-56%)**, epochs
+  unchanged at 9, wall indistinguishable across all three arms locally
+  (2.17 / 2.09 / 1.97 s, p >= 0.32) for the reason above. Unbounded shapes
+  are untouched -- `boundedIndexStaysFlat` returns immediately when no cap
+  was declared -- and the sweep confirms it: 100 / 65 536 / 1M groups
+  unchanged and conversion-free, 4M +25% (the known 08-21 trade-off), 16M
+  near-unique -11%.
+
+  Kill switch: `WADJET_TWO_LEVEL_BORN_FLAT=0` restores runtime conversion
+  for bounded sinks; `WADJET_TWO_LEVEL_HT=0` still removes the bucketed path
+  entirely. Both are in `optswitch`, so the invariance oracle sweeps them.
+
+  **Arena accounting, same date.** `intTwoLevelTable.MemoryUsage` charged
+  `len(t.arena)` -- the WHOLE shared reservation -- plus `cap(entries)` for
+  every bucket that had already grown out of it, and `releaseArenaSlot` only
+  dropped the arena at `arenaLive == 0`. That was an honest RSS statement
+  (the vacated pages really were still resident) but a bad one: a table
+  mid-growth held up to twice its live slot count, and `1a39e1e` moved 256
+  `growSub` calls INSIDE the conversion, so every conversion entered that
+  window. Fixed at the source rather than in the ledger: a departing bucket
+  now returns its pages (`memory.DiscardSlice`, MADV_DONTNEED on whole pages
+  inside the range) and `MemoryUsage` charges the mapping minus what went
+  back. madvise works in whole pages, so a bucket smaller than one stays
+  charged; the arena gate (2 MiB across 256 buckets) puts the production
+  floor at 8 KiB per bucket, so every bucket that reaches this path owns
+  whole pages.
+
   Residual, recorded so it is not re-diagnosed as this defect: a two-level
   LOOKUP costs ~33% more than a flat one at 8M entries (85.0 vs 112.9 ms,
   `BenchmarkIntIndexGrowth` probe arms) because the sub-table header is a

@@ -31,3 +31,6 @@ func OffheapExact[T any](_ *OffheapRegistry, _ int) ([]T, bool) { return nil, fa
 
 // Release is inert off linux.
 func (r *OffheapRegistry) Release(_ unsafe.Pointer) bool { return false }
+
+// DiscardSlice is inert off linux (nothing is mmap-backed there).
+func DiscardSlice[T any](_ []T) int64 { return 0 }

@@ -409,7 +409,50 @@ type HashAggregate struct {
 	// consume-loop field's offset, which measured on its own.
 	intTwoLevel    *intTwoLevelTable
 	packedTwoLevel *packedTwoLevelTable
+
+	// Bounded-sink layout decision (two_level_hash.go,
+	// twoLevelBoundedMinGroups). Also at the END of the struct, for the
+	// reason above.
+	//
+	// epochByteCap > 0 marks this a BOUNDED sink: its owner finalizes it and
+	// builds a fresh one whenever StateBytes() crosses the cap
+	// (worker.cappedPartialAgg's 128 MB epochs). The bound is what lets
+	// resolveIndices decide the group-index LAYOUT once, at construction,
+	// instead of betting on a runtime conversion an epoch-scoped table can
+	// never amortize. Set with SetEpochByteCap BEFORE Init.
+	epochByteCap int64
+	// indexBornFlat is that decision, taken in resolveIndices and read by
+	// the NDV-hint direct-build branches and every conversion gate.
+	// groupCeiling is the Gmax it was taken from (0 = unbounded), kept for
+	// the worker's log line.
+	indexBornFlat bool
+	groupCeiling  int64
+	// indexConversions counts THIS aggregate's flat→bucketed conversions.
+	// The package-level TwoLevelConversions is worker-wide and cannot be
+	// attributed to one operator when tasks run concurrently.
+	indexConversions int
 }
+
+// SetEpochByteCap declares that this aggregate's owner will finalize it and
+// build a fresh one whenever StateBytes() crosses cap — a BOUNDED sink. Call
+// it BEFORE Init: the layout of the group index is decided from this bound
+// (two_level_hash.go, twoLevelBoundedMinGroups) and a sink that learns its
+// cap after the first batch has already chosen.
+func (h *HashAggregate) SetEpochByteCap(cap int64) { h.epochByteCap = cap }
+
+// IndexConversions reports how many flat→bucketed group-index conversions
+// this aggregate paid; IndexBornFlat reports whether its layout was pinned
+// flat at construction, and GroupCeiling the Gmax that pinned it (0 =
+// unbounded sink). Read by the worker for its per-task log lines.
+func (h *HashAggregate) IndexConversions() int { return h.indexConversions }
+
+// IndexBornFlat reports whether the bounded-sink rule pinned this
+// aggregate's group index flat — see SetEpochByteCap.
+func (h *HashAggregate) IndexBornFlat() bool { return h.indexBornFlat }
+
+// GroupCeiling reports the maximum group count this sink's epoch cap allows
+// (0 when the sink is unbounded).
+func (h *HashAggregate) GroupCeiling() int64 { return h.groupCeiling }
 
 // kernelAccumulatorBytes is the per-element cost of extras.accs slices,
 // resolved once so groupMemoryUsage stays arithmetic-only.
@@ -1462,6 +1505,19 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 		intHTInitSize = htInitSize
 	}
 
+	// Group-index LAYOUT, decided here and only here. A sink whose owner
+	// finalizes and rebuilds it on a byte cap cannot amortize a flat→
+	// bucketed conversion, so it is born flat and never converts — see
+	// twoLevelBoundedMinGroups (two_level_hash.go) for the rule, its
+	// derivation and the SF100 Q18 measurements behind it. Unbounded sinks
+	// leave this false and keep the adaptive path unchanged.
+	bornFlat, ceiling := h.boundedIndexStaysFlat(b)
+	h.groupCeiling = ceiling
+	if bornFlat && !h.indexBornFlat {
+		TwoLevelBornFlat.Add(1)
+	}
+	h.indexBornFlat = bornFlat
+
 	// Grouping sets force the generic path — keys are prefixed with set ID
 	// and only subset columns are serialized per set.
 	if len(h.GroupingSets) > 0 {
@@ -1491,7 +1547,8 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 			// Gated on a real hint — the hint-free default presize (4096, or
 			// up to 64K from InputRowHint) is a guess, and guessing bucketed
 			// would give a small aggregate 256 sub-tables for nothing.
-			if twoLevelToggle.On() && h.GroupNDVHint > 0 && intHTInitSize >= twoLevelConvertAt {
+			if twoLevelToggle.On() && !h.indexBornFlat &&
+				h.GroupNDVHint > 0 && intHTInitSize >= twoLevelConvertAt {
 				h.intTwoLevel = newIntTwoLevelTable(intHTInitSize, h.offheapReg())
 				h.intGroupIndex = nil
 				TwoLevelDirectBuilds.Add(1)
@@ -1538,7 +1595,8 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 			(len(h.GroupByCols) == 2 || packedKeysToggle.On()) {
 			h.usePackedGroupKey = true
 			h.packedLayout = layout
-			if twoLevelToggle.On() && h.GroupNDVHint > 0 && intHTInitSize >= twoLevelConvertAt {
+			if twoLevelToggle.On() && !h.indexBornFlat &&
+				h.GroupNDVHint > 0 && intHTInitSize >= twoLevelConvertAt {
 				h.packedTwoLevel = newPackedTwoLevelTable(intHTInitSize, h.offheapReg())
 				h.packedIdx = nil
 				TwoLevelDirectBuilds.Add(1)
@@ -2649,17 +2707,101 @@ func convertsToTwoLevel(live, slots, incoming int) bool {
 	return twoLevelConvertEager || (live+incoming)*10 > slots*7
 }
 
+// indexConverts is convertsToTwoLevel with this sink's construction-time
+// layout decision in front of it: a bounded sink was born flat and stays
+// flat for its whole (single-epoch) life. Every conversion site — consume,
+// both SoA merges — goes through here so the rule lives in one place.
+func (h *HashAggregate) indexConverts(live, slots, incoming int) bool {
+	return !h.indexBornFlat && convertsToTwoLevel(live, slots, incoming)
+}
+
+// boundedIndexStaysFlat decides the group-index layout from what the sink
+// knows before its first row: its epoch byte cap and its per-group state
+// size. See twoLevelBoundedMinGroups for the rule and its derivation.
+//
+// Returns whether the index must be flat, and the group ceiling it was
+// decided from (0 = unbounded sink, decision deferred to the runtime gate).
+func (h *HashAggregate) boundedIndexStaysFlat(b *batch.RecordBatch) (bool, int64) {
+	if h.epochByteCap <= 0 || !bornFlatToggle.On() {
+		return false, 0
+	}
+	s := h.perGroupStateBytes(b)
+	if s <= 0 {
+		// No usable estimate. A bounded sink is flat unconditionally then —
+		// an index rebuilt every epoch can never amortize a conversion.
+		return true, 0
+	}
+	ceiling := h.epochByteCap / int64(s)
+	return ceiling < twoLevelBoundedMinGroups, ceiling
+}
+
+// perGroupStateBytes is a LOWER bound on the bytes one group adds to
+// groupMemoryUsage on the int/packed SoA fast paths — the only paths that
+// can hold a two-level index. A lower bound gives an UPPER bound on the
+// group ceiling, which is the safe direction: the layout is pinned flat only
+// when even the most optimistic group count stays under G*.
+//
+// The terms mirror what resolveIndices and initFlatAccums actually allocate:
+// one hash-table entry per group at the load-factor ceiling, the key SoA,
+// and one flat accumulator array element per aggregate. Anything charged
+// beyond these (probe slack below 70 % load, the group-state pool, generic
+// key mirrors) only makes the real per-group cost larger, i.e. the real
+// ceiling smaller.
+func (h *HashAggregate) perGroupStateBytes(b *batch.RecordBatch) int {
+	// Index: 16-byte entries (intHashEntry; packedHashEntry is 32, charged
+	// as 16 to keep this a lower bound for both) at the 70 % load factor.
+	// The bucketed form splits the same slot count 256 ways, so this term is
+	// identical for either layout.
+	n := 16 * 10 / 7
+	// Key SoA: one int64 for the single-int path, one 128-bit packed key for
+	// the composite path.
+	if len(h.GroupByCols) >= 2 {
+		n += 16
+	} else {
+		n += 8
+	}
+	needsCount := false
+	for i, agg := range h.Aggs {
+		if aggNeedsCount(agg.Func) {
+			needsCount = true
+		}
+		ci := -1
+		if i < len(h.aggColIdx) {
+			ci = h.aggColIdx[i]
+		}
+		if ci < 0 || ci >= len(b.Columns) {
+			continue // COUNT(*): the shared count array below is all it takes
+		}
+		switch agg.Func {
+		case AggSum, AggAvg, AggMin, AggMax:
+			if b.Columns[ci].Type == batch.TypeDecimal {
+				n += 16 // Int128 sum/min/max
+			} else {
+				n += 8 // int64 / float64
+			}
+			if agg.Func == AggMin || agg.Func == AggMax {
+				n++ // hasMin / hasMax
+			}
+		}
+	}
+	if needsCount {
+		n += 8 // one shared count[] array (planCountArrays folds the rest)
+	}
+	return n
+}
+
 // maybeConvertIntIndex converts the flat single-int index to the bucketed
 // form. Called at the end of a batch, so the consume loop's hoisted table
 // pointer stays valid for the whole batch and the conversion applies from
 // the next one.
 func (h *HashAggregate) maybeConvertIntIndex(newGroups int) {
 	idx := h.intGroupIndex
-	if idx == nil || !convertsToTwoLevel(idx.Len(), idx.Slots(), newGroups) {
+	if idx == nil || !h.indexConverts(idx.Len(), idx.Slots(), newGroups) {
 		return
 	}
 	h.intTwoLevel = convertIntHashTableToTwoLevel(idx, h.offheapReg())
 	h.intGroupIndex = nil
+	h.indexConversions++
 	TwoLevelConversions.Add(1)
 }
 
@@ -2667,11 +2809,12 @@ func (h *HashAggregate) maybeConvertIntIndex(newGroups int) {
 // key mode.
 func (h *HashAggregate) maybeConvertPackedIndex(newGroups int) {
 	idx := h.packedIdx
-	if idx == nil || !convertsToTwoLevel(idx.Len(), idx.Slots(), newGroups) {
+	if idx == nil || !h.indexConverts(idx.Len(), idx.Slots(), newGroups) {
 		return
 	}
 	h.packedTwoLevel = convertPackedHashTableToTwoLevel(idx, h.offheapReg())
 	h.packedIdx = nil
+	h.indexConversions++
 	TwoLevelConversions.Add(1)
 }
 
@@ -4519,6 +4662,11 @@ func (h *HashAggregate) CloneSink() SinkSource {
 		clone.GroupNDVHint = h.GroupNDVHint
 		clone.cloneNDVDivisor = h.cloneNDVDivisor
 	}
+	// A clone of a bounded sink is bounded: the owner tears the whole
+	// aggregate down on the cap, clones included. Passing the cap unchanged
+	// over-states what one clone can hold (clones own disjoint 1/k slices),
+	// which keeps the ceiling an upper bound — the safe direction.
+	clone.epochByteCap = h.epochByteCap
 	return clone
 }
 
@@ -4979,9 +5127,10 @@ func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
 	// existing capacity stays flat because there is no rehash to displace
 	// (two_level_hash.go).
 	if idx := h.intGroupIndex; idx != nil &&
-		convertsToTwoLevel(idx.Len(), idx.Slots(), o.numIntGroups) {
+		h.indexConverts(idx.Len(), idx.Slots(), o.numIntGroups) {
 		h.intTwoLevel = convertIntHashTableToTwoLevel(idx, h.offheapReg())
 		h.intGroupIndex = nil
+		h.indexConversions++
 		TwoLevelConversions.Add(1)
 	}
 	for i := 0; i < o.numIntGroups; i++ {
@@ -5133,9 +5282,10 @@ func copyFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 // then a second Get before its Put.
 func (h *HashAggregate) mergePackedGroupSoA(o *HashAggregate) {
 	if idx := h.packedIdx; idx != nil &&
-		convertsToTwoLevel(idx.Len(), idx.Slots(), o.numIntGroups) {
+		h.indexConverts(idx.Len(), idx.Slots(), o.numIntGroups) {
 		h.packedTwoLevel = convertPackedHashTableToTwoLevel(idx, h.offheapReg())
 		h.packedIdx = nil
+		h.indexConversions++
 		TwoLevelConversions.Add(1)
 	}
 	for i := 0; i < o.numIntGroups; i++ {
