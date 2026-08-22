@@ -84,6 +84,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 			RunDir:         runDir,
 			NumWorkers:     numWorkers,
 			GoMemLimit:     sliceCfg.GoMemLimit,
+			MemoryBudget:   sliceCfg.MemoryBudget,
 			PgAddr:         cfg.PgAddr,
 			DataDir:        cfg.DataDir,
 			DataPlane:      cfg.DataPlane,
@@ -172,9 +173,13 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 				firstRun[qname] = m
 			} else if ref, ok := firstRun[qname]; ok {
 				if m.RowCount != ref.RowCount {
+					var drift float64
+					if ref.RowCount != 0 {
+						drift = (float64(m.RowCount) - float64(ref.RowCount)) / float64(ref.RowCount) * 100
+					}
 					result.Regressions = append(result.Regressions, QueryDelta{
 						Query: qname, Metric: "row_count", Status: "REGRESS",
-						Baseline: float64(ref.RowCount), Projected: float64(m.RowCount),
+						Baseline: float64(ref.RowCount), Projected: float64(m.RowCount), DriftPct: drift,
 						Detail: fmt.Sprintf("run %d row count diverged from run 1", run),
 					})
 				} else if m.ValueSig != ref.ValueSig {
@@ -211,12 +216,57 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 	}
 
 	// ExpectSpill assertion for large slice.
+	//
+	// The primary signal is maxTrackerPeakMB: it reads the "task completed"
+	// log lines already captured under runDir/logs/*.log and finds the
+	// largest tracker_peak_mb any task logged. That value is written
+	// synchronously when a task finishes — see maxTrackerPeakMB's doc
+	// comment for why that sidesteps the heartbeat timing problem below.
+	//
+	// The threshold is 40% of sliceCfg.MemoryBudget, not "saturated at the
+	// ceiling": SpillManager.ShouldSpillFor (internal/engine/memory/
+	// spill.go) proactively evicts a partition once a task's tracked usage
+	// crosses 40% of budget (the "SpillCheap" threshold), so a task under
+	// genuine sustained pressure sawtooths just above that line rather
+	// than climbing to 100% — eviction keeps knocking it back down before
+	// it gets there. Empirically, forcing this fixture's build side over
+	// budget peaked its tracker at 62-100% of budget across several runs,
+	// comfortably over 40%; an unpressured SF0.01 TPC-H query's tiny
+	// tables shouldn't get within reach of even that.
+	//
+	// collector.RunPeakSpillBytes is a fallback for the same assertion via
+	// the worker heartbeat's SpillDiskUsed, in case a future change moves
+	// the tracker_peak_mb logging or a task's spill genuinely outlives one
+	// heartbeat tick. Workers heartbeat on a fixed 10s cadence
+	// (internal/worker/worker.go) while a single local-mode query — even
+	// one under real memory pressure — often completes in well under a
+	// second, so this fallback alone is not reliable: a per-query
+	// heartbeat window can open and close between two ticks and see
+	// nothing, and the spilling task's own spill directory is removed via
+	// `defer os.RemoveAll(...)` (executor_fragment.go) the instant the
+	// task returns, so even "wait and re-check" can lose that race. Kept
+	// as a fallback because it costs nothing when the log-based signal
+	// already passed, and needs no per-query timing luck itself —
+	// RunPeakSpillBytes tracks every heartbeat regardless of window
+	// boundaries — for whatever residual chance it adds.
 	if cfg.Mode == ModeLocal && cfg.Slice == SliceLarge {
-		var totalSpill int64
-		for _, m := range result.Queries {
-			totalSpill += m.SpillBytes
+		spillProven := false
+		if peakMB, err := maxTrackerPeakMB(filepath.Join(runDir, "logs")); err == nil {
+			budgetMB := sliceCfg.MemoryBudget / (1 << 20)
+			if budgetMB > 0 && peakMB*100 >= budgetMB*40 {
+				spillProven = true
+			}
 		}
-		if totalSpill == 0 {
+		if !spillProven && collector.RunPeakSpillBytes() == 0 {
+			select {
+			case <-time.After(11 * time.Second):
+			case <-ctx.Done():
+			}
+		}
+		if !spillProven && collector.RunPeakSpillBytes() > 0 {
+			spillProven = true
+		}
+		if !spillProven {
 			result.Regressions = append(result.Regressions, QueryDelta{
 				Query:  "<run>",
 				Metric: "spill_paths_exercised",

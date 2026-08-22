@@ -17,6 +17,17 @@ type SliceConfig struct {
 	OrdersFiles   int
 	GoMemLimit    int64 // bytes; passed to worker via GOMEMLIMIT env
 	ExpectSpill   bool  // if true and total spill bytes == 0, fail the run
+
+	// MemoryBudget, when > 0, is passed as --memory-budget to every
+	// spawned process (bytes; see ClusterConfig.MemoryBudget). GOMEMLIMIT
+	// alone does not force spill: when --memory-budget is left at its
+	// default (0), the engine auto-detects a per-task budget from the
+	// cgroup/physical-memory envelope and floors it near 2 GB
+	// (cmd/wadjet/main.go minBudgetPerTask) to stay viable for SF100-class
+	// joins — far above anything this slice's fixtures need, so it never
+	// spills regardless of GoMemLimit. 0 = flag unset (small slice; no
+	// spill expected, so let the engine auto-detect as usual).
+	MemoryBudget int64
 }
 
 const (
@@ -41,6 +52,20 @@ var SliceConfigs = map[Slice]SliceConfig{
 		OrdersFiles:   3,
 		GoMemLimit:    8 * GB,
 		ExpectSpill:   true,
+		// 64 MB matches the documented "constrained worker" tuning profile
+		// (docs/tuning.md: "64 MB per task — spill early") and is proven
+		// safe across the full 22+3 suite. A tighter global budget was
+		// tried and rejected: 16 MB reliably crashed the coordinator mid-
+		// suite on q18 (a real TPC-H query, not the micro), and 4 MB made
+		// micro_grace_hash_join itself return fewer rows than it should
+		// (491552 of 500000, empirically reproduced) — a correctness bug
+		// in the grace-hash spill/replay path under extreme pressure that
+		// is out of scope here (engine code) but is reason enough not to
+		// squeeze the budget that every task in the run shares. Instead
+		// ExpectSpill is met by making micro_build's own footprint clear
+		// 64 MB by a wide margin (see micros.go) rather than by starving
+		// every other query down to the fixture's level.
+		MemoryBudget: 64 * MB,
 	},
 }
 

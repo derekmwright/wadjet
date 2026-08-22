@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -74,9 +75,21 @@ func generateMicroData() map[string]microTable {
 		data["micro_orders"] = microTable{schema: microSchemas["micro_orders"], rows: rows}
 	}
 
-	// micro_build: 500K rows, high-cardinality keys, padded strings to inflate memory
+	// micro_build: 500K rows, high-cardinality keys, padded strings to
+	// inflate memory. The pad is sized so the build side's tracked memory
+	// (internal/worker's "tracker_peak_mb" per-task log field) clears the
+	// large slice's --shared-pool-budget (SliceConfigs[SliceLarge].
+	// MemoryBudget, 64 MB) by a wide margin: a 64-byte pad measured only
+	// ~28-48 MB of tracked memory in practice (run-to-run variance from GC
+	// timing / batch boundaries), not reliably over the 64 MB budget, so
+	// ExpectSpill's "did a task's tracked memory saturate its budget"
+	// check (internal/harness/spillcheck.go) could not tell a real spill
+	// apart from a task that simply never got close. 256 bytes puts the
+	// raw string data alone at ~500K x 256B = 128 MB, comfortably 2x the
+	// budget regardless of that variance.
 	{
-		const pad = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" // 64 bytes
+		const unit = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" // 64 bytes
+		pad := strings.Repeat(unit, 4)                                                  // 256 bytes
 		rows := make([]map[string]any, 500_000)
 		for i := range rows {
 			rows[i] = map[string]any{

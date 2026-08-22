@@ -120,11 +120,21 @@ func (bf *BaselineFile) Compare(m QueryMeasurement) []QueryDelta {
 	check("spill_bytes", float64(qb.SpillBytesWritten), float64(m.SpillBytes), qb.SpillTolerancePct)
 
 	if qb.RowCount != 0 && qb.RowCount != m.RowCount {
+		// Unlike wall_ms/peak_heap_mb/alloc_count/spill_bytes above, a
+		// row_count mismatch always REGRESSes regardless of tolerance (see
+		// the method doc) — TolerancePct is left at 0 to reflect that. But
+		// DriftPct is still a real, useful percentage here (how far off
+		// the row count is), so populate it instead of leaving it at its
+		// zero value: printing "drift=0.0%" for e.g. a query that returned
+		// 0 rows instead of 6 reads as "no drift" for what is actually a
+		// 100% miss.
+		baseline := float64(qb.RowCount)
 		out = append(out, QueryDelta{
 			Query:     m.Query,
 			Metric:    "row_count",
-			Baseline:  float64(qb.RowCount),
+			Baseline:  baseline,
 			Projected: float64(m.RowCount),
+			DriftPct:  (float64(m.RowCount) - baseline) / baseline * 100,
 			Status:    "REGRESS",
 		})
 	}

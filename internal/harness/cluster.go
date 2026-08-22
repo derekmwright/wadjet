@@ -27,6 +27,17 @@ type ClusterConfig struct {
 	PgAddr     string // pgwire listen address for coordinator (default ":15433")
 	DataDir    string // local data dir (FileStore) for StorageType=="file"
 
+	// MemoryBudget, when > 0, is passed as both --memory-budget and
+	// --shared-pool-budget to every spawned process (coordinator and
+	// workers). 0 leaves both flags unset, falling through to the
+	// engine's cgroup/physical-memory auto-detection — which floors the
+	// per-task budget near 2 GB (cmd/wadjet/main.go minBudgetPerTask) and
+	// auto-sizes the shared pool as (envelope - cache) independent of
+	// --memory-budget, so GOMEMLIMIT alone cannot force spill at these
+	// fixture sizes: "spill triggers are pool-driven" (main.go), so both
+	// flags need the explicit override, not just --memory-budget.
+	MemoryBudget int64
+
 	// StorageType selects the coordinator/worker storage backend.
 	// "" or "file" -> FileStore at DataDir (default)
 	// "s3"         -> MinIO/S3 at Endpoint/Region/Bucket
@@ -169,6 +180,18 @@ func (c *Cluster) StartCoordinator(ctx context.Context) error {
 		// flags win) to run the same suite through the fast path.
 		"--local-fastpath-bytes=0",
 	}
+	if c.cfg.MemoryBudget > 0 {
+		// Standalone mode also runs an internal worker (see comment above),
+		// so the coordinator needs the same budget as external workers.
+		// Both flags are required: --shared-pool-budget (not
+		// --memory-budget) is what actually gates spill at runtime, but it
+		// auto-sizes independent of --memory-budget when left unset.
+		budget := strconv.FormatInt(c.cfg.MemoryBudget, 10)
+		coordArgs = append(coordArgs,
+			"--memory-budget="+budget,
+			"--shared-pool-budget="+budget,
+		)
+	}
 	if c.cfg.DataPlane == "grpc" {
 		c.dataPlanePort = freePort()
 		coordArgs = append(coordArgs,
@@ -221,6 +244,13 @@ func (c *Cluster) StartWorkers(ctx context.Context) error {
 			"--nats-url=" + c.natsURL,
 			"--spill-dir=" + filepath.Join(c.cfg.RunDir, "spill", role),
 			"--metrics-addr=:" + strconv.Itoa(metricsPort),
+		}
+		if c.cfg.MemoryBudget > 0 {
+			budget := strconv.FormatInt(c.cfg.MemoryBudget, 10)
+			workerArgs = append(workerArgs,
+				"--memory-budget="+budget,
+				"--shared-pool-budget="+budget,
+			)
 		}
 		if c.cfg.DataPlane == "grpc" {
 			workerArgs = append(workerArgs,

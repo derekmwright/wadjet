@@ -14,6 +14,20 @@ import (
 type MeasurementCollector struct {
 	mu      sync.Mutex
 	current *windowState
+
+	// runPeakSpill is the highest hb.SpillDiskUsed seen across every
+	// heartbeat for the collector's whole lifetime, independent of any
+	// per-query window. Workers heartbeat on a fixed 10s cadence
+	// (internal/worker/worker.go); a local-mode query suite frequently
+	// finishes a single query in well under that period, so a per-query
+	// window can easily open and close between two ticks and see zero
+	// heartbeats at all — not because nothing happened, but because the
+	// sampling missed it. Per-window Observe() calls below are also
+	// dropped outright between windows (c.current == nil). Run-level
+	// assertions like ExpectSpill need "did spill happen at any point
+	// in this run," which this field answers regardless of that
+	// per-query timing mismatch.
+	runPeakSpill int64
 }
 
 type windowState struct {
@@ -47,6 +61,9 @@ func (c *MeasurementCollector) StartWindow(query string) {
 func (c *MeasurementCollector) Observe(hb distributed.WorkerHeartbeat) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if hb.SpillDiskUsed > c.runPeakSpill {
+		c.runPeakSpill = hb.SpillDiskUsed
+	}
 	if c.current == nil {
 		return
 	}
@@ -63,6 +80,16 @@ func (c *MeasurementCollector) Observe(hb distributed.WorkerHeartbeat) {
 	if hb.NumGoroutines > c.current.goroutinePeak {
 		c.current.goroutinePeak = hb.NumGoroutines
 	}
+}
+
+// RunPeakSpillBytes returns the highest hb.SpillDiskUsed seen across every
+// heartbeat this collector has observed, regardless of per-query window
+// boundaries. See the runPeakSpill field comment for why this is the
+// reliable signal for a run-level "did spill happen at all" assertion.
+func (c *MeasurementCollector) RunPeakSpillBytes() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.runPeakSpill
 }
 
 // EndWindow finalizes the active window and returns its measurement.
