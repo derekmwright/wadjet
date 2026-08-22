@@ -150,13 +150,20 @@ type cachedFileStreamSource struct {
 	dynamicRanges []exec.DynamicRange
 	bloomFilters  []*exec.BloomScanFilter
 
-	// Download-ahead for S3 parquet inputs (see filePrefetcher). Started
-	// lazily on the first openNextFile so it inherits the task context;
-	// nil when the input has no parquet files, there's no spill dir, or
-	// prefetchDisabled is set (tests exercising the serial path).
-	prefetch         *filePrefetcher
-	prefetchStarted  bool
-	prefetchDisabled bool
+	// Download-ahead for S3 parquet inputs (see filePrefetcher). Started at
+	// Init — the earliest point where the task context and the file list
+	// are both known — so the first download overlaps whatever the runner
+	// does before the first Next (on a join fragment, the build-side load).
+	// WADJET_PREFETCH_AT_INIT=0 restores the start-at-first-open behavior;
+	// openNextFile keeps the lazy start either way, so a source whose
+	// runner never calls Init still prefetches. nil when the input has no
+	// parquet files, there's no spill dir, or prefetchDisabled is set
+	// (tests exercising the serial path).
+	prefetch              *filePrefetcher
+	prefetchStarted       bool
+	prefetchDisabled      bool
+	prefetchStartedAtInit bool // prefetch was started by Init, not by the first open
+	prefetchLeadNoted     bool
 
 	// Current shuffle decode-ahead pipeline, for producer token donation
 	// (docs/design/shuffle-decode-ahead.md §2.2). Written by the producer
@@ -257,7 +264,37 @@ func (s *cachedFileStreamSource) SetShard(shardIdx, shardCount int) {
 	s.shardCount = shardCount
 }
 
-func (s *cachedFileStreamSource) Init(_ context.Context) error { return nil }
+// Init starts the download-ahead pipeline. This is the earliest point at
+// which both the file list and the task context are known, and it runs
+// BEFORE the runner builds its operator chain — so on a join fragment the
+// first scan file downloads while the build side loads instead of after it
+// (docs/benchmarks/straggler-tier-verdict-2026-08-16.md: the degraded scan
+// mode is a 5.8-7.2 s un-overlapped prefetch-take wait; Q09 join-6's slow
+// mode 8.9 s). ctx must be the task context — it is what cancels the
+// download workers on task end, retry and drain.
+func (s *cachedFileStreamSource) Init(ctx context.Context) error {
+	if prefetchAtInit.On() {
+		s.startPrefetch(ctx)
+		s.prefetchStartedAtInit = s.prefetch != nil
+	}
+	return nil
+}
+
+// startPrefetch spawns the download-ahead workers once. Idempotent: the
+// first caller wins, so Init and the first openNextFile can both call it
+// (the second is a no-op) and a source Init'd twice — a wrapper source
+// delegating Init, a retried runner — never double-starts.
+func (s *cachedFileStreamSource) startPrefetch(ctx context.Context) {
+	if s.prefetchStarted {
+		return
+	}
+	s.prefetchStarted = true
+	if s.prefetchDisabled || s.executor == nil || s.executor.spillDir == "" ||
+		len(s.files) <= 1 || !hasPrefetchableFiles(s.files, s.executor.streamingShuffleRead) {
+		return
+	}
+	s.prefetch = startFilePrefetcher(ctx, s)
+}
 
 func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	// Phase-5 relief: mark the current mapping as recently used so it isn't
@@ -468,19 +505,22 @@ func (s *cachedFileStreamSource) openNextFileTiered(ctx context.Context) (acqTie
 	idx := s.fileIdx
 	s.fileIdx++
 
-	// Start the download-ahead pipeline on first open. Before this
+	// Start the download-ahead pipeline if Init didn't (kill switch off, or
+	// a runner path that drains a source it never Init'd). Before prefetch
 	// existed, a scan task's files were downloaded strictly one at a time
 	// with decode idle during each download — on a standalone box that
 	// capped effective S3 read parallelism at MaxConcurrent streams
 	// (2026-07-05 SF10 cold-S3: suite 20m15s vs DuckDB 2m51s, same box).
-	if !s.prefetchStarted {
-		s.prefetchStarted = true
-		if !s.prefetchDisabled && s.executor.spillDir != "" &&
-			len(s.files) > 1 && hasPrefetchableFiles(s.files, s.executor.streamingShuffleRead) {
-			s.prefetch = startFilePrefetcher(ctx, s)
-		}
-	}
+	s.startPrefetch(ctx)
 	if s.prefetch != nil {
+		// Prefetch lead: wall from the workers spawning to this first take.
+		// With the at-Init start that is the build-load overlap the tier
+		// verdict asked for, measured directly; with the switch off it is
+		// ~0 by construction. Recorded once per source.
+		if !s.prefetchLeadNoted {
+			s.prefetchLeadNoted = true
+			s.acq.notePrefetchLead(time.Since(s.prefetch.startedAt), s.prefetchStartedAtInit)
+		}
 		if res := s.prefetch.take(ctx, idx); !res.skipped && res.err == nil {
 			var err error
 			if strings.HasSuffix(filePath, ".wshf") {

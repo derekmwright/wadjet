@@ -32,6 +32,33 @@ type srcAcqStats struct {
 	files        [acqTierCount]int64
 	ns           [acqTierCount]int64
 	prefetchMiss int64
+
+	// Prefetch overlap (perf(scan,worker) 2026-08-22). prefetchLeadNs is
+	// the wall between the download workers spawning and the first take —
+	// i.e. how much of the first file's download happened BEFORE the scan
+	// asked for it, which on a join fragment is the build-load overlap.
+	// prefetchAtInit records whether the start was at source Init (the new
+	// default) or at the first file open (WADJET_PREFETCH_AT_INIT=0), so a
+	// run's stats line names which arm produced the lead. The manifest
+	// wrapper shares one instance across inner sources; the lead keeps the
+	// largest, since that is the one that covered the build.
+	prefetchLeadNs int64
+	prefetchAtInit bool
+	prefetchRan    bool
+}
+
+// notePrefetchLead records the first-take lead for one source.
+func (a *srcAcqStats) notePrefetchLead(d time.Duration, atInit bool) {
+	if a == nil {
+		return
+	}
+	a.prefetchRan = true
+	if atInit {
+		a.prefetchAtInit = true
+	}
+	if ns := d.Nanoseconds(); ns > a.prefetchLeadNs {
+		a.prefetchLeadNs = ns
+	}
 }
 
 func (a *srcAcqStats) note(t acqTier, d time.Duration) {
@@ -56,6 +83,14 @@ func (a *srcAcqStats) attrs() []any {
 	}
 	if a.prefetchMiss > 0 {
 		out = append(out, "acq_prefetch_miss", a.prefetchMiss)
+	}
+	if a.prefetchRan {
+		started := 0
+		if a.prefetchAtInit {
+			started = 1
+		}
+		out = append(out, "prefetch_started_before_build", started,
+			"prefetch_lead_ms", a.prefetchLeadNs/1e6)
 	}
 	return out
 }

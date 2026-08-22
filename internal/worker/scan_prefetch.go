@@ -7,11 +7,32 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/diskio"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
+
+// prefetchAtInit moves the download-ahead start from the first file open
+// to source Init, so the first file downloads WHILE the runner loads the
+// join build side instead of after it.
+//
+// The straggler tier this closes (docs/benchmarks/
+// straggler-tier-verdict-2026-08-16.md, re-confirmed in
+// sf100-window2-analysis-2026-08-22.md): degraded scan tasks charge
+// 5.8-7.2 s to acq_prefetch (Q09 join-6's slow mode: 8.9 s) while their
+// clean-mode siblings charge 0-1 ms to acq_basecache — the whole first
+// download is exposed because it starts only after the build load
+// finished, with the connection idle for the entire build.
+//
+// Registered as a kill switch even though prefetch is best-effort and
+// cannot change a row set (every failure falls through to the tiered open
+// path): it is enumerated by the optimization-invariance oracle and
+// bisectable on EC2 by env alone, the same rationale as decode-admission.
+var prefetchAtInit = optswitch.Register("prefetch-at-init", "WADJET_PREFETCH_AT_INIT",
+	"start the scan file prefetcher at source Init so it overlaps the build load; off = start at the first file open")
 
 // Prefetch tuning. Vars (not consts) so tests can shrink them to exercise
 // the window/ordering machinery with small files.
@@ -76,6 +97,13 @@ type filePrefetcher struct {
 	wg      sync.WaitGroup
 	results []chan *prefetchResult
 
+	// startedAt is when the download workers were spawned. The wall from
+	// here to the first take() is the prefetch LEAD — the part of the
+	// download that overlapped whatever the runner did between source
+	// Init and the first Next (on a join fragment: the build load). Read
+	// once by the producer goroutine; never written after construction.
+	startedAt time.Time
+
 	mu         sync.Mutex
 	window     int64         // bytes admitted, not yet released by take/fetch-error
 	nextNeeded int           // lowest index take() has not been called for
@@ -98,13 +126,16 @@ func hasPrefetchableFiles(files []string, includeShuffle bool) bool {
 	return false
 }
 
-// startFilePrefetcher spawns the download workers for s.files. ctx should
-// be the task context (from the first Next call); cancellation stops all
-// workers. The caller must Close() the returned prefetcher.
+// startFilePrefetcher spawns the download workers for s.files. ctx MUST be
+// the task context (source Init's, or the first Next's when the at-Init
+// start is off) — cancelling it stops every worker, which is what bounds
+// the goroutines to the task on cancel, retry and drain. The caller must
+// Close() the returned prefetcher.
 func startFilePrefetcher(ctx context.Context, s *cachedFileStreamSource) *filePrefetcher {
 	pctx, cancel := context.WithCancel(ctx)
 	p := &filePrefetcher{
 		cancel:     cancel,
+		startedAt:  time.Now(),
 		results:    make([]chan *prefetchResult, len(s.files)),
 		windowFree: make(chan struct{}),
 	}

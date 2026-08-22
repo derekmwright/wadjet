@@ -63,3 +63,27 @@ Preflight clean (zero orphans), on-demand, sha-pinned 4892d76.
 Counters verified emitting at T+5min via SSM (a cold join-2 already
 showed src 12.7s / prefetch 8.6s live). Completion monitor fired
 correctly; destroyed before analysis; EC2 zero.
+
+## Lever landed (2026-08-22)
+
+`cachedFileStreamSource.Init` now starts the prefetcher
+(`internal/worker/stream_source.go`, `startPrefetch`); `openNextFile`
+keeps the lazy start as a fallback, so no runner path that drains a
+source it never Init'd loses prefetch. Every fragment runner Inits its
+source BEFORE it builds the unary chain (`executeFragment`
+`src.Init` precedes `buildUnaryChain` → `buildFragmentJoinProbe` →
+`broadcastCache.Acquire`), which is exactly the build-load overlap the
+lever asked for. Per-source concurrency and byte window are unchanged
+(`scanPrefetchConcurrency` 4, 256 MiB) — the ceiling lift stays
+rejected; only the START MOMENT moved.
+
+Kill switch `WADJET_PREFETCH_AT_INIT=0` restores start-at-first-open
+for an env-only A/B on the same binary.
+
+Verification handle for the next SF100 run: the fragment phases line
+now carries `prefetch_started_before_build` (1 = started at Init) and
+`prefetch_lead_ms` (wall from the download workers spawning to the
+first `take`). On a join fragment the lead IS the overlap, so the
+claim is directly readable per task: expect lead ≈ the build load on
+join stages, and `acq_prefetch_ms` to fall by that much. Cold scan-0
+first-touch waits (16–17 s) remain bandwidth-bound — unchanged claim.
