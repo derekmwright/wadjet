@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 )
 
 // peerRegistryTTL bounds how long file locations and fetch tokens survive
@@ -20,6 +21,17 @@ const peerRegistryTTL = 2 * time.Hour
 // peerRegistrySweepEvery rate-limits the lazy TTL sweep piggybacked on
 // Record/TokenFor calls.
 const peerRegistrySweepEvery = 10 * time.Minute
+
+// intermPeerHints gates peer-location hints for fragment SOURCE inputs —
+// in practice the gather-merge (`-interm-`) tasks of
+// dispatchFinalAggregateFanout, the only dispatcher that does not also
+// mirror its fragment inputs into Task.Inputs. Off restores the pre-
+// 2026-08-22 hint set (builds only), i.e. those consumers go straight to
+// the S3 durable wait. Placement is the only thing it can move: hints are
+// advisory on the read path and every tier falls through to the same
+// durable copy.
+var intermPeerHints = optswitch.Register("interm-peer-hints", "WADJET_INTERM_PEER_HINTS",
+	"peer-location hints on fragment source inputs (gather-merge / interm stages); off = those reads skip the peer tier")
 
 // peerFileRegistry is the coordinator's streaming-exchange bookkeeping
 // (Phase A): which worker produced (and still locally holds) each stage-
@@ -303,6 +315,20 @@ func (c *Coordinator) annotateTaskPeerLocations(t *distributed.Task) {
 	// specs; walk Operators so their build reads get peer hints too.
 	for i := range t.Operators {
 		addAll(t.Operators[i].BuildFiles)
+		// …and so do fragment SOURCE reads. Every other dispatcher mirrors
+		// its fragment's inputs into Task.Inputs, which the loop above
+		// covers; dispatchFinalAggregateFanout does not — its merge tasks
+		// carry their input list ONLY in OpShuffleSource.InputFiles. The
+		// result was a whole task class dispatched with a fetch token and
+		// no hint: the gather-merge tail never tried the producing worker's
+		// local copy and always fell into the S3 durable wait
+		// (peer_fallthroughs = 0 with 12–14.5s of wait per SF100 suite run,
+		// window-2 §7.1). OpScan's InputFiles are base-table keys, which
+		// the registry never records, so they cost one map lookup and add
+		// nothing.
+		if intermPeerHints.On() {
+			addAll(t.Operators[i].InputFiles)
+		}
 	}
 	t.InputLocations = locs
 }

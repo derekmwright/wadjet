@@ -157,6 +157,61 @@ func TestAnnotatorAsyncUploadAndDisable(t *testing.T) {
 	}
 }
 
+// TestAnnotatorHintsFragmentSourceInputs is the window-2 §7.1 regression.
+// dispatchFinalAggregateFanout's merge tasks carry their input list ONLY in
+// OpShuffleSource.InputFiles — never in Task.Inputs, which every other
+// dispatcher mirrors — so the annotator walked past them and the whole
+// gather-merge tail was dispatched with a fetch token and no peer hint. It
+// then had no tier between itself and the S3 durable wait.
+func TestAnnotatorHintsFragmentSourceInputs(t *testing.T) {
+	const (
+		interm = "queries/qr/final_aggregate-7/interm-0.wshf"
+		table  = "tables/lineitem/part-0000.parquet"
+	)
+	newMergeTask := func() distributed.Task {
+		return distributed.Task{
+			ID:      "m0",
+			QueryID: "st-final_aggregate-7-interm-qr",
+			StageID: "final_aggregate-7-merge-0",
+			Type:    distributed.TaskTypeStage,
+			// The whole point: the input list lives here and nowhere else.
+			ResultPrefix: "queries/qr/final_aggregate-7/",
+			Operators: []distributed.OpSpec{
+				{Type: distributed.OpShuffleSource, InputAlias: "repartition-11", InputFiles: []string{interm, table}},
+				{Type: distributed.OpHashAggregate},
+				{Type: distributed.OpUnpartitionedSink},
+			},
+		}
+	}
+
+	c := testCoordinatorForPeers(time.Minute)
+	c.peerFiles.Record([]string{interm}, "w1")
+	// A base-table key is never recorded, so it can never acquire a hint.
+	c.peerFiles.Record([]string{table}, "w1")
+	c.workers.record(distributed.WorkerHeartbeat{WorkerID: "w1", PeerAddr: "10.0.0.1:9095"})
+
+	task := newMergeTask()
+	c.annotateTaskPeerLocations(&task)
+	if task.InputLocations[interm] != "10.0.0.1:9095" {
+		t.Fatalf("merge task got no hint for its source input: %v", task.InputLocations)
+	}
+	if _, ok := task.InputLocations[table]; ok {
+		t.Fatalf("base-table key acquired a query-scratch hint: %v", task.InputLocations)
+	}
+
+	// Kill switch: back to builds-only hints.
+	prev := intermPeerHints.Set(false)
+	t.Cleanup(func() { intermPeerHints.Set(prev) })
+	off := newMergeTask()
+	c.annotateTaskPeerLocations(&off)
+	if len(off.InputLocations) != 0 {
+		t.Fatalf("WADJET_INTERM_PEER_HINTS=0 still hinted: %v", off.InputLocations)
+	}
+	if off.FetchToken == "" {
+		t.Fatal("the switch must only drop hints, not the fetch token")
+	}
+}
+
 func TestAnnotatorShuffleDurabilityPolicy(t *testing.T) {
 	newStageTask := func() distributed.Task {
 		return distributed.Task{

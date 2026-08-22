@@ -133,6 +133,41 @@ requires `len(GroupByCols)>0 || len(Aggregates)>0` and has **no `GroupByAll`**
 — the single-process `buildDistinct` (`plan.go:5583`) uses
 `HashAggregate.GroupByAll=true`, which has no distributed equivalent yet.
 
+### Where a fragment's inputs are visible to the annotator
+
+`coordinator.annotateTaskPeerLocations` (`coordinator/peer_locations.go`) is
+the only thing that turns a completed producer task into a consumer's
+peer-location hint, and it can only hint file lists it walks. It walks
+`Task.{Files,InputFiles,BuildFiles,Inputs,PreScannedInputs,ScanFileFilter}`,
+`FusedJoins[].BuildFiles`, and — since 2026-08-22 — `Operators[].BuildFiles`
+**and `Operators[].InputFiles`**.
+
+That last one matters because the two are not redundant. Every dispatcher
+except one mirrors its fragment's inputs into `Task.Inputs` as well as into
+`OpShuffleSource.InputFiles`; `dispatchFinalAggregateFanout`
+(`execute_stage_dag.go`, the `final_aggregate-N-merge-K` tasks and the final
+merge over their `-interm-` outputs) does not. Before the annotator walked
+op source inputs, that whole task class was dispatched with a fetch token
+and **no hint at all**: no Tier-1.5 peer read was ever attempted, the first
+S3 `Get` hit the producer's still-in-flight background upload, and the task
+sat in `awaitDurableObject`. SF100 window 2 measured that as 12–14.5 s of
+critical path per suite run, on 4-row tasks, with `peer_fallthroughs = 0`
+across every arm (nothing ever fell through because nothing was ever
+tried) — `docs/benchmarks/sf100-window2-analysis-2026-08-22.md` §7.1.
+
+Kill switch `WADJET_INTERM_PEER_HINTS=0` restores the builds-only hint set.
+Hints are advisory on every path — a stale or absent one costs one failed
+fetch and the read falls through to the same durable copy — so the only
+thing this can move besides read tier is placement, via
+`pickLocalityWorkerFrom` (`--locality-placement`), which co-locates a task
+only when *all* of its hints name one worker.
+
+**The rule for new dispatchers:** put a fragment's input keys somewhere the
+annotator walks. `Operators[].InputFiles` now qualifies, so a fragment-only
+dispatcher is fine; a dispatcher that invents a third home for input keys
+has to teach the annotator about it or its consumers lose the peer tier
+silently.
+
 ## Outer joins: the rows an empty side still owes
 
 An outer join's defining rows are the ones its data does NOT produce — the
