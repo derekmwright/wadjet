@@ -183,35 +183,54 @@ cross-validation against DuckDB.
 
 Coordinator `c7g.2xlarge` + 3× `c7gd.4xlarge` workers (16 vCPU / 32 GB /
 NVMe each), SF100 Parquet on S3 (us-east-2), NATS control plane, gRPC
-streaming exchange with durable S3 fallback. Steady-state suite (run 2 of
-2; caches populated — cold run 1 of the same session was 3m42s). Row
-counts are validated per run and the answers are additionally verifiable
-value-level against a committed DuckDB fingerprint ground truth
-(`benchmarks/tpch/fingerprint-sf100.json`, captured in-region).
-2026-08-21 at v0.16.0-correctness, `results/20260821-210755`.
+streaming exchange with durable S3 fallback. Steady-state suite (mean of
+runs 2-4 of 4; caches populated — cold run 1 of the same session was
+2m59s). Row counts are validated per run and the answers are additionally
+verifiable value-level against a committed DuckDB fingerprint ground
+truth (`benchmarks/tpch/fingerprint-sf100.json`, captured in-region).
+2026-08-22 at v0.17.0, `results/20260822-055421` (same-window baseline
+`results/20260822-053854`, engine `23abd8e` / v0.16.0-correctness).
 
 | Query | Time | | Query | Time |
 |---|---:|---|---|---:|
-| Q01 | 5.3s | | Q12 | 7.4s |
-| Q02 | 5.0s | | Q13 | 5.9s |
-| Q03 | 10.3s | | Q14 | 2.3s |
-| Q04 | 8.0s | | Q15 | 1.6s |
-| Q05 | 9.3s | | Q16 | 6.7s |
-| Q06 | 1.4s | | Q17 | 6.7s |
-| Q07 | 9.4s | | Q18 | 20.6s |
-| Q08 | 20.6s | | Q19 | 4.3s |
-| Q09 | 26.9s | | Q20 | 10.1s |
-| Q10 | 11.0s | | Q21 | 10.4s |
-| Q11 | 3.1s | | Q22 | 2.8s |
+| Q01 | 3.5s | | Q12 | 5.1s |
+| Q02 | 4.9s | | Q13 | 5.6s |
+| Q03 | 9.2s | | Q14 | 1.9s |
+| Q04 | 5.3s | | Q15 | 2.4s |
+| Q05 | 6.2s | | Q16 | 5.7s |
+| Q06 | 0.8s | | Q17 | 8.7s |
+| Q07 | 4.2s | | Q18 | 13.9s |
+| Q08 | 17.4s | | Q19 | 3.7s |
+| Q09 | 20.7s | | Q20 | 9.2s |
+| Q10 | 12.1s | | Q21 | 9.6s |
+| Q11 | 3.5s | | Q22 | 2.7s |
 
-**Suite total: 3m09s steady / 3m42s cold.** These are the first numbers
-published after the v0.16.0 correctness campaign (~60 wrong-answer fixes;
-see the release notes) — some performance was deliberately traded for
-correct answers, and clawing it back under the new gates is the next arc.
-The best pre-campaign run on this configuration was 2m36s steady / 3m21s
-cold (2026-08-16, run 4 of 4). On identical hardware in a same-day paired
-run (2026-08-14), Wadjet's steady state beat Trino 470 FTE by 10% on
-suite wall and 19% on per-query geomean, winning 12 of 22 queries
+**Suite total: 2m36s steady (mean of runs 2-4) / 2m59s cold.** The best
+single steady run was 2m33s (152.9s, run 3), beating the prior all-time
+record of 2m36s (155.9s, 2026-08-16); the cold run also beat the prior
+best cold of 3m21s (201s, 2026-08-16). Same-window baseline on engine
+`23abd8e` (v0.16.0-correctness) was 2m56s steady / 3m30s cold — an 11%
+steady-state improvement, 12% on suite totals across all 4 runs (648s vs
+738s). Row counts and DuckDB fingerprint value signatures are identical
+across every arm and run. This is the perf-clawback arc that follows the
+v0.16.0 correctness campaign: lazy-resolution guards and a compile-time
+boolean protocol taken out of the expression row loop (no kill switch —
+results are provably unchanged), a group-index layout decided at sink
+construction so bounded aggregates build flat and never convert
+(`WADJET_TWO_LEVEL_BORN_FLAT`), stage-sink row accumulation outside the
+lock (`WADJET_STAGE_SINK_ACCUM`), decode-ahead admitted as its own
+CPU-token class (`WADJET_DECODE_ADMISSION`), the scan prefetcher started
+at source Init (`WADJET_PREFETCH_AT_INIT`), geometric backoff and peer
+hints on the gather-merge durable wait (`WADJET_DURABLE_WAIT_BACKOFF`,
+`WADJET_INTERM_PEER_HINTS`), and vector-backing reuse on the hash-join
+probe emit path (`WADJET_VECTOR_REUSE`). Full attribution:
+[profile-attribution-2026-08-21.md](docs/benchmarks/profile-attribution-2026-08-21.md),
+[sf100-window-analysis-2026-08-22.md](docs/benchmarks/sf100-window-analysis-2026-08-22.md),
+[sf100-window2-analysis-2026-08-22.md](docs/benchmarks/sf100-window2-analysis-2026-08-22.md),
+and sf100-window3-analysis-2026-08-22.md (landing shortly). On identical
+hardware in a same-day paired run (2026-08-14), Wadjet's steady state beat
+Trino 470 FTE by 10% on suite wall and 19% on per-query geomean, winning
+12 of 22 queries
 ([full comparison](docs/benchmarks/trino-comparison-2026-08-14.md)).
 
 ### ClickBench, single node (official spec)
@@ -221,42 +240,43 @@ The full 43-query ClickBench suite on the official listing hardware —
 `hits` Parquet data in place (14.7 GB, no import step). Official
 methodology: page-cache drop before each query, cold + 2 hot tries,
 one process per query. Every query result is cell-exact against DuckDB
-on the same data (`benchmarks/clickbench/`). 2026-08-21 at
-v0.16.0-correctness, `benchmarks/clickbench/results-c6a-20260821-v0160.json`.
+on the same data (`benchmarks/clickbench/`). 2026-08-22 at
+v0.17.0, `benchmarks/clickbench/results-c6a-20260822-v0170.json`.
 
 | Query | Cold | Hot | Query | Cold | Hot |
 |---|---:|---:|---|---:|---:|
-| Q01 | 0.005s | 0.001s | Q23 | 21.5s | 4.38s |
-| Q02 | 0.057s | 0.024s | Q24 | 12.3s | 3.14s |
-| Q03 | 0.23s | 0.19s | Q25 | 2.63s | 1.13s |
-| Q04 | 0.33s | 0.19s | Q26 | 1.02s | 0.94s |
-| Q05 | 0.83s | 0.76s | Q27 | 2.64s | 1.12s |
-| Q06 | 1.61s | 1.52s | Q28 | 9.69s | 4.03s |
-| Q07 | 0.018s | 0.012s | Q29 | 12.0s | 11.8s |
-| Q08 | 0.13s | 0.090s | Q30 | 0.16s | 0.12s |
-| Q09 | 1.27s | 1.17s | Q31 | 2.07s | 0.98s |
-| Q10 | 3.15s | 2.90s | Q32 | 5.70s | 1.39s |
-| Q11 | 0.71s | 0.61s | Q33 | 5.94s | 5.25s |
-| Q12 | 0.81s | 0.71s | Q34 | 10.7s | 4.73s |
-| Q13 | 1.24s | 1.07s | Q35 | 14.5s | 8.38s |
-| Q14 | 3.19s | 2.44s | Q36 | 4.50s | 4.12s |
-| Q15 | 1.50s | 1.33s | Q37 | 0.32s | 0.22s |
-| Q16 | 1.06s | 0.94s | Q38 | 0.19s | 0.12s |
-| Q17 | 2.85s | 2.47s | Q39 | 0.17s | 0.068s |
-| Q18 | 2.51s | 2.13s | Q40 | 0.72s | 0.43s |
-| Q19 | 12.2s | 10.6s | Q41 | 0.074s | 0.038s |
-| Q20 | 0.18s | 0.050s | Q42 | 0.072s | 0.038s |
-| Q21 | 10.1s | 1.45s | Q43 | 0.20s | 0.15s |
-| Q22 | 11.2s | 1.96s |  |  |  |
+| Q01 | 0.001s | 0.001s | Q23 | 21.5s | 4.37s |
+| Q02 | 0.056s | 0.021s | Q24 | 12.3s | 3.11s |
+| Q03 | 0.23s | 0.19s | Q25 | 2.64s | 1.12s |
+| Q04 | 0.33s | 0.19s | Q26 | 0.99s | 0.92s |
+| Q05 | 0.74s | 0.69s | Q27 | 2.64s | 1.13s |
+| Q06 | 1.70s | 1.53s | Q28 | 9.75s | 3.96s |
+| Q07 | 0.014s | 0.012s | Q29 | 12.3s | 11.7s |
+| Q08 | 0.13s | 0.095s | Q30 | 0.15s | 0.11s |
+| Q09 | 1.15s | 1.08s | Q31 | 2.07s | 0.96s |
+| Q10 | 3.22s | 2.85s | Q32 | 5.70s | 1.39s |
+| Q11 | 0.69s | 0.59s | Q33 | 5.88s | 5.25s |
+| Q12 | 0.77s | 0.71s | Q34 | 10.7s | 4.70s |
+| Q13 | 1.28s | 1.03s | Q35 | 14.7s | 8.41s |
+| Q14 | 3.11s | 2.67s | Q36 | 4.29s | 3.81s |
+| Q15 | 1.56s | 1.31s | Q37 | 0.31s | 0.19s |
+| Q16 | 0.96s | 0.87s | Q38 | 0.20s | 0.11s |
+| Q17 | 3.13s | 2.48s | Q39 | 0.15s | 0.067s |
+| Q18 | 2.67s | 2.10s | Q40 | 0.55s | 0.41s |
+| Q19 | 11.1s | 10.8s | Q41 | 0.071s | 0.042s |
+| Q20 | 0.17s | 0.053s | Q42 | 0.071s | 0.046s |
+| Q21 | 10.1s | 1.44s | Q43 | 0.19s | 0.15s |
+| Q22 | 11.2s | 1.95s |  |  |  |
 
 **Suite sums: 2m42s cold / 1m25s hot (43/43, no failures).** By the
 official ClickBench formula (reproducible via
-`benchmarks/clickbench/rank.py`) this places Wadjet at combined #42,
-hot #66, and cold #19 of the 136 published `c6a.4xlarge` entries
-(as of 2026-08-21) — ahead of the Trino, Presto, Impala, Spark,
+`benchmarks/clickbench/rank.py`) this places Wadjet at combined #41,
+hot #66, and cold #17 of the 136 published `c6a.4xlarge` entries
+(as of 2026-08-22) — ahead of the Trino, Presto, Impala, Spark,
 Daft, GlareDB, and pg_duckdb Parquet entries on the same hardware.
-Unlike TPC-H SF100, ClickBench improved through the correctness
-campaign (cold −9s, hot −14s vs the 2026-08-17 run).
+This release's perf-clawback arc targeted the distributed TPC-H path;
+ClickBench (single-node) is flat within noise against v0.16.0-correctness
+(cold 161.5s vs 162.3s, hot 84.6s vs 85.2s).
 The remaining hot spots (Q29, Q33, Q19, Q35 — regex-keyed grouping
 and high-cardinality aggregation) are the active optimization arc.
 Cold times for early large-read queries vary run-to-run with EBS gp2
