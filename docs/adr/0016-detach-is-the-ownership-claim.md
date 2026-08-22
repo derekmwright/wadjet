@@ -130,6 +130,8 @@ fresh allocation per output batch.
   storage reuse), §5 (the consumer matrix this invariant extends)
 - `docs/benchmarks/sf100-window2-analysis-2026-08-22.md` §5 (the heap-lock ranking
   and its callers)
+- `docs/benchmarks/sf100-window3-analysis-2026-08-22.md` (the window-3 B-vs-D
+  vector-reuse arm: −260 GB/run alloc, −13.1 s/worker-run mutex, wall-neutral)
 - `internal/engine/exec/join_emit_reuse.go`, `internal/engine/batch/batch.go`
   (`Detach`, `DetachPool`), `internal/engine/batch/vector.go` (`Claim`,
   `ResetForWrite`)
