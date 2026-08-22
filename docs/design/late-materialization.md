@@ -143,6 +143,48 @@ composed away, or serialized) before batch i+1 enters.
   pipeline additionally flattens defensively before any sink not declared
   view-aware, so correctness never depends on remembering a call site.
 
+### 4.1 Emit-storage reuse (2026-08-22)
+
+The same ownership rule that lets views be lazy also lets the probe's *own*
+emit storage be reused, and the SF100 window that measured the Go heap lock at
+88% of all worker mutex delay (81 s per worker per suite run — see
+`docs/benchmarks/sf100-window-analysis-2026-08-22.md` §5) made that the largest
+single lever on the join path: `emitViewOutput` charges ~273 GB per suite run,
+all of it in large objects (>32 KB) that take the heap lock directly.
+
+`BatchPool` could not recycle any of it, because it recycles only what a driver
+hands back with `Release()`, and the worker's `fragmentDriver`
+(`internal/worker/executor_fragment.go`) does not opt into `ReleaseInputs` —
+so on the distributed path every probe output batch was freshly allocated.
+
+The signal the worker path *does* carry is `Detach`. It already means "a
+consumer keeps this past the call that handed it over", and every retaining
+consumer calls it. So:
+
+- `RecordBatch.Detach` records the claim on the batch **and on every column
+  vector** (`Vector.Claim`, which recurses through `Base` and nested children).
+  The per-vector claim is what makes it hold through a *derived* batch:
+  `ColumnPrune`, the set-op emitter and partitioned aggregation's `selView`
+  mint a new `RecordBatch` over the same `*Vector` pointers, and a view minted
+  downstream over one of the probe's gathered columns propagates the claim
+  through `Vector.Base`.
+- `HashJoinProbe` keeps its last output (`probeEmitBuf`, `join_emit_reuse.go`)
+  and writes over it — the shell, the probe/build index arrays, the view
+  composition buffers, and the eagerly-gathered build columns via
+  `Vector.ResetForWrite` — only while no claim has landed. One claim
+  surrenders the whole buffer, since every piece of it is reachable from the
+  batch the consumer kept.
+- `emitViewOutput` pins its input with `DetachPool` rather than `Detach`: that
+  reference is transitive (it dies with this output batch), so claiming the
+  input outright would stop an *upstream* probe reusing its storage forever.
+  Pool severance — the reason the call exists — is unchanged.
+
+Kill switch: `WADJET_VECTOR_REUSE=0` (`optswitch` name `vector-reuse`) restores
+a fresh allocation per output batch. Local effect, `BenchmarkProbeEmitViewOutput`
+at TPC-H widths: single-batch build (views only) 20.9 KiB → 4.6 KiB per output
+batch (−78%), multi-batch build (eager gather) 118.3 KiB → 2.1 KiB (−98%),
+24 → 7 allocs, −32% wall.
+
 ## 5. Consumer matrix (what flattens, what stays lazy)
 
 | Consumer | v1 behavior |

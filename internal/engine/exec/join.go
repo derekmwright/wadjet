@@ -2129,6 +2129,13 @@ type HashJoinProbe struct {
 	// probes never share a cursor.
 	boundOutput bool
 	res         probeResume
+
+	// emitBuf is the reusable late-materialization output storage — index
+	// arrays, view composition buffers and gathered build columns written
+	// over on each emit while no consumer has claimed them. Per-operator, and
+	// Clone() mints a fresh probe, so parallel workers never share one. See
+	// join_emit_reuse.go for the ownership rule.
+	emitBuf probeEmitBuf
 }
 
 // probeResume is the suspended position of a probe's fan-out: which probe row
@@ -2155,6 +2162,9 @@ type probeResume struct {
 }
 
 func (p *HashJoinProbe) Init(_ context.Context) error {
+	// A probe reused across queries must not carry last query's emit storage
+	// (different schema, and its consumers are long gone).
+	p.emitBuf.reset()
 	if !p.join.buildDone {
 		return fmt.Errorf("hash join build phase not complete")
 	}
@@ -2519,10 +2529,19 @@ func (p *HashJoinProbe) emitViewOutput(in *batch.RecordBatch, outSchema []parque
 	allMatched := h.JoinType != LeftJoin && h.JoinType != FullOuterJoin
 	singleBuild := len(h.buildBatches) == 1
 
-	// Index slices are freshly allocated per output batch — views escape
-	// downstream, so reusing a scratch buffer here would let batch i+1
-	// corrupt any batch-i view a consumer failed to flatten. Two O(n)
-	// uint32 slices replace one full copy per output column.
+	// Storage reuse: last call's output is written over when no consumer
+	// claimed it, which is what removes ~208 GB per SF100 suite run of gather
+	// backing plus ~62 GB of index arrays from the Go heap lock's queue. See
+	// probeEmitBuf's ownership rule (join_emit_reuse.go) — the invariant is
+	// that a consumer keeping a batch past its call calls Detach, and Detach
+	// records the claim on the column vectors, so a derived batch or a
+	// downstream view over one of our columns carries it back to us.
+	e := &p.emitBuf
+	reuse := e.reusable(mapping)
+	if !reuse {
+		e.reset()
+	}
+
 	var probeIdx, buildIdx []uint32
 	hasProbeCols, hasBuildCols := false, false
 	for _, m := range mapping {
@@ -2533,27 +2552,45 @@ func (p *HashJoinProbe) emitViewOutput(in *batch.RecordBatch, outSchema []parque
 		}
 	}
 	if hasProbeCols {
-		probeIdx = make([]uint32, n)
+		e.probeIdx = ensureU32(e.probeIdx, n)
+		probeIdx = e.probeIdx
 		for i, pair := range pairs {
 			probeIdx[i] = uint32(pair.probeRow)
 		}
 	}
 	if hasBuildCols && singleBuild {
-		buildIdx = make([]uint32, n)
+		e.buildIdx = ensureU32(e.buildIdx, n)
+		buildIdx = e.buildIdx
 		for i, pair := range pairs {
 			buildIdx[i] = uint32(pair.ref.rowIdx)
 		}
 	}
 
-	cols := make([]*batch.Vector, len(mapping))
+	if cap(e.cols) >= len(mapping) {
+		e.cols = e.cols[:len(mapping)]
+	} else {
+		e.cols = make([]*batch.Vector, len(mapping))
+		e.composed = make([][]uint32, len(mapping))
+	}
+	if len(e.composed) != len(mapping) {
+		e.composed = make([][]uint32, len(mapping))
+	}
+	cols := e.cols
 	viewCols := 0
 	for outColIdx, m := range mapping {
 		switch {
 		case m.fromProbe:
-			cols[outColIdx] = batch.NewViewVector(in.Columns[m.srcIdx], probeIdx)
+			// The view Vector itself is minted fresh every batch (a header
+			// plus a null bitmap, both small-object); only the composition
+			// buffer a view-over-view adopts — one large object per column
+			// per batch on a fused join chain — is carried across.
+			v, adopted := batch.NewViewVectorReuse(in.Columns[m.srcIdx], probeIdx, e.composed[outColIdx])
+			e.composed[outColIdx] = adopted
+			cols[outColIdx] = v
 			viewCols++
 		case singleBuild:
-			v := batch.NewViewVector(h.buildBatches[0].Columns[m.srcIdx], buildIdx)
+			v, adopted := batch.NewViewVectorReuse(h.buildBatches[0].Columns[m.srcIdx], buildIdx, e.composed[outColIdx])
+			e.composed[outColIdx] = adopted
 			if !allMatched {
 				// Left-join null-fill: unmatched pairs carry a zero buildRef
 				// whose index value is meaningless — the view's own null bit
@@ -2567,7 +2604,17 @@ func (p *HashJoinProbe) emitViewOutput(in *batch.RecordBatch, outSchema []parque
 			cols[outColIdx] = v
 			viewCols++
 		default:
-			dst := batch.NewColumnVector(outSchema[outColIdx], n)
+			// Multi-batch build: this column is gathered eagerly, so its
+			// storage is ours and is the one thing here worth reusing —
+			// ResetForWrite resizes and clears it in place, retaining the
+			// typed slice and (for BYTES) the arena PreAllocBytes would
+			// otherwise re-request at full size every batch.
+			dst := cols[outColIdx]
+			if reuse && reusableGather(dst, outSchema[outColIdx]) {
+				dst.ResetForWrite(n)
+			} else {
+				dst = batch.NewColumnVector(outSchema[outColIdx], n)
+			}
 			gatherBuildVector(dst, m.srcIdx, pairs, h.buildBatches, allMatched)
 			cols[outColIdx] = dst
 		}
@@ -2575,15 +2622,27 @@ func (p *HashJoinProbe) emitViewOutput(in *batch.RecordBatch, outSchema []parque
 
 	if hasProbeCols {
 		// Views reference the input's vectors: sever it from its pool so a
-		// recycle can't truncate the shared arenas mid-flight. GC reclaims
-		// it through the views' Base pointers once they die (the pipeline
-		// flattens before every non-view-aware consumer).
-		in.Detach()
+		// recycle can't truncate the shared arenas mid-flight. DetachPool,
+		// not Detach: the reference is transitive — it dies with THIS output
+		// batch — so claiming the input outright would stop an upstream probe
+		// reusing its own storage forever. A consumer that really keeps our
+		// output propagates the claim through Vector.Base for us.
+		in.DetachPool()
 	}
+
+	out := e.out
+	if out == nil {
+		out = &batch.RecordBatch{}
+		e.out = out
+	}
+	out.Columns = cols
+	out.Schema = outSchema
+	out.Len = n
+	out.Sel = nil
 
 	LateMatBatchesEmitted.Add(1)
 	LateMatViewColumns.Add(int64(viewCols))
-	return &batch.RecordBatch{Columns: cols, Schema: outSchema, Len: n}
+	return out
 }
 
 // inlineIntProbe is the fast probe path for single int key inner joins.

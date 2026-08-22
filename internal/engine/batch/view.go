@@ -25,15 +25,37 @@ package batch
 // indices. Callers that need null-injection (outer-join fill) mark rows
 // with v.Nulls.SetNull(i); those rows' index values are ignored.
 func NewViewVector(base *Vector, indices []uint32) *Vector {
+	v, _ := NewViewVectorReuse(base, indices, nil)
+	return v
+}
+
+// NewViewVectorReuse is NewViewVector with a caller-owned composition buffer.
+//
+// When base is itself a view its indirection has to be folded into a NEW
+// index array, and at join-emit widths that array is a large-object
+// allocation per column per output batch — one of the spans the Go heap lock
+// serializes on. Passing composeBuf lets a caller that owns the resulting
+// view's lifetime keep that array across batches. The returned slice is the
+// array the view ADOPTED: it stays live for as long as the view does, so only
+// a caller that knows the view is dead may re-pass it (see probeEmitBuf's
+// ownership rule in package exec). nil comes back when no composition was
+// needed and `indices` was adopted directly.
+func NewViewVectorReuse(base *Vector, indices, composeBuf []uint32) (*Vector, []uint32) {
 	v := &Vector{
 		Type:  base.Type,
 		Len:   len(indices),
 		Nulls: NewBitmap(len(indices)),
 	}
+	var adopted []uint32
 	if base.Base != nil {
 		// Compose: fold the base view's indirection and own-nulls into this
 		// view so Base is always owned and reads are single-hop.
-		composed := make([]uint32, len(indices))
+		composed := composeBuf
+		if cap(composed) >= len(indices) {
+			composed = composed[:len(indices)]
+		} else {
+			composed = make([]uint32, len(indices))
+		}
 		for i, x := range indices {
 			composed[i] = base.Indices[x]
 			if base.Nulls.IsNullFast(int(x)) {
@@ -41,6 +63,7 @@ func NewViewVector(base *Vector, indices []uint32) *Vector {
 			}
 		}
 		indices = composed
+		adopted = composed
 		base = base.Base
 	}
 	v.Base = base
@@ -49,7 +72,7 @@ func NewViewVector(base *Vector, indices []uint32) *Vector {
 	v.VectorDim = base.VectorDim
 	v.DecimalData.Scale = base.DecimalData.Scale
 	v.FieldNames = base.FieldNames
-	return v
+	return v, adopted
 }
 
 // IsView reports whether the vector is a view (owns no typed storage).

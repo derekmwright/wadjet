@@ -272,6 +272,22 @@ func (bc *BytesColumn) Reset() {
 	bc.ShapeOnly = false
 }
 
+// ResetForWrite resizes the column to hold exactly n values and clears it for
+// a fresh sequential write, retaining the data arena's capacity. Callers that
+// know the total byte size still call PreAllocBytes afterwards; once the arena
+// has reached its high-water mark that call becomes a no-op instead of a
+// fresh multi-hundred-KB span. See (*Vector).ResetForWrite.
+func (bc *BytesColumn) ResetForWrite(n int) {
+	if cap(bc.Offsets) >= n+1 {
+		bc.Offsets = bc.Offsets[:n+1]
+	} else {
+		bc.Offsets = make([]uint32, n+1)
+	}
+	clear(bc.Offsets)
+	bc.Data = bc.Data[:0]
+	bc.ShapeOnly = false
+}
+
 // MemBytes returns the heap bytes consumed by the offset and data slices.
 //
 // Offsets are sized by len (the logical rows+1), but the data arena is sized by
@@ -316,6 +332,98 @@ type Vector struct {
 	// loud on a view because the typed slices are nil. See view.go.
 	Base    *Vector
 	Indices []uint32
+
+	// claimed records that a consumer retains this vector's storage past the
+	// call that produced it — see (*RecordBatch).Detach, the engine-wide
+	// signal for exactly that, and (*Vector).Claim. A producer that reuses
+	// vector backing across output batches must surrender a claimed vector
+	// instead of writing over it. The claim rides the VECTOR rather than the
+	// batch shell because the batch a retaining consumer holds is not always
+	// the batch the producer emitted: ColumnPrune, the set-op emitter and
+	// partitioned aggregation's per-partition views all mint a derived
+	// RecordBatch over the SAME *Vector pointers.
+	claimed bool
+}
+
+// Claim marks this vector's storage as retained by a consumer, recursively
+// through the view base it reads from and its nested children. Once claimed a
+// vector is never reused by its producer: the claim is sticky because nothing
+// tracks when the retaining consumer is finished (a Sort holds its input until
+// Finalize), and a wrong answer here is silent data corruption.
+func (v *Vector) Claim() {
+	if v == nil || v.claimed {
+		return
+	}
+	v.claimed = true
+	if v.Base != nil {
+		v.Base.Claim()
+	}
+	if v.Child != nil {
+		v.Child.Claim()
+	}
+	for _, ch := range v.Children {
+		ch.Claim()
+	}
+}
+
+// Claimed reports whether a consumer has claimed this vector's storage.
+func (v *Vector) Claimed() bool { return v != nil && v.claimed }
+
+// ResetForWrite resizes an OWNED vector to exactly n rows and clears its
+// per-row state — null bits back to non-null, fixed-width slots to zero, the
+// bytes arena emptied — while RETAINING every backing allocation's capacity.
+// A producer that reuses one vector across output batches therefore allocates
+// only when n passes its high-water mark, where a fresh NewColumnVector
+// allocates (and the runtime zeroes) a new span every single batch.
+//
+// Slots are cleared, not merely resized: the gather loops skip writing null
+// and unmatched rows, so a stale value under a null bit would be a
+// reuse-visible difference from the freshly-zeroed path for any reader that
+// looks at a null slot's value. The clear costs the same memclr `make` was
+// already paying; what is saved is the allocation, i.e. the Go heap lock.
+//
+// Nested ARRAY/MAP/ROW element storage is append-built and is NOT reset here;
+// callers must not reuse vectors of those types (the join emit path guards
+// them out and mints fresh).
+func (v *Vector) ResetForWrite(n int) {
+	if v.Base != nil {
+		panic("batch: ResetForWrite on a view vector — views own no storage")
+	}
+	v.Indices = nil
+	v.Len = n
+	v.Nulls.ResetNonNull(n)
+	switch v.Type {
+	case TypeBool:
+		v.BoolData = resizeCleared(v.BoolData, n)
+	case TypeInt32, TypePort, TypeProtocol, TypeDate:
+		v.Int32Data = resizeCleared(v.Int32Data, n)
+	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
+		v.Int64Data = resizeCleared(v.Int64Data, n)
+	case TypeFloat32:
+		v.Float32Data = resizeCleared(v.Float32Data, n)
+	case TypeFloat64:
+		v.Float64Data = resizeCleared(v.Float64Data, n)
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+		v.BytesData.ResetForWrite(n)
+	case TypeDecimal:
+		v.DecimalData.Data = resizeCleared(v.DecimalData.Data, n)
+	case TypeVector:
+		v.Float32Data = resizeCleared(v.Float32Data, n*v.VectorDim)
+	default:
+		panic("batch: ResetForWrite on a nested column — element storage is append-built")
+	}
+}
+
+// resizeCleared re-slices s to exactly n zeroed elements, reusing the backing
+// array whenever it is large enough. The zeroing matches what make() would
+// have produced, so a reused vector is indistinguishable from a fresh one.
+func resizeCleared[T any](s []T, n int) []T {
+	if cap(s) >= n {
+		s = s[:n]
+		clear(s)
+		return s
+	}
+	return make([]T, n)
 }
 
 // NewVector creates a new vector of the given type and length.

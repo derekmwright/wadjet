@@ -12,6 +12,12 @@ type RecordBatch struct {
 	Len     int
 	Sel     []uint32 // selection vector: indices of active rows (nil = all rows active)
 	pool    *BatchPool
+	// retained records that a consumer claimed ownership of this batch with
+	// Detach. Producers that reuse output storage across calls read it (with
+	// the per-column claims Detach also sets) to decide whether last call's
+	// batch may be written over. Cleared by Reset, so a recycled batch starts
+	// unclaimed.
+	retained bool
 	// ownerID identifies which memory-tier owner currently accounts this batch's
 	// bytes. 0 means unstamped (not pool-owned, e.g. the over-size escape hatch
 	// or a Detach'd long-lived batch); ReservoirOwner means a BatchPool minted it
@@ -104,11 +110,40 @@ func (b *RecordBatch) Release() {
 	}
 }
 
-// Detach removes the batch from its pool so Release() becomes a no-op.
-// Use this when a batch will be stored long-term (e.g., hash join build side).
+// Detach claims ownership of the batch: Release() becomes a no-op so no pool
+// can recycle it, and the claim is recorded on the batch AND on every column
+// vector so a producer that reuses vector backing across calls surrenders it
+// (see (*Vector).Claim). Call it from anything that keeps a batch — or
+// anything pointing into its column storage — past the call that handed it
+// over: the hash-join build, Sort, Window, the collect sinks, the spillable
+// collector, partitioned aggregation's per-partition views.
+//
+// The per-column claim is what makes the contract hold through a derived
+// batch: ColumnPrune and the set-op emitter mint a NEW RecordBatch over the
+// same *Vector pointers, so a consumer that detaches the derived batch would
+// otherwise leave the producer of the original believing nobody kept it.
 func (b *RecordBatch) Detach() {
 	b.pool = nil
+	b.retained = true
+	for _, c := range b.Columns {
+		c.Claim()
+	}
 }
+
+// DetachPool severs only the pool link, WITHOUT claiming the batch or its
+// columns. It is for the one caller whose reference is transitive rather than
+// independent: the hash-join late-materialization emitter, whose output views
+// read the input's vectors, so the input must not be recycled underneath them
+// by a concurrently-running source — but whose views die with its own output
+// batch, whose consumer's Detach (if any) propagates the claim through
+// Vector.Base anyway. Anything that genuinely KEEPS a batch calls Detach.
+func (b *RecordBatch) DetachPool() {
+	b.pool = nil
+}
+
+// Retained reports whether a consumer claimed ownership of this batch with
+// Detach.
+func (b *RecordBatch) Retained() bool { return b.retained }
 
 // MemBytes returns the in-memory byte footprint of the batch's column data,
 // summing each Vector's MemBytes(). It deliberately omits operator-specific
@@ -142,6 +177,7 @@ func (b *RecordBatch) EnsureCapacity(n int) {
 func (b *RecordBatch) Reset(numRows int) {
 	b.Len = numRows
 	b.Sel = nil
+	b.retained = false
 	for _, col := range b.Columns {
 		resetVectorForReuse(col, numRows)
 	}
@@ -157,6 +193,9 @@ func resetVectorForReuse(col *Vector, numRows int) {
 	// indirection so the batch is a plain (empty) owned batch again.
 	col.Base = nil
 	col.Indices = nil
+	// A batch only reaches a pool when nobody claimed it (Detach severs the
+	// pool link), so a recycled vector starts unclaimed again.
+	col.claimed = false
 	col.Len = numRows
 	col.Nulls.ResetNonNull(numRows)
 	switch col.Type {
