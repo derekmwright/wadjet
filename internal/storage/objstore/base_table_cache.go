@@ -55,6 +55,11 @@ type BaseTableCacheStats struct {
 	PeerFallthroughs int64
 	PeerServes       int64
 	PeerServeBytes   int64
+	// PeerFetchNanos is the wall spent inside successful peer fetches
+	// (owner stream + local spool + admit), so the per-minute ledger
+	// yields an effective peer-tier MB/s — the number that tells a peer
+	// transfer apart from an S3 miss when both show up as src_ms.
+	PeerFetchNanos int64
 
 	// Owner read-through (docs/design/scan-affinity.md §first-touch
 	// single-flight): populates performed on behalf of a peer's fetch for
@@ -115,6 +120,7 @@ type BaseTableCache struct {
 	missBytes        atomic.Int64
 	peerHits         atomic.Int64
 	peerBytes        atomic.Int64
+	peerFetchNanos   atomic.Int64
 	peerFallthroughs atomic.Int64
 	peerServes       atomic.Int64
 	peerServeBytes   atomic.Int64
@@ -155,11 +161,11 @@ func NewBaseTableCache(inner Store, dir string, budget int64, logger *slog.Logge
 		logger = slog.Default()
 	}
 	c := &BaseTableCache{
-		inner:    inner,
-		dir:      dir,
-		tmpDir:   filepath.Join(dir, "tmp"),
-		budget:   budget,
-		logger:   logger,
+		inner:      inner,
+		dir:        dir,
+		tmpDir:     filepath.Join(dir, "tmp"),
+		budget:     budget,
+		logger:     logger,
 		entries:    make(map[string]*list.Element),
 		lru:        list.New(),
 		inflight:   make(map[string]struct{}),
@@ -372,6 +378,7 @@ func (c *BaseTableCache) getFromPeer(ctx context.Context, ck, bucket, key string
 	c.mu.Unlock()
 	defer c.clearInflight(ck)
 
+	start := time.Now()
 	rc, ok := c.peer.FetchBaseTable(ctx, bucket, key)
 	if !ok {
 		return nil, ObjectInfo{}, false
@@ -398,8 +405,15 @@ func (c *BaseTableCache) getFromPeer(ctx context.Context, ck, bucket, key string
 		c.peerFallthroughs.Add(1)
 		return nil, ObjectInfo{}, false
 	}
+	took := time.Since(start)
 	c.peerHits.Add(1)
 	c.peerBytes.Add(size)
+	c.peerFetchNanos.Add(took.Nanoseconds())
+	// One line per transfer (tens per worker per suite run): the
+	// per-file cost a straggler task pays is otherwise only inferable
+	// from src_ms, which cannot tell this tier from an S3 miss.
+	c.logger.Info("base-table cache: peer fetch",
+		"key", key, "bytes", size, "ms", took.Milliseconds())
 	return f, ObjectInfo{Key: key, Size: st.Size(), LastModified: st.ModTime()}, true
 }
 
@@ -719,6 +733,7 @@ func (c *BaseTableCache) Stats() BaseTableCacheStats {
 		Bytes:            bytes,
 		PeerHits:         c.peerHits.Load(),
 		PeerBytes:        c.peerBytes.Load(),
+		PeerFetchNanos:   c.peerFetchNanos.Load(),
 		PeerFallthroughs: c.peerFallthroughs.Load(),
 		PeerServes:       c.peerServes.Load(),
 		PeerServeBytes:   c.peerServeBytes.Load(),
@@ -736,6 +751,7 @@ func (c *BaseTableCache) LogStats() {
 		"hit_bytes", s.HitBytes, "miss_bytes", s.MissBytes,
 		"evictions", s.Evictions, "entries", s.Entries, "bytes", s.Bytes,
 		"peer_hits", s.PeerHits, "peer_bytes", s.PeerBytes,
+		"peer_fetch_ms", s.PeerFetchNanos/1e6,
 		"peer_fallthroughs", s.PeerFallthroughs,
 		"peer_serves", s.PeerServes, "peer_serve_bytes", s.PeerServeBytes,
 		"readthroughs", s.ReadThroughs, "readthrough_bytes", s.ReadThroughBytes,

@@ -25,7 +25,7 @@ Conventions:
 | [0005](0005-split-control-and-data-plane.md) | NATS control plane, gRPC data plane | Accepted |
 | [0006](0006-never-oom-memory-model.md) | Never-OOM memory: shared pool, ownership ledger, spill-everywhere | Accepted |
 | [0007](0007-shuffle-durability-policy.md) | Shuffle durability is a policy spectrum; eager stays the default | Accepted |
-| [0008](0008-task-placement-policy.md) | Task placement: eager reservation → input locality → memory binpack → round-robin, under a same-batch anti-clump cap | Accepted |
+| [0008](0008-task-placement-policy.md) | Task placement: eager reservation → cache affinity → input locality → memory binpack → round-robin, under a same-batch anti-clump cap | Accepted |
 | [0009](0009-worker-scratch-lifecycle.md) | Worker scratch lifecycle: adopt-into-cache, paced asynchronous purge | Accepted |
 | [0010](0010-shuffle-wire-formats.md) | WSHF/WSHC shuffle formats and where compression happens | Accepted |
 | [0011](0011-performance-measurement-methodology.md) | Performance measurement methodology at SF100 | Accepted |

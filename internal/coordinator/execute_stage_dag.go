@@ -2417,9 +2417,27 @@ func (c *Coordinator) dispatchComputeStage(
 	// is identical to the single-task case. Only the probe scan + probe
 	// compute is parallelized.
 	probeSplit := false
+	// Ownership-aware probe slicing (scan_affinity.go probeSplitAffineSets):
+	// when the probe is a pass-through leaf scan, group its base-table
+	// files by rendezvous owner and pin each task to that owner's NVMe
+	// cache, so no probe file has to cross the peer wire at task start.
+	// nil sets = the plain even split below.
+	var probeSets [][]string
+	var probeOwners []string
 	if n, ok := broadcastJoinProbeSplit(stage, inputs, workerCount, numTasks); ok {
 		numTasks = n
 		probeSplit = true
+		probeDep := stage.LeftDepStage
+		if probeDep == "" {
+			probeDep = stage.Dependencies[0]
+		}
+		probeIn := inputs[probeDep]
+		var bal *affineBalance
+		probeSets, probeOwners, bal = probeSplitAffineSets(flattenStageFiles(probeIn), probeIn.ScanFileSizes, c.activeWorkerIDs())
+		if probeSets != nil {
+			numTasks = len(probeSets)
+			c.logAffineBalance(stage.ID, bal)
+		}
 	}
 	// Round-robin partial-aggregate fan-out (see aggregatePartialSplit).
 	// Mutually exclusive with probe-split and skew-split by stage type.
@@ -2468,6 +2486,7 @@ func (c *Coordinator) dispatchComputeStage(
 		"distribution_count", stage.Distribution.Count,
 		"rr_agg_split", rrAggGroups != nil,
 		"probe_split", probeSplit,
+		"probe_affine", probeSets != nil,
 		"skew_split", skewAssign != nil,
 		"inputs_aliases", len(inputs),
 	}
@@ -2516,7 +2535,9 @@ func (c *Coordinator) dispatchComputeStage(
 	for w := 0; w < numTasks; w++ {
 		var taskInputs map[string][]string
 		var err error
-		if probeSplit {
+		if probeSets != nil {
+			taskInputs, err = probeSplitTaskInputs(stage, inputs, probeSets[w])
+		} else if probeSplit {
 			taskInputs, err = buildTaskInputsForBroadcastJoinSplitProbe(stage, inputs, w, numTasks)
 		} else if rrAggGroups != nil {
 			// Partial-aggregate fan-out: task w aggregates its disjoint
@@ -2655,10 +2676,13 @@ func (c *Coordinator) dispatchComputeStage(
 			Limit:               stage.Limit,
 			RowLimit:            stage.RowLimit,
 			Inputs:              taskInputs,
-			DataBucket:          c.config.ResultBucket,
-			ResultBucket:        c.config.ResultBucket,
-			ResultPrefix:        resultPrefix,
-			CreatedAt:           time.Now(),
+			// Probe-split affinity: the rendezvous owner of this task's
+			// probe files ("" on every other path — plain binpack).
+			AffinityWorkerID: affinityFor(probeOwners, w),
+			DataBucket:       c.config.ResultBucket,
+			ResultBucket:     c.config.ResultBucket,
+			ResultPrefix:     resultPrefix,
+			CreatedAt:        time.Now(),
 			// Output column projection for hash_join / broadcast_join stages.
 			// The worker applies these as the probe operator's OutputFilter so
 			// the join emits only the columns the downstream stage consumes,
@@ -4422,16 +4446,29 @@ func aggregatePartialSplit(
 // with multiple files; this helper assumes the dispatcher already vetted
 // eligibility.
 func buildTaskInputsForBroadcastJoinSplitProbe(stage physical.Stage, upstreams map[string]StageOutput, workerIdx, numTasks int) (map[string][]string, error) {
+	probeDep := stage.LeftDepStage
+	if probeDep == "" && len(stage.Dependencies) > 0 {
+		probeDep = stage.Dependencies[0]
+	}
+	var probeFiles []string
+	parts := splitFilesEvenly(flattenStageFiles(upstreams[probeDep]), numTasks)
+	if workerIdx >= 0 && workerIdx < len(parts) {
+		probeFiles = parts[workerIdx]
+	}
+	return probeSplitTaskInputs(stage, upstreams, probeFiles)
+}
+
+// probeSplitTaskInputs binds one probe-split task's inputs: the full
+// broadcast build set plus an explicit probe slice (an even split, or one
+// owner's group from probeSplitAffineSets). Any disjoint cover of the probe
+// files is a correct split, so the slicer is the caller's choice.
+func probeSplitTaskInputs(stage physical.Stage, upstreams map[string]StageOutput, probeFiles []string) (map[string][]string, error) {
 	expectedDeps := 2 + len(stage.FusedJoins)
 	if len(stage.Dependencies) != expectedDeps {
 		return nil, fmt.Errorf("broadcast_join split-probe stage %s expects %d deps (2 primary + %d fused), got %d",
 			stage.ID, expectedDeps, len(stage.FusedJoins), len(stage.Dependencies))
 	}
-	probeDep := stage.LeftDepStage
 	buildDep := stage.RightDepStage
-	if probeDep == "" {
-		probeDep = stage.Dependencies[0]
-	}
 	if buildDep == "" {
 		buildDep = stage.Dependencies[1]
 	}
@@ -4445,10 +4482,8 @@ func buildTaskInputsForBroadcastJoinSplitProbe(stage physical.Stage, upstreams m
 	}
 	out := make(map[string][]string, 2)
 	out[buildAlias] = flattenStageFiles(upstreams[buildDep])
-	probeFiles := flattenStageFiles(upstreams[probeDep])
-	parts := splitFilesEvenly(probeFiles, numTasks)
-	if workerIdx >= 0 && workerIdx < len(parts) {
-		out[probeAlias] = parts[workerIdx]
+	if len(probeFiles) > 0 {
+		out[probeAlias] = probeFiles
 	}
 	// Fused build deps don't go in inputs[]; their files travel via
 	// task.FusedJoins[i].BuildFiles, populated by dispatchComputeStage.

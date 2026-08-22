@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 )
 
 // Scan-task file→worker affinity (docs/design/scan-affinity.md).
@@ -281,4 +283,85 @@ func (c *Coordinator) activeWorkerIDs() []string {
 		ids = append(ids, w.WorkerID)
 	}
 	return ids
+}
+
+// probeSplitAffinity gates ownership-aware probe-split slicing
+// (docs/design/scan-affinity.md §probe-split affinity). A DistSingleton
+// broadcast_join whose probe is a pass-through leaf scan fans out at
+// dispatch into one task per worker, each reading a slice of the probe's
+// base-table files — and until 2026-08-22 that slice was splitFilesEvenly
+// over the catalog order, placed by memory binpack: a worker was handed
+// files it does not hold, and every such file cost a whole-object peer
+// transfer (~283 MB at SF100, 2-3 s each) on the task's critical path
+// while its morsel consumers idled. The SF100 window-3 ledger named it:
+// S3 misses flat after run 1, `peer_hits` +13-19 files per minute exactly
+// when the Q09/Q08/Q17 join-* stragglers fired, converging to zero only
+// once every worker held every file (run 4). Grouping the probe slice by
+// rendezvous owner and carrying the owner as Task.AffinityWorkerID puts
+// each file on the cache that already holds it — the same class
+// affineFileSets closed for scan fan-outs.
+//
+// Off restores splitFilesEvenly + binpack. Placement and slicing only:
+// probe-split is correct over any disjoint cover of the probe files, so
+// the row set cannot move; the switch exists so EC2 bisects it by env.
+var probeSplitAffinity = optswitch.Register("probe-split-affinity", "WADJET_PROBE_SPLIT_AFFINITY",
+	"group a probe-split broadcast join's probe files by rendezvous owner and place each task on that owner; off = even split + binpack")
+
+// probeSplitAffineSets groups a probe-split's probe files by rendezvous
+// owner: one task per owner that holds any, byte-balance shedding on top
+// when sizes are known (the same shedSurplus the scan fan-outs use, so the
+// recipient of a shed file converges warm after one peer fetch). Returns
+// nil sets — caller falls back to splitFilesEvenly — when the switch or
+// scan affinity is off, the worker set is empty, or the probe files are
+// not base-table parquet (a materialized/shuffled probe carries peer-
+// location hints and is placed by locality instead).
+//
+// The task count is whatever the ownership draw yields (≤ len(workers)),
+// EXCEPT it must never fall below the even split's
+// min(len(workers), len(files)): a probe-split task's decode parallelism
+// is never reduced by affinity. On the rare small-probe draw where the
+// owner count is fewer than that (e.g. 2 files that happen to hash to the
+// same owner among 3 workers), the fallback below hands the caller nil so
+// it takes the even split + binpack — costing at most a couple of peer
+// transfers, which is cheaper than losing a task's worth of parallelism.
+func probeSplitAffineSets(files []string, sizes []int64, workers []string) (sets [][]string, owners []string, bal *affineBalance) {
+	if !probeSplitAffinity.On() || !scanAffinityEnabled || len(workers) == 0 || len(files) == 0 {
+		return nil, nil, nil
+	}
+	for _, f := range files {
+		if !strings.HasSuffix(f, ".parquet") || strings.HasPrefix(f, "queries/") {
+			return nil, nil, nil
+		}
+	}
+	sorted := append([]string(nil), workers...)
+	sort.Strings(sorted)
+	assignee := make(map[string]string, len(files))
+	for _, f := range files {
+		assignee[f] = affinityOwner(f, sorted)
+	}
+	if len(sizes) == len(files) && affinityByteBalanceEnabled {
+		fileSize := make(map[string]int64, len(files))
+		var totalBytes int64
+		for i, f := range files {
+			fileSize[f] = sizes[i]
+			totalBytes += sizes[i]
+		}
+		if totalBytes >= affinityBalanceMinBytes {
+			bal = shedSurplus(files, fileSize, totalBytes, sorted, assignee)
+		}
+	}
+	byWorker := make(map[string][]string, len(sorted))
+	for _, f := range files {
+		byWorker[assignee[f]] = append(byWorker[assignee[f]], f)
+	}
+	for _, w := range sorted {
+		if group := byWorker[w]; len(group) > 0 {
+			sets = append(sets, group)
+			owners = append(owners, w)
+		}
+	}
+	if floor := min(len(workers), len(files)); len(sets) < floor {
+		return nil, nil, nil
+	}
+	return sets, owners, bal
 }

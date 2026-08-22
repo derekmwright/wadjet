@@ -31,7 +31,7 @@ workers. Scan fan-outs (`dispatchScanFilterStage`,
 `dispatchScanAggregateStage`, `runShuffleSide`) group files by owner
 (`affineFileSets`), preserving the fan-out's total task count with
 per-owner proportional shares; each task carries its owner as
-`Task.AffinityWorkerID`. The scheduler prefers that worker — after
+`Task.AffinityWorkerID`. The scheduler prefers that worker — ahead of
 locality, before binpack, under the same same-batch anti-stacking cap —
 and any fallback placement just misses the cache exactly as the
 pre-affinity fan-out did. Placement is a preference, never correctness.
@@ -230,3 +230,98 @@ shape:
   convergence at NIC speed) plus ~8.5 GB less cold S3 per suite.
 
 `WADJET_BASE_PEER_READTHROUGH=0` reproduces the ctl arm.
+
+## Probe-split affinity (landed 2026-08-22)
+
+Kill switch: `WADJET_PROBE_SPLIT_AFFINITY=0` (coordinator side, registered
+in `internal/optswitch`; the bench `extra_env` seam reaches the
+coordinator since d97eed6). `WADJET_SCAN_AFFINITY=0` also disables it.
+
+### The residual the peer tier left
+
+Window-3 of the 2026-08-22 clawback arc
+(`docs/benchmarks/sf100-window3-analysis-2026-08-22.md` §8.3) named the
+largest remaining variance source: the "straggler tier" on broadcast-join
+probe fragments — Q08/Q09 `join-6`, Q17 `join-2` (and Q02 `join-19` in the cold run), every one a
+`probe_split=true num_tasks=3` broadcast_join over a pass-through leaf
+scan. A slow task charged 2-4 files × 2-3 s each to `acq_prefetch_ms`
+while its 15 morsel consumers idled (`consumer_dry_wait_ms` doubled);
+same rows, same morsels, same `process_ms` as the fast mode.
+
+The per-minute cache ledger says which tier that was
+(`docs/benchmarks/probe-split-affinity-2026-08-22.md`): after run 1 the
+S3 `misses` counter is FLAT on every worker (33/31/34), while
+`peer_hits` climbs +13-19 files (~4-5 GB) in exactly the minutes the
+steady-run stragglers fire, and stops climbing only in run 4 — when every
+worker holds every file. So the steady-state straggler was never S3: it
+was the base-table **peer tier doing its job** for a reader that should
+not have needed it. `dispatchComputeStage` sliced the probe files with
+`splitFilesEvenly` over catalog order and placed the three tasks by
+memory binpack (`placement=binpack:3`), so each task was handed files its
+worker's NVMe does not hold; each such file is a whole-object peer
+transfer (283 MB at SF100 → spool + fsync into the cache → a SECOND copy
+into the prefetch spill + fsync, serialized behind a 256 MB window
+smaller than the file) on the task's critical path. Binpack is not
+deterministic across runs, so WHICH query paid was a draw — the Q09
+"mode lottery" — and it stayed a draw until full replication made every
+placement a hit.
+
+### The fix: the probe split is an affine fan-out
+
+`probeSplitAffineSets` (scan_affinity.go) groups the probe files by
+rendezvous owner — the same `distributed.AffinityOwner` the scan
+fan-outs and the worker's peer tier use — one task per owner that holds
+any, byte-balance shedding on top when the pass-through carried catalog
+sizes (`StageOutput.ScanFileSizes`), and each task carries its owner as
+`Task.AffinityWorkerID`. The scheduler's existing affinity tier
+(`pickAffinityWorkerFrom`, ahead of locality under the same-batch cap)
+then puts the task on the cache that holds its files. No probe file
+crosses the peer wire at task start; a shed file crosses it once and
+converges warm, as on scan stages.
+
+Differences from `affineFileSets`, deliberately:
+
+- No `2×workers` floor — that guard protects row-group shard fan-outs
+  (one file → many tasks) from serializing, and probe-split's unit is the
+  whole file. But the grouping must never yield FEWER tasks than the even
+  split (`min(len(workers), len(files))`) would: a probe-split task's
+  decode parallelism is never reduced by affinity. A 2-file probe on 3
+  workers draws 2 owners most of the time and groups into 2 tasks; on the
+  rare draw where both files hash to the same owner, that single-task
+  grouping falls below the even split's floor and `probeSplitAffineSets`
+  returns nil so the caller takes the even split + binpack instead — at
+  most a couple of peer transfers, cheaper than losing a task's worth of
+  parallelism.
+- One task per owner, never a proportional share > 1: a probe-split task
+  holds a full copy of the broadcast build, and one build copy per box is
+  the memory shape the split was designed around.
+- Falls back to the even split when the probe files are not base-table
+  parquet (a materialized replicate or shuffled probe carries
+  peer-location hints and is placed by locality) or the switch is off.
+
+Task count becomes the ownership draw (≤ workerCount) instead of exactly
+`min(workerCount, files)`; `estimateComputeTaskBytes` keeps dividing the
+probe bytes by the task count — within the 10 % shed tolerance when sizes
+are known, and the probe side is streamed, not held, so admission is
+unaffected.
+
+Two worker-side changes ride along for the readers that still cross the
+wire (late-materialization gathers, builds, cold first touch):
+
+- The prefetcher no longer copies a file the cache populated during its
+  own `Get` (peer fetch or concurrent tee) into the spill dir a second
+  time — it re-probes `HasCachedPath` after the `Get` and skips, so the
+  consumer mmaps the cache file in place (`acq_basecache`). Regression:
+  `TestBaseTableCacheTier_PeerPopulateSkipsPrefetchCopy`.
+- `BaseTableCache` ledgers peer fetch time (`peer_fetch_ms` on the stats
+  line, one `base-table cache: peer fetch` line per transfer with bytes
+  and ms) — the per-tier MB/s that tells a peer transfer from an S3 miss
+  when both only show as `src_ms`.
+
+Expected SF100 shape: `dispatchComputeStage … probe_split=true
+probe_affine=true` on join-6/join-2/join-19, `published tasks …
+placement=affine:3`; steady-run `peer_hits` deltas near zero on the
+join-* stages from run 2 on (remaining peer traffic = late-mat gathers
+and builds), `acq_prefetch_ms ≥ 3 s` firings in steady runs → 0 on
+probe-split stages, Q09/Q08/Q17 steady-run spread collapsing to the
+fast mode; rows and value signatures identical.

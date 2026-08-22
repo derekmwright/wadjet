@@ -205,6 +205,19 @@ func (p *filePrefetcher) fetch(ctx context.Context, s *cachedFileStreamSource, i
 	}
 	defer rc.Close()
 
+	// The Get itself may have populated the base-table cache: a peer-tier
+	// fetch (or a concurrent task's tee) spools the whole object onto the
+	// cache volume before Get returns, and rc is then the admitted cache
+	// file. Copying it a second time into the spill dir — 283 MB write +
+	// fsync per SF100 file, behind a 256 MB window that serializes the
+	// copies — bought nothing the consumer's cache tier does not already
+	// give it with an in-place mmap. Skip, and let openNextFile take the
+	// base-cache tier (a concurrent eviction just falls through to the
+	// tiered path as every skip does).
+	if lps, ok := s.executor.store.(objstore.LocalPathStore); ok && lps.HasCachedPath(s.bucket, filePath) {
+		return &prefetchResult{skipped: true}
+	}
+
 	// Admit against the byte window using the object's advertised size.
 	// A size the store didn't report (0) gets a nominal charge so an
 	// endless run of unknown-size objects can't bypass the bound.

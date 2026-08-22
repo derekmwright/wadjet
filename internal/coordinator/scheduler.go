@@ -320,18 +320,25 @@ func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]i
 			return id, "eager", true
 		}
 	}
-	if s.localityPlacement && s.registry != nil {
-		if id, ok := pickLocalityWorkerFrom(t, connected, s.registry.ActiveWorkers(), batchAssigned, batchLen); ok {
-			return id, "local", true
-		}
-	}
-	// Scan affinity (docs/design/scan-affinity.md): the task's base-table
-	// files rendezvous-hash to one worker's NVMe cache. Preference only —
-	// same-batch cap and connectivity checks as locality, and a fallback
-	// placement just misses the cache exactly as pre-affinity fan-out did.
+	// Scan affinity (docs/design/scan-affinity.md): a task whose base-table
+	// files rendezvous-hash to one worker's NVMe cache goes there AHEAD of
+	// locality. A probe-split broadcast-join task's InputLocations hints
+	// point only at its (small, replicated) broadcast build's single
+	// producer — never at its base-table probe files, which are never
+	// hinted — so locality would place the whole task on the build
+	// producer, off the cache that holds the task's actual bytes (the
+	// probe slice). Preference only — same-batch cap and connectivity
+	// checks as locality, and a fallback placement just misses the cache
+	// exactly as pre-affinity fan-out did; tasks without an affinity hint
+	// fall through to locality unchanged.
 	if t.AffinityWorkerID != "" {
 		if id, ok := pickAffinityWorkerFrom(t.AffinityWorkerID, connected, batchAssigned, batchLen); ok {
 			return id, "affine", true
+		}
+	}
+	if s.localityPlacement && s.registry != nil {
+		if id, ok := pickLocalityWorkerFrom(t, connected, s.registry.ActiveWorkers(), batchAssigned, batchLen); ok {
+			return id, "local", true
 		}
 	}
 	if t.EstimatedBytes > 0 && s.registry != nil {
