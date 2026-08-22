@@ -31,3 +31,7 @@ Conventions:
 | [0011](0011-performance-measurement-methodology.md) | Performance measurement methodology at SF100 | Accepted |
 | [0012](0012-sql-semantics-authority.md) | PostgreSQL is the SQL semantics authority; DuckDB is the performance goal and an oracle | Accepted |
 | [0013](0013-correctness-gates-and-their-boundaries.md) | The correctness gates, and what they deliberately do not gate | Accepted |
+| [0014](0014-group-index-layout-at-construction.md) | Group-index layout is decided at sink construction, not by runtime conversion | Accepted |
+| [0015](0015-decode-ahead-is-an-admission-class.md) | Decode-ahead is a CPU-token admission class, not a `TryAcquire` client behind the consumer FIFO | Accepted |
+| [0016](0016-detach-is-the-ownership-claim.md) | `Detach` is the ownership claim; producers may reuse vector backing while a batch is unclaimed | Accepted |
+| [0017](0017-stage-sinks-copy-outside-the-lock.md) | Stage sinks copy outside the lock; the lock covers handoff only | Accepted |

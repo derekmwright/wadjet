@@ -1,6 +1,6 @@
 # ADR-0013: The correctness gates, and what they deliberately do not gate
 
-Status: Accepted (2026-08-19)
+Status: Accepted (2026-08-19; nondeterminism class 9 added 2026-08-22)
 
 ## Context
 
@@ -73,6 +73,17 @@ named mechanism.
    `workers failed to register within 15s` and `context deadline exceeded`
    under heavy parallel load — never a wrong row. Test output from a busy
    machine is not evidence.
+9. **A float aggregate's own VALUE moves in its last significant digits across
+   parallel partial aggregation.** Class 4 covers a float *sort key*; this is
+   the value itself, with no ordering involved, and it shows up in the
+   harness's readable `ValueSig` because that prints 10 significant digits.
+   Example: Q19's `sum(l_extendedprice*(1-l_discount))` over 600 M rows reads
+   `c0:5.985878904e+08` in some runs and `…903e+08` in others — a relative
+   delta of 1.7e-10 at the last printed digit (2026-08-22 SF100 windows 1 and
+   3; in window 1 the *same binary* under a kill switch reproduced the other
+   value in all four runs, which is what rules out a code-level change). The
+   dual-precision fingerprint digest (6 or 4 significant digits) is unaffected.
+   Investigate only if the divergence reaches the digest.
 
 ### Pins
 
