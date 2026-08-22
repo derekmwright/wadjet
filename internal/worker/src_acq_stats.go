@@ -33,6 +33,21 @@ type srcAcqStats struct {
 	ns           [acqTierCount]int64
 	prefetchMiss int64
 
+	// Durable-object wait (peer_exchange.go awaitDurableObject): how often
+	// this task blocked on a producer's in-flight background upload, how
+	// many S3 re-polls that cost, and the wall it burned. The 2026-08-22
+	// window-2 analysis could only infer this from the 500ms quantization
+	// of task durations; these make it a grep.
+	durableWaits     int64
+	durableWaitPolls int64
+	durableWaitNs    int64
+
+	// Peer-tier hint outcomes, per task. hits: a hinted fetch served the
+	// file from the producer's NVMe. misses: a hint existed and the fetch
+	// failed, so the read fell through to the durable tier.
+	peerHits   int64
+	peerMisses int64
+
 	// Prefetch overlap (perf(scan,worker) 2026-08-22). prefetchLeadNs is
 	// the wall between the download workers spawning and the first take —
 	// i.e. how much of the first file's download happened BEFORE the scan
@@ -69,6 +84,33 @@ func (a *srcAcqStats) note(t acqTier, d time.Duration) {
 	a.ns[t] += d.Nanoseconds()
 }
 
+func (a *srcAcqStats) noteDurableWait(d time.Duration, polls int) {
+	if a == nil {
+		return
+	}
+	a.durableWaits++
+	a.durableWaitPolls += int64(polls)
+	a.durableWaitNs += d.Nanoseconds()
+}
+
+func (a *srcAcqStats) notePeer(hit bool) {
+	if a == nil {
+		return
+	}
+	if hit {
+		a.peerHits++
+		return
+	}
+	a.peerMisses++
+}
+
+// notable reports whether the tally holds a signal worth an INFO line
+// regardless of how long the task ran. A durable wait qualifies: the task
+// stalled on another worker's upload, which is exactly the case the
+// fragment-phase log floor would otherwise hide (these tasks emit a
+// handful of rows and never reach the floor).
+func (a *srcAcqStats) notable() bool { return a != nil && a.durableWaits > 0 }
+
 // attrs renders the nonzero tiers as log attrs.
 func (a *srcAcqStats) attrs() []any {
 	if a == nil {
@@ -92,9 +134,24 @@ func (a *srcAcqStats) attrs() []any {
 		out = append(out, "prefetch_started_before_build", started,
 			"prefetch_lead_ms", a.prefetchLeadNs/1e6)
 	}
+	if a.durableWaits > 0 {
+		out = append(out, "durable_waits", a.durableWaits,
+			"durable_wait_polls", a.durableWaitPolls,
+			"durable_wait_ms", a.durableWaitNs/1e6)
+	}
+	if a.peerHits > 0 {
+		out = append(out, "peer_hits", a.peerHits)
+	}
+	if a.peerMisses > 0 {
+		out = append(out, "peer_misses", a.peerMisses)
+	}
 	return out
 }
 
 // srcAcqReporter is implemented by sources whose acquisition tallies ride
-// the fragment phases line.
-type srcAcqReporter interface{ srcAcqAttrs() []any }
+// the fragment phases line. srcAcqNotable lets a short task escalate that
+// line to INFO when the tally itself is the finding.
+type srcAcqReporter interface {
+	srcAcqAttrs() []any
+	srcAcqNotable() bool
+}

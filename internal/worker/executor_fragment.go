@@ -177,10 +177,16 @@ func (p *fragmentProgress) finish(totalRows int64) {
 		"elapsed_ms", elapsed.Milliseconds(),
 		"rows", totalRows,
 	})
+	notable := false
 	if p.srcAcq != nil {
 		attrs = append(attrs, p.srcAcq.srcAcqAttrs()...)
+		notable = p.srcAcq.srcAcqNotable()
 	}
-	if elapsed >= fragmentPhaseLogFloor {
+	// The floor keeps INFO volume flat for the thousands of sub-second
+	// tasks, but a task that stalled on another worker's upload is the one
+	// case where the SHORT tasks are the finding — the gather-merge tail
+	// emits 4 rows and never reaches 5s (window-2 §7.1). Escalate those.
+	if elapsed >= fragmentPhaseLogFloor || notable {
 		p.logger.Info("fragment task phases", attrs...)
 		return
 	}

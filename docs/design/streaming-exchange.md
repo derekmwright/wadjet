@@ -258,6 +258,24 @@ Tier 1.5 peer FetchShuffle → NVMe → mmap          (NEW)
 Tier 2  S3 → NVMe → mmap                          (exists — the durable base)
 ```
 
+**Tier-2 re-poll cadence (`awaitDurableObject`, `worker/peer_exchange.go`).**
+Under Phase B the durable copy may simply not have landed yet, so a Tier-2
+miss on a hinted/tokened key is a *wait*, not a failure: the consumer
+publishes `SubjectUploadRelease` (making the producer's job urgent) and
+re-polls inside `durableWaitTotal` = 15 s before reporting
+`MissingInputKey`. The cadence is a **geometric ramp, 25 ms doubling to a
+500 ms ceiling, jittered ±25%**, not the flat 500 ms it was until
+2026-08-22. 25 ms is derived from `uploadSlotPollMs` = 50 ms, the interval
+at which a released upload job re-checks for an admission slot — the
+consumer cannot observe a state change faster than the producer can make
+one, and polling below half that rate only spends GETs. Jitter decorrelates
+the tasks of one stage boundary. Kill switch `WADJET_DURABLE_WAIT_BACKOFF=0`
+restores the flat cadence; the budget, the ceiling and the failure
+classification are identical either way. Per-task cost is visible on the
+`fragment task phases` line as `durable_waits` / `durable_wait_polls` /
+`durable_wait_ms`, which escalates that line to INFO whenever a wait
+happened (the tasks that wait are short ones the 5 s log floor would hide).
+
 Broadcast/replicate outputs **stay on S3 + KV in v1**: M consumers fetching
 the same build from one producer makes that producer a fan-out hotspot,
 which S3 absorbs today for free. Tree/chained replication is a possible

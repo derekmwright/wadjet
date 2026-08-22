@@ -246,6 +246,9 @@ func (s *manifestStreamSource) Close() error {
 // inner source this task consumed.
 func (s *manifestStreamSource) srcAcqAttrs() []any { return s.acq.attrs() }
 
+// srcAcqNotable implements srcAcqReporter over the same shared tally.
+func (s *manifestStreamSource) srcAcqNotable() bool { return s.acq.notable() }
+
 // tryDonateToken implements producerTokenDonor by forwarding to the current
 // inner file-set reader (§2.2 producer token donation).
 func (s *manifestStreamSource) tryDonateToken() bool {

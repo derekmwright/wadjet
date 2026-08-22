@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/dataplane"
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
@@ -267,8 +269,75 @@ func (s *cachedFileStreamSource) openShuffleFromPeer(ctx context.Context, key, a
 // shrink the window.
 var durableWaitTotal = 15 * time.Second
 
-// durableWaitPoll is the S3 re-poll cadence within durableWaitTotal.
+// durableWaitPoll caps the S3 re-poll cadence within durableWaitTotal —
+// the ceiling of the geometric ramp that starts at durableWaitPollMin.
+// var so tests can shrink it.
 var durableWaitPoll = 500 * time.Millisecond
+
+// durableWaitPollMin is the FIRST re-poll delay, and the base the ramp
+// doubles from. Derivation, not a tuning knob:
+//
+// The wait is for an upload the producer has already FINALIZED locally —
+// entering the wait publishes SubjectUploadRelease, which makes the
+// producer's queued or foreground-yielded job urgent (upload_manager.go).
+// The consumer therefore cannot learn anything faster than the rate at
+// which the producer's own upload state can change, and that rate is
+// uploadSlotPollMs = 50ms: the interval at which a released job re-checks
+// for an admission slot. 25ms is half of it — the coarsest cadence that
+// still observes every state the producer can enter between two polls.
+// Anything finer only spends S3 GETs on a state that cannot have moved.
+//
+// What the old flat 500ms cost: it quantized every wait to a multiple of
+// itself. SF100 window 2 (docs/benchmarks/sf100-window2-analysis-2026-08-22.md
+// §7.1) measured the 4-row gather-merge tasks completing at
+// 0.74 / 1.25 / 1.75 / 2.25 / 2.77 / 3.34 / 3.83 / 4.30 / 4.81 s — a
+// 500ms grid sitting on the critical path of every aggregate query, worth
+// 12–14.5 s per suite run. The ramp keeps the same 15s budget, the same
+// ceiling and the same MissingInputKey failure semantics, and pays at most
+// one interval of overshoot: ~25ms for a copy that is already landing,
+// 500ms only once the wait is already seconds long.
+var durableWaitPollMin = 25 * time.Millisecond
+
+// durableWaitPollGrowth is the ramp's multiplier. Binary: 25, 50, 100,
+// 200, 400, 500, 500… — the ceiling is reached after 775ms of waiting,
+// i.e. 5 probes inside the window where the flat cadence managed 1.
+const durableWaitPollGrowth = 2
+
+// durableWaitJitterNum/Den spread each delay over ±25% of its nominal
+// value (mean preserved) so the tasks of one stage boundary — 14+ of them
+// can enter the wait in the same millisecond — do not re-poll S3 as a
+// synchronized burst.
+const (
+	durableWaitJitterNum = 1
+	durableWaitJitterDen = 4
+)
+
+// durableWaitBackoff gates the ramp. Off = the pre-2026-08-22 flat
+// durableWaitPoll cadence, unjittered. Registered here rather than in a
+// planner package because it changes only WHEN a consumer re-reads an
+// object it is already entitled to read, never which rows it gets — but
+// the invariance oracle enumerates it all the same, and it is bisectable
+// on EC2 by env alone.
+var durableWaitBackoff = optswitch.Register("durable-wait-backoff", "WADJET_DURABLE_WAIT_BACKOFF",
+	"geometric+jittered re-poll ramp (25ms → 500ms) in the durable-object wait; off = flat 500ms polling")
+
+// nextDurableWaitPoll returns the delay to sleep before the next re-poll
+// and the nominal delay the one after that ramps to.
+func nextDurableWaitPoll(cur time.Duration) (sleep, next time.Duration) {
+	if !durableWaitBackoff.On() {
+		return durableWaitPoll, durableWaitPoll
+	}
+	next = cur * durableWaitPollGrowth
+	if next > durableWaitPoll {
+		next = durableWaitPoll
+	}
+	span := cur * durableWaitJitterNum / durableWaitJitterDen
+	sleep = cur - span
+	if span > 0 {
+		sleep += rand.N(2 * span)
+	}
+	return sleep, next
+}
 
 // missingInputError marks a task failure caused by an unresolvable hinted
 // input: the peer fetch failed and the durable copy stayed absent past the
@@ -302,18 +371,27 @@ func (s *cachedFileStreamSource) awaitDurableObject(ctx context.Context, key str
 				"key", key, "error", err)
 		}
 	}
-	deadline := time.Now().Add(durableWaitTotal)
-	var lastErr error
+	start := time.Now()
+	deadline := start.Add(durableWaitTotal)
+	delay := min(durableWaitPollMin, durableWaitPoll)
+	polls := 0
+	defer func() { s.noteDurableWait(time.Since(start), polls) }()
+	// Not-found is the state this wait was entered in: a budget that
+	// expires before the first poll must still report why, not a nil cause.
+	lastErr := error(objstore.ErrNotFound)
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return nil, lastErr
 		}
+		sleep, next := nextDurableWaitPoll(delay)
+		delay = next
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(min(durableWaitPoll, remaining)):
+		case <-time.After(min(sleep, remaining)):
 		}
+		polls++
 		rc, _, err := s.executor.store.Get(ctx, s.bucket, key)
 		if err == nil {
 			return rc, nil
@@ -323,6 +401,17 @@ func (s *cachedFileStreamSource) awaitDurableObject(ctx context.Context, key str
 			return nil, err // real store error — don't spin on it
 		}
 	}
+}
+
+// noteDurableWait folds one completed durable wait into the task's
+// acquisition tally, so the "fragment task phases" line carries
+// durable_waits / durable_wait_polls / durable_wait_ms. Producer
+// goroutine only, like every other srcAcqStats write.
+func (s *cachedFileStreamSource) noteDurableWait(d time.Duration, polls int) {
+	if s.acq == nil {
+		s.acq = &srcAcqStats{}
+	}
+	s.acq.noteDurableWait(d, polls)
 }
 
 // rootQueryFromKey extracts the root query id from a stage-output key of

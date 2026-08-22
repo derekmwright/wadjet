@@ -500,6 +500,10 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 // srcAcqAttrs implements srcAcqReporter for the fragment phases line.
 func (s *cachedFileStreamSource) srcAcqAttrs() []any { return s.acq.attrs() }
 
+// srcAcqNotable implements srcAcqReporter: a durable wait is worth an INFO
+// phases line however short the task was.
+func (s *cachedFileStreamSource) srcAcqNotable() bool { return s.acq.notable() }
+
 func (s *cachedFileStreamSource) openNextFileTiered(ctx context.Context) (acqTier, error) {
 	filePath := s.files[s.fileIdx]
 	idx := s.fileIdx
@@ -618,10 +622,12 @@ func (s *cachedFileStreamSource) openNextFileTiered(ctx context.Context) (acqTie
 		if addr, token := peers.hintFor(filePath); addr != "" {
 			if perr := s.openShuffleFromPeer(ctx, filePath, addr, token); perr == nil {
 				peers.fetchHits.Add(1)
+				s.acq.notePeer(true)
 				s.executor.shuffleIO.peerFiles.Add(1)
 				return acqPeer, nil
 			} else {
 				peers.fetchFallthrough.Add(1)
+				s.acq.notePeer(false)
 				if s.executor.logger != nil {
 					s.executor.logger.Debug("peer fetch fell through to S3",
 						"key", filePath, "peer", addr, "error", perr)
