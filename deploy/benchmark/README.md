@@ -138,6 +138,14 @@ export MEMORY_BUDGET=536870912  # 512 MB
 
 **Spot instances**: Defaults to off. Use `-var="use_spot=true"` to opt in. Saves ~60-70% but nodes can be reclaimed mid-benchmark. Best for SF1 where session cost is already low ($0.40). Not recommended for SF100 distributed (~$12 session) where a single reclaimed worker wastes the full run.
 
+**A/B env-var arms** (`extra_env`): the generic seam for one-off kill-switch A/Bs, e.g. `WADJET_INTERM_PEER_HINTS=0`. It applies to **both** the coordinator and every worker — each node's cloud-init exports the map into its process environment before launching the wadjet binary, so a coordinator-side switch (like `WADJET_INTERM_PEER_HINTS`, read in `internal/coordinator/peer_locations.go`) and a worker-side switch both take effect from the same `-var`:
+
+```bash
+terraform apply -var-file=sf100-distributed.tfvars \
+  -var="key_name=my-key" \
+  -var='extra_env={"WADJET_INTERM_PEER_HINTS"="0"}'
+```
+
 **Persistent data bucket**: For iterative tuning (especially SF100), create a bucket once and reuse it across cluster rebuilds:
 
 ```bash

@@ -479,7 +479,7 @@ variable "task_gc" {
 
 
 variable "extra_env" {
-  description = "Extra KEY=VALUE pairs appended to /etc/environment on every node — the generic seam for worker-env A/B arms (e.g. {WADJET_SHUFFLE_INDEX_READ=\"0\"}), replacing one-off per-flag variables."
+  description = "Extra KEY=VALUE pairs appended to /etc/environment and exported into the process env on every node (coordinator AND workers) — the generic seam for env-var A/B arms (e.g. {WADJET_SHUFFLE_INDEX_READ=\"0\"}), replacing one-off per-flag variables."
   type        = map(string)
   default     = {}
 }

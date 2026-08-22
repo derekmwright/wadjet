@@ -541,6 +541,14 @@ locals {
     # planner pass. Default on; =false is the A/B / kill-switch arm.
     export WADJET_FUSE_SCAN_SHUFFLE="${var.fuse_scan_shuffle ? "1" : "0"}"
     export WADJET_FUSE_JOIN_SHUFFLE="${var.fuse_join_shuffle ? "1" : "0"}"
+    # Generic env-arm seam (var.extra_env): coordinator-side kill switches
+    # (e.g. WADJET_INTERM_PEER_HINTS, internal/coordinator/peer_locations.go)
+    # are read by THIS process, not the workers', so they need the same
+    # export-before-launch treatment as the worker cloud-init below —
+    # /etc/environment does NOT reach an inline cloud-init shell.
+    %{for k, v in var.extra_env~}
+    export ${k}="${v}"
+    %{endfor~}
     ${local.profile_env}
     cd /root/wadjet
 
