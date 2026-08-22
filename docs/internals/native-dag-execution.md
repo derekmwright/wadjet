@@ -123,7 +123,7 @@ operators (`distributed/messages.go:260`). The worker requires `Operators` to be
 non-empty (`worker/executor_stage.go:22`).
 
 Conversion lives in `coordinator/execute_stage_dag.go`:
-- `buildAggregateFragment` (`:2373`) → `OpShuffleSource` + `OpHashAggregate{GroupByCols, Aggregates, MergeMode}`. **`MergeMode = stage.Type=="final_aggregate"||"merge_aggregate"`** (`:2400`) — merge mode rewrites `InputCol→OutputCol` and `COUNT→SUM`.
+- `buildAggregateFragment` (`:2373`) → `OpShuffleSource` + `OpHashAggregate{GroupByCols, Aggregates, MergeMode, InputRowBound}`. **`MergeMode = stage.Type=="final_aggregate"||"merge_aggregate"`** (`:2400`) — merge mode rewrites `InputCol→OutputCol` and `COUNT→SUM`. `InputRowBound` is `aggregateInputRowBound`: the exact Σ`PartitionRows` over the partitions bound to this task (0 = unknown), which decides the worker aggregate's group-index layout — see `docs/design/unbounded-final-aggregate-layout.md`.
 - `buildSortFragment` (`:2514`), shuffle dispatch `dispatchShuffleStage` (`:772`).
 - Terminal stage gets an `OpGatherSink` when `gatherReplySubject != ""`.
 

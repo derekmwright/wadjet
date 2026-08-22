@@ -348,7 +348,7 @@ func TestBuildAggregateFragment_GatherSink(t *testing.T) {
 	aggs := []distributed.AggSpec{{Func: "sum", InputCol: "v", OutputCol: "total"}}
 
 	t.Run("with reply subject emits OpGatherSink", func(t *testing.T) {
-		ops, err := buildAggregateFragment(stage, task, taskInputs, aggs, nil, "wadjet.gather.q-foo")
+		ops, err := buildAggregateFragment(stage, task, taskInputs, aggs, nil, "wadjet.gather.q-foo", 0)
 		if err != nil {
 			t.Fatalf("buildAggregateFragment: %v", err)
 		}
@@ -361,7 +361,7 @@ func TestBuildAggregateFragment_GatherSink(t *testing.T) {
 		}
 	})
 	t.Run("empty reply subject keeps legacy OpUnpartitionedSink", func(t *testing.T) {
-		ops, err := buildAggregateFragment(stage, task, taskInputs, aggs, nil, "")
+		ops, err := buildAggregateFragment(stage, task, taskInputs, aggs, nil, "", 0)
 		if err != nil {
 			t.Fatalf("buildAggregateFragment: %v", err)
 		}
@@ -381,7 +381,7 @@ func TestBuildAggregateFragment_GatherSink(t *testing.T) {
 			Limit:       10,
 		}
 		sorts := []distributed.SortKeySpec{{Column: "total", Desc: true}}
-		ops, err := buildAggregateFragment(stageWithSort, task, taskInputs, aggs, sorts, "wadjet.gather.q-sort")
+		ops, err := buildAggregateFragment(stageWithSort, task, taskInputs, aggs, sorts, "wadjet.gather.q-sort", 0)
 		if err != nil {
 			t.Fatalf("buildAggregateFragment with sort: %v", err)
 		}

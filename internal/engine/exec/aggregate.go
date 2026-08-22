@@ -421,11 +421,23 @@ type HashAggregate struct {
 	// instead of betting on a runtime conversion an epoch-scoped table can
 	// never amortize. Set with SetEpochByteCap BEFORE Init.
 	epochByteCap int64
+	// inputRowBound > 0 is an EXACT upper bound on the rows this aggregate
+	// will consume, declared by an owner that knows it — the coordinator's
+	// per-partition row accounting for a DAG aggregate task. An index that
+	// will see fewer than twoLevelMinAmortizeRows() rows in total has
+	// nothing to repay a conversion with (two_level_hash.go,
+	// twoLevelAmortizeMultiple). Set with SetInputRowBound BEFORE Init.
+	// 0 = unknown, which leaves the adaptive path untouched.
+	inputRowBound int64
 	// indexBornFlat is that decision, taken in resolveIndices and read by
 	// the NDV-hint direct-build branches and every conversion gate.
-	// groupCeiling is the Gmax it was taken from (0 = unbounded), kept for
-	// the worker's log line.
+	// groupCeiling is the Gmax the epoch cap allowed (0 = no cap), kept for
+	// the worker's log line, and indexFlatWhy names which bound pinned the
+	// layout. indexFlatWhy is a byte, not a string: it packs beside
+	// indexBornFlat instead of adding 16 bytes to a struct whose tail
+	// offsets the hot consume loop is measurably sensitive to.
 	indexBornFlat bool
+	indexFlatWhy  indexFlatReason
 	groupCeiling  int64
 	// indexConversions counts THIS aggregate's flat→bucketed conversions.
 	// The package-level TwoLevelConversions is worker-wide and cannot be
@@ -439,6 +451,25 @@ type HashAggregate struct {
 // (two_level_hash.go, twoLevelBoundedMinGroups) and a sink that learns its
 // cap after the first batch has already chosen.
 func (h *HashAggregate) SetEpochByteCap(cap int64) { h.epochByteCap = cap }
+
+// SetInputRowBound declares an EXACT upper bound on the number of rows this
+// aggregate will consume. Call it BEFORE Init, for the same reason
+// SetEpochByteCap must be: the group-index layout is decided from it once,
+// and a sink that learns its bound after the first batch has already chosen.
+//
+// "Exact" is load-bearing. The bound may over-state (a clone reads a subset
+// of its parent's rows and inherits the parent's bound), because over-stating
+// only keeps the adaptive path. It must never under-state: a bound below the
+// truth pins a genuinely high-cardinality index flat. That is why estimates —
+// InputRowHint, GroupNDVHint — are not routed here.
+func (h *HashAggregate) SetInputRowBound(rows int64) { h.inputRowBound = rows }
+
+// InputRowBound reports the declared bound (0 = none).
+func (h *HashAggregate) InputRowBound() int64 { return h.inputRowBound }
+
+// IndexFlatReason names the bound that pinned this aggregate's group index
+// flat at construction: "epoch-cap", "row-bound", or "" when nothing did.
+func (h *HashAggregate) IndexFlatReason() string { return h.indexFlatWhy.String() }
 
 // IndexConversions reports how many flat→bucketed group-index conversions
 // this aggregate paid; IndexBornFlat reports whether its layout was pinned
@@ -1505,18 +1536,19 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 		intHTInitSize = htInitSize
 	}
 
-	// Group-index LAYOUT, decided here and only here. A sink whose owner
-	// finalizes and rebuilds it on a byte cap cannot amortize a flat→
-	// bucketed conversion, so it is born flat and never converts — see
-	// twoLevelBoundedMinGroups (two_level_hash.go) for the rule, its
-	// derivation and the SF100 Q18 measurements behind it. Unbounded sinks
-	// leave this false and keep the adaptive path unchanged.
-	bornFlat, ceiling := h.boundedIndexStaysFlat(b)
+	// Group-index LAYOUT, decided here and only here, from the bounds the
+	// sink's owner declared before the first row: an epoch byte cap
+	// (twoLevelBoundedMinGroups) or an exact input-row bound
+	// (twoLevelAmortizeMultiple). Either one pins the index flat for life
+	// when a flat→bucketed conversion could not be repaid. A sink with
+	// neither bound leaves this false and keeps the adaptive path unchanged.
+	bornFlat, ceiling, flatWhy := h.indexLayoutStaysFlat(b)
 	h.groupCeiling = ceiling
 	if bornFlat && !h.indexBornFlat {
 		TwoLevelBornFlat.Add(1)
 	}
 	h.indexBornFlat = bornFlat
+	h.indexFlatWhy = flatWhy
 
 	// Grouping sets force the generic path — keys are prefixed with set ID
 	// and only subset columns are serialized per set.
@@ -2715,24 +2747,58 @@ func (h *HashAggregate) indexConverts(live, slots, incoming int) bool {
 	return !h.indexBornFlat && convertsToTwoLevel(live, slots, incoming)
 }
 
-// boundedIndexStaysFlat decides the group-index layout from what the sink
-// knows before its first row: its epoch byte cap and its per-group state
-// size. See twoLevelBoundedMinGroups for the rule and its derivation.
+// indexLayoutStaysFlat decides the group-index layout from what the sink
+// knows before its first row. Two independent bounds, either of which pins
+// the index flat for life; see two_level_hash.go for both rules, their
+// derivations and their measurements:
 //
-// Returns whether the index must be flat, and the group ceiling it was
-// decided from (0 = unbounded sink, decision deferred to the runtime gate).
-func (h *HashAggregate) boundedIndexStaysFlat(b *batch.RecordBatch) (bool, int64) {
-	if h.epochByteCap <= 0 || !bornFlatToggle.On() {
-		return false, 0
+//   - the epoch byte cap and the per-group state size give a group ceiling
+//     Gmax = C/s, compared against twoLevelBoundedMinGroups (ADR-0014);
+//   - the declared input-row bound is compared against
+//     twoLevelMinAmortizeRows() — an index that will see fewer rows than
+//     that in total has nothing left to repay a conversion with.
+//
+// Returns whether the index must be flat, the epoch-cap group ceiling
+// (0 = no cap — kept for the worker's log line), and which bound decided it.
+func (h *HashAggregate) indexLayoutStaysFlat(b *batch.RecordBatch) (flat bool, ceiling int64, why indexFlatReason) {
+	if h.epochByteCap > 0 && bornFlatToggle.On() {
+		s := h.perGroupStateBytes(b)
+		if s <= 0 {
+			// No usable estimate. A bounded sink is flat unconditionally
+			// then — an index rebuilt every epoch can never amortize a
+			// conversion.
+			return true, 0, flatReasonEpochCap
+		}
+		ceiling = h.epochByteCap / int64(s)
+		if ceiling < twoLevelBoundedMinGroups {
+			return true, ceiling, flatReasonEpochCap
+		}
 	}
-	s := h.perGroupStateBytes(b)
-	if s <= 0 {
-		// No usable estimate. A bounded sink is flat unconditionally then —
-		// an index rebuilt every epoch can never amortize a conversion.
-		return true, 0
+	if h.inputRowBound > 0 && rowBoundToggle.On() &&
+		h.inputRowBound < twoLevelMinAmortizeRows() {
+		return true, ceiling, flatReasonRowBound
 	}
-	ceiling := h.epochByteCap / int64(s)
-	return ceiling < twoLevelBoundedMinGroups, ceiling
+	return false, ceiling, flatNotPinned
+}
+
+// indexFlatReason is which of the two construction-time bounds pinned a
+// group index flat, as it surfaces in IndexFlatReason and the task logs.
+type indexFlatReason uint8
+
+const (
+	flatNotPinned indexFlatReason = iota
+	flatReasonEpochCap
+	flatReasonRowBound
+)
+
+func (r indexFlatReason) String() string {
+	switch r {
+	case flatReasonEpochCap:
+		return "epoch-cap"
+	case flatReasonRowBound:
+		return "row-bound"
+	}
+	return ""
 }
 
 // perGroupStateBytes is a LOWER bound on the bytes one group adds to
@@ -4667,6 +4733,11 @@ func (h *HashAggregate) CloneSink() SinkSource {
 	// over-states what one clone can hold (clones own disjoint 1/k slices),
 	// which keeps the ceiling an upper bound — the safe direction.
 	clone.epochByteCap = h.epochByteCap
+	// Same for the row bound: a clone consumes a SUBSET of the parent's
+	// input, so the parent's bound bounds it too. Deliberately not divided
+	// by the clone count — morsel clones take dynamic row slices, and a
+	// bound that over-states only ever keeps the adaptive path.
+	clone.inputRowBound = h.inputRowBound
 	return clone
 }
 

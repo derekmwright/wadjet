@@ -73,14 +73,26 @@ import (
 //
 // # Layout is decided at construction where the sink's bounds allow it
 //
-// Before any of the adaptive machinery below runs, a sink whose OWNER
-// finalizes and rebuilds it on a byte cap — the shuffle sender's exchange
-// partial aggregation, worker.cappedPartialAgg — is born FLAT and never
-// converts. Such a sink's index cannot outlive one epoch, so a conversion
-// has nothing after it to amortize against; see twoLevelBoundedMinGroups for
-// the rule, its derivation and its measurements. Everything below applies to
-// UNBOUNDED sinks (final/standalone aggregates), which is where the
-// structure's measured wins are.
+// Before any of the adaptive machinery below runs, a sink is born FLAT and
+// never converts when either construction-time bound says a conversion could
+// not be repaid. Both are properties the sink's owner knows before the first
+// row, and both are one comparison in HashAggregate.indexLayoutStaysFlat:
+//
+//   - EPOCH BYTE CAP (twoLevelBoundedMinGroups). A sink whose owner finalizes
+//     and rebuilds it on a byte cap — the shuffle sender's exchange partial
+//     aggregation, worker.cappedPartialAgg — holds at most C/s groups and its
+//     index cannot outlive one epoch, so a conversion has nothing after it to
+//     amortize against.
+//   - INPUT ROW BOUND (twoLevelAmortizeMultiple). An UNBOUNDED sink whose
+//     owner knows exactly how many rows it will read — a DAG aggregate task
+//     reading a known set of upstream shuffle partitions — will pass fewer
+//     than R* rows through the index in total, so it cannot have R* − the
+//     conversion threshold left after the earliest conversion point. This is
+//     the Q18/Q20 `final_aggregate` shape: rows ≈ groups, one probe per
+//     group, the conversion firing at the last doubling.
+//
+// Everything below applies to sinks with NEITHER bound — a standalone or
+// single-process aggregate that knows only its own live counters.
 //
 // # Adaptive conversion, not construction
 //
@@ -147,11 +159,18 @@ var twoLevelToggle = optswitch.Register("two-level-ht", "WADJET_TWO_LEVEL_HT",
 	"256-bucket two-level group index past twoLevelConvertAt keys (per-bucket rehash instead of whole-table)")
 
 // bornFlatToggle is the kill switch for the construction-time layout
-// decision (twoLevelBoundedMinGroups / HashAggregate.boundedIndexStaysFlat).
+// decision (twoLevelBoundedMinGroups / HashAggregate.indexLayoutStaysFlat).
 // Off = the pre-2026-08-22 behavior: every sink starts flat and converts at
 // runtime whenever convertsToTwoLevel says so, epoch cap or not.
 var bornFlatToggle = optswitch.Register("two-level-born-flat", "WADJET_TWO_LEVEL_BORN_FLAT",
 	"epoch-capped (bounded) aggregates build a flat group index and never convert")
+
+// rowBoundToggle is the kill switch for the second construction-time bound:
+// an aggregate whose owner knows EXACTLY how many rows it will read
+// (twoLevelMinAmortizeRows / HashAggregate.SetInputRowBound). Off = such an
+// aggregate takes the unchanged adaptive path, as it did before 2026-08-22.
+var rowBoundToggle = optswitch.Register("two-level-row-bound", "WADJET_TWO_LEVEL_ROW_BOUND",
+	"aggregates whose known input-row bound cannot amortize a flat→bucketed conversion are born flat")
 
 // twoLevelBoundedMinGroups is G* — the group count a BOUNDED sink's epoch
 // must be able to reach before the bucketed layout is allowed at all.
@@ -194,6 +213,67 @@ var bornFlatToggle = optswitch.Register("two-level-born-flat", "WADJET_TWO_LEVEL
 // that is a live-count crossover for a table that will keep growing, and a
 // bounded sink's table by construction will not.
 const twoLevelBoundedMinGroups = 4 << 20
+
+// twoLevelAmortizeMultiple is R*, expressed in units of twoLevelConvertAt —
+// the SECOND construction-time bound, and the one that covers the UNBOUNDED
+// final aggregates twoLevelBoundedMinGroups deliberately left alone.
+//
+// A conversion is paid ONCE, in full, at the moment it fires, and is repaid
+// only by the rows that pass through the index AFTERWARDS: every later probe
+// costs less, and every later rehash is 256 cache-resident scatters instead
+// of one DRAM-wide one. The gate in convertsToTwoLevel tests when to convert
+// (at the doubling it displaces) but never whether there is anything left to
+// repay it — that quantity is not in the flat table's live/slot counters at
+// all. It is, however, exact in the coordinator: a DAG aggregate task reads a
+// known set of upstream partitions whose row counts the producing stage
+// already reported (StageOutput.PartitionRows).
+//
+// The earliest a conversion can fire is twoLevelConvertAt live entries, so a
+// sink that will read fewer than R* rows IN TOTAL cannot have R* − convertAt
+// rows left after it. Requiring the whole input to be at least 8× the
+// conversion threshold is the same statement with the arithmetic done once.
+//
+// DERIVATION — three measurements, two shapes:
+//
+//   - SF100 TPC-H Q18 `final_aggregate-7` (24 tasks, one shuffle partition
+//     each, ~6.25 M rows and ~6.25 M near-unique groups per task, merge mode
+//     so rows ≈ groups): 4.14 s with the index off against 5.16 s (old count
+//     gate) and 5.79–6.52 s (load-factor gate) — a LOSS at R = 6.25 M, and
+//     the whole of the query's residual
+//     (docs/benchmarks/sf100-window2-analysis-2026-08-22.md §1.1, §8.2 #4;
+//     …-window3-… §2.6). Q20's `final_aggregate-9` is the same shape at
+//     ~2.3 M rows per task and moves the same way (w1: −7.7 % task-seconds
+//     with the index off).
+//   - BenchmarkAggIntCardinalitySweep, near-unique (rows ≈ groups): the 4 M
+//     arm measures the bucketed layout at +25/+31 % — a LOSS — and the 16 M
+//     arm at −4.1/−11 % — a WIN. So the crossover for a one-probe-per-group
+//     shape sits between 6.25 M (production loss) and 16 M (local win).
+//   - The shapes where the structure earns its keep are the ones with MANY
+//     rows per group: ClickBench Q33 is ~100 M rows over ~6 M groups per
+//     sink, i.e. ~17 probes per group, and a scan-level aggregate always
+//     reads far more rows than it holds groups. R is the row count, not the
+//     group count, precisely so those keep the adaptive path: R ≥ R* is
+//     satisfied by any high-cardinality scan long before its group count
+//     matters.
+//
+// 8 × twoLevelConvertAt = 8 M sits inside the bracket. Expressing it as a
+// multiple of the threshold rather than as a second absolute number keeps
+// the two halves of the gate calibrated together — including under the
+// WADJET_TWO_LEVEL_AT override, which exists so CI corpora exercise the
+// bucketed path at group counts nowhere near a million.
+//
+// The rule is MONOTONE: it can only take conversions away, never add one, so
+// no shape can become bucketed that was not bucketed before. And it fires
+// only where an EXACT bound exists — an estimate that reads low would pin a
+// genuinely huge aggregate flat, so estimates (the single-process planner's
+// InputRowHint / GroupNDVHint) are deliberately not accepted here.
+const twoLevelAmortizeMultiple = 8
+
+// twoLevelMinAmortizeRows is R* in rows. A var-derived function rather than a
+// constant because twoLevelConvertAt is itself overridable (WADJET_TWO_LEVEL_AT).
+func twoLevelMinAmortizeRows() int64 {
+	return int64(twoLevelConvertAt) * twoLevelAmortizeMultiple
+}
 
 // TwoLevelConversions counts flat→bucketed conversions, TwoLevelDirectBuilds
 // counts indexes built bucketed from an NDV hint, and TwoLevelBornFlat counts

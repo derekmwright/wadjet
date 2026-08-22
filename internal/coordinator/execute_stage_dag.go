@@ -2490,6 +2490,17 @@ func (c *Coordinator) dispatchComputeStage(
 		"skew_split", skewAssign != nil,
 		"inputs_aliases", len(inputs),
 	}
+	// Group-index layout marker for aggregate stages: the exact upstream row
+	// count this stage will re-aggregate, and the per-task bound derived
+	// from it. Together with the worker's `two_level_born_flat` counter this
+	// makes "did the unbounded final aggregate take the flat layout" a
+	// one-grep answer per run (the ADR-0014 lesson: a counter nobody can
+	// read is a counter nobody reads).
+	if stage.Type == "aggregate" || stage.Type == "final_aggregate" || stage.Type == "merge_aggregate" {
+		if b := aggregateInputRowBound(stage, inputs, 0, numTasks); b > 0 {
+			dispatchAttrs = append(dispatchAttrs, "agg_task_row_bound", b)
+		}
+	}
 	// Plan-side engagement marker for late-materialization A/B arms: join
 	// stages dispatched with view-column output enabled are grep-able from
 	// benchmark.log (worker-side runtime counters live in worker logs, which
@@ -2817,7 +2828,15 @@ func (c *Coordinator) dispatchComputeStage(
 			if fusion != nil {
 				fusedSubject = fusion.replySubject
 			}
-			ops, ferr := buildAggregateFragment(stage, &t, taskInputs, aggs, sorts, fusedSubject)
+			// Exact input-row bound for the group-index layout decision.
+			// Only the plain partition-range assignment has one: the other
+			// three slicings hand a task a file group whose row counts the
+			// per-partition vector cannot address.
+			var rowBound int64
+			if probeSets == nil && !probeSplit && rrAggGroups == nil && skewAssign == nil {
+				rowBound = aggregateInputRowBound(stage, inputs, w, numTasks)
+			}
+			ops, ferr := buildAggregateFragment(stage, &t, taskInputs, aggs, sorts, fusedSubject, rowBound)
 			if ferr != nil {
 				return StageOutput{}, fmt.Errorf("stage %s: build aggregate fragment: %w", stage.ID, ferr)
 			}
@@ -3450,7 +3469,10 @@ func buildSortMergeJoinFragment(
 // into this fragment, eliminating one S3 PUT/GET hop and one coord round-
 // trip. Each task publishes its own terminal marker; coord pre-subscribes
 // with expectedTerminals = numTasks.
-func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, aggs []distributed.AggSpec, sorts []distributed.SortKeySpec, gatherReplySubject string) ([]distributed.OpSpec, error) {
+// inputRowBound is the exact upper bound on the rows this task will read
+// (aggregateInputRowBound), or 0 when no exact bound exists. It rides the
+// OpHashAggregate spec and decides the group-index layout on the worker.
+func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, aggs []distributed.AggSpec, sorts []distributed.SortKeySpec, gatherReplySubject string, inputRowBound int64) ([]distributed.OpSpec, error) {
 	if len(taskInputs) != 1 {
 		return nil, fmt.Errorf("aggregate fragment: expected 1 input alias, got %d", len(taskInputs))
 	}
@@ -3502,6 +3524,7 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 		// Singleton, so the row it emits cannot be duplicated across tasks.
 		EmitEmptyIdentity: stage.Type == "final_aggregate" &&
 			len(stage.GroupByCols) == 0 && !stage.GroupByAll,
+		InputRowBound: inputRowBound,
 	})
 	// INTERSECT/EXCEPT counting stage (#346): the aggregate's drain is one
 	// row per distinct result row plus its per-arm counts; the emit operator
@@ -3990,7 +4013,9 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 			EstimatedBytes: intermEst,
 			CreatedAt:      time.Now(),
 		}
-		ops, ferr := buildAggregateFragment(intermStage, &t, map[string][]string{depID: group}, aggs, nil, "")
+		// No exact row bound: the fan-out slices the upstream by FILE, and
+		// the per-partition row vector cannot address a file group.
+		ops, ferr := buildAggregateFragment(intermStage, &t, map[string][]string{depID: group}, aggs, nil, "", 0)
 		if ferr != nil {
 			return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: build interm fragment %d: %w", stage.ID, i, ferr)
 		}
@@ -4061,7 +4086,9 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	if fusion != nil {
 		fusedSubject = fusion.replySubject
 	}
-	finalOps, ferr := buildAggregateFragment(stage, &finalTask, finalInputsMap, aggs, sorts, fusedSubject)
+	// The final merge reads every intermediate output; runStageTasks reports
+	// their bytes, not their rows, so there is no exact bound to declare.
+	finalOps, ferr := buildAggregateFragment(stage, &finalTask, finalInputsMap, aggs, sorts, fusedSubject, 0)
 	if ferr != nil {
 		return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: build final fragment: %w", stage.ID, ferr)
 	}
@@ -4209,6 +4236,47 @@ func estimateComputeTaskBytes(stage physical.Stage, inputs map[string]StageOutpu
 		}
 	}
 	return est
+}
+
+// aggregateInputRowBound returns an EXACT upper bound on the number of rows
+// one aggregate task will read: the sum of the upstream stage's reported
+// per-partition row counts over the partition range bound to task w. Every
+// aggregate emits at most one group per input row, so this bounds its group
+// count too — which is what the worker's group-index layout decision needs
+// (distributed.OpSpec.InputRowBound, exec/two_level_hash.go).
+//
+// 0 means UNKNOWN, and unknown must stay unknown: the layout rule pins an
+// index flat when the bound is small, so a bound that reads low where the
+// truth is high is the one error that costs. Every uncertain case therefore
+// returns 0 —
+//   - more than one dependency (the row counts do not compose),
+//   - a dep that is not hash-partitioned, or one whose worker build reported
+//     no PartitionRows,
+//   - a partition vector that does not align 1:1 with NumPartitions.
+//
+// The caller is responsible for the fourth: it must not call this for a task
+// whose inputs were assigned by probe-split / skew-split / round-robin
+// file grouping rather than by partitionRangeForWorker.
+func aggregateInputRowBound(stage physical.Stage, inputs map[string]StageOutput, w, numTasks int) int64 {
+	if len(stage.Dependencies) != 1 {
+		return 0
+	}
+	out, ok := inputs[stage.Dependencies[0]]
+	if !ok || out.Kind != OutputPartitioned || out.NumPartitions <= 0 {
+		return 0
+	}
+	if len(out.PartitionRows) != out.NumPartitions {
+		return 0
+	}
+	start, end := partitionRangeForWorker(out.NumPartitions, w, numTasks)
+	var rows int64
+	for p := start; p < end; p++ {
+		if out.PartitionRows[p] < 0 {
+			return 0
+		}
+		rows += out.PartitionRows[p]
+	}
+	return rows
 }
 
 // buildTaskInputsForStage maps a stage's Dependencies (upstream stage IDs)

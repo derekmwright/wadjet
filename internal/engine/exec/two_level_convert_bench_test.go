@@ -218,3 +218,61 @@ func BenchmarkAggIntCappedEpochs(b *testing.B) {
 // duplicated rather than exported because the worker package imports exec,
 // not the other way round.
 const defaultBenchPartialAggCap = 128 << 20
+
+// BenchmarkAggIntFinalMerge is the UNBOUNDED counterpart of
+// BenchmarkAggIntCappedEpochs: the Q18/Q20 `final_aggregate` shape.
+//
+// One aggregate for the whole input, no epoch cap, and rows ≈ groups because
+// the input is already partial-aggregated — so the index is probed about once
+// per group and a conversion has almost nothing left to repay it. The group
+// counts are the SF100 per-task figures: Q18's `final_aggregate-7` reads one
+// of 24 shuffle partitions, ~6.25 M rows and ~6.25 M near-unique groups;
+// Q20's `final_aggregate-9` is the same shape at ~2.3 M.
+//
+// Three arms, ONE interleaved window (`-benchtime 1x -count 5`, compare
+// minima — this machine is noisy at the ±10 % level):
+//
+//	flat       the kill switch off — the floor (SF100's bisect arm)
+//	adaptive   no bound declared: today's runtime conversion
+//	rowbound   the coordinator's exact row bound declared, so the layout is
+//	           decided at construction. conv/op must be 0 and the time must
+//	           sit on the flat arm.
+//
+// The local machine cannot see the production conversion cost (~675 ns per
+// live entry against a shared L3 with 8-10 tasks scattering concurrently, vs
+// ~25-30 ns here — ADR-0014), so the flat↔adaptive gap measured here is a
+// LOWER bound on the SF100 one.
+func BenchmarkAggIntFinalMerge(b *testing.B) {
+	ctx := context.Background()
+	for _, groups := range []int{6_250_000, 2_300_000} {
+		rows := groups // merge mode: one row per group per upstream producer
+		batches := benchAggIntBatches(rows, groups)
+		run := func(b *testing.B, on bool, bound int64) {
+			prev := twoLevelToggle.Set(on)
+			defer twoLevelToggle.Set(prev)
+			b.ReportAllocs()
+			b.ResetTimer()
+			conversions := TwoLevelConversions.Load()
+			for i := 0; i < b.N; i++ {
+				agg := NewHashAggregate([]string{"k"}, benchAggCols())
+				agg.SetInputRowBound(bound)
+				if err := agg.Init(ctx); err != nil {
+					b.Fatal(err)
+				}
+				for _, rb := range batches {
+					if err := agg.Consume(ctx, rb); err != nil {
+						b.Fatal(err)
+					}
+				}
+				agg.Close()
+			}
+			b.ReportMetric(float64(TwoLevelConversions.Load()-conversions)/float64(b.N), "conv/op")
+		}
+		b.Run(fmt.Sprintf("groups=%d/flat", groups),
+			func(b *testing.B) { run(b, false, 0) })
+		b.Run(fmt.Sprintf("groups=%d/adaptive", groups),
+			func(b *testing.B) { run(b, true, 0) })
+		b.Run(fmt.Sprintf("groups=%d/rowbound", groups),
+			func(b *testing.B) { run(b, true, int64(rows)) })
+	}
+}

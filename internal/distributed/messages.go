@@ -480,6 +480,18 @@ type OpSpec struct {
 	// take (see AggSpec.OutputType).
 	EmitEmptyIdentity bool `json:"emit_empty_identity,omitempty"`
 
+	// InputRowBound is an EXACT upper bound on the rows this aggregate task
+	// will read: the sum of the upstream stage's reported PartitionRows over
+	// the partitions bound to this task. It is not an estimate and not a
+	// presize hint — the worker feeds it to
+	// exec.HashAggregate.SetInputRowBound, which decides the group-index
+	// LAYOUT from it (a flat→bucketed conversion is repaid only by the rows
+	// that follow it; see exec/two_level_hash.go twoLevelAmortizeMultiple).
+	// 0 = unknown (non-partitioned input, legacy coordinator, a task whose
+	// inputs were assigned by skew/probe/round-robin splitting rather than
+	// by partition range) — the aggregate keeps the adaptive path.
+	InputRowBound int64 `json:"input_row_bound,omitempty"`
+
 	// OpSort (pipeline-breaker).
 	SortKeySpecs []SortKeySpec `json:"sort_key_specs,omitempty"` // ordered key columns
 	SortLimit    int           `json:"sort_limit,omitempty"`     // 0 = no limit; > 0 = top-N truncation after sort

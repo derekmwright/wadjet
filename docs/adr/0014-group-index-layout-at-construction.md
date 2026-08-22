@@ -1,7 +1,8 @@
 # ADR-0014: Group-index layout is decided at sink construction, not by runtime conversion
 
 Status: Accepted (born-flat rule landed 2026-08-22, `dcc95a8`; SF100-validated
-the same day, run `20260822-032608`)
+the same day, run `20260822-032608`). **Amended 2026-08-22** — the input-row
+bound extends the rule to unbounded final aggregates; see the amendment below.
 
 ## Context
 
@@ -58,7 +59,9 @@ first row, not a bet re-evaluated at runtime.**
   conversion gate returns false for its whole life**, merge paths included.
 - **Unbounded sinks — final and standalone aggregates, everything ClickBench
   runs — take the unchanged adaptive path**, NDV-hint direct builds included
-  (`boundedIndexStaysFlat` returns immediately when no cap was declared).
+  (`indexLayoutStaysFlat` falls straight through when no cap was declared).
+  *Amended below:* an unbounded sink that declares an exact INPUT ROW bound is
+  now decided from that instead of falling through.
 
 `G*` is calibrated from two measurements and nothing else. Q18's partial
 aggregate has C = 128 MB, s ≈ 46 B ⇒ `Gmax ≈ 2.9 M`, and the index-off arm
@@ -74,6 +77,57 @@ comparand: it is a live-count crossover for a table that will keep growing.
 **Kill switches:** `WADJET_TWO_LEVEL_BORN_FLAT=0` restores runtime conversion for
 bounded sinks; `WADJET_TWO_LEVEL_HT=0` removes the bucketed path entirely. Both
 are in `internal/optswitch`, so the invariance oracle sweeps them.
+
+## Amendment, 2026-08-22 — the second bound: input rows
+
+The rule above is stated for the one bound a bounded sink has. It generalizes,
+and the generalization closes the residual this ADR named.
+
+**A conversion is repaid only by the work that follows it.** An epoch cap is
+one way to know there is none; an *exact input row count* is another, and a DAG
+aggregate task has one — the coordinator already reduces
+`StageOutput.PartitionRows` across the producing stage's tasks, and the task
+reads a named partition range of it. Every aggregate emits at most one group
+per input row, so that sum bounds both the probes and the groups, exactly.
+
+**Extended decision:** an aggregate whose owner declares an exact input row
+bound `R` (`HashAggregate.SetInputRowBound`, before `Init`) is born flat when
+`R < R* = twoLevelAmortizeMultiple × twoLevelConvertAt` (8 × 1 M = 8 M). The
+earliest a conversion can fire is `twoLevelConvertAt` live entries, so a sink
+that will read fewer than `R*` rows in total cannot have `R* − convertAt` rows
+left after it. `R` is the **row** count, not the group count, and that is the
+whole discriminator: a high-cardinality *scan* aggregate reads far more rows
+than it holds groups and clears `R*` immediately, while a *merge* aggregate has
+`R ≈ G` — one probe per group — and clears it only when genuinely huge. Group
+count alone cannot separate Q18's final aggregate (~6.25 M groups per task, a
+measured loss) from ClickBench Q33 (~6 M groups per sink, a win); rows can.
+
+`R*` is bracketed by three measurements and nothing else: the near-unique
+sweep's 4 M arm (+25/+31 %, loss) and 16 M arm (−4.1/−11 %, win), and SF100
+Q18 `final_aggregate-7` at ~6.25 M rows per task (4.14 s index-off vs
+5.16–6.52 s bucketed, both windows, several arms of one binary). It is
+expressed as a multiple of `twoLevelConvertAt` so both halves of the gate stay
+calibrated together, including under the `WADJET_TWO_LEVEL_AT` override.
+
+Two properties keep this from being a threshold tweak in disguise. It is
+**monotone** — a declared bound can only remove a conversion, never add one, so
+no shape becomes bucketed that was not — and it consumes **exact bounds only**:
+every uncertain case (multiple deps, unpartitioned upstream, missing or
+misaligned `PartitionRows`, probe/skew/round-robin task slicing) yields
+"unknown" and the adaptive path is untouched, and the planner's estimates
+(`InputRowHint`, `GroupNDVHint`) are deliberately not routed in, because a
+bound that reads low is the one error that costs. Over-stating is free, which
+is why a morsel clone inherits its parent's whole-task bound undivided.
+
+Because the bound exists only on the coordinator's DAG dispatch, the
+single-process path — which is what the ClickBench harness runs — is
+untouched **by construction**. The rule therefore does not depend on the owed
+clean ClickBench interleaved A/B that lever #4 was blocked on; that A/B remains
+owed for the separate question of whether `twoLevelConvertAt` is calibrated.
+
+Kill switch: `WADJET_TWO_LEVEL_ROW_BOUND=0`, registered in `internal/optswitch`
+so the invariance oracle sweeps it. Mechanism, plumbing, expected SF100 shape
+and the ClickBench check: `docs/design/unbounded-final-aggregate-layout.md`.
 
 ## Consequences
 
@@ -98,9 +152,10 @@ are in `internal/optswitch`, so the invariance oracle sweeps them.
   those counters existed since 08-17 and were read nowhere.
 - A future sink declaring a much larger `C` can legitimately reach `G*` and will
   be born bucketed. The rule survives that; a threshold would not.
-- Q18's *unbounded* `final_aggregate-7` is untouched and remains the residual
-  (4.14 s index-off vs 5.2–6.5 s bucketed). Closing it is blocked on the owed
-  ClickBench A/B below.
+- Q18's *unbounded* `final_aggregate-7` was untouched by the original rule and
+  was the residual (4.14 s index-off vs 5.2–6.5 s bucketed). **Closed by the
+  2026-08-22 amendment above** — the input-row bound, not the owed ClickBench
+  A/B, which the amendment does not depend on.
 
 ## Alternatives rejected
 
@@ -146,5 +201,8 @@ are in `internal/optswitch`, so the invariance oracle sweeps them.
   and `G* = 4 M` derivation, and the arena accounting finding)
 - `docs/benchmarks/sf100-window-analysis-2026-08-22.md` §8 + its
   ClickBench-confound addendum; `…-window2-analysis-2026-08-22.md` §1
+- `docs/design/unbounded-final-aggregate-layout.md` (the 2026-08-22 amendment's
+  mechanism, plumbing, `R*` derivation and expected SF100 shape)
 - `internal/engine/exec/two_level_hash.go`, `internal/engine/exec/aggregate.go`,
-  `internal/worker/shuffle_partial_agg.go`
+  `internal/worker/shuffle_partial_agg.go`,
+  `internal/coordinator/execute_stage_dag.go` (`aggregateInputRowBound`)

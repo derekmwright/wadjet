@@ -2315,6 +2315,13 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 	}
 	hashAgg := exec.NewHashAggregate(spec.GroupByCols, aggCols)
 	hashAgg.GroupByAll = spec.GroupByAll
+	// The coordinator's exact per-partition row accounting, when it had one:
+	// the group-index layout is decided from it before the first batch (a
+	// flat→bucketed conversion is repaid only by the rows that follow it —
+	// exec/two_level_hash.go, twoLevelAmortizeMultiple). Must precede Init.
+	if spec.InputRowBound > 0 {
+		hashAgg.SetInputRowBound(spec.InputRowBound)
+	}
 	if sm := e.spillFor(ctx); sm != nil {
 		hashAgg.Spill = sm
 	}

@@ -41,7 +41,7 @@ func TestBuildAggregateFragment_EmitEmptyIdentity(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			task := &distributed.Task{DataBucket: "buk"}
 			ops, err := buildAggregateFragment(tt.stage, task,
-				map[string][]string{"upstream": {"f1.wshf"}}, aggs, nil, "")
+				map[string][]string{"upstream": {"f1.wshf"}}, aggs, nil, "", 0)
 			if err != nil {
 				t.Fatalf("buildAggregateFragment: %v", err)
 			}
