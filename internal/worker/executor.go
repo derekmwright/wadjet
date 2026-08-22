@@ -1496,10 +1496,17 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 				return err
 			}
 		}
+		// born_flat / conversions are the group-index layout audit: a bounded
+		// sink must show born_flat=true and conversions=0. Anything else on
+		// this line is a sink paying a flat->bucketed rehash once per epoch
+		// with nothing after it to amortize against (exec/two_level_hash.go,
+		// twoLevelBoundedMinGroups).
 		e.logger.Info("shuffle partial agg",
 			"task_id", task.ID, "in_rows", partialAgg.inRows,
 			"out_rows", partialAgg.outRows, "flushes", partialAgg.flushes,
-			"dropped_phantom_keys", partialAgg.droppedKeys, "disabled", partialAgg.disabled)
+			"dropped_phantom_keys", partialAgg.droppedKeys, "disabled", partialAgg.disabled,
+			"born_flat", partialAgg.bornFlat, "group_ceiling", partialAgg.groupCeiling,
+			"conversions", partialAgg.conversions, "cap_mb", partialAgg.capBytes/(1<<20))
 	}
 
 	tStreamEnd = time.Now()

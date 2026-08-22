@@ -233,6 +233,15 @@ right. The emit phase is single-threaded and 16-35% of WALL clock
   floor at 8 KiB per bucket, so every bucket that reaches this path owns
   whole pages.
 
+  Observability, added with the rule because every quantitative claim above
+  had to be reconstructed from CPU-profile edge weights and `flushes=`
+  counts: the `shuffle partial agg` log line now carries `born_flat`,
+  `group_ceiling`, `conversions` and `cap_mb`, and `task completed` carries
+  `two_level_conversions` / `two_level_direct_builds` / `two_level_born_flat`
+  (worker-wide deltas over the task's window, so a stage's SUM is exact even
+  though one task's line attributes across whatever overlapped it). Both
+  counters existed since 08-17 and were read nowhere.
+
   Residual, recorded so it is not re-diagnosed as this defect: a two-level
   LOOKUP costs ~33% more than a flat one at 8M entries (85.0 vs 112.9 ms,
   `BenchmarkIntIndexGrowth` probe arms) because the sub-table header is a

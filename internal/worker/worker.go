@@ -1982,6 +1982,16 @@ func (w *Worker) executeIncomingTaskDelivery(ctx context.Context, task distribut
 		}
 	}()
 
+	// Group-index layout counters, snapshotted around execution. They are
+	// worker-wide atomics, so with several tasks in flight the delta on one
+	// task's line attributes across whatever overlapped it — the sum over a
+	// stage's tasks is still exactly the stage's total, which is what the
+	// Q18 attribution needed and could not get (both counters existed and
+	// were read nowhere).
+	twoLevelConvAtStart := exec.TwoLevelConversions.Load()
+	twoLevelDirectAtStart := exec.TwoLevelDirectBuilds.Load()
+	twoLevelFlatAtStart := exec.TwoLevelBornFlat.Load()
+
 	// Recover from panics in task execution to prevent crashing
 	// the entire worker process on schema mismatches or other bugs.
 	var result distributed.ResultNotification
@@ -2141,6 +2151,15 @@ func (w *Worker) executeIncomingTaskDelivery(ctx context.Context, task distribut
 	}
 	if result.TaskStats != nil && result.TaskStats.MmapRSSMB > 0 {
 		logAttrsEnd = append(logAttrsEnd, "mmap_rss_mb", result.TaskStats.MmapRSSMB)
+	}
+	if d := exec.TwoLevelConversions.Load() - twoLevelConvAtStart; d != 0 {
+		logAttrsEnd = append(logAttrsEnd, "two_level_conversions", d)
+	}
+	if d := exec.TwoLevelDirectBuilds.Load() - twoLevelDirectAtStart; d != 0 {
+		logAttrsEnd = append(logAttrsEnd, "two_level_direct_builds", d)
+	}
+	if d := exec.TwoLevelBornFlat.Load() - twoLevelFlatAtStart; d != 0 {
+		logAttrsEnd = append(logAttrsEnd, "two_level_born_flat", d)
 	}
 	if task.TraceID != "" {
 		logAttrsEnd = append(logAttrsEnd, "trace_id", task.TraceID)
