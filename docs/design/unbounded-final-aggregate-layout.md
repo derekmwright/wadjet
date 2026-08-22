@@ -101,21 +101,32 @@ structure was built for on the adaptive path: a high-cardinality scan reads far 
 rows than it holds groups, so it clears `R*` long before its group count matters, while
 a merge aggregate has `R ≈ G` and clears it only when it is genuinely huge.
 
-**Derivation of `R*` — three measurements, bracketing it:**
+**Derivation of `R*` — three measurements, two of which bracket it in row units; the
+third is a known gap the pure-row rule does not cover:**
 
 | shape | rows | groups | bucketed vs flat | verdict under R* = 8 M |
 |---|---|---|---|---|
-| `BenchmarkAggIntCardinalitySweep`, near-unique 4 M | 16 M | 4 M | **+25/+31 %** (loss) | — (bound only applies where declared) |
+| `BenchmarkAggIntCardinalitySweep`, 4.19 M groups (rows fixed at 16.78 M for every arm of that sweep — *not* near-unique) | 16.78 M | 4.19 M | **+25/+31 %** (loss) | adaptive (rows > R*) — measured loss; not covered by the rule |
 | SF100 Q18 `final_aggregate-7`, per task | ~6.25 M | ~6.25 M | **+25 to +57 %** (loss) | flat ✓ |
-| `BenchmarkAggIntCardinalitySweep`, near-unique 16 M | 16 M | 16 M | −4.1/−11 % (win) | adaptive ✓ |
+| `BenchmarkAggIntCardinalitySweep`, near-unique (groups == rows) | 16.78 M | 16.78 M | −4.1/−11 % (win) | adaptive ✓ |
 | ClickBench Q33-class scan aggregate | ~100 M | ~6 M | win (the structure's reason to exist) | adaptive ✓ |
 
-8 M sits inside the bracket (above the 6.25 M production loss, below the 16 M measured
-win). It is expressed as a **multiple of `twoLevelConvertAt`** rather than as a second
-absolute number so the two halves of the gate stay calibrated together — including under
-the `WADJET_TWO_LEVEL_AT` override the corpus oracles use to exercise the bucketed path
-at group counts nowhere near a million. `TestRStarBracketsTheMeasurements` pins all
-three numbers, so moving the multiple has to argue with them.
+8 M sits inside the bracket formed by row 2 (below it, production loss) and row 3
+(above it, measured win). Row 1 is not part of that bracket: its 16.78 M rows already
+exceed R*, so the pure-row rule classifies it adaptive despite the measured loss — a
+gap called out rather than hidden. `R*` is expressed as a **multiple of
+`twoLevelConvertAt`** rather than as a second absolute number so the two halves of the
+gate stay calibrated together — including under the `WADJET_TWO_LEVEL_AT` override the
+corpus oracles use to exercise the bucketed path at group counts nowhere near a million.
+`TestRStarBracketsTheMeasurements` pins the two bracketing numbers, so moving the
+multiple has to argue with them.
+
+Because `R*` scales with `WADJET_TWO_LEVEL_AT` rather than sitting at a fixed row count,
+lowering that override to reach the runtime conversion path on a small corpus does not
+by itself guarantee this memo's rule reaches the bucketed layout too: a small corpus's
+per-task row count can still land below the scaled-down `R*` and get pinned flat, going
+dark. A DAG corpus run that wants bucketed coverage under the override must also set
+`WADJET_TWO_LEVEL_ROW_BOUND=0` to bypass this rule outright.
 
 **Two safety properties the rule rests on.**
 

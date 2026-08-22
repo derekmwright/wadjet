@@ -102,12 +102,19 @@ than it holds groups and clears `R*` immediately, while a *merge* aggregate has
 count alone cannot separate Q18's final aggregate (~6.25 M groups per task, a
 measured loss) from ClickBench Q33 (~6 M groups per sink, a win); rows can.
 
-`R*` is bracketed by three measurements and nothing else: the near-unique
-sweep's 4 M arm (+25/+31 %, loss) and 16 M arm (−4.1/−11 %, win), and SF100
-Q18 `final_aggregate-7` at ~6.25 M rows per task (4.14 s index-off vs
-5.16–6.52 s bucketed, both windows, several arms of one binary). It is
-expressed as a multiple of `twoLevelConvertAt` so both halves of the gate stay
-calibrated together, including under the `WADJET_TWO_LEVEL_AT` override.
+In row units, `R*` is bracketed by two measurements: SF100 Q18
+`final_aggregate-7` at ~6.25 M rows ≈ groups per task (4.14 s index-off vs
+5.16–6.52 s bucketed, both windows, several arms of one binary), a measured
+loss, BELOW it; and the near-unique arm of
+`BenchmarkAggIntCardinalitySweep` — 16.78 M rows ≈ groups (`groups == rows`)
+— at −4.1/−11 %, a measured win, ABOVE it. The sweep's other reported arm,
+4.19 M groups over the same fixed 16.78 M rows (≈4 probes/group, *not*
+near-unique), measures +25/+31 % — a loss — despite its 16.78 M rows already
+exceeding `R*`; the pure-row rule classifies that shape adaptive anyway. That
+is a known case the rule does not cover, noted here rather than folded into
+the bracket. `R*` is expressed as a multiple of `twoLevelConvertAt` so both
+halves of the gate stay calibrated together, including under the
+`WADJET_TWO_LEVEL_AT` override.
 
 Two properties keep this from being a threshold tweak in disguise. It is
 **monotone** — a declared bound can only remove a conversion, never add one, so
@@ -153,9 +160,10 @@ and the ClickBench check: `docs/design/unbounded-final-aggregate-layout.md`.
 - A future sink declaring a much larger `C` can legitimately reach `G*` and will
   be born bucketed. The rule survives that; a threshold would not.
 - Q18's *unbounded* `final_aggregate-7` was untouched by the original rule and
-  was the residual (4.14 s index-off vs 5.2–6.5 s bucketed). **Closed by the
-  2026-08-22 amendment above** — the input-row bound, not the owed ClickBench
-  A/B, which the amendment does not depend on.
+  was the residual (4.14 s index-off vs 5.2–6.5 s bucketed). **Expected to
+  close** with the 2026-08-22 amendment above — the input-row bound, not the
+  owed ClickBench A/B, which the amendment does not depend on — **pending the
+  next SF100 window**; nothing here has yet been SF100-validated.
 
 ## Alternatives rejected
 

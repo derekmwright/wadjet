@@ -244,10 +244,21 @@ const twoLevelBoundedMinGroups = 4 << 20
 //     …-window3-… §2.6). Q20's `final_aggregate-9` is the same shape at
 //     ~2.3 M rows per task and moves the same way (w1: −7.7 % task-seconds
 //     with the index off).
-//   - BenchmarkAggIntCardinalitySweep, near-unique (rows ≈ groups): the 4 M
-//     arm measures the bucketed layout at +25/+31 % — a LOSS — and the 16 M
-//     arm at −4.1/−11 % — a WIN. So the crossover for a one-probe-per-group
-//     shape sits between 6.25 M (production loss) and 16 M (local win).
+//   - BenchmarkAggIntCardinalitySweep holds rows fixed at 16.78 M
+//     (`rows = 16 << 20` for every arm — only `groups` varies) and is NOT
+//     two near-unique arms: the "4 M" arm is 16.78 M rows over 4.19 M
+//     groups (≈4 probes/group), and only the "16 M" arm is near-unique
+//     (groups == rows == 16.78 M, ≈1 probe/group). The 4.19 M-group arm
+//     measures the bucketed layout at +25/+31 % — a LOSS — and the
+//     16.78 M-group near-unique arm at −4.1/−11 % — a WIN. In ROW units,
+//     R* = 8 M is bracketed by exactly TWO measurements: the Q18
+//     production arm above (~6.25 M rows ≈ groups, measured loss) BELOW
+//     it, and this near-unique arm (16.78 M rows ≈ groups, measured win)
+//     ABOVE it. The 4.19 M-group arm's 16.78 M rows already exceed R*, so
+//     the pure-row rule deliberately classifies that shape adaptive
+//     (bucketed) too — a measured loss (+25/+31 %) that the rule does not
+//     cover. That is a known gap, called out here rather than folded into
+//     the bracket above.
 //   - The shapes where the structure earns its keep are the ones with MANY
 //     rows per group: ClickBench Q33 is ~100 M rows over ~6 M groups per
 //     sink, i.e. ~17 probes per group, and a scan-level aggregate always
@@ -359,6 +370,16 @@ const (
 // it exists so the invariance oracle and the differential harness can drive
 // the bucketed path on corpora whose group counts are nowhere near a
 // million, which is otherwise the only way this code stays dark in CI.
+//
+// R* (twoLevelMinAmortizeRows) scales with this override too, since it is
+// defined as a multiple of twoLevelConvertAt rather than an absolute row
+// count — so lowering WADJET_TWO_LEVEL_AT does not by itself guarantee the
+// DAG's unbounded-final-aggregate path (SetInputRowBound,
+// twoLevelAmortizeMultiple) reaches the bucketed layout: a small corpus's
+// per-task row count can still land below the scaled-down R* and get pinned
+// flat there, going dark. A DAG corpus run that wants bucketed coverage
+// under this override must also set WADJET_TWO_LEVEL_ROW_BOUND=0 to bypass
+// that pin outright.
 //
 // Overriding it also switches conversion to EAGER — the size test alone
 // decides, without convertsToTwoLevel's load-factor lookahead. Both halves

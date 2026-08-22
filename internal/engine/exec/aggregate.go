@@ -2782,7 +2782,13 @@ func (h *HashAggregate) indexLayoutStaysFlat(b *batch.RecordBatch) (flat bool, c
 }
 
 // indexFlatReason is which of the two construction-time bounds pinned a
-// group index flat, as it surfaces in IndexFlatReason and the task logs.
+// group index flat, as it surfaces through the exported IndexFlatReason
+// accessor and, from there, the worker's task logs: the fragment aggregate's
+// "fragment task phases" line carries it as agg_layout/agg_layout_reason
+// (executor_fragment.go's aggregateLayoutReporter); the shuffle partial
+// agg's "shuffle partial agg" line carries only the born_flat bool, since
+// that path never sets an input-row bound and so is always epoch-cap when
+// pinned (executor.go).
 type indexFlatReason uint8
 
 const (

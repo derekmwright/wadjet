@@ -74,6 +74,15 @@ type fragmentProgress struct {
 	// straggler-mode attribution counters. Read only in finish().
 	srcAcq srcAcqReporter
 
+	// aggLayout, when set by the runner to a fragment's HashAggregate
+	// breaker, folds its group-index layout decision into the phases line —
+	// the fragment-path equivalent of the shuffle partial agg's born_flat
+	// log line (executor.go's "shuffle partial agg"). Read only in finish(),
+	// same as srcAcq: the decision is made lazily on the breaker's first
+	// Consume (exec/aggregate.go's indexLayoutStaysFlat), so it must not be
+	// read before every breaker phase has run.
+	aggLayout aggregateLayoutReporter
+
 	// Phase timing (ns), fed by the fragment runners. Splits a slow task's
 	// wall into WHERE it went — the 2026-07-20 Q08 diagnosis had a task at
 	// uniform 1/3 speed and no counter that could say whether the source,
@@ -166,6 +175,27 @@ func (p *fragmentProgress) appendPhaseAttrs(attrs []any) []any {
 // thousands of sub-second tasks per suite run.
 const fragmentPhaseLogFloor = 5 * time.Second
 
+// aggregateLayoutReporter is the subset of *exec.HashAggregate's exported
+// surface fragmentProgress needs to report a fragment's group-index layout
+// decision (indexLayoutStaysFlat, two_level_hash.go). An interface, not a
+// concrete *exec.HashAggregate field, so fragmentProgress doesn't have to
+// import exec's internals beyond what it already type-asserts against.
+type aggregateLayoutReporter interface {
+	IndexBornFlat() bool
+	IndexFlatReason() string
+}
+
+// setAggregateLayout records a fragment breaker as the layout source for
+// finish()'s log line, if it reports one (HashAggregate does; Sort doesn't,
+// so this is a no-op for a Sort breaker). Safe to call once per breaker
+// immediately after buildFragmentBreaker — the decision itself is read
+// lazily by finish(), by which point the breaker has consumed its input.
+func (p *fragmentProgress) setAggregateLayout(op exec.SinkSource) {
+	if r, ok := op.(aggregateLayoutReporter); ok {
+		p.aggLayout = r
+	}
+}
+
 // finish emits one "fragment task phases" line with the task's final
 // phase split. INFO for tasks long enough to matter, Debug otherwise.
 func (p *fragmentProgress) finish(totalRows int64) {
@@ -181,6 +211,19 @@ func (p *fragmentProgress) finish(totalRows int64) {
 	if p.srcAcq != nil {
 		attrs = append(attrs, p.srcAcq.srcAcqAttrs()...)
 		notable = p.srcAcq.srcAcqNotable()
+	}
+	// Fragment-path equivalent of "shuffle partial agg"'s born_flat: which
+	// of the two construction-time bounds (if either) pinned this
+	// fragment's aggregate flat, surfaced the same one-grep way (ADR-0014).
+	if p.aggLayout != nil {
+		layout, reason := "adaptive", p.aggLayout.IndexFlatReason()
+		if p.aggLayout.IndexBornFlat() {
+			layout = "flat"
+		}
+		if reason == "" {
+			reason = "adaptive"
+		}
+		attrs = append(attrs, "agg_layout", layout, "agg_layout_reason", reason)
 	}
 	// The floor keeps INFO volume flat for the thousands of sub-second
 	// tasks, but a task that stalled on another worker's upload is the one
@@ -1770,6 +1813,7 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 		}
 		breakers[i] = fb
 		defer fb.Cleanup()
+		fp.setAggregateLayout(fb.Op)
 	}
 
 	// Phase 0..N-1: feed the previous source (src for j=0, breakers[j-1].Op

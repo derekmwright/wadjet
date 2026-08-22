@@ -2491,14 +2491,18 @@ func (c *Coordinator) dispatchComputeStage(
 		"inputs_aliases", len(inputs),
 	}
 	// Group-index layout marker for aggregate stages: the exact upstream row
-	// count this stage will re-aggregate, and the per-task bound derived
-	// from it. Together with the worker's `two_level_born_flat` counter this
-	// makes "did the unbounded final aggregate take the flat layout" a
+	// count these tasks will re-aggregate, summed across every task rather
+	// than sampled at task 0 (aggregateRowBoundTotal), and only when the
+	// same slicing exclusions the per-task rowBound computation at
+	// canMigrateAggregate applies (probeSets/probeSplit/rrAggGroups/
+	// skewAssign all hand a task a file group aggregateInputRowBound cannot
+	// address). Together with the worker's `two_level_born_flat` counter
+	// this makes "did the unbounded final aggregate take the flat layout" a
 	// one-grep answer per run (the ADR-0014 lesson: a counter nobody can
 	// read is a counter nobody reads).
 	if stage.Type == "aggregate" || stage.Type == "final_aggregate" || stage.Type == "merge_aggregate" {
-		if b := aggregateInputRowBound(stage, inputs, 0, numTasks); b > 0 {
-			dispatchAttrs = append(dispatchAttrs, "agg_task_row_bound", b)
+		if total, tasksWithBound, ok := aggregateRowBoundTotal(stage, inputs, numTasks, probeSets, probeSplit, rrAggGroups, skewAssign); ok && total > 0 {
+			dispatchAttrs = append(dispatchAttrs, "agg_row_bound_total", total, "agg_row_bound_tasks", tasksWithBound)
 		}
 	}
 	// Plan-side engagement marker for late-materialization A/B arms: join
@@ -4277,6 +4281,36 @@ func aggregateInputRowBound(stage physical.Stage, inputs map[string]StageOutput,
 		rows += out.PartitionRows[p]
 	}
 	return rows
+}
+
+// aggregateRowBoundTotal sums aggregateInputRowBound(stage, inputs, w,
+// numTasks) over every task w in [0, numTasks) — for the dispatch log line,
+// not the per-task fragment build (canMigrateAggregate calls
+// aggregateInputRowBound directly, once per task, with the same guard).
+//
+// ok is false whenever any of the four task-input slicings that do NOT
+// assign a plain partitionRangeForWorker range — probe-affine (probeSets),
+// broadcast-join probe-split (probeSplit), round-robin partial-agg fan-out
+// (rrAggGroups), or skew-split (skewAssign) — apply, mirroring the guard at
+// canMigrateAggregate's rowBound computation exactly: those slicings hand a
+// task a file group aggregateInputRowBound cannot address, so a value
+// computed as though it could would be meaningless. When ok is false the
+// caller must not log total/tasksWithBound.
+//
+// The sum is taken over ALL tasks rather than sampled at w=0: a stage whose
+// partition 0 happens to be empty (e.g. an empty hash bucket) must not read
+// as "no bound" in the log when every other task has one.
+func aggregateRowBoundTotal(stage physical.Stage, inputs map[string]StageOutput, numTasks int, probeSets [][]string, probeSplit bool, rrAggGroups [][]string, skewAssign []skewTaskAssignment) (total int64, tasksWithBound int, ok bool) {
+	if probeSets != nil || probeSplit || rrAggGroups != nil || skewAssign != nil {
+		return 0, 0, false
+	}
+	for w := 0; w < numTasks; w++ {
+		if b := aggregateInputRowBound(stage, inputs, w, numTasks); b > 0 {
+			total += b
+			tasksWithBound++
+		}
+	}
+	return total, tasksWithBound, true
 }
 
 // buildTaskInputsForStage maps a stage's Dependencies (upstream stage IDs)

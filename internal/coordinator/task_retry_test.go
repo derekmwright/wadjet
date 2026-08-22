@@ -444,6 +444,35 @@ func TestTaskRetrier_PartitionAccountingUnreported(t *testing.T) {
 	}
 }
 
+// TestTaskRetrier_PartitionAccountingMixedReporting: one task out of three
+// reports no vectors (e.g. a legacy worker binary in a mixed cluster) while
+// the other two do. The reduction must come back (nil, nil) — an unknown
+// bound, not a too-low one silently missing task b's contribution — because
+// aggregateInputRowBound's group-index layout decision and
+// planSkewSplitTasks' skew gate both treat "small" as "safe," so an
+// undercount is worse than no count at all.
+func TestTaskRetrier_PartitionAccountingMixedReporting(t *testing.T) {
+	tr := newTaskRetrier(retryTestTasks(3), false, nil, slog.Default(), "s", nil)
+
+	ra := okResult("a", "f-a")
+	ra.PartitionRows = []int64{10, 0, 5}
+	ra.PartitionBytes = []int64{100, 0, 50}
+	tr.Observe(ra)
+
+	// Task b's worker never reported per-partition vectors.
+	tr.Observe(okResult("b", "f-b"))
+
+	rc := okResult("c", "f-c")
+	rc.PartitionRows = []int64{1, 2, 3}
+	rc.PartitionBytes = []int64{10, 20, 30}
+	tr.Observe(rc)
+
+	rows, bytes := tr.PartitionAccounting(3)
+	if rows != nil || bytes != nil {
+		t.Fatalf("want nil vectors when one of three tasks didn't report, got rows=%v bytes=%v", rows, bytes)
+	}
+}
+
 // TestTaskRetrier_StaleInputAttemptRetries pins the Phase C1 slice-4
 // classification contract (docs/design/eager-consumer-dispatch.md §5): a
 // consumer task that poisons itself on a superseded producer attempt

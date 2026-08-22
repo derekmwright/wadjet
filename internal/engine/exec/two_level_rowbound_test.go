@@ -218,24 +218,37 @@ func TestCloneInheritsRowBound(t *testing.T) {
 }
 
 // TestRStarBracketsTheMeasurements pins the derivation in
-// twoLevelAmortizeMultiple against the three measurements it was taken from,
-// so moving the multiple has to argue with them.
+// twoLevelAmortizeMultiple against the two measurements that bracket it, so
+// moving the multiple has to argue with them.
+//
+// A third measurement — BenchmarkAggIntCardinalitySweep's 4.19 M-group arm,
+// which is 16.78 M rows (rows is fixed at 16 << 20 for every arm of that
+// sweep; only groups varies) over 4.19 M groups, +25/+31 % bucketed — is
+// deliberately NOT asserted here. Its 16.78 M rows already exceed R*, so the
+// pure-row rule classifies it adaptive despite the measured loss: a known
+// gap the rule does not cover (see the twoLevelAmortizeMultiple derivation
+// comment), not something a row-only bracket can express.
+//
+// Skips under WADJET_TWO_LEVEL_AT: the row constants below are anchored to
+// production's default twoLevelConvertAt (1 M ⇒ R* = 8 M) and do not hold at
+// another threshold.
 func TestRStarBracketsTheMeasurements(t *testing.T) {
+	if twoLevelConvertAt != 1_000_000 {
+		t.Skipf("twoLevelConvertAt = %d (WADJET_TWO_LEVEL_AT override?) — "+
+			"the bracket below is anchored to the production default of 1,000,000",
+			twoLevelConvertAt)
+	}
 	const (
-		q18FinalRowsPerTask = 6_250_000  // SF100 Q18 final_aggregate-7: a LOSS bucketed
-		sweepLossArm        = 4_000_000  // BenchmarkAggIntCardinalitySweep 4M near-unique: +25/+31%
-		sweepWinArm         = 16_000_000 // …16M near-unique: −4.1/−11%
+		q18FinalRowsPerTask = 6_250_000 // SF100 Q18 final_aggregate-7: ~6.25M rows ≈ groups per task, a measured LOSS bucketed
+		sweepNearUniqueRows = 16 << 20  // BenchmarkAggIntCardinalitySweep's near-unique arm: groups == rows == 16.78M, a measured WIN bucketed (-4.1/-11%)
 	)
 	rstar := twoLevelMinAmortizeRows()
 	if rstar <= q18FinalRowsPerTask {
 		t.Errorf("R* = %d must exceed the Q18 final aggregate's %d rows per task — "+
 			"that shape measures as a loss bucketed", rstar, q18FinalRowsPerTask)
 	}
-	if rstar <= sweepLossArm {
-		t.Errorf("R* = %d must exceed the sweep's %d-row loss arm", rstar, sweepLossArm)
-	}
-	if rstar > sweepWinArm {
-		t.Errorf("R* = %d must not exceed the sweep's %d-row win arm — "+
-			"above it the bucketed layout is measured to pay", rstar, sweepWinArm)
+	if rstar > sweepNearUniqueRows {
+		t.Errorf("R* = %d must not exceed the sweep's %d-row near-unique win arm — "+
+			"above it the bucketed layout is measured to pay", rstar, sweepNearUniqueRows)
 	}
 }

@@ -269,28 +269,40 @@ func (tr *taskRetrier) TotalBytes() int64 {
 // output) — callers treat nil as "sizes unknown, skew detection off".
 // Vectors shorter than numParts (shouldn't happen; defensive) contribute
 // only their prefix; longer ones are truncated.
+//
+// It is all-or-nothing: if ANY surviving task did not report vectors while
+// at least one other did (a mixed-binary cluster — some workers on a build
+// old enough not to report PartitionRows/PartitionBytes), the reduction
+// returns (nil, nil) rather than the totals from the tasks that DID report.
+// A partial reduction looks exact — every partition slot is a real sum, not
+// a sentinel — while silently omitting whole tasks' rows, which reads as a
+// bound that is too LOW. That is the one error every consumer of this
+// (aggregateInputRowBound's group-index layout decision, planSkewSplitTasks'
+// skew gate) cannot afford: both treat "small" as "safe to commit to," so a
+// bound that reads low where the truth is high is worse than no bound.
 func (tr *taskRetrier) PartitionAccounting(numParts int) (rows, bytes []int64) {
 	if numParts <= 0 {
 		return nil, nil
 	}
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
-	any := false
+	reported, total := 0, len(tr.states)
+	rows = make([]int64, numParts)
+	bytes = make([]int64, numParts)
 	for _, st := range tr.states {
 		if len(st.partRows) == 0 && len(st.partBytes) == 0 {
 			continue
 		}
-		if !any {
-			rows = make([]int64, numParts)
-			bytes = make([]int64, numParts)
-			any = true
-		}
+		reported++
 		for p := 0; p < len(st.partRows) && p < numParts; p++ {
 			rows[p] += st.partRows[p]
 		}
 		for p := 0; p < len(st.partBytes) && p < numParts; p++ {
 			bytes[p] += st.partBytes[p]
 		}
+	}
+	if reported == 0 || reported != total {
+		return nil, nil
 	}
 	return rows, bytes
 }
