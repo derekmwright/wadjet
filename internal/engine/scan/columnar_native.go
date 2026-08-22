@@ -92,7 +92,17 @@ func ReadRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 // are offered back for admission. A nil cache (or a reader without a
 // CacheIdentity) is byte-identical to ReadRowGroupNative.
 func ReadRowGroupNativeCached(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, cache *DecodedChunkCache) (*batch.RecordBatch, error) {
-	return readRowGroupNative(fr, rgIdx, schema, pool, cache, nil, nil)
+	return readRowGroupNative(fr, rgIdx, schema, pool, cache, nil, nil, nil)
+}
+
+// ReadRowGroupNativeBacked is ReadRowGroupNativeCached with the scan source's
+// row-group backing pool: the decode writes into a backing a previous row
+// group used, when the consumer released it and nobody claimed it. A nil
+// backing (or the reuse kill switch off) is byte-identical to
+// ReadRowGroupNativeCached. See BackingPool's ownership rule and
+// docs/design/scan-output-backing-reuse.md.
+func ReadRowGroupNativeBacked(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, cache *DecodedChunkCache, backing *BackingPool) (*batch.RecordBatch, error) {
+	return readRowGroupNative(fr, rgIdx, schema, nil, cache, nil, nil, backing)
 }
 
 // ReadRowGroupNativeSel is ReadRowGroupNative under a partial scan-filter
@@ -125,10 +135,10 @@ func ReadRowGroupNativeShaped(fr *pqt.FileReader, rgIdx int, schema []pqt.Column
 	if !lengthsOnlyToggle.On() {
 		shapeOnly = nil
 	}
-	return readRowGroupNative(fr, rgIdx, schema, pool, nil, sel, shapeOnly)
+	return readRowGroupNative(fr, rgIdx, schema, pool, nil, sel, shapeOnly, nil)
 }
 
-func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, cache *DecodedChunkCache, sel []uint32, shapeOnly map[string]bool) (*batch.RecordBatch, error) {
+func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool, cache *DecodedChunkCache, sel []uint32, shapeOnly map[string]bool, backing *BackingPool) (*batch.RecordBatch, error) {
 	// ARRAY/MAP leaves don't resolve by column name here; without this
 	// guard the column lookup missed and the "schema evolution" branch
 	// silently emitted ALL-NULL values for the array column — valid-looking
@@ -142,10 +152,22 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 		return nil, nil
 	}
 
+	// Output backing: a released-and-unclaimed backing from a previous row
+	// group when the scan source has one (BackingPool's ownership rule), else
+	// the caller's BatchPool, else fresh. A reused backing is bit-identical to
+	// a fresh one — ResetForWrite clears everything it re-slices — but keeps
+	// its typed arrays and, decisively, its BYTES arena, so the PreAllocBytes
+	// below stops re-requesting a multi-hundred-KB span per column per group.
 	var b *batch.RecordBatch
-	if pool != nil {
+	switch {
+	case backing != nil:
+		if b = backing.get(schema, numRows); b == nil {
+			b = batch.NewRecordBatch(schema, numRows)
+			backing.track(b, schema)
+		}
+	case pool != nil:
 		b = pool.GetForSize(numRows)
-	} else {
+	default:
 		b = batch.NewRecordBatch(schema, numRows)
 	}
 

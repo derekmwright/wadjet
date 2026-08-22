@@ -170,6 +170,15 @@ type Executor struct {
 	// over a page-cache-hot run (rowgroup-readahead residual diagnosis).
 	scanDecodeAheadDecodeNs    atomic.Int64
 	scanDecodeAheadDecodeBytes atomic.Int64
+	// Scan row-group backing reuse (docs/design/scan-output-backing-reuse.md):
+	// decodes that reused a released-and-unclaimed backing, decodes that had
+	// to mint one, and releases refused because a consumer had claimed the
+	// batch. Folded in when each scan source closes; read on the periodic
+	// "worker stats" line, never only at drain (ADR-0011 §6).
+	scanBackingHits    atomic.Int64
+	scanBackingMisses  atomic.Int64
+	scanBackingClaimed atomic.Int64
+
 	// Row groups skipped by dynamic-filter pruning (bloom + range),
 	// engagement marker for iterator-level attach — dispatch-time AND
 	// late (attach-on-arrival) deliveries both land here.
@@ -296,6 +305,13 @@ func (e *Executor) ShuffleDecodeAheadStats() (chunks, windowFullNs, tokenNs, pre
 // what these are meant to move.
 func (e *Executor) CPUTokenAdmissionStats() (capacity, reserve, admits, bypasses, holdbacks int64) {
 	return e.cpuTokens.admissionStats()
+}
+
+// ScanBackingStats returns the row-group backing-reuse counters
+// (docs/design/scan-output-backing-reuse.md): decodes served from a released
+// backing, decodes that minted one, and releases refused by a Detach claim.
+func (e *Executor) ScanBackingStats() (hits, misses, claimed int64) {
+	return e.scanBackingHits.Load(), e.scanBackingMisses.Load(), e.scanBackingClaimed.Load()
 }
 
 // foldScanDecodeAheadQueryStats adds one closed iterator's counters to

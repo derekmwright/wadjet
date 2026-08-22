@@ -2328,6 +2328,13 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 					"decode_admits", admits, "decode_bypasses", bypasses,
 					"decode_holdbacks", holdbacks)
 			}
+			// Scan row-group backing reuse — same reason the decode-admission
+			// counters ride this tick rather than only the drain line.
+			if hits, misses, claimed := w.executor.ScanBackingStats(); hits+misses+claimed > 0 {
+				statsArgs = append(statsArgs,
+					"backing_hits", hits, "backing_misses", misses,
+					"backing_claimed", claimed)
+			}
 			w.logger.Info("worker stats", statsArgs...)
 
 			// Decoded-chunk cache pressure yield (doc §9.3): while either

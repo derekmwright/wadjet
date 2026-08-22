@@ -73,7 +73,7 @@ func runSelDecodeDifferential(t *testing.T, fr *pqt.FileReader, schema []pqt.Col
 			t.Fatalf("rg %d full decode: %v", rg, err)
 		}
 		for name, sel := range selShapes(n, r) {
-			got, err := readRowGroupNative(fr, rg, schema, nil, nil, sel, nil)
+			got, err := readRowGroupNative(fr, rg, schema, nil, nil, sel, nil, nil)
 			if err != nil {
 				t.Fatalf("rg %d sel %s: %v", rg, name, err)
 			}
@@ -214,14 +214,14 @@ func BenchmarkSelDecode(b *testing.B) {
 	}
 	b.Run("full", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if _, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, nil, nil); err != nil {
+			if _, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, nil, nil, nil); err != nil {
 				b.Fatal(err)
 			}
 		}
 	})
 	b.Run("sel1pct", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if _, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, sel, nil); err != nil {
+			if _, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, sel, nil, nil); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -234,7 +234,7 @@ func BenchmarkSelDecode(b *testing.B) {
 	}
 	b.Run("clustered1pct", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if _, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, clustered, nil); err != nil {
+			if _, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, clustered, nil, nil); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -242,7 +242,7 @@ func BenchmarkSelDecode(b *testing.B) {
 	sparse := []uint32{5, 25000, 50000, 75000, 99999}
 	b.Run("sparse5rows", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if _, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, sparse, nil); err != nil {
+			if _, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, sparse, nil, nil); err != nil {
 				b.Fatal(err)
 			}
 		}

@@ -37,6 +37,47 @@ type morsel struct {
 	retire func()
 }
 
+// batchRecycler is implemented by fragment sources that OWN the storage of
+// the batches they emit and can hand it to a later decode once the consumer
+// is done with it — today, the parquet scan source's row-group backing pool
+// (scan.BackingPool, docs/design/scan-output-backing-reuse.md).
+//
+// RecycleBatch is the RELEASE half of that pool's ownership rule and the
+// dispenser's retire edge is the only place that can supply it: retire fires
+// once every zero-copy view minted over the parent has been retired, which is
+// after the whole op chain AND the sink consume — strictly later than
+// ChainDriver's ReleaseInputs edge, which is what makes it safe for the
+// late-materialization views that read the parent's columns through
+// Vector.Base after Execute returned. The CLAIM half (Detach) is checked
+// inside the pool, not here: this call is "I am done", never "nobody kept
+// it".
+type batchRecycler interface {
+	RecycleBatch(*batch.RecordBatch)
+}
+
+// sourceUnwrapper is implemented by the fragment-path source wrappers so an
+// optional-interface assertion reaches the real source underneath.
+type sourceUnwrapper interface {
+	unwrapSource() exec.Source
+}
+
+// batchRecyclerOf finds the source's recycle hook through any wrappers. Nil
+// when the source does not own its output storage (shuffle chunk readers,
+// memory sources, the row-based fallback) — those keep today's behavior.
+func batchRecyclerOf(src exec.Source) batchRecycler {
+	for i := 0; i < 8 && src != nil; i++ {
+		if r, ok := src.(batchRecycler); ok {
+			return r
+		}
+		u, ok := src.(sourceUnwrapper)
+		if !ok {
+			return nil
+		}
+		src = u.unwrapSource()
+	}
+	return nil
+}
+
 // morselDispenser replaces the parallel fragment paths' raw batch channel:
 // a single producer goroutine pulls from the fragment source, admits each
 // decoded batch against a byte budget, optionally splits it into
@@ -74,6 +115,12 @@ type morselDispenser struct {
 	// safe. signal (cap 1) kicks a blocked producer after a retire.
 	inFlight atomic.Int64
 	signal   chan struct{}
+
+	// recycler is the source's backing-release hook, resolved once at the
+	// top of run. Written by the producer goroutine before any morsel is
+	// sent; consumers read it from retire, and the channel send/receive that
+	// hands them the morsel is the happens-before edge.
+	recycler batchRecycler
 
 	// Stats, logged by the fragment runner at completion.
 	parents       atomic.Int64
@@ -135,6 +182,7 @@ func (d *morselDispenser) viewRowsFor(n int) int {
 // the producer's lifetime is the whole fragment, not the parallel section.
 func (d *morselDispenser) run(ctx context.Context, src exec.Source) error {
 	defer close(d.ch)
+	d.recycler = batchRecyclerOf(src)
 	for {
 		b, err := src.Next(ctx)
 		if err != nil {
@@ -182,6 +230,16 @@ func (d *morselDispenser) admit(ctx context.Context, cost int64) error {
 	}
 }
 
+// recycle is the release edge for the source's output backing: the parent is
+// fully retired, so every consumer of it — op chain, sink, and every
+// zero-copy sibling view — is done reading. Whether the storage may actually
+// be REUSED is the pool's decision, not ours: it vetoes on a Detach claim.
+func (d *morselDispenser) recycle(b *batch.RecordBatch) {
+	if d.recycler != nil {
+		d.recycler.RecycleBatch(b)
+	}
+}
+
 // release returns bytes to the budget and kicks the producer if it is
 // blocked in admit. The non-blocking send is race-free: a missed kick means
 // a signal is already pending, and the producer re-reads inFlight after
@@ -219,7 +277,7 @@ func (d *morselDispenser) dispatch(ctx context.Context, b *batch.RecordBatch, co
 	viewRows := d.viewRowsFor(n)
 	if !d.split || cost <= d.splitMinCost() || n <= viewRows {
 		d.morsels.Add(1)
-		return d.send(ctx, morsel{b: b, retire: func() { d.release(cost) }})
+		return d.send(ctx, morsel{b: b, retire: func() { d.release(cost); d.recycle(b) }})
 	}
 
 	numViews := (n + viewRows - 1) / viewRows
@@ -228,6 +286,7 @@ func (d *morselDispenser) dispatch(ctx context.Context, b *batch.RecordBatch, co
 	retire := func() {
 		if refs.Add(-1) == 0 {
 			d.release(cost)
+			d.recycle(b)
 		}
 	}
 

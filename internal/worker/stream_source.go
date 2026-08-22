@@ -185,6 +185,15 @@ type cachedFileStreamSource struct {
 	decodeWin   *scan.DecodeWindow
 	preOpenSkip int
 	preOpens    int // files pre-opened by the continuation (tests + DEBUG log)
+
+	// backing is this source's row-group output backing pool
+	// (docs/design/scan-output-backing-reuse.md). One per SOURCE, not per
+	// file: a batch delivered from file F may only be released after the
+	// source has moved to F+1, and both files of a table share one read
+	// schema, so the backing is reusable across the boundary. Set at
+	// construction and never reassigned — RecycleBatch reads it from
+	// consumer goroutines.
+	backing *scan.BackingPool
 }
 
 // shuffleBatchIter is the common face of the mmap-backed and streaming
@@ -238,7 +247,19 @@ func newCachedFileStreamSource(executor *Executor, queryID, bucket string, files
 		queryID:  queryID,
 		bucket:   bucket,
 		files:    files,
+		backing:  newScanBackingPool(),
 	}
+}
+
+// newScanBackingPool builds this source's row-group backing pool. Created
+// eagerly at construction rather than at the first parquet open: RecycleBatch
+// runs on consumer goroutines, so a lazy init would race a release of an
+// earlier (WSHF) batch against the first parquet open's write.
+//
+// The idle set never exceeds the byte budget one fragment is already permitted
+// to hold in decoded source bytes in flight.
+func newScanBackingPool() *scan.BackingPool {
+	return scan.NewBackingPool(scan.BackingPoolOpts{MaxIdleBytes: morselDispenserBudgetBytes})
 }
 
 // newCachedFileStreamSourceWithProjection is like newCachedFileStreamSource
@@ -253,6 +274,7 @@ func newCachedFileStreamSourceWithProjection(executor *Executor, queryID, bucket
 		bucket:         bucket,
 		files:          files,
 		projectColumns: projectColumns,
+		backing:        newScanBackingPool(),
 	}
 }
 
@@ -420,6 +442,18 @@ func (s *cachedFileStreamSource) Close() error {
 		s.fallbackBatches[i] = nil
 	}
 	s.fallbackBatches = nil
+	// Fold the backing-pool counters into the executor totals and drop the
+	// idle set: the source is done, and its retained row-group storage must
+	// not outlive it. The POINTER stays — a lagging RecycleBatch must not
+	// race a nil write, and Drop already emptied the mint registry, so any
+	// late release finds its batch foreign and is ignored.
+	if s.backing != nil {
+		st := s.backing.Stats()
+		s.executor.scanBackingHits.Add(st.Hits)
+		s.executor.scanBackingMisses.Add(st.Misses)
+		s.executor.scanBackingClaimed.Add(st.Claimed)
+		s.backing.Drop()
+	}
 	return nil
 }
 
@@ -1255,7 +1289,8 @@ func (s *cachedFileStreamSource) finishParquetState(p *pendingParquet, filePath 
 		// width as worthless-to-harmful precisely when refaults run hot).
 		opts := scan.DecodeAheadOpts{Window: s.decodeWin, Pressure: scanDecodeAheadPressure,
 			PressureStrict: scanDecodeAheadStrictPressure(),
-			Cache:          s.executor.decodedCache}
+			Cache:          s.executor.decodedCache,
+			Backing:        s.backing}
 		// The adapter, not the pool itself: decode acquires, releases AND
 		// registers its stalls as a first-class token class, so a queued
 		// morsel consumer can no longer shut the decoder that feeds it out
@@ -1303,6 +1338,7 @@ func (s *cachedFileStreamSource) finishParquetState(p *pendingParquet, filePath 
 			return nil, fmt.Errorf("opening row-group iterator for %s: %w", filePath, err)
 		}
 		rgIter.SetDecodedCache(s.executor.decodedCache)
+		rgIter.SetBackingPool(s.backing)
 		iter = rgIter
 	}
 	if len(s.dynamicRanges) > 0 || len(s.bloomFilters) > 0 {
@@ -1310,6 +1346,16 @@ func (s *cachedFileStreamSource) finishParquetState(p *pendingParquet, filePath 
 	}
 	p.iter = iter
 	return p, nil
+}
+
+// RecycleBatch implements batchRecycler: the consumer side is done with b, so
+// its backing may serve a later row-group decode — unless a consumer claimed
+// it (Detach / Vector.Claim), which the pool checks. A batch this source's
+// pool did not mint (a WSHF shuffle chunk, a row-based fallback batch) is
+// ignored. See BackingPool's ownership rule and
+// docs/design/scan-output-backing-reuse.md.
+func (s *cachedFileStreamSource) RecycleBatch(b *batch.RecordBatch) {
+	s.backing.Recycle(b)
 }
 
 // tryPreOpenNextParquet pre-opens the next file for the cross-file decode

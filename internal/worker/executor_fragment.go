@@ -255,6 +255,10 @@ func (t *timedSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	return b, err
 }
 
+// unwrapSource implements sourceUnwrapper so optional-interface assertions
+// (batchRecyclerOf) reach the real source underneath.
+func (t *timedSource) unwrapSource() exec.Source { return t.Source }
+
 // applyBackpressure pauses the consume loop briefly when the process heap
 // is approaching GOMEMLIMIT. The signal (HeapBackpressureActive) fires at
 // 70% of GOMEMLIMIT — well before the 95% spill backstop — and the pause
@@ -725,6 +729,10 @@ type bloomFilteredSource struct {
 
 func (s *bloomFilteredSource) Init(ctx context.Context) error { return s.inner.Init(ctx) }
 
+// unwrapSource implements sourceUnwrapper so optional-interface assertions
+// (batchRecyclerOf) reach the real source underneath.
+func (s *bloomFilteredSource) unwrapSource() exec.Source { return s.inner }
+
 // promotePending installs any deferred blooms whose artifacts resolved —
 // row-level op here, iterator-level forms into groupSink when the inner
 // source has one. Non-blocking; called once per batch.
@@ -919,6 +927,17 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 		fp.srcAcq = r
 	}
 	src = fp.timeSource(src)
+	// Release edge for the scan source's row-group backing (see
+	// batchRecycler): on this path a batch is done once push returns, which
+	// is after the whole op chain AND the sink consume. Whether the storage
+	// is actually reused is the pool's decision — it vetoes on a Detach
+	// claim, which is how a retaining sink (Sort, the join build) keeps it.
+	recycler := batchRecyclerOf(src)
+	recycle := func(b *batch.RecordBatch) {
+		if recycler != nil {
+			recycler.RecycleBatch(b)
+		}
+	}
 	var totalRows int64
 	consume := func(ctx context.Context, b *batch.RecordBatch) error {
 		t0 := time.Now()
@@ -983,6 +1002,7 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 			}
 			opsNs, err := driver.push(gctx, b)
 			fp.opsNs.Add(opsNs)
+			recycle(b)
 			if err != nil {
 				return err
 			}
@@ -1315,6 +1335,11 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 	if warmup != nil {
 		opsNs, err := drivers[0].push(ctx, warmup)
 		fp.opsNs.Add(opsNs)
+		// The warmup batch never passes through the dispenser, so its
+		// release edge is here (see batchRecycler).
+		if r := batchRecyclerOf(src); r != nil {
+			r.RecycleBatch(warmup)
+		}
 		if err != nil {
 			return fmt.Errorf("fragment task %s: %w", task.ID, err)
 		}

@@ -121,6 +121,64 @@ fresh allocation per output batch.
   reuse in the *upstream* probe of every fused join chain — the shape worth the
   most.
 
+## Amendment 2026-08-22 — scan output: the claim is the veto, `retire` is the release
+
+The exclusion above ("Reuse the scan row-group output … needs its own ownership
+statement") is now settled, and the answer **extends** this decision rather than
+replacing it, so it lands here instead of as a new ADR.
+
+**A scan source is not a single-consumer producer, so `Detach` alone cannot
+authorize reuse of its output.** Three readers hold a decoded row group with no
+claim recorded anywhere: the decode-ahead ring decodes group *N+1* while *N* is
+being consumed (ADR-0015); the morsel dispenser fans one ~280 MB parent out to
+`k` consumers as zero-copy views over the same `*Vector` pointers; and
+`emitViewOutput`'s view columns read the scan columns through `Vector.Base`
+after `Execute` returned — which is exactly why that call uses `DetachPool` and
+not `Detach`.
+
+**Decision.** *For output a producer emits to concurrent, unclaimed readers,
+reuse requires TWO signals, and neither may be inferred:*
+
+1. **RELEASE** — an explicit statement from the consumer side that everything
+   reading this batch is done. On the fragment paths that is `morsel.retire`
+   (fired once every sibling view has retired: after the whole op chain **and**
+   the sink consume) and, serially, the return from `driver.push`. It is
+   strictly later than `ChainDriver`'s `ReleaseInputs` edge, which is what makes
+   it safe for the transitive view references `DetachPool` was written to
+   protect.
+2. **CLAIM** — the veto this ADR already defines, unchanged: `Detach` on the
+   batch or `Vector.Claim` on any column, including transitively through a
+   derived batch or a downstream view's `Base`. One claimed column surrenders
+   the whole backing, permanently.
+
+Release without the claim check is unsound (Sort, Window, the join build and
+the spillable collector retain past `retire`, and all of them `Detach`). The
+claim check without release is unsound (the three concurrent readers above).
+Together they are exactly as conservative as the join half, one signal wider.
+
+**`DetachPool` is unchanged and stays unchanged.** The scan backing pool
+deliberately does **not** route through `RecordBatch.pool`: `emitViewOutput`
+calls `DetachPool` on every late-materialized probe input, which is the
+dominant SF100 scan shape, so hanging reuse off the pool link would disable it
+precisely where the 130.8 s of heap-lock delay lives. The pool keeps its own
+registry of outstanding backings and only ever takes back one it minted, so no
+second owner can be created for storage someone else recycles.
+
+**Kill switch:** `WADJET_SCAN_BACKING_REUSE=0` (`optswitch` `scan-backing-reuse`).
+
+**Scope:** flat leaf columns only. ROW columns are excluded — `ResetForWrite`
+refuses nested storage by design and ROW schemas are not what the profile
+names — and the parquet page buffers (`ColumnPageReader`, 94.6 s) stay
+untouched inside the safety-critical package. Mechanism, predicted SF100 shape
+and the failure modes are in `docs/design/scan-output-backing-reuse.md`.
+
+**Consequence for every new consumer, restated:** keeping a batch (or any
+vector reachable from it) past the call that handed it over still means
+`Detach`. What is new is the other side of the contract — **`retire` is now
+load-bearing for correctness, not only for the dispenser's byte budget.**
+Anything that retires a morsel before its sink is finished with the batch turns
+this into silent corruption.
+
 ## Related
 
 - ADR-0002 (`BatchPool` and the selection-vector contract), ADR-0006 (a claimed
@@ -135,3 +193,8 @@ fresh allocation per output batch.
 - `internal/engine/exec/join_emit_reuse.go`, `internal/engine/batch/batch.go`
   (`Detach`, `DetachPool`), `internal/engine/batch/vector.go` (`Claim`,
   `ResetForWrite`)
+- Amendment: ADR-0015 (the ring whose concurrency is why a claim alone is not
+  enough), `docs/design/scan-output-backing-reuse.md`,
+  `docs/design/morsel-execution.md` §4.1.1 (the `retire` contract and the
+  view-safety audit), `internal/engine/scan/backing_pool.go`,
+  `internal/worker/morsel_dispenser.go` (`batchRecycler`)

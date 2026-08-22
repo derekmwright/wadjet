@@ -55,6 +55,7 @@ type DecodeAheadIter struct {
 	advise         func(off, n int64)
 	advisedIdx     int // next row-group index to I/O-advise (win.mu)
 	cache          *DecodedChunkCache
+	backing        *BackingPool
 
 	dynamicRanges []exec.DynamicRange
 	bloomFilters  []*exec.BloomScanFilter
@@ -185,6 +186,14 @@ type DecodeAheadOpts struct {
 	// inside ReadRowGroupNativeCached (docs/design/decoded-rowgroup-cache.md).
 	// Inert unless the reader carries a CacheIdentity. nil = uncached.
 	Cache *DecodedChunkCache
+	// Backing, when set, is the SCAN SOURCE's row-group backing pool: a
+	// decode writes into storage a previous group used once the consumer
+	// released it and nobody claimed it (BackingPool's ownership rule,
+	// docs/design/scan-output-backing-reuse.md). It belongs to the source,
+	// not the iterator, so it survives the cross-file continuation — a
+	// backing delivered from file F may be released after the source has
+	// moved to F+1. nil = every group allocates fresh.
+	Backing *BackingPool
 }
 
 // TokenPool is the compute-budget seam shared with the caller's pool
@@ -331,6 +340,7 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 		tokens:         opts.Tokens,
 		advise:         opts.Advise,
 		cache:          opts.Cache,
+		backing:        opts.Backing,
 	}
 	if a, ok := opts.Tokens.(DecodeAdmission); ok {
 		it.tokenAdmit = a
@@ -608,7 +618,7 @@ func (it *DecodeAheadIter) decodeLoop() {
 		slot := &decodeSlot{est: est, ahead: isAhead}
 		if pruned := it.pruneGroup(idx, ranges, blooms); !pruned {
 			t0 := time.Now()
-			b, err := ReadRowGroupNativeCached(it.fr, idx, it.readSchema, nil, it.cache)
+			b, err := ReadRowGroupNativeBacked(it.fr, idx, it.readSchema, it.cache, it.backing)
 			it.decodeSpanNs.Add(time.Since(t0).Nanoseconds())
 			it.decodeSpanBytes.Add(it.projectedCompressedBytes(idx))
 			if err != nil {

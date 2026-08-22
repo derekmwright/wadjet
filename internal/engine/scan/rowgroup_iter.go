@@ -59,6 +59,13 @@ type RowGroupIter struct {
 	// unless the reader carries a CacheIdentity.
 	cache *DecodedChunkCache
 
+	// backing, when set via SetBackingPool, is the SCAN SOURCE's row-group
+	// backing pool: a decode writes into storage a previous group used once
+	// the consumer released it and nobody claimed it (BackingPool's ownership
+	// rule, docs/design/scan-output-backing-reuse.md). Owned by the source,
+	// so it outlives this iterator.
+	backing *BackingPool
+
 	// Per-iterator counters for diagnostics. Reset on each Open.
 	rgPrunedBloom int
 	rgPrunedRange int
@@ -86,6 +93,16 @@ func (it *RowGroupIter) SetDecodedCache(c *DecodedChunkCache) {
 		return
 	}
 	it.cache = c
+}
+
+// SetBackingPool attaches the scan source's row-group backing pool. Call
+// before the first Next (the field is read without synchronization). nil =
+// every group allocates fresh. See BackingPool's ownership rule.
+func (it *RowGroupIter) SetBackingPool(p *BackingPool) {
+	if it == nil {
+		return
+	}
+	it.backing = p
 }
 
 // PruneStats returns counters for diagnostic logging: row groups skipped
@@ -174,7 +191,7 @@ func (it *RowGroupIter) Next() (*batch.RecordBatch, error) {
 			}
 		}
 
-		b, err := ReadRowGroupNativeCached(it.fr, rgIdx, it.readSchema, nil, it.cache)
+		b, err := ReadRowGroupNativeBacked(it.fr, rgIdx, it.readSchema, it.cache, it.backing)
 		if err != nil {
 			return nil, fmt.Errorf("reading row group %d: %w", rgIdx, err)
 		}

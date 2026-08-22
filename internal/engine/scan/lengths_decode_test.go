@@ -42,7 +42,7 @@ func runLengthsDecodeDifferential(t *testing.T, fr *pqt.FileReader, schema []pqt
 		if err != nil {
 			t.Fatalf("rg %d full decode: %v", rg, err)
 		}
-		got, err := readRowGroupNative(fr, rg, schema, nil, nil, nil, shapeOnly)
+		got, err := readRowGroupNative(fr, rg, schema, nil, nil, nil, shapeOnly, nil)
 		if err != nil {
 			t.Fatalf("rg %d lengths decode: %v", rg, err)
 		}
@@ -164,7 +164,7 @@ func TestLengthsDecodeInternalWriter(t *testing.T) {
 // wrong answer.
 func TestLengthsDecodeValueReadPanics(t *testing.T) {
 	rd, schema := lengthsFixture(t, 4096, 4096)
-	b, err := readRowGroupNative(rd.FileReader(), 0, schema.Columns, nil, nil, nil, map[string]bool{"u": true})
+	b, err := readRowGroupNative(rd.FileReader(), 0, schema.Columns, nil, nil, nil, map[string]bool{"u": true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestLengthsDecodeToggleOff(t *testing.T) {
 func TestLengthsDecodeNonEligibleColumns(t *testing.T) {
 	rd, schema := lengthsFixture(t, 4096, 4096)
 	fr := rd.FileReader()
-	b, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, nil, map[string]bool{"id": true})
+	b, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, nil, map[string]bool{"id": true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func BenchmarkLengthsDecode(b *testing.B) {
 	b.Run("full", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if _, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, nil, nil); err != nil {
+			if _, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, nil, nil, nil); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -273,7 +273,7 @@ func BenchmarkLengthsDecode(b *testing.B) {
 	b.Run("lengths-only", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if _, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, nil, shapeOnly); err != nil {
+			if _, err := readRowGroupNative(fr, 0, schema.Columns, nil, nil, nil, shapeOnly, nil); err != nil {
 				b.Fatal(err)
 			}
 		}
