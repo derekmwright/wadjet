@@ -73,15 +73,47 @@ import (
 //
 // # Adaptive conversion, not construction
 //
-// A sink starts FLAT, exactly as before, and converts when it is both big
-// enough and still filling — see convertsToTwoLevel (aggregate.go) for the
-// two tests and twoLevelConvertAt for the measured curve behind the size
-// one. The decision runs once per BATCH, never per row: the consume loop
-// hoists its table pointer for the whole batch and the conversion lands at
-// the batch's end. Aggregates whose NDV hint already exceeds the threshold
-// construct bucketed directly (resolveIndices) and never pay a conversion at
-// all. Below the threshold nothing changes: no bucket indirection, no extra
-// shift, byte-identical behavior to G5.
+// A sink starts FLAT, exactly as before, and converts AT THE POINT WHERE THE
+// FLAT TABLE WOULD HAVE REHASHED ITSELF ANYWAY — see convertsToTwoLevel
+// (aggregate.go) for the two tests and twoLevelConvertAt for the measured
+// curve behind the size one. The decision runs once per BATCH, never per row:
+// the consume loop hoists its table pointer for the whole batch and the
+// conversion lands at the batch's end. Aggregates whose NDV hint already
+// exceeds the threshold construct bucketed directly (resolveIndices) and never
+// pay a conversion at all. Below the threshold nothing changes: no bucket
+// indirection, no extra shift, byte-identical behavior to G5.
+//
+// The "would have rehashed anyway" half is load-bearing and was NOT true in
+// the first version of this file, which converted on the first batch-end past
+// a live-entry threshold. That point falls, on average, halfway between two
+// doublings, so the conversion's scatter REPLACED NOTHING: the flat table
+// still owed its next doubling, the bucketed table paid it as per-bucket
+// growth, and the conversion was pure additional work. Measured on SF100
+// TPC-H (release v0.16.0-correctness, merged 3-worker CPU profile) that came
+// to ~79.6 CPU-s per suite run of conversion rehash against ~7.7 CPU-s of
+// two-level probe benefit — ≈10:1 — concentrated in the shape that can never
+// veto a growth-rate test: a NEAR-UNIQUE key, where every row mints a group
+// (Q18's GROUP BY l_orderkey over 150M lineitem rows, +87% in that release).
+//
+// Converting at the load-factor crossing instead pays the conversion INSTEAD
+// OF that doubling rather than on top of it, and the destination is the flat
+// table's own slot count split 256 ways, so the doubling it displaced then
+// happens as 256 per-bucket, cache-resident rehashes rather than one more
+// whole-table scatter. A table that is not about to rehash is a table with
+// nothing to save, so it stays flat — which also retires the old growth-rate
+// heuristic: a saturated table cannot cross its load factor, so it can no
+// longer convert at all.
+//
+// Sizing the destination at the DOUBLED capacity was tried and rejected on
+// measurement. It looks like the tidier "replace grow() exactly" — the
+// bucketed table is then born at 35% load and no bucket regrows — but it
+// only moves the per-bucket doublings into the conversion's own scatter,
+// which then works over twice the bytes and is DRAM-bound instead of
+// cache-resident. Same-window A/B on the Q18 capped-epoch shape
+// (BenchmarkAggIntCappedEpochs, near-unique 16M, n=5 medians): flat
+// 2037 ms, doubled-capacity 2204 ms (+8.2%), flat-capacity 2058 ms (+1.0%).
+// The scatter is the expensive part of a rehash, and the bucketed form's
+// whole value is that its scatters are small.
 //
 // What the conversion does NOT touch: group ids stay dense global indices
 // into the same flat accumulator arrays and the same key SoAs, so emission,
@@ -163,13 +195,15 @@ const (
 // where the flat rehash stops being a cache-resident scatter — so converting
 // at 100K would tax every mid-cardinality GROUP BY for nothing. Second, the
 // 1M rows above are NOT the steady state: at exactly the threshold the table
-// converts on its last batch and pays the whole conversion rehash (~30 ns per
-// live entry) with nothing left to amortize it. That is the irreducible worst
-// case of any size threshold; convertsToTwoLevel's growth test removes the
-// common version of it (a table that has saturated), and the default is set
-// at 1M so that everything below a million groups per sink — which is every
-// TPC-H shape and most ClickBench ones — keeps the flat index unchanged.
-// ClickBench Q33 is ~6M groups per partitioned sink and converts.
+// converted on its last batch and paid a whole conversion rehash (~30 ns per
+// live entry) with nothing left to amortize it. That was the irreducible
+// worst case of a bare size threshold, and it is what
+// convertsToTwoLevel's load-factor test removes: a table that settles just
+// past the threshold never crosses its load factor, so it never converts.
+// The default stays at 1M so that everything below a million
+// groups per sink — which is every TPC-H shape and most ClickBench ones —
+// keeps the flat index unchanged. ClickBench Q33 is ~6M groups per
+// partitioned sink and converts.
 //
 // The second, harder-to-benchmark half of the case is the growth transient:
 // a flat doubling holds old+new live (1.5x the final table) at exactly the
@@ -182,19 +216,31 @@ const (
 // it exists so the invariance oracle and the differential harness can drive
 // the bucketed path on corpora whose group counts are nowhere near a
 // million, which is otherwise the only way this code stays dark in CI.
-var twoLevelConvertAt = envPositiveInt("WADJET_TWO_LEVEL_AT", 1_000_000)
+//
+// Overriding it also switches conversion to EAGER — the size test alone
+// decides, without convertsToTwoLevel's load-factor lookahead. Both halves
+// of the shipped gate have to relax together for the override to do its job:
+// a corpus whose tables never reach a million groups is also a corpus whose
+// tables never reach a doubling, so a low threshold on its own would leave
+// the conversion, and everything downstream of it, dark. What eager mode
+// changes is WHEN the index converts, never WHAT it holds — the conversion
+// is value-preserving, so the oracle's row sets are the same either way and
+// its coverage of the bucketed path is strictly larger. Production, with no
+// override, always takes the load-factor rule (and
+// TestTwoLevelConvertsAtTheDoubling pins it there).
+var twoLevelConvertAt, twoLevelConvertEager = twoLevelConvertPolicy()
 
-// envPositiveInt reads a positive integer from the environment, falling back
-// to def on anything unparseable.
-func envPositiveInt(name string, def int) int {
-	if v, err := strconv.Atoi(os.Getenv(name)); err == nil && v > 0 {
-		return v
+// twoLevelConvertPolicy reads the conversion threshold and reports whether
+// it came from an accepted WADJET_TWO_LEVEL_AT override.
+func twoLevelConvertPolicy() (int, bool) {
+	if v, err := strconv.Atoi(os.Getenv("WADJET_TWO_LEVEL_AT")); err == nil && v > 0 {
+		return v, true
 	}
-	return def
+	return 1_000_000, false
 }
 
-// offheapSubMinBytes is the size at which a bucket's entry array moves
-// off-heap. 2 MiB, and the number is load-bearing: it is the huge-page size.
+// offheapSubMinBytes is the size at which an entry array moves off-heap.
+// 2 MiB, and the number is load-bearing: it is the huge-page size.
 //
 // The flat table goes off-heap unconditionally, which is right for ONE array
 // of tens of MB. Applied per bucket it is a trap: a mapping smaller than a
@@ -209,11 +255,25 @@ func envPositiveInt(name string, def int) int {
 //	buckets off-heap >= 64 KiB 427 ms   (+39%)
 //	buckets off-heap >= 4 KiB  407 ms   (+33%)
 //
-// So a bucket goes off-heap once it can be huge-page backed, and below that
-// it stays on the Go heap, where the allocator hands back already-faulted
-// spans out of THP-backed arenas. The heap exposure that leaves is bounded
-// by 256 x 2 MiB per index, and it is pointer-free (allocated from a
-// noscan span, never traced).
+// Which is right, and was applied to the wrong UNIT. A bucket reaches 2 MiB
+// only when the whole index is ~33M slots — past 23M groups in one sink,
+// which nothing in TPC-H or ClickBench reaches. So in practice the gate was
+// unreachable, and converting to the bucketed form silently moved the entire
+// group index off its MAP_NORESERVE huge-page reservation onto the Go heap:
+// 470 MB of heap churn per 16M-group fill where the flat table allocates
+// 11 KB (ADR-0006's amendment, undone by the structure meant to complement
+// it). With WADJET_OFFHEAP_AGG=0 — which puts BOTH forms on the heap — the
+// same 16M near-unique fill inverts from +14.8% to -4.6% against flat: the
+// backing, not the structure, was the loss.
+//
+// The unit that wants a huge page is the TABLE, not the bucket. So the 256
+// buckets are carved out of ONE reservation whenever their total clears this
+// gate (allocIntArena / newIntTwoLevelTableSub) — one mapping, one
+// MADV_HUGEPAGE, zero Go heap, and the buckets still index and probe
+// independently because the arena is only their backing store, never their
+// addressing. A bucket that outgrows its slice allocates on its own (per
+// the per-bucket gate below, which is now the fallback rather than the
+// rule), and the arena is released as soon as the last bucket has left it.
 //
 // A var so tests can force either side of the gate.
 var offheapSubMinBytes = 2 << 20
@@ -233,6 +293,10 @@ type intSubTable struct {
 	mask    uint64
 	size    int
 	offheap bool
+	// arena marks entries as a slice of the table's shared reservation
+	// rather than an allocation of its own: it is neither heap-freed nor
+	// individually Released, and growing out of it decrements arenaLive.
+	arena bool
 }
 
 // intTwoLevelTable is the bucketed form of intHashTable: same keys, same
@@ -241,20 +305,71 @@ type intSubTable struct {
 type intTwoLevelTable struct {
 	subs [twoLevelBuckets]intSubTable
 	reg  *memory.OffheapRegistry
+	// arena is the one off-heap reservation the 256 buckets were carved
+	// from (offheapSubMinBytes), and arenaLive counts how many still slice
+	// it. It is released the moment the last one grows out.
+	arena     []intHashEntry
+	arenaLive int
 }
 
 // newIntTwoLevelTable builds an empty bucketed index pre-sized for n TOTAL
 // entries (each bucket gets n/256 at 70% load).
 func newIntTwoLevelTable(n int, reg *memory.OffheapRegistry) *intTwoLevelTable {
+	return newIntTwoLevelTableSub(subCapFor(n), reg)
+}
+
+// newIntTwoLevelTableSub builds an empty bucketed index with an explicit
+// per-bucket slot count. The conversion path uses it to reproduce EXACTLY the
+// capacity the flat table's own doubling policy would have reached (see
+// convertIntHashTableToTwoLevel), which is what makes the conversion a
+// replacement for that doubling rather than an addition to it.
+func newIntTwoLevelTableSub(capPerSub int, reg *memory.OffheapRegistry) *intTwoLevelTable {
 	t := &intTwoLevelTable{reg: reg}
-	capPerSub := subCapFor(n)
+	mask := uint64(capPerSub - 1)
+	// One reservation for all 256 buckets when the TABLE is worth a huge
+	// page — see offheapSubMinBytes. fillEmptyEntries runs once over the
+	// whole arena rather than 256 times.
+	if arena, ok := allocOffheapArena[intHashEntry](reg, twoLevelBuckets*capPerSub); ok {
+		fillEmptyEntries(arena)
+		t.arena, t.arenaLive = arena, twoLevelBuckets
+		for i := range t.subs {
+			s := &t.subs[i]
+			lo, hi := i*capPerSub, (i+1)*capPerSub
+			s.entries = arena[lo:hi:hi]
+			s.mask, s.offheap, s.arena = mask, true, true
+		}
+		return t
+	}
 	for i := range t.subs {
 		s := &t.subs[i]
 		s.entries, s.offheap = allocIntSubEntries(reg, capPerSub)
 		fillEmptyEntries(s.entries)
-		s.mask = uint64(capPerSub - 1)
+		s.mask = mask
 	}
 	return t
+}
+
+// allocOffheapArena returns one reservation big enough for all 256 buckets,
+// or ok=false when off-heap is unavailable or the table is too small to be
+// worth a mapping. Shared by both key modes.
+func allocOffheapArena[T any](reg *memory.OffheapRegistry, n int) ([]T, bool) {
+	var zero T
+	if reg == nil || n*int(unsafe.Sizeof(zero)) < offheapSubMinBytes {
+		return nil, false
+	}
+	return memory.OffheapExact[T](reg, n)
+}
+
+// releaseArenaSlot records that one bucket has left the shared reservation
+// and unmaps it once none are left. Called from growSub, the only path that
+// replaces a bucket's entry array.
+func (t *intTwoLevelTable) releaseArenaSlot() {
+	t.arenaLive--
+	if t.arenaLive > 0 || t.arena == nil {
+		return
+	}
+	t.reg.Release(unsafe.Pointer(unsafe.SliceData(t.arena)))
+	t.arena = nil
 }
 
 // subCapFor returns the power-of-two slot count one bucket needs to hold
@@ -267,6 +382,18 @@ func subCapFor(n int) int {
 		c <<= 1
 	}
 	return c
+}
+
+// subCapForFlatSlots splits a FLAT slot count across the 256 buckets. Both
+// are powers of two, so the split is exact and the bucketed table indexes
+// with the same low 8+log2(subcap) hash bits the flat table of that size
+// would have used (see the bit budget above).
+func subCapForFlatSlots(slots int) int {
+	per := slots / twoLevelBuckets
+	if per < twoLevelMinSubCap {
+		return twoLevelMinSubCap
+	}
+	return per
 }
 
 // allocIntSubEntries returns a zeroed entry array for one bucket, off-heap
@@ -283,14 +410,45 @@ func allocIntSubEntries(reg *memory.OffheapRegistry, n int) ([]intHashEntry, boo
 // convertIntHashTableToTwoLevel rebuilds a flat int index as a bucketed one
 // and releases the flat table's entry array. The flat table is left empty
 // and must not be used afterwards.
+//
+// The destination has EXACTLY the flat table's slot count, split 256 ways.
+// Two things follow. The conversion is then a pure re-permutation into the
+// same number of slots — by the bit budget above, (bucket, slot) is
+// bit-for-bit the index the flat table of that size computes — and, called
+// where convertsToTwoLevel says (the flat table one batch from its load
+// factor), the doubling the flat table was about to perform as ONE
+// whole-table rehash instead happens as 256 per-bucket rehashes, each of
+// them cache-resident. That is the structure's whole claim, applied to the
+// one rehash that was already due.
+//
+// Sizing the destination at the DOUBLED capacity instead was measured and
+// rejected: it removes the per-bucket doublings, but only by moving them
+// into the conversion's own scatter, which then works over twice the bytes
+// and is DRAM-bound. On the Q18 capped-epoch shape that cost +7 points of
+// wall against this sizing (BenchmarkAggIntCappedEpochs, near-unique 16M).
+//
+// The insert loop is written out rather than calling GetOrInsertAt: the
+// source keys are unique by construction, so there is no duplicate to test
+// for.
 func convertIntHashTableToTwoLevel(flat *intHashTable, reg *memory.OffheapRegistry) *intTwoLevelTable {
-	t := newIntTwoLevelTable(flat.size, reg)
+	t := newIntTwoLevelTableSub(subCapForFlatSlots(len(flat.entries)), reg)
 	for i := range flat.entries {
 		e := &flat.entries[i]
 		if e.key == intHashEmpty {
 			continue
 		}
-		t.GetOrInsertAt(e.key, fibHash(e.key), e.val)
+		hash := fibHash(e.key)
+		b := bucketOf(hash)
+		s := &t.subs[b]
+		idx := (hash >> twoLevelSlotShift) & s.mask
+		for s.entries[idx].key != intHashEmpty {
+			idx = (idx + 1) & s.mask
+		}
+		s.entries[idx] = *e
+		s.size++
+		if s.size*10 > len(s.entries)*7 {
+			t.growSub(b)
+		}
 	}
 	flat.freeEntries()
 	return t
@@ -365,11 +523,15 @@ func (t *intTwoLevelTable) Len() int {
 }
 
 // MemoryUsage returns the bytes held by every bucket's entry array plus the
-// bucket header array itself.
+// bucket header array itself. Arena-backed buckets are counted through the
+// arena, in full and once, so a partially-vacated arena still charges the
+// bytes it is still holding.
 func (t *intTwoLevelTable) MemoryUsage() int64 {
-	var n int64
+	n := int64(len(t.arena))
 	for i := range t.subs {
-		n += int64(cap(t.subs[i].entries))
+		if !t.subs[i].arena {
+			n += int64(cap(t.subs[i].entries))
+		}
 	}
 	return n*int64(unsafe.Sizeof(intHashEntry{})) + int64(unsafe.Sizeof(t.subs))
 }
@@ -447,7 +609,7 @@ func (t *intTwoLevelTable) growSub(b uint64) {
 		return // bit-budget invariant: never let the slot window reach bit 52
 	}
 	old := s.entries
-	oldOffheap := s.offheap
+	oldOffheap, oldArena := s.offheap, s.arena
 	newEntries, offheap := allocIntSubEntries(t.reg, newCap)
 	fillEmptyEntries(newEntries)
 	newMask := uint64(newCap - 1)
@@ -462,12 +624,18 @@ func (t *intTwoLevelTable) growSub(b uint64) {
 		}
 		newEntries[idx] = *e
 	}
-	if oldOffheap {
-		t.reg.Release(unsafe.Pointer(unsafe.SliceData(old)))
-	}
 	s.entries = newEntries
 	s.offheap = offheap
+	s.arena = false
 	s.mask = newMask
+	switch {
+	case oldArena:
+		// Not this bucket's mapping to return — the arena is released when
+		// the last bucket has left it.
+		t.releaseArenaSlot()
+	case oldOffheap:
+		t.reg.Release(unsafe.Pointer(unsafe.SliceData(old)))
+	}
 }
 
 // --- packed composite key mode -------------------------------------------
@@ -478,27 +646,56 @@ type packedSubTable struct {
 	mask    uint64
 	size    int
 	offheap bool
-	_       [23]byte // pad to 64 B
+	arena   bool     // see intSubTable.arena
+	_       [22]byte // pad to 64 B
 }
 
 // packedTwoLevelTable is the bucketed form of packedHashTable. Same
 // conventions: 128-bit key inline in the entry, val == packedHashEmpty
 // marks a free slot, 70% load, caller-paired CheckGrowAt.
 type packedTwoLevelTable struct {
-	subs [twoLevelBuckets]packedSubTable
-	reg  *memory.OffheapRegistry
+	subs      [twoLevelBuckets]packedSubTable
+	reg       *memory.OffheapRegistry
+	arena     []packedHashEntry // see intTwoLevelTable.arena
+	arenaLive int
 }
 
 func newPackedTwoLevelTable(n int, reg *memory.OffheapRegistry) *packedTwoLevelTable {
+	return newPackedTwoLevelTableSub(subCapFor(n), reg)
+}
+
+// newPackedTwoLevelTableSub is newIntTwoLevelTableSub for the packed mode.
+func newPackedTwoLevelTableSub(capPerSub int, reg *memory.OffheapRegistry) *packedTwoLevelTable {
 	t := &packedTwoLevelTable{reg: reg}
-	capPerSub := subCapFor(n)
+	mask := uint64(capPerSub - 1)
+	if arena, ok := allocOffheapArena[packedHashEntry](reg, twoLevelBuckets*capPerSub); ok {
+		fillEmptyPackedEntries(arena)
+		t.arena, t.arenaLive = arena, twoLevelBuckets
+		for i := range t.subs {
+			s := &t.subs[i]
+			lo, hi := i*capPerSub, (i+1)*capPerSub
+			s.entries = arena[lo:hi:hi]
+			s.mask, s.offheap, s.arena = mask, true, true
+		}
+		return t
+	}
 	for i := range t.subs {
 		s := &t.subs[i]
 		s.entries, s.offheap = allocPackedSubEntries(reg, capPerSub)
 		fillEmptyPackedEntries(s.entries)
-		s.mask = uint64(capPerSub - 1)
+		s.mask = mask
 	}
 	return t
+}
+
+// releaseArenaSlot is intTwoLevelTable.releaseArenaSlot for the packed mode.
+func (t *packedTwoLevelTable) releaseArenaSlot() {
+	t.arenaLive--
+	if t.arenaLive > 0 || t.arena == nil {
+		return
+	}
+	t.reg.Release(unsafe.Pointer(unsafe.SliceData(t.arena)))
+	t.arena = nil
 }
 
 func allocPackedSubEntries(reg *memory.OffheapRegistry, n int) ([]packedHashEntry, bool) {
@@ -511,15 +708,27 @@ func allocPackedSubEntries(reg *memory.OffheapRegistry, n int) ([]packedHashEntr
 }
 
 // convertPackedHashTableToTwoLevel rebuilds a flat packed index as a
-// bucketed one and releases the flat entry array.
+// bucketed one and releases the flat entry array — see
+// convertIntHashTableToTwoLevel for the sizing rule and why it is that one.
 func convertPackedHashTableToTwoLevel(flat *packedHashTable, reg *memory.OffheapRegistry) *packedTwoLevelTable {
-	t := newPackedTwoLevelTable(flat.size, reg)
+	t := newPackedTwoLevelTableSub(subCapForFlatSlots(len(flat.entries)), reg)
 	for i := range flat.entries {
 		e := &flat.entries[i]
 		if e.val == packedHashEmpty {
 			continue
 		}
-		t.GetOrInsertAt(e.lo, e.hi, packedHash(e.lo, e.hi), e.val)
+		hash := packedHash(e.lo, e.hi)
+		b := bucketOf(hash)
+		s := &t.subs[b]
+		idx := (hash >> twoLevelSlotShift) & s.mask
+		for s.entries[idx].val != packedHashEmpty {
+			idx = (idx + 1) & s.mask
+		}
+		s.entries[idx] = *e
+		s.size++
+		if s.size*10 > len(s.entries)*7 {
+			t.growSub(b)
+		}
 	}
 	flat.freeEntries()
 	return t
@@ -586,9 +795,11 @@ func (t *packedTwoLevelTable) Len() int {
 }
 
 func (t *packedTwoLevelTable) MemoryUsage() int64 {
-	var n int64
+	n := int64(len(t.arena))
 	for i := range t.subs {
-		n += int64(cap(t.subs[i].entries))
+		if !t.subs[i].arena {
+			n += int64(cap(t.subs[i].entries))
+		}
 	}
 	return n*int64(unsafe.Sizeof(packedHashEntry{})) + int64(unsafe.Sizeof(t.subs))
 }
@@ -611,7 +822,7 @@ func (t *packedTwoLevelTable) growSub(b uint64) {
 		return
 	}
 	old := s.entries
-	oldOffheap := s.offheap
+	oldOffheap, oldArena := s.offheap, s.arena
 	newEntries, offheap := allocPackedSubEntries(t.reg, newCap)
 	fillEmptyPackedEntries(newEntries)
 	newMask := uint64(newCap - 1)
@@ -626,10 +837,14 @@ func (t *packedTwoLevelTable) growSub(b uint64) {
 		}
 		newEntries[idx] = *e
 	}
-	if oldOffheap {
-		t.reg.Release(unsafe.Pointer(unsafe.SliceData(old)))
-	}
 	s.entries = newEntries
 	s.offheap = offheap
+	s.arena = false
 	s.mask = newMask
+	switch {
+	case oldArena:
+		t.releaseArenaSlot()
+	case oldOffheap:
+		t.reg.Release(unsafe.Pointer(unsafe.SliceData(old)))
+	}
 }

@@ -253,6 +253,11 @@ func (h *intHashTable) EnsureCapacity(additional int) {
 // Len returns the number of entries in the table.
 func (h *intHashTable) Len() int { return h.size }
 
+// Slots returns the table's slot count — the denominator of the 70% load
+// factor. The two-level conversion reads it to decide whether a whole-table
+// rehash is already due (two_level_hash.go).
+func (h *intHashTable) Slots() int { return len(h.entries) }
+
 // MemoryUsage returns the total heap bytes consumed by the hash table.
 func (h *intHashTable) MemoryUsage() int64 {
 	return int64(cap(h.entries)) * 16 // sizeof(intHashEntry) = 16

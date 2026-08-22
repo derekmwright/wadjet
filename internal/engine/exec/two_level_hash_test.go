@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"sort"
 	"testing"
+	"unsafe"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
@@ -15,14 +16,20 @@ import (
 // withTwoLevel runs fn with the kill switch and the conversion threshold
 // forced, restoring both. A low threshold is what lets a unit-scale test
 // exercise the bucketed path at all.
+// withTwoLevel runs fn with the bucketed index forced on/off at a given
+// size threshold. It stands in for the WADJET_TWO_LEVEL_AT override and
+// carries the same eager-conversion semantics: an explicit threshold means
+// "convert on size alone", because a few-thousand-group test table never
+// reaches the doubling the shipped gate waits for. The shipped gate itself
+// is pinned by TestTwoLevelConvertsAtTheDoubling.
 func withTwoLevel(tb testing.TB, on bool, convertAt int, fn func()) {
 	tb.Helper()
 	prevOn := twoLevelToggle.Set(on)
-	prevAt := twoLevelConvertAt
-	twoLevelConvertAt = convertAt
+	prevAt, prevEager := twoLevelConvertAt, twoLevelConvertEager
+	twoLevelConvertAt, twoLevelConvertEager = convertAt, true
 	defer func() {
 		twoLevelToggle.Set(prevOn)
-		twoLevelConvertAt = prevAt
+		twoLevelConvertAt, twoLevelConvertEager = prevAt, prevEager
 	}()
 	fn()
 }
@@ -369,32 +376,50 @@ func TestTwoLevelConversionPreservesEntries(t *testing.T) {
 
 // --- off-heap accounting --------------------------------------------------
 
-// TestTwoLevelOffheapMappingsPerSub asserts the per-sub-table reservation
-// discipline: one mapping per bucket once a bucket is big enough to earn
-// one, and growth RELEASES the old reservation instead of stacking a new one
-// on top (the ADR-0006 amendment property, now per bucket).
-func TestTwoLevelOffheapMappingsPerSub(t *testing.T) {
+// TestTwoLevelOffheapReservationDiscipline asserts how the bucketed index
+// holds off-heap memory: ONE shared reservation carved into 256 bucket
+// slices at construction (the unit that wants a huge page is the table, not
+// the bucket — see offheapSubMinBytes), a bucket that outgrows its slice
+// taking a reservation of its own, the shared arena released the moment the
+// last bucket has left it, and every per-bucket grow releasing the old
+// reservation instead of stacking a new one on top (the ADR-0006 amendment
+// property).
+func TestTwoLevelOffheapReservationDiscipline(t *testing.T) {
 	if !memory.OffheapAvailable() {
 		t.Skip("off-heap unavailable on this platform/toggle")
 	}
 	prev := offheapSubMinBytes
-	offheapSubMinBytes = 1 // force every sub-table off-heap
+	offheapSubMinBytes = 1 // force off-heap at every size
 	defer func() { offheapSubMinBytes = prev }()
 
 	reg := memory.NewOffheapRegistry()
 	defer reg.Close()
 
 	tl := newIntTwoLevelTable(twoLevelBuckets*8, reg)
-	if got := reg.Mappings(); got != twoLevelBuckets {
-		t.Fatalf("after construction: %d mappings, want %d (one per bucket)", got, twoLevelBuckets)
+	if got := reg.Mappings(); got != 1 {
+		t.Fatalf("after construction: %d mappings, want 1 (all 256 buckets carved from one arena)", got)
 	}
-	// Fill enough to grow many buckets several times over.
+	for i := range tl.subs {
+		if !tl.subs[i].arena || !tl.subs[i].offheap {
+			t.Fatalf("bucket %d not arena-backed at construction", i)
+		}
+	}
+	if tl.arenaLive != twoLevelBuckets {
+		t.Fatalf("arenaLive = %d, want %d", tl.arenaLive, twoLevelBuckets)
+	}
+	// Fill enough to grow every bucket several times over.
 	for i := 0; i < 200000; i++ {
 		k := int64(i)
 		tl.GetOrInsertAt(k, fibHash(k), int32(i))
 	}
+	// Every bucket has left the arena, so the arena is gone and each bucket
+	// holds exactly one reservation of its own.
+	if tl.arena != nil || tl.arenaLive != 0 {
+		t.Fatalf("arena still held after every bucket grew (live=%d)", tl.arenaLive)
+	}
 	if got := reg.Mappings(); got != twoLevelBuckets {
-		t.Fatalf("after growth: %d mappings, want %d — grow must release the old sub-table", got, twoLevelBuckets)
+		t.Fatalf("after growth: %d mappings, want %d — grow must release the old sub-table "+
+			"and the arena must be released once vacated", got, twoLevelBuckets)
 	}
 	if tl.Len() != 200000 {
 		t.Fatalf("Len = %d, want 200000", tl.Len())
@@ -404,12 +429,50 @@ func TestTwoLevelOffheapMappingsPerSub(t *testing.T) {
 			t.Fatalf("Get(%d) = (%d,%v) after off-heap growth", i, got, ok)
 		}
 	}
-	// Every bucket must actually be off-heap under the forced threshold, so
-	// the mapping count above is really per sub-table.
 	for i := range tl.subs {
-		if !tl.subs[i].offheap {
-			t.Fatalf("bucket %d not off-heap under a 1-byte threshold", i)
+		if !tl.subs[i].offheap || tl.subs[i].arena {
+			t.Fatalf("bucket %d: offheap=%v arena=%v, want own off-heap reservation",
+				i, tl.subs[i].offheap, tl.subs[i].arena)
 		}
+	}
+}
+
+// TestTwoLevelArenaSurvivesPartialGrowth pins the half-vacated state: while
+// SOME buckets still slice the arena it must stay mapped, and MemoryUsage
+// must still charge it in full — under-reporting it would let an aggregate
+// hold bytes the spill accounting cannot see.
+func TestTwoLevelArenaSurvivesPartialGrowth(t *testing.T) {
+	if !memory.OffheapAvailable() {
+		t.Skip("off-heap unavailable on this platform/toggle")
+	}
+	prev := offheapSubMinBytes
+	offheapSubMinBytes = 1
+	defer func() { offheapSubMinBytes = prev }()
+
+	reg := memory.NewOffheapRegistry()
+	defer reg.Close()
+
+	const capPerSub = 16
+	tl := newIntTwoLevelTableSub(capPerSub, reg)
+	arenaBytes := int64(twoLevelBuckets*capPerSub) * int64(unsafe.Sizeof(intHashEntry{}))
+	headers := int64(unsafe.Sizeof(tl.subs))
+	if got, want := tl.MemoryUsage(), arenaBytes+headers; got != want {
+		t.Fatalf("MemoryUsage = %d, want %d at construction", got, want)
+	}
+	// Grow exactly one bucket by hand.
+	tl.growSub(0)
+	if tl.arena == nil {
+		t.Fatal("arena released while 255 buckets still slice it")
+	}
+	if tl.arenaLive != twoLevelBuckets-1 {
+		t.Fatalf("arenaLive = %d, want %d", tl.arenaLive, twoLevelBuckets-1)
+	}
+	if got := reg.Mappings(); got != 2 {
+		t.Fatalf("mappings = %d, want 2 (arena + the one grown bucket)", got)
+	}
+	grown := int64(cap(tl.subs[0].entries)) * int64(unsafe.Sizeof(intHashEntry{}))
+	if got, want := tl.MemoryUsage(), arenaBytes+grown+headers; got != want {
+		t.Fatalf("MemoryUsage = %d, want %d with one bucket grown out", got, want)
 	}
 }
 
@@ -597,77 +660,190 @@ func TestTwoLevelConversionMidStream(t *testing.T) {
 	}
 }
 
-// TestTwoLevelSaturatedTableDoesNotConvert pins the growth half of the
-// conversion decision: a table that has crossed the size threshold but whose
-// batches now mint almost no new groups must NOT pay a conversion it can
-// never amortize. It must still produce the same rows either way.
-func TestTwoLevelSaturatedTableDoesNotConvert(t *testing.T) {
-	schema := []parquet.Column{
-		{Name: "k", Type: parquet.TypeInt64},
-		{Name: "v", Type: parquet.TypeInt64},
-	}
-	const groups = 4000
-	// Phase 1 fills the group space; phase 2 replays it, so those batches
-	// create no new groups at all.
-	fill := make([]map[string]any, 0, groups)
-	for i := 0; i < groups; i++ {
-		fill = append(fill, map[string]any{"k": int64(i), "v": int64(i)})
-	}
-	batches := []*batch.RecordBatch{batch.FromRows(schema, fill)}
-	for r := 0; r < 6; r++ {
-		batches = append(batches, batch.FromRows(schema, fill))
-	}
-	aggs := func() []AggColumn {
-		return []AggColumn{
+// withTwoLevelStrict is withTwoLevel under the SHIPPED conversion policy:
+// the size threshold moves but the load-factor lookahead stays armed, so the
+// index converts only where a flat doubling was already due. Everything that
+// tests WHEN the conversion fires has to use this; withTwoLevel's eager mode
+// exists to give the corpus oracles coverage, not to define the rule.
+func withTwoLevelStrict(tb testing.TB, on bool, convertAt int, fn func()) {
+	tb.Helper()
+	prevOn := twoLevelToggle.Set(on)
+	prevAt, prevEager := twoLevelConvertAt, twoLevelConvertEager
+	twoLevelConvertAt, twoLevelConvertEager = convertAt, false
+	defer func() {
+		twoLevelToggle.Set(prevOn)
+		twoLevelConvertAt, twoLevelConvertEager = prevAt, prevEager
+	}()
+	fn()
+}
+
+// TestTwoLevelConvertsAtTheDoubling pins the shipped conversion gate.
+//
+// The rule under test: past the size threshold, a flat index converts on the
+// batch that brings it within one batch of its 70% load factor — the moment
+// its own grow() would have rehashed everything anyway — and at no other
+// point. That is what makes the conversion free rather than merely cheap; a
+// conversion anywhere else in the fill replaces nothing and the table still
+// owes its doubling (the SF100 regression recorded in two_level_hash.go).
+func TestTwoLevelConvertsAtTheDoubling(t *testing.T) {
+	t.Run("gate", func(t *testing.T) {
+		prevOn := twoLevelToggle.Set(true)
+		prevAt, prevEager := twoLevelConvertAt, twoLevelConvertEager
+		twoLevelConvertAt, twoLevelConvertEager = 1000, false
+		defer func() {
+			twoLevelToggle.Set(prevOn)
+			twoLevelConvertAt, twoLevelConvertEager = prevAt, prevEager
+		}()
+		cases := []struct {
+			name                  string
+			live, slots, incoming int
+			want                  bool
+		}{
+			{"below the size threshold, doubling due", 999, 1024, 2048, false},
+			{"past the threshold, table at 17%", 1400, 8192, 2048, false},
+			{"past the threshold, one batch from 70%", 6000, 8192, 2048, true},
+			{"saturated: no new groups, room left", 5000, 8192, 0, false},
+			{"crawling: a trickle, far from the load factor", 4000, 16384, 10, false},
+			{"crawling: a trickle, but AT the load factor", 11460, 16384, 10, true},
+		}
+		for _, c := range cases {
+			if got := convertsToTwoLevel(c.live, c.slots, c.incoming); got != c.want {
+				t.Errorf("%s: convertsToTwoLevel(%d, %d, %d) = %v, want %v",
+					c.name, c.live, c.slots, c.incoming, got, c.want)
+			}
+		}
+		// The kill switch outranks everything.
+		twoLevelToggle.Set(false)
+		if convertsToTwoLevel(6000, 8192, 2048) {
+			t.Error("converted with the kill switch off")
+		}
+	})
+
+	// Aggregate level: feed a near-unique key one batch at a time and watch
+	// the index flip. This is the shape the regression lived in — every row
+	// mints a group, so the retired growth-rate test passed on every batch.
+	t.Run("fill", func(t *testing.T) {
+		schema := []parquet.Column{
+			{Name: "k", Type: parquet.TypeInt64},
+			{Name: "v", Type: parquet.TypeInt64},
+		}
+		const perBatch = 2048
+		const nBatches = 24
+		batches := make([]*batch.RecordBatch, 0, nBatches)
+		for bi := 0; bi < nBatches; bi++ {
+			rows := make([]map[string]any, 0, perBatch)
+			for i := 0; i < perBatch; i++ {
+				g := int64(bi*perBatch + i)
+				rows = append(rows, map[string]any{"k": g * 2654435761, "v": g})
+			}
+			batches = append(batches, batch.FromRows(schema, rows))
+		}
+		aggs := []AggColumn{
 			{Func: AggCount, OutputCol: "cnt", OutputType: parquet.TypeInt64},
 			{Func: AggSum, InputCol: "v", OutputCol: "sv", OutputType: parquet.TypeInt64},
 		}
-	}
-	var flat, saturated []map[string]any
-	withTwoLevel(t, false, 1<<30, func() {
-		flat = runHashAggToMap(t, NewHashAggregate([]string{"k"}, aggs()), batches)
-	})
-	// Threshold well below the group count: only the growth gate can hold
-	// the conversion back.
-	withTwoLevel(t, true, 1000, func() {
-		before := TwoLevelConversions.Load()
-		h := NewHashAggregate([]string{"k"}, aggs())
-		saturated = runHashAggToMap(t, h, batches)
-		if n := TwoLevelConversions.Load() - before; n != 1 {
-			t.Fatalf("conversions = %d, want 1 (the first, still-filling batch)", n)
-		}
-	})
-	assertSameRowSets(t, []string{"k"}, flat, saturated)
+		ctx := context.Background()
 
-	// Now the shape the gate exists for: a table that crosses the threshold
-	// while CRAWLING — each batch is mostly repeats with a trickle of new
-	// keys. It reaches the same size, and must never convert.
-	const perBatch = 4000
-	const newPerBatch = 100
-	crawl := make([]*batch.RecordBatch, 0, 20)
-	for bi := 0; bi < 20; bi++ {
-		rows := make([]map[string]any, 0, perBatch)
-		for i := 0; i < newPerBatch; i++ {
-			g := bi*newPerBatch + i
-			rows = append(rows, map[string]any{"k": int64(g), "v": int64(g)})
+		var conversions int64
+		var liveAt, slotsAt, flatSlots int
+		withTwoLevelStrict(t, true, 4096, func() {
+			h := NewHashAggregate([]string{"k"}, aggs)
+			if err := h.Init(ctx); err != nil {
+				t.Fatal(err)
+			}
+			defer h.Close()
+			before := TwoLevelConversions.Load()
+			for _, b := range batches {
+				if err := h.Consume(ctx, b); err != nil {
+					t.Fatal(err)
+				}
+				if idx := h.intGroupIndex; idx != nil {
+					// Still flat: remember the capacity the conversion will
+					// be judged against. A batch that grows the flat table
+					// leaves it well under its load factor, so it cannot
+					// also convert -- the slot count seen here is therefore
+					// the slot count at the conversion.
+					flatSlots = idx.Slots()
+					continue
+				}
+				if liveAt == 0 {
+					// State AT the conversion: nothing has been inserted
+					// into the bucketed table yet (it lands at the batch's
+					// end), so Len is the flat table's live count.
+					liveAt = h.intTwoLevel.Len()
+					for i := range h.intTwoLevel.subs {
+						slotsAt += len(h.intTwoLevel.subs[i].entries)
+					}
+				}
+			}
+			conversions = TwoLevelConversions.Load() - before
+		})
+		if conversions != 1 {
+			t.Fatalf("conversions = %d, want exactly 1", conversions)
 		}
-		for i := len(rows); i < perBatch; i++ {
-			rows = append(rows, map[string]any{"k": int64(i % (bi*newPerBatch + newPerBatch)), "v": int64(1)})
+		// It converted where a doubling was due, and not before.
+		if liveAt*10 > flatSlots*7 {
+			t.Fatalf("flat table was already over its load factor at conversion "+
+				"(live=%d slots=%d) -- CheckGrow should have grown it first",
+				liveAt, flatSlots)
 		}
-		crawl = append(crawl, batch.FromRows(schema, rows))
-	}
-	var crawled, flatCrawl []map[string]any
-	withTwoLevel(t, true, 1000, func() {
-		before := TwoLevelConversions.Load()
-		crawled = runHashAggToMap(t, NewHashAggregate([]string{"k"}, aggs()), crawl)
-		if n := TwoLevelConversions.Load() - before; n != 0 {
-			t.Fatalf("conversions = %d, want 0 — a crawling table must not pay for a conversion", n)
+		if (liveAt+perBatch)*10 <= flatSlots*7 {
+			t.Fatalf("converted with a doubling still %d entries away "+
+				"(live=%d slots=%d): the conversion replaced nothing",
+				flatSlots*7/10-liveAt, liveAt, flatSlots)
+		}
+		// And it was born at the flat table's own slot count, so the doubling
+		// it displaced happens per bucket. (Buckets that cross their load
+		// factor during the conversion itself grow immediately, which is why
+		// this is a range and not an equality.)
+		if slotsAt < flatSlots || slotsAt > 2*flatSlots {
+			t.Fatalf("bucketed slots = %d, want within [%d, %d] -- the destination "+
+				"is the flat table's slot count split 256 ways", slotsAt, flatSlots, 2*flatSlots)
 		}
 	})
-	withTwoLevel(t, false, 1<<30, func() {
-		flatCrawl = runHashAggToMap(t, NewHashAggregate([]string{"k"}, aggs()), crawl)
+
+	// A table that crosses the size threshold while CRAWLING — mostly
+	// repeats with a trickle of new keys — stays flat for as long as its
+	// capacity holds, and answers identically either way.
+	t.Run("crawl", func(t *testing.T) {
+		schema := []parquet.Column{
+			{Name: "k", Type: parquet.TypeInt64},
+			{Name: "v", Type: parquet.TypeInt64},
+		}
+		const perBatch = 4000
+		const newPerBatch = 100
+		crawl := make([]*batch.RecordBatch, 0, 20)
+		for bi := 0; bi < 20; bi++ {
+			rows := make([]map[string]any, 0, perBatch)
+			for i := 0; i < newPerBatch; i++ {
+				g := bi*newPerBatch + i
+				rows = append(rows, map[string]any{"k": int64(g), "v": int64(g)})
+			}
+			for i := len(rows); i < perBatch; i++ {
+				rows = append(rows, map[string]any{"k": int64(i % (bi*newPerBatch + newPerBatch)), "v": int64(1)})
+			}
+			crawl = append(crawl, batch.FromRows(schema, rows))
+		}
+		aggs := func() []AggColumn {
+			return []AggColumn{
+				{Func: AggCount, OutputCol: "cnt", OutputType: parquet.TypeInt64},
+				{Func: AggSum, InputCol: "v", OutputCol: "sv", OutputType: parquet.TypeInt64},
+			}
+		}
+		var crawled, flatCrawl []map[string]any
+		withTwoLevelStrict(t, true, 1000, func() {
+			before := TwoLevelConversions.Load()
+			crawled = runHashAggToMap(t, NewHashAggregate([]string{"k"}, aggs()), crawl)
+			if n := TwoLevelConversions.Load() - before; n != 0 {
+				t.Fatalf("conversions = %d, want 0 — 2000 groups in a 16K-slot "+
+					"table is not about to rehash", n)
+			}
+		})
+		withTwoLevelStrict(t, false, 1<<30, func() {
+			flatCrawl = runHashAggToMap(t, NewHashAggregate([]string{"k"}, aggs()), crawl)
+		})
+		assertSameRowSets(t, []string{"k"}, flatCrawl, crawled)
 	})
-	assertSameRowSets(t, []string{"k"}, flatCrawl, crawled)
 }
 
 // TestTwoLevelDirectBuildFromNDVHint covers the second construction path:

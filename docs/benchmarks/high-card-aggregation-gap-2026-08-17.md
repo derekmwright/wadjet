@@ -111,9 +111,51 @@ right. The emit phase is single-threaded and 16-35% of WALL clock
   each grows by its own doubling, so a rehash touches 1/256 of the entries
   and the growth transient stops being 1.5x the whole table. Adaptive: a
   sink starts flat (byte-identical to G5) and converts once it holds
-  > `twoLevelConvertAt` live entries AND the batch that crossed the line was
-  still minting groups for a quarter of its rows — the second test is what
-  stops a saturated table paying for a conversion it can never amortize.
+  > `twoLevelConvertAt` live entries AND `live + incoming` crosses the flat
+  table's 70% load factor — i.e. at the doubling the conversion's rehash
+  DISPLACES, so its marginal cost is ~zero.
+
+  **Corrected 2026-08-21.** As shipped on 08-17 the second test was a
+  growth-rate one (`newGroups*4 >= rows`, "still filling"), and the
+  conversion fired at the first batch-end past the size threshold --
+  on average halfway between two doublings, so it replaced nothing and the
+  table still owed its next rehash. The SF100 profile of
+  v0.16.0-correctness sized the mistake: 72.65% of
+  `intTwoLevelTable.GetOrInsertAt` came from the conversion sweep, ~79.6
+  CPU-s per suite run of rehash against ~7.7 CPU-s of two-level probe
+  benefit (~10:1). The growth-rate test could not veto it, because the shape
+  that pays most -- a NEAR-UNIQUE key, Q18's `GROUP BY l_orderkey` over 150M
+  lineitem rows, +87% in that release -- mints a group on every row and
+  passes any "still filling" test unconditionally. The load-factor test
+  subsumes the intent (a saturated table adds no groups, so it cannot cross)
+  and costs nothing to evaluate.
+
+  Two sub-findings from the fix, both measured same-window on the Q18
+  capped-epoch shape (`BenchmarkAggIntCappedEpochs`, near-unique 16M):
+  (i) the conversion's destination must be the flat table's OWN slot count
+  split 256 ways, not the doubled capacity. Doubling looks like the tidier
+  "replace grow() exactly" -- the bucketed table is born at 35% load and no
+  bucket regrows -- but it only moves the per-bucket doublings into the
+  conversion's own scatter, which then works over twice the bytes and is
+  DRAM-bound instead of cache-resident: flat 2037 ms, doubled 2204 ms
+  (+8.2%), flat-capacity 2058 ms (+1.0%). The scatter is the expensive part
+  of a rehash and the bucketed form's whole value is that its scatters are
+  small. (ii) (b) below is unreachable in practice -- 2 MiB PER BUCKET means
+  ~23M groups before any bucket qualifies -- so converting used to drop the
+  whole index off its off-heap huge-page reservation onto the Go heap. The
+  unit that wants a huge page is the TABLE, so the 256 buckets are now
+  carved from ONE reservation (heap churn on the Q18 shape 1225 -> 956 MB;
+  the remainder is per-bucket GROWTH, which still lands on the heap and is
+  the obvious next repair: an arena per generation).
+
+  Residual, recorded so it is not re-diagnosed as this defect: a two-level
+  LOOKUP costs ~33% more than a flat one at 8M entries (85.0 vs 112.9 ms,
+  `BenchmarkIntIndexGrowth` probe arms) because the sub-table header is a
+  dependent load in front of the entry load, which costs memory-level
+  parallelism. Lookup-heavy high-cardinality shapes (~16 rows/group, which
+  is Q33) pay it on every row, and it is the bulk of what the bucketed index
+  still costs on those after this fix.
+
   Three findings worth carrying forward:
   (a) the bucket window must be the LOW 8 bits, not ClickHouse's middle
   window. Ours is not an avalanching hash: `fibHash` is multiply-only, so

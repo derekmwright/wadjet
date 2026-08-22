@@ -2083,7 +2083,7 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 	// loops above hoisted their table pointer, and the decision needs this
 	// batch's new-group count (two_level_hash.go).
 	if intIdx != nil {
-		h.maybeConvertIntIndex(intIdx.Len()-liveBefore, iterLen)
+		h.maybeConvertIntIndex(intIdx.Len() - liveBefore)
 	}
 }
 
@@ -2436,7 +2436,7 @@ func (h *HashAggregate) consumeBatchPackedGroup(b *batch.RecordBatch) {
 	// Bucketed conversion, decided once per batch at the end — see
 	// consumeBatchIntGroup.
 	if idx != nil {
-		h.maybeConvertPackedIndex(idx.Len()-liveBefore, iterLen)
+		h.maybeConvertPackedIndex(idx.Len() - liveBefore)
 	}
 }
 
@@ -2611,45 +2611,66 @@ func flatAccumLen(fa *flatAccumArrays) int {
 // through here so the mode is decided in exactly one place per operation.
 
 // convertsToTwoLevel decides, at the END of a batch, whether a flat index
-// that just crossed the threshold should convert. Two conditions:
+// should become bucketed. Two conditions:
 //
-//   - size: live > twoLevelConvertAt (see two_level_hash.go for the curve).
-//   - growth: the batch just consumed minted new groups for at least a
-//     quarter of its rows. Conversion costs one rehash of everything live
-//     (~25 ns per entry), so it is a BET that the table keeps filling. A
-//     table that has saturated — the shape where nearly every row now hits
-//     an existing group — would never win that bet back, and paying it is
-//     exactly the worst case a bare size threshold has: a GROUP BY that
-//     happens to settle just past the threshold pays the whole conversion
-//     for the handful of groups that follow. A still-filling table at a
-//     million groups, by contrast, is one that keeps going.
+//   - size: live >= twoLevelConvertAt — the measured structural crossover,
+//     below which a flat rehash is still a cache-resident scatter and
+//     bucketing is overhead (see two_level_hash.go for the curve).
+//   - imminent rehash: live + incoming crosses the flat table's 70% load
+//     factor. That is the only moment the conversion is free: it rehashes
+//     the entries grow() was about to rehash, into the capacity grow() was
+//     about to allocate, and the flat doubling then never happens. Anywhere
+//     else in the fill the conversion REPLACES NOTHING and the table still
+//     owes its doubling — the ≈10:1 overhead-to-benefit ratio the SF100
+//     profile found, and the near-unique-key regression it produced (Q18,
+//     +87%).
+//
+// incoming is what the caller is about to insert: the consume path passes
+// the new-group count of the batch just finished, as the estimate of the
+// next batch's; the merge path passes the incoming aggregate's group count,
+// which is exact.
+//
+// The growth-rate test this replaces (newGroups*4 >= rows, "still filling")
+// could not veto the losing bet it was written for: a near-unique key mints
+// a group on every row, so it passed unconditionally, on every batch, for
+// exactly the shape that pays the most. The load-factor test subsumes its
+// real intent — a saturated table adds no groups, so it can never cross,
+// so it can never convert.
 //
 // Both are per-BATCH tests on numbers the consume loop already has; nothing
 // here runs per row.
-func convertsToTwoLevel(live, newGroups, rows int) bool {
-	return twoLevelToggle.On() && live >= twoLevelConvertAt && newGroups*4 >= rows
+func convertsToTwoLevel(live, slots, incoming int) bool {
+	if !twoLevelToggle.On() || live < twoLevelConvertAt {
+		return false
+	}
+	// WADJET_TWO_LEVEL_AT (and the test helper that stands in for it) drops
+	// the lookahead so CI corpora, whose tables never reach a doubling
+	// either, still exercise the bucketed path — see two_level_hash.go.
+	return twoLevelConvertEager || (live+incoming)*10 > slots*7
 }
 
 // maybeConvertIntIndex converts the flat single-int index to the bucketed
 // form. Called at the end of a batch, so the consume loop's hoisted table
 // pointer stays valid for the whole batch and the conversion applies from
 // the next one.
-func (h *HashAggregate) maybeConvertIntIndex(newGroups, rows int) {
-	if h.intGroupIndex == nil || !convertsToTwoLevel(h.intGroupIndex.Len(), newGroups, rows) {
+func (h *HashAggregate) maybeConvertIntIndex(newGroups int) {
+	idx := h.intGroupIndex
+	if idx == nil || !convertsToTwoLevel(idx.Len(), idx.Slots(), newGroups) {
 		return
 	}
-	h.intTwoLevel = convertIntHashTableToTwoLevel(h.intGroupIndex, h.offheapReg())
+	h.intTwoLevel = convertIntHashTableToTwoLevel(idx, h.offheapReg())
 	h.intGroupIndex = nil
 	TwoLevelConversions.Add(1)
 }
 
 // maybeConvertPackedIndex is maybeConvertIntIndex for the packed composite
 // key mode.
-func (h *HashAggregate) maybeConvertPackedIndex(newGroups, rows int) {
-	if h.packedIdx == nil || !convertsToTwoLevel(h.packedIdx.Len(), newGroups, rows) {
+func (h *HashAggregate) maybeConvertPackedIndex(newGroups int) {
+	idx := h.packedIdx
+	if idx == nil || !convertsToTwoLevel(idx.Len(), idx.Slots(), newGroups) {
 		return
 	}
-	h.packedTwoLevel = convertPackedHashTableToTwoLevel(h.packedIdx, h.offheapReg())
+	h.packedTwoLevel = convertPackedHashTableToTwoLevel(idx, h.offheapReg())
 	h.packedIdx = nil
 	TwoLevelConversions.Add(1)
 }
@@ -4951,12 +4972,15 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 // materializeFlatAccums + migrateToGenericMap + per-group Accumulator.Merge.
 // Operates on flat arrays (count, sumI64, sumF64, min, max) with int hash lookup.
 func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
-	// A merge that will push the destination past the conversion threshold
-	// converts FIRST, so the inserted groups land in per-bucket tables
-	// instead of driving whole-table rehashes (two_level_hash.go).
-	if h.intGroupIndex != nil && twoLevelToggle.On() &&
-		h.intGroupIndex.Len()+o.numIntGroups >= twoLevelConvertAt {
-		h.intTwoLevel = convertIntHashTableToTwoLevel(h.intGroupIndex, h.offheapReg())
+	// A merge that will drive the destination past its load factor converts
+	// FIRST, so the inserted groups land in per-bucket tables instead of
+	// driving whole-table rehashes. Same rule as the consume path: the
+	// incoming group count is the lookahead, and a merge that fits under the
+	// existing capacity stays flat because there is no rehash to displace
+	// (two_level_hash.go).
+	if idx := h.intGroupIndex; idx != nil &&
+		convertsToTwoLevel(idx.Len(), idx.Slots(), o.numIntGroups) {
+		h.intTwoLevel = convertIntHashTableToTwoLevel(idx, h.offheapReg())
 		h.intGroupIndex = nil
 		TwoLevelConversions.Add(1)
 	}
@@ -5108,9 +5132,9 @@ func copyFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 // — the dual-int predecessor did a Get, a chain walk over three arrays, and
 // then a second Get before its Put.
 func (h *HashAggregate) mergePackedGroupSoA(o *HashAggregate) {
-	if h.packedIdx != nil && twoLevelToggle.On() &&
-		h.packedIdx.Len()+o.numIntGroups >= twoLevelConvertAt {
-		h.packedTwoLevel = convertPackedHashTableToTwoLevel(h.packedIdx, h.offheapReg())
+	if idx := h.packedIdx; idx != nil &&
+		convertsToTwoLevel(idx.Len(), idx.Slots(), o.numIntGroups) {
+		h.packedTwoLevel = convertPackedHashTableToTwoLevel(idx, h.offheapReg())
 		h.packedIdx = nil
 		TwoLevelConversions.Add(1)
 	}

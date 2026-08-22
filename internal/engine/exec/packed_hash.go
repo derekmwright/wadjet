@@ -266,6 +266,9 @@ func (h *packedHashTable) EnsureCapacity(additional int) {
 // Len returns the number of occupied slots.
 func (h *packedHashTable) Len() int { return h.size }
 
+// Slots returns the table's slot count — see intHashTable.Slots.
+func (h *packedHashTable) Slots() int { return len(h.entries) }
+
 // MemoryUsage returns the bytes consumed by the entry array.
 func (h *packedHashTable) MemoryUsage() int64 {
 	return int64(cap(h.entries)) * int64(unsafe.Sizeof(packedHashEntry{}))

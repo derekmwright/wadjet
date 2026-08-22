@@ -156,9 +156,11 @@ func BenchmarkIntIndexConvertThreshold(b *testing.B) {
 }
 
 // fillAdaptiveInt reproduces the production fill: flat until the conversion
-// threshold, bucketed after it. The threshold test runs once per BATCH, as
+// point, bucketed after it. The threshold test runs once per BATCH, as
 // consumeBatchIntGroup does — testing it per key would charge the adaptive
-// arm ~10% that the real path never pays.
+// arm ~10% that the real path never pays — and it uses the production gate
+// (convertsToTwoLevel), so the conversion lands where a flat doubling was
+// already due rather than at an arbitrary live count.
 func fillAdaptiveInt(keys []int64, reg *memory.OffheapRegistry) int {
 	flat := newIntHashTableReg(4096, reg)
 	var tl *intTwoLevelTable
@@ -167,7 +169,7 @@ func fillAdaptiveInt(keys []int64, reg *memory.OffheapRegistry) int {
 		if end > len(keys) {
 			end = len(keys)
 		}
-		if tl == nil && flat.Len() >= twoLevelConvertAt {
+		if tl == nil && convertsToTwoLevel(flat.Len(), flat.Slots(), end-off) {
 			tl = convertIntHashTableToTwoLevel(flat, reg)
 		}
 		if tl != nil {
