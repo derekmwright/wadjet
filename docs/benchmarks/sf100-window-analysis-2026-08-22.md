@@ -748,3 +748,21 @@ python3 ../conc.py
 # epoch counts
 zcat ../results/*/wlogs/wlog-*.gz | grep 'msg="shuffle partial agg"' | grep in_rows=50000000
 ```
+
+## Addendum (2026-08-22, post-implementation) — ClickBench bisect arm is confounded
+
+`WADJET_TWO_LEVEL_HT=0` gates exactly three lines in `aggregate.go` (the int and
+packed NDV-hint direct builds and `convertsToTwoLevel`); it does not gate
+partitioned aggregation, parallel emit, the off-heap arena, packed keys, or the
+two-level DISTINCT rewrite. The ClickBench "index OFF" arm (run 20260822-014659)
+slowed 27/43 queries by a run-wide ~25% — including scalar aggregates (Q2, Q3,
+Q29), a filtered `COUNT(*)` (Q20), queries with no aggregate at all (Q23–Q26),
+and string-keyed GROUP BYs that `two_level_hash.go` never converts (Q33/Q34) —
+while the clearest packed high-card shape (Q35) moved +2.3%. That shift is
+instance/run drift, not the switch. The ClickBench two-level win is therefore
+UNPROVEN in either direction; a clean same-instance interleaved ON/OFF
+ClickBench bisect is still owed. §8's design (bounded ⇒ born flat, unbounded
+unchanged) does not depend on it — shipped as dcc95a8 + d13eff7; see
+docs/benchmarks/high-card-aggregation-gap-2026-08-17.md §G6 for the derivation
+(G* = 4M, Gmax = C/s) and the accounting finding (real RSS, fixed via
+MADV_DONTNEED on departed buckets, not an over-charge).
