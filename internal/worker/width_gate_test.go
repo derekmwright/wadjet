@@ -14,8 +14,8 @@ func TestCPUTokens_WaiterFIFOAndPriority(t *testing.T) {
 		t.Fatalf("TryAcquire = %d, want 1", got)
 	}
 
-	w1 := tok.enqueueWaiter()
-	w2 := tok.enqueueWaiter()
+	w1 := tok.enqueueWaiter(false)
+	w2 := tok.enqueueWaiter(false)
 	select {
 	case <-w1.ch:
 		t.Fatal("w1 granted while pool exhausted")
@@ -51,7 +51,7 @@ func TestCPUTokens_WaiterFIFOAndPriority(t *testing.T) {
 func TestCPUTokens_CancelUngrantedWaiter(t *testing.T) {
 	tok := newCPUTokens(1)
 	tok.TryAcquire(1)
-	w := tok.enqueueWaiter()
+	w := tok.enqueueWaiter(false)
 	tok.cancelWaiter(w)
 	tok.Release(1)
 	if got := tok.InUse(); got != 0 {
@@ -61,7 +61,7 @@ func TestCPUTokens_CancelUngrantedWaiter(t *testing.T) {
 
 func TestCPUTokens_EnqueueGrantsImmediatelyWhenFree(t *testing.T) {
 	tok := newCPUTokens(2)
-	w := tok.enqueueWaiter()
+	w := tok.enqueueWaiter(false)
 	select {
 	case <-w.ch:
 	default:
@@ -79,7 +79,7 @@ func TestWidthGate_BaselineAlwaysClaimable(t *testing.T) {
 	g := newWidthGate(newCPUTokens(0))
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
-		s, err := g.claim(ctx)
+		s, err := g.claim(ctx, false)
 		if err != nil || s != slotBaseline {
 			t.Fatalf("claim %d = (%v, %v), want baseline", i, s, err)
 		}
@@ -92,8 +92,8 @@ func TestWidthGate_TokenThenBaselineThenBlock(t *testing.T) {
 	g := newWidthGate(tok)
 	ctx := context.Background()
 
-	s1, _ := g.claim(ctx) // baseline
-	s2, _ := g.claim(ctx) // pool token
+	s1, _ := g.claim(ctx, false) // baseline
+	s2, _ := g.claim(ctx, false) // pool token
 	if s1 != slotBaseline || s2 != slotToken {
 		t.Fatalf("claims = %v, %v; want baseline, token", s1, s2)
 	}
@@ -101,7 +101,7 @@ func TestWidthGate_TokenThenBaselineThenBlock(t *testing.T) {
 	// Third claim parks until a slot frees.
 	done := make(chan widthSlot, 1)
 	go func() {
-		s, err := g.claim(ctx)
+		s, err := g.claim(ctx, false)
 		if err != nil {
 			t.Errorf("claim: %v", err)
 		}
@@ -128,11 +128,11 @@ func TestWidthGate_TokenThenBaselineThenBlock(t *testing.T) {
 func TestWidthGate_ClaimHonorsContextCancel(t *testing.T) {
 	tok := newCPUTokens(0)
 	g := newWidthGate(tok)
-	base, _ := g.claim(context.Background())
+	base, _ := g.claim(context.Background(), false)
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := g.claim(ctx)
+		_, err := g.claim(ctx, false)
 		errCh <- err
 	}()
 	time.Sleep(20 * time.Millisecond)
@@ -273,8 +273,8 @@ func TestWidthGate_YieldDonatesPoolTokenToProducer(t *testing.T) {
 	g.donor = donor
 	ctx := context.Background()
 
-	base, _ := g.claim(ctx)
-	s, _ := g.claim(ctx)
+	base, _ := g.claim(ctx, false)
+	s, _ := g.claim(ctx, false)
 	if base != slotBaseline || s != slotToken {
 		t.Fatalf("claims = %v, %v; want baseline, token", base, s)
 	}
@@ -298,10 +298,10 @@ func TestWidthGate_YieldDonatesPoolTokenToProducer(t *testing.T) {
 
 	// A refusing donor falls back to the pool.
 	donor.accept = false
-	if s, _ = g.claim(ctx); s != slotBaseline {
+	if s, _ = g.claim(ctx, false); s != slotBaseline {
 		t.Fatalf("claim = %v, want baseline back", s)
 	}
-	s2, _ := g.claim(ctx)
+	s2, _ := g.claim(ctx, false)
 	if s2 != slotToken {
 		t.Fatalf("claim = %v, want token", s2)
 	}
@@ -325,7 +325,7 @@ func TestWidthGate_ClaimGrantRedirectsToStalledProducer(t *testing.T) {
 	g.donor = donor
 	ctx := context.Background()
 
-	base, _ := g.claim(ctx)
+	base, _ := g.claim(ctx, false)
 	if base != slotBaseline {
 		t.Fatalf("claim = %v, want baseline", base)
 	}
@@ -335,7 +335,7 @@ func TestWidthGate_ClaimGrantRedirectsToStalledProducer(t *testing.T) {
 
 	done := make(chan widthSlot, 1)
 	go func() {
-		s, err := g.claim(ctx)
+		s, err := g.claim(ctx, false)
 		if err != nil {
 			t.Errorf("claim: %v", err)
 		}
@@ -390,11 +390,11 @@ func TestWidthGate_ClaimGrantSticksWhenDonorRefuses(t *testing.T) {
 	g.donor = donor
 	ctx := context.Background()
 
-	base, _ := g.claim(ctx)
+	base, _ := g.claim(ctx, false)
 	tok.TryAcquire(1)
 	done := make(chan widthSlot, 1)
 	go func() {
-		s, _ := g.claim(ctx)
+		s, _ := g.claim(ctx, false)
 		done <- s
 	}()
 	time.Sleep(20 * time.Millisecond)
@@ -443,11 +443,11 @@ func TestWidthGate_ClaimDonationKillSwitch(t *testing.T) {
 			donor := &fakeTokenDonor{accept: true}
 			g.donor = donor
 			ctx := context.Background()
-			base, _ := g.claim(ctx)
+			base, _ := g.claim(ctx, false)
 			tok.TryAcquire(1)
 			done := make(chan widthSlot, 1)
 			go func() {
-				s, _ := g.claim(ctx)
+				s, _ := g.claim(ctx, false)
 				done <- s
 			}()
 			time.Sleep(20 * time.Millisecond)
@@ -485,8 +485,8 @@ func TestWidthGate_DonationKillSwitch(t *testing.T) {
 	donor := &fakeTokenDonor{accept: true}
 	g.donor = donor
 	ctx := context.Background()
-	base, _ := g.claim(ctx)
-	s, _ := g.claim(ctx)
+	base, _ := g.claim(ctx, false)
+	s, _ := g.claim(ctx, false)
 	g.yield(s)
 	if donor.calls.Load() != 0 {
 		t.Fatal("donor consulted with the kill switch set")

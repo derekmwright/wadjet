@@ -102,7 +102,15 @@ decoded ahead of consumption":
   toward serial under exhaustion, k=1 ⇒ exactly today's behavior).
   This keeps fragments×workers from oversubscribing 16 vCPUs — scan
   decode and morsel consumption compete for the same physical cores
-  and must share one budget.
+  and must share one budget. **Amended 2026-08-22**: sharing one budget
+  is right, but "non-blocking TryAcquire" made decode a second-class
+  caller a queued consumer could shut out indefinitely (SF100 measured
+  41.6 % of decoder wall in token stalls). Decode now acquires through
+  `worker.decodeTokenPool` — a token CLASS with a reserved floor and a
+  ring-occupancy priority flip — and registers its stalls via
+  `scan.DecodeAdmission` so the pool can see the demand. See
+  `shuffle-decode-ahead.md` §2.4; kill switch
+  `WADJET_DECODE_ADMISSION=0`.
 - Scope v1 = the worker DAG scan path (`cachedFileStreamSource`).
   The single-process/fastpath scanner (`scanSourceInner`,
   planner/physical/util.go) has a different shape and its own arc if

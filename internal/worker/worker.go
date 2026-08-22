@@ -1362,6 +1362,17 @@ func (w *Worker) logFinalScanStats() {
 			"donated", donated,
 			"pread_ms", preadNs/1e6, "indexed_files", indexed)
 	}
+	// CPU-token admission (cpu_tokens.go). decode_bypasses is the load-
+	// bearing number: decode-class tokens granted while morsel consumers
+	// were queued — every one of them an admission the old strict-FIFO
+	// policy refused, and the direct counterpart of scan/shuffle
+	// token_stall_ms falling.
+	if cap, reserve, admits, bypasses, holdbacks := w.executor.CPUTokenAdmissionStats(); cap > 0 {
+		w.logger.Info("cpu token admission stats (final)",
+			"capacity", cap, "decode_reserve", reserve,
+			"decode_admits", admits, "decode_bypasses", bypasses,
+			"decode_holdbacks", holdbacks)
+	}
 	writeDrop, readDrop := diskio.DropBehindStats()
 	preadChunks, preadBytes, preadAllocs := parquet.PreadStats()
 	w.logger.Info("drop-behind stats (final)",

@@ -348,11 +348,24 @@ that only the waiter's own progress would release; here every token
 holder is actively computing with bounded hold time (one row-group
 decode, one morsel), releases are continuous, and the baseline slot
 guarantees each fragment a runnable consumer regardless of the pool — no
-cycle, no wedge. Queued waiters take strict priority over `TryAcquire`
-(they hold admitted morsels; feeding them beats widening decode). A side
-effect fixes a second rigidity: width is no longer frozen at start-time
-token availability, so a fragment that began under a transient burst can
-widen when the burst passes.
+cycle, no wedge. A side effect fixes a second rigidity: width is no
+longer frozen at start-time token availability, so a fragment that began
+under a transient burst can widen when the burst passes.
+
+Queued waiters used to take **strict** priority over `TryAcquire` (they
+hold admitted morsels; feeding them beats widening decode). That rule
+holds only while the morsel ring behind the waiter has depth, and the
+SF100 2026-08-22 window measured the opposite regime as the steady state
+— ring empty 41 % of the time, full 2.9 %, `producer_wait` 0.00 %, decode
+token-stalled 41–66 % of its wall. Priority is now conditional
+(`internal/worker/cpu_tokens.go`, kill switch
+`WADJET_DECODE_ADMISSION=0`): a waiter that parks with morsels queued
+behind it (`fed`) keeps the original strict priority; decode-ahead
+outranks a queue of DRY waiters, and keeps a small reserved floor
+(~20 % of the pool, sized from the measured decode demand) even against
+fed ones. Both fragment-side inputs are already in hand at the claim —
+`len(dispenser.ch)` is the ring depth — and the fragment line reports the
+split as `width_fed_parks` / `width_dry_parks`.
 
 Kill switch: `WADJET_MORSEL_YIELD=0` restores fixed-lifetime acquisition.
 

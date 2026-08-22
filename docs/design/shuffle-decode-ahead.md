@@ -242,6 +242,66 @@ stage-walk-bound (stage_ms > decode_ms, token stalls absent), so no
 donation path can reach them — the residual is §4 extent skip-walk
 staging, not admission.
 
+## 2.4 Decode as a token class (2026-08-22, SF100 three-arm window)
+
+§2.2 and §2.3 move tokens between goroutines of the SAME fragment. The
+SF100 2026-08-22 window (3 workers × 4 runs × 3 arms, consistent in all
+12) measured the inversion they route around as a worker-WIDE property of
+the pool, and large: scan `token_stall_ms` 2 540 s against `decode_ms`
+3 220 s (**41.6 %** of decoder wall), shuffle token stall 66 %,
+`window_full_ms` only 2.9 % of `decode_ms` — the ring is EMPTY 41 % of
+the time and full 3 %, `dispenser_producer_wait_ms` is 0.00 %, and
+effective consumer width is 2.88 of 15 with consumers parked 41 %.
+Recoverable: **~226 s of decode token stall per worker per suite run
+against a ~180 s suite wall.**
+
+Closed loop, every term measured: decode is shut out of tokens → the
+morsel ring drains → consumers go dry and queue → any queued consumer
+holds `TryAcquire` at 0 (`cpu_tokens.go`) → decode stays shut out. The
+strict-priority comment (§4.2.1: "a queued consumer holds an admitted
+morsel, so feeding it beats widening decode") is written for a FULL ring;
+the measured regime is an empty one, where feeding that consumer is
+precisely what cannot happen until a decoder runs.
+
+The fix makes decode a first-class **admission class** in `cpuTokens`
+rather than a second-class `TryAcquire` caller, under two rules:
+
+1. **Reserved floor.** Decode may hold `reserve` tokens taken ahead of
+   the consumer FIFO, and a release is held back from queued consumers
+   while decode demand is registered and the floor is unmet. `reserve` is
+   ~20 % of the pool (`decodeReserveFor`), sized from the measured steady
+   demand — ≈1.5 decoders decoding + ≈1.2 queued per worker on a
+   14-token pool = 19.3 %.
+2. **Ring-occupancy flip.** While every queued consumer is itself dry,
+   decode outranks the FIFO without the floor cap; one *fed* waiter — a
+   consumer with morsels queued behind the one in its hand — restores the
+   original strict-priority rule. `widthGate.claim` carries the ring
+   depth (`len(dispenser.ch) > 0`) into the waiter.
+
+Demand is registered, not inferred: a decode worker calls
+`decodeStallBegin`/`decodeStallEnd` around its park (`scan.DecodeAdmission`
+on the scan side, direct on the WSHF scanner), so a pool with no decoder
+waiting holds nothing back and a decode-free fragment pays nothing.
+
+No-wedge: `reserve ≤ capacity−1`, the holdback never exceeds registered
+demand, every fragment keeps its token-free baseline slot, and both
+decode-ahead pipelines keep their token-exempt delivery-cursor group — so
+each side always has a runnable goroutine that needs nothing from the
+pool. The pool never calls back into a reader, so the §2.2 lock order
+(reader → pool) is unchanged and no notification bridge is needed: a
+held-back token is taken by the stalled decoder on its next condvar
+wake, which the cursor exemption guarantees (`undelivered > 0` on every
+token-wait path, so a delivery broadcast always arrives).
+
+Kill switch: `WADJET_DECODE_ADMISSION=0` (registered in
+`internal/optswitch`) restores plain `TryAcquire` behind a strict
+consumer FIFO. Markers: `cpu token admission stats (final)` —
+`decode_admits`, **`decode_bypasses`** (decode tokens granted while
+consumers were queued: the admissions the old policy refused, the direct
+measure of the fix), `decode_holdbacks` — read against scan/shuffle
+`token_stall_ms` and the fragment line's `consumer_dry_wait_ms` /
+`width_wait_ms` / `width_fed_parks` / `width_dry_parks`.
+
 ## 3. Alternatives rejected
 
 - **N producer goroutines over disjoint file slices** (the other option
@@ -273,7 +333,13 @@ staging, not admission.
   neither the pool nor the cursor rule. Revisited after the donation
   window for the deep-starvation mode: still rejected — §2.3 reaches
   that mode through the consumers' own queue positions with none of
-  the pool/reader notification bridging this shape requires.
+  the pool/reader notification bridging this shape requires. Still
+  rejected after the 2026-08-22 window, and §2.4 is not it: the pool
+  learns decode's DEMAND (a counter around the existing park) and
+  changes who a release may go to, but the scanner never joins the FIFO,
+  never queues behind another fragment's consumers, and never waits on
+  the pool — so no notification bridge exists to invert locks with, and
+  the cursor exemption is untouched.
 - **Out-of-order delivery**: the dispenser doesn't need order, but
   in-order forfeits nothing here (the window bounds occupancy either
   way), preserves `Delivered()`/truncation-position semantics for the

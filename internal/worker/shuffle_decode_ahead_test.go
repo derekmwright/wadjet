@@ -658,9 +658,13 @@ func TestShuffleDecodeAhead_ClaimDonationEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tokens := newCPUTokens(1)
-	if got := tokens.TryAcquire(1); got != 1 { // another fragment holds the pool
-		t.Fatalf("TryAcquire = %d, want 1", got)
+	// Capacity 3, all held by other fragments. It must exceed the decode
+	// holdback: with a scanner registered token-stalled the pool keeps one
+	// released token back for it (cpu_tokens.go), so a claim grant — the
+	// thing this test is about — only lands once a SECOND token frees.
+	tokens := newCPUTokens(3)
+	if got := tokens.TryAcquire(3); got != 3 { // other fragments hold the pool
+		t.Fatalf("TryAcquire = %d, want 3", got)
 	}
 	e := &Executor{store: store, spillDir: t.TempDir(), shuffleDecodeAhead: true, cpuTokens: tokens}
 	src := newCachedFileStreamSource(e, "", bucket, []string{key})
@@ -681,13 +685,13 @@ func TestShuffleDecodeAhead_ClaimDonationEndToEnd(t *testing.T) {
 	gate := newWidthGate(tokens)
 	gate.donor = ms
 
-	base, _ := gate.claim(ctx) // the baseline consumer
+	base, _ := gate.claim(ctx, false) // the baseline consumer
 	if base != slotBaseline {
 		t.Fatalf("claim = %v, want baseline", base)
 	}
 	done := make(chan widthSlot, 1)
 	go func() { // the slot-less deep-starvation waiter
-		s, err := gate.claim(ctx)
+		s, err := gate.claim(ctx, false)
 		if err != nil {
 			t.Errorf("claim: %v", err)
 		}
@@ -695,7 +699,8 @@ func TestShuffleDecodeAhead_ClaimDonationEndToEnd(t *testing.T) {
 	}()
 	time.Sleep(20 * time.Millisecond) // let the claim park FIFO
 
-	tokens.Release(1) // the other fragment finishes: grant lands on the waiter
+	tokens.Release(2) // other fragments finish: one is held back for the
+	// stalled scanner, the second grants the waiter
 	deadline := time.Now().Add(5 * time.Second)
 	for e.shuffleDecodeAheadStats.donated.Load() != 1 {
 		if time.Now().After(deadline) {
@@ -729,10 +734,14 @@ func TestShuffleDecodeAhead_ClaimDonationEndToEnd(t *testing.T) {
 	}
 	gate.yield(slotToken)
 	gate.yield(base)
+	tokens.Release(1) // the last other-fragment holder finishes
 	if err := src.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if got := tokens.InUse(); got != 0 {
 		t.Fatalf("InUse = %d, want 0 (all tokens must drain back)", got)
+	}
+	if got := tokens.decodeInUse(); got != 0 {
+		t.Fatalf("decodeInUse = %d, want 0 (donated token must drain as decode class)", got)
 	}
 }

@@ -40,7 +40,7 @@ func writePrefetchFixture(t *testing.T, store *objstore.MemStore, bucket string,
 }
 
 // drainValSum reads the source to exhaustion and sums the "val" column.
-func drainValSum(t *testing.T, ctx context.Context, src *cachedFileStreamSource) (sum int64, rows int) {
+func drainValSum(t testing.TB, ctx context.Context, src *cachedFileStreamSource) (sum int64, rows int) {
 	t.Helper()
 	valIdx := -1
 	for {

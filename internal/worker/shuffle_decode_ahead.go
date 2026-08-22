@@ -291,7 +291,7 @@ func (d *shuffleDecodeAhead) scan() {
 			// Already in delivery; a worker will never see it. Resolve it
 			// here so a concurrent next() cannot wait forever on done.
 			if slot.token {
-				d.tokens.Release(1)
+				d.tokens.releaseDecode(1)
 				slot.token = false
 			}
 			slot.err = fmt.Errorf("shuffle decode-ahead: reader closed")
@@ -367,7 +367,7 @@ func (d *shuffleDecodeAhead) scanIndexed() {
 			// Already in delivery; a worker will never see it. Resolve it
 			// here so a concurrent next() cannot wait forever on done.
 			if slot.token {
-				d.tokens.Release(1)
+				d.tokens.releaseDecode(1)
 				slot.token = false
 			}
 			slot.err = fmt.Errorf("shuffle decode-ahead: reader closed")
@@ -427,11 +427,18 @@ func (d *shuffleDecodeAhead) admit(est int64) (token, ok bool) {
 			if d.donated > 0 {
 				d.donated--
 				token = true
-			} else if d.tokens.TryAcquire(1) == 1 {
+			} else if d.tokens.tryAcquireDecode(1) == 1 {
 				token = true
 			} else {
+				// tokenStalled arms §2.2 donation; decodeStallBegin
+				// registers the same stall with the POOL, which is what
+				// lets a release be held back for this scanner instead of
+				// going to a morsel consumer that is waiting on the chunk
+				// this scanner would decode (cpu_tokens.go).
 				d.tokenStalled = true
+				d.tokens.decodeStallBegin()
 				d.timedWait(&d.stats.tokenStallNs)
+				d.tokens.decodeStallEnd()
 				d.tokenStalled = false
 				continue
 			}
@@ -454,6 +461,10 @@ func (d *shuffleDecodeAhead) tryDonate() bool {
 	if d.stopped || !d.tokenStalled {
 		return false
 	}
+	// The donor charged this token as consumer-class; the scanner releases
+	// it with releaseDecode like any token it acquired itself, so the class
+	// moves with the ownership.
+	d.tokens.adoptDecode(1)
 	d.donated++
 	d.stats.donated.Add(1)
 	d.cond.Broadcast()
@@ -465,7 +476,7 @@ func (d *shuffleDecodeAhead) tryDonate() bool {
 // never calls back into the reader.
 func (d *shuffleDecodeAhead) flushDonatedLocked() {
 	if d.donated > 0 {
-		d.tokens.Release(d.donated)
+		d.tokens.releaseDecode(d.donated)
 		d.donated = 0
 	}
 }
@@ -505,7 +516,7 @@ func (d *shuffleDecodeAhead) worker() {
 				slot.buf = nil
 			}
 			if slot.token {
-				d.tokens.Release(1)
+				d.tokens.releaseDecode(1)
 				slot.token = false
 			}
 			slot.b, slot.err = b, err
@@ -606,7 +617,7 @@ func (d *shuffleDecodeAhead) fail(err error) {
 // retireUndispatched releases a slot that reached neither queue fully.
 func (d *shuffleDecodeAhead) retireUndispatched(slot *shuffleDecodeSlot) {
 	if slot.token {
-		d.tokens.Release(1)
+		d.tokens.releaseDecode(1)
 		slot.token = false
 	}
 	slot.err = fmt.Errorf("shuffle decode-ahead: reader closed")
@@ -631,7 +642,7 @@ func (d *shuffleDecodeAhead) stop() {
 				return
 			}
 			if slot.token {
-				d.tokens.Release(1)
+				d.tokens.releaseDecode(1)
 				slot.token = false
 			}
 		default:

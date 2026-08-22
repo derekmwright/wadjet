@@ -1089,6 +1089,16 @@ func (e *Executor) morselFragmentWorkers(task distributed.Task, ops []exec.Unary
 	if morselWidthYield {
 		// The gate admits active consumers against the pool per morsel, so
 		// baseline + capacity is the reachable width; more clones can never run.
+		//
+		// Sizing target from the producer's observed FEED RATE instead (the
+		// SF100 2026-08-22 §7.4 second-order item — fragments measured an
+		// effective width of 2.88 of 15) was considered and declined: under
+		// the work-conserving gate an idle consumer holds nothing, so token
+		// demand is per ACTIVE morsel, not per consumer. An over-wide fan
+		// costs k−1 cloned op chains and parked goroutines, not pool
+		// pressure; what starved decode was the ADMISSION rule, and that is
+		// fixed in cpu_tokens.go. Revisit only if clone footprint, not
+		// admission, shows up in a profile.
 		if bound := 1 + int(e.cpuTokens.Capacity()); target > bound {
 			target = bound
 		}
@@ -1148,7 +1158,11 @@ func consumeMorsels(ctx context.Context, d *morselDispenser, gate *widthGate, pr
 			return nil
 		}
 		if gate != nil && slot == slotNone {
-			s, err := gate.claim(ctx)
+			// len(d.ch) is the ring's depth BEHIND the morsel in hand: it
+			// tells the pool whether feeding this consumer can buy
+			// throughput (fed) or whether only a decoder can (dry). See
+			// cpu_tokens.go's two admission rules.
+			s, err := gate.claim(ctx, len(d.ch) > 0)
 			if err != nil {
 				m.retire()
 				return err

@@ -51,6 +51,7 @@ type DecodeAheadIter struct {
 	pressure       func() bool
 	pressureStrict bool
 	tokens         TokenPool
+	tokenAdmit     DecodeAdmission // non-nil when tokens registers stall demand
 	advise         func(off, n int64)
 	advisedIdx     int // next row-group index to I/O-advise (win.mu)
 	cache          *DecodedChunkCache
@@ -194,6 +195,22 @@ type TokenPool interface {
 	Release(n int)
 }
 
+// DecodeAdmission is the optional half of TokenPool: a pool that
+// implements it is told when a decode worker parks on a failed
+// acquisition and when it stops waiting, so the pool can hold a floor of
+// tokens back from its own consumer queue instead of granting every
+// release around a decoder that is the only thing able to refill that
+// queue. Without it decode is a non-blocking second-class caller whose
+// demand is invisible — the closed loop the worker pool's admission
+// policy documents (internal/worker/cpu_tokens.go). Begin/End are always
+// paired and must be safe for concurrent use; they are called with the
+// window lock HELD, so an implementation must never call back into the
+// iterator.
+type DecodeAdmission interface {
+	DecodeStallBegin()
+	DecodeStallEnd()
+}
+
 // WindowLedger is the memory-budget seam shared with the caller's task
 // ledger (the worker's shared pool tracker — *memory.Tracker satisfies
 // it directly). Decoded-but-undelivered window bytes are charged here so
@@ -314,6 +331,9 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 		tokens:         opts.Tokens,
 		advise:         opts.Advise,
 		cache:          opts.Cache,
+	}
+	if a, ok := opts.Tokens.(DecodeAdmission); ok {
+		it.tokenAdmit = a
 	}
 	if it.win == nil {
 		it.win = NewDecodeWindow(opts.WindowBytes)
@@ -549,7 +569,20 @@ func (it *DecodeAheadIter) decodeLoop() {
 						it.win.ledger.Release(est)
 					}
 					it.tokenStalls.Add(1)
+					// Register the stall with the pool for the length of
+					// the park: an unregistered decode worker is demand
+					// the pool cannot see, so every release goes to a
+					// queued morsel consumer that is itself waiting for
+					// this decode. Retracted before the retry so a worker
+					// that moves on to a window/pressure stall stops
+					// holding tokens back.
+					if it.tokenAdmit != nil {
+						it.tokenAdmit.DecodeStallBegin()
+					}
 					it.timedWait(&it.tokenStallNs)
+					if it.tokenAdmit != nil {
+						it.tokenAdmit.DecodeStallEnd()
+					}
 					continue
 				}
 				holdsToken = true

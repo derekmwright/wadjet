@@ -73,11 +73,16 @@ type widthGate struct {
 	// at construction.
 	baseline chan struct{}
 
-	// Stats for the fragment-completion log line.
+	// Stats for the fragment-completion log line. fedParks/dryParks split
+	// the FIFO parks by morsel-ring occupancy at claim time — the
+	// discriminator the pool's admission policy runs on, so the next SF100
+	// run can read the regime straight off the fragment line.
 	claimWaitNs    atomic.Int64
 	yields         atomic.Int64
 	donations      atomic.Int64
 	claimDonations atomic.Int64
+	fedParks       atomic.Int64
+	dryParks       atomic.Int64
 }
 
 func newWidthGate(tokens *cpuTokens) *widthGate {
@@ -91,6 +96,13 @@ func newWidthGate(tokens *cpuTokens) *widthGate {
 // The caller holds an admitted morsel; see cpuTokens.enqueueWaiter for why
 // parking here cannot deadlock.
 //
+// fed is the morsel ring's occupancy behind the morsel in hand
+// (len(dispenser.ch) > 0). It rides into the FIFO because the pool's
+// admission policy turns on it: a fed waiter keeps strict priority over
+// decode-ahead (the original rule, in the regime it was written for), a dry
+// one does not — feeding a consumer whose ring is empty cannot buy
+// throughput until a decoder refills it (cpu_tokens.go).
+//
 // Claim-path donation (§2.3): a granted waiter whose own fragment's scanner
 // is at that moment parked token-stalled cedes its grant to the scanner and
 // re-enqueues, at most once per claim — the second grant always sticks, so
@@ -100,7 +112,7 @@ func newWidthGate(tokens *cpuTokens) *widthGate {
 // going dry) never occurs. The redirected token never re-enters the pool:
 // grant → tryDonateToken → chunk decode → worker release, the same bounded
 // ownership chain as a yield donation.
-func (g *widthGate) claim(ctx context.Context) (widthSlot, error) {
+func (g *widthGate) claim(ctx context.Context, fed bool) (widthSlot, error) {
 	select {
 	case <-g.baseline:
 		return slotBaseline, nil
@@ -111,9 +123,14 @@ func (g *widthGate) claim(ctx context.Context) (widthSlot, error) {
 	}
 	t0 := time.Now()
 	defer func() { g.claimWaitNs.Add(time.Since(t0).Nanoseconds()) }()
+	if fed {
+		g.fedParks.Add(1)
+	} else {
+		g.dryParks.Add(1)
+	}
 	redirected := false
 	for {
-		w := g.tokens.enqueueWaiter()
+		w := g.tokens.enqueueWaiter(fed)
 		select {
 		case <-g.baseline:
 			g.tokens.cancelWaiter(w)
@@ -161,5 +178,7 @@ func (g *widthGate) logAttrs() []any {
 		"width_yields", g.yields.Load(),
 		"width_donations", g.donations.Load(),
 		"width_claim_donations", g.claimDonations.Load(),
+		"width_fed_parks", g.fedParks.Load(),
+		"width_dry_parks", g.dryParks.Load(),
 	}
 }

@@ -287,6 +287,17 @@ func (e *Executor) ShuffleDecodeAheadStats() (chunks, windowFullNs, tokenNs, pre
 		s.preadNs.Load(), s.indexedFiles.Load()
 }
 
+// CPUTokenAdmissionStats reports the worker pool's decode-class admission
+// counters: pool capacity, the reserved decode floor, decode-class tokens
+// granted, how many of those were granted while morsel consumers were
+// queued (the admissions the old strict-FIFO policy refused — the direct
+// measure of the fix), and how often a release was held back to keep the
+// floor reachable. Read alongside scan/shuffle token_stall_ms, which is
+// what these are meant to move.
+func (e *Executor) CPUTokenAdmissionStats() (capacity, reserve, admits, bypasses, holdbacks int64) {
+	return e.cpuTokens.admissionStats()
+}
+
 // foldScanDecodeAheadQueryStats adds one closed iterator's counters to
 // the per-query accumulator. queryID may be empty (embedded callers);
 // those fold under the "-" bucket rather than being dropped.

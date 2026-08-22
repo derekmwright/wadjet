@@ -18,7 +18,7 @@ import (
 // groups of rowsPerGroup rows each ("id", "val" int64) and returns the
 // keys and expected val-sum. Small row groups so decode-ahead has real
 // in-file parallelism to exercise.
-func writeMultiGroupFixture(t *testing.T, store objstore.Store, bucket string, n, groupsPerFile, rowsPerGroup int) ([]string, int64) {
+func writeMultiGroupFixture(t testing.TB, store objstore.Store, bucket string, n, groupsPerFile, rowsPerGroup int) ([]string, int64) {
 	t.Helper()
 	if err := store.MakeBucket(context.Background(), bucket); err != nil {
 		t.Fatal(err)

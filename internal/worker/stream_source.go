@@ -1210,8 +1210,12 @@ func (s *cachedFileStreamSource) finishParquetState(p *pendingParquet, filePath 
 		opts := scan.DecodeAheadOpts{Window: s.decodeWin, Pressure: scanDecodeAheadPressure,
 			PressureStrict: scanDecodeAheadStrictPressure(),
 			Cache:          s.executor.decodedCache}
+		// The adapter, not the pool itself: decode acquires, releases AND
+		// registers its stalls as a first-class token class, so a queued
+		// morsel consumer can no longer shut the decoder that feeds it out
+		// of the pool (cpu_tokens.go).
 		if s.executor.cpuTokens != nil {
-			opts.Tokens = s.executor.cpuTokens
+			opts.Tokens = decodeTokenPool{s.executor.cpuTokens}
 		}
 		// Row-group I/O-ahead: on the pread path, FADV_WILLNEED on the fd
 		// starts kernel readahead so the staging pread copies from page
