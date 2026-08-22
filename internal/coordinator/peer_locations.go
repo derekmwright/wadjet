@@ -219,6 +219,22 @@ func (r *peerFileRegistry) TokenFor(queryID string) string {
 	return tok
 }
 
+// ExistingTokenFor returns the already-minted fetch token for a query ID,
+// or "" — never mints. The coordinator's own peer reads (stage_read.go)
+// need the token the WORKERS recorded; a freshly minted one would match
+// nothing and turn every fetch into a PermissionDenied round trip.
+func (r *peerFileRegistry) ExistingTokenFor(queryID string) string {
+	if r == nil || queryID == "" {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t, ok := r.tokens[queryID]; ok {
+		return t.token
+	}
+	return ""
+}
+
 // CleanupQuery drops the query's file locations and token. Called from
 // cleanupQuery for every terminal query.
 func (r *peerFileRegistry) CleanupQuery(queryID string) {
@@ -335,7 +351,12 @@ func (c *Coordinator) annotateTaskPeerLocations(t *distributed.Task) {
 
 // stageReadByCoordinator reports whether the coordinator itself reads the
 // given stage's outputs (scalar-subquery producer registered by
-// executeStageDAG). Those stages' uploads must stay eager.
+// executeStageDAG). Those stages' uploads must stay eager EVEN THOUGH the
+// coordinator now has a peer tier (stage_read.go): the peer copy is an
+// accelerator whose producer can die, and unlike a worker consumer the
+// coordinator cannot be retried onto another node — losing the only copy
+// of a scalar producer's output fails the query. Eager keeps the durable
+// fallthrough underneath the fast path in all three durability modes.
 func (c *Coordinator) stageReadByCoordinator(root, stageID string) bool {
 	if stageID == "" {
 		return false
@@ -401,16 +422,18 @@ func (c *Coordinator) classifyFatalResult(r distributed.ResultNotification) bool
 }
 
 // fetchStageOutputData reads one stage-output object for coordinator-side
-// consumption (scalar-subquery extraction). With streaming exchange off it
-// is a plain fetchResultData. With it on, a miss may just mean the
-// producer's Phase-B background upload hasn't landed — bounded re-poll,
-// with a fast input-lost exit when the producer is dead and the key never
-// went durable (the coordinator has no peer tier; S3 is its only read
-// path).
-func (c *Coordinator) fetchStageOutputData(ctx context.Context, path string) ([]byte, error) {
-	data, err := c.fetchResultData(ctx, "", path)
+// consumption (scalar-subquery extraction) and reports the tier that served
+// it. The tiers themselves live in fetchResultDataTiered (stage_read.go):
+// NATS KV, then the producing worker's local copy, then the durable store.
+//
+// What remains here is the durable-tier backstop. Every tier having missed
+// means the producer's Phase-B background upload hasn't landed AND its
+// local copy is unreachable — bounded re-poll, with a fast input-lost exit
+// when the producer is dead and the key never went durable.
+func (c *Coordinator) fetchStageOutputData(ctx context.Context, path string) ([]byte, coordReadTier, error) {
+	data, tier, err := c.fetchResultDataTiered(ctx, "", path)
 	if err == nil || c.peerFiles == nil {
-		return data, err
+		return data, tier, err
 	}
 	// Belt-and-braces under lazy durability: scalar-producer stages are
 	// annotated eager via coordReadStages, but if this key's upload was
@@ -424,7 +447,7 @@ func (c *Coordinator) fetchStageOutputData(ctx context.Context, path string) ([]
 			// re-poll running — its upload may still land within this
 			// poll's budget (docs/design/reap-grace.md).
 			if producer := c.peerFiles.Lookup(path); producer != "" && !c.workers.MayRecover(producer) {
-				return nil, fmt.Errorf("%s (%s): producer dead before upload landed", inputLostMarker, path)
+				return nil, coordReadS3, fmt.Errorf("%s (%s): producer dead before upload landed", inputLostMarker, path)
 			}
 		}
 		if time.Now().After(deadline) {
@@ -434,18 +457,18 @@ func (c *Coordinator) fetchStageOutputData(ctx context.Context, path string) ([]
 			// an opaque fetch failure.
 			if !c.peerFiles.IsDurable(path) {
 				if producer := c.peerFiles.Lookup(path); producer != "" && !c.workers.IsAlive(producer) {
-					return nil, fmt.Errorf("%s (%s): producer dead before upload landed", inputLostMarker, path)
+					return nil, coordReadS3, fmt.Errorf("%s (%s): producer dead before upload landed", inputLostMarker, path)
 				}
 			}
-			return nil, err
+			return nil, coordReadS3, err
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, coordReadS3, ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
-		if data, err = c.fetchResultData(ctx, "", path); err == nil {
-			return data, nil
+		if data, tier, err = c.fetchResultDataTiered(ctx, "", path); err == nil {
+			return data, tier, nil
 		}
 	}
 }

@@ -267,10 +267,22 @@ type Coordinator struct {
 	// coordReadStages maps root query ID → set of stage IDs whose outputs
 	// the coordinator reads directly (scalar-subquery producers,
 	// fetchStageOutputData). Those stages' tasks keep eager uploads under
-	// any ShuffleDurability policy: the coordinator has no peer tier, so
-	// S3 is its only read path. Registered by executeStageDAG before
-	// dispatch; dropped in cleanupQuery.
+	// any ShuffleDurability policy: the coordinator's peer tier
+	// (stage_read.go) is an accelerator, not a durability guarantee — if
+	// the producer dies before it can serve, S3 must still hold the copy.
+	// Registered by executeStageDAG before dispatch; dropped in
+	// cleanupQuery.
 	coordReadStages sync.Map
+
+	// peerClient dials worker PeerExchange endpoints for coordinator-side
+	// stage-output reads (stage_read.go). Non-nil only with
+	// Config.StreamingExchange — without the hint registry and the fetch
+	// tokens there is nothing to dial. Connections are lazy.
+	peerClient *dataplane.PeerClient
+	// Per-tier ledger for coordinator-side stage reads; peerMisses counts
+	// attempted peer fetches that fell through to the durable copy.
+	stageReadTiers      [coordReadTierCount]atomic.Int64
+	stageReadPeerMisses atomic.Int64
 
 	// Eager consumer dispatch (docs/design/eager-consumer-dispatch.md,
 	// eager_feed.go). eagerFeeds maps eagerFeedKey → feed, created lazily
@@ -329,6 +341,11 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 	// durability from worker UploadComplete notifications.
 	if cfg.StreamingExchange {
 		c.peerFiles = newPeerFileRegistry()
+		// Coordinator-side peer reads (stage_read.go). Plaintext, matching
+		// the worker's own outbound client and the peer server's default
+		// intra-cluster posture; grpc.NewClient is lazy, so an unused
+		// client costs one map.
+		c.peerClient = dataplane.NewPeerClient(nil)
 		// Reap grace: the reaper defers reaping a silent worker while it
 		// holds the only copy of stage outputs (pending background
 		// uploads), bounded by the grace window. Wired here, before any
@@ -1447,24 +1464,14 @@ func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []s
 	return batches, columns, totalRows
 }
 
-// fetchResultData retrieves a result blob from NATS KV or S3.
-// Used by probe-split merge when results exceed the inline threshold.
+// fetchResultData retrieves a result blob through the tiered
+// coordinator-side read path (NATS KV → producing worker → S3, see
+// stage_read.go). Used by readFinalResults / probe-split merge when results
+// exceed the inline threshold, and — via fetchStageOutputData — by
+// scalar-subquery extraction.
 func (c *Coordinator) fetchResultData(ctx context.Context, queryID, path string) ([]byte, error) {
-	// Try NATS KV first (fastest)
-	if c.resultKV != nil {
-		entry, err := c.resultKV.Get(ctx, natsKVKey(path))
-		if err == nil {
-			return entry.Value(), nil
-		}
-	}
-	// Fall back to S3
-	store := c.catalog.Store()
-	reader, _, err := store.Get(ctx, c.config.ResultBucket, path)
-	if err != nil {
-		return nil, fmt.Errorf("fetching result from S3: %w", err)
-	}
-	defer reader.Close()
-	return io.ReadAll(reader)
+	data, _, err := c.fetchResultDataTiered(ctx, queryID, path)
+	return data, err
 }
 
 // mergeProbePartials re-aggregates partial results from probe-split pipeline

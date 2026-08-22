@@ -72,11 +72,18 @@ root is a no-op.
 ## What stays eager regardless
 
 **Scalar-subquery producer stages.** The coordinator reads those outputs
-itself (`substituteScalarDependencies` → `fetchStageOutputData`) and has no
-peer tier — S3 (with the KV fast path underneath `fetchResultData`) is its
-only read path. `executeStageDAG` registers every stage ID appearing in any
-stage's `ScalarDependencies` under the root (`Coordinator.coordReadStages`,
-dropped in `cleanupQuery`); the annotator exempts them from the policy.
+itself (`substituteScalarDependencies` → `fetchStageOutputData`).
+`executeStageDAG` registers every stage ID appearing in any stage's
+`ScalarDependencies` under the root (`Coordinator.coordReadStages`, dropped
+in `cleanupQuery`); the annotator exempts them from the policy.
+
+Since 2026-08-22 the coordinator *does* have a peer tier
+(`docs/design/coordinator-stage-reads.md`), and the exemption stays anyway
+— for a different reason. The peer copy is an accelerator whose producer
+can die, and unlike a worker consumer the coordinator cannot be retried
+onto another node: losing the only copy of a scalar producer's output fails
+the query. Eager keeps the durable fallthrough underneath the fast path in
+all three modes.
 
 **Adoption-failure sync fallback.** When `LocalStageCache.Adopt` fails
 (cross-device rename etc.) the local file dies with the task spill dir and

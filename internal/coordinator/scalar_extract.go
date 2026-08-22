@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
@@ -29,7 +30,10 @@ import (
 // Used by executeStageDAG to late-bind CTE-referencing scalar subqueries
 // so both the filter-carrying stage and the subquery share the same
 // distributed accumulation path — see Stage.ScalarDependencies.
-func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOutput, projection []physical.OutputRename) (string, error) {
+// The returned tier names which copy of the producer's output answered
+// (kv / peer / s3, or none for a file-less producer) — the grep handle for
+// the substitution barrier SF100 window 4 §7 measured.
+func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOutput, projection []physical.OutputRename) (string, coordReadTier, error) {
 	files := flattenStageFiles(out)
 	if len(files) == 0 {
 		// Empty producer output is a legitimate SQL state, not a protocol
@@ -39,33 +43,35 @@ func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOu
 		// producers never reach here: their fragments emit the identity
 		// row (COUNT=0) even over an empty source, so their output is
 		// never file-less (worker executeFragment empty-source exemption).
-		return "null", nil
+		return "null", coordReadNone, nil
 	}
 	// Singleton producer: a single WSHF file with one row. If multiple
 	// files surfaced (e.g. a zero-row shard plus a one-row shard), scan
 	// until we find the first non-empty row.
+	tier := coordReadNone
 	for _, path := range files {
-		data, err := c.fetchStageOutputData(ctx, path)
+		data, t, err := c.fetchStageOutputData(ctx, path)
+		tier = t
 		if err != nil {
-			return "", fmt.Errorf("fetch %s: %w", path, err)
+			return "", tier, fmt.Errorf("fetch %s: %w", path, err)
 		}
 		decoded, err := decompressShuffleData(data)
 		if err != nil {
-			return "", fmt.Errorf("decompress %s: %w", path, err)
+			return "", tier, fmt.Errorf("decompress %s: %w", path, err)
 		}
 		if !(len(decoded) >= 4 && decoded[0] == 'W' && decoded[1] == 'S' && decoded[2] == 'H' && decoded[3] == 'F') {
-			return "", fmt.Errorf("producer output %s is not WSHF", path)
+			return "", tier, fmt.Errorf("producer output %s is not WSHF", path)
 		}
 		batches, err := readShuffleBatches(decoded)
 		if err != nil {
-			return "", fmt.Errorf("read shuffle %s: %w", path, err)
+			return "", tier, fmt.Errorf("read shuffle %s: %w", path, err)
 		}
 		lit, ok := scalarFromBatches(batches, projection)
 		if ok {
-			return lit, nil
+			return lit, tier, nil
 		}
 	}
-	return "", fmt.Errorf("producer stage output has no rows")
+	return "", tier, fmt.Errorf("producer stage output has no rows")
 }
 
 // scalarFromBatches extracts the scalar value from the producer's output
@@ -238,18 +244,24 @@ func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage ph
 		if ps, hasStage := producerStages[producerID]; hasStage {
 			projection = ps.OutputRenames
 		}
-		lit, err := c.readScalarFromStageOutput(ctx, out, projection)
+		start := time.Now()
+		lit, tier, err := c.readScalarFromStageOutput(ctx, out, projection)
 		if err != nil {
 			return stage, fmt.Errorf("extracting scalar for %s: %w", placeholder, err)
 		}
 		// One line per placeholder per query: the substituted literal is
 		// otherwise invisible anywhere (dispatched predicates are never
 		// logged), which made #272 — a wrong Q11 threshold at SF100 —
-		// undiagnosable from run artifacts.
+		// undiagnosable from run artifacts. tier/wait_ms make the OTHER
+		// half greppable: this read sits on the critical path with the
+		// whole cluster idle behind it (SF100 window 4 §7 measured
+		// 1.5–2.1 s per steady suite run across the three sites), so which
+		// copy answered and how long it took is the lever's own telemetry.
 		c.logger.Info("scalar substitution",
 			"stage_id", stage.ID, "placeholder", placeholder,
 			"producer", producerID, "producer_files", len(flattenStageFiles(out)),
-			"projection_exprs", len(projection), "literal", lit)
+			"projection_exprs", len(projection), "literal", lit,
+			"tier", tier.String(), "wait_ms", time.Since(start).Milliseconds())
 		literals[":"+placeholder] = lit
 	}
 	// Deep-copy mutable slice / map fields before rewrite.

@@ -168,6 +168,34 @@ dispatcher is fine; a dispatcher that invents a third home for input keys
 has to teach the annotator about it or its consumers lose the peer tier
 silently.
 
+### The coordinator is a consumer too
+
+Two coordinator-side reads pull stage outputs directly, with no task and
+therefore no annotator involved: `substituteScalarDependencies` →
+`readScalarFromStageOutput` → `fetchStageOutputData` (scalar-subquery
+producers) and `readFinalResults` → `fetchResultData` (probe-split merge
+partials, oversized final-stage files). Both now go through
+`fetchResultDataTiered` (`coordinator/stage_read.go`): **NATS KV → the
+producing worker's local copy → S3**, with `fetchStageOutputData`'s bounded
+re-poll still behind the durable tier.
+
+The peer tier resolves the producer from the same registry the annotator
+uses (`peerFileRegistry.Lookup` → `WorkerRegistry.PeerAddr`) and presents
+the query's already-minted fetch token via
+`peerFileRegistry.ExistingTokenFor` — which never mints, because a token
+the workers never saw buys nothing but a `PermissionDenied`. Kill switch
+`WADJET_COORD_PEER_READS=0`; per-read tier and wall land on the
+`scalar substitution` log line as `tier=` / `wait_ms=`, and
+`Coordinator.StageReadTierCounts()` aggregates them. Full argument
+(including why scalar producers still upload eagerly in every durability
+mode) in `docs/design/coordinator-stage-reads.md`.
+
+Before this, the coordinator's only read path was S3, and SF100 window 4 §7
+measured the cost: 1.5–2.1 s of **whole-cluster idle per steady suite run**
+across the three substitution sites (Q11, Q15, Q22), the cluster blocked on
+an 80-byte object whose producer had it on local NVMe. Same shape as the
+`Operators[].InputFiles` gap above, one consumer further out.
+
 ## Outer joins: the rows an empty side still owes
 
 An outer join's defining rows are the ones its data does NOT produce — the
