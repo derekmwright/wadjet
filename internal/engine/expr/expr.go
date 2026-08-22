@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -91,38 +92,54 @@ type VecExpr interface {
 
 // ColRef reads a column value from the batch.
 // Caches the column index and type after first resolution for zero-allocation
-// reads on numeric types. The cache is guarded by sync.Once so concurrent
-// callers (parallel pipeline workers sharing this *ColRef via captured
-// expression closures) don't race on the resolution writes.
+// reads on numeric types. Parallel pipeline workers share one *ColRef through
+// the captured expression closures, so the resolution writes are published
+// under a lock and read behind resolved.
 type ColRef struct {
-	Name        string
-	resolveOnce sync.Once
+	Name string
+	// resolved publishes idx/typ/structField: stored last under resolveMu,
+	// and the only thing every accessor reads before using them. Every typed
+	// accessor opens with resolve(), so this guard sits in the innermost row
+	// loop of every expression — an inlined acquire load, where sync.Once.Do
+	// cost a call plus a closure build per row.
+	resolved    atomic.Bool
+	resolveMu   sync.Mutex
 	idx         int
 	typ         batch.TypeID
 	structField string // for ROW field access (e.g., "person.name" → structField="name")
 }
 
-// resolve performs first-time column lookup. Idempotent under sync.Once.
+// resolve performs first-time column lookup. Idempotent.
 func (e *ColRef) resolve(b *batch.RecordBatch) {
-	e.resolveOnce.Do(func() {
-		e.idx = b.ColumnIndex(e.Name)
-		if e.idx < 0 && strings.Contains(e.Name, ".") {
-			parts := strings.SplitN(e.Name, ".", 2)
-			// Try unqualified (strip table prefix)
-			e.idx = b.ColumnIndex(parts[1])
-			if e.idx < 0 {
-				// Try as struct field access: parts[0] is a ROW column, parts[1] is field name
-				parentIdx := b.ColumnIndex(parts[0])
-				if parentIdx >= 0 && b.Columns[parentIdx].Type == batch.TypeRow {
-					e.idx = parentIdx
-					e.structField = parts[1]
-				}
+	if !e.resolved.Load() {
+		e.resolveSlow(b)
+	}
+}
+
+func (e *ColRef) resolveSlow(b *batch.RecordBatch) {
+	e.resolveMu.Lock()
+	defer e.resolveMu.Unlock()
+	if e.resolved.Load() {
+		return
+	}
+	e.idx = b.ColumnIndex(e.Name)
+	if e.idx < 0 && strings.Contains(e.Name, ".") {
+		parts := strings.SplitN(e.Name, ".", 2)
+		// Try unqualified (strip table prefix)
+		e.idx = b.ColumnIndex(parts[1])
+		if e.idx < 0 {
+			// Try as struct field access: parts[0] is a ROW column, parts[1] is field name
+			parentIdx := b.ColumnIndex(parts[0])
+			if parentIdx >= 0 && b.Columns[parentIdx].Type == batch.TypeRow {
+				e.idx = parentIdx
+				e.structField = parts[1]
 			}
 		}
-		if e.idx >= 0 {
-			e.typ = b.Columns[e.idx].Type
-		}
-	})
+	}
+	if e.idx >= 0 {
+		e.typ = b.Columns[e.idx].Type
+	}
+	e.resolved.Store(true)
 }
 
 func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {

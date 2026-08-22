@@ -3,6 +3,7 @@ package expr
 import (
 	"math"
 	"sync"
+	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/optswitch"
@@ -57,9 +58,19 @@ type BinOpNumeric struct {
 	Left, Right numericOperand
 	Op          string
 
-	modeOnce sync.Once
-	isInt    bool
-	flt      *BinOpFloat64 // delegate for float mode (keeps its typed fast path)
+	// modeReady publishes every field below it: set last under modeMu, read
+	// first (and alone) by the evaluators. The mode cannot move to compile
+	// time — it is read off the operands' resolved COLUMN types, which do
+	// not exist until a batch arrives — so the row loop pays a guard either
+	// way. This one is an acquire load the compiler inlines into the three
+	// Eval entry points; sync.Once.Do costs a call plus a closure build at
+	// the same place and showed up as its own frame in the SF100 worker
+	// profile (2026-08-21).
+	modeReady atomic.Bool
+	modeMu    sync.Mutex
+	isInt     bool
+	opCode    arithOp       // e.Op as an opcode: no per-row string compare
+	flt       *BinOpFloat64 // delegate for float mode (keeps its typed fast path)
 	// divTrunc marks a `/` whose operands are integer-typed while the node
 	// resolved to float mode (the int-arith kill switch is off): the float
 	// quotient is truncated toward zero so integer-division SEMANTICS hold
@@ -123,18 +134,32 @@ func temporalColOperand(e Expr, b *batch.RecordBatch) bool {
 }
 
 func (e *BinOpNumeric) resolveMode(b *batch.RecordBatch) {
-	e.modeOnce.Do(func() {
-		e.isInt = intArithToggle.On() && operandIsInt(e.Left, b) && operandIsInt(e.Right, b)
-		if !e.isInt {
-			e.flt = &BinOpFloat64{Left: e.Left, Right: e.Right, Op: e.Op}
-			e.divTrunc = e.Op == "/" &&
-				operandIsIntStructural(e.Left, b) && operandIsIntStructural(e.Right, b)
-		}
-		if (e.Op == "+" || e.Op == "-") &&
-			(temporalColOperand(e.Left, b) || temporalColOperand(e.Right, b)) {
-			e.dateNode = &BinOp{Left: e.Left, Right: e.Right, Op: e.Op}
-		}
-	})
+	if !e.modeReady.Load() {
+		e.resolveModeSlow(b)
+	}
+}
+
+// resolveModeSlow runs exactly once per node. The kill switch is read here,
+// with the operand types, so both halves of the decision are taken at the
+// same point in the lifecycle they always were.
+func (e *BinOpNumeric) resolveModeSlow(b *batch.RecordBatch) {
+	e.modeMu.Lock()
+	defer e.modeMu.Unlock()
+	if e.modeReady.Load() {
+		return
+	}
+	e.isInt = intArithToggle.On() && operandIsInt(e.Left, b) && operandIsInt(e.Right, b)
+	if !e.isInt {
+		e.flt = &BinOpFloat64{Left: e.Left, Right: e.Right, Op: e.Op}
+		e.divTrunc = e.Op == "/" &&
+			operandIsIntStructural(e.Left, b) && operandIsIntStructural(e.Right, b)
+	}
+	if (e.Op == "+" || e.Op == "-") &&
+		(temporalColOperand(e.Left, b) || temporalColOperand(e.Right, b)) {
+		e.dateNode = &BinOp{Left: e.Left, Right: e.Right, Op: e.Op}
+	}
+	e.opCode = resolveArithOp(e.Op)
+	e.modeReady.Store(true)
 }
 
 func (e *BinOpNumeric) intMode(b *batch.RecordBatch) bool {
@@ -160,16 +185,19 @@ func (e *BinOpNumeric) Eval(b *batch.RecordBatch, row int) any {
 		}
 	}
 	if !e.isInt {
-		if e.divTrunc {
-			v, ok := e.EvalFloat64(b, row)
-			if !ok {
-				return nil
-			}
-			return v
+		// The float delegate's own typed path, with the divTrunc rule
+		// spelled out rather than routed back through EvalFloat64 — that
+		// round trip re-ran the resolution guard for every row.
+		v, ok := e.flt.EvalFloat64(b, row)
+		if !ok {
+			return nil
 		}
-		return e.flt.Eval(b, row)
+		if e.divTrunc {
+			v = math.Trunc(v)
+		}
+		return v
 	}
-	v, ok := e.EvalInt64(b, row)
+	v, ok := e.intArith(b, row)
 	if !ok {
 		return nil
 	}
@@ -183,6 +211,13 @@ func (e *BinOpNumeric) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 	if !e.isInt {
 		return 0, false
 	}
+	return e.intArith(b, row)
+}
+
+// intArith is the int64 kernel. Every caller has already resolved the mode
+// and checked it: routing them back through EvalInt64 made a resolution
+// guard fire twice per row (three times for a truncating division).
+func (e *BinOpNumeric) intArith(b *batch.RecordBatch, row int) (int64, bool) {
 	lv, lok := e.Left.EvalInt64(b, row)
 	if !lok {
 		return 0, false
@@ -191,14 +226,14 @@ func (e *BinOpNumeric) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 	if !rok {
 		return 0, false
 	}
-	switch e.Op {
-	case "+":
+	switch e.opCode {
+	case arithAdd:
 		return lv + rv, true
-	case "-":
+	case arithSub:
 		return lv - rv, true
-	case "*":
+	case arithMul:
 		return lv * rv, true
-	case "/":
+	case arithDiv:
 		// Integer division truncates toward zero (#369, PostgreSQL
 		// semantics per ADR-0012). A GENUINE zero divisor raises 22012 —
 		// NULL divisors already exited above with ok=false, and the
@@ -209,7 +244,7 @@ func (e *BinOpNumeric) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 			raiseDivisionByZero()
 		}
 		return lv / rv, true
-	case "%":
+	case arithMod:
 		if rv == 0 {
 			raiseDivisionByZero()
 		}
@@ -222,7 +257,7 @@ func (e *BinOpNumeric) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 func (e *BinOpNumeric) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
 	e.resolveMode(b)
 	if e.isInt {
-		v, ok := e.EvalInt64(b, row)
+		v, ok := e.intArith(b, row)
 		return float64(v), ok
 	}
 	v, ok := e.flt.EvalFloat64(b, row)
