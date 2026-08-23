@@ -38,10 +38,17 @@ import (
 // (DECIMAL ordering), #396 (network and UUID columns in raw storage form,
 // 37+ entries) and #407 (VECTOR reading NULL on the single-process engine)
 // are all fixed, so nothing here diverges by VALUE anymore. tmdRawFormReason
-// and tmdMinByTypeReason go with them — nothing references either string
-// now. #407's fix was verified by gate re-run rather than by a code change
-// in this rebase: the container codec that closed #397 (below) made the
-// query comparable for the first time, and it turned out to already agree.
+// and tmdMinByTypeReason go with them — nothing references either string now.
+//
+// #407 is the one to read carefully, because this gate never saw its live
+// half. project_c_vec agreed as soon as the container codec that closed #397
+// made the query comparable at all: a TOP-LEVEL VECTOR takes readColumnToAny,
+// which has had the arm since #397's encoder half. What was still broken was a
+// VECTOR (or DECIMAL) leaf BELOW a container, which the row reader's separate
+// nested decode had no arm for and answered NULL for — and this corpus carries
+// no such column, so nothing here could show it. It is fixed in the reader
+// (one set of leaf decode arms, parquet.decodePresentValues) and gated in the
+// parquet package's own suite (TestVectorAndDecimalBelowAContainer).
 var tmdPins = map[string]typematrix.Pin{}
 
 // tmdUnsupported is empty: #397 (ARRAY/ROW/MAP/VECTOR had no arm in the WSHF

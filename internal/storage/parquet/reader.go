@@ -305,7 +305,12 @@ type leafColumnData struct {
 func readLeafColumn(fr *FileReader, rgIdx, colIdx int) (leafColumnData, error) {
 	leaves := fr.Leaves()
 	leaf := leaves[colIdx]
-	typeID := TypeIDFromSchemaNode(leaf)
+	// The whole Column, not just its TypeID: a leaf below a container needs
+	// its VECTOR dimension and its DECIMAL precision to decode, exactly as a
+	// top-level leaf does. nodeToColumn is the same recovery the file's own
+	// Schema is built from.
+	col := nodeToColumn(leaf)
+	typeID := col.Type
 
 	lcd := leafColumnData{
 		maxDef: int32(leaf.MaxDefLevel),
@@ -362,7 +367,11 @@ func readLeafColumn(fr *FileReader, rgIdx, colIdx int) (leafColumnData, error) {
 		}
 
 		// Decode non-null values.
-		pageVals := decodePageValues(data, lcd.maxDef, page.DefinitionLevels, typeID)
+		pageVals, err := decodePageValues(data, lcd.maxDef, page.DefinitionLevels, col)
+		if err != nil {
+			page.Release()
+			return lcd, fmt.Errorf("decoding page for %v: %w", leaf.Path, err)
+		}
 		lcd.values = append(lcd.values, pageVals...)
 		page.Release()
 	}
@@ -382,94 +391,37 @@ func readLeafColumn(fr *FileReader, rgIdx, colIdx int) (leafColumnData, error) {
 	return lcd, nil
 }
 
-// decodePageValues decodes values from a page, returning only non-null values.
-func decodePageValues(data Values, maxDef int32, defLevels []int32, typeID TypeID) []any {
-	if defLevels == nil {
-		// All values present.
-		return decodeAllValues(data, typeID)
-	}
-
-	// Count non-null values.
-	nonNull := 0
-	for _, d := range defLevels {
-		if d == maxDef {
-			nonNull++
+// decodePageValues decodes a page's PRESENT values into a fresh []any, for
+// the nested read path's per-leaf streams.
+//
+// It shares decodePresentValues with the flat row path's unpack functions
+// rather than carrying its own arm per type. It used to carry its own, and
+// the two sets had drifted: this one had no VECTOR arm and no DECIMAL arm at
+// all, so a VECTOR or DECIMAL leaf ANYWHERE below a container decoded to
+// nothing and every value under it read back NULL, while the same leaf as a
+// top-level column read correctly (#407). ADR-0018 §3: a file is readable
+// through all of the decode paths or through none of them.
+func decodePageValues(data Values, maxDef int32, defLevels []int32, col Column) ([]any, error) {
+	nonNull := data.Count()
+	if defLevels != nil {
+		nonNull = 0
+		for _, d := range defLevels {
+			if d == maxDef {
+				nonNull++
+			}
 		}
 	}
-
-	allVals := decodeAllValues(data, typeID)
-	if len(allVals) > nonNull {
-		allVals = allVals[:nonNull]
+	if nonNull <= 0 {
+		return nil, nil
 	}
-	return allVals
-}
-
-// decodeAllValues decodes all values from a Values buffer into []any.
-func decodeAllValues(data Values, typeID TypeID) []any {
-	switch typeID {
-	case TypeInt64, TypeTimestamp, TypeDuration, TypeIPv4, TypeMAC:
-		src := data.Int64()
-		vals := make([]any, len(src))
-		for i, v := range src {
-			vals[i] = v
-		}
-		return vals
-	case TypeInt32, TypePort, TypeProtocol, TypeDate:
-		src := data.Int32()
-		vals := make([]any, len(src))
-		for i, v := range src {
-			vals[i] = int64(v)
-		}
-		return vals
-	case TypeFloat64:
-		src := data.Double()
-		vals := make([]any, len(src))
-		for i, v := range src {
-			vals[i] = v
-		}
-		return vals
-	case TypeFloat32:
-		src := data.Float()
-		vals := make([]any, len(src))
-		for i, v := range src {
-			vals[i] = float64(v)
-		}
-		return vals
-	case TypeString, TypeCIDR:
-		rawData, offsets := data.ByteArray()
-		if offsets == nil {
-			return nil
-		}
-		vals := make([]any, 0, len(offsets)-1)
-		for i := 0; i+1 < len(offsets); i++ {
-			vals = append(vals, string(rawData[offsets[i]:offsets[i+1]]))
-		}
-		return vals
-	case TypeBool:
-		boolBytes := data.Boolean()
-		n := data.Count()
-		vals := make([]any, n)
-		for i := 0; i < n; i++ {
-			byteIdx := i / 8
-			bitIdx := uint(i % 8)
-			vals[i] = byteIdx < len(boolBytes) && (boolBytes[byteIdx]&(1<<bitIdx)) != 0
-		}
-		return vals
-	case TypeBytes, TypeIPv6, TypeUUID:
-		rawData, offsets := data.ByteArray()
-		if offsets == nil {
-			return nil
-		}
-		vals := make([]any, 0, len(offsets)-1)
-		for i := 0; i+1 < len(offsets); i++ {
-			b := make([]byte, offsets[i+1]-offsets[i])
-			copy(b, rawData[offsets[i]:offsets[i+1]])
-			vals = append(vals, b)
-		}
-		return vals
-	default:
-		return nil
+	if err := checkPageDecodable(col, data, nonNull); err != nil {
+		return nil, err
 	}
+	vals := make([]any, nonNull)
+	if err := decodePresentValues(vals, data, nonNull, col); err != nil {
+		return nil, err
+	}
+	return vals, nil
 }
 
 // pathKey creates a lookup key from a path slice.
@@ -1094,53 +1046,94 @@ func checkByteWidth(col Column, w, got, row int) error {
 		col.Name, col.Type, w, row, got)
 }
 
+// unpackAllPresent decodes a page with no nulls into dst[offset:offset+n].
 func unpackAllPresent(dst []any, offset int, data Values, n int, col Column) error {
 	if err := checkPageDecodable(col, data, n); err != nil {
 		return err
 	}
+	return decodePresentValues(dst[offset:offset+n], data, n, col)
+}
+
+// unpackWithNulls decodes a page's PRESENT values and scatters them to the
+// row slots its definition levels put them in, leaving the rest nil.
+//
+// The present values are decoded contiguously into the head of the
+// destination and then moved outward from the END, which is safe because a
+// value's source index is never greater than its destination index. Sharing
+// one decode with unpackAllPresent is the point: this function and that one
+// used to carry a duplicate arm per type, and duplicated arms drift — see
+// decodePageValues.
+func unpackWithNulls(dst []any, offset int, data Values, defLevels []int32, maxDef int32, n int, col Column) error {
+	if err := checkPageDecodable(col, data, data.Count()); err != nil {
+		return err
+	}
+	present := 0
+	for i := 0; i < n && i < len(defLevels); i++ {
+		if defLevels[i] == maxDef {
+			present++
+		}
+	}
+	if err := decodePresentValues(dst[offset:offset+present], data, present, col); err != nil {
+		return err
+	}
+	vi := present - 1
+	for i := n - 1; i >= 0; i-- {
+		if i < len(defLevels) && defLevels[i] == maxDef {
+			if vi >= 0 {
+				dst[offset+i] = dst[offset+vi]
+			}
+			vi--
+			continue
+		}
+		dst[offset+i] = nil
+	}
+	return nil
+}
+
+// decodePresentValues decodes the first n PRESENT values of a page into
+// dst[0:n], one entry per value and no null slots.
+//
+// This is the row reader's single set of type arms. Every caller — the
+// all-present page, the nullable page, and the nested path's per-leaf
+// stream — decodes through it, so a type the reader can read as a top-level
+// column it can also read three containers deep, and vice versa.
+func decodePresentValues(dst []any, data Values, n int, col Column) error {
+	if n <= 0 {
+		return nil
+	}
 	switch col.Type {
-	case TypeInt64, TypeTimestamp, TypeDuration:
+	case TypeInt64, TypeTimestamp, TypeDuration, TypeIPv4, TypeMAC:
 		src := data.Int64()
 		for i := 0; i < n && i < len(src); i++ {
-			dst[offset+i] = src[i]
+			dst[i] = src[i]
 		}
-	case TypeIPv4, TypeMAC:
-		src := data.Int64()
-		for i := 0; i < n && i < len(src); i++ {
-			dst[offset+i] = src[i]
-		}
-	case TypeInt32, TypePort, TypeProtocol:
+	case TypeInt32, TypePort, TypeProtocol, TypeDate:
 		src := data.Int32()
 		for i := 0; i < n && i < len(src); i++ {
-			dst[offset+i] = int64(src[i])
-		}
-	case TypeDate:
-		src := data.Int32()
-		for i := 0; i < n && i < len(src); i++ {
-			dst[offset+i] = int64(src[i])
+			dst[i] = int64(src[i])
 		}
 	case TypeFloat64:
 		src := data.Double()
 		for i := 0; i < n && i < len(src); i++ {
-			dst[offset+i] = src[i]
+			dst[i] = src[i]
 		}
 	case TypeFloat32:
 		src := data.Float()
 		for i := 0; i < n && i < len(src); i++ {
-			dst[offset+i] = float64(src[i])
+			dst[i] = float64(src[i])
 		}
 	case TypeBool:
 		boolBytes := data.Boolean()
 		for i := 0; i < n; i++ {
 			byteIdx := i / 8
 			bitIdx := uint(i % 8)
-			dst[offset+i] = byteIdx < len(boolBytes) && (boolBytes[byteIdx]&(1<<bitIdx)) != 0
+			dst[i] = byteIdx < len(boolBytes) && (boolBytes[byteIdx]&(1<<bitIdx)) != 0
 		}
 	case TypeString, TypeCIDR:
 		rawData, offsets := data.ByteArray()
 		if offsets != nil {
 			for i := 0; i < n && i+1 < len(offsets); i++ {
-				dst[offset+i] = string(rawData[offsets[i]:offsets[i+1]])
+				dst[i] = string(rawData[offsets[i]:offsets[i+1]])
 			}
 		}
 	case TypeBytes, TypeIPv6, TypeUUID:
@@ -1160,7 +1153,7 @@ func unpackAllPresent(dst []any, offset int, data Values, n int, col Column) err
 				if err := checkByteWidth(col, w, len(b), i); err != nil {
 					return err
 				}
-				dst[offset+i] = b
+				dst[i] = b
 			}
 		}
 	case TypeVector:
@@ -1171,192 +1164,37 @@ func unpackAllPresent(dst []any, offset int, data Values, n int, col Column) err
 				if err != nil {
 					return err
 				}
-				dst[offset+i] = v
+				dst[i] = v
 			}
 		}
 	case TypeDecimal:
-		unpackDecimalAllPresent(dst, offset, data, n)
+		decodeDecimalPresent(dst, data, n)
 	}
 	return nil
 }
 
-func unpackWithNulls(dst []any, offset int, data Values, defLevels []int32, maxDef int32, n int, col Column) error {
-	if err := checkPageDecodable(col, data, data.Count()); err != nil {
-		return err
-	}
-	switch col.Type {
-	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
-		src := data.Int64()
-		vi := 0
-		for i := 0; i < n; i++ {
-			if i < len(defLevels) && defLevels[i] == maxDef {
-				if vi < len(src) {
-					dst[offset+i] = src[vi]
-				}
-				vi++
-			}
-		}
-	case TypeInt32, TypePort, TypeProtocol, TypeDate:
-		src := data.Int32()
-		vi := 0
-		for i := 0; i < n; i++ {
-			if i < len(defLevels) && defLevels[i] == maxDef {
-				if vi < len(src) {
-					dst[offset+i] = int64(src[vi])
-				}
-				vi++
-			}
-		}
-	case TypeFloat64:
-		src := data.Double()
-		vi := 0
-		for i := 0; i < n; i++ {
-			if i < len(defLevels) && defLevels[i] == maxDef {
-				if vi < len(src) {
-					dst[offset+i] = src[vi]
-				}
-				vi++
-			}
-		}
-	case TypeFloat32:
-		src := data.Float()
-		vi := 0
-		for i := 0; i < n; i++ {
-			if i < len(defLevels) && defLevels[i] == maxDef {
-				if vi < len(src) {
-					dst[offset+i] = float64(src[vi])
-				}
-				vi++
-			}
-		}
-	case TypeBool:
-		boolBytes := data.Boolean()
-		vi := 0
-		for i := 0; i < n; i++ {
-			if i < len(defLevels) && defLevels[i] == maxDef {
-				byteIdx := vi / 8
-				bitIdx := uint(vi % 8)
-				dst[offset+i] = byteIdx < len(boolBytes) && (boolBytes[byteIdx]&(1<<bitIdx)) != 0
-				vi++
-			}
-		}
-	case TypeString, TypeCIDR:
-		rawData, offsets := data.ByteArray()
-		vi := 0
-		if offsets != nil {
-			for i := 0; i < n; i++ {
-				if i < len(defLevels) && defLevels[i] == maxDef {
-					if vi+1 < len(offsets) {
-						dst[offset+i] = string(rawData[offsets[vi]:offsets[vi+1]])
-					}
-					vi++
-				}
-			}
-		}
-	case TypeBytes, TypeIPv6, TypeUUID:
-		rawData, offsets := data.ByteArray()
-		vi := 0
-		if offsets != nil {
-			w := fixedByteWidth(col)
-			for i := 0; i < n; i++ {
-				if i < len(defLevels) && defLevels[i] == maxDef {
-					// See unpackAllPresent: zero length in a fixed-width
-					// column is NULL, and dst stays nil to say so.
-					if vi+1 < len(offsets) && !(w > 0 && offsets[vi+1] == offsets[vi]) {
-						b := make([]byte, offsets[vi+1]-offsets[vi])
-						copy(b, rawData[offsets[vi]:offsets[vi+1]])
-						if err := checkByteWidth(col, w, len(b), i); err != nil {
-							return err
-						}
-						dst[offset+i] = b
-					}
-					vi++
-				}
-			}
-		}
-	case TypeVector:
-		rawData, offsets := data.ByteArray()
-		vi := 0
-		if offsets != nil {
-			for i := 0; i < n; i++ {
-				if i < len(defLevels) && defLevels[i] == maxDef {
-					if vi+1 < len(offsets) {
-						v, err := float32sFromBytes(rawData[offsets[vi]:offsets[vi+1]], col.Dimension)
-						if err != nil {
-							return err
-						}
-						dst[offset+i] = v
-					}
-					vi++
-				}
-			}
-		}
-	case TypeDecimal:
-		unpackDecimalWithNulls(dst, offset, data, defLevels, maxDef, n)
-	}
-	return nil
-}
-
-func unpackDecimalAllPresent(dst []any, offset int, data Values, n int) {
+// decodeDecimalPresent decodes a DECIMAL page in any of the four physical
+// encodings the format allows. The BYTE_ARRAY forms are accumulated into an
+// int64, which is the box the row shape has always carried for a DECIMAL.
+func decodeDecimalPresent(dst []any, data Values, n int) {
 	switch data.PhysType() {
 	case PhysicalInt64:
 		src := data.Int64()
 		for i := 0; i < n && i < len(src); i++ {
-			dst[offset+i] = src[i]
+			dst[i] = src[i]
 		}
 	case PhysicalInt32:
 		src := data.Int32()
 		for i := 0; i < n && i < len(src); i++ {
-			dst[offset+i] = int64(src[i])
+			dst[i] = int64(src[i])
 		}
 	default:
 		rawData, offsets := data.ByteArray()
-		if offsets != nil {
-			for i := 0; i < n && i+1 < len(offsets); i++ {
-				b := rawData[offsets[i]:offsets[i+1]]
-				dst[offset+i] = decimalBytesToInt64(b)
-			}
+		if offsets == nil {
+			return
 		}
-	}
-}
-
-func unpackDecimalWithNulls(dst []any, offset int, data Values, defLevels []int32, maxDef int32, n int) {
-	switch data.PhysType() {
-	case PhysicalInt64:
-		src := data.Int64()
-		vi := 0
-		for i := 0; i < n; i++ {
-			if i < len(defLevels) && defLevels[i] == maxDef {
-				if vi < len(src) {
-					dst[offset+i] = src[vi]
-				}
-				vi++
-			}
-		}
-	case PhysicalInt32:
-		src := data.Int32()
-		vi := 0
-		for i := 0; i < n; i++ {
-			if i < len(defLevels) && defLevels[i] == maxDef {
-				if vi < len(src) {
-					dst[offset+i] = int64(src[vi])
-				}
-				vi++
-			}
-		}
-	default:
-		rawData, offsets := data.ByteArray()
-		vi := 0
-		if offsets != nil {
-			for i := 0; i < n; i++ {
-				if i < len(defLevels) && defLevels[i] == maxDef {
-					if vi+1 < len(offsets) {
-						b := rawData[offsets[vi]:offsets[vi+1]]
-						dst[offset+i] = decimalBytesToInt64(b)
-					}
-					vi++
-				}
-			}
+		for i := 0; i < n && i+1 < len(offsets); i++ {
+			dst[i] = decimalBytesToInt64(rawData[offsets[i]:offsets[i+1]])
 		}
 	}
 }
