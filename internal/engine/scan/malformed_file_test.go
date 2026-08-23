@@ -229,3 +229,101 @@ func TestInflatedPageValueCountIsAnError(t *testing.T) {
 		}
 	}
 }
+
+// shortRowGroupFile hand-builds a one-column file whose single PLAIN page
+// carries `pageValues` honest int64s — header and body agree — while the row
+// group's own num_rows says `declaredRows`. Both numbers are the file's own
+// claims and the format does not reconcile them.
+func shortRowGroupFile(t *testing.T, pageValues, declaredRows int) []byte {
+	t.Helper()
+	body := make([]byte, pageValues*8)
+	for i := 0; i < pageValues; i++ {
+		binary.LittleEndian.PutUint64(body[i*8:], uint64(i))
+	}
+	header := pqt.EncodePageHeader(&pqt.PageHeader{
+		Type:                 pqt.PageDataV1,
+		UncompressedPageSize: int32(len(body)),
+		CompressedPageSize:   int32(len(body)),
+		DataPageHeader: &pqt.DataPageHeader{
+			NumValues:               int32(pageValues),
+			Encoding:                pqt.EncodingPlain,
+			DefinitionLevelEncoding: pqt.EncodingRLE,
+			RepetitionLevelEncoding: pqt.EncodingRLE,
+		},
+	})
+
+	const dataStart = 4
+	chunkBytes := int64(len(header) + len(body))
+	int64Phys := pqt.PhysicalInt64
+	md := &pqt.FileMetaData{
+		Version: 1,
+		Schema: []pqt.SchemaElement{
+			{Name: "hand_built", NumChildren: 1},
+			{Name: "c", Type: &int64Phys, RepetitionType: pqt.FieldRequired},
+		},
+		NumRows: int64(declaredRows),
+		RowGroups: []pqt.RowGroup{{
+			NumRows:       int64(declaredRows),
+			TotalByteSize: chunkBytes,
+			Columns: []pqt.ColumnChunk{{
+				FileOffset: dataStart,
+				MetaData: &pqt.ColumnMetaData{
+					Type:                  pqt.PhysicalInt64,
+					Encodings:             []pqt.Encoding{pqt.EncodingPlain},
+					PathInSchema:          []string{"c"},
+					Codec:                 pqt.CodecNone,
+					NumValues:             int64(pageValues),
+					TotalUncompressedSize: chunkBytes,
+					TotalCompressedSize:   chunkBytes,
+					DataPageOffset:        dataStart,
+				},
+			}},
+		}},
+		CreatedBy: "wadjet short-row-group test",
+	}
+
+	out := append([]byte("PAR1"), header...)
+	out = append(out, body...)
+	return withFooter(out, pqt.EncodeFileMetaData(md))
+}
+
+// TestPagesOverrunningTheRowGroupAreAnError: the destination vectors are
+// sized from the ROW GROUP's num_rows, and the page loop advanced its write
+// cursor by each page's own value count with nothing comparing the two. A
+// file whose pages declare 600 values into a 300-row group copied into
+// vec.Int64Data[0:600] over an array with capacity 300 — a slice-bounds panic
+// inside the per-column errgroup, which in a worker process is the worker.
+// This is the whole-file fuzz crasher shape, reduced to its cause.
+func TestPagesOverrunningTheRowGroupAreAnError(t *testing.T) {
+	raw := shortRowGroupFile(t, 600, 300)
+
+	nativeErr, rowErr, rowsRead, nonNull := readBothPaths(t, raw,
+		pqt.Column{Name: "c", Type: pqt.TypeInt64})
+	if nativeErr == nil {
+		t.Error("the native scan copied 600 page values into a 300-row group without error")
+	} else {
+		for _, want := range []string{"600", "300"} {
+			if !strings.Contains(nativeErr.Error(), want) {
+				t.Errorf("native error %q does not name %s", nativeErr, want)
+			}
+		}
+	}
+	// The row reader already refused this shape; it must keep doing so.
+	if rowErr == nil {
+		t.Errorf("the row reader accepted the overrun: %d rows, %d non-NULL", rowsRead, nonNull)
+	}
+
+	// The consistent file still reads, so the bound refuses the corruption
+	// and not the shape.
+	fr, err := pqt.OpenFileReaderFromBytes(shortRowGroupFile(t, 300, 300))
+	if err != nil {
+		t.Fatalf("opening the consistent file: %v", err)
+	}
+	b, err := ReadRowGroupNative(fr, 0, []pqt.Column{{Name: "c", Type: pqt.TypeInt64}}, nil)
+	if err != nil {
+		t.Fatalf("the consistent file does not read: %v", err)
+	}
+	if b == nil || b.Len != 300 {
+		t.Fatalf("read %v, want 300 rows", b)
+	}
+}

@@ -378,6 +378,17 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		if pageRows == 0 {
 			continue
 		}
+		// The row group's row count is the size every destination array was
+		// allocated for; the page headers are the file's separate claim
+		// about how many values the chunk carries, and nothing in the format
+		// makes the two agree. A file whose pages declare more rows than the
+		// row group used to walk `offset` straight past the end of the
+		// vector and fault in the copy — vec.Int64Data[600:900] over a
+		// 300-element array. The row reader already refuses the same shape.
+		if pageRows < 0 || offset+pageRows > numRows {
+			page.Release()
+			return pageOverrunErr(leaves, colIdx, pageRows, offset, numRows)
+		}
 
 		data := page.Data
 		// Resolve dictionary indices to actual values — per page, not per
@@ -652,6 +663,16 @@ func copyPageIntoVector(vec *batch.Vector, offset int, data pqt.Values, defLevel
 		return copyNativeCoercedScatter(vec, offset, data, defLevels, maxDefLevel, n, fileType, catalogType)
 	}
 	return copyNativeDataScatter(vec, offset, data, defLevels, maxDefLevel, n, fileType)
+}
+
+// pageOverrunErr refuses a chunk whose page headers claim more rows than the
+// row group declares. Non-inlined for the same frame-size reason as leafErr.
+//
+//go:noinline
+func pageOverrunErr(leaves []*pqt.SchemaNode, colIdx, pageRows, offset, numRows int) error {
+	return leafErr(leaves, colIdx, fmt.Errorf(
+		"page declares %d values at row %d but the row group holds %d rows",
+		pageRows, offset, numRows))
 }
 
 // typePairErr refuses a (catalog, file) pairing whose values cannot be

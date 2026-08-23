@@ -107,6 +107,13 @@ func readColumnNativeLengths(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colId
 			page.Release()
 			continue
 		}
+		// Same bound as the full decode: the page headers' row counts are
+		// the file's claim, numRows is what the offsets array was sized for.
+		if pageRows < 0 || offset+pageRows > numRows {
+			page.Release()
+			return fmt.Errorf("column %d: page declares %d values at row %d but the row group holds %d rows",
+				colIdx, pageRows, offset, numRows)
+		}
 		defLevels := page.DefinitionLevels
 		hasNulls := page.NumNulls > 0 && defLevels != nil
 

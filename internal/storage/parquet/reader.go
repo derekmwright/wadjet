@@ -1153,9 +1153,20 @@ func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, col Column) ([]
 			}
 		}
 
+		// The row group's num_rows sized `values`; the page headers are the
+		// file's separate claim about how many the chunk carries, and the
+		// format does not reconcile them. This used to CLAMP — read the
+		// first numRows values and drop the rest — which answers a query
+		// from a file that contradicts itself without saying so. The native
+		// scan refuses the same shape, and a disagreement between the two
+		// read paths on a corrupt file is how a corrupt file becomes two
+		// different answers.
 		n := page.NumValues
-		if offset+n > numRows {
-			n = numRows - offset
+		if n < 0 || offset+n > numRows {
+			page.Release()
+			return nil, fmt.Errorf(
+				"column %s: page declares %d values at row %d but the row group holds %d rows",
+				col.Name, n, offset, numRows)
 		}
 
 		if page.NumNulls == 0 || page.DefinitionLevels == nil {
