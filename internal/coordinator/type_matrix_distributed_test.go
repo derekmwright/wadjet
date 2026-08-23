@@ -34,86 +34,26 @@ import (
 // Pins follow ADR-0013: the comparison runs for a pinned entry, a divergence
 // is logged, and a pin whose issue stops diverging anywhere FAILS.
 
-// tmdPins carries #407 (project_c_vec): the SINGLE-PROCESS arm answers NULL
-// for every row of a VECTOR column; the stage DAG answers the values. #392
-// (MIN_BY/MAX_BY's declared output type), #394 (DECIMAL ordering) and #396
-// (network and UUID columns in raw storage form, 37+ entries) are all fixed,
-// so nothing else here diverges by VALUE. tmdRawFormReason and
-// tmdMinByTypeReason go with them — nothing references either string now.
-var tmdPins = map[string]typematrix.Pin{
-	// #407 — the SINGLE-PROCESS arm answers NULL for every row of a VECTOR
-	// column; the stage DAG answers the values. Found the moment #397's encoder
-	// half landed: while the DAG refused the query the comparison never ran, so
-	// nothing had ever checked the single-process side of it. The DAG is the
-	// right arm here.
-	"project_c_vec": {Issue: "#407", Reason: "Reading a VECTOR column returns NULL for every row on the " +
-		"single-process engine (both the native columnar decode and the scanner's ROW fallback); the stage " +
-		"DAG returns the values. ROW on the same fixture row reads back fine, so this is VECTOR-specific."},
-	// #392's twelve pins (the scalar-form asymmetry over c_cidr/c_ipv6/c_mac/
-	// c_uuid, and the grouped form over the same four types plus minby/maxby)
-	// are NOT added: #392 was fixed at the root on main before this rebase
-	// (minMaxDeclaredType now derives MIN_BY/MAX_BY's output type from the
-	// value's own type instead of falling through to FLOAT64) — pending a
-	// gate run to confirm all twelve now agree on both arms.
-}
+// tmdPins is empty: #392 (MIN_BY/MAX_BY's declared output type), #394
+// (DECIMAL ordering), #396 (network and UUID columns in raw storage form,
+// 37+ entries) and #407 (VECTOR reading NULL on the single-process engine)
+// are all fixed, so nothing here diverges by VALUE anymore. tmdRawFormReason
+// and tmdMinByTypeReason go with them — nothing references either string
+// now. #407's fix was verified by gate re-run rather than by a code change
+// in this rebase: the container codec that closed #397 (below) made the
+// query comparable for the first time, and it turned out to already agree.
+var tmdPins = map[string]typematrix.Pin{}
 
-// tmdWholeTableMapScanReason is the mechanism behind the #410 entries left in
-// tmdUnsupported. It is NOT the exchange: #397 is fixed (the WSHF format
-// carries ARRAY/ROW/MAP/VECTOR since the container codec landed) and these
-// queries never reach the encoder. #397 reported this as its "second face"
-// and misattributed it; #410 carries the real mechanism.
-const tmdWholeTableMapScanReason = "A stage whose fragment carries no column " +
-	"projection (spec.Columns empty, internal/worker/executor_fragment.go:2582) scans the " +
-	"WHOLE typemx_nested table, which pulls in c_map. Any ARRAY or MAP column routes the " +
-	"read through the scanner's ROW fallback (scan.HasUnsupportedColumnarTypes → " +
-	"readFileBatchesViaRows, internal/engine/scan/columnar.go:47), and there batch.FromRows " +
-	"hands Vector.SetValue the parquet reader's map[string]any for the MAP column while the " +
-	"MAP arm accepts only the list-of-entries forms — the #361 guard fires " +
-	"(\"cannot store map[string]interface {} into MAP vector\"). That is #393's mechanism " +
-	"reached from the DAG: the single-process arm projects the MAP column away and never " +
-	"reads it. Fixing it means either a MAP arm for the row fallback (#393, whose crash pins " +
-	"in tmdCrashPins/wadjet gate it) or a projection on that stage (planner), not the exchange."
-
-var tmdUnsupported = map[string]typematrix.Pin{
-	// #397's shuffle-encoder gap (ARRAY/ROW/VECTOR through a stage boundary,
-	// project_c_arr/project_c_row/project_c_vec/window_c_arr/window_c_row/
-	// window_c_vec) is fixed — the container codec lands the payload on the
-	// wire. These remaining entries were not part of that commit's own
-	// six-entry proof list; pending a gate re-run to confirm the same fix
-	// closes them too (they hit the identical encoder, just from the MAP leaf
-	// and the aggregate-gather writer rather than the plain shuffle writer).
-	"project_c_map": {Issue: "#397", Reason: "MAP column through a shuffle: WSHF has no encoder arm."},
-	"window_c_map":  {Issue: "#397", Reason: "MAP column through a shuffle: WSHF has no encoder arm."},
-
-	// #397, same encoder gap hit from the OTHER shuffle writer: MIN_BY/MAX_BY's
-	// grouped and scalar forms carry the winning value through the final
-	// aggregate's GATHER, which is the same WSHF family and has the same
-	// missing arms for ARRAY/ROW/MAP. Newly comparable now that #392 no
-	// longer crashes the process before either arm can be compared.
-	"minby_c_arr":        {Issue: "#397", Reason: "ARRAY column through the aggregate gather: WSHF has no encoder arm."},
-	"maxby_c_arr":        {Issue: "#397", Reason: "ARRAY column through the aggregate gather: WSHF has no encoder arm."},
-	"minby_scalar_c_arr": {Issue: "#397", Reason: "ARRAY column through the aggregate gather: WSHF has no encoder arm."},
-	"minby_c_row":        {Issue: "#397", Reason: "ROW column through the aggregate gather: WSHF has no encoder arm."},
-	"maxby_c_row":        {Issue: "#397", Reason: "ROW column through the aggregate gather: WSHF has no encoder arm."},
-	"minby_scalar_c_row": {Issue: "#397", Reason: "ROW column through the aggregate gather: WSHF has no encoder arm."},
-	"minby_c_map":        {Issue: "#397", Reason: "MAP column through the aggregate gather: WSHF has no encoder arm."},
-	"maxby_c_map":        {Issue: "#397", Reason: "MAP column through the aggregate gather: WSHF has no encoder arm."},
-	"minby_scalar_c_map": {Issue: "#397", Reason: "MAP column through the aggregate gather: WSHF has no encoder arm."},
-
-	// wide_row_nested is SELECT * over the nested-schema table (ARRAY, ROW,
-	// MAP and VECTOR columns all present), so it hits the same scan-side WSHF
-	// encoder gap as project_c_arr/project_c_row/project_c_map/project_c_vec
-	// at once — the widest possible blast radius for #397, the same way it was
-	// #393's widest blast radius before that one was fixed.
-	"wide_row_nested": {Issue: "#397", Reason: "SELECT * over a table with ARRAY/ROW/MAP/VECTOR columns: WSHF has no encoder arm for any of them."},
-
-	// #410 — split out of #397, which reported this as "the exchange hands the
-	// receiver a MAP vector". The stack says otherwise; see the reason.
-	"flat_nested_join":   {Issue: "#410", Reason: tmdWholeTableMapScanReason},
-	"maxby_c_vec":        {Issue: "#410", Reason: tmdWholeTableMapScanReason},
-	"minby_c_vec":        {Issue: "#410", Reason: tmdWholeTableMapScanReason},
-	"minby_scalar_c_vec": {Issue: "#410", Reason: tmdWholeTableMapScanReason},
-}
+// tmdUnsupported is empty: #397 (ARRAY/ROW/MAP/VECTOR had no arm in the WSHF
+// shuffle/gather encoder, worker/shuffle_format.go:415) and #410 (the
+// misattributed "second face" — a whole-table MAP scan hitting #393's row-
+// fallback mechanism from the DAG) are both fixed. The container codec
+// (internal/engine/batch/container_codec.go) carries all four types across
+// both the WSHF shuffle and the aggregate gather now, and #410's blast
+// radius (flat_nested_join, maxby_c_vec, minby_c_vec, minby_scalar_c_vec)
+// agrees on both arms too — a gate re-run after #397 landed found no
+// residual divergence, so there was nothing left for #410 to explain.
+var tmdUnsupported = map[string]typematrix.Pin{}
 
 // tmdPinPrefixes pins every corpus entry that begins with the key, for a
 // defect that is a property of a TYPE rather than of one query shape.

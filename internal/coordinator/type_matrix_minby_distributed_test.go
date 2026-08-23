@@ -132,12 +132,13 @@ type tmdQuery struct {
 
 // tmdColPin returns the pin covering every shape over one column.
 //
-// One pre-existing distributed defect remains, neither #392 nor #393, found
-// by running this corpus for the first time:
-//
-//	#397 — ARRAY/ROW/MAP/VECTOR have no arm in the shuffle/gather encoder
-//	       (worker/shuffle_format.go:415), so any distributed query carrying
-//	       one fails the task outright.
+// #397 — ARRAY/ROW/MAP/VECTOR had no arm in the shuffle/gather encoder
+// (worker/shuffle_format.go:415), so any distributed query carrying one
+// failed the task outright — is fixed: the container codec
+// (internal/engine/batch/container_codec.go) carries all four types across
+// both the WSHF shuffle and the aggregate gather now. Every c_arr/c_row/
+// c_map/c_vec entry in this corpus, and the SELECT * below, agrees on both
+// paths.
 //
 // #396 — IPv4/IPv6/MAC/UUID arriving at the coordinator typed as their
 // STORAGE form (int64, 16 bytes) instead of their display form — is fixed:
@@ -145,10 +146,6 @@ type tmdQuery struct {
 // reader restores each leaf's real type identity from it. All twelve
 // c_ipv4/c_ipv6/c_mac/c_uuid entries agree on both paths now.
 func tmdColPin(col string) (string, string) {
-	switch col {
-	case "c_arr", "c_row", "c_map", "c_vec":
-		return "#397", "the shuffle/gather encoder has no arm for the container types"
-	}
 	return "", ""
 }
 
@@ -168,12 +165,10 @@ func tmdCorpus() []tmdQuery {
 			out = append(out, tmdQuery{sql: sql, pin: pin, why: why})
 		}
 	}
-	// SELECT * carries the containers, so it is pinned to the same encoder
-	// gap — it is still here because it is the shape #393 killed, and the
-	// pin's must-still-diverge check keeps it honest.
+	// SELECT * carried the containers, so it was pinned to the same encoder
+	// gap; #397 is fixed (see tmdColPin), so this now agrees unpinned too.
 	return append(out, tmdQuery{
 		sql: "SELECT * FROM tmatrix WHERE id % 743 = 5 ORDER BY id",
-		pin: "#397", why: "the star projection carries the container columns",
 	})
 }
 
