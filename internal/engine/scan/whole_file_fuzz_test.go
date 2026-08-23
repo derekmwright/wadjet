@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -65,6 +66,57 @@ func TestWholeFileMutationCrashers(t *testing.T) {
 		t.Run(fmt.Sprintf("seed%d_nmut%d", c[0], c[1]), func(t *testing.T) {
 			readMutatedBothPaths(t, mutateAllTypesFile(c[0], c[1]))
 		})
+	}
+}
+
+// TestAllTypesFixtureReadsBack pins the fixture itself: UNMUTATED, the row
+// path must hand back exactly what was written, the containers-inside-
+// containers included. A fixture the reader cannot read whole is a fuzz
+// target that tests the error path and nothing else — and these three
+// columns are the only ones in the corpus that make the assembler recurse.
+func TestAllTypesFixtureReadsBack(t *testing.T) {
+	r, err := pqt.NewReaderFromBytes(allTypesFile())
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	rows, err := r.ReadRowsAs(allTypesSchema().Columns, nil)
+	if err != nil {
+		t.Fatalf("ReadRowsAs: %v", err)
+	}
+	if len(rows) != 24 {
+		t.Fatalf("read %d rows, want 24", len(rows))
+	}
+	nested := map[string]func(i int) any{
+		"c_map_arr": func(i int) any {
+			return map[string]any{"k": []any{int64(i), int64(i + 1)}}
+		},
+		"c_arr_arr": func(i int) any {
+			return []any{[]any{int64(i)}, []any{int64(i + 1), int64(i + 2)}}
+		},
+		"c_row_map": func(i int) any {
+			return map[string]any{"f_int": int64(i), "f_map": map[string]any{"k": int64(i)}}
+		},
+	}
+	// The fixture nulls column j on row i when (i+j)%7 == 0; a NULL column
+	// is an absent key.
+	colIdx := map[string]int{}
+	for j, c := range allTypesSchema().Columns {
+		colIdx[c.Name] = j
+	}
+	for name, want := range nested {
+		j := colIdx[name]
+		for i, row := range rows {
+			got, present := row[name]
+			if (i+j)%7 == 0 {
+				if present {
+					t.Errorf("row %d %s: %#v, want absent", i, name, got)
+				}
+				continue
+			}
+			if !reflect.DeepEqual(got, want(i)) {
+				t.Errorf("row %d %s:\n   got %#v\n  want %#v", i, name, got, want(i))
+			}
+		}
 	}
 }
 
@@ -138,16 +190,49 @@ func allTypesSchema() pqt.Schema {
 				{Name: "key", Type: pqt.TypeString},
 				{Name: "value", Type: pqt.TypeInt64, Nullable: true},
 			}}},
+		// A container inside a container, which single-level columns do not
+		// reach: the recursive assembler (#409) only descends past one level
+		// for these shapes, and the levels it descends by are the ones a
+		// mutated page header desynchronises. Without them the target ran
+		// every mutation through an assembler that never recursed.
+		{Name: "c_map_arr", Type: pqt.TypeMap, Nullable: true,
+			ElementType: &pqt.Column{Name: "kv", Type: pqt.TypeRow, Fields: []pqt.Column{
+				{Name: "key", Type: pqt.TypeString},
+				{Name: "value", Type: pqt.TypeArray, Nullable: true,
+					ElementType: &pqt.Column{Name: "element", Type: pqt.TypeInt64, Nullable: true}},
+			}}},
+		{Name: "c_arr_arr", Type: pqt.TypeArray, Nullable: true,
+			ElementType: &pqt.Column{Name: "element", Type: pqt.TypeArray, Nullable: true,
+				ElementType: &pqt.Column{Name: "element", Type: pqt.TypeInt64, Nullable: true}}},
+		{Name: "c_row_map", Type: pqt.TypeRow, Nullable: true, Fields: []pqt.Column{
+			{Name: "f_int", Type: pqt.TypeInt64, Nullable: true},
+			{Name: "f_map", Type: pqt.TypeMap, Nullable: true,
+				ElementType: &pqt.Column{Name: "kv", Type: pqt.TypeRow, Fields: []pqt.Column{
+					{Name: "key", Type: pqt.TypeString},
+					{Name: "value", Type: pqt.TypeInt64, Nullable: true},
+				}}},
+		}},
 	}}
 }
 
 // nativeAllTypesSchema is the same list without ARRAY and MAP, which the
 // native reader refuses by design (their leaves do not resolve by column
-// name; such tables go to the row reader).
+// name; such tables go to the row reader) — and without a ROW carrying one,
+// for the same reason one level down: the native path reads a ROW field as a
+// leaf at col.field, and a field that is a container is a GROUP.
 func nativeAllTypesSchema() []pqt.Column {
 	var out []pqt.Column
 	for _, c := range allTypesSchema().Columns {
 		if c.Type == pqt.TypeArray || c.Type == pqt.TypeMap {
+			continue
+		}
+		nestedField := false
+		for _, f := range c.Fields {
+			if f.Type == pqt.TypeArray || f.Type == pqt.TypeMap || f.Type == pqt.TypeRow {
+				nestedField = true
+			}
+		}
+		if nestedField {
 			continue
 		}
 		out = append(out, c)
@@ -188,6 +273,12 @@ func allTypesFile() []byte {
 				"c_array":     []any{int64(i), int64(i + 1)},
 				"c_row":       map[string]any{"f_int": int64(i), "f_str": "nested"},
 				"c_map":       map[string]any{"k": int64(i)},
+				"c_map_arr":   map[string]any{"k": []any{int64(i), int64(i + 1)}},
+				"c_arr_arr":   []any{[]any{int64(i)}, []any{int64(i + 1), int64(i + 2)}},
+				"c_row_map": map[string]any{
+					"f_int": int64(i),
+					"f_map": map[string]any{"k": int64(i)},
+				},
 			}
 			// Nulls in every column, staggered so no column is all-present.
 			for j, col := range schema.Columns {
