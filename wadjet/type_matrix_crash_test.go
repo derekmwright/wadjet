@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,8 +43,31 @@ import (
 // corpus entries from index N onward instead of driving children.
 const tmChildEnv = "WADJET_TYPEMATRIX_CRASH_FROM"
 
-// tmCrashMarker prefixes the child's per-entry announcement.
+// tmCrashMarker prefixes the child's per-entry announcement, printed BEFORE
+// the query runs. tmCrashDone is printed after it returns and after a settle
+// window, so the parent can tell "died running entry i" from "died after
+// entry i finished".
+//
+// Both are needed because the fatal this gate hunts is raised on a goroutine
+// the query does not join: #392's mismatch panic fires in
+// aggregate_parallel_emit.go's emit goroutine, which can outlive the
+// db.Query call that started it. With only the ENTRY marker, the process
+// sometimes died after the loop had already announced entry i+1, and the
+// parent blamed the WRONG entry — observed as `maxby_c_uuid` reported "no
+// longer kills, so #392 is FIXED" while `minby_scalar_c_uuid`, the next
+// entry, was reported as a NEW PROCESS KILLER, in the same run. Both claims
+// were false and both fail the gate, so the race was noisy rather than
+// dangerous, but a gate that names the wrong entry cannot be read.
 const tmCrashMarker = "TYPEMATRIX-ENTRY "
+
+// tmCrashDone marks an entry the child finished without the process dying.
+const tmCrashDone = "TYPEMATRIX-DONE "
+
+// tmCrashSettle is how long the child waits after each query before declaring
+// the entry survived. It bounds the window in which an escaped goroutine's
+// panic is still attributed to the entry that started it. 270 entries x 5ms
+// is under two seconds on a gate that spawns one process per killer.
+const tmCrashSettle = 5 * time.Millisecond
 
 // tmCrashPins are the corpus entries known to kill the process.
 //
@@ -147,25 +171,40 @@ func tmRunCrashChild(t *testing.T, self string, start int) (last int, died bool,
 	cmd.Env = append(os.Environ(), tmChildEnv+"="+strconv.Itoa(start))
 	out, err := cmd.CombinedOutput()
 
-	last = -1
+	last, lastDone := -1, -1
 	sc := bufio.NewScanner(strings.NewReader(string(out)))
 	sc.Buffer(make([]byte, 0, 64*1024), 4<<20)
+	num := func(line, marker string) (int, bool) {
+		i := strings.Index(line, marker)
+		if i < 0 {
+			return 0, false
+		}
+		fields := strings.Fields(line[i+len(marker):])
+		if len(fields) == 0 {
+			return 0, false
+		}
+		n, cerr := strconv.Atoi(fields[0])
+		return n, cerr == nil
+	}
 	for sc.Scan() {
 		line := sc.Text()
-		i := strings.Index(line, tmCrashMarker)
-		if i < 0 {
+		if n, ok := num(line, tmCrashDone); ok {
+			lastDone = n
 			continue
 		}
-		fields := strings.Fields(line[i+len(tmCrashMarker):])
-		if len(fields) == 0 {
-			continue
-		}
-		if n, cerr := strconv.Atoi(fields[0]); cerr == nil {
+		if n, ok := num(line, tmCrashMarker); ok {
 			last = n
 		}
 	}
 	if err == nil {
 		return last, false, ""
+	}
+	// Attribute to the entry that STARTED and never finished. If every
+	// announced entry reported DONE, the fatal escaped from an already-
+	// finished one and the last of those owns it — not the entry whose
+	// marker happened to be printed next.
+	if lastDone >= last {
+		last = lastDone
 	}
 	return last, true, tmTail(string(out), 24)
 }
@@ -188,6 +227,11 @@ func tmCrashChild(t *testing.T, from string) {
 			defer func() { _ = recover() }() // a recoverable panic is not this gate's business
 			_, _ = db.Query(ctx, corpus[i].SQL)
 		}()
+		// Give a goroutine the query did not join its chance to take the
+		// process down while this entry is still the one on the record.
+		runtime.Gosched()
+		time.Sleep(tmCrashSettle)
+		fmt.Fprintf(os.Stderr, "%s%d\n", tmCrashDone, i)
 	}
 }
 

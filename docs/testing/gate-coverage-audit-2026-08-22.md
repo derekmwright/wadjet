@@ -130,6 +130,18 @@ The lesson worth keeping: "the storage is identical" was not sufficient
 grounds to drop a type name. The behaviour that matters attaches to the NAME,
 and only a gate that runs both engines over the same column could say so.
 
+A third defect the gates surfaced about THEMSELVES: **the process-killer gate
+blamed the wrong corpus entry** whenever the fatal escaped on a goroutine the
+query did not join — which is #392's shape exactly (the panic fires in
+`aggregate_parallel_emit.go`'s emit goroutine). One `-count=2` run produced
+both halves of the slide at once: `maxby_c_uuid` reported "no longer kills, so
+#392 is FIXED" and the adjacent `minby_scalar_c_uuid` reported as a NEW
+PROCESS KILLER, both false. Fixed here (#418): the child emits a
+`TYPEMATRIX-DONE` marker after a settle window and the parent blames the entry
+that started and never finished. 16 consecutive invocations clean afterwards,
+still 22 killers against 22 pins. Worth noting because "delete this pin, the
+bug is fixed" is an instruction a reader would act on.
+
 Two issues filed rather than fixed in those commits:
 
 - **#415 — the sort comparators report every ARRAY, ROW, MAP and VECTOR value
