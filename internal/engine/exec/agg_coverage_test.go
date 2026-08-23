@@ -681,8 +681,8 @@ func TestHashAggregateScalarMergeSink(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(got))
 	}
-	wantCount := int64(2 * len(rows))    // 2 workers × 3 rows = 6
-	wantSum := int64(2 * (1 + 2 + 3))    // 2 workers × sum(1+2+3) = 12
+	wantCount := int64(2 * len(rows)) // 2 workers × 3 rows = 6
+	wantSum := int64(2 * (1 + 2 + 3)) // 2 workers × sum(1+2+3) = 12
 	if got[0]["cnt"].(int64) != wantCount {
 		t.Errorf("cnt: got %v, want %d", got[0]["cnt"], wantCount)
 	}
