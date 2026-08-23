@@ -75,6 +75,15 @@ func DecodeContainerColumn(payload []byte, v *Vector, n int) error {
 			len(payload), v.Type, r.pos)
 	}
 	v.Len = n
+	// Grow the null bitmap with Len. The payload does not carry the top-level
+	// column's nulls — WSHF writes that bitmap separately, ahead of the data —
+	// so a destination vector built with less capacity than n (NewVectorLike
+	// drops storage; a pooled batch may be shorter than this chunk) would come
+	// back with Len = n over a bitmap of fewer bits: IsNull answers "null" past
+	// its end, turning every decoded row NULL, and IsNullFast indexes off the
+	// end of an empty one. Grow marks the new range VALID, which is the right
+	// default for a column whose nulls arrive from elsewhere.
+	v.Nulls = v.Nulls.Grow(n)
 	return nil
 }
 
@@ -583,6 +592,9 @@ func decodeVectorBody(r *containerReader, v *Vector, n int) error {
 		return fmt.Errorf("batch: unsupported container element type %v", v.Type)
 	}
 	v.Len = n
+	// Same reason as DecodeContainerColumn's: Len and the null bitmap have to
+	// move together, or every row past the bitmap's end reads back NULL.
+	v.Nulls = v.Nulls.Grow(n)
 	return nil
 }
 
