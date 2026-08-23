@@ -489,3 +489,87 @@ func TestCompactTable_ReportsAFailedMerge(t *testing.T) {
 		t.Errorf("%d files remain, want the 3 inputs untouched", n)
 	}
 }
+
+// #436: CompactTable must TERMINATE, whatever Config says.
+//
+// shouldCompact admitted a partition when len(Files) >= MinFiles, so with
+// Config.MinFiles == 1 — an exported field of an exported type, reachable by
+// configuration and not only by a test — a partition holding ONE small file
+// qualified. The pass merged it into a new single small file, set
+// compactedAny, and the loop re-read the manifest and found the same
+// condition. Forever: a stuck compactor on a scheduler, plus an unbounded
+// stream of rewrite/upload/delete cycles against the object store.
+//
+// The test is written with a timeout because the failure mode is a hang, and
+// a hung test that fails by exceeding the package timeout says nothing about
+// which test hung.
+func TestCompactTable_TerminatesWithMinFilesOne(t *testing.T) {
+	ctx := context.Background()
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "name", Type: parquet.TypeString, Nullable: true},
+	}}
+
+	for _, tc := range []struct {
+		name      string
+		files     int
+		wantFiles int
+	}{
+		// The loop shape: one file, nothing to merge it with.
+		{"single_file", 1, 1},
+		// And the ordinary case still compacts under the same config.
+		{"three_files", 3, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cat, store := setupTestCatalog(t)
+			table := "minfiles_" + tc.name
+			if err := cat.CreateTable(ctx, table, schema, nil); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < tc.files; i++ {
+				path := fmt.Sprintf("tables/%s/chunk_%04d.parquet", table, i)
+				rows := []map[string]any{{"id": int64(i), "name": fmt.Sprintf("r%d", i)}}
+				size := writeTestFile(t, store, "test-bucket", path, schema, rows)
+				if err := cat.AddFiles(ctx, table, nil, "", []catalog.FileEntry{
+					{Path: path, SizeBytes: size, NumRows: 1, CreatedAt: time.Now().UTC()},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			cfg := DefaultConfig()
+			cfg.MinFiles = 1
+			done := make(chan error, 1)
+			go func() {
+				_, err := New(cat, nil, cfg).CompactTable(ctx, table)
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("CompactTable: %v", err)
+				}
+			case <-time.After(15 * time.Second):
+				t.Fatal("CompactTable did not return with MinFiles=1 — the pass loop is rewriting " +
+					"the same partition forever")
+			}
+
+			m, err := cat.GetManifest(ctx, table)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := 0
+			for _, p := range m.Partitions {
+				n += len(p.Files)
+			}
+			if n != tc.wantFiles {
+				t.Errorf("%d files after compaction, want %d", n, tc.wantFiles)
+			}
+			// The rows survive either way.
+			rows := evoRows(t, cat, store, table, schema)
+			if len(rows) != tc.files {
+				t.Errorf("%d rows after compaction, want %d", len(rows), tc.files)
+			}
+		})
+	}
+}

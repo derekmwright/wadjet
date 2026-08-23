@@ -175,15 +175,30 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 
 	// Multi-pass loop: re-read manifest after each pass to pick up changes,
 	// and continue until no partitions need compaction.
+	//
+	// The loop's only exit used to be `compactedAny == false`, which assumes
+	// every pass makes progress. shouldCompact's two-file floor is what makes
+	// that true; the two bounds below are the belt to that brace, because the
+	// cost of being wrong here is a call that never returns while it rewrites
+	// and deletes objects forever (#436).
 	for pass := 0; ; pass++ {
 		if ctx.Err() != nil {
 			return result, ctx.Err()
+		}
+		if pass >= maxCompactionPasses {
+			return result, fmt.Errorf(
+				"compacting table %q: still not settled after %d passes — stopping rather than looping",
+				tableName, pass)
 		}
 
 		manifest, err := c.catalog.GetManifest(ctx, tableName)
 		if err != nil {
 			return nil, fmt.Errorf("getting manifest: %w", err)
 		}
+		// Progress is measured on what THIS pass did, not on the manifest's
+		// total: an ingester writing into the table between passes would
+		// otherwise read as a stall.
+		removedBefore, createdBefore := result.FilesRemoved, result.FilesCreated
 		deleteSet := buildDeleteSet(manifest.DeleteMarkers)
 
 		compactedAny := false
@@ -275,10 +290,22 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 		if !compactedAny {
 			break // no partitions needed compaction — done
 		}
+		if removed, created := result.FilesRemoved-removedBefore, result.FilesCreated-createdBefore; removed <= created {
+			return result, fmt.Errorf(
+				"compacting table %q: pass %d merged %d files into %d and so reduced nothing — "+
+					"a pass that does not shrink the partition would repeat forever",
+				tableName, pass, removed, created)
+		}
 	}
 
 	return result, nil
 }
+
+// maxCompactionPasses bounds the pass loop absolutely. Each pass merges at
+// least two files into one, so a partition of N files settles in fewer than N
+// passes and the adaptive pass size makes it far fewer; a table needing more
+// than this is not converging.
+const maxCompactionPasses = 1024
 
 // partitionLabel names the unpartitioned partition in an error message, where
 // an empty string reads as a missing value.
@@ -319,9 +346,16 @@ func (c *Compactor) adaptivePassSize(part catalog.PartitionEntry) int {
 }
 
 // shouldCompact returns true if a partition has too many files or files are too small.
+//
+// TWO files is the real precondition, independent of MinFiles: merging one
+// file produces one file, so the pass makes no progress and the loop below
+// finds the same condition on the next iteration. With Config.MinFiles == 1 —
+// an exported field of an exported type, so reachable by configuration and not
+// only by a test — that is an unbounded stream of rewrite/upload/delete cycles
+// against the object store from a call that never returns (#436).
 func (c *Compactor) shouldCompact(part catalog.PartitionEntry) bool {
 	n := len(part.Files)
-	if n < c.config.MinFiles {
+	if n < 2 || n < c.config.MinFiles {
 		return false
 	}
 	var totalSize int64
