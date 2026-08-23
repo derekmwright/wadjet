@@ -356,8 +356,14 @@ func (r *ColumnPageReader) NextDictionary() (*DictionaryData, error) {
 		return nil, fmt.Errorf("decompressing dictionary page: %w", err)
 	}
 
+	if ph.DictionaryPageHeader == nil {
+		return nil, fmt.Errorf("dictionary page has no DictionaryPageHeader")
+	}
 	numValues := int(ph.DictionaryPageHeader.NumValues)
-	vals := r.decodePlainValues(pageData, numValues)
+	vals, err := r.decodePlainValues(pageData, numValues)
+	if err != nil {
+		return nil, fmt.Errorf("decoding dictionary page: %w", err)
+	}
 
 	return &DictionaryData{NumValues: numValues, Data: vals}, nil
 }
@@ -405,8 +411,15 @@ func (r *ColumnPageReader) DictionaryIfPure() (*DictionaryData, bool, error) {
 			if err != nil {
 				return nil, false, fmt.Errorf("decompressing dictionary page: %w", err)
 			}
+			if ph.DictionaryPageHeader == nil {
+				return nil, false, fmt.Errorf("dictionary page at offset %d has no DictionaryPageHeader", off)
+			}
 			n := int(ph.DictionaryPageHeader.NumValues)
-			dict = &DictionaryData{NumValues: n, Data: r.decodePlainValues(pageData, n)}
+			vals, err := r.decodePlainValues(pageData, n)
+			if err != nil {
+				return nil, false, fmt.Errorf("decoding dictionary page: %w", err)
+			}
+			dict = &DictionaryData{NumValues: n, Data: vals}
 		case PageDataV1:
 			if ph.DataPageHeader == nil {
 				return nil, false, nil
@@ -608,7 +621,7 @@ func (r *ColumnPageReader) decodeValues(data []byte, n int, enc Encoding) (Value
 	r.pendingIdxRLE, r.pendingIdxBW = nil, 0
 	switch enc {
 	case EncodingPlain:
-		return r.decodePlainValues(data, n), nil
+		return r.decodePlainValues(data, n)
 	case EncodingRLEDictionary, EncodingPlainDictionary:
 		if len(data) == 0 || n == 0 {
 			return Values{physType: PhysicalInt32, count: 0}, nil
@@ -648,7 +661,7 @@ func (r *ColumnPageReader) decodeValues(data []byte, n int, enc Encoding) (Value
 	case EncodingRLE:
 		// RLE encoding for boolean columns.
 		if r.physType == PhysicalBoolean {
-			return DecodePlainBoolean(data, n), nil
+			return DecodePlainBoolean(data, n)
 		}
 		return Values{}, fmt.Errorf("RLE encoding only supported for BOOLEAN, got %s", r.physType)
 	default:
@@ -657,9 +670,13 @@ func (r *ColumnPageReader) decodeValues(data []byte, n int, enc Encoding) (Value
 }
 
 // decodePlainValues decodes PLAIN-encoded values based on the column's physical type.
-func (r *ColumnPageReader) decodePlainValues(data []byte, n int) Values {
+//
+// Every arm can fail: n is the page header's claim about a body whose length
+// the header does not control. A page that claims more values than it carries
+// is a corrupt (or hostile) file, and it is reported as one.
+func (r *ColumnPageReader) decodePlainValues(data []byte, n int) (Values, error) {
 	if n == 0 {
-		return Values{physType: r.physType}
+		return Values{physType: r.physType}, nil
 	}
 	switch r.physType {
 	case PhysicalBoolean:
@@ -680,7 +697,7 @@ func (r *ColumnPageReader) decodePlainValues(data []byte, n int) Values {
 		// INT96: 12 bytes per value, treat as fixed-length byte array.
 		return DecodePlainFixedLenByteArray(data, n, 12)
 	default:
-		return Values{physType: r.physType}
+		return Values{physType: r.physType}, nil
 	}
 }
 

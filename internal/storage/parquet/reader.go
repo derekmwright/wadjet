@@ -118,7 +118,7 @@ func (r *Reader) ReadRowsAs(schema []Column, selectedColumns []string) ([]map[st
 	if len(selectedColumns) > 0 {
 		readCols = filterSchemaColumns(r.schema.Columns, selectedColumns)
 	}
-	readCols, err := retypeFromCatalog(readCols, schema)
+	readCols, err := retypeFromCatalog(readCols, schema, r.fr.Leaves())
 	if err != nil {
 		return nil, err
 	}
@@ -760,42 +760,99 @@ func float32sFromBytes(b []byte, dim int) ([]float32, error) {
 	return out, nil
 }
 
-// decodeFamily is the DECODER's view of a leaf: which typed accessor the
-// bytes of a column will be handed to, and therefore how wide the elements
-// of the unsafe.Slice cast in values.go are.
+// PhysicalReadableAs reports whether a leaf physically stored as pt can be
+// decoded as the engine type t — that is, whether the typed accessor t's
+// decode arm reaches (values.go) is the one that pt's bytes are laid out
+// for.
 //
-// Types inside one family are interchangeable byte-for-byte — an IPv4 and a
-// TIMESTAMP are both eight-byte integers, and every bytes-backed type
-// (STRING, BYTES, IPv6, UUID, VECTOR) reads through the offset table that
-// BYTE_ARRAY and FIXED_LEN_BYTE_ARRAY both produce. Types in DIFFERENT
-// families are not interchangeable at all, and that is the whole point of
-// this type: see retypeFromCatalog.
-type decodeFamily int
-
-const (
-	familyBytes decodeFamily = iota
-	familyBool
-	familyInt32
-	familyInt64
-	familyFloat32
-	familyFloat64
-)
-
-func familyOf(t TypeID) decodeFamily {
-	switch wadjetTypeToPhysical(t) {
-	case PhysicalBoolean:
-		return familyBool
-	case PhysicalInt32:
-		return familyInt32
-	case PhysicalInt64:
-		return familyInt64
-	case PhysicalFloat:
-		return familyFloat32
-	case PhysicalDouble:
-		return familyFloat64
+// This is a question about the FILE, and it is deliberately not asked of
+// wadjetTypeToPhysical, which answers what OUR WRITER would have emitted.
+// The two disagree wherever parquet allows a type more than one physical
+// encoding, and DECIMAL is exactly that case: our writer stores DECIMAL as
+// INT64, but the format allows INT32, INT64, BYTE_ARRAY and
+// FIXED_LEN_BYTE_ARRAY, and pyarrow uses all of them. Asking the writer's
+// mapping let a catalog INT64 (or TIMESTAMP, IPv4, MAC, DURATION) sit over a
+// file DECIMAL backed by INT32 — same answer from wadjetTypeToPhysical, four
+// bytes per value in the file, eight read out of it.
+//
+// The bytes family accepts both BYTE_ARRAY and FIXED_LEN_BYTE_ARRAY because
+// both decode through the same offset table, and INT96 because it decodes as
+// a 12-byte fixed-length value.
+func PhysicalReadableAs(t TypeID, pt PhysicalType) bool {
+	switch t {
+	case TypeInt64, TypeTimestamp, TypeDuration, TypeIPv4, TypeMAC:
+		return pt == PhysicalInt64
+	case TypeInt32, TypePort, TypeProtocol, TypeDate:
+		return pt == PhysicalInt32
+	case TypeFloat64:
+		return pt == PhysicalDouble
+	case TypeFloat32:
+		return pt == PhysicalFloat
+	case TypeBool:
+		return pt == PhysicalBoolean
+	case TypeDecimal:
+		// All four physicals the format allows for DECIMAL.
+		return pt == PhysicalInt32 || pt == PhysicalInt64 ||
+			pt == PhysicalByteArray || pt == PhysicalFixedLenByteArray
+	case TypeString, TypeCIDR, TypeBytes, TypeIPv6, TypeUUID, TypeVector:
+		return pt == PhysicalByteArray || pt == PhysicalFixedLenByteArray || pt == PhysicalInt96
+	case TypeArray, TypeRow, TypeMap:
+		// Containers are not decoded from one leaf; their leaves are
+		// checked individually.
+		return true
 	default:
-		return familyBytes
+		return true
 	}
+}
+
+// CoercibleTo reports whether values decoded as the type the FILE stores can
+// be converted, after decode, to the type the CATALOG declares.
+//
+// This set is the contract between the two read paths. Which one runs is
+// decided by the SHAPE of the schema — a table one column of ARRAY/MAP away
+// from the row reader sends every query on it down that path (#393) — not by
+// the query, so a pairing one path converts and the other refuses is a
+// two-path divergence waiting for a schema change to expose it. The native
+// scan implements exactly these three in copyNativeCoercedDirect /
+// copyNativeCoercedScatter; readColumnToAny implements them here.
+//
+// Anything outside the set stays an error on both paths. Widening INT32 to
+// INT64 is deliberately NOT here: it is indistinguishable from the
+// catalog/file drift this guard exists to catch, and unlike the three below
+// it has no scan-side implementation to agree with.
+func CoercibleTo(file, want TypeID) bool {
+	switch {
+	case file == TypeInt64 && want == TypeInt32:
+		return true
+	case file == TypeInt64 && want == TypeFloat64:
+		return true
+	case (file == TypeDate || file == TypeInt32) && want == TypeString:
+		return true
+	}
+	return false
+}
+
+// FormatDateDays renders a DATE (days since 1970-01-01) the way the engine
+// does. batch.FormatDate delegates here so the row path and the native scan
+// cannot drift apart on a DATE→STRING coercion.
+func FormatDateDays(days int32) string {
+	return epochDate.AddDate(0, 0, int(days)).Format("2006-01-02")
+}
+
+// fixedByteWidth is the exact entry width a type needs from a
+// FIXED_LEN_BYTE_ARRAY leaf, or 0 when any width is acceptable. A UUID is
+// sixteen bytes by definition and an IPv6 address is too; a leaf of another
+// width is not a truncated one, it is a different value.
+func fixedByteWidth(c Column) int {
+	switch c.Type {
+	case TypeUUID, TypeIPv6:
+		return 16
+	case TypeVector:
+		if c.Dimension > 0 {
+			return c.Dimension * 4
+		}
+	}
+	return 0
 }
 
 // retypeFromCatalog replaces each read column's type with the catalog's,
@@ -819,19 +876,32 @@ func familyOf(t TypeID) decodeFamily {
 // per INT32 in the page, an unsafe.Slice twice as long as its backing array
 // — megabytes of adjacent heap returned as query results.
 //
+// The comparison is against the FILE LEAF's physical type, not against what
+// our writer would have chosen for the recovered type. Those differ wherever
+// the format allows a type more than one encoding: a pyarrow DECIMAL(9,2) is
+// physically INT32, our writer's DECIMAL is INT64, so a catalog INT64 over
+// that column compared INT64 to INT64 and passed — then read eight bytes per
+// four-byte value. See PhysicalReadableAs.
+//
 // Drift is an ERROR rather than a silent skip. Skipping would answer the
 // query from the file's own type, which is a different answer from the one
 // the catalog promised, arrived at without saying so; the caller cannot tell
 // that from a correct read. A named error says which column, what the
 // catalog claims and what the file actually holds — which is the whole
 // diagnosis.
-func retypeFromCatalog(readCols, catalog []Column) ([]Column, error) {
+func retypeFromCatalog(readCols, catalog []Column, leaves []*SchemaNode) ([]Column, error) {
 	if len(catalog) == 0 || len(readCols) == 0 {
 		return readCols, nil
 	}
 	byName := make(map[string]Column, len(catalog))
 	for _, c := range catalog {
 		byName[strings.ToLower(c.Name)] = c
+	}
+	leafByName := make(map[string]*SchemaNode, len(leaves))
+	for _, l := range leaves {
+		if l != nil && l.IsLeaf() {
+			leafByName[strings.ToLower(l.Name)] = l
+		}
 	}
 	out := make([]Column, len(readCols))
 	copy(out, readCols)
@@ -843,11 +913,28 @@ func retypeFromCatalog(readCols, catalog []Column) ([]Column, error) {
 		if isNestedType(c.Type) || isNestedType(want.Type) {
 			continue
 		}
-		if familyOf(want.Type) != familyOf(c.Type) {
+		// The file's own leaf is the authority. Without one (a column the
+		// file does not carry, read as all-NULL) fall back to the type the
+		// reader recovered, which is what the decode would use anyway.
+		filePhys := wadjetTypeToPhysical(c.Type)
+		var typeLen int
+		if leaf := leafByName[strings.ToLower(c.Name)]; leaf != nil && leaf.Type != nil {
+			filePhys = *leaf.Type
+			typeLen = int(leaf.TypeLength)
+		}
+		if !PhysicalReadableAs(want.Type, filePhys) && !CoercibleTo(c.Type, want.Type) {
 			return nil, fmt.Errorf(
-				"column %q: schema declares %s (physical %s) but the file stores %s (physical %s): "+
+				"column %q: schema declares %s but the file stores %s as physical %s: "+
 					"refusing to decode the file's bytes as a different width",
-				c.Name, want.Type, wadjetTypeToPhysical(want.Type), c.Type, wadjetTypeToPhysical(c.Type))
+				c.Name, want.Type, c.Type, filePhys)
+		}
+		if filePhys == PhysicalFixedLenByteArray {
+			if w := fixedByteWidth(want); w > 0 && typeLen != w {
+				return nil, fmt.Errorf(
+					"column %q: schema declares %s (%d bytes per value) but the file's "+
+						"FIXED_LEN_BYTE_ARRAY entries are %d bytes",
+					c.Name, want.Type, w, typeLen)
+			}
 		}
 		out[i].Type = want.Type
 		out[i].Precision, out[i].Scale = want.Precision, want.Scale
@@ -881,7 +968,6 @@ func filterSchemaColumns(cols []Column, selected []string) []Column {
 // declared VECTOR dimension, which the unpack functions check the file's
 // entry width against.
 func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, col Column) ([]any, error) {
-	typeID := col.Type
 	pr := fr.ColumnPages(rgIdx, colIdx)
 	if pr == nil {
 		return make([]any, numRows), nil
@@ -893,6 +979,22 @@ func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, col Column) ([]
 	if colIdx < len(leaves) {
 		maxDef = int32(leaves[colIdx].MaxDefLevel)
 	}
+
+	// Schema evolution: the catalog names a type the file does not store,
+	// but one the file's values can be CONVERTED to after decode. Decode as
+	// the file's type and convert at the end — decoding as the catalog's
+	// type would hand a page of the wrong width to the typed accessor,
+	// which is the failure this whole guard exists for. The native scan
+	// converts the same pairings in copyNativeCoerced*, gated by the same
+	// CoercibleTo set, so the two paths answer a coerced column identically.
+	convertTo, convert := col.Type, false
+	if colIdx < len(leaves) {
+		if ft := TypeIDFromSchemaNode(leaves[colIdx]); ft != col.Type && CoercibleTo(ft, col.Type) {
+			col.Type = ft
+			convert = true
+		}
+	}
+	typeID := col.Type
 
 	dict, err := pr.NextDictionary()
 	if err != nil {
@@ -950,10 +1052,85 @@ func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, col Column) ([]
 			}
 		}
 	}
+	if convert {
+		coerceDecoded(values, typeID, convertTo)
+	}
 	return values, nil
 }
 
+// coerceDecoded converts a column decoded as the file's type into the type
+// the catalog names, for the pairings CoercibleTo admits.
+//
+// INT64→INT32 needs nothing: the row path boxes both as a Go int64 and the
+// INT32 vector narrows on store, which is what the native path's
+// int32(src[i]) does. The other two produce the value the native path
+// produces, from the same helper in the DATE case.
+func coerceDecoded(values []any, from, to TypeID) {
+	switch {
+	case from == TypeInt64 && to == TypeFloat64:
+		for i, v := range values {
+			if iv, ok := v.(int64); ok {
+				values[i] = float64(iv)
+			}
+		}
+	case (from == TypeDate || from == TypeInt32) && to == TypeString:
+		for i, v := range values {
+			if iv, ok := v.(int64); ok {
+				values[i] = FormatDateDays(int32(iv))
+			}
+		}
+	}
+}
+
+// checkPageDecodable refuses a page whose bytes the column's decode arm
+// cannot read, INSTEAD of letting the typed accessor answer nil.
+//
+// nil was the whole bug on this path: every unpack loop is written
+// `for i := 0; i < n && i < len(src); i++`, so a nil src ran zero
+// iterations and left every dst slot untouched — a 1000-row column read
+// back as 1000 NULLs with err == nil. The engine cannot tell that from a
+// column that really is all NULL. The two ways to get here are a footer
+// whose logical annotation disagrees with its own leaf's physical type
+// (INT64 bytes annotated LogicalInteger{BitWidth: 32}) and catalog/file
+// drift that retypeFromCatalog did not see because the column has no leaf
+// of its own.
+func checkPageDecodable(col Column, data Values, n int) error {
+	if n <= 0 {
+		return nil
+	}
+	if !PhysicalReadableAs(col.Type, data.PhysType()) {
+		return fmt.Errorf("column %q: %s cannot be decoded from a %s page",
+			col.Name, col.Type, data.PhysType())
+	}
+	// The accessor also refuses a page body too short for its declared
+	// value count (values.go). Catch that here rather than as silent NULLs.
+	short := false
+	switch data.PhysType() {
+	case PhysicalInt64:
+		short = len(data.Int64()) == 0
+	case PhysicalInt32:
+		short = len(data.Int32()) == 0
+	case PhysicalDouble:
+		short = len(data.Double()) == 0
+	case PhysicalFloat:
+		short = len(data.Float()) == 0
+	case PhysicalBoolean:
+		// Eight values per byte, and Count() is the VALUE count (nulls do
+		// not consume a bit), so this is the right comparison on both the
+		// all-present and the nullable path.
+		short = len(data.Boolean())*8 < data.Count()
+	}
+	if short {
+		return fmt.Errorf("column %q: page declares %d %s values but its body cannot back them",
+			col.Name, data.Count(), data.PhysType())
+	}
+	return nil
+}
+
 func unpackAllPresent(dst []any, offset int, data Values, n int, col Column) error {
+	if err := checkPageDecodable(col, data, n); err != nil {
+		return err
+	}
 	switch col.Type {
 	case TypeInt64, TypeTimestamp, TypeDuration:
 		src := data.Int64()
@@ -1026,6 +1203,9 @@ func unpackAllPresent(dst []any, offset int, data Values, n int, col Column) err
 }
 
 func unpackWithNulls(dst []any, offset int, data Values, defLevels []int32, maxDef int32, n int, col Column) error {
+	if err := checkPageDecodable(col, data, data.Count()); err != nil {
+		return err
+	}
 	switch col.Type {
 	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
 		src := data.Int64()
@@ -1248,25 +1428,23 @@ func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) (Value
 
 	switch typeID {
 	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
-		src := dict.Data.Int64()
-		if err := dictEntries(len(src), dict, typeID); err != nil {
-			return Values{}, err
-		}
-		dst := make([]int64, n)
-		for i := 0; i < n; i++ {
-			dst[i] = src[indices[i]]
-		}
-		return PlainInt64Values(dst), nil
+		return gatherDictInt64(dict, indices, n, typeID)
 	case TypeInt32, TypePort, TypeProtocol, TypeDate:
-		src := dict.Data.Int32()
-		if err := dictEntries(len(src), dict, typeID); err != nil {
-			return Values{}, err
+		return gatherDictInt32(dict, indices, n, typeID)
+	case TypeDecimal:
+		// DECIMAL is the one engine type parquet stores in four different
+		// physicals, and which one a file used is a property of the FILE,
+		// not of the type. Without these two arms a dict-encoded DECIMAL
+		// backed by INT32 or INT64 — what pyarrow writes for precisions up
+		// to 18 — fell through to the BYTE_ARRAY default and could not be
+		// read at all.
+		switch dict.Data.PhysType() {
+		case PhysicalInt64:
+			return gatherDictInt64(dict, indices, n, typeID)
+		case PhysicalInt32:
+			return gatherDictInt32(dict, indices, n, typeID)
 		}
-		dst := make([]int32, n)
-		for i := 0; i < n; i++ {
-			dst[i] = src[indices[i]]
-		}
-		return PlainInt32Values(dst), nil
+		return gatherDictBytes(dict, indices, n, typeID)
 	case TypeFloat64:
 		src := dict.Data.Double()
 		if err := dictEntries(len(src), dict, typeID); err != nil {
@@ -1288,20 +1466,48 @@ func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) (Value
 		}
 		return PlainFloat32Values(dst), nil
 	default:
-		dictData, dictOffsets := dict.Data.ByteArray()
-		if err := dictEntries(len(dictOffsets)-1, dict, typeID); err != nil {
-			return Values{}, err
-		}
-		var buf []byte
-		offsets := make([]uint32, n+1)
-		for i := 0; i < n; i++ {
-			idx := indices[i]
-			offsets[i] = uint32(len(buf))
-			buf = append(buf, dictData[dictOffsets[idx]:dictOffsets[idx+1]]...)
-		}
-		offsets[n] = uint32(len(buf))
-		return ByteArrayValues(buf, offsets), nil
+		return gatherDictBytes(dict, indices, n, typeID)
 	}
+}
+
+func gatherDictInt64(dict *DictionaryData, indices []int32, n int, typeID TypeID) (Values, error) {
+	src := dict.Data.Int64()
+	if err := dictEntries(len(src), dict, typeID); err != nil {
+		return Values{}, err
+	}
+	dst := make([]int64, n)
+	for i := 0; i < n; i++ {
+		dst[i] = src[indices[i]]
+	}
+	return PlainInt64Values(dst), nil
+}
+
+func gatherDictInt32(dict *DictionaryData, indices []int32, n int, typeID TypeID) (Values, error) {
+	src := dict.Data.Int32()
+	if err := dictEntries(len(src), dict, typeID); err != nil {
+		return Values{}, err
+	}
+	dst := make([]int32, n)
+	for i := 0; i < n; i++ {
+		dst[i] = src[indices[i]]
+	}
+	return PlainInt32Values(dst), nil
+}
+
+func gatherDictBytes(dict *DictionaryData, indices []int32, n int, typeID TypeID) (Values, error) {
+	dictData, dictOffsets := dict.Data.ByteArray()
+	if err := dictEntries(len(dictOffsets)-1, dict, typeID); err != nil {
+		return Values{}, err
+	}
+	var buf []byte
+	offsets := make([]uint32, n+1)
+	for i := 0; i < n; i++ {
+		idx := indices[i]
+		offsets[i] = uint32(len(buf))
+		buf = append(buf, dictData[dictOffsets[idx]:dictOffsets[idx+1]]...)
+	}
+	offsets[n] = uint32(len(buf))
+	return ByteArrayValues(buf, offsets), nil
 }
 
 // dictEntries checks that a dictionary page decoded as many entries as its

@@ -51,8 +51,10 @@ func TestReadRowsAsRefusesWidthMismatch(t *testing.T) {
 		// R1: the reviewer's shape — an INT32 column read as INT64 asks for
 		// 8 bytes per value out of a page holding 4.
 		{"int64_over_int32", TypeInt32, int64(7), TypeInt64},
-		// R2: the same drift the other way round.
-		{"int32_over_int64", TypeInt64, int64(7), TypeInt32},
+		// The drift the other way round (INT32 over a file INT64) is NOT
+		// here: it is one of the three pairings the native scan converts,
+		// so the row path converts it too. See
+		// TestReadRowsAsCoercesTheSamePairsTheScanDoes.
 		{"float64_over_float32", TypeFloat32, 1.5, TypeFloat64},
 		{"float32_over_float64", TypeFloat64, 1.5, TypeFloat32},
 		{"int64_over_string", TypeString, "seven", TypeInt64},
@@ -130,6 +132,7 @@ func TestRetypeFromCatalogAcceptsTheEightLossyTypes(t *testing.T) {
 			out, err := retypeFromCatalog(
 				[]Column{{Name: "c", Type: tc.recovered}},
 				[]Column{{Name: "c", Type: tc.want}},
+				nil,
 			)
 			if err != nil {
 				t.Fatalf("retype %s over %s: %v", tc.want, tc.recovered, err)
@@ -148,6 +151,7 @@ func TestRetypeFromCatalogLeavesNestedAlone(t *testing.T) {
 	out, err := retypeFromCatalog(
 		[]Column{{Name: "m", Type: TypeMap}, {Name: "a", Type: TypeArray}},
 		[]Column{{Name: "m", Type: TypeString}, {Name: "a", Type: TypeRow}},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("nested columns: %v", err)
@@ -182,5 +186,119 @@ func TestVectorDimensionMismatchIsAnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "8") || !strings.Contains(err.Error(), "4") {
 		t.Errorf("error %q does not name both dimensions", err)
+	}
+}
+
+// TestReadRowsAsCoercesTheSamePairsTheScanDoes: three catalog/file pairings
+// are not drift but schema evolution the engine already converts on the
+// native scan path (copyNativeCoercedDirect). Which path a query takes is
+// decided by the SHAPE of the table's schema — one ARRAY/MAP column sends
+// every query on that table to the row reader (#393) — so a pairing that
+// converts on one path and errors on the other is a divergence waiting for
+// a schema change to expose it. parquet.CoercibleTo is the one set both
+// paths gate on; this pins the row half of it.
+func TestReadRowsAsCoercesTheSamePairsTheScanDoes(t *testing.T) {
+	cases := []struct {
+		name     string
+		fileType TypeID
+		value    any
+		want     TypeID
+		expect   any
+	}{
+		{"int32_over_int64", TypeInt64, int64(7), TypeInt32, int64(7)},
+		{"float64_over_int64", TypeInt64, int64(7), TypeFloat64, float64(7)},
+		{"string_over_date", TypeDate, "2021-03-04", TypeString, "2021-03-04"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !CoercibleTo(tc.fileType, tc.want) {
+				t.Fatalf("CoercibleTo(%s, %s) = false", tc.fileType, tc.want)
+			}
+			fileSchema := Schema{Columns: []Column{{Name: "c", Type: tc.fileType, Nullable: true}}}
+			r := retypeTestFile(t, fileSchema, []map[string]any{{"c": tc.value}, {"c": nil}})
+
+			rows, err := r.ReadRowsAs([]Column{{Name: "c", Type: tc.want, Nullable: true}}, nil)
+			if err != nil {
+				t.Fatalf("ReadRowsAs(%s over %s): %v", tc.want, tc.fileType, err)
+			}
+			if len(rows) != 2 {
+				t.Fatalf("read %d rows, want 2", len(rows))
+			}
+			if got := rows[0]["c"]; got != tc.expect {
+				t.Errorf("value = %#v, want %#v", got, tc.expect)
+			}
+			if _, ok := rows[1]["c"]; ok {
+				t.Errorf("the NULL row came back as %#v", rows[1]["c"])
+			}
+		})
+	}
+}
+
+// TestPhysicalReadableAsUsesTheFileLeafNotTheWriterMapping is finding 3: the
+// guard compared wadjetTypeToPhysical(catalog) against
+// wadjetTypeToPhysical(recovered) — OUR WRITER's mapping on both sides. Our
+// writer stores DECIMAL as INT64, so a catalog INT64 (or TIMESTAMP, IPv4,
+// MAC, DURATION) over a file DECIMAL compared INT64 to INT64 and passed,
+// whatever the file actually holds. pyarrow stores DECIMAL(9,2) as INT32.
+func TestPhysicalReadableAsUsesTheFileLeafNotTheWriterMapping(t *testing.T) {
+	int32Leaf := PhysicalInt32
+	leaves := []*SchemaNode{{
+		Name: "d", Type: &int32Leaf, LeafIndex: 0,
+		LogicalType: &LogicalType{Type: LogicalDecimal, Precision: 9, Scale: 2},
+	}}
+	for _, want := range []TypeID{TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration} {
+		t.Run(want.String(), func(t *testing.T) {
+			// The writer mapping agrees with itself and would let this
+			// through; the file leaf does not.
+			if wadjetTypeToPhysical(want) != wadjetTypeToPhysical(TypeDecimal) {
+				t.Fatalf("precondition: the writer mapping already separates %s from DECIMAL", want)
+			}
+			_, err := retypeFromCatalog(
+				[]Column{{Name: "d", Type: TypeDecimal, Precision: 9, Scale: 2}},
+				[]Column{{Name: "d", Type: want}},
+				leaves,
+			)
+			if err == nil {
+				t.Fatalf("catalog %s over an INT32-backed DECIMAL leaf was accepted", want)
+			}
+			if !strings.Contains(err.Error(), "INT32") {
+				t.Errorf("error %q does not name the file's physical type", err)
+			}
+		})
+	}
+
+	// A DECIMAL leaf that really is INT64 still retypes to the eight lossy
+	// types, which is what the mechanism is for.
+	int64Leaf := PhysicalInt64
+	ok := []*SchemaNode{{Name: "d", Type: &int64Leaf, LeafIndex: 0}}
+	if _, err := retypeFromCatalog(
+		[]Column{{Name: "d", Type: TypeInt64}},
+		[]Column{{Name: "d", Type: TypeIPv4}},
+		ok,
+	); err != nil {
+		t.Errorf("IPv4 over an INT64 leaf: %v", err)
+	}
+}
+
+// TestRetypeChecksFixedLenByteArrayWidth: a UUID is sixteen bytes by
+// definition. A FIXED_LEN_BYTE_ARRAY leaf of another width is not a
+// truncated UUID, it is a different value.
+func TestRetypeChecksFixedLenByteArrayWidth(t *testing.T) {
+	flba := PhysicalFixedLenByteArray
+	leaves := []*SchemaNode{{Name: "u", Type: &flba, TypeLength: 8, LeafIndex: 0}}
+	if _, err := retypeFromCatalog(
+		[]Column{{Name: "u", Type: TypeString}},
+		[]Column{{Name: "u", Type: TypeUUID}},
+		leaves,
+	); err == nil {
+		t.Fatal("UUID declared over an 8-byte FIXED_LEN_BYTE_ARRAY leaf was accepted")
+	}
+	leaves[0].TypeLength = 16
+	if _, err := retypeFromCatalog(
+		[]Column{{Name: "u", Type: TypeString}},
+		[]Column{{Name: "u", Type: TypeUUID}},
+		leaves,
+	); err != nil {
+		t.Fatalf("UUID over a 16-byte leaf: %v", err)
 	}
 }

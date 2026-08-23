@@ -172,7 +172,11 @@ func (s *parquetTableFuncSource) Init(_ context.Context) error {
 		return fmt.Errorf("read_parquet: %w", err)
 	}
 	schema := reader.Schema().Columns
-	s.batch = readBatchDirect(reader, schema, nil)
+	b, err := readBatchDirect(reader, schema, nil)
+	if err != nil {
+		return fmt.Errorf("read_parquet: %w", err)
+	}
+	s.batch = b
 	return nil
 }
 

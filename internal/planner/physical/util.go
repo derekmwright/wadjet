@@ -146,7 +146,7 @@ func fromRows(schema []parquet.Column, rows []map[string]any) *batch.RecordBatch
 // column-at-a-time page reading via the native FileReader. This avoids
 // parquet-go entirely. For schemas with nested types (ARRAY, MAP), falls
 // back to row-level reading.
-func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, requiredCols []string, preds ...scanPredicate) *batch.RecordBatch {
+func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, requiredCols []string, preds ...scanPredicate) (*batch.RecordBatch, error) {
 	// Nested types: fall back to row reader. The test is on the columns
 	// this query READS, not on the whole table: a table is one column of
 	// ARRAY/ROW/MAP away from sending every query on it — including ones
@@ -160,7 +160,7 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 	fr := pqReader.FileReader()
 	numRGs := fr.NumRowGroups()
 	if numRGs == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Collect active (non-pruned) row group indices.
@@ -187,7 +187,7 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 	}
 
 	if len(activeRGs) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Count total rows across active row groups.
@@ -196,15 +196,18 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 		totalRows += fr.RowGroupNumRows(rgIdx)
 	}
 	if totalRows == 0 {
-		return nil
+		return nil, nil
 	}
 
-	// Read each active row group via the native reader and merge.
+	// Read each active row group via the native reader and merge. A decode
+	// error FAILS the read: skipping the row group answers the query from
+	// the rows that happened to decode, which is a wrong answer the caller
+	// cannot tell from a right one (the silent-partial class of #144/#308).
 	var batches []*batch.RecordBatch
 	for _, rgIdx := range activeRGs {
 		b, err := scan.ReadRowGroupNative(fr, rgIdx, readSchema, nil)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("decoding row group %d: %w", rgIdx, err)
 		}
 		if b != nil {
 			batches = append(batches, b)
@@ -212,10 +215,10 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 	}
 
 	if len(batches) == 0 {
-		return nil
+		return nil, nil
 	}
 	if len(batches) == 1 {
-		return batches[0]
+		return batches[0], nil
 	}
 
 	result := batch.NewRecordBatch(readSchema, int(totalRows))
@@ -227,13 +230,13 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 		offset += b.Len
 	}
 	result.Len = offset
-	return result
+	return result, nil
 }
 
 // readBatchViaRows reads a parquet file using parquet-go's row-level reader,
 // which handles nested types (LIST, MAP, STRUCT) natively. Used as fallback
 // when the schema contains nested columns.
-func readBatchViaRows(pqReader *parquet.Reader, schema []parquet.Column, requiredCols []string) *batch.RecordBatch {
+func readBatchViaRows(pqReader *parquet.Reader, schema []parquet.Column, requiredCols []string) (*batch.RecordBatch, error) {
 	// Dotted ROW-field references require their parent column — see
 	// buildReadSchema (issue #147). ReadRows matches file columns by
 	// exact name, so "attrs.score" must become "attrs" here or the
@@ -249,9 +252,17 @@ func readBatchViaRows(pqReader *parquet.Reader, schema []parquet.Column, require
 	// PROTOCOL/DURATION/BYTES/UUID, and decoded as the plain int/bytes the
 	// footer recovers, they reach batch.FromRows in a shape the typed vector
 	// stores as NULL. The catalog schema is right here; pass it.
+	// The error is PROPAGATED, not folded into an empty batch. ReadRowsAs
+	// now refuses a column whose catalog type the file's bytes cannot
+	// supply, and turning that refusal into zero rows hands the query a
+	// silently truncated answer — exactly the shape of failure the refusal
+	// was added to stop.
 	rows, err := pqReader.ReadRowsAs(schema, selectedCols)
-	if err != nil || len(rows) == 0 {
-		return nil
+	if err != nil {
+		return nil, fmt.Errorf("reading rows: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
 	}
 
 	// Build the read schema (only columns we're reading)
@@ -272,7 +283,7 @@ func readBatchViaRows(pqReader *parquet.Reader, schema []parquet.Column, require
 		}
 	}
 
-	return fromRows(readSchema, rows)
+	return fromRows(readSchema, rows), nil
 }
 
 // mapPredOp converts a logical predicate operator string to an exec.CompareOp.

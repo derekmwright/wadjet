@@ -360,7 +360,10 @@ func TestReadBatchDirect_Consistency(t *testing.T) {
 			t.Fatalf("iter %d: creating parquet reader: %v", iter, err)
 		}
 
-		b := readBatchDirect(reader, schema.Columns, nil)
+		b, err := readBatchDirect(reader, schema.Columns, nil)
+		if err != nil {
+			t.Fatalf("iter %d: readBatchDirect: %v", iter, err)
+		}
 
 		if b == nil || b.Len != numRows {
 			t.Fatalf("iter %d: expected %d rows, got %v", iter, numRows, b)

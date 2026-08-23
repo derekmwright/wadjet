@@ -92,8 +92,14 @@ func decodeDeltaBinaryPacked(data []byte, n int) ([]int64, error) {
 		return nil, fmt.Errorf("delta: reading first value: %w", err)
 	}
 
-	if totalValues == 0 {
-		return nil, nil
+	// The page header asked for n values; the DELTA header says how many
+	// this stream holds. A stream SHORTER than the page's claim used to be
+	// silently honoured — the caller got fewer values than it asked for and
+	// no error, so the rows past the end of the stream kept whatever the
+	// destination vector already had. Refuse: which of the two numbers is
+	// wrong is not decidable here, and both answers are wrong to give.
+	if totalValues < uint64(n) {
+		return nil, fmt.Errorf("delta: page declares %d values but the DELTA_BINARY_PACKED header carries %d", n, totalValues)
 	}
 	if numMiniblocks == 0 {
 		return nil, fmt.Errorf("delta: numMiniblocks is 0")
@@ -102,6 +108,8 @@ func decodeDeltaBinaryPacked(data []byte, n int) ([]int64, error) {
 		return nil, fmt.Errorf("delta: unreasonable params: blockSize=%d numMiniblocks=%d totalValues=%d", blockSize, numMiniblocks, totalValues)
 	}
 
+	// The stream may legitimately carry MORE than this page reads (the
+	// caller decodes a prefix); take the first n.
 	count := int(totalValues)
 	if count > n {
 		count = n

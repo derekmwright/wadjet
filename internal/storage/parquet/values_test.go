@@ -227,7 +227,10 @@ func TestDecodePlainInt32(t *testing.T) {
 	for i, val := range want {
 		binary.LittleEndian.PutUint32(data[i*4:], uint32(val))
 	}
-	v := DecodePlainInt32(data, len(want))
+	v, err := DecodePlainInt32(data, len(want))
+	if err != nil {
+		t.Fatalf("DecodePlainInt32: %v", err)
+	}
 	if v.Count() != len(want) {
 		t.Fatalf("Count() = %d, want %d", v.Count(), len(want))
 	}
@@ -245,7 +248,10 @@ func TestDecodePlainInt64(t *testing.T) {
 	for i, val := range want {
 		binary.LittleEndian.PutUint64(data[i*8:], uint64(val))
 	}
-	v := DecodePlainInt64(data, len(want))
+	v, err := DecodePlainInt64(data, len(want))
+	if err != nil {
+		t.Fatalf("DecodePlainInt64: %v", err)
+	}
 	if v.Count() != len(want) {
 		t.Fatalf("Count() = %d, want %d", v.Count(), len(want))
 	}
@@ -263,7 +269,10 @@ func TestDecodePlainFloat(t *testing.T) {
 	for i, val := range want {
 		binary.LittleEndian.PutUint32(data[i*4:], math.Float32bits(val))
 	}
-	v := DecodePlainFloat(data, len(want))
+	v, err := DecodePlainFloat(data, len(want))
+	if err != nil {
+		t.Fatalf("DecodePlainFloat: %v", err)
+	}
 	got := v.Float()
 	for i, w := range want {
 		if got[i] != w {
@@ -278,7 +287,10 @@ func TestDecodePlainDouble(t *testing.T) {
 	for i, val := range want {
 		binary.LittleEndian.PutUint64(data[i*8:], math.Float64bits(val))
 	}
-	v := DecodePlainDouble(data, len(want))
+	v, err := DecodePlainDouble(data, len(want))
+	if err != nil {
+		t.Fatalf("DecodePlainDouble: %v", err)
+	}
 	got := v.Double()
 	for i, w := range want {
 		if got[i] != w {
@@ -303,7 +315,10 @@ func TestDecodePlainBoolean(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v := DecodePlainBoolean(tt.bits, tt.n)
+			v, err := DecodePlainBoolean(tt.bits, tt.n)
+			if err != nil {
+				t.Fatalf("DecodePlainBoolean: %v", err)
+			}
 			if v.Count() != tt.n {
 				t.Fatalf("Count() = %d, want %d", v.Count(), tt.n)
 			}
@@ -332,7 +347,10 @@ func TestDecodePlainByteArray(t *testing.T) {
 			buf = append(buf, s...)
 		}
 
-		v := DecodePlainByteArray(buf, len(strings))
+		v, err := DecodePlainByteArray(buf, len(strings))
+		if err != nil {
+			t.Fatalf("DecodePlainByteArray: %v", err)
+		}
 		if v.Count() != len(strings) {
 			t.Fatalf("Count() = %d, want %d", v.Count(), len(strings))
 		}
@@ -346,7 +364,10 @@ func TestDecodePlainByteArray(t *testing.T) {
 	})
 
 	t.Run("empty_input", func(t *testing.T) {
-		v := DecodePlainByteArray(nil, 0)
+		v, err := DecodePlainByteArray(nil, 0)
+		if err != nil {
+			t.Fatalf("DecodePlainByteArray: %v", err)
+		}
 		if v.Count() != 0 {
 			t.Fatalf("Count() = %d, want 0", v.Count())
 		}
@@ -355,7 +376,10 @@ func TestDecodePlainByteArray(t *testing.T) {
 	t.Run("all_empty_strings", func(t *testing.T) {
 		// Three zero-length byte arrays.
 		buf := make([]byte, 12) // 3 × 4-byte zero-length prefixes
-		v := DecodePlainByteArray(buf, 3)
+		v, err := DecodePlainByteArray(buf, 3)
+		if err != nil {
+			t.Fatalf("DecodePlainByteArray: %v", err)
+		}
 		if v.Count() != 3 {
 			t.Fatalf("Count() = %d, want 3", v.Count())
 		}
@@ -368,13 +392,23 @@ func TestDecodePlainByteArray(t *testing.T) {
 		}
 	})
 
-	t.Run("truncated_data", func(t *testing.T) {
-		// Data truncated mid-length-prefix — should return partial results.
+	t.Run("truncated_data_is_an_error", func(t *testing.T) {
+		// Data truncated mid-length-prefix. A partial decode used to be
+		// returned as a success, which reads as "the rest of the column was
+		// absent"; the page is corrupt and says so now.
 		buf := []byte{5, 0, 0, 0, 'h', 'e', 'l', 'l', 'o', 3, 0}
-		v := DecodePlainByteArray(buf, 2)
-		// Should handle gracefully — first value decoded, second truncated.
-		if v.Count() < 1 {
-			t.Fatalf("Count() = %d, want >= 1", v.Count())
+		if _, err := DecodePlainByteArray(buf, 2); err == nil {
+			t.Fatal("a page truncated mid-length-prefix decoded without error")
+		}
+	})
+
+	t.Run("length_prefix_past_the_end_is_an_error", func(t *testing.T) {
+		// One value whose length prefix claims far more than the page holds.
+		// The pass-one bounds test only checked room for the PREFIX, so the
+		// pass-two copy sliced past the end of the page and panicked.
+		buf := []byte{0xFF, 0xFF, 0xFF, 0x7F, 'x'}
+		if _, err := DecodePlainByteArray(buf, 1); err == nil {
+			t.Fatal("a 2 GiB length prefix over a 5-byte page decoded without error")
 		}
 	})
 }
@@ -396,7 +430,10 @@ func TestDecodePlainFixedLenByteArray(t *testing.T) {
 			for i := range tt.data {
 				tt.data[i] = byte(i)
 			}
-			v := DecodePlainFixedLenByteArray(tt.data, tt.n, tt.typeLength)
+			v, err := DecodePlainFixedLenByteArray(tt.data, tt.n, tt.typeLength)
+			if err != nil {
+				t.Fatalf("DecodePlainFixedLenByteArray: %v", err)
+			}
 			if v.Count() != tt.n {
 				t.Fatalf("Count() = %d, want %d", v.Count(), tt.n)
 			}
@@ -570,27 +607,68 @@ func TestValuesAccessorsRefuseWrongPhysicalType(t *testing.T) {
 	}
 }
 
-// TestValuesAccessorsClampToTheBytesTheyHave: count is a page-header claim.
-// A count larger than the bytes can back must not widen the unsafe.Slice.
-func TestValuesAccessorsClampToTheBytesTheyHave(t *testing.T) {
+// TestValuesAccessorsRefuseACountTheBytesCannotBack: count is a page-header
+// claim. A count larger than the bytes can back must not widen the
+// unsafe.Slice — and it must not quietly SHRINK it either. A truncated slice
+// answers a read of N values with fewer, which every unpack loop accepts as
+// "the rest were absent": the same silent-wrong-answer the physical-type
+// refusal exists to prevent. Refusal is the answer; the read sites turn it
+// into a named error.
+func TestValuesAccessorsRefuseACountTheBytesCannotBack(t *testing.T) {
 	data := make([]byte, 16)
 	cases := []struct {
 		name string
 		got  int
-		want int
 	}{
-		{"Int32", len(RawValues(PhysicalInt32, data, 1<<20).Int32()), 4},
-		{"Int64", len(RawValues(PhysicalInt64, data, 1<<20).Int64()), 2},
-		{"Float", len(RawValues(PhysicalFloat, data, 1<<20).Float()), 4},
-		{"Double", len(RawValues(PhysicalDouble, data, 1<<20).Double()), 2},
+		{"Int32", len(RawValues(PhysicalInt32, data, 1<<20).Int32())},
+		{"Int64", len(RawValues(PhysicalInt64, data, 1<<20).Int64())},
+		{"Float", len(RawValues(PhysicalFloat, data, 1<<20).Float())},
+		{"Double", len(RawValues(PhysicalDouble, data, 1<<20).Double())},
 	}
 	for _, tc := range cases {
-		if tc.got != tc.want {
-			t.Errorf("%s() over 16 bytes with a count of 2^20 returned %d elements, want %d",
-				tc.name, tc.got, tc.want)
+		if tc.got != 0 {
+			t.Errorf("%s() over 16 bytes with a count of 2^20 returned %d elements, want none",
+				tc.name, tc.got)
 		}
 	}
+	// A count the bytes DO back still reads.
+	if n := len(RawValues(PhysicalInt64, data, 2).Int64()); n != 2 {
+		t.Errorf("Int64() over 16 bytes with a count of 2 returned %d elements, want 2", n)
+	}
 }
+
+// TestDecodePlainRefusesAnInflatedValueCount is the page-header side of the
+// same claim, at the decoder that used to slice data[:n*width] before any
+// Values existed to check: a header saying 1,048,576 values over a
+// 1000-value body panicked with a slice-bounds error inside the scan
+// errgroup.
+func TestDecodePlainRefusesAnInflatedValueCount(t *testing.T) {
+	body := make([]byte, 1000*8)
+	const inflated = 1 << 20
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"Int32", errOf(func() error { _, e := DecodePlainInt32(body, inflated); return e })},
+		{"Int64", errOf(func() error { _, e := DecodePlainInt64(body, inflated); return e })},
+		{"Float", errOf(func() error { _, e := DecodePlainFloat(body, inflated); return e })},
+		{"Double", errOf(func() error { _, e := DecodePlainDouble(body, inflated); return e })},
+		{"Boolean", errOf(func() error { _, e := DecodePlainBoolean(body, inflated); return e })},
+		{"ByteArray", errOf(func() error { _, e := DecodePlainByteArray(body, inflated); return e })},
+		{"FLBA", errOf(func() error { _, e := DecodePlainFixedLenByteArray(body, inflated, 16); return e })},
+	}
+	for _, tc := range cases {
+		if tc.err == nil {
+			t.Errorf("DecodePlain%s with an inflated value count returned no error", tc.name)
+		}
+	}
+	// Negative counts are the same class of untrusted header field.
+	if _, err := DecodePlainInt64(body, -1); err == nil {
+		t.Error("DecodePlainInt64 with a negative value count returned no error")
+	}
+}
+
+func errOf(f func() error) error { return f() }
 
 // TestValuesAtAccessorsBoundsChecked: the statistics path indexes single
 // elements out of the same untrusted bytes.

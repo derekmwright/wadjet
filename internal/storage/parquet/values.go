@@ -2,6 +2,7 @@ package parquet
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 	"unsafe"
 )
@@ -94,21 +95,24 @@ func (v Values) PhysType() PhysicalType { return v.physType }
 //     twice as long as its backing array, i.e. adjacent heap read straight
 //     into query results. retypeFromCatalog now rejects that pairing before
 //     it gets here; this is the backstop at the unsafe site itself.
-//   - the element count must fit the bytes. count comes from a page header,
-//     which is untrusted input in a file this package must not be crashed by.
+//   - the bytes must be able to back v.count elements. Every constructor in
+//     this file establishes that (the DecodePlain* decoders now REFUSE a
+//     page body shorter than its declared value count instead of slicing
+//     into it), so this is a second backstop, not the enforcement point.
 //
-// A mismatch yields nil rather than a panic: every caller already guards its
-// loop with len(src), so a nil slice degrades to "no values decoded", which
-// the layer above reports as an error rather than a crash.
+// A short buffer yields nil, not a truncated slice. Truncating would answer
+// a read of N values with fewer, which every caller silently accepts as "the
+// rest were absent" — the same silent-wrong-answer class the physical-type
+// refusal exists to prevent. nil is refusal: the read sites check it and
+// report an error naming the column.
 func typedValues[T any](v Values, want PhysicalType, width int) []T {
-	if v.physType != want || v.count <= 0 || len(v.data) < width {
+	if v.physType != want || v.count <= 0 || width <= 0 {
 		return nil
 	}
-	n := v.count
-	if fits := len(v.data) / width; n > fits {
-		n = fits
+	if v.count > len(v.data)/width {
+		return nil
 	}
-	return unsafe.Slice((*T)(unsafe.Pointer(&v.data[0])), n)
+	return unsafe.Slice((*T)(unsafe.Pointer(&v.data[0])), v.count)
 }
 
 // Int32 returns the data as a slice of int32, or nil when the values are not
@@ -143,36 +147,92 @@ func (v Values) ByteArray() ([]byte, []uint32) {
 }
 
 // --- PLAIN encoding decoders ---
+//
+// n is the page header's declared value count and data is the page BODY.
+// Nothing in the format makes them agree: the header is Thrift the reader
+// trusted enough to parse, the body is however many bytes the chunk turned
+// out to hold. Every one of these decoders used to slice data[:n*width]
+// straight away, so a header claiming 1,048,576 values over a 1000-value
+// body killed the process with a slice-bounds panic inside the scan
+// errgroup — in a worker, that is the worker. They refuse instead, and the
+// refusal names both numbers.
+
+// plainBody returns the first n width-byte elements of a PLAIN page body,
+// or an error when the body cannot back that many.
+func plainBody(data []byte, n, width int, pt PhysicalType) ([]byte, error) {
+	if n < 0 || width <= 0 {
+		return nil, fmt.Errorf("%s page: invalid value count %d (element width %d)", pt, n, width)
+	}
+	// Division, not n*width: the product overflows for a hostile count.
+	if n > len(data)/width {
+		return nil, fmt.Errorf("%s page declares %d values (%d bytes at %d bytes each) but the page body holds %d bytes",
+			pt, n, n*width, width, len(data))
+	}
+	return data[: n*width : n*width], nil
+}
 
 // DecodePlainInt32 decodes PLAIN-encoded int32 values from raw bytes.
-func DecodePlainInt32(data []byte, n int) Values {
-	return RawValues(PhysicalInt32, data[:n*4], n)
+func DecodePlainInt32(data []byte, n int) (Values, error) {
+	body, err := plainBody(data, n, 4, PhysicalInt32)
+	if err != nil {
+		return Values{}, err
+	}
+	return RawValues(PhysicalInt32, body, n), nil
 }
 
 // DecodePlainInt64 decodes PLAIN-encoded int64 values from raw bytes.
-func DecodePlainInt64(data []byte, n int) Values {
-	return RawValues(PhysicalInt64, data[:n*8], n)
+func DecodePlainInt64(data []byte, n int) (Values, error) {
+	body, err := plainBody(data, n, 8, PhysicalInt64)
+	if err != nil {
+		return Values{}, err
+	}
+	return RawValues(PhysicalInt64, body, n), nil
 }
 
 // DecodePlainFloat decodes PLAIN-encoded float32 values from raw bytes.
-func DecodePlainFloat(data []byte, n int) Values {
-	return RawValues(PhysicalFloat, data[:n*4], n)
+func DecodePlainFloat(data []byte, n int) (Values, error) {
+	body, err := plainBody(data, n, 4, PhysicalFloat)
+	if err != nil {
+		return Values{}, err
+	}
+	return RawValues(PhysicalFloat, body, n), nil
 }
 
 // DecodePlainDouble decodes PLAIN-encoded float64 values from raw bytes.
-func DecodePlainDouble(data []byte, n int) Values {
-	return RawValues(PhysicalDouble, data[:n*8], n)
+func DecodePlainDouble(data []byte, n int) (Values, error) {
+	body, err := plainBody(data, n, 8, PhysicalDouble)
+	if err != nil {
+		return Values{}, err
+	}
+	return RawValues(PhysicalDouble, body, n), nil
 }
 
 // DecodePlainBoolean decodes PLAIN-encoded boolean values from raw bytes.
-func DecodePlainBoolean(data []byte, n int) Values {
+// Eight values per byte, LSB first.
+func DecodePlainBoolean(data []byte, n int) (Values, error) {
+	if n < 0 {
+		return Values{}, fmt.Errorf("BOOLEAN page: invalid value count %d", n)
+	}
 	byteCount := (n + 7) / 8
-	return RawValues(PhysicalBoolean, data[:byteCount], n)
+	if byteCount > len(data) {
+		return Values{}, fmt.Errorf("BOOLEAN page declares %d values (%d bytes) but the page body holds %d bytes",
+			n, byteCount, len(data))
+	}
+	return RawValues(PhysicalBoolean, data[:byteCount:byteCount], n), nil
 }
 
 // DecodePlainByteArray decodes PLAIN-encoded BYTE_ARRAY values.
 // Format: repeated [4-byte LE length][bytes...].
-func DecodePlainByteArray(data []byte, n int) Values {
+//
+// The length prefix is untrusted: the first pass validates that each value
+// is actually present before the second pass copies it. Without that, a
+// final prefix claiming 2 GiB passed the pass-one bounds test (which only
+// checked room for the PREFIX) and the pass-two copy sliced past the end of
+// the page.
+func DecodePlainByteArray(data []byte, n int) (Values, error) {
+	if n < 0 {
+		return Values{}, fmt.Errorf("BYTE_ARRAY page: invalid value count %d", n)
+	}
 	offsets := make([]uint32, n+1)
 	// First pass: compute total data size and build offset array.
 	// The raw parquet format interleaves length prefixes with data, so we
@@ -181,14 +241,20 @@ func DecodePlainByteArray(data []byte, n int) Values {
 	pos := 0
 	for i := 0; i < n; i++ {
 		if pos+4 > len(data) {
-			// Truncated — return what we have
-			offsets = offsets[:i+1]
-			return ByteArrayValues(nil, offsets)
+			return Values{}, fmt.Errorf("BYTE_ARRAY page declares %d values but the page body ends after %d", n, i)
 		}
 		length := int(binary.LittleEndian.Uint32(data[pos:]))
-		pos += 4
+		// pos only ever grows, so a length that overshoots the page is
+		// caught either by the NEXT iteration's prefix check or by the one
+		// after the loop. That keeps the payload bound at one comparison
+		// per PAGE instead of one per value, in a loop tight enough for
+		// the difference to show on a string-heavy scan.
+		pos += 4 + length
 		totalDataSize += length
-		pos += length
+	}
+	if pos > len(data) {
+		return Values{}, fmt.Errorf("BYTE_ARRAY page's %d values span %d bytes but the page body holds %d",
+			n, pos, len(data))
 	}
 
 	// Second pass: copy contiguous data and set offsets.
@@ -204,16 +270,27 @@ func DecodePlainByteArray(data []byte, n int) Values {
 		pos += length
 	}
 	offsets[n] = uint32(dataPos)
-	return ByteArrayValues(packed, offsets)
+	return ByteArrayValues(packed, offsets), nil
 }
 
 // DecodePlainFixedLenByteArray decodes PLAIN-encoded FIXED_LEN_BYTE_ARRAY values.
-func DecodePlainFixedLenByteArray(data []byte, n, typeLength int) Values {
+func DecodePlainFixedLenByteArray(data []byte, n, typeLength int) (Values, error) {
+	if n < 0 || typeLength < 0 {
+		return Values{}, fmt.Errorf("FIXED_LEN_BYTE_ARRAY page: invalid value count %d at width %d", n, typeLength)
+	}
+	if typeLength == 0 {
+		// A zero-width leaf carries no bytes at all; n zero-length values.
+		return ByteArrayValues(nil, make([]uint32, n+1)), nil
+	}
+	body, err := plainBody(data, n, typeLength, PhysicalFixedLenByteArray)
+	if err != nil {
+		return Values{}, err
+	}
 	offsets := make([]uint32, n+1)
 	for i := 0; i <= n; i++ {
 		offsets[i] = uint32(i * typeLength)
 	}
-	return ByteArrayValues(data[:n*typeLength], offsets)
+	return ByteArrayValues(body, offsets), nil
 }
 
 // --- Value extraction helpers for statistics ---

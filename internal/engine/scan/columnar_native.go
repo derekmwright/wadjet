@@ -316,16 +316,6 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		fileType = catalogType
 	}
 
-	// DECIMAL: the native decoder handles the INT64 physical encoding our
-	// writer produces. Externally-written files (PyArrow decimal128) use
-	// FIXED_LEN_BYTE_ARRAY — fail loudly rather than mis-cast the bytes;
-	// callers fall back to the row-based reader on error.
-	if fileType == pqt.TypeDecimal && colIdx < len(leaves) {
-		if pt := leaves[colIdx].Type; pt == nil || *pt != pqt.PhysicalInt64 {
-			return fmt.Errorf("decimal column %q: unsupported physical encoding (want INT64)", leaves[colIdx].Name)
-		}
-	}
-
 	// Get max definition level from schema.
 	maxDefLevel := 0
 	if colIdx < len(leaves) {
@@ -395,27 +385,10 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 			}
 		}
 
-		defLevels := page.DefinitionLevels
-		hasNulls := page.NumNulls > 0
-
-		if defLevels == nil || !hasNulls {
-			if coerce {
-				if err := copyNativeCoercedDirect(vec, offset, data, pageRows, fileType, catalogType); err != nil {
-					page.Release()
-					return err
-				}
-			} else {
-				copyNativeDataDirect(vec, offset, data, pageRows, fileType)
-			}
-		} else {
-			if coerce {
-				if err := copyNativeCoercedScatter(vec, offset, data, defLevels, int32(maxDefLevel), pageRows, fileType, catalogType); err != nil {
-					page.Release()
-					return err
-				}
-			} else {
-				copyNativeDataScatter(vec, offset, data, defLevels, int32(maxDefLevel), pageRows, fileType)
-			}
+		if err := copyPageIntoVector(vec, offset, data, page.DefinitionLevels, int32(maxDefLevel),
+			page.NumNulls > 0, pageRows, fileType, catalogType, coerce); err != nil {
+			page.Release()
+			return leafErr(leaves, colIdx, err)
 		}
 
 		offset += pageRows
@@ -488,8 +461,23 @@ func resolveNativeDictionaryScratch(s *dictResolveScratch, dict *pqt.DictionaryD
 		return pqt.Values{}, fmt.Errorf("dictionary page: %d indices for %d values", len(indices), n)
 	}
 
+	// DECIMAL is stored in four different physicals by the format; which
+	// one this file used is a property of the dictionary page's bytes, not
+	// of the type. Route it by physical rather than assuming INT64 (which
+	// is only what OUR writer emits).
+	if fileType == pqt.TypeDecimal {
+		switch dict.Data.PhysType() {
+		case pqt.PhysicalInt64:
+			fileType = pqt.TypeInt64
+		case pqt.PhysicalInt32:
+			fileType = pqt.TypeInt32
+		default:
+			return resolveDictByteArrayScratch(s, dict, indices, n)
+		}
+	}
+
 	switch fileType {
-	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration, pqt.TypeDecimal:
+	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration:
 		src := dict.Data.Int64()
 		var dst []int64
 		if s != nil {
@@ -631,45 +619,163 @@ func resolveDictByteArrayScratch(s *dictResolveScratch, dict *pqt.DictionaryData
 	return pqt.ByteArrayValues(buf, offsets), nil
 }
 
+// copyPageIntoVector dispatches one decoded page to the copy that matches its
+// nullability and whether the catalog type needs a conversion.
+//
+// It is its own function rather than four branches in readColumnNative, and
+// the error wrapping below is its own function too, because
+// readColumnNative's frame sits on the stack of every per-column errgroup
+// goroutine and those goroutines start small. Making the copies return
+// errors grew that frame by 96 bytes, which was enough to add a second
+// morestack + copystack per column read: 5% of a small-row-group scan,
+// entirely in runtime.copystack, none of it in the decode. Keep the frame
+// small — measure with `go build -gcflags=-S | grep readColumnNative`.
+func copyPageIntoVector(vec *batch.Vector, offset int, data pqt.Values, defLevels []int32,
+	maxDefLevel int32, hasNulls bool, n int, fileType, catalogType pqt.TypeID, coerce bool) error {
+	if defLevels == nil || !hasNulls {
+		if coerce {
+			return copyNativeCoercedDirect(vec, offset, data, n, fileType, catalogType)
+		}
+		return copyNativeDataDirect(vec, offset, data, n, fileType)
+	}
+	if coerce {
+		return copyNativeCoercedScatter(vec, offset, data, defLevels, maxDefLevel, n, fileType, catalogType)
+	}
+	return copyNativeDataScatter(vec, offset, data, defLevels, maxDefLevel, n, fileType)
+}
+
+// leafErr names the file leaf a decode error came from. Non-inlined for the
+// same frame-size reason as copyPageIntoVector above.
+//
+//go:noinline
+func leafErr(leaves []*pqt.SchemaNode, colIdx int, err error) error {
+	name := ""
+	if colIdx < len(leaves) {
+		name = leaves[colIdx].Name
+	}
+	return fmt.Errorf("column %q: %w", name, err)
+}
+
+// pageSrcErr names a page whose decoded values cannot back the read the
+// column's type is about to make: either the page's physical type is not the
+// one that type decodes from, or the page decoded fewer values than the read
+// needs. Both used to be a `src[:n]` over a nil or short slice — a
+// slice-bounds panic raised inside the scan errgroup, which in a worker
+// process is the worker.
+//
+// The two get one error because the caller cannot act on them differently:
+// the file says something about this column that the file's own bytes do not
+// support, and the only safe answer is to refuse the column.
+func pageSrcErr(typ pqt.TypeID, want pqt.PhysicalType, data pqt.Values, need, got int) error {
+	return fmt.Errorf("type %s decodes from %s pages but this page holds %s: %d of %d values available",
+		typ, want, data.PhysType(), got, need)
+}
+
+// int64Src and its siblings are the ONLY way the copy paths below reach a
+// typed slice: each returns the slice or the error, so no call site can
+// index one it did not check. Both checks are per PAGE, never per value:
+// the physical type, and (for the direct paths, which read n values
+// straight through) the length. The scatter paths pass need=0 and are
+// bounded by scatterRunsNative instead, which already walks the levels.
+func int64Src(data pqt.Values, need int, typ pqt.TypeID) ([]int64, error) {
+	if data.PhysType() != pqt.PhysicalInt64 {
+		return nil, pageSrcErr(typ, pqt.PhysicalInt64, data, need, 0)
+	}
+	src := data.Int64()
+	if len(src) < need {
+		return nil, pageSrcErr(typ, pqt.PhysicalInt64, data, need, len(src))
+	}
+	return src, nil
+}
+
+func int32Src(data pqt.Values, need int, typ pqt.TypeID) ([]int32, error) {
+	if data.PhysType() != pqt.PhysicalInt32 {
+		return nil, pageSrcErr(typ, pqt.PhysicalInt32, data, need, 0)
+	}
+	src := data.Int32()
+	if len(src) < need {
+		return nil, pageSrcErr(typ, pqt.PhysicalInt32, data, need, len(src))
+	}
+	return src, nil
+}
+
+func float64Src(data pqt.Values, need int, typ pqt.TypeID) ([]float64, error) {
+	if data.PhysType() != pqt.PhysicalDouble {
+		return nil, pageSrcErr(typ, pqt.PhysicalDouble, data, need, 0)
+	}
+	src := data.Double()
+	if len(src) < need {
+		return nil, pageSrcErr(typ, pqt.PhysicalDouble, data, need, len(src))
+	}
+	return src, nil
+}
+
+func float32Src(data pqt.Values, need int, typ pqt.TypeID) ([]float32, error) {
+	if data.PhysType() != pqt.PhysicalFloat {
+		return nil, pageSrcErr(typ, pqt.PhysicalFloat, data, need, 0)
+	}
+	src := data.Float()
+	if len(src) < need {
+		return nil, pageSrcErr(typ, pqt.PhysicalFloat, data, need, len(src))
+	}
+	return src, nil
+}
+
 // copyNativeDataDirect copies non-null page data into a Vector.
-func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int, typ pqt.TypeID) {
+func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int, typ pqt.TypeID) error {
 	switch typ {
 	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration:
-		src := data.Int64()
+		src, err := int64Src(data, n, typ)
+		if err != nil {
+			return err
+		}
 		copy(vec.Int64Data[offset:offset+n], src[:n])
 
 	case pqt.TypeDecimal:
-		// Scaled-integer INT64 physical → Int128 storage. Without this
-		// case the switch fell through and every decimal column scanned
-		// as zeros, silently (issue #144 suite finding).
-		if src := data.Int64(); src != nil {
-			for i := 0; i < n && i < len(src); i++ {
-				vec.DecimalData.Data[offset+i] = batch.Int128From(src[i])
-			}
-		} else if src := decimalWideValues(data); src != nil {
-			for i := 0; i < n && i < len(src); i++ {
-				vec.DecimalData.Data[offset+i] = src[i]
-			}
+		// DECIMAL is stored in four different physicals by the format;
+		// which one this file used is read off the page, not assumed.
+		// Without this case the switch fell through and every decimal
+		// column scanned as zeros, silently (issue #144 suite finding).
+		if err := decimalInto(vec.DecimalData.Data[offset:offset+n], data, 0, n); err != nil {
+			return err
 		}
 
 	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
-		src := data.Int32()
+		src, err := int32Src(data, n, typ)
+		if err != nil {
+			return err
+		}
 		copy(vec.Int32Data[offset:offset+n], src[:n])
 
 	case pqt.TypeFloat64:
-		src := data.Double()
+		src, err := float64Src(data, n, typ)
+		if err != nil {
+			return err
+		}
 		copy(vec.Float64Data[offset:offset+n], src[:n])
 
 	case pqt.TypeFloat32:
-		src := data.Float()
+		src, err := float32Src(data, n, typ)
+		if err != nil {
+			return err
+		}
 		copy(vec.Float32Data[offset:offset+n], src[:n])
 
 	case pqt.TypeBool:
+		if data.PhysType() != pqt.PhysicalBoolean {
+			return pageSrcErr(typ, pqt.PhysicalBoolean, data, n, 0)
+		}
 		boolBytes := data.Boolean()
+		// Every row carries a value on this path, so one check covers them
+		// all. A missing bit used to read as false, which is a value, not
+		// an absence.
+		if len(boolBytes)*8 < n {
+			return pageSrcErr(typ, pqt.PhysicalBoolean, data, n, len(boolBytes)*8)
+		}
 		for i := 0; i < n; i++ {
 			byteIdx := i / 8
 			bitIdx := uint(i % 8)
-			vec.BoolData[offset+i] = byteIdx < len(boolBytes) && (boolBytes[byteIdx]&(1<<bitIdx)) != 0
+			vec.BoolData[offset+i] = (boolBytes[byteIdx] & (1 << bitIdx)) != 0
 		}
 
 	case pqt.TypeVector:
@@ -678,6 +784,9 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 		dim := vec.VectorDim
 		if dim <= 0 {
 			break
+		}
+		if offsets != nil && len(offsets) < n+1 {
+			return pageSrcErr(typ, pqt.PhysicalFixedLenByteArray, data, n, len(offsets)-1)
 		}
 		for i := 0; i < n; i++ {
 			var val []byte
@@ -695,6 +804,9 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
 		rawData, offsets := data.ByteArray()
 		if offsets != nil {
+			if len(offsets) < n+1 {
+				return pageSrcErr(typ, pqt.PhysicalByteArray, data, n, len(offsets)-1)
+			}
 			vec.BytesData.BulkSet(offset, rawData, offsets, n)
 		} else {
 			// PLAIN encoding: 4-byte length prefix per value.
@@ -713,103 +825,147 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 			}
 		}
 	}
+	return nil
 }
 
-// decimalWideValues decodes a DECIMAL page whose physical type is NOT INT64.
-// Parquet allows INT32, BYTE_ARRAY and FIXED_LEN_BYTE_ARRAY to carry DECIMAL
-// as well, and TypeIDFromSchemaNode answers TypeDecimal for all four; this
-// path handed every one of them to Values.Int64(), which reinterpreted bytes
-// of the wrong width — and, for the narrower physicals, read past the end of
-// the page buffer to find enough of them. Values.Int64() now refuses a cast
-// it was not given INT64 bytes for, so the remaining three physicals are
-// decoded here instead of silently mis-read.
-func decimalWideValues(data pqt.Values) []batch.Int128 {
+// decimalInto decodes n DECIMAL values, starting at page value index
+// srcStart, straight into dst — from whichever of the four physicals the
+// format allows this file used.
+//
+// Parquet carries DECIMAL as INT32, INT64, BYTE_ARRAY or
+// FIXED_LEN_BYTE_ARRAY, and TypeIDFromSchemaNode answers TypeDecimal for all
+// four; this path used to hand every one of them to Values.Int64(), which
+// reinterpreted bytes of the wrong width — and, for the narrower physicals,
+// read past the end of the page buffer to find enough of them. The scan then
+// refused anything but INT64 outright, which made every pyarrow-written
+// decimal column unreadable on the native path. Both are fixed here: the
+// page's own physical type picks the decode.
+//
+// It writes into the caller's slice rather than returning one so the three
+// physicals cost what the INT64 case always cost — nothing per page.
+func decimalInto(dst []batch.Int128, data pqt.Values, srcStart, n int) error {
 	switch data.PhysType() {
+	case pqt.PhysicalInt64:
+		src, err := int64Src(data, srcStart+n, pqt.TypeDecimal)
+		if err != nil {
+			return err
+		}
+		for i := 0; i < n; i++ {
+			dst[i] = batch.Int128From(src[srcStart+i])
+		}
 	case pqt.PhysicalInt32:
-		src := data.Int32()
-		out := make([]batch.Int128, len(src))
-		for i, v := range src {
-			out[i] = batch.Int128From(int64(v))
+		src, err := int32Src(data, srcStart+n, pqt.TypeDecimal)
+		if err != nil {
+			return err
 		}
-		return out
-	default:
+		for i := 0; i < n; i++ {
+			dst[i] = batch.Int128From(int64(src[srcStart+i]))
+		}
+	case pqt.PhysicalByteArray, pqt.PhysicalFixedLenByteArray:
 		raw, offs := data.ByteArray()
-		if offs == nil {
-			return nil
+		if len(offs) < srcStart+n+1 {
+			return pageSrcErr(pqt.TypeDecimal, data.PhysType(), data, srcStart+n, len(offs)-1)
 		}
-		out := make([]batch.Int128, 0, len(offs)-1)
-		for i := 0; i+1 < len(offs); i++ {
-			w := pqt.DecimalFromBytes(raw[offs[i]:offs[i+1]])
-			out = append(out, batch.Int128{Hi: int64(w[0]), Lo: w[1]})
+		for i := 0; i < n; i++ {
+			w := pqt.DecimalFromBytes(raw[offs[srcStart+i]:offs[srcStart+i+1]])
+			dst[i] = batch.Int128{Hi: int64(w[0]), Lo: w[1]}
 		}
-		return out
+	default:
+		return fmt.Errorf("DECIMAL column: unsupported physical encoding %s", data.PhysType())
 	}
+	return nil
 }
 
 // copyNativeDataScatter copies nullable page data into a Vector using
 // int32 definition levels from our custom page reader.
-func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLevels []int32, maxDefLevel int32, n int, typ pqt.TypeID) {
+//
+// The typed source is not fetched for n: scatterRunsNative walks n
+// definition levels but only advances the source index on the ones that
+// carry a value, so the source is checked for its PHYSICAL type here and
+// bounded against the levels there — no pre-pass to count them.
+func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLevels []int32, maxDefLevel int32, n int, typ pqt.TypeID) error {
+	if len(defLevels) < n {
+		return fmt.Errorf("page declares %d values but decoded %d definition levels", n, len(defLevels))
+	}
 	switch typ {
 	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration:
-		src := data.Int64()
-		scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+		src, err := int64Src(data, 0, typ)
+		if err != nil {
+			return err
+		}
+		return scatterRunsNative(defLevels, maxDefLevel, n, len(src), func(dstStart, srcStart, count int) {
 			copy(vec.Int64Data[offset+dstStart:offset+dstStart+count], src[srcStart:srcStart+count])
 		}, func(dstStart, count int) {
 			vec.Nulls.SetNullRange(offset+dstStart, count)
 		})
 
 	case pqt.TypeDecimal:
-		if src := data.Int64(); src != nil {
-			scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
-				for i := 0; i < count && srcStart+i < len(src); i++ {
-					vec.DecimalData.Data[offset+dstStart+i] = batch.Int128From(src[srcStart+i])
-				}
-			}, func(dstStart, count int) {
-				vec.Nulls.SetNullRange(offset+dstStart, count)
-			})
-		} else {
-			src := decimalWideValues(data)
-			scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
-				for i := 0; i < count && srcStart+i < len(src); i++ {
-					vec.DecimalData.Data[offset+dstStart+i] = src[srcStart+i]
-				}
-			}, func(dstStart, count int) {
-				vec.Nulls.SetNullRange(offset+dstStart, count)
-			})
+		// decimalInto reports per run; scatterRunsNative's callback cannot,
+		// so the first failure is carried out.
+		var decErr error
+		if err := scatterRunsNative(defLevels, maxDefLevel, n, data.Count(), func(dstStart, srcStart, count int) {
+			if decErr == nil {
+				decErr = decimalInto(vec.DecimalData.Data[offset+dstStart:offset+dstStart+count],
+					data, srcStart, count)
+			}
+		}, func(dstStart, count int) {
+			vec.Nulls.SetNullRange(offset+dstStart, count)
+		}); err != nil {
+			return err
 		}
+		return decErr
 
 	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
-		src := data.Int32()
-		scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+		src, err := int32Src(data, 0, typ)
+		if err != nil {
+			return err
+		}
+		return scatterRunsNative(defLevels, maxDefLevel, n, len(src), func(dstStart, srcStart, count int) {
 			copy(vec.Int32Data[offset+dstStart:offset+dstStart+count], src[srcStart:srcStart+count])
 		}, func(dstStart, count int) {
 			vec.Nulls.SetNullRange(offset+dstStart, count)
 		})
 
 	case pqt.TypeFloat64:
-		src := data.Double()
-		scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+		src, err := float64Src(data, 0, typ)
+		if err != nil {
+			return err
+		}
+		return scatterRunsNative(defLevels, maxDefLevel, n, len(src), func(dstStart, srcStart, count int) {
 			copy(vec.Float64Data[offset+dstStart:offset+dstStart+count], src[srcStart:srcStart+count])
 		}, func(dstStart, count int) {
 			vec.Nulls.SetNullRange(offset+dstStart, count)
 		})
 
 	case pqt.TypeFloat32:
-		src := data.Float()
-		scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+		src, err := float32Src(data, 0, typ)
+		if err != nil {
+			return err
+		}
+		return scatterRunsNative(defLevels, maxDefLevel, n, len(src), func(dstStart, srcStart, count int) {
 			copy(vec.Float32Data[offset+dstStart:offset+dstStart+count], src[srcStart:srcStart+count])
 		}, func(dstStart, count int) {
 			vec.Nulls.SetNullRange(offset+dstStart, count)
 		})
 
 	case pqt.TypeBool:
+		if data.PhysType() != pqt.PhysicalBoolean {
+			return pageSrcErr(typ, pqt.PhysicalBoolean, data, n, 0)
+		}
 		boolBytes := data.Boolean()
 		valIdx := 0
 		for i := 0; i < n; i++ {
 			if defLevels[i] == maxDefLevel {
 				byteIdx := valIdx / 8
 				bitIdx := uint(valIdx % 8)
-				vec.BoolData[offset+i] = byteIdx < len(boolBytes) && (boolBytes[byteIdx]&(1<<bitIdx)) != 0
+				// n counts ROWS; only the non-null ones consume a bit, so
+				// the bound is per value and cannot be hoisted. It was
+				// already being tested here — it just yielded false, which
+				// is a value, not an absence.
+				if byteIdx >= len(boolBytes) {
+					return pageSrcErr(typ, pqt.PhysicalBoolean, data, valIdx+1, len(boolBytes)*8)
+				}
+				vec.BoolData[offset+i] = (boolBytes[byteIdx] & (1 << bitIdx)) != 0
 				valIdx++
 			} else {
 				vec.Nulls.SetNull(offset + i)
@@ -828,6 +984,9 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 			if defLevels[i] == maxDefLevel {
 				var val []byte
 				if offsets != nil {
+					if valIdx+1 >= len(offsets) {
+						return pageSrcErr(typ, pqt.PhysicalFixedLenByteArray, data, valIdx+1, len(offsets)-1)
+					}
 					val = rawData[offsets[valIdx]:offsets[valIdx+1]]
 				}
 				dstOff := (offset + i) * dim
@@ -844,8 +1003,14 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 		rawData, offsets := data.ByteArray()
 		valIdx := 0
 		if offsets != nil {
+			// The offsets can only run short of the levels on a corrupt
+			// page; the loop is already per value, so the bound rides
+			// along with it rather than costing a pre-pass.
 			for i := 0; i < n; i++ {
 				if defLevels[i] == maxDefLevel {
+					if valIdx+1 >= len(offsets) {
+						return pageSrcErr(typ, pqt.PhysicalByteArray, data, valIdx+1, len(offsets)-1)
+					}
 					start := offsets[valIdx]
 					end := offsets[valIdx+1]
 					vec.BytesData.Set(offset+i, rawData[start:end])
@@ -865,6 +1030,9 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 					}
 					length := int(binary.LittleEndian.Uint32(rawData[pos:]))
 					pos += 4
+					if pos+length > len(rawData) {
+						break
+					}
 					vec.BytesData.Set(offset+i, rawData[pos:pos+length])
 					pos += length
 					valIdx++
@@ -875,14 +1043,23 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 			}
 		}
 	}
+	return nil
 }
 
 // scatterRunsNative is like scatterRunsTyped but for int32 definition levels.
+//
+// srcLen is how many values the page actually decoded. The levels say how
+// many the page CLAIMS, and a corrupt file can make the two disagree — the
+// scatter would then index past the end of the typed slice and panic inside
+// the scan errgroup. The bound is checked once per RUN, before the run is
+// handed over, rather than by pre-counting the defined levels: the levels
+// are already being walked here, and a second pass over them was worth
+// several percent of the nullable-scan floor.
 func scatterRunsNative(
-	defLevels []int32, maxDefLevel int32, n int,
+	defLevels []int32, maxDefLevel int32, n, srcLen int,
 	onValid func(dstStart, srcStart, count int),
 	onNull func(dstStart, count int),
-) {
+) error {
 	valIdx := 0
 	i := 0
 	for i < n {
@@ -893,6 +1070,9 @@ func scatterRunsNative(
 				i++
 				valIdx++
 			}
+			if valIdx > srcLen {
+				return fmt.Errorf("page's definition levels mark %d values but only %d decoded", valIdx, srcLen)
+			}
 			onValid(runStart, srcStart, i-runStart)
 		} else {
 			runStart := i
@@ -902,23 +1082,33 @@ func scatterRunsNative(
 			onNull(runStart, i-runStart)
 		}
 	}
+	return nil
 }
 
 // copyNativeCoercedDirect converts non-null page data from fileType to catalogType.
 func copyNativeCoercedDirect(vec *batch.Vector, offset int, data pqt.Values, n int, fileType, catalogType pqt.TypeID) error {
 	switch {
 	case fileType == pqt.TypeInt64 && catalogType == pqt.TypeInt32:
-		src := data.Int64()
+		src, err := int64Src(data, n, fileType)
+		if err != nil {
+			return err
+		}
 		for i := 0; i < n; i++ {
 			vec.Int32Data[offset+i] = int32(src[i])
 		}
 	case fileType == pqt.TypeInt64 && catalogType == pqt.TypeFloat64:
-		src := data.Int64()
+		src, err := int64Src(data, n, fileType)
+		if err != nil {
+			return err
+		}
 		for i := 0; i < n; i++ {
 			vec.Float64Data[offset+i] = float64(src[i])
 		}
 	case (fileType == pqt.TypeDate || fileType == pqt.TypeInt32) && catalogType == pqt.TypeString:
-		src := data.Int32()
+		src, err := int32Src(data, n, fileType)
+		if err != nil {
+			return err
+		}
 		for i := 0; i < n; i++ {
 			vec.BytesData.Set(offset+i, []byte(batch.FormatDate(src[i])))
 		}
@@ -930,10 +1120,16 @@ func copyNativeCoercedDirect(vec *batch.Vector, offset int, data pqt.Values, n i
 
 // copyNativeCoercedScatter converts nullable page data with type coercion.
 func copyNativeCoercedScatter(vec *batch.Vector, offset int, data pqt.Values, defLevels []int32, maxDefLevel int32, n int, fileType, catalogType pqt.TypeID) error {
+	if len(defLevels) < n {
+		return fmt.Errorf("page declares %d values but decoded %d definition levels", n, len(defLevels))
+	}
 	switch {
 	case fileType == pqt.TypeInt64 && catalogType == pqt.TypeInt32:
-		src := data.Int64()
-		scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+		src, err := int64Src(data, 0, fileType)
+		if err != nil {
+			return err
+		}
+		return scatterRunsNative(defLevels, maxDefLevel, n, len(src), func(dstStart, srcStart, count int) {
 			for i := 0; i < count; i++ {
 				vec.Int32Data[offset+dstStart+i] = int32(src[srcStart+i])
 			}
@@ -941,8 +1137,11 @@ func copyNativeCoercedScatter(vec *batch.Vector, offset int, data pqt.Values, de
 			vec.Nulls.SetNullRange(offset+dstStart, count)
 		})
 	case fileType == pqt.TypeInt64 && catalogType == pqt.TypeFloat64:
-		src := data.Int64()
-		scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+		src, err := int64Src(data, 0, fileType)
+		if err != nil {
+			return err
+		}
+		return scatterRunsNative(defLevels, maxDefLevel, n, len(src), func(dstStart, srcStart, count int) {
 			for i := 0; i < count; i++ {
 				vec.Float64Data[offset+dstStart+i] = float64(src[srcStart+i])
 			}
@@ -950,10 +1149,16 @@ func copyNativeCoercedScatter(vec *batch.Vector, offset int, data pqt.Values, de
 			vec.Nulls.SetNullRange(offset+dstStart, count)
 		})
 	case (fileType == pqt.TypeDate || fileType == pqt.TypeInt32) && catalogType == pqt.TypeString:
-		src := data.Int32()
+		src, err := int32Src(data, 0, fileType)
+		if err != nil {
+			return err
+		}
 		valIdx := 0
 		for i := 0; i < n; i++ {
 			if defLevels[i] == maxDefLevel {
+				if valIdx >= len(src) {
+					return pageSrcErr(fileType, pqt.PhysicalInt32, data, valIdx+1, len(src))
+				}
 				vec.BytesData.Set(offset+i, []byte(batch.FormatDate(src[valIdx])))
 				valIdx++
 			} else {

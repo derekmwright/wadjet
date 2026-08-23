@@ -324,3 +324,124 @@ func init() {
 	_ = fmt.Sprint
 	_ = batch.TypeInt32
 }
+
+// TestCoercibleToMatchesTheScansOwnCoercions: three catalog/file pairings are
+// schema evolution the engine converts rather than drift it refuses. Which
+// READ PATH runs is decided by the shape of the table's schema — one
+// ARRAY/MAP column sends every query on that table to the row reader (#393) —
+// not by the query, so the set the row reader converts and the set this scan
+// converts have to be the same set. parquet.CoercibleTo is that set; this
+// checks the scan half against it exhaustively over the flat types, so a new
+// arm in copyNativeCoerced* that is not also in CoercibleTo fails here.
+func TestCoercibleToMatchesTheScansOwnCoercions(t *testing.T) {
+	flat := []pqt.TypeID{
+		pqt.TypeBool, pqt.TypeInt32, pqt.TypeInt64, pqt.TypeFloat32, pqt.TypeFloat64,
+		pqt.TypeString, pqt.TypeBytes, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeIPv6,
+		pqt.TypeCIDR, pqt.TypeMAC, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDuration,
+		pqt.TypeUUID, pqt.TypeDate, pqt.TypeDecimal,
+	}
+	for _, file := range flat {
+		for _, cat := range flat {
+			if file == cat || storageClass(file) == storageClass(cat) {
+				// Same storage class: the scan copies without converting,
+				// so no coercion is claimed or needed.
+				continue
+			}
+			supported := coercedDirectSupports(t, file, cat)
+			if got := pqt.CoercibleTo(file, cat); got != supported {
+				t.Errorf("%s→%s: CoercibleTo = %v but the scan's coerced copy %s",
+					file, cat, got, map[bool]string{true: "converts it", false: "refuses it"}[supported])
+			}
+		}
+	}
+}
+
+// coercedDirectSupports asks copyNativeCoercedDirect itself, with a page that
+// carries the values it needs, whether the pairing has an arm.
+func coercedDirectSupports(t *testing.T, file, cat pqt.TypeID) bool {
+	t.Helper()
+	vec := batch.NewVector(cat, 4)
+	vec.VectorDim = 4
+	var page pqt.Values
+	switch storageClass(file) {
+	case pqt.TypeInt64:
+		page = pqt.PlainInt64Values([]int64{1, 2, 3, 4})
+	case pqt.TypeInt32:
+		page = pqt.PlainInt32Values([]int32{1, 2, 3, 4})
+	case pqt.TypeFloat64:
+		page = pqt.PlainFloat64Values([]float64{1, 2, 3, 4})
+	case pqt.TypeFloat32:
+		page = pqt.PlainFloat32Values([]float32{1, 2, 3, 4})
+	case pqt.TypeBool:
+		page = pqt.RawValues(pqt.PhysicalBoolean, []byte{0x0F}, 4)
+	default:
+		page = pqt.ByteArrayValues([]byte("abcd"), []uint32{0, 1, 2, 3, 4})
+	}
+	return copyNativeCoercedDirect(vec, 0, page, 4, file, cat) == nil
+}
+
+// TestCoercedPairAgreesOnBothPaths is the end-to-end half: the same file,
+// the same catalog type, read once through the native scan and once through
+// the row reader, must produce the same values. Before this change the row
+// reader answered the INT32-over-INT64 pairing with an error while the scan
+// converted it.
+func TestCoercedPairAgreesOnBothPaths(t *testing.T) {
+	fileSchema := pqt.Schema{Columns: []pqt.Column{{Name: "c", Type: pqt.TypeInt64, Nullable: true}}}
+	var buf bytes.Buffer
+	w, err := pqt.NewWriter(&buf, fileSchema, pqt.DefaultWriterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []any{int64(0), int64(7), nil, int64(-3), int64(1 << 20)}
+	rows := make([]map[string]any, len(want))
+	for i, v := range want {
+		rows[i] = map[string]any{"c": v}
+	}
+	if err := w.WriteRows(rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+
+	catalog := []pqt.Column{{Name: "c", Type: pqt.TypeInt32, Nullable: true}}
+
+	fr, err := pqt.OpenFileReaderFromBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ReadRowGroupNative(fr, 0, catalog, nil)
+	if err != nil {
+		t.Fatalf("native scan: %v", err)
+	}
+
+	r, err := pqt.NewReaderFromBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.ReadRowsAs(catalog, nil)
+	if err != nil {
+		t.Fatalf("row reader: %v", err)
+	}
+	if len(got) != len(want) || b.Len != len(want) {
+		t.Fatalf("row reader read %d rows, native read %d, want %d", len(got), b.Len, len(want))
+	}
+	rowVec := batch.FromRows(catalog, got)
+	for i, w := range want {
+		if w == nil {
+			if !b.Columns[0].Nulls.IsNullFast(i) || !rowVec.Columns[0].Nulls.IsNullFast(i) {
+				t.Errorf("row %d: native null=%v, row-path null=%v, want both NULL",
+					i, b.Columns[0].Nulls.IsNullFast(i), rowVec.Columns[0].Nulls.IsNullFast(i))
+			}
+			continue
+		}
+		wantI32 := int32(w.(int64))
+		if b.Columns[0].Int32Data[i] != wantI32 {
+			t.Errorf("row %d: native = %d, want %d", i, b.Columns[0].Int32Data[i], wantI32)
+		}
+		if rowVec.Columns[0].Int32Data[i] != wantI32 {
+			t.Errorf("row %d: row path = %d, want %d", i, rowVec.Columns[0].Int32Data[i], wantI32)
+		}
+	}
+}

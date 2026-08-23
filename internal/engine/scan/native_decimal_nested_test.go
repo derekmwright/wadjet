@@ -80,21 +80,35 @@ func TestReadRowGroupNative_ArrayErrorsLoudly(t *testing.T) {
 	}
 }
 
-// TestDecimalWideValues covers the three physical types a DECIMAL column may
-// use that are NOT INT64. Parquet allows all four, and TypeIDFromSchemaNode
-// answers TypeDecimal for every one of them, but this decoder handed each of
-// them to Values.Int64() — reinterpreting bytes of the wrong width and, for
-// the narrower physicals, reading past the end of the page to find enough of
-// them. Values.Int64() now refuses a cast it was not given INT64 bytes for,
-// so these three have to be decoded on their own terms.
-func TestDecimalWideValues(t *testing.T) {
-	t.Run("int32", func(t *testing.T) {
-		got := decimalWideValues(parquet.PlainInt32Values([]int32{-2, 0, 12345}))
-		want := []int64{-2, 0, 12345}
-		if len(got) != len(want) {
-			t.Fatalf("decoded %d values, want %d", len(got), len(want))
+// TestDecimalInto covers all four physical types a DECIMAL column may use.
+// Parquet allows every one of them and TypeIDFromSchemaNode answers
+// TypeDecimal for each, but this decoder handed all four to Values.Int64() —
+// reinterpreting bytes of the wrong width and, for the narrower physicals,
+// reading past the end of the page to find enough of them. The page's own
+// physical type picks the decode now, and a page that cannot back the values
+// asked of it is an error rather than a short read.
+func TestDecimalInto(t *testing.T) {
+	decode := func(t *testing.T, data parquet.Values, srcStart, n int) []batch.Int128 {
+		t.Helper()
+		dst := make([]batch.Int128, n)
+		if err := decimalInto(dst, data, srcStart, n); err != nil {
+			t.Fatalf("decimalInto: %v", err)
 		}
-		for i, w := range want {
+		return dst
+	}
+
+	t.Run("int64", func(t *testing.T) {
+		got := decode(t, parquet.PlainInt64Values([]int64{-2, 0, 1 << 40}), 0, 3)
+		for i, w := range []int64{-2, 0, 1 << 40} {
+			if got[i] != batch.Int128From(w) {
+				t.Errorf("value %d = %+v, want %+v", i, got[i], batch.Int128From(w))
+			}
+		}
+	})
+
+	t.Run("int32", func(t *testing.T) {
+		got := decode(t, parquet.PlainInt32Values([]int32{-2, 0, 12345}), 0, 3)
+		for i, w := range []int64{-2, 0, 12345} {
 			if got[i] != batch.Int128From(w) {
 				t.Errorf("value %d = %+v, want %+v", i, got[i], batch.Int128From(w))
 			}
@@ -105,21 +119,35 @@ func TestDecimalWideValues(t *testing.T) {
 		// Big-endian two's complement, the DECIMAL byte encoding: 12345 and
 		// -2 in four bytes each.
 		data := []byte{0x00, 0x00, 0x30, 0x39, 0xff, 0xff, 0xff, 0xfe}
-		got := decimalWideValues(parquet.ByteArrayValues(data, []uint32{0, 4, 8}))
-		want := []int64{12345, -2}
-		if len(got) != len(want) {
-			t.Fatalf("decoded %d values, want %d", len(got), len(want))
-		}
-		for i, w := range want {
+		got := decode(t, parquet.ByteArrayValues(data, []uint32{0, 4, 8}), 0, 2)
+		for i, w := range []int64{12345, -2} {
 			if got[i] != batch.Int128From(w) {
 				t.Errorf("value %d = %+v, want %+v", i, got[i], batch.Int128From(w))
 			}
 		}
 	})
 
-	t.Run("empty", func(t *testing.T) {
-		if got := decimalWideValues(parquet.ByteArrayValues(nil, nil)); got != nil {
-			t.Errorf("empty page decoded %d values", len(got))
+	t.Run("srcStart_offsets_into_the_page", func(t *testing.T) {
+		// The scatter path decodes a run that starts partway through the
+		// page's values.
+		got := decode(t, parquet.PlainInt64Values([]int64{9, 8, 7, 6}), 2, 2)
+		for i, w := range []int64{7, 6} {
+			if got[i] != batch.Int128From(w) {
+				t.Errorf("value %d = %+v, want %+v", i, got[i], batch.Int128From(w))
+			}
+		}
+	})
+
+	t.Run("short_page_is_an_error", func(t *testing.T) {
+		dst := make([]batch.Int128, 4)
+		if err := decimalInto(dst[:3], parquet.ByteArrayValues(nil, nil), 0, 3); err == nil {
+			t.Error("an empty page asked for 3 values returned no error")
+		}
+		if err := decimalInto(dst, parquet.PlainInt32Values([]int32{1}), 0, 4); err == nil {
+			t.Error("a 1-value page asked for 4 values returned no error")
+		}
+		if err := decimalInto(dst[:2], parquet.PlainInt64Values([]int64{1, 2}), 1, 2); err == nil {
+			t.Error("a 2-value page asked for values 1..2 returned no error")
 		}
 	})
 }

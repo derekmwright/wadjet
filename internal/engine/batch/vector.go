@@ -1448,8 +1448,9 @@ var epochDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // FormatDate formats days-since-epoch as "2006-01-02".
 func FormatDate(days int32) string {
-	t := epochDate.AddDate(0, 0, int(days))
-	return t.Format("2006-01-02")
+	// Delegates so the scan's DATE→STRING coercion and the parquet row
+	// reader's cannot drift apart (parquet.CoercibleTo).
+	return parquet.FormatDateDays(days)
 }
 
 // FormatTimestamp renders epoch MILLISECONDS — the engine's one timestamp

@@ -11115,7 +11115,18 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 			}
 		}
 
-		b := readBatchDirect(reader, inner.schema, inner.requiredCols, inner.scanPreds...)
+		b, err := readBatchDirect(reader, inner.schema, inner.requiredCols, inner.scanPreds...)
+		if err != nil {
+			// Surface the first decode error so the scan FAILS instead of
+			// dropping this file's rows: a swallowed error here is
+			// indistinguishable from a file that legitimately contributed
+			// nothing (the same silent-partial class readRG guards).
+			select {
+			case inner.errCh <- fmt.Errorf("reading %s: %w", file.Path, err):
+			default:
+			}
+			return
+		}
 		if b == nil || b.Len == 0 {
 			continue
 		}
