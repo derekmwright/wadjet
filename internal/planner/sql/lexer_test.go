@@ -421,3 +421,50 @@ func TestLexerSkipsComments(t *testing.T) {
 		t.Fatalf("string literal = %v %q", tok.typ, tok.val)
 	}
 }
+
+// TestLexerPeekDoesNotCorruptBackup: peek() left l.width holding the PEEKED
+// rune's width, and backup() steps back by width — so a caller that read a
+// one-byte rune, peeked a wider one, and then backed up stepped back too
+// far. skipWhitespace does exactly that on '-', so `a-é` drove l.pos to -1
+// and the next read sliced l.input[-1:]. That is a process kill from any
+// pgwire client that pastes a query with a non-ASCII character after a
+// minus sign, and no recover in the server would have caught it: it is a
+// runtime panic in the lexer's own goroutine.
+func TestLexerPeekDoesNotCorruptBackup(t *testing.T) {
+	inputs := []string{
+		"-ױ0",
+		"SELECT a-é FROM t",
+		"SELECT 1-—2",
+		"-é",
+		"a -  b",
+		"SELECT '日本' - 1",
+	}
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			l := newLexer(in)
+			for i := 0; i < 64; i++ {
+				if l.pos < 0 {
+					t.Fatalf("lexer position went negative after %d tokens", i)
+				}
+				_ = l.peekToken()
+				if tok := l.nextToken(); tok.typ == TokenEOF {
+					return
+				}
+			}
+			t.Fatal("the lexer did not reach EOF in 64 tokens")
+		})
+	}
+
+	// peek() must not disturb what a following backup() undoes.
+	l := newLexer("aéb")
+	if r := l.next(); r != 'a' {
+		t.Fatalf("first rune = %q", r)
+	}
+	if r := l.peek(); r != 'é' {
+		t.Fatalf("peeked %q, want é", r)
+	}
+	l.backup()
+	if l.pos != 0 {
+		t.Errorf("after next()+peek()+backup() the position is %d, want 0", l.pos)
+	}
+}

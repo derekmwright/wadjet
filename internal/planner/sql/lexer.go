@@ -327,12 +327,29 @@ func (l *lexer) next() rune {
 // backup steps back one rune. Can only be called once per next().
 func (l *lexer) backup() {
 	l.pos -= l.width
+	if l.pos < 0 {
+		// Unreachable while every caller honours the once-per-next()
+		// contract; a floor rather than a negative index, because the
+		// alternative is l.input[-1:] and a dead process.
+		l.pos = 0
+	}
 }
 
 // peek returns the next rune without advancing.
+//
+// It restores l.width as well as l.pos, because backup() steps back by
+// WIDTH and the caller's next backup() is meant to undo the rune it read
+// BEFORE this peek. Leaving the peeked rune's width behind made that step
+// too large by however much wider the peeked rune was: skipWhitespace reads
+// one byte ('-'), peeks a two-byte rune, then backs up by two and lands at
+// position -1, so `SELECT a-é` — a minus followed by any non-ASCII
+// character — took the process down inside the lexer. Reachable from any
+// pgwire client that pastes a query with an accent in it.
 func (l *lexer) peek() rune {
+	savedWidth := l.width
 	r := l.next()
 	l.backup()
+	l.width = savedWidth
 	return r
 }
 
