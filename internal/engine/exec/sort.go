@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -961,9 +962,119 @@ func compareAny(a, b any) int {
 			return -1
 		}
 		return 1
+	case []byte:
+		bv, ok := b.([]byte)
+		if !ok {
+			return 0
+		}
+		return bytes.Compare(av, bv)
+	case []any:
+		// ARRAY, and a MAP boxed as its list of entry maps. Element-wise
+		// then by length — kernel.CompareValuesAt's rule for the columnar
+		// form of the same value (#415).
+		bv, ok := b.([]any)
+		if !ok {
+			return 0
+		}
+		n := min(len(av), len(bv))
+		for i := 0; i < n; i++ {
+			if c := compareAnyElem(av[i], bv[i]); c != 0 {
+				return c
+			}
+		}
+		return cmpInt(len(av), len(bv))
+	case map[string]any:
+		// ROW, and a MAP entry. Compared in FIELD-NAME order, because that
+		// is all a boxed row carries: Vector.GetValue renders a ROW as a Go
+		// map, which has no declaration order. The columnar comparator
+		// compares fields POSITIONALLY, as PostgreSQL's record_cmp does, so
+		// the two paths can disagree on a ROW whose declared field order is
+		// not alphabetical. Same residual, same cause, as this path's DECIMAL
+		// handling: a DECIMAL boxes as its formatted string and orders
+		// lexicographically here where the columnar path orders numerically.
+		// The boxed path answers only the spilled/global WINDOW rows;
+		// ORDER BY, sort-merge join and the in-memory window all take the
+		// columnar comparator.
+		bv, ok := b.(map[string]any)
+		if !ok {
+			return 0
+		}
+		return compareAnyFields(av, bv)
+	case []float32:
+		// VECTOR.
+		bv, ok := b.([]float32)
+		if !ok {
+			return 0
+		}
+		n := min(len(av), len(bv))
+		for i := 0; i < n; i++ {
+			if av[i] < bv[i] {
+				return -1
+			}
+			if av[i] > bv[i] {
+				return 1
+			}
+		}
+		return cmpInt(len(av), len(bv))
 	default:
 		return 0
 	}
+}
+
+// compareAnyElem compares one element INSIDE a boxed container, where a NULL
+// sorts AFTER a non-NULL — PostgreSQL's array_cmp/record_cmp rule, and what
+// kernel's columnar comparators apply. compareAny's own nil handling is the
+// COLUMN-level one (nulls first), which is a different question.
+func compareAnyElem(a, b any) int {
+	switch {
+	case a == nil && b == nil:
+		return 0
+	case a == nil:
+		return 1
+	case b == nil:
+		return -1
+	}
+	return compareAny(a, b)
+}
+
+// compareAnyFields compares two boxed ROW/MAP-entry values in field-name
+// order: names first, so {"a":1} and {"b":1} are ordered rather than tied,
+// then values.
+func compareAnyFields(a, b map[string]any) int {
+	an := sortedKeys(a)
+	bn := sortedKeys(b)
+	n := min(len(an), len(bn))
+	for i := 0; i < n; i++ {
+		if an[i] != bn[i] {
+			if an[i] < bn[i] {
+				return -1
+			}
+			return 1
+		}
+		if c := compareAnyElem(a[an[i]], b[bn[i]]); c != 0 {
+			return c
+		}
+	}
+	return cmpInt(len(an), len(bn))
+}
+
+func sortedKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func cmpInt(x, y int) int {
+	if x < y {
+		return -1
+	}
+	if x > y {
+		return 1
+	}
+	return 0
 }
 
 // topNHeap implements container/heap.Interface for bounded TopN selection.

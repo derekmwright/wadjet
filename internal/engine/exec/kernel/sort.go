@@ -8,6 +8,15 @@ import (
 
 // ResolveSortCompare returns a comparison function for the given column type.
 // The returned function has no type switch — the type is baked into the closure.
+//
+// A nil return means "this resolver cannot order that type". Callers must
+// treat nil as a refusal, not as a tie: SortMergeJoin uses these kernels for
+// key EQUALITY, so a comparator that reports every pair equal is not a
+// degraded sort, it is a cross product presented as an inner join. Until
+// #415 the default arm returned exactly such a closure and ARRAY, ROW, MAP
+// and VECTOR all fell into it — `ORDER BY arr_col` was a silent no-op and the
+// `cmp == nil` guard in sort_merge_join.go was dead code. All 22 types are
+// enumerated now; nil is reserved for a type the engine does not have.
 func ResolveSortCompare(typ batch.TypeID) SortCompareKernel {
 	switch typ {
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
@@ -24,8 +33,13 @@ func ResolveSortCompare(typ batch.TypeID) SortCompareKernel {
 		return sortCompareBool
 	case batch.TypeDecimal:
 		return sortCompareDecimal
+	case batch.TypeArray, batch.TypeMap, batch.TypeRow, batch.TypeVector:
+		return sortCompareContainer
 	default:
-		return func(a *batch.Vector, ai int, b *batch.Vector, bi int) int { return 0 }
+		// nil, not an always-equal closure: see the resolver contract note
+		// above. Every one of the engine's 22 types is named above, so this
+		// arm is reachable only for a type the engine does not have.
+		return nil
 	}
 }
 
@@ -178,8 +192,14 @@ func ResolveSortCompareNoNulls(typ batch.TypeID) SortCompareKernel {
 		return sortCompareFloat32NoNulls
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		return sortCompareStringNoNulls
+	case batch.TypeBool:
+		return sortCompareBoolNoNulls
 	case batch.TypeDecimal:
 		return sortCompareDecimalNoNulls
+	case batch.TypeArray, batch.TypeMap, batch.TypeRow, batch.TypeVector:
+		// The COLUMN has no nulls; the container's ELEMENTS still can, and
+		// CompareValuesAt checks them per element.
+		return CompareValuesAt
 	default:
 		return ResolveSortCompare(typ)
 	}
@@ -241,6 +261,17 @@ func sortCompareStringNoNulls(a *batch.Vector, ai int, b *batch.Vector, bi int) 
 	return 0
 }
 
+func sortCompareBoolNoNulls(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
+	av, bv := a.BoolData[ai], b.BoolData[bi]
+	if av == bv {
+		return 0
+	}
+	if !av {
+		return -1
+	}
+	return 1
+}
+
 // --- Nulls-last sort compare variants ---
 // These use NULLS LAST ordering: null > non-null, so nulls sort after all non-null values.
 // This avoids a redundant post-comparison null check in the sort loop.
@@ -262,8 +293,10 @@ func ResolveSortCompareNullsLast(typ batch.TypeID) SortCompareKernel {
 		return sortCompareBoolNullsLast
 	case batch.TypeDecimal:
 		return sortCompareDecimalNullsLast
+	case batch.TypeArray, batch.TypeMap, batch.TypeRow, batch.TypeVector:
+		return sortCompareContainerNullsLast
 	default:
-		return func(a *batch.Vector, ai int, b *batch.Vector, bi int) int { return 0 }
+		return nil
 	}
 }
 

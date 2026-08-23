@@ -616,11 +616,14 @@ func TestSortCompareStringWithNulls(t *testing.T) {
 }
 
 func TestSortCompareDefaultType(t *testing.T) {
-	// Use an unusual type that falls to default
-	k := ResolveSortCompare(99) // nonexistent type
-	a := makeIntVec([]int64{1}, nil)
-	if k(a, 0, a, 0) != 0 {
-		t.Fatal("default comparator should return 0")
+	// The default arm used to hand back a closure that reported every pair
+	// EQUAL. SortMergeJoin decides key equality with these kernels, so that
+	// answer is not a degraded sort — it is a cross product presented as an
+	// inner join, and it is what ARRAY/ROW/MAP/VECTOR got until #415. The
+	// resolvers now refuse instead, which is what makes the `cmp == nil`
+	// guard in sort_merge_join.go a live check.
+	if k := ResolveSortCompare(99); k != nil { // nonexistent type
+		t.Fatal("an unknown type must resolve to nil, not to an always-equal comparator")
 	}
 }
 

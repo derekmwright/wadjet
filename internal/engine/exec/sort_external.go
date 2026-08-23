@@ -139,7 +139,11 @@ func sortEntriesLessFunc(resolved []resolvedSortKey, batches []*batch.RecordBatc
 		bi, bj := batches[ei.batchIdx], batches[ej.batchIdx]
 		ri, rj := int(ei.rowIdx), int(ej.rowIdx)
 		for _, key := range resolved {
-			if key.colIdx < 0 || key.colIdx >= len(bi.Columns) || key.colIdx >= len(bj.Columns) {
+			// A nil kernel is the resolvers' refusal to order a type
+			// (kernel.ResolveSortCompare); skipping the key leaves the
+			// sequence to the remaining keys rather than dereferencing nil.
+			// All 22 types resolve, so this is a defensive guard.
+			if key.colIdx < 0 || key.compare == nil || key.colIdx >= len(bi.Columns) || key.colIdx >= len(bj.Columns) {
 				continue
 			}
 			cmp := key.compare(bi.Columns[key.colIdx], ri, bj.Columns[key.colIdx], rj)
@@ -342,7 +346,7 @@ func (h *mergeHeap) Len() int { return len(h.cursors) }
 func (h *mergeHeap) Less(i, j int) bool {
 	a, b := h.cursors[i], h.cursors[j]
 	for _, key := range h.resolved {
-		if key.colIdx < 0 || key.colIdx >= len(a.cur.Columns) || key.colIdx >= len(b.cur.Columns) {
+		if key.colIdx < 0 || key.compare == nil || key.colIdx >= len(a.cur.Columns) || key.colIdx >= len(b.cur.Columns) {
 			continue
 		}
 		cmp := key.compare(a.cur.Columns[key.colIdx], a.row, b.cur.Columns[key.colIdx], b.row)

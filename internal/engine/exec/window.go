@@ -953,7 +953,14 @@ func compareVectorValues(col *batch.Vector, a, b int) int {
 			return 1
 		}
 		return 0
-	case batch.TypeString:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		// All five are BytesColumn-backed and the sort kernel groups them
+		// together, so they order by BYTES here too. Only STRING was listed
+		// before; the other four fell to compareAny over GetValue, which
+		// compares the RENDERED text — and "2001:db8::10" sorts before
+		// "2001:db8::9" as text while the addresses do not. Same
+		// path-dependent sequence #394 found for DECIMAL, here deciding
+		// PARTITION BY boundaries and RANK peer groups.
 		va := col.BytesData.UnsafeStringValue(a)
 		vb := col.BytesData.UnsafeStringValue(b)
 		if va < vb {
@@ -963,6 +970,13 @@ func compareVectorValues(col *batch.Vector, a, b int) int {
 			return 1
 		}
 		return 0
+	case batch.TypeArray, batch.TypeMap, batch.TypeRow, batch.TypeVector:
+		// Columnar container comparison, the same total order ORDER BY and
+		// the sort-merge join take. compareAny's boxed form would answer
+		// too, but it renders a nested DECIMAL as text and loses a ROW's
+		// field ORDER, so the window would partition a container column
+		// differently from the way the sort orders it (#415).
+		return kernel.CompareValuesAt(col, a, col, b)
 	case batch.TypeDecimal:
 		// Not the default's business: Vector.GetValue boxes a DECIMAL as its
 		// FORMATTED string, so compareAny would order "10.001" before
