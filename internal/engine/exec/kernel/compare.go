@@ -994,6 +994,18 @@ func toDateInt32(v any) int32 {
 }
 
 // parseDateToDays converts a date string to days since 1970-01-01.
+//
+// KNOWN CORRECTNESS LIMIT (#451): dates outside 1677-09-22 .. 2262-04-11 are
+// SATURATED, not refused. t.Sub returns a time.Duration — int64 NANOSECONDS —
+// and its contract is to return the maximum (minimum) Duration rather than
+// report an overflow, and ±math.MaxInt64 ns is ±106751.99 days, so every date
+// past the upper edge answers 106751 (2262-04-11) and every date past the
+// lower edge answers -106751 (1677-09-22). The int32 return is not the
+// constraint: it holds ~5.8 million years. Nothing reports the clamp — the
+// caller gets an ordinary-looking day count, so `d = '9999-12-31'` (the SCD
+// end-of-time sentinel) filters on 2262-04-11, and StatsDomainValue hands the
+// same clamped count to the prune layer as a row-group bound. The answer is
+// wrong rows, not an error.
 func parseDateToDays(s string) int32 {
 	t, err := time.Parse("2006-01-02", s)
 	if err != nil {
