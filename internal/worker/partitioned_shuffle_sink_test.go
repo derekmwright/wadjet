@@ -11,6 +11,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestPartitionedShuffleSink_RoundTrip verifies that rows hash-partitioned
@@ -220,13 +221,13 @@ func readWSHFInts(t *testing.T, path, colName string) []int64 {
 	if len(data) == 0 {
 		return nil
 	}
-	r, err := newShuffleChunkReader(data)
+	r, err := wshf.NewChunkReader(data)
 	if err != nil {
 		t.Fatalf("readWSHFInts: parse %s: %v", path, err)
 	}
 	// Find column index by name.
 	colIdx := -1
-	for i, col := range r.schema {
+	for i, col := range r.Schema() {
 		if col.Name == colName {
 			colIdx = i
 			break
@@ -305,7 +306,7 @@ func TestPartitionedShuffleSink_LargeConsumeBurstParity(t *testing.T) {
 		if len(data) == 0 {
 			continue
 		}
-		rdr, err := newShuffleChunkReader(data)
+		rdr, err := wshf.NewChunkReader(data)
 		if err != nil {
 			t.Fatalf("parse partition %d: %v", p, err)
 		}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestExecuteFragment_ScanSortUnpartitioned exercises the OpSort breaker
@@ -86,7 +87,7 @@ func TestExecuteFragment_ScanSortUnpartitioned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	r, err := newShuffleChunkReader(out)
+	r, err := wshf.NewChunkReader(out)
 	if err != nil {
 		t.Fatalf("parse output: %v", err)
 	}
@@ -220,7 +221,7 @@ func TestExecuteFragment_ThreeOps_AggFilterSort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	r, err := newShuffleChunkReader(out)
+	r, err := wshf.NewChunkReader(out)
 	if err != nil {
 		t.Fatalf("parse output: %v", err)
 	}
@@ -353,7 +354,7 @@ func TestExecuteFragment_TwoBreakers_AggThenSort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	r, err := newShuffleChunkReader(out)
+	r, err := wshf.NewChunkReader(out)
 	if err != nil {
 		t.Fatalf("parse output: %v", err)
 	}
@@ -502,7 +503,7 @@ func TestExecuteFragment_TwoBreakers_SpillUnderPressure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	r, err := newShuffleChunkReader(out)
+	r, err := wshf.NewChunkReader(out)
 	if err != nil {
 		t.Fatalf("parse output: %v", err)
 	}

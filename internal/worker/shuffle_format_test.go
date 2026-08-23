@@ -10,6 +10,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 func TestShuffleFormatRoundTrip(t *testing.T) {
@@ -70,7 +71,7 @@ func TestShuffleFormatRoundTrip(t *testing.T) {
 	data[4] = byte(sw.numChunks)
 
 	// Read back
-	batches, err := shuffleReadBatches(data)
+	batches, err := wshf.DecodeBatches(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,13 +156,13 @@ func TestShuffleChunkReaderTruncatedFile(t *testing.T) {
 
 	// shuffleReadBatches must error rather than silently returning the partial
 	// data.
-	if _, err := shuffleReadBatches(data); err == nil {
+	if _, err := wshf.DecodeBatches(data); err == nil {
 		t.Error("shuffleReadBatches: want error on truncated file, got nil")
 	}
 
-	// shuffleChunkReader.Next must error after consuming the one valid chunk
+	// wshf.ChunkReader.Next must error after consuming the one valid chunk
 	// rather than silently returning EOF.
-	r, err := newShuffleChunkReader(data)
+	r, err := wshf.NewChunkReader(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,25 +171,25 @@ func TestShuffleChunkReaderTruncatedFile(t *testing.T) {
 		t.Fatalf("first chunk: err=%v batch=%v", err, first)
 	}
 	if _, err := r.Next(); err == nil {
-		t.Error("shuffleChunkReader.Next: want truncation error after first chunk, got nil")
+		t.Error("wshf.ChunkReader.Next: want truncation error after first chunk, got nil")
 	}
 }
 
 func TestShuffleFormatDetection(t *testing.T) {
 	// Binary shuffle format
 	shuffleData := []byte{'W', 'S', 'H', 'F', 0, 0, 0, 0}
-	if !isShuffleFormat(shuffleData) {
+	if !wshf.IsShuffleFormat(shuffleData) {
 		t.Error("should detect shuffle format")
 	}
 
 	// Parquet format (starts with PAR1)
 	parquetData := []byte{'P', 'A', 'R', '1', 0, 0, 0, 0}
-	if isShuffleFormat(parquetData) {
+	if wshf.IsShuffleFormat(parquetData) {
 		t.Error("should not detect parquet as shuffle format")
 	}
 
 	// Too short
-	if isShuffleFormat([]byte{1, 2}) {
+	if wshf.IsShuffleFormat([]byte{1, 2}) {
 		t.Error("should not detect short data as shuffle format")
 	}
 }
@@ -228,7 +229,7 @@ func TestShuffleCompressedRoundTrip(t *testing.T) {
 	}
 
 	// Verify WSHC is detected as shuffle format
-	if !isShuffleFormat(compressed) {
+	if !wshf.IsShuffleFormat(compressed) {
 		t.Error("compressed shuffle data should be detected as shuffle format")
 	}
 
@@ -237,7 +238,7 @@ func TestShuffleCompressedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecompressShuffleData: %v", err)
 	}
-	batches, err := shuffleReadBatches(decompressed)
+	batches, err := wshf.DecodeBatches(decompressed)
 	if err != nil {
 		t.Fatalf("shuffleReadBatches after decompress: %v", err)
 	}
@@ -253,7 +254,7 @@ func TestShuffleCompressedRoundTrip(t *testing.T) {
 
 	// Reading compressed data WITHOUT decompressing must fail
 	// (this was the bug in executeMergeSorted)
-	_, err = shuffleReadBatches(compressed)
+	_, err = wshf.DecodeBatches(compressed)
 	if err == nil {
 		t.Error("reading WSHC data without decompressing should fail")
 	}
@@ -317,7 +318,7 @@ func TestShuffleFormatDecimalScaleRoundTrip(t *testing.T) {
 	payload := buf.Bytes()
 	payload[4] = 1 // patch chunk count like the gather sink does
 
-	out, err := shuffleReadBatches(payload)
+	out, err := wshf.DecodeBatches(payload)
 	if err != nil {
 		t.Fatalf("shuffleReadBatches: %v", err)
 	}
@@ -335,11 +336,11 @@ func TestShuffleFormatDecimalScaleRoundTrip(t *testing.T) {
 	}
 
 	// The streaming chunk reader parses the same header.
-	cr, err := newShuffleChunkReader(payload)
+	cr, err := wshf.NewChunkReader(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cr.schema[1].Scale; got != 2 {
+	if got := cr.Schema()[1].Scale; got != 2 {
 		t.Fatalf("chunk reader schema scale = %d, want 2", got)
 	}
 }
@@ -393,11 +394,11 @@ func TestShuffleZstdRoundTrip(t *testing.T) {
 	if string(compressed[:4]) != "WSHZ" {
 		t.Fatalf("expected WSHZ magic under WADJET_EXCHANGE_ZSTD, got %q", compressed[:4])
 	}
-	if !isShuffleFormat(compressed) {
+	if !wshf.IsShuffleFormat(compressed) {
 		t.Error("WSHZ data should be detected as shuffle format")
 	}
-	if c, ok := codecForMagic([4]byte{'W', 'S', 'H', 'Z'}); !ok || c != codecZstd {
-		t.Fatalf("codecForMagic(WSHZ) = (%v,%v), want (codecZstd,true)", c, ok)
+	if c, ok := wshf.CodecForMagic([4]byte{'W', 'S', 'H', 'Z'}); !ok || c != codecZstd {
+		t.Fatalf("wshf.CodecForMagic(WSHZ) = (%v,%v), want (codecZstd,true)", c, ok)
 	}
 
 	decompressed, err := DecompressShuffleData(compressed)
@@ -407,14 +408,14 @@ func TestShuffleZstdRoundTrip(t *testing.T) {
 	if !bytes.Equal(decompressed, raw) {
 		t.Fatalf("WSHZ round trip not byte-identical: %d bytes vs %d raw", len(decompressed), len(raw))
 	}
-	batches, err := shuffleReadBatches(decompressed)
+	batches, err := wshf.DecodeBatches(decompressed)
 	if err != nil {
 		t.Fatalf("shuffleReadBatches after WSHZ decompress: %v", err)
 	}
 	if len(batches) != 1 || batches[0].Len != 2048 {
 		t.Fatalf("expected 1 batch with 2048 rows, got %d batches", len(batches))
 	}
-	if _, err := shuffleReadBatches(compressed); err == nil {
+	if _, err := wshf.DecodeBatches(compressed); err == nil {
 		t.Error("reading WSHZ data without decompressing should fail")
 	}
 

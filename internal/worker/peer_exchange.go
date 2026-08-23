@@ -15,6 +15,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // peerExchange holds the worker's streaming-exchange state (Phase A,
@@ -242,7 +243,7 @@ func (s *cachedFileStreamSource) openShuffleFromPeer(ctx context.Context, key, a
 	if _, err := io.ReadFull(rc, magic[:]); err != nil {
 		return fmt.Errorf("reading magic from peer %s: %w", addr, err)
 	}
-	codec, isShuffle := codecForMagic(magic)
+	codec, isShuffle := wshf.CodecForMagic(magic)
 	if !isShuffle {
 		return fmt.Errorf("peer %s returned non-shuffle payload for %s (magic %q)", addr, key, magic[:])
 	}

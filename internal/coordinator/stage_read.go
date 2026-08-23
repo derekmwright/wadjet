@@ -8,6 +8,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/optswitch"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // coordReadTier names the tier that served one coordinator-side stage-output
@@ -189,12 +190,8 @@ func (c *Coordinator) fetchFromProducerPeer(ctx context.Context, path string) ([
 }
 
 // isPeerStagePayload reports whether data starts with a magic the
-// coordinator's decode paths actually handle: raw WSHF (readShuffleBatches)
-// or an s2-wrapped WSHC envelope (decompressShuffleData unwraps it first).
-// Mirrors the worker's codecForMagic (internal/worker/shuffle_format.go)
-// without importing it — dataplane wire magics are a cross-package
-// contract, not worker-owned (dataplane/peer_server.go keeps its own copy
-// of the same four bytes for the same reason).
+// coordinator's decode paths actually handle: raw WSHF or an s2-wrapped
+// WSHC envelope, both of which wshf.Decompress + wshf.DecodeBatches read.
 //
 // WSHZ (zstd) is deliberately excluded: it is the S3-upload envelope
 // (docs/design/exchange-zstd-wire.md — chosen only when
@@ -208,12 +205,8 @@ func isPeerStagePayload(data []byte) bool {
 	if len(data) < 4 {
 		return false
 	}
-	switch string(data[:4]) {
-	case "WSHF", "WSHC":
-		return true
-	default:
-		return false
-	}
+	codec, ok := wshf.CodecForMagic([4]byte{data[0], data[1], data[2], data[3]})
+	return ok && codec != wshf.CodecZstd
 }
 
 // noteStageReadTier tallies one served coordinator-side stage read.

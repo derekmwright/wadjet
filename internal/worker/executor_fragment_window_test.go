@@ -10,6 +10,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestExecuteFragment_ScanWindowUnpartitioned runs the OpWindow breaker
@@ -100,7 +101,7 @@ func TestExecuteFragment_ScanWindowUnpartitioned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	r, err := newShuffleChunkReader(out)
+	r, err := wshf.NewChunkReader(out)
 	if err != nil {
 		t.Fatalf("parse output: %v", err)
 	}

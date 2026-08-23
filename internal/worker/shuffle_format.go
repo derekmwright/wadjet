@@ -13,29 +13,20 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
-// Columnar binary shuffle format — replaces Parquet for inter-stage shuffle data.
-// Avoids per-row goparquet.Value allocation (nRows * nCols objects), alphabetical
-// column reordering, and Parquet page/RLE encoding overhead.
+// The WRITE side of the columnar binary shuffle format — it replaces
+// Parquet for inter-stage shuffle data, avoiding per-row goparquet.Value
+// allocation (nRows * nCols objects), alphabetical column reordering and
+// Parquet page/RLE encoding overhead.
 //
-// Format:
-//   Magic "WSHF" (4 bytes)
-//   NumChunks uint32 (4 bytes)
-//   NumCols uint16 (2 bytes)
-//   Schema: for each column:
-//     NameLen uint16
-//     Name []byte
-//     TypeID uint8
-//   Chunks: for each chunk:
-//     NumRows uint32 (4 bytes)
-//     For each column:
-//       NullBitmapWords uint32 (number of uint64 words)
-//       NullBitmap []uint64
-//       DataLen uint32 (byte length of column data)
-//       Data []byte (type-dependent raw data)
+// The layout itself, the envelope magics and the ONE bounds-checked
+// decoder are in internal/wshf, which the coordinator imports too — the
+// reader used to be hand-copied there, and the copy walked the payload
+// with no bounds at all (#422).
 
-var shuffleMagic = [4]byte{'W', 'S', 'H', 'F'}
+var shuffleMagic = wshf.MagicWSHF
 
 // Extent-index footer (docs/design/shuffle-extent-index.md): file sinks
 // append a WIDX footer recording every chunk's start offset, letting the
@@ -276,116 +267,6 @@ func parseShuffleExtentIndex(ra io.ReaderAt, size int64, numChunks uint32, heade
 		}
 	}
 	return offs
-}
-
-// Sentinels returned by fixedShuffleTypeLen for the two classes whose byte
-// count is not a function of the row count.
-const (
-	// shuffleLenBytes: [dataLen u32][data][numRows × u32 end offsets].
-	shuffleLenBytes = -1
-	// shuffleLenContainer: [payloadLen u32][payload]. The payload is
-	// self-describing (batch.EncodeContainerColumn) and the walk skips it
-	// whole — ARRAY/ROW/MAP/VECTOR have no per-row width at all.
-	shuffleLenContainer = -2
-)
-
-// fixedShuffleTypeLen returns the exact payload byte length for fixed-width
-// shuffle types, or one of the sentinels above for the variable-length
-// classes. Shared by the streaming stage walk and the index-mode extent
-// validation so the two cannot diverge.
-func fixedShuffleTypeLen(typ parquet.TypeID, numRows int) (int, error) {
-	switch typ {
-	case parquet.TypeBool:
-		return (numRows + 7) / 8, nil
-	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
-		return numRows * 4, nil
-	case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
-		return numRows * 8, nil
-	case parquet.TypeFloat32:
-		return numRows * 4, nil
-	case parquet.TypeFloat64:
-		return numRows * 8, nil
-	case parquet.TypeDecimal:
-		return numRows * 16, nil
-	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
-		return shuffleLenBytes, nil
-	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow, parquet.TypeVector:
-		return shuffleLenContainer, nil
-	default:
-		return 0, fmt.Errorf("unsupported shuffle type %v", typ)
-	}
-}
-
-// validateShuffleChunkBytes walks one chunk's column segments in buf (the
-// bytes AFTER the row-count word), applying exactly the stage walk's bounds
-// checks, and requires the walk to consume buf in full. Index-mode decode
-// workers run it over their pread extent before decodeShuffleChunk —
-// readColumnData slices without bounds checks, and a decoder must not trust
-// length prefixes it has not checked, whether they arrived by stream or by
-// pread.
-func validateShuffleChunkBytes(schema []parquet.Column, numRows int, buf []byte) error {
-	pos := 0
-	take := func(n int) error {
-		if n < 0 || len(buf)-pos < n {
-			return io.ErrUnexpectedEOF
-		}
-		pos += n
-		return nil
-	}
-	for ci := range schema {
-		if len(buf)-pos < 4 {
-			return fmt.Errorf("column %d bitmap header: %w", ci, io.ErrUnexpectedEOF)
-		}
-		bitmapWords := int(binary.LittleEndian.Uint32(buf[pos:]))
-		pos += 4
-		maxWords := (numRows+63)/64 + 1
-		if bitmapWords < 0 || bitmapWords > maxWords {
-			return fmt.Errorf("column %d: implausible bitmap words %d for %d rows", ci, bitmapWords, numRows)
-		}
-		if err := take(bitmapWords * 8); err != nil {
-			return fmt.Errorf("column %d bitmap: %w", ci, err)
-		}
-		if len(buf)-pos < 4 {
-			return fmt.Errorf("column %d data header: %w", ci, io.ErrUnexpectedEOF)
-		}
-		dataLen := int(binary.LittleEndian.Uint32(buf[pos:]))
-		pos += 4
-		want, err := fixedShuffleTypeLen(schema[ci].Type, numRows)
-		if err != nil {
-			return fmt.Errorf("column %d: %w", ci, err)
-		}
-		switch {
-		case want >= 0:
-			if dataLen != want {
-				return fmt.Errorf("column %d (%v): data length %d != expected %d for %d rows",
-					ci, schema[ci].Type, dataLen, want, numRows)
-			}
-			if err := take(dataLen); err != nil {
-				return fmt.Errorf("column %d data: %w", ci, err)
-			}
-		case want == shuffleLenContainer:
-			if dataLen < 0 || dataLen > streamMaxBytesLen {
-				return fmt.Errorf("column %d: implausible container payload length %d", ci, dataLen)
-			}
-			if err := take(dataLen); err != nil {
-				return fmt.Errorf("column %d container payload: %w", ci, err)
-			}
-		default:
-			if dataLen < 0 || dataLen > streamMaxBytesLen {
-				return fmt.Errorf("column %d: implausible bytes payload length %d", ci, dataLen)
-			}
-			if err := take(dataLen); err != nil {
-				return fmt.Errorf("column %d bytes data: %w", ci, err)
-			}
-			if err := take(numRows * 4); err != nil {
-				return fmt.Errorf("column %d offsets: %w", ci, err)
-			}
-		}
-	}
-	if pos != len(buf) {
-		return fmt.Errorf("extent is %d bytes but the column walk consumed %d", len(buf), pos)
-	}
-	return nil
 }
 
 // composeViewSel resolves a view column's effective selection against its
@@ -695,7 +576,7 @@ func (sw *shuffleWriter) writeDecimalData(vec *batch.Vector, sel []uint32, numRo
 		return err
 	}
 	// Wire order is (Lo, Hi), matching the sel path above, the
-	// coordinator's readShuffleColumn, and the exec spill format. The
+	// coordinator's decode of the same bytes, and the exec spill format. The
 	// previous unsafe memcpy assumed the struct was {Lo, Hi} — it is
 	// {Hi, Lo} — so no-sel chunks hit explicit-order readers field-swapped
 	// and every decimal decoded as garbage (issue #144 suite finding).
@@ -709,364 +590,22 @@ func (sw *shuffleWriter) writeDecimalData(vec *batch.Vector, sel []uint32, numRo
 	return err
 }
 
-// shuffleChunkReader iterates over chunks in a WSHF byte slice one at a time,
-// allocating a single RecordBatch per Next call. Callers hold only one batch
-// in memory at a time instead of materializing the entire file up front.
-type shuffleChunkReader struct {
-	data      []byte
-	schema    []parquet.Column
-	numChunks uint32
-	chunk     uint32
-	pos       int
-}
-
-// newShuffleChunkReader parses the WSHF header and returns a reader positioned
-// at the first chunk. The caller retains ownership of data — it must remain
-// valid for the lifetime of the reader.
-func newShuffleChunkReader(data []byte) (*shuffleChunkReader, error) {
-	if len(data) < 10 {
-		return nil, fmt.Errorf("shuffle file too small: %d bytes", len(data))
-	}
-	if data[0] != shuffleMagic[0] || data[1] != shuffleMagic[1] ||
-		data[2] != shuffleMagic[2] || data[3] != shuffleMagic[3] {
-		return nil, fmt.Errorf("invalid shuffle magic: %q", data[:4])
-	}
-
-	pos := 4
-	numChunks := binary.LittleEndian.Uint32(data[pos:])
-	pos += 4
-	numCols := int(binary.LittleEndian.Uint16(data[pos:]))
-	pos += 2
-
-	schema := make([]parquet.Column, numCols)
-	for i := 0; i < numCols; i++ {
-		if pos+2 > len(data) {
-			return nil, fmt.Errorf("truncated schema at column %d", i)
-		}
-		nameLen := int(binary.LittleEndian.Uint16(data[pos:]))
-		pos += 2
-		if pos+nameLen+1 > len(data) {
-			return nil, fmt.Errorf("truncated schema name at column %d", i)
-		}
-		schema[i].Name = string(data[pos : pos+nameLen])
-		pos += nameLen
-		schema[i].Type = parquet.TypeID(data[pos])
-		schema[i].Nullable = true
-		pos++
-		if schema[i].Type == parquet.TypeDecimal {
-			if pos+2 > len(data) {
-				return nil, fmt.Errorf("truncated decimal schema at column %d", i)
-			}
-			schema[i].Scale = int(data[pos])
-			schema[i].Precision = int(data[pos+1])
-			pos += 2
-		}
-	}
-
-	return &shuffleChunkReader{
-		data:      data,
-		schema:    schema,
-		numChunks: numChunks,
-		pos:       pos,
-	}, nil
-}
-
-// Pos returns the reader's byte offset into the WSHF slice — everything
-// below it has been fully decoded (batches copy column data out), so the
-// drop-behind walk can discard those pages. Strictly monotonic.
-func (r *shuffleChunkReader) Pos() int { return r.pos }
-
-// Next returns the next RecordBatch from the file, or (nil, nil) when all chunks
-// have been consumed. Allocates exactly one RecordBatch per non-empty chunk.
-func (r *shuffleChunkReader) Next() (*batch.RecordBatch, error) {
-	for r.chunk < r.numChunks {
-		if r.pos+4 > len(r.data) {
-			// We promised numChunks worth of data in the header but the file
-			// is too short to even hold the next chunk's row-count word. This
-			// is a truncated/corrupt file. Returning a silent EOF here would
-			// drop the remaining rows on the floor — at SF100 that turned
-			// into wrong query results (e.g. Q05 returning 0 rows when build
-			// cache files were truncated). Surface as an error so the worker
-			// fails the task instead of completing with missing data.
-			return nil, fmt.Errorf("shuffle file truncated: chunk %d/%d header at offset %d (file size %d)",
-				r.chunk, r.numChunks, r.pos, len(r.data))
-		}
-		numRows := int(binary.LittleEndian.Uint32(r.data[r.pos:]))
-		r.pos += 4
-		r.chunk++
-
-		if numRows == 0 {
-			continue
-		}
-
-		b := batch.NewRecordBatch(r.schema, numRows)
-		for ci := range r.schema {
-			var err error
-			r.pos, err = readColumnData(r.data, r.pos, b.Columns[ci], numRows, r.schema[ci].Type)
-			if err != nil {
-				return nil, fmt.Errorf("reading column %d (%s) chunk %d: %w", ci, r.schema[ci].Name, r.chunk-1, err)
-			}
-		}
-		batch.SyncContainerSchema(b)
-		return b, nil
-	}
-	return nil, nil
-}
-
-// shuffleReadBatches reads all chunks from a binary shuffle file into RecordBatches.
-func shuffleReadBatches(data []byte) ([]*batch.RecordBatch, error) {
-	if len(data) < 10 {
-		return nil, fmt.Errorf("shuffle file too small: %d bytes", len(data))
-	}
-
-	// Verify magic
-	if data[0] != shuffleMagic[0] || data[1] != shuffleMagic[1] ||
-		data[2] != shuffleMagic[2] || data[3] != shuffleMagic[3] {
-		return nil, fmt.Errorf("invalid shuffle magic: %q", data[:4])
-	}
-
-	pos := 4
-	numChunks := binary.LittleEndian.Uint32(data[pos:])
-	pos += 4
-	numCols := int(binary.LittleEndian.Uint16(data[pos:]))
-	pos += 2
-
-	// Read schema
-	schema := make([]parquet.Column, numCols)
-	for i := 0; i < numCols; i++ {
-		nameLen := int(binary.LittleEndian.Uint16(data[pos:]))
-		pos += 2
-		schema[i].Name = string(data[pos : pos+nameLen])
-		pos += nameLen
-		schema[i].Type = parquet.TypeID(data[pos])
-		schema[i].Nullable = true
-		pos++
-		if schema[i].Type == parquet.TypeDecimal {
-			if pos+2 > len(data) {
-				return nil, fmt.Errorf("truncated decimal schema at column %d", i)
-			}
-			schema[i].Scale = int(data[pos])
-			schema[i].Precision = int(data[pos+1])
-			pos += 2
-		}
-	}
-
-	// Read chunks
-	batches := make([]*batch.RecordBatch, 0, numChunks)
-	for chunk := uint32(0); chunk < numChunks; chunk++ {
-		if pos+4 > len(data) {
-			return nil, fmt.Errorf("shuffle file truncated: chunk %d/%d header at offset %d (file size %d)",
-				chunk, numChunks, pos, len(data))
-		}
-		numRows := int(binary.LittleEndian.Uint32(data[pos:]))
-		pos += 4
-		if numRows == 0 {
-			continue
-		}
-
-		b := batch.NewRecordBatch(schema, numRows)
-		for ci := 0; ci < numCols; ci++ {
-			var err error
-			pos, err = readColumnData(data, pos, b.Columns[ci], numRows, schema[ci].Type)
-			if err != nil {
-				return nil, fmt.Errorf("reading column %d (%s) chunk %d: %w", ci, schema[ci].Name, chunk, err)
-			}
-		}
-		batch.SyncContainerSchema(b)
-		batches = append(batches, b)
-	}
-	return batches, nil
-}
-
-func readColumnData(data []byte, pos int, vec *batch.Vector, numRows int, typ parquet.TypeID) (int, error) {
-	// Read null bitmap via bulk copy.
-	bitmapWords := int(binary.LittleEndian.Uint32(data[pos:]))
-	pos += 4
-	words := vec.Nulls.Words()
-	copyWords := bitmapWords
-	if copyWords > len(words) {
-		copyWords = len(words)
-	}
-	if copyWords > 0 {
-		dstBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(words[:copyWords]))), copyWords*8)
-		copy(dstBytes, data[pos:pos+copyWords*8])
-	}
-	pos += bitmapWords * 8
-	// Invalidate the HasNulls() cache since we overwrote bitmap words directly.
-	vec.Nulls.InvalidateCache()
-
-	// Read column data
-	switch typ {
-	case parquet.TypeBool:
-		return readBoolData(data, pos, vec.BoolData, numRows)
-	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
-		return readInt32Data(data, pos, vec.Int32Data, numRows)
-	case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
-		return readInt64Data(data, pos, vec.Int64Data, numRows)
-	case parquet.TypeFloat32:
-		return readFloat32Data(data, pos, vec.Float32Data, numRows)
-	case parquet.TypeFloat64:
-		return readFloat64Data(data, pos, vec.Float64Data, numRows)
-	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
-		return readBytesData(data, pos, &vec.BytesData, numRows)
-	case parquet.TypeDecimal:
-		return readDecimalData(data, pos, vec, numRows)
-	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow, parquet.TypeVector:
-		return readContainerData(data, pos, vec, numRows)
-	default:
-		return pos, fmt.Errorf("unsupported shuffle type: %v", typ)
-	}
-}
-
-// readContainerData mirrors shuffleWriter.writeContainerData. The nested
-// shape (child element types, ROW field order, VECTOR dimension) comes from
-// the payload, not from the WSHF schema, which carries only a name and a
-// type byte — so the vector NewRecordBatch built from that schema arrives
-// here with no Child/Children at all and the decoder installs them.
-func readContainerData(data []byte, pos int, vec *batch.Vector, numRows int) (int, error) {
-	if pos+4 > len(data) {
-		return pos, fmt.Errorf("truncated container length prefix at offset %d of %d", pos, len(data))
-	}
-	payloadLen := int(binary.LittleEndian.Uint32(data[pos:]))
-	pos += 4
-	if payloadLen < 0 || pos+payloadLen > len(data) {
-		return pos, fmt.Errorf("container payload of %d bytes at offset %d exceeds the %d-byte chunk",
-			payloadLen, pos, len(data))
-	}
-	if err := batch.DecodeContainerColumn(data[pos:pos+payloadLen], vec, numRows); err != nil {
-		return pos, err
-	}
-	return pos + payloadLen, nil
-}
-
-func readInt32Data(data []byte, pos int, dst []int32, numRows int) (int, error) {
-	pos += 4 // skip dataLen header
-	nbytes := numRows * 4
-	dstBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(dst[:numRows]))), nbytes)
-	copy(dstBytes, data[pos:pos+nbytes])
-	return pos + nbytes, nil
-}
-
-func readInt64Data(data []byte, pos int, dst []int64, numRows int) (int, error) {
-	pos += 4
-	nbytes := numRows * 8
-	dstBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(dst[:numRows]))), nbytes)
-	copy(dstBytes, data[pos:pos+nbytes])
-	return pos + nbytes, nil
-}
-
-func readFloat32Data(data []byte, pos int, dst []float32, numRows int) (int, error) {
-	pos += 4
-	nbytes := numRows * 4
-	dstBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(dst[:numRows]))), nbytes)
-	copy(dstBytes, data[pos:pos+nbytes])
-	return pos + nbytes, nil
-}
-
-func readFloat64Data(data []byte, pos int, dst []float64, numRows int) (int, error) {
-	pos += 4
-	nbytes := numRows * 8
-	dstBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(dst[:numRows]))), nbytes)
-	copy(dstBytes, data[pos:pos+nbytes])
-	return pos + nbytes, nil
-}
-
-func readBoolData(data []byte, pos int, dst []bool, numRows int) (int, error) {
-	packedLen := int(binary.LittleEndian.Uint32(data[pos:]))
-	pos += 4
-	for i := 0; i < numRows; i++ {
-		dst[i] = (data[pos+i/8]>>(uint(i)%8))&1 == 1
-	}
-	pos += packedLen
-	return pos, nil
-}
-
-func readBytesData(data []byte, pos int, dst *batch.BytesColumn, numRows int) (int, error) {
-	totalDataLen := int(binary.LittleEndian.Uint32(data[pos:]))
-	pos += 4
-
-	// Read concatenated data
-	allData := data[pos : pos+totalDataLen]
-	pos += totalDataLen
-
-	// Read offsets via bulk copy.
-	offsets := make([]uint32, numRows)
-	offBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(offsets))), numRows*4)
-	copy(offBytes, data[pos:pos+numRows*4])
-	pos += numRows * 4
-
-	// Bulk-copy all string data into the BytesColumn, then set offsets.
-	dst.Data = append(dst.Data[:0], allData...)
-	if cap(dst.Offsets) < numRows+1 {
-		dst.Offsets = make([]uint32, numRows+1)
-	} else {
-		dst.Offsets = dst.Offsets[:numRows+1]
-	}
-	dst.Offsets[0] = 0
-	copy(dst.Offsets[1:], offsets)
-	return pos, nil
-}
-
-func readDecimalData(data []byte, pos int, vec *batch.Vector, numRows int) (int, error) {
-	pos += 4 // skip dataLen header
-	nbytes := numRows * 16
-	if vec.DecimalData.Data == nil {
-		return pos + nbytes, nil
-	}
-	// Wire order is (Lo, Hi) — see shuffleWriter.writeDecimalData. The
-	// previous raw struct memcpy assumed (Hi, Lo) and field-swapped any
-	// chunk produced by the explicit-order writer paths.
-	for i := 0; i < numRows; i++ {
-		off := pos + i*16
-		vec.DecimalData.Data[i] = batch.Int128{
-			Lo: binary.LittleEndian.Uint64(data[off:]),
-			Hi: int64(binary.LittleEndian.Uint64(data[off+8:])),
-		}
-	}
-	return pos + nbytes, nil
-}
-
-// isShuffleFormat returns true if the data starts with the shuffle magic bytes
-// (either uncompressed WSHF or compressed WSHC).
-func isShuffleFormat(data []byte) bool {
-	if len(data) < 4 {
-		return false
-	}
-	_, ok := codecForMagic([4]byte{data[0], data[1], data[2], data[3]})
-	return ok
-}
-
-// compressedMagic identifies an s2-compressed WSHF payload.
-var compressedMagic = [4]byte{'W', 'S', 'H', 'C'}
-
-// zstdMagic identifies a zstd-compressed WSHF payload (WSHZ envelope,
-// docs/design/exchange-zstd-wire.md). Chosen for S3 uploads when
-// WADJET_EXCHANGE_ZSTD=1; peer-wire compress-on-serve stays s2 and disk
-// stays raw WSHF, so WSHZ appears only on S3-uploaded objects.
-var zstdMagic = [4]byte{'W', 'S', 'H', 'Z'}
-
-// shuffleCodec identifies the envelope around a WSHF payload.
-type shuffleCodec uint8
+// The wire identity of the format — magics, envelope codec and the whole
+// read side — lives in internal/wshf so the coordinator decodes the same
+// bytes with the same code (#422). These aliases keep the worker's local
+// spellings; there is no second implementation behind them.
+type shuffleCodec = wshf.Codec
 
 const (
-	codecNone shuffleCodec = iota // plain WSHF
-	codecS2                       // WSHC: s2 stream of the WSHF bytes
-	codecZstd                     // WSHZ: zstd stream of the WSHF bytes
+	codecNone = wshf.CodecNone
+	codecS2   = wshf.CodecS2
+	codecZstd = wshf.CodecZstd
 )
 
-// codecForMagic maps a 4-byte magic to its codec. ok=false means the
-// payload is not a shuffle format at all (e.g. parquet).
-func codecForMagic(magic [4]byte) (shuffleCodec, bool) {
-	switch magic {
-	case shuffleMagic:
-		return codecNone, true
-	case compressedMagic:
-		return codecS2, true
-	case zstdMagic:
-		return codecZstd, true
-	}
-	return codecNone, false
-}
+var (
+	compressedMagic = wshf.MagicWSHC
+	zstdMagic       = wshf.MagicWSHZ
+)
 
 // exchangeZstd selects the WSHZ (zstd) envelope instead of WSHC (s2) for
 // S3 stage/shuffle uploads. Default off pending the SF100 A/B
@@ -1264,7 +803,7 @@ func DecompressShuffleData(data []byte) ([]byte, error) {
 	if len(data) < 4 {
 		return data, nil
 	}
-	codec, ok := codecForMagic([4]byte{data[0], data[1], data[2], data[3]})
+	codec, ok := wshf.CodecForMagic([4]byte{data[0], data[1], data[2], data[3]})
 	if !ok || codec == codecNone {
 		return data, nil // plain WSHF or not compressed shuffle data
 	}

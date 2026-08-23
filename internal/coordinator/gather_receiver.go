@@ -15,6 +15,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/dataplane"
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // gatherResult is the terminal output of a gather receiver: the assembled
@@ -157,7 +158,7 @@ func (r *gatherReceiver) handleParsed(msg *distributed.GatherBatchMsg) {
 		r.spillFrameLocked(msg)
 		return
 	}
-	decoded, err := readShuffleBatches(msg.Payload)
+	decoded, err := wshf.DecodeBatches(msg.Payload)
 	if err != nil {
 		if r.workerErr == "" {
 			r.workerErr = fmt.Sprintf("decoding gather batch: %v", err)

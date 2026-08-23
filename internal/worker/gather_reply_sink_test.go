@@ -15,6 +15,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestGatherReplySink publishes two batches and a terminal to a NATS reply
@@ -111,13 +112,13 @@ func TestGatherReplySink(t *testing.T) {
 		t.Errorf("row counts: got %d,%d want 3,2", received[0].RowCount, received[1].RowCount)
 	}
 
-	// Decode payloads via shuffleChunkReader and verify round-trip.
+	// Decode payloads via wshf.ChunkReader and verify round-trip.
 	wantIDs := []int64{1, 2, 3, 4, 5}
 	wantNames := []string{"alice", "bob", "carol", "dave", "eve"}
 	var gotIDs []int64
 	var gotNames []string
 	for i, msg := range received[:2] {
-		rdr, err := newShuffleChunkReader(msg.Payload)
+		rdr, err := wshf.NewChunkReader(msg.Payload)
 		if err != nil {
 			t.Fatalf("msg %d: reader: %v", i, err)
 		}
@@ -247,7 +248,7 @@ func TestGatherReplySinkChunksOversizedBatch(t *testing.T) {
 	totalDecoded := 0
 	gotSum := int64(0)
 	for i, msg := range received[:wantBatchMsgs] {
-		rdr, err := newShuffleChunkReader(msg.Payload)
+		rdr, err := wshf.NewChunkReader(msg.Payload)
 		if err != nil {
 			t.Fatalf("msg %d reader: %v", i, err)
 		}

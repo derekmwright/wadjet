@@ -9,6 +9,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestPartitionedShuffleMultiChunkRoundTrip is a row-loss localizer for the
@@ -108,7 +109,7 @@ func TestPartitionedShuffleMultiChunkRoundTrip(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				r, err := newShuffleChunkReader(data)
+				r, err := wshf.NewChunkReader(data)
 				if err != nil {
 					t.Fatalf("partition %d: %v", p, err)
 				}

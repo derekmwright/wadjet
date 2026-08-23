@@ -33,6 +33,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -1470,7 +1471,7 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 // with nothing said. readOneResultFile, reading the same bytes off S3
 // instead of inline, has always returned the error.
 func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []string, int64, error) {
-	inlineData, err := decompressShuffleData(data)
+	inlineData, err := wshf.Decompress(data)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("decompressing an inline partial result (%d bytes): %w", len(data), err)
 	}
@@ -1478,7 +1479,7 @@ func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []s
 	var batches []*batch.RecordBatch
 	var columns []string
 	if len(inlineData) >= 4 && string(inlineData[:4]) == "WSHF" {
-		batches, err = readShuffleBatches(inlineData)
+		batches, err = wshf.DecodeBatches(inlineData)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("reading an inline shuffle result (%d bytes): %w", len(inlineData), err)
 		}
@@ -2491,7 +2492,7 @@ func readOneResultFile(ctx context.Context, store objstore.Store, bucket, path s
 		return nil, nil, 0, err
 	}
 
-	data, err = decompressShuffleData(data)
+	data, err = wshf.Decompress(data)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -2499,7 +2500,7 @@ func readOneResultFile(ctx context.Context, store objstore.Store, bucket, path s
 	var batches []*batch.RecordBatch
 	var columns []string
 	if len(data) >= 4 && string(data[:4]) == "WSHF" {
-		batches, err = readShuffleBatches(data)
+		batches, err = wshf.DecodeBatches(data)
 		if err != nil {
 			return nil, nil, 0, err
 		}

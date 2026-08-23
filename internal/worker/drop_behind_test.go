@@ -13,6 +13,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/diskio"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestDropBehindWalk_RealMadvise walks a real >16 MiB WSHF mmap with the
@@ -66,7 +67,7 @@ func TestDropBehindWalk_RealMadvise(t *testing.T) {
 	}
 	defer syscall.Munmap(mm)
 
-	cr, err := newShuffleChunkReader(mm)
+	cr, err := wshf.NewChunkReader(mm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +124,7 @@ func TestDropBehindWalk_SkipsUnownedFiles(t *testing.T) {
 	defer syscall.Munmap(mm)
 
 	s := &cachedFileStreamSource{
-		chunkReader: &shuffleChunkReader{pos: 3 * walkDropWindowBytes},
+		chunkReader: fixedPosChunkReader(3 * walkDropWindowBytes),
 		mmapData:    mm,
 		localPath:   "",
 	}
@@ -162,3 +163,11 @@ func TestWillNeedAdviserClampsAndCounts(t *testing.T) {
 		t.Fatalf("advised bytes = %d, want %d (span1 %d + span4 %d)", got, want, span1, span4)
 	}
 }
+
+// fixedPosChunkReader stands in for an mmap chunk reader parked at a known
+// byte position — the ownership gate must refuse the drop on what the
+// position says is three full windows of decoded bytes.
+type fixedPosChunkReader int
+
+func (p fixedPosChunkReader) Pos() int                          { return int(p) }
+func (p fixedPosChunkReader) Next() (*batch.RecordBatch, error) { return nil, nil }

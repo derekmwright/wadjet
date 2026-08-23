@@ -14,6 +14,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // buildIndexedWSHF is buildMultiTypeWSHF plus the WIDX footer the file
@@ -156,7 +157,7 @@ func TestShuffleExtentIndex_FooterRoundTrip(t *testing.T) {
 		if numRows != 100 {
 			t.Fatalf("chunk %d rows = %d, want 100", i, numRows)
 		}
-		if err := validateShuffleChunkBytes(r.schema, numRows, wire[offs[i]+4:offs[i+1]]); err != nil {
+		if err := wshf.ValidateChunkBytes(r.schema, numRows, wire[offs[i]+4:offs[i+1]]); err != nil {
 			t.Fatalf("chunk %d extent invalid: %v", i, err)
 		}
 	}

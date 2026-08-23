@@ -12,6 +12,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // truncatingReadCloser serves up to remain bytes then fails with an
@@ -159,7 +160,7 @@ func TestStreamingShuffleRead_WSHC(t *testing.T) {
 	ex := &Executor{store: store, spillDir: t.TempDir(), peers: newPeerExchange(), streamingShuffleRead: true}
 	got := drainSource(t, newCachedFileStreamSource(ex, "q2", "b", []string{key}))
 
-	mm, err := newShuffleChunkReader(wire)
+	mm, err := wshf.NewChunkReader(wire)
 	if err != nil {
 		t.Fatalf("reference reader: %v", err)
 	}
@@ -184,7 +185,7 @@ func TestStreamingShuffleRead_MidStreamFallback(t *testing.T) {
 	ex := &Executor{store: store, spillDir: t.TempDir(), peers: newPeerExchange(), streamingShuffleRead: true}
 	got := drainSource(t, newCachedFileStreamSource(ex, "q3", "b", []string{key}))
 
-	mm, err := newShuffleChunkReader(wire)
+	mm, err := wshf.NewChunkReader(wire)
 	if err != nil {
 		t.Fatalf("reference reader: %v", err)
 	}
@@ -211,7 +212,7 @@ func TestStreamingShuffleRead_FlagOffUnchanged(t *testing.T) {
 	stageWSHF(t, store, "b", map[string][]byte{key: wire})
 	ex := &Executor{store: store, spillDir: t.TempDir(), peers: newPeerExchange()}
 	got := drainSource(t, newCachedFileStreamSource(ex, "q4", "b", []string{key}))
-	mm, _ := newShuffleChunkReader(wire)
+	mm, _ := wshf.NewChunkReader(wire)
 	requireBatchesEqual(t, drain(t, mm.Next), got)
 	if reads, _, _ := ex.ShuffleStreamStats(); reads != 0 {
 		t.Fatalf("flag off but streaming reads = %d", reads)

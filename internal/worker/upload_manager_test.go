@@ -11,6 +11,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // gatedStore blocks Put until the gate closes — deterministic control over
@@ -356,7 +357,7 @@ func TestAsyncUnpartitionedWriteOffPolicy(t *testing.T) {
 // readShuffleBatchesForTest decodes a WSHF payload via the production
 // chunk reader.
 func readShuffleBatchesForTest(payload []byte) ([]*batch.RecordBatch, error) {
-	r, err := newShuffleChunkReader(payload)
+	r, err := wshf.NewChunkReader(payload)
 	if err != nil {
 		return nil, err
 	}

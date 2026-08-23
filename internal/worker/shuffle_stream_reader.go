@@ -12,17 +12,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
-)
-
-// Sanity bounds for stream-decoded WSHF fields. The mmap reader is
-// implicitly bounded by the file size already on disk; a stream decoder
-// allocates BEFORE seeing the bytes, so a corrupt length prefix must not
-// translate into an arbitrary allocation.
-const (
-	streamMaxCols     = 1 << 12
-	streamMaxNameLen  = 1 << 12
-	streamMaxRows     = 1 << 26
-	streamMaxBytesLen = 1 << 31
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // streamingShuffleReader decodes WSHF chunks directly from a byte stream
@@ -31,7 +21,7 @@ const (
 // exchange-streaming-consumption.md §3 D1). The wire format is unchanged:
 // completed files carry the patched NumChunks in the header, each chunk is
 // self-contained, and the promised count is validated as the stream drains
-// (the same truncation guard as shuffleChunkReader, moved to
+// (the same truncation guard as wshf.ChunkReader, moved to
 // end-of-stream).
 //
 // Each chunk's wire bytes are assembled into a reusable scratch buffer and
@@ -129,7 +119,7 @@ func (r *streamingShuffleReader) readHeader() error {
 	}
 	r.numChunks = binary.LittleEndian.Uint32(r.hdr[:4])
 	numCols := int(binary.LittleEndian.Uint16(r.hdr[4:6]))
-	if numCols > streamMaxCols {
+	if numCols > wshf.MaxCols {
 		return fmt.Errorf("shuffle stream header: implausible column count %d", numCols)
 	}
 	r.headerEnd = 4 + 6 // outer magic (consumed by the open path) + this header
@@ -139,7 +129,7 @@ func (r *streamingShuffleReader) readHeader() error {
 			return fmt.Errorf("truncated schema at column %d: %w", i, err)
 		}
 		nameLen := int(binary.LittleEndian.Uint16(r.hdr[:2]))
-		if nameLen > streamMaxNameLen {
+		if nameLen > wshf.MaxNameLen {
 			return fmt.Errorf("shuffle stream schema: implausible name length %d at column %d", nameLen, i)
 		}
 		name := make([]byte, nameLen)
@@ -193,7 +183,7 @@ func (r *streamingShuffleReader) Next() (*batch.RecordBatch, error) {
 		if numRows == 0 {
 			continue
 		}
-		if numRows > streamMaxRows {
+		if numRows > wshf.MaxRows {
 			return nil, fmt.Errorf("shuffle stream chunk %d: implausible row count %d", r.chunk-1, numRows)
 		}
 
@@ -202,7 +192,7 @@ func (r *streamingShuffleReader) Next() (*batch.RecordBatch, error) {
 			return nil, fmt.Errorf("shuffle stream truncated: chunk %d/%d: %w", r.chunk-1, r.numChunks, err)
 		}
 
-		b, err := decodeShuffleChunk(r.schema, numRows, chunkBytes, r.chunk-1)
+		b, err := wshf.DecodeChunk(r.schema, numRows, chunkBytes, r.chunk-1)
 		if err != nil {
 			return nil, err
 		}
@@ -212,27 +202,9 @@ func (r *streamingShuffleReader) Next() (*batch.RecordBatch, error) {
 	return nil, nil
 }
 
-// decodeShuffleChunk materializes one staged chunk's column segments into a
-// fresh RecordBatch. Shared verbatim by the serial path and the decode-ahead
-// workers so the two cannot diverge on payload interpretation; chunkIdx is
-// for error text only.
-func decodeShuffleChunk(schema []parquet.Column, numRows int, chunkBytes []byte, chunkIdx uint32) (*batch.RecordBatch, error) {
-	b := batch.NewRecordBatch(schema, numRows)
-	pos := 0
-	for ci := range schema {
-		var err error
-		pos, err = readColumnData(chunkBytes, pos, b.Columns[ci], numRows, schema[ci].Type)
-		if err != nil {
-			return nil, fmt.Errorf("reading column %d (%s) chunk %d: %w", ci, schema[ci].Name, chunkIdx, err)
-		}
-	}
-	batch.SyncContainerSchema(b)
-	return b, nil
-}
-
 // readChunkBytes reads one chunk's column segments (everything after the
 // row-count word) into the reusable scratch buffer, walking the same
-// wire layout readColumnData expects. Length prefixes for fixed-width
+// wire layout wshf.ReadColumn expects. Length prefixes for fixed-width
 // types are cross-checked against numRows — a stream decoder must not
 // trust a length it is about to allocate/skip by.
 func (r *streamingShuffleReader) readChunkBytes(numRows int) ([]byte, error) {
@@ -271,7 +243,7 @@ func (r *streamingShuffleReader) readChunkBytesInto(buf []byte, numRows int) ([]
 		}
 		dataLen := int(binary.LittleEndian.Uint32(buf[len(buf)-4:]))
 		// -1 = variable: dataLen is the concatenated payload length.
-		want, err := fixedShuffleTypeLen(r.schema[ci].Type, numRows)
+		want, err := wshf.FixedTypeLen(r.schema[ci].Type, numRows)
 		if err != nil {
 			return nil, fmt.Errorf("column %d: %w", ci, err)
 		}
@@ -284,17 +256,17 @@ func (r *streamingShuffleReader) readChunkBytesInto(buf []byte, numRows int) ([]
 			if buf, err = r.appendN(buf, dataLen); err != nil {
 				return nil, fmt.Errorf("column %d data: %w", ci, err)
 			}
-		case want == shuffleLenContainer:
+		case want == wshf.LenContainer:
 			// ARRAY/ROW/MAP/VECTOR: one self-describing payload, no
 			// trailing offsets array.
-			if dataLen < 0 || dataLen > streamMaxBytesLen {
+			if dataLen < 0 || dataLen > wshf.MaxBytesLen {
 				return nil, fmt.Errorf("column %d: implausible container payload length %d", ci, dataLen)
 			}
 			if buf, err = r.appendN(buf, dataLen); err != nil {
 				return nil, fmt.Errorf("column %d container payload: %w", ci, err)
 			}
 		default:
-			if dataLen < 0 || dataLen > streamMaxBytesLen {
+			if dataLen < 0 || dataLen > wshf.MaxBytesLen {
 				return nil, fmt.Errorf("column %d: implausible bytes payload length %d", ci, dataLen)
 			}
 			if buf, err = r.appendN(buf, dataLen); err != nil {

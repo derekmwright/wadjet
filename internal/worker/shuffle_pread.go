@@ -26,7 +26,7 @@ import (
 // temps inside stage barriers.
 //
 // WADJET_SHUFFLE_PREAD=0 is the kill switch, restoring the mmap +
-// shuffleChunkReader path unchanged.
+// wshf.ChunkReader path unchanged.
 var shufflePreadEnabled = os.Getenv("WADJET_SHUFFLE_PREAD") != "0"
 
 // fileBody pairs a (possibly drop-behind-wrapped) reader with the fd it

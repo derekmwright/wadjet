@@ -8,6 +8,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestExecuteShuffle_WSHFInput verifies that a shuffle task can accept .wshf
@@ -107,7 +108,7 @@ func TestExecuteShuffle_WSHFInput(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decompress %q: %v", key, err)
 		}
-		rdr, err := newShuffleChunkReader(data)
+		rdr, err := wshf.NewChunkReader(data)
 		if err != nil {
 			t.Fatalf("reader %q: %v", key, err)
 		}
@@ -218,7 +219,7 @@ func TestExecuteShuffle_WSHFInputColumnProjection(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decompress %q: %v", key, err)
 		}
-		rdr, err := newShuffleChunkReader(data)
+		rdr, err := wshf.NewChunkReader(data)
 		if err != nil {
 			t.Fatalf("reader %q: %v", key, err)
 		}

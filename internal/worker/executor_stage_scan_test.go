@@ -9,6 +9,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // makeScanWshf writes a .wshf payload with schema (id int64, val int64) for
@@ -55,12 +56,12 @@ func readMemStoreInts(t *testing.T, store *objstore.MemStore, bucket, key, colNa
 	if len(data) == 0 {
 		return nil
 	}
-	r, err := newShuffleChunkReader(data)
+	r, err := wshf.NewChunkReader(data)
 	if err != nil {
 		t.Fatalf("readMemStoreInts: parse %s/%s: %v", bucket, key, err)
 	}
 	colIdx := -1
-	for i, col := range r.schema {
+	for i, col := range r.Schema() {
 		if col.Name == colName {
 			colIdx = i
 			break

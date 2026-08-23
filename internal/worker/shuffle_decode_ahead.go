@@ -13,6 +13,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/diskio"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // Shuffle decode-ahead (docs/design/shuffle-decode-ahead.md): the WSHF
@@ -258,7 +259,7 @@ func (d *shuffleDecodeAhead) scan() {
 		if numRows == 0 {
 			continue
 		}
-		if numRows > streamMaxRows {
+		if numRows > wshf.MaxRows {
 			d.fail(fmt.Errorf("shuffle stream chunk %d: implausible row count %d", r.chunk-1, numRows))
 			return
 		}
@@ -519,7 +520,7 @@ func (d *shuffleDecodeAhead) worker() {
 				b, err = d.decodeIndexed(slot)
 			} else {
 				t0 := time.Now()
-				b, err = decodeShuffleChunk(d.r.schema, slot.numRows, slot.buf, slot.chunkIdx)
+				b, err = wshf.DecodeChunk(d.r.schema, slot.numRows, slot.buf, slot.chunkIdx)
 				d.stats.decodeNs.Add(time.Since(t0).Nanoseconds())
 				d.putBuf(slot.buf)
 				slot.buf = nil
@@ -559,16 +560,16 @@ func (d *shuffleDecodeAhead) decodeIndexed(slot *shuffleDecodeSlot) (*batch.Reco
 	}
 	d.stats.preadNs.Add(time.Since(t0).Nanoseconds())
 	numRows := int(binary.LittleEndian.Uint32(buf[:4]))
-	if numRows <= 0 || numRows > streamMaxRows {
+	if numRows <= 0 || numRows > wshf.MaxRows {
 		d.putBuf(buf)
 		return nil, fmt.Errorf("shuffle chunk %d: implausible row count %d", slot.chunkIdx, numRows)
 	}
-	if err := validateShuffleChunkBytes(d.r.schema, numRows, buf[4:]); err != nil {
+	if err := wshf.ValidateChunkBytes(d.r.schema, numRows, buf[4:]); err != nil {
 		d.putBuf(buf)
 		return nil, fmt.Errorf("shuffle chunk %d: %w", slot.chunkIdx, err)
 	}
 	t1 := time.Now()
-	b, err := decodeShuffleChunk(d.r.schema, numRows, buf[4:], slot.chunkIdx)
+	b, err := wshf.DecodeChunk(d.r.schema, numRows, buf[4:], slot.chunkIdx)
 	d.stats.decodeNs.Add(time.Since(t1).Nanoseconds())
 	d.putBuf(buf)
 	return b, err

@@ -10,6 +10,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // multiTypeSchema exercises every WSHF-supported column class: fixed
@@ -79,7 +80,7 @@ func (nopReadCloser) Close() error { return nil }
 // open path does, and constructs the streaming reader.
 func openStreaming(tb testing.TB, wire []byte) *streamingShuffleReader {
 	tb.Helper()
-	codec, _ := codecForMagic([4]byte{wire[0], wire[1], wire[2], wire[3]})
+	codec, _ := wshf.CodecForMagic([4]byte{wire[0], wire[1], wire[2], wire[3]})
 	r, err := newStreamingShuffleReader(nopReadCloser{bytes.NewReader(wire[4:])}, codec)
 	if err != nil {
 		tb.Fatalf("newStreamingShuffleReader: %v", err)
@@ -150,9 +151,9 @@ func requireBatchesEqual(tb testing.TB, want, got []*batch.RecordBatch) {
 func TestStreamingShuffleReader_MatchesMmapReader(t *testing.T) {
 	wire := buildMultiTypeWSHF(t, 42, 5, 333)
 
-	mm, err := newShuffleChunkReader(wire)
+	mm, err := wshf.NewChunkReader(wire)
 	if err != nil {
-		t.Fatalf("newShuffleChunkReader: %v", err)
+		t.Fatalf("wshf.NewChunkReader: %v", err)
 	}
 	want := drain(t, mm.Next)
 
@@ -177,9 +178,9 @@ func TestStreamingShuffleReader_WSHC(t *testing.T) {
 		t.Skip("payload did not compress; WSHC path not exercised")
 	}
 
-	mm, err := newShuffleChunkReader(wire)
+	mm, err := wshf.NewChunkReader(wire)
 	if err != nil {
-		t.Fatalf("newShuffleChunkReader: %v", err)
+		t.Fatalf("wshf.NewChunkReader: %v", err)
 	}
 	want := drain(t, mm.Next)
 
@@ -287,7 +288,7 @@ func TestStreamingShuffleReader_CloseIdempotentAndBatchesSurvive(t *testing.T) {
 		t.Fatalf("second Close: %v", err)
 	}
 	// Batches are copies; touching them after Close must be safe.
-	mm, _ := newShuffleChunkReader(wire)
+	mm, _ := wshf.NewChunkReader(wire)
 	requireBatchesEqual(t, drain(t, mm.Next), got)
 }
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // readGroupTotals decodes an unpartitioned agg output (g, total) into a map.
@@ -23,7 +24,7 @@ func readGroupTotals(t *testing.T, store *objstore.MemStore, bucket, key string)
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	r, err := newShuffleChunkReader(data)
+	r, err := wshf.NewChunkReader(data)
 	if err != nil {
 		t.Fatalf("parse output: %v", err)
 	}

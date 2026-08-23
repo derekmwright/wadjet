@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	dpv1 "github.com/derekmwright/wadjet/gen/dataplane/v1"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // peerChunkBytes is the per-frame payload size for FetchShuffle streams.
@@ -279,12 +280,12 @@ func (s *PeerServer) FetchShuffle(req *dpv1.FetchShuffleRequest, stream grpc.Ser
 	return s.streamRaw(ctx, f, stream)
 }
 
-// Wire-format magics, mirroring internal/worker shuffle_format.go
-// (shuffleMagic / compressedMagic — dataplane cannot import worker without
-// a cycle; these four-byte constants ARE the wire contract).
+// Wire-format magics. They live in internal/wshf, which owns the format
+// and which every tier can import — the worker cannot be imported here,
+// it imports this package.
 var (
-	wshfMagic = [4]byte{'W', 'S', 'H', 'F'}
-	wshcMagic = [4]byte{'W', 'S', 'H', 'C'}
+	wshfMagic = wshf.MagicWSHF
+	wshcMagic = wshf.MagicWSHC
 )
 
 // streamRaw copies r to the stream in peerChunkBytes frames.

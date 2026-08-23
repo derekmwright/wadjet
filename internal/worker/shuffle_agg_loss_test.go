@@ -9,10 +9,11 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestShuffleReadIntoHashAggregateMultipleReaders splits 15000 unique keys
-// across 3 separate shuffleChunkReader instances (no partitionedShuffleSink,
+// across 3 separate wshf.ChunkReader instances (no partitionedShuffleSink,
 // just hand-rolled sharding into 3 writers), and feeds them sequentially
 // to a single HashAggregate. If this passes, the bug is specific to the
 // way partitionedShuffleSink lays bytes out; if it fails, the kernel itself
@@ -38,7 +39,7 @@ func TestShuffleReadIntoHashAggregateMultipleReaders(t *testing.T) {
 	rng.Shuffle(len(rows), func(i, j int) { rows[i], rows[j] = rows[j], rows[i] })
 
 	// Round-robin shard rows into 3 buffers, each becomes a separate
-	// shuffleChunkReader. No hash partitioning; round-robin means the union
+	// wshf.ChunkReader. No hash partitioning; round-robin means the union
 	// of buffer contents is exactly all 15000 input rows with no dups and
 	// no overlap between buffers.
 	const numReaders = 3
@@ -95,7 +96,7 @@ func TestShuffleReadIntoHashAggregateMultipleReaders(t *testing.T) {
 	}
 	consumed := 0
 	for _, d := range datas {
-		r, err := newShuffleChunkReader(d)
+		r, err := wshf.NewChunkReader(d)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -146,7 +147,7 @@ func TestShuffleReadIntoHashAggregateMultipleReaders(t *testing.T) {
 
 // TestShuffleReadIntoHashAggregateNoLossUniqueKeys models the failing
 // distributed sum_via_ok shape: 15000 unique keys, 1 row per key, fed
-// through a SINGLE shuffleChunkReader's chunks. This isolates whether
+// through a SINGLE wshf.ChunkReader's chunks. This isolates whether
 // the loss is from "multi-reader" file boundaries OR cumulative
 // cardinality crossing the hash-table rehash threshold.
 func TestShuffleReadIntoHashAggregateNoLossUniqueKeys(t *testing.T) {
@@ -208,7 +209,7 @@ func TestShuffleReadIntoHashAggregateNoLossUniqueKeys(t *testing.T) {
 	if err := hashAgg.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	r, err := newShuffleChunkReader(data)
+	r, err := wshf.NewChunkReader(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +267,7 @@ func TestShuffleReadIntoHashAggregateNoLossUniqueKeys(t *testing.T) {
 //   - rows are shuffle-shuffled (not the .wshf shuffle, just rng.Shuffle)
 //   - written through shuffleWriter as multiple chunks with NO selection
 //     vector (plain partitioned-shuffle output uses sel=nil at flush time)
-//   - read back via shuffleChunkReader and fed batch-by-batch to a single
+//   - read back via wshf.ChunkReader and fed batch-by-batch to a single
 //     HashAggregate configured exactly like the worker's mergeMode path:
 //     GROUP BY l_partkey, SUM(c) where c was the partial COUNT(*) output
 //
@@ -331,7 +332,7 @@ func TestShuffleReadIntoHashAggregateNoLoss(t *testing.T) {
 	data[6] = byte(sw.numChunks >> 16)
 	data[7] = byte(sw.numChunks >> 24)
 
-	// Now read back via shuffleChunkReader and feed to a HashAggregate
+	// Now read back via wshf.ChunkReader and feed to a HashAggregate
 	// configured identically to the distributed final_aggregate path:
 	// mergeMode rewrites COUNT→SUM and InputCol → OutputCol, so we model
 	// that here as Func=Sum, InputCol=OutputCol="c".
@@ -348,7 +349,7 @@ func TestShuffleReadIntoHashAggregateNoLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r, err := newShuffleChunkReader(data)
+	r, err := wshf.NewChunkReader(data)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 var viewTestSchema = []parquet.Column{
@@ -80,7 +81,7 @@ func TestShuffleWriteChunkViewColumns(t *testing.T) {
 		}
 		data := buf.Bytes()
 		data[4] = byte(sw.numChunks)
-		batches, err := shuffleReadBatches(data)
+		batches, err := wshf.DecodeBatches(data)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -136,7 +137,7 @@ func TestPartitionedShuffleSinkViewBatch(t *testing.T) {
 			if len(data) == 0 {
 				continue
 			}
-			batches, err := shuffleReadBatches(data)
+			batches, err := wshf.DecodeBatches(data)
 			if err != nil {
 				t.Fatalf("partition %d: %v", p, err)
 			}
@@ -188,7 +189,7 @@ func TestUnpartitionedStageSinkViewBatch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		batches, err := shuffleReadBatches(data)
+		batches, err := wshf.DecodeBatches(data)
 		if err != nil {
 			t.Fatal(err)
 		}

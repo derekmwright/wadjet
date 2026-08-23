@@ -31,6 +31,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -1913,8 +1914,8 @@ func (e *Executor) readInputFilesBatches(ctx context.Context, bucket string, fil
 				results[idx] = result{err: decErr}
 				return
 			}
-			if isShuffleFormat(data) {
-				batches, err := shuffleReadBatches(data)
+			if wshf.IsShuffleFormat(data) {
+				batches, err := wshf.DecodeBatches(data)
 				results[idx] = result{batches: batches, err: err}
 			} else {
 				reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))

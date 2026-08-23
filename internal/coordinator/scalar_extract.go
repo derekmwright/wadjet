@@ -12,6 +12,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // readScalarFromStageOutput extracts a single scalar value from a producer
@@ -55,14 +56,14 @@ func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOu
 		if err != nil {
 			return "", tier, fmt.Errorf("fetch %s: %w", path, err)
 		}
-		decoded, err := decompressShuffleData(data)
+		decoded, err := wshf.Decompress(data)
 		if err != nil {
 			return "", tier, fmt.Errorf("decompress %s: %w", path, err)
 		}
 		if !(len(decoded) >= 4 && decoded[0] == 'W' && decoded[1] == 'S' && decoded[2] == 'H' && decoded[3] == 'F') {
 			return "", tier, fmt.Errorf("producer output %s is not WSHF", path)
 		}
-		batches, err := readShuffleBatches(decoded)
+		batches, err := wshf.DecodeBatches(decoded)
 		if err != nil {
 			return "", tier, fmt.Errorf("read shuffle %s: %w", path, err)
 		}

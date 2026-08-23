@@ -621,7 +621,7 @@ type AggSpec struct {
 //
 // Payload is a self-contained WSHF byte stream carrying a single chunk
 // (magic + chunk-count=1 + schema header + one row chunk). The coordinator
-// decodes each message independently via the worker's shuffleChunkReader.
+// decodes each message independently via the shared wshf.ChunkReader.
 type GatherBatchMsg struct {
 	Terminal bool   `json:"terminal"`
 	RowCount int32  `json:"row_count"`

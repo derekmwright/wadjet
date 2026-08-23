@@ -10,6 +10,7 @@ import (
 	"os"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // maxGatherFrameBytes sanity-bounds a replayed frame's declared length.
@@ -94,7 +95,7 @@ func (s *gatherReplayStream) Next(_ context.Context) (*batch.RecordBatch, error)
 		if _, err := io.ReadFull(s.rd, s.frame); err != nil {
 			return nil, fmt.Errorf("reading gather scratch frame: %w", err)
 		}
-		decoded, err := readShuffleBatches(s.frame)
+		decoded, err := wshf.DecodeBatches(s.frame)
 		if err != nil {
 			return nil, fmt.Errorf("decoding gather scratch frame: %w", err)
 		}

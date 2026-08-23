@@ -13,6 +13,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // prefetchAtInit moves the download-ahead start from the first file open
@@ -337,7 +338,7 @@ func (p *filePrefetcher) fetchShuffle(ctx context.Context, s *cachedFileStreamSo
 	if _, err := io.ReadFull(rc, magic[:]); err != nil {
 		return &prefetchResult{err: fmt.Errorf("reading magic from peer %s: %w", addr, err)}
 	}
-	codec, isShuffle := codecForMagic(magic)
+	codec, isShuffle := wshf.CodecForMagic(magic)
 	if !isShuffle {
 		return &prefetchResult{err: fmt.Errorf("peer %s returned non-shuffle payload for %s (magic %q)", addr, filePath, magic[:])}
 	}

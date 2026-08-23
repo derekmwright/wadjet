@@ -9,6 +9,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // emptyFinalAggTask builds the fragment shape a final aggregate takes when
@@ -50,7 +51,7 @@ func readSingleOutputBatch(t *testing.T, store objstore.Store, bucket string, fi
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	r, err := newShuffleChunkReader(raw)
+	r, err := wshf.NewChunkReader(raw)
 	if err != nil {
 		t.Fatalf("parse output: %v", err)
 	}

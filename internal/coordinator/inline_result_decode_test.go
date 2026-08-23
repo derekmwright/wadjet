@@ -3,6 +3,8 @@ package coordinator
 import (
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // decodeInlineResult used to answer (nil, nil, 0) and log at Debug for every
@@ -21,9 +23,16 @@ func TestDecodeInlineResultReportsFailures(t *testing.T) {
 	}{
 		{"s2 frame that is not one", append([]byte("WSHC"), 0xFF, 0xFF, 0xFF, 0xFF), "decompressing"},
 		{"WSHF header with no body", []byte("WSHF"), "shuffle"},
-		// A truncated WSHF BODY is a separate, unfixed defect: readShuffleBatches
-		// walks the payload with no bounds at all and panics rather than
-		// erroring (issue filed). Only the header cases belong here.
+		// The truncated BODY cases (#422). Each of these used to index
+		// straight off the end of the slice inside the decode goroutine of
+		// readInlineResults, which nothing above recovers: a short payload
+		// from one worker took the whole coordinator down.
+		{"header promises a chunk that is not there",
+			append([]byte("WSHF"), 1, 0, 0, 0, 1, 0), "truncated"},
+		{"schema name runs past the end",
+			append([]byte("WSHF"), 1, 0, 0, 0, 1, 0, 0xFF, 0x00), "schema"},
+		{"chunk row count with no column data",
+			truncatedInlineChunk(), "chunk"},
 		{"not parquet at all", []byte("this is not a parquet file, nor a shuffle blob"), "parquet"},
 	}
 	for _, tc := range cases {
@@ -40,4 +49,18 @@ func TestDecodeInlineResultReportsFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+// truncatedInlineChunk is a syntactically valid WSHF header for one INT64
+// column promising one chunk of eight rows, then nothing. The bytes the
+// chunk claims never arrive.
+func truncatedInlineChunk() []byte {
+	b := []byte("WSHF")
+	b = append(b, 1, 0, 0, 0) // numChunks = 1
+	b = append(b, 1, 0)       // numCols = 1
+	b = append(b, 1, 0)       // name length = 1
+	b = append(b, 'v')
+	b = append(b, byte(parquet.TypeInt64))
+	b = append(b, 8, 0, 0, 0) // chunk row count = 8, and the payload ends
+	return b
 }

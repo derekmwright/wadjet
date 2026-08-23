@@ -10,6 +10,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestExecuteShuffle_HappyPath verifies that a shuffle task reads source Parquet
@@ -123,7 +124,7 @@ func TestExecuteShuffle_HappyPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decompressing %q: %v", key, err)
 		}
-		r, err := newShuffleChunkReader(data)
+		r, err := wshf.NewChunkReader(data)
 		if err != nil {
 			t.Fatalf("parsing %q: %v", key, err)
 		}
@@ -205,11 +206,11 @@ func TestExecuteShuffle_ColumnProjection(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decompressing %q: %v", key, err)
 		}
-		r, err := newShuffleChunkReader(data)
+		r, err := wshf.NewChunkReader(data)
 		if err != nil {
 			t.Fatalf("parsing %q: %v", key, err)
 		}
-		for _, col := range r.schema {
+		for _, col := range r.Schema() {
 			if col.Name == "extra" {
 				t.Errorf("unexpected column %q in projected output file %q", col.Name, key)
 			}
@@ -338,11 +339,11 @@ func TestExecuteShuffle_SchemaRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decompressing %q: %v", key, err)
 		}
-		r, err := newShuffleChunkReader(data)
+		r, err := wshf.NewChunkReader(data)
 		if err != nil {
 			t.Fatalf("parsing %q: %v", key, err)
 		}
-		for _, col := range r.schema {
+		for _, col := range r.Schema() {
 			wantType, ok := wantSchema[col.Name]
 			if !ok {
 				t.Errorf("unexpected column %q in output", col.Name)

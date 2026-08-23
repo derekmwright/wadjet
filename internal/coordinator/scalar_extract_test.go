@@ -10,6 +10,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestFirstScalarLiteral verifies the scalar extractor renders each column
@@ -200,7 +201,7 @@ func TestReadScalarFromStageOutput_WSHFDecode(t *testing.T) {
 	buf = binary.LittleEndian.AppendUint32(buf, 8) // dataLen=8 bytes
 	buf = binary.LittleEndian.AppendUint64(buf, math.Float64bits(42.5))
 
-	batches, err := readShuffleBatches(buf)
+	batches, err := wshf.DecodeBatches(buf)
 	if err != nil {
 		t.Fatalf("readShuffleBatches: %v", err)
 	}

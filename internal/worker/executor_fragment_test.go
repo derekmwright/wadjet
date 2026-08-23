@@ -13,6 +13,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestExecuteFragment_ScanFilterAggregateUnpartitioned exercises the
@@ -105,7 +106,7 @@ func TestExecuteFragment_ScanFilterAggregateUnpartitioned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	r, err := newShuffleChunkReader(out)
+	r, err := wshf.NewChunkReader(out)
 	if err != nil {
 		t.Fatalf("parse output: %v", err)
 	}
@@ -330,7 +331,7 @@ func TestExecuteFragment_ScanHashAggregateUnpartitioned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	r, err := newShuffleChunkReader(out)
+	r, err := wshf.NewChunkReader(out)
 	if err != nil {
 		t.Fatalf("parse output: %v", err)
 	}

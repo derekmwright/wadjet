@@ -23,6 +23,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // progressWriter wraps an io.Writer and reports each successful Write as
@@ -50,7 +51,7 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 //
 // For shuffle-format (.wshf) files, the source streams the S3 object directly
 // to a local spill file on the worker's NVMe and then mmaps the local file.
-// The shuffleChunkReader walks the mmap'd region in place; the kernel pages
+// The wshf.ChunkReader walks the mmap'd region in place; the kernel pages
 // in pieces lazily, so peak resident memory is bounded by the kernel's page
 // cache for the active region rather than the full file size. Without this,
 // the previous io.ReadAll path would allocate a single byte slice the size of
@@ -99,7 +100,7 @@ type cachedFileStreamSource struct {
 	fileIdx int
 
 	// Active WSHF chunk reader for the current file (nil if current file is
-	// Parquet or no file is open). Either an mmap-backed shuffleChunkReader
+	// Parquet or no file is open). Either an mmap-backed wshf.ChunkReader
 	// walking mmapData below, or a streamingShuffleReader decoding the
 	// transport body directly (--streaming-shuffle-read).
 	chunkReader shuffleBatchIter
@@ -657,7 +658,7 @@ func (s *cachedFileStreamSource) openNextFileTiered(ctx context.Context) (acqTie
 			if len(data) >= 4 {
 				magic := [4]byte{data[0], data[1], data[2], data[3]}
 				kvMagic = string(magic[:])
-				codec, isShuffle := codecForMagic(magic)
+				codec, isShuffle := wshf.CodecForMagic(magic)
 				if isShuffle {
 					if err := s.openShuffleInMemory(filePath, magic[:], bytes.NewReader(data[4:]), codec); err != nil {
 						return acqKV, err
@@ -739,7 +740,7 @@ func (s *cachedFileStreamSource) openNextFileTiered(ctx context.Context) (acqTie
 		return acqS3, fmt.Errorf("reading magic from %s: %w", filePath, err)
 	}
 
-	codec, isShuffle := codecForMagic(magic)
+	codec, isShuffle := wshf.CodecForMagic(magic)
 
 	if isShuffle {
 		// Per-tier ledger: whatever consumes rc past this point drains the
@@ -955,7 +956,7 @@ func (s *cachedFileStreamSource) openShuffleStagedFromStore(ctx context.Context,
 	if _, err := io.ReadFull(crc, magic[:]); err != nil {
 		return fmt.Errorf("reading magic from durable copy of %s: %w", srcPath, err)
 	}
-	codec, isShuffle := codecForMagic(magic)
+	codec, isShuffle := wshf.CodecForMagic(magic)
 	if !isShuffle {
 		return fmt.Errorf("durable copy of %s is not a shuffle payload (magic %q)", srcPath, magic[:])
 	}
@@ -1054,7 +1055,7 @@ func (s *cachedFileStreamSource) openPrefetchedShuffle(localPath, filePath strin
 		_ = os.Remove(localPath)
 		return fmt.Errorf("mmap prefetched shuffle file %s: %w", localPath, err)
 	}
-	r, err := newShuffleChunkReader(mmapData)
+	r, err := wshf.NewChunkReader(mmapData)
 	if err != nil {
 		_ = syscall.Munmap(mmapData)
 		_ = os.Remove(localPath)
@@ -1539,7 +1540,7 @@ func (d *decodeAheadStatsIter) Close() error {
 
 // openShuffleFile streams the (possibly compressed) shuffle body from rc to a
 // local spill file, decompressing on the fly if needed, then mmaps the result
-// and hands it to a shuffleChunkReader. Memory is bounded by the kernel's
+// and hands it to a wshf.ChunkReader. Memory is bounded by the kernel's
 // page cache footprint over the active mmap region rather than the full file
 // size.
 //
@@ -1650,7 +1651,7 @@ func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath st
 	// slice in place; readColumnData copies bytes into the RecordBatch's
 	// typed column arrays, so subsequent batches don't depend on the mmap
 	// region after they're returned to the caller.
-	r, err := newShuffleChunkReader(mmapData)
+	r, err := wshf.NewChunkReader(mmapData)
 	if err != nil {
 		_ = syscall.Munmap(mmapData)
 		return fmt.Errorf("opening shuffle file %s: %w", srcPath, err)
@@ -1775,7 +1776,7 @@ func (s *cachedFileStreamSource) openShuffleFromLocalFile(localPath string) (int
 	if err != nil {
 		return 0, fmt.Errorf("mmap cached local file %s: %w", localPath, err)
 	}
-	r, err := newShuffleChunkReader(mmapData)
+	r, err := wshf.NewChunkReader(mmapData)
 	if err != nil {
 		_ = syscall.Munmap(mmapData)
 		return 0, fmt.Errorf("opening cached shuffle file %s: %w", localPath, err)
@@ -1808,7 +1809,7 @@ func (s *cachedFileStreamSource) openShuffleInMemory(srcPath string, magic []byt
 		}
 		data = decoded
 	}
-	r, err := newShuffleChunkReader(data)
+	r, err := wshf.NewChunkReader(data)
 	if err != nil {
 		return fmt.Errorf("opening shuffle file %s: %w", srcPath, err)
 	}

@@ -9,13 +9,14 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestUnpartitionedStageSink_RoundTrip writes a couple of batches into the
 // streaming sink and confirms the resulting on-disk .wshf file decodes back to
 // the original schema and rows. This is the core invariant: the streaming
 // path produces a byte-equivalent file to the legacy in-memory path so that
-// downstream readers (cachedFileStreamSource → shuffleChunkReader) decode it
+// downstream readers (cachedFileStreamSource → wshf.ChunkReader) decode it
 // identically.
 func TestUnpartitionedStageSink_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -57,14 +58,14 @@ func TestUnpartitionedStageSink_RoundTrip(t *testing.T) {
 		t.Errorf("Path %q is unusable", sink.Path())
 	}
 
-	// Decode the file via shuffleChunkReader and verify rows.
+	// Decode the file via wshf.ChunkReader and verify rows.
 	data, err := os.ReadFile(sink.Path())
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	rdr, err := newShuffleChunkReader(data)
+	rdr, err := wshf.NewChunkReader(data)
 	if err != nil {
-		t.Fatalf("newShuffleChunkReader: %v", err)
+		t.Fatalf("wshf.NewChunkReader: %v", err)
 	}
 
 	var totalRows int
@@ -192,9 +193,9 @@ func TestUnpartitionedStageSink_CoalesceValueParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	rdr, err := newShuffleChunkReader(data)
+	rdr, err := wshf.NewChunkReader(data)
 	if err != nil {
-		t.Fatalf("newShuffleChunkReader: %v", err)
+		t.Fatalf("wshf.NewChunkReader: %v", err)
 	}
 	var gotIDs []int64
 	var gotNames []string
@@ -261,9 +262,9 @@ func TestUnpartitionedStageSink_CoalesceFlushThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	rdr, err := newShuffleChunkReader(data)
+	rdr, err := wshf.NewChunkReader(data)
 	if err != nil {
-		t.Fatalf("newShuffleChunkReader: %v", err)
+		t.Fatalf("wshf.NewChunkReader: %v", err)
 	}
 	var got []int64
 	for {

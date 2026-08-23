@@ -11,6 +11,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // #397: ARRAY, ROW, MAP and VECTOR columns could not cross a shuffle at all
@@ -186,7 +187,7 @@ func TestShuffleContainerColumnsRoundTrip(t *testing.T) {
 	data := writeContainerWSHF(t, b, sel)
 
 	t.Run("eager", func(t *testing.T) {
-		batches, err := shuffleReadBatches(data)
+		batches, err := wshf.DecodeBatches(data)
 		if err != nil {
 			t.Fatalf("shuffleReadBatches: %v", err)
 		}
@@ -198,9 +199,9 @@ func TestShuffleContainerColumnsRoundTrip(t *testing.T) {
 	})
 
 	t.Run("chunk_reader", func(t *testing.T) {
-		r, err := newShuffleChunkReader(data)
+		r, err := wshf.NewChunkReader(data)
 		if err != nil {
-			t.Fatalf("newShuffleChunkReader: %v", err)
+			t.Fatalf("wshf.NewChunkReader: %v", err)
 		}
 		var got []*batch.RecordBatch
 		for {
@@ -241,7 +242,7 @@ func TestShuffleContainerColumnsRoundTrip(t *testing.T) {
 func TestShuffleContainerNullVsEmptyAreDistinct(t *testing.T) {
 	b := buildContainerBatch(t)
 	data := writeContainerWSHF(t, b, []uint32{1, 2})
-	batches, err := shuffleReadBatches(data)
+	batches, err := wshf.DecodeBatches(data)
 	if err != nil {
 		t.Fatalf("shuffleReadBatches: %v", err)
 	}
@@ -294,7 +295,7 @@ func TestPartitionedSinkContainerColumns(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reading %s: %v", path, err)
 		}
-		batches, err := shuffleReadBatches(raw)
+		batches, err := wshf.DecodeBatches(raw)
 		if err != nil {
 			t.Fatalf("decoding %s: %v", path, err)
 		}

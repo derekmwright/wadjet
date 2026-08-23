@@ -13,6 +13,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // TestCachedFileStreamSourceMultiChunk verifies that cachedFileStreamSource
@@ -29,9 +30,9 @@ import (
 // We feed exactly the same row set into the HashAggregate via two paths
 // and compare:
 //
-//	in-process (control): partition-files-on-disk → shuffleChunkReader directly
+//	in-process (control): partition-files-on-disk → wshf.ChunkReader directly
 //	via-source (variable): partition-files-on-disk → openShuffleFile → mmap →
-//	                        shuffleChunkReader (the production path)
+//	                        wshf.ChunkReader (the production path)
 //
 // Both paths must return the same total SUM(c) and the same set of keys.
 // Any divergence localises the bug to the cachedFileStreamSource layer.
@@ -95,7 +96,7 @@ func TestCachedFileStreamSourceMultiChunk(t *testing.T) {
 	files := sink.PartitionFiles()
 	t.Logf("partition files: %v", files)
 
-	// Path A (control): read partition files directly via shuffleChunkReader.
+	// Path A (control): read partition files directly via wshf.ChunkReader.
 	controlSum, controlKeys := readSumDirect(t, files)
 	if controlSum != expectedSum {
 		t.Errorf("CONTROL direct read: sum=%d, want %d", controlSum, expectedSum)
@@ -222,9 +223,9 @@ func TestCachedFileStreamSourceMultiChunk(t *testing.T) {
 	t.Logf("HashAggregate over multi-chunk source: %d groups, sum=%d", outGroups, outSum)
 
 	// Path D: feed the same partition files DIRECTLY (no cachedFileStreamSource)
-	// to HashAggregate, one shuffleChunkReader per file. Isolates whether the
+	// to HashAggregate, one wshf.ChunkReader per file. Isolates whether the
 	// loss is in cachedFileStreamSource specifically vs. crossing file
-	// boundaries between separate shuffleChunkReader instances.
+	// boundaries between separate wshf.ChunkReader instances.
 	hashAgg2 := exec.NewHashAggregate(
 		[]string{"key"},
 		[]exec.AggColumn{{
@@ -246,7 +247,7 @@ func TestCachedFileStreamSourceMultiChunk(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r, err := newShuffleChunkReader(data)
+		r, err := wshf.NewChunkReader(data)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -297,7 +298,7 @@ func TestCachedFileStreamSourceMultiChunk(t *testing.T) {
 		directRows, directGroups, directSum)
 }
 
-// readSumDirect reads partition files via shuffleChunkReader and returns the
+// readSumDirect reads partition files via wshf.ChunkReader and returns the
 // total sum of column 1 plus row count. Used to verify file content
 // independent of the source/HashAggregate path.
 
@@ -311,7 +312,7 @@ func readSumDirect(t *testing.T, files []string) (sum int64, keys int) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r, err := newShuffleChunkReader(data)
+		r, err := wshf.NewChunkReader(data)
 		if err != nil {
 			t.Fatal(err)
 		}

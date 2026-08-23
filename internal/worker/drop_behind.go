@@ -33,7 +33,10 @@ func (s *cachedFileStreamSource) dropBehindWalk() {
 	if s.localPath == "" || s.mmapData == nil {
 		return
 	}
-	cr, ok := s.chunkReader.(*shuffleChunkReader)
+	// Only the mmap-backed walk has a byte position to drop behind; the
+	// streaming reader has no mapping at all. Asked as a capability, not
+	// as a concrete type, so the cursor's home package is free to move.
+	cr, ok := s.chunkReader.(interface{ Pos() int })
 	if !ok || !diskio.DropBehindEnabled() {
 		return
 	}
