@@ -7,7 +7,9 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -174,8 +176,14 @@ func TestScanBackingReuseEndToEnd(t *testing.T) {
 			t.Fatalf("row %d differs: reuse=%+v, no-reuse=%+v", i, on.rows[i], off.rows[i])
 		}
 	}
-	if !on.armed || !off.armed {
-		t.Fatalf("the dispenser's release hook must arm the pool on both arms (on=%v off=%v)", on.armed, off.armed)
+	// With the kill switch off, armBackingReuse now skips building a pool at
+	// all (pure inertness) rather than building one that Get/Recycle would
+	// immediately no-op through — only the "on" arm should end up armed.
+	if !on.armed {
+		t.Fatal("resolving the release hook must arm the pool when reuse is enabled")
+	}
+	if off.armed {
+		t.Fatal("the kill switch must prevent the pool from being built at all")
 	}
 	if on.hits == 0 {
 		t.Fatalf("reuse never engaged through the dispenser: hits=%d misses=%d claimed=%d", on.hits, on.misses, on.claimed)
@@ -254,4 +262,96 @@ func TestScanSourceArmingIsIdempotent(t *testing.T) {
 	}
 	// A release naming a foreign batch is still a no-op on the armed pool.
 	src.RecycleBatch(batch.NewRecordBatch(nil, 0), batch.MintStamp{})
+}
+
+// TestRunBreakerConsumeParallel_ScanBackingReuseEngagesOnFirstFile drives the
+// breaker-consume morsel-parallel path's own shape: source -> HashAggregate
+// over a real multi-row-group parquet file, through runBreakerConsumeParallel
+// directly rather than through the dispenser alone.
+//
+// This is the fix's regression: runBreakerConsumeParallel used to call its
+// warmup src.Next BEFORE resolving the source's release hook (that resolve
+// happened later, inside the morsel dispenser's own producer goroutine,
+// after the warmup batch was already decoded). cachedFileStreamSource
+// captures the backing pool into its decode-ahead iterator ONCE PER FILE, so
+// a nil pool at warmup time disabled reuse for the WHOLE FIRST FILE — which,
+// on a single-file task, is the entire task. Pre-fix this test's hits == 0.
+func TestRunBreakerConsumeParallel_ScanBackingReuseEngagesOnFirstFile(t *testing.T) {
+	const (
+		groups       = 16
+		rowsPerGroup = 1024
+	)
+	store := objstore.NewMemStore()
+	key := writeBackingReuseFixture(t, store, "b", groups, rowsPerGroup)
+
+	// Small budget: a row group must split into views across the k
+	// consumers, which is also the retire path whose refcount gates the
+	// release back to the pool.
+	prevBudget := morselDispenserBudgetBytes
+	morselDispenserBudgetBytes = 256 << 10
+	t.Cleanup(func() { morselDispenserBudgetBytes = prevBudget })
+
+	executor := NewExecutor(store, NewLRUCache(1024*1024), nil)
+	executor.SetScanDecodeAhead(true, 4<<20)
+
+	ctx := context.Background()
+	src := newCachedFileStreamSource(executor, "", "b", []string{key})
+	if err := src.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := exec.NewHashAggregate(nil, []exec.AggColumn{
+		{Func: exec.AggSum, InputCol: "val", OutputCol: "s", OutputType: parquet.TypeInt64},
+		{Func: exec.AggCount, InputCol: "id", OutputCol: "c", OutputType: parquet.TypeInt64},
+	})
+	if err := sink.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	task := distributed.Task{ID: "brk-backing", QueryID: "q-brk-backing", StageID: "scan-agg", StageType: "aggregate"}
+
+	if err := executor.runBreakerConsumeParallel(ctx, task, src, nil, sink, 4, nil); err != nil {
+		t.Fatalf("runBreakerConsumeParallel: %v", err)
+	}
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotSum, gotCount int64
+	for {
+		b, err := sink.Next(ctx)
+		if err != nil {
+			t.Fatalf("drain: %v", err)
+		}
+		if b == nil {
+			break
+		}
+		si, ci := b.ColumnIndex("s"), b.ColumnIndex("c")
+		if si < 0 || ci < 0 {
+			t.Fatalf("output schema missing s/c: %v", b.Schema)
+		}
+		for i := 0; i < b.ActiveLen(); i++ {
+			row := i
+			if b.Sel != nil {
+				row = int(b.Sel[i])
+			}
+			gotSum += b.Columns[si].Int64Data[row]
+			gotCount += b.Columns[ci].Int64Data[row]
+		}
+	}
+
+	wantCount := int64(groups * rowsPerGroup)
+	if gotCount != wantCount {
+		t.Fatalf("row count = %d, want %d", gotCount, wantCount)
+	}
+	var wantSum int64
+	for id := int64(0); id < wantCount; id++ {
+		wantSum += id * 7
+	}
+	if gotSum != wantSum {
+		t.Fatalf("sum(val) = %d, want %d", gotSum, wantSum)
+	}
+
+	if hits, _, _ := executor.ScanBackingStats(); hits == 0 {
+		t.Fatal("scan backing reuse never engaged through runBreakerConsumeParallel on a single-file task")
+	}
 }

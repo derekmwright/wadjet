@@ -1564,6 +1564,12 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 		return nil
 	}
 
+	// Resolve (and thereby ARM) the source's backing-release hook before the
+	// first Next: the pool exists only for consumers that have a release
+	// edge, and a batch decoded before it is armed carries no mint stamp and
+	// can never be taken back.
+	recycler := batchRecyclerOf(src)
+
 	// Warmup through the ORIGINAL chain into the primary — resolves the
 	// lazily-cached column indices in shared predicate/expression closures
 	// before any clone exists, and gives the primary sink its schema (the
@@ -1578,10 +1584,17 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 		}
 		return sink.Finalize(ctx)
 	}
+	warmupMint := warmup.Mint()
 	// Built before the clones exist: newFragmentDriver's bounded-output
 	// opt-in has to precede Clone() for the clones to inherit it.
 	primaryDriver := newBreakerDriver(ops, sink)
-	if _, err := primaryDriver.push(ctx, warmup); err != nil {
+	_, err = primaryDriver.push(ctx, warmup)
+	// The warmup batch never passes through the dispenser, so its release
+	// edge is here (see batchRecycler).
+	if recycler != nil {
+		recycler.RecycleBatch(warmup, warmupMint)
+	}
+	if err != nil {
 		return err
 	}
 

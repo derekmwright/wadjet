@@ -264,7 +264,12 @@ A pool is created **only** where a release edge exists. `batchRecyclerOf`
 (`morsel_dispenser.go`) both resolves the source's recycle hook and *arms* it:
 resolving the hook is the consumer's statement that it will release. Callers
 resolve before the source's first `Next`, so the first decode is already
-pooled.
+pooled — both morsel-parallel call sites in `executor_fragment.go` do this
+explicitly, above their own warmup `Next` and before any clone or morsel
+exists: `runFragmentLinearParallel` and `runBreakerConsumeParallel`. The
+dispenser's own `run` resolves the hook again at the top of the producer
+loop; since `armBackingReuse` is idempotent, that second resolve is a no-op
+for the source its caller already armed.
 
 Consumers with no release edge therefore build no pool at all, and their
 sources allocate exactly as they did before this lever:

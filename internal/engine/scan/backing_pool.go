@@ -24,6 +24,13 @@ import (
 var scanBackingReuse = optswitch.Register("scan-backing-reuse", "WADJET_SCAN_BACKING_REUSE",
 	"reuse of the decoded row-group output backing across scan-source row groups")
 
+// BackingReuseEnabled reports whether the scan-backing-reuse optimization is
+// on. Exported so a source's armBackingReuse (internal/worker) can skip
+// building a pool at all when the switch is off, rather than building one
+// that Get/Recycle would immediately no-op through — the toggle is package-
+// private here so the invariance oracle stays the single place that flips it.
+func BackingReuseEnabled() bool { return scanBackingReuse.On() }
+
 // Defaults for BackingPool sizing. Package vars so tests can shrink them.
 var (
 	// defaultMaxIdleBackings is one per default decode-ahead worker

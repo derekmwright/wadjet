@@ -273,7 +273,15 @@ func newCachedFileStreamSource(executor *Executor, queryID, bucket string, files
 //
 // The idle set never exceeds the byte budget one fragment is already permitted
 // to hold in decoded source bytes in flight.
+//
+// With the WADJET_SCAN_BACKING_REUSE kill switch off, this is a no-op: a pool
+// that Get/Recycle would immediately no-op through is pure inertness (an idle
+// free list and a NewMintOwner id nobody ever reads), so building one buys
+// nothing.
 func (s *cachedFileStreamSource) armBackingReuse() {
+	if !scan.BackingReuseEnabled() {
+		return
+	}
 	if s.backing.Load() != nil {
 		return
 	}

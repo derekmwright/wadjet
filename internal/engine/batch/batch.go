@@ -84,7 +84,12 @@ func (b *RecordBatch) Mint() MintStamp { return b.mint }
 
 // SetMint stamps the batch for its producing free list. Only the producer
 // calls it, and only while it owns the batch exclusively — at mint, and again
-// to clear the stamp when the storage is taken back.
+// to clear the stamp when the storage is taken back. The stamp travels with a
+// VALUE copy of the RecordBatch (e.g. `nb := *b`), so any such copy taken over
+// a scan batch must zero the stamp (`nb.SetMint(batch.MintStamp{})`) or it
+// would alias the parent's pool identity; today the only value copy
+// (internal/engine/exec/partitioned_agg.go's selView) Detaches immediately,
+// which claims the shared columns and trips the release veto regardless.
 func (b *RecordBatch) SetMint(m MintStamp) { b.mint = m }
 
 // NewRecordBatch creates a new record batch with the given schema and row count.
