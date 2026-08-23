@@ -145,7 +145,10 @@ func sortKeysEqual(a, b []physical.SortKeySpec) bool {
 		return false
 	}
 	for i := range a {
-		if a[i] != b[i] {
+		// SameOrdering, not ==: a SortKeySpec also carries where a synthetic
+		// __sortkey_N comes from (#424), and two keys that sort identically
+		// must compare equal whether or not one of them records that.
+		if !a[i].SameOrdering(b[i]) {
 			return false
 		}
 	}

@@ -483,6 +483,38 @@ type SortKeySpec struct {
 	Column    string
 	Desc      bool
 	NullsLast bool
+
+	// SourceExpr, SourceColumn and SourceType describe what MATERIALIZES a
+	// synthetic ORDER BY key — a term the SELECT list does not carry, which
+	// logical.resolveOrderBy named __sortkey_N. Nothing on the DAG computes
+	// a Project, so unless some pass puts that name on the producing stage
+	// the sort has no such column to key on (#424). They ride the key
+	// itself rather than the stage because every pass that moves a sort's
+	// ordering somewhere else — fuseSortIntoPredecessor's fold onto a
+	// join/aggregate, emitMergeSortTree, the gather's Exchange.Ordering —
+	// copies the SortKeySpec slice wholesale, so the definition travels with
+	// the key for free.
+	//
+	// SourceExpr is the term's expression text; SourceColumn is non-empty
+	// only when the term is a plain column reference, in which case the
+	// producer already emits that column under its own name and the key can
+	// simply be renamed to it. SourceType is the declared type a computed
+	// term's materialized column carries.
+	//
+	// Empty on every ordinary key, and read by exactly one pass
+	// (resolveHiddenSortKeys) — sortKeysEqual compares ORDERING, so these
+	// are deliberately outside that comparison.
+	SourceExpr   string
+	SourceColumn string
+	SourceType   parquet.TypeID
+}
+
+// SameOrdering reports whether two keys impose the same order. It compares
+// what the sort actually does — column, direction, NULL placement — and
+// ignores the materialization fields, which say where a synthetic key comes
+// from rather than how it sorts.
+func (k SortKeySpec) SameOrdering(o SortKeySpec) bool {
+	return k.Column == o.Column && k.Desc == o.Desc && k.NullsLast == o.NullsLast
 }
 
 // DynamicFilterEmit is the planner-side spec attached to a build-side leaf
@@ -2373,6 +2405,11 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// applyOutputRenames can rename/drop but not evaluate. Attach the
 	// SELECT list to the scan so its fragment projects it worker-side.
 	attachScanSelectProjections(node, stages)
+	// #424: a synthetic ORDER BY key (__sortkey_N) that the pass above did
+	// not materialize — every sort but the outermost query's — still names
+	// no column on the DAG. Point it at one. Runs last because the repair
+	// depends on what attachScanSelectProjections did.
+	resolveHiddenSortKeys(stages)
 	return stages, nil
 }
 
@@ -4626,11 +4663,18 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			sortChild = node.Children[0]
 		}
 		for _, ob := range node.OrderBy {
-			sortKeys = append(sortKeys, SortKeySpec{
+			key := SortKeySpec{
 				Column:    resolveSortKeyColumn(ob.Column, sortChild),
 				Desc:      ob.Desc,
 				NullsLast: resolveNullsLast(ob),
-			})
+			}
+			// A key still spelled __sortkey_N names a column the logical
+			// Project materializes and no stage does. Record what defines
+			// it; resolveHiddenSortKeys settles it at the end of planning,
+			// once it can see whether some other pass already put the name
+			// on the producing stage (#424).
+			annotateHiddenSortSource(&key, sortChild)
+			sortKeys = append(sortKeys, key)
 		}
 
 		// Phase 1: partial sort (coordinator splits into parallel tasks at runtime)

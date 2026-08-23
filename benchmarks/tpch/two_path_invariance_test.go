@@ -1288,6 +1288,55 @@ func twoPathCorpus() []twoPathQuery {
 			assertA: func(tb testing.TB, rows []map[string]any) {
 				assertOrderedBy(tb, rows, false, "n_name (recovered from n_comment)", nationOfComment)
 			}},
+		// The same term, one level down: a DERIVED TABLE whose ORDER BY names
+		// a column its own SELECT list drops. The materialized __sortkey_N
+		// only ever reached the DAG through attachScanSelectProjections,
+		// which serves the OUTERMOST select list, so a sort feeding an
+		// aggregate or a join had no stage emitting its key and the task
+		// failed outright — `key column "__sortkey_0" does not exist in the
+		// input schema` — on a query the single-process path answered (#424).
+		// The corpus had no derived table of this shape, which is why the
+		// two-path gate never saw it.
+		twoPathQuery{name: "DerivedSortColumnNotSelected", cmp: cmpUnordered, expectRows: true,
+			sql: "SELECT COUNT(*) AS c FROM (SELECT s_suppkey FROM supplier ORDER BY s_acctbal DESC) t",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCell(tb, rows, "c", 100)
+			}},
+		// Under a LIMIT the inner ORDER BY decides WHICH rows survive, so the
+		// key sum is the assertion that matters: a sort keying on nothing
+		// would still return seven rows. 253 = 7+18+38+54+22+87+27, the
+		// suppkeys of the seven largest s_acctbal at SF0.01 (top acctbal
+		// 9914.45 down to 8929.83, with 8506.63 the first row excluded).
+		twoPathQuery{name: "DerivedTopNSortColumnNotSelected", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT SUM(s_suppkey) AS keysum, COUNT(*) AS c FROM (
+				SELECT s_suppkey FROM supplier
+				ORDER BY s_acctbal DESC, s_suppkey DESC LIMIT 7) t`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCell(tb, rows, "c", 7)
+				assertSingleCell(tb, rows, "keysum", 253)
+			}},
+		// The issue's own shape: the same derived table over a join, so the
+		// key has to survive the join fragment rather than a scan.
+		twoPathQuery{name: "DerivedTopNSortColumnNotSelectedJoin", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT SUM(s_suppkey) AS keysum, COUNT(*) AS c FROM (
+				SELECT s_suppkey FROM supplier JOIN nation ON s_nationkey = n_nationkey
+				ORDER BY s_acctbal DESC, s_suppkey DESC LIMIT 7) t`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCell(tb, rows, "c", 7)
+				assertSingleCell(tb, rows, "keysum", 253)
+			}},
+		// A COMPUTED term one level down. Renaming the key to its source
+		// column cannot close this one — there is no source column — so the
+		// producing fragment has to project the expression under the hidden
+		// name, the same materialize-at-source shape #383 uses.
+		twoPathQuery{name: "DerivedTopNSortExprNotSelected", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT SUM(s_suppkey) AS keysum, COUNT(*) AS c FROM (
+				SELECT s_suppkey FROM supplier
+				ORDER BY s_acctbal * 2 DESC, s_suppkey DESC LIMIT 7) t`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertSingleCell(tb, rows, "c", 7)
+				assertSingleCell(tb, rows, "keysum", 253)
+			}},
 		// Star select: there is no SELECT-list projection to hang the
 		// materialized key on, so the planner has to create one that keeps
 		// the star.
@@ -3604,6 +3653,19 @@ func assertFirstKeyAndCount(tb testing.TB, rows []map[string]any, col string, wa
 	}
 	if got := cellNum(rows[0], col); got != wantFirst {
 		tb.Errorf("page starts at %s=%v, want %v — the offset was not applied", col, got, wantFirst)
+	}
+}
+
+// assertSingleCell checks one numeric cell of a one-row result — the shape an
+// aggregate over a derived table returns, where the whole answer is the value.
+func assertSingleCell(tb testing.TB, rows []map[string]any, col string, want float64) {
+	tb.Helper()
+	if len(rows) != 1 {
+		tb.Errorf("got %d rows, want 1 — an aggregate over a derived table returns one row", len(rows))
+		return
+	}
+	if got := cellNum(rows[0], col); got != want {
+		tb.Errorf("%s = %v, want %v", col, got, want)
 	}
 }
 
