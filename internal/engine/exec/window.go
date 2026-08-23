@@ -1372,6 +1372,14 @@ type frameMinMaxDeque struct {
 	idx  []int
 	want int // -1 = keep minimum, +1 = keep maximum
 	get  func(i int) any
+	// isNull reports whether a partition-relative row is NULL. The columnar
+	// path checks the input vector's null bitmap directly
+	// (batch.Bitmap.IsNullFast) instead of boxing the row through get and
+	// comparing to nil — advance calls this once per row it has not yet
+	// pushed, so boxing there would cost an allocation-per-row this deque
+	// exists to avoid. The row-oriented path has no bitmap to check and
+	// tests the boxed value itself.
+	isNull func(i int) bool
 	// cmp orders two partition-relative rows, both known non-NULL. It is
 	// resolved by the caller from what the caller HAS: the columnar path
 	// hands it the column's own kernel comparator, the row-oriented path a
@@ -1384,7 +1392,7 @@ type frameMinMaxDeque struct {
 
 func (d *frameMinMaxDeque) advance(lo, hi int) {
 	for ; d.next < hi; d.next++ {
-		if d.get(d.next) == nil {
+		if d.isNull(d.next) {
 			continue // SQL MIN/MAX skip NULLs
 		}
 		// Every index already in the deque passed the same NULL check, so
@@ -1528,8 +1536,9 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 			want = 1
 		}
 		d := &frameMinMaxDeque{
-			want: want,
-			get:  func(i int) any { return inputVec.GetValue(start + i) },
+			want:   want,
+			get:    func(i int) any { return inputVec.GetValue(start + i) },
+			isNull: func(i int) bool { return inputVec.Nulls.IsNullFast(start + i) },
 			// The column is right here, so the comparison is the columnar
 			// one — no box, and no second opinion about a ROW's field order.
 			cmp: func(i, j int) int {
@@ -1943,8 +1952,9 @@ func computePartitionRowOriented(part []map[string]any, wc WindowColumn, rc wind
 			want = 1
 		}
 		d := &frameMinMaxDeque{
-			want: want,
-			get:  func(i int) any { return part[i][wc.InputCol] },
+			want:   want,
+			get:    func(i int) any { return part[i][wc.InputCol] },
+			isNull: func(i int) bool { return part[i][wc.InputCol] == nil },
 			cmp: func(i, j int) int {
 				return rc.input(part[i][wc.InputCol], part[j][wc.InputCol])
 			},
