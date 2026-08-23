@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"net"
 	"strconv"
 	"strings"
@@ -170,7 +171,7 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 	case batch.TypeDuration:
 		return compareFilterImpl(getInt64Data, toInt64(value), op)
 	case batch.TypeUUID:
-		return compareFilterString(op, toString(value))
+		return compareFilterString(op, parseUUIDToRawString(toString(value)))
 	case batch.TypeDate:
 		return compareFilterImpl(getInt32Data, toDateInt32(value), op)
 	case batch.TypeBytes:
@@ -469,14 +470,191 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 			set[toFloat64(v)] = struct{}{}
 		}
 		return inFilterFloat64(set, negate)
-	case batch.TypeString, batch.TypeUUID, batch.TypeIPv6, batch.TypeCIDR:
+	case batch.TypeString, batch.TypeCIDR:
 		set := make(map[string]struct{}, len(values))
 		for _, v := range values {
 			set[toString(v)] = struct{}{}
 		}
 		return inFilterString(set, negate)
+	case batch.TypeUUID:
+		// UUID stores 16 RAW bytes, not the 36-character text.
+		set := make(map[string]struct{}, len(values))
+		for _, v := range values {
+			set[parseUUIDToRawString(toString(v))] = struct{}{}
+		}
+		return inFilterString(set, negate)
+	case batch.TypeIPv6:
+		// IPv6 stores the 16 RAW bytes; the literal is text. The scalar
+		// comparison kernel already parses it (parseIPv6ToRawString) and the
+		// IN path did not, so `WHERE ipv6_col IN ('2001:db8::1')` could not
+		// have matched even once the type had an arm.
+		set := make(map[string]struct{}, len(values))
+		for _, v := range values {
+			set[parseIPv6ToRawString(toString(v))] = struct{}{}
+		}
+		return inFilterString(set, negate)
+	case batch.TypeBytes:
+		set := make(map[string]struct{}, len(values))
+		for _, v := range values {
+			set[toBytesString(v)] = struct{}{}
+		}
+		return inFilterString(set, negate)
+	case batch.TypeIPv4:
+		set := make(map[int64]struct{}, len(values))
+		for _, v := range values {
+			set[parseIPv4ToInt64(toString(v))] = struct{}{}
+		}
+		return inFilterInt64(getInt64Data, set, negate)
+	case batch.TypeMAC:
+		set := make(map[int64]struct{}, len(values))
+		for _, v := range values {
+			set[parseMACToInt64(toString(v))] = struct{}{}
+		}
+		return inFilterInt64(getInt64Data, set, negate)
+	case batch.TypeDuration:
+		set := make(map[int64]struct{}, len(values))
+		for _, v := range values {
+			set[toInt64(v)] = struct{}{}
+		}
+		return inFilterInt64(getInt64Data, set, negate)
+	case batch.TypeFloat32:
+		// The probe widens to float64, which is exact for every float32, so
+		// the set is built the same way and 1.5 in the list matches 1.5 in
+		// the column.
+		set := make(map[float64]struct{}, len(values))
+		for _, v := range values {
+			set[toFloat64(v)] = struct{}{}
+		}
+		return inFilterFloat32(set, negate)
+	case batch.TypeBool:
+		return inFilterBool(values, negate)
+	case batch.TypeDecimal:
+		return inFilterDecimal(values, negate)
 	default:
 		return nil
+	}
+}
+
+// inFilterFloat32 probes a FLOAT32 column against a float64 set.
+func inFilterFloat32(set map[float64]struct{}, negate bool) FilterKernel {
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		keep := func(i int) bool {
+			_, found := set[float64(vec.Float32Data[i])]
+			return found != negate
+		}
+		if sel != nil {
+			for _, idx := range sel {
+				if hasNulls && vec.Nulls.IsNullFast(int(idx)) {
+					continue
+				}
+				if keep(int(idx)) {
+					out = append(out, idx)
+				}
+			}
+			return out
+		}
+		for i := 0; i < vecLen; i++ {
+			if hasNulls && vec.Nulls.IsNullFast(i) {
+				continue
+			}
+			if keep(i) {
+				out = append(out, uint32(i))
+			}
+		}
+		return out
+	}
+}
+
+// inFilterBool collapses the set to at most two members before the loop.
+func inFilterBool(values []any, negate bool) FilterKernel {
+	var wantTrue, wantFalse bool
+	for _, v := range values {
+		if toBool(v) {
+			wantTrue = true
+		} else {
+			wantFalse = true
+		}
+	}
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		keep := func(i int) bool {
+			found := wantTrue
+			if !vec.BoolData[i] {
+				found = wantFalse
+			}
+			return found != negate
+		}
+		if sel != nil {
+			for _, idx := range sel {
+				if hasNulls && vec.Nulls.IsNullFast(int(idx)) {
+					continue
+				}
+				if keep(int(idx)) {
+					out = append(out, idx)
+				}
+			}
+			return out
+		}
+		for i := 0; i < vecLen; i++ {
+			if hasNulls && vec.Nulls.IsNullFast(i) {
+				continue
+			}
+			if keep(i) {
+				out = append(out, uint32(i))
+			}
+		}
+		return out
+	}
+}
+
+// inFilterDecimal probes a DECIMAL column against the literals scaled to the
+// column's own scale, with the truncation residual carried the same way
+// compareFilterDecimal carries it: a literal that does not fit the scale
+// exactly cannot equal any stored value, so it drops out of the set.
+func inFilterDecimal(values []any, negate bool) FilterKernel {
+	texts := make([]string, 0, len(values))
+	for _, v := range values {
+		texts = append(texts, decimalLiteralText(v))
+	}
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		scale := vec.DecimalData.Scale
+		set := make(map[batch.Int128]struct{}, len(texts))
+		for _, t := range texts {
+			lit, residual := decimalLiteralAt(t, scale)
+			if residual != 0 {
+				continue // not representable at this scale: equals nothing
+			}
+			set[lit] = struct{}{}
+		}
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		keep := func(i int) bool {
+			_, found := set[vec.DecimalData.Data[i]]
+			return found != negate
+		}
+		if sel != nil {
+			for _, idx := range sel {
+				if hasNulls && vec.Nulls.IsNullFast(int(idx)) {
+					continue
+				}
+				if keep(int(idx)) {
+					out = append(out, idx)
+				}
+			}
+			return out
+		}
+		for i := 0; i < vecLen; i++ {
+			if hasNulls && vec.Nulls.IsNullFast(i) {
+				continue
+			}
+			if keep(i) {
+				out = append(out, uint32(i))
+			}
+		}
+		return out
 	}
 }
 
@@ -893,6 +1071,43 @@ func parseIPv6ToRawString(s string) string {
 	}
 	return ""
 }
+
+// parseUUIDToRawString converts a UUID literal to the 16 RAW bytes a UUID
+// column stores. Comparing the 36-character text against those bytes — which
+// is what the string kernel did before — can never match, so
+// `WHERE uuid_col = '…'` silently returned no rows. Same shape as IPv6's, and
+// the same reason parseIPv6ToRawString exists.
+//
+// A 16-byte input is already raw and passes through: internal callers that
+// build a predicate from a value they read out of a vector hand it over in
+// that form, and no UUID TEXT is 16 characters long (32 without dashes, 36
+// with), so the two cannot be confused.
+//
+// A literal that is neither yields "", which matches nothing: a stored value
+// is always 16 bytes.
+func parseUUIDToRawString(s string) string {
+	if len(s) == 16 {
+		return s
+	}
+	clean := make([]byte, 0, 32)
+	for i := 0; i < len(s); i++ {
+		if s[i] != '-' {
+			clean = append(clean, s[i])
+		}
+	}
+	if len(clean) != 32 {
+		return ""
+	}
+	raw := make([]byte, 16)
+	if _, err := hex.Decode(raw, clean); err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// UUIDLiteralToRaw is parseUUIDToRawString for the row-at-a-time predicate in
+// package exec, so the two comparison paths convert the literal identically.
+func UUIDLiteralToRaw(s string) string { return parseUUIDToRawString(s) }
 
 // ColColFilterKernel compares two columns element-wise, returning matching row indices.
 type ColColFilterKernel func(left, right *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32

@@ -160,7 +160,14 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 		case batch.TypeDuration:
 			return compareInt64(v.Int64Data[row], toInt64(value), op)
 		case batch.TypeUUID:
-			return compareString(v.BytesData.UnsafeStringValue(row), strVal, op)
+			// A UUID column stores 16 RAW bytes; the literal is 36 characters
+			// of text. Comparing them directly could never match, so
+			// `WHERE uuid_col = '…'` silently returned no rows.
+			if !netResolved {
+				cachedNetStr = kernel.UUIDLiteralToRaw(strVal)
+				netResolved = true
+			}
+			return compareString(v.BytesData.UnsafeStringValue(row), cachedNetStr, op)
 		case batch.TypeDate:
 			return compareInt64(int64(v.Int32Data[row]), toInt64(value), op)
 		case batch.TypeBytes:
@@ -494,8 +501,16 @@ func (f *InFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Rec
 		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
 	}
-	if f.colIdx < 0 || f.kern == nil {
-		return nil, nil
+	// Returning (nil, nil) here matched NOTHING, which is the failure mode
+	// #147 was filed for: an empty result indistinguishable from genuinely
+	// empty data. It fired for real — seven column types had no arm in
+	// ResolveInFilterKernel, so `WHERE bool_col IN (true)` dropped every row.
+	if f.colIdx < 0 {
+		return nil, fmt.Errorf("IN filter column %q does not exist in the input schema", f.ColName)
+	}
+	if f.kern == nil {
+		return nil, fmt.Errorf("IN filter on column %q: no set-membership kernel for type %s",
+			f.ColName, in.Columns[f.colIdx].Type)
 	}
 	// Compact in-place when a prior selection exists (see KernelFilter.Execute).
 	outBuf := f.outSel

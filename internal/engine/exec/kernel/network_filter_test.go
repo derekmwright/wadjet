@@ -140,7 +140,7 @@ func TestFilterDuration(t *testing.T) {
 		{Name: "latency_ns", Type: parquet.TypeDuration},
 	}
 	b := batch.NewRecordBatch(schema, 3)
-	b.Columns[0].SetValue(0, int64(1000000))   // 1ms
+	b.Columns[0].SetValue(0, int64(1000000))    // 1ms
 	b.Columns[0].SetValue(1, int64(5000000000)) // 5s
 	b.Columns[0].SetValue(2, int64(500000))     // 0.5ms
 
@@ -165,20 +165,27 @@ func TestFilterUUID(t *testing.T) {
 	b.Columns[0].SetValue(1, "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 	b.Columns[0].SetValue(2, "550e8400-e29b-41d4-a716-446655440000")
 
-	// UUID comparison is on raw bytes stored in BytesData, so compare the raw string form
-	// The kernel uses string comparison on the raw byte representation
-	rawTarget := b.Columns[0].BytesData.StringValue(0) // get the raw form of the first UUID
-	kern := ResolveFilterKernel(batch.TypeUUID, OpEq, rawTarget)
-	if kern == nil {
-		t.Fatal("ResolveFilterKernel returned nil for TypeUUID")
-	}
-	outSel := make([]uint32, 0, 3)
-	sel := kern(b.Columns[0], nil, 3, outSel)
-	if len(sel) != 2 {
-		t.Fatalf("expected 2 matches, got %d", len(sel))
-	}
-	if sel[0] != 0 || sel[1] != 2 {
-		t.Fatalf("expected indices [0, 2], got %v", sel)
+	// A UUID column stores 16 RAW bytes and the SQL literal is text, so the
+	// kernel converts. This assertion used to pass the RAW form, working
+	// around the fact that the text form matched nothing — which was the
+	// defect (#411), not the contract.
+	for _, target := range []any{
+		"550e8400-e29b-41d4-a716-446655440000", // canonical text
+		"550e8400e29b41d4a716446655440000",     // dashless text
+		b.Columns[0].BytesData.StringValue(0),  // already raw
+	} {
+		kern := ResolveFilterKernel(batch.TypeUUID, OpEq, target)
+		if kern == nil {
+			t.Fatalf("ResolveFilterKernel returned nil for TypeUUID (%v)", target)
+		}
+		outSel := make([]uint32, 0, 3)
+		sel := kern(b.Columns[0], nil, 3, outSel)
+		if len(sel) != 2 {
+			t.Fatalf("target %q: expected 2 matches, got %d", target, len(sel))
+		}
+		if sel[0] != 0 || sel[1] != 2 {
+			t.Fatalf("target %q: expected indices [0, 2], got %v", target, sel)
+		}
 	}
 }
 
