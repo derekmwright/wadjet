@@ -619,15 +619,31 @@ func inFilterDecimal(values []any, negate bool) FilterKernel {
 	for _, v := range values {
 		texts = append(texts, decimalLiteralText(v))
 	}
+	// The set is a pure function of the column's SCALE, and a column's scale
+	// does not change between batches, so it is built once rather than
+	// re-parsed per batch. Keyed by scale, not cached unconditionally:
+	// nothing here promises one kernel only ever sees one column.
+	//
+	// Unsynchronized deliberately. ResolveInFilterKernel is called from
+	// InFilter.Execute, and InFilter.Clone builds a FRESH InFilter that
+	// resolves its own kernel, so no two workers share this closure —
+	// unlike ColumnCompare's predicate, which Filter.Clone does share and
+	// which is why that one carries no mutable state at all.
+	var memoSet map[batch.Int128]struct{}
+	memoScale := -1
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		scale := vec.DecimalData.Scale
-		set := make(map[batch.Int128]struct{}, len(texts))
-		for _, t := range texts {
-			lit, residual := decimalLiteralAt(t, scale)
-			if residual != 0 {
-				continue // not representable at this scale: equals nothing
+		set := memoSet
+		if set == nil || memoScale != scale {
+			set = make(map[batch.Int128]struct{}, len(texts))
+			for _, t := range texts {
+				lit, residual := decimalLiteralAt(t, scale)
+				if residual != 0 {
+					continue // not representable at this scale: equals nothing
+				}
+				set[lit] = struct{}{}
 			}
-			set[lit] = struct{}{}
+			memoSet, memoScale = set, scale
 		}
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()
