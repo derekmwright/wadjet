@@ -69,6 +69,26 @@ jobs:
         # WADJET_DIFF_SEED_START/COUNT.
         run: go test -v -run TestStandaloneVsDistributedDifferential ./internal/coordinator/ -timeout 15m
 
+      - name: Type-Matrix Coverage Gates (all 22 column types)
+        # The gates TPC-H and ClickBench are structurally blind to: their
+        # corpora carry three storage types (Int32, Float64, String), so a
+        # defect that needs a BYTES, IPv4, UUID, DECIMAL or nested column to
+        # fire cannot be seen by any of them. Vector.GetValue's TypeBytes arm
+        # aliasing the column arena (#391) shipped through every existing gate
+        # for exactly that reason.
+        #
+        #   NoProcessKillers  — the set of queries that take the process down,
+        #                       found by re-execing a child per killer.
+        #   BatchReuse        — poisoned pool vs clean pool: the contract that
+        #                       a pooled batch's storage is undefined after
+        #                       Release() (#391, #398, #399).
+        #   OptimizationInvariance / Fuzz* — #287's kill-switch differential
+        #                       and generated SQL, over all 22 types.
+        #   TwoPath           — stage DAG vs single process, per type (#396).
+        run: |
+          go test -v -run 'TestTypeMatrix' ./wadjet/ -timeout 15m
+          go test -v -run 'TestTypeMatrixTwoPath' ./internal/coordinator/ -timeout 15m
+
       - name: Nested Types + Decimal Correctness
         # The gate TPC-H is structurally blind to (issue #144): TPC-H has
         # no ARRAY/MAP/ROW columns, no Decimal in the merge path, and no

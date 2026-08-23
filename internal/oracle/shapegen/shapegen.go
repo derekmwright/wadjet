@@ -35,6 +35,23 @@ const (
 	// KindDate is a text column holding ISO-8601 dates. Ordering and
 	// comparison are identical to text, but date functions apply.
 	KindDate
+	// KindOpaque is a scalar whose DOMAIN the generator does not model: BYTES,
+	// IPv4/IPv6/CIDR/MAC, UUID, TIMESTAMP, DURATION, PORT, PROTOCOL. The
+	// generator projects it, groups by it, orders by it, joins on it, counts
+	// it and MIN/MAXes it — everything it does to a column without knowing
+	// what the values mean — and applies no arithmetic, no string function and
+	// no date function to it.
+	//
+	// Nineteen of the engine's twenty-two types were unreachable by this
+	// generator before this kind existed, because Kind was the whole type
+	// universe and it had four members. A defect that needs a BYTES or an IPv4
+	// column to fire could not be generated even in principle.
+	KindOpaque
+	// KindDecimal is exact-decimal numeric. Numeric for the arms that need a
+	// number (SUM, AVG, arithmetic), but NOT interchangeable with float: its
+	// ordering, its group-key encoding and its rendering all go through
+	// separate code from FLOAT64's.
+	KindDecimal
 )
 
 // Column is one generatable column. Lits are rendered SQL literals drawn from
@@ -52,6 +69,10 @@ type Table struct {
 	Name string
 	PK   []string
 	Cols []Column
+	// SelfJoin marks a table small enough that joining it to itself stays
+	// bounded. genSelfJoin picks only from these; a schema with none gets the
+	// single-table FROM instead.
+	SelfJoin bool
 }
 
 // Edge is a joinable equality (FK pairs in practice).
@@ -91,6 +112,12 @@ type Item struct {
 	// ties differently.
 	Exact bool
 	Agg   bool
+	// Opaque marks a value whose RENDERED form does not order the way the
+	// value does: an IPv4 renders "10.0.0.9" and "10.0.0.10", which compare
+	// lexicographically in the opposite order to the addresses. The absolute
+	// order check reads rendered cells, so it cannot judge an ORDER BY over
+	// one of these — see Query.OrderKeys.
+	Opaque bool
 }
 
 // From is one FROM-clause entry. The first has an empty Join.
@@ -115,6 +142,8 @@ type Order struct {
 	Key string
 	// Exact marks a term both engines compute bit-identically (see Item).
 	Exact bool
+	// Opaque marks a term the absolute order check cannot judge (see Item).
+	Opaque bool
 }
 
 // Query is a generated query in structured form, so a failure can be shrunk
@@ -137,6 +166,11 @@ type Query struct {
 	// reporting.
 	Shape string
 	Seed  int64
+	// opaqueCols are the schema's column names whose RENDERED form does not
+	// order the way the value does. Set by the generator; read only by
+	// OrderKeys, to decline the absolute order check on a query that orders by
+	// one of them.
+	opaqueCols []string
 }
 
 // SQL renders the query.
@@ -259,7 +293,58 @@ func (q *Query) OrderKeys() []oracle.OrderKey {
 		if o.Key == "" {
 			break
 		}
+		if o.Opaque || q.touchesOpaque(o) {
+			// The absolute check compares RENDERED cells, and for the opaque
+			// types the rendering does not order like the value: IPv4
+			// "10.0.0.10" sorts before "10.0.0.9" as text and after it as an
+			// address; IPv6 and UUID have the same property, and DECIMAL's
+			// scale-preserving text orders "10.001" before "2.0002". Judging
+			// those would accuse a correct engine, so the whole query declines
+			// the absolute check rather than judging a prefix of its keys.
+			return nil
+		}
 		out = append(out, oracle.OrderKey{Alias: o.Key, Desc: o.Desc})
+	}
+	return out
+}
+
+// touchesOpaque reports whether an ORDER BY term reads a column whose rendered
+// form does not order like its value. It matches on the SQL text of the term
+// and of the select item it names, which is deliberately over-eager: declining
+// the absolute check costs a check, judging an opaque ordering costs a false
+// accusation against a correct engine.
+func (q *Query) touchesOpaque(o Order) bool {
+	if len(q.opaqueCols) == 0 {
+		return false
+	}
+	texts := []string{o.Expr}
+	for _, it := range q.Items {
+		if it.Alias != "" && it.Alias == o.Key {
+			texts = append(texts, it.Expr)
+		}
+	}
+	for _, t := range texts {
+		for _, c := range q.opaqueCols {
+			if strings.Contains(t, c) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// opaqueColumns lists the schema's columns whose rendered form does not order
+// like the value.
+func (s *Schema) opaqueColumns() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, t := range s.Tables {
+		for _, c := range t.Cols {
+			if opaqueOrder(c.Kind) && !seen[c.Name] {
+				seen[c.Name] = true
+				out = append(out, c.Name)
+			}
+		}
 	}
 	return out
 }
@@ -314,7 +399,8 @@ func (sc *scope) ofKind(k Kind) []ref {
 func (sc *scope) numeric() []ref {
 	var out []ref
 	for _, r := range sc.refs {
-		if r.col.Kind == KindInt || r.col.Kind == KindFloat {
+		switch r.col.Kind {
+		case KindInt, KindFloat, KindDecimal:
 			out = append(out, r)
 		}
 	}
@@ -379,7 +465,7 @@ func (g *Gen) Query() *Query {
 		roll -= s.weight
 	}
 
-	q := &Query{Shape: shape}
+	q := &Query{Shape: shape, opaqueCols: g.s.opaqueColumns()}
 	switch shape {
 	case "selfjoin":
 		g.genSelfJoin(q)
@@ -502,13 +588,22 @@ func (g *Gen) genFrom(q *Query, joins int, outer bool) {
 // genSelfJoin joins one table to itself under two aliases — the shape where a
 // column reference must resolve to the right side and nothing else.
 func (g *Gen) genSelfJoin(q *Query) {
-	// Restrict to tables whose self-join stays bounded.
+	// Restrict to tables whose self-join stays bounded. Which those are is a
+	// property of the SCHEMA, declared by Table.SelfJoin — it used to be a
+	// hardcoded list of TPC-H table names here, which made this function panic
+	// on any other schema (an empty candidate list indexed by pick).
 	var cands []Table
 	for _, t := range g.s.Tables {
-		switch t.Name {
-		case "nation", "region", "supplier", "customer", "part":
+		if t.SelfJoin {
 			cands = append(cands, t)
 		}
+	}
+	if len(cands) == 0 {
+		// No table in this schema can be self-joined within a sane row count.
+		// Emit the single-table FROM instead of an unbounded product.
+		t := g.s.Tables[g.pick(len(g.s.Tables))]
+		q.From = []From{{Table: t.Name, Alias: "t0", PK: t.PK}}
+		return
 	}
 	t := cands[g.pick(len(cands))]
 	q.From = []From{{Table: t.Name, Alias: "t0", PK: t.PK}}
@@ -774,16 +869,26 @@ func (g *Gen) exprItem(r ref) Item {
 	case len(r.col.Lits) > 0 && g.chance(0.2):
 		lit := r.col.Lits[g.pick(len(r.col.Lits))]
 		return Item{Expr: fmt.Sprintf("CASE WHEN %s = %s THEN 1 ELSE 0 END", nm, lit), Alias: a, Exact: true}
-	case g.chance(0.1):
+	case r.col.Kind != KindOpaque && g.chance(0.1):
 		return Item{Expr: fmt.Sprintf("COALESCE(%s, %s)", nm, zeroLit(r.col.Kind)), Alias: a, Exact: true}
 	default:
-		return Item{Expr: nm, Alias: a, Exact: true}
+		return Item{Expr: nm, Alias: a, Exact: true, Opaque: opaqueOrder(r.col.Kind)}
 	}
 }
 
+// opaqueOrder reports whether a kind's RENDERED form orders differently from
+// its value, which is what makes the absolute order check unable to judge it.
+func opaqueOrder(k Kind) bool { return k == KindOpaque || k == KindDecimal }
+
+// zeroLit is the COALESCE fallback for a kind. KindOpaque has none — there is
+// no literal that is simultaneously a valid IPv4, UUID and BYTES — which is
+// why the COALESCE arm above declines that kind rather than guessing.
 func zeroLit(k Kind) string {
-	if k == KindText || k == KindDate {
+	switch k {
+	case KindText, KindDate:
 		return "'?'"
+	case KindDecimal:
+		return "0.0"
 	}
 	return "0"
 }
@@ -1058,12 +1163,12 @@ func (g *Gen) genOrderLimit(q *Query) {
 			// By ordinal. Not with SELECT * (rejected by design) and not with
 			// DISTINCT (the term must be a select item, which it is, but the
 			// ordinal form is the interesting path here).
-			q.Order = append(q.Order, Order{Expr: fmt.Sprint(idx + 1), Desc: desc, Key: it.Alias, Exact: it.Exact})
+			q.Order = append(q.Order, Order{Expr: fmt.Sprint(idx + 1), Desc: desc, Key: it.Alias, Exact: it.Exact, Opaque: it.Opaque})
 		case g.chance(0.25) && !it.Agg && len(q.GroupBy) == 0:
 			// By the expression itself rather than its alias.
-			q.Order = append(q.Order, Order{Expr: it.Expr, Desc: desc, Key: it.Alias, Exact: it.Exact})
+			q.Order = append(q.Order, Order{Expr: it.Expr, Desc: desc, Key: it.Alias, Exact: it.Exact, Opaque: it.Opaque})
 		default:
-			q.Order = append(q.Order, Order{Expr: it.Alias, Desc: desc, Key: it.Alias, Exact: it.Exact})
+			q.Order = append(q.Order, Order{Expr: it.Alias, Desc: desc, Key: it.Alias, Exact: it.Exact, Opaque: it.Opaque})
 		}
 	}
 

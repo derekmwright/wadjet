@@ -98,16 +98,23 @@ func TestCheckOrder(t *testing.T) {
 		t.Error("ascending rows passed a DESC ordering check")
 	}
 
-	// NULLs sort last in BOTH directions on the engines under test, so a
-	// trailing NULL is in order either way and a leading one is not.
+	// PostgreSQL's NULL placement, which is what wadjet implements and what
+	// the DuckDB arm configures the reference engine for: NULLS LAST on ASC,
+	// NULLS FIRST on DESC. This checker used to place NULLs last in both
+	// directions, so a correct DESC result was reported as unsorted; TPC-H has
+	// no NULLs at all, so nothing exercised it until a fixture with nullable
+	// sort keys arrived.
 	if d := CheckOrder(res([]string{"k"}, row("k", 1), row("k", nil)), keys); d != "" {
-		t.Errorf("trailing NULL reported as out of order (ASC): %s", d)
-	}
-	if d := CheckOrder(res([]string{"k"}, row("k", 5), row("k", nil)), desc); d != "" {
-		t.Errorf("trailing NULL reported as out of order (DESC): %s", d)
+		t.Errorf("trailing NULL reported as out of order (ASC, NULLS LAST): %s", d)
 	}
 	if d := CheckOrder(res([]string{"k"}, row("k", nil), row("k", 1)), keys); d == "" {
-		t.Error("leading NULL passed the ASC ordering check")
+		t.Error("leading NULL passed the ASC ordering check (ASC is NULLS LAST)")
+	}
+	if d := CheckOrder(res([]string{"k"}, row("k", nil), row("k", 5)), desc); d != "" {
+		t.Errorf("leading NULL reported as out of order (DESC, NULLS FIRST): %s", d)
+	}
+	if d := CheckOrder(res([]string{"k"}, row("k", 5), row("k", nil)), desc); d == "" {
+		t.Error("trailing NULL passed the DESC ordering check (DESC is NULLS FIRST)")
 	}
 
 	// Multi-key: the second key only decides ties on the first.

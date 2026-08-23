@@ -169,8 +169,18 @@ func (b *RecordBatch) ColumnIndex(name string) int {
 }
 
 // Release returns the batch to its pool if applicable.
+//
+// Once released, the batch's storage is undefined: the pool may hand it to
+// another operator, which resets it and writes over the same arenas. Anything
+// keeping a value out of the batch past this point must own it — see Detach.
+// Poison mode (see poison.go) makes that undefinedness observable by
+// scribbling the arenas here, which is what the batch-reuse gate compares
+// against a clean run.
 func (b *RecordBatch) Release() {
 	if b.pool != nil {
+		if poisonOnRelease.Load() {
+			poisonBatch(b)
+		}
 		b.pool.Put(b)
 	}
 }

@@ -1,0 +1,241 @@
+package wadjet
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
+)
+
+// The process-killer gate.
+//
+// Some defects do not return a wrong answer — they take the process down in a
+// way no caller can recover from: a panic raised on a worker goroutine (the
+// parallel aggregate emitter, the partitioned-aggregation workers), or a Go
+// runtime fatal error such as a concurrent map write. #334 was exactly that
+// shape and shipped, because a harness that runs every query in one process
+// dies at the first one and reports nothing about the rest.
+//
+// This gate runs the type-matrix corpus in a CHILD process that names each
+// entry on stderr BEFORE running it. When the child dies, the last name it
+// printed is the killer; the parent records it and restarts the child at the
+// next entry. What comes back is the complete set of corpus entries that kill
+// a process, and it is compared against the declared set:
+//
+//   - an UNDECLARED killer fails the gate — that is a new defect;
+//   - a DECLARED killer that no longer kills fails the gate — the pin has
+//     outlived its bug and deleting it is the proof the fix landed
+//     (ADR-0013 §Pins).
+//
+// So a crash pin is a real pin, not a skip: the entry is still executed, in a
+// process that is allowed to die.
+
+// tmChildEnv, when set, makes the test binary run as the child: it executes
+// corpus entries from index N onward instead of driving children.
+const tmChildEnv = "WADJET_TYPEMATRIX_CRASH_FROM"
+
+// tmCrashMarker prefixes the child's per-entry announcement.
+const tmCrashMarker = "TYPEMATRIX-ENTRY "
+
+// tmCrashPins are the corpus entries known to kill the process.
+//
+// Every other gate in this file SKIPS these entries, because a dead process
+// compares nothing — this gate is the one that keeps them honest.
+// Two defects, both fatal on a goroutine no caller owns.
+//
+// #393 — a MAP column cannot be SCANNED. The columnar decoder declines MAP, so
+// the scan falls back to readBatchViaRows (internal/planner/physical/util.go:269)
+// → batch.FromRows → Vector.SetValue, whose MAP arm rejects the
+// map[string]any the parquet row reader produces. The panic is raised on
+// scanWorker (internal/planner/physical/plan.go:11092). EVERY query that
+// touches a MAP column dies, `SELECT *` included.
+//
+// #392 — minMaxDeclaredType
+// (internal/planner/physical/plan.go:10005) declares MIN/MAX/MIN_BY/MAX_BY's
+// output type from a six-case switch and falls through to FLOAT64 for
+// everything else. BOOL boxes as a bool and IPv6/CIDR/MAC/UUID/DECIMAL box as
+// strings, so the finalize write (internal/engine/exec/aggregate.go:4525)
+// hands Vector.SetValue a value the FLOAT64 vector cannot hold and it raises
+// the #361 mismatch panic — on the parallel-emit goroutine
+// (aggregate_parallel_emit.go:142), where no caller's recover can reach it.
+// The query does not return an error; it kills the process.
+//
+// The scalar (no GROUP BY) form of the same query does NOT crash: whole-input
+// aggregation resolves its output type elsewhere. That asymmetry is why the
+// corpus carries both shapes.
+var tmCrashPins = map[string]typematrix.Pin{
+	"minby_c_bool": {Issue: "#392", Reason: "MIN_BY over BOOL: bool into a FLOAT64 output vector."},
+	"maxby_c_bool": {Issue: "#392", Reason: "MAX_BY over BOOL: bool into a FLOAT64 output vector."},
+	"minby_c_ipv6": {Issue: "#392", Reason: "MIN_BY over IPV6: display string into a FLOAT64 output vector."},
+	"maxby_c_ipv6": {Issue: "#392", Reason: "MAX_BY over IPV6: display string into a FLOAT64 output vector."},
+	"minby_c_cidr": {Issue: "#392", Reason: "MIN_BY over CIDR: string into a FLOAT64 output vector."},
+	"maxby_c_cidr": {Issue: "#392", Reason: "MAX_BY over CIDR: string into a FLOAT64 output vector."},
+	"minby_c_mac":  {Issue: "#392", Reason: "MIN_BY over MAC: display string into a FLOAT64 output vector."},
+	"maxby_c_mac":  {Issue: "#392", Reason: "MAX_BY over MAC: display string into a FLOAT64 output vector."},
+	"minby_c_uuid": {Issue: "#392", Reason: "MIN_BY over UUID: display string into a FLOAT64 output vector."},
+	"maxby_c_uuid": {Issue: "#392", Reason: "MAX_BY over UUID: display string into a FLOAT64 output vector."},
+	"minby_c_dec":  {Issue: "#392", Reason: "MIN_BY over DECIMAL: formatted string into a FLOAT64 output vector."},
+	"maxby_c_dec":  {Issue: "#392", Reason: "MAX_BY over DECIMAL: formatted string into a FLOAT64 output vector."},
+	"minby_c_arr":  {Issue: "#392", Reason: "MIN_BY over ARRAY: []any into a FLOAT64 output vector."},
+	"maxby_c_arr":  {Issue: "#392", Reason: "MAX_BY over ARRAY: []any into a FLOAT64 output vector."},
+	"minby_c_row":  {Issue: "#392", Reason: "MIN_BY over ROW: map[string]any into a FLOAT64 output vector."},
+	"maxby_c_row":  {Issue: "#392", Reason: "MAX_BY over ROW: map[string]any into a FLOAT64 output vector."},
+
+	"minby_c_map":        {Issue: "#393", Reason: "Any read of a MAP column dies in the scan's row fallback."},
+	"maxby_c_map":        {Issue: "#393", Reason: "Any read of a MAP column dies in the scan's row fallback."},
+	"minby_scalar_c_map": {Issue: "#393", Reason: "Any read of a MAP column dies in the scan's row fallback."},
+	"project_c_map":      {Issue: "#393", Reason: "SELECT of a MAP column dies in the scan's row fallback."},
+	"window_c_map":       {Issue: "#393", Reason: "Any read of a MAP column dies in the scan's row fallback."},
+	"wide_row_nested": {Issue: "#393", Reason: "SELECT * over a table with a MAP column dies in the " +
+		"scan's row fallback — the widest possible blast radius for #393."},
+}
+
+// TestTypeMatrixNoProcessKillers drives child processes over the corpus and
+// gates the set of entries that kill one.
+func TestTypeMatrixNoProcessKillers(t *testing.T) {
+	if from, ok := os.LookupEnv(tmChildEnv); ok {
+		tmCrashChild(t, from)
+		return
+	}
+	if testing.Short() {
+		t.Skip("-short: the process-killer gate re-execs the test binary once per killer")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locating the test binary: %v", err)
+	}
+	corpus := typematrix.Corpus()
+
+	found := map[string]bool{}
+	start := 0
+	// One child per killer, plus one that reaches the end. Every round
+	// advances start by at least one entry, so len(corpus)+1 rounds is a
+	// termination bound, not a budget: sizing it to the number of PINS
+	// instead would cap discovery at the killers already known, which is
+	// exactly the set a discovery pass must not assume.
+	for round := 0; round <= len(corpus) && start < len(corpus); round++ {
+		last, died, detail := tmRunCrashChild(t, self, start)
+		if last < 0 {
+			if died {
+				t.Fatalf("the child died before naming an entry (start=%d), so no entry can be "+
+					"blamed:\n%s", start, detail)
+			}
+			break // child ran the whole remaining corpus
+		}
+		if !died {
+			break // child finished; `last` is just the final entry it ran
+		}
+		found[corpus[last].Name] = true
+		t.Logf("entry %q (index %d) killed the process:\n%s", corpus[last].Name, last, detail)
+		start = last + 1
+	}
+
+	names := make([]string, 0, len(found))
+	for n := range found {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if p, ok := tmCrashPins[n]; ok {
+			t.Logf("known process killer %q, tracked in %s — NOT gated:\n  %s", n, p.Issue, p.Reason)
+			continue
+		}
+		t.Errorf("NEW PROCESS KILLER: corpus entry %q takes the process down. A query that kills "+
+			"the server is the worst failure mode in the engine — file it, then pin it in "+
+			"tmCrashPins with the issue number.", n)
+	}
+	pinned := make([]string, 0, len(tmCrashPins))
+	for n := range tmCrashPins {
+		pinned = append(pinned, n)
+	}
+	sort.Strings(pinned)
+	byName := map[string]bool{}
+	for _, q := range corpus {
+		byName[q.Name] = true
+	}
+	for _, n := range pinned {
+		p := tmCrashPins[n]
+		switch {
+		case !byName[n]:
+			t.Errorf("crash pin %q (%s) names no corpus entry — it exempts nothing. "+
+				"Delete it or fix the name.", n, p.Issue)
+		case !found[n]:
+			t.Errorf("crash pin %q no longer kills the process, so %s is FIXED:\n  %s\n"+
+				"Delete the pin so the entry is gated again.", n, p.Issue, p.Reason)
+		}
+	}
+	t.Logf("process-killer gate: %d corpus entries, %d killers (%d pinned)",
+		len(corpus), len(found), len(tmCrashPins))
+}
+
+// tmRunCrashChild runs one child from index start. It returns the index of the
+// last entry the child announced (-1 if it announced none), whether the child
+// died, and the tail of its output.
+func tmRunCrashChild(t *testing.T, self string, start int) (last int, died bool, detail string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, self, "-test.run=TestTypeMatrixNoProcessKillers", "-test.v")
+	cmd.Env = append(os.Environ(), tmChildEnv+"="+strconv.Itoa(start))
+	out, err := cmd.CombinedOutput()
+
+	last = -1
+	sc := bufio.NewScanner(strings.NewReader(string(out)))
+	sc.Buffer(make([]byte, 0, 64*1024), 4<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		i := strings.Index(line, tmCrashMarker)
+		if i < 0 {
+			continue
+		}
+		fields := strings.Fields(line[i+len(tmCrashMarker):])
+		if len(fields) == 0 {
+			continue
+		}
+		if n, cerr := strconv.Atoi(fields[0]); cerr == nil {
+			last = n
+		}
+	}
+	if err == nil {
+		return last, false, ""
+	}
+	return last, true, tmTail(string(out), 24)
+}
+
+// tmCrashChild is the child half: run corpus entries from start, naming each
+// on stderr before it runs so a fatal error is attributable.
+func tmCrashChild(t *testing.T, from string) {
+	start, err := strconv.Atoi(from)
+	if err != nil {
+		t.Fatalf("bad %s=%q: %v", tmChildEnv, from, err)
+	}
+	ctx := context.Background()
+	db := tmOpen(t)
+	corpus := typematrix.Corpus()
+	for i := start; i < len(corpus); i++ {
+		// Unbuffered and BEFORE the query: a runtime fatal error is not
+		// recoverable and no buffered log survives it.
+		fmt.Fprintf(os.Stderr, "%s%d %s\n", tmCrashMarker, i, corpus[i].Name)
+		func() {
+			defer func() { _ = recover() }() // a recoverable panic is not this gate's business
+			_, _ = db.Query(ctx, corpus[i].SQL)
+		}()
+	}
+}
+
+// tmTail returns the last n lines of s.
+func tmTail(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return "    " + strings.Join(lines, "\n    ")
+}

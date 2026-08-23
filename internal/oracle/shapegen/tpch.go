@@ -11,18 +11,18 @@ package shapegen
 func TPCH() *Schema {
 	return &Schema{
 		Tables: []Table{
-			{Name: "region", PK: []string{"r_regionkey"}, Cols: []Column{
+			{Name: "region", SelfJoin: true, PK: []string{"r_regionkey"}, Cols: []Column{
 				{Name: "r_regionkey", Kind: KindInt, Lits: []string{"0", "2", "4"}},
 				{Name: "r_name", Kind: KindText, Lits: []string{"'ASIA'", "'EUROPE'", "'AMERICA'", "'AFRICA'"}},
 				{Name: "r_comment", Kind: KindText},
 			}},
-			{Name: "nation", PK: []string{"n_nationkey"}, Cols: []Column{
+			{Name: "nation", SelfJoin: true, PK: []string{"n_nationkey"}, Cols: []Column{
 				{Name: "n_nationkey", Kind: KindInt, Lits: []string{"3", "10", "20"}},
 				{Name: "n_name", Kind: KindText, Lits: []string{"'FRANCE'", "'CHINA'", "'BRAZIL'", "'GERMANY'"}},
 				{Name: "n_regionkey", Kind: KindInt, Lits: []string{"0", "1", "3"}},
 				{Name: "n_comment", Kind: KindText},
 			}},
-			{Name: "supplier", PK: []string{"s_suppkey"}, Cols: []Column{
+			{Name: "supplier", SelfJoin: true, PK: []string{"s_suppkey"}, Cols: []Column{
 				{Name: "s_suppkey", Kind: KindInt, Lits: []string{"3", "50", "99"}},
 				{Name: "s_name", Kind: KindText},
 				{Name: "s_address", Kind: KindText},
@@ -31,7 +31,7 @@ func TPCH() *Schema {
 				{Name: "s_acctbal", Kind: KindFloat, Lits: []string{"100.0", "4500.0", "9000.0"}},
 				{Name: "s_comment", Kind: KindText},
 			}},
-			{Name: "part", PK: []string{"p_partkey"}, Cols: []Column{
+			{Name: "part", SelfJoin: true, PK: []string{"p_partkey"}, Cols: []Column{
 				{Name: "p_partkey", Kind: KindInt, Lits: []string{"5", "500", "1999"}},
 				{Name: "p_name", Kind: KindText},
 				{Name: "p_mfgr", Kind: KindText, Lits: []string{"'Manufacturer#1'", "'Manufacturer#4'"}},
@@ -49,7 +49,7 @@ func TPCH() *Schema {
 				{Name: "ps_supplycost", Kind: KindFloat, Lits: []string{"50.0", "500.0", "900.0"}},
 				{Name: "ps_comment", Kind: KindText},
 			}},
-			{Name: "customer", PK: []string{"c_custkey"}, Cols: []Column{
+			{Name: "customer", SelfJoin: true, PK: []string{"c_custkey"}, Cols: []Column{
 				{Name: "c_custkey", Kind: KindInt, Lits: []string{"10", "150", "1499"}},
 				{Name: "c_name", Kind: KindText},
 				{Name: "c_address", Kind: KindText},

@@ -144,9 +144,20 @@ func missingColumns(want, got *Result) string {
 // engine — so it catches an ORDER BY that every comparison arm drops the same
 // way. Keys must name columns the result projects.
 //
-// NULL policy: both engines place NULLs last in ASC and in DESC (verified on
-// the fixture), so a NULL is treated as greater than every value in ASC and,
-// under DESC, as still sorting after every value.
+// NULL policy: PostgreSQL's, which is what wadjet implements and what the
+// DuckDB arm CONFIGURES the reference engine to use
+// (default_null_order='nulls_last_on_asc_first_on_desc') — NULLS LAST for ASC,
+// NULLS FIRST for DESC. ADR-0012 makes PostgreSQL the authority on semantics,
+// so the absolute checker has to encode the same rule the comparison arms are
+// configured for.
+//
+// It did not. Until this was corrected, compareRowsByKeys placed NULLs last in
+// BOTH directions and explicitly refused to flip a NULL-involving pair under
+// DESC, so a DESC result with NULLs FIRST — the correct answer — was reported
+// as an ordering failure. Nothing caught it because TPC-H contains no NULLs at
+// all, so the fixed corpus and the shape fuzzer over it never put a NULL in a
+// sort key. The type-matrix fixture, whose every column nulls on its own
+// stride, hit it on its second generated seed.
 func CheckOrder(res *Result, keys []OrderKey) string {
 	if len(keys) == 0 || len(res.Rows) < 2 {
 		return ""
@@ -209,11 +220,10 @@ func compareRowsByKeys(a, b map[string]any, keys []OrderKey) (int, bool) {
 		if c == 0 {
 			continue
 		}
-		// NULLs sort last in both directions, so a NULL-involving pair is
-		// already resolved by compareCells and must not be flipped by DESC.
-		if a[k.Alias] == nil || b[k.Alias] == nil {
-			return c, false
-		}
+		// A NULL-involving pair flips with DESC like any other: compareCells
+		// puts NULL after every value, so negating it under DESC puts NULL
+		// first, which is PostgreSQL's placement and the one the reference
+		// engine is configured for.
 		if k.Desc {
 			c = -c
 		}
@@ -222,7 +232,9 @@ func compareRowsByKeys(a, b map[string]any, keys []OrderKey) (int, bool) {
 	return 0, false
 }
 
-// compareCells orders two result cells. NULL sorts after every value.
+// compareCells orders two result cells in ASCENDING order. NULL sorts after
+// every value, which is NULLS LAST — the ASC half of PostgreSQL's placement.
+// The DESC half comes from compareRowsByKeys negating this result.
 func compareCells(a, b any) (int, bool) {
 	if a == nil && b == nil {
 		return 0, true
