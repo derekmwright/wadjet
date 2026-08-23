@@ -124,7 +124,17 @@ Checklist for every release:
    rows to partitions nobody reads and answers short. A release that touches
    any of them says so, and says that the upgrade is WHOLESALE — coordinator
    and all workers together, never rolling. See ADR-0010's consequences.
-5. Tag with `git tag -s` or an annotated tag from the release commit and
+5. **Note any change to what the WRITER emits, and say which direction the
+   upgrade goes.** The reader's ceilings and the writer's encodings are one
+   contract (ADR-0018): a release that changes a physical encoding produces
+   files an older reader may open and misread, which is worse than one it
+   refuses. Say whether readers must be upgraded before writers, and name the
+   remedy for files already on disk — a compaction pass is usually the whole
+   migration, and where it is not, say that too. `DECIMAL(p > 18)` in the
+   #429 release is the worked example: pre-#429 files are unreadable by
+   pyarrow and are repaired by one rewrite, and a v0.18.0 reader silently
+   truncates the new ones.
+6. Tag with `git tag -s` or an annotated tag from the release commit and
    create the GitHub release from it.
 
 ## Reporting Issues

@@ -6,7 +6,8 @@ parquet-go and wadjet's own writer). Amended 2026-08-23 with §4, "the
 writer's box for a value is the reader's box for it", after the same arc's
 review found read → write was not the identity for DECIMAL (#429) and that
 `ReadRowGroup` and `ReadRows` were two readers that disagreed about a nested
-column (#428).
+column (#428). A second compatibility note follows the pre-#409 one, for the
+`DECIMAL(p > 18)` files the writer produced before #429 (#437).
 
 ## Context
 
@@ -188,7 +189,8 @@ values had no encoding here at all.
   leaves. Files wadjet wrote before are still read (the reader takes all four
   physicals), and the new ones are readable by pyarrow. Wide columns lose
   footer min/max statistics, which costs row-group pruning on them and is
-  never wrong — absent statistics prune nothing.
+  never wrong — absent statistics prune nothing. The files already on disk,
+  and the order a cluster must upgrade in, are the compatibility note below.
 - The type-pair matrix grew from one shape (PLAIN, single page, three rows,
   one read path) to 735 cells across PLAIN and dictionary pages and all three
   columnar read paths, because "the paths agree" is only a property if the
@@ -237,6 +239,55 @@ that fixed the writer is the first one whose reader could read these shapes
 at all — before it, a MAP of ARRAY read back absent and an ARRAY of MAP read
 back as its keys (#409) — and PyArrow refused such a file outright. So no
 correct value was ever recovered from one of these columns by anything.
+
+## Compatibility note, 2026-08-23: `DECIMAL(p > 18)` files written before #429
+
+Unlike the pre-#409 nesting damage below, nothing here is lost. It still needs
+doing, and it needs doing in an order.
+
+**The files already on disk are unreadable outside wadjet.** Before #429 the
+writer chose a DECIMAL's physical type from the TypeID alone, so EVERY DECIMAL
+was an INT64 leaf. The format allows INT64 only to precision 18, and the
+Apache implementation refuses to OPEN a file that annotates a wider one:
+
+    OSError: Could not open Parquet input source '...':
+    Decimal(precision=38, scale=10) cannot be applied to primitive type INT64
+
+(pyarrow 23.0.1, on a file written by v0.18.0.) So every wadjet table carrying
+a `DECIMAL(p > 18)` column is readable only by wadjet until it is rewritten.
+
+**The remedy is one pass of the new code.** The unscaled values in the old
+files are intact and §4 makes read → write the identity, so a single rewrite
+produces a correct FLBA(16) file with byte-identical unscaled values, which
+pyarrow opens. A compaction pass over the table is the whole migration.
+`DECIMAL(p <= 18)` files are byte-identical before and after and need nothing.
+
+**The reverse direction is NOT safe: upgrade readers before writers.** A
+v0.18.0 reader opens the new FLBA(16) files without error and silently
+TRUNCATES to the low 64 bits any value that needs more than 64:
+
+    row 5, true value 93468288258671214869 (scale 10 -> 9346828825.8671214869)
+      v0.18.0 row path:     int64 1234567890123456789
+      v0.18.0 native path:  123456789.0123456789
+      new reader:           Decimal128{Hi:5, Lo:0x112210f47de98115}   correct
+
+Values that fit 64 bits read correctly on the old reader, and those are the
+only values a pre-#429 wadjet could write at all — so the exposure is confined
+to values NEWLY writable. It is still a wrong number with no error, returned
+by an old worker in a mixed-version cluster, which is the failure this ADR
+exists to refuse. This is #437.
+
+(The old reader's rendering of the truncated value was further mangled by
+#434, which dropped the high word from every DECIMAL text form.)
+
+**What the compaction gate does and does not check.** `TestCompactionIsIdem-
+potentOverTheTypeMatrix` asserts the VALUES across generations, on both read
+paths, with a PyArrow cross-check, and it asserts the SCHEMA each generation
+declares. It does not assert the footer's per-column STATISTICS. That is a
+deliberate scope line and not an oversight: a wide DECIMAL has no statistics
+to compare (see the consequence above), and statistics are an optimization
+input whose absence prunes nothing. A statistics defect shows up as a wrong
+ANSWER through the prune, which is where #442's sweep gates it, not here.
 
 ## Alternatives considered
 
