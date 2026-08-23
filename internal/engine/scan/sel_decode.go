@@ -272,13 +272,21 @@ func selCopyPage(vec *batch.Vector, pageSel []uint32, offset, pageRows int, defL
 
 // selCopyRawLengths handles the PLAIN length-prefixed fallback, where value
 // positions require a sequential walk regardless of selection; only the
-// value memcpy is skipped for unselected rows. Truncated pages stop early
-// (mirroring the full decoder) with the remaining offsets closed out.
+// value memcpy is skipped for unselected rows.
+//
+// A page that ends mid-prefix is an ERROR, the same as it is in the full
+// decoder (scan/columnar_native.go copyNativeDataDirect) and in the
+// lengths-only decoder. It used to `break`, with a comment saying the full
+// decoder tolerated truncation and stopped early — that stopped being true
+// when the full decoder was fixed, and the comment stayed. The rows after a
+// truncated page are not empty, they are unknown: the offsets get closed out
+// at whatever the walk reached, and every remaining row reads as the empty
+// string. Three decoders over one page must not disagree about whether the
+// page is readable.
 func selCopyRawLengths(vec *batch.Vector, pageSel []uint32, offset, pageRows int, defLevels []int32, maxDefLevel int32, hasNulls bool, rawData []byte) error {
 	bd := &vec.BytesData
 	cur := uint32(len(bd.Data))
 	pos, si := 0, 0
-	written := offset // rows whose offset slot is closed out
 	for i := 0; i < pageRows; i++ {
 		row := offset + i
 		isVal := true
@@ -291,12 +299,12 @@ func selCopyRawLengths(vec *batch.Vector, pageSel []uint32, offset, pageRows int
 		selected := si < len(pageSel) && int(pageSel[si]) == row
 		if isVal {
 			if pos+4 > len(rawData) {
-				break // truncated page: full decoder tolerates, stops early
+				return truncatedPlainPageErr(i, pageRows, pos+4, len(rawData))
 			}
 			length := int(binary.LittleEndian.Uint32(rawData[pos:]))
 			pos += 4
 			if length < 0 || pos+length > len(rawData) {
-				return fmt.Errorf("byte-array page: value at %d overruns page (%d bytes)", pos, length)
+				return truncatedPlainPageErr(i, pageRows, pos+length, len(rawData))
 			}
 			if selected {
 				bd.Data = append(bd.Data, rawData[pos:pos+length]...)
@@ -310,12 +318,14 @@ func selCopyRawLengths(vec *batch.Vector, pageSel []uint32, offset, pageRows int
 			si++
 		}
 		bd.Offsets[row+1] = cur
-		written = row + 1
-	}
-	// Close out rows skipped by an early break so offsets stay monotonic
-	// (pooled offset arrays carry stale values from prior use).
-	for j := written; j < offset+pageRows; j++ {
-		bd.Offsets[j+1] = cur
 	}
 	return nil
+}
+
+// truncatedPlainPageErr is the one wording the three PLAIN byte-array walks
+// share, so a file that is unreadable through one of them is unreadable
+// through all three and says the same thing.
+func truncatedPlainPageErr(i, pageRows, need, have int) error {
+	return fmt.Errorf("byte-array page: PLAIN page ends at value %d of %d — the value needs %d bytes but the page body holds %d",
+		i, pageRows, need, have)
 }

@@ -210,14 +210,14 @@ func lengthsCopyPage(vec *batch.Vector, offset, pageRows int, defLevels []int32,
 	return nil
 }
 
-// lengthsFromRawPrefixes handles the PLAIN length-prefixed layout. Truncated
-// pages stop early (mirroring the full decoder) with the remaining offsets
-// closed out so the column stays monotonic.
+// lengthsFromRawPrefixes handles the PLAIN length-prefixed layout.
+//
+// A page that ends mid-prefix is an ERROR here too — see selCopyRawLengths
+// for why the three walks have to agree.
 func lengthsFromRawPrefixes(vec *batch.Vector, offset, pageRows int, defLevels []int32, maxDefLevel int32, hasNulls bool, rawData []byte) error {
 	bd := &vec.BytesData
 	cur := bd.Offsets[offset]
 	pos := 0
-	written := offset
 	for i := 0; i < pageRows; i++ {
 		row := offset + i
 		isVal := true
@@ -229,12 +229,12 @@ func lengthsFromRawPrefixes(vec *batch.Vector, offset, pageRows int, defLevels [
 		}
 		if isVal {
 			if pos+4 > len(rawData) {
-				break // truncated page: full decoder tolerates, stops early
+				return truncatedPlainPageErr(i, pageRows, pos+4, len(rawData))
 			}
 			length := int(binary.LittleEndian.Uint32(rawData[pos:]))
 			pos += 4
 			if length < 0 || pos+length > len(rawData) {
-				return fmt.Errorf("byte-array page: value at %d overruns page (%d bytes)", pos, length)
+				return truncatedPlainPageErr(i, pageRows, pos+length, len(rawData))
 			}
 			cur += uint32(length)
 			pos += length
@@ -242,10 +242,6 @@ func lengthsFromRawPrefixes(vec *batch.Vector, offset, pageRows int, defLevels [
 			vec.Nulls.SetNull(row)
 		}
 		bd.Offsets[row+1] = cur
-		written = row + 1
-	}
-	for j := written; j < offset+pageRows; j++ {
-		bd.Offsets[j+1] = cur
 	}
 	return nil
 }

@@ -248,3 +248,80 @@ func TestShortPlainByteArrayPageIsAnError(t *testing.T) {
 		t.Errorf("value 1 = %q, want \"xy\"", got)
 	}
 }
+
+// TestAllThreePlainWalksRefuseATruncatedPage: the PLAIN length-prefixed
+// layout is walked in three places — the full decoder (copyNativeDataDirect /
+// copyNativeDataScatter), the selection-aware decoder (selCopyRawLengths) and
+// the lengths-only decoder (lengthsFromRawPrefixes, for shape-only columns).
+// Two of them used to `break` on a page that ends mid-prefix, with a comment
+// saying the full decoder tolerated truncation and stopped early. That
+// stopped being true when the full decoder was fixed and the comment stayed,
+// so the same page was unreadable through one path and read as a column of
+// empty strings through the other two.
+//
+// The body is the reviewer's: one complete value "abc", then a length prefix
+// with two of its four bytes present.
+func TestAllThreePlainWalksRefuseATruncatedPage(t *testing.T) {
+	bodies := map[string][]byte{
+		"page ends mid-prefix":     {3, 0, 0, 0, 'a', 'b', 'c', 9, 0},
+		"value runs off the end":   {3, 0, 0, 0, 'a', 'b', 'c', 9, 0, 0, 0, 'x', 'y'},
+		"no prefix for the second": {3, 0, 0, 0, 'a', 'b', 'c'},
+	}
+	const n = 2
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			defLevels := []int32{1, 1}
+
+			vec := batch.NewVector(pqt.TypeString, n)
+			if err := copyNativeDataDirect(vec, 0, pqt.RawValues(pqt.PhysicalByteArray, body, n),
+				n, pqt.TypeString); err == nil {
+				t.Error("the full decoder accepted a truncated PLAIN page")
+			}
+
+			svec := batch.NewVector(pqt.TypeString, n)
+			if err := selCopyRawLengths(svec, []uint32{0, 1}, 0, n, defLevels, 1, true, body); err == nil {
+				t.Error("the selection decoder accepted a truncated PLAIN page")
+			}
+
+			lvec := batch.NewVector(pqt.TypeString, n)
+			if err := lengthsFromRawPrefixes(lvec, 0, n, defLevels, 1, true, body); err == nil {
+				t.Error("the lengths decoder accepted a truncated PLAIN page")
+			}
+
+			// And with no selection at all, where the walk still has to
+			// parse every prefix to find the next value.
+			nvec := batch.NewVector(pqt.TypeString, n)
+			if err := selCopyRawLengths(nvec, nil, 0, n, defLevels, 1, true, body); err == nil {
+				t.Error("the selection decoder accepted a truncated page with nothing selected")
+			}
+		})
+	}
+
+	// A complete page still reads through all three, so what is refused is
+	// the truncation and not the encoding.
+	full := []byte{3, 0, 0, 0, 'a', 'b', 'c', 2, 0, 0, 0, 'x', 'y'}
+	defLevels := []int32{1, 1}
+	vec := batch.NewVector(pqt.TypeString, n)
+	if err := copyNativeDataDirect(vec, 0, pqt.RawValues(pqt.PhysicalByteArray, full, n), n, pqt.TypeString); err != nil {
+		t.Fatalf("full decoder on a complete page: %v", err)
+	}
+	svec := batch.NewVector(pqt.TypeString, n)
+	if err := selCopyRawLengths(svec, []uint32{0, 1}, 0, n, defLevels, 1, true, full); err != nil {
+		t.Fatalf("selection decoder on a complete page: %v", err)
+	}
+	lvec := batch.NewVector(pqt.TypeString, n)
+	if err := lengthsFromRawPrefixes(lvec, 0, n, defLevels, 1, true, full); err != nil {
+		t.Fatalf("lengths decoder on a complete page: %v", err)
+	}
+	for i, want := range []string{"abc", "xy"} {
+		if got := vec.BytesData.StringValue(i); got != want {
+			t.Errorf("full decoder value %d = %q, want %q", i, got, want)
+		}
+		if got := svec.BytesData.StringValue(i); got != want {
+			t.Errorf("selection decoder value %d = %q, want %q", i, got, want)
+		}
+		if got := lvec.BytesData.LengthAt(i); got != len(want) {
+			t.Errorf("lengths decoder value %d has length %d, want %d", i, got, len(want))
+		}
+	}
+}
