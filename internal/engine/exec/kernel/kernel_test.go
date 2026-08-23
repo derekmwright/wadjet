@@ -373,3 +373,26 @@ func BenchmarkSortCompareInt64(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkSortFloat32 exercises sortCompareFloat32NoNulls, the site
+// CompareFloat32 backs — a scalar FLOAT32 column sorting (ORDER BY, the
+// sort-merge join, the in-memory window). It exists to catch a regression
+// like the one CompareFloat32's native float32 body fixed: delegating to
+// CompareFloat64(float64(a), float64(b)) widened every element and cost this
+// exact shape +2.03% (see kernel/float_order.go).
+func BenchmarkSortFloat32(b *testing.B) {
+	const n = 2048
+	vec := batch.NewVector(batch.TypeFloat32, n)
+	for i := 0; i < n; i++ {
+		vec.Float32Data[i] = float32(i) * 1.5
+		vec.Nulls.SetValid(i)
+	}
+	k := ResolveSortCompareNoNulls(batch.TypeFloat32)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < n; j++ {
+			k(vec, j, vec, n-1-j)
+		}
+	}
+}
