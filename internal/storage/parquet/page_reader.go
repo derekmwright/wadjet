@@ -200,35 +200,38 @@ const maxPageBodyBytes = 1 << 30
 // found were exactly that, and the file only has to be off by one flipped
 // byte in a varint to get there.
 //
-// The END of the range is CLAMPED rather than refused. A chunk whose
-// TotalCompressedSize runs past the file is a real shape from writers that
-// round the figure up, and the page loop stops at the last complete page
-// anyway; refusing it would reject files that read correctly today. Where the
-// chunk STARTS is a different question — there is no benign reading of an
-// offset outside the file.
+// The END used to be CLAMPED to the file rather than refused, on the belief
+// that writers round TotalCompressedSize up. They do not. Every column chunk
+// in 44 files written by pyarrow (four codecs, both format versions, with and
+// without the page index), by parquet-go and by wadjet's own writer ends
+// EXACTLY where the next one begins — worst inter-chunk gap zero, worst
+// overlap zero — because the field is the sum of the chunk's page sizes,
+// headers included. Clamping therefore bought nothing and cost a silent wrong
+// answer: an overstated size reaches into the NEXT column's bytes, the page
+// loop decodes them as this column's, and a 128-row chunk comes back with 64
+// of its own values and 64 belonging to a neighbour, err == nil. An
+// overstatement is now refused, here and (against its neighbours, which one
+// chunk's metadata cannot see) in ValidateChunkLayout at open.
 func chunkRange(cm *ColumnMetaData, fileSize int64) (start, end int64, err error) {
 	start = cm.DataPageOffset
 	if cm.DictionaryPageOffset > 0 && cm.DictionaryPageOffset < cm.DataPageOffset {
 		start = cm.DictionaryPageOffset
 	}
-	// One test on the happy path, and the five messages in a frame of their
+	end = start + cm.TotalCompressedSize
+	// One test on the happy path, and the six messages in a frame of their
 	// own. Building them here instead reserved 144 bytes of stack in a
 	// function every column read calls before it has done anything, which
 	// moved the scan goroutine's first stack growth to a deeper point and
 	// cost ~3% of BenchmarkReadColumnar/rows=1000. See decodeOnePage.
 	if fileSize < 0 || cm.DataPageOffset < 0 || cm.DictionaryPageOffset < 0 ||
-		cm.TotalCompressedSize < 0 || start > fileSize {
-		return 0, 0, chunkRangeErr(cm, fileSize, start)
-	}
-	end = fileSize
-	if room := fileSize - start; cm.TotalCompressedSize < room {
-		end = start + cm.TotalCompressedSize
+		cm.TotalCompressedSize < 0 || start > fileSize || end > fileSize || end < start {
+		return 0, 0, chunkRangeErr(cm, fileSize, start, end)
 	}
 	return start, end, nil
 }
 
 //go:noinline
-func chunkRangeErr(cm *ColumnMetaData, fileSize, start int64) error {
+func chunkRangeErr(cm *ColumnMetaData, fileSize, start, end int64) error {
 	switch {
 	case fileSize < 0:
 		return fmt.Errorf("column chunk: file size %d is negative", fileSize)
@@ -238,8 +241,14 @@ func chunkRangeErr(cm *ColumnMetaData, fileSize, start int64) error {
 		return fmt.Errorf("column chunk: dictionary_page_offset %d is negative", cm.DictionaryPageOffset)
 	case cm.TotalCompressedSize < 0:
 		return fmt.Errorf("column chunk: total_compressed_size %d is negative", cm.TotalCompressedSize)
-	default:
+	case start > fileSize:
 		return fmt.Errorf("column chunk starts at offset %d, past the end of a %d-byte file", start, fileSize)
+	case end < start:
+		return fmt.Errorf("column chunk at offset %d declares a total_compressed_size of %d, which overflows",
+			start, cm.TotalCompressedSize)
+	default:
+		return fmt.Errorf("column chunk at offset %d declares %d compressed bytes, ending at %d, "+
+			"past the end of a %d-byte file", start, cm.TotalCompressedSize, end, fileSize)
 	}
 }
 

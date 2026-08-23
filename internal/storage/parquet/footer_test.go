@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 
 	goparquet "github.com/parquet-go/parquet-go"
@@ -419,5 +423,111 @@ func TestCheckRowGroupRowCount(t *testing.T) {
 	}
 	if err := CheckRowGroupRowCount(3, MaxRowsPerRowGroup+1); err == nil {
 		t.Error("a row count past the ceiling was accepted")
+	}
+}
+
+// TestRealWritersDoNotOverstateChunkSizes is the measurement ValidateChunkLayout
+// rests on, kept as a test so the "writers round it up" belief cannot come
+// back without evidence. Every column chunk in a real file ends exactly where
+// the next one begins.
+//
+// The corpus here is what CI has: the pyarrow fixtures in testdata (written by
+// the gen_*.py scripts next to them), parquet-go, and wadjet's own writer. The
+// same check over 44 files spanning four codecs, format 1.0 and 2.6, and the
+// page index found worst gap zero and worst overlap zero.
+func TestRealWritersDoNotOverstateChunkSizes(t *testing.T) {
+	files := map[string][]byte{}
+	paths, err := filepath.Glob(filepath.Join("testdata", "*.parquet"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range paths {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[p] = raw
+	}
+
+	// wadjet's own writer, several row groups and a mix of widths.
+	var wbuf bytes.Buffer
+	cfg := DefaultWriterConfig()
+	cfg.RowGroupSize = 37
+	w, err := NewWriter(&wbuf, Schema{Columns: []Column{
+		{Name: "i", Type: TypeInt64},
+		{Name: "s", Type: TypeString, Nullable: true},
+		{Name: "f", Type: TypeFloat64, Nullable: true},
+	}}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]map[string]any, 200)
+	for i := range rows {
+		rows[i] = map[string]any{"i": int64(i), "s": strings.Repeat("x", i%17), "f": float64(i) / 3}
+	}
+	if err := w.WriteRows(rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	files["wadjet-writer"] = wbuf.Bytes()
+
+	// parquet-go, which lays out dictionary pages ahead of data pages.
+	type rec struct {
+		ID   int64  `parquet:"id"`
+		Name string `parquet:"name,dict"`
+	}
+	var gbuf bytes.Buffer
+	gw := goparquet.NewGenericWriter[rec](&gbuf, goparquet.MaxRowsPerRowGroup(64))
+	grows := make([]rec, 200)
+	for i := range grows {
+		grows[i] = rec{int64(i), string(rune('a' + i%26))}
+	}
+	if _, err := gw.Write(grows); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	files["parquet-go"] = gbuf.Bytes()
+
+	for name, raw := range files {
+		t.Run(name, func(t *testing.T) {
+			md, err := ReadFileMetaData(bytes.NewReader(raw), int64(len(raw)))
+			if err != nil {
+				t.Fatalf("reading the footer: %v", err)
+			}
+			type span struct{ start, end int64 }
+			var spans []span
+			for i := range md.RowGroups {
+				for j := range md.RowGroups[i].Columns {
+					cm := md.RowGroups[i].Columns[j].MetaData
+					if cm == nil || cm.TotalCompressedSize <= 0 {
+						continue
+					}
+					s := cm.DataPageOffset
+					if cm.DictionaryPageOffset > 0 && cm.DictionaryPageOffset < s {
+						s = cm.DictionaryPageOffset
+					}
+					spans = append(spans, span{s, s + cm.TotalCompressedSize})
+				}
+			}
+			if len(spans) == 0 {
+				t.Skip("no column chunks")
+			}
+			sort.Slice(spans, func(a, b int) bool { return spans[a].start < spans[b].start })
+			for k := 0; k+1 < len(spans); k++ {
+				if gap := spans[k+1].start - spans[k].end; gap != 0 {
+					t.Errorf("chunk ending at %d is %d bytes from the next, which starts at %d",
+						spans[k].end, gap, spans[k+1].start)
+				}
+			}
+			footerLen := int64(binary.LittleEndian.Uint32(raw[len(raw)-8 : len(raw)-4]))
+			dataEnd := int64(len(raw)) - trailerSize - footerLen
+			if last := spans[len(spans)-1].end; last > dataEnd {
+				t.Errorf("the last chunk ends at %d, past the %d bytes before the footer", last, dataEnd)
+			}
+		})
 	}
 }

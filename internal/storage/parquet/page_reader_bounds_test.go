@@ -104,7 +104,7 @@ func TestFooterOffsetsAreValidatedAgainstTheFile(t *testing.T) {
 	}{
 		{"negative data page offset", func(cm *ColumnMetaData) { cm.DataPageOffset = -9025 }, "data_page_offset"},
 		{"small negative data page offset", func(cm *ColumnMetaData) { cm.DataPageOffset = -29 }, "data_page_offset"},
-		{"data page offset past EOF", func(cm *ColumnMetaData) { cm.DataPageOffset = 1 << 40 }, "past the end"},
+		{"data page offset past EOF", func(cm *ColumnMetaData) { cm.DataPageOffset = 1 << 40 }, "past the"},
 		{"negative total compressed size", func(cm *ColumnMetaData) {
 			cm.TotalCompressedSize = -1 << 20
 		}, "total_compressed_size"},
@@ -121,13 +121,28 @@ func TestFooterOffsetsAreValidatedAgainstTheFile(t *testing.T) {
 		})
 	}
 
-	// A TotalCompressedSize that runs PAST the end of the file is clamped to
-	// the file rather than refused outright — writers round the figure up —
-	// so the walk ends up parsing the footer bytes as a page header and
-	// stops there. Either outcome is fine; a fault is not.
-	t.Run("oversized total compressed size does not fault", func(t *testing.T) {
+	// A TotalCompressedSize that runs past the data region used to be
+	// CLAMPED, on the belief that writers round the figure up. They do not
+	// (see ValidateChunkLayout), and clamping let an overstated chunk read
+	// its neighbour's bytes as its own values. It is refused now.
+	t.Run("oversized total compressed size is refused", func(t *testing.T) {
 		raw := mutateChunkMeta(t, good, func(cm *ColumnMetaData) { cm.TotalCompressedSize += 1 << 20 })
-		_ = readChunkPages(t, raw)
+		err := readChunkPages(t, raw)
+		if err == nil {
+			t.Fatal("the chunk read without error")
+		}
+		if !strings.Contains(err.Error(), "past the") {
+			t.Errorf("error %q does not say the chunk runs past the file", err)
+		}
+	})
+
+	// One byte over is still over. This is the shape that matters: a small
+	// overstatement stays inside the file and reaches into the NEXT chunk.
+	t.Run("total compressed size overstated by one byte", func(t *testing.T) {
+		raw := mutateChunkMeta(t, good, func(cm *ColumnMetaData) { cm.TotalCompressedSize++ })
+		if err := readChunkPages(t, raw); err == nil {
+			t.Fatal("a one-byte overstatement was accepted")
+		}
 	})
 }
 
@@ -163,16 +178,27 @@ func TestChunkRangeRefusesUnbackedClaims(t *testing.T) {
 		})
 	}
 
-	// The benign shapes still resolve: a dictionary page before the data
-	// page moves the start back, and an oversized chunk clamps to the file.
+	// The benign shape still resolves: a dictionary page before the data
+	// page moves the start back.
 	start, end, err := chunkRange(&ColumnMetaData{
 		DataPageOffset: 100, DictionaryPageOffset: 40, TotalCompressedSize: 60}, 1024)
 	if err != nil || start != 40 || end != 100 {
 		t.Errorf("dictionary-first chunk = (%d, %d, %v), want (40, 100, nil)", start, end, err)
 	}
-	start, end, err = chunkRange(&ColumnMetaData{DataPageOffset: 900, TotalCompressedSize: 1 << 20}, 1024)
+	// A chunk that ends exactly at the last byte of the file is not
+	// overstated, and must not be refused along with the ones that are.
+	start, end, err = chunkRange(&ColumnMetaData{DataPageOffset: 900, TotalCompressedSize: 124}, 1024)
 	if err != nil || start != 900 || end != 1024 {
-		t.Errorf("oversized chunk = (%d, %d, %v), want (900, 1024, nil)", start, end, err)
+		t.Errorf("chunk ending at EOF = (%d, %d, %v), want (900, 1024, nil)", start, end, err)
+	}
+	// And one that runs past it is refused rather than clamped.
+	if _, _, err := chunkRange(&ColumnMetaData{DataPageOffset: 900, TotalCompressedSize: 1 << 20}, 1024); err == nil {
+		t.Error("an oversized chunk was clamped instead of refused")
+	}
+	// total_compressed_size large enough to overflow the addition.
+	if _, _, err := chunkRange(&ColumnMetaData{
+		DataPageOffset: 900, TotalCompressedSize: 1<<63 - 1}, 1024); err == nil {
+		t.Error("an overflowing total_compressed_size was accepted")
 	}
 }
 

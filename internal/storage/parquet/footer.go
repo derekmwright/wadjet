@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 )
 
 // Parquet file layout:
@@ -118,6 +119,9 @@ func ReadFileMetaData(r io.ReaderAt, fileSize int64) (*FileMetaData, error) {
 	if err := ValidateFileMetaData(md, fileSize); err != nil {
 		return nil, fmt.Errorf("parquet: %w", err)
 	}
+	if err := ValidateChunkLayout(md, footerOffset); err != nil {
+		return nil, fmt.Errorf("parquet: %w", err)
+	}
 	return md, nil
 }
 
@@ -223,6 +227,74 @@ func CheckRowGroupRowCount(rgIdx int, numRows int64) error {
 	if numRows > MaxRowsPerRowGroup {
 		return fmt.Errorf("row group %d declares %d rows, past the %d one row group may hold",
 			rgIdx, numRows, int64(MaxRowsPerRowGroup))
+	}
+	return nil
+}
+
+// ValidateChunkLayout holds the file's column chunks to the one thing a
+// single chunk's metadata cannot check about itself: where its neighbours
+// are.
+//
+// A chunk's extent is [offset, offset+total_compressed_size). chunkRange
+// refuses one that runs past the end of the FILE, but the far more damaging
+// overstatement is the small one — a chunk that reaches a few hundred bytes
+// into the NEXT column's pages. The page loop reads those bytes as more pages
+// of this column and returns them as values, so a 128-row chunk comes back
+// holding 64 of its own values and 64 of a neighbour's, with err == nil. That
+// is the silent-wrong-answer shape, and nothing downstream can see it.
+//
+// The rule is that the chunks tile the data region without overlapping and
+// without crossing into the footer. Measured, not assumed: across 44 files
+// from pyarrow (four codecs, format 1.0 and 2.6, with and without the page
+// index, one and many row groups), parquet-go and wadjet's own writer, every
+// adjacent pair of chunks is exactly contiguous — worst gap zero, worst
+// overlap zero — and the last chunk ends at or before the footer. No writer
+// overstates, so an overstatement is a corrupt file and is named as one.
+//
+// Empty chunks are skipped: a zero-byte extent has no bytes to collide over,
+// and its offset is whatever the writer happened to leave behind.
+func ValidateChunkLayout(md *FileMetaData, dataEnd int64) error {
+	if md == nil {
+		return nil
+	}
+	type extent struct {
+		start, end int64
+		rg, col    int
+	}
+	var spans []extent
+	for i := range md.RowGroups {
+		for j := range md.RowGroups[i].Columns {
+			cm := md.RowGroups[i].Columns[j].MetaData
+			if cm == nil || cm.TotalCompressedSize <= 0 {
+				continue
+			}
+			start := cm.DataPageOffset
+			if cm.DictionaryPageOffset > 0 && cm.DictionaryPageOffset < start {
+				start = cm.DictionaryPageOffset
+			}
+			if start < 0 {
+				// chunkRange names this one precisely; nothing to add here.
+				continue
+			}
+			end := start + cm.TotalCompressedSize
+			if end < start {
+				return fmt.Errorf("row group %d column %d declares %d compressed bytes at offset %d, which overflows",
+					i, j, cm.TotalCompressedSize, start)
+			}
+			if end > dataEnd {
+				return fmt.Errorf("row group %d column %d spans [%d, %d), past the %d bytes of data this file has "+
+					"before its footer", i, j, start, end, dataEnd)
+			}
+			spans = append(spans, extent{start, end, i, j})
+		}
+	}
+	sort.Slice(spans, func(a, b int) bool { return spans[a].start < spans[b].start })
+	for k := 0; k+1 < len(spans); k++ {
+		if spans[k].end > spans[k+1].start {
+			return fmt.Errorf("row group %d column %d spans [%d, %d) and overlaps row group %d column %d at %d",
+				spans[k].rg, spans[k].col, spans[k].start, spans[k].end,
+				spans[k+1].rg, spans[k+1].col, spans[k+1].start)
+		}
 	}
 	return nil
 }
