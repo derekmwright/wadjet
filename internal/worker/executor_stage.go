@@ -643,16 +643,29 @@ func preservesBuildSide(jt exec.JoinType) bool {
 	return jt == exec.RightJoin || jt == exec.FullOuterJoin
 }
 
-// execColumns converts a wire-declared schema into exec/parquet columns. The
-// declaration exists for the case a join side turns out to be empty; see
-// distributed.OpSpec.BuildSchema.
+// execColumns converts a wire-declared schema into exec/parquet columns.
+//
+// Two declarations arrive this way and both are the plan saying something the
+// worker cannot read off its input: OpSpec.BuildSchema/ProbeSchema shape a
+// join side that turns out to be empty, and OpSpec.ColumnTypes says what a
+// scanned file's columns really are when the file itself cannot (#423). The
+// DECIMAL and VECTOR parameters ride along because the second caller needs
+// them — a VECTOR's storage is sized from its dimension — and they are zero
+// for the first.
 func execColumns(specs []distributed.ColumnSpec) []parquet.Column {
 	if len(specs) == 0 {
 		return nil
 	}
 	out := make([]parquet.Column, len(specs))
 	for i, s := range specs {
-		out[i] = parquet.Column{Name: s.Name, Type: parquet.TypeID(s.Type), Nullable: true}
+		out[i] = parquet.Column{
+			Name:      s.Name,
+			Type:      parquet.TypeID(s.Type),
+			Nullable:  true,
+			Precision: s.Precision,
+			Scale:     s.Scale,
+			Dimension: s.Dimension,
+		}
 	}
 	return out
 }

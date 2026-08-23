@@ -119,8 +119,18 @@ type Task struct {
 	//     full union of build+probe schemas.
 	//   - aggregate / sort tasks: ignored (output schema is determined by
 	//     AggSpecs / SortKeys).
-	Columns     []string `json:"columns,omitempty"`
-	FilterExprs []string `json:"filter_exprs,omitempty"` // SQL filter expressions for pushdown
+	Columns []string `json:"columns,omitempty"`
+	// ColumnTypes is the CATALOG's declared schema for the relation a
+	// SHUFFLE task reads, when that task's Files are base-table parquet (a
+	// pass-through leaf scan absorbed into the exchange). Its own footer
+	// cannot express nine of this engine's types if it was written before
+	// v0.18.0, so without this the shuffle re-encodes an IPv4 column as the
+	// INT64 it is stored in and every consumer downstream sees raw storage
+	// form (#423). Empty for a shuffle over stage output, which carries its
+	// own types in the WSHF payload. Fragment tasks declare this per input
+	// instead, on OpSpec.ColumnTypes.
+	ColumnTypes []ColumnSpec `json:"column_types,omitempty"`
+	FilterExprs []string     `json:"filter_exprs,omitempty"` // SQL filter expressions for pushdown
 	// PostFilterExprs are SQL filter expressions applied to the stage's
 	// OUTPUT (post-aggregate/post-join) rather than to raw scan input.
 	// Native-DAG compute stages use this for HAVING and join residual
@@ -405,6 +415,23 @@ type OpSpec struct {
 	Columns        []string `json:"columns,omitempty"`      // projection hint (parquet column pruning)
 	ScanShardIndex int      `json:"scan_shard_index,omitempty"`
 	ScanShardCount int      `json:"scan_shard_count,omitempty"`
+	// ColumnTypes is the CATALOG's declared schema for the scanned table —
+	// the types beside the names Columns carries (#423).
+	//
+	// A parquet file cannot express nine of this engine's types (IPv4, IPv6,
+	// MAC, UUID, BYTES, PORT, PROTOCOL, DURATION and CIDR), so a scan that
+	// takes its types from the FILE reads them back as the plain INT64 /
+	// BYTE_ARRAY leaves they are stored in and answers 167772165 where the
+	// single-process engine answers 10.0.0.5. Files written from v0.18.0 on
+	// carry the declared types in their own footer and need nothing from
+	// here; files written before it carry no such key, and this is the only
+	// thing that tells the worker what they hold.
+	//
+	// Set only on a base-table OpScan. The worker applies it through the
+	// same admission as the row reader (parquet.Reader.SchemaAs →
+	// retypeFromCatalog), so a declaration the file's bytes cannot carry
+	// fails the task by name instead of decoding one type as another.
+	ColumnTypes []ColumnSpec `json:"column_types,omitempty"`
 
 	// OpFilter.
 	Predicates []string `json:"predicates,omitempty"`
@@ -413,15 +440,21 @@ type OpSpec struct {
 	Projections []ProjectSpec `json:"projections,omitempty"`
 
 	// OpHashJoinProbe / OpBroadcastProbe.
-	JoinType        string   `json:"join_type,omitempty"`  // inner, left, semi, anti, …
-	LeftKeys        []string `json:"left_keys,omitempty"`  // probe-side keys
-	RightKeys       []string `json:"right_keys,omitempty"` // build-side keys
-	BuildAlias      string   `json:"build_alias,omitempty"`
-	BuildFiles      []string `json:"build_files,omitempty"`  // build-side input files
-	BuildBucket     string   `json:"build_bucket,omitempty"` // bucket override for build files
-	JoinFilter      string   `json:"join_filter,omitempty"`
-	BuildRowHint    int64    `json:"build_row_hint,omitempty"`
-	SemiAntiKeyOnly bool     `json:"semi_anti_key_only,omitempty"`
+	JoinType    string   `json:"join_type,omitempty"`  // inner, left, semi, anti, …
+	LeftKeys    []string `json:"left_keys,omitempty"`  // probe-side keys
+	RightKeys   []string `json:"right_keys,omitempty"` // build-side keys
+	BuildAlias  string   `json:"build_alias,omitempty"`
+	BuildFiles  []string `json:"build_files,omitempty"`  // build-side input files
+	BuildBucket string   `json:"build_bucket,omitempty"` // bucket override for build files
+	// BuildColumnTypes is ColumnTypes for the BUILD side: the catalog's
+	// declared schema for BuildFiles when those are base-table parquet — a
+	// pass-through leaf scan feeding a join, which reads the table directly
+	// instead of an upstream stage's WSHF. Same reason and same admission
+	// as ColumnTypes (#423). Empty when the build reads stage output.
+	BuildColumnTypes []ColumnSpec `json:"build_column_types,omitempty"`
+	JoinFilter       string       `json:"join_filter,omitempty"`
+	BuildRowHint     int64        `json:"build_row_hint,omitempty"`
+	SemiAntiKeyOnly  bool         `json:"semi_anti_key_only,omitempty"`
 	// BuildFilterExprs filter the BUILD input rows before hash-table
 	// insertion (exchange subsumption dedup: the dropped exchange's scan
 	// filter — or its computed flag column — applied at build read).
@@ -536,9 +569,20 @@ type PreComputedAggregate struct {
 
 // ColumnSpec is one column of a plan-declared schema on the wire: the name
 // and the parquet.TypeID as an int, matching AggSpec.OutputType's encoding.
+//
+// Precision, Scale and Dimension are the parameters a bare TypeID does not
+// carry — DECIMAL's two, VECTOR's one. A schema declared for a SCAN needs
+// them (OpSpec.ColumnTypes, #423): the reader allocates a VECTOR's storage
+// from its dimension and renders a DECIMAL from its scale, so a spec that
+// dropped them would declare a type the worker cannot build. They are
+// omitempty and zero for every other type, so the join-side declarations
+// (BuildSchema / ProbeSchema) encode exactly as they did before.
 type ColumnSpec struct {
-	Name string `json:"name"`
-	Type int    `json:"type"`
+	Name      string `json:"name"`
+	Type      int    `json:"type"`
+	Precision int    `json:"precision,omitempty"`
+	Scale     int    `json:"scale,omitempty"`
+	Dimension int    `json:"dimension,omitempty"`
 }
 
 // ProjectSpec is one output column of an OpProject: Name is the emitted

@@ -271,17 +271,22 @@ func (c *Coordinator) runShuffleSide(
 			TableName:        sourceStage.TableName,
 			Files:            files,
 			Columns:          cols,
-			ShuffleKeys:      keys,
-			NumPartitions:    numParts,
-			DataBucket:       c.config.ResultBucket,
-			ResultBucket:     c.config.ResultBucket,
-			ResultPrefix:     resultPrefix,
-			CreatedAt:        time.Now(),
-			DynamicFilters:   dynamicFilters,
-			ComputedCols:     computedCols,
-			DropCols:         dropCols,
-			PartialAggKeys:   partialAggKeys,
-			PartialAggSpecs:  partialAggSpecs,
+			// What those columns ARE. When Files are base-table parquet
+			// (a pass-through leaf scan absorbed into this exchange), the
+			// file cannot express nine of them on its own and the shuffle
+			// would re-encode an IPv4 as the INT64 it is stored in (#423).
+			ColumnTypes:     wireColumnSpecs(sourceStage.ScanSchema),
+			ShuffleKeys:     keys,
+			NumPartitions:   numParts,
+			DataBucket:      c.config.ResultBucket,
+			ResultBucket:    c.config.ResultBucket,
+			ResultPrefix:    resultPrefix,
+			CreatedAt:       time.Now(),
+			DynamicFilters:  dynamicFilters,
+			ComputedCols:    computedCols,
+			DropCols:        dropCols,
+			PartialAggKeys:  partialAggKeys,
+			PartialAggSpecs: partialAggSpecs,
 		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID

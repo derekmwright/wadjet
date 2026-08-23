@@ -2263,6 +2263,7 @@ func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distribu
 		if err != nil {
 			return nil, fmt.Errorf("sort_merge_join build source: %w", err)
 		}
+		applyBuildSchema(src, spec)
 		buildSrc = src
 	}
 
@@ -2595,6 +2596,17 @@ func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.O
 	if err != nil {
 		return nil, err
 	}
+	// The catalog's declared schema for a base-table scan (#423). Without it
+	// the scan types its columns from the FILE, which cannot express IPv4,
+	// IPv6, MAC, UUID, BYTES, PORT, PROTOCOL, DURATION or CIDR — so a file
+	// written before the declared-schema footer key existed answered those
+	// columns in raw storage form on this path while the single-process
+	// engine, reading the catalog, answered the display form.
+	if len(spec.ColumnTypes) > 0 {
+		if cs, ok := src.(*cachedFileStreamSource); ok {
+			cs.SetDeclaredSchema(execColumns(spec.ColumnTypes))
+		}
+	}
 	// Row-group sharding for OpScan over a single compacted parquet file.
 	if spec.ScanShardCount > 1 {
 		if cs, ok := src.(*cachedFileStreamSource); ok {
@@ -2751,6 +2763,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			if err != nil {
 				return nil, fmt.Errorf("build source: %w", err)
 			}
+			applyBuildSchema(src, spec)
 		}
 		if err := src.Init(ctx); err != nil {
 			src.Close()
@@ -3051,3 +3064,16 @@ func (s *fragmentGatherSink) finalize(ctx context.Context, _ distributed.Task, _
 }
 
 func (s *fragmentGatherSink) close() {}
+
+// applyBuildSchema tells a join's BUILD source what its columns are when the
+// build reads base-table parquet — a pass-through leaf scan feeding the join,
+// whose file cannot express nine of this engine's types on its own (#423).
+// A build reading stage output carries no declaration and is untouched.
+func applyBuildSchema(src exec.Source, spec distributed.OpSpec) {
+	if len(spec.BuildColumnTypes) == 0 {
+		return
+	}
+	if cs, ok := src.(*cachedFileStreamSource); ok {
+		cs.SetDeclaredSchema(execColumns(spec.BuildColumnTypes))
+	}
+}

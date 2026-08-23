@@ -371,6 +371,12 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// Everything else is hashed structurally via the JSON serialization.
 		"Type": "hashed", "ClusterID": "hashed", "Tasks": "hashed",
 		"TableName": "hashed", "PartitionFilter": "hashed", "ScanFiles": "hashed",
+		// The catalog's declared schema for TableName (#423) is a pure
+		// function of a field already hashed, so two clone subtrees carry
+		// identical values and hashing costs nothing. It is also empty at
+		// this point — annotateScanSchemas runs after this pass — which is
+		// why hashing it can never suppress a dedup that used to happen.
+		"ScanSchema": "hashed",
 		"FilterExprs": "hashed", "GroupByCols": "hashed", "AggSpecs": "hashed",
 		"GroupByAll": "hashed", "SortKeys": "hashed", "Limit": "hashed",
 		// RowLimit changes how many rows a stage emits, so two otherwise

@@ -1295,6 +1295,11 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	// streaming, the working set is bounded by one file's batches plus the
 	// sink's per-partition bufio buffers (48 × 256 KB ≈ 12 MB).
 	src := newCachedFileStreamSourceWithProjection(e, task.QueryID, bucket, task.Files, task.Columns)
+	// What the shuffle's implicit parquet scan is reading. Base-table files
+	// written before the declared-schema footer key existed cannot say what
+	// nine of their column types are, and the WSHF this task writes would
+	// then carry raw storage form to every consumer downstream (#423).
+	src.SetDeclaredSchema(execColumns(task.ColumnTypes))
 	// Dynamic-filter pushdown for shuffle's implicit parquet scan. Operates
 	// at two layers:
 	//   - Row-group level (via cachedFileStreamSource.SetDynamicFilters →

@@ -56,6 +56,27 @@ type Stage struct {
 	TableName string
 	ScanAlias string // unique scan identity: "table" or "table:N" for Nth duplicate
 	Columns   []string
+	// ScanSchema is the CATALOG's declared schema for TableName — the whole
+	// table's columns, with the parameters a bare TypeID does not carry
+	// (DECIMAL precision/scale, VECTOR dimension).
+	//
+	// The DAG worker's scan otherwise takes its column TYPES from the FILE,
+	// and a parquet file cannot express nine of this engine's types. Files
+	// written from v0.18.0 on stamp their declared types into their own
+	// footer; files written before it do not, and on those the DAG answered
+	// an IPv4 as 167772165 where the single-process engine (which reads the
+	// catalog) answered 10.0.0.5 — #396's symptom, on existing data (#423).
+	//
+	// Declared at PLAN time rather than looked up by the worker for the same
+	// reason as AggSpec.OutputType and the join-side schemas: one catalog
+	// read, one revision, one answer for every task of the query. A worker
+	// resolving it itself could see a different revision from its peers, and
+	// two tasks of one stage would type the same column differently.
+	//
+	// The WHOLE table, not the read set: the worker's projection guard
+	// reverts to full width whenever a requested name is missing from the
+	// file, and a column read under that fallback still has to be typed.
+	ScanSchema []parquet.Column
 	// OutputColumns, when non-empty, narrows the stage's EMITTED columns
 	// to this set (worker inserts a zero-copy ColumnPrune before the
 	// sink). Columns stays the READ set — a scan must read its pushed
@@ -2410,6 +2431,11 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// no column on the DAG. Point it at one. Runs last because the repair
 	// depends on what attachScanSelectProjections did.
 	resolveHiddenSortKeys(stages)
+	// #423: the worker's scan reads column TYPES from the FILE, and a
+	// parquet file cannot express nine of ours. Declare the catalog's
+	// schema for every table this plan scans so a file written before the
+	// footer key existed is still typed the way the catalog says.
+	p.annotateScanSchemas(ctx, stages)
 	return stages, nil
 }
 

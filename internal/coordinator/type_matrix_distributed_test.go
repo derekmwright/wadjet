@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
@@ -333,6 +336,28 @@ func tmdTables() []tmdTable {
 // the stage DAG rather than the in-process fast path.
 func tmdCluster(t *testing.T, ctx context.Context) *Coordinator {
 	t.Helper()
+	infra := tmdInfra(t, ctx)
+	tmdWriteTables(t, ctx, infra, nil)
+	return tmdCoordinator(t, ctx, infra)
+}
+
+// tmdInfra is the storage and messaging both arms can share: one embedded
+// NATS, one MemStore, one NATS-KV catalog. Split out of tmdCluster so a
+// second gate can point BOTH engines at one fixture — a divergence between
+// two arms reading the same bytes cannot be a difference in the data
+// (type_matrix_legacy_file_test.go).
+type tmdInfraT struct {
+	clientURL string
+	nc        *nats.Conn
+	js        jetstream.JetStream
+	store     objstore.Store
+	kv        catalog.MetaKV
+	cat       *catalog.Catalog
+	logger    *slog.Logger
+}
+
+func tmdInfra(t *testing.T, ctx context.Context) tmdInfraT {
+	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	natsCfg := distributed.DefaultNATSConfig()
@@ -367,7 +392,20 @@ func tmdCluster(t *testing.T, ctx context.Context) *Coordinator {
 	if err := cat.Init(ctx); err != nil {
 		t.Fatalf("catalog init: %v", err)
 	}
+	return tmdInfraT{
+		clientURL: embedded.ClientURL(), nc: nc, js: js,
+		store: store, kv: kv, cat: cat, logger: logger,
+	}
+}
 
+// tmdWriteTables writes the type-matrix fixture into infra's store and
+// catalog. rewrite, when non-nil, transforms each file's bytes before they
+// are stored — the seam that lets a gate read a file this writer would never
+// produce (a pre-v0.18.0 one, #423). The catalog records the size of what was
+// actually stored, so the rewrite may change the length.
+func tmdWriteTables(t *testing.T, ctx context.Context, infra tmdInfraT, rewrite func(*testing.T, []byte) []byte) {
+	t.Helper()
+	store, cat := infra.store, infra.cat
 	// Several files per table so the DAG really fans scans out across tasks —
 	// a single-file table hides a per-task defect by accident.
 	const chunks = 4
@@ -396,6 +434,9 @@ func tmdCluster(t *testing.T, ctx context.Context) *Coordinator {
 			}
 			path := fmt.Sprintf("tables/%s/chunk_%04d.parquet", tbl.name, c)
 			payload := buf.Bytes()
+			if rewrite != nil {
+				payload = rewrite(t, payload)
+			}
 			if _, err := store.Put(ctx, "test", path, bytes.NewReader(payload),
 				int64(len(payload)), "application/octet-stream"); err != nil {
 				t.Fatalf("put %s: %v", path, err)
@@ -409,9 +450,16 @@ func tmdCluster(t *testing.T, ctx context.Context) *Coordinator {
 			t.Fatalf("add files %s: %v", tbl.name, err)
 		}
 	}
+}
+
+// tmdCoordinator stands the three-worker cluster up over infra and returns
+// the DAG-only coordinator that drives it.
+func tmdCoordinator(t *testing.T, ctx context.Context, infra tmdInfraT) *Coordinator {
+	t.Helper()
+	store, cat, nc, js, logger := infra.store, infra.cat, infra.nc, infra.js, infra.logger
 
 	coord := New(Config{
-		NATSUrl: embedded.ClientURL(), ResultBucket: "test",
+		NATSUrl: infra.clientURL, ResultBucket: "test",
 		// 0 disables the small-query fast path outright, which is what forces
 		// every query onto the stage DAG regardless of how small the scan is.
 		LocalFastPathBytes: 0,
@@ -422,7 +470,7 @@ func tmdCluster(t *testing.T, ctx context.Context) *Coordinator {
 	for i := range ids {
 		ids[i] = fmt.Sprintf("typematrix-worker-%d", i)
 		w := worker.New(worker.Config{
-			WorkerID: ids[i], NATSUrl: embedded.ClientURL(),
+			WorkerID: ids[i], NATSUrl: infra.clientURL,
 			MaxConcurrent: 4, CacheBytes: 64 << 20, SpillDir: t.TempDir(),
 		}, store, nc, js, logger)
 		wctx, wcancel := context.WithCancel(context.Background())

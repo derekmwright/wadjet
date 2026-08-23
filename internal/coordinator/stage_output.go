@@ -80,6 +80,16 @@ type StageOutput struct {
 	// outputs — WSHF inputs ignore column projection.
 	ScanTable   string
 	ScanColumns []string
+	// ScanSchema is the CATALOG's declared schema for that same relation,
+	// and it rides the pass-through for the same reason ScanColumns does:
+	// the consumer really is reading base-table parquet, so it needs to be
+	// told what the file cannot say about itself. Nine of this engine's
+	// types have no parquet annotation, so a file written before the
+	// declared-schema footer key existed hands the consumer an INT64 where
+	// the catalog says IPv4 — 167772165 instead of 10.0.0.5, on the DAG
+	// only (#423). Empty on every non-pass-through output, where the input
+	// is WSHF and carries its own types.
+	ScanSchema []parquet.Column
 
 	// eager marks a PROVISIONAL output synthesized by an eagerly-cleared
 	// consumer (eagerFeed.provisionalOutput): the producer stage is still
@@ -184,7 +194,18 @@ func wireColumnSpecs(cols []parquet.Column) []distributed.ColumnSpec {
 	}
 	out := make([]distributed.ColumnSpec, len(cols))
 	for i, c := range cols {
-		out[i] = distributed.ColumnSpec{Name: c.Name, Type: int(c.Type)}
+		out[i] = distributed.ColumnSpec{
+			Name: c.Name,
+			Type: int(c.Type),
+			// The parameters a bare TypeID does not carry. A scan's
+			// declaration needs them — the reader sizes a VECTOR's storage
+			// from its dimension and renders a DECIMAL from its scale
+			// (#423) — and they are zero for every other type, so the join
+			// declarations this also serves are unchanged.
+			Precision: c.Precision,
+			Scale:     c.Scale,
+			Dimension: c.Dimension,
+		}
 	}
 	return out
 }

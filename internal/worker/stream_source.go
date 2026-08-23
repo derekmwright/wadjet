@@ -85,6 +85,22 @@ type cachedFileStreamSource struct {
 	// without needing to teach the source about derivation rules.
 	projectColumns []string
 
+	// declaredSchema is the CATALOG's schema for the table these parquet
+	// files hold, declared by the plan (OpSpec.ColumnTypes, #423).
+	//
+	// Without it the scan takes its column TYPES from the FILE, and a
+	// parquet file cannot express nine of this engine's types — so an IPv4
+	// column written before the declared-schema footer key existed came back
+	// as the INT64 it is stored in, and the DAG answered 167772165 where the
+	// single-process engine answered 10.0.0.5 (#396's residue, #423).
+	//
+	// Applied per file in finishParquetState through the row reader's own
+	// admission (parquet.Reader.SchemaAs → retypeFromCatalog): a type the
+	// file's bytes cannot carry fails the open by name rather than decoding
+	// one type as another. Nil for every WSHF source and for a scan the plan
+	// could not type, which reads exactly as it did before.
+	declaredSchema []parquet.Column
+
 	// projectionSkipWarned dedupes the once-per-source WARN emitted when
 	// projectColumns names a column absent from the file schema (the
 	// all-or-nothing guard reverting to full width).
@@ -302,6 +318,17 @@ func newCachedFileStreamSourceWithProjection(executor *Executor, queryID, bucket
 		files:          files,
 		projectColumns: projectColumns,
 	}
+}
+
+// SetDeclaredSchema installs the catalog's schema for the table this source
+// reads, so its parquet columns are typed the way the catalog declares them
+// rather than the way the file happens to be able to express them (#423).
+// Idempotent and safe to call before Init; nil is the pre-existing behavior.
+func (s *cachedFileStreamSource) SetDeclaredSchema(cols []parquet.Column) {
+	if s == nil {
+		return
+	}
+	s.declaredSchema = cols
 }
 
 // SetShard configures row-group sharding for parquet reads on this source.
@@ -1218,7 +1245,18 @@ func (s *cachedFileStreamSource) buildParquetStateFromFile(filePath string, f *o
 // fd, madvise + touch-ahead on an mmap). On error p is released.
 func (s *cachedFileStreamSource) finishParquetState(p *pendingParquet, filePath string) (*pendingParquet, error) {
 	reader := p.reader
-	projCols := reader.Schema().Columns
+	// The catalog's types win over the file's, where the file's bytes can
+	// carry them (#423). A file written from v0.18.0 on already reports the
+	// declared types — its footer carries them — so the two agree and this
+	// changes nothing; a file written before that key existed reports the
+	// INT64/BYTE_ARRAY leaves the nine inexpressible types are stored in,
+	// and this is what tells the decoder what they hold. Drift the bytes
+	// cannot carry is a named error, not a decode of one type as another.
+	projCols, err := reader.SchemaAs(s.declaredSchema)
+	if err != nil {
+		p.release(s.executor.logger)
+		return nil, fmt.Errorf("declared schema for %s: %w", filePath, err)
+	}
 	// Apply column projection only when EVERY requested column is present
 	// in the file schema. If any requested name is missing (likely a
 	// derived/expression column that will be computed by a pre-project

@@ -1118,12 +1118,20 @@ func (c *Coordinator) dispatchShuffleStage(
 	if synthTable == "" {
 		synthTable = upstream.ScanTable
 	}
+	// ScanSchema follows synthTable: whichever stage owns the relation owns
+	// the catalog's declared types for it, and the shuffle tasks need them
+	// to read a pre-v0.18.0 file as anything but raw storage form (#423).
+	synthSchema := stage.ScanSchema
+	if len(synthSchema) == 0 {
+		synthSchema = upstream.ScanSchema
+	}
 	synthetic := physical.Stage{
 		ID:             stage.ID + "-src",
 		Type:           physical.StageScan,
 		ScanFiles:      sourceFiles,
 		TableName:      synthTable,
 		Columns:        upstream.ScanColumns,
+		ScanSchema:     synthSchema,
 		EstimatedBytes: upstream.Bytes,
 	}
 	if len(upstream.ScanFileSizes) == len(sourceFiles) {
@@ -1565,6 +1573,11 @@ func (c *Coordinator) dispatchPipelineStage(
 			ScanFileSizes: append([]int64(nil), stage.ScanFileSizes...),
 			ScanTable:     stage.TableName,
 			ScanColumns:   append([]string(nil), stage.Columns...),
+			// The consumer of a pass-through reads base-table parquet, so
+			// it inherits the scan's problem: a file written before the
+			// declared-schema footer key cannot say what nine of its types
+			// are (#423). Ship the catalog's answer with the files.
+			ScanSchema: stage.ScanSchema,
 		}
 		// Materialize Consume specs into wire form so downstream shuffle/
 		// stage dispatchers can ship them in their task descriptors
@@ -2091,6 +2104,11 @@ func (c *Coordinator) dispatchScanFilterStage(
 			InputFiles:  files,
 			InputBucket: c.config.ResultBucket,
 			Columns:     stage.Columns,
+			// The catalog's types beside the catalog's names: a file written
+			// before the declared-schema footer key existed cannot say what
+			// its IPv4/UUID/MAC columns are, and without this the scan reads
+			// them as the INT64/BYTE_ARRAY they are stored in (#423).
+			ColumnTypes: wireColumnSpecs(stage.ScanSchema),
 		}
 		if shardCount > 1 {
 			scanOp.ScanShardIndex = shardIdx
@@ -2551,6 +2569,7 @@ func (c *Coordinator) dispatchComputeStage(
 	// Hash-partitioned N-task stages each task reads its N-th partition.
 	tasks := make([]distributed.Task, 0, numTasks)
 	inputScanCols := c.stageInputScanColumns(ctx, stage, inputs)
+	inputScanTypes := stageInputScanSchemas(stage, inputs)
 	for w := 0; w < numTasks; w++ {
 		var taskInputs map[string][]string
 		var err error
@@ -2946,6 +2965,10 @@ func (c *Coordinator) dispatchComputeStage(
 		// Base-table inputs read only the columns the plan asked for. The
 		// map is per stage, not per task, so it is computed once above.
 		applySourceProjection(t.Operators, inputScanCols)
+		// ...and as WHAT. A pass-through leaf-scan input is base-table
+		// parquet, and a file written before the declared-schema footer key
+		// existed cannot say what nine of its column types are (#423).
+		applySourceColumnTypes(t.Operators, inputScanTypes)
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
 		}
@@ -3774,6 +3797,11 @@ func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files
 		InputFiles:  append([]string(nil), files...),
 		InputBucket: t.DataBucket,
 		Columns:     append([]string(nil), stage.Columns...),
+		// Same declaration as the plain scan fragment's: the fused partial
+		// aggregate reads the base table too, so a MIN/MAX or a group key
+		// over one of the nine inexpressible types needs the catalog's
+		// type here as well (#423).
+		ColumnTypes: wireColumnSpecs(stage.ScanSchema),
 	}
 	if shardCount > 1 {
 		scanOp.ScanShardIndex = shardIdx
@@ -4405,24 +4433,55 @@ func joinInputAliases(stage physical.Stage) (buildAlias, probeAlias string) {
 // (source_select.go), and cachedFileStreamSource applies it all-or-nothing
 // — any name missing from the file schema reverts the read to full width.
 func (c *Coordinator) stageInputScanColumns(ctx context.Context, stage physical.Stage, upstreams map[string]StageOutput) map[string][]string {
-	cols := func(depID string) []string {
+	out := make(map[string][]string)
+	for alias, depID := range stageInputDeps(stage) {
 		up, ok := upstreams[depID]
 		if !ok || up.ScanTable == "" || len(up.ScanColumns) == 0 {
-			return nil
+			continue
 		}
-		return c.prunedScanColumns(ctx, physical.Stage{
+		if p := c.prunedScanColumns(ctx, physical.Stage{
 			TableName: up.ScanTable,
 			Columns:   up.ScanColumns,
-		})
+		}); len(p) > 0 {
+			out[alias] = p
+		}
 	}
-	out := make(map[string][]string)
+	return out
+}
+
+// stageInputScanSchemas is stageInputScanColumns' other half: for the same
+// pass-through leaf-scan inputs, the catalog's declared TYPES for the columns
+// those names refer to (#423).
+//
+// The projection says which columns to read; this says what they ARE. A
+// parquet file cannot express nine of them, so a file written before the
+// declared-schema footer key existed hands the consumer an INT64 where the
+// catalog says IPv4 and the DAG answers 167772165 for 10.0.0.5. Empty for
+// every WSHF input, which carries its own types.
+func stageInputScanSchemas(stage physical.Stage, upstreams map[string]StageOutput) map[string][]distributed.ColumnSpec {
+	out := make(map[string][]distributed.ColumnSpec)
+	for alias, depID := range stageInputDeps(stage) {
+		up, ok := upstreams[depID]
+		if !ok || up.ScanTable == "" || len(up.ScanSchema) == 0 {
+			continue
+		}
+		out[alias] = wireColumnSpecs(up.ScanSchema)
+	}
+	return out
+}
+
+// stageInputDeps maps each source alias of a compute stage's fragment to the
+// dependency stage whose output that alias reads. Shared by every pass that
+// has to say something per INPUT rather than per operator — what to read
+// (stageInputScanColumns) and what it is (stageInputScanSchemas) — so the two
+// cannot disagree about which alias is which dep.
+func stageInputDeps(stage physical.Stage) map[string]string {
+	out := make(map[string]string, 2)
 	put := func(alias, depID string) {
 		if alias == "" {
 			return
 		}
-		if p := cols(depID); len(p) > 0 {
-			out[alias] = p
-		}
+		out[alias] = depID
 	}
 	switch stage.Type {
 	case physical.StageHashJoin, physical.StageBroadcastJoin, physical.StageSortMergeJoin:
@@ -4473,6 +4532,39 @@ func applySourceProjection(ops []distributed.OpSpec, byAlias map[string][]string
 		}
 		if p, ok := byAlias[op.InputAlias]; ok {
 			op.Columns = append([]string(nil), p...)
+		}
+	}
+}
+
+// applySourceColumnTypes stamps the per-alias DECLARED SCHEMA onto the same
+// fragment's inputs — its source operators, and the build side of its join
+// probes, which reads its own files under its own alias (#423).
+//
+// Placed here for the same reason as applySourceProjection: the declaration
+// belongs to the alias, not to whichever operator chain reads it. An operator
+// that already carries an explicit declaration (the leaf-scan builders set
+// theirs from stage.ScanSchema) is left alone.
+func applySourceColumnTypes(ops []distributed.OpSpec, byAlias map[string][]distributed.ColumnSpec) {
+	if len(byAlias) == 0 {
+		return
+	}
+	for i := range ops {
+		op := &ops[i]
+		switch op.Type {
+		case distributed.OpScan, distributed.OpShuffleSource:
+			if len(op.ColumnTypes) > 0 {
+				continue
+			}
+			if s, ok := byAlias[op.InputAlias]; ok {
+				op.ColumnTypes = s
+			}
+		case distributed.OpHashJoinProbe, distributed.OpBroadcastProbe, distributed.OpSortMergeJoin:
+			if len(op.BuildColumnTypes) > 0 {
+				continue
+			}
+			if s, ok := byAlias[op.BuildAlias]; ok {
+				op.BuildColumnTypes = s
+			}
 		}
 	}
 }
