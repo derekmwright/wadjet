@@ -302,3 +302,218 @@ func TestRetypeChecksFixedLenByteArrayWidth(t *testing.T) {
 		t.Fatalf("UUID over a 16-byte leaf: %v", err)
 	}
 }
+
+// flatTypes is every non-nested TypeID. The retype relation is defined over
+// all of them, so the tests below enumerate rather than sample: the defect
+// this file now guards against was that a WIDER admission rule quietly let in
+// eleven pairings nobody listed, and no sampled test would have named them.
+var flatTypes = []TypeID{
+	TypeBool, TypeInt32, TypeInt64, TypeFloat32, TypeFloat64,
+	TypeString, TypeBytes, TypeTimestamp, TypeIPv4, TypeIPv6,
+	TypeCIDR, TypeMAC, TypePort, TypeProtocol, TypeDuration,
+	TypeUUID, TypeDate, TypeDecimal, TypeVector,
+}
+
+// expectedStorageClass is written out by hand, deliberately: asserting
+// StorageClassOf against itself would pin nothing. This is the table the
+// engine's vector layout actually implies — which typed array a decoded value
+// lands in — and a change to either side has to be made in both places.
+func expectedStorageClass(t *testing.T, id TypeID) TypeID {
+	t.Helper()
+	switch id {
+	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
+		return TypeInt64 // Int64Data
+	case TypeInt32, TypePort, TypeProtocol, TypeDate:
+		return TypeInt32 // Int32Data
+	case TypeFloat64:
+		return TypeFloat64
+	case TypeFloat32:
+		return TypeFloat32
+	case TypeBool:
+		return TypeBool
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+		return TypeString // BytesData
+	case TypeDecimal:
+		return TypeDecimal // DecimalData ([]Int128)
+	case TypeVector:
+		return TypeVector // Float32Data, VectorDim wide
+	}
+	t.Fatalf("no storage class recorded for %s", id)
+	return id
+}
+
+func TestStorageClassOfHasNoCatchAllBucket(t *testing.T) {
+	for _, id := range flatTypes {
+		if got, want := StorageClassOf(id), expectedStorageClass(t, id); got != want {
+			t.Errorf("StorageClassOf(%s) = %s, want %s", id, got, want)
+		}
+	}
+	// The three that matter most: DECIMAL and VECTOR must NOT share the
+	// bytes bucket, which is precisely the lumping that let a STRING page be
+	// copied into a DECIMAL vector.
+	for _, id := range []TypeID{TypeDecimal, TypeVector} {
+		if StorageClassOf(id) == StorageClassOf(TypeString) {
+			t.Errorf("%s shares a storage class with STRING", id)
+		}
+	}
+}
+
+// leafFor writes a one-column file of the given type with our own writer and
+// hands back the leaf the reader recovers, plus the type it recovers it as.
+// Using a REAL file is the point: the annotations the writer emits (or
+// declines to emit) are what the admission rule reads.
+func leafFor(t *testing.T, id TypeID) (*SchemaNode, TypeID) {
+	t.Helper()
+	col := Column{Name: "c", Type: id, Nullable: true}
+	switch id {
+	case TypeDecimal:
+		col.Precision, col.Scale = 18, 2
+	case TypeVector:
+		col.Dimension = 4
+	}
+	r := retypeTestFile(t, Schema{Columns: []Column{col}}, []map[string]any{{"c": nil}})
+	leaves := r.FileReader().Leaves()
+	if len(leaves) != 1 {
+		t.Fatalf("%s: file has %d leaves, want 1", id, len(leaves))
+	}
+	return leaves[0], TypeIDFromSchemaNode(leaves[0])
+}
+
+// TestRetypeAdmissionMatrix walks every (file, catalog) pairing over the flat
+// types and asserts the admission rule holds exactly: a substitution is
+// accepted only when the two types land in the same vector arrays, or when
+// the pairing is one of the three CoercibleTo conversions.
+//
+// The regression it exists for: admission was asked of the leaf's PHYSICAL
+// type alone, and parquet stores DECIMAL in four different physicals, so
+// "can DECIMAL be read from this physical?" answered yes for essentially
+// every leaf in the file. Eleven catalog-DECIMAL pairings the previous rule
+// refused were let back in, and a STRING column read as DECIMAL(18,2) came
+// back as integers made of its letters.
+func TestRetypeAdmissionMatrix(t *testing.T) {
+	type leafInfo struct {
+		node      *SchemaNode
+		recovered TypeID
+	}
+	info := make(map[TypeID]leafInfo, len(flatTypes))
+	for _, ft := range flatTypes {
+		node, rec := leafFor(t, ft)
+		info[ft] = leafInfo{node, rec}
+	}
+
+	for _, ft := range flatTypes {
+		li := info[ft]
+		for _, want := range flatTypes {
+			if li.recovered == want {
+				continue // nothing to substitute
+			}
+			wantCol := Column{Name: "c", Type: want}
+			if want == TypeVector {
+				wantCol.Dimension = 4
+			}
+			admit := expectedStorageClass(t, li.recovered) == expectedStorageClass(t, want) ||
+				CoercibleTo(li.recovered, want)
+			// UUID and IPv6 are sixteen bytes; over a narrower
+			// FIXED_LEN_BYTE_ARRAY leaf they are refused on width even
+			// though the class matches.
+			if admit && li.node.Type != nil && *li.node.Type == PhysicalFixedLenByteArray {
+				if w := fixedByteWidth(wantCol); w > 0 && int(li.node.TypeLength) != w {
+					admit = false
+				}
+			}
+			_, err := retypeFromCatalog(
+				[]Column{{Name: "c", Type: li.recovered}},
+				[]Column{wantCol},
+				[]*SchemaNode{li.node},
+			)
+			if admit && err != nil {
+				t.Errorf("file %s (recovered %s) → catalog %s: refused (%v), want accepted",
+					ft, li.recovered, want, err)
+			}
+			if !admit && err == nil {
+				t.Errorf("file %s (recovered %s) → catalog %s: accepted, want refused",
+					ft, li.recovered, want)
+			}
+		}
+	}
+}
+
+// TestRetypeRefusesEveryCatalogDecimal names the widened class outright: a
+// DECIMAL is what the file's ANNOTATION says it is. Over any leaf the
+// annotations recover as something else, the catalog cannot make it one —
+// same width or not, the values mean something different.
+func TestRetypeRefusesEveryCatalogDecimal(t *testing.T) {
+	for _, ft := range flatTypes {
+		node, recovered := leafFor(t, ft)
+		if recovered == TypeDecimal {
+			continue // a real decimal leaf; nothing to substitute
+		}
+		t.Run(ft.String(), func(t *testing.T) {
+			_, err := retypeFromCatalog(
+				[]Column{{Name: "c", Type: recovered}},
+				[]Column{{Name: "c", Type: TypeDecimal, Precision: 18, Scale: 2}},
+				[]*SchemaNode{node},
+			)
+			if err == nil {
+				t.Fatalf("catalog DECIMAL over a %s leaf (recovered %s) was accepted", ft, recovered)
+			}
+			if !strings.Contains(err.Error(), "DECIMAL") {
+				t.Errorf("error %q does not name the declared type", err)
+			}
+		})
+	}
+}
+
+// TestReadStringColumnAsDecimalIsAnError is the end-to-end shape of the same
+// defect. ("hello","world","x") read as DECIMAL(18,2) came back as
+// [448378203247 512970878052 120] — the letters of each string reinterpreted
+// as a big-endian integer. No fault, no warning, just different numbers.
+func TestReadStringColumnAsDecimalIsAnError(t *testing.T) {
+	r := retypeTestFile(t,
+		Schema{Columns: []Column{{Name: "s", Type: TypeString, Nullable: true}}},
+		[]map[string]any{{"s": "hello"}, {"s": "world"}, {"s": "x"}})
+
+	// The file reads correctly on its own terms.
+	rows, err := r.ReadRows(nil)
+	if err != nil || len(rows) != 3 || rows[0]["s"] != "hello" {
+		t.Fatalf("ReadRows on the file's own types: %v %#v", err, rows)
+	}
+
+	got, err := r.ReadRowsAs([]Column{{Name: "s", Type: TypeDecimal, Precision: 18, Scale: 2, Nullable: true}}, nil)
+	if err == nil {
+		t.Fatalf("a STRING column read as DECIMAL(18,2) succeeded: %#v", got)
+	}
+	for _, want := range []string{`"s"`, "DECIMAL", "STRING"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
+	}
+}
+
+// TestRetypeChecksByteArrayWidthPerValue: fixedByteWidth only ran when the
+// leaf was FIXED_LEN_BYTE_ARRAY, so a catalog UUID over an ordinary
+// BYTE_ARRAY column skipped the width check entirely and handed back
+// "UUID"s of whatever length the strings happened to be. The footer cannot
+// answer the question for a BYTE_ARRAY leaf — entries are individually sized
+// — so the check is per value, at decode.
+func TestRetypeChecksByteArrayWidthPerValue(t *testing.T) {
+	r := retypeTestFile(t,
+		Schema{Columns: []Column{{Name: "u", Type: TypeString, Nullable: true}}},
+		[]map[string]any{{"u": "not-sixteen-bytes-at-all"}})
+
+	got, err := r.ReadRowsAs([]Column{{Name: "u", Type: TypeUUID, Nullable: true}}, nil)
+	if err == nil {
+		t.Fatalf("a 24-byte value read as a UUID succeeded: %#v", got)
+	}
+	if !strings.Contains(err.Error(), "16") {
+		t.Errorf("error %q does not name the required width", err)
+	}
+
+	// Sixteen bytes is a UUID, and still reads.
+	r16 := retypeTestFile(t,
+		Schema{Columns: []Column{{Name: "u", Type: TypeString, Nullable: true}}},
+		[]map[string]any{{"u": "0123456789abcdef"}})
+	if _, err := r16.ReadRowsAs([]Column{{Name: "u", Type: TypeUUID, Nullable: true}}, nil); err != nil {
+		t.Fatalf("a 16-byte value read as a UUID: %v", err)
+	}
+}

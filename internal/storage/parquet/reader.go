@@ -805,6 +805,61 @@ func PhysicalReadableAs(t TypeID, pt PhysicalType) bool {
 	}
 }
 
+// StorageClassOf returns the vector backing a decoded value lands in: types
+// that share a class have byte-identical in-memory storage, so a page decoded
+// as one can be copied into a vector allocated for the other with no
+// conversion at all.
+//
+// It is deliberately EXHAUSTIVE — no default arm. The relation it defines is
+// what both read paths use to decide whether a (catalog, file) pairing may be
+// decoded verbatim, and a catch-all bucket makes that decision by accident:
+// the scan's own version had one, and it put DECIMAL, VECTOR and the
+// bytes-backed types in a single class. A catalog STRING over a file DECIMAL
+// therefore "matched", and the copy then indexed a Decimal vector's Int128
+// array through a page of byte offsets. Every new TypeID must be given a
+// class here on purpose.
+//
+// The classes are named by a representative TypeID rather than by a private
+// enum so callers in other packages (the scan's storageClass, the planner's
+// footer-statistics path) can hold the result without importing one.
+func StorageClassOf(t TypeID) TypeID {
+	switch t {
+	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
+		return TypeInt64
+	case TypeInt32, TypePort, TypeProtocol, TypeDate:
+		return TypeInt32
+	case TypeFloat64:
+		return TypeFloat64
+	case TypeFloat32:
+		return TypeFloat32
+	case TypeBool:
+		return TypeBool
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+		return TypeString
+	case TypeDecimal:
+		return TypeDecimal
+	case TypeVector:
+		return TypeVector
+	case TypeArray:
+		return TypeArray
+	case TypeRow:
+		return TypeRow
+	case TypeMap:
+		return TypeMap
+	}
+	// Unreachable for every TypeID the engine defines. A type added without
+	// a class above gets one of its own rather than joining a bucket, so the
+	// failure is a refused read, not a wrong one.
+	return t
+}
+
+// DecodeCompatible reports whether a page decoded as fileType can be copied
+// into a vector allocated for catalogType without converting anything. It is
+// storage-class equality, named for what the callers are asking.
+func DecodeCompatible(fileType, catalogType TypeID) bool {
+	return StorageClassOf(fileType) == StorageClassOf(catalogType)
+}
+
 // CoercibleTo reports whether values decoded as the type the FILE stores can
 // be converted, after decode, to the type the CATALOG declares.
 //
@@ -876,12 +931,35 @@ func fixedByteWidth(c Column) int {
 // per INT32 in the page, an unsafe.Slice twice as long as its backing array
 // — megabytes of adjacent heap returned as query results.
 //
-// The comparison is against the FILE LEAF's physical type, not against what
-// our writer would have chosen for the recovered type. Those differ wherever
-// the format allows a type more than one encoding: a pyarrow DECIMAL(9,2) is
-// physically INT32, our writer's DECIMAL is INT64, so a catalog INT64 over
-// that column compared INT64 to INT64 and passed — then read eight bytes per
-// four-byte value. See PhysicalReadableAs.
+// The comparison is against the FILE LEAF's RECOVERED TYPE — physical type
+// plus the logical/converted annotations that TypeIDFromSchemaNode reads —
+// not against a physical type alone and not against what our writer would
+// have chosen. Each of those weaker questions admits pairings that decode to
+// nonsense:
+//
+//   - Our writer's mapping on both sides compares what WE would have written,
+//     so a pyarrow DECIMAL(9,2) (physically INT32) sitting under a catalog
+//     INT64 compared INT64 to INT64 and passed, then read eight bytes per
+//     four-byte value.
+//   - The physical type alone cannot tell a DECIMAL from the INT32, INT64,
+//     BYTE_ARRAY or FIXED_LEN_BYTE_ARRAY it is stored in — the format allows
+//     all four, and only the annotation says which one this is. Asking
+//     "is DECIMAL readable from this physical?" therefore answered yes for
+//     every leaf in the file, so a catalog DECIMAL(18,2) over a STRING column
+//     was admitted and read ("hello","world") back as two integers made of
+//     the letters. Same width, different meaning: the decode does not fault,
+//     it just answers something else.
+//
+// The question that is actually being asked is whether the values the file's
+// own type decodes to can be STORED as the catalog's type without converting
+// them, and StorageClassOf is exactly that relation. DECIMAL and VECTOR are
+// classes of their own, so a catalog DECIMAL is admissible only over a leaf
+// the annotations already recovered AS a decimal — at which point there is
+// nothing to substitute and the loop has already skipped it. The eight
+// inexpressible types share a class with the plain INT32/INT64/BYTE_ARRAY
+// their annotation-free leaves recover as, which is the whole mechanism.
+// CoercibleTo names the only pairings admitted ACROSS classes, and those are
+// decoded as the file's type and converted afterwards.
 //
 // Drift is an ERROR rather than a silent skip. Skipping would answer the
 // query from the file's own type, which is a different answer from the one
@@ -913,28 +991,22 @@ func retypeFromCatalog(readCols, catalog []Column, leaves []*SchemaNode) ([]Colu
 		if isNestedType(c.Type) || isNestedType(want.Type) {
 			continue
 		}
-		// The file's own leaf is the authority. Without one (a column the
-		// file does not carry, read as all-NULL) fall back to the type the
-		// reader recovered, which is what the decode would use anyway.
+		// The file's own leaf is the authority, annotations included.
+		// Without one (a column the file does not carry, read as all-NULL)
+		// fall back to the type the reader recovered, which is what the
+		// decode would use anyway.
+		fileType := c.Type
 		filePhys := wadjetTypeToPhysical(c.Type)
 		var typeLen int
-		if leaf := leafByName[strings.ToLower(c.Name)]; leaf != nil && leaf.Type != nil {
-			filePhys = *leaf.Type
-			typeLen = int(leaf.TypeLength)
-		}
-		if !PhysicalReadableAs(want.Type, filePhys) && !CoercibleTo(c.Type, want.Type) {
-			return nil, fmt.Errorf(
-				"column %q: schema declares %s but the file stores %s as physical %s: "+
-					"refusing to decode the file's bytes as a different width",
-				c.Name, want.Type, c.Type, filePhys)
-		}
-		if filePhys == PhysicalFixedLenByteArray {
-			if w := fixedByteWidth(want); w > 0 && typeLen != w {
-				return nil, fmt.Errorf(
-					"column %q: schema declares %s (%d bytes per value) but the file's "+
-						"FIXED_LEN_BYTE_ARRAY entries are %d bytes",
-					c.Name, want.Type, w, typeLen)
+		if leaf := leafByName[strings.ToLower(c.Name)]; leaf != nil {
+			fileType = TypeIDFromSchemaNode(leaf)
+			if leaf.Type != nil {
+				filePhys = *leaf.Type
+				typeLen = int(leaf.TypeLength)
 			}
+		}
+		if err := checkRetypeAdmissible(c.Name, fileType, filePhys, typeLen, want); err != nil {
+			return nil, err
 		}
 		out[i].Type = want.Type
 		out[i].Precision, out[i].Scale = want.Precision, want.Scale
@@ -945,6 +1017,63 @@ func retypeFromCatalog(readCols, catalog []Column, leaves []*SchemaNode) ([]Colu
 
 func isNestedType(t TypeID) bool {
 	return t == TypeArray || t == TypeRow || t == TypeMap
+}
+
+// checkRetypeAdmissible decides whether the catalog's type may replace the
+// type the file recovered for one leaf. See retypeFromCatalog for why the
+// question is asked of the RECOVERED type rather than of a physical type.
+//
+// Three outcomes, in order:
+//
+//   - Same storage class: the page's values land in the same vector arrays
+//     either way, so the substitution costs nothing and changes nothing about
+//     the decode. Only the WIDTH is still open, below.
+//   - CoercibleTo: a different class, but one of the three pairings both read
+//     paths convert after decode. The decode itself still runs as the FILE's
+//     type, so no width question arises.
+//   - Anything else is catalog/file drift, and refused by name.
+func checkRetypeAdmissible(name string, fileType TypeID, filePhys PhysicalType, typeLen int, want Column) error {
+	if CoercibleTo(fileType, want.Type) {
+		return nil
+	}
+	if !DecodeCompatible(fileType, want.Type) {
+		return fmt.Errorf(
+			"column %q: schema declares %s but the file stores %s (physical %s): "+
+				"refusing to decode the file's bytes as a different type",
+			name, want.Type, fileType, filePhys)
+	}
+	// Same class, so the bytes are copied verbatim — but a UUID is sixteen
+	// bytes by definition and an IPv6 address is too, and a VECTOR(N) is
+	// 4N. A leaf of another width is not a truncated value, it is a
+	// different one.
+	w := fixedByteWidth(want)
+	if w == 0 {
+		return nil
+	}
+	switch filePhys {
+	case PhysicalFixedLenByteArray:
+		// Every entry has the schema's width, so one check covers the column.
+		if typeLen != w {
+			return fmt.Errorf(
+				"column %q: schema declares %s (%d bytes per value) but the file's "+
+					"FIXED_LEN_BYTE_ARRAY entries are %d bytes",
+				name, want.Type, w, typeLen)
+		}
+	case PhysicalByteArray:
+		// Entries are individually sized, so the width cannot be settled
+		// from the footer at all: it is checked per value at decode
+		// (unpackAllPresent / unpackWithNulls). Admitting the column here
+		// and refusing the wrong value there is the only order that can
+		// name the offending row. Before this, a BYTE_ARRAY leaf skipped
+		// the width check entirely — it only ran for FIXED_LEN_BYTE_ARRAY —
+		// so a catalog UUID over a column of arbitrary strings read back
+		// as UUIDs of whatever length the strings happened to be.
+	default:
+		return fmt.Errorf(
+			"column %q: schema declares %s (%d bytes per value) but the file's leaf is physical %s",
+			name, want.Type, w, filePhys)
+	}
+	return nil
 }
 
 func filterSchemaColumns(cols []Column, selected []string) []Column {
@@ -1127,6 +1256,20 @@ func checkPageDecodable(col Column, data Values, n int) error {
 	return nil
 }
 
+// checkByteWidth is the per-VALUE half of the width guard a BYTE_ARRAY leaf
+// needs. A FIXED_LEN_BYTE_ARRAY declares one width for the whole column and
+// retypeFromCatalog settles it from the footer; a BYTE_ARRAY declares
+// nothing, so the only place a 16-byte type can be held to sixteen bytes is
+// here, at the value. w comes from fixedByteWidth and is 0 for the types
+// that have no fixed width, which is the fast exit.
+func checkByteWidth(col Column, w, got, row int) error {
+	if w == 0 || got == w {
+		return nil
+	}
+	return fmt.Errorf("column %q: %s is %d bytes per value but row %d holds %d",
+		col.Name, col.Type, w, row, got)
+}
+
 func unpackAllPresent(dst []any, offset int, data Values, n int, col Column) error {
 	if err := checkPageDecodable(col, data, n); err != nil {
 		return err
@@ -1179,9 +1322,13 @@ func unpackAllPresent(dst []any, offset int, data Values, n int, col Column) err
 	case TypeBytes, TypeIPv6, TypeUUID:
 		rawData, offsets := data.ByteArray()
 		if offsets != nil {
+			w := fixedByteWidth(col)
 			for i := 0; i < n && i+1 < len(offsets); i++ {
 				b := make([]byte, offsets[i+1]-offsets[i])
 				copy(b, rawData[offsets[i]:offsets[i+1]])
+				if err := checkByteWidth(col, w, len(b), i); err != nil {
+					return err
+				}
 				dst[offset+i] = b
 			}
 		}
@@ -1279,11 +1426,15 @@ func unpackWithNulls(dst []any, offset int, data Values, defLevels []int32, maxD
 		rawData, offsets := data.ByteArray()
 		vi := 0
 		if offsets != nil {
+			w := fixedByteWidth(col)
 			for i := 0; i < n; i++ {
 				if i < len(defLevels) && defLevels[i] == maxDef {
 					if vi+1 < len(offsets) {
 						b := make([]byte, offsets[vi+1]-offsets[vi])
 						copy(b, rawData[offsets[vi]:offsets[vi+1]])
+						if err := checkByteWidth(col, w, len(b), i); err != nil {
+							return err
+						}
 						dst[offset+i] = b
 					}
 					vi++
@@ -1659,4 +1810,3 @@ func decimalFromBytesRaw(b []byte) (int64, uint64) {
 	}
 	return hi, lo
 }
-
