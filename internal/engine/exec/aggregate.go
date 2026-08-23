@@ -17,6 +17,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -6011,11 +6012,14 @@ func appendVectorKey(buf []byte, v *batch.Vector, row int) []byte {
 	dim := v.VectorDim
 	buf = appendKeyUint32(buf, uint32(dim))
 	if dim <= 0 {
+		// A genuinely zero-width VECTOR column: every value IS the empty
+		// vector, so one group is the right answer, not a lost one.
 		return buf
 	}
 	base := row * dim
 	if base+dim > len(v.Float32Data) {
-		return buf
+		panic(malformedKeyColumn("VECTOR", "declares dimension %d but row %d needs %d floats and the column stores %d",
+			dim, row, base+dim, len(v.Float32Data)))
 	}
 	for _, f := range v.Float32Data[base : base+dim] {
 		buf = appendKeyUint32(buf, math.Float32bits(f))
@@ -6031,21 +6035,38 @@ func appendVectorKey(buf []byte, v *batch.Vector, row int) []byte {
 // The length prefix is what makes the encoding injective: without it
 // [["a"],["b"]] and [["a","b"]] would produce the same bytes.
 func appendListKey(buf []byte, v *batch.Vector, row int) []byte {
-	start, end := 0, 0
-	if row+1 < len(v.Offsets) {
-		start, end = int(v.Offsets[row]), int(v.Offsets[row+1])
+	if row+1 >= len(v.Offsets) {
+		panic(malformedKeyColumn(v.Type.String(), "row %d needs offsets[%d] but the column carries %d",
+			row, row+1, len(v.Offsets)))
 	}
+	start, end := int(v.Offsets[row]), int(v.Offsets[row+1])
 	if end < start {
 		end = start
 	}
 	buf = appendKeyUint32(buf, uint32(end-start))
 	if v.Child == nil {
+		if end > start {
+			panic(malformedKeyColumn(v.Type.String(), "row %d spans elements [%d,%d) but the column has no child vector",
+				row, start, end))
+		}
 		return buf
 	}
 	for i := start; i < end; i++ {
 		buf = appendNestedElem(buf, v.Child, i)
 	}
 	return buf
+}
+
+// malformedKeyColumn is what a container column whose STORAGE contradicts its
+// own shape raises. The guards used to fall back to a constant key, which is
+// the #408 defect wearing a different hat: a constant makes every row of the
+// column one group, so GROUP BY, DISTINCT, the set operations and the hash
+// joins all answer from a single key and the query returns a plausible wrong
+// answer instead of failing. A FatalEvalPanic is the one way to be loud from
+// here — appendColumnValue has no error return, and giving it one would put a
+// check in the innermost key loop of every grouped query.
+func malformedKeyColumn(typ, format string, args ...any) fatalEvalError {
+	return fatalEvalError{sqlerr.New("XX000", "malformed %s group key column: "+format, append([]any{typ}, args...)...)}
 }
 
 // appendRowKey encodes a ROW cell: the field count, then each field at this
