@@ -380,6 +380,46 @@ func coercedDirectSupports(t *testing.T, file, cat pqt.TypeID) bool {
 	return copyNativeCoercedDirect(vec, 0, page, 4, file, cat) == nil
 }
 
+// TestInt32AsStringIsRefusedOnBothPaths is the regression pin for #439 on the
+// scan half: a file leaf that is a bare INT32 (no DATE annotation) under a
+// catalog STRING column used to be admitted by CoercibleTo and formatted with
+// FormatDateDays, so an ordinary integer read back as an invented ISO date.
+// Both read paths must refuse the pairing by name now, not silently answer
+// with a fabricated date.
+func TestInt32AsStringIsRefusedOnBothPaths(t *testing.T) {
+	fileSchema := pqt.Schema{Columns: []pqt.Column{{Name: "c", Type: pqt.TypeInt32, Nullable: true}}}
+	var buf bytes.Buffer
+	w, err := pqt.NewWriter(&buf, fileSchema, pqt.DefaultWriterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteRows([]map[string]any{{"c": int64(12345)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+
+	catalog := []pqt.Column{{Name: "c", Type: pqt.TypeString, Nullable: true}}
+
+	fr, err := pqt.OpenFileReaderFromBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := ReadRowGroupNative(fr, 0, catalog, nil); err == nil {
+		t.Fatalf("native scan: a bare INT32 column read as STRING succeeded: %#v", b)
+	}
+
+	r, err := pqt.NewReaderFromBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.ReadRowsAs(catalog, nil); err == nil {
+		t.Fatalf("row reader: a bare INT32 column read as STRING succeeded: %#v", got)
+	}
+}
+
 // TestCoercedPairAgreesOnBothPaths is the end-to-end half: the same file,
 // the same catalog type, read once through the native scan and once through
 // the row reader, must produce the same values. Before this change the row

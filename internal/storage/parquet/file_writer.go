@@ -913,6 +913,9 @@ func (lb *leafBuffer) pageRowRanges(target int) []pageRange {
 	case PhysicalByteArray:
 		width = 0 // sized from offsets below
 	default:
+		// FIXED_LEN_BYTE_ARRAY falls here too — a wide DECIMAL(p>18) column
+		// (decimalFLBABytes, 16 bytes/value) stays single-page per row group,
+		// same as BOOLEAN and INT96, until splitting FLBA is worth adding.
 		return single
 	}
 	var ranges []pageRange
@@ -1646,12 +1649,10 @@ func decimalFLBABytes(v any, scale int) []byte {
 			hi = -1
 		}
 	}
+	// Every byte gets written below regardless of sign — decimalFLBAWidth is
+	// exactly 8 bytes of hi plus 8 bytes of lo — so there is no sign-extended
+	// prefill to seed first.
 	b := make([]byte, decimalFLBAWidth)
-	if hi < 0 {
-		for i := range b {
-			b[i] = 0xff
-		}
-	}
 	for i := 0; i < 8; i++ {
 		b[decimalFLBAWidth-1-i] = byte(lo >> (8 * i))
 		b[decimalFLBAWidth-9-i] = byte(uint64(hi) >> (8 * i))

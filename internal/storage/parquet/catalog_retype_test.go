@@ -234,6 +234,48 @@ func TestReadRowsAsCoercesTheSamePairsTheScanDoes(t *testing.T) {
 	}
 }
 
+// TestReadRowsAsRefusesInt32AsDate is the regression pin for #439:
+// CoercibleTo used to admit ANY plain INT32 leaf — not only one the file
+// annotated as DATE — into a catalog STRING column, and coerceDecoded
+// rendered it with FormatDateDays. A file column holding ordinary integers
+// (12345) then read back as an ISO date ("2003-10-20") under a STRING
+// catalog. Only a leaf the file itself ANNOTATED as DATE carries evidence its
+// values are day counts; a bare INT32 does not, and it must refuse by name —
+// not fabricate a date, and not (the pre-#439-fix baseline this repo also
+// tried) read back "".
+func TestReadRowsAsRefusesInt32AsDate(t *testing.T) {
+	fileSchema := Schema{Columns: []Column{{Name: "c", Type: TypeInt32, Nullable: true}}}
+	r := retypeTestFile(t, fileSchema, []map[string]any{{"c": int64(12345)}, {"c": nil}})
+
+	// The file reads correctly on its own terms.
+	rows, err := r.ReadRows(nil)
+	if err != nil || rows[0]["c"] != int64(12345) {
+		t.Fatalf("ReadRows on the file's own types: %v %#v", err, rows)
+	}
+
+	got, err := r.ReadRowsAs([]Column{{Name: "c", Type: TypeString, Nullable: true}}, nil)
+	if err == nil {
+		t.Fatalf("a bare INT32 column read as STRING succeeded: %#v "+
+			"— want an error, not a fabricated date or an empty string", got)
+	}
+	if got != nil {
+		t.Errorf("ReadRowsAs returned %d rows alongside its error", len(got))
+	}
+	for _, want := range []string{`"c"`, "STRING", "INT32"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
+	}
+
+	// DATE, the one annotation that DOES carry that evidence, still coerces.
+	if !CoercibleTo(TypeDate, TypeString) {
+		t.Error("CoercibleTo(DATE, STRING) = false — the annotated pairing must survive this fix")
+	}
+	if CoercibleTo(TypeInt32, TypeString) {
+		t.Error("CoercibleTo(INT32, STRING) = true — #439's coercion is back")
+	}
+}
+
 // TestPhysicalReadableAsUsesTheFileLeafNotTheWriterMapping is finding 3: the
 // guard compared wadjetTypeToPhysical(catalog) against
 // wadjetTypeToPhysical(recovered) — OUR WRITER's mapping on both sides. Our

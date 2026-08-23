@@ -44,6 +44,16 @@ import (
 // It runs in the default `go test ./internal/...`, so CI's unit step carries
 // it. Keep it that way: the cost is a few hundred milliseconds and the class
 // of defect it covers is silent data destruction.
+//
+// What this gate does NOT check: column statistics. gateAssertSchema checks
+// names, types, and the parameters a file can lose without losing a value —
+// it never reads min/max/null-count off the footer, and extractColumnStatsAt
+// re-derives fresh statistics from whatever mergeAndWriteFiles actually wrote
+// rather than carrying the input files' stats forward. And for DECIMAL, this
+// gate is about the read→write RELATION surviving three generations, not
+// about pinning an exact number — the absolute-value anchor (the unscaled
+// integer a given box round-trips to, including one wider than an int64) is
+// internal/storage/parquet/decimal_idempotence_test.go, not this file.
 
 const (
 	// Rows per input file. Small enough to stay fast, large enough that the
@@ -89,11 +99,15 @@ func gateNestedSchema() parquet.Schema {
 	}
 	s := typematrix.NestedSchema()
 	// Containers inside containers: the matrix's four are one level deep,
-	// and #409's assembler bug lived below that.
+	// and #409's assembler bug lived below that. c_map_map and c_arr_row
+	// round out the shapes the other three don't cover — MAP valued by
+	// another MAP, and ARRAY elementing a ROW.
 	s.Columns = append(s.Columns,
 		arr("c_arr_arr", arr("element", i64("element"))),
 		mp("c_map_arr", arr("", i64("element"))),
 		row("c_row_map", i64("a"), mp("m", i64(""))),
+		mp("c_map_map", mp("v", i64(""))),
+		arr("c_arr_row", row("element", i64("a"), i64("b"))),
 	)
 	return s
 }
@@ -141,22 +155,32 @@ func gateNestedData(offset, n int) []map[string]any {
 			r["c_arr_arr"] = []any{[]any{int64(gi), int64(2)}, []any{}}
 			r["c_map_arr"] = map[string]any{"k": []any{int64(gi)}, "e": []any{}}
 			r["c_row_map"] = map[string]any{"a": int64(gi), "m": map[string]any{"k": int64(gi)}}
+			r["c_map_map"] = map[string]any{"k": map[string]any{"k2": int64(gi)}, "e": map[string]any{}}
+			r["c_arr_row"] = []any{map[string]any{"a": int64(gi), "b": int64(gi + 1)}}
 		case 1:
 			r["c_arr_arr"] = []any{}
 			r["c_map_arr"] = map[string]any{}
 			r["c_row_map"] = map[string]any{"a": int64(gi), "m": map[string]any{}}
+			r["c_map_map"] = map[string]any{}
+			r["c_arr_row"] = []any{}
 		case 2:
 			r["c_arr_arr"] = []any{nil}
 			r["c_map_arr"] = map[string]any{"k": nil}
 			r["c_row_map"] = map[string]any{"m": map[string]any{"k": nil}}
+			r["c_map_map"] = map[string]any{"k": nil}
+			r["c_arr_row"] = []any{map[string]any{"a": nil, "b": int64(gi)}}
 		case 3:
 			r["c_arr_arr"] = nil
 			r["c_map_arr"] = nil
 			r["c_row_map"] = nil
+			r["c_map_map"] = nil
+			r["c_arr_row"] = nil
 		case 4:
 			r["c_arr_arr"] = []any{[]any{nil, int64(gi)}}
 			r["c_map_arr"] = map[string]any{"a": []any{nil}, "b": []any{int64(gi)}}
 			r["c_row_map"] = map[string]any{"a": nil, "m": map[string]any{"x": nil}}
+			r["c_map_map"] = map[string]any{"a": map[string]any{"x": nil}, "b": map[string]any{"y": int64(gi)}}
+			r["c_arr_row"] = []any{map[string]any{"a": int64(gi), "b": nil}}
 		}
 	}
 	return rows

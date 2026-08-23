@@ -1304,7 +1304,7 @@ func copyNativeCoercedDirect(vec *batch.Vector, offset int, data pqt.Values, n i
 		for i := 0; i < n; i++ {
 			vec.Float64Data[offset+i] = float64(src[i])
 		}
-	case (fileType == pqt.TypeDate || fileType == pqt.TypeInt32) && catalogType == pqt.TypeString:
+	case fileType == pqt.TypeDate && catalogType == pqt.TypeString:
 		src, err := int32Src(data, n, fileType)
 		if err != nil {
 			return err
@@ -1348,7 +1348,7 @@ func copyNativeCoercedScatter(vec *batch.Vector, offset int, data pqt.Values, de
 		}, func(dstStart, count int) {
 			vec.Nulls.SetNullRange(offset+dstStart, count)
 		})
-	case (fileType == pqt.TypeDate || fileType == pqt.TypeInt32) && catalogType == pqt.TypeString:
+	case fileType == pqt.TypeDate && catalogType == pqt.TypeString:
 		src, err := int32Src(data, 0, fileType)
 		if err != nil {
 			return err

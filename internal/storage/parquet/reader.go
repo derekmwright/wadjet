@@ -604,13 +604,20 @@ func DecodeCompatible(fileType, catalogType TypeID) bool {
 // INT64 is deliberately NOT here: it is indistinguishable from the
 // catalog/file drift this guard exists to catch, and unlike the three below
 // it has no scan-side implementation to agree with.
+//
+// TypeInt32 → TypeString was admitted here until #439: a bare INT32 leaf
+// carries no evidence its values are day counts, only a leaf the file itself
+// ANNOTATED as DATE does. Admitting it rendered arbitrary integers as ISO
+// dates (100 became "1970-04-11") on any table where a plain INT32 column
+// landed under a catalog STRING column, and once compaction started taking
+// this same coercion (#428) it wrote the fabricated dates over the inputs.
 func CoercibleTo(file, want TypeID) bool {
 	switch {
 	case file == TypeInt64 && want == TypeInt32:
 		return true
 	case file == TypeInt64 && want == TypeFloat64:
 		return true
-	case (file == TypeDate || file == TypeInt32) && want == TypeString:
+	case file == TypeDate && want == TypeString:
 		return true
 	}
 	return false
@@ -951,7 +958,7 @@ func coerceDecoded(values []any, from, to TypeID) {
 				values[i] = float64(iv)
 			}
 		}
-	case (from == TypeDate || from == TypeInt32) && to == TypeString:
+	case from == TypeDate && to == TypeString:
 		for i, v := range values {
 			if iv, ok := v.(int64); ok {
 				values[i] = FormatDateDays(int32(iv))

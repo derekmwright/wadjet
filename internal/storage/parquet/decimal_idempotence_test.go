@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,9 +69,10 @@ func TestDecimalReadWriteIsIdempotentAcrossGenerations(t *testing.T) {
 	}{
 		{"9_2", 9, 2, []int64{325, -325, 0, 1, -1, 999999999, -999999999}},
 		{"18_4", 18, 4, []int64{32500, -1, 0, 999999999999999999, -999999999999999999}},
-		// DECIMAL(p>18) is boxed as Decimal128 by the reader and stored as
-		// INT64 by this writer, so the values that round-trip are the ones
-		// an int64 holds — the rest are refused by name, not truncated.
+		// DECIMAL(p>18) is stored as FIXED_LEN_BYTE_ARRAY(16) by this writer
+		// and boxed as Decimal128 by the reader. Passing plain int64 values
+		// here exercises only the fits-in-64-bits slice of that box; a value
+		// that does not fit is TestDecimalFLBARoundTripsBeyond64Bits below.
 		{"38_10", 38, 10, []int64{32500000000, -1, 0, 9223372036854775807, -9223372036854775807}},
 	}
 	for _, tc := range cases {
@@ -115,6 +117,88 @@ func TestDecimalReadWriteIsIdempotentAcrossGenerations(t *testing.T) {
 					len(file1), len(file2), len(file3))
 			}
 		})
+	}
+}
+
+// decimal128FromBigInt renders a signed decimal string as the two's-complement
+// 128-bit hi/lo halves decimalFLBABytes writes and decimalFromBytesRaw reads
+// back, so a test can hand the writer an UNSCALED value that does not fit in
+// an int64 without duplicating that bit-splitting by hand.
+func decimal128FromBigInt(t *testing.T, s string) Decimal128 {
+	t.Helper()
+	n, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		t.Fatalf("invalid decimal string %q", s)
+	}
+	mod := new(big.Int).Lsh(big.NewInt(1), 128)
+	u := new(big.Int).Mod(n, mod) // Euclidean mod: non-negative, i.e. two's complement.
+	hi := new(big.Int).Rsh(u, 64)
+	lo := new(big.Int).And(u, new(big.Int).SetUint64(^uint64(0)))
+	return Decimal128{Hi: int64(hi.Uint64()), Lo: lo.Uint64()}
+}
+
+// TestDecimalFLBARoundTripsBeyond64Bits is the FLBA sibling of
+// TestDecimalReadWriteIsIdempotentAcrossGenerations: every value in that
+// table's "38_10" case fits in an int64, which never exercises more than the
+// bottom 64 bits of the FIXED_LEN_BYTE_ARRAY(16) box a DECIMAL(p>18) column
+// actually uses. This pins a value with 20 significant digits — larger than
+// an int64 can hold — round-tripping through wadjet's own reader/writer and
+// cross-checked against PyArrow, which decides independently how those same
+// sixteen bytes denote a number.
+func TestDecimalFLBARoundTripsBeyond64Bits(t *testing.T) {
+	schema := decimalSchema(38, 10)
+	pos := decimal128FromBigInt(t, "93468288258671214869")
+	neg := decimal128FromBigInt(t, "-93468288258671214869")
+	rows := []map[string]any{
+		{"id": int64(0), "d": pos},
+		{"id": int64(1), "d": neg},
+	}
+
+	data := writeRows(t, schema, rows)
+	got := readAllRows(t, data, schema.Columns)
+
+	checkUnscaled := func(i int, want string) {
+		t.Helper()
+		d, ok := got[i]["d"].(Decimal128)
+		if !ok {
+			t.Fatalf("row %d: d = %#v (%T), want Decimal128", i, got[i]["d"], got[i]["d"])
+		}
+		if d.String() != want {
+			t.Errorf("row %d: d = %s, want %s", i, d.String(), want)
+		}
+	}
+	checkUnscaled(0, "93468288258671214869")
+	checkUnscaled(1, "-93468288258671214869")
+
+	// Idempotent across a rewrite: a value beyond int64 must survive a
+	// compaction-shaped read→write, not get silently truncated or refused.
+	again := readAllRows(t, writeRows(t, schema, got), schema.Columns)
+	if !reflect.DeepEqual(got, again) {
+		t.Errorf("rewrite changed the values:\n  before %#v\n  after  %#v", got, again)
+	}
+
+	if !havePyArrow() {
+		t.Skip("python3 with pyarrow not available")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wide_decimal.parquet")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("python3", "-c", pyArrowDecimalScript, path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("pyarrow read failed: %v\n%s", err, out)
+	}
+	var pyGot []any
+	if err := json.Unmarshal(out, &pyGot); err != nil {
+		t.Fatalf("decoding pyarrow output %q: %v", out, err)
+	}
+	// pyArrowDecimalScript prints the SCALED decimal string; wadjet's
+	// Decimal128.String prints the UNSCALED integer above, so this compares
+	// against the scale-10 form of the same two values.
+	want := []any{"9346828825.8671214869", "-9346828825.8671214869"}
+	if fmt.Sprint(pyGot) != fmt.Sprint(want) {
+		t.Errorf("pyarrow read %v, want %v", pyGot, want)
 	}
 }
 
