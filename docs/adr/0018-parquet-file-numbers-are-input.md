@@ -240,6 +240,46 @@ at all — before it, a MAP of ARRAY read back absent and an ARRAY of MAP read
 back as its keys (#409) — and PyArrow refused such a file outright. So no
 correct value was ever recovered from one of these columns by anything.
 
+**Which columns.** A ROW adds no repetition, so what decides it is REPEATED
+inside REPEATED — a LIST or MAP holding two or more entries, nested inside
+another LIST or MAP. Verified over 16 shapes × 2 row-group layouts by
+comparing the old and new writers' level streams byte for byte:
+
+| affected | not affected (old and new writers emit identical levels) |
+|---|---|
+| `ARRAY<ARRAY<T>>` | `ARRAY<scalar>`, `MAP<K,scalar>`, `ROW{scalars}` |
+| `ARRAY<MAP<K,V>>` | `ROW{ ARRAY<scalar> }`, `ROW{ MAP<K,scalar> }`, `ROW{ROW}` |
+| `MAP<K, ARRAY<T>>` | `ARRAY<ROW{scalars}>`, `MAP<K, ROW{scalars}>` |
+| `MAP<K, MAP<K2,V>>` | |
+
+and any deeper mix that CONTAINS one of the four, the ROWs in between being
+transparent: `ARRAY<ROW{ m MAP }>`, `ROW{ l ARRAY<MAP> }`,
+`MAP<K, ARRAY<ROW{ l ARRAY<T> }>>`.
+
+**A second, smaller loss on the same arithmetic.** `decomposeArray` now
+forces a LIST's element OPTIONAL on the value side, which `flattenColumn`
+and `buildArraySchemaElements` had always done on the schema side. Before
+the fix, a LIST whose declared `ElementType` was a CONTAINER with
+`Nullable: false` stamped an EMPTY inner container one level too low — the
+level that means "this element is NULL". So `ARRAY<ARRAY>` / `ARRAY<MAP>` /
+`ARRAY<ROW>` declared with a non-nullable element read `[[]]` back as
+`[null]` and `[{}]` as `[null]`, in PyArrow as in wadjet. The footer's
+schema did not change, so no column's declared shape or max levels are
+affected — only the level stamped on an absent or empty element.
+
+**Finding the affected tables is not something the file can answer.** The
+footer records `created_by` as `wadjet (native writer)`, with no version, so
+no reader can tell a pre-#409 file from a post-#409 one (#456): the audit is
+by INGEST DATE against the release that carried #409, over the tables whose
+schema holds one of the shapes above. Both halves of that are why the note
+lists the shapes at all. Reading the file back and comparing is not an audit
+either — the bytes are self-consistent, which is the whole difficulty.
+
+**What re-ingest means here.** Rewrite the affected tables from their
+SOURCE, not from wadjet: compaction and the rewrite mode both read the file
+and write what they read, so they carry the wrong grouping into the new file
+and delete the old one. Nothing that starts from these bytes can undo them.
+
 ## Compatibility note, 2026-08-23: `DECIMAL(p > 18)` files written before #429
 
 Unlike the pre-#409 nesting damage below, nothing here is lost. It still needs
