@@ -2547,6 +2547,7 @@ func (c *Coordinator) dispatchComputeStage(
 	// input — for Singleton stages every task reads the full upstream; for
 	// Hash-partitioned N-task stages each task reads its N-th partition.
 	tasks := make([]distributed.Task, 0, numTasks)
+	inputScanCols := c.stageInputScanColumns(ctx, stage, inputs)
 	for w := 0; w < numTasks; w++ {
 		var taskInputs map[string][]string
 		var err error
@@ -2939,6 +2940,9 @@ func (c *Coordinator) dispatchComputeStage(
 				t.Operators[len(t.Operators)-1].DynamicFilterEmits = emits
 			}
 		}
+		// Base-table inputs read only the columns the plan asked for. The
+		// map is per stage, not per task, so it is computed once above.
+		applySourceProjection(t.Operators, inputScanCols)
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
 		}
@@ -4339,14 +4343,7 @@ func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOut
 		if buildDep == "" {
 			buildDep = stage.Dependencies[1]
 		}
-		buildAlias := stage.BuildTableAlias
-		if buildAlias == "" {
-			buildAlias = "build"
-		}
-		probeAlias := "probe"
-		if probeAlias == buildAlias {
-			probeAlias = "probe_side"
-		}
+		buildAlias, probeAlias := joinInputAliases(stage)
 		inputs[buildAlias] = partitionFilesForWorker(upstreams[buildDep], workerIdx, workerCount)
 		inputs[probeAlias] = partitionFilesForWorker(upstreams[probeDep], workerIdx, workerCount)
 		// Fused-build deps are intentionally NOT added to inputs[]; their
@@ -4371,6 +4368,110 @@ func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOut
 		inputs[depID] = partitionFilesForWorker(upstreams[depID], workerIdx, workerCount)
 	}
 	return inputs, nil
+}
+
+// joinInputAliases names a join fragment's two source aliases. Split out so
+// the projection map (stageInputScanColumns) is keyed exactly the way
+// buildTaskInputsForStage keys the file map — an alias that agreed by
+// coincidence would silently drop the projection instead of failing.
+func joinInputAliases(stage physical.Stage) (buildAlias, probeAlias string) {
+	buildAlias = stage.BuildTableAlias
+	if buildAlias == "" {
+		buildAlias = "build"
+	}
+	probeAlias = "probe"
+	if probeAlias == buildAlias {
+		probeAlias = "probe_side"
+	}
+	return buildAlias, probeAlias
+}
+
+// stageInputScanColumns maps each source alias of a compute stage's
+// fragment to the column projection its input should be read with — but
+// only for inputs that are PASS-THROUGH LEAF SCANS, whose "files" are
+// base-table parquet rather than a stage's own WSHF output.
+//
+// Without this the DAG reads those tables at FULL WIDTH while the
+// single-process path projects, which is a correctness difference and not
+// only a bytes one: scan.HasUnsupportedColumnarTypes tests the columns the
+// read actually asks for, so one MAP or ARRAY column that the query never
+// mentions drags the whole read into the row fallback (#410, #393). It is
+// also the projection pushdown the DAG's base-table reads never had.
+//
+// Safe by construction on the worker side: a .wshf input ignores the hint
+// (source_select.go), and cachedFileStreamSource applies it all-or-nothing
+// — any name missing from the file schema reverts the read to full width.
+func (c *Coordinator) stageInputScanColumns(ctx context.Context, stage physical.Stage, upstreams map[string]StageOutput) map[string][]string {
+	cols := func(depID string) []string {
+		up, ok := upstreams[depID]
+		if !ok || up.ScanTable == "" || len(up.ScanColumns) == 0 {
+			return nil
+		}
+		return c.prunedScanColumns(ctx, physical.Stage{
+			TableName: up.ScanTable,
+			Columns:   up.ScanColumns,
+		})
+	}
+	out := make(map[string][]string)
+	put := func(alias, depID string) {
+		if alias == "" {
+			return
+		}
+		if p := cols(depID); len(p) > 0 {
+			out[alias] = p
+		}
+	}
+	switch stage.Type {
+	case physical.StageHashJoin, physical.StageBroadcastJoin, physical.StageSortMergeJoin:
+		if len(stage.Dependencies) < 2 {
+			return out
+		}
+		probeDep, buildDep := stage.LeftDepStage, stage.RightDepStage
+		if probeDep == "" {
+			probeDep = stage.Dependencies[0]
+		}
+		if buildDep == "" {
+			buildDep = stage.Dependencies[1]
+		}
+		buildAlias, probeAlias := joinInputAliases(stage)
+		put(buildAlias, buildDep)
+		put(probeAlias, probeDep)
+	case physical.StageUnion:
+		// Every arm, not just this task's: the alias IS the dep ID, so one
+		// map serves all tasks.
+		for _, arm := range stage.UnionArms {
+			put(arm.DepStage, arm.DepStage)
+		}
+	default:
+		if len(stage.Dependencies) > 0 {
+			put(stage.Dependencies[0], stage.Dependencies[0])
+		}
+	}
+	return out
+}
+
+// applySourceProjection stamps the per-alias projection onto a fragment's
+// source operators. Applied after the fragment is built rather than inside
+// each builder: the projection belongs to the alias, not to the operator
+// chain that happens to read it, and every builder emits its source op the
+// same way. A source that already carries an explicit projection (the leaf
+// scan builders set theirs from stage.Columns) is left alone.
+func applySourceProjection(ops []distributed.OpSpec, byAlias map[string][]string) {
+	if len(byAlias) == 0 {
+		return
+	}
+	for i := range ops {
+		op := &ops[i]
+		if op.Type != distributed.OpShuffleSource && op.Type != distributed.OpScan {
+			continue
+		}
+		if len(op.Columns) > 0 {
+			continue
+		}
+		if p, ok := byAlias[op.InputAlias]; ok {
+			op.Columns = append([]string(nil), p...)
+		}
+	}
 }
 
 // broadcastJoinProbeSplit reports whether a broadcast_join stage qualifies
