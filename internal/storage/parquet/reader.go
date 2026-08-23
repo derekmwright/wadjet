@@ -182,30 +182,31 @@ func (r *Reader) readRowsFlat(readCols []Column) ([]map[string]any, error) {
 	return allRows, nil
 }
 
-// readRowsNested handles schemas with ARRAY, MAP, or ROW columns by reading
-// leaf-level pages with def/rep levels and assembling nested structures.
-func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
-	leaves := r.fr.Leaves()
+// nestedPlan is one nested column's assembly plan, under the name the read
+// answers it by.
+type nestedPlan struct {
+	name string
+	node *nestedNode
+}
 
-	leafByName := TopLevelLeafIndex(leaves)
+// nestedReadPlans builds one assembly plan per nested column being read, from
+// the FILE's schema subtree (see nested_assembly.go), and the set of leaves
+// those plans need.
+//
+// That set is exactly the set of leaves the read pages in: the read used to
+// decode EVERY leaf in the file whether or not the query asked for it, and
+// then decode the flat columns a second time through readColumnToAny. It is
+// a function of its own so a projection test can assert the SET, which is
+// the property, rather than only the values it happens to produce.
+func nestedReadPlans(root *SchemaNode, readCols []Column, numLeaves int) ([]nestedPlan, []bool) {
 	nodeByName := make(map[string]*SchemaNode)
-	if root := r.fr.SchemaRoot(); root != nil {
+	if root != nil {
 		for _, c := range root.Children {
 			nodeByName[c.Name] = c
 		}
 	}
-
-	// One assembly plan per nested column being read, built from the FILE's
-	// schema subtree (see nested_assembly.go), and the set of leaves those
-	// plans need. Only those leaves are paged in: the read used to decode
-	// EVERY leaf in the file whether or not the query asked for it, then
-	// decode the flat columns a second time through readColumnToAny.
-	type nestedPlan struct {
-		name string
-		node *nestedNode
-	}
 	var plans []nestedPlan
-	needLeaf := make([]bool, len(leaves))
+	needLeaf := make([]bool, numLeaves)
 	for _, col := range readCols {
 		if !isNestedType(col.Type) {
 			continue
@@ -221,6 +222,16 @@ func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
 			}
 		}
 	}
+	return plans, needLeaf
+}
+
+// readRowsNested handles schemas with ARRAY, MAP, or ROW columns by reading
+// leaf-level pages with def/rep levels and assembling nested structures.
+func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
+	leaves := r.fr.Leaves()
+
+	leafByName := TopLevelLeafIndex(leaves)
+	plans, needLeaf := nestedReadPlans(r.fr.SchemaRoot(), readCols, len(leaves))
 
 	var allRows []map[string]any
 	for rgIdx := 0; rgIdx < r.fr.NumRowGroups(); rgIdx++ {
@@ -654,8 +665,7 @@ func fixedByteWidth(c Column) int {
 // carried by the same physical bytes.
 //
 // Leaves only, deliberately: a nested column's read plan is built from the
-// FILE's shape (the assembly plan is built from the file's schema tree),
-// and
+// FILE's shape (the assembly plan is built from the file's schema tree), and
 // substituting a catalog Column whose children were resolved differently
 // would look up leaves that do not exist. A lossy leaf INSIDE a container
 // stays lossy — that is the same annotation gap, one level down, and it

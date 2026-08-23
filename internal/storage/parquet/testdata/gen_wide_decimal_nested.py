@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Generate wide_decimal_nested.parquet: a DECIMAL(38,10) column sitting
-beside a nested one, which is the shape that sends the WHOLE read down the
-row reader (#393) — and therefore the shape in which issue #419's truncation
-was reachable from a query.
+beside a nested one, so a read that takes the whole row (SELECT *) goes down
+the row reader (#393) — the path issue #419's truncation was reachable from.
 
 PyArrow writes any precision above 18 as a 16-byte FIXED_LEN_BYTE_ARRAY. The
 row reader accumulated all sixteen bytes into a single int64, shifting the
@@ -17,8 +16,18 @@ for every value whose magnitude exceeds 2^63.
   d_nested   list<decimal128(38,10)>
                                 -- the same values one container deep, which
                                    reaches the nested assembler's leaf decode
-  tags       list<string>       -- forces the row path even for a read that
-                                   only projects `d`
+  tags       list<string>       -- a second nested column, so an UNPROJECTED
+                                   read (SELECT *) has one whatever else the
+                                   projection drops
+
+A projection of `d` alone does NOT take the row path: the scan chooses by the
+PROJECTED schema (scan.HasUnsupportedColumnarTypes over projectSchema's
+output), and the reader by the columns the read asks for, so dropping the
+nested columns from the projection sends it to the native columnar path.
+What this file gives is the same DECIMAL(38,10) values reachable from BOTH
+paths — natively when only `d` is projected, and through the row assembler
+when a nested column comes along — which is the shape #419 was silently
+wrong on and what ADR-0018 §3 requires be checked.
 
 Regenerate with:
   python3 internal/storage/parquet/testdata/gen_wide_decimal_nested.py

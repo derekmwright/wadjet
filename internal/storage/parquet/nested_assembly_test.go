@@ -209,6 +209,11 @@ func TestNestedContainersWadjetRoundTripPerRowGroup(t *testing.T) {
 // TestNestedContainersProjection: a projected read must answer exactly what
 // the full read answered for the columns it asked for, and must not need the
 // leaves of the ones it did not.
+//
+// Both halves are asserted. The second one is not visible in the values — a
+// read that pages in every leaf in the file and then uses three of them
+// answers identically — so it is asserted against nestedReadPlans, which is
+// the set readRowsNested itself pages in.
 func TestNestedContainersProjection(t *testing.T) {
 	data, err := os.ReadFile(nestedFixture)
 	if err != nil {
@@ -230,6 +235,7 @@ func TestNestedContainersProjection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadRows: %v", err)
 			}
+			assertOnlyProjectedLeavesRead(t, r, cols)
 			want := make([]map[string]any, len(full))
 			for i, row := range full {
 				w := map[string]any{}
@@ -242,6 +248,30 @@ func TestNestedContainersProjection(t *testing.T) {
 			}
 			assertRowsEqual(t, got, want)
 		})
+	}
+}
+
+// assertOnlyProjectedLeavesRead checks the leaf set the read pages in: every
+// leaf under a projected NESTED column and no other. A flat column is not in
+// the set — it is read through readColumnToAny, by leaf index, one column at
+// a time.
+func assertOnlyProjectedLeavesRead(t *testing.T, r *Reader, cols []string) {
+	t.Helper()
+	leaves := r.fr.Leaves()
+	readCols := filterSchemaColumns(r.Schema().Columns, cols)
+	_, needLeaf := nestedReadPlans(r.fr.SchemaRoot(), readCols, len(leaves))
+
+	projected := make(map[string]bool, len(readCols))
+	for _, c := range readCols {
+		if isNestedType(c.Type) {
+			projected[c.Name] = true
+		}
+	}
+	for i, leaf := range leaves {
+		want := len(leaf.Path) > 0 && projected[leaf.Path[0]]
+		if needLeaf[i] != want {
+			t.Errorf("projection %v: leaf %v read=%v, want %v", cols, leaf.Path, needLeaf[i], want)
+		}
 	}
 }
 
