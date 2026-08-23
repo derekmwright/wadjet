@@ -84,12 +84,22 @@ func (c Col) TableOf() string {
 	return Nested
 }
 
-// Columns is the type matrix: one column per wadjet type, all 22.
+// Columns is the type matrix: one column per wadjet type, all 22, plus the
+// one SHAPE that takes a different reader from the type it shares.
 //
 // Each is nullable and each carries a NULL every so often, at a stride coprime
 // with both the batch size and the row-group size so nulls land at interior
 // AND boundary positions — the offsets-on-NULL corruption class only fires at
 // a boundary.
+//
+// c_rownest is a second ROW, and it is here because a ROW's field types decide
+// which READER answers for it: a ROW of primitive leaves is addressed by leaf
+// path in the native columnar decoder, while a ROW whose fields are themselves
+// containers has no such path and routes to the row reader
+// (scan.HasUnsupportedColumnarTypes, #448). One entry in this list is the
+// difference between the two paths being compared and one of them never being
+// exercised — the columnar arm read such a field back as all-NULL for as long
+// as no corpus column had the shape.
 func Columns() []Col {
 	return []Col{
 		{Name: "c_bool", Type: parquet.TypeBool, Flat: true, Ordered: true},
@@ -112,6 +122,7 @@ func Columns() []Col {
 		{Name: "c_dec", Type: parquet.TypeDecimal, Flat: true, Wide: true, Ordered: true},
 		{Name: "c_arr", Type: parquet.TypeArray},
 		{Name: "c_row", Type: parquet.TypeRow},
+		{Name: "c_rownest", Type: parquet.TypeRow},
 		{Name: "c_map", Type: parquet.TypeMap},
 		{Name: "c_vec", Type: parquet.TypeVector},
 	}
@@ -146,10 +157,7 @@ func schemaFor(flat bool) parquet.Schema {
 		case parquet.TypeArray:
 			pc.ElementType = &parquet.Column{Name: "element", Type: parquet.TypeString, Nullable: true}
 		case parquet.TypeRow:
-			pc.Fields = []parquet.Column{
-				{Name: "a", Type: parquet.TypeString, Nullable: true},
-				{Name: "b", Type: parquet.TypeInt64, Nullable: true},
-			}
+			pc.Fields = rowFields(c.Name)
 		case parquet.TypeMap:
 			// MAP is ARRAY(ROW("key","value")) in the storage layer, so its
 			// ElementType is the entry ROW — the shape ResolveColumn builds
@@ -164,6 +172,34 @@ func schemaFor(flat bool) parquet.Schema {
 		cols = append(cols, pc)
 	}
 	return parquet.Schema{Columns: cols}
+}
+
+// rowFields declares the two ROW columns' field lists.
+//
+// c_row is a struct of primitive LEAVES, which the native columnar reader
+// addresses one leaf chunk per field. c_rownest is a struct whose fields are
+// themselves containers, which has no such addressing and takes the row
+// reader on every path (#448). The gates compare the two paths' answers, so
+// which reader a column reaches is part of what the fixture has to cover.
+func rowFields(name string) []parquet.Column {
+	if name != "c_rownest" {
+		return []parquet.Column{
+			{Name: "a", Type: parquet.TypeString, Nullable: true},
+			{Name: "b", Type: parquet.TypeInt64, Nullable: true},
+		}
+	}
+	return []parquet.Column{
+		{Name: "s", Type: parquet.TypeRow, Nullable: true, Fields: []parquet.Column{
+			{Name: "x", Type: parquet.TypeInt64, Nullable: true},
+		}},
+		{Name: "l", Type: parquet.TypeArray, Nullable: true,
+			ElementType: &parquet.Column{Name: "element", Type: parquet.TypeString, Nullable: true}},
+		{Name: "m", Type: parquet.TypeMap, Nullable: true,
+			ElementType: &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+				{Name: "key", Type: parquet.TypeString},
+				{Name: "value", Type: parquet.TypeInt64, Nullable: true},
+			}}},
+	}
 }
 
 // DimSchema is the join partner: one row per group key.
@@ -236,12 +272,64 @@ func allData(n int) []map[string]any {
 		r["c_date"] = orNull(i, 97, fmt.Sprintf("20%02d-%02d-%02d", 10+i%15, 1+i%12, 1+i%28))
 		r["c_dec"] = orNull(i, 101, float64(i)+0.0001*float64(i%9973))
 		r["c_arr"] = orNull(i, 103, arrayValue(i))
-		r["c_row"] = orNull(i, 107, map[string]any{"a": fmt.Sprintf("r-%05d", i), "b": int64(i) * 11})
+		r["c_row"] = orNull(i, 107, rowValue(i))
+		r["c_rownest"] = orNull(i, 127, nestedRowValue(i))
 		r["c_map"] = orNull(i, 109, map[string]any{fmt.Sprintf("k%d", i%5): int64(i)})
 		r["c_vec"] = orNull(i, 113, []float32{float32(i), float32(i) + 0.5, -float32(i), 0.25})
 		rows[i] = r
 	}
 	return rows
+}
+
+// rowValue returns a PRESENT ROW whose fields cycle through present,
+// first-NULL, last-NULL and both-NULL.
+//
+// A present ROW with a NULL field is a value of its own, and the fixture used
+// to have none: c_row was all-present or NULL, so the two read paths boxed it
+// the same way by accident and #449 — the row reader omitting the null field's
+// key where the columnar reader carries it — could not be seen by any gate.
+// The stride is 7, coprime with both the batch size and the row-group size, so
+// each variant lands at interior and boundary rows.
+func rowValue(i int) any {
+	v := map[string]any{"a": fmt.Sprintf("r-%05d", i), "b": int64(i) * 11}
+	switch i % 7 {
+	case 1:
+		v["a"] = nil
+	case 2:
+		v["b"] = nil
+	case 3:
+		v["a"], v["b"] = nil, nil
+	}
+	return v
+}
+
+// nestedRowValue returns a PRESENT ROW whose three fields are containers: a
+// ROW, an ARRAY and a MAP. This is the shape the native columnar reader
+// cannot address by leaf path and must hand to the row reader (#448); before
+// that routing existed the columnar arm answered every one of these fields
+// with NULL and no error.
+//
+// The cycle covers what a container distinguishes: populated, EMPTY (not the
+// same value as NULL), NULL inside a present struct, and a NULL entry inside
+// a present container.
+func nestedRowValue(i int) any {
+	v := map[string]any{
+		"s": map[string]any{"x": int64(i)},
+		"l": []any{fmt.Sprintf("n%05d", i)},
+		"m": map[string]any{fmt.Sprintf("k%d", i%3): int64(i)},
+	}
+	switch i % 7 {
+	case 1: // empty, which is not NULL
+		v["s"] = map[string]any{"x": nil}
+		v["l"] = []any{}
+		v["m"] = map[string]any{}
+	case 2: // NULL containers inside a PRESENT struct
+		v["s"], v["l"], v["m"] = nil, nil, nil
+	case 3: // a NULL element and a NULL map value
+		v["l"] = []any{nil, fmt.Sprintf("n%05d", i)}
+		v["m"] = map[string]any{"k": nil}
+	}
+	return v
 }
 
 // arrayValue returns an ARRAY(STRING) whose length cycles 0..2 so a

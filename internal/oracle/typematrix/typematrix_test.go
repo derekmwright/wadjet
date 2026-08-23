@@ -25,9 +25,11 @@ func TestColumnsCoversAllTypes(t *testing.T) {
 	}
 
 	cols := Columns()
-	if len(cols) != len(want) {
-		t.Fatalf("Columns() has %d entries, want %d (one per type) — a type was added or dropped "+
-			"without updating this test's want list", len(cols), len(want))
+	if len(cols) != len(want)+len(extraShapes) {
+		t.Fatalf("Columns() has %d entries, want %d (one per type, plus %d deliberate shapes) — "+
+			"a type was added or dropped without updating this test's want list, or a second "+
+			"column of an existing type was added without a line in extraShapes saying why",
+			len(cols), len(want)+len(extraShapes), len(extraShapes))
 	}
 
 	seenTypes := make(map[parquet.TypeID]string, len(cols))
@@ -42,7 +44,12 @@ func TestColumnsCoversAllTypes(t *testing.T) {
 		seenNames[c.Name] = true
 
 		if prior, ok := seenTypes[c.Type]; ok {
-			t.Errorf("type %v appears twice in Columns() (%s and %s)", c.Type, prior, c.Name)
+			if _, deliberate := extraShapes[c.Name]; !deliberate {
+				t.Errorf("type %v appears twice in Columns() (%s and %s) and %s is not in "+
+					"extraShapes — say what shape it covers that %s does not, or drop it",
+					c.Type, prior, c.Name, c.Name, prior)
+			}
+			continue
 		}
 		seenTypes[c.Type] = c.Name
 	}
@@ -51,6 +58,26 @@ func TestColumnsCoversAllTypes(t *testing.T) {
 			t.Errorf("Columns() has no entry for type %v — the type-matrix gates cannot see it", typ)
 		}
 	}
+	// The other direction: a shape listed here that is no longer in the
+	// table is an exemption nothing needs.
+	for name := range extraShapes {
+		if !seenNames[name] {
+			t.Errorf("extraShapes names %q, which is not in Columns() — delete the entry", name)
+		}
+	}
+}
+
+// extraShapes names the columns that are a SECOND entry for a type already
+// covered, because the type is not what decides how the value is read.
+//
+// Every name here costs the corpus a set of queries, so each has to earn it
+// by reaching a code path no other column reaches. The test above holds both
+// directions: an unexplained duplicate type fails, and a name here that is
+// not in the table fails.
+var extraShapes = map[string]string{
+	"c_rownest": "a ROW whose fields are containers has no leaf path per field, " +
+		"so it takes the ROW READER on every path where c_row takes the native " +
+		"columnar reader (scan.HasUnsupportedColumnarTypes, #448)",
 }
 
 // TestColumnsAndCorpusAreDeterministic pins the ordering contract Corpus's
