@@ -213,6 +213,16 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 		// ROW: read each child field as a separate leaf column.
 		if col.Type == pqt.TypeRow && len(col.Fields) > 0 {
 			g.Go(func() error {
+				// The ROW's OWN null bit lives nowhere but the definition
+				// levels of its leaves: for an optional group, def < the
+				// group's max def level means the group itself was absent,
+				// and def == that level with a lower leaf level means the
+				// group was present with a null field. Reading only the
+				// leaves collapses the two — #425, where a NULL ROW came
+				// back as a present ROW with every field null. Capture the
+				// group's presence from the first leaf actually read, in
+				// the same page walk that decodes it.
+				measured := false
 				for j, field := range col.Fields {
 					key := col.Name + "." + field.Name
 					childIdx, ok := leafByPath[key]
@@ -222,7 +232,16 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 						}
 						continue
 					}
-					if err := readColumnNative(b.Columns[i].Children[j], fr, rgIdx, childIdx, numRows, field.Type); err != nil {
+					// Only the FIRST leaf read carries the recorder: every
+					// field of one ROW shares the group's def level, so one
+					// walk answers for the column, and the rest decode with
+					// nil (the hot path's shape).
+					var pres *rowPresence
+					if !measured {
+						pres = newRowPresence(b.Columns[i], leaves, childIdx)
+						measured = true
+					}
+					if err := readColumnNative(b.Columns[i].Children[j], fr, rgIdx, childIdx, numRows, field.Type, pres); err != nil {
 						return fmt.Errorf("reading ROW field %s.%s: %w", col.Name, field.Name, err)
 					}
 				}
@@ -275,7 +294,7 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 				}
 				return nil
 			}
-			if err := readColumnNative(b.Columns[i], fr, rgIdx, ci, numRows, col.Type); err != nil {
+			if err := readColumnNative(b.Columns[i], fr, rgIdx, ci, numRows, col.Type, nil); err != nil {
 				return fmt.Errorf("reading column %s: %w", col.Name, err)
 			}
 			if cacheable {
@@ -293,7 +312,11 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 
 // readColumnNative reads all pages from a column chunk into a Vector using
 // our custom ColumnPageReader.
-func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numRows int, catalogType pqt.TypeID) error {
+//
+// presence is nil for every column except the first leaf of a ROW, where it
+// carries the enclosing group's own null bits out of the same definition
+// levels this walk already decodes (see rowPresence).
+func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numRows int, catalogType pqt.TypeID, presence *rowPresence) error {
 	pr := fr.ColumnPages(rgIdx, colIdx)
 	if pr == nil {
 		return fmt.Errorf("column %d not found in row group %d", colIdx, rgIdx)
@@ -359,6 +382,10 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 			return pageOverrunErr(leaves, colIdx, pageRows, offset, numRows)
 		}
 
+		if presence != nil {
+			presence.note(page.DefinitionLevels, offset, pageRows)
+		}
+
 		if err := decodeOnePage(vec, offset, page, drs, dict, int32(maxDefLevel),
 			fileType, catalogType, coerce); err != nil {
 			page.Release()
@@ -374,6 +401,67 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 	}
 
 	return nil
+}
+
+// rowPresence reconstructs a ROW column's OWN null bitmap from the
+// definition levels of one of its leaves.
+//
+// A ROW is a parquet GROUP, and a group has no column chunk of its own: the
+// only record that a whole group was absent is that its leaves' definition
+// levels stop short of the group's level. The native reader used to read
+// only the leaves, so an absent group and a present group whose every field
+// is null decoded identically — a NULL ROW came back as a present ROW of
+// nulls (#425). Every consumer that separates "no value" from "a value made
+// of nothing" then answered wrong: IS NULL, COUNT, an outer join's padding
+// check, and any copy of the row across a shuffle.
+//
+// The rule is the format's: with the group's max definition level d, a leaf
+// definition level >= d means the group was PRESENT (the leaf may still be
+// null at a higher level), and < d means the group itself was absent.
+//
+// newRowPresence returns nil — no recording, no cost — when the group cannot
+// be null (d == 0, every ancestor REQUIRED) or when the leaf sits under a
+// REPEATED ancestor, where definition levels are per ELEMENT and no longer
+// line up one-to-one with the row group's rows. A ROW inside an ARRAY or MAP
+// never reaches this reader anyway (HasUnsupportedColumnarTypes routes those
+// schemas to the row reader), so the second guard is a backstop.
+type rowPresence struct {
+	vec      *batch.Vector // the ROW column's own vector
+	defLevel int32         // the group node's max definition level
+}
+
+func newRowPresence(vec *batch.Vector, leaves []*pqt.SchemaNode, leafIdx int) *rowPresence {
+	if vec == nil || leafIdx < 0 || leafIdx >= len(leaves) {
+		return nil
+	}
+	leaf := leaves[leafIdx]
+	if leaf == nil || leaf.Parent == nil || leaf.MaxRepLevel != 0 {
+		return nil
+	}
+	d := leaf.Parent.MaxDefLevel
+	if d <= 0 {
+		return nil
+	}
+	return &rowPresence{vec: vec, defLevel: int32(d)}
+}
+
+// note marks rows [offset, offset+n) of the ROW column null wherever the
+// page's definition levels say the group was absent. A nil defLevels slice
+// means the leaf is REQUIRED all the way up, so every row is present.
+//
+// Non-inlined for readColumnNative's frame, the reason every other helper
+// hanging off that page loop is.
+//
+//go:noinline
+func (p *rowPresence) note(defLevels []int32, offset, n int) {
+	if len(defLevels) < n {
+		return
+	}
+	for i := 0; i < n; i++ {
+		if defLevels[i] < p.defLevel {
+			p.vec.Nulls.SetNull(offset + i)
+		}
+	}
 }
 
 // rescaleTimestampChunk converts a TIMESTAMP column written elsewhere from

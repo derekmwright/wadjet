@@ -358,6 +358,18 @@ func Corpus() []Query {
 			oracle.CmpOrdered, n)
 
 		if !c.Flat {
+			// A plain projection over a range that CERTAINLY contains a NULL
+			// container. project_<n> above cannot promise that — its filter
+			// (id % 331 = 7) selects no row where the container is null for
+			// three of the four periods — and a NULL container that comes
+			// back as a PRESENT container of nulls is exactly what #425 was:
+			// the stage DAG's columnar ROW reader dropped the group's own
+			// definition level while the single-process row reader kept it.
+			// The range is wide enough to hold several nulls of every period
+			// (103, 107, 109, 113).
+			add("project_nulls_"+n,
+				fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE id < 400 ORDER BY id`, n, tbl),
+				oracle.CmpOrdered, n)
 			continue
 		}
 		// GROUP BY key: the key is serialized into the hash table and
