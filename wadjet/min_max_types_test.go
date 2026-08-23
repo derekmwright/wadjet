@@ -53,18 +53,13 @@ func TestMinMaxEveryType(t *testing.T) {
 			}
 
 			if !ok {
-				// A container type: MIN/MAX has no kernel for it and answers
-				// NULL. PostgreSQL DOES order arrays, so this is a gap, not a
-				// settled position — tracked separately; the aggregate needs
-				// a boxed-value accumulator the way MIN_BY has one. Asserted
-				// so that implementing it fails this line and brings the
-				// entry into the real gate above.
-				if scalar.Rows[0]["lo"] != nil || scalar.Rows[0]["hi"] != nil {
-					t.Fatalf("MIN/MAX over %v now answers (%v, %v) — move this column into the "+
-						"ORDER-BY-referenced arm and delete this branch",
-						col.Type, scalar.Rows[0]["lo"], scalar.Rows[0]["hi"])
-				}
-				return
+				// Every column mbTypeCols() carries — scalar or container —
+				// has an engine-side ORDER BY reference now: #426 gave
+				// ARRAY/ROW/MAP/VECTOR a MIN/MAX answer over the same total
+				// order #415 gave their ORDER BY. A column reaching here
+				// would have no reference to compare against at all, so
+				// fail loud rather than silently skip it.
+				t.Fatalf("mmOrderByReference: %s has no engine-side reference ordering", col.Name)
 			}
 
 			mbAssertTypes(t, scalar.ColumnMetas, mmOutputType(col.Type), "lo", "hi")
@@ -152,10 +147,6 @@ func mmOrderByReference(t *testing.T, db *DB, col string, where ...string) (lo, 
 			return nil
 		}
 		return res.Rows[0]["v"]
-	}
-	switch col {
-	case "c_arr", "c_row", "c_map", "c_vec":
-		return nil, nil, false
 	}
 	return read("ASC"), read("DESC"), true
 }
