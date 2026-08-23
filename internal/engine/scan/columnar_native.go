@@ -1313,6 +1313,24 @@ func scatterRunsNative(
 // copyNativeCoercedDirect converts non-null page data from fileType to catalogType.
 func copyNativeCoercedDirect(vec *batch.Vector, offset int, data pqt.Values, n int, fileType, catalogType pqt.TypeID) error {
 	switch {
+	// Lossless widening: every INT32 is an INT64 and every FLOAT32 is a
+	// FLOAT64, exactly. See parquet.CoercibleTo.
+	case fileType == pqt.TypeInt32 && catalogType == pqt.TypeInt64:
+		src, err := int32Src(data, n, fileType)
+		if err != nil {
+			return err
+		}
+		for i := 0; i < n; i++ {
+			vec.Int64Data[offset+i] = int64(src[i])
+		}
+	case fileType == pqt.TypeFloat32 && catalogType == pqt.TypeFloat64:
+		src, err := float32Src(data, n, fileType)
+		if err != nil {
+			return err
+		}
+		for i := 0; i < n; i++ {
+			vec.Float64Data[offset+i] = float64(src[i])
+		}
 	case fileType == pqt.TypeInt64 && catalogType == pqt.TypeInt32:
 		src, err := int64Src(data, n, fileType)
 		if err != nil {
@@ -1349,6 +1367,30 @@ func copyNativeCoercedScatter(vec *batch.Vector, offset int, data pqt.Values, de
 		return fmt.Errorf("page declares %d values but decoded %d definition levels", n, len(defLevels))
 	}
 	switch {
+	case fileType == pqt.TypeInt32 && catalogType == pqt.TypeInt64:
+		src, err := int32Src(data, 0, fileType)
+		if err != nil {
+			return err
+		}
+		return scatterRunsNative(defLevels, maxDefLevel, n, len(src), func(dstStart, srcStart, count int) {
+			for i := 0; i < count; i++ {
+				vec.Int64Data[offset+dstStart+i] = int64(src[srcStart+i])
+			}
+		}, func(dstStart, count int) {
+			vec.Nulls.SetNullRange(offset+dstStart, count)
+		})
+	case fileType == pqt.TypeFloat32 && catalogType == pqt.TypeFloat64:
+		src, err := float32Src(data, 0, fileType)
+		if err != nil {
+			return err
+		}
+		return scatterRunsNative(defLevels, maxDefLevel, n, len(src), func(dstStart, srcStart, count int) {
+			for i := 0; i < count; i++ {
+				vec.Float64Data[offset+dstStart+i] = float64(src[srcStart+i])
+			}
+		}, func(dstStart, count int) {
+			vec.Nulls.SetNullRange(offset+dstStart, count)
+		})
 	case fileType == pqt.TypeInt64 && catalogType == pqt.TypeInt32:
 		src, err := int64Src(data, 0, fileType)
 		if err != nil {

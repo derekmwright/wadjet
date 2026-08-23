@@ -48,14 +48,14 @@ func TestReadRowsAsRefusesWidthMismatch(t *testing.T) {
 		value    any
 		want     TypeID // what the "catalog" claims
 	}{
-		// R1: the reviewer's shape — an INT32 column read as INT64 asks for
-		// 8 bytes per value out of a page holding 4.
-		{"int64_over_int32", TypeInt32, int64(7), TypeInt64},
-		// The drift the other way round (INT32 over a file INT64) is NOT
-		// here: it is one of the three pairings the native scan converts,
-		// so the row path converts it too. See
-		// TestReadRowsAsCoercesTheSamePairsTheScanDoes.
-		{"float64_over_float32", TypeFloat32, 1.5, TypeFloat64},
+		// The two LOSSLESS WIDENINGS that used to be here — INT64 over a
+		// file INT32 and FLOAT64 over a file FLOAT32 — moved to
+		// TestReadRowsAsCoercesTheSamePairsTheScanDoes when #440 admitted
+		// them. What made them dangerous was the unsafe cast (Values.Int64()
+		// over an INT32 page returns a slice twice as long as its backing
+		// array), not the pairing; converting per value has no such
+		// question, and refusing them stopped a drifted partition compacting
+		// at all. TestReadRowsAsWideProbe still runs the crash shape.
 		{"float32_over_float64", TypeFloat64, 1.5, TypeFloat32},
 		{"int64_over_string", TypeString, "seven", TypeInt64},
 		{"string_over_int64", TypeInt64, int64(7), TypeString},
@@ -93,9 +93,14 @@ func TestReadRowsAsRefusesWidthMismatch(t *testing.T) {
 	}
 }
 
-// TestReadRowsAsWideProbe is the crash probe: enough rows that an INT64 cast
-// over an INT32 page would run well past the end of the page buffer. It must
-// come back as an error, not a read of adjacent heap and not a fault.
+// TestReadRowsAsWideProbe is the crash probe: enough rows that an INT64 CAST
+// over an INT32 page would run well past the end of the page buffer.
+//
+// Since #440 the pairing is admitted, so the assertion is stronger than an
+// error — every one of the 200k values must be the value that was written.
+// A cast over the page would answer with adjacent heap, and that is precisely
+// what this many rows makes visible: the wrong answer is not a fault, it is
+// numbers.
 func TestReadRowsAsWideProbe(t *testing.T) {
 	const n = 200_000
 	rows := make([]map[string]any, n)
@@ -103,8 +108,17 @@ func TestReadRowsAsWideProbe(t *testing.T) {
 		rows[i] = map[string]any{"c": int64(i % 1000)}
 	}
 	r := retypeTestFile(t, Schema{Columns: []Column{{Name: "c", Type: TypeInt32}}}, rows)
-	if _, err := r.ReadRowsAs([]Column{{Name: "c", Type: TypeInt64}}, nil); err == nil {
-		t.Fatal("reading a 200k-row INT32 column as INT64 succeeded, want an error")
+	got, err := r.ReadRowsAs([]Column{{Name: "c", Type: TypeInt64}}, nil)
+	if err != nil {
+		t.Fatalf("reading a 200k-row INT32 column as INT64: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("read %d rows, want %d", len(got), n)
+	}
+	for i, row := range got {
+		if want := int64(i % 1000); row["c"] != want {
+			t.Fatalf("row %d: c = %#v, want %d — the widening read the wrong bytes", i, row["c"], want)
+		}
 	}
 }
 
@@ -208,6 +222,13 @@ func TestReadRowsAsCoercesTheSamePairsTheScanDoes(t *testing.T) {
 		{"int32_over_int64", TypeInt64, int64(7), TypeInt32, int64(7)},
 		{"float64_over_int64", TypeInt64, int64(7), TypeFloat64, float64(7)},
 		{"string_over_date", TypeDate, "2021-03-04", TypeString, "2021-03-04"},
+		// The lossless widenings (#440). The row path boxes an INT32 column
+		// as int64 and a FLOAT32 column as float64 already, so the values
+		// come back unchanged — which is the point: no conversion can lose
+		// anything here.
+		{"int64_over_int32", TypeInt32, int64(7), TypeInt64, int64(7)},
+		{"int64_over_int32_min", TypeInt32, int64(-2147483648), TypeInt64, int64(-2147483648)},
+		{"float64_over_float32", TypeFloat32, 1.5, TypeFloat64, 1.5},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

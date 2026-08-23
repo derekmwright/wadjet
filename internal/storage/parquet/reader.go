@@ -596,15 +596,30 @@ func DecodeCompatible(fileType, catalogType TypeID) bool {
 // from the row reader sends every query on it down that path (#393) — not by
 // the query, so a pairing one path converts and the other refuses is a
 // two-path divergence waiting for a schema change to expose it. The native
-// scan implements exactly these three in copyNativeCoercedDirect /
-// copyNativeCoercedScatter; readColumnToAny implements them here.
+// scan implements exactly this set in copyNativeCoercedDirect /
+// copyNativeCoercedScatter; readColumnToAny implements it here.
 //
-// Anything outside the set stays an error on both paths. Widening INT32 to
-// INT64 is deliberately NOT here: it is indistinguishable from the
-// catalog/file drift this guard exists to catch, and unlike the three below
-// it has no scan-side implementation to agree with.
+// Anything outside the set stays an error on both paths.
 //
-// TypeInt32 → TypeString was admitted here until #439: a bare INT32 leaf
+// LOSSLESS WIDENING is in the set, and is the one class here that cannot
+// change a value: every INT32 is an INT64 and every FLOAT32 is a FLOAT64,
+// exactly. It was left out on the reasoning that a widening drift is
+// indistinguishable from catalog/file drift — true, and the wrong conclusion,
+// because it is a drift whose repair is exact. #428 made compaction read
+// through this gate, so refusing it stopped the partition compacting AT ALL
+// (#440): every pass failed the merge, the failure was a log line, and the
+// partition accumulated small files forever. Before that the compactor read
+// the file's own types and the writer widened on the way out, which is to say
+// the system already performed this coercion — just without anything vetting
+// it.
+//
+// The NARROWING pairings are a different matter and stay for their own
+// reasons: INT64→INT32 truncates and INT64→FLOAT64 loses precision past 2^53,
+// and both are admitted because a file that predates a narrowing catalog
+// change is otherwise unreadable. They are not evidence that any conversion
+// belongs here — and #439 is the proof, from the other direction:
+//
+// TypeInt32 → TypeString was admitted here until then. A bare INT32 leaf
 // carries no evidence its values are day counts, only a leaf the file itself
 // ANNOTATED as DATE does. Admitting it rendered arbitrary integers as ISO
 // dates (100 became "1970-04-11") on any table where a plain INT32 column
@@ -612,6 +627,10 @@ func DecodeCompatible(fileType, catalogType TypeID) bool {
 // this same coercion (#428) it wrote the fabricated dates over the inputs.
 func CoercibleTo(file, want TypeID) bool {
 	switch {
+	case file == TypeInt32 && want == TypeInt64:
+		return true
+	case file == TypeFloat32 && want == TypeFloat64:
+		return true
 	case file == TypeInt64 && want == TypeInt32:
 		return true
 	case file == TypeInt64 && want == TypeFloat64:
@@ -967,10 +986,13 @@ func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, col Column) ([]
 // coerceDecoded converts a column decoded as the file's type into the type
 // the catalog names, for the pairings CoercibleTo admits.
 //
-// INT64→INT32 needs nothing: the row path boxes both as a Go int64 and the
-// INT32 vector narrows on store, which is what the native path's
-// int32(src[i]) does. The other two produce the value the native path
-// produces, from the same helper in the DATE case.
+// Three of the five pairings need nothing here, because the row path boxes a
+// column in the WIDER Go type already: INT32 and INT64 both arrive as int64,
+// FLOAT32 and FLOAT64 both as float64. So INT64→INT32 (the INT32 vector
+// narrows on store, which is what the native path's int32(src[i]) does) and
+// the two lossless widenings are identities on this path. The remaining two
+// produce the value the native path produces, from the same helper in the
+// DATE case.
 func coerceDecoded(values []any, from, to TypeID) {
 	switch {
 	case from == TypeInt64 && to == TypeFloat64:
