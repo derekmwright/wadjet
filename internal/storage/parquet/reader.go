@@ -115,6 +115,38 @@ func (r *Reader) ReadRows(selectedColumns []string) ([]map[string]any, error) {
 // carrying a nested column) silently lost the value. The catalog knows what
 // the file cannot say; this is how it says so.
 func (r *Reader) ReadRowsAs(schema []Column, selectedColumns []string) ([]map[string]any, error) {
+	return r.readRowGroupRange(schema, selectedColumns, 0, r.fr.NumRowGroups())
+}
+
+// ReadRowGroup reads all rows from a specific row group.
+func (r *Reader) ReadRowGroup(index int, selectedColumns []string) ([]map[string]any, error) {
+	return r.ReadRowGroupAs(index, nil, selectedColumns)
+}
+
+// ReadRowGroupAs is ReadRowsAs over ONE row group: the same columns, the
+// same types, the same assembly, one group's worth of rows at a time. It
+// exists so a caller that cannot hold a whole file's boxed rows (compaction,
+// ANALYZE) does not need a second reader to avoid it.
+//
+// It used to BE a second reader, and the two disagreed: this one resolved
+// every column through leafByName, which no ARRAY/ROW/MAP has an entry for,
+// so a container column was filled with nils and dropped from every row —
+// silently, with no error and no dispatch to the assembler. Compaction is
+// ReadRowGroup → WriteRows over the table's full schema, so merging a table
+// carrying any nested column wrote that column as NULL for every row and
+// replaced the inputs with the result (#428). ADR-0018 §3: a file is
+// readable through all of the decode paths or through none of them.
+func (r *Reader) ReadRowGroupAs(index int, schema []Column, selectedColumns []string) ([]map[string]any, error) {
+	if index < 0 || index >= r.fr.NumRowGroups() {
+		return nil, fmt.Errorf("row group index %d out of range [0, %d)", index, r.fr.NumRowGroups())
+	}
+	return r.readRowGroupRange(schema, selectedColumns, index, index+1)
+}
+
+// readRowGroupRange is the ONE row-path entry: it resolves the columns to
+// read, retypes them from the caller's schema, and dispatches to the flat or
+// the nested assembler over row groups [from, to).
+func (r *Reader) readRowGroupRange(schema []Column, selectedColumns []string, from, to int) ([]map[string]any, error) {
 	readCols := r.schema.Columns
 	if len(selectedColumns) > 0 {
 		readCols = filterSchemaColumns(r.schema.Columns, selectedColumns)
@@ -124,27 +156,20 @@ func (r *Reader) ReadRowsAs(schema []Column, selectedColumns []string) ([]map[st
 		return nil, err
 	}
 
-	// Check if we have nested columns that need assembly.
-	hasNested := false
 	for _, col := range readCols {
-		if col.Type == TypeArray || col.Type == TypeMap || col.Type == TypeRow {
-			hasNested = true
-			break
+		if isNestedType(col.Type) {
+			return r.readRowsNested(readCols, from, to)
 		}
 	}
-
-	if !hasNested {
-		return r.readRowsFlat(readCols)
-	}
-	return r.readRowsNested(readCols)
+	return r.readRowsFlat(readCols, from, to)
 }
 
 // readRowsFlat is the original flat-schema read path (unchanged behavior).
-func (r *Reader) readRowsFlat(readCols []Column) ([]map[string]any, error) {
+func (r *Reader) readRowsFlat(readCols []Column, from, to int) ([]map[string]any, error) {
 	leafByName := TopLevelLeafIndex(r.fr.Leaves())
 
 	var allRows []map[string]any
-	for rgIdx := 0; rgIdx < r.fr.NumRowGroups(); rgIdx++ {
+	for rgIdx := from; rgIdx < to; rgIdx++ {
 		if err := CheckRowGroupRowCount(rgIdx, r.fr.RowGroupNumRows(rgIdx)); err != nil {
 			return nil, err
 		}
@@ -227,14 +252,14 @@ func nestedReadPlans(root *SchemaNode, readCols []Column, numLeaves int) ([]nest
 
 // readRowsNested handles schemas with ARRAY, MAP, or ROW columns by reading
 // leaf-level pages with def/rep levels and assembling nested structures.
-func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
+func (r *Reader) readRowsNested(readCols []Column, from, to int) ([]map[string]any, error) {
 	leaves := r.fr.Leaves()
 
 	leafByName := TopLevelLeafIndex(leaves)
 	plans, needLeaf := nestedReadPlans(r.fr.SchemaRoot(), readCols, len(leaves))
 
 	var allRows []map[string]any
-	for rgIdx := 0; rgIdx < r.fr.NumRowGroups(); rgIdx++ {
+	for rgIdx := from; rgIdx < to; rgIdx++ {
 		if err := CheckRowGroupRowCount(rgIdx, r.fr.RowGroupNumRows(rgIdx)); err != nil {
 			return nil, err
 		}
@@ -435,52 +460,6 @@ func pathKey(path []string) string {
 		result += "." + p
 	}
 	return result
-}
-
-// ReadRowGroup reads all rows from a specific row group.
-func (r *Reader) ReadRowGroup(index int, selectedColumns []string) ([]map[string]any, error) {
-	if index < 0 || index >= r.fr.NumRowGroups() {
-		return nil, fmt.Errorf("row group index %d out of range [0, %d)", index, r.fr.NumRowGroups())
-	}
-
-	readCols := r.schema.Columns
-	if len(selectedColumns) > 0 {
-		readCols = filterSchemaColumns(r.schema.Columns, selectedColumns)
-	}
-
-	leafByName := TopLevelLeafIndex(r.fr.Leaves())
-
-	if err := CheckRowGroupRowCount(index, r.fr.RowGroupNumRows(index)); err != nil {
-		return nil, err
-	}
-	numRows := int(r.fr.RowGroupNumRows(index))
-	colValues := make([][]any, len(readCols))
-	for i, col := range readCols {
-		leafIdx, ok := leafByName[col.Name]
-		if !ok {
-			colValues[i] = make([]any, numRows)
-			continue
-		}
-		vals, err := readColumnToAny(r.fr, index, leafIdx, numRows, col)
-		if err != nil {
-			return nil, fmt.Errorf("reading column %s: %w", col.Name, err)
-		}
-		colValues[i] = vals
-	}
-
-	rows := make([]map[string]any, numRows)
-	for row := 0; row < numRows; row++ {
-		m := make(map[string]any, len(readCols))
-		for i, col := range readCols {
-			if row < len(colValues[i]) {
-				if v := colValues[i][row]; v != nil {
-					m[col.Name] = v
-				}
-			}
-		}
-		rows[row] = m
-	}
-	return rows, nil
 }
 
 // float32sFromBytes decodes a VECTOR leaf's fixed-length bytes back into the

@@ -359,7 +359,15 @@ func (c *Compactor) mergeAndWriteFiles(ctx context.Context, files []catalog.File
 		deleted := deleteSet[f.Path]
 		var base int64
 		for rg := 0; rg < reader.NumRowGroups(); rg++ {
-			rows, err := reader.ReadRowGroup(rg, cols)
+			// ReadRowGroupAs, not ReadRowGroup: the TABLE's schema is the
+			// authority on eight types a parquet file cannot describe
+			// (IPv4, IPv6, MAC, PORT, PROTOCOL, DURATION, BYTES, UUID —
+			// buildLeafSchemaElement writes no logical annotation for any
+			// of them). Read without it, an IPv6 comes back as a Go string
+			// of sixteen raw bytes, which the writer below hands
+			// net.ParseIP and REFUSES — compaction could not read back its
+			// own output. The catalog knows what the file cannot say.
+			rows, err := reader.ReadRowGroupAs(rg, schema.Columns, cols)
 			if err != nil {
 				return nil, fmt.Errorf("reading row group %d from %s: %w", rg, f.Path, err)
 			}

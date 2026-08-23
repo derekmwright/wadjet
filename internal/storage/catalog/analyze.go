@@ -235,6 +235,13 @@ func computeFileSketches(ctx context.Context, store objstore.Store, bucket, path
 		samplers: make(map[string]*ReservoirSampler, len(schema.Columns)),
 		colTypes: make(map[string]parquet.TypeID, len(schema.Columns)),
 	}
+	// The columns actually sketched, in schema order, are also the columns
+	// READ: ReadRowGroup assembles the nested containers it is asked for
+	// (#428), and this pass discards every one of them — IsHLLSupportedType
+	// says no to ARRAY, ROW and MAP because the value→hash encoding is not
+	// well defined for them. Projecting keeps that "skip" from costing a
+	// full recursive assembly of every container in the file.
+	var sketchCols []string
 	for _, col := range schema.Columns {
 		if !IsHLLSupportedType(col.Type) {
 			continue
@@ -242,6 +249,7 @@ func computeFileSketches(ctx context.Context, store objstore.Store, bucket, path
 		out.hlls[col.Name] = &HLL{}
 		out.samplers[col.Name] = NewReservoirSampler(SampleDefaultSize)
 		out.colTypes[col.Name] = col.Type
+		sketchCols = append(sketchCols, col.Name)
 	}
 
 	nrg := reader.NumRowGroups()
@@ -251,7 +259,12 @@ func computeFileSketches(ctx context.Context, store objstore.Store, bucket, path
 			return nil, err
 		}
 		out.rgStats[rg] = reader.RowGroupStats(rg)
-		rows, err := reader.ReadRowGroup(rg, nil)
+		if len(sketchCols) == 0 {
+			// Nothing to sketch: the footer stats above are the whole
+			// answer, and a projection of no columns would read them all.
+			continue
+		}
+		rows, err := reader.ReadRowGroup(rg, sketchCols)
 		if err != nil {
 			return nil, fmt.Errorf("row group %d: %w", rg, err)
 		}
