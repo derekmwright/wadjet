@@ -91,6 +91,9 @@ var tmFuzzPins = map[int64]typematrix.Pin{
 // match. Same contract as TestTypeMatrixBatchReuse, over generated shapes
 // instead of the fixed corpus.
 func TestTypeMatrixFuzzBatchReuse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping type-matrix gate under -short — the dedicated CI step runs it without -short")
+	}
 	ctx := context.Background()
 	db := tmOpen(t)
 	schema := shapegen.TypeMatrix()
@@ -175,16 +178,42 @@ func TestTypeMatrixFuzzBatchReuse(t *testing.T) {
 // generated arm, keyed "<seed>/<toggle>".
 var tmFuzzOptPins = map[string]typematrix.Pin{
 	"11/partitioned-agg": {Issue: "#402", Reason: "GROUP BY + ORDER BY + LIMIT returns a " +
-		"different top-N with partitioned aggregation off, under a total order."},
+		"different top-N with partitioned aggregation off, under a total order. " +
+		"INTERMITTENT, and unlike #391 there is no other gate that FORCES it: the tie-break " +
+		"among rows sharing the LIMIT boundary's ORDER BY value depends on the partial-state " +
+		"merge order, which is not fixed by seed or SQL text, so the same seed and toggle " +
+		"diverge on roughly 60-75% of individual invocations and agree on the rest (measured " +
+		"2026-08-23, ~8 samples). Requiring a hit on every test run made this flake ~40% of the " +
+		"time. tmFuzzIntermittentOptRetries names this key so the comparison is retried up to a " +
+		"bound before concluding \"no divergence\" — every attempt still runs the real compare, " +
+		"and a divergence is logged the instant one appears, so this tolerates the flake without " +
+		"exempting the entry (ADR-0013 amendment 2026-08-23)."},
 	"18/scan-filter": {Issue: "#401", Reason: "A qualified column in WHERE fails to resolve once " +
 		"the filter falls back from the scan to the operator level."},
 	"18/all-off": {Issue: "#401", Reason: "Same resolution failure, with every switch off."},
+}
+
+// tmFuzzIntermittentOptRetries names optimization-invariance pins whose
+// divergence has no known forcing trigger (contrast #391, which
+// TestTypeMatrixBatchReuse's poison-on-release forces on every invocation),
+// and how many times to retry the comparison before the ratchet concludes "no
+// divergence this run". Every attempt is a real comparison against the
+// baseline; the loop stops at the first divergence, which is logged exactly
+// as a single-attempt divergence would be. This only shrinks the chance that
+// an intermittent defect happens to sit out an entire test run — it does not
+// change what counts as a divergence, and a pin not listed here still gets
+// exactly one attempt.
+var tmFuzzIntermittentOptRetries = map[string]int{
+	"11/partitioned-agg": 10, // #402
 }
 
 // TestTypeMatrixFuzzOptimizationInvariance: generated SQL over all 22 types,
 // answered with every optimization on and then once per kill switch with that
 // one off.
 func TestTypeMatrixFuzzOptimizationInvariance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping type-matrix gate under -short — the dedicated CI step runs it without -short")
+	}
 	ctx := context.Background()
 	db := tmOpen(t)
 	schema := shapegen.TypeMatrix()
@@ -210,6 +239,7 @@ func TestTypeMatrixFuzzOptimizationInvariance(t *testing.T) {
 		base *oracle.Result
 	}
 	var corpus []entry
+	var baseErrors int
 	for _, seed := range seeds {
 		q := shapegen.New(seed, schema).Query()
 		q.Seed = seed
@@ -218,6 +248,7 @@ func TestTypeMatrixFuzzOptimizationInvariance(t *testing.T) {
 		}
 		res, err := tmRun(ctx, db, q.SQL())
 		if err != nil {
+			baseErrors++ // unsupported shapes are not this arm's business
 			continue
 		}
 		corpus = append(corpus, entry{q: q, seed: seed, base: res})
@@ -225,8 +256,22 @@ func TestTypeMatrixFuzzOptimizationInvariance(t *testing.T) {
 	if len(corpus) == 0 {
 		t.Fatal("no generated query produced a baseline result")
 	}
-	t.Logf("type-matrix fuzz (optimization invariance): %d generated queries × %d configurations",
-		len(corpus), len(toggles)+1)
+	// A fixed absolute floor doesn't fit here the way tmOptEngagementFloor
+	// does: WADJET_TM_FUZZ_SEED_COUNT/START deliberately narrow or move the
+	// window for local hunting, so the floor has to scale with the window
+	// actually requested rather than a corpus size fixed at compile time.
+	// Same 90% rationale as tmOptEngagementFloor: catches a regression that
+	// makes most of the window newly unsupported without tripping on the
+	// ordinary one-seed drift a plan-shape change can cause.
+	if fuzzOptFloor := len(seeds) * 9 / 10; len(corpus) < fuzzOptFloor {
+		t.Errorf("only %d of %d generated queries produced a baseline result (%d errored), below "+
+			"the floor of %d (90%% of the window). A baseline error for a genuinely unsupported "+
+			"shape is not this arm's business, but a regression that makes most of the window "+
+			"error would shrink this gate silently instead of failing it — find out what stopped "+
+			"answering before lowering the floor.", len(corpus), len(seeds), baseErrors, fuzzOptFloor)
+	}
+	t.Logf("type-matrix fuzz (optimization invariance): %d generated queries × %d configurations "+
+		"(%d baseline errors)", len(corpus), len(toggles)+1, baseErrors)
 
 	optRatchet := newTMRatchet()
 	run := func(label string, off []*optswitch.Toggle) {
@@ -252,18 +297,29 @@ func TestTypeMatrixFuzzOptimizationInvariance(t *testing.T) {
 					}
 					t.Errorf(format, args...)
 				}
-				got, err := tmRun(ctx, db, sql)
-				if err != nil {
-					report("seed %d FAILED with %s disabled: %v\n  SQL: %s", e.seed, label, err, sql)
-					continue
+
+				attempts := 1
+				if n, ok := tmFuzzIntermittentOptRetries[key]; ok {
+					attempts = n
 				}
-				if diff := oracle.Compare(e.base, got, e.q.CompareSpec()); diff != "" {
-					report("seed %d (shape %s) diverges with %s disabled:\n  SQL: %s\n  %s\n"+
-						"  baseline: %s\n  got: %s",
-						e.seed, e.q.Shape, label, sql, diff, tmRender(e.base, 3), tmRender(got, 3))
-					continue
+				diverged := false
+				for attempt := 1; attempt <= attempts && !diverged; attempt++ {
+					got, err := tmRun(ctx, db, sql)
+					if err != nil {
+						report("seed %d FAILED with %s disabled (attempt %d/%d): %v\n  SQL: %s",
+							e.seed, label, attempt, attempts, err, sql)
+						diverged = true
+						continue
+					}
+					if diff := oracle.Compare(e.base, got, e.q.CompareSpec()); diff != "" {
+						report("seed %d (shape %s) diverges with %s disabled (attempt %d/%d):\n"+
+							"  SQL: %s\n  %s\n  baseline: %s\n  got: %s",
+							e.seed, e.q.Shape, label, attempt, attempts, sql, diff,
+							tmRender(e.base, 3), tmRender(got, 3))
+						diverged = true
+					}
 				}
-				if pinned {
+				if !diverged && pinned {
 					optRatchet.observe(key, false)
 				}
 			}

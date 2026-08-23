@@ -1,6 +1,7 @@
 # ADR-0013: The correctness gates, and what they deliberately do not gate
 
-Status: Accepted (2026-08-19; nondeterminism class 9 added 2026-08-22)
+Status: Accepted (2026-08-19; nondeterminism class 9 added 2026-08-22; type-matrix
+gates and the per-issue ratchet amendment added 2026-08-23)
 
 ## Context
 
@@ -93,6 +94,72 @@ agreeing**, so an exemption cannot outlive its bug. A pin must also check
 column SHAPE, not only values: a wrong 2-row answer once "agreed" by
 coincidence because it carried the right two values.
 
+### Amendment 2026-08-23: the type-matrix gates, and a per-issue ratchet
+
+The three gates above share one blind spot: their corpora carry three storage
+types (Int32, Float64, String — ClickBench adds Int64 and Date). Nineteen of
+the engine's twenty-two types therefore had no differential coverage from any
+of them, which is how `(*Vector).GetValue`'s TypeBytes arm aliasing the
+column arena (#391) shipped through every one of them. `internal/oracle/
+typematrix` adds a fixture covering all 22 types and five gates consume it:
+`wadjet.TestTypeMatrixNoProcessKillers`, `TestTypeMatrixBatchReuse` (poisoned
+pool vs clean pool — see `internal/engine/batch/poison.go`),
+`TestTypeMatrixOptimizationInvariance` and its fuzz-generated counterpart
+(#287's kill-switch differential over all 22 types), and
+`coordinator.TestTypeMatrixTwoPath` (stage DAG vs single process, per type).
+These follow the same Pin mechanism as the existing gates (§Pins).
+
+**The ratchet these gates use is per ISSUE, not per pin.** The "this bug is
+fixed, delete the pin" half of a Pin's ratchet is satisfied by ANY pin naming
+that issue still diverging, not by every pin naming it. The trade this
+accepts: an issue with many pins can have most of them silently start
+agreeing while the ratchet stays green on the strength of one still
+diverging — #396 (the stage DAG returns network/UUID columns in raw storage
+form) has 37 pins, so 36 of them could start agreeing without the gate
+noticing.
+
+This is deliberate, not an oversight, for two reasons:
+
+1. **Some of these defects are nondeterministic by construction.** #391
+   answers with whatever the allocator wrote over a freed arena, so a given
+   entry agrees by luck on some fraction of runs. A per-pin ratchet across
+   many pins of the same nondeterministic issue would flap — some pin, on
+   some run, agrees — for a reason that has nothing to do with the bug being
+   fixed. `typematrix.Pin.GatedBy` names the OTHER gate that forces the
+   divergence deterministically (poison-on-release forces #391's reuse on
+   every invocation), exempting a pin from this arm's must-still-diverge
+   check without exempting it from anything else — the "matches no corpus
+   entry" check still applies, and a real divergence, when this arm does see
+   one, is still logged.
+2. **Not every intermittent defect has a forcing gate.** #402 (GROUP BY +
+   ORDER BY + LIMIT returns a different top-N with partitioned aggregation
+   off, under a total order) diverges on roughly 60-75% of individual
+   invocations of the same seed and toggle, with no known trigger that forces
+   it every time — unlike #391, nothing else in the suite can serve as its
+   `GatedBy` gate. `wadjet.TestTypeMatrixFuzzOptimizationInvariance` retries
+   such a pin's comparison a bounded number of times
+   (`tmFuzzIntermittentOptRetries`) before concluding "no divergence this
+   run": every attempt is a real comparison against the baseline, the loop
+   stops and logs the instant one diverges, and only an unbroken run of
+   agreements — astronomically unlikely at the chosen bound — reaches the
+   ratchet's fail path. This tolerates the flake without becoming an
+   exemption: the entry is compared every time, just more than once when
+   needed.
+
+**Mitigation for the 36-of-37 gap**: `tmRatchet.finish` (wadjet package) and
+`tmdRatchet.finish` (coordinator package) log a summary line per issue on
+every run — `"<kind> issue #N: k of m pins still diverge this run"` — whether
+or not the ratchet fires. A real fix narrowing #396 from 37/37 to 1/37 is
+visible in the test log across however many runs it takes to land, long
+before the last pin agrees and the ratchet actually fails. No numeric
+threshold is enforced on the count (e.g. failing below `m` pins still
+diverging): the corpus is generated per type (`typematrix.Columns()`), so `m`
+shifts by design when a type or query shape is added, and a threshold tied to
+today's `m` would need updating for reasons unrelated to the bug it gates.
+The summary line is the record; a human (or a future amendment, if the gap
+proves costly in practice) decides whether a shrinking `k` warrants action
+before it reaches 1.
+
 ### Scale
 
 - **Semantics** are gated small (SF0.01, and a PostgreSQL arm at SF0.1/SF1).
@@ -115,8 +182,17 @@ coincidence because it carried the right two values.
   #320 shape from the gate built to catch it.
 - Adding a kill switch to an optimization extends the invariance oracle for
   free and is part of the definition of done (#287).
+- A pin whose issue has many entries relies on the per-issue summary line
+  (§Amendment 2026-08-23), not on the ratchet itself, to surface a fix that
+  narrows the count without silencing every pin — read the log, not just the
+  pass/fail, when triaging one of these issues.
 
 ## Related
 
 - ADR-0012 (semantics authority), ADR-0011 (performance measurement)
 - `internal/oracle/fingerprint.go`, `benchmarks/tpch/oracle_semantics_test.go`
+- `internal/oracle/typematrix`, `wadjet/type_matrix_test.go`,
+  `wadjet/type_matrix_fuzz_test.go`, `wadjet/type_matrix_crash_test.go`,
+  `internal/coordinator/type_matrix_distributed_test.go`,
+  `internal/engine/batch/poison.go`,
+  `docs/testing/gate-coverage-audit-2026-08-22.md`

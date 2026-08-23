@@ -697,23 +697,18 @@ func duckdbCorpus() []duckdbCase {
 			JOIN supplier b ON a.s_nationkey = b.s_nationkey AND a.s_suppkey < 5`},
 		duckdbCase{name: "WhereClauseColumnConjunct", sql: `SELECT COUNT(*) AS c FROM supplier a
 			JOIN supplier b ON a.s_nationkey = b.s_nationkey WHERE a.s_suppkey < b.s_suppkey`},
-		// The residual on an OUTER join is a DIFFERENT defect and is still
-		// open. An outer join's ON is evaluated BEFORE the NULL-padding, so
-		// the residual cannot be lifted above the join the way the inner
-		// case is — it would delete the unmatched rows the join exists to
-		// preserve. Carrying it would need a residual predicate on the
-		// executor's outer-join probe, which does not exist: HashJoin
-		// applies SemiAntiFilter on the semi/anti path only. Both arms used
-		// to DROP it identically and answer anyway; since #351 both refuse
-		// the query outright, which is the same gap said out loud. Pinned
-		// either way until the residual probe lands.
+		// The residual on an OUTER join was a DIFFERENT defect from the
+		// inner-join case above: an outer join's ON is evaluated BEFORE the
+		// NULL-padding, so the residual could not be lifted above the join
+		// the way the inner case is — it would delete the unmatched rows the
+		// join exists to preserve. HashJoin's Residual field (join.go) now
+		// carries exactly this, evaluated during the outer-join probe before
+		// padding — both arms answer this correctly and match DuckDB
+		// (verified 2026-08-23; this entry's knownBug was stale, gated fully
+		// with no exemption, and passing).
 		duckdbCase{name: "OuterJoinOnResidual", sql: `SELECT COUNT(*) AS c FROM nation n
 			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey
-			WHERE r.r_name IS NULL`,
-			knownBug: "a non-equi ON conjunct spanning both sides of an OUTER join has no representation: it " +
-				"cannot move above the join (that would delete the unmatched rows) and the executor has no " +
-				"residual predicate on an outer join's probe. #336 fixed the inner-join half only; since " +
-				"#351 both arms REFUSE the query rather than answering it with the conjunct dropped"},
+			WHERE r.r_name IS NULL`},
 		// Window VALUE functions over a non-float column (#345). LAG, LEAD,
 		// FIRST_VALUE, LAST_VALUE and NTH_VALUE return a value taken FROM
 		// their input column, so the output type is that column's type — and
@@ -853,21 +848,19 @@ func duckdbCorpus() []duckdbCase {
 			WHERE a.r_regionkey < b.n_nationkey`},
 		duckdbCase{name: "KeylessCrossJoinValues", sql: `SELECT a.r_name, b.n_name FROM region a, nation b
 			WHERE a.r_regionkey < b.n_nationkey AND b.n_nationkey < 3 ORDER BY a.r_name, b.n_name`},
-		// Found while fixing the above, NOT fixed here and pinned on both
-		// arms: an ON conjunct restricting one side of a FULL OUTER join is
-		// pushed into that side's scan. For a LEFT join that is legal — a
-		// build row that fails the conjunct simply never matches, and the
-		// build side is not preserved — but a FULL join preserves it, so
-		// removing it at the scan deletes rows the join owes. Regions 3 and 4
-		// vanish instead of arriving unmatched: 25 rows for an answer of 27.
-		// The LEFT-join control beside it must not move.
+		// Found while fixing the above: an ON conjunct restricting one side
+		// of a FULL OUTER join cannot be pushed into that side's scan the
+		// way it can for LEFT (LeftJoinOnConjunctBuildSide below) — a FULL
+		// join preserves rows a scan-level push would delete (Regions 3 and
+		// 4 would vanish instead of arriving unmatched: 25 rows for an
+		// answer of 27). #358's Residual join field (join.go) now carries
+		// the conjunct through the probe instead of pushing it, on both
+		// arms — this and the sibling family below (#358: the outer-join ON
+		// residual, per join type) pin that fix (verified 2026-08-23; this
+		// entry's knownBug was stale, gated fully with no exemption, and
+		// passing).
 		duckdbCase{name: "FullJoinOnConjunctBuildSide", sql: `SELECT COUNT(*) AS c FROM nation n
-			FULL OUTER JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3`,
-			knownBug: "an ON conjunct over one side of a FULL OUTER join has nowhere legal to go: pushing it " +
-				"into that side's scan deletes the rows the join would have emitted unmatched (25 rows " +
-				"against DuckDB's 27, the answer before #351), and it cannot be lifted above the join " +
-				"either. Both arms now refuse the query instead. Legal for LEFT " +
-				"(LeftJoinOnConjunctBuildSide below stays correct), wrong for FULL"},
+			FULL OUTER JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3`},
 		duckdbCase{name: "LeftJoinOnConjunctBuildSide", sql: `SELECT COUNT(*) AS c FROM nation n
 			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND r.r_regionkey < 3`},
 		// #353 — the aggregates that #339 left holding a finished value on
@@ -1047,20 +1040,20 @@ func duckdbCorpus() []duckdbCase {
 		// reference and must NOT be refused — it means the cross product.
 		duckdbCase{name: "OnClauseAllConjunctsPushed", sql: `SELECT COUNT(*) AS c FROM nation n
 			JOIN region r ON r.r_regionkey = 1 AND r.r_name = 'AMERICA'`},
-		// The OUTER-join half of #351 has no fix, only a loud failure. The
-		// inner-join route — lift the conjunct into a filter above the join —
-		// is not available here: an outer join's ON is evaluated BEFORE the
-		// NULL-padding, so a residual moved above the join would delete the
-		// rows the join exists to preserve. Both arms now REFUSE the query.
-		// The old behavior was worse and quieter: the expression reached the
-		// executor as a column name, matched nothing, and every left row came
-		// back padded — the answer to `+ 100` by luck and wrong for `+ 3`.
+		// The OUTER-join half of #351: an outer join's ON is evaluated
+		// BEFORE the NULL-padding, so the inner-join route — lift the
+		// conjunct into a filter above the join — is not available here; it
+		// would delete the rows the join exists to preserve. The old
+		// behavior was worse and quieter: the expression reached the
+		// executor as a column name, matched nothing, and every left row
+		// came back padded — the answer to `+ 100` by luck and wrong for
+		// `+ 3`. #358's Residual join field now carries the expression
+		// through the probe on both arms instead (verified 2026-08-23; this
+		// entry's knownBug was stale, gated fully with no exemption, and
+		// passing) — see the #358 family below, which pins this shape on
+		// every join disposition.
 		duckdbCase{name: "OuterJoinExpressionKey", sql: `SELECT n.n_name, r.r_name FROM nation n
-			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey + 3 ORDER BY n.n_name`,
-			knownBug: "an ON equality whose operand is an expression has no representation on an OUTER join: " +
-				"the executor matches on column names and the conjunct cannot be lifted above the join " +
-				"without deleting the padded rows. Both arms refuse it rather than answering with the " +
-				"expression treated as a column (#351)"},
+			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey + 3 ORDER BY n.n_name`},
 
 		// #355 — an aggregate over a RENAMED subquery column. walkStages
 		// treats a Project as a passthrough, so the rename never happens on

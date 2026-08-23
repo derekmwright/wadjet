@@ -50,25 +50,13 @@ var tmPins = map[string]typematrix.Pin{}
 // that is a property of the TYPE rather than of one query shape. Same ratchet:
 // every entry a prefix covers is still compared, and if EVERY entry under a
 // prefix agrees, the prefix fails.
-var tmPinPrefixes = map[string]typematrix.Pin{
-	"minby_c_bytes": {
-		Issue: "#391",
-		Reason: "(*Vector).GetValue's TypeBytes arm (internal/engine/batch/vector.go:678) " +
-			"returns v.BytesData.Value(i), a slice ALIASING the column arena. MIN_BY/MAX_BY " +
-			"retain that box in minMaxByState.bestVal across every later batch, so once the " +
-			"pool recycles the batch the aggregate answers with whatever was written over " +
-			"those bytes. Being fixed on a separate branch.",
-	},
-	"maxby_c_bytes": {
-		Issue:  "#391",
-		Reason: "Same aliasing arm as minby_c_bytes; MAX_BY retains the same box.",
-	},
-	"minby_scalar_c_bytes": {
-		Issue: "#391",
-		Reason: "Same aliasing arm, on the whole-input (no GROUP BY) aggregate path — so the " +
-			"defect is not specific to grouped aggregation.",
-	},
-}
+//
+// #391 ((*Vector).GetValue's TypeBytes arm aliasing the column arena) is fixed
+// on main (fa22f72); its three prefixes (minby_c_bytes, maxby_c_bytes,
+// minby_scalar_c_bytes) are deleted rather than left in place, per the ratchet
+// in tmRatchet.finish — the entries they covered now agree, which IS the
+// fix's proof.
+var tmPinPrefixes = map[string]typematrix.Pin{}
 
 // tmOpen loads the type matrix into an embedded DB.
 func tmOpen(t *testing.T) *DB {
@@ -182,6 +170,14 @@ func (r *tmRatchet) observe(key string, diverged bool) {
 // run would make the gate flap; requiring the issue to show itself somewhere
 // keeps the ratchet exact, because a real fix silences every one of its pins
 // at once.
+//
+// The trade this accepts (ADR-0013 amendment 2026-08-23): an issue with many
+// pins can have most of them silently start agreeing — e.g. #396's 37 pins —
+// while the ratchet stays green on the strength of one. That is not logged as
+// a pass/fail signal (only the whole issue is), so finish() also logs a
+// "k of m pins still diverge" summary per issue on every run: a real fix
+// narrowing from 37/37 to 1/37 is visible in the test log long before the
+// last pin agrees and the ratchet actually fires.
 func (r *tmRatchet) finish(t *testing.T, pins map[string]typematrix.Pin, kind string) {
 	t.Helper()
 	keys := make([]string, 0, len(pins))
@@ -192,6 +188,8 @@ func (r *tmRatchet) finish(t *testing.T, pins map[string]typematrix.Pin, kind st
 
 	issueDiverged := map[string]bool{}
 	issueReason := map[string]string{}
+	issueTotal := map[string]int{}
+	issueDivergedCount := map[string]int{}
 	var issues []string
 	for _, k := range keys {
 		p := pins[k]
@@ -201,23 +199,32 @@ func (r *tmRatchet) finish(t *testing.T, pins map[string]typematrix.Pin, kind st
 				kind, k, p.Issue)
 			continue
 		}
-		if p.GatedBy != "" {
-			// Another arm owns the must-still-diverge half for this issue.
-			issueDiverged[p.Issue] = true
-			continue
-		}
-		if _, seen := issueReason[p.Issue]; !seen {
+		if _, seen := issueTotal[p.Issue]; !seen {
 			issues = append(issues, p.Issue)
+		}
+		issueTotal[p.Issue]++
+		if r.diverged[k] {
+			issueDivergedCount[p.Issue]++
+			issueDiverged[p.Issue] = true
+		}
+		if p.GatedBy != "" {
+			// Another arm owns the must-still-diverge half for this issue —
+			// this pin does not have to show up here for the issue to count
+			// as still broken.
+			issueDiverged[p.Issue] = true
+		} else if issueReason[p.Issue] == "" {
 			issueReason[p.Issue] = p.Reason
 		}
-		if r.diverged[k] {
-			issueDiverged[p.Issue] = true
-		}
 	}
+	sort.Strings(issues)
 	for _, issue := range issues {
-		if !issueDiverged[issue] {
+		t.Logf("%s issue %s: %d of %d pins still diverge this run", kind, issue,
+			issueDivergedCount[issue], issueTotal[issue])
+		// An issue whose every pin names GatedBy has no Reason recorded here
+		// — this arm was never the one enforcing its must-still-diverge half.
+		if reason := issueReason[issue]; reason != "" && !issueDiverged[issue] {
 			t.Errorf("every %s pin for %s now AGREES, so it is FIXED:\n  %s\n"+
-				"Delete those pins so the entries are gated again.", kind, issue, issueReason[issue])
+				"Delete those pins so the entries are gated again.", kind, issue, reason)
 		}
 	}
 }
@@ -225,6 +232,9 @@ func (r *tmRatchet) finish(t *testing.T, pins map[string]typematrix.Pin, kind st
 // TestTypeMatrixBatchReuse compares each corpus query answered with the batch
 // pool poisoned on release against the same query answered normally.
 func TestTypeMatrixBatchReuse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping type-matrix gate under -short — the dedicated CI step runs it without -short")
+	}
 	ctx := context.Background()
 	db := tmOpen(t)
 	corpus := typematrix.Corpus()
@@ -321,7 +331,22 @@ func TestTypeMatrixBatchReuse(t *testing.T) {
 // (internal/planner/physical/plan.go:8020) calls in.Detach() on its input — so
 // the scan's pooled batch never goes back to its pool, and there is no reuse
 // to poison. That is a real property of the engine, not a harness limitation.
-const tmReuseEngagementFloor = 200
+//
+// Set to 90% of the 205 entries actually measured recycling a batch
+// (2026-08-23, deterministic across runs — this corpus has no randomized
+// planning). 90%, not the measured count itself, so the floor still catches a
+// regression that stops a chunk of the corpus from recycling without tripping
+// on the ordinary one-or-two-entry drift a plan-shape change can cause.
+const tmReuseEngagementFloor = 184
+
+// tmOptEngagementFloor is the equivalent floor for
+// TestTypeMatrixOptimizationInvariance's baseline pass: how many corpus
+// entries must produce a baseline result before the per-toggle comparisons
+// even start. Same rationale as tmReuseEngagementFloor — 90% of the 239
+// entries measured producing a baseline (2026-08-23) — so a regression that
+// makes most of the corpus newly unsupported shrinks the comparison set
+// loudly instead of silently.
+const tmOptEngagementFloor = 215
 
 // tmOptPins are the known divergences of the optimization-invariance arm,
 // keyed "<corpus entry>/<toggle>". Same two-way ratchet as tmPins: the
@@ -372,34 +397,19 @@ var tmOptPins = map[string]typematrix.Pin{
 // tmOptPinPrefixes pins every toggle of one corpus entry. Used when the entry's
 // answer is not a function of the query at all, so naming toggles one by one
 // would be recording noise rather than knowledge.
-var tmOptPinPrefixes = map[string]typematrix.Pin{
-	"minby_scalar_c_bytes/": {
-		Issue: "#391",
-		Reason: "The BYTES aliasing defect, visible WITHOUT poison and under nearly every " +
-			"toggle: MIN_BY(c_bytes, id) answers bytes-000000 in the baseline and a different " +
-			"row's bytes whenever a switch perturbs allocation order, because the retained " +
-			"alias reads whatever the pool wrote into those offsets by finalize time. WHICH " +
-			"value comes back is a function of allocation order, not of the query — so this is " +
-			"pinned for the whole entry rather than per toggle. Being fixed on a separate branch.",
-		GatedBy: "TestTypeMatrixBatchReuse",
-	},
-	"minby_c_bytes/": {
-		Issue:   "#391",
-		Reason:  "Same aliasing defect, grouped form.",
-		GatedBy: "TestTypeMatrixBatchReuse",
-	},
-	"maxby_c_bytes/": {
-		Issue:   "#391",
-		Reason:  "Same aliasing defect, grouped MAX_BY form.",
-		GatedBy: "TestTypeMatrixBatchReuse",
-	},
-}
+//
+// #391 is fixed on main (fa22f72); its three prefixes (minby_scalar_c_bytes/,
+// minby_c_bytes/, maxby_c_bytes/) are deleted along with tmPinPrefixes above.
+var tmOptPinPrefixes = map[string]typematrix.Pin{}
 
 // TestTypeMatrixOptimizationInvariance is the #287 kill-switch differential
 // over the type matrix: every corpus query answered with all optimizations on,
 // then once per registered switch with that one off. The TPC-H arm of the same
 // contract can only see Int32/Float64/String; this one sees all 22 types.
 func TestTypeMatrixOptimizationInvariance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping type-matrix gate under -short — the dedicated CI step runs it without -short")
+	}
 	ctx := context.Background()
 	db := tmOpen(t)
 	corpus := typematrix.Corpus()
@@ -423,21 +433,30 @@ func TestTypeMatrixOptimizationInvariance(t *testing.T) {
 		base *oracle.Result
 	}
 	var base []entry
+	var baseErrors int
 	for _, q := range corpus {
 		if _, ok := tmCrashPins[q.Name]; ok {
 			continue // see TestTypeMatrixNoProcessKillers
 		}
 		res, err := tmRun(ctx, db, q.SQL)
 		if err != nil {
-			continue // unsupported shapes are not this arm's business
+			baseErrors++ // unsupported shapes are not this arm's business
+			continue
 		}
 		base = append(base, entry{q: q, base: res})
 	}
 	if len(base) == 0 {
 		t.Fatal("no corpus query produced a baseline result")
 	}
-	t.Logf("type-matrix optimization invariance: %d queries × %d configurations",
-		len(base), len(toggles)+1)
+	t.Logf("type-matrix optimization invariance: %d queries × %d configurations (%d baseline errors)",
+		len(base), len(toggles)+1, baseErrors)
+	if len(base) < tmOptEngagementFloor {
+		t.Errorf("only %d corpus entries produced a baseline result (%d errored), below the floor "+
+			"of %d. A baseline error for a genuinely unsupported shape is not this arm's business, "+
+			"but a regression that makes most of the corpus error would shrink this gate silently "+
+			"instead of failing it — find out what stopped answering before lowering the floor.",
+			len(base), baseErrors, tmOptEngagementFloor)
+	}
 
 	ratchet := newTMRatchet()
 	run := func(label string, off []*optswitch.Toggle) {

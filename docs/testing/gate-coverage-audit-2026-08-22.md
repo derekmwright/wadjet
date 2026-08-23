@@ -3,6 +3,20 @@
 **2026-08-22.** What the correctness gates can and cannot see, per column type
 and per consumer of a column value.
 
+**Update 2026-08-23.** #391 (`(*Vector).GetValue`'s `TypeBytes` arm aliasing
+the column arena — §"Why" below, §2c row R3, ranked cell #2) is **fixed** on
+main (`fa22f72`). The three pins it held — `tmPinPrefixes`/`tmOptPinPrefixes`
+in `wadjet/type_matrix_test.go` (`minby_c_bytes`, `maxby_c_bytes`,
+`minby_scalar_c_bytes`) — are deleted; `TestTypeMatrixBatchReuse` and
+`TestTypeMatrixOptimizationInvariance` now compare those entries with no
+exemption and pass. §1b's three inert DuckDB pins are also resolved: all three
+(`OuterJoinOnResidual`, `FullJoinOnConjunctBuildSide`,
+`OuterJoinExpressionKey`) pass fully gated with no divergence (verified by
+running them; #358's join `Residual` field now carries what they exercise), so
+their stale `knownBug` prose is deleted rather than converted to
+`knownBugArm`. See §6's "Other named gaps" for what is still open, including a
+new gap this fix's own mechanism doesn't cover.
+
 ## Why
 
 A review found that `(*Vector).GetValue`'s `TypeBytes` arm
@@ -436,10 +450,27 @@ string-vs-float rendering has no cross-engine rule.
 
 ### Other named gaps not closed here
 
-- Wire the three inert DuckDB pins (§1b) and add
-  `TestDuckDBCorpusPinsAreAccountable`.
+- ~~Wire the three inert DuckDB pins (§1b)~~ **RESOLVED 2026-08-23**: all
+  three passed fully gated with no divergence once checked, so the stale
+  `knownBug` prose was deleted rather than converted to `knownBugArm` (see
+  the 2026-08-23 update at the top). `TestDuckDBCorpusPinsAreAccountable`
+  itself is still not written — the PostgreSQL oracle's sibling test exists
+  and this one doesn't, independent of whether any pin is currently inert.
 - Convert `twoPathQuery.knownBug` and `fuzzKnownDivergence` from skips into
   ratchets (§1c).
 - A parquet round-trip battery that asserts VALUES for the nine SMOKE types,
   and a logical annotation for them so a self-describing file round-trips.
 - Per-type wire tests for the 14 pgwire types that have none.
+- **New 2026-08-23: the scan `BackingPool` is not covered by
+  poison-on-release.** `poisonBatch` (`internal/engine/batch/poison.go`)
+  fires from `(*RecordBatch).Release` and only when `b.pool != nil` — the
+  condition that distinguishes a batch a `BatchPool` owns from one nobody
+  does. The row-group output backing pool added on main after this audit
+  (`7890eb5`, "pool the row-group output backing behind release+claim")
+  recycles through a SEPARATE path, `BackingPool.Recycle`, with its own veto,
+  and the batches it mints carry `pool == nil` — so poison-on-release never
+  arms for them, and `TestTypeMatrixBatchReuse` cannot see a retention defect
+  in that pool no matter how the type matrix corpus grows. Closing this needs
+  either a poison hook in `BackingPool.Recycle` itself or widening
+  `poisonBatch`'s condition to cover backing recycled outside `BatchPool`;
+  left as a follow-up.

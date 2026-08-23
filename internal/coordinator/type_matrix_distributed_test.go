@@ -278,6 +278,12 @@ func (r *tmdRatchet) observe(key string, diverged bool) {
 	}
 }
 
+// finish's ratchet is per ISSUE, not per pin (ADR-0013 amendment 2026-08-23):
+// an issue with many pins — #396 has 37 — can have most of them silently
+// start agreeing while the ratchet stays green on the strength of one still
+// diverging. finish() also logs a "k of m pins still diverge" summary per
+// issue on every run, so a real fix narrowing 37/37 to 1/37 is visible in the
+// test log long before the last pin agrees and the ratchet actually fires.
 func (r *tmdRatchet) finish(t *testing.T, pins map[string]typematrix.Pin, kind string) {
 	t.Helper()
 	keys := make([]string, 0, len(pins))
@@ -287,6 +293,8 @@ func (r *tmdRatchet) finish(t *testing.T, pins map[string]typematrix.Pin, kind s
 	sort.Strings(keys)
 	issueDiverged := map[string]bool{}
 	issueReason := map[string]string{}
+	issueTotal := map[string]int{}
+	issueDivergedCount := map[string]int{}
 	var issues []string
 	for _, k := range keys {
 		p := pins[k]
@@ -295,22 +303,27 @@ func (r *tmdRatchet) finish(t *testing.T, pins map[string]typematrix.Pin, kind s
 				"nothing. Delete it or fix the name.", kind, k, p.Issue)
 			continue
 		}
+		if _, seen := issueTotal[p.Issue]; !seen {
+			issues = append(issues, p.Issue)
+		}
+		issueTotal[p.Issue]++
+		if r.diverged[k] {
+			issueDivergedCount[p.Issue]++
+			issueDiverged[p.Issue] = true
+		}
 		if p.GatedBy != "" {
 			issueDiverged[p.Issue] = true
-			continue
-		}
-		if _, seen := issueReason[p.Issue]; !seen {
-			issues = append(issues, p.Issue)
+		} else if issueReason[p.Issue] == "" {
 			issueReason[p.Issue] = p.Reason
 		}
-		if r.diverged[k] {
-			issueDiverged[p.Issue] = true
-		}
 	}
+	sort.Strings(issues)
 	for _, issue := range issues {
-		if !issueDiverged[issue] {
+		t.Logf("%s issue %s: %d of %d pins still diverge this run", kind, issue,
+			issueDivergedCount[issue], issueTotal[issue])
+		if reason := issueReason[issue]; reason != "" && !issueDiverged[issue] {
 			t.Errorf("every %s pin for %s now AGREES, so it is FIXED:\n  %s\nDelete those pins.",
-				kind, issue, issueReason[issue])
+				kind, issue, reason)
 		}
 	}
 }
