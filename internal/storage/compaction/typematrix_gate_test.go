@@ -138,6 +138,15 @@ func gateFlatData(offset, n int) []map[string]any {
 			r["c_dec9"], r["c_dec38"] = -9999999.99, int64(-9223372036854775807)
 		case 2:
 			r["c_dec9"], r["c_dec38"] = 9999999.99, int64(9223372036854775807)
+		case 3:
+			// The only box that reaches PAST 64 bits, and the reason the
+			// (38,10) column is here: 93468288258671214869 needs 67 of them.
+			// Values that fit int64 cannot tell a reader that drops the high
+			// word from one that does not (#434).
+			r["c_dec38"] = parquet.Decimal128{Hi: 5, Lo: 0x112210f47de98115}
+		case 4:
+			// -93468288258671214869, two's complement.
+			r["c_dec38"] = parquet.Decimal128{Hi: -6, Lo: 17212176183586094827}
 		}
 	}
 	return rows
@@ -323,12 +332,30 @@ func (g *gateTable) nativeRows(t *testing.T) []map[string]any {
 	return out
 }
 
+// decimalCell is the gate's DECIMAL box on the native arm: the unscaled
+// 128-bit integer and the column's scale, which is exactly what the format
+// stores and what ADR-0018 §4 names as the value's meaning.
+type decimalCell struct {
+	Unscaled batch.Int128
+	Scale    int
+}
+
 func batchToRows(b *batch.RecordBatch) []map[string]any {
 	out := make([]map[string]any, b.Len)
 	for i := 0; i < b.Len; i++ {
 		row := make(map[string]any, len(b.Columns))
 		for c, vec := range b.Columns {
 			if vec == nil || vec.Nulls.IsNullFast(i) {
+				continue
+			}
+			// DECIMAL is compared as the 128-bit unscaled value and the
+			// scale it sits at, never as GetValue's rendered text. The
+			// rendering is its own surface with its own defects — it dropped
+			// the high word until #434, which made any two wide values that
+			// share their low 64 bits indistinguishable HERE, in the gate
+			// whose job is to notice that compaction changed a value.
+			if vec.Type == batch.TypeDecimal {
+				row[b.Schema[c].Name] = decimalCell{vec.DecimalData.Data[i], vec.DecimalData.Scale}
 				continue
 			}
 			row[b.Schema[c].Name] = vec.GetValue(i)

@@ -1,10 +1,10 @@
 package batch
 
 import (
-	"fmt"
 	"math"
 	"math/big"
 	"math/bits"
+	"strconv"
 	"strings"
 )
 
@@ -51,9 +51,44 @@ func (d Int128) ToFloat64(scale int) float64 {
 	return f / math.Pow10(scale)
 }
 
-// ToInt64 returns the unscaled int64 value. Only valid if the value fits.
+// ToInt64 returns the low 64 bits of the unscaled value as an int64. It is
+// only the value when the value FITS: Hi is not consulted, so a wider Int128
+// comes back truncated and, past 2^63, with the wrong sign. Callers that may
+// see a wide value want String, FormatDecimal or BigInt instead — dropping Hi
+// here is what made every DECIMAL past 64 bits render as its low half (#434).
 func (d Int128) ToInt64() int64 {
 	return int64(d.Lo)
+}
+
+// FitsInt64 reports whether the value is exactly an int64, i.e. whether Hi is
+// nothing but ToInt64's sign extension.
+func (d Int128) FitsInt64() bool {
+	return (d.Hi == 0 && d.Lo <= math.MaxInt64) || (d.Hi == -1 && d.Lo > math.MaxInt64)
+}
+
+// String renders the unscaled value in base 10, exactly, at any width.
+func (d Int128) String() string {
+	if d.FitsInt64() {
+		return strconv.FormatInt(int64(d.Lo), 10)
+	}
+	return d.BigInt().String()
+}
+
+// absDigits returns the base-10 digits of the value's MAGNITUDE, with no sign.
+//
+// The wide arm goes through big.Int rather than a 128-bit divmod-by-10^19
+// loop: this is the row-materialization path, not a kernel, and the narrow
+// arm below covers every value a DECIMAL(p <= 18) column can hold — which is
+// every value wadjet itself wrote before #429 and all of TPC-H and ClickBench.
+// A divmod loop here would be a hundred lines of carry arithmetic to save an
+// allocation on the values that are already the rare ones.
+func (d Int128) absDigits() string {
+	if d.Hi == 0 {
+		return strconv.FormatUint(d.Lo, 10)
+	}
+	// Abs on the big.Int, not Neg on the Int128: -2^127 negates to itself,
+	// so its magnitude has no Int128 to be rendered from.
+	return new(big.Int).Abs(d.BigInt()).String()
 }
 
 // IsZero returns true if the value is zero.
@@ -175,38 +210,44 @@ func (d Int128) BigInt() *big.Int {
 	return b.Add(b, new(big.Int).SetUint64(d.Lo))
 }
 
-// FormatDecimal formats the Int128 as a decimal string with the given scale.
+// FormatDecimal renders the unscaled value as a decimal string at the given
+// scale — the text form of a DECIMAL column, and so what GetValue hands the
+// row map, ToRows, the JSON encoder and the pgwire text protocol.
+//
+// It formats the whole 128 bits. It used to read only Lo, through
+// `v := int64(abs.Lo)` and an int64 divmod, which was wrong twice over: a
+// value past 64 bits rendered as its low half (Int128{Hi:5, Lo:0x112210f4-
+// 7de98115} at scale 10 came out 123456789.0123456789 instead of
+// 9346828825.8671214869), and any magnitude with Lo >= 2^63 made that int64
+// negative, so the sign leaked into both halves and produced text that is not
+// a number at all — "--922337203.-6854775808" for unscaled Int64Min (#434).
+//
+// Splitting the digit STRING at the scale is also what makes the result exact
+// for every scale: math.Pow10 is a float64, and 10^23 has no exact one.
 func (d Int128) FormatDecimal(scale int) string {
 	if scale <= 0 {
-		return fmt.Sprintf("%d", d.ToInt64())
+		return d.String()
 	}
 
-	neg := d.IsNegative()
-	abs := d
-	if neg {
-		abs = d.Neg()
+	digits := d.absDigits()
+	intPart, fracStr := "0", digits
+	if len(digits) > scale {
+		intPart, fracStr = digits[:len(digits)-scale], digits[len(digits)-scale:]
+	} else {
+		fracStr = strings.Repeat("0", scale-len(digits)) + digits
 	}
 
-	// For values that fit in int64
-	v := int64(abs.Lo)
-	divisor := int64(math.Pow10(scale))
-
-	intPart := v / divisor
-	fracPart := v % divisor
-
-	fracStr := fmt.Sprintf("%0*d", scale, fracPart)
-	// Trim trailing zeros
+	// Trailing zeros are trimmed, but never all of them: 3.00 at scale 2 is
+	// "3.0", not "3." — long-standing behavior the wire format depends on.
 	fracStr = strings.TrimRight(fracStr, "0")
 	if fracStr == "" {
 		fracStr = "0"
 	}
 
-	prefix := ""
-	if neg {
-		prefix = "-"
+	if d.IsNegative() {
+		return "-" + intPart + "." + fracStr
 	}
-
-	return fmt.Sprintf("%s%d.%s", prefix, intPart, fracStr)
+	return intPart + "." + fracStr
 }
 
 // DecimalColumn stores an array of Int128 values for DECIMAL vectors.
@@ -249,12 +290,42 @@ func ParseDecimalString(s string, scale int) Int128 {
 	}
 
 	combined := intStr + fracStr
-	var v int64
-	fmt.Sscanf(combined, "%d", &v)
-
-	result := Int128From(v)
-	if neg {
-		result = result.Neg()
+	if combined == "" {
+		return Int128{}
 	}
-	return result
+
+	// The narrow arm is every value a DECIMAL(p <= 18) column can hold. The
+	// wide one is why this is not a Sscanf into an int64 any more: that
+	// returned an error nobody read and left the value at whatever it had
+	// parsed, so a 20-digit unscaled value — which #429 made wadjet write
+	// itself — round-tripped through FormatDecimal as zero or as its prefix.
+	if v, err := strconv.ParseInt(combined, 10, 64); err == nil {
+		result := Int128From(v)
+		if neg {
+			result = result.Neg()
+		}
+		return result
+	}
+	b, ok := new(big.Int).SetString(combined, 10)
+	if !ok {
+		return Int128{}
+	}
+	if neg {
+		b.Neg(b)
+	}
+	return int128FromBig(b)
+}
+
+// int128FromBig narrows a big.Int to Int128, wrapping (two's complement) if it
+// does not fit — which no DECIMAL(38) value can do, since 10^38 < 2^127.
+func int128FromBig(b *big.Int) Int128 {
+	neg := b.Sign() < 0
+	mag := new(big.Int).Abs(b)
+	lo := new(big.Int).And(mag, new(big.Int).SetUint64(^uint64(0))).Uint64()
+	hi := new(big.Int).Rsh(mag, 64).Uint64()
+	out := Int128{Hi: int64(hi), Lo: lo}
+	if neg {
+		out = out.Neg()
+	}
+	return out
 }
