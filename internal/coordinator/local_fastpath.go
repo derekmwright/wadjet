@@ -232,5 +232,8 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		TotalRows: totalRows,
 		Elapsed:   time.Since(start),
 		Plan:      planStr,
+		// The sink's schema, not the batches': a zero-row result has no
+		// batch to read it off, and the wire still has to declare types.
+		Schema: sink.Schema(),
 	}, true, nil
 }

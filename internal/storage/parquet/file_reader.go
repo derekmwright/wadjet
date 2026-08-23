@@ -2,6 +2,7 @@ package parquet
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -69,7 +70,7 @@ func OpenFileReader(r io.ReaderAt, size int64) (*FileReader, error) {
 	}
 
 	root, leaves := BuildSchemaTree(meta.Schema)
-	schema := schemaFromTree(root, leaves)
+	schema := readerSchema(root, leaves, meta.KeyValueMetadata)
 
 	return &FileReader{
 		data:       data,
@@ -106,7 +107,7 @@ func OpenFileReaderMetadata(r io.ReaderAt, size int64) (*FileReader, error) {
 		return nil, err
 	}
 	root, leaves := BuildSchemaTree(meta.Schema)
-	schema := schemaFromTree(root, leaves)
+	schema := readerSchema(root, leaves, meta.KeyValueMetadata)
 	return &FileReader{
 		data:       nil, // metadata-only — page reads will fail
 		meta:       meta,
@@ -136,7 +137,7 @@ func OpenFileReaderAt(r io.ReaderAt, size int64) (*FileReader, error) {
 		return nil, err
 	}
 	root, leaves := BuildSchemaTree(meta.Schema)
-	schema := schemaFromTree(root, leaves)
+	schema := readerSchema(root, leaves, meta.KeyValueMetadata)
 	return &FileReader{
 		src:        r,
 		size:       size,
@@ -158,7 +159,7 @@ func OpenFileReaderFromBytes(data []byte) (*FileReader, error) {
 	}
 
 	root, leaves := BuildSchemaTree(meta.Schema)
-	schema := schemaFromTree(root, leaves)
+	schema := readerSchema(root, leaves, meta.KeyValueMetadata)
 
 	return &FileReader{
 		data:       data,
@@ -597,4 +598,82 @@ func (r *bytesReaderAt) ReadAt(p []byte, off int64) (int, error) {
 		return n, io.EOF
 	}
 	return n, nil
+}
+
+// DeclaredSchemaKey is the footer KeyValueMetadata key under which the
+// native writer stamps the wadjet schema it was handed, JSON-encoded.
+//
+// Parquet's own schema cannot express nine of wadjet's 22 types: IPv4, IPv6,
+// MAC, UUID, Bytes, Port, Protocol and Duration get no logical annotation
+// from buildLeafSchemaElement (there is none to give — they are not parquet
+// concepts), so TypeIDFromSchemaNode reads them back as INT64 or STRING. A
+// consumer that takes its column types from the CATALOG never noticed; one
+// that takes them from the FILE — the DAG worker's parquet scan, the
+// coordinator's scalar extraction, any tool pointed at a wadjet file —
+// rendered 10.0.0.5 as 167772165 and a UUID as 16 raw bytes (#396).
+const DeclaredSchemaKey = "wadjet.schema"
+
+// readerSchema is the schema a FileReader reports: the one inferred from the
+// parquet schema tree, with the declared types restored from
+// DeclaredSchemaKey where the file carries it.
+func readerSchema(root *SchemaNode, leaves []*SchemaNode, kv []KeyValue) Schema {
+	return overlayDeclaredSchema(schemaFromTree(root, leaves), kv)
+}
+
+// overlayDeclaredSchema restores the declared TYPE IDENTITY of each leaf
+// column from the footer's declared-schema blob. Nothing else is taken:
+// name, nullability and nested structure stay as the parquet tree described
+// them, because those the tree CAN express and the tree is what the page
+// decoders are driven by.
+//
+// A file written before this key existed, or by any other producer, has no
+// blob and keeps the inferred schema — the behaviour this replaces.
+//
+// The blob is only trusted when it lines up with the file: the same number
+// of top-level columns, the same names in the same order, and — per column —
+// the same PHYSICAL parquet type the writer would have chosen for the
+// declared type. That last check is what makes a stale or mismatched blob
+// inert rather than a source of misread pages: a declared type whose storage
+// does not match what is actually in the file is ignored.
+func overlayDeclaredSchema(inferred Schema, kv []KeyValue) Schema {
+	var raw string
+	for i := range kv {
+		if kv[i].Key == DeclaredSchemaKey {
+			raw = kv[i].Value
+			break
+		}
+	}
+	if raw == "" {
+		return inferred
+	}
+	var declared Schema
+	if err := json.Unmarshal([]byte(raw), &declared); err != nil {
+		return inferred
+	}
+	if len(declared.Columns) != len(inferred.Columns) {
+		return inferred
+	}
+	for i := range inferred.Columns {
+		if declared.Columns[i].Name != inferred.Columns[i].Name {
+			return inferred
+		}
+	}
+	for i := range inferred.Columns {
+		ic, dc := &inferred.Columns[i], &declared.Columns[i]
+		// Nested columns keep the tree's structure: LIST/MAP/STRUCT round
+		// trip through parquet's own annotations, and their element and
+		// field definitions carry nullability the blob does not re-derive.
+		if ic.ElementType != nil || len(ic.Fields) > 0 ||
+			dc.ElementType != nil || len(dc.Fields) > 0 {
+			continue
+		}
+		if wadjetTypeToPhysical(dc.Type) != wadjetTypeToPhysical(ic.Type) {
+			continue
+		}
+		ic.Type = dc.Type
+		ic.Precision = dc.Precision
+		ic.Scale = dc.Scale
+		ic.Dimension = dc.Dimension
+	}
+	return inferred
 }

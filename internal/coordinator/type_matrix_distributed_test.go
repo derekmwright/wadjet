@@ -34,83 +34,12 @@ import (
 // Pins follow ADR-0013: the comparison runs for a pinned entry, a divergence
 // is logged, and a pin whose issue stops diverging anywhere FAILS.
 
-// The reasons, shared by the entries below so a fix edits one string.
-const (
-	tmdRawFormReason = "The stage DAG returns network and UUID columns in their RAW STORAGE " +
-		"form while the single-process engine returns the display form: c_ipv4 comes back as " +
-		"167772165 instead of \"10.0.0.5\", c_mac as 187723558158341 instead of " +
-		"\"aa:bb:cc:00:00:05\", c_ipv6 and c_uuid as 16 raw bytes instead of their text. Row " +
-		"counts match on every one of these, so only a value-level compare sees it — and these " +
-		"are the product's flagship network-native types."
-)
-
-var tmdPins = map[string]typematrix.Pin{
-	// #396 — the stage DAG returns network and UUID columns in their RAW STORAGE
-	// form. The single-process engine answers c_ipv4 as "10.0.0.5", c_mac as
-	// "aa:bb:cc:00:00:05", c_ipv6 and c_uuid as their text form; the DAG answers
-	// 167772165, 187723558158341, and 16 raw bytes. Values, not row counts — every
-	// one of these has the right number of rows.
-	"distinct_c_ipv4":    {Issue: "#396", Reason: tmdRawFormReason},
-	"distinct_c_ipv6":    {Issue: "#396", Reason: tmdRawFormReason},
-	"distinct_c_mac":     {Issue: "#396", Reason: tmdRawFormReason},
-	"distinct_c_uuid":    {Issue: "#396", Reason: tmdRawFormReason},
-	"groupby_c_ipv4":     {Issue: "#396", Reason: tmdRawFormReason},
-	"groupby_c_ipv6":     {Issue: "#396", Reason: tmdRawFormReason},
-	"groupby_c_mac":      {Issue: "#396", Reason: tmdRawFormReason},
-	"groupby_c_uuid":     {Issue: "#396", Reason: tmdRawFormReason},
-	"joinpayload_c_ipv4": {Issue: "#396", Reason: tmdRawFormReason},
-	"joinpayload_c_ipv6": {Issue: "#396", Reason: tmdRawFormReason},
-	"joinpayload_c_mac":  {Issue: "#396", Reason: tmdRawFormReason},
-	"joinpayload_c_uuid": {Issue: "#396", Reason: tmdRawFormReason},
-	"maxby_c_ipv4":       {Issue: "#396", Reason: tmdRawFormReason},
-	// maxby_c_ipv6/mac/uuid and minby_c_ipv6/mac/uuid below were masked by the
-	// #392 crash pin until now: the grouped MIN_BY/MAX_BY form killed the
-	// process before either arm could be compared. #392 is fixed, so these are
-	// newly comparable, and they hit the pre-existing #396 raw-storage-form
-	// divergence like every other MIN_BY/MAX_BY shape over these three types.
-	"maxby_c_ipv6":        {Issue: "#396", Reason: tmdRawFormReason},
-	"maxby_c_mac":         {Issue: "#396", Reason: tmdRawFormReason},
-	"maxby_c_uuid":        {Issue: "#396", Reason: tmdRawFormReason},
-	"minby_c_ipv4":        {Issue: "#396", Reason: tmdRawFormReason},
-	"minby_c_ipv6":        {Issue: "#396", Reason: tmdRawFormReason},
-	"minby_c_mac":         {Issue: "#396", Reason: tmdRawFormReason},
-	"minby_c_uuid":        {Issue: "#396", Reason: tmdRawFormReason},
-	"minby_scalar_c_ipv4": {Issue: "#396", Reason: tmdRawFormReason},
-	"minmax_c_cidr":       {Issue: "#396", Reason: tmdRawFormReason},
-	"minmax_c_ipv4":       {Issue: "#396", Reason: tmdRawFormReason},
-	"minmax_c_ipv6":       {Issue: "#396", Reason: tmdRawFormReason},
-	"minmax_c_uuid":       {Issue: "#396", Reason: tmdRawFormReason},
-	"project_c_ipv4":      {Issue: "#396", Reason: tmdRawFormReason},
-	"project_c_ipv6":      {Issue: "#396", Reason: tmdRawFormReason},
-	"project_c_mac":       {Issue: "#396", Reason: tmdRawFormReason},
-	"project_c_uuid":      {Issue: "#396", Reason: tmdRawFormReason},
-	"sort_c_ipv4":         {Issue: "#396", Reason: tmdRawFormReason},
-	"sort_c_ipv6":         {Issue: "#396", Reason: tmdRawFormReason},
-	"sort_c_mac":          {Issue: "#396", Reason: tmdRawFormReason},
-	"sort_c_uuid":         {Issue: "#396", Reason: tmdRawFormReason},
-	"sort_desc_c_uuid":    {Issue: "#396", Reason: tmdRawFormReason},
-	"union_c_ipv4":        {Issue: "#396", Reason: tmdRawFormReason},
-	"union_c_ipv6":        {Issue: "#396", Reason: tmdRawFormReason},
-	"union_c_mac":         {Issue: "#396", Reason: tmdRawFormReason},
-	"union_c_uuid":        {Issue: "#396", Reason: tmdRawFormReason},
-	"wide_row":            {Issue: "#396", Reason: tmdRawFormReason},
-	"window_c_ipv4":       {Issue: "#396", Reason: tmdRawFormReason},
-	"window_c_ipv6":       {Issue: "#396", Reason: tmdRawFormReason},
-	"window_c_mac":        {Issue: "#396", Reason: tmdRawFormReason},
-	"window_c_uuid":       {Issue: "#396", Reason: tmdRawFormReason},
-
-	// #392 (MIN_BY/MAX_BY's declared output type) is fixed: both arms now
-	// declare the value's own type. minby_scalar_c_cidr agrees on both paths
-	// now and its pin is deleted (ADR-0013 §Pins). The other three scalar
-	// MIN_BY/MAX_BY-over-network-type entries still diverge, but for a
-	// DIFFERENT, pre-existing reason: the stage DAG returns IPv6/MAC/UUID in
-	// their raw storage form (the same #396 the grouped and non-aggregate
-	// shapes of these columns already carry), so they are re-pointed at #396
-	// rather than deleted.
-	"minby_scalar_c_ipv6": {Issue: "#396", Reason: tmdRawFormReason},
-	"minby_scalar_c_mac":  {Issue: "#396", Reason: tmdRawFormReason},
-	"minby_scalar_c_uuid": {Issue: "#396", Reason: tmdRawFormReason},
-}
+// tmdPins is empty: #392 (MIN_BY/MAX_BY's declared output type), #394
+// (DECIMAL ordering) and #396 (network and UUID columns in raw storage
+// form, 37+ entries) are all fixed, so nothing here diverges by VALUE
+// anymore. tmdRawFormReason and tmdMinByTypeReason go with them — nothing
+// references either string now.
+var tmdPins = map[string]typematrix.Pin{}
 
 var tmdUnsupported = map[string]typematrix.Pin{
 	// #397 — ARRAY, ROW, MAP and VECTOR columns cannot cross a shuffle: the WSHF

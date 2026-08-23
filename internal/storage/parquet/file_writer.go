@@ -3,6 +3,7 @@ package parquet
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -840,6 +841,23 @@ func (nw *NativeWriter) writeFooter() error {
 	// Build schema elements (flattened schema tree).
 	schemaElements := buildSchemaElements(nw.schema)
 
+	// Stamp the DECLARED schema alongside the parquet one. Nine of the 22
+	// types have no parquet annotation that can carry them —
+	// buildLeafSchemaElement writes none for IPv4, IPv6, MAC, UUID, Bytes,
+	// Port, Protocol or Duration — so TypeIDFromSchemaNode cannot recover
+	// them on read and the file comes back as INT64/BYTE_ARRAY. Every
+	// consumer that reads its types from the catalog instead was fine; the
+	// ones that read them from the file (the DAG worker's scan, the
+	// coordinator's scalar extraction, any tool) answered 167772165 for
+	// 10.0.0.5 (#396). This side channel makes the file self-describing for
+	// all 22 without touching the physical layout: a foreign reader ignores
+	// an unknown key and still sees a valid INT64/BYTE_ARRAY column, the
+	// way Spark and Iceberg carry their own schemas.
+	declared, err := json.Marshal(nw.schema)
+	if err != nil {
+		return fmt.Errorf("encoding declared schema for the footer: %w", err)
+	}
+
 	md := &FileMetaData{
 		Version:   1,
 		Schema:    schemaElements,
@@ -848,6 +866,7 @@ func (nw *NativeWriter) writeFooter() error {
 		CreatedBy: "wadjet (native writer)",
 		KeyValueMetadata: []KeyValue{
 			{Key: "wadjet.version", Value: "0.1.0"},
+			{Key: DeclaredSchemaKey, Value: string(declared)},
 		},
 	}
 

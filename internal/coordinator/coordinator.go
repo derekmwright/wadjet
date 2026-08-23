@@ -670,9 +670,46 @@ type SQLResult struct {
 	Plan        string
 	Error       string
 
+	// Schema is the declared type of each output column, in Columns order.
+	// Only needed for a result whose Batches are not set — a lazy stream —
+	// since OutputSchema() otherwise reads it off the first batch.
+	Schema []parquet.Column
+
 	// stream is the lazy form: set (and Batches nil) when the gather
 	// result is partially on local scratch. Accessed via Stream().
 	stream BatchStream
+}
+
+// OutputSchema returns the declared type of each result column, or nil when
+// the result carries no schema (introspection and error results).
+//
+// The DAG's gather hands back typed RecordBatches and the local fast path
+// runs a typed pipeline, but SQLResult used to publish only Columns — so
+// pgwire's coord path had no ColumnMetas and fell back to declaring OID 25
+// (text) for every column, while the embedded API's identical query declared
+// real OIDs from deriveColumnMetas. Same statement, two different
+// RowDescriptions depending on which entry point answered.
+//
+// Read before Stream(): the first Stream() call detaches Batches.
+func (r *SQLResult) OutputSchema() []parquet.Column {
+	if r == nil {
+		return nil
+	}
+	if len(r.Schema) > 0 {
+		return r.Schema
+	}
+	return gatherSchema(r.Batches)
+}
+
+// gatherSchema returns the first non-empty batch schema. Empty batches carry
+// no columns, and a result can begin with one.
+func gatherSchema(batches []*batch.RecordBatch) []parquet.Column {
+	for _, b := range batches {
+		if b != nil && len(b.Schema) > 0 {
+			return b.Schema
+		}
+	}
+	return nil
 }
 
 // Stream returns a consuming iterator over the result batches. The first
@@ -968,6 +1005,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		TotalRows: gr.totalRows,
 		Elapsed:   time.Since(start),
 		Plan:      planStr,
+		Schema:    gatherSchema(gr.batches),
 	}
 	if gr.spillPath != "" {
 		// Over-budget result: the in-memory prefix plus raw frames on

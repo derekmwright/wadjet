@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/coordinator"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
@@ -68,7 +69,52 @@ func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryRe
 		res.Close()
 		return nil, nil, err
 	}
-	return &wadjet.QueryResult{Columns: res.Columns}, res.Stream(), nil
+	// Read the schema BEFORE Stream() detaches the batches.
+	metas := coordColumnMetas(res)
+	return &wadjet.QueryResult{Columns: res.Columns, ColumnMetas: metas}, res.Stream(), nil
+}
+
+// coordColumnMetas is the coord path's answer to wadjet.deriveColumnMetas:
+// the typed column metadata sendTypedRowDescription needs, taken from the
+// schema of the vectors the values were actually stored in.
+//
+// Without it this path declared OID 25 (text) for every column — the
+// all-text fallback in sendRowDescription — while the SAME query through the
+// embedded API declared real OIDs. Two entry points, two RowDescriptions,
+// and a typed client (DataGrip, JDBC, pgx binary format) sees whichever one
+// it happened to reach (#396's wire face; the mapping itself is #305).
+//
+// Nil when the schema does not cover every column: a partial declaration is
+// worse than the uniform fallback, because a client cannot tell which
+// columns were guessed.
+func coordColumnMetas(res *coordinator.SQLResult) []wadjet.ColumnMeta {
+	schema := res.OutputSchema()
+	if len(schema) == 0 || len(res.Columns) == 0 {
+		return nil
+	}
+	byName := make(map[string]parquet.Column, len(schema))
+	for _, col := range schema {
+		byName[col.Name] = col
+	}
+	metas := make([]wadjet.ColumnMeta, len(res.Columns))
+	for i, name := range res.Columns {
+		col, ok := byName[name]
+		if !ok {
+			// Positional fallback: a renamed output column (the gather's
+			// renamer) keeps its position but not its name.
+			if i >= len(schema) {
+				return nil
+			}
+			col = schema[i]
+		}
+		metas[i] = wadjet.ColumnMeta{
+			Name:     name,
+			TypeName: col.Type.String(),
+			TypeID:   col.Type,
+			Nullable: col.Nullable,
+		}
+	}
+	return metas
 }
 
 // sendResultRows emits a DataRow per result row and returns the count sent.
