@@ -95,7 +95,46 @@ func ReadFileMetaData(r io.ReaderAt, fileSize int64) (*FileMetaData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parquet: decoding footer: %w", err)
 	}
+	if err := ValidateFileMetaData(md); err != nil {
+		return nil, fmt.Errorf("parquet: %w", err)
+	}
 	return md, nil
+}
+
+// ValidateFileMetaData holds a decoded footer to the claims it makes about
+// itself, before any of its numbers is used to size something.
+//
+// A row group's num_rows is the size EVERY destination vector in a scan is
+// allocated for (batch.NewRecordBatch(schema, numRows)), and it is a signed
+// 64-bit thrift field nothing had checked. The whole-file mutation fuzz
+// reached a negative one in seconds: "makeslice: len out of range", raised
+// while building the batch, before a single page was read.
+//
+// The upper bound is the file's OWN total. Parquet requires
+// FileMetaData.num_rows to be the sum of the row groups', so a group
+// claiming more than the file does is already self-contradictory — and
+// nothing legitimate is refused by taking the file at its word here, while a
+// single flipped byte in one row group's varint no longer asks the allocator
+// for terabytes. A zero total is left alone: writers that emit an empty file
+// leave it at zero, and there are no rows to size anything from anyway.
+func ValidateFileMetaData(md *FileMetaData) error {
+	if md == nil {
+		return fmt.Errorf("footer decoded to nothing")
+	}
+	if md.NumRows < 0 {
+		return fmt.Errorf("footer declares %d rows", md.NumRows)
+	}
+	for i := range md.RowGroups {
+		rg := &md.RowGroups[i]
+		if rg.NumRows < 0 {
+			return fmt.Errorf("row group %d declares %d rows", i, rg.NumRows)
+		}
+		if md.NumRows > 0 && rg.NumRows > md.NumRows {
+			return fmt.Errorf("row group %d declares %d rows but the file declares %d in total",
+				i, rg.NumRows, md.NumRows)
+		}
+	}
+	return nil
 }
 
 // ValidateHeader checks that the file starts with the Parquet magic bytes.

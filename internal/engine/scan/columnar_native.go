@@ -151,6 +151,12 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 	if numRows == 0 {
 		return nil, nil
 	}
+	// The footer is validated on open, so this is a backstop rather than
+	// the enforcement point — but it is one line in front of an allocation
+	// sized entirely by a number out of the file.
+	if numRows < 0 {
+		return nil, fmt.Errorf("row group %d declares %d rows", rgIdx, numRows)
+	}
 
 	// Output backing: a released-and-unclaimed backing from a previous row
 	// group when the scan source has one (BackingPool's ownership rule), else

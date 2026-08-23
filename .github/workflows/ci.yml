@@ -89,6 +89,26 @@ jobs:
           go test -v -run 'TestTypeMatrix' ./wadjet/ -timeout 15m
           go test -v -run 'TestTypeMatrixTwoPath' ./internal/coordinator/ -timeout 15m
 
+      - name: Fuzz Seed Corpora (parquet decoders)
+        # There was no fuzz step at all, so every target in the tree only ran
+        # when somebody remembered to. The decoders parse bytes the engine
+        # did NOT write — a parquet file's footer and page headers are claims
+        # about a file that does not have to honour them — and the crashers
+        # that class produced were process kills: five footer offsets used
+        # directly as slice indices (r.data[-9025:]), a page loop walking
+        # past the row group's own row count, a negative num_rows reaching
+        # makeslice.
+        #
+        # This runs the SEED CORPORA only (no -fuzz), which is a few seconds
+        # and completely deterministic: every crasher found so far is a seed,
+        # so a regression fails here by name. Live fuzzing stays a local /
+        # scheduled activity — a randomized gate that can fail an unrelated
+        # PR is a gate people learn to re-run rather than read.
+        run: |
+          go test -run 'Fuzz|TestWholeFileMutationCrashers' \
+            ./internal/storage/parquet/ ./internal/engine/scan/ \
+            ./internal/planner/sql/ ./internal/worker/ -timeout 5m
+
       - name: Nested Types + Decimal Correctness
         # The gate TPC-H is structurally blind to (issue #144): TPC-H has
         # no ARRAY/MAP/ROW columns, no Decimal in the merge path, and no
