@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -77,4 +78,48 @@ func TestReadRowGroupNative_ArrayErrorsLoudly(t *testing.T) {
 	if err == nil {
 		t.Fatal("ARRAY through the native reader must error (callers fall back to the row reader); silent all-NULL output is wrong results")
 	}
+}
+
+// TestDecimalWideValues covers the three physical types a DECIMAL column may
+// use that are NOT INT64. Parquet allows all four, and TypeIDFromSchemaNode
+// answers TypeDecimal for every one of them, but this decoder handed each of
+// them to Values.Int64() — reinterpreting bytes of the wrong width and, for
+// the narrower physicals, reading past the end of the page to find enough of
+// them. Values.Int64() now refuses a cast it was not given INT64 bytes for,
+// so these three have to be decoded on their own terms.
+func TestDecimalWideValues(t *testing.T) {
+	t.Run("int32", func(t *testing.T) {
+		got := decimalWideValues(parquet.PlainInt32Values([]int32{-2, 0, 12345}))
+		want := []int64{-2, 0, 12345}
+		if len(got) != len(want) {
+			t.Fatalf("decoded %d values, want %d", len(got), len(want))
+		}
+		for i, w := range want {
+			if got[i] != batch.Int128From(w) {
+				t.Errorf("value %d = %+v, want %+v", i, got[i], batch.Int128From(w))
+			}
+		}
+	})
+
+	t.Run("fixed_len_byte_array", func(t *testing.T) {
+		// Big-endian two's complement, the DECIMAL byte encoding: 12345 and
+		// -2 in four bytes each.
+		data := []byte{0x00, 0x00, 0x30, 0x39, 0xff, 0xff, 0xff, 0xfe}
+		got := decimalWideValues(parquet.ByteArrayValues(data, []uint32{0, 4, 8}))
+		want := []int64{12345, -2}
+		if len(got) != len(want) {
+			t.Fatalf("decoded %d values, want %d", len(got), len(want))
+		}
+		for i, w := range want {
+			if got[i] != batch.Int128From(w) {
+				t.Errorf("value %d = %+v, want %+v", i, got[i], batch.Int128From(w))
+			}
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		if got := decimalWideValues(parquet.ByteArrayValues(nil, nil)); got != nil {
+			t.Errorf("empty page decoded %d values", len(got))
+		}
+	})
 }

@@ -518,3 +518,96 @@ func TestCompressionCodecString(t *testing.T) {
 		}
 	}
 }
+
+// --- accessor guards ---
+//
+// Every fixed-width accessor is an unsafe.Slice over the page's raw bytes.
+// Two things can make that cast run off the end of its backing array, and
+// both reach this package from outside it: a physical type that is not the
+// one the caller is reading (the row reader decodes a column as the type the
+// CATALOG names — see retypeFromCatalog), and a value count that comes from
+// a page header in an untrusted file. A mismatch answers nil; every caller
+// loops under len(src), so nil degrades to "nothing decoded" and the layer
+// above reports it, instead of returning adjacent heap as query results.
+
+func TestValuesAccessorsRefuseWrongPhysicalType(t *testing.T) {
+	// 16 bytes: four int32s, two int64s, four float32s, two float64s — so
+	// every wrong-width cast is a plausible-looking read rather than an
+	// obviously empty one.
+	data := make([]byte, 16)
+	for i := range data {
+		data[i] = byte(i + 1)
+	}
+	physTypes := []PhysicalType{
+		PhysicalBoolean, PhysicalInt32, PhysicalInt64,
+		PhysicalFloat, PhysicalDouble, PhysicalByteArray,
+	}
+	accessors := []struct {
+		name string
+		want PhysicalType
+		n    func(Values) int
+	}{
+		{"Int32", PhysicalInt32, func(v Values) int { return len(v.Int32()) }},
+		{"Int64", PhysicalInt64, func(v Values) int { return len(v.Int64()) }},
+		{"Float", PhysicalFloat, func(v Values) int { return len(v.Float()) }},
+		{"Double", PhysicalDouble, func(v Values) int { return len(v.Double()) }},
+		{"Boolean", PhysicalBoolean, func(v Values) int { return len(v.Boolean()) }},
+	}
+	for _, pt := range physTypes {
+		for _, a := range accessors {
+			v := RawValues(pt, data, 2)
+			got := a.n(v)
+			if pt == a.want {
+				if got == 0 {
+					t.Errorf("%s() on %s values returned nothing", a.name, pt)
+				}
+				continue
+			}
+			if got != 0 {
+				t.Errorf("%s() on %s values returned %d elements, want none", a.name, pt, got)
+			}
+		}
+	}
+}
+
+// TestValuesAccessorsClampToTheBytesTheyHave: count is a page-header claim.
+// A count larger than the bytes can back must not widen the unsafe.Slice.
+func TestValuesAccessorsClampToTheBytesTheyHave(t *testing.T) {
+	data := make([]byte, 16)
+	cases := []struct {
+		name string
+		got  int
+		want int
+	}{
+		{"Int32", len(RawValues(PhysicalInt32, data, 1<<20).Int32()), 4},
+		{"Int64", len(RawValues(PhysicalInt64, data, 1<<20).Int64()), 2},
+		{"Float", len(RawValues(PhysicalFloat, data, 1<<20).Float()), 4},
+		{"Double", len(RawValues(PhysicalDouble, data, 1<<20).Double()), 2},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("%s() over 16 bytes with a count of 2^20 returned %d elements, want %d",
+				tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// TestValuesAtAccessorsBoundsChecked: the statistics path indexes single
+// elements out of the same untrusted bytes.
+func TestValuesAtAccessorsBoundsChecked(t *testing.T) {
+	v := RawValues(PhysicalInt64, make([]byte, 8), 1)
+	for _, tc := range []struct {
+		name string
+		got  float64
+	}{
+		{"Int32At", float64(v.Int32At(1 << 20))},
+		{"Int64At", float64(v.Int64At(1 << 20))},
+		{"FloatAt", float64(v.FloatAt(1 << 20))},
+		{"DoubleAt", v.DoubleAt(1 << 20)},
+		{"Int64At(-1)", float64(v.Int64At(-1))},
+	} {
+		if tc.got != 0 {
+			t.Errorf("%s past the end returned %v, want 0", tc.name, tc.got)
+		}
+	}
+}

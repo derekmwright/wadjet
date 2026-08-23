@@ -642,9 +642,14 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 		// Scaled-integer INT64 physical → Int128 storage. Without this
 		// case the switch fell through and every decimal column scanned
 		// as zeros, silently (issue #144 suite finding).
-		src := data.Int64()
-		for i := 0; i < n; i++ {
-			vec.DecimalData.Data[offset+i] = batch.Int128From(src[i])
+		if src := data.Int64(); src != nil {
+			for i := 0; i < n && i < len(src); i++ {
+				vec.DecimalData.Data[offset+i] = batch.Int128From(src[i])
+			}
+		} else if src := decimalWideValues(data); src != nil {
+			for i := 0; i < n && i < len(src); i++ {
+				vec.DecimalData.Data[offset+i] = src[i]
+			}
 		}
 
 	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
@@ -710,6 +715,37 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 	}
 }
 
+// decimalWideValues decodes a DECIMAL page whose physical type is NOT INT64.
+// Parquet allows INT32, BYTE_ARRAY and FIXED_LEN_BYTE_ARRAY to carry DECIMAL
+// as well, and TypeIDFromSchemaNode answers TypeDecimal for all four; this
+// path handed every one of them to Values.Int64(), which reinterpreted bytes
+// of the wrong width — and, for the narrower physicals, read past the end of
+// the page buffer to find enough of them. Values.Int64() now refuses a cast
+// it was not given INT64 bytes for, so the remaining three physicals are
+// decoded here instead of silently mis-read.
+func decimalWideValues(data pqt.Values) []batch.Int128 {
+	switch data.PhysType() {
+	case pqt.PhysicalInt32:
+		src := data.Int32()
+		out := make([]batch.Int128, len(src))
+		for i, v := range src {
+			out[i] = batch.Int128From(int64(v))
+		}
+		return out
+	default:
+		raw, offs := data.ByteArray()
+		if offs == nil {
+			return nil
+		}
+		out := make([]batch.Int128, 0, len(offs)-1)
+		for i := 0; i+1 < len(offs); i++ {
+			w := pqt.DecimalFromBytes(raw[offs[i]:offs[i+1]])
+			out = append(out, batch.Int128{Hi: int64(w[0]), Lo: w[1]})
+		}
+		return out
+	}
+}
+
 // copyNativeDataScatter copies nullable page data into a Vector using
 // int32 definition levels from our custom page reader.
 func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLevels []int32, maxDefLevel int32, n int, typ pqt.TypeID) {
@@ -723,14 +759,24 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 		})
 
 	case pqt.TypeDecimal:
-		src := data.Int64()
-		scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
-			for i := 0; i < count; i++ {
-				vec.DecimalData.Data[offset+dstStart+i] = batch.Int128From(src[srcStart+i])
-			}
-		}, func(dstStart, count int) {
-			vec.Nulls.SetNullRange(offset+dstStart, count)
-		})
+		if src := data.Int64(); src != nil {
+			scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+				for i := 0; i < count && srcStart+i < len(src); i++ {
+					vec.DecimalData.Data[offset+dstStart+i] = batch.Int128From(src[srcStart+i])
+				}
+			}, func(dstStart, count int) {
+				vec.Nulls.SetNullRange(offset+dstStart, count)
+			})
+		} else {
+			src := decimalWideValues(data)
+			scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+				for i := 0; i < count && srcStart+i < len(src); i++ {
+					vec.DecimalData.Data[offset+dstStart+i] = src[srcStart+i]
+				}
+			}, func(dstStart, count int) {
+				vec.Nulls.SetNullRange(offset+dstStart, count)
+			})
+		}
 
 	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
 		src := data.Int32()

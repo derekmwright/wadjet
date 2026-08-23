@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strconv"
 	"time"
 
@@ -37,6 +38,14 @@ type NativeWriter struct {
 
 	written   int64 // total bytes written to w so far
 	rowGroups []RowGroup
+
+	// err latches the first structural error found while decomposing a row.
+	// Decomposition walks a tree of leaf buffers and has nowhere to return
+	// an error to, so it latches here and WriteMapRows/Close surface it.
+	// Once set the writer is finished: the leaf buffers for the offending
+	// row are already inconsistent with the schema and no later row can
+	// repair them.
+	err error
 }
 
 // leafRange identifies a contiguous range of leaf buffers for a top-level column.
@@ -239,6 +248,9 @@ func wadjetTypeToPhysical(t TypeID) PhysicalType {
 // Nested types (ARRAY, MAP, ROW) are decomposed into leaf-level
 // (value, defLevel, repLevel) triples.
 func (nw *NativeWriter) WriteMapRows(rows []map[string]any) error {
+	if nw.err != nil {
+		return nw.err
+	}
 	for _, row := range rows {
 		for colIdx, col := range nw.schema.Columns {
 			val, ok := row[col.Name]
@@ -249,6 +261,9 @@ func (nw *NativeWriter) WriteMapRows(rows []map[string]any) error {
 			leafIdx := lr.start
 			nw.decomposeValue(col, val, 0, 0, &leafIdx)
 		}
+		if nw.err != nil {
+			return nw.err
+		}
 		nw.numRows++
 
 		if nw.numRows >= nw.config.RowGroupSize {
@@ -258,6 +273,13 @@ func (nw *NativeWriter) WriteMapRows(rows []map[string]any) error {
 		}
 	}
 	return nil
+}
+
+// fail latches the first structural error. See NativeWriter.err.
+func (nw *NativeWriter) fail(err error) {
+	if nw.err == nil {
+		nw.err = err
+	}
 }
 
 // decomposeValue walks a value according to col's type definition and appends
@@ -348,14 +370,41 @@ func (nw *NativeWriter) decomposeMap(col Column, val any, defLevel, repLevel int
 		return
 	}
 
+	// The key/value repetition types are fixed by the MAP schema, not by
+	// what the caller declared. This is the THIRD site that has to say so —
+	// flattenColumn (which fixes the leaf buffers' maxDefLevel) and
+	// buildMapSchemaElements (which fixes the footer's levels) are the other
+	// two, and all three must agree or the levels this function stamps land
+	// somewhere the footer does not describe. It makes no difference for a
+	// leaf value (decomposeLeaf takes its level from the leaf buffer, which
+	// flattenColumn already fixed) and all the difference for a nested one:
+	// decomposeRow/decomposeArray derive their inner def level from
+	// Nullable, so a MAP<K, ROW<..>> whose value was declared non-nullable
+	// wrote its fields one level below the footer's.
 	keyCol := col.ElementType.Fields[0]
+	keyCol.Nullable = false // keys are required
 	valCol := col.ElementType.Fields[1]
+	valCol.Nullable = true // values are optional
 
 	if val == nil {
-		// Entire map is null.
-		nw.emitNullForSubtree(keyCol, defLevel, repLevel, leafIdx)
-		nw.emitNullForSubtree(valCol, defLevel, repLevel, leafIdx)
-		return
+		if !col.Nullable {
+			// A required MAP has no encoding for NULL: its key leaf's
+			// definition levels only run 0..maxDef, and level 0 already
+			// means "map present, no entries" — the EMPTY map. Writing a
+			// NULL here produced a file whose own schema says the value
+			// cannot be null, so the reader is right to read that entry
+			// back as {} and the writer is what was wrong. Refuse it at
+			// the source rather than emit a file that cannot say what it
+			// was asked to store.
+			nw.fail(fmt.Errorf("column %q: MAP is not nullable, cannot write a NULL map "+
+				"(an empty map is map[string]any{}, which is a different value)", col.Name))
+			val = map[string]any{} // keep the leaf buffers in step; the write has already failed
+		} else {
+			// Entire map is null.
+			nw.emitNullForSubtree(keyCol, defLevel, repLevel, leafIdx)
+			nw.emitNullForSubtree(valCol, defLevel, repLevel, leafIdx)
+			return
+		}
 	}
 
 	m, ok := val.(map[string]any)
@@ -387,7 +436,8 @@ func (nw *NativeWriter) decomposeMap(col Column, val any, defLevel, repLevel int
 	keyLeafCount := countLeaves(keyCol)
 	valLeafIdx := keyLeafIdx + keyLeafCount
 
-	for k, v := range m {
+	for _, k := range sortedMapKeys(m) {
+		v := m[k]
 		elemRep := kvRep
 		if first {
 			elemRep = repLevel
@@ -465,6 +515,30 @@ func (nw *NativeWriter) emitNullForSubtree(col Column, defLevel, repLevel int32,
 	}
 }
 
+// sortedMapKeys returns m's keys in byte order.
+//
+// Go map iteration is randomized, so ranging over the map wrote the same
+// MAP value's entries in a different order on every call, and the file was
+// therefore not a function of its input: two writes of identical rows
+// produced different bytes. Nothing that compares files can work against
+// that — no golden file, no content hash, no byte-for-byte check that a
+// rewrite changed nothing. (Row-group min/max survive it, being
+// commutative; the bytes and the entry order do not.)
+//
+// The order is also observable downstream: it is the order the entries are
+// laid out in, and the vector side turns exactly that into the order
+// GetValue hands back. batch.mapEntryRows sorts on the same rule, because
+// this writer and that vector are the two ways the same map reaches disk
+// and they have to agree.
+func sortedMapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // countLeaves returns the number of leaf columns in a column subtree.
 func countLeaves(col Column) int {
 	switch col.Type {
@@ -491,6 +565,9 @@ func countLeaves(col Column) int {
 
 // Close flushes any remaining rows and writes the file footer.
 func (nw *NativeWriter) Close() error {
+	if nw.err != nil {
+		return nw.err
+	}
 	// Write magic header if this is the first write.
 	if nw.written == 0 {
 		if err := nw.writeBytes([]byte("PAR1")); err != nil {

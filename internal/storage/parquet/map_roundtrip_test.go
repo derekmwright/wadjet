@@ -2,7 +2,10 @@ package parquet
 
 import (
 	"bytes"
+	"encoding/hex"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -242,5 +245,368 @@ func TestReadRowsAsUsesCallerTypes(t *testing.T) {
 	}
 	if v, ok := got[0]["c_vec"].([]float32); !ok || !reflect.DeepEqual(v, []float32{1, 2, 3, 4}) {
 		t.Errorf("c_vec = %#v (%T), want []float32{1,2,3,4}", got[0]["c_vec"], got[0]["c_vec"])
+	}
+}
+
+// --- coverage beyond the one-value-type table above ---
+
+func mapSchemaWithValue(valueType TypeID, mapNullable, valueNullable bool) Schema {
+	return Schema{Columns: []Column{
+		{Name: "id", Type: TypeInt64},
+		{Name: "m", Type: TypeMap, Nullable: mapNullable, ElementType: &Column{
+			Name: "entry", Type: TypeRow, Fields: []Column{
+				{Name: "key", Type: TypeString},
+				{Name: "value", Type: valueType, Nullable: valueNullable},
+			},
+		}},
+	}}
+}
+
+// TestMapRoundTripValueTypes: the shape table above only ever carried INT64
+// values, so the four physical widths a MAP value can be written at were
+// covered by exactly one of them. Each of these writes the same five shapes.
+func TestMapRoundTripValueTypes(t *testing.T) {
+	cases := []struct {
+		name   string
+		typ    TypeID
+		values []any // one per entry key a, b, c
+	}{
+		{"int64", TypeInt64, []any{int64(1), int64(-2), int64(1 << 40)}},
+		{"string", TypeString, []any{"", "two", "\u00fc\u00f1\u00ee\u00e7\u00f8d\u00e9"}},
+		{"float64", TypeFloat64, []any{0.0, -1.5, 3.25}},
+		{"bool", TypeBool, []any{true, false, true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := []map[string]any{
+				{"id": int64(0), "m": map[string]any{"a": tc.values[0]}},
+				{"id": int64(1), "m": map[string]any{"a": tc.values[0], "b": tc.values[1], "c": tc.values[2]}},
+				{"id": int64(2), "m": nil},
+				{"id": int64(3), "m": map[string]any{}},
+				{"id": int64(4), "m": map[string]any{"n": nil}},
+				{"id": int64(5), "m": map[string]any{"": tc.values[0]}},
+				// Keys are UTF-8 byte strings, and the key column carries
+				// them as bytes: a multi-byte key must not be split, and an
+				// empty key must not be confused with an absent one.
+				{"id": int64(6), "m": map[string]any{
+					"\u65e5\u672c\u8a9e":       tc.values[0],
+					"\u043a\u043b\u044e\u0447": tc.values[1],
+					"emoji \U0001f5dd":         tc.values[2],
+					"":                         tc.values[0],
+				}},
+			}
+			got := mapWriteRead(t, mapSchemaWithValue(tc.typ, true, true), rows)
+			for i, want := range rows {
+				if want["m"] == nil {
+					if v, ok := got[i]["m"]; ok && v != nil {
+						t.Errorf("row %d: NULL map read back as %#v", i, v)
+					}
+					continue
+				}
+				if !reflect.DeepEqual(got[i]["m"], want["m"]) {
+					t.Errorf("row %d: map = %#v, want %#v", i, got[i]["m"], want["m"])
+				}
+			}
+		})
+	}
+}
+
+// TestMapNonNullable: a required MAP has no encoding for NULL — level 0 on
+// its key leaf already means "map present, no entries". So the EMPTY map
+// must survive the round trip, and a NULL must be refused at the writer
+// rather than written as something the file cannot say.
+func TestMapNonNullable(t *testing.T) {
+	schema := mapSchemaWithValue(TypeInt64, false, true)
+
+	got := mapWriteRead(t, schema, []map[string]any{
+		{"id": int64(0), "m": map[string]any{"a": int64(1)}},
+		{"id": int64(1), "m": map[string]any{}},
+		{"id": int64(2), "m": map[string]any{"b": int64(2), "c": int64(3)}},
+	})
+	if !reflect.DeepEqual(got[0]["m"], map[string]any{"a": int64(1)}) {
+		t.Errorf("row 0: %#v", got[0]["m"])
+	}
+	m, ok := got[1]["m"].(map[string]any)
+	if !ok || len(m) != 0 {
+		t.Errorf("row 1: empty map in a required column read back as %#v", got[1]["m"])
+	}
+	if !reflect.DeepEqual(got[2]["m"], map[string]any{"b": int64(2), "c": int64(3)}) {
+		t.Errorf("row 2: %#v", got[2]["m"])
+	}
+
+	// The NULL the column cannot hold.
+	var buf bytes.Buffer
+	pw, err := NewWriter(&buf, schema, DefaultWriterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = pw.WriteRows([]map[string]any{{"id": int64(0), "m": nil}})
+	if err == nil {
+		t.Fatal("writing a NULL into a non-nullable MAP succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), `"m"`) {
+		t.Errorf("error %q does not name the column", err)
+	}
+	// The writer stays failed: a half-decomposed row cannot be repaired by
+	// a later one, and a file closed over it would be silently short.
+	if err := pw.Close(); err == nil {
+		t.Error("Close after a failed write succeeded, want the latched error")
+	}
+}
+
+// TestMapLargeAndMultiRowGroup: one map big enough to cross a page boundary,
+// and a file whose maps straddle row groups. Row-group boundaries are where
+// the writer resets its level buffers, and the map assembler walks a whole
+// row group at a time.
+func TestMapLargeAndMultiRowGroup(t *testing.T) {
+	t.Run("large_map", func(t *testing.T) {
+		big := make(map[string]any, 10000)
+		for i := 0; i < 10000; i++ {
+			big[fmt.Sprintf("k%05d", i)] = int64(i)
+		}
+		got := mapWriteRead(t, mapTestSchema(true), []map[string]any{
+			{"id": int64(0), "m": big},
+			{"id": int64(1), "m": map[string]any{"tail": int64(-1)}},
+		})
+		gotMap, ok := got[0]["m"].(map[string]any)
+		if !ok {
+			t.Fatalf("10k-entry map read back as %#v", got[0]["m"])
+		}
+		if !reflect.DeepEqual(gotMap, big) {
+			t.Fatalf("10k-entry map: %d entries read back, want %d", len(gotMap), len(big))
+		}
+		if !reflect.DeepEqual(got[1]["m"], map[string]any{"tail": int64(-1)}) {
+			t.Errorf("row after the large map: %#v", got[1]["m"])
+		}
+	})
+
+	t.Run("multi_row_group", func(t *testing.T) {
+		rows := []map[string]any{
+			{"id": int64(0), "m": map[string]any{"a": int64(0)}},
+			{"id": int64(1), "m": nil},
+			{"id": int64(2), "m": map[string]any{}},
+			{"id": int64(3), "m": map[string]any{"b": int64(3), "c": int64(33)}},
+			{"id": int64(4), "m": map[string]any{"d": nil}},
+		}
+		var buf bytes.Buffer
+		cfg := DefaultWriterConfig()
+		cfg.RowGroupSize = 2
+		pw, err := NewWriter(&buf, mapTestSchema(true), cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := pw.WriteRows(rows); err != nil {
+			t.Fatal(err)
+		}
+		if err := pw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		raw := buf.Bytes()
+		r, err := NewReader(bytes.NewReader(raw), int64(len(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := r.NumRowGroups(); n < 3 {
+			t.Fatalf("row groups = %d, want the maps split across at least 3", n)
+		}
+		got, err := r.ReadRows(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != len(rows) {
+			t.Fatalf("read %d rows, wrote %d", len(got), len(rows))
+		}
+		for i, want := range rows {
+			if want["m"] == nil {
+				if v, ok := got[i]["m"]; ok && v != nil {
+					t.Errorf("row %d: NULL map read back as %#v", i, v)
+				}
+				continue
+			}
+			if !reflect.DeepEqual(got[i]["m"], want["m"]) {
+				t.Errorf("row %d: map = %#v, want %#v", i, got[i]["m"], want["m"])
+			}
+		}
+	})
+}
+
+// TestMapWriteIsDeterministic: decomposeMap used to range over the Go map,
+// whose iteration order is randomized, so the same rows produced different
+// bytes on every write. A file that is not a function of its input cannot be
+// compared, hashed or pinned by a golden — including by the layout test
+// above, which is only meaningful because this one holds.
+func TestMapWriteIsDeterministic(t *testing.T) {
+	rows := []map[string]any{
+		{"id": int64(0), "m": map[string]any{"delta": int64(4), "alpha": int64(1), "charlie": int64(3), "bravo": int64(2)}},
+		{"id": int64(1), "m": map[string]any{"z": nil, "y": int64(25), "x": int64(24)}},
+	}
+	write := func() []byte {
+		var buf bytes.Buffer
+		pw, err := NewWriter(&buf, mapTestSchema(true), DefaultWriterConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := pw.WriteRows(rows); err != nil {
+			t.Fatal(err)
+		}
+		if err := pw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	first := write()
+	for i := 0; i < 8; i++ {
+		if next := write(); !bytes.Equal(first, next) {
+			t.Fatalf("write %d produced different bytes (%d vs %d) for identical input", i+2, len(first), len(next))
+		}
+	}
+}
+
+// goldenSingleEntryMap is a one-row file holding {"a": 10} in a nullable
+// MAP<STRING, INT64>, captured before the writer changes in this commit.
+//
+// It pins the PHYSICAL LAYOUT of the shape that already read back correctly.
+// Ordering is the one thing this commit deliberately changes about a MAP's
+// bytes, and a single-entry map has only one order — so for this file the
+// bytes must be identical, and any other difference is an accident.
+const goldenSingleEntryMap = "504152311500151015142c15021500150615061c36002808070000000000000018080700" +
+	"000000000000000000081c07000000000000001500152215262c15021500150615061c36" +
+	"002801611801610000001140020000000200020000000202010000006115001528152c2c" +
+	"15021500150615061c360028080a0000000000000018080a00000000000000000000144c" +
+	"0200000002000200000002030a000000000000001502196c3500180d7761646a65745f73" +
+	"6368656d61150400150425001802696425244cac134011000000350218016d150215024c" +
+	"2c000000350418096b65795f76616c75651504150400150c250018036b657925004c1c00" +
+	"000015042502180576616c756525244cac1340110000001602191c193c26081c15041925" +
+	"00061918026964150216021662166626083c360028080700000000000000180807000000" +
+	"00000000000000266e1c150c192500061938016d096b65795f76616c7565036b65791502" +
+	"16021658165c266e3c360028016118016100000026ca011c1504192500061938016d096b" +
+	"65795f76616c75650576616c756515021602167a167e26ca013c360028080a0000000000" +
+	"000018080a0000000000000000000016b402160200191c180e7761646a65742e76657273" +
+	"696f6e1805302e312e300018167761646a657420286e6174697665207772697465722900" +
+	"5401000050415231"
+
+func TestMapLayoutUnchanged(t *testing.T) {
+	var buf bytes.Buffer
+	pw, err := NewWriter(&buf, mapTestSchema(true), DefaultWriterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pw.WriteRows([]map[string]any{{"id": int64(7), "m": map[string]any{"a": int64(10)}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want, err := hex.DecodeString(goldenSingleEntryMap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("single-entry MAP layout changed: %d bytes now, %d before\n now: %s\nwas: %s",
+			buf.Len(), len(want), hex.EncodeToString(buf.Bytes()), goldenSingleEntryMap)
+	}
+}
+
+// TestMapLevelSitesAgree pins the asymmetry that #393 left behind. THREE
+// places decide the definition levels of a MAP's leaves:
+//
+//   - flattenColumn, which sets each leaf buffer's maxDefLevel;
+//   - buildMapSchemaElements, which writes the repetition types into the
+//     footer the reader derives its maxDef from;
+//   - decomposeMap, which stamps the level on each entry as it is written.
+//
+// All three force the key required and the value optional, because the MAP
+// schema fixes those regardless of what the caller declared. Two of them did
+// so already; decomposeMap used the declaration as-is, so a MAP whose value
+// is itself a ROW declared non-nullable had that ROW's fields written one
+// level below what the footer describes — the level that says the whole
+// value is ABSENT, not that one field is null.
+func TestMapLevelSitesAgree(t *testing.T) {
+	schema := Schema{Columns: []Column{
+		{Name: "id", Type: TypeInt64},
+		{Name: "m", Type: TypeMap, Nullable: true, ElementType: &Column{
+			Name: "entry", Type: TypeRow, Fields: []Column{
+				{Name: "key", Type: TypeString},
+				// Declared NON-nullable on purpose: the MAP schema says
+				// otherwise and all three sites have to say the same thing.
+				{Name: "value", Type: TypeRow, Nullable: false, Fields: []Column{
+					{Name: "a", Type: TypeInt64, Nullable: true},
+				}},
+			},
+		}},
+	}}
+
+	var buf bytes.Buffer
+	nw := NewNativeWriter(&buf, schema, DefaultWriterConfig())
+
+	// Site 1: the leaf buffers.
+	writerMaxDef := make(map[string]int32, len(nw.leafBufs))
+	for _, lb := range nw.leafBufs {
+		writerMaxDef[pathKey(lb.path)] = lb.maxDefLevel
+	}
+
+	if err := nw.WriteMapRows([]map[string]any{
+		{"id": int64(0), "m": map[string]any{"k": map[string]any{"a": int64(1)}}},
+		{"id": int64(1), "m": map[string]any{"k": map[string]any{"a": nil}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := nw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw := buf.Bytes()
+	r, err := NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := r.FileReader()
+	for i, leaf := range fr.Leaves() {
+		key := pathKey(leaf.Path)
+		// Site 2: the footer.
+		if wmd, ok := writerMaxDef[key]; !ok {
+			t.Errorf("leaf %s is in the footer but has no leaf buffer", key)
+		} else if wmd != int32(leaf.MaxDefLevel) {
+			t.Errorf("leaf %s: writer stamps up to def %d, footer declares maxDef %d",
+				key, wmd, leaf.MaxDefLevel)
+		}
+
+		// Site 3: the levels actually written.
+		lcd, err := readLeafColumn(fr, 0, i)
+		if err != nil {
+			t.Fatalf("leaf %s: %v", key, err)
+		}
+		present := 0
+		for j, def := range lcd.defLevels {
+			if def > lcd.maxDef {
+				t.Fatalf("leaf %s entry %d written at def %d, above the footer's maxDef %d",
+					key, j, def, lcd.maxDef)
+			}
+			if def == lcd.maxDef {
+				present++
+			}
+		}
+		if present != len(lcd.values) {
+			t.Fatalf("leaf %s: %d entries at maxDef but %d values decoded", key, present, len(lcd.values))
+		}
+
+		// The NULL field of row 1's ROW value: "value present, field a
+		// null" is exactly one level below the leaf's maximum. A level of
+		// maxDef-2 would be the claim that the whole ROW is absent.
+		if key == "m.key_value.value.a" {
+			if len(lcd.defLevels) != 2 {
+				t.Fatalf("leaf %s: %d entries, want 2", key, len(lcd.defLevels))
+			}
+			if lcd.defLevels[1] != lcd.maxDef-1 {
+				t.Errorf("leaf %s: a NULL field inside a present ROW value written at def %d, want %d (maxDef %d)",
+					key, lcd.defLevels[1], lcd.maxDef-1, lcd.maxDef)
+			}
+		}
+	}
+
+	// Reading the row back must not desynchronise or panic. Assembling a
+	// nested MAP value is #409 and out of scope here; not crashing is not.
+	if _, err := r.ReadRows(nil); err != nil {
+		t.Fatalf("ReadRows over a MAP with a ROW value: %v", err)
 	}
 }

@@ -118,7 +118,10 @@ func (r *Reader) ReadRowsAs(schema []Column, selectedColumns []string) ([]map[st
 	if len(selectedColumns) > 0 {
 		readCols = filterSchemaColumns(r.schema.Columns, selectedColumns)
 	}
-	readCols = retypeFromCatalog(readCols, schema)
+	readCols, err := retypeFromCatalog(readCols, schema)
+	if err != nil {
+		return nil, err
+	}
 
 	// Check if we have nested columns that need assembly.
 	hasNested := false
@@ -157,7 +160,7 @@ func (r *Reader) readRowsFlat(readCols []Column) ([]map[string]any, error) {
 				colValues[i] = make([]any, numRows)
 				continue
 			}
-			vals, err := readColumnToAny(r.fr, rgIdx, leafIdx, numRows, col.Type)
+			vals, err := readColumnToAny(r.fr, rgIdx, leafIdx, numRows, col)
 			if err != nil {
 				return nil, fmt.Errorf("reading column %s: %w", col.Name, err)
 			}
@@ -229,7 +232,7 @@ func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
 				if !ok {
 					continue
 				}
-				vals, err := readColumnToAny(r.fr, rgIdx, leafIdx, numRows, col.Type)
+				vals, err := readColumnToAny(r.fr, rgIdx, leafIdx, numRows, col)
 				if err != nil {
 					return nil, fmt.Errorf("reading column %s: %w", col.Name, err)
 				}
@@ -708,7 +711,7 @@ func (r *Reader) ReadRowGroup(index int, selectedColumns []string) ([]map[string
 			colValues[i] = make([]any, numRows)
 			continue
 		}
-		vals, err := readColumnToAny(r.fr, index, leafIdx, numRows, col.Type)
+		vals, err := readColumnToAny(r.fr, index, leafIdx, numRows, col)
 		if err != nil {
 			return nil, fmt.Errorf("reading column %s: %w", col.Name, err)
 		}
@@ -735,16 +738,69 @@ func (r *Reader) ReadRowGroup(index int, selectedColumns []string) ([]map[string
 // toBytes, little-endian, four bytes per dimension. Without it neither
 // unpack function had a VECTOR arm at all, so Reader.ReadRows answered NULL
 // for every VECTOR column it was asked for.
-func float32sFromBytes(b []byte) []float32 {
-	out := make([]float32, len(b)/4)
+//
+// dim is the dimension the SCHEMA declares, and a file whose entries are a
+// different width is refused. The count is derived from the bytes, so a
+// VECTOR(8) column read out of a file storing four floats used to come back
+// as a four-element vector with no complaint at all — a shorter vector is
+// not a truncated one, it is a different point, and every distance function
+// downstream would answer over the wrong number of dimensions.
+func float32sFromBytes(b []byte, dim int) ([]float32, error) {
+	if len(b)%4 != 0 {
+		return nil, fmt.Errorf("VECTOR value is %d bytes, not a whole number of float32s", len(b))
+	}
+	n := len(b) / 4
+	if dim > 0 && n != dim {
+		return nil, fmt.Errorf("VECTOR value holds %d dimensions (%d bytes) but the schema declares %d", n, len(b), dim)
+	}
+	out := make([]float32, n)
 	for i := range out {
 		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
 	}
-	return out
+	return out, nil
+}
+
+// decodeFamily is the DECODER's view of a leaf: which typed accessor the
+// bytes of a column will be handed to, and therefore how wide the elements
+// of the unsafe.Slice cast in values.go are.
+//
+// Types inside one family are interchangeable byte-for-byte — an IPv4 and a
+// TIMESTAMP are both eight-byte integers, and every bytes-backed type
+// (STRING, BYTES, IPv6, UUID, VECTOR) reads through the offset table that
+// BYTE_ARRAY and FIXED_LEN_BYTE_ARRAY both produce. Types in DIFFERENT
+// families are not interchangeable at all, and that is the whole point of
+// this type: see retypeFromCatalog.
+type decodeFamily int
+
+const (
+	familyBytes decodeFamily = iota
+	familyBool
+	familyInt32
+	familyInt64
+	familyFloat32
+	familyFloat64
+)
+
+func familyOf(t TypeID) decodeFamily {
+	switch wadjetTypeToPhysical(t) {
+	case PhysicalBoolean:
+		return familyBool
+	case PhysicalInt32:
+		return familyInt32
+	case PhysicalInt64:
+		return familyInt64
+	case PhysicalFloat:
+		return familyFloat32
+	case PhysicalDouble:
+		return familyFloat64
+	default:
+		return familyBytes
+	}
 }
 
 // retypeFromCatalog replaces each read column's type with the catalog's,
-// where the catalog names it and both sides are leaves.
+// where the catalog names it, both sides are leaves, and the two types are
+// carried by the same physical bytes.
 //
 // Leaves only, deliberately: a nested column's read plan is built from the
 // FILE's shape (assembleMapColumn walks name/"key_value"/field paths), and
@@ -752,9 +808,26 @@ func float32sFromBytes(b []byte) []float32 {
 // would look up leaves that do not exist. A lossy leaf INSIDE a container
 // stays lossy — that is the same annotation gap, one level down, and it
 // needs the annotations, not a substitution.
-func retypeFromCatalog(readCols, catalog []Column) []Column {
+//
+// Same physical bytes, non-negotiably: this substitution exists so that a
+// column the file cannot ANNOTATE (IPv4, IPv6, MAC, PORT, PROTOCOL,
+// DURATION, BYTES, UUID) is decoded as what it is, and every one of those
+// eight has the same physical type as the type the file recovered for it.
+// A catalog type of a DIFFERENT width is not a lost annotation, it is
+// catalog/file drift, and honouring it means decoding the file's bytes as
+// a wider element: unpackAllPresent would ask Values.Int64() for one int64
+// per INT32 in the page, an unsafe.Slice twice as long as its backing array
+// — megabytes of adjacent heap returned as query results.
+//
+// Drift is an ERROR rather than a silent skip. Skipping would answer the
+// query from the file's own type, which is a different answer from the one
+// the catalog promised, arrived at without saying so; the caller cannot tell
+// that from a correct read. A named error says which column, what the
+// catalog claims and what the file actually holds — which is the whole
+// diagnosis.
+func retypeFromCatalog(readCols, catalog []Column) ([]Column, error) {
 	if len(catalog) == 0 || len(readCols) == 0 {
-		return readCols
+		return readCols, nil
 	}
 	byName := make(map[string]Column, len(catalog))
 	for _, c := range catalog {
@@ -770,11 +843,17 @@ func retypeFromCatalog(readCols, catalog []Column) []Column {
 		if isNestedType(c.Type) || isNestedType(want.Type) {
 			continue
 		}
+		if familyOf(want.Type) != familyOf(c.Type) {
+			return nil, fmt.Errorf(
+				"column %q: schema declares %s (physical %s) but the file stores %s (physical %s): "+
+					"refusing to decode the file's bytes as a different width",
+				c.Name, want.Type, wadjetTypeToPhysical(want.Type), c.Type, wadjetTypeToPhysical(c.Type))
+		}
 		out[i].Type = want.Type
 		out[i].Precision, out[i].Scale = want.Precision, want.Scale
 		out[i].Dimension = want.Dimension
 	}
-	return out
+	return out, nil
 }
 
 func isNestedType(t TypeID) bool {
@@ -796,7 +875,13 @@ func filterSchemaColumns(cols []Column, selected []string) []Column {
 }
 
 // readColumnToAny reads all pages for a column and returns values as []any.
-func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, typeID TypeID) ([]any, error) {
+//
+// col carries the type the values are decoded AS (the caller's, once
+// retypeFromCatalog has vetted it against the file's physical type) plus the
+// declared VECTOR dimension, which the unpack functions check the file's
+// entry width against.
+func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, col Column) ([]any, error) {
+	typeID := col.Type
 	pr := fr.ColumnPages(rgIdx, colIdx)
 	if pr == nil {
 		return make([]any, numRows), nil
@@ -843,12 +928,15 @@ func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, typeID TypeID) 
 		}
 
 		if page.NumNulls == 0 || page.DefinitionLevels == nil {
-			unpackAllPresent(values, offset, data, n, typeID)
+			err = unpackAllPresent(values, offset, data, n, col)
 		} else {
-			unpackWithNulls(values, offset, data, page.DefinitionLevels, maxDef, n, typeID)
+			err = unpackWithNulls(values, offset, data, page.DefinitionLevels, maxDef, n, col)
 		}
 		offset += n
 		page.Release()
+		if err != nil {
+			return nil, fmt.Errorf("column %s: %w", col.Name, err)
+		}
 	}
 
 	// A micro/nano TIMESTAMP column decodes to the file's unit; the engine
@@ -865,8 +953,8 @@ func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, typeID TypeID) 
 	return values, nil
 }
 
-func unpackAllPresent(dst []any, offset int, data Values, n int, typeID TypeID) {
-	switch typeID {
+func unpackAllPresent(dst []any, offset int, data Values, n int, col Column) error {
+	switch col.Type {
 	case TypeInt64, TypeTimestamp, TypeDuration:
 		src := data.Int64()
 		for i := 0; i < n && i < len(src); i++ {
@@ -924,16 +1012,21 @@ func unpackAllPresent(dst []any, offset int, data Values, n int, typeID TypeID) 
 		rawData, offsets := data.ByteArray()
 		if offsets != nil {
 			for i := 0; i < n && i+1 < len(offsets); i++ {
-				dst[offset+i] = float32sFromBytes(rawData[offsets[i]:offsets[i+1]])
+				v, err := float32sFromBytes(rawData[offsets[i]:offsets[i+1]], col.Dimension)
+				if err != nil {
+					return err
+				}
+				dst[offset+i] = v
 			}
 		}
 	case TypeDecimal:
 		unpackDecimalAllPresent(dst, offset, data, n)
 	}
+	return nil
 }
 
-func unpackWithNulls(dst []any, offset int, data Values, defLevels []int32, maxDef int32, n int, typeID TypeID) {
-	switch typeID {
+func unpackWithNulls(dst []any, offset int, data Values, defLevels []int32, maxDef int32, n int, col Column) error {
+	switch col.Type {
 	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
 		src := data.Int64()
 		vi := 0
@@ -1024,7 +1117,11 @@ func unpackWithNulls(dst []any, offset int, data Values, defLevels []int32, maxD
 			for i := 0; i < n; i++ {
 				if i < len(defLevels) && defLevels[i] == maxDef {
 					if vi+1 < len(offsets) {
-						dst[offset+i] = float32sFromBytes(rawData[offsets[vi]:offsets[vi+1]])
+						v, err := float32sFromBytes(rawData[offsets[vi]:offsets[vi+1]], col.Dimension)
+						if err != nil {
+							return err
+						}
+						dst[offset+i] = v
 					}
 					vi++
 				}
@@ -1033,6 +1130,7 @@ func unpackWithNulls(dst []any, offset int, data Values, defLevels []int32, maxD
 	case TypeDecimal:
 		unpackDecimalWithNulls(dst, offset, data, defLevels, maxDef, n)
 	}
+	return nil
 }
 
 func unpackDecimalAllPresent(dst []any, offset int, data Values, n int) {
@@ -1133,6 +1231,14 @@ func ValidateDictIndices(indices []int32, n, numValues int) error {
 }
 
 // resolveDictForRows resolves dictionary indices to actual values.
+//
+// The indices are validated against the dictionary's declared entry count by
+// ValidateDictIndices; dictEntries then validates that the dictionary's
+// DECODED entries actually number that many. The two are not the same claim:
+// the count comes from the page header, the entries come from the accessor
+// for typeID, and the accessor answers nil when the dictionary page's
+// physical type is not the one typeID reads (see values.go). Without the
+// second check a validated index still indexes an empty slice.
 func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) (Values, error) {
 	indices := page.Int32()
 	n := page.Count()
@@ -1143,6 +1249,9 @@ func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) (Value
 	switch typeID {
 	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
 		src := dict.Data.Int64()
+		if err := dictEntries(len(src), dict, typeID); err != nil {
+			return Values{}, err
+		}
 		dst := make([]int64, n)
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
@@ -1150,6 +1259,9 @@ func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) (Value
 		return PlainInt64Values(dst), nil
 	case TypeInt32, TypePort, TypeProtocol, TypeDate:
 		src := dict.Data.Int32()
+		if err := dictEntries(len(src), dict, typeID); err != nil {
+			return Values{}, err
+		}
 		dst := make([]int32, n)
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
@@ -1157,6 +1269,9 @@ func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) (Value
 		return PlainInt32Values(dst), nil
 	case TypeFloat64:
 		src := dict.Data.Double()
+		if err := dictEntries(len(src), dict, typeID); err != nil {
+			return Values{}, err
+		}
 		dst := make([]float64, n)
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
@@ -1164,6 +1279,9 @@ func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) (Value
 		return PlainFloat64Values(dst), nil
 	case TypeFloat32:
 		src := dict.Data.Float()
+		if err := dictEntries(len(src), dict, typeID); err != nil {
+			return Values{}, err
+		}
 		dst := make([]float32, n)
 		for i := 0; i < n; i++ {
 			dst[i] = src[indices[i]]
@@ -1171,6 +1289,9 @@ func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) (Value
 		return PlainFloat32Values(dst), nil
 	default:
 		dictData, dictOffsets := dict.Data.ByteArray()
+		if err := dictEntries(len(dictOffsets)-1, dict, typeID); err != nil {
+			return Values{}, err
+		}
 		var buf []byte
 		offsets := make([]uint32, n+1)
 		for i := 0; i < n; i++ {
@@ -1181,6 +1302,16 @@ func resolveDictForRows(dict *DictionaryData, page Values, typeID TypeID) (Value
 		offsets[n] = uint32(len(buf))
 		return ByteArrayValues(buf, offsets), nil
 	}
+}
+
+// dictEntries checks that a dictionary page decoded as many entries as its
+// header claims, so a validated index cannot run off the decoded slice.
+func dictEntries(decoded int, dict *DictionaryData, typeID TypeID) error {
+	if decoded < dict.NumValues {
+		return fmt.Errorf("dictionary page declares %d entries but decoded %d as %s (physical %s)",
+			dict.NumValues, decoded, typeID, dict.Data.PhysType())
+	}
+	return nil
 }
 
 // CompareNative compares two native Go values for ordering.

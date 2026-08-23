@@ -81,45 +81,58 @@ func (v Values) Count() int { return v.count }
 // PhysType returns the physical Parquet type of the values.
 func (v Values) PhysType() PhysicalType { return v.physType }
 
-// Int32 returns the data as a slice of int32.
-// Valid only when physType is PhysicalInt32.
-func (v Values) Int32() []int32 {
-	if len(v.data) == 0 {
+// typedValues reinterprets v.data as a []T of width-byte elements — the
+// zero-copy cast every fixed-width accessor is built on — and is the ONE
+// place that decides whether the cast is safe to make.
+//
+// Two conditions are checked, and neither is theoretical:
+//
+//   - the physical type must be the one the caller asked for. The row
+//     reader decodes a column as the type the CATALOG names, not the type
+//     the file stores, so a catalog INT64 over a file INT32 asked for
+//     v.count int64s from a buffer holding v.count int32s — an unsafe.Slice
+//     twice as long as its backing array, i.e. adjacent heap read straight
+//     into query results. retypeFromCatalog now rejects that pairing before
+//     it gets here; this is the backstop at the unsafe site itself.
+//   - the element count must fit the bytes. count comes from a page header,
+//     which is untrusted input in a file this package must not be crashed by.
+//
+// A mismatch yields nil rather than a panic: every caller already guards its
+// loop with len(src), so a nil slice degrades to "no values decoded", which
+// the layer above reports as an error rather than a crash.
+func typedValues[T any](v Values, want PhysicalType, width int) []T {
+	if v.physType != want || v.count <= 0 || len(v.data) < width {
 		return nil
 	}
-	return unsafe.Slice((*int32)(unsafe.Pointer(&v.data[0])), v.count)
-}
-
-// Int64 returns the data as a slice of int64.
-// Valid only when physType is PhysicalInt64.
-func (v Values) Int64() []int64 {
-	if len(v.data) == 0 {
-		return nil
+	n := v.count
+	if fits := len(v.data) / width; n > fits {
+		n = fits
 	}
-	return unsafe.Slice((*int64)(unsafe.Pointer(&v.data[0])), v.count)
+	return unsafe.Slice((*T)(unsafe.Pointer(&v.data[0])), n)
 }
 
-// Float returns the data as a slice of float32.
-// Valid only when physType is PhysicalFloat.
-func (v Values) Float() []float32 {
-	if len(v.data) == 0 {
-		return nil
-	}
-	return unsafe.Slice((*float32)(unsafe.Pointer(&v.data[0])), v.count)
-}
+// Int32 returns the data as a slice of int32, or nil when the values are not
+// PhysicalInt32.
+func (v Values) Int32() []int32 { return typedValues[int32](v, PhysicalInt32, 4) }
 
-// Double returns the data as a slice of float64.
-// Valid only when physType is PhysicalDouble.
-func (v Values) Double() []float64 {
-	if len(v.data) == 0 {
-		return nil
-	}
-	return unsafe.Slice((*float64)(unsafe.Pointer(&v.data[0])), v.count)
-}
+// Int64 returns the data as a slice of int64, or nil when the values are not
+// PhysicalInt64.
+func (v Values) Int64() []int64 { return typedValues[int64](v, PhysicalInt64, 8) }
 
-// Boolean returns the data as packed boolean bytes.
-// Each byte holds 8 boolean values, LSB first.
+// Float returns the data as a slice of float32, or nil when the values are
+// not PhysicalFloat.
+func (v Values) Float() []float32 { return typedValues[float32](v, PhysicalFloat, 4) }
+
+// Double returns the data as a slice of float64, or nil when the values are
+// not PhysicalDouble.
+func (v Values) Double() []float64 { return typedValues[float64](v, PhysicalDouble, 8) }
+
+// Boolean returns the data as packed boolean bytes, or nil when the values
+// are not PhysicalBoolean. Each byte holds 8 boolean values, LSB first.
 func (v Values) Boolean() []byte {
+	if v.physType != PhysicalBoolean {
+		return nil
+	}
 	return v.data
 }
 
@@ -205,26 +218,43 @@ func DecodePlainFixedLenByteArray(data []byte, n, typeLength int) Values {
 
 // --- Value extraction helpers for statistics ---
 
-// Int32At returns the int32 at index i from the data.
+// The At accessors read one element out of the raw bytes. They are used on
+// the statistics path, where the index comes from a scan over a page whose
+// declared value count may not match the bytes it actually carries, so each
+// one bounds-checks before it reads and answers zero past the end.
+
+// Int32At returns the int32 at index i from the data, or 0 if i is past the end.
 func (v Values) Int32At(i int) int32 {
 	off := i * 4
+	if i < 0 || off < 0 || off+4 > len(v.data) {
+		return 0
+	}
 	return int32(binary.LittleEndian.Uint32(v.data[off:]))
 }
 
-// Int64At returns the int64 at index i from the data.
+// Int64At returns the int64 at index i from the data, or 0 if i is past the end.
 func (v Values) Int64At(i int) int64 {
 	off := i * 8
+	if i < 0 || off < 0 || off+8 > len(v.data) {
+		return 0
+	}
 	return int64(binary.LittleEndian.Uint64(v.data[off:]))
 }
 
-// FloatAt returns the float32 at index i.
+// FloatAt returns the float32 at index i, or 0 if i is past the end.
 func (v Values) FloatAt(i int) float32 {
 	off := i * 4
+	if i < 0 || off < 0 || off+4 > len(v.data) {
+		return 0
+	}
 	return math.Float32frombits(binary.LittleEndian.Uint32(v.data[off:]))
 }
 
-// DoubleAt returns the float64 at index i.
+// DoubleAt returns the float64 at index i, or 0 if i is past the end.
 func (v Values) DoubleAt(i int) float64 {
 	off := i * 8
+	if i < 0 || off < 0 || off+8 > len(v.data) {
+		return 0
+	}
 	return math.Float64frombits(binary.LittleEndian.Uint64(v.data[off:]))
 }

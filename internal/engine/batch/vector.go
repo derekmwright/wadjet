@@ -1100,6 +1100,10 @@ func (v *Vector) SetValue(i int, val any) {
 // comparator sees, and the order a re-write puts on disk. Sorting is what
 // makes the same file read back the same way twice — and makes the
 // single-process and distributed arms agree on a MAP value at all.
+//
+// The parquet writer sorts on the same rule (parquet.sortedMapKeys), because
+// this vector and that writer are the two ways the same map reaches disk and
+// they have to put it there the same way.
 func mapEntryRows(child *Vector, m map[string]any) []any {
 	keyName, valName := "key", "value"
 	if len(child.FieldNames) == 2 {
