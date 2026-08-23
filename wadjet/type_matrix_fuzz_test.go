@@ -177,17 +177,6 @@ func TestTypeMatrixFuzzBatchReuse(t *testing.T) {
 // tmFuzzOptPins are the known optimization-invariance divergences of the
 // generated arm, keyed "<seed>/<toggle>".
 var tmFuzzOptPins = map[string]typematrix.Pin{
-	"11/partitioned-agg": {Issue: "#402", Reason: "GROUP BY + ORDER BY + LIMIT returns a " +
-		"different top-N with partitioned aggregation off, under a total order. " +
-		"INTERMITTENT, and unlike #391 there is no other gate that FORCES it: the tie-break " +
-		"among rows sharing the LIMIT boundary's ORDER BY value depends on the partial-state " +
-		"merge order, which is not fixed by seed or SQL text, so the same seed and toggle " +
-		"diverge on roughly 60-75% of individual invocations and agree on the rest (measured " +
-		"2026-08-23, ~8 samples). Requiring a hit on every test run made this flake ~40% of the " +
-		"time. tmFuzzIntermittentOptRetries names this key so the comparison is retried up to a " +
-		"bound before concluding \"no divergence\" — every attempt still runs the real compare, " +
-		"and a divergence is logged the instant one appears, so this tolerates the flake without " +
-		"exempting the entry (ADR-0013 amendment 2026-08-23)."},
 	"18/scan-filter": {Issue: "#401", Reason: "A qualified column in WHERE fails to resolve once " +
 		"the filter falls back from the scan to the operator level."},
 	"18/all-off": {Issue: "#401", Reason: "Same resolution failure, with every switch off."},
@@ -203,9 +192,11 @@ var tmFuzzOptPins = map[string]typematrix.Pin{
 // an intermittent defect happens to sit out an entire test run — it does not
 // change what counts as a divergence, and a pin not listed here still gets
 // exactly one attempt.
-var tmFuzzIntermittentOptRetries = map[string]int{
-	"11/partitioned-agg": 10, // #402
-}
+//
+// Empty since #402 — its only entry — was fixed. The mechanism stays: it is
+// the policy ADR-0013 settled for a pin with no forcing gate, and the next
+// such pin needs a map entry, not a rediscovery.
+var tmFuzzIntermittentOptRetries = map[string]int{}
 
 // TestTypeMatrixFuzzOptimizationInvariance: generated SQL over all 22 types,
 // answered with every optimization on and then once per kill switch with that

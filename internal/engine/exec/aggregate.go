@@ -6318,6 +6318,17 @@ func (h *HashAggregate) materializeFlatAccums() {
 			}
 			for ai := range h.intFlatAccs {
 				fa := &h.intFlatAccs[ai]
+				// Resolve the SHARED count array before the bound check.
+				// flatAccumLen probes an aggregate's OWN arrays, and a
+				// count-sharing COUNT owns none of them (count nil by
+				// definition, no sum, no min/max) — so it measured 0 for
+				// every group, the guard below skipped it unconditionally,
+				// and its accumulator stayed at the zero value. A duplicate
+				// COUNT of the same column therefore emitted 0 while the
+				// aggregate it shares with emitted the right number, on
+				// whichever groups happened to reach this materialize
+				// (#402).
+				ca := countArrayOf(h.intFlatAccs, ai)
 				// Defensive: a gi that wasn't appended to the SoA arrays
 				// (can happen when compact-to-generic migration runs with
 				// no rows consumed, leaving intFlatAccs cap=0 while
@@ -6325,12 +6336,12 @@ func (h *HashAggregate) materializeFlatAccums() {
 				// index a zero-length array and panic. Leave the
 				// accumulator at its zero value so downstream kernels
 				// emit identity output rather than crashing the worker.
-				if gi >= flatAccumLen(fa) {
+				if gi >= flatAccumLen(fa) && gi >= len(ca) {
 					continue
 				}
 				acc := &ext.accs[ai]
 				acc.Count = 0
-				if ca := countArrayOf(h.intFlatAccs, ai); ca != nil {
+				if gi < len(ca) {
 					acc.Count = ca[gi]
 				}
 				acc.IsFloat = fa.isFloat

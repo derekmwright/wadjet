@@ -133,10 +133,12 @@ This is deliberate, not an oversight, for two reasons:
    one, is still logged.
 2. **Not every intermittent defect has a forcing gate.** #402 (GROUP BY +
    ORDER BY + LIMIT returns a different top-N with partitioned aggregation
-   off, under a total order) diverges on roughly 60-75% of individual
-   invocations of the same seed and toggle, with no known trigger that forces
-   it every time — unlike #391, nothing else in the suite can serve as its
-   `GatedBy` gate. `wadjet.TestTypeMatrixFuzzOptimizationInvariance` retries
+   off, under a total order) diverged on roughly 60-75% of individual
+   invocations of the same seed and toggle, with no known trigger that forced
+   it every time — unlike #391, nothing else in the suite could serve as its
+   `GatedBy` gate. (#402 is fixed and its pin is deleted; it remains the
+   worked example, and `tmFuzzIntermittentOptRetries` remains the mechanism
+   for the next pin of its shape.) `wadjet.TestTypeMatrixFuzzOptimizationInvariance` retries
    such a pin's comparison a bounded number of times
    (`tmFuzzIntermittentOptRetries`) before concluding "no divergence this
    run": every attempt is a real comparison against the baseline, the loop
