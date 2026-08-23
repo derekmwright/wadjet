@@ -158,6 +158,20 @@ Two issues filed rather than fixed in those commits:
   publish and pgwire declares OID 25 (text) for every column. Typing it needs
   the output schema derived from the PLAN rather than from data flow.
 
+**Update 2026-08-23 (rebased onto main's own #392 fix).** The commits above
+landed on a branch that did not yet have main's independent fix for #392
+(`MIN_BY`/`MAX_BY`'s declared output type, `minMaxDeclaredType` gaining the
+value's own type instead of falling through to FLOAT64). Rebasing the two
+together changes the ending this section gave #392: with BOTH fixes present,
+`minby_scalar_c_cidr`/`_ipv6`/`_mac`/`_uuid` do not merely agree that they
+refuse (the `tmdUnsupported` outcome above) — the single-process arm no
+longer refuses at all, so all four fully AGREE on the VALUE, the same as
+every other MIN_BY/MAX_BY shape over these types. `TestTypeMatrixTwoPath`
+and `TestTypeMatrixMinByTwoPath` confirm this: all four `tmdUnsupported`
+entries and `tmdColPin`'s `#396` case are deleted rather than kept, and both
+gates pass with no exemption for these columns. #392 itself is closed by
+that other fix, not by anything in this document's commits.
+
 ## Why
 
 A review found that `(*Vector).GetValue`'s `TypeBytes` arm

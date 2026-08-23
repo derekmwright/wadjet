@@ -132,20 +132,20 @@ type tmdQuery struct {
 
 // tmdColPin returns the pin covering every shape over one column.
 //
-// Two pre-existing distributed defects, neither of them #392 or #393, both
-// found by running this corpus for the first time:
+// One pre-existing distributed defect remains, neither #392 nor #393, found
+// by running this corpus for the first time:
 //
-//	#396 — IPv4/IPv6/MAC/UUID arrive at the coordinator typed as their
-//	       STORAGE (int64, 16 bytes), so they render as 167772167 instead of
-//	       10.0.0.7. The four types whose GetValue box is a formatted string
-//	       over a differently-shaped storage, and only those.
 //	#397 — ARRAY/ROW/MAP/VECTOR have no arm in the shuffle/gather encoder
 //	       (worker/shuffle_format.go:415), so any distributed query carrying
 //	       one fails the task outright.
+//
+// #396 — IPv4/IPv6/MAC/UUID arriving at the coordinator typed as their
+// STORAGE form (int64, 16 bytes) instead of their display form — is fixed:
+// the NativeWriter now stamps the declared schema into the footer, and the
+// reader restores each leaf's real type identity from it. All twelve
+// c_ipv4/c_ipv6/c_mac/c_uuid entries agree on both paths now.
 func tmdColPin(col string) (string, string) {
 	switch col {
-	case "c_ipv4", "c_ipv6", "c_mac", "c_uuid":
-		return "#396", "the display types arrive at the coordinator as their storage form"
 	case "c_arr", "c_row", "c_map", "c_vec":
 		return "#397", "the shuffle/gather encoder has no arm for the container types"
 	}

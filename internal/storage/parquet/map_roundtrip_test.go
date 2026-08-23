@@ -463,12 +463,21 @@ func TestMapWriteIsDeterministic(t *testing.T) {
 }
 
 // goldenSingleEntryMap is a one-row file holding {"a": 10} in a nullable
-// MAP<STRING, INT64>, captured before the writer changes in this commit.
+// MAP<STRING, INT64>, captured before the writer changes in the commit that
+// made MAP writes deterministic.
 //
 // It pins the PHYSICAL LAYOUT of the shape that already read back correctly.
-// Ordering is the one thing this commit deliberately changes about a MAP's
+// Ordering is the one thing that commit deliberately changed about a MAP's
 // bytes, and a single-entry map has only one order — so for this file the
 // bytes must be identical, and any other difference is an accident.
+//
+// The footer's KeyValueMetadata carries one more entry than that commit
+// left it with: "wadjet.schema", the declared-schema JSON blob every
+// NativeWriter file now stamps into the footer so a reader can restore leaf
+// type identity for the types parquet's own schema cannot express (IPv4,
+// IPv6, MAC, UUID, Bytes, Port, Protocol, Duration). That is an additive,
+// intentional footer change, not a layout regression — everything before
+// and after the new key, including the encoded column data, is unchanged.
 const goldenSingleEntryMap = "504152311500151015142c15021500150615061c36002808070000000000000018080700" +
 	"000000000000000000081c07000000000000001500152215262c15021500150615061c36" +
 	"002801611801610000001140020000000200020000000202010000006115001528152c2c" +
@@ -481,9 +490,16 @@ const goldenSingleEntryMap = "504152311500151015142c15021500150615061c3600280807
 	"00000000000000266e1c150c192500061938016d096b65795f76616c7565036b65791502" +
 	"16021658165c266e3c360028016118016100000026ca011c1504192500061938016d096b" +
 	"65795f76616c75650576616c756515021602167a167e26ca013c360028080a0000000000" +
-	"000018080a0000000000000000000016b402160200191c180e7761646a65742e76657273" +
-	"696f6e1805302e312e300018167761646a657420286e6174697665207772697465722900" +
-	"5401000050415231"
+	"000018080a0000000000000000000016b402160200192c180e7761646a65742e76657273" +
+	"696f6e1805302e312e3000180d7761646a65742e736368656d6118f5017b22636f6c756d" +
+	"6e73223a5b7b226e616d65223a226964222c2274797065223a322c226e756c6c61626c65" +
+	"223a66616c73657d2c7b226e616d65223a226d222c2274797065223a32302c226e756c6c" +
+	"61626c65223a747275652c22656c656d656e745f74797065223a7b226e616d65223a2265" +
+	"6e747279222c2274797065223a31392c226e756c6c61626c65223a66616c73652c226669" +
+	"656c6473223a5b7b226e616d65223a226b6579222c2274797065223a352c226e756c6c61" +
+	"626c65223a66616c73657d2c7b226e616d65223a2276616c7565222c2274797065223a32" +
+	"2c226e756c6c61626c65223a747275657d5d7d7d5d7d0018167761646a657420286e6174" +
+	"6976652077726974657229005c02000050415231"
 
 func TestMapLayoutUnchanged(t *testing.T) {
 	var buf bytes.Buffer
