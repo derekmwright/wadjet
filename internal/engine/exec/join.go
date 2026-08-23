@@ -1567,6 +1567,25 @@ func (h *HashJoin) consolidateBuild() {
 				dst.BytesData.BulkCopy(off, &src.BytesData, 0, b.Len)
 			case batch.TypeDecimal:
 				copy(dst.DecimalData.Data[off:off+b.Len], src.DecimalData.Data[:b.Len])
+			default:
+				// ARRAY, ROW, MAP, VECTOR. There was no arm and no default,
+				// so the null bitmap above was copied and the VALUES were
+				// not — and :1583 then discards the originals, leaving every
+				// row of such a payload column empty. It fired only when the
+				// build had >1 batch, ≤2M rows and <30% tracker use, so the
+				// same join answered correctly or emptily depending on
+				// memory.
+				//
+				// Element storage is append-built and array offsets must
+				// advance in row order, so this is per row rather than a bulk
+				// slice copy — CopyValueFrom is the primitive every other
+				// gather in the engine uses, and it advances offsets and
+				// children for NULL rows too. The loop below is in row order
+				// within a batch and the batches are visited in offset order,
+				// which is the sequential-destination contract it requires.
+				for i := 0; i < b.Len; i++ {
+					copyVectorValue(dst, off+i, src, i)
+				}
 			}
 		}
 	}
