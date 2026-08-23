@@ -24,15 +24,10 @@ import (
 //
 // After this fix, retypeFromCatalog refuses the pairing (INT32 is no longer
 // in CoercibleTo's STRING arm), so ReadRowGroupAs — and therefore
-// mergeAndWriteFiles — errors instead of coercing. CompactTable's pass loop
-// currently swallows that error with a Warn and `continue` rather than
-// returning it (#435, open, tracked separately): this test pins that
-// EXISTING behavior — CompactTable reports no error and no partitions
-// compacted for the drifted table — while asserting the property #435 exists
-// to protect: a merge that cannot be read safely must not destroy the
-// inputs. If #435 is fixed to surface the error instead, this test's
-// no-error branch simply stops executing; either shape is correct so long as
-// the inputs survive and nothing fabricated is written.
+// mergeAndWriteFiles — errors instead of coercing. #435 has since landed, so
+// CompactTable RETURNS that error rather than swallowing it with a Warn: this
+// test now asserts the error and the property it protects, which is that a
+// merge that cannot be read safely must not destroy the inputs.
 func TestCompactTableRefusesInt32AsDate(t *testing.T) {
 	cat, store := setupTestCatalog(t)
 	ctx := context.Background()
@@ -74,13 +69,14 @@ func TestCompactTableRefusesInt32AsDate(t *testing.T) {
 	cfg.MinFiles = 2 // both files are candidates for one merge pass
 	result, err := New(cat, nil, cfg).CompactTable(ctx, "driftv")
 
-	// See the doc comment: #435 currently swallows the merge error with a
-	// Warn, so CompactTable itself reports (result, nil). Assert on whichever
-	// of the two legal shapes actually happened, rather than pinning one.
 	if err == nil {
-		if result.PartitionsCompacted != 0 || result.FilesCreated != 0 || result.RowsMerged != 0 {
-			t.Fatalf("CompactTable reported success compacting the drifted partition: %+v", result)
-		}
+		t.Fatalf("CompactTable reported success over a partition it could not read: %+v", result)
+	}
+	if result == nil || len(result.Failed) != 1 {
+		t.Fatalf("Result.Failed = %+v, want the one drifted partition", result)
+	}
+	if result.PartitionsCompacted != 0 || result.FilesCreated != 0 || result.RowsMerged != 0 {
+		t.Fatalf("CompactTable counted work it did not do: %+v", result)
 	}
 
 	// Whichever way the failure surfaced, the inputs must be exactly what
