@@ -2,7 +2,11 @@
 
 Status: Accepted (landed 2026-08-23, `09b19d2`..`94143bc`, on the hardening
 arc that began with `20049f9`; ceilings measured against pyarrow 23.0.1,
-parquet-go and wadjet's own writer)
+parquet-go and wadjet's own writer). Amended 2026-08-23 with §4, "the
+writer's box for a value is the reader's box for it", after the same arc's
+review found read → write was not the identity for DECIMAL (#429) and that
+`ReadRowGroup` and `ReadRows` were two readers that disagreed about a nested
+column (#428).
 
 ## Context
 
@@ -124,6 +128,40 @@ input for which "a value" had no stable meaning — as a value it is a
 zero-length entry in a column whose entries are all sixteen bytes, which one
 reader called an error and the other called a value.
 
+### 4. The writer's box for a value is the reader's box for it
+
+"The paths agree" is not only a statement about two readers. A reader and a
+writer that disagree about what a boxed value MEANS turn `read → write` into
+a transformation, and the one job in this system that is read → write over a
+whole table — compaction — then rewrites the table into something else and
+deletes the inputs.
+
+Stated for the one type where the two conventions were inverses:
+
+**The in-memory box for a DECIMAL value is the UNSCALED integer at the
+column's declared scale.** 3.25 in a `DECIMAL(9,2)` column is the int64 325.
+That is what the format stores, what `Reader.ReadRows` hands back, and what
+`batch.Int128`/`DecimalColumn` hold. An INTEGER box (`int`, `int32`, `int64`,
+`parquet.Decimal128`) is therefore already scaled and is written verbatim;
+only a REAL box (`float64`, `float32`) or a numeric STRING carries a decimal
+point, and only those are multiplied by 10^scale on the way in.
+
+The writer used to read every integer box as the WHOLE number and multiply,
+so each compaction pass over a `DECIMAL(p, s>0)` column multiplied it by
+10^s — ×100 per pass at scale 2, silently, over the inputs (#429). One
+generation cannot see it, because the first write is from ingest boxes; the
+property to gate is `read(write(read(f))) == read(f)`, run at least twice.
+
+The corollary about ceilings has a twin about ENCODINGS: **a physical
+encoding this package chooses must be one the format allows for that logical
+type.** DECIMAL's physical type is a function of its PRECISION — INT32 to 9
+digits, INT64 to 18, and FIXED_LEN_BYTE_ARRAY beyond — and picking it from
+the TypeID alone produced `DECIMAL(38,10)` annotated over an INT64 leaf,
+which the Apache implementation refuses to OPEN ("Decimal(precision=38,
+scale=10) cannot be applied to primitive type INT64"). Every wadjet table
+with a wide DECIMAL column was unreadable outside wadjet, and the widest
+values had no encoding here at all.
+
 ## Consequences
 
 - Files that were read before and are refused now: a footer whose row groups
@@ -141,6 +179,16 @@ reader called an error and the other called a value.
   producing a file that reads differently on different paths. Callers that
   fed unparseable network literals get an error where they previously got
   0.0.0.0, `00:00:00:00:00:00`, or ten bytes in a sixteen-byte column.
+- A caller that handed an integer to a DECIMAL column meaning the WHOLE
+  number now stores a different value — 10^scale smaller. That reading was
+  never the reader's, so no round trip through this package changes; what
+  changes is a hand-written literal. The type matrix and the compaction gate
+  carry the new contract.
+- `DECIMAL(p > 18)` columns are written as sixteen-byte FIXED_LEN_BYTE_ARRAY
+  leaves. Files wadjet wrote before are still read (the reader takes all four
+  physicals), and the new ones are readable by pyarrow. Wide columns lose
+  footer min/max statistics, which costs row-group pruning on them and is
+  never wrong — absent statistics prune nothing.
 - The type-pair matrix grew from one shape (PLAIN, single page, three rows,
   one read path) to 735 cells across PLAIN and dictionary pages and all three
   columnar read paths, because "the paths agree" is only a property if the
@@ -205,3 +253,11 @@ correct value was ever recovered from one of these columns by anything.
 - **Refuse a non-16-byte UUID at the reader only.** Rejected as
   insufficient: the file had already been written. The refusal belongs at the
   writer, where the column and the row are still known.
+- **Make the WRITER's convention the one the reader follows** — hand back
+  DECIMAL as the whole number so the existing writer arm is right. Rejected:
+  the unscaled integer is what the FORMAT stores and what the engine's own
+  `Int128` column holds, so this would have moved the conversion into every
+  reader and every consumer instead of removing it.
+- **Keep writing wide DECIMAL as INT64 and refuse the values that overflow.**
+  Rejected: the refusal was already there and the file was still malformed —
+  a reader outside wadjet cannot open it whatever the values are.

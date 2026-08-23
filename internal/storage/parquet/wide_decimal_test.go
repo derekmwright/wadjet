@@ -236,13 +236,82 @@ func TestNarrowDecimalRefusesAValueItCannotHold(t *testing.T) {
 	}
 }
 
-// TestWriterRefusesADecimalItCannotStore: this writer stores DECIMAL as
-// INT64, so an unscaled value past 64 bits has no encoding here. It must fail
-// the WRITE rather than truncate — the file is the one artifact a writer
-// cannot take back.
-func TestWriterRefusesADecimalItCannotStore(t *testing.T) {
+// TestWideDecimalWriteRoundTrip: a DECIMAL past 18 digits is written as a
+// sixteen-byte FIXED_LEN_BYTE_ARRAY leaf, which is what the format requires
+// and what makes the wide value storable at all.
+//
+// It used to be written as INT64 whatever the precision, because the physical
+// type was chosen from the TypeID alone. Two things followed. The unscaled
+// value had to fit 64 bits or the write was refused — the widest DECIMAL(38)
+// values had no encoding here. And the file wadjet produced was one the
+// Apache implementation will not OPEN:
+//
+//	Decimal(precision=38, scale=10) cannot be applied to primitive type INT64
+//
+// so every wadjet table with a DECIMAL(p > 18) column was unreadable outside
+// wadjet. Found by the compaction gate's PyArrow arm
+// (compaction.TestCompactionIsIdempotentOverTheTypeMatrix).
+func TestWideDecimalWriteRoundTrip(t *testing.T) {
 	schema := Schema{Columns: []Column{
 		{Name: "d", Type: TypeDecimal, Precision: 38, Scale: 0, Nullable: true},
+	}}
+	vals := []Decimal128{
+		{Hi: 5421010862427522170, Lo: 0x98a223fffffffff}, // past 2^63
+		Decimal128From(7),
+		Decimal128From(-7),
+		Decimal128From(0),
+		{Hi: -5421010862427522171, Lo: 0xf675ddc000000001}, // its negative
+	}
+	rows := make([]map[string]any, len(vals)+1)
+	for i, v := range vals {
+		rows[i] = map[string]any{"d": v}
+	}
+	rows[len(vals)] = map[string]any{}
+
+	var buf bytes.Buffer
+	pw, err := NewWriter(&buf, schema, DefaultWriterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pw.WriteRows(rows); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := pw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	r, err := NewReaderFromBytes(buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The leaf must be a sixteen-byte FIXED_LEN_BYTE_ARRAY, not an INT64.
+	leaf := r.fr.Leaves()[0]
+	if leaf.Type == nil || *leaf.Type != PhysicalFixedLenByteArray || leaf.TypeLength != decimalFLBAWidth {
+		t.Fatalf("DECIMAL(38,0) leaf is %v/%d, want FIXED_LEN_BYTE_ARRAY/%d",
+			leaf.Type, leaf.TypeLength, decimalFLBAWidth)
+	}
+	got, err := r.ReadRows(nil)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(got) != len(rows) {
+		t.Fatalf("read %d rows, want %d", len(got), len(rows))
+	}
+	for i, v := range vals {
+		wantUnscaled(t, "wide-write", got[i]["d"], v.String())
+	}
+	if v, ok := got[len(vals)]["d"]; ok {
+		t.Errorf("the NULL row came back as %#v", v)
+	}
+}
+
+// TestWriterRefusesADecimalItCannotStore: a DECIMAL whose precision fits an
+// INT64 leaf IS stored in one, and an unscaled value past 64 bits then has no
+// encoding. It must fail the WRITE rather than truncate — the file is the one
+// artifact a writer cannot take back.
+func TestWriterRefusesADecimalItCannotStore(t *testing.T) {
+	schema := Schema{Columns: []Column{
+		{Name: "d", Type: TypeDecimal, Precision: 18, Scale: 0, Nullable: true},
 	}}
 	var buf bytes.Buffer
 	pw, err := NewWriter(&buf, schema, DefaultWriterConfig())

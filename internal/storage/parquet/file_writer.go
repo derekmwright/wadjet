@@ -62,7 +62,7 @@ type leafRange struct {
 // leafBuffer accumulates values for a single leaf column, supporting
 // multi-level definition and repetition levels for nested schemas.
 type leafBuffer struct {
-	col      Column   // the leaf column definition
+	col      Column // the leaf column definition
 	physical PhysicalType
 	path     []string // full path from schema root (e.g. ["tags", "list", "element"])
 
@@ -85,12 +85,12 @@ type leafBuffer struct {
 	count     int // total entries (values + nulls/absent markers)
 
 	// Statistics tracking.
-	hasStats               bool
-	minI32, maxI32         int32
-	minI64, maxI64         int64
-	minF32, maxF32         float32
-	minF64, maxF64         float64
-	minBytes, maxBytes     []byte
+	hasStats           bool
+	minI32, maxI32     int32
+	minI64, maxI64     int64
+	minF32, maxF32     float32
+	minF64, maxF64     float64
+	minBytes, maxBytes []byte
 }
 
 // NewNativeWriter creates a Parquet writer that writes to the given io.Writer.
@@ -147,7 +147,7 @@ func (nw *NativeWriter) flattenColumn(col Column, parentPath []string, defLevel,
 		if col.Nullable {
 			curDef++ // outer group presence
 		}
-		curDef++   // list group (repeated) adds 1 to def
+		curDef++               // list group (repeated) adds 1 to def
 		curRep := repLevel + 1 // repeated adds 1 to rep
 
 		elemCol := Column{Name: "element", Type: TypeString, Nullable: true}
@@ -164,7 +164,7 @@ func (nw *NativeWriter) flattenColumn(col Column, parentPath []string, defLevel,
 		if col.Nullable {
 			curDef++ // outer group presence
 		}
-		curDef++   // key_value group (repeated) adds 1 to def
+		curDef++               // key_value group (repeated) adds 1 to def
 		curRep := repLevel + 1 // repeated adds 1 to rep
 
 		if col.ElementType != nil && col.ElementType.Type == TypeRow && len(col.ElementType.Fields) == 2 {
@@ -216,7 +216,7 @@ func (nw *NativeWriter) flattenColumn(col Column, parentPath []string, defLevel,
 
 		lb := leafBuffer{
 			col:         col,
-			physical:    wadjetTypeToPhysical(col.Type),
+			physical:    columnPhysical(col),
 			path:        fullPath,
 			maxDefLevel: curDef,
 			maxRepLevel: repLevel,
@@ -297,6 +297,36 @@ func mapElementDesc(e *Column) string {
 		return "nil"
 	}
 	return e.Type.String()
+}
+
+// decimalFLBAWidth is the byte width of a FIXED_LEN_BYTE_ARRAY DECIMAL leaf.
+// Sixteen bytes is exactly the unscaled range of DECIMAL(38, s), the widest
+// precision the format defines, and it is what pyarrow writes for anything
+// past 18 digits.
+const decimalFLBAWidth = 16
+
+// decimalMaxInt64Precision is the last DECIMAL precision an INT64 leaf may
+// carry. The format's rule, not a policy: INT32 backs precision ≤ 9 and
+// INT64 precision ≤ 18, and a file that annotates a wider DECIMAL over an
+// INT64 leaf is malformed. pyarrow refuses to open one at all —
+//
+//	Decimal(precision=38, scale=10) cannot be applied to primitive type INT64
+//
+// — which is what wadjet used to write for every DECIMAL(p > 18) column,
+// because the physical type was chosen from the TypeID alone.
+const decimalMaxInt64Precision = 18
+
+// columnPhysical is the physical type this writer emits for one column.
+//
+// It takes the COLUMN, not the TypeID, because DECIMAL's physical encoding
+// is a function of its precision (see decimalMaxInt64Precision) — the one
+// place where the two disagree. wadjetTypeToPhysical stays as the TypeID-only
+// mapping the reader's compatibility checks ask about.
+func columnPhysical(col Column) PhysicalType {
+	if col.Type == TypeDecimal && col.Precision > decimalMaxInt64Precision {
+		return PhysicalFixedLenByteArray
+	}
+	return wadjetTypeToPhysical(col.Type)
 }
 
 func wadjetTypeToPhysical(t TypeID) PhysicalType {
@@ -404,15 +434,19 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 		}
 		val = conv
 	}
-	// This writer stores DECIMAL as INT64 (wadjetTypeToPhysical), so an
-	// unscaled value past 64 bits has no encoding here at all. The row
-	// reader can now hand one back (Decimal128, for a DECIMAL(p>18) column
-	// read out of a pyarrow file), and the only ways to write it were a
-	// silent truncation or a silent zero. ADR-0018: a value this package
-	// cannot represent fails the WRITE, where the column and the row are
-	// still known, rather than producing a file that reads back as a
-	// different number.
-	if d, ok := val.(Decimal128); ok && col.Type == TypeDecimal {
+	// A DECIMAL whose precision fits an INT64 leaf is stored in one, and an
+	// unscaled value past 64 bits then has no encoding at all. The row
+	// reader can hand one back (Decimal128), and the only ways to write it
+	// were a silent truncation or a silent zero. ADR-0018: a value this
+	// package cannot represent fails the WRITE, where the column and the
+	// row are still known, rather than producing a file that reads back as
+	// a different number.
+	//
+	// A DECIMAL(p > 18) column is FIXED_LEN_BYTE_ARRAY and has no such
+	// bound, so the check is asked of the column's PHYSICAL type rather
+	// than of TypeDecimal.
+	if d, ok := val.(Decimal128); ok && col.Type == TypeDecimal &&
+		columnPhysical(col) == PhysicalInt64 {
 		if _, fits := d.Int64(); !fits {
 			nw.fail(fmt.Errorf("column %q, row %d: DECIMAL unscaled value %s needs more than 64 bits, "+
 				"which this writer's INT64 encoding cannot store", col.Name, nw.rowsSeen, d))
@@ -1141,18 +1175,18 @@ func buildArraySchemaElements(col Column, elements *[]SchemaElement) {
 	ct := ConvertedList
 	// Outer group with ConvertedType=LIST.
 	outer := SchemaElement{
-		Name:          col.Name,
-		NumChildren:   1,
+		Name:           col.Name,
+		NumChildren:    1,
 		RepetitionType: rep,
-		ConvertedType: &ct,
-		LogicalType:   &LogicalType{Type: LogicalList},
+		ConvertedType:  &ct,
+		LogicalType:    &LogicalType{Type: LogicalList},
 	}
 	*elements = append(*elements, outer)
 
 	// Repeated "list" group.
 	listGroup := SchemaElement{
-		Name:          "list",
-		NumChildren:   1,
+		Name:           "list",
+		NumChildren:    1,
 		RepetitionType: FieldRepeated,
 	}
 	*elements = append(*elements, listGroup)
@@ -1181,20 +1215,20 @@ func buildMapSchemaElements(col Column, elements *[]SchemaElement) {
 	}
 	ct := ConvertedMap
 	outer := SchemaElement{
-		Name:          col.Name,
-		NumChildren:   1,
+		Name:           col.Name,
+		NumChildren:    1,
 		RepetitionType: rep,
-		ConvertedType: &ct,
-		LogicalType:   &LogicalType{Type: LogicalMap},
+		ConvertedType:  &ct,
+		LogicalType:    &LogicalType{Type: LogicalMap},
 	}
 	*elements = append(*elements, outer)
 
 	kvCt := ConvertedMapKeyValue
 	kvGroup := SchemaElement{
-		Name:          "key_value",
-		NumChildren:   2,
+		Name:           "key_value",
+		NumChildren:    2,
 		RepetitionType: FieldRepeated,
-		ConvertedType: &kvCt,
+		ConvertedType:  &kvCt,
 	}
 	*elements = append(*elements, kvGroup)
 
@@ -1222,8 +1256,8 @@ func buildRowSchemaElements(col Column, elements *[]SchemaElement) {
 		rep = FieldRequired
 	}
 	group := SchemaElement{
-		Name:          col.Name,
-		NumChildren:   int32(len(col.Fields)),
+		Name:           col.Name,
+		NumChildren:    int32(len(col.Fields)),
 		RepetitionType: rep,
 	}
 	*elements = append(*elements, group)
@@ -1238,7 +1272,7 @@ func buildLeafSchemaElement(col Column, elements *[]SchemaElement) {
 	se := SchemaElement{
 		Name: col.Name,
 	}
-	pt := wadjetTypeToPhysical(col.Type)
+	pt := columnPhysical(col)
 	se.Type = &pt
 
 	if col.Nullable {
@@ -1281,6 +1315,9 @@ func buildLeafSchemaElement(col Column, elements *[]SchemaElement) {
 		}
 		se.Precision = int32(prec)
 		se.Scale = int32(col.Scale)
+		if pt == PhysicalFixedLenByteArray {
+			se.TypeLength = decimalFLBAWidth
+		}
 		se.LogicalType = &LogicalType{
 			Type:      LogicalDecimal,
 			Precision: prec,
@@ -1323,11 +1360,13 @@ func (lb *leafBuffer) appendEntryWithValue(defLevel, repLevel int32, val any) {
 	case PhysicalInt64:
 		var v int64
 		if lb.col.Type == TypeDecimal {
-			// DECIMAL stores the SCALED integer (3.25 at scale 2 → 325).
-			// toInt64's float64 branch truncated to the unscaled integer
-			// part, so every non-integer decimal value was destroyed on
-			// write (issue #144 suite finding).
-			v = decimalScaledInt64(val, int(lb.col.Scale))
+			// DECIMAL stores the UNSCALED integer (3.25 at scale 2 → 325).
+			// toInt64's float64 branch truncated to the whole part, so
+			// every non-integer decimal value was destroyed on write
+			// (issue #144 suite finding); decimalUnscaledInt64 also decides
+			// which boxes are already unscaled and which carry a decimal
+			// point, which is what makes read → write idempotent (#429).
+			v = decimalUnscaledInt64(val, int(lb.col.Scale))
 		} else {
 			v = toInt64(val, lb.col.Type)
 		}
@@ -1342,6 +1381,10 @@ func (lb *leafBuffer) appendEntryWithValue(defLevel, repLevel int32, val any) {
 		b := toBytes(val, lb.col.Type)
 		lb.appendByteArray(b)
 	case PhysicalFixedLenByteArray:
+		if lb.col.Type == TypeDecimal {
+			lb.data = append(lb.data, decimalFLBABytes(val, int(lb.col.Scale))...)
+			break
+		}
 		b := toBytes(val, lb.col.Type)
 		lb.data = append(lb.data, b...)
 	}
@@ -1390,7 +1433,6 @@ func (lb *leafBuffer) appendByteArray(b []byte) {
 	lb.packed = append(lb.packed, b...)
 	lb.updateStatsBytes(b)
 }
-
 
 func (lb *leafBuffer) reset() {
 	lb.data = lb.data[:0]
@@ -1534,45 +1576,87 @@ func toInt32(v any, colType TypeID) int32 {
 	}
 }
 
-// decimalScaledInt64 converts an ingest value to the scaled integer a
-// DECIMAL(p,s) column stores physically (INT64): value × 10^scale, rounded
-// half away from zero. Integer inputs are whole decimal values; float and
-// numeric-string inputs carry fractional digits. Non-finite floats and
-// unparseable strings store 0 (matching toInt64's default for garbage).
-func decimalScaledInt64(v any, scale int) int64 {
-	pow := 1.0
-	for i := 0; i < scale; i++ {
-		pow *= 10
-	}
+// decimalUnscaledInt64 converts a boxed DECIMAL value to the unscaled
+// integer the column stores physically (INT64).
+//
+// The contract is ADR-0018's writer corollary, and it is the whole of this
+// function: an INTEGER box (int, int32, int64, Decimal128) is ALREADY the
+// unscaled value at the column's declared scale; a REAL box (float64,
+// float32) or a numeric STRING carries the decimal point and is scaled here,
+// × 10^scale, rounded half away from zero. Non-finite floats and unparseable
+// strings store 0 (matching toInt64's default for garbage).
+//
+// Integer-means-unscaled is the reader's convention, the format's own, and
+// batch.Vector.SetValue's — 3.25 at scale 2 is the int64 325 in all three.
+// This function used to multiply an integer box by 10^scale, i.e. to read it
+// as the whole number 325.00, which made read → write NOT IDEMPOTENT: every
+// compaction pass over a DECIMAL(p, s>0) column multiplied it by 10^s and
+// wrote the result back over the inputs (#429). At scale 2 that is ×100 per
+// pass, silently.
+func decimalUnscaledInt64(v any, scale int) int64 {
 	switch t := v.(type) {
 	case int:
-		return int64(t) * int64(pow)
+		return int64(t)
 	case int32:
-		return int64(t) * int64(pow)
+		return int64(t)
 	case int64:
-		return t * int64(pow)
+		return t
 	case Decimal128:
 		// decomposeLeaf has already refused the ones that do not fit, so
 		// this is the narrow value in a wide column, treated exactly as the
 		// int64 above.
-		v, _ := t.Int64()
-		return v * int64(pow)
+		u, _ := t.Int64()
+		return u
 	case float64:
 		if math.IsNaN(t) || math.IsInf(t, 0) {
 			return 0
 		}
+		pow := 1.0
+		for i := 0; i < scale; i++ {
+			pow *= 10
+		}
 		return int64(math.Round(t * pow))
 	case float32:
-		return decimalScaledInt64(float64(t), scale)
+		return decimalUnscaledInt64(float64(t), scale)
 	case string:
 		f, err := strconv.ParseFloat(t, 64)
 		if err != nil {
 			return 0
 		}
-		return decimalScaledInt64(f, scale)
+		return decimalUnscaledInt64(f, scale)
 	default:
 		return 0
 	}
+}
+
+// decimalFLBABytes renders a DECIMAL box as the sixteen-byte big-endian
+// two's-complement unscaled value a FIXED_LEN_BYTE_ARRAY DECIMAL leaf holds
+// — the same layout decimalFromBytesRaw reads back and the one pyarrow
+// writes. An integer box is already unscaled (ADR-0018's writer corollary);
+// a real or string box is scaled first, exactly as the INT64 leaf does it.
+func decimalFLBABytes(v any, scale int) []byte {
+	var hi int64
+	var lo uint64
+	if d, ok := v.(Decimal128); ok {
+		hi, lo = d.Hi, d.Lo
+	} else {
+		u := decimalUnscaledInt64(v, scale)
+		lo = uint64(u)
+		if u < 0 {
+			hi = -1
+		}
+	}
+	b := make([]byte, decimalFLBAWidth)
+	if hi < 0 {
+		for i := range b {
+			b[i] = 0xff
+		}
+	}
+	for i := 0; i < 8; i++ {
+		b[decimalFLBAWidth-1-i] = byte(lo >> (8 * i))
+		b[decimalFLBAWidth-9-i] = byte(uint64(hi) >> (8 * i))
+	}
+	return b
 }
 
 func toInt64(v any, colType TypeID) int64 {

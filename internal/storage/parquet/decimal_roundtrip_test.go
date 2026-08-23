@@ -36,18 +36,24 @@ func writeDecimalFile(tb testing.TB, scale int, vals []any) []byte {
 	return buf.Bytes()
 }
 
-func TestDecimalScaledInt64(t *testing.T) {
+// TestDecimalUnscaledInt64 pins ADR-0018's writer corollary box by box: an
+// INTEGER box is already the unscaled value at the column's scale, a REAL or
+// numeric-STRING box carries the decimal point and is scaled here.
+//
+// The integer rows used to expect the scaled product (int64(7) at scale 2 →
+// 700, i.e. "seven point zero zero"). That is the inverse of what the READER
+// hands back for the same column, so read → write multiplied the column by
+// 10^scale every pass (#429).
+func TestDecimalUnscaledInt64(t *testing.T) {
 	tests := []struct {
 		val   any
 		scale int
 		want  int64
 	}{
+		// Real and string boxes carry the point: they are scaled.
 		{3.25, 2, 325},
 		{-1.5, 2, -150},
 		{0.0, 2, 0},
-		{int64(7), 2, 700},
-		{int(7), 2, 700},
-		{int32(-3), 2, -300},
 		{"12.34", 2, 1234},
 		{"-0.01", 2, -1},
 		{"7", 2, 700},
@@ -57,14 +63,22 @@ func TestDecimalScaledInt64(t *testing.T) {
 		{3.25, 0, 3},       // scale 0 keeps integer part, rounded
 		{"garbage", 2, 0},  // unparseable stores 0 (matches toInt64 default)
 		{float32(1.5), 1, 15},
+		// Integer boxes ARE the unscaled value: stored verbatim.
+		{int64(7), 2, 7},
+		{int(7), 2, 7},
+		{int32(-3), 2, -3},
+		{int64(325), 2, 325},
+		{Decimal128From(325), 2, 325},
+		{Decimal128From(-150), 2, -150},
+		{int64(7), 0, 7},
 	}
 	for _, tc := range tests {
-		if got := decimalScaledInt64(tc.val, tc.scale); got != tc.want {
-			t.Errorf("decimalScaledInt64(%v, %d) = %d, want %d", tc.val, tc.scale, got, tc.want)
+		if got := decimalUnscaledInt64(tc.val, tc.scale); got != tc.want {
+			t.Errorf("decimalUnscaledInt64(%v (%T), %d) = %d, want %d", tc.val, tc.val, tc.scale, got, tc.want)
 		}
 	}
 	// Non-finite floats must not poison the column.
-	if got := decimalScaledInt64(nan(), 2); got != 0 {
+	if got := decimalUnscaledInt64(nan(), 2); got != 0 {
 		t.Errorf("NaN = %d, want 0", got)
 	}
 }
@@ -96,7 +110,9 @@ func TestDecimalValueRoundTrip(t *testing.T) {
 	// it unscaled and FormatDecimal renders with the column scale. This
 	// test pins the write-side scaling: before the fix the file held the
 	// TRUNCATED integer part (3, not 325) for every non-integer input.
-	vals := []any{3.25, -1.5, 0.0, int64(7), "12.34", nil, 0.01, -9999999.99}
+	// int64(700) rather than int64(7): an integer box is the UNSCALED
+	// value, which is also what ReadRows hands back for it (#429).
+	vals := []any{3.25, -1.5, 0.0, int64(700), "12.34", nil, 0.01, -9999999.99}
 	want := []float64{325, -150, 0, 700, 1234, 0, 1, -999999999}
 	isNull := []bool{false, false, false, false, false, true, false, false}
 	data := writeDecimalFile(t, 2, vals)

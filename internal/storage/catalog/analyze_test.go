@@ -343,12 +343,24 @@ func TestAnalyzeTableHistogramWideDecimal(t *testing.T) {
 		t.Fatalf("CreateTable: %v", err)
 	}
 
+	// The box for a DECIMAL value is the UNSCALED integer at the column's
+	// scale (ADR-0018 §4), on the way in as well as on the way out — so the
+	// decimal value k is written as k × 10^scale, the same number the
+	// SelectivityRange bounds below are built from.
+	unscaled := func(n int64) parquet.Decimal128 {
+		pow := int64(1)
+		for i := 0; i < scale; i++ {
+			pow *= 10
+		}
+		return parquet.Decimal128From(n * pow)
+	}
+
 	const rowsPerFile = 5_000
 	const numFiles = 3
 	for fi := 0; fi < numFiles; fi++ {
 		rows := make([]map[string]any, rowsPerFile)
 		for i := 0; i < rowsPerFile; i++ {
-			rows[i] = map[string]any{"d": int64(fi*rowsPerFile + i)}
+			rows[i] = map[string]any{"d": unscaled(int64(fi*rowsPerFile + i))}
 		}
 		var buf bytes.Buffer
 		pw, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
@@ -395,13 +407,6 @@ func TestAnalyzeTableHistogramWideDecimal(t *testing.T) {
 	// Boundaries are the column's UNSCALED values, which is the same unit
 	// the reader hands back; the query side asks in that unit too, through
 	// the same Decimal128 box.
-	unscaled := func(n int64) parquet.Decimal128 {
-		pow := int64(1)
-		for i := 0; i < scale; i++ {
-			pow *= 10
-		}
-		return parquet.Decimal128From(n * pow)
-	}
 	q1 := dStats.Histogram.SelectivityRange(unscaled(0), unscaled(3750))
 	t.Logf("[0, 3750] sel=%.4f (expect ~0.25)", q1)
 	if q1 < 0.20 || q1 > 0.30 {

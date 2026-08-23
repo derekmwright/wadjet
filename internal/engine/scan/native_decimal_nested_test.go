@@ -41,8 +41,12 @@ func TestReadRowGroupNative_DecimalValues(t *testing.T) {
 	schema := parquet.Schema{Columns: []parquet.Column{
 		{Name: "d", Type: parquet.TypeDecimal, Nullable: true, Precision: 12, Scale: 2},
 	}}
+	// int64(700), not int64(7): an INTEGER box handed to a DECIMAL column
+	// is the UNSCALED value (ADR-0018's writer corollary, #429), so 7.00 at
+	// scale 2 is written as 700. A float or a numeric string still carries
+	// the point and is scaled by the writer.
 	rows := []map[string]any{
-		{"d": 3.25}, {"d": nil}, {"d": -1.5}, {"d": int64(7)}, {"d": "12.34"},
+		{"d": 3.25}, {"d": nil}, {"d": -1.5}, {"d": int64(700)}, {"d": "12.34"},
 	}
 	r := writeOneRG(t, schema, rows)
 	b, err := ReadRowGroupNative(r.FileReader(), 0, schema.Columns, nil)
