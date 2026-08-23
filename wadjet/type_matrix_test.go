@@ -353,27 +353,6 @@ const tmOptEngagementFloor = 215
 // comparison runs, a pinned divergence is logged, and a pin that starts
 // agreeing (or names an entry/toggle pair that no longer occurs) FAILS.
 var tmOptPins = map[string]typematrix.Pin{
-	"groupby_c_dec/agg-fast-paths": {
-		Issue: "#394",
-		Reason: "ORDER BY over a DECIMAL column sorts LEXICOGRAPHICALLY on one path and " +
-			"NUMERICALLY on the other, so `10.001` sorts before `2.0002` with the fast paths on " +
-			"and after with them off. kernel/sort.go's ResolveSortCompare has no DECIMAL arm and " +
-			"its default returns a comparator that reports every row equal (kernel/sort.go:21), " +
-			"while the other path falls through to compareAny on the FORMATTED string " +
-			"(exec/sort.go:903). Same rows, different sequence: only the ordered compare sees it.",
-	},
-	"distinct_c_dec/agg-fast-paths": {
-		Issue:  "#394",
-		Reason: "Same DECIMAL ordering divergence, reached through DISTINCT.",
-	},
-	"groupby_c_dec/all-off": {
-		Issue:  "#394",
-		Reason: "Same DECIMAL ordering divergence, with every switch off.",
-	},
-	"distinct_c_dec/all-off": {
-		Issue:  "#394",
-		Reason: "Same DECIMAL ordering divergence, with every switch off.",
-	},
 	"groupby_c_ipv6/partitioned-agg": {
 		Issue: "#395",
 		Reason: "GROUP BY an IPV6 or UUID column loses the KEY VALUE with partitioned " +

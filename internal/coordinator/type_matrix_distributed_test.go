@@ -42,9 +42,6 @@ const (
 		"\"aa:bb:cc:00:00:05\", c_ipv6 and c_uuid as 16 raw bytes instead of their text. Row " +
 		"counts match on every one of these, so only a value-level compare sees it — and these " +
 		"are the product's flagship network-native types."
-	tmdDecimalOrderReason = "ORDER BY over a DECIMAL column sorts LEXICOGRAPHICALLY on one path " +
-		"and NUMERICALLY on the other, so `10.001` sorts before `2.0002` on one arm and after on " +
-		"the other. Same rows, different sequence."
 )
 
 var tmdPins = map[string]typematrix.Pin{
@@ -101,11 +98,6 @@ var tmdPins = map[string]typematrix.Pin{
 	"window_c_ipv6":       {Issue: "#396", Reason: tmdRawFormReason},
 	"window_c_mac":        {Issue: "#396", Reason: tmdRawFormReason},
 	"window_c_uuid":       {Issue: "#396", Reason: tmdRawFormReason},
-
-	// #394 — ORDER BY over a DECIMAL column sorts lexicographically on one path and
-	// numerically on the other.
-	"distinct_c_dec": {Issue: "#394", Reason: tmdDecimalOrderReason},
-	"groupby_c_dec":  {Issue: "#394", Reason: tmdDecimalOrderReason},
 
 	// #392 (MIN_BY/MAX_BY's declared output type) is fixed: both arms now
 	// declare the value's own type. minby_scalar_c_cidr agrees on both paths

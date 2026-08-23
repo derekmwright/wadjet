@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -962,6 +963,13 @@ func compareVectorValues(col *batch.Vector, a, b int) int {
 			return 1
 		}
 		return 0
+	case batch.TypeDecimal:
+		// Not the default's business: Vector.GetValue boxes a DECIMAL as its
+		// FORMATTED string, so compareAny would order "10.001" before
+		// "2.0002" — the same lexicographic-vs-numeric split #394 found in
+		// the sort kernel, here driving PARTITION BY boundaries and the
+		// RANK/DENSE_RANK/PERCENT_RANK/CUME_DIST peer groups.
+		return kernel.CompareDecimalAt(col, a, col, b)
 	default:
 		return compareAny(col.GetValue(a), col.GetValue(b))
 	}
