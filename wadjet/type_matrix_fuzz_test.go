@@ -76,10 +76,16 @@ func tmFuzzKnownDivergence(q *shapegen.Query) string { return "" }
 // subquery expressions, read by every parallel pipeline worker. Poison only
 // perturbed the timing that decided which worker lost the race. All three
 // seeds now agree on both arms, which IS the fix's proof (ADR-0013 §Pins).
-var tmFuzzPins = map[int64]typematrix.Pin{
-	48: {Issue: "#399", Reason: "DECIMAL GROUP BY keys read after their batch was released: " +
-		"3157 rows both ways, different keys."},
-}
+//
+// #399's pin (seed 48) is deleted too, and it was never a retention bug
+// either. Seed 48's query is `... GROUP BY t0.c_dec ORDER BY c3, c1`: what
+// differed between the clean and poisoned runs was the row SEQUENCE, not the
+// keys, because `ORDER BY c1` over a DECIMAL was a no-op — every DECIMAL pair
+// compared EQUAL in kernel.ResolveSortCompare's default arm, so the sort was
+// stable and returned whatever order the two runs' hash tables happened to
+// emit. #394's comparator arm decided that order, and the seed has agreed
+// since. Deleting the pin is the proof (ADR-0013 §Pins).
+var tmFuzzPins = map[int64]typematrix.Pin{}
 
 // TestTypeMatrixFuzzBatchReuse: generated SQL over all 22 types, answered with
 // the batch pool poisoned on release and again without, results required to
