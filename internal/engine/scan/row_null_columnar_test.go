@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -189,5 +190,83 @@ func TestNativeReaderRowNullsUnderProjection(t *testing.T) {
 	}
 	if next != n {
 		t.Fatalf("read %d rows, want %d", next, n)
+	}
+}
+
+// TestRowPresenceDeclineDoesNotBurnTheOneAttempt guards the loop in
+// readRowGroupNative that measures a ROW's own presence from its FIRST
+// leaf: `measured` used to be set true whenever the loop ATTEMPTED
+// newRowPresence at all, even when it declined (returned nil). A ROW whose
+// first field's leaf cannot carry presence — a bare REPEATED primitive
+// directly under the group is the shape that declines, since definition
+// levels there are per ELEMENT, not per row — then silently stopped the
+// group from ever getting presence tracking, even though a LATER field of
+// the same ROW could have supplied it.
+//
+// wadjet's own writer never emits a bare repeated primitive directly under
+// a ROW group (Column.Fields always writes OPTIONAL/REQUIRED; REPEATED is
+// used only inside ARRAY/MAP's own list/element wrapper, which routes to
+// the row reader before this code ever runs), so there is no written file
+// that exercises this. This tests newRowPresence's decline and the loop's
+// `measured` bookkeeping directly, mirroring readRowGroupNative's own
+// two-line pattern exactly.
+func TestRowPresenceDeclineDoesNotBurnTheOneAttempt(t *testing.T) {
+	group := &pqt.SchemaNode{Name: "s", MaxDefLevel: 1, MaxRepLevel: 0}
+	repLeaf := &pqt.SchemaNode{Name: "rep_field", Parent: group, MaxRepLevel: 1}
+	okLeaf := &pqt.SchemaNode{Name: "c", Parent: group, MaxRepLevel: 0}
+	leaves := []*pqt.SchemaNode{repLeaf, okLeaf}
+
+	vec := &batch.Vector{}
+
+	measured := false
+	var presRep *rowPresence
+	if !measured {
+		presRep = newRowPresence(vec, leaves, 0)
+		measured = presRep != nil
+	}
+	if presRep != nil {
+		t.Fatalf("newRowPresence over a REPEATED leaf should decline (nil), got %+v", presRep)
+	}
+	if measured {
+		t.Fatalf("a declined attempt must not set measured — that burns the row's one chance at presence tracking")
+	}
+
+	var presC *rowPresence
+	if !measured {
+		presC = newRowPresence(vec, leaves, 1)
+		measured = presC != nil
+	}
+	if presC == nil {
+		t.Fatalf("the second field's own leaf qualifies (MaxDefLevel 1, not repeated) — it must still get a chance after the first declined")
+	}
+	if !measured {
+		t.Fatalf("a successful attempt must set measured")
+	}
+}
+
+// TestRowPresenceNoteRefusesTruncatedLevelStream is ADR-0018's rule applied
+// to rowPresence.note: both plain and RLE-encoded definition-level streams
+// decode exactly the page's NumValues, so a shorter slice is not a shape a
+// well-formed file produces. note used to treat that shape as "every
+// remaining row present" — the same silently-wrong-NULLs failure mode
+// #425 fixed for the ordinary case, reopened for a truncated file.
+func TestRowPresenceNoteRefusesTruncatedLevelStream(t *testing.T) {
+	p := &rowPresence{vec: &batch.Vector{Nulls: batch.NewBitmap(4)}, defLevel: 1}
+
+	// The page claims 4 rows; the decoded level stream carries only 2 —
+	// hand-truncated, the shape a corrupt file produces.
+	if err := p.note([]int32{1, 0}, 0, 4); err == nil {
+		t.Fatal("note must refuse a definition-level stream shorter than the page's row count, not silently treat the missing levels as PRESENT")
+	}
+
+	// The well-formed shape — an exact-length level stream — must still
+	// work and mark nulls correctly: defLevel[i] < p.defLevel(1) is absent.
+	if err := p.note([]int32{1, 0, 1, 1}, 0, 4); err != nil {
+		t.Fatalf("note on a well-formed level stream: %v", err)
+	}
+	for i, wantNull := range []bool{false, true, false, false} {
+		if got := p.vec.Nulls.IsNull(i); got != wantNull {
+			t.Errorf("row %d: null=%v, want %v", i, got, wantNull)
+		}
 	}
 }

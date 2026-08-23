@@ -187,12 +187,15 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 	// a struct field may share a top-level column's name, and the name of a
 	// column in the read schema means the top-level one.
 	leafByName := pqt.TopLevelLeafIndex(leaves)
-	// Also map by path for qualified name lookup.
+	// Also map by path for qualified name lookup. Keyed on the FULL path,
+	// joined — not the last two components, which collide: leaf [s, c] and
+	// leaf [r, s, c] both hashed to "s.c" (the later leaf in file order
+	// silently won), so reading top-level ROW s could resolve to the
+	// leaf inside r instead, whose group has a different MaxDefLevel.
 	leafByPath := make(map[string]int, len(leaves))
 	for i, leaf := range leaves {
 		if len(leaf.Path) >= 2 {
-			key := leaf.Path[len(leaf.Path)-2] + "." + leaf.Path[len(leaf.Path)-1]
-			leafByPath[key] = i
+			leafByPath[strings.Join(leaf.Path, ".")] = i
 		}
 	}
 
@@ -232,6 +235,16 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 						}
 						continue
 					}
+					// A top-level column's leaf path IS [col.Name,
+					// field.Name], so the full-path key above resolves
+					// correctly here — this is a named backstop against a
+					// future path-keying regression (that is exactly how
+					// this leaf-by-path map went wrong once already),
+					// checked before either the presence or the data read
+					// touches the resolved leaf.
+					if leaf := leaves[childIdx]; len(leaf.Path) == 0 || leaf.Path[0] != col.Name {
+						return fmt.Errorf("reading ROW field %s.%s: resolved leaf path %v does not start with column %q", col.Name, field.Name, leaf.Path, col.Name)
+					}
 					// Only the FIRST leaf read carries the recorder: every
 					// field of one ROW shares the group's def level, so one
 					// walk answers for the column, and the rest decode with
@@ -239,7 +252,7 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 					var pres *rowPresence
 					if !measured {
 						pres = newRowPresence(b.Columns[i], leaves, childIdx)
-						measured = true
+						measured = pres != nil
 					}
 					if err := readColumnNative(b.Columns[i].Children[j], fr, rgIdx, childIdx, numRows, field.Type, pres); err != nil {
 						return fmt.Errorf("reading ROW field %s.%s: %w", col.Name, field.Name, err)
@@ -383,7 +396,10 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		}
 
 		if presence != nil {
-			presence.note(page.DefinitionLevels, offset, pageRows)
+			if err := presence.note(page.DefinitionLevels, offset, pageRows); err != nil {
+				page.Release()
+				return leafErr(leaves, colIdx, err)
+			}
 		}
 
 		if err := decodeOnePage(vec, offset, page, drs, dict, int32(maxDefLevel),
@@ -446,22 +462,29 @@ func newRowPresence(vec *batch.Vector, leaves []*pqt.SchemaNode, leafIdx int) *r
 }
 
 // note marks rows [offset, offset+n) of the ROW column null wherever the
-// page's definition levels say the group was absent. A nil defLevels slice
-// means the leaf is REQUIRED all the way up, so every row is present.
+// page's definition levels say the group was absent. note is only called
+// when presence != nil, which newRowPresence guards to the case where this
+// leaf's MaxDefLevel is > 0 — so both plain and RLE-encoded pages decode
+// exactly n definition levels here; a shorter slice is not a shape a
+// well-formed file produces. Per ADR-0018, a claim the file's own numbers
+// don't support is refused by name rather than treated as "every remaining
+// row present" — the previous behavior turned a truncated level stream into
+// silently-wrong NULLs.
 //
 // Non-inlined for readColumnNative's frame, the reason every other helper
 // hanging off that page loop is.
 //
 //go:noinline
-func (p *rowPresence) note(defLevels []int32, offset, n int) {
+func (p *rowPresence) note(defLevels []int32, offset, n int) error {
 	if len(defLevels) < n {
-		return
+		return fmt.Errorf("row presence: page declares %d values but decoded only %d definition levels", n, len(defLevels))
 	}
 	for i := 0; i < n; i++ {
 		if defLevels[i] < p.defLevel {
 			p.vec.Nulls.SetNull(offset + i)
 		}
 	}
+	return nil
 }
 
 // rescaleTimestampChunk converts a TIMESTAMP column written elsewhere from
