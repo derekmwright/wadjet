@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"math"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -148,5 +149,53 @@ func TestStatsDomainValueAgreesWithTheFilterKernel(t *testing.T) {
 	got, ok := StatsDomainValue(batch.TypeDecimal, 2, 0.25)
 	if !ok || got != lit.ToInt64() {
 		t.Errorf("decimal stats value %#v, kernel literal %d", got, lit.ToInt64())
+	}
+}
+
+// The two's-complement range is ASYMMETRIC: -9223372036854775808 is an int64
+// and +9223372036854775808 is not. A conversion that strips the sign and
+// parses the MAGNITUDE therefore overflows on exactly one value in the range,
+// and withholds the predicate that names the most negative unscaled decimal a
+// column can hold — the one place a DECIMAL's minimum bound actually sits.
+//
+// Withholding is not a wrong answer, which is why nothing else here sees it:
+// the row groups simply stop being skipped for that predicate. It is asserted
+// at the bound and one step past it in BOTH directions, so the fix cannot
+// drift into accepting a value int64 does not hold.
+func TestStatsDomainValueDecimalAtTheInt64Bounds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lit   any
+		scale int
+		want  int64
+		ok    bool
+	}{
+		{"max", "9223372036854775807", 0, math.MaxInt64, true},
+		{"min", "-9223372036854775808", 0, math.MinInt64, true},
+		{"min+1", "-9223372036854775807", 0, math.MinInt64 + 1, true},
+		{"max-1", "9223372036854775806", 0, math.MaxInt64 - 1, true},
+		// The same two bounds reached through the SCALE, which is how a
+		// DECIMAL literal usually arrives.
+		{"min scaled", "-922337203685477.5808", 4, math.MinInt64, true},
+		{"max scaled", "922337203685477.5807", 4, math.MaxInt64, true},
+		// An int64 literal renders through the same path.
+		{"min as int64", int64(math.MinInt64), 0, math.MinInt64, true},
+		{"max as int64", int64(math.MaxInt64), 0, math.MaxInt64, true},
+		// One past the range in each direction stays WITHHELD: past int64 the
+		// bound is a FIXED_LEN_BYTE_ARRAY the writer emits no statistics for.
+		{"max+1", "9223372036854775808", 0, 0, false},
+		{"min-1", "-9223372036854775809", 0, 0, false},
+		{"max+1 scaled", "922337203685477.5808", 4, 0, false},
+		{"min-1 scaled", "-922337203685477.5809", 4, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := StatsDomainValue(batch.TypeDecimal, tc.scale, tc.lit)
+			if ok != tc.ok {
+				t.Fatalf("decimal(%v) scale %d: ok = %v, want %v (got %#v)", tc.lit, tc.scale, ok, tc.ok, got)
+			}
+			if ok && got != any(tc.want) {
+				t.Errorf("decimal(%v) scale %d = %#v, want %d", tc.lit, tc.scale, got, tc.want)
+			}
+		})
 	}
 }

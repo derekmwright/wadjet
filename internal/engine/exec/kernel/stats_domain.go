@@ -209,14 +209,20 @@ func decimalStatsValue(v any, scale int) (any, bool) {
 		}
 		fracPart = fracPart[:scale]
 	}
-	unscaled, err := strconv.ParseInt(intPart+fracPart, 10, 64)
+	// The SIGN goes back on before the parse, not after it. Two's complement
+	// is asymmetric — -9223372036854775808 is an int64 and its magnitude is
+	// not — so parsing the digits alone and negating withholds exactly the
+	// most negative unscaled value a column can hold, which is where a
+	// DECIMAL's minimum bound sits.
+	digits := intPart + fracPart
+	if neg {
+		digits = "-" + digits
+	}
+	unscaled, err := strconv.ParseInt(digits, 10, 64)
 	if err != nil {
 		// Past int64 the bound is a FIXED_LEN_BYTE_ARRAY the writer does not
 		// emit statistics for, so there is nothing to compare against anyway.
 		return nil, false
-	}
-	if neg {
-		unscaled = -unscaled
 	}
 	return unscaled, true
 }
