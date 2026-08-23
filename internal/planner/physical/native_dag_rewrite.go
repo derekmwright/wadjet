@@ -165,12 +165,6 @@ func fuseSortIntoPredecessor(stages []Stage, workerCount int) []Stage {
 		if len(s.Dependencies) != 1 {
 			continue
 		}
-		if hasDependent[s.ID] {
-			// Someone downstream reads this sort's output, and that
-			// consumer reads the predecessor's task files concatenated.
-			// See the correctness note above (#390).
-			continue
-		}
 		predIdx, ok := idIndex[s.Dependencies[0]]
 		if !ok {
 			continue
@@ -209,6 +203,21 @@ func fuseSortIntoPredecessor(stages []Stage, workerCount int) []Stage {
 				pred.SortShardLocal = true
 				continue // sort stage survives as the merge
 			}
+		}
+		if hasDependent[s.ID] {
+			// Someone downstream reads this sort's output, and that
+			// consumer reads the predecessor's task files concatenated.
+			// See the correctness note above (#390). Checked here, AFTER
+			// the shard-local branch above rather than before it: that
+			// branch never drops this sort stage — it keeps it in place as
+			// the global N×Limit-row merge and only annotates the
+			// predecessor — so a downstream dependent of THIS stage still
+			// reads a fully merged, sorted result either way, and the
+			// #390 hazard does not apply to it. Only the fold-into-
+			// predecessor path below, which removes this stage and
+			// redirects readers to the predecessor's raw concatenated
+			// output, needs the dependent check.
+			continue
 		}
 		// Fold sort into predecessor.
 		pred.SortKeys = append([]SortKeySpec(nil), s.SortKeys...)
