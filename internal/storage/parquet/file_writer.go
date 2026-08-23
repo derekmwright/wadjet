@@ -155,18 +155,30 @@ func (nw *NativeWriter) flattenColumn(col Column, parentPath []string, defLevel,
 
 		if col.ElementType != nil && col.ElementType.Type == TypeRow && len(col.ElementType.Fields) == 2 {
 			kvPath := append(append([]string(nil), parentPath...), col.Name, "key_value")
+			// The key/value repetition types are fixed by the MAP schema,
+			// not by what the caller declared, and these MUST be the same
+			// two lines buildMapSchemaElements writes into the footer: the
+			// max definition level a leaf buffer stamps on its values is
+			// the level the READER derives from that footer. They disagreed
+			// — the value took +1 here AND another +1 from its own
+			// Nullable, so a MAP whose value column was declared nullable
+			// (the natural declaration) wrote every value at def 4 against
+			// a file that said 3. The reader counted zero present values,
+			// so every MAP value read back NULL, and a map carrying an
+			// explicit NULL value desynchronised the level/value streams
+			// and took the decoder out of bounds (#393).
 			keyCol := col.ElementType.Fields[0]
+			keyCol.Nullable = false // keys are required
 			valCol := col.ElementType.Fields[1]
+			valCol.Nullable = true // values are optional — counted ONCE, below
 
-			// Key is required within key_value.
 			keyPath := make([]string, len(kvPath))
 			copy(keyPath, kvPath)
 			nw.flattenColumn(keyCol, keyPath, curDef, curRep)
 
-			// Value is optional within key_value.
 			valPath := make([]string, len(kvPath))
 			copy(valPath, kvPath)
-			nw.flattenColumn(valCol, valPath, curDef+1, curRep) // +1 for optional value
+			nw.flattenColumn(valCol, valPath, curDef, curRep)
 		}
 
 	case TypeRow:
@@ -384,8 +396,13 @@ func (nw *NativeWriter) decomposeMap(col Column, val any, defLevel, repLevel int
 		tmpKeyIdx := keyLeafIdx
 		tmpValIdx := valLeafIdx
 		nw.decomposeValue(keyCol, k, kvDef, elemRep, &tmpKeyIdx)
-		// Value in MAP is optional, so it gets +1 def from key_value group.
-		nw.decomposeValue(valCol, v, kvDef+1, elemRep, &tmpValIdx)
+		// kvDef, not kvDef+1: this level is only ever stamped on an ABSENT
+		// value (a present one carries the leaf's own maxDefLevel), and
+		// "key_value present, value null" IS kvDef. Claiming the value's
+		// own level for a value that was never written told the reader to
+		// consume one it did not have — the level and value streams then
+		// slid apart and the decoder ran off the end of the page.
+		nw.decomposeValue(valCol, v, kvDef, elemRep, &tmpValIdx)
 	}
 
 	// Advance leafIdx past all map leaves.

@@ -147,9 +147,13 @@ func fromRows(schema []parquet.Column, rows []map[string]any) *batch.RecordBatch
 // parquet-go entirely. For schemas with nested types (ARRAY, MAP), falls
 // back to row-level reading.
 func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, requiredCols []string, preds ...scanPredicate) *batch.RecordBatch {
-	// Nested types: fall back to row reader
-	pqSchema := parquet.Schema{Columns: schema}
-	if pqSchema.HasNestedColumns() {
+	// Nested types: fall back to row reader. The test is on the columns
+	// this query READS, not on the whole table: a table is one column of
+	// ARRAY/ROW/MAP away from sending every query on it — including ones
+	// that touch none of them — down a path with no column pruning, no
+	// row-group pruning and no batch pooling (#393).
+	readSchema := buildReadSchema(schema, requiredCols)
+	if (&parquet.Schema{Columns: readSchema}).HasNestedColumns() {
 		return readBatchViaRows(pqReader, schema, requiredCols)
 	}
 
@@ -158,8 +162,6 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 	if numRGs == 0 {
 		return nil
 	}
-
-	readSchema := buildReadSchema(schema, requiredCols)
 
 	// Collect active (non-pruned) row group indices.
 	activeRGs := make([]int, 0, numRGs)
@@ -243,7 +245,11 @@ func readBatchViaRows(pqReader *parquet.Reader, schema []parquet.Column, require
 			selectedCols[i] = c.Name
 		}
 	}
-	rows, err := pqReader.ReadRows(selectedCols)
+	// ReadRowsAs, not ReadRows: the file cannot name IPv4/IPv6/MAC/PORT/
+	// PROTOCOL/DURATION/BYTES/UUID, and decoded as the plain int/bytes the
+	// footer recovers, they reach batch.FromRows in a shape the typed vector
+	// stores as NULL. The catalog schema is right here; pass it.
+	rows, err := pqReader.ReadRowsAs(schema, selectedCols)
 	if err != nil || len(rows) == 0 {
 		return nil
 	}
@@ -606,8 +612,12 @@ type prefetchResult struct {
 // files into heap upfront" behaviour that OOMed SF100 workers when
 // lineitem partitions hit 21 × 283 MB ≈ 6 GB per scan per task.
 func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
-	// Check for nested types — fall back to file-level scan
-	pqSchema := parquet.Schema{Columns: inner.schema}
+	// Check for nested types — fall back to file-level scan. Read columns
+	// only, and it MUST be the same test scannerExecSource.Init already
+	// made: the branch between the eager and lazy paths is taken there, and
+	// this early return leaves zero rgUnits, so a disagreement is a scan
+	// that returns no rows and no error (#144).
+	pqSchema := parquet.Schema{Columns: buildReadSchema(inner.schema, inner.requiredCols)}
 	if pqSchema.HasNestedColumns() {
 		inner.hasNestedTypes = true
 		return

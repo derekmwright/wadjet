@@ -57,7 +57,10 @@ func ReadFileBatchesShard(reader *pqt.Reader, schema []pqt.Column, selectedCols 
 
 // readFileBatchesViaRows falls back to row-based reading for unsupported types.
 func readFileBatchesViaRows(reader *pqt.Reader, readSchema []pqt.Column, selectedCols []string) ([]*batch.RecordBatch, error) {
-	rows, err := reader.ReadRows(selectedCols)
+	// Typed by the CALLER's schema: the file's own footer cannot express
+	// the network types, BYTES or UUID, and the row reader would otherwise
+	// hand FromRows a shape those vectors store as NULL.
+	rows, err := reader.ReadRowsAs(readSchema, selectedCols)
 	if err != nil {
 		return nil, err
 	}

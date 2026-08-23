@@ -1,8 +1,11 @@
 package parquet
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
+	"strings"
 )
 
 // RowGroupStats contains min/max statistics for a row group.
@@ -94,10 +97,28 @@ func (r *Reader) RowGroupStats(index int) RowGroupStats {
 // Supports nested types (ARRAY, MAP, ROW) by assembling leaf-level data
 // using definition and repetition levels.
 func (r *Reader) ReadRows(selectedColumns []string) ([]map[string]any, error) {
+	return r.ReadRowsAs(nil, selectedColumns)
+}
+
+// ReadRowsAs is ReadRows with the CALLER's types: every column that schema
+// names is decoded as the type the caller declares for it, and the rest as
+// the type recovered from the file.
+//
+// The difference is not cosmetic. A parquet file cannot describe eight of
+// this engine's types: buildLeafSchemaElement writes no logical annotation
+// for IPv4, IPv6, MAC, PORT, PROTOCOL, DURATION, BYTES or UUID, so
+// TypeIDFromSchemaNode recovers them as plain INT64/BYTE_ARRAY columns.
+// Decoded that way an IPv6 came back as a 16-byte Go STRING, which
+// Vector.SetValue then handed net.ParseIP and stored as NULL — so every
+// query that falls back to the row reader (which is every query on a table
+// carrying a nested column) silently lost the value. The catalog knows what
+// the file cannot say; this is how it says so.
+func (r *Reader) ReadRowsAs(schema []Column, selectedColumns []string) ([]map[string]any, error) {
 	readCols := r.schema.Columns
 	if len(selectedColumns) > 0 {
 		readCols = filterSchemaColumns(r.schema.Columns, selectedColumns)
 	}
+	readCols = retypeFromCatalog(readCols, schema)
 
 	// Check if we have nested columns that need assembly.
 	hasNested := false
@@ -570,6 +591,17 @@ func assembleMapColumn(col Column, leaves []*SchemaNode, leafByPath map[string]i
 		if def < outerGroupDef {
 			continue
 		}
+		if def == outerGroupDef {
+			// MAP present, key_value group absent: an EMPTY map, which is
+			// not the same value as a NULL map and must not read back as
+			// one. assembleArrayColumn has always drawn this distinction
+			// for the zero-length ARRAY; MAP simply fell through to "no
+			// entries", which the caller cannot tell from absent.
+			if _, exists := rows[rowIdx][col.Name]; !exists {
+				rows[rowIdx][col.Name] = map[string]any{}
+			}
+			continue
+		}
 
 		// Key present (key is required so if kv group present, key is present).
 		if def >= keyLCD.maxDef {
@@ -696,6 +728,57 @@ func (r *Reader) ReadRowGroup(index int, selectedColumns []string) ([]map[string
 		rows[row] = m
 	}
 	return rows, nil
+}
+
+// float32sFromBytes decodes a VECTOR leaf's fixed-length bytes back into the
+// []float32 the engine's row shape carries — the inverse of the writer's
+// toBytes, little-endian, four bytes per dimension. Without it neither
+// unpack function had a VECTOR arm at all, so Reader.ReadRows answered NULL
+// for every VECTOR column it was asked for.
+func float32sFromBytes(b []byte) []float32 {
+	out := make([]float32, len(b)/4)
+	for i := range out {
+		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return out
+}
+
+// retypeFromCatalog replaces each read column's type with the catalog's,
+// where the catalog names it and both sides are leaves.
+//
+// Leaves only, deliberately: a nested column's read plan is built from the
+// FILE's shape (assembleMapColumn walks name/"key_value"/field paths), and
+// substituting a catalog Column whose children were resolved differently
+// would look up leaves that do not exist. A lossy leaf INSIDE a container
+// stays lossy — that is the same annotation gap, one level down, and it
+// needs the annotations, not a substitution.
+func retypeFromCatalog(readCols, catalog []Column) []Column {
+	if len(catalog) == 0 || len(readCols) == 0 {
+		return readCols
+	}
+	byName := make(map[string]Column, len(catalog))
+	for _, c := range catalog {
+		byName[strings.ToLower(c.Name)] = c
+	}
+	out := make([]Column, len(readCols))
+	copy(out, readCols)
+	for i, c := range out {
+		want, ok := byName[strings.ToLower(c.Name)]
+		if !ok || want.Type == c.Type {
+			continue
+		}
+		if isNestedType(c.Type) || isNestedType(want.Type) {
+			continue
+		}
+		out[i].Type = want.Type
+		out[i].Precision, out[i].Scale = want.Precision, want.Scale
+		out[i].Dimension = want.Dimension
+	}
+	return out
+}
+
+func isNestedType(t TypeID) bool {
+	return t == TypeArray || t == TypeRow || t == TypeMap
 }
 
 func filterSchemaColumns(cols []Column, selected []string) []Column {
@@ -837,6 +920,13 @@ func unpackAllPresent(dst []any, offset int, data Values, n int, typeID TypeID) 
 				dst[offset+i] = b
 			}
 		}
+	case TypeVector:
+		rawData, offsets := data.ByteArray()
+		if offsets != nil {
+			for i := 0; i < n && i+1 < len(offsets); i++ {
+				dst[offset+i] = float32sFromBytes(rawData[offsets[i]:offsets[i+1]])
+			}
+		}
 	case TypeDecimal:
 		unpackDecimalAllPresent(dst, offset, data, n)
 	}
@@ -922,6 +1012,19 @@ func unpackWithNulls(dst []any, offset int, data Values, defLevels []int32, maxD
 						b := make([]byte, offsets[vi+1]-offsets[vi])
 						copy(b, rawData[offsets[vi]:offsets[vi+1]])
 						dst[offset+i] = b
+					}
+					vi++
+				}
+			}
+		}
+	case TypeVector:
+		rawData, offsets := data.ByteArray()
+		vi := 0
+		if offsets != nil {
+			for i := 0; i < n; i++ {
+				if i < len(defLevels) && defLevels[i] == maxDef {
+					if vi+1 < len(offsets) {
+						dst[offset+i] = float32sFromBytes(rawData[offsets[vi]:offsets[vi+1]])
 					}
 					vi++
 				}

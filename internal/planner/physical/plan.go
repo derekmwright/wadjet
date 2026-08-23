@@ -10844,7 +10844,11 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	// inside buildRGUnits, which runs after the branch was already taken —
 	// the early return left zero rgUnits and every query against a nested
 	// table returned 0 rows with no error (issue #144 suite finding).
-	innerSchema := parquet.Schema{Columns: inner.schema}
+	// Decided on the columns this scan READS, matching readBatchDirect's own
+	// test: one ARRAY/ROW/MAP column in a table used to put every query on
+	// that table onto the row reader, which mints unpooled batches and reads
+	// every column of every row group (#393).
+	innerSchema := parquet.Schema{Columns: buildReadSchema(inner.schema, inner.requiredCols)}
 	inner.hasNestedTypes = innerSchema.HasNestedColumns()
 	s.scanner = inner
 

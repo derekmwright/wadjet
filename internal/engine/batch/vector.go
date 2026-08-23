@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unsafe"
@@ -1052,6 +1054,14 @@ func (v *Vector) SetValue(i int, val any) {
 			// The guard matters doubly here: the old silent `return` did
 			// not even advance Offsets, so every LATER row of the column
 			// read back shifted — the wrong value became someone else's.
+			//
+			// A bare map[string]any is refused too, MAP vector or not. It
+			// is the row-level shape of a MAP AND the box of a ROW, and
+			// this function cannot tell them apart: batch.FromRows converts
+			// the first at the boundary where the context IS known, and
+			// what reaches here is a ROW written into a mis-derived MAP
+			// vector — a live stage-DAG defect (#397) whose only current
+			// report is this guard.
 			v.mismatch(val)
 		}
 		start := v.Child.Len
@@ -1078,6 +1088,67 @@ func (v *Vector) SetValue(i int, val any) {
 			child.SetValue(i, row[name])
 		}
 	}
+}
+
+// mapEntryRows converts a MAP's row-level Go map into the entry rows the
+// vector stores: one ROW per key, carrying the child ROW's own two field
+// names so a schema that named them something other than key/value still
+// lands in the right children.
+//
+// Entries come out in KEY ORDER. Go map iteration is randomized, and the
+// order is observable: it is the order GetValue hands back, the order a
+// comparator sees, and the order a re-write puts on disk. Sorting is what
+// makes the same file read back the same way twice — and makes the
+// single-process and distributed arms agree on a MAP value at all.
+func mapEntryRows(child *Vector, m map[string]any) []any {
+	keyName, valName := "key", "value"
+	if len(child.FieldNames) == 2 {
+		keyName, valName = child.FieldNames[0], child.FieldNames[1]
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]any, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, map[string]any{keyName: mapKeyValue(child, k), valName: m[k]})
+	}
+	return out
+}
+
+// mapKeyValue coerces a MAP's row-level key to something the key child can
+// hold. Row-level keys are always strings — assembleMapColumn stringifies
+// whatever the file carried and a Go map's key is the writer's only source —
+// so a numerically-typed key column would otherwise take a string and raise
+// the type guard from inside the scan, trading one process-killer for
+// another. Every other family (STRING/BYTES/DATE/DECIMAL/the network types/
+// UUID) parses its own string form already.
+func mapKeyValue(child *Vector, k string) any {
+	if len(child.Children) == 0 {
+		return k
+	}
+	switch child.Children[0].Type {
+	case TypeInt32, TypeInt64, TypePort, TypeProtocol, TypeDuration, TypeTimestamp:
+		n, err := strconv.ParseInt(k, 10, 64)
+		if err != nil {
+			return nil
+		}
+		return n
+	case TypeFloat32, TypeFloat64:
+		f, err := strconv.ParseFloat(k, 64)
+		if err != nil {
+			return nil
+		}
+		return f
+	case TypeBool:
+		b, err := strconv.ParseBool(k)
+		if err != nil {
+			return nil
+		}
+		return b
+	}
+	return k
 }
 
 // appendToVector appends a single value to a vector, growing its backing storage.

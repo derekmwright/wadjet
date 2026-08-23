@@ -332,15 +332,46 @@ func truncateVectorStorage(v *Vector) {
 }
 
 // FromRows creates a RecordBatch from row-oriented data.
+//
+// This is the ROW→BATCH boundary, and the one place where the two shapes of
+// a MAP meet: the parquet row reader produces a Go map (and the writer
+// consumes one) while the vector stores MAP as ARRAY(ROW("key","value")).
+// Nothing converted between them, so every scan that fell back to the row
+// reader — every query on a table carrying a nested column — handed
+// Vector.SetValue a map it rejects and died on the scan worker (#393).
+//
+// The conversion belongs HERE rather than in SetValue's MAP arm. SetValue
+// cannot tell a MAP's row shape from a ROW's box (both are map[string]any),
+// so accepting one there would silently reshape a ROW written into a
+// mis-derived MAP vector — a live defect on the stage DAG (#397) that the
+// #361 guard is currently the only thing reporting. At this boundary the
+// context is unambiguous: the value came from the row reader and the
+// catalog says the column is a MAP.
 func FromRows(schema []parquet.Column, rows []map[string]any) *RecordBatch {
 	b := NewRecordBatch(schema, len(rows))
 	for i, row := range rows {
 		for j, col := range schema {
 			val := row[col.Name]
+			if col.Type == TypeMap {
+				val = mapRowShapeToEntries(b.Columns[j], val)
+			}
 			b.Columns[j].SetValue(i, val)
 		}
 	}
 	return b
+}
+
+// mapRowShapeToEntries converts a MAP's row-level Go map into the entry
+// rows a MAP vector stores, and passes anything else through untouched:
+// the storage shape (which is what ToRows produces, so an aggregate's
+// spill round trip through FromRows is a no-op here) and NULL.
+// See FromRows for why the conversion is not in SetValue.
+func mapRowShapeToEntries(v *Vector, val any) any {
+	m, ok := val.(map[string]any)
+	if !ok || v == nil || v.Type != TypeMap || v.Child == nil {
+		return val
+	}
+	return mapEntryRows(v.Child, m)
 }
 
 // Compact materializes the selection vector into a contiguous batch using
