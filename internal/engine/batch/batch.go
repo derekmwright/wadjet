@@ -349,11 +349,28 @@ func truncateVectorStorage(v *Vector) {
 // catalog says the column is a MAP.
 func FromRows(schema []parquet.Column, rows []map[string]any) *RecordBatch {
 	b := NewRecordBatch(schema, len(rows))
+	// A MAP's row shape needs converting wherever it SITS, not only when it
+	// is the whole column: the reader hands back a Go map for a MAP inside a
+	// ROW, inside an ARRAY or inside another MAP too, and SetValue's #361
+	// guard rejects one — so a scan of a table carrying such a column died
+	// at this boundary, which is the nested half of #393 and the shape #448
+	// now routes HERE. Which columns need the walk is a property of the
+	// SCHEMA, so it is decided once per column and the flat majority keeps
+	// exactly the old path.
+	var deep []bool
+	for j := range schema {
+		if hasMapBelow(b.Columns[j]) {
+			if deep == nil {
+				deep = make([]bool, len(schema))
+			}
+			deep[j] = true
+		}
+	}
 	for i, row := range rows {
 		for j, col := range schema {
 			val := row[col.Name]
-			if col.Type == TypeMap {
-				val = mapRowShapeToEntries(b.Columns[j], val)
+			if deep != nil && deep[j] {
+				val = rowShapeToStorage(b.Columns[j], val)
 			}
 			b.Columns[j].SetValue(i, val)
 		}
@@ -361,17 +378,94 @@ func FromRows(schema []parquet.Column, rows []map[string]any) *RecordBatch {
 	return b
 }
 
-// mapRowShapeToEntries converts a MAP's row-level Go map into the entry
-// rows a MAP vector stores, and passes anything else through untouched:
-// the storage shape (which is what ToRows produces, so an aggregate's
-// spill round trip through FromRows is a no-op here) and NULL.
+// hasMapBelow reports whether v or anything under it stores a MAP.
+func hasMapBelow(v *Vector) bool {
+	if v == nil {
+		return false
+	}
+	if v.Type == TypeMap {
+		return true
+	}
+	if hasMapBelow(v.Child) {
+		return true
+	}
+	for _, ch := range v.Children {
+		if hasMapBelow(ch) {
+			return true
+		}
+	}
+	return false
+}
+
+// rowShapeToStorage converts a row-reader box into the shape the vectors
+// store, at every depth: a MAP's Go map becomes the entry rows a MAP vector
+// holds, and a ROW's fields and an ARRAY's elements are converted through
+// their own children so that a MAP anywhere below is reached.
+//
+// Anything else passes through untouched, including a MAP already in the
+// storage shape (which is what ToRows produces, so an aggregate's spill
+// round trip through FromRows is a no-op) and NULL. Converting entries
+// element-wise in that case is what keeps the walk IDEMPOTENT, and that is
+// what makes it safe to run over a value of unknown provenance.
+//
 // See FromRows for why the conversion is not in SetValue.
-func mapRowShapeToEntries(v *Vector, val any) any {
-	m, ok := val.(map[string]any)
-	if !ok || v == nil || v.Type != TypeMap || v.Child == nil {
+func rowShapeToStorage(v *Vector, val any) any {
+	if v == nil || val == nil {
 		return val
 	}
-	return mapEntryRows(v.Child, m)
+	switch v.Type {
+	case TypeMap:
+		if m, ok := val.(map[string]any); ok {
+			entries := mapEntryRows(v.Child, m)
+			for i, e := range entries {
+				entries[i] = rowShapeToStorage(v.Child, e)
+			}
+			return entries
+		}
+		fallthrough
+	case TypeArray:
+		elems, ok := val.([]any)
+		if !ok {
+			return val
+		}
+		out := make([]any, len(elems))
+		for i, e := range elems {
+			out[i] = rowShapeToStorage(v.Child, e)
+		}
+		return out
+	case TypeRow:
+		m, ok := val.(map[string]any)
+		if !ok {
+			return val
+		}
+		// Keyed by the vector's OWN field names, which is how SetValue reads
+		// it back: a key the schema does not declare is dropped here and was
+		// ignored there.
+		out := make(map[string]any, len(v.Children))
+		for j, ch := range v.Children {
+			name := ""
+			if j < len(v.FieldNames) {
+				name = v.FieldNames[j]
+			}
+			out[name] = rowShapeToStorage(ch, m[name])
+		}
+		return out
+	}
+	return val
+}
+
+// mapRowShapeToEntries converts a MAP's row-level Go map into the entry
+// rows a MAP vector stores, and passes anything else through untouched.
+// It is rowShapeToStorage for the callers that hold a MAP vector and a
+// value they know came from the row shape.
+func mapRowShapeToEntries(v *Vector, val any) any {
+	if v == nil || v.Type != TypeMap || v.Child == nil {
+		return val
+	}
+	if _, ok := val.(map[string]any); !ok {
+		return val
+	}
+	return rowShapeToStorage(v, val)
 }
 
 // Compact materializes the selection vector into a contiguous batch using

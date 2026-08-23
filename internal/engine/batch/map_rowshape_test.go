@@ -103,3 +103,93 @@ func TestSetValueStillRejectsBareMap(t *testing.T) {
 		})
 	}
 }
+
+// TestFromRowsAcceptsRowShapeMapAtEveryDepth: the conversion was applied only
+// when the MAP was the whole COLUMN, so a MAP inside a ROW, inside an ARRAY
+// or inside another MAP still reached SetValue as a bare Go map and raised
+// the same guard — the same defect as #393, one level down, on every one of
+// those three shapes. It became reachable on the columnar path too when #448
+// routed a ROW with a container field to the row reader.
+//
+// The shapes that DID work are here beside them: a container with no MAP
+// below it never enters the walk, and one that does must come out the same
+// as before.
+func TestFromRowsAcceptsRowShapeMapAtEveryDepth(t *testing.T) {
+	i64 := func(n string) parquet.Column {
+		return parquet.Column{Name: n, Type: parquet.TypeInt64, Nullable: true}
+	}
+	mp := func(name string, val parquet.Column) parquet.Column {
+		val.Name = "value"
+		return parquet.Column{Name: name, Type: parquet.TypeMap, Nullable: true,
+			ElementType: &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+				{Name: "key", Type: parquet.TypeString}, val,
+			}}}
+	}
+	arr := func(name string, elem parquet.Column) parquet.Column {
+		return parquet.Column{Name: name, Type: parquet.TypeArray, Nullable: true, ElementType: &elem}
+	}
+	row := func(name string, fields ...parquet.Column) parquet.Column {
+		return parquet.Column{Name: name, Type: parquet.TypeRow, Nullable: true, Fields: fields}
+	}
+	entry := func(k string, v any) map[string]any {
+		return map[string]any{"key": k, "value": v}
+	}
+
+	tests := []struct {
+		name string
+		col  parquet.Column
+		in   any
+		want any
+	}{
+		{"map inside a row", row("c", i64("a"), mp("m", i64(""))),
+			map[string]any{"a": int64(1), "m": map[string]any{"k": int64(2)}},
+			map[string]any{"a": int64(1), "m": []any{entry("k", int64(2))}}},
+		{"map inside an array", arr("c", mp("element", i64(""))),
+			[]any{map[string]any{"k": int64(1)}},
+			[]any{[]any{entry("k", int64(1))}}},
+		{"map inside a map", mp("c", mp("", i64(""))),
+			map[string]any{"k": map[string]any{"i": int64(1)}},
+			[]any{entry("k", []any{entry("i", int64(1))})}},
+		{"a NULL map inside a row stays NULL", row("c", i64("a"), mp("m", i64(""))),
+			map[string]any{"a": int64(1), "m": nil},
+			map[string]any{"a": int64(1), "m": nil}},
+		{"an empty map inside a row is empty, not NULL", row("c", i64("a"), mp("m", i64(""))),
+			map[string]any{"a": int64(1), "m": map[string]any{}},
+			map[string]any{"a": int64(1), "m": []any{}}},
+		// The MAP-free containers: unchanged, and not walked at all.
+		{"row of row", row("c", i64("a"), row("s", i64("b"))),
+			map[string]any{"a": int64(1), "s": map[string]any{"b": int64(2)}},
+			map[string]any{"a": int64(1), "s": map[string]any{"b": int64(2)}}},
+		{"row of array", row("c", i64("a"), arr("l", i64("element"))),
+			map[string]any{"a": int64(1), "l": []any{int64(2)}},
+			map[string]any{"a": int64(1), "l": []any{int64(2)}}},
+		{"array of row", arr("c", row("element", i64("x"))),
+			[]any{map[string]any{"x": int64(1)}},
+			[]any{map[string]any{"x": int64(1)}}},
+		{"map of array", mp("c", arr("", i64("element"))),
+			map[string]any{"k": []any{int64(1)}},
+			[]any{entry("k", []any{int64(1)})}},
+		{"map of row", mp("c", row("", i64("x"))),
+			map[string]any{"k": map[string]any{"x": int64(1)}},
+			[]any{entry("k", map[string]any{"x": int64(1)})}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := FromRows([]parquet.Column{tt.col}, []map[string]any{{"c": tt.in}, {"c": nil}})
+			if got := b.Columns[0].GetValue(0); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("GetValue(0) = %#v, want %#v", got, tt.want)
+			}
+			if got := b.Columns[0].GetValue(1); got != nil {
+				t.Errorf("GetValue(1) = %#v, want nil", got)
+			}
+			// Idempotence: the storage shape the batch just produced must
+			// survive a second pass, because ToRows→FromRows (the spill and
+			// exchange round trip) hands exactly that back.
+			again := FromRows([]parquet.Column{tt.col},
+				[]map[string]any{{"c": b.Columns[0].GetValue(0)}})
+			if got := again.Columns[0].GetValue(0); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("second pass over the storage shape = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
