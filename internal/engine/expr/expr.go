@@ -4245,28 +4245,49 @@ type SubqueryRunner func(sql string) ([]map[string]any, error)
 // ScalarSubquery evaluates a subquery that returns a single scalar value.
 // Example: WHERE price > (SELECT AVG(price) FROM products)
 // Uncorrelated: executed once and result cached.
+//
+// The cache is shared by every parallel pipeline worker — one compiled
+// expression tree is captured by all of them (Pipeline.runParallel) — so it
+// is published the same way ColRef publishes its resolution: written under
+// resolveMu, released by an atomic store, and never read before that store
+// is observed. A plain `if !cached { cached = true; ... }` raced: a worker
+// that saw the flag before the value was written compared against a nil
+// threshold, dropped every row of its batches, and the query answered a
+// different row count on every run (#398).
 type ScalarSubquery struct {
 	SQL    string
 	Runner SubqueryRunner
-	cached bool
-	val    any
+	// resolved publishes val: stored last under resolveMu, and the only
+	// thing an evaluating goroutine reads before using val.
+	resolved  atomic.Bool
+	resolveMu sync.Mutex
+	val       any
 }
 
 func (e *ScalarSubquery) Eval(_ *batch.RecordBatch, _ int) any {
-	if !e.cached {
-		e.cached = true
-		rows, err := e.Runner(e.SQL)
-		if err != nil || len(rows) == 0 {
-			e.val = nil
-			return nil
-		}
-		// Return first column of first row
-		for _, v := range rows[0] {
-			e.val = v
-			break
-		}
+	if !e.resolved.Load() {
+		e.resolveSlow()
 	}
 	return e.val
+}
+
+func (e *ScalarSubquery) resolveSlow() {
+	e.resolveMu.Lock()
+	defer e.resolveMu.Unlock()
+	if e.resolved.Load() {
+		return
+	}
+	defer e.resolved.Store(true)
+	rows, err := e.Runner(e.SQL)
+	if err != nil || len(rows) == 0 {
+		e.val = nil
+		return
+	}
+	// Return first column of first row
+	for _, v := range rows[0] {
+		e.val = v
+		break
+	}
 }
 
 // InSubquery checks if a value is in the result set of a subquery.
@@ -4277,7 +4298,11 @@ type InSubquery struct {
 	SQL    string
 	Runner SubqueryRunner
 	Not    bool
-	cached bool
+	// resolved publishes the set: stored last under resolveMu. Same
+	// contract, and the same defect, as ScalarSubquery's (#398) — an
+	// unsynchronized flag let a parallel worker probe a half-built map.
+	resolved  atomic.Bool
+	resolveMu sync.Mutex
 	// setNull records a NULL in the subquery's result set: a probe that
 	// misses such a set is UNKNOWN, not false — the `NOT IN (SELECT
 	// nullable_col ...)` trap (#370).
@@ -4298,14 +4323,64 @@ func (e *InSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 }
 
 func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
-	if !e.cached {
-		e.cached = true
-		rows, err := e.Runner(e.SQL)
-		if err != nil {
-			return e.Not, false
+	if !e.resolved.Load() {
+		e.resolveSlow()
+	}
+	lv := e.Expr.Eval(b, row)
+	if lv == nil {
+		return false, true
+	}
+	// Fast path: typed hash lookup
+	if e.intSet != nil {
+		if iv, ok := toInt64Safe(lv); ok {
+			if _, found := e.intSet[iv]; found {
+				return !e.Not, false
+			}
+			return e.missAnswer()
 		}
-		// Collect values and detect predominant type for hash set
-		var rawVals []any
+	}
+	if e.strSet != nil {
+		if sv, ok := lv.(string); ok {
+			if _, found := e.strSet[sv]; found {
+				return !e.Not, false
+			}
+			return e.missAnswer()
+		}
+	}
+	if e.fltSet != nil {
+		if fv, ok := toFloat64Safe(lv); ok {
+			if _, found := e.fltSet[fv]; found {
+				return !e.Not, false
+			}
+			return e.missAnswer()
+		}
+	}
+	// Fallback: linear scan for mixed types
+	for _, rv := range e.vals {
+		if rv != nil && compare(lv, rv, CmpEq) {
+			return !e.Not, false
+		}
+	}
+	return e.missAnswer()
+}
+
+// resolveSlow runs the subquery once and builds the probe set. Idempotent.
+func (e *InSubquery) resolveSlow() {
+	e.resolveMu.Lock()
+	defer e.resolveMu.Unlock()
+	if e.resolved.Load() {
+		return
+	}
+	defer e.resolved.Store(true)
+	rows, err := e.Runner(e.SQL)
+	if err != nil {
+		// An empty set: every probe misses, which is what the pre-#398
+		// code answered on the failing call and on every call after it.
+		return
+	}
+	// Collect values and detect predominant type for hash set
+	var rawVals []any
+	{
 		for _, r := range rows {
 			for _, v := range r {
 				if v != nil {
@@ -4357,42 +4432,6 @@ func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 			}
 		}
 	}
-	lv := e.Expr.Eval(b, row)
-	if lv == nil {
-		return false, true
-	}
-	// Fast path: typed hash lookup
-	if e.intSet != nil {
-		if iv, ok := toInt64Safe(lv); ok {
-			if _, found := e.intSet[iv]; found {
-				return !e.Not, false
-			}
-			return e.missAnswer()
-		}
-	}
-	if e.strSet != nil {
-		if sv, ok := lv.(string); ok {
-			if _, found := e.strSet[sv]; found {
-				return !e.Not, false
-			}
-			return e.missAnswer()
-		}
-	}
-	if e.fltSet != nil {
-		if fv, ok := toFloat64Safe(lv); ok {
-			if _, found := e.fltSet[fv]; found {
-				return !e.Not, false
-			}
-			return e.missAnswer()
-		}
-	}
-	// Fallback: linear scan for mixed types
-	for _, rv := range e.vals {
-		if rv != nil && compare(lv, rv, CmpEq) {
-			return !e.Not, false
-		}
-	}
-	return e.missAnswer()
 }
 
 // missAnswer is the IN answer for a probe the set does not contain: FALSE
@@ -4411,8 +4450,11 @@ type ExistsSubquery struct {
 	SQL    string
 	Runner SubqueryRunner
 	Not    bool
-	cached bool
-	exists bool
+	// resolved publishes exists: stored last under resolveMu. Same
+	// contract, and the same defect, as ScalarSubquery's (#398).
+	resolved  atomic.Bool
+	resolveMu sync.Mutex
+	exists    bool
 }
 
 func (e *ExistsSubquery) Eval(b *batch.RecordBatch, row int) any {
@@ -4420,15 +4462,24 @@ func (e *ExistsSubquery) Eval(b *batch.RecordBatch, row int) any {
 }
 
 func (e *ExistsSubquery) EvalBool(_ *batch.RecordBatch, _ int) bool {
-	if !e.cached {
-		e.cached = true
-		rows, err := e.Runner(e.SQL)
-		e.exists = err == nil && len(rows) > 0
+	if !e.resolved.Load() {
+		e.resolveSlow()
 	}
 	if e.Not {
 		return !e.exists
 	}
 	return e.exists
+}
+
+func (e *ExistsSubquery) resolveSlow() {
+	e.resolveMu.Lock()
+	defer e.resolveMu.Unlock()
+	if e.resolved.Load() {
+		return
+	}
+	rows, err := e.Runner(e.SQL)
+	e.exists = err == nil && len(rows) > 0
+	e.resolved.Store(true)
 }
 
 // Cast wraps an expression with explicit type conversion.

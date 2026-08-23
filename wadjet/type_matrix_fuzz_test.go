@@ -71,19 +71,14 @@ func tmFuzzKnownDivergence(q *shapegen.Query) string { return "" }
 // window actually runs: a pinned seed inside the window that stops diverging
 // FAILS, and an unpinned seed that diverges FAILS. A pin for a seed outside the
 // window is simply not checked — the window is the corpus.
+// #398's three pins (seeds 31, 124, 214) are deleted: the defect was never a
+// retention bug at all but an unsynchronized once-cache on the uncorrelated
+// subquery expressions, read by every parallel pipeline worker. Poison only
+// perturbed the timing that decided which worker lost the race. All three
+// seeds now agree on both arms, which IS the fix's proof (ADR-0013 §Pins).
 var tmFuzzPins = map[int64]typematrix.Pin{
-	31: {Issue: "#398", Reason: "Scalar-subquery threshold read after its batch was released: " +
-		"0 rows clean, 597 poisoned.",
-		// INTERMITTENT: which value the released arena holds is a function of
-		// allocation order, so this seed diverges on some runs and not others.
-		// TestTypeMatrixBatchReuse forces the reuse deterministically and owns
-		// the must-still-diverge half of the ratchet for the whole class.
-		GatedBy: "TestTypeMatrixBatchReuse"},
 	48: {Issue: "#399", Reason: "DECIMAL GROUP BY keys read after their batch was released: " +
 		"3157 rows both ways, different keys."},
-	124: {Issue: "#398", Reason: "Scalar-subquery threshold, star projection: 3 rows clean, 1 poisoned."},
-	214: {Issue: "#398", Reason: "Scalar-subquery threshold: the poisoned run fails a query the " +
-		"clean run answers (string into a FLOAT64 vector)."},
 }
 
 // TestTypeMatrixFuzzBatchReuse: generated SQL over all 22 types, answered with
