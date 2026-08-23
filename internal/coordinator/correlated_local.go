@@ -92,6 +92,12 @@ func (c *Coordinator) runCorrelatedLocal(ctx context.Context, queryID string, lo
 		TotalRows: totalRows,
 		Elapsed:   time.Since(start),
 		Plan:      planStr,
+		// The sink's schema, not the batches': a zero-row result has no
+		// batch to read the types off, and pgwire still has to declare
+		// them. Without this the coord path fell back to OID 25 (text) for
+		// every column of an empty correlated-subquery result while the
+		// same query through the embedded API declared real OIDs.
+		Schema: sink.Schema(),
 	}, nil
 }
 

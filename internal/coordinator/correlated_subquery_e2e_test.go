@@ -236,6 +236,70 @@ func TestCorrelatedSubqueryDistributedCoordinator(t *testing.T) {
 			t.Errorf("error does not name the budget: %v", err)
 		}
 	})
+
+	// pgwire's coord path builds its RowDescription from
+	// SQLResult.OutputSchema() and declares OID 25 (text) for every column
+	// when there is none, while the SAME statement through the embedded API
+	// declares real OIDs. OutputSchema() reads the batches' schema — and the
+	// first Stream() call DETACHES the batches, which is the order
+	// queryViaCoord happens to use and the next caller may not. Recording the
+	// sink's schema on the result makes the answer independent of that order.
+	//
+	// Must stay AFTER RoutedViaRefusal: that subtest asserts an exact
+	// correlated-route count.
+	t.Run("SchemaSurvivesStreamDetach", func(t *testing.T) {
+		res, err := coord.ExecuteSQL(ctx, `SELECT c_custkey, c_acctbal,
+			(SELECT AVG(c_acctbal) FROM customer c2
+				WHERE c2.c_nationkey < c1.c_nationkey) AS below_avg
+			FROM customer c1 WHERE c1.c_custkey <= 5`)
+		if err != nil {
+			t.Fatalf("ExecuteSQL: %v", err)
+		}
+		defer res.Close()
+		if res.Error != "" {
+			t.Fatalf("result error: %s", res.Error)
+		}
+		if res.TotalRows == 0 {
+			t.Fatal("0 rows — the fixture must carry custkeys 1..5")
+		}
+		// Take the rows FIRST, the way a streaming consumer does.
+		stream := res.Stream()
+		for {
+			b, err := stream.Next(ctx)
+			if err != nil {
+				t.Fatalf("stream: %v", err)
+			}
+			if b == nil {
+				break
+			}
+		}
+		// The two base-table columns carry their catalog types. The
+		// correlated subquery's own output column is only checked for
+		// PRESENCE: it currently lands in a STRING vector regardless of the
+		// aggregate's type, which is a separate defect from this one and
+		// pinning it here would enshrine it.
+		want := map[string]parquet.TypeID{
+			"c_custkey": parquet.TypeInt32,
+			"c_acctbal": parquet.TypeFloat64,
+		}
+		schema := res.OutputSchema()
+		if len(schema) != 3 {
+			t.Fatalf("after Stream() the result declares %d column types, want 3 — "+
+				"pgwire declares text for every column of a result with no schema", len(schema))
+		}
+		seen := map[string]bool{}
+		for _, col := range schema {
+			seen[col.Name] = true
+			if w, ok := want[col.Name]; ok && col.Type != w {
+				t.Errorf("column %q declared %s, want %s", col.Name, col.Type, w)
+			}
+		}
+		for _, name := range []string{"c_custkey", "c_acctbal", "below_avg"} {
+			if !seen[name] {
+				t.Errorf("output schema does not name column %q", name)
+			}
+		}
+	})
 }
 
 // setupCorrelatedCluster stands up an embedded-NATS cluster (3 workers, one

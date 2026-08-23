@@ -2906,6 +2906,10 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 		TotalRows:   totalRows,
 		Elapsed:     elapsed,
 		Plan:        planStr,
+		// Recorded rather than left to OutputSchema's fallback: the first
+		// Stream() call detaches Batches, so a consumer that streams before
+		// it asks for the types would otherwise get none.
+		Schema: gatherSchema(batches),
 	}, nil
 }
 
