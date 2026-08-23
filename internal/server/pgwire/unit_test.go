@@ -48,11 +48,14 @@ func TestPgTypeOID(t *testing.T) {
 		{"BOOL", 16},
 		{"TIMESTAMP", 1114},
 		{"DATE", 1082},
-		{"VARCHAR", 25},  // default = text
-		{"STRING", 25},   // default = text
-		{"UNKNOWN", 25},  // default = text
-		{"int32", 23},    // case insensitive
-		{"float64", 701}, // case insensitive
+		{"DECIMAL", 1700}, // numeric — pgFormatType already said so
+		{"NUMERIC", 1700},
+		{"decimal", 1700}, // case insensitive
+		{"VARCHAR", 25},   // default = text
+		{"STRING", 25},    // default = text
+		{"UNKNOWN", 25},   // default = text
+		{"int32", 23},     // case insensitive
+		{"float64", 701},  // case insensitive
 	}
 	for _, tt := range tests {
 		t.Run(tt.typeName, func(t *testing.T) {

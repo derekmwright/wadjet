@@ -1988,6 +1988,14 @@ func pgTypeOID(typeName string) int {
 		return 1114 // timestamp
 	case "DATE":
 		return 1082 // date
+	case "DECIMAL", "NUMERIC":
+		// PostgreSQL's numeric. The values on the wire are exact — a DECIMAL
+		// is boxed as its rendered text (#434 made that rendering carry all
+		// 128 bits) and the binary form below encodes the same digits — so
+		// the only thing OID 25 was buying was a client that reads an exact
+		// decimal column as a String. pgFormatType already answered "numeric"
+		// for the same type, so the catalog was contradicting the wire.
+		return 1700 // numeric
 	case "VECTOR":
 		return 25 // text (pgvector uses custom OID, but text works for display)
 	default:
@@ -2841,7 +2849,7 @@ func sendColumnTypes(columns []string, metas []wadjet.ColumnMeta) []parquet.Type
 				continue
 			}
 		}
-		if m.TypeID != parquet.TypeTimestamp && m.TypeID != parquet.TypeDate {
+		if m.TypeID != parquet.TypeTimestamp && m.TypeID != parquet.TypeDate && m.TypeID != parquet.TypeDecimal {
 			continue
 		}
 		if types == nil {
@@ -2936,6 +2944,14 @@ func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtC
 			// as its rendered text, which appendBinaryValue would have
 			// written verbatim under OID 1082.
 			c.buf = appendBinaryDate(c.buf, ds)
+		case binary && colType == parquet.TypeDecimal && dsOK:
+			// Binary `numeric` is a base-10000 digit vector. A DECIMAL is
+			// boxed as its rendered text, and appendBinaryValue's string arm
+			// would have written those ASCII bytes verbatim under OID 1700 —
+			// the same defect the two arms above exist to prevent, and the
+			// one the OID change would otherwise have CREATED (under OID 25
+			// the raw bytes were the right binary form of a text column).
+			c.buf = appendBinaryNumeric(c.buf, ds)
 		case binary:
 			c.buf = appendBinaryValue(c.buf, val)
 		default:
@@ -2994,6 +3010,117 @@ func appendBinaryDate(buf []byte, s string) []byte {
 	}
 	buf = appendInt32(buf, 4)
 	return appendInt32(buf, int32(days))
+}
+
+// PostgreSQL's binary `numeric` is a base-10000 digit vector, not a number:
+//
+//	int16 ndigits, int16 weight, int16 sign, int16 dscale, int16 digits[ndigits]
+//
+// with the value being sum(digits[i] * 10000^(weight-i)) under sign, and
+// dscale the number of fraction digits to DISPLAY. There is no float in it,
+// which is the point — it is why an exact decimal survives the wire.
+const (
+	pgNumericPos int16 = 0x0000
+	pgNumericNeg int16 = 0x4000
+)
+
+// appendBinaryNumeric encodes a decimal rendered as [-]ddd[.ddd] into a
+// PostgreSQL binary `numeric` (OID 1700).
+//
+// A value that does not parse is sent as NULL. Unlike `date` and `timestamp`
+// the field is variable-length, so writing the text instead would not even be
+// caught by a width check — a client would decode ASCII as digit groups and
+// get a number with no relation to the value.
+func appendBinaryNumeric(buf []byte, s string) []byte {
+	digits, weight, sign, dscale, ok := pgNumericDigits(s)
+	if !ok {
+		return appendInt32(buf, -1)
+	}
+	buf = appendInt32(buf, int32(8+2*len(digits)))
+	buf = appendInt16(buf, int16(len(digits)))
+	buf = appendInt16(buf, weight)
+	buf = appendInt16(buf, sign)
+	buf = appendInt16(buf, dscale)
+	for _, d := range digits {
+		buf = appendInt16(buf, d)
+	}
+	return buf
+}
+
+// pgNumericDigits splits a rendered decimal into the four header fields and
+// the base-10000 digit vector. It works on the DIGITS, never through a float:
+// the whole reason a DECIMAL column exists is that float64 cannot hold its
+// values, and a wide DECIMAL(38,10) needs 128 bits.
+func pgNumericDigits(s string) (digits []int16, weight, sign, dscale int16, ok bool) {
+	sign = pgNumericPos
+	switch {
+	case strings.HasPrefix(s, "-"):
+		sign, s = pgNumericNeg, s[1:]
+	case strings.HasPrefix(s, "+"):
+		s = s[1:]
+	}
+	intPart, fracPart := s, ""
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		intPart, fracPart = s[:i], s[i+1:]
+	}
+	// At least one digit somewhere: "", "-" and "." otherwise walked the
+	// arithmetic below to a clean ZERO, which is a value, not a refusal.
+	if intPart == "" && fracPart == "" {
+		return nil, 0, 0, 0, false
+	}
+	if !allASCIIDigits(intPart) || !allASCIIDigits(fracPart) {
+		return nil, 0, 0, 0, false
+	}
+	if intPart == "" {
+		intPart = "0"
+	}
+	if len(fracPart) > math.MaxInt16 || len(intPart) > math.MaxInt16 {
+		return nil, 0, 0, 0, false
+	}
+	dscale = int16(len(fracPart))
+
+	// Whole base-10000 groups: the integer part pads on the LEFT and the
+	// fraction on the RIGHT, because the decimal point is the group boundary.
+	if r := len(intPart) % 4; r != 0 {
+		intPart = strings.Repeat("0", 4-r) + intPart
+	}
+	if r := len(fracPart) % 4; r != 0 {
+		fracPart += strings.Repeat("0", 4-r)
+	}
+	all := intPart + fracPart
+	weight = int16(len(intPart)/4 - 1)
+	digits = make([]int16, 0, len(all)/4)
+	for i := 0; i < len(all); i += 4 {
+		var d int16
+		for _, ch := range []byte(all[i : i+4]) {
+			d = d*10 + int16(ch-'0')
+		}
+		digits = append(digits, d)
+	}
+	// Leading zero groups shift the weight; trailing ones just shorten the
+	// vector. PostgreSQL writes zero as ndigits = 0.
+	lead := 0
+	for lead < len(digits) && digits[lead] == 0 {
+		lead++
+	}
+	digits = digits[lead:]
+	weight -= int16(lead)
+	for len(digits) > 0 && digits[len(digits)-1] == 0 {
+		digits = digits[:len(digits)-1]
+	}
+	if len(digits) == 0 {
+		weight = 0
+	}
+	return digits, weight, sign, dscale, true
+}
+
+func allASCIIDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // appendBinaryValue appends a value in PostgreSQL binary format.

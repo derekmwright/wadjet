@@ -2,7 +2,9 @@ package tpch
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"strconv"
@@ -393,6 +395,55 @@ func newOracleStore(t *testing.T, committed bool) (objstore.Store, error) {
 	return objstore.NewFileStore(t.TempDir())
 }
 
+// pgWideStep is the unscaled increment between consecutive d_wide values: 23
+// digits, so |unscaled| runs to about 9.9e24 across the fixture and even the
+// SMALLEST non-zero value needs 77 bits. int64 tops out at 19 digits, so no
+// value in this column is representable the way every DECIMAL wadjet wrote
+// before #429 was.
+const pgWideStep = "98765432109876543210987"
+
+// pgWideUnscaled builds row i's d_wide value, monotonic in i and spanning both
+// signs for the same reason the columns above are (see pgDecimalRows).
+func pgWideUnscaled(i int) parquet.Decimal128 {
+	step, ok := new(big.Int).SetString(pgWideStep, 10)
+	if !ok {
+		panic("pgWideStep is not an integer")
+	}
+	n := step.Mul(step, big.NewInt(int64(i-100)))
+	return decimal128FromBigInt(n)
+}
+
+// decimal128FromBigInt renders a signed big.Int as the two 64-bit halves
+// parquet.Decimal128 carries, two's complement.
+func decimal128FromBigInt(n *big.Int) parquet.Decimal128 {
+	m := new(big.Int).Set(n)
+	if m.Sign() < 0 {
+		m.Add(m, new(big.Int).Lsh(big.NewInt(1), 128))
+	}
+	var b [16]byte
+	m.FillBytes(b[:])
+	return parquet.Decimal128{
+		Hi: int64(binary.BigEndian.Uint64(b[0:8])),
+		Lo: binary.BigEndian.Uint64(b[8:16]),
+	}
+}
+
+// pgNumericOf converts a Decimal128 box at a column's scale into the exact
+// pgtype.Numeric the PostgreSQL sink needs.
+//
+// This is a RENDERING decision of the harness in the same class as
+// normalizeTemporal, not a second source: the number is the one Decimal128
+// holds, and pgx's COPY is binary-only (a Go string for a numeric column has
+// no binary encode plan), so the box has to be spelled in the driver's type.
+// The conversion is exact — it moves 128 bits of integer and a scale.
+func pgNumericOf(d parquet.Decimal128, scale int32) pgtype.Numeric {
+	n, ok := new(big.Int).SetString(d.String(), 10)
+	if !ok {
+		panic("Decimal128.String is not an integer: " + d.String())
+	}
+	return pgtype.Numeric{Int: n, Exp: -scale, Valid: true}
+}
+
 // createPostgresSchema declares the fixture with the PostgreSQL types that
 // MIRROR Wadjet's declared types, so a type OID the wire arm compares is a
 // comparison of the two engines and not of two schema-writing conventions.
@@ -486,6 +537,14 @@ func oracleTables() map[string]parquet.Schema {
 		{Name: "d_key", Type: parquet.TypeInt64},
 		{Name: "d_2", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
 		{Name: "d_4", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true},
+		// The WIDE arm. Precision 38 is the other side of ADR-0018 §4's
+		// encoding rule — an INT32 leaf to 9 digits, INT64 to 18, and
+		// FIXED_LEN_BYTE_ARRAY beyond — and it is the arm the fixture had no
+		// column for, so every DECIMAL entry above was exercising the INT64
+		// path only. Its values need more than 64 bits, which is exactly the
+		// range #429 could not write and #437's old reader silently
+		// truncates.
+		{Name: "d_wide", Type: parquet.TypeDecimal, Precision: 38, Scale: 10, Nullable: true},
 	}}
 	return out
 }
@@ -505,6 +564,15 @@ func pgDecimalRows() []map[string]any {
 		}
 		if i%23 != 0 {
 			r["d_4"] = float64(i-100) * 0.0625
+		}
+		// d_wide is boxed as parquet.Decimal128 — the UNSCALED 128-bit
+		// integer, which ADR-0018 §4 makes the writer's verbatim input. A
+		// float64 box would be scaled on the way in and cannot hold 25
+		// significant digits, and a numeric STRING box goes through
+		// strconv.ParseFloat in decimalUnscaledInt64 and loses them the same
+		// way. Every non-zero value here needs at least 77 bits.
+		if i%13 != 0 {
+			r["d_wide"] = pgWideUnscaled(i)
 		}
 		rows[i] = r
 	}
@@ -556,7 +624,11 @@ func (o *postgresOracle) copyInto(ctx context.Context, table string, rows []map[
 	for i, row := range rows {
 		v := make([]any, len(cols))
 		for j, col := range cols {
-			v[j] = row[col]
+			val := row[col]
+			if d, ok := val.(parquet.Decimal128); ok {
+				val = pgNumericOf(d, int32(schema.Columns[j].Scale))
+			}
+			v[j] = val
 		}
 		values[i] = v
 	}
