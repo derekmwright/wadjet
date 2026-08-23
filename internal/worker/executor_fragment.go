@@ -960,8 +960,20 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 
 	g, gctx := errgroup.WithContext(ctx)
 	// Producer: source.Next → channel. Closes ch on EOF or error.
-	g.Go(func() error {
+	g.Go(func() (err error) {
 		defer close(ch)
+		// The source pump runs on an errgroup goroutine nobody else owns, so
+		// a *batch.TypeMismatchError raised inside src.Next — the scan's row
+		// fallback reaching a MAP column, #393 — took the WORKER PROCESS down
+		// instead of failing the task. Same contract as #400's two sites; the
+		// errgroup already has an error channel, so the recovered error just
+		// becomes this goroutine's return. Anything that is NOT a
+		// FatalEvalPanic is re-raised, matching Pipeline.Run's policy.
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("source next: %w", exec.RecoverFatalEval(r))
+			}
+		}()
 		for {
 			b, err := src.Next(gctx)
 			if err != nil {

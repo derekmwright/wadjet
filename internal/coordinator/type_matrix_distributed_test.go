@@ -49,6 +49,12 @@ var tmdPins = map[string]typematrix.Pin{
 	"project_c_vec": {Issue: "#407", Reason: "Reading a VECTOR column returns NULL for every row on the " +
 		"single-process engine (both the native columnar decode and the scanner's ROW fallback); the stage " +
 		"DAG returns the values. ROW on the same fixture row reads back fine, so this is VECTOR-specific."},
+	// #392's twelve pins (the scalar-form asymmetry over c_cidr/c_ipv6/c_mac/
+	// c_uuid, and the grouped form over the same four types plus minby/maxby)
+	// are NOT added: #392 was fixed at the root on main before this rebase
+	// (minMaxDeclaredType now derives MIN_BY/MAX_BY's output type from the
+	// value's own type instead of falling through to FLOAT64) — pending a
+	// gate run to confirm all twelve now agree on both arms.
 }
 
 // tmdWholeTableMapScanReason is the mechanism behind the #410 entries left in
@@ -204,8 +210,12 @@ func TestTypeMatrixTwoPath(t *testing.T) {
 // this list carries no independent claim — it exists so this suite does not
 // die on the first one.
 //
-// #392 and #393 are both fixed; the map is empty rather than removed so the
-// mechanism stays in place for the next crash-pinned defect.
+// #392 and #393 are both fixed at the root, and independently #400 and this
+// commit wrapped all three goroutines that had no recover (the parallel-emit
+// aggregate, the scan workers, and the fragment source pump) so nothing in
+// the corpus kills a process any more either. The map is empty rather than
+// removed so the mechanism stays in place for the next crash-pinned defect.
+// wadjet.tmCrashPins is empty for the same reasons and owns that ratchet.
 var tmdCrashPins = map[string]typematrix.Pin{}
 
 func tmdPinFor(name string) (typematrix.Pin, string, bool) {
