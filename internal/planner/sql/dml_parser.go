@@ -215,6 +215,11 @@ func parseInsert(sql string, l *lexer) (*ParsedQuery, error) {
 //
 // Splitting on TOP-LEVEL commas with a depth counter is what collectUntil in
 // this same file already does for UPDATE SET.
+//
+// Every refusal about one value names that value's 1-based position in the
+// tuple. The reason alone ("VALUES accepts literals, not the expression ...")
+// told the author of `VALUES (1, 'a', <bad>, 4)` what was wrong but not which
+// entry it was, so finding it meant re-reading the tuple by hand.
 func parseValuesRow(l *lexer, tableName string) ([]string, error) {
 	var row []string
 	var cur []token
@@ -223,7 +228,8 @@ func parseValuesRow(l *lexer, tableName string) ([]string, error) {
 		tok := l.nextToken()
 		switch {
 		case tok.typ == TokenEOF || tok.typ == TokenError:
-			return nil, fmt.Errorf("unterminated VALUES row in INSERT INTO %s", tableName)
+			return nil, fmt.Errorf("unterminated VALUES row in INSERT INTO %s: input ended at value %d of the VALUES tuple",
+				tableName, len(row)+1)
 		case tok.typ == TokenLParen:
 			depth++
 		case tok.typ == TokenRParen && depth > 0:
@@ -233,13 +239,13 @@ func parseValuesRow(l *lexer, tableName string) ([]string, error) {
 			if len(cur) == 0 && len(row) == 0 {
 				return nil, fmt.Errorf("empty VALUES row in INSERT INTO %s", tableName)
 			}
-			v, err := insertValueText(cur, tableName)
+			v, err := insertValueText(cur, tableName, len(row)+1)
 			if err != nil {
 				return nil, err
 			}
 			return append(row, v), nil
 		case tok.typ == TokenComma && depth == 0:
-			v, err := insertValueText(cur, tableName)
+			v, err := insertValueText(cur, tableName, len(row)+1)
 			if err != nil {
 				return nil, err
 			}
@@ -263,11 +269,14 @@ func parseValuesRow(l *lexer, tableName string) ([]string, error) {
 // Anything else is an EXPRESSION, and this path has no evaluator: the old loop
 // answered `VALUES (coalesce(a, b))` with a truncated row and no error at all.
 // Naming it is the honest answer, and it costs nothing that worked before.
-func insertValueText(toks []token, tableName string) (string, error) {
+//
+// ordinal is the value's 1-based position in the tuple and is used only in the
+// refusals, so that a rejected entry can be found without counting commas.
+func insertValueText(toks []token, tableName string, ordinal int) (string, error) {
 	toks = stripRedundantParens(toks)
 	switch {
 	case len(toks) == 0:
-		return "", fmt.Errorf("empty value in VALUES row of INSERT INTO %s", tableName)
+		return "", fmt.Errorf("value %d of the VALUES tuple in INSERT INTO %s: empty value", ordinal, tableName)
 	case len(toks) == 1:
 		return toks[0].val, nil
 	case len(toks) == 2 && toks[1].typ == TokenNumber && toks[0].typ == TokenMinus:
@@ -282,8 +291,8 @@ func insertValueText(toks []token, tableName string) (string, error) {
 		}
 		b.WriteString(t.val)
 	}
-	return "", fmt.Errorf("INSERT INTO %s: VALUES accepts literals, not the expression %q",
-		tableName, b.String())
+	return "", fmt.Errorf("value %d of the VALUES tuple in INSERT INTO %s: VALUES accepts literals, not the expression %q",
+		ordinal, tableName, b.String())
 }
 
 // stripRedundantParens removes parentheses that wrap the WHOLE value, so

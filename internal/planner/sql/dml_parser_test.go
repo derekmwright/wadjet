@@ -1,6 +1,9 @@
 package sql
 
 import (
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -256,5 +259,64 @@ func TestParseInsert_RefusesExpressionsItCannotEvaluate(t *testing.T) {
 		if q, err := Parse(sql); err == nil {
 			t.Errorf("%s parsed with no error: %#v", sql, q.Insert)
 		}
+	}
+}
+
+// A refusal that describes WHAT is wrong but not WHICH entry it was leaves the
+// author of `VALUES (1, 'a', <bad>, 4)` to find the value by inspection. Every
+// per-value refusal carries the value's 1-based position in the tuple, and the
+// position must be the value's own — an off-by-one is exactly as unhelpful as
+// no position at all, so these cases pin the first, a middle and the last
+// entry, and the count restarts with each tuple.
+var valuesOrdinalRE = regexp.MustCompile(`value (\d+) of the VALUES tuple`)
+
+func TestParseInsert_RefusalNamesValueOrdinal(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		sql        string
+		wantOrd    int
+		wantReason string
+	}{
+		{"expression_first", `INSERT INTO t (a, b, c, d) VALUES (2 * 3, 'x', 3, 4)`,
+			1, "not the expression"},
+		{"expression_middle", `INSERT INTO t (a, b, c, d) VALUES (1, 'x', 2 * 3, 4)`,
+			3, "not the expression"},
+		{"expression_last", `INSERT INTO t (a, b, c, d) VALUES (1, 'x', 3, 2 * 3)`,
+			4, "not the expression"},
+		{"function_call_middle", `INSERT INTO t (a, b, c) VALUES (1, coalesce(1, 2), 3)`,
+			2, "not the expression"},
+		// An entry with no tokens at all: the reason is still "empty value".
+		{"empty_value_first", `INSERT INTO t (a, b, c) VALUES (, 2, 3)`, 1, "empty value"},
+		{"empty_value_middle", `INSERT INTO t (a, b, c) VALUES (1, , 3)`, 2, "empty value"},
+		{"empty_value_last", `INSERT INTO t (a, b, c) VALUES (1, 2, )`, 3, "empty value"},
+		// The tuple's ')' never arrives: the position is the value being read
+		// when the input ran out, not the count of completed values.
+		{"unterminated_first", `INSERT INTO t (a, b) VALUES (1`, 1, "unterminated VALUES row"},
+		{"unterminated_third", `INSERT INTO t (a, b, c) VALUES (1, 2, 3`, 3, "unterminated VALUES row"},
+		// The count is per TUPLE, not per statement.
+		{"second_row_restarts_count", `INSERT INTO t (a, b) VALUES (1, 2), (3, 4 * 5)`,
+			2, "not the expression"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.sql)
+			if err == nil {
+				t.Fatalf("%s parsed with no error", tc.sql)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tc.wantReason) {
+				t.Errorf("error %q does not keep the reason %q", msg, tc.wantReason)
+			}
+			m := valuesOrdinalRE.FindStringSubmatch(msg)
+			if m == nil {
+				t.Fatalf("error %q names no value position", msg)
+			}
+			got, convErr := strconv.Atoi(m[1])
+			if convErr != nil {
+				t.Fatalf("position %q in %q is not a number", m[1], msg)
+			}
+			if got != tc.wantOrd {
+				t.Errorf("error names value %d, want value %d: %q", got, tc.wantOrd, msg)
+			}
+		})
 	}
 }
