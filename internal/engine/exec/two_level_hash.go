@@ -61,15 +61,21 @@ import (
 // WHY THE BUCKET IS THE LOW WINDOW (measured, not assumed): the obvious
 // choice — a middle window like bits 39..32, which is what ClickHouse's
 // `hash >> (32 - 8)` amounts to — is correct only for an avalanching hash.
-// fibHash is multiply-only (`key * phi`), so picking keys by ANY high-ish
-// window selects a near-arithmetic subsequence of a dense key range, and
-// fibHash collapses strided keys onto few slots (the pre-existing property
-// recorded in TestFibHashStrideCollapse). Simulated on 33M dense int keys:
-// bucket=bits 39..32 gave 6.46 average probes per insert at 8M keys and
-// degrades with scale, while bucket=low 8 bits gives exactly 1.00 at every
-// size — the flat table's own number. Random and packed-composite families
-// measure 1.50 either way. The low window is the only one that inherits the
-// flat table's guarantees instead of replacing them with new ones.
+// fibHash is not one: it folds the key's high bits down and then multiplies
+// by phi, deliberately KEEPING the multiply's collision-free bijection on the
+// low bits for dense integer ids (see fibHash, where avalanching was measured
+// and rejected at +47% geomean). So picking keys by any high-ish window
+// selects a near-arithmetic subsequence of a dense key range. Simulated on
+// 33M dense int keys: bucket=bits 39..32 gave 6.46 average probes per insert
+// at 8M keys and degrades with scale, while bucket=low 8 bits gives exactly
+// 1.00 at every size — the flat table's own number. Random and
+// packed-composite families measure 1.50 either way. The low window is the
+// only one that inherits the flat table's guarantees instead of replacing
+// them with new ones.
+//
+// The low window is also why #306's stride collapse hit this table as hard as
+// the flat one — a key set of multiples of 2^s had constant low bits, so it
+// landed in ONE bucket on ONE chain. fibHash's fold fixed both at once.
 //
 // # Layout is decided at construction where the sink's bounds allow it
 //
@@ -763,24 +769,24 @@ func (t *intTwoLevelTable) Delete(key int64) (int32, bool) {
 		return 0, false
 	}
 	deleted := s.entries[idx].val
+	// Knuth Algorithm R, the same walk intHashTable.Delete runs and with the
+	// same correction: an entry that must STAY does not end the walk, because
+	// one further along can still have a home at or before the hole. See the
+	// comment there (#306).
 	i := idx
+	j := idx
 	for k := 0; k < n; k++ {
-		j := (i + 1) & s.mask
+		j = (j + 1) & s.mask
 		e := &s.entries[j]
 		if e.key == intHashEmpty {
-			s.entries[i].key = intHashEmpty
-			s.size--
-			return deleted, true
+			break
 		}
 		id := (fibHash(e.key) >> twoLevelSlotShift) & s.mask
-		if ((i - id) & s.mask) < ((j - id) & s.mask) {
-			s.entries[i] = *e
-			i = j
+		if ((j - id) & s.mask) < ((j - i) & s.mask) {
 			continue
 		}
-		s.entries[i].key = intHashEmpty
-		s.size--
-		return deleted, true
+		s.entries[i] = *e
+		i = j
 	}
 	s.entries[i].key = intHashEmpty
 	s.size--

@@ -89,11 +89,77 @@ func fillEmptyEntries(entries []intHashEntry) {
 	}
 }
 
-// fibHash mixes an int64 key using Fibonacci hashing for good distribution.
+// fibHash mixes an int64 key into the 64-bit hash every int-keyed table in
+// this engine indexes by.
+//
+// It used to be the Fibonacci multiply alone — `key * phi` — and a
+// multiply-only hash has one bit-level property that matters here: the low k
+// bits of the product depend ONLY on the low k bits of the key. So a key set
+// whose members are all multiples of 2^s shares the same low s bits, and in
+// any table with at most 2^s slots every one of them lands on the SAME slot:
+// one probe chain, O(n) per lookup, a GROUP BY that degrades from linear to
+// quadratic. That is not a contrived input — an id column allocated in
+// strided blocks, a timestamp truncated to a minute or hour boundary, and a
+// byte-aligned offset all produce it (#306). The property was DOCUMENTED
+// in-tree rather than fixed, because the obvious fix gives up the other half
+// of the multiply-only behaviour: for DENSE keys 0..n-1, `key * phi mod 2^k`
+// is a bijection, so sequential ids collided exactly zero times.
+//
+// The mixing step is a PREFIX-XOR fold of the key's high bits into its low
+// ones, applied BEFORE the multiply. Four xorshift-rights, each of them a
+// bijection on 64 bits, so the composition with the multiply is a bijection
+// too (TestFibHashIsInjective): two distinct keys never share a hash, and the
+// only collisions left are the birthday collisions of the truncation to
+// slots.
+//
+// # Why a fold and not a real avalanche
+//
+// murmur3's fmix64 (what DuckDB uses) was the first attempt. It avalanches,
+// so it fixes every stride — but it also gives up the dense-key bijection,
+// and that bijection is worth keeping: at the tables' 70% load factor, linear
+// probing's UNSUCCESSFUL-search cost, which is what an INSERT pays and
+// near-unique aggregation is all inserts, goes from 1.00 probes to about 6.
+// The fold keeps both, and the evidence is the probe count itself — a
+// deterministic number, unlike this package's aggregate wall-clock
+// benchmarks, whose run-to-run variance on a loaded host reaches ±200% even
+// on arms this function cannot touch (the string and packed key shapes hash
+// elsewhere).
+//
+// Simulated over 2^20 keys in 2^21 slots, average probes per insert:
+//
+//	family        dense  +1e9  ×3    2^4    2^8   2^12  2^16   2^24    random
+//	bare multiply  1.00  1.00  1.00  4.50   64.5  1024  16384  524288  1.50
+//	this fold      1.00  1.00  1.19  1.00   1.73  2.05  1.00   1.00    1.50
+//	fmix64         1.50  1.50  1.50  1.50   1.50  1.50  1.50   1.50    1.50
+//
+// with truncated timestamps (×60000, ×3600000) going 8.50→1.54 and 32.5→1.50.
+// A dense key below 2^7 is untouched by any of the four shifts, and over a
+// dense RANGE the fold stays injective on the low log2(slots) bits, which is
+// what preserves the multiply's bijection there.
+//
+// TPC-H SF1 confirms no wall-clock cost, interleaved in one window, three
+// runs each: bare 59.41 / 58.91 / 57.61 s, this 58.06 / 56.95 / 58.83 s.
+//
+// The partition bits — which partitionFor takes off the TOP of the same word,
+// where the multiply already spreads well — are unaffected, so hash-once can
+// still route and index from one value (TestHashSpreadFamilies). The fold is
+// LINEAR, not an avalanche, so for a strided family the top and low windows
+// stay mildly correlated; TestTwoLevelThreeWindowSpread's ownerBucketSkew
+// records the 1.8× bucket skew that leaves.
+//
+// Not gated by an optswitch toggle: a hash cannot change a query's row SET,
+// only the ORDER an unordered GROUP BY emits its groups in, and a toggle over
+// that would hand the optimization-invariance oracle a false divergence to
+// chase. Bisecting it means deleting the four shifts.
 func fibHash(key int64) uint64 {
 	// Fibonacci hashing constant for 64-bit: golden ratio * 2^64
 	const phi = 11400714819323198485
-	return uint64(key) * phi
+	k := uint64(key)
+	k ^= k >> 43
+	k ^= k >> 29
+	k ^= k >> 17
+	k ^= k >> 7
+	return k * phi
 }
 
 // Put inserts or updates a key-value pair. Returns the previous value and whether
@@ -305,35 +371,37 @@ func (h *intHashTable) Delete(key int64) (int32, bool) {
 	}
 	deleted := h.entries[idx].val
 
-	// Back-shift loop. Walk forward from idx; for each filled slot j, decide
-	// whether the entry at j must move back to i (the current hole) to keep
-	// its probe chain reachable. The entry at j with ideal position id is
-	// reachable via probing from id; if i lies on j's probe chain (i.e., id
-	// is closer to i than to j in cyclic forward order), vacating i would
-	// break that chain — so move the entry back. Otherwise leave it and stop.
+	// Back-shift loop (Knuth Algorithm R). Walk forward from the hole; for
+	// each filled slot j, an entry whose ideal position id lies cyclically
+	// in (i, j] is still reachable with the hole at i and STAYS — but the
+	// walk KEEPS GOING, because an entry further along can still have a home
+	// at or before the hole and would be orphaned by it. The walk ends only
+	// at an empty slot, which is where every probe chain ends anyway.
+	//
+	// Stopping at the first entry that stays was the bug: with a home of
+	// exactly j that entry does not move, but the entry at j+1 can have
+	// probed from a home before the hole, and leaving the hole where it was
+	// cut its chain — Get returned "missing" for a key that was still in the
+	// table. It was invisible while fibHash was multiply-only, because that
+	// hash is a bijection on the low bits, so the dense integer keys this
+	// path sees never formed a chain long enough to reach the case (#306).
 	i := idx
+	j := idx
 	for k := 0; k < n; k++ {
-		j := (i + 1) & h.mask
+		j = (j + 1) & h.mask
 		e := &h.entries[j]
 		if e.key == intHashEmpty {
-			h.entries[i].key = intHashEmpty
-			h.size--
-			return deleted, true
+			break
 		}
 		id := fibHash(e.key) & h.mask
-		if ((i-id)&h.mask) < ((j-id)&h.mask) {
-			h.entries[i] = *e
-			i = j
+		// Move iff e probed at least as far as the hole is from j — i.e.
+		// the hole lies on e's chain.
+		if ((j - id) & h.mask) < ((j - i) & h.mask) {
 			continue
 		}
-		h.entries[i].key = intHashEmpty
-		h.size--
-		return deleted, true
+		h.entries[i] = *e
+		i = j
 	}
-	// Defensive: table-wide back-shift completed without hitting an empty
-	// slot. Possible only if the table is entirely full and forms one giant
-	// probe chain — not a state the 70%-load invariant allows, but guard
-	// anyway. Empty the final hole and return.
 	h.entries[i].key = intHashEmpty
 	h.size--
 	return deleted, true

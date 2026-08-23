@@ -161,10 +161,13 @@ func selView(b *batch.RecordBatch, sel []uint32) *batch.RecordBatch {
 //
 // WHICH function is unified matters. We adopt the SINK's, per key shape:
 //
-//	int64 key   fibHash(key) = key * phi. Its low bits are a bijection on the
-//	            key's low bits, so dense integer ids keep the collision-free,
-//	            sequential slot layout intHashTable was built around; its top
-//	            bits depend on every input bit, which is the textbook use of a
+//	int64 key   fibHash(key) — a high-bits fold, then the phi multiply. The
+//	            multiply's low bits are a bijection on ITS input's low bits,
+//	            and the fold leaves a dense integer range injective there, so
+//	            dense ids keep the collision-free sequential slot layout
+//	            intHashTable was built around while a key set of multiples of
+//	            2^s no longer collapses onto one chain (#306). The top bits
+//	            depend on every input bit, which is the textbook use of a
 //	            multiplicative hash and what the partitioner takes.
 //	packed key  packedHash(lo, hi) — the 128-bit fold in packed_hash.go.
 //	string key  strHash(key), whose low 32 bits are also strEntry.hashTag, so

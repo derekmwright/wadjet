@@ -101,12 +101,12 @@ func TestTwoLevelMatchesFlatCollisions(t *testing.T) {
 // inside a bucket, measured as the average linear-probe count of filling a
 // sub-table sized for its own share.
 //
-// The strided int family is excluded from the BUCKET bound for the reason
-// TestFibHashStrideCollapse records: fibHash is multiply-only, so keys that
-// are all multiples of 2^s have identical low bits and land in one bucket.
-// Its slot spread is still asserted — the collapse costs bucket balance, not
-// probe locality, which is strictly better than what the flat table does with
-// the same family.
+// Every family clears every bound now. The strided int family used to be
+// EXCLUDED from the bucket bound because it landed entirely in one bucket:
+// fibHash was multiply-only, so keys that are all multiples of 2^s share
+// their low bits, and both the bucket and the slot window read low bits.
+// #306's mixing step folds the high bits down, and the only concession left
+// is ownerBucketSkew below.
 func TestTwoLevelThreeWindowSpread(t *testing.T) {
 	const n = 1 << 17
 	const parts = 12 // NumCPU-shaped, not a power of two
@@ -114,21 +114,32 @@ func TestTwoLevelThreeWindowSpread(t *testing.T) {
 	families := []struct {
 		name string
 		// lowBitSpread: whether this family's LOW hash bits spread at all.
-		// False only for the stride-2^k int family, whose low bits are
-		// identically zero — the pre-existing fibHash property recorded in
-		// TestFibHashStrideCollapse. Both the bucket window and the slot
-		// window read low bits, so that family collapses in both, exactly as
-		// it already collapses in the flat table. Its partition spread (top
-		// bits) is still asserted.
+		// Every family does now. The stride-2^k integers did not until #306
+		// gave fibHash a mixing step: their low bits were identically zero,
+		// and since both the bucket window and the slot window read low
+		// bits, the family collapsed onto one bucket AND one probe chain,
+		// exactly as it collapsed in the flat table. The field stays so a
+		// future unspreadable family can declare itself rather than silently
+		// fail the bucket bound.
 		lowBitSpread bool
-		hashes       []uint64
+		// ownerBucketSkew is the numerator of the per-owner bucket bound
+		// (bound = mean * skew/2). fibHash's mixing step is a LINEAR fold,
+		// not an avalanche, so for a STRIDED family the top window (the
+		// owner) and the low window (the bucket) stay correlated, and
+		// conditioning on one skews the other — measured at 1.8x the mean
+		// where an avalanching hash gives 1.0x. The guard is against a family
+		// COLLAPSING onto one bucket, which is exactly what the bare multiply
+		// did to this family (every key in one bucket); 1.8x is not that.
+		// Avalanching instead was measured and rejected — see fibHash.
+		ownerBucketSkew int
+		hashes          []uint64
 	}{
-		{"int-dense", true, genHashes(n, func(i int) uint64 { return fibHash(int64(i)) })},
-		{"int-negative", true, genHashes(n, func(i int) uint64 { return fibHash(int64(-i)) })},
-		{"int-scaled", true, genHashes(n, func(i int) uint64 { return fibHash(int64(i) * 2654435761) })},
-		{"int-strided-64k", false, genHashes(n, func(i int) uint64 { return fibHash(int64(i) << 16) })},
-		{"packed-two-dense", true, genHashes(n, func(i int) uint64 { return packedHash(uint64(i)*2654435761, uint64(i)) })},
-		{"packed-hi-word", true, genHashes(n, func(i int) uint64 { return packedHash(0, uint64(i)) })},
+		{"int-dense", true, 3, genHashes(n, func(i int) uint64 { return fibHash(int64(i)) })},
+		{"int-negative", true, 3, genHashes(n, func(i int) uint64 { return fibHash(int64(-i)) })},
+		{"int-scaled", true, 3, genHashes(n, func(i int) uint64 { return fibHash(int64(i) * 2654435761) })},
+		{"int-strided-64k", true, 5, genHashes(n, func(i int) uint64 { return fibHash(int64(i) << 16) })},
+		{"packed-two-dense", true, 3, genHashes(n, func(i int) uint64 { return packedHash(uint64(i)*2654435761, uint64(i)) })},
+		{"packed-hi-word", true, 3, genHashes(n, func(i int) uint64 { return packedHash(0, uint64(i)) })},
 	}
 
 	// Bounds are several times the mean: they catch a family collapsing onto
@@ -143,13 +154,6 @@ func TestTwoLevelThreeWindowSpread(t *testing.T) {
 				t.Errorf("partition bits: worst of %d owners holds %d of %d keys", parts, w, n)
 			}
 			if !f.lowBitSpread {
-				// Documented collapse: assert it is EXACTLY the flat table's
-				// behavior (every key in one bucket, on one probe chain) so a
-				// silent change in fibHash surfaces here too.
-				if w := worstBucket(f.hashes, twoLevelBuckets, func(h uint64) int { return int(bucketOf(h)) }); w != n {
-					t.Fatalf("stride family no longer collapses onto one bucket (worst %d of %d) — "+
-						"re-check the bit budget in two_level_hash.go", w, n)
-				}
 				return
 			}
 			{
@@ -167,7 +171,7 @@ func TestTwoLevelThreeWindowSpread(t *testing.T) {
 					if len(inPart) == 0 {
 						t.Fatalf("owner %d received no keys", p)
 					}
-					bound := len(inPart)/twoLevelBuckets*3/2 + 8
+					bound := len(inPart)/twoLevelBuckets*f.ownerBucketSkew/2 + 8
 					if w := worstBucket(inPart, twoLevelBuckets, func(h uint64) int { return int(bucketOf(h)) }); w > bound {
 						t.Errorf("owner %d bucket bits: worst of %d buckets holds %d of %d keys",
 							p, twoLevelBuckets, w, len(inPart))

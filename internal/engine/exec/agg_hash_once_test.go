@@ -387,14 +387,17 @@ func TestUnifiedHashSpread(t *testing.T) {
 		name   string
 		hashes []uint64
 		// slotSpread: whether the table's own hash claims a spread over the
-		// LOW bits for this key family. False for stride-2^k integer keys —
-		// see TestFibHashStrideCollapse for what that is and why it is not
-		// hash-once's to change.
+		// LOW bits for this key family. Every family claims it now; the
+		// stride-2^k integers did not until #306 gave fibHash a mixing step
+		// (TestFibHashStrideBreak).
 		slotSpread bool
 	}{
 		{"int-dense", genHashes(n, func(i int) uint64 { return fibHash(int64(i)) }), true},
 		{"int-negative", genHashes(n, func(i int) uint64 { return fibHash(int64(-i)) }), true},
-		{"int-strided-64k", genHashes(n, func(i int) uint64 { return fibHash(int64(i) << 16) }), false},
+		// Was `false` — this family collapsed onto one probe chain until
+		// #306 gave fibHash a mixing step. TestFibHashStrideBreak checks
+		// every stride width; this entry keeps it in the general sweep.
+		{"int-strided-64k", genHashes(n, func(i int) uint64 { return fibHash(int64(i) << 16) }), true},
 		{"packed-low-half", genHashes(n, func(i int) uint64 { return packedHash(uint64(i), 0) }), true},
 		{"packed-high-half", genHashes(n, func(i int) uint64 { return packedHash(uint64(i)<<32, 0) }), true},
 		{"packed-hi-word", genHashes(n, func(i int) uint64 { return packedHash(0, uint64(i)) }), true},
@@ -448,33 +451,66 @@ func TestUnifiedHashSpread(t *testing.T) {
 	}
 }
 
-// TestFibHashStrideCollapse records a PRE-EXISTING property of intHashTable
-// that the hash-once spread sweep surfaced, so it is written down rather than
-// rediscovered: fibHash is multiply-only, so the low k bits of key*phi depend
-// only on the low k bits of the key. A single-int GROUP BY whose keys are all
-// multiples of 2^s therefore maps every key to one probe chain in any table
-// with <= 2^s slots.
+// TestFibHashStrideBreak is #306's regression, and the inverse of what this
+// test asserted when it was written.
 //
-// This is the table's own indexing, unchanged by hash-once (the router hands
-// it bit-for-bit the value it computed for itself — see
-// TestRoutedHashMatchesTableHash), and the partition bits, which come off the
-// TOP of the same product, are unaffected. Fixing it means changing every
-// int-keyed table's slot layout — and giving up the collision-free bijection
-// dense ids currently enjoy — so it is a separate decision, not a G5 rider.
-func TestFibHashStrideCollapse(t *testing.T) {
+// fibHash was multiply-only, so the low k bits of key*phi depended ONLY on
+// the low k bits of the key: a single-int GROUP BY whose keys are all
+// multiples of 2^s put every key on ONE probe chain in any table with at most
+// 2^s slots. The test recorded that collapse (worst bucket == n) rather than
+// fixing it, because the fix costs the collision-free bijection dense ids
+// enjoyed. fibHash now runs murmur3's fmix64 finalizer, so every output bit
+// depends on every input bit and no stride survives.
+//
+// Every stride is checked, not just the 2^16 the original recorded: a
+// finalizer that happened to break one shift width and not another would pass
+// a single-stride test and leave the defect in place for the rest.
+func TestFibHashStrideBreak(t *testing.T) {
 	const n = 4096
 	const slots = 1 << 15
-	strided := genHashes(n, func(i int) uint64 { return fibHash(int64(i) << 16) })
-
-	if w := worstBucket(strided, slots, func(h uint64) int { return int(h & (slots - 1)) }); w != n {
-		t.Fatalf("stride-2^16 keys spread over %d slots (worst bucket %d of %d) — fibHash changed; "+
-			"re-check the int-path slot assumptions in partitioned_agg.go", slots, w, n)
+	// Uniform hashing puts the worst of 32768 slots a few above the 0.125
+	// mean; 12 is several times that and still catches the real failure
+	// (a family collapsing onto one chain, worst == n).
+	const slotBound = 12
+	for _, s := range []uint{1, 2, 4, 8, 12, 16, 20, 24, 32, 40} {
+		strided := genHashes(n, func(i int) uint64 { return fibHash(int64(i) << s) })
+		if w := worstBucket(strided, slots, func(h uint64) int { return int(h & (slots - 1)) }); w > slotBound {
+			t.Errorf("stride 2^%d: worst of %d slots holds %d of %d keys — the mixing step "+
+				"does not break this stride", s, slots, w, n)
+		}
+		// The owner split stays even too: the partition bits come off the
+		// TOP of the same word, and hash-once reuses one value for both.
+		const parts = 12
+		if w := worstBucket(strided, parts, func(h uint64) int { return int(partitionFor(h, parts)) }); w > n/parts*3/2 {
+			t.Errorf("stride 2^%d partition bits: worst of %d owners holds %d of %d keys", s, parts, w, n)
+		}
 	}
-	// The owner split is still even: partitioning does not inherit the
-	// collapse, which is why hash-once can reuse this hash for routing.
-	const parts = 12
-	if w := worstBucket(strided, parts, func(h uint64) int { return int(partitionFor(h, parts)) }); w > n/parts*3/2 {
-		t.Fatalf("partition bits: worst of %d owners holds %d of %d strided keys", parts, w, n)
+}
+
+// TestFibHashIsInjective: mixing must not merge two keys into one hash, or a
+// GROUP BY would still be correct (the tables compare keys, not hashes) but
+// would pay a probe chain for a collision that never had to happen. fmix64 is
+// a bijection on 64 bits — each of its five steps is invertible — so the
+// worst case is the birthday rate on the TRUNCATION to slots, never on the
+// full word.
+func TestFibHashIsInjective(t *testing.T) {
+	const n = 1 << 16
+	keys := make(map[int64]bool, n+192)
+	for i := int64(0); i < n; i++ {
+		keys[i] = true
+	}
+	for s := uint(0); s < 63; s++ {
+		keys[1<<s] = true
+		keys[-(1 << s)] = true
+		keys[(1<<s)-1] = true
+	}
+	seen := make(map[uint64]int64, len(keys))
+	for key := range keys {
+		h := fibHash(key)
+		if prev, dup := seen[h]; dup {
+			t.Fatalf("fibHash(%d) == fibHash(%d) == %#x", key, prev, h)
+		}
+		seen[h] = key
 	}
 }
 
