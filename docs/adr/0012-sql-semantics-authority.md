@@ -54,12 +54,32 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    oracle invocation loses that setting, because otherwise deleting one line
    silently changes what "ground truth" means.
 
-5. **One deliberate divergence from PostgreSQL: collation.** Wadjet compares
-   and sorts strings with BINARY collation, not PostgreSQL's locale-dependent
-   collation. Locale-sensitive comparison costs real work on every string
-   compare and sort, surprises analysts more than it helps, and no BI client
-   depends on it. Where the oracle needs to agree, use a `C`-collation
-   database rather than exempting string ordering.
+5. **Deliberate divergences from PostgreSQL.** (Amended 2026-08-23: collation
+   was not the only one — the other three below were never PostgreSQL's call
+   to begin with, and are recorded here so a future gate does not mistake
+   them for undecided.)
+
+   - **Collation.** Wadjet compares and sorts strings with BINARY collation,
+     not PostgreSQL's locale-dependent collation. Locale-sensitive comparison
+     costs real work on every string compare and sort, surprises analysts
+     more than it helps, and no BI client depends on it. Where the oracle
+     needs to agree, use a `C`-collation database rather than exempting
+     string ordering.
+   - **MIN/MAX over BOOL.** PostgreSQL has no `min(boolean)`/`max(boolean)`
+     aggregate (verified against live PostgreSQL: it errors, "function
+     min(boolean) does not exist") — `bool_and`/`bool_or` are its idiom for
+     the same question. Wadjet supports MIN/MAX over BOOL as a deliberate
+     extension, not a divergence PostgreSQL took a position on; `bool_and`/
+     `bool_or` remain available and are still the PostgreSQL-idiomatic
+     spelling.
+   - **MAP and VECTOR ordering.** Both are wadjet-only types — PostgreSQL has
+     neither — so their total orders (`internal/engine/exec/kernel/
+     container_sort.go`) are wadjet-defined, not a choice against a
+     PostgreSQL answer.
+   - **MIN(bytes) declares BYTEA, not STRING.** The output type follows the
+     input type, matching PostgreSQL's own `min(bytea)`; no divergence, noted
+     here only because early declared-schema code guessed STRING for every
+     MIN/MAX before the input-typed fix.
 
 6. **Semantics decisions are technical, not product.** They are made and
    executed, then reported — not escalated. An existing project commitment
