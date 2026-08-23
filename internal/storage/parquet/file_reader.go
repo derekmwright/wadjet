@@ -633,25 +633,19 @@ func readerSchema(root *SchemaNode, leaves []*SchemaNode, kv []KeyValue) Schema 
 // attacker-controlled input like any other part of the file.
 const maxDeclaredSchemaBytes = 1 << 20
 
-// declaredOverlayTypes is the ONLY set of types the overlay will install, and
-// it is exactly the set parquet's own schema cannot express: the eight for
-// which buildLeafSchemaElement writes no LogicalType and no ConvertedType,
-// because there is no annotation to write. That set is the entire reason the
-// blob exists (#396), so it is the entire reach the blob gets.
+// declaredOverlayTypes is the set of types the overlay will install on an
+// UNANNOTATED leaf, and it is exactly the set parquet's own schema cannot
+// express: the eight for which buildLeafSchemaElement writes no LogicalType
+// and no ConvertedType, because there is no annotation to write. That set is
+// the reason the blob exists (#396), so it is the reach the blob gets.
 //
 // Everything else is annotated in the file itself and the FILE wins: DECIMAL
 // carries its own precision and scale, TIMESTAMP/DATE/INT32/INT64 their
-// logical type, STRING and CIDR the UTF8 annotation, VECTOR the wadjet
-// LogicalVector extension with its dimension. An annotated leaf is immune to
-// the blob, so a stale or hostile blob cannot relabel DECIMAL(18,4) as
-// DECIMAL(12,1) (every value 1000× off), retype a TIMESTAMP as IPv4, or hand
-// the batch allocator a fabricated VECTOR dimension.
-//
-// The cost is that CIDR — stored as UTF-8 text and annotated LogicalString by
-// the writer — reads back as STRING rather than CIDR. The STORED BYTES are
-// the same text either way and every consumer renders the same characters, so
-// this is a type-name difference on a value-identical column, which is the
-// price of making the annotated-leaf rule absolute.
+// logical type, STRING the UTF8 annotation, VECTOR the wadjet LogicalVector
+// extension with its dimension. An annotated leaf is immune to the blob, so a
+// stale or hostile blob cannot relabel DECIMAL(18,4) as DECIMAL(12,1) (every
+// value 1000× off), retype a TIMESTAMP as IPv4, or hand the batch allocator a
+// fabricated VECTOR dimension.
 var declaredOverlayTypes = map[TypeID]bool{
 	TypeIPv4:     true,
 	TypeIPv6:     true,
@@ -661,6 +655,47 @@ var declaredOverlayTypes = map[TypeID]bool{
 	TypePort:     true,
 	TypeProtocol: true,
 	TypeDuration: true,
+}
+
+// declaredOverlayUTF8Types is the one exception to "an annotated leaf is
+// immune", and it holds exactly one type.
+//
+// CIDR has no parquet annotation of its own either, so buildLeafSchemaElement
+// writes it as UTF8 STRING — the annotation describes the STORAGE truthfully
+// and loses only the name. Restoring the name over a UTF8 leaf changes
+// nothing about how the page is decoded (BYTE_ARRAY either way) and nothing
+// about how a value renders (Vector.GetValue returns the same text for both
+// STRING and CIDR), which is what makes this safe where STRING→IPv6 is not:
+// IPv6's storage contract is exactly 16 bytes and GetValue renders anything
+// else as "".
+//
+// It is not cosmetic. The engine dispatches on the TYPE, and CIDR and STRING
+// do not behave identically everywhere: with CIDR reverting to STRING, the
+// stage DAG and the single-process engine started answering
+// `SELECT MIN(c_cidr), MAX(c_cidr)` differently — the DAG correctly, the
+// single-process arm with NULLs — because one saw a STRING column and the
+// other the catalog's CIDR (TestTypeMatrixTwoPath/minmax_c_cidr; the
+// single-process NULL is a separate defect, and #392's MIN_BY switch is
+// another). Restoring the declared name is what keeps the two paths reading
+// the same column as the same type.
+var declaredOverlayUTF8Types = map[TypeID]bool{
+	TypeCIDR: true,
+}
+
+// leafIsUTF8String reports whether a leaf is annotated as parquet UTF8 text
+// and stored as BYTE_ARRAY — the annotation buildLeafSchemaElement writes for
+// both STRING and CIDR.
+func leafIsUTF8String(n *SchemaNode) bool {
+	if n.Type == nil || *n.Type != PhysicalByteArray {
+		return false
+	}
+	if n.LogicalType != nil && n.LogicalType.Type == LogicalString {
+		return n.ConvertedType == nil || *n.ConvertedType == ConvertedUTF8
+	}
+	if n.LogicalType == nil && n.ConvertedType != nil && *n.ConvertedType == ConvertedUTF8 {
+		return true
+	}
+	return false
 }
 
 // overlayDeclaredSchema restores the declared TYPE IDENTITY of each leaf
@@ -683,9 +718,11 @@ var declaredOverlayTypes = map[TypeID]bool{
 //     in the same order;
 //  3. the leaf carries NO LogicalType and NO ConvertedType — the file itself
 //     said nothing about what the column means, which is the only situation
-//     the blob is here to fix;
-//  4. the declared type is one of declaredOverlayTypes, the eight types
-//     parquet cannot annotate;
+//     the blob is here to fix — or it is annotated UTF8 text, the single
+//     exception below;
+//  4. the declared type is one of declaredOverlayTypes (the eight types
+//     parquet cannot annotate) on an unannotated leaf, or CIDR on a UTF8 one
+//     (declaredOverlayUTF8Types: same storage, same rendering, name only);
 //  5. the physical parquet type of that declared type is the physical type
 //     the leaf ACTUALLY has in the file.
 //
@@ -729,9 +766,13 @@ func overlayDeclaredSchema(inferred Schema, nodes []*SchemaNode, kv []KeyValue) 
 			continue
 		}
 		if n.LogicalType != nil || n.ConvertedType != nil {
-			continue // the file annotated this leaf; the file wins
-		}
-		if !declaredOverlayTypes[dc.Type] {
+			// The file annotated this leaf, so the file wins — with one
+			// exception: a UTF8 STRING leaf may carry back the name CIDR,
+			// whose storage and rendering are that same text.
+			if !(leafIsUTF8String(n) && declaredOverlayUTF8Types[dc.Type]) {
+				continue
+			}
+		} else if !declaredOverlayTypes[dc.Type] {
 			continue
 		}
 		if wadjetTypeToPhysical(dc.Type) != *n.Type {

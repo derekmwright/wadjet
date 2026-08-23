@@ -83,17 +83,8 @@ func TestDeclaredSchemaRoundTrip(t *testing.T) {
 		if g.Name != want.Name {
 			t.Fatalf("column %d: name %q, want %q", i, g.Name, want.Name)
 		}
-		wantType := want.Type
-		if wantType == TypeCIDR {
-			// CIDR is the one declared type the overlay deliberately does
-			// NOT restore: the writer annotates it LogicalString, and an
-			// annotated leaf is immune to the blob (declaredOverlayTypes).
-			// The stored bytes are the same UTF-8 text either way, so the
-			// column reads back value-identical under the name STRING.
-			wantType = TypeString
-		}
-		if g.Type != wantType {
-			t.Errorf("column %q: read back as %s, want %s", want.Name, g.Type, wantType)
+		if g.Type != want.Type {
+			t.Errorf("column %q: read back as %s, want %s", want.Name, g.Type, want.Type)
 		}
 		if want.Type == TypeDecimal && (g.Precision != want.Precision || g.Scale != want.Scale) {
 			t.Errorf("column %q: precision/scale %d/%d, want %d/%d",
@@ -162,6 +153,7 @@ func overlayFixture() Schema {
 			{Name: "c_str", Type: TypeString, Nullable: true},
 			{Name: "c_ipv4", Type: TypeIPv4},
 			{Name: "c_vec", Type: TypeVector, Dimension: 4},
+			{Name: "c_cidr", Type: TypeCIDR, Nullable: true},
 		},
 	}
 }
@@ -224,10 +216,18 @@ func TestOverlayDeclaredSchemaAdversarialBlobs(t *testing.T) {
 		{typ: TypeString},
 		{typ: TypeInt64}, // c_ipv4 has no annotation: this is the #396 loss
 		{typ: TypeVector, dim: 4},
+		{typ: TypeString}, // c_cidr is annotated UTF8, like every STRING
 	}
-	// What the HONEST blob is allowed to change: c_ipv4, and nothing else.
+	// What the HONEST blob is allowed to change: the unannotated INT64 leaf,
+	// and the NAME of the UTF8 leaf the writer stamped for a CIDR column.
 	honestState := append([]colState(nil), inferredState...)
 	honestState[3] = colState{typ: TypeIPv4}
+	honestState[5] = colState{typ: TypeCIDR}
+	// A blob that lines up with the file but lies about ONE column loses that
+	// column only: the other honest restorations still happen. Used by the
+	// per-column refusal cases below, all of which mutate c_ipv4.
+	perColumnRefusal := append([]colState(nil), honestState...)
+	perColumnRefusal[3] = colState{typ: TypeInt64}
 
 	mutate := func(f func(s *Schema)) []KeyValue {
 		s := cloneColumns(overlayFixture())
@@ -268,6 +268,36 @@ func TestOverlayDeclaredSchemaAdversarialBlobs(t *testing.T) {
 			want: honestState,
 		},
 		{
+			name: "an annotated STRING cannot be retyped as UUID",
+			kv:   mutate(func(s *Schema) { s.Columns[2].Type = TypeUUID }),
+			want: honestState,
+		},
+		{
+			name: "an annotated STRING cannot be retyped as BYTES",
+			kv:   mutate(func(s *Schema) { s.Columns[2].Type = TypeBytes }),
+			want: honestState,
+		},
+		{
+			name: "an annotated STRING CAN carry back the name CIDR",
+			// The one relabel a UTF8 leaf accepts, and the reason the
+			// exception exists at all: same BYTE_ARRAY storage, same text
+			// out of Vector.GetValue. A blob that calls a plain STRING
+			// column CIDR therefore changes the type NAME and nothing a
+			// value passes through — which is why it is allowed where
+			// STRING to IPv6 (a 16-byte contract) is not.
+			kv: mutate(func(s *Schema) { s.Columns[2].Type = TypeCIDR }),
+			want: func() []colState {
+				w := append([]colState(nil), honestState...)
+				w[2] = colState{typ: TypeCIDR}
+				return w
+			}(),
+		},
+		{
+			name: "an annotated TIMESTAMP cannot be relabelled CIDR either",
+			kv:   mutate(func(s *Schema) { s.Columns[1].Type = TypeCIDR }),
+			want: honestState,
+		},
+		{
 			name: "an annotated VECTOR cannot be given a fabricated dimension",
 			kv:   mutate(func(s *Schema) { s.Columns[4].Dimension = 1 << 30 }),
 			want: honestState,
@@ -290,23 +320,23 @@ func TestOverlayDeclaredSchemaAdversarialBlobs(t *testing.T) {
 				s.Columns[3].Type = TypeDecimal
 				s.Columns[3].Precision, s.Columns[3].Scale = 12, 1
 			}),
-			want: inferredState,
+			want: perColumnRefusal,
 		},
 		{
 			name: "a negative type id is refused",
 			kv:   mutate(func(s *Schema) { s.Columns[3].Type = TypeID(-3) }),
-			want: inferredState,
+			want: perColumnRefusal,
 		},
 		{
 			name: "a type id past the last type is refused",
 			kv:   mutate(func(s *Schema) { s.Columns[3].Type = TypeID(9999) }),
-			want: inferredState,
+			want: perColumnRefusal,
 		},
 		{
 			name: "a declared type stored differently is refused",
 			// IPv6 is BYTE_ARRAY; the c_ipv4 leaf is INT64.
 			kv:   mutate(func(s *Schema) { s.Columns[3].Type = TypeIPv6 }),
-			want: inferredState,
+			want: perColumnRefusal,
 		},
 		{
 			name: "reordered names void the whole blob",
@@ -433,6 +463,11 @@ func TestOverlayRestoresTheEightInexpressibleTypes(t *testing.T) {
 				"a type was added to or removed from the overlay's reach without updating the gate",
 				len(declaredOverlayTypes), len(want))
 		}
+		// CIDR is the ninth restorable type and rides the UTF8 exception,
+		// not this map; if that ever changes the gate should say so.
+		if len(declaredOverlayUTF8Types) != 1 || !declaredOverlayUTF8Types[TypeCIDR] {
+			t.Fatalf("declaredOverlayUTF8Types is %v, want exactly {CIDR}", declaredOverlayUTF8Types)
+		}
 		if !declaredOverlayTypes[w.typ] {
 			t.Errorf("%s is not in declaredOverlayTypes", w.typ)
 		}
@@ -487,11 +522,17 @@ func FuzzOverlayDeclaredSchema(f *testing.F) {
 			if g.Type == in.Type {
 				continue
 			}
-			if !declaredOverlayTypes[g.Type] {
-				t.Fatalf("column %q: type became %s, which the overlay may never install", g.Name, g.Type)
-			}
-			if n.LogicalType != nil || n.ConvertedType != nil {
+			annotated := n.LogicalType != nil || n.ConvertedType != nil
+			switch {
+			case !annotated && declaredOverlayTypes[g.Type]:
+				// The eight types parquet cannot annotate, on a leaf the
+				// file said nothing about.
+			case annotated && leafIsUTF8String(n) && declaredOverlayUTF8Types[g.Type]:
+				// The single exception: CIDR over UTF8 text.
+			case annotated:
 				t.Fatalf("column %q: an ANNOTATED leaf was retyped to %s", g.Name, g.Type)
+			default:
+				t.Fatalf("column %q: type became %s, which the overlay may never install", g.Name, g.Type)
 			}
 			if wadjetTypeToPhysical(g.Type) != *n.Type {
 				t.Fatalf("column %q: type %s does not match the leaf's physical type", g.Name, g.Type)

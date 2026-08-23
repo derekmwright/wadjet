@@ -90,19 +90,40 @@ those commits' scope.
 
 | Finding | Change |
 |---|---|
-| #396's overlay trusted the blob too far | `overlayDeclaredSchema` gated only on `wadjetTypeToPhysical`, so a footer blob could override types the FILE ANNOTATES CORRECTLY — DECIMAL(18,4) relabelled (12,1) is every value 1000× off, TIMESTAMP→IPv4, STRING→IPv6 renders `""` — and an unknown TypeID passed because that function's default returns BYTE_ARRAY, and `Dimension` was copied unvalidated into what the batch allocator sizes from. The overlay now applies ONLY to a leaf with no LogicalType and no ConvertedType, ONLY for the eight types parquet cannot annotate, and copies type identity ONLY. Permanent `FuzzOverlayDeclaredSchema` plus a 21-case adversarial table |
+| #396's overlay trusted the blob too far | `overlayDeclaredSchema` gated only on `wadjetTypeToPhysical`, so a footer blob could override types the FILE ANNOTATES CORRECTLY — DECIMAL(18,4) relabelled (12,1) is every value 1000× off, TIMESTAMP→IPv4, STRING→IPv6 renders `""` — and an unknown TypeID passed because that function's default returns BYTE_ARRAY, and `Dimension` was copied unvalidated into what the batch allocator sizes from. The overlay now applies ONLY to a leaf with no LogicalType and no ConvertedType (plus one documented exception, below), ONLY for the eight types parquet cannot annotate, and copies type identity ONLY. Permanent `FuzzOverlayDeclaredSchema` plus a 25-case adversarial table |
 | #394's comparator was exact only below 2^53 | `CompareDecimalAt` rescaled through float64 at unequal scales, and `SortMergeJoin` uses that comparator for key EQUALITY — so it was a spurious JOIN MATCH, not a sort-order nicety. Now exact at every scale (`Int128.MulPow10` with overflow detection, big.Int beyond it). The suite had no sort-merge join over a DECIMAL key at all; it has one now, at equal and unequal scale |
 | the IPv6 write stub | `ipv6StringToBytes` stored the literal's TEXT — 11 bytes where the contract is 16 — which #396 made visible: the column now reads back as IPV6 and `GetValue` renders any other length as `""` |
 | a result's schema was read off its batches | `SQLResult.OutputSchema()` fell back to the first batch, and `Stream()` detaches the batches; the correlated-local route never set `Schema` at all. Both sites now record it at construction |
 
-One behaviour change worth stating plainly: **CIDR now reads back from a
-parquet file as STRING, not CIDR.** The writer annotates it `LogicalString`,
-and the hardened overlay makes an annotated leaf immune to the blob. The
-stored bytes are the same UTF-8 text either way and every consumer renders the
-same characters, so this is a type-name difference on a value-identical
-column — the price of the annotated-leaf rule being absolute rather than
-case-by-case. The eight types #396 was actually about (IPv4, IPv6, MAC, UUID,
-Bytes, Port, Protocol, Duration) are unaffected.
+**The one exception to "an annotated leaf is immune", and how the gate found
+it.** CIDR has no parquet annotation of its own either, so the writer stamps
+it as UTF8 STRING — an annotation that describes the STORAGE truthfully and
+loses only the name. The first cut of the hardened rule therefore let CIDR
+revert to STRING, on the reasoning that the bytes and the rendering are
+identical and only the type NAME differs.
+
+`TestTypeMatrixTwoPath` refuted that in one run. The engine dispatches on the
+TYPE, and CIDR and STRING do not behave identically everywhere:
+
+- `minmax_c_cidr` — `SELECT MIN(c_cidr), MAX(c_cidr) FROM typemx` — DIVERGED,
+  with the DAG (seeing STRING) answering correctly and the single-process arm
+  (seeing the catalog's CIDR) answering NULL for both. The single-process NULL
+  is a pre-existing defect this exposed rather than caused, but the two paths
+  disagreeing is exactly what #396 was about.
+- `minby_scalar_c_cidr` — the DAG started ANSWERING a query the single-process
+  arm refuses, re-opening the #392 asymmetry that #396 had just closed.
+
+So the exception is narrow and explicit: a leaf annotated UTF8 STRING may
+carry back the name CIDR, and nothing else (`declaredOverlayUTF8Types`, one
+entry). Storage and rendering are unchanged by that relabel, which is what
+makes it safe where STRING→IPv6 is not — IPv6's contract is exactly 16 bytes
+and `GetValue` renders anything else as `""`. The adversarial table pins
+STRING→UUID and STRING→BYTES as still refused over the same leaf, and
+TIMESTAMP→CIDR as refused over a different one.
+
+The lesson worth keeping: "the storage is identical" was not sufficient
+grounds to drop a type name. The behaviour that matters attaches to the NAME,
+and only a gate that runs both engines over the same column could say so.
 
 Two issues filed rather than fixed in those commits:
 
