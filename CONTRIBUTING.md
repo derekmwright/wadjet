@@ -116,7 +116,15 @@ Checklist for every release:
 3. **Release notes** summarize the arc since the previous tag: headline
    perf/feature work first, then correctness fixes, with benchmark
    deltas stated as before → after.
-4. Tag with `git tag -s` or an annotated tag from the release commit and
+4. **Note any change to the exchange contract in the release notes.** The
+   shuffle wire format and the partition ASSIGNMENT that goes with it
+   (`hashRowsIntoPartitions`, the partition count derivation, the WSHF field
+   order) must be identical across every process in a cluster: a stage whose
+   tasks run a mix of binaries across such a change does not fail, it routes
+   rows to partitions nobody reads and answers short. A release that touches
+   any of them says so, and says that the upgrade is WHOLESALE — coordinator
+   and all workers together, never rolling. See ADR-0010's consequences.
+5. Tag with `git tag -s` or an annotated tag from the release commit and
    create the GitHub release from it.
 
 ## Reporting Issues

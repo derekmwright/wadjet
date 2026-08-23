@@ -37,6 +37,20 @@ consumer can sniff and decode, including mid-stream.
 - s2 was measured wall-neutral for background encode
   (`docs/design/s2-shuffle-encode.md` refutation memo, 2026-07-19) —
   the win case is wire bytes, never encode overlap.
+- **The partition ASSIGNMENT is part of the exchange contract, not just the
+  byte layout.** Every producer of a repartition stage must map a key to the
+  same partition number, because the consumer of partition *p* reads only the
+  files named *p* and assumes every row with such a key is in them. A binary
+  that hashes a key differently from its peers does not fail: it writes the
+  row to a partition nobody looks in for it, and the join or aggregate comes
+  back short. `hashRowsIntoPartitions`
+  (`internal/worker/partitioned_shuffle_sink.go`) is that function, and it
+  changed in the #397 wave — BOOL, DECIMAL and VECTOR keys hash their bytes
+  where they previously mixed a constant `0x00`. **So a cluster's coordinator
+  and workers are deployed WHOLESALE, never rolling**: a stage whose tasks run
+  a mix of binaries across a change to this function answers wrong, silently.
+  The same rule covers any future change to the hash, the partition count
+  derivation, or the WSHF field order.
 
 References: `docs/design/peer-wire-compression.md`,
 `docs/design/exchange-streaming-consumption.md`.
