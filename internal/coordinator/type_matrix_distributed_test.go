@@ -36,9 +36,11 @@ import (
 
 // tmdPins is empty: #392 (MIN_BY/MAX_BY's declared output type), #394
 // (DECIMAL ordering), #396 (network and UUID columns in raw storage form,
-// 37+ entries) and #407 (VECTOR reading NULL on the single-process engine)
-// are all fixed, so nothing here diverges by VALUE anymore. tmdRawFormReason
-// and tmdMinByTypeReason go with them — nothing references either string now.
+// 37+ entries), #407 (VECTOR reading NULL on the single-process engine) and
+// #425 (a NULL ROW arriving from the DAG as a present ROW with all-NULL
+// fields) are all fixed, so nothing here diverges by VALUE anymore.
+// tmdRawFormReason and tmdMinByTypeReason go with them — nothing references
+// either string now.
 //
 // #407 is the one to read carefully, because this gate never saw its live
 // half. project_c_vec agreed as soon as the container codec that closed #397
@@ -50,23 +52,18 @@ import (
 // (one set of leaf decode arms, parquet.decodePresentValues) and gated in the
 // parquet package's own suite (TestVectorAndDecimalBelowAContainer).
 //
-// One entry is pinned again, for #425. Its subject is NOT the window: a NULL
-// ROW comes back from the DAG as a PRESENT row with all-NULL fields, and
+// #425's entry was window_c_row, and its subject was NOT the window: a NULL
+// ROW came back from the DAG as a PRESENT row with all-NULL fields, and
 // `SELECT id, c_row FROM typemx_nested WHERE id > 100 AND id < 110 ORDER BY
-// id` reproduces it with no window function at all (id=106 is the fixture's
-// NULL c_row: single answers <nil>, the DAG answers map[a:<nil> b:<nil>]).
-// The entry started diverging when #406 landed — until then FIRST_VALUE and
+// id` reproduced it with no window function at all (id=106 is the fixture's
+// NULL c_row: single answered <nil>, the DAG answered map[a:<nil> b:<nil>]).
+// It started diverging when #406 landed — until then FIRST_VALUE and
 // LAST_VALUE over a container answered NULL on BOTH arms, so the two agreed
 // on a wrong answer and nothing about the underlying value ever reached the
-// comparison. The corpus has no entry that catches the plain projection form
-// (project_c_row's filter selects no NULL c_row row); adding one belongs with
-// the fix.
-var tmdPins = map[string]typematrix.Pin{
-	"window_c_row": {Issue: "#425", Reason: "a NULL ROW arrives from the DAG as a present ROW with " +
-		"all-NULL fields, so LAST_VALUE at the fixture's NULL row answers map[a:<nil> b:<nil>] " +
-		"where the single-process engine answers <nil>. Not window-specific: a plain projection " +
-		"of c_row over the same rows diverges the same way."},
-}
+// comparison. The fix is the columnar reader carrying a ROW's own null bit
+// out of its leaves' definition levels (readRowGroupNative's rowPresence),
+// which the DAG's stream source reaches on any schema carrying a bare ROW.
+var tmdPins = map[string]typematrix.Pin{}
 
 // tmdUnsupported is empty: #397 (ARRAY/ROW/MAP/VECTOR had no arm in the WSHF
 // shuffle/gather encoder, worker/shuffle_format.go:415) and #410 (the
