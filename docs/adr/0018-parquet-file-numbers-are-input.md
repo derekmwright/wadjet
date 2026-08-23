@@ -146,6 +146,50 @@ reader called an error and the other called a value.
   columnar read paths, because "the paths agree" is only a property if the
   paths are all exercised.
 
+## Compatibility note, 2026-08-23: files this writer produced before #409
+
+The rules above are about believing the FILE. One class of file wadjet wrote
+itself is now on the wrong side of them.
+
+Before #409, `decomposeArray` and `decomposeMap` derived a continuing entry's
+repetition level as `repLevel+1`, conflating the level to STAMP with the
+container's own DEPTH. Those differ whenever the inner container sits in the
+FIRST entry of an outer repeated group — the level to stamp is then the
+OUTER one, because that is where the repetition last happened. So for a
+multi-entry LIST or MAP nested inside another LIST or MAP, every element
+after the first was written one level too low, and the same arithmetic
+mis-levelled an empty inner container. On disk:
+
+    {"k": [1, 2]}   reads back as    {"k": [1]}, with an entry left over
+    [[1, 2]]        reads back as    [[1], [2]]
+
+**These files are unrecoverable.** The repetition level is the only record of
+where one container ended and the next began; once two elements of an inner
+list carry the outer list's level, nothing in the file distinguishes them
+from two entries of the outer one. There is no rewrite that recovers the
+grouping, and a reader that "corrects" them would have to guess. Tables
+holding such columns must be RE-INGESTED from their source. This is #427.
+
+What the reader does with them now: it returns what PyArrow returns —
+`{"k": [1]}`, `[[1], [2]]` — because that is what the levels say, and a
+second reader disagreeing with the Apache implementation about the same
+bytes is the failure §3 exists to prevent. Where the mistake desynchronised
+SIBLING leaves (a map's key against its value, a struct's fields against
+each other) the read is REFUSED instead, by the assembler's drained-cursor
+check: entries left unread after the row group's records mean the levels and
+the row count describe different data. That check sees a subset — it cannot
+see a shape whose leaves all happen to drain — so the boundary is: a
+pre-#409 file with a container inside a container is suspect whether or not
+it is refused.
+
+Only wadjet's own writer produced them. Files written by PyArrow or
+parquet-go were never affected, and neither was any shape one container
+deep. The blast radius is bounded on the read side too: the same release
+that fixed the writer is the first one whose reader could read these shapes
+at all — before it, a MAP of ARRAY read back absent and an ARRAY of MAP read
+back as its keys (#409) — and PyArrow refused such a file outright. So no
+correct value was ever recovered from one of these columns by anything.
+
 ## Alternatives considered
 
 - **Keep clamping an overstated chunk.** Rejected on evidence: no writer
