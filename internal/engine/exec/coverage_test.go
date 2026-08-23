@@ -1101,7 +1101,12 @@ func TestAppendKeyValue(t *testing.T) {
 		{"hello", "hello"},
 		{true, "true"},
 		{false, "false"},
-		{struct{}{}, "<unknown>"},
+		// The fallback renders the value instead of a constant: the constant
+		// "<unknown>" made every BYTES group key equal after a partial drain.
+		{struct{}{}, "{}"},
+		{[]byte("raw"), "raw"},
+		{[]any{"a", "b"}, "[a b]"},
+		{[]float32{1, 2}, "[1 2]"},
 	}
 	for _, tt := range tests {
 		buf := appendKeyValue(nil, tt.input)

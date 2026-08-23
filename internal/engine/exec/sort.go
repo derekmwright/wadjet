@@ -989,6 +989,19 @@ func (h *topNHeap) Pop() any {
 }
 
 // appendKeyValue writes a value to a byte buffer without fmt.Sprint overhead.
+//
+// This is the k-way MERGE key for drained partial aggregate runs
+// (appendSerializedKey, aggregate_partial_drain_cursor.go), so a type that
+// falls through here does not merely sort oddly — every group of that type
+// merges into ONE. The default used to be the constant string "<unknown>",
+// which did exactly that to a BYTES group key: distinct in memory, collapsed
+// into a single group the moment memory pressure forced a drain, so the same
+// query answered differently depending on how much memory it had.
+//
+// Boxed forms reaching here come from Vector.GetValue: bool, int32, int64,
+// float32, float64, string (STRING and every type that renders as text —
+// IPV6, CIDR, UUID, IPV4, MAC, DATE, DECIMAL), []byte (BYTES), []any (ARRAY),
+// map[string]any (ROW, MAP) and []float32 (VECTOR).
 func appendKeyValue(buf []byte, v any) []byte {
 	if v == nil {
 		return append(buf, "<null>"...)
@@ -1004,9 +1017,15 @@ func appendKeyValue(buf []byte, v any) []byte {
 		return strconv.AppendFloat(buf, float64(tv), 'g', -1, 32)
 	case string:
 		return append(buf, tv...)
+	case []byte:
+		// BYTES: the raw bytes, exactly as the string case writes a string's.
+		return append(buf, tv...)
 	case bool:
 		return strconv.AppendBool(buf, tv)
 	default:
-		return append(buf, "<unknown>"...)
+		// The containers. %v is deterministic for every one of them — fmt
+		// prints map keys in SORTED order, so a ROW or MAP renders the same
+		// way on every run, which a range over the map would not.
+		return fmt.Appendf(buf, "%v", tv)
 	}
 }
