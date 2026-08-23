@@ -23,24 +23,24 @@ import (
 // at the schema level too: HashAggregate.OutputSchema derives MIN_BY/MAX_BY's
 // output type from the value's own observed type (aggregate.go, the
 // AggMinBy/AggMaxBy case), so a wrong declaration for that function can no
-// longer reach SetValue. MIN/MAX get the same correction, but only for the
-// types minMaxOutputType names (String/Bytes/Date/Timestamp/IPv4/Int64/
-// Int32/Float64/Float32) — DURATION is deliberately outside that list (its
-// accumulator finalizes the same as INT64, and nothing has ever needed to
-// widen it), so a wrong declaration for MIN/MAX(duration_col) is still
-// trusted verbatim. Declaring it as something SetValue does not accept a raw
-// int64 into (IPv6, whose arm accepts only string/[]byte) still hits the
-// #361 guard on the parallel-emit goroutine, so it still stands in for "some
-// future declaration bug reaches this write" — which is what this test is
-// actually about, independent of which specific bug last supplied the
-// reproduction.
+// longer reach SetValue. MIN/MAX get the same correction for every type
+// minMaxOutputType answers ok for — since #417 that is all eighteen flat
+// types — so the stand-in has to be a type it still DECLINES. DECIMAL is
+// one: its accumulator finalizes MinDec through ToFloat64, so the output is
+// already a float64 and the planner's declaration is left standing.
+// Declaring it as something SetValue does not accept a float64 into (IPv6,
+// whose arm takes only string/[]byte) still hits the #361 guard on the
+// parallel-emit goroutine, so it stands in for "some future declaration bug
+// reaches this write" — which is what this test is actually about,
+// independent of which specific bug last supplied the reproduction. It was
+// DURATION until #417 put DURATION on the corrected list.
 //
 // Before the fix this test does not fail — it takes the test binary down.
 func TestParallelEmitPanicBecomesQueryError(t *testing.T) {
 	ctx := context.Background()
 	schema := []parquet.Column{
 		{Name: "k", Type: parquet.TypeInt64, Nullable: true},
-		{Name: "s", Type: parquet.TypeDuration, Nullable: true},
+		{Name: "s", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true},
 	}
 	aggs := []AggColumn{
 		{Func: AggMin, InputCol: "s", OutputCol: "mb", OutputType: parquet.TypeIPv6},

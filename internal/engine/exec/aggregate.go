@@ -1474,9 +1474,16 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 		case AggMin, AggMax:
 			if idx := h.aggColIdx[i]; idx >= 0 {
 				switch b.Columns[idx].Type {
-				case batch.TypeString, batch.TypeBytes:
-					// The flat SoA arrays have no string min/max storage;
-					// route through the generic kernel.Accumulator path.
+				case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR,
+					batch.TypeUUID, batch.TypeBool:
+					// The flat SoA arrays have no byte-backed or bool
+					// min/max storage; route through the generic
+					// kernel.Accumulator path. The list must stay in step
+					// with the byte-backed arms of kernel.ResolveRowMin: a
+					// type with a working updater that is NOT named here
+					// stays on the SoA path, whose scatter has no arm for
+					// it, and answers NULL again — which is #417 reached by
+					// its other door.
 					allSimpleAggs = false
 				}
 			}
@@ -4720,7 +4727,7 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 			// Consume so MIN(url) emits a string and MIN(date) stays a date
 			// instead of surfacing raw epoch days.
 			if resolved {
-				if t := minMaxOutputType(h.aggInputTypes[i]); t != 0 {
+				if t, ok := minMaxOutputType(h.aggInputTypes[i]); ok {
 					out.Type = t
 				}
 			}
@@ -4735,26 +4742,66 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 }
 
 // minMaxOutputType maps a MIN/MAX input column type to its output type.
-// Returns 0 (keep the planner-declared type) for unresolved or types whose
-// finalized value is already a float64 (Decimal finalizes via ToFloat64).
-func minMaxOutputType(in batch.TypeID) parquet.TypeID {
+// ok=false means "keep the planner-declared type" — for DECIMAL, whose
+// finalized value is already a float64 (via ToFloat64), and for a type with
+// no MIN/MAX kernel at all. It is a second return rather than a zero TypeID
+// because parquet.TypeBool IS zero, and a caller reading a real BOOL
+// declaration as "undeclared" is how #354 and #371 went wrong.
+//
+// MIN/MAX return a value taken from the input column, so the rule is "the
+// input's own type", the same rule #392 settled for MIN_BY/MAX_BY. The
+// switch used to name seven types and return 0 for the rest, which left the
+// planner's FLOAT64 declaration standing: `MIN(mac_col)` answered
+// 1.877e+14 instead of an address, `MIN(port_col)` answered a float, and
+// IPV6/CIDR/UUID/BOOL — whose kernels answered NULL anyway until #417 —
+// would have landed a string or a bool in a FLOAT64 vector and raised the
+// #361 guard on the parallel-emit goroutine.
+//
+// Kept at 0 deliberately:
+//
+//   - DECIMAL, because the accumulator finalizes MinDec through ToFloat64
+//     and a DECIMAL declaration would need the input's SCALE to re-parse it.
+//   - ARRAY/ROW/MAP/VECTOR, which have no MIN/MAX kernel at all: the
+//     resolvers return nil, the aggregate answers NULL, and declaring a
+//     container output would only give SetValue a NULL to write.
+//
+// physical.minMaxDeclaredType mirrors this function and must change with it.
+func minMaxOutputType(in batch.TypeID) (parquet.TypeID, bool) {
 	switch in {
-	case batch.TypeString, batch.TypeBytes:
-		return parquet.TypeString
+	case batch.TypeString:
+		return parquet.TypeString, true
+	case batch.TypeBytes:
+		return parquet.TypeBytes, true
 	case batch.TypeDate:
-		return parquet.TypeDate
+		return parquet.TypeDate, true
 	case batch.TypeTimestamp:
-		return parquet.TypeTimestamp
+		return parquet.TypeTimestamp, true
 	case batch.TypeIPv4:
-		return parquet.TypeIPv4
+		return parquet.TypeIPv4, true
+	case batch.TypeIPv6:
+		return parquet.TypeIPv6, true
+	case batch.TypeCIDR:
+		return parquet.TypeCIDR, true
+	case batch.TypeUUID:
+		return parquet.TypeUUID, true
+	case batch.TypeMAC:
+		return parquet.TypeMAC, true
+	case batch.TypePort:
+		return parquet.TypePort, true
+	case batch.TypeProtocol:
+		return parquet.TypeProtocol, true
+	case batch.TypeDuration:
+		return parquet.TypeDuration, true
+	case batch.TypeBool:
+		return parquet.TypeBool, true
 	case batch.TypeInt64:
-		return parquet.TypeInt64
+		return parquet.TypeInt64, true
 	case batch.TypeInt32:
-		return parquet.TypeInt64
+		return parquet.TypeInt64, true
 	case batch.TypeFloat64, batch.TypeFloat32:
-		return parquet.TypeFloat64
+		return parquet.TypeFloat64, true
 	}
-	return 0
+	return 0, false
 }
 
 // CloneSink returns a new HashAggregate with the same configuration but fresh state.
@@ -6336,6 +6383,12 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 			case batch.TypeDecimal:
 				fa.minDec = memory.Offheap[batch.Int128](reg, initCap)
 				fa.isDecimal = true
+				// The SUM/AVG arm above always set this; the min/max arms
+				// did not, and loadAccFromFlat finalizes MinDec through
+				// ToFloat64(DecScale) — so a scale-4 column would have
+				// answered 10000x too large the moment the scatter started
+				// writing anything at all.
+				fa.decScale = b.Columns[ci].DecimalData.Scale
 			default:
 				fa.minI64 = memory.Offheap[int64](reg, initCap)
 			}
@@ -6348,6 +6401,7 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 			case batch.TypeDecimal:
 				fa.maxDec = memory.Offheap[batch.Int128](reg, initCap)
 				fa.isDecimal = true
+				fa.decScale = b.Columns[ci].DecimalData.Scale
 			default:
 				fa.maxI64 = memory.Offheap[int64](reg, initCap)
 			}

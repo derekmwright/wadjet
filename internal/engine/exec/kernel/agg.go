@@ -357,8 +357,10 @@ func ResolveRowMin(typ batch.TypeID) RowAggUpdater {
 		return minRowFloat32
 	case batch.TypeDecimal:
 		return minRowDecimal
-	case batch.TypeString, batch.TypeBytes:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		return minRowString
+	case batch.TypeBool:
+		return minRowBool
 	default:
 		return nil
 	}
@@ -377,8 +379,10 @@ func ResolveRowMinNoNulls(typ batch.TypeID) RowAggUpdater {
 		return minRowFloat32NoNulls
 	case batch.TypeDecimal:
 		return minRowDecimal
-	case batch.TypeString, batch.TypeBytes:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		return minRowStringNoNulls
+	case batch.TypeBool:
+		return minRowBoolNoNulls
 	default:
 		return nil
 	}
@@ -397,8 +401,10 @@ func ResolveRowMax(typ batch.TypeID) RowAggUpdater {
 		return maxRowFloat32
 	case batch.TypeDecimal:
 		return maxRowDecimal
-	case batch.TypeString, batch.TypeBytes:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		return maxRowString
+	case batch.TypeBool:
+		return maxRowBool
 	default:
 		return nil
 	}
@@ -417,8 +423,10 @@ func ResolveRowMaxNoNulls(typ batch.TypeID) RowAggUpdater {
 		return maxRowFloat32NoNulls
 	case batch.TypeDecimal:
 		return maxRowDecimal
-	case batch.TypeString, batch.TypeBytes:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		return maxRowStringNoNulls
+	case batch.TypeBool:
+		return maxRowBoolNoNulls
 	default:
 		return nil
 	}
@@ -547,8 +555,10 @@ func ResolveBatchMin(typ batch.TypeID) BatchAggKernel {
 			acc.IsDecimal = true
 			acc.DecScale = vec.DecimalData.Scale
 		}
-	case batch.TypeString, batch.TypeBytes:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		return minBatchString
+	case batch.TypeBool:
+		return minBatchBool
 	default:
 		return nil
 	}
@@ -603,8 +613,10 @@ func ResolveBatchMax(typ batch.TypeID) BatchAggKernel {
 			acc.IsDecimal = true
 			acc.DecScale = vec.DecimalData.Scale
 		}
-	case batch.TypeString, batch.TypeBytes:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		return maxBatchString
+	case batch.TypeBool:
+		return maxBatchBool
 	default:
 		return nil
 	}

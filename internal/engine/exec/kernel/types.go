@@ -35,8 +35,16 @@ type Accumulator struct {
 	HasMax    bool
 	IsFloat   bool // true when the source column is a float type (or AVG over int64, which accumulates in float64 to avoid int64 sum wraparound)
 	IsDecimal bool // true when the source column is DECIMAL
-	IsString  bool // true when the source column is a string/bytes type (MIN/MAX)
+	IsString  bool // true when the source column is byte-backed (MIN/MAX): STRING, BYTES, IPV6, CIDR, UUID
+	IsBool    bool // true when the source column is BOOL (MIN/MAX); the value rides in MinI64/MaxI64 as 0/1
 	DecScale  int  // scale for DECIMAL columns
+	// StrType is the SOURCE column type behind MinStr/MaxStr. The five
+	// byte-backed types share one accumulator slot but not one boxed shape:
+	// IPV6 and UUID store raw 16-byte values that only round-trip into their
+	// own vector as []byte, while STRING and CIDR store their own text. Boxing
+	// them all as a Go string handed the IPV6 output vector 16 arbitrary bytes
+	// as an ADDRESS TO PARSE, which fails and writes NULL (#417).
+	StrType batch.TypeID
 }
 
 // FinalSum returns the accumulated sum as the appropriate type.
@@ -67,13 +75,31 @@ func (a *Accumulator) FinalAvg() any {
 	return float64(a.SumI64) / float64(a.Count)
 }
 
+// minMaxBox re-boxes a byte-backed MIN/MAX into the shape the OUTPUT vector
+// accepts. Vector.SetValue reads a string on an IPV6 or UUID column as TEXT
+// TO PARSE and a []byte as the raw storage form; the accumulator holds the
+// raw form, so those two must come back as []byte. STRING and CIDR store
+// their own text (a CIDR vector's bytes ARE "192.168.0.0/24") and come back
+// as a string. The []byte conversion also COPIES, which is what keeps the
+// answer independent of the arena the value was read from.
+func minMaxBox(typ batch.TypeID, s string) any {
+	switch typ {
+	case batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
+		return []byte(s)
+	}
+	return s
+}
+
 // FinalMin returns the accumulated minimum.
 func (a *Accumulator) FinalMin() any {
 	if !a.HasMin {
 		return nil
 	}
+	if a.IsBool {
+		return a.MinI64 != 0
+	}
 	if a.IsString {
-		return a.MinStr
+		return minMaxBox(a.StrType, a.MinStr)
 	}
 	if a.IsDecimal {
 		return a.MinDec.ToFloat64(a.DecScale)
@@ -89,8 +115,11 @@ func (a *Accumulator) FinalMax() any {
 	if !a.HasMax {
 		return nil
 	}
+	if a.IsBool {
+		return a.MaxI64 != 0
+	}
 	if a.IsString {
-		return a.MaxStr
+		return minMaxBox(a.StrType, a.MaxStr)
 	}
 	if a.IsDecimal {
 		return a.MaxDec.ToFloat64(a.DecScale)
@@ -117,6 +146,10 @@ func (a *Accumulator) Merge(other *Accumulator) {
 	}
 	if other.IsString {
 		a.IsString = true
+		a.StrType = other.StrType
+	}
+	if other.IsBool {
+		a.IsBool = true
 	}
 	if other.HasMin {
 		if !a.HasMin {

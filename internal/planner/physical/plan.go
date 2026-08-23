@@ -10026,14 +10026,32 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 // case is spelled out here as float64 rather than propagated as undeclared.
 func minMaxDeclaredType(in parquet.TypeID) parquet.TypeID {
 	switch in {
-	case parquet.TypeString, parquet.TypeBytes:
+	case parquet.TypeString:
 		return parquet.TypeString
+	case parquet.TypeBytes:
+		return parquet.TypeBytes
 	case parquet.TypeDate:
 		return parquet.TypeDate
 	case parquet.TypeTimestamp:
 		return parquet.TypeTimestamp
 	case parquet.TypeIPv4:
 		return parquet.TypeIPv4
+	case parquet.TypeIPv6:
+		return parquet.TypeIPv6
+	case parquet.TypeCIDR:
+		return parquet.TypeCIDR
+	case parquet.TypeUUID:
+		return parquet.TypeUUID
+	case parquet.TypeMAC:
+		return parquet.TypeMAC
+	case parquet.TypePort:
+		return parquet.TypePort
+	case parquet.TypeProtocol:
+		return parquet.TypeProtocol
+	case parquet.TypeDuration:
+		return parquet.TypeDuration
+	case parquet.TypeBool:
+		return parquet.TypeBool
 	case parquet.TypeInt64, parquet.TypeInt32:
 		return parquet.TypeInt64
 	}

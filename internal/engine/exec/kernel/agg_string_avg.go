@@ -9,12 +9,21 @@ import (
 
 var debugStrKernel = os.Getenv("WADJET_DEBUG_STRKERNEL") == "1"
 
-// String MIN/MAX kernels and overflow-safe AVG kernels.
+// Byte-backed and BOOL MIN/MAX kernels, and overflow-safe AVG kernels.
 //
 // MIN/MAX over string/bytes columns previously resolved to a nil updater —
 // the aggregate silently skipped accumulation and returned NULL (ClickBench
 // Q22, MIN(URL)). Comparisons use the zero-copy string view; only a new
 // best value is copied out of the batch buffer (StringValue).
+//
+// The same nil updater kept answering NULL for the other three BytesColumn
+// types — IPV6, CIDR and UUID — and for BOOL, long after STRING and BYTES
+// were fixed, because the resolvers named two types where five share the
+// storage (#417). The byte order is the one kernel/sort.go already gives all
+// five, so MIN agrees with the first row of an ORDER BY over the same column.
+// The accumulator records WHICH of the five it holds (Accumulator.StrType),
+// because the raw bytes of an IPV6 or a UUID are not text and only round-trip
+// into their own vector as []byte.
 //
 // AVG over int64-class columns previously shared the int64 SUM kernel; the
 // running sum wrapped for large values (AVG(UserID) over hash-like IDs) and
@@ -35,6 +44,7 @@ func minRowStringNoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 }
 func minStrUpdate(acc *Accumulator, vec *batch.Vector, row int) {
 	acc.IsString = true
+	acc.StrType = vec.Type
 	v := vec.BytesData.UnsafeStringValue(row)
 	if !acc.HasMin || v < acc.MinStr {
 		acc.MinStr = vec.BytesData.StringValue(row)
@@ -52,6 +62,7 @@ func maxRowStringNoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 }
 func maxStrUpdate(acc *Accumulator, vec *batch.Vector, row int) {
 	acc.IsString = true
+	acc.StrType = vec.Type
 	v := vec.BytesData.UnsafeStringValue(row)
 	if debugStrKernel && len(v) > 64 {
 		panic(fmt.Sprintf("maxStrUpdate oversized: row=%d len=%d offsets=%d vecLen=%d type=%v", row, len(v), len(vec.BytesData.Offsets), vec.Len, vec.Type))
@@ -64,6 +75,7 @@ func maxStrUpdate(acc *Accumulator, vec *batch.Vector, row int) {
 
 func minBatchString(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 	acc.IsString = true
+	acc.StrType = vec.Type
 	nulls := &vec.Nulls
 	if sel != nil {
 		for _, idx := range sel {
@@ -82,6 +94,7 @@ func minBatchString(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen in
 
 func maxBatchString(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 	acc.IsString = true
+	acc.StrType = vec.Type
 	nulls := &vec.Nulls
 	if sel != nil {
 		for _, idx := range sel {
@@ -94,6 +107,92 @@ func maxBatchString(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen in
 	for i := 0; i < vecLen; i++ {
 		if !nulls.IsNullFast(i) {
 			maxStrUpdate(acc, vec, i)
+		}
+	}
+}
+
+// BOOL MIN/MAX. PostgreSQL has no min(boolean)/max(boolean) — it offers
+// bool_and/bool_or instead — so there is no PG answer to follow here; the
+// order is DuckDB's and kernel/sort.go's, false < true, which is also what
+// `ORDER BY bool_col` already returns. Answering is the extension; the NULL
+// this replaces was not an answer at all.
+//
+// The value rides in MinI64/MaxI64 as 0/1 rather than in a slot of its own:
+// the accumulator already has an integer channel with a merge and a finalize,
+// and IsBool is what tells FinalMin to hand it back as a bool.
+
+func minRowBool(acc *Accumulator, vec *batch.Vector, row int) {
+	if !vec.Nulls.IsNullFast(row) {
+		minBoolUpdate(acc, vec, row)
+	}
+}
+func minRowBoolNoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	minBoolUpdate(acc, vec, row)
+}
+func minBoolUpdate(acc *Accumulator, vec *batch.Vector, row int) {
+	acc.IsBool = true
+	v := int64(0)
+	if vec.BoolData[row] {
+		v = 1
+	}
+	if !acc.HasMin || v < acc.MinI64 {
+		acc.MinI64 = v
+		acc.HasMin = true
+	}
+}
+
+func maxRowBool(acc *Accumulator, vec *batch.Vector, row int) {
+	if !vec.Nulls.IsNullFast(row) {
+		maxBoolUpdate(acc, vec, row)
+	}
+}
+func maxRowBoolNoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	maxBoolUpdate(acc, vec, row)
+}
+func maxBoolUpdate(acc *Accumulator, vec *batch.Vector, row int) {
+	acc.IsBool = true
+	v := int64(0)
+	if vec.BoolData[row] {
+		v = 1
+	}
+	if !acc.HasMax || v > acc.MaxI64 {
+		acc.MaxI64 = v
+		acc.HasMax = true
+	}
+}
+
+func minBatchBool(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
+	acc.IsBool = true
+	nulls := &vec.Nulls
+	if sel != nil {
+		for _, idx := range sel {
+			if !nulls.IsNullFast(int(idx)) {
+				minBoolUpdate(acc, vec, int(idx))
+			}
+		}
+		return
+	}
+	for i := 0; i < vecLen; i++ {
+		if !nulls.IsNullFast(i) {
+			minBoolUpdate(acc, vec, i)
+		}
+	}
+}
+
+func maxBatchBool(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
+	acc.IsBool = true
+	nulls := &vec.Nulls
+	if sel != nil {
+		for _, idx := range sel {
+			if !nulls.IsNullFast(int(idx)) {
+				maxBoolUpdate(acc, vec, int(idx))
+			}
+		}
+		return
+	}
+	for i := 0; i < vecLen; i++ {
+		if !nulls.IsNullFast(i) {
+			maxBoolUpdate(acc, vec, i)
 		}
 	}
 }

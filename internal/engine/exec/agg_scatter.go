@@ -431,6 +431,58 @@ func scatterMinInt[T ~int32 | ~int64](minArr []int64, hasMin []bool, data []T, g
 	}
 }
 
+func scatterMinDecimal(minArr []batch.Int128, hasMin []bool, data []batch.Int128, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
+	hasNulls := nulls.HasNulls()
+	if sel != nil {
+		for si := range sel {
+			row := int(sel[si])
+			if idx := gi[si]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
+				v := data[row]
+				if !hasMin[idx] || v.Less(minArr[idx]) {
+					minArr[idx] = v
+					hasMin[idx] = true
+				}
+			}
+		}
+	} else {
+		for row := 0; row < n; row++ {
+			if idx := gi[row]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
+				v := data[row]
+				if !hasMin[idx] || v.Less(minArr[idx]) {
+					minArr[idx] = v
+					hasMin[idx] = true
+				}
+			}
+		}
+	}
+}
+
+func scatterMaxDecimal(maxArr []batch.Int128, hasMax []bool, data []batch.Int128, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
+	hasNulls := nulls.HasNulls()
+	if sel != nil {
+		for si := range sel {
+			row := int(sel[si])
+			if idx := gi[si]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
+				v := data[row]
+				if !hasMax[idx] || maxArr[idx].Less(v) {
+					maxArr[idx] = v
+					hasMax[idx] = true
+				}
+			}
+		}
+	} else {
+		for row := 0; row < n; row++ {
+			if idx := gi[row]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
+				v := data[row]
+				if !hasMax[idx] || maxArr[idx].Less(v) {
+					maxArr[idx] = v
+					hasMax[idx] = true
+				}
+			}
+		}
+	}
+}
+
 func scatterMinFloat[T ~float32 | ~float64](minArr []float64, hasMin []bool, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
@@ -562,6 +614,17 @@ func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batc
 			scatterMinFloat(fa.minF64, fa.hasMin, col.Float64Data, gi, &col.Nulls, sel, n)
 		case batch.TypeFloat32:
 			scatterMinFloat(fa.minF64, fa.hasMin, col.Float32Data, gi, &col.Nulls, sel, n)
+		case batch.TypeDecimal:
+			// initFlatAccums allocates minDec for a DECIMAL column and every
+			// later stage of the SoA path — merge, copy, load, partial
+			// spill — reads it, but nothing ever WROTE it: this switch had
+			// no DECIMAL arm and no default. So `SELECT g, MIN(dec_col) ...
+			// GROUP BY g` left hasMin all false and finalized as NULL on
+			// every group, while the scalar `SELECT MIN(dec_col)` answered
+			// correctly through kernel.ResolveBatchMin's own DECIMAL arm.
+			// Both arms of the two-path gate take this code, so both
+			// answered NULL and agreed (#417).
+			scatterMinDecimal(fa.minDec, fa.hasMin, col.DecimalData.Data, gi, &col.Nulls, sel, n)
 		}
 	case AggMax:
 		switch col.Type {
@@ -573,6 +636,8 @@ func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batc
 			scatterMaxFloat(fa.maxF64, fa.hasMax, col.Float64Data, gi, &col.Nulls, sel, n)
 		case batch.TypeFloat32:
 			scatterMaxFloat(fa.maxF64, fa.hasMax, col.Float32Data, gi, &col.Nulls, sel, n)
+		case batch.TypeDecimal:
+			scatterMaxDecimal(fa.maxDec, fa.hasMax, col.DecimalData.Data, gi, &col.Nulls, sel, n)
 		}
 	}
 }
