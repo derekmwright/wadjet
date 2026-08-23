@@ -370,11 +370,7 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 	it.advisedIdx = it.start
 	it.slots = make(map[int]*decodeSlot, it.workers)
 
-	leaves := fr.Leaves()
-	leafByName := make(map[string]int, len(leaves))
-	for i, leaf := range leaves {
-		leafByName[leaf.Name] = i
-	}
+	leafByName := pqt.TopLevelLeafIndex(fr.Leaves())
 	it.estLeaves = make([]int, len(readSchema))
 	for i, col := range readSchema {
 		if li, ok := leafByName[col.Name]; ok {

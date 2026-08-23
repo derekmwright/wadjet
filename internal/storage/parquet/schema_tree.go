@@ -122,6 +122,33 @@ func computeLevels(node *SchemaNode, defLevel, repLevel int) {
 	}
 }
 
+// TopLevelLeafIndex maps a TOP-LEVEL column's name to its leaf index.
+//
+// Node-first, by schema-tree position: a struct FIELD may carry the same
+// name as a top-level column, so `x INT64, r ROW{x INT64}` has two leaves
+// named "x", and a plain map[leafName]index keeps whichever came last. The
+// name of a top-level column means the leaf whose PATH is that one name —
+// the read paths used to answer ReadRows(["x"]) and ReadRowGroup with the
+// STRUCT FIELD's values, silently, while ReadRows(nil) answered with the
+// column's own.
+//
+// A name that is not a top-level leaf still resolves to a deeper leaf of
+// that name, which is what a caller naming a nested leaf directly relies on;
+// the top-level one only ever WINS a collision.
+func TopLevelLeafIndex(leaves []*SchemaNode) map[string]int {
+	byName := make(map[string]int, len(leaves))
+	for i, l := range leaves {
+		if l == nil {
+			continue
+		}
+		if j, dup := byName[l.Name]; dup && len(leaves[j].Path) == 1 {
+			continue // a top-level leaf already claims this name
+		}
+		byName[l.Name] = i
+	}
+	return byName
+}
+
 // FindLeafByName finds a leaf node by column name (last path component).
 func FindLeafByName(root *SchemaNode, name string) *SchemaNode {
 	if root == nil {

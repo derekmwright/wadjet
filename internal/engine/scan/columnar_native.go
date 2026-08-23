@@ -183,11 +183,10 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 		return nil, fmt.Errorf("row group %d metadata not found", rgIdx)
 	}
 
-	// Build leaf-name-to-index mapping for column lookup.
-	leafByName := make(map[string]int, len(leaves))
-	for i, leaf := range leaves {
-		leafByName[leaf.Name] = i
-	}
+	// Build leaf-name-to-index mapping for column lookup. Top-level first:
+	// a struct field may share a top-level column's name, and the name of a
+	// column in the read schema means the top-level one.
+	leafByName := pqt.TopLevelLeafIndex(leaves)
 	// Also map by path for qualified name lookup.
 	leafByPath := make(map[string]int, len(leaves))
 	for i, leaf := range leaves {

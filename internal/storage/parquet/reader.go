@@ -141,11 +141,7 @@ func (r *Reader) ReadRowsAs(schema []Column, selectedColumns []string) ([]map[st
 
 // readRowsFlat is the original flat-schema read path (unchanged behavior).
 func (r *Reader) readRowsFlat(readCols []Column) ([]map[string]any, error) {
-	leaves := r.fr.Leaves()
-	leafByName := make(map[string]int, len(leaves))
-	for i, l := range leaves {
-		leafByName[l.Name] = i
-	}
+	leafByName := TopLevelLeafIndex(r.fr.Leaves())
 
 	var allRows []map[string]any
 	for rgIdx := 0; rgIdx < r.fr.NumRowGroups(); rgIdx++ {
@@ -191,10 +187,7 @@ func (r *Reader) readRowsFlat(readCols []Column) ([]map[string]any, error) {
 func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
 	leaves := r.fr.Leaves()
 
-	leafByName := make(map[string]int, len(leaves))
-	for i, l := range leaves {
-		leafByName[l.Name] = i
-	}
+	leafByName := TopLevelLeafIndex(leaves)
 	nodeByName := make(map[string]*SchemaNode)
 	if root := r.fr.SchemaRoot(); root != nil {
 		for _, c := range root.Children {
@@ -265,15 +258,8 @@ func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
 			if isNestedType(col.Type) {
 				continue
 			}
-			// By NODE first: a struct field can share a name with a
-			// top-level column, and leafByName keeps only one of them.
-			leafIdx := -1
-			if n, ok := nodeByName[col.Name]; ok && n.IsLeaf() {
-				leafIdx = n.LeafIndex
-			} else if i, ok := leafByName[col.Name]; ok {
-				leafIdx = i
-			}
-			if leafIdx < 0 {
+			leafIdx, ok := leafByName[col.Name]
+			if !ok {
 				continue
 			}
 			vals, err := readColumnToAny(r.fr, rgIdx, leafIdx, numRows, col)
@@ -448,11 +434,7 @@ func (r *Reader) ReadRowGroup(index int, selectedColumns []string) ([]map[string
 		readCols = filterSchemaColumns(r.schema.Columns, selectedColumns)
 	}
 
-	leaves := r.fr.Leaves()
-	leafByName := make(map[string]int, len(leaves))
-	for i, l := range leaves {
-		leafByName[l.Name] = i
-	}
+	leafByName := TopLevelLeafIndex(r.fr.Leaves())
 
 	if err := CheckRowGroupRowCount(index, r.fr.RowGroupNumRows(index)); err != nil {
 		return nil, err
@@ -730,11 +712,20 @@ func retypeFromCatalog(readCols, catalog []Column, leaves []*SchemaNode) ([]Colu
 	for _, c := range catalog {
 		byName[strings.ToLower(c.Name)] = c
 	}
+	// Top-level first, for the same reason TopLevelLeafIndex exists: the
+	// catalog names a TOP-LEVEL column, and a struct field of the same name
+	// would otherwise decide what physical type this substitution is vetted
+	// against.
 	leafByName := make(map[string]*SchemaNode, len(leaves))
 	for _, l := range leaves {
-		if l != nil && l.IsLeaf() {
-			leafByName[strings.ToLower(l.Name)] = l
+		if l == nil || !l.IsLeaf() {
+			continue
 		}
+		k := strings.ToLower(l.Name)
+		if prev, dup := leafByName[k]; dup && len(prev.Path) == 1 {
+			continue
+		}
+		leafByName[k] = l
 	}
 	out := make([]Column, len(readCols))
 	copy(out, readCols)
