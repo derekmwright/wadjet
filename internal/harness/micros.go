@@ -200,7 +200,15 @@ GROUP BY o.o_orderkey`
 // memory-heavy build side (micro_build, 500K padded rows) against a smaller
 // probe side (micro_probe, 50K rows), then asserts spill occurred.
 func RunMicroGraceHashJoin(ctx context.Context, coordURL string, collector *MeasurementCollector) (QueryMeasurement, error) {
-	sql := `SELECT b.build_key, b.build_val, p.probe_val
+	// LENGTH(b.build_pad) rather than b.build_pad: the 256-byte pad is the
+	// whole memory mechanism, so the query has to READ it — since #410 the
+	// DAG projects a stage's base-table scan to the columns the plan asks
+	// for, and a pad no expression mentions is simply not read, which took
+	// the build side under the 64 MB budget and made ExpectSpill fail on a
+	// run where nothing was wrong. Wrapping it in LENGTH keeps the pad in
+	// the join's payload (the build side must carry it to the projection)
+	// without shipping 128 MB of strings back through the gather.
+	sql := `SELECT b.build_key, b.build_val, p.probe_val, LENGTH(b.build_pad) AS pad_len
 FROM micro_build b
 JOIN micro_probe p ON b.build_key = p.probe_key`
 
