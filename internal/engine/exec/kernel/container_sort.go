@@ -41,6 +41,14 @@ import "github.com/derekmwright/wadjet/internal/engine/batch"
 //     applied to the fixed-width layout, so a VECTOR and an ARRAY of the same
 //     numbers sort the same way.
 //
+// A FLOAT element — a VECTOR's, or an ARRAY(FLOAT32/FLOAT64)'s — is compared
+// with CompareFloat32/CompareFloat64 (float_order.go), PostgreSQL's float
+// order: NaN above everything and equal to itself. Ordering elements with a
+// bare `<`/`>` pair instead makes a NaN tie against whatever sits opposite it,
+// which is a per-POSITION tie that does not compose across a multi-element
+// container, so the "total order" was not transitive whenever a NaN appeared
+// at differing positions (#446).
+//
 // # NULLs
 //
 // Two levels, deliberately different:
@@ -159,10 +167,13 @@ func compareRowAt(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 // compareVectorAt compares one VECTOR: element-wise over the common prefix,
 // then by dimension.
 //
-// NaN compares equal to everything, as it does in the FLOAT32 and FLOAT64
-// column comparators; a vector column of NaNs is no more ordered than a float
-// column of NaNs, and making one of them a total order without the other
-// would be the inconsistency, not the fix.
+// Elements go through CompareFloat32 — PostgreSQL's float order, NaN greatest
+// and NaN == NaN — not a bare `<`/`>` pair. The bare pair ties a NaN against
+// WHATEVER sits opposite it, which is a per-POSITION tie and does not compose
+// into a transitive whole-vector relation: [NaN,0,2] < [0,1,2] < [1,0,1] <
+// [NaN,0,2] was a cycle this comparator used to report (#446). The scalar
+// FLOAT32/FLOAT64 columns take the same rule, so a VECTOR of NaNs is ordered
+// exactly as consistently as a float column of NaNs — both totally.
 func compareVectorAt(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 	ad, bd := a.VectorDim, b.VectorDim
 	if ad <= 0 || bd <= 0 {
@@ -177,12 +188,8 @@ func compareVectorAt(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 		return 0
 	}
 	for k := 0; k < n; k++ {
-		av, bv := a.Float32Data[ao+k], b.Float32Data[bo+k]
-		if av < bv {
-			return -1
-		}
-		if av > bv {
-			return 1
+		if c := CompareFloat32(a.Float32Data[ao+k], b.Float32Data[bo+k]); c != 0 {
+			return c
 		}
 	}
 	return compareLen(ad, bd)

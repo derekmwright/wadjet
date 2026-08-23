@@ -670,7 +670,7 @@ func (w *Window) finalizeWithSpill() error {
 
 	// Compute each window function on the row slice
 	for _, wc := range w.Columns {
-		computeWindowRowOriented(allRows, wc)
+		computeWindowRowOriented(allRows, wc, w.schema)
 	}
 
 	// Materialize into output batches
@@ -956,14 +956,11 @@ func compareVectorValues(col *batch.Vector, a, b int) int {
 		}
 		return 0
 	case batch.TypeFloat64:
-		va, vb := col.Float64Data[a], col.Float64Data[b]
-		if va < vb {
-			return -1
-		}
-		if va > vb {
-			return 1
-		}
-		return 0
+		// kernel's float order (NaN greatest, NaN == NaN), the same one the
+		// sort kernels and the container comparators take — a window must
+		// not draw its PARTITION BY boundaries and RANK peer groups on a
+		// different order from the one that sorted the rows (#446).
+		return kernel.CompareFloat64(col.Float64Data[a], col.Float64Data[b])
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		va, vb := col.Int32Data[a], col.Int32Data[b]
 		if va < vb {
@@ -974,14 +971,7 @@ func compareVectorValues(col *batch.Vector, a, b int) int {
 		}
 		return 0
 	case batch.TypeFloat32:
-		va, vb := col.Float32Data[a], col.Float32Data[b]
-		if va < vb {
-			return -1
-		}
-		if va > vb {
-			return 1
-		}
-		return 0
+		return kernel.CompareFloat32(col.Float32Data[a], col.Float32Data[b])
 	case batch.TypeBool:
 		va, vb := col.BoolData[a], col.BoolData[b]
 		if !va && vb {
@@ -1382,18 +1372,25 @@ type frameMinMaxDeque struct {
 	idx  []int
 	want int // -1 = keep minimum, +1 = keep maximum
 	get  func(i int) any
+	// cmp orders two partition-relative rows, both known non-NULL. It is
+	// resolved by the caller from what the caller HAS: the columnar path
+	// hands it the column's own kernel comparator, the row-oriented path a
+	// comparator built from the declared column (#444). Comparing the boxed
+	// values here with compareAny was the site that ordered a ROW's fields by
+	// NAME while every other path ordered them positionally.
+	cmp  func(i, j int) int
 	next int // next partition-relative row not yet pushed
 }
 
 func (d *frameMinMaxDeque) advance(lo, hi int) {
 	for ; d.next < hi; d.next++ {
-		v := d.get(d.next)
-		if v == nil {
+		if d.get(d.next) == nil {
 			continue // SQL MIN/MAX skip NULLs
 		}
+		// Every index already in the deque passed the same NULL check, so
+		// both sides of cmp are non-NULL.
 		for len(d.idx) > 0 {
-			back := d.get(d.idx[len(d.idx)-1])
-			if back != nil && compareAny(v, back)*d.want < 0 {
+			if d.cmp(d.next, d.idx[len(d.idx)-1])*d.want < 0 {
 				break
 			}
 			d.idx = d.idx[:len(d.idx)-1]
@@ -1530,7 +1527,15 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 		if wc.Func == WinMax {
 			want = 1
 		}
-		d := &frameMinMaxDeque{want: want, get: func(i int) any { return inputVec.GetValue(start + i) }}
+		d := &frameMinMaxDeque{
+			want: want,
+			get:  func(i int) any { return inputVec.GetValue(start + i) },
+			// The column is right here, so the comparison is the columnar
+			// one — no box, and no second opinion about a ROW's field order.
+			cmp: func(i, j int) int {
+				return kernel.CompareValuesAt(inputVec, start+i, inputVec, start+j)
+			},
+		}
 		for i := 0; i < n; i++ {
 			lo, hi := fr.bounds(i)
 			if hi < lo {
@@ -1728,23 +1733,56 @@ func vecSummable(v *batch.Vector) bool {
 
 // --- Row-oriented window computation (spill path) ---
 
+// windowRowCompares holds the boxed comparators one row-oriented window
+// column needs — one per PARTITION BY column, one per ORDER BY key, and one
+// for the value column MIN/MAX ranks — resolved ONCE from the declared
+// schema.
+//
+// Resolving them is what makes this path agree with the columnar one. A row
+// map carries values, not declarations: Vector.GetValue renders a ROW as an
+// unordered map and a DECIMAL as text, so a comparator with nothing but the
+// box has to guess a field order and a numeric order, and guessed the wrong
+// one both times (#444). Resolving per column also keeps the type switch out
+// of the comparison loop, which is the codebase's typed-kernel rule.
+type windowRowCompares struct {
+	partition []boxedCompare
+	order     []boxedCompare
+	input     boxedCompare
+}
+
+func newWindowRowCompares(schema []parquet.Column, wc WindowColumn) windowRowCompares {
+	rc := windowRowCompares{
+		partition: make([]boxedCompare, len(wc.PartitionBy)),
+		order:     make([]boxedCompare, len(wc.OrderBy)),
+		input:     newBoxedCompareFor(schema, wc.InputCol),
+	}
+	for i, pk := range wc.PartitionBy {
+		rc.partition[i] = newBoxedCompareFor(schema, pk)
+	}
+	for i, ok := range wc.OrderBy {
+		rc.order[i] = newBoxedCompareFor(schema, ok.Column)
+	}
+	return rc
+}
+
 // computeWindowRowOriented computes a single window function over row data.
 // Used when spill occurred to avoid materializing a giant columnar batch.
-func computeWindowRowOriented(rows []map[string]any, wc WindowColumn) {
+func computeWindowRowOriented(rows []map[string]any, wc WindowColumn, schema []parquet.Column) {
 	if len(rows) == 0 {
 		return
 	}
+	rc := newWindowRowCompares(schema, wc)
 
 	// Sort by partition+order keys
 	sort.SliceStable(rows, func(a, b int) bool {
-		for _, pk := range wc.PartitionBy {
-			cmp := compareAny(rows[a][pk], rows[b][pk])
+		for i, pk := range wc.PartitionBy {
+			cmp := rc.partition[i](rows[a][pk], rows[b][pk])
 			if cmp != 0 {
 				return cmp < 0
 			}
 		}
-		for _, ok := range wc.OrderBy {
-			cmp := compareAny(rows[a][ok.Column], rows[b][ok.Column])
+		for i, ok := range wc.OrderBy {
+			cmp := rc.order[i](rows[a][ok.Column], rows[b][ok.Column])
 			if cmp != 0 {
 				if ok.Order == Descending {
 					return cmp > 0
@@ -1759,26 +1797,26 @@ func computeWindowRowOriented(rows []map[string]any, wc WindowColumn) {
 	i := 0
 	for i < len(rows) {
 		partEnd := i + 1
-		for partEnd < len(rows) && samePartitionRows(rows[i], rows[partEnd], wc.PartitionBy) {
+		for partEnd < len(rows) && samePartitionRows(rows[i], rows[partEnd], wc.PartitionBy, rc.partition) {
 			partEnd++
 		}
-		computePartitionRowOriented(rows[i:partEnd], wc)
+		computePartitionRowOriented(rows[i:partEnd], wc, rc)
 		i = partEnd
 	}
 }
 
-func samePartitionRows(a, b map[string]any, partCols []string) bool {
-	for _, col := range partCols {
-		if compareAny(a[col], b[col]) != 0 {
+func samePartitionRows(a, b map[string]any, partCols []string, cmps []boxedCompare) bool {
+	for i, col := range partCols {
+		if cmps[i](a[col], b[col]) != 0 {
 			return false
 		}
 	}
 	return true
 }
 
-func sameOrderRows(a, b map[string]any, orderCols []SortKey) bool {
-	for _, ok := range orderCols {
-		if compareAny(a[ok.Column], b[ok.Column]) != 0 {
+func sameOrderRows(a, b map[string]any, orderCols []SortKey, cmps []boxedCompare) bool {
+	for i, ok := range orderCols {
+		if cmps[i](a[ok.Column], b[ok.Column]) != 0 {
 			return false
 		}
 	}
@@ -1808,13 +1846,13 @@ func rowFloat64(row map[string]any, col string) float64 {
 
 // rowPeerGroups labels every row of a partition with its ORDER-BY peer group,
 // the row-oriented twin of columnarPeerGroups.
-func rowPeerGroups(part []map[string]any, orderBy []SortKey) ([]int32, []int32) {
+func rowPeerGroups(part []map[string]any, orderBy []SortKey, cmps []boxedCompare) ([]int32, []int32) {
 	n := len(part)
 	lo := make([]int32, n)
 	hi := make([]int32, n)
 	for i := 0; i < n; {
 		j := i + 1
-		for j < n && sameOrderRows(part[i], part[j], orderBy) {
+		for j < n && sameOrderRows(part[i], part[j], orderBy, cmps) {
 			j++
 		}
 		for k := i; k < j; k++ {
@@ -1826,7 +1864,7 @@ func rowPeerGroups(part []map[string]any, orderBy []SortKey) ([]int32, []int32) 
 }
 
 // computePartitionRowOriented computes a window function for one partition.
-func computePartitionRowOriented(part []map[string]any, wc WindowColumn) {
+func computePartitionRowOriented(part []map[string]any, wc WindowColumn, rc windowRowCompares) {
 	n := len(part)
 	outCol := wc.OutputCol
 
@@ -1836,7 +1874,7 @@ func computePartitionRowOriented(part []map[string]any, wc WindowColumn) {
 	var fr resolvedFrame
 	if frameSensitive(wc.Func) {
 		fr = resolveFrame(wc, n, len(wc.OrderBy) > 0, func() ([]int32, []int32) {
-			return rowPeerGroups(part, wc.OrderBy)
+			return rowPeerGroups(part, wc.OrderBy, rc.order)
 		})
 	}
 
@@ -1849,7 +1887,7 @@ func computePartitionRowOriented(part []map[string]any, wc WindowColumn) {
 	case WinRank:
 		rank := int64(1)
 		for i := 0; i < n; i++ {
-			if i > 0 && !sameOrderRows(part[i-1], part[i], wc.OrderBy) {
+			if i > 0 && !sameOrderRows(part[i-1], part[i], wc.OrderBy, rc.order) {
 				rank = int64(i + 1)
 			}
 			part[i][outCol] = rank
@@ -1858,7 +1896,7 @@ func computePartitionRowOriented(part []map[string]any, wc WindowColumn) {
 	case WinDenseRank:
 		rank := int64(1)
 		for i := 0; i < n; i++ {
-			if i > 0 && !sameOrderRows(part[i-1], part[i], wc.OrderBy) {
+			if i > 0 && !sameOrderRows(part[i-1], part[i], wc.OrderBy, rc.order) {
 				rank++
 			}
 			part[i][outCol] = rank
@@ -1904,7 +1942,13 @@ func computePartitionRowOriented(part []map[string]any, wc WindowColumn) {
 		if wc.Func == WinMax {
 			want = 1
 		}
-		d := &frameMinMaxDeque{want: want, get: func(i int) any { return part[i][wc.InputCol] }}
+		d := &frameMinMaxDeque{
+			want: want,
+			get:  func(i int) any { return part[i][wc.InputCol] },
+			cmp: func(i, j int) int {
+				return rc.input(part[i][wc.InputCol], part[j][wc.InputCol])
+			},
+		}
 		for i := 0; i < n; i++ {
 			lo, hi := fr.bounds(i)
 			if hi < lo {
@@ -1994,7 +2038,7 @@ func computePartitionRowOriented(part []map[string]any, wc WindowColumn) {
 		} else {
 			rank := int64(1)
 			for i := 0; i < n; i++ {
-				if i > 0 && !sameOrderRows(part[i-1], part[i], wc.OrderBy) {
+				if i > 0 && !sameOrderRows(part[i-1], part[i], wc.OrderBy, rc.order) {
 					rank = int64(i + 1)
 				}
 				part[i][outCol] = float64(rank-1) / float64(n-1)
@@ -2004,7 +2048,7 @@ func computePartitionRowOriented(part []map[string]any, wc WindowColumn) {
 	case WinCumeDist:
 		for i := 0; i < n; {
 			j := i + 1
-			for j < n && sameOrderRows(part[i], part[j], wc.OrderBy) {
+			for j < n && sameOrderRows(part[i], part[j], wc.OrderBy, rc.order) {
 				j++
 			}
 			cd := float64(j) / float64(n)

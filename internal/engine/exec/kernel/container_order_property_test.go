@@ -2,7 +2,6 @@ package kernel
 
 import (
 	"fmt"
-	"math"
 	"math/rand"
 	"testing"
 
@@ -27,6 +26,14 @@ import (
 // when the comparator says they do (this generator's propNaN always
 // produces the one canonical NaN bit pattern, so the two notions of "same
 // NaN" never actually diverge in this test).
+//
+// NaN is IN all four properties. It used to be excluded from P2-P4, because
+// the comparators tied a NaN against whatever sat opposite it and that
+// per-position tie is not transitive over a multi-element container (#446) —
+// so the "total order" #415 established was not one wherever a NaN appeared.
+// The comparators now take PostgreSQL's float order (NaN greatest, NaN equal
+// to itself; kernel/float_order.go), which is total at every arity, and the
+// exclusion is gone: the NaN arms below are the gate on that.
 
 func arrayIntCol() parquet.Column {
 	return parquet.Column{Name: "v", Type: parquet.TypeArray, Nullable: true,
@@ -50,13 +57,13 @@ func propGen(rng *rand.Rand, col parquet.Column, withNaN bool) any {
 		n := rng.Intn(4)
 		out := make([]any, n)
 		for i := range out {
-			out[i] = propGenElem(rng, *col.ElementType)
+			out[i] = propGenElem(rng, *col.ElementType, withNaN)
 		}
 		return out
 	case parquet.TypeRow:
 		m := map[string]any{}
 		for _, f := range col.Fields {
-			m[f.Name] = propGenElem(rng, f)
+			m[f.Name] = propGenElem(rng, f, withNaN)
 		}
 		return m
 	case parquet.TypeMap:
@@ -93,7 +100,7 @@ func propMaybeNull(rng *rand.Rand, v any) any {
 	return v
 }
 
-func propGenElem(rng *rand.Rand, col parquet.Column) any {
+func propGenElem(rng *rand.Rand, col parquet.Column, withNaN bool) any {
 	switch col.Type {
 	case parquet.TypeString:
 		if rng.Intn(5) == 0 {
@@ -105,47 +112,41 @@ func propGenElem(rng *rand.Rand, col parquet.Column) any {
 			return nil
 		}
 		return int64(rng.Intn(3))
+	case parquet.TypeFloat64:
+		if rng.Intn(5) == 0 {
+			return nil
+		}
+		if withNaN && rng.Intn(4) == 0 {
+			return propNaN()
+		}
+		return float64(rng.Intn(3))
+	case parquet.TypeFloat32:
+		if rng.Intn(5) == 0 {
+			return nil
+		}
+		if withNaN && rng.Intn(4) == 0 {
+			return float32(propNaN())
+		}
+		return float32(rng.Intn(3))
 	case parquet.TypeRow:
 		if rng.Intn(6) == 0 {
 			return nil
 		}
 		m := map[string]any{}
 		for _, f := range col.Fields {
-			m[f.Name] = propGenElem(rng, f)
+			m[f.Name] = propGenElem(rng, f, withNaN)
 		}
 		return m
 	}
 	return nil
 }
 
-// hasNaN reports whether v (a VECTOR cell's boxed []float32, this
-// generator's only source of NaN) contains one. compareVectorAt ties a NaN
-// element against WHATEVER is at the same position in the other operand
-// (container_sort.go: "NaN compares equal to everything, as it does in the
-// FLOAT32 and FLOAT64 column comparators") — a per-POSITION tie, not a
-// whole-value one, exactly like a bare FLOAT64 column's own NaN handling
-// (which is only ever asked about ONE position, so it never has occasion to
-// break down the same way). Chaining that per-position tie across DIFFERENT
-// pairs of vectors — the only way a 3+-element vector CAN be compared — does
-// not compose into a value-level equivalence relation, so P2/P3/P4 do not
-// hold once a NaN is anywhere in the comparison: excluded here, matching the
-// container-order doc's own "no more ordered than a float column of NaNs"
-// admission. This is NOT the same as the pre-existing scalar-float NaN tie a
-// separate reviewer investigation found unrelated to #415 — over 3+ elements
-// the per-position tie genuinely breaks transitivity (filed as #446, not
-// fixed in this round: the natural fix is a semantics decision that also
-// touches ARRAY(FLOAT)'s identical exposure).
-func hasNaN(v any) bool {
-	fs, ok := v.([]float32)
-	if !ok {
-		return false
-	}
-	for _, f := range fs {
-		if math.IsNaN(float64(f)) {
-			return true
-		}
-	}
-	return false
+// arrayFloatCol is #446's second half: compareListAt routes an ARRAY's float
+// elements through the same scalar comparators a VECTOR's go through, so
+// ARRAY(FLOAT32) and ARRAY(FLOAT64) had the identical non-transitivity.
+func arrayFloatCol(elem parquet.TypeID) parquet.Column {
+	return parquet.Column{Name: "v", Type: parquet.TypeArray, Nullable: true,
+		ElementType: &parquet.Column{Name: "element", Type: elem, Nullable: true}}
 }
 
 func propSign(x int) int {
@@ -171,6 +172,8 @@ func TestContainerOrderProperties(t *testing.T) {
 		{"vector", vectorCol(), false},
 		{"vector_nan", vectorCol(), true},
 		{"array_of_row", arrayOfRowCol(), false},
+		{"array_float64_nan", arrayFloatCol(parquet.TypeFloat64), true},
+		{"array_float32_nan", arrayFloatCol(parquet.TypeFloat32), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,10 +189,6 @@ func TestContainerOrderProperties(t *testing.T) {
 				t.Fatalf("nil comparator")
 			}
 			keyOf := func(i int) string { return fmt.Sprintf("%#v", vec.GetValue(i)) }
-			nan := make([]bool, n)
-			for i := range rows {
-				nan[i] = hasNaN(rows[i]["v"])
-			}
 
 			p1, p2, p3, p4 := 0, 0, 0, 0
 			for i := 0; i < n; i++ {
@@ -198,9 +197,6 @@ func TestContainerOrderProperties(t *testing.T) {
 					t.Errorf("P1 reflexive: row %d vs itself = %d (%v)", i, c, rows[i]["v"])
 				}
 				for j := 0; j < n; j++ {
-					if nan[i] || nan[j] {
-						continue // see hasNaN
-					}
 					cij, cji := cmp(vec, i, vec, j), cmp(vec, j, vec, i)
 					if propSign(cij) != -propSign(cji) && p2 < 3 {
 						p2++
@@ -220,11 +216,11 @@ func TestContainerOrderProperties(t *testing.T) {
 			}
 			for i := 0; i < n && p3 < 3; i++ {
 				for j := 0; j < n && p3 < 3; j++ {
-					if nan[i] || nan[j] || cmp(vec, i, vec, j) > 0 {
+					if cmp(vec, i, vec, j) > 0 {
 						continue
 					}
 					for k := 0; k < n && p3 < 3; k++ {
-						if nan[k] || cmp(vec, j, vec, k) > 0 {
+						if cmp(vec, j, vec, k) > 0 {
 							continue
 						}
 						if cmp(vec, i, vec, k) > 0 {

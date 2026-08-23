@@ -263,7 +263,7 @@ func TestWindowFrameRowOrientedMatchesColumnar(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			columnar := runFrameWindow(t, wc)
 			rows := frameTestRows()
-			computeWindowRowOriented(rows, wc)
+			computeWindowRowOriented(rows, wc, frameTestSchema)
 			if len(rows) != len(columnar) {
 				t.Fatalf("row count %d vs %d", len(rows), len(columnar))
 			}

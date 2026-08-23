@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -952,14 +953,9 @@ func compareAny(a, b any) int {
 	case int32:
 		return compareAny(int64(av), b)
 	case float64:
-		bv := toFloat64(b)
-		if av < bv {
-			return -1
-		}
-		if av > bv {
-			return 1
-		}
-		return 0
+		// kernel's float order, so the boxed path and the columnar one agree
+		// on a NaN: greatest, and equal to itself (#446).
+		return kernel.CompareFloat64(av, toFloat64(b))
 	case float32:
 		return compareAny(float64(av), b)
 	case string:
@@ -1009,34 +1005,31 @@ func compareAny(a, b any) int {
 		return cmpInt(len(av), len(bv))
 	case map[string]any:
 		// ROW, and a MAP entry. Compared in FIELD-NAME order, because that
-		// is all a boxed row carries: Vector.GetValue renders a ROW as a Go
-		// map, which has no declaration order. The columnar comparator
-		// compares fields POSITIONALLY, as PostgreSQL's record_cmp does, so
-		// the two paths can disagree on a ROW whose declared field order is
-		// not alphabetical. Same residual, same cause, as this path's DECIMAL
-		// handling: a DECIMAL boxes as its formatted string and orders
-		// lexicographically here where the columnar path orders numerically.
-		// The boxed path answers only the spilled/global WINDOW rows;
-		// ORDER BY, sort-merge join and the in-memory window all take the
-		// columnar comparator.
+		// is all a boxed row carries with no declaration to consult:
+		// Vector.GetValue renders a ROW as a Go map, which has no
+		// declaration order. The columnar comparator compares fields
+		// POSITIONALLY, as PostgreSQL's record_cmp does — so a caller that
+		// HAS the declaration must resolve newBoxedCompare (compare_boxed.go)
+		// instead of calling this, and every production caller now does
+		// (#444). What is left here is the genuinely undeclared case, where
+		// the box's own name order is the only order there is.
 		bv, ok := b.(map[string]any)
 		if !ok {
 			return 0
 		}
 		return compareAnyFields(av, bv)
 	case []float32:
-		// VECTOR.
+		// VECTOR. Element-wise in kernel's float order — a bare `<`/`>` pair
+		// ties a NaN against whatever sits opposite it, which does not
+		// compose into a transitive whole-vector relation (#446).
 		bv, ok := b.([]float32)
 		if !ok {
 			return 0
 		}
 		n := min(len(av), len(bv))
 		for i := 0; i < n; i++ {
-			if av[i] < bv[i] {
-				return -1
-			}
-			if av[i] > bv[i] {
-				return 1
+			if c := kernel.CompareFloat32(av[i], bv[i]); c != 0 {
+				return c
 			}
 		}
 		return cmpInt(len(av), len(bv))
@@ -1238,9 +1231,34 @@ func appendKeyFields(buf []byte, m map[string]any) []byte {
 func appendKeyFloats(buf []byte, vals []float32) []byte {
 	buf = binary.AppendUvarint(buf, uint64(len(vals)))
 	for _, f := range vals {
-		buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(f))
+		buf = binary.LittleEndian.AppendUint32(buf, keyFloat32bits(f))
 	}
 	return buf
+}
+
+// keyFloat32bits / keyFloat64bits are Float32bits/Float64bits with every NaN
+// folded onto one payload.
+//
+// The comparators order NaN as a single value — greatest, and equal to itself
+// (kernel/float_order.go, #446) — and the container-order contract is that
+// "compares equal" and "serializes alike" name the same relation. Raw IEEE
+// bits break that: two NaNs of different payload compare EQUAL and would
+// serialize DIFFERENTLY, so a drained partial aggregate would split one group
+// in two and answer differently depending on how much memory it had. A
+// payload is not part of a DECIMAL-free SQL value's identity, so folding it
+// is the side to give.
+func keyFloat32bits(f float32) uint32 {
+	if f != f {
+		return math.Float32bits(float32(math.NaN()))
+	}
+	return math.Float32bits(f)
+}
+
+func keyFloat64bits(f float64) uint64 {
+	if f != f {
+		return math.Float64bits(math.NaN())
+	}
+	return math.Float64bits(f)
 }
 
 // Nested-element kind tags. Every nested element is SELF-DELIMITING: a tag,
@@ -1281,9 +1299,9 @@ func appendKeyElem(buf []byte, v any) []byte {
 	case int64:
 		return binary.LittleEndian.AppendUint64(append(buf, keyElemInt64), uint64(tv))
 	case float32:
-		return binary.LittleEndian.AppendUint32(append(buf, keyElemFloat32), math.Float32bits(tv))
+		return binary.LittleEndian.AppendUint32(append(buf, keyElemFloat32), keyFloat32bits(tv))
 	case float64:
-		return binary.LittleEndian.AppendUint64(append(buf, keyElemFloat64), math.Float64bits(tv))
+		return binary.LittleEndian.AppendUint64(append(buf, keyElemFloat64), keyFloat64bits(tv))
 	case string:
 		return appendKeyRaw(append(buf, keyElemString), tv)
 	case []byte:

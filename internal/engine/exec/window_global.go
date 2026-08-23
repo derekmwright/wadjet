@@ -88,6 +88,27 @@ func globalInputIdxs(schema []parquet.Column, g windowSpecGroup) []int {
 	return idxs
 }
 
+// globalInputCompares resolves one boxed comparator per group column, from
+// the DECLARED input column rather than from the box.
+//
+// MIN/MAX here carry a running value across batches, so the vector it came
+// from is long gone by the next comparison and the columnar comparator cannot
+// be used directly. What the declaration supplies is the part the box drops:
+// a ROW's field ORDER and a DECIMAL's scale. Without it this path ordered a
+// ROW by field NAME while ORDER BY over the same column ordered it
+// positionally (#444).
+func globalInputCompares(schema []parquet.Column, inputIdxs []int) []boxedCompare {
+	cmps := make([]boxedCompare, len(inputIdxs))
+	for i, ii := range inputIdxs {
+		if ii < 0 || ii >= len(schema) {
+			cmps[i] = compareAny
+			continue
+		}
+		cmps[i] = newBoxedCompare(schema[ii])
+	}
+	return cmps
+}
+
 // collectGlobalWindowStats streams the merger once (consuming it) and
 // returns the partition-level scalars for g's columns.
 func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpecGroup) (*globalWindowStats, error) {
@@ -102,6 +123,7 @@ func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpe
 		maxV:        make([]any, nc),
 	}
 	inputIdxs := globalInputIdxs(schema, g)
+	cmps := globalInputCompares(schema, inputIdxs)
 	for {
 		b, err := m.Next()
 		if err != nil {
@@ -131,14 +153,14 @@ func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpe
 				case WinMin:
 					if len(wc.OrderBy) == 0 {
 						v := b.Columns[ii].GetValue(r)
-						if st.minV[i] == nil || (v != nil && compareAny(v, st.minV[i]) < 0) {
+						if st.minV[i] == nil || (v != nil && cmps[i](v, st.minV[i]) < 0) {
 							st.minV[i] = v
 						}
 					}
 				case WinMax:
 					if len(wc.OrderBy) == 0 {
 						v := b.Columns[ii].GetValue(r)
-						if st.maxV[i] == nil || (v != nil && compareAny(v, st.maxV[i]) > 0) {
+						if st.maxV[i] == nil || (v != nil && cmps[i](v, st.maxV[i]) > 0) {
 							st.maxV[i] = v
 						}
 					}
@@ -184,7 +206,12 @@ type globalWindowStreamer struct {
 	inputIdxs []int
 	orderIdxs []int
 	compare   []kernel.SortCompareKernel
-	resolved  bool
+	// inputCmp[i] orders two BOXED values of group column i's input column,
+	// resolved from the declaration (see globalInputCompares). The running
+	// MIN/MAX below outlive the vector, so this is the boxed twin of
+	// compare's columnar kernels — one order, two representations.
+	inputCmp []boxedCompare
+	resolved bool
 
 	// carried state
 	rowIdx    int64 // rows consumed from the merger
@@ -248,6 +275,7 @@ func newGlobalWindowStreamer(m *runMerger, schema []parquet.Column, g windowSpec
 		ntileInit:   make([]bool, nc),
 		leadCursor:  make([]int64, nc),
 	}
+	s.inputCmp = globalInputCompares(schema, s.inputIdxs)
 	for i, wc := range g.cols {
 		switch wc.Func {
 		case WinLag:
@@ -525,7 +553,7 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 			if inVec != nil {
 				v = inVec.GetValue(r)
 			}
-			if s.runMin[i] == nil || (v != nil && compareAny(v, s.runMin[i]) < 0) {
+			if s.runMin[i] == nil || (v != nil && s.inputCmp[i](v, s.runMin[i]) < 0) {
 				s.runMin[i] = v
 			}
 			return
@@ -538,7 +566,7 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 			if inVec != nil {
 				v = inVec.GetValue(r)
 			}
-			if s.runMax[i] == nil || (v != nil && compareAny(v, s.runMax[i]) > 0) {
+			if s.runMax[i] == nil || (v != nil && s.inputCmp[i](v, s.runMax[i]) > 0) {
 				s.runMax[i] = v
 			}
 			return

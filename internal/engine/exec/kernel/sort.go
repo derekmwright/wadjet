@@ -99,14 +99,7 @@ func sortCompareFloat64(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 	if bN {
 		return 1
 	}
-	av, bv := a.Float64Data[ai], b.Float64Data[bi]
-	if av < bv {
-		return -1
-	}
-	if av > bv {
-		return 1
-	}
-	return 0
+	return CompareFloat64(a.Float64Data[ai], b.Float64Data[bi])
 }
 
 func sortCompareFloat32(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
@@ -121,14 +114,7 @@ func sortCompareFloat32(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 	if bN {
 		return 1
 	}
-	av, bv := a.Float32Data[ai], b.Float32Data[bi]
-	if av < bv {
-		return -1
-	}
-	if av > bv {
-		return 1
-	}
-	return 0
+	return CompareFloat32(a.Float32Data[ai], b.Float32Data[bi])
 }
 
 func sortCompareString(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
@@ -228,25 +214,11 @@ func sortCompareInt32NoNulls(a *batch.Vector, ai int, b *batch.Vector, bi int) i
 }
 
 func sortCompareFloat64NoNulls(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
-	av, bv := a.Float64Data[ai], b.Float64Data[bi]
-	if av < bv {
-		return -1
-	}
-	if av > bv {
-		return 1
-	}
-	return 0
+	return CompareFloat64(a.Float64Data[ai], b.Float64Data[bi])
 }
 
 func sortCompareFloat32NoNulls(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
-	av, bv := a.Float32Data[ai], b.Float32Data[bi]
-	if av < bv {
-		return -1
-	}
-	if av > bv {
-		return 1
-	}
-	return 0
+	return CompareFloat32(a.Float32Data[ai], b.Float32Data[bi])
 }
 
 func sortCompareStringNoNulls(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
@@ -356,14 +328,7 @@ func sortCompareFloat64NullsLast(a *batch.Vector, ai int, b *batch.Vector, bi in
 	if bN {
 		return -1
 	}
-	av, bv := a.Float64Data[ai], b.Float64Data[bi]
-	if av < bv {
-		return -1
-	}
-	if av > bv {
-		return 1
-	}
-	return 0
+	return CompareFloat64(a.Float64Data[ai], b.Float64Data[bi])
 }
 
 func sortCompareFloat32NullsLast(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
@@ -378,14 +343,7 @@ func sortCompareFloat32NullsLast(a *batch.Vector, ai int, b *batch.Vector, bi in
 	if bN {
 		return -1
 	}
-	av, bv := a.Float32Data[ai], b.Float32Data[bi]
-	if av < bv {
-		return -1
-	}
-	if av > bv {
-		return 1
-	}
-	return 0
+	return CompareFloat32(a.Float32Data[ai], b.Float32Data[bi])
 }
 
 func sortCompareStringNullsLast(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
