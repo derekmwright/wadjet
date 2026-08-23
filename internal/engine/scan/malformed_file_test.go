@@ -327,3 +327,126 @@ func TestPagesOverrunningTheRowGroupAreAnError(t *testing.T) {
 		t.Fatalf("read %v, want 300 rows", b)
 	}
 }
+
+// reannotatedInt64File writes a real 1000-row INT64 column and re-encodes the
+// footer so the leaf carries `lt` instead of its own annotation. The page
+// bodies are untouched and still hold int64s.
+func reannotatedInt64File(t *testing.T, lt *pqt.LogicalType) []byte {
+	t.Helper()
+	schema := pqt.Schema{Columns: []pqt.Column{{Name: "c", Type: pqt.TypeInt64}}}
+	var buf bytes.Buffer
+	w, err := pqt.NewWriter(&buf, schema, pqt.DefaultWriterConfig())
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	rows := make([]map[string]any, 1000)
+	for i := range rows {
+		rows[i] = map[string]any{"c": int64(i)}
+	}
+	if err := w.WriteRows(rows); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	raw := buf.Bytes()
+
+	footerLen := int(binary.LittleEndian.Uint32(raw[len(raw)-8 : len(raw)-4]))
+	start := len(raw) - 8 - footerLen
+	md, err := pqt.DecodeFileMetaData(raw[start : start+footerLen])
+	if err != nil {
+		t.Fatalf("decoding footer: %v", err)
+	}
+	for i := range md.Schema {
+		if md.Schema[i].Name == "c" {
+			md.Schema[i].LogicalType = lt
+			md.Schema[i].ConvertedType = nil
+		}
+	}
+	return withFooter(raw[:start], pqt.EncodeFileMetaData(md))
+}
+
+// TestByteArrayAccessorChecksThePagePhysicalType: Values.ByteArray was the
+// one typed accessor with no physical-type check. An INT64 page answered it
+// with its raw eight-byte-per-value buffer and a nil offsets slice — and a
+// nil offsets slice is how the byte-array copy paths spell "PLAIN, four-byte
+// length prefix per value". So a column of integers decoded into a STRING
+// vector as whatever those bytes happened to say, with err == nil, while the
+// ROW reader refused the same file. One corrupt annotation, two different
+// answers, chosen by a schema shape the query never mentions.
+func TestByteArrayAccessorChecksThePagePhysicalType(t *testing.T) {
+	cases := []struct {
+		name    string
+		logical *pqt.LogicalType
+		catalog pqt.TypeID
+	}{
+		{"LogicalString over INT64", &pqt.LogicalType{Type: pqt.LogicalString}, pqt.TypeString},
+		{"LogicalVector over INT64", &pqt.LogicalType{Type: pqt.LogicalVector, Dimension: 2}, pqt.TypeVector},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := reannotatedInt64File(t, tc.logical)
+
+			fr, err := pqt.OpenFileReaderFromBytes(raw)
+			if err != nil {
+				t.Fatalf("opening: %v", err)
+			}
+			leaf := fr.Leaves()[0]
+			if leaf.Type == nil || *leaf.Type != pqt.PhysicalInt64 {
+				t.Fatalf("leaf physical = %v, want INT64", leaf.Type)
+			}
+			if got := pqt.TypeIDFromSchemaNode(leaf); got != tc.catalog {
+				t.Fatalf("recovered type = %s, want %s (the annotation did not take)", got, tc.catalog)
+			}
+
+			col := pqt.Column{Name: "c", Type: tc.catalog, Dimension: 2}
+			nativeErr, rowErr, rowsRead, nonNull := readBothPaths(t, raw, col)
+			if nativeErr == nil {
+				t.Error("the native scan decoded an INT64 page through the byte-array path without error")
+			}
+			if rowErr == nil {
+				t.Errorf("the row reader accepted it: %d rows, %d non-NULL", rowsRead, nonNull)
+			}
+		})
+	}
+}
+
+// TestSelDecodeEligibilityAgreesWithTheFullDecode: the sel-pruned path picked
+// its columns by the RECOVERED type alone, so a LogicalString annotation on
+// an INT64 leaf made it eligible for a decoder that walks per-value byte
+// offsets a page of integers does not have. Eligibility now asks the leaf's
+// PHYSICAL type as well, which is the same question byteArraySrc asks of the
+// page — the two must not disagree, or the sel path answers a query the full
+// path refuses.
+func TestSelDecodeEligibilityAgreesWithTheFullDecode(t *testing.T) {
+	raw := reannotatedInt64File(t, &pqt.LogicalType{Type: pqt.LogicalString})
+	fr, err := pqt.OpenFileReaderFromBytes(raw)
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if selEligibleLeaf(fr, 0, pqt.TypeString) {
+		t.Error("an INT64 leaf annotated STRING was admitted to the sel-decode path")
+	}
+
+	// A real BYTE_ARRAY column is still eligible, so the gate refuses the
+	// annotation mismatch and not the path.
+	var buf bytes.Buffer
+	w, err := pqt.NewWriter(&buf, pqt.Schema{Columns: []pqt.Column{{Name: "s", Type: pqt.TypeString}}},
+		pqt.DefaultWriterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteRows([]map[string]any{{"s": "a"}, {"s": "b"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	good, err := pqt.OpenFileReaderFromBytes(buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selEligibleLeaf(good, 0, pqt.TypeString) {
+		t.Error("a real BYTE_ARRAY STRING column is no longer sel-eligible")
+	}
+}

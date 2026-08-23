@@ -742,6 +742,22 @@ func int32Src(data pqt.Values, need int, typ pqt.TypeID) ([]int32, error) {
 	return src, nil
 }
 
+// byteArraySrc is the byte-array arm of the same family: the physical type
+// is checked per PAGE, and a page that does not carry byte-array values is
+// refused rather than read through a nil offsets table. A nil table is how
+// the copy paths spell "PLAIN, four-byte length prefix per value", so an
+// INT64 page reaching them decoded into a STRING vector as whatever those
+// bytes happened to say — data rows, err == nil, while the row reader
+// refused the same file.
+func byteArraySrc(data pqt.Values, typ pqt.TypeID) ([]byte, []uint32, error) {
+	switch data.PhysType() {
+	case pqt.PhysicalByteArray, pqt.PhysicalFixedLenByteArray, pqt.PhysicalInt96:
+		raw, offs := data.ByteArray()
+		return raw, offs, nil
+	}
+	return nil, nil, pageSrcErr(typ, pqt.PhysicalByteArray, data, data.Count(), 0)
+}
+
 func float64Src(data pqt.Values, need int, typ pqt.TypeID) ([]float64, error) {
 	if data.PhysType() != pqt.PhysicalDouble {
 		return nil, pageSrcErr(typ, pqt.PhysicalDouble, data, need, 0)
@@ -823,7 +839,10 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 
 	case pqt.TypeVector:
 		// FIXED_LEN_BYTE_ARRAY: decode little-endian float32 bytes into Float32Data.
-		rawData, offsets := data.ByteArray()
+		rawData, offsets, err := byteArraySrc(data, typ)
+		if err != nil {
+			return err
+		}
 		dim := vec.VectorDim
 		if dim <= 0 {
 			break
@@ -845,7 +864,10 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 		}
 
 	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
-		rawData, offsets := data.ByteArray()
+		rawData, offsets, err := byteArraySrc(data, typ)
+		if err != nil {
+			return err
+		}
 		if offsets != nil {
 			if len(offsets) < n+1 {
 				return pageSrcErr(typ, pqt.PhysicalByteArray, data, n, len(offsets)-1)
@@ -1017,7 +1039,10 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 
 	case pqt.TypeVector:
 		// FIXED_LEN_BYTE_ARRAY with nullable scatter.
-		rawData, offsets := data.ByteArray()
+		rawData, offsets, err := byteArraySrc(data, typ)
+		if err != nil {
+			return err
+		}
 		dim := vec.VectorDim
 		if dim <= 0 {
 			break
@@ -1043,7 +1068,10 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 		}
 
 	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
-		rawData, offsets := data.ByteArray()
+		rawData, offsets, err := byteArraySrc(data, typ)
+		if err != nil {
+			return err
+		}
 		valIdx := 0
 		if offsets != nil {
 			// The offsets can only run short of the levels on a corrupt

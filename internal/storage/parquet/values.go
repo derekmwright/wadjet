@@ -140,10 +140,29 @@ func (v Values) Boolean() []byte {
 	return v.data
 }
 
-// ByteArray returns the concatenated byte data and per-value offsets.
+// ByteArray returns the concatenated byte data and per-value offsets, or
+// (nil, nil) when the values are not one of the byte-carrying physicals.
 // Value i is data[offsets[i]:offsets[i+1]].
+//
+// The physical-type check is the same backstop the typed accessors get from
+// typedValues, and it was the one accessor that did not have it. An INT64
+// page handed to ByteArray answered with its raw eight-byte-per-value buffer
+// and a nil offsets slice — and the byte-array copy paths read a nil offsets
+// slice as "PLAIN encoding, four-byte length prefix per value", so a column
+// of integers decoded into a STRING vector as whatever the length prefixes
+// happened to say, with err == nil. The row reader refused the same file
+// (checkPageDecodable asks PhysicalReadableAs first), so one corrupt
+// annotation produced two different answers depending on which read path the
+// table's schema shape selected.
+//
+// INT96 is included because it decodes through the same offset table as a
+// twelve-byte fixed-length value.
 func (v Values) ByteArray() ([]byte, []uint32) {
-	return v.data, v.offsets
+	switch v.physType {
+	case PhysicalByteArray, PhysicalFixedLenByteArray, PhysicalInt96:
+		return v.data, v.offsets
+	}
+	return nil, nil
 }
 
 // --- PLAIN encoding decoders ---

@@ -136,7 +136,10 @@ func readColumnNativeLengths(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colId
 				}
 				return lengthsCopyPage(vec, offset, pageRows, defLevels, maxDefLevel, hasNulls, lenAt)
 			}
-			rawData, offs := page.Data.ByteArray()
+			rawData, offs, err := byteArraySrc(page.Data, pqt.TypeString)
+			if err != nil {
+				return err
+			}
 			if offs != nil {
 				lenAt := func(vi int) (int, error) {
 					if vi+1 >= len(offs) {

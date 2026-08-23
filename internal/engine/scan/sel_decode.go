@@ -56,7 +56,23 @@ func selEligibleLeaf(fr *pqt.FileReader, colIdx int, catalogType pqt.TypeID) boo
 		return false
 	}
 	ft := pqt.TypeIDFromSchemaNode(leaf)
-	return ft == pqt.TypeString || ft == pqt.TypeBytes
+	if ft != pqt.TypeString && ft != pqt.TypeBytes {
+		return false
+	}
+	// The recovered type comes from the ANNOTATIONS, and an annotation can
+	// sit over any physical at all: a LogicalString on an INT64 leaf
+	// recovers as STRING while the pages carry eight-byte integers. This
+	// path walks per-value byte offsets, so it needs the PHYSICAL to be one
+	// that has them; the full decode refuses such a page outright
+	// (byteArraySrc), and eligibility must not disagree with it.
+	if leaf.Type == nil {
+		return false
+	}
+	switch *leaf.Type {
+	case pqt.PhysicalByteArray, pqt.PhysicalFixedLenByteArray:
+		return true
+	}
+	return false
 }
 
 // readColumnNativeSel reads a byte-array column materializing only the
@@ -157,7 +173,10 @@ func readColumnNativeSel(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, n
 				}
 				return selCopyPage(vec, pageSel, offset, pageRows, defLevels, maxDefLevel, hasNulls, valueAt)
 			}
-			rawData, offs := page.Data.ByteArray()
+			rawData, offs, err := byteArraySrc(page.Data, pqt.TypeString)
+			if err != nil {
+				return err
+			}
 			if offs != nil {
 				valueAt := func(vi int) ([]byte, error) {
 					if vi+1 >= len(offs) {
