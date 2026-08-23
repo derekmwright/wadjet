@@ -325,3 +325,42 @@ func TestAllThreePlainWalksRefuseATruncatedPage(t *testing.T) {
 		}
 	}
 }
+
+// TestZeroDimensionVectorColumnIsAnError: a VECTOR(N) column with N <= 0 is
+// an invalid catalog entry. Both copy arms used to `break` on it, which
+// returns nil having written nothing into a POOLED vector — so the column
+// came back holding whatever the previous row group had left there.
+func TestZeroDimensionVectorColumnIsAnError(t *testing.T) {
+	body := make([]byte, 16) // four float32s, enough for a dim-4 value
+	for _, tc := range []struct {
+		name string
+		run  func(vec *batch.Vector) error
+	}{
+		{"all present", func(vec *batch.Vector) error {
+			return copyNativeDataDirect(vec, 0, pqt.RawValues(pqt.PhysicalFixedLenByteArray, body, 1),
+				1, pqt.TypeVector)
+		}},
+		{"nullable scatter", func(vec *batch.Vector) error {
+			return copyNativeDataScatter(vec, 0, pqt.RawValues(pqt.PhysicalFixedLenByteArray, body, 1),
+				[]int32{1}, 1, 1, pqt.TypeVector)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vec := batch.NewVectorVector(1, 0) // dimension 0
+			err := tc.run(vec)
+			if err == nil {
+				t.Fatal("a VECTOR column with dimension 0 decoded without error")
+			}
+			if !contains(err.Error(), "VECTOR") || !contains(err.Error(), "dimension") {
+				t.Errorf("error %q does not name the column's dimension", err)
+			}
+		})
+	}
+
+	// A real dimension still decodes.
+	vec := batch.NewVectorVector(1, 4)
+	if err := copyNativeDataDirect(vec, 0, pqt.RawValues(pqt.PhysicalFixedLenByteArray, body, 1),
+		1, pqt.TypeVector); err != nil {
+		t.Fatalf("a dimension-4 VECTOR: %v", err)
+	}
+}

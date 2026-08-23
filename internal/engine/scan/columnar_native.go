@@ -632,6 +632,22 @@ func copyPageIntoVector(vec *batch.Vector, offset int, data pqt.Values, defLevel
 	return copyNativeDataScatter(vec, offset, data, defLevels, maxDefLevel, n, fileType)
 }
 
+// zeroVectorDimErr refuses a VECTOR column whose declared dimension is not a
+// dimension.
+//
+// Both copy arms used to `break` here, which returns nil having written
+// nothing — and the destination is a pooled vector, so "nothing" is whatever
+// the previous row group left in it. A VECTOR(N) column with N <= 0 is an
+// invalid catalog entry, not a column of empty vectors; saying so is the only
+// answer that is not somebody else's data.
+//
+// Non-inlined for the same frame-size reason as leafErr.
+//
+//go:noinline
+func zeroVectorDimErr(dim int) error {
+	return fmt.Errorf("type VECTOR: the column declares dimension %d, so its values have no width", dim)
+}
+
 // plainPrefixErr refuses a PLAIN byte-array page that ends inside a value.
 // Non-inlined for the same frame-size reason as leafErr.
 //
@@ -920,7 +936,7 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 		}
 		dim := vec.VectorDim
 		if dim <= 0 {
-			break
+			return zeroVectorDimErr(dim)
 		}
 		if offsets != nil && len(offsets) < n+1 {
 			return pageSrcErr(typ, pqt.PhysicalFixedLenByteArray, data, n, len(offsets)-1)
@@ -1148,7 +1164,7 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 		}
 		dim := vec.VectorDim
 		if dim <= 0 {
-			break
+			return zeroVectorDimErr(dim)
 		}
 		valIdx := 0
 		for i := 0; i < n; i++ {
