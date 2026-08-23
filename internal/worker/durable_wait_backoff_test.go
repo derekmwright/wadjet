@@ -36,9 +36,10 @@ func waitForLateObject(t *testing.T, queryID, key, bucket string, landAt time.Du
 // TestDurableWaitBackoffFindsEarlyLandings is the window-2 §7.1 regression:
 // the durable wait used to re-poll on a flat 500ms clock, so a copy that
 // landed in 150ms still cost 500ms of critical path — and the gather-merge
-// tail of every aggregate query is exactly that shape. The ramp finds it
-// within ~2x the landing time; the kill switch restores the old quantum,
-// which is what makes this a real before/after and not a tautology.
+// tail of every aggregate query is exactly that shape. The ramp resolves
+// the landing in several sub-quantum probes; the kill switch restores the
+// old single-probe quantum, which is what makes this a real before/after
+// and not a tautology.
 func TestDurableWaitBackoffFindsEarlyLandings(t *testing.T) {
 	const (
 		bucket = "scratch"
@@ -51,16 +52,23 @@ func TestDurableWaitBackoffFindsEarlyLandings(t *testing.T) {
 
 		const queryID = "q-backoff-on"
 		key := "queries/" + queryID + "/final_aggregate-7/merge-0.wshf"
-		elapsed, src := waitForLateObject(t, queryID, key, bucket, landAt)
-		if elapsed > 2*landAt {
-			t.Fatalf("wait = %v, want <= %v (ramp: 25/75/175ms probes)", elapsed, 2*landAt)
-		}
+		_, src := waitForLateObject(t, queryID, key, bucket, landAt)
 		if src.acq.durableWaits != 1 {
 			t.Fatalf("durable_waits = %d, want 1", src.acq.durableWaits)
 		}
+		// The PROBE COUNT is the mechanism, and it is what separates the two
+		// arms: the ramp re-probes inside one flat quantum (25/75/175ms
+		// cumulative), the flat clock probes exactly once. The wall this
+		// took to run is a scheduling outcome — asserting "wait <= 300ms"
+		// here failed at 312.8ms whenever other suites ran concurrently
+		// (#421), while proving nothing the counts do not.
 		if src.acq.durableWaitPolls < 2 {
 			t.Fatalf("durable_wait_polls = %d; the ramp must probe more than once inside %v",
 				src.acq.durableWaitPolls, landAt)
+		}
+		if src.acq.durableWaitPolls > 8 {
+			t.Fatalf("durable_wait_polls = %d; the ramp saturates at %v, so an object landing at %v "+
+				"cannot need that many probes", src.acq.durableWaitPolls, durableWaitPoll, landAt)
 		}
 		if !src.acq.notable() {
 			t.Fatal("a task that waited on a durable object must escalate its phases line")

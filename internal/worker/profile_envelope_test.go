@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"runtime"
+	"runtime/pprof"
 	"sync"
 	"testing"
 	"time"
@@ -32,9 +33,18 @@ func TestCollectProfileEnvelope_BlockMutexGated(t *testing.T) {
 	if len(env.Goroutine) == 0 {
 		t.Fatal("goroutine profile missing from envelope with samplers off")
 	}
-	if len(env.Block) != 0 || len(env.Mutex) != 0 {
-		t.Fatalf("block/mutex present with samplers off: block=%d mutex=%d",
-			len(env.Block), len(env.Mutex))
+	// The envelope's gate is pprof's record COUNT, not the env knob, and a
+	// non-zero count is not this test's doing: the race build's runtime
+	// records contended runtime-internal locks into the mutex profile on
+	// its own, which is why this assertion failed alone under -race with
+	// a few hundred bytes in each payload (#421). Assert the gate the
+	// collector actually applies, so the check is true of the code rather
+	// than of the build it happens to run under.
+	if pprof.Lookup("block").Count() == 0 && len(env.Block) != 0 {
+		t.Fatalf("block payload present with an empty block profile: %d bytes", len(env.Block))
+	}
+	if pprof.Lookup("mutex").Count() == 0 && len(env.Mutex) != 0 {
+		t.Fatalf("mutex payload present with an empty mutex profile: %d bytes", len(env.Mutex))
 	}
 
 	// Samplers on: generate one blocking event and one mutex contention

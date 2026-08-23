@@ -43,6 +43,24 @@ func insertEmptyChunk(tb testing.TB, wire []byte) []byte {
 	return out
 }
 
+// awaitStall blocks until the scanner has been denied admission at least
+// once for the named reason. The stall COUNT is deterministic — with the
+// consumer not draining, occupancy pins at the admission floor and the
+// scanner must park — where the stall DURATION only records how long it
+// happened to stay parked, which is a scheduling outcome and was the
+// source of the flake in #421. The generous deadline is a liveness bound,
+// not a timing assertion.
+func awaitStall(tb testing.TB, reason string, get func() int64) {
+	tb.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for get() == 0 {
+		if time.Now().After(deadline) {
+			tb.Fatalf("scanner never stalled on %s", reason)
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
+}
+
 // TestShuffleDecodeAhead_MatchesSerial is the core parity gate: same
 // batches, same order, same values as the serial streaming reader, across
 // every WSHF-supported column class, with an empty chunk in the wire.
@@ -110,13 +128,13 @@ func TestShuffleDecodeAhead_ZeroTokens(t *testing.T) {
 
 	var stats shuffleDecodeAheadStats
 	r := openDecodeAhead(t, wire, 4, newCPUTokens(0), nil, false, &stats)
+	// Same shape as the pressure/window arms: the stall is forced by
+	// holding the consumer, then counted (#421).
+	awaitStall(t, "token", stats.tokenStalls.Load)
 	got := drain(t, r.Next)
 	requireBatchesEqual(t, want, got)
 	if err := r.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
-	}
-	if stats.tokenStallNs.Load() == 0 {
-		t.Fatalf("expected token stalls with a zero-capacity pool")
 	}
 }
 
@@ -163,13 +181,15 @@ func TestShuffleDecodeAhead_UnderPressure(t *testing.T) {
 	for _, strict := range []bool{false, true} {
 		var stats shuffleDecodeAheadStats
 		r := openDecodeAhead(t, wire, 4, nil, func() bool { return true }, strict, &stats)
+		// Hold the consumer until admission has actually been denied:
+		// occupancy climbs to the floor (1 chunk ahead, 0 in strict) and
+		// stays there while nothing is delivered, so the stall is forced,
+		// not raced for.
+		awaitStall(t, "pressure", stats.pressureStalls.Load)
 		got := drain(t, r.Next)
 		requireBatchesEqual(t, want, got)
 		if err := r.Close(); err != nil {
 			t.Fatalf("strict=%v Close: %v", strict, err)
-		}
-		if stats.pressureNs.Load() == 0 {
-			t.Fatalf("strict=%v: expected pressure stalls with hook forced on", strict)
 		}
 	}
 }
@@ -187,13 +207,14 @@ func TestShuffleDecodeAhead_WindowBound(t *testing.T) {
 
 	var stats shuffleDecodeAheadStats
 	r := openDecodeAhead(t, wire, 4, nil, nil, false, &stats)
+	// Every chunk past the delivery cursor is oversized against a 1-byte
+	// window, so the scanner parks on the second chunk before the consumer
+	// touches the reader.
+	awaitStall(t, "window-full", stats.windowFullStalls.Load)
 	got := drain(t, r.Next)
 	requireBatchesEqual(t, want, got)
 	if err := r.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
-	}
-	if stats.windowFullNs.Load() == 0 {
-		t.Fatalf("expected window-full stalls with a 1-byte window")
 	}
 }
 

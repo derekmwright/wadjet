@@ -110,11 +110,19 @@ type shuffleDecodeAheadStats struct {
 	windowFullNs atomic.Int64
 	tokenStallNs atomic.Int64
 	pressureNs   atomic.Int64
-	stageNs      atomic.Int64
-	decodeNs     atomic.Int64
-	donated      atomic.Int64
-	preadNs      atomic.Int64 // index mode: worker-side extent read time
-	indexedFiles atomic.Int64 // readers that engaged WIDX index staging
+	// Stall COUNTS beside the stall durations (the scan-side decode-ahead
+	// already folds both, see Executor.foldScanDecodeAheadQueryStats). A
+	// count is the deterministic fact — "admission was denied" — where the
+	// duration only says how long the scanner happened to be parked, which
+	// is a scheduling outcome (#421).
+	windowFullStalls atomic.Int64
+	tokenStalls      atomic.Int64
+	pressureStalls   atomic.Int64
+	stageNs          atomic.Int64
+	decodeNs         atomic.Int64
+	donated          atomic.Int64
+	preadNs          atomic.Int64 // index mode: worker-side extent read time
+	indexedFiles     atomic.Int64 // readers that engaged WIDX index staging
 }
 
 // shuffleDecodeSlot is one staged chunk moving through the pipeline: the
@@ -407,7 +415,7 @@ func (d *shuffleDecodeAhead) admit(est int64) (token, ok bool) {
 			return token, true
 		}
 		if d.inflight+est > d.limit {
-			d.timedWait(&d.stats.windowFullNs)
+			d.timedWait(&d.stats.windowFullNs, &d.stats.windowFullStalls)
 			continue
 		}
 		if d.pressure != nil && d.pressure() {
@@ -419,7 +427,7 @@ func (d *shuffleDecodeAhead) admit(est int64) (token, ok bool) {
 				// Never park holding donated capacity: pressure waits are
 				// unbounded from the pool's point of view.
 				d.flushDonatedLocked()
-				d.timedWait(&d.stats.pressureNs)
+				d.timedWait(&d.stats.pressureNs, &d.stats.pressureStalls)
 				continue
 			}
 		}
@@ -437,7 +445,7 @@ func (d *shuffleDecodeAhead) admit(est int64) (token, ok bool) {
 				// this scanner would decode (cpu_tokens.go).
 				d.tokenStalled = true
 				d.tokens.decodeStallBegin()
-				d.timedWait(&d.stats.tokenStallNs)
+				d.timedWait(&d.stats.tokenStallNs, &d.stats.tokenStalls)
 				d.tokens.decodeStallEnd()
 				d.tokenStalled = false
 				continue
@@ -491,7 +499,8 @@ func (d *shuffleDecodeAhead) flushDonated() {
 // timedWait waits on the delivery condvar, adding the parked span to ns.
 // Caller holds d.mu. Progress is guaranteed: undelivered > 0 on every wait
 // path, so a delivery (or stop) broadcast always arrives.
-func (d *shuffleDecodeAhead) timedWait(ns *atomic.Int64) {
+func (d *shuffleDecodeAhead) timedWait(ns, count *atomic.Int64) {
+	count.Add(1)
 	t0 := time.Now()
 	d.cond.Wait()
 	ns.Add(time.Since(t0).Nanoseconds())
