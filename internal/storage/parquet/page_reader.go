@@ -124,6 +124,52 @@ type ColumnPageReader struct {
 	deferDictIdx  bool
 	pendingIdxRLE []byte
 	pendingIdxBW  int
+
+	// Row budget (SetRowBudget): how many rows the ROW GROUP says this
+	// chunk holds, and how many the pages walked so far have claimed. Zero
+	// means the caller did not say, and nothing is enforced. See chargeRows.
+	rowBudget int
+	rowsSeen  int
+}
+
+// SetRowBudget tells the reader how many rows the row group holds, so a page
+// header cannot claim more than the file elsewhere says exist. FileReader
+// sets it for every reader it hands out; see chargeRows for what it buys.
+func (r *ColumnPageReader) SetRowBudget(rows int) { r.rowBudget = rows }
+
+// chargeRows holds a data page's declared value count to the rows the row
+// group has left.
+//
+// num_values is a thrift i32 that decodeDataPageV1/V2 size an allocation from
+// before anything looks at the page body: one int32 per value for the
+// definition levels, and another per value for the dictionary indices. The
+// header bound (MaxPageValues) leaves that at 64 MiB per column, and the scan
+// fans out per column, so a twenty-byte page header still buys a lot of
+// memory per corrupt file.
+//
+// The exact bound is the row group's own row count, and for a FLAT leaf it is
+// exact: one value per row, and the chunk's pages sum to the row group's
+// rows. Nested leaves have more values than rows — that is what repetition
+// levels are for — so they keep only the header bound.
+func (r *ColumnPageReader) chargeRows(ph *PageHeader) error {
+	if r.rowBudget <= 0 || r.maxRepLevel > 0 {
+		return nil
+	}
+	var n int
+	switch {
+	case ph.DataPageHeader != nil:
+		n = int(ph.DataPageHeader.NumValues)
+	case ph.DataPageHeaderV2 != nil:
+		n = int(ph.DataPageHeaderV2.NumValues)
+	default:
+		return nil
+	}
+	if left := r.rowBudget - r.rowsSeen; n > left {
+		return fmt.Errorf("page declares %d values but the row group has %d of its %d rows left",
+			n, left, r.rowBudget)
+	}
+	r.rowsSeen += n
+	return nil
 }
 
 // DeferDictIndices stops dictionary-encoded data pages from expanding
@@ -411,6 +457,9 @@ func (r *ColumnPageReader) NextPageMaybeSkip(shouldSkip func(numRows int) bool) 
 		}
 		compressedData, next, err := r.pageBody(bodyOff, ph)
 		if err != nil {
+			return nil, err
+		}
+		if err := r.chargeRows(ph); err != nil {
 			return nil, err
 		}
 		r.off = next

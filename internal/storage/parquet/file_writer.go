@@ -926,6 +926,16 @@ func (nw *NativeWriter) writeColumnChunk(lb *leafBuffer) (uncompressed, compress
 // chunk ColumnMetaData carries the authoritative statistics either way,
 // and per-page stats would otherwise repeat the chunk bounds.
 func (nw *NativeWriter) writeDataPage(lb *leafBuffer, pr pageRange, single bool) (uncompressed, compressed int64, err error) {
+	// The reader refuses a page header claiming more than MaxPageValues, so
+	// the writer must not produce one. pageRowRanges splits by BYTES and
+	// declines to split at all for BOOLEAN, INT96, FIXED_LEN and nested
+	// leaves, so a large enough RowGroupSize (or a wide enough array) can
+	// reach the ceiling on those. Failing here names the knob; writing the
+	// file would produce one this package cannot read back.
+	if n := pr.rowEnd - pr.rowStart; n > MaxPageValues {
+		return 0, 0, fmt.Errorf("column %q: a page would declare %d values, past the %d a page may hold "+
+			"— lower WriterConfig.RowGroupSize", lb.col.Name, n, MaxPageValues)
+	}
 	var pageBuf bytes.Buffer
 
 	// Write repetition levels (RLE encoded with 4-byte LE length prefix).

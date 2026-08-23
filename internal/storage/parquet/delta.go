@@ -104,7 +104,7 @@ func decodeDeltaBinaryPacked(data []byte, n int) ([]int64, error) {
 	if numMiniblocks == 0 {
 		return nil, fmt.Errorf("delta: numMiniblocks is 0")
 	}
-	if blockSize > 1<<20 || numMiniblocks > 1<<20 || totalValues > 10_000_000 {
+	if blockSize > 1<<20 || numMiniblocks > 1<<20 || totalValues > MaxPageValues {
 		return nil, fmt.Errorf("delta: unreasonable params: blockSize=%d numMiniblocks=%d totalValues=%d", blockSize, numMiniblocks, totalValues)
 	}
 
@@ -115,7 +115,20 @@ func decodeDeltaBinaryPacked(data []byte, n int) ([]int64, error) {
 		count = n
 	}
 
-	result := make([]int64, 0, count)
+	// Grow into the result rather than sizing it from the header. count comes
+	// from totalValues, and the header is not the body: a seven-byte page can
+	// declare millions of values, and a run of miniblocks at bit width zero
+	// costs no payload bytes at all, so there is no ratio that bounds one by
+	// the other. Appending reaches a legitimate count in a handful of
+	// doublings — the largest page any real writer emits is 20,000 values —
+	// and an illegitimate one dies at the first block whose bytes are
+	// missing, having allocated 32 KiB rather than 80 MB.
+	const deltaPrealloc = 1 << 12
+	prealloc := count
+	if prealloc > deltaPrealloc {
+		prealloc = deltaPrealloc
+	}
+	result := make([]int64, 0, prealloc)
 	result = append(result, firstValue)
 	if count == 1 {
 		return result, nil
@@ -127,6 +140,11 @@ func decodeDeltaBinaryPacked(data []byte, n int) ([]int64, error) {
 	}
 	remaining := count - 1
 
+	// One bit-width buffer for the whole walk. It used to be allocated per
+	// BLOCK, and numMiniblocks may be up to 2^20 — a mebibyte per block, out
+	// of a page body that may be seven bytes long.
+	bitWidths := make([]byte, numMiniblocks)
+
 	for remaining > 0 {
 		// Read block header: min delta + bit widths per miniblock.
 		minDelta, err := readZigzag()
@@ -134,7 +152,6 @@ func decodeDeltaBinaryPacked(data []byte, n int) ([]int64, error) {
 			return nil, fmt.Errorf("delta: reading min delta: %w", err)
 		}
 
-		bitWidths := make([]byte, numMiniblocks)
 		if off+int(numMiniblocks) > len(data) {
 			return nil, fmt.Errorf("delta: not enough data for bit widths")
 		}
@@ -225,6 +242,20 @@ func DecodeDeltaLengthByteArray(data []byte, n int) (Values, error) {
 
 // findDeltaDataEnd scans the delta header to find the byte offset where
 // the encoded length data ends (and the actual byte values begin).
+//
+// It walks the same blocks decodeDeltaBinaryPacked does, but for a different
+// number of values — the caller may read a PREFIX of the stream, while the
+// byte data begins after ALL of it — so the two walks cannot be merged.
+//
+// What it must not do is walk past the end of the data. It used to: its
+// readVarint returns 0 without advancing off once off reaches len(data), so
+// the block loop kept going with nothing left to read, allocating one
+// bit-width array per block (up to a mebibyte each, numMiniblocks being an
+// unvalidated header field) against a value count the header had claimed. A
+// seven-byte page body cost milliseconds that way, and it was what stalled
+// FuzzDecodePageValues to zero execs per second. The caller compares the
+// returned offset against len(data) and refuses; stopping at the end of the
+// data reaches that refusal without the walk.
 func findDeltaDataEnd(data []byte, n int) int {
 	off := 0
 	readVarint := func() uint64 {
@@ -260,12 +291,22 @@ func findDeltaDataEnd(data []byte, n int) int {
 		miniblockSize = 1
 	}
 
+	bitWidths := make([]byte, numMiniblocks)
+
 	for remaining > 0 {
+		if off >= len(data) {
+			// Nothing left to scan. Whatever the header claims, the stream
+			// ended here, and off is already at or past len(data) — which is
+			// exactly what the caller checks.
+			return off
+		}
 		readZigzag() // min delta
 
-		bitWidths := make([]byte, numMiniblocks)
+		clear(bitWidths)
 		if off+int(numMiniblocks) <= len(data) {
 			copy(bitWidths, data[off:off+int(numMiniblocks)])
+		} else if off < len(data) {
+			copy(bitWidths, data[off:])
 		}
 		off += int(numMiniblocks)
 

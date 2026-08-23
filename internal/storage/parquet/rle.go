@@ -275,6 +275,25 @@ func init() {
 	// The batch decoder is the real implementation.
 }
 
+// checkRLECount bounds the one number these decoders allocate from.
+//
+// The body cannot bound it and never could: an RLE run encodes arbitrarily
+// many equal values in a handful of bytes, so nine bytes can legitimately
+// declare 2^31 of them. count comes from a page header instead, and
+// MaxPageValues is what holds that to something a writer produces. Callers
+// who know the row group's own row count apply the tight bound before ever
+// reaching here (ColumnPageReader.chargeRows); this is the floor under the
+// ones who do not.
+func checkRLECount(count int) error {
+	if count < 0 {
+		return fmt.Errorf("rle: value count %d is negative", count)
+	}
+	if count > MaxPageValues {
+		return fmt.Errorf("rle: value count %d is past the %d a page may declare", count, MaxPageValues)
+	}
+	return nil
+}
+
 // DecodeRLEInt32 decodes RLE/bit-packing hybrid encoded data into a slice of int32.
 // This is the primary entry point for decoding definition levels and dictionary indices.
 func DecodeRLEInt32(data []byte, bitWidth, count int) ([]int32, error) {
@@ -286,6 +305,9 @@ func DecodeRLEInt32(data []byte, bitWidth, count int) ([]int32, error) {
 // per-chunk scratch buffer turns ~50 allocations per column chunk into
 // one (allocation zeroing was a third of the 100-part narrow-scan floor).
 func DecodeRLEInt32Into(dst []int32, data []byte, bitWidth, count int) ([]int32, error) {
+	if err := checkRLECount(count); err != nil {
+		return nil, err
+	}
 	if cap(dst) < count {
 		dst = make([]int32, count)
 	} else {
@@ -314,6 +336,9 @@ func DecodeRLEInt32WithLengthInto(dst []int32, data []byte, bitWidth, count int)
 	length := int(binary.LittleEndian.Uint32(data[:4]))
 	if 4+length > len(data) {
 		return nil, 0, fmt.Errorf("rle: length %d exceeds data %d", length, len(data)-4)
+	}
+	if err := checkRLECount(count); err != nil {
+		return nil, 0, err
 	}
 	if cap(dst) < count {
 		dst = make([]int32, count)

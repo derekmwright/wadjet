@@ -237,6 +237,13 @@ func (f *FileReader) ColumnPages(rgIdx, colIdx int) *ColumnPageReader {
 		pr.SetTypeLength(int(f.leaves[colIdx].TypeLength))
 	}
 
+	// The row group's row count is the exact bound on what this chunk's page
+	// headers may claim, for a flat leaf. Setting it here rather than at each
+	// of the seven call sites is what makes it hold everywhere.
+	if rg.NumRows > 0 && rg.NumRows <= MaxRowsPerRowGroup {
+		pr.SetRowBudget(int(rg.NumRows))
+	}
+
 	return pr
 }
 
