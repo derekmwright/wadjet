@@ -216,8 +216,13 @@ func structuredConjuncts(expr plansql.Node) []Predicate {
 			continue
 		}
 		var val any
+		var valText string
 		switch lit.Kind {
 		case plansql.LitNumber:
+			// The box is for the estimator and the typed comparisons; the
+			// TEXT is what a DECIMAL column's prune and filter convert at the
+			// column's scale, which a float64 box cannot survive (#452).
+			valText = lit.Value
 			if iv, err := strconv.ParseInt(lit.Value, 10, 64); err == nil {
 				val = iv
 			} else if fv, err := strconv.ParseFloat(lit.Value, 64); err == nil {
@@ -234,7 +239,8 @@ func structuredConjuncts(expr plansql.Node) []Predicate {
 		if col.Table != "" {
 			name = col.Table + "." + col.Column
 		}
-		out = append(out, Predicate{Column: name, Op: op, Value: val, Raw: c.String(), ASTExpr: c, PruneOnly: true})
+		out = append(out, Predicate{Column: name, Op: op, Value: val, ValueText: valText,
+			Raw: c.String(), ASTExpr: c, PruneOnly: true})
 	}
 	return out
 }

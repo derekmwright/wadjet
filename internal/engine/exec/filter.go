@@ -125,6 +125,13 @@ func (c *lazyColIdx) resolveSlow(b *batch.RecordBatch, name string) int {
 
 // ColumnCompare creates a predicate that compares a column against a constant value.
 func ColumnCompare(colName string, op CompareOp, value any) Predicate {
+	return ColumnCompareLit(colName, op, value, "")
+}
+
+// ColumnCompareLit is ColumnCompare for a constant that came from a numeric
+// literal, carrying the literal's exact source text so a DECIMAL column is
+// compared in its own domain rather than against a float64 (#452).
+func ColumnCompareLit(colName string, op CompareOp, value any, litText string) Predicate {
 	col := &lazyColIdx{}
 	// Every literal conversion below is a pure function of `value`, so it
 	// happens ONCE, here, rather than behind a per-closure "resolved" flag
@@ -146,6 +153,16 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 	// a zero-length test, not a byte compare — and it is what keeps such a
 	// column eligible for the lengths-only scan decode.
 	emptyTest := strVal == "" && (op == OpEq || op == OpNe)
+	// A DECIMAL constant is resolved from TEXT at the column's scale. The
+	// literal's own text when there is one — fmt.Sprint of the float64 box
+	// has already lost the digits past a double (#452) — and the box's
+	// rendering otherwise, which is what the kernel does with it too.
+	decText := strVal
+	if litText != "" {
+		decText = litText
+	}
+	decLit := kernel.NewDecimalLiteral(decText)
+	kernelOp := toKernelOp(op)
 	return func(b *batch.RecordBatch, row int) bool {
 		idx := col.get(b, colName)
 		if idx < 0 {
@@ -214,7 +231,7 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 		case batch.TypeDecimal:
 			// Exact, at the column's own scale — the same rule the
 			// vectorized kernel applies, so the two paths cannot disagree.
-			return kernel.DecimalRowCompare(v, row, strVal, toKernelOp(op))
+			return decLit.Compare(v, row, kernelOp)
 		}
 		return false
 	}
@@ -411,6 +428,13 @@ type KernelFilter struct {
 	ColName string
 	Op      CompareOp
 	Value   any
+	// LitText is the constant's exact source text, carried alongside the box
+	// for the one type whose values a float64 cannot hold: a DECIMAL column's
+	// kernel takes the TEXT and converts it at the column's own scale, so a
+	// literal with more significant digits than a double survives (#452).
+	// Used only when the resolved column is a DECIMAL — every other kernel
+	// reads Value exactly as before. Empty for a non-numeric constant.
+	LitText string
 	// RowFallback, when non-nil, evaluates the original comparison row-at-
 	// a-time. Used when ColName is a ROW-field access ("attrs.score") that
 	// the typed kernel cannot evaluate — the planner attaches the compiled
@@ -429,6 +453,25 @@ type KernelFilter struct {
 // NewKernelFilter creates a filter that uses typed kernels for comparison.
 func NewKernelFilter(colName string, op CompareOp, value any) *KernelFilter {
 	return &KernelFilter{ColName: colName, Op: op, Value: value}
+}
+
+// NewKernelFilterLit is NewKernelFilter for a constant that came from a
+// numeric literal, carrying the literal's exact source text for a DECIMAL
+// column (#452).
+func NewKernelFilterLit(colName string, op CompareOp, value any, litText string) *KernelFilter {
+	return &KernelFilter{ColName: colName, Op: op, Value: value, LitText: litText}
+}
+
+// decimalLitValue substitutes a numeric literal's exact source text for its
+// float64 box when the column being compared is a DECIMAL, whose values a
+// float64 cannot represent past ~15-16 significant digits. The DECIMAL
+// kernels take their constant as text and convert it at the column's scale
+// (kernel.compareFilterDecimal); every other type reads the box.
+func decimalLitValue(typ batch.TypeID, value any, litText string) any {
+	if typ == batch.TypeDecimal && litText != "" {
+		return litText
+	}
+	return value
 }
 
 func (f *KernelFilter) Init(_ context.Context) error { return nil }
@@ -452,7 +495,8 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 		}
 		if f.colIdx >= 0 {
 			typ := in.Columns[f.colIdx].Type
-			f.kern = kernel.ResolveFilterKernel(typ, toKernelOp(f.Op), f.Value)
+			f.kern = kernel.ResolveFilterKernel(typ, toKernelOp(f.Op),
+				decimalLitValue(typ, f.Value, f.LitText))
 		}
 		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
@@ -500,22 +544,33 @@ func (f *KernelFilter) Close() error { return nil }
 // Clone returns a new KernelFilter with the same parameters but fresh
 // resolution state and scratch buffers for concurrent Execute calls.
 func (f *KernelFilter) Clone() UnaryOperator {
-	return &KernelFilter{ColName: f.ColName, Op: f.Op, Value: f.Value, RowFallback: f.RowFallback}
+	return &KernelFilter{ColName: f.ColName, Op: f.Op, Value: f.Value,
+		LitText: f.LitText, RowFallback: f.RowFallback}
 }
 
 // InFilter uses a vectorized kernel for set membership testing (IN / NOT IN).
 type InFilter struct {
-	ColName  string
-	Values   []any
-	Negate   bool
-	colIdx   int
-	kern     kernel.FilterKernel
-	outSel   []uint32
-	resolved bool
+	ColName string
+	Values  []any
+	Negate  bool
+	// ValueTexts holds each value's exact literal source text, parallel to
+	// Values, for a DECIMAL column — see KernelFilter.LitText (#452). Nil, or
+	// an empty entry, keeps the boxed value.
+	ValueTexts []string
+	colIdx     int
+	kern       kernel.FilterKernel
+	outSel     []uint32
+	resolved   bool
 }
 
 func NewInFilter(colName string, values []any, negate bool) *InFilter {
 	return &InFilter{ColName: colName, Values: values, Negate: negate}
+}
+
+// NewInFilterLit is NewInFilter for a list of numeric literals, carrying each
+// literal's exact source text for a DECIMAL column (#452).
+func NewInFilterLit(colName string, values []any, texts []string, negate bool) *InFilter {
+	return &InFilter{ColName: colName, Values: values, ValueTexts: texts, Negate: negate}
 }
 
 func (f *InFilter) Init(_ context.Context) error { return nil }
@@ -529,7 +584,7 @@ func (f *InFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Rec
 		}
 		if f.colIdx >= 0 {
 			typ := in.Columns[f.colIdx].Type
-			f.kern = kernel.ResolveInFilterKernel(typ, f.Values, f.Negate)
+			f.kern = kernel.ResolveInFilterKernel(typ, f.kernelValues(typ), f.Negate)
 		}
 		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
@@ -560,8 +615,22 @@ func (f *InFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Rec
 
 func (f *InFilter) Close() error { return nil }
 
+// kernelValues is Values with each member's exact literal text substituted for
+// a DECIMAL column (#452); the slice is unchanged for every other type.
+func (f *InFilter) kernelValues(typ batch.TypeID) []any {
+	if typ != batch.TypeDecimal || len(f.ValueTexts) != len(f.Values) {
+		return f.Values
+	}
+	out := make([]any, len(f.Values))
+	for i, v := range f.Values {
+		out[i] = decimalLitValue(typ, v, f.ValueTexts[i])
+	}
+	return out
+}
+
 func (f *InFilter) Clone() UnaryOperator {
-	return &InFilter{ColName: f.ColName, Values: f.Values, Negate: f.Negate}
+	return &InFilter{ColName: f.ColName, Values: f.Values,
+		ValueTexts: f.ValueTexts, Negate: f.Negate}
 }
 
 // LikeFilter uses a vectorized kernel for SQL LIKE pattern matching.

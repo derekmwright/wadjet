@@ -229,16 +229,6 @@ const (
 	pgBugUnsupported = "UNIMPLEMENTED IN WADJET:"
 )
 
-// wideLiteralPin is #452: compileLit turns every numeric literal that is not
-// an exact int64 into a float64, so a literal with more than ~16 significant
-// digits is replaced by the nearest double before it ever meets the column.
-// The rounded literal here sits 0.0286 BELOW the value row 150 holds, which is
-// why the same defect makes `=` match nothing, `>` gain a row, `<>` gain it
-// back, and `>=` and `<` agree by luck. Storage and the comparator are exact —
-// ORDER BY, SUM, AVG and MIN/MAX all agree — so this is the literal alone.
-const wideLiteralPin = pgBugWadjet + " a DECIMAL literal wider than float64 is rounded before the " +
-	"comparison, so the value compared is not the value typed"
-
 // postgresCorpus is the 22 TPC-H queries plus the PostgreSQL-semantics shapes
 // they leave dark.
 //
@@ -384,23 +374,18 @@ func postgresSemanticsCases() []pgCase {
 	// comparison and the fingerprint's tolerance covers the last digits, so
 	// they catch an arithmetic defect and not a boxing one.
 	out = append(out,
-		pgCase{name: "WideDecimalEq", sql: `SELECT d_key FROM dec_probe WHERE d_wide = 493827160549382.7160549350 ORDER BY d_key`,
-			knownBug: wideLiteralPin, issue: "#452"},
-		pgCase{name: "WideDecimalEqNegative", sql: `SELECT d_key FROM dec_probe WHERE d_wide = -888888888988888.8888988830 ORDER BY d_key`,
-			knownBug: wideLiteralPin, issue: "#452"},
+		pgCase{name: "WideDecimalEq", sql: `SELECT d_key FROM dec_probe WHERE d_wide = 493827160549382.7160549350 ORDER BY d_key`},
+		pgCase{name: "WideDecimalEqNegative", sql: `SELECT d_key FROM dec_probe WHERE d_wide = -888888888988888.8888988830 ORDER BY d_key`},
 		pgCase{name: "WideDecimalEqZero", sql: `SELECT d_key FROM dec_probe WHERE d_wide = 0 ORDER BY d_key`},
 		// One unit of the last decimal place apart from a value that IS in the
 		// column. A float64 cannot tell these two literals apart at all.
 		pgCase{name: "WideDecimalEqOffByUlp", sql: `SELECT d_key FROM dec_probe WHERE d_wide = 493827160549382.7160549351 ORDER BY d_key`},
-		pgCase{name: "WideDecimalNe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide <> 493827160549382.7160549350`,
-			knownBug: wideLiteralPin, issue: "#452"},
+		pgCase{name: "WideDecimalNe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide <> 493827160549382.7160549350`},
 		pgCase{name: "WideDecimalLt", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide < 493827160549382.7160549350`},
-		pgCase{name: "WideDecimalGt", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide > 493827160549382.7160549350`,
-			knownBug: wideLiteralPin, issue: "#452"},
+		pgCase{name: "WideDecimalGt", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide > 493827160549382.7160549350`},
 		pgCase{name: "WideDecimalGe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide >= 493827160549382.7160549350`},
 		pgCase{name: "WideDecimalBetween", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide BETWEEN 493827160549382.7160549350 AND 740740740824074.0740824025`},
-		pgCase{name: "WideDecimalIn", sql: `SELECT d_key FROM dec_probe WHERE d_wide IN (493827160549382.7160549350, -888888888988888.8888988830, 0) ORDER BY d_key`,
-			knownBug: wideLiteralPin, issue: "#452"},
+		pgCase{name: "WideDecimalIn", sql: `SELECT d_key FROM dec_probe WHERE d_wide IN (493827160549382.7160549350, -888888888988888.8888988830, 0) ORDER BY d_key`},
 		pgCase{name: "WideDecimalIsNull", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide IS NULL`},
 		pgCase{name: "WideDecimalIsNotNull", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide IS NOT NULL`},
 		// ORDER BY on the wide column: the SEQUENCE of d_key is the answer, so

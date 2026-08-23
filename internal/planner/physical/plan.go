@@ -9029,7 +9029,7 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 
 	if pred.Column != "" && pred.Op != "" {
 		op := parseCompareOp(pred.Op)
-		return exec.NewFilter(exec.ColumnCompare(pred.Column, op, pred.Value)), nil
+		return exec.NewFilter(exec.ColumnCompareLit(pred.Column, op, pred.Value, pred.ValueText)), nil
 	}
 
 	return nil, nil
@@ -9108,8 +9108,12 @@ func colColFilterWithRowFallback(left, right string, op exec.CompareOp, cmp expr
 	return f
 }
 
-func kernelFilterWithRowFallback(name string, op exec.CompareOp, val any, cmp expr.Expr) *exec.KernelFilter {
-	kf := exec.NewKernelFilter(name, op, val)
+func kernelFilterWithRowFallback(name string, op exec.CompareOp, lit *expr.Lit, cmp expr.Expr) *exec.KernelFilter {
+	// The literal's own TEXT travels with its box. A DECIMAL column's kernel
+	// converts the text at the column's scale, which is the only way a
+	// literal past a float64's ~15-16 significant digits reaches the
+	// comparison as the number that was written (#452).
+	kf := exec.NewKernelFilterLit(name, op, lit.Val, lit.Text)
 	if strings.Contains(name, ".") {
 		kf.RowFallback = wrapPredicate(cmp)
 	}
@@ -9134,13 +9138,13 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 		// col op const
 		if lc, lok := v.Left.(*expr.ColRef); lok {
 			if lit, rok := v.Right.(*expr.Lit); rok {
-				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit.Val, v)}
+				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit, v)}
 			}
 		}
 		// const op col → flip
 		if lit, lok := v.Left.(*expr.Lit); lok {
 			if rc, rok := v.Right.(*expr.ColRef); rok {
-				return []exec.UnaryOperator{kernelFilterWithRowFallback(rc.Name, flipOp(op), lit.Val, v)}
+				return []exec.UnaryOperator{kernelFilterWithRowFallback(rc.Name, flipOp(op), lit, v)}
 			}
 		}
 	case *expr.CmpInt64:
@@ -9153,7 +9157,7 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 				return []exec.UnaryOperator{colColFilterWithRowFallback(lc.Name, rc.Name, op, v)}
 			}
 			if lit, rok := v.Right.(*expr.Lit); rok {
-				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit.Val, v)}
+				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit, v)}
 			}
 		}
 	case *expr.CmpFloat64:
@@ -9166,7 +9170,7 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 				return []exec.UnaryOperator{colColFilterWithRowFallback(lc.Name, rc.Name, op, v)}
 			}
 			if lit, rok := v.Right.(*expr.Lit); rok {
-				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit.Val, v)}
+				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit, v)}
 			}
 		}
 	case *expr.And:
@@ -9204,13 +9208,13 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 				if hi, hok := v.Hi.(*expr.Lit); hok {
 					if v.Not {
 						return []exec.UnaryOperator{exec.NewOrFilter(
-							exec.NewKernelFilter(col.Name, exec.OpLt, lo.Val),
-							exec.NewKernelFilter(col.Name, exec.OpGt, hi.Val),
+							exec.NewKernelFilterLit(col.Name, exec.OpLt, lo.Val, lo.Text),
+							exec.NewKernelFilterLit(col.Name, exec.OpGt, hi.Val, hi.Text),
 						)}
 					}
 					return []exec.UnaryOperator{
-						exec.NewKernelFilter(col.Name, exec.OpGe, lo.Val),
-						exec.NewKernelFilter(col.Name, exec.OpLe, hi.Val),
+						exec.NewKernelFilterLit(col.Name, exec.OpGe, lo.Val, lo.Text),
+						exec.NewKernelFilterLit(col.Name, exec.OpLe, hi.Val, hi.Text),
 					}
 				}
 			}
@@ -9219,14 +9223,16 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 		// col IN (lit, lit, ...) or col NOT IN (lit, lit, ...)
 		if col, ok := v.Expr.(*expr.ColRef); ok {
 			values := make([]any, 0, len(v.Values))
+			texts := make([]string, 0, len(v.Values))
 			for _, val := range v.Values {
 				if lit, ok := val.(*expr.Lit); ok {
 					values = append(values, lit.Val)
+					texts = append(texts, lit.Text)
 				} else {
 					return nil // non-literal in IN list
 				}
 			}
-			return []exec.UnaryOperator{exec.NewInFilter(col.Name, values, v.Not)}
+			return []exec.UnaryOperator{exec.NewInFilterLit(col.Name, values, texts, v.Not)}
 		}
 	case *expr.Like:
 		// col LIKE 'pattern' or col NOT LIKE 'pattern'
@@ -9255,7 +9261,7 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 		if v.Not {
 			op = exec.OpNe
 		}
-		return []exec.UnaryOperator{kernelFilterWithRowFallback(v.Col.Name, op, "", v)}
+		return []exec.UnaryOperator{kernelFilterWithRowFallback(v.Col.Name, op, &expr.Lit{Val: ""}, v)}
 	case *expr.Not:
 		// NOT (expr) — try to vectorize the inner expression
 		inner := extractFilterOps(v.Operand)
@@ -9676,7 +9682,7 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 			col := cleanExpr(strings.TrimSpace(parts[0]))
 			valStr := strings.TrimSpace(parts[1])
 			val := parseValue(valStr)
-			return exec.NewKernelFilter(col, o.op, val)
+			return exec.NewKernelFilterLit(col, o.op, val, numericLitText(valStr))
 		}
 	}
 
@@ -9711,11 +9717,12 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 		rest := strings.TrimSpace(raw[idx+len(" BETWEEN "):])
 		andIdx := strings.Index(strings.ToUpper(rest), " AND ")
 		if andIdx >= 0 {
-			lo := parseValue(strings.TrimSpace(rest[:andIdx]))
-			hi := parseValue(strings.TrimSpace(rest[andIdx+len(" AND "):]))
+			loStr := strings.TrimSpace(rest[:andIdx])
+			hiStr := strings.TrimSpace(rest[andIdx+len(" AND "):])
+			lo, hi := parseValue(loStr), parseValue(hiStr)
 			return exec.NewChainFilter([]exec.UnaryOperator{
-				exec.NewKernelFilter(col, exec.OpGe, lo),
-				exec.NewKernelFilter(col, exec.OpLe, hi),
+				exec.NewKernelFilterLit(col, exec.OpGe, lo, numericLitText(loStr)),
+				exec.NewKernelFilterLit(col, exec.OpLe, hi, numericLitText(hiStr)),
 			})
 		}
 	}
@@ -9728,15 +9735,48 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 		rest = strings.TrimSuffix(rest, ")")
 		parts := strings.Split(rest, ",")
 		values := make([]any, 0, len(parts))
+		texts := make([]string, 0, len(parts))
 		for _, part := range parts {
-			values = append(values, parseValue(strings.TrimSpace(part)))
+			part = strings.TrimSpace(part)
+			values = append(values, parseValue(part))
+			texts = append(texts, numericLitText(part))
 		}
 		if len(values) > 0 {
-			return exec.NewInFilter(col, values, false)
+			return exec.NewInFilterLit(col, values, texts, false)
 		}
 	}
 
 	return nil
+}
+
+// numericLitText returns a raw predicate operand's text when it is a plain
+// decimal number, and "" otherwise. It is what lets a DECIMAL comparison
+// built from raw SQL text keep the digits the float64 box drops (#452);
+// exponent forms are deliberately not included, so they keep the box.
+func numericLitText(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	i := 0
+	if s[0] == '+' || s[0] == '-' {
+		i++
+	}
+	digits, dot := false, false
+	for ; i < len(s); i++ {
+		switch {
+		case s[i] >= '0' && s[i] <= '9':
+			digits = true
+		case s[i] == '.' && !dot:
+			dot = true
+		default:
+			return ""
+		}
+	}
+	if !digits {
+		return ""
+	}
+	return s
 }
 
 func parseValue(s string) any {
@@ -10887,7 +10927,15 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		if !known {
 			continue
 		}
-		val, ok := kernel.StatsDomainValue(col.Type, int(col.Scale), pred.Value)
+		// A DECIMAL bound is converted from the literal's TEXT: the float64
+		// box has already dropped the digits past a double, and a bound that
+		// is off by a fraction of the last place prunes the row group the
+		// answer is in (#452).
+		lit := pred.Value
+		if col.Type == parquet.TypeDecimal && pred.ValueText != "" {
+			lit = pred.ValueText
+		}
+		val, ok := kernel.StatsDomainValue(col.Type, int(col.Scale), lit)
 		if !ok {
 			continue
 		}

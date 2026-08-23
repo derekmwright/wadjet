@@ -380,7 +380,7 @@ func compileWithParamRefs(node plansql.Node, paramIdx map[string]int) (Expr, err
 		default:
 			op = CmpEq
 		}
-		return &Cmp{Left: left, Right: right, Op: op}, nil
+		return NewCmp(left, right, op), nil
 
 	case *plansql.InExpr:
 		left, err := compileWithParamRefs(n.Left, paramIdx)
@@ -395,7 +395,7 @@ func compileWithParamRefs(node plansql.Node, paramIdx map[string]int) (Expr, err
 			}
 			values = append(values, compiled)
 		}
-		return &In{Expr: left, Values: values, Not: n.Not}, nil
+		return NewIn(left, values, n.Not), nil
 
 	case *plansql.BetweenExpr:
 		expr, err := compileWithParamRefs(n.Left, paramIdx)
@@ -410,7 +410,7 @@ func compileWithParamRefs(node plansql.Node, paramIdx map[string]int) (Expr, err
 		if err != nil {
 			return nil, err
 		}
-		return &Between{Expr: expr, Low: low, Hi: hi, Not: n.Not}, nil
+		return NewBetween(expr, low, hi, n.Not), nil
 
 	case *plansql.LikeExpr:
 		left, err := compileWithParamRefs(n.Left, paramIdx)
@@ -611,11 +611,8 @@ func cloneExprWithArgs(e Expr, argsPtr *[]any) Expr {
 			Op:      n.Op,
 		}
 	case *Cmp:
-		return &Cmp{
-			Left:  cloneExprWithArgs(n.Left, argsPtr),
-			Right: cloneExprWithArgs(n.Right, argsPtr),
-			Op:    n.Op,
-		}
+		return NewCmp(cloneExprWithArgs(n.Left, argsPtr),
+			cloneExprWithArgs(n.Right, argsPtr), n.Op)
 	case *And:
 		return &And{
 			Left:  cloneExprWithArgs(n.Left, argsPtr),
@@ -686,18 +683,11 @@ func cloneExprWithArgs(e Expr, argsPtr *[]any) Expr {
 		for i, v := range n.Values {
 			values[i] = cloneExprWithArgs(v, argsPtr)
 		}
-		return &In{
-			Expr:   cloneExprWithArgs(n.Expr, argsPtr),
-			Values: values,
-			Not:    n.Not,
-		}
+		return NewIn(cloneExprWithArgs(n.Expr, argsPtr), values, n.Not)
 	case *Between:
-		return &Between{
-			Expr: cloneExprWithArgs(n.Expr, argsPtr),
-			Low:  cloneExprWithArgs(n.Low, argsPtr),
-			Hi:   cloneExprWithArgs(n.Hi, argsPtr),
-			Not:  n.Not,
-		}
+		return NewBetween(cloneExprWithArgs(n.Expr, argsPtr),
+			cloneExprWithArgs(n.Low, argsPtr),
+			cloneExprWithArgs(n.Hi, argsPtr), n.Not)
 	case *Like:
 		return &Like{
 			Expr:    cloneExprWithArgs(n.Expr, argsPtr),

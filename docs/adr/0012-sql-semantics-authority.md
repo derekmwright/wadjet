@@ -81,7 +81,41 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      here only because early declared-schema code guessed STRING for every
      MIN/MAX before the input-typed fix.
 
-6. **Semantics decisions are technical, not product.** They are made and
+7. **A numeric literal's carrier is its TEXT, not a float64.** (Added
+   2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
+   `numeric` and compares it at full precision, so `WHERE d = 493827160549382.7160549350`
+   must find the row holding that value. A float64 carries ~15-16 significant
+   decimal digits and a `DECIMAL(38,10)` carries 38, so the box the compiler
+   builds for arithmetic cannot also be the record of which number was
+   written: it is a different number by the time it meets the column, and the
+   damage is not uniform — the rounded literal landed just BELOW the stored
+   value, so `=` matched nothing, `>` gained a row, `<>` gained it back, and
+   `>=` and `<` agreed by luck. Four operators agreeing is not partly right.
+
+   Three rules follow, and they hold on every path — the vectorized kernel,
+   the row-at-a-time expression, the raw-text predicate, and the row-group
+   prune:
+
+   - The literal's source text travels with its box (`expr.Lit.Text`,
+     `logical.Predicate.ValueText`, `exec.KernelFilter.LitText`) and is what
+     a DECIMAL comparison converts, at the COLUMN's scale.
+   - A literal the column's scale cannot hold exactly — `0.255` against a
+     `DECIMAL(9,2)` — equals nothing, and still has its place in the ORDER:
+     it sits strictly between two representable values, so `> 0.255` excludes
+     the row holding `0.25` that `>= 0.25` admits. Truncating the literal
+     instead would answer a different question; the residual of the discarded
+     digits is carried rather than dropped.
+   - One conversion serves the prune and the filter
+     (`kernel.StatsDomainValue`, `kernel.decimalLiteralAt`), because a prune
+     that reads the predicate differently from the filter deletes rows the
+     filter would have kept.
+
+   Arithmetic over DECIMAL still goes through float64, and so do MIN/MAX/SUM
+   over a DECIMAL column. That is a separate, visible limit — comparison is
+   where a rounded value silently changes the ROW SET, which is why it is
+   settled here first.
+
+8. **Semantics decisions are technical, not product.** They are made and
    executed, then reported — not escalated. An existing project commitment
    settles everything downstream of it; check for the commitment before
    drafting the question.
@@ -94,6 +128,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   *emitted* DuckDB's.
 - The differential gate keeps full strength across the ordering corpus rather
   than carrying exemptions.
+- A DECIMAL predicate answers the same on the kernel path and the row-at-a-time
+  path (changed 2026-08-23). The row path had compared a DECIMAL column's
+  RENDERED TEXT against a float64 literal and, finding no numeric reading of
+  that pair, fell through to a lexicographic string comparison — so
+  `CASE WHEN d = 1339815.97` was false for the row holding exactly that value
+  even at a scale a float64 represents perfectly.
 - Open questions in the same territory, to be decided by this ADR's rule and
   recorded when they are: integer overflow behavior, `timestamptz` and the
   session TimeZone GUC, empty-string versus NULL, identifier case folding.
@@ -108,3 +148,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 - CLAUDE.md, "Don't skip pgwire compatibility"
 - `benchmarks/tpch/oracle_semantics_test.go`, `internal/planner/physical/plan.go`
   (`resolveNullsLast`), `internal/distributed/messages.go` (`PlaceNullsLast`)
+- `internal/engine/exec/kernel/decimal_literal.go` (the literal, resolved at a
+  column's scale), `internal/engine/expr/decimal_literal.go` (the row path's
+  binding), `wadjet/decimal_literal_test.go` (the operator sweep at three
+  scales, both paths)

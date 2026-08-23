@@ -127,11 +127,15 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		// exactly as `7/2` does. Value-identical for floats.
 		if n.Op == "-" {
 			if lit, ok := operand.(*Lit); ok {
+				// The source text is negated with the box: it is the only
+				// exact record of a literal wider than a float64, and a
+				// negative bound is where a DECIMAL column's extreme values
+				// sit (#452).
 				switch v := lit.Val.(type) {
 				case int64:
-					return &Lit{Val: -v}, nil
+					return &Lit{Val: -v, Text: negateLitText(lit.Text)}, nil
 				case float64:
-					return &Lit{Val: -v}, nil
+					return &Lit{Val: -v, Text: negateLitText(lit.Text)}, nil
 				}
 			}
 		}
@@ -217,7 +221,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			}
 			values = append(values, compiled)
 		}
-		return &In{Expr: left, Values: values, Not: n.Not}, nil
+		return NewIn(left, values, n.Not), nil
 
 	case *plansql.BetweenExpr:
 		e, err := compileWithCtx(n.Left, ctx)
@@ -232,7 +236,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Between{Expr: e, Low: low, Hi: hi, Not: n.Not}, nil
+		return NewBetween(e, low, hi, n.Not), nil
 
 	case *plansql.LikeExpr:
 		left, err := compileWithCtx(n.Left, ctx)
@@ -420,7 +424,7 @@ func compileCmp(left, right Expr, op CmpOp) Expr {
 			return tl
 		}
 	}
-	generic := &Cmp{Left: left, Right: right, Op: op}
+	generic := NewCmp(left, right, op)
 	// Offsets-shape: `col = ''` / `col <> ''` is a zero-length test on the
 	// offsets array. WHERE SearchPhrase <> '' is the dominant filter shape
 	// across ClickBench Q22-Q27; the generic path copies every value out of
@@ -600,15 +604,21 @@ func isIntNative(e Expr) bool {
 func compileLit(n *plansql.Lit) (Expr, error) {
 	switch n.Kind {
 	case plansql.LitNumber:
+		// The source text rides along on every numeric literal. The box below
+		// is for arithmetic and is lossy by construction past a float64's
+		// ~15-16 significant digits, so it cannot be the only record of what
+		// the user wrote: a comparison against a DECIMAL column reads Text and
+		// answers in the column's own exact domain instead (#452).
+		//
 		// Try integer first
 		if i, err := strconv.ParseInt(n.Value, 10, 64); err == nil {
-			return &Lit{Val: i}, nil
+			return &Lit{Val: i, Text: n.Value}, nil
 		}
 		// Try float
 		if f, err := strconv.ParseFloat(n.Value, 64); err == nil {
-			return &Lit{Val: f}, nil
+			return &Lit{Val: f, Text: n.Value}, nil
 		}
-		return &Lit{Val: n.Value}, nil
+		return &Lit{Val: n.Value, Text: n.Value}, nil
 	case plansql.LitString:
 		return &Lit{Val: n.Value}, nil
 	case plansql.LitBool:

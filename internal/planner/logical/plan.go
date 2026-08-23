@@ -194,11 +194,17 @@ type Node struct {
 
 // Predicate is a filter condition.
 type Predicate struct {
-	Column  string
-	Op      string // =, !=, <, <=, >, >=, is_null, is_not_null, in, between
-	Value   any
-	Raw     string       // raw SQL expression
-	ASTExpr plansql.Node // compiled AST expression node
+	Column string
+	Op     string // =, !=, <, <=, >, >=, is_null, is_not_null, in, between
+	Value  any
+	// ValueText is a numeric Value's exact source text. Value is boxed for
+	// arithmetic and a float64 cannot hold a DECIMAL past ~15-16 significant
+	// digits, so the text is what the scan's prune and the row-at-a-time
+	// filter convert at the column's own scale (#452). Empty when Value did
+	// not come from a numeric literal.
+	ValueText string
+	Raw       string       // raw SQL expression
+	ASTExpr   plansql.Node // compiled AST expression node
 	// PruneOnly marks predicates attached solely for storage-level pruning
 	// (row-group stats / dictionary probes). The cardinality estimator
 	// ignores them: attaching AST-decomposed conjuncts must not shift

@@ -303,6 +303,15 @@ func (e *ColRef) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 // Lit returns a constant value.
 type Lit struct {
 	Val any
+	// Text is the numeric literal's source text, kept verbatim. Val is the
+	// literal boxed for arithmetic — an int64 where one is exact, a float64
+	// otherwise — and a float64 carries ~15-16 significant decimal digits
+	// where a DECIMAL(38,10) column carries 38, so the box alone cannot say
+	// which number was written (#452). Comparisons against a DECIMAL column
+	// read this instead and compare in the column's own domain; everything
+	// else keeps reading Val and is unchanged. Empty for a non-numeric
+	// literal.
+	Text string
 }
 
 func (e *Lit) Eval(_ *batch.RecordBatch, _ int) any {
@@ -937,6 +946,17 @@ const (
 type Cmp struct {
 	Left, Right Expr
 	Op          CmpOp
+	// dec is the DECIMAL-column-against-numeric-literal binding, set by
+	// NewCmp. Nil for every other operand shape — and for a Cmp assembled as
+	// a struct literal, which is why the compiler builds them through NewCmp
+	// (decimal_literal.go).
+	dec *decimalLitCmp
+}
+
+// NewCmp builds a comparison, binding the one operand shape that cannot be
+// answered through float64: a DECIMAL column against a numeric literal.
+func NewCmp(left, right Expr, op CmpOp) *Cmp {
+	return &Cmp{Left: left, Right: right, Op: op, dec: bindDecimalCmp(left, right)}
 }
 
 func (e *Cmp) Eval(b *batch.RecordBatch, row int) any {
@@ -944,15 +964,19 @@ func (e *Cmp) Eval(b *batch.RecordBatch, row int) any {
 }
 
 func (e *Cmp) EvalBool(b *batch.RecordBatch, row int) bool {
-	lv := e.Left.Eval(b, row)
-	rv := e.Right.Eval(b, row)
-	if lv == nil || rv == nil {
-		return false // UNKNOWN: a filter keeps neither UNKNOWN nor FALSE
-	}
-	return compare(lv, rv, e.Op)
+	v, null := e.EvalBoolNull(b, row)
+	return v && !null
 }
 
 func (e *Cmp) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	if e.dec != nil {
+		if vec := e.dec.vector(b); vec != nil {
+			if vec.Nulls.IsNullFast(row) {
+				return false, true // a comparison against NULL is UNKNOWN (#370)
+			}
+			return cmpOrder(e.dec.order(vec, row, 0), e.Op), false
+		}
+	}
 	lv := e.Left.Eval(b, row)
 	rv := e.Right.Eval(b, row)
 	if lv == nil || rv == nil {
@@ -1347,6 +1371,15 @@ type In struct {
 	Expr   Expr
 	Values []Expr
 	Not    bool
+	// dec binds a DECIMAL column against an all-numeric-literal list; see
+	// NewCmp and decimal_literal.go.
+	dec *decimalLitCmp
+}
+
+// NewIn builds a set-membership test, binding the DECIMAL-column-against-
+// numeric-literals shape.
+func NewIn(e Expr, values []Expr, not bool) *In {
+	return &In{Expr: e, Values: values, Not: not, dec: bindDecimalList(e, values)}
 }
 
 func (e *In) Eval(b *batch.RecordBatch, row int) any {
@@ -1364,6 +1397,21 @@ func (e *In) EvalBool(b *batch.RecordBatch, row int) bool {
 // `1 NOT IN (2, NULL)` must not answer true: PostgreSQL's reading is "I
 // don't know, so no" (#370).
 func (e *In) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	if e.dec != nil {
+		if vec := e.dec.vector(b); vec != nil {
+			if vec.Nulls.IsNullFast(row) {
+				return false, true
+			}
+			// Every member is a numeric literal here, so the list holds no
+			// NULL and the three-valued reading below cannot arise.
+			for i := range e.Values {
+				if e.dec.order(vec, row, i) == 0 {
+					return !e.Not, false
+				}
+			}
+			return e.Not, false
+		}
+	}
 	lv := e.Expr.Eval(b, row)
 	if lv == nil {
 		return false, true
@@ -1390,6 +1438,16 @@ type Between struct {
 	Expr    Expr
 	Low, Hi Expr
 	Not     bool
+	// dec binds a DECIMAL column against two numeric-literal bounds; see
+	// NewCmp and decimal_literal.go.
+	dec *decimalLitCmp
+}
+
+// NewBetween builds a range test, binding the DECIMAL-column-against-
+// numeric-literals shape.
+func NewBetween(e, low, hi Expr, not bool) *Between {
+	return &Between{Expr: e, Low: low, Hi: hi, Not: not,
+		dec: bindDecimalList(e, []Expr{low, hi})}
 }
 
 func (e *Between) Eval(b *batch.RecordBatch, row int) any {
@@ -1405,6 +1463,19 @@ func (e *Between) EvalBool(b *batch.RecordBatch, row int) bool {
 // bound does not force UNKNOWN — the other half can still answer FALSE
 // (`5 BETWEEN NULL AND 2` is false, and NOT BETWEEN flips it to true).
 func (e *Between) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	if e.dec != nil {
+		if vec := e.dec.vector(b); vec != nil {
+			if vec.Nulls.IsNullFast(row) {
+				return false, true
+			}
+			// Both bounds are numeric literals here, so neither half can be
+			// UNKNOWN and BETWEEN is the plain conjunction.
+			if e.dec.order(vec, row, 0) < 0 || e.dec.order(vec, row, 1) > 0 {
+				return e.Not, false
+			}
+			return !e.Not, false
+		}
+	}
 	v := e.Expr.Eval(b, row)
 	if v == nil {
 		return false, true
