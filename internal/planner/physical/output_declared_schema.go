@@ -185,6 +185,32 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			return nil
 		}
 		return emittedColTypes(n.Children[0])
+	case logical.NodeWindow:
+		// Window appends its output columns to the input batch in place — it
+		// drops nothing — so every input column passes through at its input
+		// type, and only the window expressions themselves need typing. Using
+		// windowSpecOutputType (walkStages/buildWindow's own resolver) keeps
+		// this answer identical to what the operator actually emits: an INT64
+		// passthrough column no longer declares STRING on a zero-row result,
+		// and ROW_NUMBER/RANK/COUNT declare INT64, SUM/AVG declare FLOAT64,
+		// and a value function (LAG/LEAD/FIRST_VALUE/...) or MIN/MAX declares
+		// its argument column's type when that is known.
+		if len(n.Children) != 1 {
+			return nil
+		}
+		in := emittedColTypes(n.Children[0])
+		out := make(map[string]parquet.TypeID, len(in)+len(n.WindowExprs))
+		for k, t := range in {
+			out[k] = t
+		}
+		for _, we := range n.WindowExprs {
+			name := strings.ToLower(we.OutputCol)
+			if name == "" {
+				continue
+			}
+			out[name] = windowSpecOutputType(n, we)
+		}
+		return out
 	}
 	return inputColTypes(n)
 }

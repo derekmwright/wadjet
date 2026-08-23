@@ -67,6 +67,65 @@ func TestEmptyResultDeclaresPlanSchema(t *testing.T) {
 				`FROM ` + typematrix.Table + ` t0 WHERE %s`,
 			correlated: true,
 		},
+
+		// Widened during review (#416): expression-heavy shapes on the DAG
+		// route, mirroring the wadjet-side widening in empty_result_schema_test.go.
+		{
+			name: "agg_sum_avg_count",
+			tmpl: `SELECT g, SUM(id) AS s, AVG(id) AS a, COUNT(*) AS n FROM ` + typematrix.Table + ` WHERE %s GROUP BY g`,
+		},
+		{
+			name: "agg_minmax_mixed",
+			tmpl: `SELECT g, MIN(c_str) AS lo, MAX(c_ipv6) AS hi, MIN(c_dur) AS d, MAX(c_uuid) AS u ` +
+				`FROM ` + typematrix.Table + ` WHERE %s GROUP BY g`,
+		},
+		{
+			name: "agg_minmax_mixed2",
+			tmpl: `SELECT g, MIN(c_mac) AS m, MAX(c_port) AS p, MIN(c_bool) AS b, MAX(c_dec) AS de ` +
+				`FROM ` + typematrix.Table + ` WHERE %s GROUP BY g`,
+		},
+		{
+			// NOT `id + 1 AS pi` here: attachScanSelectProjections doesn't
+			// thread the single-process path's integer-preserving-arithmetic
+			// hint through, so on the DAG route that declares (and computes)
+			// FLOAT64 where the embedded engine answers INT64 (#445). Filed
+			// rather than fixed in this round; CAST and c_f64/2 are unaffected
+			// (CAST has its own declared type, and c_f64 is already FLOAT64).
+			name: "cast_arith",
+			tmpl: `SELECT CAST(id AS BIGINT) AS ci, UPPER(c_str) AS up, c_f64 / 2 AS df ` +
+				`FROM ` + typematrix.Table + ` WHERE %s`,
+		},
+		{
+			name: "concat_case_coalesce",
+			tmpl: `SELECT c_str || '-x' AS cat, CASE WHEN id > 10 THEN 'big' ELSE 'small' END AS cw, ` +
+				`COALESCE(c_i32, 0) AS co FROM ` + typematrix.Table + ` WHERE %s`,
+		},
+		{
+			name: "distinct",
+			tmpl: `SELECT DISTINCT g FROM ` + typematrix.Table + ` WHERE %s`,
+		},
+		// A computed BOOLEAN projection (`id > 3 AS gt`, `... LIKE ... AS lk`)
+		// is deliberately NOT in this corpus: buildSelectProjection treats a
+		// projection spec's zero-value Type as "not set" and defaults it to
+		// STRING, and parquet.TypeBool IS that zero value, so a correctly
+		// inferred BOOL is indistinguishable from unset and silently comes
+		// back as the STRING "true"/"false" on the DAG route (#445, filed
+		// rather than fixed in this round).
+
+		// F3: same window coverage as the wadjet-side gate, over the DAG's
+		// window stage.
+		{
+			name: "window_row_number",
+			tmpl: `SELECT id, ROW_NUMBER() OVER (PARTITION BY g ORDER BY id) AS rn FROM ` + typematrix.Table + ` WHERE %s`,
+		},
+		{
+			name: "window_sum_over",
+			tmpl: `SELECT id, SUM(id) OVER (PARTITION BY g) AS sw FROM ` + typematrix.Table + ` WHERE %s`,
+		},
+		{
+			name: "window_lag_default",
+			tmpl: `SELECT id, LAG(id, 1, -1) OVER (ORDER BY id) AS lg FROM ` + typematrix.Table + ` WHERE %s`,
+		},
 	}
 
 	for _, tc := range cases {
