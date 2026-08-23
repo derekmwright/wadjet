@@ -603,7 +603,7 @@ func (r *bytesReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // DeclaredSchemaKey is the footer KeyValueMetadata key under which the
 // native writer stamps the wadjet schema it was handed, JSON-encoded.
 //
-// Parquet's own schema cannot express nine of wadjet's 22 types: IPv4, IPv6,
+// Parquet's own schema cannot express eight of wadjet's 22 types: IPv4, IPv6,
 // MAC, UUID, Bytes, Port, Protocol and Duration get no logical annotation
 // from buildLeafSchemaElement (there is none to give — they are not parquet
 // concepts), so TypeIDFromSchemaNode reads them back as INT64 or STRING. A
@@ -611,31 +611,89 @@ func (r *bytesReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // that takes them from the FILE — the DAG worker's parquet scan, the
 // coordinator's scalar extraction, any tool pointed at a wadjet file —
 // rendered 10.0.0.5 as 167772165 and a UUID as 16 raw bytes (#396).
+//
+// Those eight are also the ONLY types the read side takes from this blob:
+// see declaredOverlayTypes for why an annotated leaf ignores it.
 const DeclaredSchemaKey = "wadjet.schema"
 
 // readerSchema is the schema a FileReader reports: the one inferred from the
 // parquet schema tree, with the declared types restored from
 // DeclaredSchemaKey where the file carries it.
 func readerSchema(root *SchemaNode, leaves []*SchemaNode, kv []KeyValue) Schema {
-	return overlayDeclaredSchema(schemaFromTree(root, leaves), kv)
+	var top []*SchemaNode
+	if root != nil {
+		top = root.Children
+	}
+	return overlayDeclaredSchema(schemaFromTree(root, leaves), top, kv)
+}
+
+// maxDeclaredSchemaBytes bounds the footer blob this reader will decode. A
+// thousand-column schema encodes to roughly 100 KB; past a megabyte the value
+// under the key is not a schema the native writer produced, and the footer is
+// attacker-controlled input like any other part of the file.
+const maxDeclaredSchemaBytes = 1 << 20
+
+// declaredOverlayTypes is the ONLY set of types the overlay will install, and
+// it is exactly the set parquet's own schema cannot express: the eight for
+// which buildLeafSchemaElement writes no LogicalType and no ConvertedType,
+// because there is no annotation to write. That set is the entire reason the
+// blob exists (#396), so it is the entire reach the blob gets.
+//
+// Everything else is annotated in the file itself and the FILE wins: DECIMAL
+// carries its own precision and scale, TIMESTAMP/DATE/INT32/INT64 their
+// logical type, STRING and CIDR the UTF8 annotation, VECTOR the wadjet
+// LogicalVector extension with its dimension. An annotated leaf is immune to
+// the blob, so a stale or hostile blob cannot relabel DECIMAL(18,4) as
+// DECIMAL(12,1) (every value 1000× off), retype a TIMESTAMP as IPv4, or hand
+// the batch allocator a fabricated VECTOR dimension.
+//
+// The cost is that CIDR — stored as UTF-8 text and annotated LogicalString by
+// the writer — reads back as STRING rather than CIDR. The STORED BYTES are
+// the same text either way and every consumer renders the same characters, so
+// this is a type-name difference on a value-identical column, which is the
+// price of making the annotated-leaf rule absolute.
+var declaredOverlayTypes = map[TypeID]bool{
+	TypeIPv4:     true,
+	TypeIPv6:     true,
+	TypeMAC:      true,
+	TypeUUID:     true,
+	TypeBytes:    true,
+	TypePort:     true,
+	TypeProtocol: true,
+	TypeDuration: true,
 }
 
 // overlayDeclaredSchema restores the declared TYPE IDENTITY of each leaf
-// column from the footer's declared-schema blob. Nothing else is taken:
-// name, nullability and nested structure stay as the parquet tree described
-// them, because those the tree CAN express and the tree is what the page
-// decoders are driven by.
+// column from the footer's declared-schema blob. Nothing else is taken: name,
+// nullability, precision, scale, dimension and nested structure all stay as
+// the parquet tree described them, because those the tree CAN express and the
+// tree is what the page decoders are driven by.
 //
 // A file written before this key existed, or by any other producer, has no
 // blob and keeps the inferred schema — the behaviour this replaces.
 //
-// The blob is only trusted when it lines up with the file: the same number
-// of top-level columns, the same names in the same order, and — per column —
-// the same PHYSICAL parquet type the writer would have chosen for the
-// declared type. That last check is what makes a stale or mismatched blob
-// inert rather than a source of misread pages: a declared type whose storage
-// does not match what is actually in the file is ignored.
-func overlayDeclaredSchema(inferred Schema, kv []KeyValue) Schema {
+// The blob is UNTRUSTED INPUT: it is bytes in a file, and a reader that lets
+// it choose how pages are interpreted has handed a file the power to make the
+// engine misread its own data. Five conditions must all hold before a single
+// column is touched, and any failure leaves that column — or the whole
+// schema — exactly as the tree described it:
+//
+//  1. the blob is under maxDeclaredSchemaBytes and decodes as JSON;
+//  2. it describes the same number of top-level columns, with the same names
+//     in the same order;
+//  3. the leaf carries NO LogicalType and NO ConvertedType — the file itself
+//     said nothing about what the column means, which is the only situation
+//     the blob is here to fix;
+//  4. the declared type is one of declaredOverlayTypes, the eight types
+//     parquet cannot annotate;
+//  5. the physical parquet type of that declared type is the physical type
+//     the leaf ACTUALLY has in the file.
+//
+// Together those make a stale or mismatched blob inert rather than a source
+// of misread pages, and they bound the blast radius of a hostile one to
+// relabelling an unannotated INT32/INT64/BYTE_ARRAY column as another type
+// with the identical storage.
+func overlayDeclaredSchema(inferred Schema, nodes []*SchemaNode, kv []KeyValue) Schema {
 	var raw string
 	for i := range kv {
 		if kv[i].Key == DeclaredSchemaKey {
@@ -643,14 +701,14 @@ func overlayDeclaredSchema(inferred Schema, kv []KeyValue) Schema {
 			break
 		}
 	}
-	if raw == "" {
+	if raw == "" || len(raw) > maxDeclaredSchemaBytes {
 		return inferred
 	}
 	var declared Schema
 	if err := json.Unmarshal([]byte(raw), &declared); err != nil {
 		return inferred
 	}
-	if len(declared.Columns) != len(inferred.Columns) {
+	if len(declared.Columns) != len(inferred.Columns) || len(nodes) != len(inferred.Columns) {
 		return inferred
 	}
 	for i := range inferred.Columns {
@@ -659,21 +717,30 @@ func overlayDeclaredSchema(inferred Schema, kv []KeyValue) Schema {
 		}
 	}
 	for i := range inferred.Columns {
-		ic, dc := &inferred.Columns[i], &declared.Columns[i]
-		// Nested columns keep the tree's structure: LIST/MAP/STRUCT round
-		// trip through parquet's own annotations, and their element and
-		// field definitions carry nullability the blob does not re-derive.
+		ic, dc, n := &inferred.Columns[i], &declared.Columns[i], nodes[i]
+		if n == nil || !n.IsLeaf() {
+			// Group node: LIST/MAP/STRUCT round trip through parquet's own
+			// annotations, and their element and field definitions carry
+			// nullability the blob does not re-derive.
+			continue
+		}
 		if ic.ElementType != nil || len(ic.Fields) > 0 ||
 			dc.ElementType != nil || len(dc.Fields) > 0 {
 			continue
 		}
-		if wadjetTypeToPhysical(dc.Type) != wadjetTypeToPhysical(ic.Type) {
+		if n.LogicalType != nil || n.ConvertedType != nil {
+			continue // the file annotated this leaf; the file wins
+		}
+		if !declaredOverlayTypes[dc.Type] {
 			continue
 		}
+		if wadjetTypeToPhysical(dc.Type) != *n.Type {
+			continue
+		}
+		// Type identity ONLY. None of the eight has a precision, scale or
+		// dimension to carry, and copying those fields is how a blob would
+		// reach the decode and allocation paths.
 		ic.Type = dc.Type
-		ic.Precision = dc.Precision
-		ic.Scale = dc.Scale
-		ic.Dimension = dc.Dimension
 	}
 	return inferred
 }
