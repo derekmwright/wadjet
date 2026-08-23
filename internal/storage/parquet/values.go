@@ -232,11 +232,14 @@ func DecodePlainBoolean(data []byte, n int) (Values, error) {
 	if n < 0 {
 		return Values{}, fmt.Errorf("BOOLEAN page: invalid value count %d", n)
 	}
-	byteCount := (n + 7) / 8
-	if byteCount > len(data) {
-		return Values{}, fmt.Errorf("BOOLEAN page declares %d values (%d bytes) but the page body holds %d bytes",
-			n, byteCount, len(data))
+	// Bound BEFORE the round-up: (n+7) overflows to a negative for a count
+	// near the top of the int range, and a negative byteCount sails past the
+	// comparison below and slices data[:negative].
+	if n > len(data)*8 {
+		return Values{}, fmt.Errorf("BOOLEAN page declares %d values but the page body holds %d bytes (%d bits)",
+			n, len(data), len(data)*8)
 	}
+	byteCount := (n + 7) / 8
 	return RawValues(PhysicalBoolean, data[:byteCount:byteCount], n), nil
 }
 
@@ -251,6 +254,18 @@ func DecodePlainBoolean(data []byte, n int) (Values, error) {
 func DecodePlainByteArray(data []byte, n int) (Values, error) {
 	if n < 0 {
 		return Values{}, fmt.Errorf("BYTE_ARRAY page: invalid value count %d", n)
+	}
+	// The offsets array is sized from the header's value count, and the
+	// header is a thrift i32 nothing had bounded: a page claiming 2^31-1
+	// values asked the allocator for eight gibibytes before a single byte of
+	// the body was looked at, and the process died there rather than at the
+	// refusal three lines later. Every value needs at least its own 4-byte
+	// length prefix, so the body itself sets the ceiling. Division, not
+	// multiplication: the product overflows for a hostile count.
+	if n > len(data)/4 {
+		return Values{}, fmt.Errorf(
+			"BYTE_ARRAY page declares %d values but the page body holds %d bytes, "+
+				"which cannot carry that many 4-byte length prefixes", n, len(data))
 	}
 	offsets := make([]uint32, n+1)
 	// First pass: compute total data size and build offset array.
@@ -298,8 +313,20 @@ func DecodePlainFixedLenByteArray(data []byte, n, typeLength int) (Values, error
 		return Values{}, fmt.Errorf("FIXED_LEN_BYTE_ARRAY page: invalid value count %d at width %d", n, typeLength)
 	}
 	if typeLength == 0 {
-		// A zero-width leaf carries no bytes at all; n zero-length values.
-		return ByteArrayValues(nil, make([]uint32, n+1)), nil
+		// The format requires a FIXED_LEN_BYTE_ARRAY leaf to declare a
+		// positive type_length, so a zero here means the schema element did
+		// not carry one — the width of every value in the column is unknown,
+		// not zero. Answering with n empty values dressed that up as a
+		// successful read of n blanks, and sized an offsets array from an
+		// unbounded header count to do it (2^31-1 values = eight gibibytes,
+		// asked for before anything looked at the body). An empty page is
+		// still fine, because n values of unknown width is only a question
+		// when there are values.
+		if n > 0 {
+			return Values{}, fmt.Errorf(
+				"FIXED_LEN_BYTE_ARRAY page declares %d values but the schema gives the leaf no type_length", n)
+		}
+		return ByteArrayValues(nil, make([]uint32, 1)), nil
 	}
 	body, err := plainBody(data, n, typeLength, PhysicalFixedLenByteArray)
 	if err != nil {

@@ -3,6 +3,8 @@ package parquet
 import (
 	"encoding/binary"
 	"math"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -687,5 +689,109 @@ func TestValuesAtAccessorsBoundsChecked(t *testing.T) {
 		if tc.got != 0 {
 			t.Errorf("%s past the end returned %v, want 0", tc.name, tc.got)
 		}
+	}
+}
+
+// A page header's value count is a thrift i32 the reader only parsed. Two
+// decoders sized an allocation from it before anything compared it to the
+// page body: DecodePlainByteArray's offsets array, and the zero-width
+// FIXED_LEN_BYTE_ARRAY arm — which then RETURNED SUCCESS, handing back n
+// empty values for a column whose width the schema never gave. At 2^31-1
+// declared values that is eight gibibytes asked for out of an empty page,
+// and the process dies in the allocator rather than at the refusal that
+// would otherwise have come three lines later.
+
+func TestPlainDecodersBoundTheValueCountBeforeAllocating(t *testing.T) {
+	cases := []struct {
+		name string
+		call func() (Values, error)
+		want string
+	}{
+		{"BYTE_ARRAY over an empty body",
+			func() (Values, error) { return DecodePlainByteArray(nil, 1<<31-1) },
+			"length prefixes"},
+		{"BYTE_ARRAY needing more prefixes than the body has bytes",
+			func() (Values, error) { return DecodePlainByteArray(make([]byte, 39), 10) },
+			"length prefixes"},
+		{"zero-width FIXED_LEN_BYTE_ARRAY with values",
+			func() (Values, error) { return DecodePlainFixedLenByteArray(nil, 1<<31-1, 0) },
+			"type_length"},
+		{"BOOLEAN count whose round-up overflows",
+			func() (Values, error) { return DecodePlainBoolean([]byte{0xFF}, math.MaxInt) },
+			"bits"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := tc.call()
+			if err == nil {
+				t.Fatalf("accepted: %d values", v.Count())
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q", err, tc.want)
+			}
+		})
+	}
+
+	// A zero-width leaf with NO values is still fine: n values of unknown
+	// width is only a question when there are values.
+	if v, err := DecodePlainFixedLenByteArray(nil, 0, 0); err != nil || v.Count() != 0 {
+		t.Errorf("empty zero-width page = (%d, %v), want (0, nil)", v.Count(), err)
+	}
+	// And ten honest values in a body that can hold them still decode.
+	body := make([]byte, 0, 10*(4+3))
+	for i := 0; i < 10; i++ {
+		body = append(body, 3, 0, 0, 0, 'a', 'b', 'c')
+	}
+	if v, err := DecodePlainByteArray(body, 10); err != nil || v.Count() != 10 {
+		t.Errorf("honest BYTE_ARRAY page = (%d, %v), want (10, nil)", v.Count(), err)
+	}
+}
+
+// TestPlainByteArrayRefusalIsCheap is the half the error message cannot
+// show: the refusal has to happen BEFORE the allocation, not after it. A
+// gibibyte-sized offsets array for a page body of forty bytes is the defect
+// even when the call goes on to return an error.
+func TestPlainByteArrayRefusalIsCheap(t *testing.T) {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	if _, err := DecodePlainByteArray(make([]byte, 40), 1<<28); err == nil {
+		t.Fatal("a page declaring 2^28 values over a 40-byte body was accepted")
+	}
+	runtime.ReadMemStats(&after)
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+		t.Errorf("refusing the page allocated %d bytes; the offsets array is sized before the bound", grew)
+	}
+}
+
+// TestPageHeaderValueCountIsCapped: num_values reaches DecodeRLEInt32, which
+// allocates one int32 per value with no reference to the page body at all —
+// RLE can encode any count in a few bytes, so there is no data-derived bound
+// and the header itself has to carry one.
+func TestPageHeaderValueCountIsCapped(t *testing.T) {
+	for _, n := range []int32{MaxPageValues + 1, 1<<31 - 1} {
+		raw := EncodePageHeader(&PageHeader{
+			Type:                 PageDataV1,
+			UncompressedPageSize: 8,
+			CompressedPageSize:   8,
+			DataPageHeader: &DataPageHeader{
+				NumValues: n, Encoding: EncodingPlain,
+				DefinitionLevelEncoding: EncodingRLE, RepetitionLevelEncoding: EncodingRLE,
+			},
+		})
+		if _, _, err := DecodePageHeader(raw); err == nil {
+			t.Errorf("a page header declaring %d values was accepted", n)
+		}
+	}
+	// The cap is far above any real page, so an ordinary header still parses.
+	raw := EncodePageHeader(&PageHeader{
+		Type: PageDataV1, UncompressedPageSize: 8, CompressedPageSize: 8,
+		DataPageHeader: &DataPageHeader{
+			NumValues: 2048, Encoding: EncodingPlain,
+			DefinitionLevelEncoding: EncodingRLE, RepetitionLevelEncoding: EncodingRLE,
+		},
+	})
+	if _, _, err := DecodePageHeader(raw); err != nil {
+		t.Errorf("an ordinary 2048-value page header: %v", err)
 	}
 }

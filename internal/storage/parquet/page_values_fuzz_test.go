@@ -2,6 +2,7 @@ package parquet
 
 import (
 	"encoding/binary"
+	"math"
 	"testing"
 )
 
@@ -44,6 +45,18 @@ func FuzzDecodePageValues(f *testing.F) {
 	// Negative and zero counts.
 	f.Add(uint8(2), uint8(0), -1, 0, make([]byte, 64))
 	f.Add(uint8(2), uint8(0), 0, 0, []byte{})
+	// Counts that size an ALLOCATION before anything bounds them: the
+	// byte-array offsets array and the zero-width FIXED_LEN_BYTE_ARRAY arm
+	// both did `make([]uint32, n+1)` first and checked the body afterwards,
+	// so 2^31-1 declared values asked for eight gibibytes out of an empty
+	// page. This class was invisible while the fuzz body excluded n > 2^20.
+	f.Add(uint8(6), uint8(0), 1<<31-1, 0, []byte{})
+	f.Add(uint8(7), uint8(0), 1<<31-1, 0, []byte{})
+	f.Add(uint8(7), uint8(0), 1<<20, 0, []byte{})
+	// BOOLEAN rounds its count up to whole bytes; near the top of the int
+	// range (n+7) overflows to a negative and slices data[:negative].
+	f.Add(uint8(0), uint8(0), math.MaxInt, 0, []byte{0xFF})
+	f.Add(uint8(0), uint8(0), math.MaxInt-3, 0, []byte{0xFF})
 	// DELTA_BINARY_PACKED whose header carries fewer values than the page
 	// declares, and a truncated one.
 	f.Add(uint8(2), uint8(2), 1000, 0, deltaHeader(128, 1, 4, 7))
@@ -56,12 +69,13 @@ func FuzzDecodePageValues(f *testing.F) {
 	f.Add(uint8(6), uint8(4), 4, 0, deltaHeader(128, 1, 4, 1))
 
 	f.Fuzz(func(t *testing.T, physRaw, encRaw uint8, n, typeLength int, body []byte) {
-		// The count and width still come from a header, so negative values
-		// stay in scope; only the sizes that would make the ALLOCATOR, not
-		// the decoder, the thing under test are excluded.
-		if n > 1<<20 || typeLength > 1<<12 || n < -8 || typeLength < -8 {
-			return
-		}
+		// Nothing is excluded. The count and the width both come from a
+		// header the reader only parsed, so every value an i32 (or a
+		// varint mis-parse) can produce is in scope — including the huge
+		// ones. Excluding them was hiding a class rather than avoiding one:
+		// two decoders sized an allocation from the count BEFORE bounding
+		// it against the body, so the process died in the allocator instead
+		// of at the refusal three lines later.
 		phys := []PhysicalType{
 			PhysicalBoolean, PhysicalInt32, PhysicalInt64, PhysicalInt96,
 			PhysicalFloat, PhysicalDouble, PhysicalByteArray, PhysicalFixedLenByteArray,

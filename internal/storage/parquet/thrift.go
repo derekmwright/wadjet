@@ -1217,7 +1217,57 @@ func DecodePageHeader(data []byte) (*PageHeader, int, error) {
 			}
 		}
 	}
+	if err := checkPageValueCounts(ph); err != nil {
+		return nil, 0, err
+	}
 	return ph, d.off, nil
+}
+
+// MaxPageValues bounds a page header's declared value count.
+//
+// num_values is a thrift i32 that several decoders size an allocation from
+// before anything has looked at the page body — DecodeRLEInt32 allocates one
+// int32 per value, and the byte-array decoders one offset. Nothing bounded
+// it, so a single flipped byte in a varint could ask for gigabytes out of a
+// file a few hundred bytes long, and the process died in the allocator
+// rather than at the refusal that would otherwise have followed.
+//
+// 2^28 is four orders of magnitude above any page a writer produces (pages
+// are thousands to low millions of values) and keeps the worst allocation a
+// header alone can provoke at a gibibyte, matching maxPageBodyBytes. The
+// tight bound is elsewhere and stays there: the scan holds a chunk's pages
+// to the row group's own row count.
+const MaxPageValues = 1 << 28
+
+func checkPageValueCounts(ph *PageHeader) error {
+	check := func(what string, n int32) error {
+		if n < 0 || n > MaxPageValues {
+			return fmt.Errorf("page header declares %s = %d, outside [0, %d]", what, n, MaxPageValues)
+		}
+		return nil
+	}
+	if h := ph.DataPageHeader; h != nil {
+		if err := check("num_values", h.NumValues); err != nil {
+			return err
+		}
+	}
+	if h := ph.DataPageHeaderV2; h != nil {
+		if err := check("num_values", h.NumValues); err != nil {
+			return err
+		}
+		if err := check("num_rows", h.NumRows); err != nil {
+			return err
+		}
+		if err := check("num_nulls", h.NumNulls); err != nil {
+			return err
+		}
+	}
+	if h := ph.DictionaryPageHeader; h != nil {
+		if err := check("dictionary num_values", h.NumValues); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *thriftDecoder) decodeDataPageHeader(dph *DataPageHeader) error {
