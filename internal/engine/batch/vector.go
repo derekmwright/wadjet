@@ -991,6 +991,16 @@ func (v *Vector) SetValue(i int, val any) {
 		switch tv := val.(type) {
 		case Int128:
 			v.DecimalData.Data[i] = tv
+		case parquet.Decimal128:
+			// The parquet row reader's box for a DECIMAL wider than 64
+			// bits. It cannot hand back a batch.Int128 — batch imports
+			// parquet, not the other way round — so the two-word form
+			// crosses the boundary and is re-boxed here. Without this arm
+			// the value would fall through to mismatch(), which is the
+			// point: the alternative shape was an int64 holding the LOW 64
+			// BITS of the unscaled value, a different number returned
+			// silently (#419).
+			v.DecimalData.Data[i] = Int128{Hi: tv.Hi, Lo: tv.Lo}
 		case int64:
 			v.DecimalData.Data[i] = Int128From(tv)
 		case int:

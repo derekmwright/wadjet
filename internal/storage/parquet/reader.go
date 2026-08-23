@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"strings"
 )
 
@@ -1168,52 +1169,86 @@ func decodePresentValues(dst []any, data Values, n int, col Column) error {
 			}
 		}
 	case TypeDecimal:
-		decodeDecimalPresent(dst, data, n)
+		return decodeDecimalValues(dst, data, n, col)
 	}
 	return nil
 }
 
-// decodeDecimalPresent decodes a DECIMAL page in any of the four physical
-// encodings the format allows. The BYTE_ARRAY forms are accumulated into an
-// int64, which is the box the row shape has always carried for a DECIMAL.
-func decodeDecimalPresent(dst []any, data Values, n int) {
+// decodeDecimalValues decodes a DECIMAL page, in any of the four physical
+// encodings the format allows, into the row path's box for the column.
+//
+// A column whose declared precision exceeds 18 digits is boxed as
+// Decimal128, because that is the point past which the unscaled value stops
+// fitting in an int64. It used to be boxed as an int64 regardless: for a
+// 16-byte DECIMAL(38,10) the accumulator shifted the top eight bytes
+// straight out of the register and returned the low 64 bits of the unscaled
+// value, reinterpreted as signed, with no error (#419). The native scan
+// decodes the same bytes into a 128-bit value and was right; the two paths
+// are chosen by the SHAPE of the table's schema, not by the query, so the
+// same column answered differently depending on whether some OTHER column in
+// the table happened to be nested.
+//
+// Under 19 digits the box stays an int64 — the shape every consumer of this
+// reader already handles — and a value that does not fit one is an ERROR
+// naming the column, not a different number. That case means the file's
+// values contradict the precision the file itself declares.
+func decodeDecimalValues(dst []any, data Values, n int, col Column) error {
+	wide := decimalNeeds128(col)
 	switch data.PhysType() {
 	case PhysicalInt64:
 		src := data.Int64()
 		for i := 0; i < n && i < len(src); i++ {
-			dst[i] = src[i]
+			if wide {
+				dst[i] = Decimal128From(src[i])
+			} else {
+				dst[i] = src[i]
+			}
 		}
 	case PhysicalInt32:
 		src := data.Int32()
 		for i := 0; i < n && i < len(src); i++ {
-			dst[i] = int64(src[i])
+			if wide {
+				dst[i] = Decimal128From(int64(src[i]))
+			} else {
+				dst[i] = int64(src[i])
+			}
 		}
 	default:
 		rawData, offsets := data.ByteArray()
 		if offsets == nil {
-			return
+			return nil
 		}
 		for i := 0; i < n && i+1 < len(offsets); i++ {
-			dst[i] = decimalBytesToInt64(rawData[offsets[i]:offsets[i+1]])
+			hi, lo := decimalFromBytesRaw(rawData[offsets[i]:offsets[i+1]])
+			d := Decimal128{Hi: hi, Lo: lo}
+			if wide {
+				dst[i] = d
+				continue
+			}
+			v, ok := d.Int64()
+			if !ok {
+				return fmt.Errorf("column %q: DECIMAL(%d,%d) value %s at entry %d does not fit "+
+					"the 64 bits its declared precision allows", col.Name, col.Precision, col.Scale, d, i)
+			}
+			dst[i] = v
 		}
 	}
+	return nil
 }
 
-// decimalBytesToInt64 converts big-endian two's complement bytes to int64.
-func decimalBytesToInt64(b []byte) int64 {
-	if len(b) == 0 {
-		return 0
-	}
-	// Sign-extend from MSB.
-	negative := b[0]&0x80 != 0
-	var v int64
-	if negative {
-		v = -1
-	}
-	for _, c := range b {
-		v = (v << 8) | int64(c)
-	}
-	return v
+// decimalNeeds128 reports whether a DECIMAL column's unscaled values must be
+// boxed as Decimal128 on the row path. Eighteen digits is the last precision
+// whose every value fits an int64 (int64 holds 19 digits, but not all
+// 19-digit numbers), and 18 is also the widest DECIMAL parquet allows over
+// an INT64, so this is exactly the set of columns the narrow box cannot
+// carry.
+//
+// A column that declares no precision at all keeps the narrow box: an
+// unannotated DECIMAL is a malformed file rather than a wide one, and the
+// per-value fit check in decodeDecimalValues refuses a value that overflows
+// instead of returning a different number for it.
+func decimalNeeds128(col Column) bool {
+	return col.Precision > 18
 }
 
 // ValidateDictIndices checks that a page's dictionary indices are all
@@ -1443,6 +1478,48 @@ func DecimalFromBytes(b []byte) [2]uint64 {
 	}
 
 	return [2]uint64{hi, lo}
+}
+
+// Decimal128 is the row path's box for a DECIMAL column's UNSCALED value,
+// in the same two-word form the engine's decimal vector stores
+// (batch.Int128). It exists because the row shape is []any and this package
+// cannot import the engine's batch package — batch imports this one.
+//
+// It is used only for a column whose declared precision exceeds 18 digits
+// (decimalNeeds128). Narrower columns keep the plain int64 box every
+// existing consumer of Reader.ReadRows already handles, so the new shape
+// appears exactly where the old one was returning a wrong number.
+type Decimal128 struct {
+	Hi int64  // upper 64 bits, signed
+	Lo uint64 // lower 64 bits
+}
+
+// Decimal128From widens an int64 unscaled value.
+func Decimal128From(v int64) Decimal128 {
+	hi := int64(0)
+	if v < 0 {
+		hi = -1
+	}
+	return Decimal128{Hi: hi, Lo: uint64(v)}
+}
+
+// Int64 returns the value as an int64 and whether it fits in one.
+func (d Decimal128) Int64() (int64, bool) {
+	if d.Hi == 0 && int64(d.Lo) >= 0 {
+		return int64(d.Lo), true
+	}
+	if d.Hi == -1 && int64(d.Lo) < 0 {
+		return int64(d.Lo), true
+	}
+	return 0, false
+}
+
+// String renders the unscaled integer in base 10, so an error message about
+// a decimal that does not fit names the actual number.
+func (d Decimal128) String() string {
+	n := new(big.Int).SetInt64(d.Hi)
+	n.Lsh(n, 64)
+	return n.Or(n, new(big.Int).SetUint64(d.Lo)).String()
 }
 
 // decimalFromBytesRaw converts big-endian byte array to Int128 (hi, lo).

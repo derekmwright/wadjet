@@ -404,6 +404,22 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 		}
 		val = conv
 	}
+	// This writer stores DECIMAL as INT64 (wadjetTypeToPhysical), so an
+	// unscaled value past 64 bits has no encoding here at all. The row
+	// reader can now hand one back (Decimal128, for a DECIMAL(p>18) column
+	// read out of a pyarrow file), and the only ways to write it were a
+	// silent truncation or a silent zero. ADR-0018: a value this package
+	// cannot represent fails the WRITE, where the column and the row are
+	// still known, rather than producing a file that reads back as a
+	// different number.
+	if d, ok := val.(Decimal128); ok && col.Type == TypeDecimal {
+		if _, fits := d.Int64(); !fits {
+			nw.fail(fmt.Errorf("column %q, row %d: DECIMAL unscaled value %s needs more than 64 bits, "+
+				"which this writer's INT64 encoding cannot store", col.Name, nw.rowsSeen, d))
+			lb.appendEntry(defLevel, repLevel)
+			return
+		}
+	}
 	// Value is present — def level is maxDefLevel.
 	lb.appendEntryWithValue(lb.maxDefLevel, repLevel, val)
 }
@@ -1535,6 +1551,12 @@ func decimalScaledInt64(v any, scale int) int64 {
 		return int64(t) * int64(pow)
 	case int64:
 		return t * int64(pow)
+	case Decimal128:
+		// decomposeLeaf has already refused the ones that do not fit, so
+		// this is the narrow value in a wide column, treated exactly as the
+		// int64 above.
+		v, _ := t.Int64()
+		return v * int64(pow)
 	case float64:
 		if math.IsNaN(t) || math.IsInf(t, 0) {
 			return 0
