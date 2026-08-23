@@ -211,23 +211,36 @@ func chunkRange(cm *ColumnMetaData, fileSize int64) (start, end int64, err error
 	if cm.DictionaryPageOffset > 0 && cm.DictionaryPageOffset < cm.DataPageOffset {
 		start = cm.DictionaryPageOffset
 	}
-	switch {
-	case fileSize < 0:
-		return 0, 0, fmt.Errorf("column chunk: file size %d is negative", fileSize)
-	case cm.DataPageOffset < 0:
-		return 0, 0, fmt.Errorf("column chunk: data_page_offset %d is negative", cm.DataPageOffset)
-	case cm.DictionaryPageOffset < 0:
-		return 0, 0, fmt.Errorf("column chunk: dictionary_page_offset %d is negative", cm.DictionaryPageOffset)
-	case cm.TotalCompressedSize < 0:
-		return 0, 0, fmt.Errorf("column chunk: total_compressed_size %d is negative", cm.TotalCompressedSize)
-	case start > fileSize:
-		return 0, 0, fmt.Errorf("column chunk starts at offset %d, past the end of a %d-byte file", start, fileSize)
+	// One test on the happy path, and the five messages in a frame of their
+	// own. Building them here instead reserved 144 bytes of stack in a
+	// function every column read calls before it has done anything, which
+	// moved the scan goroutine's first stack growth to a deeper point and
+	// cost ~3% of BenchmarkReadColumnar/rows=1000. See decodeOnePage.
+	if fileSize < 0 || cm.DataPageOffset < 0 || cm.DictionaryPageOffset < 0 ||
+		cm.TotalCompressedSize < 0 || start > fileSize {
+		return 0, 0, chunkRangeErr(cm, fileSize, start)
 	}
 	end = fileSize
 	if room := fileSize - start; cm.TotalCompressedSize < room {
 		end = start + cm.TotalCompressedSize
 	}
 	return start, end, nil
+}
+
+//go:noinline
+func chunkRangeErr(cm *ColumnMetaData, fileSize, start int64) error {
+	switch {
+	case fileSize < 0:
+		return fmt.Errorf("column chunk: file size %d is negative", fileSize)
+	case cm.DataPageOffset < 0:
+		return fmt.Errorf("column chunk: data_page_offset %d is negative", cm.DataPageOffset)
+	case cm.DictionaryPageOffset < 0:
+		return fmt.Errorf("column chunk: dictionary_page_offset %d is negative", cm.DictionaryPageOffset)
+	case cm.TotalCompressedSize < 0:
+		return fmt.Errorf("column chunk: total_compressed_size %d is negative", cm.TotalCompressedSize)
+	default:
+		return fmt.Errorf("column chunk starts at offset %d, past the end of a %d-byte file", start, fileSize)
+	}
 }
 
 // pageBody returns the compressed body of the page whose header ended at

@@ -313,31 +313,10 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		colReadScratchPool.Put(scr)
 	}()
 
-	// Detect file type from schema tree.
 	leaves := fr.Leaves()
-	var fileType pqt.TypeID
-	if colIdx < len(leaves) {
-		fileType = pqt.TypeIDFromSchemaNode(leaves[colIdx])
-	} else {
-		fileType = catalogType
-	}
-
-	// Get max definition level from schema.
-	maxDefLevel := 0
-	if colIdx < len(leaves) {
-		maxDefLevel = leaves[colIdx].MaxDefLevel
-	}
-
-	// Admission, before a single byte is copied. The copy paths below
-	// switch on the FILE's type while writing into a vector allocated for
-	// the CATALOG's, so the two must agree on which typed array the values
-	// land in — that is what storageClass answers. A pairing that agrees is
-	// copied verbatim; the three CoercibleTo pairings are converted; nothing
-	// else is decodable, and the ones that used to reach the copy anyway did
-	// not fail, they indexed the wrong array and panicked.
-	coerce := storageClass(fileType) != storageClass(catalogType)
-	if coerce && !pqt.CoercibleTo(fileType, catalogType) {
-		return typePairErr(leaves, colIdx, fileType, catalogType)
+	fileType, maxDefLevel, coerce, perr := columnDecodePlan(leaves, colIdx, catalogType)
+	if perr != nil {
+		return perr
 	}
 
 	// Read dictionary if present.
@@ -353,22 +332,7 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 	// uncompressed size (an overestimate by page framing — a hint, not an
 	// accounting figure); dictionary chunks expand to ~numRows × the mean
 	// dictionary entry width.
-	switch catalogType {
-	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
-		est := 0
-		if dict != nil && dict.NumValues > 0 {
-			if dictData, _ := dict.Data.ByteArray(); dictData != nil {
-				est = numRows * (len(dictData)/dict.NumValues + 1)
-			}
-		} else if rg := fr.RowGroupMeta(rgIdx); rg != nil && colIdx < len(rg.Columns) {
-			if cm := rg.Columns[colIdx].MetaData; cm != nil {
-				est = int(cm.TotalUncompressedSize)
-			}
-		}
-		if est > 0 {
-			vec.BytesData.PreAllocBytes(est)
-		}
-	}
+	preallocBytesArena(vec, fr, rgIdx, colIdx, numRows, dict, catalogType)
 
 	offset := 0
 	for {
@@ -396,24 +360,8 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 			return pageOverrunErr(leaves, colIdx, pageRows, offset, numRows)
 		}
 
-		data := page.Data
-		// Resolve dictionary indices to actual values — per page, not per
-		// chunk: dict-overflow fallback mixes dictionary and PLAIN pages
-		// within one chunk.
-		if page.IsDictEncoded() {
-			if dict == nil {
-				page.Release()
-				return fmt.Errorf("dictionary-encoded page but chunk has no dictionary page")
-			}
-			data, err = resolveNativeDictionaryScratch(drs, dict, data, fileType)
-			if err != nil {
-				page.Release()
-				return fmt.Errorf("resolving dictionary page: %w", err)
-			}
-		}
-
-		if err := copyPageIntoVector(vec, offset, data, page.DefinitionLevels, int32(maxDefLevel),
-			page.NumNulls > 0, pageRows, fileType, catalogType, coerce); err != nil {
+		if err := decodeOnePage(vec, offset, page, drs, dict, int32(maxDefLevel),
+			fileType, catalogType, coerce); err != nil {
 			page.Release()
 			return leafErr(leaves, colIdx, err)
 		}
@@ -422,24 +370,37 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		page.Release()
 	}
 
-	// A TIMESTAMP column written elsewhere may be in MICROS or NANOS; the
-	// engine unit is MILLIS. Rescale the whole chunk once, after the page
-	// loop, rather than per page: it is one linear pass over data that is
-	// still hot in cache, it cannot be confused by dictionary pages (whose
-	// shared buffers must not be mutated), and it treats the direct and
-	// scatter copies identically. Millis files divide by 1 and return
-	// immediately, so our own files pay nothing.
-	if catalogType == pqt.TypeTimestamp && colIdx < len(leaves) && offset > 0 {
-		if div := pqt.TimestampDivisorFromSchemaNode(leaves[colIdx]); div != 1 {
-			n := offset
-			if n > len(vec.Int64Data) {
-				n = len(vec.Int64Data)
-			}
-			pqt.ScaleTimestampsToEngine(vec.Int64Data[:n], div)
-		}
+	if catalogType == pqt.TypeTimestamp && offset > 0 {
+		rescaleTimestampChunk(vec, leaves, colIdx, offset)
 	}
 
 	return nil
+}
+
+// rescaleTimestampChunk converts a TIMESTAMP column written elsewhere from
+// MICROS or NANOS to the engine's MILLIS, once per chunk rather than per
+// page: it is one linear pass over data that is still hot in cache, it
+// cannot be confused by dictionary pages (whose shared buffers must not be
+// mutated), and it treats the direct and scatter copies identically. Millis
+// files divide by 1 and return immediately, so our own files pay nothing.
+//
+// Non-inlined for readColumnNative's frame: inline, it keeps the leaf slice
+// and the vector's typed array live all the way to the end of the page loop.
+//
+//go:noinline
+func rescaleTimestampChunk(vec *batch.Vector, leaves []*pqt.SchemaNode, colIdx, offset int) {
+	if colIdx >= len(leaves) {
+		return
+	}
+	div := pqt.TimestampDivisorFromSchemaNode(leaves[colIdx])
+	if div == 1 {
+		return
+	}
+	n := offset
+	if n > len(vec.Int64Data) {
+		n = len(vec.Int64Data)
+	}
+	pqt.ScaleTimestampsToEngine(vec.Int64Data[:n], div)
 }
 
 // resolveNativeDictionary resolves INT32 dictionary indices to actual values.
@@ -690,16 +651,115 @@ func pageOverrunErr(leaves []*pqt.SchemaNode, colIdx, pageRows, offset, numRows 
 		pageRows, offset, numRows))
 }
 
-// typePairErr refuses a (catalog, file) pairing whose values cannot be
-// carried by the same vector arrays. Non-inlined, and building its message in
-// its own frame, for the same reason as leafErr: readColumnNative's frame
-// sits on the stack of every per-column errgroup goroutine.
+// decodeOnePage resolves one page's values (expanding dictionary indices
+// when the page carries them) and copies them into the destination vector.
+//
+// Non-inlined, and it is the largest of readColumnNative's frame savings:
+// the decoded pqt.Values is a 56-byte struct and copyPageIntoVector takes
+// ten arguments including a copy of it, so doing this inline reserved all of
+// that in the frame of a function that runs on a freshly-created errgroup
+// goroutine. Past the runtime's initial stack size every column read pays a
+// runtime.newstack + copystack — measured at +5.7% on
+// BenchmarkReadColumnar/rows=1000, and reproducible on an untouched tree by
+// adding 48 bytes of dead padding to readColumnNative. That is the whole
+// mechanism: the frame, not the work.
+//
+// Dictionary resolution stays per PAGE rather than per chunk because a
+// writer's dictionary overflow mixes dictionary-encoded and PLAIN pages
+// within one chunk.
 //
 //go:noinline
-func typePairErr(leaves []*pqt.SchemaNode, colIdx int, fileType, catalogType pqt.TypeID) error {
-	return leafErr(leaves, colIdx, fmt.Errorf(
-		"schema declares %s but the file stores %s: refusing to decode the file's "+
-			"values into a %s vector", catalogType, fileType, catalogType))
+func decodeOnePage(vec *batch.Vector, offset int, page *pqt.PageData, drs *dictResolveScratch,
+	dict *pqt.DictionaryData, maxDefLevel int32, fileType, catalogType pqt.TypeID, coerce bool) error {
+	data := page.Data
+	if page.IsDictEncoded() {
+		if dict == nil {
+			return fmt.Errorf("dictionary-encoded page but chunk has no dictionary page")
+		}
+		var err error
+		data, err = resolveNativeDictionaryScratch(drs, dict, data, fileType)
+		if err != nil {
+			return fmt.Errorf("resolving dictionary page: %w", err)
+		}
+	}
+	return copyPageIntoVector(vec, offset, data, page.DefinitionLevels, maxDefLevel,
+		page.NumNulls > 0, page.NumValues, fileType, catalogType, coerce)
+}
+
+// columnDecodePlan resolves everything readColumnNative needs to know about
+// one leaf before it starts reading pages: the type the FILE recovers for
+// it, its maximum definition level, and whether the values need converting
+// on the way into the catalog's vector — refusing the pairings where they
+// cannot get there at all.
+//
+// The copy paths switch on the FILE's type while writing into a vector
+// allocated for the CATALOG's, so the two must agree on which typed array
+// the values land in; storageClass answers that. A pairing that agrees is
+// copied verbatim, the three CoercibleTo pairings are converted, and nothing
+// else is decodable — the ones that used to reach the copy anyway did not
+// fail, they indexed the wrong array and panicked.
+//
+// It is one non-inlined function, and that is load-bearing rather than
+// tidy. readColumnNative's frame sits on the stack of every per-column
+// errgroup goroutine, and those start at the runtime's minimum: doing this
+// work inline grew the frame past what the initial stack holds, so EVERY
+// column read paid an extra runtime.newstack + copystack. That measured as
+// +7% on BenchmarkReadColumnar/rows=1000 with runtime.newstack going from
+// 4.9% to 8.8% of a GOMAXPROCS=1 profile. Check the frame with
+// `go build -gcflags=-S | grep readColumnNative STEXT` — it must stay at or
+// under the 0x268 it was before this guard existed.
+//
+//go:noinline
+func columnDecodePlan(leaves []*pqt.SchemaNode, colIdx int, catalogType pqt.TypeID) (
+	fileType pqt.TypeID, maxDefLevel int, coerce bool, err error) {
+	fileType = catalogType
+	if colIdx < len(leaves) {
+		fileType = pqt.TypeIDFromSchemaNode(leaves[colIdx])
+		maxDefLevel = leaves[colIdx].MaxDefLevel
+	}
+	coerce = storageClass(fileType) != storageClass(catalogType)
+	if coerce && !pqt.CoercibleTo(fileType, catalogType) {
+		return fileType, maxDefLevel, false, leafErr(leaves, colIdx, fmt.Errorf(
+			"schema declares %s but the file stores %s: refusing to decode the file's "+
+				"values into a %s vector", catalogType, fileType, catalogType))
+	}
+	return fileType, maxDefLevel, coerce, nil
+}
+
+// preallocBytesArena sizes a bytes column's arena for the whole chunk up
+// front, so the per-page BulkSet appends never grow it: append-doubling
+// re-memmoved the arena log2(chunkBytes) times per chunk (31% of worker
+// growslice CPU, 2026-08-12 treatment profile). Plain chunks use the chunk
+// metadata's uncompressed size (an overestimate by page framing — a hint,
+// not an accounting figure); dictionary chunks expand to ~numRows x the mean
+// dictionary entry width.
+//
+// Non-inlined for the frame-size reason readColumnNative's comment gives:
+// the estimate reaches into the dictionary values and the row-group
+// metadata, and doing that inline keeps both live across the calls, which
+// costs the caller stack it pays for on every column read.
+//
+//go:noinline
+func preallocBytesArena(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numRows int,
+	dict *pqt.DictionaryData, catalogType pqt.TypeID) {
+	switch catalogType {
+	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
+	default:
+		return
+	}
+	est := 0
+	if dict != nil && dict.NumValues > 0 {
+		if dictData, _ := dict.Data.ByteArray(); dictData != nil {
+			est = numRows * (len(dictData)/dict.NumValues + 1)
+		}
+	} else if rg := fr.RowGroupMeta(rgIdx); rg != nil && colIdx < len(rg.Columns) {
+		if cm := rg.Columns[colIdx].MetaData; cm != nil {
+			est = int(cm.TotalUncompressedSize)
+		}
+	}
+	if est > 0 {
+		vec.BytesData.PreAllocBytes(est)
+	}
 }
 
 // leafErr names the file leaf a decode error came from. Non-inlined for the
