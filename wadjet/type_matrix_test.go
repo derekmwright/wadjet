@@ -352,26 +352,7 @@ const tmOptEngagementFloor = 215
 // keyed "<corpus entry>/<toggle>". Same two-way ratchet as tmPins: the
 // comparison runs, a pinned divergence is logged, and a pin that starts
 // agreeing (or names an entry/toggle pair that no longer occurs) FAILS.
-var tmOptPins = map[string]typematrix.Pin{
-	"groupby_c_ipv6/partitioned-agg": {
-		Issue: "#395",
-		Reason: "GROUP BY an IPV6 or UUID column loses the KEY VALUE with partitioned " +
-			"aggregation disabled: every output key is the empty string while the counts stay " +
-			"right. The row count matches, so only a value-level compare sees it.",
-	},
-	"distinct_c_ipv6/partitioned-agg": {
-		Issue:  "#395",
-		Reason: "Same lost IPV6 key value, reached through DISTINCT.",
-	},
-	"groupby_c_uuid/partitioned-agg": {
-		Issue:  "#395",
-		Reason: "Same lost key value for UUID.",
-	},
-	"distinct_c_uuid/partitioned-agg": {
-		Issue:  "#395",
-		Reason: "Same lost key value for UUID, reached through DISTINCT.",
-	},
-}
+var tmOptPins = map[string]typematrix.Pin{}
 
 // tmOptPinPrefixes pins every toggle of one corpus entry. Used when the entry's
 // answer is not a function of the query at all, so naming toggles one by one

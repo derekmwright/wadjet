@@ -1975,6 +1975,34 @@ func writePartialKeyToColumn(dst *batch.Vector, i int, kv *partialKeyValue) {
 		return
 	}
 	dst.Nulls.SetValid(i)
+
+	// A partialTagString kv carries the key's DISPLAY form. The consume-time
+	// generic path boxes a group key through Vector.GetValue, and GetValue
+	// FORMATS every type whose storage is not its text: IPv4 and MAC to their
+	// dotted/colon form, IPv6 and UUID to their text, DATE to "2006-01-02",
+	// DECIMAL to its scaled digits. Only the types whose storage IS that text
+	// — STRING, BYTES, CIDR — may take the bytes verbatim. The rest have to go
+	// back through Vector.SetValue, which re-parses the display form into
+	// storage.
+	//
+	// The typed dispatch below matches on the DESTINATION alone, so before
+	// this it wrote display text straight into raw storage: 11 bytes of
+	// "2001:db8::1" (36 of a UUID) into a column whose contract is exactly 16,
+	// which Vector.GetValue then rendered as the EMPTY STRING for every key
+	// while the counts and the row count stayed right (#395). The int-backed
+	// half of the same class is quieter still: a string-tagged kv has I64 == 0,
+	// so a DATE/IPv4/MAC key reaching this path came back as 1970-01-01 /
+	// 0.0.0.0 for every group.
+	if kv.Tag == partialTagString {
+		switch dst.Type {
+		case batch.TypeString, batch.TypeBytes, batch.TypeCIDR:
+			dst.BytesData.Set(i, kv.Bytes)
+		default:
+			writePartialKeyFallback(dst, i, kv)
+		}
+		return
+	}
+
 	switch dst.Type {
 	case batch.TypeBool:
 		dst.BoolData[i] = kv.Tag == partialTagBoolTrue || kv.I64 != 0
@@ -2021,8 +2049,9 @@ func writeIntKeyToColumn(dst *batch.Vector, i int, v int64, t batch.TypeID) {
 }
 
 // writePartialKeyFallback handles types not in the typed-dispatch fast
-// path. Goes through Vector.SetValue, which boxes once per call. Reached
-// only for decimal group-by keys today.
+// path, plus every display-form (partialTagString) key whose destination
+// stores something other than that text. Goes through Vector.SetValue,
+// which boxes once per call and re-parses the display form.
 func writePartialKeyFallback(dst *batch.Vector, i int, kv *partialKeyValue) {
 	switch kv.Tag {
 	case partialTagInt128:
