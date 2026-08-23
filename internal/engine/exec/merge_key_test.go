@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"math"
 	"testing"
 )
 
@@ -92,5 +93,50 @@ func TestMergeKeyKeepsBoxedTypesDistinct(t *testing.T) {
 		if again := key(wide); again != first {
 			t.Fatalf("map key rendered %q then %q — the fallback is not deterministic", first, again)
 		}
+	}
+}
+
+// TestMergeKeyFoldsCanonicalFloatValues is TestMergeKeyKeepsBoxedTypesDistinct's
+// mirror image: values the comparator says are the SAME (kernel/
+// float_order.go: -0.0 = 0.0, and every NaN payload = every other NaN
+// payload) must produce the SAME merge key, at every level appendKeyValue
+// reaches — the bare scalar, and a float nested inside an ARRAY or a VECTOR.
+//
+// Before this fix, appendKeyValue's float64/float32 arms rendered -0.0 as the
+// literal text "-0" and 0.0 as "0" (strconv.AppendFloat does not canonicalize
+// the sign of zero), and keyFloat32bits/keyFloat64bits (the VECTOR/ARRAY(FLOAT)
+// element path) preserved -0.0's sign bit outright. So a partial aggregate
+// drain merged NaN payloads together (already fixed pre-#446) but kept -0.0
+// and +0.0 as two merge keys — the same "answer depends on how much memory it
+// had" failure TestMergeKeyKeepsBoxedTypesDistinct documents, on the other
+// side of the same invariant: P4 in kernel's container-order property test
+// (cmp == 0 <=> key-equal).
+func TestMergeKeyFoldsCanonicalFloatValues(t *testing.T) {
+	buf := make([]byte, 0, 64)
+	key := func(vals ...any) string { return serializeKey(buf, vals) }
+	negZero64 := math.Copysign(0, -1)
+	negZero32 := float32(math.Copysign(0, -1))
+	nan1 := math.Float64frombits(0x7ff8000000000001) // quiet NaN, payload 1
+	nan2 := math.Float64frombits(0x7ff8000000000002) // quiet NaN, payload 2
+
+	cases := []struct {
+		name string
+		a, b []any
+	}{
+		{"float64 -0.0 vs 0.0", []any{negZero64}, []any{0.0}},
+		{"float32 -0.0 vs 0.0", []any{negZero32}, []any{float32(0)}},
+		{"float64 NaN payloads", []any{nan1}, []any{nan2}},
+		{"vector -0.0 vs 0.0 element", []any{[]float32{negZero32, 1}}, []any{[]float32{0, 1}}},
+		{"array float64 -0.0 vs 0.0 element", []any{[]any{negZero64}}, []any{[]any{0.0}}},
+		{"array float32 -0.0 vs 0.0 element", []any{[]any{negZero32}}, []any{[]any{float32(0)}}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			ka, kb := key(tc.a...), key(tc.b...)
+			if ka != kb {
+				t.Fatalf("values the comparator treats as equal produced different merge keys: %q vs %q", ka, kb)
+			}
+		})
 	}
 }

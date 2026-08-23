@@ -37,7 +37,8 @@ package kernel
 // equal (as `==` and PostgreSQL both say), and all NaNs compare equal
 // whatever their payload. The key serializers are canonicalized to match, so
 // "compares equal" and "serializes alike" stay the same relation — see
-// appendKeyFloat64 (exec/sort.go).
+// keyFloat32bits / keyFloat64bits and appendKeyValue's float arms
+// (exec/sort.go).
 
 // CompareFloat64 orders two float64 values with NaN greatest and NaN == NaN.
 func CompareFloat64(a, b float64) int {

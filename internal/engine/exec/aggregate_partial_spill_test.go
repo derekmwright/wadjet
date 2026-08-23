@@ -1326,3 +1326,84 @@ func TestPartialDrain_FreeListReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestExternalMergeSpill_FloatNegZeroCollapsesOnDrain is the regression for
+// the -0.0/+0.0 half of #446's key-canonicalization gap.
+//
+// A lone FLOAT64 GROUP BY column takes the generic-SoA path with deferred key
+// boxing (aggregate.go's consumeBatchGenericSoA): the in-memory hash lookup
+// hashes raw IEEE bits (typedRowHash), so -0.0 and +0.0 land in two different
+// group slots from the moment they're consumed — PostgreSQL says they are the
+// SAME value (-0.0 = 0.0), so this in-memory split is itself a known,
+// separately-tracked defect (see the FLOAT NaN/-0 semantics umbrella issue;
+// GROUP BY/DISTINCT's hash key still doesn't canonicalize).
+//
+// What THIS test pins is the drain/merge step: forcing a spill routes both
+// slots through partialGroupCursor.strKeyValsAt → appendSerializedKey →
+// appendKeyValue (sort.go), the boxed k-way MERGE key. Before this fix,
+// appendKeyValue rendered float64 with strconv.AppendFloat directly, which
+// prints -0.0 as "-0" and +0.0 as "0" — two different merge keys, so the
+// split from Consume survived the drain and the query answered 2 groups.
+// canonicalFloat64 now folds the sign of zero before rendering, so the merge
+// key agrees they're one value and the drain coalesces them back into the
+// single group PostgreSQL expects.
+func TestExternalMergeSpill_FloatNegZeroCollapsesOnDrain(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "g", Type: parquet.TypeFloat64},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	const numBatches = 20
+	const rowsPerBatch = 50
+	batches := make([]*batch.RecordBatch, 0, numBatches)
+	var wantCount int64
+	var wantSum int64
+	for bi := 0; bi < numBatches; bi++ {
+		rows := make([]map[string]any, 0, rowsPerBatch)
+		for ri := 0; ri < rowsPerBatch; ri++ {
+			g := 0.0
+			if (bi+ri)%2 == 0 {
+				g = math.Copysign(0, -1) // -0.0
+			}
+			v := int64(bi*1000 + ri + 1)
+			rows = append(rows, map[string]any{"g": g, "v": v})
+			wantCount++
+			wantSum += v
+		}
+		batches = append(batches, batch.FromRows(schema, rows))
+	}
+
+	mkAgg := func(spill *memory.SpillManager) *HashAggregate {
+		h := NewHashAggregate([]string{"g"}, []AggColumn{
+			{Func: AggCount, OutputCol: "c", OutputType: parquet.TypeInt64},
+			{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeInt64},
+		})
+		h.Spill = spill
+		return h
+	}
+
+	// Tight budget: every other Consume spills, forcing the drain/merge path
+	// that reifies keys through appendKeyValue.
+	tracker := memory.NewTracker("test", 1_000)
+	sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := mkAgg(sm)
+	tracker.ForceReserve(900)
+	gotRows := runHashAggToMap(t, h, batches)
+
+	if len(gotRows) != 1 {
+		t.Fatalf("GROUP BY over {-0.0, 0.0}: got %d groups, want 1 (PostgreSQL: -0.0 = 0.0) — rows: %v",
+			len(gotRows), gotRows)
+	}
+	row := gotRows[0]
+	if c, _ := row["c"].(int64); c != wantCount {
+		t.Errorf("count = %d, want %d", c, wantCount)
+	}
+	if s, _ := row["total"].(int64); s != wantSum {
+		t.Errorf("sum = %d, want %d", s, wantSum)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

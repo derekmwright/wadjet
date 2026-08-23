@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"testing"
 
@@ -25,7 +26,11 @@ import (
 // IsNaN rather than by "==", so two NaN cells compare equal here exactly
 // when the comparator says they do (this generator's propNaN always
 // produces the one canonical NaN bit pattern, so the two notions of "same
-// NaN" never actually diverge in this test).
+// NaN" never actually diverge in this test). fmt does NOT do the equivalent
+// fold for -0.0 — it renders "-0", distinct from +0.0's "0" — so keyOf below
+// canonicalizes the sign of zero itself before handing the value to fmt,
+// the same fold keyFloat32bits/keyFloat64bits apply on the real encoder's
+// side (exec/sort.go).
 //
 // NaN is IN all four properties. It used to be excluded from P2-P4, because
 // the comparators tied a NaN against whatever sat opposite it and that
@@ -80,12 +85,22 @@ func propGen(rng *rand.Rand, col parquet.Column, withNaN bool) any {
 				out[i] = float32(propNaN())
 				continue
 			}
+			if withNaN && rng.Intn(6) == 0 {
+				out[i] = float32(propNegZero())
+				continue
+			}
 			out[i] = float32(rng.Intn(3))
 		}
 		return out
 	}
 	return nil
 }
+
+// propNegZero returns -0.0, computed rather than written as a literal so it
+// reads the same as propNaN's runtime-computed NaN: the point is the VALUE
+// (kernel/float_order.go: -0.0 = 0.0), not that the compiler could constant-
+// fold a literal away.
+func propNegZero() float64 { return math.Copysign(0, -1) }
 
 // propNaN returns a NaN computed at runtime (0.0/0.0), matching zzGen's
 // approach in the original scratch test: the point is a value the compiler
@@ -119,6 +134,9 @@ func propGenElem(rng *rand.Rand, col parquet.Column, withNaN bool) any {
 		if withNaN && rng.Intn(4) == 0 {
 			return propNaN()
 		}
+		if withNaN && rng.Intn(4) == 0 {
+			return propNegZero()
+		}
 		return float64(rng.Intn(3))
 	case parquet.TypeFloat32:
 		if rng.Intn(5) == 0 {
@@ -126,6 +144,9 @@ func propGenElem(rng *rand.Rand, col parquet.Column, withNaN bool) any {
 		}
 		if withNaN && rng.Intn(4) == 0 {
 			return float32(propNaN())
+		}
+		if withNaN && rng.Intn(4) == 0 {
+			return float32(propNegZero())
 		}
 		return float32(rng.Intn(3))
 	case parquet.TypeRow:
@@ -147,6 +168,52 @@ func propGenElem(rng *rand.Rand, col parquet.Column, withNaN bool) any {
 func arrayFloatCol(elem parquet.TypeID) parquet.Column {
 	return parquet.Column{Name: "v", Type: parquet.TypeArray, Nullable: true,
 		ElementType: &parquet.Column{Name: "element", Type: elem, Nullable: true}}
+}
+
+// canonicalZero walks a boxed value (vec.GetValue's shapes: nil, bool,
+// int32/64, float32/64, string, []byte, []any, map[string]any, []float32)
+// and replaces every -0.0 with +0.0, at any nesting depth. keyOf's "same
+// value" check is fmt's own rendering, and fmt does not fold the sign of
+// zero the way it folds NaN (see the comment above TestContainerOrderProperties)
+// — so this is P4's independent restatement of the same fold
+// keyFloat32bits/keyFloat64bits apply on the real encoder's side.
+func canonicalZero(v any) any {
+	switch tv := v.(type) {
+	case float64:
+		if tv == 0 {
+			return float64(0)
+		}
+		return tv
+	case float32:
+		if tv == 0 {
+			return float32(0)
+		}
+		return tv
+	case []any:
+		out := make([]any, len(tv))
+		for i, e := range tv {
+			out[i] = canonicalZero(e)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(tv))
+		for k, e := range tv {
+			out[k] = canonicalZero(e)
+		}
+		return out
+	case []float32:
+		out := make([]float32, len(tv))
+		for i, f := range tv {
+			if f == 0 {
+				out[i] = 0
+				continue
+			}
+			out[i] = f
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 func propSign(x int) int {
@@ -188,7 +255,7 @@ func TestContainerOrderProperties(t *testing.T) {
 			if cmp == nil {
 				t.Fatalf("nil comparator")
 			}
-			keyOf := func(i int) string { return fmt.Sprintf("%#v", vec.GetValue(i)) }
+			keyOf := func(i int) string { return fmt.Sprintf("%#v", canonicalZero(vec.GetValue(i))) }
 
 			p1, p2, p3, p4 := 0, 0, 0, 0
 			for i := 0; i < n; i++ {

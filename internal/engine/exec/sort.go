@@ -1159,9 +1159,13 @@ func appendKeyValue(buf []byte, v any) []byte {
 	case int32:
 		return strconv.AppendInt(buf, int64(tv), 10)
 	case float64:
-		return strconv.AppendFloat(buf, tv, 'g', -1, 64)
+		// canonicalFloat64: -0.0 must render as "0" like +0.0 does, or the
+		// two would key differently despite comparing equal (kernel/
+		// float_order.go). NaN already renders as the literal string "NaN"
+		// regardless of payload, so no fold is needed for that case here.
+		return strconv.AppendFloat(buf, canonicalFloat64(tv), 'g', -1, 64)
 	case float32:
-		return strconv.AppendFloat(buf, float64(tv), 'g', -1, 32)
+		return strconv.AppendFloat(buf, float64(canonicalFloat32(tv)), 'g', -1, 32)
 	case string:
 		// A length prefix, not the raw run: without it a NUL inside the
 		// value is indistinguishable from the column separator — and a
@@ -1236,29 +1240,56 @@ func appendKeyFloats(buf []byte, vals []float32) []byte {
 	return buf
 }
 
+// canonicalFloat32 / canonicalFloat64 fold a value onto the one bit pattern
+// PostgreSQL's float order treats as canonical for it: every NaN payload onto
+// one NaN, and -0.0 onto +0.0 (kernel/float_order.go's CompareFloat32/64 say
+// both pairs compare EQUAL, so a value that reaches here through GetValue's
+// float64/float32 box and a value that reaches here through a vector's raw
+// bits must key alike). Used by keyFloat32bits/keyFloat64bits (below) and by
+// appendKeyValue's float arms, so the same fold applies whether the caller
+// keys by bit pattern or by formatting the float64/float32 the box holds.
+func canonicalFloat32(f float32) float32 {
+	if f != f {
+		return float32(math.NaN())
+	}
+	if f == 0 {
+		// Also folds -0.0: `==` treats -0.0 and +0.0 as equal, and the
+		// untyped constant 0 is +0.0.
+		return 0
+	}
+	return f
+}
+
+func canonicalFloat64(f float64) float64 {
+	if f != f {
+		return math.NaN()
+	}
+	if f == 0 {
+		return 0
+	}
+	return f
+}
+
 // keyFloat32bits / keyFloat64bits are Float32bits/Float64bits with every NaN
-// folded onto one payload.
+// folded onto one payload and -0.0 folded onto +0.0.
 //
 // The comparators order NaN as a single value — greatest, and equal to itself
-// (kernel/float_order.go, #446) — and the container-order contract is that
-// "compares equal" and "serializes alike" name the same relation. Raw IEEE
-// bits break that: two NaNs of different payload compare EQUAL and would
-// serialize DIFFERENTLY, so a drained partial aggregate would split one group
-// in two and answer differently depending on how much memory it had. A
-// payload is not part of a DECIMAL-free SQL value's identity, so folding it
-// is the side to give.
+// (kernel/float_order.go, #446) — and -0.0 as equal to +0.0, and the
+// container-order contract is that "compares equal" and "serializes alike"
+// name the same relation. Raw IEEE bits break both: two NaNs of different
+// payload, or -0.0 and +0.0, compare EQUAL and would serialize DIFFERENTLY,
+// so a drained partial aggregate would split one group in two and answer
+// differently depending on how much memory it had (and a GROUP BY through
+// this path would disagree with `rank() OVER (ORDER BY f)`, which the
+// comparator already puts in one peer group). A payload, and a zero's sign,
+// are not part of a DECIMAL-free SQL value's identity, so folding them is the
+// side to give.
 func keyFloat32bits(f float32) uint32 {
-	if f != f {
-		return math.Float32bits(float32(math.NaN()))
-	}
-	return math.Float32bits(f)
+	return math.Float32bits(canonicalFloat32(f))
 }
 
 func keyFloat64bits(f float64) uint64 {
-	if f != f {
-		return math.Float64bits(math.NaN())
-	}
-	return math.Float64bits(f)
+	return math.Float64bits(canonicalFloat64(f))
 }
 
 // Nested-element kind tags. Every nested element is SELF-DELIMITING: a tag,
