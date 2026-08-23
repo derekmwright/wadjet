@@ -26,7 +26,7 @@ those entries with no exemption:
 | #394 | `kernel/sort.go` gained a DECIMAL arm in all three resolvers (numeric, by unscaled `Int128` at equal scale), and `compareVectorValues` (`window.go`) one of its own instead of falling through to `compareAny` on the formatted string | 4 in `tmOptPins`, 2 in `tmdPins` |
 | #395 | `writePartialKeyToColumn` (`aggregate_partial_spill.go`) no longer writes a DISPLAY-form key into raw storage: only STRING/BYTES/CIDR store that text, the rest re-parse through `Vector.SetValue`. Closes the int-backed half of the same defect too — a DATE/IPv4/MAC key on this path read back as 1970-01-01 / 0.0.0.0 | 4 in `tmOptPins`, which is now empty |
 | #396 | the native writer stamps the declared schema into the footer (`wadjet.schema` KeyValueMetadata) and `FileReader` restores each leaf column's type identity from it; `SQLResult.OutputSchema()` + `coordColumnMetas` give the coord path the same pgwire ColumnMetas the embedded path already had | 37 in `tmdPins`, which is now empty |
-| #402 | `materializeFlatAccums` resolves the SHARED count array before its bound check — `flatAccumLen` probes an aggregate's own arrays and a count-sharing COUNT owns none, so it measured 0 and was skipped for every group. Not a top-N bug: the heap and the multi-key comparator were correct and were sorting a wrong value | 1 in `tmFuzzOptPins` + its `tmFuzzIntermittentOptRetries` entry |
+| #402 | `materializeFlatAccums` resolves the SHARED count array before its bound check — `flatAccumLen` probes an aggregate's own arrays and a count-sharing COUNT owns none, so it measured 0 and was skipped for every group. Not a top-N bug: the heap and the multi-key comparator were correct and were sorting a wrong value. Wider than the reported shape — see below | 1 in `tmFuzzOptPins` + its `tmFuzzIntermittentOptRetries` entry |
 
 `TestTypeMatrixTwoPath` now reports **229 compared, 0 diverged**.
 
@@ -42,6 +42,19 @@ Three consequences worth recording:
   scan (`physical.Stage` → `distributed.OpSpec` → `sourceForAliasWithProjection`
   → `finishParquetState`, plus `worker/executor.go`'s four
   `scan.ReadFileBatches` calls), which is a separate change.
+
+  **The two-path gate is STRUCTURALLY BLIND to that boundary and always will
+  be**: `TestTypeMatrixTwoPath` writes its own fixture files with the current
+  writer (`tmdCluster` calls `parquet.NewWriter` on every run), so every file
+  it ever reads carries a `wadjet.schema` key. The migration case — a table
+  whose parquet predates the key — cannot occur in a suite that generates its
+  own data, no matter how the corpus grows. On such a table the DAG still
+  returns raw storage while the fast path returns the display form, which is
+  the ORIGINAL #396 symptom, unfixed, on old data. Catching it needs a fixture
+  written WITHOUT the key (the writer would need a switch, or the fixture
+  would have to be checked in as bytes) or the catalog→worker plumbing above,
+  which removes the question. Until one of those lands, the claim "#396 is
+  fixed" means "for files written from here on".
 - **#392's four `minby_scalar_*` pins moved from `tmdPins` to
   `tmdUnsupported`.** They were pinned as an ASYMMETRY — the single-process
   arm refusing while the DAG answered — only because the DAG saw those
@@ -54,6 +67,58 @@ Three consequences worth recording:
   the top-N merge. The top-N was innocent. `tmFuzzIntermittentOptRetries` is
   now empty but stays, as the settled policy for the next pin with no forcing
   gate.
+- **#402's blast radius was wider than "a duplicate COUNT", and the issue text
+  understated it.** `planCountArrays` (`aggregate.go:6059`) shares a count
+  array by COLUMN CLASS, not by expression: every count-needing aggregate over
+  the same input column joins one class, plus one class for `COUNT(*)`, and
+  the first of each class owns the array while the rest read it. The
+  aggregate that lost its count through this merge is any SHARER that owns no
+  arrays of its own — and a COUNT owns none (no sum, no min/max, `count` nil
+  once it shares). So `SUM(v), COUNT(v)`, `AVG(v), COUNT(v)`, two `COUNT(*)`
+  and the 2nd and 3rd of three `COUNT(v)` were ALL answering 0 through the
+  generic-SoA merge, over a float64 group key, whenever a clone merged empty.
+  The reverse order (`COUNT(v), SUM(v)`) was always right, because there the
+  sharer is the SUM and it owns `sumI64` — which is exactly why
+  `agg_count_layout_test.go`'s AVG-sharer merge case passed and the cell
+  stayed uncovered. `TestCountSharingGenericSoAMergeShapes` now pins all five
+  shapes; four of them fail on the pre-fix guard.
+
+**Update 2026-08-23 (third wave: the adversarial review of the second).** The
+second wave's four fixes were reviewed against their own claims. Four changes
+came out of it, and two issues were filed for what should not be fixed under
+those commits' scope.
+
+| Finding | Change |
+|---|---|
+| #396's overlay trusted the blob too far | `overlayDeclaredSchema` gated only on `wadjetTypeToPhysical`, so a footer blob could override types the FILE ANNOTATES CORRECTLY — DECIMAL(18,4) relabelled (12,1) is every value 1000× off, TIMESTAMP→IPv4, STRING→IPv6 renders `""` — and an unknown TypeID passed because that function's default returns BYTE_ARRAY, and `Dimension` was copied unvalidated into what the batch allocator sizes from. The overlay now applies ONLY to a leaf with no LogicalType and no ConvertedType, ONLY for the eight types parquet cannot annotate, and copies type identity ONLY. Permanent `FuzzOverlayDeclaredSchema` plus a 21-case adversarial table |
+| #394's comparator was exact only below 2^53 | `CompareDecimalAt` rescaled through float64 at unequal scales, and `SortMergeJoin` uses that comparator for key EQUALITY — so it was a spurious JOIN MATCH, not a sort-order nicety. Now exact at every scale (`Int128.MulPow10` with overflow detection, big.Int beyond it). The suite had no sort-merge join over a DECIMAL key at all; it has one now, at equal and unequal scale |
+| the IPv6 write stub | `ipv6StringToBytes` stored the literal's TEXT — 11 bytes where the contract is 16 — which #396 made visible: the column now reads back as IPV6 and `GetValue` renders any other length as `""` |
+| a result's schema was read off its batches | `SQLResult.OutputSchema()` fell back to the first batch, and `Stream()` detaches the batches; the correlated-local route never set `Schema` at all. Both sites now record it at construction |
+
+One behaviour change worth stating plainly: **CIDR now reads back from a
+parquet file as STRING, not CIDR.** The writer annotates it `LogicalString`,
+and the hardened overlay makes an annotated leaf immune to the blob. The
+stored bytes are the same UTF-8 text either way and every consumer renders the
+same characters, so this is a type-name difference on a value-identical
+column — the price of the annotated-leaf rule being absolute rather than
+case-by-case. The eight types #396 was actually about (IPv4, IPv6, MAC, UUID,
+Bytes, Port, Protocol, Duration) are unaffected.
+
+Two issues filed rather than fixed in those commits:
+
+- **#415 — the sort comparators report every ARRAY, ROW, MAP and VECTOR value
+  EQUAL.** This is #394's residual: DECIMAL was the fifth type in that
+  `default` arm and the only one fixed. `ORDER BY` over those types is a
+  silent no-op and a sort-merge join on such a key matches every row against
+  every row; the `cmp == nil` guard in `sort_merge_join.go:467` is dead code,
+  because the resolvers return the always-equal closure rather than nil. The
+  two-path gate cannot see it — both arms take the same comparator and agree.
+- **#416 — a zero-row result declares no column TYPES on any path**, and none
+  of its column NAMES on the correlated-local route. `CollectSink` captures
+  its schema from the first batch it CONSUMES and `exec.Project` resolves its
+  output types from the first input batch, so an empty result has no schema to
+  publish and pgwire declares OID 25 (text) for every column. Typing it needs
+  the output schema derived from the PLAN rather than from data flow.
 
 ## Why
 

@@ -6323,11 +6323,14 @@ func (h *HashAggregate) materializeFlatAccums() {
 				// count-sharing COUNT owns none of them (count nil by
 				// definition, no sum, no min/max) — so it measured 0 for
 				// every group, the guard below skipped it unconditionally,
-				// and its accumulator stayed at the zero value. A duplicate
-				// COUNT of the same column therefore emitted 0 while the
-				// aggregate it shares with emitted the right number, on
-				// whichever groups happened to reach this materialize
-				// (#402).
+				// and its accumulator stayed at the zero value. Sharing is
+				// by COLUMN CLASS (planCountArrays), so that is every COUNT
+				// that is not the FIRST count-needing aggregate over its
+				// column: `SUM(v), COUNT(v)`, `AVG(v), COUNT(v)`, a second
+				// COUNT(*), the second and third of three COUNT(v). Each
+				// emitted 0 while the aggregate it shares with emitted the
+				// right number, on whichever groups happened to reach this
+				// materialize (#402).
 				ca := countArrayOf(h.intFlatAccs, ai)
 				// Defensive: a gi that wasn't appended to the SoA arrays
 				// (can happen when compact-to-generic migration runs with
@@ -6336,6 +6339,13 @@ func (h *HashAggregate) materializeFlatAccums() {
 				// index a zero-length array and panic. Leave the
 				// accumulator at its zero value so downstream kernels
 				// emit identity output rather than crashing the worker.
+				// Both bounds, because the two arrays are the same length
+				// whenever both are live: growTo extends every array the
+				// aggregate owns to the same n each batch, and the shared
+				// count array is grown by its OWNER on the same schedule.
+				// The only aggregate whose own length can lag is a sharer
+				// that owns no arrays at all, and `gi >= len(ca)` is what
+				// keeps it in.
 				if gi >= flatAccumLen(fa) && gi >= len(ca) {
 					continue
 				}

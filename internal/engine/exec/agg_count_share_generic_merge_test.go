@@ -83,3 +83,134 @@ func TestCountSharingGenericSoAMerge(t *testing.T) {
 		}
 	}
 }
+
+// TestCountSharingGenericSoAMergeShapes pins the BLAST RADIUS of #402, which
+// is wider than "a duplicate COUNT".
+//
+// planCountArrays (aggregate.go:6059) shares by COLUMN CLASS, not by
+// expression: every count-needing aggregate over the same input column — and
+// every COUNT(*) — joins one class, the first of the class owns the array and
+// the rest read it. The aggregate that loses its count in the merge is any
+// SHARER that owns no arrays of its own, and a COUNT owns none: no sum, no
+// min/max, and count nil by definition once it shares.
+//
+// So `SUM(v), COUNT(v)`, `AVG(v), COUNT(v)`, two `COUNT(*)` and three
+// `COUNT(v)` were ALL wrong through this merge — not only the duplicate-COUNT
+// pair the issue was reported with. The reverse order (`COUNT(v), SUM(v)`) was
+// always right, because there the sharer is the SUM and it owns sumI64, which
+// is exactly why agg_count_layout_test.go's AVG-sharer merge case passed.
+func TestCountSharingGenericSoAMergeShapes(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeFloat64},
+		{Name: "v", Type: parquet.TypeInt64, Nullable: true},
+	}
+	rows := []map[string]any{
+		{"k": 18.5, "v": int64(3)},
+		{"k": 53.5, "v": int64(5)},
+		{"k": 18.5, "v": nil}, // counted by COUNT(*), not by COUNT(v)
+		{"k": 80.5, "v": int64(7)},
+	}
+
+	cases := []struct {
+		name string
+		aggs []AggColumn
+		want map[string]map[string]any
+	}{
+		{
+			name: "SUM then COUNT of the same column",
+			aggs: []AggColumn{
+				{Func: AggSum, InputCol: "v", OutputCol: "s", OutputType: parquet.TypeInt64},
+				{Func: AggCount, InputCol: "v", OutputCol: "c", OutputType: parquet.TypeInt64},
+			},
+			want: map[string]map[string]any{
+				"18.5": {"s": int64(3), "c": int64(1)},
+				"53.5": {"s": int64(5), "c": int64(1)},
+				"80.5": {"s": int64(7), "c": int64(1)},
+			},
+		},
+		{
+			name: "AVG then COUNT of the same column",
+			aggs: []AggColumn{
+				{Func: AggAvg, InputCol: "v", OutputCol: "a", OutputType: parquet.TypeFloat64},
+				{Func: AggCount, InputCol: "v", OutputCol: "c", OutputType: parquet.TypeInt64},
+			},
+			want: map[string]map[string]any{
+				"18.5": {"a": 3.0, "c": int64(1)},
+				"53.5": {"a": 5.0, "c": int64(1)},
+				"80.5": {"a": 7.0, "c": int64(1)},
+			},
+		},
+		{
+			name: "two COUNT(*)",
+			aggs: []AggColumn{
+				{Func: AggCount, OutputCol: "n1", OutputType: parquet.TypeInt64},
+				{Func: AggCount, OutputCol: "n2", OutputType: parquet.TypeInt64},
+			},
+			want: map[string]map[string]any{
+				"18.5": {"n1": int64(2), "n2": int64(2)},
+				"53.5": {"n1": int64(1), "n2": int64(1)},
+				"80.5": {"n1": int64(1), "n2": int64(1)},
+			},
+		},
+		{
+			name: "three COUNTs of the same column",
+			aggs: []AggColumn{
+				{Func: AggCount, InputCol: "v", OutputCol: "c1", OutputType: parquet.TypeInt64},
+				{Func: AggCount, InputCol: "v", OutputCol: "c2", OutputType: parquet.TypeInt64},
+				{Func: AggCount, InputCol: "v", OutputCol: "c3", OutputType: parquet.TypeInt64},
+			},
+			want: map[string]map[string]any{
+				"18.5": {"c1": int64(1), "c2": int64(1), "c3": int64(1)},
+				"53.5": {"c1": int64(1), "c2": int64(1), "c3": int64(1)},
+				"80.5": {"c1": int64(1), "c2": int64(1), "c3": int64(1)},
+			},
+		},
+		{
+			name: "COUNT then SUM: the sharer owns sumI64, so this one was never wrong",
+			aggs: []AggColumn{
+				{Func: AggCount, InputCol: "v", OutputCol: "c", OutputType: parquet.TypeInt64},
+				{Func: AggSum, InputCol: "v", OutputCol: "s", OutputType: parquet.TypeInt64},
+			},
+			want: map[string]map[string]any{
+				"18.5": {"c": int64(1), "s": int64(3)},
+				"53.5": {"c": int64(1), "s": int64(5)},
+				"80.5": {"c": int64(1), "s": int64(7)},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			parent := NewHashAggregate([]string{"k"}, tc.aggs)
+			if err := parent.Init(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := parent.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
+				t.Fatal(err)
+			}
+			empty := parent.CloneSink().(*HashAggregate)
+			if err := empty.Init(ctx); err != nil {
+				t.Fatal(err)
+			}
+			parent.MergeSink(empty)
+
+			got := aggRows(t, parent)
+			if len(got) != len(tc.want) {
+				t.Fatalf("groups = %d, want %d: %v", len(got), len(tc.want), got)
+			}
+			for _, row := range got {
+				key := keyString(row["k"])
+				want, ok := tc.want[key]
+				if !ok {
+					t.Fatalf("unexpected group %q: %v", key, row)
+				}
+				for col, w := range want {
+					if !valuesEqual(row[col], w) {
+						t.Errorf("group %s: %s = %v, want %v (row: %v)", key, col, row[col], w, row)
+					}
+				}
+			}
+		})
+	}
+}

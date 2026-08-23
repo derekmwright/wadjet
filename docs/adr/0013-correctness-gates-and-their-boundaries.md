@@ -138,7 +138,10 @@ This is deliberate, not an oversight, for two reasons:
    it every time — unlike #391, nothing else in the suite could serve as its
    `GatedBy` gate. (#402 is fixed and its pin is deleted; it remains the
    worked example, and `tmFuzzIntermittentOptRetries` remains the mechanism
-   for the next pin of its shape.) `wadjet.TestTypeMatrixFuzzOptimizationInvariance` retries
+   for the next pin of its shape. The trigger IS known now, in hindsight:
+   whether a clone lane consumed nothing, which is scheduling — nothing a
+   gate can set. The point stands, and is sharper for it: a trigger can be
+   perfectly understood and still be unforceable.) `wadjet.TestTypeMatrixFuzzOptimizationInvariance` retries
    such a pin's comparison a bounded number of times
    (`tmFuzzIntermittentOptRetries`) before concluding "no divergence this
    run": every attempt is a real comparison against the baseline, the loop
