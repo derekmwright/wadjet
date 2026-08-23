@@ -23,9 +23,14 @@ var decimalSortSchema = []parquet.Column{
 //	numeric:       -3.5  0.0  0.0001  2.0002  9.9  10.001  100.25
 //	lexicographic: -3.5  0.0  0.0001  10.001  100.25  2.0002  9.9
 //	input:         the sequence below
+//
+// The INPUT is spelled loosely — ParseDecimalString rescales it to the
+// column's declared 4 — while the expectation is spelled at the declared
+// scale, which is what FormatDecimal renders now that a DECIMAL's text form
+// is its declared width (#453).
 var decimalSortInput = []string{"10.001", "0.0001", "100.25", "-3.5", "9.9", "0.0", "2.0002"}
 
-var decimalSortNumericAsc = []string{"-3.5", "0.0", "0.0001", "2.0002", "9.9", "10.001", "100.25"}
+var decimalSortNumericAsc = []string{"-3.5000", "0.0000", "0.0001", "2.0002", "9.9000", "10.0010", "100.2500"}
 
 func decimalSortRows(tb testing.TB, withNull bool) []map[string]any {
 	tb.Helper()

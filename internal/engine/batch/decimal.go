@@ -214,6 +214,20 @@ func (d Int128) BigInt() *big.Int {
 // scale — the text form of a DECIMAL column, and so what GetValue hands the
 // row map, ToRows, the JSON encoder and the pgwire text protocol.
 //
+// The fraction is EXACTLY scale digits, never fewer. It used to be trimmed of
+// trailing zeros, so a numeric(9,2) holding -24.50 reached a client as
+// "-24.5" and a numeric(38,10) zero as "0.0" (#453). PostgreSQL renders a
+// numeric(p,s) at its DECLARED scale always, and ADR-0012 makes PostgreSQL
+// the authority — but the deeper reason is that a DECIMAL column exists
+// BECAUSE its scale is part of the value's meaning. A currency column that
+// spells itself "-24.5" is one a BI tool displays wrong, and any client that
+// string-compares or formats from the text gets a different answer than it
+// gets from PostgreSQL. The trim also reached the wire's binary form, whose
+// dscale header pgNumericDigits counts off this very string.
+//
+// scale <= 0 renders no point at all — "12345", not "12345." — which is
+// PostgreSQL's numeric(p,0) too.
+//
 // It formats the whole 128 bits. It used to read only Lo, through
 // `v := int64(abs.Lo)` and an int64 divmod, which was wrong twice over: a
 // value past 64 bits rendered as its low half (Int128{Hi:5, Lo:0x112210f4-
@@ -235,13 +249,6 @@ func (d Int128) FormatDecimal(scale int) string {
 		intPart, fracStr = digits[:len(digits)-scale], digits[len(digits)-scale:]
 	} else {
 		fracStr = strings.Repeat("0", scale-len(digits)) + digits
-	}
-
-	// Trailing zeros are trimmed, but never all of them: 3.00 at scale 2 is
-	// "3.0", not "3." — long-standing behavior the wire format depends on.
-	fracStr = strings.TrimRight(fracStr, "0")
-	if fracStr == "" {
-		fracStr = "0"
 	}
 
 	if d.IsNegative() {

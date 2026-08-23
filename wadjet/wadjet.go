@@ -196,11 +196,22 @@ func (db *DB) NewIngester(tableName string, schema parquet.Schema, partitionKeys
 }
 
 // ColumnMeta describes a result column's type information.
+//
+// Precision and Scale are the DECLARATION, not the value: a bare TypeID is
+// not a type for a DECIMAL, and the pgwire layer needs them to fill
+// RowDescription's type modifier — PostgreSQL packs a numeric's precision and
+// scale there, and it is where a JDBC or ODBC client reads
+// ResultSetMetaData.getPrecision()/getScale() from. Sending the constant -1
+// declares an unconstrained numeric, so a tool that sizes a display column or
+// round-trips DDL from a result set got it wrong for every DECIMAL(p,s)
+// column (#454). They are zero for every other type.
 type ColumnMeta struct {
-	Name     string
-	TypeName string         // Wadjet type name (e.g., "INT64", "STRING")
-	TypeID   parquet.TypeID // Wadjet type ID
-	Nullable bool
+	Name      string
+	TypeName  string         // Wadjet type name (e.g., "INT64", "STRING")
+	TypeID    parquet.TypeID // Wadjet type ID
+	Nullable  bool
+	Precision int // DECIMAL: declared max digits
+	Scale     int // DECIMAL: declared digits after the point
 }
 
 // QueryResult contains the result of a SQL query.
@@ -639,21 +650,24 @@ func reconcileColumnName(name string, rows []map[string]any) string {
 func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parquet.Column, cat *catalog.Catalog) []ColumnMeta {
 	metas := make([]ColumnMeta, len(columns))
 
-	// The executed output schema, keyed by column name.
-	outMap := make(map[string]parquet.TypeID, len(outSchema))
+	// The executed output schema, keyed by column name. The whole Column,
+	// not just its TypeID: a DECIMAL's precision and scale are part of the
+	// declaration the wire has to carry (#454), and keying by TypeID threw
+	// them away here before anything downstream could ask.
+	outMap := make(map[string]parquet.Column, len(outSchema))
 	for _, c := range outSchema {
-		outMap[c.Name] = c.Type
+		outMap[c.Name] = c
 	}
 
 	// Try to match columns against catalog table schemas
 	ctx := context.Background()
-	schemaMap := make(map[string]parquet.TypeID)
+	schemaMap := make(map[string]parquet.Column)
 	if cat != nil {
 		if tableNames, err := cat.ListTables(ctx); err == nil {
 			for _, tableName := range tableNames {
 				if table, err := cat.GetTable(ctx, tableName); err == nil && table != nil {
 					for _, col := range table.Schema.Columns {
-						schemaMap[col.Name] = col.Type
+						schemaMap[col.Name] = col
 					}
 				}
 			}
@@ -665,16 +679,18 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 
 		// The executed plan's output schema first — it is per-result rather
 		// than a cross-table name match, and it sees computed columns.
-		if tid, ok := outMap[name]; ok {
-			metas[i].TypeID = tid
-			metas[i].TypeName = tid.String()
+		if col, ok := outMap[name]; ok {
+			metas[i].TypeID = col.Type
+			metas[i].TypeName = col.Type.String()
+			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale
 			continue
 		}
 
 		// Then the catalog schema
-		if tid, ok := schemaMap[name]; ok {
-			metas[i].TypeID = tid
-			metas[i].TypeName = tid.String()
+		if col, ok := schemaMap[name]; ok {
+			metas[i].TypeID = col.Type
+			metas[i].TypeName = col.Type.String()
+			metas[i].Precision, metas[i].Scale = col.Precision, col.Scale
 			continue
 		}
 

@@ -328,7 +328,8 @@ func TestShuffleFormatDecimalScaleRoundTrip(t *testing.T) {
 	if got := out[0].Schema[1].Scale; got != 2 {
 		t.Fatalf("decoded schema scale = %d, want 2 (header lost it)", got)
 	}
-	want := []string{"3.25", "-1.5", "12.34"}
+	// Scale 2 means two fraction digits in the text form, always (#453).
+	want := []string{"3.25", "-1.50", "12.34"}
 	for i, w := range want {
 		if got := fmt.Sprintf("%v", out[0].Columns[1].GetValue(i)); got != w {
 			t.Fatalf("row %d: %v, want %s", i, got, w)

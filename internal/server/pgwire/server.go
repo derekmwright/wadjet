@@ -2772,14 +2772,52 @@ func (c *pgConn) sendTypedRowDescription(metas []wadjet.ColumnMeta, fmtCodes []i
 		c.buf = appendInt32(c.buf, int32(oid))
 		// Data type size
 		c.buf = appendInt16(c.buf, pgTypeSize(oid))
-		// Type modifier (int32) = -1
-		c.buf = appendInt32(c.buf, -1)
+		// Type modifier: the DECLARATION a bare OID cannot carry
+		c.buf = appendInt32(c.buf, pgTypeMod(m))
 		// Format code (int16): what the Bind chose for this column
 		c.buf = appendInt16(c.buf, fmtCodeAt(fmtCodes, i))
 	}
 
 	c.sendMsg('T', c.buf)
 }
+
+// pgTypeMod returns the PostgreSQL type modifier (atttypmod) for a result
+// column, or -1 for a type that has none.
+//
+// The modifier is where PostgreSQL keeps the part of a declaration the OID
+// does not carry: numeric's (precision, scale), varchar/bpchar's length,
+// time/timestamp/interval's second precision. -1 means "unconstrained", which
+// is protocol-legal and is what every unparameterised type sends — so writing
+// the constant -1 for everything was less information rather than wrong
+// information, and it went unnoticed until DECIMAL started declaring OID 1700
+// (#454). What a client loses is ResultSetMetaData.getPrecision()/getScale():
+// a column declared DECIMAL(9,2) reports 0 or "unlimited", and a tool that
+// sizes a display column or round-trips DDL from a result set gets it wrong.
+//
+// numeric packs the pair as ((precision << 16) | scale) + VARHDRSZ, exactly as
+// PostgreSQL's numerictypmodin does (utils/adt/numeric.c). Precision 0 means
+// the declaration did not reach us — a plan-declared schema for a zero-row
+// result, an inferred type — and an unconstrained numeric is the honest
+// answer there, not a fabricated (0,0).
+//
+// The switch is keyed on the wadjet TypeID rather than the OID so that a type
+// which later gains a parameter (a VARCHAR(n), a TIME(n)) is added here and
+// not in the wire writer.
+func pgTypeMod(m wadjet.ColumnMeta) int32 {
+	switch m.TypeID {
+	case parquet.TypeDecimal:
+		if m.Precision <= 0 {
+			return -1
+		}
+		return int32((m.Precision<<16)|(m.Scale&0xFFFF)) + pgVarHdrSz
+	default:
+		return -1
+	}
+}
+
+// pgVarHdrSz is PostgreSQL's VARHDRSZ, the 4 bytes every length-carrying
+// typmod is offset by so that -1 can mean "no modifier".
+const pgVarHdrSz = 4
 
 // pgTypeSize returns the type size for a PostgreSQL type OID.
 // Fixed-size types report their byte size; variable-length types report -1.

@@ -507,24 +507,12 @@ func int4Text(v int32) []byte { return []byte(strconv.FormatInt(int64(v), 10)) }
 // The pins the wire corpus shares, written once so the same defect cannot
 // acquire two descriptions.
 const (
-	// decimalTypmodPin is #454: sendTypedRowDescription writes a constant -1
-	// where PostgreSQL packs a numeric's precision and scale. -1 is
-	// protocol-LEGAL (it declares an unconstrained numeric), so unlike the
-	// OID this is less information rather than wrong information — but it is
-	// the information a JDBC client reads getPrecision()/getScale() from, and
-	// wadjet.ColumnMeta does not carry precision or scale to send.
-	decimalTypmodPin = "WADJET BUG (#454): the RowDescription type modifier is hard-coded -1, so a " +
-		"DECIMAL's declared precision and scale never reach the client. Blocked on wadjet.ColumnMeta " +
-		"carrying them at all"
-
-	// decimalTrimPin is #453: FormatDecimal trims trailing zeros, so a
-	// numeric(9,2) holding -24.50 is spelled "-24.5". The NUMBER is right and
-	// the BINARY form is right at full scale (binary_decode agrees) — only
-	// the text spelling differs, which is why this lands on float_text_render
-	// and not on values_text.
-	decimalTrimPin = "WADJET BUG (#453): FormatDecimal trims trailing zeros, so a DECIMAL's text form " +
-		"is not at the column's declared scale. It is the one rendering every consumer sees, so the " +
-		"fix moves the DuckDB corpus and the compaction gate with it"
+	// #454 (type_modifiers) and #453 (float_text_render) were pinned here on
+	// both DECIMAL entries. Both are fixed and the pins are gone, which is
+	// the proof: ColumnMeta now carries the declared precision and scale and
+	// pgTypeMod packs them the way numerictypmodin does, and FormatDecimal
+	// renders the fraction at its declared scale instead of trimming it. The
+	// two properties are gated again.
 
 	// noExactNumericPin is a DELIBERATE difference, documented rather than
 	// fixed: the engine has one numeric tower and it is float64.
@@ -593,18 +581,10 @@ func wireCorpus() []wireCase {
 		// binary digit vector. The binary arm is the one the OID change makes
 		// load-bearing: under OID 25 the generic string encoder was right,
 		// because the binary form of a text column IS its bytes.
-		{name: "DecimalColumn", sql: `SELECT d_2, d_4 FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
-			pins: map[string]string{
-				wirePropTypeMods:    decimalTypmodPin,
-				wirePropFloatRender: decimalTrimPin,
-			}},
+		{name: "DecimalColumn", sql: `SELECT d_2, d_4 FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
 		// The wide arm, whose values need more than 64 bits — the range no
 		// float8 fallback could carry and the one #437's old reader truncates.
-		{name: "WideDecimalColumn", sql: `SELECT d_wide FROM dec_probe WHERE d_key IN (1, 100, 150) ORDER BY d_key`,
-			pins: map[string]string{
-				wirePropTypeMods:    decimalTypmodPin,
-				wirePropFloatRender: decimalTrimPin,
-			}},
+		{name: "WideDecimalColumn", sql: `SELECT d_wide FROM dec_probe WHERE d_key IN (1, 100, 150) ORDER BY d_key`},
 		// A parameter bound by its DECLARED type rather than as a string —
 		// the shape of the 4a25af0 fix, and the one that exercises
 		// ParameterDescription.

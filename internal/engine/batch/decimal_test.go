@@ -8,9 +8,9 @@ import (
 
 func TestInt128From(t *testing.T) {
 	tests := []struct {
-		input    int64
-		wantHi   int64
-		wantLo   uint64
+		input  int64
+		wantHi int64
+		wantLo uint64
 	}{
 		{0, 0, 0},
 		{1, 0, 1},
@@ -118,11 +118,13 @@ func TestFormatDecimal(t *testing.T) {
 		want  string
 	}{
 		{Int128From(12345), 2, "123.45"},
-		{Int128From(100), 2, "1.0"},
-		{Int128From(0), 2, "0.0"},
+		// A DECIMAL renders at its DECLARED scale, trailing zeros included
+		// (#453) — 1.00, not 1.0, which is what PostgreSQL sends.
+		{Int128From(100), 2, "1.00"},
+		{Int128From(0), 2, "0.00"},
 		{Int128From(12345), 0, "12345"},
 		{Int128From(-9999), 2, "-99.99"},
-		{Int128From(1000000), 4, "100.0"},
+		{Int128From(1000000), 4, "100.0000"},
 		{Int128From(123456789), 6, "123.456789"},
 	}
 
@@ -174,14 +176,14 @@ func TestDecimalVector(t *testing.T) {
 	if got := v.GetValue(1); got != "-99.99" {
 		t.Errorf("row 1 = %v, want -99.99", got)
 	}
-	if got := v.GetValue(2); got != "500.0" {
-		t.Errorf("row 2 = %v, want 500.0", got)
+	if got := v.GetValue(2); got != "500.00" {
+		t.Errorf("row 2 = %v, want 500.00", got)
 	}
 	if got := v.GetValue(3); got != nil {
 		t.Errorf("row 3 = %v, want nil", got)
 	}
-	if got := v.GetValue(4); got != "42.1" {
-		t.Errorf("row 4 = %v, want 42.1", got)
+	if got := v.GetValue(4); got != "42.10" {
+		t.Errorf("row 4 = %v, want 42.10", got)
 	}
 
 	// GetNumericFloat64
@@ -291,5 +293,38 @@ func TestInt128BigInt(t *testing.T) {
 		if got := tc.v.BigInt().String(); got != tc.want {
 			t.Errorf("Int128{%d,%d}.BigInt() = %s, want %s", tc.v.Hi, tc.v.Lo, got, tc.want)
 		}
+	}
+}
+
+// TestFormatDecimalRendersAtTheDeclaredScale is #453's regression, with the
+// issue's own observed table: PostgreSQL renders a numeric(p,s) at its
+// DECLARED scale, always, and trimming the trailing zeros made a currency
+// column spell itself "-24.5" where a client expects "-24.50".
+func TestFormatDecimalRendersAtTheDeclaredScale(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		d     Int128
+		scale int
+		want  string
+	}{
+		{"numeric_9_2_negative", Int128From(-2450), 2, "-24.50"},
+		{"numeric_38_10_zero", Int128{}, 10, "0.0000000000"},
+		// 493827160549382.7160549350 — the wide row from the issue, whose
+		// last digit is the zero the trim ate.
+		{"numeric_38_10_wide", ParseDecimalString("493827160549382.7160549350", 10), 10, "493827160549382.7160549350"},
+		// scale 0 has no fraction to pad, and gets no point.
+		{"numeric_9_0", Int128From(-2450), 0, "-2450"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.d.FormatDecimal(tc.scale); got != tc.want {
+				t.Errorf("FormatDecimal(%d) = %q, want %q", tc.scale, got, tc.want)
+			}
+			// The text is exactly what ParseDecimalString reads back, which is
+			// what makes the boxed DECIMAL comparator (exec's
+			// boxedDecimalCompare) exact.
+			if back := ParseDecimalString(tc.want, tc.scale); !back.Equal(tc.d) {
+				t.Errorf("round trip: %q at scale %d parsed to %v, want %v", tc.want, tc.scale, back, tc.d)
+			}
+		})
 	}
 }

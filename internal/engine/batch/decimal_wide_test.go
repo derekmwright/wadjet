@@ -20,10 +20,6 @@ func refFormatDecimal(t *testing.T, d Int128, scale int) string {
 	q, r := new(big.Int).QuoRem(new(big.Int).Abs(b), div, new(big.Int))
 	frac := r.String()
 	frac = strings.Repeat("0", scale-len(frac)) + frac
-	frac = strings.TrimRight(frac, "0")
-	if frac == "" {
-		frac = "0"
-	}
 	sign := ""
 	if b.Sign() < 0 {
 		sign = "-"
@@ -48,7 +44,7 @@ func TestFormatDecimalWideValues(t *testing.T) {
 		{"int64_min_scale0", Int128{Hi: -1, Lo: 0x8000000000000000}, 0, "-9223372036854775808"},
 		// 12345678901234567890 — fits 64 bits UNSIGNED but not signed, which
 		// is the case the old int64(abs.Lo) turned negative.
-		{"lo_past_int64_max", Int128{Hi: 0, Lo: 0xab54a98ceb1f0ad2}, 4, "1234567890123456.789"},
+		{"lo_past_int64_max", Int128{Hi: 0, Lo: 0xab54a98ceb1f0ad2}, 4, "1234567890123456.7890"},
 		{"lo_past_int64_max_scale0", Int128{Hi: 0, Lo: 0xab54a98ceb1f0ad2}, 0, "12345678901234567890"},
 		// The Int128 extremes.
 		{"max", Int128{Hi: math.MaxInt64, Lo: math.MaxUint64}, 0, "170141183460469231731687303715884105727"},
@@ -57,9 +53,11 @@ func TestFormatDecimalWideValues(t *testing.T) {
 		{"min_scale38", Int128{Hi: math.MinInt64, Lo: 0}, 38, "-1.70141183460469231731687303715884105728"},
 		// Narrow values: the shapes that already worked must keep working.
 		{"simple", Int128From(325), 2, "3.25"},
-		{"trailing_zero_kept", Int128From(300), 2, "3.0"},
+		// The fraction is the DECLARED width, trailing zeros and all (#453):
+		// 3.00 at scale 2 is "3.00", which is what PostgreSQL sends.
+		{"trailing_zeros_are_the_scale", Int128From(300), 2, "3.00"},
 		{"negative_simple", Int128From(-325), 2, "-3.25"},
-		{"zero", Int128{}, 2, "0.0"},
+		{"zero", Int128{}, 2, "0.00"},
 		{"zero_scale0", Int128{}, 0, "0"},
 		// Magnitude smaller than the scale: the leading zeros are the value.
 		{"sub_one", Int128From(25), 2, "0.25"},
@@ -68,7 +66,7 @@ func TestFormatDecimalWideValues(t *testing.T) {
 		{"deep_scale_neg", Int128From(-1), 10, "-0.0000000001"},
 		// Exact powers of ten, where a float divisor stops being exact: 10^23
 		// has no float64.
-		{"pow10_23", func() Int128 { v, _ := Int128From(1).MulPow10(23); return v }(), 23, "1.0"},
+		{"pow10_23", func() Int128 { v, _ := Int128From(1).MulPow10(23); return v }(), 23, "1.00000000000000000000000"},
 		{"pow10_23_plus_one", func() Int128 {
 			v, _ := Int128From(1).MulPow10(23)
 			return v.Add(Int128From(1))

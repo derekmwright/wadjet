@@ -108,10 +108,12 @@ func coordColumnMetas(res *coordinator.SQLResult) []wadjet.ColumnMeta {
 			col = schema[i]
 		}
 		metas[i] = wadjet.ColumnMeta{
-			Name:     name,
-			TypeName: col.Type.String(),
-			TypeID:   col.Type,
-			Nullable: col.Nullable,
+			Name:      name,
+			TypeName:  col.Type.String(),
+			TypeID:    col.Type,
+			Nullable:  col.Nullable,
+			Precision: col.Precision,
+			Scale:     col.Scale,
 		}
 	}
 	return metas
