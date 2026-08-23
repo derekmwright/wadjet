@@ -444,10 +444,10 @@ func hasNetworkLiteralForm(t TypeID) bool {
 // — stored as a value it is a zero-length entry in a fixed-width column,
 // which the row reader called an error and the columnar reader called a
 // value, and which answers false to IS NULL and equal to the empty string
-// when what was meant was that there is no address. The readers hold the other end of this
-// contract: a zero-length entry in an IPV6 or UUID column reads back as NULL
-// on both paths (reader.go unpackAllPresent / unpackWithNulls,
-// scan/columnar_native.go).
+// when what was meant was that there is no address. The readers hold the
+// other end of this contract: a zero-length entry in an IPV6 or UUID column
+// reads back as NULL on both paths (reader.go unpackAllPresent /
+// unpackWithNulls, scan/columnar_native.go).
 func convertNetworkLiteral(colType TypeID, s string) (any, error) {
 	if s == "" {
 		return nil, nil

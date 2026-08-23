@@ -35,3 +35,4 @@ Conventions:
 | [0015](0015-decode-ahead-is-an-admission-class.md) | Decode-ahead is a CPU-token admission class, not a `TryAcquire` client behind the consumer FIFO | Accepted |
 | [0016](0016-detach-is-the-ownership-claim.md) | `Detach` is the ownership claim; producers may reuse vector backing while a batch is unclaimed (amended 2026-08-22: scan output needs release + claim) | Accepted |
 | [0017](0017-stage-sinks-copy-outside-the-lock.md) | Stage sinks copy outside the lock; the lock covers handoff only | Accepted |
+| [0018](0018-parquet-file-numbers-are-input.md) | A parquet file's own numbers are input, not fact | Accepted |
