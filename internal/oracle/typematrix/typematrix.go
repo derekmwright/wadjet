@@ -370,6 +370,17 @@ func Corpus() []Query {
 			add("project_nulls_"+n,
 				fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE id < 400 ORDER BY id`, n, tbl),
 				oracle.CmpOrdered, n)
+			// MIN/MAX over a container. The flat arm below gates these on
+			// c.Ordered; the containers have no such flag because they had no
+			// order until #415 gave them one, and MIN/MAX declined to answer
+			// until #426. Both forms, because the scalar one takes the
+			// whole-input path and the grouped one the hash path.
+			add("minmax_"+n,
+				fmt.Sprintf(`SELECT MIN(%s) AS lo, MAX(%s) AS hi FROM %s`, n, n, tbl),
+				oracle.CmpUnordered, n)
+			add("minmax_group_"+n,
+				fmt.Sprintf(`SELECT g, MIN(%s) AS lo, MAX(%s) AS hi FROM %s GROUP BY g ORDER BY g`, n, n, tbl),
+				oracle.CmpOrdered, n)
 			continue
 		}
 		// GROUP BY key: the key is serialized into the hash table and

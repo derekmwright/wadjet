@@ -10104,6 +10104,12 @@ func minMaxDeclaredType(in parquet.TypeID) parquet.TypeID {
 		return parquet.TypeBool
 	case parquet.TypeInt64, parquet.TypeInt32:
 		return parquet.TypeInt64
+	case parquet.TypeArray, parquet.TypeRow, parquet.TypeMap, parquet.TypeVector:
+		// A container MIN/MAX answers with an input VALUE (#426), so its
+		// declaration is the input's own — the MIN_BY rule above. A
+		// FLOAT64 declaration over one of these is the #392 shape: the
+		// output vector cannot hold the box at all.
+		return in
 	}
 	return parquet.TypeFloat64
 }

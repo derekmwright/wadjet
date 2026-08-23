@@ -168,7 +168,9 @@ type HashAggregate struct {
 	groupColTypes     []batch.TypeID
 	groupColMeta      []parquet.Column        // full input column metadata per group col (Decimal Scale/Precision survive into outputSchema)
 	aggInputTypes     []batch.TypeID          // observed input column type per aggregate (0 = unresolved)
-	aggInputMeta      []parquet.Column        // full input column metadata per aggregate (MIN_BY/MAX_BY re-emit their input's Scale/Fields/ElementType/Dimension)
+	aggInputMeta      []parquet.Column        // full input column metadata per aggregate (MIN/MAX over a container and MIN_BY/MAX_BY re-emit their input's Scale/Fields/ElementType/Dimension)
+	aggBoxedMinMax    []bool                  // per aggregate: MIN/MAX over ARRAY/ROW/MAP/VECTOR, which retains a value instead of filling an Accumulator slot (#426)
+	hasBoxedMinMax    bool                    // any aggBoxedMinMax entry is set — one bool so the row and finalize loops pay a single load when none is
 	aggUpdaters       []kernel.RowAggUpdater  // resolved typed updaters
 	aggUpdatersNoNull []kernel.RowAggUpdater  // no-null-check variants
 	batchUpdaters     []kernel.RowAggUpdater  // per-batch updater selection (reusable)
@@ -1368,6 +1370,8 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 	h.aggUpdaters = make([]kernel.RowAggUpdater, len(h.Aggs))
 	h.aggUpdatersNoNull = make([]kernel.RowAggUpdater, len(h.Aggs))
 	h.batchUpdaters = make([]kernel.RowAggUpdater, len(h.Aggs))
+	h.aggBoxedMinMax = make([]bool, len(h.Aggs))
+	h.hasBoxedMinMax = false
 	for i, agg := range h.Aggs {
 		h.aggColIdx2[i] = -1 // default: no second column
 		if agg.Func == AggCountDistinct || agg.Func == AggApproxDistinct {
@@ -1398,6 +1402,10 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 			}
 			h.aggUpdaters[i] = resolveAggUpdater(agg.Func, b.Columns[idx].Type)
 			h.aggUpdatersNoNull[i] = resolveAggUpdaterNoNull(agg.Func, b.Columns[idx].Type)
+			if isContainerMinMax(agg.Func, b.Columns[idx].Type) {
+				h.aggBoxedMinMax[i] = true
+				h.hasBoxedMinMax = true
+			}
 		} else {
 			h.aggColIdx[i] = -1
 			if agg.Func == AggCount {
@@ -1486,6 +1494,13 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 					// its other door.
 					allSimpleAggs = false
 				}
+			}
+			if h.aggBoxedMinMax[i] {
+				// A container's extreme is a retained VALUE, not an
+				// Accumulator slot — the same shape MIN_BY needs, so it
+				// takes the same per-group extraState (#426).
+				allSimpleAggs = false
+				h.needsExtra = true
 			}
 			if h.aggUpdaters[i] == nil && agg.InputCol != "" {
 				allSimpleAggs = false
@@ -3681,6 +3696,12 @@ func (h *HashAggregate) initGroupState(ext *groupStateExtras, b *batch.RecordBat
 			ext.extraState[i] = &minMaxByState{isMin: true}
 		case AggMaxBy:
 			ext.extraState[i] = &minMaxByState{isMin: false}
+		case AggMin, AggMax:
+			// Only the container form takes an extraState; scalar MIN/MAX
+			// stay on the Accumulator, whose slot is already allocated.
+			if i < len(h.aggBoxedMinMax) && h.aggBoxedMinMax[i] {
+				ext.extraState[i] = &containerMinMaxState{isMin: agg.Func == AggMin}
+			}
 		}
 	}
 }
@@ -3692,6 +3713,27 @@ func (h *HashAggregate) initGroupState(ext *groupStateExtras, b *batch.RecordBat
 func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row int) {
 	ext := gs.extras
 	for i, agg := range h.Aggs {
+		// MIN/MAX over a container is the one aggregate whose FUNC does not
+		// decide its path — the input type does. Kept ahead of the switch,
+		// behind one bool, so the ordinary MIN/MAX arm below stays exactly
+		// what it was for every scalar type (#426).
+		if h.hasBoxedMinMax && i < len(h.aggBoxedMinMax) && h.aggBoxedMinMax[i] {
+			idx := h.aggColIdx[i]
+			// extraState can be short on a state adopted from a clone that
+			// resolved differently; a missing slot means no value observed,
+			// which finalizes NULL — never an index panic on the emit path.
+			if idx < 0 || i >= len(ext.extraState) {
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				continue
+			}
+			if st, ok := ext.extraState[i].(*containerMinMaxState); ok {
+				st.observe(v, row)
+			}
+			continue
+		}
 		switch agg.Func {
 		case AggCountDistinct:
 			// COUNT(DISTINCT): hash the value, add to set
@@ -4450,6 +4492,16 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		// Set aggregate columns
 		for j, agg := range h.Aggs {
 			colIdx := len(h.GroupByCols) + j
+			// Mirror of updateGroup's pre-switch arm: a container MIN/MAX
+			// finalizes from its retained value, not from an Accumulator.
+			if h.hasBoxedMinMax && j < len(h.aggBoxedMinMax) && h.aggBoxedMinMax[j] {
+				var st *containerMinMaxState
+				if ext != nil && j < len(ext.extraState) {
+					st, _ = ext.extraState[j].(*containerMinMaxState)
+				}
+				out.Columns[colIdx].SetValue(i, st.value())
+				continue
+			}
 			switch agg.Func {
 			case AggCountDistinct:
 				out.Columns[colIdx].SetValue(i, int64(ext.distinctSets[j].count()))
@@ -4730,6 +4782,15 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 				if t, ok := minMaxOutputType(h.aggInputTypes[i]); ok {
 					out.Type = t
 				}
+				// A container answer is the input value itself, so it needs
+				// the input's SHAPE for the same reason MIN_BY does:
+				// Child/Children/VectorDim must exist before SetValue can
+				// write anything at all (#426).
+				if batch.IsContainerType(h.aggInputTypes[i]) &&
+					i < len(h.aggInputMeta) && h.aggInputMeta[i].Type == out.Type {
+					meta := h.aggInputMeta[i]
+					out.Fields, out.ElementType, out.Dimension = meta.Fields, meta.ElementType, meta.Dimension
+				}
 			}
 		}
 		cols = append(cols, out)
@@ -4757,13 +4818,14 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 // would have landed a string or a bool in a FLOAT64 vector and raised the
 // #361 guard on the parallel-emit goroutine.
 //
-// Kept at 0 deliberately:
+// Kept at 0 deliberately: DECIMAL, because the accumulator finalizes
+// MinDec through ToFloat64 and a DECIMAL declaration would need the
+// input's SCALE to re-parse it.
 //
-//   - DECIMAL, because the accumulator finalizes MinDec through ToFloat64
-//     and a DECIMAL declaration would need the input's SCALE to re-parse it.
-//   - ARRAY/ROW/MAP/VECTOR, which have no MIN/MAX kernel at all: the
-//     resolvers return nil, the aggregate answers NULL, and declaring a
-//     container output would only give SetValue a NULL to write.
+// ARRAY/ROW/MAP/VECTOR are NOT in that list: containers answer a real
+// value now (#426, containerMinMaxState), boxed by GetValue and written
+// back with SetValue, so the only declaration that can hold it is the
+// input's own — the same rule #392 settled for MIN_BY/MAX_BY.
 //
 // physical.minMaxDeclaredType mirrors this function and must change with it.
 func minMaxOutputType(in batch.TypeID) (parquet.TypeID, bool) {
@@ -4800,6 +4862,13 @@ func minMaxOutputType(in batch.TypeID) (parquet.TypeID, bool) {
 		return parquet.TypeInt64, true
 	case batch.TypeFloat64, batch.TypeFloat32:
 		return parquet.TypeFloat64, true
+	case batch.TypeArray, batch.TypeRow, batch.TypeMap, batch.TypeVector:
+		// The answer IS an input value, boxed by GetValue and written back
+		// with SetValue, so the only declaration that can hold it is the
+		// input's own — the MIN_BY rule (#392), now reached by MIN/MAX too
+		// because containers answer (#426). outputSchema copies the shape
+		// metadata alongside.
+		return parquet.TypeID(in), true
 	}
 	return 0, false
 }
@@ -4918,6 +4987,8 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 	if len(h.aggInputTypes) == 0 && len(o.aggInputTypes) > 0 {
 		h.aggInputTypes = o.aggInputTypes
 		h.aggInputMeta = o.aggInputMeta
+		h.aggBoxedMinMax = o.aggBoxedMinMax
+		h.hasBoxedMinMax = o.hasBoxedMinMax
 		if len(h.aggColIdx) == 0 {
 			h.aggColIdx = o.aggColIdx
 		}
@@ -5124,6 +5195,13 @@ func (h *HashAggregate) mergeExtraState(dst, src *groupStateExtras) {
 			if !d.hasValue || (d.isMin && s.bestCmp < d.bestCmp) || (!d.isMin && s.bestCmp > d.bestCmp) {
 				d.bestVal, d.bestCmp, d.hasValue = s.bestVal, s.bestCmp, true
 			}
+		case *containerMinMaxState:
+			d, ok := dst.extraState[j].(*containerMinMaxState)
+			if !ok {
+				dst.extraState[j] = s
+				continue
+			}
+			d.merge(s)
 		case bool:
 			d, ok := dst.extraState[j].(bool)
 			if !ok {
@@ -5208,6 +5286,8 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	h.aggColIdx2 = o.aggColIdx2
 	h.aggInputTypes = o.aggInputTypes
 	h.aggInputMeta = o.aggInputMeta
+	h.aggBoxedMinMax = o.aggBoxedMinMax
+	h.hasBoxedMinMax = o.hasBoxedMinMax
 	h.groupColTypes = o.groupColTypes
 	h.groupColMeta = o.groupColMeta
 	h.aggUpdaters = o.aggUpdaters
