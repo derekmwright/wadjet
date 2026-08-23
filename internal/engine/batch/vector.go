@@ -676,7 +676,27 @@ func (v *Vector) GetValue(i int) any {
 	case TypeFloat32:
 		return v.Float32Data[i]
 	case TypeBytes:
-		return v.BytesData.Value(i)
+		// COPY, never the arena slice BytesData.Value returns. GetValue is a
+		// BOXING boundary: every other arm here hands back a value that owns
+		// its storage (String materializes a string, IPv6/CIDR/UUID format,
+		// VECTOR make+copy), and the consumers are the ones that KEEP the box
+		// past the batch — minMaxByState.bestVal for MIN_BY/MAX_BY,
+		// groupStateExtras.keyValues for a BYTES GROUP BY key, the global
+		// window's first/last/nth, the correlated-subquery value map, ToRows.
+		// None of them Claim or Detach, so an arena alias is rewritten under
+		// them by any producer that reuses its output backing: Project's
+		// BatchPool plus Pipeline.runSerial's Release, the join-emit vector
+		// reuse (69aecbb / ADR-0016) and the scan row-group backing pool
+		// (docs/design/scan-output-backing-reuse.md). MIN_BY over a BYTES
+		// column returned the LAST row group's bytes instead of the min's.
+		// One allocation on a path that is already boxing into an interface.
+		raw := v.BytesData.Value(i)
+		if raw == nil {
+			return []byte(nil)
+		}
+		out := make([]byte, len(raw))
+		copy(out, raw)
+		return out
 	case TypeIPv4:
 		return formatIPv4(uint32(v.Int64Data[i]))
 	case TypeIPv6:
