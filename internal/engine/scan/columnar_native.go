@@ -322,7 +322,17 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		maxDefLevel = leaves[colIdx].MaxDefLevel
 	}
 
+	// Admission, before a single byte is copied. The copy paths below
+	// switch on the FILE's type while writing into a vector allocated for
+	// the CATALOG's, so the two must agree on which typed array the values
+	// land in — that is what storageClass answers. A pairing that agrees is
+	// copied verbatim; the three CoercibleTo pairings are converted; nothing
+	// else is decodable, and the ones that used to reach the copy anyway did
+	// not fail, they indexed the wrong array and panicked.
 	coerce := storageClass(fileType) != storageClass(catalogType)
+	if coerce && !pqt.CoercibleTo(fileType, catalogType) {
+		return typePairErr(leaves, colIdx, fileType, catalogType)
+	}
 
 	// Read dictionary if present.
 	dict, err := pr.NextDictionary()
@@ -642,6 +652,18 @@ func copyPageIntoVector(vec *batch.Vector, offset int, data pqt.Values, defLevel
 		return copyNativeCoercedScatter(vec, offset, data, defLevels, maxDefLevel, n, fileType, catalogType)
 	}
 	return copyNativeDataScatter(vec, offset, data, defLevels, maxDefLevel, n, fileType)
+}
+
+// typePairErr refuses a (catalog, file) pairing whose values cannot be
+// carried by the same vector arrays. Non-inlined, and building its message in
+// its own frame, for the same reason as leafErr: readColumnNative's frame
+// sits on the stack of every per-column errgroup goroutine.
+//
+//go:noinline
+func typePairErr(leaves []*pqt.SchemaNode, colIdx int, fileType, catalogType pqt.TypeID) error {
+	return leafErr(leaves, colIdx, fmt.Errorf(
+		"schema declares %s but the file stores %s: refusing to decode the file's "+
+			"values into a %s vector", catalogType, fileType, catalogType))
 }
 
 // leafErr names the file leaf a decode error came from. Non-inlined for the

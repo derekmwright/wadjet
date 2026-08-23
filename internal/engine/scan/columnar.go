@@ -131,22 +131,22 @@ func StorageClass(t pqt.TypeID) pqt.TypeID { return storageClass(t) }
 // storageClass returns a normalized type representing the physical storage
 // format used in a Vector. Types sharing a storage class have identical
 // in-memory layout (e.g. TypeIPv4 and TypeInt64 both use Int64Data).
-func storageClass(t pqt.TypeID) pqt.TypeID {
-	switch t {
-	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration:
-		return pqt.TypeInt64
-	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
-		return pqt.TypeInt32
-	case pqt.TypeFloat64:
-		return pqt.TypeFloat64
-	case pqt.TypeFloat32:
-		return pqt.TypeFloat32
-	case pqt.TypeBool:
-		return pqt.TypeBool
-	default: // String, Bytes, IPv6, CIDR, UUID
-		return pqt.TypeString
-	}
-}
+//
+// It delegates to parquet.StorageClassOf because the ROW reader gates the
+// same admission on the same relation (retypeFromCatalog), and two copies of
+// it drift: which read path a query takes is decided by the SHAPE of the
+// table's schema, not by the query, so a pairing one path copies and the
+// other refuses is a divergence waiting for a schema change to expose it.
+//
+// The version that used to live here had a `default:` arm, and that arm is
+// what made the pairing unsafe: DECIMAL (Int128 array), VECTOR (Float32Data,
+// VectorDim wide) and the five bytes-backed types all landed in one class.
+// A catalog STRING over a file DECIMAL therefore "matched", coerce stayed
+// false, and copyNativeDataDirect switched on the FILE's type — indexing
+// DecimalData on a vector that had only ever allocated a bytes arena. Sixteen
+// of the 361 (catalog, file) pairs panicked that way, inside the scan
+// errgroup, which in a worker process is the worker.
+func storageClass(t pqt.TypeID) pqt.TypeID { return pqt.StorageClassOf(t) }
 
 // columnAliases maps catalog column names to known alternate names found in
 // external Parquet datasets (e.g. Polars TPC-H uses "comments" for "l_comment").
