@@ -170,19 +170,9 @@ func parseInsert(sql string, l *lexer) (*ParsedQuery, error) {
 		}
 		l.nextToken() // consume (
 
-		var row []string
-		for {
-			tok := l.nextToken()
-			if tok.typ == TokenRParen {
-				break
-			}
-			if tok.typ == TokenEOF || tok.typ == TokenError {
-				return nil, fmt.Errorf("unterminated VALUES row in INSERT INTO %s", tableName)
-			}
-			if tok.typ == TokenComma {
-				continue
-			}
-			row = append(row, tok.val)
+		row, err := parseValuesRow(l, tableName)
+		if err != nil {
+			return nil, err
 		}
 		valueRows = append(valueRows, row)
 
@@ -209,6 +199,117 @@ func parseInsert(sql string, l *lexer) (*ParsedQuery, error) {
 			Values:  valueRows,
 		},
 	}, nil
+}
+
+// parseValuesRow reads one `(v1, v2, ...)` tuple, the opening paren already
+// consumed, and returns one entry per VALUE.
+//
+// The loop this replaces appended one entry per TOKEN and merely SKIPPED
+// commas, so the entry count was the token count rather than the comma count.
+// A unary minus is its own token — the lexer is right to make it one, and
+// lexNumber deliberately never absorbs a sign — so `VALUES (4, -3)` produced
+// ["4", "-", "3"] and failed with "expected 2 values, got 3" (#447). It also
+// broke on the FIRST ')' at any depth, with no depth counter, so a nested
+// parenthesis left the tuple's own ')' in the stream and the statement parsed
+// SUCCESSFULLY with truncated values.
+//
+// Splitting on TOP-LEVEL commas with a depth counter is what collectUntil in
+// this same file already does for UPDATE SET.
+func parseValuesRow(l *lexer, tableName string) ([]string, error) {
+	var row []string
+	var cur []token
+	depth := 0
+	for {
+		tok := l.nextToken()
+		switch {
+		case tok.typ == TokenEOF || tok.typ == TokenError:
+			return nil, fmt.Errorf("unterminated VALUES row in INSERT INTO %s", tableName)
+		case tok.typ == TokenLParen:
+			depth++
+		case tok.typ == TokenRParen && depth > 0:
+			depth--
+		case tok.typ == TokenRParen:
+			// The tuple's own closing paren.
+			if len(cur) == 0 && len(row) == 0 {
+				return nil, fmt.Errorf("empty VALUES row in INSERT INTO %s", tableName)
+			}
+			v, err := insertValueText(cur, tableName)
+			if err != nil {
+				return nil, err
+			}
+			return append(row, v), nil
+		case tok.typ == TokenComma && depth == 0:
+			v, err := insertValueText(cur, tableName)
+			if err != nil {
+				return nil, err
+			}
+			row = append(row, v)
+			cur = cur[:0]
+			continue
+		}
+		cur = append(cur, tok)
+	}
+}
+
+// insertValueText renders one VALUES entry as the literal text the executors'
+// converters read.
+//
+// A single token keeps its own val, which is what makes a string literal
+// arrive without its quotes and `NULL` arrive as the keyword — the behaviour
+// the converters (wadjet/dml.go convertValue, server.go convertDMLValue) are
+// written against. The two shapes above that are a signed numeric literal and
+// a value wrapped in redundant parentheses.
+//
+// Anything else is an EXPRESSION, and this path has no evaluator: the old loop
+// answered `VALUES (coalesce(a, b))` with a truncated row and no error at all.
+// Naming it is the honest answer, and it costs nothing that worked before.
+func insertValueText(toks []token, tableName string) (string, error) {
+	toks = stripRedundantParens(toks)
+	switch {
+	case len(toks) == 0:
+		return "", fmt.Errorf("empty value in VALUES row of INSERT INTO %s", tableName)
+	case len(toks) == 1:
+		return toks[0].val, nil
+	case len(toks) == 2 && toks[1].typ == TokenNumber && toks[0].typ == TokenMinus:
+		return "-" + toks[1].val, nil
+	case len(toks) == 2 && toks[1].typ == TokenNumber && toks[0].typ == TokenPlus:
+		return toks[1].val, nil
+	}
+	var b strings.Builder
+	for i, t := range toks {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(t.val)
+	}
+	return "", fmt.Errorf("INSERT INTO %s: VALUES accepts literals, not the expression %q",
+		tableName, b.String())
+}
+
+// stripRedundantParens removes parentheses that wrap the WHOLE value, so
+// `((-3))` is the literal -3. A leading '(' that closes before the end — the
+// `(1) + (2)` shape — wraps nothing and is left alone.
+func stripRedundantParens(toks []token) []token {
+	for len(toks) >= 2 && toks[0].typ == TokenLParen && toks[len(toks)-1].typ == TokenRParen {
+		depth := 0
+		wraps := true
+		for i, t := range toks {
+			switch t.typ {
+			case TokenLParen:
+				depth++
+			case TokenRParen:
+				depth--
+			}
+			if depth == 0 && i < len(toks)-1 {
+				wraps = false
+			}
+		}
+		if !wraps {
+			return toks
+		}
+		toks = toks[1 : len(toks)-1]
+	}
+	return toks
 }
 
 // collectUntil reads tokens from the lexer and returns their text until one

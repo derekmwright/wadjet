@@ -2,12 +2,13 @@ package test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
-	"github.com/derekmwright/wadjet/wadjet"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 func setupDMLTestDB(t *testing.T) *wadjet.DB {
@@ -313,5 +314,41 @@ func TestDelete_NonexistentTable(t *testing.T) {
 	_, err := db.Execute(ctx, "DELETE FROM nonexistent WHERE id = 1")
 	if err == nil {
 		t.Fatal("expected error for nonexistent table")
+	}
+}
+
+// #447: a negative literal in a VALUES tuple. parseInsert split the tuple one
+// LEXER TOKEN per value, and a unary minus is its own token, so
+// `VALUES (8, -3)` arrived as three values against two columns.
+func TestInsert_NegativeLiteral(t *testing.T) {
+	db := setupDMLTestDB(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+		id   int64
+		age  int64
+	}{
+		{"negative", "INSERT INTO users (id, name, age) VALUES (8, 'Heidi', -3)", 8, -3},
+		{"unary_plus", "INSERT INTO users (id, name, age) VALUES (9, 'Ivan', +3)", 9, 3},
+		{"redundant_parens", "INSERT INTO users (id, name, age) VALUES (10, 'Judy', ((-40)))", 10, -40},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := db.Execute(ctx, tc.sql)
+			if err != nil {
+				t.Fatalf("Execute %q: %v", tc.sql, err)
+			}
+			if res.RowsAffected != 1 {
+				t.Fatalf("%d rows affected, want 1", res.RowsAffected)
+			}
+			rows := queryRows(t, db, fmt.Sprintf("SELECT id, age FROM users WHERE id = %d", tc.id))
+			if len(rows) != 1 {
+				t.Fatalf("read back %d rows, want 1", len(rows))
+			}
+			if got := rows[0]["age"]; got != tc.age {
+				t.Errorf("age = %#v (%T), want %d", got, got, tc.age)
+			}
+		})
 	}
 }

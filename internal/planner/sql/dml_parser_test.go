@@ -181,3 +181,80 @@ func TestParseInsert_MissingValues(t *testing.T) {
 		t.Fatal("expected error for missing VALUES")
 	}
 }
+
+// #447: the VALUES tuple was split one LEXER TOKEN per value, with commas
+// merely skipped, so the entry count was the token count. A unary minus is its
+// own token — the lexer is right to make it one — and `VALUES (4, -3)`
+// therefore produced ["4","-","3"] and failed with "expected 2 values, got 3".
+//
+// The same loop broke on the first ')' at ANY depth, so a nested parenthesis
+// left the tuple's own ')' unconsumed and the statement parsed SUCCESSFULLY
+// with truncated values.
+func TestParseInsert_ValueSplitting(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want [][]string
+	}{
+		{"unary_minus", `INSERT INTO t (a, b) VALUES (4, -3)`, [][]string{{"4", "-3"}}},
+		{"unary_plus", `INSERT INTO t (a, b) VALUES (4, +3)`, [][]string{{"4", "3"}}},
+		{"both_negative", `INSERT INTO t (a, b) VALUES (-4, -3)`, [][]string{{"-4", "-3"}}},
+		{"negative_float", `INSERT INTO t (a, b) VALUES (-4.5, 3)`, [][]string{{"-4.5", "3"}}},
+		{"negative_multi_row", `INSERT INTO t (a, b) VALUES (-1, 2), (3, -4)`,
+			[][]string{{"-1", "2"}, {"3", "-4"}}},
+		{"redundant_parens", `INSERT INTO t (a, b) VALUES ((1), 2)`, [][]string{{"1", "2"}}},
+		{"nested_parens_around_sign", `INSERT INTO t (a, b) VALUES (((-3)), 2)`,
+			[][]string{{"-3", "2"}}},
+		// A string literal keeps arriving unquoted, commas and parens inside
+		// it included: it is one lexer token and always was.
+		{"string_with_comma", `INSERT INTO t (a, b) VALUES (1, 'a, b')`,
+			[][]string{{"1", "a, b"}}},
+		{"string_with_paren", `INSERT INTO t (a, b) VALUES (1, 'has (paren)')`,
+			[][]string{{"1", "has (paren)"}}},
+		{"string_with_escaped_quote", `INSERT INTO t (a, b) VALUES (1, 'it''s')`,
+			[][]string{{"1", "it's"}}},
+		{"null_keyword", `INSERT INTO t (a, b) VALUES (1, NULL)`, [][]string{{"1", "NULL"}}},
+		{"single_column", `INSERT INTO t (a) VALUES (-7)`, [][]string{{"-7"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, err := Parse(tc.sql)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if q.Insert == nil {
+				t.Fatal("no InsertInfo")
+			}
+			if len(q.Insert.Values) != len(tc.want) {
+				t.Fatalf("got %d rows, want %d: %#v", len(q.Insert.Values), len(tc.want), q.Insert.Values)
+			}
+			for i, wantRow := range tc.want {
+				gotRow := q.Insert.Values[i]
+				if len(gotRow) != len(wantRow) {
+					t.Fatalf("row %d: got %d values %#v, want %d %#v",
+						i, len(gotRow), gotRow, len(wantRow), wantRow)
+				}
+				for j := range wantRow {
+					if gotRow[j] != wantRow[j] {
+						t.Errorf("row %d value %d = %q, want %q", i, j, gotRow[j], wantRow[j])
+					}
+				}
+			}
+		})
+	}
+}
+
+// An expression this path cannot evaluate is a NAMED error. The old loop
+// answered `VALUES (coalesce(a, b))` with a truncated row, no error, and the
+// tuple's closing paren left in the stream.
+func TestParseInsert_RefusesExpressionsItCannotEvaluate(t *testing.T) {
+	for _, sql := range []string{
+		`INSERT INTO t (a) VALUES (2 * 3)`,
+		`INSERT INTO t (a) VALUES (coalesce(1, 2))`,
+		`INSERT INTO t (a, b) VALUES (1, a + 1)`,
+		`INSERT INTO t (a) VALUES ()`,
+	} {
+		if q, err := Parse(sql); err == nil {
+			t.Errorf("%s parsed with no error: %#v", sql, q.Insert)
+		}
+	}
+}
