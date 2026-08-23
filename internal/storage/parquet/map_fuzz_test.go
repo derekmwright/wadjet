@@ -19,6 +19,15 @@ import (
 //
 // The corpus seeds the six shapes that broke: a single entry, several
 // entries, NULL, empty, an entry whose VALUE is null, and a zero-length key.
+//
+// valueType selects the MAP's VALUE column, and it now runs past the four
+// leaf types it started with into the three CONTAINER shapes #409 was about:
+// a value that is itself an ARRAY, a ROW or a MAP. Those are the shapes the
+// old fixed-depth leaf lookup could not resolve at all — a MAP of ARRAY or of
+// ROW read back as an absent column, with no error — and they are also where
+// the writer's repetition-level arithmetic is load-bearing, because a
+// container inside the FIRST entry of a map is the one place where the level
+// to stamp and the level's own depth differ.
 func FuzzMapRoundTrip(f *testing.F) {
 	// shape is a bitmask over per-row shapes; nul/val select the schema.
 	for _, shape := range []uint32{
@@ -29,28 +38,25 @@ func FuzzMapRoundTrip(f *testing.F) {
 		0x5a5a5a5a,
 		0xdeadbeef,
 	} {
-		for valueType := uint8(0); valueType < 4; valueType++ {
+		for valueType := uint8(0); valueType < uint8(len(mapValueShapes)); valueType++ {
 			f.Add(shape, valueType, true)
 			f.Add(shape, valueType, false)
 		}
 	}
 
 	f.Fuzz(func(t *testing.T, shape uint32, valueType uint8, mapNullable bool) {
-		typ := []TypeID{TypeInt64, TypeString, TypeFloat64, TypeBool}[int(valueType)%4]
-		schema := mapSchemaWithValue(typ, mapNullable, true)
+		sel := int(valueType) % len(mapValueShapes)
+		schema := Schema{Columns: []Column{
+			{Name: "id", Type: TypeInt64},
+			{Name: "m", Type: TypeMap, Nullable: mapNullable, ElementType: &Column{
+				Name: "entry", Type: TypeRow, Fields: []Column{
+					{Name: "key", Type: TypeString},
+					mapValueShapes[sel].col(),
+				},
+			}},
+		}}
 
-		value := func(n int) any {
-			switch typ {
-			case TypeString:
-				return fmt.Sprintf("v%d", n)
-			case TypeFloat64:
-				return float64(n) / 4
-			case TypeBool:
-				return n%2 == 0
-			default:
-				return int64(n)
-			}
-		}
+		value := func(n int) any { return mapValueShapes[sel].value(n) }
 
 		// Eight rows, each shaped by four bits of the seed.
 		rows := make([]map[string]any, 0, 8)
@@ -140,10 +146,79 @@ func FuzzMapRoundTrip(f *testing.F) {
 					}
 					continue
 				}
+				// A container value compares structurally: DeepEqual over
+				// []any / map[string]any IS the round-trip property.
 				if !reflect.DeepEqual(gv, wv) {
 					t.Fatalf("row %d key %q: %#v (%T), want %#v (%T)", i, k, gv, gv, wv, wv)
 				}
 			}
 		}
 	})
+}
+
+// mapValueShapes is the MAP value column the fuzzer varies over: four leaf
+// types and three containers. Each entry pairs the schema Column with a
+// generator whose output round-trips EXACTLY, so the comparison can be
+// structural equality rather than a tolerance.
+var mapValueShapes = []struct {
+	col   func() Column
+	value func(n int) any
+}{
+	{func() Column { return Column{Name: "value", Type: TypeInt64, Nullable: true} },
+		func(n int) any { return int64(n) }},
+	{func() Column { return Column{Name: "value", Type: TypeString, Nullable: true} },
+		func(n int) any { return fmt.Sprintf("v%d", n) }},
+	{func() Column { return Column{Name: "value", Type: TypeFloat64, Nullable: true} },
+		func(n int) any { return float64(n) / 4 }},
+	{func() Column { return Column{Name: "value", Type: TypeBool, Nullable: true} },
+		func(n int) any { return n%2 == 0 }},
+
+	// MAP(STRING, ARRAY(INT64)) — one of the two shapes that read back as an
+	// absent column. Length cycles through 0 (an empty array is not a NULL
+	// one), 1 and 3, and the middle element of a 3 is NULL.
+	{func() Column {
+		return Column{Name: "value", Type: TypeArray, Nullable: true,
+			ElementType: &Column{Name: "element", Type: TypeInt64, Nullable: true}}
+	}, func(n int) any {
+		switch n % 3 {
+		case 0:
+			return []any{}
+		case 1:
+			return []any{int64(n)}
+		default:
+			return []any{int64(n), nil, int64(n + 1)}
+		}
+	}},
+
+	// MAP(STRING, ROW(x INT64, y STRING)) — the other. A NULL field is
+	// omitted from the assembled struct, so the generator keeps both fields
+	// present and the comparison stays exact.
+	{func() Column {
+		return Column{Name: "value", Type: TypeRow, Nullable: true, Fields: []Column{
+			{Name: "x", Type: TypeInt64, Nullable: true},
+			{Name: "y", Type: TypeString, Nullable: true},
+		}}
+	}, func(n int) any {
+		return map[string]any{"x": int64(n), "y": fmt.Sprintf("y%d", n)}
+	}},
+
+	// MAP(STRING, MAP(STRING, INT64)) — two repeated groups deep, which is
+	// where the writer's repetition depth and the level it stamps part ways.
+	{func() Column {
+		return Column{Name: "value", Type: TypeMap, Nullable: true, ElementType: &Column{
+			Name: "entry", Type: TypeRow, Fields: []Column{
+				{Name: "key", Type: TypeString},
+				{Name: "value", Type: TypeInt64, Nullable: true},
+			},
+		}}
+	}, func(n int) any {
+		switch n % 3 {
+		case 0:
+			return map[string]any{}
+		case 1:
+			return map[string]any{"i": int64(n)}
+		default:
+			return map[string]any{"i": int64(n), "j": nil, "k": int64(n + 1)}
+		}
+	}},
 }

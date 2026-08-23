@@ -1122,7 +1122,7 @@ func mapEntryRows(child *Vector, m map[string]any) []any {
 }
 
 // mapKeyValue coerces a MAP's row-level key to something the key child can
-// hold. Row-level keys are always strings — assembleMapColumn stringifies
+// hold. Row-level keys are always strings — the parquet reader stringifies
 // whatever the file carried and a Go map's key is the writer's only source —
 // so a numerically-typed key column would otherwise take a string and raise
 // the type guard from inside the scan, trading one process-killer for

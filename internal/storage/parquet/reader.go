@@ -190,12 +190,42 @@ func (r *Reader) readRowsFlat(readCols []Column) ([]map[string]any, error) {
 func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
 	leaves := r.fr.Leaves()
 
-	// Build a leaf index map by path for nested lookups.
-	leafByPath := make(map[string]int, len(leaves))
 	leafByName := make(map[string]int, len(leaves))
 	for i, l := range leaves {
-		leafByPath[pathKey(l.Path)] = i
 		leafByName[l.Name] = i
+	}
+	nodeByName := make(map[string]*SchemaNode)
+	if root := r.fr.SchemaRoot(); root != nil {
+		for _, c := range root.Children {
+			nodeByName[c.Name] = c
+		}
+	}
+
+	// One assembly plan per nested column being read, built from the FILE's
+	// schema subtree (see nested_assembly.go), and the set of leaves those
+	// plans need. Only those leaves are paged in: the read used to decode
+	// EVERY leaf in the file whether or not the query asked for it, then
+	// decode the flat columns a second time through readColumnToAny.
+	type nestedPlan struct {
+		name string
+		node *nestedNode
+	}
+	var plans []nestedPlan
+	needLeaf := make([]bool, len(leaves))
+	for _, col := range readCols {
+		if !isNestedType(col.Type) {
+			continue
+		}
+		node := buildAssemblyPlan(nodeByName[col.Name])
+		if node == nil {
+			continue
+		}
+		plans = append(plans, nestedPlan{col.Name, node})
+		for _, li := range node.leaves {
+			if li >= 0 && li < len(needLeaf) {
+				needLeaf[li] = true
+			}
+		}
 	}
 
 	var allRows []map[string]any
@@ -208,9 +238,11 @@ func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
 			continue
 		}
 
-		// Read all leaf column pages with def/rep levels.
 		leafPages := make([]leafColumnData, len(leaves))
 		for i := range leaves {
+			if !needLeaf[i] {
+				continue
+			}
 			lcd, err := readLeafColumn(r.fr, rgIdx, i)
 			if err != nil {
 				return nil, fmt.Errorf("reading leaf column %v: %w", leaves[i].Path, err)
@@ -218,34 +250,38 @@ func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
 			leafPages[i] = lcd
 		}
 
-		// Assemble rows.
 		rows := make([]map[string]any, numRows)
 		for i := range rows {
 			rows[i] = make(map[string]any, len(readCols))
 		}
 
+		asm := newRecordAssembler(leafPages)
+		for _, p := range plans {
+			asm.assembleNestedColumn(p.node, p.name, rows)
+		}
+
 		for _, col := range readCols {
-			switch col.Type {
-			case TypeArray:
-				assembleArrayColumn(col, leaves, leafByPath, leafPages, rows)
-			case TypeMap:
-				assembleMapColumn(col, leaves, leafByPath, leafPages, rows)
-			case TypeRow:
-				assembleRowColumn(col, leaves, leafByPath, leafPages, rows)
-			default:
-				// Flat column — use the simple path.
-				leafIdx, ok := leafByName[col.Name]
-				if !ok {
-					continue
-				}
-				vals, err := readColumnToAny(r.fr, rgIdx, leafIdx, numRows, col)
-				if err != nil {
-					return nil, fmt.Errorf("reading column %s: %w", col.Name, err)
-				}
-				for row := 0; row < numRows; row++ {
-					if row < len(vals) && vals[row] != nil {
-						rows[row][col.Name] = vals[row]
-					}
+			if isNestedType(col.Type) {
+				continue
+			}
+			// By NODE first: a struct field can share a name with a
+			// top-level column, and leafByName keeps only one of them.
+			leafIdx := -1
+			if n, ok := nodeByName[col.Name]; ok && n.IsLeaf() {
+				leafIdx = n.LeafIndex
+			} else if i, ok := leafByName[col.Name]; ok {
+				leafIdx = i
+			}
+			if leafIdx < 0 {
+				continue
+			}
+			vals, err := readColumnToAny(r.fr, rgIdx, leafIdx, numRows, col)
+			if err != nil {
+				return nil, fmt.Errorf("reading column %s: %w", col.Name, err)
+			}
+			for row := 0; row < numRows; row++ {
+				if row < len(vals) && vals[row] != nil {
+					rows[row][col.Name] = vals[row]
 				}
 			}
 		}
@@ -446,250 +482,6 @@ func pathKey(path []string) string {
 		result += "." + p
 	}
 	return result
-}
-
-// findLeafByPrefix finds a leaf column whose path starts with the given prefix.
-func findLeafByPrefix(leaves []*SchemaNode, leafByPath map[string]int, prefix []string) (int, bool) {
-	prefixKey := pathKey(prefix)
-	for i, l := range leaves {
-		lk := pathKey(l.Path)
-		if lk == prefixKey || (len(lk) > len(prefixKey) && lk[:len(prefixKey)] == prefixKey && lk[len(prefixKey)] == '.') {
-			return i, true
-		}
-		_ = leafByPath // use the map to silence linter
-	}
-	return -1, false
-}
-
-// assembleArrayColumn reads an ARRAY column's leaves and assembles []any values per row.
-func assembleArrayColumn(col Column, leaves []*SchemaNode, leafByPath map[string]int, leafPages []leafColumnData, rows []map[string]any) {
-	elemCol := Column{Name: "element", Type: TypeString}
-	if col.ElementType != nil {
-		elemCol = *col.ElementType
-	}
-
-	// For simple element types, find the single leaf.
-	elemPath := []string{col.Name, "list", elemCol.Name}
-	leafIdx, ok := leafByPath[pathKey(elemPath)]
-	if !ok {
-		// Try finding by prefix for nested element types.
-		leafIdx2, ok2 := findLeafByPrefix(leaves, leafByPath, []string{col.Name, "list"})
-		if !ok2 {
-			return
-		}
-		leafIdx = leafIdx2
-	}
-
-	lcd := leafPages[leafIdx]
-	if len(lcd.defLevels) == 0 {
-		return
-	}
-
-	// The outer group adds 1 def level if nullable.
-	// The list (repeated) group adds 1 def level and 1 rep level.
-	// The element adds 1 def level if optional.
-	// So: def=0 -> null array, def=1 -> empty array, def=2 -> list present but element null,
-	//     def=3 -> value present (for optional group + repeated list + optional element).
-	// For non-nullable outer: def=0 -> empty array, def=1 -> list present but elem null, def=2 -> value present.
-	outerGroupDef := int32(0)
-	if col.Nullable {
-		outerGroupDef = 1
-	}
-	emptyArrayDef := outerGroupDef // list group absent means empty
-
-	rowIdx := 0
-	valIdx := 0
-
-	for i := 0; i < len(lcd.defLevels); i++ {
-		def := lcd.defLevels[i]
-		rep := int32(0)
-		if i < len(lcd.repLevels) {
-			rep = lcd.repLevels[i]
-		}
-
-		if rep == 0 && i > 0 {
-			// New row boundary (rep=0 means start of new top-level value).
-			rowIdx++
-		}
-		if rowIdx >= len(rows) {
-			break
-		}
-
-		if def < outerGroupDef {
-			// Null array — leave as nil in the row.
-			continue
-		}
-		if def == emptyArrayDef {
-			// Empty array — only set if not already set.
-			if _, exists := rows[rowIdx][col.Name]; !exists {
-				rows[rowIdx][col.Name] = []any{}
-			}
-			continue
-		}
-
-		// Value present in the list.
-		var elemVal any
-		if def == lcd.maxDef {
-			if valIdx < len(lcd.values) {
-				elemVal = lcd.values[valIdx]
-			}
-			valIdx++
-		}
-
-		existing, exists := rows[rowIdx][col.Name]
-		if !exists {
-			rows[rowIdx][col.Name] = []any{elemVal}
-		} else {
-			arr := existing.([]any)
-			rows[rowIdx][col.Name] = append(arr, elemVal)
-		}
-	}
-}
-
-// assembleMapColumn reads a MAP column's leaves and assembles map values per row.
-func assembleMapColumn(col Column, leaves []*SchemaNode, leafByPath map[string]int, leafPages []leafColumnData, rows []map[string]any) {
-	if col.ElementType == nil || len(col.ElementType.Fields) != 2 {
-		return
-	}
-
-	keyCol := col.ElementType.Fields[0]
-	valCol := col.ElementType.Fields[1]
-
-	keyPath := []string{col.Name, "key_value", keyCol.Name}
-	valPath := []string{col.Name, "key_value", valCol.Name}
-
-	keyLeafIdx, ok := leafByPath[pathKey(keyPath)]
-	if !ok {
-		return
-	}
-	valLeafIdx, ok := leafByPath[pathKey(valPath)]
-	if !ok {
-		return
-	}
-
-	keyLCD := leafPages[keyLeafIdx]
-	valLCD := leafPages[valLeafIdx]
-
-	if len(keyLCD.defLevels) == 0 {
-		return
-	}
-
-	outerGroupDef := int32(0)
-	if col.Nullable {
-		outerGroupDef = 1
-	}
-
-	rowIdx := 0
-	keyValIdx := 0
-	valValIdx := 0
-
-	for i := 0; i < len(keyLCD.defLevels); i++ {
-		def := keyLCD.defLevels[i]
-		rep := int32(0)
-		if i < len(keyLCD.repLevels) {
-			rep = keyLCD.repLevels[i]
-		}
-
-		if rep == 0 && i > 0 {
-			rowIdx++
-		}
-		if rowIdx >= len(rows) {
-			break
-		}
-
-		if def < outerGroupDef {
-			continue
-		}
-		if def == outerGroupDef {
-			// MAP present, key_value group absent: an EMPTY map, which is
-			// not the same value as a NULL map and must not read back as
-			// one. assembleArrayColumn has always drawn this distinction
-			// for the zero-length ARRAY; MAP simply fell through to "no
-			// entries", which the caller cannot tell from absent.
-			if _, exists := rows[rowIdx][col.Name]; !exists {
-				rows[rowIdx][col.Name] = map[string]any{}
-			}
-			continue
-		}
-
-		// Key present (key is required so if kv group present, key is present).
-		if def >= keyLCD.maxDef {
-			var k any
-			if keyValIdx < len(keyLCD.values) {
-				k = keyLCD.values[keyValIdx]
-			}
-			keyValIdx++
-
-			var v any
-			if i < len(valLCD.defLevels) && valLCD.defLevels[i] == valLCD.maxDef {
-				if valValIdx < len(valLCD.values) {
-					v = valLCD.values[valValIdx]
-				}
-				valValIdx++
-			}
-
-			existing, exists := rows[rowIdx][col.Name]
-			if !exists {
-				rows[rowIdx][col.Name] = map[string]any{fmt.Sprint(k): v}
-			} else {
-				m := existing.(map[string]any)
-				m[fmt.Sprint(k)] = v
-			}
-		}
-	}
-}
-
-// assembleRowColumn reads a ROW/STRUCT column's leaves and assembles map values per row.
-func assembleRowColumn(col Column, leaves []*SchemaNode, leafByPath map[string]int, leafPages []leafColumnData, rows []map[string]any) {
-	outerGroupDef := int32(0)
-	if col.Nullable {
-		outerGroupDef = 1
-	}
-
-	for _, field := range col.Fields {
-		fieldPath := []string{col.Name, field.Name}
-		leafIdx, ok := leafByPath[pathKey(fieldPath)]
-		if !ok {
-			continue
-		}
-
-		lcd := leafPages[leafIdx]
-		if len(lcd.defLevels) == 0 {
-			continue
-		}
-
-		valIdx := 0
-		for rowIdx := 0; rowIdx < len(rows) && rowIdx < len(lcd.defLevels); rowIdx++ {
-			def := lcd.defLevels[rowIdx]
-
-			if def < outerGroupDef {
-				// Outer struct is null.
-				continue
-			}
-
-			// Struct is present. Check if field value is present.
-			if def == lcd.maxDef {
-				var fieldVal any
-				if valIdx < len(lcd.values) {
-					fieldVal = lcd.values[valIdx]
-				}
-				valIdx++
-
-				existing, exists := rows[rowIdx][col.Name]
-				if !exists {
-					rows[rowIdx][col.Name] = map[string]any{field.Name: fieldVal}
-				} else {
-					m := existing.(map[string]any)
-					m[field.Name] = fieldVal
-				}
-			} else if def >= outerGroupDef {
-				// Struct present but field is null. Still need to ensure struct exists.
-				if _, exists := rows[rowIdx][col.Name]; !exists {
-					rows[rowIdx][col.Name] = map[string]any{}
-				}
-			}
-		}
-	}
 }
 
 // ReadRowGroup reads all rows from a specific row group.
@@ -924,7 +716,8 @@ func fixedByteWidth(c Column) int {
 // carried by the same physical bytes.
 //
 // Leaves only, deliberately: a nested column's read plan is built from the
-// FILE's shape (assembleMapColumn walks name/"key_value"/field paths), and
+// FILE's shape (the assembly plan is built from the file's schema tree),
+// and
 // substituting a catalog Column whose children were resolved differently
 // would look up leaves that do not exist. A lossy leaf INSIDE a container
 // stays lossy — that is the same annotation gap, one level down, and it

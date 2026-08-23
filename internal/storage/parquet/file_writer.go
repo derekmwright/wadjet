@@ -338,7 +338,7 @@ func (nw *NativeWriter) WriteMapRows(rows []map[string]any) error {
 			}
 			lr := nw.colLeafRanges[colIdx]
 			leafIdx := lr.start
-			nw.decomposeValue(col, val, 0, 0, &leafIdx)
+			nw.decomposeValue(col, val, 0, 0, 0, &leafIdx)
 		}
 		if nw.err != nil {
 			return nw.err
@@ -365,14 +365,14 @@ func (nw *NativeWriter) fail(err error) {
 // decomposeValue walks a value according to col's type definition and appends
 // (value, defLevel, repLevel) triples to the appropriate leaf buffers.
 // leafIdx is advanced as leaves are visited.
-func (nw *NativeWriter) decomposeValue(col Column, val any, defLevel, repLevel int32, leafIdx *int) {
+func (nw *NativeWriter) decomposeValue(col Column, val any, defLevel, repLevel, repDepth int32, leafIdx *int) {
 	switch col.Type {
 	case TypeArray:
-		nw.decomposeArray(col, val, defLevel, repLevel, leafIdx)
+		nw.decomposeArray(col, val, defLevel, repLevel, repDepth, leafIdx)
 	case TypeMap:
-		nw.decomposeMap(col, val, defLevel, repLevel, leafIdx)
+		nw.decomposeMap(col, val, defLevel, repLevel, repDepth, leafIdx)
 	case TypeRow:
-		nw.decomposeRow(col, val, defLevel, repLevel, leafIdx)
+		nw.decomposeRow(col, val, defLevel, repLevel, repDepth, leafIdx)
 	default:
 		nw.decomposeLeaf(col, val, defLevel, repLevel, leafIdx)
 	}
@@ -474,11 +474,21 @@ func convertNetworkLiteral(colType TypeID, s string) (any, error) {
 }
 
 // decomposeArray handles ARRAY (LIST) type columns.
-func (nw *NativeWriter) decomposeArray(col Column, val any, defLevel, repLevel int32, leafIdx *int) {
+func (nw *NativeWriter) decomposeArray(col Column, val any, defLevel, repLevel, repDepth int32, leafIdx *int) {
 	elemCol := Column{Name: "element", Type: TypeString}
 	if col.ElementType != nil {
 		elemCol = *col.ElementType
 	}
+	// A LIST's element is OPTIONAL by the schema, not by what the caller
+	// declared — the same third-site rule decomposeMap spells out for a
+	// map's key and value. flattenColumn and buildArraySchemaElements both
+	// force it, so this must too: it makes no difference for a leaf element
+	// (decomposeLeaf takes a present value's level from the leaf buffer,
+	// which flattenColumn already fixed) and all the difference for a
+	// container one, where decomposeRow/decomposeMap/decomposeArray derive
+	// the inner definition level from Nullable and would stamp an absent
+	// field one level below what the footer describes.
+	elemCol.Nullable = true
 
 	if val == nil {
 		// Entire array is null. Emit null at current def level for all leaves.
@@ -509,15 +519,26 @@ func (nw *NativeWriter) decomposeArray(col Column, val any, defLevel, repLevel i
 
 	// Non-empty array: each element gets def at least innerDef+1 (list group present).
 	listDef := innerDef + 1
-	listRep := repLevel + 1
+	// The repetition level a CONTINUING element carries is this list's own
+	// depth in the schema, which is repDepth+1 — NOT repLevel+1. The two are
+	// different numbers whenever this list is the first entry of an outer
+	// repeated group: repLevel is then the OUTER level (or 0 at the top of
+	// the row), because that is where the repetition last happened, while
+	// the depth is unchanged. Deriving one from the other stamped the second
+	// element of a list inside the FIRST entry of a map (or of another list)
+	// one level too low, which reads back as a new entry of the OUTER
+	// container — {"k": [1, 2]} came back as {"k": [1]}, and [[1, 2]] as
+	// [[1], [2]]. flattenColumn already threads the depth correctly; this is
+	// the same arithmetic on the value side.
+	listRepDepth := repDepth + 1
 
 	for i, elem := range arr {
-		elemRep := listRep
+		elemRep := listRepDepth
 		if i == 0 {
-			elemRep = repLevel // first element uses parent rep level
+			elemRep = repLevel // first element continues the enclosing repetition
 		}
 		saveLeafIdx := *leafIdx
-		nw.decomposeValue(elemCol, elem, listDef, elemRep, leafIdx)
+		nw.decomposeValue(elemCol, elem, listDef, elemRep, listRepDepth, leafIdx)
 		// Reset leafIdx for next element — all elements write to the same leaves.
 		if i < len(arr)-1 {
 			*leafIdx = saveLeafIdx
@@ -526,7 +547,7 @@ func (nw *NativeWriter) decomposeArray(col Column, val any, defLevel, repLevel i
 }
 
 // decomposeMap handles MAP type columns.
-func (nw *NativeWriter) decomposeMap(col Column, val any, defLevel, repLevel int32, leafIdx *int) {
+func (nw *NativeWriter) decomposeMap(col Column, val any, defLevel, repLevel, repDepth int32, leafIdx *int) {
 	if col.ElementType == nil || len(col.ElementType.Fields) != 2 {
 		// Malformed MAP — skip leaves.
 		return
@@ -590,7 +611,7 @@ func (nw *NativeWriter) decomposeMap(col Column, val any, defLevel, repLevel int
 
 	// Non-empty map: iterate key-value pairs.
 	kvDef := innerDef + 1 // key_value group is present
-	kvRep := repLevel + 1
+	kvRep := repDepth + 1 // this map's own depth — see decomposeArray
 
 	first := true
 	keyLeafIdx := *leafIdx
@@ -607,14 +628,14 @@ func (nw *NativeWriter) decomposeMap(col Column, val any, defLevel, repLevel int
 		}
 		tmpKeyIdx := keyLeafIdx
 		tmpValIdx := valLeafIdx
-		nw.decomposeValue(keyCol, k, kvDef, elemRep, &tmpKeyIdx)
+		nw.decomposeValue(keyCol, k, kvDef, elemRep, kvRep, &tmpKeyIdx)
 		// kvDef, not kvDef+1: this level is only ever stamped on an ABSENT
 		// value (a present one carries the leaf's own maxDefLevel), and
 		// "key_value present, value null" IS kvDef. Claiming the value's
 		// own level for a value that was never written told the reader to
 		// consume one it did not have — the level and value streams then
 		// slid apart and the decoder ran off the end of the page.
-		nw.decomposeValue(valCol, v, kvDef, elemRep, &tmpValIdx)
+		nw.decomposeValue(valCol, v, kvDef, elemRep, kvRep, &tmpValIdx)
 	}
 
 	// Advance leafIdx past all map leaves.
@@ -622,7 +643,7 @@ func (nw *NativeWriter) decomposeMap(col Column, val any, defLevel, repLevel int
 }
 
 // decomposeRow handles ROW/STRUCT type columns.
-func (nw *NativeWriter) decomposeRow(col Column, val any, defLevel, repLevel int32, leafIdx *int) {
+func (nw *NativeWriter) decomposeRow(col Column, val any, defLevel, repLevel, repDepth int32, leafIdx *int) {
 	innerDef := defLevel
 	if col.Nullable {
 		innerDef++ // group presence
@@ -644,10 +665,11 @@ func (nw *NativeWriter) decomposeRow(col Column, val any, defLevel, repLevel int
 		return
 	}
 
-	// Struct present — decompose each field.
+	// Struct present — decompose each field. A struct adds no repetition, so
+	// both the level to stamp and the depth pass through unchanged.
 	for _, field := range col.Fields {
 		fieldVal := m[field.Name]
-		nw.decomposeValue(field, fieldVal, innerDef, repLevel, leafIdx)
+		nw.decomposeValue(field, fieldVal, innerDef, repLevel, repDepth, leafIdx)
 	}
 }
 

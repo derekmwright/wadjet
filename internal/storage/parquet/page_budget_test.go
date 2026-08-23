@@ -3,6 +3,7 @@ package parquet
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -132,6 +133,94 @@ func TestPageValueCountIsHeldToTheRowGroup(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "rows left") {
 		t.Errorf("error %q does not name the row budget", err)
+	}
+}
+
+// TestRepeatedLeafIsNotHeldToTheRowCount is the other half of the same rule,
+// and the one that would show up as a FALSE REFUSAL rather than as a missed
+// one: a REPEATED leaf has one entry per VALUE, not per row, so a 1000-row
+// file of 10-element arrays legitimately puts 10000 values in its element
+// chunk. chargeRows exempts a leaf with MaxRepLevel > 0 for exactly this
+// reason, and nothing asserted it — the exemption lived only in a comment.
+//
+// The counterfactual is the proof: the same chunk, the same budget, with the
+// exemption suppressed, IS refused.
+func TestRepeatedLeafIsNotHeldToTheRowCount(t *testing.T) {
+	const rows, elems = 1000, 10
+	schema := Schema{Columns: []Column{
+		{Name: "id", Type: TypeInt64},
+		{Name: "a", Type: TypeArray, Nullable: true,
+			ElementType: &Column{Name: "element", Type: TypeInt64, Nullable: true}},
+	}}
+	for _, rgSize := range []int{128, 1024, 131072} {
+		t.Run(fmt.Sprint("rowgroup", rgSize), func(t *testing.T) {
+			var buf bytes.Buffer
+			cfg := DefaultWriterConfig()
+			cfg.RowGroupSize = rgSize
+			w, err := NewWriter(&buf, schema, cfg)
+			if err != nil {
+				t.Fatalf("writer: %v", err)
+			}
+			in := make([]map[string]any, rows)
+			for i := range in {
+				arr := make([]any, elems)
+				for j := range arr {
+					arr[j] = int64(i*elems + j)
+				}
+				in[i] = map[string]any{"id": int64(i), "a": arr}
+			}
+			if err := w.WriteRows(in); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+
+			r, err := NewReaderFromBytes(buf.Bytes())
+			if err != nil {
+				t.Fatalf("reader: %v", err)
+			}
+			got, err := r.ReadRows(nil)
+			if err != nil {
+				t.Fatalf("a valid nested file was refused: %v", err)
+			}
+			if len(got) != rows {
+				t.Fatalf("read %d rows, want %d", len(got), rows)
+			}
+			total := 0
+			for i, row := range got {
+				arr, ok := row["a"].([]any)
+				if !ok || len(arr) != elems {
+					t.Fatalf("row %d: a = %#v, want %d elements", i, row["a"], elems)
+				}
+				if arr[0] != int64(i*elems) {
+					t.Fatalf("row %d: a[0] = %#v, want %d", i, arr[0], i*elems)
+				}
+				total += len(arr)
+			}
+			if total != rows*elems {
+				t.Fatalf("recovered %d elements, want %d", total, rows*elems)
+			}
+		})
+	}
+}
+
+// TestRepeatedLeafExemptionIsWhatAdmitsIt drives the same page counts through
+// the budget check with maxRepLevel forced to zero, so the accept above is
+// attributable to the exemption and not to the numbers happening to fit.
+func TestRepeatedLeafExemptionIsWhatAdmitsIt(t *testing.T) {
+	ph := &PageHeader{Type: PageDataV1, DataPageHeader: &DataPageHeader{NumValues: 10000}}
+
+	nested := &ColumnPageReader{maxRepLevel: 1}
+	nested.SetRowBudget(1000)
+	if err := nested.chargeRows(ph); err != nil {
+		t.Fatalf("a repeated leaf's 10000 values over 1000 rows was refused: %v", err)
+	}
+
+	flat := &ColumnPageReader{maxRepLevel: 0}
+	flat.SetRowBudget(1000)
+	if err := flat.chargeRows(ph); err == nil {
+		t.Fatal("a FLAT leaf claiming 10000 values over 1000 rows was accepted")
 	}
 }
 
