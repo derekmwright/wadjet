@@ -210,6 +210,8 @@ The `internal/storage/parquet/` package is **critical infrastructure** — any d
 - **Bit-exact verification**: Verify output against files produced by Apache Parquet reference implementations (parquet-go, PyArrow)
 - **No unsafe shortcuts**: Validate lengths and offsets before `unsafe.Slice` casts — an off-by-one corrupts memory silently
 - **TPC-H correctness gate**: All 22 queries must pass at SF0.01 after any parquet change, before merging
+- **Compaction gate**: `TestCompactionIsIdempotentOverTheTypeMatrix` (`internal/storage/compaction`) — all 22 types plus DECIMAL(9,2)/(18,4)/(38,10) and containers nested in containers, ingest → compact ×3, asserted on both read paths (row reader and native scan) with a PyArrow cross-check. Compaction REPLACES its inputs, so every read→write asymmetry there is silent data loss; run it after any change to the reader, the writer, or the compactor.
+- **ANALYZE gate**: `TestAnalyzeCoversEveryTypeMatrixColumn` (same package) — every type the sampler supports must produce a sketch, and the ones it does not are an explicit list asserted in both directions, so coverage cannot be lost by accident.
 
 ### What NOT to Do
 
