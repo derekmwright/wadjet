@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -79,24 +81,73 @@ func (f *Filter) Clone() UnaryOperator {
 	return &Filter{Pred: f.Pred}
 }
 
+// lazyColIdx resolves a column index once and publishes it to every
+// goroutine that shares the closure holding it.
+//
+// A predicate closure is SHARED, not cloned: Filter.Clone gives each parallel
+// worker its own scratch buffer and the same Pred, which is the whole point —
+// the closure is meant to be stateless. A plain captured `cachedIdx` int is
+// therefore a data race between the worker that resolves it and every worker
+// that reads it. Pipeline.runParallel's single-threaded warm-up pass fills
+// the cache first and usually hides this; a predicate the warm-up batch never
+// reaches (a conjunct that short-circuits ahead of it) is resolved by the
+// workers themselves, concurrently.
+//
+// The shape is expr.ColRef's, for its reason: an inlined acquire load in the
+// innermost row loop, where sync.Once.Do costs a call plus a closure build
+// per row. idx is written before resolved is stored, and read only after
+// resolved loads true.
+type lazyColIdx struct {
+	resolved atomic.Bool
+	mu       sync.Mutex
+	idx      int
+}
+
+// get returns the index of name in b, resolving it on first use. A name the
+// batch does not carry resolves to -1 and stays there, exactly as the
+// captured-int version did.
+func (c *lazyColIdx) get(b *batch.RecordBatch, name string) int {
+	if c.resolved.Load() {
+		return c.idx
+	}
+	return c.resolveSlow(b, name)
+}
+
+func (c *lazyColIdx) resolveSlow(b *batch.RecordBatch, name string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.resolved.Load() {
+		c.idx = b.ColumnIndex(name)
+		c.resolved.Store(true)
+	}
+	return c.idx
+}
+
 // ColumnCompare creates a predicate that compares a column against a constant value.
 func ColumnCompare(colName string, op CompareOp, value any) Predicate {
-	cachedIdx := -2 // -2 = unresolved, -1 = not found
-	var cachedNetInt int64
-	var cachedNetStr string
-	netResolved := false
-	// The literal's string form is constant: rendering it per row cost a
-	// fmt.Sprint allocation on every comparison.
+	col := &lazyColIdx{}
+	// Every literal conversion below is a pure function of `value`, so it
+	// happens ONCE, here, rather than behind a per-closure "resolved" flag
+	// inside the predicate. Those flags were a data race, not a cache:
+	// Filter.Clone hands the SAME closure to every parallel worker, so one
+	// worker's `cachedNetStr = ...` raced every other worker's read of it —
+	// and a string header is two words, so a torn read is a garbage
+	// comparison or a segfault, not merely a stale value. Hoisting also
+	// removes the branch from the row loop.
 	strVal := fmt.Sprint(value)
+	intVal := toInt64(value)
+	floatVal := toFloat64(value)
+	ipv4Val := parseIPv4FilterVal(value)
+	macVal := parseMACFilterVal(value)
+	ipv6Val := parseIPv6FilterVal(value)
+	uuidVal := kernel.UUIDLiteralToRaw(strVal)
+	bytesVal := bytesFilterVal(value)
 	// Offsets-shape: comparing a string column against the empty string is
 	// a zero-length test, not a byte compare — and it is what keeps such a
 	// column eligible for the lengths-only scan decode.
 	emptyTest := strVal == "" && (op == OpEq || op == OpNe)
 	return func(b *batch.RecordBatch, row int) bool {
-		if cachedIdx == -2 {
-			cachedIdx = b.ColumnIndex(colName)
-		}
-		idx := cachedIdx
+		idx := col.get(b, colName)
 		if idx < 0 {
 			return false
 		}
@@ -115,13 +166,13 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 
 		switch v.Type {
 		case batch.TypeInt64, batch.TypeTimestamp:
-			return compareInt64(v.Int64Data[row], toInt64(value), op)
+			return compareInt64(v.Int64Data[row], intVal, op)
 		case batch.TypeInt32:
-			return compareInt64(int64(v.Int32Data[row]), toInt64(value), op)
+			return compareInt64(int64(v.Int32Data[row]), intVal, op)
 		case batch.TypeFloat64:
-			return compareFloat64(v.Float64Data[row], toFloat64(value), op)
+			return compareFloat64(v.Float64Data[row], floatVal, op)
 		case batch.TypeFloat32:
-			return compareFloat64(float64(v.Float32Data[row]), toFloat64(value), op)
+			return compareFloat64(float64(v.Float32Data[row]), floatVal, op)
 		case batch.TypeString:
 			if emptyTest {
 				empty := v.BytesData.LengthAt(row) == 0
@@ -136,46 +187,30 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 				return v.BoolData[row] != value.(bool)
 			}
 		case batch.TypeIPv4:
-			if !netResolved {
-				cachedNetInt = parseIPv4FilterVal(value)
-				netResolved = true
-			}
-			return compareInt64(v.Int64Data[row], cachedNetInt, op)
+			return compareInt64(v.Int64Data[row], ipv4Val, op)
 		case batch.TypeMAC:
-			if !netResolved {
-				cachedNetInt = parseMACFilterVal(value)
-				netResolved = true
-			}
-			return compareInt64(v.Int64Data[row], cachedNetInt, op)
+			return compareInt64(v.Int64Data[row], macVal, op)
 		case batch.TypeIPv6:
-			if !netResolved {
-				cachedNetStr = parseIPv6FilterVal(value)
-				netResolved = true
-			}
-			return compareString(v.BytesData.UnsafeStringValue(row), cachedNetStr, op)
+			return compareString(v.BytesData.UnsafeStringValue(row), ipv6Val, op)
 		case batch.TypeCIDR:
 			return compareString(v.BytesData.UnsafeStringValue(row), strVal, op)
 		case batch.TypePort, batch.TypeProtocol:
-			return compareInt64(int64(v.Int32Data[row]), toInt64(value), op)
+			return compareInt64(int64(v.Int32Data[row]), intVal, op)
 		case batch.TypeDuration:
-			return compareInt64(v.Int64Data[row], toInt64(value), op)
+			return compareInt64(v.Int64Data[row], intVal, op)
 		case batch.TypeUUID:
 			// A UUID column stores 16 RAW bytes; the literal is 36 characters
 			// of text. Comparing them directly could never match, so
 			// `WHERE uuid_col = '…'` silently returned no rows.
-			if !netResolved {
-				cachedNetStr = kernel.UUIDLiteralToRaw(strVal)
-				netResolved = true
-			}
-			return compareString(v.BytesData.UnsafeStringValue(row), cachedNetStr, op)
+			return compareString(v.BytesData.UnsafeStringValue(row), uuidVal, op)
 		case batch.TypeDate:
-			return compareInt64(int64(v.Int32Data[row]), toInt64(value), op)
+			return compareInt64(int64(v.Int32Data[row]), intVal, op)
 		case batch.TypeBytes:
 			// BYTES compares by bytes, like STRING over the same arena. The
 			// row fallback had no arm and fell to `return false`, so a
 			// predicate over a BYTES column that reached this path dropped
 			// every row (same class as #401's missing kernel).
-			return compareString(v.BytesData.UnsafeStringValue(row), bytesFilterVal(value), op)
+			return compareString(v.BytesData.UnsafeStringValue(row), bytesVal, op)
 		case batch.TypeDecimal:
 			// Exact, at the column's own scale — the same rule the
 			// vectorized kernel applies, so the two paths cannot disagree.
@@ -234,15 +269,13 @@ func parseIPv6FilterVal(value any) string {
 // ColumnLike creates a predicate that evaluates col LIKE pattern using SQL LIKE semantics.
 // The pattern uses % for any sequence of characters and _ for any single character.
 func ColumnLike(colName, pattern string, not bool) Predicate {
-	cachedIdx := -2
+	col := &lazyColIdx{}
 	return func(b *batch.RecordBatch, row int) bool {
-		if cachedIdx == -2 {
-			cachedIdx = b.ColumnIndex(colName)
-		}
-		if cachedIdx < 0 {
+		idx := col.get(b, colName)
+		if idx < 0 {
 			return false
 		}
-		v := b.Columns[cachedIdx]
+		v := b.Columns[idx]
 		if v.Nulls.IsNull(row) {
 			return false
 		}
