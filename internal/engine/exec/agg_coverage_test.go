@@ -225,10 +225,14 @@ func TestAppendColumnValueTypes(t *testing.T) {
 	})
 
 	t.Run("Unknown", func(t *testing.T) {
+		// Not reachable for any of the 22 column types since #408 — every one
+		// has an arm. The marker is deliberately long and self-describing:
+		// the '?' it replaced was a plausible-looking single byte that
+		// silently made every ARRAY/ROW/MAP/VECTOR value equal.
 		v := batch.NewVector(batch.TypeBool, 1) // doesn't matter
 		buf := appendColumnValue(nil, v, 0, batch.TypeID(99))
-		if string(buf) != "?" {
-			t.Fatalf("expected '?', got %q", string(buf))
+		if string(buf) != "\x00unsupported-key-type" {
+			t.Fatalf("expected the unsupported-type marker, got %q", string(buf))
 		}
 	})
 

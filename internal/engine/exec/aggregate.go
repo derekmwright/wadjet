@@ -5976,9 +5976,92 @@ func appendColumnValue(buf []byte, v *batch.Vector, row int, typ batch.TypeID) [
 		return append(buf,
 			byte(val), byte(val>>8), byte(val>>16), byte(val>>24),
 			byte(val>>32), byte(val>>40), byte(val>>48), byte(val>>56))
+	case batch.TypeVector:
+		return appendVectorKey(buf, v, row)
+	case batch.TypeArray, batch.TypeMap:
+		return appendListKey(buf, v, row)
+	case batch.TypeRow:
+		return appendRowKey(buf, v, row)
 	default:
-		return append(buf, '?')
+		// Unreachable for a column type: every one of the 22 has an arm
+		// above. Kept as a loud marker rather than a silent constant — the
+		// constant '?' that used to live here collapsed every ARRAY, ROW, MAP
+		// and VECTOR value into ONE key, so GROUP BY, DISTINCT, the set
+		// operations, COUNT(DISTINCT), APPROX_DISTINCT and hash-join keys all
+		// answered one group / one distinct value / a cross join.
+		return append(buf, "\x00unsupported-key-type"...)
 	}
+}
+
+// appendVectorKey encodes a VECTOR cell: its dimension, then every element's
+// IEEE-754 bits. The dimension is part of the key because two vectors of
+// different width are different values even when one is the other's prefix.
+func appendVectorKey(buf []byte, v *batch.Vector, row int) []byte {
+	dim := v.VectorDim
+	buf = appendKeyUint32(buf, uint32(dim))
+	if dim <= 0 {
+		return buf
+	}
+	base := row * dim
+	if base+dim > len(v.Float32Data) {
+		return buf
+	}
+	for _, f := range v.Float32Data[base : base+dim] {
+		buf = appendKeyUint32(buf, math.Float32bits(f))
+	}
+	return buf
+}
+
+// appendListKey encodes an ARRAY or MAP cell: the element count, then each
+// element. MAP is stored as ARRAY(ROW(key,value)), so it rides the same code —
+// and, like every other engine path over MAP, it treats entry ORDER as part of
+// the value rather than canonicalising it.
+//
+// The length prefix is what makes the encoding injective: without it
+// [["a"],["b"]] and [["a","b"]] would produce the same bytes.
+func appendListKey(buf []byte, v *batch.Vector, row int) []byte {
+	start, end := 0, 0
+	if row+1 < len(v.Offsets) {
+		start, end = int(v.Offsets[row]), int(v.Offsets[row+1])
+	}
+	if end < start {
+		end = start
+	}
+	buf = appendKeyUint32(buf, uint32(end-start))
+	if v.Child == nil {
+		return buf
+	}
+	for i := start; i < end; i++ {
+		buf = appendNestedElem(buf, v.Child, i)
+	}
+	return buf
+}
+
+// appendRowKey encodes a ROW cell: the field count, then each field at this
+// row. Field NAMES are not encoded — every row of one column carries the same
+// schema, so they add bytes and no discrimination.
+func appendRowKey(buf []byte, v *batch.Vector, row int) []byte {
+	buf = appendKeyUint32(buf, uint32(len(v.Children)))
+	for _, ch := range v.Children {
+		buf = appendNestedElem(buf, ch, row)
+	}
+	return buf
+}
+
+// appendNestedElem writes one nested element: a null flag, then the value.
+// The flag is what keeps a NULL element distinct from a zero one, the same way
+// the top-level key loops flag a NULL column value before calling
+// appendColumnValue.
+func appendNestedElem(buf []byte, child *batch.Vector, i int) []byte {
+	if child == nil || i >= child.Len || child.Nulls.IsNullFast(i) {
+		return append(buf, 1)
+	}
+	buf = append(buf, 0)
+	return appendColumnValue(buf, child, i, child.Type)
+}
+
+func appendKeyUint32(buf []byte, val uint32) []byte {
+	return append(buf, byte(val), byte(val>>8), byte(val>>16), byte(val>>24))
 }
 
 // computePercentileCont returns the interpolated percentile value (continuous).
