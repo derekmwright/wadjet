@@ -122,15 +122,36 @@ func ValidateNativeDAGShape(stages []Stage) error {
 //   - Exactly one dependency.
 //
 // Correctness: the sort stage carried SortKeys + Limit; both move onto
-// the predecessor. Downstream references to the dropped sort are
-// rewritten to the predecessor. No LeftDepStage/RightDepStage rewriting
-// needed because the sort had only one plain dep (sort stages never
-// appear as a join's left/right slot).
+// the predecessor, and the fold is valid only while the predecessor still
+// runs as ONE task. Nothing in the plan guarantees that — a Singleton
+// broadcast_join is re-fanned-out at dispatch by broadcastJoinProbeSplit,
+// which slices the probe files across workers — so each task would sort
+// and limit its own slice and the outputs would be concatenated: the
+// wrong top-N, not merely the wrong order (#390).
+//
+// What makes the fold safe in the shape it was written for is that the
+// sort has NO DEPENDENTS at this point. EnsureDistribution has not run
+// yet, so the terminal gather does not exist; a dependent-free sort is
+// the one that will BECOME the gather's input, and dispatchGatherStage
+// re-imposes the fused SortKeys/Limit as a merge-sort gather fragment
+// (the #288 ordered-gather path). A sort that already has a dependent —
+// an ORDER BY + LIMIT inside a derived table or CTE feeding a join or an
+// aggregate — reaches a consumer that does no such thing: every other
+// consumer of a stage's output (a downstream stage's inputs, an
+// exchange-repartition or replicate source, a coordinator-read scalar)
+// reads a flat concatenation of the producing tasks' files. So this pass
+// refuses to fold into a predecessor whose sort someone else is reading,
+// and the standalone single-task sort stage stays in the plan to do the
+// global job.
+//
+// Downstream references to a dropped sort are rewritten to the
+// predecessor.
 func fuseSortIntoPredecessor(stages []Stage, workerCount int) []Stage {
 	idIndex := make(map[string]int, len(stages))
 	for i := range stages {
 		idIndex[stages[i].ID] = i
 	}
+	hasDependent := stageDependents(stages)
 
 	droppedSort := make(map[string]string) // sort ID → predecessor ID
 	for i := range stages {
@@ -142,6 +163,12 @@ func fuseSortIntoPredecessor(stages []Stage, workerCount int) []Stage {
 			continue
 		}
 		if len(s.Dependencies) != 1 {
+			continue
+		}
+		if hasDependent[s.ID] {
+			// Someone downstream reads this sort's output, and that
+			// consumer reads the predecessor's task files concatenated.
+			// See the correctness note above (#390).
 			continue
 		}
 		predIdx, ok := idIndex[s.Dependencies[0]]
@@ -220,6 +247,41 @@ func fuseSortIntoPredecessor(stages []Stage, workerCount int) []Stage {
 		out = append(out, s)
 	}
 	return out
+}
+
+// stageDependents reports, per stage ID, whether any other stage in the
+// plan reads its output. Every edge counts: the plain dependency list, a
+// join's probe/build slots, a fused or chained join's build, a union arm,
+// and a scalar-subquery producer. A stage with no dependent is the plan's
+// root — the one EnsureDistribution will attach the terminal gather to.
+func stageDependents(stages []Stage) map[string]bool {
+	dep := make(map[string]bool, len(stages))
+	mark := func(id string) {
+		if id != "" {
+			dep[id] = true
+		}
+	}
+	for i := range stages {
+		s := &stages[i]
+		for _, d := range s.Dependencies {
+			mark(d)
+		}
+		mark(s.LeftDepStage)
+		mark(s.RightDepStage)
+		for _, fj := range s.FusedJoins {
+			mark(fj.BuildDepStage)
+		}
+		for _, cj := range s.ChainedJoins {
+			mark(cj.BuildDepStage)
+		}
+		for _, arm := range s.UnionArms {
+			mark(arm.DepStage)
+		}
+		for _, prod := range s.ScalarDependencies {
+			mark(prod)
+		}
+	}
+	return dep
 }
 
 // collapseRedundantFinalMergeSort removes trivial trailing merge_sort
