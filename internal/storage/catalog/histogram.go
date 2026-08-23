@@ -7,6 +7,8 @@ import (
 	"io"
 	"math"
 	"sort"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Histogram is an equi-depth histogram over a column's values. Each
@@ -118,6 +120,8 @@ func classifySampleType(sample []any) (uint8, bool) {
 		return histTypeFloat64, true
 	case string, []byte:
 		return histTypeBytes, true
+	case parquet.Decimal128:
+		return histTypeFloat64, true
 	}
 	return 0, false
 }
@@ -163,9 +167,22 @@ func toFloat64Safe(v any) float64 {
 		return float64(tv)
 	case int:
 		return float64(tv)
+	case parquet.Decimal128:
+		// A DECIMAL whose precision exceeds 18 digits comes back from the
+		// row reader as its two-word UNSCALED value (#419), which is the
+		// only shape it has: it does not fit an int64, which is why the box
+		// exists. float64 is what the histogram interpolates in, the
+		// conversion is monotone, and one column carries one scale, so the
+		// unscaled integers order exactly as the decimals do. Precision
+		// past 2^53 is lost, which costs a bucket boundary an ulp and
+		// nothing else — this is a selectivity estimate.
+		return float64(tv.Hi)*twoPow64 + float64(tv.Lo)
 	}
 	return 0
 }
+
+// twoPow64 is 2^64 exactly, the weight of a Decimal128's high word.
+const twoPow64 = float64(1 << 64)
 
 func toBytes(v any) []byte {
 	switch tv := v.(type) {

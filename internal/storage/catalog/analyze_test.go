@@ -313,3 +313,103 @@ func TestAnalyzeTableWithZeroLengthUUIDValues(t *testing.T) {
 		t.Errorf("UUID NDV = %d, want ~100", cs.NDV)
 	}
 }
+
+// TestAnalyzeTableHistogramWideDecimal: a DECIMAL column whose precision
+// exceeds 18 digits is boxed by the row reader as parquet.Decimal128 (#419),
+// and the sampler's type switch had no arm for it — so ReservoirSampler.Add
+// dropped every value, ANALYZE stored an empty sample, and the column got no
+// histogram at all while a DECIMAL(18,2) beside it got one. Silent: the
+// planner just fell back to its hardcoded fractions.
+//
+// wadjet's own writer stores DECIMAL as INT64, so the values here all FIT in
+// 64 bits; what makes them Decimal128 is the declared precision, which is
+// what the reader boxes by.
+func TestAnalyzeTableHistogramWideDecimal(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, "test"); err != nil {
+		t.Fatal(err)
+	}
+	cat := New(NewMemKV(), store, "test")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	const scale = 10
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "d", Type: parquet.TypeDecimal, Precision: 38, Scale: scale, Nullable: false},
+	}}
+	if err := cat.CreateTable(ctx, "wide", schema, nil); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+
+	const rowsPerFile = 5_000
+	const numFiles = 3
+	for fi := 0; fi < numFiles; fi++ {
+		rows := make([]map[string]any, rowsPerFile)
+		for i := 0; i < rowsPerFile; i++ {
+			rows[i] = map[string]any{"d": int64(fi*rowsPerFile + i)}
+		}
+		var buf bytes.Buffer
+		pw, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := pw.WriteRows(rows); err != nil {
+			t.Fatal(err)
+		}
+		if err := pw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		key := fmt.Sprintf("tables/wide/c_%d.parquet", fi)
+		data := buf.Bytes()
+		if _, err := store.Put(ctx, "test", key, bytes.NewReader(data), int64(len(data)), "application/octet-stream"); err != nil {
+			t.Fatal(err)
+		}
+		if err := cat.AddFiles(ctx, "wide", nil, "tables/wide/", []FileEntry{
+			{Path: key, SizeBytes: int64(len(data)), NumRows: rowsPerFile},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := cat.AnalyzeTable(ctx, "wide"); err != nil {
+		t.Fatalf("AnalyzeTable: %v", err)
+	}
+	stats, err := cat.AggregateColumnStats(ctx, "wide")
+	if err != nil {
+		t.Fatalf("AggregateColumnStats: %v", err)
+	}
+	dStats, ok := stats["d"]
+	if !ok {
+		t.Fatal("missing d stats")
+	}
+	if dStats.Histogram == nil {
+		t.Fatal("no histogram built for DECIMAL(38,10)")
+	}
+	if dStats.Histogram.TotalValues != rowsPerFile*numFiles {
+		t.Errorf("histogram TotalValues = %d, want %d",
+			dStats.Histogram.TotalValues, rowsPerFile*numFiles)
+	}
+
+	// Boundaries are the column's UNSCALED values, which is the same unit
+	// the reader hands back; the query side asks in that unit too, through
+	// the same Decimal128 box.
+	unscaled := func(n int64) parquet.Decimal128 {
+		pow := int64(1)
+		for i := 0; i < scale; i++ {
+			pow *= 10
+		}
+		return parquet.Decimal128From(n * pow)
+	}
+	q1 := dStats.Histogram.SelectivityRange(unscaled(0), unscaled(3750))
+	t.Logf("[0, 3750] sel=%.4f (expect ~0.25)", q1)
+	if q1 < 0.20 || q1 > 0.30 {
+		t.Errorf("first quarter sel %.4f outside expected", q1)
+	}
+	h2 := dStats.Histogram.SelectivityRange(unscaled(7500), unscaled(15000))
+	t.Logf("[7500, 15000] sel=%.4f (expect ~0.5)", h2)
+	if h2 < 0.40 || h2 > 0.60 {
+		t.Errorf("second half sel %.4f outside expected", h2)
+	}
+}

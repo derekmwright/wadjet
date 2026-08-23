@@ -8,6 +8,8 @@ import (
 	"io"
 	"math"
 	"sort"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // ColumnSample is a fixed-size random sample of a column's values,
@@ -186,6 +188,8 @@ func sampleTypeOf(v any) (uint8, bool) {
 		return histTypeFloat64, true
 	case string, []byte:
 		return histTypeBytes, true
+	case parquet.Decimal128:
+		return histTypeFloat64, true
 	}
 	return 0, false
 }
