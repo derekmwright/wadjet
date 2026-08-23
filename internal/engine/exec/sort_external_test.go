@@ -475,3 +475,46 @@ func TestSortExternalMerge_Determinism(t *testing.T) {
 		t.Fatal("output not sorted by key")
 	}
 }
+
+// fakeUnsupportedTypeBatch builds a single-batch, single-column RecordBatch
+// whose column carries a TypeID no resolver recognizes — the same sentinel
+// TestResolveSortCompareCoversEveryType (kernel/container_sort_test.go) uses
+// to prove kernel.ResolveSortCompare refuses everything past the real 22
+// types. Good enough to drive a resolve step: nothing here reads the
+// column's data, only its declared Type.
+func fakeUnsupportedTypeBatch(colName string, n int) *batch.RecordBatch {
+	v := batch.NewVector(batch.TypeID(200), n)
+	return &batch.RecordBatch{
+		Columns: []*batch.Vector{v},
+		Schema:  []parquet.Column{{Name: colName, Type: parquet.TypeID(200)}},
+		Len:     n,
+	}
+}
+
+// F5 regression: a sort/merge key whose column type resolves to no
+// comparator must fail loudly, not silently tie every row on that key — the
+// same failure mode a dropped GROUP BY or PARTITION BY key has. Before the
+// fix, resolveSortKeysForBatches returned a resolvedSortKey carrying a nil
+// compare, and its two consumers (sortEntriesLessFunc, mergeHeap.Less)
+// silently skipped the key instead of erroring, exactly the bug class
+// sort_merge_join.go's resolveCompareKernels already refuses for join keys.
+func TestResolveSortKeysForBatches_UnsupportedTypeErrors(t *testing.T) {
+	b := fakeUnsupportedTypeBatch("v", 3)
+	keys := []SortKey{{Column: "v", Order: Ascending}}
+	if _, err := resolveSortKeysForBatches(keys, []*batch.RecordBatch{b}); err == nil {
+		t.Fatal("expected an error for an unsupported key type, got nil")
+	}
+}
+
+// F5 regression: the k-way run merger's own key resolution (newRunMerger)
+// carries the same obligation as resolveSortKeysForBatches — a run whose
+// sort key resolves to no comparator must refuse to merge rather than
+// silently treat every row on that key as tied.
+func TestNewRunMerger_UnsupportedTypeErrors(t *testing.T) {
+	b := fakeUnsupportedTypeBatch("v", 3)
+	c := &runCursor{cur: b}
+	keys := []SortKey{{Column: "v", Order: Ascending}}
+	if _, err := newRunMerger(b.Schema, keys, []*runCursor{c}); err == nil {
+		t.Fatal("expected an error for an unsupported key type, got nil")
+	}
+}

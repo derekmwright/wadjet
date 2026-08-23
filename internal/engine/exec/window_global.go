@@ -1,6 +1,8 @@
 package exec
 
 import (
+	"fmt"
+
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -285,21 +287,40 @@ func newGlobalWindowStreamer(m *runMerger, schema []parquet.Column, g windowSpec
 }
 
 // resolveKernels picks compare kernels from the first batch's column types.
-func (s *globalWindowStreamer) resolveKernels(b *batch.RecordBatch) {
+//
+// An ORDER BY column that resolves to no comparator is an error, not a
+// skip: every type this engine has resolves (kernel.ResolveSortCompare), so
+// nil means the column's type cannot be ordered at all, and silently
+// dropping it from the comparison — as samePeer used to — merges every ORDER
+// BY peer group that differs only on that key into one, exactly as a
+// dropped PARTITION BY key merges every partition. Mirrors
+// SortMergeJoin.resolveCompareKernels (sort_merge_join.go), which already
+// fails loudly on the same condition.
+func (s *globalWindowStreamer) resolveKernels(b *batch.RecordBatch) error {
 	s.compare = make([]kernel.SortCompareKernel, len(s.orderIdxs))
 	for i, idx := range s.orderIdxs {
-		if idx >= 0 && idx < len(b.Columns) {
-			s.compare[i] = kernel.ResolveSortCompare(b.Columns[idx].Type)
+		if idx < 0 || idx >= len(b.Columns) {
+			continue
 		}
+		cmp := kernel.ResolveSortCompare(b.Columns[idx].Type)
+		if cmp == nil {
+			return fmt.Errorf("window: unsupported ORDER BY type %d for column index %d", b.Columns[idx].Type, idx)
+		}
+		s.compare[i] = cmp
 	}
 	s.resolved = true
+	return nil
 }
 
 // samePeer reports whether two rows are ORDER-BY peers (null==null equal,
 // matching sameColumnar's semantics on the in-memory path).
 func (s *globalWindowStreamer) samePeer(ba *batch.RecordBatch, ra int, bb *batch.RecordBatch, rb int) bool {
 	for i, idx := range s.orderIdxs {
-		if idx < 0 || s.compare[i] == nil {
+		// idx < 0 is a column resolve could not find — a legitimate skip,
+		// unrelated to type support. A resolved column always carries a
+		// non-nil compare: resolveKernels errors out before returning
+		// otherwise.
+		if idx < 0 {
 			continue
 		}
 		if s.compare[i](ba.Columns[idx], ra, bb.Columns[idx], rb) != 0 {
@@ -354,7 +375,9 @@ func (s *globalWindowStreamer) Next() (*batch.RecordBatch, error) {
 			continue
 		}
 		if !s.resolved {
-			s.resolveKernels(nb)
+			if err := s.resolveKernels(nb); err != nil {
+				return nil, err
+			}
 		}
 		s.ingest(nb)
 		s.markResolved()

@@ -1,6 +1,8 @@
 package exec
 
 import (
+	"fmt"
+
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -125,22 +127,38 @@ func newPartitionWalker(m *runMerger, partitionBy []string, charge func(delta in
 // resolve binds partition column indices and comparison kernels against the
 // first batch's schema. Null-aware kernels report null==null as 0, so
 // all-null key runs group into one partition (sameColumnar semantics).
-func (w *partitionWalker) resolve(b *batch.RecordBatch) {
+//
+// A PARTITION BY column that resolves to no comparator is an error, not a
+// skip: every type this engine has resolves (kernel.ResolveSortCompare), so
+// nil means the column's type cannot be ordered at all, and silently
+// dropping it from the comparison — as sameRow used to — merges every
+// partition on that key into one, exactly as a dropped GROUP BY key merges
+// every group. Mirrors SortMergeJoin.resolveCompareKernels
+// (sort_merge_join.go), which already fails loudly on the same condition.
+func (w *partitionWalker) resolve(b *batch.RecordBatch) error {
 	for i, name := range w.partitionBy {
 		idx := b.ColumnIndex(name)
 		if idx >= len(b.Columns) {
 			continue
 		}
 		w.partIdxs[i] = idx
-		w.compare[i] = kernel.ResolveSortCompare(b.Columns[idx].Type)
+		cmp := kernel.ResolveSortCompare(b.Columns[idx].Type)
+		if cmp == nil {
+			return fmt.Errorf("window: unsupported PARTITION BY type %d for %q", b.Columns[idx].Type, name)
+		}
+		w.compare[i] = cmp
 	}
 	w.resolved = true
+	return nil
 }
 
 // sameRow reports whether two rows agree on every partition column.
 func (w *partitionWalker) sameRow(ba *batch.RecordBatch, ra int, bb *batch.RecordBatch, rb int) bool {
 	for i, idx := range w.partIdxs {
-		if idx < 0 || w.compare[i] == nil {
+		// idx < 0 is a column resolve could not find — a legitimate skip,
+		// unrelated to type support. A resolved column always carries a
+		// non-nil compare: resolve errors out before returning otherwise.
+		if idx < 0 {
 			continue
 		}
 		if w.compare[i](ba.Columns[idx], ra, bb.Columns[idx], rb) != 0 {
@@ -228,7 +246,9 @@ func (w *partitionWalker) nextPartition() ([]*batch.RecordBatch, int64, error) {
 				continue
 			}
 			if !w.resolved {
-				w.resolve(nb)
+				if err := w.resolve(nb); err != nil {
+					return nil, 0, err
+				}
 			}
 			b, start = nb, 0
 		default:
@@ -363,7 +383,15 @@ func openRunMerger(dir string, schema []parquet.Column, keys []SortKey, runs []s
 		c.ord = ord
 		cursors = append(cursors, c)
 	}
-	return newRunMerger(schema, keys, cursors), runs, nil
+	merger, err := newRunMerger(schema, keys, cursors)
+	if err != nil {
+		for _, prev := range cursors {
+			prev.close()
+		}
+		removeRunFiles(runs)
+		return nil, nil, err
+	}
+	return merger, runs, nil
 }
 
 // computeWindowPartition concatenates one partition's segments, appends the

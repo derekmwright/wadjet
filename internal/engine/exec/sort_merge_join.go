@@ -516,7 +516,14 @@ func (j *SortMergeJoin) openStream(side *smjSide) (*smjStream, error) {
 	}
 	if len(batches) > 0 {
 		entries := buildSortEntries(batches, totalRows)
-		resolved := resolveSortKeysForBatches(side.keys, batches)
+		resolved, err := resolveSortKeysForBatches(side.keys, batches)
+		if err != nil {
+			for _, prev := range cursors {
+				prev.close()
+			}
+			removeRunFiles(runs)
+			return nil, err
+		}
 		entries = selectSortedEntries(entries, sortEntriesLessFunc(resolved, batches), 0)
 		c, err := newMemRunCursor(side.schema, batches, entries)
 		if err != nil {
@@ -530,8 +537,16 @@ func (j *SortMergeJoin) openStream(side *smjSide) (*smjStream, error) {
 		cursors = append(cursors, c)
 	}
 
+	merger, err := newRunMerger(side.schema, side.keys, cursors)
+	if err != nil {
+		for _, prev := range cursors {
+			prev.close()
+		}
+		removeRunFiles(runs)
+		return nil, err
+	}
 	s := &smjStream{
-		merger: newRunMerger(side.schema, side.keys, cursors),
+		merger: merger,
 		runs:   runs,
 		keyIdx: make([]int, len(side.keys)),
 	}

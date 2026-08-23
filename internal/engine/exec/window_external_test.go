@@ -553,3 +553,22 @@ func TestPartitionWalker_ReleaseCurrent(t *testing.T) {
 		t.Fatal("walker state not cleared")
 	}
 }
+
+// F5 regression: a PARTITION BY key whose column type resolves to no
+// comparator must fail loudly, not silently merge every partition on that
+// key into one — the same failure mode a dropped GROUP BY key has. Before
+// the fix, partitionWalker.resolve set a nil compare entry and sameRow
+// silently skipped it instead of erroring, exactly the bug class
+// sort_merge_join.go's resolveCompareKernels already refuses for join keys.
+func TestPartitionWalkerResolve_UnsupportedTypeErrors(t *testing.T) {
+	v := batch.NewVector(batch.TypeID(200), 3)
+	b := &batch.RecordBatch{
+		Columns: []*batch.Vector{v},
+		Schema:  []parquet.Column{{Name: "p", Type: parquet.TypeID(200)}},
+		Len:     3,
+	}
+	w := newPartitionWalker(nil, []string{"p"}, nil)
+	if err := w.resolve(b); err == nil {
+		t.Fatal("expected an error for an unsupported PARTITION BY type, got nil")
+	}
+}

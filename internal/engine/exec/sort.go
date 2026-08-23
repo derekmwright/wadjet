@@ -147,7 +147,9 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// the batch-count trigger covers the untracked case.
 	if s.Limit > 0 && (s.totalRows > s.Limit*2+4*batch.DefaultBatchSize ||
 		s.trackedMem > 96<<20 || len(s.batches) >= 4) {
-		s.compactTopKLocked()
+		if err := s.compactTopKLocked(); err != nil {
+			return err
+		}
 	}
 
 	// Spill to disk if memory pressure is high. The columnar run path
@@ -193,12 +195,15 @@ func (s *Sort) flushSpillLocked() (int64, error) {
 // compactTopKLocked replaces the buffered batches with a single dense
 // batch holding only the current top Limit rows. Caller must hold s.mu,
 // s.Limit must be > 0, and s.schema must be set.
-func (s *Sort) compactTopKLocked() {
+func (s *Sort) compactTopKLocked() error {
 	if len(s.batches) == 0 {
-		return
+		return nil
 	}
 	entries := buildSortEntries(s.batches, s.totalRows)
-	resolved := resolveSortKeysForBatches(s.Keys, s.batches)
+	resolved, err := resolveSortKeysForBatches(s.Keys, s.batches)
+	if err != nil {
+		return err
+	}
 	entries = selectSortedEntries(entries, sortEntriesLessFunc(resolved, s.batches), s.Limit)
 	compacted := gatherEntriesBatch(s.schema, s.batches, entries)
 	if s.Spill != nil && s.trackedMem > 0 {
@@ -216,6 +221,7 @@ func (s *Sort) compactTopKLocked() {
 			s.Spill.Tracker().PublishOwned(s.accInstanceID, s.trackedMem)
 		}
 	}
+	return nil
 }
 
 func (s *Sort) Finalize(_ context.Context) error {
@@ -275,7 +281,14 @@ func (s *Sort) finalizeExternalMerge() error {
 	// run, so it ties last — consistent with the stable in-memory sort.
 	if len(s.batches) > 0 {
 		entries := buildSortEntries(s.batches, s.totalRows)
-		resolved := resolveSortKeysForBatches(s.Keys, s.batches)
+		resolved, err := resolveSortKeysForBatches(s.Keys, s.batches)
+		if err != nil {
+			for _, prev := range cursors {
+				prev.close()
+			}
+			removeRunFiles(runs)
+			return err
+		}
 		entries = selectSortedEntries(entries, sortEntriesLessFunc(resolved, s.batches), s.Limit)
 		c, err := newMemRunCursor(s.schema, s.batches, entries)
 		if err != nil {
@@ -289,7 +302,15 @@ func (s *Sort) finalizeExternalMerge() error {
 		cursors = append(cursors, c)
 	}
 
-	s.merger = newRunMerger(s.schema, s.Keys, cursors)
+	merger, err := newRunMerger(s.schema, s.Keys, cursors)
+	if err != nil {
+		for _, prev := range cursors {
+			prev.close()
+		}
+		removeRunFiles(runs)
+		return err
+	}
+	s.merger = merger
 	s.mergeRuns = runs
 	return nil
 }
@@ -328,7 +349,10 @@ func (s *Sort) finalizeColumnar() error {
 	}
 
 	entries := buildSortEntries(s.batches, s.totalRows)
-	resolved := resolveSortKeysForBatches(s.Keys, s.batches)
+	resolved, err := resolveSortKeysForBatches(s.Keys, s.batches)
+	if err != nil {
+		return err
+	}
 	entries = selectSortedEntries(entries, sortEntriesLessFunc(resolved, s.batches), s.Limit)
 
 	// Materialize sorted batches using typed column copies.

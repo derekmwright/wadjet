@@ -2,6 +2,7 @@ package exec
 
 import (
 	"container/heap"
+	"fmt"
 	"os"
 	"sort"
 
@@ -77,13 +78,22 @@ func resolveSortCompareForKey(typ batch.TypeID, key SortKey, nullFree bool) kern
 // resolveSortKeysForBatches resolves key columns and picks comparison kernels.
 // Null ordering (NULLS FIRST vs NULLS LAST) is baked into kernel selection;
 // the null-free fast kernel is used only when no batch has nulls in the column.
-func resolveSortKeysForBatches(keys []SortKey, batches []*batch.RecordBatch) []resolvedSortKey {
+//
+// A resolved column that gets no comparator is an ERROR, not a skip: every
+// one of the 22 types resolves (kernel.ResolveSortCompareCoversEveryType),
+// so a nil here means a key's column type is one this engine cannot order at
+// all, and silently dropping it from the comparison — as the two callers
+// below used to — merges every value of that key together, exactly as a
+// missing PARTITION BY key merges every partition. Mirrors
+// SortMergeJoin.resolveCompareKernels (sort_merge_join.go), which already
+// fails loudly on the same condition for join keys.
+func resolveSortKeysForBatches(keys []SortKey, batches []*batch.RecordBatch) ([]resolvedSortKey, error) {
 	resolved := make([]resolvedSortKey, len(keys))
 	if len(batches) == 0 {
 		for i, key := range keys {
 			resolved[i] = resolvedSortKey{colIdx: -1, order: key.Order}
 		}
-		return resolved
+		return resolved, nil
 	}
 	firstBatch := batches[0]
 	for i, key := range keys {
@@ -94,7 +104,8 @@ func resolveSortKeysForBatches(keys []SortKey, batches []*batch.RecordBatch) []r
 		// found no exact match, this loop set idx = -1, and the key was
 		// silently skipped — TPC-H Q07 came back with correct rows in
 		// arbitrary order (#314). A key that matches nothing is still
-		// skipped, as before.
+		// skipped, as before — that is a missing COLUMN, a different
+		// failure than an unsupported TYPE.
 		idx := columnIndexFallback(firstBatch, key.Column)
 		if idx >= len(firstBatch.Columns) {
 			idx = -1 // schema/column count mismatch — skip this key
@@ -110,10 +121,13 @@ func resolveSortKeysForBatches(keys []SortKey, batches []*batch.RecordBatch) []r
 				}
 			}
 			cmp = resolveSortCompareForKey(colType, key, allNullFree)
+			if cmp == nil {
+				return nil, fmt.Errorf("sort: unsupported key type %d for %q", colType, key.Column)
+			}
 		}
 		resolved[i] = resolvedSortKey{colIdx: idx, order: key.Order, compare: cmp}
 	}
-	return resolved
+	return resolved, nil
 }
 
 // buildSortEntries flattens the active rows of batches into sort entries.
@@ -139,11 +153,13 @@ func sortEntriesLessFunc(resolved []resolvedSortKey, batches []*batch.RecordBatc
 		bi, bj := batches[ei.batchIdx], batches[ej.batchIdx]
 		ri, rj := int(ei.rowIdx), int(ej.rowIdx)
 		for _, key := range resolved {
-			// A nil kernel is the resolvers' refusal to order a type
-			// (kernel.ResolveSortCompare); skipping the key leaves the
-			// sequence to the remaining keys rather than dereferencing nil.
-			// All 22 types resolve, so this is a defensive guard.
-			if key.colIdx < 0 || key.compare == nil || key.colIdx >= len(bi.Columns) || key.colIdx >= len(bj.Columns) {
+			// colIdx < 0 is a column resolveSortKeysForBatches could not
+			// find — a legitimate skip, unrelated to type support. A key
+			// that resolved a column always carries a non-nil compare:
+			// resolveSortKeysForBatches errors out before returning one
+			// otherwise, so this loop never has to guess what an
+			// unorderable type means for the sequence.
+			if key.colIdx < 0 || key.colIdx >= len(bi.Columns) || key.colIdx >= len(bj.Columns) {
 				continue
 			}
 			cmp := key.compare(bi.Columns[key.colIdx], ri, bj.Columns[key.colIdx], rj)
@@ -242,7 +258,10 @@ func writeSortedRun(dir string, schema []parquet.Column, batches []*batch.Record
 // as one sorted run file. limit > 0 truncates the run to its top limit rows.
 func sortBatchesToRun(dir string, schema []parquet.Column, batches []*batch.RecordBatch, totalRows int, keys []SortKey, limit int) (string, error) {
 	entries := buildSortEntries(batches, totalRows)
-	resolved := resolveSortKeysForBatches(keys, batches)
+	resolved, err := resolveSortKeysForBatches(keys, batches)
+	if err != nil {
+		return "", err
+	}
 	entries = selectSortedEntries(entries, sortEntriesLessFunc(resolved, batches), limit)
 	return writeSortedRun(dir, schema, batches, entries)
 }
@@ -346,7 +365,10 @@ func (h *mergeHeap) Len() int { return len(h.cursors) }
 func (h *mergeHeap) Less(i, j int) bool {
 	a, b := h.cursors[i], h.cursors[j]
 	for _, key := range h.resolved {
-		if key.colIdx < 0 || key.compare == nil || key.colIdx >= len(a.cur.Columns) || key.colIdx >= len(b.cur.Columns) {
+		// colIdx < 0 is a missing column, a legitimate skip; a resolved
+		// column always carries a non-nil compare (newRunMerger errors out
+		// before building this heap otherwise).
+		if key.colIdx < 0 || key.colIdx >= len(a.cur.Columns) || key.colIdx >= len(b.cur.Columns) {
 			continue
 		}
 		cmp := key.compare(a.cur.Columns[key.colIdx], a.row, b.cur.Columns[key.colIdx], b.row)
@@ -381,7 +403,13 @@ type runMerger struct {
 // newRunMerger builds a merger over the cursors. Comparison kernels are
 // resolved from the first live cursor's batch (all runs share the schema);
 // always null-aware because per-run null-freedom isn't tracked across files.
-func newRunMerger(schema []parquet.Column, keys []SortKey, cursors []*runCursor) *runMerger {
+//
+// A resolved column that gets no comparator is an error for the same reason
+// resolveSortKeysForBatches treats it as one: every type this engine has
+// resolves, so nil means the key's column type cannot be ordered at all, and
+// merging its runs as if every value tied — the old behavior — silently
+// scrambles the k-way merge order instead of refusing it.
+func newRunMerger(schema []parquet.Column, keys []SortKey, cursors []*runCursor) (*runMerger, error) {
 	live := make([]*runCursor, 0, len(cursors))
 	for _, c := range cursors {
 		if c.cur != nil {
@@ -402,11 +430,17 @@ func newRunMerger(schema []parquet.Column, keys []SortKey, cursors []*runCursor)
 			continue
 		}
 		cmp := resolveSortCompareForKey(first.Columns[idx].Type, key, false)
+		if cmp == nil {
+			for _, c := range live {
+				c.close()
+			}
+			return nil, fmt.Errorf("sort merge: unsupported key type %d for %q", first.Columns[idx].Type, key.Column)
+		}
 		resolved[i] = resolvedSortKey{colIdx: idx, order: key.Order, compare: cmp}
 	}
 	h := &mergeHeap{cursors: live, resolved: resolved}
 	heap.Init(h)
-	return &runMerger{h: h, schema: schema}
+	return &runMerger{h: h, schema: schema}, nil
 }
 
 // mergeRef pins one merged output row: the source batch stays alive until the
@@ -516,7 +550,11 @@ func mergeRunsToFile(dir string, schema []parquet.Column, keys []SortKey, runs [
 		c.ord = ord
 		cursors = append(cursors, c)
 	}
-	m := newRunMerger(schema, keys, cursors)
+	m, err := newRunMerger(schema, keys, cursors)
+	if err != nil {
+		closeAll()
+		return "", err
+	}
 	defer m.close()
 
 	sw, err := newSpillBatchWriter(dir, "sort-merge")
