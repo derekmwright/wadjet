@@ -1357,7 +1357,24 @@ func gatherDictInt32(dict *DictionaryData, indices []int32, n int, typeID TypeID
 
 func gatherDictBytes(dict *DictionaryData, indices []int32, n int, typeID TypeID) (Values, error) {
 	dictData, dictOffsets := dict.Data.ByteArray()
-	if err := dictEntries(len(dictOffsets)-1, dict, typeID); err != nil {
+	// A BYTE_ARRAY offset table carries one more entry than it has values,
+	// so the entry count is len-1 — but only when there IS a table. An
+	// EMPTY dictionary page has none at all (decodePlainValues returns a
+	// zero Values for n == 0), and len(nil)-1 is -1, which dictEntries read
+	// as "decoded fewer entries than declared" and refused the file.
+	//
+	// An empty dictionary page is what pyarrow writes for a column chunk
+	// whose every value in that row group is NULL, which is why the shape
+	// that surfaced it was a MAP's value leaf in the second of three row
+	// groups: the same file's first row group read fine, and so did the
+	// same column with dictionary encoding off. Nothing about it is nested
+	// or positional — a flat STRING column with an all-NULL row group was
+	// unreadable in exactly the same way.
+	entries := 0
+	if len(dictOffsets) > 0 {
+		entries = len(dictOffsets) - 1
+	}
+	if err := dictEntries(entries, dict, typeID); err != nil {
 		return Values{}, err
 	}
 	var buf []byte
