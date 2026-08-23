@@ -874,6 +874,24 @@ type CollectSink struct {
 	// (heap-1347079-130.pprof: CollectSink.ToRows = 68% inuse_space —
 	// project_q18_sf10_native_dag_oom_2026-04-24).
 	SkipFinalizeToRows bool
+	// SchemaHint is the PLAN-DERIVED output schema, set by the planner
+	// before the pipeline runs. Schema() falls back to it when the sink
+	// consumed nothing, which is the only case it can be needed and the only
+	// case it is consulted.
+	//
+	// A query's output schema is a property of the PLAN, not of the data,
+	// but this sink learned it from the first batch it consumed — so
+	// `SELECT a, b FROM t WHERE false` had no schema, and every route that
+	// reads names or types off this sink handed the client nothing:
+	// pgwire's coord path then declared OID 25 (text) for every column, and
+	// the coordinator's correlated-local route a RowDescription with ZERO
+	// FIELDS — not an empty table with headers, no table at all (#416).
+	//
+	// It is a HINT, not an override: a consumed batch always wins, because
+	// the runtime saw the vectors and the planner only predicted them. Init
+	// deliberately does not clear it — it is configuration the planner
+	// attaches once, not per-run state.
+	SchemaHint []parquet.Column
 }
 
 func (s *CollectSink) Init(_ context.Context) error {
@@ -942,10 +960,13 @@ func (s *CollectSink) Batches() []*batch.RecordBatch {
 	return s.batches
 }
 
-// Schema returns the schema of the first consumed batch (nil if no batch
-// was consumed). Unlike Batches()[0].Schema, it remains available after
-// ToRows releases the batches.
+// Schema returns the schema of the first consumed batch, or the planner's
+// SchemaHint when no batch was consumed. Unlike Batches()[0].Schema, it
+// remains available after ToRows releases the batches.
 func (s *CollectSink) Schema() []parquet.Column {
+	if s.schema == nil {
+		return s.SchemaHint
+	}
 	return s.schema
 }
 

@@ -361,7 +361,12 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		"UnionArms": "reference",
 		// Refuse-to-fingerprint fields (later passes / non-whitelisted
 		// stage types only).
-		"OutputRenames": "refused", "EmitDynamicFilters": "refused",
+		// OutputSchema rides with OutputRenames: both are set only on the
+		// terminal gather, both describe the RESULT rather than the work,
+		// and refusing costs nothing because that stage type is not
+		// fingerprintable anyway (#416).
+		"OutputRenames": "refused", "OutputSchema": "refused",
+		"EmitDynamicFilters":    "refused",
 		"PreComputedAggregates": "refused", "BuildCachePreScans": "refused",
 		// Everything else is hashed structurally via the JSON serialization.
 		"Type": "hashed", "ClusterID": "hashed", "Tasks": "hashed",
@@ -381,7 +386,7 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// plus the input schema, so identical subtrees carry identical maps
 		// and hashing is the safe default (encoding/json sorts map keys).
 		"GroupByTypes": "hashed",
-		"WindowCols": "hashed", "JoinPartitionCount": "hashed",
+		"WindowCols":   "hashed", "JoinPartitionCount": "hashed",
 		"FusedAggGroupBy": "hashed", "FusedAggSpecs": "hashed",
 		"RawInputAggregate": "hashed",
 		// The set-operation marker changes what the stage EMITS (intersect

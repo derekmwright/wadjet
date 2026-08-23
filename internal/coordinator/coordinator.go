@@ -1006,7 +1006,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		TotalRows: gr.totalRows,
 		Elapsed:   time.Since(start),
 		Plan:      planStr,
-		Schema:    gatherSchema(gr.batches),
+		// The plan's declaration stands in when the batches cannot answer,
+		// which is exactly a zero-row result: OutputRenames already keeps
+		// the column NAMES in that case, and without this pgwire declares
+		// OID 25 (text) for every one of them (#416).
+		Schema: schemaOrDeclared(gatherSchema(gr.batches), physStages),
 	}
 	if gr.spillPath != "" {
 		// Over-budget result: the in-memory prefix plus raw frames on
@@ -2920,9 +2924,21 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 		Plan:        planStr,
 		// Recorded rather than left to OutputSchema's fallback: the first
 		// Stream() call detaches Batches, so a consumer that streams before
-		// it asks for the types would otherwise get none.
-		Schema: gatherSchema(batches),
+		// it asks for the types would otherwise get none. A zero-row result
+		// has no batch to record, so the plan's declaration stands in (#416).
+		Schema: schemaOrDeclared(gatherSchema(batches), meta.stages),
 	}, nil
+}
+
+// schemaOrDeclared prefers the schema read off real batches and falls back to
+// the plan's declaration on the terminal gather stage. The two describe the
+// same columns; only a zero-row result needs the second, because there is no
+// batch to read the first from (#416).
+func schemaOrDeclared(gathered []parquet.Column, stages []physical.Stage) []parquet.Column {
+	if len(gathered) > 0 {
+		return gathered
+	}
+	return physical.GatherOutputSchema(stages)
 }
 
 // CancelQuery cancels a running query.

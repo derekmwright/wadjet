@@ -34,6 +34,13 @@ type PhysicalPlan struct {
 	Pipeline *exec.Pipeline
 	Stages   []Stage // for distributed execution
 	Cleanup  func()  // optional: called after pipeline finishes to clean up spill files
+	// OutputSchema is the PLAN-DERIVED output schema: the SELECT list's
+	// column names with the types the catalog says they carry. It answers
+	// the question a zero-row result leaves open, since every other source
+	// of a result schema in this engine reads it off a batch that never
+	// arrived (#416, declaredOutputSchema). Advisory: a consumed batch
+	// always wins.
+	OutputSchema []parquet.Column
 }
 
 // Stage represents a unit of distributed work with metadata for task creation.
@@ -269,6 +276,12 @@ type Stage struct {
 	// "substr(l_shipdate, 1, 4)") instead of the user's aliases
 	// ("supp_nation", "l_year"). Only populated on the Gather stage.
 	OutputRenames []OutputRename
+
+	// OutputSchema is the PLAN-DERIVED result schema — the same column list
+	// OutputRenames names, with the types the catalog says they carry. Only
+	// populated on the Gather stage, and read only when the gathered batches
+	// cannot answer: a zero-row result (#416, declaredOutputSchema).
+	OutputSchema []parquet.Column
 
 	// ProjectExprs, set on a leaf scan stage whose output feeds the gather
 	// directly, makes the scan fragment compute the SELECT list (worker-side
@@ -2087,6 +2100,12 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 			Sink:    sink,
 			Workers: pipelineWorkers,
 		},
+		OutputSchema: declaredOutputSchema(node),
+	}
+	// Hand the sink the plan's answer for the case where no batch will ever
+	// tell it: a zero-row result. It is consulted only then (#416).
+	if cs, ok := sink.(*exec.CollectSink); ok {
+		cs.SchemaHint = plan.OutputSchema
 	}
 
 	// Attach spill file cleanup. CTE collectors and the scan cache
@@ -2335,12 +2354,42 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 			}
 		}
 	}
+	// The gather also carries the PLAN's answer for the output schema, which
+	// is what a zero-row DAG result has instead of a batch to read it off:
+	// OutputRenames already gave such a result its column NAMES, and this
+	// gives it their TYPES, so pgwire declares the same OIDs for an empty
+	// result as for a full one (#416).
+	if outSchema := declaredOutputSchema(node); len(outSchema) > 0 {
+		for i := range stages {
+			if stages[i].Type == StageExchangeGather {
+				stages[i].OutputSchema = outSchema
+				break
+			}
+		}
+	}
 	// #169: when the SELECT list carries scalar expressions and the gather
 	// reads a bare leaf scan, the expressions would never be computed —
 	// applyOutputRenames can rename/drop but not evaluate. Attach the
 	// SELECT list to the scan so its fragment projects it worker-side.
 	attachScanSelectProjections(node, stages)
 	return stages, nil
+}
+
+// GatherOutputSchema returns the plan-declared output schema carried on a
+// stage DAG's terminal gather, or nil when the plan could not declare one.
+//
+// The coordinator calls it for the case its own answer cannot cover: a
+// zero-row result has no batch to read a schema off, so `gatherSchema` over
+// the gathered batches returns nil and pgwire falls back to declaring OID 25
+// (text) for every column. Names already survive that case through
+// OutputRenames; this is the other half (#416).
+func GatherOutputSchema(stages []Stage) []parquet.Column {
+	for i := range stages {
+		if stages[i].Type == StageExchangeGather {
+			return stages[i].OutputSchema
+		}
+	}
+	return nil
 }
 
 // attachScanSelectProjections sets ProjectExprs on a leaf scan stage when

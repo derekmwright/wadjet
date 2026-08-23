@@ -148,10 +148,10 @@ func dedupeSharedSubplans(stages []Stage) []Stage {
 
 type subplanDeduper struct {
 	stages    []Stage
-	idx       map[string]int      // stage ID -> index
-	consumers map[string][]int    // stage ID -> indexes of consuming stages (all edge kinds)
-	roots     []int               // pre-rewire zero-consumer stages (the gather et al.)
-	fps       map[string]string   // stage ID -> fingerprint ("" = memoized failure)
+	idx       map[string]int    // stage ID -> index
+	consumers map[string][]int  // stage ID -> indexes of consuming stages (all edge kinds)
+	roots     []int             // pre-rewire zero-consumer stages (the gather et al.)
+	fps       map[string]string // stage ID -> fingerprint ("" = memoized failure)
 	fpOK      map[string]bool
 	sizes     map[string]int
 	dropped   map[string]bool
@@ -309,6 +309,7 @@ func (d *subplanDeduper) fingerprintAs(id, joinTypeOverride string) (string, boo
 	// clause is what keeps that from becoming an unnoticed gap if the
 	// fingerprintable set ever widens.
 	if len(s.ScalarDependencies) > 0 || len(s.OutputRenames) > 0 ||
+		len(s.OutputSchema) > 0 ||
 		len(s.EmitDynamicFilters) > 0 || len(s.ConsumeDynamicFilters) > 0 ||
 		len(s.PreComputedAggregates) > 0 || len(s.BuildCachePreScans) > 0 ||
 		len(s.UnionArms) > 0 {
