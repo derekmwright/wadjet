@@ -1277,6 +1277,14 @@ func checkByteWidth(col Column, w, got, row int) error {
 	if w == 0 || got == w {
 		return nil
 	}
+	// A ZERO-length value is an absence, not a wrong width: the writer
+	// stores an unparseable or empty IPv6 literal as no bytes at all
+	// (convertStringToBytes), and TestNativeWriterParsesIPv6Literals pins
+	// that it reads back the same way. A four- or twenty-four-byte value is
+	// a different value; an empty one is no value.
+	if got == 0 {
+		return nil
+	}
 	return fmt.Errorf("column %q: %s is %d bytes per value but row %d holds %d",
 		col.Name, col.Type, w, row, got)
 }
