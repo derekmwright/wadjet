@@ -566,9 +566,34 @@ func resolveDictByteArray(dict *pqt.DictionaryData, indices []int32, n int) (pqt
 	return resolveDictByteArrayScratch(nil, dict, indices, n)
 }
 
+// dictEntryCount is how many entries a byte-array dictionary page holds,
+// given its offset table. An offset table for k entries has k+1 offsets — and
+// an EMPTY dictionary page has NO offset table at all, so the arithmetic that
+// every gather loop below used, len(offsets)-1, came out -1.
+//
+// That is not an off-by-one in a message. The gathers bound an index with
+// `uint(idx) >= uint(numVals)`, one compare for negative and too-large, and
+// uint(-1) is MaxUint: the guard was VACUOUS for an empty dictionary, so a
+// data page that still carried indices walked straight into a nil offsets
+// slice and panicked — inside a per-column errgroup goroutine, where no
+// caller can recover it (#433). The row path refused the same bytes by name
+// (parquet.ValidateDictIndices against the page's declared NumValues), which
+// is the ADR-0018 §3 disagreement.
+//
+// Clamping at zero makes the existing compare do the whole job: with
+// numVals == 0 every index is out of range and the loop returns the error the
+// row path already returned. The well-formed empty-dictionary shape (#432 —
+// an all-NULL row group, n == 0) is unaffected, because its loop never runs.
+func dictEntryCount(offsets []uint32) int {
+	if len(offsets) < 2 {
+		return 0
+	}
+	return len(offsets) - 1
+}
+
 func resolveDictByteArrayScratch(s *dictResolveScratch, dict *pqt.DictionaryData, indices []int32, n int) (pqt.Values, error) {
 	dictData, dictOffsets := dict.Data.ByteArray()
-	numVals := len(dictOffsets) - 1
+	numVals := dictEntryCount(dictOffsets)
 	total := 0
 	for i := 0; i < n; i++ {
 		idx := indices[i]

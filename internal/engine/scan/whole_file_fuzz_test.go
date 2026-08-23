@@ -36,23 +36,87 @@ func FuzzWholeFileMutation(f *testing.F) {
 		{221642, 5}, {126704, -47}, {126704, -49},
 		{142690, 7}, {126538, -65}, {-10, 1},
 	} {
-		f.Add(c[0], c[1])
+		f.Add(c[0], c[1], fixtureAllTypes)
 	}
 	// Found by this target on the tree that had already fixed the six above:
 	// a row group whose num_rows went NEGATIVE, which
 	// batch.NewRecordBatch turned into "makeslice: len out of range" before
 	// a single page was read. The footer is validated on open now.
-	f.Add(-19, 62)
+	f.Add(-19, 62, fixtureAllTypes)
 	// A few plain shapes so the corpus starts with both regions covered.
-	f.Add(1, 1)
-	f.Add(2, -1)
-	f.Add(3, 200)
-	f.Add(4, 0)
+	f.Add(1, 1, fixtureAllTypes)
+	f.Add(2, -1, fixtureAllTypes)
+	f.Add(3, 200, fixtureAllTypes)
+	f.Add(4, 0, fixtureAllTypes)
 
-	f.Fuzz(func(t *testing.T, seed, nmut int) {
-		raw := mutateAllTypesFile(seed, nmut)
-		readMutatedBothPaths(t, raw)
+	// The dictionary arm. wadjet's own writer never emits a dictionary page,
+	// so the all-types fixture cannot reach the dictionary gathers AT ALL —
+	// which is why 60s of this target never found #433, a vacuous bounds
+	// check that panicked on an empty dictionary page with a live index
+	// stream. The second fixture is a dictionary-encoded BYTE_ARRAY chunk,
+	// where a mutated dictionary page header is one byte away from that
+	// shape and a mutated index stream is one byte away from every other
+	// out-of-range gather.
+	f.Add(1, 1, fixtureDictString)
+	f.Add(2, -1, fixtureDictString)
+	f.Add(5, 3, fixtureDictString)
+	f.Add(7, -9, fixtureDictString)
+	f.Add(11, 40, fixtureDictString)
+
+	f.Fuzz(func(t *testing.T, seed, nmut, fixture int) {
+		fx := fuzzFixture(t, fixture)
+		readMutatedBothPaths(t, mutateFile(fx.raw, seed, nmut), fx.native, fx.row)
 	})
+}
+
+// The fixtures this target mutates. A negative or unknown selector folds onto
+// the all-types file rather than skipping, so the fuzzer never spends inputs
+// on a no-op.
+const (
+	fixtureAllTypes = iota
+	fixtureDictString
+	numFuzzFixtures
+)
+
+type mutationFixture struct {
+	raw    []byte
+	native []pqt.Column
+	row    []pqt.Column
+}
+
+func fuzzFixture(t testing.TB, which int) mutationFixture {
+	t.Helper()
+	which = ((which % numFuzzFixtures) + numFuzzFixtures) % numFuzzFixtures
+	if which == fixtureDictString {
+		col := colFor(pqt.TypeString)
+		return mutationFixture{
+			raw:    dictStringFile(t),
+			native: []pqt.Column{col},
+			row:    []pqt.Column{col},
+		}
+	}
+	return mutationFixture{
+		raw:    allTypesFile(),
+		native: nativeAllTypesSchema(),
+		row:    allTypesSchema().Columns,
+	}
+}
+
+// dictStringFile is a single-column BYTE_ARRAY chunk rewritten as a
+// dictionary page plus a live RLE_DICTIONARY index stream — the shape no
+// wadjet-written file has. Built once: the rewrite parses and re-emits a
+// footer, which is not work to repeat per fuzz input.
+var (
+	dictStringOnce sync.Once
+	dictStringRaw  []byte
+)
+
+func dictStringFile(t testing.TB) []byte {
+	t.Helper()
+	dictStringOnce.Do(func() {
+		dictStringRaw = dictEncodeOneColumnFile(t, writeMatrixFile(t, pqt.TypeString))
+	})
+	return dictStringRaw
 }
 
 // TestWholeFileMutationCrashers runs the six known crashers as an ordinary
@@ -64,7 +128,8 @@ func TestWholeFileMutationCrashers(t *testing.T) {
 		{-19, 62},
 	} {
 		t.Run(fmt.Sprintf("seed%d_nmut%d", c[0], c[1]), func(t *testing.T) {
-			readMutatedBothPaths(t, mutateAllTypesFile(c[0], c[1]))
+			fx := fuzzFixture(t, fixtureAllTypes)
+			readMutatedBothPaths(t, mutateFile(fx.raw, c[0], c[1]), fx.native, fx.row)
 		})
 	}
 }
@@ -122,14 +187,14 @@ func TestAllTypesFixtureReadsBack(t *testing.T) {
 
 // readMutatedBothPaths is the property itself: whatever the bytes say, both
 // readers either refuse the file or hand back values that can be touched.
-func readMutatedBothPaths(t *testing.T, raw []byte) {
+func readMutatedBothPaths(t *testing.T, raw []byte, nativeSchema, rowSchema []pqt.Column) {
 	t.Helper()
 	// No recover: a panic in a decode goroutine is not recoverable by the
 	// caller in production either (the scan fans out per column under an
 	// errgroup), so catching it here would test something the engine does
 	// not get to do.
 	if fr, err := pqt.OpenFileReaderFromBytes(raw); err == nil {
-		batches, err := ReadFileBatchesNative(fr, nativeAllTypesSchema(), nil)
+		batches, err := ReadFileBatchesNative(fr, nativeSchema, nil)
 		if err == nil {
 			for _, b := range batches {
 				if b == nil {
@@ -144,7 +209,7 @@ func readMutatedBothPaths(t *testing.T, raw []byte) {
 		}
 	}
 	if r, err := pqt.NewReaderFromBytes(raw); err == nil {
-		_, _ = r.ReadRowsAs(allTypesSchema().Columns, nil)
+		_, _ = r.ReadRowsAs(rowSchema, nil)
 	}
 }
 
@@ -298,7 +363,7 @@ func allTypesFile() []byte {
 	return allTypesRaw
 }
 
-// mutateAllTypesFile applies |nmut| byte mutations to a copy of the fixture.
+// mutateFile applies |nmut| byte mutations to a copy of a fixture.
 //
 // The scheme is deterministic in (seed, nmut) so a crasher is a pair of
 // integers and nothing else has to be stored:
@@ -318,8 +383,7 @@ func allTypesFile() []byte {
 // 0xFF — the last because saturated bytes are what turn a small varint into
 // a huge one, which is the shape behind both the inflated counts and the
 // negative offsets.
-func mutateAllTypesFile(seed, nmut int) []byte {
-	orig := allTypesFile()
+func mutateFile(orig []byte, seed, nmut int) []byte {
 	raw := make([]byte, len(orig))
 	copy(raw, orig)
 

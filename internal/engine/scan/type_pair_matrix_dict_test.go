@@ -43,7 +43,7 @@ func matrixSel() []uint32 {
 // chunk: 40 rows, every fifth one NULL, all present values identical (which
 // is what lets dictEncodeOneColumnFile rewrite it with a one-entry
 // dictionary).
-func writeMatrixFile(t *testing.T, id pqt.TypeID) []byte {
+func writeMatrixFile(t testing.TB, id pqt.TypeID) []byte {
 	t.Helper()
 	schema := pqt.Schema{Columns: []pqt.Column{colFor(id)}}
 	cfg := pqt.DefaultWriterConfig()
@@ -81,7 +81,7 @@ func writeMatrixFile(t *testing.T, id pqt.TypeID) []byte {
 // dictionary page body IS the PLAIN value bytes: take the page's values as
 // written, keep the first one as a one-entry dictionary, and replace the
 // value section with an index stream that points every row at it.
-func dictEncodeOneColumnFile(t *testing.T, raw []byte) []byte {
+func dictEncodeOneColumnFile(t testing.TB, raw []byte) []byte {
 	t.Helper()
 	footerLen := int(binary.LittleEndian.Uint32(raw[len(raw)-8 : len(raw)-4]))
 	footerStart := len(raw) - 8 - footerLen

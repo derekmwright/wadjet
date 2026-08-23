@@ -160,7 +160,7 @@ func readColumnNativeSel(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, n
 					return fmt.Errorf("dictionary-encoded page but chunk has no dictionary page")
 				}
 				indices := page.Data.Int32()
-				numVals := len(dictOffs) - 1
+				numVals := dictEntryCount(dictOffs)
 				valueAt := func(vi int) ([]byte, error) {
 					if vi >= len(indices) {
 						return nil, fmt.Errorf("dictionary page: value %d beyond %d indices", vi, len(indices))

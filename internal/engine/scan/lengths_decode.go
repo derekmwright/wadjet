@@ -123,7 +123,7 @@ func readColumnNativeLengths(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colId
 					return fmt.Errorf("dictionary-encoded page but chunk has no dictionary page")
 				}
 				indices := page.Data.Int32()
-				numVals := len(dictOffs) - 1
+				numVals := dictEntryCount(dictOffs)
 				lenAt := func(vi int) (int, error) {
 					if vi >= len(indices) {
 						return 0, fmt.Errorf("dictionary page: value %d beyond %d indices", vi, len(indices))
