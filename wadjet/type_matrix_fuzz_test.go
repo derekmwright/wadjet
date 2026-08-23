@@ -172,9 +172,15 @@ func TestTypeMatrixFuzzBatchReuse(t *testing.T) {
 // tmFuzzOptPins are the known optimization-invariance divergences of the
 // generated arm, keyed "<seed>/<toggle>".
 var tmFuzzOptPins = map[string]typematrix.Pin{
-	"18/scan-filter": {Issue: "#401", Reason: "A qualified column in WHERE fails to resolve once " +
-		"the filter falls back from the scan to the operator level."},
-	"18/all-off": {Issue: "#401", Reason: "Same resolution failure, with every switch off."},
+	// #401's two pins (18/scan-filter, 18/all-off) are deleted. The failure was
+	// never about name resolution: ResolveFilterKernel had no DECIMAL arm, and
+	// KernelFilter reported a nil kernel as `filter column %q does not exist in
+	// the input schema`. With the arm added the seed answers the same under
+	// every switch.
+	//
+	// #402's entry ("11/partitioned-agg") is also gone — fixed on main before
+	// this rebase (shared-count/merge-bound fix); see tmFuzzIntermittentOptRetries
+	// below.
 }
 
 // tmFuzzIntermittentOptRetries names optimization-invariance pins whose

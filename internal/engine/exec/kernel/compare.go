@@ -3,6 +3,7 @@ package kernel
 import (
 	"encoding/binary"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -172,9 +173,188 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 		return compareFilterString(op, toString(value))
 	case batch.TypeDate:
 		return compareFilterImpl(getInt32Data, toDateInt32(value), op)
+	case batch.TypeBytes:
+		// BYTES compares by bytes, which is what the string kernel does —
+		// it reads the same arena. The constant arrives as a string from a
+		// SQL literal and as []byte from a parameter.
+		return compareFilterString(op, toBytesString(value))
+	case batch.TypeDecimal:
+		return compareFilterDecimal(op, value)
 	default:
 		return nil
 	}
+}
+
+// toBytesString renders a BYTES filter constant as the raw byte string the
+// column stores.
+func toBytesString(v any) string {
+	switch tv := v.(type) {
+	case string:
+		return tv
+	case []byte:
+		return string(tv)
+	default:
+		return ""
+	}
+}
+
+// compareFilterDecimal compares a DECIMAL column against a constant.
+//
+// Without this arm ResolveFilterKernel returned nil for DECIMAL, and every
+// caller read that as "the column does not exist": `WHERE dec_col <> 5.0005`
+// failed the query with `filter column "c_dec" does not exist in the input
+// schema` whenever the predicate reached the operator-level filter instead of
+// the scan (#401).
+//
+// The comparison is EXACT, per ADR-0012 — PostgreSQL compares numeric against
+// a numeric literal at full precision. The column's values live at its own
+// scale, so the constant is truncated to that scale and the truncation's
+// RESIDUAL is carried: with a DECIMAL(18,4) column, `> 2499.5074494849528`
+// must still exclude the row holding exactly 2499.5074, which comparing
+// against the truncated constant alone would admit.
+//
+// The literal is resolved per CALL, not per row and not once at resolve time:
+// the vector carries the scale, and a kernel resolved from one batch can be
+// handed the next one.
+func compareFilterDecimal(op CompareOp, value any) FilterKernel {
+	text := decimalLiteralText(value)
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		lit, residual := decimalLiteralAt(text, vec.DecimalData.Scale)
+		data := vec.DecimalData.Data
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		keep := func(i int) bool {
+			return applyCompareOp(decimalOrder(data[i], lit, residual), op)
+		}
+		if sel != nil {
+			for _, idx := range sel {
+				if hasNulls && vec.Nulls.IsNullFast(int(idx)) {
+					continue
+				}
+				if keep(int(idx)) {
+					out = append(out, idx)
+				}
+			}
+			return out
+		}
+		for i := 0; i < vecLen; i++ {
+			if hasNulls && vec.Nulls.IsNullFast(i) {
+				continue
+			}
+			if keep(i) {
+				out = append(out, uint32(i))
+			}
+		}
+		return out
+	}
+}
+
+// compareInt128 is defined in sort.go (same package) — both the sort kernels
+// and the DECIMAL filter/equality kernels below compare on the same Int128
+// representation and share the one function.
+
+// decimalOrder orders one stored value against a constant already truncated to
+// the column's scale, using the truncation's residual to settle a tie: a
+// positive residual means the true constant is larger than what was kept, so
+// the equal-looking column value is actually smaller.
+func decimalOrder(cell, lit batch.Int128, residual int) int {
+	if c := compareInt128(cell, lit); c != 0 {
+		return c
+	}
+	return -residual
+}
+
+func applyCompareOp(c int, op CompareOp) bool {
+	switch op {
+	case OpEq:
+		return c == 0
+	case OpNe:
+		return c != 0
+	case OpLt:
+		return c < 0
+	case OpLe:
+		return c <= 0
+	case OpGt:
+		return c > 0
+	case OpGe:
+		return c >= 0
+	}
+	return false
+}
+
+// DecimalRowCompare answers `vec[row] <op> literal` for a DECIMAL column, for
+// the row-at-a-time predicate path. It shares decimalLiteralAt with the
+// vectorized kernel deliberately: two comparison rules for the same predicate
+// is exactly the shape #394 was filed for.
+func DecimalRowCompare(vec *batch.Vector, row int, literal string, op CompareOp) bool {
+	lit, residual := decimalLiteralAt(normalizeDecimalText(literal), vec.DecimalData.Scale)
+	return applyCompareOp(decimalOrder(vec.DecimalData.Data[row], lit, residual), op)
+}
+
+// decimalLiteralText renders a filter constant as plain decimal text, with no
+// exponent, so the scaling below can be done on digits rather than in float64.
+// It returns "" for a value that is not a number, which reads as zero.
+func decimalLiteralText(v any) string {
+	switch tv := v.(type) {
+	case string:
+		return normalizeDecimalText(tv)
+	case []byte:
+		return normalizeDecimalText(string(tv))
+	case float64:
+		return strconv.FormatFloat(tv, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(tv), 'f', -1, 32)
+	case int64:
+		return strconv.FormatInt(tv, 10)
+	case int32:
+		return strconv.FormatInt(int64(tv), 10)
+	case int:
+		return strconv.FormatInt(int64(tv), 10)
+	default:
+		return ""
+	}
+}
+
+// normalizeDecimalText expands an exponent form ("1.5e3") into plain digits;
+// anything already plain is returned unchanged, including text that is not a
+// number at all — ParseDecimalString reads that as zero, which is what every
+// other kernel's conversion does with an unusable constant.
+func normalizeDecimalText(s string) string {
+	if !strings.ContainsAny(s, "eE") {
+		return s
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return s
+	}
+	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
+// decimalLiteralAt truncates plain decimal text to `scale` and reports the
+// residual: +1 when the true value is strictly greater than the truncation
+// kept (positive number with discarded non-zero digits), -1 when strictly
+// less (negative number, same), 0 when the truncation was exact.
+func decimalLiteralAt(text string, scale int) (batch.Int128, int) {
+	lit := batch.ParseDecimalString(text, scale)
+	t := strings.TrimSpace(text)
+	neg := strings.HasPrefix(t, "-")
+	dot := strings.IndexByte(t, '.')
+	if dot < 0 {
+		return lit, 0
+	}
+	frac := t[dot+1:]
+	if len(frac) <= scale {
+		return lit, 0
+	}
+	for _, c := range frac[scale:] {
+		if c >= '1' && c <= '9' {
+			if neg {
+				return lit, -1
+			}
+			return lit, 1
+		}
+	}
+	return lit, 0
 }
 
 // compareFilterString handles string column comparison.

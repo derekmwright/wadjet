@@ -163,8 +163,31 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 			return compareString(v.BytesData.UnsafeStringValue(row), strVal, op)
 		case batch.TypeDate:
 			return compareInt64(int64(v.Int32Data[row]), toInt64(value), op)
+		case batch.TypeBytes:
+			// BYTES compares by bytes, like STRING over the same arena. The
+			// row fallback had no arm and fell to `return false`, so a
+			// predicate over a BYTES column that reached this path dropped
+			// every row (same class as #401's missing kernel).
+			return compareString(v.BytesData.UnsafeStringValue(row), bytesFilterVal(value), op)
+		case batch.TypeDecimal:
+			// Exact, at the column's own scale — the same rule the
+			// vectorized kernel applies, so the two paths cannot disagree.
+			return kernel.DecimalRowCompare(v, row, strVal, toKernelOp(op))
 		}
 		return false
+	}
+}
+
+// bytesFilterVal renders a BYTES constant as the raw byte string the column
+// stores, without going through fmt.Sprint (which renders []byte as "[1 2 3]").
+func bytesFilterVal(value any) string {
+	switch tv := value.(type) {
+	case string:
+		return tv
+	case []byte:
+		return string(tv)
+	default:
+		return fmt.Sprint(value)
 	}
 }
 
@@ -398,11 +421,19 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 	if f.useFallback {
 		return f.inner.Execute(ctx, in)
 	}
-	if f.colIdx < 0 || f.kern == nil {
+	if f.colIdx < 0 {
 		// An unresolvable filter column previously matched NOTHING — a
 		// typo'd WHERE clause silently returned an empty result,
 		// indistinguishable from genuinely empty data (issue #147).
 		return nil, fmt.Errorf("filter column %q does not exist in the input schema", f.ColName)
+	}
+	if f.kern == nil {
+		// The column resolved; the TYPE has no comparison kernel. Reporting
+		// that as "does not exist" sent every reader hunting a name-resolution
+		// bug — that is how #401 was filed, when the real answer was that
+		// ResolveFilterKernel had no DECIMAL arm.
+		return nil, fmt.Errorf("filter on column %q: no comparison kernel for type %s",
+			f.ColName, in.Columns[f.colIdx].Type)
 	}
 
 	// When the batch already has a selection vector (e.g. from a prior filter
