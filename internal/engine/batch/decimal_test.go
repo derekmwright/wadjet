@@ -2,6 +2,7 @@ package batch
 
 import (
 	"math"
+	"math/big"
 	"testing"
 )
 
@@ -191,5 +192,104 @@ func TestDecimalVector(t *testing.T) {
 	_, ok = v.GetNumericFloat64(3)
 	if ok {
 		t.Error("GetNumericFloat64(3) should return false for null")
+	}
+}
+
+// TestInt128MulPow10 pins the exact-rescale primitive the DECIMAL comparator
+// uses to compare two scales without going through float64.
+func TestInt128MulPow10(t *testing.T) {
+	cases := []struct {
+		name string
+		v    Int128
+		n    int
+		ok   bool
+	}{
+		{"zero", Int128From(0), 5, true},
+		{"n=0 is identity", Int128From(123), 0, true},
+		{"small positive", Int128From(12345), 3, true},
+		{"small negative", Int128From(-12345), 3, true},
+		{"past int64 in one step", Int128From(1 << 62), 3, true},
+		{"chunked past 19", Int128From(7), 25, true},
+		{"chunked past 38", Int128From(1), 38, true},
+		{"negative chunked", Int128From(-1), 38, true},
+		{"just fits", Int128{Hi: 1, Lo: 0}, 18, true},
+		{"overflows on the last chunk", Int128{Hi: 1 << 62, Lo: 0}, 3, false},
+		{"overflows just past the boundary", Int128{Hi: 1, Lo: 0}, 19, false},
+		{"overflows wildly", Int128From(1), 40, false},
+		{"most negative", Int128{Hi: -1 << 63, Lo: 0}, 1, false},
+		{"negative n is refused", Int128From(1), -1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := tc.v.MulPow10(tc.n)
+			if ok != tc.ok {
+				t.Fatalf("MulPow10(%d) ok = %v, want %v", tc.n, ok, tc.ok)
+			}
+			if !ok {
+				return
+			}
+			// big.Int is the oracle: the product must be EXACT, and must
+			// round trip back through Int128's own 128-bit view.
+			want := new(big.Int).Mul(tc.v.BigInt(),
+				new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(tc.n)), nil))
+			if got.BigInt().Cmp(want) != 0 {
+				t.Errorf("MulPow10(%d) = %s, want %s", tc.n, got.BigInt(), want)
+			}
+			if want.BitLen() > 127 {
+				t.Errorf("MulPow10(%d) accepted a product of %d bits", tc.n, want.BitLen())
+			}
+		})
+	}
+}
+
+// TestInt128MulPow10NeverApproximates sweeps the boundary where a product
+// stops fitting: every accepted answer must be exact and every refusal must
+// be a genuine overflow, because the comparator treats ok=false as "take the
+// wide path" and an accepted-but-wrong product would be a silent wrong join.
+func TestInt128MulPow10NeverApproximates(t *testing.T) {
+	seeds := []Int128{
+		Int128From(1), Int128From(-1), Int128From(9007199254740993),
+		Int128From(math.MaxInt64), Int128From(math.MinInt64),
+		{Hi: 1 << 40, Lo: 12345}, {Hi: -1 << 40, Lo: 12345},
+	}
+	pow10 := func(n int) *big.Int {
+		return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n)), nil)
+	}
+	for si, v := range seeds {
+		for n := 0; n <= 40; n++ {
+			got, ok := v.MulPow10(n)
+			want := new(big.Int).Mul(v.BigInt(), pow10(n))
+			fits := want.BitLen() <= 126 // conservative: definitely representable
+			if !ok {
+				if fits {
+					t.Errorf("seed %d: MulPow10(%d) refused a %d-bit product", si, n, want.BitLen())
+				}
+				continue
+			}
+			if got.BigInt().Cmp(want) != 0 {
+				t.Fatalf("seed %d: MulPow10(%d) = %s, want %s", si, n, got.BigInt(), want)
+			}
+		}
+	}
+}
+
+// TestInt128BigInt pins the 128-bit view both directions of the sign.
+func TestInt128BigInt(t *testing.T) {
+	cases := []struct {
+		v    Int128
+		want string
+	}{
+		{Int128From(0), "0"},
+		{Int128From(1), "1"},
+		{Int128From(-1), "-1"},
+		{Int128From(math.MaxInt64), "9223372036854775807"},
+		{Int128From(math.MinInt64), "-9223372036854775808"},
+		{Int128{Hi: 1, Lo: 0}, "18446744073709551616"},
+		{Int128{Hi: -1, Lo: 0}, "-18446744073709551616"},
+	}
+	for _, tc := range cases {
+		if got := tc.v.BigInt().String(); got != tc.want {
+			t.Errorf("Int128{%d,%d}.BigInt() = %s, want %s", tc.v.Hi, tc.v.Lo, got, tc.want)
+		}
 	}
 }

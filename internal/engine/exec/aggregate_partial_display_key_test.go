@@ -23,25 +23,31 @@ import (
 // display form read back.
 func TestWritePartialKeyDisplayForm(t *testing.T) {
 	cases := []struct {
-		name string
-		typ  parquet.TypeID
-		disp string
+		name  string
+		typ   parquet.TypeID
+		scale int
+		disp  string
 	}{
-		{"ipv6", parquet.TypeIPv6, "2001:db8::1"},
-		{"ipv6-zero", parquet.TypeIPv6, "2001:db8::"},
-		{"uuid", parquet.TypeUUID, "00000000-0000-4000-8000-00000000002a"},
-		{"ipv4", parquet.TypeIPv4, "10.0.0.5"},
-		{"mac", parquet.TypeMAC, "aa:bb:cc:00:00:05"},
-		{"date", parquet.TypeDate, "2021-03-04"},
-		{"cidr", parquet.TypeCIDR, "10.0.0.0/8"},
-		{"string", parquet.TypeString, "plain text"},
+		{"ipv6", parquet.TypeIPv6, 0, "2001:db8::1"},
+		{"ipv6-zero", parquet.TypeIPv6, 0, "2001:db8::"},
+		{"uuid", parquet.TypeUUID, 0, "00000000-0000-4000-8000-00000000002a"},
+		{"ipv4", parquet.TypeIPv4, 0, "10.0.0.5"},
+		{"mac", parquet.TypeMAC, 0, "aa:bb:cc:00:00:05"},
+		{"date", parquet.TypeDate, 0, "2021-03-04"},
+		{"cidr", parquet.TypeCIDR, 0, "10.0.0.0/8"},
+		{"string", parquet.TypeString, 0, "plain text"},
+		// DECIMAL's display form is its SCALED digits, and it reaches the
+		// same emit through writePartialKeyFallback. Cheap insurance for
+		// the type whose two other comparison paths were #394.
+		{"decimal", parquet.TypeDecimal, 4, "12.3456"},
+		{"decimal-negative", parquet.TypeDecimal, 4, "-0.0001"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Two rows: a NULL first, so the bytes-backed offsets have to
 			// advance before the value lands, then the value.
-			dst := batch.NewVector(tc.typ, 2)
+			dst := batch.NewVectorWithScale(tc.typ, 2, tc.scale)
 			var null partialKeyValue
 			setPartialKeyFromAny(&null, nil)
 			writePartialKeyToColumn(dst, 0, &null)

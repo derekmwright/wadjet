@@ -1,6 +1,10 @@
 package kernel
 
-import "github.com/derekmwright/wadjet/internal/engine/batch"
+import (
+	"math/big"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+)
 
 // ResolveSortCompare returns a comparison function for the given column type.
 // The returned function has no type switch — the type is baked into the closure.
@@ -409,34 +413,59 @@ func sortCompareBoolNullsLast(a *batch.Vector, ai int, b *batch.Vector, bi int) 
 // "2.0002". Same query, three different sequences depending on which path
 // answered (#394).
 //
-// Equal scales compare the unscaled Int128s directly and are exact. That is
-// every sort over one column, every sorted run, and every k-way merge over
-// runs of one column. Unequal scales are reachable only where two separately
-// declared DECIMAL columns meet — a sort-merge join key, a set operation —
-// and are compared as float64, which is exact up to 2^53 unscaled units and
-// loses ties above it. Exactness there needs a 128-bit rescale this engine
-// has no multiply for; the float path is still a total, value-ordered
-// comparison, where the old default was not.
+// The comparison is EXACT at every scale. Equal scales compare the unscaled
+// Int128s directly — that is every sort over one column, every sorted run and
+// every k-way merge over runs. Unequal scales, reachable where two separately
+// declared DECIMAL columns meet, rescale the smaller-scale operand by
+// 10^(delta) and compare the unscaled integers; if that product overflows
+// Int128 the two are compared as big.Int rather than approximated.
+//
+// Exactness is not a nicety here: SortMergeJoin uses this comparator for key
+// EQUALITY (sort_merge_join.go), so an approximate answer is a spurious JOIN
+// MATCH. The float64 rescale this replaced held to 2^53 unscaled units and
+// then started reporting 9007199254740993 and 9007199254740992.0 — which
+// differ by one unscaled unit at the common scale — as the same key.
 func CompareDecimalAt(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 	av, bv := a.DecimalData.Data[ai], b.DecimalData.Data[bi]
-	if a.DecimalData.Scale == b.DecimalData.Scale {
-		if av.Less(bv) {
-			return -1
-		}
-		if bv.Less(av) {
-			return 1
-		}
-		return 0
+	as, bs := a.DecimalData.Scale, b.DecimalData.Scale
+	if as == bs {
+		return compareInt128(av, bv)
 	}
-	af := av.ToFloat64(a.DecimalData.Scale)
-	bf := bv.ToFloat64(b.DecimalData.Scale)
-	if af < bf {
+	// Rescale the SMALLER scale up: scaling down would discard digits and
+	// turn a real difference into a tie.
+	if as < bs {
+		if scaled, ok := av.MulPow10(bs - as); ok {
+			return compareInt128(scaled, bv)
+		}
+	} else {
+		if scaled, ok := bv.MulPow10(as - bs); ok {
+			return compareInt128(av, scaled)
+		}
+	}
+	return compareDecimalBig(av, as, bv, bs)
+}
+
+func compareInt128(av, bv batch.Int128) int {
+	if av.Less(bv) {
 		return -1
 	}
-	if af > bf {
+	if bv.Less(av) {
 		return 1
 	}
 	return 0
+}
+
+// compareDecimalBig is the exact fallback for the rare pair whose rescale
+// does not fit in Int128 — a near-full-width unscaled value meeting a much
+// larger scale. It allocates, and it is reached only there.
+func compareDecimalBig(av batch.Int128, as int, bv batch.Int128, bs int) int {
+	x, y := av.BigInt(), bv.BigInt()
+	if as < bs {
+		x.Mul(x, big.NewInt(0).Exp(big.NewInt(10), big.NewInt(int64(bs-as)), nil))
+	} else if bs < as {
+		y.Mul(y, big.NewInt(0).Exp(big.NewInt(10), big.NewInt(int64(as-bs)), nil))
+	}
+	return x.Cmp(y)
 }
 
 func sortCompareDecimal(a *batch.Vector, ai int, b *batch.Vector, bi int) int {

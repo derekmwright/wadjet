@@ -3,6 +3,8 @@ package batch
 import (
 	"fmt"
 	"math"
+	"math/big"
+	"math/bits"
 	"strings"
 )
 
@@ -100,6 +102,77 @@ func (d Int128) Less(other Int128) bool {
 // Equal returns true if d == other.
 func (d Int128) Equal(other Int128) bool {
 	return d.Hi == other.Hi && d.Lo == other.Lo
+}
+
+// pow10u64 holds the powers of ten that fit in a uint64 (10^19 < 2^64).
+var pow10u64 = [20]uint64{
+	1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000,
+	1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19,
+}
+
+// MulPow10 returns d x 10^n and reports whether the EXACT product fits in
+// Int128. It never returns an approximation: a false second result means the
+// caller must take a wider path, not that the first result is close.
+//
+// Rescaling one operand up to the other's scale is how two DECIMALs of
+// different scale are compared exactly (kernel.CompareDecimalAt), which
+// matters at a sort-merge join key where the comparator decides EQUALITY:
+// float64 rescaling makes 9007199254740993 and 9007199254740992.0 the same
+// number and emits a join row for a pair that does not match.
+func (d Int128) MulPow10(n int) (Int128, bool) {
+	if n < 0 {
+		return Int128{}, false
+	}
+	if n == 0 || d.IsZero() {
+		return d, true
+	}
+	neg := d.IsNegative()
+	mag := d
+	if neg {
+		mag = d.Neg()
+		if mag.IsNegative() {
+			// -2^127 negates to itself; its magnitude has no Int128, so
+			// any multiple of it certainly has none.
+			return Int128{}, false
+		}
+	}
+	hi, lo := uint64(mag.Hi), mag.Lo
+	for n > 0 {
+		k := n
+		if k > 19 {
+			k = 19
+		}
+		m := pow10u64[k]
+		carryHi, newLo := bits.Mul64(lo, m)
+		topHi, midHi := bits.Mul64(hi, m)
+		if topHi != 0 {
+			return Int128{}, false // product needs more than 128 bits
+		}
+		newHi, carry := bits.Add64(carryHi, midHi, 0)
+		if carry != 0 {
+			return Int128{}, false
+		}
+		hi, lo = newHi, newLo
+		n -= k
+	}
+	if hi&(1<<63) != 0 {
+		// Magnitude >= 2^127: outside the signed range (conservatively so
+		// for exactly -2^127, whose callers take the wide path instead).
+		return Int128{}, false
+	}
+	res := Int128{Hi: int64(hi), Lo: lo}
+	if neg {
+		res = res.Neg()
+	}
+	return res, true
+}
+
+// BigInt returns the value as a big.Int: Hi x 2^64 + Lo, exactly. Used on the
+// paths where an Int128 is too narrow to hold an intermediate result.
+func (d Int128) BigInt() *big.Int {
+	b := new(big.Int).SetInt64(d.Hi)
+	b.Lsh(b, 64)
+	return b.Add(b, new(big.Int).SetUint64(d.Lo))
 }
 
 // FormatDecimal formats the Int128 as a decimal string with the given scale.
