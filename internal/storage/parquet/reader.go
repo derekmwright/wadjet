@@ -253,6 +253,9 @@ func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
 		for _, p := range plans {
 			asm.assembleNestedColumn(p.node, p.name, rows)
 		}
+		if err := asm.checkDrained(leaves); err != nil {
+			return nil, fmt.Errorf("row group %d: %w", rgIdx, err)
+		}
 
 		for _, col := range readCols {
 			if isNestedType(col.Type) {
