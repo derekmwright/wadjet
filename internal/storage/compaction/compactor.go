@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
@@ -48,7 +49,32 @@ func partitionedOutputPath(tableName, partPath, base string) string {
 			dir = prefix + "/" + strings.TrimSuffix(partPath, "/")
 		}
 	}
-	return fmt.Sprintf("%s/%s_%d.parquet", dir, base, time.Now().UnixNano())
+	return fmt.Sprintf("%s/%s_%d.parquet", dir, base, nextOutputNanos())
+}
+
+// lastOutputNanos makes the nanosecond suffix above strictly increasing within
+// a process.
+//
+// The suffix is the only thing separating two output paths in the same
+// partition directory, and RewriteTable emits them back to back — one per
+// memory-bounded group — where compaction emitted at most one per pass. A
+// repeated value is not a name clash the store reports: the second Put
+// OVERWRITES the first, and the first group's manifest entry then points at
+// the second group's bytes, so those rows are gone with no error anywhere.
+// Wall-clock resolution is not a property to bet that on.
+var lastOutputNanos atomic.Int64
+
+func nextOutputNanos() int64 {
+	for {
+		prev := lastOutputNanos.Load()
+		now := time.Now().UnixNano()
+		if now <= prev {
+			now = prev + 1
+		}
+		if lastOutputNanos.CompareAndSwap(prev, now) {
+			return now
+		}
+	}
 }
 
 // Config controls compaction trigger thresholds and limits.
@@ -149,7 +175,8 @@ func (c *Compactor) releaseGCLock(filePath string) {
 type Result struct {
 	Table string
 	// PartitionsCompacted counts successful MERGES, not distinct partitions:
-	// a partition compacted over three passes counts three times.
+	// a partition compacted over three passes, or rewritten as three
+	// memory-bounded groups, counts three times.
 	PartitionsCompacted int
 	FilesRemoved        int
 	FilesCreated        int
@@ -176,8 +203,8 @@ type PartitionFailure struct {
 	Err       error
 }
 
-// CompactionFailed is the aggregate error CompactTable returns when at least
-// one partition's merge failed.
+// CompactionFailed is the aggregate error CompactTable and RewriteTable return
+// when at least one partition's merge failed.
 //
 // One error for the whole table, not the first failure, because a merge
 // failure is scoped to the partition whose files could not be read: #435
@@ -328,6 +355,93 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 				"compacting table %q: pass %d merged %d files into %d and so reduced nothing — "+
 					"a pass that does not shrink the partition would repeat forever",
 				tableName, pass, removed, created)
+		}
+	}
+
+	if len(result.Failed) > 0 {
+		return result, &CompactionFailed{
+			Table:     tableName,
+			Failures:  result.Failed,
+			Compacted: result.PartitionsCompacted,
+		}
+	}
+	return result, nil
+}
+
+// RewriteTable rewrites EVERY file of every partition of a table exactly once,
+// through the current writer, and replaces the originals.
+//
+// This is the format-migration mode, and it is deliberately not compaction.
+// shouldCompact's floors — two files, MinFiles, an average size under
+// MaxFileSizeBytes — all answer "is this partition worth merging", which is
+// the right question for a background sweep and the wrong one for a
+// migration: a partition holding ONE 512 MB file is exactly the file that has
+// to be rewritten, and it is the one shape compaction will never touch. So a
+// rewrite is exempt from the floors and admits a 1 -> 1 pass.
+//
+// It terminates structurally rather than by CompactTable's progress rule. The
+// file list is read from the manifest ONCE, split into memory-bounded groups,
+// and each group is written once; nothing re-reads the manifest, so no output
+// of this call can become an input to it. "1 removed, 1 created" is progress
+// here, which is precisely why the progress rule cannot apply.
+//
+// Its use is ADR-0018's DECIMAL(p > 18) migration: files written before #429
+// annotate a wide DECIMAL over an INT64 leaf, and no reader outside wadjet can
+// open them. One rewrite through the current writer produces a FLBA(16) leaf
+// with byte-identical unscaled values. Every other type round-trips unchanged
+// (that is the compaction gate's property), so running it over a table that
+// needs nothing costs the rewrite and changes no value.
+//
+// Like CompactTable, a partition whose merge fails does not stop the others;
+// the aggregate is *CompactionFailed.
+func (c *Compactor) RewriteTable(ctx context.Context, tableName string) (*Result, error) {
+	tableMeta, err := c.catalog.GetTable(ctx, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("getting table metadata: %w", err)
+	}
+	manifest, err := c.catalog.GetManifest(ctx, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("getting manifest: %w", err)
+	}
+
+	result := &Result{Table: tableName}
+	deleteSet := buildDeleteSet(manifest.DeleteMarkers)
+
+	for _, part := range manifest.Partitions {
+		if len(part.Files) == 0 {
+			continue
+		}
+		// The group size bounds peak heap exactly as it does for compaction.
+		// Unlike compaction, every group is rewritten, so one sweep of this
+		// loop covers the partition instead of successive passes.
+		groupSize := max(c.adaptivePassSize(part), 1)
+
+		rewroteAny := false
+		for start := 0; start < len(part.Files); start += groupSize {
+			if ctx.Err() != nil {
+				return result, ctx.Err()
+			}
+			group := part.Files[start:min(start+groupSize, len(part.Files))]
+
+			err := c.mergeGroup(ctx, tableName, tableMeta.Schema, part, group, deleteSet, result)
+			var me *mergeError
+			if errors.As(err, &me) {
+				c.logger.Error("rewrite failed for partition",
+					"table", tableName, "partition", part.Path, "error", me.err)
+				result.Failed = append(result.Failed, PartitionFailure{Partition: part.Path, Err: me.err})
+				// The groups after this one in the same partition are left as
+				// they are: a partial partition is still readable, and a
+				// re-run picks up what is still in the old format.
+				break
+			}
+			if err != nil {
+				return result, err
+			}
+			rewroteAny = true
+		}
+		if rewroteAny {
+			c.logger.Info("rewrote partition",
+				"table", tableName, "partition", part.Path, "files", len(part.Files))
 		}
 	}
 

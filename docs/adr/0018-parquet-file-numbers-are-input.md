@@ -256,11 +256,34 @@ Apache implementation refuses to OPEN a file that annotates a wider one:
 (pyarrow 23.0.1, on a file written by v0.18.0.) So every wadjet table carrying
 a `DECIMAL(p > 18)` column is readable only by wadjet until it is rewritten.
 
-**The remedy is one pass of the new code.** The unscaled values in the old
-files are intact and §4 makes read → write the identity, so a single rewrite
-produces a correct FLBA(16) file with byte-identical unscaled values, which
-pyarrow opens. A compaction pass over the table is the whole migration.
-`DECIMAL(p <= 18)` files are byte-identical before and after and need nothing.
+**The remedy is one rewrite pass of the new code, and it has a command.** The
+unscaled values in the old files are intact and §4 makes read → write the
+identity, so a single rewrite produces a correct FLBA(16) file with
+byte-identical unscaled values, which pyarrow opens. `DECIMAL(p <= 18)` files
+are byte-identical before and after and need nothing, so the pass is safe to
+run over a whole table rather than a hand-picked set of partitions:
+
+    wadjet compact --rewrite <table>
+
+It is `--rewrite` and not ordinary compaction, deliberately. Compaction's
+trigger asks whether a partition is worth MERGING — two files or more, at
+least `MinFiles` of them, an average size under `MaxFileSizeBytes` — and a
+healthy table answers no to all three. The partitions holding one large
+well-compacted file, which is most of a table that has been running a while,
+are exactly the ones a compaction sweep will never touch. So an earlier draft
+of this note, which said a compaction pass over the table was the whole
+migration, was true of the DATA and false of the CODE: the files that most
+needed rewriting were the ones no pass would have been triggered on.
+
+`Compactor.RewriteTable` (`internal/storage/compaction/compactor.go`) is that
+mode: exempt from the trigger's floors, admitting a 1 → 1 rewrite, and
+terminating structurally rather than by compaction's per-pass progress rule —
+it reads the partition's file list from the manifest ONCE, splits it into
+memory-bounded groups, and writes each group once, so no output of the call
+can become an input to it. "1 removed, 1 created" is progress here, which is
+precisely why the progress rule cannot apply. Failures are per-partition: a
+partition that cannot be read is reported and skipped, and the rest of the
+table is still migrated.
 
 **The reverse direction is NOT safe: upgrade readers before writers.** A
 v0.18.0 reader opens the new FLBA(16) files without error and silently

@@ -217,6 +217,7 @@ func main() {
 	rootCmd.AddCommand(tablesCmd())
 	rootCmd.AddCommand(createTableCmd())
 	rootCmd.AddCommand(dropTableCmd())
+	rootCmd.AddCommand(compactCmd())
 	rootCmd.AddCommand(shellCmd())
 	rootCmd.AddCommand(clustersCmd())
 	rootCmd.AddCommand(mcpCmd())
@@ -658,6 +659,112 @@ func dropTableCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// compactCmd is the maintenance surface for the storage layer's two
+// read-and-rewrite modes.
+//
+// The default is an ordinary compaction pass: the background sweep's own
+// thresholds, run once, on demand.
+//
+// --rewrite is the FORMAT MIGRATION mode, and it is the reason this command
+// exists. Compaction's thresholds ask "is this partition worth merging" —
+// two files or more, at least --min-files of them, average size under
+// --max-file-size — and a table that is already healthy answers no to all
+// three. So no compaction pass will ever touch a partition holding one large
+// file, which is exactly the file that has to be rewritten when the FORMAT
+// changed underneath it. --rewrite rewrites every file of every partition
+// once, floors and all.
+//
+// The migration it was built for is ADR-0018's DECIMAL(p > 18): files written
+// before #429 annotate a wide DECIMAL over an INT64 leaf, which no reader
+// outside wadjet will open. One rewrite produces a FLBA(16) leaf with
+// byte-identical unscaled values. Upgrade every reader in the cluster BEFORE
+// running it — an old reader silently truncates a wide DECIMAL from a new
+// file to its low 64 bits (#437).
+func compactCmd() *cobra.Command {
+	var rewrite bool
+	var minFiles int
+	var maxFileSize int64
+
+	cmd := &cobra.Command{
+		Use:   "compact [table]",
+		Short: "Compact a table's small files, or rewrite every file through the current writer",
+		Long: "Compact a table. With --rewrite, every file of every partition is rewritten " +
+			"once through the current writer regardless of the compaction thresholds — the " +
+			"format-migration mode (see docs/adr/0018-parquet-file-numbers-are-input.md).",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			table := args[0]
+
+			natsAddr := natsURL
+			if natsAddr == "" {
+				natsAddr = fmt.Sprintf("nats://127.0.0.1:%d", natsPort)
+			}
+			nc, err := distributed.Connect(natsAddr, nil)
+			if err != nil {
+				return fmt.Errorf("connecting to NATS at %s: %w", natsAddr, err)
+			}
+			defer nc.Close()
+
+			js, err := distributed.NewJetStream(nc)
+			if err != nil {
+				return fmt.Errorf("creating JetStream: %w", err)
+			}
+			kv, err := catalog.NewNATSKV(js)
+			if err != nil {
+				return fmt.Errorf("creating catalog KV: %w", err)
+			}
+
+			store, err := newStore()
+			if err != nil {
+				return fmt.Errorf("opening object store: %w", err)
+			}
+
+			cat := catalog.NewWithCluster(kv, store, bucket, clusterID)
+			if _, err := cat.GetTable(ctx, table); err != nil {
+				return err
+			}
+
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+			cfg := compaction.DefaultConfig()
+			if minFiles > 0 {
+				cfg.MinFiles = minFiles
+			}
+			if maxFileSize > 0 {
+				cfg.MaxFileSizeBytes = maxFileSize
+			}
+			c := compaction.New(cat, logger, cfg)
+
+			var result *compaction.Result
+			if rewrite {
+				result, err = c.RewriteTable(ctx, table)
+			} else {
+				result, err = c.CompactTable(ctx, table)
+			}
+			if result != nil {
+				fmt.Printf("table %s: %d merges, %d files removed, %d created, %d rows, %d -> %d bytes\n",
+					result.Table, result.PartitionsCompacted, result.FilesRemoved,
+					result.FilesCreated, result.RowsMerged, result.BytesBefore, result.BytesAfter)
+				if result.PassLimitReached {
+					fmt.Println("note: the pass limit was reached with work outstanding — run again")
+				}
+				for _, f := range result.Failed {
+					fmt.Fprintf(os.Stderr, "partition %s FAILED: %v\n", f.Partition, f.Err)
+				}
+			}
+			return err
+		},
+	}
+
+	cmd.Flags().BoolVar(&rewrite, "rewrite", false,
+		"rewrite EVERY file of every partition once, ignoring the compaction thresholds (format migration)")
+	cmd.Flags().IntVar(&minFiles, "min-files", 0,
+		"override the minimum file count that triggers compaction (ignored with --rewrite)")
+	cmd.Flags().Int64Var(&maxFileSize, "max-file-size", 0,
+		"override the average file size below which compaction triggers, in bytes (ignored with --rewrite)")
+	return cmd
 }
 
 func clustersCmd() *cobra.Command {
