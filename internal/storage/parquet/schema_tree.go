@@ -1,23 +1,25 @@
 package parquet
 
+import "strings"
+
 // SchemaNode is a node in the reconstructed Parquet schema tree.
 // Built from the flat SchemaElement list in the file footer.
 // Group nodes have children; leaf nodes have a physical type.
 type SchemaNode struct {
 	Name           string
-	Type           *PhysicalType       // nil for group nodes
-	TypeLength     int32               // for FIXED_LEN_BYTE_ARRAY
+	Type           *PhysicalType // nil for group nodes
+	TypeLength     int32         // for FIXED_LEN_BYTE_ARRAY
 	RepetitionType FieldRepetitionType
 	LogicalType    *LogicalType
 	ConvertedType  *ConvertedType
-	Precision      int32               // for DECIMAL
-	Scale          int32               // for DECIMAL
+	Precision      int32 // for DECIMAL
+	Scale          int32 // for DECIMAL
 	Children       []*SchemaNode
 	Parent         *SchemaNode
-	LeafIndex      int             // index among leaf columns (-1 for groups)
-	Path           []string        // full path from root
-	MaxDefLevel    int             // computed max definition level
-	MaxRepLevel    int             // computed max repetition level
+	LeafIndex      int      // index among leaf columns (-1 for groups)
+	Path           []string // full path from root
+	MaxDefLevel    int      // computed max definition level
+	MaxRepLevel    int      // computed max repetition level
 }
 
 // IsLeaf returns true if this node is a leaf (primitive type).
@@ -135,19 +137,53 @@ func computeLevels(node *SchemaNode, defLevel, repLevel int) {
 // A name that is not a top-level leaf still resolves to a deeper leaf of
 // that name, which is what a caller naming a nested leaf directly relies on;
 // the top-level one only ever WINS a collision.
-func TopLevelLeafIndex(leaves []*SchemaNode) map[string]int {
+//
+// Names are matched CASE-INSENSITIVELY: see FoldName.
+func TopLevelLeafIndex(leaves []*SchemaNode) LeafIndex {
 	byName := make(map[string]int, len(leaves))
 	for i, l := range leaves {
 		if l == nil {
 			continue
 		}
-		if j, dup := byName[l.Name]; dup && len(leaves[j].Path) == 1 {
+		k := FoldName(l.Name)
+		if j, dup := byName[k]; dup && len(leaves[j].Path) == 1 {
 			continue // a top-level leaf already claims this name
 		}
-		byName[l.Name] = i
+		byName[k] = i
 	}
-	return byName
+	return LeafIndex{byName: byName}
 }
+
+// LeafIndex is a resolved column-name-to-leaf mapping. It is a struct rather
+// than a bare map so that a caller cannot index it with an unfolded name: the
+// folding IS the lookup rule, and a site that forgets it reads the column as
+// all-NULL rather than failing (#441).
+type LeafIndex struct{ byName map[string]int }
+
+// Lookup resolves a column name to its leaf index under the identity rule.
+func (x LeafIndex) Lookup(name string) (int, bool) {
+	i, ok := x.byName[FoldName(name)]
+	return i, ok
+}
+
+// Len reports how many distinct names the index resolves.
+func (x LeafIndex) Len() int { return len(x.byName) }
+
+// FoldName is the ONE identity rule for a column name in this package: names
+// are compared case-insensitively, folded to lower case.
+//
+// It follows the SQL layer. PostgreSQL folds an unquoted identifier to lower
+// case and wadjet's parser does the same, so the catalog's spelling of a
+// column is lower case whatever the file's writer chose — and pyarrow,
+// parquet-mr and Spark all preserve the author's capitalisation. A file column
+// `Name` under a catalog column `name` is the SAME column.
+//
+// It used to depend on which helper looked. retypeFromCatalog folded and
+// filterSchemaColumns did not, so a case-mismatched column was dropped from
+// the projection before the retype could ever see it: absent from every row
+// map, written back as NULL by the writer, and through compaction that is the
+// column destroyed with its inputs deleted (#441).
+func FoldName(s string) string { return strings.ToLower(s) }
 
 // FindLeafByName finds a leaf node by column name (last path component).
 func FindLeafByName(root *SchemaNode, name string) *SchemaNode {

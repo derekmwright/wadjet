@@ -373,7 +373,7 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 	leafByName := pqt.TopLevelLeafIndex(fr.Leaves())
 	it.estLeaves = make([]int, len(readSchema))
 	for i, col := range readSchema {
-		if li, ok := leafByName[col.Name]; ok {
+		if li, ok := leafByName.Lookup(col.Name); ok {
 			it.estLeaves[i] = li
 		} else {
 			it.estLeaves[i] = -1

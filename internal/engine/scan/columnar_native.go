@@ -231,12 +231,12 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 			continue
 		}
 
-		colIdx, ok := leafByName[col.Name]
+		colIdx, ok := leafByName.Lookup(col.Name)
 		if !ok {
 			// Try aliases.
 			found := false
 			for _, alias := range columnAliases[col.Name] {
-				if idx, ok := leafByName[alias]; ok {
+				if idx, ok := leafByName.Lookup(alias); ok {
 					colIdx = idx
 					found = true
 					break

@@ -6,7 +6,6 @@ import (
 	"io"
 	"math"
 	"math/big"
-	"strings"
 )
 
 // RowGroupStats contains min/max statistics for a row group.
@@ -180,7 +179,7 @@ func (r *Reader) readRowsFlat(readCols []Column, from, to int) ([]map[string]any
 
 		colValues := make([][]any, len(readCols))
 		for i, col := range readCols {
-			leafIdx, ok := leafByName[col.Name]
+			leafIdx, ok := leafByName.Lookup(col.Name)
 			if !ok {
 				colValues[i] = make([]any, numRows)
 				continue
@@ -227,7 +226,7 @@ func nestedReadPlans(root *SchemaNode, readCols []Column, numLeaves int) ([]nest
 	nodeByName := make(map[string]*SchemaNode)
 	if root != nil {
 		for _, c := range root.Children {
-			nodeByName[c.Name] = c
+			nodeByName[FoldName(c.Name)] = c
 		}
 	}
 	var plans []nestedPlan
@@ -236,7 +235,7 @@ func nestedReadPlans(root *SchemaNode, readCols []Column, numLeaves int) ([]nest
 		if !isNestedType(col.Type) {
 			continue
 		}
-		node := buildAssemblyPlan(nodeByName[col.Name])
+		node := buildAssemblyPlan(nodeByName[FoldName(col.Name)])
 		if node == nil {
 			continue
 		}
@@ -297,7 +296,7 @@ func (r *Reader) readRowsNested(readCols []Column, from, to int) ([]map[string]a
 			if isNestedType(col.Type) {
 				continue
 			}
-			leafIdx, ok := leafByName[col.Name]
+			leafIdx, ok := leafByName.Lookup(col.Name)
 			if !ok {
 				continue
 			}
@@ -709,7 +708,7 @@ func retypeFromCatalog(readCols, catalog []Column, leaves []*SchemaNode) ([]Colu
 	}
 	byName := make(map[string]Column, len(catalog))
 	for _, c := range catalog {
-		byName[strings.ToLower(c.Name)] = c
+		byName[FoldName(c.Name)] = c
 	}
 	// Top-level first, for the same reason TopLevelLeafIndex exists: the
 	// catalog names a TOP-LEVEL column, and a struct field of the same name
@@ -720,7 +719,7 @@ func retypeFromCatalog(readCols, catalog []Column, leaves []*SchemaNode) ([]Colu
 		if l == nil || !l.IsLeaf() {
 			continue
 		}
-		k := strings.ToLower(l.Name)
+		k := FoldName(l.Name)
 		if prev, dup := leafByName[k]; dup && len(prev.Path) == 1 {
 			continue
 		}
@@ -728,9 +727,27 @@ func retypeFromCatalog(readCols, catalog []Column, leaves []*SchemaNode) ([]Colu
 	}
 	out := make([]Column, len(readCols))
 	copy(out, readCols)
+	// Two file columns that fold to the same catalog column are an ambiguity,
+	// not a projection: whichever wrote the row map last would decide the
+	// answer. Refuse by name instead.
+	claimed := make(map[string]string, len(out))
 	for i, c := range out {
-		want, ok := byName[strings.ToLower(c.Name)]
-		if !ok || want.Type == c.Type {
+		want, ok := byName[FoldName(c.Name)]
+		if !ok {
+			continue
+		}
+		if prev, dup := claimed[FoldName(c.Name)]; dup {
+			return nil, fmt.Errorf(
+				"columns %q and %q both answer to schema column %q: the file names "+
+					"one column twice under this schema's identity rule",
+				prev, c.Name, want.Name)
+		}
+		claimed[FoldName(c.Name)] = c.Name
+		// The catalog's SPELLING is the answer's, so a file written by a
+		// writer that preserved the author's capitalisation is keyed by the
+		// name the caller asked for rather than by the one on disk.
+		out[i].Name = want.Name
+		if want.Type == c.Type {
 			continue
 		}
 		if isNestedType(c.Type) || isNestedType(want.Type) {
@@ -743,7 +760,7 @@ func retypeFromCatalog(readCols, catalog []Column, leaves []*SchemaNode) ([]Colu
 		fileType := c.Type
 		filePhys := wadjetTypeToPhysical(c.Type)
 		var typeLen int
-		if leaf := leafByName[strings.ToLower(c.Name)]; leaf != nil {
+		if leaf := leafByName[FoldName(c.Name)]; leaf != nil {
 			fileType = TypeIDFromSchemaNode(leaf)
 			if leaf.Type != nil {
 				filePhys = *leaf.Type
@@ -821,14 +838,18 @@ func checkRetypeAdmissible(name string, fileType TypeID, filePhys PhysicalType, 
 	return nil
 }
 
+// filterSchemaColumns narrows the FILE's schema to the projection, under the
+// package's one identity rule (FoldName). It used to key on the exact name
+// while retypeFromCatalog folded, which dropped a case-mismatched column
+// before the retype could see it (#441).
 func filterSchemaColumns(cols []Column, selected []string) []Column {
 	need := make(map[string]bool, len(selected))
 	for _, s := range selected {
-		need[s] = true
+		need[FoldName(s)] = true
 	}
 	var result []Column
 	for _, c := range cols {
-		if need[c.Name] {
+		if need[FoldName(c.Name)] {
 			result = append(result, c)
 		}
 	}
