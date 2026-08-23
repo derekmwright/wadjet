@@ -138,6 +138,24 @@ func (d *emitDrain) produce(ctx context.Context, unit *HashAggregate, ownState b
 	if !ownState {
 		defer unit.Close()
 	}
+	// A FatalEvalPanic raised by this unit's emission happens on THIS
+	// goroutine, so Pipeline.Run's recover (pipeline.go:82) cannot see it and
+	// the panic takes the PROCESS down — in a server, every connected
+	// client's query, not just the offending one (#400). Convert it to the
+	// drain's error, exactly as runParallel does for its own workers, so a
+	// value the output vector cannot hold (#392) becomes a query error.
+	//
+	// Registered last, so it runs FIRST on the way out: the unit is still
+	// closed and wg.Done still fires.
+	//
+	// The error is wrapped so d.err keeps a single concrete type —
+	// atomic.Value panics on an inconsistently typed store.
+	defer func() {
+		if r := recover(); r != nil {
+			d.err.CompareAndSwap(nil,
+				fmt.Errorf("draining aggregate partition: %w", RecoverFatalEval(r)))
+		}
+	}()
 	for {
 		b, err := unit.nextOwn(ctx)
 		if err != nil {

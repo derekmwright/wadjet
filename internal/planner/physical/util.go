@@ -955,6 +955,12 @@ func canRangePruneRowGroup(ranges []exec.DynamicRange, stats parquet.RowGroupSta
 // delaying batch delivery.
 func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 	defer inner.wg.Done()
+	// Same goroutine-ownership problem as scanWorker's — see
+	// recoverWorkerPanic (#400). This path decodes columnar row groups rather
+	// than falling back to rows, so it is not the one #393 reaches, but the
+	// contract is identical and leaving it unguarded would just move the
+	// process killer.
+	defer inner.recoverWorkerPanic("scan row-group worker")
 
 	var prefetched *prefetchResult
 

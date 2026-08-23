@@ -75,11 +75,22 @@ const tmCrashSettle = 5 * time.Millisecond
 // compares nothing — this gate is the one that keeps them honest.
 //
 // #393 (MAP scan fallback) and #392 (minMaxDeclaredType's FLOAT64 fallthrough)
-// are both fixed — see the closing commits for the mechanism. The map is
-// empty rather than removed: the mechanism (crash-pin the entries a fix
-// hasn't reached yet, delete the pin the moment TestTypeMatrixNoProcessKillers
-// says the entry no longer kills the process) stays in place for the next
-// type-coverage defect that takes the process down.
+// are both fixed at the root — see the closing commits for the mechanism.
+// Independently, #400 wrapped the two goroutines that had no recover — the
+// parallel aggregate emitter (internal/engine/exec/aggregate_parallel_emit.go)
+// and the scan workers (internal/planner/physical/plan.go, util.go) — so a
+// FatalEvalPanic raised there is delivered as a query error the way
+// Pipeline.Run has always delivered its own, rather than taking the process
+// down. That recover is a safety net for the NEXT type-coverage defect that
+// reaches one of those goroutines, not the reason #392/#393 are gone from
+// this map: both were verified fixed at the value level (dbf6031) before
+// their pins were deleted.
+//
+// The map is empty rather than removed: the mechanism (crash-pin the entries
+// a fix hasn't reached yet, delete the pin the moment
+// TestTypeMatrixNoProcessKillers says the entry no longer kills the process)
+// stays in place for the next type-coverage defect that takes the process
+// down.
 var tmCrashPins = map[string]typematrix.Pin{}
 
 // TestTypeMatrixNoProcessKillers drives child processes over the corpus and

@@ -11072,9 +11072,38 @@ func (s *scannerExecSource) RowsScanned() int64 {
 	return 0
 }
 
+// recoverWorkerPanic converts a FatalEvalPanic raised on a scan goroutine into
+// the scan's error instead of letting it take the process down.
+//
+// These goroutines are not the caller's: Pipeline.Run recovers on ITS
+// goroutine (internal/engine/exec/pipeline.go:82), so a *batch.TypeMismatchError
+// raised by Vector.SetValue — whose whole design (#361) is "a query error,
+// never the server" — killed the process here, and with it every other
+// client's query (#400, and #393 as the query that reaches it). Anything that
+// is NOT a FatalEvalPanic is re-raised untouched, which is the same policy the
+// pipeline applies: a genuine bug still crashes.
+//
+// errCh is buffered, and next() selects on it, so a non-blocking send is
+// enough; the cancel stops the sibling workers.
+func (inner *scanSourceInner) recoverWorkerPanic(what string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	err := exec.RecoverFatalEval(r)
+	select {
+	case inner.errCh <- fmt.Errorf("%s: %w", what, err):
+	default:
+	}
+	if inner.cancel != nil {
+		inner.cancel()
+	}
+}
+
 // scanWorker reads files in parallel, writing decoded batches to batchCh.
 func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 	defer inner.wg.Done()
+	defer inner.recoverWorkerPanic("scan worker")
 
 	for {
 		idx := int(atomic.AddInt64(&inner.idx, 1) - 1)
