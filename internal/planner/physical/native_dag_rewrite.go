@@ -280,6 +280,23 @@ func stageDependents(stages []Stage) map[string]bool {
 		for _, prod := range s.ScalarDependencies {
 			mark(prod)
 		}
+		// ConsumeDynamicFilters[].SourceStageID is currently unreachable
+		// through the walks above: applyDynamicFilters mirrors this same
+		// ID into s.Dependencies when it wires the edge (dynamic_filter.go
+		// "append the build-scan stage ID to its Dependencies"), and the
+		// build-scan stage it names is independently marked anyway via the
+		// hash_join stage's own LeftDepStage/RightDepStage — a join cannot
+		// run without both sides regardless of any dynamic filter. But
+		// applyAttachOnArrival's filterAttachedStatDeps (dynamic_filter_attach.go)
+		// strips that mirrored ID back OUT of Dependencies for
+		// attach-on-arrival edges (the non-blocking mode), so a future
+		// shape where a scan's ONLY other reference is its dynamic-filter
+		// consume would silently read as dependent-free — a false "root" —
+		// without this. Marked here so stageDependents cannot regress on
+		// that shape even though no known plan exercises it today.
+		for _, cf := range s.ConsumeDynamicFilters {
+			mark(cf.SourceStageID)
+		}
 	}
 	return dep
 }
@@ -288,9 +305,9 @@ func stageDependents(stages []Stage) map[string]bool {
 // stages whose job is already done by their upstream Singleton sort.
 // The common TPC-H shape after collapseMergeTreesForNativeDAG is:
 //
-//   sort-N        Singleton   SortKeys=K   deps=[...]
-//   merge_sort-M  Singleton   deps=[sort-N]
-//   gather        Singleton   deps=[merge_sort-M]
+//	sort-N        Singleton   SortKeys=K   deps=[...]
+//	merge_sort-M  Singleton   deps=[sort-N]
+//	gather        Singleton   deps=[merge_sort-M]
 //
 // The merge_sort-M stage is a no-op: it reads one already-sorted input
 // and re-emits it. Under native-DAG this becomes a full worker round-
@@ -379,14 +396,16 @@ func collapseRedundantFinalMergeSort(stages []Stage) []Stage {
 // that re-scans the same upstream data.
 //
 // Shape produced by emitMergeAggregateTree (upstream > 16):
-//   intermediate-0   final_aggregate  dep=[leafIDs...] MergeGroup=0
-//   intermediate-1   final_aggregate  dep=[leafIDs...] MergeGroup=1
-//   ...
-//   intermediate-N   final_aggregate  dep=[leafIDs...] MergeGroup=N-1
-//   final            final_aggregate  dep=[intermediate-0, ..., intermediate-N]
+//
+//	intermediate-0   final_aggregate  dep=[leafIDs...] MergeGroup=0
+//	intermediate-1   final_aggregate  dep=[leafIDs...] MergeGroup=1
+//	...
+//	intermediate-N   final_aggregate  dep=[leafIDs...] MergeGroup=N-1
+//	final            final_aggregate  dep=[intermediate-0, ..., intermediate-N]
 //
 // Rewrite to:
-//   final            final_aggregate  dep=[leafIDs...]    (no MergeGroup)
+//
+//	final            final_aggregate  dep=[leafIDs...]    (no MergeGroup)
 //
 // The same pattern applies to merge_sort trees. Rewriting is safe because:
 //   - Final stages already compute the full aggregate/sort from all upstream
@@ -397,7 +416,6 @@ func collapseRedundantFinalMergeSort(stages []Stage) []Stage {
 //     today (they consume all upstream inputs and emit merged output);
 //     wiring them behind a N-partition dispatch is future work, but even
 //     single-task is faster than the 83-stage tree.
-//
 func collapseMergeTreesForNativeDAG(stages []Stage) []Stage {
 	// Pre-index stages by ID.
 	idIndex := make(map[string]int, len(stages))
