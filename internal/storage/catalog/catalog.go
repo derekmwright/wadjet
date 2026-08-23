@@ -241,6 +241,9 @@ func (c *Catalog) ListTables(_ context.Context) ([]string, error) {
 
 // CreateTable creates a new table with the given schema and partition keys.
 func (c *Catalog) CreateTable(_ context.Context, name string, schema parquet.Schema, partitionKeys []string) error {
+	if err := checkDistinctColumnNames(schema); err != nil {
+		return fmt.Errorf("creating table %q: %w", name, err)
+	}
 	for _, pk := range partitionKeys {
 		if !schema.HasColumn(pk) {
 			return fmt.Errorf("partition key %q not found in schema", pk)
@@ -284,6 +287,31 @@ func (c *Catalog) CreateTable(_ context.Context, name string, schema parquet.Sch
 	meta.Tables = append(meta.Tables, name)
 	meta.UpdatedAt = now
 	return c.putJSON(c.key("meta"), meta)
+}
+
+// checkDistinctColumnNames refuses a schema whose column names collide under
+// the parquet package's identity rule.
+//
+// CreateTable validated the partition keys and nothing else, and the embedded
+// API reaches it directly, so a schema of [V INT32, v INT64] was accepted and
+// stored. Nothing downstream can then answer "what type is v": the reader
+// maps a file column to a catalog column by FoldName, so which of the two
+// entries decided the answer came down to the order they were listed in. The
+// refusal belongs here, where the schema is still the caller's to fix, rather
+// than at the read of a table that should never have existed.
+func checkDistinctColumnNames(schema parquet.Schema) error {
+	seen := make(map[string]string, len(schema.Columns))
+	for _, col := range schema.Columns {
+		k := parquet.FoldName(col.Name)
+		if prev, dup := seen[k]; dup {
+			return fmt.Errorf(
+				"schema columns %q and %q both answer to the name %q: the schema names "+
+					"one column twice under this package's identity rule",
+				prev, col.Name, k)
+		}
+		seen[k] = col.Name
+	}
+	return nil
 }
 
 // ErrTableNotFound marks a GetTable miss: the catalog was reachable and the

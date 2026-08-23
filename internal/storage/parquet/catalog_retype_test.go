@@ -580,3 +580,75 @@ func TestRetypeChecksByteArrayWidthPerValue(t *testing.T) {
 		t.Fatalf("a 16-byte value read as a UUID: %v", err)
 	}
 }
+
+// TestRetypeRefusesFoldCollidingNames covers BOTH sides of the name mapping.
+//
+// The FILE side was guarded: two file columns folding to one catalog column
+// is an ambiguity whichever wrote the row map last would silently resolve.
+// The CATALOG side was not, and it has the same shape and a worse reach — a
+// schema of [V INT32, v INT64] was accepted, the second entry overwrote the
+// first in the lookup map, and the TYPE every matching file column was read
+// as came down to the order the columns happened to be listed in. Both are
+// refused now, in the same words.
+func TestRetypeRefusesFoldCollidingNames(t *testing.T) {
+	cases := []struct {
+		name    string
+		file    []Column
+		catalog []Column
+		// the two spellings the message must name
+		wantA, wantB string
+	}{
+		{
+			name:    "two_file_columns",
+			file:    []Column{{Name: "V", Type: TypeInt64}, {Name: "v", Type: TypeInt64}},
+			catalog: []Column{{Name: "v", Type: TypeInt64}},
+			wantA:   "V", wantB: "v",
+		},
+		{
+			name:    "two_catalog_columns",
+			file:    []Column{{Name: "v", Type: TypeInt64}},
+			catalog: []Column{{Name: "V", Type: TypeInt32}, {Name: "v", Type: TypeInt64}},
+			wantA:   "V", wantB: "v",
+		},
+		{
+			// The collision is not only case: FoldName is the rule, and any
+			// two spellings it maps together are one column.
+			name:    "catalog_mixed_case",
+			file:    []Column{{Name: "Amount", Type: TypeInt64}},
+			catalog: []Column{{Name: "AMOUNT", Type: TypeInt32}, {Name: "amount", Type: TypeInt64}},
+			wantA:   "AMOUNT", wantB: "amount",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := retypeFromCatalog(tc.file, tc.catalog, nil)
+			if err == nil {
+				t.Fatal("retypeFromCatalog accepted a name that resolves to two columns — " +
+					"the surviving entry, and so the answer's type, is decided by list order")
+			}
+			for _, want := range []string{tc.wantA, tc.wantB, "twice"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestRetypeAcceptsCaseMismatchedSingleColumn is the other half: folding is
+// the identity rule (#441), so ONE file column under a differently-cased
+// catalog column must still resolve. The refusal above must not have made
+// case-insensitive matching itself an error.
+func TestRetypeAcceptsCaseMismatchedSingleColumn(t *testing.T) {
+	out, err := retypeFromCatalog(
+		[]Column{{Name: "Amount", Type: TypeInt64}},
+		[]Column{{Name: "amount", Type: TypeDuration}},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("a single case-mismatched column was refused: %v", err)
+	}
+	if out[0].Name != "amount" || out[0].Type != TypeDuration {
+		t.Fatalf("column = %+v, want the catalog's spelling and type", out[0])
+	}
+}

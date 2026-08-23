@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -302,6 +303,65 @@ func TestCreateTableDuplicate(t *testing.T) {
 	err := cat.CreateTable(ctx, "dup", schema, nil)
 	if err == nil {
 		t.Fatal("expected error when creating duplicate table, got nil")
+	}
+}
+
+// TestCreateTableRefusesFoldCollidingColumns: CreateTable validated the
+// partition keys and nothing else, and the embedded API reaches it directly,
+// so a schema of [V INT32, v INT64] was accepted and stored. Nothing
+// downstream can then answer "what type is v" — the parquet reader maps a file
+// column to a catalog column by FoldName, so which of the two entries decided
+// the answer came down to the order they were listed in.
+func TestCreateTableRefusesFoldCollidingColumns(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		columns []parquet.Column
+		wantErr bool
+	}{
+		{"case_only", []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "V", Type: parquet.TypeInt32},
+			{Name: "v", Type: parquet.TypeInt64},
+		}, true},
+		{"exact_duplicate", []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "id", Type: parquet.TypeString},
+		}, true},
+		{"mixed_case", []parquet.Column{
+			{Name: "Amount", Type: parquet.TypeInt64},
+			{Name: "AMOUNT", Type: parquet.TypeInt64},
+		}, true},
+		// Distinct names that merely SHARE a prefix are fine, and so is a
+		// single column whose spelling is not lower case: folding is the
+		// identity rule, not a naming policy.
+		{"distinct", []parquet.Column{
+			{Name: "Amount", Type: parquet.TypeInt64},
+			{Name: "amount_usd", Type: parquet.TypeInt64},
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cat, ctx := setupCatalog(t)
+			err := cat.CreateTable(ctx, "t_"+tc.name, parquet.Schema{Columns: tc.columns}, nil)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("CreateTable stored a schema that names one column twice — " +
+						"the column's type is then decided by list order")
+				}
+				for _, want := range []string{"t_" + tc.name, "twice"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not mention %q", err, want)
+					}
+				}
+				// And nothing was stored.
+				if _, err := cat.GetTable(ctx, "t_"+tc.name); err == nil {
+					t.Error("the refused table exists in the catalog")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CreateTable refused a schema with distinct names: %v", err)
+			}
+		})
 	}
 }
 

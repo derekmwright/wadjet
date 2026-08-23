@@ -725,9 +725,22 @@ func retypeFromCatalog(readCols, catalog []Column, leaves []*SchemaNode) ([]Colu
 	if len(catalog) == 0 || len(readCols) == 0 {
 		return readCols, nil
 	}
+	// The same ambiguity as the `claimed` check below, on the other side of
+	// the mapping — and it was unguarded. Two CATALOG columns that fold to
+	// one name simply overwrote each other here, so a schema declaring
+	// [V INT32, v INT64] was accepted and the surviving entry, hence the
+	// TYPE every matching file column is read as, was decided by the order
+	// the columns happened to be listed in. Refuse it in the same words.
 	byName := make(map[string]Column, len(catalog))
 	for _, c := range catalog {
-		byName[FoldName(c.Name)] = c
+		k := FoldName(c.Name)
+		if prev, dup := byName[k]; dup {
+			return nil, fmt.Errorf(
+				"schema columns %q and %q both answer to the name %q: the schema names "+
+					"one column twice under this package's identity rule",
+				prev.Name, c.Name, k)
+		}
+		byName[k] = c
 	}
 	// Top-level first, for the same reason TopLevelLeafIndex exists: the
 	// catalog names a TOP-LEVEL column, and a struct field of the same name
