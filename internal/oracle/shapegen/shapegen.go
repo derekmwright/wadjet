@@ -1165,8 +1165,20 @@ func (g *Gen) genOrderLimit(q *Query) {
 			// ordinal form is the interesting path here).
 			q.Order = append(q.Order, Order{Expr: fmt.Sprint(idx + 1), Desc: desc, Key: it.Alias, Exact: it.Exact, Opaque: it.Opaque})
 		case g.chance(0.25) && !it.Agg && len(q.GroupBy) == 0:
-			// By the expression itself rather than its alias.
-			q.Order = append(q.Order, Order{Expr: it.Expr, Desc: desc, Key: it.Alias, Exact: it.Exact, Opaque: it.Opaque})
+			// By the expression itself rather than its alias. PostgreSQL
+			// resolves a BARE name in ORDER BY against OUTPUT column names
+			// BEFORE input columns, so when this item's expression text is
+			// also some other item's alias, the term orders by THAT item —
+			// `SELECT c_f32 AS id, id AS c1 ... ORDER BY id` orders by c_f32,
+			// not by the table's id. Recording this item's key regardless made
+			// the absolute order check compare the wrong column and accuse a
+			// correct engine. The SQL is unchanged; only the key this term is
+			// judged by moves.
+			tgt := it
+			if shadow := itemByAlias(q, it.Expr); shadow != nil {
+				tgt = *shadow
+			}
+			q.Order = append(q.Order, Order{Expr: it.Expr, Desc: desc, Key: tgt.Alias, Exact: tgt.Exact, Opaque: tgt.Opaque})
 		default:
 			q.Order = append(q.Order, Order{Expr: it.Alias, Desc: desc, Key: it.Alias, Exact: it.Exact, Opaque: it.Opaque})
 		}
@@ -1201,6 +1213,39 @@ func (q *Query) hasStar() bool {
 		}
 	}
 	return false
+}
+
+// itemByAlias returns the select item whose OUTPUT name is expr, when expr is
+// a bare identifier — the only form PostgreSQL resolves against output names.
+// A qualified name (t0.id), an ordinal, or anything with an operator or a call
+// in it is resolved against the input, so those return nil.
+func itemByAlias(q *Query, expr string) *Item {
+	if !isBareName(expr) {
+		return nil
+	}
+	for i := range q.Items {
+		if q.Items[i].Star == "" && q.Items[i].Alias == expr {
+			return &q.Items[i]
+		}
+	}
+	return nil
+}
+
+// isBareName reports whether s is a single unqualified identifier.
+func isBareName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c == '_':
+		case c >= '0' && c <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func projects(q *Query, r ref) bool {
