@@ -976,6 +976,8 @@ func compareVectorValues(col *batch.Vector, a, b int) int {
 }
 
 // vecFloat64 reads a float64 value from any numeric vector without boxing.
+// The second result reports whether the COLUMN has a numeric reading at all;
+// false means the caller must produce NULL, never a zero.
 //
 // Its four-case switch defaulted to 0 for DECIMAL, DURATION, PORT, PROTOCOL
 // and DATE, so a window SUM or AVG over any of them computed ZERO and marked
@@ -984,15 +986,23 @@ func compareVectorValues(col *batch.Vector, a, b int) int {
 // numeric_promote.go alongside the grouped aggregate's, so the windowed and
 // grouped forms of one query cannot disagree.
 //
-// IPV4 and MAC still read 0 here: PostgreSQL has no sum or avg over inet or
-// macaddr, and the right answer is a plan-time refusal rather than a number —
-// left open, tracked with #392's output-type decision.
-func vecFloat64(v *batch.Vector, i int) float64 {
-	if v == nil || v.Nulls.IsNullFast(i) {
-		return 0
+// Returning the bool is the second half of that: the promotion table already
+// said IPV4 and MAC have no numeric reading, and this function discarded the
+// answer, so `SUM(ipv4_col) OVER ()` computed 0 and marked the row VALID
+// while the grouped `SUM(ipv4_col)` answered NULL — the exact
+// windowed-vs-grouped disagreement #412 was filed for.
+//
+// A NULL CELL is not that case: it reads (0, true), because a NULL
+// contributes nothing to a sum and leaves the sum defined. The bool is about
+// the type, so it is constant across a column's rows.
+func vecFloat64(v *batch.Vector, i int) (float64, bool) {
+	if v == nil || !numericPromotable(v.Type) {
+		return 0, false
 	}
-	f, _ := numericFloat64(v, i)
-	return f
+	if v.Nulls.IsNullFast(i) {
+		return 0, true
+	}
+	return numericFloat64(v, i)
 }
 
 // sameColumnar returns true if two rows have equal values for the given column indices.
@@ -1417,6 +1427,12 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 	// subtracted and the arithmetic is the same running total, in the same
 	// order, that this branch computed before frames existed.
 	case WinSum:
+		// No numeric reading for this column type (IPV4, MAC, a byte-backed
+		// type, a container): the answer is NULL for every row, which is
+		// what the grouped SUM answers and what winVec already holds.
+		if !vecSummable(inputVec) {
+			return
+		}
 		var sum float64
 		curLo, curHi := 0, 0
 		for i := 0; i < n; i++ {
@@ -1442,6 +1458,9 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 		}
 
 	case WinAvg:
+		if !vecSummable(inputVec) {
+			return // see WinSum
+		}
 		var sum float64
 		curLo, curHi := 0, 0
 		for i := 0; i < n; i++ {
@@ -1633,14 +1652,26 @@ func slideFrameSum(inputVec *batch.Vector, start, lo, hi, curLo, curHi int, sum 
 		hi = lo
 	}
 	for curHi < hi {
-		*sum += vecFloat64(inputVec, start+curHi)
+		f, _ := vecFloat64(inputVec, start+curHi)
+		*sum += f
 		curHi++
 	}
 	for curLo < lo {
-		*sum -= vecFloat64(inputVec, start+curLo)
+		f, _ := vecFloat64(inputVec, start+curLo)
+		*sum -= f
 		curLo++
 	}
 	return curLo, curHi
+}
+
+// vecSummable reports whether a window SUM or AVG over this column has a
+// numeric reading. The answer is a property of the column TYPE, so it is
+// asked once per partition rather than per row — a per-row check would let a
+// frame that happens to add no rows write a zero for a column that has no
+// number in it at all.
+func vecSummable(v *batch.Vector) bool {
+	_, ok := vecFloat64(v, 0)
+	return ok
 }
 
 // --- Row-oriented window computation (spill path) ---

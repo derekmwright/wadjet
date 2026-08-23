@@ -62,7 +62,11 @@ func TestNumericPromotionCoversTheIntegerBackedTypes(t *testing.T) {
 			if got := ext(v, 0); got != tc.want {
 				t.Errorf("extractor = %v, want %v", got, tc.want)
 			}
-			if got := vecFloat64(v, 0); got != tc.want {
+			got, ok := vecFloat64(v, 0)
+			if !ok {
+				t.Fatalf("vecFloat64 reports no numeric reading for %s — a window SUM/AVG over it answers NULL", tc.typ)
+			}
+			if got != tc.want {
 				t.Errorf("vecFloat64 = %v, want %v — a window SUM/AVG reads through this", got, tc.want)
 			}
 			// The grouped SUM's own list is the reference: a type this table
@@ -76,8 +80,8 @@ func TestNumericPromotionCoversTheIntegerBackedTypes(t *testing.T) {
 
 	// DATE is promotable for reading, and ResolveRowSum already accepts it.
 	dv := promoteVec(t, batch.TypeDate, "1970-01-11")
-	if got := vecFloat64(dv, 0); got != 10 {
-		t.Errorf("DATE vecFloat64 = %v, want 10 (days since epoch)", got)
+	if got, ok := vecFloat64(dv, 0); !ok || got != 10 {
+		t.Errorf("DATE vecFloat64 = %v, %v, want 10 (days since epoch), true", got, ok)
 	}
 }
 

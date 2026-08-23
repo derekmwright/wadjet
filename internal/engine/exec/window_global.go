@@ -54,13 +54,17 @@ import (
 
 // globalWindowStats carries the pass-1 partition-level scalars.
 type globalWindowStats struct {
-	n     int64
-	sum   []float64 // per group column; only aggregates fill these
-	first []any
-	last  []any
-	nth   []any
-	minV  []any
-	maxV  []any
+	n   int64
+	sum []float64 // per group column; only aggregates fill these
+	// notSummable[i] marks a SUM/AVG column whose input type has no numeric
+	// reading (IPV4, MAC, the byte-backed types, the containers). Its answer
+	// is NULL, the same as the grouped aggregate's — see vecFloat64 (#412).
+	notSummable []bool
+	first       []any
+	last        []any
+	nth         []any
+	minV        []any
+	maxV        []any
 }
 
 // globalInputIdxs resolves each group column's input column index in schema
@@ -87,12 +91,13 @@ func globalInputIdxs(schema []parquet.Column, g windowSpecGroup) []int {
 func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpecGroup) (*globalWindowStats, error) {
 	nc := len(g.cols)
 	st := &globalWindowStats{
-		sum:   make([]float64, nc),
-		first: make([]any, nc),
-		last:  make([]any, nc),
-		nth:   make([]any, nc),
-		minV:  make([]any, nc),
-		maxV:  make([]any, nc),
+		sum:         make([]float64, nc),
+		notSummable: make([]bool, nc),
+		first:       make([]any, nc),
+		last:        make([]any, nc),
+		nth:         make([]any, nc),
+		minV:        make([]any, nc),
+		maxV:        make([]any, nc),
 	}
 	inputIdxs := globalInputIdxs(schema, g)
 	for {
@@ -114,7 +119,12 @@ func collectGlobalWindowStats(m *runMerger, schema []parquet.Column, g windowSpe
 				switch wc.Func {
 				case WinSum, WinAvg:
 					if len(wc.OrderBy) == 0 {
-						st.sum[i] += vecFloat64(b.Columns[ii], r)
+						f, ok := vecFloat64(b.Columns[ii], r)
+						if !ok {
+							st.notSummable[i] = true
+							continue
+						}
+						st.sum[i] += f
 					}
 				case WinMin:
 					if len(wc.OrderBy) == 0 {
@@ -180,9 +190,14 @@ type globalWindowStreamer struct {
 	denseRank int64
 	runSum    []float64 // per col, running aggregates
 	runCount  []int64
-	runMin    []any
-	runMax    []any
-	lagRings  [][]any // per col, ring of size offset
+	// notSummable[i] marks an ORDER-BY'd SUM/AVG column whose input type has
+	// no numeric reading. Its rows stay NULL, matching the grouped aggregate
+	// (vecFloat64, #412). The peer backfill reads it, so it cannot be a
+	// local decision at the row.
+	notSummable []bool
+	runMin      []any
+	runMax      []any
+	lagRings    [][]any // per col, ring of size offset
 	// ntile state (replicates the in-memory loop exactly)
 	ntileBucket []int64
 	ntileCount  []int
@@ -221,6 +236,7 @@ func newGlobalWindowStreamer(m *runMerger, schema []parquet.Column, g windowSpec
 		denseRank:   1,
 		runSum:      make([]float64, nc),
 		runCount:    make([]int64, nc),
+		notSummable: make([]bool, nc),
 		runMin:      make([]any, nc),
 		runMax:      make([]any, nc),
 		lagRings:    make([][]any, nc),
@@ -439,7 +455,17 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 	// running value per row is the same answer only when no two rows tie.
 	case WinSum:
 		if len(wc.OrderBy) > 0 {
-			s.runSum[i] += vecFloat64(inVec, r)
+			f, ok := vecFloat64(inVec, r)
+			if !ok {
+				// No numeric reading for this column type: NULL, which is
+				// what vec already holds and what the grouped SUM answers.
+				s.notSummable[i] = true
+				return
+			}
+			s.runSum[i] += f
+			return
+		}
+		if s.stats.notSummable[i] {
 			return
 		}
 		vec.Float64Data[r] = s.stats.sum[i]
@@ -455,7 +481,15 @@ func (s *globalWindowStreamer) computeImmediate(wc WindowColumn, i int, vec *bat
 
 	case WinAvg:
 		if len(wc.OrderBy) > 0 {
-			s.runSum[i] += vecFloat64(inVec, r)
+			f, ok := vecFloat64(inVec, r)
+			if !ok {
+				s.notSummable[i] = true
+				return
+			}
+			s.runSum[i] += f
+			return
+		}
+		if s.stats.notSummable[i] {
 			return
 		}
 		vec.Float64Data[r] = s.stats.sum[i] / float64(n)
@@ -629,12 +663,18 @@ func (s *globalWindowStreamer) backfillPeerFrame(end int64) {
 			vec := pb.outVec(numInput, i)
 			switch wc.Func {
 			case WinSum:
+				if s.notSummable[i] {
+					continue // no numeric reading: NULL, as vec already is
+				}
 				vec.Float64Data[lr] = s.runSum[i]
 				vec.Nulls.SetValid(lr)
 			case WinCount:
 				vec.Int64Data[lr] = s.runCount[i]
 				vec.Nulls.SetValid(lr)
 			case WinAvg:
+				if s.notSummable[i] {
+					continue
+				}
 				vec.Float64Data[lr] = s.runSum[i] / float64(end)
 				vec.Nulls.SetValid(lr)
 			default:

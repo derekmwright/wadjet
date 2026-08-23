@@ -116,51 +116,54 @@ func TestCompareVectorValuesAllTypes(t *testing.T) {
 }
 
 func TestVecFloat64AllTypes(t *testing.T) {
-	// nil vector
-	if vecFloat64(nil, 0) != 0 {
-		t.Error("expected 0 for nil vector")
+	// nil vector: no numeric reading, so the caller must produce NULL.
+	if got, ok := vecFloat64(nil, 0); got != 0 || ok {
+		t.Errorf("nil vector = %v, %v; want 0, false", got, ok)
 	}
 
 	// Float64
 	vf64 := batch.NewVector(batch.TypeFloat64, 1)
 	vf64.Float64Data[0] = 3.14
-	if vecFloat64(vf64, 0) != 3.14 {
-		t.Error("expected 3.14 for Float64")
+	if got, ok := vecFloat64(vf64, 0); got != 3.14 || !ok {
+		t.Errorf("Float64 = %v, %v; want 3.14, true", got, ok)
 	}
 
 	// Float32
 	vf32 := batch.NewVector(batch.TypeFloat32, 1)
 	vf32.Float32Data[0] = 2.5
-	if math.Abs(vecFloat64(vf32, 0)-2.5) > 0.001 {
-		t.Errorf("expected ~2.5 for Float32, got %f", vecFloat64(vf32, 0))
+	if got, ok := vecFloat64(vf32, 0); math.Abs(got-2.5) > 0.001 || !ok {
+		t.Errorf("Float32 = %v, %v; want ~2.5, true", got, ok)
 	}
 
 	// Int64
 	vi64 := batch.NewVector(batch.TypeInt64, 1)
 	vi64.Int64Data[0] = 42
-	if vecFloat64(vi64, 0) != 42.0 {
-		t.Error("expected 42.0 for Int64")
+	if got, ok := vecFloat64(vi64, 0); got != 42.0 || !ok {
+		t.Errorf("Int64 = %v, %v; want 42, true", got, ok)
 	}
 
 	// Int32
 	vi32 := batch.NewVector(batch.TypeInt32, 1)
 	vi32.Int32Data[0] = 10
-	if vecFloat64(vi32, 0) != 10.0 {
-		t.Error("expected 10.0 for Int32")
+	if got, ok := vecFloat64(vi32, 0); got != 10.0 || !ok {
+		t.Errorf("Int32 = %v, %v; want 10, true", got, ok)
 	}
 
-	// Null value
+	// A NULL CELL is not a missing numeric reading: it contributes nothing
+	// to a sum and leaves the sum defined, so ok stays true.
 	vi64n := batch.NewVector(batch.TypeInt64, 1)
 	vi64n.Nulls.SetNull(0)
-	if vecFloat64(vi64n, 0) != 0 {
-		t.Error("expected 0 for null value")
+	if got, ok := vecFloat64(vi64n, 0); got != 0 || !ok {
+		t.Errorf("null Int64 cell = %v, %v; want 0, true", got, ok)
 	}
 
-	// Unsupported type
-	vs := batch.NewVector(batch.TypeString, 1)
-	vs.BytesData.Set(0, []byte("abc"))
-	if vecFloat64(vs, 0) != 0 {
-		t.Error("expected 0 for string type")
+	// A type with no numeric reading. The bool is the whole point: the
+	// caller must answer NULL, not the zero (#412).
+	for _, typ := range []batch.TypeID{batch.TypeString, batch.TypeIPv4, batch.TypeMAC} {
+		v := batch.NewVector(typ, 1)
+		if got, ok := vecFloat64(v, 0); got != 0 || ok {
+			t.Errorf("%s = %v, %v; want 0, false", typ, got, ok)
+		}
 	}
 }
 
