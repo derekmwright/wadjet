@@ -107,9 +107,14 @@ TYPE, and CIDR and STRING do not behave identically everywhere:
 
 - `minmax_c_cidr` — `SELECT MIN(c_cidr), MAX(c_cidr) FROM typemx` — DIVERGED,
   with the DAG (seeing STRING) answering correctly and the single-process arm
-  (seeing the catalog's CIDR) answering NULL for both. The single-process NULL
-  is a pre-existing defect this exposed rather than caused, but the two paths
-  disagreeing is exactly what #396 was about.
+  (seeing the catalog's CIDR) answering NULL for both. The two paths
+  disagreeing is exactly what #396 was about — and the NULL is a defect of its
+  own, filed as **#417**: `MIN`/`MAX` over CIDR, IPV6 or UUID returns NULL on
+  BOTH paths, because the six resolvers in `kernel/agg.go` enumerate only
+  `TypeString, TypeBytes` among the bytes-backed types and return nil for the
+  rest. Both arms take the same resolvers, so the two-path gate reads three
+  matching wrong answers as agreement; only the momentary type disagreement
+  above made one arm right and exposed it.
 - `minby_scalar_c_cidr` — the DAG started ANSWERING a query the single-process
   arm refuses, re-opening the #392 asymmetry that #396 had just closed.
 
