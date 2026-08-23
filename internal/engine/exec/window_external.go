@@ -383,14 +383,11 @@ func computeWindowPartition(parts []*batch.RecordBatch, schema []parquet.Column,
 	outSchema := make([]parquet.Column, base, base+len(g.cols))
 	copy(outSchema, schema)
 	for _, wc := range g.cols {
-		vec := batch.NewVector(wc.OutputType, n)
+		outCol := windowOutputColumn(wc, schema)
+		vec := batch.NewColumnVector(outCol, n)
 		vec.Nulls = batch.NewBitmapAllNull(n)
 		combined.Columns = append(combined.Columns, vec)
-		outSchema = append(outSchema, parquet.Column{
-			Name:     wc.OutputCol,
-			Type:     wc.OutputType,
-			Nullable: true,
-		})
+		outSchema = append(outSchema, outCol)
 	}
 	combined.Schema = outSchema
 
@@ -451,7 +448,7 @@ func windowDiskPass(dir string, schema []parquet.Column, runs []string, g window
 	outSchema := make([]parquet.Column, len(schema), len(schema)+len(g.cols))
 	copy(outSchema, schema)
 	for _, wc := range g.cols {
-		outSchema = append(outSchema, parquet.Column{Name: wc.OutputCol, Type: wc.OutputType, Nullable: true})
+		outSchema = append(outSchema, windowOutputColumn(wc, schema))
 	}
 
 	sw, err := newSpillBatchWriter(dir, "window-pass")

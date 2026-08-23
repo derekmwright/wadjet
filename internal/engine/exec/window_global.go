@@ -370,10 +370,11 @@ func (s *globalWindowStreamer) ingest(nb *batch.RecordBatch) {
 	outSchema := make([]parquet.Column, numInput, numInput+len(s.g.cols))
 	copy(outSchema, s.schema)
 	for _, wc := range s.g.cols {
-		vec := batch.NewVector(wc.OutputType, nb.Len)
+		outCol := windowOutputColumn(wc, s.schema)
+		vec := batch.NewColumnVector(outCol, nb.Len)
 		vec.Nulls = batch.NewBitmapAllNull(nb.Len)
 		nb.Columns = append(nb.Columns, vec)
-		outSchema = append(outSchema, parquet.Column{Name: wc.OutputCol, Type: wc.OutputType, Nullable: true})
+		outSchema = append(outSchema, outCol)
 	}
 	nb.Schema = outSchema
 
@@ -833,7 +834,7 @@ func globalWindowDiskPass(dir string, schema []parquet.Column, runs []string, g 
 	outSchema := make([]parquet.Column, len(schema), len(schema)+len(g.cols))
 	copy(outSchema, schema)
 	for _, wc := range g.cols {
-		outSchema = append(outSchema, parquet.Column{Name: wc.OutputCol, Type: wc.OutputType, Nullable: true})
+		outSchema = append(outSchema, windowOutputColumn(wc, schema))
 	}
 
 	merger2, runs2, err := openRunMerger(dir, schema, g.sortKeys, runs)

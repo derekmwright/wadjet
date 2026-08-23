@@ -165,6 +165,42 @@ func WindowMinMaxType(in parquet.TypeID) (parquet.TypeID, bool) {
 	return 0, false
 }
 
+// windowOutputColumn declares one window function's output column. When the
+// output IS the input column's own type — which is the whole point of
+// retypeValueColumns below — the input's PARAMETERISATION rides along too.
+//
+// A bare TypeID is not a type for five of the twenty-two. DECIMAL without its
+// scale, VECTOR without its dimension, ARRAY/MAP without an element and ROW
+// without fields are all unusable, and unusable in SILENCE: Vector.SetValue's
+// ARRAY/MAP arm returns early on a nil Child, its ROW arm on nil Children and
+// its VECTOR arm on a zero dimension, over a vector whose null mask was
+// pre-set all-null — so `FIRST_VALUE(arr_col) OVER (...)` wrote nothing and
+// read back NULL on every row (#406). DECIMAL was the quiet one: SetValue
+// re-parses the formatted string GetValue produced against the OUTPUT
+// vector's scale, so a scale-4 column came back through a scale-0 vector as
+// 3 where the row holds 3.0003 — a wrong number, not a missing one.
+//
+// This is the aggregate's aggInputMeta rule (aggregate.go, #392) applied to
+// the window: the metadata travels with the type because it is what makes the
+// boxed value round-trip. The `col.Type != wc.OutputType` guard is the same
+// one, and for the same reason — metadata is copied only when it describes
+// the very type being declared.
+func windowOutputColumn(wc WindowColumn, schema []parquet.Column) parquet.Column {
+	out := parquet.Column{Name: wc.OutputCol, Type: wc.OutputType, Nullable: true}
+	if wc.InputCol == "" {
+		return out
+	}
+	for _, col := range schema {
+		if col.Name != wc.InputCol || col.Type != wc.OutputType {
+			continue
+		}
+		out.Precision, out.Scale = col.Precision, col.Scale
+		out.Fields, out.ElementType, out.Dimension = col.Fields, col.ElementType, col.Dimension
+		break
+	}
+	return out
+}
+
 // retypeValueColumns re-declares each value function's output type from the
 // input vector it will actually read, the way exec.Project resolves a
 // projection's type from its input batch instead of trusting the planner's
@@ -249,8 +285,17 @@ type Window struct {
 }
 
 // NewWindow creates a new window operator.
+// NewWindow copies the spec slice. retypeValueColumns REWRITES OutputType in
+// place, so sharing the caller's backing array lets one Window's correction
+// land in another's specs — and the other then sees retypeValueColumns report
+// "nothing changed", skips the w.groups rebuild, and keeps the spec COPIES
+// groupWindowSpecs took at Init under the OLD type. The external path reads
+// its types from those copies, so it would allocate a FLOAT64 output vector
+// for an ARRAY value and raise the #361 guard on the write.
 func NewWindow(cols []WindowColumn) *Window {
-	return &Window{Columns: cols}
+	own := make([]WindowColumn, len(cols))
+	copy(own, cols)
+	return &Window{Columns: own}
 }
 
 func (w *Window) Init(_ context.Context) error {
@@ -559,14 +604,11 @@ func (w *Window) finalizeColumnar() error {
 	outSchema := w.buildOutputSchema()
 
 	for _, wc := range w.Columns {
-		vec := batch.NewVector(wc.OutputType, combined.Len)
+		outCol := windowOutputColumn(wc, w.schema)
+		vec := batch.NewColumnVector(outCol, combined.Len)
 		vec.Nulls = batch.NewBitmapAllNull(combined.Len)
 		combined.Columns = append(combined.Columns, vec)
-		combined.Schema = append(combined.Schema, parquet.Column{
-			Name:     wc.OutputCol,
-			Type:     wc.OutputType,
-			Nullable: true,
-		})
+		combined.Schema = append(combined.Schema, outCol)
 	}
 
 	numOrigCols := len(w.schema)
@@ -648,11 +690,7 @@ func (w *Window) buildOutputSchema() []parquet.Column {
 	outSchema := make([]parquet.Column, len(w.schema))
 	copy(outSchema, w.schema)
 	for _, wc := range w.Columns {
-		outSchema = append(outSchema, parquet.Column{
-			Name:     wc.OutputCol,
-			Type:     wc.OutputType,
-			Nullable: true,
-		})
+		outSchema = append(outSchema, windowOutputColumn(wc, w.schema))
 	}
 	return outSchema
 }

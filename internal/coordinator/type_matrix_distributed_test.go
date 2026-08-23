@@ -49,7 +49,24 @@ import (
 // no such column, so nothing here could show it. It is fixed in the reader
 // (one set of leaf decode arms, parquet.decodePresentValues) and gated in the
 // parquet package's own suite (TestVectorAndDecimalBelowAContainer).
-var tmdPins = map[string]typematrix.Pin{}
+//
+// One entry is pinned again, for #425. Its subject is NOT the window: a NULL
+// ROW comes back from the DAG as a PRESENT row with all-NULL fields, and
+// `SELECT id, c_row FROM typemx_nested WHERE id > 100 AND id < 110 ORDER BY
+// id` reproduces it with no window function at all (id=106 is the fixture's
+// NULL c_row: single answers <nil>, the DAG answers map[a:<nil> b:<nil>]).
+// The entry started diverging when #406 landed — until then FIRST_VALUE and
+// LAST_VALUE over a container answered NULL on BOTH arms, so the two agreed
+// on a wrong answer and nothing about the underlying value ever reached the
+// comparison. The corpus has no entry that catches the plain projection form
+// (project_c_row's filter selects no NULL c_row row); adding one belongs with
+// the fix.
+var tmdPins = map[string]typematrix.Pin{
+	"window_c_row": {Issue: "#425", Reason: "a NULL ROW arrives from the DAG as a present ROW with " +
+		"all-NULL fields, so LAST_VALUE at the fixture's NULL row answers map[a:<nil> b:<nil>] " +
+		"where the single-process engine answers <nil>. Not window-specific: a plain projection " +
+		"of c_row over the same rows diverges the same way."},
+}
 
 // tmdUnsupported is empty: #397 (ARRAY/ROW/MAP/VECTOR had no arm in the WSHF
 // shuffle/gather encoder, worker/shuffle_format.go:415) and #410 (the
