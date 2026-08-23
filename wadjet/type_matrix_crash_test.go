@@ -49,54 +49,14 @@ const tmCrashMarker = "TYPEMATRIX-ENTRY "
 //
 // Every other gate in this file SKIPS these entries, because a dead process
 // compares nothing — this gate is the one that keeps them honest.
-// Two defects, both fatal on a goroutine no caller owns.
 //
-// #393 — a MAP column cannot be SCANNED. The columnar decoder declines MAP, so
-// the scan falls back to readBatchViaRows (internal/planner/physical/util.go:269)
-// → batch.FromRows → Vector.SetValue, whose MAP arm rejects the
-// map[string]any the parquet row reader produces. The panic is raised on
-// scanWorker (internal/planner/physical/plan.go:11092). EVERY query that
-// touches a MAP column dies, `SELECT *` included.
-//
-// #392 — minMaxDeclaredType
-// (internal/planner/physical/plan.go:10005) declares MIN/MAX/MIN_BY/MAX_BY's
-// output type from a six-case switch and falls through to FLOAT64 for
-// everything else. BOOL boxes as a bool and IPv6/CIDR/MAC/UUID/DECIMAL box as
-// strings, so the finalize write (internal/engine/exec/aggregate.go:4525)
-// hands Vector.SetValue a value the FLOAT64 vector cannot hold and it raises
-// the #361 mismatch panic — on the parallel-emit goroutine
-// (aggregate_parallel_emit.go:142), where no caller's recover can reach it.
-// The query does not return an error; it kills the process.
-//
-// The scalar (no GROUP BY) form of the same query does NOT crash: whole-input
-// aggregation resolves its output type elsewhere. That asymmetry is why the
-// corpus carries both shapes.
-var tmCrashPins = map[string]typematrix.Pin{
-	"minby_c_bool": {Issue: "#392", Reason: "MIN_BY over BOOL: bool into a FLOAT64 output vector."},
-	"maxby_c_bool": {Issue: "#392", Reason: "MAX_BY over BOOL: bool into a FLOAT64 output vector."},
-	"minby_c_ipv6": {Issue: "#392", Reason: "MIN_BY over IPV6: display string into a FLOAT64 output vector."},
-	"maxby_c_ipv6": {Issue: "#392", Reason: "MAX_BY over IPV6: display string into a FLOAT64 output vector."},
-	"minby_c_cidr": {Issue: "#392", Reason: "MIN_BY over CIDR: string into a FLOAT64 output vector."},
-	"maxby_c_cidr": {Issue: "#392", Reason: "MAX_BY over CIDR: string into a FLOAT64 output vector."},
-	"minby_c_mac":  {Issue: "#392", Reason: "MIN_BY over MAC: display string into a FLOAT64 output vector."},
-	"maxby_c_mac":  {Issue: "#392", Reason: "MAX_BY over MAC: display string into a FLOAT64 output vector."},
-	"minby_c_uuid": {Issue: "#392", Reason: "MIN_BY over UUID: display string into a FLOAT64 output vector."},
-	"maxby_c_uuid": {Issue: "#392", Reason: "MAX_BY over UUID: display string into a FLOAT64 output vector."},
-	"minby_c_dec":  {Issue: "#392", Reason: "MIN_BY over DECIMAL: formatted string into a FLOAT64 output vector."},
-	"maxby_c_dec":  {Issue: "#392", Reason: "MAX_BY over DECIMAL: formatted string into a FLOAT64 output vector."},
-	"minby_c_arr":  {Issue: "#392", Reason: "MIN_BY over ARRAY: []any into a FLOAT64 output vector."},
-	"maxby_c_arr":  {Issue: "#392", Reason: "MAX_BY over ARRAY: []any into a FLOAT64 output vector."},
-	"minby_c_row":  {Issue: "#392", Reason: "MIN_BY over ROW: map[string]any into a FLOAT64 output vector."},
-	"maxby_c_row":  {Issue: "#392", Reason: "MAX_BY over ROW: map[string]any into a FLOAT64 output vector."},
-
-	"minby_c_map":        {Issue: "#393", Reason: "Any read of a MAP column dies in the scan's row fallback."},
-	"maxby_c_map":        {Issue: "#393", Reason: "Any read of a MAP column dies in the scan's row fallback."},
-	"minby_scalar_c_map": {Issue: "#393", Reason: "Any read of a MAP column dies in the scan's row fallback."},
-	"project_c_map":      {Issue: "#393", Reason: "SELECT of a MAP column dies in the scan's row fallback."},
-	"window_c_map":       {Issue: "#393", Reason: "Any read of a MAP column dies in the scan's row fallback."},
-	"wide_row_nested": {Issue: "#393", Reason: "SELECT * over a table with a MAP column dies in the " +
-		"scan's row fallback — the widest possible blast radius for #393."},
-}
+// #393 (MAP scan fallback) and #392 (minMaxDeclaredType's FLOAT64 fallthrough)
+// are both fixed — see the closing commits for the mechanism. The map is
+// empty rather than removed: the mechanism (crash-pin the entries a fix
+// hasn't reached yet, delete the pin the moment TestTypeMatrixNoProcessKillers
+// says the entry no longer kills the process) stays in place for the next
+// type-coverage defect that takes the process down.
+var tmCrashPins = map[string]typematrix.Pin{}
 
 // TestTypeMatrixNoProcessKillers drives child processes over the corpus and
 // gates the set of entries that kill one.

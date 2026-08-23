@@ -45,10 +45,6 @@ const (
 	tmdDecimalOrderReason = "ORDER BY over a DECIMAL column sorts LEXICOGRAPHICALLY on one path " +
 		"and NUMERICALLY on the other, so `10.001` sorts before `2.0002` on one arm and after on " +
 		"the other. Same rows, different sequence."
-	tmdMinByTypeReason = "MIN_BY/MAX_BY's declared output type comes from a six-case switch " +
-		"(minMaxDeclaredType, internal/planner/physical/plan.go:10005) that falls through to " +
-		"FLOAT64 for everything else, so the finalize write hands Vector.SetValue a value the " +
-		"output vector cannot hold."
 )
 
 var tmdPins = map[string]typematrix.Pin{
@@ -57,20 +53,31 @@ var tmdPins = map[string]typematrix.Pin{
 	// "aa:bb:cc:00:00:05", c_ipv6 and c_uuid as their text form; the DAG answers
 	// 167772165, 187723558158341, and 16 raw bytes. Values, not row counts — every
 	// one of these has the right number of rows.
-	"distinct_c_ipv4":     {Issue: "#396", Reason: tmdRawFormReason},
-	"distinct_c_ipv6":     {Issue: "#396", Reason: tmdRawFormReason},
-	"distinct_c_mac":      {Issue: "#396", Reason: tmdRawFormReason},
-	"distinct_c_uuid":     {Issue: "#396", Reason: tmdRawFormReason},
-	"groupby_c_ipv4":      {Issue: "#396", Reason: tmdRawFormReason},
-	"groupby_c_ipv6":      {Issue: "#396", Reason: tmdRawFormReason},
-	"groupby_c_mac":       {Issue: "#396", Reason: tmdRawFormReason},
-	"groupby_c_uuid":      {Issue: "#396", Reason: tmdRawFormReason},
-	"joinpayload_c_ipv4":  {Issue: "#396", Reason: tmdRawFormReason},
-	"joinpayload_c_ipv6":  {Issue: "#396", Reason: tmdRawFormReason},
-	"joinpayload_c_mac":   {Issue: "#396", Reason: tmdRawFormReason},
-	"joinpayload_c_uuid":  {Issue: "#396", Reason: tmdRawFormReason},
-	"maxby_c_ipv4":        {Issue: "#396", Reason: tmdRawFormReason},
+	"distinct_c_ipv4":    {Issue: "#396", Reason: tmdRawFormReason},
+	"distinct_c_ipv6":    {Issue: "#396", Reason: tmdRawFormReason},
+	"distinct_c_mac":     {Issue: "#396", Reason: tmdRawFormReason},
+	"distinct_c_uuid":    {Issue: "#396", Reason: tmdRawFormReason},
+	"groupby_c_ipv4":     {Issue: "#396", Reason: tmdRawFormReason},
+	"groupby_c_ipv6":     {Issue: "#396", Reason: tmdRawFormReason},
+	"groupby_c_mac":      {Issue: "#396", Reason: tmdRawFormReason},
+	"groupby_c_uuid":     {Issue: "#396", Reason: tmdRawFormReason},
+	"joinpayload_c_ipv4": {Issue: "#396", Reason: tmdRawFormReason},
+	"joinpayload_c_ipv6": {Issue: "#396", Reason: tmdRawFormReason},
+	"joinpayload_c_mac":  {Issue: "#396", Reason: tmdRawFormReason},
+	"joinpayload_c_uuid": {Issue: "#396", Reason: tmdRawFormReason},
+	"maxby_c_ipv4":       {Issue: "#396", Reason: tmdRawFormReason},
+	// maxby_c_ipv6/mac/uuid and minby_c_ipv6/mac/uuid below were masked by the
+	// #392 crash pin until now: the grouped MIN_BY/MAX_BY form killed the
+	// process before either arm could be compared. #392 is fixed, so these are
+	// newly comparable, and they hit the pre-existing #396 raw-storage-form
+	// divergence like every other MIN_BY/MAX_BY shape over these three types.
+	"maxby_c_ipv6":        {Issue: "#396", Reason: tmdRawFormReason},
+	"maxby_c_mac":         {Issue: "#396", Reason: tmdRawFormReason},
+	"maxby_c_uuid":        {Issue: "#396", Reason: tmdRawFormReason},
 	"minby_c_ipv4":        {Issue: "#396", Reason: tmdRawFormReason},
+	"minby_c_ipv6":        {Issue: "#396", Reason: tmdRawFormReason},
+	"minby_c_mac":         {Issue: "#396", Reason: tmdRawFormReason},
+	"minby_c_uuid":        {Issue: "#396", Reason: tmdRawFormReason},
 	"minby_scalar_c_ipv4": {Issue: "#396", Reason: tmdRawFormReason},
 	"minmax_c_cidr":       {Issue: "#396", Reason: tmdRawFormReason},
 	"minmax_c_ipv4":       {Issue: "#396", Reason: tmdRawFormReason},
@@ -100,27 +107,54 @@ var tmdPins = map[string]typematrix.Pin{
 	"distinct_c_dec": {Issue: "#394", Reason: tmdDecimalOrderReason},
 	"groupby_c_dec":  {Issue: "#394", Reason: tmdDecimalOrderReason},
 
-	// #392 — MIN_BY/MAX_BY's declared output type. Here it shows as an ASYMMETRY:
-	// the single-process whole-input aggregate raises the #361 mismatch (as a
-	// recoverable query error, unlike the grouped form which kills the process)
-	// while the stage DAG answers the same query.
-	"minby_scalar_c_cidr": {Issue: "#392", Reason: tmdMinByTypeReason},
-	"minby_scalar_c_ipv6": {Issue: "#392", Reason: tmdMinByTypeReason},
-	"minby_scalar_c_mac":  {Issue: "#392", Reason: tmdMinByTypeReason},
-	"minby_scalar_c_uuid": {Issue: "#392", Reason: tmdMinByTypeReason},
+	// #392 (MIN_BY/MAX_BY's declared output type) is fixed: both arms now
+	// declare the value's own type. minby_scalar_c_cidr agrees on both paths
+	// now and its pin is deleted (ADR-0013 §Pins). The other three scalar
+	// MIN_BY/MAX_BY-over-network-type entries still diverge, but for a
+	// DIFFERENT, pre-existing reason: the stage DAG returns IPv6/MAC/UUID in
+	// their raw storage form (the same #396 the grouped and non-aggregate
+	// shapes of these columns already carry), so they are re-pointed at #396
+	// rather than deleted.
+	"minby_scalar_c_ipv6": {Issue: "#396", Reason: tmdRawFormReason},
+	"minby_scalar_c_mac":  {Issue: "#396", Reason: tmdRawFormReason},
+	"minby_scalar_c_uuid": {Issue: "#396", Reason: tmdRawFormReason},
 }
 
 var tmdUnsupported = map[string]typematrix.Pin{
-	// #397 — ARRAY, ROW and VECTOR columns cannot cross a shuffle: the WSHF
+	// #397 — ARRAY, ROW, MAP and VECTOR columns cannot cross a shuffle: the WSHF
 	// encoder has no arm for them and errors out (internal/worker/shuffle_format.go).
 	// The single-process engine answers these queries, so the DAG is strictly
 	// less capable — but it FAILS rather than answering wrongly.
 	"project_c_arr": {Issue: "#397", Reason: "ARRAY column through a shuffle: WSHF has no encoder arm."},
 	"project_c_row": {Issue: "#397", Reason: "ROW column through a shuffle: WSHF has no encoder arm."},
 	"project_c_vec": {Issue: "#397", Reason: "VECTOR column through a shuffle: WSHF has no encoder arm."},
+	"project_c_map": {Issue: "#397", Reason: "MAP column through a shuffle: WSHF has no encoder arm."},
 	"window_c_arr":  {Issue: "#397", Reason: "ARRAY column through a shuffle: WSHF has no encoder arm."},
 	"window_c_row":  {Issue: "#397", Reason: "ROW column through a shuffle: WSHF has no encoder arm."},
 	"window_c_vec":  {Issue: "#397", Reason: "VECTOR column through a shuffle: WSHF has no encoder arm."},
+	"window_c_map":  {Issue: "#397", Reason: "MAP column through a shuffle: WSHF has no encoder arm."},
+
+	// #397, same encoder gap hit from the OTHER shuffle writer: MIN_BY/MAX_BY's
+	// grouped and scalar forms carry the winning value through the final
+	// aggregate's GATHER, which is the same WSHF family and has the same
+	// missing arms for ARRAY/ROW/MAP. Newly comparable now that #392 no
+	// longer crashes the process before either arm can be compared.
+	"minby_c_arr":        {Issue: "#397", Reason: "ARRAY column through the aggregate gather: WSHF has no encoder arm."},
+	"maxby_c_arr":        {Issue: "#397", Reason: "ARRAY column through the aggregate gather: WSHF has no encoder arm."},
+	"minby_scalar_c_arr": {Issue: "#397", Reason: "ARRAY column through the aggregate gather: WSHF has no encoder arm."},
+	"minby_c_row":        {Issue: "#397", Reason: "ROW column through the aggregate gather: WSHF has no encoder arm."},
+	"maxby_c_row":        {Issue: "#397", Reason: "ROW column through the aggregate gather: WSHF has no encoder arm."},
+	"minby_scalar_c_row": {Issue: "#397", Reason: "ROW column through the aggregate gather: WSHF has no encoder arm."},
+	"minby_c_map":        {Issue: "#397", Reason: "MAP column through the aggregate gather: WSHF has no encoder arm."},
+	"maxby_c_map":        {Issue: "#397", Reason: "MAP column through the aggregate gather: WSHF has no encoder arm."},
+	"minby_scalar_c_map": {Issue: "#397", Reason: "MAP column through the aggregate gather: WSHF has no encoder arm."},
+
+	// wide_row_nested is SELECT * over the nested-schema table (ARRAY, ROW,
+	// MAP and VECTOR columns all present), so it hits the same scan-side WSHF
+	// encoder gap as project_c_arr/project_c_row/project_c_map/project_c_vec
+	// at once — the widest possible blast radius for #397, the same way it was
+	// #393's widest blast radius before that one was fixed.
+	"wide_row_nested": {Issue: "#397", Reason: "SELECT * over a table with ARRAY/ROW/MAP/VECTOR columns: WSHF has no encoder arm for any of them."},
 
 	// #397, second face: where the DAG does not refuse outright, the exchange
 	// schema mis-derives the container type and the receiving operator raises the
@@ -226,31 +260,10 @@ func TestTypeMatrixTwoPath(t *testing.T) {
 // cannot be compared here either. The wadjet-side gate owns the ratchet, so
 // this list carries no independent claim — it exists so this suite does not
 // die on the first one.
-var tmdCrashPins = map[string]typematrix.Pin{
-	"minby_c_bool": {Issue: "#392", Reason: "MIN_BY/MAX_BY output type resolves to FLOAT64 for every type outside a six-case switch."},
-	"maxby_c_bool": {Issue: "#392", Reason: "See minby_c_bool."},
-	"minby_c_ipv6": {Issue: "#392", Reason: "See minby_c_bool."},
-	"maxby_c_ipv6": {Issue: "#392", Reason: "See minby_c_bool."},
-	"minby_c_cidr": {Issue: "#392", Reason: "See minby_c_bool."},
-	"maxby_c_cidr": {Issue: "#392", Reason: "See minby_c_bool."},
-	"minby_c_mac":  {Issue: "#392", Reason: "See minby_c_bool."},
-	"maxby_c_mac":  {Issue: "#392", Reason: "See minby_c_bool."},
-	"minby_c_uuid": {Issue: "#392", Reason: "See minby_c_bool."},
-	"maxby_c_uuid": {Issue: "#392", Reason: "See minby_c_bool."},
-	"minby_c_dec":  {Issue: "#392", Reason: "See minby_c_bool."},
-	"maxby_c_dec":  {Issue: "#392", Reason: "See minby_c_bool."},
-	"minby_c_arr":  {Issue: "#392", Reason: "See minby_c_bool."},
-	"maxby_c_arr":  {Issue: "#392", Reason: "See minby_c_bool."},
-	"minby_c_row":  {Issue: "#392", Reason: "See minby_c_bool."},
-	"maxby_c_row":  {Issue: "#392", Reason: "See minby_c_bool."},
-
-	"minby_c_map":        {Issue: "#393", Reason: "Any read of a MAP column dies in the scan's row fallback."},
-	"maxby_c_map":        {Issue: "#393", Reason: "See minby_c_map."},
-	"minby_scalar_c_map": {Issue: "#393", Reason: "See minby_c_map."},
-	"project_c_map":      {Issue: "#393", Reason: "See minby_c_map."},
-	"window_c_map":       {Issue: "#393", Reason: "See minby_c_map."},
-	"wide_row_nested":    {Issue: "#393", Reason: "SELECT * over a table with a MAP column; see minby_c_map."},
-}
+//
+// #392 and #393 are both fixed; the map is empty rather than removed so the
+// mechanism stays in place for the next crash-pinned defect.
+var tmdCrashPins = map[string]typematrix.Pin{}
 
 func tmdPinFor(name string) (typematrix.Pin, string, bool) {
 	if p, ok := tmdPins[name]; ok {
