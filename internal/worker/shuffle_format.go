@@ -88,6 +88,7 @@ type shuffleWriter struct {
 	buf            []byte   // reusable scratch buffer
 	gatherBuf      []byte   // reusable buffer for gathering selected rows
 	viewSelScratch []uint32 // reusable composed selection for view columns
+	containerBuf   []byte   // reusable encode buffer for ARRAY/ROW/MAP/VECTOR payloads
 }
 
 func newShuffleWriter(w io.Writer, schema []parquet.Column) *shuffleWriter {
@@ -277,10 +278,21 @@ func parseShuffleExtentIndex(ra io.ReaderAt, size int64, numChunks uint32, heade
 	return offs
 }
 
+// Sentinels returned by fixedShuffleTypeLen for the two classes whose byte
+// count is not a function of the row count.
+const (
+	// shuffleLenBytes: [dataLen u32][data][numRows × u32 end offsets].
+	shuffleLenBytes = -1
+	// shuffleLenContainer: [payloadLen u32][payload]. The payload is
+	// self-describing (batch.EncodeContainerColumn) and the walk skips it
+	// whole — ARRAY/ROW/MAP/VECTOR have no per-row width at all.
+	shuffleLenContainer = -2
+)
+
 // fixedShuffleTypeLen returns the exact payload byte length for fixed-width
-// shuffle types, or -1 for variable-length (bytes-class) types. Shared by
-// the streaming stage walk and the index-mode extent validation so the two
-// cannot diverge.
+// shuffle types, or one of the sentinels above for the variable-length
+// classes. Shared by the streaming stage walk and the index-mode extent
+// validation so the two cannot diverge.
 func fixedShuffleTypeLen(typ parquet.TypeID, numRows int) (int, error) {
 	switch typ {
 	case parquet.TypeBool:
@@ -296,7 +308,9 @@ func fixedShuffleTypeLen(typ parquet.TypeID, numRows int) (int, error) {
 	case parquet.TypeDecimal:
 		return numRows * 16, nil
 	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
-		return -1, nil
+		return shuffleLenBytes, nil
+	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow, parquet.TypeVector:
+		return shuffleLenContainer, nil
 	default:
 		return 0, fmt.Errorf("unsupported shuffle type %v", typ)
 	}
@@ -340,7 +354,8 @@ func validateShuffleChunkBytes(schema []parquet.Column, numRows int, buf []byte)
 		if err != nil {
 			return fmt.Errorf("column %d: %w", ci, err)
 		}
-		if want >= 0 {
+		switch {
+		case want >= 0:
 			if dataLen != want {
 				return fmt.Errorf("column %d (%v): data length %d != expected %d for %d rows",
 					ci, schema[ci].Type, dataLen, want, numRows)
@@ -348,7 +363,14 @@ func validateShuffleChunkBytes(schema []parquet.Column, numRows int, buf []byte)
 			if err := take(dataLen); err != nil {
 				return fmt.Errorf("column %d data: %w", ci, err)
 			}
-		} else {
+		case want == shuffleLenContainer:
+			if dataLen < 0 || dataLen > streamMaxBytesLen {
+				return fmt.Errorf("column %d: implausible container payload length %d", ci, dataLen)
+			}
+			if err := take(dataLen); err != nil {
+				return fmt.Errorf("column %d container payload: %w", ci, err)
+			}
+		default:
 			if dataLen < 0 || dataLen > streamMaxBytesLen {
 				return fmt.Errorf("column %d: implausible bytes payload length %d", ci, dataLen)
 			}
@@ -427,9 +449,53 @@ func (sw *shuffleWriter) writeColumnData(vec *batch.Vector, sel []uint32, numRow
 		return sw.writeBytesData(&vec.BytesData, &vec.Nulls, sel, numRows)
 	case parquet.TypeDecimal:
 		return sw.writeDecimalData(vec, sel, numRows)
+	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow, parquet.TypeVector:
+		return sw.writeContainerData(vec, sel, numRows)
 	default:
 		return fmt.Errorf("unsupported shuffle type: %v", typ)
 	}
+}
+
+// writeContainerData encodes an ARRAY, ROW, MAP or VECTOR column as
+// [payloadLen u32][payload], the payload being the shared container codec's
+// self-describing form (batch.EncodeContainerColumn). The length prefix is
+// what lets the stage walk and the extent-index validator skip a column
+// whose byte count is not a function of the row count alone.
+//
+// The column is GATHERED into a canonical copy first — always, not only
+// under a selection. The codec requires storage exactly numRows wide with
+// ARRAY offsets starting at 0 and no view indirection, and NewVectorLike +
+// AppendFrom is the engine's own nested-aware primitive for producing
+// exactly that (it also resolves a view source). One copy per container
+// column per chunk; the four container types appear in no TPC-H or
+// ClickBench query, so this pays nothing on the measured paths and buys the
+// encoder a shape it can trust.
+func (sw *shuffleWriter) writeContainerData(vec *batch.Vector, sel []uint32, numRows int) error {
+	shape := vec
+	if shape.Base != nil {
+		shape = shape.Base
+	}
+	g := batch.NewVectorLike(shape)
+	if sel != nil {
+		for _, si := range sel {
+			g.AppendFrom(vec, int(si))
+		}
+	} else {
+		for i := 0; i < numRows; i++ {
+			g.AppendFrom(vec, i)
+		}
+	}
+	payload, err := batch.EncodeContainerColumn(sw.containerBuf[:0], g, numRows)
+	sw.containerBuf = payload // keep the grown scratch even on error
+	if err != nil {
+		return err
+	}
+	binary.LittleEndian.PutUint32(sw.buf[:4], uint32(len(payload)))
+	if _, err := sw.w.Write(sw.buf[:4]); err != nil {
+		return err
+	}
+	_, err = sw.w.Write(payload)
+	return err
 }
 
 func (sw *shuffleWriter) writeInt32Data(data []int32, sel []uint32, numRows int) error {
@@ -741,6 +807,7 @@ func (r *shuffleChunkReader) Next() (*batch.RecordBatch, error) {
 				return nil, fmt.Errorf("reading column %d (%s) chunk %d: %w", ci, r.schema[ci].Name, r.chunk-1, err)
 			}
 		}
+		batch.SyncContainerSchema(b)
 		return b, nil
 	}
 	return nil, nil
@@ -805,6 +872,7 @@ func shuffleReadBatches(data []byte) ([]*batch.RecordBatch, error) {
 				return nil, fmt.Errorf("reading column %d (%s) chunk %d: %w", ci, schema[ci].Name, chunk, err)
 			}
 		}
+		batch.SyncContainerSchema(b)
 		batches = append(batches, b)
 	}
 	return batches, nil
@@ -843,9 +911,32 @@ func readColumnData(data []byte, pos int, vec *batch.Vector, numRows int, typ pa
 		return readBytesData(data, pos, &vec.BytesData, numRows)
 	case parquet.TypeDecimal:
 		return readDecimalData(data, pos, vec, numRows)
+	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow, parquet.TypeVector:
+		return readContainerData(data, pos, vec, numRows)
 	default:
 		return pos, fmt.Errorf("unsupported shuffle type: %v", typ)
 	}
+}
+
+// readContainerData mirrors shuffleWriter.writeContainerData. The nested
+// shape (child element types, ROW field order, VECTOR dimension) comes from
+// the payload, not from the WSHF schema, which carries only a name and a
+// type byte — so the vector NewRecordBatch built from that schema arrives
+// here with no Child/Children at all and the decoder installs them.
+func readContainerData(data []byte, pos int, vec *batch.Vector, numRows int) (int, error) {
+	if pos+4 > len(data) {
+		return pos, fmt.Errorf("truncated container length prefix at offset %d of %d", pos, len(data))
+	}
+	payloadLen := int(binary.LittleEndian.Uint32(data[pos:]))
+	pos += 4
+	if payloadLen < 0 || pos+payloadLen > len(data) {
+		return pos, fmt.Errorf("container payload of %d bytes at offset %d exceeds the %d-byte chunk",
+			payloadLen, pos, len(data))
+	}
+	if err := batch.DecodeContainerColumn(data[pos:pos+payloadLen], vec, numRows); err != nil {
+		return pos, err
+	}
+	return pos + payloadLen, nil
 }
 
 func readInt32Data(data []byte, pos int, dst []int32, numRows int) (int, error) {

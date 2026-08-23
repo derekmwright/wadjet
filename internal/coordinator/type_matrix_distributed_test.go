@@ -34,25 +34,49 @@ import (
 // Pins follow ADR-0013: the comparison runs for a pinned entry, a divergence
 // is logged, and a pin whose issue stops diverging anywhere FAILS.
 
-// tmdPins is empty: #392 (MIN_BY/MAX_BY's declared output type), #394
-// (DECIMAL ordering) and #396 (network and UUID columns in raw storage
-// form, 37+ entries) are all fixed, so nothing here diverges by VALUE
-// anymore. tmdRawFormReason and tmdMinByTypeReason go with them — nothing
-// references either string now.
-var tmdPins = map[string]typematrix.Pin{}
+// tmdPins carries #407 (project_c_vec): the SINGLE-PROCESS arm answers NULL
+// for every row of a VECTOR column; the stage DAG answers the values. #392
+// (MIN_BY/MAX_BY's declared output type), #394 (DECIMAL ordering) and #396
+// (network and UUID columns in raw storage form, 37+ entries) are all fixed,
+// so nothing else here diverges by VALUE. tmdRawFormReason and
+// tmdMinByTypeReason go with them — nothing references either string now.
+var tmdPins = map[string]typematrix.Pin{
+	// #407 — the SINGLE-PROCESS arm answers NULL for every row of a VECTOR
+	// column; the stage DAG answers the values. Found the moment #397's encoder
+	// half landed: while the DAG refused the query the comparison never ran, so
+	// nothing had ever checked the single-process side of it. The DAG is the
+	// right arm here.
+	"project_c_vec": {Issue: "#407", Reason: "Reading a VECTOR column returns NULL for every row on the " +
+		"single-process engine (both the native columnar decode and the scanner's ROW fallback); the stage " +
+		"DAG returns the values. ROW on the same fixture row reads back fine, so this is VECTOR-specific."},
+}
+
+// tmdWholeTableMapScanReason is the mechanism behind the #410 entries left in
+// tmdUnsupported. It is NOT the exchange: #397 is fixed (the WSHF format
+// carries ARRAY/ROW/MAP/VECTOR since the container codec landed) and these
+// queries never reach the encoder. #397 reported this as its "second face"
+// and misattributed it; #410 carries the real mechanism.
+const tmdWholeTableMapScanReason = "A stage whose fragment carries no column " +
+	"projection (spec.Columns empty, internal/worker/executor_fragment.go:2582) scans the " +
+	"WHOLE typemx_nested table, which pulls in c_map. Any ARRAY or MAP column routes the " +
+	"read through the scanner's ROW fallback (scan.HasUnsupportedColumnarTypes → " +
+	"readFileBatchesViaRows, internal/engine/scan/columnar.go:47), and there batch.FromRows " +
+	"hands Vector.SetValue the parquet reader's map[string]any for the MAP column while the " +
+	"MAP arm accepts only the list-of-entries forms — the #361 guard fires " +
+	"(\"cannot store map[string]interface {} into MAP vector\"). That is #393's mechanism " +
+	"reached from the DAG: the single-process arm projects the MAP column away and never " +
+	"reads it. Fixing it means either a MAP arm for the row fallback (#393, whose crash pins " +
+	"in tmdCrashPins/wadjet gate it) or a projection on that stage (planner), not the exchange."
 
 var tmdUnsupported = map[string]typematrix.Pin{
-	// #397 — ARRAY, ROW, MAP and VECTOR columns cannot cross a shuffle: the WSHF
-	// encoder has no arm for them and errors out (internal/worker/shuffle_format.go).
-	// The single-process engine answers these queries, so the DAG is strictly
-	// less capable — but it FAILS rather than answering wrongly.
-	"project_c_arr": {Issue: "#397", Reason: "ARRAY column through a shuffle: WSHF has no encoder arm."},
-	"project_c_row": {Issue: "#397", Reason: "ROW column through a shuffle: WSHF has no encoder arm."},
-	"project_c_vec": {Issue: "#397", Reason: "VECTOR column through a shuffle: WSHF has no encoder arm."},
+	// #397's shuffle-encoder gap (ARRAY/ROW/VECTOR through a stage boundary,
+	// project_c_arr/project_c_row/project_c_vec/window_c_arr/window_c_row/
+	// window_c_vec) is fixed — the container codec lands the payload on the
+	// wire. These remaining entries were not part of that commit's own
+	// six-entry proof list; pending a gate re-run to confirm the same fix
+	// closes them too (they hit the identical encoder, just from the MAP leaf
+	// and the aggregate-gather writer rather than the plain shuffle writer).
 	"project_c_map": {Issue: "#397", Reason: "MAP column through a shuffle: WSHF has no encoder arm."},
-	"window_c_arr":  {Issue: "#397", Reason: "ARRAY column through a shuffle: WSHF has no encoder arm."},
-	"window_c_row":  {Issue: "#397", Reason: "ROW column through a shuffle: WSHF has no encoder arm."},
-	"window_c_vec":  {Issue: "#397", Reason: "VECTOR column through a shuffle: WSHF has no encoder arm."},
 	"window_c_map":  {Issue: "#397", Reason: "MAP column through a shuffle: WSHF has no encoder arm."},
 
 	// #397, same encoder gap hit from the OTHER shuffle writer: MIN_BY/MAX_BY's
@@ -77,14 +101,12 @@ var tmdUnsupported = map[string]typematrix.Pin{
 	// #393's widest blast radius before that one was fixed.
 	"wide_row_nested": {Issue: "#397", Reason: "SELECT * over a table with ARRAY/ROW/MAP/VECTOR columns: WSHF has no encoder arm for any of them."},
 
-	// #397, second face: where the DAG does not refuse outright, the exchange
-	// schema mis-derives the container type and the receiving operator raises the
-	// #361 mismatch ("cannot store map[string]interface {} into MAP vector") for a
-	// VECTOR or ARRAY payload.
-	"flat_nested_join":   {Issue: "#397", Reason: "container payload across the exchange: the receiving operator is handed a MAP vector."},
-	"maxby_c_vec":        {Issue: "#397", Reason: "container payload across the exchange: the receiving operator is handed a MAP vector."},
-	"minby_c_vec":        {Issue: "#397", Reason: "container payload across the exchange: the receiving operator is handed a MAP vector."},
-	"minby_scalar_c_vec": {Issue: "#397", Reason: "container payload across the exchange: the receiving operator is handed a MAP vector."},
+	// #410 — split out of #397, which reported this as "the exchange hands the
+	// receiver a MAP vector". The stack says otherwise; see the reason.
+	"flat_nested_join":   {Issue: "#410", Reason: tmdWholeTableMapScanReason},
+	"maxby_c_vec":        {Issue: "#410", Reason: tmdWholeTableMapScanReason},
+	"minby_c_vec":        {Issue: "#410", Reason: tmdWholeTableMapScanReason},
+	"minby_scalar_c_vec": {Issue: "#410", Reason: tmdWholeTableMapScanReason},
 }
 
 // tmdPinPrefixes pins every corpus entry that begins with the key, for a

@@ -66,8 +66,9 @@ type unpartitionedStageSink struct {
 	// chunk-per-consume fragmented stage outputs ~100× (SF10 v1.5 A/B
 	// 2026-07-03: s2Decode 26.6s→35.6s, suite +15%). Consumed rows accumulate
 	// in rowBuf and flush at unpartitionedFlushRows/-Bytes. Flat schemas only
-	// (appendBatchRowsBulk/growBatchTo have no nested arms); nested schemas
-	// keep the legacy chunk-per-consume path. coalesce: 0=undecided,
+	// (appendBatchRowsBulk/growBatchTo gained container arms in #397, but
+	// row-at-a-time ones); container schemas keep the legacy
+	// chunk-per-consume path. coalesce: 0=undecided,
 	// 1=coalescing, -1=legacy.
 	//
 	// The flush is DOUBLE-BUFFERED (docs/design/morsel-execution.md §4.1.1
@@ -104,8 +105,12 @@ const (
 	unpartitionedFlushBytes = 16 << 20
 )
 
-// batchSchemaIsFlat reports whether every column type has an arm in
-// appendBatchRowsBulk/growBatchTo.
+// batchSchemaIsFlat reports whether every column type takes a BULK arm in
+// appendBatchRowsBulk/growBatchTo. Since #397 the container types have arms
+// there too, but they copy row-at-a-time through CopyValueFrom — the
+// accumulator's whole reason to exist is the bulk copy, so a container
+// schema keeps the legacy chunk-per-consume path and pays no per-row copy
+// on the way in.
 func batchSchemaIsFlat(schema []parquet.Column) bool {
 	for _, c := range schema {
 		switch c.Type {

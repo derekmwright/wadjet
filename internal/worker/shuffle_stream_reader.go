@@ -226,6 +226,7 @@ func decodeShuffleChunk(schema []parquet.Column, numRows int, chunkBytes []byte,
 			return nil, fmt.Errorf("reading column %d (%s) chunk %d: %w", ci, schema[ci].Name, chunkIdx, err)
 		}
 	}
+	batch.SyncContainerSchema(b)
 	return b, nil
 }
 
@@ -274,7 +275,8 @@ func (r *streamingShuffleReader) readChunkBytesInto(buf []byte, numRows int) ([]
 		if err != nil {
 			return nil, fmt.Errorf("column %d: %w", ci, err)
 		}
-		if want >= 0 {
+		switch {
+		case want >= 0:
 			if dataLen != want {
 				return nil, fmt.Errorf("column %d (%v): data length %d != expected %d for %d rows",
 					ci, r.schema[ci].Type, dataLen, want, numRows)
@@ -282,7 +284,16 @@ func (r *streamingShuffleReader) readChunkBytesInto(buf []byte, numRows int) ([]
 			if buf, err = r.appendN(buf, dataLen); err != nil {
 				return nil, fmt.Errorf("column %d data: %w", ci, err)
 			}
-		} else {
+		case want == shuffleLenContainer:
+			// ARRAY/ROW/MAP/VECTOR: one self-describing payload, no
+			// trailing offsets array.
+			if dataLen < 0 || dataLen > streamMaxBytesLen {
+				return nil, fmt.Errorf("column %d: implausible container payload length %d", ci, dataLen)
+			}
+			if buf, err = r.appendN(buf, dataLen); err != nil {
+				return nil, fmt.Errorf("column %d container payload: %w", ci, err)
+			}
+		default:
 			if dataLen < 0 || dataLen > streamMaxBytesLen {
 				return nil, fmt.Errorf("column %d: implausible bytes payload length %d", ci, dataLen)
 			}

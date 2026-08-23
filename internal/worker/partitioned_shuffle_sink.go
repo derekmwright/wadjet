@@ -525,7 +525,18 @@ func newShuffleAccumBatch(schema []parquet.Column, initCap int) *batch.RecordBat
 	}
 	rb := batch.NewRecordBatch(schema, initCap)
 	rb.Len = 0
-	for _, col := range rb.Columns {
+	for i, col := range rb.Columns {
+		if batch.IsContainerType(col.Type) {
+			// Container columns start EMPTY, not pre-sized: appendBatchRowsBulk
+			// grows them through CopyValueFrom, whose ARRAY/ROW children are
+			// append-built. NewRecordBatch pre-sizes ROW children to initCap,
+			// which would put those children on the indexed-write branch at
+			// rows the parent has not reached. NewVectorLike keeps the shape
+			// (child element types, field names, VECTOR dim) and drops the
+			// storage.
+			rb.Columns[i] = batch.NewVectorLike(col)
+			continue
+		}
 		if col.BytesData.Offsets != nil {
 			col.BytesData.Offsets = col.BytesData.Offsets[:1]
 			col.BytesData.Offsets[0] = 0
@@ -539,7 +550,7 @@ func newShuffleAccumBatch(schema []parquet.Column, initCap int) *batch.RecordBat
 // memory. Mirror of the reset flushPartitionLocked performs on pw.rowBuf.
 func resetShuffleAccumBatch(rb *batch.RecordBatch) {
 	rb.Len = 0
-	for _, col := range rb.Columns {
+	for i, col := range rb.Columns {
 		col.Len = 0
 		col.Nulls.ResetNonNull(0)
 		switch col.Type {
@@ -547,15 +558,23 @@ func resetShuffleAccumBatch(rb *batch.RecordBatch) {
 			col.BytesData.Data = col.BytesData.Data[:0]
 			col.BytesData.Offsets = col.BytesData.Offsets[:1]
 			col.BytesData.Offsets[0] = 0
+		case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow, parquet.TypeVector:
+			// Element storage is append-built at every level, so an
+			// in-place reset would have to walk the whole tree; mint the
+			// same shape empty instead. Container columns are off the
+			// measured paths (no TPC-H or ClickBench query has one), so
+			// the allocation buys correctness at no benchmark cost.
+			rb.Columns[i] = batch.NewVectorLike(col)
 		}
 	}
 }
 
 // appendBatchRowsBulk copies the given source rows of b into dst (appending
-// at dst.Len) and returns the approximate byte count added. FLAT column
-// types only — the switch (like growBatchTo) has no Array/Map/Row/Vector
-// arms. Shared by the partition writers and the unpartitioned stage sink's
-// chunk-coalescing accumulator.
+// at dst.Len) and returns the approximate byte count added. Flat columns
+// take a bulk typed arm; ARRAY/MAP/ROW/VECTOR take a row-at-a-time
+// CopyValueFrom arm; anything else PANICS (see the default). Shared by the
+// partition writers and the unpartitioned stage sink's chunk-coalescing
+// accumulator.
 func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows []uint32) int {
 	start := dst.Len
 	end := start + len(srcRows)
@@ -748,6 +767,36 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 				}
 			}
 			bytesAdded += nRows * 16
+
+		case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow, parquet.TypeVector:
+			// Container columns copy row-at-a-time through the engine's
+			// nested-aware typed primitive: offsets, child elements, ROW
+			// children and the VECTOR stride all have to advance together,
+			// and CopyValueFrom is the one place that knows how (it also
+			// advances a NULL row's bookkeeping, which is what keeps every
+			// later row aligned). Sequential di, which the start..end walk
+			// guarantees.
+			//
+			// Until #397 there was no arm here AND no default, so these
+			// columns silently advanced dst.Len without appending anything
+			// and the failure surfaced later, at the writer.
+			for i, row := range rows {
+				dstCol.CopyValueFrom(start+i, srcCol, int(row))
+			}
+			bytesAdded += nRows * 16 // rough: a gate figure, not accounting
+
+		default:
+			// A 23rd column type must not reach the silent path the four
+			// container types spent #397 in. Panics rather than returns
+			// because every caller is a sink Consume with no per-column
+			// error seam; the worker's task-level recover turns it into a
+			// query error.
+			name := ""
+			if ci < len(dst.Schema) {
+				name = dst.Schema[ci].Name
+			}
+			panic(fmt.Sprintf("appendBatchRowsBulk: no arm for column %d (%s) of type %v",
+				ci, name, dstCol.Type))
 		}
 	}
 
@@ -832,6 +881,25 @@ func growBatchTo(dst *batch.RecordBatch, n int) {
 			} else if len(col.DecimalData.Data) < n {
 				col.DecimalData.Data = col.DecimalData.Data[:n]
 			}
+		case parquet.TypeArray, parquet.TypeMap:
+			// Only the offsets array is indexed (CopyValueFrom writes
+			// Offsets[di] and Offsets[di+1]); child elements are appended.
+			needed := n + 1
+			if cap(col.Offsets) < needed {
+				grew := make([]int32, needed, growCap(cap(col.Offsets), needed))
+				copy(grew, col.Offsets)
+				col.Offsets = grew
+			} else if len(col.Offsets) < needed {
+				col.Offsets = col.Offsets[:needed]
+			}
+		case parquet.TypeRow, parquet.TypeVector:
+			// Nothing indexed at this level: ROW children are append-built
+			// and CopyValueFrom grows a VECTOR's stride itself.
+		default:
+			// Same contract as appendBatchRowsBulk's default — a type with
+			// no arm here would advance Len over storage that was never
+			// grown.
+			panic(fmt.Sprintf("growBatchTo: no arm for column type %v", col.Type))
 		}
 		col.Nulls = col.Nulls.Grow(n)
 	}
@@ -1155,7 +1223,73 @@ func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, h
 				}
 				hashes[i] = h
 			}
+		case parquet.TypeBool:
+			data := col.BoolData
+			for i := 0; i < n; i++ {
+				row := i
+				if useSel {
+					row = int(b.Sel[i])
+				}
+				h := hashes[i]
+				if col.Nulls.IsNullFast(row) {
+					h = (h ^ 0xff) * fnvPrime64
+				} else {
+					var v byte
+					if data[row] {
+						v = 1
+					}
+					h = (h ^ uint64(v)) * fnvPrime64
+				}
+				hashes[i] = h
+			}
+		case parquet.TypeDecimal:
+			data := col.DecimalData.Data
+			for i := 0; i < n; i++ {
+				row := i
+				if useSel {
+					row = int(b.Sel[i])
+				}
+				h := hashes[i]
+				if col.Nulls.IsNullFast(row) || data == nil {
+					h = (h ^ 0xff) * fnvPrime64
+				} else {
+					d := data[row]
+					for _, w := range [2]uint64{d.Lo, uint64(d.Hi)} {
+						for s := 0; s < 64; s += 8 {
+							h = (h ^ uint64(byte(w>>uint(s)))) * fnvPrime64
+						}
+					}
+				}
+				hashes[i] = h
+			}
+		case parquet.TypeVector:
+			dim := col.VectorDim
+			for i := 0; i < n; i++ {
+				row := i
+				if useSel {
+					row = int(b.Sel[i])
+				}
+				h := hashes[i]
+				if col.Nulls.IsNullFast(row) || dim <= 0 || (row+1)*dim > len(col.Float32Data) {
+					h = (h ^ 0xff) * fnvPrime64
+				} else {
+					for _, f := range col.Float32Data[row*dim : (row+1)*dim] {
+						v := math.Float32bits(f)
+						h = (h ^ uint64(byte(v))) * fnvPrime64
+						h = (h ^ uint64(byte(v>>8))) * fnvPrime64
+						h = (h ^ uint64(byte(v>>16))) * fnvPrime64
+						h = (h ^ uint64(byte(v>>24))) * fnvPrime64
+					}
+				}
+				hashes[i] = h
+			}
 		default:
+			// ARRAY, MAP and ROW keys still mix a constant: hashing them
+			// means walking offsets and child vectors recursively, which is
+			// a bigger change than #397's encoder and has no caller today
+			// (the planner does not choose a container column as a
+			// partition key). Deterministic, so never a wrong answer — but
+			// every row of such a key routes to ONE partition.
 			for i := 0; i < n; i++ {
 				hashes[i] = (hashes[i] ^ 0x00) * fnvPrime64
 			}
@@ -1172,9 +1306,11 @@ func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, h
 }
 
 // hashVectorValue mixes a single column value at the given row into h using
-// FNV-1a. Supports the join-key types we encounter in TPC-H/SIEM workloads.
-// For unsupported types, hashes a zero byte (deterministic but skewed — the
-// planner is responsible for not picking these as partition keys).
+// FNV-1a. It must mix the SAME byte stream as hashRowsIntoPartitions above,
+// arm for arm — the sink routes with that one and the tests verify the
+// routing with this one, so a divergence would read as a routing bug.
+// ARRAY/MAP/ROW still hash a zero byte (deterministic but skewed — every
+// row of such a key lands in one partition; see the default there).
 func hashVectorValue(h interface{ Write([]byte) (int, error) }, col *batch.Vector, row int, scratch []byte) {
 	if col.Nulls.IsNullFast(row) {
 		// Null contributes a distinct marker so that null rows are consistently
@@ -1191,6 +1327,32 @@ func hashVectorValue(h interface{ Write([]byte) (int, error) }, col *batch.Vecto
 		_, _ = h.Write(scratch[:8])
 	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
 		_, _ = h.Write(col.BytesData.Value(row))
+	case parquet.TypeBool:
+		var v byte
+		if col.BoolData[row] {
+			v = 1
+		}
+		_, _ = h.Write([]byte{v})
+	case parquet.TypeDecimal:
+		if col.DecimalData.Data == nil {
+			_, _ = h.Write([]byte{0xff})
+			return
+		}
+		d := col.DecimalData.Data[row]
+		binary.LittleEndian.PutUint64(scratch[:8], d.Lo)
+		_, _ = h.Write(scratch[:8])
+		binary.LittleEndian.PutUint64(scratch[:8], uint64(d.Hi))
+		_, _ = h.Write(scratch[:8])
+	case parquet.TypeVector:
+		dim := col.VectorDim
+		if dim <= 0 || (row+1)*dim > len(col.Float32Data) {
+			_, _ = h.Write([]byte{0xff})
+			return
+		}
+		for _, f := range col.Float32Data[row*dim : (row+1)*dim] {
+			binary.LittleEndian.PutUint32(scratch[:4], math.Float32bits(f))
+			_, _ = h.Write(scratch[:4])
+		}
 	default:
 		_, _ = h.Write([]byte{0x00})
 	}

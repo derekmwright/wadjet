@@ -291,9 +291,12 @@ func TestGatherReplySinkConsumeError(t *testing.T) {
 	}
 	t.Cleanup(func() { nc.Close() })
 
-	// Schema with an unsupported shuffle type (Array) forces writeChunk to fail.
+	// A type WSHF has no arm for forces writeChunk to fail. This was ARRAY
+	// until #397 gave the four container types real encoder arms; the test
+	// is about the error PLUMBING, so it now uses a type id outside the
+	// 22-type space rather than pinning a refusal that is gone.
 	schema := []parquet.Column{
-		{Name: "a", Type: parquet.TypeArray, Nullable: true, ElementType: &parquet.Column{Type: parquet.TypeInt64}},
+		{Name: "a", Type: parquet.TypeID(99), Nullable: true},
 	}
 	b := batch.NewRecordBatch(schema, 1)
 

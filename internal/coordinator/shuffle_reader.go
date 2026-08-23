@@ -81,6 +81,7 @@ func readShuffleBatches(data []byte) ([]*batch.RecordBatch, error) {
 				return nil, fmt.Errorf("column %d chunk %d: %w", ci, chunk, err)
 			}
 		}
+		batch.SyncContainerSchema(b)
 		batches = append(batches, b)
 	}
 	return batches, nil
@@ -159,6 +160,25 @@ func readShuffleColumn(data []byte, pos int, vec *batch.Vector, numRows int, typ
 		} else {
 			pos += numRows * 16
 		}
+	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow, parquet.TypeVector:
+		// [payloadLen u32][payload]. The payload codec is shared with the
+		// worker's writer and reader (batch.EncodeContainerColumn /
+		// DecodeContainerColumn) — this decoder is an independent copy of
+		// the WSHF walk, and a hand-written second copy of a RECURSIVE
+		// nested layout is what #397 must not leave behind.
+		if pos+4 > len(data) {
+			return pos, fmt.Errorf("truncated container length prefix at offset %d of %d", pos, len(data))
+		}
+		payloadLen := int(binary.LittleEndian.Uint32(data[pos:]))
+		pos += 4
+		if payloadLen < 0 || pos+payloadLen > len(data) {
+			return pos, fmt.Errorf("container payload of %d bytes at offset %d exceeds the %d-byte chunk",
+				payloadLen, pos, len(data))
+		}
+		if err := batch.DecodeContainerColumn(data[pos:pos+payloadLen], vec, numRows); err != nil {
+			return pos, err
+		}
+		pos += payloadLen
 	default:
 		return pos, fmt.Errorf("unsupported type: %v", typ)
 	}
