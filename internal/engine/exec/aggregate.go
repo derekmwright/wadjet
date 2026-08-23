@@ -1028,6 +1028,65 @@ type minMaxByState struct {
 	isMin    bool
 }
 
+// boxContainerMemBytes estimates the retained heap footprint of a value
+// Vector.GetValue boxed for a container column (ARRAY/MAP as []any, ROW as
+// map[string]any, VECTOR as []float32) — MIN_BY/MAX_BY's bestVal shares the
+// same declared-output-type rule as container MIN/MAX (aggSpecOutputType:
+// "MIN_BY/MAX_BY hand the output vector the box GetValue produced"), so
+// bestVal can retain an arbitrarily large nested structure the same way
+// containerMinMaxState.best can. Anything else returns 0: the flat per-agg
+// charge (extraStateBytes += len(h.Aggs) * 80) already tracks close to
+// measured for a scalar bestVal — a STRING return column measured 487 B/
+// group against 484 reported — so this must not double-charge what the
+// flat estimate already covers.
+func boxContainerMemBytes(v any) int64 {
+	switch v.(type) {
+	case []any, map[string]any, []float32:
+		return boxMemBytesDeep(v)
+	default:
+		return 0
+	}
+}
+
+// boxMemBytesDeep walks the exact shapes Vector.GetValue produces (its
+// TypeArray/TypeMap/TypeRow/TypeVector/TypeString/TypeBytes arms) and sums
+// a rough heap estimate. Not exhaustive over every Go type — GetValue's box
+// set is closed, so it does not need to be; an unrecognized type gets a
+// small fixed estimate rather than 0, so a future box shape undercounts
+// rather than vanishing entirely.
+func boxMemBytesDeep(v any) int64 {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case []any:
+		n := int64(24) // slice header
+		for _, e := range x {
+			n += 16 + boxMemBytesDeep(e) // interface header + element
+		}
+		return n
+	case map[string]any:
+		n := int64(48) // map header estimate
+		for k, e := range x {
+			n += int64(len(k)) + 16 + boxMemBytesDeep(e)
+		}
+		return n
+	case []float32:
+		return 24 + int64(len(x))*4
+	case string:
+		return 16 + int64(len(x))
+	case []byte:
+		return 24 + int64(len(x))
+	case int64, float64:
+		return 8
+	case int32, float32:
+		return 4
+	case bool:
+		return 1
+	default:
+		return 16
+	}
+}
+
 // float64Extractor reads a float64 value from a vector at a given row index.
 // Pre-resolved during Init to eliminate per-row type switches in updateGroup.
 type float64Extractor func(v *batch.Vector, row int) float64
@@ -3730,7 +3789,9 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 				continue
 			}
 			if st, ok := ext.extraState[i].(*containerMinMaxState); ok {
+				before := st.memBytes()
 				st.observe(v, row)
+				h.extraStateBytes += st.memBytes() - before
 			}
 			continue
 		}
@@ -3949,9 +4010,11 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if !state.hasValue ||
 				(state.isMin && cmpVal < state.bestCmp) ||
 				(!state.isMin && cmpVal > state.bestCmp) {
+				before := boxContainerMemBytes(state.bestVal)
 				state.hasValue = true
 				state.bestCmp = cmpVal
 				state.bestVal = v1.GetValue(row)
+				h.extraStateBytes += boxContainerMemBytes(state.bestVal) - before
 			}
 
 		default:
@@ -5126,6 +5189,20 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 			}
 			if oExt.extraState != nil {
 				h.extraStateBytes += int64(len(oExt.extraState)) * 80
+				// The flat charge above is sized for a scalar box; a
+				// container MIN/MAX's retained value (or MIN_BY/MAX_BY's
+				// bestVal, which shares the same container-shaped output
+				// per aggSpecOutputType) is a whole copied structure and
+				// needs its own accounting on top, the same as observe/
+				// merge do for a group already in h.
+				for _, st := range oExt.extraState {
+					switch st := st.(type) {
+					case *containerMinMaxState:
+						h.extraStateBytes += st.memBytes()
+					case *minMaxByState:
+						h.extraStateBytes += boxContainerMemBytes(st.bestVal)
+					}
+				}
 			}
 			for _, ds := range oExt.distinctSets {
 				h.distinctBytes += ds.memBytes()
@@ -5187,21 +5264,27 @@ func (h *HashAggregate) mergeExtraState(dst, src *groupStateExtras) {
 			d, ok := dst.extraState[j].(*minMaxByState)
 			if !ok {
 				dst.extraState[j] = s
+				h.extraStateBytes += boxContainerMemBytes(s.bestVal)
 				continue
 			}
 			if !s.hasValue {
 				continue
 			}
 			if !d.hasValue || (d.isMin && s.bestCmp < d.bestCmp) || (!d.isMin && s.bestCmp > d.bestCmp) {
+				before := boxContainerMemBytes(d.bestVal)
 				d.bestVal, d.bestCmp, d.hasValue = s.bestVal, s.bestCmp, true
+				h.extraStateBytes += boxContainerMemBytes(d.bestVal) - before
 			}
 		case *containerMinMaxState:
 			d, ok := dst.extraState[j].(*containerMinMaxState)
 			if !ok {
 				dst.extraState[j] = s
+				h.extraStateBytes += s.memBytes()
 				continue
 			}
+			before := d.memBytes()
 			d.merge(s)
+			h.extraStateBytes += d.memBytes() - before
 		case bool:
 			d, ok := dst.extraState[j].(bool)
 			if !ok {

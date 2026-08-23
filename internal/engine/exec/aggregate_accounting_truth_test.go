@@ -259,3 +259,144 @@ func TestGroupMemoryUsageTruth_VsHeap(t *testing.T) {
 		t.Fatalf("groupMemoryUsage = %d but live heap grew %d — estimate below 50%% of measured (pre-counter behavior)", got, grown)
 	}
 }
+
+// containerArrayBatch builds n rows of (g, c_arr) where c_arr is an
+// 8-element STRING array whose elements are elemLen bytes wide — one group
+// per row, so groupMemoryUsage's container charge is exactly n retained
+// arrays, no MIN comparisons overwriting one another. Built directly rather
+// than through FromRows so the nested column's shape comes from the schema,
+// the same reason agg_container_minmax_test.go does.
+func containerArrayBatch(tb testing.TB, base, n, elemLen int) *batch.RecordBatch {
+	tb.Helper()
+	schema := []parquet.Column{
+		{Name: "g", Type: parquet.TypeInt32},
+		{Name: "c_arr", Type: parquet.TypeArray, Nullable: true,
+			ElementType: &parquet.Column{Name: "element", Type: parquet.TypeString, Nullable: true}},
+	}
+	b := batch.NewRecordBatch(schema, n)
+	for i := 0; i < n; i++ {
+		b.Columns[0].SetValue(i, int32(base+i))
+		arr := make([]any, 8)
+		for j := range arr {
+			arr[j] = fmt.Sprintf("v-%0*d", elemLen, base+i)
+		}
+		b.Columns[1].SetValue(i, arr)
+	}
+	return b
+}
+
+// TestGroupMemoryUsageTruth_ContainerMinMax: a boxed container MIN/MAX
+// retains a whole copied Vector per group, not a scalar slot — the flat
+// per-agg charge (extraStateBytes += len(h.Aggs) * 80, sized for a scalar
+// box) undercounted it by an order of magnitude once the payload had any
+// size to it (measured 1336-1807 B/group against 484 reported, #F3). This
+// is the deterministic half of that guard: no GC noise, just the counter
+// against its own known floor and its own growth with payload size.
+func TestGroupMemoryUsageTruth_ContainerMinMax(t *testing.T) {
+	const n = 10_000
+	run := func(elemLen int) int64 {
+		h := &HashAggregate{
+			GroupByCols: []string{"g"},
+			Aggs:        []AggColumn{{Func: AggMin, InputCol: "c_arr", OutputCol: "lo", OutputType: parquet.TypeArray}},
+		}
+		ctx := context.Background()
+		if err := h.Init(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.Consume(ctx, containerArrayBatch(t, 0, n, elemLen)); err != nil {
+			t.Fatal(err)
+		}
+		return h.extraStateBytes
+	}
+	small := run(8)
+	large := run(64)
+
+	flatOnly := int64(n) * 80
+	if small <= flatOnly {
+		t.Fatalf("extraStateBytes = %d, want > the flat per-agg figure %d — the retained container's own Vector.MemBytes() must be charged on top",
+			small, flatOnly)
+	}
+	if large <= small {
+		t.Fatalf("extraStateBytes did not grow with payload size: short-element run=%d, long-element run=%d", small, large)
+	}
+}
+
+// TestGroupMemoryUsageTruth_ContainerMinMaxVsHeap compares the container
+// charge against measured live-heap growth, the same one-sided (noise-
+// tolerant) bound TestGroupMemoryUsageTruth_VsHeap uses for string keys.
+func TestGroupMemoryUsageTruth_ContainerMinMaxVsHeap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("heap measurement is noisy; skipped in -short")
+	}
+	const n = 10_000
+	const elemLen = 32
+	h := &HashAggregate{
+		GroupByCols: []string{"g"},
+		Aggs:        []AggColumn{{Func: AggMin, InputCol: "c_arr", OutputCol: "lo", OutputType: parquet.TypeArray}},
+	}
+	ctx := context.Background()
+	if err := h.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Build the input first so its allocations don't pollute the window.
+	b := containerArrayBatch(t, 0, n, elemLen)
+	var ms0, ms1 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&ms0)
+	if err := h.Consume(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&ms1)
+	grown := int64(ms1.HeapAlloc) - int64(ms0.HeapAlloc)
+	got := h.groupMemoryUsage()
+	if grown > 0 && got < grown/2 {
+		t.Fatalf("groupMemoryUsage = %d but live heap grew %d — estimate below 50%% of measured", got, grown)
+	}
+}
+
+// TestGroupMemoryUsageTruth_MinByContainer checks the same hole in
+// minMaxByState.bestVal: MIN_BY/MAX_BY's return column can be a container
+// too (aggSpecOutputType declares MIN_BY's output as its input's own type,
+// with no restriction to scalars), and bestVal then retains the same
+// GetValue box a container MIN/MAX retains as a Vector. A scalar bestVal
+// must stay on the flat charge alone (already measured close: a STRING
+// return column ran 487 B/group against 484 reported) — only the container
+// shape should push extraStateBytes past it.
+func TestGroupMemoryUsageTruth_MinByContainer(t *testing.T) {
+	const n = 5_000
+	schema := []parquet.Column{
+		{Name: "g", Type: parquet.TypeInt32},
+		{Name: "k", Type: parquet.TypeFloat64},
+		{Name: "c_arr", Type: parquet.TypeArray, Nullable: true,
+			ElementType: &parquet.Column{Name: "element", Type: parquet.TypeString, Nullable: true}},
+	}
+	b := batch.NewRecordBatch(schema, n)
+	for i := 0; i < n; i++ {
+		b.Columns[0].SetValue(i, int32(i))
+		b.Columns[1].SetValue(i, float64(i))
+		arr := make([]any, 8)
+		for j := range arr {
+			arr[j] = fmt.Sprintf("v-%032d", i)
+		}
+		b.Columns[2].SetValue(i, arr)
+	}
+
+	h := &HashAggregate{
+		GroupByCols: []string{"g"},
+		Aggs: []AggColumn{{Func: AggMinBy, InputCol: "c_arr", InputCol2: "k",
+			OutputCol: "lo", OutputType: parquet.TypeArray}},
+	}
+	ctx := context.Background()
+	if err := h.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Consume(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	flatOnly := int64(n) * 80
+	if h.extraStateBytes <= flatOnly {
+		t.Fatalf("extraStateBytes = %d, want > the flat per-agg figure %d — MIN_BY's retained container bestVal must be charged too",
+			h.extraStateBytes, flatOnly)
+	}
+}

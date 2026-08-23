@@ -53,9 +53,15 @@ func isContainerMinMax(fn AggFunc, typ batch.TypeID) bool {
 // group that sees only NULLs answers NULL, which is what a nil best means.
 func (s *containerMinMaxState) observe(src *batch.Vector, row int) {
 	// Resolve a late-materialization view: CompareValuesAt indexes the
-	// vector's own storage, and a view has none. The view's OWN null bits
-	// (outer-join fill) were consulted by the caller, so following the
-	// index here is safe.
+	// vector's own storage, and a view has none. In practice src.Base is
+	// nil here today — HashAggregate does not implement ViewAware, so
+	// Consume flattens every view before updateGroup ever calls observe
+	// (FlattenForConsumer(b, nil), which flattens unconditionally for a
+	// non-view-aware consumer). The caller's null check above
+	// (v.Nulls.IsNullFast(row)) only covers the view's OWN override bits,
+	// not Base's — it does NOT establish that following the index to Base
+	// here is safe. A future view-aware caller that reaches this branch
+	// with src.Base != nil must re-audit its own null check accordingly.
 	if src.Base != nil {
 		row = int(src.Indices[row])
 		src = src.Base
@@ -95,6 +101,20 @@ func (s *containerMinMaxState) value() any {
 		return nil
 	}
 	return s.best.GetValue(0)
+}
+
+// memBytes reports best's actual retained heap footprint. HashAggregate's
+// per-group flat charge (extraStateBytes += len(h.Aggs) * 80, sized for a
+// scalar box) undercounts a container's retained value by an order of
+// magnitude once its payload has any size to it — best is a whole copied
+// nested structure, not a scalar slot. Callers delta-adjust extraStateBytes
+// against this whenever best is set or replaced (observe, merge), the same
+// pattern already used for distinctSets.
+func (s *containerMinMaxState) memBytes() int64 {
+	if s == nil || s.best == nil {
+		return 0
+	}
+	return s.best.MemBytes()
 }
 
 // copyContainerRow materializes src[row] as a standalone one-row vector.
