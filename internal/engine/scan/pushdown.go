@@ -1,6 +1,8 @@
 package scan
 
 import (
+	"math"
+
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/optswitch"
 	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -14,6 +16,15 @@ var StatsPrune = optswitch.Register("stats-prune", "WADJET_STATS_PRUNE",
 	"min/max zonemap row-group pruning from static scan predicates")
 
 // StatsPredicate evaluates whether a row group can be skipped based on column stats.
+//
+// Value must already be in the STATS domain — the representation
+// parquet.RowGroupStats decodes the footer's bounds into, which for several
+// types is not the representation a SQL literal arrives in. This layer
+// compares two `any` values by their Go kind and cannot tell an unscaled
+// DECIMAL bound from a scaled literal, or sixteen raw address bytes from an
+// address in text; both pairs land in the same kind and get compared as if
+// they agreed, which is #442. kernel.StatsDomainValue is the conversion, and
+// the producer WITHHOLDS a predicate it cannot convert.
 type StatsPredicate struct {
 	Column string
 	Op     exec.CompareOp
@@ -116,52 +127,92 @@ func compareValues(a, b any) int {
 // day-number stats against zero and prune every row group the moment
 // string date literals reached the stats layer.
 func compareValuesOK(a, b any) (int, bool) {
-	switch av := a.(type) {
-	case int64:
-		bv, ok := toInt64OK(b)
-		if !ok {
-			return 0, false
+	if ai, ok := toInt64OK(a); ok {
+		if bi, ok := toInt64OK(b); ok {
+			return cmpOrdered(ai, bi), true
 		}
-		if av < bv {
-			return -1, true
+		if bf, ok := toFloat64OK(b); ok {
+			return cmpInt64Float64(ai, bf)
 		}
-		if av > bv {
-			return 1, true
-		}
-		return 0, true
-	case int32:
-		return compareValuesOK(int64(av), b)
-	case float64:
-		bv, ok := toFloat64OK(b)
-		if !ok {
-			return 0, false
-		}
-		if av < bv {
-			return -1, true
-		}
-		if av > bv {
-			return 1, true
-		}
-		return 0, true
-	case float32:
-		return compareValuesOK(float64(av), b)
-	case string:
-		bv, ok := b.(string)
-		if !ok {
-			return 0, false
-		}
-		if av < bv {
-			return -1, true
-		}
-		if av > bv {
-			return 1, true
-		}
-		return 0, true
-	default:
 		return 0, false
 	}
+	if af, ok := toFloat64OK(a); ok {
+		if bf, ok := toFloat64OK(b); ok {
+			if math.IsNaN(af) || math.IsNaN(bf) {
+				return 0, false
+			}
+			return cmpOrdered(af, bf), true
+		}
+		if bi, ok := toInt64OK(b); ok {
+			c, ok := cmpInt64Float64(bi, af)
+			return -c, ok
+		}
+		return 0, false
+	}
+	as, aok := a.(string)
+	bs, bok := b.(string)
+	if aok && bok {
+		return cmpOrdered(as, bs), true
+	}
+	return 0, false
 }
 
+func cmpOrdered[T int64 | float64 | string](a, b T) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
+// cmpInt64Float64 orders an integer against a float EXACTLY, at every
+// magnitude, in one direction only — so that compareValuesOK gives the same
+// answer whichever operand it is handed first.
+//
+// It used to not. The int64 arm coerced through toInt64OK, which REFUSES a
+// non-integral float; the float64 arm coerced through toFloat64OK, which
+// accepts an int64 without complaint. So (stat, literal) and
+// (literal, stat) could disagree about whether the pair was even comparable —
+// and CanPruneRowGroup passes them in the two different orders, OpEq one way
+// and the five ordered operators the other. The DECIMAL half of #442 was
+// invisible on `<`, `<=`, `>` and `>=` for exactly that reason: they were
+// saved by a refusal, not by being right, and an INTEGRAL literal against the
+// same wrong domain pruned them too.
+func cmpInt64Float64(i int64, f float64) (int, bool) {
+	switch {
+	case math.IsNaN(f):
+		return 0, false
+	case math.IsInf(f, 1):
+		return -1, true
+	case math.IsInf(f, -1):
+		return 1, true
+	}
+	// 2^63 is exactly representable; anything at or past it is outside int64.
+	const twoPow63 = float64(1) * (1 << 62) * 2
+	if f >= twoPow63 {
+		return -1, true
+	}
+	if f < -twoPow63 {
+		return 1, true
+	}
+	t := math.Trunc(f)
+	if ti := int64(t); i != ti {
+		return cmpOrdered(i, ti), true
+	}
+	switch frac := f - t; {
+	case frac > 0:
+		return -1, true
+	case frac < 0:
+		return 1, true
+	}
+	return 0, true
+}
+
+// toInt64OK and toFloat64OK now report only what a value IS, never what it
+// could be coerced to: the pairing is decided by compareValuesOK, which is the
+// only place that can make the choice symmetric.
 func toInt64OK(v any) (int64, bool) {
 	switch tv := v.(type) {
 	case int64:
@@ -170,8 +221,6 @@ func toInt64OK(v any) (int64, bool) {
 		return int64(tv), true
 	case int:
 		return int64(tv), true
-	case float64:
-		return int64(tv), tv == float64(int64(tv))
 	default:
 		return 0, false
 	}
@@ -182,12 +231,6 @@ func toFloat64OK(v any) (float64, bool) {
 	case float64:
 		return tv, true
 	case float32:
-		return float64(tv), true
-	case int64:
-		return float64(tv), true
-	case int32:
-		return float64(tv), true
-	case int:
 		return float64(tv), true
 	default:
 		return 0, false

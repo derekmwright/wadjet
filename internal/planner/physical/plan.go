@@ -19,6 +19,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/config"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
@@ -10854,35 +10855,43 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 
 	scanCtx, cancel := context.WithCancel(ctx)
 	// Convert logical predicates to scan predicates for row-group pruning.
-	// Date-typed columns store int32 days-since-epoch; a string literal
-	// ('2013-07-31') coerces to its day number HERE, where the schema is
-	// known — the stats layer refuses cross-type comparisons, so without
-	// this coercion date-range predicates simply never prune.
-	dateCols := make(map[string]bool, 2)
+	//
+	// The literal is in the ENGINE's domain and the row group's statistics
+	// and dictionary are in the FILE's, and for several types those are not
+	// the same thing: a DATE is a day number against a text literal, a
+	// DECIMAL's bounds are the unscaled integer against a float, an IPV6's
+	// are the raw sixteen bytes against an address in text. The prune layer
+	// compares two `any` values by their Go kind and cannot tell — so the
+	// conversion happens HERE, the one place that still holds the column's
+	// type and scale, and a predicate with no conversion is WITHHELD rather
+	// than pushed down raw (#442, #438). kernel.StatsDomainValue is the same
+	// conversion the filter kernel applies to the literal, so the prune and
+	// the filter cannot disagree about what the predicate means.
+	statsCols := make(map[string]parquet.Column, len(tableMeta.Schema.Columns))
 	for _, c := range tableMeta.Schema.Columns {
-		if c.Type == parquet.TypeDate {
-			dateCols[c.Name] = true
-		}
+		statsCols[c.Name] = c
 	}
 	var sp []scanPredicate
 	var eqProbes []scan.EqProbe
 	for _, pred := range s.scanPreds {
-		if pred.Column != "" && pred.Op != "" && pred.Value != nil {
-			val := pred.Value
-			if dateCols[pred.Column] {
-				if str, ok := val.(string); ok {
-					if ts, err := time.Parse("2006-01-02", str); err == nil {
-						val = ts.Unix() / 86400
-					}
-				}
-			}
-			sp = append(sp, scanPredicate{Column: pred.Column, Op: pred.Op, Value: val})
-			// Equality conjuncts also feed the dictionary probe — the
-			// precise prune where zonemaps are blind (point filters on
-			// high-cardinality columns).
-			if pred.Op == "=" && scan.DictPrune.On() {
-				eqProbes = append(eqProbes, scan.EqProbe{ColName: pred.Column, Value: val})
-			}
+		if pred.Column == "" || pred.Op == "" || pred.Value == nil {
+			continue
+		}
+		col, known := statsCols[pred.Column]
+		if !known {
+			continue
+		}
+		val, ok := kernel.StatsDomainValue(col.Type, int(col.Scale), pred.Value)
+		if !ok {
+			continue
+		}
+		sp = append(sp, scanPredicate{Column: pred.Column, Op: pred.Op, Value: val})
+		// Equality conjuncts also feed the dictionary probe — the
+		// precise prune where zonemaps are blind (point filters on
+		// high-cardinality columns). Dictionary entries are raw file
+		// values too, so they take the same converted literal.
+		if pred.Op == "=" && scan.DictPrune.On() {
+			eqProbes = append(eqProbes, scan.EqProbe{ColName: pred.Column, Value: val})
 		}
 	}
 

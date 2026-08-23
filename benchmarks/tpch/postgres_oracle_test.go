@@ -302,14 +302,22 @@ func (o *postgresOracle) load(t *testing.T, ctx context.Context) {
 
 	o.createPostgresSchema(t, ctx)
 
-	ingesters := make(map[string]*ingest.Ingester, len(AllTables))
-	for name, schema := range AllTables {
+	tables := oracleTables()
+	ingesters := make(map[string]*ingest.Ingester, len(tables))
+	for name, schema := range tables {
+		rowGroup := 50_000
+		if name == pgDecimalTable {
+			// Small row groups so the DECIMAL entries actually cross a
+			// zonemap boundary: a single row group has bounds wide enough to
+			// contain every literal, and #438 was a PRUNE.
+			rowGroup = pgDecimalRowGroup
+		}
 		if err := db.CreateTable(ctx, name, schema, nil); err != nil {
 			t.Fatalf("wadjet create table %s: %v", name, err)
 		}
 		ingesters[name] = db.NewIngester(name, schema, nil, ingest.Config{
 			MaxBufferRows: 200_000,
-			RowGroupSize:  50_000,
+			RowGroupSize:  rowGroup,
 		})
 	}
 
@@ -339,6 +347,9 @@ func (o *postgresOracle) load(t *testing.T, ctx context.Context) {
 		if err := GenerateChunked(scale, 50_000, sink); err != nil {
 			t.Fatalf("generating SF%g: %v", float64(scale), err)
 		}
+	}
+	if err := sink(pgDecimalTable, pgDecimalRows()); err != nil {
+		t.Fatalf("%v", err)
 	}
 	for name, ing := range ingesters {
 		if err := ing.FlushAll(ctx); err != nil {
@@ -392,7 +403,7 @@ func newOracleStore(t *testing.T, committed bool) (objstore.Store, error) {
 // PostgreSQL answer a different query.
 func (o *postgresOracle) createPostgresSchema(t *testing.T, ctx context.Context) {
 	t.Helper()
-	for name, schema := range AllTables {
+	for name, schema := range oracleTables() {
 		if _, err := o.conn.Exec(ctx, "DROP TABLE IF EXISTS "+name+" CASCADE"); err != nil {
 			t.Fatalf("drop %s: %v", name, err)
 		}
@@ -449,6 +460,57 @@ func (o *postgresOracle) createPostgresIndexes(t *testing.T, ctx context.Context
 	}
 }
 
+// pgDecimalTable is a fixture the TPC-H schema cannot provide. TPC-H models
+// every monetary column as FLOAT64 (benchmarks/tpch/schema.go: "Monetary
+// values use FLOAT64"), so no arm of this oracle ever put a predicate on a
+// DECIMAL column — and #438 was `WHERE v = 0.25` on a DECIMAL(9,2) returning
+// no rows at all. PostgreSQL's `numeric` is the authority on what those
+// predicates mean (ADR-0012), so the fixture gains a table rather than the
+// question going unasked.
+//
+// It is DELIBERATELY not in AllTables: that map drives the harness, the
+// seeders and both data tiers, and this table has no place in any of them.
+const (
+	pgDecimalTable    = "dec_probe"
+	pgDecimalRows_    = 200
+	pgDecimalRowGroup = 50
+)
+
+// oracleTables is AllTables plus the fixtures that exist only for this oracle.
+func oracleTables() map[string]parquet.Schema {
+	out := make(map[string]parquet.Schema, len(AllTables)+1)
+	for name, schema := range AllTables {
+		out[name] = schema
+	}
+	out[pgDecimalTable] = parquet.Schema{Columns: []parquet.Column{
+		{Name: "d_key", Type: parquet.TypeInt64},
+		{Name: "d_2", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
+		{Name: "d_4", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true},
+	}}
+	return out
+}
+
+// pgDecimalRows is MONOTONIC in both decimal columns and spans both signs, so
+// each row group's bounds are narrow and a literal in the middle of one is
+// outside every other's — the only shape a wrong row-group prune is visible
+// through. Every value is exact at its column's scale.
+func pgDecimalRows() []map[string]any {
+	rows := make([]map[string]any, pgDecimalRows_)
+	for i := range rows {
+		r := map[string]any{"d_key": int64(i)}
+		// Every 17th row is NULL in d_2 and every 23rd in d_4, on strides that
+		// do not line up with the row-group boundary.
+		if i%17 != 0 {
+			r["d_2"] = float64(i-100) * 0.25
+		}
+		if i%23 != 0 {
+			r["d_4"] = float64(i-100) * 0.0625
+		}
+		rows[i] = r
+	}
+	return rows
+}
+
 // postgresColumnType maps one Wadjet column type to the PostgreSQL type that
 // carries the same values and declares the same wire OID.
 func postgresColumnType(t *testing.T, c parquet.Column) string {
@@ -471,6 +533,8 @@ func postgresColumnType(t *testing.T, c parquet.Column) string {
 		return "date"
 	case parquet.TypeTimestamp:
 		return "timestamp"
+	case parquet.TypeDecimal:
+		return fmt.Sprintf("numeric(%d,%d)", c.Precision, c.Scale)
 	default:
 		t.Fatalf("column %s has type %s, which the PostgreSQL oracle does not map yet", c.Name, c.Type)
 		return ""
@@ -480,7 +544,7 @@ func postgresColumnType(t *testing.T, c parquet.Column) string {
 // copyInto loads one chunk through COPY, which is what keeps the larger tier a
 // couple of minutes rather than an afternoon of INSERTs.
 func (o *postgresOracle) copyInto(ctx context.Context, table string, rows []map[string]any) error {
-	schema, ok := AllTables[table]
+	schema, ok := oracleTables()[table]
 	if !ok {
 		return fmt.Errorf("no schema for table %s", table)
 	}

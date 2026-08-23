@@ -34,12 +34,40 @@ import (
 // extends it for local hunting and WADJET_TM_FUZZ_SEED_START moves the window.
 // A failing seed IS the repro: generation is fully determined by it.
 
+// tmFuzzRegressionSeeds are the seeds whose generated query once found a
+// defect. They run on EVERY invocation, whatever window the rolling arm is
+// set to, and they are the reason a fixed defect stays fixed.
+//
+// The rolling window is a hunting ground, not a corpus: it is 20-40 seeds wide
+// and it always starts at 1, so a defect a seed found stops being checked the
+// moment the window moves past it — or, as with these two, was never inside it
+// to begin with. #442 was found at seeds 160 and 258, both outside both
+// windows, by a hand-moved WADJET_TM_FUZZ_SEED_START. Nothing would have
+// noticed it coming back.
+//
+// This is the ratchet tmFuzzPins already provides for known divergences,
+// pointed the other way: a pin says "this seed is allowed to diverge until the
+// issue is closed", and a regression seed says "this seed is never allowed to
+// diverge again". Add a seed here whenever one finds a defect, in the same
+// commit as the fix, with the issue in the comment.
+var tmFuzzRegressionSeeds = []int64{
+	160, // #442 — c_dec = 1500.15 pruned by an unscaled DECIMAL bound
+	258, // #442 — c_ipv6 >= '2001:db8::5' pruned by a raw 16-byte bound
+}
+
 func tmFuzzSeeds(def int) []int64 {
 	start := int64(tmFuzzEnvInt("WADJET_TM_FUZZ_SEED_START", 1))
 	count := tmFuzzEnvInt("WADJET_TM_FUZZ_SEED_COUNT", def)
-	out := make([]int64, count)
-	for i := range out {
-		out[i] = start + int64(i)
+	out := make([]int64, 0, count+len(tmFuzzRegressionSeeds))
+	in := make(map[int64]bool, count+len(tmFuzzRegressionSeeds))
+	for i := 0; i < count; i++ {
+		seed := start + int64(i)
+		out, in[seed] = append(out, seed), true
+	}
+	for _, seed := range tmFuzzRegressionSeeds {
+		if !in[seed] {
+			out, in[seed] = append(out, seed), true
+		}
 	}
 	return out
 }

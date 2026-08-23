@@ -307,6 +307,50 @@ func postgresSemanticsCases() []pgCase {
 			FROM nation ORDER BY r DESC, k DESC NULLS LAST, n_name`},
 	)
 
+	// --- DECIMAL predicates ---------------------------------------------
+	//
+	// The gap #438 fell through. TPC-H models every monetary column as
+	// FLOAT64, so no arm of this oracle had ever put a predicate on a DECIMAL
+	// column, and `WHERE v = 0.25` on a DECIMAL(9,2) holding 0.25 returned no
+	// rows — the row-group prune compared the literal against the UNSCALED
+	// bound (#442). PostgreSQL's `numeric` is what a client means by these,
+	// so it is the one that answers.
+	//
+	// dec_probe is monotonic in both columns over small row groups, and the
+	// literals are chosen from the LAST row group, whose unscaled bounds
+	// (1250..2475 for d_2) sit far above the literal's scaled value — which is
+	// what makes a raw comparison prune the row group holding the answer. A
+	// literal from a row group whose bounds straddle zero is absorbed and
+	// proves nothing. The entries project
+	// d_key rather than the decimal itself on purpose: PostgreSQL hands a
+	// numeric to the driver and Wadjet renders it as text, which is a
+	// difference of BOXING that the wire arm reports as a type OID — asking it
+	// here would report a divergence about neither engine's arithmetic.
+	out = append(out,
+		pgCase{name: "DecimalEqScale2", sql: `SELECT d_key FROM dec_probe WHERE d_2 = 12.75 ORDER BY d_key`},
+		pgCase{name: "DecimalEqScale2Negative", sql: `SELECT d_key FROM dec_probe WHERE d_2 = -20.00 ORDER BY d_key`},
+		pgCase{name: "DecimalEqScale2Zero", sql: `SELECT d_key FROM dec_probe WHERE d_2 = 0 ORDER BY d_key`},
+		// The same value written with more and with fewer decimals than the
+		// column carries. 12.750 IS 12.75; 12.751 is a value the column cannot
+		// hold, and PostgreSQL matches nothing rather than rounding.
+		pgCase{name: "DecimalEqTrailingZeros", sql: `SELECT d_key FROM dec_probe WHERE d_2 = 12.7500 ORDER BY d_key`},
+		pgCase{name: "DecimalEqPastScale", sql: `SELECT d_key FROM dec_probe WHERE d_2 = 12.751 ORDER BY d_key`},
+		pgCase{name: "DecimalEqIntegerLiteral", sql: `SELECT d_key FROM dec_probe WHERE d_2 = 20 ORDER BY d_key`},
+		pgCase{name: "DecimalNe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 <> 12.75`},
+		pgCase{name: "DecimalLt", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 < 12.75`},
+		pgCase{name: "DecimalLe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 <= 12.75`},
+		pgCase{name: "DecimalGt", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 > 12.75`},
+		pgCase{name: "DecimalGe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 >= 12.75`},
+		pgCase{name: "DecimalIn", sql: `SELECT d_key FROM dec_probe WHERE d_2 IN (12.75, -20.00, 0.25) ORDER BY d_key`},
+		pgCase{name: "DecimalBetween", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 BETWEEN 12.75 AND 20.00`},
+		pgCase{name: "DecimalCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_2 = 12.75 THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "DecimalIsNull", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IS NULL`},
+		// Scale 4, so the conversion is not pinned to one scale.
+		pgCase{name: "DecimalEqScale4", sql: `SELECT d_key FROM dec_probe WHERE d_4 = 3.1875 ORDER BY d_key`},
+		pgCase{name: "DecimalGeScale4", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 >= 3.1875`},
+		pgCase{name: "DecimalTwoColumns", sql: `SELECT d_key FROM dec_probe WHERE d_2 = 12.75 AND d_4 >= 0 ORDER BY d_key`},
+	)
+
 	// --- String ordering ------------------------------------------------
 	//
 	// Wadjet compares strings by bytes; PostgreSQL by the collation. The
