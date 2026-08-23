@@ -68,10 +68,30 @@ var (
 // the batch, permanently, because every column is reachable from the batch a
 // consumer kept.
 //
-// The pool only ever takes back a batch it minted (see outstanding): a WSHF
-// shuffle chunk, a row-based fallback batch or a batch already recycled is
-// ignored, so no second owner can be created for storage someone else
-// recycles.
+// # Identity, without a reference
+//
+// The pool only ever takes back a batch it minted, at the generation it minted
+// it: a WSHF shuffle chunk, a row-based fallback batch, a batch from another
+// pool or a batch already recycled is ignored, so no second owner can be
+// created for storage someone else recycles.
+//
+// That identity is a batch.MintStamp the pool writes ON the batch, never a
+// registry of outstanding pointers. A registry is a strong reference: the
+// batches this pool mints are whole decoded row groups (~280 MB each at SF100
+// lineitem widths), and most of the sources that own a pool have consumers
+// with NO release edge at all (the shuffle task's plain Next loop, the
+// hash-join build source, planner.StreamingSources) — every one of those would
+// pin its entire live set for the source's lifetime, invisibly to the memory
+// ledger, and any cap on the registry's size would silently turn reuse off
+// rather than bound the damage. The stamp inverts the direction: the pool
+// holds only its own idle list, a dropped batch (a bloom-filtered-to-nothing
+// row group, a ring discard at a cross-file boundary) is plain garbage the
+// moment the pipeline lets go of it, and a source whose consumer never
+// releases costs exactly one stamp per decode.
+//
+// A pool is created only where a RELEASE EDGE exists — see the caller side in
+// internal/worker (batchRecyclerOf arms it). A pool without one could never
+// take a backing back, so it would be pure overhead.
 //
 // See docs/design/scan-output-backing-reuse.md for the full statement and the
 // preconditions it rests on.
@@ -79,15 +99,23 @@ type BackingPool struct {
 	maxIdle      int
 	maxIdleBytes int64
 
+	// owner is this pool's process-unique producer id, stamped on every
+	// backing it mints. Immutable after construction.
+	owner uint64
+
 	mu        sync.Mutex
 	idle      []*batch.RecordBatch
 	idleBytes int64
-	// outstanding is the set of backings this pool handed out and has not
-	// taken back. It is the mint stamp: Recycle ignores anything absent from
-	// it. Self-pruning — an entry is deleted on the first Recycle whether or
-	// not the backing is admitted to idle — so it stays the size of the live
-	// set (bounded by the decode window and the dispenser budget).
-	outstanding map[*batch.RecordBatch]struct{}
+	// dropped is set by Drop when the owning source closes. A pool that has
+	// been dropped refuses every later release: retained row-group storage
+	// must not outlive the source that owns it, and a release still in flight
+	// at Close would otherwise re-grow the idle set behind it.
+	dropped bool
+	// seq numbers the mints. Bumped for every hand-out (fresh or reused), so
+	// a release that names an older Seq is a stale release from a previous
+	// generation of the same storage and is refused. Guarded by mu, which is
+	// also what orders the stamp reads and writes against each other.
+	seq uint64
 
 	hits    atomic.Int64
 	misses  atomic.Int64
@@ -109,14 +137,13 @@ type BackingPoolOpts struct {
 // NewBackingPool returns a pool for one scan source. It is safe for concurrent
 // use: decode workers call get, consumers call Recycle.
 func NewBackingPool(opts BackingPoolOpts) *BackingPool {
-	p := &BackingPool{maxIdle: opts.MaxIdle, maxIdleBytes: opts.MaxIdleBytes}
+	p := &BackingPool{maxIdle: opts.MaxIdle, maxIdleBytes: opts.MaxIdleBytes, owner: batch.NewMintOwner()}
 	if p.maxIdle <= 0 {
 		p.maxIdle = defaultMaxIdleBackings
 	}
 	if p.maxIdleBytes <= 0 {
 		p.maxIdleBytes = defaultMaxIdleBackingBytes
 	}
-	p.outstanding = make(map[*batch.RecordBatch]struct{}, p.maxIdle+2)
 	return p
 }
 
@@ -126,6 +153,11 @@ type BackingPoolStats struct {
 	Misses    int64 // decodes that had to mint one
 	Claimed   int64 // releases refused because a consumer had claimed the batch
 	IdleBytes int64
+	// Held is the number of batches this pool holds a Go reference to. It is
+	// exactly the idle free list: the pool never references a backing it has
+	// handed out, so a source whose consumer has no release edge holds nothing
+	// here however many row groups it decodes.
+	Held int
 }
 
 // Stats snapshots the counters.
@@ -135,12 +167,14 @@ func (p *BackingPool) Stats() BackingPoolStats {
 	}
 	p.mu.Lock()
 	idle := p.idleBytes
+	held := len(p.idle)
 	p.mu.Unlock()
 	return BackingPoolStats{
 		Hits:      p.hits.Load(),
 		Misses:    p.misses.Load(),
 		Claimed:   p.claimed.Load(),
 		IdleBytes: idle,
+		Held:      held,
 	}
 }
 
@@ -151,9 +185,12 @@ func (p *BackingPool) Drop() {
 		return
 	}
 	p.mu.Lock()
+	for _, b := range p.idle {
+		b.SetMint(batch.MintStamp{})
+	}
 	p.idle = nil
 	p.idleBytes = 0
-	p.outstanding = map[*batch.RecordBatch]struct{}{}
+	p.dropped = true
 	p.mu.Unlock()
 }
 
@@ -191,7 +228,8 @@ func (p *BackingPool) get(schema []pqt.Column, numRows int) *batch.RecordBatch {
 		p.misses.Add(1)
 		return nil
 	}
-	p.outstanding[b] = struct{}{}
+	p.seq++
+	b.SetMint(batch.MintStamp{Owner: p.owner, Seq: p.seq})
 	p.mu.Unlock()
 
 	for _, c := range b.Columns {
@@ -204,35 +242,52 @@ func (p *BackingPool) get(schema []pqt.Column, numRows int) *batch.RecordBatch {
 	return b
 }
 
-// track records a freshly minted backing as one of ours, so a later Recycle
-// will take it. Called with the batch the decode is about to write into.
+// track stamps a freshly minted backing as ours, so a later Recycle naming
+// that stamp will take it. Called with the batch the decode is about to write
+// into, while the decode still owns it exclusively.
+//
+// There is no registry and therefore no cap: stamping is O(1) and costs the
+// pool no reference, so a source that mints ten thousand backings and releases
+// none is exactly as cheap as one that releases every one — and, unlike the
+// registry it replaces, cannot cross a size bound and silently stop
+// recognizing its own batches.
 func (p *BackingPool) track(b *batch.RecordBatch, schema []pqt.Column) {
 	if p == nil || b == nil || !scanBackingReuse.On() || !reusableShape(schema) {
 		return
 	}
 	p.mu.Lock()
-	// Never grow the mint registry past what the caps could ever hold plus
-	// the live set the budgets allow; a pathological source that never
-	// releases would otherwise accumulate entries for the source's lifetime.
-	if len(p.outstanding) < 4*p.maxIdle+8 {
-		p.outstanding[b] = struct{}{}
-	}
+	p.seq++
+	b.SetMint(batch.MintStamp{Owner: p.owner, Seq: p.seq})
 	p.mu.Unlock()
 }
 
-// Recycle is the release edge: the consumer side is done with b. It is a
-// no-op for a batch this pool did not mint. See the ownership rule on
-// BackingPool — the claim check here is the retention veto.
-func (p *BackingPool) Recycle(b *batch.RecordBatch) {
-	if p == nil || b == nil {
+// Recycle is the release edge: the consumer side is done with the batch it was
+// handed as b under the stamp mint. It is a no-op for a batch this pool did not
+// mint, and for a stamp that is not the CURRENT one for that storage — a stale
+// release from a previous generation, which must never re-admit a live
+// backing. See the ownership rule on BackingPool: the claim check below is the
+// retention veto.
+//
+// The caller captures mint when it takes delivery of the batch, not at release
+// time: reading the stamp back off the batch would defeat the generation check
+// exactly when it matters, since by then the batch may already carry the next
+// generation's stamp.
+func (p *BackingPool) Recycle(b *batch.RecordBatch, mint batch.MintStamp) {
+	if p == nil || b == nil || mint.Owner != p.owner {
 		return
 	}
 	p.mu.Lock()
-	if _, ours := p.outstanding[b]; !ours {
+	if p.dropped || b.Mint() != mint {
+		// The source closed, or the batch was already taken back / re-minted
+		// since — either way this release names storage that is no longer
+		// ours to hand out.
 		p.mu.Unlock()
 		return
 	}
-	delete(p.outstanding, b)
+	// Clear the stamp first: from here the batch is either ours again (idle)
+	// or nobody's (claimed, over cap), and a second release of the same
+	// generation finds nothing to take.
+	b.SetMint(batch.MintStamp{})
 	p.mu.Unlock()
 
 	if !scanBackingReuse.On() {
@@ -257,7 +312,7 @@ func (p *BackingPool) Recycle(b *batch.RecordBatch) {
 	sz := b.MemBytes()
 	p.mu.Lock()
 	// The escape hatch: an empty idle list always accepts, whatever the size.
-	if len(p.idle) >= p.maxIdle || (len(p.idle) > 0 && p.idleBytes+sz > p.maxIdleBytes) {
+	if p.dropped || len(p.idle) >= p.maxIdle || (len(p.idle) > 0 && p.idleBytes+sz > p.maxIdleBytes) {
 		p.mu.Unlock()
 		return
 	}

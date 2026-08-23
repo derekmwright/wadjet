@@ -160,9 +160,16 @@ Together they are exactly as conservative as the join half, one signal wider.
 deliberately does **not** route through `RecordBatch.pool`: `emitViewOutput`
 calls `DetachPool` on every late-materialized probe input, which is the
 dominant SF100 scan shape, so hanging reuse off the pool link would disable it
-precisely where the 130.8 s of heap-lock delay lives. The pool keeps its own
-registry of outstanding backings and only ever takes back one it minted, so no
-second owner can be created for storage someone else recycles.
+precisely where the 130.8 s of heap-lock delay lives. The pool recognizes its
+own backings by a `batch.MintStamp{Owner, Seq}` it writes **on** the batch, and
+only ever takes back one it minted at the generation it minted it, so no second
+owner can be created for storage someone else recycles — and no *live* backing
+can be re-admitted by a stale release. The stamp, rather than a registry of
+outstanding pointers, is deliberate: a registry is a strong reference to whole
+decoded row groups (~280 MB each at SF100) that the memory ledger cannot see,
+held for the producer's lifetime on every consumer that never releases. For the
+same reason a pool is created **only** where a release edge exists —
+`batchRecyclerOf` arms it — never at source construction.
 
 **Kill switch:** `WADJET_SCAN_BACKING_REUSE=0` (`optswitch` `scan-backing-reuse`).
 
@@ -174,7 +181,11 @@ and the failure modes are in `docs/design/scan-output-backing-reuse.md`.
 
 **Consequence for every new consumer, restated:** keeping a batch (or any
 vector reachable from it) past the call that handed it over still means
-`Detach`. What is new is the other side of the contract — **`retire` is now
+`Detach` — and *any boxed value that points into column storage counts as
+keeping it*. `Vector.GetValue` is the boxing boundary and every arm of it now
+copies (#391: the `TypeBytes` arm returned the arena slice, so MIN_BY/MAX_BY
+over BYTES and a boxed BYTES group key answered from whatever the producer had
+written since). What is new is the other side of the contract — **`retire` is now
 load-bearing for correctness, not only for the dispenser's byte budget.**
 Anything that retires a morsel before its sink is finished with the batch turns
 this into silent corruption.

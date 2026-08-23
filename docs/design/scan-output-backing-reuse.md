@@ -144,8 +144,8 @@ probe's views still point into it. This lever does not route through
 `RecordBatch.pool` at all — deliberately, because `emitViewOutput` calls
 `DetachPool` on *every* late-materialized probe input, which is the dominant
 SF100 scan shape; hanging reuse off `b.pool` would disable it exactly where the
-130.8 s lives. Instead the scan pool holds its own registry of outstanding
-backings, and the retire edge — which is later than the `ReleaseInputs` edge —
+130.8 s lives. Instead the scan pool stamps its own identity **on** the batch
+(§4.1.1), and the retire edge — which is later than the `ReleaseInputs` edge —
 is what makes that safe.
 
 ### 3.2 Preconditions this rests on, and where they are audited
@@ -158,6 +158,39 @@ is what makes that safe.
 | `retire` fires after the whole chain **and** the sink, once per parent | `morsel_dispenser.go` `dispatch`; `executor_fragment.go` consumer bodies |
 | a reset vector is bit-identical to a fresh one | `Vector.ResetForWrite` / `resizeCleared` / `Bitmap.ResetNonNull` (all clear what they resize) |
 | the decoded-chunk cache owns its own copy | `decoded_cache.go` `cloneChunkVector` deep-copies on `Offer`; `fillFromCache` copies *into* our vector |
+| a value **boxed** out of a column owns its storage | `Vector.GetValue` — every arm returns a copy, including `TypeBytes` since the fix for #391 (before it, that one arm returned the arena slice itself) |
+| at most one goroutine can `Claim` a given vector | `Vector.claimed` is a plain `bool` read-modify-write (`vector.go:353`), **not** an atomic — see the constraint below |
+
+**`Vector.Claim` is a non-atomic RMW, and the claim is now a correctness
+veto.** It is sound today because no consumer that receives a *split* parent
+ever claims: on the pipeline-breaker path splitting is gated to
+`*exec.HashAggregate` (`executor_fragment.go:1620`), which copies rows out
+during `Consume` and never `Detach`es, and on the linear parallel path the
+audited chain operators and the streaming sinks copy or serialize rather than
+retain (`HashJoinProbe.emitViewOutput` uses `DetachPool`, which deliberately
+does *not* claim). The moment a consumer both takes views over a shared parent
+and `Detach`es — k goroutines racing a write to the same `claimed` field —
+`claimed` has to become an `atomic.Bool` first. That was a lost *reuse* before
+this lever; it is a lost *veto* now.
+
+### 3.3 Consumer matrix
+
+What each consumer of a scan batch does with the storage, and therefore
+whether the backing can come back:
+
+| consumer | what it does with our storage | release outcome |
+|---|---|---|
+| `Filter`, `ColumnPrune`, `Project` | writes `Sel` / mints its own output vectors; never writes input columns (`morsel-execution.md` §4.1.1) | reusable |
+| `HashJoinProbe` (late materialization) | emits **views** over our columns and calls `DetachPool` — no claim; the views die with its output batch | reusable, unless a downstream `Detach` propagates a claim through `Vector.Base` |
+| `HashAggregate` | **copies** every value into group state during `Consume` — accumulators are typed scalars, group keys are serialized into `keyBuf` / `compactKeys`. **Except** values boxed through `Vector.GetValue`: `keyValues` for a boxed group key, `minMaxByState.bestVal` for MIN_BY/MAX_BY. `TypeBytes` returned an arena alias there and this operator never `Detach`es, so nothing vetoed the reuse — fixed in `GetValue`, which now copies (#391) | reusable |
+| hash-join **build**, `Sort`, `Window`, `SortMergeJoin`, `batch_collector`, partitioned aggregation | retain past the call and `Detach` (ADR-0016) | **vetoed**, permanently for that backing |
+| shuffle sink / WSHF writer, gather output | serializes into its own buffers | reusable |
+| spill | writes to disk | reusable |
+
+Anything added to this table has to answer the same question: does it keep a
+reference — including a *boxed value* that points into column storage — past
+the call it was handed the batch in? If yes, it claims; if it cannot claim, the
+box must own its bytes.
 
 ---
 
@@ -170,18 +203,82 @@ row-group batches, in `internal/engine/scan/backing_pool.go`.
 
 ```
 get(schema, numRows) → *batch.RecordBatch | nil     // called by the decode worker
-Recycle(b)                                          // called on the release edge
+Recycle(b, mint)                                    // called on the release edge
 ```
 
 * `get` pops an idle backing whose **shape** matches the read schema (column
   count, per-column `Type`, DECIMAL `Scale`, VECTOR `Dimension`), calls
   `Vector.ResetForWrite(numRows)` on every column and `Sel = nil`, `Len =
-  numRows` on the shell, and records it as *outstanding*. A miss returns nil
-  and the caller mints `batch.NewRecordBatch` as before.
-* `Recycle` looks the batch up in the outstanding set (foreign batches are
-  ignored — §3), removes it, and admits it to the idle list only if
-  `!b.Retained()` and no column reports `Claimed()`, and the caps below allow
+  numRows` on the shell, and **stamps** it (§4.1.1). A miss returns nil and the
+  caller mints `batch.NewRecordBatch` and stamps that instead (`track`).
+* `Recycle` verifies the stamp — ours, and the *current* generation — clears
+  it, and admits the batch to the idle list only if `!b.Retained()`, no column
+  reports `Claimed()`, and the caps below allow it.
+
+#### 4.1.1 Identity is a stamp, never a reference
+
+The pool must recognize a batch it minted and refuse everything else: a WSHF
+shuffle chunk, a row-based fallback batch, a batch from another pool or one
+already recycled. The obvious implementation — a
+`map[*batch.RecordBatch]struct{}` of everything handed out — is the wrong one,
+and was the first version's defect:
+
+* It is a **strong reference**, invisible to the memory ledger. The batches
+  here are whole decoded row groups, ~280 MB each at SF100 `lineitem` widths.
+* Most sources that own a pool have consumers with **no release edge at all**
+  (below). Every one of those would pin its entire live set for the source's
+  lifetime.
+* Batches the pipeline simply **drops** — a `bloomFilteredSource` row group
+  filtered to nothing, a ring discard at a cross-file boundary — never reach a
+  release edge, so their entries would never leave the map at all.
+* Any bound on the map's *size* makes it worse, not better: past the bound the
+  pool stops recognizing its own batches and reuse switches itself off
+  silently, on exactly the sources that decode the most.
+
+So identity lives on the batch instead, as a `batch.MintStamp{Owner, Seq}`:
+
+* `Owner` is a process-unique producer id (`batch.NewMintOwner`). Zero means
+  unstamped — what every foreign batch carries — so adopting one is impossible
+  by construction rather than by lookup.
+* `Seq` is bumped on **every** hand-out of the same storage. A release names
+  the `Seq` it took delivery under (the dispenser captures it at `dispatch`,
+  the linear path before `push`), so a stale release from a previous generation
+  — a `retire` that fires twice around a re-mint — names an old `Seq` and is
+  refused. Re-admitting a **live** backing to the free list would hand one
+  buffer to two decoders; that is the one failure this design must not have,
+  and the generation check is what forecloses it. (The `retire` closures are
+  also idempotent at the source — see §4.2 — so this is belt and braces.)
+* `Drop` (source close) clears the idle stamps and refuses every later
+  release, so retained row-group storage never outlives the source that owns
   it.
+
+The pool therefore references nothing it has handed out. A dropped batch is
+plain garbage the moment the pipeline lets go of it, a source whose consumer
+never releases costs exactly one stamp per decode, and there is no cap to
+cross. `BackingPoolStats.Held` is the assertion seam: it is `len(idle)` and
+nothing else.
+
+#### 4.1.2 No release edge, no pool
+
+A pool is created **only** where a release edge exists. `batchRecyclerOf`
+(`morsel_dispenser.go`) both resolves the source's recycle hook and *arms* it:
+resolving the hook is the consumer's statement that it will release. Callers
+resolve before the source's first `Next`, so the first decode is already
+pooled.
+
+Consumers with no release edge therefore build no pool at all, and their
+sources allocate exactly as they did before this lever:
+
+| consumer | where |
+|---|---|
+| shuffle task's plain `src.Next` loop (base-table scan → repartition — the highest-volume SF100 stage) | `executor.go` |
+| `planner.StreamingSources` | `executor.go` |
+| hash-join build source | `executor_fragment.go` |
+| `runFragmentWithBreakers` serial / post-breaker phases | `executor_fragment.go` |
+
+Adding a release edge to any of them is a one-line change *plus* the argument
+that the edge is genuinely later than every reader — the same argument §3
+makes for the two edges that exist.
 
 **Reset, not re-allocate, is what wins.** `ResetForWrite` retains every backing
 array's capacity: the typed slice is re-sliced and cleared (the same memclr
@@ -203,15 +300,24 @@ it (SF100 `lineitem`, ~280 MB/group).
 ### 4.2 Where it is wired
 
 ```
+batchRecyclerOf(src)              ARMS the pool — no release edge, no pool
+       │
+       ▼
 cachedFileStreamSource            owns *scan.BackingPool for its whole life
   ├─ DecodeAheadOpts.Backing  ───► DecodeAheadIter.decodeLoop
   │                                  └─ ReadRowGroupNativeBacked(...)
   └─ RowGroupIter.SetBackingPool ─► RowGroupIter.Next
                                      └─ ReadRowGroupNativeBacked(...)
 
-morselDispenser.dispatch retire ─► src.RecycleBatch(parent)   [parallel path]
-runFragmentLinear after push    ─► src.RecycleBatch(b)        [serial path]
+morselDispenser.dispatch retire ─► src.RecycleBatch(parent, mint)  [parallel]
+runFragmentLinear after push    ─► src.RecycleBatch(b, mint)       [serial]
 ```
+
+Both retire closures fire **once**: the split path via its view refcount
+reaching zero, the unsplit path via a `sync.Once`. A retire that ran twice used
+to double-credit the dispenser's byte budget; now it would also be a second
+release of the parent's backing, so idempotence at the *source* of the signal
+is part of the ownership rule rather than an accounting nicety.
 
 The pool lives on the **source**, not the iterator, so it survives the
 cross-file transition (a batch from file *F* may still be in flight when the
@@ -263,8 +369,8 @@ STRING/BYTES/IPv6/CIDR/UUID (the variable-width `BytesColumn` arena — the
   named candidate after this one.
 * **Eager/manifest stage inputs** (`manifestStreamSource`). It creates a new
   inner `cachedFileStreamSource` per resolved file set, so a release arriving
-  after the swap would reach the wrong pool — where the mint registry would
-  ignore it anyway. Its inputs are shuffle chunks rather than parquet row
+  after the swap would reach the wrong pool — where the stamp's `Owner` check
+  refuses it anyway. Its inputs are shuffle chunks rather than parquet row
   groups, so there is nothing to win; forwarding the hook through it would need
   a lock around `inner` for no measured gain.
 * **The decoded-chunk cache's clones.** `cloneChunkVector` allocates the
@@ -370,6 +476,13 @@ mechanism working: those batches genuinely outlive the call.
   `gc_delta` is the signal that says which way the trade went. It is *not*
   charged to the task ledger; if a future envelope needs it to be, the seam is
   `BackingPool.IdleBytes()`.
+* **A release that names a stale generation.** Refused by the `Seq` check
+  (§4.1.1) and, upstream of it, by the retire closures' once-only firing. The
+  pool test `TestBackingPoolRefusesStaleGenerationRelease` drives the exact
+  shape: release, re-mint, then the old release again.
+* **A new consumer that forgets to arm.** It simply gets no reuse — the
+  pre-lever behavior — never a wrong read. `backing_hits == 0` on a path that
+  should have it is the signal.
 * **Cross-file shape drift.** Two files of the "same" table with different
   DECIMAL scales or VECTOR dimensions. The shape check compares type, scale and
   dimension per column and rejects a mismatch, so the worst case is a missed

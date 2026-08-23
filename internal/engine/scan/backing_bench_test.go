@@ -50,7 +50,7 @@ func BenchmarkReadRowGroupBacking(b *testing.B) {
 						if err != nil {
 							b.Fatal(err)
 						}
-						pool.Recycle(rb) // nil pool: no-op
+						pool.Recycle(rb, rb.Mint()) // nil pool: no-op
 					}
 				}
 			})

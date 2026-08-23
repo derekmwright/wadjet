@@ -933,9 +933,9 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 	// is actually reused is the pool's decision — it vetoes on a Detach
 	// claim, which is how a retaining sink (Sort, the join build) keeps it.
 	recycler := batchRecyclerOf(src)
-	recycle := func(b *batch.RecordBatch) {
+	recycle := func(b *batch.RecordBatch, mint batch.MintStamp) {
 		if recycler != nil {
-			recycler.RecycleBatch(b)
+			recycler.RecycleBatch(b, mint)
 		}
 	}
 	var totalRows int64
@@ -1000,9 +1000,13 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 			if err := fp.applyBackpressure(gctx); err != nil {
 				return err
 			}
+			// The batch's identity at delivery, captured BEFORE the chain
+			// runs: a release must name the generation it was handed, never
+			// whatever stamp the storage carries once it is back in play.
+			mint := b.Mint()
 			opsNs, err := driver.push(gctx, b)
 			fp.opsNs.Add(opsNs)
-			recycle(b)
+			recycle(b, mint)
 			if err != nil {
 				return err
 			}
@@ -1321,6 +1325,12 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 		return nil
 	}
 
+	// Resolve (and thereby ARM) the source's backing-release hook before the
+	// first Next: the pool exists only for consumers that have a release
+	// edge, and a batch decoded before it is armed carries no mint stamp and
+	// can never be taken back.
+	recycler := batchRecyclerOf(src)
+
 	// Warmup: one batch through the original chain before any clone exists.
 	// The driver is built first: its EnableBoundedOutput must run before
 	// Clone() so the clones inherit the opt-in.
@@ -1333,12 +1343,13 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 	drivers := make([]*fragmentDriver, 1, k)
 	drivers[0] = newFragmentDriver(ops, deliver)
 	if warmup != nil {
+		warmupMint := warmup.Mint()
 		opsNs, err := drivers[0].push(ctx, warmup)
 		fp.opsNs.Add(opsNs)
 		// The warmup batch never passes through the dispenser, so its
 		// release edge is here (see batchRecycler).
-		if r := batchRecyclerOf(src); r != nil {
-			r.RecycleBatch(warmup)
+		if recycler != nil {
+			recycler.RecycleBatch(warmup, warmupMint)
 		}
 		if err != nil {
 			return fmt.Errorf("fragment task %s: %w", task.ID, err)

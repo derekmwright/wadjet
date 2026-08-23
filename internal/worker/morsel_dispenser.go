@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -51,8 +52,22 @@ type morsel struct {
 // Vector.Base after Execute returned. The CLAIM half (Detach) is checked
 // inside the pool, not here: this call is "I am done", never "nobody kept
 // it".
+//
+// The mint stamp is the batch's identity at the moment the consumer took
+// delivery of it (batch.MintStamp). It is captured then, not at release time,
+// so a retire that somehow fires twice around a re-mint names the OLD
+// generation and the pool refuses it — a stale release must never re-admit a
+// live backing.
+//
+// armBackingReuse is the other half of the contract: a source only builds a
+// pool when a consumer with a release edge asks for the hook. Consumers
+// without one (the shuffle task's plain Next loop, planner.StreamingSources,
+// the hash-join build source, the post-breaker phases) never call
+// batchRecyclerOf, so those sources allocate no pool at all rather than one
+// that could never take anything back.
 type batchRecycler interface {
-	RecycleBatch(*batch.RecordBatch)
+	armBackingReuse()
+	RecycleBatch(b *batch.RecordBatch, mint batch.MintStamp)
 }
 
 // sourceUnwrapper is implemented by the fragment-path source wrappers so an
@@ -61,12 +76,16 @@ type sourceUnwrapper interface {
 	unwrapSource() exec.Source
 }
 
-// batchRecyclerOf finds the source's recycle hook through any wrappers. Nil
-// when the source does not own its output storage (shuffle chunk readers,
+// batchRecyclerOf finds the source's recycle hook through any wrappers and
+// ARMS it — resolving the hook IS the statement that this consumer has a
+// release edge, and it is what creates the source's backing pool. Callers must
+// therefore resolve before the source's first Next, which every caller does.
+// Nil when the source does not own its output storage (shuffle chunk readers,
 // memory sources, the row-based fallback) — those keep today's behavior.
 func batchRecyclerOf(src exec.Source) batchRecycler {
 	for i := 0; i < 8 && src != nil; i++ {
 		if r, ok := src.(batchRecycler); ok {
+			r.armBackingReuse()
 			return r
 		}
 		u, ok := src.(sourceUnwrapper)
@@ -233,10 +252,11 @@ func (d *morselDispenser) admit(ctx context.Context, cost int64) error {
 // recycle is the release edge for the source's output backing: the parent is
 // fully retired, so every consumer of it — op chain, sink, and every
 // zero-copy sibling view — is done reading. Whether the storage may actually
-// be REUSED is the pool's decision, not ours: it vetoes on a Detach claim.
-func (d *morselDispenser) recycle(b *batch.RecordBatch) {
+// be REUSED is the pool's decision, not ours: it vetoes on a Detach claim, and
+// on a stamp that is no longer the current generation.
+func (d *morselDispenser) recycle(b *batch.RecordBatch, mint batch.MintStamp) {
 	if d.recycler != nil {
-		d.recycler.RecycleBatch(b)
+		d.recycler.RecycleBatch(b, mint)
 	}
 }
 
@@ -275,9 +295,26 @@ func (d *morselDispenser) splitMinCost() int64 {
 func (d *morselDispenser) dispatch(ctx context.Context, b *batch.RecordBatch, cost int64) error {
 	n := b.ActiveLen()
 	viewRows := d.viewRowsFor(n)
+	// The parent's identity at delivery. Captured here, before any consumer
+	// can touch it, so a release always names the generation it was handed.
+	mint := b.Mint()
 	if !d.split || cost <= d.splitMinCost() || n <= viewRows {
 		d.morsels.Add(1)
-		return d.send(ctx, morsel{b: b, retire: func() { d.release(cost); d.recycle(b) }})
+		// Retire ONCE, like the split path's refcount below. A consumer that
+		// retires the same morsel twice would otherwise double-credit the
+		// byte budget and, worse, release the parent a second time: the pool
+		// refuses a stale generation, but a release that lands after the
+		// backing has been re-minted would be indistinguishable from a live
+		// one if the stamp ever repeated. Idempotence at the SOURCE of the
+		// signal is cheaper to reason about than a guard at every receiver.
+		var once sync.Once
+		retire := func() {
+			once.Do(func() {
+				d.release(cost)
+				d.recycle(b, mint)
+			})
+		}
+		return d.send(ctx, morsel{b: b, retire: retire})
 	}
 
 	numViews := (n + viewRows - 1) / viewRows
@@ -286,7 +323,7 @@ func (d *morselDispenser) dispatch(ctx context.Context, b *batch.RecordBatch, co
 	retire := func() {
 		if refs.Add(-1) == 0 {
 			d.release(cost)
-			d.recycle(b)
+			d.recycle(b, mint)
 		}
 	}
 

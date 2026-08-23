@@ -3,7 +3,10 @@ package scan
 import (
 	"bytes"
 	"fmt"
+	"runtime"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	pqt "github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -83,6 +86,13 @@ func snapshotBatch(b *batch.RecordBatch) batchSnapshot {
 	return s
 }
 
+// release is the test-side release edge: it names the stamp the batch was
+// handed under, which is what a real consumer captures at delivery (the
+// dispenser at dispatch, the linear fragment path before push).
+func release(p *BackingPool, b *batch.RecordBatch) {
+	p.Recycle(b, b.Mint())
+}
+
 func (s batchSnapshot) equal(o batchSnapshot) bool {
 	if s.rows != o.rows || len(s.vals) != len(o.vals) {
 		return false
@@ -128,7 +138,7 @@ func TestBackingReuseMatchesFreshAllocation(t *testing.T) {
 			t.Fatalf("rg=%d: pooled decode differs from fresh decode", rg)
 		}
 		// Release edge: nobody claimed it, so the next decode may reuse it.
-		pool.Recycle(b)
+		release(pool, b)
 	}
 	st := pool.Stats()
 	if st.Hits == 0 {
@@ -190,7 +200,7 @@ func TestBackingReuseVetoedByClaim(t *testing.T) {
 		}
 		kept := snapshotBatch(b)
 		b.Detach() // a retaining consumer
-		pool.Recycle(b)
+		release(pool, b)
 
 		next, err := ReadRowGroupNativeBacked(fr, 1, schema, nil, pool)
 		if err != nil {
@@ -225,7 +235,7 @@ func TestBackingReuseVetoedByClaim(t *testing.T) {
 		if b.Retained() {
 			t.Fatal("precondition: the scan batch shell itself is not retained")
 		}
-		pool.Recycle(b)
+		release(pool, b)
 		if st := pool.Stats(); st.Claimed != 1 {
 			t.Fatalf("a derived batch's claim did not veto the release: %+v", st)
 		}
@@ -250,7 +260,7 @@ func TestBackingReuseVetoedByClaim(t *testing.T) {
 			Len:     b.Len,
 		}
 		out.Detach()
-		pool.Recycle(b)
+		release(pool, b)
 		if st := pool.Stats(); st.Claimed != 1 {
 			t.Fatalf("a downstream view's claim did not veto the release: %+v", st)
 		}
@@ -264,8 +274,8 @@ func TestBackingPoolIgnoresForeignBatch(t *testing.T) {
 	schema := backingTestSchema()
 	pool := NewBackingPool(BackingPoolOpts{})
 	foreign := batch.NewRecordBatch(schema, 128)
-	pool.Recycle(foreign)
-	pool.Recycle(foreign)
+	release(pool, foreign)
+	release(pool, foreign)
 	if got := pool.get(schema, 128); got != nil {
 		t.Fatal("the pool adopted a batch it never minted")
 	}
@@ -284,8 +294,8 @@ func TestBackingPoolRecycleIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pool.Recycle(b)
-	pool.Recycle(b)
+	release(pool, b)
+	release(pool, b)
 
 	first := pool.get(schema, 100)
 	second := pool.get(schema, 100)
@@ -311,7 +321,7 @@ func TestBackingPoolCaps(t *testing.T) {
 			minted = append(minted, b)
 		}
 		for _, b := range minted {
-			pool.Recycle(b)
+			release(pool, b)
 		}
 		got := 0
 		for pool.get(schema, 64) != nil {
@@ -328,8 +338,8 @@ func TestBackingPoolCaps(t *testing.T) {
 		bb := batch.NewRecordBatch(schema, 4096)
 		pool.track(a, schema)
 		pool.track(bb, schema)
-		pool.Recycle(a)
-		pool.Recycle(bb)
+		release(pool, a)
+		release(pool, bb)
 		if pool.get(schema, 4096) == nil {
 			t.Fatal("the always-keep-one escape did not fire")
 		}
@@ -349,7 +359,7 @@ func TestBackingPoolShapeGuards(t *testing.T) {
 	}}}
 	rb := batch.NewRecordBatch(rowSchema, 16)
 	pool.track(rb, rowSchema)
-	pool.Recycle(rb)
+	release(pool, rb)
 	if pool.get(rowSchema, 16) != nil {
 		t.Fatal("a ROW schema was admitted to the pool")
 	}
@@ -358,7 +368,7 @@ func TestBackingPoolShapeGuards(t *testing.T) {
 	dec2 := []pqt.Column{{Name: "d", Type: pqt.TypeDecimal, Scale: 2}}
 	db := batch.NewRecordBatch(dec4, 16)
 	pool.track(db, dec4)
-	pool.Recycle(db)
+	release(pool, db)
 	if pool.get(dec2, 16) != nil {
 		t.Fatal("a scale-4 backing was handed to a scale-2 read")
 	}
@@ -390,7 +400,7 @@ func TestBackingPoolKillSwitch(t *testing.T) {
 			}
 		}
 		seen = append(seen, b)
-		pool.Recycle(b)
+		release(pool, b)
 	}
 	if st := pool.Stats(); st.Hits != 0 {
 		t.Fatalf("expected no hits with the switch off, got %+v", st)
@@ -440,7 +450,7 @@ func TestBackingReuseThroughDecodeAheadIter(t *testing.T) {
 				t.Fatalf("pass %d group %d differs from the unpooled decode", pass, i)
 			}
 			// The consumer is done: release edge.
-			pool.Recycle(b)
+			release(pool, b)
 		}
 		if err := it.Close(); err != nil {
 			t.Fatal(err)
@@ -451,5 +461,125 @@ func TestBackingReuseThroughDecodeAheadIter(t *testing.T) {
 	}
 	if st := pool.Stats(); st.Hits == 0 {
 		t.Fatalf("the ring never reused a backing across two passes: %+v", st)
+	}
+}
+
+// TestBackingPoolHoldsNothingWithoutReleaseEdge is the resource-pin
+// regression. The pool's identity used to be a map[*batch.RecordBatch] of
+// everything it had handed out, so a consumer with NO release edge — the
+// shuffle task's plain Next loop, the hash-join build source,
+// planner.StreamingSources, a bloom-filtered-to-nothing row group the fragment
+// simply drops — pinned whole decoded row groups (~280 MB each at SF100) for
+// the source's lifetime, invisibly to the memory ledger. With the mint stamp
+// the pool references nothing it has handed out, so the batches are collectable
+// the moment the consumer lets go.
+func TestBackingPoolHoldsNothingWithoutReleaseEdge(t *testing.T) {
+	rd := writeBackingTestFile(t, 4000, 200)
+	fr := rd.FileReader()
+	schema := backingTestSchema()
+	pool := NewBackingPool(BackingPoolOpts{})
+
+	const decodes = 20
+	var freed atomic.Int64
+	for rg := 0; rg < decodes; rg++ {
+		b, err := ReadRowGroupNativeBacked(fr, rg%fr.NumRowGroups(), schema, nil, pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Never released: this is the no-release-edge consumer.
+		runtime.AddCleanup(b, func(int) { freed.Add(1) }, 0)
+		b = nil
+	}
+
+	if st := pool.Stats(); st.Held != 0 || st.IdleBytes != 0 {
+		t.Fatalf("the pool kept %d backings (%d bytes) it had handed out", st.Held, st.IdleBytes)
+	}
+	// And nothing else in the pool reaches them either.
+	deadline := time.Now().Add(10 * time.Second)
+	for freed.Load() < decodes && time.Now().Before(deadline) {
+		runtime.GC()
+		time.Sleep(5 * time.Millisecond)
+	}
+	got := freed.Load()
+	// The pool must be alive for the whole check — a live source holds it for
+	// its lifetime, and without this the GC would collect the pool itself and
+	// the registry with it, which would make this test pass for the wrong
+	// reason.
+	runtime.KeepAlive(pool)
+	if got != decodes {
+		t.Fatalf("%d/%d unreleased backings became collectable; the pool still references the rest", got, decodes)
+	}
+}
+
+// TestBackingPoolMintingIsUncapped: the mint registry used to stop recording
+// past 4*maxIdle+8 entries, so on any source that accumulated that many
+// unreleased backings every later batch became "foreign" and reuse switched
+// itself off silently — precisely on the sources that decode the most. The
+// stamp has no such bound.
+func TestBackingPoolMintingIsUncapped(t *testing.T) {
+	schema := backingTestSchema()
+	pool := NewBackingPool(BackingPoolOpts{})
+
+	const minted = 4*4 + 8 + 100 // comfortably past the old registry cap
+	var last *batch.RecordBatch
+	for i := 0; i < minted; i++ {
+		b := batch.NewRecordBatch(schema, 64)
+		pool.track(b, schema)
+		last = b
+	}
+	// Release only the LAST one: under the old cap it was never recorded, so
+	// this release was ignored and the pool stayed empty forever.
+	release(pool, last)
+	if got := pool.get(schema, 64); got != last {
+		t.Fatalf("a backing minted past the old registry cap was not recognized on release (got %v)", got)
+	}
+}
+
+// TestBackingPoolRefusesStaleGenerationRelease: a release names the generation
+// it was handed. A second release that arrives after the storage has been
+// re-minted must be refused — re-admitting a LIVE backing would hand one
+// buffer to two decoders, the one failure this pool must not have.
+func TestBackingPoolRefusesStaleGenerationRelease(t *testing.T) {
+	schema := backingTestSchema()
+	pool := NewBackingPool(BackingPoolOpts{})
+
+	b := batch.NewRecordBatch(schema, 64)
+	pool.track(b, schema)
+	stale := b.Mint()
+
+	pool.Recycle(b, stale) // generation 1's release
+	got := pool.get(schema, 64)
+	if got != b {
+		t.Fatal("the released backing was not handed back")
+	}
+	if got.Mint() == stale {
+		t.Fatal("the re-mint did not advance the generation")
+	}
+
+	// The stale retire fires again while generation 2 is LIVE.
+	pool.Recycle(b, stale)
+	if again := pool.get(schema, 64); again != nil {
+		t.Fatal("a stale release re-admitted a live backing to the free list")
+	}
+}
+
+// TestBackingPoolDropRefusesLateRelease: once the owning source closes, a
+// release still in flight must not re-grow the free list behind it — retained
+// row-group storage must not outlive the source.
+func TestBackingPoolDropRefusesLateRelease(t *testing.T) {
+	schema := backingTestSchema()
+	pool := NewBackingPool(BackingPoolOpts{})
+
+	b := batch.NewRecordBatch(schema, 64)
+	pool.track(b, schema)
+	mint := b.Mint()
+
+	pool.Drop()
+	pool.Recycle(b, mint)
+	if pool.get(schema, 64) != nil {
+		t.Fatal("a release that landed after Drop re-grew the idle set")
+	}
+	if st := pool.Stats(); st.Held != 0 {
+		t.Fatalf("Drop left %d backings held", st.Held)
 	}
 }
