@@ -1,5 +1,7 @@
 # Wadjet
 
+[![Release](https://img.shields.io/github/v/release/derekmwright/wadjet?sort=semver)](https://github.com/derekmwright/wadjet/releases) [![CI](https://img.shields.io/github/actions/workflow/status/derekmwright/wadjet/ci.yml?branch=main&label=CI)](https://github.com/derekmwright/wadjet/actions/workflows/ci.yml) [![Go Version](https://img.shields.io/github/go-mod/go-version/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/blob/main/go.mod) [![License](https://img.shields.io/github/license/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/blob/main/LICENSE) [![Go Report Card](https://goreportcard.com/badge/github.com/derekmwright/wadjet)](https://goreportcard.com/report/github.com/derekmwright/wadjet) [![Issues](https://img.shields.io/github/issues/derekmwright/wadjet)](https://github.com/derekmwright/wadjet/issues)
+
 A lightweight analytical query engine in pure Go. Columnar storage on Parquet, vectorized execution, full SQL, and optional distributed processing over NATS and S3-compatible object storage.
 
 ## Why Wadjet
