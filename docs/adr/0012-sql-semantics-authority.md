@@ -120,6 +120,53 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    settles everything downstream of it; check for the commitment before
    drafting the question.
 
+9. **Float ordering follows PostgreSQL, not IEEE754, in every ORDER/
+   PARTITION/peer/key context; a boxed value's comparison order follows the
+   column's declaration, not the box's Go type.** (Added 2026-08-23, #444/
+   #446 follow-up.)
+
+   - **Float order.** PostgreSQL's `float8_cmp_internal`/
+     `float4_cmp_internal` give FLOAT a total order that IEEE754's own
+     comparison operators do not: NaN sorts ABOVE every other value and
+     equals itself, and -0.0 equals +0.0. `ORDER BY`, `GROUP BY`'s peer
+     grouping, window PARTITION/peer groups, and any key built to represent
+     "the same value for merge/comparison purposes" now apply that rule —
+     `kernel.CompareFloat64`/`CompareFloat32`
+     (`internal/engine/exec/kernel/float_order.go`) is the one place the
+     rule is stated, every scalar FLOAT32/FLOAT64 comparator and the
+     VECTOR/ARRAY(FLOAT) element comparators are built on it, and the boxed
+     k-way MERGE key a spilled aggregate's drain step reifies
+     (`appendKeyValue`/`keyFloat32bits`/`keyFloat64bits`,
+     `internal/engine/exec/sort.go`) is canonicalized to agree: two values
+     the comparator calls equal must also serialize alike, or a query's
+     answer depends on how much memory it had (the same failure mode
+     `appendKeyValue`'s BYTES/ARRAY/ROW fix addressed for a different type
+     class).
+   - **A boxed value's order is the column's DECLARATION, not a property of
+     its Go box.** `Vector.GetValue` erases declaration order — a ROW boxes
+     as `map[string]any`, which has none — so a comparator that dispatches
+     on the BOX's own Go type (a `map[string]any`'s keys, sorted
+     alphabetically) can disagree with the COLUMNAR comparator, which reads
+     the real declared field order. `internal/engine/exec/compare_boxed.go`
+     resolves the boxed comparator FROM the declaration (a closure built
+     once per column), so both paths order a ROW's fields positionally and a
+     DECIMAL numerically, matching PostgreSQL's `record_cmp`. The dynamic
+     fallback (`compareAny`, used only when no declaration is available)
+     still orders a ROW by field name — no production path reaches it — and
+     is not addressed by this decision.
+   - **What this does NOT yet cover.** The predicate kernels (`=`, `>`, `IN`
+     — `internal/engine/expr/expr.go`'s `cmpFloat64Op`/`cmpFloat32Op`,
+     `internal/engine/exec/kernel/compare.go`'s `ResolveFilterKernel`), the
+     PRIMARY (non-spilled) GROUP BY/DISTINCT hash key
+     (`internal/engine/exec/aggregate.go`'s `typedRowHash`/
+     `serializeGroupKey`/`appendColumnValue`), and the hash-join key
+     (`internal/engine/exec/join.go`'s `buildKeyFromBatch`/`buildProbeKey`)
+     still compare/hash raw IEEE754 bits — a `WHERE f = f` over a NaN row,
+     or a `GROUP BY`/`DISTINCT`/hash-join over `{-0.0, 0.0}` in the common
+     (non-spilling) case, still disagrees with PostgreSQL. Tracked as #459.
+     MIN/MAX over a NaN column is the same gap in the aggregate kernels,
+     tracked as #457.
+
 ## Consequences
 
 - `ORDER BY x DESC` places NULLs first (changed 2026-08-19). The default had
@@ -152,3 +199,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   column's scale), `internal/engine/expr/decimal_literal.go` (the row path's
   binding), `wadjet/decimal_literal_test.go` (the operator sweep at three
   scales, both paths)
+- #444 (boxed ROW comparator ordered fields by name, not declared position),
+  #446 (VECTOR/ARRAY(FLOAT) comparators not transitive under NaN) — the work
+  item 9 above records the settled position for
+- #459 (predicate kernels, the primary GROUP BY/DISTINCT hash key, and
+  hash-join keys still compare floats as raw IEEE754), #457 (MIN/MAX over a
+  NaN column) — item 9's open remainder
+- `internal/engine/exec/kernel/float_order.go`, `internal/engine/exec/
+  compare_boxed.go`, `internal/engine/exec/kernel/
+  container_order_property_test.go` (the P1-P4 total-order property test)
