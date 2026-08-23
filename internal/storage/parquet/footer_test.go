@@ -531,3 +531,65 @@ func TestRealWritersDoNotOverstateChunkSizes(t *testing.T) {
 		})
 	}
 }
+
+// TestChunkLayoutAcceptsAFooterListedOutOfOrder covers the fallback. The
+// ordered walk is the common case and allocates nothing; a footer whose
+// chunks are not listed in file order re-walks with a sort, and the answer
+// must be the same either way.
+func TestChunkLayoutAcceptsAFooterListedOutOfOrder(t *testing.T) {
+	var buf bytes.Buffer
+	w, err := NewWriter(&buf, Schema{Columns: []Column{
+		{Name: "a", Type: TypeInt64},
+		{Name: "b", Type: TypeInt64},
+	}}, DefaultWriterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]map[string]any, 64)
+	for i := range rows {
+		rows[i] = map[string]any{"a": int64(i), "b": int64(i * 2)}
+	}
+	if err := w.WriteRows(rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+
+	decode := func(raw []byte) (*FileMetaData, int64) {
+		t.Helper()
+		footerLen := int64(binary.LittleEndian.Uint32(raw[len(raw)-8 : len(raw)-4]))
+		start := int64(len(raw)) - trailerSize - footerLen
+		md, err := DecodeFileMetaData(raw[start : start+footerLen])
+		if err != nil {
+			t.Fatalf("decoding footer: %v", err)
+		}
+		return md, start
+	}
+
+	md, dataEnd := decode(raw)
+	if len(md.RowGroups[0].Columns) != 2 {
+		t.Fatalf("fixture has %d columns", len(md.RowGroups[0].Columns))
+	}
+	// In order: accepted, and by the walk that allocates nothing.
+	if ok, err := validateChunkLayoutInOrder(md, dataEnd); !ok || err != nil {
+		t.Fatalf("the in-order walk answered (%v, %v)", ok, err)
+	}
+
+	// Listed backwards: the ordered walk gives up, the sorted one accepts.
+	md.RowGroups[0].Columns[0], md.RowGroups[0].Columns[1] =
+		md.RowGroups[0].Columns[1], md.RowGroups[0].Columns[0]
+	if ok, err := validateChunkLayoutInOrder(md, dataEnd); ok || err != nil {
+		t.Errorf("the in-order walk answered (%v, %v) for a backwards footer", ok, err)
+	}
+	if err := ValidateChunkLayout(md, dataEnd); err != nil {
+		t.Errorf("a backwards-listed footer was refused: %v", err)
+	}
+
+	// Backwards AND overlapping: still refused.
+	md.RowGroups[0].Columns[1].MetaData.TotalCompressedSize += 32
+	if err := ValidateChunkLayout(md, dataEnd); err == nil {
+		t.Error("a backwards-listed footer with overlapping chunks was accepted")
+	}
+}

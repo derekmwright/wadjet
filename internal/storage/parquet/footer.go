@@ -1,11 +1,12 @@
 package parquet
 
 import (
+	"cmp"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
-	"sort"
+	"slices"
 )
 
 // Parquet file layout:
@@ -257,43 +258,103 @@ func ValidateChunkLayout(md *FileMetaData, dataEnd int64) error {
 	if md == nil {
 		return nil
 	}
-	type extent struct {
-		start, end int64
-		rg, col    int
+	ordered, err := validateChunkLayoutInOrder(md, dataEnd)
+	if err != nil || ordered {
+		return err
 	}
+	return validateChunkLayoutSorted(md, dataEnd)
+}
+
+// validateChunkLayoutInOrder is the common case and allocates nothing: chunks
+// come out of the footer in file order — row groups in order, and the columns
+// within each in order — so one ordered walk is the whole check. It reports
+// ordered=false the moment a chunk starts before its predecessor did, and the
+// caller re-walks with a sort; no writer in the corpus produces that shape.
+func validateChunkLayoutInOrder(md *FileMetaData, dataEnd int64) (bool, error) {
+	var prev extent
+	var have bool
+	for i := range md.RowGroups {
+		for j := range md.RowGroups[i].Columns {
+			e, ok, err := chunkExtent(md, i, j, dataEnd)
+			if err != nil {
+				return true, err
+			}
+			if !ok {
+				continue
+			}
+			if have {
+				if e.start < prev.start {
+					return false, nil
+				}
+				if e.start < prev.end {
+					return true, overlapErr(prev, e)
+				}
+			}
+			prev, have = e, true
+		}
+	}
+	return true, nil
+}
+
+type extent struct {
+	start, end int64
+	rg, col    int
+}
+
+// chunkExtent is one column chunk's byte range, or ok=false when it has none
+// to collide over. Empty chunks are skipped: a zero-byte extent has nothing
+// to overlap, and its offset is whatever the writer happened to leave behind.
+// A negative start is left to chunkRange, which names it precisely.
+func chunkExtent(md *FileMetaData, i, j int, dataEnd int64) (extent, bool, error) {
+	cm := md.RowGroups[i].Columns[j].MetaData
+	if cm == nil || cm.TotalCompressedSize <= 0 {
+		return extent{}, false, nil
+	}
+	start := cm.DataPageOffset
+	if cm.DictionaryPageOffset > 0 && cm.DictionaryPageOffset < start {
+		start = cm.DictionaryPageOffset
+	}
+	if start < 0 {
+		return extent{}, false, nil
+	}
+	end := start + cm.TotalCompressedSize
+	if end < start {
+		return extent{}, false, fmt.Errorf(
+			"row group %d column %d declares %d compressed bytes at offset %d, which overflows",
+			i, j, cm.TotalCompressedSize, start)
+	}
+	if end > dataEnd {
+		return extent{}, false, fmt.Errorf(
+			"row group %d column %d spans [%d, %d), past the %d bytes of data this file has before its footer",
+			i, j, start, end, dataEnd)
+	}
+	return extent{start, end, i, j}, true, nil
+}
+
+func overlapErr(a, b extent) error {
+	return fmt.Errorf("row group %d column %d spans [%d, %d) and overlaps row group %d column %d at %d",
+		a.rg, a.col, a.start, a.end, b.rg, b.col, b.start)
+}
+
+// validateChunkLayoutSorted is the general case, for a footer whose chunks are
+// not listed in file order. No writer in the corpus produces one.
+func validateChunkLayoutSorted(md *FileMetaData, dataEnd int64) error {
 	var spans []extent
 	for i := range md.RowGroups {
 		for j := range md.RowGroups[i].Columns {
-			cm := md.RowGroups[i].Columns[j].MetaData
-			if cm == nil || cm.TotalCompressedSize <= 0 {
-				continue
+			e, ok, err := chunkExtent(md, i, j, dataEnd)
+			if err != nil {
+				return err
 			}
-			start := cm.DataPageOffset
-			if cm.DictionaryPageOffset > 0 && cm.DictionaryPageOffset < start {
-				start = cm.DictionaryPageOffset
+			if ok {
+				spans = append(spans, e)
 			}
-			if start < 0 {
-				// chunkRange names this one precisely; nothing to add here.
-				continue
-			}
-			end := start + cm.TotalCompressedSize
-			if end < start {
-				return fmt.Errorf("row group %d column %d declares %d compressed bytes at offset %d, which overflows",
-					i, j, cm.TotalCompressedSize, start)
-			}
-			if end > dataEnd {
-				return fmt.Errorf("row group %d column %d spans [%d, %d), past the %d bytes of data this file has "+
-					"before its footer", i, j, start, end, dataEnd)
-			}
-			spans = append(spans, extent{start, end, i, j})
 		}
 	}
-	sort.Slice(spans, func(a, b int) bool { return spans[a].start < spans[b].start })
+	slices.SortFunc(spans, func(a, b extent) int { return cmp.Compare(a.start, b.start) })
 	for k := 0; k+1 < len(spans); k++ {
 		if spans[k].end > spans[k+1].start {
-			return fmt.Errorf("row group %d column %d spans [%d, %d) and overlaps row group %d column %d at %d",
-				spans[k].rg, spans[k].col, spans[k].start, spans[k].end,
-				spans[k+1].rg, spans[k+1].col, spans[k+1].start)
+			return overlapErr(spans[k], spans[k+1])
 		}
 	}
 	return nil
