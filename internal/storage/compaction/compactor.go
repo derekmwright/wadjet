@@ -5,6 +5,7 @@ package compaction
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -146,7 +147,9 @@ func (c *Compactor) releaseGCLock(filePath string) {
 // the partitions that DID compact, so a caller reading them alone cannot tell
 // a clean run from one where a partition failed on every pass (#435).
 type Result struct {
-	Table               string
+	Table string
+	// PartitionsCompacted counts successful MERGES, not distinct partitions:
+	// a partition compacted over three passes counts three times.
 	PartitionsCompacted int
 	FilesRemoved        int
 	FilesCreated        int
@@ -154,6 +157,17 @@ type Result struct {
 	BytesBefore         int64
 	BytesAfter          int64
 	Failed              []PartitionFailure
+
+	// PassLimitReached reports that the multi-pass loop stopped at
+	// maxCompactionPasses with the table still shrinking. It is a flag on a
+	// SUCCESSFUL result rather than an error: every one of those passes had
+	// to remove more files than it created to get there (the progress rule
+	// in CompactTable), so the work is real and committed, and calling the
+	// call a failure would discard a correct result and — through the
+	// background sweep's `continue` on error — skip the table's
+	// delete-marker GC as well. The next sweep picks the table up where
+	// this one left off.
+	PassLimitReached bool
 }
 
 // PartitionFailure is one partition whose merge failed, and why.
@@ -162,9 +176,65 @@ type PartitionFailure struct {
 	Err       error
 }
 
+// CompactionFailed is the aggregate error CompactTable returns when at least
+// one partition's merge failed.
+//
+// One error for the whole table, not the first failure, because a merge
+// failure is scoped to the partition whose files could not be read: #435
+// correctly made a failed merge visible to the caller, but by RETURNING at the
+// first one, so a single drifted partition froze compaction of every other
+// partition in the table — and, since the background sweep `continue`s to the
+// next table on an error from here, the table's delete-marker GC with it.
+//
+// Compacted lets a caller tell a partial run from a total one without
+// inspecting the Result: zero means nothing in this table compacted, non-zero
+// means the named partitions failed while the rest went through.
+type CompactionFailed struct {
+	Table     string
+	Failures  []PartitionFailure
+	Compacted int
+}
+
+// Partial reports whether some partitions compacted despite the failures.
+func (e *CompactionFailed) Partial() bool { return e.Compacted > 0 }
+
+func (e *CompactionFailed) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "compacting table %q: %d of %d partitions failed",
+		e.Table, len(e.Failures), len(e.Failures)+e.Compacted)
+	for _, f := range e.Failures {
+		fmt.Fprintf(&b, "; partition %s: %v", partitionLabel(f.Partition), f.Err)
+	}
+	return b.String()
+}
+
+// Unwrap exposes the individual causes to errors.Is and errors.As.
+func (e *CompactionFailed) Unwrap() []error {
+	errs := make([]error, len(e.Failures))
+	for i, f := range e.Failures {
+		errs[i] = f.Err
+	}
+	return errs
+}
+
+// mergeError marks the one failure that is scoped to a single partition: the
+// merge itself, which READS and REWRITES that partition's data and touches
+// nothing else. Every other error in a pass — the manifest, the object store —
+// is a condition on the whole call, so the caller distinguishes them by type
+// rather than by position.
+type mergeError struct{ err error }
+
+func (m *mergeError) Error() string { return m.err.Error() }
+func (m *mergeError) Unwrap() error { return m.err }
+
 // CompactTable runs compaction for all partitions of a table. When a partition
 // has more files than can be merged in one pass, multiple passes run back-to-back
 // until the partition is fully compacted (no 5-minute wait between passes).
+//
+// A partition whose merge fails does not stop the others: the failure is
+// recorded in Result.Failed, the partition is skipped for the rest of the
+// call, and the aggregate *CompactionFailed comes back at the end. See that
+// type for why the first-failure return this replaced was too blunt.
 func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result, error) {
 	tableMeta, err := c.catalog.GetTable(ctx, tableName)
 	if err != nil {
@@ -172,6 +242,11 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 	}
 
 	result := &Result{Table: tableName}
+
+	// A partition that failed is not retried on a later pass of this same
+	// call: the manifest entry it failed on is untouched, so the merge would
+	// read the same bytes and fail identically, once per pass.
+	failed := make(map[string]bool)
 
 	// Multi-pass loop: re-read manifest after each pass to pick up changes,
 	// and continue until no partitions need compaction.
@@ -186,14 +261,20 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 			return result, ctx.Err()
 		}
 		if pass >= maxCompactionPasses {
-			return result, fmt.Errorf(
-				"compacting table %q: still not settled after %d passes — stopping rather than looping",
-				tableName, pass)
+			// Not a loop: the progress rule below forced every one of those
+			// passes to remove more files than it created, so this is a
+			// table still genuinely shrinking. Stop, flag it, and let the
+			// next sweep continue — see Result.PassLimitReached (#436).
+			c.logger.Warn("compaction pass limit reached, stopping with work outstanding",
+				"table", tableName, "passes", pass,
+				"files_removed", result.FilesRemoved, "files_created", result.FilesCreated)
+			result.PassLimitReached = true
+			break
 		}
 
 		manifest, err := c.catalog.GetManifest(ctx, tableName)
 		if err != nil {
-			return nil, fmt.Errorf("getting manifest: %w", err)
+			return result, fmt.Errorf("getting manifest: %w", err)
 		}
 		// Progress is measured on what THIS pass did, not on the manifest's
 		// total: an ingester writing into the table between passes would
@@ -203,79 +284,32 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 
 		compactedAny := false
 		for _, part := range manifest.Partitions {
-			if !c.shouldCompact(part) {
+			if failed[part.Path] || !c.shouldCompact(part) {
 				continue
 			}
 
-			maxFiles := c.adaptivePassSize(part)
 			files := part.Files
-			if len(files) > maxFiles {
+			if maxFiles := c.adaptivePassSize(part); len(files) > maxFiles {
 				files = files[:maxFiles]
 			}
 
-			newPath := compactedFilePath(tableName, part.Path)
-			written, err := c.mergeAndWriteFiles(ctx, files, tableMeta.Schema, deleteSet, newPath)
-			if err != nil {
+			err := c.mergeGroup(ctx, tableName, tableMeta.Schema, part, files, deleteSet, result)
+			var me *mergeError
+			if errors.As(err, &me) {
 				// The merge is the step that READS and REWRITES the data, and
-				// it was the one step in this loop that only logged: every
-				// other error here returns, and CompactTable then handed its
-				// caller (*Result, nil) with the failed partition invisible
-				// in counters that only count successes.
-				//
-				// That is the reporting defect that hides corruption. #428
-				// and #429 were both silent read->write asymmetries in this
-				// exact call, and a merge that had started erroring would
-				// have looked like a clean run to anything but a log reader
-				// — while the sweeper retried the same partition forever
-				// (#435).
-				//
-				// No data is lost either way: the inputs are removed only
-				// after a successful write. What changes is that the caller
-				// is told.
+				// it is the only failure here scoped to one partition: no data
+				// is lost, because the inputs are removed only after a
+				// successful write. Record it, skip this partition, keep
+				// going (#435).
 				c.logger.Error("compaction failed for partition",
-					"table", tableName, "partition", part.Path, "error", err)
-				result.Failed = append(result.Failed, PartitionFailure{Partition: part.Path, Err: err})
-				return result, fmt.Errorf("compacting table %q partition %q: %w",
-					tableName, partitionLabel(part.Path), err)
-			}
-
-			if written.rowsWritten == 0 {
-				// Every row delete-filtered: nothing was uploaded.
-				oldPaths := filePaths(files)
-				if err := c.catalog.RemoveFiles(ctx, tableName, oldPaths); err != nil {
-					return nil, fmt.Errorf("removing empty partition files: %w", err)
-				}
-				c.deleteFromStore(ctx, oldPaths)
-				result.FilesRemoved += len(files)
-				result.PartitionsCompacted++
-				compactedAny = true
+					"table", tableName, "partition", part.Path, "error", me.err)
+				result.Failed = append(result.Failed, PartitionFailure{Partition: part.Path, Err: me.err})
+				failed[part.Path] = true
 				continue
 			}
-
-			oldPaths := filePaths(files)
-			if err := c.catalog.RemoveFiles(ctx, tableName, oldPaths); err != nil {
-				return nil, fmt.Errorf("removing old files from manifest: %w", err)
+			if err != nil {
+				return result, err
 			}
-
-			newEntry := catalog.FileEntry{
-				Path:        newPath,
-				SizeBytes:   written.size,
-				NumRows:     written.rowsWritten,
-				CreatedAt:   time.Now().UTC(),
-				ColumnStats: written.columnStats,
-			}
-			if err := c.catalog.AddFiles(ctx, tableName, part.Values, part.Path, []catalog.FileEntry{newEntry}); err != nil {
-				return nil, fmt.Errorf("adding merged file to manifest: %w", err)
-			}
-
-			c.deleteFromStore(ctx, oldPaths)
-
-			result.PartitionsCompacted++
-			result.FilesRemoved += len(files)
-			result.FilesCreated++
-			result.RowsMerged += written.rowsWritten
-			result.BytesBefore += written.bytesBefore
-			result.BytesAfter += written.size
 			compactedAny = true
 
 			c.logger.Info("compacted partition",
@@ -283,7 +317,6 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 				"partition", part.Path,
 				"pass", pass,
 				"files_merged", len(files),
-				"rows", written.rowsWritten,
 			)
 		}
 
@@ -298,13 +331,79 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 		}
 	}
 
+	if len(result.Failed) > 0 {
+		return result, &CompactionFailed{
+			Table:     tableName,
+			Failures:  result.Failed,
+			Compacted: result.PartitionsCompacted,
+		}
+	}
 	return result, nil
+}
+
+// mergeGroup merges one group of a partition's files into a single new file
+// and swaps the manifest, folding the outcome into result.
+//
+// The caller classifies the error rather than the position: *mergeError is the
+// read-and-rewrite step failing on THIS partition's bytes, with its inputs
+// untouched; anything else is the manifest or the object store, which is not a
+// per-partition condition and ends the call.
+func (c *Compactor) mergeGroup(ctx context.Context, tableName string, schema parquet.Schema,
+	part catalog.PartitionEntry, files []catalog.FileEntry,
+	deleteSet map[string]map[int64]bool, result *Result) error {
+
+	newPath := compactedFilePath(tableName, part.Path)
+	written, err := c.mergeAndWriteFiles(ctx, files, schema, deleteSet, newPath)
+	if err != nil {
+		// Unadorned: CompactionFailed names the table and the partition, and
+		// PartitionFailure carries the partition alongside this cause, so a
+		// prefix here would only repeat itself in the aggregate message.
+		return &mergeError{err: err}
+	}
+
+	// Write-before-delete: mergeAndWriteFiles has already uploaded newPath (or
+	// written nothing, when every row was delete-filtered away).
+	oldPaths := filePaths(files)
+	if err := c.catalog.RemoveFiles(ctx, tableName, oldPaths); err != nil {
+		return fmt.Errorf("removing old files from manifest: %w", err)
+	}
+
+	if written.rowsWritten == 0 {
+		c.deleteFromStore(ctx, oldPaths)
+		result.FilesRemoved += len(files)
+		result.PartitionsCompacted++
+		return nil
+	}
+
+	newEntry := catalog.FileEntry{
+		Path:        newPath,
+		SizeBytes:   written.size,
+		NumRows:     written.rowsWritten,
+		CreatedAt:   time.Now().UTC(),
+		ColumnStats: written.columnStats,
+	}
+	if err := c.catalog.AddFiles(ctx, tableName, part.Values, part.Path, []catalog.FileEntry{newEntry}); err != nil {
+		return fmt.Errorf("adding merged file to manifest: %w", err)
+	}
+
+	c.deleteFromStore(ctx, oldPaths)
+
+	result.PartitionsCompacted++
+	result.FilesRemoved += len(files)
+	result.FilesCreated++
+	result.RowsMerged += written.rowsWritten
+	result.BytesBefore += written.bytesBefore
+	result.BytesAfter += written.size
+	return nil
 }
 
 // maxCompactionPasses bounds the pass loop absolutely. Each pass merges at
 // least two files into one, so a partition of N files settles in fewer than N
 // passes and the adaptive pass size makes it far fewer; a table needing more
 // than this is not converging.
+//
+// Reaching it is reported as Result.PassLimitReached, not as an error: see
+// that field for why 1024 passes of committed work is not a failure.
 const maxCompactionPasses = 1024
 
 // partitionLabel names the unpartitioned partition in an error message, where

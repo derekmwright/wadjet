@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -97,18 +98,35 @@ func (bc *BackgroundCompactor) sweep(ctx context.Context) {
 		}
 
 		result, err := bc.compactor.CompactTable(ctx, table)
-		if err != nil {
+		// A partition whose merge failed is reported and skipped, not fatal
+		// to the sweep: CompactTable has already compacted whatever else the
+		// table had, and the delete-marker GC below is independent of it. The
+		// unconditional `continue` this replaced meant one drifted partition
+		// stopped GC for the whole table indefinitely — delete markers that
+		// never age out, and the deleted rows still physically present.
+		var failed *CompactionFailed
+		switch {
+		case errors.As(err, &failed):
+			bc.logger.Warn("compaction partially failed",
+				"table", table,
+				"partitions_failed", len(failed.Failures),
+				"partitions_compacted", failed.Compacted,
+				"error", err)
+		case err != nil:
+			// The manifest, the store, or the context: nothing about this
+			// table's state is known, so leave it for the next sweep.
 			bc.logger.Warn("compaction failed", "table", table, "error", err)
 			continue
 		}
 
-		if result.PartitionsCompacted > 0 {
+		if result != nil && result.PartitionsCompacted > 0 {
 			bc.logger.Info("compaction complete",
 				"table", table,
 				"partitions", result.PartitionsCompacted,
 				"files_removed", result.FilesRemoved,
 				"files_created", result.FilesCreated,
 				"rows_merged", result.RowsMerged,
+				"pass_limit_reached", result.PassLimitReached,
 			)
 		}
 
