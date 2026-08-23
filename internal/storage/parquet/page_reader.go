@@ -107,6 +107,16 @@ type ColumnPageReader struct {
 	defScratch []int32
 	idxScratch []int32
 
+	// Construction-time refusal. Every offset and length below is a number
+	// out of the FOOTER — the file's own claim about where its bytes are —
+	// and a column chunk whose claims do not fit the file cannot be read at
+	// all. ColumnPages has no error return, so the refusal is carried here
+	// and handed to the first NextPage/NextDictionary/DictionaryIfPure call.
+	// Returning a reader that quietly yields no pages instead would answer
+	// the query with an empty column, which is a different answer, given
+	// without saying so.
+	openErr error
+
 	// Deferred dictionary indices (DeferDictIndices): dictionary-encoded
 	// data pages keep their raw RLE payload on PageData instead of
 	// expanding it to one int32 per value. pendingIdx* carry the payload
@@ -171,6 +181,92 @@ func (r *ColumnPageReader) TakeScratch() (def, idx []int32) {
 	return def, idx
 }
 
+// maxPageBodyBytes bounds what one page HEADER may claim about the size of
+// its own decompressed body. UncompressedPageSize is a thrift i32 the
+// decompressors pre-allocate from (`make([]byte, 0, size)`), so an
+// unvalidated header could ask for two gigabytes per page out of a file a
+// few hundred bytes long. A gibibyte is orders of magnitude above any page a
+// writer produces and still small enough that a corrupt file cannot exhaust
+// the process before the read fails.
+const maxPageBodyBytes = 1 << 30
+
+// chunkRange turns a column chunk's footer offsets into a byte range inside
+// the file, refusing every claim the file cannot back.
+//
+// Nothing validated these before. DataPageOffset and DictionaryPageOffset are
+// signed 64-bit thrift fields read straight out of the footer, and a negative
+// one became a negative slice index at the very first read: `r.data[r.off:]`
+// with r.off = -9025. Five of the six crashers the whole-file mutation fuzz
+// found were exactly that, and the file only has to be off by one flipped
+// byte in a varint to get there.
+//
+// The END of the range is CLAMPED rather than refused. A chunk whose
+// TotalCompressedSize runs past the file is a real shape from writers that
+// round the figure up, and the page loop stops at the last complete page
+// anyway; refusing it would reject files that read correctly today. Where the
+// chunk STARTS is a different question — there is no benign reading of an
+// offset outside the file.
+func chunkRange(cm *ColumnMetaData, fileSize int64) (start, end int64, err error) {
+	start = cm.DataPageOffset
+	if cm.DictionaryPageOffset > 0 && cm.DictionaryPageOffset < cm.DataPageOffset {
+		start = cm.DictionaryPageOffset
+	}
+	switch {
+	case fileSize < 0:
+		return 0, 0, fmt.Errorf("column chunk: file size %d is negative", fileSize)
+	case cm.DataPageOffset < 0:
+		return 0, 0, fmt.Errorf("column chunk: data_page_offset %d is negative", cm.DataPageOffset)
+	case cm.DictionaryPageOffset < 0:
+		return 0, 0, fmt.Errorf("column chunk: dictionary_page_offset %d is negative", cm.DictionaryPageOffset)
+	case cm.TotalCompressedSize < 0:
+		return 0, 0, fmt.Errorf("column chunk: total_compressed_size %d is negative", cm.TotalCompressedSize)
+	case start > fileSize:
+		return 0, 0, fmt.Errorf("column chunk starts at offset %d, past the end of a %d-byte file", start, fileSize)
+	}
+	end = fileSize
+	if room := fileSize - start; cm.TotalCompressedSize < room {
+		end = start + cm.TotalCompressedSize
+	}
+	return start, end, nil
+}
+
+// pageBody returns the compressed body of the page whose header ended at
+// off, and the offset just past it. Both numbers come from the page header,
+// which is thrift the reader trusted enough to parse and nothing more:
+// CompressedPageSize is an i32 that may be negative or may run past the end
+// of the chunk, and `r.data[r.off : r.off+int(ph.CompressedPageSize)]` was
+// taking it at its word.
+func (r *ColumnPageReader) pageBody(off int, ph *PageHeader) ([]byte, int, error) {
+	size := int(ph.CompressedPageSize)
+	if size < 0 || off > r.endOff || size > r.endOff-off {
+		return nil, 0, fmt.Errorf("page at offset %d declares a %d-byte body but the chunk ends at %d",
+			off, ph.CompressedPageSize, r.endOff)
+	}
+	if u := int(ph.UncompressedPageSize); u < 0 || u > maxPageBodyBytes {
+		return nil, 0, fmt.Errorf("page at offset %d declares an uncompressed size of %d bytes",
+			off, ph.UncompressedPageSize)
+	}
+	return r.data[off : off+size : off+size], off + size, nil
+}
+
+// nextHeader decodes the page header at off and returns it with the offset
+// its body starts at. A header that does not fit inside the chunk is refused
+// rather than advanced past.
+func (r *ColumnPageReader) nextHeader(off int) (*PageHeader, int, error) {
+	if off < 0 || off > len(r.data) {
+		return nil, 0, fmt.Errorf("page offset %d is outside the %d bytes staged for this chunk", off, len(r.data))
+	}
+	ph, headerSize, err := DecodePageHeader(r.data[off:])
+	if err != nil {
+		return nil, 0, fmt.Errorf("reading page header at offset %d: %w", off, err)
+	}
+	if headerSize <= 0 || headerSize > r.endOff-off {
+		return nil, 0, fmt.Errorf("page header at offset %d is %d bytes but the chunk ends at %d",
+			off, headerSize, r.endOff)
+	}
+	return ph, off + headerSize, nil
+}
+
 // NewColumnPageReader creates a page reader for a column chunk.
 //
 // Parameters:
@@ -179,14 +275,12 @@ func (r *ColumnPageReader) TakeScratch() (def, idx []int32) {
 //   - maxDefLevel: maximum definition level (0 for required columns)
 //   - maxRepLevel: maximum repetition level (0 for flat schemas)
 func NewColumnPageReader(fileData []byte, cm *ColumnMetaData, maxDefLevel, maxRepLevel int) *ColumnPageReader {
-	startOff := int(cm.DataPageOffset)
-	if cm.DictionaryPageOffset > 0 && cm.DictionaryPageOffset < cm.DataPageOffset {
-		startOff = int(cm.DictionaryPageOffset)
+	start, end, err := chunkRange(cm, int64(len(fileData)))
+	if err != nil {
+		return &ColumnPageReader{openErr: err, codec: cm.Codec, physType: cm.Type,
+			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel}
 	}
-	endOff := startOff + int(cm.TotalCompressedSize)
-	if endOff > len(fileData) {
-		endOff = len(fileData)
-	}
+	startOff, endOff := int(start), int(end)
 
 	// Determine type length for FIXED_LEN_BYTE_ARRAY.
 	typeLength := 0
@@ -220,18 +314,12 @@ func NewColumnPageReader(fileData []byte, cm *ColumnMetaData, maxDefLevel, maxRe
 // The caller MUST Close the reader to return the buffer, and must not
 // retain any decoded Values past Close.
 func NewColumnPageReaderAt(src io.ReaderAt, fileSize int64, cm *ColumnMetaData, maxDefLevel, maxRepLevel int) *ColumnPageReader {
-	startOff := cm.DataPageOffset
-	if cm.DictionaryPageOffset > 0 && cm.DictionaryPageOffset < cm.DataPageOffset {
-		startOff = cm.DictionaryPageOffset
+	startOff, endOff, err := chunkRange(cm, fileSize)
+	if err != nil {
+		return &ColumnPageReader{openErr: err, codec: cm.Codec, physType: cm.Type,
+			maxDefLevel: maxDefLevel, maxRepLevel: maxRepLevel}
 	}
-	endOff := startOff + cm.TotalCompressedSize
-	if endOff > fileSize {
-		endOff = fileSize
-	}
-	srcLen := 0
-	if endOff > startOff {
-		srcLen = int(endOff - startOff)
-	}
+	srcLen := int(endOff - startOff)
 
 	typeLength := 0 // FIXED_LEN_BYTE_ARRAY: caller sets via SetTypeLength
 
@@ -253,6 +341,9 @@ func NewColumnPageReaderAt(src io.ReaderAt, fileSize int64, cm *ColumnMetaData, 
 // mode. Any read error surfaces to the NextPage/NextDictionary caller —
 // a staged chunk must never silently read as empty.
 func (r *ColumnPageReader) ensureData() error {
+	if r.openErr != nil {
+		return r.openErr
+	}
 	if r.data != nil || r.src == nil || r.srcLen == 0 {
 		return nil
 	}
@@ -292,14 +383,15 @@ func (r *ColumnPageReader) NextPageMaybeSkip(shouldSkip func(numRows int) bool) 
 		return nil, err
 	}
 	for r.off < r.endOff {
-		ph, headerSize, err := DecodePageHeader(r.data[r.off:])
+		ph, bodyOff, err := r.nextHeader(r.off)
 		if err != nil {
-			return nil, fmt.Errorf("reading page header at offset %d: %w", r.off, err)
+			return nil, err
 		}
-		r.off += headerSize
-
-		compressedData := r.data[r.off : r.off+int(ph.CompressedPageSize)]
-		r.off += int(ph.CompressedPageSize)
+		compressedData, next, err := r.pageBody(bodyOff, ph)
+		if err != nil {
+			return nil, err
+		}
+		r.off = next
 
 		switch ph.Type {
 		case PageDataV1:
@@ -337,18 +429,20 @@ func (r *ColumnPageReader) NextDictionary() (*DictionaryData, error) {
 		return nil, err
 	}
 
-	ph, headerSize, err := DecodePageHeader(r.data[r.off:])
+	ph, bodyOff, err := r.nextHeader(r.off)
 	if err != nil {
-		return nil, fmt.Errorf("reading page header: %w", err)
+		return nil, err
 	}
 
 	if ph.Type != PageDictionary {
 		return nil, nil // not a dictionary page — rewind not needed since we didn't advance
 	}
 
-	r.off += headerSize
-	compressedData := r.data[r.off : r.off+int(ph.CompressedPageSize)]
-	r.off += int(ph.CompressedPageSize)
+	compressedData, next, err := r.pageBody(bodyOff, ph)
+	if err != nil {
+		return nil, err
+	}
+	r.off = next
 
 	// Decompress.
 	pageData, err := Decompress(r.codec, compressedData, int(ph.UncompressedPageSize))
@@ -391,16 +485,15 @@ func (r *ColumnPageReader) DictionaryIfPure() (*DictionaryData, bool, error) {
 	var dict *DictionaryData
 	off := r.off
 	for off < r.endOff {
-		ph, headerSize, err := DecodePageHeader(r.data[off:])
+		ph, bodyOff, err := r.nextHeader(off)
 		if err != nil {
-			return nil, false, fmt.Errorf("walking page header at offset %d: %w", off, err)
+			return nil, false, err
 		}
-		off += headerSize
-		if int(ph.CompressedPageSize) < 0 || off+int(ph.CompressedPageSize) > r.endOff {
-			return nil, false, fmt.Errorf("page at offset %d overruns chunk", off-headerSize)
+		body, next, err := r.pageBody(bodyOff, ph)
+		if err != nil {
+			return nil, false, err
 		}
-		body := r.data[off : off+int(ph.CompressedPageSize)]
-		off += int(ph.CompressedPageSize)
+		off = next
 
 		switch ph.Type {
 		case PageDictionary:
