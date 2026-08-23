@@ -36,7 +36,8 @@ steady-drift diagnosis that motivated the scan-side lever.
 
 All local .wshf opens in `cachedFileStreamSource` decode via sequential
 `read()` into the existing `streamingShuffleReader` (heap scratch, reused
-across chunks) instead of `mmap` + `shuffleChunkReader`:
+across chunks) instead of `mmap` + `wshf.ChunkReader`
+(`internal/wshf/decode.go`, the mmap kill-switch reader):
 
 | Tier | Before | After |
 |---|---|---|
@@ -50,7 +51,8 @@ Mechanics (`internal/worker/shuffle_pread.go`):
 
 - The fd goes in at offset 0; `streamingShuffleReader` wraps it in a
   256 KiB bufio layer and decodes chunk-by-chunk with the exact same
-  `readColumnData` path as the mmap reader, so the two modes cannot
+  `wshf.ReadColumn` path (`internal/wshf/decode.go`) as the mmap reader,
+  so the two modes cannot
   diverge on payload interpretation (the streaming reader also carries
   the stricter stream-side sanity bounds).
 - `FADV_SEQUENTIAL` on the fd doubles kernel readahead (the walk is
@@ -90,7 +92,7 @@ for just-written parquet temps after pread priced at +15.9% cold):
 ## Kill switch
 
 `WADJET_SHUFFLE_PREAD=0` (worker env) / `-var=shuffle_pread=0`
-(deploy/benchmark/terraform) restores the mmap + `shuffleChunkReader`
+(deploy/benchmark/terraform) restores the mmap + `wshf.ChunkReader`
 path byte-for-byte; it remains the off arm for same-binary A/Bs.
 
 ## Validation

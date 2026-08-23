@@ -42,7 +42,8 @@ shuffle join family in `distributed_tpch_test.go:1417-1596`).
   needs no new exchange machinery.
 - **Partition files are unsorted and readers are order-agnostic.** `.wshf`
   chunks carry no ordering and may interleave across concurrent consumers
-  (`shuffle_format.go:112-128`, `partitioned_shuffle_sink.go:74-78`); the
+  (`shuffle_format.go:159-187` writes them, `internal/wshf/decode.go`
+  reads them order-agnostically; `partitioned_shuffle_sink.go:74-78`); the
   streaming-exchange fetch path never inspects order
   (`stream_source.go:168-194`, `peer_exchange.go:145-225`).
 - **The sorted-run facility is shared and SF100-validated.** Sort's external

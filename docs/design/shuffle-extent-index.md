@@ -50,8 +50,10 @@ footer. Compression envelopes (WSHC/WSHZ) and the staging
 decompressor carry the WSHF payload verbatim, so footers survive the
 S3 round trip. Every existing reader is `numChunks`-bounded and never
 reads past the last chunk — the mmap kill-switch reader, both serial
-readers, `shuffleReadBatches`, and the coordinator paths are all
-footer-blind by construction; no version fork.
+readers, `wshf.DecodeBatches`, and the coordinator paths are all
+footer-blind by construction; no version fork. (All of the above go
+through `internal/wshf`'s single decoder since #422; the read side no
+longer has a coordinator-specific copy to keep footer-blind separately.)
 
 **Reader** (`streamingShuffleReader` + `shuffleDecodeAhead`): the
 file-backed open path (`openShuffleFromFileStreaming`) offers the fd
@@ -72,12 +74,12 @@ exemption intact) and emitting extent slots. Decode workers pread
 their own extents (`os.File.ReadAt`, goroutine-safe, GC-safe read
 syscalls — the frozen-spin posture is preserved), parse the row-count
 word, re-run the stage walk's bounds validation over the in-memory
-extent (`validateShuffleChunkBytes` — `readColumnData` slices without
-bounds checks, and "a decoder must not trust lengths it has not
-checked" applies to pread bytes exactly as to stream bytes), then run
-the unchanged `decodeShuffleChunk`. Delivery, credit, `Delivered()`,
-error positions, truncation class, and token balance are identical to
-the walk path.
+extent (`wshf.ValidateChunkBytes` — the underlying `wshf.ReadColumn`
+is Cursor-bounds-checked directly, and "a decoder must not trust
+lengths it has not checked" applies to pread bytes exactly as to
+stream bytes), then run the unchanged `wshf.DecodeChunk`. Delivery,
+credit, `Delivered()`, error positions, truncation class, and token
+balance are identical to the walk path.
 
 **The serial floor collapses from full-file staging (syscall + memcpy
 of every byte) to an offset-table loop.** Staging I/O moves into the

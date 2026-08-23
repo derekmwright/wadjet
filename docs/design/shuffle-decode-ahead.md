@@ -20,16 +20,17 @@ producer goroutine whatever the consumer width.
 All production WSHF consumption flows through `streamingShuffleReader`
 (`--streaming-shuffle-read` default true routes transport bodies there;
 `WADJET_SHUFFLE_PREAD` default on routes local staged/cached files there
-too — the mmap `shuffleChunkReader` survives only behind that kill
-switch). Its `Next` is two phases per chunk:
+too — the mmap `wshf.ChunkReader` (`internal/wshf/decode.go`) survives
+only behind that kill switch). Its `Next` is two phases per chunk:
 
 1. **Stage** — `readChunkBytes`: walk the chunk's length-prefixed column
    segments off the stream into scratch. Sequential I/O + memcpy; this is
    also where chunk boundaries are discovered (a WSHF chunk's extent is
    only known by walking its column headers).
-2. **Decode** — `batch.NewRecordBatch` + the `readColumnData` column
-   loop: bitmap copies, fixed-width memcpys, BytesColumn append, decimal
-   transform. Allocation- and memmove-heavy; the dominant cost.
+2. **Decode** — `batch.NewRecordBatch` + the `wshf.ReadColumn` column
+   loop (`internal/wshf/decode.go:220`): bitmap copies, fixed-width
+   memcpys, BytesColumn append, decimal transform. Allocation- and
+   memmove-heavy; the dominant cost.
 
 Both phases run on the one producer goroutine, so k morsel consumers
 starve behind one core's staging+decode throughput. Warm runs starve
@@ -45,7 +46,7 @@ Split the two phases at the seam they already have:
   and emits one slot per non-empty chunk — to an ordered delivery queue
   (consumer side) and a work queue (decode side).
 - **k decode workers** take slots and run the exact serial decode
-  (`decodeShuffleChunk`, extracted so the two paths cannot diverge),
+  (`wshf.DecodeChunk`, extracted so the two paths cannot diverge),
   parking the batch in the slot. Workers never touch the stream and
   never block on anything but the work queue.
 - **`Next` delivers strictly in order** (slot FIFO, wait on each slot's

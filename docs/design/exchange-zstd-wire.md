@@ -58,12 +58,17 @@ unpaced; s2 already "runs ahead" of the paced PUT-body reader).
 
 ## 4. Implementation map (all in internal/worker unless noted)
 
-- `shuffle_format.go`: `zstdMagic = "WSHZ"`; codec parameter (or
+- `shuffle_format.go`: `zstdMagic = wshf.MagicWSHZ` (the magic itself
+  now lives in `internal/wshf/wshf.go`, sniffed via `wshf.CodecForMagic`
+  rather than a package-local `isShuffleFormat`); codec parameter (or
   env-selected package var) in `CompressShuffleData` /
   `compressShuffleStream`; zstd branches in `DecompressShuffleData`,
-  `streamDecompressShuffle`, `isShuffleFormat`; pooled zstd
-  encoder/decoder alongside the s2 pools (klauspost zstd decoders
-  are goroutine-bound — pool them like the s2 readers, do NOT share).
+  `streamDecompressShuffle`. (The coordinator's own decode — inline
+  results and stage-output reads — goes through the shared
+  `wshf.Decompress`/`wshf.DecodeBatches` instead of a worker-side
+  helper; see ADR-0010 and #422.) Pooled zstd encoder/decoder alongside
+  the s2 pools (klauspost zstd decoders are goroutine-bound — pool them
+  like the s2 readers, do NOT share).
 - `shuffle_stream_reader.go`: three-way magic branch (WSHF/WSHC/WSHZ),
   pooled zstd reader parallel to `s2r`.
 - `stream_source.go`: the `wshc bool` threaded through

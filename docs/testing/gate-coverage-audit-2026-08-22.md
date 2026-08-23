@@ -172,6 +172,23 @@ entries and `tmdColPin`'s `#396` case are deleted rather than kept, and both
 gates pass with no exemption for these columns. #392 itself is closed by
 that other fix, not by anything in this document's commits.
 
+**Update 2026-08-23 (container codec closes #397 and #410).** §2a's "ARRAY/
+ROW/MAP/VECTOR cannot cross a shuffle" (below) and §5's `#397` row are
+**fixed** by `internal/engine/batch/container_codec.go`
+(`EncodeContainerColumn`/`DecodeContainerColumn`): `writeColumnData`
+(now `internal/worker/shuffle_format.go:289`, not `:415`) gained the
+missing arm at `:333`, dispatching to `writeContainerData`, and the read
+side — unified into `internal/wshf` since #422 — decodes it back via
+`wshf.ReadColumn`'s container arm (`internal/wshf/decode.go:280`) calling
+`batch.DecodeContainerColumn`. `#410` (the misattributed "second face" —
+a whole-table MAP scan hitting #393's row-fallback mechanism from the DAG)
+is also fixed; a gate re-run after #397 landed found no residual
+divergence for it. `tmdUnsupported` in
+`internal/coordinator/type_matrix_distributed_test.go` is empty for both.
+This document's own §2a bullet and §5 table row are left as originally
+written — a record of what the audit found at the time — rather than
+edited in place, matching how #391/#392/#394-396/#402 are handled above.
+
 ## Why
 
 A review found that `(*Vector).GetValue`'s `TypeBytes` arm

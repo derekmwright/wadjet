@@ -64,7 +64,7 @@ batches.
   (window.go:129-130), CollectSink/BatchSink (pipeline.go:594), the deferred
   join / reverse-bloom bridges (plan.go:4218, :4087). Serializing sinks all
   gather rows anyway: shuffle `writeChunk(cols, sel, n)`
-  (shuffle_format.go:110-148), `gatherReplySink` (gather_reply_sink.go:75),
+  (shuffle_format.go:159-187), `gatherReplySink` (gather_reply_sink.go:75),
   `partitionedShuffleSink` (partitioned_shuffle_sink.go:142).
 - Column pruning through joins already exists (`OutputFilter` from
   `NeededColumns`, join.go:1902-1912, plan.go:4183) — late materialization is

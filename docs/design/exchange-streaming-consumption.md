@@ -51,7 +51,7 @@ file- or task-terminal:
   `flushPartitionLocked :607`); `unpartitionedStageSink` double-buffers
   16 MB flushes outside the lock (`unpartitioned_stage_sink.go:229-258`).
 - The WSHF format is chunk-framed and self-describing
-  (`shuffle_format.go:17-35`); `writeChunk` (`:123`) needs no footer.
+  (layout doc: `internal/wshf/wshf.go:8-22`); `writeChunk` (`shuffle_format.go:159`) needs no footer.
   The ONE whole-file field is the header `NumChunks`, written as 0 and
   patched at Finalize (`partitioned_shuffle_sink.go:690-697`). For a
   COMPLETED file the header is already correct. The s2 layer is
@@ -62,12 +62,15 @@ file- or task-terminal:
   `peerFetchReader` adapts it to `io.Reader` (`peer_client.go:89`).
 - **The consumer then throws the streaming away**: `openShuffleFromPeer`
   (`peer_exchange.go:167`) hands the reader to `openShuffleFile`
-  (`stream_source.go:643`), which `io.Copy`s the whole body to a spill
-  temp, `Sync`s, mmaps, and only then constructs `shuffleChunkReader`
-  (`:698-729`). Decode of chunk 1 waits for byte N. The S3 read path is
-  identical.
-- `shuffleChunkReader` decodes chunk-at-a-time but over a random-access
-  `[]byte` (`shuffle_format.go:432,:493`), not an `io.Reader`.
+  (`stream_source.go:1553`), which `io.Copy`s the whole body to a spill
+  temp, `Sync`s, mmaps, and only then constructs a `wshf.ChunkReader`
+  (`stream_source.go:1654`, `internal/wshf/decode.go:82-92`). Decode of
+  chunk 1 waits for byte N. The S3 read path is identical. (D1 below has
+  since shipped and closed this gap on the default path — this
+  file-then-mmap picture survives only behind `WADJET_SHUFFLE_PREAD=0`,
+  docs/design/shuffle-pread-reads.md.)
+- `wshf.ChunkReader` decodes chunk-at-a-time but over a random-access
+  `[]byte` (`internal/wshf/decode.go:71-131`), not an `io.Reader`.
 - Files are consumed strictly one at a time: `cachedFileStreamSource`
   iterates `s.files` serially (`openNextFile`, `stream_source.go:304`);
   the scan prefetcher deliberately excludes shuffle keys
@@ -96,15 +99,20 @@ is explicitly gated on the D1+D2 profile.
 
 ### D1 — streaming chunk decode (kill the staging hop)
 
+[Shipped as `streamingShuffleReader` (`internal/worker/shuffle_stream_reader.go`),
+`--streaming-shuffle-read` default true — see
+docs/design/shuffle-decode-ahead.md §1.]
+
 A `streamingShuffleReader`: an `io.Reader`-based variant of
-`shuffleChunkReader` that reads the header (including the — correct,
+`wshf.ChunkReader` that reads the header (including the — correct,
 file-is-complete — `NumChunks`), then decodes chunk-by-chunk directly
 from the peer gRPC stream (or S3 body), validating the promised count at
-EOF exactly as the mmap reader does today (`shuffle_format.go:503`'s
-truncation guard moves to end-of-stream). Wire it in
-`openShuffleFromPeer` and the S3 WSHF branch of `openNextFile`; the
-decoded batches already copy out of the buffer
-(`readColumnData :591`), so no aliasing changes.
+EOF exactly as the mmap reader does today (`wshf.ChunkReader.Next`'s
+truncation guard, `internal/wshf/decode.go:107-131`, moves to
+end-of-stream). Wire it in `openShuffleFromPeer` and the S3 WSHF branch
+of `openNextFile`; the decoded batches already copy out of the buffer
+(`wshf.ReadColumn`, `internal/wshf/decode.go:220`), so no aliasing
+changes.
 
 - No format change. No disk write, no fsync, no mmap, no
   `mmapRegistry` traffic on this path; heap holds one chunk frame at a

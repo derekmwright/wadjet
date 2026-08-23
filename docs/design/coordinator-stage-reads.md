@@ -120,12 +120,14 @@ worker reads, unchanged:
   itself (`isPeerStagePayload`, `stage_read.go`) before ever returning the
   bytes — WSHF or WSHC is a hit, anything else (WSHZ, garbage, a short
   read) is a miss that falls through to S3, mirroring the worker's
-  `codecForMagic` (`internal/worker/peer_exchange.go`). WSHZ is deliberately
-  excluded: it is the zstd envelope `--exchange-zstd` uses for **S3**
-  uploads only, never for what a peer holds on local disk, so a peer
-  serving it would mean the local copy is not what this tier expects — a
-  tier failure, not a payload for decode to choke on. Downstream, the
-  coordinator's existing `decompressShuffleData` unwraps WSHC and
+  `wshf.CodecForMagic` sniff (`internal/worker/peer_exchange.go`, the
+  same function this file's own `isPeerStagePayload` calls). WSHZ is
+  deliberately excluded: it is the zstd envelope `--exchange-zstd` uses
+  for **S3** uploads only, never for what a peer holds on local disk, so
+  a peer serving it would mean the local copy is not what this tier
+  expects — a tier failure, not a payload for decode to choke on.
+  Downstream, the coordinator's `wshf.Decompress`
+  (`internal/wshf/decompress.go`) unwraps WSHC **and** WSHZ, and
   `decodeInlineResult` sniffs WSHF-vs-parquet — unchanged, and now
   guaranteed to never see a magic the tier itself didn't already recognize.
 

@@ -158,9 +158,12 @@ not object size).
 
 - WSHF carries **no version byte**: magic `WSHF` + `NumChunks`
   (patched at Finalize via seek-back,
-  `partitioned_shuffle_sink.go:716-726`) + schema + chunks
-  (`shuffle_format.go:37-109`). WSHC is magic `WSHC` + an s2 stream of
-  the complete inner WSHF file. Format identity = the 4-byte magic;
+  `partitioned_shuffle_sink.go:716-726`) + schema + chunks (layout
+  doc `internal/wshf/wshf.go:8-22`, written by
+  `shuffle_format.go:102-187`, parsed by `wshf.ParseHeader`,
+  `internal/wshf/decode.go:14-66`). WSHC is magic `WSHC` + an s2 stream
+  of the complete inner WSHF file (WSHZ, added later, is the zstd
+  variant of the same envelope). Format identity = the 4-byte magic;
   readers dispatch on it and error loudly on anything else.
 - Scratch is intra-query ephemeral (written and read within one run,
   purged at query end), so cross-version exposure exists only when a
