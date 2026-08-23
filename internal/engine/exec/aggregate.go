@@ -1029,26 +1029,36 @@ type minMaxByState struct {
 // Pre-resolved during Init to eliminate per-row type switches in updateGroup.
 type float64Extractor func(v *batch.Vector, row int) float64
 
-// resolveFloat64Extractor returns a typed float64 extractor for the given column type.
-// Returns nil if the type cannot be converted to float64.
+// resolveFloat64Extractor returns a typed float64 extractor for the given
+// column type, or nil if the type has no numeric reading — updateGroup reads
+// nil as "skip every row", so the aggregate answers NULL.
+//
+// The type list lives in numeric_promote.go, shared with the window operator's
+// vecFloat64 and matched to kernel.ResolveRowSum's, because three lists that
+// disagree is three different answers to one query. PORT, PROTOCOL and
+// DURATION were absent and made STDDEV/VARIANCE/MEDIAN/PERCENTILE/MODE over
+// them answer NULL; TypeDate's absence was the same defect fixed for one type
+// only (#353).
 func resolveFloat64Extractor(typ batch.TypeID) float64Extractor {
-	switch typ {
-	case batch.TypeInt64, batch.TypeTimestamp:
-		return func(v *batch.Vector, row int) float64 { return float64(v.Int64Data[row]) }
-	case batch.TypeInt32, batch.TypeDate:
-		// TypeDate is days-since-epoch in Int32Data, so it orders and
-		// interpolates like the integer it is. Its absence here made
-		// MIN_BY(x, a_date_column) answer NULL: the extractor came back
-		// nil and updateGroup skipped every row (#353).
-		return func(v *batch.Vector, row int) float64 { return float64(v.Int32Data[row]) }
-	case batch.TypeFloat64:
-		return func(v *batch.Vector, row int) float64 { return v.Float64Data[row] }
-	case batch.TypeFloat32:
-		return func(v *batch.Vector, row int) float64 { return float64(v.Float32Data[row]) }
-	case batch.TypeDecimal:
-		return func(v *batch.Vector, row int) float64 { return v.DecimalData.Data[row].ToFloat64(v.DecimalData.Scale) }
-	default:
+	if !numericPromotable(typ) {
 		return nil
+	}
+	return func(v *batch.Vector, row int) float64 {
+		f, _ := numericFloat64(v, row)
+		return f
+	}
+}
+
+// resolveOrderKeyExtractor is resolveFloat64Extractor for MIN_BY/MAX_BY's
+// ORDERING column, which only has to order — it never becomes the answer. That
+// admits IPV4, MAC and BOOL, whose stored integer form orders like the value.
+func resolveOrderKeyExtractor(typ batch.TypeID) float64Extractor {
+	if !orderKeyPromotable(typ) {
+		return nil
+	}
+	return func(v *batch.Vector, row int) float64 {
+		f, _ := orderKeyFloat64(v, row)
+		return f
 	}
 }
 
@@ -1431,9 +1441,10 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 				h.aggF64Extract2[i] = resolveFloat64Extractor(b.Columns[idx].Type)
 			}
 		case AggMinBy, AggMaxBy:
-			// Second column is the comparison column (needs float64 conversion)
+			// Second column is the ORDERING column: it picks the row and
+			// never becomes the answer, so it takes the wider table.
 			if idx := h.aggColIdx2[i]; idx >= 0 {
-				h.aggF64Extract2[i] = resolveFloat64Extractor(b.Columns[idx].Type)
+				h.aggF64Extract2[i] = resolveOrderKeyExtractor(b.Columns[idx].Type)
 			}
 		}
 	}

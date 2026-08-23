@@ -976,22 +976,23 @@ func compareVectorValues(col *batch.Vector, a, b int) int {
 }
 
 // vecFloat64 reads a float64 value from any numeric vector without boxing.
+//
+// Its four-case switch defaulted to 0 for DECIMAL, DURATION, PORT, PROTOCOL
+// and DATE, so a window SUM or AVG over any of them computed ZERO and marked
+// the row valid — a wrong number, not a missing one, and identical on every
+// arm of every differential gate. The type list now lives in
+// numeric_promote.go alongside the grouped aggregate's, so the windowed and
+// grouped forms of one query cannot disagree.
+//
+// IPV4 and MAC still read 0 here: PostgreSQL has no sum or avg over inet or
+// macaddr, and the right answer is a plan-time refusal rather than a number —
+// left open, tracked with #392's output-type decision.
 func vecFloat64(v *batch.Vector, i int) float64 {
 	if v == nil || v.Nulls.IsNullFast(i) {
 		return 0
 	}
-	switch v.Type {
-	case batch.TypeFloat64:
-		return v.Float64Data[i]
-	case batch.TypeFloat32:
-		return float64(v.Float32Data[i])
-	case batch.TypeInt64, batch.TypeTimestamp:
-		return float64(v.Int64Data[i])
-	case batch.TypeInt32:
-		return float64(v.Int32Data[i])
-	default:
-		return 0
-	}
+	f, _ := numericFloat64(v, i)
+	return f
 }
 
 // sameColumnar returns true if two rows have equal values for the given column indices.
