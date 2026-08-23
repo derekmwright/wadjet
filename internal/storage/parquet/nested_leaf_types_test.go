@@ -59,10 +59,10 @@ func TestVectorAndDecimalBelowAContainer(t *testing.T) {
 		{ // NULL in every position under a present container
 			"id": int64(1),
 			"av": []any{nil},
-			"rv": map[string]any{"n": int64(8)},
+			"rv": map[string]any{"n": int64(8), "v": nil},
 			"mv": map[string]any{"a": nil},
 			"ad": []any{nil},
-			"rd": map[string]any{"n": int64(10)},
+			"rd": map[string]any{"n": int64(10), "d": nil},
 			"md": map[string]any{"a": nil},
 		},
 		{ // every container NULL

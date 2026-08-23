@@ -263,13 +263,24 @@ func (a *recordAssembler) read(node *nestedNode) any {
 		}
 		m := make(map[string]any, len(node.children))
 		for _, c := range node.children {
-			// A NULL field is left OUT of the map rather than stored as a
-			// nil entry: that is the convention every other row-shape in
-			// this reader uses for absence (readRowsFlat omits a nil
-			// column), and batch.FromRows reads a missing key as NULL.
-			if v := a.read(c); v != nil {
-				m[c.name] = v
-			}
+			// EVERY declared field gets a key, a NULL one holding nil. The
+			// convention is set by the other box for the same value: the
+			// columnar reader's ROW vector answers GetValue with one entry
+			// per child, nulls included, so omitting the key here made
+			// ROW(a=>NULL, b=>-3) read back as map[b:-3] on this path and
+			// map[a:<nil> b:-3] on that one — a live two-path value
+			// divergence for any present ROW with a null field (#449).
+			//
+			// It is only the TOP level of a row where absence is spelled by
+			// a missing key (readRowsFlat omits a nil column, and the
+			// columnar box agrees — a batch's null column contributes no
+			// entry). Inside a ROW the field set is fixed by the schema, so
+			// the key is always there and nil is the value.
+			//
+			// Round-tripping is unaffected: decomposeRow reads m[field.Name]
+			// and batch.FromRows drives (*Vector).SetValue by field name, so
+			// an explicit nil and a missing key write the same NULL.
+			m[c.name] = a.read(c)
 		}
 		return m
 

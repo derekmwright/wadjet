@@ -28,9 +28,11 @@ import (
 const nestedFixture = "testdata/nested_containers.parquet"
 
 // nestedContainersWant is the fixture's content in the shape ReadRows
-// returns: a NULL top-level column and a NULL struct field are ABSENT keys
-// (that is how every row shape in this reader spells absence), while a NULL
-// map VALUE and a NULL array ELEMENT are present entries holding nil.
+// returns: a NULL top-level COLUMN is an absent key (that is how a row spells
+// a column it has no value for), while everything below the top level is a
+// present entry holding nil — a NULL struct FIELD, a NULL map VALUE and a
+// NULL array ELEMENT alike. A struct's field set is fixed by the schema, so
+// its keys are always all there; #449 is what omitting them cost.
 func nestedContainersWant() []map[string]any {
 	return []map[string]any{
 		{ // ordinary values
@@ -54,7 +56,7 @@ func nestedContainersWant() []map[string]any {
 			"m_map":    map[string]any{},
 			"r_map":    map[string]any{"a": int64(6), "m": map[string]any{}},
 			"r_arr":    map[string]any{"a": int64(6), "l": []any{}},
-			"r_row":    map[string]any{"a": int64(6), "s": map[string]any{}},
+			"r_row":    map[string]any{"a": int64(6), "s": map[string]any{"b": nil}},
 			"a_map":    []any{},
 			"a_row":    []any{},
 			"a_arr":    []any{},
@@ -65,9 +67,9 @@ func nestedContainersWant() []map[string]any {
 			"m_list":   map[string]any{"k": nil},
 			"m_struct": map[string]any{"k": nil},
 			"m_map":    map[string]any{"k": nil},
-			"r_map":    map[string]any{},
-			"r_arr":    map[string]any{},
-			"r_row":    map[string]any{},
+			"r_map":    map[string]any{"a": nil, "m": nil},
+			"r_arr":    map[string]any{"a": nil, "l": nil},
+			"r_row":    map[string]any{"a": nil, "s": nil},
 			"a_map":    []any{nil},
 			"a_row":    []any{nil},
 			"a_arr":    []any{nil},
@@ -80,8 +82,8 @@ func nestedContainersWant() []map[string]any {
 			"m_int":  map[string]any{"a": int64(1), "b": int64(2)},
 			"m_list": map[string]any{"a": []any{}, "b": []any{int64(3), nil, int64(5)}},
 			"m_struct": map[string]any{
-				"a": map[string]any{"y": "a"},
-				"b": map[string]any{"x": int64(7)},
+				"a": map[string]any{"x": nil, "y": "a"},
+				"b": map[string]any{"x": int64(7), "y": nil},
 			},
 			"m_map": map[string]any{
 				"a": map[string]any{},
@@ -95,7 +97,7 @@ func nestedContainersWant() []map[string]any {
 				map[string]any{},
 				map[string]any{"b": nil, "c": int64(3)},
 			},
-			"a_row": []any{map[string]any{"x": int64(2)}, map[string]any{}},
+			"a_row": []any{map[string]any{"x": int64(2)}, map[string]any{"x": nil}},
 			"a_arr": []any{[]any{int64(3)}, []any{}, []any{nil, int64(5)}},
 		},
 	}
