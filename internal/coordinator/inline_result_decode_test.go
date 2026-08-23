@@ -1,10 +1,16 @@
 package coordinator
 
 import (
+	"bytes"
+	"encoding/binary"
+	"math"
 	"strings"
 	"testing"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // decodeInlineResult used to answer (nil, nil, 0) and log at Debug for every
@@ -49,6 +55,76 @@ func TestDecodeInlineResultReportsFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDecodeInlineResultDecodesWSHZ pins a fix that had no test: before
+// #422 unified the read side into internal/wshf, the coordinator's inline
+// decode only knew the WSHF and WSHC (s2) magics — a WSHZ-enveloped payload
+// fell into the "not parquet at all" branch and failed with a parquet-open
+// error, even though the bytes were a perfectly good shuffle result. WSHZ is
+// what a worker's stage/shuffle upload carries under
+// WADJET_EXCHANGE_ZSTD=1 (docs/design/exchange-zstd-wire.md); this test sets
+// that flag only to document the real trigger — decodeInlineResult itself
+// never reads it, it dispatches purely on the four-byte magic via
+// wshf.Decompress.
+func TestDecodeInlineResultDecodesWSHZ(t *testing.T) {
+	t.Setenv("WADJET_EXCHANGE_ZSTD", "1")
+
+	var c Coordinator
+	data := wshzInlineFixture(t)
+
+	batches, cols, rows, err := c.decodeInlineResult(data)
+	if err != nil {
+		t.Fatalf("decodeInlineResult(WSHZ): %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("rows = %d, want 1", rows)
+	}
+	if len(cols) != 1 || cols[0] != "x" {
+		t.Fatalf("cols = %v, want [x]", cols)
+	}
+	if len(batches) != 1 || batches[0].Len != 1 {
+		t.Fatalf("batches = %v, want one batch of one row", batches)
+	}
+	got := batches[0].Columns[0].Float64Data[0]
+	if got != 42.5 {
+		t.Fatalf("decoded value = %v, want 42.5", got)
+	}
+}
+
+// wshzInlineFixture builds a valid WSHF payload for one float64=42.5 row
+// (the same hand-built layout TestReadScalarFromStageOutput_WSHFDecode
+// uses) and wraps it in a WSHZ envelope: magic "WSHZ" + a zstd stream of
+// the raw WSHF bytes, exactly what wshf.Decompress expects to unwrap.
+func wshzInlineFixture(tb testing.TB) []byte {
+	tb.Helper()
+	var raw []byte
+	raw = append(raw, 'W', 'S', 'H', 'F')
+	raw = binary.LittleEndian.AppendUint32(raw, 1) // 1 chunk
+	raw = binary.LittleEndian.AppendUint16(raw, 1) // 1 col
+	raw = binary.LittleEndian.AppendUint16(raw, 1) // name length = 1
+	raw = append(raw, 'x')
+	raw = append(raw, byte(parquet.TypeFloat64))
+	raw = binary.LittleEndian.AppendUint32(raw, 1) // numRows = 1
+	raw = binary.LittleEndian.AppendUint32(raw, 1) // bitmapWords = 1
+	raw = binary.LittleEndian.AppendUint64(raw, 1) // bit 0 = valid
+	raw = binary.LittleEndian.AppendUint32(raw, 8) // dataLen = 8 bytes
+	raw = binary.LittleEndian.AppendUint64(raw, math.Float64bits(42.5))
+
+	var body bytes.Buffer
+	zw, err := zstd.NewWriter(&body)
+	if err != nil {
+		tb.Fatalf("zstd.NewWriter: %v", err)
+	}
+	if _, err := zw.Write(raw); err != nil {
+		tb.Fatalf("zstd write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		tb.Fatalf("zstd close: %v", err)
+	}
+
+	data := append([]byte{}, wshf.MagicWSHZ[:]...)
+	return append(data, body.Bytes()...)
 }
 
 // truncatedInlineChunk is a syntactically valid WSHF header for one INT64

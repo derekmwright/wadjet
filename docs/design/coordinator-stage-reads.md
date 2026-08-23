@@ -130,6 +130,18 @@ worker reads, unchanged:
   (`internal/wshf/decompress.go`) unwraps WSHC **and** WSHZ, and
   `decodeInlineResult` sniffs WSHF-vs-parquet — unchanged, and now
   guaranteed to never see a magic the tier itself didn't already recognize.
+  Both halves of that last sentence are asserted directly, not just
+  inferred from the peer-tier code: `TestDecodeInlineResultDecodesWSHZ`
+  (`internal/coordinator/inline_result_decode_test.go`) feeds a
+  WSHZ-enveloped payload straight to `decodeInlineResult` and requires it
+  to decode — the fix `wshf.Decompress` gave that path had no test of its
+  own before this — while `stage_read_test.go`'s peer-tier fallthrough
+  cases keep proving a WSHZ payload from a peer is a miss, never a decode
+  attempt. The two paths are allowed to disagree on WSHZ specifically
+  because they answer different questions: decode asks "is this a shuffle
+  payload", tier selection asks "is this the copy this tier is supposed
+  to be serving" — and a peer serving WSHZ answers no to the second
+  question even though `wshf.Decompress` could answer the first.
 
 Every declination and every failure falls through to the durable copy. The
 tier can only change which byte-identical copy of an object is read.
