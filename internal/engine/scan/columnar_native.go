@@ -213,7 +213,11 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 	g.SetLimit(limit)
 	for i, col := range schema {
 		i, col := i, col
-		// ROW: read each child field as a separate leaf column.
+		// ROW: read each child field as a separate leaf column. Every field
+		// IS a leaf here: HasUnsupportedColumnarTypes refuses a ROW with a
+		// container field, whose leaves sit below the {column, field} path
+		// this lookup can name — the miss took the all-nulls branch and read
+		// the field away (#448).
 		if col.Type == pqt.TypeRow && len(col.Fields) > 0 {
 			g.Go(func() error {
 				// The ROW's OWN null bit lives nowhere but the definition
@@ -230,6 +234,9 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 					key := col.Name + "." + field.Name
 					childIdx, ok := leafByPath[key]
 					if !ok {
+						// The field is absent from THIS file — a field added
+						// to the schema after it was written reads as NULL,
+						// the same as a missing top-level column below.
 						for k := 0; k < numRows; k++ {
 							b.Columns[i].Children[j].Nulls.SetNull(k)
 						}
