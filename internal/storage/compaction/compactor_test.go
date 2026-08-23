@@ -576,3 +576,90 @@ func TestPartitionedOutputPath(t *testing.T) {
 		}
 	}
 }
+
+// TestCompactTable_ZeroLengthUUIDValues is the production half of a two-path
+// divergence: compaction reads through parquet.Reader.ReadRowGroup, the ROW
+// path, and that path refused a zero-length entry in a UUID column ("UUID is
+// 16 bytes per value but row 2 holds 10" for the unparseable case, and a
+// non-NULL empty value for the empty one) on files wadjet had written itself.
+// The native columnar reader read the same files without complaint, so the
+// failure only appeared once the background sweep touched a table.
+//
+// A zero-length entry is an absence now, on both paths, and compaction of a
+// file carrying one has to complete and carry the absence through.
+func TestCompactTable_ZeroLengthUUIDValues(t *testing.T) {
+	cat, store := setupTestCatalog(t)
+	ctx := context.Background()
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "u", Type: parquet.TypeUUID, Nullable: true},
+			{Name: "a", Type: parquet.TypeIPv6, Nullable: true},
+		},
+	}
+	if err := cat.CreateTable(ctx, "sessions", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 6; i++ {
+		path := fmt.Sprintf("tables/sessions/chunk_%04d.parquet", i)
+		size := writeTestFile(t, store, "test-bucket", path, schema, []map[string]any{
+			{"id": int64(i*3 + 0), "u": "550e8400-e29b-41d4-a716-446655440000", "a": "2001:db8::1"},
+			// The legacy shape: a zero-length BYTE_ARRAY entry, not NULL.
+			{"id": int64(i*3 + 1), "u": []byte{}, "a": []byte{}},
+			{"id": int64(i*3 + 2), "u": nil, "a": nil},
+		})
+		if err := cat.AddFiles(ctx, "sessions", nil, "", []catalog.FileEntry{
+			{Path: path, SizeBytes: size, NumRows: 3, CreatedAt: time.Now().UTC()},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := DefaultConfig()
+	cfg.MinFiles = 3
+	c := New(cat, nil, cfg)
+	if _, err := c.CompactTable(ctx, "sessions"); err != nil {
+		t.Fatalf("compacting a table with zero-length UUID values: %v", err)
+	}
+
+	// And every row is still there, with the absences still absent.
+	manifest, err := cat.GetManifest(ctx, "sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	total, absent := 0, 0
+	for _, part := range manifest.Partitions {
+		for _, f := range part.Files {
+			rc, _, err := store.Get(ctx, "test-bucket", f.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := r.ReadRows(nil)
+			if err != nil {
+				t.Fatalf("reading the compacted file: %v", err)
+			}
+			for _, row := range rows {
+				total++
+				if v, ok := row["u"]; !ok || v == nil {
+					absent++
+				}
+			}
+		}
+	}
+	if total != 18 {
+		t.Errorf("compaction produced %d rows, want 18", total)
+	}
+	if absent != 12 {
+		t.Errorf("%d rows have no UUID, want 12 (one empty and one NULL per input file)", absent)
+	}
+}

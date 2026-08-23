@@ -233,3 +233,83 @@ func TestAnalyzeTableHistogramEndToEnd(t *testing.T) {
 		t.Errorf("second half sel %.4f outside expected", h2)
 	}
 }
+
+// TestAnalyzeTableWithZeroLengthUUIDValues: ANALYZE reads through
+// parquet.Reader.ReadRowGroup — the ROW path — and that path refused a
+// zero-length entry in a UUID column ("UUID is 16 bytes per value but row 2
+// holds 10") on files wadjet had written itself, while the native columnar
+// reader read them. ANALYZE is background work, so the divergence surfaced as
+// a table that could be queried but never analyzed.
+//
+// A zero-length entry is an absence now, on both paths, and ANALYZE counts it
+// as one rather than as a distinct value.
+func TestAnalyzeTableWithZeroLengthUUIDValues(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, "test"); err != nil {
+		t.Fatal(err)
+	}
+	cat := New(NewMemKV(), store, "test")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "u", Type: parquet.TypeUUID, Nullable: true},
+		{Name: "a", Type: parquet.TypeIPv6, Nullable: true},
+	}}
+	if err := cat.CreateTable(ctx, "sessions", schema, nil); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+
+	rows := make([]map[string]any, 0, 300)
+	for i := 0; i < 100; i++ {
+		rows = append(rows,
+			map[string]any{"id": int64(i*3 + 0),
+				"u": fmt.Sprintf("00000000-0000-4000-8000-%012x", i),
+				"a": fmt.Sprintf("2001:db8::%x", i)},
+			// The legacy shape: a zero-length BYTE_ARRAY entry, not NULL.
+			map[string]any{"id": int64(i*3 + 1), "u": []byte{}, "a": []byte{}},
+			map[string]any{"id": int64(i*3 + 2), "u": nil, "a": nil},
+		)
+	}
+	var buf bytes.Buffer
+	pw, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pw.WriteRows(rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := pw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := buf.Bytes()
+	const key = "tables/sessions/chunk_0000.parquet"
+	if _, err := store.Put(ctx, "test", key, bytes.NewReader(data), int64(len(data)), "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddFiles(ctx, "sessions", nil, "tables/sessions/", []FileEntry{
+		{Path: key, SizeBytes: int64(len(data)), NumRows: int64(len(rows)), CreatedAt: time.Now()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := cat.AnalyzeTable(ctx, "sessions"); err != nil {
+		t.Fatalf("AnalyzeTable over a file with zero-length UUID values: %v", err)
+	}
+
+	stats, err := cat.AggregateColumnStats(ctx, "sessions")
+	if err != nil {
+		t.Fatalf("AggregateColumnStats: %v", err)
+	}
+	cs, ok := stats["u"]
+	if !ok {
+		t.Fatal("no stats for the UUID column")
+	}
+	// 100 real values; the 200 absences must not be counted as one more.
+	if cs.NDV < 90 || cs.NDV > 110 {
+		t.Errorf("UUID NDV = %d, want ~100", cs.NDV)
+	}
+}

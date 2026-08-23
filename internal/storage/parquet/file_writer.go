@@ -37,6 +37,9 @@ type NativeWriter struct {
 	// Maps top-level column index to its leaf range [startLeaf, endLeaf).
 	colLeafRanges []leafRange
 	numRows       int
+	// rowsSeen counts rows across the whole file, where numRows resets at
+	// every row group. It exists so a value error can name the row.
+	rowsSeen int64
 
 	written   int64 // total bytes written to w so far
 	rowGroups []RowGroup
@@ -341,6 +344,7 @@ func (nw *NativeWriter) WriteMapRows(rows []map[string]any) error {
 			return nw.err
 		}
 		nw.numRows++
+		nw.rowsSeen++
 
 		if nw.numRows >= nw.config.RowGroupSize {
 			if err := nw.flushRowGroup(); err != nil {
@@ -383,8 +387,90 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 		lb.appendEntry(defLevel, repLevel)
 		return
 	}
+	// A text literal for a binary network type is converted HERE, where the
+	// column and the row are still known and an error can name them. Below
+	// this line the converters cannot report failure and never could.
+	if s, ok := val.(string); ok && hasNetworkLiteralForm(col.Type) {
+		conv, err := convertNetworkLiteral(col.Type, s)
+		if err != nil {
+			nw.fail(fmt.Errorf("column %q, row %d: %w", col.Name, nw.rowsSeen, err))
+			lb.appendEntry(defLevel, repLevel)
+			return
+		}
+		if conv == nil {
+			// The empty literal is an absence, and absence is NULL.
+			lb.appendEntry(defLevel, repLevel)
+			return
+		}
+		val = conv
+	}
 	// Value is present — def level is maxDefLevel.
 	lb.appendEntryWithValue(lb.maxDefLevel, repLevel, val)
+}
+
+// hasNetworkLiteralForm reports whether a column of this type stores BINARY
+// but accepts TEXT on the way in.
+func hasNetworkLiteralForm(t TypeID) bool {
+	switch t {
+	case TypeIPv4, TypeIPv6, TypeMAC, TypeUUID:
+		return true
+	}
+	return false
+}
+
+// convertNetworkLiteral turns a text literal into the binary form its column
+// is defined to hold: an int64 for IPV4 and MAC, sixteen bytes for IPV6 and
+// UUID. It has three outcomes, and the two that are not "it converted" are
+// the point.
+//
+// There used to be one. Every converter answered garbage with a zero value:
+// ipv4StringToInt64 and macStringToInt64 returned 0, so "zz" landed in a MAC
+// column as 00:00:00:00:00:00, indistinguishable from an address somebody
+// meant; ipv6StringToBytes returned nothing; and convertStringToBytes stored
+// an unparseable UUID as THE RAW STRING BYTES, so "not-a-uuid" became ten
+// bytes in a column whose entries are sixteen. That last one produced a file
+// wadjet WROTE that wadjet's own row reader then refused — "UUID is 16 bytes
+// per value but row 2 holds 10" — while the native columnar reader read it.
+// One file, two paths, two answers, and the row path is the one compaction
+// and ANALYZE run on.
+//
+// PostgreSQL decides what a bad literal means (ADR-0012) and there it is an
+// error: `invalid input syntax for type uuid`. So a literal that parses
+// converts, and anything else is an error naming the column, the row and the
+// literal.
+//
+// The empty literal is the third outcome: it is an absence, and it is written
+// as NULL. "" is the one input for which "a value" has no stable meaning here
+// — stored as a value it is a zero-length entry in a fixed-width column,
+// which the row reader called an error and the columnar reader called a
+// value, and which answers false to IS NULL and equal to the empty string
+// when what was meant was that there is no address. The readers hold the other end of this
+// contract: a zero-length entry in an IPV6 or UUID column reads back as NULL
+// on both paths (reader.go unpackAllPresent / unpackWithNulls,
+// scan/columnar_native.go).
+func convertNetworkLiteral(colType TypeID, s string) (any, error) {
+	if s == "" {
+		return nil, nil
+	}
+	switch colType {
+	case TypeIPv4:
+		if n, ok := ipv4StringToInt64(s); ok {
+			return n, nil
+		}
+	case TypeMAC:
+		if n, ok := macStringToInt64(s); ok {
+			return n, nil
+		}
+	case TypeIPv6:
+		if b := ipv6StringToBytes(s); b != nil {
+			return b, nil
+		}
+	case TypeUUID:
+		if b := parseUUIDForWrite(s); b != nil {
+			return b, nil
+		}
+	}
+	return nil, fmt.Errorf("%q is not a valid %s value", s, colType)
 }
 
 // decomposeArray handles ARRAY (LIST) type columns.
@@ -1509,12 +1595,16 @@ func toBytes(v any, colType TypeID) []byte {
 }
 
 // convertStringToInt64 handles network type string-to-int64 conversion.
+// decomposeLeaf converts and validates these literals before the value ever
+// reaches a leaf buffer, so an unparseable one cannot arrive here.
 func convertStringToInt64(s string, colType TypeID) int64 {
 	switch colType {
 	case TypeIPv4:
-		return ipv4StringToInt64(s)
+		n, _ := ipv4StringToInt64(s)
+		return n
 	case TypeMAC:
-		return macStringToInt64(s)
+		n, _ := macStringToInt64(s)
+		return n
 	default:
 		return 0
 	}
@@ -1526,11 +1616,11 @@ func convertStringToBytes(s string, colType TypeID) []byte {
 	case TypeIPv6:
 		return ipv6StringToBytes(s)
 	case TypeUUID:
-		b := parseUUIDForWrite(s)
-		if b != nil {
-			return b
-		}
-		return []byte(s)
+		// A literal that does not parse never reaches here: decomposeLeaf
+		// converts and refuses first. Returning the RAW STRING BYTES is what
+		// it used to do, and that is how a ten-byte value got into a
+		// sixteen-byte column.
+		return parseUUIDForWrite(s)
 	default:
 		return []byte(s)
 	}
@@ -1650,47 +1740,61 @@ func compressPage(data []byte, codec CompressionCodec) ([]byte, error) {
 }
 
 // Network type conversion helpers (reuse writer.go functions where possible).
-func ipv4StringToInt64(s string) int64 {
+//
+// Both report whether the literal parsed. They used to answer garbage with 0,
+// which is also the answer for "0.0.0.0" and for 00:00:00:00:00:00 — so the
+// caller could not tell a parsed address from a rejected one, and "zz" was
+// stored as a real MAC. See convertNetworkLiteral.
+func ipv4StringToInt64(s string) (int64, bool) {
 	// Simple IPv4 parser — avoid net.ParseIP allocation.
 	var ip [4]byte
 	idx := 0
 	octet := 0
+	digits := 0
 	for i := 0; i < len(s); i++ {
 		if s[i] == '.' {
+			if digits == 0 || idx >= 3 {
+				return 0, false
+			}
 			ip[idx] = byte(octet)
 			idx++
 			octet = 0
-			if idx >= 4 {
-				return 0
-			}
+			digits = 0
 		} else if s[i] >= '0' && s[i] <= '9' {
 			octet = octet*10 + int(s[i]-'0')
+			digits++
+			if octet > 255 || digits > 3 {
+				return 0, false
+			}
 		} else {
-			return 0
+			return 0, false
 		}
 	}
-	if idx == 3 {
+	if idx == 3 && digits > 0 {
 		ip[idx] = byte(octet)
-		return int64(binary.BigEndian.Uint32(ip[:]))
+		return int64(binary.BigEndian.Uint32(ip[:])), true
 	}
-	return 0
+	return 0, false
 }
 
-func macStringToInt64(s string) int64 {
+func macStringToInt64(s string) (int64, bool) {
 	// Parse "00:11:22:33:44:55" format.
 	if len(s) != 17 {
-		return 0
+		return 0, false
 	}
 	var n uint64
 	for i := 0; i < 6; i++ {
+		if i > 0 && s[i*3-1] != ':' {
+			return 0, false
+		}
 		hi := unhex(s[i*3])
 		lo := unhex(s[i*3+1])
 		if hi == 0xFF || lo == 0xFF {
-			return 0
+			return 0, false
 		}
 		n = (n << 8) | uint64(hi<<4|lo)
 	}
-	return int64(n)
+	return int64(n), true
 }
 
 // ipv6StringToBytes parses an IPv6 literal into the 16-byte storage form an
@@ -1705,10 +1809,10 @@ func macStringToInt64(s string) int64 {
 // same silent shape as #395. Invisible until the declared type was honoured
 // on read (#396); now the column reads back as IPV6 and shows it.
 //
-// An unparseable literal stores nothing, which reads back as "" rather than
-// as a wrong address. That matches its neighbours (ipv4StringToInt64 and
-// macStringToInt64 both return 0) and is as far as this layer can go: the
-// write path from decomposeValue down carries no error.
+// A literal that does not parse returns nil, and nil is a refusal rather than
+// a value: decomposeLeaf turns it into an error naming the column and the row
+// (convertNetworkLiteral). It used to be stored as no bytes at all, which
+// read back as "" — an address-shaped hole that IS NULL answered false to.
 func ipv6StringToBytes(s string) []byte {
 	ip := net.ParseIP(s)
 	if ip == nil {

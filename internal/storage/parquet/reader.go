@@ -1282,16 +1282,19 @@ func checkPageDecodable(col Column, data Values, n int) error {
 // nothing, so the only place a 16-byte type can be held to sixteen bytes is
 // here, at the value. w comes from fixedByteWidth and is 0 for the types
 // that have no fixed width, which is the fast exit.
+//
+// It used to carve out a zero-length value as "an absence, not a wrong
+// width", because the writer stored an unparseable IPv6 literal as no bytes
+// at all. That is not what the carve-out did: the value came back as a
+// non-NULL empty string: false to IS NULL, and equal to the empty
+// string. The absence is
+// real, so it is now expressed as one — the callers set NULL for a
+// zero-length entry in a fixed-width column and never reach this check with
+// got == 0. What remains is the case the check is for: four bytes, or
+// twenty-four, in a column whose entries are sixteen. That is a different
+// value, not a missing one.
 func checkByteWidth(col Column, w, got, row int) error {
 	if w == 0 || got == w {
-		return nil
-	}
-	// A ZERO-length value is an absence, not a wrong width: the writer
-	// stores an unparseable or empty IPv6 literal as no bytes at all
-	// (convertStringToBytes), and TestNativeWriterParsesIPv6Literals pins
-	// that it reads back the same way. A four- or twenty-four-byte value is
-	// a different value; an empty one is no value.
-	if got == 0 {
 		return nil
 	}
 	return fmt.Errorf("column %q: %s is %d bytes per value but row %d holds %d",
@@ -1352,6 +1355,13 @@ func unpackAllPresent(dst []any, offset int, data Values, n int, col Column) err
 		if offsets != nil {
 			w := fixedByteWidth(col)
 			for i := 0; i < n && i+1 < len(offsets); i++ {
+				// A zero-length entry in a fixed-width column is an absence
+				// (convertNetworkLiteral). Leaving dst nil is how this layer
+				// says NULL. BYTES has no fixed width, so an empty BYTES
+				// value stays the empty value it is.
+				if w > 0 && offsets[i+1] == offsets[i] {
+					continue
+				}
 				b := make([]byte, offsets[i+1]-offsets[i])
 				copy(b, rawData[offsets[i]:offsets[i+1]])
 				if err := checkByteWidth(col, w, len(b), i); err != nil {
@@ -1457,7 +1467,9 @@ func unpackWithNulls(dst []any, offset int, data Values, defLevels []int32, maxD
 			w := fixedByteWidth(col)
 			for i := 0; i < n; i++ {
 				if i < len(defLevels) && defLevels[i] == maxDef {
-					if vi+1 < len(offsets) {
+					// See unpackAllPresent: zero length in a fixed-width
+					// column is NULL, and dst stays nil to say so.
+					if vi+1 < len(offsets) && !(w > 0 && offsets[vi+1] == offsets[vi]) {
 						b := make([]byte, offsets[vi+1]-offsets[vi])
 						copy(b, rawData[offsets[vi]:offsets[vi+1]])
 						if err := checkByteWidth(col, w, len(b), i); err != nil {

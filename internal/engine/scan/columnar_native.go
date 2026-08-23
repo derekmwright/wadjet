@@ -943,11 +943,31 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 		if err != nil {
 			return err
 		}
+		// A zero-length entry in a fixed-width column is an absence, not a
+		// zero-length address. Older files carry those entries
+		// (parquet.convertNetworkLiteral), and the row reader reads them
+		// back as NULL — so this path has to as well, or the same file
+		// answers IS NULL differently depending on which reader ran.
+		//
+		// The DESTINATION's type decides, not typ: typ is what the FILE
+		// recovers, and a UUID column wadjet wrote comes back from the
+		// footer as a plain BYTE_ARRAY string. vec.Type is the catalog's,
+		// which is where "sixteen bytes per value" is written down. Only
+		// IPV6 and UUID have a fixed width; STRING, BYTES and CIDR do not,
+		// and an empty value there is the empty value.
+		emptyIsNull := vec.Type == pqt.TypeIPv6 || vec.Type == pqt.TypeUUID
 		if offsets != nil {
 			if len(offsets) < n+1 {
 				return pageSrcErr(typ, pqt.PhysicalByteArray, data, n, len(offsets)-1)
 			}
 			vec.BytesData.BulkSet(offset, rawData, offsets, n)
+			if emptyIsNull {
+				for i := 0; i < n; i++ {
+					if offsets[i+1] == offsets[i] {
+						vec.Nulls.SetNull(offset + i)
+					}
+				}
+			}
 		} else {
 			// PLAIN encoding: 4-byte length prefix per value. Running out
 			// of prefixes, or off the end of one value's bytes, used to
@@ -966,6 +986,9 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 					return plainPrefixErr(typ, i, n, pos+length, len(rawData))
 				}
 				vec.BytesData.Set(offset+i, rawData[pos:pos+length])
+				if emptyIsNull && length == 0 {
+					vec.Nulls.SetNull(offset + i)
+				}
 				pos += length
 			}
 		}
@@ -1152,6 +1175,10 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 		if err != nil {
 			return err
 		}
+		// See copyNativeDataDirect: zero length in a fixed-width column is
+		// NULL on both readers or on neither, and the DESTINATION's type is
+		// the one that says the column has a fixed width.
+		emptyIsNull := vec.Type == pqt.TypeIPv6 || vec.Type == pqt.TypeUUID
 		valIdx := 0
 		if offsets != nil {
 			// The offsets can only run short of the levels on a corrupt
@@ -1165,6 +1192,9 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 					start := offsets[valIdx]
 					end := offsets[valIdx+1]
 					vec.BytesData.Set(offset+i, rawData[start:end])
+					if emptyIsNull && end == start {
+						vec.Nulls.SetNull(offset + i)
+					}
 					valIdx++
 				} else {
 					vec.Nulls.SetNull(offset + i)
@@ -1186,6 +1216,9 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 						return plainPrefixErr(typ, i, n, pos+length, len(rawData))
 					}
 					vec.BytesData.Set(offset+i, rawData[pos:pos+length])
+					if emptyIsNull && length == 0 {
+						vec.Nulls.SetNull(offset + i)
+					}
 					pos += length
 					valIdx++
 				} else {
