@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -413,5 +414,78 @@ func TestCompactTable_SchemaDriftMatrix(t *testing.T) {
 					"the values ran anyway and deleted the inputs", n)
 			}
 		})
+	}
+}
+
+// #435: a failed merge must reach the CALLER, not only the log.
+//
+// The merge is the step that reads and rewrites the data, and it was the one
+// step in CompactTable's pass loop that only logged — every other error there
+// returns. So CompactTable handed back (*Result, nil) with the failed
+// partition invisible in counters that count only successes, the sweeper
+// retried the same partition forever, and the type-matrix gate had to check
+// the resulting FILE COUNT to notice a pass had not run.
+func TestCompactTable_ReportsAFailedMerge(t *testing.T) {
+	tableSchema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeInt64, Nullable: true},
+	}}
+	// A STRING leaf under an INT64 column: genuine drift, no exact repair,
+	// and the merge is refused by name.
+	fileSchema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeString, Nullable: true},
+	}}
+	ctx := context.Background()
+	cat, store := setupTestCatalog(t)
+	if err := cat.CreateTable(ctx, "failmerge", tableSchema, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		path := fmt.Sprintf("tables/failmerge/chunk_%04d.parquet", i)
+		rows := []map[string]any{
+			{"id": int64(i*2 + 0), "v": "hello"},
+			{"id": int64(i*2 + 1), "v": "world"},
+		}
+		size := writeTestFile(t, store, "test-bucket", path, fileSchema, rows)
+		if err := cat.AddFiles(ctx, "failmerge", nil, "", []catalog.FileEntry{
+			{Path: path, SizeBytes: size, NumRows: int64(len(rows)), CreatedAt: time.Now().UTC()},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := DefaultConfig()
+	cfg.MinFiles = 2
+	res, err := New(cat, nil, cfg).CompactTable(ctx, "failmerge")
+	if err == nil {
+		t.Fatalf("CompactTable reported success over a partition whose merge failed: %+v", res)
+	}
+	if res == nil {
+		t.Fatal("CompactTable returned no Result alongside its error, so the caller cannot see what ran")
+	}
+	if len(res.Failed) != 1 {
+		t.Fatalf("Result.Failed = %+v, want exactly one partition", res.Failed)
+	}
+	if res.Failed[0].Err == nil {
+		t.Error("the recorded failure carries no cause")
+	}
+	for _, want := range []string{"failmerge", "INT64", "STRING"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
+	}
+	// The inputs are untouched: the merge is refused before anything is
+	// removed, which is why this is a reporting defect and not data loss.
+	m, err := cat.GetManifest(ctx, "failmerge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, p := range m.Partitions {
+		n += len(p.Files)
+	}
+	if n != 3 {
+		t.Errorf("%d files remain, want the 3 inputs untouched", n)
 	}
 }

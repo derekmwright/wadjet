@@ -140,6 +140,11 @@ func (c *Compactor) releaseGCLock(filePath string) {
 }
 
 // Result summarizes one compaction pass for a table.
+//
+// Failed names the partitions whose merge did not run. It is part of the
+// result rather than only of the log because the counters below count only
+// the partitions that DID compact, so a caller reading them alone cannot tell
+// a clean run from one where a partition failed on every pass (#435).
 type Result struct {
 	Table               string
 	PartitionsCompacted int
@@ -148,6 +153,13 @@ type Result struct {
 	RowsMerged          int64
 	BytesBefore         int64
 	BytesAfter          int64
+	Failed              []PartitionFailure
+}
+
+// PartitionFailure is one partition whose merge failed, and why.
+type PartitionFailure struct {
+	Partition string
+	Err       error
 }
 
 // CompactTable runs compaction for all partitions of a table. When a partition
@@ -189,9 +201,27 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 			newPath := compactedFilePath(tableName, part.Path)
 			written, err := c.mergeAndWriteFiles(ctx, files, tableMeta.Schema, deleteSet, newPath)
 			if err != nil {
-				c.logger.Warn("compaction failed for partition",
+				// The merge is the step that READS and REWRITES the data, and
+				// it was the one step in this loop that only logged: every
+				// other error here returns, and CompactTable then handed its
+				// caller (*Result, nil) with the failed partition invisible
+				// in counters that only count successes.
+				//
+				// That is the reporting defect that hides corruption. #428
+				// and #429 were both silent read->write asymmetries in this
+				// exact call, and a merge that had started erroring would
+				// have looked like a clean run to anything but a log reader
+				// — while the sweeper retried the same partition forever
+				// (#435).
+				//
+				// No data is lost either way: the inputs are removed only
+				// after a successful write. What changes is that the caller
+				// is told.
+				c.logger.Error("compaction failed for partition",
 					"table", tableName, "partition", part.Path, "error", err)
-				continue
+				result.Failed = append(result.Failed, PartitionFailure{Partition: part.Path, Err: err})
+				return result, fmt.Errorf("compacting table %q partition %q: %w",
+					tableName, partitionLabel(part.Path), err)
 			}
 
 			if written.rowsWritten == 0 {
@@ -248,6 +278,15 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 	}
 
 	return result, nil
+}
+
+// partitionLabel names the unpartitioned partition in an error message, where
+// an empty string reads as a missing value.
+func partitionLabel(path string) string {
+	if path == "" {
+		return "(unpartitioned)"
+	}
+	return path
 }
 
 // adaptivePassSize returns the max files to merge in one pass, scaling up for
