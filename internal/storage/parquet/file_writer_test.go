@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"strings"
 	"testing"
 
 	goparquet "github.com/parquet-go/parquet-go"
@@ -632,5 +633,109 @@ func TestNativeWriterFloat32(t *testing.T) {
 	}
 	if f32s[1] != -1.0 {
 		t.Errorf("f32[1] = %v, want -1.0", f32s[1])
+	}
+}
+
+// TestNewWriterRefusesAStructurallyImpossibleSchema: the footer's schema tree
+// and the leaf buffers are built by two separate walks, and for a malformed
+// MAP they agreed only by both doing nothing. buildMapSchemaElements writes
+// the "key_value" group declaring NumChildren = 2 and then emits the key and
+// value ONLY when ElementType is a two-field ROW — so a MAP built the
+// natural-looking way, with Fields holding key and value and ElementType nil,
+// produced a footer whose group promises two children and has none.
+// BuildSchemaTree reads that back as a group borrowing the next two
+// TOP-LEVEL columns, so it is not one missing map: every column after it is
+// misplaced. Nothing complained, and Close returned nil.
+func TestNewWriterRefusesAStructurallyImpossibleSchema(t *testing.T) {
+	cases := []struct {
+		name   string
+		column Column
+		want   string
+	}{
+		{"MAP with Fields instead of ElementType", Column{
+			Name: "m", Type: TypeMap, Fields: []Column{
+				{Name: "key", Type: TypeString}, {Name: "value", Type: TypeInt64},
+			},
+		}, "MAP needs ElementType"},
+		{"MAP with no element at all", Column{Name: "m", Type: TypeMap}, "MAP needs ElementType"},
+		{"MAP whose element is not a ROW", Column{
+			Name: "m", Type: TypeMap, ElementType: &Column{Name: "kv", Type: TypeString},
+		}, "MAP needs ElementType"},
+		{"MAP whose element ROW has one field", Column{
+			Name: "m", Type: TypeMap, ElementType: &Column{Name: "kv", Type: TypeRow,
+				Fields: []Column{{Name: "key", Type: TypeString}}},
+		}, "MAP needs ElementType"},
+		{"ARRAY with no element type", Column{Name: "a", Type: TypeArray}, "ARRAY needs an ElementType"},
+		{"ROW with no fields", Column{Name: "r", Type: TypeRow}, "ROW needs at least one field"},
+		{"VECTOR with no dimension", Column{Name: "v", Type: TypeVector}, "positive Dimension"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w, err := NewWriter(&buf, Schema{Columns: []Column{tc.column, {Name: "after", Type: TypeInt64}}},
+				DefaultWriterConfig())
+			if err == nil {
+				_ = w.Close()
+				t.Fatalf("the schema was accepted; the file is %d bytes", buf.Len())
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q", err, tc.want)
+			}
+			if buf.Len() != 0 {
+				t.Errorf("%d bytes were written before the refusal", buf.Len())
+			}
+		})
+	}
+
+	// The well-formed MAP still writes, so the check refuses the shape and
+	// not the type.
+	var buf bytes.Buffer
+	w, err := NewWriter(&buf, Schema{Columns: []Column{{
+		Name: "m", Type: TypeMap, Nullable: true,
+		ElementType: &Column{Name: "kv", Type: TypeRow, Fields: []Column{
+			{Name: "key", Type: TypeString}, {Name: "value", Type: TypeInt64, Nullable: true},
+		}},
+	}}}, DefaultWriterConfig())
+	if err != nil {
+		t.Fatalf("a well-formed MAP was refused: %v", err)
+	}
+	if err := w.WriteRows([]map[string]any{{"m": map[string]any{"a": int64(1)}}}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+// TestMalformedMapSchemaMisplacesLaterColumns records what the refusal
+// prevents, by driving the two walks that used to disagree directly.
+func TestMalformedMapSchemaMisplacesLaterColumns(t *testing.T) {
+	bad := Schema{Columns: []Column{
+		{Name: "m", Type: TypeMap, Fields: []Column{
+			{Name: "key", Type: TypeString}, {Name: "value", Type: TypeInt64},
+		}},
+		{Name: "a", Type: TypeInt64},
+		{Name: "b", Type: TypeInt64},
+	}}
+	if err := ValidateWriteSchema(bad); err == nil {
+		t.Fatal("ValidateWriteSchema accepted the malformed MAP")
+	}
+
+	elements := buildSchemaElements(bad)
+	root, leaves := BuildSchemaTree(elements)
+	if root == nil {
+		t.Fatal("no schema root")
+	}
+	// The key_value group swallowed "a" and "b": the top level is left with
+	// the map alone, and the two int columns are now its key and value.
+	if len(root.Children) != 1 {
+		t.Errorf("top-level columns after the malformed MAP: %d, want 1 (they were absorbed)", len(root.Children))
+	}
+	names := make([]string, 0, len(leaves))
+	for _, l := range leaves {
+		names = append(names, l.Name)
+	}
+	if strings.Join(names, ",") != "a,b" {
+		t.Errorf("leaves = %v; the map's own key/value never made it into the footer", names)
 	}
 }

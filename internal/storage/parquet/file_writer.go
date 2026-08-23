@@ -222,6 +222,80 @@ func (nw *NativeWriter) flattenColumn(col Column, parentPath []string, defLevel,
 	}
 }
 
+// ValidateWriteSchema refuses a schema the writer cannot turn into a
+// well-formed file.
+//
+// The footer's schema tree and the leaf buffers are built by two separate
+// walks (buildColumnSchemaElements and flattenColumn), and they agreed about
+// a malformed MAP only by both doing nothing: buildMapSchemaElements emits
+// the outer group and a "key_value" group declaring NumChildren = 2, then
+// emits the key and value ONLY when ElementType is a two-field ROW. A MAP
+// built the natural-looking way — Fields holding the key and value columns,
+// ElementType nil — therefore wrote a footer whose key_value group promises
+// two children and has none. BuildSchemaTree reads that back as a group
+// borrowing the next two top-level columns as its children, so the file is
+// not merely missing its map: every column after it is misplaced. Nothing
+// in the write path complained, and Close returned nil.
+//
+// A file is the one artifact a writer cannot take back, so the refusal is at
+// construction, before a single row is accepted.
+func ValidateWriteSchema(schema Schema) error {
+	for _, c := range schema.Columns {
+		if err := validateWriteColumn(c, c.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateWriteColumn(c Column, path string) error {
+	switch c.Type {
+	case TypeMap:
+		// MAP is stored as ARRAY(ROW(key, value)); ElementType carries that
+		// ROW. Fields is the ROW/STRUCT spelling and is not read here.
+		if c.ElementType == nil || c.ElementType.Type != TypeRow || len(c.ElementType.Fields) != 2 {
+			return fmt.Errorf("column %q: a MAP needs ElementType = ROW with exactly two fields "+
+				"(key, value); got ElementType %v with %d Fields on the column itself",
+				path, mapElementDesc(c.ElementType), len(c.Fields))
+		}
+		if err := validateWriteColumn(c.ElementType.Fields[0], path+".key"); err != nil {
+			return err
+		}
+		return validateWriteColumn(c.ElementType.Fields[1], path+".value")
+	case TypeArray:
+		if c.ElementType == nil {
+			return fmt.Errorf("column %q: an ARRAY needs an ElementType", path)
+		}
+		return validateWriteColumn(*c.ElementType, path+".element")
+	case TypeRow:
+		if len(c.Fields) == 0 {
+			return fmt.Errorf("column %q: a ROW needs at least one field", path)
+		}
+		for _, f := range c.Fields {
+			if err := validateWriteColumn(f, path+"."+f.Name); err != nil {
+				return err
+			}
+		}
+		return nil
+	case TypeVector:
+		// The leaf is FIXED_LEN_BYTE_ARRAY and its type_length is the
+		// dimension: without one the footer declares a zero-width leaf,
+		// which says nothing about how wide the values actually are.
+		if c.Dimension <= 0 {
+			return fmt.Errorf("column %q: a VECTOR needs a positive Dimension, got %d", path, c.Dimension)
+		}
+		return nil
+	}
+	return nil
+}
+
+func mapElementDesc(e *Column) string {
+	if e == nil {
+		return "nil"
+	}
+	return e.Type.String()
+}
+
 func wadjetTypeToPhysical(t TypeID) PhysicalType {
 	switch t {
 	case TypeBool:

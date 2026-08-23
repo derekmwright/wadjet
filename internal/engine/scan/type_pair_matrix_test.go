@@ -194,3 +194,57 @@ func TestStorageClassStaysExact(t *testing.T) {
 		t.Error("a STRING vector allocated an Int128 array")
 	}
 }
+
+// TestShortPlainByteArrayPageIsAnError: the PLAIN byte-array fallback walks
+// four-byte length prefixes, and both of its bounds tests used to `break`.
+// A page that ends mid-value therefore left every remaining row holding
+// whatever the pooled vector had in it — poison bytes, or a previous row
+// group's strings — and returned nil. The rows after a truncated page are
+// not empty, they are unknown.
+func TestShortPlainByteArrayPageIsAnError(t *testing.T) {
+	// Two values declared: "abc" complete, then a prefix claiming 9 bytes
+	// with only two present.
+	body := []byte{3, 0, 0, 0, 'a', 'b', 'c', 9, 0, 0, 0, 'x', 'y'}
+	cases := []struct {
+		name string
+		body []byte
+		n    int
+	}{
+		{"value runs off the end", body, 2},
+		{"page ends mid-prefix", body[:len(body)-2-2], 2},
+		{"no prefix at all for the second value", body[:7], 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data := pqt.RawValues(pqt.PhysicalByteArray, tc.body, tc.n)
+
+			vec := batch.NewVector(pqt.TypeString, tc.n)
+			if err := copyNativeDataDirect(vec, 0, data, tc.n, pqt.TypeString); err == nil {
+				t.Error("the all-present copy accepted a truncated PLAIN page")
+			}
+
+			nvec := batch.NewVector(pqt.TypeString, tc.n)
+			defLevels := make([]int32, tc.n)
+			for i := range defLevels {
+				defLevels[i] = 1
+			}
+			if err := copyNativeDataScatter(nvec, 0, data, defLevels, 1, tc.n, pqt.TypeString); err == nil {
+				t.Error("the nullable copy accepted a truncated PLAIN page")
+			}
+		})
+	}
+
+	// A complete page still copies, so the refusal is of the truncation and
+	// not of the encoding.
+	full := []byte{3, 0, 0, 0, 'a', 'b', 'c', 2, 0, 0, 0, 'x', 'y'}
+	vec := batch.NewVector(pqt.TypeString, 2)
+	if err := copyNativeDataDirect(vec, 0, pqt.RawValues(pqt.PhysicalByteArray, full, 2), 2, pqt.TypeString); err != nil {
+		t.Fatalf("a complete PLAIN page: %v", err)
+	}
+	if got := vec.BytesData.StringValue(0); got != "abc" {
+		t.Errorf("value 0 = %q, want \"abc\"", got)
+	}
+	if got := vec.BytesData.StringValue(1); got != "xy" {
+		t.Errorf("value 1 = %q, want \"xy\"", got)
+	}
+}

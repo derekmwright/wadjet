@@ -1413,20 +1413,21 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 		batches []*batch.RecordBatch
 		columns []string
 		rows    int64
+		err     error
 	}
 	slot := make([]decoded, len(pending))
 
 	if len(pending) == 1 {
-		b, cols, rows := c.decodeInlineResult(pending[0].data)
-		slot[0] = decoded{batches: b, columns: cols, rows: rows}
+		b, cols, rows, err := c.decodeInlineResult(pending[0].data)
+		slot[0] = decoded{batches: b, columns: cols, rows: rows, err: err}
 	} else {
 		var wg sync.WaitGroup
 		for i, w := range pending {
 			wg.Add(1)
 			go func(idx int, data []byte) {
 				defer wg.Done()
-				b, cols, rows := c.decodeInlineResult(data)
-				slot[idx] = decoded{batches: b, columns: cols, rows: rows}
+				b, cols, rows, err := c.decodeInlineResult(data)
+				slot[idx] = decoded{batches: b, columns: cols, rows: rows, err: err}
 			}(i, w.data)
 		}
 		wg.Wait()
@@ -1437,6 +1438,12 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 	var decodedBytes int64
 	totalRows := s3Rows
 	for _, d := range slot {
+		// A result that failed to decode is not an empty result. Reporting
+		// it as one silently drops a worker's whole share of the answer —
+		// the query returns fewer rows and says nothing about why.
+		if d.err != nil {
+			return nil, nil, 0, d.err
+		}
 		if len(d.columns) > 0 && len(columns) == 0 {
 			columns = d.columns
 		}
@@ -1455,11 +1462,17 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 }
 
 // decodeInlineResult decompresses and deserializes a single inline result.
-func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []string, int64) {
+//
+// Every failure is RETURNED. It used to answer (nil, nil, 0) and log at
+// Debug, which the caller cannot tell apart from a worker that legitimately
+// produced no rows: a corrupt or truncated partial result silently removed
+// that worker's whole share of the answer, and the query came back short
+// with nothing said. readOneResultFile, reading the same bytes off S3
+// instead of inline, has always returned the error.
+func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []string, int64, error) {
 	inlineData, err := decompressShuffleData(data)
 	if err != nil {
-		c.logger.Debug("shuffle decompress error", "err", err)
-		return nil, nil, 0
+		return nil, nil, 0, fmt.Errorf("decompressing an inline partial result (%d bytes): %w", len(data), err)
 	}
 
 	var batches []*batch.RecordBatch
@@ -1467,8 +1480,7 @@ func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []s
 	if len(inlineData) >= 4 && string(inlineData[:4]) == "WSHF" {
 		batches, err = readShuffleBatches(inlineData)
 		if err != nil {
-			c.logger.Debug("shuffle read error", "err", err)
-			return nil, nil, 0
+			return nil, nil, 0, fmt.Errorf("reading an inline shuffle result (%d bytes): %w", len(inlineData), err)
 		}
 		if len(batches) > 0 {
 			columns = make([]string, len(batches[0].Schema))
@@ -1479,8 +1491,7 @@ func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []s
 	} else {
 		reader, err := parquet.NewReader(bytes.NewReader(inlineData), int64(len(inlineData)))
 		if err != nil {
-			c.logger.Debug("parquet reader error", "err", err)
-			return nil, nil, 0
+			return nil, nil, 0, fmt.Errorf("opening an inline parquet result (%d bytes): %w", len(inlineData), err)
 		}
 		schema := reader.Schema().Columns
 		if len(schema) > 0 {
@@ -1491,7 +1502,7 @@ func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []s
 		}
 		batches, err = scan.ReadFileBatches(reader, schema, nil)
 		if err != nil {
-			return nil, nil, 0
+			return nil, nil, 0, fmt.Errorf("reading an inline parquet result (%d bytes): %w", len(inlineData), err)
 		}
 	}
 
@@ -1499,7 +1510,7 @@ func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []s
 	for _, b := range batches {
 		totalRows += int64(b.ActiveLen())
 	}
-	return batches, columns, totalRows
+	return batches, columns, totalRows, nil
 }
 
 // fetchResultData retrieves a result blob through the tiered

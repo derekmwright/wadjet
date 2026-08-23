@@ -665,6 +665,15 @@ func copyPageIntoVector(vec *batch.Vector, offset int, data pqt.Values, defLevel
 	return copyNativeDataScatter(vec, offset, data, defLevels, maxDefLevel, n, fileType)
 }
 
+// plainPrefixErr refuses a PLAIN byte-array page that ends inside a value.
+// Non-inlined for the same frame-size reason as leafErr.
+//
+//go:noinline
+func plainPrefixErr(typ pqt.TypeID, i, n, need, have int) error {
+	return fmt.Errorf("type %s: PLAIN page ends at value %d of %d — the value needs %d bytes but the page body holds %d",
+		typ, i, n, need, have)
+}
+
 // pageOverrunErr refuses a chunk whose page headers claim more rows than the
 // row group declares. Non-inlined for the same frame-size reason as leafErr.
 //
@@ -874,16 +883,21 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 			}
 			vec.BytesData.BulkSet(offset, rawData, offsets, n)
 		} else {
-			// PLAIN encoding: 4-byte length prefix per value.
+			// PLAIN encoding: 4-byte length prefix per value. Running out
+			// of prefixes, or off the end of one value's bytes, used to
+			// `break` — which leaves every remaining row holding whatever
+			// the pooled vector had in it and returns nil. A page that ends
+			// mid-value is a page the file cannot back; the rows after it
+			// are not empty, they are unknown.
 			pos := 0
 			for i := 0; i < n; i++ {
 				if pos+4 > len(rawData) {
-					break
+					return plainPrefixErr(typ, i, n, pos, len(rawData))
 				}
 				length := int(binary.LittleEndian.Uint32(rawData[pos:]))
 				pos += 4
-				if pos+length > len(rawData) {
-					break
+				if length < 0 || pos+length > len(rawData) {
+					return plainPrefixErr(typ, i, n, pos+length, len(rawData))
 				}
 				vec.BytesData.Set(offset+i, rawData[pos:pos+length])
 				pos += length
@@ -1092,17 +1106,18 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 				}
 			}
 		} else {
-			// PLAIN encoding fallback.
+			// PLAIN encoding fallback. See copyNativeDataDirect: a short
+			// prefix is a refusal, not a stopping point.
 			pos := 0
 			for i := 0; i < n; i++ {
 				if defLevels[i] == maxDefLevel {
 					if pos+4 > len(rawData) {
-						break
+						return plainPrefixErr(typ, i, n, pos, len(rawData))
 					}
 					length := int(binary.LittleEndian.Uint32(rawData[pos:]))
 					pos += 4
-					if pos+length > len(rawData) {
-						break
+					if length < 0 || pos+length > len(rawData) {
+						return plainPrefixErr(typ, i, n, pos+length, len(rawData))
 					}
 					vec.BytesData.Set(offset+i, rawData[pos:pos+length])
 					pos += length

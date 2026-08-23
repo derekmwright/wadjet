@@ -83,6 +83,9 @@ func NewWriter(w io.Writer, schema Schema, cfg WriterConfig) (*Writer, error) {
 	if cfg.RowGroupSize <= 0 {
 		cfg.RowGroupSize = 128 * 1024
 	}
+	if err := ValidateWriteSchema(schema); err != nil {
+		return nil, err
+	}
 
 	return &Writer{
 		schema: schema,
