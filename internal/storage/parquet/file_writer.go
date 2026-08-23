@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"sort"
 	"strconv"
 	"time"
@@ -1618,10 +1619,26 @@ func macStringToInt64(s string) int64 {
 	return int64(n)
 }
 
+// ipv6StringToBytes parses an IPv6 literal into the 16-byte storage form an
+// IPV6 column is defined to hold — the same conversion Writer.prepareRows
+// does ahead of WriteRows, and the same one batch.Vector.SetValue does for a
+// string handed to an IPV6 vector.
+//
+// It used to store the TEXT instead, on the reasoning that prepareRows had
+// already converted anything real. Whatever came through the NativeWriter's
+// direct API therefore landed as 11 bytes where the contract is exactly 16,
+// and Vector.GetValue renders any other length as the EMPTY STRING — the
+// same silent shape as #395. Invisible until the declared type was honoured
+// on read (#396); now the column reads back as IPV6 and shows it.
+//
+// An unparseable literal stores nothing, which reads back as "" rather than
+// as a wrong address. That matches its neighbours (ipv4StringToInt64 and
+// macStringToInt64 both return 0) and is as far as this layer can go: the
+// write path from decomposeValue down carries no error.
 func ipv6StringToBytes(s string) []byte {
-	// IPv6 parsing is complex. The existing Writer.prepareRows already
-	// converts IPv6 strings to 16-byte binary before calling WriteRows,
-	// so the NativeWriter receives pre-converted []byte values via toBytes.
-	// This fallback just stores as string bytes for direct API usage.
-	return []byte(s)
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return nil
+	}
+	return ip.To16()
 }

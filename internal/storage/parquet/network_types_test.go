@@ -2,6 +2,7 @@ package parquet
 
 import (
 	"bytes"
+	"net"
 	"testing"
 )
 
@@ -229,6 +230,79 @@ func TestParseTypeIDNewTypes(t *testing.T) {
 		}
 		if got != tt.want {
 			t.Errorf("ParseTypeID(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+// TestNativeWriterParsesIPv6Literals covers the direct NativeWriter API,
+// which Writer.prepareRows does not sit in front of.
+//
+// ipv6StringToBytes used to store the literal's TEXT: 11 bytes where an IPV6
+// column's contract is exactly 16. Nothing complained, because the reader
+// reported the column as STRING until the declared type started coming back
+// (#396) — and the engine renders a non-16-byte IPV6 value as the EMPTY
+// STRING. Every row written through this path read back as "".
+func TestNativeWriterParsesIPv6Literals(t *testing.T) {
+	schema := Schema{Columns: []Column{{Name: "addr", Type: TypeIPv6, Nullable: true}}}
+
+	preconverted := net.ParseIP("2001:db8::7").To16()
+	cases := []struct {
+		name string
+		in   any
+		want net.IP // nil means "no value stored"
+	}{
+		{"full literal", "2001:db8::5", net.ParseIP("2001:db8::5")},
+		{"loopback", "::1", net.ParseIP("::1")},
+		{"ipv4 literal maps into 16 bytes", "10.0.0.5", net.ParseIP("10.0.0.5").To16()},
+		{"already storage bytes", []byte(preconverted), preconverted},
+		{"unparseable literal stores nothing", "not an address", nil},
+		{"empty literal stores nothing", "", nil},
+	}
+
+	rows := make([]map[string]any, len(cases))
+	for i, tc := range cases {
+		rows[i] = map[string]any{"addr": tc.in}
+	}
+
+	var buf bytes.Buffer
+	w := NewNativeWriter(&buf, schema, DefaultWriterConfig())
+	if err := w.WriteMapRows(rows); err != nil {
+		t.Fatalf("WriteMapRows: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	data := buf.Bytes()
+	r, err := NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if got := r.Schema().Columns[0].Type; got != TypeIPv6 {
+		t.Fatalf("column read back as %s, want IPV6", got)
+	}
+	readBack, err := r.ReadRows(nil)
+	if err != nil {
+		t.Fatalf("ReadRows: %v", err)
+	}
+	if len(readBack) != len(cases) {
+		t.Fatalf("read %d rows, want %d", len(readBack), len(cases))
+	}
+	for i, tc := range cases {
+		raw, _ := readBack[i]["addr"].([]byte)
+		if tc.want == nil {
+			if len(raw) != 0 {
+				t.Errorf("%s: stored %d bytes (%x), want nothing", tc.name, len(raw), raw)
+			}
+			continue
+		}
+		if len(raw) != 16 {
+			t.Errorf("%s: stored %d bytes (%q), want the 16-byte address form",
+				tc.name, len(raw), raw)
+			continue
+		}
+		if !net.IP(raw).Equal(tc.want) {
+			t.Errorf("%s: stored %s, want %s", tc.name, net.IP(raw), tc.want)
 		}
 	}
 }
