@@ -435,10 +435,16 @@ type AggSpec struct {
 	// column whose name matches InputCol.
 	InputExpr string
 	// OutputType is the plan-time output type of this aggregate, mirrored
-	// onto distributed.AggSpec at dispatch. Zero = undeclared, which is
-	// only produced for a MIN/MAX whose input column does not resolve to
-	// a catalog type; see aggSpecOutputType.
+	// onto distributed.AggSpec at dispatch. Undeclared — OutputTypeKnown
+	// false — is only produced for a MIN/MAX-family aggregate whose input
+	// column does not resolve to a catalog type; see aggSpecOutputType.
 	OutputType parquet.TypeID
+	// OutputTypeKnown distinguishes a DECLARED OutputType from the zero
+	// value, which TypeBool shares: BOOL_AND/BOOL_OR always declare BOOL,
+	// and since #392 so does MIN_BY over a BOOL column. Reading that zero
+	// as "undeclared" is the #354/#371 shape — a declaration dropped on
+	// one dispatch path and re-guessed by the worker.
+	OutputTypeKnown bool
 	// InputType is the plan-time type of the vector InputExpr evaluates
 	// into, mirrored onto distributed.AggSpec at dispatch. Zero when
 	// there is no derived input. The worker hardcoded Float64 here, which
@@ -4410,14 +4416,16 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			if resolved, expr, _, renamed := resolveAggInputName(agg.InputCol2, aggChild); renamed && expr == nil {
 				agg.InputCol2 = resolved
 			}
+			outType, outTypeKnown := aggSpecOutputType(node, agg)
 			spec := AggSpec{
-				Func:       agg.Func,
-				InputCol:   agg.InputCol,
-				OutputCol:  agg.OutputCol,
-				OutputType: aggSpecOutputType(node, agg),
-				InputCol2:  agg.InputCol2,
-				Separator:  agg.Separator,
-				Percentile: agg.Percentile,
+				Func:            agg.Func,
+				InputCol:        agg.InputCol,
+				OutputCol:       agg.OutputCol,
+				OutputType:      outType,
+				OutputTypeKnown: outTypeKnown,
+				InputCol2:       agg.InputCol2,
+				Separator:       agg.Separator,
+				Percentile:      agg.Percentile,
 			}
 			agg.InputExpr = inputExpr
 			// DISTINCT rides the canonical Func string the worker already
@@ -7090,8 +7098,8 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// MIN/MAX from the vector it observes anyway, so this only decides
 		// the type of the identity row an empty input produces — which is
 		// exactly where the two paths would otherwise disagree.
-		outType := aggSpecOutputType(node, agg)
-		if outType == 0 {
+		outType, outTypeKnown := aggSpecOutputType(node, agg)
+		if !outTypeKnown {
 			outType = aggOutputType(agg.Func, agg.Distinct)
 		}
 		// The arguments past the first arrive as their own fields
@@ -9979,23 +9987,37 @@ func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 // aggregate's inputs for it and returns 0 — undeclared — when it cannot: a
 // derived-expression argument, a column no scan below carries, or two scans
 // carrying it at different types.
-func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) parquet.TypeID {
+// ok=false is the undeclared answer; callers fall back to the
+// function-name derivation. It is returned as a second value rather than
+// as a zero TypeID because TypeBool IS zero: MIN_BY over a BOOL column
+// declares BOOL, and a caller reading that as "undeclared" is how a
+// declaration goes missing on exactly one path (#354, #371).
+func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, bool) {
 	fn := strings.ToLower(strings.TrimSpace(agg.Func))
 	switch fn {
 	case "min", "max", "min_by", "max_by":
 	default:
-		return aggOutputType(agg.Func, agg.Distinct)
+		return aggOutputType(agg.Func, agg.Distinct), true
 	}
 	if agg.InputExpr != nil {
 		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
-			return 0
+			return 0, false
 		}
 	}
 	in, ok := scanColumnType(node, agg.InputCol)
 	if !ok {
-		return 0
+		return 0, false
 	}
-	return minMaxDeclaredType(in)
+	if fn == "min_by" || fn == "max_by" {
+		// The VALUE's type, for every type there is. MIN_BY/MAX_BY hand the
+		// output vector the box GetValue produced for the winning row, so
+		// the only declaration that can hold it is the input's own — see
+		// exec.HashAggregate.outputSchema (#392). No switch here: a switch
+		// is what fell through to FLOAT64 for the sixteen types outside it
+		// and killed the process on the emit goroutine.
+		return in, true
+	}
+	return minMaxDeclaredType(in), true
 }
 
 // minMaxDeclaredType maps a MIN/MAX input column type to the output type

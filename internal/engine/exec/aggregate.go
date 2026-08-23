@@ -167,6 +167,7 @@ type HashAggregate struct {
 	groupColTypes     []batch.TypeID
 	groupColMeta      []parquet.Column        // full input column metadata per group col (Decimal Scale/Precision survive into outputSchema)
 	aggInputTypes     []batch.TypeID          // observed input column type per aggregate (0 = unresolved)
+	aggInputMeta      []parquet.Column        // full input column metadata per aggregate (MIN_BY/MAX_BY re-emit their input's Scale/Fields/ElementType/Dimension)
 	aggUpdaters       []kernel.RowAggUpdater  // resolved typed updaters
 	aggUpdatersNoNull []kernel.RowAggUpdater  // no-null-check variants
 	batchUpdaters     []kernel.RowAggUpdater  // per-batch updater selection (reusable)
@@ -1352,6 +1353,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 	h.aggColIdx = make([]int, len(h.Aggs))
 	h.aggColIdx2 = make([]int, len(h.Aggs))
 	h.aggInputTypes = make([]batch.TypeID, len(h.Aggs))
+	h.aggInputMeta = make([]parquet.Column, len(h.Aggs))
 	h.aggUpdaters = make([]kernel.RowAggUpdater, len(h.Aggs))
 	h.aggUpdatersNoNull = make([]kernel.RowAggUpdater, len(h.Aggs))
 	h.batchUpdaters = make([]kernel.RowAggUpdater, len(h.Aggs))
@@ -1380,6 +1382,9 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 				return unresolvedAggColumn("aggregate input", agg.InputCol, b)
 			}
 			h.aggInputTypes[i] = b.Columns[idx].Type
+			if idx < len(b.Schema) {
+				h.aggInputMeta[i] = b.Schema[idx]
+			}
 			h.aggUpdaters[i] = resolveAggUpdater(agg.Func, b.Columns[idx].Type)
 			h.aggUpdatersNoNull[i] = resolveAggUpdaterNoNull(agg.Func, b.Columns[idx].Type)
 		} else {
@@ -4664,24 +4669,51 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 		cols = append(cols, out)
 	}
 	for i, agg := range h.Aggs {
-		typ := agg.OutputType
-		// MIN/MAX preserve their input's type. The planner declares float64
-		// (it has no resolved input types); override from the type observed
-		// at Consume so MIN(url) emits a string and MIN(date) stays a date
-		// instead of surfacing raw epoch days.
-		// MIN_BY/MAX_BY return a value taken from their FIRST argument, so
-		// they follow it the same way — the ordering column decides which
-		// row, never the type. Declared float64, MIN_BY(o_orderpriority,
-		// o_totalprice) wrote its string into a Float64 vector and came
-		// back as 0 on every row (#353), which is #345's window-value
-		// defect in the aggregate.
-		if (agg.Func == AggMin || agg.Func == AggMax ||
-			agg.Func == AggMinBy || agg.Func == AggMaxBy) && i < len(h.aggInputTypes) {
-			if t := minMaxOutputType(h.aggInputTypes[i]); t != 0 {
-				typ = t
+		out := parquet.Column{Name: agg.OutputCol, Type: agg.OutputType, Nullable: true}
+		resolved := i < len(h.aggColIdx) && h.aggColIdx[i] >= 0 && i < len(h.aggInputTypes)
+		switch agg.Func {
+		case AggMinBy, AggMaxBy:
+			// MIN_BY/MAX_BY emit a value taken VERBATIM from their first
+			// argument — finalize writes back the very box GetValue
+			// produced (minMaxByState.bestVal), so the output column IS the
+			// input column, type and metadata alike. Any other declaration
+			// hands SetValue a value the vector cannot hold: a FLOAT64
+			// declaration over BOOL/IPV6/CIDR/MAC/UUID/DECIMAL/ARRAY/ROW
+			// raised the #361 guard on the parallel-emit goroutine, where no
+			// caller's recover can reach it, and took the process down
+			// (#392). PORT/PROTOCOL/DURATION were the quiet half of the same
+			// defect: they box as int32/int64, which a FLOAT64 vector
+			// accepts, so `MIN_BY(port_col, id)` simply answered as a float.
+			// #353 was the STRING corner of the same declaration:
+			// MIN_BY(o_orderpriority, o_totalprice) wrote its string into a
+			// Float64 vector and came back as 0 on every row.
+			//
+			// The metadata travels with the type because it is what makes
+			// the box round-trip: DECIMAL re-parses its formatted string
+			// against the OUTPUT vector's scale, and ARRAY/ROW/MAP/VECTOR
+			// need Child/Children/VectorDim to exist before SetValue can
+			// write anything at all.
+			if resolved {
+				out.Type = parquet.TypeID(h.aggInputTypes[i])
+				if i < len(h.aggInputMeta) && h.aggInputMeta[i].Type == out.Type {
+					meta := h.aggInputMeta[i]
+					out.Precision, out.Scale = meta.Precision, meta.Scale
+					out.Fields, out.ElementType, out.Dimension = meta.Fields, meta.ElementType, meta.Dimension
+				}
+			}
+		case AggMin, AggMax:
+			// MIN/MAX preserve their input's type. The planner declares
+			// float64 for the types whose ACCUMULATOR finalizes as a float
+			// (Decimal via ToFloat64); override from the type observed at
+			// Consume so MIN(url) emits a string and MIN(date) stays a date
+			// instead of surfacing raw epoch days.
+			if resolved {
+				if t := minMaxOutputType(h.aggInputTypes[i]); t != 0 {
+					out.Type = t
+				}
 			}
 		}
-		cols = append(cols, parquet.Column{Name: agg.OutputCol, Type: typ, Nullable: true})
+		cols = append(cols, out)
 	}
 	// GROUPING SETS null columns (appear in other sets but not this one)
 	for _, name := range h.NullGroupCols {
@@ -4814,6 +4846,21 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 		// while the merged states hold full key tuples (index panic).
 		if len(h.GroupByCols) == 0 && len(o.GroupByCols) > 0 {
 			h.GroupByCols = o.GroupByCols
+		}
+	}
+	// Same inheritance for the aggregate inputs, and for the same reason:
+	// MIN/MAX/MIN_BY/MAX_BY re-declare their output from the type (and, for
+	// DECIMAL and the containers, the full column metadata) they observed at
+	// Consume. A parent that consumed nothing observed nothing, so without
+	// this it emits the value under whatever the planner guessed. The
+	// GROUP BY block above cannot carry it: a SCALAR aggregate has no group
+	// columns at all, and MIN_BY's ungrouped form is exactly the shape the
+	// parallel merge produces.
+	if len(h.aggInputTypes) == 0 && len(o.aggInputTypes) > 0 {
+		h.aggInputTypes = o.aggInputTypes
+		h.aggInputMeta = o.aggInputMeta
+		if len(h.aggColIdx) == 0 {
+			h.aggColIdx = o.aggColIdx
 		}
 	}
 
@@ -5101,6 +5148,7 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	h.aggColIdx = o.aggColIdx
 	h.aggColIdx2 = o.aggColIdx2
 	h.aggInputTypes = o.aggInputTypes
+	h.aggInputMeta = o.aggInputMeta
 	h.groupColTypes = o.groupColTypes
 	h.groupColMeta = o.groupColMeta
 	h.aggUpdaters = o.aggUpdaters

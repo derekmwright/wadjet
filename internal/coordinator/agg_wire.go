@@ -1,8 +1,6 @@
 package coordinator
 
 import (
-	"strings"
-
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -47,20 +45,19 @@ func wireAggSpecs(specs []physical.AggSpec) []distributed.AggSpec {
 			Percentile: a.Percentile,
 		}
 		// physical.AggSpec.OutputType (parquet.TypeID, plain int) is itself
-		// ambiguous at zero: aggSpecOutputType returns TypeBool (0) as a
-		// GENUINE declaration for every function except the MIN/MAX family
-		// (BOOL_AND/BOOL_OR/EVERY always resolve, never guess), and returns
-		// 0 for MIN/MAX/MIN_BY/MAX_BY only when it could NOT resolve the
-		// input column's catalog type — minMaxDeclaredType never maps an
-		// input type to TypeBool, so a MIN/MAX-family zero can only be the
-		// undeclared case. Func name alone disambiguates the two (#354): a
-		// distributed BOOL_AND used to read its own declaration as absent
-		// and fall back to a guess.
-		declared := true
-		switch strings.ToLower(strings.TrimSpace(a.Func)) {
-		case "min", "max", "min_by", "max_by":
-			declared = a.OutputType != 0
-		}
+		// ambiguous at zero: TypeBool IS zero, and it is a GENUINE
+		// declaration for BOOL_AND/BOOL_OR/EVERY — and, since #392, for
+		// MIN_BY/MAX_BY over a BOOL column, whose output type is its input's
+		// whatever that is. The func name can no longer disambiguate the two
+		// (it could while minMaxDeclaredType's six-case switch never mapped
+		// anything to BOOL), so the planner says which it means outright.
+		// Reading a real declaration as absent is #354: a distributed
+		// BOOL_AND fell back to a guess about its own output.
+		//
+		// The OutputType != 0 arm keeps specs built outside
+		// aggSpecOutputType — the exchange sender-side partials, older
+		// plans — declaring exactly what they declared before.
+		declared := a.OutputTypeKnown || a.OutputType != 0
 		if declared {
 			spec.OutputType = distributed.WindowTypePtr(int(a.OutputType))
 		}

@@ -185,9 +185,9 @@ func (p *Planner) emitSetOpCountingStage(stages *[]Stage, unionID string, node *
 		GroupByCols: append([]string(nil), outNames...),
 		AggSpecs: []AggSpec{
 			{Func: "SUM", InputCol: SetOpLeftCountCol, OutputCol: SetOpLeftCountCol,
-				OutputType: parquet.TypeInt64},
+				OutputType: parquet.TypeInt64, OutputTypeKnown: true},
 			{Func: "SUM", InputCol: SetOpRightCountCol, OutputCol: SetOpRightCountCol,
-				OutputType: parquet.TypeInt64},
+				OutputType: parquet.TypeInt64, OutputTypeKnown: true},
 		},
 		RawInputAggregate: true,
 		SetOp:             op,
