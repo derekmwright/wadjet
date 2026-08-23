@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 )
 
 // Parquet file layout:
@@ -28,6 +29,25 @@ const (
 
 	// minFileSize is the minimum valid Parquet file: header magic + trailer.
 	minFileSize = 4 + trailerSize
+
+	// MaxRowsPerRowGroup bounds a row group's declared row count.
+	//
+	// A row group's num_rows is the length EVERY destination vector in a
+	// scan is allocated for, so it is the one footer field that turns
+	// directly into an allocation before any page is read. Writers do not
+	// approach this figure: pyarrow's max_rows_per_group defaults to 2^20,
+	// parquet-mr and Spark size row groups by BYTES (128 MiB), which at one
+	// byte per row is 2^27 rows for a single-column table and far fewer for
+	// anything real, and wadjet's own default is 128 * 1024. 2^26 is 64x
+	// pyarrow's default and above anything the corpus contains, while
+	// keeping the worst single allocation a corrupt footer can provoke to
+	// tens of millions of entries rather than the terabyte a flipped varint
+	// used to ask for.
+	MaxRowsPerRowGroup = 1 << 26
+
+	// maxRowsPerFileByte bounds a row count against the size of the file
+	// that carries it. See rowCeiling.
+	maxRowsPerFileByte = 1 << 12
 )
 
 // readAtFull is a tolerant ReadAt that treats (n == len(p), err == io.EOF)
@@ -95,7 +115,7 @@ func ReadFileMetaData(r io.ReaderAt, fileSize int64) (*FileMetaData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parquet: decoding footer: %w", err)
 	}
-	if err := ValidateFileMetaData(md); err != nil {
+	if err := ValidateFileMetaData(md, fileSize); err != nil {
 		return nil, fmt.Errorf("parquet: %w", err)
 	}
 	return md, nil
@@ -110,29 +130,99 @@ func ReadFileMetaData(r io.ReaderAt, fileSize int64) (*FileMetaData, error) {
 // reached a negative one in seconds: "makeslice: len out of range", raised
 // while building the batch, before a single page was read.
 //
-// The upper bound is the file's OWN total. Parquet requires
-// FileMetaData.num_rows to be the sum of the row groups', so a group
-// claiming more than the file does is already self-contradictory — and
-// nothing legitimate is refused by taking the file at its word here, while a
-// single flipped byte in one row group's varint no longer asks the allocator
-// for terabytes. A zero total is left alone: writers that emit an empty file
-// leave it at zero, and there are no rows to size anything from anyway.
-func ValidateFileMetaData(md *FileMetaData) error {
+// Refusing negatives was not enough, and neither was holding each row group
+// to the FILE's total: the file's total is a varint out of the same footer.
+// num_rows = 2^40 on a two-row file reached makeslice with 128 GiB and died
+// as "fatal error: runtime: out of memory" — unrecoverable, so in a worker
+// process it is the worker; 2^30 was accepted outright and decoded after
+// allocating gibibytes. Three bounds close that, in the order they cost:
+//
+//  1. Nothing is negative.
+//  2. Every row group is within MaxRowsPerRowGroup, and within what the
+//     file's own BYTES can carry (rowCeiling). Both are policy ceilings,
+//     documented at their constants.
+//  3. The file's total is exactly the sum of its row groups'. The format
+//     requires that, every writer in the corpus honours it (244 files,
+//     wadjet's own and pyarrow's, checked), and it is the only check here
+//     that is exact rather than generous — which makes it the one that
+//     catches a single flipped varint wherever it landed.
+func ValidateFileMetaData(md *FileMetaData, fileSize int64) error {
 	if md == nil {
 		return fmt.Errorf("footer decoded to nothing")
 	}
 	if md.NumRows < 0 {
 		return fmt.Errorf("footer declares %d rows", md.NumRows)
 	}
+	ceiling := rowCeiling(fileSize)
+	if md.NumRows > ceiling {
+		return fmt.Errorf("footer declares %d rows, more than the %d a %d-byte file can carry",
+			md.NumRows, ceiling, fileSize)
+	}
+	var sum int64
 	for i := range md.RowGroups {
 		rg := &md.RowGroups[i]
 		if rg.NumRows < 0 {
 			return fmt.Errorf("row group %d declares %d rows", i, rg.NumRows)
 		}
-		if md.NumRows > 0 && rg.NumRows > md.NumRows {
-			return fmt.Errorf("row group %d declares %d rows but the file declares %d in total",
-				i, rg.NumRows, md.NumRows)
+		if rg.NumRows > MaxRowsPerRowGroup {
+			return fmt.Errorf("row group %d declares %d rows, past the %d one row group may hold",
+				i, rg.NumRows, int64(MaxRowsPerRowGroup))
 		}
+		if rg.NumRows > ceiling {
+			return fmt.Errorf("row group %d declares %d rows, more than the %d a %d-byte file can carry",
+				i, rg.NumRows, ceiling, fileSize)
+		}
+		sum += rg.NumRows
+	}
+	if sum != md.NumRows {
+		return fmt.Errorf("footer declares %d rows but its %d row groups sum to %d",
+			md.NumRows, len(md.RowGroups), sum)
+	}
+	return nil
+}
+
+// rowCeiling is the most rows a file of this many bytes can be carrying.
+//
+// There is no bound here that is both tight and sound: RLE encodes a run of
+// arbitrarily many equal values in a handful of bytes, so in principle a few
+// hundred bytes can declare billions of rows. What CAN be bounded is what a
+// writer actually emits, and that was measured rather than guessed. The
+// densest shapes pyarrow will produce -- one all-null or one constant column,
+// zstd, dictionary on, pages as large as it allows -- land at 210 to 464 rows
+// per byte across 1e6, 1e7 and 1e8 rows; the densest file in this repo's own
+// corpus is 0.42 rows per byte. 2^12 leaves an order of magnitude of headroom
+// over the densest thing a real writer produced, and still refuses 2^30 rows
+// out of a kilobyte.
+//
+// This is a policy ceiling of the same kind as footerMaxSize and
+// maxPageBodyBytes, and it is stated as one: a file past it is refused by
+// name, not silently truncated.
+func rowCeiling(fileSize int64) int64 {
+	if fileSize <= 0 {
+		return 0
+	}
+	if fileSize > math.MaxInt64/maxRowsPerFileByte {
+		return math.MaxInt64
+	}
+	return fileSize * maxRowsPerFileByte
+}
+
+// CheckRowGroupRowCount is the allocation-site half of the row-count bound.
+//
+// ValidateFileMetaData is the enforcement point and runs on every open, but
+// the number reaches an allocator through several doors -- the native
+// columnar reader's batch, the row reader's per-column []any, the staged
+// reader -- and a footer that arrived some other way (a cache, a test, a
+// future call site) must not be able to walk through one of them. One
+// comparison in front of each allocation is cheaper than trusting that the
+// only path here is the validated one.
+func CheckRowGroupRowCount(rgIdx int, numRows int64) error {
+	if numRows < 0 {
+		return fmt.Errorf("row group %d declares %d rows", rgIdx, numRows)
+	}
+	if numRows > MaxRowsPerRowGroup {
+		return fmt.Errorf("row group %d declares %d rows, past the %d one row group may hold",
+			rgIdx, numRows, int64(MaxRowsPerRowGroup))
 	}
 	return nil
 }

@@ -148,6 +148,9 @@ func (r *Reader) readRowsFlat(readCols []Column) ([]map[string]any, error) {
 
 	var allRows []map[string]any
 	for rgIdx := 0; rgIdx < r.fr.NumRowGroups(); rgIdx++ {
+		if err := CheckRowGroupRowCount(rgIdx, r.fr.RowGroupNumRows(rgIdx)); err != nil {
+			return nil, err
+		}
 		numRows := int(r.fr.RowGroupNumRows(rgIdx))
 		if numRows == 0 {
 			continue
@@ -197,6 +200,9 @@ func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
 
 	var allRows []map[string]any
 	for rgIdx := 0; rgIdx < r.fr.NumRowGroups(); rgIdx++ {
+		if err := CheckRowGroupRowCount(rgIdx, r.fr.RowGroupNumRows(rgIdx)); err != nil {
+			return nil, err
+		}
 		numRows := int(r.fr.RowGroupNumRows(rgIdx))
 		if numRows == 0 {
 			continue
@@ -703,6 +709,9 @@ func (r *Reader) ReadRowGroup(index int, selectedColumns []string) ([]map[string
 		leafByName[l.Name] = i
 	}
 
+	if err := CheckRowGroupRowCount(index, r.fr.RowGroupNumRows(index)); err != nil {
+		return nil, err
+	}
 	numRows := int(r.fr.RowGroupNumRows(index))
 	colValues := make([][]any, len(readCols))
 	for i, col := range readCols {

@@ -314,3 +314,110 @@ func TestReadFileMetaDataBadMagic(t *testing.T) {
 		t.Error("expected error for bad trailing magic")
 	}
 }
+
+// TestValidateFileMetaDataBoundsRowCounts covers the three bounds the
+// validator applies to a footer's row counts. Each of them is the last thing
+// between a thrift varint and an allocation sized from it.
+func TestValidateFileMetaDataBoundsRowCounts(t *testing.T) {
+	// A two-row file, near enough to the real thing: 1 KiB.
+	const fileSize = 1024
+	rgs := func(counts ...int64) []RowGroup {
+		out := make([]RowGroup, len(counts))
+		for i, c := range counts {
+			out[i] = RowGroup{NumRows: c}
+		}
+		return out
+	}
+	cases := []struct {
+		name string
+		md   FileMetaData
+		size int64
+		want string
+	}{
+		{"honest two-row file", FileMetaData{NumRows: 2, RowGroups: rgs(2)}, fileSize, ""},
+		{"honest empty file", FileMetaData{NumRows: 0}, fileSize, ""},
+		{"negative file total", FileMetaData{NumRows: -1}, fileSize, "footer declares -1 rows"},
+		{"negative row group", FileMetaData{NumRows: 0, RowGroups: rgs(-4)}, fileSize,
+			"row group 0 declares -4 rows"},
+		// The reviewer's two: the file says it holds 2^40 (or 2^30) rows and
+		// the row group still says two. batch.NewRecordBatch(schema, 1<<40)
+		// was 128 GiB of bitmap and "fatal error: runtime: out of memory".
+		{"file total of 2^40 over a two-row group",
+			FileMetaData{NumRows: 1 << 40, RowGroups: rgs(2)}, fileSize, "a 1024-byte file can carry"},
+		{"file total of 2^30 over a two-row group",
+			FileMetaData{NumRows: 1 << 30, RowGroups: rgs(2)}, fileSize, "a 1024-byte file can carry"},
+		// And with the row group inflated to match, so the sum agrees.
+		{"both inflated to 2^40",
+			FileMetaData{NumRows: 1 << 40, RowGroups: rgs(1 << 40)}, fileSize, "a 1024-byte file can carry"},
+		{"both inflated to 2^30",
+			FileMetaData{NumRows: 1 << 30, RowGroups: rgs(1 << 30)}, fileSize, "a 1024-byte file can carry"},
+		// Past the per-row-group ceiling even for a file large enough to
+		// carry that many rows by bytes.
+		{"row group past MaxRowsPerRowGroup",
+			FileMetaData{NumRows: MaxRowsPerRowGroup + 1, RowGroups: rgs(MaxRowsPerRowGroup + 1)},
+			1 << 30, "past the 67108864 one row group may hold"},
+		{"MaxRowsPerRowGroup exactly, with the bytes to back it",
+			FileMetaData{NumRows: MaxRowsPerRowGroup, RowGroups: rgs(MaxRowsPerRowGroup)}, 1 << 30, ""},
+		// The exact check: one flipped varint anywhere shows up as a sum
+		// that no longer adds.
+		{"row groups do not sum to the file total",
+			FileMetaData{NumRows: 6, RowGroups: rgs(2, 2)}, fileSize, "row groups sum to 4"},
+		{"rows with no row groups at all",
+			FileMetaData{NumRows: 3}, fileSize, "row groups sum to 0"},
+		{"several honest row groups", FileMetaData{NumRows: 9, RowGroups: rgs(2, 3, 4)}, fileSize, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			md := tc.md
+			err := ValidateFileMetaData(&md, tc.size)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("refused an honest footer: %v", err)
+			case tc.want != "" && err == nil:
+				t.Fatal("accepted")
+			case tc.want != "" && !bytes.Contains([]byte(err.Error()), []byte(tc.want)):
+				t.Errorf("error %q does not mention %q", err, tc.want)
+			}
+		})
+	}
+	if err := ValidateFileMetaData(nil, fileSize); err == nil {
+		t.Error("a nil footer was accepted")
+	}
+}
+
+// TestRowCeilingHasHeadroomOverRealWriters pins the constant against what was
+// measured rather than against itself: the densest files pyarrow will produce
+// (one all-null or one constant column, zstd, dictionary on, maximal pages)
+// ran 210-464 rows per byte at 1e6, 1e7 and 1e8 rows.
+func TestRowCeilingHasHeadroomOverRealWriters(t *testing.T) {
+	const densestObserved = 464
+	if got := rowCeiling(1); got <= densestObserved {
+		t.Errorf("rowCeiling admits %d rows per byte; the densest real writer output was %d",
+			got, densestObserved)
+	}
+	if got := rowCeiling(0); got != 0 {
+		t.Errorf("rowCeiling(0) = %d, want 0", got)
+	}
+	if got := rowCeiling(-1); got != 0 {
+		t.Errorf("rowCeiling(-1) = %d, want 0", got)
+	}
+	// And it does not overflow into a negative for a nonsense size.
+	if got := rowCeiling(1<<62 + 1); got <= 0 {
+		t.Errorf("rowCeiling(2^62) = %d", got)
+	}
+}
+
+func TestCheckRowGroupRowCount(t *testing.T) {
+	if err := CheckRowGroupRowCount(0, 0); err != nil {
+		t.Errorf("zero rows: %v", err)
+	}
+	if err := CheckRowGroupRowCount(0, MaxRowsPerRowGroup); err != nil {
+		t.Errorf("the ceiling itself: %v", err)
+	}
+	if err := CheckRowGroupRowCount(3, -1); err == nil {
+		t.Error("a negative row count was accepted")
+	}
+	if err := CheckRowGroupRowCount(3, MaxRowsPerRowGroup+1); err == nil {
+		t.Error("a row count past the ceiling was accepted")
+	}
+}
