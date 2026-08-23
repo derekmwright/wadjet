@@ -1098,15 +1098,21 @@ func TestAppendKeyValue(t *testing.T) {
 		{int32(10), "10"},
 		{float64(3.14), "3.14"},
 		{float32(2.5), "2.5"},
-		{"hello", "hello"},
 		{true, "true"},
 		{false, "false"},
+		// Every variable-width form carries a uvarint length, and every
+		// container walks its elements: `%v` collapsed distinct values onto
+		// one key (see TestMergeKeyKeepsBoxedTypesDistinct), which after a
+		// partial drain merged distinct groups.
+		{"hello", "\x05hello"},
+		{[]byte("raw"), "\x03raw"},
 		// The fallback renders the value instead of a constant: the constant
 		// "<unknown>" made every BYTES group key equal after a partial drain.
-		{struct{}{}, "{}"},
-		{[]byte("raw"), "raw"},
-		{[]any{"a", "b"}, "[a b]"},
-		{[]float32{1, 2}, "[1 2]"},
+		{struct{}{}, "\x02{}"},
+		// count=2, then tag(string)+len+bytes for each element.
+		{[]any{"a", "b"}, "\x02\x07\x01a\x07\x01b"},
+		// dimension, then the IEEE-754 bits of each element.
+		{[]float32{1, 2}, "\x02\x00\x00\x80\x3f\x00\x00\x00\x40"},
 	}
 	for _, tt := range tests {
 		buf := appendKeyValue(nil, tt.input)

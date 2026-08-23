@@ -2,7 +2,10 @@ package exec
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"math"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1002,6 +1005,22 @@ func (h *topNHeap) Pop() any {
 // float32, float64, string (STRING and every type that renders as text —
 // IPV6, CIDR, UUID, IPV4, MAC, DATE, DECIMAL), []byte (BYTES), []any (ARRAY),
 // map[string]any (ROW, MAP) and []float32 (VECTOR).
+//
+// The encoding must be INJECTIVE, not merely deterministic. Two group keys
+// that share bytes are one group after a drain, and the query answers
+// differently depending on how much memory it had — the same failure the
+// "<unknown>" constant caused, reached by a subtler route. `%v` is not
+// injective for any container (ARRAY["a b"] and ARRAY["a","b"] both print
+// `[a b]`; ROW{a:"b c:d"} and ROW{a:"b",c:"d"} both print `map[a:b c:d]`),
+// and a raw byte run is not injective against serializeKey's single 0x00
+// separator (BYTES "a\x00" ‖ "b" and BYTES "a" ‖ "\x00b" are the same five
+// bytes). So every variable-width form is length-prefixed and every
+// container walks its elements, mirroring appendColumnValue's framing.
+//
+// The fixed-width text forms — the integers, floats and bools — are
+// unchanged: they contain no 0x00, so the separator still delimits them, and
+// appendTypedIntKey (aggregate_partial_drain_cursor.go) writes the same bytes
+// for an int-mode key without boxing it.
 func appendKeyValue(buf []byte, v any) []byte {
 	if v == nil {
 		return append(buf, "<null>"...)
@@ -1016,16 +1035,131 @@ func appendKeyValue(buf []byte, v any) []byte {
 	case float32:
 		return strconv.AppendFloat(buf, float64(tv), 'g', -1, 32)
 	case string:
-		return append(buf, tv...)
+		// A length prefix, not the raw run: without it a NUL inside the
+		// value is indistinguishable from the column separator — and a
+		// literal "<null>" is indistinguishable from a NULL key.
+		return appendKeyRaw(buf, tv)
 	case []byte:
-		// BYTES: the raw bytes, exactly as the string case writes a string's.
-		return append(buf, tv...)
+		return appendKeyRaw(buf, string(tv))
 	case bool:
 		return strconv.AppendBool(buf, tv)
+	case []any:
+		// ARRAY (and a MAP boxed as a list of entries).
+		return appendKeyElems(buf, tv)
+	case map[string]any:
+		// ROW and MAP. Field names are sorted, as fmt sorted them, and are
+		// part of the key: {"a":"x"} and {"b":"x"} are different values.
+		return appendKeyFields(buf, tv)
+	case []float32:
+		// VECTOR.
+		return appendKeyFloats(buf, tv)
 	default:
-		// The containers. %v is deterministic for every one of them — fmt
-		// prints map keys in SORTED order, so a ROW or MAP renders the same
-		// way on every run, which a range over the map would not.
-		return fmt.Appendf(buf, "%v", tv)
+		// A boxed shape Vector.GetValue does not produce. Rendered rather
+		// than dropped, and length-prefixed like every other variable-width
+		// case so it cannot swallow a separator.
+		return appendKeyRaw(buf, fmt.Sprint(tv))
+	}
+}
+
+// appendKeyRaw writes a uvarint length then the bytes. Uvarint rather than a
+// fixed 4 bytes because the drain cursor's key arena holds one of these per
+// string group-key column per group: a short value pays one byte.
+func appendKeyRaw(buf []byte, s string) []byte {
+	buf = binary.AppendUvarint(buf, uint64(len(s)))
+	return append(buf, s...)
+}
+
+// appendKeyElems writes an ARRAY: its element count, then each element.
+// The count is what makes it injective — without it [["a"],["b"]] and
+// [["a","b"]] would produce the same bytes (appendListKey, aggregate.go,
+// makes the same argument for the columnar form).
+func appendKeyElems(buf []byte, vals []any) []byte {
+	buf = binary.AppendUvarint(buf, uint64(len(vals)))
+	for _, e := range vals {
+		buf = appendKeyElem(buf, e)
+	}
+	return buf
+}
+
+// appendKeyFields writes a ROW or MAP: its field count, then each
+// name/value pair in name order.
+func appendKeyFields(buf []byte, m map[string]any) []byte {
+	buf = binary.AppendUvarint(buf, uint64(len(m)))
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		buf = appendKeyRaw(buf, name)
+		buf = appendKeyElem(buf, m[name])
+	}
+	return buf
+}
+
+// appendKeyFloats writes a VECTOR: its dimension, then every element's
+// IEEE-754 bits. The dimension is part of the key because two vectors of
+// different width are different values even when one is the other's prefix.
+func appendKeyFloats(buf []byte, vals []float32) []byte {
+	buf = binary.AppendUvarint(buf, uint64(len(vals)))
+	for _, f := range vals {
+		buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(f))
+	}
+	return buf
+}
+
+// Nested-element kind tags. Every nested element is SELF-DELIMITING: a tag,
+// then a fixed-width or length-prefixed payload. The top level's text forms
+// cannot be reused inside a container — text carries no length and there is
+// no separator down here, so two adjacent elements would run together
+// (ARRAY[1,23] and ARRAY[12,3] are the same digits).
+const (
+	keyElemNull byte = iota
+	keyElemFalse
+	keyElemTrue
+	keyElemInt32
+	keyElemInt64
+	keyElemFloat32
+	keyElemFloat64
+	keyElemString
+	keyElemBytes
+	keyElemList
+	keyElemFields
+	keyElemFloats
+	keyElemOther
+)
+
+// appendKeyElem writes one nested element: its kind tag, then its payload.
+// The tag also keeps a nested NULL distinct from a zero or an empty string,
+// the same job appendNestedElem's flag byte does for the columnar form.
+func appendKeyElem(buf []byte, v any) []byte {
+	switch tv := v.(type) {
+	case nil:
+		return append(buf, keyElemNull)
+	case bool:
+		if tv {
+			return append(buf, keyElemTrue)
+		}
+		return append(buf, keyElemFalse)
+	case int32:
+		return binary.LittleEndian.AppendUint32(append(buf, keyElemInt32), uint32(tv))
+	case int64:
+		return binary.LittleEndian.AppendUint64(append(buf, keyElemInt64), uint64(tv))
+	case float32:
+		return binary.LittleEndian.AppendUint32(append(buf, keyElemFloat32), math.Float32bits(tv))
+	case float64:
+		return binary.LittleEndian.AppendUint64(append(buf, keyElemFloat64), math.Float64bits(tv))
+	case string:
+		return appendKeyRaw(append(buf, keyElemString), tv)
+	case []byte:
+		return appendKeyRaw(append(buf, keyElemBytes), string(tv))
+	case []any:
+		return appendKeyElems(append(buf, keyElemList), tv)
+	case map[string]any:
+		return appendKeyFields(append(buf, keyElemFields), tv)
+	case []float32:
+		return appendKeyFloats(append(buf, keyElemFloats), tv)
+	default:
+		return appendKeyRaw(append(buf, keyElemOther), fmt.Sprint(tv))
 	}
 }

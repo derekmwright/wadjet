@@ -12,15 +12,19 @@ import (
 func TestSerializeKey(t *testing.T) {
 	buf := make([]byte, 0, 64)
 
+	// Text forms are unchanged (appendTypedIntKey writes the same bytes for
+	// an int-mode key without boxing it); the variable-width forms carry a
+	// uvarint length, without which a value containing the 0x00 column
+	// separator would merge with its neighbour after a partial drain.
 	tests := []struct {
 		vals []any
 		want string
 	}{
 		{nil, ""},
 		{[]any{int64(42)}, "42"},
-		{[]any{"hello"}, "hello"},
+		{[]any{"hello"}, "\x05hello"},
 		{[]any{nil}, "<null>"},
-		{[]any{int64(1), "two"}, "1\x00two"},
+		{[]any{int64(1), "two"}, "1\x00\x03two"},
 	}
 
 	for _, tt := range tests {

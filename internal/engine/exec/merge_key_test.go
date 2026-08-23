@@ -16,8 +16,13 @@ import (
 // different answer depending on how much memory it had.
 //
 // The container forms fell through too, and a range over a Go map would have
-// made a ROW or MAP key nondeterministic run to run. fmt prints map keys in
-// sorted order, which is why the fallback is %v and not a hand-rolled walk.
+// made a ROW or MAP key nondeterministic run to run. %v fixed the
+// nondeterminism (fmt prints map keys in sorted order) and left the second
+// half of the property missing: %v is deterministic but NOT injective, and
+// neither is a raw byte run against a single 0x00 column separator. Distinct
+// values that share bytes are one group after a drain, which is the same
+// answer-depends-on-memory failure the constant caused. The `collides`
+// cases below are the shapes that reached it.
 func TestMergeKeyKeepsBoxedTypesDistinct(t *testing.T) {
 	buf := make([]byte, 0, 64)
 	key := func(vals ...any) string { return serializeKey(buf, vals) }
@@ -33,6 +38,27 @@ func TestMergeKeyKeepsBoxedTypesDistinct(t *testing.T) {
 		{"vector", []any{[]float32{1, 2}}, []any{[]float32{2, 1}}},
 		{"row", []any{map[string]any{"a": "x"}}, []any{map[string]any{"a": "y"}}},
 		{"row field", []any{map[string]any{"a": "x"}}, []any{map[string]any{"b": "x"}}},
+		// %v printed both of these `[a b]`.
+		{"array element boundary", []any{[]any{"a b"}}, []any{[]any{"a", "b"}}},
+		// %v printed both of these `[]`.
+		{"array empty vs one empty string", []any{[]any{}}, []any{[]any{""}}},
+		// %v printed both of these `map[a:b c:d]`.
+		{"row field boundary", []any{map[string]any{"a": "b c:d"}},
+			[]any{map[string]any{"a": "b", "c": "d"}}},
+		// Raw bytes plus a 0x00 separator: both were "a\x00\x00b".
+		{"bytes across the separator", []any{[]byte("a\x00"), []byte("b")},
+			[]any{[]byte("a"), []byte("\x00b")}},
+		// The same hole in the STRING form, which shares the separator.
+		{"string across the separator", []any{"a\x00", "b"}, []any{"a", "\x00b"}},
+		// A literal "<null>" is a value, not the NULL marker.
+		{"null vs its rendering", []any{nil}, []any{"<null>"}},
+		// A nested NULL is not a nested empty string.
+		{"nested null vs empty", []any{[]any{nil}}, []any{[]any{""}}},
+		// Adjacent nested integers have no separator of their own.
+		{"nested int boundary", []any{[]any{int64(1), int64(23)}},
+			[]any{[]any{int64(12), int64(3)}}},
+		// A vector is not the array of the same numbers.
+		{"vector length", []any{[]float32{1, 2}}, []any{[]float32{1, 2, 0}}},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -49,10 +75,14 @@ func TestMergeKeyKeepsBoxedTypesDistinct(t *testing.T) {
 		})
 	}
 
-	// A BYTES key must round-trip its bytes, not a placeholder: the merge
-	// compares these lexicographically, so the ordering has to be the values'.
-	if got := key([]byte("alpha")); got != "alpha" {
-		t.Errorf("BYTES key = %q, want the raw bytes", got)
+	// A BYTES key must carry its bytes, not a placeholder — the constant
+	// "<unknown>" is what collapsed every BYTES group into one. It carries
+	// them behind a uvarint length, which is what keeps a NUL inside the
+	// value distinct from the column separator. The merge only needs a total
+	// order over these keys, not the values' own order (an int-mode key is
+	// decimal text, which does not sort numerically either).
+	if got := key([]byte("alpha")); got != "\x05alpha" {
+		t.Errorf("BYTES key = %q, want a length prefix and the raw bytes", got)
 	}
 	// Determinism of the map fallback is the load-bearing property; check it
 	// over a map big enough that Go's randomised iteration would show.

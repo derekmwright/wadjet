@@ -47,10 +47,12 @@ import (
 //     for each agg:           accumulator (variable layout — see emitAcc)
 //   endMarker     byte (0x00)
 //
-// The sortKey is the binary GROUP BY key (same encoding as appendColumnValue
-// uses for the in-memory hash table). We sort & merge by sortKey rather than
-// by display values because the key is already canonical and equal-comparable
-// across runs.
+// The sortKey is the drain cursor's group key (appendSerializedKey /
+// appendKeyValue, sort.go — NOT appendColumnValue's in-memory hash-table
+// encoding, which is a different format). Every run's key comes from that
+// one producer, which is what makes keys equal-comparable across runs; we
+// sort & merge by it rather than by display values for that reason. It must
+// be injective, or equal bytes merge two different groups.
 
 const partialSpillMagic = "WAGS\x01"
 
