@@ -17,6 +17,44 @@ their stale `knownBug` prose is deleted rather than converted to
 `knownBugArm`. See §6's "Other named gaps" for what is still open, including a
 new gap this fix's own mechanism doesn't cover.
 
+**Update 2026-08-23 (second wave).** Four more of the divergences §5 lists
+are **fixed**, and every pin they held is deleted — the gates now compare
+those entries with no exemption:
+
+| Issue | Fix | Pins deleted |
+|---|---|---|
+| #394 | `kernel/sort.go` gained a DECIMAL arm in all three resolvers (numeric, by unscaled `Int128` at equal scale), and `compareVectorValues` (`window.go`) one of its own instead of falling through to `compareAny` on the formatted string | 4 in `tmOptPins`, 2 in `tmdPins` |
+| #395 | `writePartialKeyToColumn` (`aggregate_partial_spill.go`) no longer writes a DISPLAY-form key into raw storage: only STRING/BYTES/CIDR store that text, the rest re-parse through `Vector.SetValue`. Closes the int-backed half of the same defect too — a DATE/IPv4/MAC key on this path read back as 1970-01-01 / 0.0.0.0 | 4 in `tmOptPins`, which is now empty |
+| #396 | the native writer stamps the declared schema into the footer (`wadjet.schema` KeyValueMetadata) and `FileReader` restores each leaf column's type identity from it; `SQLResult.OutputSchema()` + `coordColumnMetas` give the coord path the same pgwire ColumnMetas the embedded path already had | 37 in `tmdPins`, which is now empty |
+| #402 | `materializeFlatAccums` resolves the SHARED count array before its bound check — `flatAccumLen` probes an aggregate's own arrays and a count-sharing COUNT owns none, so it measured 0 and was skipped for every group. Not a top-N bug: the heap and the multi-key comparator were correct and were sorting a wrong value | 1 in `tmFuzzOptPins` + its `tmFuzzIntermittentOptRetries` entry |
+
+`TestTypeMatrixTwoPath` now reports **229 compared, 0 diverged**.
+
+Three consequences worth recording:
+
+- **§2a's "nine types are lossy through a self-describing parquet file" is
+  closed for files written from here on**, and with it §6's "a logical
+  annotation for them so a self-describing file round-trips". The residual is
+  a migration boundary, not a design one: a file written by an older build
+  carries no `wadjet.schema` key, so the DAG still reads its IPv4/IPv6/MAC/
+  UUID/Bytes/Port/Protocol/Duration columns as INT64/STRING. Closing that for
+  existing data needs the catalog's declared schema plumbed to the worker's
+  scan (`physical.Stage` → `distributed.OpSpec` → `sourceForAliasWithProjection`
+  → `finishParquetState`, plus `worker/executor.go`'s four
+  `scan.ReadFileBatches` calls), which is a separate change.
+- **#392's four `minby_scalar_*` pins moved from `tmdPins` to
+  `tmdUnsupported`.** They were pinned as an ASYMMETRY — the single-process
+  arm refusing while the DAG answered — only because the DAG saw those
+  columns as INT64/STRING, which `MIN_BY`'s six-case switch happens to
+  declare correctly. With the real declared type the DAG reaches the same
+  wrong FLOAT64 declaration and refuses the same way. The two paths agree;
+  #392 itself is untouched.
+- **#402 was a diagnosis correction.** Its pin text (and the ADR-0013
+  amendment quoting it) attributed the divergence to an unstable tie-break in
+  the top-N merge. The top-N was innocent. `tmFuzzIntermittentOptRetries` is
+  now empty but stays, as the settled policy for the next pin with no forcing
+  gate.
+
 ## Why
 
 A review found that `(*Vector).GetValue`'s `TypeBytes` arm
@@ -458,8 +496,11 @@ string-vs-float rendering has no cross-engine rule.
   and this one doesn't, independent of whether any pin is currently inert.
 - Convert `twoPathQuery.knownBug` and `fuzzKnownDivergence` from skips into
   ratchets (§1c).
-- A parquet round-trip battery that asserts VALUES for the nine SMOKE types,
-  and a logical annotation for them so a self-describing file round-trips.
+- ~~A logical annotation for the nine SMOKE types so a self-describing file
+  round-trips~~ **RESOLVED 2026-08-23** by the footer's `wadjet.schema` key
+  (#396, see the second-wave update at the top) — for files written after
+  it. A parquet round-trip battery that asserts VALUES for those nine is
+  still not written; `TestDeclaredSchemaRoundTrip` asserts the TYPES only.
 - Per-type wire tests for the 14 pgwire types that have none.
 - **New 2026-08-23: the scan `BackingPool` is not covered by
   poison-on-release.** `poisonBatch` (`internal/engine/batch/poison.go`)
