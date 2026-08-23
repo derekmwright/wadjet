@@ -8,6 +8,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // #425, wire half: a NULL container and an EMPTY (or all-null-contents)
@@ -172,9 +173,9 @@ func TestShuffleNestedContainerNullVsEmpty(t *testing.T) {
 	binary.LittleEndian.PutUint32(data[4:], sw.numChunks)
 
 	t.Run("eager", func(t *testing.T) {
-		batches, err := shuffleReadBatches(data)
+		batches, err := wshf.DecodeBatches(data)
 		if err != nil {
-			t.Fatalf("shuffleReadBatches: %v", err)
+			t.Fatalf("wshf.DecodeBatches: %v", err)
 		}
 		if len(batches) != 2 {
 			t.Fatalf("got %d batches, want 2", len(batches))
@@ -184,9 +185,9 @@ func TestShuffleNestedContainerNullVsEmpty(t *testing.T) {
 	})
 
 	t.Run("chunk_reader", func(t *testing.T) {
-		r, err := newShuffleChunkReader(data)
+		r, err := wshf.NewChunkReader(data)
 		if err != nil {
-			t.Fatalf("newShuffleChunkReader: %v", err)
+			t.Fatalf("wshf.NewChunkReader: %v", err)
 		}
 		var got []*batch.RecordBatch
 		for {

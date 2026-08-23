@@ -7,6 +7,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
 // #425, coordinator half. readShuffleColumn is an independent copy of the
@@ -101,9 +102,9 @@ func TestShuffleReaderNestedContainerNulls(t *testing.T) {
 		buf = append(buf, payload...)
 	}
 
-	batches, err := readShuffleBatches(buf)
+	batches, err := wshf.DecodeBatches(buf)
 	if err != nil {
-		t.Fatalf("readShuffleBatches: %v", err)
+		t.Fatalf("wshf.DecodeBatches: %v", err)
 	}
 	if len(batches) != 1 || batches[0].Len != rows {
 		t.Fatalf("got %d batches", len(batches))
