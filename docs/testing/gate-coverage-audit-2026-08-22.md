@@ -55,6 +55,35 @@ Three consequences worth recording:
   would have to be checked in as bytes) or the catalog→worker plumbing above,
   which removes the question. Until one of those lands, the claim "#396 is
   fixed" means "for files written from here on".
+
+  **Update 2026-08-23 (#423): both of those landed, and the qualifier is
+  gone.** The plumbing is `physical.Stage.ScanSchema` (`annotateScanSchemas`,
+  one catalog lookup per distinct table at the end of `PlanDistributed`) →
+  `distributed.OpSpec.ColumnTypes` / `.BuildColumnTypes` /
+  `distributed.Task.ColumnTypes` → `cachedFileStreamSource.SetDeclaredSchema`
+  → `parquet.Reader.SchemaAs` in `finishParquetState`, which is
+  `retypeFromCatalog` — the row reader's own admission, so the two read paths
+  cannot disagree about what a declaration may replace.
+
+  Three carriers, not one, because a base table reaches the worker three
+  ways, and the third is the one this audit's hop list missed: a plain
+  unfiltered scan dispatches NO TASKS — it passes its parquet keys through as
+  a `StageOutput`, so the CONSUMER stage reads the base table. That is why the
+  first cut left `MIN_BY`/`MAX_BY` and join payloads in raw form: those
+  fragments read the table through `OpShuffleSource` and a join's `BuildFiles`,
+  not through `OpScan`. `StageOutput.ScanSchema` carries the declaration
+  across that hop. (The four `worker/executor.go` `scan.ReadFileBatches` calls
+  the list names are unreachable — `readParquetFileBatches`,
+  `readParquetFilesConcurrentBatches` and `readInputFilesBatches` have no
+  callers — so they were left alone rather than plumbed.)
+
+  The blindness is fixed too, by making the fixture constructible:
+  `parquet.StripDeclaredSchema` re-encodes a footer without the key, and
+  `coordinator.TestTypeMatrixTwoPathWithoutDeclaredSchemaFooter` is this
+  suite's corpus over such files, both arms on ONE store and ONE catalog so a
+  divergence cannot be a difference in the data, with the fixture's inability
+  to declare its own types asserted rather than assumed. 45 of its 120
+  entries fail without the plumbing and none with it.
 - **#392's four `minby_scalar_*` pins moved from `tmdPins` to
   `tmdUnsupported`.** They were pinned as an ASYMMETRY — the single-process
   arm refusing while the DAG answered — only because the DAG saw those

@@ -108,13 +108,53 @@ the embedded engine per policy shape.
 | `NodeScan` | `scan` stage (tasks = file/row-group split) | `buildScan` is the single-process analog |
 | `NodeJoin` | `hash_join`/`broadcast_join` (+ `exchange-repartition` shuffles for non-broadcast) | keys parsed at plan time (`plan.go:3145+`); RIGHT/FULL never broadcast — see §Outer joins |
 | `NodeAggregate` | `aggregate` (partial) → `final_aggregate` | two-phase (`plan.go:3034-3103`); the distribution pass adds the exchange |
-| `NodeSort` | `sort` → merge-sort tree | `plan.go:3105` |
+| `NodeSort` | `sort` → merge-sort tree | `plan.go:3105`. A key naming a term the SELECT list drops is a `__sortkey_N` that no stage emits — see §Synthetic sort keys. |
 | `NodeWindow` | `window` | `plan.go:3384`. One task per PARTITION BY partition when the input already arrives clustered on those keys; Singleton otherwise — see §Window. |
 | `NodeFilter` | pushes predicates onto child stage | `plan.go:3323` |
 | `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. |
 | `NodeIntersect` / `NodeExcept` | `union` (with per-arm tag columns) + a grouped counting `final_aggregate` | `set_op_stages.go` (#346). The distribution pass inserts an `exchange-repartition` on the full result row between them — see §Set operations. |
 | **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. Top-level DISTINCT never reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns it into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages. Remaining NodeDistincts (semi/anti build-side dedup, fallback shapes) stay passthrough. |
 | **`NodeProject`** | **nothing — passthrough** | same `default` case; aliases recovered at gather |
+
+## Synthetic sort keys: the column a Project would have computed
+
+`ORDER BY b` over `SELECT a` names a column the SELECT-list Project drops, so
+`logical.resolveOrderBy` MATERIALIZES the term as a hidden projection called
+`__sortkey_N` and points the Sort at it. The single-process pipeline runs that
+Project as a real operator below the Sort and `hiddenSortTrimOp` drops the
+column again before the client sees it.
+
+**On the DAG an ordinary Project emits no stage**, so the name exists nowhere
+unless a pass writes it onto the fragment producing the sort's input.
+`attachScanSelectProjections` does that — but only for the OUTERMOST SELECT
+list, the one feeding the terminal gather. Every other sort (an ORDER BY
+inside a derived table or CTE, whose consumer is an aggregate or a join)
+reached a fragment emitting no such column and the task failed with
+`sort: key column "__sortkey_0" does not exist in the input schema` on a query
+the fast path answered (#424).
+
+`resolveHiddenSortKeys` (`planner/physical/hidden_sort_key.go`) settles them,
+and runs **last** in `PlanDistributed` — after `attachScanSelectProjections`,
+because the repair depends on what that pass did:
+
+- key already emitted → nothing to do;
+- a plain column reference → the KEY is renamed to its source column, which
+  the producer already ships under its own name (the DAG's convention);
+- a computed term → projected INTO the producing fragment under the hidden
+  name, the `Stage.ProjectExprs` → `OpProject` machinery (#169, #383).
+
+Running late is load-bearing in the other direction too: a key renamed BEFORE
+`attachScanSelectProjections` falls outside that pass's sort-key coverage
+check on `SELECT a, LENGTH(b) AS l … ORDER BY c`, and the whole projection —
+including the computed select item — would be declined. The definition rides
+`SortKeySpec.SourceExpr`/`SourceColumn`/`SourceType` rather than the stage
+because every pass that MOVES an ordering (`fuseSortIntoPredecessor`'s fold
+onto a join or aggregate, `emitMergeSortTree`, the gather's
+`Exchange.Ordering`) copies the key slice wholesale.
+
+This is the follow-on to #390: that guard keeps a sort with a dependent as its
+own stage rather than folding it into a predecessor dispatch may re-fan-out,
+and that stage is exactly the one whose input had no key to sort on.
 
 ## Stage → worker fragment conversion
 
@@ -126,6 +166,48 @@ Conversion lives in `coordinator/execute_stage_dag.go`:
 - `buildAggregateFragment` (`:2373`) → `OpShuffleSource` + `OpHashAggregate{GroupByCols, Aggregates, MergeMode, InputRowBound}`. **`MergeMode = stage.Type=="final_aggregate"||"merge_aggregate"`** (`:2400`) — merge mode rewrites `InputCol→OutputCol` and `COUNT→SUM`. `InputRowBound` is `aggregateInputRowBound`: the exact Σ`PartitionRows` over the partitions bound to this task (0 = unknown), which decides the worker aggregate's group-index layout — see `docs/design/unbounded-final-aggregate-layout.md`.
 - `buildSortFragment` (`:2514`), shuffle dispatch `dispatchShuffleStage` (`:772`).
 - Terminal stage gets an `OpGatherSink` when `gatherReplySubject != ""`.
+
+### A base table reaches the worker THREE ways, and all three must declare its types
+
+A parquet file cannot express nine of this engine's types (IPv4, IPv6, MAC,
+UUID, BYTES, PORT, PROTOCOL, DURATION have no logical annotation to write;
+CIDR is written as plain UTF8). Files written from v0.18.0 on carry the
+declared schema in their own footer (`parquet.DeclaredSchemaKey`); files
+written before it do not, and a reader that types from the FILE answers
+`167772165` where the catalog says `10.0.0.5` (#396, then #423 for the
+migration boundary). The catalog's answer therefore rides the plan —
+`physical.Stage.ScanSchema`, filled by `annotateScanSchemas` at the end of
+`PlanDistributed`, at PLAN time so every task of a query sees one catalog
+revision.
+
+**The trap when adding a base-table read path**: a plain unfiltered scan
+dispatches NO TASKS. `executeStage` passes its parquet keys through as a
+`StageOutput{Kind: OutputSinglePart, ScanTable, ScanColumns, ScanSchema}`, so
+the table is read by the CONSUMER stage, not by a scan fragment. The three
+carriers, and where each is read:
+
+| Carrier | Set by | Read by |
+|---|---|---|
+| `OpSpec.ColumnTypes` | the two `OpScan` builders (`dispatchScanStage`, `buildScanAggregateFragment`) from `stage.ScanSchema`; `applySourceColumnTypes` for a pass-through input, from `stageInputScanSchemas` | `worker.buildFragmentSource` |
+| `OpSpec.BuildColumnTypes` | `applySourceColumnTypes`, keyed by `BuildAlias` | `worker.applyBuildSchema`, both join build sources |
+| `Task.ColumnTypes` | `runShuffleSide` from the synthetic source stage | `executeShuffleTask`'s implicit parquet scan |
+
+All three land on `cachedFileStreamSource.SetDeclaredSchema` and are applied
+per file in `finishParquetState` via `parquet.Reader.SchemaAs`, which IS
+`retypeFromCatalog` — the row reader's own admission, so the two read paths
+cannot disagree about what a declaration may replace. Where the footer key
+exists the two agree and the substitution is a no-op; where they disagree the
+catalog wins if the file's bytes can carry its type and the open FAILS by
+name if they cannot.
+
+`applySourceProjection` (what to read) and `applySourceColumnTypes` (what it
+is) share `stageInputDeps` for the alias→dependency mapping, so they cannot
+disagree about which alias is which input. **A new dispatcher that reads base
+parquet has to pick one of the three carriers**, or its columns silently
+revert to the file's own types — which is the #396 symptom, one path further
+out. Gate: `coordinator.TestTypeMatrixTwoPathWithoutDeclaredSchemaFooter`,
+which runs the type-matrix corpus over footer-stripped files
+(`parquet.StripDeclaredSchema`).
 
 Worker side: `buildFragmentUnary` (`worker/executor_fragment.go:952`) and
 `buildFragmentHashAggregate` (`:788`). **Gap:** the hash-aggregate fragment
