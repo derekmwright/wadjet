@@ -9109,7 +9109,7 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 // filter operator when the pattern is a simple comparison (col op col, col op const)
 // or an AND chain of such comparisons. Returns nil for complex expressions.
 func tryVectorizeFilter(e expr.Expr) exec.UnaryOperator {
-	ops := extractFilterOps(e)
+	ops := extractFilterOps(e, false)
 	if len(ops) == 0 {
 		return nil
 	}
@@ -9131,7 +9131,7 @@ func tryPartialVectorize(e expr.Expr) exec.UnaryOperator {
 	var vectorized []exec.UnaryOperator
 	var nonVectorized []expr.Expr
 	for _, part := range parts {
-		ops := extractFilterOps(part)
+		ops := extractFilterOps(part, false)
 		if ops != nil {
 			vectorized = append(vectorized, ops...)
 		} else {
@@ -9190,10 +9190,85 @@ func kernelFilterWithRowFallback(name string, op exec.CompareOp, lit *expr.Lit, 
 	return kf
 }
 
-func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
+// negateCmpOp inverts a comparison for an enclosing NOT. Under SQL's
+// three-valued logic NOT (a = b) is TRUE exactly where a <> b is TRUE — both
+// are UNKNOWN when either side is NULL, and every filter kernel already skips
+// NULL rows — so the inverted operator is the whole of the negation for a
+// WHERE, which admits only TRUE. The second result is false for an operator
+// with no inverse in this set: the signal to leave the predicate to the row
+// evaluator rather than lower it wrongly.
+func negateCmpOp(op exec.CompareOp) (exec.CompareOp, bool) {
+	switch op {
+	case exec.OpEq:
+		return exec.OpNe, true
+	case exec.OpNe:
+		return exec.OpEq, true
+	case exec.OpLt:
+		return exec.OpGe, true
+	case exec.OpLe:
+		return exec.OpGt, true
+	case exec.OpGt:
+		return exec.OpLe, true
+	case exec.OpGe:
+		return exec.OpLt, true
+	default:
+		return op, false
+	}
+}
+
+// maybeNegate applies an enclosing NOT to an already-mapped comparison.
+func maybeNegate(op exec.CompareOp, neg bool) (exec.CompareOp, bool) {
+	if !neg {
+		return op, true
+	}
+	return negateCmpOp(op)
+}
+
+// negatedExpr is the expression a lowered operator's row-at-a-time fallback
+// must evaluate. That fallback is the ORIGINAL comparison, so under a NOT it
+// has to be wrapped: handing it the un-negated node is the same dropped
+// negation one layer down (#461).
+func negatedExpr(e expr.Expr, neg bool) expr.Expr {
+	if !neg {
+		return e
+	}
+	return &expr.Not{Operand: e}
+}
+
+// orOfOps unions two extracted operand lists into one OR filter. Nil on
+// either side means that side is not vectorizable, and an OR is only as
+// vectorizable as both of its arms.
+func orOfOps(leftOps, rightOps []exec.UnaryOperator) []exec.UnaryOperator {
+	if leftOps == nil || rightOps == nil {
+		return nil
+	}
+	one := func(ops []exec.UnaryOperator) exec.UnaryOperator {
+		if len(ops) == 1 {
+			return ops[0]
+		}
+		return exec.NewChainFilter(ops)
+	}
+	return []exec.UnaryOperator{exec.NewOrFilter(one(leftOps), one(rightOps))}
+}
+
+// extractFilterOps recursively extracts vectorizable filter ops from AND
+// combinations.
+//
+// neg carries an enclosing NOT: what comes back is the negation of e. That is
+// what the *expr.Not case used to drop — it returned the operand's own
+// operators, so `WHERE NOT (k = 131)` was executed as `WHERE k = 131`, the
+// complement of the answer, silently and on both engines (#461). Anything
+// that cannot be negated returns nil instead, and the caller's residual
+// row-at-a-time filter evaluates the NOT itself, where three-valued logic
+// survives (expr.Not.EvalBoolNull).
+func extractFilterOps(e expr.Expr, neg bool) []exec.UnaryOperator {
 	switch v := e.(type) {
 	case *expr.Cmp:
-		op := cmpToExecOp(v.Op)
+		op, ok := maybeNegate(cmpToExecOp(v.Op), neg)
+		if !ok {
+			return nil
+		}
+		fb := negatedExpr(v, neg)
 		// col op col
 		if lc, lok := v.Left.(*expr.ColRef); lok {
 			if rc, rok := v.Right.(*expr.ColRef); rok {
@@ -9202,81 +9277,94 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 					// evaluate it; leave this comparison row-at-a-time.
 					return nil
 				}
-				return []exec.UnaryOperator{colColFilterWithRowFallback(lc.Name, rc.Name, op, v)}
+				return []exec.UnaryOperator{colColFilterWithRowFallback(lc.Name, rc.Name, op, fb)}
 			}
 		}
 		// col op const
 		if lc, lok := v.Left.(*expr.ColRef); lok {
 			if lit, rok := v.Right.(*expr.Lit); rok {
-				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit, v)}
+				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit, fb)}
 			}
 		}
 		// const op col → flip
 		if lit, lok := v.Left.(*expr.Lit); lok {
 			if rc, rok := v.Right.(*expr.ColRef); rok {
-				return []exec.UnaryOperator{kernelFilterWithRowFallback(rc.Name, flipOp(op), lit, v)}
+				return []exec.UnaryOperator{kernelFilterWithRowFallback(rc.Name, flipOp(op), lit, fb)}
 			}
 		}
 	case *expr.CmpInt64:
-		op := cmpToExecOp(v.Op)
+		op, ok := maybeNegate(cmpToExecOp(v.Op), neg)
+		if !ok {
+			return nil
+		}
+		fb := negatedExpr(v, neg)
 		if lc, lok := v.Left.(*expr.ColRef); lok {
 			if rc, rok := v.Right.(*expr.ColRef); rok {
 				if strings.Contains(lc.Name, ".") || strings.Contains(rc.Name, ".") {
 					return nil
 				}
-				return []exec.UnaryOperator{colColFilterWithRowFallback(lc.Name, rc.Name, op, v)}
+				return []exec.UnaryOperator{colColFilterWithRowFallback(lc.Name, rc.Name, op, fb)}
 			}
 			if lit, rok := v.Right.(*expr.Lit); rok {
-				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit, v)}
+				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit, fb)}
 			}
 		}
 	case *expr.CmpFloat64:
-		op := cmpToExecOp(v.Op)
+		op, ok := maybeNegate(cmpToExecOp(v.Op), neg)
+		if !ok {
+			return nil
+		}
+		fb := negatedExpr(v, neg)
 		if lc, lok := v.Left.(*expr.ColRef); lok {
 			if rc, rok := v.Right.(*expr.ColRef); rok {
 				if strings.Contains(lc.Name, ".") || strings.Contains(rc.Name, ".") {
 					return nil
 				}
-				return []exec.UnaryOperator{colColFilterWithRowFallback(lc.Name, rc.Name, op, v)}
+				return []exec.UnaryOperator{colColFilterWithRowFallback(lc.Name, rc.Name, op, fb)}
 			}
 			if lit, rok := v.Right.(*expr.Lit); rok {
-				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit, v)}
+				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit, fb)}
 			}
 		}
 	case *expr.And:
-		leftOps := extractFilterOps(v.Left)
+		if neg {
+			// De Morgan: NOT (a AND b) is NOT a OR NOT b, which holds in
+			// Kleene logic as well as Boolean.
+			return orOfOps(extractFilterOps(v.Left, true), extractFilterOps(v.Right, true))
+		}
+		leftOps := extractFilterOps(v.Left, false)
 		if leftOps == nil {
 			return nil
 		}
-		rightOps := extractFilterOps(v.Right)
+		rightOps := extractFilterOps(v.Right, false)
 		if rightOps == nil {
 			return nil
 		}
 		return append(leftOps, rightOps...)
 	case *expr.Or:
-		leftOps := extractFilterOps(v.Left)
-		rightOps := extractFilterOps(v.Right)
-		if leftOps != nil && rightOps != nil {
-			var left, right exec.UnaryOperator
-			if len(leftOps) == 1 {
-				left = leftOps[0]
-			} else {
-				left = exec.NewChainFilter(leftOps)
+		if neg {
+			// De Morgan the other way: NOT (a OR b) is NOT a AND NOT b, and
+			// an AND is the chained intersection of the two selections.
+			leftOps := extractFilterOps(v.Left, true)
+			if leftOps == nil {
+				return nil
 			}
-			if len(rightOps) == 1 {
-				right = rightOps[0]
-			} else {
-				right = exec.NewChainFilter(rightOps)
+			rightOps := extractFilterOps(v.Right, true)
+			if rightOps == nil {
+				return nil
 			}
-			return []exec.UnaryOperator{exec.NewOrFilter(left, right)}
+			return append(leftOps, rightOps...)
 		}
+		return orOfOps(extractFilterOps(v.Left, false), extractFilterOps(v.Right, false))
 	case *expr.Between:
 		// col BETWEEN low AND high → two kernel filters: col >= low AND col <= high
 		// col NOT BETWEEN low AND high → col < low OR col > high
 		if col, ok := v.Expr.(*expr.ColRef); ok {
 			if lo, lok := v.Low.(*expr.Lit); lok {
 				if hi, hok := v.Hi.(*expr.Lit); hok {
-					if v.Not {
+					// SQL defines `x NOT BETWEEN a AND b` as `NOT (x BETWEEN
+					// a AND b)`, so an enclosing NOT is the same flag.
+					if v.Not != neg {
 						return []exec.UnaryOperator{exec.NewOrFilter(
 							exec.NewKernelFilterLit(col.Name, exec.OpLt, lo.Val, lo.Text),
 							exec.NewKernelFilterLit(col.Name, exec.OpGt, hi.Val, hi.Text),
@@ -9302,42 +9390,41 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 					return nil // non-literal in IN list
 				}
 			}
-			return []exec.UnaryOperator{exec.NewInFilterLit(col.Name, values, texts, v.Not)}
+			return []exec.UnaryOperator{exec.NewInFilterLit(col.Name, values, texts, v.Not != neg)}
 		}
 	case *expr.Like:
 		// col LIKE 'pattern' or col NOT LIKE 'pattern'
 		if col, ok := v.Expr.(*expr.ColRef); ok {
 			if pat, ok := v.Pattern.(*expr.Lit); ok {
 				if s, ok := pat.Val.(string); ok {
-					return []exec.UnaryOperator{exec.NewLikeFilter(col.Name, s, v.Not)}
+					return []exec.UnaryOperator{exec.NewLikeFilter(col.Name, s, v.Not != neg)}
 				}
 			}
 		}
 	case *expr.IsNull:
 		// col IS NULL / col IS NOT NULL — vectorized null bitmap scan
 		if col, ok := v.Operand.(*expr.ColRef); ok {
-			return []exec.UnaryOperator{exec.NewNullCheckFilter(col.Name, !v.Not)}
+			return []exec.UnaryOperator{exec.NewNullCheckFilter(col.Name, v.Not == neg)}
 		}
 	case *expr.ColIsNull:
 		// Offsets-shape rewrite of `col IS [NOT] NULL` (expr/shape_funcs.go).
 		// Same kernel the *expr.IsNull case builds — without this the filter
 		// would silently drop to row-at-a-time evaluation.
-		return []exec.UnaryOperator{exec.NewNullCheckFilter(v.Col.Name, !v.Not)}
+		return []exec.UnaryOperator{exec.NewNullCheckFilter(v.Col.Name, v.Not == neg)}
 	case *expr.ColEmptyStr:
 		// Offsets-shape rewrite of a column compared against the empty
 		// string literal (expr/shape_funcs.go). Reproduces exactly what the
 		// *expr.Cmp "col op const" branch built for the pre-rewrite node.
 		op := exec.OpEq
-		if v.Not {
+		if v.Not != neg {
 			op = exec.OpNe
 		}
-		return []exec.UnaryOperator{kernelFilterWithRowFallback(v.Col.Name, op, &expr.Lit{Val: ""}, v)}
+		return []exec.UnaryOperator{kernelFilterWithRowFallback(v.Col.Name, op, &expr.Lit{Val: ""}, negatedExpr(v, neg))}
 	case *expr.Not:
-		// NOT (expr) — try to vectorize the inner expression
-		inner := extractFilterOps(v.Operand)
-		if inner != nil {
-			return inner
-		}
+		// NOT (expr) — vectorize the NEGATION of the inner expression. This
+		// case used to return the inner expression's own operators, which
+		// applied the predicate positively and answered the complement (#461).
+		return extractFilterOps(v.Operand, !neg)
 	}
 	return nil
 }

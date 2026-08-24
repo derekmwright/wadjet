@@ -1,0 +1,312 @@
+package coordinator
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/derekmwright/wadjet/internal/oracle"
+	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
+)
+
+// The predicate-semantics gate: what a WHERE clause MEANS, asserted by VALUE
+// on both engines.
+//
+// The two-path gate next door (TestTypeMatrixTwoPath) asks whether the stage
+// DAG and the single-process engine agree. That question cannot see a defect
+// in the shared lowering, and #461 was exactly that: `extractFilterOps`
+// returned the operators of a NOT's OPERAND, un-negated, so `WHERE NOT (id =
+// 131)` was executed as `WHERE id = 131` — the complement of the answer — on
+// BOTH engines, in perfect agreement. The distributed path re-parses its
+// filters from SQL text and reaches the same lowering, which is why the two
+// arms agreed on the wrong rows.
+//
+// So this gate carries its own expectation. Each case names the row set SQL
+// requires, computed in Go from the same fixture the engines read, and both
+// arms are held to it. An engine that agrees with the other but not with SQL
+// fails here.
+//
+// Three-valued logic is the point of most of the corpus. A WHERE admits only
+// TRUE: a NULL row satisfies neither a predicate nor its negation, and
+// `NOT (a AND b)` is `NOT a OR NOT b` in Kleene logic too.
+
+// predCase is one predicate, and the rows it must return.
+type predCase struct {
+	name string
+	// where is spliced into `SELECT id FROM typemx WHERE <where> ORDER BY id`.
+	where string
+	// want reports whether fixture row r qualifies. It is written from SQL's
+	// rules, not from the engine's behaviour.
+	want func(r tmxRow) bool
+}
+
+// tmxRow is one fixture row's columns, already unboxed. Nullable columns
+// carry a pointer so "absent" and "zero" stay distinct — the distinction the
+// filter kernels lost.
+type tmxRow struct {
+	id  int64
+	i64 *int64
+	i32 *int32
+	str *string
+	dec *float64
+	g   *int32
+}
+
+func tmxRows() []tmxRow {
+	raw := typematrix.Data(typematrix.Rows)
+	out := make([]tmxRow, len(raw))
+	for i, r := range raw {
+		row := tmxRow{id: r["id"].(int64)}
+		if v, ok := r["c_i64"].(int64); ok {
+			row.i64 = &v
+		}
+		if v, ok := r["c_i32"].(int32); ok {
+			row.i32 = &v
+		}
+		if v, ok := r["c_str"].(string); ok {
+			row.str = &v
+		}
+		if v, ok := r["c_dec"].(float64); ok {
+			row.dec = &v
+		}
+		if v, ok := r["g"].(int32); ok {
+			row.g = &v
+		}
+		out[i] = row
+	}
+	return out
+}
+
+// c_i64 holds i*1_000_003, NULL every 31st row; c_str holds "s-%06d", NULL
+// every 43rd. These are the two literals the corpus compares against.
+const (
+	tmxI64At131 = 131 * 1_000_003
+	tmxI64At100 = 100 * 1_000_003
+)
+
+func notPredicateCases() []predCase {
+	return []predCase{
+		// #461's four reported shapes, on a NOT NULL column: the answer is
+		// the complement of the positive predicate.
+		{"NotEqNonNullable", "NOT (id = 131)", func(r tmxRow) bool { return r.id != 131 }},
+		{"NotLtNonNullable", "NOT (id < 10)", func(r tmxRow) bool { return r.id >= 10 }},
+		{"NotInNonNullable", "NOT (id IN (1, 2, 3))", func(r tmxRow) bool {
+			return r.id != 1 && r.id != 2 && r.id != 3
+		}},
+		{"NotBetweenNonNullable", "NOT (id BETWEEN 10 AND 19)", func(r tmxRow) bool {
+			return r.id < 10 || r.id > 19
+		}},
+		// The other four comparisons.
+		{"NotNeNonNullable", "NOT (id <> 131)", func(r tmxRow) bool { return r.id == 131 }},
+		{"NotLeNonNullable", "NOT (id <= 10)", func(r tmxRow) bool { return r.id > 10 }},
+		{"NotGtNonNullable", "NOT (id > 10)", func(r tmxRow) bool { return r.id <= 10 }},
+		{"NotGeNonNullable", "NOT (id >= 10)", func(r tmxRow) bool { return r.id < 10 }},
+		// A literal on the left keeps its flip through the negation.
+		{"NotFlippedLiteral", "NOT (10 < id)", func(r tmxRow) bool { return r.id <= 10 }},
+
+		// The same shapes on a NULLABLE column. A NULL row is UNKNOWN under
+		// the predicate and UNKNOWN under its negation, so it appears in
+		// neither answer — the complement of the positive answer is NOT the
+		// negation's answer here, which is what makes these the load-bearing
+		// cases.
+		{"NotEqNullable", fmt.Sprintf("NOT (c_i64 = %d)", tmxI64At131), func(r tmxRow) bool {
+			return r.i64 != nil && *r.i64 != tmxI64At131
+		}},
+		{"NotNeNullable", fmt.Sprintf("NOT (c_i64 <> %d)", tmxI64At131), func(r tmxRow) bool {
+			return r.i64 != nil && *r.i64 == tmxI64At131
+		}},
+		{"NotLtNullable", fmt.Sprintf("NOT (c_i64 < %d)", tmxI64At100), func(r tmxRow) bool {
+			return r.i64 != nil && *r.i64 >= tmxI64At100
+		}},
+		{"NotGeNullable", fmt.Sprintf("NOT (c_i64 >= %d)", tmxI64At100), func(r tmxRow) bool {
+			return r.i64 != nil && *r.i64 < tmxI64At100
+		}},
+		{"NotInNullable", "NOT (c_i64 IN (1000003, 2000006, 3000009))", func(r tmxRow) bool {
+			if r.i64 == nil {
+				return false
+			}
+			return *r.i64 != 1000003 && *r.i64 != 2000006 && *r.i64 != 3000009
+		}},
+		{"NotNotInNullable", "NOT (c_i64 NOT IN (1000003, 2000006, 3000009))", func(r tmxRow) bool {
+			if r.i64 == nil {
+				return false
+			}
+			return *r.i64 == 1000003 || *r.i64 == 2000006 || *r.i64 == 3000009
+		}},
+		{"NotBetweenNullable", "NOT (c_i64 BETWEEN 10000030 AND 19000057)", func(r tmxRow) bool {
+			return r.i64 != nil && (*r.i64 < 10000030 || *r.i64 > 19000057)
+		}},
+		{"NotNotBetweenNullable", "NOT (c_i64 NOT BETWEEN 10000030 AND 19000057)", func(r tmxRow) bool {
+			return r.i64 != nil && *r.i64 >= 10000030 && *r.i64 <= 19000057
+		}},
+		{"NotEqNullableInt32", "NOT (c_i32 = 393)", func(r tmxRow) bool {
+			return r.i32 != nil && *r.i32 != 393
+		}},
+
+		// IS NULL is the one test a NULL row answers TRUE, and its negation
+		// is the only way to ask for the rest.
+		{"NotIsNull", "NOT (c_i64 IS NULL)", func(r tmxRow) bool { return r.i64 != nil }},
+		{"NotIsNotNull", "NOT (c_i64 IS NOT NULL)", func(r tmxRow) bool { return r.i64 == nil }},
+
+		// Strings: equality, LIKE and NOT LIKE under a negation.
+		{"NotEqString", "NOT (c_str = 's-000131')", func(r tmxRow) bool {
+			return r.str != nil && *r.str != "s-000131"
+		}},
+		{"NotLikeString", "NOT (c_str LIKE 's-00013%')", func(r tmxRow) bool {
+			return r.str != nil && !strings.HasPrefix(*r.str, "s-00013")
+		}},
+		{"NotNotLikeString", "NOT (c_str NOT LIKE 's-00013%')", func(r tmxRow) bool {
+			return r.str != nil && strings.HasPrefix(*r.str, "s-00013")
+		}},
+
+		// De Morgan, both directions, with a nullable operand so the Kleene
+		// truth table is exercised: NOT (A AND B) is TRUE when EITHER side is
+		// FALSE, even if the other is UNKNOWN.
+		{"NotOfAnd", "NOT (id < 100 AND c_i64 > 0)", func(r tmxRow) bool {
+			aFalse := r.id >= 100
+			bFalse := r.i64 != nil && *r.i64 <= 0
+			return aFalse || bFalse
+		}},
+		{"NotOfOr", "NOT (id < 100 OR c_i64 > 0)", func(r tmxRow) bool {
+			aFalse := r.id >= 100
+			bFalse := r.i64 != nil && *r.i64 <= 0
+			return aFalse && bFalse
+		}},
+		// Two negations cancel — right before the fix too, because two
+		// dropped negations cancel as well. It is here so the fix cannot
+		// break what accident had right.
+		{"DoubleNegation", "NOT (NOT (id = 131))", func(r tmxRow) bool { return r.id == 131 }},
+
+		// A negation beside a conjunct the lowering cannot vectorize: the
+		// vectorized half and the row-at-a-time half must agree on the same
+		// negation (tryPartialVectorize).
+		{"NotBesideRowPredicate", "NOT (id = 131) AND ABS(id) < 200", func(r tmxRow) bool {
+			return r.id != 131 && r.id < 200
+		}},
+		// A negation the lowering must DECLINE: ABS(id) is not a bare column,
+		// so the whole predicate falls to the row evaluator, which keeps the
+		// negation.
+		{"NotOverFunctionCall", "NOT (ABS(id) < 10)", func(r tmxRow) bool { return r.id >= 10 }},
+
+		// Column against column, negated.
+		{"NotColCol", "NOT (id = c_i64)", func(r tmxRow) bool {
+			return r.i64 != nil && r.id != *r.i64
+		}},
+
+		// A DECIMAL column takes its own kernel (kernel.compareFilterDecimal,
+		// the newest one), so the negation has to reach that arm too.
+		{"NotLtDecimal", "NOT (c_dec < 100)", func(r tmxRow) bool {
+			return r.dec != nil && *r.dec >= 100
+		}},
+	}
+}
+
+func TestTypeMatrixPredicateSemanticsTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: the predicate-semantics gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+	rows := tmxRows()
+
+	cases := notPredicateCases()
+	t.Logf("predicate-semantics gate: %d predicates × 2 arms (A single-process, B stage DAG), "+
+		"each held to the row set SQL requires", len(cases))
+
+	check := func(t *testing.T, sql string, want func(tmxRow) bool) {
+		t.Helper()
+		var wantIDs []int64
+		for _, r := range rows {
+			if want(r) {
+				wantIDs = append(wantIDs, r.id)
+			}
+		}
+		for _, arm := range []struct {
+			name string
+			run  func() (*oracle.Result, error)
+		}{
+			{"single", func() (*oracle.Result, error) { return tmdRunSingle(ctx, single, sql) }},
+			{"dag", func() (*oracle.Result, error) { return tmdRunDAG(ctx, coord, sql) }},
+		} {
+			res, err := arm.run()
+			if err != nil {
+				t.Errorf("%s arm failed: %v\n  SQL: %s", arm.name, err, sql)
+				continue
+			}
+			if diff := diffIDs(wantIDs, predIDs(t, res)); diff != "" {
+				t.Errorf("%s arm answered the wrong rows\n  SQL: %s\n  %s", arm.name, sql, diff)
+			}
+		}
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			check(t, "SELECT id FROM "+typematrix.Table+" WHERE "+c.where+" ORDER BY id", c.want)
+		})
+	}
+
+	// A negation over a JOIN: the predicate travels through join planning and,
+	// on the DAG, through a separate stage's re-parse of the filter text. g is
+	// the join key and is nullable, so a NULL-key row is dropped by the join
+	// before the negation is ever asked.
+	t.Run("NotOverJoin", func(t *testing.T) {
+		check(t, "SELECT t.id AS id FROM "+typematrix.Table+" t JOIN "+typematrix.Dim+
+			" d ON t.g = d.k WHERE NOT (t.id < 100) ORDER BY id",
+			func(r tmxRow) bool { return r.g != nil && r.id >= 100 })
+	})
+}
+
+// predIDs pulls the id column out of a result, in the order it arrived.
+func predIDs(t *testing.T, res *oracle.Result) []int64 {
+	t.Helper()
+	out := make([]int64, 0, len(res.Rows))
+	for _, r := range res.Rows {
+		switch v := r["id"].(type) {
+		case int64:
+			out = append(out, v)
+		case int32:
+			out = append(out, int64(v))
+		case float64:
+			out = append(out, int64(v))
+		default:
+			t.Fatalf("id came back as %T (%v), which no arm should produce", r["id"], r["id"])
+		}
+	}
+	return out
+}
+
+// diffIDs reports the first difference between two id sequences, plus the
+// counts, which is usually enough to name the defect on sight: a dropped
+// negation returns the complement.
+func diffIDs(want, got []int64) string {
+	if len(want) == len(got) {
+		same := true
+		for i := range want {
+			if want[i] != got[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return ""
+		}
+	}
+	n := len(want)
+	if len(got) < n {
+		n = len(got)
+	}
+	for i := 0; i < n; i++ {
+		if want[i] != got[i] {
+			return fmt.Sprintf("want %d rows, got %d; first difference at index %d: want id=%d, got id=%d",
+				len(want), len(got), i, want[i], got[i])
+		}
+	}
+	return fmt.Sprintf("want %d rows, got %d; the shorter is a prefix of the longer (first %d ids agree)",
+		len(want), len(got), n)
+}

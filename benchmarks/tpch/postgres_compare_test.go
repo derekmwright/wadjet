@@ -737,6 +737,63 @@ func postgresSemanticsCases() []pgCase {
 			FROM nation ORDER BY n_nationkey`},
 	)
 
+	// --- Negated predicates ----------------------------------------------
+	//
+	// `WHERE NOT (<predicate>)` was executed as `WHERE <predicate>` whenever
+	// the inner predicate vectorized: the physical planner's filter lowering
+	// returned the operand's operators UN-negated, so the engine answered the
+	// COMPLEMENT of the row set (#461). A complement is a plausible-looking
+	// answer, which is how it survived every existing gate — including the
+	// two-path one, because both engines share the lowering and agreed.
+	//
+	// Half of these negate a predicate on a NULLABLE column, where the answer
+	// is NOT the complement: NOT UNKNOWN is UNKNOWN, so a NULL row belongs to
+	// neither the predicate's answer nor its negation's. dec_probe nulls d_2
+	// every 17th row, which is what makes that half a different question from
+	// the nation half.
+	out = append(out,
+		pgCase{name: "NotEquality", sql: `SELECT n_nationkey FROM nation WHERE NOT (n_regionkey = 1) ORDER BY n_nationkey`},
+		pgCase{name: "NotInequality", sql: `SELECT n_nationkey FROM nation WHERE NOT (n_regionkey <> 1) ORDER BY n_nationkey`},
+		pgCase{name: "NotLessThan", sql: `SELECT n_nationkey FROM nation WHERE NOT (n_nationkey < 10) ORDER BY n_nationkey`},
+		pgCase{name: "NotGreaterEqual", sql: `SELECT n_nationkey FROM nation WHERE NOT (n_nationkey >= 10) ORDER BY n_nationkey`},
+		pgCase{name: "NotInList", sql: `SELECT n_nationkey FROM nation WHERE NOT (n_nationkey IN (1, 2, 3)) ORDER BY n_nationkey`},
+		pgCase{name: "NotNotInList", sql: `SELECT n_nationkey FROM nation WHERE NOT (n_nationkey NOT IN (1, 2, 3)) ORDER BY n_nationkey`},
+		pgCase{name: "NotBetween", sql: `SELECT n_nationkey FROM nation WHERE NOT (n_nationkey BETWEEN 10 AND 19) ORDER BY n_nationkey`},
+		pgCase{name: "NotNotBetween", sql: `SELECT n_nationkey FROM nation WHERE NOT (n_nationkey NOT BETWEEN 10 AND 19) ORDER BY n_nationkey`},
+		pgCase{name: "NotLike", sql: `SELECT n_name FROM nation WHERE NOT (n_name LIKE 'A%') ORDER BY n_name`},
+		pgCase{name: "NotNotLike", sql: `SELECT n_name FROM nation WHERE NOT (n_name NOT LIKE 'A%') ORDER BY n_name`},
+		pgCase{name: "NotDoubleNegation", sql: `SELECT n_nationkey FROM nation WHERE NOT (NOT (n_regionkey = 1)) ORDER BY n_nationkey`},
+		// De Morgan, both directions.
+		pgCase{name: "NotOfAnd", sql: `SELECT n_nationkey FROM nation
+			WHERE NOT (n_regionkey = 1 AND n_nationkey < 10) ORDER BY n_nationkey`},
+		pgCase{name: "NotOfOr", sql: `SELECT n_nationkey FROM nation
+			WHERE NOT (n_regionkey = 1 OR n_nationkey < 10) ORDER BY n_nationkey`},
+		// A negation the lowering cannot vectorize must keep it too: the row
+		// evaluator is the fallback, and dropping the NOT there would be the
+		// same defect one layer down.
+		pgCase{name: "NotOverFunctionCall", sql: `SELECT n_nationkey FROM nation
+			WHERE NOT (ABS(n_nationkey) < 10) ORDER BY n_nationkey`},
+
+		// The nullable arm.
+		pgCase{name: "NotEqualityNullable", sql: `SELECT d_key FROM dec_probe WHERE NOT (d_2 = 12.75) ORDER BY d_key`},
+		pgCase{name: "NotInequalityNullable", sql: `SELECT d_key FROM dec_probe WHERE NOT (d_2 <> 12.75) ORDER BY d_key`},
+		pgCase{name: "NotLessThanNullable", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE NOT (d_2 < 0)`},
+		pgCase{name: "NotInListNullable", sql: `SELECT d_key FROM dec_probe WHERE NOT (d_2 IN (12.75, -20.00, 0.25)) ORDER BY d_key`},
+		pgCase{name: "NotNotInListNullable", sql: `SELECT d_key FROM dec_probe WHERE NOT (d_2 NOT IN (12.75, -20.00, 0.25)) ORDER BY d_key`},
+		pgCase{name: "NotBetweenNullable", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE NOT (d_2 BETWEEN -1 AND 1)`},
+		pgCase{name: "NotNotBetweenNullable", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE NOT (d_2 NOT BETWEEN -1 AND 1)`},
+		pgCase{name: "NotIsNullNullable", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE NOT (d_2 IS NULL)`},
+		pgCase{name: "NotIsNotNullNullable", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE NOT (d_2 IS NOT NULL)`},
+		// Kleene, not Boolean: NOT (A AND B) is TRUE wherever either side is
+		// FALSE, even where the other is UNKNOWN — so these two are not
+		// complements of each other, and neither is the complement of the
+		// un-negated form.
+		pgCase{name: "NotOfAndWithNullable", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE NOT (d_key < 100 AND d_2 > 0)`},
+		pgCase{name: "NotOfOrWithNullable", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE NOT (d_key < 100 OR d_2 > 0)`},
+		// Two nullable columns, nulling on different strides.
+		pgCase{name: "NotOfAndTwoNullables", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE NOT (d_2 > 0 AND d_4 > 0)`},
+	)
+
 	// --- Set operations --------------------------------------------------
 	//
 	// UNION dedups and UNION ALL does not; EXCEPT and INTERSECT dedup and their
