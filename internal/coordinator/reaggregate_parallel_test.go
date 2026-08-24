@@ -96,12 +96,20 @@ func TestReAggregatePartials_ParallelByteIdentical(t *testing.T) {
 		runtime.GOMAXPROCS(prev)
 		t.Fatalf("expected serial merge at GOMAXPROCS=1, got shards=%d", got)
 	}
-	serial := c.reAggregatePartials(makeBatches(), columns, colIdx, mi)
+	serial, err := c.reAggregatePartials(makeBatches(), columns, colIdx, mi)
+	if err != nil {
+		runtime.GOMAXPROCS(prev)
+		t.Fatalf("serial merge: %v", err)
+	}
 
 	// Parallel: ensure > 1 shard actually engages.
 	runtime.GOMAXPROCS(maxInt(2, runtime.NumCPU()))
 	shards := mergeShardCount(groups * len(values))
-	parallel := c.reAggregatePartials(makeBatches(), columns, colIdx, mi)
+	parallel, err := c.reAggregatePartials(makeBatches(), columns, colIdx, mi)
+	if err != nil {
+		runtime.GOMAXPROCS(prev)
+		t.Fatalf("parallel merge: %v", err)
+	}
 	runtime.GOMAXPROCS(prev)
 
 	if shards <= 1 {

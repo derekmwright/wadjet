@@ -1573,7 +1573,11 @@ func (c *Coordinator) mergeProbePartials(in BatchStream, columns []string, mi *l
 			return nil, 0, nil
 		}
 		if len(mi.GroupBy) > 0 {
-			batches = c.reAggregatePartials(batches, columns, colIdx, mi)
+			var err error
+			batches, err = c.reAggregatePartials(batches, columns, colIdx, mi)
+			if err != nil {
+				return nil, 0, err
+			}
 		} else {
 			// Scalar aggregate (no GROUP BY): merge N worker partials into 1 row.
 			// Each worker returned 1 row with partial SUM/COUNT/MIN/MAX.
@@ -1922,15 +1926,30 @@ func compareAnyValues(a, b any) int {
 	return 0
 }
 
-func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, mi *logical.MergeInfo) []*batch.RecordBatch {
+func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, mi *logical.MergeInfo) ([]*batch.RecordBatch, error) {
 	if len(batches) == 0 || len(mi.AggExprs) == 0 {
-		return batches
+		return batches, nil
 	}
 
-	// Resolve group-by and aggregate column indices
+	// Resolve group-by and aggregate column indices.
+	//
+	// A group-by name the partials do not carry is not a column to shrug
+	// at: the map's zero value is index 0, so every group would silently
+	// re-key on the result's FIRST column and the client would get
+	// confidently-wrong totals — merged across groups, or split within one.
+	// The names come from MergeInfo, which reads them off the logical plan,
+	// and the DAG's standing hazard is exactly that a name resolves on the
+	// plan and not on the wire (a derived table's alias shipping under its
+	// source name, #466/#467). Fail loudly instead.
 	groupByIdx := make([]int, len(mi.GroupBy))
 	for i, col := range mi.GroupBy {
-		groupByIdx[i] = colIdx[col]
+		idx, ok := colIdx[col]
+		if !ok {
+			return nil, fmt.Errorf(
+				"merging partial aggregates: GROUP BY column %q is not in the partial result schema %v",
+				col, columns)
+		}
+		groupByIdx[i] = idx
 	}
 
 	// Pre-resolve aggregate column metadata + a typed merge function once per
@@ -2010,7 +2029,7 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 	}
 
 	if len(aggCols) == 0 {
-		return batches
+		return batches, nil
 	}
 
 	schema := batches[0].Schema
@@ -2238,7 +2257,7 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 	}
 	result.Len = len(ordered)
 
-	return []*batch.RecordBatch{result}
+	return []*batch.RecordBatch{result}, nil
 }
 
 // parallelMergeMinRows is the partial-row count below which reAggregatePartials

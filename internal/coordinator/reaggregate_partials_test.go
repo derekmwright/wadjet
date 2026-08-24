@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -101,7 +102,10 @@ func TestReAggregatePartialsCorrectness(t *testing.T) {
 				columns[i] = c.Name
 				colIdx[c.Name] = i
 			}
-			out := c.reAggregatePartials(batches, columns, colIdx, tc.mi)
+			out, err := c.reAggregatePartials(batches, columns, colIdx, tc.mi)
+			if err != nil {
+				t.Fatalf("re-aggregating partials: %v", err)
+			}
 			if len(out) != 1 {
 				t.Fatalf("expected 1 output batch, got %d", len(out))
 			}
@@ -214,6 +218,58 @@ func BenchmarkReAggregatePartialsManyGroups(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = c.reAggregatePartials(batches, columns, colIdx, mi)
+		_, _ = c.reAggregatePartials(batches, columns, colIdx, mi)
+	}
+}
+
+// TestReAggregatePartialsRejectsAnUnknownGroupByColumn pins the loud failure
+// on a MergeInfo group key the partial batches do not carry.
+//
+// The lookup used to be a bare `groupByIdx[i] = colIdx[col]`, and a map miss
+// yields index 0 — so the merge re-keyed every group on the result's FIRST
+// column and returned confidently-wrong totals: groups collapsed into one
+// another where column 0 happened to match, and one real group split where
+// it did not. Nothing anywhere else noticed, because the row count and the
+// column list both stay plausible.
+//
+// The names in MergeInfo come off the logical plan, and the DAG's standing
+// hazard is a name that resolves on the plan but not on the wire — a derived
+// table's SELECT alias shipping under its source name (#466/#467). That is
+// precisely how this lookup misses in production.
+func TestReAggregatePartialsRejectsAnUnknownGroupByColumn(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "s", Type: parquet.TypeFloat64},
+		{Name: "lo", Type: parquet.TypeFloat64},
+		{Name: "hi", Type: parquet.TypeFloat64},
+	}
+	columns := make([]string, len(schema))
+	colIdx := make(map[string]int, len(schema))
+	for i, col := range schema {
+		columns[i] = col.Name
+		colIdx[col.Name] = i
+	}
+	batches := []*batch.RecordBatch{newRecordBatchFromRows(t, schema, []rowVal{
+		{kInt64: 1, sFloat64: 10},
+		{kInt64: 2, sFloat64: 20},
+	})}
+	mi := &logical.MergeInfo{
+		// "u.k" is the qualified spelling of a derived table's alias — the
+		// exact name the plan carries and the wire does not.
+		GroupBy:  []string{"u.k"},
+		AggExprs: []logical.AggExpr{{Func: "SUM", OutputCol: "s"}},
+	}
+
+	c := &Coordinator{}
+	out, err := c.reAggregatePartials(batches, columns, colIdx, mi)
+	if err == nil {
+		t.Fatalf("merging on an absent group-by column succeeded and returned %d batch(es)"+
+			" — the miss resolved to column index 0 and every group was re-keyed on %q",
+			len(out), columns[0])
+	}
+	for _, want := range []string{"u.k", "GROUP BY"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not name %q, so it cannot be acted on: %v", want, err)
+		}
 	}
 }

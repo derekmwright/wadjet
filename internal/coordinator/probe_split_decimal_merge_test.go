@@ -85,10 +85,14 @@ func TestProbeSplitGroupedDecimalMerge(t *testing.T) {
 		{Func: "max", OutputCol: "hi"},
 	}}
 	c := &Coordinator{}
-	rows := c.reAggregatePartials([]*batch.RecordBatch{
+	merged, err := c.reAggregatePartials([]*batch.RecordBatch{
 		mk(1, "977777777887777.7577887713", "-100.5000000000", "9.5000000000"),
 		mk(1, "22222222112222.2422112287", "-9.5000000000", "10.2000000000"),
-	}, []string{"g", "s", "lo", "hi"}, map[string]int{"g": 0, "s": 1, "lo": 2, "hi": 3}, mi)[0].ToRows()
+	}, []string{"g", "s", "lo", "hi"}, map[string]int{"g": 0, "s": 1, "lo": 2, "hi": 3}, mi)
+	if err != nil {
+		t.Fatalf("reAggregatePartials: %v", err)
+	}
+	rows := merged[0].ToRows()
 	if len(rows) != 1 {
 		t.Fatalf("got %d groups, want 1", len(rows))
 	}
