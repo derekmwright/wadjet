@@ -409,6 +409,223 @@ found #483, so there's a real tradeoff either way).
    harness structurally cannot reach that part of wadjet's surface no
    matter how it's configured.
 
+## Full soak results (2026-08-24, wadjet#289)
+
+The deep soak the pilot deferred. wadjet main @ `1cf758ba`, `--num-threads 1`
+per pair, patches above applied. Ran as many independently-supervised
+(wadjet server + SQLancer process) pairs in parallel — one pair per
+oracle/seed, each on its own ports/data-dir/nats-store-dir — rather than
+one long single-threaded run, since wadjet crashes discovered during this
+soak (see below) made single-pair sequential throughput too slow to reach
+a meaningful volume in a reasonable wall-clock budget. Each pair's
+supervisor auto-restarts wadjet on crash and keeps going with a fresh
+SQLancer invocation, so a crash costs only a few seconds of downtime
+instead of ending that seed's run.
+
+**Total: 182,037 queries** across 33 oracle/seed pairs, ~135 minutes of
+soak execution (a 90-minute base run — WHERE/HAVING/QUERY_PARTITIONING/
+NOREC at 5 seeds each, PQS at 3 seeds, all concurrent — followed by a
+45-minute extension adding 5 more seeds each to WHERE and HAVING, whose
+crash rate had left them well under the other oracles' per-wall-clock-
+minute yield). **Zero genuine oracle violations** (`"counts mismatch"` /
+`"... mismatch:"`) at any volume — every TLP-WHERE, TLP-HAVING,
+TLP-Aggregate (via QUERY_PARTITIONING), NoREC, and PQS check that actually
+completed agreed with wadjet's own answer.
+
+| Oracle | Seeds | Queries (sum) | Crashes (auto-recovered) |
+|---|---|---|---|
+| WHERE (TLP) | 1001–1010 (10) | 31,576 | 824 |
+| HAVING (TLP) | 1001–1010 (10) | 19,436 | 1,149 |
+| QUERY_PARTITIONING (TLP-WHERE+HAVING+Aggregate composite) | 1001–1005 (5) | 33,299 | 638 |
+| NOREC | 1001–1005 (5) | 34,077 | 435 |
+| PQS | 1001–1003 (3) | 63,649 | 84 |
+| **Total** | | **182,037** | **3,130** |
+
+(Per-seed breakdowns are in each pair's `progress.log`/`summary.txt` under
+`soak-run/<oracle>-seed<seed>/` from this soak's own scratch output — not
+committed, not part of the harness itself.)
+
+QUERY_PARTITIONING and NOREC cleared 50k+ comfortably per the plan's
+target; PQS well exceeded it. WHERE and HAVING, even after doubling their
+seed count, landed short of 50k — see "The crash class that dominated
+this soak" below for why.
+
+### The crash class that dominated this soak
+
+Five new, genuine wadjet bugs were found and filed, **all of them
+process-crashing panics**, none of them wrong-value oracle violations:
+
+- **#508** — `HashJoin`'s build-side goroutine (`buildJoin` in
+  `internal/planner/physical/plan.go`) has no panic recovery at all, so
+  even the *designed* `FatalEvalPanic` error class (invalid cast,
+  division by zero, the #361 type-mismatch guard) crashes the entire
+  server instead of returning a client error, whenever the panicking
+  expression is evaluated on a join's build side. Dominant single crash
+  cause in this soak (~1,050 of 3,130+ crashes were the invalid-cast
+  variant alone).
+- **#509** — `CONCAT()`/`||` with a non-text argument after position 0
+  (e.g. `CONCAT(text_col, int_col)`) indexes an empty offsets array and
+  crashes the server — no join needed, an ordinary single-table `SELECT`
+  triggers it. Root cause: `FuncCall.EvalVec`'s text-readability guard
+  only checks argument index 0. Seen at dozens of different argument
+  counts/offsets (not just the small-n example in the filed issue).
+- **#510** — `joinFlushSource.Close()` (RIGHT/FULL OUTER JOIN unmatched-row
+  flush) dereferences a nil `*pipelineSource` when `Close()` runs without
+  a preceding `Init()` — observed nested under a set operation.
+- **#511** — the architectural pattern behind why #509/#510 (and any
+  future undiscovered panic) crash the whole process: only the deliberately-
+  raised `FatalEvalPanic` class is converted to a client error anywhere in
+  the call stack; every other panic is *designed* to re-panic past every
+  existing recovery point, with nothing left to catch it. Filed as its own
+  issue since fixing #508/#509/#510 individually doesn't close the class.
+- **#512** — `Pipeline.runParallel`'s "first error wins" tracking uses a
+  plain `sync/atomic.Value`, which panics if two racing workers store
+  different *concrete* error types — which two different panic/error
+  sources in the same function routinely do.
+
+All five are `bug,correctness,priority:high`. None overlap the pre-existing
+open-issue list (`gh issue list --state open`, including #493, #497,
+#500/#501, #504-#507, #478, #482, #488-#490) checked at triage time —
+these are new failure modes, not recurrences of that territory (which
+needs FLOAT/DECIMAL/network types this harness's type pool structurally
+excludes).
+
+**Every one of the 3,130 crashes in the entire soak matches one of these
+five signatures** — confirmed by grepping all captured stack traces for
+anything outside {invalid-cast/division-by-zero (#508), index-out-of-range
+(#509), nil-pointer (#510), atomic.Value race (#512)}: zero unmatched. No
+sixth crash class was hiding in the volume.
+
+This is the practical reason WHERE and HAVING undershot 50k even after
+doubling their seed count: HAVING's crash rate was roughly 1 restart per
+17 queries executed (worse than any other oracle — its generated
+predicates apparently hit the #508 goroutine path more often than the
+other oracles' shapes do), so a large fraction of each pair's wall-clock
+budget went to wadjet-restart + re-establishing schema rather than
+executing oracle checks. **Fixing #508 alone (add
+`exec.RecoverFatalEval` to `buildJoin`'s goroutine) would likely multiply
+achievable soak throughput several-fold**, since it's both the single
+largest crash contributor and the cheapest of the five to fix.
+
+### Operational hazards found running this soak (beyond the crash bugs)
+
+- **A runaway multi-way join can fill the disk in minutes.** Early in
+  this soak, with `--query-timeout` unset (server default, unbounded),
+  several of the ~20 parallel pairs independently generated an unlimited
+  multi-way join; one worker's shuffle spill alone reached 10+ GB, and
+  collectively they took the box from 40 GB free to 1.6 GB free in under
+  two minutes — this soak's own near-miss, caught and recovered before
+  data loss. **Fix: run the wadjet server under `--query-timeout`** (this
+  soak used `8s` — generous for the tiny generated schemas) — it aborts
+  the runaway query with a normal client error instead of an unbounded
+  spill. A companion disk-watchdog (poll `df`, kill every soak process if
+  free space drops below a floor) is cheap insurance for any soak that
+  didn't have `--query-timeout` from the start.
+- **The same runaway-join shape can also balloon server RSS** (observed
+  ~19 GB RSS for one query within the `--query-timeout=15s` window, on a
+  server configured with `--memory-budget=256MiB`) — the memory budget
+  does not appear to bound in-flight cross-join row generation before a
+  spill-eligible operator is reached. Not filed as its own issue (out of
+  this soak's scope to fully characterize), but worth a memory-budget
+  follow-up look, and a reason to keep `--query-timeout` tight and to run
+  each soak pair with an explicit `-Xmx`/`GOMEMLIMIT` cap plus the same
+  kind of external memory watchdog used here.
+- **`--num-threads` must stay 1 per wadjet instance** (unchanged from the
+  pilot's finding) — this soak's parallelism came from running many
+  *independent* wadjet-server + SQLancer pairs side by side (own ports,
+  own data-dir, own NATS store-dir), never from `--num-threads > 1`
+  against one server.
+- **A crashed wadjet mid-session makes SQLancer blitz through its
+  remaining `--num-tries`/`--max-generated-databases` budget with
+  near-instant `Connection refused` failures** if nothing intervenes —
+  harmless to data but pure wasted wall-clock and (with a naive logger)
+  thousands of near-empty per-round log files. This soak's supervisor
+  detects the dead server via `kill -0` and restarts immediately rather
+  than letting a session run to its own timeout; a soak without that
+  supervision should bound `--timeout-seconds` tightly per session for
+  the same reason (note: SQLancer's `--timeout-seconds` is the *whole
+  run's* wall-clock budget via `execService.awaitTermination`, not a
+  per-query timeout as this repo's pilot notes implied — size it to the
+  session length you actually want, not "a few seconds").
+
+### PQS — feasibility verdict: feasible, worth including by default
+
+The pilot never tried PQS. This soak did: 63,649 queries across 3 seeds,
+45 minutes, **zero violations**, and every crash it hit matched an
+already-filed signature (#508, #512) — nothing PQS-specific. Noise-wise,
+PQS leans heavily on `BETWEEN SYMMETRIC` (unsupported wadjet syntax,
+`unknown function: symmetric` — SQLancer's PQS pivot-predicate synthesis
+uses it far more than TLP/NoREC's expression generator does) and the same
+unpatched `IS UNKNOWN` gap as the other oracles. Despite that noise floor,
+PQS was the single highest-throughput oracle in this soak (comfortably
+above the other four's per-seed rate, and the lowest crash rate by a wide
+margin) and found nothing structurally different from them.
+**Recommendation: include PQS by default in the standing soak.** A
+`BETWEEN SYMMETRIC` rendering patch (drop it the same way
+`patches/0001-wadjet-dialect-fixups.patch` already drops `ONLY table`/
+`SELECT ALL`/`ISNULL` — SQLancer's Postgres dialect can always fall back to
+plain `BETWEEN`) would likely raise its useful-query fraction further; not
+implemented in this soak (timeboxed per the task).
+
+### Noise profile (unexpected-error classes, full soak)
+
+173,938 "unexpected error" events (an uncaught exception SQLancer's own
+`ExpectedErrors` list doesn't recognize — see "Triage protocol" above),
+across 7,693 distinct normalized messages, excluding the crash-class
+panics covered separately above. Bucketed by normalized wadjet error text:
+
+| Count | Class | Verdict |
+|---|---|---|
+| 39,574 | `join ON residual "..." not evaluable as a probe residual` (right/left/full) | Loud, by-design rejection (CLAUDE.md's loud-failure philosophy) — not a defect |
+| 29,952 | `join ON "...": ... cannot be represented as an equi-join key` (incl. `BETWEEN`/`BETWEEN SYMMETRIC` residuals) | Same — loud, by-design rejection |
+| 27,754 | `expected NULL, TRUE, FALSE, or DISTINCT FROM after IS [NOT]` (WHERE/JOIN ON/GROUP BY/HAVING/derived-table contexts) | **The pilot's unpatched `IS UNKNOWN`/`IS NOT UNKNOWN` follow-up** — now confirmed as one of the single largest noise sources across the harness, not just TLP-WHERE. Same fix shape as the already-applied `ISNULL`/`NOTNULL` patch; highest-value harness patch to add next |
+| 21,694 | `batch: cannot store ... vector (#361 silent-write guard)` (string→BOOL, string→INT*, bool→INT*) | The #361 guard firing and being caught gracefully on every path except the one goroutine #508 fixes — high volume suggests SQLancer's INT/BOOL/TEXT corpus frequently generates implicit-coercion shapes wadjet's type resolution rejects; not independently investigated further this soak |
+| 18,472 | (long tail: thousands of distinct normalized messages, most under 50 occurrences each) | Not bucketed individually — see the soak's raw per-message counts if resuming this triage |
+| 17,360 | `ORDER BY tN.cN: over a GROUP BY, only a grouped column, a grouping expression, or a select-list alias can be sorted on` | New dominant class not seen in the pilot's smaller sample — appears to be a real, intentional SQL restriction message; not examined further, candidate for a closer look given the volume |
+| 10,380 | `parse: parsing SQL: expected )` (WHERE/JOIN ON/GROUP BY/HAVING/derived-table contexts) | Parser edge case, still unexamined (carried over from pilot) |
+| 4,762 | `native DAG: stage scan-N has no dependencies and no ScanFiles` | Carried over from the pilot's own "unexamined, worth a follow-up look" — still true at ~10x the pilot's volume |
+| 3,566 | `physical plan: UNION ALL: ...` (cites issue #346) | #346 is closed; this is an intentional remaining unsupported-shape rejection referencing its historical context, not a regression — confirmed via `gh issue view 346` |
+| 424 | `hash aggregate: ... schemaless batch (#277)` | Same — #277 is closed; intentional guard, not a regression |
+
+Follow-up for the harness itself (mirrors the pilot's own recommendation,
+now with much higher confidence given the volume): patch `BETWEEN
+SYMMETRIC` and `IS UNKNOWN`/`IS NOT UNKNOWN` out of the generator the same
+way `ONLY table`/`SELECT ALL`/`ISNULL` already are — between them these
+two account for roughly a third of all unexpected-error noise across the
+whole soak.
+
+### Recommendation for the standing pre-release soak configuration
+
+1. **Fix #508 first** (add `exec.RecoverFatalEval` recovery to
+   `buildJoin`'s build-side goroutine) — it is both the single largest
+   crash contributor in this soak and the cheapest of the five filed bugs
+   to fix, and fixing it should multiply achievable query throughput per
+   wall-clock minute several-fold by eliminating the dominant
+   restart-overhead tax. Fix #509/#510/#512 too before the next full soak
+   — none is individually large, but all three are unconditionally
+   process-fatal today.
+2. Land the `BETWEEN SYMMETRIC` and `IS UNKNOWN` harness patches (same
+   shape as the existing `ONLY table`/`SELECT ALL`/`ISNULL` patches) —
+   together they're roughly a third of this soak's noise floor, and
+   PQS in particular is noise-dominated by the first of the two.
+3. Run all five oracles used here (`WHERE`, `HAVING`, `QUERY_PARTITIONING`,
+   `NOREC`, `PQS`) by default — none showed a reason to exclude it, and
+   PQS in particular earns a place after this soak's positive verdict.
+4. Keep this soak's operational scaffolding: many independent
+   (wadjet-server + SQLancer) pairs run in parallel rather than one
+   long `--num-threads 1` run, `--query-timeout` set on every server
+   (a few seconds is plenty for a small generated schema), an external
+   disk-space watchdog, and a supervisor that restarts wadjet on crash
+   and keeps accumulating query volume rather than letting one crash end
+   a seed's run early.
+5. Target 50k+ queries per oracle per the original plan, but budget wall
+   time by *crash rate*, not by raw query count, until #508 lands — this
+   soak needed roughly 2x the wall time for WHERE/HAVING that
+   QUERY_PARTITIONING/NOREC/PQS needed to reach a comparable volume.
+6. Every fix lands as a permanent gate entry per
+   `feedback-external-adversarial-tooling` — a minimal repro for each of
+   #508–#512 is in the filed issues; none has a regression test yet.
+
 ## Licensing
 
 `sqlancer/sqlancer` is GPLv3-licensed. It is cloned fresh by `build.sh`
