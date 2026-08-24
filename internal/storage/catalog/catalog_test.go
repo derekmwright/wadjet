@@ -704,3 +704,104 @@ func TestRemoveFiles_CleansDeleteMarkers(t *testing.T) {
 		t.Errorf("expected remaining marker for part-0002, got %q", manifest.DeleteMarkers[0].FilePath)
 	}
 }
+
+// TestAddNewFilesRefusesPathCollision is a #494 regression: a writer that
+// mints a fresh path per file (ingest, compaction, delete-marker GC) must
+// never have a Path collision silently REPLACE the existing manifest entry
+// the way AddFiles/mergeFileEntries deliberately does for re-discovery
+// (#278) — that silent replace is how a birthday collision on a short
+// chunk ID used to lose a whole file's rows with no error anywhere.
+// AddNewFiles must refuse the collision, and the original entry must
+// survive untouched.
+func TestAddNewFilesRefusesPathCollision(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	original := FileEntry{Path: "tables/events/chunk_aaaa.parquet", SizeBytes: 1000, NumRows: 100, CreatedAt: time.Now().UTC()}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{original}); err != nil {
+		t.Fatalf("AddNewFiles (first write): %v", err)
+	}
+
+	colliding := FileEntry{Path: "tables/events/chunk_aaaa.parquet", SizeBytes: 999999, NumRows: 999, CreatedAt: time.Now().UTC()}
+	err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{colliding})
+	if err == nil {
+		t.Fatal("expected AddNewFiles to refuse a colliding path, got nil error")
+	}
+
+	manifest, gErr := cat.GetManifest(ctx, "events")
+	if gErr != nil {
+		t.Fatal(gErr)
+	}
+	if len(manifest.Partitions) != 1 || len(manifest.Partitions[0].Files) != 1 {
+		t.Fatalf("expected the original single entry to survive a refused collision, got %+v", manifest.Partitions)
+	}
+	got := manifest.Partitions[0].Files[0]
+	if got.SizeBytes != original.SizeBytes || got.NumRows != original.NumRows {
+		t.Fatalf("refused collision must not modify the existing entry: got %+v, want %+v", got, original)
+	}
+}
+
+// TestAddNewFilesAllowsDistinctPaths sanity-checks the common case: distinct
+// freshly minted paths add cleanly, same as AddFiles.
+func TestAddNewFilesAllowsDistinctPaths(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	files := []FileEntry{
+		{Path: "tables/events/chunk_aaaa.parquet", SizeBytes: 100, NumRows: 10, CreatedAt: time.Now().UTC()},
+		{Path: "tables/events/chunk_bbbb.parquet", SizeBytes: 200, NumRows: 20, CreatedAt: time.Now().UTC()},
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", files); err != nil {
+		t.Fatalf("AddNewFiles: %v", err)
+	}
+
+	manifest, err := cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Partitions) != 1 || len(manifest.Partitions[0].Files) != 2 {
+		t.Fatalf("expected 2 files across 1 partition, got %+v", manifest.Partitions)
+	}
+}
+
+// TestSwapFileForGCRefusesDuplicatePath is a #494 regression for the other
+// writer of freshly minted paths that bypasses AddFiles entirely:
+// ForceCompactFile's delete-marker rewrite swaps its new file in via
+// SwapFileForGC. A rewrite output landing on a path some OTHER file in the
+// same partition already holds must be refused, not silently accepted
+// alongside (or over) it.
+func TestSwapFileForGCRefusesDuplicatePath(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	partPath := "tables/events"
+	a := FileEntry{Path: "tables/events/chunk_a.parquet", SizeBytes: 100, NumRows: 10, CreatedAt: time.Now().UTC()}
+	b := FileEntry{Path: "tables/events/chunk_b.parquet", SizeBytes: 200, NumRows: 20, CreatedAt: time.Now().UTC()}
+	if err := cat.AddFiles(ctx, "events", nil, partPath, []FileEntry{a, b}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rewrite of `a` collides with the already-present `b`.
+	newFile := &FileEntry{Path: b.Path, SizeBytes: 1, NumRows: 1, CreatedAt: time.Now().UTC()}
+	err := cat.SwapFileForGC(ctx, "events", a.Path, newFile, nil, partPath, map[int64]bool{0: true})
+	if err == nil {
+		t.Fatal("expected SwapFileForGC to refuse a duplicate path, got nil error")
+	}
+
+	manifest, gErr := cat.GetManifest(ctx, "events")
+	if gErr != nil {
+		t.Fatal(gErr)
+	}
+	if len(manifest.Partitions) != 1 || len(manifest.Partitions[0].Files) != 2 {
+		t.Fatalf("refused swap must leave both original files in place, got %+v", manifest.Partitions)
+	}
+}

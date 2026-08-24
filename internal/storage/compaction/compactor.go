@@ -12,16 +12,16 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/internal/storage/partition"
+	"github.com/google/uuid"
 )
 
 // compactedFilePath returns the S3 key for a compaction output file. Mirrors
-// partition.Strategy.FilePath for the compacted_<nanos>.parquet chunk id: for
+// partition.Strategy.FilePath for the compacted_<uuidv7>.parquet chunk id: for
 // unpartitioned tables the path is "<tables/name>/compacted_X.parquet"; for
 // Hive-partitioned tables it is "<tables/name>/<hive-path>/compacted_X.parquet".
 //
@@ -33,12 +33,27 @@ func compactedFilePath(tableName, partPath string) string {
 	return partitionedOutputPath(tableName, partPath, "compacted")
 }
 
-// partitionedOutputPath builds "<base>_<nanos>.parquet" under the partition's
-// directory. Some writers store the partition path already table-prefixed
-// (the harness datagen primes "tables/<name>/"); blindly joining
-// prefix+partPath then yields "tables/orders/tables/orders//compacted_*" —
-// consistent (write, manifest, and read all use it) but wrong. A prefixed
+// partitionedOutputPath builds "<base>_<uuidv7>.parquet" under the
+// partition's directory. Some writers store the partition path already
+// table-prefixed (the harness datagen primes "tables/<name>/"); blindly
+// joining prefix+partPath then yields "tables/orders/tables/orders//compacted_*"
+// — consistent (write, manifest, and read all use it) but wrong. A prefixed
 // partPath is treated as the full base.
+//
+// The suffix used to be a nanosecond timestamp (see #494): the only thing
+// separating two output paths in the same partition directory, and
+// RewriteTable emits them back to back — one per memory-bounded group —
+// where compaction emitted at most one per pass, and ForceCompactFile's
+// delete-marker rewrites run from independent workers entirely. A repeated
+// value is not a name clash the store reports: the second Put OVERWRITES the
+// first, and the first group's manifest entry then points at the second
+// group's bytes, so those rows are gone with no error anywhere. Wall-clock
+// resolution — worse, a process-local monotonic counter racing OTHER
+// processes' clocks — is not a property to bet that on. A UUIDv7 carries
+// enough random bits to make a collision astronomically unlikely across
+// every writer in the cluster, and its leading 48-bit millisecond timestamp
+// keeps outputs roughly sorted by creation order, same as the counter did
+// within one process.
 func partitionedOutputPath(tableName, partPath, base string) string {
 	prefix := partition.TablePrefix(tableName)
 	dir := prefix
@@ -49,32 +64,7 @@ func partitionedOutputPath(tableName, partPath, base string) string {
 			dir = prefix + "/" + strings.TrimSuffix(partPath, "/")
 		}
 	}
-	return fmt.Sprintf("%s/%s_%d.parquet", dir, base, nextOutputNanos())
-}
-
-// lastOutputNanos makes the nanosecond suffix above strictly increasing within
-// a process.
-//
-// The suffix is the only thing separating two output paths in the same
-// partition directory, and RewriteTable emits them back to back — one per
-// memory-bounded group — where compaction emitted at most one per pass. A
-// repeated value is not a name clash the store reports: the second Put
-// OVERWRITES the first, and the first group's manifest entry then points at
-// the second group's bytes, so those rows are gone with no error anywhere.
-// Wall-clock resolution is not a property to bet that on.
-var lastOutputNanos atomic.Int64
-
-func nextOutputNanos() int64 {
-	for {
-		prev := lastOutputNanos.Load()
-		now := time.Now().UnixNano()
-		if now <= prev {
-			now = prev + 1
-		}
-		if lastOutputNanos.CompareAndSwap(prev, now) {
-			return now
-		}
-	}
+	return fmt.Sprintf("%s/%s_%s.parquet", dir, base, uuid.Must(uuid.NewV7()).String())
 }
 
 // Config controls compaction trigger thresholds and limits.
@@ -496,7 +486,10 @@ func (c *Compactor) mergeGroup(ctx context.Context, tableName string, schema par
 		CreatedAt:   time.Now().UTC(),
 		ColumnStats: written.columnStats,
 	}
-	if err := c.catalog.AddFiles(ctx, tableName, part.Values, part.Path, []catalog.FileEntry{newEntry}); err != nil {
+	// AddNewFiles, not AddFiles: newPath is a freshly minted UUIDv7 (#494),
+	// so a collision with an existing entry should be refused loudly
+	// rather than silently replacing it.
+	if err := c.catalog.AddNewFiles(ctx, tableName, part.Values, part.Path, []catalog.FileEntry{newEntry}); err != nil {
 		return fmt.Errorf("adding merged file to manifest: %w", err)
 	}
 

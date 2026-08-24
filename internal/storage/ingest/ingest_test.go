@@ -9,6 +9,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/google/uuid"
 )
 
 var testSchema = parquet.Schema{Columns: []parquet.Column{
@@ -82,6 +83,55 @@ func TestIngestAndFlushAll(t *testing.T) {
 	}
 	if parquetCount == 0 {
 		t.Fatal("expected at least one parquet file in the store")
+	}
+}
+
+// TestFlushBufferChunkIDIsFullUUID is a #494 regression: chunk IDs used to
+// be an 8-char (32-bit) prefix of a UUID, giving a ~0.6% chance of a
+// birthday collision at 100k files in one table — and mergeFileEntries
+// REPLACES a colliding manifest entry rather than erroring, so a collision
+// silently dropped a whole file's rows. The chunk ID must now be a full,
+// unpruned UUID string.
+func TestFlushBufferChunkIDIsFullUUID(t *testing.T) {
+	cat, store := setupCatalog(t)
+	ing := New(cat, testTable, testSchema, []string{"year"}, DefaultConfig())
+	ctx := context.Background()
+
+	rows := []map[string]any{
+		{"id": int64(1), "name": "alice", "year": "2025"},
+	}
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	objects, err := store.List(ctx, testBucket, objstore.ListOptions{Prefix: "tables/" + testTable + "/"})
+	if err != nil {
+		t.Fatalf("list objects: %v", err)
+	}
+
+	found := false
+	for _, obj := range objects {
+		base := obj.Key
+		if idx := strings.LastIndex(base, "/"); idx >= 0 {
+			base = base[idx+1:]
+		}
+		if !strings.HasPrefix(base, "chunk_") || !strings.HasSuffix(base, ".parquet") {
+			continue
+		}
+		found = true
+		id := strings.TrimSuffix(strings.TrimPrefix(base, "chunk_"), ".parquet")
+		if len(id) != 36 {
+			t.Fatalf("chunk id %q is %d chars, want a full 36-char UUID (not a truncated prefix)", id, len(id))
+		}
+		if _, err := uuid.Parse(id); err != nil {
+			t.Fatalf("chunk id %q does not parse as a UUID: %v", id, err)
+		}
+	}
+	if !found {
+		t.Fatal("expected at least one chunk_*.parquet file")
 	}
 }
 

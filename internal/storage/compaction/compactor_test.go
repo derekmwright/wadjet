@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,6 +80,75 @@ func TestCompactTable_UnpartitionedTableOutputPath(t *testing.T) {
 		t.Fatalf("compacted file not reachable at %q: %v", compactedPath, err)
 	}
 	rc.Close()
+}
+
+// TestCompactTable_MixedLegacyAndFullUUIDChunkNames is a #494 back-compat
+// regression: a table compacted before the fix can carry old 8-char chunk
+// names (chunk_a1b2c3d4.parquet) right alongside files ingested after it
+// under the new full-UUIDv7 names, in the same partition. Compaction reads
+// a manifest entry purely by its Path string — nothing parses or assumes a
+// length or shape for it — so the two naming eras must merge together
+// without incident.
+func TestCompactTable_MixedLegacyAndFullUUIDChunkNames(t *testing.T) {
+	cat, store := setupTestCatalog(t)
+	ctx := context.Background()
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+		},
+	}
+	if err := cat.CreateTable(ctx, "customer", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	const partPath = ""
+	legacyNames := []string{
+		"tables/customer/chunk_a1b2c3d4.parquet",
+		"tables/customer/chunk_deadbeef.parquet",
+	}
+	newNames := []string{
+		"tables/customer/chunk_01a035f6-9ed5-726a-94d0-5bbcfddd79c0.parquet",
+		"tables/customer/chunk_01a035f6-c2f1-7c3e-8a11-2f6e2f0b9a11.parquet",
+		"tables/customer/chunk_01a035f6-e4a2-70a1-9b22-3a7f3f1c8b22.parquet",
+	}
+	allNames := append(append([]string{}, legacyNames...), newNames...)
+
+	var wantRows int64
+	for i, path := range allNames {
+		size := writeTestFile(t, store, "test-bucket", path, schema, []map[string]any{
+			{"id": int64(i*10 + 1)},
+			{"id": int64(i*10 + 2)},
+		})
+		if err := cat.AddFiles(ctx, "customer", nil, partPath, []catalog.FileEntry{
+			{Path: path, SizeBytes: size, NumRows: 2, CreatedAt: time.Now().UTC()},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		wantRows += 2
+	}
+
+	cfg := DefaultConfig()
+	cfg.MinFiles = 2
+	c := New(cat, nil, cfg)
+	if _, err := c.CompactTable(ctx, "customer"); err != nil {
+		t.Fatalf("compacting a partition with mixed legacy/new chunk names: %v", err)
+	}
+
+	manifest, err := cat.GetManifest(ctx, "customer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Partitions) != 1 || len(manifest.Partitions[0].Files) != 1 {
+		t.Fatalf("expected 1 merged file, got %+v", manifest.Partitions)
+	}
+	merged := manifest.Partitions[0].Files[0]
+	if merged.NumRows != wantRows {
+		t.Fatalf("merged rows = %d, want %d (all legacy and new-named inputs)", merged.NumRows, wantRows)
+	}
+	if _, _, err := store.Get(ctx, "test-bucket", merged.Path); err != nil {
+		t.Fatalf("merged file not reachable at %q: %v", merged.Path, err)
+	}
 }
 
 func setupTestCatalog(t *testing.T) (*catalog.Catalog, objstore.Store) {
@@ -574,6 +644,37 @@ func TestPartitionedOutputPath(t *testing.T) {
 			t.Errorf("partitionedOutputPath(%q,%q) = %q, want prefix %q with no //",
 				tc.table, tc.partPath, got, tc.wantPrefix)
 		}
+	}
+}
+
+// TestPartitionedOutputPathUnique is a #494 regression for the nanosecond
+// suffix partitionedOutputPath used to generate: RewriteTable calls it back
+// to back for successive memory-bounded groups, fast enough on some
+// platforms to land on the same nanosecond, and a repeated suffix isn't a
+// name clash the store reports — the second Put silently OVERWRITES the
+// first, so the first group's manifest entry then points at the second
+// group's bytes and its rows are gone with no error anywhere. The fix
+// (a UUIDv7 suffix) must hold up under the same back-to-back, highly
+// concurrent call pattern.
+func TestPartitionedOutputPathUnique(t *testing.T) {
+	const n = 2000
+	paths := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			paths[i] = partitionedOutputPath("orders", "", "compacted")
+		}(i)
+	}
+	wg.Wait()
+
+	seen := make(map[string]bool, n)
+	for _, p := range paths {
+		if seen[p] {
+			t.Fatalf("partitionedOutputPath produced a duplicate: %q", p)
+		}
+		seen[p] = true
 	}
 }
 

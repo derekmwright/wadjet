@@ -31,7 +31,9 @@ func (s *Strategy) PartitionPath(values map[string]string) string {
 }
 
 // FilePath generates a full file path for a chunk within a partition.
-// Example: tables/events/year=2026/month=03/day=15/chunk_0001_<uuid>.parquet
+// Example: tables/events/year=2026/month=03/day=15/chunk_<uuidv7>.parquet
+// (the caller — storage/ingest — builds chunkID; see #494 for why it must
+// carry a full 128-bit identifier, not a truncated one).
 func (s *Strategy) FilePath(tablePrefix string, values map[string]string, chunkID string) string {
 	partPath := s.PartitionPath(values)
 	if partPath == "" {

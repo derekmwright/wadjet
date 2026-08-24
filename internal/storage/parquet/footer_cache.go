@@ -38,10 +38,13 @@ import (
 //
 //     bucket + key — the manifest's own notion of file identity. Wadjet's
 //     writers never rewrite a data object in place: ingest names chunks with
-//     a fresh UUID (storage/ingest/ingest.go:300), compaction and
-//     delete-marker GC write a new nanosecond-stamped key and swap the
-//     manifest atomically (storage/compaction/compactor.go:50, 189, 613;
-//     catalog.SwapFileForGC). The base-table NVMe cache and the
+//     a fresh UUIDv7 (storage/ingest/ingest.go:309), compaction and
+//     delete-marker GC write a new UUIDv7-stamped key and swap the manifest
+//     atomically (storage/compaction/compactor.go:57, 459, 897;
+//     catalog.SwapFileForGC). Every one of those names is a full 128-bit
+//     identifier, not a truncated prefix (#494) — a fresh key never
+//     recreates an old one within the birthday bound this cache's own key
+//     format has to worry about. The base-table NVMe cache and the
 //     decoded-chunk cache (engine/scan/decoded_cache.go:88) already stand on
 //     exactly this premise.
 //

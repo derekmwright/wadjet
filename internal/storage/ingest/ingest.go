@@ -297,7 +297,16 @@ func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *part
 		return nil
 	}
 
-	chunkID := fmt.Sprintf("chunk_%s", uuid.New().String()[:8])
+	// Full UUIDv7, not a truncated prefix (#494): a v4 UUID's first 8 hex
+	// chars carry only 32 bits, and mergeFileEntries keys the manifest by
+	// Path and REPLACES on a collision — two chunks landing on the same
+	// 8 chars silently drops one file's rows (p ~= n^2/2^33, ~0.6% at
+	// 100k files in one table). The full ~122 random bits of a v7 UUID
+	// make that astronomically unlikely, and v7's leading 48-bit
+	// millisecond timestamp keeps chunk names roughly sortable by
+	// creation order, same as a ULID, without a new dependency:
+	// google/uuid (already imported here) has shipped NewV7 since v1.6.0.
+	chunkID := fmt.Sprintf("chunk_%s", uuid.Must(uuid.NewV7()).String())
 	filePath := ing.strategy.FilePath(
 		partition.TablePrefix(ing.tableName),
 		buf.values,
@@ -383,7 +392,11 @@ func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *part
 		SketchesKey: sketchesKey,
 	}
 
-	if err := ing.catalog.AddFiles(ctx, ing.tableName, buf.values, partPath, []catalog.FileEntry{fileEntry}); err != nil {
+	// AddNewFiles, not AddFiles: chunkID is a freshly minted UUIDv7 (#494),
+	// never a path this table's manifest can already hold, so a collision
+	// here should be refused loudly rather than silently replacing an
+	// existing entry.
+	if err := ing.catalog.AddNewFiles(ctx, ing.tableName, buf.values, partPath, []catalog.FileEntry{fileEntry}); err != nil {
 		return fmt.Errorf("updating manifest: %w", err)
 	}
 

@@ -460,6 +460,12 @@ func casBackoff(attempt int) {
 // populated catalog previously APPENDED duplicate entries, tripling
 // lineitem to 189 files and silently multiplying every aggregate while
 // row-count gates stayed green (#278).
+//
+// This replace-on-collision contract is right for AddFiles's callers —
+// harness and Iceberg catalog discovery, which legitimately re-register a
+// path an earlier run (or the source catalog) already knows about. A writer
+// that mints a brand-new path per call wants the opposite contract: see
+// mergeNewFileEntries and AddNewFiles.
 func mergeFileEntries(existing, incoming []FileEntry) []FileEntry {
 	out := append([]FileEntry(nil), existing...)
 	byPath := make(map[string]int, len(out))
@@ -477,11 +483,40 @@ func mergeFileEntries(existing, incoming []FileEntry) []FileEntry {
 	return out
 }
 
-// AddFiles adds file entries to the manifest for a given partition.
-// Uses compare-and-swap to prevent concurrent flushes from losing updates.
-// Idempotent per file path (mergeFileEntries): duplicate adds replace
-// rather than append.
-func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[string]string, partPath string, files []FileEntry) error {
+// mergeNewFileEntries is mergeFileEntries's strict counterpart, for callers
+// whose every incoming Path is freshly minted and must not already be in
+// the partition (#494). Ingest's chunk_<uuid>, compaction's
+// compacted_<uuid>, and delete-marker GC's rewrite_<uuid> all mint a full
+// UUIDv7 per file specifically so a collision here is astronomically
+// unlikely — which is exactly why one is refused with an error instead of
+// silently replacing the existing entry the way mergeFileEntries does: a
+// hit means a real bug (an ID-generation defect, or two writers racing on
+// the same output path), not the ordinary idempotent re-registration
+// mergeFileEntries exists for. Silently replacing here is how #494's
+// row-loss happened: the pre-existing entry — and, in the wild, quite
+// possibly its still-referenced bytes in the object store — disappears
+// with no error anywhere.
+func mergeNewFileEntries(existing, incoming []FileEntry) ([]FileEntry, error) {
+	out := append([]FileEntry(nil), existing...)
+	byPath := make(map[string]int, len(out))
+	for i, f := range out {
+		byPath[f.Path] = i
+	}
+	for _, f := range incoming {
+		if _, ok := byPath[f.Path]; ok {
+			return nil, fmt.Errorf("file path %q already exists in the manifest: refusing to silently replace it (#494)", f.Path)
+		}
+		byPath[f.Path] = len(out)
+		out = append(out, f)
+	}
+	return out, nil
+}
+
+// addFiles is the shared CAS-retry loop behind AddFiles and AddNewFiles;
+// merge decides how a Path collision within one partition's file list is
+// resolved.
+func (c *Catalog) addFiles(tableName string, partValues map[string]string, partPath string, files []FileEntry,
+	merge func(existing, incoming []FileEntry) ([]FileEntry, error)) error {
 	c.invalidateManifestCache(tableName)
 	key := c.key("manifest." + tableName)
 
@@ -501,16 +536,24 @@ func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[s
 		found := false
 		for i, p := range manifest.Partitions {
 			if p.Path == partPath {
-				manifest.Partitions[i].Files = mergeFileEntries(p.Files, files)
+				merged, mErr := merge(p.Files, files)
+				if mErr != nil {
+					return mErr
+				}
+				manifest.Partitions[i].Files = merged
 				found = true
 				break
 			}
 		}
 		if !found {
+			merged, mErr := merge(nil, files)
+			if mErr != nil {
+				return mErr
+			}
 			manifest.Partitions = append(manifest.Partitions, PartitionEntry{
 				Path:   partPath,
 				Values: partValues,
-				Files:  mergeFileEntries(nil, files),
+				Files:  merged,
 			})
 		}
 
@@ -528,6 +571,27 @@ func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[s
 		return err
 	}
 	return fmt.Errorf("manifest update failed after %d CAS retries (table %q)", maxRetries, tableName)
+}
+
+// AddFiles adds file entries to the manifest for a given partition.
+// Uses compare-and-swap to prevent concurrent flushes from losing updates.
+// Idempotent per file path (mergeFileEntries): duplicate adds replace
+// rather than append. For a writer minting brand-new paths, prefer
+// AddNewFiles, which refuses a collision instead of masking it.
+func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[string]string, partPath string, files []FileEntry) error {
+	return c.addFiles(tableName, partValues, partPath, files, func(existing, incoming []FileEntry) ([]FileEntry, error) {
+		return mergeFileEntries(existing, incoming), nil
+	})
+}
+
+// AddNewFiles adds newly-created file entries to the manifest for a given
+// partition — the production write path for ingest, compaction, and
+// delete-marker GC, none of which ever legitimately re-register a path
+// (#494). Uses the same CAS retry as AddFiles, but a Path collision with an
+// existing entry is refused with an error rather than silently replaced;
+// see mergeNewFileEntries.
+func (c *Catalog) AddNewFiles(_ context.Context, tableName string, partValues map[string]string, partPath string, files []FileEntry) error {
+	return c.addFiles(tableName, partValues, partPath, files, mergeNewFileEntries)
 }
 
 // AddDeleteMarkers adds delete markers to a table's manifest using CAS.
@@ -817,6 +881,16 @@ func (c *Catalog) SwapFileForGC(_ context.Context, tableName string, oldPath str
 		for i := range manifest.Partitions {
 			if manifest.Partitions[i].Path != partPath {
 				continue
+			}
+			// newFile's path is a freshly minted rewrite_<uuid> (#494) — it
+			// must not already name a file this partition still carries.
+			// Checked before the in-place filter below mutates the slice.
+			if newFile != nil {
+				for _, f := range manifest.Partitions[i].Files {
+					if f.Path != oldPath && f.Path == newFile.Path {
+						return fmt.Errorf("file path %q already exists in partition %q: refusing to add a duplicate GC-rewrite output (#494)", newFile.Path, partPath)
+					}
+				}
 			}
 			filtered := manifest.Partitions[i].Files[:0]
 			for _, f := range manifest.Partitions[i].Files {
