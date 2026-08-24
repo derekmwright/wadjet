@@ -454,20 +454,6 @@ func rowShapeToStorage(v *Vector, val any) any {
 	return val
 }
 
-// mapRowShapeToEntries converts a MAP's row-level Go map into the entry
-// rows a MAP vector stores, and passes anything else through untouched.
-// It is rowShapeToStorage for the callers that hold a MAP vector and a
-// value they know came from the row shape.
-func mapRowShapeToEntries(v *Vector, val any) any {
-	if v == nil || v.Type != TypeMap || v.Child == nil {
-		return val
-	}
-	if _, ok := val.(map[string]any); !ok {
-		return val
-	}
-	return rowShapeToStorage(v, val)
-}
-
 // Compact materializes the selection vector into a contiguous batch using
 // the typed nested-aware value copier. Returns the batch unchanged when no
 // selection vector is set.
