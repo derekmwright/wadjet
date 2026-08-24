@@ -40,9 +40,11 @@ func declaredOutputSchema(root *logical.Node) []parquet.Column {
 		return nil
 	}
 	var childTypes map[string]parquet.TypeID
+	var childDecimal map[string]logical.DecimalMeta
 	var strictInt map[string]bool
 	if len(pn.Children) == 1 {
 		childTypes = emittedColTypes(pn.Children[0])
+		childDecimal = emittedColDecimal(pn.Children[0])
 		// The same integer-preserving-arithmetic hint the projection builder
 		// passes: without it `id + 1` declares FLOAT64 here where the
 		// operator emits INT64 (#297's rule), so an empty result would
@@ -59,11 +61,20 @@ func declaredOutputSchema(root *logical.Node) []parquet.Column {
 			// not match the SELECT list.
 			return nil
 		}
-		out = append(out, parquet.Column{
+		typ := declaredProjectionType(proj, childTypes, strictInt)
+		col := parquet.Column{
 			Name:     name,
-			Type:     declaredProjectionType(proj, childTypes, strictInt),
+			Type:     typ,
 			Nullable: true,
-		})
+		}
+		if typ == parquet.TypeDecimal {
+			// precision 0 (pgTypeMod's "unconstrained") when it cannot be
+			// resolved — the honest fallback, not a fabricated (p,s) (#458).
+			if m, ok := declaredProjectionDecimal(proj, childDecimal); ok {
+				col.Precision, col.Scale = m.Precision, m.Scale
+			}
+		}
+		out = append(out, col)
 	}
 	return out
 }
@@ -107,6 +118,49 @@ func declaredProjectionType(proj logical.Projection, colTypes map[string]parquet
 		return t
 	}
 	return parquet.TypeString
+}
+
+// declaredProjectionDecimal is declaredProjectionType's companion for the
+// one piece a bare parquet.TypeID cannot carry: a DECIMAL projection's
+// precision and scale (#458). It mirrors declaredProjectionType's own
+// name-resolution exactly (aggregate output, bare/renamed column reference,
+// or undecided for anything computed) so the two never disagree about WHICH
+// column's metadata they are describing — only declaredProjectionType's
+// caller decides whether the answer here is even consulted (only when the
+// projection's declared type is itself DECIMAL).
+func declaredProjectionDecimal(proj logical.Projection, decMeta map[string]logical.DecimalMeta) (logical.DecimalMeta, bool) {
+	if proj.IsAgg {
+		return lookupColDecimal(decMeta, declaredProjectionName(proj))
+	}
+	if proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr) {
+		// A computed DECIMAL expression (CAST, arithmetic, a scalar
+		// function): declaredProjectionType has no precision/scale
+		// inference for these either, so this stays undecided rather than
+		// guessing — the same honest "unconstrained" fallback as before.
+		return logical.DecimalMeta{}, false
+	}
+	ref := proj.Column
+	if ref == "" {
+		ref = cleanExpr(proj.Expr)
+	}
+	return lookupColDecimal(decMeta, ref)
+}
+
+// lookupColDecimal is lookupColType's companion for a DECIMAL-meta map.
+func lookupColDecimal(decMeta map[string]logical.DecimalMeta, name string) (logical.DecimalMeta, bool) {
+	if decMeta == nil || name == "" {
+		return logical.DecimalMeta{}, false
+	}
+	lc := strings.ToLower(strings.TrimSpace(name))
+	if m, ok := decMeta[lc]; ok {
+		return m, true
+	}
+	if dot := strings.LastIndexByte(lc, '.'); dot >= 0 {
+		if m, ok := decMeta[lc[dot+1:]]; ok {
+			return m, true
+		}
+	}
+	return logical.DecimalMeta{}, false
 }
 
 // lookupColType resolves a possibly-qualified name against a column-type map,
@@ -213,4 +267,72 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 		return out
 	}
 	return inputColTypes(n)
+}
+
+// emittedColDecimal is emittedColTypes' companion for DECIMAL precision/
+// scale (#458): the same walk over the same node kinds, but holding only
+// entries whose column IS declared DECIMAL by emittedColTypes — a name
+// present here and absent (or a different type) there would be a
+// contradiction between the two answers describing the same column.
+//
+// A Window's own expressions never introduce a new DECIMAL (MIN/MAX/value
+// functions over a DECIMAL argument declare DECIMAL via windowSpecOutputType,
+// but this walk does not have a per-expression source-column resolver for
+// window specs the way emittedColTypes does — window output precision/scale
+// stays undecided, same as before #458), so only the input passthrough
+// carries entries there.
+func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
+	if n == nil {
+		return nil
+	}
+	switch n.Type {
+	case logical.NodeAggregate:
+		if len(n.Children) != 1 {
+			return nil
+		}
+		in := emittedColDecimal(n.Children[0])
+		out := make(map[string]logical.DecimalMeta, len(n.GroupBy)+len(n.AggExprs))
+		for _, g := range n.GroupBy {
+			if m, ok := lookupColDecimal(in, g); ok {
+				out[strings.ToLower(g)] = m
+			}
+		}
+		for _, agg := range n.AggExprs {
+			name := strings.ToLower(agg.OutputCol)
+			if name == "" {
+				continue
+			}
+			if m, known := aggSpecOutputDecimal(n, agg); known {
+				out[name] = m
+			}
+		}
+		return out
+	case logical.NodeProject:
+		if len(n.Children) != 1 {
+			return nil
+		}
+		in := emittedColDecimal(n.Children[0])
+		out := make(map[string]logical.DecimalMeta, len(n.Projections))
+		for _, proj := range n.Projections {
+			name := declaredProjectionName(proj)
+			if name == "" {
+				continue
+			}
+			if m, ok := declaredProjectionDecimal(proj, in); ok {
+				out[strings.ToLower(name)] = m
+			}
+		}
+		return out
+	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
+		if len(n.Children) != 1 {
+			return nil
+		}
+		return emittedColDecimal(n.Children[0])
+	case logical.NodeWindow:
+		if len(n.Children) != 1 {
+			return nil
+		}
+		return emittedColDecimal(n.Children[0])
+	}
+	return inputColDecimal(n)
 }

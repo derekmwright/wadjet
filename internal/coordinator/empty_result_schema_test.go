@@ -232,10 +232,18 @@ func TestJoinDeclaredSchemaAgreesWhenBuildSideEmpty(t *testing.T) {
 	}
 }
 
+// describeSchema renders every column's name, type, and — for a DECIMAL —
+// its precision/scale (c.Precision/c.Scale are always 0 for every other
+// type, so including them unconditionally is harmless there). The (p,s)
+// half is #458's regression on the DAG route: before that fix a zero-row
+// result's DECIMAL columns declared Precision=0 (typmod -1, "unconstrained")
+// regardless of the underlying column's real declaration, while the
+// non-empty arm answered the real (p,s) — a divergence Type alone could
+// not see.
 func describeSchema(cols []parquet.Column) string {
 	parts := make([]string, len(cols))
 	for i, c := range cols {
-		parts[i] = c.Name + ":" + c.Type.String()
+		parts[i] = fmt.Sprintf("%s:%s(%d,%d)", c.Name, c.Type, c.Precision, c.Scale)
 	}
 	return strings.Join(parts, ",")
 }

@@ -90,10 +90,17 @@ func TestEmptyResultDeclaresSameColumnsAsNonEmpty(t *testing.T) {
 	}
 }
 
+// describeMetas renders every column's name, type, and — for a DECIMAL —
+// its precision/scale (m.Precision, m.Scale are always 0 for every other
+// type, so including them unconditionally is harmless there). The (p,s)
+// half is #458's regression: before that fix a zero-row result's DECIMAL
+// columns declared Precision=0 (typmod -1, "unconstrained") regardless of
+// the underlying column's real declaration, while a non-empty result
+// answered the real (p,s) — a divergence TypeID alone could not see.
 func describeMetas(r *QueryResult) string {
 	parts := make([]string, len(r.ColumnMetas))
 	for i, m := range r.ColumnMetas {
-		parts[i] = m.Name + ":" + m.TypeID.String()
+		parts[i] = fmt.Sprintf("%s:%s(%d,%d)", m.Name, m.TypeID, m.Precision, m.Scale)
 	}
 	return strings.Join(parts, ",")
 }

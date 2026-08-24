@@ -1314,9 +1314,13 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 			cols := make([]string, len(table.Schema.Columns))
 			intCols := make(map[string]bool, len(table.Schema.Columns))
 			colTypes := make(map[string]parquet.TypeID, len(table.Schema.Columns))
+			colDecimal := make(map[string]logical.DecimalMeta)
 			for i, c := range table.Schema.Columns {
 				cols[i] = c.Name
 				colTypes[strings.ToLower(c.Name)] = c.Type
+				if c.Type == parquet.TypeDecimal {
+					colDecimal[strings.ToLower(c.Name)] = logical.DecimalMeta{Precision: c.Precision, Scale: c.Scale}
+				}
 				switch c.Type {
 				case parquet.TypeInt64, parquet.TypeInt32, parquet.TypeTimestamp,
 					parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration,
@@ -1335,6 +1339,7 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 			node.ScanIntCols = intCols
 			node.ScanStrictIntCols = strictInt
 			node.ScanColTypes = colTypes
+			node.ScanColDecimal = colDecimal
 		}
 		// Estimate row count from manifest for join reordering
 		if manifest, err := p.catalog.GetManifest(ctx, node.TableName); err == nil {
@@ -7641,6 +7646,47 @@ func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 	return nil
 }
 
+// inputColDecimal is inputColTypes' companion for DECIMAL precision/scale
+// (#458): the same walk, sourced from ScanColDecimal instead of
+// ScanColTypes, and holding only entries a DECIMAL column has. A name two
+// scans disagree on (different (p,s), same as a type disagreement above) is
+// dropped rather than picking a side.
+func inputColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
+	if n == nil {
+		return nil
+	}
+	switch n.Type {
+	case logical.NodeScan:
+		return n.ScanColDecimal
+	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
+		if len(n.Children) != 1 {
+			return nil
+		}
+		return inputColDecimal(n.Children[0])
+	case logical.NodeJoin:
+		if len(n.Children) != 2 {
+			return nil
+		}
+		left, right := inputColDecimal(n.Children[0]), inputColDecimal(n.Children[1])
+		if left == nil || right == nil {
+			return nil
+		}
+		merged := make(map[string]logical.DecimalMeta, len(left)+len(right))
+		for c, m := range left {
+			merged[c] = m
+		}
+		for c, m := range right {
+			if prev, dup := merged[c]; dup && prev != m {
+				delete(merged, c)
+				continue
+			}
+			merged[c] = m
+		}
+		return merged
+	}
+	return nil
+}
+
 // sourceColTypesThroughRenames is inputColTypes for an expression whose
 // references were substituted through nested rename-only Projects (#387):
 // after substitution the expression names only SOURCE columns, so the types
@@ -10421,6 +10467,29 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 	return minMaxDeclaredType(in), true
 }
 
+// aggSpecOutputDecimal is aggSpecOutputType's companion for the one piece a
+// bare TypeID cannot carry: MIN/MAX/MIN_BY/MAX_BY of a DECIMAL(p,s) column
+// answers in that SAME (p,s) — it hands back a value the column already
+// holds, not a computed one — so a zero-row result can declare it exactly
+// the way declaredOutputSchema declares the type itself (#458). SUM/AVG over
+// a DECIMAL widen or rescale it (exec.HashAggregate decides the exact
+// number from the accumulator it observes at runtime), so this deliberately
+// answers false for those — the zero-row declaration stays DECIMAL with an
+// unconstrained typmod (precision 0, -1 on the wire) rather than guessing.
+func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.DecimalMeta, bool) {
+	switch strings.ToLower(strings.TrimSpace(agg.Func)) {
+	case "min", "max", "min_by", "max_by":
+	default:
+		return logical.DecimalMeta{}, false
+	}
+	if agg.InputExpr != nil {
+		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
+			return logical.DecimalMeta{}, false
+		}
+	}
+	return scanColumnDecimal(node, agg.InputCol)
+}
+
 // minMaxDeclaredType maps a MIN/MAX input column type to the output type
 // exec.HashAggregate emits for it. It mirrors exec.minMaxOutputType, whose
 // "0" answer means "keep what the planner declared" — float64 — so that
@@ -10506,6 +10575,45 @@ func scanColumnType(node *logical.Node, col string) (parquet.TypeID, bool) {
 	}
 	if !walk(node) {
 		return 0, false
+	}
+	return found, ok
+}
+
+// scanColumnDecimal resolves a DECIMAL column name to its (precision, scale)
+// by searching the scans below node (ScanColDecimal, populated by
+// AnnotateScanColumns) — the same walk as scanColumnType, for the one piece
+// of a DECIMAL column's declaration a bare TypeID cannot carry (#458). Two
+// scans that disagree report not-found, same as scanColumnType.
+func scanColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta, bool) {
+	if node == nil || col == "" {
+		return logical.DecimalMeta{}, false
+	}
+	if dot := strings.LastIndexByte(col, '.'); dot >= 0 {
+		col = col[dot+1:]
+	}
+	col = strings.ToLower(col)
+	var found logical.DecimalMeta
+	ok := false
+	var walk func(n *logical.Node) bool
+	walk = func(n *logical.Node) bool {
+		if n == nil {
+			return true
+		}
+		if m, present := n.ScanColDecimal[col]; present {
+			if ok && m != found {
+				return false
+			}
+			found, ok = m, true
+		}
+		for _, c := range n.Children {
+			if !walk(c) {
+				return false
+			}
+		}
+		return true
+	}
+	if !walk(node) {
+		return logical.DecimalMeta{}, false
 	}
 	return found, ok
 }

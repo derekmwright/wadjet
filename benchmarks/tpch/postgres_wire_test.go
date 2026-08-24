@@ -585,6 +585,16 @@ func wireCorpus() []wireCase {
 		// The wide arm, whose values need more than 64 bits — the range no
 		// float8 fallback could carry and the one #437's old reader truncates.
 		{name: "WideDecimalColumn", sql: `SELECT d_wide FROM dec_probe WHERE d_key IN (1, 100, 150) ORDER BY d_key`},
+		// A ZERO-ROW DECIMAL result (#458): d_key never goes negative, so
+		// this matches nothing on either engine. RowDescription is sent
+		// before any DataRow regardless of row count, so the type modifier
+		// is exactly as comparable here as on DecimalColumn above — the
+		// difference #458 hid is that Wadjet's zero-row path took a
+		// PLAN-DECLARED schema (declaredOutputSchema) rather than one read
+		// off a batch, and that path used to carry no precision/scale at
+		// all (typmod -1, "unconstrained") where PostgreSQL still declares
+		// numeric(9,2)/numeric(18,4).
+		{name: "DecimalColumnZeroRows", sql: `SELECT d_2, d_4 FROM dec_probe WHERE d_key = -1`},
 		// A parameter bound by its DECLARED type rather than as a string —
 		// the shape of the 4a25af0 fix, and the one that exercises
 		// ParameterDescription.

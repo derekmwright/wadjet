@@ -9,6 +9,13 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
+// DecimalMeta carries a DECIMAL column's declared precision and scale — the
+// two facts a bare parquet.TypeID cannot express. See Node.ScanColDecimal.
+type DecimalMeta struct {
+	Precision int
+	Scale     int
+}
+
 // ScanColumnStats holds aggregated column statistics from the catalog.
 type ScanColumnStats struct {
 	MinValue  any
@@ -102,7 +109,16 @@ type Node struct {
 	// catalog types (populated by physical.AnnotateScanColumns alongside
 	// ScanColumns). It is what lets the planner declare a MIN/MAX output
 	// type, which follows the input column rather than the function.
-	ScanColTypes      map[string]parquet.TypeID
+	ScanColTypes map[string]parquet.TypeID
+	// ScanColDecimal maps this scan's lower-cased column names to their
+	// DECIMAL precision/scale — entries exist only for TypeDecimal columns.
+	// Populated by physical.AnnotateScanColumns alongside ScanColTypes. It is
+	// what lets a zero-row DECIMAL result declare the same PostgreSQL typmod
+	// a non-empty one does: ScanColTypes alone carries the bare TypeID, which
+	// left every declared-schema DECIMAL column at Precision=0 (typmod -1,
+	// "unconstrained") even when the underlying column had a real (p,s)
+	// (#458).
+	ScanColDecimal    map[string]DecimalMeta
 	FilterOnlyColumns []string // columns needed ONLY by the filter directly above this scan (candidates for scan-level filter evaluation without materialization)
 	ShapeOnlyColumns  []string // byte-array columns whose EVERY use in the plan reads shape, not contents (LENGTH/IS NULL/= ''/COUNT) — the scan decodes them as lengths, see shape_only_columns.go
 	SampleMethod      string   // TABLESAMPLE method: BERNOULLI, SYSTEM
