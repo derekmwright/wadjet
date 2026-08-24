@@ -961,6 +961,32 @@ type Cmp struct {
 	// the outer comparison of #465's own repro — meets a DECIMAL rendered as
 	// text.
 	lText, rText string
+	// notText caches a settled "neither operand's boxed value is ever a Go
+	// string" answer for the GENERIC path. compareWithText's exactTextOrder
+	// can only ever succeed when at least one operand boxes as a string (a
+	// STRING or DECIMAL column reads as its rendered text; every other type
+	// never does), so once one row shows neither side is a string, no later
+	// row can be either — PROVIDED both operands are bare columns and/or
+	// literals, whose boxed TYPE is as fixed for the query as a column's
+	// declared type is (decimalLitCmp.notDecimal relies on the same
+	// invariant). That is why EvalBoolNull only consults this cache when dec
+	// or decCols matched at bind time: a composite operand like GREATEST/LEAST
+	// has no such guarantee — pickExtremum can return a DECIMAL column's text
+	// on one row and a literal's own numeric box on the next for the SAME
+	// Cmp, and settling "not text" from the row that happened to be numeric
+	// would wrongly skip the exact comparison on a later row that is text
+	// (caught by TestDecimalLiteralAtEveryComparisonSite/least_one_ulp_away).
+	//
+	// Settling this lets a comparison between two ordinary (non-DECIMAL)
+	// columns skip compareWithText's two failed interface assertions and the
+	// exactTextOrder call itself, falling straight to compare() — measured
+	// +18% on FLOAT64 rows (21.7 -> 26 ns/row) before this cache.
+	//
+	// Same atomic-publish reasoning as notDecimal: parallel pipeline workers
+	// can race to settle this, but the answer is a pure function of the
+	// operands' fixed types, so a losing racer's store is redundant, not
+	// wrong.
+	notText atomic.Bool
 }
 
 // NewCmp builds a comparison, binding the two operand shapes that cannot be
@@ -1002,6 +1028,19 @@ func (e *Cmp) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	rv := e.Right.Eval(b, row)
 	if lv == nil || rv == nil {
 		return false, true // a comparison against NULL is UNKNOWN (#370)
+	}
+	// notText is only trustworthy when both operands are bare columns
+	// and/or literals (dec or decCols matched) — see its doc comment.
+	if e.dec != nil || e.decCols != nil {
+		if e.notText.Load() {
+			return compare(lv, rv, e.Op), false
+		}
+		_, lIsStr := lv.(string)
+		_, rIsStr := rv.(string)
+		if !lIsStr && !rIsStr {
+			e.notText.Store(true)
+			return compare(lv, rv, e.Op), false
+		}
 	}
 	return compareWithText(lv, rv, e.lText, e.rText, e.Op), false
 }
