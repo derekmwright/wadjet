@@ -2709,6 +2709,11 @@ func ReadResultFiles(ctx context.Context, store objstore.Store, bucket string, p
 		sem <- struct{}{}
 		go func(idx int, p string) {
 			defer wg.Done()
+			// Parquet decoding on a goroutine with no recover above it. This
+			// reader already treats a failed file as an empty one (the error
+			// is discarded), so a panic gets the same answer instead of
+			// ending the coordinator process (#511).
+			defer exec.CatchQueryPanic(ctx, "result file decode", func(error) {})
 			defer func() { <-sem }()
 			batches, cols, rows, _ := readOneResultFile(ctx, store, bucket, p)
 			results[idx] = fileResult{batches: batches, columns: cols, rows: rows}

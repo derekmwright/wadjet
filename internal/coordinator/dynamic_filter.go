@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
@@ -66,6 +67,12 @@ func mergeBuildStatsFromPartials(
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			// Decoding a worker-written artifact on a goroutine with no
+			// recover above it. This fetch is already best-effort — a
+			// missing partial leaves artifacts[i] nil and the caller
+			// withholds the filter — so a panic gets that same answer
+			// rather than ending the coordinator process (#511).
+			defer exec.CatchQueryPanic(ctx, "dynamic filter artifact decode", func(error) {})
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			rc, _, err := store.Get(ctx, refs[i].Bucket, refs[i].Key)
