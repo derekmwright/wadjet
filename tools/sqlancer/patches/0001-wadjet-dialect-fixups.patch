@@ -1,0 +1,153 @@
+diff --git a/src/sqlancer/postgres/PostgresToStringVisitor.java b/src/sqlancer/postgres/PostgresToStringVisitor.java
+index 87bd3c4..e155ae7 100644
+--- a/src/sqlancer/postgres/PostgresToStringVisitor.java
++++ b/src/sqlancer/postgres/PostgresToStringVisitor.java
+@@ -6,7 +6,6 @@ import java.util.Optional;
+ import sqlancer.Randomly;
+ import sqlancer.common.visitor.BinaryOperation;
+ import sqlancer.common.visitor.ToStringVisitor;
+-import sqlancer.postgres.PostgresSchema.PostgresDataType;
+ import sqlancer.postgres.ast.PostgresAggregate;
+ import sqlancer.postgres.ast.PostgresBetweenOperation;
+ import sqlancer.postgres.ast.PostgresBinaryLogicalOperation;
+@@ -81,13 +80,15 @@ public final class PostgresToStringVisitor extends ToStringVisitor<PostgresExpre
+ 
+     @Override
+     public void visit(PostgresFromTable from) {
+-        if (from.isOnly()) {
+-            sb.append("ONLY ");
+-        }
++        // wadjet-harness patch: skip Postgres table-inheritance syntax
++        // (ONLY table / table*) entirely. Wadjet has no inheritance model,
++        // so both forms parse-error there, and isOnly()/the trailing "*"
++        // have no effect on any oracle's expected-value computation (grep
++        // confirms PostgresExpectedValueVisitor never reads isOnly()) — so
++        // always rendering the plain table name is semantically identical
++        // for every oracle. See wadjet's tools/sqlancer/README.md, "Patches
++        // applied to the SQLancer clone".
+         sb.append(from.getTable().getName());
+-        if (!from.isOnly() && Randomly.getBoolean()) {
+-            sb.append("*");
+-        }
+     }
+ 
+     @Override
+@@ -116,7 +117,13 @@ public final class PostgresToStringVisitor extends ToStringVisitor<PostgresExpre
+             }
+             break;
+         case ALL:
+-            sb.append(Randomly.fromOptions("ALL ", ""));
++            // wadjet-harness patch: never emit the literal "ALL " keyword —
++            // wadjet's parser doesn't accept `SELECT ALL ...` at all (this
++            // was, by a wide margin, the single largest source of "unexpected
++            // token" noise in the pilot soak). ALL is standard SQL's no-op
++            // opposite of DISTINCT, so dropping the keyword changes nothing
++            // about the query's semantics for any oracle. See tools/sqlancer
++            // /README.md, "Patches applied to the SQLancer clone".
+             break;
+         default:
+             throw new AssertionError();
+@@ -277,12 +284,14 @@ public final class PostgresToStringVisitor extends ToStringVisitor<PostgresExpre
+ 
+     @Override
+     public void visit(PostgresBetweenOperation op) {
++        // wadjet-harness patch: drop the two explicit `COLLATE "C"` emissions
++        // this method used to add for TEXT operands. Wadjet's parser has no
++        // COLLATE syntax at all (parse error), and per wadjet's own
++        // CLAUDE.md it always compares strings by bytes regardless, so the
++        // clause changed nothing about the comparison it was guarding. See
++        // tools/sqlancer/README.md, "Patches applied to the SQLancer clone".
+         sb.append("(");
+         visit(op.getExpr());
+-        if (PostgresProvider.generateOnlyKnown && op.getExpr().getExpressionType() == PostgresDataType.TEXT
+-                && op.getLeft().getExpressionType() == PostgresDataType.TEXT) {
+-            sb.append(" COLLATE \"C\"");
+-        }
+         sb.append(") BETWEEN ");
+         if (op.isSymmetric()) {
+             sb.append("SYMMETRIC ");
+@@ -291,10 +300,6 @@ public final class PostgresToStringVisitor extends ToStringVisitor<PostgresExpre
+         visit(op.getLeft());
+         sb.append(") AND (");
+         visit(op.getRight());
+-        if (PostgresProvider.generateOnlyKnown && op.getExpr().getExpressionType() == PostgresDataType.TEXT
+-                && op.getRight().getExpressionType() == PostgresDataType.TEXT) {
+-            sb.append(" COLLATE \"C\"");
+-        }
+         sb.append(")");
+     }
+ 
+diff --git a/src/sqlancer/postgres/ast/PostgresPostfixOperation.java b/src/sqlancer/postgres/ast/PostgresPostfixOperation.java
+index 78c7350..bcfe8ab 100644
+--- a/src/sqlancer/postgres/ast/PostgresPostfixOperation.java
++++ b/src/sqlancer/postgres/ast/PostgresPostfixOperation.java
+@@ -11,7 +11,15 @@ public class PostgresPostfixOperation implements PostgresExpression {
+     private final String operatorTextRepresentation;
+ 
+     public enum PostfixOperator implements Operator {
+-        IS_NULL("IS NULL", "ISNULL") {
++        // wadjet-harness patch: dropped the "ISNULL"/"NOTNULL" postfix
++        // spellings below (kept only the standard "IS NULL"/"IS NOT NULL"
++        // form) — wadjet's parser doesn't accept the postfix shorthand, and
++        // TLPWhereOracle's third comparison arm (p / NOT p / p IS NULL) uses
++        // this operator on every single query, making it by far the largest
++        // source of "trailing input after the end of the statement" noise
++        // in the pilot soak. See tools/sqlancer/README.md, "Patches applied
++        // to the SQLancer clone".
++        IS_NULL("IS NULL") {
+             @Override
+             public PostgresConstant apply(PostgresConstant expectedValue) {
+                 return PostgresConstant.createBooleanConstant(expectedValue.isNull());
+@@ -35,7 +43,7 @@ public class PostgresPostfixOperation implements PostgresExpression {
+             }
+         },
+ 
+-        IS_NOT_NULL("IS NOT NULL", "NOTNULL") {
++        IS_NOT_NULL("IS NOT NULL") {
+ 
+             @Override
+             public PostgresConstant apply(PostgresConstant expectedValue) {
+diff --git a/src/sqlancer/postgres/gen/PostgresExpressionGenerator.java b/src/sqlancer/postgres/gen/PostgresExpressionGenerator.java
+index bad87af..d545950 100644
+--- a/src/sqlancer/postgres/gen/PostgresExpressionGenerator.java
++++ b/src/sqlancer/postgres/gen/PostgresExpressionGenerator.java
+@@ -255,13 +255,29 @@ public class PostgresExpressionGenerator implements ExpressionGenerator<Postgres
+     private PostgresExpression getComparison(PostgresExpression leftExpr, PostgresExpression rightExpr) {
+         PostgresBinaryComparisonOperation op = new PostgresBinaryComparisonOperation(leftExpr, rightExpr,
+                 PostgresBinaryComparisonOperation.PostgresBinaryComparisonOperator.getRandom());
+-        if (PostgresProvider.generateOnlyKnown && op.getLeft().getExpressionType() == PostgresDataType.TEXT
++        if (PostgresProvider.generateOnlyKnown && explicitCollateEnabled() && op.getLeft()
++                .getExpressionType() == PostgresDataType.TEXT
+                 && op.getRight().getExpressionType() == PostgresDataType.TEXT) {
+             return new PostgresCollate(op, "C");
+         }
+         return op;
+     }
+ 
++    // wadjet-harness patch: generateOnlyKnown alone drives two unrelated
++    // things upstream — restricting the type pool to INT/BOOLEAN/TEXT
++    // (PostgresDataType.getRandomType()), which wadjet needs, and wrapping
++    // every TEXT expression/comparison in an explicit `COLLATE "C"` clause
++    // for PQS determinism, which parse-errors on wadjet (it has no
++    // collation syntax; per wadjet's own CLAUDE.md it already always
++    // compares strings by bytes, so the wrap buys nothing there anyway).
++    // Reusing --test-collations (already plumbed to PostgresGlobalState)
++    // as the gate for the second behavior only lets a wadjet harness keep
++    // the first. See tools/sqlancer/README.md, "Patches applied to the
++    // SQLancer clone".
++    private boolean explicitCollateEnabled() {
++        return globalState == null || globalState.getDbmsSpecificOptions().testCollations;
++    }
++
+     private PostgresExpression inOperation(int depth) {
+         PostgresDataType type = PostgresDataType.getRandomType();
+         PostgresExpression leftExpr = generateExpression(depth + 1, type);
+@@ -292,7 +308,7 @@ public class PostgresExpressionGenerator implements ExpressionGenerator<Postgres
+     }
+ 
+     private PostgresExpression potentiallyWrapInCollate(PostgresDataType dataType, PostgresExpression exprInternal) {
+-        if (dataType == PostgresDataType.TEXT && PostgresProvider.generateOnlyKnown) {
++        if (dataType == PostgresDataType.TEXT && PostgresProvider.generateOnlyKnown && explicitCollateEnabled()) {
+             return new PostgresCollate(exprInternal, "C");
+         } else {
+             return exprInternal;
