@@ -727,6 +727,47 @@ func ConvertValue(s string, typ parquet.TypeID) (any, error) {
 	return convertValue(s, typ)
 }
 
+// convertValue's default case (return the trimmed, unquoted string as-is)
+// is exactly right for six of the fourteen types that have no explicit case
+// below, so they are deliberately left to it rather than given a
+// pass-through case that would say nothing extra:
+//
+//   - TypeBytes: ingest.checkType accepts a string for BYTES, and the
+//     writer's toBytes/convertStringToBytes takes the string's raw bytes.
+//   - TypeIPv4, TypeIPv6, TypeMAC, TypeCIDR, TypeUUID: the writer's
+//     decomposeLeaf/convertNetworkLiteral (file_writer.go) is the
+//     authoritative text→binary conversion for these — it already runs on
+//     whatever string reaches it, validates the literal, and raises a
+//     descriptive error for a bad one (ADR-0012: PostgreSQL decides what an
+//     invalid literal means, and there it is an error). Converting here too
+//     would either duplicate that logic or race two different validators
+//     over the same literal; TypeCIDR stores its text form directly and
+//     needs no conversion either way.
+//   - TypeDecimal: the writer's decimalUnscaledInt64 already parses a
+//     numeric string at the column's declared scale (float64 branch),
+//     matching batch.Vector.SetValue's own string case.
+//
+// TypePort and TypeProtocol (BUG: INSERT into either always failed) and
+// TypeDuration (BUG: silently wrote 0 — see below) are NOT in that set:
+// their writer-side converters only accept already-numeric Go values
+// (writer.go's prepareRows int/int32/float64 switch has no string case for
+// any of the three, and file_writer.go's convertStringToInt64 — the network
+// string→int64 path decomposeLeaf delegates to — only knows TypeIPv4 and
+// TypeMAC), so a bare string reaching them is silently read as int64(0) by
+// toInt64's default arm. There is also no established literal syntax
+// anywhere in the system (parser, ingest, or a named-form registration like
+// Port/Protocol never got) beyond a plain integer for these three, so that
+// is the form parsed here — matching checkType's accepted Go types
+// (int/int32/int64/...) and TypeDuration's schema.go contract ("nanoseconds,
+// stored as int64").
+//
+// TypeArray, TypeRow, TypeMap, TypeVector have no case and are not
+// "mechanical": the INSERT VALUES parser itself (dml_parser.go's
+// insertValueText) accepts only a single literal token per value — an
+// array/row/map/vector literal is a composite expression it explicitly
+// refuses ("Anything else is an EXPRESSION, and this path has no
+// evaluator"), so convertValue never even receives one today. Supporting
+// them would start at the parser grammar, not here.
 func convertValue(s string, typ parquet.TypeID) (any, error) {
 	s = strings.TrimSpace(s)
 
@@ -761,6 +802,26 @@ func convertValue(s string, typ parquet.TypeID) (any, error) {
 		return strconv.ParseFloat(s, 64)
 	case parquet.TypeString:
 		return s, nil
+	case parquet.TypePort, parquet.TypeProtocol:
+		// Both are INT32-backed (schema.go: PORT a uint16, PROTOCOL a
+		// uint8, both widened into Int32Data) and, like TypeInt32 above,
+		// only ever reached a plain integer literal's text — the parser
+		// has no other literal form for them and neither does the writer.
+		v, err := strconv.ParseInt(s, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse %s value %q: %w", typ, s, err)
+		}
+		return int32(v), nil
+	case parquet.TypeDuration:
+		// schema.go: "nanoseconds, stored as int64" — the same unit
+		// batch.Vector.GetValue reads back and toInt64/convertStringToInt64
+		// (file_writer.go) do NOT special-case, unlike TypeDate/TypeTimestamp
+		// below. A bare integer literal is the only accepted form.
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse duration value %q (nanoseconds): %w", s, err)
+		}
+		return v, nil
 	case parquet.TypeTimestamp:
 		// Try standard formats
 		for _, layout := range []string{
