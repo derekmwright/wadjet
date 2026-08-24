@@ -40,7 +40,10 @@ func TestScanProjectionAttachArithmeticAndBoolean(t *testing.T) {
 		t.Fatalf("ExecuteSQL: %v", err)
 	}
 
-	const wantSchema = "id:INT64,gt:BOOL,lk:BOOL,pi:INT64,mi:INT64"
+	// The (0,0) suffix is describeSchema's precision/scale rendering (#458):
+	// every type here is non-DECIMAL, so both are zero — the assertion is
+	// still about the declared TYPES.
+	const wantSchema = "id:INT64(0,0),gt:BOOL(0,0),lk:BOOL(0,0),pi:INT64(0,0),mi:INT64(0,0)"
 	if got := describeSchema(res.OutputSchema()); got != wantSchema {
 		t.Errorf("declared schema = %q, want %q", got, wantSchema)
 	}
