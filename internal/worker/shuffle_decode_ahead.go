@@ -223,10 +223,12 @@ func (r *streamingShuffleReader) startDecodeAhead(workers int, tokens *cpuTokens
 	d.wg.Add(1 + workers)
 	go func() {
 		defer d.wg.Done()
-		// The stage phase walks the stream and validates extents; a panic
-		// there is the same class as the decode workers' and gets the same
-		// answer — a terminal error slot, not a dead worker (#511).
-		defer exec.CatchQueryPanic(context.Background(), "shuffle decode-ahead scan", d.fail)
+		// scan/scanIndexed carry the boundary that turns a panic into the
+		// terminal error slot, INSIDE themselves so it runs before their own
+		// close defers. This outer one is only the last resort for a panic
+		// raised by those close defers, and must not touch d.delivery — by
+		// the time it can fire, that channel is closed (#511).
+		defer exec.CatchQueryPanic(context.Background(), "shuffle decode-ahead teardown", func(error) {})
 		if d.idx != nil {
 			d.scanIndexed()
 		} else {
@@ -254,6 +256,15 @@ func (d *shuffleDecodeAhead) scan() {
 	// consumed (file end, error, quit) go back to the pool. Deposits are
 	// impossible after this runs: tokenStalled is false once admit returns.
 	defer d.flushDonated()
+	// Registered LAST so it runs FIRST on the way out, ahead of the close
+	// defers above. A boundary that lets `defer close(d.delivery)` run
+	// before it turns the recovery itself into a send on a closed channel —
+	// an unrecoverable panic inside the deferred recovery, which is exactly
+	// what a boundary must never do (ADR-0019). Landing fail() first also
+	// keeps the contract the consumer relies on: the error arrives as a
+	// terminal slot, not as a clean EOF that silently truncates the stream
+	// after however many chunks had already been staged.
+	defer exec.CatchQueryPanic(context.Background(), "shuffle decode-ahead scan", d.fail)
 	r := d.r
 	for r.chunk < r.numChunks {
 		if _, err := io.ReadFull(r.br, r.hdr[:4]); err != nil {
@@ -328,6 +339,15 @@ func (d *shuffleDecodeAhead) scanIndexed() {
 	defer close(d.jobs)
 	defer close(d.delivery)
 	defer d.flushDonated()
+	// Registered LAST so it runs FIRST on the way out, ahead of the close
+	// defers above. A boundary that lets `defer close(d.delivery)` run
+	// before it turns the recovery itself into a send on a closed channel —
+	// an unrecoverable panic inside the deferred recovery, which is exactly
+	// what a boundary must never do (ADR-0019). Landing fail() first also
+	// keeps the contract the consumer relies on: the error arrives as a
+	// terminal slot, not as a clean EOF that silently truncates the stream
+	// after however many chunks had already been staged.
+	defer exec.CatchQueryPanic(context.Background(), "shuffle decode-ahead scan", d.fail)
 	r := d.r
 	d.stats.indexedFiles.Add(1)
 	// Extent readahead: keep FADV_WILLNEED issued a bounded distance ahead

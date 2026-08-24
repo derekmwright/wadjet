@@ -40,10 +40,39 @@ func NewCachedStore(inner objstore.Store, cache *LRUCache, tracker *memory.Track
 // it has already run). rc is always closed.
 func (s *CachedStore) readFully(rc io.ReadCloser, size int64, bucket, key string) (data []byte, release func(), err error) {
 	release = func() {}
+
+	// Obligations this call owes however it leaves: the reader handle, and
+	// any charge it put on the worker-lifetime tracker. A panic unwinding
+	// out of the read — a transport body that blows up mid-copy — used to
+	// take the process down, and the ledger died with it. Now the query
+	// boundary keeps the worker alive, which turns an unreleased
+	// ForceReserve into a permanent cut to every LATER query's budget: the
+	// worker slowly starves instead of crashing. A boundary is only sound if
+	// the obligations underneath it unwind too (ADR-0019).
+	//
+	// returned is set on every ordinary return path, so the cleanup below is
+	// the PANIC path and nothing else. On success the charge is deliberately
+	// NOT released here — ownership transfers to the caller's release.
+	var charged int64
+	rcOpen := true
+	returned := false
+	defer func() {
+		if returned {
+			return
+		}
+		if rcOpen {
+			rc.Close()
+		}
+		if charged > 0 && s.tracker != nil {
+			s.tracker.Release(charged)
+		}
+	}()
+
 	if size > 0 {
 		// Charge BEFORE the allocation so pressure machinery sees it coming.
 		if s.tracker != nil {
 			s.tracker.ForceReserve(size)
+			charged = size
 			release = func() { s.tracker.Release(size) }
 		}
 		// Pre-allocate buffer using known file size to avoid io.ReadAll's
@@ -51,22 +80,30 @@ func (s *CachedStore) readFully(rc io.ReadCloser, size int64, bucket, key string
 		buf := make([]byte, size)
 		n, readErr := io.ReadFull(rc, buf)
 		rc.Close()
+		rcOpen = false
 		if readErr != nil && readErr != io.ErrUnexpectedEOF {
 			release()
+			charged = 0
+			returned = true
 			return nil, func() {}, fmt.Errorf("reading %s/%s: %w", bucket, key, readErr)
 		}
+		returned = true
 		return buf[:n], release, nil
 	}
 	data, err = io.ReadAll(rc)
 	rc.Close()
+	rcOpen = false
 	if err != nil {
+		returned = true
 		return nil, release, fmt.Errorf("reading %s/%s: %w", bucket, key, err)
 	}
 	if s.tracker != nil && len(data) > 0 {
 		n := int64(len(data))
 		s.tracker.ForceReserve(n)
+		charged = n
 		release = func() { s.tracker.Release(n) }
 	}
+	returned = true
 	return data, release, nil
 }
 

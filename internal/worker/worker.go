@@ -2015,12 +2015,15 @@ func (w *Worker) executeIncomingTaskDelivery(ctx context.Context, task distribut
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
+				// RecoverQueryPanic has already logged the stack at error
+				// level with the task and query id. It must NOT also travel
+				// in the result: this string is the coordinator's errMsg and
+				// goes straight out to the SQL client, so appending it put
+				// 8 KB of Go frames in a psql ERROR line. The client gets
+				// the panic value; the stack stays in the worker's log,
+				// which is where an operator looks for it.
 				taskErr := exec.RecoverQueryPanic(taskCtx, "worker task "+task.ID, r)
 				text := taskErr.Error()
-				var qp *exec.QueryPanic
-				if errors.As(taskErr, &qp) {
-					text += "\n" + qp.Stack
-				}
 				result = distributed.ResultNotification{
 					TaskID:    task.ID,
 					QueryID:   task.QueryID,
@@ -2082,7 +2085,12 @@ func (w *Worker) executeIncomingTaskDelivery(ctx context.Context, task distribut
 	// Publish failed tasks to the DLQ for inspection
 	if !result.Success {
 		reason := "execution_error"
-		if len(result.Error) >= 13 && result.Error[:13] == "task panicked" {
+		// The classifier used to match the literal "task panicked" prefix
+		// this path produced. It now produces exec.QueryPanic's message, so
+		// ask the boundary that owns that format instead of re-encoding it
+		// here — a string this file no longer writes is a classifier that
+		// silently stops classifying.
+		if exec.IsQueryPanicMessage(result.Error) {
 			reason = "panic"
 		}
 		w.publishDLQ(task, reason, result.Error)
