@@ -212,34 +212,65 @@ func TestSetOpRefusals(t *testing.T) {
 // read as one stream, so a column declared FLOAT64 by one arm and INT32 by
 // another is a decoding error rather than a union. The narrower arm is cast.
 //
-// `+ 100.5` (rather than an integer literal) is deliberate: `r_regionkey` is
-// a strict-int column, and since #445 threaded the integer-preserving-
-// arithmetic rule (#297) through this path too, `r_regionkey + 100` now
-// declares INT64 like PostgreSQL does, not FLOAT64 — which would exercise
-// only the INT32→INT64 rung of the widening ladder below, not the FLOAT64
-// rung this test names in its own doc comment.
+// Two rungs of the widening ladder, both live since #445/#472 threaded the
+// integer-preserving-arithmetic rule (#297) through every computed-column
+// call site:
+//
+//   - float64 widening: `+ 100.5` forces FLOAT64 regardless of the strict-int
+//     rule (no integer literal reconciles with it), so this rung stays
+//     exercised whatever the arithmetic rule declares for `+ 100` alone.
+//   - int64 widening: `r_regionkey + 100` on the strict-int r_regionkey now
+//     declares INT64 like PostgreSQL does, not FLOAT64 — the case #445 could
+//     not name a working int-only repro for it dropped when it switched to
+//     100.5. Now that #472 closed the last call site still passing
+//     strictInt=nil, the INT32→INT64 rung is reachable and worth pinning in
+//     its own right, alongside the FLOAT64 one rather than instead of it.
 func TestSetOpArmTypesReconciled(t *testing.T) {
-	cat, ctx := setupTPCHCatalog(t)
-	stages, err := planSetOpStages(t, cat, ctx,
-		"SELECT r_regionkey + 100.5 AS k FROM region UNION ALL SELECT n_nationkey AS k FROM nation")
-	if err != nil {
-		t.Fatalf("PlanDistributed: %v", err)
-	}
-	union := onlyStageOfType(t, stages, StageUnion)
-	if len(union.UnionArms) != 2 {
-		t.Fatalf("union has %d arms, want 2", len(union.UnionArms))
-	}
-	for i, arm := range union.UnionArms {
-		if len(arm.Projections) != 1 {
-			t.Fatalf("arm %d projects %d columns, want 1", i, len(arm.Projections))
-		}
-		if arm.Projections[0].Type != parquet.TypeFloat64 {
-			t.Errorf("arm %d emits column k as %s; both arms must agree on the type",
-				i, arm.Projections[0].Type)
-		}
-	}
-	if got := union.UnionArms[1].Projections[0].Expr; !strings.Contains(strings.ToUpper(got), "CAST") {
-		t.Errorf("the int arm's expression is %q — it must be cast to the reconciled type", got)
+	for _, tc := range []struct {
+		name string
+		sql  string
+		// want is the type both arms must agree on after reconciliation.
+		want parquet.TypeID
+		// castArm is the union-arm index (nation's arm, always the narrower
+		// INT32 one here) that must carry a CAST to want.
+		castArm int
+	}{
+		{
+			name:    "float64 widening",
+			sql:     "SELECT r_regionkey + 100.5 AS k FROM region UNION ALL SELECT n_nationkey AS k FROM nation",
+			want:    parquet.TypeFloat64,
+			castArm: 1,
+		},
+		{
+			name:    "int64 widening",
+			sql:     "SELECT r_regionkey + 100 AS k FROM region UNION ALL SELECT n_nationkey AS k FROM nation",
+			want:    parquet.TypeInt64,
+			castArm: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cat, ctx := setupTPCHCatalog(t)
+			stages, err := planSetOpStages(t, cat, ctx, tc.sql)
+			if err != nil {
+				t.Fatalf("PlanDistributed: %v", err)
+			}
+			union := onlyStageOfType(t, stages, StageUnion)
+			if len(union.UnionArms) != 2 {
+				t.Fatalf("union has %d arms, want 2", len(union.UnionArms))
+			}
+			for i, arm := range union.UnionArms {
+				if len(arm.Projections) != 1 {
+					t.Fatalf("arm %d projects %d columns, want 1", i, len(arm.Projections))
+				}
+				if arm.Projections[0].Type != tc.want {
+					t.Errorf("arm %d emits column k as %s; both arms must agree on the type",
+						i, arm.Projections[0].Type)
+				}
+			}
+			if got := union.UnionArms[tc.castArm].Projections[0].Expr; !strings.Contains(strings.ToUpper(got), "CAST") {
+				t.Errorf("the narrower arm's expression is %q — it must be cast to the reconciled type", got)
+			}
+		})
 	}
 }
 
