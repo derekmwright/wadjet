@@ -222,6 +222,10 @@ type Coordinator struct {
 	// (per-row correlated subquery, #359) and that were routed to the
 	// coordinator-local single-process pipeline instead.
 	localCorrelated atomic.Int64
+	// localDistinct counts queries whose plan the stage DAG refused for a
+	// DISTINCT it has no stage for (#466) and that were routed to the
+	// coordinator-local single-process pipeline instead.
+	localDistinct atomic.Int64
 	// local executions reported to the client instead of retried on the
 	// DAG (#308) — every increment is a query the two paths might have
 	// answered differently.
@@ -918,6 +922,14 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// outcome (no DAG plan exists to fall back to).
 		if errors.Is(err, physical.ErrCorrelatedSubqueryDistributed) {
 			return c.runCorrelatedLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
+		// Same shape one construct over: a DISTINCT the DAG has no stage
+		// for and the post-gather dedup cannot see. The refusal exists so
+		// the DISTINCT is not silently DROPPED (#466) — but the query has
+		// an answer, and the single-process pipeline applies a Distinct
+		// wherever it sits, so route it there rather than erroring.
+		if errors.Is(err, physical.ErrDistinctDistributed) {
+			return c.runDistinctLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}

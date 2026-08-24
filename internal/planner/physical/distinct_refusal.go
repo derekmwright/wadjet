@@ -27,6 +27,13 @@ import (
 // Refusing is the #308 position — a deterministic loud failure beats a
 // silently different answer — and it is a refusal the rewrite is expected to
 // make unreachable for every shape it handles.
+//
+// The refusal is a HANDOFF, not the query's outcome: Coordinator.ExecuteSQL
+// matches this error and answers on the coordinator-local single-process
+// pipeline, which applies a Distinct wherever it sits (runDistinctLocal, the
+// same move #359 makes for correlated subqueries). A caller with no local
+// engine reports it. What the refusal buys either way is that nothing
+// carrying DISTINCT semantics reaches walkStages.
 var ErrDistinctDistributed = errors.New(
 	"DISTINCT in this position has no distributed stage")
 
