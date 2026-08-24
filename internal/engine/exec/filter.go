@@ -132,6 +132,17 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 // literal, carrying the literal's exact source text so a DECIMAL column is
 // compared in its own domain rather than against a float64 (#452).
 func ColumnCompareLit(colName string, op CompareOp, value any, litText string) Predicate {
+	if value == nil && op != OpIsNull && op != OpIsNotNull {
+		// A nil constant is NOT the type's zero (mirrors ResolveFilterKernel's
+		// guard in kernel/compare.go): fmt.Sprint(nil)="<nil>", toInt64(nil)=0,
+		// toBool(nil)=false, parseIPv4FilterVal(nil)=0 would otherwise let a
+		// NULL-literal comparison silently match the row holding the zero
+		// value instead of matching none. No caller currently reaches this
+		// with a nil value (producers lower a NULL literal to
+		// MatchNothingFilter before it gets here) — this is a floor guard,
+		// not a reachable path today.
+		return func(*batch.RecordBatch, int) bool { return false }
+	}
 	col := &lazyColIdx{}
 	// Every literal conversion below is a pure function of `value`, so it
 	// happens ONCE, here, rather than behind a per-closure "resolved" flag
@@ -467,7 +478,18 @@ func NewKernelFilterLit(colName string, op CompareOp, value any, litText string)
 // float64 cannot represent past ~15-16 significant digits. The DECIMAL
 // kernels take their constant as text and convert it at the column's scale
 // (kernel.compareFilterDecimal); every other type reads the box.
+//
+// A nil value must stay nil: ResolveFilterKernel's nil guard is what turns a
+// NULL-literal comparison into "match nothing" instead of the type's zero,
+// and substituting litText here for a nil value would hand it a non-nil
+// string and skip that guard. No caller currently reaches this with a nil
+// value and non-empty litText (producers lower a NULL literal to
+// MatchNothingFilter before it gets here) — this is a floor guard, not a
+// reachable path today.
 func decimalLitValue(typ batch.TypeID, value any, litText string) any {
+	if value == nil {
+		return nil
+	}
 	if typ == batch.TypeDecimal && litText != "" {
 		return litText
 	}
