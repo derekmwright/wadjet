@@ -6362,10 +6362,14 @@ func appendColumnValue(buf []byte, v *batch.Vector, row int, typ batch.TypeID) [
 		}
 		return append(buf, 0)
 	case batch.TypeDecimal:
-		val := math.Float64bits(v.DecimalData.Data[row].ToFloat64(v.DecimalData.Scale))
-		return append(buf,
-			byte(val), byte(val>>8), byte(val>>16), byte(val>>24),
-			byte(val>>32), byte(val>>40), byte(val>>48), byte(val>>56))
+		// The value's canonical (unscaled, minimal scale) digits, exactly —
+		// NOT its float64. A float64 holds ~16 significant digits and a
+		// DECIMAL(38,10) holds 38, so keying on the double merged every pair
+		// of values that agreed to 16 digits into one group / one distinct
+		// value / a join match (#474). Scale-normalized so that 12.75 keys
+		// alike whether the column declares scale 2 or scale 4, which is what
+		// the comparator says and therefore what a cross-scale join needs.
+		return batch.AppendDecimalKey(buf, v.DecimalData.Data[row], v.DecimalData.Scale)
 	case batch.TypeVector:
 		return appendVectorKey(buf, v, row)
 	case batch.TypeArray, batch.TypeMap:

@@ -220,11 +220,20 @@ func TestAppendColumnValueTypes(t *testing.T) {
 	})
 
 	t.Run("Decimal", func(t *testing.T) {
+		// The key is the value's canonical (unscaled, minimal scale) digits,
+		// not its float64 bits: 10.00 at scale 2 keys as scale 0 / unscaled
+		// 10, which is the SAME key the value gets from a column declaring
+		// any other scale (#474).
 		v := batch.NewVectorWithScale(batch.TypeDecimal, 1, 2)
 		v.DecimalData.Data[0] = batch.Int128From(1000)
 		buf := appendColumnValue(nil, v, 0, batch.TypeDecimal)
-		if len(buf) != 8 {
-			t.Fatalf("expected 8 bytes, got %d", len(buf))
+		if want := []byte{0, 1, 10}; string(buf) != string(want) {
+			t.Fatalf("expected %v, got %v", want, buf)
+		}
+		wide := batch.NewVectorWithScale(batch.TypeDecimal, 1, 4)
+		wide.DecimalData.Data[0] = batch.Int128From(100000)
+		if got := appendColumnValue(nil, wide, 0, batch.TypeDecimal); string(got) != string(buf) {
+			t.Fatalf("10.00 at scale 2 keyed %v but 10.0000 at scale 4 keyed %v", buf, got)
 		}
 	})
 

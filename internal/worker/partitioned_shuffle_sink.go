@@ -1244,6 +1244,7 @@ func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, h
 			}
 		case parquet.TypeDecimal:
 			data := col.DecimalData.Data
+			decScale := col.DecimalData.Scale
 			for i := 0; i < n; i++ {
 				row := i
 				if useSel {
@@ -1253,11 +1254,16 @@ func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, h
 				if col.Nulls.IsNullFast(row) || data == nil {
 					h = (h ^ 0xff) * fnvPrime64
 				} else {
-					d := data[row]
-					for _, w := range [2]uint64{d.Lo, uint64(d.Hi)} {
-						for s := 0; s < 64; s += 8 {
-							h = (h ^ uint64(byte(w>>uint(s)))) * fnvPrime64
-						}
+					// The CANONICAL key, not the raw Int128: the unscaled
+					// integer alone makes the partition depend on the
+					// column's declared SCALE, so a shuffle join between a
+					// DECIMAL(9,2) and a DECIMAL(18,4) holding the same
+					// quantity would send equal values to different
+					// partitions and match none of them - the cross-scale
+					// case #474's key encoding exists to serve.
+					var kb [batch.MaxDecimalKeyLen]byte
+					for _, c := range batch.AppendDecimalKey(kb[:0], data[row], decScale) {
+						h = (h ^ uint64(c)) * fnvPrime64
 					}
 				}
 				hashes[i] = h
@@ -1338,11 +1344,10 @@ func hashVectorValue(h interface{ Write([]byte) (int, error) }, col *batch.Vecto
 			_, _ = h.Write([]byte{0xff})
 			return
 		}
-		d := col.DecimalData.Data[row]
-		binary.LittleEndian.PutUint64(scratch[:8], d.Lo)
-		_, _ = h.Write(scratch[:8])
-		binary.LittleEndian.PutUint64(scratch[:8], uint64(d.Hi))
-		_, _ = h.Write(scratch[:8])
+		// Canonical, scale-normalized - see the DECIMAL arm of
+		// hashRowsIntoPartitions.
+		var kb [batch.MaxDecimalKeyLen]byte
+		_, _ = h.Write(batch.AppendDecimalKey(kb[:0], col.DecimalData.Data[row], col.DecimalData.Scale))
 	case parquet.TypeVector:
 		dim := col.VectorDim
 		if dim <= 0 || (row+1)*dim > len(col.Float32Data) {

@@ -1325,5 +1325,40 @@ func postgresSemanticsCases() []pgCase {
 		) AS t`},
 	)
 
+	// --- DECIMAL group / DISTINCT / join keys (#474) ------------------------
+	//
+	// The key for a DECIMAL was the float64 BITS of the value, which holds ~16
+	// significant digits against a DECIMAL(38,10)'s 38 — so values that differ
+	// only past the 16th shared a group, a distinct value and a join match.
+	// The repair has to be exact AND scale-blind, because `numeric '12.75' =
+	// numeric '12.7500'` is TRUE: the cross-scale join below is the half a
+	// raw-unscaled-bytes key would have broken, and it runs over two REAL
+	// columns of different scale (d_2 at scale 2 and d_4 at scale 4 coincide
+	// wherever 0.25a = 0.0625b).
+	out = append(out,
+		pgCase{name: "DecimalWideGroupByCount",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT d_wide FROM dec_probe GROUP BY d_wide) g`},
+		pgCase{name: "DecimalWideCountDistinct", sql: `SELECT COUNT(DISTINCT d_wide) AS n FROM dec_probe`},
+		// The IS NOT NULL guards are load-bearing, not decoration: the
+		// serialized join key encodes a NULL as a lone flag byte, so two NULL
+		// rows key alike and the equi-join pairs them — a separate defect
+		// (#459's NULL-joins-NULL note) that would otherwise swamp what these
+		// entries measure. The unguarded forms are the gate for THAT.
+		pgCase{name: "DecimalWideSelfJoin",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN dec_probe b
+				ON a.d_wide = b.d_wide WHERE a.d_wide IS NOT NULL`},
+		pgCase{name: "DecimalNarrowPairGroupBy",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT d_2, d_4 FROM dec_probe GROUP BY d_2, d_4) g`},
+		pgCase{name: "DecimalCrossScaleJoinCount",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN dec_probe b ON a.d_2 = b.d_4
+				WHERE a.d_2 IS NOT NULL AND b.d_4 IS NOT NULL`},
+		pgCase{name: "DecimalCrossScaleJoinKeys",
+			sql: `SELECT a.d_key, b.d_key FROM dec_probe a JOIN dec_probe b ON a.d_2 = b.d_4
+				WHERE a.d_2 IS NOT NULL AND b.d_4 IS NOT NULL ORDER BY a.d_key, b.d_key`},
+		pgCase{name: "DecimalCrossScaleSemiJoin",
+			sql: `SELECT a.d_key FROM dec_probe a WHERE EXISTS
+				(SELECT 1 FROM dec_probe b WHERE b.d_4 = a.d_2) ORDER BY a.d_key`},
+	)
+
 	return out
 }

@@ -1,6 +1,7 @@
 package batch
 
 import (
+	"encoding/binary"
 	"errors"
 	"math"
 	"math/big"
@@ -718,4 +719,110 @@ func int128FromBig(b *big.Int) Int128 {
 		out = out.Neg()
 	}
 	return out
+}
+
+// --- Canonical DECIMAL key encoding ---
+//
+// A DECIMAL group / DISTINCT / join / bloom key used to be
+// `math.Float64bits(v.ToFloat64(scale))`. A float64 carries ~16 significant
+// decimal digits and a DECIMAL(38,10) carries 38, so every pair of values that
+// agrees to 16 digits shared one key: GROUP BY collapsed them into one group,
+// COUNT(DISTINCT) counted them once, and a hash join matched each against the
+// other (#474).
+//
+// Keying on the raw 16 bytes of the unscaled Int128 is the wrong repair: it
+// makes the key depend on the SCALE, so 12.75 stored in a DECIMAL(9,2)
+// (unscaled 1275) would stop matching 12.75 stored in a DECIMAL(18,4)
+// (unscaled 127500) — and a join between two tables that declare the same
+// quantity at different scales is exactly the shape that breaks. The
+// comparator (kernel.CompareDecimalAt) calls those two equal, and ADR-0012
+// item 8's invariant is that two values the comparator calls equal must also
+// SERIALIZE alike.
+//
+// So the key is the value's canonical form: the unique (unscaled, scale) pair
+// with scale >= 0 minimal, i.e. trailing zero digits stripped from the
+// fraction. 12.75 is (1275, 2) from either column; 12.7500 normalizes to it;
+// 1200 at scale 2 (unscaled 120000) and 1200 at scale 0 both normalize to
+// (1200, 0); zero is (0, 0) at every scale. That form is unique per VALUE, so
+// the encoding is injective by construction — different values cannot collide,
+// whatever their declared precision.
+
+// decimalKeyNegative is the sign bit in a canonical DECIMAL key's second byte.
+const decimalKeyNegative = 0x80
+
+// MaxDecimalKeyLen is the widest AppendDecimalKey output: a scale byte, a
+// sign/length byte, and up to 16 magnitude bytes.
+const MaxDecimalKeyLen = 18
+
+// AppendDecimalKey appends the canonical, scale-normalized binary key for the
+// DECIMAL value `d` held at `scale`, and returns the extended buffer.
+//
+// The encoding is
+//
+//	[normalized scale : 1 byte][sign | magnitude length : 1 byte][magnitude : N bytes]
+//
+// with the magnitude in minimal-width BIG-endian bytes (no leading zero byte)
+// and the sign in the high bit of the length byte. It is self-delimiting — the
+// length byte says how many follow — which is what lets it sit inside a
+// multi-column key or a nested container element without a separator, exactly
+// like the fixed-width arms it joins.
+//
+// Minimal width rather than a flat 16 bytes because these keys are stored per
+// group and per build row: a DECIMAL(9,2) price keys in 4 bytes, so the whole
+// key of a single-DECIMAL GROUP BY still fits the 8-byte compact path.
+func AppendDecimalKey(buf []byte, d Int128, scale int) []byte {
+	if scale < 0 {
+		scale = 0
+	}
+	hi, lo, neg := d.magnitude()
+	if hi == 0 && lo == 0 {
+		// Zero is one value at every scale, so it is one key.
+		return append(buf, 0, 0)
+	}
+	// Strip trailing zero digits so the scale is minimal. The narrow arm is
+	// every value a DECIMAL(p <= 19) column can hold and needs no 128-bit
+	// division; both arms exit on the first non-zero last digit, which is the
+	// common case for a value that is not padded.
+	if hi == 0 {
+		for scale > 0 && lo%10 == 0 {
+			lo /= 10
+			scale--
+		}
+	} else {
+		for scale > 0 {
+			qhi := hi / 10
+			qlo, rem := bits.Div64(hi%10, lo, 10)
+			if rem != 0 {
+				break
+			}
+			hi, lo = qhi, qlo
+			scale--
+		}
+	}
+
+	var mag [16]byte
+	binary.BigEndian.PutUint64(mag[0:8], hi)
+	binary.BigEndian.PutUint64(mag[8:16], lo)
+	first := 0
+	for mag[first] == 0 {
+		first++ // terminates: the value is not zero
+	}
+	sl := byte(16 - first)
+	if neg {
+		sl |= decimalKeyNegative
+	}
+	buf = append(buf, byte(scale), sl)
+	return append(buf, mag[first:]...)
+}
+
+// magnitude returns |d| as an unsigned 128-bit pair plus the sign. Two's
+// complement negation of -2^127 wraps to itself, whose BITS are the correct
+// unsigned magnitude 2^127 — so reading the negated halves as unsigned is
+// right for every Int128 including that one, where Neg alone is not.
+func (d Int128) magnitude() (hi, lo uint64, neg bool) {
+	if d.Hi < 0 {
+		n := d.Neg()
+		return uint64(n.Hi), n.Lo, true
+	}
+	return uint64(d.Hi), d.Lo, false
 }

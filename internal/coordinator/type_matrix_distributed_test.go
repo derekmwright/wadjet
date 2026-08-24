@@ -338,6 +338,10 @@ func tmdTables() []tmdTable {
 		// the same reason as dtpTable: TestMinMaxFloatNaNTwoPath uses the same
 		// two arms, and no type-matrix corpus entry names this table.
 		{nmmTable, nmmSchema(), nmmData()},
+		// The key-encoding fixture (#474 DECIMAL keys, #459 float keys).
+		// Rides along for the same reason as dtpTable: TestKeyEncodingTwoPath
+		// uses the same two arms, and no type-matrix corpus entry names it.
+		{ketTable, ketSchema(), ketData()},
 	}
 }
 
