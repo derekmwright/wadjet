@@ -403,6 +403,51 @@ type Pin struct {
 	GatedBy string
 }
 
+// networkFuncArg maps each network-native column to a representative scalar
+// function that reads it as network-address TEXT (internal/engine/expr's
+// networkTextFuncs table), for the function-argument consumer class below.
+// Every one of these is a "(guard)" case in expr/network_typematrix_test.go
+// and wadjet/network_typed_column_args_test.go — proven correct at the expr
+// layer already — so what THIS corpus checks is new: that the single-
+// process and stage-DAG engines still agree once the value has gone through
+// a scalar function.
+var networkFuncArg = map[string]string{
+	"c_ipv4":  "ip_to_string",
+	"c_ipv6":  "ip_to_string",
+	"c_cidr":  "network_address",
+	"c_mac":   "mac_to_string",
+	"c_port":  "port_name",
+	"c_proto": "protocol_name",
+}
+
+// networkLit gives each network-native column a literal EQUAL to id=700's
+// value under allData's per-column formula (id=700 lands on a non-NULL
+// stride position for all six: 700 mod 59/61/67/71/73/79 never hits the
+// stride's NULL slot). EQUALITY only — an ORDERING literal comparison
+// (<, >) against TypeIPv6 has a live, filed, pre-existing divergence
+// between this expr path and the stage DAG (#492) that this corpus does
+// not yet gate; adding one here would make every run of this corpus fail on
+// a known, already-tracked bug instead of catching a new one.
+//
+// c_port/c_proto are UNQUOTED (a bare numeric literal, `c_port = 1724`),
+// not a quoted string like the other four: both are Int32-backed, and a
+// QUOTED numeric literal against an Int32/Int64/PORT/PROTOCOL column hits a
+// different, pre-existing bug (#493) — kernel.toInt64's string case
+// calls parseTimestampString, not a plain integer parse, so `c_port =
+// '1724'` silently compares against 0 on one engine and something else
+// again on the other. That is a real defect (filed, not fixed here — out
+// of this corpus's territory), not a reason to leave PORT/PROTOCOL out of
+// this consumer class: the unquoted form is how a `PORT = <int>` /
+// `PROTOCOL = <int>` predicate is actually written.
+var networkLit = map[string]string{
+	"c_ipv4":  "'10.0.2.188'",
+	"c_ipv6":  "'2001:db8::2bc'",
+	"c_cidr":  "'192.168.188.0/24'",
+	"c_mac":   "'aa:bb:cc:00:02:bc'",
+	"c_port":  "1724",
+	"c_proto": "188",
+}
+
 // Corpus generates the query corpus: per type-column templates plus the
 // entries that need no particular column.
 //
@@ -444,6 +489,27 @@ func Corpus() []Query {
 				`LAST_VALUE(%s) OVER (PARTITION BY g ORDER BY id) AS l `+
 				`FROM %s WHERE id < 400 ORDER BY id`, n, n, tbl),
 			oracle.CmpOrdered, n)
+
+		// Function-argument, CAST-AS-STRING and literal-comparison consumer
+		// classes for the six network-native types — the routes #484/#485
+		// special-cased (ColRef/FuncCall/Cast/Cmp in internal/engine/expr)
+		// and feedback_gate_coverage_of_type_system.md flagged as absent
+		// from this corpus: none of the other templates above route a
+		// network column through a function call, a STRING cast, or a
+		// literal comparison, so a two-path divergence in any of those
+		// three would have been invisible here. See networkFuncArg/
+		// networkLit for why literal comparison stays EQUALITY-only.
+		if fn, ok := networkFuncArg[n]; ok {
+			add("funcarg_"+n,
+				fmt.Sprintf(`SELECT id, %s(%s) AS v FROM %s WHERE id %% 331 = 7 ORDER BY id`, fn, n, tbl),
+				oracle.CmpOrdered, n)
+			add("caststr_"+n,
+				fmt.Sprintf(`SELECT id, CAST(%s AS STRING) AS v FROM %s WHERE id %% 331 = 7 ORDER BY id`, n, tbl),
+				oracle.CmpOrdered, n)
+			add("litcmp_"+n,
+				fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE %s = %s ORDER BY id`, n, tbl, n, networkLit[n]),
+				oracle.CmpOrdered, n)
+		}
 
 		if !c.Flat {
 			// A plain projection over a range that CERTAINLY contains a NULL
