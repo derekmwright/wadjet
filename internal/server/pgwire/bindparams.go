@@ -245,9 +245,12 @@ const (
 
 // renderBinaryNumeric decodes PostgreSQL's binary `numeric` wire format —
 //
-//	int16 ndigits, int16 weight, uint16 sign, uint16 dscale, int16 digits[ndigits]
+//	uint16 ndigits, int16 weight, uint16 sign, uint16 dscale, int16 digits[ndigits]
 //
-// where the value is sum(digits[i] * 10000^(weight-i)) under sign and dscale
+// (numeric_recv in the backend reads ndigits with pq_getmsgint(..., uint16),
+// same as sign and dscale; weight is the one signed field — "we allow any
+// int16 for weight", per its own comment) — where the value is
+// sum(digits[i] * 10000^(weight-i)) under sign and dscale
 // is the number of fraction digits to DISPLAY — into the exact decimal TEXT
 // PostgreSQL itself would print for the same value, then hands that text to
 // renderTextParam so the bare-literal path (and its "confirm it's a number"
@@ -271,7 +274,13 @@ func renderBinaryNumeric(raw []byte) (string, error) {
 	if len(raw) < 8 {
 		return "", fmt.Errorf("numeric parameter has %d bytes, want at least 8", len(raw))
 	}
-	ndigits := int(int16(binary.BigEndian.Uint16(raw[0:2])))
+	// ndigits is UNSIGNED on the wire (numeric_recv: `(uint16)
+	// pq_getmsgint(...)`). Reading it as int16 rejected anything with the
+	// high bit set as a "negative digit count" — including legitimate,
+	// PostgreSQL-emitted values: (1e131071+1)::numeric, a number at the
+	// documented max of 131072 digits before the decimal point, sends
+	// ndigits=32768, which read as int16 is -32768.
+	ndigits := int(binary.BigEndian.Uint16(raw[0:2]))
 	weight := int(int16(binary.BigEndian.Uint16(raw[2:4])))
 	sign := binary.BigEndian.Uint16(raw[4:6])
 	dscale := int(binary.BigEndian.Uint16(raw[6:8]))
@@ -286,14 +295,37 @@ func renderBinaryNumeric(raw []byte) (string, error) {
 	default:
 		return "", fmt.Errorf("numeric parameter has an unrecognized sign %#04x", sign)
 	}
-	if ndigits < 0 {
-		return "", fmt.Errorf("numeric parameter has a negative digit count %d", ndigits)
-	}
+	// ndigits is inherently >= 0 now that it is read unsigned; the real
+	// well-formedness guard is that the client actually supplied that many
+	// digit groups on the wire — same thing numeric_recv relies on (it
+	// allocates ndigits digits and then reads that many uint16s from the
+	// buffer, which errors on a short read).
 	if want := 8 + 2*ndigits; len(raw) != want {
 		return "", fmt.Errorf("numeric parameter has %d bytes, want %d for %d digits", len(raw), want, ndigits)
 	}
-	if dscale < 0 {
-		return "", fmt.Errorf("numeric parameter has a negative display scale %d", dscale)
+	// dscale is the number of digits DISPLAYED after the decimal point, and
+	// the loop below writes exactly that many characters. numeric_recv
+	// bounds it to 14 bits (NUMERIC_DSCALE_MASK, `(value.dscale &
+	// NUMERIC_DSCALE_MASK) != value.dscale` in the backend) — PostgreSQL's
+	// own documented "16383 digits after the decimal point" maximum — and
+	// rejects anything wider with "invalid scale in external numeric
+	// value". Mirror that here: without it, dscale up to 65535 (the full
+	// uint16 read above already allows, since it can never go negative)
+	// writes up to 65535 fraction characters from a dscale field that costs
+	// the client 2 wire bytes to set, four times PostgreSQL's own limit.
+	//
+	// weight gets no equivalent cap: it is already read as int16 above, so
+	// its range is exactly [-32768, 32767] — PG_INT16_MAX, which
+	// numeric_recv's own comment ("we allow any int16 for weight") confirms
+	// is the type's whole legal range, and which is where PostgreSQL's
+	// "131072 digits before the decimal point" limit comes from
+	// ((32767+1) groups of 4 digits). The integer-part loop below can still
+	// write up to 131072 characters from a weight field that costs 2 wire
+	// bytes and one real digit group to set — that is PostgreSQL's own
+	// documented maximum-precision NUMERIC, not a defect to cap further.
+	const pgNumericDscaleMax = 0x3FFF // NUMERIC_DSCALE_MASK
+	if dscale > pgNumericDscaleMax {
+		return "", fmt.Errorf("numeric parameter has a display scale %d, want 0-%d", dscale, pgNumericDscaleMax)
 	}
 
 	digits := make([]int16, ndigits)

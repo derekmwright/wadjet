@@ -318,12 +318,28 @@ func TestRenderBinaryNumericMalformed(t *testing.T) {
 			b = append(b, be16(10000)...) // base-10000 digit must be 0-9999
 			return b
 		}()},
-		{"negative ndigits", func() []byte {
+		// ndigits' high bit set (0xFFFF here) used to read as int16 -1 and
+		// fail the (now-removed) "negative digit count" check directly. It
+		// is unsigned now (FIX 1, see TestRenderBinaryNumericHighNdigits
+		// below for the legitimate case this used to wrongly reject), so
+		// this must still fail — but on the length check: ndigits=65535
+		// declares 65535 digit groups and only the 8-byte header is here.
+		{"declared ndigits with no digit bytes at all", func() []byte {
 			var b []byte
-			b = append(b, be16(-1)...)
+			b = append(b, be16(-1)...) // 0xFFFF -> ndigits 65535 unsigned
 			b = append(b, be16(0)...)
 			b = append(b, be16(0)...)
 			b = append(b, be16(0)...)
+			return b
+		}()},
+		// dscale past NUMERIC_DSCALE_MASK (FIX 2): PostgreSQL's own bound is
+		// 16383 digits after the decimal point; 16384 is one past it.
+		{"dscale past 16383", func() []byte {
+			var b []byte
+			b = append(b, be16(0)...) // ndigits
+			b = append(b, be16(0)...) // weight
+			b = append(b, be16(int(pgNumericSignPositive))...)
+			b = append(b, be16(16384)...) // dscale
 			return b
 		}()},
 	}
@@ -333,6 +349,111 @@ func TestRenderBinaryNumericMalformed(t *testing.T) {
 				t.Fatalf("renderBinaryNumeric(%s) = %q, want an error", tt.name, got)
 			}
 		})
+	}
+}
+
+// TestRenderBinaryNumericHighNdigits pins FIX 1: ndigits is UNSIGNED on the
+// wire (numeric_recv reads it with pq_getmsgint(..., uint16)), so a value
+// with the high bit set is not a negative digit count, it's a legitimate
+// large one. (1e131071+1)::numeric — a number at PostgreSQL's own documented
+// maximum of 131072 digits before the decimal point — sends ndigits=32768,
+// which the old signed read decoded as int16(-32768) and rejected outright
+// as "negative digit count -32768". This constructs that exact shape: 32768
+// real digit groups (weight=32767, so every position 0..weight has an
+// actual wire-supplied digit — nothing implicit) and checks it decodes
+// clean, not that it merely avoids erroring.
+func TestRenderBinaryNumericHighNdigits(t *testing.T) {
+	const ndigits = 32768
+	const weight = 32767 // ndigits-1: every position is a real digit, no implicit padding
+	raw := make([]byte, 8+2*ndigits)
+	binary.BigEndian.PutUint16(raw[0:2], uint16(ndigits))
+	binary.BigEndian.PutUint16(raw[2:4], uint16(int16(weight)))
+	binary.BigEndian.PutUint16(raw[4:6], pgNumericSignPositive)
+	binary.BigEndian.PutUint16(raw[6:8], 0) // dscale
+	// digits[0] = 1, the rest 0: the value is 1 followed by `weight` more
+	// base-10000 zero groups, i.e. 10^131071 — (1e131071+1)::numeric's
+	// integer part exactly (its "+1" only affects the last digit group,
+	// irrelevant to what this test is checking).
+	binary.BigEndian.PutUint16(raw[8:10], 1)
+
+	got, err := renderBinaryNumeric(raw)
+	if err != nil {
+		t.Fatalf("renderBinaryNumeric with ndigits=%d (0x%04x, negative as int16): %v", ndigits, uint16(ndigits), err)
+	}
+	const wantLen = 4 * ndigits // (weight+1) groups, 4 digits each, minus the 3 the first group's FormatInt omits... see below
+	if len(got) != wantLen-3 {
+		t.Fatalf("renderBinaryNumeric with ndigits=%d decoded to %d characters, want %d (131072 digits: '1' then %d zero groups)",
+			ndigits, len(got), wantLen-3, weight)
+	}
+	if got[0] != '1' {
+		t.Fatalf("renderBinaryNumeric with ndigits=%d = %q..., want it to start with 1", ndigits, got[:1])
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] != '0' {
+			t.Fatalf("renderBinaryNumeric with ndigits=%d: byte %d = %q, want '0'", ndigits, i, got[i])
+		}
+	}
+}
+
+// TestRenderBinaryNumericDscaleBoundary pins the FIX 2 edge: 16383
+// (NUMERIC_DSCALE_MASK) accepted, 16384 rejected — the boundary
+// TestRenderBinaryNumericMalformed's "dscale past 16383" case is one side
+// of.
+func TestRenderBinaryNumericDscaleBoundary(t *testing.T) {
+	be16 := func(v int) []byte { return binary.BigEndian.AppendUint16(nil, uint16(int16(v))) }
+	header := func(dscale int) []byte {
+		var b []byte
+		b = append(b, be16(0)...) // ndigits
+		b = append(b, be16(0)...) // weight
+		b = append(b, be16(int(pgNumericSignPositive))...)
+		b = append(b, be16(dscale)...)
+		return b
+	}
+	if got, err := renderBinaryNumeric(header(16383)); err != nil {
+		t.Errorf("renderBinaryNumeric with dscale=16383 (NUMERIC_DSCALE_MASK, the legal max): %v", err)
+	} else if got != "0."+strings.Repeat("0", 16383) {
+		t.Errorf("renderBinaryNumeric with dscale=16383 = %q (%d chars), want %d fraction digits", got, len(got), 16383)
+	}
+	if _, err := renderBinaryNumeric(header(16384)); err == nil {
+		t.Error("renderBinaryNumeric with dscale=16384 (one past NUMERIC_DSCALE_MASK) succeeded, want an error")
+	}
+}
+
+// TestRenderBinaryNumericResourceExhaustionShape re-runs the adversarial
+// review's fuzz shape: a numeric parameter built to amplify a small wire
+// payload into a large substituted-SQL string (weight=32767 maximizes the
+// integer part, dscale at its now-capped legal max maximizes the fraction
+// part), decoded repeatedly to confirm FIX 1 + FIX 2 together bound the
+// output — no panic, no unbounded growth — rather than merely not
+// crashing once. Bounded well under the review's 60-90s budget: this is CPU
+// work on ~150KB of output per call, not I/O.
+func TestRenderBinaryNumericResourceExhaustionShape(t *testing.T) {
+	const weight = 32767                    // legal max: PG_INT16_MAX, matches NUMERIC_WEIGHT_MAX
+	const dscale = 0x3FFF                   // legal max: NUMERIC_DSCALE_MASK
+	const maxWant = 1 + 131072 + 1 + dscale // sign + integer part + '.' + fraction part
+
+	raw := make([]byte, 8+2) // ndigits=1: minimal wire cost for the amplification
+	binary.BigEndian.PutUint16(raw[0:2], 1)
+	binary.BigEndian.PutUint16(raw[2:4], uint16(int16(weight)))
+	binary.BigEndian.PutUint16(raw[4:6], pgNumericSignPositive)
+	binary.BigEndian.PutUint16(raw[6:8], dscale)
+	binary.BigEndian.PutUint16(raw[8:10], 1) // one real digit; everything else implicit zero
+
+	// A few thousand decodes — not the reviewer's literal 65535-parameter
+	// Bind message, which is a wire-parsing/allocation cost this function
+	// does not pay (it decodes bytes already read off the wire); what this
+	// function owns is the per-call string-building cost, which this loop
+	// exercises repeatedly to catch anything superlinear in it.
+	const iterations = 4000
+	for i := 0; i < iterations; i++ {
+		got, err := renderBinaryNumeric(raw)
+		if err != nil {
+			t.Fatalf("iteration %d: renderBinaryNumeric: %v", i, err)
+		}
+		if len(got) > maxWant {
+			t.Fatalf("iteration %d: renderBinaryNumeric produced %d characters, want <= %d (PostgreSQL's own "+
+				"131072-integer-digit / 16383-fraction-digit maximum)", i, len(got), maxWant)
+		}
 	}
 }
 
