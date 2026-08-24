@@ -671,6 +671,10 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	}
 
 	var failedFiles atomic.Int64
+	// Separate from firstErr: a recovered panic fails the scan outright,
+	// while an ordinary per-file read error is tolerated unless every file
+	// failed. See scanSourceInner.fatalScanErr.
+	var panicErr exec.FirstError
 	// FirstError, not a bare atomic.Value: every store here happens on a
 	// footer-reader goroutine, and atomic.Value panics the moment two of
 	// them carry differently-typed errors (#512).
@@ -702,9 +706,15 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 				// Thrift footer decoding on a goroutine nobody joins for
 				// errors: a malformed footer that panics the decoder took
 				// the process down instead of failing the scan (#511).
+				//
+				// Recorded as FATAL, not as one more failedFiles tick: that
+				// counter only fails the scan when every file failed, so a
+				// single panicked footer among many would have dropped that
+				// file's rows and returned a short answer.
 				defer exec.CatchQueryPanic(ctx, "scan footer reader", func(err error) {
 					failedFiles.Add(1)
 					firstErr.Set(err)
+					panicErr.Set(err)
 				})
 				for {
 					n := int(atomic.AddInt64(&metaIdx, 1) - 1)
@@ -798,6 +808,9 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	if failed := failedFiles.Load(); failed > 0 {
 		inner.failedFiles = int(failed)
 		inner.firstFileErr = firstErr.Err()
+	}
+	if err := panicErr.Err(); err != nil {
+		inner.fatalScanErr = err
 	}
 
 	// Enumerate row groups from each file's metadata, applying pruning.

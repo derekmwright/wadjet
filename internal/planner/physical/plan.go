@@ -11460,6 +11460,15 @@ type scanSourceInner struct {
 	failedFiles  int
 	firstFileErr error // sample error from the first file failure
 
+	// fatalScanErr is a failure the scan must NOT tolerate, however many
+	// other files succeeded. failedFiles is deliberately forgiving — it only
+	// fails the scan when EVERY file failed, because a since-deleted object
+	// is a survivable degradation. A recovered panic is not in that class: a
+	// footer decoder that panicked has no idea how many row groups it should
+	// have produced, so tolerating it drops that file's rows and answers a
+	// wrong number (#511).
+	fatalScanErr error
+
 	// pooledBufs tracks []byte buffers obtained from readBufPool during
 	// buildRGUnits. These are returned to the pool when the scan source
 	// is closed, enabling cross-query buffer reuse.
@@ -11768,6 +11777,14 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		// Eager row-group-level parallel scan: download all files, enumerate
 		// row groups, apply predicate pruning, then process RGs in parallel.
 		inner.buildRGUnits(scanCtx)
+
+		// A panic on a footer reader is fatal to the scan regardless of how
+		// many other files parsed, because the rows it would have
+		// contributed are simply missing from the answer.
+		if inner.fatalScanErr != nil {
+			cancel()
+			return fmt.Errorf("scan %s: %w", s.tableName, inner.fatalScanErr)
+		}
 
 		// Fail the scan if all files failed to read — prevents silent 0-row
 		// results that are indistinguishable from correct empty results.
