@@ -283,9 +283,19 @@ because a delete marker belongs to the **file**, not to the alias reading it:
 | Where | What |
 |---|---|
 | `physical.Stage.ScanDeletes` | file → deleted row indices, read from the SAME manifest object that produced `ScanFiles` (`walkStages` `NodeScan`). Replayed onto the final stage list by `annotateScanDeletes` (`physical/scan_delete_markers.go`) from the planner's snapshot — **never a second catalog read**: markers grow until a compaction replaces the file they name, so a marker set read AFTER the file list can be missing the markers of a file the list still holds. |
-| `coordinator.collectStageDeletes` → `withQueryDeleteMarkers(ctx, …)` | the query's union, parked on the dispatch context at the top of `executeStageDAG` |
-| `Scheduler.PublishTasks` → `stampTaskDeleteMarkers` | the ONE stamp. Walks every file list a task can carry — `Files`, `InputFiles`, `BuildFiles`, `Inputs`, `PreScannedInputs`, `ScanFileFilter`, `FusedJoins[].BuildFiles`, `Operators[].{InputFiles,BuildFiles}` — the same set `annotateTaskPeerLocations` walks, and emits `Task.DeleteMarkers`. Every dispatcher and every retry passes through here, so a new dispatcher gets it for free. |
+| `coordinator.collectStageDeletes` → `withQueryDeleteMarkers(ctx, …)` | the query's union, parked on the dispatch context at the top of `executeStageDAG`. **Not** at the top of `SubmitSQL`, deliberately: `physStages` there is overwritten with a synthetic single "pipeline" stage before any stamp built from it would be read, and that emptiness is correct — every `TaskTypePipeline` task re-plans its `SQLText` on the worker against a live catalog (`executePipeline` → `planner.Plan`), whose scanner reads `manifest.DeleteMarkers` itself at scan Init, the same as the single-process engine. `coordinator.TestDistributedScanHonorsDeleteMarkersOnThePipelinePath` covers both shapes that path dispatches (plain and probe-split). |
+| `Scheduler.PublishTasks` → `stampTaskDeleteMarkers` | the ONE stamp. Walks every file list a task can carry — `Files`, `InputFiles`, `BuildFiles`, `Inputs`, `PreScannedInputs`, `ScanFileFilter`, `FusedJoins[].BuildFiles`, `Operators[].{InputFiles,BuildFiles}`, `PreComputedAggregates[].CacheFiles` — the same set `annotateTaskPeerLocations` walks (`coordinator.TestTaskFieldCarrierCoverage` guards both against a new carrier going unclassified), and emits `Task.DeleteMarkers`. Every dispatcher and every retry passes through here, so a new dispatcher gets it for free. |
 | worker `taskDeleteSets` → `cachedFileStreamSource.SetDeleteMarkers` | decoded per task, handed to every source the task builds; a key naming a file this source never opens simply never matches |
+
+`collectStageDeletes` unions its stages' snapshots FIRST-WINS on a file that
+appears in more than one (`delete_markers.go:63`) — harmless for a self-join,
+where every scan of the file comes from the SAME plan-time manifest read, but
+a genuine gap for a concurrent DELETE landing between two *separate*
+scan-node manifest reads within one statement: the older marker set can win
+for a file the newer read would have marked further. #502's per-statement
+manifest pinning (one revision threaded through planning and scan Init)
+closes this the same way it closes the analogous staleness window for
+`ScanSchema`.
 
 Wire form: `distributed.DeleteSpec{File, Runs}`, where `Runs` is
 `scan.EncodeDeleteRuns` — varint (gap, length) pairs over the coalesced runs.
