@@ -84,10 +84,20 @@ jobs:
         #                       Release() (#391, #398, #399).
         #   OptimizationInvariance / Fuzz* — #287's kill-switch differential
         #                       and generated SQL, over all 22 types.
-        #   TwoPath           — stage DAG vs single process, per type (#396).
+        #   TwoPath           — stage DAG vs single process, per type (#396);
+        #                       PredicateSemanticsTwoPath holds each arm to
+        #                       SQL-computed truth instead of to the other
+        #                       arm (#461/#450) and MinByTwoPath does the
+        #                       same for MIN_BY/MAX_BY.
+        #
+        # The second line was 'TestTypeMatrixTwoPath', an unanchored regexp
+        # that happened to match only the one test of that exact name — so
+        # PredicateSemanticsTwoPath and MinByTwoPath never ran here, and
+        # -short (the Unit Tests step above) skips them too. Broadened to
+        # 'TestTypeMatrix' so every TwoPath gate in the package runs.
         run: |
           go test -v -run 'TestTypeMatrix' ./wadjet/ -timeout 15m
-          go test -v -run 'TestTypeMatrixTwoPath' ./internal/coordinator/ -timeout 15m
+          go test -v -run 'TestTypeMatrix' ./internal/coordinator/ -timeout 15m
 
       - name: Fuzz Seed Corpora (parquet decoders)
         # There was no fuzz step at all, so every target in the tree only ran
