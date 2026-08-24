@@ -35,6 +35,16 @@ type decimalLitCmp struct {
 	lits []*kernel.DecimalLiteral // one per literal operand, in operand order
 	flip bool                     // the literal was the LEFT operand
 
+	// numeric caches lits[i].Numeric(), one bool per literal, decided once at
+	// BIND time rather than read on every row. lit.Numeric() parses the
+	// literal's text from scratch (isDecimalText → batch.DecimalTextAt) — a
+	// full text parse, not the cached-by-scale resolution lit.Order() does —
+	// and a literal's text is immutable for the query's lifetime, so calling
+	// it per row bought nothing but the parse cost 2048 times over: measured
+	// 12x on a plain `col > lit`, 59x on an exponent-form literal (the digit
+	// walk is longer), 15x on IN, against a hoisted read of this slice.
+	numeric []bool
+
 	// notDecimal caches a settled "this column is not DECIMAL" answer. A
 	// column's type cannot change across the batches of one query, so the
 	// first batch that resolves the bound column to anything but DECIMAL
@@ -93,17 +103,27 @@ func bareCol(e Expr) (*ColRef, bool) {
 	return col, true
 }
 
+// newDecimalLitCmp builds a binding and resolves every literal's Numeric()
+// answer once, up front — see decimalLitCmp.numeric.
+func newDecimalLitCmp(col *ColRef, lits []*kernel.DecimalLiteral, flip bool) *decimalLitCmp {
+	numeric := make([]bool, len(lits))
+	for i, lit := range lits {
+		numeric[i] = lit.Numeric()
+	}
+	return &decimalLitCmp{col: col, lits: lits, flip: flip, numeric: numeric}
+}
+
 // bindDecimalCmp binds `col op lit` or `lit op col`, in either operand order.
 func bindDecimalCmp(left, right Expr) *decimalLitCmp {
 	if col, ok := bareCol(left); ok {
 		if lit, ok := numericLit(right); ok {
-			return &decimalLitCmp{col: col, lits: []*kernel.DecimalLiteral{lit}}
+			return newDecimalLitCmp(col, []*kernel.DecimalLiteral{lit}, false)
 		}
 		return nil
 	}
 	if col, ok := bareCol(right); ok {
 		if lit, ok := numericLit(left); ok {
-			return &decimalLitCmp{col: col, lits: []*kernel.DecimalLiteral{lit}, flip: true}
+			return newDecimalLitCmp(col, []*kernel.DecimalLiteral{lit}, true)
 		}
 	}
 	return nil
@@ -126,7 +146,7 @@ func bindDecimalList(col Expr, values []Expr) *decimalLitCmp {
 		}
 		lits[i] = lit
 	}
-	return &decimalLitCmp{col: c, lits: lits}
+	return newDecimalLitCmp(c, lits, false)
 }
 
 // vector returns the batch's DECIMAL column for this binding, or nil when the
@@ -160,7 +180,7 @@ func (d *decimalLitCmp) vector(b *batch.RecordBatch) *batch.Vector {
 // both paths refuse the same query.
 func (d *decimalLitCmp) order(vec *batch.Vector, row, i int) int {
 	lit := d.lits[i]
-	if !lit.Numeric() {
+	if !d.numeric[i] {
 		raiseInvalidTextRepresentation("numeric", lit.Text())
 	}
 	c := lit.Order(vec, row)
