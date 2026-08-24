@@ -28,6 +28,17 @@ func TestRenderParamText(t *testing.T) {
 		{"float4", "1.5", oidFloat4, "1.5"},
 		{"float exponent", "1e3", oidFloat8, "1e3"},
 		{"numeric", "12345.6789", oidNumeric, "12345.6789"},
+		// FIX 5: ParseFloat("1e400") fails with strconv.ErrRange — the
+		// grammar accepted it, only float64's exponent range (overflow to
+		// +/-Inf) could not hold it — and used to fall all the way through
+		// to quoteLiteral, writing a numeric-shaped string as a quoted TEXT
+		// literal and comparing a DECIMAL column to text. wadjet's DECIMAL
+		// is not bound to float64, so the text still splices bare. (Go's
+		// ParseFloat treats UNDERFLOW differently — "1e-400" returns 0,
+		// nil, no ErrRange — so only the overflow direction exercises this
+		// path.)
+		{"numeric past float64 range", "1e400", oidNumeric, "1e400"},
+		{"numeric past float64 range negative", "-1e400", oidNumeric, "-1e400"},
 		// A value that is not a number does not go out bare, whatever the
 		// declared type says.
 		{"int4 with junk stays quoted", "2; DROP TABLE users", oidInt4, "'2; DROP TABLE users'"},

@@ -18,6 +18,7 @@ package pgwire
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -95,8 +96,19 @@ func renderParam(raw []byte, binaryFmt bool, oid uint32) (string, error) {
 func renderTextParam(s string, oid uint32) (string, error) {
 	switch {
 	case numericOID(oid):
-		// Confirm it really is a number before writing it unquoted.
-		if _, err := strconv.ParseFloat(s, 64); err == nil {
+		// Confirm it really is a number before writing it unquoted. A range
+		// error (1e400 overflowing to +Inf) still names a syntactically
+		// valid number — ParseFloat's grammar accepted it and only
+		// float64's exponent range could not hold it — and wadjet's DECIMAL
+		// is not bound to float64, so the text itself, not the (unused)
+		// parsed value, still splices as a bare literal here. Falling
+		// through to quoteLiteral on ErrRange was the bug: it wrote a
+		// numeric-shaped string as a quoted TEXT literal, comparing a
+		// DECIMAL column to text for the one case (an out-of-range literal)
+		// where the number really was a number. (Underflow does not take
+		// this path: ParseFloat("1e-400") returns 0, nil — no ErrRange —
+		// so it was already handled by the err == nil arm.)
+		if _, err := strconv.ParseFloat(s, 64); err == nil || errors.Is(err, strconv.ErrRange) {
 			return s, nil
 		}
 		if _, err := strconv.ParseInt(s, 10, 64); err == nil {
