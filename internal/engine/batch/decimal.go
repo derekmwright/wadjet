@@ -811,6 +811,11 @@ func AppendDecimalKey(buf []byte, d Int128, scale int) []byte {
 	if neg {
 		sl |= decimalKeyNegative
 	}
+	// byte(scale): safe because scale never exceeds MaxDecimalScale (38) —
+	// a column's declared scale is bounded there at DDL time (10^38 < 2^127
+	// is the widest an Int128 carrier holds, MaxDecimalScale's own comment
+	// above), and the two stripping loops above only ever DECREASE it. 38
+	// fits a byte with room to spare; this is not a truncation site.
 	buf = append(buf, byte(scale), sl)
 	return append(buf, mag[first:]...)
 }

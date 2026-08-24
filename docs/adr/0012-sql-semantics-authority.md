@@ -216,18 +216,38 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      fallback (`compareAny`, used only when no declaration is available)
      still orders a ROW by field name — no production path reaches it — and
      is not addressed by this decision.
-   - **What this does NOT yet cover.** The predicate kernels (`=`, `>`, `IN`
-     — `internal/engine/expr/expr.go`'s `cmpFloat64Op`/`cmpFloat32Op`,
-     `internal/engine/exec/kernel/compare.go`'s `ResolveFilterKernel`), the
-     PRIMARY (non-spilled) GROUP BY/DISTINCT hash key
-     (`internal/engine/exec/aggregate.go`'s `typedRowHash`/
-     `serializeGroupKey`/`appendColumnValue`), and the hash-join key
-     (`internal/engine/exec/join.go`'s `buildKeyFromBatch`/`buildProbeKey`)
-     still compare/hash raw IEEE754 bits — a `WHERE f = f` over a NaN row,
-     or a `GROUP BY`/`DISTINCT`/hash-join over `{-0.0, 0.0}` in the common
-     (non-spilling) case, still disagrees with PostgreSQL. Tracked as #459.
-     MIN/MAX over a NaN column is the same gap in the aggregate kernels,
-     tracked as #457.
+   - **What is now covered, and what is left.** (Updated 2026-08-24, #459's
+     close.) The predicate kernels (`=`, `>`, `IN` — `internal/engine/expr/
+     expr.go`'s `cmpFloat64Op`/`cmpFloat32Op`, `internal/engine/exec/kernel/
+     compare.go`'s `ResolveFilterKernel`), the PRIMARY (non-spilled) GROUP
+     BY/DISTINCT hash key (`internal/engine/exec/aggregate.go`'s
+     `typedRowHash`/`serializeGroupKey`/`appendColumnValue`), and the
+     hash-join key (`internal/engine/exec/join.go`'s `buildKeyFromBatch`/
+     `buildProbeKey`) now compare/hash the canonical bits — a `WHERE f = f`
+     over a NaN row, and a `GROUP BY`/`DISTINCT`/hash-join over `{-0.0,
+     0.0}`, agree with PostgreSQL in the single-process engine. MIN/MAX over
+     a NaN column was fixed earlier and separately (`kernel.CompareFloat64`
+     in the accumulator loop, #457). The DISTRIBUTED half of the same rule
+     closed alongside: `hashRowsIntoPartitions`
+     (`internal/worker/partitioned_shuffle_sink.go`) is the shuffle's own
+     router, keyed independently of the in-process hash above, and its
+     scalar FLOAT32/FLOAT64 arms moved with #459 — its VECTOR arm did not,
+     because a VECTOR element's canonicalization lives in a different
+     function (`appendVectorKey`, aggregate.go) that #459 did not touch;
+     the router disagreeing with that key for one type was the same
+     defect class one type over (`hashVectorValue` too, kept in step per
+     its own comment requiring the two hash the same byte stream), closed
+     in the same fold-in that closed #459. Nothing named in this item's
+     original list remains open. Three findings adjacent to it — not float
+     ordering — surfaced during the same work and are tracked separately
+     rather than folded in: RIGHT/FULL joins losing a NULL-keyed BUILD row
+     on the integer key paths (#496), `BuildFromRows` routing a dual-int key
+     join down the string branch (#498), and cross-scale DECIMAL set
+     operations not deduplicating (#499). A float row-group statistics bound
+     can also HIDE a NaN
+     that this order says must have kept the row group in a `>`/`>=`/`<>`
+     prune — that is a pruning-input question, not an ordering one, and is
+     recorded in ADR-0018's territory instead (its §5).
 
 9. **Exact numeric aggregates: what MIN/MAX/SUM/AVG over a DECIMAL answer.**
    (Added 2026-08-23, #455.) PostgreSQL's `min`/`max`/`sum`/`avg` over
@@ -334,8 +354,10 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   #446 (VECTOR/ARRAY(FLOAT) comparators not transitive under NaN) — the work
   item 8 above records the settled position for
 - #459 (predicate kernels, the primary GROUP BY/DISTINCT hash key, and
-  hash-join keys still compare floats as raw IEEE754), #457 (MIN/MAX over a
-  NaN column) — item 8's open remainder
+  hash-join keys compared floats as raw IEEE754 — closed), #457 (MIN/MAX over
+  a NaN column — closed) — item 8's remainder, now closed; see "What is now
+  covered, and what is left" above for the distributed VECTOR-router
+  follow-on that closed alongside
 - `internal/engine/exec/kernel/float_order.go`, `internal/engine/exec/
   compare_boxed.go`, `internal/engine/exec/kernel/
   container_order_property_test.go` (the P1-P4 total-order property test)

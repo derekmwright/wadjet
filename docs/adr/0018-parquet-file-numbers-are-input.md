@@ -163,6 +163,61 @@ scale=10) cannot be applied to primitive type INT64"). Every wadjet table
 with a wide DECIMAL column was unreadable outside wadjet, and the widest
 values had no encoding here at all.
 
+### 5. A statistics bound can be silent about a value it never recorded
+
+(Added 2026-08-24, from the #459/#474 fold-in review.) The four rules above
+are about believing a NUMBER the file states. A statistics bound is a
+narrower kind of claim than a row count or an offset: it is not wrong the way
+an overstated `total_compressed_size` is wrong, but it can still be
+*incomplete* in a way pruning must not treat as complete — and a float
+column's MIN/MAX is exactly that shape.
+
+The parquet format excludes NaN from a column's min/max by specification, and
+wadjet's writer (`leafBuffer.updateStatsF64`/`updateStatsF32`,
+`internal/storage/parquet/file_writer.go`) follows it — but by accident of
+implementation, not by a NaN-aware check. Both accumulators seed from the
+FIRST value they see (`!lb.hasStats || v < lb.minF64`) and every later
+comparison against a NaN accumulator is IEEE-false, so a NaN's actual effect
+on the stored bound depends on where it falls in the row group:
+
+- **NaN elsewhere in the row group.** The min/max accumulated from the OTHER
+  values is correct and finite — NaN never wins a `<`/`>` against anything,
+  itself included, so it is silently skipped exactly as the format asks. The
+  footer's bound is a true statement about the non-NaN rows, but it is SILENT
+  about whether a NaN row is also present: `[1, 5]` is what a row group
+  holding `{1, 3, 5}` writes, and it is also what one holding `{1, 3, 5, NaN}`
+  writes.
+- **NaN is the FIRST value.** `!lb.hasStats` is true on that first call, so
+  `lb.minF64`/`lb.maxF64` are seeded to NaN unconditionally — and every
+  subsequent comparison against a NaN accumulator is IEEE-false, so nothing
+  after it can ever replace it. The row group's real finite min and max are
+  lost, not merely silent: the footer stores NaN as both bounds
+  (`buildStats` writes them through with no NaN check of its own).
+
+PostgreSQL's float order (ADR-0012 item 8) makes the silence load-bearing: NaN
+sorts ABOVE every value, so `> c`, `>= c` and `<> c` are TRUE for a hidden
+NaN row. Pruning a row group on a bound that cannot see that row would delete
+rows the filter keeps — a prune reading the predicate differently from the
+filter, which this ADR's whole point forbids. `CanPruneRowGroup`
+(`internal/engine/scan/pushdown.go`) therefore declines `>`, `>=` and `<>`
+for ANY float-typed bound, poisoned or not. `=`, `<` and `<=` need no
+exception: NaN satisfies none of them against a finite constant, whether or
+not one is hiding, so the bound decides those correctly either way — and in
+the poisoned case, `compareValuesOK`'s own `math.IsNaN` check refuses the
+comparison outright (`ok=false`), which happens to decline pruning for every
+operator there too, not only the three named above. That refusal is a
+correct side effect of a NaN-comparison guard written for a different reason
+(#442's cross-type coercion), not a deliberate second line of defense — the
+`>`/`>=`/`<>` decline in `CanPruneRowGroup` is the one this ADR asserts by
+name, and is what a test should gate rather than the accident it currently
+also survives on.
+
+The general form: **a statistics bound proves what it recorded, and is
+silent — not wrong — about a value the format told the writer to leave out.**
+A predicate whose truth depends on that excluded value's presence cannot be
+answered from the bound and must decline to prune, the same rule §1's
+ceilings apply to a claim the file never made in the first place.
+
 ## Consequences
 
 - Files that were read before and are refused now: a footer whose row groups

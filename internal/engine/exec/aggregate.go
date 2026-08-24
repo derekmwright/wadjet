@@ -1874,8 +1874,14 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 		// the binary key encoding losslessly AND boxes to a primitive whose
 		// reconstruction is trivial (GetValue parity: int64/int32/float/
 		// bool/string/[]byte). Network types, Date, and UUID box as
-		// FORMATTED STRINGS in GetValue; Decimal encodes float64 bits —
-		// those keep eager boxing. Kills the per-new-group []any +
+		// FORMATTED STRINGS in GetValue; Decimal boxes as one too
+		// (FormatDecimal at the column's scale, vector.go) but its storage
+		// is Int128 plus that scale, not a flat typed slice buildKeySerCols/
+		// serializeGroupKey's typed reconstruction below handles, and its
+		// KEY is the canonical unscaled digits at the column's scale
+		// (AppendDecimalKey, #474), not a float64 as it was before —
+		// Decimal keeps eager boxing for the storage-shape reason, not the
+		// old key-encoding one. Kills the per-new-group []any +
 		// GetValue-box + extras allocations that were 29% (mallocgc cum) of
 		// ClickBench Q19's profile.
 		h.deferGenericKeyBoxing = true

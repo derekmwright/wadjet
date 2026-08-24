@@ -80,11 +80,18 @@ consumer can sniff and decode, including mid-stream.
   back short. `hashRowsIntoPartitions`
   (`internal/worker/partitioned_shuffle_sink.go`) is that function, and it
   changed in the #397 wave — BOOL, DECIMAL and VECTOR keys hash their bytes
-  where they previously mixed a constant `0x00`. **So a cluster's coordinator
-  and workers are deployed WHOLESALE, never rolling**: a stage whose tasks run
-  a mix of binaries across a change to this function answers wrong, silently.
-  The same rule covers any future change to the hash, the partition count
-  derivation, or the WSHF field order.
+  where they previously mixed a constant `0x00` — and again in the #459/#474
+  wave (2026-08-24): the FLOAT32/FLOAT64 and VECTOR arms now hash the
+  CANONICAL bits (`kernel.KeyFloat32Bits`/`KeyFloat64Bits` — NaN payloads and
+  -0.0 folded, matching PostgreSQL's float order, ADR-0012 item 8) instead of
+  the raw IEEE754 bits, and the DECIMAL arm hashes the canonical unscaled
+  digits at the column's scale instead of a float64 cast, so a cross-scale
+  DECIMAL join co-partitions and a `{-0.0, 0.0}`/NaN GROUP BY does not split
+  across the shuffle. **So a cluster's coordinator and workers are deployed
+  WHOLESALE, never rolling**: a stage whose tasks run a mix of binaries
+  across a change to this function answers wrong, silently. The same rule
+  covers any future change to the hash, the partition count derivation, or
+  the WSHF field order.
 
 References: `docs/design/peer-wire-compression.md`,
 `docs/design/exchange-streaming-consumption.md`.
