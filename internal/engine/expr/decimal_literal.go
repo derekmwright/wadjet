@@ -1,6 +1,8 @@
 package expr
 
 import (
+	"sync/atomic"
+
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 )
@@ -30,6 +32,23 @@ type decimalLitCmp struct {
 	col  *ColRef
 	lits []*kernel.DecimalLiteral // one per literal operand, in operand order
 	flip bool                     // the literal was the LEFT operand
+
+	// notDecimal caches a settled "this column is not DECIMAL" answer. A
+	// column's type cannot change across the batches of one query, so the
+	// first batch that resolves the bound column to anything but DECIMAL
+	// settles it for every row of every later batch too. vector() checks
+	// this FIRST so the common case — every non-DECIMAL type, on the
+	// row-at-a-time path — costs one atomic load instead of a
+	// ColRef.resolve() call plus three field checks per row (measured
+	// +5.4% Cmp / +13% In on a FLOAT64 column before this cache existed).
+	//
+	// Cmp/In/Between are shared across parallel pipeline workers evaluating
+	// the same batch concurrently (see ColRef.resolved's doc comment), so
+	// this needs the same atomic publish that ColRef itself uses — a plain
+	// bool would be a data race. Concurrent writers can only ever agree
+	// (the answer is a pure function of the column's fixed type), so a
+	// losing racer's store is redundant, not wrong.
+	notDecimal atomic.Bool
 }
 
 // numericLit reports the exact source text of a numeric literal operand.
@@ -92,8 +111,12 @@ func bindDecimalList(col Expr, values []Expr) *decimalLitCmp {
 // or a VIEW whose values live in a base vector through an index (the decimal
 // kernels read DecimalData directly, as every other kernel does).
 func (d *decimalLitCmp) vector(b *batch.RecordBatch) *batch.Vector {
+	if d.notDecimal.Load() {
+		return nil
+	}
 	d.col.resolve(b)
 	if d.col.idx < 0 || d.col.idx >= len(b.Columns) || d.col.typ != batch.TypeDecimal {
+		d.notDecimal.Store(true)
 		return nil
 	}
 	v := b.Columns[d.col.idx]

@@ -144,6 +144,67 @@ func BenchmarkCaseWhen(b *testing.B) {
 	}
 }
 
+// BenchmarkComparisonDecimalBoundFloat64 measures the row-at-a-time Cmp path
+// on a FLOAT64 column compared against a numeric literal, built through
+// NewCmp so the decimalLitCmp binding is actually attached (a Cmp assembled
+// as a bare struct literal — as BenchmarkComparison above does — never sets
+// dec, so it can't see this cost at all). Every row on this path calls
+// decimalLitCmp.vector(), which must decide "not DECIMAL" and fall through;
+// this is the benchmark FIX-1 (notDecimal cache) targets.
+func BenchmarkComparisonDecimalBoundFloat64(b *testing.B) {
+	bb := benchBatch(2048)
+	e := NewCmp(&ColRef{Name: "amount"}, &Lit{Val: float64(100), Text: "100"}, CmpGt)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for row := 0; row < 2048; row++ {
+			_ = e.EvalBool(bb, row)
+		}
+	}
+}
+
+// BenchmarkDecimalLitCmpVectorNotDecimal isolates decimalLitCmp.vector()
+// itself, the exact code FIX-1 touches, from the surrounding Cmp.EvalBoolNull
+// generic-path fallback — which boxes the FLOAT64 column value into an `any`
+// every row (~2047 allocs/2048 rows) regardless of this fix, and dwarfs
+// vector()'s own cost on a wall-clock ns/op measurement. This benchmark calls
+// vector() directly in a tight loop so the resolve()+3-checks-vs-one-atomic-
+// load delta is visible on its own.
+func BenchmarkDecimalLitCmpVectorNotDecimal(b *testing.B) {
+	bb := benchBatch(2048)
+	d := bindDecimalCmp(&ColRef{Name: "amount"}, &Lit{Val: float64(100), Text: "100"})
+	if d == nil {
+		b.Fatal("expected a decimalLitCmp binding for col-op-lit")
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for row := 0; row < 2048; row++ {
+			_ = d.vector(bb)
+		}
+	}
+}
+
+// BenchmarkInExprDecimalBoundFloat64 is BenchmarkComparisonDecimalBoundFloat64's
+// counterpart for IN, built through NewIn so bindDecimalList actually attaches
+// dec (an In assembled as a bare struct literal never does).
+func BenchmarkInExprDecimalBoundFloat64(b *testing.B) {
+	bb := benchBatch(2048)
+	e := NewIn(&ColRef{Name: "amount"}, []Expr{
+		&Lit{Val: float64(0), Text: "0"},
+		&Lit{Val: float64(1), Text: "1"},
+		&Lit{Val: float64(5), Text: "5"},
+		&Lit{Val: float64(10), Text: "10"},
+	}, false)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for row := 0; row < 2048; row++ {
+			_ = e.EvalBool(bb, row)
+		}
+	}
+}
+
 func BenchmarkInExpr(b *testing.B) {
 	bb := benchBatch(2048)
 	e := &In{
