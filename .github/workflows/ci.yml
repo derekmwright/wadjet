@@ -95,8 +95,15 @@ jobs:
         # PredicateSemanticsTwoPath and MinByTwoPath never ran here, and
         # -short (the Unit Tests step above) skips them too. Broadened to
         # 'TestTypeMatrix' so every TwoPath gate in the package runs.
+        #
+        # TestQueryPanicBoundaryHoldsForEveryShape is joined to this step by
+        # name, not left to the regex above: it is a process-killer gate like
+        # TestTypeMatrixNoProcessKillers, it skips itself under -short (so the
+        # Unit Tests step above never runs it), and 'TestTypeMatrix' does not
+        # match it. Without this line the whole panic-boundary gate was dead
+        # in CI while passing locally.
         run: |
-          go test -v -run 'TestTypeMatrix' ./wadjet/ -timeout 15m
+          go test -v -run 'TestTypeMatrix|TestQueryPanicBoundary' ./wadjet/ -timeout 15m
           go test -v -run 'TestTypeMatrix' ./internal/coordinator/ -timeout 15m
 
       - name: Fuzz Seed Corpora (parquet decoders)

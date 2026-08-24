@@ -537,6 +537,21 @@ func Corpus() []Query {
 				oracle.CmpOrdered, n)
 			continue
 		}
+		// TEXT FUNCTIONS over a typed column. A vec string kernel reads its
+		// argument straight out of BytesData, so it indexes an offsets array
+		// that an INT64/DATE/IPv4/... column simply does not have. #509 was
+		// exactly that — CONCAT(text, bigint) killed the server on ordinary
+		// single-table SQL — and this corpus could not see it, because not
+		// one entry above routes a typed column into a text function at all.
+		// CONCAT reads EVERY argument as text (the multi-arg form is the one
+		// that regressed); UPPER reads its first, which is the #273 shape.
+		add("concat_"+n,
+			fmt.Sprintf(`SELECT id, CONCAT(c_str, %s) AS v FROM %s WHERE id %% 331 = 7 ORDER BY id`, n, tbl),
+			oracle.CmpOrdered, n)
+		add("upper_"+n,
+			fmt.Sprintf(`SELECT id, UPPER(%s) AS v FROM %s WHERE id %% 331 = 7 ORDER BY id`, n, tbl),
+			oracle.CmpOrdered, n)
+
 		// GROUP BY key: the key is serialized into the hash table and
 		// reconstructed on output, a second retention path with its own
 		// per-type encoding.
@@ -582,6 +597,22 @@ func Corpus() []Query {
 				fmt.Sprintf(`SELECT a.id AS id, b.%s AS v FROM %s a JOIN %s b ON a.id = b.id `+
 					`WHERE a.id %% 337 = 11 ORDER BY a.id`, n, tbl, tbl),
 				oracle.CmpOrdered, n)
+			// SEMI and ANTI joins. Their build side needs only key
+			// existence, so HashJoin.Build routes them to
+			// buildParallelKeyOnly — a morsel-parallel path with its own
+			// goroutines, its own shared source mutex and its own
+			// flattenSource wrapper, reached by nothing else in this corpus.
+			// A defect that lives only there (a panic under that mutex, a
+			// per-type key encoding the local tables get wrong) was
+			// invisible to every gate this corpus feeds.
+			add("semijoin_"+n,
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE a.%s IN `+
+					`(SELECT b.%s FROM %s b WHERE b.id < 500)`, tbl, n, n, tbl),
+				oracle.CmpUnordered, n)
+			add("antijoin_"+n,
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE NOT EXISTS `+
+					`(SELECT 1 FROM %s b WHERE b.%s = a.%s AND b.id < 500)`, tbl, tbl, n, n),
+				oracle.CmpUnordered, n)
 		}
 	}
 
