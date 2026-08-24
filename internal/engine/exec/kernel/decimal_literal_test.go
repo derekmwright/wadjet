@@ -149,3 +149,51 @@ func TestDecimalLiteralExponentFormIsStillRounded(t *testing.T) {
 			"round-trips through float64, so delete this pin")
 	}
 }
+
+// TestDecimalLiteralSaturatesPastTheCarrier is #462 at the unit. A literal
+// wider than Int128 at the column's scale used to be narrowed by
+// two's-complement wraparound and landed back inside the ordinary range: the
+// issue's own probe, NewDecimalLiteral("1e39").Order(a vector holding 1.50 at
+// scale 2), answered +1 — "the column's 1.50 is GREATER than 1e39".
+func TestDecimalLiteralSaturatesPastTheCarrier(t *testing.T) {
+	vec := decimalVec(t, 2, "1.50", "-1.50", "0.00")
+	for _, tc := range []struct {
+		lit  string
+		want int // Order() for every row: the literal is off the scale
+	}{
+		{"1000000000000000000000000000000000000000", -1},  // 1e39
+		{"-1000000000000000000000000000000000000000", 1},  // -1e39
+		{"99999999999999999999999999999999999999999", -1}, // 1e41 - 1
+		{"-99999999999999999999999999999999999999999", 1},
+	} {
+		lit := NewDecimalLiteral(tc.lit)
+		for row := 0; row < 3; row++ {
+			if got := lit.Order(vec, row); got != tc.want {
+				t.Errorf("NewDecimalLiteral(%q).Order(row %d) = %d, want %d",
+					tc.lit, row, got, tc.want)
+			}
+		}
+		// Every operator reads that one order, so the whole family follows.
+		if lit.Compare(vec, 0, OpEq) {
+			t.Errorf("%s: a value past the carrier equals a stored 1.50", tc.lit)
+		}
+		wantGt := tc.want > 0
+		if got := lit.Compare(vec, 0, OpGt); got != wantGt {
+			t.Errorf("%s: 1.50 > literal = %v, want %v", tc.lit, got, wantGt)
+		}
+	}
+}
+
+// TestDecimalLiteralSaturationIsScaleDependent: an in-range literal at one
+// scale is out of range at another, because the carrier holds the UNSCALED
+// integer. 10^30 fits Int128 at scale 0 and needs 40 digits at scale 10.
+func TestDecimalLiteralSaturationIsScaleDependent(t *testing.T) {
+	const wide = "1000000000000000000000000000000" // 10^30
+	lit := NewDecimalLiteral(wide)
+	if got := lit.Order(decimalVec(t, 0, "1"), 0); got != -1 {
+		t.Errorf("scale 0: Order = %d, want -1", got)
+	}
+	if got := lit.Order(decimalVec(t, 10, "1.0000000000"), 0); got != -1 {
+		t.Errorf("scale 10 (saturating): Order = %d, want -1", got)
+	}
+}

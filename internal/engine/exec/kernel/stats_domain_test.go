@@ -142,13 +142,13 @@ func TestStatsDomainValueAgreesWithTheFilterKernel(t *testing.T) {
 	}
 	// The DECIMAL literal the kernel resolves at scale 2 is the same unscaled
 	// integer this hands the prune.
-	lit, residual := decimalLiteralAt(decimalLiteralText(0.25), 2)
-	if residual != 0 {
-		t.Fatalf("0.25 at scale 2 should be exact, residual %d", residual)
+	lit := decimalLiteralAt(decimalLiteralText(0.25), 2)
+	if lit.Residual != 0 || lit.Sat != 0 {
+		t.Fatalf("0.25 at scale 2 should be exact, residual %d sat %d", lit.Residual, lit.Sat)
 	}
 	got, ok := StatsDomainValue(batch.TypeDecimal, 2, 0.25)
-	if !ok || got != lit.ToInt64() {
-		t.Errorf("decimal stats value %#v, kernel literal %d", got, lit.ToInt64())
+	if !ok || got != lit.Unscaled.ToInt64() {
+		t.Errorf("decimal stats value %#v, kernel literal %d", got, lit.Unscaled.ToInt64())
 	}
 }
 

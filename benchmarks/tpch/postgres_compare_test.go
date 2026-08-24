@@ -518,6 +518,27 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DecimalTwoColumns", sql: `SELECT d_key FROM dec_probe WHERE d_2 = 12.75 AND d_4 >= 0 ORDER BY d_key`},
 	)
 
+	// A literal wider than the 128-bit carrier at the column's scale (#462).
+	// PostgreSQL's numeric is unbounded, so it answers these by ordinary
+	// comparison and every row is on one side of the literal. Wadjet narrowed
+	// the literal by two's-complement WRAPAROUND, which landed it back inside
+	// the ordinary range — sometimes with the opposite sign — so `d_2 < 1e39`
+	// returned nothing at all. Written out in full as well as in exponent
+	// form: the two spellings must agree.
+	out = append(out,
+		pgCase{name: "DecimalLtPastCarrier", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 < 1000000000000000000000000000000000000000`},
+		pgCase{name: "DecimalGtPastCarrierNegative", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 > -1000000000000000000000000000000000000000`},
+		pgCase{name: "DecimalGtPastCarrier", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 > 1000000000000000000000000000000000000000`},
+		pgCase{name: "DecimalEqPastCarrier", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 = 1000000000000000000000000000000000000000`},
+		pgCase{name: "DecimalNePastCarrier", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 <> 1000000000000000000000000000000000000000`},
+		pgCase{name: "DecimalInPastCarrier", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IN (1000000000000000000000000000000000000000, 12.75)`},
+		pgCase{name: "DecimalBetweenPastCarrier", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 BETWEEN -1000000000000000000000000000000000000000 AND 1000000000000000000000000000000000000000`},
+		// In range as an integer, out of range once the column's scale of 10
+		// is applied: saturation is a property of the SCALED value.
+		pgCase{name: "WideDecimalLtPastCarrierAtScale", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide < 100000000000000000000000000000`},
+		pgCase{name: "WideDecimalGtPastCarrierAtScale", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide > 100000000000000000000000000000`},
+	)
+
 	// --- Wide DECIMAL (precision 38) --------------------------------------
 	//
 	// Everything above runs on ONE physical encoding. A DECIMAL's leaf type is

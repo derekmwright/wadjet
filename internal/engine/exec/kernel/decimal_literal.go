@@ -35,9 +35,8 @@ type DecimalLiteral struct {
 // decimalLiteralScaled is one literal at one scale. Scale is part of the value
 // because nothing promises a literal only ever meets one column.
 type decimalLiteralScaled struct {
-	scale    int
-	lit      batch.Int128
-	residual int
+	scale int
+	sd    batch.ScaledDecimal
 }
 
 // NewDecimalLiteral binds literal text — plain or exponent form — for
@@ -50,21 +49,25 @@ func (d *DecimalLiteral) at(scale int) *decimalLiteralScaled {
 	if r := d.resolved.Load(); r != nil && r.scale == scale {
 		return r
 	}
-	lit, residual := decimalLiteralAt(d.text, scale)
-	r := &decimalLiteralScaled{scale: scale, lit: lit, residual: residual}
+	r := &decimalLiteralScaled{scale: scale, sd: decimalLiteralAt(d.text, scale)}
 	d.resolved.Store(r)
 	return r
 }
 
 // Order returns -1, 0 or +1 as vec[row] is less than, equal to, or greater
 // than the literal — exactly, including for a literal with more fractional
-// digits than the column's scale, which equals no stored value but still has
-// a place in the order.
+// digits than the column's scale (which equals no stored value but still has
+// a place in the order) and for one wider than the carrier itself (which
+// orders above or below every value the column can hold).
 //
 // The caller owns the null check: a NULL row has no value to order.
 func (d *DecimalLiteral) Order(vec *batch.Vector, row int) int {
-	r := d.at(vec.DecimalData.Scale)
-	return decimalOrder(vec.DecimalData.Data[row], r.lit, r.residual)
+	return d.at(vec.DecimalData.Scale).sd.Order(vec.DecimalData.Data[row])
+}
+
+// OrderAt is Order against a value already read out of a column at `scale`.
+func (d *DecimalLiteral) OrderAt(cell batch.Int128, scale int) int {
+	return d.at(scale).sd.Order(cell)
 }
 
 // Compare answers `vec[row] <op> literal`.

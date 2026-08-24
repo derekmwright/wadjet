@@ -111,6 +111,17 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      the row holding `0.25` that `>= 0.25` admits. Truncating the literal
      instead would answer a different question; the residual of the discarded
      digits is carried rather than dropped.
+   - A literal the CARRIER cannot hold at that scale — `1e39`, or `10^30`
+     against a `DECIMAL(38,10)`, whose unscaled integer needs more than the
+     128 bits `Int128` has — keeps its place in the order by SATURATING: it
+     compares strictly greater (or strictly less, when negative) than every
+     value the column can hold, which is what it is. It never wraps and never
+     errors. Narrowing it two's-complement instead put it back INSIDE the
+     ordinary range as a plausible number of either sign, so `WHERE d < 1e39`
+     — true of every row — selected none of them (#462). The order this
+     produces is the order of the exact rationals, saturation included, which
+     `batch.TestScaledDecimalOrderIsTransitiveAtTheBoundary` asserts over
+     every triple of stored values and constants either side of the ends.
    - One conversion serves the prune and the filter
      (`kernel.StatsDomainValue`, `kernel.decimalLiteralAt`), because a prune
      that reads the predicate differently from the filter deletes rows the

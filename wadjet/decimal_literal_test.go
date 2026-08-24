@@ -363,3 +363,48 @@ func TestDecimalLiteralInEveryClause(t *testing.T) {
 		})
 	}
 }
+
+// TestDecimalLiteralPastTheCarrierSaturates is #462 end to end. A literal too
+// wide for Int128 at the column's scale used to WRAP two's complement and
+// reappear inside the ordinary range, so `WHERE d_2 < 1e39` — true of every
+// row the column can hold — returned none of them.
+//
+// Every expectation is PostgreSQL's, whose numeric is unbounded and compares
+// these exactly (verified against postgres:17-alpine on the same fixture).
+func TestDecimalLiteralPastTheCarrierSaturates(t *testing.T) {
+	ctx := context.Background()
+	db := declitOpen(t)
+
+	// Written out in full as well as in exponent form: the plain spelling is
+	// what a wrapped narrowing hit first, and the two must agree.
+	const e39 = "1000000000000000000000000000000000000000"
+	for _, tc := range []struct {
+		pred string
+		want int64
+	}{
+		{"d_2 < 1e39", 188},
+		{"d_2 < " + e39, 188},
+		{"d_2 <= " + e39, 188},
+		{"d_2 > -1e39", 188},
+		{"d_2 >= -" + e39, 188},
+		{"d_2 <> " + e39, 188},
+		{"d_2 > 1e39", 0},
+		{"d_2 >= " + e39, 0},
+		{"d_2 = " + e39, 0},
+		{"d_2 < -" + e39, 0},
+		{"d_2 IN (" + e39 + ", -" + e39 + ")", 0},
+		{"d_2 BETWEEN -" + e39 + " AND " + e39, 188},
+		// The same literal against the WIDE column: 10^29 is inside Int128 as
+		// an integer and outside it once the column's scale of 10 is applied.
+		{"d_wide < 100000000000000000000000000000", 184},
+		{"d_wide > 100000000000000000000000000000", 0},
+	} {
+		t.Run(tc.pred, func(t *testing.T) {
+			declitCheck(t, ctx, db,
+				"SELECT COUNT(*) AS n FROM declit WHERE "+tc.pred, tc.want)
+			declitCheck(t, ctx, db,
+				"SELECT COUNT(*) AS n FROM declit WHERE CASE WHEN "+tc.pred+
+					" THEN 1 ELSE 0 END = 1", tc.want)
+		})
+	}
+}

@@ -160,6 +160,27 @@ func (d Int128) Equal(other Int128) bool {
 	return d.Hi == other.Hi && d.Lo == other.Lo
 }
 
+// Cmp orders two values: -1, 0 or +1 as d is less than, equal to or greater
+// than other. Every DECIMAL comparison in the engine bottoms out here.
+func (d Int128) Cmp(other Int128) int {
+	if d.Less(other) {
+		return -1
+	}
+	if other.Less(d) {
+		return 1
+	}
+	return 0
+}
+
+// Int128Max and Int128Min are the widest values the carrier holds. A DECIMAL
+// column never reaches them — 10^38 < 2^127 — but a LITERAL in a predicate is
+// under no such limit, and the two are what a literal outside the range
+// saturates to.
+var (
+	Int128Max = Int128{Hi: math.MaxInt64, Lo: math.MaxUint64}
+	Int128Min = Int128{Hi: math.MinInt64, Lo: 0}
+)
+
 // pow10u64 holds the powers of ten that fit in a uint64 (10^19 < 2^64).
 var pow10u64 = [20]uint64{
 	1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000,
@@ -383,61 +404,198 @@ func NewDecimalColumn(capacity, scale int) DecimalColumn {
 	}
 }
 
-// ParseDecimalString parses a decimal string like "123.45" into an Int128 with the given scale.
-func ParseDecimalString(s string, scale int) Int128 {
-	s = strings.TrimSpace(s)
-	neg := false
-	if len(s) > 0 && s[0] == '-' {
-		neg = true
-		s = s[1:]
-	} else if len(s) > 0 && s[0] == '+' {
-		s = s[1:]
-	}
+// ScaledDecimal is a numeric value resolved into a DECIMAL column's domain:
+// the unscaled integer at that column's scale, plus everything the domain
+// could not hold. It is the single carrier every DECIMAL comparison converts
+// a constant through — the vectorized kernel, the row-at-a-time expression
+// and the row-group prune — so that one predicate cannot be read three ways.
+type ScaledDecimal struct {
+	// Unscaled is the value at the column's scale, truncated toward zero.
+	Unscaled Int128
+	// Residual is the SIGN of what the truncation dropped: +1 when the true
+	// value is strictly above Unscaled, -1 when strictly below, 0 when the
+	// conversion was exact. It is what keeps a literal finer than the
+	// column's scale in its rational place in the order (ADR-0012 item 6).
+	Residual int
+	// Sat is 0 when the true value HAS an Int128 at this scale, and +1 / -1
+	// when it lies above Int128Max / below Int128Min.
+	//
+	// A value outside the range orders above (or below) every value the
+	// column can hold, which is what it actually is. Narrowing it by
+	// two's-complement wraparound instead landed it back INSIDE the ordinary
+	// range, so `WHERE d < 1e39` — true of every row — selected none of them
+	// (#462).
+	Sat int
+}
 
-	parts := strings.SplitN(s, ".", 2)
-	intStr := parts[0]
-	fracStr := ""
-	if len(parts) == 2 {
-		fracStr = parts[1]
+// Order returns -1, 0 or +1 as an unscaled column value at the SAME scale is
+// less than, equal to, or greater than this value.
+func (s ScaledDecimal) Order(cell Int128) int {
+	switch {
+	case s.Sat > 0:
+		return -1 // every representable value is below a saturated maximum
+	case s.Sat < 0:
+		return 1
 	}
+	if c := cell.Cmp(s.Unscaled); c != 0 {
+		return c
+	}
+	// Equal to what the truncation kept: a positive residual means the true
+	// constant is larger than that, so the column's value is smaller.
+	return -s.Residual
+}
 
-	// Pad or truncate fractional part to match scale
-	if len(fracStr) < scale {
-		fracStr += strings.Repeat("0", scale-len(fracStr))
-	} else if len(fracStr) > scale {
-		fracStr = fracStr[:scale]
-	}
+// maxInt128Digits is the widest base-10 magnitude an Int128 can hold: 2^127-1
+// has 39 digits, so 40 digits never fits and 39 has to be checked.
+const maxInt128Digits = 39
 
-	combined := intStr + fracStr
-	if combined == "" {
-		return Int128{}
+// saturatedDecimal is the ScaledDecimal for a magnitude outside the Int128
+// range, on the given side of it.
+func saturatedDecimal(neg bool) ScaledDecimal {
+	if neg {
+		return ScaledDecimal{Unscaled: Int128Min, Sat: -1}
 	}
+	return ScaledDecimal{Unscaled: Int128Max, Sat: 1}
+}
 
-	// The narrow arm is every value a DECIMAL(p <= 18) column can hold. The
-	// wide one is why this is not a Sscanf into an int64 any more: that
-	// returned an error nobody read and left the value at whatever it had
-	// parsed, so a 20-digit unscaled value — which #429 made wadjet write
-	// itself — round-tripped through FormatDecimal as zero or as its prefix.
-	if v, err := strconv.ParseInt(combined, 10, 64); err == nil {
-		result := Int128From(v)
-		if neg {
-			result = result.Neg()
-		}
-		return result
-	}
-	b, ok := new(big.Int).SetString(combined, 10)
+// DecimalTextAt resolves numeric TEXT into a DECIMAL column's domain at
+// `scale`, exactly and without ever going through a float64.
+//
+// ok=false means the text is not a number. It is deliberately NOT reported as
+// the value zero: a constant nobody can read used to compare EQUAL to every
+// stored zero (#463), which is the most dangerous shape a parse failure can
+// take because it neither errors nor returns nothing.
+func DecimalTextAt(text string, scale int) (ScaledDecimal, bool) {
+	neg, digits, exp, ok := decimalParts(text)
 	if !ok {
-		return Int128{}
+		return ScaledDecimal{}, false
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return ScaledDecimal{}, true // zero, at every scale
+	}
+	sign := 1
+	if neg {
+		sign = -1
+	}
+	// The unscaled value at `scale` is digits x 10^(exp+scale).
+	shift := exp + scale
+	residual := 0
+	var kept string
+	switch {
+	case shift >= 0:
+		if len(digits)+shift > maxInt128Digits {
+			return saturatedDecimal(neg), true
+		}
+		kept = digits + strings.Repeat("0", shift)
+	default:
+		drop := -shift
+		if drop >= len(digits) {
+			// Smaller in magnitude than one unit at this scale: it truncates
+			// to zero but is not zero, and the residual is what keeps
+			// `> 0.0001` from admitting the row holding 0.00.
+			return ScaledDecimal{Residual: sign}, true
+		}
+		kept, digits = digits[:len(digits)-drop], digits[len(digits)-drop:]
+		if strings.Trim(digits, "0") != "" {
+			residual = sign
+		}
+		if len(kept) > maxInt128Digits {
+			return saturatedDecimal(neg), true
+		}
+	}
+	v, ok := int128FromDigits(kept, neg)
+	if !ok {
+		return saturatedDecimal(neg), true
+	}
+	return ScaledDecimal{Unscaled: v, Residual: residual}, true
+}
+
+// decimalParts splits numeric text into its sign, its digits with the decimal
+// point removed, and the power of ten those digits must be multiplied by.
+// ok=false for anything that is not a plain decimal number.
+func decimalParts(s string) (neg bool, digits string, exp int, ok bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false, "", 0, false
+	}
+	switch s[0] {
+	case '-':
+		neg, s = true, s[1:]
+	case '+':
+		s = s[1:]
+	}
+	intPart, fracPart, _ := strings.Cut(s, ".")
+	if !allDigits(intPart) || !allDigits(fracPart) || intPart+fracPart == "" {
+		return false, "", 0, false
+	}
+	return neg, intPart + fracPart, -len(fracPart), true
+}
+
+func allDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// int128FromDigits reads a base-10 MAGNITUDE (no sign, no leading zeros
+// required) into a signed Int128, reporting false when it does not fit.
+func int128FromDigits(digits string, neg bool) (Int128, bool) {
+	// 19 digits is the widest magnitude that certainly fits a uint64, and it
+	// covers every DECIMAL(p <= 18) column.
+	if len(digits) <= 19 {
+		u, err := strconv.ParseUint(digits, 10, 64)
+		if err != nil {
+			return Int128{}, false
+		}
+		v := Int128{Lo: u}
+		if neg {
+			v = v.Neg()
+		}
+		return v, true
+	}
+	b, ok := new(big.Int).SetString(digits, 10)
+	if !ok {
+		return Int128{}, false
 	}
 	if neg {
 		b.Neg(b)
 	}
-	return int128FromBig(b)
+	if !fitsInt128(b) {
+		return Int128{}, false
+	}
+	return int128FromBig(b), true
 }
 
-// int128FromBig narrows a big.Int to Int128, wrapping (two's complement) if it
-// does not fit — which no DECIMAL(38) value can do, since 10^38 < 2^127.
+// ParseDecimalString parses a decimal string like "123.45" into an Int128 at
+// the given scale, truncating toward zero. Text that is not a number reads as
+// zero here — callers that must tell "not a number" from "the value zero"
+// take DecimalTextAt, which is the same conversion with that answer kept.
+func ParseDecimalString(s string, scale int) Int128 {
+	d, ok := DecimalTextAt(s, scale)
+	if !ok {
+		return Int128{}
+	}
+	return d.Unscaled
+}
+
+// int128FromBig narrows a big.Int to Int128, SATURATING at the range's ends.
+//
+// It used to wrap two's complement, on the argument that no DECIMAL(38) value
+// can overflow — true of a column's values, false of a literal compared
+// against one, and a wrapped literal reappears inside the ordinary range as a
+// perfectly plausible number of the wrong sign (#462). Saturation keeps it on
+// the correct side of every value the column holds.
 func int128FromBig(b *big.Int) Int128 {
+	if !fitsInt128(b) {
+		if b.Sign() < 0 {
+			return Int128Min
+		}
+		return Int128Max
+	}
 	neg := b.Sign() < 0
 	mag := new(big.Int).Abs(b)
 	lo := new(big.Int).And(mag, new(big.Int).SetUint64(^uint64(0))).Uint64()

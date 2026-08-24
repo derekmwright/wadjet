@@ -239,12 +239,12 @@ func toBytesString(v any) string {
 func compareFilterDecimal(op CompareOp, value any) FilterKernel {
 	text := decimalLiteralText(value)
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
-		lit, residual := decimalLiteralAt(text, vec.DecimalData.Scale)
+		lit := decimalLiteralAt(text, vec.DecimalData.Scale)
 		data := vec.DecimalData.Data
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()
 		keep := func(i int) bool {
-			return applyCompareOp(decimalOrder(data[i], lit, residual), op)
+			return applyCompareOp(lit.Order(data[i]), op)
 		}
 		if sel != nil {
 			for _, idx := range sel {
@@ -272,17 +272,10 @@ func compareFilterDecimal(op CompareOp, value any) FilterKernel {
 // compareInt128 is defined in sort.go (same package) — both the sort kernels
 // and the DECIMAL filter/equality kernels below compare on the same Int128
 // representation and share the one function.
-
-// decimalOrder orders one stored value against a constant already truncated to
-// the column's scale, using the truncation's residual to settle a tie: a
-// positive residual means the true constant is larger than what was kept, so
-// the equal-looking column value is actually smaller.
-func decimalOrder(cell, lit batch.Int128, residual int) int {
-	if c := compareInt128(cell, lit); c != 0 {
-		return c
-	}
-	return -residual
-}
+//
+// The DECIMAL-against-constant order is batch.ScaledDecimal.Order: the
+// constant resolved into the column's domain, ordered against a stored cell,
+// residual and out-of-range saturation included.
 
 func applyCompareOp(c int, op CompareOp) bool {
 	switch op {
@@ -341,31 +334,16 @@ func normalizeDecimalText(s string) string {
 	return strconv.FormatFloat(f, 'f', -1, 64)
 }
 
-// decimalLiteralAt truncates plain decimal text to `scale` and reports the
-// residual: +1 when the true value is strictly greater than the truncation
-// kept (positive number with discarded non-zero digits), -1 when strictly
-// less (negative number, same), 0 when the truncation was exact.
-func decimalLiteralAt(text string, scale int) (batch.Int128, int) {
-	lit := batch.ParseDecimalString(text, scale)
-	t := strings.TrimSpace(text)
-	neg := strings.HasPrefix(t, "-")
-	dot := strings.IndexByte(t, '.')
-	if dot < 0 {
-		return lit, 0
-	}
-	frac := t[dot+1:]
-	if len(frac) <= scale {
-		return lit, 0
-	}
-	for _, c := range frac[scale:] {
-		if c >= '1' && c <= '9' {
-			if neg {
-				return lit, -1
-			}
-			return lit, 1
-		}
-	}
-	return lit, 0
+// decimalLiteralAt resolves plain decimal text into a column's domain at
+// `scale`: the unscaled value, the residual of the digits the scale could not
+// hold, and the saturation of a magnitude wider than Int128.
+//
+// Text that is not a number resolves to the zero value, which orders as the
+// number zero — the behaviour every other kernel's conversion has for an
+// unusable constant.
+func decimalLiteralAt(text string, scale int) batch.ScaledDecimal {
+	d, _ := batch.DecimalTextAt(text, scale)
+	return d
 }
 
 // compareFilterString handles string column comparison.
@@ -647,11 +625,13 @@ func inFilterDecimal(values []any, negate bool) FilterKernel {
 		if set == nil || memoScale != scale {
 			set = make(map[batch.Int128]struct{}, len(texts))
 			for _, t := range texts {
-				lit, residual := decimalLiteralAt(t, scale)
-				if residual != 0 {
-					continue // not representable at this scale: equals nothing
+				lit := decimalLiteralAt(t, scale)
+				if lit.Residual != 0 || lit.Sat != 0 {
+					// Not representable at this scale, or outside the
+					// carrier's range entirely: equals nothing.
+					continue
 				}
-				set[lit] = struct{}{}
+				set[lit.Unscaled] = struct{}{}
 			}
 			memoSet, memoScale = set, scale
 		}
