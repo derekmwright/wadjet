@@ -827,6 +827,7 @@ func TestReAggregatePartialsMerge(t *testing.T) {
 		AggExprs:     []logical.AggExpr{{Func: "sum", InputCol: "revenue", OutputCol: "revenue"}},
 		OrderBy:      []logical.OrderExpr{{Column: "revenue", Desc: true}},
 		Limit:        20,
+		HasLimit:     true,
 		HasAggregate: true,
 	}
 
@@ -942,6 +943,7 @@ func TestTopKMerge(t *testing.T) {
 		AggExprs:     []logical.AggExpr{{Func: "sum", InputCol: "val", OutputCol: "val"}},
 		OrderBy:      []logical.OrderExpr{{Column: "val", Desc: true}},
 		Limit:        3,
+		HasLimit:     true,
 		HasAggregate: true,
 	}
 
@@ -971,6 +973,51 @@ func TestTopKMerge(t *testing.T) {
 		wantVal := float64(100 - i)
 		if gotVal != wantVal {
 			t.Errorf("row %d: val = %f, want %f", i, gotVal, wantVal)
+		}
+	}
+}
+
+// TestMergeProbePartials_LimitZero is the probe-split-merge regression test
+// for #481: mergeProbePartials used `keep > 0` to decide whether to
+// truncate, so a real `ORDER BY ... LIMIT 0` (KeepRows() == 0) fell through
+// the truncation guard and returned every merged row instead of zero.
+func TestMergeProbePartials_LimitZero(t *testing.T) {
+	coord := &Coordinator{}
+
+	schema := []parquet.Column{
+		{Name: "key", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeFloat64},
+	}
+	columns := []string{"key", "val"}
+
+	b := batch.NewRecordBatch(schema, 100)
+	for i := 0; i < 100; i++ {
+		b.Columns[0].Int64Data[i] = int64(i)
+		b.Columns[0].Nulls.SetValid(i)
+		b.Columns[1].Float64Data[i] = float64(100 - i)
+		b.Columns[1].Nulls.SetValid(i)
+	}
+	b.Len = 100
+
+	mi := &logical.MergeInfo{
+		GroupBy:      []string{"key"},
+		AggExprs:     []logical.AggExpr{{Func: "sum", InputCol: "val", OutputCol: "val"}},
+		OrderBy:      []logical.OrderExpr{{Column: "val", Desc: true}},
+		Limit:        0,
+		HasLimit:     true,
+		HasAggregate: true,
+	}
+
+	merged, totalRows, err := coord.mergeProbePartials(newSliceStream([]*batch.RecordBatch{b}), columns, mi)
+	if err != nil {
+		t.Fatalf("mergeProbePartials error: %v", err)
+	}
+	if totalRows != 0 {
+		t.Errorf("totalRows = %d, want 0", totalRows)
+	}
+	for _, mb := range merged {
+		if mb.ActiveLen() != 0 {
+			t.Errorf("merged batch has %d active rows, want 0", mb.ActiveLen())
 		}
 	}
 }

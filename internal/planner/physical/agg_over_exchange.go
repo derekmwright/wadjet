@@ -85,7 +85,7 @@ func rewireAggOverRawExchange(stages []Stage) []Stage {
 		fa := &stages[fi]
 		if fa.Type != "final_aggregate" || len(fa.Dependencies) != 1 ||
 			len(fa.GroupByCols) == 0 || fa.GroupByAll ||
-			len(fa.SortKeys) > 0 || fa.Limit > 0 || fa.MergeGroupCount > 0 {
+			len(fa.SortKeys) > 0 || fa.HasLimit || fa.MergeGroupCount > 0 {
 			continue
 		}
 		bIdx, ok := idIndex[fa.Dependencies[0]]

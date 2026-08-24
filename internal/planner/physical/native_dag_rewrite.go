@@ -190,16 +190,18 @@ func fuseSortIntoPredecessor(stages []Stage, workerCount int) []Stage {
 		// input on the group keys and fans it out; each shard owns disjoint
 		// groups, so exact per-shard aggregates + local top-Limit are a
 		// superset of the global top-Limit) and KEEP this sort stage as the
-		// N×Limit-row merge. Limit > 0 is load-bearing: it bounds the merge
-		// input; ORDER BY without LIMIT keeps today's fuse.
+		// N×Limit-row merge. A set Limit is load-bearing (including a real
+		// LIMIT 0 — #481): it bounds the merge input; ORDER BY without
+		// LIMIT keeps today's fuse.
 		// Kill switch WADJET_SHARDED_FINALS=0.
 		if ShardedSortFinals.Load() && workerCount > 1 &&
 			pred.Type == "final_aggregate" && len(pred.GroupByCols) > 0 &&
-			s.Limit > 0 && len(pred.Dependencies) == 1 {
+			s.HasLimit && len(pred.Dependencies) == 1 {
 			if depIdx, ok := idIndex[pred.Dependencies[0]]; ok &&
 				stages[depIdx].Distribution.Kind != DistSingleton {
 				pred.SortKeys = append([]SortKeySpec(nil), s.SortKeys...)
 				pred.Limit = s.Limit
+				pred.HasLimit = true
 				pred.SortShardLocal = true
 				continue // sort stage survives as the merge
 			}
@@ -221,8 +223,9 @@ func fuseSortIntoPredecessor(stages []Stage, workerCount int) []Stage {
 		}
 		// Fold sort into predecessor.
 		pred.SortKeys = append([]SortKeySpec(nil), s.SortKeys...)
-		if s.Limit > 0 {
+		if s.HasLimit {
 			pred.Limit = s.Limit
+			pred.HasLimit = true
 		}
 		droppedSort[s.ID] = pred.ID
 	}

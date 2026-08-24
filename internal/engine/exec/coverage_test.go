@@ -967,7 +967,8 @@ func TestSinkDetachPooledBatch(t *testing.T) {
 
 	// --- Test Sort ---
 	s := &Sort{
-		Keys: []SortKey{{Column: "id", Order: Ascending}},
+		Keys:  []SortKey{{Column: "id", Order: Ascending}},
+		Limit: -1,
 	}
 	s.Init(context.Background())
 

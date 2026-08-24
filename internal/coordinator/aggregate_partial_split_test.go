@@ -109,7 +109,15 @@ func TestAggregatePartialSplit_Trigger(t *testing.T) {
 		},
 		{
 			name:   "limit_excluded",
-			stage:  withField(func(s *physical.Stage) { s.Limit = 10 }),
+			stage:  withField(func(s *physical.Stage) { s.Limit = 10; s.HasLimit = true }),
+			inputs: partitioned, workers: 3, curTasks: 1, wantOK: false,
+		},
+		{
+			// #481: a real LIMIT 0 must exclude the split exactly like any
+			// other limit — HasLimit is what the guard now consults, never
+			// `Limit != 0`, which would have missed this case entirely.
+			name:   "limit_zero_excluded",
+			stage:  withField(func(s *physical.Stage) { s.Limit = 0; s.HasLimit = true }),
 			inputs: partitioned, workers: 3, curTasks: 1, wantOK: false,
 		},
 		{

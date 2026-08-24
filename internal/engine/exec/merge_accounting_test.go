@@ -36,7 +36,7 @@ func TestSortMergeSink_TransfersAccounting(t *testing.T) {
 		return batch.FromRows(schema, rows)
 	}
 
-	primary := &Sort{Keys: []SortKey{{Column: "k"}}, Spill: real}
+	primary := &Sort{Keys: []SortKey{{Column: "k"}}, Limit: -1, Spill: real}
 	clone := primary.CloneSink().(*Sort)
 	clone.Spill = view
 

@@ -71,7 +71,7 @@ func chainProducerEligible(s *Stage) bool {
 		len(s.ChainedAggSpecs) == 0 && len(s.ChainedAggGroupBy) == 0 &&
 		s.Distribution.Kind == DistHashPartitioned && s.Distribution.Count > 0 &&
 		s.Exchange == nil &&
-		len(s.SortKeys) == 0 && s.Limit == 0 &&
+		len(s.SortKeys) == 0 && !s.HasLimit &&
 		len(s.GroupByCols) == 0 && len(s.AggSpecs) == 0 && !s.GroupByAll &&
 		s.ProbeSplitAlias == "" && len(s.ProbeSplitFiles) == 0 &&
 		len(s.BuildCachePreScans) == 0 && len(s.PreComputedAggregates) == 0 &&
@@ -112,7 +112,7 @@ func chainConsumerEligible(c, p *Stage) bool {
 	}
 	// Every other producer-side restriction applies to the consumer too.
 	return c.Exchange == nil &&
-		len(c.SortKeys) == 0 && c.Limit == 0 &&
+		len(c.SortKeys) == 0 && !c.HasLimit &&
 		len(c.GroupByCols) == 0 && len(c.AggSpecs) == 0 && !c.GroupByAll &&
 		c.ProbeSplitAlias == "" && len(c.ProbeSplitFiles) == 0 &&
 		len(c.BuildCachePreScans) == 0 && len(c.PreComputedAggregates) == 0 &&
@@ -281,7 +281,7 @@ func chainAggConsumerEligible(c, p *Stage) bool {
 	// never belong to the absorbable shape.
 	return !c.GroupByAll &&
 		c.Exchange == nil &&
-		len(c.SortKeys) == 0 && c.Limit == 0 &&
+		len(c.SortKeys) == 0 && !c.HasLimit &&
 		len(c.FilterExprs) == 0 &&
 		len(c.FusedAggGroupBy) == 0 && len(c.FusedAggSpecs) == 0 &&
 		!c.RawInputAggregate &&

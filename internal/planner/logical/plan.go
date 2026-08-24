@@ -361,6 +361,7 @@ func ExtractMergeInfo(plan *Node) *MergeInfo {
 	n := plan
 	if n.Type == NodeLimit {
 		mi.Limit = n.LimitVal
+		mi.HasLimit = n.LimitVal != NoLimit
 		mi.Offset = n.OffsetVal
 		if len(n.Children) > 0 {
 			n = n.Children[0]
@@ -445,9 +446,17 @@ type MergeInfo struct {
 	GroupBy  []string
 	AggExprs []AggExpr
 	OrderBy  []OrderExpr
-	// Limit is the top-level LIMIT, or NoLimit when the statement has only
-	// an OFFSET. Test Limit > 0 before using it as a row bound.
-	Limit int
+	// Limit is the top-level LIMIT value; meaningful only when HasLimit is
+	// true. HasLimit is false both when the statement has no LIMIT at all
+	// and when it has only an OFFSET (NoLimit) — a companion bool rather
+	// than folding NoLimit into Limit itself, because the many test
+	// literals that construct a MergeInfo{} directly (never touching
+	// Limit) must keep meaning "unbounded" by leaving both fields at their
+	// zero value. Before HasLimit existed, `Limit > 0` doubled as that
+	// same test, so a probe-split merge for `... LIMIT 0` silently kept
+	// every row instead of zero (#481) — test HasLimit, never `Limit > 0`.
+	Limit    int
+	HasLimit bool
 	// Offset is the top-level OFFSET. Rows to keep are [Offset, Offset+Limit)
 	// — a merge that truncates to Limit before skipping Offset returns the
 	// first page for every page (#337).
@@ -457,10 +466,13 @@ type MergeInfo struct {
 }
 
 // KeepRows is the number of rows a merge step must hold on to before the
-// offset is applied: everything up to Offset+Limit. Zero means unbounded.
+// offset is applied: everything up to Offset+Limit. Returns NoLimit (-1)
+// when unbounded — never 0, which is itself a real, meaningful "keep
+// nothing" answer for a top-level `LIMIT 0` (#481). Callers must test
+// `KeepRows() >= 0`, never `KeepRows() > 0`.
 func (mi *MergeInfo) KeepRows() int {
-	if mi.Limit <= 0 {
-		return 0
+	if !mi.HasLimit {
+		return NoLimit
 	}
 	return mi.Limit + mi.Offset
 }
@@ -622,8 +634,11 @@ func NewSort(child *Node, orderBy []OrderExpr) *Node {
 
 // NoLimit is the LimitVal of a Limit node that only skips rows: `OFFSET n`
 // with no LIMIT, which is what a paginating client sends for the last page.
-// Every row past the offset passes. Consumers must test LimitVal > 0 before
-// using it as a row bound — an unbounded node has no bound to push down.
+// Every row past the offset passes. Consumers must test `LimitVal !=
+// NoLimit` before using it as a row bound — never `LimitVal > 0`, which
+// mistakes a real `LIMIT 0` for "unbounded" and was the root cause of #481
+// (`ORDER BY ... LIMIT 0` returning every row). An unbounded node has no
+// bound to push down; a LimitVal of exactly 0 is a real, meaningful bound.
 const NoLimit = -1
 
 // NewLimit creates a limit node. limit is NoLimit when only the offset

@@ -1520,6 +1520,45 @@ func twoPathCorpus() []twoPathQuery {
 			assertA: func(tb testing.TB, rows []map[string]any) {
 				assertFirstKeyAndCount(tb, rows, "n_regionkey", 3, 2)
 			}},
+		// #481: `ORDER BY ... LIMIT 0` returned every row instead of zero on
+		// BOTH the single-process planner (buildTopN's exec.Sort.Limit /
+		// sortSourceAdapter) and the distributed DAG (Stage.Limit /
+		// MergeInfo.KeepRows / OpSpec.SortLimit) — 0 doubled as each
+		// carrier's own "no limit" sentinel, colliding with a real LIMIT 0.
+		// expectRows stays off: emptiness is the answer, and "all 25 rows"
+		// (or a DAG task's un-truncated partial) is exactly the bug.
+		twoPathQuery{name: "OrderByLimitZero", cmp: cmpOrdered,
+			sql: "SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 0",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 0 {
+					tb.Errorf("got %d rows for LIMIT 0, want 0", len(rows))
+				}
+			}},
+		// LIMIT 0 OFFSET n never touched the Sort/Top-K "0 = no limit"
+		// convention (it takes the plain exec.Limit path, whose Max == 0
+		// already short-circuited correctly) — pinned here as a guard
+		// against the fix regressing an already-correct shape.
+		twoPathQuery{name: "OrderByLimitZeroOffset", cmp: cmpOrdered,
+			sql: "SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 0 OFFSET 5",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 0 {
+					tb.Errorf("got %d rows for LIMIT 0 OFFSET 5, want 0", len(rows))
+				}
+			}},
+		// A derived table's own `ORDER BY ... LIMIT 0` produces a sort stage
+		// (walkStages attaches Limit/HasLimit to it directly), unlike a
+		// bare, no-ORDER-BY derived-table LIMIT — #478's separate, still-
+		// open bug, where no DAG stage bounds it at all. This entry proves
+		// #481's fix reaches a NESTED sort stage, not only the top level.
+		twoPathQuery{name: "DerivedOrderByLimitZeroUnderCount", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 0) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 0)
+			}},
 	)
 
 	// #332: a temporal COLUMN plus or minus an INTERVAL. The operator read its
@@ -3541,6 +3580,23 @@ func twoPathCorpus() []twoPathQuery {
 			assertA: func(tb testing.TB, rows []map[string]any) {
 				tb.Helper()
 				assertSingleCell(tb, rows, "c", 2)
+			}},
+		// Same #478 mechanism as DerivedLimitUnderCount above, pinning the
+		// LIMIT 0 boundary specifically: found while writing #481's own
+		// regression coverage (a real, zero-vs-"no limit" sentinel
+		// collision, which #478 is not — #478 reproduces identically for
+		// any LIMIT value, including a positive one, because no DAG stage
+		// bounds a bare derived-table LIMIT at all). Not fixed here; #481's
+		// fix does not reach this shape because there is no sort stage to
+		// carry the bound (no ORDER BY inside the derived table) — see
+		// DerivedOrderByLimitZeroUnderCount above for the shape #481 DOES fix.
+		twoPathQuery{name: "DerivedLimitZeroUnderCount", cmp: cmpUnordered, expectRows: true,
+			knownBug: "#478",
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation LIMIT 0) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 0)
 			}},
 		// #480, repro A: a non-equi join has no join keys, so its build side
 		// requires clustered_on[] — an empty key list only a singleton or a

@@ -102,14 +102,14 @@ type RequiredDistribution struct {
 // Partitioning.satisfies(Distribution). The truth table is documented in
 // the Phase 1 spec §"The property algebra".
 //
-//   RequiredAny:                    always true.
-//   RequiredSingleton:              only DistSingleton.
-//   RequiredBroadcast:              only DistBroadcast.
-//   RequiredClusteredOn(K):         DistBroadcast yes; DistSingleton yes;
-//                                   DistHashPartitioned iff Keys==K;
-//                                   DistRoundRobin no (multi-task, unclustered).
-//   RequiredHashPartitionedOn(K, N): only DistHashPartitioned with Keys==K
-//                                   and Count==N.
+//	RequiredAny:                    always true.
+//	RequiredSingleton:              only DistSingleton.
+//	RequiredBroadcast:              only DistBroadcast.
+//	RequiredClusteredOn(K):         DistBroadcast yes; DistSingleton yes;
+//	                                DistHashPartitioned iff Keys==K;
+//	                                DistRoundRobin no (multi-task, unclustered).
+//	RequiredHashPartitionedOn(K, N): only DistHashPartitioned with Keys==K
+//	                                and Count==N.
 func (d Distribution) Satisfies(req RequiredDistribution) bool {
 	switch req.Kind {
 	case RequiredAny:
@@ -225,7 +225,7 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 		// shard top-Ks its own disjoint groups; the surviving downstream
 		// sort merges), so it clusters like a sort-free grouped final.
 		if len(stage.GroupByCols) > 0 &&
-			(stage.SortShardLocal || (len(stage.SortKeys) == 0 && stage.Limit == 0)) {
+			(stage.SortShardLocal || (len(stage.SortKeys) == 0 && !stage.HasLimit)) {
 			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: stage.GroupByCols}
 		}
 		return RequiredDistribution{Kind: RequiredAny}
@@ -341,7 +341,7 @@ func OutputDistribution(stage Stage, deps map[string]Distribution, workerCount i
 		// or when they are SortShardLocal (each shard sorts/limits its own
 		// disjoint groups; the surviving downstream sort stage merges).
 		if len(stage.GroupByCols) > 0 &&
-			(stage.SortShardLocal || (len(stage.SortKeys) == 0 && stage.Limit == 0)) &&
+			(stage.SortShardLocal || (len(stage.SortKeys) == 0 && !stage.HasLimit)) &&
 			len(stage.Dependencies) == 1 {
 			if depDist, ok := deps[stage.Dependencies[0]]; ok &&
 				depDist.Kind == DistHashPartitioned &&

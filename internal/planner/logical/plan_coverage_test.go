@@ -415,6 +415,57 @@ func TestNewLimit(t *testing.T) {
 	}
 }
 
+// TestMergeInfoKeepRows_LimitZero is the regression test for #481:
+// MergeInfo.KeepRows() used `Limit <= 0` to mean "unbounded", so a
+// probe-split query with a real `LIMIT 0` merged (and returned) every row
+// instead of zero. ExtractMergeInfo must set HasLimit from LimitVal !=
+// NoLimit (not from LimitVal itself), and KeepRows must report a real,
+// non-negative "keep nothing" bound for it — never NoLimit, which means
+// "no bound at all".
+func TestMergeInfoKeepRows_LimitZero(t *testing.T) {
+	scan := NewScan("t", "")
+	limit := NewLimit(scan, 0, 0)
+	mi := ExtractMergeInfo(limit)
+	if mi == nil {
+		t.Fatal("ExtractMergeInfo returned nil")
+	}
+	if !mi.HasLimit {
+		t.Fatalf("HasLimit = false for a real LIMIT 0, want true")
+	}
+	if mi.Limit != 0 {
+		t.Fatalf("Limit = %d, want 0", mi.Limit)
+	}
+	if got := mi.KeepRows(); got != 0 {
+		t.Fatalf("KeepRows() = %d for LIMIT 0 OFFSET 0, want 0", got)
+	}
+
+	// LIMIT 0 OFFSET 5: KeepRows is Offset+Limit, still a real (non-NoLimit) bound.
+	limitOffset := NewLimit(scan, 0, 5)
+	miOffset := ExtractMergeInfo(limitOffset)
+	if got := miOffset.KeepRows(); got != 5 {
+		t.Fatalf("KeepRows() = %d for LIMIT 0 OFFSET 5, want 5", got)
+	}
+
+	// OFFSET alone (no LIMIT) stays genuinely unbounded.
+	offsetOnly := NewLimit(scan, NoLimit, 5)
+	miNoLimit := ExtractMergeInfo(offsetOnly)
+	if miNoLimit.HasLimit {
+		t.Fatalf("HasLimit = true for OFFSET-only, want false")
+	}
+	if got := miNoLimit.KeepRows(); got != NoLimit {
+		t.Fatalf("KeepRows() = %d for OFFSET-only, want NoLimit (%d)", got, NoLimit)
+	}
+
+	// No Limit node at all: same unbounded answer.
+	miNone := ExtractMergeInfo(scan)
+	if miNone.HasLimit {
+		t.Fatalf("HasLimit = true with no Limit node, want false")
+	}
+	if got := miNone.KeepRows(); got != NoLimit {
+		t.Fatalf("KeepRows() = %d with no Limit node, want NoLimit (%d)", got, NoLimit)
+	}
+}
+
 func TestNewDistinct(t *testing.T) {
 	child := NewScan("t", "")
 	n := NewDistinct(child)

@@ -525,9 +525,17 @@ type OpSpec struct {
 	// by partition range) — the aggregate keeps the adaptive path.
 	InputRowBound int64 `json:"input_row_bound,omitempty"`
 
-	// OpSort (pipeline-breaker).
+	// OpSort (pipeline-breaker). SortLimit is meaningful only when
+	// HasSortLimit is true — a companion bool rather than folding "no
+	// limit" into SortLimit's own zero, because `omitempty` already drops
+	// SortLimit off the wire when it's 0, so a genuine `LIMIT 0` and "no
+	// limit at all" were indistinguishable once the worker decoded them
+	// (#481: a distributed `ORDER BY ... LIMIT 0` truncated nothing).
+	// HasSortLimit's own `omitempty` still elides the common unbounded
+	// case from the wire, since false is its zero value.
 	SortKeySpecs []SortKeySpec `json:"sort_key_specs,omitempty"` // ordered key columns
-	SortLimit    int           `json:"sort_limit,omitempty"`     // 0 = no limit; > 0 = top-N truncation after sort
+	SortLimit    int           `json:"sort_limit,omitempty"`     // top-N truncation after sort; valid iff HasSortLimit
+	HasSortLimit bool          `json:"has_sort_limit,omitempty"` // true when SortLimit is a real bound (may be 0)
 
 	// OpWindow (pipeline-breaker). One entry per window column; the
 	// operator appends them to its input's columns in this order.

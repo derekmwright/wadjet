@@ -360,7 +360,10 @@ func (j *SortMergeJoin) flushSideLocked(side *smjSide) (int64, error) {
 	if len(side.batches) == 0 || side.trackedMem == 0 {
 		return 0, nil
 	}
-	path, err := sortBatchesToRun(j.Spill.SpillDir(), side.schema, side.batches, side.totalRows, side.keys, 0)
+	// -1 (NoLimit): a join side's sorted run is never top-K truncated (#481
+	// repurposed the shared helpers' 0 into a real bound for exec.Sort's
+	// own calls — this call site must keep meaning "every row").
+	path, err := sortBatchesToRun(j.Spill.SpillDir(), side.schema, side.batches, side.totalRows, side.keys, -1)
 	if err != nil {
 		return 0, err
 	}
@@ -496,7 +499,8 @@ func (j *SortMergeJoin) openStream(side *smjSide) (*smjStream, error) {
 	if j.Spill != nil {
 		spillDir = j.Spill.SpillDir()
 	}
-	runs, err := preMergeRuns(spillDir, side.schema, side.keys, runs, maxMergeFanIn-1, 0)
+	// -1 (NoLimit): join streams are never top-K truncated.
+	runs, err := preMergeRuns(spillDir, side.schema, side.keys, runs, maxMergeFanIn-1, -1)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +528,7 @@ func (j *SortMergeJoin) openStream(side *smjSide) (*smjStream, error) {
 			removeRunFiles(runs)
 			return nil, err
 		}
-		entries = selectSortedEntries(entries, sortEntriesLessFunc(resolved, batches), 0)
+		entries = selectSortedEntries(entries, sortEntriesLessFunc(resolved, batches), -1)
 		c, err := newMemRunCursor(side.schema, batches, entries)
 		if err != nil {
 			for _, prev := range cursors {

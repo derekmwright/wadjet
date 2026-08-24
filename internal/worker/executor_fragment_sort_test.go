@@ -59,7 +59,8 @@ func TestExecuteFragment_ScanSortUnpartitioned(t *testing.T) {
 				SortKeySpecs: []distributed.SortKeySpec{
 					{Column: "val", Desc: true},
 				},
-				SortLimit: 3,
+				SortLimit:    3,
+				HasSortLimit: true,
 			},
 			{
 				Type: distributed.OpUnpartitionedSink,
@@ -128,6 +129,72 @@ func TestExecuteFragment_ScanSortUnpartitioned(t *testing.T) {
 		if gotVals[i] != want {
 			t.Errorf("row %d: got val=%d, want %d (full sequence: %v)", i, gotVals[i], want, gotVals)
 		}
+	}
+}
+
+// TestExecuteFragment_ScanSortUnpartitioned_LimitZero is the worker/DAG
+// regression test for #481: `ORDER BY ... LIMIT 0` returned every row on
+// the distributed path because OpSpec.SortLimit's own 0 doubled as "no
+// limit" on the wire (and `omitempty` dropped it entirely). HasSortLimit
+// distinguishes a real, meaningful zero from "the coordinator never set a
+// limit at all" — this exercises exactly the wire shape the coordinator's
+// buildSortFragment/buildJoinFragment/buildAggregateFragment now produce
+// for a fused `LIMIT 0` (SortLimit: 0, HasSortLimit: true).
+func TestExecuteFragment_ScanSortUnpartitioned_LimitZero(t *testing.T) {
+	ctx := context.Background()
+	const bucket = "test-fragment-sort-limit-zero"
+
+	rows := [][2]int64{
+		{1, 50}, {2, 10}, {3, 90}, {4, 30}, {5, 70},
+	}
+	data := makeScanWshf(t, rows)
+
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, bucket); err != nil {
+		t.Fatalf("MakeBucket: %v", err)
+	}
+	key := "in/sort/t0.wshf"
+	if _, err := store.Put(ctx, bucket, key, bytes.NewReader(data), int64(len(data)), "application/octet-stream"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	executor := NewExecutor(store, NewLRUCache(4*1024*1024), nil)
+
+	task := distributed.Task{
+		ID:           "frag-sort-limit-zero-0",
+		QueryID:      "q-frag-sort-limit-zero",
+		StageID:      "sort-0",
+		Type:         distributed.TaskTypeStage,
+		DataBucket:   bucket,
+		ResultBucket: bucket,
+		ResultPrefix: "out/sort-limit-zero/",
+		Operators: []distributed.OpSpec{
+			{
+				Type:        distributed.OpScan,
+				InputAlias:  "t",
+				InputFiles:  []string{key},
+				InputBucket: bucket,
+				Columns:     []string{"id", "val"},
+			},
+			{
+				Type: distributed.OpSort,
+				SortKeySpecs: []distributed.SortKeySpec{
+					{Column: "val", Desc: true},
+				},
+				SortLimit:    0,
+				HasSortLimit: true,
+			},
+			{
+				Type: distributed.OpUnpartitionedSink,
+			},
+		},
+	}
+	result := &distributed.ResultNotification{TaskID: task.ID}
+	if err := executor.executeStage(ctx, task, result); err != nil {
+		t.Fatalf("executeStage: %v", err)
+	}
+	if result.NumRows != 0 {
+		t.Fatalf("NumRows = %d, want 0 (ORDER BY ... LIMIT 0)", result.NumRows)
 	}
 }
 

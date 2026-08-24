@@ -15,12 +15,29 @@ import (
 // canFuseGather. Each row constructs a gather stage + a pending map and
 // asserts whether fusion is allowed.
 func TestCanFuseGather_Eligibility(t *testing.T) {
+	// mkAgg's callers pass limit == 0 to mean "no LIMIT at all" throughout
+	// this table, so HasLimit mirrors that (limit > 0) rather than always
+	// being true — a real `LIMIT 0` dependency is exercised separately
+	// below via mkAggHasLimit, since 0 is ambiguous as a plain int param.
 	mkAgg := func(typ string, sortKeys []physical.SortKeySpec, limit int, dist physical.DistKind) physical.Stage {
 		return physical.Stage{
 			ID:           "agg",
 			Type:         typ,
 			SortKeys:     sortKeys,
 			Limit:        limit,
+			HasLimit:     limit > 0,
+			Distribution: physical.Distribution{Kind: dist},
+		}
+	}
+	// mkAggHasLimit builds a stage with an explicit, always-real Limit
+	// (including zero) — the #481 shape the plain int param above cannot
+	// express.
+	mkAggHasLimit := func(typ string, limit int, dist physical.DistKind) physical.Stage {
+		return physical.Stage{
+			ID:           "agg",
+			Type:         typ,
+			Limit:        limit,
+			HasLimit:     true,
 			Distribution: physical.Distribution{Kind: dist},
 		}
 	}
@@ -126,6 +143,23 @@ func TestCanFuseGather_Eligibility(t *testing.T) {
 			},
 			pending: map[string]physical.Stage{
 				"agg": mkAgg("final_aggregate", nil, 100, physical.DistHashPartitioned),
+			},
+			want: false,
+		},
+		{
+			// #481 regression: a real `ORDER BY ... LIMIT 0` on a
+			// hash-partitioned final_aggregate carries Limit == 0 with
+			// HasLimit == true. Before HasLimit existed, Limit == 0 was
+			// indistinguishable from "no limit at all", so canFuseGather
+			// wrongly allowed the fusion and the zero-row bound was lost.
+			name: "rejects: dep has a real LIMIT 0 and is hash-partitioned",
+			gather: physical.Stage{
+				ID:           "gather",
+				Type:         physical.StageExchangeGather,
+				Dependencies: []string{"agg"},
+			},
+			pending: map[string]physical.Stage{
+				"agg": mkAggHasLimit("final_aggregate", 0, physical.DistHashPartitioned),
 			},
 			want: false,
 		},
@@ -260,8 +294,9 @@ func TestCanFuseGather_Eligibility(t *testing.T) {
 // (single input alias, non-empty SortKeys) surface as errors.
 func TestBuildSortFragment(t *testing.T) {
 	stage := physical.Stage{
-		Type:  "sort",
-		Limit: 5,
+		Type:     "sort",
+		Limit:    5,
+		HasLimit: true,
 	}
 	task := &distributed.Task{DataBucket: "buk"}
 	taskInputs := map[string][]string{"upstream": {"f1.wshf", "f2.wshf"}}
@@ -298,6 +333,9 @@ func TestBuildSortFragment(t *testing.T) {
 		}
 		if ops[1].SortLimit != 5 {
 			t.Errorf("ops[1].SortLimit: got %d, want 5", ops[1].SortLimit)
+		}
+		if !ops[1].HasSortLimit {
+			t.Errorf("ops[1].HasSortLimit: got false, want true")
 		}
 		if ops[2].Type != distributed.OpUnpartitionedSink {
 			t.Errorf("ops[2]: got %q, want %q", ops[2].Type, distributed.OpUnpartitionedSink)
@@ -379,6 +417,7 @@ func TestBuildAggregateFragment_GatherSink(t *testing.T) {
 			GroupByCols: []string{"g"},
 			SortKeys:    []physical.SortKeySpec{{Column: "total", Desc: true}},
 			Limit:       10,
+			HasLimit:    true,
 		}
 		sorts := []distributed.SortKeySpec{{Column: "total", Desc: true}}
 		ops, err := buildAggregateFragment(stageWithSort, task, taskInputs, aggs, sorts, "wadjet.gather.q-sort", 0)
@@ -394,6 +433,9 @@ func TestBuildAggregateFragment_GatherSink(t *testing.T) {
 		}
 		if ops[2].SortLimit != 10 {
 			t.Errorf("OpSort.SortLimit: got %d, want 10 (forwarded from stage.Limit)", ops[2].SortLimit)
+		}
+		if !ops[2].HasSortLimit {
+			t.Errorf("OpSort.HasSortLimit: got false, want true (forwarded from stage.HasLimit)")
 		}
 		if len(ops[2].SortKeySpecs) != 1 || ops[2].SortKeySpecs[0].Column != "total" {
 			t.Errorf("OpSort.SortKeySpecs: got %+v, want [{total Desc}]", ops[2].SortKeySpecs)

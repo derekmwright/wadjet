@@ -389,7 +389,11 @@ func (w *Window) flushSpillLocked() (int64, error) {
 		return 0, nil
 	}
 	if w.useColumnarRuns() {
-		path, err := sortBatchesToRun(w.Spill.SpillDir(), w.schema, w.batches, w.totalRows, w.groups[0].sortKeys, 0)
+		// -1 (NoLimit): a window run is never top-K truncated, unlike
+		// exec.Sort's own Limit-bearing calls to this same helper (#481
+		// repurposed 0 as a real, meaningful bound there — this call site
+		// must keep meaning "every row").
+		path, err := sortBatchesToRun(w.Spill.SpillDir(), w.schema, w.batches, w.totalRows, w.groups[0].sortKeys, -1)
 		if err != nil {
 			return 0, err
 		}

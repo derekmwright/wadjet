@@ -226,7 +226,7 @@ func TestSharedSpillManager_SortRunsReclaimed(t *testing.T) {
 	ctx := context.Background()
 
 	for _, arm := range []string{"completed", "failed"} {
-		s := &Sort{Keys: []SortKey{{Column: "v"}}, Spill: sm}
+		s := &Sort{Keys: []SortKey{{Column: "v"}}, Limit: -1, Spill: sm}
 		if err := s.Init(ctx); err != nil {
 			t.Fatalf("%s Init: %v", arm, err)
 		}

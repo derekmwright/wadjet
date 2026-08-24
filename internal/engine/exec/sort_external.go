@@ -178,8 +178,14 @@ func sortEntriesLessFunc(resolved []resolvedSortKey, batches []*batch.RecordBatc
 // selectSortedEntries sorts entries; when 0 < limit < len/2 it uses the
 // bounded heap to find the top limit entries in O(n log k), and in all
 // limited cases truncates the result to limit (rows past limit in a sorted
-// run can never appear in the global top-K).
+// run can never appear in the global top-K). limit < 0 (NoLimit) means
+// unbounded; limit == 0 is a real, empty top-K — the heap path is already
+// guarded by limit > 0, so without this case the function would fall through
+// and return EVERY entry (the #481 bug), not panic.
 func selectSortedEntries(entries []sortEntry, less func(a, b sortEntry) bool, limit int) []sortEntry {
+	if limit == 0 {
+		return entries[:0]
+	}
 	if limit > 0 && limit < len(entries)/2 {
 		k := limit
 		h := &topNHeap{
@@ -255,7 +261,8 @@ func writeSortedRun(dir string, schema []parquet.Column, batches []*batch.Record
 }
 
 // sortBatchesToRun sorts the active rows of batches by keys and writes them
-// as one sorted run file. limit > 0 truncates the run to its top limit rows.
+// as one sorted run file. limit >= 0 truncates the run to its top limit
+// rows (limit == 0 writes an empty run); limit < 0 (NoLimit) writes every row.
 func sortBatchesToRun(dir string, schema []parquet.Column, batches []*batch.RecordBatch, totalRows int, keys []SortKey, limit int) (string, error) {
 	entries := buildSortEntries(batches, totalRows)
 	resolved, err := resolveSortKeysForBatches(keys, batches)
@@ -492,8 +499,9 @@ func (m *runMerger) close() {
 
 // preMergeRuns reduces the run count to at most maxRuns by merging groups of
 // maxMergeFanIn runs into longer runs (multi-level external merge). Consumed
-// run files are deleted. limit > 0 truncates intermediate runs (sorted, so
-// rows past limit cannot reach the global top-K).
+// run files are deleted. limit >= 0 truncates intermediate runs (sorted, so
+// rows past limit cannot reach the global top-K); limit < 0 (NoLimit) keeps
+// every row.
 //
 // Ownership contract: on error, every run file involved — accumulated
 // intermediates and not-yet-consumed inputs alike — has been deleted. The
@@ -533,8 +541,14 @@ func preMergeRuns(dir string, schema []parquet.Column, keys []SortKey, runs []st
 	return runs, nil
 }
 
-// mergeRunsToFile merges the given runs into one new run file.
+// mergeRunsToFile merges the given runs into one new run file. limit == 0
+// (a real top-K of zero) short-circuits to the same "" empty-output
+// convention writeSortedRun uses for zero entries — the caller still owns
+// removing the input run files, so no cursors need to be opened at all.
 func mergeRunsToFile(dir string, schema []parquet.Column, keys []SortKey, runs []string, limit int) (string, error) {
+	if limit == 0 {
+		return "", nil
+	}
 	cursors := make([]*runCursor, 0, len(runs))
 	closeAll := func() {
 		for _, c := range cursors {

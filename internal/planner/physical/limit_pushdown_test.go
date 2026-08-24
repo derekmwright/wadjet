@@ -163,3 +163,46 @@ func TestLimitNotPushedThroughSort(t *testing.T) {
 		}
 	}
 }
+
+// TestLimitZeroOverSort is the single-process-planner regression for #481:
+// `ORDER BY ... LIMIT 0` returned every row instead of zero, because
+// buildTopN's exec.Sort.Limit and sortSourceAdapter's own top-K guard both
+// used 0 to mean "no limit" — colliding with a real, meaningful LIMIT 0.
+// Verifies the Top-K sort is built with a real, set zero bound (not
+// silently "unbounded") and that running the pipeline yields zero rows.
+func TestLimitZeroOverSort(t *testing.T) {
+	ctx := context.Background()
+	cat, _ := setupManyFiles(t, "limit_zero_test", 5, 20)
+	planner := NewPlanner(cat)
+
+	// Build: SELECT * FROM limit_zero_test ORDER BY id LIMIT 0
+	scan := logical.NewScan("limit_zero_test", "limit_zero_test")
+	sort := logical.NewSort(scan, []logical.OrderExpr{{Column: "id"}})
+	limit := logical.NewLimit(sort, 0, 0)
+
+	plan, err := planner.Plan(ctx, limit)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	defer plan.Pipeline.Close()
+
+	adapter, ok := plan.Pipeline.Source.(*sortSourceAdapter)
+	if !ok {
+		t.Fatalf("expected *sortSourceAdapter (Top-K), got %T", plan.Pipeline.Source)
+	}
+	if !(adapter.sort.Limit == 0) {
+		t.Fatalf("expected the Top-K sort's Limit to be a real 0, got %d", adapter.sort.Limit)
+	}
+
+	if err := plan.Pipeline.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	sink, ok := plan.Pipeline.Sink.(*exec.CollectSink)
+	if !ok {
+		t.Fatalf("expected CollectSink, got %T", plan.Pipeline.Sink)
+	}
+	if len(sink.Rows) != 0 {
+		t.Errorf("ORDER BY ... LIMIT 0: got %d rows, want 0", len(sink.Rows))
+	}
+}

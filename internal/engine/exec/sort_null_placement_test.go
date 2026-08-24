@@ -181,7 +181,7 @@ func TestSortNullPlacementExternalMerge(t *testing.T) {
 			var runs []string
 			for _, vals := range [][]any{{int64(2), nil, int64(5)}, {int64(1), int64(6), nil}} {
 				b := nullPlacementBatch(t, vals...)
-				path, err := sortBatchesToRun(dir, schema, []*batch.RecordBatch{b}, b.Len, keys, 0)
+				path, err := sortBatchesToRun(dir, schema, []*batch.RecordBatch{b}, b.Len, keys, -1)
 				if err != nil {
 					t.Fatal(err)
 				}

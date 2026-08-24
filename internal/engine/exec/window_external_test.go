@@ -459,7 +459,7 @@ func TestWindowGlobal_StreamingBoundsMemory(t *testing.T) {
 		}
 	}
 	keys := []SortKey{{Column: "ts", Order: Ascending}}
-	run, err := sortBatchesToRun(dir, schema, batches, nBatches*rowsPer, keys, 0)
+	run, err := sortBatchesToRun(dir, schema, batches, nBatches*rowsPer, keys, -1)
 	if err != nil {
 		t.Fatal(err)
 	}

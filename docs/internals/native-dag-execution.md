@@ -701,3 +701,7 @@ correctness of a distributed change before EC2.
 
 - `docs/architecture.md` §Distributed Execution (high level), `docs/distributed.md` (deployment).
 - Memory: `project-distributed-distinct-design-2026-06-29` (the sharded-distinct fix design + this investigation).
+
+## Limit sentinels (#481)
+
+A real `LIMIT 0` is a bound, not an absence. The convention after #481: `exec.Sort.Limit` and the shared sort helpers use `-1` (`logical.NoLimit`) for "unbounded"; `physical.Stage`, `logical.MergeInfo`, and `distributed.OpSpec` carry companion bools (`HasLimit`, `HasSortLimit`) because their zero-value literals are ubiquitous. An unbounded stage leaves both fields at their zero value — the shared-subplan fingerprint hashes `Limit` unconditionally. Never reintroduce `0 == no limit` on any carrier; the wire's `HasSortLimit` also tolerates a pre-#481 coordinator via the `SortLimit > 0` disjunct in the worker (ADR-0010 mandates wholesale deploys regardless).

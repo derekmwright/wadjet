@@ -113,7 +113,7 @@ func canFuseGather(gatherStage physical.Stage, pending map[string]physical.Stage
 		if len(gatherOrdering) > 0 {
 			return "", false
 		}
-		if (len(dep.SortKeys) > 0 || dep.Limit > 0) && dep.Distribution.Kind != physical.DistSingleton {
+		if (len(dep.SortKeys) > 0 || dep.HasLimit) && dep.Distribution.Kind != physical.DistSingleton {
 			return "", false
 		}
 		return depID, true
@@ -2711,7 +2711,8 @@ func (c *Coordinator) dispatchComputeStage(
 			GroupByCols:         stage.GroupByCols,
 			Aggregates:          aggs,
 			SortKeys:            sorts,
-			Limit:               stage.Limit,
+			// Task.Limit is dead (zero readers) and stage.Limit can now be NoLimit(-1);
+			// deliberately not carried — see #481.
 			RowLimit:            stage.RowLimit,
 			Inputs:              taskInputs,
 			// Probe-split affinity: the rendezvous owner of this task's
@@ -3388,6 +3389,7 @@ func buildJoinFragment(
 			Type:         distributed.OpSort,
 			SortKeySpecs: append([]distributed.SortKeySpec(nil), sorts...),
 			SortLimit:    stage.Limit,
+			HasSortLimit: stage.HasLimit,
 		})
 	}
 	ops = append(ops, terminalSink)
@@ -3471,6 +3473,7 @@ func buildSortMergeJoinFragment(
 			Type:         distributed.OpSort,
 			SortKeySpecs: append([]distributed.SortKeySpec(nil), sorts...),
 			SortLimit:    stage.Limit,
+			HasSortLimit: stage.HasLimit,
 		})
 	}
 	ops = append(ops, distributed.OpSpec{Type: distributed.OpUnpartitionedSink})
@@ -3585,6 +3588,7 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 			Type:         distributed.OpSort,
 			SortKeySpecs: append([]distributed.SortKeySpec(nil), sorts...),
 			SortLimit:    stage.Limit,
+			HasSortLimit: stage.HasLimit,
 		})
 	}
 	if gatherReplySubject != "" {
@@ -3890,6 +3894,7 @@ func buildSortFragment(stage physical.Stage, t *distributed.Task, taskInputs map
 			Type:         distributed.OpSort,
 			SortKeySpecs: append([]distributed.SortKeySpec(nil), sorts...),
 			SortLimit:    stage.Limit,
+			HasSortLimit: stage.HasLimit,
 		},
 		terminal,
 	}, nil
@@ -4717,7 +4722,7 @@ func aggregatePartialSplit(
 	if len(stage.Dependencies) != 1 || len(stage.FusedJoins) != 0 {
 		return "", nil, false
 	}
-	if len(stage.SortKeys) != 0 || stage.Limit != 0 || len(stage.FilterExprs) != 0 {
+	if len(stage.SortKeys) != 0 || stage.HasLimit || len(stage.FilterExprs) != 0 {
 		return "", nil, false
 	}
 	depID = stage.Dependencies[0]
@@ -4871,6 +4876,7 @@ func (c *Coordinator) dispatchGatherStage(
 				Type:         distributed.OpSort,
 				SortKeySpecs: ordering,
 				SortLimit:    depStage.Limit,
+				HasSortLimit: depStage.HasLimit,
 			},
 			{
 				Type:         distributed.OpGatherSink,

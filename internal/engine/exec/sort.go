@@ -35,10 +35,18 @@ type SortKey struct {
 // Sort is a Sink that accumulates all batches columnar and sorts them
 // using typed comparisons on an index array (no row-oriented conversion).
 // When a SpillManager is set, Sort will spill to disk when memory pressure is high.
-// When Limit > 0, only the top Limit rows are materialized (Top-K optimization).
+// When Limit >= 0, only the top Limit rows are materialized (Top-K
+// optimization) — Limit is a real row count, so LIMIT 0 correctly
+// materializes zero rows.
 type Sort struct {
-	Keys   []SortKey
-	Limit  int // 0 = no limit, >0 = only materialize top N rows
+	Keys []SortKey
+	// Limit is the Top-K row bound, or NoLimit (-1, the same sentinel
+	// exec.Limit.Max and logical.NoLimit use) when the sort is unbounded.
+	// Every reader below tests `>= 0` (never `> 0`) so a real zero is never
+	// mistaken for "unbounded" — that collision was #481:
+	// `ORDER BY ... LIMIT 0` returned every row because 0 doubled as the
+	// "no limit" sentinel.
+	Limit  int
 	schema []parquet.Column
 	Spill  *memory.SpillManager // optional: enables spill-to-disk
 
@@ -64,7 +72,7 @@ type Sort struct {
 }
 
 func NewSort(keys []SortKey) *Sort {
-	return &Sort{Keys: keys}
+	return &Sort{Keys: keys, Limit: -1}
 }
 
 func (s *Sort) Init(_ context.Context) error {
@@ -146,7 +154,7 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// (~6GB) per clone, which still OOM-killed the c6a on Q24. The byte
 	// trigger uses the exact tracked cost when a spill manager is wired;
 	// the batch-count trigger covers the untracked case.
-	if s.Limit > 0 && (s.totalRows > s.Limit*2+4*batch.DefaultBatchSize ||
+	if s.Limit >= 0 && (s.totalRows > s.Limit*2+4*batch.DefaultBatchSize ||
 		s.trackedMem > 96<<20 || len(s.batches) >= 4) {
 		if err := s.compactTopKLocked(); err != nil {
 			return err
@@ -195,7 +203,8 @@ func (s *Sort) flushSpillLocked() (int64, error) {
 
 // compactTopKLocked replaces the buffered batches with a single dense
 // batch holding only the current top Limit rows. Caller must hold s.mu,
-// s.Limit must be > 0, and s.schema must be set.
+// s.Limit must be >= 0 (a real bound, possibly zero), and s.schema must be
+// set.
 func (s *Sort) compactTopKLocked() error {
 	if len(s.batches) == 0 {
 		return nil
@@ -376,7 +385,7 @@ func (s *Sort) Truncate(n int) {
 	// Callers (fragment PostFinalize, sortSourceAdapter) invoke Truncate once
 	// between Finalize and the first Next, before any rows are emitted.
 	if s.merger != nil || s.mergeDone {
-		if s.Limit == 0 || n < s.Limit {
+		if s.Limit < 0 || n < s.Limit {
 			s.Limit = n
 		}
 		return
@@ -576,7 +585,7 @@ func (s *Sort) nextMerged() (*batch.RecordBatch, error) {
 		s.mu.Unlock()
 		return nil, nil
 	}
-	if s.Limit > 0 {
+	if s.Limit >= 0 {
 		remaining := s.Limit - s.mergeEmit
 		if remaining <= 0 {
 			s.mu.Lock()

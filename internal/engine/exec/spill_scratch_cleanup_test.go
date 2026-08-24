@@ -36,7 +36,7 @@ func makeRun(tb testing.TB, dir string, vals ...int64) string {
 		rows[i] = map[string]any{"val": v}
 	}
 	b := batch.FromRows(schema, rows)
-	path, err := sortBatchesToRun(dir, schema, []*batch.RecordBatch{b}, len(vals), scratchKeys, 0)
+	path, err := sortBatchesToRun(dir, schema, []*batch.RecordBatch{b}, len(vals), scratchKeys, -1)
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestMergeRunsToFile_MidMergeErrorRemovesPartial(t *testing.T) {
 	corruptRunTail(t, evil)
 
 	schema := []parquet.Column{{Name: "val", Type: parquet.TypeInt64}}
-	if _, err := mergeRunsToFile(dir, schema, scratchKeys, []string{good, evil}, 0); err == nil {
+	if _, err := mergeRunsToFile(dir, schema, scratchKeys, []string{good, evil}, -1); err == nil {
 		t.Fatal("expected merge error from corrupt run")
 	}
 	// Inputs are the caller's to clean; the partial sort-merge output must
@@ -112,7 +112,7 @@ func TestPreMergeRuns_ErrorCleansEverything(t *testing.T) {
 	corruptRunTail(t, runs[1])
 
 	schema := []parquet.Column{{Name: "val", Type: parquet.TypeInt64}}
-	if _, err := preMergeRuns(dir, schema, scratchKeys, runs, 2, 0); err == nil {
+	if _, err := preMergeRuns(dir, schema, scratchKeys, runs, 2, -1); err == nil {
 		t.Fatal("expected error from corrupt run")
 	}
 	if got := binFiles(t, dir); len(got) != 0 {

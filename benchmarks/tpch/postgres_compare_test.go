@@ -875,6 +875,20 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "LimitThenOffset", sql: `SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3 OFFSET 5`},
 		pgCase{name: "OffsetPastEnd", sql: `SELECT n_nationkey FROM nation ORDER BY n_nationkey OFFSET 1000`,
 			countOnly: true, why: "an empty result has no rows to fingerprint; at tolerance 0 the count is the entire answer"},
+		// #481: `ORDER BY ... LIMIT 0` returned every row instead of zero — a
+		// sentinel collision (0 doubled as both "a real LIMIT 0" and "no
+		// limit at all") across exec.Sort.Limit, sortSourceAdapter's Top-K
+		// guard, and the coordinator's MergeInfo.KeepRows. Plain `LIMIT 0`
+		// (no ORDER BY) and `LIMIT 0 OFFSET n` never touched that
+		// convention and already answered correctly, which is why they are
+		// pinned here too — as a guard against the fix regressing them,
+		// not because either was ever broken.
+		pgCase{name: "OrderByLimitZero", sql: `SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 0`,
+			countOnly: true, why: "an empty result has no rows to fingerprint; at tolerance 0 the count is the entire answer"},
+		pgCase{name: "OrderByLimitZeroOffset", sql: `SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 0 OFFSET 5`,
+			countOnly: true, why: "an empty result has no rows to fingerprint; at tolerance 0 the count is the entire answer"},
+		pgCase{name: "PlainLimitZeroNoOrderBy", sql: `SELECT n_nationkey FROM nation LIMIT 0`,
+			countOnly: true, why: "an empty result has no rows to fingerprint; at tolerance 0 the count is the entire answer"},
 	)
 
 	// --- String functions -------------------------------------------------

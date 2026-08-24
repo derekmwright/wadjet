@@ -175,6 +175,119 @@ func TestSortExternalMerge_TopK(t *testing.T) {
 	}
 }
 
+// TestSortExternalMerge_LimitZero is the regression test for #481:
+// `ORDER BY ... LIMIT 0` returned every row instead of zero, because 0
+// doubled as Sort.Limit's own "no limit" sentinel. This exercises the
+// external-merge/spill path specifically — the "second, independent
+// occurrence" the issue's own filing flagged as unconfirmed
+// (nextMerged's old `s.Limit > 0` guard and Truncate's old `s.Limit == 0`
+// reset check).
+//
+// Modeled on the worker's real fragment-breaker shape (buildFragmentSort /
+// executor_fragment.go): the sort Consumes with NO limit set — so real
+// pressure spills REAL, non-empty sorted runs to disk — and the LIMIT is
+// only applied afterward via Truncate(0), called between Finalize and the
+// first Next (exactly what the worker's deferred PostFinalize does). If
+// this collapsed back to "no limit", the merge would stream every spilled
+// row instead of none.
+func TestSortExternalMerge_LimitZero(t *testing.T) {
+	forceTinyRuns(t)
+	schema := []parquet.Column{{Name: "val", Type: parquet.TypeInt64}}
+	keys := []SortKey{{Column: "val", Order: Ascending}}
+
+	// No Limit set during Consume (stays NoLimit, matching buildFragmentSort):
+	// pressure must spill real, unbounded runs.
+	s := newSortSpillHarness(t, keys, 512)
+
+	ctx := context.Background()
+	const total = 200
+	perm := rand.New(rand.NewSource(13)).Perm(total)
+	for i := 0; i < total; i += 10 {
+		rows := make([]map[string]any, 0, 10)
+		for j := i; j < i+10; j++ {
+			rows = append(rows, map[string]any{"val": int64(perm[j])})
+		}
+		if err := s.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(s.runFiles) == 0 {
+		t.Fatal("run-spill path was never exercised")
+	}
+	if err := s.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The LIMIT arrives here, exactly as the worker's PostFinalize does.
+	s.Truncate(0)
+	got := drainSortRows(t, s)
+	if len(got) != 0 {
+		t.Fatalf("ORDER BY ... LIMIT 0 (external merge): got %d rows, want 0", len(got))
+	}
+}
+
+// TestSortExternalMerge_LimitZeroFromStart is the counterpart where Limit
+// is known to be 0 from construction (the single-process planner's
+// buildTopN shape, sortOp.Limit = n set before Consume). Streaming
+// compaction then keeps the buffer empty throughout, so no run file is
+// EVER written for a real LIMIT 0 — writeSortedRun's existing "" empty-run
+// convention (mirrored by mergeRunsToFile's own limit==0 short-circuit)
+// means there is nothing to spill, not a missed spill.
+func TestSortExternalMerge_LimitZeroFromStart(t *testing.T) {
+	forceTinyRuns(t)
+	schema := []parquet.Column{{Name: "val", Type: parquet.TypeInt64}}
+	keys := []SortKey{{Column: "val", Order: Ascending}}
+
+	s := newSortSpillHarness(t, keys, 512)
+	s.Limit = 0
+
+	ctx := context.Background()
+	const total = 200
+	perm := rand.New(rand.NewSource(17)).Perm(total)
+	for i := 0; i < total; i += 10 {
+		rows := make([]map[string]any, 0, 10)
+		for j := i; j < i+10; j++ {
+			rows = append(rows, map[string]any{"val": int64(perm[j])})
+		}
+		if err := s.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(s.runFiles) != 0 {
+		t.Fatalf("LIMIT 0 known up front should never write a run file, got %d", len(s.runFiles))
+	}
+	if err := s.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := drainSortRows(t, s)
+	if len(got) != 0 {
+		t.Fatalf("ORDER BY ... LIMIT 0 (known from start): got %d rows, want 0", len(got))
+	}
+}
+
+// TestSort_LimitZero_InMemory is the in-memory-path counterpart: no spill
+// pressure, so Finalize takes finalizeColumnar rather than the
+// external-merge path. Regression for #481.
+func TestSort_LimitZero_InMemory(t *testing.T) {
+	schema := []parquet.Column{{Name: "val", Type: parquet.TypeInt64}}
+	s := NewSort([]SortKey{{Column: "val", Order: Ascending}})
+	s.Limit = 0
+	ctx := context.Background()
+	if err := s.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows := []map[string]any{{"val": int64(3)}, {"val": int64(1)}, {"val": int64(2)}}
+	if err := s.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := drainSortRows(t, s)
+	if len(got) != 0 {
+		t.Fatalf("ORDER BY ... LIMIT 0 (in-memory): got %d rows, want 0", len(got))
+	}
+}
+
 // TestSortExternalMerge_MultiLevel forces the multi-level pre-merge by
 // capping fan-in at 2 with many runs, verifying correctness end-to-end.
 func TestSortExternalMerge_MultiLevel(t *testing.T) {

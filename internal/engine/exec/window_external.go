@@ -306,7 +306,8 @@ func resortRunsByKeys(dir string, schema []parquet.Column, runs []string, keys [
 		if len(buf) == 0 {
 			return nil
 		}
-		p, err := sortBatchesToRun(dir, schema, buf, bufRows, keys, 0)
+		// -1 (NoLimit): a resorted window run is never top-K truncated.
+		p, err := sortBatchesToRun(dir, schema, buf, bufRows, keys, -1)
 		if err != nil {
 			return err
 		}
@@ -366,7 +367,8 @@ func resortRunsByKeys(dir string, schema []parquet.Column, runs []string, keys [
 // failures; cursor failures clean the post-merge list here) — callers just
 // propagate.
 func openRunMerger(dir string, schema []parquet.Column, keys []SortKey, runs []string) (*runMerger, []string, error) {
-	runs, err := preMergeRuns(dir, schema, keys, runs, maxMergeFanIn, 0)
+	// -1 (NoLimit): window runs are never top-K truncated.
+	runs, err := preMergeRuns(dir, schema, keys, runs, maxMergeFanIn, -1)
 	if err != nil {
 		return nil, nil, err
 	}

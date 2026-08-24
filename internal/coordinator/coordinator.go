@@ -1009,9 +1009,9 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// lazily from scratch, and truncating its in-memory prefix would drop rows
 	// the stream still owns.
 	if gr != nil && gr.spillPath == "" {
-		if mi := logical.ExtractMergeInfo(logicalPlan); mi != nil && (mi.Limit > 0 || mi.Offset > 0) {
+		if mi := logical.ExtractMergeInfo(logicalPlan); mi != nil && (mi.HasLimit || mi.Offset > 0) {
 			gr.batches = offsetBatches(gr.batches, mi.Offset)
-			if mi.Limit > 0 {
+			if mi.HasLimit {
 				gr.batches = limitBatches(gr.batches, mi.Limit)
 			}
 			var total int64
@@ -1619,6 +1619,12 @@ func (c *Coordinator) mergeProbePartials(in BatchStream, columns []string, mi *l
 	// use a top-K heap select to avoid sorting the full result set.
 	// keep is limit+offset: the top-K select and the truncation below both
 	// have to hold the rows the OFFSET will skip, which is applied last.
+	// KeepRows returns NoLimit (-1) when unbounded, so the truncation guard
+	// below tests `keep >= 0` — never `keep > 0`, which mistook a real
+	// `LIMIT 0` merge (keep == 0) for "unbounded" and kept every row
+	// (#481). The top-K heap gate stays `keep > 0`: it is a pure
+	// optimization, and keep == 0 falls through to the plain truncation
+	// below, which handles it correctly.
 	keep := mi.KeepRows()
 	if len(mi.OrderBy) > 0 && keep > 0 && len(batches) == 1 && batches[0].Len > keep*4 {
 		c.topKBatches(batches, columns, colIdx, mi.OrderBy, keep)
@@ -1626,7 +1632,7 @@ func (c *Coordinator) mergeProbePartials(in BatchStream, columns []string, mi *l
 		if len(mi.OrderBy) > 0 {
 			c.sortBatches(batches, columns, colIdx, mi.OrderBy)
 		}
-		if keep > 0 {
+		if keep >= 0 {
 			batches = limitBatches(batches, keep)
 		}
 	}
@@ -1667,7 +1673,7 @@ func (c *Coordinator) dedupGatherResult(gr *gatherResult, mi *logical.MergeInfo)
 	gr.spillBytes = 0
 	gr.renamer = nil
 
-	if len(mi.OrderBy) > 0 || mi.Limit > 0 {
+	if len(mi.OrderBy) > 0 || mi.HasLimit {
 		colIdx := make(map[string]int, len(gr.columns))
 		for i, col := range gr.columns {
 			colIdx[col] = i
@@ -1676,8 +1682,10 @@ func (c *Coordinator) dedupGatherResult(gr *gatherResult, mi *logical.MergeInfo)
 			c.sortBatches(gr.batches, gr.columns, colIdx, mi.OrderBy)
 		}
 		// Truncate to limit+offset, not limit: the caller applies the OFFSET
-		// after this, so the rows it skips must still be here.
-		if keep := mi.KeepRows(); keep > 0 {
+		// after this, so the rows it skips must still be here. >= 0, not
+		// > 0 — KeepRows returns NoLimit (-1) when unbounded and a real
+		// truncated-to-zero bound otherwise (#481).
+		if keep := mi.KeepRows(); keep >= 0 {
 			gr.batches = limitBatches(gr.batches, keep)
 		}
 	}

@@ -384,6 +384,10 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		"ScanSchema":  "hashed",
 		"FilterExprs": "hashed", "GroupByCols": "hashed", "AggSpecs": "hashed",
 		"GroupByAll": "hashed", "SortKeys": "hashed", "Limit": "hashed",
+		// HasLimit rides with Limit: without it, two subtrees with a
+		// genuine LIMIT 0 vs. no LIMIT at all would hash identically and
+		// dedup into one (#481).
+		"HasLimit": "hashed",
 		// RowLimit changes how many rows a stage emits, so two otherwise
 		// identical subtrees with different bounds are not interchangeable
 		// and must not dedup into one.

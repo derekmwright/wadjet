@@ -114,7 +114,18 @@ type Stage struct {
 
 	// Sort metadata
 	SortKeys []SortKeySpec
+	// Limit is the row bound this stage's Sort/TopN carries — meaningful
+	// only when HasLimit is true. A companion bool rather than a -1
+	// sentinel on Limit itself: Stage is built via dozens of `Stage{...}`
+	// literals across the planner/coordinator that never touch Limit, and
+	// every one of them must keep meaning "unbounded" by leaving both
+	// fields at their zero value. Before HasLimit existed, Limit's own 0
+	// doubled as that same "unbounded" sentinel, so a stage carrying a
+	// real `ORDER BY ... LIMIT 0` was indistinguishable from one with no
+	// limit at all (#481) — every reader of Limit below must consult
+	// HasLimit, never `Limit > 0`/`Limit == 0` alone.
 	Limit    int
+	HasLimit bool
 
 	// RowLimit bounds how many rows this stage's tasks EMIT, for a LIMIT with
 	// no ORDER BY. Distinct from Limit, which is a top-N applied after a sort:
@@ -4809,20 +4820,35 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// OFFSET is applied once, at the coordinator, after the merge, so the
 		// rows it skips have to survive the stage that produced them. A
 		// stage told to keep 3 rows for `LIMIT 3 OFFSET 5` kept the first
-		// three and the answer was the first page again (#337). Zero when
-		// there is no LIMIT — an OFFSET alone bounds nothing.
-		stageBound := 0
-		if node.LimitVal > 0 {
+		// three and the answer was the first page again (#337). No bound
+		// when there is no LIMIT — an OFFSET alone bounds nothing. NoLimit
+		// (-1), not 0: `node.LimitVal` is itself 0 for a real `LIMIT 0`, and
+		// treating that the same as "no LIMIT" silently dropped the bound
+		// end-to-end for `ORDER BY ... LIMIT 0` on the DAG path (#481).
+		stageBound := logical.NoLimit
+		hasStageBound := false
+		if node.LimitVal != logical.NoLimit {
 			stageBound = node.LimitVal + node.OffsetVal
+			hasStageBound = true
 		}
 		// Propagate limit to both merge_sort and sort stages
 		sorted := false
 		for i := len(*stages) - 1; i >= 0; i-- {
 			if (*stages)[i].Type == "merge_sort" {
-				(*stages)[i].Limit = stageBound
+				if hasStageBound {
+					(*stages)[i].Limit = stageBound
+					(*stages)[i].HasLimit = true
+				}
+				// else: leave both fields at their zero value — an unbounded
+				// stage is (0,false), and the shared-subplan fingerprint
+				// hashes Limit unconditionally, so writing NoLimit here would
+				// split an OFFSET-only sort from its no-LIMIT twin.
 				sorted = true
 			} else if (*stages)[i].Type == "sort" {
-				(*stages)[i].Limit = stageBound
+				if hasStageBound {
+					(*stages)[i].Limit = stageBound
+					(*stages)[i].HasLimit = true
+				}
 				sorted = true
 				break
 			}
@@ -8530,7 +8556,6 @@ func (p *Planner) buildTopN(ctx context.Context, sortNode *logical.Node, n int) 
 		childSource: childSource,
 		childOps:    childOps,
 		sort:        sortOp,
-		limitN:      n,
 	}, nil, &exec.CollectSink{}, nil
 }
 
@@ -11052,13 +11077,15 @@ func (a *aggSourceAdapter) Close() error {
 }
 
 // sortSourceAdapter wraps a child pipeline + sort into a Source.
-// When limitN > 0, it truncates results to the top N rows after sorting
-// (Top-K optimization: avoids materializing the full sorted result).
+// When sort.Limit >= 0, it truncates results to the top N rows after
+// sorting (Top-K optimization: avoids materializing the full sorted
+// result). The bound lives only on sort.Limit — no separate limitN field to
+// keep in sync — so a real LIMIT 0 (sort.Limit == 0) truncates correctly
+// instead of colliding with sort.Limit's own "no limit" sentinel (#481).
 type sortSourceAdapter struct {
 	childSource exec.Source
 	childOps    []exec.UnaryOperator
 	sort        *exec.Sort
-	limitN      int // 0 = no limit
 	initialized bool
 }
 
@@ -11082,9 +11109,10 @@ func (s *sortSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error
 		if err := pipe.Run(ctx); err != nil {
 			return nil, err
 		}
-		// Top-K truncation: discard everything beyond limitN rows
-		if s.limitN > 0 {
-			s.sort.Truncate(s.limitN)
+		// Top-K truncation: discard everything beyond sort.Limit rows. >= 0,
+		// not > 0 — a real LIMIT 0 must truncate to zero rows too (#481).
+		if s.sort.Limit >= 0 {
+			s.sort.Truncate(s.sort.Limit)
 		}
 	}
 	return s.sort.Next(ctx)

@@ -190,7 +190,7 @@ func TestRequiredChildDistribution(t *testing.T) {
 		},
 		{
 			name:  "final_aggregate with Limit stays on RequiredAny",
-			stage: Stage{ID: "final_aggregate-2", Type: "final_aggregate", GroupByCols: []string{"l_returnflag"}, Limit: 10},
+			stage: Stage{ID: "final_aggregate-2", Type: "final_aggregate", GroupByCols: []string{"l_returnflag"}, Limit: 10, HasLimit: true},
 			slot:  0,
 			want:  RequiredDistribution{Kind: RequiredAny},
 		},

@@ -2168,8 +2168,10 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 		}
 		// Truncate to the top-N rows after Finalize. Truncate runs ONCE
 		// between Finalize and the first Next so the materialized output
-		// is bounded.
-		if spec.SortLimit > 0 {
+		// is bounded. HasSortLimit, not `SortLimit > 0`: a real
+		// `ORDER BY ... LIMIT 0` carries SortLimit == 0, which is a
+		// meaningful "truncate to nothing" bound, not "no limit" (#481).
+		if spec.HasSortLimit || spec.SortLimit > 0 { // SortLimit>0 without the flag can only come from a pre-HasSortLimit coordinator; honor it (ADR-0010 mandates wholesale deploys, this keeps the additive-field-degrades-conservatively invariant anyway).
 			limit := spec.SortLimit
 			fb.PostFinalize = func() { sorter.Truncate(limit) }
 		}
