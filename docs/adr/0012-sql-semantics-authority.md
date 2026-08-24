@@ -126,6 +126,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      (`kernel.StatsDomainValue`, `kernel.decimalLiteralAt`), because a prune
      that reads the predicate differently from the filter deletes rows the
      filter would have kept.
+   - **A constant that is not a number is a query ERROR, never a value.**
+     (Added 2026-08-24, #463.) The conversion used to answer ZERO for
+     anything it could not parse, so `WHERE d = 'abc'` — and `WHERE d = 1e400`,
+     which the float64 expansion could not read either — matched every row
+     holding zero. PostgreSQL refuses both spellings of "this is not a
+     number" with SQLSTATE 22P02, so wadjet raises the same, from the
+     vectorized filter (`exec.decimalConstError`) and from the row-at-a-time
+     comparison (`expr.raiseInvalidTextRepresentation`) alike: one path
+     erroring while the other answers is the two-path defect class. Exponent
+     form is not that case — `1e400` IS a number, and is now read as one, by
+     folding the exponent into the scaling instead of through
+     `strconv.ParseFloat`.
 
    Arithmetic over DECIMAL still goes through float64, and so do MIN/MAX/SUM
    over a DECIMAL column. That is a separate, visible limit — comparison is

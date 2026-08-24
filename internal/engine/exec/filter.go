@@ -12,6 +12,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // Predicate evaluates a row and returns true if it passes the filter.
@@ -496,6 +497,28 @@ func decimalLitValue(typ batch.TypeID, value any, litText string) any {
 	return value
 }
 
+// decimalConstError is the query error a constant that is not a number earns
+// when it reaches a DECIMAL column, and nil for every other case.
+//
+// It used to be no error at all: batch.ParseDecimalString read anything it
+// could not parse as the value ZERO, so `WHERE d = 'abc'` — and `WHERE
+// d = 1e400`, which the old float64 expansion could not read either —
+// matched every row holding zero (#463). PostgreSQL refuses the query, and
+// ADR-0012 makes PostgreSQL the authority on error-versus-not, so this is its
+// SQLSTATE and its wording.
+//
+// A nil constant is NOT this case: it is UNKNOWN for every row, which
+// ResolveFilterKernel's own nil guard already answers.
+func decimalConstError(typ batch.TypeID, value any) error {
+	if typ != batch.TypeDecimal || value == nil {
+		return nil
+	}
+	if _, ok := kernel.DecimalConstText(value); ok {
+		return nil
+	}
+	return sqlerr.New("22P02", "invalid input syntax for type numeric: %q", fmt.Sprint(value))
+}
+
 func (f *KernelFilter) Init(_ context.Context) error { return nil }
 
 func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
@@ -534,12 +557,16 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 		return nil, fmt.Errorf("filter column %q does not exist in the input schema", f.ColName)
 	}
 	if f.kern == nil {
+		typ := in.Columns[f.colIdx].Type
+		if err := decimalConstError(typ, decimalLitValue(typ, f.Value, f.LitText)); err != nil {
+			return nil, err
+		}
 		// The column resolved; the TYPE has no comparison kernel. Reporting
 		// that as "does not exist" sent every reader hunting a name-resolution
 		// bug — that is how #401 was filed, when the real answer was that
 		// ResolveFilterKernel had no DECIMAL arm.
 		return nil, fmt.Errorf("filter on column %q: no comparison kernel for type %s",
-			f.ColName, in.Columns[f.colIdx].Type)
+			f.ColName, typ)
 	}
 
 	// When the batch already has a selection vector (e.g. from a prior filter
@@ -619,8 +646,14 @@ func (f *InFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Rec
 		return nil, fmt.Errorf("IN filter column %q does not exist in the input schema", f.ColName)
 	}
 	if f.kern == nil {
+		typ := in.Columns[f.colIdx].Type
+		for _, v := range f.kernelValues(typ) {
+			if err := decimalConstError(typ, v); err != nil {
+				return nil, err
+			}
+		}
 		return nil, fmt.Errorf("IN filter on column %q: no set-membership kernel for type %s",
-			f.ColName, in.Columns[f.colIdx].Type)
+			f.ColName, typ)
 	}
 	// Compact in-place when a prior selection exists (see KernelFilter.Execute).
 	outBuf := f.outSel

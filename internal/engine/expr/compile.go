@@ -136,6 +136,18 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					return &Lit{Val: -v, Text: negateLitText(lit.Text)}, nil
 				case float64:
 					return &Lit{Val: -v, Text: negateLitText(lit.Text)}, nil
+				case string:
+					// A numeric literal that neither an int64 nor a float64
+					// can hold is boxed as its own text (compileLit's last
+					// arm — 1e400 makes strconv.ParseFloat report ErrRange).
+					// Leaving the minus outside as a UnaryOp hid the literal
+					// from every binding that looks for one, so `d >= -1e400`
+					// lost the exact text the DECIMAL comparison reads (#463).
+					// Text is empty for a STRING literal, which keeps `-'abc'`
+					// where it was.
+					if lit.Text != "" {
+						return &Lit{Val: negateLitText(v), Text: negateLitText(lit.Text)}, nil
+					}
 				}
 			}
 		}

@@ -1,6 +1,7 @@
 package batch
 
 import (
+	"errors"
 	"math"
 	"math/big"
 	"math/bits"
@@ -511,9 +512,17 @@ func DecimalTextAt(text string, scale int) (ScaledDecimal, bool) {
 	return ScaledDecimal{Unscaled: v, Residual: residual}, true
 }
 
-// decimalParts splits numeric text into its sign, its digits with the decimal
-// point removed, and the power of ten those digits must be multiplied by.
-// ok=false for anything that is not a plain decimal number.
+// decimalParts splits numeric text — plain or exponent form — into its sign,
+// its digits with the decimal point removed, and the power of ten those
+// digits must be multiplied by. ok=false for anything that is not a number.
+//
+// The exponent is read as an INTEGER and folded into the power of ten, never
+// expanded through a float64. Expanding through strconv.ParseFloat is what
+// made `1e400` unreadable — ParseFloat reports ErrRange, the old expansion
+// gave up and handed the untouched "1e400" to a parser with no exponent
+// handling, and that returned the value ZERO, which matched every row holding
+// zero (#463). Here 1e400 is simply a number with a large exponent: it
+// resolves, saturates, and orders above everything (#462).
 func decimalParts(s string) (neg bool, digits string, exp int, ok bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -525,12 +534,29 @@ func decimalParts(s string) (neg bool, digits string, exp int, ok bool) {
 	case '+':
 		s = s[1:]
 	}
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		e, err := strconv.Atoi(s[i+1:])
+		if err != nil && !errors.Is(err, strconv.ErrRange) {
+			return false, "", 0, false
+		}
+		// ErrRange keeps Atoi's clamped magnitude, which is already far past
+		// anything that changes the answer; clamping again keeps exp+scale
+		// from overflowing an int in the caller.
+		exp = min(max(e, -maxDecimalExponent), maxDecimalExponent)
+		s = s[:i]
+	}
 	intPart, fracPart, _ := strings.Cut(s, ".")
 	if !allDigits(intPart) || !allDigits(fracPart) || intPart+fracPart == "" {
 		return false, "", 0, false
 	}
-	return neg, intPart + fracPart, -len(fracPart), true
+	return neg, intPart + fracPart, exp - len(fracPart), true
 }
+
+// maxDecimalExponent bounds the power of ten a literal's exponent contributes.
+// Anything at this magnitude already saturates (or truncates to zero) at every
+// scale a DECIMAL can declare, so clamping changes no answer and keeps the
+// arithmetic below in range.
+const maxDecimalExponent = 1 << 30
 
 func allDigits(s string) bool {
 	for i := 0; i < len(s); i++ {

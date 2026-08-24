@@ -51,13 +51,34 @@ type decimalLitCmp struct {
 	notDecimal atomic.Bool
 }
 
-// numericLit reports the exact source text of a numeric literal operand.
+// numericLit reports the exact source text of a constant operand that a
+// DECIMAL column can be compared against.
+//
+// A numeric literal contributes its verbatim source Text: the float64 box the
+// compiler built for arithmetic has already lost the digits past a double
+// (ADR-0012 item 6). A STRING literal contributes its own text, because
+// PostgreSQL types an unquoted-type literal from the other operand — `d =
+// '12.75'` is a numeric comparison there, not a string one — and because a
+// string that is NOT a number must reach the comparison to be REFUSED there
+// rather than read as zero (#463). Whether the column is a DECIMAL at all is
+// still decided per batch by vector(); nothing here changes what a string
+// literal means against a string column.
 func numericLit(e Expr) (*kernel.DecimalLiteral, bool) {
 	lit, ok := e.(*Lit)
-	if !ok || lit.Text == "" || !isNumeric(lit.Val) {
+	if !ok {
 		return nil, false
 	}
-	return kernel.NewDecimalLiteral(lit.Text), true
+	// Text is set for a NUMERIC literal and empty for every other kind, so it
+	// is both the exact carrier and the test for "this operand is a number
+	// the user wrote" — including one no Go numeric box can hold, which
+	// compileLit boxes as its own text.
+	if lit.Text != "" {
+		return kernel.NewDecimalLiteral(lit.Text), true
+	}
+	if s, ok := lit.Val.(string); ok {
+		return kernel.NewDecimalLiteral(s), true
+	}
+	return nil, false
 }
 
 // bareCol returns the operand as a plain column reference — not a ROW field
@@ -128,8 +149,19 @@ func (d *decimalLitCmp) vector(b *batch.RecordBatch) *batch.Vector {
 
 // order compares the row's value against literal i, as -1, 0 or +1, with the
 // operand order the expression was written in.
+//
+// A literal that is not a number ABORTS the query here rather than answering.
+// The column is a DECIMAL by the time this runs, so PostgreSQL's answer to
+// `d = 'abc'` is a 22P02, and the alternative — the old silent reading of an
+// unparseable constant as the value zero — matched every row holding zero
+// (#463). The kernel path raises the same error from decimalConstError, so
+// both paths refuse the same query.
 func (d *decimalLitCmp) order(vec *batch.Vector, row, i int) int {
-	c := d.lits[i].Order(vec, row)
+	lit := d.lits[i]
+	if !lit.Numeric() {
+		raiseInvalidTextRepresentation("numeric", lit.Text())
+	}
+	c := lit.Order(vec, row)
 	if d.flip {
 		return -c
 	}

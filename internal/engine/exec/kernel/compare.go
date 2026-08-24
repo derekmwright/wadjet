@@ -3,6 +3,7 @@ package kernel
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -237,7 +238,12 @@ func toBytesString(v any) string {
 // the vector carries the scale, and a kernel resolved from one batch can be
 // handed the next one.
 func compareFilterDecimal(op CompareOp, value any) FilterKernel {
-	text := decimalLiteralText(value)
+	text, ok := DecimalConstText(value)
+	if !ok {
+		// Not a number: there is no comparison to make. The caller turns a
+		// nil kernel into the query error PostgreSQL raises (#463).
+		return nil
+	}
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		lit := decimalLiteralAt(text, vec.DecimalData.Scale)
 		data := vec.DecimalData.Data
@@ -295,52 +301,67 @@ func applyCompareOp(c int, op CompareOp) bool {
 	return false
 }
 
-// decimalLiteralText renders a filter constant as plain decimal text, with no
-// exponent, so the scaling below can be done on digits rather than in float64.
-// It returns "" for a value that is not a number, which reads as zero.
-func decimalLiteralText(v any) string {
+// DecimalConstText renders a comparison constant as the decimal text a
+// DECIMAL column's domain is reached through, and reports whether the
+// constant IS a number.
+//
+// The second result is not decoration. A constant nobody can read used to
+// resolve to the value ZERO and match every stored zero (#463) — the worst
+// shape a failure can take, because it neither errors nor returns nothing.
+// PostgreSQL refuses the query instead ("invalid input syntax for type
+// numeric"), and ADR-0012 makes PostgreSQL the authority on error-versus-not,
+// so a false here is a query error at the caller, not a value.
+//
+// Exponent form is passed through untouched: batch.DecimalTextAt folds the
+// exponent into the scaling exactly, where expanding it through a float64
+// first is what lost 1e400 entirely.
+func DecimalConstText(v any) (string, bool) {
 	switch tv := v.(type) {
 	case string:
-		return normalizeDecimalText(tv)
+		return tv, isDecimalText(tv)
 	case []byte:
-		return normalizeDecimalText(string(tv))
+		return string(tv), isDecimalText(string(tv))
 	case float64:
-		return strconv.FormatFloat(tv, 'f', -1, 64)
+		// NaN and the infinities have no numeric text and no place in a
+		// DECIMAL's order; they are not values this column type holds.
+		if math.IsNaN(tv) || math.IsInf(tv, 0) {
+			return "", false
+		}
+		return strconv.FormatFloat(tv, 'f', -1, 64), true
 	case float32:
-		return strconv.FormatFloat(float64(tv), 'f', -1, 32)
+		f := float64(tv)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return "", false
+		}
+		return strconv.FormatFloat(f, 'f', -1, 32), true
 	case int64:
-		return strconv.FormatInt(tv, 10)
+		return strconv.FormatInt(tv, 10), true
 	case int32:
-		return strconv.FormatInt(int64(tv), 10)
+		return strconv.FormatInt(int64(tv), 10), true
 	case int:
-		return strconv.FormatInt(int64(tv), 10)
+		return strconv.FormatInt(int64(tv), 10), true
 	default:
-		return ""
+		return "", false
 	}
 }
 
-// normalizeDecimalText expands an exponent form ("1.5e3") into plain digits;
-// anything already plain is returned unchanged, including text that is not a
-// number at all — ParseDecimalString reads that as zero, which is what every
-// other kernel's conversion does with an unusable constant.
-func normalizeDecimalText(s string) string {
-	if !strings.ContainsAny(s, "eE") {
-		return s
-	}
-	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-	if err != nil {
-		return s
-	}
-	return strconv.FormatFloat(f, 'f', -1, 64)
+// isDecimalText reports whether text names a number. Numeric shape does not
+// depend on the scale it will later be resolved at, so scale 0 answers it.
+func isDecimalText(s string) bool {
+	_, ok := batch.DecimalTextAt(s, 0)
+	return ok
 }
 
-// decimalLiteralAt resolves plain decimal text into a column's domain at
-// `scale`: the unscaled value, the residual of the digits the scale could not
-// hold, and the saturation of a magnitude wider than Int128.
-//
-// Text that is not a number resolves to the zero value, which orders as the
-// number zero — the behaviour every other kernel's conversion has for an
-// unusable constant.
+// decimalLiteralText is DecimalConstText for the callers that have already
+// established the constant is a number.
+func decimalLiteralText(v any) string {
+	text, _ := DecimalConstText(v)
+	return text
+}
+
+// decimalLiteralAt resolves decimal text into a column's domain at `scale`:
+// the unscaled value, the residual of the digits the scale could not hold,
+// and the saturation of a magnitude wider than Int128.
 func decimalLiteralAt(text string, scale int) batch.ScaledDecimal {
 	d, _ := batch.DecimalTextAt(text, scale)
 	return d
@@ -605,7 +626,11 @@ func inFilterBool(values []any, negate bool) FilterKernel {
 func inFilterDecimal(values []any, negate bool) FilterKernel {
 	texts := make([]string, 0, len(values))
 	for _, v := range values {
-		texts = append(texts, decimalLiteralText(v))
+		text, ok := DecimalConstText(v)
+		if !ok {
+			return nil // see compareFilterDecimal: a query error, not a value
+		}
+		texts = append(texts, text)
 	}
 	// The set is a pure function of the column's SCALE, and a column's scale
 	// does not change between batches, so it is built once rather than

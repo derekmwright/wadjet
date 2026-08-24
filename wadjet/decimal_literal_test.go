@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/scan"
@@ -405,6 +406,97 @@ func TestDecimalLiteralPastTheCarrierSaturates(t *testing.T) {
 			declitCheck(t, ctx, db,
 				"SELECT COUNT(*) AS n FROM declit WHERE CASE WHEN "+tc.pred+
 					" THEN 1 ELSE 0 END = 1", tc.want)
+		})
+	}
+}
+
+// TestDecimalLiteralExponentFormIsExact is #463. An exponent-form literal used
+// to be expanded through strconv.ParseFloat before a single digit was scaled,
+// and a magnitude past float64's range made ParseFloat report ErrRange: the
+// expansion gave up, the untouched "1e400" reached a parser with no exponent
+// handling, and THAT returned the value ZERO. `WHERE d_2 = 1e400` matched the
+// row holding 0.00.
+//
+// PostgreSQL's numeric is unbounded and reads all of these as the numbers they
+// name; every count below is its answer on the same fixture.
+func TestDecimalLiteralExponentFormIsExact(t *testing.T) {
+	ctx := context.Background()
+	db := declitOpen(t)
+
+	for _, tc := range []struct {
+		pred string
+		want int64
+	}{
+		// Past float64's range in both directions: not zero, and ordered.
+		{"d_2 = 1e400", 0},
+		{"d_2 <> 1e400", 188},
+		{"d_2 < 1e400", 188},
+		{"d_2 > 1e400", 0},
+		{"d_2 > -1e400", 188},
+		{"d_2 BETWEEN -1e400 AND 1e400", 188},
+		{"d_2 IN (1e400, 2160993.50)", 1},
+		// Underflow is the same defect mirrored: 1e-400 is a positive number
+		// smaller than the column's last place, so it equals nothing and
+		// splits the rows exactly at zero.
+		{"d_2 = 1e-400", 0},
+		{"d_2 < 1e-400", 95},
+		{"d_2 > 1e-400", 93},
+		{"d_2 >= -1e-400", 94},
+		// Inside float64's range but past its 15-16 significant digits: the
+		// exponent is folded into the scaling, so the literal keeps all 25.
+		{"d_wide = 4.938271605493827160549350e14", 1},
+		{"d_wide > 4.938271605493827160549350e14", 45},
+		{"d_wide = 4938271605493827160549350e-10", 1},
+		{"d_wide = 49382716054938271605493.50E-8", 1},
+		// A quoted numeric constant is a numeric comparison against a DECIMAL
+		// column, as it is in PostgreSQL — not a string one.
+		{"d_2 = '2160993.50'", 1},
+	} {
+		t.Run(tc.pred, func(t *testing.T) {
+			declitCheck(t, ctx, db,
+				"SELECT COUNT(*) AS n FROM declit WHERE "+tc.pred, tc.want)
+			declitCheck(t, ctx, db,
+				"SELECT COUNT(*) AS n FROM declit WHERE CASE WHEN "+tc.pred+
+					" THEN 1 ELSE 0 END = 1", tc.want)
+		})
+	}
+}
+
+// TestDecimalNonNumericLiteralIsRefused is the other half of #463. A constant
+// that is not a number used to resolve to the value ZERO and match every row
+// holding zero — no error, and rows the user never asked for. PostgreSQL
+// refuses the statement ("invalid input syntax for type numeric"), and
+// ADR-0012 makes PostgreSQL the authority on error-versus-not.
+//
+// Both paths are asserted: the vectorized kernel raises it from the filter and
+// the row-at-a-time evaluator from the bound comparison, so the two cannot
+// disagree about whether the query is legal.
+func TestDecimalNonNumericLiteralIsRefused(t *testing.T) {
+	ctx := context.Background()
+	db := declitOpen(t)
+
+	for _, pred := range []string{
+		"d_2 = 'abc'",
+		"d_2 <> 'abc'",
+		"d_2 > 'abc'",
+		"d_2 IN ('abc', 1.0)",
+		"d_2 BETWEEN 'abc' AND 'def'",
+		"'abc' = d_2",
+		"d_wide < 'not a number'",
+	} {
+		t.Run(pred, func(t *testing.T) {
+			for _, sql := range []string{
+				"SELECT COUNT(*) AS n FROM declit WHERE " + pred,
+				"SELECT COUNT(*) AS n FROM declit WHERE CASE WHEN " + pred + " THEN 1 ELSE 0 END = 1",
+			} {
+				_, err := tmRun(ctx, db, sql)
+				if err == nil {
+					t.Fatalf("%s answered instead of refusing a non-numeric constant", sql)
+				}
+				if !strings.Contains(err.Error(), "invalid input syntax for type numeric") {
+					t.Errorf("%s\n  error = %v, want PostgreSQL's numeric input-syntax error", sql, err)
+				}
+			}
 		})
 	}
 }

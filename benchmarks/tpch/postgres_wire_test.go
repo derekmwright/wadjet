@@ -661,6 +661,11 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		{name: "SyntaxError", sql: `SELECT FROM WHERE`},
 		{name: "DivisionByZero", sql: `SELECT 1/0`},
 		{name: "InvalidTextRepresentation", sql: `SELECT CAST('abc' AS integer)`},
+		// A constant that is not a number, reaching a DECIMAL column. Both
+		// engines must REFUSE it: wadjet used to read it as the value zero and
+		// answer the rows holding zero (#463), which is worse than a wrong
+		// code because the client treats the rows as the truth.
+		{name: "DecimalNonNumericConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 = 'abc'`},
 		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`},
 		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`},
 		{name: "AmbiguousColumn", sql: `SELECT n_nationkey FROM nation a JOIN nation b ON a.n_nationkey = b.n_nationkey`},

@@ -40,10 +40,20 @@ type decimalLiteralScaled struct {
 }
 
 // NewDecimalLiteral binds literal text — plain or exponent form — for
-// comparison against DECIMAL columns.
+// comparison against DECIMAL columns. The text is kept VERBATIM: the exponent
+// is folded into the scaling exactly when the literal is resolved at a
+// column's scale, never expanded through a float64 first (#463).
 func NewDecimalLiteral(text string) *DecimalLiteral {
-	return &DecimalLiteral{text: normalizeDecimalText(text)}
+	return &DecimalLiteral{text: text}
 }
+
+// Numeric reports whether the literal's text names a number at all. A false
+// here is a query error at the comparison — PostgreSQL raises "invalid input
+// syntax for type numeric" rather than reading the text as zero (#463).
+func (d *DecimalLiteral) Numeric() bool { return isDecimalText(d.text) }
+
+// Text is the literal's source text, verbatim.
+func (d *DecimalLiteral) Text() string { return d.text }
 
 func (d *DecimalLiteral) at(scale int) *decimalLiteralScaled {
 	if r := d.resolved.Load(); r != nil && r.scale == scale {

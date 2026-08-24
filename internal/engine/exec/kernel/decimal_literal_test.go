@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"math"
 	"sync"
 	"testing"
 
@@ -125,28 +126,99 @@ func TestDecimalLiteralIsConcurrencySafe(t *testing.T) {
 	wg.Wait()
 }
 
-// TestDecimalLiteralExponentFormIsStillRounded pins a KNOWN LIMIT, not a
-// property: an exponent-form literal is expanded through a float64 by
-// normalizeDecimalText (compare.go), so it arrives already rounded and the
-// exactness above does not reach it. Plain decimal text — every literal the
-// SQL parser sees written out, and everything #452 was about — is exact.
-//
-// The fix is one hunk in normalizeDecimalText: expand the exponent by moving
-// the decimal POINT across the digit string instead of round-tripping through
-// strconv.ParseFloat. It belongs there rather than here because
-// compareFilterDecimal shares that function, and one comparison rule per
-// predicate is the property that keeps the vectorized and row paths from
-// disagreeing (#394). When that lands, this test fails and is deleted.
-func TestDecimalLiteralExponentFormIsStillRounded(t *testing.T) {
+// TestDecimalLiteralExponentFormIsExact replaces the pin that stood here for
+// the opposite claim. An exponent-form literal used to be expanded through
+// strconv.ParseFloat before any digit was scaled, so it arrived already
+// rounded; the exponent is now folded into the scaling itself, on the digit
+// string, and every spelling of the same number resolves to the same value
+// (#463).
+func TestDecimalLiteralExponentFormIsExact(t *testing.T) {
 	vec := decimalVec(t, 10, "493827160549382.7160549350")
-	plain := NewDecimalLiteral("493827160549382.7160549350")
-	if got := plain.Order(vec, 0); got != 0 {
-		t.Fatalf("plain text: Order = %d, want 0", got)
+	for _, text := range []string{
+		"493827160549382.7160549350",
+		"4.938271605493827160549350e14",
+		"4938271605493827160549350e-10",
+		"49382716054938271605493.50E-8",
+		"+4.93827160549382716054935E+14",
+	} {
+		if got := NewDecimalLiteral(text).Order(vec, 0); got != 0 {
+			t.Errorf("NewDecimalLiteral(%q).Order = %d, want 0 (the same number)", text, got)
+		}
 	}
-	exp := NewDecimalLiteral("4.938271605493827160549350e14")
-	if got := exp.Order(vec, 0); got == 0 {
-		t.Fatal("exponent form is exact now — normalizeDecimalText no longer " +
-			"round-trips through float64, so delete this pin")
+	// One unit of the last place either side, in exponent form: a float64
+	// round trip renders all three identically.
+	if got := NewDecimalLiteral("4.938271605493827160549351e14").Order(vec, 0); got != -1 {
+		t.Errorf("one ulp above: Order = %d, want -1", got)
+	}
+	if got := NewDecimalLiteral("4.938271605493827160549349e14").Order(vec, 0); got != 1 {
+		t.Errorf("one ulp below: Order = %d, want 1", got)
+	}
+}
+
+// TestDecimalLiteralOutOfFloatRangeIsOrdered is #463's headline: a literal
+// past float64's range used to be unreadable — ParseFloat reported ErrRange,
+// the expansion gave up, and the parser that received the untouched "1e400"
+// returned ZERO, so `WHERE d = 1e400` matched the row holding 0.00. It is an
+// ordinary number with a large exponent; it saturates and orders above
+// everything.
+func TestDecimalLiteralOutOfFloatRangeIsOrdered(t *testing.T) {
+	vec := decimalVec(t, 2, "0.00", "1.50", "-1.50")
+	for _, tc := range []struct {
+		lit  string
+		want int
+	}{
+		{"1e400", -1},
+		{"-1e400", 1},
+		{"1E400", -1},
+		// Not zero, and not rounded to zero: a positive value below one unit
+		// of the column's scale sits strictly ABOVE the stored 0.00.
+		{"1e-400", -1},
+		{"-1e-400", 1},
+	} {
+		lit := NewDecimalLiteral(tc.lit)
+		if !lit.Numeric() {
+			t.Fatalf("%q is a number", tc.lit)
+		}
+		if got := lit.Order(vec, 0); got != tc.want {
+			t.Errorf("NewDecimalLiteral(%q).Order(0.00) = %d, want %d", tc.lit, got, tc.want)
+		}
+	}
+	// Nothing equals a value the scale cannot hold, and the residual is what
+	// keeps `< 1e-400` from admitting the row holding 0.00 that `<= 0` does.
+	tiny := NewDecimalLiteral("1e-400")
+	if tiny.Compare(vec, 0, OpEq) {
+		t.Error("1e-400 equals the stored 0.00")
+	}
+	if !tiny.Compare(vec, 0, OpLt) {
+		t.Error("the stored 0.00 is not below 1e-400")
+	}
+}
+
+// TestDecimalLiteralRejectsWhatIsNotANumber: the constant reaches the
+// comparison so the comparison can REFUSE it. Reading it as zero is what made
+// `WHERE d = 'abc'` answer the rows holding zero.
+func TestDecimalLiteralRejectsWhatIsNotANumber(t *testing.T) {
+	for _, text := range []string{"abc", "", "  ", "1.2.3", "1e", "1eX", "--1", "0x10", "1,000", "NaN"} {
+		if NewDecimalLiteral(text).Numeric() {
+			t.Errorf("NewDecimalLiteral(%q).Numeric() = true", text)
+		}
+		if _, ok := DecimalConstText(text); ok {
+			t.Errorf("DecimalConstText(%q) accepted a non-number", text)
+		}
+	}
+	for _, text := range []string{"0", "-0", "+1", ".5", "5.", "1e400", "1E-400", " 12.75 "} {
+		if !NewDecimalLiteral(text).Numeric() {
+			t.Errorf("NewDecimalLiteral(%q).Numeric() = false", text)
+		}
+	}
+	// Constants that are not text at all.
+	for _, v := range []any{true, math.NaN(), math.Inf(1), math.Inf(-1), []byte("abc")} {
+		if _, ok := DecimalConstText(v); ok {
+			t.Errorf("DecimalConstText(%#v) accepted a non-number", v)
+		}
+	}
+	if _, ok := DecimalConstText([]byte("12.75")); !ok {
+		t.Error("DecimalConstText refused a numeric []byte parameter")
 	}
 }
 

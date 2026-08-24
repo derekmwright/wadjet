@@ -539,6 +539,32 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "WideDecimalGtPastCarrierAtScale", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide > 100000000000000000000000000000`},
 	)
 
+	// Exponent-form literals (#463). These used to be expanded through
+	// strconv.ParseFloat before a digit was scaled: 1e400 made ParseFloat
+	// report ErrRange, the expansion gave up, and the parser that received the
+	// untouched text answered with the value ZERO — so `d_2 = 1e400` matched
+	// the row holding 0.00. PostgreSQL's numeric is unbounded and reads every
+	// spelling below as the number it names.
+	out = append(out,
+		pgCase{name: "DecimalEqOutOfFloatRange", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 = 1e400`},
+		pgCase{name: "DecimalLtOutOfFloatRange", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 < 1e400`},
+		pgCase{name: "DecimalGtOutOfFloatRangeNegative", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 > -1e400`},
+		pgCase{name: "DecimalBetweenOutOfFloatRange", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 BETWEEN -1e400 AND 1e400`},
+		// Underflow is the same defect mirrored: a positive value below the
+		// column's last place equals nothing and splits the rows at zero.
+		pgCase{name: "DecimalEqUnderFloatRange", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 = 1e-400`},
+		pgCase{name: "DecimalLtUnderFloatRange", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 < 1e-400`},
+		pgCase{name: "DecimalGeUnderFloatRangeNegative", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 >= -1e-400`},
+		// Inside float64's range but past its significant digits: the exponent
+		// is folded into the scaling, so all 25 digits survive.
+		pgCase{name: "WideDecimalEqExponentForm", sql: `SELECT d_key FROM dec_probe WHERE d_wide = 4.938271605493827160549350e14 ORDER BY d_key`},
+		pgCase{name: "WideDecimalEqExponentFormNegativeExp", sql: `SELECT d_key FROM dec_probe WHERE d_wide = 4938271605493827160549350e-10 ORDER BY d_key`},
+		pgCase{name: "WideDecimalGtExponentForm", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide > 4.938271605493827160549350e14`},
+		// A quoted numeric constant against a DECIMAL column is a NUMERIC
+		// comparison in PostgreSQL, not a string one.
+		pgCase{name: "DecimalEqQuotedNumeric", sql: `SELECT d_key FROM dec_probe WHERE d_2 = '12.75' ORDER BY d_key`},
+	)
+
 	// --- Wide DECIMAL (precision 38) --------------------------------------
 	//
 	// Everything above runs on ONE physical encoding. A DECIMAL's leaf type is
