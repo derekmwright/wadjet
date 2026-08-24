@@ -78,6 +78,14 @@ func TestKeyOnlyBuildPanicUnderSourceMutexDoesNotDeadlock(t *testing.T) {
 // TestKeyOnlyBuildPanicStopsSiblings: the failing worker must also cancel, so
 // the siblings stop pulling instead of draining the whole source after the
 // build has already failed.
+//
+// Build runs synchronously here (unlike its neighbour above), so a
+// regression that strands the siblings — the exact deadlock class
+// TestKeyOnlyBuildPanicUnderSourceMutexDoesNotDeadlock guards — would hang
+// this call forever with nothing to time it out except the test binary's own
+// budget (8m in CI, spanning every package). The same internal deadline
+// pattern turns that into a DEADLOCK failure in seconds, with a stack dump
+// naming the stuck goroutines, instead of an opaque whole-run timeout.
 func TestKeyOnlyBuildPanicStopsSiblings(t *testing.T) {
 	if runtime.NumCPU() < 2 {
 		t.Skip("needs >1 CPU for the parallel key-only path")
@@ -92,8 +100,19 @@ func TestKeyOnlyBuildPanicStopsSiblings(t *testing.T) {
 	hj := NewHashJoin(AntiJoin, []string{"k"}, []string{"k"})
 	hj.SemiAntiKeyOnly = true
 
+	done := make(chan error, 1)
 	start := time.Now()
-	err := hj.Build(context.Background(), src)
+	go func() { done <- hj.Build(context.Background(), src) }()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(30 * time.Second):
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		t.Fatalf("DEADLOCK: Build did not return 30s after a recovered panic — the siblings "+
+			"were not cancelled.\n%s", buf[:n])
+	}
 	if err == nil {
 		t.Fatal("Build returned nil after a panic in the build source")
 	}
