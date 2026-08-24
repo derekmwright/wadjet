@@ -1070,5 +1070,54 @@ func postgresSemanticsCases() []pgCase {
 				GROUP BY u.k ORDER BY k`},
 	)
 
+	// --- MIN/MAX float NaN ordering (#457) -----------------------------------
+	//
+	// PostgreSQL's float order (float8_cmp_internal) places NaN ABOVE every
+	// other value, so a group containing a NaN answers MAX = NaN and MIN =
+	// the smallest non-NaN value, wherever the NaN sits in arrival order —
+	// verified live: MIN/MAX over {1.0, NaN, -Infinity, +Infinity} in every
+	// arrival order all render MIN=-Infinity/MAX=NaN, an all-NaN group
+	// answers NaN for both, and NULLs are skipped as usual (a NaN plus NULLs
+	// still answers NaN for both). CAST('NaN' AS DOUBLE PRECISION) is the
+	// SQL both engines parse identically (Go's strconv.ParseFloat and
+	// PostgreSQL's float8in both read the token), so this is the same query
+	// text against both.
+	out = append(out,
+		pgCase{name: "MinMaxFloatNaNGrouped", sql: `SELECT g, MIN(v) AS lo, MAX(v) AS hi FROM (
+			SELECT 1 AS g, CAST(1.0 AS DOUBLE PRECISION) AS v
+			UNION ALL SELECT 1, CAST('NaN' AS DOUBLE PRECISION)
+			UNION ALL SELECT 1, CAST('-Infinity' AS DOUBLE PRECISION)
+			UNION ALL SELECT 1, CAST('Infinity' AS DOUBLE PRECISION)
+			UNION ALL SELECT 2, CAST('-Infinity' AS DOUBLE PRECISION)
+			UNION ALL SELECT 2, CAST('NaN' AS DOUBLE PRECISION)
+			UNION ALL SELECT 2, CAST('Infinity' AS DOUBLE PRECISION)
+			UNION ALL SELECT 2, CAST(1.0 AS DOUBLE PRECISION)
+			UNION ALL SELECT 3, CAST('NaN' AS DOUBLE PRECISION)
+			UNION ALL SELECT 3, CAST(1.0 AS DOUBLE PRECISION)
+			UNION ALL SELECT 3, CAST('-Infinity' AS DOUBLE PRECISION)
+			UNION ALL SELECT 3, CAST('Infinity' AS DOUBLE PRECISION)
+			UNION ALL SELECT 4, CAST('NaN' AS DOUBLE PRECISION)
+			UNION ALL SELECT 4, CAST('NaN' AS DOUBLE PRECISION)
+			UNION ALL SELECT 4, CAST('NaN' AS DOUBLE PRECISION)
+			UNION ALL SELECT 5, CAST('NaN' AS DOUBLE PRECISION)
+			UNION ALL SELECT 5, CAST(NULL AS DOUBLE PRECISION)
+			UNION ALL SELECT 5, CAST(NULL AS DOUBLE PRECISION)
+			UNION ALL SELECT 6, CAST(NULL AS DOUBLE PRECISION)
+			UNION ALL SELECT 6, CAST('NaN' AS DOUBLE PRECISION)
+			UNION ALL SELECT 6, CAST(2.0 AS DOUBLE PRECISION)
+		) AS t GROUP BY g ORDER BY g`},
+		pgCase{name: "MinMaxFloatNaNScalar", sql: `SELECT MIN(v) AS lo, MAX(v) AS hi FROM (
+			SELECT CAST('NaN' AS DOUBLE PRECISION) AS v
+			UNION ALL SELECT CAST(1.0 AS DOUBLE PRECISION)
+			UNION ALL SELECT CAST('-Infinity' AS DOUBLE PRECISION)
+			UNION ALL SELECT CAST('Infinity' AS DOUBLE PRECISION)
+		) AS t`},
+		pgCase{name: "MinMaxFloatAllNaNScalar", sql: `SELECT MIN(v) AS lo, MAX(v) AS hi FROM (
+			SELECT CAST('NaN' AS DOUBLE PRECISION) AS v
+			UNION ALL SELECT CAST('NaN' AS DOUBLE PRECISION)
+			UNION ALL SELECT CAST('NaN' AS DOUBLE PRECISION)
+		) AS t`},
+	)
+
 	return out
 }

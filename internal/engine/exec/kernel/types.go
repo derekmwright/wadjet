@@ -212,7 +212,7 @@ func (a *Accumulator) Merge(other *Accumulator) {
 					a.MinStr = other.MinStr
 				}
 			} else if other.IsFloat || a.IsFloat {
-				if other.MinF64 < a.MinF64 {
+				if CompareFloat64(other.MinF64, a.MinF64) < 0 {
 					a.MinF64 = other.MinF64
 				}
 			} else if other.IsDecimal || a.IsDecimal {
@@ -239,7 +239,7 @@ func (a *Accumulator) Merge(other *Accumulator) {
 					a.MaxStr = other.MaxStr
 				}
 			} else if other.IsFloat || a.IsFloat {
-				if other.MaxF64 > a.MaxF64 {
+				if CompareFloat64(other.MaxF64, a.MaxF64) > 0 {
 					a.MaxF64 = other.MaxF64
 				}
 			} else if other.IsDecimal || a.IsDecimal {

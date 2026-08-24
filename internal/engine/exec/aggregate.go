@@ -5622,7 +5622,7 @@ func mergeFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 		if ofa.hasMin != nil && ofa.hasMin[srcIdx] {
 			if hfa.hasMin[dstIdx] {
 				if hfa.isFloat {
-					if ofa.minF64[srcIdx] < hfa.minF64[dstIdx] {
+					if kernel.CompareFloat64(ofa.minF64[srcIdx], hfa.minF64[dstIdx]) < 0 {
 						hfa.minF64[dstIdx] = ofa.minF64[srcIdx]
 					}
 				} else if hfa.isDecimal {
@@ -5650,7 +5650,7 @@ func mergeFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 		if ofa.hasMax != nil && ofa.hasMax[srcIdx] {
 			if hfa.hasMax[dstIdx] {
 				if hfa.isFloat {
-					if ofa.maxF64[srcIdx] > hfa.maxF64[dstIdx] {
+					if kernel.CompareFloat64(ofa.maxF64[srcIdx], hfa.maxF64[dstIdx]) > 0 {
 						hfa.maxF64[dstIdx] = ofa.maxF64[srcIdx]
 					}
 				} else if hfa.isDecimal {

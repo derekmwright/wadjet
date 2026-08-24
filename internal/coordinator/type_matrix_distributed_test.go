@@ -334,6 +334,10 @@ func tmdTables() []tmdTable {
 		// type-matrix corpus entry names either table.
 		{dtpTable, dtpSchema(), dtpData()},
 		{dtpOvfTable, dtpOvfSchema(), dtpOvfData()},
+		// The float MIN/MAX NaN-ordering fixture (#457). Rides along here for
+		// the same reason as dtpTable: TestMinMaxFloatNaNTwoPath uses the same
+		// two arms, and no type-matrix corpus entry names this table.
+		{nmmTable, nmmSchema(), nmmData()},
 	}
 }
 

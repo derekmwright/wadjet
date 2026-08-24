@@ -26,6 +26,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
@@ -1893,17 +1894,17 @@ func mergeDecimalPartials(rows []map[string]any, col string, scale int, fn strin
 }
 
 // compareAnyValues compares two values for min/max merge.
+//
+// The float64 arm follows kernel.CompareFloat64 (ADR-0012: PostgreSQL
+// decides float ordering — NaN sorts greatest and equal to itself) so this
+// legacy scalar-aggregate merge path agrees with the engine's own MIN/MAX
+// accumulators and with ORDER BY, instead of arrival-order-dependent IEEE
+// `<`/`>` where a NaN partial is silently skipped (#457).
 func compareAnyValues(a, b any) int {
 	switch av := a.(type) {
 	case float64:
 		bv, _ := b.(float64)
-		if av < bv {
-			return -1
-		}
-		if av > bv {
-			return 1
-		}
-		return 0
+		return kernel.CompareFloat64(av, bv)
 	case int64:
 		bv, _ := b.(int64)
 		if av < bv {
@@ -1957,14 +1958,21 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 	// switching on a "sum"/"min"/"max" string per row per aggregate.
 	type aggMergeFn func(cur float64, in float64) float64
 	sumMerge := func(cur, in float64) float64 { return cur + in }
+	// minMerge/maxMerge follow kernel.CompareFloat64 (ADR-0012: NaN sorts
+	// greatest, equal to itself) so a probe-split partial's MIN/MAX agrees
+	// with the engine's own accumulators and ORDER BY, instead of raw IEEE
+	// `<`/`>` silently skipping a NaN partial depending on merge order
+	// (#457). Applied uniformly to every extracted-to-float64 column
+	// (int32/int64/float32/float64); NaN cannot arise from an integer
+	// column, so the comparison is unchanged there.
 	minMerge := func(cur, in float64) float64 {
-		if in < cur {
+		if kernel.CompareFloat64(in, cur) < 0 {
 			return in
 		}
 		return cur
 	}
 	maxMerge := func(cur, in float64) float64 {
-		if in > cur {
+		if kernel.CompareFloat64(in, cur) > 0 {
 			return in
 		}
 		return cur
