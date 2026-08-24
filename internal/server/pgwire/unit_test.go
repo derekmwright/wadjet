@@ -328,12 +328,37 @@ func TestFormatPgValue(t *testing.T) {
 		{"nested_array", []any{[]any{1, 2}}, `{"{1,2}"}`},
 		{"array_with_null", []any{"a", nil, "c"}, "{a,NULL,c}"},
 		{"array_needs_quoting", []any{"has,comma", "has space", ""}, `{"has,comma","has space",""}`},
+		// pgArrayNeedsQuoting's whitespace set omitted \v and \f (vertical
+		// tab, form feed): PostgreSQL's array_isspace treats both as
+		// whitespace alongside space/tab/newline/CR, so a leading/trailing
+		// or embedded VT/FF must trigger quoting the same as a space does.
+		// Verified against live PostgreSQL 17:
+		//
+		//	wadjet_verify=# SELECT ARRAY[E'a\vb', E'a\fb']::text[];
+		//	          array
+		//	--------------------------
+		//	 {"a\x0Bb","a\x0Cb"}
+		//	(1 row)
+		//
+		// (psql renders the control bytes as \x0B/\x0C for display; the
+		// wire bytes themselves are the literal VT/FF, which is what "want"
+		// below contains via Go's \v/\f escapes.)
+		{"array_vtab_formfeed", []any{"a\vb", "a\fb"}, "{\"a\vb\",\"a\fb\"}"},
 		// A ROW value (map[string]any, wadjet's boxing for it) with no
 		// column declaration to give it PostgreSQL's field order falls back
 		// to sorted keys — still deterministic composite text, not the
 		// map-range-random "{k: v}" this used to produce.
 		{"row_no_schema", map[string]any{"k": "v"}, "(v)"},
 		{"row_no_schema_multi_field", map[string]any{"b": "2", "a": "1", "c": "3"}, "(1,2,3)"},
+		// pgCompositeNeedsQuoting's whitespace set had the same \v/\f gap as
+		// the array one above. Verified against live PostgreSQL 17:
+		//
+		//	wadjet_verify=# SELECT ROW(E'a\vb', E'a\fb')::record;
+		//	          row
+		//	------------------------
+		//	 ("a\x0Bb","a\x0Cb")
+		//	(1 row)
+		{"row_no_schema_vtab_formfeed", map[string]any{"k": "a\vb"}, "(\"a\vb\")"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

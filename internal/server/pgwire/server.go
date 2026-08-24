@@ -3407,7 +3407,13 @@ func pgArrayNeedsQuoting(s string) bool {
 	}
 	for _, r := range s {
 		switch r {
-		case ',', '{', '}', '"', '\\', ' ', '\t', '\n', '\r':
+		// PostgreSQL's array_isspace (arrayfuncs.c) treats seven bytes as
+		// whitespace: space, tab, newline, CR, vertical tab, and form feed
+		// — the last two (\v, \f) were missing here, so a leading or
+		// trailing VT/FF silently dropped its quoting on a round trip
+		// instead of coming back with it, same as any other array-breaking
+		// character would.
+		case ',', '{', '}', '"', '\\', ' ', '\t', '\n', '\r', '\v', '\f':
 			return true
 		}
 	}
@@ -3564,7 +3570,11 @@ func pgCompositeNeedsQuoting(s string) bool {
 	}
 	for _, r := range s {
 		switch r {
-		case ',', '(', ')', '"', '\\', ' ', '\t', '\n', '\r':
+		// record_in/record_out's isspace (rowtypes.c, same set as the C
+		// library isspace it defers to for this) treats \v and \f as
+		// whitespace alongside space/tab/newline/CR — the same gap as
+		// pgArrayNeedsQuoting above, and the same fix.
+		case ',', '(', ')', '"', '\\', ' ', '\t', '\n', '\r', '\v', '\f':
 			return true
 		}
 	}
