@@ -228,3 +228,88 @@ func describeStages(stages []Stage) string {
 	}
 	return b.String()
 }
+
+// #466 review, blocker: `SELECT DISTINCT *` inside a derived table REFUSED,
+// where the pre-#466 DAG answered correctly.
+//
+// A bare-star select list produces no NodeProject at all — the plan is
+// Distinct → Scan — so rewriteDistinctAsGroupBy's projection-driven path had
+// nothing to read, declined, and refuseUnstageableDistinct then refused the
+// query. The star's columns are knowable from the scan's catalog annotation
+// (the same source ExpandStarProjections reads), so the rewrite synthesizes
+// the group keys from them.
+//
+// Declaring the keys is also what stops the column pruner from eating the
+// dedup: a Distinct names no columns, so `SELECT COUNT(*) FROM (SELECT
+// DISTINCT * FROM lineitem) u` pruned the scan to ONE column and the
+// single-process path deduplicated on that, and over a join it pruned to
+// zero columns and tripped the schemaless-batch guard (#277).
+func TestDerivedStarDistinctEmitsADedupStage(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+
+	for _, tt := range []struct {
+		name string
+		sql  string
+		keys []string
+	}{
+		{
+			name: "SELECT DISTINCT *",
+			sql:  "SELECT COUNT(*) AS c FROM (SELECT DISTINCT * FROM supplier) u",
+			keys: []string{"s_suppkey", "s_name", "s_address", "s_nationkey",
+				"s_phone", "s_acctbal", "s_comment"},
+		},
+		{
+			name: "SELECT DISTINCT t.*",
+			sql:  "SELECT COUNT(*) AS c FROM (SELECT DISTINCT s.* FROM supplier s) u",
+			keys: []string{"s_suppkey", "s_name", "s_address", "s_nationkey",
+				"s_phone", "s_acctbal", "s_comment"},
+		},
+		{
+			name: "star DISTINCT behind a WHERE",
+			sql:  "SELECT COUNT(*) AS c FROM (SELECT DISTINCT * FROM nation WHERE n_regionkey = 1) u",
+			keys: []string{"n_nationkey", "n_name", "n_regionkey", "n_comment"},
+		},
+		{
+			name: "star DISTINCT over a join, both sides",
+			sql:  "SELECT COUNT(*) AS c FROM (SELECT DISTINCT * FROM nation JOIN region ON 1=1) u",
+			keys: []string{"n_nationkey", "n_name", "n_regionkey", "n_comment",
+				"r_regionkey", "r_name", "r_comment"},
+		},
+		{
+			// The root shape was answered by the coordinator's post-gather
+			// dedup; it is sharded now, and must still deduplicate.
+			name: "root SELECT DISTINCT *",
+			sql:  "SELECT DISTINCT * FROM nation",
+			keys: []string{"n_nationkey", "n_name", "n_regionkey", "n_comment"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			stages := sqlToStages(t, cat, ctx, tt.sql, 3)
+			if got := distinctGroupStages(stages, tt.keys...); len(got) == 0 {
+				t.Fatalf("no stage deduplicates on %v — the star DISTINCT reached no worker\nstages:\n%s",
+					tt.keys, describeStages(stages))
+			}
+			assertNoUnstageableDistinct(t, cat, ctx, tt.sql)
+		})
+	}
+}
+
+// #466 review: the group-key test is an AST check on the projection, and it
+// used to be gated behind a `(?i)\bselect\b` match on the expression TEXT.
+// The word inside a STRING LITERAL fired it, the rewrite declined, and off
+// the root path the query was refused — an error for a statement PostgreSQL
+// answers, on both the DAG and (via the refusal) any caller of
+// PlanDistributed.
+func TestDistinctOverAStringLiteralNamingSelectIsRewritten(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	const sql = `SELECT COUNT(*) AS c FROM
+	    (SELECT DISTINCT n_name, 'x select y' AS lit FROM nation) u`
+
+	if err := planDistributedErr(t, cat, ctx, sql); err != nil {
+		t.Fatalf("a DISTINCT over a string literal containing the word \"select\" was refused: %v", err)
+	}
+	stages := sqlToStages(t, cat, ctx, sql, 3)
+	if got := distinctGroupStages(stages, "n_name", "'x select y'"); len(got) == 0 {
+		t.Fatalf("no dedup stage for the literal projection\nstages:\n%s", describeStages(stages))
+	}
+}

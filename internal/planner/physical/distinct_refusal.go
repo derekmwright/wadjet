@@ -36,6 +36,9 @@ var ErrDistinctDistributed = errors.New(
 // Scope mirrors the two compensations exactly. The root path — the chain of
 // Limit / Sort / Project nodes descending from the plan root — is where the
 // coordinator's post-gather dedup can see a Distinct, so one there is fine.
+// (A star DISTINCT reaches neither branch: logical.rewriteStarDistinct
+// lowers it wherever it sits, reading its group keys off the scan's catalog
+// annotation, so this refusal never sees one whose columns are knowable.)
 // Anywhere else, an unmarked Distinct that survived the rewrite is a dropped
 // DISTINCT. A BuildSideDedup Distinct is planner-inserted and carries no
 // user-visible semantics, so it never refuses.

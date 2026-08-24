@@ -68,7 +68,19 @@ func TestRewriteDistinctAsGroupBy(t *testing.T) {
 		{"duplicate column deduped", "SELECT DISTINCT a, a FROM t", true, []string{"a"}},
 		{"expression", "SELECT DISTINCT a, b + c FROM t", true, []string{"a", "b + c"}},
 		{"function expression", "SELECT DISTINCT lower(a) AS x FROM t", true, []string{"lower(a)"}},
-		{"star falls back", "SELECT DISTINCT * FROM t", false, nil},
+		// A star's columns come from the scan's catalog annotation; this
+		// helper builds an unannotated plan, so there is nothing to group
+		// by and the rewrite declines. See
+		// TestRewriteDistinctAsGroupBy_StarUsesScanColumns for the
+		// annotated case.
+		{"unannotated star falls back", "SELECT DISTINCT * FROM t", false, nil},
+		// #466 review: the group-key check is an AST check, and used to be
+		// preceded by a `(?i)\bselect\b` match on the expression TEXT.
+		// That fired on a string literal and declined a rewritable
+		// projection, which off the root path became a refusal for a query
+		// PostgreSQL answers.
+		{"string literal containing SELECT", "SELECT DISTINCT a, 'x select y' FROM t", true,
+			[]string{"a", "'x select y'"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -224,5 +236,94 @@ func TestRewriteDistinctAsGroupBy_PreservesCTEs(t *testing.T) {
 	}
 	if hasNodeType(out, NodeDistinct) {
 		t.Fatalf("distinct not rewritten\n%s", out.PrettyPrint(0))
+	}
+}
+
+// `SELECT DISTINCT *` and `SELECT DISTINCT t.*` reach the rewrite as a
+// Distinct sitting DIRECTLY on the relation: a bare-star select list produces
+// no NodeProject at all, so the projection-driven path has nothing to read.
+// Its group keys are the relation's own columns, from the scan's catalog
+// annotation — the same source ExpandStarProjections uses.
+//
+// Before this, the shape was declined here and then REFUSED off the root path
+// by physical.refuseUnstageableDistinct, so `SELECT COUNT(*) FROM (SELECT
+// DISTINCT * FROM supplier) u` — which PostgreSQL answers 100, and which the
+// pre-#466 DAG also answered 100 — came back as an error.
+func TestRewriteDistinctAsGroupBy_StarUsesScanColumns(t *testing.T) {
+	nation := func() *Node {
+		s := NewScan("nation", "")
+		s.ScanColumns = []string{"n_nationkey", "n_name", "n_regionkey"}
+		return s
+	}
+	region := func() *Node {
+		s := NewScan("region", "")
+		s.ScanColumns = []string{"r_regionkey", "r_name"}
+		return s
+	}
+
+	t.Run("directly on a scan", func(t *testing.T) {
+		out := rewriteDistinctAsGroupBy(NewDistinct(nation()))
+		assertStarDistinctKeys(t, out, []string{"n_nationkey", "n_name", "n_regionkey"})
+	})
+
+	t.Run("through the WHERE filter", func(t *testing.T) {
+		f := &Node{Type: NodeFilter, Children: []*Node{nation()}}
+		out := rewriteDistinctAsGroupBy(NewDistinct(f))
+		assertStarDistinctKeys(t, out, []string{"n_nationkey", "n_name", "n_regionkey"})
+	})
+
+	t.Run("over a join, both sides", func(t *testing.T) {
+		j := &Node{Type: NodeJoin, JoinType: "cross", Children: []*Node{nation(), region()}}
+		out := rewriteDistinctAsGroupBy(NewDistinct(j))
+		assertStarDistinctKeys(t, out,
+			[]string{"n_nationkey", "n_name", "n_regionkey", "r_regionkey", "r_name"})
+	})
+
+	t.Run("declines an unannotated scan", func(t *testing.T) {
+		out := rewriteDistinctAsGroupBy(NewDistinct(NewScan("nation", "")))
+		if !hasNodeType(out, NodeDistinct) {
+			t.Fatalf("rewrote a star DISTINCT with no known column set\n%s", out.PrettyPrint(0))
+		}
+	})
+
+	t.Run("declines a self join whose names collide", func(t *testing.T) {
+		// Both sides carry n_name; one group key cannot stand for two
+		// columns, and collapsing them over-deduplicates.
+		j := &Node{Type: NodeJoin, JoinType: "inner", Children: []*Node{nation(), nation()}}
+		out := rewriteDistinctAsGroupBy(NewDistinct(j))
+		if !hasNodeType(out, NodeDistinct) {
+			t.Fatalf("rewrote a star DISTINCT over colliding column names\n%s", out.PrettyPrint(0))
+		}
+	})
+
+	t.Run("declines a semi join, which emits one side only", func(t *testing.T) {
+		j := &Node{Type: NodeJoin, JoinType: "semi", Children: []*Node{nation(), region()}}
+		out := rewriteDistinctAsGroupBy(NewDistinct(j))
+		if !hasNodeType(out, NodeDistinct) {
+			t.Fatalf("rewrote a star DISTINCT over a semi join — the right side's"+
+				" columns are not in the output\n%s", out.PrettyPrint(0))
+		}
+	})
+
+	t.Run("declines below a nested aggregate", func(t *testing.T) {
+		agg := NewAggregate(nation(), []string{"n_regionkey"}, nil)
+		out := rewriteDistinctAsGroupBy(NewDistinct(agg))
+		if !hasNodeType(out, NodeDistinct) {
+			t.Fatalf("rewrote a star DISTINCT whose input is not the scans' columns\n%s",
+				out.PrettyPrint(0))
+		}
+	})
+}
+
+// assertStarDistinctKeys checks the rewrite replaced the Distinct with an
+// aggregate-free GROUP BY on exactly keys, in order.
+func assertStarDistinctKeys(t *testing.T, out *Node, keys []string) {
+	t.Helper()
+	if hasNodeType(out, NodeDistinct) {
+		t.Fatalf("DISTINCT survived the rewrite — off the root path the DAG refuses it\n%s",
+			out.PrettyPrint(0))
+	}
+	if findDistinctGroupBy(out, keys) == nil {
+		t.Fatalf("no aggregate-free GROUP BY on %v\n%s", keys, out.PrettyPrint(0))
 	}
 }
