@@ -86,14 +86,59 @@ func compareFilterImpl[T Ordered](getData func(v *batch.Vector) []T, val T, op C
 	}
 }
 
-// compareFilterFloat is compareFilterImpl for FLOAT32/FLOAT64: identical loop
-// shape, but the per-row test comes from resolveFloatConstPred so the column
-// is compared in PostgreSQL's total order rather than Go's IEEE754 one
-// (kernel/float_order.go). The operator and the constant's NaN-ness are
-// resolved once, here, so the inner loop keeps a single call through a
-// non-escaping closure exactly as the generic kernel does.
+// compareFilterFloat is compareFilterImpl for FLOAT32/FLOAT64: same loop
+// shape, but the per-row test comes from kernel/float_order.go so the column
+// is compared in PostgreSQL's total order rather than Go's IEEE754 one. The
+// operator and the constant's NaN-ness are resolved once, here — and the
+// constant's NaN-ness also picks WHICH shape the per-row test takes. A NaN
+// constant is rare on the query side and its answer depends only on the
+// row's own NaN-ness, so it keeps resolveFloatConstPred's one-argument
+// capturing closure. The common, non-NaN case uses resolveFloatConstPred2's
+// non-capturing two-argument form instead, with val carried as a plain
+// loop-invariant argument: the capturing form here measured +28% on
+// FilterColumnCompare, because calling a closure that captured the constant
+// was a genuine indirect call per row rather than the near-free dispatch the
+// equivalent integer path (resolveCompare, above) gets.
 func compareFilterFloat[T FloatOrdered](getData func(v *batch.Vector) []T, val T, op CompareOp) FilterKernel {
-	keep := resolveFloatConstPred(op, val)
+	if val != val {
+		keep := resolveFloatConstPred(op, val)
+		return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+			data := getData(vec)
+			out := outSel[:0]
+			hasNulls := vec.Nulls.HasNulls()
+			if sel != nil {
+				if hasNulls {
+					for _, idx := range sel {
+						if !vec.Nulls.IsNullFast(int(idx)) && keep(data[idx]) {
+							out = append(out, idx)
+						}
+					}
+				} else {
+					for _, idx := range sel {
+						if keep(data[idx]) {
+							out = append(out, idx)
+						}
+					}
+				}
+			} else {
+				if hasNulls {
+					for i := 0; i < vecLen; i++ {
+						if !vec.Nulls.IsNullFast(i) && keep(data[i]) {
+							out = append(out, uint32(i))
+						}
+					}
+				} else {
+					for i := 0; i < vecLen; i++ {
+						if keep(data[i]) {
+							out = append(out, uint32(i))
+						}
+					}
+				}
+			}
+			return out
+		}
+	}
+	cmpFn := resolveFloatConstPred2[T](op)
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		data := getData(vec)
 		out := outSel[:0]
@@ -101,13 +146,13 @@ func compareFilterFloat[T FloatOrdered](getData func(v *batch.Vector) []T, val T
 		if sel != nil {
 			if hasNulls {
 				for _, idx := range sel {
-					if !vec.Nulls.IsNullFast(int(idx)) && keep(data[idx]) {
+					if !vec.Nulls.IsNullFast(int(idx)) && cmpFn(data[idx], val) {
 						out = append(out, idx)
 					}
 				}
 			} else {
 				for _, idx := range sel {
-					if keep(data[idx]) {
+					if cmpFn(data[idx], val) {
 						out = append(out, idx)
 					}
 				}
@@ -115,13 +160,13 @@ func compareFilterFloat[T FloatOrdered](getData func(v *batch.Vector) []T, val T
 		} else {
 			if hasNulls {
 				for i := 0; i < vecLen; i++ {
-					if !vec.Nulls.IsNullFast(i) && keep(data[i]) {
+					if !vec.Nulls.IsNullFast(i) && cmpFn(data[i], val) {
 						out = append(out, uint32(i))
 					}
 				}
 			} else {
 				for i := 0; i < vecLen; i++ {
-					if keep(data[i]) {
+					if cmpFn(data[i], val) {
 						out = append(out, uint32(i))
 					}
 				}

@@ -222,6 +222,42 @@ func resolveFloatConstPred[T FloatOrdered](op CompareOp, c T) func(T) bool {
 	return func(T) bool { return false }
 }
 
+// resolveFloatConstPred2 is resolveFloatConstPred's two-argument form for a
+// NON-NaN constant: every branch below closes over nothing at all, so the
+// constant travels to each call as an ordinary loop-invariant ARGUMENT
+// instead of state captured in a heap-allocated closure. compareFilterFloat
+// (kernel/compare.go) depends on that distinction, not just on the
+// arithmetic: resolveFloatConstPred's one-argument form captures c in the
+// closure it returns, and calling THAT per row was FilterColumnCompare's
+// float col-const arm going through a genuine indirect call the compiler
+// could not reason about, where the equivalent integer path (resolveCompare,
+// compare.go) already passes its constant as a plain argument and stays
+// close to free. Measured cost of the capturing form: +28% on
+// FilterColumnCompare, not the "~" the #459 commit claimed. Call this only
+// when c == c; a NaN constant keeps resolveFloatConstPred's one-argument
+// form (compareFilterFloat branches on it) — that path is rare enough on the
+// query side, and its answer depends only on the ROW's own NaN-ness, not on
+// c's value, so there was nothing to gain by changing its shape too.
+func resolveFloatConstPred2[T FloatOrdered](op CompareOp) func(a, c T) bool {
+	switch op {
+	case OpEq:
+		return func(a, c T) bool { return a == c }
+	case OpNe:
+		return func(a, c T) bool { return a != c }
+	case OpLt:
+		return func(a, c T) bool { return a < c }
+	case OpLe:
+		return func(a, c T) bool { return a <= c }
+	case OpGt:
+		// !(a <= c), not `a > c || a != a`: see resolveFloatConstPred —
+		// identical for every a, one comparison instead of two.
+		return func(a, c T) bool { return !(a <= c) }
+	case OpGe:
+		return func(a, c T) bool { return !(a < c) }
+	}
+	return func(a, c T) bool { return false }
+}
+
 // resolveFloatColColPred returns the per-row test for `column <op> column`.
 func resolveFloatColColPred[T FloatOrdered](op CompareOp) func(a, b T) bool {
 	switch op {
