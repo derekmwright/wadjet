@@ -255,6 +255,160 @@ func materializeSortKey(producer *Stage, key SortKeySpec) bool {
 	return true
 }
 
+// annotateDerivedAliasSortKey records the column the DAG's streams carry for
+// a sort key that names a DERIVED TABLE's SELECT-list alias. child is the
+// node the Sort reads. See SortKeySpec.AliasSource for the defect.
+//
+// The walk is resolveSortKeyColumn's, with the opposite terminal: that
+// resolver commits only at an AGGREGATE, whose outputs it can name exactly,
+// and deliberately leaves a scan/join producer alone because
+// attachScanSelectProjections may still put the alias onto its fragment.
+// This annotation is how that decision gets DEFERRED instead of dropped —
+// the name is recorded here and settled in resolveDerivedAliasSortKeys, which
+// runs after that pass and can see what the fragment really emits.
+//
+// Only a PLAIN rename is recorded. A computed alias has no source column to
+// point at; the #383/#169 machinery materializes it into the producing
+// fragment under the alias itself, and pointing the key at the expression
+// text would miss that projection. Chained renames resolve level by level
+// (`j` → `k` → `s_nationkey`), each Project substituting at most once because
+// a projection list is simultaneous.
+func annotateDerivedAliasSortKey(key *SortKeySpec, child *logical.Node) {
+	if key.Column == "" || logical.IsHiddenSortColumn(key.Column) {
+		return // the synthetic-key mechanism above owns those
+	}
+	resolved := key.Column
+	for n := child; n != nil; {
+		switch n.Type {
+		case logical.NodeProject:
+			bare := derivedScopeBareName(resolved, n)
+			proj := projectionForName(n.Projections, resolved, bare)
+			if proj == nil {
+				break
+			}
+			if proj.IsAgg || proj.Column == "" {
+				return // aggregate output or computed alias — not ours
+			}
+			next := proj.Column
+			if proj.Expr != "" {
+				// The qualifier-preserving spelling, for the same reason
+				// resolveSortKeyColumn prefers it: a self-joined table gives
+				// both aliases the same bare column name, and only "n1.n_name"
+				// says which. lookupEmittedColumn applies the qualified↔bare
+				// fallback when the producer spells it the other way.
+				next = proj.Expr
+			}
+			if strings.EqualFold(next, resolved) {
+				return // self-rename, nothing to point at
+			}
+			resolved = next
+		case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
+			// Order/cardinality-preserving passthroughs: keep descending.
+		default:
+			// A producer this walk cannot reason about (Aggregate, Join,
+			// Scan, Window, a set operation): stop, and keep whatever the
+			// Projects above it resolved.
+			n = nil
+			continue
+		}
+		if len(n.Children) != 1 {
+			break
+		}
+		n = n.Children[0]
+	}
+	if !strings.EqualFold(resolved, key.Column) {
+		key.AliasSource = resolved
+	}
+}
+
+// resolveDerivedAliasSortKeys points every sort key that names a derived
+// table's SELECT-list alias at the column its producing stage really emits.
+//
+// It runs after attachScanSelectProjections, because that pass is the one
+// thing that can make the alias real: where it attached an alias-naming
+// OpProject the fragment emits the alias and the key is already right, and
+// where it declined the fragment emits the SOURCE column and the key has to
+// be pointed there. The distinction cannot be drawn from the emitted column
+// SET alone — a shadowing alias (`s_acctbal AS s_suppkey`) means the producer
+// emits a column spelled like the key that is the WRONG one — so the test is
+// whether the projection MATERIALIZES the name, not whether the name exists.
+//
+// A stage the producer walk does not recognize (a merge_sort over a sort, the
+// gather's fused ordering) inherits the decision made for the key it was
+// copied from: emitMergeSortTree hands out the same SortKeySpec values, so
+// matching on (column, alias source) re-applies the rewrite exactly where the
+// same key travelled.
+func resolveDerivedAliasSortKeys(stages []Stage) {
+	idx := make(map[string]int, len(stages))
+	for i := range stages {
+		idx[stages[i].ID] = i
+	}
+	rewrites := map[string]string{}
+	rewriteKey := func(k SortKeySpec) string {
+		return strings.ToLower(k.Column) + "\x00" + strings.ToLower(k.AliasSource)
+	}
+	for i := range stages {
+		if !hasAliasSortKey(stages[i].SortKeys) {
+			continue
+		}
+		producer := sortKeyProducer(stages, idx, i)
+		if producer == nil {
+			continue
+		}
+		emitted := stageEmittedColumns(producer)
+		for k := range stages[i].SortKeys {
+			key := &stages[i].SortKeys[k]
+			if key.AliasSource == "" || projectionMaterializes(producer, key.Column) {
+				continue
+			}
+			name, ok := lookupEmittedColumn(emitted, key.AliasSource)
+			if !ok {
+				continue // leave today's behavior rather than invent an order
+			}
+			rewrites[rewriteKey(*key)] = name
+			key.Column = name
+		}
+	}
+	if len(rewrites) == 0 {
+		return
+	}
+	for i := range stages {
+		for k := range stages[i].SortKeys {
+			key := &stages[i].SortKeys[k]
+			if key.AliasSource == "" {
+				continue
+			}
+			if name, ok := rewrites[rewriteKey(*key)]; ok {
+				key.Column = name
+			}
+		}
+	}
+}
+
+func hasAliasSortKey(keys []SortKeySpec) bool {
+	for _, k := range keys {
+		if k.AliasSource != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// projectionMaterializes reports whether the producer's fragment computes a
+// column under this exact name — the only way a derived table's alias comes
+// to exist on the DAG (attachScanSelectProjections' aliased branch, #316).
+// The stage's plain column list does NOT count: a name that appears there
+// belongs to the underlying relation, which for a shadowing alias is exactly
+// the wrong column.
+func projectionMaterializes(s *Stage, name string) bool {
+	for _, p := range s.ProjectExprs {
+		if strings.EqualFold(p.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // annotateHiddenSortSource records what materializes key, when key is a
 // synthetic ORDER BY term. child is the node the Sort reads.
 func annotateHiddenSortSource(key *SortKeySpec, child *logical.Node) {

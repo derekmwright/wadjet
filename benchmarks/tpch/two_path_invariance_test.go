@@ -3641,6 +3641,122 @@ func twoPathCorpus() []twoPathQuery {
 			}},
 	)
 
+	// --- #468: a derived table's ORDER BY binds to its SELECT-list alias ---
+	//
+	// walkStages emits no stage for an ordinary Project, so a derived
+	// table's rename happens NOWHERE on the DAG: streams carry source column
+	// names and each consumer resolves the alias back through the plan. The
+	// ORDER BY consumer had no such resolution over a scan/join producer at
+	// all, because attachScanSelectProjections might still materialize the
+	// alias there — and that pass serves the OUTERMOST SELECT list only. So a
+	// derived table's sort either failed loud (`sort: key column "k" does not
+	// exist in the input schema`, #467's first repro) or, when the alias
+	// SHADOWS a base column of the same relation, silently keyed on the WRONG
+	// column: `SELECT s_acctbal AS s_suppkey ... ORDER BY s_suppkey DESC`
+	// ordered by supplier key where PostgreSQL orders by ACCTBAL.
+	//
+	// Every expected value below was confirmed against a live
+	// postgres:17-alpine over the same SF0.01 fixture.
+	out = append(out,
+		// The issue's first repro. Loud pre-fix; the derived ORDER BY's
+		// leading term is s_name, whose zero-padded spelling orders exactly
+		// like s_suppkey, so an ascending k IS the ordering applied.
+		twoPathQuery{name: "DerivedAliasInDerivedSortKey", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT k FROM (SELECT s1.s_suppkey AS k, s1.s_name FROM supplier s1
+				ORDER BY s1.s_name, s1.s_suppkey DESC) x`,
+			wantRows: 100, wantCols: []string{"k"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "k (the derived ORDER BY s_name)",
+					func(r map[string]any) float64 { return cellNum(r, "k") })
+			}},
+		// The issue's second repro: the FIRST sort term is aliased too.
+		twoPathQuery{name: "DerivedAliasInDerivedSortKeyBothTerms", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT k, nm FROM (SELECT s_suppkey AS k, s_name AS nm FROM supplier s1
+				ORDER BY nm, s1.s_suppkey DESC) x`,
+			wantRows: 100, wantCols: []string{"k", "nm"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "nm",
+					func(r map[string]any) string { return cellText(r, "nm") })
+			}},
+		// The sort key DECIDES which rows survive, so a key that resolved to
+		// nothing cannot pass by returning the right count: the answer is
+		// the sum of the seven largest supplier keys.
+		twoPathQuery{name: "DerivedAliasSortKeyUnderLimit", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT SUM(k) AS c FROM (SELECT s_suppkey AS k FROM supplier s1
+				ORDER BY k DESC LIMIT 7) t`,
+			wantRows: 1, wantCols: []string{"c"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				keys := sf001Column(tb, "supplier", "s_suppkey")
+				sort.Sort(sort.Reverse(sort.Float64Slice(keys)))
+				var want float64
+				for _, k := range keys[:7] {
+					want += k
+				}
+				assertSingleCell(tb, rows, "c", want)
+			}},
+		// #468: the alias SHADOWS a base column of the same relation, so
+		// `ORDER BY s_suppkey` inside the derived table means the ALIAS
+		// (s_acctbal) — PostgreSQL's rule, verified live. The DAG bound it
+		// to the base column and ordered by supplier key. Nothing errors:
+		// the name exists on both sides.
+		//
+		// The outer SELECT must NOT carry the shadowing column, which is
+		// what makes column pruning leave the base one visible to the sort;
+		// DerivedAliasShadowCarriedOut below is the shape that always
+		// agreed, kept so a fix cannot trade one for the other.
+		twoPathQuery{name: "DerivedAliasShadowsBaseColumnInSort", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT real_key FROM (SELECT s_acctbal AS s_suppkey, s_suppkey AS real_key
+				FROM supplier ORDER BY s_suppkey DESC) x`,
+			wantRows: 100, wantCols: []string{"real_key"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				acct := supplierAcctbalByKey(tb)
+				assertOrderedBy(tb, rows, true, "s_acctbal (the alias the ORDER BY names)",
+					func(r map[string]any) float64 { return acct[cellNum(r, "real_key")] })
+			}},
+		// The same shadow with the derived table's own LIMIT: one row, and
+		// it has to be the largest ACCTBAL, not the largest supplier key.
+		twoPathQuery{name: "DerivedAliasShadowsBaseColumnUnderLimit", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT real_key FROM (SELECT s_acctbal AS s_suppkey, s_suppkey AS real_key
+				FROM supplier ORDER BY s_suppkey DESC LIMIT 1) x`,
+			wantRows: 1, wantCols: []string{"real_key"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				var want, best float64
+				for key, bal := range supplierAcctbalByKey(tb) {
+					if bal > best {
+						best, want = bal, key
+					}
+				}
+				assertSingleCell(tb, rows, "real_key", want)
+			}},
+		// The control from the issue: carrying the shadowing column out
+		// makes both arms agree and both be right. It is here so the fix is
+		// held to keeping it that way.
+		twoPathQuery{name: "DerivedAliasShadowCarriedOut", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT s_suppkey, real_key FROM (SELECT s_acctbal AS s_suppkey, s_suppkey AS real_key
+				FROM supplier ORDER BY s_suppkey DESC) x`,
+			wantRows: 100, wantCols: []string{"s_suppkey", "real_key"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, true, "s_suppkey (which carries s_acctbal)",
+					func(r map[string]any) float64 { return cellNum(r, "s_suppkey") })
+			}},
+
+		// Two-level derived nesting: the rename CHAINS (j → k → source), and
+		// the outer reference is qualified. resolveShuffleKey resolved at
+		// most one level, so the join key stopped at `k` and matched
+		// nothing — 0 rows where PostgreSQL answers 100.
+		twoPathQuery{name: "DerivedAliasChainedSortKey", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT j FROM (SELECT k AS j FROM (SELECT s_suppkey AS k, s_name FROM supplier) x
+				ORDER BY k DESC) y`,
+			wantRows: 100, wantCols: []string{"j"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, true, "j",
+					func(r map[string]any) float64 { return cellNum(r, "j") })
+			}},
+	)
+
 	// #358 — the outer-join ON residual: the non-key conjunct runs on the
 	// combined row BEFORE the match is accepted, a probe row whose
 	// candidates all fail comes back NULL-padded rather than dropped, and a
@@ -4151,6 +4267,19 @@ func distinctKeys(tb testing.TB, table, col string) map[float64]bool {
 			tb.Fatalf("fixture table %q has no column %q", table, col)
 		}
 		out[toFloat(v)] = true
+	}
+	return out
+}
+
+// supplierAcctbalByKey maps s_suppkey to s_acctbal over the fixture. It is
+// what lets a result that carries only the supplier key be checked for an
+// ordering by ACCTBAL — the #468 shape, where the derived table's ORDER BY
+// names an alias whose value is a column the outer SELECT never returns.
+func supplierAcctbalByKey(tb testing.TB) map[float64]float64 {
+	tb.Helper()
+	out := map[float64]float64{}
+	for _, r := range sf001Table(tb, "supplier") {
+		out[toFloat(r["s_suppkey"])] = toFloat(r["s_acctbal"])
 	}
 	return out
 }

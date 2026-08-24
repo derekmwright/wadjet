@@ -1084,6 +1084,50 @@ func postgresSemanticsCases() []pgCase {
 				GROUP BY u.k ORDER BY k`},
 	)
 
+	// --- #468: ORDER BY inside a derived table binds the SELECT alias --------
+	//
+	// PostgreSQL resolves an ORDER BY output-column name to the SELECT-list
+	// alias, and that holds even when the alias SHADOWS a base column of the
+	// same relation: `SELECT s_acctbal AS s_suppkey ... ORDER BY s_suppkey
+	// DESC` orders by ACCTBAL. Verified live on postgres:17-alpine before the
+	// fix; these entries are what keeps it verified.
+	out = append(out,
+		pgCase{name: "DerivedAliasInDerivedSortKey",
+			sql: `SELECT k FROM (SELECT s1.s_suppkey AS k, s1.s_name FROM supplier s1
+				ORDER BY s1.s_name, s1.s_suppkey DESC) x`},
+		pgCase{name: "DerivedAliasInDerivedSortKeyBothTerms",
+			sql: `SELECT k, nm FROM (SELECT s_suppkey AS k, s_name AS nm FROM supplier s1
+				ORDER BY nm, s1.s_suppkey DESC) x`},
+		pgCase{name: "DerivedAliasSortKeyUnderLimit",
+			sql: `SELECT SUM(k) AS c FROM (SELECT s_suppkey AS k FROM supplier s1
+				ORDER BY k DESC LIMIT 7) t`},
+		// #468. The outer SELECT deliberately omits the shadowing column:
+		// carrying it out is what made both engines agree, so the repro
+		// needs it gone and the control keeps it.
+		pgCase{name: "DerivedAliasShadowsBaseColumnInSort",
+			sql: `SELECT real_key FROM (SELECT s_acctbal AS s_suppkey, s_suppkey AS real_key
+				FROM supplier ORDER BY s_suppkey DESC) x`},
+		pgCase{name: "DerivedAliasShadowsBaseColumnUnderLimit",
+			sql: `SELECT real_key FROM (SELECT s_acctbal AS s_suppkey, s_suppkey AS real_key
+				FROM supplier ORDER BY s_suppkey DESC LIMIT 1) x`},
+		pgCase{name: "DerivedAliasShadowCarriedOut",
+			sql: `SELECT s_suppkey, real_key FROM (SELECT s_acctbal AS s_suppkey, s_suppkey AS real_key
+				FROM supplier ORDER BY s_suppkey DESC) x`},
+		// #327's root-level family, re-asserted: the same shadowing rule one
+		// level UP, which this fix must not disturb.
+		pgCase{name: "RootAliasShadowsBaseColumnInSort",
+			sql: `SELECT s_acctbal AS s_suppkey, s_name FROM supplier ORDER BY s_suppkey DESC`},
+		pgCase{name: "RootAliasInSortKey",
+			sql: `SELECT s_suppkey AS k FROM supplier ORDER BY k DESC`},
+		pgCase{name: "RootAliasShadowsAnotherItemsSource",
+			sql: `SELECT n_name AS n_comment, n_comment AS c FROM nation ORDER BY n_name`},
+		// Two-level derived nesting: the rename chains and the outer
+		// reference is qualified.
+		pgCase{name: "DerivedAliasChainedSortKey",
+			sql: `SELECT j FROM (SELECT k AS j FROM (SELECT s_suppkey AS k, s_name FROM supplier) x
+				ORDER BY k DESC) y`},
+	)
+
 	// --- MIN/MAX float NaN ordering (#457) -----------------------------------
 	//
 	// PostgreSQL's float order (float8_cmp_internal) places NaN ABOVE every

@@ -565,6 +565,30 @@ type SortKeySpec struct {
 	SourceColumn    string
 	SourceType      parquet.TypeID
 	SourceTypeKnown bool
+
+	// AliasSource is the column the producing stream carries for a key that
+	// names a DERIVED TABLE's SELECT-list alias — the non-synthetic sibling
+	// of SourceColumn above (#467, #468).
+	//
+	// `SELECT k FROM (SELECT s_suppkey AS k FROM supplier ORDER BY
+	// s_suppkey DESC) x` sorts on "k", because logical.resolveOrderBy binds
+	// an ORDER BY term to the SELECT list's OUTPUT name — which is also what
+	// PostgreSQL does, and is the whole point when the alias SHADOWS a base
+	// column of the same relation (`s_acctbal AS s_suppkey ... ORDER BY
+	// s_suppkey` means the alias). On the DAG that name exists nowhere
+	// unless attachScanSelectProjections materialized it, and only the
+	// OUTERMOST SELECT list gets that treatment: a derived table's sort
+	// either failed loud (`sort: key column "k" does not exist in the input
+	// schema`) or — with a shadowing alias — silently keyed on the WRONG
+	// column, ordering by base s_suppkey where PostgreSQL orders by
+	// s_acctbal.
+	//
+	// Set by annotateDerivedAliasSortKey at stage-emission time, where the
+	// logical Projects are still in hand, and consumed by
+	// resolveDerivedAliasSortKeys once planning can see whether the alias
+	// was materialized after all. Empty on every ordinary key, and outside
+	// SameOrdering for the same reason the fields above are.
+	AliasSource string
 }
 
 // SameOrdering reports whether two keys impose the same order. It compares
@@ -2495,6 +2519,12 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// no column on the DAG. Point it at one. Runs last because the repair
 	// depends on what attachScanSelectProjections did.
 	resolveHiddenSortKeys(stages)
+	// #467/#468: and the same repair for a key naming a DERIVED table's
+	// SELECT-list alias. Runs after attachScanSelectProjections for the same
+	// reason — the alias is real exactly where that pass materialized it,
+	// and names the wrong column (a shadowing alias) or none at all
+	// everywhere else.
+	resolveDerivedAliasSortKeys(stages)
 	// #423: the worker's scan reads column TYPES from the FILE, and a
 	// parquet file cannot express nine of ours. Declare the catalog's
 	// schema for every table this plan scans so a file written before the
@@ -4793,6 +4823,13 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// once it can see whether some other pass already put the name
 			// on the producing stage (#424).
 			annotateHiddenSortSource(&key, sortChild)
+			// And the non-synthetic sibling: a key naming a DERIVED table's
+			// SELECT-list alias, which resolveSortKeyColumn above leaves
+			// alone over a scan/join producer because it cannot yet know
+			// whether attachScanSelectProjections will materialize the name
+			// (#467, #468). Record the source column;
+			// resolveDerivedAliasSortKeys decides once that is settled.
+			annotateDerivedAliasSortKey(&key, sortChild)
 			sortKeys = append(sortKeys, key)
 		}
 
