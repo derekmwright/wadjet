@@ -1775,7 +1775,13 @@ func (e *Like) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if v == nil || p == nil {
 		return false, true
 	}
-	result := matchLike(toString(v), toString(p))
+	// A TypeIPv4/TypeMAC operand boxes as its raw encoded int64 (ColRef.Eval's
+	// int64 fast path), so `ipv4_col LIKE '10.%'` would otherwise match
+	// against the digit string of that number rather than the address text —
+	// the same rendering gap Cast's string-family case resolves through this
+	// same helper (#497). TypeIPv6/TypeCIDR/TypeUUID need no equivalent call:
+	// Vector.GetValue's default case already renders them as text.
+	result := matchLike(toString(networkOperand(b, row, e.Expr, v)), toString(p))
 	if e.Not {
 		return !result, false
 	}

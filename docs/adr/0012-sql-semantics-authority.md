@@ -404,6 +404,42 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     (`litcmp_ord_c_ipv6`, `litcmp_ord_c_cidr`) — verified to reproduce the
     689-vs-1358-row divergence on the pre-fix engine and agree after.
 
+11. **LIKE against a network-native type or UUID renders the column to
+    TEXT, the same convention CAST AS STRING and every scalar function
+    argument already use — a deliberate divergence from PostgreSQL, which
+    has no such operator at all.** (Added 2026-08-24, #497.) PostgreSQL's
+    `inet`/`cidr`/`macaddr` refuse LIKE outright (verified live:
+    `'10.0.0.1'::inet LIKE '10.%'` raises "operator does not exist: inet ~~
+    unknown") — but that is not a semantics PostgreSQL DECIDED for wadjet's
+    own network types to disagree with (item 1's territory); it is
+    PostgreSQL not having the "these types are text everywhere" contract
+    #484 already built for them at all. Rendering to text, then matching,
+    is the answer consistent with that existing contract rather than a new
+    one.
+
+    Before this fix there was no decision implemented at either extreme:
+    `ResolveLikeFilterKernel` (`internal/engine/exec/kernel/compare.go`)
+    unconditionally read the column's `BytesData`, with no per-type dispatch
+    at all — the same shape of gap `ResolveFilterKernel` (the `=`/`<`/`>`
+    kernel) is explicitly built to avoid. TypeIPv4/TypeMAC/TypePort/
+    TypeProtocol store into `Int64Data`/`Int32Data`, so this INDEXED AN
+    EMPTY BACKING STORE — a panic that is not the one deliberate
+    `FatalEvalPanic` shape the pipeline drivers convert back into a query
+    error, so it re-raised untouched all the way up: a process killer, not
+    a wrong answer. TypeIPv6/TypeUUID store into `BytesData` but as the
+    address's RAW binary form, so the pattern silently matched nothing
+    regardless of whether it was reasonable. `likeTextRenderer` now
+    resolves a per-type row-to-text function once per column — the same
+    resolve-once-dispatch-in-the-loop discipline every other kernel here
+    follows — covering every one of the 22 types (a default arm renders any
+    other type's own boxed value, never indexing `BytesData` on a column
+    that does not have it, which is the invariant this item exists to
+    restore regardless of what LIKE against a given type is decided to
+    MEAN). The row-at-a-time `expr.Like` path had the same gap for
+    TypeIPv4/TypeMAC specifically (their `ColRef.Eval` box is the raw int64,
+    not text) and is fixed the same way `Cast`'s string-family case already
+    was, through the shared `networkOperand` resolver.
+
 ## Consequences
 
 - `ORDER BY x DESC` places NULLs first (changed 2026-08-19). The default had
@@ -451,11 +487,13 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   refusal is per-row, not plan-time — open) — the work items 6's amendments
   record
 - #492 (IPv6/CIDR literal ordering was lexical-text, not numeric/structural,
-  and disagreed between the single-process engine and the stage DAG) — item
-  10 above records the settled position for; `internal/engine/exec/kernel/
-  compare.go` (`CidrSortKey`), `internal/engine/expr/compile.go`
-  (`tryNetworkLit`, `ipv6LitToRawString`), `internal/engine/expr/expr.go`
-  (`CmpNetworkLit`), `internal/oracle/typematrix/typematrix.go`
+  and disagreed between the single-process engine and the stage DAG) and
+  #497 (LIKE against a network-native type or UUID panicked or silently
+  matched nothing) — item 10 and item 11 above record the settled position
+  for; `internal/engine/exec/kernel/compare.go` (`CidrSortKey`,
+  `likeTextRenderer`), `internal/engine/expr/compile.go` (`tryNetworkLit`,
+  `ipv6LitToRawString`), `internal/engine/expr/expr.go` (`CmpNetworkLit`,
+  `Like.EvalBoolNull`), `internal/oracle/typematrix/typematrix.go`
   (`networkOrdLit`)
 - #444 (boxed ROW comparator ordered fields by name, not declared position),
   #446 (VECTOR/ARRAY(FLOAT) comparators not transitive under NaN) — the work

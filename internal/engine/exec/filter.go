@@ -731,7 +731,7 @@ func (f *LikeFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.R
 			f.colIdx = in.ColumnIndex(parts[1])
 		}
 		if f.colIdx >= 0 {
-			f.kern = kernel.ResolveLikeFilterKernel(f.Pattern, f.Negate)
+			f.kern = kernel.ResolveLikeFilterKernel(in.Columns[f.colIdx].Type, f.Pattern, f.Negate)
 		}
 		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true

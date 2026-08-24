@@ -3,6 +3,7 @@ package kernel
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"math"
 	"net"
 	"strconv"
@@ -1052,10 +1053,25 @@ func inFilterString(set map[string]struct{}, negate bool) FilterKernel {
 
 // --- LIKE filter kernel ---
 
-// ResolveLikeFilterKernel creates a FilterKernel for SQL LIKE pattern matching.
-// Converts SQL LIKE patterns (% and _) to optimized matching functions.
-func ResolveLikeFilterKernel(pattern string, negate bool) FilterKernel {
+// ResolveLikeFilterKernel creates a FilterKernel for SQL LIKE pattern
+// matching against a column of the given type. Converts SQL LIKE patterns
+// (% and _) to optimized matching functions.
+//
+// The column's underlying storage is not always TEXT in BytesData: TypeIPv4/
+// TypeMAC/TypePort/TypeProtocol box as Int64Data/Int32Data, and TypeIPv6/
+// TypeUUID box as BytesData but hold the address's RAW binary form, not the
+// human-readable text a LIKE pattern is written against. This used to be a
+// single BytesData.UnsafeStringValue call with no type check at all —
+// indexing an empty backing store for the Int64Data/Int32Data types (a
+// process-killing panic, since it is not the one deliberate FatalEvalPanic
+// shape recover() converts back into a query error) and matching nothing for
+// IPv6/UUID (their raw bytes never contain the pattern's text) (#497).
+// likeTextRenderer resolves the row->text function once per column, the same
+// per-type-dispatch-once discipline ResolveFilterKernel already follows, so
+// the inner loop has no per-row type switch.
+func ResolveLikeFilterKernel(typ batch.TypeID, pattern string, negate bool) FilterKernel {
 	matcher := compileLikePattern(pattern)
+	render := likeTextRenderer(typ)
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()
@@ -1064,7 +1080,7 @@ func ResolveLikeFilterKernel(pattern string, negate bool) FilterKernel {
 				if hasNulls && vec.Nulls.IsNullFast(int(idx)) {
 					continue
 				}
-				if matcher(vec.BytesData.UnsafeStringValue(int(idx))) != negate {
+				if matcher(render(vec, int(idx))) != negate {
 					out = append(out, idx)
 				}
 			}
@@ -1073,13 +1089,102 @@ func ResolveLikeFilterKernel(pattern string, negate bool) FilterKernel {
 				if hasNulls && vec.Nulls.IsNullFast(i) {
 					continue
 				}
-				if matcher(vec.BytesData.UnsafeStringValue(i)) != negate {
+				if matcher(render(vec, i)) != negate {
 					out = append(out, uint32(i))
 				}
 			}
 		}
 		return out
 	}
+}
+
+// likeTextRenderer resolves, once per column, the row->text function LIKE
+// matches a pattern against.
+//
+// Wadjet renders every network-native type (and UUID) as human-readable text
+// for CAST AS STRING and scalar function arguments (#484) — LIKE follows the
+// same convention rather than refusing outright the way PostgreSQL does for
+// inet/cidr/macaddr (verified live: `'10.0.0.1'::inet LIKE '10.%'` raises
+// "operator does not exist: inet ~~ unknown"). ADR-0012 item 8/9's
+// neighborhood records this as a deliberate divergence, not an oversight:
+// PostgreSQL's answer here is "no such operator", which is not a semantics
+// PostgreSQL decided for wadjet's own network types to disagree with — it is
+// PostgreSQL not having wadjet's "these types are text everywhere" contract
+// at all. TypeCIDR is already TEXT in its own storage (parquet/schema.go), so
+// it falls through to the same BytesData path TypeString/TypeBytes use.
+//
+// The default arm covers every OTHER type (Int64/Float64/Bool/Decimal/Date/
+// etc.) with the row's own boxed value, rendered the same way the row-at-
+// a-time expr.Like path already does (fmt.Sprint on whatever Vector.GetValue
+// returns) — never indexing BytesData on a column that does not have it,
+// which is the one invariant this function exists to restore regardless of
+// what LIKE against a given type is decided to MEAN.
+func likeTextRenderer(typ batch.TypeID) func(*batch.Vector, int) string {
+	switch typ {
+	case batch.TypeString, batch.TypeBytes, batch.TypeCIDR:
+		// Already TEXT in BytesData: the original zero-copy path.
+		return func(v *batch.Vector, i int) string { return v.BytesData.UnsafeStringValue(i) }
+	case batch.TypeIPv4:
+		return func(v *batch.Vector, i int) string { return likeFormatIPv4(uint32(v.Int64Data[i])) }
+	case batch.TypeMAC:
+		return func(v *batch.Vector, i int) string { return likeFormatMAC(uint64(v.Int64Data[i])) }
+	case batch.TypePort, batch.TypeProtocol:
+		return func(v *batch.Vector, i int) string { return strconv.Itoa(int(v.Int32Data[i])) }
+	case batch.TypeIPv6:
+		return func(v *batch.Vector, i int) string {
+			raw := v.BytesData.Value(i)
+			if len(raw) != 16 {
+				return ""
+			}
+			return net.IP(raw).String()
+		}
+	case batch.TypeUUID:
+		return func(v *batch.Vector, i int) string {
+			raw := v.BytesData.Value(i)
+			if len(raw) != 16 {
+				return ""
+			}
+			return likeFormatUUID(raw)
+		}
+	default:
+		return func(v *batch.Vector, i int) string { return fmt.Sprint(v.GetValue(i)) }
+	}
+}
+
+// likeFormatIPv4 and likeFormatMAC render the raw int64 encodings
+// TypeIPv4/TypeMAC columns store into the address text a LIKE pattern is
+// written against — duplicated locally rather than imported from batch (this
+// package's parseIPv4ToInt64/parseMACToInt64 already duplicate the reverse
+// direction for the same reason: these are trivial, one-way re-encodes, not
+// the shared-implementation case CidrSortKey's export comment explains).
+func likeFormatIPv4(v uint32) string {
+	ip := make(net.IP, net.IPv4len)
+	binary.BigEndian.PutUint32(ip, v)
+	return ip.String()
+}
+
+func likeFormatMAC(v uint64) string {
+	b := make(net.HardwareAddr, 6)
+	for i := 5; i >= 0; i-- {
+		b[i] = byte(v)
+		v >>= 8
+	}
+	return b.String()
+}
+
+// likeFormatUUID renders 16 raw bytes as "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".
+func likeFormatUUID(b []byte) string {
+	var buf [36]byte
+	hex.Encode(buf[0:8], b[0:4])
+	buf[8] = '-'
+	hex.Encode(buf[9:13], b[4:6])
+	buf[13] = '-'
+	hex.Encode(buf[14:18], b[6:8])
+	buf[18] = '-'
+	hex.Encode(buf[19:23], b[8:10])
+	buf[23] = '-'
+	hex.Encode(buf[24:36], b[10:16])
+	return string(buf[:])
 }
 
 // compileLikePattern converts a SQL LIKE pattern to an optimized match function.

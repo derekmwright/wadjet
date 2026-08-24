@@ -274,3 +274,53 @@ func TestFilterIPv4WithNulls(t *testing.T) {
 		t.Fatalf("expected 2 matches (nulls excluded), got %d: %v", len(sel), sel)
 	}
 }
+
+// TestResolveLikeFilterKernelNetworkTypes is #497: ResolveLikeFilterKernel
+// used to call vec.BytesData.UnsafeStringValue unconditionally, regardless
+// of the column's real storage — an index-out-of-range PANIC for
+// TypeIPv4/TypeMAC/TypePort/TypeProtocol (Int64Data/Int32Data-backed,
+// BytesData empty) and a silent zero-match for TypeIPv6/TypeUUID
+// (BytesData-backed but in their RAW binary form, not the text a LIKE
+// pattern is written against). Every type here must both NOT panic and
+// match the way its own CAST-AS-STRING text would.
+func TestResolveLikeFilterKernelNetworkTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		typ     batch.TypeID
+		colType parquet.TypeID
+		value   any
+		pattern string
+		want    bool
+	}{
+		{"ipv4 match", batch.TypeIPv4, parquet.TypeIPv4, "10.1.2.3", "10.%", true},
+		{"ipv4 no match", batch.TypeIPv4, parquet.TypeIPv4, "10.1.2.3", "9.%", false},
+		{"mac match", batch.TypeMAC, parquet.TypeMAC, "aa:bb:cc:dd:ee:ff", "aa:bb:%", true},
+		{"mac no match", batch.TypeMAC, parquet.TypeMAC, "aa:bb:cc:dd:ee:ff", "11:%", false},
+		{"port match", batch.TypePort, parquet.TypePort, int32(443), "44%", true},
+		{"port no match", batch.TypePort, parquet.TypePort, int32(443), "80%", false},
+		{"protocol match", batch.TypeProtocol, parquet.TypeProtocol, int32(6), "6", true},
+		{"protocol no match", batch.TypeProtocol, parquet.TypeProtocol, int32(6), "17", false},
+		{"ipv6 match", batch.TypeIPv6, parquet.TypeIPv6, "2001:db8::1", "2001:db8%", true},
+		{"ipv6 no match", batch.TypeIPv6, parquet.TypeIPv6, "2001:db8::1", "::1%", false},
+		{"uuid match", batch.TypeUUID, parquet.TypeUUID, "550e8400-e29b-41d4-a716-446655440000", "550e8400%", true},
+		{"uuid no match", batch.TypeUUID, parquet.TypeUUID, "550e8400-e29b-41d4-a716-446655440000", "ffffffff%", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := []parquet.Column{{Name: "c", Type: tt.colType}}
+			b := batch.NewRecordBatch(schema, 1)
+			b.Columns[0].SetValue(0, tt.value)
+
+			kern := ResolveLikeFilterKernel(tt.typ, tt.pattern, false)
+			if kern == nil {
+				t.Fatalf("ResolveLikeFilterKernel returned nil for %v", tt.typ)
+			}
+			outSel := make([]uint32, 0, 1)
+			sel := kern(b.Columns[0], nil, 1, outSel)
+			got := len(sel) == 1
+			if got != tt.want {
+				t.Errorf("LIKE %q against %v = %v, want %v (sel=%v)", tt.pattern, tt.value, got, tt.want, sel)
+			}
+		})
+	}
+}
