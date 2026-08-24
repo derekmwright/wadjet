@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // maxTaskAttempts caps total executions of one task (first attempt +
@@ -88,6 +90,23 @@ type taskAttemptState struct {
 	terminal  bool
 }
 
+// stageTaskFailure carries a failed stage task's SQLSTATE across the process
+// boundary. errMsg is the worker's raw text; err is the caller's framing of
+// it, whose wording each stage type owns.
+//
+// A worker-side panic is converted at the worker's own boundary and reaches
+// the coordinator as a bare STRING in a ResultNotification — the *QueryPanic
+// and its XX000 do not survive that trip, and framing the text with %s
+// produced an error with no code at all, so the client was handed the blanket
+// class instead of internal_error. The marker left in the message is what
+// there is to key off (exec.IsQueryPanicMessage).
+func stageTaskFailure(errMsg string, err error) error {
+	if exec.IsQueryPanicMessage(errMsg) {
+		return sqlerr.Wrap(exec.SQLStateInternalError, err)
+	}
+	return err
+}
+
 // newTaskRetrier registers the dispatched tasks. republish re-dispatches a
 // single task; it is invoked on the caller-provided function asynchronously
 // (from the NATS subscription goroutine) and must not block long. fatal
@@ -155,7 +174,12 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 	// Failure: retry if attempts remain, else terminal failure. A
 	// fatal-classified failure (input lost) skips straight to terminal —
 	// re-dispatching cannot recreate a dead producer's un-uploaded output.
-	fatalNow := tr.fatal != nil && tr.fatal(r)
+	// A recovered panic is deterministic: the same task on the same input
+	// panics again, so the two extra attempts buy nothing and cost the
+	// stage its whole retry budget plus two more chances to hit whatever
+	// the panic damaged on a worker. It is terminal on the first failure,
+	// the same way an input-lost failure is.
+	fatalNow := exec.IsQueryPanicMessage(r.Error) || (tr.fatal != nil && tr.fatal(r))
 	if !fatalNow && tr.retryEnabled && st.attempts < maxTaskAttempts {
 		st.attempts++
 		task := tr.growEstimateLocked(r.TaskID)

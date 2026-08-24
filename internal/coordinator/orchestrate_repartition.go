@@ -360,7 +360,7 @@ func (c *Coordinator) runShuffleSide(
 
 	// Check for any task failures (terminal: retries exhausted).
 	if taskID, errMsg, failed := retrier.FirstError(); failed {
-		return nil, shuffleSideStats{}, fmt.Errorf("shuffle-%s task %s failed after %d attempts: %s", sideName, taskID, maxTaskAttempts, errMsg)
+		return nil, shuffleSideStats{}, stageTaskFailure(errMsg, fmt.Errorf("shuffle-%s task %s failed after %d attempts: %s", sideName, taskID, maxTaskAttempts, errMsg))
 	}
 
 	// Bucket result files by partition. Each file has a path like:

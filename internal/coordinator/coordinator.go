@@ -2703,17 +2703,19 @@ func ReadResultFiles(ctx context.Context, store objstore.Store, bucket string, p
 	const maxConcurrent = 8
 	sem := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
+	var decodeErr exec.FirstError
 
 	for i, path := range paths {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(idx int, p string) {
 			defer wg.Done()
-			// Parquet decoding on a goroutine with no recover above it. This
-			// reader already treats a failed file as an empty one (the error
-			// is discarded), so a panic gets the same answer instead of
-			// ending the coordinator process (#511).
-			defer exec.CatchQueryPanic(ctx, "result file decode", func(error) {})
+			// Parquet decoding on a goroutine with no recover above it
+			// (#511). The panic must SURFACE: this reader discards
+			// readOneResultFile's error, so swallowing the panic too would
+			// drop one result file's rows and return a short answer that
+			// looks exactly like a correct one.
+			defer exec.CatchQueryPanic(ctx, "result file decode", decodeErr.Set)
 			defer func() { <-sem }()
 			batches, cols, rows, _ := readOneResultFile(ctx, store, bucket, p)
 			results[idx] = fileResult{batches: batches, columns: cols, rows: rows}
@@ -2730,6 +2732,9 @@ func ReadResultFiles(ctx context.Context, store objstore.Store, bucket string, p
 		}
 		totalRows += r.rows
 		allBatches = append(allBatches, r.batches...)
+	}
+	if err := decodeErr.Err(); err != nil {
+		return nil, nil, 0, err
 	}
 	return allBatches, columns, totalRows, nil
 }
