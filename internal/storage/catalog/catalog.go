@@ -29,13 +29,13 @@ const (
 	defaultClusterID = "local"
 )
 
-// manifestCacheEntry holds a cached manifest with an expiry time.
+// manifestCacheEntry is a decoded manifest tagged with the KV revision it
+// was decoded from. The revision — never wall-clock time — is what makes
+// the entry usable; see Catalog.GetManifest.
 type manifestCacheEntry struct {
 	manifest *PartitionManifest
-	expiry   time.Time
+	rev      uint64
 }
-
-const manifestCacheTTL = 2 * time.Second
 
 // Catalog manages table metadata via KV and data via object storage.
 type Catalog struct {
@@ -44,35 +44,38 @@ type Catalog struct {
 	bucket    string
 	clusterID string
 
+	// manifestCache memoizes the DECODED manifest per table, keyed by the
+	// KV revision it was decoded from. It is a decode memo, not a
+	// staleness window: GetManifest re-checks the revision on every call.
 	manifestMu    sync.Mutex
 	manifestCache map[string]manifestCacheEntry
 
 	// aggStatsCache memoizes AggregateColumnStats per table, keyed by the
-	// manifest's content version (UpdatedAt + file count). The aggregate
-	// is a pure function of the manifest, but computing it reads one
+	// manifest's KV revision. The aggregate is a pure function of the
+	// manifest, but computing it reads one
 	// sketches blob PER FILE — on an object-store-backed catalog that was
 	// 600 serial S3 GETs (~40s) of PLANNING on every query touching
 	// lineitem at SF10 (2026-07-05 finding: the dominant cost of the
 	// cold-S3 standalone suite, dwarfing the scan itself). Entries
-	// invalidate when ingestion bumps the manifest's UpdatedAt.
+	// invalidate when the manifest's KV revision moves.
 	aggStatsMu    sync.Mutex
 	aggStatsCache map[string]aggStatsCacheEntry
 
 	// rgMetaCache memoizes the decoded per-table RG-metadata blob (see
-	// rgmeta.go), keyed by the same manifest content version as
-	// aggStatsCache. Without it every scan re-fetches and re-decodes the
-	// blob; with it the blob costs one store GET per (table, manifest
-	// version) per process.
+	// rgmeta.go), keyed by the same manifest revision as aggStatsCache.
+	// Without it every scan re-fetches and re-decodes the blob; with it
+	// the blob costs one store GET per (table, manifest revision) per
+	// process.
 	rgMetaMu    sync.Mutex
 	rgMetaCache map[string]rgMetaCacheEntry
 }
 
-// aggStatsCacheEntry is a memoized AggregateColumnStats result. The stats
-// map is shared with callers — treat it as immutable.
+// aggStatsCacheEntry is a memoized AggregateColumnStats result, valid for
+// exactly the manifest revision it was computed from. The stats map is
+// shared with callers — treat it as immutable.
 type aggStatsCacheEntry struct {
-	updatedAt time.Time
-	fileCount int
-	stats     map[string]TableColumnStats
+	rev   uint64
+	stats map[string]TableColumnStats
 }
 
 // CatalogMeta is the top-level catalog metadata.
@@ -333,17 +336,102 @@ func (c *Catalog) GetTable(_ context.Context, name string) (*TableMeta, error) {
 }
 
 // GetManifest returns the partition manifest for a table.
-// Results are cached briefly to avoid repeated KV reads within a query.
+//
+// Freshness is decided by the manifest key's KV REVISION, on every call.
+// The cache only ever skips re-decoding a revision this process already
+// decoded; it is a decode memo, never a staleness window.
+//
+// It used to be one, and that was #483. A 2-second wall-clock TTL,
+// invalidated only by writes made through the same *Catalog value, is
+// sound only while a process holds exactly one of them. Standalone holds
+// three over the same KV — the coordinator's, the pgwire DB's, and a fresh
+// one per worker pipeline task — and pgwire routes SELECT through the
+// coordinator's catalog while INSERT/UPDATE/DELETE and DDL go through the
+// DB's. Every write therefore invalidated a cache no reader was consulting,
+// and reads answered from a manifest up to two seconds old. Statements
+// issued back to back (a psql script, a SQLancer round, any client driving
+// a session) all land inside that window: writes looked lost, and
+// DROP TABLE + CREATE TABLE of the same name answered out of the previous
+// incarnation's files — silently when the two schemas were
+// encoding-compatible, and as a decode-time type refusal when they were
+// not. A revision is the catalog's own notion of "which version is this",
+// so validating against it cannot drift from what the catalog holds; a
+// clock can.
+//
+// The returned manifest is SHARED with every other caller holding this
+// revision. Treat it as immutable — mutators inside this package take
+// loadManifest instead.
 func (c *Catalog) GetManifest(_ context.Context, tableName string) (*PartitionManifest, error) {
-	c.manifestMu.Lock()
-	if c.manifestCache != nil {
-		if entry, ok := c.manifestCache[tableName]; ok && time.Now().Before(entry.expiry) {
-			c.manifestMu.Unlock()
-			return entry.manifest, nil
+	manifest, _, err := c.manifestWithRevision(tableName)
+	return manifest, err
+}
+
+// manifestWithRevision returns the manifest together with the KV revision
+// it came from. Derived caches (aggregate column stats, RG metadata) key
+// on that revision so they expire exactly when the manifest does, rather
+// than on a content proxy that a same-nanosecond rewrite could repeat.
+func (c *Catalog) manifestWithRevision(tableName string) (*PartitionManifest, uint64, error) {
+	key := c.key("manifest." + tableName)
+
+	// Revision-only probe when the store offers one: a hit then costs a
+	// map lookup instead of copying and decoding the whole manifest.
+	if rr, ok := c.kv.(RevisionReader); ok {
+		switch rev, err := rr.Revision(key); {
+		case err == ErrKeyNotFound:
+			return nil, 0, fmt.Errorf("manifest for table %q not found", tableName)
+		case err == nil:
+			if entry, hit := c.cachedManifest(tableName, rev); hit {
+				return entry, rev, nil
+			}
 		}
 	}
+
+	data, rev, err := c.kv.Get(key)
+	if err != nil {
+		if err == ErrKeyNotFound {
+			return nil, 0, fmt.Errorf("manifest for table %q not found", tableName)
+		}
+		return nil, 0, err
+	}
+	if entry, hit := c.cachedManifest(tableName, rev); hit {
+		return entry, rev, nil
+	}
+
+	var manifest PartitionManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, 0, fmt.Errorf("decoding manifest for table %q: %w", tableName, err)
+	}
+
+	c.manifestMu.Lock()
+	if c.manifestCache == nil {
+		c.manifestCache = make(map[string]manifestCacheEntry)
+	}
+	c.manifestCache[tableName] = manifestCacheEntry{manifest: &manifest, rev: rev}
 	c.manifestMu.Unlock()
 
+	return &manifest, rev, nil
+}
+
+// cachedManifest returns the memoized manifest for a table when it was
+// decoded from exactly the revision asked for.
+func (c *Catalog) cachedManifest(tableName string, rev uint64) (*PartitionManifest, bool) {
+	c.manifestMu.Lock()
+	defer c.manifestMu.Unlock()
+	entry, ok := c.manifestCache[tableName]
+	// rev 0 means the KV could not report a revision — never serve the memo on
+	// it, or the cache becomes an unbounded staleness window (worse than the
+	// old TTL). Both current KVs allocate revisions from 1.
+	if !ok || rev == 0 || entry.rev != rev {
+		return nil, false
+	}
+	return entry.manifest, true
+}
+
+// loadManifest reads and decodes a table's manifest without consulting or
+// filling the cache. Callers that MUTATE what they read take this: the
+// cached manifest is shared with every concurrent reader in the process,
+// so mutating it in place is both a wrong answer and a data race.
+func (c *Catalog) loadManifest(tableName string) (*PartitionManifest, error) {
 	var manifest PartitionManifest
 	if err := c.getJSON(c.key("manifest."+tableName), &manifest); err != nil {
 		if err == ErrKeyNotFound {
@@ -351,17 +439,6 @@ func (c *Catalog) GetManifest(_ context.Context, tableName string) (*PartitionMa
 		}
 		return nil, err
 	}
-
-	c.manifestMu.Lock()
-	if c.manifestCache == nil {
-		c.manifestCache = make(map[string]manifestCacheEntry)
-	}
-	c.manifestCache[tableName] = manifestCacheEntry{
-		manifest: &manifest,
-		expiry:   time.Now().Add(manifestCacheTTL),
-	}
-	c.manifestMu.Unlock()
-
 	return &manifest, nil
 }
 
@@ -863,21 +940,15 @@ func (c *Catalog) DropTable(_ context.Context, name string) error {
 // AggregateColumnStats computes table-level column statistics by merging
 // per-file stats across all partitions. Returns nil for columns without stats.
 func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map[string]TableColumnStats, error) {
-	manifest, err := c.GetManifest(context.Background(), tableName)
+	manifest, rev, err := c.manifestWithRevision(tableName)
 	if err != nil {
 		return nil, err
 	}
 
-	fileCount := 0
-	for _, part := range manifest.Partitions {
-		fileCount += len(part.Files)
-	}
-
-	// Memoized result for this manifest version? The stats map is shared —
+	// Memoized result for this manifest revision? The stats map is shared —
 	// callers must not mutate it (both planner call sites only read).
 	c.aggStatsMu.Lock()
-	if e, ok := c.aggStatsCache[tableName]; ok &&
-		e.updatedAt.Equal(manifest.UpdatedAt) && e.fileCount == fileCount {
+	if e, ok := c.aggStatsCache[tableName]; ok && e.rev == rev {
 		c.aggStatsMu.Unlock()
 		return e.stats, nil
 	}
@@ -981,11 +1052,7 @@ func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map
 	if c.aggStatsCache == nil {
 		c.aggStatsCache = make(map[string]aggStatsCacheEntry)
 	}
-	c.aggStatsCache[tableName] = aggStatsCacheEntry{
-		updatedAt: manifest.UpdatedAt,
-		fileCount: fileCount,
-		stats:     agg,
-	}
+	c.aggStatsCache[tableName] = aggStatsCacheEntry{rev: rev, stats: agg}
 	c.aggStatsMu.Unlock()
 	return agg, nil
 }
@@ -1175,8 +1242,12 @@ func (c *Catalog) KV() MetaKV {
 
 // --- internal helpers ---
 
-// invalidateManifestCache removes a cached manifest entry so the next
-// GetManifest call reads fresh data from KV.
+// invalidateManifestCache drops a table's memoized manifest and everything
+// derived from it. Correctness no longer rests on it — every entry carries
+// the KV revision it was decoded from, so a write another instance never
+// hears about still cannot be served (#483). This is the local writer's
+// courtesy: it frees the superseded decode instead of waiting for the next
+// reader to notice the revision moved.
 func (c *Catalog) invalidateManifestCache(tableName string) {
 	c.manifestMu.Lock()
 	delete(c.manifestCache, tableName)

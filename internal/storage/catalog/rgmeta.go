@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"time"
 
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -295,12 +294,11 @@ func (c *Catalog) PutTableRGMeta(ctx context.Context, table string, files []File
 }
 
 // rgMetaCacheEntry is a memoized decoded RG-metadata blob, validated the
-// same way as aggStatsCacheEntry: by the manifest's content version.
+// same way as aggStatsCacheEntry: by the manifest's KV revision.
 // The map is shared with callers — treat it as immutable.
 type rgMetaCacheEntry struct {
-	updatedAt time.Time
-	fileCount int
-	byPath    map[string][]parquet.RowGroupStats
+	rev    uint64
+	byPath map[string][]parquet.RowGroupStats
 }
 
 // TableRGMeta returns the table's persisted row-group metadata as a
@@ -308,23 +306,18 @@ type rgMetaCacheEntry struct {
 // Best-effort: fetch/decode failures return nil, nil so scans degrade
 // to per-file footer reads instead of failing.
 //
-// The decoded blob is memoized per table, keyed by the manifest's
-// UpdatedAt + file count — the same invalidation contract as
-// AggregateColumnStats. In the 22-query benchmark process the blob is
-// fetched from the store once per table, not once per query.
+// The decoded blob is memoized per table, keyed by the manifest's KV
+// revision — the same invalidation contract as AggregateColumnStats. In
+// the 22-query benchmark process the blob is fetched from the store once
+// per table, not once per query.
 func (c *Catalog) TableRGMeta(ctx context.Context, tableName string) (map[string][]parquet.RowGroupStats, error) {
-	manifest, err := c.GetManifest(ctx, tableName)
+	manifest, rev, err := c.manifestWithRevision(tableName)
 	if err != nil || manifest == nil || manifest.RGMetaKey == "" {
 		return nil, nil
 	}
-	fileCount := 0
-	for _, p := range manifest.Partitions {
-		fileCount += len(p.Files)
-	}
 
 	c.rgMetaMu.Lock()
-	if e, ok := c.rgMetaCache[tableName]; ok &&
-		e.updatedAt.Equal(manifest.UpdatedAt) && e.fileCount == fileCount {
+	if e, ok := c.rgMetaCache[tableName]; ok && e.rev == rev {
 		c.rgMetaMu.Unlock()
 		return e.byPath, nil
 	}
@@ -344,11 +337,7 @@ func (c *Catalog) TableRGMeta(ctx context.Context, tableName string) (map[string
 	if c.rgMetaCache == nil {
 		c.rgMetaCache = make(map[string]rgMetaCacheEntry)
 	}
-	c.rgMetaCache[tableName] = rgMetaCacheEntry{
-		updatedAt: manifest.UpdatedAt,
-		fileCount: fileCount,
-		byPath:    byPath,
-	}
+	c.rgMetaCache[tableName] = rgMetaCacheEntry{rev: rev, byPath: byPath}
 	c.rgMetaMu.Unlock()
 	return byPath, nil
 }

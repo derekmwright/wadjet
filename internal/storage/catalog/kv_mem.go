@@ -37,6 +37,20 @@ func (m *MemKV) Get(key string) ([]byte, uint64, error) {
 	return cp, m.revs[key], nil
 }
 
+// Revision implements RevisionReader: the key's revision without copying
+// its value, so a catalog cache can revalidate for the price of a map
+// lookup.
+func (m *MemKV) Revision(key string) (uint64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	rev, ok := m.revs[key]
+	if !ok {
+		return 0, ErrKeyNotFound
+	}
+	return rev, nil
+}
+
 func (m *MemKV) Put(key string, value []byte) (uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

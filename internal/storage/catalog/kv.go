@@ -31,3 +31,19 @@ type MetaKV interface {
 	// An empty prefix returns all keys.
 	List(prefix string) ([]string, error)
 }
+
+// RevisionReader is an OPTIONAL MetaKV capability: report a key's current
+// revision without transferring its value.
+//
+// Catalog validates every cached manifest against the KV revision on every
+// read (a wall-clock TTL is not a correctness mechanism — see
+// Catalog.GetManifest), so the validation happens on the hottest planner
+// path there is. A store that can answer "what revision is this key at"
+// without shipping back a manifest that is megabytes of JSON at SF100
+// turns that validation into an O(1) probe. A store that cannot (NATS KV
+// has no value-free get) simply omits the method and pays the full read,
+// which is what the pre-cache code did anyway.
+type RevisionReader interface {
+	// Revision returns the key's current revision, or ErrKeyNotFound.
+	Revision(key string) (uint64, error)
+}

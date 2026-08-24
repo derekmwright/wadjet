@@ -38,7 +38,11 @@ import (
 // failed file. Files that fail (corrupt, missing) are logged and
 // skipped — partial coverage is better than total failure.
 func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
-	manifest, err := c.GetManifest(ctx, name)
+	// loadManifest, not GetManifest: this rewrites the manifest in place
+	// (sketch keys onto every FileEntry, RGMetaKey, UpdatedAt) before
+	// persisting it, and GetManifest's result is shared with every
+	// concurrent reader holding the same revision.
+	manifest, err := c.loadManifest(name)
 	if err != nil {
 		return 0, fmt.Errorf("analyze %s: load manifest: %w", name, err)
 	}
