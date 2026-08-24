@@ -142,6 +142,189 @@ func TestRenderParamBinaryRejected(t *testing.T) {
 	}
 }
 
+// TestRenderBinaryNumericRoundTripsThroughAppendBinaryNumeric feeds
+// appendBinaryNumeric's own encoding (server.go, the send side of the SAME
+// wire format) into renderBinaryNumeric and checks the decoded literal is
+// byte-identical to the source text. The two encoders were written
+// independently and neither calls the other, so agreement here is a real
+// cross-check of the header arithmetic, not a restatement.
+//
+// This is also the #464 regression: before the fix, oidNumeric fell into the
+// text-bytes arm and this whole list decoded as garbage.
+func TestRenderBinaryNumericRoundTripsThroughAppendBinaryNumeric(t *testing.T) {
+	for _, s := range []string{
+		"0.0", "0.00000", "1.0", "-1.0", "25.0", "-25.0",
+		"0.5", "-0.5", "12.75", "-20.0", "3.1875",
+		"0.0001", "-0.0001", "1234.5678", "12345.6", "99999999.99",
+		// Past float64's exact range and past int64 entirely — the reason a
+		// DECIMAL column exists, and the review's "wide 25-digit values".
+		"9346828825.8671214869", "-9346828825.8671214869",
+		"1234567890123456789012345.6789012345",
+		"-1234567890123456789012345.6789012345",
+		"9999999999999999999999999999.9999999999",
+		"-9999999999999999999999999999.9999999999",
+		// No fraction at all.
+		"42", "-42", "0",
+		// Trailing-zero dscale: the value is round, but the display scale
+		// still names the digits after the point.
+		"100.00", "0.00", "5.500",
+	} {
+		t.Run(s, func(t *testing.T) {
+			buf := appendBinaryNumeric(nil, s)
+			if len(buf) < 4 {
+				t.Fatalf("appendBinaryNumeric(%q) = %d bytes", s, len(buf))
+			}
+			n := int32(uint32(buf[0])<<24 | uint32(buf[1])<<16 | uint32(buf[2])<<8 | uint32(buf[3]))
+			if n < 0 {
+				t.Fatalf("appendBinaryNumeric(%q) encoded as NULL", s)
+			}
+			body := buf[4:]
+			if int(n) != len(body) {
+				t.Fatalf("declared length %d, body %d bytes", n, len(body))
+			}
+
+			got, err := renderBinaryNumeric(body)
+			if err != nil {
+				t.Fatalf("renderBinaryNumeric: %v", err)
+			}
+			if got != s {
+				t.Fatalf("renderBinaryNumeric round trip = %q, want %q", got, s)
+			}
+		})
+	}
+}
+
+// TestRenderBinaryNumericHeaderShapes pins the digit-group arithmetic
+// directly against hand-built wire bytes, independent of appendBinaryNumeric,
+// so a defect shared by both encoders could not hide behind their agreement.
+func TestRenderBinaryNumericHeaderShapes(t *testing.T) {
+	be16 := func(v int) []byte { return binary.BigEndian.AppendUint16(nil, uint16(int16(v))) }
+	header := func(ndigits, weight int, sign uint16, dscale int, digits ...int) []byte {
+		var b []byte
+		b = append(b, be16(ndigits)...)
+		b = append(b, be16(weight)...)
+		b = append(b, be16(int(sign))...)
+		b = append(b, be16(dscale)...)
+		for _, d := range digits {
+			b = append(b, be16(d)...)
+		}
+		return b
+	}
+
+	tests := []struct {
+		name string
+		raw  []byte
+		want string
+	}{
+		{"12345.6", header(3, 1, pgNumericSignPositive, 1, 1, 2345, 6000), "12345.6"},
+		{"0.5", header(1, -1, pgNumericSignPositive, 1, 5000), "0.5"},
+		{"-25.0", header(1, 0, pgNumericSignNegative, 1, 25), "-25.0"},
+		{"zero with display scale", header(0, 0, pgNumericSignPositive, 2), "0.00"},
+		{"zero no scale", header(0, 0, pgNumericSignPositive, 0), "0"},
+		// Trimmed leading zero groups: 0.0001 stores one digit at weight -1,
+		// not a zero group at weight 0 followed by the real one.
+		{"0.0001", header(1, -1, pgNumericSignPositive, 4, 1), "0.0001"},
+		// A gap between the last real digit group and dscale — the
+		// trailing-zero-group case appendBinaryNumeric trims on send.
+		{"100.00", header(1, 0, pgNumericSignPositive, 2, 100), "100.00"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := renderBinaryNumeric(tt.raw)
+			if err != nil {
+				t.Fatalf("renderBinaryNumeric: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("renderBinaryNumeric(%s) = %q, want %q", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRenderBinaryNumericSpecialValues covers the values PostgreSQL's binary
+// numeric format can carry that wadjet's DECIMAL cannot: NaN and the two
+// infinities. Each must fail with an error naming the reason, never a value.
+func TestRenderBinaryNumericSpecialValues(t *testing.T) {
+	be16 := func(v uint16) []byte { return binary.BigEndian.AppendUint16(nil, v) }
+	header := func(sign uint16) []byte {
+		var b []byte
+		b = append(b, be16(0)...) // ndigits
+		b = append(b, be16(0)...) // weight
+		b = append(b, be16(sign)...)
+		b = append(b, be16(0)...) // dscale
+		return b
+	}
+
+	tests := []struct {
+		name    string
+		raw     []byte
+		wantErr string
+	}{
+		{"NaN", header(pgNumericSignNaN), "NaN"},
+		{"positive infinity", header(pgNumericSignPosInf), "infinite"},
+		{"negative infinity", header(pgNumericSignNegInf), "infinite"},
+		{"unrecognized sign", header(0x1234), "sign"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := renderBinaryNumeric(tt.raw)
+			if err == nil {
+				t.Fatalf("renderBinaryNumeric(%s) = %q, want an error", tt.name, got)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("renderBinaryNumeric(%s) error = %q, want it to mention %q", tt.name, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestRenderBinaryNumericMalformed covers bytes that cannot be a valid
+// numeric under any interpretation — a short header, a declared length that
+// disagrees with the digit count, and an out-of-range digit. Each must
+// refuse rather than read past the field or wrap around into a wrong number.
+func TestRenderBinaryNumericMalformed(t *testing.T) {
+	be16 := func(v int) []byte { return binary.BigEndian.AppendUint16(nil, uint16(int16(v))) }
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{"too short", []byte{0, 1, 0, 0, 0, 0}},
+		{"declared digit count too high", func() []byte {
+			var b []byte
+			b = append(b, be16(2)...)
+			b = append(b, be16(0)...)
+			b = append(b, be16(0)...)
+			b = append(b, be16(0)...)
+			b = append(b, be16(5)...) // only one digit present, not two
+			return b
+		}()},
+		{"digit out of range", func() []byte {
+			var b []byte
+			b = append(b, be16(1)...)
+			b = append(b, be16(0)...)
+			b = append(b, be16(0)...)
+			b = append(b, be16(0)...)
+			b = append(b, be16(10000)...) // base-10000 digit must be 0-9999
+			return b
+		}()},
+		{"negative ndigits", func() []byte {
+			var b []byte
+			b = append(b, be16(-1)...)
+			b = append(b, be16(0)...)
+			b = append(b, be16(0)...)
+			b = append(b, be16(0)...)
+			return b
+		}()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, err := renderBinaryNumeric(tt.raw); err == nil {
+				t.Fatalf("renderBinaryNumeric(%s) = %q, want an error", tt.name, got)
+			}
+		})
+	}
+}
+
 // TestRenderParamFloatSpecials keeps Inf and NaN, which have no unquoted SQL
 // spelling, from being spliced in bare.
 func TestRenderParamFloatSpecials(t *testing.T) {

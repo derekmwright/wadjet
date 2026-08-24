@@ -205,12 +205,12 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 	case oidBytea:
 		return quoteLiteral(`\x` + hex.EncodeToString(raw)), nil
 
-	case oidText, oidVarchar, oidBPChar, oidNumeric:
+	case oidNumeric:
+		return renderBinaryNumeric(raw)
+
+	case oidText, oidVarchar, oidBPChar:
 		// PostgreSQL's binary form for these is the same bytes as the text
-		// form. numeric is the exception in principle — its binary form is a
-		// digit-group structure — but no driver sends binary numeric without
-		// declaring the OID, and if one does, the text below is at worst a
-		// quoted literal rather than injected SQL.
+		// form.
 		return renderTextParam(string(raw), oid)
 
 	default:
@@ -218,6 +218,128 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 		// quoting the raw bytes, which is how a silent wrong answer starts.
 		return "", fmt.Errorf("parameter of type OID %d sent in binary format is not supported", oid)
 	}
+}
+
+// PostgreSQL's sign field for binary `numeric` (numeric_recv /
+// numeric_send in the backend). pgPositive/pgNegative are ordinary values;
+// the other three name special values wadjet's DECIMAL cannot hold.
+const (
+	pgNumericSignPositive uint16 = 0x0000
+	pgNumericSignNegative uint16 = 0x4000
+	pgNumericSignNaN      uint16 = 0xC000
+	pgNumericSignPosInf   uint16 = 0xD000
+	pgNumericSignNegInf   uint16 = 0xF000
+)
+
+// renderBinaryNumeric decodes PostgreSQL's binary `numeric` wire format —
+//
+//	int16 ndigits, int16 weight, uint16 sign, uint16 dscale, int16 digits[ndigits]
+//
+// where the value is sum(digits[i] * 10000^(weight-i)) under sign and dscale
+// is the number of fraction digits to DISPLAY — into the exact decimal TEXT
+// PostgreSQL itself would print for the same value, then hands that text to
+// renderTextParam so the bare-literal path (and its "confirm it's a number"
+// fallback) stays the one place a numeric literal gets written, text or
+// binary.
+//
+// pgx v5 sends this for any parameter whose declared OID is 1700, which
+// paraminfer.go now infers for a placeholder compared against a DECIMAL
+// column — so this is the ordinary path for a Go client, not an exotic one
+// (#464). Before this, oidNumeric fell into the same arm as oidText and the
+// digit-group bytes were read back as if they were ASCII: garbage that
+// failed renderTextParam's number check and went out as a quoted string,
+// comparing a DECIMAL column to text and matching nothing (or, past `>`,
+// coercing in whatever direction that comparison's own fallback took).
+//
+// This is the read side of appendBinaryNumeric/pgNumericDigits (server.go),
+// which encodes the same format for values wadjet SENDS. Neither calls the
+// other, so a header-arithmetic mistake here would not be caught by that
+// side agreeing with itself.
+func renderBinaryNumeric(raw []byte) (string, error) {
+	if len(raw) < 8 {
+		return "", fmt.Errorf("numeric parameter has %d bytes, want at least 8", len(raw))
+	}
+	ndigits := int(int16(binary.BigEndian.Uint16(raw[0:2])))
+	weight := int(int16(binary.BigEndian.Uint16(raw[2:4])))
+	sign := binary.BigEndian.Uint16(raw[4:6])
+	dscale := int(binary.BigEndian.Uint16(raw[6:8]))
+
+	switch sign {
+	case pgNumericSignPositive, pgNumericSignNegative:
+		// Ordinary value; handled below.
+	case pgNumericSignNaN:
+		return "", fmt.Errorf("numeric parameter is NaN, which wadjet DECIMAL cannot represent")
+	case pgNumericSignPosInf, pgNumericSignNegInf:
+		return "", fmt.Errorf("numeric parameter is infinite, which wadjet DECIMAL cannot represent")
+	default:
+		return "", fmt.Errorf("numeric parameter has an unrecognized sign %#04x", sign)
+	}
+	if ndigits < 0 {
+		return "", fmt.Errorf("numeric parameter has a negative digit count %d", ndigits)
+	}
+	if want := 8 + 2*ndigits; len(raw) != want {
+		return "", fmt.Errorf("numeric parameter has %d bytes, want %d for %d digits", len(raw), want, ndigits)
+	}
+	if dscale < 0 {
+		return "", fmt.Errorf("numeric parameter has a negative display scale %d", dscale)
+	}
+
+	digits := make([]int16, ndigits)
+	for i := range digits {
+		d := int16(binary.BigEndian.Uint16(raw[8+2*i : 10+2*i]))
+		if d < 0 || d > 9999 {
+			return "", fmt.Errorf("numeric parameter digit %d is %d, want 0-9999", i, d)
+		}
+		digits[i] = d
+	}
+	// digitAt reads a base-10000 digit by its position in the value, not its
+	// index into the (trimmed) wire array: PostgreSQL omits leading and
+	// trailing all-zero digit groups on the wire, so any position before
+	// digit 0 or past the last one is an implicit zero group.
+	digitAt := func(i int) int16 {
+		if i < 0 || i >= ndigits {
+			return 0
+		}
+		return digits[i]
+	}
+
+	var b strings.Builder
+	if sign == pgNumericSignNegative && ndigits > 0 {
+		// PostgreSQL never signs a zero value (ndigits == 0 always carries
+		// the positive sign), so this stays unsigned rather than echoing a
+		// stray negative sign on a zero this decoder was handed.
+		b.WriteByte('-')
+	}
+
+	if ndigits == 0 || weight < 0 {
+		b.WriteByte('0')
+	} else {
+		for i := 0; i <= weight; i++ {
+			if i == 0 {
+				b.WriteString(strconv.FormatInt(int64(digitAt(i)), 10))
+			} else {
+				fmt.Fprintf(&b, "%04d", digitAt(i))
+			}
+		}
+	}
+
+	if dscale > 0 {
+		b.WriteByte('.')
+		i := weight + 1
+		remaining := dscale
+		for remaining > 0 {
+			group := fmt.Sprintf("%04d", digitAt(i))
+			take := remaining
+			if take > 4 {
+				take = 4
+			}
+			b.WriteString(group[:take])
+			remaining -= take
+			i++
+		}
+	}
+
+	return renderTextParam(b.String(), oidNumeric)
 }
 
 // formatFloat renders a float as an unquoted SQL numeric literal. Infinities
