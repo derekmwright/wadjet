@@ -588,13 +588,20 @@ type ColumnSpec struct {
 // ProjectSpec is one output column of an OpProject: Name is the emitted
 // column, Expr the SQL expression the worker compiles (bare column
 // references become passthrough copies). Type is the plan-time inferred
-// parquet.TypeID for computed expressions (0 = resolve from the source
-// column) — the worker can't infer it from the input schema because the
-// output column doesn't exist there.
+// parquet.TypeID for a computed expression — the worker can't infer it from
+// the input schema because the output column doesn't exist there.
+//
+// A POINTER, like AggSpec.OutputType (#354) and WindowColSpec.OutputType
+// (#371): a plain int Type collided with parquet.TypeBool's zero value, so a
+// correctly-inferred BOOL expression (a comparison, LIKE, a boolean literal)
+// was indistinguishable from "never resolved" and buildSelectProjection
+// defaulted it to STRING, boxing the value as the text "true"/"false" on the
+// wire (#445). nil means "resolve from the source column" (a bare passthrough,
+// which the worker resolves by DirectCopy and never consults this for).
 type ProjectSpec struct {
 	Expr string `json:"expr"`
 	Name string `json:"name"`
-	Type int    `json:"type,omitempty"`
+	Type *int   `json:"type,omitempty"`
 }
 
 // AggSpec defines an aggregation in a task.

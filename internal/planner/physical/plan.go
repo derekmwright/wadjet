@@ -366,13 +366,24 @@ type OutputRename struct {
 // ProjectExprSpec is one SELECT-list item a scan fragment must emit: Name is
 // the output column, Expr the SQL text the worker compiles and evaluates
 // (bare column references become passthrough copies). Type is the plan-time
-// inferred output type for computed expressions (inferProjectionType) — the
-// worker cannot resolve it from the input schema because the output column
-// doesn't exist there; zero means "resolve from source column" (bare refs).
+// inferred output type for computed expressions (inferProjectionTypeCols) —
+// the worker cannot resolve it from the input schema because the output
+// column doesn't exist there. A bare passthrough leaves Type at its zero
+// value and the worker never consults it there (a ColRef resolves by
+// DirectCopy instead).
 type ProjectExprSpec struct {
 	Expr string
 	Name string
 	Type parquet.TypeID
+	// TypeKnown distinguishes a DECLARED Type from the zero value, which
+	// TypeBool shares — the same shape as AggSpec.OutputTypeKnown (#354,
+	// #371). A computed BOOLEAN expression (a comparison, LIKE, IS NULL, a
+	// boolean literal — anything inferProjectionTypeCols resolves to
+	// TypeBool) otherwise reads as "not set": projectOpFromSpecs drops it
+	// off the wire, and the worker's buildSelectProjection then guesses
+	// STRING for a column that IS a bool, so a pgwire client asking for the
+	// true OID gets a boxed "true"/"false" string instead (#445).
+	TypeKnown bool
 }
 
 // UnionArm is one arm of a StageUnion: the stage producing it, and the
@@ -2490,8 +2501,15 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 	// the catalog has to happen here too, or COALESCE(n_name, n_comment)
 	// stays Float64 on arm B alone (#333).
 	var colTypes map[string]parquet.TypeID
+	var strictInt map[string]bool
 	if len(projNode.Children) == 1 {
 		colTypes = inputColTypes(projNode.Children[0])
+		// The same integer-preserving-arithmetic hint the single-process
+		// path resolves via emittedColTypes/declaredProjectionType (#297):
+		// without it, `id + 1` over a strict-int column declares (and
+		// COMPUTES) FLOAT64 here, where the single-process engine answers
+		// INT64 for the identical SQL (#443, #445).
+		strictInt = strictIntArithCols(projNode.Children[0])
 	}
 	hasExpr := false
 	specs := make([]ProjectExprSpec, 0, len(proj))
@@ -2508,14 +2526,16 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		}
 		name := strings.ToLower(expr)
 		var typ parquet.TypeID
+		var typeKnown bool
 		if p.ASTExpr != nil && !isSimpleColRefForRename(p.ASTExpr) {
 			if referencesSyntheticAgg(p.ASTExpr) {
 				return // wrapped aggregate — evaluated at the gather
 			}
 			hasExpr = true
-			typ = inferProjectionTypeCols(p.ASTExpr, parquet.TypeString, nil, colTypes)
+			typ = inferProjectionTypeCols(p.ASTExpr, parquet.TypeString, strictInt, colTypes)
+			typeKnown = true
 		}
-		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ})
+		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ, TypeKnown: typeKnown})
 	}
 	// #386: a NESTED subquery rename never trips anyRenamed — the outer list
 	// merely forwards the alias (`SELECT k FROM (SELECT r_regionkey AS k FROM
@@ -2548,8 +2568,14 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 			// today's loud failure over a silently different expression.
 			if rewritten, ok := substituteNestedRenameRefs(proj[j].ASTExpr, renameChild); ok && rewritten != proj[j].ASTExpr {
 				specs[j].Expr = rewritten.String()
-				specs[j].Type = inferProjectionTypeCols(rewritten, parquet.TypeString, nil,
+				// strictIntArithColsThroughRenames mirrors the colTypes call
+				// just below it: the rewritten expression names only SOURCE
+				// columns, so the strict-int set to check it against is the
+				// one visible BELOW the rename chain, same as #445 above.
+				specs[j].Type = inferProjectionTypeCols(rewritten, parquet.TypeString,
+					strictIntArithColsThroughRenames(renameChild),
 					sourceColTypesThroughRenames(renameChild))
+				specs[j].TypeKnown = true
 				anyNestedRename = true
 			}
 			continue
@@ -5207,9 +5233,11 @@ func absorbSecurityBarrier(node, scan *logical.Node, stages *[]Stage) {
 		}
 		var typ parquet.TypeID
 		if isExpr {
-			typ = inferProjectionTypeCols(pr.ASTExpr, parquet.TypeString, nil, scan.ScanColTypes)
+			// Same integer-preserving-arithmetic hint as
+			// attachScanSelectProjections (#297, #445).
+			typ = inferProjectionTypeCols(pr.ASTExpr, parquet.TypeString, strictIntArithCols(scan), scan.ScanColTypes)
 		}
-		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ})
+		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ, TypeKnown: isExpr})
 	}
 	if len(specs) > 0 {
 		target.SecurityProjectExprs = specs
@@ -7617,6 +7645,24 @@ func sourceColTypesThroughRenames(n *logical.Node) map[string]parquet.TypeID {
 		n = n.Children[0]
 	}
 	return inputColTypes(n)
+}
+
+// strictIntArithColsThroughRenames mirrors sourceColTypesThroughRenames for
+// the integer-preserving-arithmetic hint (#297): an expression rewritten by
+// substituteNestedRenameRefs names only SOURCE columns, so the strict-int set
+// visible BELOW the rename chain is the one to check the rewritten expression
+// against (#445) — a plain rename forwards the exact int column, it does not
+// rebind it to a different value.
+func strictIntArithColsThroughRenames(n *logical.Node) map[string]bool {
+	for n != nil && n.Type == logical.NodeProject && len(n.Children) == 1 {
+		for _, p := range n.Projections {
+			if p.IsAgg || p.Column == "" {
+				return nil
+			}
+		}
+		n = n.Children[0]
+	}
+	return strictIntArithCols(n)
 }
 
 // colRefDeclaredType resolves a bare column reference against the catalog

@@ -211,10 +211,17 @@ func TestSetOpRefusals(t *testing.T) {
 // TestSetOpArmTypesReconciled: the arms' outputs are separate .wshf files
 // read as one stream, so a column declared FLOAT64 by one arm and INT32 by
 // another is a decoding error rather than a union. The narrower arm is cast.
+//
+// `+ 100.5` (rather than an integer literal) is deliberate: `r_regionkey` is
+// a strict-int column, and since #445 threaded the integer-preserving-
+// arithmetic rule (#297) through this path too, `r_regionkey + 100` now
+// declares INT64 like PostgreSQL does, not FLOAT64 — which would exercise
+// only the INT32→INT64 rung of the widening ladder below, not the FLOAT64
+// rung this test names in its own doc comment.
 func TestSetOpArmTypesReconciled(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 	stages, err := planSetOpStages(t, cat, ctx,
-		"SELECT r_regionkey + 100 AS k FROM region UNION ALL SELECT n_nationkey AS k FROM nation")
+		"SELECT r_regionkey + 100.5 AS k FROM region UNION ALL SELECT n_nationkey AS k FROM nation")
 	if err != nil {
 		t.Fatalf("PlanDistributed: %v", err)
 	}

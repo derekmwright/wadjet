@@ -332,9 +332,13 @@ func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, erro
 		if err != nil {
 			return nil, fmt.Errorf("compile projection %q: %w", p.Expr, err)
 		}
-		typ := parquet.TypeID(p.Type)
-		if p.Type == 0 {
-			typ = parquet.TypeString
+		// p.Type is a pointer exactly because a plain int couldn't tell a
+		// declared BOOL (TypeID 0) apart from "never declared" (#445) — nil
+		// is the only "not set" case; the fallback below stays STRING, which
+		// is what an unresolved computed expression declared before.
+		typ := parquet.TypeString
+		if p.Type != nil {
+			typ = parquet.TypeID(*p.Type)
 		}
 		e := compiled
 		projCols = append(projCols, exec.ProjectColumn{

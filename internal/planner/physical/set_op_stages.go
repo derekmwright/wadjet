@@ -131,8 +131,8 @@ func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 				l, r = "0", "1"
 			}
 			arms[i].Projections = append(arms[i].Projections,
-				ProjectExprSpec{Expr: l, Name: SetOpLeftCountCol, Type: parquet.TypeInt64},
-				ProjectExprSpec{Expr: r, Name: SetOpRightCountCol, Type: parquet.TypeInt64})
+				ProjectExprSpec{Expr: l, Name: SetOpLeftCountCol, Type: parquet.TypeInt64, TypeKnown: true},
+				ProjectExprSpec{Expr: r, Name: SetOpRightCountCol, Type: parquet.TypeInt64, TypeKnown: true})
 		}
 	}
 	unionID := fmt.Sprintf("union-%d", len(*stages))
@@ -382,8 +382,12 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 	// does not exist in the arm's schema, so the worker cannot resolve it
 	// (same reason attachScanSelectProjections carries Type — #333).
 	var colTypes map[string]parquet.TypeID
+	var strictInt map[string]bool
 	if len(projNode.Children) == 1 {
 		colTypes = inputColTypes(projNode.Children[0])
+		// Same integer-preserving-arithmetic hint as
+		// attachScanSelectProjections (#297, #445).
+		strictInt = strictIntArithCols(projNode.Children[0])
 	}
 	plan := setOpArmPlan{
 		specs: make([]ProjectExprSpec, 0, len(outNames)),
@@ -410,7 +414,8 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			}
 			// A computed column's declared type IS its runtime type: the
 			// worker builds the output vector from it.
-			spec.Type = inferProjectionTypeCols(pr.ASTExpr, parquet.TypeString, nil, colTypes)
+			spec.Type = inferProjectionTypeCols(pr.ASTExpr, parquet.TypeString, strictInt, colTypes)
+			spec.TypeKnown = true
 			ct = setOpColType{typ: spec.Type, known: true}
 		} else if t, ok := colTypes[strings.ToLower(e)]; ok {
 			// A bare reference copies its source column, so the source's
@@ -483,6 +488,7 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string) error {
 			}
 			plans[i].specs[col].Expr = cast
 			plans[i].specs[col].Type = want.typ
+			plans[i].specs[col].TypeKnown = true
 			plans[i].types[col] = setOpColType{typ: want.typ, known: true}
 		}
 	}

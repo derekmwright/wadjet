@@ -257,7 +257,7 @@ func TestAliasedSortKeyWithoutAggregateResolves(t *testing.T) {
 			want: []string{"nm"},
 			wantProjected: []ProjectExprSpec{
 				{Expr: "n_name", Name: "nm"},
-				{Expr: "upper(n_comment)", Name: "uc", Type: parquet.TypeString},
+				{Expr: "upper(n_comment)", Name: "uc", Type: parquet.TypeString, TypeKnown: true},
 			},
 		},
 		{
