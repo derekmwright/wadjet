@@ -1814,8 +1814,11 @@ type FuncCall struct {
 	vecRet   batch.TypeID
 	vecRetOK bool
 	// This function reads its arguments as text (stringInputFuncs), so a
-	// non-byte-array argument-0 column has no bytes for the kernel to read.
+	// non-byte-array column has no bytes for the kernel to read.
 	vecTextFn bool
+	// The argument positions this function does NOT read as text
+	// (typedArgPositions); nil when every argument is text.
+	vecTypedArgs map[int]bool
 
 	// Compile-once state for literal-argument regexp_replace (see
 	// regexp_prepared.go). Built lazily under prepOnce; nil when the call
@@ -1841,6 +1844,31 @@ var stringInputFuncs = map[string]bool{
 	"left": true, "right": true, "starts_with": true, "ends_with": true,
 	"contains": true, "split_part": true, "strpos": true, "lpad": true,
 	"rpad": true, "cast_string": true,
+}
+
+// typedArgPositions names, for a stringInputFuncs entry, the argument
+// positions that are NOT read as text — a count, an index, a width. Every
+// other position of every other entry IS read as text, including all of
+// concat's, which is variadic.
+//
+// The distinction is load-bearing at the vec dispatch in FuncCall.EvalVec: a
+// text position must hold a byte-array-shaped vector before the kernel may
+// index its offsets, and a typed position must NOT be checked that way or
+// SUBSTR(s, 1, 4) would lose the vec path to its integer arguments. Getting
+// that split wrong is not a wrong answer, it is a dead server (#509): the
+// kernel indexes an offsets array a BIGINT column does not have.
+//
+// Absent from this table means "every argument is text". That default is the
+// safe direction — the worst it costs a mis-classified function is the
+// per-row path.
+var typedArgPositions = map[string]map[int]bool{
+	"substr":     {1: true, 2: true}, // (text, start, length)
+	"substring":  {1: true, 2: true},
+	"left":       {1: true}, // (text, count)
+	"right":      {1: true},
+	"split_part": {2: true}, // (text, delimiter, field)
+	"lpad":       {1: true}, // (text, width, fill)
+	"rpad":       {1: true},
 }
 
 // formatTemporalArgs rewrites boxed TypeDate ColRef argument values to
@@ -2217,7 +2245,9 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 		var c Confidence
 		e.vecRet, c = DefaultRegistry.ReturnType(e.Name).Resolve(0, nil)
 		e.vecRetOK = c != Undecided
-		e.vecTextFn = stringInputFuncs[strings.ToLower(e.Name)]
+		lower := strings.ToLower(e.Name)
+		e.vecTextFn = stringInputFuncs[lower]
+		e.vecTypedArgs = typedArgPositions[lower]
 	})
 	if e.vecFn == nil {
 		if e.tryEvalMemoized(b, out, n) {
@@ -2242,13 +2272,20 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 			}
 			// String-input vec kernels read BytesData; a TypeDate column
 			// has none and must render through the (fixed) per-row path
-			// (issue #273). The same is true of an argument-0 column that
-			// is not stored as a byte array at all: `SELECT UPPER(int_col)`
-			// indexed a nil offsets array and killed the process. Only
-			// position 0 is checked because it is the one argument every
-			// function in stringInputFuncs reads as text — substr's 2nd and
-			// 3rd are integers by design and must keep the vec path.
-			if e.vecTextFn && (a.typ == batch.TypeDate || (i == 0 && !vecTextReadable(b.Columns[a.idx], n))) {
+			// (issue #273). The same is true of a column that is not stored
+			// as a byte array at all: `SELECT UPPER(int_col)` indexed a nil
+			// offsets array and killed the process.
+			//
+			// Every argument the kernel reads AS TEXT gets that check, not
+			// just position 0. Position 0 alone was the premise "the one
+			// argument every function in stringInputFuncs reads as text",
+			// true for substr/left/right and false for the rest: concat
+			// reads all of them, replace three, starts_with/ends_with/
+			// contains two. `CONCAT(text_col, int_col)` therefore handed
+			// vecConcat a BIGINT vector with a zero-length Offsets slice and
+			// took the whole server down on ordinary single-table SQL (#509).
+			if e.vecTextFn && (a.typ == batch.TypeDate ||
+				(!e.vecTypedArgs[i] && !vecTextReadable(b.Columns[a.idx], n))) {
 				e.evalVecPerRow(b, out, n)
 				return
 			}
