@@ -955,6 +955,12 @@ type Cmp struct {
 	// decCols is the two-bare-columns binding, for the pair whose boxes carry
 	// no way to tell a DECIMAL from a string (#477).
 	decCols *decimalColCmp
+	// lText/rText are the operands' literal source texts, hoisted out of the
+	// row loop. They carry the exact literal into the GENERIC path, which is
+	// where an operand that is not a bare column — `GREATEST(d, lit) = lit`,
+	// the outer comparison of #465's own repro — meets a DECIMAL rendered as
+	// text.
+	lText, rText string
 }
 
 // NewCmp builds a comparison, binding the two operand shapes that cannot be
@@ -962,7 +968,8 @@ type Cmp struct {
 // and two DECIMAL columns against each other.
 func NewCmp(left, right Expr, op CmpOp) *Cmp {
 	return &Cmp{Left: left, Right: right, Op: op,
-		dec: bindDecimalCmp(left, right), decCols: bindDecimalCols(left, right)}
+		dec: bindDecimalCmp(left, right), decCols: bindDecimalCols(left, right),
+		lText: litText(left), rText: litText(right)}
 }
 
 func (e *Cmp) Eval(b *batch.RecordBatch, row int) any {
@@ -996,7 +1003,7 @@ func (e *Cmp) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if lv == nil || rv == nil {
 		return false, true // a comparison against NULL is UNKNOWN (#370)
 	}
-	return compare(lv, rv, e.Op), false
+	return compareWithText(lv, rv, e.lText, e.rText, e.Op), false
 }
 
 // CmpTemporalLit compares a bare column against a string literal that
@@ -1243,7 +1250,11 @@ func (e *IsDistinctFrom) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool
 	case lv == nil || rv == nil:
 		distinct = true
 	default:
-		distinct = !compare(lv, rv, CmpEq)
+		// A DECIMAL column against a numeric literal is compared at the
+		// literal's full precision, not through its float64 box: `d IS
+		// DISTINCT FROM <a literal naming d exactly>` answered 200 rows where
+		// PostgreSQL answers 199 (#465).
+		distinct = !compareWithText(lv, rv, litText(e.Left), litText(e.Right), CmpEq)
 	}
 	if e.Not {
 		return !distinct, false
@@ -1653,9 +1664,14 @@ func (e *Case) Eval(b *batch.RecordBatch, row int) any {
 	if e.Operand != nil {
 		// Simple CASE: CASE x WHEN v1 THEN r1 ...
 		opVal := e.Operand.Eval(b, row)
+		opText := litText(e.Operand)
 		for _, w := range e.Whens {
 			whenVal := w.Cond.Eval(b, row)
-			if opVal != nil && whenVal != nil && compare(opVal, whenVal, CmpEq) {
+			// The WHEN value's exact source text settles a match a float64
+			// box cannot: `CASE d WHEN <a literal naming d exactly>` answered
+			// the ELSE branch (#465).
+			if opVal != nil && whenVal != nil &&
+				compareWithText(opVal, whenVal, opText, litText(w.Cond), CmpEq) {
 				return w.Result.Eval(b, row)
 			}
 		}
@@ -1738,6 +1754,12 @@ type FuncCall struct {
 	wantsNetworkText bool
 	wantsInstant     bool
 	wantsDateKind    bool
+	// This function picks the extremum of its arguments (GREATEST / LEAST),
+	// so it is evaluated with the argument EXPRESSIONS in hand: a numeric
+	// literal's exact source text settles an ordering its float64 box cannot
+	// (#465). extremumOp is CmpGt for GREATEST and CmpLt for LEAST.
+	extremum   bool
+	extremumOp CmpOp
 
 	vecOnce sync.Once
 	vecFn   VecScalarFunc
@@ -2074,6 +2096,12 @@ func (e *FuncCall) resolveFnSlow() {
 	e.wantsNetworkText = networkTextFuncs[lower]
 	e.wantsInstant = temporalInputFuncs[lower]
 	e.wantsDateKind = dateArithFuncs[lower]
+	switch lower {
+	case "greatest":
+		e.extremum, e.extremumOp = true, CmpGt
+	case "least":
+		e.extremum, e.extremumOp = true, CmpLt
+	}
 	e.fnReady.Store(true)
 }
 
@@ -2099,7 +2127,36 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	if e.wantsInstant {
 		e.resolveTemporalArgs(b, row, args)
 	}
+	if e.extremum {
+		return pickExtremum(e.Args, args, e.extremumOp)
+	}
 	return e.fn(args)
+}
+
+// pickExtremum is fnGreatest/fnLeast with the argument EXPRESSIONS in hand.
+//
+// fnGreatest orders through compare(), which reads a DECIMAL column's box as
+// text and a numeric literal's as a float64 and has no exact reading of that
+// pair — so `GREATEST(d, lit)` picked the wrong operand whenever the literal
+// named a value a double cannot hold (#465). The ordering rule is otherwise
+// unchanged, NULL skipping included: PostgreSQL's GREATEST/LEAST ignore NULL
+// arguments and answer NULL only when every argument is NULL.
+func pickExtremum(argExprs []Expr, args []any, op CmpOp) any {
+	var best any
+	bestText := ""
+	for i, a := range args {
+		if a == nil {
+			continue
+		}
+		text := ""
+		if i < len(argExprs) {
+			text = litText(argExprs[i])
+		}
+		if best == nil || compareWithText(a, best, text, bestText, op) {
+			best, bestText = a, text
+		}
+	}
+	return best
 }
 
 // EvalVec evaluates the function for an entire batch, writing results to out.

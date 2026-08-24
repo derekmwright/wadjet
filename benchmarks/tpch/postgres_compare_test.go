@@ -612,6 +612,36 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DecimalColColLtInCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_2 < d_4 THEN 1 ELSE 0 END = 1`},
 	)
 
+	// The comparison sites #452's binding did not reach (#465). A simple
+	// CASE's WHEN, IS [NOT] DISTINCT FROM and GREATEST/LEAST all compared
+	// through the boxed path, where the column is rendered TEXT and the
+	// literal is the float64 the compiler built for arithmetic — so a literal
+	// naming a stored value exactly did not match it.
+	//
+	// Each shape appears TWICE: once with the literal that names a stored
+	// value exactly and once one unit of the last place away from it. A
+	// float64 renders those two identically, so the pair is what tells an
+	// exact comparison from a rounded one.
+	out = append(out,
+		pgCase{name: "WideDecimalSimpleCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE d_wide WHEN 493827160549382.7160549350 THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "WideDecimalSimpleCaseOffByUlp", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE d_wide WHEN 493827160549382.7160549351 THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "WideDecimalIsDistinctFrom", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide IS DISTINCT FROM 493827160549382.7160549350`},
+		pgCase{name: "WideDecimalIsDistinctFromOffByUlp", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide IS DISTINCT FROM 493827160549382.7160549351`},
+		pgCase{name: "WideDecimalIsNotDistinctFrom", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide IS NOT DISTINCT FROM 493827160549382.7160549350`},
+		pgCase{name: "WideDecimalGreatest", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_wide, 493827160549382.7160549350) = 493827160549382.7160549350`},
+		pgCase{name: "WideDecimalLeast", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE LEAST(d_wide, 493827160549382.7160549350) = 493827160549382.7160549350`},
+		pgCase{name: "WideDecimalLeastOffByUlp", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE LEAST(d_wide, 493827160549382.7160549351) = 493827160549382.7160549351`},
+		// The narrow column, where every value IS a float64: these entries
+		// hold the sites to what they already answered.
+		pgCase{name: "DecimalSimpleCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE d_2 WHEN 12.75 THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "DecimalIsDistinctFrom", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IS DISTINCT FROM 12.75`},
+		pgCase{name: "DecimalGreatest", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_2, 12.75) = 12.75`},
+		pgCase{name: "DecimalLeast", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE LEAST(d_2, 12.75) = 12.75`},
+		// A literal past the 128-bit carrier reaches these sites too, and
+		// saturates there as it does everywhere else (#462).
+		pgCase{name: "DecimalGreatestPastCarrier", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_2, 1e39) = 1e39`},
+	)
+
 	// --- Wide DECIMAL (precision 38) --------------------------------------
 	//
 	// Everything above runs on ONE physical encoding. A DECIMAL's leaf type is

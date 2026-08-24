@@ -311,6 +311,60 @@ func decimalTextOrderFloat(v float64, text string) (int, bool) {
 	return kernel.CompareFloat64(v, f), true
 }
 
+// litText reports a numeric literal operand's exact source text, and "" for
+// every other operand. Text is set only for a numeric literal (compileLit), so
+// it doubles as the test for "this operand is a number the user wrote".
+func litText(e Expr) string {
+	if l, ok := e.(*Lit); ok {
+		return l.Text
+	}
+	return ""
+}
+
+// compareWithText is compare() for a site that knows its operands' literal
+// TEXTS.
+//
+// It exists because the boxed comparison cannot be exact on its own where one
+// side is a DECIMAL — the column arrives as its rendered text and the literal
+// as a float64 that has already lost the digits past a double, so the best
+// compare() can do for the pair is a float comparison. That is right for a
+// genuine FLOAT column and wrong for a numeric literal, which PostgreSQL types
+// as numeric and compares at full precision.
+//
+// `CASE d WHEN lit`, `d IS DISTINCT FROM lit` and `GREATEST/LEAST(d, lit)` are
+// the sites: they compare through the boxed path, and #452's binding — which
+// covers `col op lit`, IN and BETWEEN — never reached them (#465).
+func compareWithText(a, b any, aText, bText string, op CmpOp) bool {
+	if c, ok := exactTextOrder(a, b, aText, bText); ok {
+		return cmpOrder(c, op)
+	}
+	return compare(a, b, op)
+}
+
+// exactTextOrder orders a value BOXED AS TEXT against a literal whose exact
+// text is known, as the two exact decimals they are.
+//
+// It applies only when exactly one side is a text box and the other carries a
+// literal's text. Two text boxes are two STRING values as far as anything here
+// can tell — nothing in a box says "this came from a DECIMAL column", which is
+// what decimalColCmp's declaration binding is for — and two numeric boxes are
+// already compared by their own types' rules.
+func exactTextOrder(a, b any, aText, bText string) (int, bool) {
+	if as, ok := a.(string); ok {
+		if bText == "" {
+			return 0, false
+		}
+		return batch.CompareDecimalTexts(as, bText)
+	}
+	if bs, ok := b.(string); ok {
+		if aText == "" {
+			return 0, false
+		}
+		return batch.CompareDecimalTexts(aText, bs)
+	}
+	return 0, false
+}
+
 // negateLitText flips the sign of a numeric literal's source text, so folding
 // a unary minus into the literal keeps the exact text alongside the box.
 func negateLitText(text string) string {

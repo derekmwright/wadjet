@@ -95,12 +95,16 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    Three rules follow. They hold for a bare DECIMAL column compared, matched
    against an IN list, or bounded by BETWEEN, against a numeric literal — the
    vectorized kernel, the row-at-a-time expression, the raw-text predicate,
-   and the row-group prune all bind that one shape. They do NOT yet reach
-   every site that compares a DECIMAL column to a literal: an
-   arithmetic-wrapped operand (`d + 0 = lit`), `CASE d WHEN lit`,
-   `d IS DISTINCT FROM lit`, and `GREATEST`/`LEAST` still fall through to the
-   generic float64 comparison and can reproduce the same failure. Tracked in
-   #465 rather than fixed here.
+   and the row-group prune all bind that one shape. (Amended 2026-08-24,
+   #465: `CASE d WHEN lit`, `d IS DISTINCT FROM lit` and
+   `GREATEST`/`LEAST(d, lit)` now hold them too. Those three compare through
+   the BOXED path, where the column is rendered text and the literal is the
+   float64 box, so they carry the literal's `Text` into the comparison and
+   order the two exact decimals — `expr.compareWithText`,
+   `batch.CompareDecimalTexts`. An arithmetic-wrapped operand — `d + 0 = lit`
+   — still does not: arithmetic over DECIMAL goes through float64 before any
+   comparison sees it, which is the separate limit recorded at the end of this
+   item.)
 
    - The literal's source text travels with its box (`expr.Lit.Text`,
      `logical.Predicate.ValueText`, `exec.KernelFilter.LitText`) and is what
@@ -126,6 +130,17 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      (`kernel.StatsDomainValue`, `kernel.decimalLiteralAt`), because a prune
      that reads the predicate differently from the filter deletes rows the
      filter would have kept.
+   - **A DECIMAL meeting a value of another type is compared by VALUE, and
+     the rule is the other type's.** (Added 2026-08-24, #476/#477.) A DECIMAL
+     column boxes as its rendered TEXT, so every boxed comparison against it
+     used to fall through to a LEXICOGRAPHIC one, where "9" sorts above "10".
+     Against an INTEGER the comparison is exact (`expr.decimalTextOrder`, the
+     same `ScaledDecimal` carrier); against a FLOAT it is a float64
+     comparison, because PostgreSQL's `numeric <op> double precision` casts
+     the numeric; against another DECIMAL it is the unscaled Int128s at their
+     two scales (`kernel.CompareDecimalValues`), which no box can be
+     dispatched on — two rendered DECIMALs are indistinguishable from two
+     strings — so that pair is bound from the column DECLARATIONS, per item 8.
    - **A constant that is not a number is a query ERROR, never a value.**
      (Added 2026-08-24, #463.) The conversion used to answer ZERO for
      anything it could not parse, so `WHERE d = 'abc'` — and `WHERE d = 1e400`,
@@ -285,8 +300,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   (`resolveNullsLast`), `internal/distributed/messages.go` (`PlaceNullsLast`)
 - `internal/engine/exec/kernel/decimal_literal.go` (the literal, resolved at a
   column's scale), `internal/engine/expr/decimal_literal.go` (the row path's
-  binding), `wadjet/decimal_literal_test.go` (the operator sweep at three
-  scales, both paths)
+  bindings and the boxed comparisons), `wadjet/decimal_literal_test.go` (the
+  operator sweep at three scales, both paths)
+- `internal/engine/batch/decimal.go` (`ScaledDecimal`, `DecimalTextAt`,
+  `CompareDecimalTexts` — one carrier and one text comparison for every
+  DECIMAL predicate), `internal/engine/exec/kernel/compare.go`
+  (`colColFilterDecimal`, `DecimalConstText`),
+  `internal/engine/exec/kernel/sort.go` (`CompareDecimalValues`)
+- #462 (a literal past the carrier wrapped two's complement), #463 (an
+  unreadable literal answered ZERO), #465 (CASE / IS DISTINCT FROM /
+  GREATEST / LEAST did not carry the literal's text), #476 (a boxed DECIMAL
+  against a number compared lexicographically), #477 (two DECIMAL columns had
+  no kernel at all) — the work items 6's amendments record
 - #444 (boxed ROW comparator ordered fields by name, not declared position),
   #446 (VECTOR/ARRAY(FLOAT) comparators not transitive under NaN) — the work
   item 8 above records the settled position for

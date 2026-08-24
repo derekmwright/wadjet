@@ -512,6 +512,90 @@ func DecimalTextAt(text string, scale int) (ScaledDecimal, bool) {
 	return ScaledDecimal{Unscaled: v, Residual: residual}, true
 }
 
+// CompareDecimalTexts orders two numeric TEXTS as the exact numbers they name,
+// returning -1, 0 or +1, and ok=false when either is not a number.
+//
+// No scale, no carrier, no float: this is the comparison for two values whose
+// only lossless form is their text — a DECIMAL column rendered by
+// FormatDecimal against a literal too wide for the float64 box the compiler
+// built for it (ADR-0012 item 6). It compares the power of ten of the leading
+// digit first and the digit strings after, so it is exact at any width and
+// allocates nothing.
+func CompareDecimalTexts(a, b string) (int, bool) {
+	aNeg, aDigits, aExp, aOK := decimalParts(a)
+	bNeg, bDigits, bExp, bOK := decimalParts(b)
+	if !aOK || !bOK {
+		return 0, false
+	}
+	aDigits, aExp = trimDecimalDigits(aDigits, aExp)
+	bDigits, bExp = trimDecimalDigits(bDigits, bExp)
+	switch {
+	case aDigits == "" && bDigits == "":
+		return 0, true // both zero, whatever their spelling or sign
+	case aDigits == "":
+		if bNeg {
+			return 1, true
+		}
+		return -1, true
+	case bDigits == "":
+		if aNeg {
+			return -1, true
+		}
+		return 1, true
+	case aNeg != bNeg:
+		if aNeg {
+			return -1, true
+		}
+		return 1, true
+	}
+	c := compareDecimalMagnitudes(aDigits, aExp, bDigits, bExp)
+	if aNeg {
+		c = -c
+	}
+	return c, true
+}
+
+// trimDecimalDigits strips a magnitude's leading zeros and folds its trailing
+// zeros into the exponent, so "1.50" and "1.5000" reach the comparison in the
+// same shape.
+func trimDecimalDigits(digits string, exp int) (string, int) {
+	digits = strings.TrimLeft(digits, "0")
+	for len(digits) > 0 && digits[len(digits)-1] == '0' {
+		digits = digits[:len(digits)-1]
+		exp++
+	}
+	return digits, exp
+}
+
+// compareDecimalMagnitudes orders two NON-ZERO magnitudes, each given as
+// leading-and-trailing-zero-free digits times 10^exp.
+func compareDecimalMagnitudes(aDigits string, aExp int, bDigits string, bExp int) int {
+	// The power of ten of the most significant digit decides first.
+	if ah, bh := len(aDigits)+aExp, len(bDigits)+bExp; ah != bh {
+		if ah < bh {
+			return -1
+		}
+		return 1
+	}
+	n := max(len(aDigits), len(bDigits))
+	for i := 0; i < n; i++ {
+		x, y := byte('0'), byte('0')
+		if i < len(aDigits) {
+			x = aDigits[i]
+		}
+		if i < len(bDigits) {
+			y = bDigits[i]
+		}
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
 // decimalParts splits numeric text — plain or exponent form — into its sign,
 // its digits with the decimal point removed, and the power of ten those
 // digits must be multiplied by. ok=false for anything that is not a number.
