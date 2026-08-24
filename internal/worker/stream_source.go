@@ -453,8 +453,14 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 				// shard starting at a group other than 0, so neither a
 				// running count nor the batch's own position would do. A
 				// batch whose every row is deleted is dropped rather than
-				// shipped with an empty selection.
+				// shipped with an empty selection — and, like the
+				// single-process scan's releaseScanBatch on the same path
+				// (physical/plan.go), recycled rather than left for GC: it
+				// was already minted from the backing pool same as any
+				// batch this source hands a consumer, and RecycleBatch
+				// no-ops safely if the pool never armed (nil-safe Recycle).
 				if !scan.ApplyDeleteMarkers(b, s.parquetIter.RowOffset(), s.curDeletes) {
+					s.RecycleBatch(b, b.Mint())
 					continue
 				}
 				s.tryPreOpenNextParquet()
@@ -498,6 +504,12 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 				s.curDeleteOffset += int64(b.Len)
 			}
 			if !scan.ApplyDeleteMarkers(b, off, s.curDeletes) {
+				// Row-reader fallback batches are never minted from this
+				// source's backing pool (RecycleBatch's mint check is a
+				// no-op on them), but calling it unconditionally matches
+				// the parquetIter branch above and costs nothing on a path
+				// that IS armed for some future fallback backing.
+				s.RecycleBatch(b, b.Mint())
 				continue
 			}
 			return b, nil
