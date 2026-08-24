@@ -1257,49 +1257,75 @@ func (s *cachedFileStreamSource) finishParquetState(p *pendingParquet, filePath 
 		p.release(s.executor.logger)
 		return nil, fmt.Errorf("declared schema for %s: %w", filePath, err)
 	}
-	// Apply column projection only when EVERY requested column is present
-	// in the file schema. If any requested name is missing (likely a
-	// derived/expression column that will be computed by a pre-project
-	// pass), skip projection entirely and read the full schema — the
-	// downstream operator needs the raw columns to compute the derivation.
+	// Apply column projection to whichever requested names ARE present in
+	// the file schema — the intersection — rather than reverting to the
+	// full file schema the moment any one name is missing.
+	//
+	// A name can be missing for two reasons, and only one of them needs the
+	// other requested columns to survive pruning: (1) it is a genuine raw
+	// column that this file's schema predates (schema evolution) — dropping
+	// it here is fine, the file never had it to read; (2) it is a
+	// derived/expression output or bookkeeping sentinel (RowCountOnlyColumn,
+	// "__having_N", a materialized ORDER BY name — see optimizer.go
+	// pushColumnNeeds) that no file schema will ever contain. Either way,
+	// the OTHER requested names are real columns the query does reference,
+	// and dropping them along with the unresolvable one used to route the
+	// entire scan through the row reader whenever the table also carried a
+	// nested-ROW column — up to 60x slower for a query that never touches
+	// that column (#448/#449 F5). The raw columns an expression or having
+	// clause actually reads arrive as their OWN entries in projectColumns
+	// (collectASTColumnRefs walks into InputExpr/JoinFilter/etc. and adds
+	// each leaf ColumnRef beside any synthetic name), so keeping the
+	// intersection never starves a derivation of a column it needs — it
+	// only stops requesting columns nothing downstream will read.
+	//
+	// A previous, more aggressive variant of this fell back to full width
+	// on ANY miss because a pre-projection-pushdown InputCol could name a
+	// whole expression with no accompanying raw-column entries at all,
+	// which under intersection alone would starve the derivation of every
+	// column it needed and stalled Q01 at SF10. That gap is closed upstream
+	// now (every ColumnRef inside an expression is pushed as its own
+	// needed name), so the intersection here is safe; if that upstream
+	// guarantee ever regresses, TestTPCHQueries/TestTPCHOptimizationInvariance
+	// will show wrong aggregates, not just a slow scan.
 	if len(s.projectColumns) > 0 {
 		schemaSet := make(map[string]bool, len(projCols))
 		for _, c := range projCols {
 			schemaSet[c.Name] = true
 		}
-		allPresent := true
 		var missing []string
 		for _, name := range s.projectColumns {
 			if !schemaSet[name] {
-				allPresent = false
 				missing = append(missing, name)
 			}
 		}
-		if !allPresent && !s.projectionSkipWarned {
-			// Once per source, not per file: a 600-file scan reverting to
-			// full width is one event. Legitimate for derived columns
+		if len(missing) > 0 && !s.projectionSkipWarned {
+			// Once per source, not per file: a 600-file scan narrowing to
+			// the intersection is one event. Legitimate for derived columns
 			// (pre-project computes them); polluted planner lists were the
 			// silent 5-6x shuffle-byte amplifier of memo §2 A1 — this line
 			// is how the next regression of that class gets seen.
 			s.projectionSkipWarned = true
-			s.executor.logger.Warn("parquet projection skipped: requested columns missing from schema (reading full width)",
+			s.executor.logger.Warn("parquet projection narrowed: requested columns missing from schema",
 				"query_id", s.queryID, "missing", strings.Join(missing, ","),
 				"requested", len(s.projectColumns))
 		}
-		if allPresent {
-			wanted := make(map[string]bool, len(s.projectColumns))
-			for _, c := range s.projectColumns {
-				wanted[c] = true
+		wanted := make(map[string]bool, len(s.projectColumns))
+		for _, c := range s.projectColumns {
+			wanted[c] = true
+		}
+		filtered := make([]parquet.Column, 0, len(s.projectColumns))
+		for _, c := range projCols {
+			if wanted[c.Name] {
+				filtered = append(filtered, c)
 			}
-			filtered := make([]parquet.Column, 0, len(s.projectColumns))
-			for _, c := range projCols {
-				if wanted[c.Name] {
-					filtered = append(filtered, c)
-				}
-			}
-			if len(filtered) > 0 {
-				projCols = filtered
-			}
+		}
+		// Every requested name was unresolvable (e.g. a bare COUNT(*)'s
+		// RowCountOnlyColumn sentinel reaching this guard on its own) —
+		// nothing to narrow to, so keep reading the full schema rather than
+		// hand the reader an empty projection.
+		if len(filtered) > 0 {
+			projCols = filtered
 		}
 	}
 	shardIdx, shardCount := s.shardIdx, s.shardCount
