@@ -147,6 +147,23 @@ type twoPathQuery struct {
 	// silently downgrades distributed queries to single-process, and
 	// nothing else in this suite would notice (the answers stay right).
 	localRoute bool
+	// distinctRoute: arm B must answer this query via the #466 route — the
+	// stage DAG refuses a DISTINCT it has no stage for
+	// (physical.ErrDistinctDistributed) and the coordinator runs it on its
+	// local single-process pipeline. Asserted for these entries AND for no
+	// others, for the same reason as localRoute: an over-broad refusal
+	// downgrades distributed queries to single-process while every answer
+	// stays right, so only the counter can see it.
+	distinctRoute bool
+	// dagPin pins a stage-DAG-only defect that is NOT this entry's subject
+	// and is tracked elsewhere. Arm A stays fully gated (absolute
+	// assertion, columns, row count); arm B must still FAIL with an error
+	// containing dagPin, so the subtest fails the moment the DAG starts
+	// answering and the pin has to go. A knownBug skip would hide that,
+	// and deleting the entry would lose arm A's coverage.
+	dagPin string
+	// dagPinIssue names where the dagPin defect is tracked.
+	dagPinIssue string
 	// assertA is an ABSOLUTE assertion on arm A's rows, run in addition to
 	// the two-arm compare. The compare's contract is "the paths agree", not
 	// "the answer is right" — a defect that hits both engines the same way
@@ -381,6 +398,7 @@ func TestTwoPathInvariance(t *testing.T) {
 			hitsBefore := fast.LocalFastPathHits()
 			localRows, localCols, localErr := runArm(t, ctx, fast, q.sql)
 			routesBefore := dag.CorrelatedLocalRoutes()
+			distinctRoutesBefore := dag.DistinctLocalRoutes()
 			dagRows, dagCols, dagErr := runArm(t, ctx, dag, q.sql)
 
 			// The #359 route must engage exactly for the entries that
@@ -395,6 +413,17 @@ func TestTwoPathInvariance(t *testing.T) {
 			}
 			if !q.localRoute && routed != 0 {
 				t.Errorf("arm B routed this query to the coordinator-local pipeline — the #359 refusal fired for a shape the stage DAG can run")
+			}
+
+			// Same contract for the #466 DISTINCT refusal: it must fire for
+			// the shapes that declare it and for nothing else. A DISTINCT
+			// the DAG CAN stage taking this route is a lost dedup stage.
+			distinctRouted := dag.DistinctLocalRoutes() - distinctRoutesBefore
+			if q.distinctRoute && distinctRouted == 0 {
+				t.Errorf("arm B ran the stage DAG for a DISTINCT it has no stage for — the #466 refusal did not fire")
+			}
+			if !q.distinctRoute && distinctRouted != 0 {
+				t.Errorf("arm B routed this query to the coordinator-local pipeline — the #466 DISTINCT refusal fired for a shape the stage DAG can run")
 			}
 
 			// The fast path declines any plan it cannot size-estimate —
@@ -417,6 +446,36 @@ func TestTwoPathInvariance(t *testing.T) {
 				} else {
 					localRows, localCols, localErr = res.Rows, res.Columns, nil
 				}
+			}
+
+			// A pinned DAG defect: arm A is still gated in full, arm B
+			// must still be broken in the pinned way. Both halves matter —
+			// the pin is deleted when arm B agrees, and arm A's assertion
+			// is the only thing keeping the shape covered until then.
+			if q.dagPin != "" {
+				if localErr != nil {
+					t.Fatalf("arm A (single-process) failed on a shape only arm B is pinned for\n  SQL: %s\n  error: %v", q.sql, localErr)
+				}
+				if dagErr == nil {
+					t.Fatalf("arm B (stage DAG) now ANSWERS this query (%d rows) — %s is fixed."+
+						"\n  Delete dagPin on %s so both arms are gated again.\n  SQL: %s",
+						len(dagRows), q.dagPinIssue, q.name, q.sql)
+				}
+				if !strings.Contains(dagErr.Error(), q.dagPin) {
+					t.Fatalf("arm B failed in a way the pin does not describe (%s expects %q)\n  SQL: %s\n  error: %v",
+						q.dagPinIssue, q.dagPin, q.sql, dagErr)
+				}
+				t.Logf("stage DAG defect pinned, NOT gated: %q (%s)", q.dagPin, q.dagPinIssue)
+				if len(q.wantCols) > 0 && !sameColumns(localCols, q.wantCols) {
+					t.Errorf("arm A returned columns %v, the query selects %v\n  SQL: %s", localCols, q.wantCols, q.sql)
+				}
+				if q.wantRows > 0 && len(localRows) != q.wantRows {
+					t.Errorf("arm A returned %d rows, want %d\n  SQL: %s", len(localRows), q.wantRows, q.sql)
+				}
+				if q.assertA != nil {
+					q.assertA(t, localRows)
+				}
+				return
 			}
 
 			// A query that answers on one path and errors on the other is
@@ -3312,6 +3371,220 @@ func twoPathCorpus() []twoPathQuery {
 			}},
 	)
 
+	// #466 review wave. Four shapes the first fix got wrong, each verified
+	// against PostgreSQL 17 (postgres:17-alpine, --locale=C) on the same
+	// statements.
+	//
+	// The blocker: `SELECT DISTINCT *` reaches the rewrite as Distinct →
+	// Scan, with no NodeProject at all (a bare-star select list produces
+	// none), so the projection-driven rewrite declined and the new refusal
+	// then turned a query the PRE-#466 DAG answered correctly into an
+	// error. The star's columns come from the scan's catalog annotation.
+	out = append(out,
+		twoPathQuery{name: "DerivedStarDistinctUnderCount", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT DISTINCT * FROM supplier) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", float64(distinctRowCount(tb, "supplier")))
+			}},
+		twoPathQuery{name: "DerivedQualifiedStarDistinctUnderCount", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT DISTINCT s.* FROM supplier s) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", float64(distinctRowCount(tb, "supplier")))
+			}},
+		// A star over a JOIN: the dedup key is both sides' columns. Arm A
+		// used to fail this outright — with nothing above naming a column,
+		// the pruner narrowed the join output to ZERO columns and the
+		// hash aggregate refused the schemaless batch (#277). Declaring the
+		// group keys is what keeps the columns alive.
+		twoPathQuery{name: "DerivedStarDistinctOverJoin", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT DISTINCT * FROM nation JOIN region ON 1=1) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				n := len(sf001Table(tb, "nation")) * len(sf001Table(tb, "region"))
+				assertSingleCell(tb, rows, "c", float64(n))
+			}},
+		// The wide table is the one that shows WHICH columns deduplicated.
+		// Arm A answered 14979 here — the number of distinct l_orderkeys —
+		// because the pruner had narrowed the star to one column and the
+		// dedup ran on that. Every one of the 60000 rows is distinct.
+		twoPathQuery{name: "DerivedStarDistinctWideTable", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT DISTINCT * FROM lineitem) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", float64(distinctRowCount(tb, "lineitem")))
+			}},
+		// The group-key test is an AST check. It used to be gated behind a
+		// `(?i)\bselect\b` match on the expression TEXT, which fired on the
+		// word inside a STRING LITERAL: the rewrite declined and the query
+		// was refused on both paths.
+		twoPathQuery{name: "DerivedDistinctStringLiteralNamingSelect", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT DISTINCT n_name, 'x select y' AS lit FROM nation) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				names := map[string]bool{}
+				for _, r := range sf001Table(tb, "nation") {
+					names[fmt.Sprint(r["n_name"])] = true
+				}
+				assertSingleCell(tb, rows, "c", float64(len(names)))
+			}},
+		// The shapes the rewrite genuinely cannot lower: an aggregate
+		// projection has no group key. Off the root path nothing on the DAG
+		// would apply the DISTINCT, so PlanDistributed refuses — and the
+		// coordinator routes the refusal onto its local single-process
+		// pipeline rather than handing the client an error, the same move
+		// #359 makes for correlated subqueries. distinctRoute asserts the
+		// route actually engaged, so a silently-dropped DISTINCT cannot
+		// pass as one that was routed.
+		twoPathQuery{name: "DerivedDistinctOverAggregateProjection", cmp: cmpUnordered, expectRows: true,
+			distinctRoute: true,
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT DISTINCT o_orderstatus, SUM(o_totalprice) AS s FROM orders GROUP BY o_orderstatus) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				statuses := map[string]bool{}
+				for _, r := range sf001Table(tb, "orders") {
+					statuses[fmt.Sprint(r["o_orderstatus"])] = true
+				}
+				assertSingleCell(tb, rows, "c", float64(len(statuses)))
+			}},
+		twoPathQuery{name: "GroupedOverDerivedDistinctAggregateProjection", cmp: cmpOrdered, expectRows: true,
+			distinctRoute: true,
+			sql: `SELECT k, COUNT(*) AS c FROM
+				(SELECT DISTINCT n_regionkey AS k, COUNT(*) AS n FROM nation GROUP BY n_regionkey) u
+				GROUP BY k ORDER BY k`,
+			wantCols: []string{"k", "c"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				keys := distinctKeys(tb, "nation", "n_regionkey")
+				if len(rows) != len(keys) {
+					tb.Fatalf("got %d groups, want %d", len(rows), len(keys))
+				}
+				for _, r := range rows {
+					if !keys[cellNum(r, "k")] {
+						tb.Errorf("unexpected group k=%v", cellNum(r, "k"))
+					}
+					if got := cellNum(r, "c"); got != 1 {
+						tb.Errorf("group k=%v: c = %v, want 1 — one (regionkey, count) pair per region",
+							cellNum(r, "k"), got)
+					}
+				}
+			}},
+		// #466's repro row 5, reassigned to #467: the DAG cannot resolve a
+		// derived table's SELECT alias, so a QUALIFIED group key names a
+		// column no fragment emits. Nothing to do with DISTINCT — the same
+		// statement with the DISTINCT removed fails identically — so it is
+		// pinned here rather than skipped, and arm A stays gated.
+		twoPathQuery{name: "GroupByQualifiedAliasOverDerivedDistinct", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT k, COUNT(*) AS c FROM
+				(SELECT DISTINCT n_regionkey AS k, n_name FROM nation) u
+				GROUP BY u.k ORDER BY k`,
+			wantCols:    []string{"k", "c"},
+			dagPin:      `GROUP BY key "u.k" is not a column of its input`,
+			dagPinIssue: "#467",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				want := map[float64]map[string]bool{}
+				for _, r := range sf001Table(tb, "nation") {
+					rk := toFloat(r["n_regionkey"])
+					if want[rk] == nil {
+						want[rk] = map[string]bool{}
+					}
+					want[rk][fmt.Sprint(r["n_name"])] = true
+				}
+				if len(rows) != len(want) {
+					tb.Fatalf("got %d groups, want %d", len(rows), len(want))
+				}
+				for _, row := range rows {
+					k := cellNum(row, "k")
+					names, ok := want[k]
+					if !ok {
+						tb.Errorf("unexpected group k=%v", k)
+						continue
+					}
+					if got := cellNum(row, "c"); got != float64(len(names)) {
+						tb.Errorf("group k=%v: c = %v, want %v", k, got, len(names))
+					}
+				}
+			}},
+	)
+
+	// Found by the same #466 review probe, filed separately because none of
+	// them is about DISTINCT — each has an explicit-GROUP-BY twin that
+	// behaves identically, and all reproduce on the base commit.
+	out = append(out,
+		// #478: a LIMIT inside a derived table lands on no DAG stage.
+		// walkStages attaches a bound only to a sort/merge_sort stage, and
+		// the coordinator's compensating LIMIT/OFFSET pass reads
+		// ExtractMergeInfo, which sees the ROOT path only. Silent: the
+		// derived table yields every row and the outer aggregate counts
+		// them all.
+		twoPathQuery{name: "DerivedLimitUnderCount", cmp: cmpUnordered, expectRows: true,
+			knownBug: "#478",
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation LIMIT 3) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 3)
+			}},
+		twoPathQuery{name: "DerivedDistinctLimitUnderCount", cmp: cmpUnordered, expectRows: true,
+			knownBug: "#478",
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT DISTINCT n_regionkey FROM nation LIMIT 2) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 2)
+			}},
+		// #480, repro A: a non-equi join has no join keys, so its build side
+		// requires clustered_on[] — an empty key list only a singleton or a
+		// broadcast satisfies — and the derived aggregate feeding it is
+		// hash-partitioned on its group keys. No exchange reconciles them.
+		twoPathQuery{name: "DerivedAggregateNonEquiJoin", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT s_nationkey FROM supplier) u
+				JOIN (SELECT DISTINCT n_nationkey FROM nation) v ON u.s_nationkey < v.n_nationkey`,
+			wantCols: []string{"c"}, wantRows: 1,
+			dagPin: "requires clustered_on[]", dagPinIssue: "#480",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				supp := distinctKeys(tb, "supplier", "s_nationkey")
+				var pairs float64
+				for s := range supp {
+					for n := range distinctKeys(tb, "nation", "n_nationkey") {
+						if s < n {
+							pairs++
+						}
+					}
+				}
+				assertSingleCell(tb, rows, "c", pairs)
+			}},
+		// #480, repro B: #467's mechanism at a third consumer. A fragment
+		// emits columns under their SOURCE names, so the shuffle's partition
+		// key — the derived table's alias — names nothing in the schema.
+		twoPathQuery{name: "AliasJoinedDerivedAggregates", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT s_nationkey AS a FROM supplier) x
+				JOIN (SELECT DISTINCT n_nationkey AS b FROM nation) y ON x.a = y.b`,
+			wantCols: []string{"c"}, wantRows: 1,
+			dagPin: `partitioned shuffle: key "y.b" not in schema`, dagPinIssue: "#480",
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				nations := distinctKeys(tb, "nation", "n_nationkey")
+				var matched float64
+				for s := range distinctKeys(tb, "supplier", "s_nationkey") {
+					if nations[s] {
+						matched++
+					}
+				}
+				assertSingleCell(tb, rows, "c", matched)
+			}},
+	)
+
 	// #358 — the outer-join ON residual: the non-key conjunct runs on the
 	// combined row BEFORE the match is accepted, a probe row whose
 	// candidates all fail comes back NULL-padded rather than dropped, and a
@@ -3824,6 +4097,28 @@ func distinctKeys(tb testing.TB, table, col string) map[float64]bool {
 		out[toFloat(v)] = true
 	}
 	return out
+}
+
+// distinctRowCount is the reference for `SELECT DISTINCT *`: how many
+// distinct WHOLE rows the fixture table holds. Computed here rather than
+// written down, because the number the defect produced (the distinct values
+// of ONE column) is just as plausible-looking as the right one.
+func distinctRowCount(tb testing.TB, table string) int {
+	tb.Helper()
+	seen := map[string]bool{}
+	for _, r := range sf001Table(tb, table) {
+		cols := make([]string, 0, len(r))
+		for c := range r {
+			cols = append(cols, c)
+		}
+		sort.Strings(cols)
+		var key strings.Builder
+		for _, c := range cols {
+			fmt.Fprintf(&key, "%s=%v\x00", c, r[c])
+		}
+		seen[key.String()] = true
+	}
+	return len(seen)
 }
 
 // assertSingleCell checks one numeric cell of a one-row result — the shape an

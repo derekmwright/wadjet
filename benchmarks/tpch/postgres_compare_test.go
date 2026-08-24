@@ -1017,5 +1017,58 @@ func postgresSemanticsCases() []pgCase {
 			EXTRACT(MONTH FROM DATE '1996-03-15') AS m, EXTRACT(DAY FROM DATE '1996-03-15') AS d`},
 	)
 
+	// --- DISTINCT, and where its dedup key comes from -------------------
+	//
+	// #466 is the family: a DISTINCT is executed by being lowered to a GROUP
+	// BY over the projection below it, and every shape where that lowering
+	// declines or picks the wrong keys is a wrong ANSWER, not an error. The
+	// answers are what PostgreSQL is here to settle; the two-path invariance
+	// suite then carries the same statements to the stage DAG.
+	//
+	// A star DISTINCT is the sharp case: `*` names no columns, so the dedup
+	// key has to be reconstructed from the relation's schema. Reconstructing
+	// it from the PRUNED set instead gave 14979 for the lineitem entry — the
+	// number of distinct l_orderkeys — which is as plausible a number as the
+	// right one (#479).
+	out = append(out,
+		pgCase{name: "DerivedDistinctUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT n_regionkey FROM nation) u`},
+		pgCase{name: "DerivedDistinctMultiColumnUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT o_orderstatus, o_orderpriority FROM orders) u`},
+		pgCase{name: "DerivedStarDistinctUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT * FROM supplier) u`},
+		pgCase{name: "DerivedQualifiedStarDistinctUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT s.* FROM supplier s) u`},
+		pgCase{name: "DerivedStarDistinctWideTableUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT * FROM lineitem) u`},
+		pgCase{name: "DerivedStarDistinctOverJoinUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT * FROM nation JOIN region ON 1=1) u`},
+		pgCase{name: "DerivedStarDistinctBehindWhereUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT * FROM nation WHERE n_regionkey = 1) u`},
+		// The group-key test is an AST question. A text pre-check for the
+		// word "select" used to run first and fired on a string LITERAL, so
+		// the rewrite declined and the query was refused outright.
+		pgCase{name: "DerivedDistinctStringLiteralNamingSelect",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT n_name, 'x select y' AS lit FROM nation) u`},
+		// An aggregate projection has no group key, so the lowering cannot
+		// happen at all — the distributed planner refuses these and the
+		// coordinator routes them to its single-process pipeline. The
+		// semantics are still PostgreSQL's.
+		pgCase{name: "DerivedDistinctOverAggregateProjection",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT DISTINCT o_orderstatus, SUM(o_totalprice) AS s FROM orders GROUP BY o_orderstatus) u`},
+		pgCase{name: "GroupedOverDerivedDistinctAggregateProjection",
+			sql: `SELECT k, COUNT(*) AS c FROM
+				(SELECT DISTINCT n_regionkey AS k, COUNT(*) AS n FROM nation GROUP BY n_regionkey) u
+				GROUP BY k ORDER BY k`},
+		// #467's shape: a QUALIFIED group key naming a derived table's
+		// alias. Correct on the engine this arm exercises; the stage DAG
+		// cannot resolve it, which is pinned in the two-path suite.
+		pgCase{name: "GroupByQualifiedAliasOverDerivedDistinct",
+			sql: `SELECT k, COUNT(*) AS c FROM
+				(SELECT DISTINCT n_regionkey AS k, n_name FROM nation) u
+				GROUP BY u.k ORDER BY k`},
+	)
+
 	return out
 }
