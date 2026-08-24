@@ -346,6 +346,13 @@ func (c *Coordinator) annotateTaskPeerLocations(t *distributed.Task) {
 			addAll(t.Operators[i].InputFiles)
 		}
 	}
+	// Mirrors stampTaskDeleteMarkers's walk (delete_markers.go): a
+	// pre-computed aggregate's cache files are S3 keys like any other
+	// stage output, so a peer hint can accelerate their fetch the same as
+	// PreScannedInputs' above.
+	for i := range t.PreComputedAggregates {
+		addAll(t.PreComputedAggregates[i].CacheFiles)
+	}
 	t.InputLocations = locs
 }
 

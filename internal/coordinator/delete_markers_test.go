@@ -40,6 +40,12 @@ func TestStampTaskDeleteMarkersCoversEveryFileCarrier(t *testing.T) {
 		"op-build-files": {Operators: []distributed.OpSpec{{Type: distributed.OpHashJoinProbe, BuildFiles: []string{marked}}}},
 		// Chained-join builds from stage-chain fusion.
 		"fused-join-builds": {FusedJoins: []distributed.FusedJoinSpec{{BuildFiles: []string{marked}}}},
+		// Pre-computed derived-aggregate cache files (shuffle-distributed
+		// aggregate). Walked defensively, like PreScannedInputs: never
+		// base-table parquet in practice (aggregate_shuffle.go's own
+		// live-catalog sub-query already applied deletes when it wrote
+		// these), but a file list all the same.
+		"pre-computed-aggregates": {PreComputedAggregates: []distributed.PreComputedAggregate{{CacheFiles: []string{marked}}}},
 	}
 
 	for name, task := range carriers {

@@ -128,6 +128,17 @@ func stampTaskDeleteMarkers(t *distributed.Task, deletes map[string][]int64) {
 		addAll(t.Operators[i].InputFiles)
 		addAll(t.Operators[i].BuildFiles)
 	}
+	// PreComputedAggregates' CacheFiles are, like PreScannedInputs, always
+	// the query-scoped .wshf output of a TaskTypePipeline sub-query that
+	// already applied deletes when producing them (aggregate_shuffle.go's
+	// preComputeDerivedAggregate) — never base-table parquet. Walked
+	// anyway for the same reason PreScannedInputs is: cheap, and it keeps
+	// every *Files field a task can carry covered by one classification
+	// (task_field_carrier_coverage_test.go) instead of a documented
+	// exception.
+	for i := range t.PreComputedAggregates {
+		addAll(t.PreComputedAggregates[i].CacheFiles)
+	}
 	// Three of the walked fields are maps, so the order the specs come out
 	// in is Go's map order. Sorting costs nothing at these sizes and makes a
 	// task's serialized bytes reproducible, which is what a DLQ entry or a
