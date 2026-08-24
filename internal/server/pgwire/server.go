@@ -3349,6 +3349,20 @@ func formatPgValueTyped(val any, col *parquet.Column) string {
 // col.Type tells them apart when it is known; without it (col is nil, or
 // declares neither) this renders as an ARRAY, which is right far more often
 // — MAP is the wadjet extension here, ARRAY is the PostgreSQL type.
+//
+// Review note (N2, adversarial review of #464/#471, not fixed here): this
+// default is also a genuine DISPLAY divergence, not just a best-effort
+// guess. The exact same MAP value renders two different text shapes
+// depending on whether nestedSchema happened to resolve col for this
+// position — formatPgMap's "{k1: v1, k2: v2}" when it did, this function's
+// ARRAY-shaped "{elem1,elem2}" (each entry's own 2-field ROW rendered as a
+// composite, comma-joined) when it did not. A client could see either
+// shape for the same query depending on the coord vs. legacy path, or a
+// renamed/computed MAP column landing outside both nestedSchemaByName and
+// nestedColumnSchemas' resolution. Fixing it needs a way to tell "this is
+// unambiguously a MAP, just with no known field names" from "this could be
+// either" — which the boxed value alone (a bare []any, identical for both
+// types) does not carry, and no col to consult.
 func formatPgArrayOrMap(elems []any, col *parquet.Column) string {
 	if col != nil && col.Type == parquet.TypeMap {
 		return formatPgMap(elems, col)
