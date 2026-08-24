@@ -6397,7 +6397,19 @@ func (s *joinFlushSource) Next(ctx context.Context) (*batch.RecordBatch, error) 
 	return nil, nil
 }
 
+// Close releases the probe pipeline whether or not Init ever ran.
+//
+// pipeline is assigned in Init, and a source can be constructed and then
+// closed without one — a plan whose execution is abandoned between
+// buildPipeline and the first Init (an early return, a cancellation, a set
+// operation that decides not to pull a branch). Dereferencing the nil
+// pipeline there crashed the whole server process (#510), and skipping the
+// close instead would leak the source and operators that construction
+// already built. Close what exists.
 func (s *joinFlushSource) Close() error {
+	if s.pipeline == nil {
+		s.pipeline = &pipelineSource{source: s.inner, ops: s.innerOps}
+	}
 	return s.pipeline.Close()
 }
 
@@ -6449,7 +6461,12 @@ func (s *rightSemiFlushSource) Next(ctx context.Context) (*batch.RecordBatch, er
 	return nil, nil
 }
 
+// Close releases the probe pipeline whether or not Init ever ran — the same
+// contract, and the same #510 crash, as joinFlushSource.Close above.
 func (s *rightSemiFlushSource) Close() error {
+	if s.pipeline == nil {
+		s.pipeline = &pipelineSource{source: s.inner, ops: s.innerOps}
+	}
 	return s.pipeline.Close()
 }
 
@@ -6887,7 +6904,15 @@ func (ps *pipelineSource) runFrom(ctx context.Context, i int, b *batch.RecordBat
 	return b, nil
 }
 
+// Close is nil-receiver and nil-source safe. Wrappers assign their
+// pipelineSource in Init and delegate their own Close to it, so a source
+// closed without ever being initialized arrives here as a nil receiver —
+// which used to be a segfault, i.e. the whole server (#510). Every Close in
+// the teardown path has to be reachable from a half-built plan.
 func (ps *pipelineSource) Close() error {
+	if ps == nil || ps.source == nil {
+		return nil
+	}
 	err := ps.source.Close()
 	for _, op := range ps.ops {
 		if e := op.Close(); e != nil && err == nil {
