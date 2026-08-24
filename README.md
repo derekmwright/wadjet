@@ -44,6 +44,122 @@ Managed tables live in an S3-compatible store (MinIO, AWS S3, R2). That is the d
 ./wadjet-bin shell --endpoint=localhost:9000
 ```
 
+## Native Functions
+
+Wadjet's SQL surface leans hard into functions purpose-built for network
+and security analytics — a dedicated IPv4/IPv6/CIDR/MAC/Port/Protocol type
+system backed by a library of functions that collapse what's usually
+string-parsing or a UDF elsewhere into one call. A few representative
+examples, each run against a live server as part of writing this section.
+
+**Is this flow internal-to-external?**
+
+```sql
+SELECT src_ip, dst_ip, bytes_out
+FROM flow_logs
+WHERE cidr_contains('10.0.0.0/8', src_ip)
+  AND NOT cidr_contains('10.0.0.0/8', dst_ip)
+ORDER BY bytes_out DESC
+```
+
+Elsewhere: general-purpose warehouses (Snowflake, BigQuery, Redshift,
+Databricks) have no CIDR type at all, so this becomes string parsing or a
+UDF. PostgreSQL does have real `inet`/`cidr` containment operators — but
+it isn't a columnar engine built to scan billions of flow rows.
+
+**Top-talking /24 subnets by egress**
+
+```sql
+SELECT mask_ip(src_ip, 1) AS subnet_24,
+       SUM(bytes_out) AS egress,
+       COUNT(*) AS flows
+FROM flow_logs
+GROUP BY mask_ip(src_ip, 1)
+ORDER BY egress DESC
+```
+
+```
+  subnet_24  |  egress  | flows
+-------------+----------+-------
+ 10.0.1.0    |  1393540 |     4
+ 10.0.2.0    |  1200300 |     2
+ 203.0.113.0 |     1800 |     1
+ 192.168.1.0 |      500 |     1
+```
+
+Elsewhere: `split_part(ip,'.',1) || '.' || split_part(ip,'.',2) || '.' ||
+split_part(ip,'.',3) || '.0'` — four string operations per row to do what
+`mask_ip` does in one.
+
+**Which NIC vendor prefixes are actually on the network**
+
+```sql
+SELECT mac_vendor_oui(src_mac) AS oui, COUNT(*) AS devices
+FROM flow_logs
+GROUP BY mac_vendor_oui(src_mac)
+ORDER BY devices DESC
+```
+
+`mac_vendor_oui` pulls the 3-byte OUI prefix out of a MAC in one call
+instead of hand-slicing the string; join the result against an IEEE OUI
+table to resolve a manufacturer name, same as anywhere else.
+
+**Human-readable service breakdown from raw flow tuples**
+
+```sql
+SELECT protocol_name(protocol)   AS protocol,
+       port_name(dst_port)       AS service,
+       port_class(dst_port)      AS port_class,
+       COUNT(*)                  AS flows,
+       SUM(bytes_in + bytes_out) AS total_bytes
+FROM flow_logs
+GROUP BY protocol_name(protocol), port_name(dst_port), port_class(dst_port)
+ORDER BY total_bytes DESC
+```
+
+```
+ protocol | service | port_class | flows | total_bytes
+----------+---------+------------+-------+-------------
+ tcp      | https   | well-known |     3 |     2602600
+ tcp      | ssh     | well-known |     2 |       26400
+ tcp      | rdp     | registered |     2 |        2200
+ udp      | dns     | well-known |     1 |         230
+```
+
+Elsewhere: a `CASE WHEN dst_port = 443 THEN 'https' WHEN dst_port = 22
+THEN 'ssh' ...` ladder maintained by hand, and a lookup table for IANA
+protocol numbers.
+
+**Near-duplicate alert triage**
+
+```sql
+SELECT b.alert_id, b.description,
+       cosine_similarity(embed(a.description), embed(b.description)) AS score
+FROM alerts a, alerts b
+WHERE a.alert_id = 1 AND b.alert_id != 1
+ORDER BY score DESC
+```
+
+`embed()` batches one API call per record batch — not per row — against
+OpenAI, Voyage AI, or Ollama, with an LRU cache; `cosine_similarity`
+scores the result inline, so a triage query that groups a flood of
+near-duplicate alerts is one SELECT. Elsewhere this means standing up a
+separate vector database (pgvector, Milvus, Pinecone) alongside the
+analytics engine.
+
+**Function families**
+
+| Family | Count | Covers |
+|---|---:|---|
+| Network & protocol | 100+ | CIDR/subnet math, MAC, port/protocol semantics, TCP/DNS/TLS/HTTP deep inspection, ICMP, IPv6 tunneling, JA3/JA3S fingerprinting, payload search |
+| GeoIP / ASN | 11 | MaxMind GeoLite2/GeoIP2 city + ASN lookup |
+| Vector & embeddings | 5 + `embed()` | cosine_similarity, l2_distance, dot_product, vector_norm, vector_dims, embed()/embed_model()/embed_dim() |
+| Date/time | 30+ | truncation, extraction, ISO 8601, Unix time, timezone conversion |
+| String | 45+ | regex, padding, encoding, distance (Levenshtein/Soundex/Hamming) |
+| Aggregate | 23 | approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by |
+
+Full signatures for every function: [SQL Reference § Built-in Functions](docs/sql-reference.md#built-in-functions).
+
 ## Features
 
 ### SQL
