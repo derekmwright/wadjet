@@ -594,6 +594,83 @@ func TestQueryTrackerConcurrentAccess(t *testing.T) {
 	}
 }
 
+// TestQueryTrackerGetSnapshotIsRaceFree is #514's regression test.
+//
+// TestQueryTrackerConcurrentAccess above already calls Get() concurrently
+// with RecordResult, but it never dereferences the returned StageInfo
+// pointers' fields — so it never observed the bug even though the race was
+// there the whole time. This test reads exactly the fields
+// Coordinator.GetQueryStatus reads (StageID, Type, TotalTasks, DoneTasks,
+// FailedTasks) off a tight-polled Get() snapshot while RecordResult lands
+// results on another goroutine, the same shape as an async-submission
+// client polling GetQueryStatus against a running query
+// (delete_markers_pipeline_path_test.go's psdCheckSubmit, which found this
+// under -race via the coordinator/NATS path). Before the fix, Get()'s
+// shallow copy shared the tracker's live *StageInfo pointers with
+// RecordResult's in-place writes (query_tracker.go:133) with no
+// synchronization once Get() released qt.mu — `go test -race` failed here.
+// Kept NATS-free so it stays fast and isn't exposed to the vendored
+// nats-server stream-update race documented on that other test.
+func TestQueryTrackerGetSnapshotIsRaceFree(t *testing.T) {
+	qt := NewQueryTracker()
+	const totalTasks = 200
+	stages := map[string]*StageInfo{
+		"s0": {StageID: "s0", TotalTasks: totalTasks},
+	}
+	qt.Register("q-poll", "SQL", stages, []string{"s0"})
+	qt.Start("q-poll")
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for i := 0; i < totalTasks; i++ {
+			qt.RecordResult(distributed.ResultNotification{
+				QueryID:    "q-poll",
+				StageID:    "s0",
+				TaskID:     "t-" + strconv.Itoa(i),
+				Success:    true,
+				NumRows:    1,
+				ResultPath: "path/result.parquet",
+			})
+		}
+	}()
+
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-writerDone:
+				return
+			default:
+			}
+			info := qt.Get("q-poll")
+			if info == nil {
+				continue
+			}
+			for _, stageID := range info.StageOrder {
+				stage := info.Stages[stageID]
+				if stage == nil {
+					continue
+				}
+				_ = stage.StageID
+				_ = stage.Type
+				_ = stage.TotalTasks
+				_ = stage.DoneTasks
+				_ = stage.FailedTasks
+			}
+		}
+	}()
+
+	<-writerDone
+	<-readerDone
+
+	info := qt.Get("q-poll")
+	if info.TotalRows != totalTasks {
+		t.Errorf("TotalRows: got %d, want %d", info.TotalRows, totalTasks)
+	}
+}
+
 // --- ActiveQueryIDs ---
 
 func TestActiveQueryIDs(t *testing.T) {

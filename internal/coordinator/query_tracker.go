@@ -142,10 +142,17 @@ func (qt *QueryTracker) RecordResult(result distributed.ResultNotification) (sta
 	return stage.DoneTasks+stage.FailedTasks >= stage.TotalTasks
 }
 
-// GetReadyStages returns stages whose dependencies are all complete.
+// GetReadyStages returns stages whose dependencies are all complete. Takes
+// the exclusive lock, not RLock: it marks each returned stage Scheduled and
+// stamps ScheduledAt, mutating *StageInfo state in place. RLock only
+// serializes against Lock, not against other concurrent RLock holders, so
+// those writes under RLock would race both with themselves (two overlapping
+// GetReadyStages calls) and with any other RLock reader of the same fields
+// (StalledStages) — the same class of bug as #514, just write-write instead
+// of write-read.
 func (qt *QueryTracker) GetReadyStages(queryID string) []string {
-	qt.mu.RLock()
-	defer qt.mu.RUnlock()
+	qt.mu.Lock()
+	defer qt.mu.Unlock()
 
 	q, ok := qt.queries[queryID]
 	if !ok {
@@ -202,7 +209,9 @@ func (qt *QueryTracker) Fail(queryID string, err string) {
 	}
 }
 
-// Get returns the current state of a query.
+// Get returns a snapshot of a query's state, safe to read without qt.mu
+// held. See snapshotStages for why a plain `copy := *q` is not enough
+// (#514).
 func (qt *QueryTracker) Get(queryID string) *QueryInfo {
 	qt.mu.RLock()
 	defer qt.mu.RUnlock()
@@ -210,9 +219,47 @@ func (qt *QueryTracker) Get(queryID string) *QueryInfo {
 	if !ok {
 		return nil
 	}
-	// Return a shallow copy
 	copy := *q
+	copy.Stages = snapshotStages(q.Stages)
 	return &copy
+}
+
+// snapshotStages deep-copies a query's stage map into values that are
+// independent of the tracker's live *StageInfo pointers. Must be called
+// with qt.mu held (either lock).
+//
+// A `copy := *q` (the previous behavior) copies the QueryInfo struct but
+// q.Stages is a map[string]*StageInfo — the copy's map holds the exact same
+// *StageInfo pointers as the original. RecordResult mutates those pointees
+// in place (stage.DoneTasks++, stage.Results = append(...), ...) while
+// holding qt.mu; a caller that reads fields off the "copy" does so after
+// Get/List already released the lock, so those reads race RecordResult's
+// writes with no synchronization at all (#514) — confirmed by -race on a
+// tight GetQueryStatus poll against a running query.
+//
+// Results is deep-copied (append to a nil slice) rather than shared: the
+// field itself — not just its backing array — gets reassigned on every
+// RecordResult call (`stage.Results = append(...)`), so even a shared slice
+// header would be read concurrently with that reassignment.
+//
+// SeenTasks is dropped (nil) rather than copied: it's RecordResult's
+// task-retry dedup bookkeeping, never read by any exported accessor, and a
+// shared map reference would still race — worse, map access itself is not
+// safe for even a concurrent read against a write (unlike slices/scalars),
+// so this one can't be fixed by taking a value copy of the field.
+//
+// Dependencies is shared as-is: set once when the stage is constructed
+// (before Register), never mutated after — aliasing a read-only slice is
+// safe.
+func snapshotStages(stages map[string]*StageInfo) map[string]*StageInfo {
+	out := make(map[string]*StageInfo, len(stages))
+	for id, stage := range stages {
+		s := *stage
+		s.Results = append([]distributed.ResultNotification(nil), stage.Results...)
+		s.SeenTasks = nil
+		out[id] = &s
+	}
+	return out
 }
 
 // StageFailed returns the error message if a completed stage has all tasks
@@ -417,7 +464,10 @@ func (qt *QueryTracker) ActiveQueryIDs() map[string]struct{} {
 	return active
 }
 
-// List returns all tracked queries (shallow copies).
+// List returns all tracked queries as snapshots (see snapshotStages) — no
+// exported caller currently reads a listed query's Stages, but List has the
+// exact same shallow-copy shape Get had, so it gets the same fix rather
+// than waiting for its own #514-shaped report.
 func (qt *QueryTracker) List() []*QueryInfo {
 	qt.mu.RLock()
 	defer qt.mu.RUnlock()
@@ -425,6 +475,7 @@ func (qt *QueryTracker) List() []*QueryInfo {
 	result := make([]*QueryInfo, 0, len(qt.queries))
 	for _, q := range qt.queries {
 		copy := *q
+		copy.Stages = snapshotStages(q.Stages)
 		result = append(result, &copy)
 	}
 	return result
