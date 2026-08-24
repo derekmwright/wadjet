@@ -116,6 +116,55 @@ func TestTypeMatrixPruningNeverChangesTheAnswer(t *testing.T) {
 			})
 		}
 	}
+
+	// The six comparisons above are all a *expr.Cmp — the only shape
+	// structuredConjuncts (internal/planner/physical) builds a prune
+	// predicate from today. A NOT and a `= NULL` are two shapes that AREN'T
+	// that today (a NotNode isn't a CmpExpr, and a NULL literal lowers to
+	// MatchNothingFilter before reaching the prune layer), so both sides of
+	// this sweep currently agree by construction rather than by a pruning
+	// decision getting the negation or the three-valued NULL right. That is
+	// exactly why they belong here: if a future change teaches the prune
+	// layer to push a negated or NULL-literal conjunct into a row-group
+	// skip decision, this is where a wrong one shows up, in this file, gated
+	// in CI — not only in the two-path or predicate-semantics gates next
+	// door, which assert against SQL truth rather than against each other.
+	extra := []struct {
+		name string
+		sql  string
+	}{
+		// id is int64, monotonic 0..Rows-1, never NULL — a clean column to
+		// split row groups on. NOT (id < 2500) is id >= 2500, a genuinely
+		// non-trivial row set that lands inside the fixture's five 1100-row
+		// groups rather than falling wholly outside every bound.
+		{"NotLessThan", fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE NOT (id < 2500)", typematrix.Table)},
+		{"NotGreaterEqual", fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE NOT (id >= 2500)", typematrix.Table)},
+		// `= NULL` is UNKNOWN for every row, so both sides must answer 0 —
+		// but they must both answer it by evaluating the predicate, not by
+		// one side crashing on a nil bound while the other quietly matches
+		// nothing.
+		{"NullLiteralEq", fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE id = NULL", typematrix.Table)},
+	}
+	for _, tc := range extra {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			off, okOff := count(t, tc.sql, false)
+			if !okOff {
+				skipped++
+				t.Skipf("the engine does not answer this shape: %s", tc.sql)
+			}
+			on, okOn := count(t, tc.sql, true)
+			if !okOn {
+				t.Fatalf("pruning turned an answerable query into an error: %s", tc.sql)
+			}
+			checked++
+			if on != off {
+				t.Errorf("PRUNING CHANGED THE ANSWER\n  SQL: %s\n  prune on  = %d\n  prune off = %d",
+					tc.sql, on, off)
+			}
+		})
+	}
+
 	t.Logf("prune sweep: %d predicates compared, %d shapes unanswerable", checked, skipped)
 	if checked == 0 {
 		t.Fatal("no predicate was compared — the sweep proves nothing")
