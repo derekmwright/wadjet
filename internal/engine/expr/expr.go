@@ -1809,7 +1809,11 @@ func (e *FuncCall) formatTemporalArgs(args []any) {
 // dotted-quad or colon-hex address and silently answered NULL (cidr_contains,
 // ip_to_string, mac_vendor_oui, ...). Keyed lowercase, the registry's
 // convention. TypeIPv6/TypeCIDR/TypeUUID columns are not affected: ColRef.Eval
-// already renders those through Vector.GetValue's default case.
+// already renders those through Vector.GetValue's default case — for a
+// FUNCTION ARGUMENT, which is all this registry is about. That is not a
+// claim about comparison ORDERING against those three: see CmpNetworkLit's
+// doc and tryNetworkLit (compile.go) for why `<`/`>` against a literal is a
+// separate, still-open question (#492) that this rendering does not answer.
 var networkTextFuncs = map[string]bool{
 	"broadcast_address": true, "cidr_contains": true, "cidr_overlap": true,
 	"cidr_to_range": true, "flow_direction": true,

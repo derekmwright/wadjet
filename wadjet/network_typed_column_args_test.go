@@ -28,9 +28,19 @@ import (
 // comparison against a string literal (`ip_col = '10.0.0.1'`) boxed the
 // column the same way and never matched. TypePort/TypeProtocol (Int32-
 // backed, numeric functions) and TypeIPv6/TypeCIDR/TypeUUID (never
-// intercepted, already fell through to GetValue) were already correct —
-// the "regression guard" cases below pin that so a future change can't
-// quietly break them while "fixing" IPv4/MAC.
+// intercepted, already fell through to GetValue) were already correct for
+// every case this file actually exercises — a function argument, CAST AS
+// STRING, and EQUALITY against a literal — and the "regression guard" cases
+// below pin exactly that, no more, so a future change can't quietly break
+// them while "fixing" IPv4/MAC.
+//
+// "Already correct" does NOT extend to ORDERING (<, >, <=, >=) against a
+// literal for IPv6/CIDR: that compares the rendered TEXT lexically, not the
+// address's numeric value, disagrees between this expr path's WHERE and
+// SELECT evaluation, and disagrees outright with the stage DAG for IPv6 —
+// a live, filed, pre-existing divergence (#492), untouched by this file or
+// by #484/#485. No guard case here claims otherwise: every guard below is
+// `=`, never `<`/`>`.
 //
 // There is no separate vectorized kernel for any of these functions
 // (FuncCall.EvalVec falls back to the identical per-row Eval() when

@@ -486,8 +486,27 @@ func tryTemporalLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpTemporalLi
 // tryNetworkLit builds a CmpNetworkLit when other is a string literal that
 // parses as an IPv4 address or a MAC address; nil otherwise. Mirrors
 // tryTemporalLit for the network-typed pair (TypeIPv4, TypeMAC): see
-// CmpNetworkLit for why these two need it and TypeIPv6/TypeCIDR/TypeUUID
-// don't (ColRef.Eval already renders those as text).
+// CmpNetworkLit for why these two need it. TypeIPv6/TypeCIDR/TypeUUID don't
+// go through this path because ColRef.Eval already renders them as text
+// (Vector.GetValue's default case) — but that is enough only for EQUALITY.
+// It is NOT the same claim as "ordering already works": comparing the
+// rendered TEXT lexically (<, >, <=, >=) is not the address's numeric
+// order, is not even consistent between this expr path's WHERE and SELECT
+// evaluation, and disagrees outright with the stage DAG for IPv6 — a live,
+// filed, pre-existing divergence (#492) this function does not fix. CIDR's
+// ordering is untested and suspected to have the same shape; UUID's is
+// right only by the accident of its literal always zero-padding to a fixed
+// hex width, which does not generalize to IPv6/CIDR's variable width.
+//
+// Column type is unknown at compile time (see tryTemporalLit's own comment),
+// so this cannot be, and does not need to be, restricted to columns that are
+// ACTUALLY network-typed: a STRING column whose literal happens to parse as
+// an address (`s = '10.1.2.3'`) gets wrapped the same way, but
+// extractFilterOps' *expr.CmpNetworkLit case (internal/planner/physical/
+// plan.go) and CmpNetworkLit.EvalBoolNull's genericFallback both defer
+// entirely to the column's REAL type at kernel-build/eval time — a STRING
+// column takes its ordinary compareFilterString/lexical-compare path either
+// way, never the IPv4/MAC branch.
 func tryNetworkLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpNetworkLit {
 	lit, ok := other.(*Lit)
 	if !ok {

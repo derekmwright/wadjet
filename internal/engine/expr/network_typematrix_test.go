@@ -24,6 +24,15 @@ import (
 // with 2 rows and every case below is checked through EvalVec too, to pin
 // that the fallback wiring stays intact rather than assuming it from the
 // source.
+//
+// Every "(guard)" case below for TypeIPv6/TypeCIDR/TypeUUID/TypePort/
+// TypeProtocol is a function argument, a CAST AS STRING, or an EQUALITY
+// literal comparison — the three shapes that were already correct before
+// this fix and must stay that way. None of them is an ORDERING comparison
+// (<, >): IPv6 ordering against a literal is lexical-text, not numeric,
+// disagrees between this expr path's WHERE and SELECT evaluation, and
+// disagrees outright with the stage DAG — a live, filed, pre-existing
+// divergence (#492) this file does not cover and does not claim to.
 
 // netTypeMatrixBatch returns a 2-row batch carrying one column of each of
 // the six network-native types, values chosen so that a IPv4 comparison
