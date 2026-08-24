@@ -500,3 +500,68 @@ func TestDecimalNonNumericLiteralIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// TestDecimalNonNumericLiteralAtBoxedSitesIsRefused is #505: the #463
+// refusal reached the direct comparison shapes above but not the three sites
+// #465 taught to compare a DECIMAL column against a literal's exact text —
+// CASE's simple form, IS DISTINCT FROM, and GREATEST/LEAST — nor a unary
+// minus over a string literal, which read an unparseable operand as the
+// float64 zero and matched the row holding 0.00, #463's exact failure mode
+// on a path #463 never touched.
+func TestDecimalNonNumericLiteralAtBoxedSitesIsRefused(t *testing.T) {
+	ctx := context.Background()
+	db := declitOpen(t)
+
+	for _, pred := range []string{
+		"CASE d_2 WHEN 'abc' THEN 1 ELSE 0 END = 1",
+		"d_2 IS DISTINCT FROM 'abc'",
+		"GREATEST(d_2, 'abc') = 'abc'",
+		"LEAST(d_2, 'abc') = 'abc'",
+		"d_2 = -'abc'",
+		"d_2 = -'1e400x'", // not a number even in exponent form
+	} {
+		t.Run(pred, func(t *testing.T) {
+			sql := "SELECT COUNT(*) AS n FROM declit WHERE " + pred
+			_, err := tmRun(ctx, db, sql)
+			if err == nil {
+				t.Fatalf("%s answered instead of refusing a non-numeric constant", sql)
+			}
+			if !strings.Contains(err.Error(), "invalid input syntax for type numeric") {
+				t.Errorf("%s\n  error = %v, want PostgreSQL's numeric input-syntax error", sql, err)
+			}
+		})
+	}
+
+	// The refusal must not depend on which row happens to reach it: k=100
+	// holds exactly 0.00, the value an unparseable constant used to read as.
+	t.Run("does_not_depend_on_the_zero_row_surviving", func(t *testing.T) {
+		sql := "SELECT COUNT(*) AS n FROM declit WHERE k <> 100 AND d_2 IS DISTINCT FROM 'abc'"
+		_, err := tmRun(ctx, db, sql)
+		if err == nil || !strings.Contains(err.Error(), "invalid input syntax for type numeric") {
+			t.Errorf("error = %v, want PostgreSQL's numeric input-syntax error", err)
+		}
+	})
+}
+
+// TestDecimalUnaryMinusOverQuotedStringLiteral is #505's other half: a
+// QUOTED string literal under unary minus must fold the same way an
+// unquoted numeric literal already does when its content is a number
+// (`d = -'43219.87'` works exactly like `d = -43219.87`), and must saturate
+// rather than match the wrong row when the number is past the DECIMAL
+// carrier's range (ADR-0012 item 6) — `d = -'1e400'` used to match the row
+// holding 0.00; it must now match nothing, the same as unquoted `-1e400`.
+func TestDecimalUnaryMinusOverQuotedStringLiteral(t *testing.T) {
+	ctx := context.Background()
+	db := declitOpen(t)
+
+	// Row 99 holds d_2 = -43219.87 (declitCol.declitUnscaled(99) = step*-1).
+	const negRowKey = 99
+	const negRowText = "43219.87" // the POSITIVE text; the query negates it
+	declitCheck(t, ctx, db,
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM declit WHERE k = %d AND d_2 = -'%s'", negRowKey, negRowText),
+		1)
+	declitCheck(t, ctx, db,
+		"SELECT COUNT(*) AS n FROM declit WHERE d_2 = -'1e400'", 0)
+	declitCheck(t, ctx, db,
+		"SELECT COUNT(*) AS n FROM declit WHERE d_2 <> -'1e400'", 188)
+}

@@ -171,6 +171,46 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      form is not that case — `1e400` IS a number, and is now read as one, by
      folding the exponent into the scaling instead of through
      `strconv.ParseFloat`.
+   - **The #463 refusal reaches the #465 boxed sites and a negated string
+     literal.** (Added 2026-08-24, #505.) `CASE d WHEN 'abc'`,
+     `d IS DISTINCT FROM 'abc'` and `GREATEST`/`LEAST(d, 'abc')` answered
+     instead of erroring: `compareWithText`'s `exactTextOrder` only fires
+     when the literal already looks numeric (`Lit.Text` set by `compileLit`),
+     so a non-numeric string never reached ANY refusal on these three sites
+     and fell through to `compare()`'s ordinary string comparison instead.
+     `expr.refuseNonNumericAgainstDecimal` closes it: whichever operand
+     resolves, in THIS batch, to a materialized DECIMAL column is checked
+     against the other operand's literal text before `compareWithText` runs,
+     raising the same 22P02 `decimalLitCmp.order` already raises for the
+     direct-comparison shapes — so the refusal still depends only on the
+     column's REAL type, never on the operand's Go box, the way item 8's
+     boxed-value rule requires generally.
+
+     `d = -'abc'` and `d = -'1e400'` were the same failure mode wearing a
+     `UnaryOp`: a unary minus over a STRING literal was deliberately left
+     unfolded and evaluated through the generic numeric-coercion path,
+     which reads anything unparseable as the float64 zero — both matched
+     the row holding 0.00, #463's exact failure mode on the one shape #463
+     never touched. Compile-time folding (`compileWithCtx`'s `UnaryOp` case,
+     `expr/compile.go`) now treats a QUOTED string literal the way an
+     UNQUOTED one already was: a numeric-looking string folds into a
+     negated `Lit` carrying its exact text — so `d = -'5.00'` enters the
+     same `DecimalLiteral` path `d = -5.00` does, saturating past the
+     carrier exactly as this item already specifies rather than matching
+     the wrong row — and a non-numeric string is refused at COMPILE time,
+     before any row, batch, or short-circuiting conjunct exists to hide it.
+
+     **Known residual: the three boxed sites' refusal is still a PER-ROW
+     check, not a plan-time one — tracked as #517.** `d = 'abc'` against an
+     EMPTY table, or behind a conjunct no row survives to
+     (`k > 100000 AND d = 'abc'`), still answers zero rows instead of
+     erroring, on this shape and on the original #463 shape alike: the
+     comparison — and therefore the refusal — never runs. PostgreSQL
+     resolves an unknown-typed literal's type from the column's DECLARATION
+     and refuses at parse/bind time, independent of any row existing.
+     Closing that needs the column's declared type available where the
+     predicate is planned/bound, which is planner territory rather than an
+     extension of the boxed-comparison machinery this bullet closes.
 
    Arithmetic over DECIMAL still goes through float64, and so do MIN/MAX/SUM
    over a DECIMAL column. That is a separate, visible limit — comparison is
@@ -349,7 +389,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   unreadable literal answered ZERO), #465 (CASE / IS DISTINCT FROM /
   GREATEST / LEAST did not carry the literal's text), #476 (a boxed DECIMAL
   against a number compared lexicographically), #477 (two DECIMAL columns had
-  no kernel at all) — the work items 6's amendments record
+  no kernel at all), #505 (the #463 refusal did not reach the #465 boxed
+  sites or a negated string literal), #506 (two DECIMAL columns still compare
+  lexically at the same three boxed sites — open), #517 (the boxed-site
+  refusal is per-row, not plan-time — open) — the work items 6's amendments
+  record
 - #444 (boxed ROW comparator ordered fields by name, not declared position),
   #446 (VECTOR/ARRAY(FLOAT) comparators not transitive under NaN) — the work
   item 8 above records the settled position for

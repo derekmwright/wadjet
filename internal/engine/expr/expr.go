@@ -1292,7 +1292,11 @@ func (e *IsDistinctFrom) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool
 		// A DECIMAL column against a numeric literal is compared at the
 		// literal's full precision, not through its float64 box: `d IS
 		// DISTINCT FROM <a literal naming d exactly>` answered 200 rows where
-		// PostgreSQL answers 199 (#465).
+		// PostgreSQL answers 199 (#465). A literal that is not a number is a
+		// query ERROR against a DECIMAL column, never a value (#463) — this
+		// boxed site carried the exact-text comparison but not the refusal
+		// (#505): `d IS DISTINCT FROM 'abc'` answered every row instead.
+		refuseNonNumericAgainstDecimal(b, e.Left, e.Right)
 		distinct = !compareWithText(lv, rv, litText(e.Left), litText(e.Right), CmpEq)
 	}
 	if e.Not {
@@ -1714,10 +1718,14 @@ func (e *Case) Eval(b *batch.RecordBatch, row int) any {
 			whenVal := w.Cond.Eval(b, row)
 			// The WHEN value's exact source text settles a match a float64
 			// box cannot: `CASE d WHEN <a literal naming d exactly>` answered
-			// the ELSE branch (#465).
-			if opVal != nil && whenVal != nil &&
-				compareWithText(opVal, whenVal, opText, litText(w.Cond), CmpEq) {
-				return w.Result.Eval(b, row)
+			// the ELSE branch (#465). A WHEN value that is not a number is a
+			// query ERROR against a DECIMAL operand, never a silent ELSE
+			// (#463/#505): `CASE d WHEN 'abc'` answered 0 instead of refusing.
+			if opVal != nil && whenVal != nil {
+				refuseNonNumericAgainstDecimal(b, e.Operand, w.Cond)
+				if compareWithText(opVal, whenVal, opText, litText(w.Cond), CmpEq) {
+					return w.Result.Eval(b, row)
+				}
 			}
 		}
 	} else {
@@ -2201,7 +2209,7 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 		e.resolveTemporalArgs(b, row, args)
 	}
 	if e.extremum {
-		return pickExtremum(e.Args, args, e.extremumOp)
+		return pickExtremum(b, e.Args, args, e.extremumOp)
 	}
 	return e.fn(args)
 }
@@ -2214,19 +2222,33 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 // named a value a double cannot hold (#465). The ordering rule is otherwise
 // unchanged, NULL skipping included: PostgreSQL's GREATEST/LEAST ignore NULL
 // arguments and answer NULL only when every argument is NULL.
-func pickExtremum(argExprs []Expr, args []any, op CmpOp) any {
+//
+// A candidate that is not a number is a query ERROR against a DECIMAL
+// argument, never a value PostgreSQL would just skip past (#463/#505):
+// `GREATEST(d, 'abc')` answered 'abc' as the extremum instead of refusing.
+// The refusal checks the pair actually being compared THIS iteration — best
+// so far against the new candidate — the same as compareWithText itself.
+func pickExtremum(b *batch.RecordBatch, argExprs []Expr, args []any, op CmpOp) any {
 	var best any
+	var bestExpr Expr
 	bestText := ""
 	for i, a := range args {
 		if a == nil {
 			continue
 		}
+		var curExpr Expr
 		text := ""
 		if i < len(argExprs) {
-			text = litText(argExprs[i])
+			curExpr = argExprs[i]
+			text = litText(curExpr)
 		}
-		if best == nil || compareWithText(a, best, text, bestText, op) {
-			best, bestText = a, text
+		if best == nil {
+			best, bestText, bestExpr = a, text, curExpr
+			continue
+		}
+		refuseNonNumericAgainstDecimal(b, bestExpr, curExpr)
+		if compareWithText(a, best, text, bestText, op) {
+			best, bestText, bestExpr = a, text, curExpr
 		}
 	}
 	return best

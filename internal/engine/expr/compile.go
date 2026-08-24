@@ -143,11 +143,33 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					// Leaving the minus outside as a UnaryOp hid the literal
 					// from every binding that looks for one, so `d >= -1e400`
 					// lost the exact text the DECIMAL comparison reads (#463).
-					// Text is empty for a STRING literal, which keeps `-'abc'`
-					// where it was.
 					if lit.Text != "" {
 						return &Lit{Val: negateLitText(v), Text: negateLitText(lit.Text)}, nil
 					}
+					// Text is empty here, so this is a QUOTED string literal,
+					// not a numeric token straight from the parser — `-'abc'`
+					// or `-'1e400'` (the exponent written INSIDE the quotes).
+					// Left as a bare UnaryOp, the minus evaluated through the
+					// generic numeric-coercion path, which reads anything it
+					// cannot parse as the float64 zero — #463's exact failure
+					// mode resurrected on the one shape #463 never touched:
+					// `d = -'abc'` matched every row holding 0.00 (#505).
+					//
+					// A string whose CONTENT is a number folds the same way
+					// an unquoted numeric literal already does two cases
+					// above — Text carries the negated source text into the
+					// DecimalLiteral path, so `d = -'5.00'` keeps working
+					// exactly like `d = -5.00`. A string that is not a
+					// number is refused HERE, at compile time: unary minus
+					// has no reading of it in any context, so there is no
+					// row to wait for the way a boxed comparison must (and
+					// unlike `d = 'abc'`, which could in principle be a
+					// legitimate string comparison against a non-DECIMAL
+					// column, `-'abc'` cannot be a value of any type).
+					if isNumericLitText(v) {
+						return &Lit{Val: negateLitText(v), Text: negateLitText(v)}, nil
+					}
+					return nil, invalidNumericLiteralError(v)
 				}
 			}
 		}

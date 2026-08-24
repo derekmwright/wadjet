@@ -33,3 +33,15 @@ func raiseDivisionByZero() {
 func raiseInvalidTextRepresentation(destType, input string) {
 	panic(fatalEval{sqlerr.New("22P02", "invalid input syntax for type %s: %q", destType, input)})
 }
+
+// invalidNumericLiteralError is raiseInvalidTextRepresentation's non-panicking
+// sibling, for the one site that can know a numeric refusal is certain before
+// any row is ever read: unary minus over a STRING literal that is not a
+// number (#505). Compile() rejects it directly rather than deferring to a
+// per-row panic, because the answer does not depend on the column it will
+// eventually meet — `-'abc'` is refused whether or not a row ever reaches it,
+// unlike `d = 'abc'`, where the same text could be a legitimate value against
+// a non-DECIMAL column.
+func invalidNumericLiteralError(input string) error {
+	return sqlerr.New("22P02", "invalid input syntax for type numeric: %q", input)
+}

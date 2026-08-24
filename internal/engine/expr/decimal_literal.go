@@ -103,6 +103,51 @@ func bareCol(e Expr) (*ColRef, bool) {
 	return col, true
 }
 
+// refuseNonNumericAgainstDecimal raises #463's refusal — SQLSTATE 22P02,
+// never a value — when one operand is a materialized DECIMAL column in THIS
+// batch and the other is a literal whose text does not name a number.
+//
+// It is the refusal half of compareWithText's job, for the three sites
+// (#465) that carry a literal's exact text into a boxed comparison but never
+// call Numeric() on it: Case's simple-CASE arm, IsDistinctFrom, and
+// pickExtremum (GREATEST/LEAST) all compare through compareWithText, whose
+// exactTextOrder only fires for a literal ALREADY known to be numeric
+// (compileLit sets Lit.Text for exactly that shape) — a non-numeric string
+// like 'abc' carries no Text, so exactTextOrder never runs and compareWithText
+// falls through to compare()'s ordinary string comparison instead of
+// refusing, resurrecting #463's exact failure mode on the boxed path (#505).
+//
+// bindDecimalCmp's `d op lit` shape does not need this: NewCmp binds it at
+// construction time and decimalLitCmp.order already refuses there. This is
+// for the three sites that reach a DECIMAL column with no such binding.
+func refuseNonNumericAgainstDecimal(b *batch.RecordBatch, left, right Expr) {
+	if refuseIfDecimalSide(b, left, right) {
+		return
+	}
+	refuseIfDecimalSide(b, right, left)
+}
+
+// refuseIfDecimalSide checks one operand order of refuseNonNumericAgainstDecimal:
+// colSide as the candidate DECIMAL column, litSide as the candidate literal.
+// Reports whether colSide resolved to a bare column at all (numeric or not),
+// so the caller does not also try the flipped order when colSide already
+// settles the question.
+func refuseIfDecimalSide(b *batch.RecordBatch, colSide, litSide Expr) bool {
+	col, ok := bareCol(colSide)
+	if !ok {
+		return false
+	}
+	col.resolve(b)
+	if col.idx < 0 || col.idx >= len(b.Columns) || col.typ != batch.TypeDecimal {
+		return true
+	}
+	lit, ok := numericLit(litSide)
+	if ok && !lit.Numeric() {
+		raiseInvalidTextRepresentation("numeric", lit.Text())
+	}
+	return true
+}
+
 // newDecimalLitCmp builds a binding and resolves every literal's Numeric()
 // answer once, up front — see decimalLitCmp.numeric.
 func newDecimalLitCmp(col *ColRef, lits []*kernel.DecimalLiteral, flip bool) *decimalLitCmp {
@@ -398,4 +443,14 @@ func negateLitText(text string) string {
 	default:
 		return "-" + text
 	}
+}
+
+// isNumericLitText reports whether a QUOTED string literal's content names a
+// number, using the same shape test a DECIMAL comparison's refusal already
+// uses (kernel.DecimalLiteral.Numeric — isDecimalText → batch.DecimalTextAt).
+// One test decides both "does this parse" questions: compileWithCtx's unary
+// minus fold (compile.go) uses it to choose between folding `-'5.00'` into a
+// literal and refusing `-'abc'` at compile time (#505).
+func isNumericLitText(s string) bool {
+	return kernel.NewDecimalLiteral(s).Numeric()
 }
