@@ -81,7 +81,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      here only because early declared-schema code guessed STRING for every
      MIN/MAX before the input-typed fix.
 
-7. **A numeric literal's carrier is its TEXT, not a float64.** (Added
+6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
    `numeric` and compares it at full precision, so `WHERE d = 493827160549382.7160549350`
    must find the row holding that value. A float64 carries ~15-16 significant
@@ -92,9 +92,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    value, so `=` matched nothing, `>` gained a row, `<>` gained it back, and
    `>=` and `<` agreed by luck. Four operators agreeing is not partly right.
 
-   Three rules follow, and they hold on every path — the vectorized kernel,
-   the row-at-a-time expression, the raw-text predicate, and the row-group
-   prune:
+   Three rules follow. They hold for a bare DECIMAL column compared, matched
+   against an IN list, or bounded by BETWEEN, against a numeric literal — the
+   vectorized kernel, the row-at-a-time expression, the raw-text predicate,
+   and the row-group prune all bind that one shape. They do NOT yet reach
+   every site that compares a DECIMAL column to a literal: an
+   arithmetic-wrapped operand (`d + 0 = lit`), `CASE d WHEN lit`,
+   `d IS DISTINCT FROM lit`, and `GREATEST`/`LEAST` still fall through to the
+   generic float64 comparison and can reproduce the same failure. Tracked in
+   #465 rather than fixed here.
 
    - The literal's source text travels with its box (`expr.Lit.Text`,
      `logical.Predicate.ValueText`, `exec.KernelFilter.LitText`) and is what
@@ -115,12 +121,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    where a rounded value silently changes the ROW SET, which is why it is
    settled here first.
 
-8. **Semantics decisions are technical, not product.** They are made and
+7. **Semantics decisions are technical, not product.** They are made and
    executed, then reported — not escalated. An existing project commitment
    settles everything downstream of it; check for the commitment before
    drafting the question.
 
-9. **Float ordering follows PostgreSQL, not IEEE754, in every ORDER/
+8. **Float ordering follows PostgreSQL, not IEEE754, in every ORDER/
    PARTITION/peer/key context; a boxed value's comparison order follows the
    column's declaration, not the box's Go type.** (Added 2026-08-23, #444/
    #446 follow-up.)
@@ -201,10 +207,10 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   scales, both paths)
 - #444 (boxed ROW comparator ordered fields by name, not declared position),
   #446 (VECTOR/ARRAY(FLOAT) comparators not transitive under NaN) — the work
-  item 9 above records the settled position for
+  item 8 above records the settled position for
 - #459 (predicate kernels, the primary GROUP BY/DISTINCT hash key, and
   hash-join keys still compare floats as raw IEEE754), #457 (MIN/MAX over a
-  NaN column) — item 9's open remainder
+  NaN column) — item 8's open remainder
 - `internal/engine/exec/kernel/float_order.go`, `internal/engine/exec/
   compare_boxed.go`, `internal/engine/exec/kernel/
   container_order_property_test.go` (the P1-P4 total-order property test)
