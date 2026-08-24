@@ -86,7 +86,7 @@ var tmdUnsupported = map[string]typematrix.Pin{}
 // every wide type at once and one pin per type would say the same thing
 // thirteen times.
 //
-// `WHERE col IN (SELECT col FROM ...)` returns ZERO ROWS on the
+// #516: `WHERE col IN (SELECT col FROM ...)` returns ZERO ROWS on the
 // single-process path while the stage DAG answers it correctly. Reproduced
 // on the 1cf758ba binary with a hand-built fixture -- 1000 rows, a = id % 97,
 // so every value appears among id < 500 -- where the query must answer 1000
@@ -103,7 +103,7 @@ var tmdUnsupported = map[string]typematrix.Pin{}
 // proof the fix landed (ADR-0013 §Pins).
 var tmdPinPrefixes = map[string]typematrix.Pin{
 	"semijoin_": {
-		Issue: "UNFILED: IN (subquery) returns zero rows on the single-process path",
+		Issue: "#516",
 		Reason: "single answers 0, the DAG answers the right count, for every wide type. " +
 			"Pre-existing on 1cf758ba; surfaced by adding a semi-join shape to the corpus.",
 	},
