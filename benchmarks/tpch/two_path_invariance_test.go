@@ -3193,6 +3193,125 @@ func twoPathCorpus() []twoPathQuery {
 			}},
 	)
 
+	// #466: a DISTINCT inside a derived table whose consumer is an AGGREGATE
+	// was dropped outright on the DAG. walkStages emits no stage for a
+	// Distinct node; the two things that compensated each covered only part
+	// of the space (the logical rewrite ran on the root path only, and the
+	// coordinator's post-gather dedup reads ExtractMergeInfo, which returns
+	// at the first aggregate it meets and never looks below it). So
+	// `SELECT COUNT(*) FROM (SELECT DISTINCT c FROM t) u` answered 25 where
+	// PostgreSQL and the single-process path answer 5 — deterministic,
+	// silent, and identical before the #423/#424 wave.
+	//
+	// The two-arm compare alone would not have been enough for long: #424
+	// had just converted the loud half of this family (a derived ORDER BY
+	// whose synthetic sort key named no column) into the silent wrong
+	// answer. Every entry therefore carries an ABSOLUTE assertion recomputed
+	// from the fixture rows, so a defect that hits both arms the same way
+	// cannot pass as agreement. The expected values were confirmed against
+	// PostgreSQL 17 on the same shapes.
+	out = append(out,
+		twoPathQuery{name: "DerivedDistinctUnderCount", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT DISTINCT n_regionkey FROM nation) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", float64(len(distinctKeys(tb, "nation", "n_regionkey"))))
+			}},
+		twoPathQuery{name: "DerivedDistinctUnderSum", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT SUM(k) AS s FROM (SELECT DISTINCT n_regionkey AS k FROM nation) u`,
+			wantCols: []string{"s"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				var sum float64
+				for k := range distinctKeys(tb, "nation", "n_regionkey") {
+					sum += k
+				}
+				assertSingleCell(tb, rows, "s", sum)
+			}},
+		twoPathQuery{name: "DerivedDistinctUnderAvg", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT AVG(k) AS a FROM (SELECT DISTINCT s_nationkey AS k FROM supplier) u`,
+			wantCols: []string{"a"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				keys := distinctKeys(tb, "supplier", "s_nationkey")
+				var sum float64
+				for k := range keys {
+					sum += k
+				}
+				assertSingleCell(tb, rows, "a", sum/float64(len(keys)))
+			}},
+		// Several DISTINCT columns: the dedup key is the tuple, so a rewrite
+		// that grouped on only the first would over-collapse rather than
+		// under-collapse — the opposite error, equally silent.
+		twoPathQuery{name: "DerivedDistinctMultiColumn", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT DISTINCT o_orderstatus, o_orderpriority FROM orders) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				pairs := map[string]bool{}
+				for _, r := range sf001Table(tb, "orders") {
+					pairs[fmt.Sprint(r["o_orderstatus"], "\x00", r["o_orderpriority"])] = true
+				}
+				assertSingleCell(tb, rows, "c", float64(len(pairs)))
+			}},
+		// The derived DISTINCT is a JOIN input, so the dedup has to happen
+		// before the join multiplies rows: 25 distinct nationkeys matching
+		// nation 1:1, not 100 suppliers.
+		twoPathQuery{name: "DerivedDistinctUnderAggregateUnderJoin", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT s_nationkey FROM supplier) u
+				JOIN nation ON u.s_nationkey = nation.n_nationkey`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				nations := distinctKeys(tb, "nation", "n_nationkey")
+				matched := 0
+				for k := range distinctKeys(tb, "supplier", "s_nationkey") {
+					if nations[k] {
+						matched++
+					}
+				}
+				assertSingleCell(tb, rows, "c", float64(matched))
+			}},
+		// GROUP BY over a derived DISTINCT: the dedup key is the derived
+		// table's whole output, and the outer grouping is a second, coarser
+		// aggregate over it. Dropping the inner one leaves the outer counts
+		// inflated by the duplicate rows.
+		twoPathQuery{name: "GroupByOverDerivedDistinct", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT k, COUNT(*) AS c FROM
+				(SELECT DISTINCT n_regionkey AS k, n_name FROM nation) u
+				GROUP BY k ORDER BY k`,
+			wantCols: []string{"k", "c"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				// One row per region; its count is the number of DISTINCT
+				// (regionkey, name) pairs in that region.
+				want := map[float64]map[string]bool{}
+				for _, r := range sf001Table(tb, "nation") {
+					rk := toFloat(r["n_regionkey"])
+					if want[rk] == nil {
+						want[rk] = map[string]bool{}
+					}
+					want[rk][fmt.Sprint(r["n_name"])] = true
+				}
+				if len(rows) != len(want) {
+					tb.Fatalf("got %d groups, want %d", len(rows), len(want))
+				}
+				for _, row := range rows {
+					k := cellNum(row, "k")
+					names, ok := want[k]
+					if !ok {
+						tb.Errorf("unexpected group k=%v", k)
+						continue
+					}
+					if got := cellNum(row, "c"); got != float64(len(names)) {
+						tb.Errorf("group k=%v: c = %v, want %v — the inner DISTINCT was not applied",
+							k, got, len(names))
+					}
+				}
+			}},
+	)
+
 	// #358 — the outer-join ON residual: the non-key conjunct runs on the
 	// combined row BEFORE the match is accepted, a probe row whose
 	// candidates all fail comes back NULL-padded rather than dropped, and a
@@ -3688,6 +3807,23 @@ func assertFirstKeyAndCount(tb testing.TB, rows []map[string]any, col string, wa
 	if got := cellNum(rows[0], col); got != wantFirst {
 		tb.Errorf("page starts at %s=%v, want %v — the offset was not applied", col, got, wantFirst)
 	}
+}
+
+// distinctKeys is the reference dedup: the distinct values of one numeric
+// fixture column, computed here rather than read from a constant, so the
+// expectation follows the fixture instead of having to be re-derived
+// whenever it changes.
+func distinctKeys(tb testing.TB, table, col string) map[float64]bool {
+	tb.Helper()
+	out := map[float64]bool{}
+	for _, r := range sf001Table(tb, table) {
+		v, ok := r[col]
+		if !ok {
+			tb.Fatalf("fixture table %q has no column %q", table, col)
+		}
+		out[toFloat(v)] = true
+	}
+	return out
 }
 
 // assertSingleCell checks one numeric cell of a one-row result — the shape an

@@ -73,6 +73,10 @@ func dedupSemiAntiBuildSide(n *Node) *Node {
 	}
 	proj := NewProject(right, projections)
 	dedup := NewDistinct(proj)
+	// Planner-inserted, not a user SELECT DISTINCT: keep it out of
+	// rewriteDistinctAsGroupBy's remit so the physical planner's
+	// Distinct(Project) build-side handling still matches (#466).
+	dedup.BuildSideDedup = true
 	n.Children[1] = dedup
 	return n
 }

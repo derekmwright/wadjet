@@ -863,6 +863,58 @@ func TestExtractMergeInfoNoProjectRename(t *testing.T) {
 	}
 }
 
+// A derived table's SELECT list and the outer query's are separate Project
+// nodes and nothing merges them, so an aggregate inside a derived table sits
+// under a CHAIN of projections:
+//
+//	SELECT nation FROM (SELECT n_name AS nation, SUM(r) AS total FROM … GROUP BY n_name) u
+//	⇒ Project[nation] → Project[nation, total] → Aggregate
+//
+// Stopping at the first Project made the aggregate invisible, and a
+// probe-split merge then CONCATENATED the workers' partial groups instead of
+// re-aggregating them. Renames must compose innermost-outward (#466).
+func TestExtractMergeInfoProjectChain(t *testing.T) {
+	agg := &Node{
+		Type:    NodeAggregate,
+		GroupBy: []string{"n_name"},
+		AggExprs: []AggExpr{
+			{Func: "sum", InputCol: "revenue", OutputCol: "revenue"},
+		},
+	}
+	inner := &Node{
+		Type: NodeProject,
+		Projections: []Projection{
+			{Column: "n_name", Alias: "nation"},
+			{Expr: "revenue", Alias: "total_rev", IsAgg: true},
+		},
+		Children: []*Node{agg},
+	}
+	outer := &Node{
+		Type: NodeProject,
+		Projections: []Projection{
+			{Column: "nation", Alias: "nm"},
+			{Column: "total_rev", Alias: "t"},
+		},
+		Children: []*Node{inner},
+	}
+
+	mi := ExtractMergeInfo(outer)
+	if mi == nil {
+		t.Fatal("ExtractMergeInfo returned nil")
+	}
+	if !mi.HasAggregate {
+		t.Fatal("the aggregate under a two-Project chain was not seen — a probe-split " +
+			"merge would concatenate partial groups instead of re-aggregating them")
+	}
+	// Composed through both levels: n_name → nation → nm.
+	if len(mi.GroupBy) != 1 || mi.GroupBy[0] != "nm" {
+		t.Errorf("GroupBy = %v, want [nm] (renames must compose innermost-outward)", mi.GroupBy)
+	}
+	if len(mi.AggExprs) != 1 || mi.AggExprs[0].OutputCol != "t" {
+		t.Errorf("AggExprs[0].OutputCol = %q, want %q", mi.AggExprs[0].OutputCol, "t")
+	}
+}
+
 func TestExtractMergeInfoNoProject(t *testing.T) {
 	// Plan with no Project node at all — names come directly from Aggregate.
 	agg := &Node{

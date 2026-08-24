@@ -2228,6 +2228,12 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := p.refuseCorrelatedSubqueries(node); err != nil {
 		return nil, err
 	}
+	// A DISTINCT with no stage and no coordinator dedup is a DROPPED
+	// DISTINCT — the raw row set, returned confidently (#466). Refuse it
+	// here for the same reason: loud beats silently different.
+	if err := refuseUnstageableDistinct(node); err != nil {
+		return nil, err
+	}
 	stages := p.generateStages(node)
 	if p.setOpErr != nil {
 		return nil, p.setOpErr
@@ -5157,16 +5163,19 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 	default:
 		// Passthrough nodes (Project, Distinct) — walk children.
 		//
-		// NOTE (#163): Distinct being a passthrough here is the root of the
-		// distributed-DISTINCT correctness bug — no dedup stage is emitted, so
-		// distributed SELECT DISTINCT returns every row. The fix (emit a
-		// GroupByAll partial→final dedup) is NOT just adding a case here: the
-		// distinct input must first be projected to its output columns (the
-		// logical Project above the Distinct is itself a passthrough, so the
-		// scan output carries all columns and GroupByAll over-distinguishes).
-		// The GroupByAll plumbing (Stage/OpSpec/buildFragmentHashAggregate) is
-		// in place; wiring the pre-dedup projection is the remaining work. See
-		// project-distributed-distinct-design-2026-06-29.
+		// NOTE (#163/#466): Distinct still emits no stage here. It no longer
+		// silently drops the DISTINCT, because nothing that carries semantics
+		// reaches this branch: logical.rewriteDistinctAsGroupBy turns every
+		// user Distinct(Project) in the tree into a GroupBy aggregate, which
+		// stages as an aggregate and solves by construction the problem that
+		// blocked a GroupByAll dedup stage (the projection below the Distinct
+		// becomes the group keys, so the dedup runs on the output columns
+		// rather than over-distinguishing on the scan's full width). What can
+		// still arrive is a Distinct the rewrite declined: on the root path
+		// the coordinator's post-gather dedup applies it (MergeInfo.
+		// HasDistinct); anywhere else refuseUnstageableDistinct has already
+		// refused the query. A planner-inserted BuildSideDedup Distinct
+		// carries no user-visible semantics and passes through as before.
 		for _, child := range node.Children {
 			p.walkStages(child, stages, parentID)
 		}

@@ -6,7 +6,7 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// rewriteDistinctAsGroupBy rewrites a top-level SELECT DISTINCT into an
+// rewriteDistinctAsGroupBy rewrites every user SELECT DISTINCT into an
 // aggregate-free GROUP BY over the projection's expressions:
 //
 //	Distinct → Project[e1 [AS a1], …] → child
@@ -19,57 +19,65 @@ import (
 // coordinator-side dedup fallback, which funnels every pre-dedup row to a
 // single node — and which cannot project expression output at the gather.
 //
+// It runs over the WHOLE tree, not just the root path, because the DAG has
+// no execution for NodeDistinct at all: walkStages passes it through as a
+// passthrough node and emits no stage (#163). Two compensations hid that —
+// this rewrite for the root Distinct, and the coordinator's post-gather
+// dedup keyed off MergeInfo.HasDistinct — and a DISTINCT inside a derived
+// table whose consumer is an aggregate fell between them, so
+// `SELECT COUNT(*) FROM (SELECT DISTINCT c FROM t) u` counted every raw row
+// on the DAG and the deduplicated rows single-process (#466). Rewriting the
+// Distinct wherever it sits gives it a stage wherever it sits.
+//
 // Scope:
-//   - Only the root-path Distinct (ancestors Sort/Limit only) is rewritten.
-//     Semi/anti build-side dedup Distincts sit under joins and keep their
-//     dedicated handling.
-//   - Aggregate projections (SELECT DISTINCT a, SUM(b) …), SELECT DISTINCT *
-//     and subquery expressions fall through to the coordinator dedup
-//     (MergeInfo.HasDistinct).
+//   - A Distinct marked BuildSideDedup is planner-inserted (semi/anti build
+//     dedup, decorrelated semijoin key source), carries no user-visible
+//     semantics, and has dedicated physical handling. Left alone.
+//   - Aggregate projections (SELECT DISTINCT a, SUM(b) …) and subquery
+//     expressions still fall through. On the root path the coordinator dedup
+//     (MergeInfo.HasDistinct) answers them; anywhere else the DAG refuses the
+//     query rather than dropping the DISTINCT silently — see
+//     physical.refuseUnstageableDistinct.
 func rewriteDistinctAsGroupBy(n *Node) *Node {
 	if n == nil {
 		return n
 	}
-	switch n.Type {
-	case NodeSort, NodeLimit:
-		if len(n.Children) == 1 {
-			n.Children[0] = rewriteDistinctAsGroupBy(n.Children[0])
-		}
-		return n
-	case NodeDistinct:
-		if len(n.Children) != 1 {
-			return n
-		}
-		proj := n.Children[0]
-		if proj.Type != NodeProject || len(proj.Children) != 1 {
-			return n
-		}
-		groupBy := make([]string, 0, len(proj.Projections))
-		groupByExprs := make([]plansql.Node, 0, len(proj.Projections))
-		seen := make(map[string]bool, len(proj.Projections))
-		for _, p := range proj.Projections {
-			key, ast, ok := projectionGroupKey(p)
-			if !ok {
-				return n
-			}
-			if !seen[key] {
-				seen[key] = true
-				groupBy = append(groupBy, key)
-				groupByExprs = append(groupByExprs, ast)
-			}
-		}
-		if len(groupBy) == 0 {
-			return n
-		}
-		agg := NewAggregate(proj.Children[0], groupBy, nil)
-		agg.GroupByExprs = groupByExprs
-		proj.Children = []*Node{agg}
-		// The Distinct may be the plan root, which carries the CTE
-		// definitions the physical planner resolves against.
-		proj.CTEs = n.CTEs
-		return proj
+	for i, child := range n.Children {
+		n.Children[i] = rewriteDistinctAsGroupBy(child)
 	}
-	return n
+	if n.Type != NodeDistinct || n.BuildSideDedup || len(n.Children) != 1 {
+		return n
+	}
+	proj := n.Children[0]
+	if proj.Type != NodeProject || len(proj.Children) != 1 {
+		return n
+	}
+	groupBy := make([]string, 0, len(proj.Projections))
+	groupByExprs := make([]plansql.Node, 0, len(proj.Projections))
+	seen := make(map[string]bool, len(proj.Projections))
+	for _, p := range proj.Projections {
+		key, ast, ok := projectionGroupKey(p)
+		if !ok {
+			return n
+		}
+		if !seen[key] {
+			seen[key] = true
+			groupBy = append(groupBy, key)
+			groupByExprs = append(groupByExprs, ast)
+		}
+	}
+	if len(groupBy) == 0 {
+		return n
+	}
+	agg := NewAggregate(proj.Children[0], groupBy, nil)
+	agg.GroupByExprs = groupByExprs
+	proj.Children = []*Node{agg}
+	// The Distinct may be the plan root, which carries the CTE
+	// definitions the physical planner resolves against.
+	if len(n.CTEs) > 0 {
+		proj.CTEs = n.CTEs
+	}
+	return proj
 }
 
 // subqueryRe conservatively detects a subquery inside an expression. False

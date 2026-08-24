@@ -190,6 +190,21 @@ type Node struct {
 	// uses it after predicate pushdown to semijoin-reduce the aggregate's
 	// input by the outer plan's key-source branch.
 	ScalarDecorrelated bool
+
+	// BuildSideDedup marks a Distinct the PLANNER inserted, not one the
+	// user wrote. Two passes create them: dedupSemiAntiBuildSide bounds a
+	// semi/anti join's build hashtable by NDV, and scalar_agg_semijoin
+	// builds a decorrelated semijoin's key source. Neither carries
+	// user-visible semantics — a semi/anti join's result does not depend
+	// on whether its build side has duplicates — and the physical planner
+	// has dedicated handling for the shape (estimateDistinctKeyBytes sizes
+	// Distinct(Project) subtrees by key count; the distinct-pair semi/anti
+	// build fast path matches on it).
+	//
+	// rewriteDistinctAsGroupBy therefore leaves a marked Distinct alone and
+	// rewrites every UNMARKED one — those are user SELECT DISTINCTs, and
+	// each is an answer the engine has to actually compute (#466).
+	BuildSideDedup bool
 }
 
 // Predicate is a filter condition.
@@ -343,41 +358,24 @@ func ExtractMergeInfo(plan *Node) *MergeInfo {
 	}
 	// Capture Project rename mappings so we can translate logical aggregate
 	// column names to the post-projection names that appear in worker batches.
-	var projections []Projection
-	if n.Type == NodeProject && len(n.Children) > 0 {
-		projections = n.Projections
+	//
+	// A CHAIN, not a single node: a derived table's own SELECT list and the
+	// outer query's are separate Projects and nothing merges them, so
+	// `SELECT c FROM (SELECT COUNT(*) AS c FROM t) u` stacks two above the
+	// aggregate. Stopping at the first left the aggregate invisible, and a
+	// probe-split merge then CONCATENATED the workers' partial groups
+	// instead of re-aggregating them. Renames compose innermost-outward.
+	var chain []*Node
+	for n.Type == NodeProject && len(n.Children) > 0 {
+		chain = append(chain, n)
 		n = n.Children[0]
 	}
 	if n.Type == NodeAggregate {
 		mi.GroupBy = append([]string(nil), n.GroupBy...)
 		mi.AggExprs = append([]AggExpr(nil), n.AggExprs...)
 		mi.HasAggregate = true
-		// Apply projection renames: map pre-projection names to aliases
-		if len(projections) > 0 {
-			rename := make(map[string]string, len(projections))
-			for _, p := range projections {
-				src := p.Column
-				if src == "" {
-					src = p.Expr
-				}
-				dst := p.Alias
-				if dst == "" {
-					dst = src
-				}
-				if src != dst {
-					rename[src] = dst
-				}
-			}
-			for i, col := range mi.GroupBy {
-				if alias, ok := rename[col]; ok {
-					mi.GroupBy[i] = alias
-				}
-			}
-			for i, ae := range mi.AggExprs {
-				if alias, ok := rename[ae.OutputCol]; ok {
-					mi.AggExprs[i].OutputCol = alias
-				}
-			}
+		for i := len(chain) - 1; i >= 0; i-- {
+			mi.applyProjectionRenames(chain[i].Projections)
 		}
 		return mi
 	}
@@ -391,6 +389,39 @@ func ExtractMergeInfo(plan *Node) *MergeInfo {
 	// with no ORDER BY or GROUP BY can probe-split — each worker produces its
 	// partition's rows and the coordinator concatenates them.
 	return mi
+}
+
+// applyProjectionRenames maps the aggregate's output names through one
+// projection level, so the merge keys match the names the worker batches
+// carry after that projection runs.
+func (mi *MergeInfo) applyProjectionRenames(projections []Projection) {
+	if len(projections) == 0 {
+		return
+	}
+	rename := make(map[string]string, len(projections))
+	for _, p := range projections {
+		src := p.Column
+		if src == "" {
+			src = p.Expr
+		}
+		dst := p.Alias
+		if dst == "" {
+			dst = src
+		}
+		if src != dst {
+			rename[src] = dst
+		}
+	}
+	for i, col := range mi.GroupBy {
+		if alias, ok := rename[col]; ok {
+			mi.GroupBy[i] = alias
+		}
+	}
+	for i, ae := range mi.AggExprs {
+		if alias, ok := rename[ae.OutputCol]; ok {
+			mi.AggExprs[i].OutputCol = alias
+		}
+	}
 }
 
 // MergeInfo describes how to merge probe-split partial results.

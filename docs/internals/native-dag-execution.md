@@ -24,7 +24,10 @@ There are **two coordinator entry paths** — know which one you're in:
 | **Probe-split pipeline** (legacy/secondary) | `Coordinator.SubmitSQL` (`coordinator/coordinator.go:~2160`) | collapses to one `pipeline-0` stage | `mergeProbePartials`/`deduplicatePartials` using `logical.MergeInfo` (`coordinator/coordinator.go:1154,1223`) | async submit path |
 
 ⚠️ **These paths handle DISTINCT differently.** The probe-split path dedups via
-`MergeInfo.HasDistinct`; the native-DAG path does **not** (see Known Issues).
+`MergeInfo.HasDistinct`; the native-DAG path does **not** — it relies on the
+logical rewrite having turned every user DISTINCT into an aggregate, plus a
+post-gather `dedupGatherResult` for the root-path shapes the rewrite declines
+(see §Where dedup / aggregate / distinct happen).
 
 ## Small-query local fast path (routing ahead of the DAG)
 
@@ -113,7 +116,7 @@ the embedded engine per policy shape.
 | `NodeFilter` | pushes predicates onto child stage | `plan.go:3323` |
 | `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. |
 | `NodeIntersect` / `NodeExcept` | `union` (with per-arm tag columns) + a grouped counting `final_aggregate` | `set_op_stages.go` (#346). The distribution pass inserts an `exchange-repartition` on the full result row between them — see §Set operations. |
-| **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. Top-level DISTINCT never reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns it into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages. Remaining NodeDistincts (semi/anti build-side dedup, fallback shapes) stay passthrough. |
+| **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. No USER DISTINCT reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns every `Distinct(Project)` in the tree, at any depth, into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages (#466 widened this from the root path only). What still passes through: planner-inserted `BuildSideDedup` Distincts (semi/anti build dedup, decorrelated semijoin key source), which carry no user-visible semantics, and root-path fallback shapes the coordinator dedups after the gather. A user Distinct anywhere else is REFUSED by `refuseUnstageableDistinct` (`physical/distinct_refusal.go`) rather than dropped. |
 | **`NodeProject`** | **nothing — passthrough** | same `default` case; aliases recovered at gather |
 
 ## Synthetic sort keys: the column a Project would have computed
@@ -338,8 +341,11 @@ it, with the inequality riding as the stage's post-filter.
 - **Aggregate (with functions):** `aggregate` (partial, per scan task) → `final_aggregate` (merge). The distribution pass inserts a shuffle/gather so the final merges all partials. ✅ correct distributed.
 - **Sort:** `sort` → merge-sort tree, merged at the gather. ✅
 - **Bare GROUP BY (no agg fn):** same stages as aggregates — the fused scan runs the partial dedup and hash-partitions on the group keys; the `final_aggregate` fans out one task per disjoint partition. The dispatch gate that routes a fused scan into `dispatchScanAggregateStage` accepts `FusedAggGroupBy`-only stages (`execute_stage_dag.go`, was `FusedAggSpecs`-only — issue #166). ✅ sharded.
-- **Top-level DISTINCT:** rewritten at logical-optimize time to an aggregate-free GROUP BY over the SELECT list (`logical.rewriteDistinctAsGroupBy`, `planner/logical/distinct_rewrite.go`) — bare columns AND scalar expressions (derived group-bys are evaluated by the worker's `buildAggInputProjection`). Rides the sharded path above; the coordinator does no dedup (`MergeInfo.HasDistinct` is false post-rewrite). ✅ sharded.
-- **DISTINCT fallback shapes** (`SELECT DISTINCT *`, DISTINCT with aggregate projections, subquery expressions): not rewritten; `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`). Correct but single-node at the coordinator.
+- **DISTINCT, anywhere in the plan:** rewritten at logical-optimize time to an aggregate-free GROUP BY over the projection below it (`logical.rewriteDistinctAsGroupBy`, `planner/logical/distinct_rewrite.go`) — bare columns AND scalar expressions (derived group-bys are evaluated by the worker's `buildAggInputProjection`). Rides the sharded path above; the coordinator does no dedup (`MergeInfo.HasDistinct` is false post-rewrite). ✅ sharded.
+
+  The rewrite walks the WHOLE tree. It used to walk only the root path, and a DISTINCT inside a derived table feeding an aggregate then reached nobody: `walkStages` emits no stage for it, and `ExtractMergeInfo` returns at the first `NodeAggregate` it meets, so the coordinator never saw it either. `SELECT COUNT(*) FROM (SELECT DISTINCT c FROM t) u` answered with the raw count on the DAG and the deduplicated one single-process — silent, deterministic, and unnoticed because the two shapes on either side of it (root `SELECT DISTINCT`, and a derived DISTINCT feeding a plain projection, which `ExtractMergeInfo` does see past one Project) were both correct (#466).
+- **DISTINCT fallback shapes** (DISTINCT with aggregate projections, subquery expressions): not rewritten. On the ROOT path `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`) — correct but single-node at the coordinator. Anywhere else nothing would apply it, so `PlanDistributed` returns `ErrDistinctDistributed` (`planner/physical/distinct_refusal.go`) instead: the #308 position, a deterministic loud failure over a silently different answer.
+- **`ExtractMergeInfo` walks a Project CHAIN** above the aggregate, not a single node, composing renames innermost-outward. A derived table's SELECT list and the outer query's are separate `NodeProject`s that nothing merges, so `SELECT c FROM (SELECT COUNT(*) AS c FROM t) u` stacks two; stopping at the first made the aggregate invisible and a probe-split merge concatenated the workers' partial groups instead of re-aggregating them.
 
 ## Set operations
 
@@ -629,6 +635,18 @@ returned every input row (no cross-task dedup) — #163 (first-cut coordinator
 dedup, PR #165) then #166 + the sharded rewrite (partial-dedup at scan →
 hash-partition exchange → per-partition final tasks). Regression coverage:
 `coordinator/distinct_distributed_test.go` (multi-worker e2e, 9 query shapes).
+
+**Fixed 2026-08 (#466):** the same class one level down. The 2026-07 rewrite
+only covered the ROOT DISTINCT, so a DISTINCT inside a derived table feeding
+an aggregate still returned every input row on the DAG — `SELECT COUNT(*) FROM
+(SELECT DISTINCT c FROM t) u` answered 100 where PostgreSQL and the
+single-process path answer 25. The rewrite now walks the whole tree, marked
+`BuildSideDedup` Distincts are excluded by an explicit flag rather than by
+position, and anything the rewrite still declines off the root path is refused
+instead of dropped. Regression coverage: `planner/logical/distinct_rewrite_test.go`
+(rewrite scope + marker), `planner/physical/derived_distinct_test.go`
+(the emitted dedup stage and the refusal), and the `DerivedDistinct*` /
+`GroupByOverDerivedDistinct` entries in the two-path invariance corpus.
 
 ## How to inspect this machinery (recipes)
 

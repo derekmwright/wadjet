@@ -95,6 +95,8 @@ func walkReduceScalarAggs(n *Node) {
 	}
 	keySource := &Node{
 		Type: NodeDistinct,
+		// Planner-inserted key source, not a user SELECT DISTINCT (#466).
+		BuildSideDedup: true,
 		Children: []*Node{{
 			Type:        NodeProject,
 			Projections: proj,
