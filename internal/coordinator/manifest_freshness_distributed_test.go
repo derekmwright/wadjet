@@ -101,15 +101,17 @@ func TestDistributedSelectAfterWriteSeesTheWrite(t *testing.T) {
 	mfdWant(t, mfdSelect(t, ctx, coord, "SELECT c1, c0 FROM dtp6 WHERE c0 > 0", "c0"),
 		[]string{"1", "2", "3"}, "after a third INSERT, new query shape")
 
-	// DELETE's visibility is deliberately NOT asserted on this arm (#491). It is a
-	// separate defect from #483: the DAG's scan source is built from
-	// OpSpec.InputFiles alone (buildFragmentSource →
-	// cachedFileStreamSource), and neither internal/distributed nor
-	// internal/worker carries a delete-marker field at all, so merge-on-read
-	// deletes are invisible to every DAG scan regardless of manifest
-	// freshness. The single-process path applies them (scannerExecSource,
-	// internal/planner/physical/plan.go) and the embedded arm of this
-	// regression asserts that (wadjet/manifest_freshness_test.go).
+	// DELETE was the documented gap on this arm until #491: the DAG's scan
+	// source is built from the task's file list, and nothing on the wire
+	// said which rows a merge-on-read DELETE had removed, so every DAG scan
+	// answered with them still in it while the single-process path (which
+	// reads the manifest at scan Init) did not. Now asserted, on the same
+	// three-worker DAG as the rest of this test.
+	mfdWrite(t, db, "DELETE FROM dtp6 WHERE c0 = 2")
+	mfdWant(t, mfdSelect(t, ctx, coord, "SELECT c0, c1 FROM dtp6", "c0"), []string{"1", "3"},
+		"after a DELETE through the other catalog owner")
+	mfdWant(t, mfdSelect(t, ctx, coord, "SELECT COUNT(*) AS n FROM dtp6", "n"), []string{"2"},
+		"COUNT(*) after the DELETE")
 }
 
 func TestDistributedDropAndRecreateDoesNotServeThePreviousIncarnation(t *testing.T) {

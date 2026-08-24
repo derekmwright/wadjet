@@ -167,11 +167,20 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 		deadlineNano = dl.UnixNano()
 	}
 
+	// Merge-on-read deletes ride the dispatch context, not a dispatcher's
+	// task builder: the marker belongs to the FILE, so one walk over every
+	// file list a task can carry serves every stage kind, and a retry
+	// re-publishing through here is stamped again with the same plan-time
+	// snapshot (#491). Nil for the common case — a query over tables with
+	// no deletes — and then this is one map lookup per publish.
+	queryDeletes := queryDeleteMarkersFromContext(ctx)
+
 	batch := make([]preparedTask, 0, len(tasks))
 	for _, task := range tasks {
 		if s.annotate != nil {
 			s.annotate(&task)
 		}
+		stampTaskDeleteMarkers(&task, queryDeletes)
 		data, err := distributed.Marshal(task)
 		if err != nil {
 			return fmt.Errorf("marshaling task %s: %w", task.ID, err)

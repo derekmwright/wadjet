@@ -2968,6 +2968,9 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		queryTimeout = 30 * time.Minute
 	}
 	asyncCtx, asyncCancel := context.WithTimeout(context.Background(), queryTimeout)
+	// Same merge-on-read delete stamp the native-DAG path installs: this
+	// context is built from Background, so it inherits nothing (#491).
+	asyncCtx = withQueryDeleteMarkers(asyncCtx, collectStageDeletes(physStages))
 
 	// Subscribe for results (non-blocking callback)
 	doneCh := make(chan struct{}, 1)

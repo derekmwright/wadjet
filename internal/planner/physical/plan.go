@@ -77,6 +77,22 @@ type Stage struct {
 	// reverts to full width whenever a requested name is missing from the
 	// file, and a column read under that fallback still has to be typed.
 	ScanSchema []parquet.Column
+	// ScanDeletes is the table's merge-on-read DELETE state at plan time:
+	// data-file path → the file-absolute row indices a DELETE removed and
+	// compaction has not yet folded in (catalog.PartitionManifest.
+	// DeleteMarkers). Read from the SAME manifest that produced ScanFiles,
+	// which is not an accident: markers only ever grow until a compaction
+	// replaces the file they name, so a marker set read AFTER the file list
+	// can be missing the markers of a file the list still holds, and those
+	// deleted rows come back. Reading both from one manifest object makes
+	// the pair a snapshot.
+	//
+	// Rides to the worker as Task.DeleteMarkers, stamped per task from the
+	// files that task actually reads. Declared at plan time for the reason
+	// ScanSchema is: one catalog revision for every task of the query, so
+	// two tasks of one stage cannot disagree about which rows exist (#491).
+	// Nil for every table with no deletes.
+	ScanDeletes map[string][]int64
 	// OutputColumns, when non-empty, narrows the stage's EMITTED columns
 	// to this set (worker inserts a zero-copy ColumnPrune before the
 	// sink). Columns stays the READ set — a scan must read its pushed
@@ -776,6 +792,17 @@ type Planner struct {
 	// Reset at the start of generateStages so each query gets a fresh map.
 	ctePlannedTerminal map[string]string
 
+	// scanDeletes caches the merge-on-read DELETE state walkStages read for
+	// each base table, table name → (file path → file-absolute deleted row
+	// indices). Captured from the SAME manifest object that produced the
+	// stage's ScanFiles, so the pair is a snapshot; annotateScanDeletes
+	// then replays it onto the FINAL stage list, which is where a fused or
+	// rewritten stage that ends up owning those files can be reached.
+	// Re-reading the manifest in that late pass instead would reintroduce
+	// exactly the skew the snapshot exists to avoid (see Stage.ScanDeletes).
+	// Reset at the start of generateStages.
+	scanDeletes map[string]map[string][]int64
+
 	// setOpErr records a set operation walkStages cannot lower to stages.
 	// walkStages has no error return (it is recursive over ~20 node kinds
 	// and every other case is total), so the refusal is parked here and
@@ -1022,6 +1049,7 @@ func (p *Planner) forSubquery() *Planner {
 	sub := *p
 	sub.scanCounter = nil
 	sub.ctePlannedTerminal = nil
+	sub.scanDeletes = nil
 	sub.scalarPlaceholderSeq = 0
 	sub.MaterializedInputs = nil
 	sub.StreamingSources = nil
@@ -2530,6 +2558,10 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// schema for every table this plan scans so a file written before the
 	// footer key existed is still typed the way the catalog says.
 	p.annotateScanSchemas(ctx, stages)
+	// #491: and the same declare-on-the-plan treatment for the table's
+	// merge-on-read DELETE state, replayed from the snapshot walkStages
+	// took rather than a second manifest read.
+	p.annotateScanDeletes(stages)
 	return stages, nil
 }
 
@@ -3695,6 +3727,9 @@ func (p *Planner) ExpandFederatedScans(stages []Stage) []Stage {
 				}
 				newStage.ScanFiles = files
 				newStage.ScanFileSizes = fileSizes
+				// The remote cluster's own delete state — the local one
+				// names files this stage will never read.
+				newStage.ScanDeletes = deleteMarkerMap(manifest.DeleteMarkers)
 				if len(files) > 0 {
 					newStage.Tasks = len(files)
 				}
@@ -3734,6 +3769,7 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	// (typically when emitScalarProducerStages re-walks a CTE-referencing
 	// scalar subquery, which would otherwise double-compute the CTE).
 	p.ctePlannedTerminal = make(map[string]string)
+	p.scanDeletes = nil
 	p.setOpErr = nil
 	p.joinCondErr = nil
 	p.correlatedErr = nil
@@ -4601,6 +4637,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		var scanFileSizes []int64
 		var estBytes, estRows int64
 		partFilter := node.PartitionFilter
+		var scanDeletes map[string][]int64
 		if meta, err := p.catalog.GetManifest(context.Background(), node.TableName); err == nil {
 			for _, part := range meta.Partitions {
 				if len(partFilter) > 0 && len(part.Values) > 0 {
@@ -4618,6 +4655,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			if len(scanFiles) > 0 {
 				tasks = len(scanFiles)
 			}
+			// Merge-on-read deletes, from THIS manifest object — the same
+			// snapshot the file list came from (see Stage.ScanDeletes).
+			scanDeletes = deleteMarkerMap(meta.DeleteMarkers)
+			p.rememberScanDeletes(node.TableName, scanDeletes)
 		}
 		// Build unique ScanAlias: "table" for first scan, "table:1", "table:2"
 		// for duplicates. This disambiguates multiple scans of the same table
@@ -4643,6 +4684,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			PartitionFilter: partFilter,
 			ScanFiles:       scanFiles,
 			ScanFileSizes:   scanFileSizes,
+			ScanDeletes:     scanDeletes,
 			EstimatedBytes:  estBytes,
 			EstimatedRows:   estRows,
 		}

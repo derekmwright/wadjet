@@ -106,6 +106,22 @@ type cachedFileStreamSource struct {
 	// all-or-nothing guard reverting to full width).
 	projectionSkipWarned bool
 
+	// deleteMarkers is the merge-on-read DELETE state for the base-table
+	// files this source reads, keyed by the same S3 key that appears in
+	// files (Task.DeleteMarkers, declared by the plan — #491). A DELETE
+	// records file-absolute row indices instead of rewriting parquet, so
+	// without this the DAG answers with the deleted rows still in it while
+	// the single-process engine, which reads the manifest, does not.
+	//
+	// curDeletes is the entry for the file currently open, and
+	// curDeleteOffset tracks the row-based fallback's position within it
+	// (the columnar path gets its offset from the iterator). Nil for every
+	// WSHF source and for every base table with no deletes — the common
+	// case, and then the whole mechanism is one nil check per batch.
+	deleteMarkers   map[string]*scan.DeleteSet
+	curDeletes      *scan.DeleteSet
+	curDeleteOffset int64
+
 	// Row-group sharding. When shardCount > 1, parquet reads only row groups
 	// [idx*N/count, (idx+1)*N/count). Only applies to parquet inputs (.wshf
 	// shuffle outputs are unaffected — those are already partitioned by the
@@ -234,6 +250,12 @@ type shuffleBatchIter interface {
 // and decode-ahead (scan.DecodeAheadIter) parquet row-group iterators.
 type parquetGroupIter interface {
 	Next() (*batch.RecordBatch, error)
+	// RowOffset is the FILE-ABSOLUTE index of the first row of the batch
+	// Next just returned — the frame merge-on-read delete markers are
+	// expressed in. On the interface rather than resolved by type
+	// assertion so a new iterator cannot join this path silently
+	// answering 0 and skipping the wrong rows.
+	RowOffset() int64
 	SetDynamicFilters(ranges []exec.DynamicRange, blooms []*exec.BloomScanFilter)
 	Close() error
 }
@@ -331,6 +353,19 @@ func (s *cachedFileStreamSource) SetDeclaredSchema(cols []parquet.Column) {
 	s.declaredSchema = cols
 }
 
+// SetDeleteMarkers installs the merge-on-read DELETE state for the files
+// this source reads, keyed by S3 key. Idempotent and safe to call before
+// Init; nil or an empty map is the pre-existing behavior (no filtering).
+// Keys naming files this source never opens are simply never consulted,
+// which is what lets ONE task-level map serve every alias a fragment reads
+// — the marker belongs to the file, not to the alias.
+func (s *cachedFileStreamSource) SetDeleteMarkers(m map[string]*scan.DeleteSet) {
+	if s == nil || len(m) == 0 {
+		return
+	}
+	s.deleteMarkers = m
+}
+
 // SetShard configures row-group sharding for parquet reads on this source.
 // shardCount <= 1 disables sharding (whole file). Idempotent and safe to
 // call before Init.
@@ -412,6 +447,16 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 				return nil, err
 			}
 			if b != nil {
+				// Merge-on-read deletes. The iterator reports where this
+				// batch begins IN THE FILE, which is the frame the markers
+				// use — row groups may be pruned and the read may be a
+				// shard starting at a group other than 0, so neither a
+				// running count nor the batch's own position would do. A
+				// batch whose every row is deleted is dropped rather than
+				// shipped with an empty selection.
+				if !scan.ApplyDeleteMarkers(b, s.parquetIter.RowOffset(), s.curDeletes) {
+					continue
+				}
 				s.tryPreOpenNextParquet()
 				return b, nil
 			}
@@ -444,6 +489,17 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 			b := s.fallbackBatches[s.fallbackBatchIdx]
 			s.fallbackBatches[s.fallbackBatchIdx] = nil
 			s.fallbackBatchIdx++
+			// The row reader decodes the whole file in one shot, in file
+			// order, so the running count IS the file-absolute offset. It
+			// must advance even for a fully-deleted batch, which is why
+			// the bump happens before the drop.
+			off := s.curDeleteOffset
+			if b != nil {
+				s.curDeleteOffset += int64(b.Len)
+			}
+			if !scan.ApplyDeleteMarkers(b, off, s.curDeletes) {
+				continue
+			}
 			return b, nil
 		}
 		if s.fallbackBatches != nil {
@@ -529,6 +585,8 @@ func (s *cachedFileStreamSource) releaseParquetIter() {
 // releaseCurrentFile munmaps and deletes the local cache file backing the
 // current chunkReader. Safe to call multiple times.
 func (s *cachedFileStreamSource) releaseCurrentFile() {
+	s.curDeletes = nil
+	s.curDeleteOffset = 0
 	s.chunkReader = nil
 	s.walkDropMark = 0
 	// Donation target first: a consumer racing tryDonateToken against this
@@ -1114,6 +1172,12 @@ type pendingParquet struct {
 	localPath       string
 	toucher         *rangeToucher
 	fallbackBatches []*batch.RecordBatch
+	// deletes is the open file's merge-on-read delete set, resolved at
+	// open rather than at delivery: the cross-file decode continuation
+	// pre-opens the NEXT file while the current one is still delivering,
+	// so "which file is s.files[s.fileIdx]" is the wrong question by the
+	// time a batch comes out.
+	deletes *scan.DeleteSet
 }
 
 // release drops a never-installed pending file: quiesce decode first
@@ -1160,6 +1224,8 @@ func (s *cachedFileStreamSource) installParquet(p *pendingParquet) {
 	s.toucher = p.toucher
 	s.fallbackBatches = p.fallbackBatches
 	s.fallbackBatchIdx = 0
+	s.curDeletes = p.deletes
+	s.curDeleteOffset = 0
 }
 
 func (s *cachedFileStreamSource) finishOpenParquet(filePath string, data, mmapData []byte, localPath string) error {
@@ -1245,6 +1311,11 @@ func (s *cachedFileStreamSource) buildParquetStateFromFile(filePath string, f *o
 // fd, madvise + touch-ahead on an mmap). On error p is released.
 func (s *cachedFileStreamSource) finishParquetState(p *pendingParquet, filePath string) (*pendingParquet, error) {
 	reader := p.reader
+	// Every parquet open funnels through here — mmap, pread, base-table
+	// cache, prefetched temp — so this is the one place the file's delete
+	// set has to be resolved. It rides the pendingParquet because the
+	// pre-open continuation opens file N+1 before file N stops delivering.
+	p.deletes = s.deleteMarkers[filePath]
 	// The catalog's types win over the file's, where the file's bytes can
 	// carry them (#423). A file written from v0.18.0 on already reports the
 	// declared types — its footer carries them — so the two agree and this

@@ -39,10 +39,20 @@ import (
 // those types. The slice path stays available; this iterator is a parallel
 // fast lane for the common case.
 type RowGroupIter struct {
-	fr           *pqt.FileReader
-	readSchema   []pqt.Column
-	cur, end     int
-	closed       bool
+	fr         *pqt.FileReader
+	readSchema []pqt.Column
+	cur, end   int
+	closed     bool
+
+	// rowOffsets[i] is the FILE-ABSOLUTE index of row group i's first row
+	// (the prefix sum of RowGroupNumRows over the whole file, not over this
+	// iterator's shard). lastOffset is that value for the group Next most
+	// recently returned. Merge-on-read delete markers name file-absolute
+	// rows, so a consumer applying them has to be told where in the file
+	// the batch it just took delivery of begins — and a sharded read
+	// starts at a group that is not group 0. See scan.DeleteSet.
+	rowOffsets []int64
+	lastOffset int64
 
 	// Empty-shard sentinel: shardIdx out of range or row-fallback shard >0
 	// returns no batches without erroring. matches ReadFileBatchesShard.
@@ -152,6 +162,7 @@ func OpenRowGroupIter(reader *pqt.Reader, schema []pqt.Column, selectedCols []st
 		readSchema: readSchema,
 		cur:        startRg,
 		end:        endRg,
+		rowOffsets: rowGroupRowOffsets(fr),
 	}, nil
 }
 
@@ -200,6 +211,7 @@ func (it *RowGroupIter) Next() (*batch.RecordBatch, error) {
 			continue
 		}
 		it.rgRead++
+		it.lastOffset = rowOffsetAt(it.rowOffsets, rgIdx)
 		return b, nil
 	}
 	return nil, nil
@@ -215,4 +227,44 @@ func (it *RowGroupIter) Close() error {
 	}
 	it.closed = true
 	return nil
+}
+
+// RowOffset is the FILE-ABSOLUTE index of the first row of the batch Next
+// most recently returned. Valid only immediately after a non-nil Next; 0
+// before the first delivery and for the empty-shard sentinel. Consumers use
+// it to place a batch within its file, which is the frame merge-on-read
+// delete markers are expressed in.
+func (it *RowGroupIter) RowOffset() int64 {
+	if it == nil {
+		return 0
+	}
+	return it.lastOffset
+}
+
+// rowGroupRowOffsets is the prefix sum of a file's row-group row counts:
+// entry i is the file-absolute index of row group i's first row. Computed
+// once per open — NumRowGroups is tens, not millions — and never narrowed
+// to a shard, because the frame delete markers use is the whole file.
+func rowGroupRowOffsets(fr *pqt.FileReader) []int64 {
+	if fr == nil {
+		return nil
+	}
+	n := fr.NumRowGroups()
+	if n <= 0 {
+		return nil
+	}
+	offsets := make([]int64, n)
+	var acc int64
+	for i := 0; i < n; i++ {
+		offsets[i] = acc
+		acc += fr.RowGroupNumRows(i)
+	}
+	return offsets
+}
+
+func rowOffsetAt(offsets []int64, idx int) int64 {
+	if idx < 0 || idx >= len(offsets) {
+		return 0
+	}
+	return offsets[idx]
 }

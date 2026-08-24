@@ -381,7 +381,16 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// identical values and hashing costs nothing. It is also empty at
 		// this point — annotateScanSchemas runs after this pass — which is
 		// why hashing it can never suppress a dedup that used to happen.
-		"ScanSchema":  "hashed",
+		"ScanSchema": "hashed",
+		// The table's merge-on-read DELETE state (#491) is, like ScanSchema,
+		// a pure function of TableName — walkStages takes it from the same
+		// manifest object as ScanFiles, so two clone subtrees over one table
+		// carry the identical map and hashing can never suppress a dedup
+		// that used to happen. Unlike ScanSchema it IS populated by this
+		// point, which is why it is hashed rather than merely harmless:
+		// two subtrees that somehow disagreed about which rows exist are
+		// not interchangeable.
+		"ScanDeletes": "hashed",
 		"FilterExprs": "hashed", "GroupByCols": "hashed", "AggSpecs": "hashed",
 		"GroupByAll": "hashed", "SortKeys": "hashed", "Limit": "hashed",
 		// HasLimit rides with Limit: without it, two subtrees with a

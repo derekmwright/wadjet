@@ -149,7 +149,7 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 			// result instead of waiting forever.
 			continue
 		}
-		src, err := e.sourceForAlias(task.QueryID, bucket, alias, files)
+		src, err := e.sourceForAlias(task, bucket, alias, files)
 		if err != nil {
 			return fmt.Errorf("gather task %s: source for %q: %w", task.ID, alias, err)
 		}

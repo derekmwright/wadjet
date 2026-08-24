@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 )
 
@@ -74,22 +75,35 @@ func kindOf(key string) inputFileKind {
 // file patterns within an alias are consistent (so a planner bug that mixes
 // partitioned output with flat output fails fast instead of silently
 // concatenating mismatched chunk streams).
-func (e *Executor) sourceForAlias(queryID, bucket, alias string, files []string) (exec.Source, error) {
-	return e.sourceForAliasWithProjection(queryID, bucket, alias, files, nil)
+func (e *Executor) sourceForAlias(task distributed.Task, bucket, alias string, files []string) (exec.Source, error) {
+	return e.sourceForAliasWithProjection(task, bucket, alias, files, nil)
 }
 
 // sourceForAliasWithProjection hints that the parquet reader should only
 // materialise the named columns. Safe to call with a mix of schema and
 // derived column names — the source skips projection when any requested
 // column is missing from the file schema. WSHF payloads ignore the hint.
-func (e *Executor) sourceForAliasWithProjection(queryID, bucket, alias string, files []string, projectColumns []string) (exec.Source, error) {
+func (e *Executor) sourceForAliasWithProjection(task distributed.Task, bucket, alias string, files []string, projectColumns []string) (exec.Source, error) {
 	kind, err := classifyInputFiles(files)
 	if err != nil {
 		return nil, fmt.Errorf("alias %q: %w", alias, err)
 	}
 	_ = kind
-	if len(projectColumns) > 0 {
-		return newCachedFileStreamSourceWithProjection(e, queryID, bucket, files, projectColumns), nil
+	// Merge-on-read deletes for whichever of these files are base-table
+	// parquet (#491). Takes the whole task rather than its QueryID because
+	// the markers are a task-level declaration keyed by FILE — the alias
+	// this source reads under is irrelevant to which rows a file lost, and
+	// a fragment reading one table twice must skip the same rows on both.
+	deletes, err := taskDeleteSets(task)
+	if err != nil {
+		return nil, err
 	}
-	return newCachedFileStreamSource(e, queryID, bucket, files), nil
+	var src *cachedFileStreamSource
+	if len(projectColumns) > 0 {
+		src = newCachedFileStreamSourceWithProjection(e, task.QueryID, bucket, files, projectColumns)
+	} else {
+		src = newCachedFileStreamSource(e, task.QueryID, bucket, files)
+	}
+	src.SetDeleteMarkers(deletes)
+	return src, nil
 }

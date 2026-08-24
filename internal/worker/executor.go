@@ -1051,14 +1051,26 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	// yielding batches on demand. This avoids materializing the entire build
 	// side into memory — the hash join's grace spill handles memory pressure.
 	if len(task.PreScannedInputs) > 0 || len(precompAliasFiles) > 0 || len(task.Inputs) > 0 {
+		// Merge-on-read deletes, decoded once for every source this task
+		// builds. A pre-scanned input CAN be base-table parquet (the
+		// probe-split shape), and a source that bypasses the catalog-reading
+		// scanner has to be told which rows a DELETE removed (#491).
+		taskDeletes, err := taskDeleteSets(task)
+		if err != nil {
+			return err
+		}
 		streamingSources := make(map[string]exec.Source, len(task.PreScannedInputs)+len(precompAliasFiles)+len(task.Inputs))
 		for tableName, files := range task.PreScannedInputs {
-			streamingSources[tableName] = newCachedFileStreamSource(e, task.QueryID, bucket, files)
+			src := newCachedFileStreamSource(e, task.QueryID, bucket, files)
+			src.SetDeleteMarkers(taskDeletes)
+			streamingSources[tableName] = src
 			e.logger.Debug("streaming pre-scanned input",
 				"table", tableName, "files", len(files))
 		}
 		for alias, files := range precompAliasFiles {
-			streamingSources[alias] = newCachedFileStreamSource(e, task.QueryID, bucket, files)
+			src := newCachedFileStreamSource(e, task.QueryID, bucket, files)
+			src.SetDeleteMarkers(taskDeletes)
+			streamingSources[alias] = src
 			e.logger.Debug("streaming pre-computed aggregate",
 				"alias", alias, "files", len(files))
 		}
@@ -1069,7 +1081,7 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 			if _, already := streamingSources[alias]; already {
 				return fmt.Errorf("alias %q populated by both Inputs and legacy pre-scanned paths", alias)
 			}
-			src, err := e.sourceForAlias(task.QueryID, bucket, alias, files)
+			src, err := e.sourceForAlias(task, bucket, alias, files)
 			if err != nil {
 				return fmt.Errorf("source for alias %q: %w", alias, err)
 			}
@@ -1295,6 +1307,15 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	// streaming, the working set is bounded by one file's batches plus the
 	// sink's per-partition bufio buffers (48 × 256 KB ≈ 12 MB).
 	src := newCachedFileStreamSourceWithProjection(e, task.QueryID, bucket, task.Files, task.Columns)
+	// Which rows the shuffle's implicit parquet scan must NOT read. A
+	// scan-absorbed leaf feeding an exchange reads base-table parquet
+	// directly, so a DELETE the manifest recorded has to reach it here or
+	// the deleted rows are hash-partitioned into every consumer (#491).
+	shuffleDeletes, err := taskDeleteSets(task)
+	if err != nil {
+		return err
+	}
+	src.SetDeleteMarkers(shuffleDeletes)
 	// What the shuffle's implicit parquet scan is reading. Base-table files
 	// written before the declared-schema footer key existed cannot say what
 	// nine of their column types are, and the WSHF this task writes would

@@ -2261,7 +2261,7 @@ func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distribu
 		if bucket == "" {
 			bucket = task.ResultBucket
 		}
-		src, err := e.sourceForAlias(task.QueryID, bucket, spec.BuildAlias, spec.BuildFiles)
+		src, err := e.sourceForAlias(task, bucket, spec.BuildAlias, spec.BuildFiles)
 		if err != nil {
 			return nil, fmt.Errorf("sort_merge_join build source: %w", err)
 		}
@@ -2594,7 +2594,7 @@ func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.O
 	if len(spec.InputFiles) == 0 {
 		return nil, fmt.Errorf("source %q: empty InputFiles", spec.Type)
 	}
-	src, err := e.sourceForAliasWithProjection(task.QueryID, bucket, spec.InputAlias, spec.InputFiles, spec.Columns)
+	src, err := e.sourceForAliasWithProjection(task, bucket, spec.InputAlias, spec.InputFiles, spec.Columns)
 	if err != nil {
 		return nil, err
 	}
@@ -2761,7 +2761,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			src = emptyFragmentSource{}
 		default:
 			var err error
-			src, err = e.sourceForAlias(task.QueryID, bucket, spec.BuildAlias, spec.BuildFiles)
+			src, err = e.sourceForAlias(task, bucket, spec.BuildAlias, spec.BuildFiles)
 			if err != nil {
 				return nil, fmt.Errorf("build source: %w", err)
 			}

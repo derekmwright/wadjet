@@ -562,6 +562,7 @@ type fakeGroupIter struct {
 }
 
 func (f *fakeGroupIter) Next() (*batch.RecordBatch, error) { return nil, nil }
+func (f *fakeGroupIter) RowOffset() int64                  { return 0 }
 func (f *fakeGroupIter) SetDynamicFilters(ranges []exec.DynamicRange, blooms []*exec.BloomScanFilter) {
 	f.ranges, f.blooms = ranges, blooms
 	f.sets++

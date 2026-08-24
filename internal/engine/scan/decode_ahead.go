@@ -76,6 +76,15 @@ type DecodeAheadIter struct {
 	// Empty-shard sentinel (mirrors RowGroupIter).
 	empty bool
 
+	// rowOffsets[i] is the FILE-ABSOLUTE index of row group i's first row;
+	// lastOffset is that value for the group Next most recently delivered
+	// (win.mu). Same contract and same reason as RowGroupIter's — a
+	// merge-on-read delete marker names a file-absolute row, and neither
+	// the shard nor the delivery order tells the consumer where in the
+	// file its batch begins.
+	rowOffsets []int64
+	lastOffset int64
+
 	// Counters. Prune counters mirror RowGroupIter's for diagnostic
 	// parity; the rest are the memo §5 markers, read via Stats.
 	rgPrunedBloom    atomic.Int64
@@ -123,6 +132,7 @@ type decodeSlot struct {
 	batch *batch.RecordBatch // nil when pruned or empty
 	err   error
 	est   int64 // window bytes reserved for this group
+	off   int64 // file-absolute row offset of this group's first row
 	ahead bool  // admitted as non-cursor: delivery/drop decrements win.ahead
 }
 
@@ -366,6 +376,7 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 	it.fr = fr
 	it.readSchema = readSchema
 	it.start, it.end = rowGroupRangeForShard(fr.NumRowGroups(), shardIdx, shardCount)
+	it.rowOffsets = rowGroupRowOffsets(fr)
 	it.nextIdx, it.deliver = it.start, it.start
 	it.advisedIdx = it.start
 	it.slots = make(map[int]*decodeSlot, it.workers)
@@ -481,7 +492,6 @@ func (it *DecodeAheadIter) DecodeSpans() (ns, bytes int64) {
 	return it.decodeSpanNs.Load(), it.decodeSpanBytes.Load()
 }
 
-
 // Next returns the next decoded row group in source order, or (nil, nil)
 // when exhausted. Contract identical to RowGroupIter.Next.
 func (it *DecodeAheadIter) Next() (*batch.RecordBatch, error) {
@@ -510,6 +520,7 @@ func (it *DecodeAheadIter) Next() (*batch.RecordBatch, error) {
 			if slot.batch == nil {
 				continue // pruned or empty group — same silent skip as serial
 			}
+			it.lastOffset = slot.off
 			return slot.batch, nil
 		}
 		if it.deliver >= it.end {
@@ -517,6 +528,18 @@ func (it *DecodeAheadIter) Next() (*batch.RecordBatch, error) {
 		}
 		it.win.cond.Wait()
 	}
+}
+
+// RowOffset is the FILE-ABSOLUTE index of the first row of the batch Next
+// most recently returned. Same contract as RowGroupIter.RowOffset: valid
+// immediately after a non-nil Next, 0 before the first delivery.
+func (it *DecodeAheadIter) RowOffset() int64 {
+	if it == nil || it.empty {
+		return 0
+	}
+	it.win.mu.Lock()
+	defer it.win.mu.Unlock()
+	return it.lastOffset
 }
 
 // decodeLoop is one worker: admit the next index against the byte
@@ -611,7 +634,7 @@ func (it *DecodeAheadIter) decodeLoop() {
 		for g := adviseLo; g < adviseHi; g++ {
 			it.adviseGroup(g, ranges, blooms)
 		}
-		slot := &decodeSlot{est: est, ahead: isAhead}
+		slot := &decodeSlot{est: est, ahead: isAhead, off: rowOffsetAt(it.rowOffsets, idx)}
 		if pruned := it.pruneGroup(idx, ranges, blooms); !pruned {
 			t0 := time.Now()
 			b, err := ReadRowGroupNativeBacked(it.fr, idx, it.readSchema, it.cache, it.backing)

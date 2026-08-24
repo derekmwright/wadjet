@@ -2,7 +2,8 @@
 
 Status: Accepted (compress-on-serve landed PR #265, 2026-07-24; WSHZ zstd
 envelope landed `6d3082c`, 2026-08-14; the single read side landed as
-`internal/wshf`, #422, 2026-08-23)
+`internal/wshf`, #422, 2026-08-23; the wholesale-deploy rule extended to
+answer-changing task-spec fields with `Task.DeleteMarkers`, #491, 2026-08-24)
 
 ## Context
 
@@ -92,6 +93,23 @@ consumer can sniff and decode, including mid-stream.
   across a change to this function answers wrong, silently. The same rule
   covers any future change to the hash, the partition count derivation, or
   the WSHF field order.
+- **And it covers a TASK-SPEC field whose absence changes the answer.** The
+  wholesale rule was written for the exchange format, but the failure it
+  guards against — a stage whose tasks run a mix of binaries answering
+  differently, silently — is a property of the DECLARATION, not of the byte
+  layout. `Task.DeleteMarkers` (#491, 2026-08-24) is the second entry in
+  that wave list: it carries the merge-on-read DELETE state for the
+  base-table files a task reads, and a worker that predates the field
+  unmarshals it away and returns the deleted rows. On a rolling deploy that
+  is *some* of a stage's tasks returning them — a partial, non-reproducible
+  wrong answer, which is worse than all of them doing it. Same rule, same
+  reason: coordinator and workers deploy together.
+
+  The general test for whether an additive task field falls under this rule
+  is whether a worker IGNORING it still answers correctly. `HasSortLimit`
+  and `ColumnTypes` degrade conservatively (an old worker answers the way it
+  always did); `DeleteMarkers` does not, because the field's whole purpose is
+  to REMOVE rows.
 
 References: `docs/design/peer-wire-compression.md`,
 `docs/design/exchange-streaming-consumption.md`.

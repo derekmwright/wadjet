@@ -280,6 +280,13 @@ func (c *Coordinator) executeStageDAG(
 	defer bridge.Close()
 	ctx = withStageProgressBridge(ctx, bridge)
 
+	// The query's merge-on-read DELETE state, unioned over the plan's
+	// stages and parked on the dispatch context. Scheduler.PublishTasks
+	// stamps it onto every task it sends — whatever dispatcher built it,
+	// whatever carrier the base-table files arrive on, retries included
+	// (#491). Nothing to do for a query over tables with no deletes.
+	ctx = withQueryDeleteMarkers(ctx, collectStageDeletes(stages))
+
 	// Register parent queryID in the tracker so SubjectQueryActive replies
 	// "active" for this query. Without this the worker's pre-execute
 	// is-query-still-active probe (worker.go:402) gets "0" back and terms

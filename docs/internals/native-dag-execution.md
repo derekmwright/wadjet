@@ -266,6 +266,71 @@ requires `len(GroupByCols)>0 || len(Aggregates)>0` and has **no `GroupByAll`**
 — the single-process `buildDistinct` (`plan.go:5583`) uses
 `HashAggregate.GroupByAll=true`, which has no distributed equivalent yet.
 
+### …and the other thing a base-table read has to be told: which rows are deleted
+
+A DELETE does not rewrite parquet. It records the FILE-ABSOLUTE row indices
+it removed in the manifest (`catalog.DeleteMarker`), and every scan of the
+marked file skips them until compaction folds them in. The single-process
+scanner reads the manifest at scan Init and tracks the offset per row group
+(`physical.rgUnit.rgRowOffset`); the DAG's workers read a file list the
+coordinator hands them and, before #491, were told nothing — so **every DAG
+scan of a table with deletes returned the deleted rows**, silently, while the
+same query answered correctly on the fast path.
+
+The fix deliberately does NOT add a fourth carrier beside the three above,
+because a delete marker belongs to the **file**, not to the alias reading it:
+
+| Where | What |
+|---|---|
+| `physical.Stage.ScanDeletes` | file → deleted row indices, read from the SAME manifest object that produced `ScanFiles` (`walkStages` `NodeScan`). Replayed onto the final stage list by `annotateScanDeletes` (`physical/scan_delete_markers.go`) from the planner's snapshot — **never a second catalog read**: markers grow until a compaction replaces the file they name, so a marker set read AFTER the file list can be missing the markers of a file the list still holds. |
+| `coordinator.collectStageDeletes` → `withQueryDeleteMarkers(ctx, …)` | the query's union, parked on the dispatch context at the top of `executeStageDAG` |
+| `Scheduler.PublishTasks` → `stampTaskDeleteMarkers` | the ONE stamp. Walks every file list a task can carry — `Files`, `InputFiles`, `BuildFiles`, `Inputs`, `PreScannedInputs`, `ScanFileFilter`, `FusedJoins[].BuildFiles`, `Operators[].{InputFiles,BuildFiles}` — the same set `annotateTaskPeerLocations` walks, and emits `Task.DeleteMarkers`. Every dispatcher and every retry passes through here, so a new dispatcher gets it for free. |
+| worker `taskDeleteSets` → `cachedFileStreamSource.SetDeleteMarkers` | decoded per task, handed to every source the task builds; a key naming a file this source never opens simply never matches |
+
+Wire form: `distributed.DeleteSpec{File, Runs}`, where `Runs` is
+`scan.EncodeDeleteRuns` — varint (gap, length) pairs over the coalesced runs.
+Measured (`coordinator.TestTaskSpecSizeWithDeleteMarkers`, per file, against
+the same markers as one `catalog.DeleteMarker` in the manifest):
+
+| shape | wire | manifest JSON |
+|---|---|---|
+| 8 sparse deletes | 123 B | 172 B |
+| one 500k contiguous run | 87 B | 3.39 MB |
+| 1% scattered (10k rows) | 26.7 KB | 69.0 KB |
+
+A one-file scan task therefore carries 260 B – 27 KB, and the encoding is
+smaller than the manifest's own in every shape — so **the catalog, not the
+8 MB NATS payload cap, is the binding constraint** and no S3 side channel is
+needed. The residual is one task reading very many heavily-marked files at
+once (an unfiltered pass-through gather over a whole table); that fails
+loudly at `nc.Publish` with `ErrMaxPayload`, never silently.
+
+Applying them is offset arithmetic, and the frame is the FILE:
+`RowGroupIter.RowOffset()` / `DecodeAheadIter.RowOffset()` report where the
+batch just delivered begins, computed from the whole file's row-group prefix
+sum — so a pruned row group, a shard starting at group *k*, and the
+decode-ahead iterator's out-of-order decode all stay correct.
+`scan.ApplyDeleteMarkers` intersects the existing selection rather than
+overwriting it, and a fully-deleted batch is DROPPED rather than shipped with
+an empty selection. The row-reader fallback (Array/Map schemas) decodes the
+file in one shot and uses a running count instead.
+`parquetGroupIter` declares `RowOffset` so a new iterator cannot join this
+path silently answering 0.
+
+Gates: `coordinator.TestDistributedScanHonorsDeleteMarkers` (the two-path
+corpus — scan/COUNT/GROUP BY/JOIN/DISTINCT before and after a DELETE),
+`TestDistributedScanHonorsUpdateDeleteMarkers` (UPDATE = delete+insert; the
+failure mode is DOUBLE counting),
+`TestDistributedScanAgreesAcrossCompactionOfDeletedRows`, the DELETE arm of
+`TestDistributedSelectAfterWriteSeesTheWrite`, and
+`worker.TestStreamSourceDeleteMarkers*` for the offset arithmetic (both
+iterators, sharding, per-file keying, the row-reader fallback, the
+projection-intersection path).
+
+**ADR-0010's wholesale-deploy rule applies**: a worker predating
+`Task.DeleteMarkers` unmarshals it away and returns the deleted rows, so a
+rolling deploy makes *some* of a stage's tasks answer wrong.
+
 ### Where a fragment's inputs are visible to the annotator
 
 `coordinator.annotateTaskPeerLocations` (`coordinator/peer_locations.go`) is
