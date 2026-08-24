@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // #424 with #390, which is the pair the plan actually produces.
@@ -111,6 +112,80 @@ func TestDerivedTableSortKeyResolvesToAnEmittedColumn(t *testing.T) {
 							k.Column, producer.ID)
 					}
 				}
+			}
+		})
+	}
+}
+
+// Regression for #472: annotateHiddenSortSource passed strictInt=nil when
+// declaring a computed hidden sort key's type, so `ORDER BY s_suppkey + 1`
+// inside a derived table declared FLOAT64 where the same term at the
+// query's root (attachScanSelectProjections) declares INT64 (#297, #445) —
+// two routes disagreeing about the same arithmetic. materializeSortKey also
+// built the resulting ProjectExprSpec without TypeKnown, so a genuinely
+// BOOL sort key (`s_acctbal > 100`) was indistinguishable from "not set" —
+// Type's zero value IS TypeBool, the same shape #445 fixed for
+// attachScanSelectProjections — and projectOpFromSpecs drops an unset type
+// off the wire.
+func TestHiddenSortKeyDeclaresComputedType(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+
+	for _, tc := range []struct {
+		name     string
+		sql      string
+		wantType parquet.TypeID
+	}{
+		{
+			name:     "boolean comparison",
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT s_suppkey FROM supplier ORDER BY s_acctbal > 100 DESC LIMIT 7) t`,
+			wantType: parquet.TypeBool,
+		},
+		{
+			name:     "strict-int arithmetic",
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT s_suppkey FROM supplier ORDER BY s_suppkey + 1 DESC LIMIT 7) t`,
+			wantType: parquet.TypeInt64,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stages := sqlToStages(t, cat, ctx, tc.sql, 3)
+			sortID := findStageOfType(stages, "sort")
+			if sortID == "" {
+				t.Fatal("no sort stage")
+			}
+			byID := map[string]*Stage{}
+			for i := range stages {
+				byID[stages[i].ID] = &stages[i]
+			}
+			sort := byID[sortID]
+			if len(sort.Dependencies) != 1 {
+				t.Fatalf("sort %s has %d dependencies, want 1", sortID, len(sort.Dependencies))
+			}
+			producer := byID[sort.Dependencies[0]]
+			if producer == nil {
+				t.Fatalf("sort %s depends on unknown stage %q", sortID, sort.Dependencies[0])
+			}
+			key := sort.SortKeys[0].Column
+			if !logical.IsHiddenSortColumn(key) {
+				t.Fatalf("sort key %q is not a hidden key — the test shape must materialize one", key)
+			}
+
+			var spec *ProjectExprSpec
+			for i := range producer.ProjectExprs {
+				if strings.EqualFold(producer.ProjectExprs[i].Name, key) {
+					spec = &producer.ProjectExprs[i]
+				}
+			}
+			if spec == nil {
+				t.Fatalf("producer %s carries no projection for hidden key %q: %+v",
+					producer.ID, key, producer.ProjectExprs)
+			}
+			if !spec.TypeKnown {
+				t.Fatalf("hidden sort key %q declares TypeKnown=false — indistinguishable from "+
+					"unset (TypeBool is the zero value), so projectOpFromSpecs drops it off the "+
+					"wire (#472)", key)
+			}
+			if spec.Type != tc.wantType {
+				t.Errorf("hidden sort key %q declared %v, want %v", key, spec.Type, tc.wantType)
 			}
 		})
 	}

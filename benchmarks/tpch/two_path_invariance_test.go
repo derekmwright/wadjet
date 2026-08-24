@@ -3579,6 +3579,40 @@ func twoPathCorpus() []twoPathQuery {
 					}
 				}
 			}},
+
+		// #472: a derived table's ORDER BY over a term the SELECT list drops
+		// is a hidden sort key resolveHiddenSortKeys materializes into the
+		// producing fragment (hidden_sort_key.go) — a different call site
+		// than attachScanSelectProjections, which only covers the OUTERMOST
+		// SELECT list. The join consumer here forces exactly that path
+		// (#424's "join consumer" shape) rather than the root sort, so the
+		// LIMIT 20 subset the DAG picks is what proves the hidden key
+		// actually ordered on the right VALUES, not just that it typed them
+		// right at plan time (join_declared_schema_test.go and
+		// hidden_sort_key_test.go cover that half).
+		//
+		// A boolean comparison: annotateHiddenSortSource's ProjectExprSpec
+		// used to carry Type without TypeKnown, so a genuinely BOOL key was
+		// indistinguishable from unset (TypeBool is the zero value, #445's
+		// shape) and the worker fell back to computing it as the STRING
+		// "true"/"false" instead. s_suppkey breaks ties within the boolean's
+		// two groups so which 20 rows the LIMIT keeps is deterministic —
+		// without it the true-group is larger than 20 and an unrelated
+		// tie-order difference would fail this the same way a real
+		// divergence would.
+		twoPathQuery{name: "HiddenSortKeyBoolean", cmp: cmpUnordered,
+			sql: `SELECT t.s_suppkey, s2.s_name FROM (
+				SELECT s_suppkey FROM supplier
+				ORDER BY s_acctbal > 5000 DESC, s_suppkey LIMIT 20) t
+				JOIN supplier s2 ON t.s_suppkey = s2.s_suppkey`},
+		// Strict-int arithmetic: the same call site passed strictInt=nil, so
+		// `s_suppkey + 1` declared FLOAT64 on the hidden-key path where the
+		// identical term at a query's root declares INT64 through
+		// attachScanSelectProjections (#297, #445).
+		twoPathQuery{name: "HiddenSortKeyStrictIntArith", cmp: cmpUnordered,
+			sql: `SELECT t.s_suppkey, s2.s_name FROM (
+				SELECT s_suppkey FROM supplier ORDER BY s_suppkey + 1 DESC LIMIT 20) t
+				JOIN supplier s2 ON t.s_suppkey = s2.s_suppkey`},
 	)
 	return out
 }

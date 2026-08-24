@@ -531,14 +531,19 @@ type SortKeySpec struct {
 	// only when the term is a plain column reference, in which case the
 	// producer already emits that column under its own name and the key can
 	// simply be renamed to it. SourceType is the declared type a computed
-	// term's materialized column carries.
+	// term's materialized column carries; SourceTypeKnown distinguishes a
+	// DECLARED SourceType from the zero value TypeBool shares (the same
+	// ProjectExprSpec.TypeKnown shape, #445/#472) — without it a genuinely
+	// BOOL sort key reads as "not set" and the materialized projection drops
+	// its type off the wire.
 	//
 	// Empty on every ordinary key, and read by exactly one pass
 	// (resolveHiddenSortKeys) — sortKeysEqual compares ORDERING, so these
 	// are deliberately outside that comparison.
-	SourceExpr   string
-	SourceColumn string
-	SourceType   parquet.TypeID
+	SourceExpr      string
+	SourceColumn    string
+	SourceType      parquet.TypeID
+	SourceTypeKnown bool
 }
 
 // SameOrdering reports whether two keys impose the same order. It compares

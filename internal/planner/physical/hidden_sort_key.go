@@ -245,8 +245,12 @@ func materializeSortKey(producer *Stage, key SortKeySpec) bool {
 		Name: strings.ToLower(key.Column),
 		// The materialized column exists in no catalog, so its declared
 		// type IS its runtime type — the worker builds the output vector
-		// from it (#333).
-		Type: key.SourceType,
+		// from it (#333). TypeKnown must ride along: Type's zero value is
+		// TypeBool, so a genuinely BOOL sort key is indistinguishable from
+		// "not set" without it, and projectOpFromSpecs drops it off the
+		// wire (#445, #472).
+		Type:      key.SourceType,
+		TypeKnown: key.SourceTypeKnown,
 	})
 	return true
 }
@@ -273,8 +277,15 @@ func annotateHiddenSortSource(key *SortKeySpec, child *logical.Node) {
 		return
 	}
 	if proj.ASTExpr != nil && len(owner.Children) == 1 {
+		// Same integer-preserving-arithmetic hint the materializing
+		// projection passes for every other computed-column site (#297,
+		// #445): without it, `ORDER BY s_suppkey + 1` inside a derived
+		// table declares FLOAT64 here where the same term at the query's
+		// root gets INT64 through attachScanSelectProjections (#472).
+		strictInt := strictIntArithCols(owner.Children[0])
 		key.SourceType = inferProjectionTypeCols(proj.ASTExpr, parquet.TypeString,
-			nil, inputColTypes(owner.Children[0]))
+			strictInt, inputColTypes(owner.Children[0]))
+		key.SourceTypeKnown = true
 	}
 }
 
