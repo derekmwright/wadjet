@@ -27,6 +27,29 @@ type BackgroundConfig struct {
 	// GCMinAge is the minimum age before delete markers are garbage collected
 	// and their files are force-rewritten. Zero uses DefaultGCMinAge.
 	GCMinAge time.Duration
+	// DropGrace is the minimum age before a dropped table's data files are
+	// physically deleted (catalog.Catalog.FlushDroppedTableFiles). Zero
+	// uses catalog.DefaultDropTableGrace. Only consulted when
+	// ReclaimDroppedTables is true.
+	DropGrace time.Duration
+	// ReclaimDroppedTables controls whether the sweep calls
+	// catalog.Catalog.FlushDroppedTableFiles at all. Default: false.
+	//
+	// Deliberately opt-in rather than tied to Enabled (#494 review): this
+	// *Catalog is not the only one a DROP can go through. An embedded
+	// wadjet.DB and a standalone pgwire DB each own a separate *Catalog
+	// from the one a BackgroundCompactor sweeps (cmd/wadjet/main.go's
+	// standalone mode is the concrete case — its pgwire server opens its
+	// own wadjet.DB), so turning this on unconditionally would reclaim a
+	// DROPped table's files for queries issued through the compactor's
+	// catalog while silently never reclaiming ones issued through psql or
+	// the embedded API against the others. An explicit, honest default of
+	// "not reclaimed anywhere yet" beats an inconsistent "reclaimed here,
+	// not there" that looks like a bug until someone reads the wiring.
+	// Turning it on is safe wherever it runs: FlushDroppedTableFiles's
+	// live-manifest guard and table-prefix scoping hold regardless of
+	// which *Catalog instance calls it.
+	ReclaimDroppedTables bool
 }
 
 // BackgroundCompactor runs periodic compaction sweeps across all tables.
@@ -47,6 +70,9 @@ func NewBackgroundCompactor(cat *catalog.Catalog, cfg BackgroundConfig, logger *
 	}
 	if cfg.GCMinAge == 0 {
 		cfg.GCMinAge = DefaultGCMinAge
+	}
+	if cfg.DropGrace == 0 {
+		cfg.DropGrace = catalog.DefaultDropTableGrace
 	}
 	return &BackgroundCompactor{
 		compactor: New(cat, logger, cfg.Compaction),
@@ -85,6 +111,17 @@ func (bc *BackgroundCompactor) sweep(ctx context.Context) {
 	// (their manifest entries are long gone; the grace existed only for
 	// queries dispatched against the pre-compaction manifest).
 	bc.compactor.FlushDeferredDeletes(ctx)
+
+	// Same idea for DROP TABLE (#494), gated behind ReclaimDroppedTables
+	// (see its doc comment for why this is opt-in rather than unconditional
+	// like FlushDeferredDeletes above): physically delete a dropped table's
+	// data files once DropGrace has elapsed. Independent of the table loop
+	// below by construction — the table is already gone from ListTables.
+	if bc.config.ReclaimDroppedTables {
+		if dropped := bc.catalog.FlushDroppedTableFiles(ctx, bc.config.DropGrace); dropped > 0 {
+			bc.logger.Info("flushed dropped-table files", "files", dropped)
+		}
+	}
 
 	tables, err := bc.catalog.ListTables(ctx)
 	if err != nil {

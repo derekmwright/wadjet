@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand/v2"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/storage/partition"
 )
 
 const (
@@ -68,6 +70,15 @@ type Catalog struct {
 	// process.
 	rgMetaMu    sync.Mutex
 	rgMetaCache map[string]rgMetaCacheEntry
+
+	// pendingDrops holds dropped tables' data files awaiting physical
+	// deletion once DefaultDropTableGrace elapses, subject to
+	// FlushDroppedTableFiles's live-manifest guard. See DropTable and
+	// FlushDroppedTableFiles. Nothing in this package flushes it on a
+	// timer, and production wiring of that flush is opt-in — see
+	// compaction.BackgroundConfig.ReclaimDroppedTables.
+	dropMu       sync.Mutex
+	pendingDrops []pendingTableDrop
 }
 
 // aggStatsCacheEntry is a memoized AggregateColumnStats result, valid for
@@ -983,7 +994,37 @@ func (c *Catalog) LoadUDFs() ([]UDFDef, error) {
 }
 
 // DropTable removes a table from the catalog.
-func (c *Catalog) DropTable(_ context.Context, name string) error {
+//
+// Metadata only: the table's name and manifest KV keys go away here, which
+// is what makes it immediately invisible to every NEW query (GetTable,
+// GetManifest, and ListTables all answer from this same metadata, and #483
+// keys the manifest cache by KV revision so a stale in-process copy can't
+// serve a resurrected name's old files either). The table's DATA FILES are
+// deliberately NOT deleted here — see FlushDroppedTableFiles for why, when,
+// and under what guard they go.
+//
+// Tombstone-then-grace-delete, not a prefix delete under tables/<name>/,
+// and not "leave it forever" either (#494 asked for a decision between
+// those). A live prefix delete is the wrong shape regardless of timing: a
+// CREATE TABLE of the same name during the grace window gets an entirely
+// new, unrelated set of files at that same prefix (chunk/compacted names
+// are per-file random, not derived from the table name), and a prefix
+// delete run after the fact cannot tell that incarnation's files from the
+// dropped one's — it would eat the new table's data. Recording the EXACT
+// paths this incarnation owned, once, right here, and checking each one
+// against every CURRENT manifest before ever deleting it
+// (FlushDroppedTableFiles) has no such blast radius. It doesn't reach
+// RGMetaKey/SketchesKey blobs under stats/<name>/ — those are named by
+// table+column, not by a birthday-collision-prone short ID, so they sit
+// outside #494's collision hazard; leaking them is a separate, lower-
+// severity storage-hygiene gap.
+//
+// Ordering matters: the pending-drop record is appended only AFTER the
+// metadata put below succeeds. A failed DROP (the put returns an error)
+// must leave the table exactly as recoverable as it was before the call —
+// nothing scheduled for physical deletion — not half-gone with its files
+// already timed for reclaim.
+func (c *Catalog) DropTable(ctx context.Context, name string) error {
 	meta, err := c.getMeta()
 	if err != nil {
 		return err
@@ -1002,13 +1043,207 @@ func (c *Catalog) DropTable(_ context.Context, name string) error {
 		return fmt.Errorf("table %q not found", name)
 	}
 
+	// Snapshot every data file this incarnation owns before its manifest
+	// disappears. CreateTable always writes an (initially empty) manifest
+	// alongside the table entry, so this should never miss for a table
+	// meta.Tables still lists; a miss just means nothing to schedule.
+	var dropPaths []string
+	if manifest, mErr := c.GetManifest(ctx, name); mErr == nil {
+		for _, part := range manifest.Partitions {
+			for _, f := range part.Files {
+				dropPaths = append(dropPaths, f.Path)
+			}
+		}
+	}
+
 	c.invalidateManifestCache(name)
 	_ = c.kv.Delete(c.key("table." + name))
 	_ = c.kv.Delete(c.key("manifest." + name))
 
 	meta.Tables = tables
 	meta.UpdatedAt = time.Now().UTC()
-	return c.putJSON(c.key("meta"), meta)
+	if err := c.putJSON(c.key("meta"), meta); err != nil {
+		return err
+	}
+
+	if len(dropPaths) > 0 {
+		c.recordPendingDrop(name, dropPaths)
+	}
+	return nil
+}
+
+// maxPendingTableDrops bounds pendingDrops so a process that drops many
+// tables while nothing ever calls FlushDroppedTableFiles — reclaim is
+// opt-in (compaction.BackgroundConfig.ReclaimDroppedTables), and an
+// embedded wadjet.DB or a standalone pgwire DB may never wire it at all —
+// doesn't grow this list, and the process's memory, without bound.
+const maxPendingTableDrops = 10_000
+
+// recordPendingDrop appends a dropped table's file snapshot to
+// pendingDrops, evicting the OLDEST entry first if the list is already at
+// maxPendingTableDrops. Eviction leaks the evicted table's files — they
+// are removed from pendingDrops without ever being scheduled for physical
+// deletion — rather than deleting anything outside FlushDroppedTableFiles's
+// guard: a leak is a storage-hygiene problem an operator can clean up
+// later; an incorrect delete is unrecoverable data loss (#494).
+func (c *Catalog) recordPendingDrop(table string, paths []string) {
+	c.dropMu.Lock()
+	defer c.dropMu.Unlock()
+	if len(c.pendingDrops) >= maxPendingTableDrops {
+		evicted := c.pendingDrops[0]
+		c.pendingDrops = c.pendingDrops[1:]
+		slog.Default().Warn("pendingDrops at capacity: evicting the oldest dropped table's file record without deleting its files",
+			"evicted_table", evicted.table, "evicted_files", len(evicted.paths), "cap", maxPendingTableDrops)
+	}
+	c.pendingDrops = append(c.pendingDrops, pendingTableDrop{
+		table: table,
+		paths: paths,
+		at:    time.Now(),
+	})
+}
+
+// pendingTableDrop is one dropped table's data files awaiting physical
+// deletion once their grace period elapses and FlushDroppedTableFiles's
+// live-manifest guard clears them. See DropTable and FlushDroppedTableFiles.
+type pendingTableDrop struct {
+	table string
+	paths []string
+	at    time.Time
+}
+
+// DefaultDropTableGrace bounds how long a dropped table's data files stay
+// physically present after DropTable returns, mirroring
+// compaction.DefaultDeleteGrace's reasoning exactly: a query dispatched
+// against the table's last manifest resolved its file list at dispatch
+// time and keeps reading those exact paths until it finishes, so deleting
+// the bytes the instant the manifest disappears races every such query. No
+// NEW query can be racing — the table is already gone from meta.Tables —
+// so the grace only has to outlive work already in flight.
+const DefaultDropTableGrace = 30 * time.Minute
+
+// liveManifestPaths returns the set of every file path referenced by ANY
+// table's manifest right now. This is FlushDroppedTableFiles's load-bearing
+// guard: a path recorded in pendingDrops can ALSO be live at flush time —
+// the same table name re-created and the very same object paths
+// re-registered into it (#278's documented idempotent re-registration
+// workflow lets a harness/bench loader do exactly that, and
+// iceberg.CatalogIntegration.RefreshTable does it on every metadata
+// refresh: drop, recreate, re-register the same warehouse files) — and a
+// path referenced by any CURRENT manifest must never be deleted just
+// because some OTHER, already-gone incarnation once also owned it.
+//
+// A GetManifest error for a table ListTables just returned is treated as
+// "this sweep cannot prove anything is safe" rather than "that table has
+// no files": the caller aborts the whole flush for this round instead of
+// deleting against a possibly-incomplete picture.
+func (c *Catalog) liveManifestPaths(ctx context.Context) (map[string]bool, error) {
+	tables, err := c.ListTables(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing tables: %w", err)
+	}
+	live := make(map[string]bool)
+	for _, name := range tables {
+		manifest, mErr := c.GetManifest(ctx, name)
+		if mErr != nil {
+			return nil, fmt.Errorf("reading manifest for %q: %w", name, mErr)
+		}
+		for _, part := range manifest.Partitions {
+			for _, f := range part.Files {
+				live[f.Path] = true
+			}
+		}
+	}
+	return live, nil
+}
+
+// FlushDroppedTableFiles physically deletes the data files of tables
+// DropTable removed at least grace ago (zero or negative flushes
+// everything pending, for tests). Two independent safety layers stand
+// between a pending path and the Delete call below; either alone blocks
+// the #494 review's reproduced data loss:
+//
+//  1. The live-manifest guard (liveManifestPaths, built once per call,
+//     only when there is something pending to check it against): a path
+//     referenced by ANY current table's manifest is never deleted, no
+//     matter how long its OLD incarnation has been gone. This is the
+//     load-bearing layer — it is what makes drop-then-re-register-the-
+//     same-files (#278's workflow) and Iceberg's RefreshTable
+//     (drop+recreate over the same warehouse files, every refresh) safe.
+//  2. Defense in depth: a path is only ever a delete candidate if it
+//     falls under its OWN table's partition.TablePrefix(name) —
+//     "tables/<name>/...". An Iceberg-registered table's warehouse files
+//     (or anything registered against a foreign store/bucket via
+//     iceberg.NewCatalogIntegrationWithStore) never take that shape, so
+//     they can never reach the Delete call below even if layer (1)
+//     somehow missed them.
+//
+// On top of both, this mirrors compaction.Compactor's own
+// deleteFromStore/FlushDeferredDeletes recreated-object guard: a path
+// whose object was modified after the drop was recorded is skipped,
+// since something has legitimately written there since.
+//
+// Not called from within this package on any timer, and — unlike
+// compaction's own deferred-delete flush — not called unconditionally by
+// the production background sweep either: see
+// compaction.BackgroundConfig.ReclaimDroppedTables (opt-in, default off).
+// Not every process that can DROP a table runs that sweep against the
+// same *Catalog (an embedded wadjet.DB and a standalone pgwire DB each
+// hold their own), so leaving this off by default means "not reclaimed
+// yet" rather than "reclaimed here but not there" is the honest default
+// everywhere; a leaked object is an ops cleanup problem, where an
+// incorrectly deleted one is data loss. Like the compactor's own
+// pendingDeletes, this list is process-local — a crash before the grace
+// elapses leaves the files in place rather than losing track of them
+// destructively, the same trade compaction already makes. Returns the
+// number of files deleted.
+func (c *Catalog) FlushDroppedTableFiles(ctx context.Context, grace time.Duration) int {
+	c.dropMu.Lock()
+	nothingPending := len(c.pendingDrops) == 0
+	c.dropMu.Unlock()
+	if nothingPending {
+		return 0
+	}
+
+	livePaths, err := c.liveManifestPaths(ctx)
+	if err != nil {
+		// Can't prove any path is safe to delete this round: try again
+		// next sweep instead of deleting blind.
+		return 0
+	}
+
+	cutoff := time.Now().Add(-grace)
+	c.dropMu.Lock()
+	var due, keep []pendingTableDrop
+	for _, pd := range c.pendingDrops {
+		if pd.at.Before(cutoff) {
+			due = append(due, pd)
+		} else {
+			keep = append(keep, pd)
+		}
+	}
+	c.pendingDrops = keep
+	c.dropMu.Unlock()
+
+	deleted := 0
+	for _, pd := range due {
+		tablePrefix := partition.TablePrefix(pd.table) + "/"
+		for _, p := range pd.paths {
+			if livePaths[p] {
+				continue // still referenced by a live manifest: never delete
+			}
+			if !strings.HasPrefix(p, tablePrefix) {
+				continue // defense in depth: never delete outside our own table's prefix
+			}
+			if info, hErr := c.store.Head(ctx, c.bucket, p); hErr == nil && info.LastModified.After(pd.at) {
+				continue // recreated-object guard: something wrote here since the drop
+			}
+			if dErr := c.store.Delete(ctx, c.bucket, p); dErr != nil {
+				continue
+			}
+			deleted++
+		}
+	}
+	return deleted
 }
 
 // AggregateColumnStats computes table-level column statistics by merging

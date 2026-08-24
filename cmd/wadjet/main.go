@@ -95,6 +95,7 @@ var (
 	metricsAddr           string
 	enableAlerts          bool
 	backgroundCompaction  bool
+	reclaimDroppedTables  bool
 	dataPlane             string
 	drainTimeout          time.Duration
 	dataPlaneAddr         string
@@ -211,6 +212,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
 	rootCmd.PersistentFlags().BoolVar(&enableAlerts, "enable-alerts", false, "enable CREATE ALERT DDL and scheduler (default: disabled)")
 	rootCmd.PersistentFlags().BoolVar(&backgroundCompaction, "background-compaction", true, "Run the periodic small-file compaction sweep (5m interval). --background-compaction=false disables it — useful for benchmark comparability (compaction mid-suite shifts timings and doubles data-dir disk during the delete grace) and for read-only/pre-compacted datasets.")
+	rootCmd.PersistentFlags().BoolVar(&reclaimDroppedTables, "reclaim-dropped-tables", false, "Physically delete a DROPped table's data files once catalog.DefaultDropTableGrace has elapsed, behind a live-manifest guard (a path still referenced by any current table's manifest — e.g. drop-then-re-register of the same object paths, or an Iceberg RefreshTable's drop+recreate — is never deleted) and table-prefix scoping. Default false: this process's *Catalog is not necessarily the only one a DROP can go through (standalone's pgwire server opens its own embedded wadjet.DB with a separate *Catalog from this compaction sweep's), so an operator who enables this on one process while another can also DROP against a different Catalog should understand the split — see docs/adr/0020-drop-table-reclaim-is-opt-in.md. Leaving it off just means dropped tables' files leak in the object store until reclaimed by other means, not that they are ever served incorrectly. #494.")
 
 	rootCmd.AddCommand(serveCmd())
 	rootCmd.AddCommand(queryCmd())
@@ -1208,8 +1210,9 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	// Start background compaction
 	compactor := compaction.NewBackgroundCompactor(cat, compaction.BackgroundConfig{
-		Enabled:    backgroundCompaction,
-		Compaction: compaction.DefaultConfig(),
+		Enabled:              backgroundCompaction,
+		Compaction:           compaction.DefaultConfig(),
+		ReclaimDroppedTables: reclaimDroppedTables,
 	}, logger)
 	compactor.Start(ctx)
 
@@ -1503,8 +1506,9 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 
 	// Start background compaction
 	coordCompactor := compaction.NewBackgroundCompactor(cat, compaction.BackgroundConfig{
-		Enabled:    backgroundCompaction,
-		Compaction: compaction.DefaultConfig(),
+		Enabled:              backgroundCompaction,
+		Compaction:           compaction.DefaultConfig(),
+		ReclaimDroppedTables: reclaimDroppedTables,
 	}, logger)
 	coordCompactor.Start(ctx)
 

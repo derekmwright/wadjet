@@ -126,9 +126,14 @@ func TestDistributedDropAndRecreateDoesNotServeThePreviousIncarnation(t *testing
 	mfdWrite(t, db, "CREATE TABLE drepro (c0 BIGINT, c1 BIGINT)")
 	mfdWrite(t, db, "INSERT INTO drepro VALUES (2, 999)")
 
-	// The dropped incarnation's file stores c1 as STRING and is still in the
-	// object store — DROP TABLE removes the catalog entries, not the data.
-	// It must not reach this scan under the new schema, on any worker.
+	// The dropped incarnation's file stores c1 as STRING. DROP TABLE removes
+	// the catalog entries immediately; the underlying object is not deleted
+	// synchronously (#494's catalog.Catalog.FlushDroppedTableFiles reclaims
+	// it later, behind a grace period and a live-manifest guard, and only
+	// where a process opts in — see compaction.BackgroundConfig.
+	// ReclaimDroppedTables), so the file is still physically present here.
+	// It must not reach this scan under the new schema, on any worker,
+	// regardless of whether or when it is eventually reclaimed.
 	mfdWant(t, mfdSelect(t, ctx, coord, "SELECT * FROM drepro", "c1"), []string{"999"},
 		"recreated table with a new column type")
 }

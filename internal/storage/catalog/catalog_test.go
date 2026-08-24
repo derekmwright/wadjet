@@ -1,7 +1,11 @@
 package catalog
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -803,5 +807,277 @@ func TestSwapFileForGCRefusesDuplicatePath(t *testing.T) {
 	}
 	if len(manifest.Partitions) != 1 || len(manifest.Partitions[0].Files) != 2 {
 		t.Fatalf("refused swap must leave both original files in place, got %+v", manifest.Partitions)
+	}
+}
+
+// TestDropTableDefersPhysicalDeletion is a #494 regression: DropTable must
+// not physically delete a table's data files itself (a query dispatched
+// against the pre-drop manifest may still be reading them), but it must
+// not leak them forever either — FlushDroppedTableFiles deletes them once
+// their grace period has elapsed.
+func TestDropTableDefersPhysicalDeletion(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	path := "tables/events/chunk_aaaa.parquet"
+	if _, err := cat.Store().Put(ctx, cat.Bucket(), path, bytes.NewReader([]byte("data")), 4, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
+		{Path: path, SizeBytes: 4, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Not yet due: a long grace must leave the bytes in place.
+	if n := cat.FlushDroppedTableFiles(ctx, time.Hour); n != 0 {
+		t.Fatalf("expected 0 files flushed before grace elapses, got %d", n)
+	}
+	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), path); err != nil {
+		t.Fatalf("dropped table's file must survive until its grace elapses: %v", err)
+	}
+
+	// Due: a zero/expired grace flushes it.
+	time.Sleep(2 * time.Millisecond)
+	if n := cat.FlushDroppedTableFiles(ctx, 0); n != 1 {
+		t.Fatalf("expected 1 file flushed once due, got %d", n)
+	}
+	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), path); err == nil {
+		t.Error("expected dropped table's file to be deleted from the object store after flush")
+	}
+}
+
+// TestDropTableFlushSkipsRecreatedObject mirrors compaction's own
+// recreated-object guard (deleteFromStore/FlushDeferredDeletes): if the
+// object at a to-be-deleted path was modified AFTER the drop was recorded,
+// something else legitimately wrote there since, and FlushDroppedTableFiles
+// must not delete it out from under that write.
+func TestDropTableFlushSkipsRecreatedObject(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	path := "tables/events/chunk_aaaa.parquet"
+	if _, err := cat.Store().Put(ctx, cat.Bucket(), path, bytes.NewReader([]byte("old")), 3, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
+		{Path: path, SizeBytes: 3, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Something rewrites the same path after the drop was recorded.
+	time.Sleep(2 * time.Millisecond)
+	if _, err := cat.Store().Put(ctx, cat.Bucket(), path, bytes.NewReader([]byte("new-data")), 8, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := cat.FlushDroppedTableFiles(ctx, 0); n != 0 {
+		t.Fatalf("expected the recreated object to be skipped, got %d files flushed", n)
+	}
+	rc, _, err := cat.Store().Get(ctx, cat.Bucket(), path)
+	if err != nil {
+		t.Fatalf("recreated object must survive the flush: %v", err)
+	}
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	if string(got) != "new-data" {
+		t.Fatalf("recreated object content = %q, want %q", got, "new-data")
+	}
+}
+
+// TestFlushDroppedTableFilesSkipsPathsLiveInARecreatedTable is the
+// catalog-level version of the #494 review's reproduced data loss: drop a
+// table, recreate a table of the SAME name, and re-register the very same
+// object path into it (#278's documented idempotent re-registration
+// workflow — a harness/bench loader, or Iceberg's RefreshTable, doing
+// exactly that). The live-manifest guard must see the path is referenced
+// by the recreated table's CURRENT manifest and refuse to delete it, even
+// though a pendingDrops entry for the earlier incarnation is due.
+func TestFlushDroppedTableFilesSkipsPathsLiveInARecreatedTable(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := "tables/events/chunk_aaaa.parquet"
+	if _, err := cat.Store().Put(ctx, cat.Bucket(), path, bytes.NewReader([]byte("data")), 4, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
+		{Path: path, SizeBytes: 4, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Recreate + re-register the SAME path.
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
+		{Path: path, SizeBytes: 4, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	if n := cat.FlushDroppedTableFiles(ctx, 0); n != 0 {
+		t.Fatalf("expected the live-manifest guard to skip a path re-registered into a recreated table, got %d flushed", n)
+	}
+	manifest, err := cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Partitions) != 1 || len(manifest.Partitions[0].Files) != 1 {
+		t.Fatalf("recreated table's manifest should still reference 1 file, got %+v", manifest.Partitions)
+	}
+	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), path); err != nil {
+		t.Errorf("DATA LOSS: recreated table's live file was deleted: %v", err)
+	}
+}
+
+// TestFlushDroppedTableFilesNeverDeletesOutsideItsOwnTablePrefix is a
+// defense-in-depth #494 regression, independent of the live-manifest
+// guard: a path a dropped table's manifest held that does NOT take the
+// "tables/<name>/..." shape — exactly what an Iceberg-registered table's
+// warehouse files look like, or anything registered against a foreign
+// store/bucket via iceberg.NewCatalogIntegrationWithStore — must never be
+// deleted by FlushDroppedTableFiles, even once its own table is long gone
+// and nothing protects it in liveManifestPaths.
+func TestFlushDroppedTableFilesNeverDeletesOutsideItsOwnTablePrefix(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	foreignPath := "warehouse/events/data/year=2024/part-00000.parquet"
+	if _, err := cat.Store().Put(ctx, cat.Bucket(), foreignPath, bytes.NewReader([]byte("PAR1")), 4, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
+		{Path: foreignPath, SizeBytes: 4, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	if n := cat.FlushDroppedTableFiles(ctx, 0); n != 0 {
+		t.Fatalf("expected the foreign-shaped path to be skipped, got %d files flushed", n)
+	}
+	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), foreignPath); err != nil {
+		t.Errorf("a path outside tables/<name>/ must never be deleted: %v", err)
+	}
+}
+
+// failingKV wraps a real MetaKV and can be told to fail the NEXT Put call —
+// used to simulate a DropTable whose final metadata commit fails partway
+// through, without needing a real KV outage.
+type failingKV struct {
+	MetaKV
+	failNextPut bool
+}
+
+func (f *failingKV) Put(key string, value []byte) (uint64, error) {
+	if f.failNextPut {
+		f.failNextPut = false
+		return 0, errors.New("injected: meta put failed")
+	}
+	return f.MetaKV.Put(key, value)
+}
+
+// TestDropTableKeepsFilesOnFailedMetaPut is a #494 regression for the
+// pendingDrops append ordering: DropTable must schedule nothing for
+// physical deletion unless its final metadata put actually succeeds. A
+// DROP that fails partway through must leave the table's files exactly as
+// recoverable as they were before the call — not scheduled for reclaim.
+func TestDropTableKeepsFilesOnFailedMetaPut(t *testing.T) {
+	store := objstore.NewMemStore()
+	kv := &failingKV{MetaKV: NewMemKV()}
+	cat := New(kv, store, "test-bucket")
+	ctx := context.Background()
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	schema := testSchema()
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := "tables/events/chunk_aaaa.parquet"
+	if _, err := cat.Store().Put(ctx, cat.Bucket(), path, bytes.NewReader([]byte("data")), 4, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
+		{Path: path, SizeBytes: 4, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	kv.failNextPut = true
+	if err := cat.DropTable(ctx, "events"); err == nil {
+		t.Fatal("expected DropTable to surface the injected meta-put failure")
+	}
+
+	if n := cat.FlushDroppedTableFiles(ctx, 0); n != 0 {
+		t.Fatalf("a failed DROP must not schedule any files for deletion, got %d flushed", n)
+	}
+	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), path); err != nil {
+		t.Fatalf("file must survive a failed DROP: %v", err)
+	}
+}
+
+// TestPendingDropsCapEvictsOldestWithoutDeleting is a #494 regression for
+// the reclaim-is-opt-in default: if nothing ever calls
+// FlushDroppedTableFiles (compaction.BackgroundConfig.ReclaimDroppedTables
+// defaults off), pendingDrops must not grow without bound. Past
+// maxPendingTableDrops the OLDEST entry is evicted — leaking its files —
+// rather than ever risking their deletion outside FlushDroppedTableFiles's
+// guard.
+func TestPendingDropsCapEvictsOldestWithoutDeleting(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+
+	path0 := "tables/t0/chunk_a.parquet"
+	if _, err := cat.Store().Put(ctx, cat.Bucket(), path0, bytes.NewReader([]byte("x")), 1, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	cat.recordPendingDrop("t0", []string{path0})
+
+	for i := 1; i <= maxPendingTableDrops; i++ {
+		cat.recordPendingDrop(fmt.Sprintf("t%d", i), []string{fmt.Sprintf("tables/t%d/chunk_a.parquet", i)})
+	}
+
+	cat.dropMu.Lock()
+	n := len(cat.pendingDrops)
+	oldest := cat.pendingDrops[0].table
+	cat.dropMu.Unlock()
+	if n != maxPendingTableDrops {
+		t.Fatalf("pendingDrops = %d entries, want capped at %d", n, maxPendingTableDrops)
+	}
+	if oldest == "t0" {
+		t.Fatal("expected t0 (the oldest entry) to have been evicted")
+	}
+	// t0's file must be LEAKED (still present) — it fell out of
+	// pendingDrops without ever reaching FlushDroppedTableFiles.
+	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), path0); err != nil {
+		t.Fatalf("evicted drop's file must be leaked, not deleted: %v", err)
 	}
 }

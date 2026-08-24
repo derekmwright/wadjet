@@ -387,6 +387,160 @@ func TestBackgroundSweep_GCDeleteMarkers(t *testing.T) {
 	}
 }
 
+// TestBackgroundSweep_FlushesDroppedTableFiles is a #494 regression: with
+// ReclaimDroppedTables enabled, the background compaction sweep drives
+// catalog.Catalog.FlushDroppedTableFiles (DropTable itself never deletes
+// physical bytes — see its doc comment), so a dropped table's files must
+// actually disappear once the sweep runs past their DropGrace.
+func TestBackgroundSweep_FlushesDroppedTableFiles(t *testing.T) {
+	cat, store := setupTestCatalog(t)
+	ctx := context.Background()
+	schema := testGCSchema()
+
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := "tables/events/chunk_0000.parquet"
+	rows := []map[string]any{{"id": int64(1), "name": "alice"}}
+	size := writeTestFile(t, store, "test-bucket", path, schema, rows)
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []catalog.FileEntry{
+		{Path: path, SizeBytes: size, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Get(ctx, "test-bucket", path); err != nil {
+		t.Fatalf("file must survive DropTable itself: %v", err)
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	bc := NewBackgroundCompactor(cat, BackgroundConfig{
+		Enabled:              true,
+		Compaction:           DefaultConfig(),
+		DropGrace:            time.Nanosecond,
+		ReclaimDroppedTables: true,
+	}, nil)
+	bc.sweep(ctx)
+
+	if _, _, err := store.Get(ctx, "test-bucket", path); err == nil {
+		t.Error("expected dropped table's file to be physically deleted after the sweep")
+	}
+}
+
+// TestBackgroundSweep_ReclaimDroppedTablesDefaultsOff is a #494 regression
+// for the wiring decision itself: ReclaimDroppedTables must default to
+// false, so a sweep that doesn't opt in never calls
+// FlushDroppedTableFiles even though a drop is well past its grace.
+func TestBackgroundSweep_ReclaimDroppedTablesDefaultsOff(t *testing.T) {
+	cat, store := setupTestCatalog(t)
+	ctx := context.Background()
+	schema := testGCSchema()
+
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := "tables/events/chunk_0000.parquet"
+	rows := []map[string]any{{"id": int64(1), "name": "alice"}}
+	size := writeTestFile(t, store, "test-bucket", path, schema, rows)
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []catalog.FileEntry{
+		{Path: path, SizeBytes: size, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	bc := NewBackgroundCompactor(cat, BackgroundConfig{
+		Enabled:    true,
+		Compaction: DefaultConfig(),
+		DropGrace:  time.Nanosecond,
+		// ReclaimDroppedTables left at its zero value (false).
+	}, nil)
+	bc.sweep(ctx)
+
+	if _, _, err := store.Get(ctx, "test-bucket", path); err != nil {
+		t.Errorf("dropped table's file must survive a sweep with ReclaimDroppedTables unset: %v", err)
+	}
+}
+
+// TestReviewRepro_DropThenReregisterSameFilesLosesThem is a permanent
+// #494 regression, promoted from the adversarial review's reproducer: the
+// documented re-registration workflow (#278 — harness / bench loaders /
+// Iceberg discovery re-register the SAME object paths into a table)
+// combined with the drop grace-delete used to lose data outright — DROP
+// the table, re-register the same files (they are still physically
+// present, which is the whole point of the grace), and the background
+// sweep deleted them out from under the LIVE table. The live-manifest
+// guard in catalog.Catalog.FlushDroppedTableFiles is what fixes this.
+func TestReviewRepro_DropThenReregisterSameFilesLosesThem(t *testing.T) {
+	cat, store := setupTestCatalog(t)
+	ctx := context.Background()
+	schema := testGCSchema()
+
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := "tables/events/chunk_0000.parquet"
+	rows := []map[string]any{{"id": int64(1), "name": "alice"}}
+	size := writeTestFile(t, store, "test-bucket", path, schema, rows)
+	if err := cat.AddFiles(ctx, "events", nil, "tables/events", []catalog.FileEntry{
+		{Path: path, SizeBytes: size, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Operator drops the table...
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+	// ...then re-runs the loader, which re-creates the table and
+	// re-registers the very same object paths (AddFiles is deliberately
+	// idempotent for exactly this, per #278).
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddFiles(ctx, "events", nil, "tables/events", []catalog.FileEntry{
+		{Path: path, SizeBytes: size, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The table is live and queryable right now.
+	if _, _, err := store.Get(ctx, "test-bucket", path); err != nil {
+		t.Fatalf("precondition: live table's file must exist: %v", err)
+	}
+
+	// The background sweep runs after DropGrace elapses.
+	time.Sleep(2 * time.Millisecond)
+	bc := NewBackgroundCompactor(cat, BackgroundConfig{
+		Enabled:              true,
+		Compaction:           DefaultConfig(),
+		DropGrace:            time.Nanosecond,
+		ReclaimDroppedTables: true,
+	}, nil)
+	bc.sweep(ctx)
+
+	man, err := cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := 0
+	for _, p := range man.Partitions {
+		refs += len(p.Files)
+	}
+	if refs != 1 {
+		t.Fatalf("live manifest should still reference 1 file, got %d", refs)
+	}
+	if _, _, err := store.Get(ctx, "test-bucket", path); err != nil {
+		t.Errorf("DATA LOSS: the LIVE table's manifest still references %q but the sweep deleted it: %v", path, err)
+	}
+}
+
 func TestAddDeleteMarkers_PreservesCreatedAt(t *testing.T) {
 	cat, _ := setupTestCatalog(t)
 	ctx := context.Background()
@@ -730,7 +884,7 @@ func (f *faultInjectKV) Update(key string, value []byte, expectedRev uint64) (ui
 	}
 	return f.inner.Update(key, value, expectedRev)
 }
-func (f *faultInjectKV) Delete(key string) error          { return f.inner.Delete(key) }
+func (f *faultInjectKV) Delete(key string) error              { return f.inner.Delete(key) }
 func (f *faultInjectKV) List(prefix string) ([]string, error) { return f.inner.List(prefix) }
 
 // TestGCDeleteMarkers_OrphanCASRetry simulates ErrRevisionMismatch during
