@@ -1325,6 +1325,49 @@ func postgresSemanticsCases() []pgCase {
 		) AS t`},
 	)
 
+	// --- Float PREDICATES and float KEYS under the same order (#459) --------
+	//
+	// #457 (above) settled the aggregate accumulators. The rest of the tree
+	// still read floats as IEEE754: `=` was not reflexive for NaN, `>` did not
+	// place NaN above everything, and the GROUP BY / DISTINCT / hash-join key
+	// hashed raw bits, so -0.0 and +0.0 were two groups and never joined.
+	// PostgreSQL says otherwise on every one of those, and this is the
+	// standing proof — the same SQL, both engines, no exemptions.
+	//
+	// pgFloatRows is the eight-row fixture read live off postgres:17-alpine
+	// while these entries were written: one NaN, both zeros, both infinities,
+	// two ordinary values and a NULL.
+	out = append(out,
+		pgCase{name: "FloatSelfEqualityIncludesNaN",
+			sql: `SELECT COUNT(*) AS n FROM (` + pgFloatRows + `) t WHERE v = v`},
+		pgCase{name: "FloatGreaterThanAdmitsNaN",
+			sql: `SELECT k FROM (` + pgFloatRows + `) t WHERE v > 1e300 ORDER BY k`},
+		pgCase{name: "FloatGreaterEqualAdmitsNaN",
+			sql: `SELECT k FROM (` + pgFloatRows + `) t WHERE v >= 1e300 ORDER BY k`},
+		pgCase{name: "FloatLessThanExcludesNaN",
+			sql: `SELECT k FROM (` + pgFloatRows + `) t WHERE v < 1e300 ORDER BY k`},
+		pgCase{name: "FloatNotEqualAdmitsNaN",
+			sql: `SELECT k FROM (` + pgFloatRows + `) t WHERE v <> 1e300 ORDER BY k`},
+		pgCase{name: "FloatComparedToNaNConstant",
+			sql: `SELECT k FROM (` + pgFloatRows + `) t
+				WHERE v = CAST('NaN' AS DOUBLE PRECISION) OR v >= CAST('NaN' AS DOUBLE PRECISION) ORDER BY k`},
+		pgCase{name: "FloatLessEqualNaNConstantAdmitsAll",
+			sql: `SELECT COUNT(*) AS n FROM (` + pgFloatRows + `) t WHERE v <= CAST('NaN' AS DOUBLE PRECISION)`},
+		pgCase{name: "FloatInListWithNaN",
+			sql: `SELECT k FROM (` + pgFloatRows + `) t WHERE v IN (CAST('NaN' AS DOUBLE PRECISION), 1.0) ORDER BY k`},
+		pgCase{name: "FloatNotInListWithNaN",
+			sql: `SELECT k FROM (` + pgFloatRows + `) t WHERE v NOT IN (CAST('NaN' AS DOUBLE PRECISION), 1.0) ORDER BY k`},
+		// The KEY half. The two zeros are one group of two, the NaN is its
+		// own group of one, and the NULL is a group as GROUP BY (not
+		// COUNT(DISTINCT)) counts it.
+		pgCase{name: "FloatGroupKeyFoldsZerosAndNaN",
+			sql: `SELECT COUNT(*) AS c, MIN(k) AS lo FROM (` + pgFloatRows + `) t GROUP BY v ORDER BY c, lo`},
+		pgCase{name: "FloatDistinctFoldsZerosAndNaN",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT DISTINCT v FROM (` + pgFloatRows + `) t) d`},
+		pgCase{name: "FloatCountDistinctFoldsZerosAndNaN",
+			sql: `SELECT COUNT(DISTINCT v) AS n FROM (` + pgFloatRows + `) t`},
+	)
+
 	// --- DECIMAL group / DISTINCT / join keys (#474) ------------------------
 	//
 	// The key for a DECIMAL was the float64 BITS of the value, which holds ~16
@@ -1358,7 +1401,34 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DecimalCrossScaleSemiJoin",
 			sql: `SELECT a.d_key FROM dec_probe a WHERE EXISTS
 				(SELECT 1 FROM dec_probe b WHERE b.d_4 = a.d_2) ORDER BY a.d_key`},
+		// The same two joins WITHOUT the IS NOT NULL guards. Both columns are
+		// nullable, so these also assert that a NULL key matches nothing —
+		// itself included — which is what the serialized join key's lone
+		// null-flag byte got wrong (#459).
+		pgCase{name: "DecimalWideSelfJoinWithNulls",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN dec_probe b ON a.d_wide = b.d_wide`},
+		pgCase{name: "DecimalCrossScaleJoinWithNulls",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN dec_probe b ON a.d_2 = b.d_4`},
+		// A NULL key must not match in a plain equi-join over any type, and
+		// the STRING key is the encoding the defect lived in.
+		pgCase{name: "NullableStringKeySelfJoin",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN dec_probe b ON a.d_2 = b.d_2`},
 	)
 
 	return out
 }
+
+// pgFloatRows is the eight-row float fixture the #459 entries above are
+// written over, as a derived table both engines parse identically. NaN and
+// ±Infinity have to be manufactured with CAST rather than stored: ingest
+// JSON-encodes row-group statistics into the catalog manifest and
+// encoding/json refuses them, so no wadjet table can hold one today.
+const pgFloatRows = `
+	SELECT 1 AS k, CAST('NaN' AS DOUBLE PRECISION) AS v
+	UNION ALL SELECT 2, CAST(0.0 AS DOUBLE PRECISION)
+	UNION ALL SELECT 3, CAST(-0.0 AS DOUBLE PRECISION)
+	UNION ALL SELECT 4, CAST('Infinity' AS DOUBLE PRECISION)
+	UNION ALL SELECT 5, CAST('-Infinity' AS DOUBLE PRECISION)
+	UNION ALL SELECT 6, CAST(1.0 AS DOUBLE PRECISION)
+	UNION ALL SELECT 7, CAST(2.0 AS DOUBLE PRECISION)
+	UNION ALL SELECT 8, CAST(NULL AS DOUBLE PRECISION)`

@@ -61,6 +61,23 @@ func CanPruneRowGroup(pred StatsPredicate, stats pqt.RowGroupStats) bool {
 	min := colStats.MinValue
 	max := colStats.MaxValue
 
+	// A FLOAT column's statistics say nothing about NaN. The parquet format
+	// keeps NaN out of min/max by specification, and wadjet's own writer never
+	// lets one win a `<`/`>` either — so a row group whose bounds are [1, 5]
+	// may still hold a NaN. PostgreSQL orders NaN ABOVE every value (ADR-0012
+	// item 8), which the filter kernels now do too, so `> c`, `>= c` and
+	// `<> c` are TRUE for that invisible row and pruning on the bounds would
+	// delete rows the filter keeps — a prune reading the predicate differently
+	// from the filter (ADR-0018). `=`, `<` and `<=` need no exception: NaN
+	// satisfies none of them against a finite constant, so the bounds decide
+	// those correctly whether or not a NaN is hiding.
+	if isFloatBound(min) || isFloatBound(max) {
+		switch pred.Op {
+		case exec.OpGt, exec.OpGe, exec.OpNe:
+			return false
+		}
+	}
+
 	switch pred.Op {
 	case exec.OpEq:
 		// Prune if value < min or value > max
@@ -95,6 +112,17 @@ func CanPruneRowGroup(pred StatsPredicate, stats pqt.RowGroupStats) bool {
 	default:
 		return false
 	}
+}
+
+// isFloatBound reports whether a statistics bound came from a FLOAT column.
+// The bound's Go kind is the only signal available here — CanPruneRowGroup is
+// handed a decoded bound and a literal, not the column's declared type.
+func isFloatBound(v any) bool {
+	switch v.(type) {
+	case float32, float64:
+		return true
+	}
+	return false
 }
 
 // CompareValues compares two typed values (int32, int64, float32, float64, string).

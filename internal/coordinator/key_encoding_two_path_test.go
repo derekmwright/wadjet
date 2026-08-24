@@ -10,21 +10,24 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// The distributed half of #474.
+// The distributed half of #474 and #459's key arms.
 //
-// A DECIMAL group / DISTINCT / join key was the float64 BITS of the value, so
-// values differing past ~16 significant digits shared a key.
+// #474: a DECIMAL group / DISTINCT / join key was the float64 BITS of the
+// value, so values differing past ~16 significant digits shared a key.
+// #459: a FLOAT key was the raw IEEE bits, so -0.0 and +0.0 were two groups
+// and two NaNs of different payload were two more — while the comparator,
+// ORDER BY and the spilled merge key had already folded them.
 //
-// It is fixed in one place, `appendColumnValue` (exec/aggregate.go), which the
-// in-process gates in internal/engine/exec and wadjet cover. What they cannot
-// see is the SHUFFLE: `hashRowsIntoPartitions`
+// Both are fixed in one place, `appendColumnValue` (exec/aggregate.go), which
+// the in-process gates in internal/engine/exec and wadjet cover. What they
+// cannot see is the SHUFFLE: `hashRowsIntoPartitions`
 // (internal/worker/partitioned_shuffle_sink.go) routes rows to exchange
 // partitions with its OWN hash, and a router that disagrees with the key
 // sends two equal values to different workers, where no key comparison can
-// ever bring them back together. That hash keyed a DECIMAL on the raw Int128,
-// which is scale-dependent, so a cross-scale join stopped co-partitioning.
-// This gate is the proof the two agree, over the same rows, through the real
-// DAG.
+// ever bring them back together. That hash keyed a DECIMAL on the raw Int128
+// (scale-dependent, so a cross-scale join stops co-partitioning) and a float
+// on raw IEEE bits (so ±0.0 and two NaN payloads split). This gate is the
+// proof the two agree, over the same rows, through the real DAG.
 const ketTable = "keyenc"
 
 // ketValueExpr manufactures the NaN/±Inf values, which cannot be ingested:
@@ -115,10 +118,12 @@ func TestKeyEncodingTwoPath(t *testing.T) {
 
 	coord := tmdCluster(t, ctx)
 	single := tmdStandalone(t, ctx)
+	v := ketValueExpr
 
 	// Every expectation below is PostgreSQL's answer over the same values
-	// (verified live against postgres:17-alpine): the four DECIMALs are FOUR
-	// values however close their doubles are.
+	// (verified live against postgres:17-alpine): the two zeros are ONE
+	// value, the NaNs are ONE value equal to itself, and the four DECIMALs
+	// are FOUR values however close their doubles are.
 	cases := []struct {
 		name string
 		sql  string
@@ -130,6 +135,22 @@ func TestKeyEncodingTwoPath(t *testing.T) {
 		// 16 rows, four values, four rows each: 4 x 4 x 4.
 		{"decimal_self_join", fmt.Sprintf(
 			"SELECT COUNT(*) AS n FROM %s a JOIN %s b ON a.d = b.d", ketTable, ketTable), 64},
+		// Float groups over the stored ±0.0 column: 0 (four rows), 1, 2, and
+		// the NULLs. Four groups, not five.
+		{"float_stored_groups", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM (SELECT z, COUNT(*) AS c FROM %s GROUP BY z) g", ketTable), 4},
+		{"float_stored_zero_group", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM (SELECT z, COUNT(*) AS c FROM %s WHERE z = 0 GROUP BY z HAVING COUNT(*) = 4) g",
+			ketTable), 1},
+		// Computed column: NaN, 0, 1, 2, +Inf, -Inf, NULL = 7 groups.
+		{"float_computed_groups", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM (SELECT (%s) AS f, COUNT(*) AS c FROM %s GROUP BY 1) g", v, ketTable), 7},
+		{"float_self_join_zero", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM (SELECT id, z FROM %s WHERE z = 0) a JOIN (SELECT id, z FROM %s WHERE z = 0) b ON a.z = b.z",
+			ketTable, ketTable), 16},
+		// The predicate arms, distributed.
+		{"float_gt_1e300", fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE (%s) > 1e300", ketTable, v), 4},
+		{"float_self_eq", fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE (%s) = (%s)", ketTable, v, v), 14},
 	}
 
 	for _, tc := range cases {

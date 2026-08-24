@@ -396,23 +396,15 @@ func compareInt64(a, b int64, op CompareOp) bool {
 	}
 }
 
+// compareFloat64 is the row-at-a-time twin of the vectorized FLOAT kernel
+// (kernel.compareFilterFloat), and answers in the same order: PostgreSQL's,
+// where NaN is the greatest value and equal to itself. Go's own operators are
+// IEEE754, so this path used to disagree with ORDER BY, with the group key,
+// and — once the kernel moved — with the vectorized filter over the same
+// predicate, which is the two-path divergence ADR-0012's consequence note
+// records for DECIMAL.
 func compareFloat64(a, b float64, op CompareOp) bool {
-	switch op {
-	case OpEq:
-		return a == b
-	case OpNe:
-		return a != b
-	case OpLt:
-		return a < b
-	case OpLe:
-		return a <= b
-	case OpGt:
-		return a > b
-	case OpGe:
-		return a >= b
-	default:
-		return false
-	}
+	return kernel.FloatCompareOp(a, b, toKernelOp(op))
 }
 
 func compareString(a, b string, op CompareOp) bool {

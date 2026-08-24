@@ -1356,20 +1356,26 @@ func (e *CmpFloat64) EvalBool(b *batch.RecordBatch, row int) bool {
 	return cmpFloat64Op(lv, rv, e.Op)
 }
 
+// cmpFloat64Op compares two float64 operands in PostgreSQL's float order —
+// NaN greatest and equal to itself, -0.0 equal to +0.0 — which is the order
+// the vectorized kernel, the group key, ORDER BY and the window peer groups
+// all use (ADR-0012 item 8). Go's operators are IEEE754, so spelling them
+// directly here made `CASE WHEN f = f` and `HAVING f > 1e300` answer
+// differently from the same predicate in a WHERE clause.
 func cmpFloat64Op(lv, rv float64, op CmpOp) bool {
 	switch op {
 	case CmpEq:
-		return lv == rv
+		return kernel.FloatEq(lv, rv)
 	case CmpNe:
-		return lv != rv
+		return kernel.FloatNe(lv, rv)
 	case CmpLt:
-		return lv < rv
+		return kernel.FloatLt(lv, rv)
 	case CmpLe:
-		return lv <= rv
+		return kernel.FloatLe(lv, rv)
 	case CmpGt:
-		return lv > rv
+		return kernel.FloatGt(lv, rv)
 	case CmpGe:
-		return lv >= rv
+		return kernel.FloatGe(lv, rv)
 	default:
 		return false
 	}
@@ -4411,23 +4417,11 @@ func compare(a, b any, op CmpOp) bool {
 			}
 		}
 	}
-	// Fast path: both float64
+	// Fast path: both float64. PostgreSQL's float order, like every other
+	// float comparison in the tree (cmpFloat64Op above).
 	if af, ok := a.(float64); ok {
 		if bf, ok := b.(float64); ok {
-			switch op {
-			case CmpEq:
-				return af == bf
-			case CmpNe:
-				return af != bf
-			case CmpLt:
-				return af < bf
-			case CmpLe:
-				return af <= bf
-			case CmpGt:
-				return af > bf
-			case CmpGe:
-				return af >= bf
-			}
+			return cmpFloat64Op(af, bf, op)
 		}
 	}
 	// Fast path: both string

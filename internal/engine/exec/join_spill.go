@@ -1499,7 +1499,10 @@ func (p *HashJoinProbe) probePartition(in *batch.RecordBatch, row int) int {
 		}
 		return spillPartition(dualIntHash(a, b))
 	}
-	p.buildProbeKey(in, row)
+	// The key's matchability is irrelevant to ROUTING: a NULL-keyed probe row
+	// still needs a deterministic partition, the same way the integer arms
+	// above send one to partition 0.
+	_ = p.buildProbeKey(in, row)
 	return spillPartitionBytes(p.keyBuf)
 }
 

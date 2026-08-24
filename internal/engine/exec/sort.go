@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"math"
 	"sort"
 	"strconv"
 	"sync"
@@ -1257,27 +1256,13 @@ func appendKeyFloats(buf []byte, vals []float32) []byte {
 // bits must key alike). Used by keyFloat32bits/keyFloat64bits (below) and by
 // appendKeyValue's float arms, so the same fold applies whether the caller
 // keys by bit pattern or by formatting the float64/float32 the box holds.
-func canonicalFloat32(f float32) float32 {
-	if f != f {
-		return float32(math.NaN())
-	}
-	if f == 0 {
-		// Also folds -0.0: `==` treats -0.0 and +0.0 as equal, and the
-		// untyped constant 0 is +0.0.
-		return 0
-	}
-	return f
-}
+// The rule itself lives with the comparator it has to agree with
+// (kernel.CanonicalFloat32/64, kernel/float_order.go) — the group key, the
+// join key, the shuffle's partition router and this merge key all state it
+// once, from there.
+func canonicalFloat32(f float32) float32 { return kernel.CanonicalFloat32(f) }
 
-func canonicalFloat64(f float64) float64 {
-	if f != f {
-		return math.NaN()
-	}
-	if f == 0 {
-		return 0
-	}
-	return f
-}
+func canonicalFloat64(f float64) float64 { return kernel.CanonicalFloat64(f) }
 
 // keyFloat32bits / keyFloat64bits are Float32bits/Float64bits with every NaN
 // folded onto one payload and -0.0 folded onto +0.0.
@@ -1293,13 +1278,9 @@ func canonicalFloat64(f float64) float64 {
 // comparator already puts in one peer group). A payload, and a zero's sign,
 // are not part of a DECIMAL-free SQL value's identity, so folding them is the
 // side to give.
-func keyFloat32bits(f float32) uint32 {
-	return math.Float32bits(canonicalFloat32(f))
-}
+func keyFloat32bits(f float32) uint32 { return kernel.KeyFloat32Bits(f) }
 
-func keyFloat64bits(f float64) uint64 {
-	return math.Float64bits(canonicalFloat64(f))
-}
+func keyFloat64bits(f float64) uint64 { return kernel.KeyFloat64Bits(f) }
 
 // Nested-element kind tags. Every nested element is SELF-DELIMITING: a tag,
 // then a fixed-width or length-prefixed payload. The top level's text forms

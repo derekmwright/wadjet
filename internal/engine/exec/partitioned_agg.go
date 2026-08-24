@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"math"
 	"math/bits"
 	"os"
 	"sync"
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/optswitch"
 )
 
@@ -573,9 +573,16 @@ func legacyCompositeHash(cols []*batch.Vector, row int) uint64 {
 }
 
 func f64bits(f float64) uint64 {
-	// NaN and ±0 canonicalization is unnecessary here: group-key equality
-	// in the aggregate uses the same raw bit patterns.
-	return math.Float64bits(f)
+	// Canonical bits, folding every NaN payload onto one NaN and -0.0 onto
+	// +0.0. This is a ROUTING hash, but routing decides group identity here:
+	// each partition owns its own hash table, so two rows this function sends
+	// to different partitions can never become one group however the sink
+	// compares them. The sink's key does call them equal (the comparator does,
+	// and PostgreSQL does), so the router has to as well - the comment this
+	// replaced said the canonicalization was unnecessary "because group-key
+	// equality in the aggregate uses the same raw bit patterns", which stopped
+	// being true when the group key was canonicalized (#459).
+	return kernel.KeyFloat64Bits(f)
 }
 
 // fnv1aBytes routes string group keys to partition owners. Word-at-a-time

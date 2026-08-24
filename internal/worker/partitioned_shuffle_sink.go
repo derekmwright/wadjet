@@ -18,6 +18,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/diskio"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -1176,7 +1177,13 @@ func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, h
 				if col.Nulls.IsNullFast(row) {
 					h = (h ^ 0xff) * fnvPrime64
 				} else {
-					v := math.Float32bits(data[row])
+					// Canonical bits, not raw: -0.0 and +0.0 are one value
+					// and every NaN payload is one value (kernel/
+					// float_order.go), so they must route to ONE partition
+					// or the shuffle join and the shuffle aggregate would
+					// answer differently from the single-process ones that
+					// key them alike (#459).
+					v := kernel.KeyFloat32Bits(data[row])
 					h = (h ^ uint64(byte(v))) * fnvPrime64
 					h = (h ^ uint64(byte(v>>8))) * fnvPrime64
 					h = (h ^ uint64(byte(v>>16))) * fnvPrime64
@@ -1195,7 +1202,7 @@ func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, h
 				if col.Nulls.IsNullFast(row) {
 					h = (h ^ 0xff) * fnvPrime64
 				} else {
-					v := math.Float64bits(data[row])
+					v := kernel.KeyFloat64Bits(data[row])
 					h = (h ^ uint64(byte(v))) * fnvPrime64
 					h = (h ^ uint64(byte(v>>8))) * fnvPrime64
 					h = (h ^ uint64(byte(v>>16))) * fnvPrime64

@@ -86,6 +86,51 @@ func compareFilterImpl[T Ordered](getData func(v *batch.Vector) []T, val T, op C
 	}
 }
 
+// compareFilterFloat is compareFilterImpl for FLOAT32/FLOAT64: identical loop
+// shape, but the per-row test comes from resolveFloatConstPred so the column
+// is compared in PostgreSQL's total order rather than Go's IEEE754 one
+// (kernel/float_order.go). The operator and the constant's NaN-ness are
+// resolved once, here, so the inner loop keeps a single call through a
+// non-escaping closure exactly as the generic kernel does.
+func compareFilterFloat[T FloatOrdered](getData func(v *batch.Vector) []T, val T, op CompareOp) FilterKernel {
+	keep := resolveFloatConstPred(op, val)
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		data := getData(vec)
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		if sel != nil {
+			if hasNulls {
+				for _, idx := range sel {
+					if !vec.Nulls.IsNullFast(int(idx)) && keep(data[idx]) {
+						out = append(out, idx)
+					}
+				}
+			} else {
+				for _, idx := range sel {
+					if keep(data[idx]) {
+						out = append(out, idx)
+					}
+				}
+			}
+		} else {
+			if hasNulls {
+				for i := 0; i < vecLen; i++ {
+					if !vec.Nulls.IsNullFast(i) && keep(data[i]) {
+						out = append(out, uint32(i))
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					if keep(data[i]) {
+						out = append(out, uint32(i))
+					}
+				}
+			}
+		}
+		return out
+	}
+}
+
 // Data accessor functions for each vector type.
 func getInt64Data(v *batch.Vector) []int64     { return v.Int64Data }
 func getInt32Data(v *batch.Vector) []int32     { return v.Int32Data }
@@ -168,9 +213,12 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 	case batch.TypeInt32:
 		return compareFilterImpl(getInt32Data, int32(toInt64(value)), op)
 	case batch.TypeFloat64:
-		return compareFilterImpl(getFloat64Data, toFloat64(value), op)
+		// Not compareFilterImpl: FLOAT compares in PostgreSQL's total order,
+		// where NaN is the greatest value and equal to itself, so `> 1e300`
+		// admits a NaN row and `= f` keeps one (#459, ADR-0012 item 8).
+		return compareFilterFloat(getFloat64Data, toFloat64(value), op)
 	case batch.TypeFloat32:
-		return compareFilterImpl(getFloat32Data, float32(toFloat64(value)), op)
+		return compareFilterFloat(getFloat32Data, float32(toFloat64(value)), op)
 	case batch.TypeString:
 		return compareFilterString(op, toString(value))
 	case batch.TypeIPv4:
@@ -474,11 +522,8 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 		}
 		return inFilterInt32(getInt32Data, set, negate)
 	case batch.TypeFloat64:
-		set := make(map[float64]struct{}, len(values))
-		for _, v := range values {
-			set[toFloat64(v)] = struct{}{}
-		}
-		return inFilterFloat64(set, negate)
+		set, hasNaN := floatInSet(values)
+		return inFilterFloat64(set, hasNaN, negate)
 	case batch.TypeString, batch.TypeCIDR:
 		set := make(map[string]struct{}, len(values))
 		for _, v := range values {
@@ -530,11 +575,8 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 		// The probe widens to float64, which is exact for every float32, so
 		// the set is built the same way and 1.5 in the list matches 1.5 in
 		// the column.
-		set := make(map[float64]struct{}, len(values))
-		for _, v := range values {
-			set[toFloat64(v)] = struct{}{}
-		}
-		return inFilterFloat32(set, negate)
+		set, hasNaN := floatInSet(values)
+		return inFilterFloat32(set, hasNaN, negate)
 	case batch.TypeBool:
 		return inFilterBool(values, negate)
 	case batch.TypeDecimal:
@@ -544,13 +586,41 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 	}
 }
 
+// floatInSet builds an IN list's float64 membership set, and reports
+// separately whether the list held a NaN.
+//
+// The flag is not redundant with the map. A Go map's keys compare with `==`,
+// which is IEEE754: a NaN key is unreachable by lookup — inserting one and
+// probing with a NaN both miss — so a NaN in the list could never have matched
+// a NaN in the column, though PostgreSQL says it does (NaN = NaN is TRUE, so
+// `f IN ('NaN')` selects the NaN rows). `==` also makes -0.0 and +0.0 the SAME
+// key, which is the answer PostgreSQL gives and is a property of the language
+// rather than of the runtime's hashing, so no fold is needed for that pair.
+func floatInSet(values []any) (map[float64]struct{}, bool) {
+	set := make(map[float64]struct{}, len(values))
+	hasNaN := false
+	for _, v := range values {
+		f := toFloat64(v)
+		if f != f {
+			hasNaN = true
+			continue
+		}
+		set[f] = struct{}{}
+	}
+	return set, hasNaN
+}
+
 // inFilterFloat32 probes a FLOAT32 column against a float64 set.
-func inFilterFloat32(set map[float64]struct{}, negate bool) FilterKernel {
+func inFilterFloat32(set map[float64]struct{}, hasNaN, negate bool) FilterKernel {
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()
 		keep := func(i int) bool {
-			_, found := set[float64(vec.Float32Data[i])]
+			f := vec.Float32Data[i]
+			if f != f {
+				return hasNaN != negate
+			}
+			_, found := set[float64(f)]
 			return found != negate
 		}
 		if sel != nil {
@@ -781,18 +851,26 @@ func inFilterInt32(getData func(v *batch.Vector) []int32, set map[int32]struct{}
 	}
 }
 
-func inFilterFloat64(set map[float64]struct{}, negate bool) FilterKernel {
+func inFilterFloat64(set map[float64]struct{}, hasNaN, negate bool) FilterKernel {
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		data := vec.Float64Data
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()
+		member := func(f float64) bool {
+			if f != f {
+				// A NaN column value: the Go map cannot answer this (see
+				// floatInSet), and PostgreSQL says NaN = NaN.
+				return hasNaN
+			}
+			_, found := set[f]
+			return found
+		}
 		if sel != nil {
 			for _, idx := range sel {
 				if hasNulls && vec.Nulls.IsNullFast(int(idx)) {
 					continue
 				}
-				_, found := set[data[idx]]
-				if found != negate {
+				if member(data[idx]) != negate {
 					out = append(out, idx)
 				}
 			}
@@ -801,8 +879,7 @@ func inFilterFloat64(set map[float64]struct{}, negate bool) FilterKernel {
 				if hasNulls && vec.Nulls.IsNullFast(i) {
 					continue
 				}
-				_, found := set[data[i]]
-				if found != negate {
+				if member(data[i]) != negate {
 					out = append(out, uint32(i))
 				}
 			}
@@ -1242,6 +1319,51 @@ func colColFilterString(op CompareOp) ColColFilterKernel {
 	}
 }
 
+// colColFilterFloat is colColFilterImpl for FLOAT32/FLOAT64, with the
+// per-row test taken from PostgreSQL's float total order — the same
+// substitution compareFilterFloat makes on the constant side, and the reason
+// `WHERE f = f` no longer drops the NaN rows.
+func colColFilterFloat[T FloatOrdered](getData func(v *batch.Vector) []T, op CompareOp) ColColFilterKernel {
+	cmpFn := resolveFloatColColPred[T](op)
+	return func(left, right *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		ld := getData(left)
+		rd := getData(right)
+		out := outSel[:0]
+		hasNulls := left.Nulls.HasNulls() || right.Nulls.HasNulls()
+		if sel != nil {
+			if hasNulls {
+				for _, idx := range sel {
+					i := int(idx)
+					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && cmpFn(ld[idx], rd[idx]) {
+						out = append(out, idx)
+					}
+				}
+			} else {
+				for _, idx := range sel {
+					if cmpFn(ld[idx], rd[idx]) {
+						out = append(out, idx)
+					}
+				}
+			}
+		} else {
+			if hasNulls {
+				for i := 0; i < vecLen; i++ {
+					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && cmpFn(ld[i], rd[i]) {
+						out = append(out, uint32(i))
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					if cmpFn(ld[i], rd[i]) {
+						out = append(out, uint32(i))
+					}
+				}
+			}
+		}
+		return out
+	}
+}
+
 // ResolveColColFilterKernel creates a ColColFilterKernel for comparing two columns
 // of the given type. Returns nil if the type is not supported.
 func ResolveColColFilterKernel(typ batch.TypeID, op CompareOp) ColColFilterKernel {
@@ -1251,9 +1373,11 @@ func ResolveColColFilterKernel(typ batch.TypeID, op CompareOp) ColColFilterKerne
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		return colColFilterImpl(getInt32Data, op)
 	case batch.TypeFloat64:
-		return colColFilterImpl(getFloat64Data, op)
+		// PostgreSQL's float order, not Go's — `WHERE f = f` is TRUE for a
+		// NaN row and `WHERE a > b` is TRUE when a is NaN and b is not.
+		return colColFilterFloat(getFloat64Data, op)
 	case batch.TypeFloat32:
-		return colColFilterImpl(getFloat32Data, op)
+		return colColFilterFloat(getFloat32Data, op)
 	case batch.TypeString, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		return colColFilterString(op)
 	case batch.TypeDecimal:

@@ -209,6 +209,13 @@ type HashJoin struct {
 	// Collected during Build() for range-based row-group pruning on the probe side.
 	buildKeyMin []any
 	buildKeyMax []any
+	// buildKeyNaN[i] records that build key column i held a NaN, which
+	// SUPPRESSES its dynamic range entirely. A NaN join key matches another
+	// NaN (PostgreSQL's float order, ADR-0012 item 8) and parquet statistics
+	// deliberately exclude NaN from min/max, so no [min,max] bound can tell
+	// whether a probe row group holds a matching one: any range would prune
+	// row groups the join would have matched.
+	buildKeyNaN []bool
 
 	// trackedMem tracks how much memory THIS join has reserved from the shared
 	// MemTracker. Used during spill to release only this join's contribution
@@ -289,6 +296,9 @@ func (h *HashJoin) BuildKeyRange() []DynamicRange {
 	}
 	ranges := make([]DynamicRange, 0, len(h.LeftKeys))
 	for i, col := range h.LeftKeys {
+		if i < len(h.buildKeyNaN) && h.buildKeyNaN[i] {
+			continue // see buildKeyNaN
+		}
 		if i < len(h.buildKeyMin) && h.buildKeyMin[i] != nil {
 			ranges = append(ranges, DynamicRange{
 				Column:   col,
@@ -312,6 +322,7 @@ func (h *HashJoin) updateKeyMinMax(b *batch.RecordBatch) {
 	if h.buildKeyMin == nil {
 		h.buildKeyMin = make([]any, len(h.buildKeyIdx))
 		h.buildKeyMax = make([]any, len(h.buildKeyIdx))
+		h.buildKeyNaN = make([]bool, len(h.buildKeyIdx))
 	}
 	for ki, colIdx := range h.buildKeyIdx {
 		if colIdx < 0 || colIdx >= len(b.Columns) {
@@ -408,6 +419,16 @@ func (h *HashJoin) updateKeyMinMax(b *batch.RecordBatch) {
 					return
 				}
 				v := col.Float64Data[row]
+				if v != v {
+					// A NaN build key. It is a real key that a probe-side NaN
+					// matches, and it has no place in a [min,max] bound the
+					// probe's parquet statistics could be compared against —
+					// those exclude NaN by specification. Record it and leave
+					// the bound to the finite values; BuildKeyRange then
+					// withholds this column's range altogether.
+					h.buildKeyNaN[ki] = true
+					return
+				}
 				if first {
 					lo, hi = v, v
 					first = false
@@ -603,7 +624,9 @@ func (p *HashJoinProbe) existsInBuild(in *batch.RecordBatch, row int) bool {
 	if h.strIndex == nil {
 		return false
 	}
-	p.buildProbeKey(in, row)
+	if !p.buildProbeKey(in, row) {
+		return false // NULL key: matches nothing, itself included
+	}
 	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(p.keyBuf)) {
 		return false
 	}
@@ -668,7 +691,9 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 	if h.strIndex == nil {
 		return p.lookupBuf
 	}
-	p.buildProbeKey(in, row)
+	if !p.buildProbeKey(in, row) {
+		return p.lookupBuf // NULL key: matches nothing, itself included
+	}
 	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(p.keyBuf)) {
 		return p.lookupBuf
 	}
@@ -2035,13 +2060,33 @@ func (h *HashJoin) resolveProbeKeyIdx(b *batch.RecordBatch) {
 	h.probeResolved.Store(true)
 }
 
-// buildProbeKey fills p.keyBuf with the serialized probe key for a row.
-// Uses the per-probe keyBuf to avoid races when multiple cloned probes
-// execute in parallel.
-func (p *HashJoinProbe) buildProbeKey(b *batch.RecordBatch, row int) {
+// buildProbeKey fills p.keyBuf with the serialized probe key for a row and
+// reports whether that key may MATCH. Uses the per-probe keyBuf to avoid races
+// when multiple cloned probes execute in parallel.
+//
+// A row holding a NULL in any key column reports false: SQL's `=` is UNKNOWN
+// against a NULL, so an equi-join must not pair it with anything — not even
+// with another NULL. The key bytes are still filled in, because the partition
+// router (probePartition, join_spill.go) needs a deterministic partition for
+// every row including that one, exactly as the integer paths return partition
+// 0 for a key they refuse to match.
+//
+// Without the flag, a NULL serialized to a lone 0x01 flag byte with no
+// payload, so two NULL rows produced IDENTICAL key bytes and the string hash
+// table — which matches keys by byte equality — joined them. The integer fast
+// paths (intProbeKey, dualIntKeyFromVectors) have always refused a NULL key,
+// so which answer a query got depended on whether its key columns happened to
+// be integers (#459).
+//
+// An UNRESOLVABLE key column (idx < 0) is deliberately NOT a NULL here: it
+// keeps its flag byte and its matchability, because folding it in would turn
+// a join whose key column is missing from the probe schema from "matches
+// everything" into "matches nothing" — a different bug, in a different place.
+func (p *HashJoinProbe) buildProbeKey(b *batch.RecordBatch, row int) bool {
 	h := p.join
 	h.resolveProbeKeyIdx(b)
 	p.keyBuf = p.keyBuf[:0]
+	matchable := true
 	for _, idx := range h.probeKeyIdx {
 		if idx < 0 {
 			p.keyBuf = append(p.keyBuf, 1) // null flag
@@ -2050,11 +2095,13 @@ func (p *HashJoinProbe) buildProbeKey(b *batch.RecordBatch, row int) {
 		v := b.Columns[idx]
 		if v.Nulls.IsNullFast(row) {
 			p.keyBuf = append(p.keyBuf, 1) // null flag
+			matchable = false
 		} else {
 			p.keyBuf = append(p.keyBuf, 0) // not-null flag
 			p.keyBuf = appendColumnValue(p.keyBuf, v, row, v.Type)
 		}
 	}
+	return matchable
 }
 
 // joinOutputPoolSize is the capacity for join output batch pooling.
@@ -2207,7 +2254,9 @@ func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
 			h.arenaMatched[idx] = true
 		}
 	} else if h.strIndex != nil {
-		p.buildProbeKey(in, row)
+		if !p.buildProbeKey(in, row) {
+			return // NULL key: matches nothing, so it marks nothing
+		}
 		head, ok := h.strIndex.Get(p.keyBuf)
 		if !ok {
 			return
@@ -3541,7 +3590,9 @@ func (p *HashJoinProbe) markKeyMatchedLocked(in *batch.RecordBatch, row int) {
 			h.arenaMatched[idx] = true
 		}
 	} else if h.strIndex != nil {
-		p.buildProbeKey(in, row)
+		if !p.buildProbeKey(in, row) {
+			return // NULL key: matches nothing, so it marks nothing
+		}
 		head, ok := h.strIndex.Get(p.keyBuf)
 		if !ok {
 			return

@@ -5917,11 +5917,11 @@ func serializeGroupKey(buf []byte, cols []keySerCol, row int) []byte {
 			v := uint32(c.i32[row])
 			buf = append(buf, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
 		case 3:
-			v := math.Float64bits(c.f64[row])
+			v := keyFloat64bits(c.f64[row])
 			buf = append(buf, byte(v), byte(v>>8), byte(v>>16), byte(v>>24),
 				byte(v>>32), byte(v>>40), byte(v>>48), byte(v>>56))
 		case 4:
-			v := math.Float32bits(c.f32[row])
+			v := keyFloat32bits(c.f32[row])
 			buf = append(buf, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
 		case 5:
 			data := c.bytes.Value(row)
@@ -5956,9 +5956,9 @@ func typedRowHash(cols []keySerCol, row int) uint64 {
 			case 2:
 				ch = mix64(uint64(uint32(c.i32[row])))
 			case 3:
-				ch = mix64(math.Float64bits(c.f64[row]))
+				ch = mix64(keyFloat64bits(c.f64[row]))
 			case 4:
-				ch = mix64(uint64(math.Float32bits(c.f32[row])))
+				ch = mix64(uint64(keyFloat32bits(c.f32[row])))
 			case 5:
 				ch = strHash([]byte(c.bytes.UnsafeStringValue(row)))
 			case 6:
@@ -6005,12 +6005,12 @@ func serializedKeyMatchesRow(key string, cols []keySerCol, row int) bool {
 			}
 			key = key[4:]
 		case 3:
-			if len(key) < 8 || binary.LittleEndian.Uint64([]byte(key[:8])) != math.Float64bits(c.f64[row]) {
+			if len(key) < 8 || binary.LittleEndian.Uint64([]byte(key[:8])) != keyFloat64bits(c.f64[row]) {
 				return false
 			}
 			key = key[8:]
 		case 4:
-			if len(key) < 4 || binary.LittleEndian.Uint32([]byte(key[:4])) != math.Float32bits(c.f32[row]) {
+			if len(key) < 4 || binary.LittleEndian.Uint32([]byte(key[:4])) != keyFloat32bits(c.f32[row]) {
 				return false
 			}
 			key = key[4:]
@@ -6344,12 +6344,18 @@ func appendColumnValue(buf []byte, v *batch.Vector, row int, typ batch.TypeID) [
 		val := v.Int32Data[row]
 		return append(buf, byte(val), byte(val>>8), byte(val>>16), byte(val>>24))
 	case batch.TypeFloat64:
-		val := math.Float64bits(v.Float64Data[row])
+		// keyFloat64bits, not Float64bits: every NaN payload folds onto one
+		// NaN and -0.0 onto +0.0, because the comparator calls those pairs
+		// EQUAL (kernel/float_order.go) and a key that split them would make
+		// GROUP BY, DISTINCT and a hash join disagree with ORDER BY, with
+		// `rank()`, and with the spilled merge key that already folds them
+		// (#459).
+		val := keyFloat64bits(v.Float64Data[row])
 		return append(buf,
 			byte(val), byte(val>>8), byte(val>>16), byte(val>>24),
 			byte(val>>32), byte(val>>40), byte(val>>48), byte(val>>56))
 	case batch.TypeFloat32:
-		val := math.Float32bits(v.Float32Data[row])
+		val := keyFloat32bits(v.Float32Data[row])
 		return append(buf, byte(val), byte(val>>8), byte(val>>16), byte(val>>24))
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		data := v.BytesData.Value(row)
@@ -6404,7 +6410,11 @@ func appendVectorKey(buf []byte, v *batch.Vector, row int) []byte {
 			dim, row, base+dim, len(v.Float32Data)))
 	}
 	for _, f := range v.Float32Data[base : base+dim] {
-		buf = appendKeyUint32(buf, math.Float32bits(f))
+		// keyFloat32bits: the VECTOR element comparator folds NaN payloads
+		// and -0.0 (kernel/float_order.go), and the boxed VECTOR key
+		// (appendKeyFloats, sort.go) already folds them — this arm was the
+		// last one keying raw IEEE bits.
+		buf = appendKeyUint32(buf, keyFloat32bits(f))
 	}
 	return buf
 }

@@ -225,18 +225,42 @@ func TestCanPruneFloatStats(t *testing.T) {
 		},
 	}
 
-	// temp > 200 should prune (max is 100)
-	if !CanPruneRowGroup(StatsPredicate{"temp", exec.OpGt, float64(200.0)}, stats) {
-		t.Fatal("expected prune for GT above max")
+	// temp > 200 must NOT prune even though max is 100. A float column's
+	// statistics exclude NaN by specification, and NaN is greater than every
+	// value (ADR-0012 item 8), so the row group may hold a row this predicate
+	// selects and the bounds cannot say. Same for >= and <>.
+	if CanPruneRowGroup(StatsPredicate{"temp", exec.OpGt, float64(200.0)}, stats) {
+		t.Fatal("GT on a float column must not prune: a NaN row is invisible to min/max and satisfies it")
+	}
+	if CanPruneRowGroup(StatsPredicate{"temp", exec.OpGe, float64(200.0)}, stats) {
+		t.Fatal("GE on a float column must not prune: a NaN row is invisible to min/max and satisfies it")
 	}
 
-	// temp < -10 should prune (min is 0)
+	// temp < -10 should prune (min is 0). NaN satisfies neither < nor <= nor
+	// = against a finite constant, so those three still read the bounds.
 	if !CanPruneRowGroup(StatsPredicate{"temp", exec.OpLt, float64(-10.0)}, stats) {
 		t.Fatal("expected prune for LT below min")
+	}
+	if !CanPruneRowGroup(StatsPredicate{"temp", exec.OpLe, float64(-10.0)}, stats) {
+		t.Fatal("expected prune for LE below min")
+	}
+	if !CanPruneRowGroup(StatsPredicate{"temp", exec.OpEq, float64(200.0)}, stats) {
+		t.Fatal("expected prune for EQ above max")
 	}
 
 	// temp = 50 should not prune
 	if CanPruneRowGroup(StatsPredicate{"temp", exec.OpEq, float64(50.0)}, stats) {
 		t.Fatal("should not prune for EQ within range")
+	}
+
+	// An INTEGER column keeps every arm: there is no NaN to hide.
+	intStats := pqt.RowGroupStats{
+		NumRows: 100,
+		Columns: map[string]pqt.ColumnStats{
+			"n": {HasStats: true, MinValue: int64(0), MaxValue: int64(100)},
+		},
+	}
+	if !CanPruneRowGroup(StatsPredicate{"n", exec.OpGt, int64(200)}, intStats) {
+		t.Fatal("expected prune for GT above max on an integer column")
 	}
 }
