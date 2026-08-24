@@ -671,7 +671,10 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	}
 
 	var failedFiles atomic.Int64
-	var firstErr atomic.Value // stores first error for diagnostics
+	// FirstError, not a bare atomic.Value: every store here happens on a
+	// footer-reader goroutine, and atomic.Value panics the moment two of
+	// them carry differently-typed errors (#512).
+	var firstErr exec.FirstError
 
 	if len(footerFiles) > 0 {
 		var metaWg sync.WaitGroup
@@ -734,13 +737,13 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 							ra.Close()
 							if err != nil {
 								if failedFiles.Add(1) == 1 {
-									firstErr.Store(fmt.Errorf("metadata %s: %w", entry.Path, err))
+									firstErr.Set(fmt.Errorf("metadata %s: %w", entry.Path, err))
 								}
 								continue
 							}
 						} else {
 							if failedFiles.Add(1) == 1 {
-								firstErr.Store(fmt.Errorf("get metadata %s: %w", entry.Path, err))
+								firstErr.Set(fmt.Errorf("get metadata %s: %w", entry.Path, err))
 							}
 							continue
 						}
@@ -749,7 +752,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 						rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), entry.Path)
 						if err != nil {
 							if failedFiles.Add(1) == 1 {
-								firstErr.Store(fmt.Errorf("get %s: %w", entry.Path, err))
+								firstErr.Set(fmt.Errorf("get %s: %w", entry.Path, err))
 							}
 							continue
 						}
@@ -757,7 +760,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 						rc.Close()
 						if err != nil {
 							if failedFiles.Add(1) == 1 {
-								firstErr.Store(fmt.Errorf("read %s: %w", entry.Path, err))
+								firstErr.Set(fmt.Errorf("read %s: %w", entry.Path, err))
 							}
 							continue
 						}
@@ -765,7 +768,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 							footerCacheIdentity(inner.cat, entry, int64(len(data))))
 						if err != nil {
 							if failedFiles.Add(1) == 1 {
-								firstErr.Store(fmt.Errorf("parquet %s (%d bytes): %w", entry.Path, len(data), err))
+								firstErr.Set(fmt.Errorf("parquet %s (%d bytes): %w", entry.Path, len(data), err))
 							}
 							continue
 						}
@@ -787,9 +790,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 
 	if failed := failedFiles.Load(); failed > 0 {
 		inner.failedFiles = int(failed)
-		if v := firstErr.Load(); v != nil {
-			inner.firstFileErr = v.(error)
-		}
+		inner.firstFileErr = firstErr.Err()
 	}
 
 	// Enumerate row groups from each file's metadata, applying pruning.

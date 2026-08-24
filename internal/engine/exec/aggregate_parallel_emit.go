@@ -62,9 +62,10 @@ type emitDrain struct {
 	out  chan *batch.RecordBatch
 	stop chan struct{}
 	wg   sync.WaitGroup
-	// err holds the first producer error. Always a *fmt.wrapError so the
-	// atomic.Value type-consistency rule holds.
-	err  atomic.Value
+	// err holds the first producer error. FirstError boxes it so the
+	// atomic.Value type-consistency rule holds no matter which shape of
+	// error a producer reports (#512).
+	err  FirstError
 	once sync.Once
 }
 
@@ -148,18 +149,15 @@ func (d *emitDrain) produce(ctx context.Context, unit *HashAggregate, ownState b
 	// Registered last, so it runs FIRST on the way out: the unit is still
 	// closed and wg.Done still fires.
 	//
-	// The error is wrapped so d.err keeps a single concrete type —
-	// atomic.Value panics on an inconsistently typed store.
 	defer func() {
 		if r := recover(); r != nil {
-			d.err.CompareAndSwap(nil,
-				fmt.Errorf("draining aggregate partition: %w", RecoverFatalEval(r)))
+			d.err.Set(fmt.Errorf("draining aggregate partition: %w", RecoverFatalEval(r)))
 		}
 	}()
 	for {
 		b, err := unit.nextOwn(ctx)
 		if err != nil {
-			d.err.CompareAndSwap(nil, fmt.Errorf("draining aggregate partition: %w", err))
+			d.err.Set(fmt.Errorf("draining aggregate partition: %w", err))
 			return
 		}
 		if b == nil {
@@ -172,7 +170,7 @@ func (d *emitDrain) produce(ctx context.Context, unit *HashAggregate, ownState b
 			return
 		case <-ctx.Done():
 			b.Release()
-			d.err.CompareAndSwap(nil, fmt.Errorf("draining aggregate partition: %w", ctx.Err()))
+			d.err.Set(fmt.Errorf("draining aggregate partition: %w", ctx.Err()))
 			return
 		}
 	}
@@ -182,14 +180,14 @@ func (d *emitDrain) produce(ctx context.Context, unit *HashAggregate, ownState b
 // exhausted. Safe to call from multiple goroutines (it is a channel receive
 // plus an atomic load), though today's downstream pipeline is serial.
 func (d *emitDrain) next() (*batch.RecordBatch, error) {
-	if v := d.err.Load(); v != nil {
+	if err := d.err.Err(); err != nil {
 		d.shutdown()
-		return nil, v.(error)
+		return nil, err
 	}
 	b, ok := <-d.out
 	if !ok {
-		if v := d.err.Load(); v != nil {
-			return nil, v.(error)
+		if err := d.err.Err(); err != nil {
+			return nil, err
 		}
 		return nil, nil
 	}

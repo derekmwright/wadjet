@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -506,7 +505,11 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	var firstErr atomic.Value // stores first error
+	// The first-error slot is a FirstError, not a bare atomic.Value: the
+	// panic boundary and the ordinary return paths below store errors of
+	// different concrete types, and an atomic.Value panics on the second
+	// shape (#512).
+	var firstErr FirstError
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -518,7 +521,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 			// other panic is re-raised as before.
 			defer func() {
 				if r := recover(); r != nil {
-					firstErr.CompareAndSwap(nil, recoverFatalEval(r))
+					firstErr.Set(recoverFatalEval(r))
 					cancel()
 				}
 			}()
@@ -549,7 +552,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 				if workerID == 0 && pendingWarmup != nil {
 					for _, wb := range pendingWarmup {
 						if err := partitionAndDeliver(workerCtx, primaryAgg, sink, wb, 0, partQueues, &partScratch); err != nil {
-							firstErr.CompareAndSwap(nil, err)
+							firstErr.Set(err)
 							cancel()
 							return
 						}
@@ -589,7 +592,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 				// double-drain.
 				if err := pauseOrDrainUnless(workerCtx, drainPhase, sink); err != nil {
 					if workerCtx.Err() == nil {
-						firstErr.CompareAndSwap(nil, err)
+						firstErr.Set(err)
 						cancel()
 					}
 					return
@@ -600,7 +603,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 					if workerCtx.Err() != nil {
 						return // context cancelled, not a real error
 					}
-					firstErr.CompareAndSwap(nil, fmt.Errorf("source next: %w", err))
+					firstErr.Set(fmt.Errorf("source next: %w", err))
 					cancel()
 					return
 				}
@@ -619,7 +622,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 					if workerCtx.Err() != nil && ctx.Err() == nil {
 						return
 					}
-					firstErr.CompareAndSwap(nil, err)
+					firstErr.Set(err)
 					cancel()
 					return
 				}
@@ -635,8 +638,8 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 	wg.Wait()
 
 	// Check for worker errors.
-	if v := firstErr.Load(); v != nil {
-		return v.(error)
+	if err := firstErr.Err(); err != nil {
+		return err
 	}
 	// Workers that noticed a cancelled parent context return silently, so a
 	// CancelRequest used to yield whatever the workers had collected, with a

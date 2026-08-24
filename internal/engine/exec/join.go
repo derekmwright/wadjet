@@ -1253,7 +1253,7 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 	// Launch workers.
 	var sourceMu sync.Mutex
 	var wg sync.WaitGroup
-	var firstErr atomic.Value
+	var firstErr FirstError
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -1272,7 +1272,7 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 				}
 				sourceMu.Unlock()
 				if err != nil {
-					firstErr.CompareAndSwap(nil, fmt.Errorf("build source next: %w", err))
+					firstErr.Set(fmt.Errorf("build source next: %w", err))
 					return
 				}
 				if b == nil {
@@ -1287,8 +1287,8 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 	}
 	wg.Wait()
 
-	if v := firstErr.Load(); v != nil {
-		return v.(error)
+	if err := firstErr.Err(); err != nil {
+		return err
 	}
 
 	// Merge: count total rows, pick largest local table as base, insert rest.
