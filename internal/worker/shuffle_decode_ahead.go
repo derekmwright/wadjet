@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/diskio"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/wshf"
 )
 
@@ -221,6 +223,10 @@ func (r *streamingShuffleReader) startDecodeAhead(workers int, tokens *cpuTokens
 	d.wg.Add(1 + workers)
 	go func() {
 		defer d.wg.Done()
+		// The stage phase walks the stream and validates extents; a panic
+		// there is the same class as the decode workers' and gets the same
+		// answer — a terminal error slot, not a dead worker (#511).
+		defer exec.CatchQueryPanic(context.Background(), "shuffle decode-ahead scan", d.fail)
 		if d.idx != nil {
 			d.scanIndexed()
 		} else {
@@ -508,12 +514,34 @@ func (d *shuffleDecodeAhead) timedWait(ns, count *atomic.Int64) {
 }
 
 func (d *shuffleDecodeAhead) worker() {
+	// The slot this worker has taken off the queue and not yet resolved.
+	// wshf.DecodeChunk reads bytes off disk with the trust they deserve
+	// (none), so a panic here is reachable — and unrecovered it ends the
+	// worker process, while recovered without resolving the slot would
+	// leave the consumer blocked on a `done` that never closes. Resolve the
+	// in-flight slot with the error and fail the stream. One defer per
+	// worker goroutine, not per chunk (#511).
+	var inFlight *shuffleDecodeSlot
+	defer exec.CatchQueryPanic(context.Background(), "shuffle chunk decode", func(err error) {
+		if inFlight != nil {
+			if inFlight.token {
+				d.tokens.releaseDecode(1)
+				inFlight.token = false
+			}
+			inFlight.b, inFlight.err = nil, err
+			close(inFlight.done)
+			inFlight = nil
+			return
+		}
+		d.fail(err)
+	})
 	for {
 		select {
 		case slot, ok := <-d.jobs:
 			if !ok {
 				return
 			}
+			inFlight = slot
 			var b *batch.RecordBatch
 			var err error
 			if d.idx != nil {
@@ -530,6 +558,9 @@ func (d *shuffleDecodeAhead) worker() {
 				slot.token = false
 			}
 			slot.b, slot.err = b, err
+			// Cleared BEFORE the close, so a panic in the close itself
+			// cannot make the boundary close an already-closed channel.
+			inFlight = nil
 			close(slot.done)
 		case <-d.quit:
 			return

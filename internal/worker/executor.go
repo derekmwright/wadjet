@@ -1653,6 +1653,12 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		wg.Add(1)
 		go func(p int, localPath string) {
 			defer wg.Done()
+			// Compressing and uploading a partition on a goroutine with no
+			// recover above it: unrecovered, a panic here ends the WORKER
+			// process rather than the task (#511).
+			defer exec.CatchQueryPanic(ctx, "shuffle partition upload", func(err error) {
+				partResults[p] = partResult{err: err}
+			})
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
@@ -1890,6 +1896,12 @@ func (e *Executor) readParquetFilesConcurrentBatches(ctx context.Context, bucket
 		wg.Add(1)
 		go func(idx int, filePath string) {
 			defer wg.Done()
+			// Parquet decoding is the classic panic surface and this runs
+			// on a goroutine nobody joins for errors — unrecovered it took
+			// the worker process with it (#511).
+			defer exec.CatchQueryPanic(ctx, "parquet file decode", func(err error) {
+				results[idx] = result{err: err}
+			})
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
@@ -1930,6 +1942,11 @@ func (e *Executor) readInputFilesBatches(ctx context.Context, bucket string, fil
 		wg.Add(1)
 		go func(idx int, filePath string) {
 			defer wg.Done()
+			// Decompressing and decoding a shuffle file — untrusted bytes
+			// on a goroutine with no recover above it (#511).
+			defer exec.CatchQueryPanic(ctx, "shuffle file decode", func(err error) {
+				results[idx] = result{err: err}
+			})
 			sem <- struct{}{}
 			defer func() { <-sem }()
 

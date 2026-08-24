@@ -181,13 +181,30 @@ func startFilePrefetcher(ctx context.Context, s *cachedFileStreamSource) *filePr
 
 func (p *filePrefetcher) run(ctx context.Context, s *cachedFileStreamSource, jobs <-chan int) {
 	defer p.wg.Done()
+	// The index being fetched, so the boundary below can answer for it.
+	inFlight := -1
+	// fetch reaches decode and decompression paths on a goroutine nobody
+	// joins for errors. Unrecovered, a panic there ends the worker process;
+	// recovered but undelivered, the consumer waits forever on an empty
+	// result slot. Deliver it as that file's error (#511). One defer per
+	// prefetch goroutine, not per file.
+	defer exec.CatchQueryPanic(ctx, "scan file prefetch", func(err error) {
+		if inFlight >= 0 {
+			p.results[inFlight] <- &prefetchResult{err: err}
+		}
+	})
 	for idx := range jobs {
 		if ctx.Err() != nil {
 			return
 		}
 		// results[idx] is buffered (cap 1) and each index is fetched by
-		// exactly one worker, so the send never blocks.
-		p.results[idx] <- p.fetch(ctx, s, idx)
+		// exactly one worker, so the send never blocks. inFlight is cleared
+		// BEFORE the send, so a panic in the send itself cannot make the
+		// boundary send a second time.
+		inFlight = idx
+		res := p.fetch(ctx, s, idx)
+		inFlight = -1
+		p.results[idx] <- res
 	}
 }
 
