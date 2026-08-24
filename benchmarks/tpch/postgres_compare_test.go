@@ -1015,6 +1015,47 @@ func postgresSemanticsCases() []pgCase {
 			countOnly: true, why: "an empty result has no rows to fingerprint; at tolerance 0 the count is the entire answer"},
 	)
 
+	// --- Subquery predicates: where a bound inside a subquery binds --------
+	//
+	// `IN (SELECT ...)` lowers to a semi join, and until #516/#482 the
+	// lowering got both halves of "what does the subquery yield" wrong: it
+	// named the join key from the SELECT list as written (so an aliased
+	// self-IN matched nothing and answered ZERO rows) and it dropped the
+	// subquery's LIMIT entirely (so a bounded subquery matched against the
+	// FULL unbounded column and the predicate selected every row, for any n).
+	// PostgreSQL is the authority on both, and neither shape was in this
+	// corpus at all — there was no `IN (SELECT ...)` entry of any kind.
+	//
+	// Every bounded entry carries an ORDER BY inside the subquery: a bare
+	// LIMIT does not say WHICH rows it yields, so the two engines may
+	// legitimately pick different ones (ADR-0013's nondeterminism list).
+	out = append(out,
+		pgCase{name: "InSubqueryAliasedSelfJoin",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
+				(SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey < 10)`},
+		pgCase{name: "InSubqueryAliasedSelectItem",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
+				(SELECT b.n_regionkey AS rk FROM nation b WHERE b.n_nationkey < 10)`},
+		pgCase{name: "NotInSubqueryAliasedSelfJoin",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey NOT IN
+				(SELECT b.n_nationkey FROM nation b WHERE b.n_nationkey < 10)`},
+		pgCase{name: "InSubqueryGroupedAliased",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
+				(SELECT b.n_regionkey FROM nation b GROUP BY b.n_regionkey HAVING COUNT(*) > 1)`},
+		pgCase{name: "InSubqueryOrderedLimit",
+			sql: `SELECT COUNT(*) AS c FROM nation WHERE n_nationkey IN
+				(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3)`},
+		pgCase{name: "InSubqueryOrderedLimitOffset",
+			sql: `SELECT COUNT(*) AS c FROM nation WHERE n_nationkey IN
+				(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3 OFFSET 5)`},
+		pgCase{name: "InSubqueryLimitZero",
+			sql: `SELECT COUNT(*) AS c FROM nation WHERE n_nationkey IN
+				(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 0)`},
+		pgCase{name: "NotInSubqueryOrderedLimit",
+			sql: `SELECT COUNT(*) AS c FROM nation WHERE n_nationkey NOT IN
+				(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3)`},
+	)
+
 	// --- String functions -------------------------------------------------
 	//
 	// SQL string positions are 1-based, SUBSTRING clamps rather than erroring

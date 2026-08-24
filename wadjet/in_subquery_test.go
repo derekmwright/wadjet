@@ -75,3 +75,60 @@ func TestInSubquerySemiJoinAnswersEveryAliasSpelling(t *testing.T) {
 		})
 	}
 }
+
+// TestInSubqueryHonorsTheSubqueryLimit is #482's value gate.
+//
+// `WHERE x IN (SELECT … LIMIT n)` matched against the FULL unbounded result
+// set for any n, so the predicate selected every row. The semi join the IN
+// lowers to has nowhere to put the bound — its build side IS the relation the
+// subquery reads — so a bounded subquery is not decorrelated at all and is
+// executed as written instead.
+//
+// Every entry carries an ORDER BY inside the subquery, because a bare LIMIT
+// does not say WHICH rows it yields (ADR-0013's legal-nondeterminism list);
+// the two bare-LIMIT entries below assert only what is determined regardless.
+// Expectations read off PostgreSQL 17.
+func TestInSubqueryHonorsTheSubqueryLimit(t *testing.T) {
+	ctx := context.Background()
+	db := mbOpen(t)
+
+	cases := []struct {
+		name string
+		sql  string
+		want int64
+	}{
+		{"ordered_limit",
+			`SELECT COUNT(*) AS n FROM mbtypes WHERE id IN (SELECT id FROM mbtypes ORDER BY id LIMIT 3)`, 3},
+		{"ordered_limit_offset",
+			`SELECT COUNT(*) AS n FROM mbtypes WHERE id IN (SELECT id FROM mbtypes ORDER BY id LIMIT 3 OFFSET 5)`, 3},
+		{"ordered_limit_aliased",
+			`SELECT COUNT(*) AS n FROM mbtypes a WHERE a.id IN (SELECT b.id FROM mbtypes b ORDER BY b.id LIMIT 3)`, 3},
+		{"not_in_ordered_limit",
+			`SELECT COUNT(*) AS n FROM mbtypes WHERE id NOT IN (SELECT id FROM mbtypes ORDER BY id LIMIT 3)`, 4997},
+		// LIMIT 0 is a bound, not an absence (#481) — the membership set is
+		// empty and nothing matches.
+		{"limit_zero",
+			`SELECT COUNT(*) AS n FROM mbtypes WHERE id IN (SELECT id FROM mbtypes ORDER BY id LIMIT 0)`, 0},
+		// Bare LIMIT: WHICH three ids is unspecified, but id is unique, so
+		// exactly three outer rows match whichever three they are.
+		{"bare_limit",
+			`SELECT COUNT(*) AS n FROM mbtypes WHERE id IN (SELECT id FROM mbtypes LIMIT 3)`, 3},
+		{"bare_not_in_limit",
+			`SELECT COUNT(*) AS n FROM mbtypes WHERE id NOT IN (SELECT id FROM mbtypes LIMIT 3)`, 4997},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := db.Query(ctx, tc.sql)
+			if err != nil {
+				t.Fatalf("query error: %v\n  SQL: %s", err, tc.sql)
+			}
+			if len(res.Rows) != 1 {
+				t.Fatalf("got %d rows, want 1 (scalar COUNT)\n  SQL: %s", len(res.Rows), tc.sql)
+			}
+			if got := res.Rows[0]["n"]; got != tc.want {
+				t.Errorf("COUNT(*) = %v, want %d (PostgreSQL 17)\n  SQL: %s", got, tc.want, tc.sql)
+			}
+		})
+	}
+}

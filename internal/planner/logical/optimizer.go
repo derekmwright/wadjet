@@ -1364,6 +1364,19 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		return nil
 	}
 
+	// A LIMIT/OFFSET says WHICH rows the subquery yields, and the semi join
+	// this rewrite builds has nowhere to put that bound: its build side IS
+	// the relation the subquery reads, so the membership set was the whole
+	// unbounded column and `x IN (SELECT y FROM t ORDER BY y LIMIT 3)`
+	// matched every row for any n (#482). Decline, and the subquery stays a
+	// filter predicate — an uncorrelated one is executed once as written,
+	// LIMIT, OFFSET and ORDER BY included, and its result IS the bounded
+	// membership set. Deciding a bound here instead would mean re-deriving
+	// the subquery's own ordering, and a per-task bound is not a global one.
+	if strings.TrimSpace(info.Limit) != "" || strings.TrimSpace(info.Offset) != "" {
+		return nil
+	}
+
 	// Name the inner key the way the inner plan built below actually emits
 	// it. Declining here leaves the IN as a subquery filter, which is the
 	// correct answer for every shape this cannot name (#516).

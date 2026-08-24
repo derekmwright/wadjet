@@ -99,6 +99,42 @@ func TestInSubqueryKeepsANonLeadingRelationsQualifier(t *testing.T) {
 	}
 }
 
+// #482 — the subquery's LIMIT/OFFSET was dropped on the floor: the semi join's
+// build side IS the relation the subquery reads, so the membership set was the
+// whole unbounded column and the predicate matched every row for any n.
+// Declining leaves the IN a subquery filter, which is executed as written.
+func TestInSubqueryWithALimitDeclinesDecorrelation(t *testing.T) {
+	for _, sql := range []string{
+		`SELECT o_orderkey FROM orders WHERE o_custkey IN (SELECT o_custkey FROM orders ORDER BY o_custkey LIMIT 3)`,
+		`SELECT o_orderkey FROM orders WHERE o_custkey IN (SELECT o_custkey FROM orders LIMIT 3)`,
+		`SELECT o_orderkey FROM orders WHERE o_custkey IN (SELECT o_custkey FROM orders ORDER BY o_custkey LIMIT 3 OFFSET 5)`,
+		`SELECT o_orderkey FROM orders WHERE o_custkey IN (SELECT o_custkey FROM orders ORDER BY o_custkey LIMIT 0)`,
+		`SELECT o_orderkey FROM orders WHERE o_custkey IN (SELECT o_custkey FROM orders ORDER BY o_custkey OFFSET 5)`,
+		`SELECT o_orderkey FROM orders WHERE o_custkey NOT IN (SELECT o_custkey FROM orders ORDER BY o_custkey LIMIT 3)`,
+	} {
+		plan := buildPlan(t, sql)
+		annotateScanColumnsForTest(plan)
+		optimized := Optimize(plan)
+		if join := findNodeMatching(optimized, func(n *Node) bool {
+			return n.Type == NodeJoin && (n.JoinType == "semi" || n.JoinType == "anti")
+		}); join != nil {
+			t.Errorf("a bounded IN-subquery was decorrelated into a %s join, which has nowhere to "+
+				"put the bound\n  SQL: %s\n  ON: %s", join.JoinType, sql, join.JoinCond)
+		}
+		if !hasNodeType(optimized, NodeFilter) {
+			t.Errorf("the IN predicate survived neither as a join nor as a filter\n  SQL: %s", sql)
+		}
+	}
+
+	// The unbounded twin must still decorrelate, or the guard above is a
+	// blanket disable of the rewrite rather than a bound on it.
+	plan := buildPlan(t, `SELECT o_orderkey FROM orders WHERE o_custkey IN (SELECT o_custkey FROM orders WHERE o_orderkey < 500)`)
+	annotateScanColumnsForTest(plan)
+	if findNodeMatching(Optimize(plan), func(n *Node) bool { return n.Type == NodeJoin && n.JoinType == "semi" }) == nil {
+		t.Error("an unbounded IN-subquery no longer decorrelates into a semi join")
+	}
+}
+
 // innerSemiJoinKeyFor returns the inner side of the semi/anti join sql
 // decorrelates to, and ok=false when it did not decorrelate.
 func innerSemiJoinKeyFor(t *testing.T, sql string) (string, bool) {
