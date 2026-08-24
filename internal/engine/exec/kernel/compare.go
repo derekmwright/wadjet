@@ -283,15 +283,6 @@ func applyCompareOp(c int, op CompareOp) bool {
 	return false
 }
 
-// DecimalRowCompare answers `vec[row] <op> literal` for a DECIMAL column, for
-// the row-at-a-time predicate path. It shares decimalLiteralAt with the
-// vectorized kernel deliberately: two comparison rules for the same predicate
-// is exactly the shape #394 was filed for.
-func DecimalRowCompare(vec *batch.Vector, row int, literal string, op CompareOp) bool {
-	lit, residual := decimalLiteralAt(normalizeDecimalText(literal), vec.DecimalData.Scale)
-	return applyCompareOp(decimalOrder(vec.DecimalData.Data[row], lit, residual), op)
-}
-
 // decimalLiteralText renders a filter constant as plain decimal text, with no
 // exponent, so the scaling below can be done on digits rather than in float64.
 // It returns "" for a value that is not a number, which reads as zero.
