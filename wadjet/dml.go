@@ -807,9 +807,26 @@ func convertValue(s string, typ parquet.TypeID) (any, error) {
 		// uint8, both widened into Int32Data) and, like TypeInt32 above,
 		// only ever reached a plain integer literal's text — the parser
 		// has no other literal form for them and neither does the writer.
+		// ParseInt(s, 10, 32) alone accepts anything an int32 holds, but
+		// the STORED width is narrower — uint16 for PORT, uint8 for
+		// PROTOCOL — and nothing downstream (checkType, the writer's
+		// toInt32/convertStringToInt64) re-checks that narrower range, so
+		// an out-of-range literal (99999, -1) silently succeeded and read
+		// back verbatim: a value no real port or protocol number can be.
+		// Range-check against the STORED type here, loudly, the same way
+		// an out-of-range int32 literal already fails ParseInt above.
 		v, err := strconv.ParseInt(s, 10, 32)
 		if err != nil {
 			return nil, fmt.Errorf("cannot parse %s value %q: %w", typ, s, err)
+		}
+		var lo, hi int64
+		if typ == parquet.TypePort {
+			lo, hi = 0, 65535
+		} else {
+			lo, hi = 0, 255
+		}
+		if v < lo || v > hi {
+			return nil, fmt.Errorf("%s value %d out of range [%d, %d]", typ, v, lo, hi)
 		}
 		return int32(v), nil
 	case parquet.TypeDuration:
