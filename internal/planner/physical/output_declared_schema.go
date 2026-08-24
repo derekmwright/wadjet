@@ -31,25 +31,9 @@ import (
 // (alias, else the unqualified column, else the cleaned expression text), so
 // an empty result names its columns the way a non-empty one would.
 func declaredOutputSchema(root *logical.Node) []parquet.Column {
-	pn := findOutputProjectionNode(root)
-	if pn == nil {
+	projs, childTypes, childDecimal, strictInt, ok := declaredProjectionInputs(root)
+	if !ok {
 		return nil
-	}
-	projs := logical.VisibleProjections(pn.Projections)
-	if len(projs) == 0 {
-		return nil
-	}
-	var childTypes map[string]parquet.TypeID
-	var childDecimal map[string]logical.DecimalMeta
-	var strictInt map[string]bool
-	if len(pn.Children) == 1 {
-		childTypes = emittedColTypes(pn.Children[0])
-		childDecimal = emittedColDecimal(pn.Children[0])
-		// The same integer-preserving-arithmetic hint the projection builder
-		// passes: without it `id + 1` declares FLOAT64 here where the
-		// operator emits INT64 (#297's rule), so an empty result would
-		// disagree with a full one about the type of its own column.
-		strictInt = strictIntArithCols(pn.Children[0])
 	}
 	out := make([]parquet.Column, 0, len(projs))
 	for _, proj := range projs {
@@ -77,6 +61,80 @@ func declaredOutputSchema(root *logical.Node) []parquet.Column {
 		out = append(out, col)
 	}
 	return out
+}
+
+// declaredWireUnconstrainedDecimal names the DECIMAL output columns whose
+// PostgreSQL wire typmod must declare "unconstrained" (-1) even though this
+// engine's own declared/exec schema keeps a real (p,s) for them.
+//
+// Verified live against postgres:17-alpine's \gdesc: an aggregate function
+// call NEVER carries its argument's typmod through — MIN(n)/MAX(n)/
+// MIN_BY(x,n)/MAX_BY(x,n)/SUM(n)/AVG(n) over a numeric(p,s) column all
+// report an unconstrained numeric, and only a BARE column reference in the
+// SELECT list keeps (p,s). declaredOutputSchema's own Precision/Scale answer
+// stays real for these columns — internal/engine/exec/aggregate.go's DECIMAL
+// vector allocation and internal/storage/parquet's file writer both key
+// physical decisions off Precision/Scale (18-digit INT64 vs 38-digit
+// FixedLenByteArray encoding), so zeroing it there would risk silently
+// mis-encoding a materialized MIN/MAX-of-DECIMAL(38,s) result — this is
+// wire-metadata ONLY, consulted solely by pgTypeMod (fold-in to #457/#458,
+// FIX 2).
+//
+// proj.IsAgg is PostgreSQL's actual rule, not a MIN/MAX/SUM/AVG allowlist:
+// any projection whose value came from an aggregate spec (declaredProjection
+// Type already resolves its type from the aggregate's own emitted-type map)
+// is, by that same fact, not a bare column reference — the one shape PG
+// preserves typmod for.
+func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
+	projs, childTypes, _, strictInt, ok := declaredProjectionInputs(root)
+	if !ok {
+		return nil
+	}
+	var out map[string]bool
+	for _, proj := range projs {
+		if !proj.IsAgg {
+			continue
+		}
+		name := declaredProjectionName(proj)
+		if name == "" {
+			continue
+		}
+		if declaredProjectionType(proj, childTypes, strictInt) != parquet.TypeDecimal {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]bool)
+		}
+		out[name] = true
+	}
+	return out
+}
+
+// declaredProjectionInputs is declaredOutputSchema's and
+// declaredWireUnconstrainedDecimal's shared setup: the visible projection
+// list plus the child's emitted-type maps each projection is resolved
+// against. ok is false when there is nothing to declare (no output
+// projection node, or an empty SELECT list) — callers return their own
+// empty answer in that case rather than proceeding with nil maps.
+func declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, childTypes map[string]parquet.TypeID, childDecimal map[string]logical.DecimalMeta, strictInt map[string]bool, ok bool) {
+	pn := findOutputProjectionNode(root)
+	if pn == nil {
+		return nil, nil, nil, nil, false
+	}
+	projs = logical.VisibleProjections(pn.Projections)
+	if len(projs) == 0 {
+		return nil, nil, nil, nil, false
+	}
+	if len(pn.Children) == 1 {
+		childTypes = emittedColTypes(pn.Children[0])
+		childDecimal = emittedColDecimal(pn.Children[0])
+		// The same integer-preserving-arithmetic hint the projection builder
+		// passes: without it `id + 1` declares FLOAT64 here where the
+		// operator emits INT64 (#297's rule), so an empty result would
+		// disagree with a full one about the type of its own column.
+		strictInt = strictIntArithCols(pn.Children[0])
+	}
+	return projs, childTypes, childDecimal, strictInt, true
 }
 
 // declaredProjectionName mirrors the naming rule in the projection builder

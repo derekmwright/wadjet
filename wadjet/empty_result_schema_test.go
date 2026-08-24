@@ -36,6 +36,12 @@ func TestEmptyResultDeclaresSameColumnsAsNonEmpty(t *testing.T) {
 		// Widened during review (#416): expression-heavy and mixed-type
 		// shapes the cases above did not exercise.
 		{"agg_sum_avg", "SELECT g, SUM(id) AS s, AVG(id) AS a FROM mbtypes WHERE %s GROUP BY g"},
+		// Unlike agg_sum_avg above (an integer), a DECIMAL SUM/AVG widens
+		// its output — exec.HashAggregate answers (38, scale)/(38,
+		// AvgScale(scale)) at runtime, and the zero-row plan-declared path
+		// used to answer (0,0) for both, an internal divergence #416's own
+		// suite could not see (fold-in to #457/#458, FIX 2).
+		{"agg_sum_avg_decimal", "SELECT g, SUM(c_dec) AS s, AVG(c_dec) AS a FROM mbtypes WHERE %s GROUP BY g"},
 		{"agg_count_distinct", "SELECT g, COUNT(*) AS n, COUNT(DISTINCT c_str) AS d FROM mbtypes WHERE %s GROUP BY g"},
 		{"agg_minmax_mixed", "SELECT g, MIN(c_str) AS lo, MAX(c_ipv6) AS hi, MIN(c_dur) AS d, " +
 			"MAX(c_uuid) AS u, MIN(c_bool) AS b FROM mbtypes WHERE %s GROUP BY g"},
@@ -103,4 +109,71 @@ func describeMetas(r *QueryResult) string {
 		parts[i] = fmt.Sprintf("%s:%s(%d,%d)", m.Name, m.TypeID, m.Precision, m.Scale)
 	}
 	return strings.Join(parts, ",")
+}
+
+// TestColumnMetaWireUnconstrainedDecimal pins FIX 2 (fold-in to #457/#458)
+// directly against ColumnMeta, not just the wire bytes pgTypeMod turns it
+// into: a DECIMAL column produced by ANY aggregate function reports
+// WireUnconstrained=true (so the wire declares typmod -1) while its
+// Precision/Scale still carry the column's real declaration internally, and
+// a bare column reference reports WireUnconstrained=false. MIN_BY/MAX_BY
+// are covered here rather than through the pg-oracle differential suite
+// because they are not standard PostgreSQL functions — there is no live
+// server to compare against — so this is the direct proof for them; MIN/
+// SUM's live-PostgreSQL agreement is proven by
+// benchmarks/tpch/postgres_wire_test.go's MinOverDecimalColumn/
+// SumOverDecimalColumn wire-corpus entries.
+func TestColumnMetaWireUnconstrainedDecimal(t *testing.T) {
+	ctx := context.Background()
+	db := mbOpen(t)
+
+	cases := []struct {
+		name       string
+		sql        string
+		col        string
+		want       bool
+		wantScale  int
+		checkScale bool
+	}{
+		{name: "bare_column", sql: "SELECT c_dec FROM mbtypes WHERE id < 5", col: "c_dec", want: false,
+			wantScale: 4, checkScale: true},
+		{name: "min", sql: "SELECT MIN(c_dec) AS m FROM mbtypes WHERE id < 5", col: "m", want: true,
+			wantScale: 4, checkScale: true},
+		{name: "max", sql: "SELECT MAX(c_dec) AS m FROM mbtypes WHERE id < 5", col: "m", want: true},
+		// MIN_BY/MAX_BY's RETURN column has to be the DECIMAL one (its first
+		// argument) for this to test anything: the ordering column's type
+		// (MIN_BY's SECOND argument, id here) is not what the output
+		// declares — see aggregate.go's #392 comment.
+		{name: "min_by_returns_decimal", sql: "SELECT MIN_BY(c_dec, id) AS m FROM mbtypes WHERE id < 5", col: "m", want: true,
+			wantScale: 4, checkScale: true},
+		{name: "max_by_returns_decimal", sql: "SELECT MAX_BY(c_dec, id) AS m FROM mbtypes WHERE id < 5", col: "m", want: true,
+			wantScale: 4, checkScale: true},
+		{name: "sum", sql: "SELECT SUM(c_dec) AS s FROM mbtypes WHERE id < 5", col: "s", want: true},
+		{name: "avg", sql: "SELECT AVG(c_dec) AS a FROM mbtypes WHERE id < 5", col: "a", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := db.Query(ctx, tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var found bool
+			for _, m := range res.ColumnMetas {
+				if m.Name != tc.col {
+					continue
+				}
+				found = true
+				if m.WireUnconstrained != tc.want {
+					t.Errorf("%s: WireUnconstrained = %v, want %v", tc.col, m.WireUnconstrained, tc.want)
+				}
+				if tc.checkScale && m.Scale != tc.wantScale {
+					t.Errorf("%s: Scale = %d, want %d (WireUnconstrained must not blank out the real internal declaration)",
+						tc.col, m.Scale, tc.wantScale)
+				}
+			}
+			if !found {
+				t.Fatalf("column %q not found in result: %v", tc.col, res.Columns)
+			}
+		})
+	}
 }

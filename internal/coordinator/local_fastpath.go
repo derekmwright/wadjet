@@ -235,5 +235,8 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		// The sink's schema, not the batches': a zero-row result has no
 		// batch to read it off, and the wire still has to declare types.
 		Schema: sink.Schema(),
+		// A plan property, applies whether or not this result has rows
+		// (FIX 2, #457/#458 fold-in).
+		WireUnconstrainedDecimal: sink.SchemaHintWireUnconstrainedDecimal,
 	}, true, nil
 }

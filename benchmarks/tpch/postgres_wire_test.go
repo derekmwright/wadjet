@@ -595,6 +595,22 @@ func wireCorpus() []wireCase {
 		// all (typmod -1, "unconstrained") where PostgreSQL still declares
 		// numeric(9,2)/numeric(18,4).
 		{name: "DecimalColumnZeroRows", sql: `SELECT d_2, d_4 FROM dec_probe WHERE d_key = -1`},
+		// MIN/SUM over a DECIMAL column (FIX 2, fold-in to #457/#458): live
+		// PostgreSQL's \gdesc declares typmod -1 ("unconstrained numeric")
+		// for MIN(numeric(p,s)), SUM(numeric(p,s)), and every other
+		// aggregate over a numeric column — typmod survives ONLY a bare
+		// column reference, never a function call, aggregate or otherwise.
+		// DecimalColumn/DecimalColumnZeroRows above cover the bare-column
+		// half; these four cover the aggregate half, zero-row and
+		// non-zero-row, so a divergence here can no longer hide the way it
+		// did before typmod (-1) was compared at all (#454) and then before
+		// the zero-row plan-declared path was compared (#458): both
+		// entries pass with NO pin, because after FIX 2 wadjet agrees with
+		// PostgreSQL outright rather than needing an exemption.
+		{name: "MinOverDecimalColumn", sql: `SELECT MIN(d_2) AS lo FROM dec_probe WHERE d_key IN (1, 2, 3)`},
+		{name: "MinOverDecimalColumnZeroRows", sql: `SELECT MIN(d_2) AS lo FROM dec_probe WHERE d_key = -1`},
+		{name: "SumOverDecimalColumn", sql: `SELECT SUM(d_2) AS s FROM dec_probe WHERE d_key IN (1, 2, 3)`},
+		{name: "SumOverDecimalColumnZeroRows", sql: `SELECT SUM(d_2) AS s FROM dec_probe WHERE d_key = -1`},
 		// A parameter bound by its DECLARED type rather than as a string —
 		// the shape of the 4a25af0 fix, and the one that exercises
 		// ParameterDescription.

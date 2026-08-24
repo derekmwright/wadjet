@@ -35,6 +35,18 @@ func TestPgTypeModPacksNumericPrecisionAndScale(t *testing.T) {
 		// schema for a zero-row result, or an inferred type. -1 (unconstrained)
 		// is the honest answer, not a fabricated (0,0).
 		{"decimal_without_a_declaration", decMeta(0, 0), -1},
+		// FIX 2 (fold-in to #457/#458): MIN/MAX/MIN_BY/MAX_BY/SUM/AVG over a
+		// DECIMAL(p,s) column know their REAL (p,s) internally — Precision/
+		// Scale here are non-zero, deliberately — but live postgres:17-
+		// alpine's \gdesc reports typmod -1 for every one of them: an
+		// aggregate function call never carries its argument's typmod
+		// through, only a bare column reference does. WireUnconstrained is
+		// how declaredWireUnconstrainedDecimal (physical package) tells
+		// pgTypeMod that, independent of what Precision/Scale answer.
+		{"decimal_aggregate_output_wire_unconstrained", wadjet.ColumnMeta{
+			Name: "d", TypeName: "DECIMAL", TypeID: parquet.TypeDecimal,
+			Precision: 9, Scale: 2, WireUnconstrained: true,
+		}, -1},
 		// Every other type has no modifier, and must keep sending -1.
 		{"int64", wadjet.ColumnMeta{Name: "c", TypeName: "INT64", TypeID: parquet.TypeInt64}, -1},
 		{"string", wadjet.ColumnMeta{Name: "c", TypeName: "STRING", TypeID: parquet.TypeString}, -1},

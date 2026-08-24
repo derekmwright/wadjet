@@ -892,6 +892,13 @@ type CollectSink struct {
 	// deliberately does not clear it — it is configuration the planner
 	// attaches once, not per-run state.
 	SchemaHint []parquet.Column
+	// SchemaHintWireUnconstrainedDecimal names the DECIMAL output columns
+	// whose PostgreSQL wire typmod must say "unconstrained" (-1) — an
+	// aggregate function call, never a bare column reference. Unlike
+	// SchemaHint, this is consulted for EVERY result, zero-row or not:
+	// which columns are aggregate output is a property of the PLAN, not of
+	// whether Consume ever ran (FIX 2, #457/#458 fold-in).
+	SchemaHintWireUnconstrainedDecimal map[string]bool
 }
 
 func (s *CollectSink) Init(_ context.Context) error {

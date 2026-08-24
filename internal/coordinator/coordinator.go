@@ -681,6 +681,15 @@ type SQLResult struct {
 	// since OutputSchema() otherwise reads it off the first batch.
 	Schema []parquet.Column
 
+	// WireUnconstrainedDecimal names the DECIMAL columns in Schema whose
+	// PostgreSQL wire typmod must say "unconstrained" (-1) even though
+	// Schema itself carries their real (p,s) — an aggregate function call,
+	// unlike a bare column reference, on live PostgreSQL. Unlike Schema's
+	// zero-row-only role above, this is a PLAN property consulted for every
+	// result (FIX 2, #457/#458 fold-in; see
+	// physical.declaredWireUnconstrainedDecimal).
+	WireUnconstrainedDecimal map[string]bool
+
 	// stream is the lazy form: set (and Batches nil) when the gather
 	// result is partially on local scratch. Accessed via Stream().
 	stream BatchStream
@@ -1024,6 +1033,9 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// the column NAMES in that case, and without this pgwire declares
 		// OID 25 (text) for every one of them (#416).
 		Schema: schemaOrDeclared(gatherSchema(gr.batches), physStages),
+		// A plan property, unlike Schema's fallback above: applies whether
+		// or not this result has rows (FIX 2, #457/#458 fold-in).
+		WireUnconstrainedDecimal: physical.GatherOutputWireUnconstrainedDecimal(physStages),
 	}
 	if gr.spillPath != "" {
 		// Over-budget result: the in-memory prefix plus raw frames on
@@ -3120,6 +3132,9 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 		// it asks for the types would otherwise get none. A zero-row result
 		// has no batch to record, so the plan's declaration stands in (#416).
 		Schema: schemaOrDeclared(gatherSchema(batches), meta.stages),
+		// A plan property, unlike Schema's fallback above: applies whether
+		// or not this result has rows (FIX 2, #457/#458 fold-in).
+		WireUnconstrainedDecimal: physical.GatherOutputWireUnconstrainedDecimal(meta.stages),
 	}, nil
 }
 

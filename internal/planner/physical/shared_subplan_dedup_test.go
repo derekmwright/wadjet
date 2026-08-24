@@ -366,8 +366,13 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// and refusing costs nothing because that stage type is not
 		// fingerprintable anyway (#416).
 		"OutputRenames": "refused", "OutputSchema": "refused",
-		"EmitDynamicFilters":    "refused",
-		"PreComputedAggregates": "refused", "BuildCachePreScans": "refused",
+		// OutputWireUnconstrainedDecimal rides with OutputSchema: set on
+		// the SAME terminal gather stage, from the SAME declaredProjection
+		// Inputs gate in declaredWireUnconstrainedDecimal, whenever
+		// OutputSchema itself is set (FIX 2, #457/#458 fold-in).
+		"OutputWireUnconstrainedDecimal": "refused",
+		"EmitDynamicFilters":             "refused",
+		"PreComputedAggregates":          "refused", "BuildCachePreScans": "refused",
 		// Everything else is hashed structurally via the JSON serialization.
 		"Type": "hashed", "ClusterID": "hashed", "Tasks": "hashed",
 		"TableName": "hashed", "PartitionFilter": "hashed", "ScanFiles": "hashed",
@@ -376,7 +381,7 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// identical values and hashing costs nothing. It is also empty at
 		// this point — annotateScanSchemas runs after this pass — which is
 		// why hashing it can never suppress a dedup that used to happen.
-		"ScanSchema": "hashed",
+		"ScanSchema":  "hashed",
 		"FilterExprs": "hashed", "GroupByCols": "hashed", "AggSpecs": "hashed",
 		"GroupByAll": "hashed", "SortKeys": "hashed", "Limit": "hashed",
 		// RowLimit changes how many rows a stage emits, so two otherwise

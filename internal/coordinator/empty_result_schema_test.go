@@ -85,6 +85,19 @@ func TestEmptyResultDeclaresPlanSchema(t *testing.T) {
 				`FROM ` + typematrix.Table + ` WHERE %s GROUP BY g`,
 		},
 		{
+			// SUM/AVG over a DECIMAL column, unlike agg_sum_avg_count above
+			// (whose `id` is an integer): exec.HashAggregate widens a real
+			// SUM/AVG's DECIMAL output to (38, scale)/(38, AvgScale(scale))
+			// at runtime, but the zero-row plan-declared path used to answer
+			// (0,0) — "unconstrained" — for both, an internal divergence
+			// #416's own regression suite could not see because
+			// agg_sum_avg_count never exercised a DECIMAL SUM/AVG (fold-in
+			// to #457/#458, FIX 2: aggSpecOutputDecimal now derives the same
+			// (38, scale) formula at plan time).
+			name: "agg_sum_avg_decimal",
+			tmpl: `SELECT g, SUM(c_dec) AS s, AVG(c_dec) AS a FROM ` + typematrix.Table + ` WHERE %s GROUP BY g`,
+		},
+		{
 			// `id + 1 AS pi`: attachScanSelectProjections now threads the
 			// single-process path's integer-preserving-arithmetic hint
 			// through (strictIntArithCols), so the DAG route declares (and

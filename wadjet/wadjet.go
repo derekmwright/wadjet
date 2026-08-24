@@ -212,6 +212,15 @@ type ColumnMeta struct {
 	Nullable  bool
 	Precision int // DECIMAL: declared max digits
 	Scale     int // DECIMAL: declared digits after the point
+	// WireUnconstrained is true for a DECIMAL column produced by an
+	// aggregate function (MIN/MAX/MIN_BY/MAX_BY/SUM/AVG and any other
+	// DECIMAL-producing aggregate): Precision/Scale above still carry the
+	// real declaration for callers that want it, but PostgreSQL's own wire
+	// protocol reports typmod -1 ("unconstrained numeric") for any such
+	// column — verified against live postgres:17-alpine's \gdesc, which
+	// keeps a real typmod only for a BARE column reference. pgTypeMod
+	// treats this the same as Precision <= 0 (FIX 2, #457/#458 fold-in).
+	WireUnconstrained bool
 }
 
 // QueryResult contains the result of a SQL query.
@@ -331,15 +340,19 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	// executed plan's output schema is the authority for `SELECT *`, where
 	// the projection list names no columns of its own.
 	var outSchema []parquet.Column
+	var wireUnconstrained map[string]bool
 	if collectSink, ok := pipeline.Sink.(*exec.CollectSink); ok {
 		outSchema = collectSink.Schema()
+		// Plan-time, not row-count-dependent (FIX 2, #457/#458 fold-in) —
+		// consulted whether or not Consume ever ran.
+		wireUnconstrained = collectSink.SchemaHintWireUnconstrainedDecimal
 	}
 	columns := deriveColumns(selectInfo, rows, outSchema)
 
 	// Derive typed column metadata
 	var metas []ColumnMeta
 	if len(columns) > 0 {
-		metas = deriveColumnMetas(columns, rows, outSchema, db.catalog)
+		metas = deriveColumnMetas(columns, rows, outSchema, db.catalog, wireUnconstrained)
 	}
 
 	return &QueryResult{
@@ -647,7 +660,12 @@ func reconcileColumnName(name string, rows []map[string]any) string {
 // as bare epoch milliseconds; see Vector.GetValue), so `CAST(x AS date)` was
 // reported STRING and `CAST(x AS timestamp)` INT64, and the wire declared
 // OID 25 / 20 where PostgreSQL declares 1082 / 1114 (#363).
-func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parquet.Column, cat *catalog.Catalog) []ColumnMeta {
+// wireUnconstrainedDecimal names the DECIMAL columns (by output name) whose
+// wire typmod must say "unconstrained" (-1) regardless of what Precision/
+// Scale this function resolves for them below — an aggregate function
+// call, on live PostgreSQL, never keeps its argument's typmod (FIX 2,
+// #457/#458 fold-in). May be nil.
+func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parquet.Column, cat *catalog.Catalog, wireUnconstrainedDecimal map[string]bool) []ColumnMeta {
 	metas := make([]ColumnMeta, len(columns))
 
 	// The executed output schema, keyed by column name. The whole Column,
@@ -675,7 +693,7 @@ func deriveColumnMetas(columns []string, rows []map[string]any, outSchema []parq
 	}
 
 	for i, name := range columns {
-		metas[i] = ColumnMeta{Name: name, Nullable: true}
+		metas[i] = ColumnMeta{Name: name, Nullable: true, WireUnconstrained: wireUnconstrainedDecimal[name]}
 
 		// The executed plan's output schema first — it is per-result rather
 		// than a cross-table name match, and it sees computed columns.

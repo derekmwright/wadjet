@@ -111,5 +111,8 @@ func (c *Coordinator) runRefusedLocal(
 		// every column of an empty result while the same query through the
 		// embedded API declared real OIDs.
 		Schema: sink.Schema(),
+		// A plan property, applies whether or not this result has rows
+		// (FIX 2, #457/#458 fold-in).
+		WireUnconstrainedDecimal: sink.SchemaHintWireUnconstrainedDecimal,
 	}, nil
 }

@@ -305,6 +305,16 @@ type Stage struct {
 	// cannot answer: a zero-row result (#416, declaredOutputSchema).
 	OutputSchema []parquet.Column
 
+	// OutputWireUnconstrainedDecimal names the DECIMAL columns in
+	// OutputSchema whose PostgreSQL wire typmod must say "unconstrained"
+	// (-1) even though OutputSchema itself (and the executed result, when
+	// there is one) carries their real (p,s) — an aggregate function call
+	// never keeps its argument's typmod on live PostgreSQL. Only populated
+	// on the Gather stage, and unlike OutputSchema's zero-row-only role,
+	// consulted for every result (FIX 2, #457/#458 fold-in; see
+	// declaredWireUnconstrainedDecimal).
+	OutputWireUnconstrainedDecimal map[string]bool
+
 	// ProjectExprs, set on a leaf scan stage whose output feeds the gather
 	// directly, makes the scan fragment compute the SELECT list (worker-side
 	// exec.Project after scan+filter). Without it a bare expression SELECT
@@ -2181,6 +2191,10 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// tell it: a zero-row result. It is consulted only then (#416).
 	if cs, ok := sink.(*exec.CollectSink); ok {
 		cs.SchemaHint = plan.OutputSchema
+		// Unlike SchemaHint, this is consulted on EVERY result, zero-row or
+		// not: which DECIMAL columns are aggregate output is a property of
+		// the PLAN, not of whether a batch arrived (FIX 2, #457/#458 fold-in).
+		cs.SchemaHintWireUnconstrainedDecimal = declaredWireUnconstrainedDecimal(node)
 	}
 
 	// Attach spill file cleanup. CTE collectors and the scan cache
@@ -2448,6 +2462,18 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 			}
 		}
 	}
+	// Same PLAN-time answer as the single-process path's
+	// SchemaHintWireUnconstrainedDecimal (FIX 2, #457/#458 fold-in):
+	// unlike OutputSchema above, consulted on every result, not only a
+	// zero-row one.
+	if wireUnconstrained := declaredWireUnconstrainedDecimal(node); len(wireUnconstrained) > 0 {
+		for i := range stages {
+			if stages[i].Type == StageExchangeGather {
+				stages[i].OutputWireUnconstrainedDecimal = wireUnconstrained
+				break
+			}
+		}
+	}
 	// #169: when the SELECT list carries scalar expressions and the gather
 	// reads a bare leaf scan, the expressions would never be computed —
 	// applyOutputRenames can rename/drop but not evaluate. Attach the
@@ -2478,6 +2504,20 @@ func GatherOutputSchema(stages []Stage) []parquet.Column {
 	for i := range stages {
 		if stages[i].Type == StageExchangeGather {
 			return stages[i].OutputSchema
+		}
+	}
+	return nil
+}
+
+// GatherOutputWireUnconstrainedDecimal is GatherOutputSchema's companion for
+// the DECIMAL output columns whose PostgreSQL wire typmod must say
+// "unconstrained" (-1) regardless of whether the result has rows — an
+// aggregate function call, unlike a bare column reference (FIX 2,
+// #457/#458 fold-in; see declaredWireUnconstrainedDecimal).
+func GatherOutputWireUnconstrainedDecimal(stages []Stage) map[string]bool {
+	for i := range stages {
+		if stages[i].Type == StageExchangeGather {
+			return stages[i].OutputWireUnconstrainedDecimal
 		}
 	}
 	return nil
@@ -10471,14 +10511,26 @@ func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID,
 // bare TypeID cannot carry: MIN/MAX/MIN_BY/MAX_BY of a DECIMAL(p,s) column
 // answers in that SAME (p,s) — it hands back a value the column already
 // holds, not a computed one — so a zero-row result can declare it exactly
-// the way declaredOutputSchema declares the type itself (#458). SUM/AVG over
-// a DECIMAL widen or rescale it (exec.HashAggregate decides the exact
-// number from the accumulator it observes at runtime), so this deliberately
-// answers false for those — the zero-row declaration stays DECIMAL with an
-// unconstrained typmod (precision 0, -1 on the wire) rather than guessing.
+// the way declaredOutputSchema declares the type itself (#458).
+//
+// SUM/AVG widen or rescale their input rather than keeping it, but the
+// WIDENING RULE itself is fixed at plan time, not decided by the
+// accumulator at runtime: SUM keeps the input's scale and widens precision
+// to the carrier's full width, AVG additionally widens the scale by
+// batch.AvgScaleIncrement (batch.AvgScale) — exec.HashAggregate.
+// decOutputParams computes the identical (precision, scale) from the
+// vector it observes, so mirroring the formula here (rather than leaving
+// it "unconstrained, precision 0") makes a zero-row SUM/AVG-over-DECIMAL
+// result agree with a non-empty one internally, closing the divergence the
+// #416 zero-row-schema regression suite could not see because it compared
+// only NAME and TYPE, not (precision, scale) (fold-in to #457/#458, FIX 2).
+// The WIRE typmod for these is a separate question, answered unconditionally
+// -1 for every aggregate regardless of this function's answer — see
+// declaredWireUnconstrainedDecimal.
 func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.DecimalMeta, bool) {
-	switch strings.ToLower(strings.TrimSpace(agg.Func)) {
-	case "min", "max", "min_by", "max_by":
+	fn := strings.ToLower(strings.TrimSpace(agg.Func))
+	switch fn {
+	case "min", "max", "min_by", "max_by", "sum", "avg":
 	default:
 		return logical.DecimalMeta{}, false
 	}
@@ -10487,7 +10539,18 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 			return logical.DecimalMeta{}, false
 		}
 	}
-	return scanColumnDecimal(node, agg.InputCol)
+	in, ok := scanColumnDecimal(node, agg.InputCol)
+	if !ok {
+		return logical.DecimalMeta{}, false
+	}
+	switch fn {
+	case "sum":
+		return logical.DecimalMeta{Precision: batch.MaxDecimalPrecision, Scale: in.Scale}, true
+	case "avg":
+		return logical.DecimalMeta{Precision: batch.MaxDecimalPrecision, Scale: batch.AvgScale(in.Scale)}, true
+	default:
+		return in, true
+	}
 }
 
 // minMaxDeclaredType maps a MIN/MAX input column type to the output type

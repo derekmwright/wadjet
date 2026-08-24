@@ -114,6 +114,10 @@ func coordColumnMetas(res *coordinator.SQLResult) []wadjet.ColumnMeta {
 			Nullable:  col.Nullable,
 			Precision: col.Precision,
 			Scale:     col.Scale,
+			// A plan property (FIX 2, #457/#458 fold-in): which DECIMAL
+			// columns are aggregate output, and so must declare typmod -1
+			// on the wire regardless of the real Precision/Scale above.
+			WireUnconstrained: res.WireUnconstrainedDecimal[name],
 		}
 	}
 	return metas

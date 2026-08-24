@@ -2806,7 +2806,13 @@ func (c *pgConn) sendTypedRowDescription(metas []wadjet.ColumnMeta, fmtCodes []i
 func pgTypeMod(m wadjet.ColumnMeta) int32 {
 	switch m.TypeID {
 	case parquet.TypeDecimal:
-		if m.Precision <= 0 {
+		// m.WireUnconstrained: an aggregate function's DECIMAL result (MIN/
+		// MAX/MIN_BY/MAX_BY/SUM/AVG). live PostgreSQL's \gdesc keeps a
+		// numeric(p,s)'s typmod only for a BARE column reference — every
+		// aggregate call forgets it, even though m.Precision/m.Scale here
+		// still carry the real declaration for a caller that wants it
+		// (FIX 2, #457/#458 fold-in).
+		if m.Precision <= 0 || m.WireUnconstrained {
 			return -1
 		}
 		return int32((m.Precision<<16)|(m.Scale&0xFFFF)) + pgVarHdrSz
