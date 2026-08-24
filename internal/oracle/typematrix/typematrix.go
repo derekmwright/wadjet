@@ -706,6 +706,15 @@ func Corpus() []Query {
 			// A defect that lives only there (a panic under that mutex, a
 			// per-type key encoding the local tables get wrong) was
 			// invisible to every gate this corpus feeds.
+			//
+			// All three are written with ALIASES on both relations, which is
+			// the OTHER thing they cover: the keys of these joins are named
+			// by the OPTIMIZER, not by the user, and decorrelateInSubqueries
+			// has to spell the inner one the way the inner plan emits it.
+			// When it did not, every `IN (SELECT …)` here answered ZERO rows
+			// on the single-process path while the stage DAG answered
+			// correctly (#516) — and a bare, unaliased self-IN happened to
+			// work, which is why nothing caught it.
 			add("semijoin_"+n,
 				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE a.%s IN `+
 					`(SELECT b.%s FROM %s b WHERE b.id < 500)`, tbl, n, n, tbl),
@@ -713,6 +722,17 @@ func Corpus() []Query {
 			add("antijoin_"+n,
 				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE NOT EXISTS `+
 					`(SELECT 1 FROM %s b WHERE b.%s = a.%s AND b.id < 500)`, tbl, tbl, n, n),
+				oracle.CmpUnordered, n)
+			// NOT IN is a THIRD lowering, not a spelling of the one above: a
+			// correlated NOT EXISTS decorrelates on its own equality, while
+			// an uncorrelated NOT IN takes its key from the subquery's SELECT
+			// list — the half #516 got wrong. Both sides are NULL-guarded,
+			// because SQL's NOT IN over a set CONTAINING a NULL is NULL for
+			// every probe row and this corpus is not where that rule is
+			// settled.
+			add("notin_"+n,
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE a.%s IS NOT NULL AND a.%s NOT IN `+
+					`(SELECT b.%s FROM %s b WHERE b.id < 500 AND b.%s IS NOT NULL)`, tbl, n, n, n, tbl, n),
 				oracle.CmpUnordered, n)
 		}
 	}

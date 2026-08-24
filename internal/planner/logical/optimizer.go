@@ -1253,6 +1253,97 @@ func findInSubqueryNode(node plansql.Node) (*plansql.InExpr, *plansql.SubqueryNo
 	return nil, nil
 }
 
+// innerSemiJoinKey names the column the decorrelated inner plan EMITS for the
+// subquery's single SELECT item — the build-side key of the semi/anti join
+// tryDecorrelateInSubquery returns. ok=false declines the rewrite.
+//
+// The rewrite builds the inner plan as Scan → [Join …] → [Filter] →
+// [Aggregate] and never a Project, so the build side carries the SOURCE
+// column names of the relations it reads — which is also why the inner WHERE
+// goes through stripTableQualifiers. A key spelled any other way names a
+// column that is not in the build schema, and the failure is SILENT: the
+// physical planner splits the condition literally, exec.HashJoin's
+// FixKeyAssignment then finds the OTHER side's bare name present in the build
+// schema — which on a self-join it always is — and swaps the pair, leaving
+// the probe to resolve a name only the build side has. The join matches
+// nothing and `WHERE a.x IN (SELECT b.x FROM t b …)` answers zero rows where
+// PostgreSQL answers every one of them (#516).
+//
+// Two spellings the caller used to produce and nothing emits: the item's
+// ALIAS (`SELECT b.id AS bid` — no Project materializes `bid`) and a
+// qualifier on the subquery's own leading relation (`b.id`, where the Scan
+// under it emits `id`).
+func innerSemiJoinKey(info *plansql.SelectInfo) (string, bool) {
+	col := info.Columns[0]
+	if col.IsAgg {
+		// Only the GROUP BY branch below builds an aggregate, and it names
+		// the output exactly this. Without a GROUP BY nothing in the inner
+		// plan computes the aggregate at all.
+		if len(info.GroupBy) == 0 {
+			return "", false
+		}
+		name := cleanExpr(col.Alias)
+		if name == "" {
+			name = cleanExpr(col.Expr)
+		}
+		return name, name != ""
+	}
+	ref := plainColRef(col.ASTExpr)
+	if ref == nil {
+		// A computed item (`b.id + 0`): no node in the inner plan
+		// materializes it, and the physical planner refuses the resulting
+		// non-column equi-join key outright.
+		return "", false
+	}
+	if ref.Table != "" && !namesInnerLeadRelation(info, ref.Table) {
+		// A qualifier naming a joined subquery's NON-leading relation. The
+		// inner join qualifies a build-side column only when its bare name
+		// collides, so the qualified spelling can be the right one; leave it
+		// as written rather than guess.
+		return cleanExpr(col.Expr), true
+	}
+	return ref.Column, ref.Column != ""
+}
+
+// plainColRef returns node as a bare column reference, or nil when it is any
+// other expression. Parentheses are transparent.
+func plainColRef(node plansql.Node) *plansql.ColRef {
+	switch n := node.(type) {
+	case *plansql.ColRef:
+		return n
+	case *plansql.ParenNode:
+		return plainColRef(n.Inner)
+	}
+	return nil
+}
+
+// namesInnerLeadRelation reports whether qualifier names the subquery's
+// LEADING relation — the one tryDecorrelateInSubquery turns into the inner
+// plan's bottom Scan, whose columns every node above it carries unqualified.
+func namesInnerLeadRelation(info *plansql.SelectInfo, qualifier string) bool {
+	if qualifier == "" || len(info.Tables) == 0 {
+		return false
+	}
+	lead := info.Tables[0]
+	return strings.EqualFold(qualifier, lead.Alias) || strings.EqualFold(qualifier, lead.Name)
+}
+
+// innerGroupKey spells a GROUP BY term the way the inner plan's Scan emits it,
+// for innerSemiJoinKey's reason: the aggregate's output column IS its group
+// key's text, and a key spelled `b.g` over a Scan emitting `g` puts the
+// mismatch one node higher instead of removing it.
+func innerGroupKey(info *plansql.SelectInfo, term string) string {
+	term = cleanExpr(term)
+	dot := strings.IndexByte(term, '.')
+	if dot <= 0 || strings.ContainsAny(term, "() ") {
+		return term
+	}
+	if !namesInnerLeadRelation(info, term[:dot]) {
+		return term
+	}
+	return term[dot+1:]
+}
+
 // tryDecorrelateInSubquery attempts to convert an IN/NOT IN subquery into a
 // SemiJoin (IN) or AntiJoin (NOT IN) node. Handles uncorrelated IN with
 // optional GROUP BY + HAVING, and correlated IN with equality keys.
@@ -1273,12 +1364,11 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		return nil
 	}
 
-	// Get the inner select column name (stripped of table qualifiers)
-	innerSelectCol := info.Columns[0].Alias
-	if innerSelectCol == "" {
-		innerSelectCol = cleanExpr(info.Columns[0].Expr)
-	}
-	if innerSelectCol == "" {
+	// Name the inner key the way the inner plan built below actually emits
+	// it. Declining here leaves the IN as a subquery filter, which is the
+	// correct answer for every shape this cannot name (#516).
+	innerSelectCol, ok := innerSemiJoinKey(info)
+	if !ok {
 		return nil
 	}
 
@@ -1352,7 +1442,7 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	if len(info.GroupBy) > 0 {
 		var groupBy []string
 		for _, gb := range info.GroupBy {
-			groupBy = append(groupBy, cleanExpr(gb))
+			groupBy = append(groupBy, innerGroupKey(info, gb))
 		}
 
 		var aggs []AggExpr
