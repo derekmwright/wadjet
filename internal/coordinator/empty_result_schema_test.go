@@ -85,14 +85,15 @@ func TestEmptyResultDeclaresPlanSchema(t *testing.T) {
 				`FROM ` + typematrix.Table + ` WHERE %s GROUP BY g`,
 		},
 		{
-			// NOT `id + 1 AS pi` here: attachScanSelectProjections doesn't
-			// thread the single-process path's integer-preserving-arithmetic
-			// hint through, so on the DAG route that declares (and computes)
-			// FLOAT64 where the embedded engine answers INT64 (#445). Filed
-			// rather than fixed in this round; CAST and c_f64/2 are unaffected
-			// (CAST has its own declared type, and c_f64 is already FLOAT64).
+			// `id + 1 AS pi`: attachScanSelectProjections now threads the
+			// single-process path's integer-preserving-arithmetic hint
+			// through (strictIntArithCols), so the DAG route declares (and
+			// computes) INT64 here exactly as the embedded engine does
+			// (#443, #445 — was FLOAT64 on the DAG only). CAST and c_f64/2
+			// were always unaffected (CAST has its own declared type, and
+			// c_f64 is already FLOAT64).
 			name: "cast_arith",
-			tmpl: `SELECT CAST(id AS BIGINT) AS ci, UPPER(c_str) AS up, c_f64 / 2 AS df ` +
+			tmpl: `SELECT CAST(id AS BIGINT) AS ci, UPPER(c_str) AS up, id + 1 AS pi, c_f64 / 2 AS df ` +
 				`FROM ` + typematrix.Table + ` WHERE %s`,
 		},
 		{
@@ -104,13 +105,18 @@ func TestEmptyResultDeclaresPlanSchema(t *testing.T) {
 			name: "distinct",
 			tmpl: `SELECT DISTINCT g FROM ` + typematrix.Table + ` WHERE %s`,
 		},
-		// A computed BOOLEAN projection (`id > 3 AS gt`, `... LIKE ... AS lk`)
-		// is deliberately NOT in this corpus: buildSelectProjection treats a
-		// projection spec's zero-value Type as "not set" and defaults it to
-		// STRING, and parquet.TypeBool IS that zero value, so a correctly
-		// inferred BOOL is indistinguishable from unset and silently comes
-		// back as the STRING "true"/"false" on the DAG route (#445, filed
-		// rather than fixed in this round).
+		{
+			// A computed BOOLEAN projection: buildSelectProjection used to
+			// treat a projection spec's zero-value Type as "not set" and
+			// default it to STRING, and parquet.TypeBool IS that zero value,
+			// so a correctly inferred BOOL was indistinguishable from unset
+			// and silently came back as the STRING "true"/"false" on the DAG
+			// route (#443, #445). ProjectSpec.Type is now a pointer — the
+			// same TypeKnown/nil shape as AggSpec.OutputType (#354) — so a
+			// declared BOOL survives the wire.
+			name: "computed_bool",
+			tmpl: `SELECT id, id > 3 AS gt, c_str LIKE 'str%%' AS lk FROM ` + typematrix.Table + ` WHERE %s`,
+		},
 
 		// F3: same window coverage as the wadjet-side gate, over the DAG's
 		// window stage.
