@@ -785,10 +785,15 @@ func postgresSemanticsCases() []pgCase {
 	//
 	// `WHERE NOT (<predicate>)` was executed as `WHERE <predicate>` whenever
 	// the inner predicate vectorized: the physical planner's filter lowering
-	// returned the operand's operators UN-negated, so the engine answered the
-	// COMPLEMENT of the row set (#461). A complement is a plausible-looking
-	// answer, which is how it survived every existing gate — including the
-	// two-path one, because both engines share the lowering and agreed.
+	// returned the operand's operators UN-negated, so the single-process
+	// engine answered the COMPLEMENT of the row set (#461) — the distributed
+	// worker compiles scan filters straight to the row evaluator and never
+	// hit this. A complement is a plausible-looking answer, which is how it
+	// survived every existing gate — including the two-path one, whose
+	// corpus had no negated predicate to send the single-process arm down
+	// the buggy path in the first place. That gate compares the two arms to
+	// each other, not to SQL; a corpus gap, not a lowering the arms share,
+	// is what hid it.
 	//
 	// Half of these negate a predicate on a NULLABLE column, where the answer
 	// is NOT the complement: NOT UNKNOWN is UNKNOWN, so a NULL row belongs to

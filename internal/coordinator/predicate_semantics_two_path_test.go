@@ -15,18 +15,25 @@ import (
 // on both engines.
 //
 // The two-path gate next door (TestTypeMatrixTwoPath) asks whether the stage
-// DAG and the single-process engine agree. That question cannot see a defect
-// in the shared lowering, and #461 was exactly that: `extractFilterOps`
-// returned the operators of a NOT's OPERAND, un-negated, so `WHERE NOT (id =
-// 131)` was executed as `WHERE id = 131` — the complement of the answer — on
-// BOTH engines, in perfect agreement. The distributed path re-parses its
-// filters from SQL text and reaches the same lowering, which is why the two
-// arms agreed on the wrong rows.
+// DAG and the single-process engine agree with EACH OTHER — and #461/#450
+// slipped past it not because the two arms share a lowering, but because its
+// corpus had no negated predicate and no NULL literal to drive either arm
+// into the code that was wrong. The DAG arm was never at risk here: the
+// worker compiles scan-pushed filters straight to the row evaluator
+// (compileFilterExprs in internal/worker/filter_compile.go calls
+// exec.NewFilter(expr.FilterPredicate(compiled)), never extractFilterOps) and
+// that evaluator got NOT and NULL-literal comparisons right throughout. The
+// single-process arm's physical planner additionally tries to vectorize a
+// filter (buildFilterOp → tryVectorizeFilter/tryPartialVectorize in
+// internal/planner/physical/plan.go), and it was extractFilterOps there that
+// returned a NOT's OPERAND un-negated (#461) and let a NULL literal read as
+// the column type's zero (#450) — a bug in one arm, not a shared one.
 //
-// So this gate carries its own expectation. Each case names the row set SQL
-// requires, computed in Go from the same fixture the engines read, and both
-// arms are held to it. An engine that agrees with the other but not with SQL
-// fails here.
+// So this gate carries its own expectation instead of comparing the arms to
+// each other. Each case names the row set SQL requires, computed in Go from
+// the same fixture the engines read, and both arms are held to it. An engine
+// that agrees with the other but not with SQL fails here — which is exactly
+// the failure mode the corpus gap above let through.
 //
 // Three-valued logic is the point of most of the corpus. A WHERE admits only
 // TRUE: a NULL row satisfies neither a predicate nor its negation, and
