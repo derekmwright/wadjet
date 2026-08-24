@@ -116,7 +116,7 @@ the embedded engine per policy shape.
 | `NodeFilter` | pushes predicates onto child stage | `plan.go:3323` |
 | `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. |
 | `NodeIntersect` / `NodeExcept` | `union` (with per-arm tag columns) + a grouped counting `final_aggregate` | `set_op_stages.go` (#346). The distribution pass inserts an `exchange-repartition` on the full result row between them — see §Set operations. |
-| **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. No USER DISTINCT reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns every `Distinct(Project)` in the tree, at any depth, into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages (#466 widened this from the root path only). What still passes through: planner-inserted `BuildSideDedup` Distincts (semi/anti build dedup, decorrelated semijoin key source), which carry no user-visible semantics, and root-path fallback shapes the coordinator dedups after the gather. A user Distinct anywhere else is REFUSED by `refuseUnstageableDistinct` (`physical/distinct_refusal.go`) rather than dropped. |
+| **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. No USER DISTINCT reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns every `Distinct(Project)` in the tree, at any depth, into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages (#466 widened this from the root path only). What still passes through: planner-inserted `BuildSideDedup` Distincts (semi/anti build dedup, decorrelated semijoin key source), which carry no user-visible semantics, and root-path fallback shapes the coordinator dedups after the gather. A user Distinct anywhere else is REFUSED by `refuseUnstageableDistinct` (`physical/distinct_refusal.go`) rather than dropped, and the coordinator answers it on the local single-process pipeline. |
 | **`NodeProject`** | **nothing — passthrough** | same `default` case; aliases recovered at gather |
 
 ## Synthetic sort keys: the column a Project would have computed
@@ -344,7 +344,20 @@ it, with the inequality riding as the stage's post-filter.
 - **DISTINCT, anywhere in the plan:** rewritten at logical-optimize time to an aggregate-free GROUP BY over the projection below it (`logical.rewriteDistinctAsGroupBy`, `planner/logical/distinct_rewrite.go`) — bare columns AND scalar expressions (derived group-bys are evaluated by the worker's `buildAggInputProjection`). Rides the sharded path above; the coordinator does no dedup (`MergeInfo.HasDistinct` is false post-rewrite). ✅ sharded.
 
   The rewrite walks the WHOLE tree. It used to walk only the root path, and a DISTINCT inside a derived table feeding an aggregate then reached nobody: `walkStages` emits no stage for it, and `ExtractMergeInfo` returns at the first `NodeAggregate` it meets, so the coordinator never saw it either. `SELECT COUNT(*) FROM (SELECT DISTINCT c FROM t) u` answered with the raw count on the DAG and the deduplicated one single-process — silent, deterministic, and unnoticed because the two shapes on either side of it (root `SELECT DISTINCT`, and a derived DISTINCT feeding a plain projection, which `ExtractMergeInfo` does see past one Project) were both correct (#466).
-- **DISTINCT fallback shapes** (DISTINCT with aggregate projections, subquery expressions): not rewritten. On the ROOT path `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`) — correct but single-node at the coordinator. Anywhere else nothing would apply it, so `PlanDistributed` returns `ErrDistinctDistributed` (`planner/physical/distinct_refusal.go`) instead: the #308 position, a deterministic loud failure over a silently different answer.
+
+### DISTINCT fallback shapes: what actually happens to each
+
+A DISTINCT is executed by being turned into a GROUP BY. Three outcomes, and no shape is silently dropped:
+
+| Shape | What happens |
+|---|---|
+| `SELECT DISTINCT a, b + c AS x …` — every projection is a usable group key | **Rewritten in place**, wherever the Distinct sits. Sharded. |
+| `SELECT DISTINCT *` / `SELECT DISTINCT t.*` — no `NodeProject` exists at all (a bare-star select list produces none), so the plan is `Distinct → Scan` or `Distinct → Filter → Scan` or `Distinct → Join(Scan, Scan)` | **Rewritten in place** by `rewriteStarDistinct`: the group keys are the relation's own columns, read off `Node.ScanColumns` (the catalog annotation `ExpandStarProjections` uses). Descends only through column-preserving nodes — a Filter, and a join that emits BOTH sides — and declines a semi/anti join, a nested aggregate/projection, an unannotated scan, or a name that appears in two scans (one group key cannot stand for two columns). Sharded. |
+| `SELECT DISTINCT a, SUM(b) …` (an aggregate projection has no group key) or a projection carrying a subquery | **Not rewritten.** On the ROOT path `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`) — correct, but single-node at the coordinator. Anywhere else nothing on the DAG would apply it, so `PlanDistributed` returns `ErrDistinctDistributed` (`planner/physical/distinct_refusal.go`) and the coordinator **routes the query to its local single-process pipeline** (`Coordinator.runDistinctLocal`, `coordinator/refused_local.go`) — the #359 pattern, counter `DistinctLocalRoutes()`. |
+
+The refusal is not the answer: it is the handoff. Refusing beat dropping the DISTINCT (#466, the #308 position — a loud failure over a silently different answer), but the query still HAS an answer and one engine in the coordinator process computes it, so an error would be a worse outcome than either. What the refusal buys is that nothing reaches `walkStages` with a semantics-carrying Distinct in it.
+
+Declaring the star's group keys is also what stops the column pruner from eating the dedup. A `NodeDistinct` names no columns, so `computeRequiredColumns` narrowed a star DISTINCT's scan to whatever else the query mentioned: `SELECT COUNT(*) FROM (SELECT DISTINCT * FROM lineitem) u` deduplicated on ONE column (the distinct `l_orderkey` count, 14979 instead of 60175), and over a join it pruned to zero columns and tripped the schemaless-batch guard (#277). Group keys are required columns (#479).
 - **`ExtractMergeInfo` walks a Project CHAIN** above the aggregate, not a single node, composing renames innermost-outward. A derived table's SELECT list and the outer query's are separate `NodeProject`s that nothing merges, so `SELECT c FROM (SELECT COUNT(*) AS c FROM t) u` stacks two; stopping at the first made the aggregate invisible and a probe-split merge concatenated the workers' partial groups instead of re-aggregating them.
 
 ## Set operations
@@ -474,7 +487,9 @@ Mechanism (same refuse-loudly shape as set operations):
   `coordinator/correlated_local.go`) — a ROUTE, not a fallback: no DAG plan
   exists, every local failure (including the result budget) is the query's
   outcome. No byte-threshold gate (these plans are unestimable); memory and
-  result budgets still bound it. Counter: `CorrelatedLocalRoutes()`.
+  result budgets still bound it. Counter: `CorrelatedLocalRoutes()`. The
+  guards live in `Coordinator.runRefusedLocal` (`coordinator/refused_local.go`),
+  shared with the #466 DISTINCT route.
 - Backstop at the deferral seam: `resolveSubqueryAST` refuses to defer or
   eagerly execute a subquery that is not self-contained
   (`plansql.DanglingTableRefs`), parking `correlatedErr` the way `setOpErr`
@@ -642,11 +657,24 @@ an aggregate still returned every input row on the DAG — `SELECT COUNT(*) FROM
 (SELECT DISTINCT c FROM t) u` answered 100 where PostgreSQL and the
 single-process path answer 25. The rewrite now walks the whole tree, marked
 `BuildSideDedup` Distincts are excluded by an explicit flag rather than by
-position, and anything the rewrite still declines off the root path is refused
-instead of dropped. Regression coverage: `planner/logical/distinct_rewrite_test.go`
-(rewrite scope + marker), `planner/physical/derived_distinct_test.go`
-(the emitted dedup stage and the refusal), and the `DerivedDistinct*` /
-`GroupByOverDerivedDistinct` entries in the two-path invariance corpus.
+position, a star DISTINCT (which has no `NodeProject` to read) takes its group
+keys from the scan's catalog annotation, and anything the rewrite still
+declines off the root path is refused and routed to the coordinator-local
+pipeline instead of dropped. Regression coverage:
+`planner/logical/distinct_rewrite_test.go` (rewrite scope, star keys, marker),
+`planner/physical/derived_distinct_test.go` (the emitted dedup stage and the
+refusal), the `DerivedDistinct*` / `DerivedStarDistinct*` /
+`GroupByOverDerivedDistinct` entries in the two-path invariance corpus, and the
+matching PostgreSQL-oracle entries that settle what the answers ARE.
+
+Two things the review of that fix turned up and this document now states above:
+a star DISTINCT used to be REFUSED where the pre-#466 DAG answered correctly,
+and the group-key test was gated behind a text match for the word `select`
+that fired on string literals. Three defects it found that are NOT this
+family are tracked separately: #478 (a derived-table LIMIT lands on no stage),
+#479 (the pruned-column-set dedup, fixed here), and #480 (two loud DAG
+failures on a derived table feeding a join, both with explicit-`GROUP BY`
+twins).
 
 ## How to inspect this machinery (recipes)
 
