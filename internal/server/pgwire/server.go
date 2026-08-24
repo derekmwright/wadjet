@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -240,11 +241,18 @@ type pgConn struct {
 	resultFmtCodes  []int16                 // result format codes from Bind (0=text, 1=binary)
 	describeResult  *wadjet.QueryResult     // cached Describe result for Execute reuse
 	describeStream  coordinator.BatchStream // columnar half of describeResult (coord path)
-	describeErr     error                   // cached Describe-time execution failure for Execute replay
-	describeCancel  string                  // set when that failure was a cancellation: the 57014 message to replay
-	describeSynth   *synthAnswer            // cached Describe-time introspection answer
-	describedSQL    string                  // statement the three caches above belong to
-	paramOIDCache   map[string][]uint32     // per-statement inferred parameter OIDs (see paraminfer.go)
+	// describeNestedSchema is the declared ROW/ARRAY/MAP structure (field
+	// order, element type) sendDataRow needs to render a composite value in
+	// PostgreSQL's text form, keyed by output column name — resolved
+	// alongside describeResult so Execute reuses the SAME resolution rather
+	// than re-deriving it (and, for the legacy query path, re-paying the
+	// catalog round-trip nestedColumnSchemas makes).
+	describeNestedSchema map[string]parquet.Column
+	describeErr          error               // cached Describe-time execution failure for Execute replay
+	describeCancel       string              // set when that failure was a cancellation: the 57014 message to replay
+	describeSynth        *synthAnswer        // cached Describe-time introspection answer
+	describedSQL         string              // statement the three caches above belong to
+	paramOIDCache        map[string][]uint32 // per-statement inferred parameter OIDs (see paraminfer.go)
 
 	// Transaction state: 'I' = idle, 'T' = in transaction, 'E' = failed
 	txState byte
@@ -826,11 +834,15 @@ func (c *pgConn) handleQuery(sql string) {
 	}
 	var result *wadjet.QueryResult
 	var stream coordinator.BatchStream
+	var nestedSchema map[string]parquet.Column
 	var err error
 	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
-		result, stream, err = c.queryViaCoord(ctx, sql)
+		result, stream, nestedSchema, err = c.queryViaCoord(ctx, sql)
 	} else {
 		result, err = c.db.Query(ctx, sql)
+		if err == nil {
+			nestedSchema = c.nestedColumnSchemas(sql, result.ColumnMetas)
+		}
 	}
 	c.server.releaseQuery()
 	if err != nil {
@@ -878,7 +890,7 @@ func (c *pgConn) handleQuery(sql string) {
 
 	// Send DataRow for each row — coord-path batches are boxed and sent
 	// one batch at a time, never materialized as a whole.
-	sent, sendErr := c.sendResultRows(ctx, columns, stream, result.Rows, nil, result.ColumnMetas)
+	sent, sendErr := c.sendResultRows(ctx, columns, stream, result.Rows, nil, result.ColumnMetas, nestedSchema)
 	if sendErr != nil {
 		// Partial DataRows followed by ErrorResponse is legal in the v3
 		// protocol; the client discards the partial result.
@@ -1128,11 +1140,15 @@ func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 	defer cancel()
 	var result *wadjet.QueryResult
 	var stream coordinator.BatchStream
+	var nestedSchema map[string]parquet.Column
 	var err error
 	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(shapeSQL) {
-		result, stream, err = c.queryViaCoord(ctx, shapeSQL)
+		result, stream, nestedSchema, err = c.queryViaCoord(ctx, shapeSQL)
 	} else {
 		result, err = c.db.Query(ctx, shapeSQL)
+		if err == nil {
+			nestedSchema = c.nestedColumnSchemas(shapeSQL, result.ColumnMetas)
+		}
 	}
 	if err != nil {
 		// Can't describe — send NoData rather than error, and CACHE the
@@ -1168,6 +1184,7 @@ func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 	} else {
 		c.describeResult = result
 		c.describeStream = stream
+		c.describeNestedSchema = nestedSchema
 		c.describedSQL = sql
 	}
 
@@ -1301,17 +1318,23 @@ func (c *pgConn) handleExecute(payload []byte) {
 	defer cancel()
 	var result *wadjet.QueryResult
 	var stream coordinator.BatchStream
+	var nestedSchema map[string]parquet.Column
 	if c.describeResult != nil {
 		result = c.describeResult
 		stream = c.describeStream
+		nestedSchema = c.describeNestedSchema
 		c.describeResult = nil
 		c.describeStream = nil
+		c.describeNestedSchema = nil
 	} else {
 		var err error
 		if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
-			result, stream, err = c.queryViaCoord(ctx, sql)
+			result, stream, nestedSchema, err = c.queryViaCoord(ctx, sql)
 		} else {
 			result, err = c.db.Query(ctx, sql)
+			if err == nil {
+				nestedSchema = c.nestedColumnSchemas(sql, result.ColumnMetas)
+			}
 		}
 		if err != nil {
 			c.sendQueryError(ctx, "42000", err)
@@ -1352,7 +1375,7 @@ func (c *pgConn) handleExecute(payload []byte) {
 	// Extended query protocol: Execute sends only DataRow + CommandComplete.
 	// RowDescription was already sent by Describe. Do NOT send it again.
 	// Coord-path batches are boxed and sent one batch at a time.
-	sent, sendErr := c.sendResultRows(ctx, columns, stream, result.Rows, c.resultFmtCodes, result.ColumnMetas)
+	sent, sendErr := c.sendResultRows(ctx, columns, stream, result.Rows, c.resultFmtCodes, result.ColumnMetas, nestedSchema)
 	if sendErr != nil {
 		c.sendQueryError(ctx, "58030", fmt.Errorf("reading result batches: %w", sendErr))
 		return
@@ -1947,10 +1970,11 @@ func (c *pgConn) sendSynthRows(ans *synthAnswer, fmtCodes []int16) {
 	for _, row := range ans.rows {
 		if len(fmtCodes) > 0 {
 			// Synthetic catalog answers carry no typed metas, so there is
-			// no timestamp column to convert.
-			c.sendDataRowFormatted(ans.cols, row, fmtCodes, nil)
+			// no timestamp column to convert, and no nested-type schema
+			// either — every catalog-emulation value is a scalar.
+			c.sendDataRowFormatted(ans.cols, row, fmtCodes, nil, nil)
 		} else {
-			c.sendDataRow(ans.cols, row, nil)
+			c.sendDataRow(ans.cols, row, nil, nil)
 		}
 	}
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(ans.rows)))
@@ -2927,7 +2951,7 @@ func columnTypeAt(types []parquet.TypeID, i int) parquet.TypeID {
 // `timestamp` values are microseconds relative to the latter.
 const pgEpochOffsetMicros = 946684800 * 1_000_000
 
-func (c *pgConn) sendDataRow(columns []string, row map[string]any, colTypes []parquet.TypeID) {
+func (c *pgConn) sendDataRow(columns []string, row map[string]any, colTypes []parquet.TypeID, nestedSchema map[string]parquet.Column) {
 	c.buf = c.buf[:0]
 
 	// Column count (int16)
@@ -2940,7 +2964,7 @@ func (c *pgConn) sendDataRow(columns []string, row map[string]any, colTypes []pa
 			c.buf = appendInt32(c.buf, -1)
 			continue
 		}
-		s := formatPgValue(val)
+		s := formatPgValueTyped(val, nestedColumnFor(nestedSchema, col))
 		if columnTypeAt(colTypes, i) == parquet.TypeTimestamp {
 			if ms, ok := val.(int64); ok {
 				s = batch.FormatTimestamp(ms)
@@ -2953,10 +2977,27 @@ func (c *pgConn) sendDataRow(columns []string, row map[string]any, colTypes []pa
 	c.sendMsg('D', c.buf)
 }
 
+// nestedColumnFor looks up col's declared ROW/ARRAY/MAP structure in
+// nestedSchema (sendResultRows resolves it once per result — see
+// queryViaCoord's exact answer and nestedColumnSchemas' catalog-lookup
+// best-effort one in paraminfer.go), or nil when there is none: unresolved
+// is not an error here, just a formatPgValueTyped call that renders without
+// a declared field order or element type instead of refusing.
+func nestedColumnFor(nestedSchema map[string]parquet.Column, name string) *parquet.Column {
+	if nestedSchema == nil {
+		return nil
+	}
+	col, ok := nestedSchema[name]
+	if !ok {
+		return nil
+	}
+	return &col
+}
+
 // sendDataRowFormatted sends a DataRow using the format codes from Bind.
 // Columns with format code 1 (binary) get binary-encoded values.
 // metas provides type info for correct binary encoding (may be nil for text-only).
-func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtCodes []int16, colTypes []parquet.TypeID) {
+func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtCodes []int16, colTypes []parquet.TypeID, nestedSchema map[string]parquet.Column) {
 	c.buf = c.buf[:0]
 	c.buf = appendInt16(c.buf, int16(len(columns)))
 
@@ -2964,6 +3005,21 @@ func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtC
 		val, ok := row[col]
 		if !ok || val == nil {
 			c.buf = appendInt32(c.buf, -1)
+			continue
+		}
+
+		// ROW/ARRAY/MAP have no PostgreSQL binary wire form of their own —
+		// they declare OID 25 (text), same as an unresolved type, and OID
+		// 25's "binary" format IS its text bytes — so both formats render
+		// the same way here, ahead of the numeric/timestamp/date binary
+		// arms below (which do not apply) and appendBinaryValue's generic
+		// fallback (which used to reach these via Go's %v and print
+		// "map[...]"/"[...]" instead of PostgreSQL's composite/array text).
+		switch val.(type) {
+		case map[string]any, []any:
+			s := formatPgValueTyped(val, nestedColumnFor(nestedSchema, col))
+			c.buf = appendInt32(c.buf, int32(len(s)))
+			c.buf = append(c.buf, s...)
 			continue
 		}
 
@@ -2999,7 +3055,7 @@ func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtC
 		case binary:
 			c.buf = appendBinaryValue(c.buf, val)
 		default:
-			s := formatPgValue(val)
+			s := formatPgValueTyped(val, nestedColumnFor(nestedSchema, col))
 			if isTS && msOK {
 				s = batch.FormatTimestamp(ms)
 			}
@@ -3210,11 +3266,35 @@ func appendBinaryValue(buf []byte, val any) []byte {
 	return buf
 }
 
-// formatPgValue formats a value for PgWire text output.
-// Produces SQL-like formatting for nested types (arrays, maps, structs).
+// formatPgValue formats a value for PgWire text output when no column-type
+// declaration is available for it — the introspection/catalog-emulation
+// rows, and any caller that predates typed rendering. It is
+// formatPgValueTyped with no column, so a ROW/ARRAY/MAP value still comes
+// out in PostgreSQL's composite/array shape, just without a schema to give
+// a ROW its DECLARED field order or an ARRAY/MAP its element type — see
+// formatPgValueTyped's doc for what that fallback looks like.
 func formatPgValue(val any) string {
+	return formatPgValueTyped(val, nil)
+}
+
+// formatPgValueTyped formats a value for PgWire text output, the way
+// formatPgValue always did for every scalar type, plus PostgreSQL's actual
+// composite/array text forms for ROW and ARRAY (#471) using col — the
+// column's declared parquet.Column, when sendResultRows was able to resolve
+// one (queryViaCoord's exact answer, or nestedColumnSchemas' catalog-lookup
+// best effort for the legacy query path) — for a ROW's field order and an
+// ARRAY's element type. col may be nil (an unresolved computed expression,
+// or any other caller that has none): every nested-type helper below
+// degrades to a schema-free rendering instead of refusing, per each
+// helper's own doc.
+func formatPgValueTyped(val any, col *parquet.Column) string {
 	switch tv := val.(type) {
 	case []float32:
+		// VECTOR: a wadjet extension with no PostgreSQL array/composite
+		// form to match (unlike ARRAY/ROW below, which this bracket
+		// convention used to also apply, incorrectly — see #471). Left as
+		// is: square brackets, no space, the established display for this
+		// type.
 		var buf strings.Builder
 		buf.WriteByte('[')
 		for i, f := range tv {
@@ -3226,31 +3306,14 @@ func formatPgValue(val any) string {
 		buf.WriteByte(']')
 		return buf.String()
 	case []any:
-		var buf strings.Builder
-		buf.WriteByte('[')
-		for i, elem := range tv {
-			if i > 0 {
-				buf.WriteString(", ")
-			}
-			buf.WriteString(formatPgValue(elem))
-		}
-		buf.WriteByte(']')
-		return buf.String()
+		// wadjet's boxing for BOTH ARRAY and MAP (a MAP's entries arrive as
+		// one 2-field ROW per key, in the sorted-key order mapEntryRows
+		// already put them in) — formatPgArrayOrMap tells them apart using
+		// col.Type when it is known.
+		return formatPgArrayOrMap(tv, col)
 	case map[string]any:
-		var buf strings.Builder
-		buf.WriteByte('{')
-		first := true
-		for k, v := range tv {
-			if !first {
-				buf.WriteString(", ")
-			}
-			first = false
-			buf.WriteString(k)
-			buf.WriteString(": ")
-			buf.WriteString(formatPgValue(v))
-		}
-		buf.WriteByte('}')
-		return buf.String()
+		// wadjet's boxing for ROW.
+		return formatPgComposite(tv, col)
 	case bool:
 		// PostgreSQL text format for bool is t/f, not true/false.
 		if tv {
@@ -3264,6 +3327,248 @@ func formatPgValue(val any) string {
 	default:
 		return fmt.Sprintf("%v", val)
 	}
+}
+
+// formatPgArrayOrMap renders wadjet's []any boxing for ARRAY and MAP.
+// col.Type tells them apart when it is known; without it (col is nil, or
+// declares neither) this renders as an ARRAY, which is right far more often
+// — MAP is the wadjet extension here, ARRAY is the PostgreSQL type.
+func formatPgArrayOrMap(elems []any, col *parquet.Column) string {
+	if col != nil && col.Type == parquet.TypeMap {
+		return formatPgMap(elems, col)
+	}
+	var elemCol *parquet.Column
+	if col != nil && col.ElementType != nil {
+		elemCol = col.ElementType
+	}
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, e := range elems {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(formatPgArrayElement(e, elemCol))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+// formatPgArrayElement renders one ARRAY element in PostgreSQL's array text
+// form: a genuine NULL is the bare, unquoted keyword (never the four
+// letters as text — quotePgArray is what quotes THAT case, below); anything
+// else is rendered by its own type, recursively, and then quoted if
+// quotePgArray says the result needs it.
+func formatPgArrayElement(val any, col *parquet.Column) string {
+	if val == nil {
+		return "NULL"
+	}
+	return quotePgArray(formatPgValueTyped(val, col))
+}
+
+// quotePgArray applies PostgreSQL's array-element quoting: wrap in double
+// quotes — backslash-escaping an embedded double quote or backslash — when
+// the text is empty, reads case-insensitively as the NULL keyword, or
+// contains a character the array parser would otherwise treat as
+// structural.
+//
+// Verified against live PostgreSQL 17 (array_out). This input (a plain
+// value, a value needing quoting for each trigger character below, an
+// empty string, and the literal text "NULL"):
+//
+//	ARRAY['plain','has,comma','has"quote','has\backslash','has space',
+//	      '','NULL','has{brace}','has(paren)']
+//
+// renders as:
+//
+//	{plain,"has,comma","has\"quote","has\\backslash","has space","","NULL",
+//	 "has{brace}",has(paren)}
+//
+// Note parentheses do NOT trigger array quoting (last element, unquoted) —
+// that is a COMPOSITE rule, quotePgComposite below, not an array one.
+func quotePgArray(s string) string {
+	if !pgArrayNeedsQuoting(s) {
+		return s
+	}
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		if r == '"' || r == '\\' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func pgArrayNeedsQuoting(s string) bool {
+	if s == "" || strings.EqualFold(s, "NULL") {
+		return true
+	}
+	for _, r := range s {
+		switch r {
+		case ',', '{', '}', '"', '\\', ' ', '\t', '\n', '\r':
+			return true
+		}
+	}
+	return false
+}
+
+// formatPgMap renders a MAP's entries — already in the sorted-key order
+// mapEntryRows (internal/engine/batch) put them in when the row was
+// written, which this function relies on rather than re-deriving: ranging
+// a Go map here would reintroduce the exact randomization mapEntryRows
+// exists to avoid — as "{k1: v1, k2: v2}". MAP is a wadjet extension with no
+// PostgreSQL form to match, so this keeps the bracket convention already in
+// use rather than inventing a new one; the fix is the two real defects
+// map-range-random order (gone: this walks the incoming SLICE, never a Go
+// map) and a NULL value printing as Go's "<nil>" (renders as the unquoted
+// NULL keyword now, matching quotePgArray's convention above it).
+//
+// col, when known, is a TypeMap column: like ARRAY, its per-entry structure
+// lives under ElementType — not Fields directly (a MAP column's Fields is
+// unused; ElementType points at a TypeRow column carrying the two entry
+// fields, the same declaration shape internal/engine/batch and every other
+// nested-type schema in this codebase uses) — whose two Fields name which
+// of each entry's two keys is "key" and which is "value". mapEntryRows
+// writes those same two names, defaulting to "key"/"value" when the schema
+// does not override them, which this falls back to as well when col is nil
+// or its structure does not resolve.
+func formatPgMap(entries []any, col *parquet.Column) string {
+	keyName, valName := "key", "value"
+	var keyCol, valCol *parquet.Column
+	if col != nil && col.ElementType != nil && len(col.ElementType.Fields) == 2 {
+		entryFields := col.ElementType.Fields
+		keyName, valName = entryFields[0].Name, entryFields[1].Name
+		keyCol, valCol = &entryFields[0], &entryFields[1]
+	}
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, e := range entries {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		entry, ok := e.(map[string]any)
+		if !ok {
+			// Not the 2-field entry shape mapEntryRows produces — render
+			// whatever it is rather than panic on a type assertion.
+			b.WriteString(formatPgValueTyped(e, nil))
+			continue
+		}
+		b.WriteString(formatPgMapEntryField(entry[keyName], keyCol))
+		b.WriteString(": ")
+		b.WriteString(formatPgMapEntryField(entry[valName], valCol))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+func formatPgMapEntryField(val any, col *parquet.Column) string {
+	if val == nil {
+		return "NULL"
+	}
+	return formatPgValueTyped(val, col)
+}
+
+// formatPgComposite renders a ROW value in PostgreSQL's composite text
+// form: parenthesized, comma-separated, in the column's DECLARED field
+// order (col.Fields, when known) — with a NULL field as an EMPTY slot
+// between commas, never the word NULL (that is an array/MAP convention,
+// not a composite one).
+//
+// Without a declared order (col is nil, or names a different number of
+// fields than the value has keys — a computed ROW expression on the legacy
+// query path, or a catalog name collision nestedColumnSchemas already
+// distrusts for a different reason), the keys are sorted instead: not
+// PostgreSQL's answer, but deterministic, which random Go map iteration was
+// not.
+//
+// Verified against live PostgreSQL 17 (record_out) on a 3-field composite:
+// ROW(1,NULL,3) renders "(1,,3)"; the NULL middle field is nothing between
+// the two commas, not the word NULL.
+func formatPgComposite(row map[string]any, col *parquet.Column) string {
+	names, fieldCols := compositeFieldOrder(row, col)
+	var b strings.Builder
+	b.WriteByte('(')
+	for i, name := range names {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		v, ok := row[name]
+		if !ok || v == nil {
+			continue // NULL: an empty slot, not text.
+		}
+		b.WriteString(quotePgComposite(formatPgValueTyped(v, fieldCols[i])))
+	}
+	b.WriteByte(')')
+	return b.String()
+}
+
+// compositeFieldOrder returns row's field names in DISPLAY order, and the
+// declared Column for each (nil where col did not cover it) for recursive
+// rendering.
+func compositeFieldOrder(row map[string]any, col *parquet.Column) ([]string, []*parquet.Column) {
+	if col != nil && len(col.Fields) == len(row) {
+		names := make([]string, len(col.Fields))
+		cols := make([]*parquet.Column, len(col.Fields))
+		for i := range col.Fields {
+			names[i] = col.Fields[i].Name
+			cols[i] = &col.Fields[i]
+		}
+		return names, cols
+	}
+	names := make([]string, 0, len(row))
+	for k := range row {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names, make([]*parquet.Column, len(names))
+}
+
+// quotePgComposite applies PostgreSQL's composite-field quoting: wrap in
+// double quotes — doubling an embedded double quote, backslash-escaping an
+// embedded backslash — when the text is empty or contains a character the
+// composite parser would otherwise treat as structural.
+//
+// Verified against live PostgreSQL 17 (record_out) field by field:
+// braces do NOT trigger composite quoting ("has{brace}" prints unquoted,
+// unlike an array element with the same content — quotePgArray above) and,
+// a genuine PostgreSQL quirk this mirrors rather than improves on, the
+// literal text "NULL" is not quoted either — ROW(1,'NULL',3) prints
+// "(1,NULL,3)", indistinguishable in the composite's OWN text from what a
+// true NULL field renders as ONE LEVEL UP, in an array or a bare column:
+// an empty slot here, not this string.
+func quotePgComposite(s string) string {
+	if !pgCompositeNeedsQuoting(s) {
+		return s
+	}
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"':
+			b.WriteString(`""`)
+		case '\\':
+			b.WriteString(`\\`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func pgCompositeNeedsQuoting(s string) bool {
+	if s == "" {
+		return true
+	}
+	for _, r := range s {
+		switch r {
+		case ',', '(', ')', '"', '\\', ' ', '\t', '\n', '\r':
+			return true
+		}
+	}
+	return false
 }
 
 // formatPgFloat renders a float the way PostgreSQL's text protocol does:

@@ -24,6 +24,9 @@ import (
 	"context"
 	"strings"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // cmpOperators are the comparison spellings a placeholder can stand against.
@@ -227,6 +230,84 @@ func (c *pgConn) columnParamOIDs(sql string) map[string]uint32 {
 	}
 	for key := range conflicting {
 		delete(out, key)
+	}
+	return out
+}
+
+// isNestedTypeID reports whether t is one of the container types whose text
+// rendering needs the column's DECLARED structure — ROW's field order,
+// ARRAY's element type, MAP's key/value field names — because the Go value
+// GetValue hands back carries none of that on its own: a ROW is a
+// map[string]any with no remembered order, an ARRAY and a MAP are both a
+// bare []any indistinguishable from each other without it (#471).
+func isNestedTypeID(t parquet.TypeID) bool {
+	switch t {
+	case parquet.TypeRow, parquet.TypeArray, parquet.TypeMap:
+		return true
+	}
+	return false
+}
+
+// nestedColumnSchemas resolves the declared structure of every ROW/ARRAY/MAP
+// output column for the LEGACY (non-coord) query path, by matching it, by
+// name, against a column of the same name in a catalog table the statement
+// references — columnParamOIDs' technique, applied to a different question:
+// not which wire OID a BOUND PARAMETER should decode as, but which field
+// order and element type an OUTPUT VALUE should render with. The coord path
+// has an exact answer instead (queryViaCoord reads it straight off the
+// query's own output schema, which also covers a computed expression); this
+// is the best this layer can do without that.
+//
+// A column two tables carry under the same name but a DIFFERENT top-level
+// type is dropped, the same conflict rule columnParamOIDs applies — a wrong
+// confident structure would silently drop fields formatPgComposite cannot
+// find under it, which is worse than the order-agnostic fallback.
+//
+// Skipped entirely (nil, no catalog round trip) when metas says no output
+// column is a nested type, which is the ordinary query.
+func (c *pgConn) nestedColumnSchemas(sql string, metas []wadjet.ColumnMeta) map[string]parquet.Column {
+	needed := false
+	for _, m := range metas {
+		if isNestedTypeID(m.TypeID) {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tables, err := c.db.ListTables(ctx)
+	if err != nil {
+		return nil
+	}
+	lowerSQL := strings.ToLower(sql)
+	out := make(map[string]parquet.Column)
+	conflicting := make(map[string]bool)
+	for _, table := range tables {
+		if !containsIdentWord(lowerSQL, strings.ToLower(table)) {
+			continue
+		}
+		tm, err := c.db.Catalog().GetTable(ctx, table)
+		if err != nil || tm == nil {
+			continue
+		}
+		for _, col := range tm.Schema.Columns {
+			if prev, dup := out[col.Name]; dup && prev.Type != col.Type {
+				conflicting[col.Name] = true
+				continue
+			}
+			out[col.Name] = col
+		}
+	}
+	for name := range conflicting {
+		delete(out, name)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

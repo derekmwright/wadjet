@@ -316,10 +316,24 @@ func TestFormatPgValue(t *testing.T) {
 		{"float32", float32(2.5), "2.5"},
 		{"bool", true, "t"}, // PostgreSQL text format for bool
 		{"nil_default", nil, "<nil>"},
-		{"array", []any{"a", "b", "c"}, "[a, b, c]"},
-		{"empty_array", []any{}, "[]"},
-		{"nested_array", []any{[]any{1, 2}}, "[[1, 2]]"},
-		{"map", map[string]any{"k": "v"}, "{k: v}"},
+		// #471: ARRAY is PostgreSQL's braces-and-commas text form, not the
+		// old square-bracket-with-space rendering — verified against live
+		// PostgreSQL 17 (array_out; see formatPgArrayElement/quotePgArray).
+		{"array", []any{"a", "b", "c"}, "{a,b,c}"},
+		{"empty_array", []any{}, "{}"},
+		// The inner array's own text is "{1,2}", which itself contains a
+		// brace — one of the characters that triggers ARRAY-element
+		// quoting (quotePgArray) — so the outer level quotes it, the same
+		// way it quotes a nested composite's parens-and-comma text.
+		{"nested_array", []any{[]any{1, 2}}, `{"{1,2}"}`},
+		{"array_with_null", []any{"a", nil, "c"}, "{a,NULL,c}"},
+		{"array_needs_quoting", []any{"has,comma", "has space", ""}, `{"has,comma","has space",""}`},
+		// A ROW value (map[string]any, wadjet's boxing for it) with no
+		// column declaration to give it PostgreSQL's field order falls back
+		// to sorted keys — still deterministic composite text, not the
+		// map-range-random "{k: v}" this used to produce.
+		{"row_no_schema", map[string]any{"k": "v"}, "(v)"},
+		{"row_no_schema_multi_field", map[string]any{"b": "2", "a": "1", "c": "3"}, "(1,2,3)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -329,6 +343,156 @@ func TestFormatPgValue(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFormatPgValueTypedComposite covers #471's core claim: with a declared
+// ROW/ARRAY/MAP column, formatPgValueTyped renders PostgreSQL's actual
+// composite/array text form, in the DECLARED field order, with a NULL as an
+// empty slot (ROW) or the bare keyword (ARRAY/MAP) rather than Go's "<nil>",
+// and PostgreSQL's quoting rules for a field/element that needs it. Every
+// "want" here was checked against live PostgreSQL 17 for the equivalent
+// value (see quotePgArray/quotePgComposite's doc comments for the exact
+// psql transcripts).
+func TestFormatPgValueTypedComposite(t *testing.T) {
+	rowCol := &parquet.Column{
+		Type: parquet.TypeRow,
+		Fields: []parquet.Column{
+			{Name: "a", Type: parquet.TypeInt32},
+			{Name: "b", Type: parquet.TypeString},
+			{Name: "c", Type: parquet.TypeInt32},
+		},
+	}
+
+	t.Run("declared field order, not insertion order", func(t *testing.T) {
+		// Go map iteration would put these three fields in an unpredictable
+		// order; the declared order says a, b, c.
+		row := map[string]any{"c": int32(3), "a": int32(1), "b": "x"}
+		if got, want := formatPgValueTyped(row, rowCol), "(1,x,3)"; got != want {
+			t.Errorf("formatPgValueTyped = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("NULL field is an empty slot", func(t *testing.T) {
+		row := map[string]any{"a": int32(1), "b": nil, "c": int32(3)}
+		if got, want := formatPgValueTyped(row, rowCol), "(1,,3)"; got != want {
+			t.Errorf("formatPgValueTyped = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("field needing composite quoting", func(t *testing.T) {
+		tests := []struct {
+			name string
+			b    string
+			want string
+		}{
+			{"comma", "has,comma", `(1,"has,comma",3)`},
+			{"embedded quote doubles", `has"quote`, `(1,"has""quote",3)`},
+			{"embedded backslash", `has\backslash`, `(1,"has\\backslash",3)`},
+			{"parens", "has(paren)", `(1,"has(paren)",3)`},
+			{"space", "has space", `(1,"has space",3)`},
+			{"empty string", "", `(1,"",3)`},
+			// A genuine PostgreSQL quirk quotePgComposite mirrors: the
+			// literal text "NULL" is NOT quoted, unlike an array element.
+			{"literal NULL string is unquoted", "NULL", `(1,NULL,3)`},
+			// Braces do not trigger composite quoting (an array rule).
+			{"braces do not trigger quoting", "has{brace}", `(1,has{brace},3)`},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				row := map[string]any{"a": int32(1), "b": tc.b, "c": int32(3)}
+				if got := formatPgValueTyped(row, rowCol); got != tc.want {
+					t.Errorf("formatPgValueTyped(%q) = %q, want %q", tc.b, got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("nested composite in array", func(t *testing.T) {
+		arrCol := &parquet.Column{Type: parquet.TypeArray, ElementType: rowCol}
+		elems := []any{
+			map[string]any{"a": int32(1), "b": "x", "c": int32(0)},
+			nil,
+		}
+		if got, want := formatPgValueTyped(elems, arrCol), `{"(1,x,0)",NULL}`; got != want {
+			t.Errorf("formatPgValueTyped = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("nested array in composite, doubly quoted", func(t *testing.T) {
+		outerCol := &parquet.Column{
+			Type: parquet.TypeRow,
+			Fields: []parquet.Column{
+				{Name: "a", Type: parquet.TypeInt32},
+				{Name: "arr", Type: parquet.TypeArray, ElementType: &parquet.Column{Type: parquet.TypeString}},
+				{Name: "c", Type: parquet.TypeInt32},
+			},
+		}
+		row := map[string]any{
+			"a":   int32(1),
+			"arr": []any{"has,comma", "plain"},
+			"c":   int32(3),
+		}
+		// Live PostgreSQL 17: ROW(1, ARRAY['has,comma','plain'], 3) prints
+		// (1,"{""has,comma"",plain}",3) — the array's own quote-doubling
+		// gets doubled AGAIN by the composite level wrapping it.
+		want := `(1,"{""has,comma"",plain}",3)`
+		if got := formatPgValueTyped(row, outerCol); got != want {
+			t.Errorf("formatPgValueTyped = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestFormatPgValueTypedMap covers the MAP defects #471 named: entries
+// render in the order they arrive (mapEntryRows already sorted them by key;
+// this must never re-range a Go map and reintroduce randomization) and a
+// NULL value renders as the unquoted NULL keyword, not Go's "<nil>".
+func TestFormatPgValueTypedMap(t *testing.T) {
+	// A MAP column's own Fields is unused; its per-entry structure lives
+	// under ElementType (a TypeRow column) — the same declaration shape
+	// every MAP schema in this codebase uses (see e.g.
+	// wadjet/container_order_test.go's coSchema).
+	mapCol := &parquet.Column{
+		Type: parquet.TypeMap,
+		ElementType: &parquet.Column{
+			Type: parquet.TypeRow,
+			Fields: []parquet.Column{
+				{Name: "key", Type: parquet.TypeString},
+				{Name: "value", Type: parquet.TypeInt32},
+			},
+		},
+	}
+
+	t.Run("entries render in incoming (sorted-key) order", func(t *testing.T) {
+		entries := []any{
+			map[string]any{"key": "alice", "value": int32(1)},
+			map[string]any{"key": "bob", "value": int32(2)},
+		}
+		if got, want := formatPgValueTyped(entries, mapCol), "{alice: 1, bob: 2}"; got != want {
+			t.Errorf("formatPgValueTyped = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("NULL value is the keyword, not <nil>", func(t *testing.T) {
+		entries := []any{map[string]any{"key": "alice", "value": nil}}
+		if got, want := formatPgValueTyped(entries, mapCol), "{alice: NULL}"; got != want {
+			t.Errorf("formatPgValueTyped = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no column declaration falls back to key/value field names", func(t *testing.T) {
+		// mapEntryRows' own default when the schema does not override the
+		// two field names — matches even without a resolved column.
+		entries := []any{map[string]any{"key": "alice", "value": int32(1)}}
+		// Without col, formatPgArrayOrMap cannot tell this []any is a MAP
+		// rather than an ARRAY of 2-field ROWs, so it renders as an array
+		// of composites (sorted-key field order: "key" < "value") —
+		// deterministic, and documented as the schema-free fallback. The
+		// composite text "(alice,1)" contains a comma, which is also an
+		// array-quoting trigger, so the outer array quotes it.
+		if got, want := formatPgValueTyped(entries, nil), `{"(alice,1)"}`; got != want {
+			t.Errorf("formatPgValueTyped = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestAppendInt16(t *testing.T) {

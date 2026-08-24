@@ -63,15 +63,33 @@ func (c *pgConn) canBypassDB() bool {
 // only ever sees the 100 final rows because coord's native-DAG executor
 // produces the post-LIMIT batches at Gather. Legacy db.Query materialized
 // the full pre-LIMIT pipeline output.
-func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryResult, coordinator.BatchStream, error) {
+func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryResult, coordinator.BatchStream, map[string]parquet.Column, error) {
 	res, err := c.coord.ExecuteSQL(ctx, sql)
 	if err != nil {
 		res.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// Read the schema BEFORE Stream() detaches the batches.
 	metas := coordColumnMetas(res)
-	return &wadjet.QueryResult{Columns: res.Columns, ColumnMetas: metas}, res.Stream(), nil
+	nestedSchema := nestedSchemaByName(res.OutputSchema())
+	return &wadjet.QueryResult{Columns: res.Columns, ColumnMetas: metas}, res.Stream(), nestedSchema, nil
+}
+
+// nestedSchemaByName indexes a query's output schema by column name so
+// formatPgValueTyped can look up a ROW/ARRAY/MAP column's declared field
+// order and element type by the same name sendDataRow already keys rows on.
+// Every column is kept, not just the nested-typed ones: a scalar entry is
+// simply never read by formatPgValueTyped, and filtering it out here would
+// just be a second pass over the same slice for no benefit.
+func nestedSchemaByName(schema []parquet.Column) map[string]parquet.Column {
+	if len(schema) == 0 {
+		return nil
+	}
+	byName := make(map[string]parquet.Column, len(schema))
+	for _, col := range schema {
+		byName[col.Name] = col
+	}
+	return byName
 }
 
 // coordColumnMetas is the coord path's answer to wadjet.deriveColumnMetas:
@@ -134,7 +152,7 @@ func coordColumnMetas(res *coordinator.SQLResult) []wadjet.ColumnMeta {
 // ErrorResponse after the partial DataRows (legal in the v3 protocol).
 // ctx is the statement's context: a CancelRequest (or statement_timeout)
 // mid-send stops the stream instead of sending the remaining rows.
-func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream coordinator.BatchStream, rows []map[string]any, fmtCodes []int16, metas []wadjet.ColumnMeta) (int, error) {
+func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream coordinator.BatchStream, rows []map[string]any, fmtCodes []int16, metas []wadjet.ColumnMeta, nestedSchema map[string]parquet.Column) (int, error) {
 	sent := 0
 	// Resolved once per result, not per row: the value a client reads has
 	// to match the type the RowDescription declared, and only the metas
@@ -142,9 +160,9 @@ func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream co
 	colTypes := sendColumnTypes(columns, metas)
 	send := func(row map[string]any) {
 		if len(fmtCodes) > 0 {
-			c.sendDataRowFormatted(columns, row, fmtCodes, colTypes)
+			c.sendDataRowFormatted(columns, row, fmtCodes, colTypes, nestedSchema)
 		} else {
-			c.sendDataRow(columns, row, colTypes)
+			c.sendDataRow(columns, row, colTypes, nestedSchema)
 		}
 		sent++
 	}
@@ -190,6 +208,7 @@ func (c *pgConn) closeDescribeCache() {
 		c.describeStream = nil
 	}
 	c.describeResult = nil
+	c.describeNestedSchema = nil
 	c.describeErr = nil
 	c.describeCancel = ""
 	c.describeSynth = nil

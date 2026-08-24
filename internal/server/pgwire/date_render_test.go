@@ -35,7 +35,7 @@ func TestDateBinaryFormat(t *testing.T) {
 		rc := &recordConn{}
 		c := &pgConn{conn: rc}
 		rows := []map[string]any{{"d": tc.date}}
-		if _, err := c.sendResultRows(context.Background(), []string{"d"}, nil, rows, []int16{1}, dateMetas()); err != nil {
+		if _, err := c.sendResultRows(context.Background(), []string{"d"}, nil, rows, []int16{1}, dateMetas(), nil); err != nil {
 			t.Fatalf("%s: sendResultRows: %v", tc.name, err)
 		}
 		fields := dataRowFields(t, rc.buf.Bytes())
@@ -56,7 +56,7 @@ func TestDateBinaryUnparseableIsNull(t *testing.T) {
 	rc := &recordConn{}
 	c := &pgConn{conn: rc}
 	rows := []map[string]any{{"d": "not a date"}}
-	if _, err := c.sendResultRows(context.Background(), []string{"d"}, nil, rows, []int16{1}, dateMetas()); err != nil {
+	if _, err := c.sendResultRows(context.Background(), []string{"d"}, nil, rows, []int16{1}, dateMetas(), nil); err != nil {
 		t.Fatalf("sendResultRows: %v", err)
 	}
 	if f := dataRowFields(t, rc.buf.Bytes())[0]; f != nil {
@@ -70,7 +70,7 @@ func TestDateTextFormatUnchanged(t *testing.T) {
 	rc := &recordConn{}
 	c := &pgConn{conn: rc}
 	rows := []map[string]any{{"d": "1996-03-13"}}
-	if _, err := c.sendResultRows(context.Background(), []string{"d"}, nil, rows, []int16{0}, dateMetas()); err != nil {
+	if _, err := c.sendResultRows(context.Background(), []string{"d"}, nil, rows, []int16{0}, dateMetas(), nil); err != nil {
 		t.Fatalf("sendResultRows: %v", err)
 	}
 	if got := string(dataRowFields(t, rc.buf.Bytes())[0]); got != "1996-03-13" {
