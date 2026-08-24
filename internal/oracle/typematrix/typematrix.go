@@ -423,11 +423,12 @@ var networkFuncArg = map[string]string{
 // networkLit gives each network-native column a literal EQUAL to id=700's
 // value under allData's per-column formula (id=700 lands on a non-NULL
 // stride position for all six: 700 mod 59/61/67/71/73/79 never hits the
-// stride's NULL slot). EQUALITY only — an ORDERING literal comparison
-// (<, >) against TypeIPv6 has a live, filed, pre-existing divergence
-// between this expr path and the stage DAG (#492) that this corpus does
-// not yet gate; adding one here would make every run of this corpus fail on
-// a known, already-tracked bug instead of catching a new one.
+// stride's NULL slot). EQUALITY only. ORDERING is a separate consumer class
+// (networkOrdLit, below): an ORDERING literal comparison (<, >) against
+// TypeIPv6 or TypeCIDR used to compare the column's rendered TEXT lexically
+// instead of the address's numeric/structural order, and disagreed outright
+// between this expr path and the stage DAG (#492, fixed) — this corpus now
+// gates it instead of skipping it as a known bug.
 //
 // c_port/c_proto are UNQUOTED (a bare numeric literal, `c_port = 1724`),
 // not a quoted string like the other four: both are Int32-backed, and a
@@ -446,6 +447,20 @@ var networkLit = map[string]string{
 	"c_mac":   "'aa:bb:cc:00:02:bc'",
 	"c_port":  "1724",
 	"c_proto": "188",
+}
+
+// networkOrdLit gives c_ipv6 and c_cidr an ORDERING literal (`<`). Only
+// these two: IPv4/MAC/PORT/PROTOCOL already had a correct typed ordering
+// comparator before #492 (tryNetworkLit's int64 encodings), so their
+// ordering was never at risk of the lexical-text divergence this entry
+// exists to gate. The literal is the same one networkLit uses for equality,
+// which under allData's per-column formula ("2001:db8::" + hex(i),
+// "192.168." + (i%256) + ".0/24") spans a wide range of hex-digit-count and
+// decimal-digit-count boundaries across the fixture's 5000 rows — exactly
+// where lexical and numeric/structural order disagree.
+var networkOrdLit = map[string]string{
+	"c_ipv6": networkLit["c_ipv6"],
+	"c_cidr": networkLit["c_cidr"],
 }
 
 // Corpus generates the query corpus: per type-column templates plus the
@@ -498,7 +513,9 @@ func Corpus() []Query {
 		// network column through a function call, a STRING cast, or a
 		// literal comparison, so a two-path divergence in any of those
 		// three would have been invisible here. See networkFuncArg/
-		// networkLit for why literal comparison stays EQUALITY-only.
+		// networkLit for why EQUALITY is the only literal-comparison shape
+		// every network type gets; networkOrdLit adds ORDERING for the two
+		// types (#492) whose ordering comparator needed a real fix.
 		if fn, ok := networkFuncArg[n]; ok {
 			add("funcarg_"+n,
 				fmt.Sprintf(`SELECT id, %s(%s) AS v FROM %s WHERE id %% 331 = 7 ORDER BY id`, fn, n, tbl),
@@ -509,6 +526,11 @@ func Corpus() []Query {
 			add("litcmp_"+n,
 				fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE %s = %s ORDER BY id`, n, tbl, n, networkLit[n]),
 				oracle.CmpOrdered, n)
+			if lit, ok := networkOrdLit[n]; ok {
+				add("litcmp_ord_"+n,
+					fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE %s < %s ORDER BY id`, n, tbl, n, lit),
+					oracle.CmpOrdered, n)
+			}
 		}
 
 		if !c.Flat {

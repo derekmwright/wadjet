@@ -114,6 +114,48 @@ func TestFilterCIDR(t *testing.T) {
 	}
 }
 
+// TestFilterCIDROrderingIsStructural is #492: the column stores CIDR as
+// plain TEXT (parquet/schema.go), so comparing a literal against it directly
+// was a LEXICAL byte comparison of that text — "10.0.0.0/24" sorts below
+// "9.0.0.0/8" as text even though 10.x is the larger address. PostgreSQL
+// orders inet/cidr STRUCTURALLY: family, then address bytes, then prefix
+// length (verified against live PostgreSQL).
+func TestFilterCIDROrderingIsStructural(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "cidr", Type: parquet.TypeCIDR},
+	}
+	b := batch.NewRecordBatch(schema, 4)
+	b.Columns[0].SetValue(0, "10.0.0.0/24") // numerically largest address
+	b.Columns[0].SetValue(1, "9.0.0.0/8")   // numerically smallest address
+	b.Columns[0].SetValue(2, "10.0.0.0/8")  // same address as row 0, smaller prefix
+	b.Columns[0].SetValue(3, "::/0")        // IPv6: sorts after every IPv4 entry
+
+	// > "9.0.0.0/8": every row except row 1 itself (numeric address order,
+	// not "10.0.0.0/24" < "9.0.0.0/8" as lexical text would say).
+	kern := ResolveFilterKernel(batch.TypeCIDR, OpGt, "9.0.0.0/8")
+	if kern == nil {
+		t.Fatal("ResolveFilterKernel returned nil for TypeCIDR OpGt")
+	}
+	outSel := make([]uint32, 0, 4)
+	sel := kern(b.Columns[0], nil, 4, outSel)
+	if len(sel) != 3 || sel[0] != 0 || sel[1] != 2 || sel[2] != 3 {
+		t.Fatalf("> 9.0.0.0/8: expected [0 2 3], got %v", sel)
+	}
+
+	// < "10.0.0.0/24": same address, smaller prefix (row 2) and the smaller
+	// address (row 1) — ascending prefix length at equal address is
+	// PostgreSQL's rule, not the reverse.
+	kern = ResolveFilterKernel(batch.TypeCIDR, OpLt, "10.0.0.0/24")
+	if kern == nil {
+		t.Fatal("ResolveFilterKernel returned nil for TypeCIDR OpLt")
+	}
+	outSel = make([]uint32, 0, 4)
+	sel = kern(b.Columns[0], nil, 4, outSel)
+	if len(sel) != 2 || sel[0] != 1 || sel[1] != 2 {
+		t.Fatalf("< 10.0.0.0/24: expected [1 2], got %v", sel)
+	}
+}
+
 func TestFilterPort(t *testing.T) {
 	schema := []parquet.Column{
 		{Name: "port", Type: parquet.TypePort},

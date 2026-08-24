@@ -28,11 +28,15 @@ import (
 // Every "(guard)" case below for TypeIPv6/TypeCIDR/TypeUUID/TypePort/
 // TypeProtocol is a function argument, a CAST AS STRING, or an EQUALITY
 // literal comparison — the three shapes that were already correct before
-// this fix and must stay that way. None of them is an ORDERING comparison
-// (<, >): IPv6 ordering against a literal is lexical-text, not numeric,
-// disagrees between this expr path's WHERE and SELECT evaluation, and
-// disagrees outright with the stage DAG — a live, filed, pre-existing
-// divergence (#492) this file does not cover and does not claim to.
+// this fix and must stay that way. ORDERING (<, >) against IPv6 or CIDR used
+// to be a separate, later-filed defect (#492): comparing the rendered TEXT
+// lexically instead of the address's numeric/structural order, disagreeing
+// between this expr path's WHERE and SELECT evaluation and disagreeing
+// outright with the stage DAG. tryNetworkLit/CmpNetworkLit now cover IPv6
+// (raw 16-byte comparison) and CIDR (kernel.CidrSortKey's structural order)
+// the same way this file's IPv4 cases already covered IPv4 — see
+// TestIPv6OrderingUsesNumericEncoding and
+// TestCIDROrderingUsesStructuralEncoding below.
 
 // netTypeMatrixBatch returns a 2-row batch carrying one column of each of
 // the six network-native types, values chosen so that a IPv4 comparison
@@ -191,5 +195,125 @@ func TestIPv4ColumnToColumnOrderingUsesNumericEncoding(t *testing.T) {
 	}
 	if got := be.EvalBool(one, 0); !got {
 		t.Errorf("a(10.1.2.3) > z(9.255.255.255) = %v, want true (numeric ordering)", got)
+	}
+}
+
+// TestIPv6OrderingUsesNumericEncoding pins #492: an IPv6 literal ordering
+// comparison used to compare the column's RENDERED TEXT lexically, which is
+// not even a total order — "2001:db8::9" and "2001:db8::10" disagree with
+// their numeric relationship as text ('1' < '9' byte-wise puts "::10" before
+// "::9"), the exact pair the issue was filed with. tryNetworkLit/
+// CmpNetworkLit now pre-parse the literal into the column's raw 16-byte
+// form, matching the numeric order ResolveFilterKernel's scan-pushdown path
+// already used for TypeIPv6 (kernel/compare.go), so the two paths agree.
+func TestIPv6OrderingUsesNumericEncoding(t *testing.T) {
+	schema := []parquet.Column{{Name: "c_ipv6", Type: parquet.TypeIPv6}}
+	b := batch.NewRecordBatch(schema, 1)
+	b.Columns[0].SetValue(0, "2001:db8::9")
+
+	tests := []struct {
+		name string
+		cmp  Expr
+		want bool
+	}{
+		{"::9 < ::10", compileCmp(&ColRef{Name: "c_ipv6"}, &Lit{Val: "2001:db8::10"}, CmpLt), true},
+		{"::9 > ::10 is false", compileCmp(&ColRef{Name: "c_ipv6"}, &Lit{Val: "2001:db8::10"}, CmpGt), false},
+		{"flipped operand order: ::10 > ::9", compileCmp(&Lit{Val: "2001:db8::10"}, &ColRef{Name: "c_ipv6"}, CmpGt), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			be, ok := tt.cmp.(BoolExpr)
+			if !ok {
+				t.Fatalf("%T does not implement BoolExpr", tt.cmp)
+			}
+			if got := be.EvalBool(b, 0); got != tt.want {
+				t.Errorf("row0 = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	// Pins that this now compiles to the typed comparator at all — the
+	// lexical bug rode on tryNetworkLit returning nil for IPv6 and the
+	// predicate falling to a plain *expr.Cmp.
+	got := compileCmp(&ColRef{Name: "c_ipv6"}, &Lit{Val: "2001:db8::10"}, CmpLt)
+	if _, ok := got.(*CmpNetworkLit); !ok {
+		t.Errorf("compileCmp(ipv6 < literal) = %T, want *CmpNetworkLit", got)
+	}
+}
+
+// TestCIDROrderingUsesStructuralEncoding pins #492 for CIDR: PostgreSQL
+// orders inet/cidr STRUCTURALLY (family, then address bytes, then prefix
+// length — verified against live PostgreSQL), which disagrees with lexical
+// text order the same way IPv6 does: "10.0.0.0/24" sorts below "9.0.0.0/8"
+// as text even though 10.x is the larger address, and CIDR had no raw-byte
+// kernel case at all before this fix (unlike IPv6, whose scan-pushdown path
+// was already numeric).
+func TestCIDROrderingUsesStructuralEncoding(t *testing.T) {
+	schema := []parquet.Column{{Name: "c_cidr", Type: parquet.TypeCIDR}}
+	b := batch.NewRecordBatch(schema, 1)
+	b.Columns[0].SetValue(0, "10.0.0.0/24")
+
+	tests := []struct {
+		name string
+		cmp  Expr
+		want bool
+	}{
+		{"10.0.0.0/24 > 9.0.0.0/8 numerically", compileCmp(&ColRef{Name: "c_cidr"}, &Lit{Val: "9.0.0.0/8"}, CmpGt), true},
+		{"10.0.0.0/24 < 9.0.0.0/8 is false", compileCmp(&ColRef{Name: "c_cidr"}, &Lit{Val: "9.0.0.0/8"}, CmpLt), false},
+		{"same address, larger prefix sorts after", compileCmp(&ColRef{Name: "c_cidr"}, &Lit{Val: "10.0.0.0/8"}, CmpGt), true},
+		{"IPv4 family sorts before IPv6", compileCmp(&ColRef{Name: "c_cidr"}, &Lit{Val: "::/0"}, CmpLt), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			be, ok := tt.cmp.(BoolExpr)
+			if !ok {
+				t.Fatalf("%T does not implement BoolExpr", tt.cmp)
+			}
+			if got := be.EvalBool(b, 0); got != tt.want {
+				t.Errorf("row0 = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestUUIDOrderingIsCorrectByHexAccident pins #492's UUID finding: a UUID
+// literal ordering comparison goes through the SAME generic compare() path
+// IPv6/CIDR used to (tryNetworkLit does not special-case TypeUUID at all),
+// and is right anyway — not because the mechanism is sound in general, but
+// because ColRef.Eval renders a UUID column as its zero-padded, fixed-width
+// 32-hex-digit text (batch.formatUUID), and lexical order of a FIXED-WIDTH
+// hex string equals the address's own byte order. This is an accident of
+// representation the issue explicitly calls out as NOT generalizing to
+// IPv6's variable-width `::`-compressed form or CIDR's variable-width
+// prefix notation — which is exactly why those two needed a real fix and
+// UUID does not. Pinned so a future change to UUID's rendering (e.g.
+// dropping the zero-pad) cannot silently reintroduce the same bug class.
+func TestUUIDOrderingIsCorrectByHexAccident(t *testing.T) {
+	schema := []parquet.Column{{Name: "c_uuid", Type: parquet.TypeUUID}}
+	b := batch.NewRecordBatch(schema, 1)
+	// Chosen so the byte that makes the numeric order run counter to a
+	// short-vs-long or digit-count based mis-order would show up early: a
+	// leading '0' vs '1' nibble, not merely a difference deep in the string.
+	b.Columns[0].SetValue(0, "0fffffff-0000-0000-0000-000000000000")
+
+	tests := []struct {
+		name string
+		cmp  Expr
+		want bool
+	}{
+		{"0f... < ff...", compileCmp(&ColRef{Name: "c_uuid"}, &Lit{Val: "ffffffff-0000-0000-0000-000000000000"}, CmpLt), true},
+		{"0f... > 00...", compileCmp(&ColRef{Name: "c_uuid"}, &Lit{Val: "00000000-0000-0000-0000-000000000001"}, CmpGt), true},
+		{"0f... > ff... is false", compileCmp(&ColRef{Name: "c_uuid"}, &Lit{Val: "ffffffff-0000-0000-0000-000000000000"}, CmpGt), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			be, ok := tt.cmp.(BoolExpr)
+			if !ok {
+				t.Fatalf("%T does not implement BoolExpr", tt.cmp)
+			}
+			if got := be.EvalBool(b, 0); got != tt.want {
+				t.Errorf("row0 = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

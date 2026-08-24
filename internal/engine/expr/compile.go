@@ -2,9 +2,11 @@ package expr
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
@@ -518,19 +520,22 @@ func tryTemporalLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpTemporalLi
 }
 
 // tryNetworkLit builds a CmpNetworkLit when other is a string literal that
-// parses as an IPv4 address or a MAC address; nil otherwise. Mirrors
-// tryTemporalLit for the network-typed pair (TypeIPv4, TypeMAC): see
-// CmpNetworkLit for why these two need it. TypeIPv6/TypeCIDR/TypeUUID don't
-// go through this path because ColRef.Eval already renders them as text
-// (Vector.GetValue's default case) — but that is enough only for EQUALITY.
-// It is NOT the same claim as "ordering already works": comparing the
-// rendered TEXT lexically (<, >, <=, >=) is not the address's numeric
-// order, is not even consistent between this expr path's WHERE and SELECT
-// evaluation, and disagrees outright with the stage DAG for IPv6 — a live,
-// filed, pre-existing divergence (#492) this function does not fix. CIDR's
-// ordering is untested and suspected to have the same shape; UUID's is
-// right only by the accident of its literal always zero-padding to a fixed
-// hex width, which does not generalize to IPv6/CIDR's variable width.
+// parses as an IPv4 address, a MAC address, an IPv6 address, or a CIDR
+// network; nil otherwise. Mirrors tryTemporalLit for the network-typed
+// columns: see CmpNetworkLit for why they need it. UUID does not go through
+// this path: ColRef.Eval already renders it as its zero-padded hex TEXT
+// (Vector.GetValue's default case), and lexical order of that fixed-width
+// text happens to equal the UUID's own byte order, which is enough for
+// ordering too, not just equality — an accident that does NOT generalize to
+// IPv6 (variable-width `::`-compressed hex) or CIDR (variable-width prefix
+// notation), which is why those two DO need a typed comparator (#492): the
+// column renders as text there too, but comparing that text lexically (<, >,
+// <=, >=) is not the address's numeric/structural order, is not even
+// consistent between this expr path's WHERE and SELECT evaluation, and used
+// to disagree outright with the stage DAG for IPv6 (both compile predicates
+// through this same function; before this fix, an IPv6/CIDR literal made
+// tryNetworkLit return nil, so the predicate fell to a plain *expr.Cmp and
+// its generic per-row path, which is where the lexical comparison happened).
 //
 // Column type is unknown at compile time (see tryTemporalLit's own comment),
 // so this cannot be, and does not need to be, restricted to columns that are
@@ -540,7 +545,7 @@ func tryTemporalLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpTemporalLi
 // plan.go) and CmpNetworkLit.EvalBoolNull's genericFallback both defer
 // entirely to the column's REAL type at kernel-build/eval time — a STRING
 // column takes its ordinary compareFilterString/lexical-compare path either
-// way, never the IPv4/MAC branch.
+// way, never one of the typed branches.
 func tryNetworkLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpNetworkLit {
 	lit, ok := other.(*Lit)
 	if !ok {
@@ -552,10 +557,32 @@ func tryNetworkLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpNetworkLit 
 	}
 	ipv4, ipv4ok := ipv4LitToInt64(s)
 	mac, macok := macLitToInt64(s)
-	if !ipv4ok && !macok {
+	ipv6, ipv6ok := ipv6LitToRawString(s)
+	cidr, cidrok := kernel.CidrSortKey(s)
+	if !ipv4ok && !macok && !ipv6ok && !cidrok {
 		return nil
 	}
-	return &CmpNetworkLit{Col: col, Lit: s, Op: op, Flip: flip, ipv4: ipv4, ipv4ok: ipv4ok, mac: mac, macok: macok}
+	return &CmpNetworkLit{
+		Col: col, Lit: s, Op: op, Flip: flip,
+		ipv4: ipv4, ipv4ok: ipv4ok,
+		mac: mac, macok: macok,
+		ipv6: ipv6, ipv6ok: ipv6ok,
+		cidr: cidr, cidrok: cidrok,
+	}
+}
+
+// ipv6LitToRawString parses a pure IPv6 literal into the 16-byte raw form
+// TypeIPv6 columns use (batch.Vector.SetValue's TypeIPv6 case). ok is false
+// for anything that is not a valid IPv6 text form, INCLUDING a plain IPv4
+// literal: ipv4LitToInt64 already owns that shape, and net.ParseIP would
+// otherwise also accept a v4 address through its v4-in-v6-mapped form,
+// double-binding the same literal to two branches.
+func ipv6LitToRawString(s string) (string, bool) {
+	ip := net.ParseIP(s)
+	if ip == nil || ip.To4() != nil {
+		return "", false
+	}
+	return string(ip.To16()), true
 }
 
 // isProvablyInt64 returns true if the expression definitely produces int64 values.

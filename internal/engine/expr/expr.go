@@ -1128,25 +1128,29 @@ func (e *CmpTemporalLit) genericFallback(b *batch.RecordBatch, row int) (bool, b
 }
 
 // CmpNetworkLit compares a bare column against a string literal that parses
-// as an IPv4 address or a MAC address, without per-row parsing or boxing —
-// CmpTemporalLit's counterpart for network types, and for the same reason:
-// ColRef.Eval boxes a TypeIPv4/TypeMAC column as its raw encoded int64 (the
-// representation arithmetic and column-to-column ordering comparisons
-// depend on — see networkTextFuncs), so `ip_col = '10.0.0.1'` boxed the
-// column as a decimal digit string and the literal as itself and the
-// generic path's mixed int64/string compare() falls through to lexical
-// string comparison of the two, which never match (issue found via README
-// verification). Column type is unknown at compile time, so the literal is
-// pre-parsed into BOTH encodings here and the right one picked per batch
+// as an IPv4 address, a MAC address, an IPv6 address, or a CIDR network,
+// without per-row parsing or boxing — CmpTemporalLit's counterpart for
+// network types, and for the same reason: ColRef.Eval boxes a TypeIPv4/
+// TypeMAC column as its raw encoded int64 (the representation arithmetic and
+// column-to-column ordering comparisons depend on — see networkTextFuncs) and
+// a TypeIPv6/TypeCIDR column as rendered TEXT (Vector.GetValue's default
+// case), so `ip_col = '10.0.0.1'` boxed the column as a decimal digit string
+// and the literal as itself, and `ipv6_col < '2001:db8::10'` boxed the
+// column's address as text and compared it LEXICALLY against the literal —
+// neither is the address's own order (issues found via README verification
+// and #492). Column type is unknown at compile time, so the literal is
+// pre-parsed into every encoding here and the right one picked per batch
 // from the column's resolved type; a non-network column (or a network
 // column whose type doesn't match the literal's parse) delegates to the
 // generic compare() with the original operand order, keeping semantics
 // bit-identical with Cmp in every sub-case — matching CmpTemporalLit's own
-// contract. Comparing the pre-parsed encodings numerically (not as
-// formatted strings) is also what keeps ordering (<, >) correct: IPv4's
-// big-endian uint32 and MAC's packed 48 bits both sort the same as the
-// address itself, where a dotted-quad or colon-hex STRING would sort
-// lexically and disagree with it (e.g. "9.0.0.1" > "10.0.0.1" as text).
+// contract. Comparing the pre-parsed encodings (not as formatted strings) is
+// also what keeps ordering (<, >) correct: IPv4's big-endian uint32, MAC's
+// packed 48 bits, and IPv6's raw 16 bytes all sort the same as the address
+// itself, and CIDR's structural key (kernel.CidrSortKey) sorts the same as
+// PostgreSQL's inet order — where a dotted-quad, colon-hex, or CIDR-notation
+// STRING would sort lexically and disagree with it (e.g. "9.0.0.1" >
+// "10.0.0.1" as text).
 type CmpNetworkLit struct {
 	Col    *ColRef
 	Lit    string // original literal text (generic-fallback operand)
@@ -1156,6 +1160,10 @@ type CmpNetworkLit struct {
 	ipv4ok bool
 	mac    int64
 	macok  bool
+	ipv6   string // raw 16 bytes, the column's own TypeIPv6 storage form
+	ipv6ok bool
+	cidr   string // kernel.CidrSortKey's structural key
+	cidrok bool
 }
 
 func (e *CmpNetworkLit) Eval(b *batch.RecordBatch, row int) any {
@@ -1169,22 +1177,36 @@ func (e *CmpNetworkLit) EvalBool(b *batch.RecordBatch, row int) bool {
 
 func (e *CmpNetworkLit) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	e.Col.resolve(b)
-	var lit int64
 	switch e.Col.typ {
 	case batch.TypeIPv4:
 		if !e.ipv4ok {
 			return e.genericFallback(b, row)
 		}
-		lit = e.ipv4
+		return e.evalInt64(b, row, e.ipv4)
 	case batch.TypeMAC:
 		if !e.macok {
 			return e.genericFallback(b, row)
 		}
-		lit = e.mac
+		return e.evalInt64(b, row, e.mac)
+	case batch.TypeIPv6:
+		if !e.ipv6ok {
+			return e.genericFallback(b, row)
+		}
+		return e.evalRawBytes(b, row, e.ipv6)
+	case batch.TypeCIDR:
+		if !e.cidrok {
+			return e.genericFallback(b, row)
+		}
+		return e.evalCIDR(b, row)
 	default:
 		// Non-network column: exact generic semantics.
 		return e.genericFallback(b, row)
 	}
+}
+
+// evalInt64 is the IPv4/MAC arm: the column boxes as its raw encoded int64,
+// which sorts the same as the address (big-endian uint32 / packed 48 bits).
+func (e *CmpNetworkLit) evalInt64(b *batch.RecordBatch, row int, lit int64) (bool, bool) {
 	v, ok := e.Col.EvalInt64(b, row)
 	if !ok {
 		return false, true // NULL / unresolved — a comparison against NULL is UNKNOWN
@@ -1193,21 +1215,62 @@ func (e *CmpNetworkLit) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool)
 	if e.Flip {
 		a, bv = lit, v
 	}
-	switch e.Op {
-	case CmpEq:
-		return a == bv, false
-	case CmpNe:
-		return a != bv, false
-	case CmpLt:
-		return a < bv, false
-	case CmpLe:
-		return a <= bv, false
-	case CmpGt:
-		return a > bv, false
-	case CmpGe:
-		return a >= bv, false
+	return cmpInt64Op(a, bv, e.Op), false
+}
+
+// evalRawBytes is the IPv6 arm: the column stores the address's raw 16
+// bytes (batch.Vector's TypeIPv6 storage), which a Go string comparison
+// orders byte-for-byte — the address's own big-endian numeric order — unlike
+// the RENDERED text ColRef.Eval would hand back instead.
+func (e *CmpNetworkLit) evalRawBytes(b *batch.RecordBatch, row int, lit string) (bool, bool) {
+	v, ok := e.colRawBytes(b, row)
+	if !ok {
+		return false, true
 	}
-	return false, false
+	a, bv := v, lit
+	if e.Flip {
+		a, bv = lit, v
+	}
+	return cmpStringOp(a, bv, e.Op), false
+}
+
+// evalCIDR is the CIDR arm: the column stores plain TEXT (parquet/
+// schema.go), so its own value is re-keyed through the identical
+// kernel.CidrSortKey the literal already went through at compile time —
+// anything else risks the row and the literal disagreeing about what
+// "structural order" means, which is the two-implementation defect #492's
+// own doc comment warns CidrSortKey's export exists to prevent.
+func (e *CmpNetworkLit) evalCIDR(b *batch.RecordBatch, row int) (bool, bool) {
+	raw, ok := e.colRawBytes(b, row)
+	if !ok {
+		return false, true
+	}
+	key, ok := kernel.CidrSortKey(raw)
+	if !ok {
+		// The column enforces the CIDR shape, so a stored value should
+		// always re-key; if it somehow does not, fall back rather than
+		// silently mis-order it.
+		return e.genericFallback(b, row)
+	}
+	a, bv := key, e.cidr
+	if e.Flip {
+		a, bv = e.cidr, key
+	}
+	return cmpStringOp(a, bv, e.Op), false
+}
+
+// colRawBytes reads the column's raw BytesData at row — the address's own
+// storage, never the rendered text ColRef.Eval would produce — and whether
+// the row is non-NULL. e.Col must already be resolved.
+func (e *CmpNetworkLit) colRawBytes(b *batch.RecordBatch, row int) (string, bool) {
+	if e.Col.idx < 0 || e.Col.idx >= len(b.Columns) {
+		return "", false
+	}
+	v := b.Columns[e.Col.idx]
+	if v.Nulls.IsNullFast(row) {
+		return "", false
+	}
+	return v.BytesData.UnsafeStringValue(row), true
 }
 
 func (e *CmpNetworkLit) genericFallback(b *batch.RecordBatch, row int) (bool, bool) {
@@ -1219,6 +1282,29 @@ func (e *CmpNetworkLit) genericFallback(b *batch.RecordBatch, row int) (bool, bo
 		return compare(e.Lit, cv, e.Op), false
 	}
 	return compare(cv, e.Lit, e.Op), false
+}
+
+// cmpStringOp applies a comparison operator to two strings, byte-for-byte —
+// CmpNetworkLit's IPv6/CIDR arms feed it keys already re-encoded so that
+// byte order IS the intended order (raw address bytes, or CidrSortKey's
+// structural key), not the general-purpose collation cmpOrder/compare() use
+// for an ordinary STRING column.
+func cmpStringOp(a, b string, op CmpOp) bool {
+	switch op {
+	case CmpEq:
+		return a == b
+	case CmpNe:
+		return a != b
+	case CmpLt:
+		return a < b
+	case CmpLe:
+		return a <= b
+	case CmpGt:
+		return a > b
+	case CmpGe:
+		return a >= b
+	}
+	return false
 }
 
 // CmpInt64 is a typed comparison that operates on int64 without boxing.

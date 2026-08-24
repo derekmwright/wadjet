@@ -348,6 +348,62 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      the defect ship green. AVG keeps the float comparison, for the scale
      contract above and for no other reason.
 
+10. **A network-literal ORDERING comparison follows the address's own
+    order, not the column's rendered text — item 8's boxed-value rule
+    applied to IPv6 and CIDR.** (Added 2026-08-24, #492.) `tryNetworkLit`/
+    `CmpNetworkLit` (`internal/engine/expr`) already pre-parsed an IPv4 or
+    MAC literal into its column's raw int64 encoding at compile time, so
+    ordering compared the address numerically. IPv6 and CIDR literals had
+    no such preparser: `compileCmp` fell back to a plain `*expr.Cmp`, whose
+    generic path compares the column's RENDERED TEXT lexically —
+    `"2001:db8::9" > "2001:db8::10"` as text (`'1' < '9'` byte-wise), the
+    opposite of the numeric truth, and not even a total order (a value can
+    fail BOTH `<` and `>` against the same literal). CIDR was worse: even
+    the KERNEL's scan-pushdown path (`ResolveFilterKernel`'s `TypeCIDR`
+    case) was lexical, because the column stores CIDR as plain text
+    (`parquet/schema.go`) with no raw-byte form to fall back on the way
+    IPv6 already had.
+
+    The fix extends the existing pattern instead of inventing a new one:
+    `tryNetworkLit` now also recognizes an IPv6 literal (pre-parsed into
+    the column's raw 16 bytes, compared byte-for-byte — a fixed-width
+    big-endian encoding, so Go's own string ordering IS the address's
+    numeric order) and a CIDR literal (pre-parsed into a STRUCTURAL key —
+    family, then address bytes, then prefix length, PostgreSQL's own inet
+    order verified live: `'9.0.0.0/8' < '10.0.0.0/8'` is true where the
+    same comparison on the raw text is false, and `'10.0.0.0/8' <
+    '10.0.0.0/24'` is true — ascending prefix length at equal address).
+    `kernel.CidrSortKey` is the ONE implementation both the kernel's
+    scan-pushdown path and `expr.CmpNetworkLit`'s generic-evaluation path
+    call, exported for exactly the reason its own doc comment gives: two
+    structural parsers maintained separately is the two-path defect class
+    this item closes, not a shape to reintroduce by duplicating it.
+    `internal/planner/physical/plan.go`'s `extractFilterOps` needed no
+    change at all — its `*expr.CmpNetworkLit` case was already generic over
+    which typed fields the node carries, dispatching on the column's REAL
+    runtime type through `ResolveFilterKernel` the same way it always had.
+
+    UUID needed no fix: its literal always zero-pads to a fixed 32-hex-digit
+    form, so lexical order of that FIXED-WIDTH text happens to equal the
+    address's own byte order — an accident of representation pinned by a
+    test (`TestUUIDOrderingIsCorrectByHexAccident`) rather than relied on
+    silently, because it does not generalize to IPv6's variable-width
+    `::`-compressed form or CIDR's variable-width prefix notation, which is
+    exactly why those two needed a real fix and UUID did not.
+
+    The two-path divergence this item closes was reproducible directly: the
+    single-process engine answered 16 rows and the stage DAG answered 2 for
+    the same `WHERE c_ipv6 < '2001:db8::10'` — both engines compile the
+    predicate through the identical `expr.Compile` (the worker's
+    `compileFilterExprs` calls it too, never a separate re-implementation),
+    so the fix lives entirely in `internal/engine/expr` and
+    `internal/engine/exec/kernel` and reaches both paths through the shape
+    both already shared. `internal/oracle/typematrix`'s corpus, which had
+    deliberately excluded an ordering literal comparison against IPv6/CIDR
+    to avoid gating an already-known bug, now includes one
+    (`litcmp_ord_c_ipv6`, `litcmp_ord_c_cidr`) — verified to reproduce the
+    689-vs-1358-row divergence on the pre-fix engine and agree after.
+
 ## Consequences
 
 - `ORDER BY x DESC` places NULLs first (changed 2026-08-19). The default had
@@ -394,6 +450,13 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   lexically at the same three boxed sites — open), #517 (the boxed-site
   refusal is per-row, not plan-time — open) — the work items 6's amendments
   record
+- #492 (IPv6/CIDR literal ordering was lexical-text, not numeric/structural,
+  and disagreed between the single-process engine and the stage DAG) — item
+  10 above records the settled position for; `internal/engine/exec/kernel/
+  compare.go` (`CidrSortKey`), `internal/engine/expr/compile.go`
+  (`tryNetworkLit`, `ipv6LitToRawString`), `internal/engine/expr/expr.go`
+  (`CmpNetworkLit`), `internal/oracle/typematrix/typematrix.go`
+  (`networkOrdLit`)
 - #444 (boxed ROW comparator ordered fields by name, not declared position),
   #446 (VECTOR/ARRAY(FLOAT) comparators not transitive under NaN) — the work
   item 8 above records the settled position for

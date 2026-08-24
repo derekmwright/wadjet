@@ -273,7 +273,22 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 	case batch.TypeIPv6:
 		return compareFilterString(op, parseIPv6ToRawString(toString(value)))
 	case batch.TypeCIDR:
-		return compareFilterString(op, toString(value))
+		// The column stores plain TEXT (parquet/schema.go), so comparing the
+		// literal against it directly is a byte comparison of that text —
+		// LEXICAL, not PostgreSQL's structural inet order (family, then
+		// address bytes, then prefix length): "10.0.0.0/24" sorts below
+		// "9.0.0.0/8" as text even though 10.x is the larger address (#492).
+		// compareFilterCIDR re-keys both the literal and every row's own
+		// text into that structural order before comparing.
+		if key, ok := CidrSortKey(toString(value)); ok {
+			return compareFilterCIDR(op, key)
+		}
+		// The literal itself is not a parseable CIDR: no stored value (which
+		// the column enforces the shape of) can equal it, matching how
+		// TypeIPv4/TypeIPv6 above answer an unparseable literal with a
+		// sentinel that matches nothing rather than falling back to a raw
+		// text compare of a shape the column never holds.
+		return matchNothingKernel
 	case batch.TypePort, batch.TypeProtocol:
 		return compareFilterImpl(getInt32Data, int32(toInt64(value)), op)
 	case batch.TypeDuration:
@@ -503,6 +518,79 @@ func compareFilterString(op CompareOp, val string) FilterKernel {
 					if cmpFn(vec.BytesData.UnsafeStringValue(i), val) {
 						out = append(out, uint32(i))
 					}
+				}
+			}
+		}
+		return out
+	}
+}
+
+// CidrSortKey re-keys a CIDR literal's TEXT ("192.168.1.0/24") into
+// PostgreSQL's structural inet order — family, then address bytes, then
+// prefix length (verified against live PostgreSQL: '10.0.0.0/8' <
+// '::1/128' is true, '10.0.0.0/8' < '10.0.0.0/24' is true, i.e. ascending
+// prefix length at equal address) — as a byte string two keys compare
+// lexically in exactly that order: the family byte disambiguates length
+// before any address byte is compared, so a v4 key and a v6 key never
+// collide despite their different widths, and the trailing prefix-length
+// byte only matters once every address byte already tied.
+//
+// ok is false when s does not parse as a CIDR at all — a stored column
+// value never fails this (the column enforces the shape), but a literal
+// might.
+//
+// Exported — unlike this file's other literal parse helpers
+// (parseIPv4ToInt64, parseMACToInt64, parseIPv6ToRawString), which
+// internal/engine/expr duplicates locally rather than importing — because
+// this one is not a trivial re-encode: expr.CmpNetworkLit's CIDR literal and
+// this kernel's per-row CIDR key MUST agree bit for bit, and two structural
+// parsers maintained separately is exactly the shape #492 already is (the
+// kernel path numeric, the expr path lexical). One implementation, shared,
+// is what keeps them from drifting apart again.
+func CidrSortKey(s string) (string, bool) {
+	_, ipnet, err := net.ParseCIDR(s)
+	if err != nil || ipnet == nil {
+		return "", false
+	}
+	ones, bits := ipnet.Mask.Size()
+	var buf []byte
+	if bits == 32 {
+		buf = make([]byte, 0, 1+net.IPv4len+1)
+		buf = append(buf, 0x04)
+		buf = append(buf, ipnet.IP.To4()...)
+	} else {
+		buf = make([]byte, 0, 1+net.IPv6len+1)
+		buf = append(buf, 0x06)
+		buf = append(buf, ipnet.IP.To16()...)
+	}
+	buf = append(buf, byte(ones))
+	return string(buf), true
+}
+
+// compareFilterCIDR orders a CIDR column against a literal STRUCTURALLY
+// (CidrSortKey), never by the column's raw stored text (#492). litKey is the
+// literal's key, precomputed once; each row's own key is recomputed from its
+// text every time, since the column has no compact byte encoding to read
+// instead (parquet/schema.go stores CIDR as plain text).
+func compareFilterCIDR(op CompareOp, litKey string) FilterKernel {
+	cmpFn := resolveCompare[string](op)
+	match := func(vec *batch.Vector, i int) bool {
+		key, ok := CidrSortKey(vec.BytesData.UnsafeStringValue(i))
+		return ok && cmpFn(key, litKey)
+	}
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		if sel != nil {
+			for _, idx := range sel {
+				if (!hasNulls || !vec.Nulls.IsNullFast(int(idx))) && match(vec, int(idx)) {
+					out = append(out, idx)
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				if (!hasNulls || !vec.Nulls.IsNullFast(i)) && match(vec, i) {
+					out = append(out, uint32(i))
 				}
 			}
 		}
