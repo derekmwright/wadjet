@@ -642,6 +642,22 @@ func (nw *NativeWriter) decomposeMap(col Column, val any, defLevel, repLevel, re
 
 	m, ok := val.(map[string]any)
 	if !ok {
+		// A MAP's STORAGE shape — the []any of {key,value} entry maps that
+		// batch.Vector.GetValue (and therefore RecordBatch.RowAt/ToRows)
+		// hands back for a MAP column — is not the native map[string]any
+		// this function otherwise requires. Any row that passed through
+		// RowAt/ToRows before being handed back to WriteRows (UPDATE's and
+		// MERGE's re-ingest of a boxed row) carries its MAP columns in that
+		// shape, and without this conversion they silently wrote as NULL:
+		// the type assertion failed and fell straight to the empty-subtree
+		// branch below, with no error to say a value went missing. Found
+		// chasing #448/#449's regression tests once ReadFileColumnar could
+		// finally reach this path for a table with a MAP column.
+		if converted, ok2 := mapFromStorageShapeEntries(val, keyCol.Name, valCol.Name); ok2 {
+			m, ok = converted, true
+		}
+	}
+	if !ok {
 		nw.emitNullForSubtree(keyCol, defLevel, repLevel, leafIdx)
 		nw.emitNullForSubtree(valCol, defLevel, repLevel, leafIdx)
 		return
@@ -764,6 +780,36 @@ func (nw *NativeWriter) emitNullForSubtree(col Column, defLevel, repLevel int32,
 // GetValue hands back. batch.mapEntryRows sorts on the same rule, because
 // this writer and that vector are the two ways the same map reaches disk
 // and they have to agree.
+// mapFromStorageShapeEntries converts a MAP's storage-shape value — []any of
+// {keyName: k, valName: v} entry maps, the shape batch.Vector.GetValue's
+// TypeMap arm produces (and batch.mapEntryRows builds from a native map on
+// the way in) — back into the native map[string]any this writer expects.
+// Returns ok=false for anything else, so the caller's existing
+// malformed-input handling is unchanged.
+//
+// MAP keys are always Go strings at this boundary (mapKeyValue's own
+// comment: "Row-level keys are always strings"), so a non-string key entry
+// is exactly as malformed as any other shape val could have been.
+func mapFromStorageShapeEntries(val any, keyName, valName string) (map[string]any, bool) {
+	entries, ok := val.([]any)
+	if !ok {
+		return nil, false
+	}
+	m := make(map[string]any, len(entries))
+	for _, e := range entries {
+		entry, ok := e.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		k, ok := entry[keyName].(string)
+		if !ok {
+			return nil, false
+		}
+		m[k] = entry[valName]
+	}
+	return m, true
+}
+
 func sortedMapKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

@@ -523,6 +523,70 @@ func TestMapLayoutUnchanged(t *testing.T) {
 	}
 }
 
+// TestMapAcceptsStorageShapeEntries pins the round trip UPDATE and MERGE
+// depend on. batch.Vector.GetValue's TypeMap arm — and therefore
+// RecordBatch.RowAt/ToRows — boxes a MAP column as its STORAGE shape: []any
+// of {"key": k, "value": v} entry maps, key-sorted, NOT the native
+// map[string]any WriteRows otherwise requires (batch.mapEntryRows builds
+// that same shape from a native map on the way in). Any row boxed by
+// RowAt/ToRows before being handed back to WriteRows — UPDATE's and MERGE's
+// re-ingest of a matched row — carried its MAP columns in that shape, and
+// decomposeMap's plain map[string]any type assertion failed on it: the value
+// silently wrote as NULL, with no error to say a column went missing.
+//
+// Found chasing #448/#449's DML regression tests, once ReadFileColumnar
+// could finally reach a table with a MAP column on the UPDATE path (it had
+// always errored earlier, so this shape was never exercised before).
+func TestMapAcceptsStorageShapeEntries(t *testing.T) {
+	schema := mapTestSchema(true)
+	nativeRows := []map[string]any{
+		{"id": int64(0), "m": map[string]any{"a": int64(10), "b": int64(20)}},
+		{"id": int64(1), "m": map[string]any{}},
+		{"id": int64(2), "m": nil},
+		{"id": int64(3), "m": map[string]any{"z": nil}},
+	}
+	// storageShapeRows carries the exact same values as nativeRows, but each
+	// MAP value in the []any-of-entries shape GetValue/RowAt/ToRows produce.
+	storageShapeRows := []map[string]any{
+		{"id": int64(0), "m": []any{
+			map[string]any{"key": "a", "value": int64(10)},
+			map[string]any{"key": "b", "value": int64(20)},
+		}},
+		{"id": int64(1), "m": []any{}},
+		{"id": int64(2), "m": nil},
+		{"id": int64(3), "m": []any{
+			map[string]any{"key": "z", "value": nil},
+		}},
+	}
+
+	native := mapWriteRead(t, schema, nativeRows)
+	viaEntries := mapWriteRead(t, schema, storageShapeRows)
+	for i := range nativeRows {
+		if !reflect.DeepEqual(native[i]["m"], viaEntries[i]["m"]) {
+			t.Errorf("row %d: native-shape input read back %#v, storage-shape input read back %#v — must be identical",
+				i, native[i]["m"], viaEntries[i]["m"])
+		}
+	}
+
+	want := []any{
+		map[string]any{"a": int64(10), "b": int64(20)},
+		map[string]any{},
+		nil,
+		map[string]any{"z": nil},
+	}
+	for i, w := range want {
+		if w == nil {
+			if v, ok := viaEntries[i]["m"]; ok && v != nil {
+				t.Errorf("row %d: NULL map read back as %#v", i, v)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(viaEntries[i]["m"], w) {
+			t.Errorf("row %d: map = %#v, want %#v", i, viaEntries[i]["m"], w)
+		}
+	}
+}
+
 // TestMapLevelSitesAgree pins the asymmetry that #393 left behind. THREE
 // places decide the definition levels of a MAP's leaves:
 //
