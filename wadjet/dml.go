@@ -30,10 +30,11 @@ type ExecResult struct {
 func (db *DB) Execute(ctx context.Context, sql string) (res *ExecResult, err error) {
 	// Same seam as DB.Query: DML builds row batches (batch.FromRows) with
 	// user-supplied values, so batch.TypeMismatchError (#361's guard) must
-	// come back as an error, never a process exit.
+	// come back as an error, never a process exit — and since #511 so must
+	// any other panic this statement reaches.
 	defer func() {
 		if r := recover(); r != nil {
-			err = exec.RecoverFatalEval(r)
+			err = exec.RecoverQueryPanic(ctx, "embedded statement", r)
 		}
 	}()
 	parsed, err := plansql.Parse(sql)

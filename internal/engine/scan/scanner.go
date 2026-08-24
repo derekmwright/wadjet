@@ -224,6 +224,12 @@ func (s *Scanner) startPrefetch(ctx context.Context, idx int) {
 	go func() {
 		buf := fileReadPool.Get().(*bytes.Buffer)
 		buf.Reset()
+		// The consumer waits on the channel, so a panic here has to arrive
+		// as this file's error — unrecovered it ends the process, and
+		// recovered-but-undelivered it hangs the scan (#511).
+		defer exec.CatchQueryPanic(ctx, "scan file prefetch", func(err error) {
+			s.prefetchCh <- prefetchedFile{file: file, buf: buf, err: err}
+		})
 
 		rc, _, err := s.cat.Store().Get(ctx, s.cat.Bucket(), file.path)
 		if err != nil {
@@ -241,6 +247,11 @@ func (s *Scanner) startPrefetch(ctx context.Context, idx int) {
 func (s *Scanner) startReaderAtPrefetch(ctx context.Context, idx int) {
 	file := s.files[idx]
 	go func() {
+		// Same contract as startPrefetch: deliver the panic as this file's
+		// error rather than ending the process or wedging the consumer.
+		defer exec.CatchQueryPanic(ctx, "scan reader-at prefetch", func(err error) {
+			s.raPrefetchCh <- prefetchedReaderAt{file: file, err: err}
+		})
 		ras := s.cat.Store().(objstore.ReaderAtStore)
 		ra, size, err := ras.GetReaderAt(ctx, s.cat.Bucket(), file.path)
 		s.raPrefetchCh <- prefetchedReaderAt{file: file, ra: ra, size: size, err: err}

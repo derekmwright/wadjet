@@ -699,6 +699,13 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 		for i := 0; i < metaWorkers; i++ {
 			go func() {
 				defer metaWg.Done()
+				// Thrift footer decoding on a goroutine nobody joins for
+				// errors: a malformed footer that panics the decoder took
+				// the process down instead of failing the scan (#511).
+				defer exec.CatchQueryPanic(ctx, "scan footer reader", func(err error) {
+					failedFiles.Add(1)
+					firstErr.Set(err)
+				})
 				for {
 					n := int(atomic.AddInt64(&metaIdx, 1) - 1)
 					if n >= len(footerFiles) {
@@ -961,7 +968,7 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 	// than falling back to rows, so it is not the one #393 reaches, but the
 	// contract is identical and leaving it unguarded would just move the
 	// process killer.
-	defer inner.recoverWorkerPanic("scan row-group worker")
+	defer inner.recoverWorkerPanic(ctx, "scan row-group worker")
 
 	var prefetched *prefetchResult
 

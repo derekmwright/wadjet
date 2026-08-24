@@ -233,14 +233,16 @@ type QueryResult struct {
 
 // Query executes a SQL query and returns the results.
 func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err error) {
-	// Panics that carry a query ERROR (exec.FatalEvalPanic — including
-	// batch.TypeMismatchError, #361's silent-write guard) become that error
-	// here: this entry reaches batch-writing code outside Pipeline.Run's
-	// own recover (result assembly, catalog-backed synthetic tables), and
-	// the embedded caller must get an error, never a process exit.
+	// The embedded API's query boundary. Panics that carry a query ERROR
+	// (exec.FatalEvalPanic — including batch.TypeMismatchError, #361's
+	// silent-write guard) become that error here: this entry reaches
+	// batch-writing code outside Pipeline.Run's own recover (result
+	// assembly, catalog-backed synthetic tables). Since #511 an UNEXPECTED
+	// panic becomes an internal error too — an embedded caller must get an
+	// error back, never a process exit taken on its behalf.
 	defer func() {
 		if r := recover(); r != nil {
-			err = exec.RecoverFatalEval(r)
+			err = exec.RecoverQueryPanic(ctx, "embedded query", r)
 		}
 	}()
 	parsed, err := plansql.Parse(sql)

@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"runtime/debug"
 	"runtime/pprof"
 	"strconv"
 	"strings"
@@ -1884,6 +1883,10 @@ func (w *Worker) executeIncomingTaskDelivery(ctx context.Context, task distribut
 	// progress and to publish TaskProgress to coord.
 	taskProgress := &TaskProgress{}
 	taskCtx = exec.WithProgressReporter(taskCtx, taskProgress)
+	// Every panic boundary under this task — the fragment drivers, the
+	// pipeline workers, the scan goroutines — names the query it belongs
+	// to in its log line (#511).
+	taskCtx = exec.WithQueryID(taskCtx, task.QueryID)
 	defer taskCancel()
 
 	// Start OTel child span linked to coordinator's trace
@@ -2003,25 +2006,27 @@ func (w *Worker) executeIncomingTaskDelivery(ctx context.Context, task distribut
 	twoLevelDirectAtStart := exec.TwoLevelDirectBuilds.Load()
 	twoLevelFlatAtStart := exec.TwoLevelBornFlat.Load()
 
-	// Recover from panics in task execution to prevent crashing
-	// the entire worker process on schema mismatches or other bugs.
+	// Recover from panics in task execution to prevent crashing the entire
+	// worker process on schema mismatches or other bugs. This boundary
+	// predates #511 and is the shape that generalized into
+	// exec.RecoverQueryPanic — routing through it keeps the logging, the
+	// stack capture and the recovered-panic count identical everywhere.
 	var result distributed.ResultNotification
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				stack := string(debug.Stack())
-				w.logger.Error("task panicked",
-					"task_id", task.ID,
-					"query_id", task.QueryID,
-					"panic", fmt.Sprintf("%v", r),
-					"stack", stack,
-				)
+				taskErr := exec.RecoverQueryPanic(taskCtx, "worker task "+task.ID, r)
+				text := taskErr.Error()
+				var qp *exec.QueryPanic
+				if errors.As(taskErr, &qp) {
+					text += "\n" + qp.Stack
+				}
 				result = distributed.ResultNotification{
 					TaskID:    task.ID,
 					QueryID:   task.QueryID,
 					StageID:   task.StageID,
 					WorkerID:  w.config.WorkerID,
-					Error:     fmt.Sprintf("task panicked: %v\n%s", r, stack),
+					Error:     text,
 					Duration:  0,
 					Timestamp: time.Now(),
 				}

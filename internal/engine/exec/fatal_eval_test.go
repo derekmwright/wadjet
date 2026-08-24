@@ -86,10 +86,18 @@ func TestPipelineConvertsFatalEvalPanicToError(t *testing.T) {
 	}
 }
 
-// Anything that is not a FatalEvalPanic keeps propagating as a panic: the
-// recover is a narrow conversion, not a blanket catch that would turn every
-// engine bug into a quiet error return.
-func TestPipelineRepanicsOrdinaryPanics(t *testing.T) {
+// An ordinary panic is NOT quietly turned into a nil error, and it is not
+// re-raised into a process exit either. #511 replaced the second half of that
+// contract: the recover used to be a narrow conversion that re-panicked
+// everything else, on the reasoning that a blanket catch would hide engine
+// bugs. It hid nothing and cost everything — the re-panic reached no further
+// recovery, so one query's bug ended the server for every connection.
+//
+// The bug stays loud without that price. It comes back as an internal error
+// (XX000) whose message carries the panic value, the full stack is logged at
+// error level, and exec.QueryPanicsRecovered counts it so the process-killer
+// gate fails CI on any query that reaches one.
+func TestPipelineReportsOrdinaryPanicsAsInternalErrors(t *testing.T) {
 	p := &Pipeline{
 		Source: NewSliceSource(fatalEvalSchema(), fatalEvalRows(4)),
 		Ops: []UnaryOperator{NewFilter(func(*batch.RecordBatch, int) bool {
@@ -97,15 +105,32 @@ func TestPipelineRepanicsOrdinaryPanics(t *testing.T) {
 		})},
 		Sink: &CollectSink{},
 	}
+	before := QueryPanicsRecovered()
 
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("an ordinary panic was swallowed by the FatalEvalPanic recover")
-		}
-		if s, ok := r.(string); !ok || s != "some engine bug" {
-			t.Fatalf("re-raised %#v, want the original panic value", r)
-		}
+	err := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("the panic escaped Pipeline.Run (%v) — it would end the process", r)
+			}
+		}()
+		return p.Run(context.Background())
 	}()
-	_ = p.Run(context.Background())
+
+	if err == nil {
+		t.Fatal("Run returned nil; the panic must surface as a query error")
+	}
+	if !strings.Contains(err.Error(), "some engine bug") {
+		t.Errorf("error %q lost the panic value", err)
+	}
+	var qp *QueryPanic
+	if !errors.As(err, &qp) {
+		t.Fatalf("error %v is not a *QueryPanic, so it carries no SQLSTATE", err)
+	}
+	if qp.SQLState() != SQLStateInternalError {
+		t.Errorf("SQLSTATE = %q, want %q", qp.SQLState(), SQLStateInternalError)
+	}
+	if after := QueryPanicsRecovered(); after != before+1 {
+		t.Errorf("QueryPanicsRecovered %d -> %d, want +1: an engine bug the gate cannot "+
+			"see is an engine bug the gate cannot fail on", before, after)
+	}
 }

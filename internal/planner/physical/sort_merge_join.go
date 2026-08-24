@@ -78,6 +78,17 @@ func (p *Planner) buildSortMergeJoin(ctx context.Context, node *logical.Node, le
 	var buildErr error
 	go func() {
 		defer close(buildDone)
+		// The build runs on its own goroutine so it can overlap with the
+		// probe side's preparation, which also means no recover above it:
+		// a panic anywhere in the build pipeline ended the process rather
+		// than the query (#511). buildErr is read after the barrier, so
+		// delivering it there is all the adapter needs.
+		//
+		// Registered after close(buildDone) so it runs FIRST on the way
+		// out: buildErr is set before the barrier opens.
+		defer exec.CatchQueryPanic(ctx, "sort-merge join build", func(err error) {
+			buildErr = fmt.Errorf("sort-merge join build side: %w", err)
+		})
 		if err := j.Build(ctx, buildSource); err != nil {
 			buildErr = fmt.Errorf("sort-merge join build side: %w", err)
 		}

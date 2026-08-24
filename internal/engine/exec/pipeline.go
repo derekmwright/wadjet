@@ -78,9 +78,13 @@ func RecoverFatalEval(r any) error { return recoverFatalEval(r) }
 // implement Cloneable, batches are processed by multiple goroutines
 // concurrently. Otherwise falls back to serial execution.
 func (p *Pipeline) Run(ctx context.Context) (err error) {
+	// The query-scoped boundary (#511): a FatalEvalPanic still becomes its
+	// own precise error, and anything else becomes an internal-error XX000
+	// with a logged stack rather than a dead process. The caller's deferred
+	// Close still runs, so the pipeline tears down normally either way.
 	defer func() {
 		if r := recover(); r != nil {
-			err = recoverFatalEval(r)
+			err = RecoverQueryPanic(ctx, "pipeline", r)
 		}
 	}()
 	if err := p.Source.Init(ctx); err != nil {
@@ -162,16 +166,20 @@ func (d *ChainDriver) Inspect(fn func(opIdx int, op UnaryOperator, out *batch.Re
 // Push runs b through the whole chain. The bool result is the pipeline's
 // `exhausted` signal: a DoneSignaler operator (LIMIT) reported satisfaction.
 //
-// A FatalEvalPanic raised by an expression inside the chain is converted to
-// an error here, the same contract Pipeline.Run provides. ChainDriver's
-// callers (the worker's fragment drivers) run on errgroup goroutines with no
-// recover of their own, so without this a runtime query error — 22012
-// division by zero, 22P02 invalid cast — would take the worker process down
-// instead of failing the query.
+// A panic raised by an expression inside the chain is converted to an error
+// here, the same contract Pipeline.Run provides. ChainDriver's callers (the
+// worker's fragment drivers) run on errgroup goroutines with no recover of
+// their own, so without this a runtime query error — 22012 division by zero,
+// 22P02 invalid cast — would take the worker process down instead of failing
+// the query. Since #511 that holds for an UNEXPECTED panic too: re-raising it
+// past this point reached an errgroup goroutine and ended the process.
+//
+// The defer is per batch, not per row, and it already existed — the boundary
+// added no new cost to this path.
 func (d *ChainDriver) Push(ctx context.Context, b *batch.RecordBatch) (exhausted bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = recoverFatalEval(r)
+			err = RecoverQueryPanic(ctx, "operator chain", r)
 		}
 	}()
 	return d.push(ctx, 0, b)
@@ -348,6 +356,13 @@ func (p *Pipeline) flushSpilledOps(ctx context.Context, ops []UnaryOperator) err
 // runParallel processes batches through cloned operator chains in parallel.
 // The source and sink are shared; each worker gets its own cloned operators.
 func (p *Pipeline) runParallel(ctx context.Context) error {
+	// The first-error slot is a FirstError, not a bare atomic.Value: the
+	// panic boundary and the ordinary return paths below store errors of
+	// different concrete types, and an atomic.Value panics on the second
+	// shape (#512). Declared up here because the partition-queue closer,
+	// spawned before the workers are, reports into it too.
+	var firstErr FirstError
+
 	// Warm-up: process one batch through the original ops to resolve lazy
 	// column indices in expressions (e.g., KernelFilter, ColumnCompare).
 	// This ensures clones inherit resolved state where possible.
@@ -377,6 +392,11 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		}
 		producersWG.Add(p.Workers)
 		go func() {
+			// This goroutine only waits and closes channels, but it is
+			// still a goroutine a query spawned: a double close here is a
+			// panic like any other, and unrecovered it ends the process
+			// rather than the query (#511).
+			defer CatchQueryPanic(ctx, "partition queue closer", firstErr.Set)
 			producersWG.Wait()
 			for _, q := range partQueues {
 				close(q)
@@ -505,26 +525,19 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	// The first-error slot is a FirstError, not a bare atomic.Value: the
-	// panic boundary and the ordinary return paths below store errors of
-	// different concrete types, and an atomic.Value panics on the second
-	// shape (#512).
-	var firstErr FirstError
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func(workerID int, ops []UnaryOperator) {
 			defer wg.Done()
-			// A FatalEvalPanic raised here would escape Run's own recover —
-			// it happens on this goroutine, not the caller's — and take the
-			// process with it. Convert it to the first error and cancel; any
-			// other panic is re-raised as before.
-			defer func() {
-				if r := recover(); r != nil {
-					firstErr.Set(recoverFatalEval(r))
-					cancel()
-				}
-			}()
+			// A panic raised here escapes Run's own recover — it happens on
+			// this goroutine, not the caller's — and takes the process with
+			// it. Convert ANY of them to the first error and cancel (#511);
+			// a FatalEvalPanic still arrives as its own precise error.
+			defer CatchQueryPanic(workerCtx, "pipeline worker", func(err error) {
+				firstErr.Set(err)
+				cancel()
+			})
 			// Each worker uses its own sink when MergeableSink, else shared sink
 			var sink Sink
 			if workerSinks != nil {

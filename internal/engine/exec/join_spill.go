@@ -1241,9 +1241,16 @@ func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, erro
 		if len(p.spillFlushPartIDs) > 0 {
 			p.spillFlushPrefetch = make(chan preloadedBuild, 1)
 			firstID := p.spillFlushPartIDs[0]
+			ch := p.spillFlushPrefetch
 			go func() {
+				// Decoding a spill run on a goroutine nobody joins: a panic
+				// in the decoder ends the process unless it is delivered
+				// down the same channel the error travels (#511).
+				defer CatchQueryPanic(ctx, "join spill build prefetch", func(err error) {
+					ch <- preloadedBuild{nil, err}
+				})
 				b, err := p.join.loadBuildBatches(firstID)
-				p.spillFlushPrefetch <- preloadedBuild{b, err}
+				ch <- preloadedBuild{b, err}
 			}()
 		}
 		p.spillFlushInit = true
@@ -1316,9 +1323,15 @@ func (p *HashJoinProbe) openNextSpillPartition(ctx context.Context) error {
 	if p.spillFlushPartIdx < len(p.spillFlushPartIDs) {
 		nextID := p.spillFlushPartIDs[p.spillFlushPartIdx]
 		p.spillFlushPrefetch = make(chan preloadedBuild, 1)
+		ch := p.spillFlushPrefetch
 		go func() {
+			// See the first prefetch above: the panic has to come back as
+			// this partition's error, not as a dead process (#511).
+			defer CatchQueryPanic(ctx, "join spill build prefetch", func(err error) {
+				ch <- preloadedBuild{nil, err}
+			})
 			b, err := p.join.loadBuildBatches(nextID)
-			p.spillFlushPrefetch <- preloadedBuild{b, err}
+			ch <- preloadedBuild{b, err}
 		}()
 	} else {
 		p.spillFlushPrefetch = nil

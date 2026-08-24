@@ -473,6 +473,13 @@ func (p *Planner) mmFoldFiles(ctx context.Context, files []catalog.FileEntry, co
 	for w := 0; w < workers; w++ {
 		go func(local []mmColumn) {
 			defer wg.Done()
+			// Footer folding on a goroutine with no error channel: the
+			// only sound answer to a panic is to DECLINE the metadata
+			// shortcut, which sends the query down the ordinary scan.
+			// Unrecovered it ended the process instead (#511).
+			defer exec.CatchQueryPanic(ctx, "min/max metadata worker", func(error) {
+				declined.Store(true)
+			})
 			for {
 				n := int(atomic.AddInt64(&idx, 1) - 1)
 				if n >= len(files) || declined.Load() || ctx.Err() != nil {

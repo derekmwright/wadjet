@@ -11837,6 +11837,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 
 	// Close batchCh when all workers are done
 	go func() {
+		defer inner.recoverWorkerPanic(ctx, "scan batch-channel closer")
 		inner.wg.Wait()
 		close(inner.batchCh)
 	}()
@@ -11914,25 +11915,25 @@ func (s *scannerExecSource) RowsScanned() int64 {
 	return 0
 }
 
-// recoverWorkerPanic converts a FatalEvalPanic raised on a scan goroutine into
-// the scan's error instead of letting it take the process down.
+// recoverWorkerPanic converts a panic raised on a scan goroutine into the
+// scan's error instead of letting it take the process down.
 //
 // These goroutines are not the caller's: Pipeline.Run recovers on ITS
-// goroutine (internal/engine/exec/pipeline.go:82), so a *batch.TypeMismatchError
-// raised by Vector.SetValue — whose whole design (#361) is "a query error,
-// never the server" — killed the process here, and with it every other
-// client's query (#400, and #393 as the query that reaches it). Anything that
-// is NOT a FatalEvalPanic is re-raised untouched, which is the same policy the
-// pipeline applies: a genuine bug still crashes.
+// goroutine, so a *batch.TypeMismatchError raised by Vector.SetValue — whose
+// whole design (#361) is "a query error, never the server" — killed the
+// process here, and with it every other client's query (#400, and #393 as the
+// query that reaches it). Since #511 it converts ANY panic, not only the
+// FatalEvalPanic class: a decoder bug on a scan worker is still one query's
+// failure, not the server's.
 //
 // errCh is buffered, and next() selects on it, so a non-blocking send is
 // enough; the cancel stops the sibling workers.
-func (inner *scanSourceInner) recoverWorkerPanic(what string) {
+func (inner *scanSourceInner) recoverWorkerPanic(ctx context.Context, what string) {
 	r := recover()
 	if r == nil {
 		return
 	}
-	err := exec.RecoverFatalEval(r)
+	err := exec.RecoverQueryPanic(ctx, what, r)
 	select {
 	case inner.errCh <- fmt.Errorf("%s: %w", what, err):
 	default:
@@ -11945,7 +11946,7 @@ func (inner *scanSourceInner) recoverWorkerPanic(what string) {
 // scanWorker reads files in parallel, writing decoded batches to batchCh.
 func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 	defer inner.wg.Done()
-	defer inner.recoverWorkerPanic("scan worker")
+	defer inner.recoverWorkerPanic(ctx, "scan worker")
 
 	for {
 		idx := int(atomic.AddInt64(&inner.idx, 1) - 1)

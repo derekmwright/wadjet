@@ -23,6 +23,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/auth"
 	"github.com/derekmwright/wadjet/internal/coordinator"
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
@@ -193,6 +194,15 @@ func (s *Server) acceptLoop() {
 
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
+	// Backstop under pgConn.dispatch's per-message boundary: a panic raised
+	// during startup, or one that escapes the message boundary itself, drops
+	// THIS connection and no other. Without it the accept-loop goroutine
+	// dies and takes the process with it (#511).
+	defer func() {
+		if r := recover(); r != nil {
+			_ = exec.RecoverQueryPanic(context.Background(), "pgwire connection", r)
+		}
+	}()
 	c := &pgConn{
 		conn:         conn,
 		db:           s.db,
@@ -288,31 +298,62 @@ func (c *pgConn) run() {
 			return
 		}
 
-		switch msgType {
-		case 'Q': // Simple Query
-			sql := readCString(payload)
-			c.handleQuery(sql)
-		case 'P': // Parse (Extended Query)
-			c.handleParse(payload)
-		case 'B': // Bind (Extended Query)
-			c.handleBind(payload)
-		case 'D': // Describe (Extended Query)
-			c.handleDescribe(payload)
-		case 'E': // Execute (Extended Query)
-			c.handleExecute(payload)
-		case 'H': // Flush
-			// no-op, we write eagerly
-		case 'S': // Sync
-			c.sendReadyForQuery()
-		case 'C': // Close (prepared statement or portal)
-			c.handleClose(payload)
-		case 'X': // Terminate
+		// The last line of defence for process survival (#511). Every layer
+		// below converts what it can, but this one owns the invariant that a
+		// panic reached from ONE connection's message must not end the
+		// server for every other connection. It reports the internal error
+		// on this connection and returns to the read loop, so the session
+		// stays usable — exactly what a client sees from PostgreSQL when the
+		// backend hits an internal error it can report.
+		if !c.dispatch(msgType, payload) {
 			return
-		default:
-			c.sendError("ERROR", "08P01", fmt.Sprintf("unsupported message type: %c", msgType))
-			c.sendReadyForQuery()
 		}
 	}
+}
+
+// dispatch handles one protocol message under the connection's panic
+// boundary. It returns false when the connection should close (Terminate, or
+// a panic that left the protocol stream unusable).
+func (c *pgConn) dispatch(msgType byte, payload []byte) (keepGoing bool) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		err := exec.RecoverQueryPanic(context.Background(), "pgwire message", r)
+		code := sqlerr.StateOf(err)
+		if code == "" {
+			code = exec.SQLStateInternalError
+		}
+		c.sendError("ERROR", code, err.Error())
+		c.sendReadyForQuery()
+		keepGoing = true
+	}()
+	switch msgType {
+	case 'Q': // Simple Query
+		sql := readCString(payload)
+		c.handleQuery(sql)
+	case 'P': // Parse (Extended Query)
+		c.handleParse(payload)
+	case 'B': // Bind (Extended Query)
+		c.handleBind(payload)
+	case 'D': // Describe (Extended Query)
+		c.handleDescribe(payload)
+	case 'E': // Execute (Extended Query)
+		c.handleExecute(payload)
+	case 'H': // Flush
+		// no-op, we write eagerly
+	case 'S': // Sync
+		c.sendReadyForQuery()
+	case 'C': // Close (prepared statement or portal)
+		c.handleClose(payload)
+	case 'X': // Terminate
+		return false
+	default:
+		c.sendError("ERROR", "08P01", fmt.Sprintf("unsupported message type: %c", msgType))
+		c.sendReadyForQuery()
+	}
+	return true
 }
 
 func (c *pgConn) handleStartup() error {

@@ -121,6 +121,9 @@ func (h *HashAggregate) startParallelEmit(ctx context.Context) {
 		go d.produce(ctx, u, false)
 	}
 	go func() {
+		// Waiting and closing is still a query's goroutine: unrecovered,
+		// a panic here ends the process rather than the query (#511).
+		defer CatchQueryPanic(ctx, "aggregate emit closer", d.err.Set)
 		d.wg.Wait()
 		close(d.out)
 	}()
@@ -139,21 +142,19 @@ func (d *emitDrain) produce(ctx context.Context, unit *HashAggregate, ownState b
 	if !ownState {
 		defer unit.Close()
 	}
-	// A FatalEvalPanic raised by this unit's emission happens on THIS
-	// goroutine, so Pipeline.Run's recover (pipeline.go:82) cannot see it and
-	// the panic takes the PROCESS down — in a server, every connected
-	// client's query, not just the offending one (#400). Convert it to the
-	// drain's error, exactly as runParallel does for its own workers, so a
-	// value the output vector cannot hold (#392) becomes a query error.
+	// A panic raised by this unit's emission happens on THIS goroutine, so
+	// Pipeline.Run's recover cannot see it and the panic takes the PROCESS
+	// down — in a server, every connected client's query, not just the
+	// offending one (#400). Convert it to the drain's error, exactly as
+	// runParallel does for its own workers, so a value the output vector
+	// cannot hold (#392) becomes a query error. Since #511 that holds for
+	// ANY panic, not only the FatalEvalPanic class.
 	//
 	// Registered last, so it runs FIRST on the way out: the unit is still
 	// closed and wg.Done still fires.
-	//
-	defer func() {
-		if r := recover(); r != nil {
-			d.err.Set(fmt.Errorf("draining aggregate partition: %w", RecoverFatalEval(r)))
-		}
-	}()
+	defer CatchQueryPanic(ctx, "aggregate emit", func(err error) {
+		d.err.Set(fmt.Errorf("draining aggregate partition: %w", err))
+	})
 	for {
 		b, err := unit.nextOwn(ctx)
 		if err != nil {

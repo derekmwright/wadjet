@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	execpkg "github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 )
 
@@ -61,6 +62,8 @@ const tmChildEnv = "WADJET_TYPEMATRIX_CRASH_FROM"
 const tmCrashMarker = "TYPEMATRIX-ENTRY "
 
 // tmCrashDone marks an entry the child finished without the process dying.
+// Its second field is how many panics exec's query boundary converted while
+// that entry ran — see tmPanicPins.
 const tmCrashDone = "TYPEMATRIX-DONE "
 
 // tmCrashSettle is how long the child waits after each query before declaring
@@ -93,6 +96,21 @@ const tmCrashSettle = 5 * time.Millisecond
 // down.
 var tmCrashPins = map[string]typematrix.Pin{}
 
+// tmPanicPins are the corpus entries known to raise an INTERNAL PANIC that
+// the query-scoped boundary recovers (#511).
+//
+// The boundary is what keeps the crash gate above honest now that it exists:
+// once every goroutine converts any panic into a query error, a brand-new
+// index-out-of-range no longer kills a process, so no child dies and the
+// crash arm sees nothing. That is the right production behaviour and the
+// wrong gate. exec.QueryPanicsRecovered is the seam — a recovered panic is
+// still a defect, so the child reports the count around every entry and an
+// unpinned nonzero delta fails CI exactly as a killer does.
+//
+// Empty, and gating: every panic the SQLancer soak reached (#508, #509, #510,
+// #512) is fixed at the root, not merely recovered.
+var tmPanicPins = map[string]typematrix.Pin{}
+
 // TestTypeMatrixNoProcessKillers drives child processes over the corpus and
 // gates the set of entries that kill one.
 func TestTypeMatrixNoProcessKillers(t *testing.T) {
@@ -110,6 +128,7 @@ func TestTypeMatrixNoProcessKillers(t *testing.T) {
 	corpus := typematrix.Corpus()
 
 	found := map[string]bool{}
+	panicked := map[string]int{}
 	start := 0
 	// One child per killer, plus one that reaches the end. Every round
 	// advances start by at least one entry, so len(corpus)+1 rounds is a
@@ -117,7 +136,12 @@ func TestTypeMatrixNoProcessKillers(t *testing.T) {
 	// instead would cap discovery at the killers already known, which is
 	// exactly the set a discovery pass must not assume.
 	for round := 0; round <= len(corpus) && start < len(corpus); round++ {
-		last, died, detail := tmRunCrashChild(t, self, start)
+		last, died, panics, detail := tmRunCrashChild(t, self, start)
+		for idx, n := range panics {
+			if idx >= 0 && idx < len(corpus) {
+				panicked[corpus[idx].Name] += n
+			}
+		}
 		if last < 0 {
 			if died {
 				t.Fatalf("the child died before naming an entry (start=%d), so no entry can be "+
@@ -132,6 +156,7 @@ func TestTypeMatrixNoProcessKillers(t *testing.T) {
 		t.Logf("entry %q (index %d) killed the process:\n%s", corpus[last].Name, last, detail)
 		start = last + 1
 	}
+	tmGatePanics(t, corpus, panicked)
 
 	names := make([]string, 0, len(found))
 	for n := range found {
@@ -171,10 +196,55 @@ func TestTypeMatrixNoProcessKillers(t *testing.T) {
 		len(corpus), len(found), len(tmCrashPins))
 }
 
+// tmGatePanics compares the set of corpus entries that raised a recovered
+// internal panic against tmPanicPins, on the same terms as the crash arm: an
+// undeclared one is a new defect, a declared one that no longer panics is a
+// pin that has outlived its bug.
+func tmGatePanics(t *testing.T, corpus []typematrix.Query, panicked map[string]int) {
+	t.Helper()
+	names := make([]string, 0, len(panicked))
+	for n := range panicked {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if p, ok := tmPanicPins[n]; ok {
+			t.Logf("known internal panic in %q, tracked in %s — NOT gated:\n  %s", n, p.Issue, p.Reason)
+			continue
+		}
+		t.Errorf("NEW INTERNAL PANIC: corpus entry %q raised %d panic(s) that the query "+
+			"boundary had to recover. The server survived, which is the whole point of the "+
+			"boundary — but a query that panics is still a defect, and the boundary exists "+
+			"so it fails HERE instead of in production. File it, then pin it in tmPanicPins.",
+			n, panicked[n])
+	}
+	byName := map[string]bool{}
+	for _, q := range corpus {
+		byName[q.Name] = true
+	}
+	pinned := make([]string, 0, len(tmPanicPins))
+	for n := range tmPanicPins {
+		pinned = append(pinned, n)
+	}
+	sort.Strings(pinned)
+	for _, n := range pinned {
+		p := tmPanicPins[n]
+		switch {
+		case !byName[n]:
+			t.Errorf("panic pin %q (%s) names no corpus entry — it exempts nothing. "+
+				"Delete it or fix the name.", n, p.Issue)
+		case panicked[n] == 0:
+			t.Errorf("panic pin %q no longer panics, so %s is FIXED:\n  %s\n"+
+				"Delete the pin so the entry is gated again.", n, p.Issue, p.Reason)
+		}
+	}
+	t.Logf("internal-panic gate: %d entries panicked (%d pinned)", len(panicked), len(tmPanicPins))
+}
+
 // tmRunCrashChild runs one child from index start. It returns the index of the
 // last entry the child announced (-1 if it announced none), whether the child
-// died, and the tail of its output.
-func tmRunCrashChild(t *testing.T, self string, start int) (last int, died bool, detail string) {
+// died, the recovered-panic count per entry index, and the tail of its output.
+func tmRunCrashChild(t *testing.T, self string, start int) (last int, died bool, panics map[int]int, detail string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -183,14 +253,18 @@ func tmRunCrashChild(t *testing.T, self string, start int) (last int, died bool,
 	out, err := cmd.CombinedOutput()
 
 	last, lastDone := -1, -1
+	panics = map[int]int{}
 	sc := bufio.NewScanner(strings.NewReader(string(out)))
 	sc.Buffer(make([]byte, 0, 64*1024), 4<<20)
-	num := func(line, marker string) (int, bool) {
+	fieldsAfter := func(line, marker string) []string {
 		i := strings.Index(line, marker)
 		if i < 0 {
-			return 0, false
+			return nil
 		}
-		fields := strings.Fields(line[i+len(marker):])
+		return strings.Fields(line[i+len(marker):])
+	}
+	num := func(line, marker string) (int, bool) {
+		fields := fieldsAfter(line, marker)
 		if len(fields) == 0 {
 			return 0, false
 		}
@@ -201,6 +275,11 @@ func tmRunCrashChild(t *testing.T, self string, start int) (last int, died bool,
 		line := sc.Text()
 		if n, ok := num(line, tmCrashDone); ok {
 			lastDone = n
+			if f := fieldsAfter(line, tmCrashDone); len(f) > 1 {
+				if p, cerr := strconv.Atoi(f[1]); cerr == nil && p > 0 {
+					panics[n] += p
+				}
+			}
 			continue
 		}
 		if n, ok := num(line, tmCrashMarker); ok {
@@ -208,7 +287,7 @@ func tmRunCrashChild(t *testing.T, self string, start int) (last int, died bool,
 		}
 	}
 	if err == nil {
-		return last, false, ""
+		return last, false, panics, ""
 	}
 	// Attribute to the entry that STARTED and never finished. If every
 	// announced entry reported DONE, the fatal escaped from an already-
@@ -217,7 +296,7 @@ func tmRunCrashChild(t *testing.T, self string, start int) (last int, died bool,
 	if lastDone >= last {
 		last = lastDone
 	}
-	return last, true, tmTail(string(out), 24)
+	return last, true, panics, tmTail(string(out), 24)
 }
 
 // tmCrashChild is the child half: run corpus entries from start, naming each
@@ -234,6 +313,7 @@ func tmCrashChild(t *testing.T, from string) {
 		// Unbuffered and BEFORE the query: a runtime fatal error is not
 		// recoverable and no buffered log survives it.
 		fmt.Fprintf(os.Stderr, "%s%d %s\n", tmCrashMarker, i, corpus[i].Name)
+		before := execpkg.QueryPanicsRecovered()
 		func() {
 			defer func() { _ = recover() }() // a recoverable panic is not this gate's business
 			_, _ = db.Query(ctx, corpus[i].SQL)
@@ -242,7 +322,12 @@ func tmCrashChild(t *testing.T, from string) {
 		// process down while this entry is still the one on the record.
 		runtime.Gosched()
 		time.Sleep(tmCrashSettle)
-		fmt.Fprintf(os.Stderr, "%s%d\n", tmCrashDone, i)
+		// The DONE line carries the entry index and the number of panics the
+		// query boundary converted while it ran. Zero is the normal case; a
+		// nonzero count is a defect the boundary kept out of production, and
+		// the parent gates it against tmPanicPins.
+		fmt.Fprintf(os.Stderr, "%s%d %d\n", tmCrashDone, i,
+			execpkg.QueryPanicsRecovered()-before)
 	}
 }
 

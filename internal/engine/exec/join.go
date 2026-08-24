@@ -1259,6 +1259,11 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 		wg.Add(1)
 		go func(lb *localKeyBuild) {
 			defer wg.Done()
+			// Morsel-parallel key insertion runs on goroutines the caller
+			// never joins for errors, so an unrecovered panic here — a
+			// value the key encoder cannot hold, a bad column index — ends
+			// the process instead of the query (#511).
+			defer CatchQueryPanic(ctx, "hash join key build worker", firstErr.Set)
 			for {
 				if ctx.Err() != nil {
 					return

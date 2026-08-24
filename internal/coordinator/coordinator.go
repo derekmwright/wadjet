@@ -794,13 +794,20 @@ func (r *SQLResult) Rows() ([]map[string]any, error) {
 
 // ExecuteSQL parses SQL, plans, distributes across workers, and collects results.
 func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResult, err error) {
-	// Panics carrying a query error (exec.FatalEvalPanic, including
-	// batch.TypeMismatchError — #361's silent-write guard) become that
-	// error: coordinator-side merge and gather write batches outside
-	// Pipeline.Run's recover, and pgwire sits directly above this entry.
+	// The coordinator's own query boundary. Panics carrying a query error
+	// (exec.FatalEvalPanic, including batch.TypeMismatchError — #361's
+	// silent-write guard) become that error: coordinator-side merge and
+	// gather write batches outside Pipeline.Run's recover, and pgwire sits
+	// directly above this entry. Since #511 an UNEXPECTED panic becomes an
+	// internal error (XX000) here too, instead of being re-raised into a
+	// process exit that takes every other connection with it.
+	//
+	// ctx is reassigned below with the query id; the closure reads the
+	// variable, so the log line names the query even though the id does not
+	// exist yet at this point.
 	defer func() {
 		if r := recover(); r != nil {
-			err = exec.RecoverFatalEval(r)
+			err = exec.RecoverQueryPanic(ctx, "coordinator query", r)
 		}
 	}()
 	if !c.isLeaderOrStandalone() {
@@ -821,6 +828,9 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 
 	start := time.Now()
 	queryID := uuid.New().String()[:8]
+	// Every panic boundary below this point — the pipeline, its workers, the
+	// scan goroutines — logs the query it belongs to (#511).
+	ctx = exec.WithQueryID(ctx, queryID)
 
 	// Start OTel span for the query if tracing is enabled
 	if c.otel != nil {
@@ -1412,6 +1422,12 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 			wg.Add(1)
 			go func(i int, path string) {
 				defer wg.Done()
+				// Reading and decoding a stage's S3 output: a decoder panic
+				// here ended the coordinator process, so it is delivered as
+				// this fetch's error instead (#511).
+				defer exec.CatchQueryPanic(ctx, "gather result fetch", func(err error) {
+					fetchResults[i] = fetchResult{err: err}
+				})
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				if budget > 0 && fetchedBytes.Load() > budget {
@@ -1456,6 +1472,11 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 			wg.Add(1)
 			go func(idx int, data []byte) {
 				defer wg.Done()
+				// Decoding a worker's inline result payload — untrusted
+				// bytes on a goroutine with no recover above it (#511).
+				defer exec.CatchQueryPanic(ctx, "inline result decode", func(err error) {
+					slot[idx] = decoded{err: err}
+				})
 				b, cols, rows, err := c.decodeInlineResult(data)
 				slot[idx] = decoded{batches: b, columns: cols, rows: rows, err: err}
 			}(i, w.data)
@@ -2235,10 +2256,17 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 		// restored below by sorting on the global first-occurrence rank.
 		shardOrdered := make([][]*mergedRow, shards)
 		var wg sync.WaitGroup
+		var shardErr exec.FirstError
 		for w := 0; w < shards; w++ {
 			wg.Add(1)
 			go func(w int) {
 				defer wg.Done()
+				// Re-aggregating partials reads worker-produced values on a
+				// goroutine with no recover above it: a panic here ended the
+				// coordinator process rather than the query (#511). This
+				// merge takes no context — the query id is missing from the
+				// log line, the error still reaches the client.
+				defer exec.CatchQueryPanic(context.Background(), "partial re-aggregation shard", shardErr.Set)
 				groups := make(map[string]*mergedRow)
 				var local []*mergedRow
 				accumulate(groups, &local, make([]byte, 0, 256), func(key []byte) bool {
@@ -2248,6 +2276,9 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 			}(w)
 		}
 		wg.Wait()
+		if err := shardErr.Err(); err != nil {
+			return nil, err
+		}
 		for w := 0; w < shards; w++ {
 			ordered = append(ordered, shardOrdered[w]...)
 		}

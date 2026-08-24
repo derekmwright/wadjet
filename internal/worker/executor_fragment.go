@@ -967,11 +967,11 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 		// fallback reaching a MAP column, #393 — took the WORKER PROCESS down
 		// instead of failing the task. Same contract as #400's two sites; the
 		// errgroup already has an error channel, so the recovered error just
-		// becomes this goroutine's return. Anything that is NOT a
-		// FatalEvalPanic is re-raised, matching Pipeline.Run's policy.
+		// becomes this goroutine's return. Since #511 that covers any panic,
+		// not only the FatalEvalPanic class.
 		defer func() {
 			if r := recover(); r != nil {
-				err = fmt.Errorf("source next: %w", exec.RecoverFatalEval(r))
+				err = fmt.Errorf("source next: %w", exec.RecoverQueryPanic(gctx, "fragment source pump", r))
 			}
 		}()
 		for {
