@@ -432,11 +432,14 @@ type ScaledDecimal struct {
 // Order returns -1, 0 or +1 as an unscaled column value at the SAME scale is
 // less than, equal to, or greater than this value.
 func (s ScaledDecimal) Order(cell Int128) int {
-	switch {
-	case s.Sat > 0:
-		return -1 // every representable value is below a saturated maximum
-	case s.Sat < 0:
-		return 1
+	// Sat is -1, 0 or +1 (see its doc comment), so negating it is the same
+	// answer as the two-armed switch this replaced — every representable
+	// value is below a saturated maximum (Sat>0 → -1) and above a saturated
+	// minimum (Sat<0 → +1) — at a size the compiler will actually inline:
+	// the switch cost 83 against Go's 80 inlining budget, so Order stopped
+	// inlining into the vectorized DECIMAL filter kernel (measured +39%).
+	if s.Sat != 0 {
+		return -s.Sat
 	}
 	if c := cell.Cmp(s.Unscaled); c != 0 {
 		return c
