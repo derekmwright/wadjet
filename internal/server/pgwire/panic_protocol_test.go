@@ -144,6 +144,51 @@ func TestPanicInExtendedFlowIsDiscardedUntilSync(t *testing.T) {
 	}
 }
 
+// TestUnsupportedMessageBetweenParseAndSyncKeepsTheProtocolInStep pins the
+// same desync for the dispatch default arm (unsupported message type) that
+// TestExtendedQueryPanicKeepsTheProtocolInStep pins for a recovered panic.
+//
+// An unsupported message type is never 'Q', so nothing stops a client (or a
+// fuzzer, or a driver like the one 'F' FunctionCall realistically models)
+// from sending one in the middle of an extended-query sequence, before its
+// Sync. Answering it with an immediate ReadyForQuery — as if it were a
+// self-contained request — emits a Z the client's own Sync hasn't earned
+// yet: the client, still waiting for that Sync's reply, consumes the
+// spurious one as the answer to whatever it sends next.
+func TestUnsupportedMessageBetweenParseAndSyncKeepsTheProtocolInStep(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+	c := newPGClient(t, srv.Addr())
+	c.startup("wadjet", "wadjet")
+
+	sql := "SELECT 1"
+	c.writeMsg('P', append(append([]byte{0}, sql...), 0, 0, 0)) // unnamed statement, no params
+	c.writeMsg('F', nil)                                        // unsupported mid-sequence
+	c.writeMsg('S', nil)                                        // Sync: the message that owes the Z
+
+	types, errText := readUntilReady(t, c, 20*time.Second)
+	if !strings.Contains(types, "E") {
+		t.Fatalf("no ErrorResponse for an unsupported message type; saw %q", types)
+	}
+	if n := strings.Count(types, "Z"); n != 1 {
+		t.Fatalf("saw %d ReadyForQuery messages (%q), want exactly 1", n, types)
+	}
+	if !strings.Contains(errText, "unsupported") {
+		t.Errorf("error text %q lost the unsupported-message report", errText)
+	}
+	// Sync's Z has been read. Anything still queued is the spurious one an
+	// immediate Z on the default arm would have produced.
+	assertNothingPending(t, c, "after Sync following an unsupported message mid-sequence")
+
+	cols, rows, _ := c.simpleQuery("SELECT 42 AS answer")
+	if len(cols) != 1 || cols[0] != "answer" {
+		t.Fatalf("next query returned columns %v — the stream is desynchronised", cols)
+	}
+	if len(rows) != 1 || rows[0][0] != "42" {
+		t.Fatalf("next query returned rows %v, want [[42]]", rows)
+	}
+}
+
 // TestSimpleQueryPanicStillReadiesTheConnection is the counterpart: in the
 // simple-query protocol handleQuery owes the Z itself, so when a panic kills
 // it before it sends one the boundary must supply it — otherwise the client

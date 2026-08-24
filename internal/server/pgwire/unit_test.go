@@ -773,6 +773,10 @@ func TestPGWireUnsupportedMessageType(t *testing.T) {
 
 	// Send an unknown message type (e.g., 'Z' which is ReadyForQuery from server)
 	client.writeMsg('Z', []byte{0})
+	// An unsupported message type is never 'Q', so it enters the same
+	// skipUntilSync error state a panic in an extended-query message does:
+	// Sync, not the message itself, owns the ReadyForQuery.
+	client.writeMsg('S', nil)
 
 	// Should get error + ReadyForQuery back
 	for {

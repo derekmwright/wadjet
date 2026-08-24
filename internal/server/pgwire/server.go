@@ -387,8 +387,16 @@ func (c *pgConn) dispatch(msgType byte, payload []byte) (keepGoing bool) {
 	case 'X': // Terminate
 		return false
 	default:
+		// Same desync the recover() above fixes for a panic: this is never
+		// 'Q' (Q has its own case), so it can arrive between an
+		// extended-query message and that sequence's Sync. Answering it
+		// with an immediate Z here is the same spurious-Z bug — the
+		// client's own Sync hasn't run yet, so it consumes this one as the
+		// reply to whatever it sends next. Report the error and let Sync,
+		// the only message that owns a Z once we are in that state,
+		// deliver it.
 		c.sendError("ERROR", "08P01", fmt.Sprintf("unsupported message type: %c", msgType))
-		c.sendReadyForQuery()
+		c.skipUntilSync = true
 	}
 	return true
 }
