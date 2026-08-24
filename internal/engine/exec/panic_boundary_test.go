@@ -78,6 +78,29 @@ func TestRecoverQueryPanicConvertsEverythingElse(t *testing.T) {
 	}
 }
 
+// TestQueryPanicErrorTextExcludesTheStack: the message is what travels. A
+// worker's task failure carries it across the wire as a plain string and the
+// coordinator hands that to the SQL client, so 8 KB of Go frames appended
+// here lands in a psql ERROR line. The stack belongs in the log, which
+// RecoverQueryPanic already writes with the query id.
+func TestQueryPanicErrorTextExcludesTheStack(t *testing.T) {
+	err := RecoverQueryPanic(context.Background(), "worker task t-1", "boom")
+	var qp *QueryPanic
+	if !errors.As(err, &qp) {
+		t.Fatalf("err = %v, want a *QueryPanic", err)
+	}
+	if qp.Stack == "" {
+		t.Fatal("no stack captured — the log line would name no code")
+	}
+	if strings.Contains(err.Error(), "goroutine ") || strings.Contains(err.Error(), ".go:") {
+		t.Errorf("Error() carries the stack, which travels to the SQL client:\n%s", err.Error())
+	}
+	if len(err.Error()) > 512 {
+		t.Errorf("Error() is %d bytes; a client-facing message this long is a stack in "+
+			"disguise", len(err.Error()))
+	}
+}
+
 // TestQueryPanicUnwrapsAPanickedError lets errors.Is/As reach past the
 // boundary, so a caller can still match a sentinel that was panicked.
 func TestQueryPanicUnwrapsAPanickedError(t *testing.T) {

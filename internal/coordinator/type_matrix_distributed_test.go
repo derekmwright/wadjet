@@ -81,7 +81,33 @@ var tmdUnsupported = map[string]typematrix.Pin{}
 
 // tmdPinPrefixes pins every corpus entry that begins with the key, for a
 // defect that is a property of a TYPE rather than of one query shape.
-var tmdPinPrefixes = map[string]typematrix.Pin{}
+//
+// semijoin_ is a defect of the SHAPE, pinned by prefix because it fires for
+// every wide type at once and one pin per type would say the same thing
+// thirteen times.
+//
+// `WHERE col IN (SELECT col FROM ...)` returns ZERO ROWS on the
+// single-process path while the stage DAG answers it correctly. Reproduced
+// on the 1cf758ba binary with a hand-built fixture -- 1000 rows, a = id % 97,
+// so every value appears among id < 500 -- where the query must answer 1000
+// and answers 0. PostgreSQL answers 1000. NOT EXISTS over the same data is
+// correct, so it is IN-subquery lowering specifically.
+//
+// This is NOT a regression from the #511 panic-boundary work; that work only
+// added the corpus shape that made it visible. The corpus had no semi/anti
+// join entry at all before, which is why every gate it feeds was blind to a
+// wrong answer on one of the most ordinary shapes in SQL.
+//
+// The entries still RUN and still compare — the divergence is logged, and
+// the gate FAILS the moment they start agreeing, so deleting this pin is the
+// proof the fix landed (ADR-0013 §Pins).
+var tmdPinPrefixes = map[string]typematrix.Pin{
+	"semijoin_": {
+		Issue: "UNFILED: IN (subquery) returns zero rows on the single-process path",
+		Reason: "single answers 0, the DAG answers the right count, for every wide type. " +
+			"Pre-existing on 1cf758ba; surfaced by adding a semi-join shape to the corpus.",
+	},
+}
 
 func TestTypeMatrixTwoPath(t *testing.T) {
 	if testing.Short() {

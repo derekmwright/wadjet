@@ -79,6 +79,16 @@ func TestTypeMatrixTwoPathWithoutDeclaredSchemaFooter(t *testing.T) {
 			if p, ok := tmdCrashPins[q.Name]; ok {
 				t.Skipf("process killer, tracked in %s:\n  %s", p.Issue, p.Reason)
 			}
+			// A shape that already diverges on the ORDINARY two-path gate
+			// cannot say anything about the legacy-footer question this gate
+			// exists for: both arms would be comparing a defect that has
+			// nothing to do with where the column's type came from. The pin
+			// is shared so it is stated once, and the ratchet that owns it
+			// lives in TestTypeMatrixTwoPath.
+			if p, _, ok := tmdPinFor(q.Name); ok {
+				t.Skipf("diverges on the ordinary two-path gate too, tracked in %s:\n  %s",
+					p.Issue, p.Reason)
+			}
 			aRes, aErr := tmdRunSingle(ctx, single, q.SQL)
 			bRes, bErr := tmdRunDAG(ctx, coord, q.SQL)
 			if aErr != nil && bErr != nil {
