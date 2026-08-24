@@ -55,8 +55,25 @@ type QueryPanic struct {
 	Stack string
 }
 
+// queryPanicPrefix opens every QueryPanic message. It is load-bearing across
+// a process boundary: a worker's failure reaches the coordinator as a plain
+// STRING in a ResultNotification, with no error chain and no type left, so
+// this prefix is the only thing that still says "this was a panic" once the
+// task result has crossed the wire. Both the retry decision and the SQLSTATE
+// the client is handed key off it (IsQueryPanicMessage). Do not reword it
+// without changing that matcher.
+const queryPanicPrefix = "internal error in "
+
 func (p *QueryPanic) Error() string {
-	return fmt.Sprintf("internal error in %s: %v", p.Where, p.Value)
+	return fmt.Sprintf("%s%s: %v", queryPanicPrefix, p.Where, p.Value)
+}
+
+// IsQueryPanicMessage reports whether a failure message came from a query
+// boundary — including one that crossed the distributed wire as text and was
+// then wrapped by the coordinator's stage/task framing, hence Contains rather
+// than HasPrefix.
+func IsQueryPanicMessage(msg string) bool {
+	return strings.Contains(msg, queryPanicPrefix)
 }
 
 // SQLState satisfies sqlerr.Coder, so pgwire reports XX000 rather than the

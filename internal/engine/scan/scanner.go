@@ -227,17 +227,28 @@ func (s *Scanner) startPrefetch(ctx context.Context, idx int) {
 		// The consumer waits on the channel, so a panic here has to arrive
 		// as this file's error — unrecovered it ends the process, and
 		// recovered-but-undelivered it hangs the scan (#511).
+		//
+		// sent guards the obligation in both directions: the boundary must
+		// deliver the result if the body never did, and must NOT deliver a
+		// second one if the panic came from the send itself (that would
+		// desynchronise this file's slot from the consumer's file order).
+		sent := false
 		defer exec.CatchQueryPanic(ctx, "scan file prefetch", func(err error) {
-			s.prefetchCh <- prefetchedFile{file: file, buf: buf, err: err}
+			if !sent {
+				sent = true
+				s.prefetchCh <- prefetchedFile{file: file, buf: buf, err: err}
+			}
 		})
 
 		rc, _, err := s.cat.Store().Get(ctx, s.cat.Bucket(), file.path)
 		if err != nil {
+			sent = true
 			s.prefetchCh <- prefetchedFile{file: file, buf: buf, err: err}
 			return
 		}
 		_, err = io.Copy(buf, rc)
 		rc.Close()
+		sent = true
 		s.prefetchCh <- prefetchedFile{file: file, buf: buf, err: err}
 	}()
 }
@@ -247,13 +258,17 @@ func (s *Scanner) startPrefetch(ctx context.Context, idx int) {
 func (s *Scanner) startReaderAtPrefetch(ctx context.Context, idx int) {
 	file := s.files[idx]
 	go func() {
-		// Same contract as startPrefetch: deliver the panic as this file's
-		// error rather than ending the process or wedging the consumer.
+		// Same contract as startPrefetch, including the send-once guard.
+		sent := false
 		defer exec.CatchQueryPanic(ctx, "scan reader-at prefetch", func(err error) {
-			s.raPrefetchCh <- prefetchedReaderAt{file: file, err: err}
+			if !sent {
+				sent = true
+				s.raPrefetchCh <- prefetchedReaderAt{file: file, err: err}
+			}
 		})
 		ras := s.cat.Store().(objstore.ReaderAtStore)
 		ra, size, err := ras.GetReaderAt(ctx, s.cat.Bucket(), file.path)
+		sent = true
 		s.raPrefetchCh <- prefetchedReaderAt{file: file, ra: ra, size: size, err: err}
 	}()
 }

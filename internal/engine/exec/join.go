@@ -1250,7 +1250,11 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 		progress.AddRows(int64(first.ActiveLen()))
 	}
 
-	// Launch workers.
+	// Launch workers. The workers share a cancellable child context so the
+	// first failure — an error or a recovered panic — stops the siblings
+	// instead of leaving them to pull the rest of the source.
+	buildCtx, cancelBuild := context.WithCancel(ctx)
+	defer cancelBuild()
 	var sourceMu sync.Mutex
 	var wg sync.WaitGroup
 	var firstErr FirstError
@@ -1263,21 +1267,46 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 			// never joins for errors, so an unrecovered panic here — a
 			// value the key encoder cannot hold, a bad column index — ends
 			// the process instead of the query (#511).
-			defer CatchQueryPanic(ctx, "hash join key build worker", firstErr.Set)
+			//
+			// source.Next runs UNDER sourceMu, and a panic raised inside it
+			// unwinds past the Unlock below. Recovering without releasing
+			// the mutex trades the crash for something worse: every sibling
+			// blocks on sourceMu.Lock forever and the wg.Wait below never
+			// returns, so the query hangs holding its memory budget and its
+			// connection. FlattenViews on a batch the source hands back is
+			// a live panic surface there (the #361/#392 class), so this is
+			// reachable, not theoretical.
+			//
+			// A boundary owes every obligation the dying goroutine held,
+			// not just the one in flight (ADR-0019). Here that is the
+			// mutex, tracked in a variable rather than a per-batch defer so
+			// the pull loop keeps its cost.
+			holdsSource := false
+			defer CatchQueryPanic(buildCtx, "hash join key build worker", func(err error) {
+				if holdsSource {
+					holdsSource = false
+					sourceMu.Unlock()
+				}
+				firstErr.Set(err)
+				cancelBuild()
+			})
 			for {
-				if ctx.Err() != nil {
+				if buildCtx.Err() != nil {
 					return
 				}
 				sourceMu.Lock()
-				b, err := source.Next(ctx)
+				holdsSource = true
+				b, err := source.Next(buildCtx)
 				if b != nil && b.Sel != nil {
 					sel := make([]uint32, len(b.Sel))
 					copy(sel, b.Sel)
 					b.Sel = sel
 				}
+				holdsSource = false
 				sourceMu.Unlock()
 				if err != nil {
 					firstErr.Set(fmt.Errorf("build source next: %w", err))
+					cancelBuild()
 					return
 				}
 				if b == nil {

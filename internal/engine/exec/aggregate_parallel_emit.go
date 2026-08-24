@@ -123,8 +123,21 @@ func (h *HashAggregate) startParallelEmit(ctx context.Context) {
 	go func() {
 		// Waiting and closing is still a query's goroutine: unrecovered,
 		// a panic here ends the process rather than the query (#511).
-		defer CatchQueryPanic(ctx, "aggregate emit closer", d.err.Set)
+		//
+		// next() blocks on a receive from d.out until this closes it, so
+		// recovering without closing would hang the query instead of
+		// crashing the server. The close is this goroutine's obligation and
+		// the boundary discharges it (ADR-0019).
+		closedOut := false
+		defer CatchQueryPanic(ctx, "aggregate emit closer", func(err error) {
+			d.err.Set(err)
+			if !closedOut {
+				closedOut = true
+				close(d.out)
+			}
+		})
 		d.wg.Wait()
+		closedOut = true
 		close(d.out)
 	}()
 

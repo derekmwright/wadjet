@@ -393,13 +393,25 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		producersWG.Add(p.Workers)
 		go func() {
 			// This goroutine only waits and closes channels, but it is
-			// still a goroutine a query spawned: a double close here is a
-			// panic like any other, and unrecovered it ends the process
-			// rather than the query (#511).
-			defer CatchQueryPanic(ctx, "partition queue closer", firstErr.Set)
+			// still a goroutine a query spawned: a panic here unrecovered
+			// ends the process rather than the query (#511).
+			//
+			// Closing the queues is this goroutine's obligation, and every
+			// worker's drainPartitionQueue is blocked until it happens — so
+			// recovering WITHOUT closing would trade the crash for a hung
+			// query. closed tracks how far it got; the boundary finishes the
+			// job for the rest (a second close of the same queue is what the
+			// index, not a fresh loop, prevents).
+			closed := 0
+			defer CatchQueryPanic(ctx, "partition queue closer", func(err error) {
+				firstErr.Set(err)
+				for ; closed < len(partQueues); closed++ {
+					close(partQueues[closed])
+				}
+			})
 			producersWG.Wait()
-			for _, q := range partQueues {
-				close(q)
+			for ; closed < len(partQueues); closed++ {
+				close(partQueues[closed])
 			}
 		}()
 	}
