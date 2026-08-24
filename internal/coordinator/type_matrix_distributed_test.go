@@ -66,7 +66,53 @@ import (
 // comparison. The fix is the columnar reader carrying a ROW's own null bit
 // out of its leaves' definition levels (readRowGroupNative's rowPresence),
 // which the DAG's stream source reaches on any schema carrying a bare ROW.
-var tmdPins = map[string]typematrix.Pin{}
+//
+// #516 is not fixed yet and lives here now, one entry per wide type rather
+// than the single prefix pin it started as (see tmdPinPrefixes below): `WHERE
+// col IN (SELECT col FROM ...)` returns ZERO ROWS on the single-process path
+// while the stage DAG answers it correctly. Reproduced on the 1cf758ba binary
+// with a hand-built fixture -- 1000 rows, a = id % 97, so every value appears
+// among id < 500 -- where the query must answer 1000 and answers 0. PostgreSQL
+// answers 1000. NOT EXISTS over the same data is correct, so it is
+// IN-subquery lowering specifically.
+//
+// This is NOT a regression from the #511 panic-boundary work; that work only
+// added the corpus shape that made it visible. The corpus had no semi/anti
+// join entry at all before, which is why every gate it feeds was blind to a
+// wrong answer on one of the most ordinary shapes in SQL.
+//
+// The entries still RUN and still compare — the divergence is logged, and
+// the gate FAILS the moment they start agreeing, so deleting a pin is the
+// proof its fix landed (ADR-0013 §Pins).
+var tmdPins = map[string]typematrix.Pin{
+	"semijoin_c_i32":   tmd516Pin,
+	"semijoin_c_i64":   tmd516Pin,
+	"semijoin_c_f32":   tmd516Pin,
+	"semijoin_c_f64":   tmd516Pin,
+	"semijoin_c_str":   tmd516Pin,
+	"semijoin_c_bytes": tmd516Pin,
+	"semijoin_c_ts":    tmd516Pin,
+	"semijoin_c_ipv4":  tmd516Pin,
+	"semijoin_c_ipv6":  tmd516Pin,
+	"semijoin_c_mac":   tmd516Pin,
+	"semijoin_c_dur":   tmd516Pin,
+	"semijoin_c_uuid":  tmd516Pin,
+	"semijoin_c_dec":   tmd516Pin,
+}
+
+// tmd516Pin is #516's pin value, shared by all thirteen tmdPins entries
+// above: one issue, one reason, thirteen named ratchet keys. Splitting a
+// defect that is a property of the SHAPE (fires identically for every wide
+// type) into per-entry pins — rather than the single tmdPinPrefixes entry it
+// started as — is what lets finish()'s "k of m pins still diverge" line show
+// partial progress if a fix lands for some types before others, instead of
+// staying "1 of 1" until the very last one agrees (ADR-0013 amendment
+// 2026-08-23).
+var tmd516Pin = typematrix.Pin{
+	Issue: "#516",
+	Reason: "single answers 0, the DAG answers the right count, for every wide type. " +
+		"Pre-existing on 1cf758ba; surfaced by adding a semi-join shape to the corpus.",
+}
 
 // tmdUnsupported is empty: #397 (ARRAY/ROW/MAP/VECTOR had no arm in the WSHF
 // shuffle/gather encoder, worker/shuffle_format.go:415) and #410 (the
@@ -80,34 +126,14 @@ var tmdPins = map[string]typematrix.Pin{}
 var tmdUnsupported = map[string]typematrix.Pin{}
 
 // tmdPinPrefixes pins every corpus entry that begins with the key, for a
-// defect that is a property of a TYPE rather than of one query shape.
-//
-// semijoin_ is a defect of the SHAPE, pinned by prefix because it fires for
-// every wide type at once and one pin per type would say the same thing
-// thirteen times.
-//
-// #516: `WHERE col IN (SELECT col FROM ...)` returns ZERO ROWS on the
-// single-process path while the stage DAG answers it correctly. Reproduced
-// on the 1cf758ba binary with a hand-built fixture -- 1000 rows, a = id % 97,
-// so every value appears among id < 500 -- where the query must answer 1000
-// and answers 0. PostgreSQL answers 1000. NOT EXISTS over the same data is
-// correct, so it is IN-subquery lowering specifically.
-//
-// This is NOT a regression from the #511 panic-boundary work; that work only
-// added the corpus shape that made it visible. The corpus had no semi/anti
-// join entry at all before, which is why every gate it feeds was blind to a
-// wrong answer on one of the most ordinary shapes in SQL.
-//
-// The entries still RUN and still compare — the divergence is logged, and
-// the gate FAILS the moment they start agreeing, so deleting this pin is the
-// proof the fix landed (ADR-0013 §Pins).
-var tmdPinPrefixes = map[string]typematrix.Pin{
-	"semijoin_": {
-		Issue: "#516",
-		Reason: "single answers 0, the DAG answers the right count, for every wide type. " +
-			"Pre-existing on 1cf758ba; surfaced by adding a semi-join shape to the corpus.",
-	},
-}
+// defect that is a property of a TYPE rather than of one query shape and
+// whose members are too many, or too dynamically named, to enumerate
+// cheaply. It is empty: #516 used to be the one entry here (fires identically
+// for every wide type, thirteen of them, all named at compile time), and it
+// moved to thirteen named tmdPins entries above once naming them turned out
+// to be just as cheap and gave finish()'s ratchet real per-entry visibility.
+// The mechanism stays for the next shape-wide defect this trade doesn't favor.
+var tmdPinPrefixes = map[string]typematrix.Pin{}
 
 func TestTypeMatrixTwoPath(t *testing.T) {
 	if testing.Short() {
