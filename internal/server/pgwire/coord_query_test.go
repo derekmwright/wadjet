@@ -136,3 +136,100 @@ func TestSendResultRows_LegacyRows(t *testing.T) {
 		t.Errorf("DataRow messages = %d, want 2", got)
 	}
 }
+
+// TestSendResultRowsRenamedRowColumnUsesCoordPositionalFallback pins FIX 4
+// (adversarial review of #464/#471): the #471 defect resurfacing under a
+// RENAMED output column.
+//
+// queryViaCoord resolves nestedSchema from res.OutputSchema(), which names
+// each column by its schema's own Name — not necessarily the name the
+// column surfaces under in the result's own Columns list, which an alias or
+// the gather's renamer can change. Before this fix, nestedColumnFor only
+// ever looked a column up BY NAME, so a renamed ROW column's schema entry
+// was simply never found: formatPgComposite fell back to its schema-less
+// path (alphabetically sorted keys) instead of the declared field order,
+// rendering "(Reston,VA,20190)" where PostgreSQL's declared order is
+// "(Reston,20190,VA)".
+//
+// This drives the exact chain queryViaCoord feeds sendResultRows — a coord-
+// style nestedSchema from nestedSchemaByName, through the SliceStream
+// harness TestSendResultRows_PerBatch above already established for the
+// coord path — without needing a live NATS-backed *coordinator.Coordinator
+// (review N3): the schema-resolution and positional-fallback logic under
+// test lives entirely in nestedSchemaByName/nestedColumnFor/sendResultRows,
+// none of which reads through c.coord itself.
+func TestSendResultRowsRenamedRowColumnUsesCoordPositionalFallback(t *testing.T) {
+	// The query's declared output schema, exactly the shape
+	// queryViaCoord/nestedSchemaByName would see from res.OutputSchema():
+	// column 1 is a ROW named "addr" with a deliberately non-alphabetical
+	// field order (sorted would be city, state, zip).
+	outputSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt32},
+		{Name: "addr", Type: parquet.TypeRow, Nullable: true, Fields: []parquet.Column{
+			{Name: "city", Type: parquet.TypeString, Nullable: true},
+			{Name: "zip", Type: parquet.TypeInt32, Nullable: true},
+			{Name: "state", Type: parquet.TypeString, Nullable: true},
+		}},
+	}
+	nestedSchema := nestedSchemaByName(outputSchema)
+
+	// The row's own column list, as sendResultRows/sendDataRow key by: same
+	// POSITION as outputSchema, but a DIFFERENT name for column 1 — "home",
+	// not "addr" — the alias/renamer case nestedSchemaByName's byName map
+	// alone cannot resolve.
+	outCols := []string{"id", "home"}
+	rowSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt32},
+		{Name: "home", Type: parquet.TypeRow, Nullable: true, Fields: outputSchema[1].Fields},
+	}
+	b := batch.FromRows(rowSchema, []map[string]any{
+		{"id": int32(1), "home": map[string]any{"city": "Reston", "zip": int32(20190), "state": "VA"}},
+	})
+
+	rc := &recordConn{}
+	c := &pgConn{conn: rc}
+	sent, err := c.sendResultRows(context.Background(), outCols,
+		coordinator.NewSliceStream([]*batch.RecordBatch{b}), nil, nil, nil, nestedSchema)
+	if err != nil {
+		t.Fatalf("sendResultRows: %v", err)
+	}
+	if sent != 1 {
+		t.Fatalf("sent = %d, want 1", sent)
+	}
+
+	wire := rc.buf.Bytes()
+	const wantDeclaredOrder = "(Reston,20190,VA)" // city, zip, state — the declared order
+	const gotSortedOrder = "(Reston,VA,20190)"    // city, state, zip — alphabetically sorted keys
+	if bytes.Contains(wire, []byte(gotSortedOrder)) {
+		t.Errorf("wire contains the sorted-key fallback %q — nestedColumnFor did not use the "+
+			"positional match for the renamed \"home\" column (#471 resurfacing)", gotSortedOrder)
+	}
+	if !bytes.Contains(wire, []byte(wantDeclaredOrder)) {
+		t.Errorf("wire = %q, want it to contain the declared field order %q", wire, wantDeclaredOrder)
+	}
+}
+
+// TestNestedColumnForLegacySchemaHasNoPositionalFallback pins the other half
+// of FIX 4: nestedColumnSchemas' catalog-lookup schema (the legacy,
+// non-coord query path) must NOT get a positional fallback. Its entries come
+// from whichever catalog table columns happen to share a name with
+// something in the SQL text — no relationship to output column position —
+// so applying one there would attach a random table column's structure to
+// an unrelated output column instead of correctly reporting "unresolved".
+func TestNestedColumnForLegacySchemaHasNoPositionalFallback(t *testing.T) {
+	legacy := &nestedFieldSchema{
+		byName: map[string]parquet.Column{
+			"addr": {Name: "addr", Type: parquet.TypeRow, Fields: []parquet.Column{
+				{Name: "city", Type: parquet.TypeString},
+			}},
+		},
+		// ordered intentionally nil: nestedColumnSchemas never sets it.
+	}
+	if col := nestedColumnFor(legacy, "addr", 1); col == nil {
+		t.Error(`nestedColumnFor(legacy, "addr", 1) = nil, want the by-name match regardless of position`)
+	}
+	if col := nestedColumnFor(legacy, "home", 0); col != nil {
+		t.Errorf(`nestedColumnFor(legacy, "home", 0) = %+v, want nil — no positional fallback for a `+
+			`catalog-lookup schema even though position 0 exists`, col)
+	}
+}

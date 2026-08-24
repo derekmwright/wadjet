@@ -265,7 +265,13 @@ func isNestedTypeID(t parquet.TypeID) bool {
 //
 // Skipped entirely (nil, no catalog round trip) when metas says no output
 // column is a nested type, which is the ordinary query.
-func (c *pgConn) nestedColumnSchemas(sql string, metas []wadjet.ColumnMeta) map[string]parquet.Column {
+//
+// Returns byName only (nestedFieldSchema.ordered left nil): entries here
+// come from whichever catalog table columns happen to share a name with
+// something in the SQL text, which has no positional relationship to the
+// output column list — unlike the coord path's nestedSchemaByName, there is
+// no positional fallback to offer.
+func (c *pgConn) nestedColumnSchemas(sql string, metas []wadjet.ColumnMeta) *nestedFieldSchema {
 	needed := false
 	for _, m := range metas {
 		if isNestedTypeID(m.TypeID) {
@@ -309,7 +315,7 @@ func (c *pgConn) nestedColumnSchemas(sql string, metas []wadjet.ColumnMeta) map[
 	if len(out) == 0 {
 		return nil
 	}
-	return out
+	return &nestedFieldSchema{byName: out}
 }
 
 // containsIdentWord reports whether word appears in s bounded by

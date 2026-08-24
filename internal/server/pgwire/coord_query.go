@@ -63,7 +63,7 @@ func (c *pgConn) canBypassDB() bool {
 // only ever sees the 100 final rows because coord's native-DAG executor
 // produces the post-LIMIT batches at Gather. Legacy db.Query materialized
 // the full pre-LIMIT pipeline output.
-func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryResult, coordinator.BatchStream, map[string]parquet.Column, error) {
+func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryResult, coordinator.BatchStream, *nestedFieldSchema, error) {
 	res, err := c.coord.ExecuteSQL(ctx, sql)
 	if err != nil {
 		res.Close()
@@ -75,13 +75,39 @@ func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryRe
 	return &wadjet.QueryResult{Columns: res.Columns, ColumnMetas: metas}, res.Stream(), nestedSchema, nil
 }
 
+// nestedFieldSchema is a query output column's declared ROW/ARRAY/MAP
+// structure, resolved by output column NAME with an optional positional
+// fallback — nestedColumnFor's two lookups.
+//
+// ordered is set only by the coord path (nestedSchemaByName): OutputSchema()
+// and SQLResult.Columns are two views of the SAME query result and so agree
+// on position (coordinator.go's SQLResult.Schema doc: "the declared type of
+// each output column, in Columns order"), the exact invariant
+// coordColumnMetas already relies on for ITS positional fallback. A renamed
+// output column (the gather's renamer; an alias; a computed expression) can
+// lose its name from byName while keeping its slot in ordered, mirroring
+// coordColumnMetas' rule: "keeps its position but not its name" (#471
+// resurfacing as #464/#471 fold-in review item FIX 4 — a renamed ROW column
+// fell back to formatPgComposite's schema-less path, sorted-key order,
+// instead of its declared field order).
+//
+// The legacy catalog lookup (nestedColumnSchemas, paraminfer.go) leaves
+// ordered nil: its entries come from whichever catalog table columns happen
+// to share a name with something in the SQL text, which has no positional
+// relationship to the output column list at all — a fallback there would
+// attach a random table column's schema to an unrelated output position.
+type nestedFieldSchema struct {
+	byName  map[string]parquet.Column
+	ordered []parquet.Column
+}
+
 // nestedSchemaByName indexes a query's output schema by column name so
 // formatPgValueTyped can look up a ROW/ARRAY/MAP column's declared field
 // order and element type by the same name sendDataRow already keys rows on.
 // Every column is kept, not just the nested-typed ones: a scalar entry is
 // simply never read by formatPgValueTyped, and filtering it out here would
 // just be a second pass over the same slice for no benefit.
-func nestedSchemaByName(schema []parquet.Column) map[string]parquet.Column {
+func nestedSchemaByName(schema []parquet.Column) *nestedFieldSchema {
 	if len(schema) == 0 {
 		return nil
 	}
@@ -89,7 +115,7 @@ func nestedSchemaByName(schema []parquet.Column) map[string]parquet.Column {
 	for _, col := range schema {
 		byName[col.Name] = col
 	}
-	return byName
+	return &nestedFieldSchema{byName: byName, ordered: schema}
 }
 
 // coordColumnMetas is the coord path's answer to wadjet.deriveColumnMetas:
@@ -152,7 +178,7 @@ func coordColumnMetas(res *coordinator.SQLResult) []wadjet.ColumnMeta {
 // ErrorResponse after the partial DataRows (legal in the v3 protocol).
 // ctx is the statement's context: a CancelRequest (or statement_timeout)
 // mid-send stops the stream instead of sending the remaining rows.
-func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream coordinator.BatchStream, rows []map[string]any, fmtCodes []int16, metas []wadjet.ColumnMeta, nestedSchema map[string]parquet.Column) (int, error) {
+func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream coordinator.BatchStream, rows []map[string]any, fmtCodes []int16, metas []wadjet.ColumnMeta, nestedSchema *nestedFieldSchema) (int, error) {
 	sent := 0
 	// Resolved once per result, not per row: the value a client reads has
 	// to match the type the RowDescription declared, and only the metas

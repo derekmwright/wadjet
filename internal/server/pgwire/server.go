@@ -247,7 +247,7 @@ type pgConn struct {
 	// alongside describeResult so Execute reuses the SAME resolution rather
 	// than re-deriving it (and, for the legacy query path, re-paying the
 	// catalog round-trip nestedColumnSchemas makes).
-	describeNestedSchema map[string]parquet.Column
+	describeNestedSchema *nestedFieldSchema
 	describeErr          error               // cached Describe-time execution failure for Execute replay
 	describeCancel       string              // set when that failure was a cancellation: the 57014 message to replay
 	describeSynth        *synthAnswer        // cached Describe-time introspection answer
@@ -834,7 +834,7 @@ func (c *pgConn) handleQuery(sql string) {
 	}
 	var result *wadjet.QueryResult
 	var stream coordinator.BatchStream
-	var nestedSchema map[string]parquet.Column
+	var nestedSchema *nestedFieldSchema
 	var err error
 	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
 		result, stream, nestedSchema, err = c.queryViaCoord(ctx, sql)
@@ -1140,7 +1140,7 @@ func (c *pgConn) describeSQL(sql string, fmtCodes []int16) {
 	defer cancel()
 	var result *wadjet.QueryResult
 	var stream coordinator.BatchStream
-	var nestedSchema map[string]parquet.Column
+	var nestedSchema *nestedFieldSchema
 	var err error
 	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(shapeSQL) {
 		result, stream, nestedSchema, err = c.queryViaCoord(ctx, shapeSQL)
@@ -1318,7 +1318,7 @@ func (c *pgConn) handleExecute(payload []byte) {
 	defer cancel()
 	var result *wadjet.QueryResult
 	var stream coordinator.BatchStream
-	var nestedSchema map[string]parquet.Column
+	var nestedSchema *nestedFieldSchema
 	if c.describeResult != nil {
 		result = c.describeResult
 		stream = c.describeStream
@@ -2951,7 +2951,7 @@ func columnTypeAt(types []parquet.TypeID, i int) parquet.TypeID {
 // `timestamp` values are microseconds relative to the latter.
 const pgEpochOffsetMicros = 946684800 * 1_000_000
 
-func (c *pgConn) sendDataRow(columns []string, row map[string]any, colTypes []parquet.TypeID, nestedSchema map[string]parquet.Column) {
+func (c *pgConn) sendDataRow(columns []string, row map[string]any, colTypes []parquet.TypeID, nestedSchema *nestedFieldSchema) {
 	c.buf = c.buf[:0]
 
 	// Column count (int16)
@@ -2964,7 +2964,7 @@ func (c *pgConn) sendDataRow(columns []string, row map[string]any, colTypes []pa
 			c.buf = appendInt32(c.buf, -1)
 			continue
 		}
-		s := formatPgValueTyped(val, nestedColumnFor(nestedSchema, col))
+		s := formatPgValueTyped(val, nestedColumnFor(nestedSchema, col, i))
 		if columnTypeAt(colTypes, i) == parquet.TypeTimestamp {
 			if ms, ok := val.(int64); ok {
 				s = batch.FormatTimestamp(ms)
@@ -2983,21 +2983,37 @@ func (c *pgConn) sendDataRow(columns []string, row map[string]any, colTypes []pa
 // best-effort one in paraminfer.go), or nil when there is none: unresolved
 // is not an error here, just a formatPgValueTyped call that renders without
 // a declared field order or element type instead of refusing.
-func nestedColumnFor(nestedSchema map[string]parquet.Column, name string) *parquet.Column {
+//
+// pos is col's index in the row's own output column list — sendDataRow and
+// sendDataRowFormatted's loop variable, unchanged from the caller. When the
+// name lookup misses, a positional fallback tries nestedSchema.ordered at
+// pos: nestedFieldSchema's doc explains why that is sound for the coord
+// path's schema (positionally aligned with the output columns) and a no-op
+// for the legacy catalog-lookup one (ordered left nil there). Without this,
+// a renamed ROW/ARRAY/MAP output column — an alias, or the gather's own
+// renamer — lost its declared structure entirely and fell back to
+// formatPgComposite's schema-less rendering (sorted keys for a ROW) even
+// though the query's real output schema still had it, at the same position
+// coordColumnMetas already trusts for its own positional fallback (#471
+// resurfacing).
+func nestedColumnFor(nestedSchema *nestedFieldSchema, name string, pos int) *parquet.Column {
 	if nestedSchema == nil {
 		return nil
 	}
-	col, ok := nestedSchema[name]
-	if !ok {
-		return nil
+	if col, ok := nestedSchema.byName[name]; ok {
+		return &col
 	}
-	return &col
+	if nestedSchema.ordered != nil && pos >= 0 && pos < len(nestedSchema.ordered) {
+		col := nestedSchema.ordered[pos]
+		return &col
+	}
+	return nil
 }
 
 // sendDataRowFormatted sends a DataRow using the format codes from Bind.
 // Columns with format code 1 (binary) get binary-encoded values.
 // metas provides type info for correct binary encoding (may be nil for text-only).
-func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtCodes []int16, colTypes []parquet.TypeID, nestedSchema map[string]parquet.Column) {
+func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtCodes []int16, colTypes []parquet.TypeID, nestedSchema *nestedFieldSchema) {
 	c.buf = c.buf[:0]
 	c.buf = appendInt16(c.buf, int16(len(columns)))
 
@@ -3017,7 +3033,7 @@ func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtC
 		// "map[...]"/"[...]" instead of PostgreSQL's composite/array text).
 		switch val.(type) {
 		case map[string]any, []any:
-			s := formatPgValueTyped(val, nestedColumnFor(nestedSchema, col))
+			s := formatPgValueTyped(val, nestedColumnFor(nestedSchema, col, i))
 			c.buf = appendInt32(c.buf, int32(len(s)))
 			c.buf = append(c.buf, s...)
 			continue
@@ -3055,7 +3071,7 @@ func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtC
 		case binary:
 			c.buf = appendBinaryValue(c.buf, val)
 		default:
-			s := formatPgValueTyped(val, nestedColumnFor(nestedSchema, col))
+			s := formatPgValueTyped(val, nestedColumnFor(nestedSchema, col, i))
 			if isTS && msOK {
 				s = batch.FormatTimestamp(ms)
 			}

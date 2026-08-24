@@ -214,7 +214,7 @@ func TestIssue471NestedColumnSchemasResolvesDeclaredOrder(t *testing.T) {
 	if got == nil {
 		t.Fatal("nestedColumnSchemas returned nil, want a resolved schema")
 	}
-	addrCol, ok := got["addr"]
+	addrCol, ok := got.byName["addr"]
 	if !ok {
 		t.Fatal(`nestedColumnSchemas did not resolve "addr"`)
 	}
@@ -222,7 +222,7 @@ func TestIssue471NestedColumnSchemasResolvesDeclaredOrder(t *testing.T) {
 		addrCol.Fields[1].Name != "zip" || addrCol.Fields[2].Name != "state" {
 		t.Errorf("addr.Fields = %+v, want [city zip state] in that order", addrCol.Fields)
 	}
-	tagsCol, ok := got["tags"]
+	tagsCol, ok := got.byName["tags"]
 	if !ok {
 		t.Fatal(`nestedColumnSchemas did not resolve "tags"`)
 	}
@@ -279,7 +279,12 @@ func TestIssue471NestedColumnSchemasDropsConflicts(t *testing.T) {
 		{Name: "info", TypeID: parquet.TypeRow},
 	}
 	got := c.nestedColumnSchemas("SELECT id, info FROM rowtab, arrtab", metas)
-	if _, ok := got["info"]; ok {
-		t.Errorf(`nestedColumnSchemas resolved "info" despite a ROW/ARRAY conflict across tables: %+v`, got["info"])
+	if got == nil {
+		// "id" resolves cleanly (both tables agree on int32), so the
+		// conflict dropping "info" alone must not empty the whole result.
+		t.Fatal("nestedColumnSchemas returned nil, want a schema with the conflict-free \"id\" column")
+	}
+	if _, ok := got.byName["info"]; ok {
+		t.Errorf(`nestedColumnSchemas resolved "info" despite a ROW/ARRAY conflict across tables: %+v`, got.byName["info"])
 	}
 }
