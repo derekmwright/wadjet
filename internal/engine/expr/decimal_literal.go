@@ -1,6 +1,8 @@
 package expr
 
 import (
+	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -185,6 +187,61 @@ func cmpOrder(c int, op CmpOp) bool {
 		return c >= 0
 	}
 	return false
+}
+
+// decimalTextOrder orders a NUMBER against a DECIMAL value that reached the
+// boxed path as its rendered text, returning -1, 0 or +1 for num against the
+// text, and ok=false when the text is not a number (an ordinary string
+// column's value, which must keep comparing as a string).
+//
+// Two different rules, both PostgreSQL's:
+//
+//   - Against an INTEGER the comparison is EXACT. batch.DecimalTextAt at
+//     scale 0 truncates the text to its integer part and reports the sign of
+//     what it dropped, and ScaledDecimal.Order settles the tie with that
+//     residual — so 3 vs "3.0000" is equal, 3 vs "3.0001" is less, and
+//     nothing is rounded on either side. It saturates too, so a text value
+//     wider than Int128 still orders (#462).
+//   - Against a FLOAT the comparison is a float64 one, because that is what
+//     PostgreSQL does with `numeric <op> double precision`: it casts the
+//     numeric. Verified on live PostgreSQL — `9007199254740993::numeric =
+//     9007199254740992::float8` is TRUE.
+func decimalTextOrder(num any, text string) (int, bool) {
+	switch v := num.(type) {
+	case int64:
+		return decimalTextOrderInt(v, text)
+	case int:
+		return decimalTextOrderInt(int64(v), text)
+	case int32:
+		return decimalTextOrderInt(int64(v), text)
+	case float64:
+		return decimalTextOrderFloat(v, text)
+	case float32:
+		return decimalTextOrderFloat(float64(v), text)
+	}
+	return 0, false
+}
+
+func decimalTextOrderInt(v int64, text string) (int, bool) {
+	sd, ok := batch.DecimalTextAt(text, 0)
+	if !ok {
+		return 0, false
+	}
+	return sd.Order(batch.Int128From(v)), true
+}
+
+func decimalTextOrderFloat(v float64, text string) (int, bool) {
+	// The numeric SHAPE is settled by the same parser the exact arm uses, so
+	// the two agree about which strings are numbers at all: strconv.ParseFloat
+	// alone would accept "NaN" and "Inf", which no DECIMAL column renders.
+	if _, ok := batch.DecimalTextAt(text, 0); !ok {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
+	if err != nil {
+		return 0, false
+	}
+	return kernel.CompareFloat64(v, f), true
 }
 
 // negateLitText flips the sign of a numeric literal's source text, so folding

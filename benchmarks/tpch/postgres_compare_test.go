@@ -565,6 +565,33 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DecimalEqQuotedNumeric", sql: `SELECT d_key FROM dec_probe WHERE d_2 = '12.75' ORDER BY d_key`},
 	)
 
+	// COLUMN against COLUMN, one of them a DECIMAL (#476). d_2 is
+	// (d_key-100)*0.25, so `d_key >= d_2` is true of every non-NULL row and
+	// `d_key < d_2` of none — numbers a reader can check by hand, and numbers
+	// wadjet got wrong (129 and 59) because the DECIMAL side boxes as its
+	// rendered TEXT and the pair fell through to a lexicographic comparison.
+	// `=` and `<>` were right throughout, which is why only an oracle sweeping
+	// every operator could see it.
+	out = append(out,
+		pgCase{name: "DecimalColColIntGe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key >= d_2`},
+		pgCase{name: "DecimalColColIntGt", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key > d_2`},
+		pgCase{name: "DecimalColColIntLt", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key < d_2`},
+		pgCase{name: "DecimalColColIntLe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key <= d_2`},
+		pgCase{name: "DecimalColColIntEq", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key = d_2`},
+		pgCase{name: "DecimalColColIntNe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key <> d_2`},
+		pgCase{name: "DecimalColColIntFlipped", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 <= d_key`},
+		// Scale 4 and the 25-digit wide column, so the reading is not pinned
+		// to one scale or to values an int64 could hold.
+		pgCase{name: "DecimalColColIntGeScale4", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key >= d_4`},
+		pgCase{name: "DecimalColColIntGeWide", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key >= d_wide`},
+		pgCase{name: "DecimalColColIntLtWide", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key < d_wide`},
+		// The rows themselves, not only their count: a count can agree while
+		// the row SET does not.
+		pgCase{name: "DecimalColColIntGeRows", sql: `SELECT d_key FROM dec_probe WHERE d_key >= d_2 ORDER BY d_key`},
+		// Through the row-at-a-time evaluator, which a CASE forces.
+		pgCase{name: "DecimalColColIntGeInCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_key >= d_2 THEN 1 ELSE 0 END = 1`},
+	)
+
 	// --- Wide DECIMAL (precision 38) --------------------------------------
 	//
 	// Everything above runs on ONE physical encoding. A DECIMAL's leaf type is

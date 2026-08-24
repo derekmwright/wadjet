@@ -4339,6 +4339,31 @@ func compare(a, b any, op CmpOp) bool {
 			}
 		}
 	}
+	// Mixed number/DECIMAL-text. A DECIMAL value boxes as its RENDERED TEXT
+	// (Vector.GetValue), so a mixed-type column-column comparison — an INT64
+	// column on the other side of `d_key >= d_2` — arrives here as (number,
+	// string). Every reading below it was wrong for that pair: the temporal
+	// branches cannot parse a decimal (their layouts all need '-' separators,
+	// so this steals nothing from them), isNumeric is false for a string, and
+	// the terminal fallback compares them LEXICOGRAPHICALLY, where "9" sorts
+	// above "10". `d_key >= d_2` answered 129 rows against PostgreSQL's 188,
+	// with `=` and `<>` right and only the ORDERING operators wrong, which is
+	// what kept it hidden (#476).
+	//
+	// It goes ahead of the temporal branches rather than behind them because
+	// of their epoch guard: `bi != 0 || ai == 0` fires for ANY unparseable
+	// string once the numeric side is zero, so `0 = '0.0001'` was true.
+	if as, ok := a.(string); ok {
+		if c, ok := decimalTextOrder(b, as); ok {
+			return cmpOrder(-c, op)
+		}
+	}
+	if bs, ok := b.(string); ok {
+		if c, ok := decimalTextOrder(a, bs); ok {
+			return cmpOrder(c, op)
+		}
+	}
+
 	// Mixed int64/string: implicit date/timestamp casting.
 	// TypeDate columns store epoch days (int32→int64), TypeTimestamp stores epoch ms.
 	// Date strings ("YYYY-MM-DD") are exactly 10 chars with no time component.

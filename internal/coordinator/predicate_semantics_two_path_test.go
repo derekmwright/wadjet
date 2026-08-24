@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -288,6 +289,95 @@ func nullLiteralPredicateCases() []predCase {
 	}
 }
 
+// decimalColColPredicateCases pin what a COLUMN-against-COLUMN comparison
+// between a DECIMAL and a column of another type means on both arms (#476).
+//
+// A DECIMAL column boxes as its RENDERED TEXT, so the pair reached the row
+// evaluator as (int64, string) and compared LEXICOGRAPHICALLY — "9" above
+// "10" — with `=` and `<>` right and only the ORDERING operators wrong.
+//
+// c_dec is `i + 0.0001*(i%9973)` at DECIMAL(18,4) and c_i64 is `i*1_000_003`,
+// both NULL on their own strides, so the two orderings below are decided by
+// the FRACTION the lexicographic reading could not see: over 5000 rows the
+// fraction is non-zero on every row that has a value at all.
+func decimalColColPredicateCases() []predCase {
+	// decUnscaled is c_dec at the column's own DECIMAL(18,4) scale, as an
+	// exact integer, so no expectation here depends on float64 arithmetic.
+	decUnscaled := func(r tmxRow) (int64, bool) {
+		if r.dec == nil {
+			return 0, false
+		}
+		return int64(math.Round(*r.dec * 10000)), true
+	}
+	// ord compares an integer column against c_dec at that scale, answering
+	// the ordering SQL requires, or false for "this row has a NULL and
+	// qualifies for nothing".
+	ord := func(get func(tmxRow) (int64, bool), want func(int) bool) func(tmxRow) bool {
+		return func(r tmxRow) bool {
+			u, ok := decUnscaled(r)
+			if !ok {
+				return false
+			}
+			v, ok := get(r)
+			if !ok {
+				return false
+			}
+			switch n := v * 10000; {
+			case n < u:
+				return want(-1)
+			case n > u:
+				return want(1)
+			default:
+				return want(0)
+			}
+		}
+	}
+	i64 := func(r tmxRow) (int64, bool) {
+		if r.i64 == nil {
+			return 0, false
+		}
+		return *r.i64, true
+	}
+	i32 := func(r tmxRow) (int64, bool) {
+		if r.i32 == nil {
+			return 0, false
+		}
+		return int64(*r.i32), true
+	}
+	rowID := func(r tmxRow) (int64, bool) { return r.id, true }
+	lt := func(c int) bool { return c < 0 }
+	le := func(c int) bool { return c <= 0 }
+	gt := func(c int) bool { return c > 0 }
+	ge := func(c int) bool { return c >= 0 }
+	eq := func(c int) bool { return c == 0 }
+	ne := func(c int) bool { return c != 0 }
+	return []predCase{
+		// INT64 against DECIMAL, every operator. c_i64 is i*1_000_003 and
+		// c_dec is about i, so the integer is far larger on every row but the
+		// first — and the lexicographic reading got that wrong for every row
+		// whose digit counts differ, which is most of them.
+		{"DecimalColColI64Gt", "c_i64 > c_dec", ord(i64, gt)},
+		{"DecimalColColI64Ge", "c_i64 >= c_dec", ord(i64, ge)},
+		{"DecimalColColI64Lt", "c_i64 < c_dec", ord(i64, lt)},
+		{"DecimalColColI64Le", "c_i64 <= c_dec", ord(i64, le)},
+		{"DecimalColColI64Eq", "c_i64 = c_dec", ord(i64, eq)},
+		{"DecimalColColI64Ne", "c_i64 <> c_dec", ord(i64, ne)},
+		{"DecimalColColFlipped", "c_dec < c_i64", ord(i64, gt)},
+		// id is NOT NULL and equals the row index, so it sits just BELOW
+		// c_dec's fraction on every row that has one: the operators split
+		// where a lexicographic reading cannot.
+		{"DecimalColColIdLt", "id < c_dec", ord(rowID, lt)},
+		{"DecimalColColIdGe", "id >= c_dec", ord(rowID, ge)},
+		{"DecimalColColIdEq", "id = c_dec", ord(rowID, eq)},
+		// INT32 against DECIMAL: the widening is per storage class.
+		{"DecimalColColI32Lt", "c_i32 < c_dec", ord(i32, lt)},
+		{"DecimalColColI32Ge", "c_i32 >= c_dec", ord(i32, ge)},
+		// The negated forms, where a NULL row appears in neither answer.
+		{"DecimalColColNotGe", "NOT (c_i64 >= c_dec)", ord(i64, lt)},
+		{"DecimalColColNotLt", "NOT (c_i64 < c_dec)", ord(i64, ge)},
+	}
+}
+
 func TestTypeMatrixPredicateSemanticsTwoPath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: the predicate-semantics gate stands up an embedded NATS cluster")
@@ -300,6 +390,7 @@ func TestTypeMatrixPredicateSemanticsTwoPath(t *testing.T) {
 	rows := tmxRows()
 
 	cases := append(notPredicateCases(), nullLiteralPredicateCases()...)
+	cases = append(cases, decimalColColPredicateCases()...)
 	t.Logf("predicate-semantics gate: %d predicates × 2 arms (A single-process, B stage DAG), "+
 		"each held to the row set SQL requires", len(cases))
 
