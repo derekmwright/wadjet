@@ -3516,18 +3516,19 @@ func twoPathCorpus() []twoPathQuery {
 					}
 				}
 			}},
-		// #466's repro row 5, reassigned to #467: the DAG cannot resolve a
-		// derived table's SELECT alias, so a QUALIFIED group key names a
-		// column no fragment emits. Nothing to do with DISTINCT — the same
-		// statement with the DISTINCT removed fails identically — so it is
-		// pinned here rather than skipped, and arm A stays gated.
+		// #466's repro row 5, reassigned to #467 and FIXED there: the DAG
+		// could not resolve a derived table's SELECT alias, so a QUALIFIED
+		// group key named a column no fragment emits (`hash aggregate:
+		// GROUP BY key "u.k" is not a column of its input`). Nothing to do
+		// with DISTINCT — the same statement with the DISTINCT removed
+		// failed identically — so it was pinned rather than skipped, and
+		// the pin is gone now that resolveAggInputName drops the derived
+		// table's own qualifier inside its scope.
 		twoPathQuery{name: "GroupByQualifiedAliasOverDerivedDistinct", cmp: cmpOrdered, expectRows: true,
 			sql: `SELECT k, COUNT(*) AS c FROM
 				(SELECT DISTINCT n_regionkey AS k, n_name FROM nation) u
 				GROUP BY u.k ORDER BY k`,
-			wantCols:    []string{"k", "c"},
-			dagPin:      `GROUP BY key "u.k" is not a column of its input`,
-			dagPinIssue: "#467",
+			wantCols: []string{"k", "c"},
 			assertA: func(tb testing.TB, rows []map[string]any) {
 				tb.Helper()
 				want := map[float64]map[string]bool{}
@@ -3620,14 +3621,17 @@ func twoPathCorpus() []twoPathQuery {
 				}
 				assertSingleCell(tb, rows, "c", pairs)
 			}},
-		// #480, repro B: #467's mechanism at a third consumer. A fragment
-		// emits columns under their SOURCE names, so the shuffle's partition
-		// key — the derived table's alias — names nothing in the schema.
+		// #480, repro B: #467's mechanism at a third consumer, and FIXED
+		// with it. A fragment emits columns under their SOURCE names, so
+		// the shuffle's partition key — the derived table's alias, spelled
+		// `y.b` — named nothing in the schema and the exchange failed
+		// (`partitioned shuffle: key "y.b" not in schema`). resolveShuffleKey
+		// now drops the derived table's own qualifier inside its scope, so
+		// both arms are gated again.
 		twoPathQuery{name: "AliasJoinedDerivedAggregates", cmp: cmpUnordered, expectRows: true,
 			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT s_nationkey AS a FROM supplier) x
 				JOIN (SELECT DISTINCT n_nationkey AS b FROM nation) y ON x.a = y.b`,
 			wantCols: []string{"c"}, wantRows: 1,
-			dagPin: `partitioned shuffle: key "y.b" not in schema`, dagPinIssue: "#480",
 			assertA: func(tb testing.TB, rows []map[string]any) {
 				tb.Helper()
 				nations := distinctKeys(tb, "nation", "n_nationkey")
@@ -3641,19 +3645,31 @@ func twoPathCorpus() []twoPathQuery {
 			}},
 	)
 
-	// --- #468: a derived table's ORDER BY binds to its SELECT-list alias ---
+	// --- #467 / #468: a DERIVED TABLE's SELECT-list alias, at every
+	// consumer that has to resolve a name on the DAG ------------------------
 	//
 	// walkStages emits no stage for an ordinary Project, so a derived
-	// table's rename happens NOWHERE on the DAG: streams carry source column
-	// names and each consumer resolves the alias back through the plan. The
-	// ORDER BY consumer had no such resolution over a scan/join producer at
-	// all, because attachScanSelectProjections might still materialize the
-	// alias there — and that pass serves the OUTERMOST SELECT list only. So a
-	// derived table's sort either failed loud (`sort: key column "k" does not
-	// exist in the input schema`, #467's first repro) or, when the alias
-	// SHADOWS a base column of the same relation, silently keyed on the WRONG
-	// column: `SELECT s_acctbal AS s_suppkey ... ORDER BY s_suppkey DESC`
-	// ordered by supplier key where PostgreSQL orders by ACCTBAL.
+	// table's rename happens NOWHERE on the DAG: every stream carries
+	// source column names and each consumer compensates by resolving the
+	// alias back through the plan. Four consumers, one missing rule each,
+	// so one cause failed four ways:
+	//
+	//	sort key       LOUD  `sort: key column "k" does not exist in the
+	//	                     input schema` — resolveSortKeyColumn commits
+	//	                     only at an AGGREGATE producer and left a
+	//	                     scan/join one alone.
+	//	group key      LOUD  `hash aggregate: GROUP BY key "u.k" is not a
+	//	                     column of its input`.
+	//	shuffle key    LOUD  `partitioned shuffle: key "y.b" not in schema`.
+	//	broadcast-join key
+	//	               SILENT — the probe matched nothing and the query
+	//	                     answered 0 rows where PostgreSQL answers 24.
+	//
+	// The qualified spelling (`x.k`, `u.k`, `y.j` — what every BI tool
+	// writes) is what none of the four handled; the sort key failed bare
+	// too. #468 is the same family's quiet corner: an alias that SHADOWS a
+	// base column of the same relation makes the name exist on both sides,
+	// so nothing errors and the DAG simply sorts by the wrong column.
 	//
 	// Every expected value below was confirmed against a live
 	// postgres:17-alpine over the same SF0.01 fixture.
@@ -3695,6 +3711,47 @@ func twoPathCorpus() []twoPathQuery {
 				}
 				assertSingleCell(tb, rows, "c", want)
 			}},
+		// The SILENT half: the join key names the derived table through its
+		// own alias. 0 rows on the DAG pre-fix, 24 on the single-process
+		// path and on PostgreSQL.
+		twoPathQuery{name: "DerivedAliasJoinKeyQualified", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT x.k FROM (SELECT s_suppkey AS k FROM supplier s1
+				ORDER BY s1.s_suppkey DESC) x JOIN nation ON x.k = n_nationkey`,
+			wantRows: 24, wantCols: []string{"k"},
+			assertA: assertDerivedAliasJoinKeys},
+		// The bare spelling of the same join. It returned 24 rows pre-fix,
+		// but under the SOURCE column names (n_nationkey, s_suppkey) rather
+		// than the `k` the query selects — the gather could not resolve the
+		// rename either, so wantCols is the half that catches it.
+		twoPathQuery{name: "DerivedAliasJoinKeyBare", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT x.k FROM (SELECT s_suppkey AS k FROM supplier s1) x
+				JOIN nation ON k = n_nationkey`,
+			wantRows: 24, wantCols: []string{"k"},
+			assertA: assertDerivedAliasJoinKeys},
+		// The GROUP BY consumer with the DISTINCT stripped — the DISTINCT in
+		// GroupByQualifiedAliasOverDerivedDistinct above was always
+		// incidental, and this is the twin that proves it.
+		twoPathQuery{name: "DerivedAliasGroupKeyQualified", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT k, COUNT(*) AS c FROM (SELECT n_regionkey AS k, n_name FROM nation) u
+				GROUP BY u.k ORDER BY k`,
+			wantRows: 5, wantCols: []string{"k", "c"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				want := map[float64]float64{}
+				for _, r := range sf001Table(tb, "nation") {
+					want[toFloat(r["n_regionkey"])]++
+				}
+				if len(rows) != len(want) {
+					tb.Fatalf("got %d groups, want %d", len(rows), len(want))
+				}
+				for _, r := range rows {
+					k := cellNum(r, "k")
+					if got := cellNum(r, "c"); got != want[k] {
+						tb.Errorf("group k=%v: c = %v, want %v", k, got, want[k])
+					}
+				}
+			}},
+
 		// #468: the alias SHADOWS a base column of the same relation, so
 		// `ORDER BY s_suppkey` inside the derived table means the ALIAS
 		// (s_acctbal) — PostgreSQL's rule, verified live. The DAG bound it
@@ -3754,6 +3811,42 @@ func twoPathCorpus() []twoPathQuery {
 			assertA: func(tb testing.TB, rows []map[string]any) {
 				assertOrderedBy(tb, rows, true, "j",
 					func(r map[string]any) float64 { return cellNum(r, "j") })
+			}},
+		twoPathQuery{name: "DerivedAliasChainedJoinKey", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM (SELECT k AS j FROM (SELECT s_nationkey AS k FROM supplier) x) y
+				JOIN nation ON y.j = n_nationkey`,
+			wantRows: 1, wantCols: []string{"c"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				nations := distinctKeys(tb, "nation", "n_nationkey")
+				var want float64
+				for _, r := range sf001Table(tb, "supplier") {
+					if nations[toFloat(r["s_nationkey"])] {
+						want++
+					}
+				}
+				assertSingleCell(tb, rows, "c", want)
+			}},
+		twoPathQuery{name: "DerivedAliasChainedGroupKey", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT y.j, COUNT(*) AS c FROM
+				(SELECT k AS j FROM (SELECT s_nationkey AS k FROM supplier) x) y
+				GROUP BY y.j ORDER BY y.j`,
+			wantCols: []string{"j", "c"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				want := map[float64]float64{}
+				for _, r := range sf001Table(tb, "supplier") {
+					want[toFloat(r["s_nationkey"])]++
+				}
+				if len(rows) != len(want) {
+					tb.Fatalf("got %d groups, want %d", len(rows), len(want))
+				}
+				for _, r := range rows {
+					j := cellNum(r, "j")
+					if got := cellNum(r, "c"); got != want[j] {
+						tb.Errorf("group j=%v: c = %v, want %v", j, got, want[j])
+					}
+				}
 			}},
 	)
 
@@ -4282,6 +4375,35 @@ func supplierAcctbalByKey(tb testing.TB) map[float64]float64 {
 		out[toFloat(r["s_suppkey"])] = toFloat(r["s_acctbal"])
 	}
 	return out
+}
+
+// assertDerivedAliasJoinKeys is the absolute truth for #467's silent repro:
+// the derived table exposes every supplier key under the alias `k`, and the
+// join keeps exactly those that are also nation keys. Shared by the qualified
+// and bare spellings of the same join, which must answer identically.
+func assertDerivedAliasJoinKeys(tb testing.TB, rows []map[string]any) {
+	tb.Helper()
+	nations := distinctKeys(tb, "nation", "n_nationkey")
+	want := map[float64]bool{}
+	for _, r := range sf001Table(tb, "supplier") {
+		if k := toFloat(r["s_suppkey"]); nations[k] {
+			want[k] = true
+		}
+	}
+	if len(rows) != len(want) {
+		tb.Fatalf("got %d rows, want %d supplier keys that are also nation keys", len(rows), len(want))
+	}
+	for _, r := range rows {
+		k := cellNum(r, "k")
+		if !want[k] {
+			tb.Errorf("k=%v is not a supplier key matching a nation key", k)
+			continue
+		}
+		delete(want, k)
+	}
+	if len(want) != 0 {
+		tb.Errorf("%d matching keys missing from the result", len(want))
+	}
 }
 
 // distinctRowCount is the reference for `SELECT DISTINCT *`: how many

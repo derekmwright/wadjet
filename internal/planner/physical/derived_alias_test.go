@@ -163,6 +163,85 @@ func TestRootSelectAliasStillMaterializesOnTheProducer(t *testing.T) {
 	}
 }
 
+// TestDerivedTableAliasJoinAndGroupKeys covers #467's silent half and #480:
+// a join key, a shuffle partition key and a GROUP BY key that name a derived
+// table through its own alias all have to resolve to the source column the
+// streams carry.
+func TestDerivedTableAliasJoinAndGroupKeys(t *testing.T) {
+	t.Run("qualified join key", func(t *testing.T) {
+		// Pre-fix the key stayed `x.k`: a broadcast join's probe matched
+		// nothing and the query answered 0 rows with no error at all.
+		stages := planStagesForRenameTest(t,
+			`SELECT x.k FROM (SELECT s_suppkey AS k FROM supplier s1) x
+			 JOIN nation ON x.k = n_nationkey`)
+		assertJoinKeysResolved(t, stages, "s_suppkey", "n_nationkey")
+	})
+	t.Run("chained qualified join key", func(t *testing.T) {
+		stages := planStagesForRenameTest(t,
+			`SELECT COUNT(*) AS c FROM
+			 (SELECT k AS j FROM (SELECT s_nationkey AS k FROM supplier) x) y
+			 JOIN nation ON y.j = n_nationkey`)
+		assertJoinKeysResolved(t, stages, "s_nationkey", "n_nationkey")
+	})
+	t.Run("qualified group key", func(t *testing.T) {
+		stages := planStagesForRenameTest(t,
+			`SELECT k, COUNT(*) AS c FROM (SELECT n_regionkey AS k, n_name FROM nation) u
+			 GROUP BY u.k`)
+		assertGroupKeys(t, stages, "n_regionkey")
+	})
+	t.Run("chained qualified group key", func(t *testing.T) {
+		stages := planStagesForRenameTest(t,
+			`SELECT y.j, COUNT(*) AS c FROM
+			 (SELECT k AS j FROM (SELECT s_nationkey AS k FROM supplier) x) y
+			 GROUP BY y.j`)
+		assertGroupKeys(t, stages, "s_nationkey")
+	})
+}
+
+func assertJoinKeysResolved(t *testing.T, stages []Stage, wantLeft, wantRight string) {
+	t.Helper()
+	found := false
+	for i := range stages {
+		s := &stages[i]
+		if len(s.JoinLeftKeys) == 0 && len(s.JoinRightKeys) == 0 {
+			continue
+		}
+		found = true
+		keys := append(append([]string(nil), s.JoinLeftKeys...), s.JoinRightKeys...)
+		for _, k := range keys {
+			if strings.Contains(k, ".") {
+				t.Errorf("stage %s dispatches join key %q — the derived table's qualifier "+
+					"never reaches the streams, so the probe matches nothing", s.ID, k)
+			}
+		}
+		if !containsFold(keys, wantLeft) || !containsFold(keys, wantRight) {
+			t.Errorf("stage %s join keys %v, want both %q and %q", s.ID, keys, wantLeft, wantRight)
+		}
+	}
+	if !found {
+		t.Fatalf("no join stage in the plan")
+	}
+}
+
+func assertGroupKeys(t *testing.T, stages []Stage, want string) {
+	t.Helper()
+	found := false
+	for i := range stages {
+		s := &stages[i]
+		if len(s.GroupByCols) == 0 {
+			continue
+		}
+		found = true
+		if len(s.GroupByCols) != 1 || !strings.EqualFold(s.GroupByCols[0], want) {
+			t.Errorf("stage %s GROUP BY %v, want [%s] — an unresolved key fails the task with "+
+				"`GROUP BY key %q is not a column of its input`", s.ID, s.GroupByCols, want, s.GroupByCols[0])
+		}
+	}
+	if !found {
+		t.Fatalf("no aggregate stage in the plan")
+	}
+}
+
 // TestDerivedScopeBareNameOnlyStripsInsideItsOwnScope is the safety rule the
 // whole family rests on. Dropping a qualifier unconditionally would resolve
 // `SUM(t.c)` over `t JOIN (SELECT d AS c FROM u) v` to `d` — a silently
@@ -200,4 +279,23 @@ func TestDerivedScopeBareNameOnlyStripsInsideItsOwnScope(t *testing.T) {
 		})
 	}
 
+	// The whole point, end to end: the aggregate argument keeps naming t's
+	// own column even though the sibling arm of the join aliases the same
+	// bare name.
+	join := &logical.Node{Type: logical.NodeJoin, JoinType: "inner", Children: []*logical.Node{
+		{Type: logical.NodeScan, TableName: "t", TableAlias: "t"},
+		derived("v"),
+	}}
+	if got, _, _, renamed := resolveAggInputName("t.c", join); renamed || got != "t.c" {
+		t.Errorf("resolveAggInputName(%q) = %q (renamed=%v), want it left alone — "+
+			"the sibling arm's alias must not capture another relation's column", "t.c", got, renamed)
+	}
+	if got := resolveShuffleKey("t.c", join); got != "t.c" {
+		t.Errorf("resolveShuffleKey(%q) = %q, want it left alone", "t.c", got)
+	}
+	// And it does resolve when the reference really does name the derived
+	// table.
+	if got := resolveShuffleKey("v.c", join); got != "d" {
+		t.Errorf("resolveShuffleKey(%q) = %q, want %q", "v.c", got, "d")
+	}
 }

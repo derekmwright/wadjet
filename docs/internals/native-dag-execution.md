@@ -117,7 +117,7 @@ the embedded engine per policy shape.
 | `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. |
 | `NodeIntersect` / `NodeExcept` | `union` (with per-arm tag columns) + a grouped counting `final_aggregate` | `set_op_stages.go` (#346). The distribution pass inserts an `exchange-repartition` on the full result row between them — see §Set operations. |
 | **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. No USER DISTINCT reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns every `Distinct(Project)` in the tree, at any depth, into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages (#466 widened this from the root path only). What still passes through: planner-inserted `BuildSideDedup` Distincts (semi/anti build dedup, decorrelated semijoin key source), which carry no user-visible semantics, and root-path fallback shapes the coordinator dedups after the gather. A user Distinct anywhere else is REFUSED by `refuseUnstageableDistinct` (`physical/distinct_refusal.go`) rather than dropped, and the coordinator answers it on the local single-process pipeline. |
-| **`NodeProject`** | **nothing — passthrough** | same `default` case; aliases recovered at gather |
+| **`NodeProject`** | **nothing — passthrough** | same `default` case; aliases recovered at gather, and every other consumer resolves them back to source names — see §Derived-table aliases |
 
 ## Synthetic sort keys: the column a Project would have computed
 
@@ -158,6 +158,54 @@ onto a join or aggregate, `emitMergeSortTree`, the gather's
 This is the follow-on to #390: that guard keeps a sort with a dependent as its
 own stage rather than folding it into a predecessor dispatch may re-fan-out,
 and that stage is exactly the one whose input had no key to sort on.
+
+## Derived-table aliases: five resolvers, one convention
+
+Because a Project emits no stage, **a derived table's rename happens nowhere
+on the DAG**: every stream carries SOURCE column names, and each consumer
+resolves the alias back through the logical plan.
+
+| consumer | resolver | file |
+|---|---|---|
+| join key / shuffle partition key | `resolveShuffleKey` | `plan.go` |
+| aggregate argument, GROUP BY key | `resolveAggInputName` / `aggStageGroupKey` | `plan.go` |
+| ORDER BY term over an AGGREGATE producer | `resolveSortKeyColumn` | `plan.go` |
+| ORDER BY term over a SCAN/JOIN producer | `annotateDerivedAliasSortKey` → `resolveDerivedAliasSortKeys` | `hidden_sort_key.go` |
+| the gather's result schema | `resolveOutputRenameSource` | `output_rename_resolve.go` |
+
+Two rules they all share (`planner/physical/derived_alias.go`, #467/#468/#480):
+
+- **Renames chain.** `SELECT k AS j FROM (SELECT s_nationkey AS k FROM
+  supplier) x` has to walk `j` → `k` → `s_nationkey`; stopping one level
+  short leaves a key that matches nothing.
+- **A qualified reference may drop its qualifier only inside the scope that
+  owns it.** `x.k`, `u.k`, `y.j` name the derived table's OUTPUT column, and
+  `derivedScopeBareName` drops the qualifier when the subtree being searched
+  actually contains the relation it names — `BuildFromTable`'s
+  `setSubtreeAlias` stamps the derived alias onto every Scan below it. The
+  guard is not decoration: `SUM(t.c)` over `t JOIN (SELECT d AS c FROM u) v`
+  must keep naming t's own column, and an unconditional strip resolves it to
+  `d`. Both join-recursing resolvers descend one arm at a time, so the
+  scoping is exact.
+
+One cause, four failure modes before the fix: the sort loud (`sort: key
+column "k" does not exist in the input schema`), the aggregate loud (`hash
+aggregate: GROUP BY key "u.k" is not a column of its input`), the shuffle
+loud (`partitioned shuffle: key "y.b" not in schema`), and a **broadcast join
+SILENT** — its probe matched nothing and the query returned 0 rows where
+PostgreSQL returns 24.
+
+The sort consumer is split across two passes rather than resolved in place
+because `attachScanSelectProjections` may still MATERIALIZE the alias on the
+producing fragment (the outermost SELECT list, #316). `SortKeySpec.AliasSource`
+records the source column at stage-emission time and
+`resolveDerivedAliasSortKeys` decides after that pass has run: where the
+fragment's `ProjectExprs` computes a column under the key's own name the key
+is already right, and otherwise it is pointed at the source. The test is
+whether the projection MATERIALIZES the name, not whether the name exists —
+with a SHADOWING alias (`SELECT s_acctbal AS s_suppkey … ORDER BY s_suppkey`,
+which PostgreSQL binds to the alias) the producer emits a column spelled like
+the key that is exactly the wrong one, and nothing errors.
 
 ## Stage → worker fragment conversion
 

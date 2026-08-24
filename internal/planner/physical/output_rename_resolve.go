@@ -48,10 +48,14 @@ func resolveOutputRenameSource(name string, child *logical.Node) string {
 	for n := child; n != nil; {
 		switch {
 		case n.Type == logical.NodeProject:
-			for _, proj := range n.Projections {
-				if proj.Alias == "" || !strings.EqualFold(proj.Alias, resolved) {
-					continue
-				}
+			// A source spelled through the derived table's own alias
+			// (`SELECT x.k FROM (SELECT s_suppkey AS k ...) x`) is looked up
+			// bare inside that table's scope — see derivedScopeBareName.
+			// Without it the gather could not resolve the source, degraded
+			// to its rename-only fallback, and the client saw the join's
+			// full upstream width under source names instead of `k` (#467).
+			bare := derivedScopeBareName(resolved, n)
+			if proj := projectionForName(n.Projections, resolved, bare); proj != nil {
 				if proj.IsAgg || proj.Column == "" {
 					// Aggregate output or computed alias — the stage that
 					// evaluates it emits it under this very name.
@@ -69,7 +73,6 @@ func resolveOutputRenameSource(name string, child *logical.Node) string {
 					return resolved // self-rename, nothing to chase
 				}
 				resolved = next
-				break
 			}
 		case n.Type == logical.NodeAggregate:
 			return resolved

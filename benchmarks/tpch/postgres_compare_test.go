@@ -1077,20 +1077,24 @@ func postgresSemanticsCases() []pgCase {
 				GROUP BY k ORDER BY k`},
 		// #467's shape: a QUALIFIED group key naming a derived table's
 		// alias. Correct on the engine this arm exercises; the stage DAG
-		// cannot resolve it, which is pinned in the two-path suite.
+		// could not resolve it, which the two-path suite gates.
 		pgCase{name: "GroupByQualifiedAliasOverDerivedDistinct",
 			sql: `SELECT k, COUNT(*) AS c FROM
 				(SELECT DISTINCT n_regionkey AS k, n_name FROM nation) u
 				GROUP BY u.k ORDER BY k`},
 	)
 
-	// --- #468: ORDER BY inside a derived table binds the SELECT alias --------
+	// --- #467 / #468: a derived table's SELECT-list alias ---------------------
 	//
-	// PostgreSQL resolves an ORDER BY output-column name to the SELECT-list
-	// alias, and that holds even when the alias SHADOWS a base column of the
-	// same relation: `SELECT s_acctbal AS s_suppkey ... ORDER BY s_suppkey
-	// DESC` orders by ACCTBAL. Verified live on postgres:17-alpine before the
-	// fix; these entries are what keeps it verified.
+	// PostgreSQL is the authority for two rules the DAG got wrong. First,
+	// a reference qualified by the derived table's own alias (`x.k`, `u.k`,
+	// `y.j`) names that table's OUTPUT column — the alias, not anything of
+	// the underlying relation. Second, an ORDER BY term inside the derived
+	// table binds to the SELECT-list alias even when the alias SHADOWS a
+	// base column of the same relation, so `SELECT s_acctbal AS s_suppkey
+	// ... ORDER BY s_suppkey DESC` orders by ACCTBAL. Both were verified
+	// live on postgres:17-alpine before the fix; these entries are what
+	// keeps them verified.
 	out = append(out,
 		pgCase{name: "DerivedAliasInDerivedSortKey",
 			sql: `SELECT k FROM (SELECT s1.s_suppkey AS k, s1.s_name FROM supplier s1
@@ -1101,6 +1105,18 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DerivedAliasSortKeyUnderLimit",
 			sql: `SELECT SUM(k) AS c FROM (SELECT s_suppkey AS k FROM supplier s1
 				ORDER BY k DESC LIMIT 7) t`},
+		pgCase{name: "DerivedAliasJoinKeyQualified",
+			sql: `SELECT x.k FROM (SELECT s_suppkey AS k FROM supplier s1
+				ORDER BY s1.s_suppkey DESC) x JOIN nation ON x.k = n_nationkey ORDER BY x.k`},
+		pgCase{name: "DerivedAliasJoinKeyBare",
+			sql: `SELECT x.k FROM (SELECT s_suppkey AS k FROM supplier s1) x
+				JOIN nation ON k = n_nationkey ORDER BY x.k`},
+		pgCase{name: "DerivedAliasGroupKeyQualified",
+			sql: `SELECT k, COUNT(*) AS c FROM (SELECT n_regionkey AS k, n_name FROM nation) u
+				GROUP BY u.k ORDER BY k`},
+		pgCase{name: "DerivedAliasShufflePartitionKey",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT s_nationkey AS a FROM supplier) x
+				JOIN (SELECT DISTINCT n_nationkey AS b FROM nation) y ON x.a = y.b`},
 		// #468. The outer SELECT deliberately omits the shadowing column:
 		// carrying it out is what made both engines agree, so the repro
 		// needs it gone and the control keeps it.
@@ -1126,6 +1142,14 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DerivedAliasChainedSortKey",
 			sql: `SELECT j FROM (SELECT k AS j FROM (SELECT s_suppkey AS k, s_name FROM supplier) x
 				ORDER BY k DESC) y`},
+		pgCase{name: "DerivedAliasChainedJoinKey",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT k AS j FROM (SELECT s_nationkey AS k FROM supplier) x) y
+				JOIN nation ON y.j = n_nationkey`},
+		pgCase{name: "DerivedAliasChainedGroupKey",
+			sql: `SELECT y.j, COUNT(*) AS c FROM
+				(SELECT k AS j FROM (SELECT s_nationkey AS k FROM supplier) x) y
+				GROUP BY y.j ORDER BY y.j`},
 	)
 
 	// --- MIN/MAX float NaN ordering (#457) -----------------------------------

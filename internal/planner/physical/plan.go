@@ -4206,27 +4206,42 @@ func sumFusedBytes(stages []Stage, specs []FusedJoinSpec) int64 {
 //
 // Join nodes recurse into their output-visible children: both sides for
 // inner/outer joins, probe side only for semi/anti. First resolution wins.
+//
+// A key qualified by the derived table's own alias (`ON x.k = n_nationkey`)
+// resolves through derivedScopeBareName, which drops the qualifier only
+// inside the scope that owns it — without that the key reached the worker as
+// `x.k`, a broadcast join's probe matched nothing and the query returned 0
+// rows where the single-process path returned 24, and a hash join's shuffle
+// failed loud with `partitioned shuffle: key "x.a" not in schema` (#467,
+// #480).
+//
+// Renames CHAIN: `SELECT k AS j FROM (SELECT s_nationkey AS k FROM supplier)`
+// has to walk j → k → s_nationkey, mirroring resolveAggInputName and
+// resolveOutputRenameSource. Each Project substitutes at most once (a
+// projection list is simultaneous, so `b AS a, a AS b` must not chase
+// itself) and the walk only ever descends, so it terminates.
 func resolveShuffleKey(key string, child *logical.Node) string {
 	if child == nil {
 		return key
 	}
+	resolved := key
 	for n := child; n != nil; {
 		if n.Type == logical.NodeProject {
-			for _, proj := range n.Projections {
-				if strings.EqualFold(proj.Alias, key) && proj.Column != "" {
-					return proj.Column
-				}
+			bare := derivedScopeBareName(resolved, n)
+			if proj := projectionForName(n.Projections, resolved, bare); proj != nil &&
+				proj.Column != "" && !strings.EqualFold(proj.Column, resolved) {
+				resolved = proj.Column
 			}
 		}
 		if n.Type == logical.NodeJoin && len(n.Children) == 2 {
-			if resolved := resolveShuffleKey(key, n.Children[0]); resolved != key {
-				return resolved
+			if r := resolveShuffleKey(resolved, n.Children[0]); r != resolved {
+				return r
 			}
 			jt := strings.ToLower(n.JoinType)
 			if jt != "semi" && jt != "anti" {
-				return resolveShuffleKey(key, n.Children[1])
+				return resolveShuffleKey(resolved, n.Children[1])
 			}
-			return key
+			return resolved
 		}
 		// Continue down to single-child nodes (Filter, Sort, Limit, Project, Aggregate)
 		if len(n.Children) == 1 {
@@ -4235,7 +4250,7 @@ func resolveShuffleKey(key string, child *logical.Node) string {
 			break
 		}
 	}
-	return key
+	return resolved
 }
 
 // resolveAggInputName maps a name an aggregate stage READS — an aggregate
@@ -4285,10 +4300,13 @@ func resolveAggInputName(name string, child *logical.Node) (resolved string, exp
 	for n := child; n != nil; {
 		switch {
 		case n.Type == logical.NodeProject:
-			for _, proj := range n.Projections {
-				if !strings.EqualFold(proj.Alias, resolved) || proj.Alias == "" {
-					continue
-				}
+			// A name qualified by the derived table's own alias (`GROUP BY
+			// u.k`) is looked up bare inside that table's scope — see
+			// derivedScopeBareName. Without it the key reached the worker
+			// as `u.k` and the task failed loud: `hash aggregate: GROUP BY
+			// key "u.k" is not a column of its input` (#467).
+			bare := derivedScopeBareName(resolved, n)
+			if proj := projectionForName(n.Projections, resolved, bare); proj != nil {
 				switch {
 				case proj.Column != "" && !strings.EqualFold(proj.Column, resolved):
 					resolved, alias = proj.Column, true
@@ -4299,7 +4317,6 @@ func resolveAggInputName(name string, child *logical.Node) (resolved string, exp
 					}
 					return resolved, proj.ASTExpr, below, true
 				}
-				break
 			}
 		case n.Type == logical.NodeAggregate:
 			return resolved, nil, nil, alias
@@ -4471,15 +4488,46 @@ func resolveSortKeyColumn(key string, child *logical.Node) string {
 // the source column, because the Project that would have created the alias
 // emits no stage (#355).
 func aggregateOutputName(n *logical.Node, col string) (string, bool) {
+	var child *logical.Node
+	if len(n.Children) == 1 {
+		child = n.Children[0]
+	}
+	emit := func(g string) (string, bool) {
+		if child != nil {
+			if resolved, renamed := aggStageGroupKey(g, child); renamed {
+				return resolved, true
+			}
+		}
+		return g, true
+	}
 	for _, g := range n.GroupBy {
 		if strings.EqualFold(g, col) {
-			if len(n.Children) == 1 {
-				if resolved, renamed := aggStageGroupKey(g, n.Children[0]); renamed {
-					return resolved, true
-				}
-			}
-			return g, true
+			return emit(g)
 		}
+	}
+	// The two spellings of one key: `GROUP BY u.k` names the same output as
+	// the `k` the SELECT list and the ORDER BY use, and either side may be
+	// the qualified one. Both are dropped to their bare form only inside the
+	// derived scope that owns the qualifier — see derivedScopeBareName
+	// (#467). A bare spelling that matches TWO group keys is a self-join's
+	// `n1.n_name`/`n2.n_name`: naming one of them would order by an
+	// arbitrary side, so the key is left for the caller to give up on, the
+	// same call lookupEmittedColumn makes on the same ambiguity.
+	bare := func(name string) string {
+		if b := derivedScopeBareName(name, child); b != "" {
+			return b
+		}
+		return name
+	}
+	cb := bare(col)
+	match, count := "", 0
+	for _, g := range n.GroupBy {
+		if strings.EqualFold(bare(g), cb) {
+			match, count = g, count+1
+		}
+	}
+	if count == 1 {
+		return emit(match)
 	}
 	for _, a := range n.AggExprs {
 		if strings.EqualFold(a.OutputCol, col) {
@@ -4703,6 +4751,16 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					p.aggStageRenames = make(map[string]string)
 				}
 				p.aggStageRenames[strings.ToLower(key)] = resolved
+				// The gather's rename reads this map by the name the outer
+				// SELECT list uses, which for a key written through the
+				// derived table's alias (`GROUP BY u.k`) is the BARE one
+				// (`SELECT k`). Record both spellings or the lookup misses
+				// and the result comes back at full upstream width (#467).
+				if bare := derivedScopeBareName(key, aggChild); bare != "" {
+					if _, taken := p.aggStageRenames[strings.ToLower(bare)]; !taken {
+						p.aggStageRenames[strings.ToLower(bare)] = resolved
+					}
+				}
 			}
 		}
 		// Plan-time types for the derived keys, computed here where the
