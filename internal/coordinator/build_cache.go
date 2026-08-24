@@ -192,6 +192,18 @@ func chunkFiles(files []string, size int) [][]string {
 // tasks for the same table when the file list is split into chunks.
 // If fileSubset is non-nil, a ScanFileFilter is set on the task so only those
 // files are read; a nil fileSubset means scan all files (full table).
+// ctx is derived from parentCtx (SubmitSQL's request context, see :2914 in
+// coordinator.go) and never carries withQueryDeleteMarkers — deliberately,
+// not by oversight (#491 discussion). The task this function dispatches is
+// itself a TaskTypePipeline task (SQLText "SELECT ... FROM <table>"), and
+// executePipeline always re-plans it on the worker with a live catalog
+// (planner.Plan, whose buildScan reads manifest.DeleteMarkers directly at
+// scan Init — engine/scan/scanner.go), so the pre-scan applies deletes on
+// its own the same way any other pipeline task does. What THIS function
+// returns is that task's OUTPUT (a query-scoped .wshf file under
+// resultPrefix below, or the inline-promoted equivalent), never the base
+// parquet it read — see the assertion at the resultPath return below,
+// which is what makes that guarantee load-bearing rather than incidental.
 func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID string, stage physical.Stage, groupIdx int, fileSubset []string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(parentCtx, buildCacheTimeout)
 	defer cancel()
@@ -308,6 +320,19 @@ func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID s
 		return nil, fmt.Errorf("build cache scan failed: %s", resultErr)
 	}
 	if resultPath != "" {
+		// PreScannedInputs (what the caller feeds this into) skips the
+		// catalog-reading scanner entirely (worker/executor.go), which is
+		// safe only because a pre-scan result is never base-table parquet —
+		// deletes are already applied, by this task's own live-catalog scan,
+		// by the time this path exists. Guard the invariant at the source
+		// instead of trusting every future producer of resultPath to
+		// preserve it: a path outside this query's own result prefix is
+		// exactly the shape a base-table key would take, and reading past
+		// it would silently resurrect deleted rows on the probe-split path.
+		if !strings.HasPrefix(resultPath, resultPrefix) {
+			return nil, fmt.Errorf("build cache scan for %s returned %q, outside its query-scoped result prefix %q: "+
+				"PreScannedInputs must never carry a base-table path (#491)", stage.ScanAlias, resultPath, resultPrefix)
+		}
 		return []string{resultPath}, nil
 	}
 	if resultRows == 0 {

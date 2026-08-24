@@ -1051,25 +1051,29 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	// yielding batches on demand. This avoids materializing the entire build
 	// side into memory — the hash join's grace spill handles memory pressure.
 	if len(task.PreScannedInputs) > 0 || len(precompAliasFiles) > 0 || len(task.Inputs) > 0 {
-		// Merge-on-read deletes, decoded once for every source this task
-		// builds. A pre-scanned input CAN be base-table parquet (the
-		// probe-split shape), and a source that bypasses the catalog-reading
-		// scanner has to be told which rows a DELETE removed (#491).
-		taskDeletes, err := taskDeleteSets(task)
-		if err != nil {
-			return err
-		}
+		// No taskDeleteSets/SetDeleteMarkers here for PreScannedInputs or
+		// precompAliasFiles (unlike task.Inputs below, handled inside
+		// sourceForAlias). Both file lists are query-scoped .wshf output
+		// (queries/<id>/build-cache/... and queries/<id>/aggregate-cache/...)
+		// from an earlier TaskTypePipeline sub-query — build_cache.go's
+		// preScanOneTable / aggregate_shuffle.go's preComputeDerivedAggregate
+		// — that already re-planned against a live catalog and applied
+		// manifest.DeleteMarkers itself when producing them (executePipeline
+		// always re-plans this way: see planner.Plan below). They can never
+		// be base-table parquet, so a marker keyed by base-table path could
+		// never match one of these keys even if this task carried one (#491
+		// discussion; build_cache.go asserts the invariant on the write
+		// side). A source built from either map is reading rows a DELETE
+		// has already removed, not rows it still needs to filter.
 		streamingSources := make(map[string]exec.Source, len(task.PreScannedInputs)+len(precompAliasFiles)+len(task.Inputs))
 		for tableName, files := range task.PreScannedInputs {
 			src := newCachedFileStreamSource(e, task.QueryID, bucket, files)
-			src.SetDeleteMarkers(taskDeletes)
 			streamingSources[tableName] = src
 			e.logger.Debug("streaming pre-scanned input",
 				"table", tableName, "files", len(files))
 		}
 		for alias, files := range precompAliasFiles {
 			src := newCachedFileStreamSource(e, task.QueryID, bucket, files)
-			src.SetDeleteMarkers(taskDeletes)
 			streamingSources[alias] = src
 			e.logger.Debug("streaming pre-computed aggregate",
 				"alias", alias, "files", len(files))
