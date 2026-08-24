@@ -418,10 +418,16 @@ func compileCmp(left, right Expr, op CmpOp) Expr {
 		if tl := tryTemporalLit(col, right, op, false); tl != nil {
 			return tl
 		}
+		if nl := tryNetworkLit(col, right, op, false); nl != nil {
+			return nl
+		}
 	}
 	if col, ok := right.(*ColRef); ok && col.structField == "" {
 		if tl := tryTemporalLit(col, left, op, true); tl != nil {
 			return tl
+		}
+		if nl := tryNetworkLit(col, left, op, true); nl != nil {
+			return nl
 		}
 	}
 	generic := NewCmp(left, right, op)
@@ -475,6 +481,28 @@ func tryTemporalLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpTemporalLi
 		return nil
 	}
 	return &CmpTemporalLit{Col: col, Lit: s, Op: op, Flip: flip, days: days, ms: ms}
+}
+
+// tryNetworkLit builds a CmpNetworkLit when other is a string literal that
+// parses as an IPv4 address or a MAC address; nil otherwise. Mirrors
+// tryTemporalLit for the network-typed pair (TypeIPv4, TypeMAC): see
+// CmpNetworkLit for why these two need it and TypeIPv6/TypeCIDR/TypeUUID
+// don't (ColRef.Eval already renders those as text).
+func tryNetworkLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpNetworkLit {
+	lit, ok := other.(*Lit)
+	if !ok {
+		return nil
+	}
+	s, ok := lit.Val.(string)
+	if !ok {
+		return nil
+	}
+	ipv4, ipv4ok := ipv4LitToInt64(s)
+	mac, macok := macLitToInt64(s)
+	if !ipv4ok && !macok {
+		return nil
+	}
+	return &CmpNetworkLit{Col: col, Lit: s, Op: op, Flip: flip, ipv4: ipv4, ipv4ok: ipv4ok, mac: mac, macok: macok}
 }
 
 // isProvablyInt64 returns true if the expression definitely produces int64 values.

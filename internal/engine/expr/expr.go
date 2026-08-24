@@ -1067,6 +1067,100 @@ func (e *CmpTemporalLit) genericFallback(b *batch.RecordBatch, row int) (bool, b
 	return compare(cv, e.Lit, e.Op), false
 }
 
+// CmpNetworkLit compares a bare column against a string literal that parses
+// as an IPv4 address or a MAC address, without per-row parsing or boxing —
+// CmpTemporalLit's counterpart for network types, and for the same reason:
+// ColRef.Eval boxes a TypeIPv4/TypeMAC column as its raw encoded int64 (the
+// representation arithmetic and column-to-column ordering comparisons
+// depend on — see networkTextFuncs), so `ip_col = '10.0.0.1'` boxed the
+// column as a decimal digit string and the literal as itself and the
+// generic path's mixed int64/string compare() falls through to lexical
+// string comparison of the two, which never match (issue found via README
+// verification). Column type is unknown at compile time, so the literal is
+// pre-parsed into BOTH encodings here and the right one picked per batch
+// from the column's resolved type; a non-network column (or a network
+// column whose type doesn't match the literal's parse) delegates to the
+// generic compare() with the original operand order, keeping semantics
+// bit-identical with Cmp in every sub-case — matching CmpTemporalLit's own
+// contract. Comparing the pre-parsed encodings numerically (not as
+// formatted strings) is also what keeps ordering (<, >) correct: IPv4's
+// big-endian uint32 and MAC's packed 48 bits both sort the same as the
+// address itself, where a dotted-quad or colon-hex STRING would sort
+// lexically and disagree with it (e.g. "9.0.0.1" > "10.0.0.1" as text).
+type CmpNetworkLit struct {
+	Col    *ColRef
+	Lit    string // original literal text (generic-fallback operand)
+	Op     CmpOp
+	Flip   bool // literal was the LEFT operand: evaluate as (lit OP col)
+	ipv4   int64
+	ipv4ok bool
+	mac    int64
+	macok  bool
+}
+
+func (e *CmpNetworkLit) Eval(b *batch.RecordBatch, row int) any {
+	return boolNullBox(e.EvalBoolNull(b, row))
+}
+
+func (e *CmpNetworkLit) EvalBool(b *batch.RecordBatch, row int) bool {
+	v, null := e.EvalBoolNull(b, row)
+	return v && !null
+}
+
+func (e *CmpNetworkLit) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
+	e.Col.resolve(b)
+	var lit int64
+	switch e.Col.typ {
+	case batch.TypeIPv4:
+		if !e.ipv4ok {
+			return e.genericFallback(b, row)
+		}
+		lit = e.ipv4
+	case batch.TypeMAC:
+		if !e.macok {
+			return e.genericFallback(b, row)
+		}
+		lit = e.mac
+	default:
+		// Non-network column: exact generic semantics.
+		return e.genericFallback(b, row)
+	}
+	v, ok := e.Col.EvalInt64(b, row)
+	if !ok {
+		return false, true // NULL / unresolved — a comparison against NULL is UNKNOWN
+	}
+	a, bv := v, lit
+	if e.Flip {
+		a, bv = lit, v
+	}
+	switch e.Op {
+	case CmpEq:
+		return a == bv, false
+	case CmpNe:
+		return a != bv, false
+	case CmpLt:
+		return a < bv, false
+	case CmpLe:
+		return a <= bv, false
+	case CmpGt:
+		return a > bv, false
+	case CmpGe:
+		return a >= bv, false
+	}
+	return false, false
+}
+
+func (e *CmpNetworkLit) genericFallback(b *batch.RecordBatch, row int) (bool, bool) {
+	cv := e.Col.Eval(b, row)
+	if cv == nil {
+		return false, true
+	}
+	if e.Flip {
+		return compare(e.Lit, cv, e.Op), false
+	}
+	return compare(cv, e.Lit, e.Op), false
+}
+
 // CmpInt64 is a typed comparison that operates on int64 without boxing.
 type CmpInt64 struct {
 	Left, Right Int64Expr
@@ -1621,13 +1715,15 @@ type FuncCall struct {
 	fnMu    sync.Mutex
 	fn      ScalarFunc
 	// Argument-family flags, resolved with fn under fnReady: this function
-	// reads its arguments as text (stringInputFuncs) / as instants
-	// (temporalInputFuncs) / as instants that must remember whether they
-	// came from a DATE or a TIMESTAMP column (dateArithFuncs, which render
-	// their result). Resolved once rather than re-looked-up per row.
-	wantsText     bool
-	wantsInstant  bool
-	wantsDateKind bool
+	// reads its arguments as text (stringInputFuncs) / as network addresses
+	// (networkTextFuncs) / as instants (temporalInputFuncs) / as instants
+	// that must remember whether they came from a DATE or a TIMESTAMP
+	// column (dateArithFuncs, which render their result). Resolved once
+	// rather than re-looked-up per row.
+	wantsText        bool
+	wantsNetworkText bool
+	wantsInstant     bool
+	wantsDateKind    bool
 
 	vecOnce sync.Once
 	vecFn   VecScalarFunc
@@ -1698,6 +1794,66 @@ func (e *FuncCall) formatTemporalArgs(args []any) {
 		if v, ok := args[i].(int64); ok {
 			args[i] = batch.FormatDate(int32(v))
 		}
+	}
+}
+
+// networkTextFuncs are the scalar functions whose bodies parse an argument
+// as network-address TEXT — every function that reaches net.ParseIP,
+// net.ParseMAC, net.ParseCIDR, or (mac_format) hand-rolled hex-with-
+// separators parsing on a stringified argument. ColRef.Eval boxes a
+// TypeIPv4/TypeMAC column as its raw encoded int64 — the representation
+// arithmetic, GROUP BY keys and column-to-column ordering comparisons all
+// depend on, exactly as TypeDate's epoch-day int64 does for
+// stringInputFuncs above — so a function in this set that reads a typed
+// network column argument saw a decimal digit string instead of a
+// dotted-quad or colon-hex address and silently answered NULL (cidr_contains,
+// ip_to_string, mac_vendor_oui, ...). Keyed lowercase, the registry's
+// convention. TypeIPv6/TypeCIDR/TypeUUID columns are not affected: ColRef.Eval
+// already renders those through Vector.GetValue's default case.
+var networkTextFuncs = map[string]bool{
+	"broadcast_address": true, "cidr_contains": true, "cidr_overlap": true,
+	"cidr_to_range": true, "flow_direction": true,
+	"geoip_asn": true, "geoip_city": true, "geoip_continent": true,
+	"geoip_country": true, "geoip_country_name": true, "geoip_latitude": true,
+	"geoip_longitude": true, "geoip_org": true, "geoip_postal_code": true,
+	"geoip_subdivision": true, "geoip_timezone": true,
+	"hosts_in_cidr": true, "ip_add": true, "ip_between": true, "ip_diff": true,
+	"ip_in_range": true, "ip_netmask": true, "ip_subnet": true,
+	"ip_subtract": true, "ip_to_hex": true, "ip_to_int": true,
+	"ip_to_string": true, "ip_version": true,
+	"ipv6_compress": true, "ipv6_expand": true, "ipv6_scope": true,
+	"ipv6_to_eui64": true, "is_6to4": true, "is_ipv4": true, "is_ipv6": true,
+	"is_link_local_ip": true, "is_loopback_ip": true, "is_multicast_ip": true,
+	"is_private_ip": true, "is_reserved_ip": true, "is_teredo": true,
+	"mac_is_local": true, "mac_is_unicast": true, "mac_to_string": true,
+	"mac_vendor_oui": true, "mac_format": true, "mask_ip": true,
+	"network_address": true, "prefix_length": true, "reverse_dns": true,
+	"same_subnet": true, "sixto4_gateway": true, "teredo_client": true,
+	"teredo_server": true,
+}
+
+// formatNetworkArgs rewrites boxed TypeIPv4/TypeMAC ColRef argument values
+// to their canonical text form (dotted-quad / colon-hex) for
+// networkTextFuncs. Reads through the column directly — like
+// resolveTemporalArgs's columnInstant, and unlike formatTemporalArgs above —
+// because formatIPv4/formatMAC are batch-package-internal; Vector.GetValue
+// is the exported boundary that already renders them correctly (it is what
+// a bare `SELECT ip_col` reads through, via exec.ColumnRef). Only direct
+// column references are covered, matching formatTemporalArgs: a nested
+// expression's output type isn't known here.
+func (e *FuncCall) formatNetworkArgs(b *batch.RecordBatch, row int, args []any) {
+	for i, a := range e.Args {
+		cr, ok := a.(*ColRef)
+		if !ok || cr.structField != "" {
+			continue
+		}
+		if cr.typ != batch.TypeIPv4 && cr.typ != batch.TypeMAC {
+			continue
+		}
+		if cr.idx < 0 || cr.idx >= len(b.Columns) {
+			continue
+		}
+		args[i] = b.Columns[cr.idx].GetValue(row)
 	}
 }
 
@@ -1897,6 +2053,7 @@ func (e *FuncCall) resolveFnSlow() {
 	lower := strings.ToLower(e.Name)
 	e.fn = DefaultRegistry.Lookup(e.Name)
 	e.wantsText = stringInputFuncs[lower]
+	e.wantsNetworkText = networkTextFuncs[lower]
 	e.wantsInstant = temporalInputFuncs[lower]
 	e.wantsDateKind = dateArithFuncs[lower]
 	e.fnReady.Store(true)
@@ -1917,6 +2074,9 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	}
 	if e.wantsText {
 		e.formatTemporalArgs(args)
+	}
+	if e.wantsNetworkText {
+		e.formatNetworkArgs(b, row, args)
 	}
 	if e.wantsInstant {
 		e.resolveTemporalArgs(b, row, args)
@@ -3774,6 +3934,38 @@ func parseUUIDHex(s string) []byte {
 	return raw
 }
 
+// ipv4LitToInt64 parses a dotted-quad IPv4 literal into the int64 encoding
+// TypeIPv4 columns use — batch.Vector.SetValue's TypeIPv4 case and
+// writer.go's prepareRows agree on this: the address's big-endian uint32
+// widened to int64. ok is false for anything that isn't a valid IPv4 text
+// form (including an IPv6 literal — To4 refuses it).
+func ipv4LitToInt64(s string) (int64, bool) {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return 0, false
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return 0, false
+	}
+	return int64(binary.BigEndian.Uint32(ip4)), true
+}
+
+// macLitToInt64 parses a MAC literal into the int64 encoding TypeMAC columns
+// use — batch.Vector.SetValue's TypeMAC case: the six bytes packed
+// big-endian into the low 48 bits.
+func macLitToInt64(s string) (int64, bool) {
+	hw, err := net.ParseMAC(s)
+	if err != nil || len(hw) != 6 {
+		return 0, false
+	}
+	var n uint64
+	for _, b := range hw {
+		n = (n << 8) | uint64(b)
+	}
+	return int64(n), true
+}
+
 // --- Network function implementations ---
 
 func fnIPToString(args []any) any {
@@ -4603,10 +4795,32 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	case "decimal", "numeric":
 		return ToFloat64(v)
 	case "char", "varchar", "text", "string":
-		return fmt.Sprint(v)
+		return fmt.Sprint(networkOperand(b, row, e.Operand, v))
 	default:
 		return v
 	}
+}
+
+// networkOperand resolves a TypeIPv4/TypeMAC ColRef operand to its canonical
+// text form before a string-family CAST renders it. Cast.Eval reads the
+// operand through the same Eval() that boxes those two types as their raw
+// encoded int64 (see formatNetworkArgs / networkTextFuncs), so
+// `CAST(ipv4_col AS STRING)` would otherwise stringify the number instead of
+// the address. Mirrors temporalOperand's contract: only a bare column
+// reference is resolved, and every other operand shape (an already-string
+// value, a nested expression, a literal) passes v through unchanged.
+func networkOperand(b *batch.RecordBatch, row int, operand Expr, v any) any {
+	cr, ok := operand.(*ColRef)
+	if !ok || cr.structField != "" {
+		return v
+	}
+	if cr.typ != batch.TypeIPv4 && cr.typ != batch.TypeMAC {
+		return v
+	}
+	if cr.idx < 0 || cr.idx >= len(b.Columns) {
+		return v
+	}
+	return b.Columns[cr.idx].GetValue(row)
 }
 
 // stringOperand reports v's text when it is a string or byte slice — the two
