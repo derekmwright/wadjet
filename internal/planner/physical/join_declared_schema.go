@@ -64,6 +64,8 @@ func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
 			// through to the scans below, source-named as the DAG spells
 			// them.
 			var colTypes map[string]parquet.TypeID
+			var strictInt map[string]bool
+			haveTypes := false
 			for _, pr := range cur.Projections {
 				if pr.IsAgg || pr.Column != "" || pr.Alias == "" ||
 					pr.ASTExpr == nil || isSimpleColRefForRename(pr.ASTExpr) {
@@ -73,13 +75,22 @@ func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
 				if seen[lc] || (len(wantSet) > 0 && !wantSet[lc]) {
 					continue
 				}
-				if colTypes == nil && len(cur.Children) == 1 {
+				if !haveTypes && len(cur.Children) == 1 {
 					colTypes = inputColTypes(cur.Children[0])
+					// Same integer-preserving-arithmetic hint
+					// absorbComputedSubqueryProjection passes when it
+					// materializes this same computed column into the scan
+					// fragment (#297, #445): without it, `id + 1` declares
+					// FLOAT64 here but INT64 there, and a join over an empty
+					// side disagrees with a join over a full one about the
+					// type of its own column (#473).
+					strictInt = strictIntArithCols(cur.Children[0])
+					haveTypes = true
 				}
 				seen[lc] = true
 				out = append(out, parquet.Column{
 					Name:     pr.Alias,
-					Type:     inferProjectionTypeCols(pr.ASTExpr, parquet.TypeString, nil, colTypes),
+					Type:     inferProjectionTypeCols(pr.ASTExpr, parquet.TypeString, strictInt, colTypes),
 					Nullable: true,
 				})
 			}

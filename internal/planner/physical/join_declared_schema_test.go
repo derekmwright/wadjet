@@ -109,6 +109,80 @@ func TestDeclaredJoinSchemaTypes(t *testing.T) {
 	}
 }
 
+// Regression for #473: absorbComputedSubqueryProjection (join_input_projection.go)
+// materializes a join input's computed column into its producing scan
+// fragment with the integer-preserving-arithmetic hint (#297, #445),
+// declaring `r_regionkey + 1` INT64 — the type the worker actually builds
+// the vector as (#333). declaredJoinSchema passed strictInt=nil when
+// declaring the SAME column for the join's empty-side hint, so it disagreed
+// and declared FLOAT64 instead: a join whose build side turns out empty
+// would hand exec.HashJoin a schema at odds with what a full build side
+// really produces for that column. This asserts the two declarations agree.
+func TestDeclaredJoinSchemaAgreesWithComputedInputProjection(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	const sql = `SELECT n.n_name, r.rk2 FROM nation n
+		LEFT JOIN (SELECT r_regionkey, r_regionkey + 1 AS rk2 FROM region) r
+		ON n.n_regionkey = r.r_regionkey`
+
+	stages := sqlToStages(t, cat, ctx, sql, 3)
+
+	// The PROJ spec: the materializing projection absorbComputedSubqueryProjection
+	// appends to the region scan fragment.
+	var scanProjType parquet.TypeID
+	var foundScan bool
+	for _, s := range stages {
+		if s.Type != StageScan || s.TableName != "region" {
+			continue
+		}
+		for _, spec := range s.ProjectExprs {
+			if strings.EqualFold(spec.Name, "rk2") {
+				foundScan = true
+				scanProjType = spec.Type
+				if !spec.TypeKnown {
+					t.Errorf("scan's materializing projection for rk2 does not set TypeKnown")
+				}
+			}
+		}
+	}
+	if !foundScan {
+		t.Fatal("region scan carries no materialized projection for rk2")
+	}
+	if scanProjType != parquet.TypeInt64 {
+		t.Errorf("materializing projection declares rk2 as %v, want INT64 "+
+			"(r_regionkey + 1 over a strict-int column)", scanProjType)
+	}
+
+	// The PROBESC spec: the join stage's declared build-side schema
+	// (declaredJoinSchema via joinSideSchemas), consulted only when the build
+	// side turns out empty.
+	var join *Stage
+	for i := range stages {
+		if stages[i].Type == StageHashJoin || stages[i].Type == StageBroadcastJoin {
+			join = &stages[i]
+		}
+	}
+	if join == nil {
+		t.Fatal("no join stage planned")
+	}
+	var buildType parquet.TypeID
+	var foundBuild bool
+	for _, c := range join.JoinBuildSchema {
+		if strings.EqualFold(c.Name, "rk2") {
+			foundBuild = true
+			buildType = c.Type
+		}
+	}
+	if !foundBuild {
+		t.Fatalf("JoinBuildSchema does not declare rk2: %+v", join.JoinBuildSchema)
+	}
+	if buildType != scanProjType {
+		t.Errorf("declaredJoinSchema declares rk2 as %v, but the materializing projection that "+
+			"actually produces it (absorbComputedSubqueryProjection) declares %v — an empty build "+
+			"side would disagree with a full one about the type of its own column (#473)",
+			buildType, scanProjType)
+	}
+}
+
 func hasDeclaredColumn(cols []parquet.Column, name string) bool {
 	for _, c := range cols {
 		if strings.EqualFold(c.Name, name) {

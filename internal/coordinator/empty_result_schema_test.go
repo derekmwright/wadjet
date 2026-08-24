@@ -178,6 +178,60 @@ func TestEmptyResultDeclaresPlanSchema(t *testing.T) {
 	}
 }
 
+// TestJoinDeclaredSchemaAgreesWhenBuildSideEmpty is the join-shaped sibling
+// of TestEmptyResultDeclaresPlanSchema: #348/#352's class, where it is a
+// SIDE of a join that turns out empty rather than the whole query.
+//
+// The build side here (typemx_dim LEFT JOINs a computed subquery over
+// typemx, so the subquery is the join's RIGHT/build operand) carries a
+// COMPUTED column, `g + 1 AS g2`. absorbComputedSubqueryProjection
+// materializes it into the producing scan fragment with the
+// integer-preserving-arithmetic hint and declares it INT64 (#297, #445) —
+// the type the worker actually builds the vector as. declaredJoinSchema
+// used to pass strictInt=nil when declaring the SAME column for the join's
+// empty-build hint (consulted only when the build side delivers no batch at
+// all), declaring FLOAT64 instead: an empty build disagreed with a full one
+// about the type of its own column (#473). Row counts differ between the
+// arms (the build side fans out one dimension row per match, none when it is
+// empty) — it is g2's declared TYPE that must not move.
+func TestJoinDeclaredSchemaAgreesWhenBuildSideEmpty(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+	coord := tmdCluster(t, ctx)
+
+	const tmpl = `SELECT d.k AS k, t.g2 AS g2 FROM ` + typematrix.Dim + ` d ` +
+		`LEFT JOIN (SELECT g, g + 1 AS g2 FROM ` + typematrix.Table + ` WHERE %s) t ` +
+		`ON d.k = t.g`
+
+	full, err := coord.ExecuteSQL(ctx, fmt.Sprintf(tmpl, "id < 200"))
+	if err != nil {
+		t.Fatalf("full-build arm: %v", err)
+	}
+	if full.TotalRows == 0 {
+		t.Fatalf("the full-build arm returned no rows; the reference is meaningless")
+	}
+	empty, err := coord.ExecuteSQL(ctx, fmt.Sprintf(tmpl, "id < 0"))
+	if err != nil {
+		t.Fatalf("empty-build arm: %v", err)
+	}
+	if empty.TotalRows == 0 {
+		t.Fatalf("the empty-build arm returned no rows: a LEFT JOIN still owes every dimension " +
+			"row even when its build side matches nothing (#348)")
+	}
+
+	gotSchema, wantSchema := empty.OutputSchema(), full.OutputSchema()
+	if got, want := describeSchema(gotSchema), describeSchema(wantSchema); got != want {
+		t.Errorf("column TYPES differ between the empty-build and full-build arms:\n"+
+			" empty-build %s\n full-build  %s", got, want)
+	}
+	for _, c := range gotSchema {
+		if strings.EqualFold(c.Name, "g2") && c.Type != parquet.TypeInt64 {
+			t.Errorf("g2 declared %v with an empty build side, want INT64 (g + 1 over a strict-int column)",
+				c.Type)
+		}
+	}
+}
+
 func describeSchema(cols []parquet.Column) string {
 	parts := make([]string, len(cols))
 	for i, c := range cols {
