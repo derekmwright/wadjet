@@ -225,7 +225,28 @@ func findParquetColumnByPath(pqCols [][]string, parentName, childName string) in
 
 // ReadFileColumnar reads all row groups from a Parquet reader into a single RecordBatch.
 // Used by the DML executor to read entire files for DELETE/UPDATE operations.
+//
+// A schema with an Array/Map column, or a ROW whose field is itself a
+// container, is refused by ReadRowGroupNative (HasUnsupportedColumnarTypes,
+// #448/#449) — routing here instead of erroring would either fail every
+// DELETE/UPDATE against such a table or, before that guard existed, silently
+// null out the nested column on readback. The row reader has no such
+// restriction, and readFileBatchesViaRows(reader, schema, nil) reads the
+// whole file into exactly one batch in file order, so the row indices the
+// DML callers compute against it (delete markers, scalar UPDATE rewrites)
+// line up the same way ReadRowGroupNative's batches would have.
 func ReadFileColumnar(reader *pqt.Reader, schema []pqt.Column) (*batch.RecordBatch, error) {
+	if HasUnsupportedColumnarTypes(schema) {
+		batches, err := readFileBatchesViaRows(reader, schema, nil)
+		if err != nil {
+			return nil, err
+		}
+		if len(batches) == 0 {
+			return nil, nil
+		}
+		return batches[0], nil
+	}
+
 	fr := reader.FileReader()
 
 	var batches []*batch.RecordBatch
