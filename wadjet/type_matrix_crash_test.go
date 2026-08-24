@@ -128,6 +128,7 @@ func TestTypeMatrixNoProcessKillers(t *testing.T) {
 	corpus := typematrix.Corpus()
 
 	found := map[string]bool{}
+	hung := map[string]bool{}
 	panicked := map[string]int{}
 	start := 0
 	// One child per killer, plus one that reaches the end. Every round
@@ -136,7 +137,7 @@ func TestTypeMatrixNoProcessKillers(t *testing.T) {
 	// instead would cap discovery at the killers already known, which is
 	// exactly the set a discovery pass must not assume.
 	for round := 0; round <= len(corpus) && start < len(corpus); round++ {
-		last, died, panics, detail := tmRunCrashChild(t, self, start)
+		last, died, timedOut, panics, detail := tmRunCrashChild(t, self, start)
 		for idx, n := range panics {
 			if idx >= 0 && idx < len(corpus) {
 				panicked[corpus[idx].Name] += n
@@ -153,7 +154,18 @@ func TestTypeMatrixNoProcessKillers(t *testing.T) {
 			break // child finished; `last` is just the final entry it ran
 		}
 		found[corpus[last].Name] = true
-		t.Logf("entry %q (index %d) killed the process:\n%s", corpus[last].Name, last, detail)
+		if timedOut {
+			// ctx.Err() fired: WE killed the child after its 10m deadline
+			// because it never exited on its own. That is a HANG, not a
+			// crash — a crash at least ends, a hang holds a slot forever —
+			// and reporting it as a generic kill would send the wrong
+			// investigation down the wrong path.
+			hung[corpus[last].Name] = true
+			t.Logf("entry %q (index %d) HUNG — the harness's 10m per-child deadline killed it; "+
+				"the process never exited on its own:\n%s", corpus[last].Name, last, detail)
+		} else {
+			t.Logf("entry %q (index %d) killed the process:\n%s", corpus[last].Name, last, detail)
+		}
 		start = last + 1
 	}
 	tmGatePanics(t, corpus, panicked)
@@ -166,6 +178,13 @@ func TestTypeMatrixNoProcessKillers(t *testing.T) {
 	for _, n := range names {
 		if p, ok := tmCrashPins[n]; ok {
 			t.Logf("known process killer %q, tracked in %s — NOT gated:\n  %s", n, p.Issue, p.Reason)
+			continue
+		}
+		if hung[n] {
+			t.Errorf("NEW HANG: corpus entry %q never exits — the harness's 10m per-child deadline "+
+				"is what ended it, not the process itself. A query that hangs holds its slot forever, "+
+				"which no timeout in the engine ends — file it, then pin it in tmCrashPins with the "+
+				"issue number.", n)
 			continue
 		}
 		t.Errorf("NEW PROCESS KILLER: corpus entry %q takes the process down. A query that kills "+
@@ -244,7 +263,11 @@ func tmGatePanics(t *testing.T, corpus []typematrix.Query, panicked map[string]i
 // tmRunCrashChild runs one child from index start. It returns the index of the
 // last entry the child announced (-1 if it announced none), whether the child
 // died, the recovered-panic count per entry index, and the tail of its output.
-func tmRunCrashChild(t *testing.T, self string, start int) (last int, died bool, panics map[int]int, detail string) {
+// timedOut reports whether ctx's own 10m deadline is what ended the child —
+// that is a HANG (the harness killed it because it never exited on its own),
+// a different defect than a process that crashed or panicked unrecoverably
+// well inside the deadline, and the caller reports it distinctly.
+func tmRunCrashChild(t *testing.T, self string, start int) (last int, died, timedOut bool, panics map[int]int, detail string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -287,7 +310,7 @@ func tmRunCrashChild(t *testing.T, self string, start int) (last int, died bool,
 		}
 	}
 	if err == nil {
-		return last, false, panics, ""
+		return last, false, false, panics, ""
 	}
 	// Attribute to the entry that STARTED and never finished. If every
 	// announced entry reported DONE, the fatal escaped from an already-
@@ -296,7 +319,12 @@ func tmRunCrashChild(t *testing.T, self string, start int) (last int, died bool,
 	if lastDone >= last {
 		last = lastDone
 	}
-	return last, true, panics, tmTail(string(out), 24)
+	// ctx.Err() is non-nil only when OUR deadline elapsed and
+	// exec.CommandContext killed the child for us — the child never chose to
+	// exit. Any other death (a panic escaping past recover, a Go runtime
+	// fatal like a concurrent map write, an OS-level crash) leaves ctx.Err()
+	// nil because the process ended well within the 10m window.
+	return last, true, ctx.Err() == context.DeadlineExceeded, panics, tmTail(string(out), 24)
 }
 
 // tmCrashChild is the child half: run corpus entries from start, naming each

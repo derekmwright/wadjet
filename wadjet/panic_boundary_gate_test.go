@@ -204,10 +204,11 @@ func TestQueryPanicBoundaryHoldsForEveryShape(t *testing.T) {
 	corpus := pbCorpus()
 
 	killers := map[string]bool{}
+	hung := map[string]bool{}
 	panicked := map[string]int{}
 	start := 0
 	for round := 0; round <= len(corpus) && start < len(corpus); round++ {
-		last, died, panics, detail := pbRunChild(t, self, start)
+		last, died, timedOut, panics, detail := pbRunChild(t, self, start)
 		for idx, n := range panics {
 			if idx >= 0 && idx < len(corpus) {
 				panicked[corpus[idx].name] += n
@@ -223,14 +224,29 @@ func TestQueryPanicBoundaryHoldsForEveryShape(t *testing.T) {
 			break
 		}
 		killers[corpus[last].name] = true
-		t.Logf("shape %q (index %d) killed the process:\n%s", corpus[last].name, last, detail)
+		if timedOut {
+			// ctx.Err() fired: WE killed the child after its 10m deadline
+			// because it never exited on its own. That is a HANG, not a
+			// crash — a crash at least ends, a hang holds a slot forever —
+			// and reporting it as a generic kill would send the wrong
+			// investigation down the wrong path.
+			hung[corpus[last].name] = true
+			t.Logf("shape %q (index %d) HUNG — the harness's 10m per-child deadline killed it; "+
+				"the process never exited on its own:\n%s", corpus[last].name, last, detail)
+		} else {
+			t.Logf("shape %q (index %d) killed the process:\n%s", corpus[last].name, last, detail)
+		}
 		start = last + 1
 	}
 
 	bad := make([]string, 0, len(killers)+len(panicked))
 	for n := range killers {
 		if _, ok := pbPins[n]; !ok {
-			bad = append(bad, fmt.Sprintf("%s: KILLED THE PROCESS", n))
+			if hung[n] {
+				bad = append(bad, fmt.Sprintf("%s: HUNG (harness deadline killed it, not a crash)", n))
+			} else {
+				bad = append(bad, fmt.Sprintf("%s: KILLED THE PROCESS", n))
+			}
 		}
 	}
 	for n, c := range panicked {
@@ -255,7 +271,11 @@ func TestQueryPanicBoundaryHoldsForEveryShape(t *testing.T) {
 }
 
 // pbRunChild runs one child from index start, mirroring tmRunCrashChild.
-func pbRunChild(t *testing.T, self string, start int) (last int, died bool, panics map[int]int, detail string) {
+// timedOut reports whether ctx's own 10m deadline is what ended the child —
+// that is a HANG (the harness killed it because it never exited on its own),
+// a different defect than a process that crashed or panicked unrecoverably
+// well inside the deadline, and the caller reports it distinctly.
+func pbRunChild(t *testing.T, self string, start int) (last int, died, timedOut bool, panics map[int]int, detail string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -298,16 +318,21 @@ func pbRunChild(t *testing.T, self string, start int) (last int, died bool, pani
 		// The child ran to the end AND its own assertions passed. A failing
 		// child that did not die is a value assertion, not a crash — surface
 		// it rather than reporting a clean gate.
-		return last, false, panics, ""
+		return last, false, false, panics, ""
 	}
 	if strings.Contains(string(out), "--- FAIL") {
 		t.Errorf("the panic-shape child reported failures (start=%d):\n%s", start, pbTail(string(out), 40))
-		return last, false, panics, ""
+		return last, false, false, panics, ""
 	}
 	if lastDone >= last {
 		last = lastDone
 	}
-	return last, true, panics, pbTail(string(out), 30)
+	// ctx.Err() is non-nil only when OUR deadline elapsed and
+	// exec.CommandContext killed the child for us — the child never chose to
+	// exit. Any other death (a panic escaping past recover, a Go runtime
+	// fatal like a concurrent map write, an OS-level crash) leaves ctx.Err()
+	// nil because the process ended well within the 10m window.
+	return last, true, ctx.Err() == context.DeadlineExceeded, panics, pbTail(string(out), 30)
 }
 
 // pbChild is the child half: run shapes from start, naming each on stderr
