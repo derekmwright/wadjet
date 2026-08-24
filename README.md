@@ -50,7 +50,20 @@ Wadjet's SQL surface leans hard into functions purpose-built for network
 and security analytics — a dedicated IPv4/IPv6/CIDR/MAC/Port/Protocol type
 system backed by a library of functions that collapse what's usually
 string-parsing or a UDF elsewhere into one call. A few representative
-examples, each run against a live server as part of writing this section.
+examples, each run against a live server as part of writing this section,
+against a table declared with the native types end to end:
+
+```sql
+CREATE TABLE flow_logs (
+    src_ip    IPv4,
+    dst_ip    IPv4,
+    src_mac   MAC,
+    dst_port  Port,
+    protocol  Protocol,
+    bytes_in  Int64,
+    bytes_out Int64
+)
+```
 
 **Is this flow internal-to-external?**
 
@@ -79,12 +92,12 @@ ORDER BY egress DESC
 ```
 
 ```
-  subnet_24  |  egress  | flows
--------------+----------+-------
- 10.0.1.0    |  1393540 |     4
- 10.0.2.0    |  1200300 |     2
- 203.0.113.0 |     1800 |     1
- 192.168.1.0 |      500 |     1
+  subnet_24  | egress  | flows
+-------------+---------+-------
+ 10.0.1.0    | 1393540 |     4
+ 10.0.2.0    | 1200300 |     2
+ 203.0.113.0 |    1800 |     1
+ 192.168.1.0 |     500 |     1
 ```
 
 Elsewhere: `split_part(ip,'.',1) || '.' || split_part(ip,'.',2) || '.' ||
