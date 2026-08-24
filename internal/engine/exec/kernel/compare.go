@@ -145,6 +145,20 @@ func toBool(v any) bool {
 // given type against a constant value. The type dispatch happens once here;
 // the returned function has no type switches in its inner loop.
 func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel {
+	if value == nil {
+		// A nil constant is NOT the type's zero. Every coercion below reads
+		// it as one — toInt64(nil) is 0, toString(nil) is "", toBool(nil) is
+		// false — so `WHERE c_i64 = NULL` answered the rows holding 0 and
+		// `WHERE c_str = NULL` the rows holding "" (#450). A comparison
+		// against NULL is UNKNOWN for every row and a WHERE admits only
+		// TRUE, so the kernel selects nothing.
+		//
+		// The planner does not send one here any more (it lowers the shape to
+		// exec.MatchNothingFilter); this is the guard that makes "no caller
+		// passes nil" a local fact rather than an invariant spread across
+		// every entry point that can bind a constant.
+		return matchNothingKernel
+	}
 	switch typ {
 	case batch.TypeBool:
 		return compareFilterBool(op, toBool(value))
@@ -184,6 +198,11 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 	default:
 		return nil
 	}
+}
+
+// matchNothingKernel selects no rows. See ResolveFilterKernel's nil guard.
+func matchNothingKernel(_ *batch.Vector, _ []uint32, _ int, outSel []uint32) []uint32 {
+	return outSel[:0]
 }
 
 // toBytesString renders a BYTES filter constant as the raw byte string the

@@ -737,6 +737,50 @@ func postgresSemanticsCases() []pgCase {
 			FROM nation ORDER BY n_nationkey`},
 	)
 
+	// --- Comparison against a NULL literal --------------------------------
+	//
+	// `col = NULL` is UNKNOWN, never TRUE, which is why `IS NULL` exists as a
+	// separate operator. Wadjet lowered the shape to a typed kernel and the
+	// nil constant was coerced to the column type's ZERO, so `= NULL` matched
+	// the rows holding 0 or '' and `<> NULL` matched everything else (#450).
+	//
+	// PostgreSQL is the authority here and answers all of these with the
+	// empty set — except the three that are deliberately NOT empty: a NULL
+	// inside an IN list drops out instead of poisoning it, a NULL BETWEEN
+	// bound leaves the other bound standing under NOT BETWEEN, and an OR
+	// keeps its other arm. A gate made only of empty answers would pass on an
+	// engine that returned nothing for everything.
+	out = append(out,
+		pgCase{name: "NullLiteralEq", sql: `SELECT COUNT(*) AS n FROM nation WHERE n_regionkey = NULL`},
+		pgCase{name: "NullLiteralNe", sql: `SELECT COUNT(*) AS n FROM nation WHERE n_regionkey <> NULL`},
+		pgCase{name: "NullLiteralLt", sql: `SELECT COUNT(*) AS n FROM nation WHERE n_regionkey < NULL`},
+		pgCase{name: "NullLiteralGe", sql: `SELECT COUNT(*) AS n FROM nation WHERE n_regionkey >= NULL`},
+		pgCase{name: "NullLiteralFlipped", sql: `SELECT COUNT(*) AS n FROM nation WHERE NULL = n_regionkey`},
+		pgCase{name: "NullLiteralString", sql: `SELECT COUNT(*) AS n FROM nation WHERE n_name = NULL`},
+		pgCase{name: "NullLiteralStringGt", sql: `SELECT COUNT(*) AS n FROM nation WHERE n_name > NULL`},
+		pgCase{name: "NullLiteralLike", sql: `SELECT COUNT(*) AS n FROM nation WHERE n_name LIKE NULL`},
+		pgCase{name: "NullLiteralNotLike", sql: `SELECT COUNT(*) AS n FROM nation WHERE n_name NOT LIKE NULL`},
+		pgCase{name: "NullLiteralNegated", sql: `SELECT COUNT(*) AS n FROM nation WHERE NOT (n_regionkey = NULL)`},
+		pgCase{name: "NullLiteralInAlone", sql: `SELECT COUNT(*) AS n FROM nation WHERE n_regionkey IN (NULL)`},
+		pgCase{name: "NullLiteralNotInWithValue", sql: `SELECT COUNT(*) AS n FROM nation WHERE n_regionkey NOT IN (1, NULL)`},
+		pgCase{name: "NullLiteralBetween", sql: `SELECT COUNT(*) AS n FROM nation WHERE n_regionkey BETWEEN NULL AND 2`},
+		// The three that must NOT come back empty.
+		pgCase{name: "NullLiteralInWithValue", sql: `SELECT n_nationkey FROM nation
+			WHERE n_regionkey IN (1, NULL) ORDER BY n_nationkey`},
+		pgCase{name: "NullLiteralNotBetween", sql: `SELECT n_nationkey FROM nation
+			WHERE n_regionkey NOT BETWEEN NULL AND 2 ORDER BY n_nationkey`},
+		pgCase{name: "NullLiteralOrKeepsOtherArm", sql: `SELECT n_nationkey FROM nation
+			WHERE n_regionkey = NULL OR n_nationkey < 5 ORDER BY n_nationkey`},
+		// On a genuinely NULLABLE column, where IS NULL and = NULL are two
+		// different questions with two different answers.
+		pgCase{name: "NullLiteralEqNullable", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 = NULL`},
+		pgCase{name: "NullLiteralNeNullable", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 <> NULL`},
+		pgCase{name: "NullLiteralIsNullContrast", sql: `SELECT
+			(SELECT COUNT(*) FROM dec_probe WHERE d_2 = NULL) AS eq_null,
+			(SELECT COUNT(*) FROM dec_probe WHERE d_2 IS NULL) AS is_null,
+			(SELECT COUNT(*) FROM dec_probe WHERE d_2 IS NOT NULL) AS is_not_null`},
+	)
+
 	// --- Negated predicates ----------------------------------------------
 	//
 	// `WHERE NOT (<predicate>)` was executed as `WHERE <predicate>` whenever

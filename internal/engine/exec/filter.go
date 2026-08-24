@@ -633,6 +633,32 @@ func (f *InFilter) Clone() UnaryOperator {
 		ValueTexts: f.ValueTexts, Negate: f.Negate}
 }
 
+// MatchNothingFilter admits no rows. It is the operator for a predicate that
+// is UNKNOWN on every row whatever the data says — a comparison against a
+// NULL literal, and its negation too, since NOT UNKNOWN is UNKNOWN. A WHERE
+// admits only TRUE, so the answer is no rows.
+//
+// Saying that in the PLAN is the point. Lowering `col = NULL` to a typed
+// kernel handed it a nil constant, which every coercion in
+// kernel.ResolveFilterKernel turns into the column type's ZERO: `WHERE c_i64
+// = NULL` answered the rows where the column is 0, `WHERE c_str = NULL` the
+// rows where the string is empty (#450).
+type MatchNothingFilter struct{}
+
+func NewMatchNothingFilter() *MatchNothingFilter { return &MatchNothingFilter{} }
+
+func (f *MatchNothingFilter) Init(_ context.Context) error { return nil }
+
+// Execute returns the no-rows-survive signal every other filter uses when its
+// selection comes back empty.
+func (f *MatchNothingFilter) Execute(_ context.Context, _ *batch.RecordBatch) (*batch.RecordBatch, error) {
+	return nil, nil
+}
+
+func (f *MatchNothingFilter) Close() error { return nil }
+
+func (f *MatchNothingFilter) Clone() UnaryOperator { return &MatchNothingFilter{} }
+
 // LikeFilter uses a vectorized kernel for SQL LIKE pattern matching.
 type LikeFilter struct {
 	ColName  string

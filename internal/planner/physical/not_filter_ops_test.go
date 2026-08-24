@@ -51,6 +51,8 @@ func describe(op exec.UnaryOperator) string {
 		return fmt.Sprintf("like(%s %q negate=%v)", f.ColName, f.Pattern, f.Negate)
 	case *exec.NullCheckFilter:
 		return fmt.Sprintf("nullcheck(%s isnull=%v)", f.ColName, f.CheckNull)
+	case *exec.MatchNothingFilter:
+		return "nothing()"
 	case *exec.ColColFilter:
 		return fmt.Sprintf("colcol(%s %s %s)", f.LeftCol, opNames[f.Op], f.RightCol)
 	case *exec.OrFilter:

@@ -9178,7 +9178,15 @@ func colColFilterWithRowFallback(left, right string, op exec.CompareOp, cmp expr
 	return f
 }
 
-func kernelFilterWithRowFallback(name string, op exec.CompareOp, lit *expr.Lit, cmp expr.Expr) *exec.KernelFilter {
+func kernelFilterWithRowFallback(name string, op exec.CompareOp, lit *expr.Lit, cmp expr.Expr) exec.UnaryOperator {
+	if lit.Val == nil {
+		// A comparison against a NULL literal is UNKNOWN for every row, so no
+		// row qualifies. It cannot be lowered to a value comparison at all:
+		// the kernel takes its constant as a box and every typed coercion
+		// reads nil as that type's ZERO, which answered `WHERE c_i64 = NULL`
+		// with the rows where the column is 0 (#450).
+		return exec.NewMatchNothingFilter()
+	}
 	// The literal's own TEXT travels with its box. A DECIMAL column's kernel
 	// converts the text at the column's scale, which is the only way a
 	// literal past a float64's ~15-16 significant digits reaches the
@@ -9188,6 +9196,50 @@ func kernelFilterWithRowFallback(name string, op exec.CompareOp, lit *expr.Lit, 
 		kf.RowFallback = wrapPredicate(cmp)
 	}
 	return kf
+}
+
+// kernelOrNothing is the `col <op> constant` operator for a constant that did
+// not arrive inside an expr.Lit — a BETWEEN bound, or a value parsed out of
+// raw predicate text. Same NULL rule as kernelFilterWithRowFallback.
+func kernelOrNothing(col string, op exec.CompareOp, val any, text string) exec.UnaryOperator {
+	if val == nil {
+		return exec.NewMatchNothingFilter()
+	}
+	return exec.NewKernelFilterLit(col, op, val, text)
+}
+
+// inFilterForList builds the IN / NOT IN operator for a list of literals,
+// applying SQL's NULL rule to the LIST — which is not the same rule as for a
+// scalar comparison, and is the one that surprises people:
+//
+//	`x IN (a, NULL)` is TRUE where x = a and UNKNOWN everywhere else, because
+//	TRUE dominates the disjunction. A NULL member therefore drops out; with
+//	nothing else left the whole test is UNKNOWN and nothing qualifies.
+//
+//	`x NOT IN (a, NULL)` is `x <> a AND x <> NULL`, and the second conjunct is
+//	UNKNOWN for every row: the result is FALSE or UNKNOWN, never TRUE. A NULL
+//	anywhere in a NOT IN list empties the answer (#450).
+//
+// An empty list with no NULL in it is left alone — that is a different shape
+// and the set kernel already answers it.
+func inFilterForList(col string, values []any, texts []string, negate bool) exec.UnaryOperator {
+	kept := make([]any, 0, len(values))
+	keptTexts := make([]string, 0, len(texts))
+	hadNull := false
+	for i, v := range values {
+		if v == nil {
+			hadNull = true
+			continue
+		}
+		kept = append(kept, v)
+		if i < len(texts) {
+			keptTexts = append(keptTexts, texts[i])
+		}
+	}
+	if hadNull && (negate || len(kept) == 0) {
+		return exec.NewMatchNothingFilter()
+	}
+	return exec.NewInFilterLit(col, kept, keptTexts, negate)
 }
 
 // negateCmpOp inverts a comparison for an enclosing NOT. Under SQL's
@@ -9364,15 +9416,21 @@ func extractFilterOps(e expr.Expr, neg bool) []exec.UnaryOperator {
 				if hi, hok := v.Hi.(*expr.Lit); hok {
 					// SQL defines `x NOT BETWEEN a AND b` as `NOT (x BETWEEN
 					// a AND b)`, so an enclosing NOT is the same flag.
+					// A NULL bound makes its own half UNKNOWN and leaves the
+					// other half standing. BETWEEN then admits nothing, and
+					// NOT BETWEEN reduces to the surviving comparison —
+					// `x NOT BETWEEN NULL AND h` is TRUE exactly where
+					// x > h, because a FALSE conjunct makes the conjunction
+					// FALSE whatever the UNKNOWN one says (#450).
 					if v.Not != neg {
 						return []exec.UnaryOperator{exec.NewOrFilter(
-							exec.NewKernelFilterLit(col.Name, exec.OpLt, lo.Val, lo.Text),
-							exec.NewKernelFilterLit(col.Name, exec.OpGt, hi.Val, hi.Text),
+							kernelOrNothing(col.Name, exec.OpLt, lo.Val, lo.Text),
+							kernelOrNothing(col.Name, exec.OpGt, hi.Val, hi.Text),
 						)}
 					}
 					return []exec.UnaryOperator{
-						exec.NewKernelFilterLit(col.Name, exec.OpGe, lo.Val, lo.Text),
-						exec.NewKernelFilterLit(col.Name, exec.OpLe, hi.Val, hi.Text),
+						kernelOrNothing(col.Name, exec.OpGe, lo.Val, lo.Text),
+						kernelOrNothing(col.Name, exec.OpLe, hi.Val, hi.Text),
 					}
 				}
 			}
@@ -9390,12 +9448,17 @@ func extractFilterOps(e expr.Expr, neg bool) []exec.UnaryOperator {
 					return nil // non-literal in IN list
 				}
 			}
-			return []exec.UnaryOperator{exec.NewInFilterLit(col.Name, values, texts, v.Not != neg)}
+			return []exec.UnaryOperator{inFilterForList(col.Name, values, texts, v.Not != neg)}
 		}
 	case *expr.Like:
 		// col LIKE 'pattern' or col NOT LIKE 'pattern'
 		if col, ok := v.Expr.(*expr.ColRef); ok {
 			if pat, ok := v.Pattern.(*expr.Lit); ok {
+				if pat.Val == nil {
+					// `col LIKE NULL` is UNKNOWN for every row, negated or
+					// not — there is no pattern to match against (#450).
+					return []exec.UnaryOperator{exec.NewMatchNothingFilter()}
+				}
 				if s, ok := pat.Val.(string); ok {
 					return []exec.UnaryOperator{exec.NewLikeFilter(col.Name, s, v.Not != neg)}
 				}
@@ -9839,7 +9902,7 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 			col := cleanExpr(strings.TrimSpace(parts[0]))
 			valStr := strings.TrimSpace(parts[1])
 			val := parseValue(valStr)
-			return exec.NewKernelFilterLit(col, o.op, val, numericLitText(valStr))
+			return kernelOrNothing(col, o.op, val, numericLitText(valStr))
 		}
 	}
 
@@ -9878,8 +9941,8 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 			hiStr := strings.TrimSpace(rest[andIdx+len(" AND "):])
 			lo, hi := parseValue(loStr), parseValue(hiStr)
 			return exec.NewChainFilter([]exec.UnaryOperator{
-				exec.NewKernelFilterLit(col, exec.OpGe, lo, numericLitText(loStr)),
-				exec.NewKernelFilterLit(col, exec.OpLe, hi, numericLitText(hiStr)),
+				kernelOrNothing(col, exec.OpGe, lo, numericLitText(loStr)),
+				kernelOrNothing(col, exec.OpLe, hi, numericLitText(hiStr)),
 			})
 		}
 	}
@@ -9899,7 +9962,7 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 			texts = append(texts, numericLitText(part))
 		}
 		if len(values) > 0 {
-			return exec.NewInFilterLit(col, values, texts, false)
+			return inFilterForList(col, values, texts, false)
 		}
 	}
 
@@ -9941,6 +10004,13 @@ func parseValue(s string) any {
 	// Remove quotes
 	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
 		return s[1 : len(s)-1]
+	}
+	// An UNQUOTED null is the NULL literal. Falling through returned the
+	// four-character string "null", so `WHERE c = NULL` reaching this path
+	// compared the column against that text instead of answering UNKNOWN;
+	// the callers turn nil into a match-nothing operator (#450).
+	if strings.EqualFold(s, "null") {
+		return nil
 	}
 	// Try integer
 	if i, err := strconv.ParseInt(s, 10, 64); err == nil {

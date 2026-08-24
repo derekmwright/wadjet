@@ -203,6 +203,84 @@ func notPredicateCases() []predCase {
 	}
 }
 
+// nullLiteralPredicateCases pins what a comparison against a NULL LITERAL
+// means. `col <op> NULL` is UNKNOWN on every row and a WHERE admits only
+// TRUE, so almost every entry here is the empty answer — and almost every one
+// of them returned rows before the fix, because the nil constant reached the
+// typed kernel and was read as the column type's ZERO: `c_i64 = NULL` matched
+// the rows holding 0, `c_str = NULL` the rows holding "", `id <> NULL` matched
+// every row whose id is not 0 (#450).
+//
+// The entries that are NOT empty are the ones that make this a semantics test
+// rather than a "returns nothing" test: a NULL inside an IN list drops out
+// rather than poisoning it, a NULL BETWEEN bound leaves the other bound
+// standing under NOT BETWEEN, and an OR keeps its other arm.
+func nullLiteralPredicateCases() []predCase {
+	none := func(tmxRow) bool { return false }
+	return []predCase{
+		// Every comparison, on a nullable column.
+		{"NullLitEq", "c_i64 = NULL", none},
+		{"NullLitNe", "c_i64 <> NULL", none},
+		{"NullLitBangEq", "c_i64 != NULL", none},
+		{"NullLitLt", "c_i64 < NULL", none},
+		{"NullLitLe", "c_i64 <= NULL", none},
+		{"NullLitGt", "c_i64 > NULL", none},
+		{"NullLitGe", "c_i64 >= NULL", none},
+		{"NullLitFlipped", "NULL = c_i64", none},
+		{"NullLitFlippedGt", "NULL > c_i64", none},
+		// And on a NOT NULL column, where the old answer was the whole table:
+		// id <> 0 is true for 4999 of the 5000 rows.
+		{"NullLitEqNonNullable", "id = NULL", none},
+		{"NullLitNeNonNullable", "id <> NULL", none},
+		{"NullLitGeNonNullable", "id >= NULL", none},
+		// One per storage class, because the coercion was per type.
+		{"NullLitString", "c_str = NULL", none},
+		{"NullLitStringGt", "c_str > NULL", none},
+		{"NullLitBool", "c_bool = NULL", none},
+		{"NullLitBoolNe", "c_bool <> NULL", none},
+		{"NullLitInt32", "c_i32 = NULL", none},
+		{"NullLitFloat", "c_f64 = NULL", none},
+		{"NullLitDecimal", "c_dec = NULL", none},
+		{"NullLitDate", "c_date = NULL", none},
+		// NOT UNKNOWN is UNKNOWN.
+		{"NullLitNegated", "NOT (c_i64 = NULL)", none},
+		{"NullLitNegatedNe", "NOT (id <> NULL)", none},
+		// Set membership. A NULL member cannot make IN true, so it drops out
+		// and the rest of the list still answers; in a NOT IN it makes every
+		// row FALSE or UNKNOWN.
+		{"NullLitInAlone", "c_i64 IN (NULL)", none},
+		{"NullLitInWithValue", "c_i64 IN (1000003, NULL)", func(r tmxRow) bool {
+			return r.i64 != nil && *r.i64 == 1000003
+		}},
+		{"NullLitNotInAlone", "c_i64 NOT IN (NULL)", none},
+		{"NullLitNotInWithValue", "c_i64 NOT IN (1000003, NULL)", none},
+		// A NULL bound. BETWEEN admits nothing; NOT BETWEEN reduces to the
+		// comparison that survives, because a FALSE conjunct makes the
+		// conjunction FALSE whatever the UNKNOWN one says.
+		{"NullLitBetweenLow", "c_i64 BETWEEN NULL AND 19000057", none},
+		{"NullLitBetweenHigh", "c_i64 BETWEEN 10000030 AND NULL", none},
+		{"NullLitNotBetweenLow", "c_i64 NOT BETWEEN NULL AND 19000057", func(r tmxRow) bool {
+			return r.i64 != nil && *r.i64 > 19000057
+		}},
+		{"NullLitNotBetweenHigh", "c_i64 NOT BETWEEN 10000030 AND NULL", func(r tmxRow) bool {
+			return r.i64 != nil && *r.i64 < 10000030
+		}},
+		// No pattern to match against.
+		{"NullLitLike", "c_str LIKE NULL", none},
+		{"NullLitNotLike", "c_str NOT LIKE NULL", none},
+		// Composition: an AND with an UNKNOWN conjunct is never TRUE; an OR
+		// keeps its other arm.
+		{"NullLitAnd", "c_i64 = NULL AND id < 10", none},
+		{"NullLitOr", "c_i64 = NULL OR id < 10", func(r tmxRow) bool { return r.id < 10 }},
+		// The controls. IS NULL is the only null test and was always right —
+		// it takes a separate operator that reads the null bitmap. These fail
+		// if a fix for the above ever reaches them.
+		{"IsNullControl", "c_i64 IS NULL", func(r tmxRow) bool { return r.i64 == nil }},
+		{"IsNotNullControl", "c_i64 IS NOT NULL", func(r tmxRow) bool { return r.i64 != nil }},
+		{"IsNullOnNonNullable", "id IS NULL", none},
+	}
+}
+
 func TestTypeMatrixPredicateSemanticsTwoPath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: the predicate-semantics gate stands up an embedded NATS cluster")
@@ -214,7 +292,7 @@ func TestTypeMatrixPredicateSemanticsTwoPath(t *testing.T) {
 	single := tmdStandalone(t, ctx)
 	rows := tmxRows()
 
-	cases := notPredicateCases()
+	cases := append(notPredicateCases(), nullLiteralPredicateCases()...)
 	t.Logf("predicate-semantics gate: %d predicates × 2 arms (A single-process, B stage DAG), "+
 		"each held to the row set SQL requires", len(cases))
 
