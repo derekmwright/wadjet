@@ -2927,6 +2927,24 @@ func (c *Coordinator) dispatchComputeStage(
 			}
 			t.Operators = ops
 		}
+		// Limit migration: always on the fragment path, for the window
+		// stage's reason — there is no legacy single-op limit handler, so an
+		// unclaimed limit stage would ship with Operators == nil and die in
+		// executeStage. Failing here says which stage instead.
+		if stage.Type == physical.StageLimit {
+			if t.Operators != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: limit stage already claimed by another migration", stage.ID)
+			}
+			var fusedSubject string
+			if fusion != nil {
+				fusedSubject = fusion.replySubject
+			}
+			ops, ferr := buildLimitFragment(stage, &t, taskInputs, fusedSubject)
+			if ferr != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: build limit fragment: %w", stage.ID, ferr)
+			}
+			t.Operators = ops
+		}
 		// Union migration: one arm per task, always on the fragment path.
 		// There is no legacy single-op execution for a union stage, so an
 		// unclaimed one would silently dispatch as a no-op pipe that
@@ -3741,6 +3759,62 @@ func buildWindowFragment(stage physical.Stage, t *distributed.Task, taskInputs m
 	// A predicate walkStages pushed onto this stage names the window's
 	// OUTPUT columns, so it runs after the operator — and it has to run at
 	// all: an unemitted filter is a silently unfiltered answer.
+	if len(t.PostFilterExprs) > 0 {
+		ops = append(ops, distributed.OpSpec{
+			Type:       distributed.OpFilter,
+			Predicates: append([]string(nil), t.PostFilterExprs...),
+		})
+	}
+	if gatherReplySubject != "" {
+		ops = append(ops, distributed.OpSpec{
+			Type:         distributed.OpGatherSink,
+			ReplySubject: gatherReplySubject,
+		})
+	} else {
+		ops = append(ops, distributed.OpSpec{Type: distributed.OpUnpartitionedSink})
+	}
+	return ops, nil
+}
+
+// buildLimitFragment translates a limit stage's task into a fragment:
+//
+//	[OpShuffleSource, OpLimit, OpFilter?(a predicate above the LIMIT), <sink>]
+//
+// One task, reading every partition of its input, because that is what makes
+// the bound GLOBAL — the whole point of the stage (physical.StageLimit,
+// #478). There is no per-task split to make here and no ordering decision to
+// take: a LIMIT under an ORDER BY reaches this stage only for its OFFSET,
+// with the sort stage below already having produced the ordered prefix.
+func buildLimitFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, gatherReplySubject string) ([]distributed.OpSpec, error) {
+	if len(taskInputs) != 1 {
+		return nil, fmt.Errorf("limit fragment: expected 1 input alias, got %d", len(taskInputs))
+	}
+	if !stage.HasLimit && stage.Offset <= 0 {
+		return nil, fmt.Errorf("limit fragment: stage %s carries neither a LIMIT nor an OFFSET", stage.ID)
+	}
+	var alias string
+	var files []string
+	for k, v := range taskInputs {
+		alias, files = k, v
+		break
+	}
+	ops := []distributed.OpSpec{
+		{
+			Type:        distributed.OpShuffleSource,
+			InputAlias:  alias,
+			InputFiles:  files,
+			InputBucket: t.DataBucket,
+		},
+		{
+			Type:          distributed.OpLimit,
+			LimitCount:    stage.Limit,
+			HasLimitCount: stage.HasLimit,
+			LimitOffset:   stage.Offset,
+		},
+	}
+	// A predicate walkStages pushed onto this stage names the LIMIT's output
+	// columns, so it runs after the operator — and it has to run at all: an
+	// unemitted filter is a silently unfiltered answer.
 	if len(t.PostFilterExprs) > 0 {
 		ops = append(ops, distributed.OpSpec{
 			Type:       distributed.OpFilter,

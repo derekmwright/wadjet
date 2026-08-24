@@ -397,6 +397,9 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// genuine LIMIT 0 vs. no LIMIT at all would hash identically and
 		// dedup into one (#481).
 		"HasLimit": "hashed",
+		// Offset rides with Limit for the same reason: a StageLimit that
+		// skips 5 rows and one that skips none emit different rows.
+		"Offset": "hashed",
 		// RowLimit changes how many rows a stage emits, so two otherwise
 		// identical subtrees with different bounds are not interchangeable
 		// and must not dedup into one.

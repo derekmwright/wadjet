@@ -26,6 +26,20 @@ const (
 	// operation on the DAG. See Stage.UnionArms.
 	StageUnion = "union"
 
+	// StageLimit bounds its input GLOBALLY: one task, reading every
+	// partition of its dependency, applying OFFSET then LIMIT once.
+	//
+	// A LIMIT is only a bound if exactly one thing applies it to the whole
+	// stream. The two places that could were the coordinator's post-gather
+	// MergeInfo pass — which reads the ROOT node only — and a sort stage's
+	// top-N, which needs an ORDER BY below the LIMIT. A LIMIT anywhere else
+	// in the tree reached neither and bounded nothing: the derived table
+	// yielded every row and the outer query computed over all of them,
+	// silently (#478). This stage is that third place. Singleton by
+	// construction, because a per-task bound is not a global one — k tasks
+	// each keeping n rows is not the first n rows of their union.
+	StageLimit = "limit"
+
 	// Exchange stages — inserted by EnsureDistribution.
 	// Repartition is the rename of the legacy "shuffle" type; the string
 	// value changes so that the old name does not silently leak through.

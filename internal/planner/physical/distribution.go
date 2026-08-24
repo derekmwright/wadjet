@@ -244,6 +244,13 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: keys}
 		}
 		return RequiredDistribution{Kind: RequiredAny}
+	case StageLimit:
+		// RequiredAny, and honestly so: a Singleton stage's single task
+		// reads EVERY partition of its input (partitionFilesForWorker with
+		// workerCount == 1), which is exactly what makes the bound global.
+		// Asking for RequiredSingleton would splice in a gather exchange
+		// that moves the same bytes to the same one task.
+		return RequiredDistribution{Kind: RequiredAny}
 	case StagePipeline, "table_func":
 		return RequiredDistribution{Kind: RequiredAny}
 	default:
@@ -400,6 +407,12 @@ func OutputDistribution(stage Stage, deps map[string]Distribution, workerCount i
 				return depDist
 			}
 		}
+		return Distribution{Kind: DistSingleton}
+	case StageLimit:
+		// One task holding the whole bounded result. Not a scalability
+		// bound worth removing: the stage's OUTPUT is at most LIMIT rows,
+		// and there is no sharded way to take the first n of a union
+		// anyway — that is the property the stage exists to provide.
 		return Distribution{Kind: DistSingleton}
 	case StagePipeline, "table_func":
 		return Distribution{Kind: DistSingleton}

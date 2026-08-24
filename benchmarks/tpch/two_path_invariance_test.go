@@ -3560,14 +3560,15 @@ func twoPathCorpus() []twoPathQuery {
 	// them is about DISTINCT — each has an explicit-GROUP-BY twin that
 	// behaves identically, and all reproduce on the base commit.
 	out = append(out,
-		// #478: a LIMIT inside a derived table lands on no DAG stage.
-		// walkStages attaches a bound only to a sort/merge_sort stage, and
+		// #478 (FIXED — the knownBug pins are gone and these are gated):
+		// a LIMIT inside a derived table used to land on no DAG stage.
+		// walkStages attached a bound only to a sort/merge_sort stage, and
 		// the coordinator's compensating LIMIT/OFFSET pass reads
-		// ExtractMergeInfo, which sees the ROOT path only. Silent: the
-		// derived table yields every row and the outer aggregate counts
-		// them all.
+		// ExtractMergeInfo, which sees the ROOT node only. Silent: the
+		// derived table yielded every row and the outer aggregate counted
+		// them all. physical.StageLimit is the third applier those two
+		// leave uncovered.
 		twoPathQuery{name: "DerivedLimitUnderCount", cmp: cmpUnordered, expectRows: true,
-			knownBug: "#478",
 			sql:      `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation LIMIT 3) u`,
 			wantCols: []string{"c"}, wantRows: 1,
 			assertA: func(tb testing.TB, rows []map[string]any) {
@@ -3575,29 +3576,100 @@ func twoPathCorpus() []twoPathQuery {
 				assertSingleCell(tb, rows, "c", 3)
 			}},
 		twoPathQuery{name: "DerivedDistinctLimitUnderCount", cmp: cmpUnordered, expectRows: true,
-			knownBug: "#478",
 			sql:      `SELECT COUNT(*) AS c FROM (SELECT DISTINCT n_regionkey FROM nation LIMIT 2) u`,
 			wantCols: []string{"c"}, wantRows: 1,
 			assertA: func(tb testing.TB, rows []map[string]any) {
 				tb.Helper()
 				assertSingleCell(tb, rows, "c", 2)
 			}},
-		// Same #478 mechanism as DerivedLimitUnderCount above, pinning the
-		// LIMIT 0 boundary specifically: found while writing #481's own
-		// regression coverage (a real, zero-vs-"no limit" sentinel
-		// collision, which #478 is not — #478 reproduces identically for
-		// any LIMIT value, including a positive one, because no DAG stage
-		// bounds a bare derived-table LIMIT at all). Not fixed here; #481's
-		// fix does not reach this shape because there is no sort stage to
+		// The explicit-GROUP-BY twin of the entry above: same answer, and
+		// the pair is what says the defect was never about DISTINCT.
+		twoPathQuery{name: "DerivedGroupByLimitUnderCount", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT n_regionkey FROM nation GROUP BY n_regionkey LIMIT 2) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 2)
+			}},
+		// Same #478 mechanism, at the LIMIT 0 boundary: found while writing
+		// #481's own regression coverage (a real, zero-vs-"no limit"
+		// sentinel collision, which #478 is not — #478 reproduced
+		// identically for any LIMIT value, including a positive one,
+		// because no DAG stage bounded a bare derived-table LIMIT at all).
+		// #481's fix does not reach this shape: there is no sort stage to
 		// carry the bound (no ORDER BY inside the derived table) — see
-		// DerivedOrderByLimitZeroUnderCount above for the shape #481 DOES fix.
+		// DerivedOrderByLimitZeroUnderCount above for the shape it DOES fix.
 		twoPathQuery{name: "DerivedLimitZeroUnderCount", cmp: cmpUnordered, expectRows: true,
-			knownBug: "#478",
 			sql:      `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation LIMIT 0) u`,
 			wantCols: []string{"c"}, wantRows: 1,
 			assertA: func(tb testing.TB, rows []map[string]any) {
 				tb.Helper()
 				assertSingleCell(tb, rows, "c", 0)
+			}},
+		// The OFFSET half, which #478's repro table names and which nothing
+		// in this corpus covered. Two distinct defects live here: a bare
+		// derived LIMIT/OFFSET reached no stage at all, and a SORTED one
+		// reached a sort stage that truncates to limit+OFFSET without ever
+		// skipping — so `ORDER BY n LIMIT 3 OFFSET 5` one level down
+		// answered 8, not 3.
+		twoPathQuery{name: "DerivedLimitOffsetUnderCount", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation LIMIT 3 OFFSET 5) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 3)
+			}},
+		twoPathQuery{name: "DerivedOrderByLimitOffsetUnderCount", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3 OFFSET 5) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 3)
+			}},
+		// An OFFSET with no LIMIT bounds nothing below it but still has to
+		// skip, and the sort-stage path had no place to do that either.
+		twoPathQuery{name: "DerivedOffsetAloneUnderCount", cmp: cmpUnordered, expectRows: true,
+			sql:      `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation OFFSET 20) u`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 5)
+			}},
+		// The bounded derived table as a JOIN input and as a WINDOW input.
+		// Neither consumer is an aggregate, so neither is reached by the
+		// entries above — and a wrong row count here is a wrong join
+		// cardinality and a wrong row NUMBER, not just a wrong total.
+		// ORDER BY inside, so WHICH rows survive the bound is determined.
+		twoPathQuery{name: "DerivedLimitFeedsJoin", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) u
+				JOIN region r ON u.n_nationkey = r.r_regionkey`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 3)
+			}},
+		twoPathQuery{name: "DerivedLimitFeedsWindow", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT MAX(rn) AS c FROM (SELECT n_nationkey, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn
+				FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 4) v) w`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 4)
+			}},
+		// The OFFSET has to skip the RIGHT rows, not just the right number
+		// of them — #337's "the answer was the first page again", one level
+		// down. Ordered on both sides so the sequence is the assertion.
+		twoPathQuery{name: "DerivedOrderByLimitOffsetValues", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3 OFFSET 5) u
+				ORDER BY n_nationkey`,
+			wantCols: []string{"n_nationkey"}, wantRows: 3,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				for i, want := range []float64{5, 6, 7} {
+					if got := cellNum(rows[i], "n_nationkey"); got != want {
+						tb.Errorf("row %d = %v, want %v", i, got, want)
+					}
+				}
 			}},
 		// #480, repro A: a non-equi join has no join keys, so its build side
 		// requires clustered_on[] — an empty key list only a singleton or a

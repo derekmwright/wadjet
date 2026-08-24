@@ -2659,6 +2659,17 @@ func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task
 		}
 		return []exec.UnaryOperator{proj}, nil, nil
 
+	case distributed.OpLimit:
+		// The global bound of a StageLimit (#478). Singleton by plan
+		// construction, so this one operator sees the whole stream —
+		// exec.Limit's Max is -1 for unbounded, and HasLimitCount is what
+		// keeps a real `LIMIT 0` from decoding as one (#481).
+		max := int64(-1)
+		if spec.HasLimitCount {
+			max = int64(spec.LimitCount)
+		}
+		return []exec.UnaryOperator{exec.NewLimit(max, int64(spec.LimitOffset))}, nil, nil
+
 	case distributed.OpSetOpEmit:
 		// INTERSECT/EXCEPT emit (#346): the counting aggregate's drain rows
 		// carry per-arm multiplicities; this op applies the operation's

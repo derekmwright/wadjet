@@ -114,6 +114,7 @@ the embedded engine per policy shape.
 | `NodeSort` | `sort` → merge-sort tree | `plan.go:3105`. A key naming a term the SELECT list drops is a `__sortkey_N` that no stage emits — see §Synthetic sort keys. |
 | `NodeWindow` | `window` | `plan.go:3384`. One task per PARTITION BY partition when the input already arrives clustered on those keys; Singleton otherwise — see §Window. |
 | `NodeFilter` | pushes predicates onto child stage | `plan.go:3323` |
+| `NodeLimit` | a bound on the sort stage below it, a per-task `RowLimit` on the scans, and — for every LIMIT the coordinator's post-gather pass cannot see — a `limit` stage | `plan.go`, `needsLimitStage`. See §Where a LIMIT is applied. |
 | `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. |
 | `NodeIntersect` / `NodeExcept` | `union` (with per-arm tag columns) + a grouped counting `final_aggregate` | `set_op_stages.go` (#346). The distribution pass inserts an `exchange-repartition` on the full result row between them — see §Set operations. |
 | **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. No USER DISTINCT reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns every `Distinct(Project)` in the tree, at any depth, into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages (#466 widened this from the root path only). What still passes through: planner-inserted `BuildSideDedup` Distincts (semi/anti build dedup, decorrelated semijoin key source), which carry no user-visible semantics, and root-path fallback shapes the coordinator dedups after the gather. A user Distinct anywhere else is REFUSED by `refuseUnstageableDistinct` (`physical/distinct_refusal.go`) rather than dropped, and the coordinator answers it on the local single-process pipeline. |
@@ -794,7 +795,8 @@ Two things the review of that fix turned up and this document now states above:
 a star DISTINCT used to be REFUSED where the pre-#466 DAG answered correctly,
 and the group-key test was gated behind a text match for the word `select`
 that fired on string literals. Three defects it found that are NOT this
-family are tracked separately: #478 (a derived-table LIMIT lands on no stage),
+family are tracked separately: #478 (a derived-table LIMIT landed on no
+stage — fixed, see §Where a LIMIT is applied),
 #479 (the pruned-column-set dedup, fixed here), and #480 (two loud DAG
 failures on a derived table feeding a join, both with explicit-`GROUP BY`
 twins).
@@ -881,6 +883,41 @@ correctness of a distributed change before EC2.
 
 - `docs/architecture.md` §Distributed Execution (high level), `docs/distributed.md` (deployment).
 - Memory: `project-distributed-distinct-design-2026-06-29` (the sharded-distinct fix design + this investigation).
+
+## Where a LIMIT is applied
+
+Three things can bound a stream on the DAG, and they cover disjoint cases.
+Deciding which one owns a given `NodeLimit` is `needsLimitStage`
+(`planner/physical/plan.go`):
+
+| Applier | Reaches | How |
+|---|---|---|
+| the coordinator's post-gather pass | the PLAN ROOT's LIMIT and no other | `ExecuteSQL`'s `mi.Limit`/`mi.Offset` block, from `logical.ExtractMergeInfo` — which reads `plan` itself, not a path |
+| a `sort` / `merge_sort` stage's top-N | a LIMIT with an ORDER BY directly below it **and no OFFSET** | `walkStages` writes `Stage.Limit = limit+offset`; the SKIP is the coordinator's job in the shape that was written for |
+| **`limit` stage** (`StageLimit`) | everything else | one Singleton task, `[OpShuffleSource, OpLimit, sink]`, applying OFFSET then LIMIT once over its whole input |
+
+A LIMIT the first two miss bounded **nothing** before #478. `SELECT COUNT(*)
+FROM (SELECT DISTINCT k FROM t LIMIT 2) u` counted every distinct k, its plain
+and explicit-`GROUP BY` twins did the same, and an `ORDER BY … LIMIT 3 OFFSET
+5` one level down answered 8 — the sort's `limit+offset` truncation with
+nothing to skip it. All silent, all deterministic, all a function of how much
+data sat behind the query.
+
+**Singleton is the correctness property, not a scalability compromise.** A
+per-task bound is not a global one: k tasks each keeping n rows is not the
+first n rows of their union. `RequiredChildDistribution` stays `RequiredAny`
+because a Singleton stage's single task already reads every partition of its
+input (`partitionFilesForWorker` with `workerCount == 1`) — the same rule the
+Singleton window stage runs on — so no gather exchange is spliced in to move
+the same bytes to the same task. `ValidateNativeDAGShape` asserts the stage is
+Singleton, has exactly one dependency, and carries a bound.
+
+The per-task `Stage.RowLimit` pushdown is unchanged and still an optimization
+underneath this: each producing task stops pulling at limit+offset, and the
+stage above re-limits the union. That composition is exactly what the root
+path already did (`RowLimit` + the coordinator's trim), and it is sound
+because the global prefix takes at most limit+offset rows in total, so no task
+can be truncated below what the prefix could need from it.
 
 ## Limit sentinels (#481)
 

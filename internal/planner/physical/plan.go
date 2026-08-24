@@ -140,8 +140,17 @@ type Stage struct {
 	// real `ORDER BY ... LIMIT 0` was indistinguishable from one with no
 	// limit at all (#481) — every reader of Limit below must consult
 	// HasLimit, never `Limit > 0`/`Limit == 0` alone.
+	// A StageLimit carries its LIMIT here too — same meaning, same
+	// HasLimit guard — paired with Offset below.
 	Limit    int
 	HasLimit bool
+	// Offset is the rows a StageLimit SKIPS before it starts emitting.
+	// Meaningful only on that stage type: everywhere else the OFFSET is
+	// applied once by the coordinator over the gathered result, and a
+	// stage that skipped rows on its own would skip them twice. No
+	// companion bool — 0 rows skipped and no OFFSET are the same thing,
+	// unlike LIMIT, where 0 rows kept and no LIMIT are opposites.
+	Offset int
 
 	// RowLimit bounds how many rows this stage's tasks EMIT, for a LIMIT with
 	// no ORDER BY. Distinct from Limit, which is a top-N applied after a sort:
@@ -802,6 +811,13 @@ type Planner struct {
 	// exactly the skew the snapshot exists to avoid (see Stage.ScanDeletes).
 	// Reset at the start of generateStages.
 	scanDeletes map[string]map[string][]int64
+
+	// limitStageRoot is the node generateStages was entered with — the one
+	// node whose LIMIT the coordinator's post-gather pass can see, because
+	// logical.ExtractMergeInfo reads the plan root and nothing below it.
+	// needsLimitStage compares against it to decide which LIMITs still need
+	// a stage of their own (#478). Set at the start of generateStages.
+	limitStageRoot *logical.Node
 
 	// setOpErr records a set operation walkStages cannot lower to stages.
 	// walkStages has no error return (it is recursive over ~20 node kinds
@@ -3595,6 +3611,41 @@ func hasFilterOrPartition(n *logical.Node) bool {
 	return false
 }
 
+// needsLimitStage reports whether this NodeLimit needs a StageLimit of its
+// own, given whether walkStages just handed its bound to a sort stage.
+//
+// Exactly three things can bound a stream on the DAG, and only one of them
+// applies to any given LIMIT:
+//
+//   - The coordinator's post-gather pass (`mi.Limit`/`mi.Offset` in
+//     ExecuteSQL). It reads `logical.ExtractMergeInfo`, which inspects the
+//     PLAN ROOT and nothing else — so it reaches a top-level LIMIT and no
+//     other.
+//   - A sort stage's top-N. It needs an ORDER BY below the LIMIT, and it
+//     truncates to limit+OFFSET rather than skipping, because the OFFSET is
+//     the coordinator's job in the shape it was written for. So it covers a
+//     sorted LIMIT with no OFFSET, and only that.
+//   - This stage.
+//
+// A LIMIT the first two miss bounded NOTHING before #478: `SELECT COUNT(*)
+// FROM (SELECT DISTINCT k FROM t LIMIT 2) u` counted every distinct k, and
+// its plain and explicit-GROUP-BY twins did the same. Silent, deterministic,
+// and dependent only on how much data sits behind the query.
+//
+// The root case is left exactly as it was rather than moved onto this stage:
+// the coordinator's pass is correct there, and emitting a stage as well would
+// apply the OFFSET twice.
+func (p *Planner) needsLimitStage(node *logical.Node, sorted bool) bool {
+	if node == p.limitStageRoot {
+		return false // the coordinator's post-gather pass owns this one
+	}
+	if sorted && node.OffsetVal == 0 {
+		return false // the sort stage's top-N is already the global bound
+	}
+	// An OFFSET alone still needs a stage: nothing below skips rows.
+	return node.LimitVal != logical.NoLimit || node.OffsetVal > 0
+}
+
 func hasLimit(n *logical.Node) bool {
 	if n == nil {
 		return false
@@ -3770,6 +3821,7 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	// scalar subquery, which would otherwise double-compute the CTE).
 	p.ctePlannedTerminal = make(map[string]string)
 	p.scanDeletes = nil
+	p.limitStageRoot = node
 	p.setOpErr = nil
 	p.joinCondErr = nil
 	p.correlatedErr = nil
@@ -5007,6 +5059,27 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					(*stages)[i].RowLimit = stageBound
 				}
 			}
+		}
+		// …and the bound itself, for every LIMIT the two existing appliers
+		// cannot reach. See needsLimitStage: the coordinator's post-gather
+		// pass reads the ROOT node only, and the sort top-N above needs an
+		// ORDER BY below the LIMIT and cannot skip an OFFSET. A LIMIT that
+		// is neither reached NOTHING (#478) — RowLimit above is a per-task
+		// truncation, and k tasks each keeping n rows is not the first n
+		// rows of their union.
+		if p.needsLimitStage(node, sorted) {
+			limitStage := Stage{
+				ID:           fmt.Sprintf("limit-%d", len(*stages)),
+				Type:         StageLimit,
+				Tasks:        1,
+				Offset:       node.OffsetVal,
+				Dependencies: leafStages((*stages)[preLimitCount:]),
+			}
+			if node.LimitVal != logical.NoLimit {
+				limitStage.Limit = node.LimitVal
+				limitStage.HasLimit = true
+			}
+			*stages = append(*stages, limitStage)
 		}
 
 	case logical.NodeJoin:

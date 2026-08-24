@@ -70,6 +70,24 @@ func ValidateNativeDAGShape(stages []Stage) error {
 			if len(s.WindowCols) == 0 {
 				return fmt.Errorf("native-DAG: window stage %s carries no window columns", s.ID)
 			}
+		case StageLimit:
+			// buildLimitFragment reads exactly one input alias and needs a
+			// bound to build an operator from. A stage that violates either
+			// ships as a task that cannot run — fail at plan time, where the
+			// shape is visible (the #349 precedent).
+			if len(s.Dependencies) != 1 {
+				return fmt.Errorf("native-DAG: limit stage %s has %d dependencies, expected 1",
+					s.ID, len(s.Dependencies))
+			}
+			if !s.HasLimit && s.Offset <= 0 {
+				return fmt.Errorf("native-DAG: limit stage %s carries neither a LIMIT nor an OFFSET", s.ID)
+			}
+			if s.Distribution.Kind != DistSingleton {
+				// A multi-task limit stage is not a bound: each task would keep
+				// its own n rows and the union would be up to k*n.
+				return fmt.Errorf("native-DAG: limit stage %s is %v, must be Singleton for the bound to be global",
+					s.ID, s.Distribution.Kind)
+			}
 		case StageUnion:
 			// Arm i is dispatched as task i reading Dependencies[i], so the
 			// two lists must stay index-aligned. A pass that rewired one

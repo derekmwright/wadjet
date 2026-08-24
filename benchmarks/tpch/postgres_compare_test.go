@@ -1015,6 +1015,49 @@ func postgresSemanticsCases() []pgCase {
 			countOnly: true, why: "an empty result has no rows to fingerprint; at tolerance 0 the count is the entire answer"},
 	)
 
+	// --- A bound one level down: LIMIT/OFFSET inside a derived table ------
+	//
+	// #478: the DAG applied a LIMIT in exactly two places — the
+	// coordinator's post-gather pass, which reads the plan ROOT, and a sort
+	// stage's top-N, which needs an ORDER BY below the LIMIT and truncates
+	// to limit+OFFSET without ever skipping. A LIMIT that reached neither
+	// bounded nothing, so the derived table yielded every row and the outer
+	// query computed over all of them. PostgreSQL says what each of these
+	// answers; the corpus had no derived-table LIMIT of any kind.
+	//
+	// `LIMIT n` over an unordered derived table does not say WHICH rows it
+	// yields, but the outer COUNT(*) makes the answer determined either
+	// way, so a value compare is sound (ADR-0013's nondeterminism list
+	// covers the row identity, not the cardinality).
+	out = append(out,
+		pgCase{name: "DerivedLimitUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation LIMIT 3) u`},
+		pgCase{name: "DerivedLimitOffsetUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation LIMIT 3 OFFSET 5) u`},
+		pgCase{name: "DerivedDistinctLimitUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT DISTINCT n_regionkey FROM nation LIMIT 2) u`},
+		pgCase{name: "DerivedGroupByLimitUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n_regionkey FROM nation GROUP BY n_regionkey LIMIT 2) u`},
+		pgCase{name: "DerivedLimitZeroUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation LIMIT 0) u`},
+		pgCase{name: "DerivedOffsetAloneUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation OFFSET 20) u`},
+		pgCase{name: "DerivedOrderByLimitOffsetUnderCount",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3 OFFSET 5) u`},
+		// The OFFSET must skip the RIGHT rows, not just the right number of
+		// them — this is the entry that would catch a bound applied without
+		// its skip.
+		pgCase{name: "DerivedOrderByLimitOffsetValues",
+			sql: `SELECT n_nationkey FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3 OFFSET 5) u
+				ORDER BY n_nationkey`},
+		pgCase{name: "DerivedLimitFeedsJoin",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) u
+				JOIN region r ON u.n_nationkey = r.r_regionkey`},
+		pgCase{name: "DerivedLimitFeedsWindow",
+			sql: `SELECT MAX(rn) AS c FROM (SELECT n_nationkey, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn
+				FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 4) v) w`},
+	)
+
 	// --- Subquery predicates: where a bound inside a subquery binds --------
 	//
 	// `IN (SELECT ...)` lowers to a semi join, and until #516/#482 the

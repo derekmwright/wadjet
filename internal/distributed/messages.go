@@ -446,6 +446,12 @@ const (
 	// the count columns. Sits immediately after the counting
 	// OpHashAggregate in a set-operation final_aggregate fragment.
 	OpSetOpEmit OpType = "set_op_emit"
+
+	// OpLimit applies OFFSET then LIMIT to the whole stream (exec.Limit).
+	// It runs in a StageLimit fragment, which the planner makes Singleton
+	// precisely so this operator sees every row: a per-task LIMIT n over N
+	// tasks is not a global LIMIT n. See physical.StageLimit (#478).
+	OpLimit OpType = "limit"
 )
 
 // OpSpec describes one operator within a fragment pipeline. Fields are
@@ -597,6 +603,15 @@ type OpSpec struct {
 	// stats from the upstream build-scan stage. Worker wires each into the
 	// row-group pruning path before the first S3 fetch.
 	DynamicFilters []DynamicFilterSpec `json:"dynamic_filters,omitempty"`
+
+	// OpLimit. HasLimitCount discriminates a real `LIMIT 0` from "no LIMIT
+	// at all" for the same reason HasSortLimit does (#481): omitempty drops
+	// a zero LimitCount off the wire, so the two would decode identically.
+	// LimitOffset needs no companion — skipping zero rows and having no
+	// OFFSET are the same thing.
+	LimitCount    int  `json:"limit_count,omitempty"`
+	LimitOffset   int  `json:"limit_offset,omitempty"`
+	HasLimitCount bool `json:"has_limit_count,omitempty"`
 
 	// OpSetOpEmit.
 	SetOp         string `json:"set_op,omitempty"`          // "intersect" | "except"
