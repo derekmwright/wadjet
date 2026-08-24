@@ -9610,6 +9610,41 @@ func extractFilterOps(e expr.Expr, neg bool) []exec.UnaryOperator {
 				return []exec.UnaryOperator{kernelFilterWithRowFallback(rc.Name, flipOp(op), lit, fb)}
 			}
 		}
+	case *expr.CmpNetworkLit:
+		// Bare column vs. a string literal compileCmp pre-parsed as an IPv4
+		// or MAC address (tryNetworkLit/CmpNetworkLit in expr/compile.go).
+		// This case was missing entirely, so every `ipv4_col <op> 'lit'` /
+		// `mac_col <op> 'lit'` predicate fell through to nil here and ran
+		// row-at-a-time, losing the vectorized kernel a plain *expr.Cmp node
+		// got on this exact shape before compileCmp started emitting
+		// CmpNetworkLit (measured +43% on 400k rows).
+		//
+		// v.Col's type isn't known here — extractFilterOps has no schema,
+		// same as the *expr.Cmp arm above — so this builds the identical
+		// "col op const" kernel filter that arm would have built for the
+		// original `col op 'lit'`/`'lit' op col`, from v.Lit (the literal's
+		// original text) rather than the pre-parsed ipv4/mac int64s on the
+		// node: ResolveFilterKernel (exec/kernel/compare.go) dispatches
+		// purely on the column's REAL runtime type, parsing v.Lit itself via
+		// parseIPv4ToInt64/parseMACToInt64 for an actual network column and
+		// falling to compareFilterString for anything else. That is also
+		// why tryNetworkLit does not need to be, and cannot be, restricted
+		// to network-typed columns at compile time: a STRING column whose
+		// literal happens to parse as an address (`s = '10.1.2.3'`) rides
+		// this same case and gets exactly its normal compareFilterString
+		// kernel — using the pre-parsed int64s directly here, bypassing
+		// that dispatch, would misinterpret a STRING vector as encoded
+		// IPv4/MAC int64 data.
+		op, ok := maybeNegate(cmpToExecOp(v.Op), neg)
+		if !ok {
+			return nil
+		}
+		fb := negatedExpr(v, neg)
+		kOp := op
+		if v.Flip {
+			kOp = flipOp(op)
+		}
+		return []exec.UnaryOperator{kernelFilterWithRowFallback(v.Col.Name, kOp, &expr.Lit{Val: v.Lit}, fb)}
 	case *expr.CmpInt64:
 		op, ok := maybeNegate(cmpToExecOp(v.Op), neg)
 		if !ok {
