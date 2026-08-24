@@ -237,6 +237,12 @@ type pgConn struct {
 	authProvider *auth.Provider // nil = no auth
 	identity     *auth.Identity // set after successful auth
 
+	// skipUntilSync is PostgreSQL's extended-query error state: after an
+	// error is reported for a Parse/Bind/Describe/Execute/Close message,
+	// every further message is discarded until Sync, which is the one that
+	// emits ReadyForQuery. See dispatch.
+	skipUntilSync bool
+
 	// Session variables (SET key = value)
 	sessionVars map[string]string
 
@@ -314,6 +320,19 @@ func (c *pgConn) run() {
 // dispatch handles one protocol message under the connection's panic
 // boundary. It returns false when the connection should close (Terminate, or
 // a panic that left the protocol stream unusable).
+//
+// Who owes a ReadyForQuery is not uniform, and getting it wrong is a SILENT
+// WRONG ANSWER rather than a visible failure. handleQuery ('Q') sends its own
+// Z on every path it can take. The extended-query handlers (P/B/D/E/C) send
+// none — in that sub-protocol only Sync does. So a boundary that answered
+// every panic with ErrorResponse + Z emitted a SPURIOUS Z whenever the panic
+// came from an extended-query message: the client, still waiting for its own
+// Sync's Z, consumed the stale one as the reply to its NEXT statement and got
+// zero rows back on a healthy connection.
+//
+// PostgreSQL's own rule is the fix: on an error inside extended-query
+// processing the backend reports it, then DISCARDS every message until Sync,
+// and only Sync emits the ReadyForQuery. skipUntilSync is that state.
 func (c *pgConn) dispatch(msgType byte, payload []byte) (keepGoing bool) {
 	defer func() {
 		r := recover()
@@ -326,9 +345,24 @@ func (c *pgConn) dispatch(msgType byte, payload []byte) (keepGoing bool) {
 			code = exec.SQLStateInternalError
 		}
 		c.sendError("ERROR", code, err.Error())
-		c.sendReadyForQuery()
+		if msgType == 'Q' {
+			// Simple query: handleQuery owed the Z and died before sending
+			// it, so the boundary owes it instead.
+			c.sendReadyForQuery()
+		} else {
+			// Extended query: Sync owes the Z. Enter the error state and let
+			// it arrive there, exactly once.
+			c.skipUntilSync = true
+		}
 		keepGoing = true
 	}()
+
+	// In the error state every message is discarded until Sync ends it.
+	// Terminate still closes the connection.
+	if c.skipUntilSync && msgType != 'S' && msgType != 'X' {
+		return true
+	}
+
 	switch msgType {
 	case 'Q': // Simple Query
 		sql := readCString(payload)
@@ -344,6 +378,9 @@ func (c *pgConn) dispatch(msgType byte, payload []byte) (keepGoing bool) {
 	case 'H': // Flush
 		// no-op, we write eagerly
 	case 'S': // Sync
+		// Ends any extended-query error state and emits the single
+		// ReadyForQuery the client has been waiting for.
+		c.skipUntilSync = false
 		c.sendReadyForQuery()
 	case 'C': // Close (prepared statement or portal)
 		c.handleClose(payload)
@@ -3679,6 +3716,13 @@ func (c *pgConn) sendCommandComplete(tag string) {
 }
 
 func (c *pgConn) sendError(severity, code, message string) {
+	// Every field here is NUL-terminated, so a NUL inside one would end it
+	// early and let the remainder be read as further fields — a message
+	// built from a recovered panic value is attacker-influenced text, so
+	// strip them rather than trust the source (#511).
+	severity = stripNUL(severity)
+	code = stripNUL(code)
+	message = stripNUL(message)
 	// ErrorResponse: 'E' + fields
 	var payload []byte
 	// Severity
@@ -3701,6 +3745,14 @@ func (c *pgConn) sendError(severity, code, message string) {
 	payload = append(payload, 0)
 
 	c.sendMsg('E', payload)
+}
+
+// stripNUL removes NUL bytes, which terminate a wire field.
+func stripNUL(s string) string {
+	if !strings.ContainsRune(s, 0) {
+		return s
+	}
+	return strings.ReplaceAll(s, "\x00", "")
 }
 
 func (c *pgConn) sendMsg(typ byte, payload []byte) {
