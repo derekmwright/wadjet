@@ -173,6 +173,65 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      MIN/MAX over a NaN column is the same gap in the aggregate kernels,
      tracked as #457.
 
+9. **Exact numeric aggregates: what MIN/MAX/SUM/AVG over a DECIMAL answer.**
+   (Added 2026-08-23, #455.) PostgreSQL's `min`/`max`/`sum`/`avg` over
+   `numeric` are exact and answer in `numeric`. Wadjet's were answering in
+   `float64`: the accumulators were already exact Int128 at the column's
+   scale, but the declared OUTPUT type was a double, so everything past ~16
+   significant digits was gone before any consumer saw it —
+   `MAX(numeric(38,10))` returned `9.777777778877776e+14` for
+   `977777777887777.7577887713`, and `HAVING MAX(d) = <that value>` therefore
+   matched nothing. The contract now:
+
+   - **MIN/MAX(DECIMAL(p,s)) → DECIMAL(p,s).** The answer is a value the
+     column holds, so it keeps the column's own precision and scale. Exact,
+     and identical to PostgreSQL.
+   - **SUM(DECIMAL(p,s)) → DECIMAL(38,s).** Exact, accumulated in Int128 at
+     the input's scale. The declared precision is the carrier's full width
+     rather than the input's, because a sum genuinely exceeds its column's
+     precision and a narrower declaration would hand the parquet writer a
+     leaf too small for the value.
+   - **SUM overflow is an ERROR, not a wrapped total.** PostgreSQL's numeric
+     is unbounded; wadjet's exact carrier is 128 bits, which holds every
+     DECIMAL(38) value but not every sum of them (two values near 10^38
+     suffice). A wrapped sum is a different number wearing the right type, so
+     the query fails with a message naming the aggregate. This is a
+     deliberate, documented limit of the carrier — not a semantic
+     disagreement with PostgreSQL. The flag is STICKY, so a running total
+     that leaves the range and comes back — `+9e37, +9e37, -9e37`, whose
+     exact total is representable — also fails; refusing a sum we did carry
+     exactly is the conservative side of a limit whose other side is a
+     wrapped number nobody can see is wrong.
+   - **AVG(DECIMAL(p,s)) → DECIMAL(38, min(s+4, 38))**, computed as exact
+     division of the Int128 sum by the row count, rounded half away from
+     zero. This is a **deliberate divergence in the number of digits kept**:
+     PostgreSQL's numeric division picks a scale giving at least 16
+     significant digits (and never below the dividend's scale), so its answer
+     may carry more or fewer fractional digits than wadjet's. Both are exact
+     to the digits they keep and agree to `min(both scales)`. A fixed
+     increment — the Spark and SQL Server rule — is the honest choice for a
+     128-bit carrier: the digits kept do not depend on the magnitude of the
+     answer, so the same query over more rows cannot silently change the
+     scale of its own output column. An average with no exact 128-bit value
+     is an error, for SUM overflow's reason.
+   - **STDDEV / VARIANCE / CORR / COVAR / MEDIAN / PERCENTILE over a DECIMAL
+     stay float64.** PostgreSQL answers those in `numeric` too. This is a
+     KNOWN, deliberate deviation, recorded rather than hidden: they need
+     square roots and running means, which an exact fixed-point tower does
+     not provide, and the oracle's float tolerance covers the difference.
+     Reopening it means building the tower, not widening an accumulator.
+   - **Both execution paths and the DAG's partial/final merge answer the
+     same thing.** The partial ships SUM as an Int128 DECIMAL plus a COUNT,
+     and the final divides — `internal/worker/avg_fold.go`. A DECIMAL
+     aggregate that answered exactly in one process and approximately across
+     three workers would be the two-path defect class all over again
+     (ADR-0018 §3).
+   - **The oracle compares these entries EXACTLY.** MIN/MAX/SUM over a
+     DECIMAL are compared digit for digit on both engines
+     (`pgCase.exactNumeric`), because a float-rendered comparison is what let
+     the defect ship green. AVG keeps the float comparison, for the scale
+     contract above and for no other reason.
+
 ## Consequences
 
 - `ORDER BY x DESC` places NULLs first (changed 2026-08-19). The default had
@@ -214,3 +273,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
 - `internal/engine/exec/kernel/float_order.go`, `internal/engine/exec/
   compare_boxed.go`, `internal/engine/exec/kernel/
   container_order_property_test.go` (the P1-P4 total-order property test)
+- Exact numeric aggregates (item 9): `internal/engine/batch/decimal.go`
+  (`AddChecked`, `AvgScale`, `DecimalAvg`), `internal/engine/exec/kernel/types.go`
+  (`Accumulator.FinalSum`/`FinalAvg`/`FinalMin`/`FinalMax`),
+  `internal/engine/exec/aggregate.go` (`outputSchema`, `minMaxOutputType`),
+  `internal/planner/physical/plan.go` (`aggSpecOutputType`),
+  `internal/worker/avg_fold.go`

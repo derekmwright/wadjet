@@ -275,7 +275,11 @@ func maxRowFloat32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 
 func sumRowDecimal(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
-		acc.SumDec = acc.SumDec.Add(vec.DecimalData.Data[row])
+		sum, ok := acc.SumDec.AddChecked(vec.DecimalData.Data[row])
+		acc.SumDec = sum
+		if !ok {
+			acc.DecOverflow = true
+		}
 		acc.Count++
 		acc.IsDecimal = true
 		acc.DecScale = vec.DecimalData.Scale
@@ -476,20 +480,28 @@ func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			data := vec.DecimalData.Data
 			nulls := &vec.Nulls
+			overflow := false
 			if sel != nil {
 				for _, idx := range sel {
 					if !nulls.IsNullFast(int(idx)) {
-						acc.SumDec = acc.SumDec.Add(data[idx])
+						sum, ok := acc.SumDec.AddChecked(data[idx])
+						acc.SumDec = sum
+						overflow = overflow || !ok
 						acc.Count++
 					}
 				}
 			} else {
 				for i := 0; i < vecLen; i++ {
 					if !nulls.IsNullFast(i) {
-						acc.SumDec = acc.SumDec.Add(data[i])
+						sum, ok := acc.SumDec.AddChecked(data[i])
+						acc.SumDec = sum
+						overflow = overflow || !ok
 						acc.Count++
 					}
 				}
+			}
+			if overflow {
+				acc.DecOverflow = true
 			}
 			acc.IsDecimal = true
 			acc.DecScale = vec.DecimalData.Scale

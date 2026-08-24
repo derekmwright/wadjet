@@ -3,6 +3,7 @@ package tpch
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 	"testing"
@@ -56,6 +57,19 @@ type pgCase struct {
 	why       string
 	limit     int
 	tolerance int
+	// exactNumeric compares NUMERIC/DECIMAL cells as their exact decimal
+	// digits on both sides instead of through the fingerprint's float
+	// rendering. Set it on an entry whose answer IS the digits — a DECIMAL
+	// aggregate — and leave it off where the two engines legitimately keep a
+	// different number of them (AVG, whose scale rule differs by contract:
+	// PostgreSQL picks a scale giving at least 16 significant digits, wadjet
+	// widens the input's scale by 4 — see batch.AvgScaleIncrement).
+	//
+	// Without it these entries prove almost nothing: both sides render to a
+	// float64 and agree about the first six significant digits, which is
+	// exactly the agreement #455 had while MAX(numeric(38,10)) was returning
+	// 9.777777778877776e+14 for 977777777887777.7577887713.
+	exactNumeric bool
 	// knownBug pins a divergence that is not gated today. The comparison still
 	// runs and the subtest FAILS when the divergence disappears, so deleting
 	// this field is the whole of "the fix landed". Classified by kind:
@@ -83,7 +97,11 @@ func runPostgresSemanticsArm(t *testing.T, ctx context.Context, o *postgresOracl
 	gated, pinned := 0, 0
 	for _, c := range corpus {
 		t.Run(c.name, func(t *testing.T) {
-			pgRows, pgCols, pgErr := o.runPostgres(ctx, c.sql)
+			run := o.runPostgres
+			if c.exactNumeric {
+				run = o.runPostgresExact
+			}
+			pgRows, pgCols, pgErr := run(ctx, c.sql)
 			if pgErr != nil {
 				// PostgreSQL refusing the query means the entry is not a
 				// question about Wadjet. It is always the corpus's fault, so
@@ -164,9 +182,158 @@ func comparePostgres(c pgCase, pgRows []map[string]any, pgCols []string, wRows [
 	if len(wCols) != len(pgCols) {
 		return false, fmt.Sprintf("%d columns %v, PostgreSQL %d %v", len(wCols), wCols, len(pgCols), pgCols)
 	}
-	want := oracle.FingerprintOf(positional(pgRows, pgCols), c.ordered)
-	got := oracle.FingerprintOf(positional(wRows, wCols), c.ordered)
+	pgPos, wPos := positional(pgRows, pgCols), positional(wRows, wCols)
+	reconcileNumericBoxing(c, pgPos, wPos)
+	want := oracle.FingerprintOf(pgPos, c.ordered)
+	got := oracle.FingerprintOf(wPos, c.ordered)
 	return want.Match(got)
+}
+
+// reconcileNumericBoxing puts the two engines' numbers in ONE rendering
+// before they are digested. It is a rendering rule, not an exemption: it
+// never makes two different NUMBERS compare equal, only the same number
+// handed over as text by one engine and as a float by the other.
+//
+// Two directions, chosen per entry:
+//
+//   - exactNumeric: both sides carry the digits (the PostgreSQL side through
+//     runPostgresExact, the Wadjet side because a DECIMAL cell IS its text),
+//     so both are canonicalised — trailing fraction zeros trimmed, so
+//     PostgreSQL's numeric(9,2) "12.50" and Wadjet's "12.5" are the same
+//     value written twice — and compared digit for digit.
+//
+//   - otherwise: PostgreSQL flattens a NUMERIC to float64 while Wadjet hands
+//     a DECIMAL over as text, and the fingerprint would compare "16303690.96"
+//     against "1.63037e+07" and call it a divergence about nothing. Where the
+//     PostgreSQL side of a column is a float and the Wadjet side is a numeric
+//     STRING, the string is read as a float so both render through the same
+//     quantum. Keyed on the pair, so a genuine text column — where
+//     PostgreSQL's side is also a string — is untouched.
+func reconcileNumericBoxing(c pgCase, pg, w *oracle.Result) {
+	if len(pg.Rows) == 0 || len(w.Rows) == 0 {
+		return
+	}
+	for _, key := range pg.Columns {
+		if c.exactNumeric {
+			canonicalizeNumericStrings(pg, key)
+			canonicalizeNumericStrings(w, key)
+			continue
+		}
+		if !columnIsFloatBoxed(pg, key) {
+			continue
+		}
+		for _, row := range w.Rows {
+			s, ok := row[key].(string)
+			if !ok {
+				continue
+			}
+			if f, ok := parseFloat(strings.TrimSpace(s)); ok {
+				row[key] = f
+			}
+		}
+	}
+}
+
+// columnIsFloatBoxed reports whether every non-NULL cell of this column on the
+// PostgreSQL side arrived as a float — i.e. the column is a number there.
+func columnIsFloatBoxed(res *oracle.Result, key string) bool {
+	sawFloat := false
+	for _, row := range res.Rows {
+		switch row[key].(type) {
+		case nil:
+		case float64, float32:
+			sawFloat = true
+		default:
+			return false
+		}
+	}
+	return sawFloat
+}
+
+// canonicalizeNumericStrings rewrites every plain-decimal STRING cell of one
+// column into one spelling: no trailing fraction zeros, no bare trailing
+// point, no "-0". Applied to both engines, so it cannot hide a difference of
+// value — only a difference of how many zeros each side chose to print.
+func canonicalizeNumericStrings(res *oracle.Result, key string) {
+	for _, row := range res.Rows {
+		s, ok := row[key].(string)
+		if !ok {
+			continue
+		}
+		if canon, ok := canonicalDecimalString(s); ok {
+			row[key] = canon
+		}
+	}
+}
+
+// canonicalDecimalString parses a plain decimal literal (sign, digits,
+// optional fraction — no exponent, which no DECIMAL rendering produces) and
+// re-renders it canonically. ok=false leaves the cell alone, which is what
+// keeps a date, a name or an IP address out of this.
+func canonicalDecimalString(s string) (string, bool) {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return "", false
+	}
+	neg := false
+	switch t[0] {
+	case '-':
+		neg, t = true, t[1:]
+	case '+':
+		t = t[1:]
+	}
+	intPart, fracPart := t, ""
+	if dot := strings.IndexByte(t, '.'); dot >= 0 {
+		intPart, fracPart = t[:dot], t[dot+1:]
+	}
+	if intPart == "" && fracPart == "" {
+		return "", false
+	}
+	for _, part := range []string{intPart, fracPart} {
+		for i := 0; i < len(part); i++ {
+			if part[i] < '0' || part[i] > '9' {
+				return "", false
+			}
+		}
+	}
+	unscaled, ok := new(big.Int).SetString(intPart+fracPart, 10)
+	if !ok {
+		return "", false
+	}
+	if neg {
+		unscaled.Neg(unscaled)
+	}
+	return canonicalDecimalText(unscaled, len(fracPart)), true
+}
+
+// canonicalDecimalText renders an unscaled integer at a scale in the one
+// spelling both engines are compared in: the digits split at the scale with
+// trailing fraction zeros removed, and no decimal point at all when nothing
+// is left after it. Shared with the PostgreSQL side's exactNumericText.
+func canonicalDecimalText(unscaled *big.Int, scale int) string {
+	neg := unscaled.Sign() < 0
+	digits := new(big.Int).Abs(unscaled).String()
+	out := digits
+	if scale > 0 {
+		if len(digits) <= scale {
+			digits = strings.Repeat("0", scale-len(digits)+1) + digits
+		}
+		intPart, frac := digits[:len(digits)-scale], digits[len(digits)-scale:]
+		frac = strings.TrimRight(frac, "0")
+		if frac == "" {
+			out = intPart
+		} else {
+			out = intPart + "." + frac
+		}
+	}
+	out = strings.TrimLeft(out, "0")
+	if out == "" || out[0] == '.' {
+		out = "0" + out
+	}
+	if neg && strings.Trim(out, "0.") != "" {
+		out = "-" + out
+	}
+	return out
 }
 
 // positional re-keys rows onto "c0".."cN" in the engine's own column order, so
@@ -369,10 +536,20 @@ func postgresSemanticsCases() []pgCase {
 	//
 	// Same projection discipline as above — d_key, not the decimal, because
 	// the two engines box it differently and the wire arm is where that is
-	// reported. The two aggregates are the exception and are comparable for
-	// the same reason AVG(int) is: both sides render to a float64 for the
-	// comparison and the fingerprint's tolerance covers the last digits, so
-	// they catch an arithmetic defect and not a boxing one.
+	// reported. The AGGREGATES are the exception, and since #455 they are
+	// compared as VALUES, digit for digit (exactNumeric): MIN/MAX/SUM over a
+	// numeric are exact on both engines, so anything less than exact equality
+	// is a defect. They used to be compared through the fingerprint's float
+	// rendering "for the same reason AVG(int) is", and that is precisely how
+	// MAX(d_wide) could answer 9.777777778877776e+14 for
+	// 977777777887777.7577887713 with the gate green.
+	//
+	// AVG keeps the float comparison, and that is a CONTRACT difference
+	// rather than an oversight: both engines divide exactly, but PostgreSQL
+	// picks a result scale giving at least 16 significant digits while wadjet
+	// widens the input scale by a fixed 4 (batch.AvgScaleIncrement, ADR-0012
+	// item 9). The two agree to min(both scales) and differ in how many digits
+	// past that they keep, which no exact comparison can express.
 	out = append(out,
 		pgCase{name: "WideDecimalEq", sql: `SELECT d_key FROM dec_probe WHERE d_wide = 493827160549382.7160549350 ORDER BY d_key`},
 		pgCase{name: "WideDecimalEqNegative", sql: `SELECT d_key FROM dec_probe WHERE d_wide = -888888888988888.8888988830 ORDER BY d_key`},
@@ -393,9 +570,26 @@ func postgresSemanticsCases() []pgCase {
 		// included, since their placement is PostgreSQL's rule (ADR-0012).
 		pgCase{name: "WideDecimalOrderBy", sql: `SELECT d_key FROM dec_probe ORDER BY d_wide, d_key`},
 		pgCase{name: "WideDecimalOrderByDesc", sql: `SELECT d_key FROM dec_probe ORDER BY d_wide DESC, d_key`},
-		pgCase{name: "WideDecimalSum", sql: `SELECT SUM(d_wide) AS s FROM dec_probe WHERE d_key < 60`},
+		pgCase{name: "WideDecimalSum", sql: `SELECT SUM(d_wide) AS s FROM dec_probe WHERE d_key < 60`,
+			exactNumeric: true},
 		pgCase{name: "WideDecimalAvg", sql: `SELECT AVG(d_wide) AS a FROM dec_probe WHERE d_key < 60`},
-		pgCase{name: "WideDecimalMinMax", sql: `SELECT MIN(d_wide) AS lo, MAX(d_wide) AS hi FROM dec_probe`},
+		pgCase{name: "WideDecimalMinMax", sql: `SELECT MIN(d_wide) AS lo, MAX(d_wide) AS hi FROM dec_probe`,
+			exactNumeric: true},
+		// The grouped accumulator is a different one from the whole-input
+		// kernels above (the flat SoA arrays, agg_scatter.go), and it is the
+		// half #417 found answering NULL for DECIMAL while the scalar form
+		// was right.
+		pgCase{name: "WideDecimalMinMaxSumGrouped", exactNumeric: true,
+			sql: `SELECT d_key % 4 AS g, MIN(d_wide) AS lo, MAX(d_wide) AS hi, SUM(d_wide) AS s
+				FROM dec_probe GROUP BY g`},
+		// The narrow encodings, which the issue's second example is over: a
+		// DECIMAL(9,2) MIN answered -4.27876713e+06 for -4278767.13.
+		pgCase{name: "NarrowDecimalMinMaxSum", exactNumeric: true,
+			sql: `SELECT MIN(d_2) AS lo2, MAX(d_2) AS hi2, SUM(d_2) AS s2,
+				MIN(d_4) AS lo4, MAX(d_4) AS hi4, SUM(d_4) AS s4 FROM dec_probe`},
+		pgCase{name: "NarrowDecimalMinMaxSumGrouped", exactNumeric: true,
+			sql: `SELECT d_key % 3 AS g, MIN(d_2) AS lo, MAX(d_2) AS hi, SUM(d_2) AS s,
+				SUM(d_4) AS s4 FROM dec_probe GROUP BY g`},
 		// Both encodings in one predicate.
 		pgCase{name: "WideDecimalWithNarrow", sql: `SELECT d_key FROM dec_probe WHERE d_wide > 0 AND d_2 < 0 ORDER BY d_key`},
 	)

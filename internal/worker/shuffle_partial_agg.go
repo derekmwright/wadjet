@@ -26,11 +26,12 @@ import (
 // partitioned sink requires: it locks the WSHF schema from the first
 // batch it consumes.
 //
-// NOTE on types: SUM over a Decimal column emits Float64 (the same
-// erosion the downstream aggregate applies today via
-// kernel.Accumulator.FinalSum), so the shipped column type may differ
-// from the raw payload's. Consumers resolve WSHF columns by name and
-// type per batch, and every chunk this operator emits shares one schema.
+// NOTE on types: the shipped column type may differ from the raw payload's
+// (SUM over an int32-class column widens to int64, for one), so consumers
+// resolve WSHF columns by name and type per batch; every chunk this operator
+// emits shares one schema. SUM over a DECIMAL ships a DECIMAL at the column's
+// own scale since #455 — it used to ship the float64 the accumulator
+// finalized through, which is where the digits went.
 type cappedPartialAgg struct {
 	groupBy  []string
 	aggs     []exec.AggColumn

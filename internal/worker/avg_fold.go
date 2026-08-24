@@ -111,19 +111,27 @@ func foldOneBatch(in *batch.RecordBatch, pairs []avgFoldPair) (*batch.RecordBatc
 		pairBySumIdx[p.sumIdx] = p
 	}
 
-	// Build new schema: keep every column except dropped count columns,
-	// rename sum columns to their AVG output names with type Float64.
+	// Build new schema: keep every column except dropped count columns, and
+	// rename sum columns to their AVG output names.
+	//
+	// The AVG column's type follows the SUM partial's: float64 for every
+	// numeric type but DECIMAL, over which AVG answers in DECIMAL at
+	// batch.AvgScale(sum scale) — the same declaration the single-process
+	// HashAggregate makes for the same query (exec.outputSchema), because
+	// the two paths owe the client one answer and one type (#455).
 	newSchema := make([]parquet.Column, 0, len(in.Schema)-len(pairs))
 	for i, c := range in.Schema {
 		if dropIdx[i] {
 			continue
 		}
 		if p, ok := pairBySumIdx[i]; ok {
-			newSchema = append(newSchema, parquet.Column{
-				Name:     p.outputCol,
-				Type:     parquet.TypeFloat64,
-				Nullable: true,
-			})
+			out := parquet.Column{Name: p.outputCol, Type: parquet.TypeFloat64, Nullable: true}
+			if c.Type == parquet.TypeDecimal {
+				out.Type = parquet.TypeDecimal
+				out.Precision = batch.MaxDecimalPrecision
+				out.Scale = batch.AvgScale(in.Columns[i].DecimalData.Scale)
+			}
+			newSchema = append(newSchema, out)
 			continue
 		}
 		newSchema = append(newSchema, c)
@@ -158,7 +166,15 @@ func foldOneBatch(in *batch.RecordBatch, pairs []avgFoldPair) (*batch.RecordBatc
 // SUM partial is whatever numeric type AVG was over (int or float, etc.);
 // the COUNT partial is always int64. We cast both to float64 for the
 // divide. count==0 → null.
+//
+// A DECIMAL sum is the exception and takes the exact path: Int128 division
+// at batch.AvgScale, which is what the single-process engine computes for
+// the same query. Casting it to a float64 here would put the digits back
+// where #455 found them, on one of the two paths only.
 func writeAvgColumn(dst, sumCol, countCol *batch.Vector, n int) error {
+	if sumCol.Type == parquet.TypeDecimal {
+		return writeDecimalAvgColumn(dst, sumCol, countCol, n)
+	}
 	for i := 0; i < n; i++ {
 		// COUNT is always int64; null-or-zero count means no rows
 		// contributed, so AVG is NULL.
@@ -171,10 +187,8 @@ func writeAvgColumn(dst, sumCol, countCol *batch.Vector, n int) error {
 			dst.Nulls.SetNull(i)
 			continue
 		}
-		// SUM may be float64 (TypeFloat32/Float64 input), int64
-		// (TypeInt32/Int64 input), or decimal. AVG of decimal isn't
-		// expected in the TPC-H suite at the time of this write —
-		// fall back to nil if encountered.
+		// SUM is float64 (TypeFloat32/Float64 input) or int64
+		// (TypeInt32/Int64 input) here; DECIMAL took the exact path above.
 		if sumCol.Nulls.IsNullFast(i) {
 			dst.Nulls.SetNull(i)
 			continue
@@ -195,6 +209,41 @@ func writeAvgColumn(dst, sumCol, countCol *batch.Vector, n int) error {
 			return fmt.Errorf("unsupported AVG sum type: %v", sumCol.Type)
 		}
 		dst.Float64Data[i] = sumF / float64(c)
+		dst.Nulls.SetValid(i)
+	}
+	return nil
+}
+
+// writeDecimalAvgColumn is writeAvgColumn's exact arm: dst[i] is the Int128
+// quotient of the DECIMAL sum by the row count, at dst's own scale.
+//
+// A quotient with no Int128 is a query error rather than an approximation —
+// the same position SUM overflow takes (ADR-0012 item 9) — because the whole
+// point of answering AVG(DECIMAL) in DECIMAL is that the digits are the ones
+// the data had.
+func writeDecimalAvgColumn(dst, sumCol, countCol *batch.Vector, n int) error {
+	addScale := dst.DecimalData.Scale - sumCol.DecimalData.Scale
+	if addScale < 0 {
+		return fmt.Errorf("avg-fold: AVG output scale %d is narrower than its SUM partial's %d",
+			dst.DecimalData.Scale, sumCol.DecimalData.Scale)
+	}
+	for i := 0; i < n; i++ {
+		if countCol.Nulls.IsNullFast(i) || sumCol.Nulls.IsNullFast(i) {
+			dst.WriteNullAt(i)
+			continue
+		}
+		c := countCol.Int64Data[i]
+		if c == 0 {
+			dst.WriteNullAt(i)
+			continue
+		}
+		q, ok := batch.DecimalAvg(sumCol.DecimalData.Data[i], c, addScale)
+		if !ok {
+			return fmt.Errorf("avg-fold: AVG over a DECIMAL column has no exact 128-bit value "+
+				"(sum %s over %d rows at scale %d)",
+				sumCol.DecimalData.Data[i].FormatDecimal(sumCol.DecimalData.Scale), c, dst.DecimalData.Scale)
+		}
+		dst.DecimalData.Data[i] = q
 		dst.Nulls.SetValid(i)
 	}
 	return nil

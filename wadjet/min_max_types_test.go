@@ -3,7 +3,6 @@ package wadjet
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -153,24 +152,28 @@ func mmOrderByReference(t *testing.T, db *DB, col string, where ...string) (lo, 
 
 // mmOutputType is the declared output type of MIN/MAX over a column of the
 // given type: its own, except that the int32-class widens to INT64 and
-// DECIMAL keeps the FLOAT64 its accumulator finalizes to.
+// FLOAT32 to FLOAT64.
+//
+// DECIMAL used to be a third exception — its accumulator finalized through
+// ToFloat64, so the answer came back as a double and everything past the
+// 16th digit was gone (#455). It answers in DECIMAL now, so the exception is
+// deleted rather than documented: that deletion IS the fix's proof here.
 func mmOutputType(in parquet.TypeID) parquet.TypeID {
 	switch in {
 	case parquet.TypeInt32:
 		return parquet.TypeInt64
 	case parquet.TypeFloat32:
 		return parquet.TypeFloat64
-	case parquet.TypeDecimal:
-		return parquet.TypeFloat64
 	}
 	return in
 }
 
 // mmWiden converts a projected value into the shape MIN/MAX declares for its
-// column, for the three types whose aggregate output is not the input's own:
-// the int32 class widens to int64, FLOAT32 to float64, and DECIMAL finalizes
-// through ToFloat64 where the projection renders its text. Nothing else is
-// converted, so a genuine type change still fails.
+// column, for the two types whose aggregate output is not the input's own:
+// the int32 class widens to int64 and FLOAT32 to float64. Nothing else is
+// converted, so a genuine type change still fails — DECIMAL in particular
+// compares as the same TEXT the projection renders, which is what makes this
+// a check on the digits and not on a rounding of them (#455).
 func mmWiden(t *testing.T, in parquet.TypeID, v any) any {
 	t.Helper()
 	if v == nil {
@@ -189,16 +192,6 @@ func mmWiden(t *testing.T, in parquet.TypeID, v any) any {
 			t.Fatalf("projection of a FLOAT32 column boxed %T", v)
 		}
 		return float64(f)
-	case parquet.TypeDecimal:
-		s, ok := v.(string)
-		if !ok {
-			t.Fatalf("projection of a DECIMAL column boxed %T", v)
-		}
-		f, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			t.Fatalf("DECIMAL projection %q does not parse: %v", s, err)
-		}
-		return f
 	}
 	return v
 }

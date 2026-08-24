@@ -121,6 +121,27 @@ func (d Int128) Add(other Int128) Int128 {
 	return Int128{Hi: hi, Lo: lo}
 }
 
+// AddChecked returns d + other and reports whether the EXACT sum fits in an
+// Int128. A false second result means the first is the WRAPPED value and must
+// not be shown to anyone: it is a different number, silently.
+//
+// Two's-complement signed addition overflows exactly when the operands share a
+// sign and the result does not — the standard rule, and the only one needed
+// here because Add is a plain 128-bit add with carry.
+//
+// SUM over a DECIMAL column accumulates through this (kernel.Accumulator,
+// agg_scatter's flat arrays): the aggregate's carrier is 128 bits wide, so a
+// DECIMAL(38) column holding values near 10^38 overflows after two rows, and
+// the wrapped answer looks like an ordinary number. See docs/adr/0012,
+// item 9 (exact numeric aggregates).
+func (d Int128) AddChecked(other Int128) (Int128, bool) {
+	sum := d.Add(other)
+	if (d.Hi < 0) == (other.Hi < 0) && (sum.Hi < 0) != (d.Hi < 0) {
+		return sum, false
+	}
+	return sum, true
+}
+
 // Sub returns d - other.
 func (d Int128) Sub(other Int128) Int128 {
 	return d.Add(other.Neg())
@@ -208,6 +229,97 @@ func (d Int128) BigInt() *big.Int {
 	b := new(big.Int).SetInt64(d.Hi)
 	b.Lsh(b, 64)
 	return b.Add(b, new(big.Int).SetUint64(d.Lo))
+}
+
+// MaxDecimalScale and MaxDecimalPrecision are the widest DECIMAL an Int128
+// carrier can hold: 10^38 < 2^127, 10^39 is not.
+const (
+	MaxDecimalPrecision = 38
+	MaxDecimalScale     = 38
+)
+
+// AvgScaleIncrement is how many fractional digits AVG(DECIMAL) adds to its
+// input's scale.
+//
+// The contract (ADR-0012 item 9, the AVG bullet): AVG over a DECIMAL is
+// EXACT numeric division rounded half-away-from-zero at scale+4, the rule
+// Spark and SQL Server use.
+// PostgreSQL instead picks a scale giving at least 16 significant digits (and
+// never below the dividend's own scale), so the two agree to at least
+// min(both scales) and differ only in how many digits past that they keep.
+// A fixed increment is the honest choice for an engine whose numeric carrier
+// is 128 bits wide: the digits kept do not depend on the magnitude of the
+// answer, so the same query over more rows cannot silently change the scale
+// of its own output column.
+const AvgScaleIncrement = 4
+
+// AvgScale returns the scale AVG emits over a DECIMAL input of this scale.
+func AvgScale(inScale int) int {
+	s := inScale + AvgScaleIncrement
+	if s > MaxDecimalScale {
+		s = MaxDecimalScale
+	}
+	if s < 0 {
+		s = 0
+	}
+	return s
+}
+
+// DecimalAvg divides an exact DECIMAL sum by a row count, returning the
+// unscaled quotient at scale+addScale, rounded half away from zero (which is
+// what PostgreSQL's numeric rounding does, and what DECIMAL casts here do).
+//
+// ok=false means the exact quotient has no Int128 — the caller must report an
+// error rather than an approximation. That is reachable even when the SUM
+// itself fit: scaling by 10^addScale is a multiplication, so a sum near the
+// top of the range with a small count has no representable average.
+func DecimalAvg(sum Int128, count int64, addScale int) (Int128, bool) {
+	if count <= 0 || addScale < 0 {
+		return Int128{}, false
+	}
+	// Fast path: the scaled dividend fits an int64, so the whole division is
+	// two machine instructions. count < 2^62 keeps the rounding comparison
+	// (2*rem vs count) inside int64 — a row count past that is not reachable.
+	if scaled, ok := sum.MulPow10(addScale); ok && scaled.FitsInt64() && count < 1<<62 {
+		n := scaled.ToInt64()
+		q, rem := n/count, n%count
+		if rem < 0 {
+			rem = -rem
+		}
+		if rem*2 >= count {
+			if n < 0 {
+				q--
+			} else {
+				q++
+			}
+		}
+		return Int128From(q), true
+	}
+	// Wide path: exact big.Int division, then the same half-away-from-zero
+	// rounding. Reached only by DECIMALs past 18 digits, which is where a
+	// float64 quotient would have lost the digits this whole path exists for.
+	num := sum.BigInt()
+	num.Mul(num, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(addScale)), nil))
+	den := big.NewInt(count)
+	q, rem := new(big.Int).QuoRem(num, den, new(big.Int))
+	rem.Abs(rem)
+	if rem.Lsh(rem, 1).Cmp(den) >= 0 {
+		if num.Sign() < 0 {
+			q.Sub(q, big.NewInt(1))
+		} else {
+			q.Add(q, big.NewInt(1))
+		}
+	}
+	if !fitsInt128(q) {
+		return Int128{}, false
+	}
+	return int128FromBig(q), true
+}
+
+// fitsInt128 reports whether b is representable as a signed 128-bit integer.
+func fitsInt128(b *big.Int) bool {
+	return b.BitLen() < 128 || (b.Sign() < 0 && b.BitLen() == 128 &&
+		b.CmpAbs(new(big.Int).Lsh(big.NewInt(1), 127)) == 0)
 }
 
 // FormatDecimal renders the unscaled value as a decimal string at the given

@@ -10135,10 +10135,10 @@ func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 // aggSpecOutputType declares the output type of one aggregate over the
 // subtree rooted at the Aggregate node that owns it.
 //
-// Every family except MIN/MAX is input-independent in this engine — SUM and
-// AVG finalize to float64 whatever they summed, COUNT to int64 — so
-// aggOutputType alone is exact, and it is the same declaration the
-// single-process pipeline compiles into exec.AggColumn.OutputType.
+// COUNT is input-independent in this engine, so aggOutputType alone is exact
+// for it, and it is the same declaration the single-process pipeline compiles
+// into exec.AggColumn.OutputType. SUM and AVG are input-independent for every
+// type but DECIMAL, over which they answer in DECIMAL (#455).
 //
 // MIN/MAX are the exception, and MIN_BY/MAX_BY with them: their output IS
 // their (first) input's type, which exec.HashAggregate resolves from the
@@ -10154,19 +10154,43 @@ func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 // declaration goes missing on exactly one path (#354, #371).
 func aggSpecOutputType(node *logical.Node, agg logical.AggExpr) (parquet.TypeID, bool) {
 	fn := strings.ToLower(strings.TrimSpace(agg.Func))
+	// SUM and AVG join the input-dependent list for ONE input type: over a
+	// DECIMAL column they answer in DECIMAL, exactly (#455). Over everything
+	// else they are still float64, and an input this cannot resolve — a
+	// derived expression, a name no scan below carries, the partial's output
+	// column read by a final aggregate — keeps that float64 declaration
+	// rather than becoming undeclared, which is what it has always been.
+	decimalCapable := false
 	switch fn {
 	case "min", "max", "min_by", "max_by":
+	case "sum", "avg":
+		decimalCapable = true
 	default:
 		return aggOutputType(agg.Func, agg.Distinct), true
 	}
+	unresolved := func() (parquet.TypeID, bool) {
+		if decimalCapable {
+			return aggOutputType(agg.Func, agg.Distinct), true
+		}
+		return 0, false
+	}
 	if agg.InputExpr != nil {
 		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
-			return 0, false
+			return unresolved()
 		}
 	}
 	in, ok := scanColumnType(node, agg.InputCol)
 	if !ok {
-		return 0, false
+		return unresolved()
+	}
+	if decimalCapable {
+		if in == parquet.TypeDecimal {
+			// exec.HashAggregate fills in the precision and scale from the
+			// vector it observes (outputSchema); the TYPE is what has to
+			// agree between the two paths at plan time.
+			return parquet.TypeDecimal, true
+		}
+		return aggOutputType(agg.Func, agg.Distinct), true
 	}
 	if fn == "min_by" || fn == "max_by" {
 		// The VALUE's type, for every type there is. MIN_BY/MAX_BY hand the
@@ -10214,6 +10238,11 @@ func minMaxDeclaredType(in parquet.TypeID) parquet.TypeID {
 		return parquet.TypeBool
 	case parquet.TypeInt64, parquet.TypeInt32:
 		return parquet.TypeInt64
+	case parquet.TypeDecimal:
+		// MIN/MAX of a DECIMAL is a value the column HOLDS, so it answers in
+		// DECIMAL — the accumulator was always an exact Int128 and only the
+		// declaration said float64, which is where the digits went (#455).
+		return parquet.TypeDecimal
 	case parquet.TypeArray, parquet.TypeRow, parquet.TypeMap, parquet.TypeVector:
 		// A container MIN/MAX answers with an input VALUE (#426), so its
 		// declaration is the input's own — the MIN_BY rule above. A

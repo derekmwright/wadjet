@@ -1730,15 +1730,36 @@ func (c *Coordinator) mergeScalarAggregates(batches []*batch.RecordBatch, column
 	}
 
 	// Merge into single row
+	schema := batches[0].Schema
 	merged := make(map[string]any, len(columns))
 	for _, ae := range mi.AggExprs {
 		idx, ok := colIdx[ae.OutputCol]
 		if !ok {
 			continue
 		}
-		_ = idx
 
-		switch strings.ToLower(ae.Func) {
+		fn := strings.ToLower(ae.Func)
+
+		// A DECIMAL partial is boxed as its TEXT by ToRows, so the float
+		// arms below would round it and the string comparison in
+		// compareAnyValues would order "9.5" after "10.2". Merge those
+		// exactly, in the Int128 the value came from (#455).
+		//
+		// Only the aggregates this merge can actually FOLD take that path.
+		// AVG is not one of them: a mean of means is not the mean, so the
+		// default arm's "first non-nil partial" stands — wrong in the same
+		// way it has always been on this legacy path, rather than newly
+		// wrong by a different amount.
+		if idx < len(schema) && schema[idx].Type == parquet.TypeDecimal && decimalFoldable(fn) {
+			if v, ok := mergeDecimalPartials(rows, ae.OutputCol, schema[idx].Scale, fn); ok {
+				merged[ae.OutputCol] = v
+			} else {
+				merged[ae.OutputCol] = nil
+			}
+			continue
+		}
+
+		switch fn {
 		case "sum", "count":
 			var total float64
 			for _, row := range rows {
@@ -1789,6 +1810,70 @@ func (c *Coordinator) mergeScalarAggregates(batches []*batch.RecordBatch, column
 	}
 
 	return []*batch.RecordBatch{batch.FromRows(batches[0].Schema, []map[string]any{merged})}
+}
+
+// decimalFoldable reports whether mergeDecimalPartials can fold this
+// aggregate across worker partials. SUM and COUNT add, MIN and MAX pick; AVG,
+// STDDEV and the rest need state the partials do not carry, so they keep the
+// caller's existing (approximate) handling instead of being folded wrongly.
+func decimalFoldable(fn string) bool {
+	switch fn {
+	case "sum", "count", "min", "max":
+		return true
+	}
+	return false
+}
+
+// mergeDecimalPartials folds one DECIMAL aggregate column across partial rows,
+// exactly. The cells are the text form ToRows produces for a DECIMAL, so they
+// are parsed back at the column's scale, folded as Int128 and re-rendered —
+// no float64 anywhere on the path. ok=false means every partial was NULL.
+//
+// SUM overflow answers NULL rather than the wrapped total, for the reason
+// exec.decimalSumOverflow states: a wrapped sum is a different number wearing
+// the right type. It is not the query ERROR the engine raises for the same
+// condition, because this legacy probe-split merge has no error channel —
+// "no value" is the closest honest answer it can give.
+func mergeDecimalPartials(rows []map[string]any, col string, scale int, fn string) (any, bool) {
+	var acc batch.Int128
+	seen := false
+	for _, row := range rows {
+		v := row[col]
+		if v == nil {
+			continue
+		}
+		text, isText := v.(string)
+		if !isText {
+			// Not the text box a DECIMAL column produces — leave the value
+			// alone rather than guess at its shape.
+			return v, true
+		}
+		d := batch.ParseDecimalString(text, scale)
+		if !seen {
+			acc, seen = d, true
+			continue
+		}
+		switch fn {
+		case "min":
+			if d.Less(acc) {
+				acc = d
+			}
+		case "max":
+			if acc.Less(d) {
+				acc = d
+			}
+		default: // sum, count — decimalFoldable admits nothing else
+			sum, ok := acc.AddChecked(d)
+			if !ok {
+				return nil, false
+			}
+			acc = sum
+		}
+	}
+	if !seen {
+		return nil, false
+	}
+	return acc.FormatDecimal(scale), true
 }
 
 // compareAnyValues compares two values for min/max merge.
@@ -1853,24 +1938,63 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 		}
 		return cur
 	}
+	// A DECIMAL agg column folds in Int128, not float64: the whole reason
+	// SUM/MIN/MAX over a DECIMAL answer in DECIMAL is that the digits are
+	// exact, and a float64 round-trip through this merge would drop them on
+	// the probe-split path only (#455). decMergeFn is nil for every other
+	// type, which is the flag that keeps the float path unchanged.
+	//
+	// Unlike the engine's own accumulator this merge cannot RAISE on an
+	// Int128 overflow — it has no error channel — so decSum wraps, as every
+	// other aggregate on this path already does past its type's range (an
+	// int64 SUM here is folded in float64). The DAG path, which is where a
+	// distributed aggregate normally runs, reports the overflow.
+	type decMergeFn func(cur, in batch.Int128) batch.Int128
+	decSum := func(cur, in batch.Int128) batch.Int128 { return cur.Add(in) }
+	decMin := func(cur, in batch.Int128) batch.Int128 {
+		if in.Less(cur) {
+			return in
+		}
+		return cur
+	}
+	decMax := func(cur, in batch.Int128) batch.Int128 {
+		if cur.Less(in) {
+			return in
+		}
+		return cur
+	}
 	type aggCol struct {
 		idx     int
 		mergeFn aggMergeFn
+		decFn   decMergeFn
 	}
 	var aggCols []aggCol
+	anyDec := false
 	for _, ae := range mi.AggExprs {
 		idx, ok := colIdx[ae.OutputCol]
 		if !ok {
 			continue
 		}
 		merge := sumMerge // COUNT, SUM → SUM
+		var dec decMergeFn
+		isDec := idx < len(batches[0].Schema) && batches[0].Schema[idx].Type == parquet.TypeDecimal
+		if isDec {
+			dec = decSum
+		}
 		switch strings.ToLower(ae.Func) {
 		case "min":
 			merge = minMerge
+			if isDec {
+				dec = decMin
+			}
 		case "max":
 			merge = maxMerge
+			if isDec {
+				dec = decMax
+			}
 		}
-		aggCols = append(aggCols, aggCol{idx: idx, mergeFn: merge})
+		anyDec = anyDec || dec != nil
+		aggCols = append(aggCols, aggCol{idx: idx, mergeFn: merge, decFn: dec})
 	}
 
 	if len(aggCols) == 0 {
@@ -1964,7 +2088,10 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 		sourceBatch *batch.RecordBatch
 		sourceRow   int
 		aggVals     []float64
-		rank        int
+		// aggDecs is allocated only when some aggregate column is DECIMAL;
+		// its entries are meaningful exactly where aggCols[ai].decFn != nil.
+		aggDecs []batch.Int128
+		rank    int
 	}
 
 	// Per-batch global row offset, so a group's first-occurrence position has a
@@ -2006,13 +2133,29 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 					for ai, ext := range aggExtractors {
 						aggVals[ai] = ext(b, row)
 					}
-					mr = &mergedRow{sourceBatch: b, sourceRow: row, aggVals: aggVals, rank: batchStart[bi] + ri}
+					var aggDecs []batch.Int128
+					if anyDec {
+						aggDecs = make([]batch.Int128, len(aggCols))
+						for ai, ac := range aggCols {
+							if ac.decFn != nil {
+								aggDecs[ai] = b.Columns[ac.idx].DecimalData.Data[row]
+							}
+						}
+					}
+					mr = &mergedRow{sourceBatch: b, sourceRow: row, aggVals: aggVals, aggDecs: aggDecs, rank: batchStart[bi] + ri}
 					groups[key] = mr
 					*ordered = append(*ordered, mr)
 					continue
 				}
 				for ai, ext := range aggExtractors {
 					mr.aggVals[ai] = aggCols[ai].mergeFn(mr.aggVals[ai], ext(b, row))
+				}
+				if anyDec {
+					for ai, ac := range aggCols {
+						if ac.decFn != nil {
+							mr.aggDecs[ai] = ac.decFn(mr.aggDecs[ai], b.Columns[ac.idx].DecimalData.Data[row])
+						}
+					}
 				}
 			}
 		}
@@ -2063,6 +2206,10 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 			copyVectorValue(result.Columns[ci], ri, mr.sourceBatch.Columns[ci], mr.sourceRow, schema[ci].Type)
 		}
 		for ai, ac := range aggCols {
+			if ac.decFn != nil {
+				result.Columns[ac.idx].DecimalData.Data[ri] = mr.aggDecs[ai]
+				continue
+			}
 			setFloat64Value(result.Columns[ac.idx], ri, mr.aggVals[ai], schema[ac.idx].Type)
 		}
 		for ci := range schema {
@@ -2432,6 +2579,13 @@ func setFloat64Value(vec *batch.Vector, row int, val float64, typ parquet.TypeID
 		vec.Float32Data[row] = float32(val)
 	case parquet.TypeFloat64:
 		vec.Float64Data[row] = val
+	case parquet.TypeDecimal:
+		// Unreachable from reAggregatePartials, which folds every DECIMAL
+		// agg column in Int128 and never reaches this writer (#455). Kept
+		// so that a future caller writing a float64 into a DECIMAL column
+		// lands on a lossy value rather than on the silent all-zeroes a
+		// missing arm produced.
+		vec.DecimalData.Data[row] = batch.Int128FromFloat64(val, vec.DecimalData.Scale)
 	}
 }
 

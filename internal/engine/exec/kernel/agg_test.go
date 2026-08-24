@@ -344,6 +344,9 @@ func TestFinalMax(t *testing.T) {
 	})
 }
 
+// A DECIMAL aggregate finalizes as the value's TEXT, not as a float64: the
+// box has to survive an output vector at a different scale, and the whole
+// point of #455 is that the digits past the 16th are still there.
 func TestFinalSumDecimal(t *testing.T) {
 	acc := Accumulator{
 		SumDec:    batch.Int128From(1000),
@@ -351,16 +354,41 @@ func TestFinalSumDecimal(t *testing.T) {
 		IsDecimal: true,
 		DecScale:  2,
 	}
-	result := acc.FinalSum()
-	if result == nil {
-		t.Fatal("expected non-nil")
-	}
-	// 1000 with scale 2 = 10.0
-	if result.(float64) != 10.0 {
-		t.Fatalf("expected 10.0, got %v", result)
+	if got := acc.FinalSum(); got != "10.00" {
+		t.Fatalf("FinalSum() = %#v, want \"10.00\" (unscaled 1000 at scale 2)", got)
 	}
 }
 
+// A sum 25 digits wide: the value #455 opens with, which no float64 holds.
+func TestFinalSumDecimalPast64Bits(t *testing.T) {
+	sum := batch.ParseDecimalString("977777777887777.7577887713", 10)
+	acc := Accumulator{SumDec: sum, Count: 1, IsDecimal: true, DecScale: 10}
+	if got := acc.FinalSum(); got != "977777777887777.7577887713" {
+		t.Fatalf("FinalSum() = %#v, want the exact 25-digit value", got)
+	}
+}
+
+func TestFinalSumDecimalOverflowIsFlagged(t *testing.T) {
+	// Two values just under 2^126 each: their exact sum has no Int128.
+	big := batch.Int128{Hi: 1 << 62, Lo: 0}
+	var acc Accumulator
+	acc.IsDecimal, acc.DecScale = true, 0
+	for i := 0; i < 3; i++ {
+		sum, ok := acc.SumDec.AddChecked(big)
+		acc.SumDec = sum
+		if !ok {
+			acc.DecOverflow = true
+		}
+		acc.Count++
+	}
+	if !acc.DecOverflow {
+		t.Fatal("three additions of 2^126 did not report an Int128 overflow")
+	}
+}
+
+// AVG over a DECIMAL divides exactly and widens the scale by
+// batch.AvgScaleIncrement — 1000/2 at scale 2 is 5.000000, rendered at the
+// output's full scale 6 (#453: a numeric(p,s) renders at its declared scale).
 func TestFinalAvgDecimal(t *testing.T) {
 	acc := Accumulator{
 		SumDec:    batch.Int128From(1000),
@@ -368,10 +396,33 @@ func TestFinalAvgDecimal(t *testing.T) {
 		IsDecimal: true,
 		DecScale:  2,
 	}
-	result := acc.FinalAvg()
-	// 1000 / 2 with scale 2 = 10.0 / 2.0 = 5.0
-	if result.(float64) != 5.0 {
-		t.Fatalf("expected 5.0, got %v", result)
+	if got := acc.FinalAvg(); got != "5.000000" {
+		t.Fatalf("FinalAvg() = %#v, want \"5.000000\"", got)
+	}
+}
+
+// The division that a float64 cannot do: 1/3 at scale 2 keeps six places.
+func TestFinalAvgDecimalKeepsFourExtraDigits(t *testing.T) {
+	acc := Accumulator{SumDec: batch.Int128From(100), Count: 3, IsDecimal: true, DecScale: 2}
+	if got := acc.FinalAvg(); got != "0.333333" {
+		t.Fatalf("FinalAvg() = %#v, want \"0.333333\" (1.00/3 at scale 2+4)", got)
+	}
+}
+
+// Half-away-from-zero, in both directions: 5/2 at scale 0 rounds to 3 at
+// scale 4 only if the extra digits are kept, so the case that pins the
+// rounding is one whose exact quotient needs a fifth place.
+func TestFinalAvgDecimalRoundsHalfAwayFromZero(t *testing.T) {
+	// 1 / 8 = 0.125 exactly at scale 3; at scale 0+4 = 4 there is nothing to
+	// round. 1 / 16 = 0.0625, also exact. 1 / 32 = 0.03125 needs a fifth
+	// place and rounds away from zero to 0.0313.
+	pos := Accumulator{SumDec: batch.Int128From(1), Count: 32, IsDecimal: true, DecScale: 0}
+	if got := pos.FinalAvg(); got != "0.0313" {
+		t.Fatalf("FinalAvg() = %#v, want \"0.0313\"", got)
+	}
+	neg := Accumulator{SumDec: batch.Int128From(-1), Count: 32, IsDecimal: true, DecScale: 0}
+	if got := neg.FinalAvg(); got != "-0.0313" {
+		t.Fatalf("FinalAvg() = %#v, want \"-0.0313\"", got)
 	}
 }
 

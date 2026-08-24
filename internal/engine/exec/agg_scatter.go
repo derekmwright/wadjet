@@ -44,6 +44,13 @@ type flatAccumArrays struct {
 	isFloat   bool
 	isDecimal bool
 	decScale  int
+	// sumDecOverflow marks that at least one group's DECIMAL SUM left the
+	// 128-bit range in this operator. Per COLUMN rather than per group: one
+	// wrapped sum fails the whole query (#455), so a bool is the whole
+	// answer and a []bool would be a per-group array of zeroes. Merged by
+	// mergeFlatAccs and copied onto every accumulator loadAccFromFlat
+	// builds, which is where the emit path reads it.
+	sumDecOverflow bool
 }
 
 // countArrayOf resolves the count array an aggregate reads, following the
@@ -327,43 +334,58 @@ func scatterSumFloatNoCount[T ~float32 | ~float64 | ~int64](sumArr []float64, da
 	}
 }
 
-func scatterSumDecimal(sumArr []batch.Int128, countArr []int64, data []batch.Int128, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
+// scatterSumDecimal returns whether any group's sum left the Int128 range —
+// the caller ORs it into flatAccumArrays.sumDecOverflow, and the emit path
+// turns that into a query error rather than writing the wrapped value (#455).
+func scatterSumDecimal(sumArr []batch.Int128, countArr []int64, data []batch.Int128, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) bool {
 	hasNulls := nulls.HasNulls()
+	overflow := false
 	if sel != nil {
 		for si := range sel {
 			row := int(sel[si])
 			if idx := gi[si]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
-				sumArr[idx] = sumArr[idx].Add(data[row])
+				sum, ok := sumArr[idx].AddChecked(data[row])
+				sumArr[idx] = sum
+				overflow = overflow || !ok
 				countArr[idx]++
 			}
 		}
 	} else {
 		for row := 0; row < n; row++ {
 			if idx := gi[row]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
-				sumArr[idx] = sumArr[idx].Add(data[row])
+				sum, ok := sumArr[idx].AddChecked(data[row])
+				sumArr[idx] = sum
+				overflow = overflow || !ok
 				countArr[idx]++
 			}
 		}
 	}
+	return overflow
 }
 
 // scatterSumDecimalNoCount is scatterSumDecimal for a count-sharing aggregate.
-func scatterSumDecimalNoCount(sumArr []batch.Int128, data []batch.Int128, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
+func scatterSumDecimalNoCount(sumArr []batch.Int128, data []batch.Int128, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) bool {
 	hasNulls := nulls.HasNulls()
+	overflow := false
 	if sel != nil {
 		for si := range sel {
 			row := int(sel[si])
 			if idx := gi[si]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
-				sumArr[idx] = sumArr[idx].Add(data[row])
+				sum, ok := sumArr[idx].AddChecked(data[row])
+				sumArr[idx] = sum
+				overflow = overflow || !ok
 			}
 		}
 	} else {
 		for row := 0; row < n; row++ {
 			if idx := gi[row]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
-				sumArr[idx] = sumArr[idx].Add(data[row])
+				sum, ok := sumArr[idx].AddChecked(data[row])
+				sumArr[idx] = sum
+				overflow = overflow || !ok
 			}
 		}
 	}
+	return overflow
 }
 
 func scatterCount(countArr []int64, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
@@ -587,7 +609,9 @@ func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batc
 		case batch.TypeFloat32:
 			scatterSumFloat(fa.sumF64, fa.count, col.Float32Data, gi, &col.Nulls, sel, n)
 		case batch.TypeDecimal:
-			scatterSumDecimal(fa.sumDec, fa.count, col.DecimalData.Data, gi, &col.Nulls, sel, n)
+			if scatterSumDecimal(fa.sumDec, fa.count, col.DecimalData.Data, gi, &col.Nulls, sel, n) {
+				fa.sumDecOverflow = true
+			}
 		}
 	case AggSum:
 		switch col.Type {
@@ -600,7 +624,9 @@ func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batc
 		case batch.TypeFloat32:
 			scatterSumFloat(fa.sumF64, fa.count, col.Float32Data, gi, &col.Nulls, sel, n)
 		case batch.TypeDecimal:
-			scatterSumDecimal(fa.sumDec, fa.count, col.DecimalData.Data, gi, &col.Nulls, sel, n)
+			if scatterSumDecimal(fa.sumDec, fa.count, col.DecimalData.Data, gi, &col.Nulls, sel, n) {
+				fa.sumDecOverflow = true
+			}
 		}
 	case AggCount:
 		scatterCount(fa.count, gi, &col.Nulls, sel, n)
@@ -657,7 +683,9 @@ func scatterFlatAggUpdateNoCount(fa *flatAccumArrays, gi []int32, fn AggFunc, co
 		case batch.TypeFloat32:
 			scatterSumFloatNoCount(fa.sumF64, col.Float32Data, gi, &col.Nulls, sel, n)
 		case batch.TypeDecimal:
-			scatterSumDecimalNoCount(fa.sumDec, col.DecimalData.Data, gi, &col.Nulls, sel, n)
+			if scatterSumDecimalNoCount(fa.sumDec, col.DecimalData.Data, gi, &col.Nulls, sel, n) {
+				fa.sumDecOverflow = true
+			}
 		}
 		return
 	}
@@ -671,6 +699,8 @@ func scatterFlatAggUpdateNoCount(fa *flatAccumArrays, gi []int32, fn AggFunc, co
 	case batch.TypeFloat32:
 		scatterSumFloatNoCount(fa.sumF64, col.Float32Data, gi, &col.Nulls, sel, n)
 	case batch.TypeDecimal:
-		scatterSumDecimalNoCount(fa.sumDec, col.DecimalData.Data, gi, &col.Nulls, sel, n)
+		if scatterSumDecimalNoCount(fa.sumDec, col.DecimalData.Data, gi, &col.Nulls, sel, n) {
+			fa.sumDecOverflow = true
+		}
 	}
 }

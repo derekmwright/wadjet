@@ -643,6 +643,20 @@ func (o *postgresOracle) copyInto(ctx context.Context, table string, rows []map[
 // deliberate: it is the same path a Go client takes, so a value this arm
 // compares is a value a client would actually see.
 func (o *postgresOracle) runPostgres(ctx context.Context, sql string) ([]map[string]any, []string, error) {
+	return o.runPostgresBoxed(ctx, sql, false)
+}
+
+// runPostgresExact is runPostgres with NUMERIC values kept as their exact
+// decimal text instead of flattened to float64. Used by the corpus entries
+// that compare a DECIMAL aggregate as a VALUE (pgCase.exactNumeric): a
+// float64 rendering cannot hold what a numeric(38,10) carries, which is the
+// whole of #455 — an oracle that rounds both sides to six significant digits
+// can only report that the two agree about the first six.
+func (o *postgresOracle) runPostgresExact(ctx context.Context, sql string) ([]map[string]any, []string, error) {
+	return o.runPostgresBoxed(ctx, sql, true)
+}
+
+func (o *postgresOracle) runPostgresBoxed(ctx context.Context, sql string, exact bool) ([]map[string]any, []string, error) {
 	rows, err := o.conn.Query(ctx, sql)
 	if err != nil {
 		return nil, nil, err
@@ -662,7 +676,14 @@ func (o *postgresOracle) runPostgres(ctx context.Context, sql string) ([]map[str
 		}
 		m := make(map[string]any, len(cols))
 		for i, col := range cols {
-			m[col] = normalizePostgresValue(normalizeTemporal(fields[i].DataTypeOID, vals[i]))
+			v := normalizeTemporal(fields[i].DataTypeOID, vals[i])
+			if exact {
+				if text, ok := exactNumericText(v); ok {
+					m[col] = text
+					continue
+				}
+			}
+			m[col] = normalizePostgresValue(v)
 		}
 		out = append(out, m)
 	}
@@ -726,6 +747,28 @@ func normalizeTemporal(oid uint32, v any) any {
 	default:
 		return v
 	}
+}
+
+// exactNumericText renders a PostgreSQL NUMERIC as its exact decimal digits.
+// pgtype.Numeric carries the value as (Int, Exp) — Int x 10^Exp — which is
+// exactly the unscaled-integer-plus-scale form a DECIMAL column holds, so no
+// float64 is involved anywhere on this path.
+//
+// ok=false for anything that is not a finite numeric; the caller falls back
+// to the ordinary float flattening.
+func exactNumericText(v any) (string, bool) {
+	n, ok := v.(pgtype.Numeric)
+	if !ok || !n.Valid || n.NaN || n.Int == nil || n.InfinityModifier != pgtype.Finite {
+		return "", false
+	}
+	unscaled := new(big.Int).Set(n.Int)
+	scale := 0
+	if n.Exp < 0 {
+		scale = int(-n.Exp)
+	} else if n.Exp > 0 {
+		unscaled.Mul(unscaled, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n.Exp)), nil))
+	}
+	return canonicalDecimalText(unscaled, scale), true
 }
 
 func numericFloat(v any) (float64, bool) {

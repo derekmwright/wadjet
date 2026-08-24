@@ -24,26 +24,27 @@ import (
 // output type from the value's own observed type (aggregate.go, the
 // AggMinBy/AggMaxBy case), so a wrong declaration for that function can no
 // longer reach SetValue. MIN/MAX get the same correction for every type
-// minMaxOutputType answers ok for — since #417 that is all eighteen flat
-// types — so the stand-in has to be a type it still DECLINES. DECIMAL is
-// one: its accumulator finalizes MinDec through ToFloat64, so the output is
-// already a float64 and the planner's declaration is left standing.
-// Declaring it as something SetValue does not accept a float64 into (IPv6,
-// whose arm takes only string/[]byte) still hits the #361 guard on the
-// parallel-emit goroutine, so it stands in for "some future declaration bug
-// reaches this write" — which is what this test is actually about,
-// independent of which specific bug last supplied the reproduction. It was
-// DURATION until #417 put DURATION on the corrected list.
+// minMaxOutputType answers ok for — since #417 that is the flat types and
+// since #455 DECIMAL too, which is now all 22 — so the stand-in has to be an
+// aggregate whose declaration nothing corrects. SUM and AVG are those:
+// outputSchema overrides them only over a DECIMAL input (#455), so AVG over
+// an INT64 column keeps whatever the planner declared. Declaring it as
+// something SetValue does not accept a float64 into (IPv6, whose arm takes
+// only string/[]byte) hits the #361 guard on the parallel-emit goroutine, so
+// it stands in for "some future declaration bug reaches this write" — which
+// is what this test is actually about, independent of which specific bug
+// last supplied the reproduction. It was DURATION until #417 put DURATION on
+// the corrected list, and MIN(DECIMAL) until #455 did the same for DECIMAL.
 //
 // Before the fix this test does not fail — it takes the test binary down.
 func TestParallelEmitPanicBecomesQueryError(t *testing.T) {
 	ctx := context.Background()
 	schema := []parquet.Column{
 		{Name: "k", Type: parquet.TypeInt64, Nullable: true},
-		{Name: "s", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true},
+		{Name: "n", Type: parquet.TypeInt64, Nullable: true},
 	}
 	aggs := []AggColumn{
-		{Func: AggMin, InputCol: "s", OutputCol: "mb", OutputType: parquet.TypeIPv6},
+		{Func: AggAvg, InputCol: "n", OutputCol: "mb", OutputType: parquet.TypeIPv6},
 	}
 
 	const nUnits = 4
@@ -63,7 +64,7 @@ func TestParallelEmitPanicBecomesQueryError(t *testing.T) {
 	}
 	for g := 0; g < 64; g++ {
 		u := g % nUnits
-		rows := []map[string]any{{"k": int64(g), "s": int64(g)}}
+		rows := []map[string]any{{"k": int64(g), "n": int64(g)}}
 		if err := units[u].Consume(ctx, batch.FromRows(schema, rows)); err != nil {
 			t.Fatal(err)
 		}

@@ -169,6 +169,8 @@ type HashAggregate struct {
 	groupColMeta      []parquet.Column        // full input column metadata per group col (Decimal Scale/Precision survive into outputSchema)
 	aggInputTypes     []batch.TypeID          // observed input column type per aggregate (0 = unresolved)
 	aggInputMeta      []parquet.Column        // full input column metadata per aggregate (MIN/MAX over a container and MIN_BY/MAX_BY re-emit their input's Scale/Fields/ElementType/Dimension)
+	aggInputDecScale  []int                   // DECIMAL input scale per aggregate, read from the VECTOR (not the schema column) so the declared output scale is the one the Int128 accumulator actually counts in (#455)
+	hasDecAggInput    bool                    // any aggregate reads a DECIMAL column — gates the per-batch scale reconciliation in Consume
 	aggBoxedMinMax    []bool                  // per aggregate: MIN/MAX over ARRAY/ROW/MAP/VECTOR, which retains a value instead of filling an Accumulator slot (#426)
 	hasBoxedMinMax    bool                    // any aggBoxedMinMax entry is set — one bool so the row and finalize loops pay a single load when none is
 	aggUpdaters       []kernel.RowAggUpdater  // resolved typed updaters
@@ -1245,6 +1247,32 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 		}
 	}
 
+	// A DECIMAL aggregate's SCALE is learned from the input vector, and one
+	// kind of input batch carries a scale that is not its column's: the
+	// identity row an ungrouped aggregate emits when it consumed no rows at
+	// all. That row has no input schema to read a scale from, so it ships
+	// zero — and a downstream merge that adopted it would render every later
+	// value 10^scale too large. Preferring the first NONZERO observation
+	// costs a genuinely scale-0 column nothing (it reports 0 in every batch)
+	// and is the only reachable case where two batches of one aggregate
+	// disagree (#455).
+	if h.hasDecAggInput {
+		for i, ci := range h.aggColIdx {
+			if i >= len(h.aggInputDecScale) || h.aggInputDecScale[i] != 0 ||
+				ci < 0 || ci >= len(b.Columns) {
+				continue
+			}
+			c := b.Columns[ci]
+			if c.Type != batch.TypeDecimal || c.DecimalData.Scale == 0 {
+				continue
+			}
+			h.aggInputDecScale[i] = c.DecimalData.Scale
+			if i < len(h.intFlatAccs) && h.intFlatAccs[i].isDecimal && h.intFlatAccs[i].decScale == 0 {
+				h.intFlatAccs[i].decScale = c.DecimalData.Scale
+			}
+		}
+	}
+
 	// Spill decision is based on current group state size, not input
 	// throughput. Input batches are transient — they're GC'd after Consume
 	// returns. Only the hash table + accumulator arrays persist, and
@@ -1426,6 +1454,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 	h.aggColIdx2 = make([]int, len(h.Aggs))
 	h.aggInputTypes = make([]batch.TypeID, len(h.Aggs))
 	h.aggInputMeta = make([]parquet.Column, len(h.Aggs))
+	h.aggInputDecScale = make([]int, len(h.Aggs))
 	h.aggUpdaters = make([]kernel.RowAggUpdater, len(h.Aggs))
 	h.aggUpdatersNoNull = make([]kernel.RowAggUpdater, len(h.Aggs))
 	h.batchUpdaters = make([]kernel.RowAggUpdater, len(h.Aggs))
@@ -1458,6 +1487,16 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 			h.aggInputTypes[i] = b.Columns[idx].Type
 			if idx < len(b.Schema) {
 				h.aggInputMeta[i] = b.Schema[idx]
+			}
+			if b.Columns[idx].Type == batch.TypeDecimal {
+				h.hasDecAggInput = true
+				// The VECTOR's scale, not the schema column's: the
+				// accumulators count in the vector's scale (initFlatAccums,
+				// kernel.sumRowDecimal), so declaring anything else would
+				// emit an Int128 that means 10^(difference) times the
+				// answer. The two agree everywhere they are both set; this
+				// reads the one that is load-bearing.
+				h.aggInputDecScale[i] = b.Columns[idx].DecimalData.Scale
 			}
 			h.aggUpdaters[i] = resolveAggUpdater(agg.Func, b.Columns[idx].Type)
 			h.aggUpdatersNoNull[i] = resolveAggUpdaterNoNull(agg.Func, b.Columns[idx].Type)
@@ -4458,6 +4497,9 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 		h.outputPos = 1
 		out := batch.NewRecordBatch(h.emitOutputSchema(), 1)
 		for j, agg := range h.Aggs {
+			if err := h.decAggErr(&h.scalarAccs[j], j, agg.Func); err != nil {
+				return nil, err
+			}
 			result := finalizeKernelAcc(&h.scalarAccs[j], agg.Func)
 			out.Columns[j].SetValue(0, result)
 		}
@@ -4678,6 +4720,9 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 				// return type and Vector.SetValue's type switch — saves one
 				// box per (row × simple-agg-col) at SF100 scale.
 				if ext != nil && ext.accs != nil {
+					if err := h.decAggErr(&ext.accs[j], j, agg.Func); err != nil {
+						return nil, err
+					}
 					writeAccToColumn(out.Columns[colIdx], i, &ext.accs[j], agg.Func)
 				} else {
 					// SoA flat-arrays path: synthesize a stack-only Accumulator
@@ -4686,6 +4731,9 @@ func (h *HashAggregate) nextOwn(_ context.Context) (*batch.RecordBatch, error) {
 					// retain it), so this is alloc-free.
 					var acc kernel.Accumulator
 					loadAccFromFlat(&h.intFlatAccs[j], countArrayOf(h.intFlatAccs, j), start+i, &acc)
+					if err := h.decAggErr(&acc, j, agg.Func); err != nil {
+						return nil, err
+					}
 					writeAccToColumn(out.Columns[colIdx], i, &acc, agg.Func)
 				}
 			}
@@ -4837,10 +4885,11 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 			}
 		case AggMin, AggMax:
 			// MIN/MAX preserve their input's type. The planner declares
-			// float64 for the types whose ACCUMULATOR finalizes as a float
-			// (Decimal via ToFloat64); override from the type observed at
-			// Consume so MIN(url) emits a string and MIN(date) stays a date
-			// instead of surfacing raw epoch days.
+			// float64 for the types whose ACCUMULATOR used to finalize as a
+			// float; override from the type observed at Consume so MIN(url)
+			// emits a string, MIN(date) stays a date instead of surfacing
+			// raw epoch days, and MIN(dec) stays a DECIMAL instead of the
+			// float64 that dropped every digit past the 16th (#455).
 			if resolved {
 				if t, ok := minMaxOutputType(h.aggInputTypes[i]); ok {
 					out.Type = t
@@ -4854,6 +4903,32 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 					meta := h.aggInputMeta[i]
 					out.Fields, out.ElementType, out.Dimension = meta.Fields, meta.ElementType, meta.Dimension
 				}
+				// MIN/MAX of a DECIMAL is a value the column HOLDS, so it
+				// keeps the column's own precision and scale — the same
+				// rule PostgreSQL's min(numeric)/max(numeric) follow.
+				if h.aggInputTypes[i] == batch.TypeDecimal {
+					out.Precision, out.Scale = h.decOutputParams(i, h.aggInputDecScale[i])
+				}
+			}
+		case AggSum, AggAvg:
+			// SUM and AVG over a DECIMAL answer in DECIMAL, exactly
+			// (#455). The accumulator was already an Int128 at the column's
+			// scale; only the declaration said float64, which is where the
+			// digits went.
+			//
+			// SUM keeps the input's scale and declares the carrier's full
+			// precision, because a sum genuinely can exceed its column's:
+			// declaring the input's precision would make the parquet writer
+			// pick a leaf too narrow for the value it is handed. AVG widens
+			// the scale by batch.AvgScaleIncrement — see that constant for
+			// the contract and how it differs from PostgreSQL's rule.
+			if resolved && h.aggInputTypes[i] == batch.TypeDecimal {
+				out.Type = parquet.TypeDecimal
+				scale := h.aggInputDecScale[i]
+				if agg.Func == AggAvg {
+					scale = batch.AvgScale(scale)
+				}
+				out.Precision, out.Scale = batch.MaxDecimalPrecision, scale
 			}
 		}
 		cols = append(cols, out)
@@ -4865,10 +4940,27 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 	return cols
 }
 
+// decOutputParams returns the (precision, scale) a DECIMAL aggregate output
+// declares for aggregate i. The scale is the caller's — MIN/MAX keep the
+// input's, AVG widens it — and the precision is the input column's when the
+// schema recorded one, else the carrier's full width. A zero precision on a
+// DECIMAL column is a schema that never declared one; declaring 0 downstream
+// would describe a column that can hold no digits at all.
+func (h *HashAggregate) decOutputParams(i, scale int) (precision, outScale int) {
+	precision = batch.MaxDecimalPrecision
+	if i < len(h.aggInputMeta) && h.aggInputMeta[i].Type == parquet.TypeDecimal &&
+		h.aggInputMeta[i].Precision > 0 {
+		precision = h.aggInputMeta[i].Precision
+	}
+	if scale > precision {
+		precision = batch.MaxDecimalPrecision
+	}
+	return precision, scale
+}
+
 // minMaxOutputType maps a MIN/MAX input column type to its output type.
-// ok=false means "keep the planner-declared type" — for DECIMAL, whose
-// finalized value is already a float64 (via ToFloat64), and for a type with
-// no MIN/MAX kernel at all. It is a second return rather than a zero TypeID
+// ok=false means "keep the planner-declared type" — reached only by a type
+// with no MIN/MAX kernel at all. It is a second return rather than a zero TypeID
 // because parquet.TypeBool IS zero, and a caller reading a real BOOL
 // declaration as "undeclared" is how #354 and #371 went wrong.
 //
@@ -4881,9 +4973,10 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 // would have landed a string or a bool in a FLOAT64 vector and raised the
 // #361 guard on the parallel-emit goroutine.
 //
-// Kept at 0 deliberately: DECIMAL, because the accumulator finalizes
-// MinDec through ToFloat64 and a DECIMAL declaration would need the
-// input's SCALE to re-parse it.
+// DECIMAL is in the list since #455: the accumulator was always an exact
+// Int128 at the column's scale, and outputSchema copies that scale onto the
+// declaration, so MIN/MAX of a DECIMAL answers with a value the column
+// actually holds instead of a float64 that cannot hold it.
 //
 // ARRAY/ROW/MAP/VECTOR are NOT in that list: containers answer a real
 // value now (#426, containerMinMaxState), boxed by GetValue and written
@@ -4925,6 +5018,8 @@ func minMaxOutputType(in batch.TypeID) (parquet.TypeID, bool) {
 		return parquet.TypeInt64, true
 	case batch.TypeFloat64, batch.TypeFloat32:
 		return parquet.TypeFloat64, true
+	case batch.TypeDecimal:
+		return parquet.TypeDecimal, true
 	case batch.TypeArray, batch.TypeRow, batch.TypeMap, batch.TypeVector:
 		// The answer IS an input value, boxed by GetValue and written back
 		// with SetValue, so the only declaration that can hold it is the
@@ -5050,6 +5145,7 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 	if len(h.aggInputTypes) == 0 && len(o.aggInputTypes) > 0 {
 		h.aggInputTypes = o.aggInputTypes
 		h.aggInputMeta = o.aggInputMeta
+		h.aggInputDecScale = o.aggInputDecScale
 		h.aggBoxedMinMax = o.aggBoxedMinMax
 		h.hasBoxedMinMax = o.hasBoxedMinMax
 		if len(h.aggColIdx) == 0 {
@@ -5369,6 +5465,7 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	h.aggColIdx2 = o.aggColIdx2
 	h.aggInputTypes = o.aggInputTypes
 	h.aggInputMeta = o.aggInputMeta
+	h.aggInputDecScale = o.aggInputDecScale
 	h.aggBoxedMinMax = o.aggBoxedMinMax
 	h.hasBoxedMinMax = o.hasBoxedMinMax
 	h.groupColTypes = o.groupColTypes
@@ -5513,7 +5610,14 @@ func mergeFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 			hfa.sumF64[dstIdx] += ofa.sumF64[srcIdx]
 		}
 		if hfa.sumDec != nil {
-			hfa.sumDec[dstIdx] = hfa.sumDec[dstIdx].Add(ofa.sumDec[srcIdx])
+			sum, ok := hfa.sumDec[dstIdx].AddChecked(ofa.sumDec[srcIdx])
+			hfa.sumDec[dstIdx] = sum
+			if !ok {
+				hfa.sumDecOverflow = true
+			}
+		}
+		if ofa.sumDecOverflow {
+			hfa.sumDecOverflow = true
 		}
 		if ofa.hasMin != nil && ofa.hasMin[srcIdx] {
 			if hfa.hasMin[dstIdx] {
@@ -5595,6 +5699,9 @@ func copyFlatAccumRow(dst, src []flatAccumArrays, dstIdx, srcIdx int) {
 		}
 		if dfa.sumDec != nil {
 			dfa.sumDec[dstIdx] = sfa.sumDec[srcIdx]
+		}
+		if sfa.sumDecOverflow {
+			dfa.sumDecOverflow = true
 		}
 		if dfa.minI64 != nil {
 			dfa.minI64[dstIdx] = sfa.minI64[srcIdx]
@@ -6131,6 +6238,67 @@ func resolveAggUpdaterNoNull(fn AggFunc, typ batch.TypeID) kernel.RowAggUpdater 
 	}
 }
 
+// decimalSumOverflow reports a DECIMAL SUM that left the 128-bit range.
+//
+// PostgreSQL's sum(numeric) is unbounded; wadjet's carrier is an Int128, which
+// holds every DECIMAL(38) value but not every SUM of them — two rows near
+// 10^38 are enough. The wrapped total is a different number wearing the right
+// type, so the query fails here instead of answering it (ADR-0012 item 9). The
+// accumulator carries the flag from wherever the add happened (row kernel,
+// batch kernel, SoA scatter, merge, spill) to this one emit-time check.
+func decimalSumOverflow(col string) error {
+	if col == "" {
+		col = "sum"
+	}
+	return fmt.Errorf("SUM over a DECIMAL column overflowed the 128-bit exact accumulator (%s): "+
+		"the running total is outside the range DECIMAL(38) can represent", col)
+}
+
+// decimalAvgUnrepresentable reports a DECIMAL AVG whose exact quotient has no
+// Int128. It is the SAME refusal decimalSumOverflow makes, one multiplication
+// later: AVG scales the sum by 10^AvgScaleIncrement before it divides, so a
+// sum well inside the carrier can still have no representable average.
+//
+// It must be an ERROR and not a NULL. A NULL here is indistinguishable from
+// "no rows contributed", so the client cannot tell a missing group from a
+// number the engine declined to print — and the DAG's own fold raises on this
+// condition (worker.writeDecimalAvgColumn), so answering NULL on the
+// single-process path would make the two paths disagree about the same query
+// (ADR-0018 §3, the two-path contract).
+func decimalAvgUnrepresentable(col string) error {
+	if col == "" {
+		col = "avg"
+	}
+	return fmt.Errorf("AVG over a DECIMAL column has no exact 128-bit value (%s): "+
+		"the sum scaled to the output's scale is outside the range DECIMAL(38) can represent", col)
+}
+
+// decAggErr returns the error for aggregate j when its accumulator cannot
+// answer EXACTLY: a DECIMAL SUM that wrapped, or a DECIMAL AVG whose exact
+// quotient has no Int128. nil otherwise.
+//
+// The AVG arm divides here and again in the writer. That is deliberate: the
+// alternative is an error return threaded through writeAccToColumn's typed
+// fast path, and a DECIMAL AVG is not on any hot path (TPC-H's prices are
+// FLOAT64), so the second division costs nothing that shows.
+func (h *HashAggregate) decAggErr(acc *kernel.Accumulator, j int, fn AggFunc) error {
+	name := func() string {
+		if j < len(h.Aggs) {
+			return h.Aggs[j].OutputCol
+		}
+		return ""
+	}
+	if acc.DecOverflow {
+		return decimalSumOverflow(name())
+	}
+	if fn == AggAvg && acc.IsDecimal && acc.Count > 0 {
+		if _, ok := acc.DecimalAvg(); !ok {
+			return decimalAvgUnrepresentable(name())
+		}
+	}
+	return nil
+}
+
 // finalizeKernelAcc converts a kernel.Accumulator to the final result value.
 func finalizeKernelAcc(acc *kernel.Accumulator, fn AggFunc) any {
 	switch fn {
@@ -6591,6 +6759,7 @@ func loadAccFromFlat(fa *flatAccumArrays, countArr []int64, gi int, dst *kernel.
 	dst.IsFloat = fa.isFloat
 	dst.IsDecimal = fa.isDecimal
 	dst.DecScale = fa.decScale
+	dst.DecOverflow = fa.sumDecOverflow
 	if fa.sumI64 != nil {
 		dst.SumI64 = fa.sumI64[gi]
 	}
@@ -6689,6 +6858,7 @@ func (h *HashAggregate) materializeFlatAccums() {
 				acc.IsFloat = fa.isFloat
 				acc.IsDecimal = fa.isDecimal
 				acc.DecScale = fa.decScale
+				acc.DecOverflow = fa.sumDecOverflow
 				if fa.sumI64 != nil {
 					acc.SumI64 = fa.sumI64[gi]
 				}
@@ -6763,6 +6933,7 @@ func (h *HashAggregate) materializeFlatAccums() {
 			acc.IsFloat = fa.isFloat
 			acc.IsDecimal = fa.isDecimal
 			acc.DecScale = fa.decScale
+			acc.DecOverflow = fa.sumDecOverflow
 			if fa.sumI64 != nil {
 				acc.SumI64 = fa.sumI64[gi]
 			}
@@ -6848,6 +7019,9 @@ func (h *HashAggregate) rebuildFlatAccums(b *batch.RecordBatch) {
 			}
 			if fa.sumDec != nil {
 				fa.sumDec[gi] = acc.SumDec
+			}
+			if acc.DecOverflow {
+				fa.sumDecOverflow = true
 			}
 			if fa.minI64 != nil {
 				fa.minI64[gi] = acc.MinI64

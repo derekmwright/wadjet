@@ -44,7 +44,9 @@ import (
 //     sortKeyLen  uint32
 //     sortKey     bytes
 //     for each group col:    typed value (tagged like raw-row spill)
-//     for each agg:           accumulator (variable layout — see emitAcc)
+//     for each agg:           accumulator (variable layout — see emitAcc;
+//                             a DECIMAL SUM prefixes its Int128 with the
+//                             overflow flag)
 //   endMarker     byte (0x00)
 //
 // The sortKey is the drain cursor's group key (appendSerializedKey /
@@ -309,6 +311,12 @@ func emitAcc(w *bufio.Writer, scratch []byte, spec partialAggSpec, a *kernel.Acc
 		}
 		switch {
 		case spec.IsDecimal:
+			// The overflow flag rides with the value: a wrapped sum that
+			// spills and comes back must still fail the query, not answer
+			// with the wrapped total (#455).
+			if err := writeBool(w, a.DecOverflow); err != nil {
+				return err
+			}
 			return writeInt128(w, scratch, a.SumDec)
 		case spec.IsFloat:
 			return writeFloat64(w, scratch, a.SumF64)
@@ -365,6 +373,11 @@ func readAcc(r *bufio.Reader, scratch []byte, spec partialAggSpec, a *kernel.Acc
 		a.Count = c
 		switch {
 		case spec.IsDecimal:
+			of, err := readBool(r)
+			if err != nil {
+				return err
+			}
+			a.DecOverflow = of
 			v, err := readInt128(r, scratch)
 			if err != nil {
 				return err
@@ -1802,7 +1815,10 @@ func (h *HashAggregate) nextFromPartialMerger() (*batch.RecordBatch, error) {
 
 	out := batch.NewRecordBatch(h.partialMergerSchema, batch.DefaultBatchSize)
 	nGroupCols := len(h.GroupByCols)
-	h.writeMergedRow(out, 0, first, nGroupCols)
+	if err := h.writeMergedRow(out, 0, first, nGroupCols); err != nil {
+		h.closePartialMerger()
+		return nil, err
+	}
 	nRows := 1
 
 	for nRows < batch.DefaultBatchSize {
@@ -1814,7 +1830,10 @@ func (h *HashAggregate) nextFromPartialMerger() (*batch.RecordBatch, error) {
 		if g == nil {
 			break
 		}
-		h.writeMergedRow(out, nRows, g, nGroupCols)
+		if err := h.writeMergedRow(out, nRows, g, nGroupCols); err != nil {
+			h.closePartialMerger()
+			return nil, err
+		}
 		nRows++
 	}
 
@@ -1836,14 +1855,18 @@ func (h *HashAggregate) nextFromPartialMerger() (*batch.RecordBatch, error) {
 //
 // Both group-by and agg writes dispatch on the destination column's
 // batch.TypeID directly to the typed Vector slot — no `any` round-trip.
-func (h *HashAggregate) writeMergedRow(out *batch.RecordBatch, i int, g *partialGroup, nGroupCols int) {
+func (h *HashAggregate) writeMergedRow(out *batch.RecordBatch, i int, g *partialGroup, nGroupCols int) error {
 	for k := 0; k < nGroupCols && k < len(g.KeyVals); k++ {
 		writePartialKeyToColumn(out.Columns[k], i, &g.KeyVals[k])
 	}
 	for j, agg := range h.Aggs {
 		colIdx := nGroupCols + j
+		if err := h.decAggErr(&g.Accs[j], j, agg.Func); err != nil {
+			return err
+		}
 		writeAccToColumn(out.Columns[colIdx], i, &g.Accs[j], agg.Func)
 	}
+	return nil
 }
 
 // writeAccToColumn writes the finalized value of acc (under aggregate
@@ -1853,7 +1876,7 @@ func (h *HashAggregate) writeMergedRow(out *batch.RecordBatch, i int, g *partial
 // `any` return boxes every row at SF100 Q17 scale (10K+ groups × 1+
 // agg cols per merged group). The canUseExternalMerge gate guarantees
 // only SUM/COUNT/MIN/MAX/AVG reach here, and the output column type is
-// always one of int64 / float64 (per outputSchema's agg rules).
+// int64, float64 or — over a DECIMAL input, since #455 — DECIMAL.
 func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggFunc) {
 	switch fn {
 	case AggSum:
@@ -1873,6 +1896,18 @@ func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggF
 			}
 		case batch.TypeInt64:
 			dst.Int64Data[i] = acc.SumI64
+		case batch.TypeDecimal:
+			// The scales match by construction — outputSchema declares the
+			// column at the accumulator's own scale — so the Int128 goes
+			// straight across with no string in between. The guard is not
+			// defensive dressing: a mismatch has to re-parse through the
+			// text box, because a raw Int128 at the wrong scale is a
+			// different number written silently.
+			if acc.IsDecimal && dst.DecimalData.Scale == acc.DecScale {
+				dst.DecimalData.Data[i] = acc.SumDec
+			} else {
+				writeAccFallback(dst, i, acc, fn)
+			}
 		default:
 			writeAccFallback(dst, i, acc, fn)
 		}
@@ -1891,6 +1926,21 @@ func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggF
 			default:
 				dst.Float64Data[i] = float64(acc.SumI64) / float64(acc.Count)
 			}
+			return
+		}
+		if dst.Type == batch.TypeDecimal && acc.IsDecimal &&
+			dst.DecimalData.Scale == batch.AvgScale(acc.DecScale) {
+			q, ok := acc.DecimalAvg()
+			if !ok {
+				// Unreachable: every caller runs decAggErr first, which
+				// fails the query on exactly this condition. Kept as a
+				// non-answer rather than a wrong one for the day a new
+				// caller forgets, since an approximation here would be the
+				// float64 #455 removed.
+				dst.WriteNullAt(i)
+				return
+			}
+			dst.DecimalData.Data[i] = q
 			return
 		}
 		writeAccFallback(dst, i, acc, fn)
@@ -1918,6 +1968,12 @@ func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggF
 			}
 		case batch.TypeInt64:
 			dst.Int64Data[i] = acc.MinI64
+		case batch.TypeDecimal:
+			if acc.IsDecimal && dst.DecimalData.Scale == acc.DecScale {
+				dst.DecimalData.Data[i] = acc.MinDec
+			} else {
+				writeAccFallback(dst, i, acc, fn)
+			}
 		default:
 			writeAccFallback(dst, i, acc, fn)
 		}
@@ -1938,6 +1994,12 @@ func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggF
 			}
 		case batch.TypeInt64:
 			dst.Int64Data[i] = acc.MaxI64
+		case batch.TypeDecimal:
+			if acc.IsDecimal && dst.DecimalData.Scale == acc.DecScale {
+				dst.DecimalData.Data[i] = acc.MaxDec
+			} else {
+				writeAccFallback(dst, i, acc, fn)
+			}
 		default:
 			writeAccFallback(dst, i, acc, fn)
 		}

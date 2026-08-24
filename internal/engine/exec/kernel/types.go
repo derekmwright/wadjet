@@ -38,6 +38,12 @@ type Accumulator struct {
 	IsString  bool // true when the source column is byte-backed (MIN/MAX): STRING, BYTES, IPV6, CIDR, UUID
 	IsBool    bool // true when the source column is BOOL (MIN/MAX); the value rides in MinI64/MaxI64 as 0/1
 	DecScale  int  // scale for DECIMAL columns
+	// DecOverflow marks a DECIMAL SUM that left the 128-bit range. SumDec
+	// then holds the WRAPPED value — a different number — so the emit path
+	// turns this into a query error instead of writing it out (#455). It
+	// rides the accumulator rather than a per-operator flag because every
+	// merge, spill and clone path already carries the accumulator.
+	DecOverflow bool
 	// StrType is the SOURCE column type behind MinStr/MaxStr. The five
 	// byte-backed types share one accumulator slot but not one boxed shape:
 	// IPV6 and UUID store raw 16-byte values that only round-trip into their
@@ -47,13 +53,28 @@ type Accumulator struct {
 	StrType batch.TypeID
 }
 
+// A DECIMAL answer is boxed as its TEXT, the same form (*Vector).GetValue
+// produces, because that is the only box that survives a destination vector
+// whose scale differs from the accumulator's: Vector.SetValue re-parses the
+// text against its OWN scale, while a raw Int128 would be stored verbatim and
+// silently mean 10^(difference) times the intended number. The typed emit path
+// (exec.writeAccToColumn) writes the Int128 straight through when the scales
+// match and never builds this string.
+func decimalBox(d batch.Int128, scale int) any { return d.FormatDecimal(scale) }
+
 // FinalSum returns the accumulated sum as the appropriate type.
+//
+// A DECIMAL sum is EXACT: Int128 at the column's own scale, so SUM over a
+// DECIMAL is a DECIMAL and not the float64 that dropped every digit past the
+// 16th (#455). An overflowed sum is not returned at all — the caller checks
+// DecOverflow first and fails the query, since the wrapped value is a
+// different number wearing the right type.
 func (a *Accumulator) FinalSum() any {
 	if a.Count == 0 {
 		return nil
 	}
 	if a.IsDecimal {
-		return a.SumDec.ToFloat64(a.DecScale)
+		return decimalBox(a.SumDec, a.DecScale)
 	}
 	if a.IsFloat {
 		return a.SumF64
@@ -62,17 +83,37 @@ func (a *Accumulator) FinalSum() any {
 }
 
 // FinalAvg returns the accumulated average.
+//
+// Over a DECIMAL it is exact numeric division at scale+AvgScaleIncrement
+// (batch.AvgScale), rounded half away from zero — see that constant for why
+// the increment is fixed rather than PostgreSQL's significant-digit rule.
+//
+// nil for a quotient with no Int128 is NOT the answer to that case: callers
+// run exec.decAggErr first, which fails the query the way a SUM overflow
+// does. Returning nil here would be a NULL the client cannot tell from "no
+// rows".
 func (a *Accumulator) FinalAvg() any {
 	if a.Count == 0 {
 		return nil
 	}
 	if a.IsDecimal {
-		return a.SumDec.ToFloat64(a.DecScale) / float64(a.Count)
+		q, ok := a.DecimalAvg()
+		if !ok {
+			return nil
+		}
+		return decimalBox(q, batch.AvgScale(a.DecScale))
 	}
 	if a.IsFloat {
 		return a.SumF64 / float64(a.Count)
 	}
 	return float64(a.SumI64) / float64(a.Count)
+}
+
+// DecimalAvg is FinalAvg's exact half for a DECIMAL accumulator: the unscaled
+// quotient at batch.AvgScale(DecScale). ok=false means the exact answer does
+// not fit an Int128 — a query error, not a rounding.
+func (a *Accumulator) DecimalAvg() (batch.Int128, bool) {
+	return batch.DecimalAvg(a.SumDec, a.Count, batch.AvgScale(a.DecScale)-a.DecScale)
 }
 
 // minMaxBox re-boxes a byte-backed MIN/MAX into the shape the OUTPUT vector
@@ -102,7 +143,7 @@ func (a *Accumulator) FinalMin() any {
 		return minMaxBox(a.StrType, a.MinStr)
 	}
 	if a.IsDecimal {
-		return a.MinDec.ToFloat64(a.DecScale)
+		return decimalBox(a.MinDec, a.DecScale)
 	}
 	if a.IsFloat {
 		return a.MinF64
@@ -122,7 +163,7 @@ func (a *Accumulator) FinalMax() any {
 		return minMaxBox(a.StrType, a.MaxStr)
 	}
 	if a.IsDecimal {
-		return a.MaxDec.ToFloat64(a.DecScale)
+		return decimalBox(a.MaxDec, a.DecScale)
 	}
 	if a.IsFloat {
 		return a.MaxF64
@@ -141,8 +182,15 @@ func (a *Accumulator) Merge(other *Accumulator) {
 	}
 	if other.IsDecimal {
 		a.IsDecimal = true
-		a.SumDec = a.SumDec.Add(other.SumDec)
+		sum, ok := a.SumDec.AddChecked(other.SumDec)
+		a.SumDec = sum
+		if !ok {
+			a.DecOverflow = true
+		}
 		a.DecScale = other.DecScale
+	}
+	if other.DecOverflow {
+		a.DecOverflow = true
 	}
 	if other.IsString {
 		a.IsString = true

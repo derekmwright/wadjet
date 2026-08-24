@@ -328,6 +328,12 @@ func tmdTables() []tmdTable {
 		{typematrix.Table, typematrix.Schema(), typematrix.Data(typematrix.Rows)},
 		{typematrix.Nested, typematrix.NestedSchema(), typematrix.NestedData(typematrix.Rows)},
 		{typematrix.Dim, typematrix.DimSchema(), typematrix.DimData()},
+		// The exact-DECIMAL fixtures (#455). They ride along here rather than
+		// standing up a second cluster: TestDecimalAggregatesTwoPath and
+		// TestDecimalAggregateOverflowTwoPath use the same two arms, and no
+		// type-matrix corpus entry names either table.
+		{dtpTable, dtpSchema(), dtpData()},
+		{dtpOvfTable, dtpOvfSchema(), dtpOvfData()},
 	}
 }
 

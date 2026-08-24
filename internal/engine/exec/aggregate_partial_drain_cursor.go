@@ -321,9 +321,10 @@ func (c *partialGroupCursor) loadHeadAccsSoA(gi int) {
 		// Reset acc so a previously-loaded group's HasMin/HasMax/etc. don't
 		// leak into a fresh load that doesn't touch those fields.
 		*acc = kernel.Accumulator{
-			IsFloat:   fa.isFloat,
-			IsDecimal: fa.isDecimal,
-			DecScale:  fa.decScale,
+			IsFloat:     fa.isFloat,
+			IsDecimal:   fa.isDecimal,
+			DecScale:    fa.decScale,
+			DecOverflow: fa.sumDecOverflow,
 		}
 		// Resolve the count array through the sharing link (nil for MIN/MAX).
 		if ca := countArrayOf(c.flatAccs, ai); ca != nil {
