@@ -370,3 +370,227 @@ func TestExternalMergeSpill_FloatMinMaxNaNSurvivesDrain(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// --- MIN_BY/MAX_BY float NaN ordering key (fold-in to #457) ----------------
+//
+// MIN_BY/MAX_BY's accumulator (updateGroup's AggMinBy/AggMaxBy case,
+// aggregate.go) and its cross-unit merge (mergeExtraState's *minMaxByState
+// case) compared the ordering column with raw `<`/`>` instead of
+// kernel.CompareFloat64, the same arrival-order-dependent defect #457 fixed
+// for bare MIN/MAX. Reviewer's probe: rows {a: NaN, b: 1.0, c: -5.0,
+// d: 3.0} — under PostgreSQL's float order (NaN sorts greatest, ADR-0012
+// item 8), MIN_BY must return the row carrying the smallest non-NaN
+// comparison value ("c") and MAX_BY must return the row whose comparison
+// value is NaN ("a"), in every arrival order and whichever unit merges into
+// the other.
+
+func minByMaxBySchema() []parquet.Column {
+	return []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "name", Type: parquet.TypeString},
+		{Name: "val", Type: parquet.TypeFloat64, Nullable: true},
+	}
+}
+
+func minByMaxByAggs() []AggColumn {
+	return []AggColumn{
+		{Func: AggMinBy, InputCol: "name", InputCol2: "val", OutputCol: "min_name", OutputType: parquet.TypeString},
+		{Func: AggMaxBy, InputCol: "name", InputCol2: "val", OutputCol: "max_name", OutputType: parquet.TypeString},
+	}
+}
+
+// checkMinByMaxByRow asserts the {min_name, max_name} output row against the
+// reviewer's probe's expected winners.
+func checkMinByMaxByRow(t *testing.T, label string, row map[string]any) {
+	t.Helper()
+	if minName, _ := row["min_name"].(string); minName != "c" {
+		t.Errorf("%s: MIN_BY = %q, want %q", label, minName, "c")
+	}
+	if maxName, _ := row["max_name"].(string); maxName != "a" {
+		t.Errorf("%s: MAX_BY = %q, want %q", label, maxName, "a")
+	}
+}
+
+// TestHashAggregate_MinByMaxByFloatNaN_ArrivalOrder drives the grouped
+// accumulator (updateGroup's AggMinBy/AggMaxBy case) with the reviewer's
+// probe row set delivered in several different arrival orders, each as its
+// own group key so a single Consume call's per-row order is what's under
+// test.
+func TestHashAggregate_MinByMaxByFloatNaN_ArrivalOrder(t *testing.T) {
+	nan := math.NaN()
+	// base[0]=a (NaN), base[1]=b (1.0), base[2]=c (-5.0), base[3]=d (3.0).
+	type probeRow struct {
+		name string
+		val  float64
+	}
+	base := []probeRow{{"a", nan}, {"b", 1.0}, {"c", -5.0}, {"d", 3.0}}
+	orders := []struct {
+		name string
+		perm []int
+	}{
+		{"natural", []int{0, 1, 2, 3}},               // a, b, c, d — NaN first
+		{"nan_last", []int{1, 2, 3, 0}},              // b, c, d, a — NaN last
+		{"min_first", []int{2, 0, 1, 3}},             // c, a, b, d — winner arrives first
+		{"reverse", []int{3, 2, 1, 0}},               // d, c, b, a
+		{"nan_then_min_adjacent", []int{2, 3, 1, 0}}, // c, d, b, a
+	}
+
+	ctx := context.Background()
+	h := NewHashAggregate([]string{"k"}, minByMaxByAggs())
+	if err := h.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i, o := range orders {
+		k := int64(i)
+		rows := make([]map[string]any, 0, len(o.perm))
+		for _, idx := range o.perm {
+			rows = append(rows, map[string]any{"k": k, "name": base[idx].name, "val": base[idx].val})
+		}
+		if err := h.Consume(ctx, batch.FromRows(minByMaxBySchema(), rows)); err != nil {
+			t.Fatalf("%s: Consume: %v", o.name, err)
+		}
+	}
+	if err := h.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := map[int64]map[string]any{}
+	for {
+		b, err := h.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil {
+			break
+		}
+		for _, row := range b.ToRows() {
+			got[row["k"].(int64)] = row
+		}
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for i, o := range orders {
+		row, ok := got[int64(i)]
+		if !ok {
+			t.Fatalf("%s: group missing from output", o.name)
+		}
+		checkMinByMaxByRow(t, o.name, row)
+	}
+}
+
+// TestHashAggregate_MinByMaxByFloatNaN_Scalar drives the same probe row set
+// through the no-GROUP-BY scalar path, in several arrival orders.
+func TestHashAggregate_MinByMaxByFloatNaN_Scalar(t *testing.T) {
+	nan := math.NaN()
+	orders := map[string][]map[string]any{
+		"natural": {
+			{"k": int64(1), "name": "a", "val": nan},
+			{"k": int64(1), "name": "b", "val": 1.0},
+			{"k": int64(1), "name": "c", "val": -5.0},
+			{"k": int64(1), "name": "d", "val": 3.0},
+		},
+		"min_first": {
+			{"k": int64(1), "name": "c", "val": -5.0},
+			{"k": int64(1), "name": "a", "val": nan},
+			{"k": int64(1), "name": "d", "val": 3.0},
+			{"k": int64(1), "name": "b", "val": 1.0},
+		},
+		"nan_last": {
+			{"k": int64(1), "name": "b", "val": 1.0},
+			{"k": int64(1), "name": "d", "val": 3.0},
+			{"k": int64(1), "name": "c", "val": -5.0},
+			{"k": int64(1), "name": "a", "val": nan},
+		},
+	}
+	for name, rows := range orders {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			h := NewHashAggregate(nil, minByMaxByAggs())
+			if err := h.Init(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.Consume(ctx, batch.FromRows(minByMaxBySchema(), rows)); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.Finalize(ctx); err != nil {
+				t.Fatal(err)
+			}
+			b, err := h.Next(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b == nil {
+				t.Fatal("expected one output row")
+			}
+			out := b.ToRows()
+			if len(out) != 1 {
+				t.Fatalf("got %d rows, want 1", len(out))
+			}
+			checkMinByMaxByRow(t, name, out[0])
+			if err := h.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestHashAggregate_MergeSink_MinByMaxByFloatNaN drives mergeExtraState's
+// *minMaxByState case directly: one unit sees only the NaN-keyed row, the
+// other sees the three finite-keyed rows, merged in both directions (which
+// unit is primary must not change the answer).
+func TestHashAggregate_MergeSink_MinByMaxByFloatNaN(t *testing.T) {
+	nan := math.NaN()
+	for _, dir := range []string{"nan_unit_primary", "finite_unit_primary"} {
+		t.Run(dir, func(t *testing.T) {
+			ctx := context.Background()
+			prim := NewHashAggregate([]string{"k"}, minByMaxByAggs())
+			if err := prim.Init(ctx); err != nil {
+				t.Fatal(err)
+			}
+			clone := prim.CloneSink().(*HashAggregate)
+			if err := clone.Init(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			nanRows := []map[string]any{{"k": int64(1), "name": "a", "val": nan}}
+			finiteRows := []map[string]any{
+				{"k": int64(1), "name": "b", "val": 1.0},
+				{"k": int64(1), "name": "c", "val": -5.0},
+				{"k": int64(1), "name": "d", "val": 3.0},
+			}
+
+			var nanUnit, finiteUnit *HashAggregate
+			if dir == "nan_unit_primary" {
+				nanUnit, finiteUnit = prim, clone
+			} else {
+				nanUnit, finiteUnit = clone, prim
+			}
+			if err := nanUnit.Consume(ctx, batch.FromRows(minByMaxBySchema(), nanRows)); err != nil {
+				t.Fatal(err)
+			}
+			if err := finiteUnit.Consume(ctx, batch.FromRows(minByMaxBySchema(), finiteRows)); err != nil {
+				t.Fatal(err)
+			}
+
+			prim.MergeSink(clone)
+			if err := prim.Finalize(ctx); err != nil {
+				t.Fatal(err)
+			}
+			b, err := prim.Next(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b == nil {
+				t.Fatal("expected one output row")
+			}
+			out := b.ToRows()
+			if len(out) != 1 {
+				t.Fatalf("got %d rows, want 1", len(out))
+			}
+			checkMinByMaxByRow(t, dir, out[0])
+			if err := prim.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

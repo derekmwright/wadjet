@@ -4047,8 +4047,8 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			state := ext.extraState[i].(*minMaxByState)
 			cmpVal := extract2(v2, row)
 			if !state.hasValue ||
-				(state.isMin && cmpVal < state.bestCmp) ||
-				(!state.isMin && cmpVal > state.bestCmp) {
+				(state.isMin && kernel.CompareFloat64(cmpVal, state.bestCmp) < 0) ||
+				(!state.isMin && kernel.CompareFloat64(cmpVal, state.bestCmp) > 0) {
 				before := boxContainerMemBytes(state.bestVal)
 				state.hasValue = true
 				state.bestCmp = cmpVal
@@ -5366,7 +5366,7 @@ func (h *HashAggregate) mergeExtraState(dst, src *groupStateExtras) {
 			if !s.hasValue {
 				continue
 			}
-			if !d.hasValue || (d.isMin && s.bestCmp < d.bestCmp) || (!d.isMin && s.bestCmp > d.bestCmp) {
+			if !d.hasValue || (d.isMin && kernel.CompareFloat64(s.bestCmp, d.bestCmp) < 0) || (!d.isMin && kernel.CompareFloat64(s.bestCmp, d.bestCmp) > 0) {
 				before := boxContainerMemBytes(d.bestVal)
 				d.bestVal, d.bestCmp, d.hasValue = s.bestVal, s.bestCmp, true
 				h.extraStateBytes += boxContainerMemBytes(d.bestVal) - before
