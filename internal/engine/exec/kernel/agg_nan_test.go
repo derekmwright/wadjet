@@ -264,3 +264,62 @@ func TestAccumulatorMergeFloat_NaN(t *testing.T) {
 		}
 	})
 }
+
+// TestCheapNaNMinMaxFormsMatchCompareFloat64 proves the semantics-identical
+// but branch-cheaper replace-tests substituted into the row/slice MIN/MAX
+// updaters (minRowFloat64/32, maxRowFloat64/32 and their NoNulls variants,
+// minSliceFloat64/32, maxSliceFloat64/32 in agg.go; scatterMinFloat/
+// scatterMaxFloat in exec/agg_scatter.go) decide EXACTLY the same
+// accumulator-replace outcome as CompareFloat64(v, acc) does, over every
+// ordered pair drawn from a set covering every boundary the total order
+// distinguishes: -Inf, a negative finite, -0.0, +0.0, a positive finite,
+// +Inf, and NaN.
+//
+//	MIN replace-test:  v < acc || acc != acc   (acc is the current best)
+//	MAX replace-test:  v > acc || v != v
+//
+// Both forms replace `CompareFloat64(v, acc) < 0` / `> 0`. The property:
+// whenever the current accumulator holds NaN, ANY non-NaN v beats it for
+// MIN (a real number is always less than NaN in PostgreSQL's order) and NO
+// v beats it for MAX unless v is ALSO NaN — a NaN accumulator already IS
+// the max. A "replace NaN with NaN" (both sides NaN) that the cheap form
+// triggers where CompareFloat64 would answer 0 (no replace) is harmless:
+// the stored value's MEANING is unchanged, since every NaN compares equal
+// to every other NaN regardless of payload (float_order.go's documented
+// order), and none of these kernels serialize a NaN's bit pattern.
+//
+// A change to CompareFloat64's order (a new boundary, a different NaN
+// rule) must revisit this proof — it is not derived from CompareFloat64 at
+// runtime, it is checked against it here.
+//
+// The one allowed divergence: v and acc are BOTH NaN. CompareFloat64 calls
+// that a tie (0, no replace) since every NaN compares equal to every other
+// regardless of payload; the cheap form replaces anyway (v != v / acc != acc
+// is true independent of which side holds the current accumulator). The
+// stored value's OBSERVABLE meaning — "this accumulator holds NaN" — is
+// identical either way, so that one cell is a redundant write, never a
+// wrong one, and no kernel in this tree round-trips a NaN's specific bit
+// pattern. Every other one of the 49 pairs must decide identically to
+// CompareFloat64, checked pointwise below with no exception.
+func TestCheapNaNMinMaxFormsMatchCompareFloat64(t *testing.T) {
+	vals := []float64{math.Inf(-1), -1, math.Copysign(0, -1), 0, 1, math.Inf(1), math.NaN()}
+	for _, v := range vals {
+		for _, acc := range vals {
+			bothNaN := math.IsNaN(v) && math.IsNaN(acc)
+
+			wantMinReplace := CompareFloat64(v, acc) < 0
+			gotMinReplace := v < acc || acc != acc
+			if gotMinReplace != wantMinReplace && !bothNaN {
+				t.Errorf("MIN cheap form: v=%v acc=%v: got replace=%v, want %v (CompareFloat64=%d)",
+					v, acc, gotMinReplace, wantMinReplace, CompareFloat64(v, acc))
+			}
+
+			wantMaxReplace := CompareFloat64(v, acc) > 0
+			gotMaxReplace := v > acc || v != v
+			if gotMaxReplace != wantMaxReplace && !bothNaN {
+				t.Errorf("MAX cheap form: v=%v acc=%v: got replace=%v, want %v (CompareFloat64=%d)",
+					v, acc, gotMaxReplace, wantMaxReplace, CompareFloat64(v, acc))
+			}
+		}
+	}
+}

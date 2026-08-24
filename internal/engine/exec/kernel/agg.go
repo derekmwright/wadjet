@@ -161,10 +161,24 @@ func minRowInt32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 	}
 }
 
+// The float MIN/MAX row and slice updaters below (#457) order by
+// PostgreSQL's float total order — NaN sorts greatest, ADR-0012 item 8 —
+// using `v < acc || acc != acc` (MIN) / `v > acc || v != v` (MAX) in place
+// of a kernel.CompareFloat64 call: pointwise identical to
+// CompareFloat64(v, acc) < 0 / > 0 except when v AND acc are both NaN,
+// where the cheap form does a redundant "replace NaN with NaN" that
+// CompareFloat64 would skip as a tie — harmless, since every NaN compares
+// equal to every other regardless of payload and nothing here round-trips
+// a NaN's bit pattern. Proved exhaustively over every boundary the order
+// distinguishes by kernel.TestCheapNaNMinMaxFormsMatchCompareFloat64
+// (agg_nan_test.go); a CompareFloat64 function call measured +59-102% on
+// these hot per-element loops (BenchmarkScalarMinMaxFloat64/32,
+// BenchmarkRowMinMaxFloat64, agg_nan_bench_test.go) for no behavioral
+// difference a caller can observe.
 func minRowFloat64(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
 		v := vec.Float64Data[row]
-		if !acc.HasMin || CompareFloat64(v, acc.MinF64) < 0 {
+		if !acc.HasMin || v < acc.MinF64 || acc.MinF64 != acc.MinF64 {
 			acc.MinF64 = v
 			acc.HasMin = true
 			acc.IsFloat = true
@@ -173,7 +187,7 @@ func minRowFloat64(acc *Accumulator, vec *batch.Vector, row int) {
 }
 func minRowFloat64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 	v := vec.Float64Data[row]
-	if !acc.HasMin || CompareFloat64(v, acc.MinF64) < 0 {
+	if !acc.HasMin || v < acc.MinF64 || acc.MinF64 != acc.MinF64 {
 		acc.MinF64 = v
 		acc.HasMin = true
 		acc.IsFloat = true
@@ -183,7 +197,7 @@ func minRowFloat64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 func minRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
 		v := float64(vec.Float32Data[row])
-		if !acc.HasMin || CompareFloat64(v, acc.MinF64) < 0 {
+		if !acc.HasMin || v < acc.MinF64 || acc.MinF64 != acc.MinF64 {
 			acc.MinF64 = v
 			acc.HasMin = true
 			acc.IsFloat = true
@@ -192,7 +206,7 @@ func minRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 }
 func minRowFloat32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 	v := float64(vec.Float32Data[row])
-	if !acc.HasMin || CompareFloat64(v, acc.MinF64) < 0 {
+	if !acc.HasMin || v < acc.MinF64 || acc.MinF64 != acc.MinF64 {
 		acc.MinF64 = v
 		acc.HasMin = true
 		acc.IsFloat = true
@@ -233,10 +247,11 @@ func maxRowInt32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 	}
 }
 
+// See minRowFloat64's comment for the `v > acc || v != v` cheap form.
 func maxRowFloat64(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
 		v := vec.Float64Data[row]
-		if !acc.HasMax || CompareFloat64(v, acc.MaxF64) > 0 {
+		if !acc.HasMax || v > acc.MaxF64 || v != v {
 			acc.MaxF64 = v
 			acc.HasMax = true
 			acc.IsFloat = true
@@ -245,7 +260,7 @@ func maxRowFloat64(acc *Accumulator, vec *batch.Vector, row int) {
 }
 func maxRowFloat64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 	v := vec.Float64Data[row]
-	if !acc.HasMax || CompareFloat64(v, acc.MaxF64) > 0 {
+	if !acc.HasMax || v > acc.MaxF64 || v != v {
 		acc.MaxF64 = v
 		acc.HasMax = true
 		acc.IsFloat = true
@@ -255,7 +270,7 @@ func maxRowFloat64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 func maxRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
 		v := float64(vec.Float32Data[row])
-		if !acc.HasMax || CompareFloat64(v, acc.MaxF64) > 0 {
+		if !acc.HasMax || v > acc.MaxF64 || v != v {
 			acc.MaxF64 = v
 			acc.HasMax = true
 			acc.IsFloat = true
@@ -264,7 +279,7 @@ func maxRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 }
 func maxRowFloat32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
 	v := float64(vec.Float32Data[row])
-	if !acc.HasMax || CompareFloat64(v, acc.MaxF64) > 0 {
+	if !acc.HasMax || v > acc.MaxF64 || v != v {
 		acc.MaxF64 = v
 		acc.HasMax = true
 		acc.IsFloat = true
@@ -724,13 +739,14 @@ func minSliceInt32(acc *Accumulator, data []int32, nulls *batch.Bitmap, sel []ui
 	}
 }
 
+// See minRowFloat64's comment for the `v < acc || acc != acc` cheap form.
 func minSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel []uint32, vecLen int) {
 	if sel != nil {
 		if nulls.HasNulls() {
 			for _, idx := range sel {
 				if !nulls.IsNullFast(int(idx)) {
 					v := data[idx]
-					if !acc.HasMin || CompareFloat64(v, acc.MinF64) < 0 {
+					if !acc.HasMin || v < acc.MinF64 || acc.MinF64 != acc.MinF64 {
 						acc.MinF64 = v
 						acc.HasMin = true
 					}
@@ -739,7 +755,7 @@ func minSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel 
 		} else {
 			for _, idx := range sel {
 				v := data[idx]
-				if !acc.HasMin || CompareFloat64(v, acc.MinF64) < 0 {
+				if !acc.HasMin || v < acc.MinF64 || acc.MinF64 != acc.MinF64 {
 					acc.MinF64 = v
 					acc.HasMin = true
 				}
@@ -750,7 +766,7 @@ func minSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel 
 			for i := 0; i < vecLen; i++ {
 				if !nulls.IsNullFast(i) {
 					v := data[i]
-					if !acc.HasMin || CompareFloat64(v, acc.MinF64) < 0 {
+					if !acc.HasMin || v < acc.MinF64 || acc.MinF64 != acc.MinF64 {
 						acc.MinF64 = v
 						acc.HasMin = true
 					}
@@ -759,7 +775,7 @@ func minSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel 
 		} else {
 			for i := 0; i < vecLen; i++ {
 				v := data[i]
-				if !acc.HasMin || CompareFloat64(v, acc.MinF64) < 0 {
+				if !acc.HasMin || v < acc.MinF64 || acc.MinF64 != acc.MinF64 {
 					acc.MinF64 = v
 					acc.HasMin = true
 				}
@@ -774,7 +790,7 @@ func minSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel 
 			for _, idx := range sel {
 				if !nulls.IsNullFast(int(idx)) {
 					v := float64(data[idx])
-					if !acc.HasMin || CompareFloat64(v, acc.MinF64) < 0 {
+					if !acc.HasMin || v < acc.MinF64 || acc.MinF64 != acc.MinF64 {
 						acc.MinF64 = v
 						acc.HasMin = true
 					}
@@ -783,7 +799,7 @@ func minSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel 
 		} else {
 			for _, idx := range sel {
 				v := float64(data[idx])
-				if !acc.HasMin || CompareFloat64(v, acc.MinF64) < 0 {
+				if !acc.HasMin || v < acc.MinF64 || acc.MinF64 != acc.MinF64 {
 					acc.MinF64 = v
 					acc.HasMin = true
 				}
@@ -794,7 +810,7 @@ func minSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel 
 			for i := 0; i < vecLen; i++ {
 				if !nulls.IsNullFast(i) {
 					v := float64(data[i])
-					if !acc.HasMin || CompareFloat64(v, acc.MinF64) < 0 {
+					if !acc.HasMin || v < acc.MinF64 || acc.MinF64 != acc.MinF64 {
 						acc.MinF64 = v
 						acc.HasMin = true
 					}
@@ -803,7 +819,7 @@ func minSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel 
 		} else {
 			for i := 0; i < vecLen; i++ {
 				v := float64(data[i])
-				if !acc.HasMin || CompareFloat64(v, acc.MinF64) < 0 {
+				if !acc.HasMin || v < acc.MinF64 || acc.MinF64 != acc.MinF64 {
 					acc.MinF64 = v
 					acc.HasMin = true
 				}
@@ -900,13 +916,14 @@ func maxSliceInt32(acc *Accumulator, data []int32, nulls *batch.Bitmap, sel []ui
 	}
 }
 
+// See minRowFloat64's comment for the `v > acc || v != v` cheap form.
 func maxSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel []uint32, vecLen int) {
 	if sel != nil {
 		if nulls.HasNulls() {
 			for _, idx := range sel {
 				if !nulls.IsNullFast(int(idx)) {
 					v := data[idx]
-					if !acc.HasMax || CompareFloat64(v, acc.MaxF64) > 0 {
+					if !acc.HasMax || v > acc.MaxF64 || v != v {
 						acc.MaxF64 = v
 						acc.HasMax = true
 					}
@@ -915,7 +932,7 @@ func maxSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel 
 		} else {
 			for _, idx := range sel {
 				v := data[idx]
-				if !acc.HasMax || CompareFloat64(v, acc.MaxF64) > 0 {
+				if !acc.HasMax || v > acc.MaxF64 || v != v {
 					acc.MaxF64 = v
 					acc.HasMax = true
 				}
@@ -926,7 +943,7 @@ func maxSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel 
 			for i := 0; i < vecLen; i++ {
 				if !nulls.IsNullFast(i) {
 					v := data[i]
-					if !acc.HasMax || CompareFloat64(v, acc.MaxF64) > 0 {
+					if !acc.HasMax || v > acc.MaxF64 || v != v {
 						acc.MaxF64 = v
 						acc.HasMax = true
 					}
@@ -935,7 +952,7 @@ func maxSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel 
 		} else {
 			for i := 0; i < vecLen; i++ {
 				v := data[i]
-				if !acc.HasMax || CompareFloat64(v, acc.MaxF64) > 0 {
+				if !acc.HasMax || v > acc.MaxF64 || v != v {
 					acc.MaxF64 = v
 					acc.HasMax = true
 				}
@@ -950,7 +967,7 @@ func maxSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel 
 			for _, idx := range sel {
 				if !nulls.IsNullFast(int(idx)) {
 					v := float64(data[idx])
-					if !acc.HasMax || CompareFloat64(v, acc.MaxF64) > 0 {
+					if !acc.HasMax || v > acc.MaxF64 || v != v {
 						acc.MaxF64 = v
 						acc.HasMax = true
 					}
@@ -959,7 +976,7 @@ func maxSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel 
 		} else {
 			for _, idx := range sel {
 				v := float64(data[idx])
-				if !acc.HasMax || CompareFloat64(v, acc.MaxF64) > 0 {
+				if !acc.HasMax || v > acc.MaxF64 || v != v {
 					acc.MaxF64 = v
 					acc.HasMax = true
 				}
@@ -970,7 +987,7 @@ func maxSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel 
 			for i := 0; i < vecLen; i++ {
 				if !nulls.IsNullFast(i) {
 					v := float64(data[i])
-					if !acc.HasMax || CompareFloat64(v, acc.MaxF64) > 0 {
+					if !acc.HasMax || v > acc.MaxF64 || v != v {
 						acc.MaxF64 = v
 						acc.HasMax = true
 					}
@@ -979,7 +996,7 @@ func maxSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel 
 		} else {
 			for i := 0; i < vecLen; i++ {
 				v := float64(data[i])
-				if !acc.HasMax || CompareFloat64(v, acc.MaxF64) > 0 {
+				if !acc.HasMax || v > acc.MaxF64 || v != v {
 					acc.MaxF64 = v
 					acc.HasMax = true
 				}

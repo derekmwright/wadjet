@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
-	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 )
 
 // flatAccumArrays stores accumulator state in SoA (Struct of Arrays) layout
@@ -513,7 +512,10 @@ func scatterMinFloat[T ~float32 | ~float64](minArr []float64, hasMin []bool, dat
 			row := int(sel[si])
 			if idx := gi[si]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
 				v := float64(data[row])
-				if !hasMin[idx] || kernel.CompareFloat64(v, minArr[idx]) < 0 {
+				// See kernel.minRowFloat64's comment for the cheap
+				// `v < acc || acc != acc` replace-test (identical outcome
+				// to kernel.CompareFloat64(v, acc) < 0, #457 fold-in).
+				if !hasMin[idx] || v < minArr[idx] || minArr[idx] != minArr[idx] {
 					minArr[idx] = v
 					hasMin[idx] = true
 				}
@@ -523,7 +525,10 @@ func scatterMinFloat[T ~float32 | ~float64](minArr []float64, hasMin []bool, dat
 		for row := 0; row < n; row++ {
 			if idx := gi[row]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
 				v := float64(data[row])
-				if !hasMin[idx] || kernel.CompareFloat64(v, minArr[idx]) < 0 {
+				// See kernel.minRowFloat64's comment for the cheap
+				// `v < acc || acc != acc` replace-test (identical outcome
+				// to kernel.CompareFloat64(v, acc) < 0, #457 fold-in).
+				if !hasMin[idx] || v < minArr[idx] || minArr[idx] != minArr[idx] {
 					minArr[idx] = v
 					hasMin[idx] = true
 				}
@@ -565,7 +570,10 @@ func scatterMaxFloat[T ~float32 | ~float64](maxArr []float64, hasMax []bool, dat
 			row := int(sel[si])
 			if idx := gi[si]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
 				v := float64(data[row])
-				if !hasMax[idx] || kernel.CompareFloat64(v, maxArr[idx]) > 0 {
+				// See kernel.minRowFloat64's comment for the cheap
+				// `v > acc || v != v` replace-test (identical outcome to
+				// kernel.CompareFloat64(v, acc) > 0, #457 fold-in).
+				if !hasMax[idx] || v > maxArr[idx] || v != v {
 					maxArr[idx] = v
 					hasMax[idx] = true
 				}
@@ -575,7 +583,10 @@ func scatterMaxFloat[T ~float32 | ~float64](maxArr []float64, hasMax []bool, dat
 		for row := 0; row < n; row++ {
 			if idx := gi[row]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
 				v := float64(data[row])
-				if !hasMax[idx] || kernel.CompareFloat64(v, maxArr[idx]) > 0 {
+				// See kernel.minRowFloat64's comment for the cheap
+				// `v > acc || v != v` replace-test (identical outcome to
+				// kernel.CompareFloat64(v, acc) > 0, #457 fold-in).
+				if !hasMax[idx] || v > maxArr[idx] || v != v {
 					maxArr[idx] = v
 					hasMax[idx] = true
 				}
