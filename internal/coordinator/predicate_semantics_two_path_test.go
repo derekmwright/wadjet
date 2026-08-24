@@ -290,11 +290,14 @@ func nullLiteralPredicateCases() []predCase {
 }
 
 // decimalColColPredicateCases pin what a COLUMN-against-COLUMN comparison
-// between a DECIMAL and a column of another type means on both arms (#476).
+// involving a DECIMAL means on both arms (#476, #477).
 //
-// A DECIMAL column boxes as its RENDERED TEXT, so the pair reached the row
-// evaluator as (int64, string) and compared LEXICOGRAPHICALLY — "9" above
-// "10" — with `=` and `<>` right and only the ORDERING operators wrong.
+// A DECIMAL column boxes as its RENDERED TEXT, so a mixed-type pair reached
+// the row evaluator as (int64, string) and compared LEXICOGRAPHICALLY — "9"
+// above "10" — with `=` and `<>` right and only the ORDERING operators wrong.
+// A same-type pair never got that far on the single-process arm: two DECIMALs
+// share a TypeID, so the mixed-type fallback was skipped and no kernel existed
+// to take its place.
 //
 // c_dec is `i + 0.0001*(i%9973)` at DECIMAL(18,4) and c_i64 is `i*1_000_003`,
 // both NULL on their own strides, so the two orderings below are decided by
@@ -345,6 +348,8 @@ func decimalColColPredicateCases() []predCase {
 		return int64(*r.i32), true
 	}
 	rowID := func(r tmxRow) (int64, bool) { return r.id, true }
+	none := func(tmxRow) bool { return false }
+	present := func(r tmxRow) bool { return r.dec != nil }
 	lt := func(c int) bool { return c < 0 }
 	le := func(c int) bool { return c <= 0 }
 	gt := func(c int) bool { return c > 0 }
@@ -375,6 +380,18 @@ func decimalColColPredicateCases() []predCase {
 		// The negated forms, where a NULL row appears in neither answer.
 		{"DecimalColColNotGe", "NOT (c_i64 >= c_dec)", ord(i64, lt)},
 		{"DecimalColColNotLt", "NOT (c_i64 < c_dec)", ord(i64, ge)},
+		// DECIMAL against DECIMAL (#477): the same TypeID on both sides, which
+		// skipped the mixed-type fallback and found no kernel to use instead,
+		// so these did not answer wrongly — they FAILED the query on the
+		// single-process arm while the DAG arm, which always compiles to the
+		// row evaluator, answered from two rendered texts.
+		{"DecimalColColSameEq", "c_dec = c_dec", present},
+		{"DecimalColColSameGe", "c_dec >= c_dec", present},
+		{"DecimalColColSameLe", "c_dec <= c_dec", present},
+		{"DecimalColColSameNe", "c_dec <> c_dec", none},
+		{"DecimalColColSameLt", "c_dec < c_dec", none},
+		{"DecimalColColSameGt", "c_dec > c_dec", none},
+		{"DecimalColColSameNotLt", "NOT (c_dec < c_dec)", present},
 	}
 }
 

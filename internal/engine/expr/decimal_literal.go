@@ -189,6 +189,73 @@ func cmpOrder(c int, op CmpOp) bool {
 	return false
 }
 
+// decimalColCmp binds two BARE COLUMN operands so that when both turn out to
+// be DECIMALs the comparison happens on the unscaled Int128s, at whatever
+// scales the two columns declare.
+//
+// The boxed path cannot do this one. Both operands reach it as their RENDERED
+// TEXT, and compare()'s two-strings fast path answers first — lexicographically,
+// where "10.001" sorts below "2.0002" — so nothing about the BOX distinguishes
+// two DECIMAL columns from two ordinary string columns. Only the DECLARATION
+// does, which is ADR-0012 item 8's rule and the reason this is a binding
+// rather than another branch in compare(). Two DECIMALs of different SCALE are
+// the case that matters even for equality: "1.50" and "1.5000" are the same
+// number and different text (#477).
+type decimalColCmp struct {
+	left, right *ColRef
+	// notDecimal caches a settled "this pair is not two DECIMAL columns".
+	// See decimalLitCmp.notDecimal for why it is atomic.
+	notDecimal atomic.Bool
+}
+
+// bindDecimalCols binds `col op col`. Nil for every other operand shape.
+func bindDecimalCols(left, right Expr) *decimalColCmp {
+	l, ok := bareCol(left)
+	if !ok {
+		return nil
+	}
+	r, ok := bareCol(right)
+	if !ok {
+		return nil
+	}
+	return &decimalColCmp{left: l, right: r}
+}
+
+// vectors returns the batch's two DECIMAL columns for this binding, or nil
+// when the exact path does not apply.
+func (d *decimalColCmp) vectors(b *batch.RecordBatch) (*batch.Vector, *batch.Vector) {
+	if d.notDecimal.Load() {
+		return nil, nil
+	}
+	lv := decimalVectorOf(d.left, b)
+	rv := decimalVectorOf(d.right, b)
+	if lv == nil || rv == nil {
+		// Only a resolved NON-DECIMAL type is permanent; an empty column in
+		// one batch says nothing about the next.
+		if (lv == nil && d.left.typ != batch.TypeDecimal) ||
+			(rv == nil && d.right.typ != batch.TypeDecimal) {
+			d.notDecimal.Store(true)
+		}
+		return nil, nil
+	}
+	return lv, rv
+}
+
+// decimalVectorOf resolves one bound column to its DECIMAL vector, or nil for
+// any other type, an unresolved name, or a VIEW whose values live in a base
+// vector through an index (the decimal kernels read DecimalData directly).
+func decimalVectorOf(col *ColRef, b *batch.RecordBatch) *batch.Vector {
+	col.resolve(b)
+	if col.idx < 0 || col.idx >= len(b.Columns) || col.typ != batch.TypeDecimal {
+		return nil
+	}
+	v := b.Columns[col.idx]
+	if v.Base != nil || len(v.DecimalData.Data) == 0 {
+		return nil
+	}
+	return v
+}
+
 // decimalTextOrder orders a NUMBER against a DECIMAL value that reached the
 // boxed path as its rendered text, returning -1, 0 or +1 for num against the
 // text, and ok=false when the text is not a number (an ordinary string

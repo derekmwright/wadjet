@@ -417,8 +417,15 @@ func sortCompareBoolNullsLast(a *batch.Vector, ai int, b *batch.Vector, bi int) 
 // then started reporting 9007199254740993 and 9007199254740992.0 — which
 // differ by one unscaled unit at the common scale — as the same key.
 func CompareDecimalAt(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
-	av, bv := a.DecimalData.Data[ai], b.DecimalData.Data[bi]
-	as, bs := a.DecimalData.Scale, b.DecimalData.Scale
+	return CompareDecimalValues(a.DecimalData.Data[ai], a.DecimalData.Scale,
+		b.DecimalData.Data[bi], b.DecimalData.Scale)
+}
+
+// CompareDecimalValues is CompareDecimalAt on values already read out of their
+// columns — the form the col-col FILTER kernel needs, which reads its two
+// slices once per batch rather than per row. One function so the sort
+// comparator, the sort-merge join key and the filter cannot drift apart.
+func CompareDecimalValues(av batch.Int128, as int, bv batch.Int128, bs int) int {
 	if as == bs {
 		return compareInt128(av, bv)
 	}

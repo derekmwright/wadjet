@@ -54,3 +54,48 @@ func TestDecimalAgainstOtherColumnTypesOrdersNumerically(t *testing.T) {
 		})
 	}
 }
+
+// #477: two DECIMAL columns share a TypeID, so ColColFilter skipped the
+// mixed-type row fallback and looked for a vectorized kernel that
+// ResolveColColFilterKernel had no arm to give it. Every operator FAILED the
+// query outright. The row-at-a-time path did not fail — it answered, from the
+// two RENDERED TEXTS, lexicographically, where "10.001" sorts below "2.0002".
+//
+// Every expectation is PostgreSQL's on the same fixture, verified against live
+// postgres:17-alpine.
+func TestDecimalColumnAgainstDecimalColumn(t *testing.T) {
+	ctx := context.Background()
+	db := declitOpen(t)
+
+	for _, tc := range []struct {
+		pred string
+		want int64
+	}{
+		// Scale 2 against scale 4: the two columns cross, so no operator is
+		// vacuous and equality is decided across scales.
+		{"d_2 = d_4", 1},
+		{"d_2 <> d_4", 179},
+		{"d_2 < d_4", 89},
+		{"d_2 <= d_4", 90},
+		{"d_2 > d_4", 90},
+		{"d_2 >= d_4", 91},
+		// Scale 4 against the 25-digit scale-10 column, whose rescale is the
+		// arm a float64 comparison could not carry.
+		{"d_4 < d_wide", 87},
+		{"d_4 >= d_wide", 89},
+		{"d_2 < d_wide", 85},
+		// A column against itself: every non-NULL row equals itself, no row is
+		// distinct from itself, and the NULL rows appear in neither.
+		{"d_2 = d_2", 188},
+		{"d_2 <> d_2", 0},
+		{"d_wide >= d_wide", 184},
+	} {
+		t.Run(tc.pred, func(t *testing.T) {
+			declitCheck(t, ctx, db,
+				"SELECT COUNT(*) AS n FROM declit WHERE "+tc.pred, tc.want)
+			declitCheck(t, ctx, db,
+				"SELECT COUNT(*) AS n FROM declit WHERE CASE WHEN "+tc.pred+
+					" THEN 1 ELSE 0 END = 1", tc.want)
+		})
+	}
+}

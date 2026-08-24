@@ -1256,7 +1256,54 @@ func ResolveColColFilterKernel(typ batch.TypeID, op CompareOp) ColColFilterKerne
 		return colColFilterImpl(getFloat32Data, op)
 	case batch.TypeString, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		return colColFilterString(op)
+	case batch.TypeDecimal:
+		return colColFilterDecimal(op)
 	default:
 		return nil
+	}
+}
+
+// colColFilterDecimal compares two DECIMAL columns by NUMERIC value.
+//
+// Without this arm the resolver returned nil, and ColColFilter had nothing to
+// fall back to: its row-at-a-time fallback is attached only when the two
+// column TYPES differ (#375's mixed-type guard), and two DECIMALs share a
+// TypeID. `WHERE d_2 = d_4` therefore failed the query outright — "could not
+// resolve kernel for d_2 0 d_4" — for every operator (#477).
+//
+// The two columns' SCALES need not agree, and the comparison is exact at any
+// pair of them: CompareDecimalValues rescales the smaller-scale operand up and
+// falls back to big.Int only for the pair whose rescale overflows. Which of
+// the two paths applies is decided ONCE per batch, because a scale is a
+// property of the column, not of the row.
+func colColFilterDecimal(op CompareOp) ColColFilterKernel {
+	return func(left, right *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		ld, rd := left.DecimalData.Data, right.DecimalData.Data
+		ls, rs := left.DecimalData.Scale, right.DecimalData.Scale
+		keep := func(i int) bool { return applyCompareOp(compareInt128(ld[i], rd[i]), op) }
+		if ls != rs {
+			keep = func(i int) bool {
+				return applyCompareOp(CompareDecimalValues(ld[i], ls, rd[i], rs), op)
+			}
+		}
+		out := outSel[:0]
+		hasNulls := left.Nulls.HasNulls() || right.Nulls.HasNulls()
+		null := func(i int) bool {
+			return hasNulls && (left.Nulls.IsNullFast(i) || right.Nulls.IsNullFast(i))
+		}
+		if sel != nil {
+			for _, idx := range sel {
+				if !null(int(idx)) && keep(int(idx)) {
+					out = append(out, idx)
+				}
+			}
+			return out
+		}
+		for i := 0; i < vecLen; i++ {
+			if !null(i) && keep(i) {
+				out = append(out, uint32(i))
+			}
+		}
+		return out
 	}
 }

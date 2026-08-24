@@ -592,6 +592,26 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DecimalColColIntGeInCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_key >= d_2 THEN 1 ELSE 0 END = 1`},
 	)
 
+	// DECIMAL against DECIMAL (#477). The two columns share a TypeID, so
+	// ColColFilter skipped the mixed-type row fallback and went looking for a
+	// kernel that did not exist — every operator FAILED the query. Three
+	// different scales here (2, 4 and 10), so equality is decided ACROSS
+	// scales, where "1.50" and "1.5000" are the same number and different
+	// text.
+	out = append(out,
+		pgCase{name: "DecimalColColEq", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 = d_4`},
+		pgCase{name: "DecimalColColNe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 <> d_4`},
+		pgCase{name: "DecimalColColLt", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 < d_4`},
+		pgCase{name: "DecimalColColLe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 <= d_4`},
+		pgCase{name: "DecimalColColGt", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 > d_4`},
+		pgCase{name: "DecimalColColGe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 >= d_4`},
+		pgCase{name: "DecimalColColWideLt", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 < d_wide`},
+		pgCase{name: "DecimalColColWideGe", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 >= d_wide`},
+		pgCase{name: "DecimalColColSelf", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 = d_2`},
+		pgCase{name: "DecimalColColEqRows", sql: `SELECT d_key FROM dec_probe WHERE d_2 = d_4 ORDER BY d_key`},
+		pgCase{name: "DecimalColColLtInCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_2 < d_4 THEN 1 ELSE 0 END = 1`},
+	)
+
 	// --- Wide DECIMAL (precision 38) --------------------------------------
 	//
 	// Everything above runs on ONE physical encoding. A DECIMAL's leaf type is

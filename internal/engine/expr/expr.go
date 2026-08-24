@@ -31,6 +31,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/geoip"
 	"golang.org/x/net/publicsuffix"
 )
@@ -951,12 +952,17 @@ type Cmp struct {
 	// a struct literal, which is why the compiler builds them through NewCmp
 	// (decimal_literal.go).
 	dec *decimalLitCmp
+	// decCols is the two-bare-columns binding, for the pair whose boxes carry
+	// no way to tell a DECIMAL from a string (#477).
+	decCols *decimalColCmp
 }
 
-// NewCmp builds a comparison, binding the one operand shape that cannot be
-// answered through float64: a DECIMAL column against a numeric literal.
+// NewCmp builds a comparison, binding the two operand shapes that cannot be
+// answered from the boxed values: a DECIMAL column against a numeric literal,
+// and two DECIMAL columns against each other.
 func NewCmp(left, right Expr, op CmpOp) *Cmp {
-	return &Cmp{Left: left, Right: right, Op: op, dec: bindDecimalCmp(left, right)}
+	return &Cmp{Left: left, Right: right, Op: op,
+		dec: bindDecimalCmp(left, right), decCols: bindDecimalCols(left, right)}
 }
 
 func (e *Cmp) Eval(b *batch.RecordBatch, row int) any {
@@ -975,6 +981,14 @@ func (e *Cmp) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 				return false, true // a comparison against NULL is UNKNOWN (#370)
 			}
 			return cmpOrder(e.dec.order(vec, row, 0), e.Op), false
+		}
+	}
+	if e.decCols != nil {
+		if lv, rv := e.decCols.vectors(b); lv != nil {
+			if lv.Nulls.IsNullFast(row) || rv.Nulls.IsNullFast(row) {
+				return false, true // a comparison against NULL is UNKNOWN (#370)
+			}
+			return cmpOrder(kernel.CompareDecimalAt(lv, row, rv, row), e.Op), false
 		}
 	}
 	lv := e.Left.Eval(b, row)
