@@ -8,11 +8,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -200,6 +202,67 @@ func TestSetupStreamsIdempotent(t *testing.T) {
 	}
 	if err := SetupStreams(ctx, js); err != nil {
 		t.Fatalf("SetupStreams second call: %v", err)
+	}
+}
+
+// TestEmbeddedNATSConcurrentJetStreamStartupIsRaceFree guards against the
+// intra-server data race in embedded JetStream startup fixed upstream by
+// nats-io/nats-server@7ffbf6a488e9ec677028a55ae5383e2596cca09 ("[FIXED]
+// Data races on stream config on JS read paths", first released in
+// v2.12.9): jsAccount.tieredReservation read a stream's cfg fields
+// (jetstream_api.go:1591) without the cfgMu that guards the config write
+// in the stream-update path (stream.go:2517) (#515). On v2.12.6-v2.12.8
+// it reproduced under -race roughly 1-in-4 to 1-in-8 runs of any test
+// that starts an embedded server and creates more than one stream. This
+// test fans the same multi-stream SetupStreams flow across several
+// concurrent embedded servers so `go test -race` keeps amplifying the
+// window if the race ever resurfaces (e.g. an accidental downgrade).
+func TestEmbeddedNATSConcurrentJetStreamStartupIsRaceFree(t *testing.T) {
+	const servers = 8
+
+	var wg sync.WaitGroup
+	errs := make(chan error, servers)
+	for i := 0; i < servers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			cfg := DefaultNATSConfig()
+			cfg.Port = -1
+			cfg.StoreDir = t.TempDir()
+
+			en, err := NewEmbeddedNATS(cfg, nil)
+			if err != nil {
+				errs <- fmt.Errorf("NewEmbeddedNATS: %w", err)
+				return
+			}
+			defer en.Shutdown()
+
+			nc, err := ConnectInProcess(en.Server())
+			if err != nil {
+				errs <- fmt.Errorf("ConnectInProcess: %w", err)
+				return
+			}
+			defer nc.Close()
+
+			js, err := NewJetStream(nc)
+			if err != nil {
+				errs <- fmt.Errorf("NewJetStream: %w", err)
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := SetupStreams(ctx, js); err != nil {
+				errs <- fmt.Errorf("SetupStreams: %w", err)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
 	}
 }
 
