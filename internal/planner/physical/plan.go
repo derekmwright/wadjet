@@ -6005,6 +6005,23 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	var rbBuildSource exec.Source = buildSource // may be wrapped with bloom
 	go func() {
 		defer close(buildDone)
+		// The build runs here so it can overlap with the probe side's
+		// preparation, which also means nothing above it recovers: this
+		// goroutine's whole call stack — pipelineSource.runFrom, the
+		// operators pushed onto the build side, every expression they
+		// evaluate — had no boundary at all. A filter pushed onto a join's
+		// build side that raised the DESIGNED query-error panic (an invalid
+		// cast) therefore killed the SERVER, while the same condition on a
+		// scan filter or the fast path returned a normal error to the client
+		// (#508). Everything else it can raise did the same.
+		//
+		// buildErr is read by all three consumers after the barrier, so
+		// setting it is the whole delivery. Registered after
+		// close(buildDone), so it runs FIRST on the way out and the error is
+		// in place before the barrier opens.
+		defer exec.CatchQueryPanic(ctx, "hash join build", func(err error) {
+			buildErr = fmt.Errorf("building hash table: %w", err)
+		})
 		if buildStart != nil {
 			<-buildStart // wait for reverse bloom injection
 		}
