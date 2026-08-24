@@ -85,7 +85,7 @@ func TestRetrierFatalSkipsRetries(t *testing.T) {
 	if republished != 0 {
 		t.Fatalf("fatal failure was republished %d times", republished)
 	}
-	_, errMsg, failed := tr.FirstError()
+	_, errMsg, _, failed := tr.FirstError()
 	if !failed || !strings.Contains(errMsg, inputLostMarker) {
 		t.Fatalf("terminal error %q missing input-lost marker", errMsg)
 	}
@@ -108,7 +108,7 @@ func TestRetrierExhaustedMissingInputCarriesMarker(t *testing.T) {
 	for i := 0; i < maxTaskAttempts; i++ {
 		tr.Observe(fail)
 	}
-	_, errMsg, failed := tr.FirstError()
+	_, errMsg, _, failed := tr.FirstError()
 	if !failed || !strings.Contains(errMsg, inputLostMarker) {
 		t.Fatalf("exhausted-attempts error %q missing marker", errMsg)
 	}

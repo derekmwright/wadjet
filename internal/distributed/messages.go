@@ -874,6 +874,17 @@ type ResultNotification struct {
 	WorkerID string `json:"worker_id"`
 	Success  bool   `json:"success"`
 	Error    string `json:"error,omitempty"`
+	// Panicked marks a failure that crossed the query-scoped panic boundary
+	// (ADR-0019) on the worker, set from the recovered error's TYPE
+	// (errors.As against *exec.QueryPanic), never from Error's text. Error
+	// is free-form: it can embed arbitrary user data (e.g. an invalid CAST
+	// argument), and that text can legitimately contain any substring,
+	// including one that used to double as the panic marker
+	// (exec.queryPanicPrefix) — a SQL statement casting the literal string
+	// "internal error in x" reproduced exactly that collision. The retry
+	// decision and the SQLSTATE handed to the client key off this field,
+	// not off Error.
+	Panicked bool `json:"panicked,omitempty"`
 
 	// Result location
 	ResultPath  string   `json:"result_path,omitempty"`

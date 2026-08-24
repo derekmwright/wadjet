@@ -47,7 +47,7 @@ func TestQueryPanicMessageSurvivesStageFraming(t *testing.T) {
 
 func TestStageTaskFailureCarriesInternalErrorSQLSTATE(t *testing.T) {
 	raw := panicText(t)
-	err := stageTaskFailure(raw, fmt.Errorf("stage join-3: task t-1 failed after 3 attempts: %s", raw))
+	err := stageTaskFailure(true, fmt.Errorf("stage join-3: task t-1 failed after 3 attempts: %s", raw))
 	if got := sqlerr.StateOf(err); got != exec.SQLStateInternalError {
 		t.Errorf("SQLSTATE = %q, want %q — a panic that crossed the wire must still reach "+
 			"the client as internal_error, not the blanket class", got, exec.SQLStateInternalError)
@@ -58,9 +58,54 @@ func TestStageTaskFailureCarriesInternalErrorSQLSTATE(t *testing.T) {
 
 	// An ordinary failure keeps whatever code it already had (usually none),
 	// so this must not blanket-stamp XX000 onto everything.
-	plain := stageTaskFailure("worker died", errors.New("stage join-3: task t-1 failed"))
+	plain := stageTaskFailure(false, errors.New("stage join-3: task t-1 failed"))
 	if got := sqlerr.StateOf(plain); got != "" {
 		t.Errorf("SQLSTATE = %q on a non-panic failure, want none", got)
+	}
+}
+
+// TestCastErrorTextIsNotMisclassifiedAsPanic is the regression for the
+// substring-match bug stageTaskFailure and taskRetrier.Observe used to carry:
+// keying "is this a panic" off exec.IsQueryPanicMessage(errMsg) matched on
+// the free-form error TEXT, and CAST('internal error in x' AS INT) produces
+// exactly `invalid input syntax for type integer: "internal error in x"` —
+// a perfectly ordinary 22P02 client error whose message happens to embed the
+// panic marker as user data. The old classifier called that XX000 and
+// terminal-on-first-failure; it is neither.
+func TestCastErrorTextIsNotMisclassifiedAsPanic(t *testing.T) {
+	castErrMsg := `invalid input syntax for type integer: "internal error in x"`
+	if !exec.IsQueryPanicMessage(castErrMsg) {
+		t.Fatalf("test no longer reproduces the collision: %q does not contain the panic marker", castErrMsg)
+	}
+
+	// stageTaskFailure must not stamp XX000 onto it: the worker correctly
+	// determined this was not a *exec.QueryPanic, so Panicked is false.
+	err := stageTaskFailure(false, fmt.Errorf("stage cast-1: task t-1 failed after 1 attempts: %s", castErrMsg))
+	if got := sqlerr.StateOf(err); got == exec.SQLStateInternalError {
+		t.Errorf("SQLSTATE = %q, a CAST error was misclassified as an internal panic", got)
+	}
+
+	// taskRetrier.Observe must still retry it — a recovered panic skips
+	// straight to terminal, but this was never one.
+	task := distributed.Task{ID: "t-cast", QueryID: "q-1", StageID: "s-1"}
+	republished := make(chan distributed.Task, 4)
+	tr := newTaskRetrier([]distributed.Task{task}, true,
+		func(t distributed.Task) { republished <- t },
+		slog.New(slog.DiscardHandler), "s-1", nil)
+
+	if done := tr.Observe(distributed.ResultNotification{
+		TaskID: "t-cast", QueryID: "q-1", StageID: "s-1",
+		Success: false, Error: castErrMsg, Panicked: false,
+	}); done {
+		t.Fatal("a CAST error went terminal on its first attempt — retryable classification changed")
+	}
+	select {
+	case got := <-republished:
+		if got.ID != "t-cast" {
+			t.Errorf("re-dispatched %q, want t-cast", got.ID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a CAST error was never re-dispatched — it was misclassified as a fatal panic")
 	}
 }
 
@@ -77,7 +122,7 @@ func TestRecoveredPanicIsNotRetried(t *testing.T) {
 
 	done := tr.Observe(distributed.ResultNotification{
 		TaskID: "t-1", QueryID: "q-1", StageID: "s-1",
-		Success: false, Error: panicText(t),
+		Success: false, Error: panicText(t), Panicked: true,
 	})
 	if !done {
 		t.Fatal("a panicking task was not terminal on its first failure")
@@ -86,8 +131,8 @@ func TestRecoveredPanicIsNotRetried(t *testing.T) {
 		t.Errorf("the task was re-dispatched %d times; a recovered panic must not be retried",
 			republished)
 	}
-	if _, msg, failed := tr.FirstError(); !failed || !exec.IsQueryPanicMessage(msg) {
-		t.Errorf("FirstError() = (%q, %v), want the panic message and failed=true", msg, failed)
+	if _, msg, panicked, failed := tr.FirstError(); !failed || !panicked {
+		t.Errorf("FirstError() = (%q, panicked=%v, failed=%v), want panicked=true and failed=true", msg, panicked, failed)
 	}
 }
 

@@ -86,22 +86,27 @@ type taskAttemptState struct {
 	partRows  []int64
 	partBytes []int64
 	errMsg    string
+	panicked  bool
 	attempts  int
 	terminal  bool
 }
 
 // stageTaskFailure carries a failed stage task's SQLSTATE across the process
-// boundary. errMsg is the worker's raw text; err is the caller's framing of
-// it, whose wording each stage type owns.
+// boundary. err is the caller's framing of the worker's raw error text,
+// whose wording each stage type owns; panicked is the worker's
+// ResultNotification.Panicked bit for that same failure.
 //
 // A worker-side panic is converted at the worker's own boundary and reaches
 // the coordinator as a bare STRING in a ResultNotification — the *QueryPanic
 // and its XX000 do not survive that trip, and framing the text with %s
 // produced an error with no code at all, so the client was handed the blanket
-// class instead of internal_error. The marker left in the message is what
-// there is to key off (exec.IsQueryPanicMessage).
-func stageTaskFailure(errMsg string, err error) error {
-	if exec.IsQueryPanicMessage(errMsg) {
+// class instead of internal_error. panicked is what there is to key off: it
+// is set from the worker's error TYPE, not from the error text, because that
+// text is free-form and can legitimately contain any substring — including
+// one that used to double as the panic marker (a CAST reporting back an
+// invalid input of "internal error in x" is exactly that collision).
+func stageTaskFailure(panicked bool, err error) error {
+	if panicked {
 		return sqlerr.Wrap(exec.SQLStateInternalError, err)
 	}
 	return err
@@ -179,7 +184,7 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 	// stage its whole retry budget plus two more chances to hit whatever
 	// the panic damaged on a worker. It is terminal on the first failure,
 	// the same way an input-lost failure is.
-	fatalNow := exec.IsQueryPanicMessage(r.Error) || (tr.fatal != nil && tr.fatal(r))
+	fatalNow := r.Panicked || (tr.fatal != nil && tr.fatal(r))
 	if !fatalNow && tr.retryEnabled && st.attempts < maxTaskAttempts {
 		st.attempts++
 		task := tr.growEstimateLocked(r.TaskID)
@@ -197,6 +202,7 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 		return false
 	}
 	st.errMsg = r.Error
+	st.panicked = r.Panicked
 	if r.MissingInputKey != "" {
 		// Tag both the fatal-classified case and attempts-exhausted-on-
 		// missing-input so ExecuteSQL's streaming-disabled re-execution
@@ -249,15 +255,18 @@ func (tr *taskRetrier) IsTerminal(taskID string) bool {
 }
 
 // FirstError returns the first terminal failure in dispatch order, if any.
-func (tr *taskRetrier) FirstError() (taskID, errMsg string, failed bool) {
+// panicked reports whether that failure's ResultNotification.Panicked bit
+// was set, for callers deciding SQLSTATE (see stageTaskFailure) — never
+// derive it by re-inspecting errMsg's text.
+func (tr *taskRetrier) FirstError() (taskID, errMsg string, panicked, failed bool) {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	for _, id := range tr.order {
 		if st := tr.states[id]; st.terminal && st.errMsg != "" {
-			return id, st.errMsg, true
+			return id, st.errMsg, st.panicked, true
 		}
 	}
-	return "", "", false
+	return "", "", false, false
 }
 
 // Files returns per-task result files in dispatch order. Only meaningful

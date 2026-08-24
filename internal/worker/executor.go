@@ -827,6 +827,14 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		if errors.As(err, &miss) {
 			result.MissingInputKey = miss.key
 		}
+		// Same reasoning for a query-scoped panic (ADR-0019): classify from
+		// the error's TYPE, not by matching text in result.Error, which can
+		// legitimately contain the panic marker as ordinary user data (e.g.
+		// CAST('internal error in x' AS INT)'s reported invalid input).
+		var qp *exec.QueryPanic
+		if errors.As(err, &qp) {
+			result.Panicked = true
+		}
 	} else {
 		result.Success = true
 	}

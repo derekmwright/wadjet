@@ -1448,8 +1448,8 @@ func (c *Coordinator) materializeReplicate(
 	if err := awaitStageProgress(ctx, done, progress, "replicate "+stage.ID); err != nil {
 		return nil, 0, err
 	}
-	if _, errMsg, failed := retrier.FirstError(); failed {
-		return nil, 0, stageTaskFailure(errMsg, fmt.Errorf("materialize task failed after %d attempts: %s", maxTaskAttempts, errMsg))
+	if _, errMsg, panicked, failed := retrier.FirstError(); failed {
+		return nil, 0, stageTaskFailure(panicked, fmt.Errorf("materialize task failed after %d attempts: %s", maxTaskAttempts, errMsg))
 	}
 	resultFiles := retrier.Files()[0]
 	if len(resultFiles) == 0 {
@@ -1924,8 +1924,8 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		return StageOutput{}, err
 	}
 
-	if taskID, errMsg, failed := retrier.FirstError(); failed {
-		return StageOutput{}, stageTaskFailure(errMsg, fmt.Errorf("scan-agg stage %s: task %s failed after %d attempts: %s", stage.ID, taskID, maxTaskAttempts, errMsg))
+	if taskID, errMsg, panicked, failed := retrier.FirstError(); failed {
+		return StageOutput{}, stageTaskFailure(panicked, fmt.Errorf("scan-agg stage %s: task %s failed after %d attempts: %s", stage.ID, taskID, maxTaskAttempts, errMsg))
 	}
 	resultFiles := retrier.Files()
 	if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0 {
@@ -2283,8 +2283,8 @@ func (c *Coordinator) dispatchScanFilterStage(
 		return StageOutput{}, err
 	}
 
-	if taskID, errMsg, failed := retrier.FirstError(); failed {
-		return StageOutput{}, stageTaskFailure(errMsg, fmt.Errorf("scan-filter stage %s: task %s failed after %d attempts: %s", stage.ID, taskID, maxTaskAttempts, errMsg))
+	if taskID, errMsg, panicked, failed := retrier.FirstError(); failed {
+		return StageOutput{}, stageTaskFailure(panicked, fmt.Errorf("scan-filter stage %s: task %s failed after %d attempts: %s", stage.ID, taskID, maxTaskAttempts, errMsg))
 	}
 	resultFiles := retrier.Files()
 
@@ -3154,8 +3154,8 @@ func (c *Coordinator) dispatchComputeStage(
 	}
 	c.logger.Info("compute stage complete", "stage_id", stage.ID, "tasks", len(tasks))
 
-	if taskID, errMsg, failed := retrier.FirstError(); failed {
-		return StageOutput{}, stageTaskFailure(errMsg, fmt.Errorf("stage %s: task %s failed after %d attempts: %s", stage.ID, taskID, maxTaskAttempts, errMsg))
+	if taskID, errMsg, panicked, failed := retrier.FirstError(); failed {
+		return StageOutput{}, stageTaskFailure(panicked, fmt.Errorf("stage %s: task %s failed after %d attempts: %s", stage.ID, taskID, maxTaskAttempts, errMsg))
 	}
 	resultFiles := retrier.Files()
 	// Output-side dynamic-filter partials (markSemiAntiBuildFilters):
@@ -4258,8 +4258,8 @@ func (c *Coordinator) runStageTasks(
 		return nil, 0, err
 	}
 
-	if taskID, errMsg, failed := retrier.FirstError(); failed {
-		return nil, 0, stageTaskFailure(errMsg, fmt.Errorf("stage %s: task %s failed after %d attempts: %s", stageLabel, taskID, maxTaskAttempts, errMsg))
+	if taskID, errMsg, panicked, failed := retrier.FirstError(); failed {
+		return nil, 0, stageTaskFailure(panicked, fmt.Errorf("stage %s: task %s failed after %d attempts: %s", stageLabel, taskID, maxTaskAttempts, errMsg))
 	}
 	return retrier.Files(), retrier.TotalBytes(), nil
 }

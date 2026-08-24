@@ -2085,12 +2085,11 @@ func (w *Worker) executeIncomingTaskDelivery(ctx context.Context, task distribut
 	// Publish failed tasks to the DLQ for inspection
 	if !result.Success {
 		reason := "execution_error"
-		// The classifier used to match the literal "task panicked" prefix
-		// this path produced. It now produces exec.QueryPanic's message, so
-		// ask the boundary that owns that format instead of re-encoding it
-		// here — a string this file no longer writes is a classifier that
-		// silently stops classifying.
-		if exec.IsQueryPanicMessage(result.Error) {
+		// result.Panicked is set from the recovered error's TYPE (ADR-0019),
+		// not by matching text in result.Error — that text is free-form and
+		// can legitimately contain the old panic marker as ordinary user
+		// data (e.g. a CAST reporting back the invalid input it was given).
+		if result.Panicked {
 			reason = "panic"
 		}
 		w.publishDLQ(task, reason, result.Error)
