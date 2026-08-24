@@ -145,7 +145,7 @@ func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 	// rows with the data gone. Callers must route such schemas to the
 	// row-based fallback (readFileBatchesViaRows / readBatchViaRows).
 	if HasUnsupportedColumnarTypes(schema) {
-		return nil, fmt.Errorf("native reader does not support ARRAY/MAP columns")
+		return nil, fmt.Errorf("native reader does not support %s", describeUnsupportedColumnarColumn(schema))
 	}
 	// The footer is validated on open, so this is a backstop rather than
 	// the enforcement point — but it is one line in front of an allocation

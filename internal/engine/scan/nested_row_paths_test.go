@@ -5,6 +5,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -301,6 +302,40 @@ func nestedBatchToRows(b *batch.RecordBatch) []map[string]any {
 		out[i] = row
 	}
 	return out
+}
+
+// TestNativeReaderRefusalNamesTheOffendingColumn is #448/#449's F2: the
+// refusal error said "ARRAY/MAP" even when the offender was a ROW whose
+// field is itself a container — neither an ARRAY nor a MAP column. It must
+// name the actual column (and, for a ROW, the actual field) and its type.
+func TestNativeReaderRefusalNamesTheOffendingColumn(t *testing.T) {
+	schema := rowPathsSchema()
+	data := rowPathsWadjetFile(t)
+	r, err := pqt.NewReaderFromBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ReadRowGroupNative(r.FileReader(), 0, schema.Columns, nil)
+	if err == nil {
+		t.Fatal("ReadRowGroupNative accepted a ROW with a container field")
+	}
+	if strings.Contains(err.Error(), "ARRAY/MAP columns") {
+		t.Errorf("error %q still says the generic ARRAY/MAP text instead of naming the column", err)
+	}
+	if !strings.Contains(err.Error(), `"r_row"`) {
+		t.Errorf("error %q does not name the offending column r_row", err)
+	}
+
+	// A plain top-level ARRAY column IS an ARRAY, so the wording naming it
+	// as one is correct, not the bug — it must still name the COLUMN.
+	arrSchema := []pqt.Column{{Name: "tags", Type: pqt.TypeArray, Nullable: true,
+		ElementType: &pqt.Column{Name: "element", Type: pqt.TypeString, Nullable: true}}}
+	if !HasUnsupportedColumnarTypes(arrSchema) {
+		t.Fatal("a top-level ARRAY column must be refused")
+	}
+	if msg := describeUnsupportedColumnarColumn(arrSchema); !strings.Contains(msg, `"tags"`) || !strings.Contains(msg, "ARRAY") {
+		t.Errorf("describeUnsupportedColumnarColumn = %q, want it to name column \"tags\" and ARRAY", msg)
+	}
 }
 
 func assertNestedRowsEqual(t *testing.T, what string, got, want []map[string]any) {

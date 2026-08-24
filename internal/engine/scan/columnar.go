@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -154,6 +155,29 @@ func HasUnsupportedColumnarTypes(schema []pqt.Column) bool {
 		}
 	}
 	return false
+}
+
+// describeUnsupportedColumnarColumn names the specific column (and, for a
+// ROW, the specific field) that made HasUnsupportedColumnarTypes refuse a
+// schema. Mirrors that function's traversal exactly so the two never
+// disagree on which column is the offender — a bare "ARRAY/MAP" error at the
+// call site was misleading when the true offender was a ROW field one level
+// down (#448/#449).
+func describeUnsupportedColumnarColumn(schema []pqt.Column) string {
+	for _, col := range schema {
+		switch col.Type {
+		case pqt.TypeArray, pqt.TypeMap:
+			return fmt.Sprintf("column %q (%s)", col.Name, col.Type)
+		case pqt.TypeRow:
+			for _, f := range col.Fields {
+				switch f.Type {
+				case pqt.TypeArray, pqt.TypeMap, pqt.TypeRow:
+					return fmt.Sprintf("column %q: ROW field %q (%s)", col.Name, f.Name, f.Type)
+				}
+			}
+		}
+	}
+	return "schema"
 }
 
 // StorageClass exposes storageClass to other packages. It is the file-vs-
