@@ -799,6 +799,63 @@ family are tracked separately: #478 (a derived-table LIMIT lands on no stage),
 failures on a derived table feeding a join, both with explicit-`GROUP BY`
 twins).
 
+## The query panic boundary (#511, ADR-0019)
+
+Every goroutine a query spawns converts ANY panic into that query's error
+instead of ending the process: `exec.RecoverQueryPanic` /
+`exec.CatchQueryPanic` in `internal/engine/exec/panic_boundary.go`. A
+`FatalEvalPanic` still becomes its own precise error; anything else becomes a
+`*exec.QueryPanic` (SQLSTATE XX000), logged at error level with the query id
+and a truncated stack, and counted by `exec.QueryPanicsRecovered` — which is
+what the two process-killer gates read.
+
+**A boundary owes every obligation the dying goroutine held**, not just the
+unit in flight (ADR-0019 §2a). That obligation is a property of the site, so
+it is written down here. Adding a goroutine to the query path means adding a
+row.
+
+| Site | Boundary name | Obligation it discharges |
+|---|---|---|
+| `exec/pipeline.go` `Pipeline.Run` | `pipeline` | none — returns the error |
+| `exec/pipeline.go` `ChainDriver.Push` | `operator chain` | none — returns the error (per batch; the defer pre-dates the boundary) |
+| `exec/pipeline.go` runParallel worker | `pipeline worker` | first-error slot + `cancel()` |
+| `exec/pipeline.go` partition-queue closer | `partition queue closer` | **closes every remaining partition queue** (workers drain on them) |
+| `exec/aggregate_parallel_emit.go` `produce` | `aggregate emit` | drain error slot; unit `Close` + `wg.Done` stay on their own defers |
+| `exec/aggregate_parallel_emit.go` closer | `aggregate emit closer` | **closes `d.out`** (`next()` blocks on it) |
+| `exec/join.go` key-build worker | `hash join key build worker` | **releases `sourceMu`** (siblings block on it) + `cancelBuild()` |
+| `exec/join_spill.go` build prefetch ×2 | `join spill build prefetch` | sends the partition's error down the prefetch channel |
+| `scan/scanner.go` file prefetch ×2 | `scan file prefetch`, `scan reader-at prefetch` | sends this file's result **exactly once** (`sent` guard) |
+| `physical/plan.go` `buildJoin` | `hash join build` | sets `buildErr` before the build barrier opens |
+| `physical/plan.go` scan/rg workers, ch closer | `scan worker`, `scan row-group worker`, `scan batch-channel closer` | error onto `errCh` + `cancel()` |
+| `physical/util.go` footer readers | `scan footer reader` | records **`fatalScanErr`** — a tolerated per-file failure would silently drop that file's rows |
+| `physical/sort_merge_join.go` build | `sort-merge join build` | sets `buildErr` before the barrier |
+| `physical/metadata_minmax.go` workers | `min/max metadata worker` | `declined` → the query falls back to a real scan |
+| `coordinator/coordinator.go` `ExecuteSQL` | `coordinator query` | none — returns the error |
+| `coordinator/coordinator.go` gather / inline / re-agg / result-file | `gather result fetch`, `inline result decode`, `partial re-aggregation shard`, `result file decode` | fills that slot's error; the result-file one **must surface** or rows go missing |
+| `coordinator/dynamic_filter.go` | `dynamic filter artifact decode` | leaves the slot nil → the filter is withheld |
+| `worker/worker.go` task executor | `worker task <id>` | failure `ResultNotification`; **stack stays in the log, not on the wire** |
+| `worker/executor_fragment.go` source pump | `fragment source pump` | errgroup return value |
+| `worker/executor.go` upload / parquet / shuffle | `shuffle partition upload`, `parquet file decode`, `shuffle file decode` | fills that index's result slot |
+| `worker/scan_prefetch.go` prefetch workers | `scan file prefetch` | in-flight index **plus every index still queued** (nothing else drains `jobs`) |
+| `worker/shuffle_decode_ahead.go` scanner | `shuffle decode-ahead scan` | `d.fail` **before** the scanner's own `close(d.delivery)` |
+| `worker/shuffle_decode_ahead.go` decode workers | `shuffle chunk decode` | releases the slot's CPU token, sets its error, **closes its `done`** |
+| `worker/cached_store.go` `readFully` | (plain defer) | **releases the worker-lifetime ledger charge** and closes the reader |
+| `pgwire/server.go` per message | `pgwire message` | ErrorResponse; ReadyForQuery **only for 'Q'** — extended-query messages enter `skipUntilSync` and let Sync send it |
+| `pgwire/server.go` per connection | `pgwire connection` | drops this connection only |
+| `wadjet/wadjet.go`, `wadjet/dml.go` | `embedded query`, `embedded statement` | none — returns the error |
+
+Across the process boundary the panic survives only as text, so
+`exec.IsQueryPanicMessage` (matching `queryPanicPrefix`) is what
+`coordinator/task_retry.go` uses to (a) mark the task terminal rather than
+retrying a deterministic failure and (b) re-attach XX000 via
+`stageTaskFailure`.
+
+Gates: `TestTypeMatrixNoProcessKillers` and
+`TestQueryPanicBoundaryHoldsForEveryShape` (both in `wadjet/`) fail on a dead
+child AND on an unpinned recovered panic; the obligation regressions live in
+`exec/join_build_panic_test.go`, `worker/panic_obligations_test.go` and
+`pgwire/panic_protocol_test.go`.
+
 ## How to inspect this machinery (recipes)
 
 **Dump the stages a query plans to** — fastest way to see what the DAG looks
