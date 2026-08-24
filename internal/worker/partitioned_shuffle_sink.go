@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1286,8 +1285,15 @@ func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, h
 				if col.Nulls.IsNullFast(row) || dim <= 0 || (row+1)*dim > len(col.Float32Data) {
 					h = (h ^ 0xff) * fnvPrime64
 				} else {
+					// Canonical bits, not raw: -0.0 and +0.0 are one value
+					// and every NaN payload is one value (kernel/
+					// float_order.go), matching the TypeFloat32 arm above
+					// and appendVectorKey (engine/exec/aggregate.go) — a
+					// VECTOR element keyed by raw bits here would split a
+					// group that the router and the single-process merge
+					// both call one group (#459).
 					for _, f := range col.Float32Data[row*dim : (row+1)*dim] {
-						v := math.Float32bits(f)
+						v := kernel.KeyFloat32Bits(f)
 						h = (h ^ uint64(byte(v))) * fnvPrime64
 						h = (h ^ uint64(byte(v>>8))) * fnvPrime64
 						h = (h ^ uint64(byte(v>>16))) * fnvPrime64
@@ -1361,8 +1367,10 @@ func hashVectorValue(h interface{ Write([]byte) (int, error) }, col *batch.Vecto
 			_, _ = h.Write([]byte{0xff})
 			return
 		}
+		// Must mix the SAME byte stream as the TypeVector arm of
+		// hashRowsIntoPartitions above: canonical bits, not raw (#459).
 		for _, f := range col.Float32Data[row*dim : (row+1)*dim] {
-			binary.LittleEndian.PutUint32(scratch[:4], math.Float32bits(f))
+			binary.LittleEndian.PutUint32(scratch[:4], kernel.KeyFloat32Bits(f))
 			_, _ = h.Write(scratch[:4])
 		}
 	default:

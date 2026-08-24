@@ -28,6 +28,16 @@ import (
 // (scale-dependent, so a cross-scale join stops co-partitioning) and a float
 // on raw IEEE bits (so ±0.0 and two NaN payloads split). This gate is the
 // proof the two agree, over the same rows, through the real DAG.
+//
+// The zv column is #459's VECTOR sub-bug: appendVectorKey (exec/
+// aggregate.go) folded a VECTOR element's -0.0/NaN through
+// kernel.KeyFloat32Bits, but the TypeVector arms of hashRowsIntoPartitions
+// and hashVectorValue (internal/worker/partitioned_shuffle_sink.go) still
+// hashed the element's raw IEEE bits — a router/key disagreement, same
+// shape as the DECIMAL and scalar-FLOAT ones above, proven concretely with
+// two single-element vectors ([+0.0,1] and [-0.0,1]) landing in different
+// exchange partitions (249 vs 183) under the pre-fix router. The
+// vector_groups cases below are the distributed proof that they now agree.
 const ketTable = "keyenc"
 
 // ketValueExpr manufactures the NaN/±Inf values, which cannot be ingested:
@@ -47,6 +57,7 @@ func ketSchema() parquet.Schema {
 		{Name: "kind", Type: parquet.TypeString},
 		{Name: "z", Type: parquet.TypeFloat64, Nullable: true},
 		{Name: "d", Type: parquet.TypeDecimal, Precision: 38, Scale: 10, Nullable: true},
+		{Name: "zv", Type: parquet.TypeVector, Nullable: true, Dimension: 2},
 	}}
 }
 
@@ -76,6 +87,8 @@ func ketDecimal(offset int64) parquet.Decimal128 {
 func ketData() []map[string]any {
 	negZero := float64(0)
 	negZero = -negZero
+	negZero32 := float32(0)
+	negZero32 = -negZero32
 	kinds := []struct {
 		kind string
 		z    any
@@ -88,8 +101,28 @@ func ketData() []map[string]any {
 	offsets := []int64{0, 1, 1000, 1001}
 	out := make([]map[string]any, len(kinds))
 	for i, k := range kinds {
+		// zv: a VECTOR(2) whose first element is +0.0 for rows 0-7 and -0.0
+		// for rows 8-15, second element = -(1 + i%4) (the canonical group
+		// id, one of four negative values chosen because they route the
+		// pre-fix raw-bit hash of hashRowsIntoPartitions to a DIFFERENT
+		// partition than the canonical-bit hash at this test's numParts —
+		// small non-negative second elements happen not to, at this
+		// numParts, which would leave the case unable to tell the fix from
+		// the bug). The 4-chunk write in tmdWriteTables (16 rows / 4 chunks
+		// = 4 rows each) puts every canonical vector's +0.0 half in chunks
+		// 0-1 and its -0.0 half in chunks 2-3 — different workers' partial
+		// aggregates — so a shuffle router that keys ±0.0 apart
+		// (hashRowsIntoPartitions' TypeVector arm before #459's VECTOR
+		// sub-bug was closed) sends the two halves to different exchange
+		// partitions and the final merge never recombines them into the one
+		// group PostgreSQL and appendVectorKey both call it.
+		vz0 := float32(0)
+		if i >= 8 {
+			vz0 = negZero32
+		}
 		out[i] = map[string]any{
 			"id": int64(i), "kind": k.kind, "z": k.z, "d": ketDecimal(offsets[i%4]),
+			"zv": []float32{vz0, -float32(1 + i%4)},
 		}
 	}
 	return out
@@ -120,10 +153,14 @@ func TestKeyEncodingTwoPath(t *testing.T) {
 	single := tmdStandalone(t, ctx)
 	v := ketValueExpr
 
-	// Every expectation below is PostgreSQL's answer over the same values
-	// (verified live against postgres:17-alpine): the two zeros are ONE
-	// value, the NaNs are ONE value equal to itself, and the four DECIMALs
-	// are FOUR values however close their doubles are.
+	// Every decimal_*/float_* expectation below is PostgreSQL's answer over
+	// the same values (verified live against postgres:17-alpine): the two
+	// zeros are ONE value, the NaNs are ONE value equal to itself, and the
+	// four DECIMALs are FOUR values however close their doubles are. VECTOR
+	// has no PostgreSQL analogue in this fixture (pgvector was not stood up
+	// for this gate); the vector_* expectations are wadjet's own -0.0-folds-
+	// to-+0.0 rule, the same rule item 8 states for FLOAT (ADR-0012),
+	// applied per element.
 	cases := []struct {
 		name string
 		sql  string
@@ -151,6 +188,17 @@ func TestKeyEncodingTwoPath(t *testing.T) {
 		// The predicate arms, distributed.
 		{"float_gt_1e300", fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE (%s) > 1e300", ketTable, v), 4},
 		{"float_self_eq", fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE (%s) = (%s)", ketTable, v, v), 14},
+		// VECTOR groups over zv: 4 canonical vectors ([0,0], [0,1], [0,2],
+		// [0,3]), each stored twice with a +0.0 first element (chunks 0-1)
+		// and twice with a -0.0 first element (chunks 2-3). Four groups, not
+		// eight — and each one's COUNT(*) is 4, which only holds if the
+		// +0.0 half and the -0.0 half, computed as PARTIAL aggregates on
+		// different workers, land in the SAME shuffle partition and merge.
+		{"vector_groups", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM (SELECT zv, COUNT(*) AS c FROM %s GROUP BY zv) g", ketTable), 4},
+		{"vector_group_row_counts", fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM (SELECT zv, COUNT(*) AS c FROM %s GROUP BY zv HAVING COUNT(*) = 4) g",
+			ketTable), 4},
 	}
 
 	for _, tc := range cases {
