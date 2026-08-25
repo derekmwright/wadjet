@@ -417,8 +417,16 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		// plus the input schema, so identical subtrees carry identical maps
 		// and hashing is the safe default (encoding/json sorts map keys).
 		"GroupByTypes": "hashed",
-		"WindowCols":   "hashed", "JoinPartitionCount": "hashed",
-		"FusedAggGroupBy": "hashed", "FusedAggSpecs": "hashed",
+		"WindowCols":   "hashed",
+		// The materialized PARTITION BY / ORDER BY keys (#585) change what
+		// the window PARTITIONS ON, so two subtrees whose window keys differ
+		// are never interchangeable — and the synthetic names are positional
+		// (__winkey_0, __winkey_1), so the expressions have to be part of the
+		// fingerprint or two stages keyed on different values would hash
+		// alike on the names alone.
+		"WindowKeyExprs":     "hashed",
+		"JoinPartitionCount": "hashed",
+		"FusedAggGroupBy":    "hashed", "FusedAggSpecs": "hashed",
 		"RawInputAggregate": "hashed",
 		// The set-operation marker changes what the stage EMITS (intersect
 		// vs except vs plain aggregate; distinct vs ALL), so two subtrees

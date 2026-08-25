@@ -1004,6 +1004,39 @@ func Corpus() []Query {
 	add("wide_row_nested",
 		fmt.Sprintf(`SELECT * FROM %s WHERE id %% 743 = 5 ORDER BY id`, Nested),
 		oracle.CmpOrdered, "")
+	// A window whose PARTITION BY is QUALIFIED, and one whose PARTITION BY is
+	// an EXPRESSION over the type (#585). Every window entry in the per-type
+	// loop above writes its key as a BARE column, which is the one spelling
+	// that always worked: a qualified reference missed the batch's bare name
+	// and an expression named a column nothing computed, so both DROPPED out
+	// of the key list and the window ran over ONE partition — silently, and
+	// on every type.
+	//
+	// Per type rather than once, because the two arms have to agree about the
+	// partition BOUNDARY as well as the key's name: the columnar walk
+	// compares with compareVectorValues and the spilled walk with
+	// kernel.ResolveSortCompare, and a type either orders in both or the
+	// stage fails. The expression arm is COALESCE rather than arithmetic so
+	// it is writable for every type, and it puts the type through the
+	// pre-window projection — the materialized column is built at the
+	// planner's declared type, which is where a wrong declaration turns into
+	// a merged partition.
+	for _, c := range Columns() {
+		if !c.Flat {
+			continue // ARRAY/ROW/MAP/VECTOR are not partition keys
+		}
+		n, tbl := c.Name, c.TableOf()
+		add("windowkey_qualified_"+n,
+			fmt.Sprintf(`SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.%s) AS c, `+
+				`ROW_NUMBER() OVER (PARTITION BY t.%s ORDER BY t.id) AS rn `+
+				`FROM %s t WHERE t.id < 400 ORDER BY t.id`, n, n, tbl),
+			oracle.CmpOrdered, n)
+		add("windowkey_expr_"+n,
+			fmt.Sprintf(`SELECT id, COUNT(*) OVER (PARTITION BY COALESCE(%s, %s)) AS c `+
+				`FROM %s WHERE id < 400 ORDER BY id`, n, n, tbl),
+			oracle.CmpOrdered, n)
+	}
+
 	// A join ACROSS the two tables: the flat side's typed columns and the
 	// nested side's containers meet in one output batch, which is the shape a
 	// build-side copy or a late-materialization view has to carry.

@@ -2646,6 +2646,112 @@ func postgresSemanticsCases() []pgCase {
 
 	out = append(out, multiKeyCorrelatedCases()...)
 
+	// --- A window's PARTITION BY / ORDER BY key spelling (#585) -------------
+	//
+	// Every window entry above writes its keys as BARE columns, and that was
+	// load-bearing: a key spelled any other way was silently DROPPED and the
+	// window ran over one partition spanning the input. `PARTITION BY n.n_regionkey`
+	// missed the batch's bare `n_regionkey`; `PARTITION BY n_nationkey % 3`
+	// named a column nothing had computed. Neither errored — ROW_NUMBER()
+	// numbered straight through every region and SUM OVER returned the
+	// whole-table sum, which is a plausible-looking answer to a different
+	// query.
+	//
+	// PostgreSQL is the authority here for the reason ADR-0012 gives: these
+	// are the spellings a BI client emits, and what a client expects of them
+	// is defined by the server it was written against. It partitions in every
+	// shape below (verified live on postgres:17-alpine), including the two
+	// wadjet had no answer for at all — a ROW field path and an unresolvable
+	// name, where PostgreSQL's answer is an ERROR and silence is the wrong
+	// one.
+	//
+	// Every ORDER BY inside an OVER ends on a UNIQUE column, so no frame
+	// depends on tie order (the reason WindowDefaultFrameIsRange states), and
+	// every entry has a total top-level ORDER BY so the row SEQUENCE is part
+	// of the comparison.
+	out = append(out,
+		pgCase{name: "WindowKeyQualifiedRankFamily", ordered: true, sql: `SELECT n.n_nationkey,
+			ROW_NUMBER() OVER (PARTITION BY n.n_regionkey ORDER BY n.n_nationkey) AS rn,
+			RANK() OVER (PARTITION BY n.n_regionkey ORDER BY n.n_nationkey) AS rk,
+			DENSE_RANK() OVER (PARTITION BY n.n_regionkey ORDER BY n.n_nationkey) AS drk
+			FROM nation n ORDER BY n.n_nationkey`},
+		// No ORDER BY inside the OVER: the whole-partition shape, where a lost
+		// key is a whole-TABLE aggregate rather than a running one.
+		pgCase{name: "WindowKeyQualifiedAggregatesNoOrderBy", ordered: true, sql: `SELECT n.n_nationkey,
+			SUM(n.n_regionkey) OVER (PARTITION BY n.n_regionkey) AS s,
+			COUNT(*) OVER (PARTITION BY n.n_regionkey) AS c,
+			MIN(n.n_name) OVER (PARTITION BY n.n_regionkey) AS lo
+			FROM nation n ORDER BY n.n_nationkey`},
+		pgCase{name: "WindowKeyQualifiedValueFunctions", ordered: true, sql: `SELECT n.n_nationkey,
+			LAG(n.n_name) OVER (PARTITION BY n.n_regionkey ORDER BY n.n_nationkey) AS lag_name,
+			LEAD(n.n_name) OVER (PARTITION BY n.n_regionkey ORDER BY n.n_nationkey) AS lead_name,
+			FIRST_VALUE(n.n_name) OVER (PARTITION BY n.n_regionkey ORDER BY n.n_nationkey) AS first_name
+			FROM nation n ORDER BY n.n_nationkey`},
+
+		// The expression families, one entry each.
+		pgCase{name: "WindowKeyExpressionModulo", ordered: true, sql: `SELECT n_nationkey,
+			ROW_NUMBER() OVER (PARTITION BY n_nationkey % 3 ORDER BY n_nationkey) AS rn,
+			COUNT(*) OVER (PARTITION BY n_nationkey % 3) AS c
+			FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "WindowKeyExpressionArithmetic", ordered: true, sql: `SELECT n_nationkey,
+			SUM(n_regionkey) OVER (PARTITION BY n_regionkey - 1 ORDER BY n_nationkey) AS s
+			FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "WindowKeyExpressionFunction", ordered: true, sql: `SELECT n_nationkey,
+			COUNT(*) OVER (PARTITION BY SUBSTR(n_name, 1, 1)) AS c
+			FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "WindowKeyExpressionCase", ordered: true, sql: `SELECT n_nationkey,
+			ROW_NUMBER() OVER (PARTITION BY CASE WHEN n_regionkey < 2 THEN 'lo' ELSE 'hi' END
+				ORDER BY n_nationkey) AS rn
+			FROM nation ORDER BY n_nationkey`},
+		// The ORDER BY inside the OVER is the expression, which is the same
+		// resolution and a different clause: dropping it loses the frame's
+		// order rather than the partition, and answers a running total
+		// accumulated in the wrong sequence.
+		pgCase{name: "WindowKeyExpressionInWindowOrderBy", ordered: true, sql: `SELECT n_nationkey,
+			ROW_NUMBER() OVER (PARTITION BY n_regionkey ORDER BY n_nationkey % 5, n_nationkey) AS rn
+			FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "WindowKeyExpressionOrderByDescNullsFirst", ordered: true, sql: `SELECT n_nationkey,
+			ROW_NUMBER() OVER (PARTITION BY n_regionkey
+				ORDER BY NULLIF(n_nationkey, 3) DESC NULLS FIRST, n_nationkey) AS rn
+			FROM nation ORDER BY n_nationkey`},
+
+		// PostgreSQL puts every NULL key in ONE partition — the same rule
+		// GROUP BY follows, and the one an engine that skips a null key
+		// breaks. NULLIF makes region 2's five nations the NULL partition.
+		pgCase{name: "WindowKeyNullPartition", ordered: true, sql: `SELECT n_nationkey,
+			COUNT(*) OVER (PARTITION BY NULLIF(n_regionkey, 2)) AS c,
+			ROW_NUMBER() OVER (PARTITION BY NULLIF(n_regionkey, 2) ORDER BY n_nationkey) AS rn
+			FROM nation ORDER BY n_nationkey`},
+
+		// One key list mixing all three spellings, and two OVER clauses
+		// SHARING one computed key — the case a per-clause materialization
+		// computes twice.
+		pgCase{name: "WindowKeyMixedSpellings", ordered: true, sql: `SELECT n.n_nationkey,
+			ROW_NUMBER() OVER (PARTITION BY n_regionkey, n.n_name, n.n_nationkey % 2
+				ORDER BY n.n_nationkey) AS rn
+			FROM nation n ORDER BY n.n_nationkey`},
+		pgCase{name: "WindowKeySharedExpressionAcrossClauses", ordered: true, sql: `SELECT n_nationkey,
+			ROW_NUMBER() OVER (PARTITION BY n_nationkey % 4 ORDER BY n_nationkey) AS rn,
+			COUNT(*) OVER (PARTITION BY n_nationkey % 4) AS c
+			FROM nation ORDER BY n_nationkey`},
+
+		// The window's input is not a scan: an aggregate, a derived table, a
+		// CTE. Each gives the planner a different amount of schema to type
+		// the materialized key from, and an INT64 key declared FLOAT64 merges
+		// partitions that differ past 2^53.
+		pgCase{name: "WindowKeyOverGroupByHaving", ordered: true, sql: `SELECT n_regionkey,
+			ROW_NUMBER() OVER (PARTITION BY n_regionkey % 2 ORDER BY n_regionkey) AS rn
+			FROM nation GROUP BY n_regionkey HAVING COUNT(*) > 1 ORDER BY n_regionkey`},
+		pgCase{name: "WindowKeyOverDerivedTable", ordered: true, sql: `SELECT u.k,
+			ROW_NUMBER() OVER (PARTITION BY u.k % 3 ORDER BY u.k) AS rn
+			FROM (SELECT n_nationkey AS k FROM nation WHERE n_nationkey < 12) u ORDER BY u.k`},
+		pgCase{name: "WindowKeyOverCTE", ordered: true, sql: `WITH u AS (
+				SELECT n_nationkey AS k, n_regionkey AS r FROM nation)
+			SELECT u.k, COUNT(*) OVER (PARTITION BY u.r) AS c,
+			ROW_NUMBER() OVER (PARTITION BY u.k % 2 ORDER BY u.k) AS rn
+			FROM u ORDER BY u.k`},
+	)
+
 	return out
 }
 
