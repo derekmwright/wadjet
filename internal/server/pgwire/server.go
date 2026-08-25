@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -2109,6 +2110,16 @@ func pgTypeOID(typeName string) int {
 		// decimal column as a String. pgFormatType already answered "numeric"
 		// for the same type, so the catalog was contradicting the wire.
 		return 1700 // numeric
+	case "BYTES":
+		// PostgreSQL's bytea. A BYTES value has a printed form there — `\x`
+		// followed by lowercase hex, under the default bytea_output = hex —
+		// and OID 17 is what tells a client to read the cell that way. Under
+		// OID 25 the same bytes claimed to be TEXT, which a length-aware
+		// client (pgx, JDBC) took at its word and a strlen-based one (libpq's
+		// PQgetvalue) truncated at the first NUL: one query, two answers
+		// (#570). oidBytea in bindparams.go is the same number, used for
+		// inbound Bind parameters and the pg_type catalog row.
+		return 17 // bytea
 	case "VECTOR":
 		return 25 // text (pgvector uses custom OID, but text works for display)
 	default:
@@ -2673,6 +2684,8 @@ func pgFormatType(typeName string) string {
 		return "date"
 	case "DECIMAL":
 		return "numeric"
+	case "BYTES":
+		return "bytea"
 	default:
 		return "text"
 	}
@@ -3394,6 +3407,16 @@ func appendBinaryValue(buf []byte, val any) []byte {
 	case string:
 		buf = appendInt32(buf, int32(len(v)))
 		buf = append(buf, v...)
+	case []byte:
+		// bytea's binary form is the value itself — byteasend writes the
+		// bytes and nothing else. Without this arm a BYTES column fell to
+		// the %v fallback below and shipped Go's slice-of-decimal-bytes
+		// debug notation ("[255 254 0 65]") under a declared OID 17, which
+		// is the same defect shape appendBinaryTimestamp/appendBinaryDate/
+		// appendBinaryNumeric exist to prevent for their own types: bytes a
+		// typed client decodes under the OID it was promised (#570).
+		buf = appendInt32(buf, int32(len(v)))
+		buf = append(buf, v...)
 	default:
 		// Fallback: text encoding
 		s := fmt.Sprintf("%v", v)
@@ -3457,6 +3480,20 @@ func formatPgValueTyped(val any, col *parquet.Column) string {
 			return "t"
 		}
 		return "f"
+	case []byte:
+		// wadjet's boxing for BYTES, and PostgreSQL's text form for the
+		// bytea it now declares (OID 17): `\x` then LOWERCASE hex, which is
+		// byteaout under the default bytea_output = hex — the setting
+		// expr.pgcompat already reports to a client that asks. This arm used
+		// to be missing, so the value fell to the %v default and went out as
+		// "[255 254 0 65]" (#570).
+		//
+		// The hex form also removes a hazard the raw bytes carried: a
+		// non-UTF-8 value with an embedded NUL cannot appear in a
+		// PostgreSQL text-format field at all, and libpq's PQgetvalue —
+		// a NUL-terminated char* — truncates at it, so pgx read four bytes
+		// where psql read two. Hex is pure ASCII.
+		return `\x` + hex.EncodeToString(tv)
 	case float64:
 		return formatPgFloat(tv, 64)
 	case float32:

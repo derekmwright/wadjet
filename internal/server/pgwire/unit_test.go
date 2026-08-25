@@ -50,6 +50,8 @@ func TestPgTypeOID(t *testing.T) {
 		{"DATE", 1082},
 		{"DECIMAL", 1700}, // numeric — pgFormatType already said so
 		{"NUMERIC", 1700},
+		{"BYTES", 17},     // bytea (#570) — not the text default
+		{"bytes", 17},     // case insensitive
 		{"decimal", 1700}, // case insensitive
 		{"VARCHAR", 25},   // default = text
 		{"STRING", 25},    // default = text
@@ -80,6 +82,7 @@ func TestPgTypeSize(t *testing.T) {
 		{701, 8},  // float8
 		{1082, 4}, // date
 		{1114, 8}, // timestamp
+		{17, -1},  // bytea (variable) — PostgreSQL's own pg_type.typlen
 		{25, -1},  // text (variable)
 		{0, -1},   // unknown (variable)
 	}
@@ -107,6 +110,7 @@ func TestPgFormatType(t *testing.T) {
 		{"TIMESTAMP", "timestamp without time zone"},
 		{"DATE", "date"},
 		{"DECIMAL", "numeric"},
+		{"BYTES", "bytea"}, // must agree with pgTypeOID's 17 (#570)
 		{"VARCHAR", "text"},
 		{"UNKNOWN", "text"},
 	}
@@ -359,6 +363,13 @@ func TestFormatPgValue(t *testing.T) {
 		//	 ("a\x0Bb","a\x0Cb")
 		//	(1 row)
 		{"row_no_schema_vtab_formfeed", map[string]any{"k": "a\vb"}, "(\"a\vb\")"},
+		// BYTES (#570): PostgreSQL's byteaout under the default
+		// bytea_output = hex. The empty value is `\x` and not the empty
+		// string, which is what tells a client the cell held zero bytes
+		// rather than nothing.
+		{"bytes_empty", []byte{}, `\x`},
+		{"bytes_nul_and_high", []byte{0xff, 0xfe, 0x00, 0x41}, `\xfffe0041`},
+		{"bytes_ascii", []byte("hi"), `\x6869`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

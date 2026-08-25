@@ -76,6 +76,51 @@ func quoteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
+// decodeByteaText reads PostgreSQL's TEXT representation of a bytea value
+// into the bytes it denotes, the way byteain does:
+//
+//	\x48656c6c6f   hex form, the default bytea_output produces it
+//	Hello\134\000  escape form: \\ is one backslash, \ooo one octal byte,
+//	                and every other byte stands for itself
+//
+// A malformed spelling is an ERROR rather than a fallback to the raw text:
+// the two forms are not ambiguous, and quietly binding the SPELLING of a
+// value the client meant as bytes is how `WHERE b = $1` matches nothing.
+func decodeByteaText(s string) ([]byte, error) {
+	if strings.HasPrefix(s, `\x`) || strings.HasPrefix(s, `\X`) {
+		raw, err := hex.DecodeString(s[2:])
+		if err != nil {
+			return nil, fmt.Errorf("bytea parameter is not valid hex: %w", err)
+		}
+		return raw, nil
+	}
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' {
+			out = append(out, s[i])
+			continue
+		}
+		if i+1 < len(s) && s[i+1] == '\\' {
+			out = append(out, '\\')
+			i++
+			continue
+		}
+		if i+3 < len(s) && isOctalDigit(s[i+1]) && isOctalDigit(s[i+2]) && isOctalDigit(s[i+3]) {
+			v := (int(s[i+1]-'0') << 6) | (int(s[i+2]-'0') << 3) | int(s[i+3]-'0')
+			if v > 0xFF {
+				return nil, fmt.Errorf("bytea parameter has an octal escape past one byte: %q", s[i:i+4])
+			}
+			out = append(out, byte(v))
+			i += 3
+			continue
+		}
+		return nil, fmt.Errorf("bytea parameter has an invalid escape at offset %d", i)
+	}
+	return out, nil
+}
+
+func isOctalDigit(c byte) bool { return c >= '0' && c <= '7' }
+
 // renderParam turns one Bind parameter into the SQL literal that stands in for
 // it. raw is the parameter's bytes, binary reports the format code, and oid is
 // what Parse declared for it (0 when the client left it to the server).
@@ -115,6 +160,21 @@ func renderTextParam(s string, oid uint32) (string, error) {
 			return s, nil
 		}
 		return quoteLiteral(s), nil
+	case oid == oidBytea:
+		// PostgreSQL's TEXT input for bytea, byteain: either the hex form
+		// `\x` + hex digits, or the historical escape form where a
+		// backslash introduces `\\` for one backslash and `\ooo` for one
+		// octal byte. Both denote BYTES, and what wadjet compares a BYTES
+		// column against is the VALUE's bytes — so the literal written here
+		// carries those bytes, not their spelling. Writing the spelling was
+		// the defect: `WHERE b = $1` bound with the two bytes "hi" became
+		// `WHERE b = '\x6869'`, a ten-character string against a two-byte
+		// column, and matched nothing (#570).
+		raw, err := decodeByteaText(s)
+		if err != nil {
+			return "", err
+		}
+		return quoteLiteral(string(raw)), nil
 	case oid == oidBool:
 		switch strings.ToLower(strings.TrimSpace(s)) {
 		case "t", "true", "y", "yes", "on", "1":
@@ -215,7 +275,13 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 		return quoteLiteral(h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]), nil
 
 	case oidBytea:
-		return quoteLiteral(`\x` + hex.EncodeToString(raw)), nil
+		// The binary form of a bytea parameter IS the value's bytes
+		// (bytearecv), so they go straight into the literal. Rendering them
+		// as `\x` + hex instead wrote a TEN-character string literal for a
+		// two-byte value, which compared against a BYTES column matched
+		// nothing — the silent-wrong-answer shape this whole file exists to
+		// close, on the one type it had left open (#570).
+		return quoteLiteral(string(raw)), nil
 
 	case oidNumeric:
 		return renderBinaryNumeric(raw)

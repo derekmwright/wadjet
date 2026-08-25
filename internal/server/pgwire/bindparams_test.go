@@ -60,6 +60,17 @@ func TestRenderParamText(t *testing.T) {
 		{"uuid", "0f8fad5b-d9cb-469f-a165-70867728950e", oidUUID,
 			"'0f8fad5b-d9cb-469f-a165-70867728950e'"},
 
+		// bytea in TEXT format: byteain's two spellings, both denoting the
+		// same BYTES. The literal carries the value's bytes, not the
+		// spelling — `\x6869` is a two-byte value, and quoting the six
+		// characters compares a string against a BYTES column (#570).
+		{"bytea hex", `\x6869`, oidBytea, "'hi'"},
+		{"bytea hex empty", `\x`, oidBytea, "''"},
+		{"bytea hex uppercase digits", `\x4869`, oidBytea, "'Hi'"},
+		{"bytea escape form", "hi", oidBytea, "'hi'"},
+		{"bytea escape octal", `\150\151`, oidBytea, "'hi'"},
+		{"bytea escape doubled backslash", `a\\b`, oidBytea, `'a\b'`},
+
 		// Quoting is by doubling, the only escape this lexer reads.
 		{"embedded quote", "it's", oidText, "'it''s'"},
 		{"quote termination attempt", "'; DROP TABLE users; --", oidText,
@@ -111,7 +122,15 @@ func TestRenderParamBinary(t *testing.T) {
 			0x0f, 0x8f, 0xad, 0x5b, 0xd9, 0xcb, 0x46, 0x9f,
 			0xa1, 0x65, 0x70, 0x86, 0x77, 0x28, 0x95, 0x0e,
 		}, oidUUID, "'0f8fad5b-d9cb-469f-a165-70867728950e'"},
-		{"bytea", []byte{0xde, 0xad, 0xbe, 0xef}, oidBytea, `'\xdeadbeef'`},
+		// bytea's binary form IS the value's bytes, and the literal has to
+		// carry those bytes — not their `\x` SPELLING, which is a
+		// ten-character STRING that matches nothing against a BYTES column
+		// (#570). Every byte here survives the lexer verbatim: lexString
+		// slices the input rather than re-encoding runes, so 0xde does not
+		// become U+FFFD on the way back in.
+		{"bytea", []byte{0xde, 0xad, 0xbe, 0xef}, oidBytea, "'" + string([]byte{0xde, 0xad, 0xbe, 0xef}) + "'"},
+		{"bytea with a quote and a NUL", []byte{'a', '\'', 0x00}, oidBytea, "'a''" + string([]byte{0x00}) + "'"},
+		{"bytea empty", []byte{}, oidBytea, "''"},
 		// Binary text is the same bytes as text text.
 		{"text", []byte("it's"), oidText, "'it''s'"},
 	}
