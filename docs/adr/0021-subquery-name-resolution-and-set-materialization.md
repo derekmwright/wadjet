@@ -1,6 +1,7 @@
 # ADR-0021: A decorrelated subquery's names are resolved from the plan, and the sets it cannot join are materialized
 
-Status: Accepted (2026-08-25)
+Status: Accepted (2026-08-25; §1a added the same day after a derived-table
+inner was found to reach the executor as a scan of a nonexistent table)
 
 ## Context
 
@@ -97,6 +98,34 @@ qualifiers too: `BuildSemiAntiFilter`, `extractFilterBuildColumns` and
 bare-name fallback the key index uses, because the strip there was the same
 defect one layer down.
 
+### 1a. A relation the rewrite cannot BUILD is declined too
+
+Naming is not the only thing the rewrites get from the subquery. Each of them
+turns the subquery's FROM/JOIN list into Scan nodes directly —
+`NewScan(info.Tables[0].Name, …)` — and a DERIVED TABLE is not a name a Scan
+can hold. The parser keeps a FROM-subquery as a table whose NAME is its own
+SQL text, `(SELECT …)`, and the plan BUILDER recognises that prefix and
+recurses into it. The rewrites did not, so the semi/anti join's build side
+became a scan of a table the catalog has never heard of.
+
+That scan does not fail. It yields ZERO batches, so the build side was empty
+and `IN` answered nothing while `NOT IN` answered every row — on both paths,
+with no error anywhere (#571). Two further defects were reachable only through
+it: the runtime key repair then fires on a key-only build and wipes NOT IN's
+NULL poison (#572), and the subquery-predicate route the decline now takes had
+never stated the empty-set boundary at all, dropping a NULL-keyed probe row
+where `x NOT IN ()` is TRUE.
+
+Building the derived plan here instead was rejected on §1's own terms: the
+rewrite would then have to NAME the derived side's columns, and
+`emittedColumns` has no model for a derived scan — it reads `ScanColumns`,
+which the catalog annotation fills and a derived table has no catalog entry
+for. `spellInner` reports "unresolved" and the caller keeps the rewrite's
+pre-reorder guess, which is exactly the silent wrong answer §1 exists to
+remove. A CTE name has the same exposure by a different spelling and is not
+covered, because nothing at this layer distinguishes it from a base table
+(#535).
+
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
 `resolveSubqueryAST` gains an `InExpr` case. An uncorrelated IN-subquery is
@@ -184,6 +213,7 @@ an empty value list, so both render as the constant they are.
 
 - ADR-0012 (PostgreSQL decides semantics), ADR-0013 (the gates and their pins)
 - #516, #526, #527 (naming), #482, #524 (sets), #507 (three-valued NOT IN)
+- #571 (derived-table inner), #572 (the key repair it reached), #535 (CTE)
 - `internal/planner/logical/inner_key_spelling.go`,
   `internal/planner/physical/in_subquery_set.go`,
   `docs/internals/native-dag-execution.md` §Correlated subqueries

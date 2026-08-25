@@ -1467,6 +1467,59 @@ func postgresSemanticsCases() []pgCase {
 				 WHERE c.n_regionkey = a.n_regionkey AND c.n_nationkey > a.n_nationkey)`},
 	)
 
+	// --- The same predicate over a DERIVED-TABLE inner (#571) -------------
+	//
+	// The parser keeps a FROM-subquery as a table whose NAME is its own SQL
+	// text, and the three decorrelations called NewScan on that text — a scan
+	// of a table the catalog does not have, which yields ZERO batches and no
+	// error. The semi/anti join's build side was therefore empty, so `IN`
+	// answered nothing and `NOT IN` answered every row. The rewrites decline
+	// this shape now and the predicate is executed as written.
+	//
+	// The last pair is the shape the issue was filed from: a NULL reaches the
+	// derived list, so NOT IN's three-valued rule (#507) has to survive the
+	// route the decline takes. An empty build side answered 0 for that one
+	// too, by accident — the IN twin is what tells the two apart.
+	out = append(out,
+		pgCase{name: "InSubqueryDerivedInner",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
+				(SELECT s.rk FROM (SELECT b.n_regionkey AS rk FROM nation b WHERE b.n_nationkey < 3) s)`},
+		pgCase{name: "NotInSubqueryDerivedInner",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey NOT IN
+				(SELECT s.rk FROM (SELECT b.n_regionkey AS rk FROM nation b WHERE b.n_nationkey < 3) s)`},
+		pgCase{name: "InSubqueryDerivedInnerValues",
+			sql: `SELECT a.n_nationkey AS k FROM nation a WHERE a.n_regionkey IN
+				(SELECT s.rk FROM (SELECT b.n_regionkey AS rk FROM nation b WHERE b.n_nationkey < 3) s)
+				ORDER BY k`, ordered: true},
+		pgCase{name: "InSubqueryDerivedInnerJoined",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey IN
+				(SELECT s.k FROM (SELECT c.n_nationkey AS k, c.n_regionkey AS rk FROM nation c) s
+				 JOIN nation b ON b.n_regionkey = s.rk WHERE s.k < 3)`},
+		pgCase{name: "NotInSubqueryDerivedInnerJoined",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey NOT IN
+				(SELECT s.k FROM (SELECT c.n_nationkey AS k, c.n_regionkey AS rk FROM nation c) s
+				 JOIN nation b ON b.n_regionkey = s.rk WHERE s.k < 3)`},
+		pgCase{name: "ExistsDerivedInnerCorrelation",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE EXISTS
+				(SELECT 1 FROM (SELECT b.n_regionkey AS rk FROM nation b WHERE b.n_nationkey < 3) s
+				 WHERE s.rk = a.n_regionkey)`},
+		pgCase{name: "NotExistsDerivedInnerCorrelation",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE NOT EXISTS
+				(SELECT 1 FROM (SELECT b.n_regionkey AS rk FROM nation b WHERE b.n_nationkey < 3) s
+				 WHERE s.rk = a.n_regionkey)`},
+		pgCase{name: "ScalarSubqueryDerivedInner",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey >
+				(SELECT MAX(s.k) FROM (SELECT b.n_nationkey AS k FROM nation b WHERE b.n_regionkey = 0) s)`},
+		pgCase{name: "NotInSubqueryDerivedInnerNullInList",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey NOT IN
+				(SELECT s.rk FROM (SELECT r.r_regionkey AS rk FROM nation b
+				 LEFT JOIN region r ON r.r_regionkey = b.n_regionkey AND r.r_regionkey < 2) s)`},
+		pgCase{name: "InSubqueryDerivedInnerNullInList",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
+				(SELECT s.rk FROM (SELECT r.r_regionkey AS rk FROM nation b
+				 LEFT JOIN region r ON r.r_regionkey = b.n_regionkey AND r.r_regionkey < 2) s)`},
+	)
+
 	// --- NOT IN's three-valued rule over NULLs (#507) ------------------
 	//
 	// `decorrelateInSubqueries` lowers NOT IN to an anti join, and an anti

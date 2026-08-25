@@ -979,6 +979,9 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	}
 
 	// Build inner plan from subquery's FROM/JOIN
+	if !innerRelationsAreScannable(info) {
+		return nil, pred, false
+	}
 	innerScan := NewScan(info.Tables[0].Name, info.Tables[0].Alias)
 	var innerPlan *Node = innerScan
 	for _, j := range info.Joins {
@@ -1391,6 +1394,44 @@ func innerGroupKey(info *plansql.SelectInfo, term string) InnerKeyRef {
 	return ref
 }
 
+// innerRelationsAreScannable reports whether every relation the subquery's
+// FROM/JOIN list names is one the decorrelation rewrites can turn into a plain
+// Scan node.
+//
+// A DERIVED TABLE is not. The parser keeps a FROM-subquery as a table whose
+// NAME is its own SQL text — `(SELECT …)` — and the plan BUILDER recognises
+// that prefix and recurses into it (builder.go, "Check for derived table").
+// The three decorrelations below do not: each calls NewScan on the name it was
+// handed, producing a Scan of a table the catalog has never heard of. That
+// scan is not an error. It yields ZERO batches, so the semi/anti join's build
+// side is empty and `IN` answers nothing while `NOT IN` answers every row —
+// silently, on both paths (#571).
+//
+// Declining is the answer rather than building the derived plan here, for the
+// reason ADR-0021 §1 gives: the rewrite would then have to NAME the derived
+// side's columns, and inner_key_spelling.go's model of what a subtree emits
+// has no arm for a derived scan, so the reference it settled on would be a
+// guess. A declined IN stays a subquery predicate, executed as written — the
+// single-process path resolves it through expr.InSubquery and the stage DAG
+// materializes the set (ADR-0021 §2). A slower right answer beats a wrong one.
+//
+// A CTE name has the same exposure by a different spelling and is NOT covered
+// here: nothing at this layer distinguishes it from a base table. That is
+// tracked separately (#535).
+func innerRelationsAreScannable(info *plansql.SelectInfo) bool {
+	for _, t := range info.Tables {
+		if strings.HasPrefix(strings.TrimSpace(t.Name), "(") {
+			return false
+		}
+	}
+	for _, j := range info.Joins {
+		if strings.HasPrefix(strings.TrimSpace(j.RightTable), "(") {
+			return false
+		}
+	}
+	return true
+}
+
 // tryDecorrelateInSubquery attempts to convert an IN/NOT IN subquery into a
 // SemiJoin (IN) or AntiJoin (NOT IN) node. Handles uncorrelated IN with
 // optional GROUP BY + HAVING, and correlated IN with equality keys.
@@ -1439,6 +1480,9 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 	}
 
 	// Build inner plan: Scan → optional JOINs
+	if !innerRelationsAreScannable(info) {
+		return nil
+	}
 	innerScan := NewScan(info.Tables[0].Name, info.Tables[0].Alias)
 	var innerPlan *Node = innerScan
 	for _, j := range info.Joins {
@@ -2696,6 +2740,9 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	}
 
 	// Build inner plan: Scan → optional JOINs
+	if !innerRelationsAreScannable(info) {
+		return nil
+	}
 	innerScan := NewScan(info.Tables[0].Name, info.Tables[0].Alias)
 	var innerPlan *Node = innerScan
 	for _, j := range info.Joins {

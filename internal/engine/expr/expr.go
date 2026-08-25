@@ -5067,10 +5067,15 @@ type InSubquery struct {
 	// misses such a set is UNKNOWN, not false — the `NOT IN (SELECT
 	// nullable_col ...)` trap (#370).
 	setNull bool
-	intSet  map[int64]struct{}
-	strSet  map[string]struct{}
-	fltSet  map[float64]struct{}
-	vals    []any // fallback for mixed types
+	// emptySet records that the subquery returned NOTHING — not one value,
+	// not even a NULL. It is a distinct case from setNull and from a
+	// populated set, because an empty set is the one where a NULL PROBE key
+	// is decided rather than UNKNOWN (see EvalBoolNull).
+	emptySet bool
+	intSet   map[int64]struct{}
+	strSet   map[string]struct{}
+	fltSet   map[float64]struct{}
+	vals     []any // fallback for mixed types
 	// chargedBytes is exactly what was handed to Budget.Reserve, guarded by
 	// resolveMu, so Release returns exactly that many bytes exactly once.
 	chargedBytes int64
@@ -5088,6 +5093,17 @@ func (e *InSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if !e.resolved.Load() {
 		e.resolveSlow()
+	}
+	// An EMPTY set is a real answer and not an absence, and it is checked
+	// BEFORE the probe's own NULL because the NULL-keyed row is exactly the
+	// one the general rule gets wrong: `x IN ()` is FALSE for every row and
+	// `x NOT IN ()` is TRUE for every row, the NULL-keyed one included,
+	// because an empty set offers no comparison to be UNKNOWN about. This is
+	// the same boundary the semi/anti lowering states (#507) and the
+	// materialized IN-set renders as a constant (ADR-0021 §2); the subquery-
+	// predicate route stated it nowhere and dropped the NULL-keyed row.
+	if e.emptySet {
+		return e.Not, false
 	}
 	lv := e.Expr.Eval(b, row)
 	if lv == nil {
@@ -5139,6 +5155,7 @@ func (e *InSubquery) resolveSlow() {
 	if err != nil {
 		// An empty set: every probe misses, which is what the pre-#398
 		// code answered on the failing call and on every call after it.
+		e.emptySet = true
 		return
 	}
 	// Collect values and detect predominant type for hash set
@@ -5194,6 +5211,8 @@ func (e *InSubquery) resolveSlow() {
 				e.vals = rawVals
 			}
 		}
+		// Nothing at all came back — not a value and not a NULL.
+		e.emptySet = len(rawVals) == 0 && !e.setNull
 	}
 	e.chargeMemory()
 }

@@ -194,3 +194,103 @@ func TestNotInSubqueryIsThreeValuedOverNulls(t *testing.T) {
 		t.Errorf("NOT IN over case C returned %v, want the single row id=3 (PostgreSQL 17)", res.Rows)
 	}
 }
+
+// #571. The same predicates over a subquery whose FROM is a DERIVED TABLE.
+//
+// The parser keeps a FROM-subquery as a table whose NAME is its own SQL text,
+// and the plan BUILDER recognises that and recurses. The three decorrelation
+// rewrites did not: each called NewScan on the text it was handed, producing a
+// Scan of a table the catalog has never heard of. Such a scan is not an error
+// — it yields ZERO batches — so the semi/anti join's build side was empty and
+// `IN` answered nothing while `NOT IN` answered every row, silently.
+//
+// The NULL cases are why this belongs next to #507's gate rather than in a
+// file of its own: an empty build side answers 0 for a poisoned NOT IN too,
+// by accident, and the IN twin beside each one is what tells the accident from
+// the rule. Every want is a live postgres:17-alpine transcript over these rows.
+func TestSubqueryOverADerivedTableIsNotDecorrelatedIntoAnEmptyBuild(t *testing.T) {
+	ctx := context.Background()
+	db := niOpen(t)
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want int64
+	}{
+		// The live repro both #571 and #572 were filed from: a derived table
+		// JOINED to a base relation, with a NULL reaching the list. The
+		// subquery yields {1, NULL}: p.k=1 is excluded by the match, and the
+		// other two rows compare against the NULL and go UNKNOWN.
+		{"joined_derived_not_in",
+			`SELECT COUNT(*) AS n FROM probe_a p WHERE p.k NOT IN
+				(SELECT s.k FROM (SELECT l.k AS k, l.id AS id FROM lst_a l) s
+				 JOIN probe_a b ON b.id = s.id)`, 0},
+		{"joined_derived_in",
+			`SELECT COUNT(*) AS n FROM probe_a p WHERE p.k IN
+				(SELECT s.k FROM (SELECT l.k AS k, l.id AS id FROM lst_a l) s
+				 JOIN probe_a b ON b.id = s.id)`, 1},
+
+		// The plain derived table, no join. A clean list, so NOT IN keeps
+		// exactly the row that differs from every value in it.
+		{"derived_not_in",
+			`SELECT COUNT(*) AS n FROM probe_c p WHERE p.k NOT IN
+				(SELECT s.k FROM (SELECT l.k AS k FROM lst_c l) s)`, 1},
+		{"derived_in",
+			`SELECT COUNT(*) AS n FROM probe_c p WHERE p.k IN
+				(SELECT s.k FROM (SELECT l.k AS k FROM lst_c l) s)`, 1},
+		// An EMPTY derived set is a real answer, not an absence: NOT IN is
+		// TRUE for every row including the NULL-keyed one, which is also
+		// what an empty build side answered for the wrong reason.
+		{"derived_not_in_empty_set",
+			`SELECT COUNT(*) AS n FROM probe_c p WHERE p.k NOT IN
+				(SELECT s.k FROM (SELECT l.k AS k FROM lst_c l WHERE l.k > 999) s)`, 3},
+
+		// The serialized-key path reaches the hash table by different code
+		// than the integer one (#459).
+		{"derived_not_in_string",
+			`SELECT COUNT(*) AS n FROM probe_s p WHERE p.s NOT IN
+				(SELECT s.v FROM (SELECT l.s AS v FROM lst_s l) s)`, 0},
+		{"derived_in_string",
+			`SELECT COUNT(*) AS n FROM probe_s p WHERE p.s IN
+				(SELECT s.v FROM (SELECT l.s AS v FROM lst_s l) s)`, 1},
+
+		// The other two rewrites that build their inner plan the same way:
+		// correlated EXISTS and the scalar subquery.
+		{"derived_exists",
+			`SELECT COUNT(*) AS n FROM probe_c p WHERE EXISTS
+				(SELECT 1 FROM (SELECT l.k AS k FROM lst_c l) s WHERE s.k = p.k)`, 1},
+		{"derived_not_exists",
+			`SELECT COUNT(*) AS n FROM probe_c p WHERE NOT EXISTS
+				(SELECT 1 FROM (SELECT l.k AS k FROM lst_c l) s WHERE s.k = p.k)`, 2},
+		{"derived_scalar_subquery",
+			`SELECT COUNT(*) AS n FROM probe_c p WHERE p.k >
+				(SELECT MAX(s.k) FROM (SELECT l.k AS k FROM lst_c l) s)`, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := db.Query(ctx, tc.sql)
+			if err != nil {
+				t.Fatalf("query error: %v\n  SQL: %s", err, tc.sql)
+			}
+			if len(res.Rows) != 1 {
+				t.Fatalf("got %d rows, want 1 (scalar COUNT)\n  SQL: %s", len(res.Rows), tc.sql)
+			}
+			if got := res.Rows[0]["n"]; got != tc.want {
+				t.Errorf("COUNT(*) = %v, want %d (PostgreSQL 17)\n  SQL: %s", got, tc.want, tc.sql)
+			}
+		})
+	}
+
+	// The VALUES: a right count over the wrong row is what a count-only
+	// assertion cannot see, and an empty build side gets one of these counts
+	// right by accident.
+	res, err := db.Query(ctx,
+		`SELECT p.id AS id FROM probe_c p WHERE p.k NOT IN
+			(SELECT s.k FROM (SELECT l.k AS k FROM lst_c l) s) ORDER BY p.id`)
+	if err != nil {
+		t.Fatalf("query error: %v", err)
+	}
+	if len(res.Rows) != 1 || res.Rows[0]["id"] != int64(3) {
+		t.Errorf("NOT IN over a derived-table list returned %v, want the single row id=3 "+
+			"(PostgreSQL 17)", res.Rows)
+	}
+}

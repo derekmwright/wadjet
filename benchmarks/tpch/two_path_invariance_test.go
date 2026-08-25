@@ -3779,6 +3779,76 @@ func twoPathCorpus() []twoPathQuery {
 				tb.Helper()
 				assertSingleCell(tb, rows, "c", 10)
 			}},
+		// #571: the same predicate over a subquery whose FROM is a DERIVED
+		// TABLE. The parser keeps a FROM-subquery as a table whose NAME is
+		// its own SQL text, and the decorrelations called NewScan on that
+		// text — a scan of a table the catalog does not have, which yields
+		// zero batches and no error. The semi/anti join's build side was
+		// therefore EMPTY: IN answered nothing, NOT IN answered every row,
+		// on both arms, silently. They decline the rewrite now and the
+		// predicate is executed as written, so the assertions carry
+		// PostgreSQL's number rather than the other arm's.
+		twoPathQuery{name: "InSubqueryDerivedInner", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
+				(SELECT s.rk FROM (SELECT b.n_regionkey AS rk FROM nation b WHERE b.n_nationkey < 3) s)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 10)
+			}},
+		twoPathQuery{name: "NotInSubqueryDerivedInner", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey NOT IN
+				(SELECT s.rk FROM (SELECT b.n_regionkey AS rk FROM nation b WHERE b.n_nationkey < 3) s)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 15)
+			}},
+		// The derived table JOINED to a base relation: #571's own repro
+		// shape, and the one no spelling could have rescued — the derived
+		// side has no catalog schema for inner_key_spelling.go to model, so
+		// the reference the rewrite settled on was a guess either way.
+		twoPathQuery{name: "InSubqueryDerivedInnerJoined", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey IN
+				(SELECT s.k FROM (SELECT c.n_nationkey AS k, c.n_regionkey AS rk FROM nation c) s
+				 JOIN nation b ON b.n_regionkey = s.rk WHERE s.k < 3)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 3)
+			}},
+		twoPathQuery{name: "NotInSubqueryDerivedInnerJoined", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey NOT IN
+				(SELECT s.k FROM (SELECT c.n_nationkey AS k, c.n_regionkey AS rk FROM nation c) s
+				 JOIN nation b ON b.n_regionkey = s.rk WHERE s.k < 3)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 22)
+			}},
+		// A NULL in the derived list. This is the live repro #571 and #572
+		// were both filed from, in TPC-H spelling: NOT IN over a set holding
+		// a NULL is UNKNOWN for every row it did not match, so the answer is
+		// EMPTY — and an empty build side produced the same 0 for the wrong
+		// reason before, which is what the IN twin below separates.
+		twoPathQuery{name: "NotInSubqueryDerivedInnerNullInList", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey NOT IN
+				(SELECT s.rk FROM (SELECT r.r_regionkey AS rk FROM nation b
+				 LEFT JOIN region r ON r.r_regionkey = b.n_regionkey AND r.r_regionkey < 2) s)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 0)
+			}},
+		twoPathQuery{name: "InSubqueryDerivedInnerNullInList", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
+				(SELECT s.rk FROM (SELECT r.r_regionkey AS rk FROM nation b
+				 LEFT JOIN region r ON r.r_regionkey = b.n_regionkey AND r.r_regionkey < 2) s)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 10)
+			}},
 		// #507: NOT IN is three-valued and an anti join is not. Every TPC-H
 		// column is NOT NULL, so a LEFT JOIN manufactures the NULLs — one
 		// entry puts them in the PROBE key, one in the LIST, and the third is
