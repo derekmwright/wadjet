@@ -70,12 +70,27 @@ func TestCastStringMatchesProjectionForDateAndFloat32(t *testing.T) {
 // type-matrix fixture (multiple scan batches — the vectorized EvalVec path
 // falls back to per-row Eval for every scalar function including CAST, so
 // this also exercises the batch boundary) and checks CAST(<col> AS STRING)
-// against the same row's plain projection, for both fixed types.
+// against the same row's plain projection, for every FLAT type — not only
+// the two #521 fixed (DATE, FLOAT32): boxedTextOperand is the one resolver
+// both LIKE and CAST now share for all 18, so a divergence anywhere in that
+// set is one implementation disagreeing with itself, and every flat type
+// belongs in the sweep that would catch a sixth one (item 11's own point
+// about "types that box differently" needing a checkable list, not an
+// enumeration someone has to remember to extend).
+//
+// BYTES is the one type whose plain projection does NOT come back as a Go
+// string (Vector.GetValue copies it out as []byte), so it is compared as
+// TEXT of its own bytes rather than by fmt.Sprint, which would print the
+// byte SLICE ("[98 121 ...]") instead of the string CAST renders.
 func TestCastStringAgreesWithProjectionAcrossFixture(t *testing.T) {
 	ctx := context.Background()
 	db := tmOpen(t)
 
-	for _, col := range []string{"c_date", "c_f32"} {
+	for _, c := range typematrix.Columns() {
+		if !c.Flat {
+			continue
+		}
+		col := c.Name
 		t.Run(col, func(t *testing.T) {
 			res, err := tmRun(ctx, db, fmt.Sprintf(
 				"SELECT id, %s AS v, CAST(%s AS STRING) AS s FROM %s WHERE %s IS NOT NULL ORDER BY id",
@@ -88,7 +103,12 @@ func TestCastStringAgreesWithProjectionAcrossFixture(t *testing.T) {
 			}
 			mismatches := 0
 			for _, r := range res.Rows {
-				want := fmt.Sprint(r["v"])
+				var want string
+				if b, ok := r["v"].([]byte); ok {
+					want = string(b)
+				} else {
+					want = fmt.Sprint(r["v"])
+				}
 				got, _ := r["s"].(string)
 				if got != want {
 					mismatches++

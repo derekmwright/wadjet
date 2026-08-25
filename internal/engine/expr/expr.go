@@ -5226,7 +5226,22 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	case "decimal", "numeric":
 		return ToFloat64(v)
 	case "char", "varchar", "text", "string":
-		return fmt.Sprint(boxedTextOperand(b, row, e.Operand, v))
+		// stringOperand first: a BYTES operand boxes as a raw []byte (both
+		// here and from GetValue — ColRef.Eval has no divergent fast path
+		// for TypeBytes the way it does for the four types
+		// boxedTextOperand resolves), and fmt.Sprint's default verb prints a
+		// []byte as Go's own slice-of-decimal-bytes notation
+		// ("[98 121 116 ...]") instead of the text those bytes spell —
+		// exactly the kind of divergence-from-the-column's-own-rendering
+		// this whole resolver chain exists to catch, just one type it had
+		// not caught yet. TypeBytes joins TypeString and TypeCIDR under one
+		// text rendering in kernel.likeTextRenderer already; CAST AS STRING
+		// now agrees with it instead of with fmt.Sprint's debug format.
+		text := boxedTextOperand(b, row, e.Operand, v)
+		if s, ok := stringOperand(text); ok {
+			return s
+		}
+		return fmt.Sprint(text)
 	default:
 		return v
 	}
