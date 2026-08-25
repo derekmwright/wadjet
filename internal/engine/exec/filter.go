@@ -159,7 +159,7 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 	ipv4Val := parseIPv4FilterVal(value)
 	macVal := parseMACFilterVal(value)
 	ipv6Val := parseIPv6FilterVal(value)
-	uuidVal, _ := kernel.UUIDLiteralToRaw(strVal)
+	uuidVal, uuidOK := kernel.UUIDLiteralToRaw(strVal)
 	bytesVal := bytesFilterVal(value)
 	// Offsets-shape: comparing a string column against the empty string is
 	// a zero-length test, not a byte compare — and it is what keeps such a
@@ -231,6 +231,20 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 			// A UUID column stores 16 RAW bytes; the literal is 36 characters
 			// of text. Comparing them directly could never match, so
 			// `WHERE uuid_col = '…'` silently returned no rows.
+			//
+			// uuidOK false means the literal names no UUID at all —
+			// `networkConstError`'s TypeUUID arm is this same rule for the
+			// vectorized kernel path (#519); this is the last-resort
+			// row-at-a-time path (ColumnCompareLit, reached from
+			// physical/plan.go and worker/executor_fragment.go), which has
+			// no error return of its own, so it raises the same 22P02 via the
+			// pipeline's own FatalEvalPanic shape rather than silently
+			// comparing against the empty string — which used to match
+			// nothing for `=` and every row for `<>`, one bad literal
+			// answering a whole query wrong in two different directions.
+			if !uuidOK {
+				panic(fatalEvalError{sqlerr.New("22P02", "invalid input syntax for type uuid: %q", strVal)})
+			}
 			return compareString(v.BytesData.UnsafeStringValue(row), uuidVal, op)
 		case batch.TypeDate:
 			return compareInt64(int64(v.Int32Data[row]), intVal, op)
