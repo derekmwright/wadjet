@@ -76,10 +76,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      neither — so their total orders (`internal/engine/exec/kernel/
      container_sort.go`) are wadjet-defined, not a choice against a
      PostgreSQL answer.
-   - **MIN(bytes) declares BYTEA, not STRING.** The output type follows the
-     input type, matching PostgreSQL's own `min(bytea)`; no divergence, noted
-     here only because early declared-schema code guessed STRING for every
-     MIN/MAX before the input-typed fix.
+   - **MIN/MAX over BYTES.** (Corrected 2026-08-25, #570. The original said
+     this matched "PostgreSQL's own `min(bytea)`", which does not exist:
+     verified live, `min(bytea)` raises "function min(bytea) does not
+     exist", exactly as `min(boolean)` does.) So this is the same kind of
+     deliberate extension the BOOL bullet above is, over a type whose order
+     wadjet defines anyway — bytewise, which is what every bytea comparison
+     uses and what PostgreSQL's own `bytea` operators use. The output type
+     still follows the INPUT type and declares bytea (OID 17), which is what
+     the extension has to do to be self-consistent; early declared-schema
+     code guessed STRING for every MIN/MAX before the input-typed fix.
+     `ByteaMinMax` in the wire arm's error list pins it, so the claim is
+     checkable rather than remembered.
    - **A TEXT value compared against a NUMBER.** (Added 2026-08-24, #504.)
      PostgreSQL refuses the pair outright — verified live, `WHERE s = 1.5`
      over a `text` column is 42883 "operator does not exist: text = numeric",
@@ -904,44 +912,112 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     `CAST(timestamp AS STRING)` and LIKE render epoch milliseconds rather
     than the instant pgwire renders.)
 
-    **BYTES is a THIRD divergence in the same family, and this one is not
-    just a rendering — it is a hazard.** (Added 2026-08-25, #570.)
-    PostgreSQL's `bytea::text` is `\x<hex>` under the default
-    `bytea_output = hex`. Wadjet has three renderings of one BYTES value and
-    none of them is that: the embedded projection hands back a `[]byte`
-    (`Vector.GetValue`'s TypeBytes arm), `CAST AS STRING` and LIKE hand back
-    the RAW BYTES as a Go string (`expr.stringOperand`,
-    `kernel.likeTextRenderer` — made to agree with each other rather than
-    with PostgreSQL), and the WIRE hands back Go's `%v`, `[255 254 0 65]`,
-    under OID **25** because `pgwire.pgTypeOID` has no BYTES case and
-    `formatPgValueTyped` has no `[]byte` case. `oidBytea = 17` exists in the
-    tree and is used only for inbound Bind parameters and the `pg_type`
-    catalog row.
+    **BYTES is bytea, and it is the one type where LIKE and CAST
+    deliberately disagree.** (Added 2026-08-25, #570. Recorded as an open
+    divergence when this item was written; closed the same day.)
 
-    The hazard is the CAST rendering. For the four bytes
-    `0xff 0xfe 0x00 0x41` it produces a string that is invalid UTF-8 and
-    holds an EMBEDDED NUL. PostgreSQL cannot represent that in a text-format
-    field at all — `text` rejects `\0`, so no PG server ever puts one inside
-    a DataRow text field — and libpq TRUNCATES at it: `PQgetvalue` returns a
-    NUL-terminated `char*`, so a length-aware client (pgx, JDBC) reads four
-    bytes and a strlen-based one reads two. One query, two answers,
-    decided by the client library. The `\x` form removes that for free,
-    being pure ASCII.
+    PostgreSQL's `bytea::text` is `\x` followed by lowercase hex, under the
+    default `bytea_output = hex` — a setting `expr.pgcompat` already reports
+    to a client that asks for it. Wadjet had THREE renderings of one BYTES
+    value and none of them was that: the embedded projection handed back a
+    `[]byte` (`Vector.GetValue`'s TypeBytes arm), `CAST AS STRING` and LIKE
+    handed back the RAW BYTES as a Go string, and the WIRE handed back Go's
+    `%v`, `[255 254 0 65]`, under OID **25** because `pgwire.pgTypeOID` had
+    no BYTES case and `formatPgValueTyped` no `[]byte` case. `oidBytea = 17`
+    existed in the tree and was used only for inbound Bind parameters and
+    the `pg_type` catalog row.
 
-    Recorded rather than fixed because the fix is the WIRE's — OID 17 plus a
-    hex TEXT encoding and a raw BINARY one — and the CAST should follow it,
-    which reverses the direction of the change that produced today's
-    rendering. Both halves are #570.
+    The CAST rendering was not only wrong, it was a HAZARD. For the four
+    bytes `0xff 0xfe 0x00 0x41` the raw form is invalid UTF-8 and holds an
+    embedded NUL. PostgreSQL cannot represent that in a text-format field at
+    all — `text` rejects `\0`, so no PG server ever puts one inside a
+    DataRow text field — and libpq TRUNCATES at it: `PQgetvalue` returns a
+    NUL-terminated `char*`, so a length-aware client (pgx, JDBC) read four
+    bytes and a strlen-based one read two. One query, two answers, decided
+    by the client library.
 
-    **Neither oracle arm has ever seen a BYTES value.** `bytea` appears
-    nowhere in `benchmarks/` or `internal/oracle/`, and the pg-oracle runs
-    only over the TPC-H fixture, which has no BYTES column — so
-    `EngineSemantics` never compared the value and `WireProtocol` never
-    compared the OID. This is exactly the coverage shape ADR-0013's
-    type-matrix amendment was written for, one gate short: the type matrix
-    covers all 22 types, the PostgreSQL arms cover three. Whichever
-    rendering lands, the pg-oracle fixture needs a BYTES column against a PG
-    `bytea` one, or the decision this item records has nothing holding it.
+    **What landed.** Rule 1 decides all of it, because PostgreSQL does give
+    BYTES a printed form:
+
+    - `pgTypeOID` returns **17 (bytea)**, `pgTypeSize` -1 and `pgTypeMod` -1
+      (bytea is varlena and takes no modifier), and `pgFormatType` answers
+      `bytea` so the catalog stops contradicting the wire — the same pairing
+      #454 had to restore for DECIMAL.
+    - `formatPgValueTyped` renders `\x` + lowercase hex, and
+      `appendBinaryValue` writes the raw bytes, which IS bytea's binary form
+      (`byteasend`). The binary arm is what the OID change makes
+      load-bearing: under OID 25 the `%v` fallback was at least
+      self-consistent, because the binary form of a text column is its
+      bytes.
+    - `CAST(b AS STRING)` renders the same `\x` hex, which removes the
+      embedded-NUL hazard for free — hex is pure ASCII. This REVERSES the
+      direction of the change that made CAST agree with `likeTextRenderer`
+      by handing back the raw bytes; agreeing with each other was the right
+      half, agreeing on the raw bytes was not.
+    - A bytea **Bind parameter** decodes to BYTES. pgwire has no
+      bound-parameter path below the parser, so Bind renders each parameter
+      as a LITERAL, and it was writing the SPELLING of the bytes
+      (`'\x6869'`) — a ten-character string compared against a two-byte
+      column, matching nothing. `bindparams.decodeByteaText` reads both of
+      `byteain`'s spellings (hex, and the escape form with `\\` and
+      `\ooo`) and the binary form is the bytes themselves; a malformed
+      spelling is an error, never a fallback to the raw characters.
+
+    **LIKE does NOT follow the CAST, and that is the PostgreSQL answer.**
+    `~~` over bytea EXISTS there and is BYTEWISE — verified live,
+    `'\xfffe0041'::bytea LIKE '%A%'` is TRUE, matching the 0x41 BYTE and not
+    a digit of the hex spelling. So PostgreSQL itself renders one way and
+    matches another for this type, and `kernel.likeTextRenderer` keeps
+    matching the raw bytes. The "identical at both evaluation sites" claim
+    this item makes is about LIKE's two sites (the kernel and the row path),
+    which still agree; the additional claim that CAST agrees with LIKE holds
+    for every flat type EXCEPT this one, and only because PostgreSQL breaks
+    it first. `wadjet.TestCastStringPinsPostgresRenderingPerType` pins the
+    hex spelling and `TestCastStringAgreesWithProjectionAcrossFixture` builds
+    the BYTES expectation from the projected bytes rather than from CAST, so
+    an implementation and a comparator agreeing on the same wrong hex still
+    fail.
+
+    **The engine's own answers were already PostgreSQL's**, which is why the
+    fix moved the wire and the CAST and nothing else: comparison and
+    ordering over BYTES are bytewise, an unknown-typed literal beside a
+    BYTES column is read as its bytes (`b = 'hi'` finds the same row on both
+    engines), `LENGTH`/`OCTET_LENGTH` count octets, and GROUP BY, DISTINCT,
+    joins and NULL handling all agree. That is a finding of the coverage
+    below, not an assumption.
+
+    **The coverage hole is closed, and it found a second defect.** `bytea`
+    appeared NOWHERE in `benchmarks/` or `internal/oracle/` — the pg-oracle
+    ran only over the TPC-H fixture, which has no BYTES column, so
+    `EngineSemantics` had never compared the value and `WireProtocol` had
+    never compared the OID. The fixture now has a `bytea_probe` table
+    (`postgres_oracle_test.go`, PG side `bytea`, wadjet side BYTES) holding
+    the empty value, four NULs, the invalid-UTF-8-with-embedded-NUL value
+    above, ASCII text, single high bytes, a prefix pair, and NULLs. Over it
+    run 33 gated semantics entries (plus the one pin below), 10 wire-metadata
+    entries and 2 in the wire error list; the DuckDB arm loads the SAME rows
+    — not a second copy of "the same" fixture — for 13 more BLOB entries. Standing that
+    up immediately failed a query the type matrix had never asked:
+    `ResolveColColFilterKernel`'s string arm listed STRING, IPv6 and UUID
+    but not BYTES, and because two BYTES columns share a TypeID the
+    mixed-type row-at-a-time fallback did not apply either — so
+    `WHERE b_val = b_other` came back as "could not resolve kernel", the
+    identical shape #477 found for two DECIMALs. This is the coverage-matrix
+    argument in concrete form: the gap was not in what the gates ASSERT but
+    in which types they had a value for.
+
+    **What is not fixed, and is pinned rather than forgotten.** A BYTES
+    LITERAL does not exist: `b_val = '\x6869'` in a hand-written statement
+    compares six characters, where PostgreSQL's byteain reads two bytes
+    (#582, `BytesEqHexSpelledLiteral`). The Bind path escapes this only
+    because it has a declared parameter OID to decode against. And the
+    scalar function layer has no BYTES notion at all — every function reads
+    its operand through `expr.toString`, so `UPPER(b)` ANSWERS where
+    PostgreSQL raises 42883, and `b || b` returns TEXT where PostgreSQL
+    returns bytea, which puts the raw-bytes-under-OID-25 hazard back in
+    through a derived value (#583, `ByteaTextFunctionOverBytes` and
+    `ByteaConcat`). `OCTET_LENGTH` over bytea declares float8 for #530's
+    reason, unrelated to this type.
 
 12. **A set operation's result type is the COMMON type of its arms, and every
     arm is MOVED into it — never reinterpreted.** (Added 2026-08-25, #533.)
