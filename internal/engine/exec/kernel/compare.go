@@ -1261,24 +1261,34 @@ func ResolveLikeFilterKernel(typ batch.TypeID, pattern string, negate bool) Filt
 // likeTextRenderer resolves, once per column, the row->text function LIKE
 // matches a pattern against.
 //
-// Wadjet renders every network-native type (and UUID) as human-readable text
-// for CAST AS STRING and scalar function arguments (#484) — LIKE follows the
-// same convention rather than refusing outright the way PostgreSQL does for
-// inet/cidr/macaddr (verified live: `'10.0.0.1'::inet LIKE '10.%'` raises
-// "operator does not exist: inet ~~ unknown"). ADR-0012 item 8/9's
-// neighborhood records this as a deliberate divergence, not an oversight:
-// PostgreSQL's answer here is "no such operator", which is not a semantics
-// PostgreSQL decided for wadjet's own network types to disagree with — it is
-// PostgreSQL not having wadjet's "these types are text everywhere" contract
-// at all. TypeCIDR is already TEXT in its own storage (parquet/schema.go), so
-// it falls through to the same BytesData path TypeString/TypeBytes use.
+// Wadjet renders every SIX network-native types and UUID as human-readable
+// text for CAST AS STRING and scalar function arguments (#484) — LIKE follows
+// the same convention rather than refusing outright the way PostgreSQL does
+// for inet/cidr/macaddr (verified live: `'10.0.0.1'::inet LIKE '10.%'` raises
+// "operator does not exist: inet ~~ unknown"). ADR-0012 item 11 records the
+// decision and its reasons. TypeCIDR is already TEXT in its own storage
+// (parquet/schema.go), so it falls through to the same BytesData path
+// TypeString/TypeBytes use.
+//
+// That CAST-agreement claim is scoped to those SEVEN types and no further.
+// It is false for DATE, whose CAST AS STRING answers the epoch DAY (15007)
+// while this renderer, the projection and PostgreSQL's own `date::text` all
+// answer 2011-02-02 — a separate defect in CAST's string family, filed, not
+// a contract this function is part of.
 //
 // The default arm covers every OTHER type (Int64/Float64/Bool/Decimal/Date/
-// etc.) with the row's own boxed value, rendered the same way the row-at-
-// a-time expr.Like path already does (fmt.Sprint on whatever Vector.GetValue
-// returns) — never indexing BytesData on a column that does not have it,
-// which is the one invariant this function exists to restore regardless of
-// what LIKE against a given type is decided to MEAN.
+// the containers) with the row's own boxed value — fmt.Sprint on whatever
+// Vector.GetValue returns — never indexing BytesData on a column that does
+// not have it, which is the one invariant this function exists to restore
+// regardless of what LIKE against a given type is decided to MEAN.
+//
+// This rendering is the DEFINITION of what LIKE matches, so the
+// row-at-a-time path has to reproduce it rather than the other way round:
+// expr.likeOperand reads Vector.GetValue for the four types ColRef.Eval boxes
+// differently (IPv4, MAC, DATE, FLOAT32), and
+// wadjet.TestLikeAnswersTheSameAtBothSites sweeps every flat type through
+// both sites. Changing a per-type arm here without checking that sweep
+// re-opens the divergence it exists to catch.
 func likeTextRenderer(typ batch.TypeID) func(*batch.Vector, int) string {
 	switch typ {
 	case batch.TypeString, batch.TypeBytes, batch.TypeCIDR:

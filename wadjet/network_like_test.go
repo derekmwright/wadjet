@@ -2,7 +2,10 @@ package wadjet
 
 import (
 	"context"
+	"fmt"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
@@ -155,5 +158,69 @@ func TestNotLikeOnNetworkTypes(t *testing.T) {
 				t.Errorf("%s: n = %d, want 0 (the one row matches the positive pattern)", sql, got)
 			}
 		})
+	}
+}
+
+// TestLikeAnswersTheSameAtBothSites sweeps EVERY flat type in the type matrix
+// through LIKE at both sites — the scan's vectorized kernel
+// (`kernel.ResolveLikeFilterKernel`, reached from a WHERE clause) and the
+// row-at-a-time evaluator (`expr.Like`, reached from a SELECT list) — and
+// requires them to select the same rows.
+//
+// #497 gave the kernel a per-type row-to-text function and left the row path
+// with the four types ColRef.Eval boxes differently from Vector.GetValue. Two
+// of them were still diverging when that fix shipped, and neither was visible
+// to any existing gate: `c_date LIKE '20%'` matched 4949 rows through the scan
+// and 83 through a projection (the epoch DAY, not the date), and `c_f32 LIKE
+// '%1%'` differed by 237 rows (a float64-widened rendering of a float32).
+//
+// The sweep is per TYPE rather than per known-bad type on purpose: an
+// enumerated list of "types that box differently" is the same shape of gap
+// #497 was filed for, and this is what makes the list checkable rather than
+// believed.
+func TestLikeAnswersTheSameAtBothSites(t *testing.T) {
+	ctx := context.Background()
+	db := tmOpen(t)
+
+	// Patterns that bite in different places: a contains, an anchored prefix
+	// and an anchored suffix. A rendering difference usually shows in only one.
+	patterns := []string{"%1%", "2%", "%0", "%-%"}
+
+	for _, c := range typematrix.Columns() {
+		if !c.Flat {
+			continue // a container has no single text form to match
+		}
+		for _, pat := range patterns {
+			t.Run(c.Name+"_"+pat, func(t *testing.T) {
+				kern, err := tmRun(ctx, db, fmt.Sprintf(
+					"SELECT COUNT(*) AS n FROM %s WHERE %s LIKE '%s'", typematrix.Table, c.Name, pat))
+				if err != nil {
+					t.Fatalf("WHERE form: %v", err)
+				}
+				want, ok := tmAsInt64(kern.Rows[0]["n"])
+				if !ok {
+					t.Fatalf("COUNT(*) came back as %#v", kern.Rows[0]["n"])
+				}
+				// The projection form, counted here rather than in SQL: an
+				// outer WHERE over the computed column lets the planner push
+				// the LIKE back down to the kernel, which would compare the
+				// kernel against itself.
+				proj, err := tmRun(ctx, db, fmt.Sprintf(
+					"SELECT %s LIKE '%s' AS m FROM %s", c.Name, pat, typematrix.Table))
+				if err != nil {
+					t.Fatalf("projection form: %v", err)
+				}
+				var got int64
+				for _, r := range proj.Rows {
+					if b, ok := r["m"].(bool); ok && b {
+						got++
+					}
+				}
+				if got != want {
+					t.Errorf("%s LIKE '%s': the scan kernel matched %d rows and the row evaluator %d — "+
+						"the two sites render this column's value differently", c.Name, pat, want, got)
+				}
+			})
+		}
 	}
 }

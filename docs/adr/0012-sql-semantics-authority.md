@@ -553,41 +553,80 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     pass needed (`litcmp_bare_c_cidr`, `litcmp_hostbits_c_cidr`,
     `litcmp_xfamily_c_ipv6` and their ordering forms).
 
-11. **LIKE against a network-native type or UUID renders the column to
-    TEXT, the same convention CAST AS STRING and every scalar function
-    argument already use — a deliberate divergence from PostgreSQL, which
-    has no such operator at all.** (Added 2026-08-24, #497.) PostgreSQL's
-    `inet`/`cidr`/`macaddr` refuse LIKE outright (verified live:
-    `'10.0.0.1'::inet LIKE '10.%'` raises "operator does not exist: inet ~~
-    unknown") — but that is not a semantics PostgreSQL DECIDED for wadjet's
-    own network types to disagree with (item 1's territory); it is
-    PostgreSQL not having the "these types are text everywhere" contract
-    #484 already built for them at all. Rendering to text, then matching,
-    is the answer consistent with that existing contract rather than a new
-    one.
+11. **LIKE renders the column to TEXT for every type — the value's own
+    printed form, identical at both evaluation sites — rather than refusing
+    the way PostgreSQL does.** (Added 2026-08-24, #497. Scoped and corrected
+    2026-08-24 after review: the original claimed the rendering matches
+    `CAST AS STRING` across all 22 types, which is true of the seven types
+    the fix was about and false of DATE.)
 
-    Before this fix there was no decision implemented at either extreme:
-    `ResolveLikeFilterKernel` (`internal/engine/exec/kernel/compare.go`)
-    unconditionally read the column's `BytesData`, with no per-type dispatch
-    at all — the same shape of gap `ResolveFilterKernel` (the `=`/`<`/`>`
-    kernel) is explicitly built to avoid. TypeIPv4/TypeMAC/TypePort/
-    TypeProtocol store into `Int64Data`/`Int32Data`, so this INDEXED AN
-    EMPTY BACKING STORE — a panic that is not the one deliberate
-    `FatalEvalPanic` shape the pipeline drivers convert back into a query
-    error, so it re-raised untouched all the way up: a process killer, not
-    a wrong answer. TypeIPv6/TypeUUID store into `BytesData` but as the
-    address's RAW binary form, so the pattern silently matched nothing
-    regardless of whether it was reasonable. `likeTextRenderer` now
-    resolves a per-type row-to-text function once per column — the same
+    PostgreSQL's `inet`/`cidr`/`macaddr` — and its `date`, `numeric`,
+    `integer` and `boolean` — refuse LIKE outright (verified live:
+    `'10.0.0.1'::inet LIKE '10.%'` raises "operator does not exist: inet ~~
+    unknown"). That is not a semantics PostgreSQL DECIDED for wadjet's own
+    network types to disagree with (item 1's territory); it is PostgreSQL
+    not having the "these types are text everywhere" contract #484 already
+    built for them. **Wadjet renders and matches.** The reasons, in order:
+    the rendering contract already exists for the six network types and
+    UUID; the engine has answered `int_col LIKE '1%'` since before there was
+    a decision to make, and turning that into an error is a breaking change
+    with no correctness payoff; and the invariant that actually failed here
+    was never "does this operator exist" but "does it read the right backing
+    store, and does it answer the same at both sites".
+
+    **What the text is.** The value's own printed form — `Vector.GetValue`'s
+    rendering, which is what the projection shows: `2011-02-02` for a DATE,
+    `10.0.0.1` for an IPv4, `1.0001` for a DECIMAL, epoch MILLISECONDS for a
+    TIMESTAMP, `0.14285715` for a FLOAT32 (float32 shortest round-trip, not
+    its float64 widening). For the six network types and UUID this is also
+    exactly what `CAST AS STRING` and every scalar function argument produce
+    — that seven-type agreement is the claim, and it holds. It does NOT hold
+    for DATE: `CAST(c_date AS STRING)` answers the epoch DAY (`15007`) where
+    the projection and LIKE answer `2011-02-02`. PostgreSQL's `date::text`
+    is the date, so the CAST is the side that is wrong; it is a separate
+    defect in CAST's string family, filed rather than repaired inside a LIKE
+    fix, and named here so the next reader does not take the two for one
+    contract again.
+
+    **Both sites must render alike, and two did not.** `ResolveLikeFilterKernel`
+    (`internal/engine/exec/kernel/compare.go`) unconditionally read the
+    column's `BytesData`, with no per-type dispatch at all — the same shape
+    of gap `ResolveFilterKernel` (the `=`/`<`/`>` kernel) is explicitly built
+    to avoid. TypeIPv4/TypeMAC/TypePort/TypeProtocol store into
+    `Int64Data`/`Int32Data`, so this INDEXED AN EMPTY BACKING STORE — a panic
+    that is not the one deliberate `FatalEvalPanic` shape the pipeline
+    drivers convert back into a query error, so it re-raised untouched all
+    the way up: a process killer, not a wrong answer. TypeIPv6/TypeUUID
+    store into `BytesData` but as the address's RAW binary form, so the
+    pattern silently matched nothing. `likeTextRenderer` now resolves a
+    per-type row-to-text function once per column — the same
     resolve-once-dispatch-in-the-loop discipline every other kernel here
     follows — covering every one of the 22 types (a default arm renders any
     other type's own boxed value, never indexing `BytesData` on a column
-    that does not have it, which is the invariant this item exists to
-    restore regardless of what LIKE against a given type is decided to
-    MEAN). The row-at-a-time `expr.Like` path had the same gap for
-    TypeIPv4/TypeMAC specifically (their `ColRef.Eval` box is the raw int64,
-    not text) and is fixed the same way `Cast`'s string-family case already
-    was, through the shared `networkOperand` resolver.
+    that does not have it).
+
+    The row-at-a-time `expr.Like` path had the same class of gap for the
+    four types `ColRef.Eval` boxes differently from `GetValue`. #497 closed
+    two of them (TypeIPv4/TypeMAC, through the shared `networkOperand`
+    resolver `Cast`'s string-family case already used) and left two open,
+    which the review found: `c_date LIKE '20%'` matched 4949 rows through
+    the scan and 83 through a projection — the epoch DAY, not the date —
+    and `c_f32 LIKE '%1%'` differed by 237 rows, a float64-widened rendering
+    of a float32. `expr.likeOperand` closes both, and
+    `wadjet.TestLikeAnswersTheSameAtBothSites` sweeps EVERY flat type
+    through both sites so a fifth type that starts boxing differently is a
+    failing test rather than another quiet divergence. An enumerated list of
+    "types that box differently" is the same shape of gap #497 was filed
+    for; the sweep is what makes the list checkable.
+
+    **Containers are rendered but not specified.** ARRAY, ROW, MAP and
+    VECTOR reach the default arm and match Go's own `fmt.Sprint` of the
+    boxed value (`[1 2 3]`, `map[k0:0]`). Both sites agree on it — it is the
+    same `fmt.Sprint(GetValue(i))` on each — so it is not a divergence, but
+    it is not a text form the engine produces anywhere else and it is not a
+    contract: it would change if the boxing did. Deciding a real container
+    text (or refusing LIKE for containers, which is the other honest answer)
+    is left open and filed, deliberately not blessed by silence here.
 
 ## Consequences
 

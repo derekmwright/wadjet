@@ -1802,13 +1802,7 @@ func (e *Like) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if v == nil || p == nil {
 		return false, true
 	}
-	// A TypeIPv4/TypeMAC operand boxes as its raw encoded int64 (ColRef.Eval's
-	// int64 fast path), so `ipv4_col LIKE '10.%'` would otherwise match
-	// against the digit string of that number rather than the address text —
-	// the same rendering gap Cast's string-family case resolves through this
-	// same helper (#497). TypeIPv6/TypeCIDR/TypeUUID need no equivalent call:
-	// Vector.GetValue's default case already renders them as text.
-	result := matchLike(toString(networkOperand(b, row, e.Expr, v)), toString(p))
+	result := matchLike(toString(likeOperand(b, row, e.Expr, v)), toString(p))
 	if e.Not {
 		return !result, false
 	}
@@ -5142,6 +5136,50 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 // the address. Mirrors temporalOperand's contract: only a bare column
 // reference is resolved, and every other operand shape (an already-string
 // value, a nested expression, a literal) passes v through unchanged.
+// likeOperand renders a LIKE operand as the text the column's own value
+// PRINTS as — which is, by construction, the text the vectorized kernel
+// matches against (kernel.likeTextRenderer's default arm is
+// fmt.Sprint(Vector.GetValue(i)), and its per-type arms were written to agree
+// with that rendering).
+//
+// ColRef.Eval boxes four types differently from GetValue, for speed on the
+// numeric paths that dominate it, and all four made LIKE match a DIFFERENT
+// STRING here from the one the scan's kernel matched — the same query
+// answering two ways depending on whether the predicate reached the WHERE
+// clause or a SELECT list:
+//
+//	IPv4, MAC  the raw encoded int64, so `ipv4_col LIKE '10.%'` matched the
+//	           digits of that integer instead of the address text
+//	DATE       the epoch DAY, so `c_date LIKE '20%'` was false for 2011-02-02
+//	           and true for the day number 20123
+//	FLOAT32    widened to float64, so 1/7 printed 0.1428571492433548 here and
+//	           0.14285715 through the kernel
+//
+// The IPv4/MAC pair was fixed with #497; DATE and FLOAT32 were found by the
+// review of it, through the exhaustive two-site sweep this list should never
+// again be trusted without: `wadjet.TestLikeAnswersTheSameAtBothSites` runs
+// every flat type through both, so a fifth type that starts boxing
+// differently is a failing test rather than another quiet divergence.
+//
+// Cast keeps networkOperand instead: its string-family case has its own
+// rendering contract for DATE (a separate defect, filed) and must not be
+// changed by a LIKE fix.
+func likeOperand(b *batch.RecordBatch, row int, operand Expr, v any) any {
+	cr, ok := operand.(*ColRef)
+	if !ok || cr.structField != "" {
+		return v
+	}
+	switch cr.typ {
+	case batch.TypeIPv4, batch.TypeMAC, batch.TypeDate, batch.TypeFloat32:
+	default:
+		return v
+	}
+	if cr.idx < 0 || cr.idx >= len(b.Columns) {
+		return v
+	}
+	return b.Columns[cr.idx].GetValue(row)
+}
+
 func networkOperand(b *batch.RecordBatch, row int, operand Expr, v any) any {
 	cr, ok := operand.(*ColRef)
 	if !ok || cr.structField != "" {
