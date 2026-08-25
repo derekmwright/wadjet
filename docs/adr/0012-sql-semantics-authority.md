@@ -985,6 +985,29 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     `CAST(timestamp AS STRING)` and LIKE render epoch milliseconds rather
     than the instant pgwire renders.)
 
+    **Item 6's PLAN-TIME refusal has the identical gap, for the identical
+    structural reason.** (Added 2026-08-25, #579.) `checkLiteralTypes`/
+    `refuseLiteralAgainstColumn` (`internal/planner/physical/
+    validate_literal.go`) ask `colScope` whether a column is DECIMAL — a
+    plain BOOLEAN (`colScope.addQualifiedTyped`'s `isDecimal bool`,
+    `internal/planner/physical/validate.go`), not the column's declared
+    `parquet.TypeID` — so there is no way to ask the same question for CIDR
+    or any other network type even in principle; this is not a rule that
+    excludes them, it is a bool that only ever meant one type. A non-numeric
+    literal against a CIDR column therefore never reaches item 6's #517
+    fix and falls all the way back to THIS item's runtime-only story: it is
+    evaluated as ordinary text at the three boxed sites (CASE, IS DISTINCT
+    FROM, GREATEST/LEAST) and only refuses at the scan-filter runtime layer,
+    and only once a row actually reaches it. Verified live against
+    postgres:17 on a `cidrtest(id BIGINT, c CIDR)` fixture: `WHERE id >
+    100000 AND c = 'zzz'` raises 22P02 there unconditionally and here only
+    when a row satisfies `id > 100000`; `CASE c WHEN 'zzz' THEN 1 ELSE 0
+    END = 1`, `c IS DISTINCT FROM 'zzz'` and `GREATEST(c, 'zzz')` all answer
+    here and all raise there. Widening `colScope` to carry the column's
+    declared type (or an enum covering DECIMAL/network/neither) instead of
+    a bare bool, with a per-type literal validator alongside
+    `expr.IsNumericLiteralText`, is the fix shape #579 records.
+
     **BYTES is bytea, and it is the one type where LIKE and CAST
     deliberately disagree.** (Added 2026-08-25, #570. Recorded as an open
     divergence when this item was written; closed the same day.)
