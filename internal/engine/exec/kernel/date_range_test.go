@@ -13,6 +13,16 @@ import (
 // and every one past 1677-09-22..2262-04-11 used to answer the window's
 // edge instead — a time.Duration nanosecond saturation in the old
 // t.Sub(epoch) arithmetic.
+//
+// What #451 did NOT cover, and this file therefore does not assert: a string
+// that is not a date at all. parseDateToDays still returns (0, nil) after
+// every layout fails, so `WHERE d = '2026-02-30'` answers the rows holding
+// 1970-01-01 where PostgreSQL raises 22008, and parquet.parseDateForWrite
+// does the same thing at INGEST — writing the epoch for an unparseable
+// value, which is silent data loss rather than a query-time misreading.
+// Tracked as #560; the fix belongs to the same refusal convention
+// CidrSortKey/IPv6LitKey/DecimalConstText already use, but the ingest arm
+// needs its own decision and neither is in #451's scope.
 func TestParseDateToDaysDoesNotClampAtTheDurationBoundary(t *testing.T) {
 	tests := []struct {
 		lit  string

@@ -599,17 +599,31 @@ func networkConstError(typ batch.TypeID, value any) error {
 	return nil
 }
 
-// dateConstError is decimalConstError's counterpart for a DATE literal that
-// is a real, validly-formatted date whose day count does not fit the int32
-// the DATE column encoding stores (kernel.DateLiteralDays / #451).
+// dateConstError is decimalConstError's counterpart for a DATE value whose
+// day count does not fit the int32 the DATE column encoding stores
+// (kernel.DateLiteralDays / #451). PostgreSQL raises 22008
+// (datetime_field_overflow) for a date outside its own representable range,
+// and ADR-0012 item 1 makes PostgreSQL the authority on error-versus-not, so
+// this is its SQLSTATE.
 //
-// It used to answer instead of refusing: parseDateToDays SATURATED past
-// roughly 1677-09-22..2262-04-11 (a time.Duration nanosecond overflow, not
-// this column's actual range), so `d = '9999-12-31'` — the common SCD-2
-// end-of-time sentinel — silently compared as 2262-04-11 instead. PostgreSQL
-// raises 22008 (datetime_field_overflow) for a date outside its own
-// representable range, and ADR-0012 item 1 makes PostgreSQL the authority on
-// error-versus-not, so this is its SQLSTATE.
+// No DATE STRING literal can reach it, and that is the point: #451's defect
+// was that `d = '9999-12-31'` — the common SCD-2 end-of-time sentinel —
+// silently compared as 2262-04-11, because parseDateToDays computed its day
+// count through a time.Duration, which SATURATES at ±math.MaxInt64
+// nanoseconds (~292 years) rather than reporting an overflow. That is fixed
+// where it happened, in the arithmetic: kernel.parseDateToDays now counts
+// civil days from t.Unix(), and 9999-12-31 is 2,932,896 days — about 700×
+// inside int32 — so it is now simply CORRECT, not an error. Nor can any
+// other literal reach the guard: every layout parseDateToDays accepts takes
+// time.Parse's "2006", which is exactly four digits, so 9999-12-31 is the
+// largest date a literal can spell and 0000-01-01 the smallest.
+//
+// The guard is still live for a caller that hands kernel.toDateInt32 a RAW
+// day count — an int64 or int compared against a DATE column, which no
+// parser bounds — and it is what keeps ResolveFilterKernel's "nil kernel,
+// caller raises" convention honest for the type. Leave it in place: this is
+// the layer that must not clamp, whatever the layer above happens to be able
+// to produce today.
 func dateConstError(typ batch.TypeID, value any) error {
 	if typ != batch.TypeDate || value == nil {
 		return nil
