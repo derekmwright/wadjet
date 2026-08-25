@@ -4868,16 +4868,11 @@ func ToInt64(v any) int64 {
 	}
 }
 
-// parseTemporalInt64 converts a date/timestamp string to the same int64 unit
-// as the reference value. TypeDate columns use epoch days (small int64 values),
-// TypeTimestamp columns use epoch milliseconds (large int64 values).
-// The threshold 500_000 (~year 3339 in days) safely distinguishes the two.
-func parseTemporalInt64(ref int64, s string) int64 {
-	v, _ := parseTemporalInt64OK(ref, s)
-	return v
-}
-
-// parseTemporalInt64OK is parseTemporalInt64 with an explicit success signal.
+// parseTemporalInt64OK converts a date/timestamp string to the same int64
+// unit as the reference value, with an explicit success signal.
+// TypeDate columns use epoch days (small int64 values), TypeTimestamp
+// columns use epoch milliseconds (large int64 values). The threshold
+// 500_000 (~year 3339 in days) safely distinguishes the two.
 //
 // The signal is the whole point at the comparison site. Its callers used to
 // test the RESULT — `if bi := parseTemporalInt64(ai, bs); bi != 0 || ai == 0`
@@ -4891,9 +4886,9 @@ func parseTemporalInt64(ref int64, s string) int64 {
 func parseTemporalInt64OK(ref int64, s string) (int64, bool) {
 	if ref < 500_000 && ref > -500_000 {
 		// Reference is epoch days — parse the string as days too.
-		return parseDateToEpochDaysOK(s)
+		return parseDateToEpochDaysCachedOK(s)
 	}
-	return parseTimestampToEpochMsOK(s)
+	return parseTimestampToEpochMsCachedOK(s)
 }
 
 // Deterministic temporal-string parsers are called row-by-row from
@@ -4905,23 +4900,39 @@ func parseTemporalInt64OK(ref int64, s string) (int64, bool) {
 // Q14/Q15/Q20: ~1-3 literals each; suite-wide < 20 distinct strings), so a
 // memoization cache stays trivially small and never grows unbounded.
 var (
-	dateEpochDaysCache    sync.Map // map[string]int64 → epoch days
-	timestampEpochMsCache sync.Map // map[string]int64 → epoch milliseconds
+	dateEpochDaysCache    sync.Map // map[string]temporalParseResult → epoch days
+	timestampEpochMsCache sync.Map // map[string]temporalParseResult → epoch milliseconds
 )
 
-// parseDateToEpochDays parses a date/timestamp string into epoch days.
-func parseDateToEpochDays(s string) int64 {
+// temporalParseResult is a cached string→epoch conversion's outcome,
+// including whether the parse succeeded — 0 is a valid epoch-days/epoch-ms
+// result in its own right (the Unix epoch itself), so the cache cannot
+// collapse "parsed to 0" and "did not parse" into the same cached value the
+// way a bare int64 cache would.
+type temporalParseResult struct {
+	v  int64
+	ok bool
+}
+
+// parseDateToEpochDaysCachedOK is parseDateToEpochDaysOK routed through
+// dateEpochDaysCache, so parseTemporalInt64OK's row-by-row date comparisons
+// serve a repeated literal from a map lookup instead of re-walking up to 4
+// time.Parse layouts every row.
+func parseDateToEpochDaysCachedOK(s string) (int64, bool) {
 	if v, ok := dateEpochDaysCache.Load(s); ok {
-		return v.(int64)
+		r := v.(temporalParseResult)
+		return r.v, r.ok
 	}
-	result, _ := parseDateToEpochDaysOK(s)
-	dateEpochDaysCache.Store(s, result)
-	return result
+	days, ok := parseDateToEpochDaysOK(s)
+	dateEpochDaysCache.Store(s, temporalParseResult{v: days, ok: ok})
+	return days, ok
 }
 
 // parseDateToEpochDaysOK is the uncached parse with an explicit success
 // signal (0 is a valid result for the epoch itself). Used at expression
-// compile time by compileCmp's temporal-literal specialization.
+// compile time by compileCmp's temporal-literal specialization, where it
+// runs once per literal rather than once per row, and by
+// parseDateToEpochDaysCachedOK on a cache miss.
 //
 // The day count is computed from t.Unix() (civil-days arithmetic), not
 // t.Sub(epoch): Sub returns a time.Duration, which saturates at
@@ -4952,14 +4963,28 @@ func parseDateToEpochDaysOK(s string) (int64, bool) {
 	return 0, false
 }
 
-// parseTimestampToEpochMs parses common timestamp string formats into epoch milliseconds.
+// parseTimestampToEpochMs parses common timestamp string formats into epoch
+// milliseconds, discarding the success signal ToInt64's callers have no use
+// for (a failed parse and an epoch-zero result both read as 0 there, which
+// is the existing contract for a non-temporal string reaching ToInt64).
 func parseTimestampToEpochMs(s string) int64 {
+	v, _ := parseTimestampToEpochMsCachedOK(s)
+	return v
+}
+
+// parseTimestampToEpochMsCachedOK is parseTimestampToEpochMsOK routed
+// through timestampEpochMsCache — the same cache ToInt64's
+// parseTimestampToEpochMs already shares, so a literal parsed through either
+// caller warms the other's lookup too, and there is exactly one cache of
+// timestamp parses rather than one per caller.
+func parseTimestampToEpochMsCachedOK(s string) (int64, bool) {
 	if v, ok := timestampEpochMsCache.Load(s); ok {
-		return v.(int64)
+		r := v.(temporalParseResult)
+		return r.v, r.ok
 	}
-	result, _ := parseTimestampToEpochMsOK(s)
-	timestampEpochMsCache.Store(s, result)
-	return result
+	ms, ok := parseTimestampToEpochMsOK(s)
+	timestampEpochMsCache.Store(s, temporalParseResult{v: ms, ok: ok})
+	return ms, ok
 }
 
 // parseTimestampToEpochMsOK is the uncached parse with an explicit success
@@ -10869,7 +10894,7 @@ func fnEntropy(args []any) any {
 //	TypeDate      Int32Data, days since the epoch
 //	TypeTimestamp Int64Data, MILLISECONDS since the epoch (what the parquet
 //	              writer emits — file_writer.go encodes TimestampMillis — and
-//	              what the comparison path assumes, parseTemporalInt64)
+//	              what the comparison path assumes, parseTemporalInt64OK)
 //	String/Bytes  text, parsed
 //	anything else Int64Data read as seconds, the only defensible reading of
 //	              an untyped integer and what parseTime(int64) has always done

@@ -536,7 +536,7 @@ func nodeToColumn(n *SchemaNode) Column {
 // MILLISECONDS: 1 for MILLIS, 1_000 for MICROS, 1_000_000 for NANOS.
 //
 // The engine has exactly one timestamp unit — file_writer.go emits MILLIS and
-// the expression layer's parseTemporalInt64 reads MILLIS — but parquet files
+// the expression layer's parseTemporalInt64OK reads MILLIS — but parquet files
 // written elsewhere carry whichever unit their producer chose (MICROS is the
 // PyArrow, Spark and Iceberg default; NANOS is common from pandas). Decoding
 // those verbatim puts every instant off by 1000x or 1000000x, silently. Any

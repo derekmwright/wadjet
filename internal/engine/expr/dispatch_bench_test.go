@@ -75,6 +75,19 @@ func BenchmarkFilterCmpTemporalLit(b *testing.B) {
 	benchFilterLoop(b, "d >= '1998-01-01'", &CmpTemporalLit{})
 }
 
+// BenchmarkFilterInTemporalLit is CmpTemporalLit's fast specialization does
+// NOT apply here: compileIn never builds one, so a DATE column inside an IN
+// list reaches In's generic boxedPair-disarmed fallback — compare()'s
+// (int64, string) temporal branch, parsed through parseTemporalInt64OK on
+// every row for every member. It is the row-path benchmark for that
+// fallback's cache (dateEpochDaysCache/timestampEpochMsCache): each literal
+// below is a date literal chosen to fall inside dispatchBenchBatch's "d"
+// column range (epoch days 10000-10399) so the benchmark actually selects
+// rows rather than measuring the reject path only.
+func BenchmarkFilterInTemporalLit(b *testing.B) {
+	benchFilterLoop(b, "d IN ('1997-05-19', '1997-07-08', '1997-10-16', '1998-01-24', '1998-05-04', '1998-06-22')", &In{})
+}
+
 func BenchmarkFilterIn(b *testing.B) {
 	benchFilterLoop(b, "n IN (1, 7, 11, 23, 99, 500)", &In{})
 }

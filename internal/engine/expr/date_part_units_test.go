@@ -249,7 +249,7 @@ func TestDatePartsUnknownUnit(t *testing.T) {
 // TestTemporalColumnBoxingUnchanged pins the representation the fix is built
 // on top of rather than replacing. Boxing a DATE as time.Time or as its ISO
 // string would have been unambiguous, but ColRef.Eval's box feeds comparison
-// (compare()'s parseTemporalInt64 infers days-vs-milliseconds from the
+// (compare()'s parseTemporalInt64OK infers days-vs-milliseconds from the
 // MAGNITUDE of this int64), arithmetic and Vector.SetValue on materialization
 // — none of which accept a time.Time. The unit is restored at the function
 // boundary instead, where the column's type is still in hand: for the
