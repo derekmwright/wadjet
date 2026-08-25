@@ -7569,7 +7569,24 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			}
 		}
 		if !needsProject {
-			return p.buildPipeline(ctx, child)
+			// Every check above asks whether a projection would COMPUTE
+			// anything; none asks whether the aggregate's output is the
+			// answer's SHAPE. It routinely is not. A HAVING over an
+			// aggregate the SELECT list does not carry adds a synthetic
+			// `__having_N` output column (logical/builder.go), and
+			// `GROUP BY a, b` with only `a` selected adds `b` — eliding
+			// the projection published both to the client, which is how
+			// `SELECT k FROM g GROUP BY k HAVING BOOL_OR(flag)` answered
+			// with a `__having_0` column nobody asked for (#591), and how
+			// a grouped-but-unselected key reached psql. A projection over
+			// an aggregate is elidable only when the aggregate already
+			// emits exactly the projected columns, in order; anything this
+			// cannot determine (grouping sets, an unrecognized node below)
+			// keeps the projection, which is always sound and merely costs
+			// a copy.
+			if names, ok := aggregateOutputNames(child); ok && namesMatchProjections(names, node.Projections) {
+				return p.buildPipeline(ctx, child)
+			}
 		}
 	}
 
@@ -11354,6 +11371,111 @@ func scanColumnDecimal(node *logical.Node, col string) (logical.DecimalMeta, boo
 // passthrough node (e.g., Filter for HAVING) whose child is an Aggregate.
 func hasAggregateAncestor(node *logical.Node) bool {
 	return findAggregateAncestor(node) != nil
+}
+
+// aggregateOutputNames returns the column names the pipeline under a
+// projection emits, in order, when that pipeline ends in an Aggregate, and
+// reports whether they could be determined at all. It mirrors buildAggregate's
+// own naming: group keys first (a non-plain GROUP BY expression under its
+// `__gb_expr_N` synthetic name), then one column per aggregate under its
+// OutputCol, then the constant columns litPostOps re-attaches for the literal
+// keys elided from the key set.
+//
+// "Could not determine" is not a failure: the only caller uses this to decide
+// whether a projection is redundant, and an undetermined answer keeps the
+// projection.
+func aggregateOutputNames(node *logical.Node) ([]string, bool) {
+	if node == nil {
+		return nil, false
+	}
+	switch node.Type {
+	case logical.NodeFilter:
+		// A HAVING filter passes its input's schema through unchanged.
+		if len(node.Children) == 0 {
+			return nil, false
+		}
+		return aggregateOutputNames(node.Children[0])
+	case logical.NodeProject:
+		// Only the synthetic finalization projections findAggregateAncestor
+		// walks through; a real one is the pipeline's output already.
+		if !node.PreservesAggOutputs {
+			return nil, false
+		}
+		names := make([]string, 0, len(node.Projections))
+		for i := range node.Projections {
+			names = append(names, projectionOutputName(node.Projections[i]))
+		}
+		return names, true
+	case logical.NodeAggregate:
+		// Grouping sets renumber the key columns and add null-group
+		// bookkeeping; not modeled here.
+		if len(node.GroupingSets) > 0 || len(node.GroupingSetNulls) > 0 {
+			return nil, false
+		}
+		haveExprs := len(node.GroupByExprs) == len(node.GroupBy)
+		nonLit := 0
+		if haveExprs {
+			for _, gbExpr := range node.GroupByExprs {
+				if gbExpr == nil {
+					nonLit++
+					continue
+				}
+				if _, isLit := gbExpr.(*plansql.Lit); !isLit {
+					nonLit++
+				}
+			}
+		}
+		names := make([]string, 0, len(node.GroupBy)+len(node.AggExprs))
+		var elidedLits []string
+		for i, gb := range node.GroupBy {
+			name := plansql.NormalizeIdentRef(strings.TrimSpace(gb))
+			if haveExprs && node.GroupByExprs[i] != nil {
+				if _, isLit := node.GroupByExprs[i].(*plansql.Lit); isLit && nonLit > 0 {
+					elidedLits = append(elidedLits, fmt.Sprintf("__gb_expr_%d", i))
+					continue
+				}
+				if !isPlainGroupKey(node.GroupByExprs[i]) {
+					name = fmt.Sprintf("__gb_expr_%d", i)
+				}
+			}
+			names = append(names, name)
+		}
+		for i := range node.AggExprs {
+			names = append(names, node.AggExprs[i].OutputCol)
+		}
+		return append(names, elidedLits...), true
+	}
+	return nil, false
+}
+
+// projectionOutputName is the column name a projection publishes, resolved the
+// same way buildProject's own ProjectColumn naming resolves it.
+func projectionOutputName(proj logical.Projection) string {
+	name := proj.Alias
+	if name == "" {
+		name = proj.Column
+	}
+	if name == "" {
+		name = cleanExpr(proj.Expr)
+	}
+	return plansql.NormalizeIdentRef(strings.TrimSpace(name))
+}
+
+// namesMatchProjections reports whether an aggregate's output columns are
+// exactly the projected ones, in order. Names are compared case-insensitively:
+// output names come from SQL identifiers, which the rest of the engine matches
+// that way.
+func namesMatchProjections(names []string, projections []logical.Projection) bool {
+	if len(names) != len(projections) {
+		return false
+	}
+	for i := range names {
+		if !strings.EqualFold(plansql.NormalizeIdentRef(strings.TrimSpace(names[i])),
+			projectionOutputName(projections[i])) {
+			return false
+		}
+	}
+	return true
 }
 
 // findAggregateAncestor returns the Aggregate node if the given node is one,
