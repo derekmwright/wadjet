@@ -36,6 +36,11 @@ func TestReclaimNeverDeletesOperatorRegisteredFilesTheEngineNeverWrote(t *testin
 	if err := cat.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// Without a declared flusher, recordPendingDrop is a no-op and every
+	// assertion below would hold vacuously — pass whether or not the
+	// ownership filter this test is about even exists. Declaring one is
+	// what makes "scheduled != 0" and "flush deleted N" mean anything.
+	cat.EnableDropReclaim()
 
 	// The operator's own dataset, staged in their bucket long before any
 	// wadjet process ran, under the loaders' default "tables/" prefix.
