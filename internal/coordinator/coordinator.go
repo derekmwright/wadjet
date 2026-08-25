@@ -2183,6 +2183,19 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 				}
 				return append(dst, '0')
 			}
+		case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow, parquet.TypeVector:
+			// The engine's own boxed merge key, not a rendering. `%v` is not
+			// injective for a container — ARRAY['a b'] and ARRAY['a','b']
+			// both print `[a b]` — so two groups every worker keeps apart
+			// merged into one HERE, at the cross-worker boundary, and the
+			// same query answered differently single-process. The element
+			// framing and the nested CIDR re-key both need the column's
+			// declared metadata, which is why the encoder takes the whole
+			// parquet.Column rather than its type.
+			col := &schema[ci]
+			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
+				return exec.AppendBoxedGroupKey(dst, b.Columns[ci].GetValue(row), col)
+			}
 		default:
 			typ := schema[ci].Type
 			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {

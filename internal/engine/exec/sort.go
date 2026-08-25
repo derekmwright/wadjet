@@ -1246,6 +1246,30 @@ func appendKeyValueWithMeta(buf []byte, v any, meta *parquet.Column) []byte {
 	return appendKeyValue(buf, v)
 }
 
+// AppendBoxedGroupKey is appendKeyValueWithMeta under an exported name, for
+// the ONE consumer outside this package that builds the same key from the
+// same boxed value: the coordinator's cross-worker GROUP BY re-aggregation
+// (reAggregatePartials' keyEncoders).
+//
+// That layer keys a container column by `fmt.Appendf("%v", ...)`, which is
+// not injective for any of the four — ARRAY['a b'] and ARRAY['a','b'] both
+// render `[a b]`, ROW{a:'b c:d'} and ROW{a:'b',c:'d'} both render
+// `map[a:b c:d]` — so two distinct groups merged into one at the coordinator
+// while every worker, and the single-process engine, kept them apart. It was
+// unreachable while a container GROUP BY failed outright (#566/#576); making
+// those queries answer is what exposes it, so the two fixes belong together.
+//
+// Exporting THIS rather than a fresh encoder is the point: the bytes have to
+// be the ones the engine's own boxed merge key produces, or the coordinator
+// re-splits what a worker merged. That includes the float fold (a NaN payload
+// and a -0.0 are not part of a value's identity, kernel/float_order.go) and
+// the CIDR re-key (#520), both of which a value-preserving encoding —
+// appendContainerKeyValue, which the drained partial's VALUE uses — must not
+// apply and this one must.
+func AppendBoxedGroupKey(dst []byte, v any, col *parquet.Column) []byte {
+	return appendKeyValueWithMeta(dst, v, col)
+}
+
 // appendKeyElemsWithMeta is appendKeyElems with the elements' DECLARED type
 // available. appendKeyFieldsWithMeta is appendKeyFields' counterpart.
 //
