@@ -25,11 +25,11 @@ import (
 //
 // So each arm is held to a property SQL requires rather than to the other arm:
 //
-//	1. the result carries exactly the columns the SELECT list asked for;
-//	2. `p` / `NOT p` / `p IS NULL` partition the ungated GROUP BY (TLP's
-//	   invariant, which is what found both defects);
-//	3. an ungrouped reference is refused with 42803 on both paths — the DAG's
-//	   stage planner must not accept what the local path refuses.
+//  1. the result carries exactly the columns the SELECT list asked for;
+//  2. `p` / `NOT p` / `p IS NULL` partition the ungated GROUP BY (TLP's
+//     invariant, which is what found both defects);
+//  3. an ungrouped reference is refused with 42803 on both paths — the DAG's
+//     stage planner must not accept what the local path refuses.
 //
 // Agreement between the arms is then checked as well, which is free once both
 // answers are in hand.
