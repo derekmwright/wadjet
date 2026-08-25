@@ -93,6 +93,19 @@ const (
 	partialTagContainer byte = 10
 )
 
+// ContainerKeyDrainWrites counts container group-key values written into a
+// partial-state run — one per group per drain, across spills AND the
+// morsel-parallel clone handoff, which use the same run format.
+//
+// It is exported because a gate at the SQL layer cannot otherwise tell a
+// query that exercised this path from one that never left memory. The first
+// version of the 1 KiB-budget gate compared a budgeted answer with an
+// unbudgeted one for all four container types and was VACUOUS for three of
+// them: only VECTOR ever reached a drain, so ARRAY/ROW/MAP compared two
+// in-memory runs to each other and would have passed with this whole file
+// deleted. A gate that cannot say whether it engaged is not a gate.
+var ContainerKeyDrainWrites atomic.Int64
+
 // partialSpillSeq is a per-process counter for unique partial-spill filenames.
 // Distinct from spillFileSeq (raw-row spills) so the filenames are easy to
 // distinguish in /tmp listings during debugging.
@@ -616,6 +629,7 @@ func setPartialKeyFromAny(dst *partialKeyValue, v any) {
 			// rebuild the value if it were accepted, so the box is encoded
 			// losslessly instead (aggregate_container_key.go).
 			dst.Tag = partialTagContainer
+			ContainerKeyDrainWrites.Add(1)
 			// A FRESH buffer, never dst's own: kWayMerger.Next copies a
 			// partialKeyValue by STRUCT, so the Bytes header it keeps aliases
 			// whatever this wrote, and it then advances the source
@@ -2079,11 +2093,17 @@ func writeAccFallback(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggF
 // empty container — is the silent-wrong-answer shape #361 exists to stop.
 func writePartialKeyToColumn(dst *batch.Vector, i int, kv *partialKeyValue) error {
 	if kv.Tag == partialTagNull {
-		dst.Nulls.SetNull(i)
-		switch dst.Type {
-		case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-			dst.BytesData.Set(i, nil)
-		}
+		// WriteNullAt, not a hand-rolled SetNull plus an enumerated list of
+		// the destinations that also need an empty slot. That list held the
+		// five bytes-class types and could not hold a container: a NULL
+		// ARRAY/MAP leaves its Offsets entry unwritten, and a NULL ROW skips
+		// every CHILD's slot — so a bytes-class field below it keeps offsets
+		// describing the wrong bytes and the next non-null row reads from the
+		// start of the arena (`s:s106` came back as `s:s0s1s10s100...`).
+		// WriteNullAt advances the variable-length bookkeeping for EVERY
+		// shape, children included, which is why
+		// decodeSerializedKeyIntoColumns already uses it for the same job.
+		dst.WriteNullAt(i)
 		return nil
 	}
 
