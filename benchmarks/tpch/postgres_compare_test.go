@@ -2273,26 +2273,16 @@ func postgresSemanticsCases() []pgCase {
 // coordinator.TestMultiKeyCorrelatedTwoPath) ask exactly the same questions —
 // those two compare against the constants this arm re-derives live.
 func multiKeyCorrelatedCases() []pgCase {
-	// The two families that diverge for reasons that are NOT this one, both
-	// found by this corpus and both reproducing with a SINGLE key.
-	pins := map[string]struct{ bug, issue string }{
-		"notin_str_i64": {pgBugWadjet + ` a CORRELATED NOT IN is lowered to a plain anti join, so it ` +
-			`answers its NOT EXISTS twin instead of NOT IN's three-valued rule (#507's remainder)`, "#578"},
-		"notin_null_build_key": {pgBugWadjet + ` the same correlated NOT IN lowering: the two-valued ` +
-			`question, where PostgreSQL's is three-valued`, "#578"},
-		"notin_null_probe_key": {pgBugWadjet + ` the same lowering, on the half of the rule that needs ` +
-			`only the PROBE row's own NULL key and no per-group state`, "#578"},
-		"exists_derived_inner": {pgBugWadjet + ` a semi/anti join whose BUILD SIDE is a derived table ` +
-			`matches nothing — with one key, and with no correlation at all`, "#577"},
-		"notexists_derived_inner": {pgBugWadjet + ` the anti twin of the same defect: the whole probe ` +
-			`side survives`, "#577"},
-		"in_derived_inner": {pgBugWadjet + ` the IN spelling of the same defect`, "#577"},
-	}
-	out := make([]pgCase, 0, 48)
+	// The pins come from the corpus itself (multikey.Case.KnownBug/Issue), not
+	// from a second list here. Two arms already consume those fields, and a
+	// duplicate map is a pin that can go stale in one place and not the other
+	// — which it promptly did: the distinct-name arm's #577/#578 entries were
+	// pinned in the corpus and unpinned here, and this arm failed on them.
+	out := make([]pgCase, 0, 80)
 	for _, c := range multikey.Corpus() {
 		pc := pgCase{name: "MultiKey_" + c.Name, sql: c.SQL}
-		if p, ok := pins[c.Name]; ok {
-			pc.knownBug, pc.issue = p.bug, p.issue
+		if c.KnownBug != "" {
+			pc.knownBug, pc.issue = pgBugWadjet+" "+c.KnownBug, c.Issue
 		}
 		out = append(out, pc)
 	}
