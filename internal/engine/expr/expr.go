@@ -1994,10 +1994,15 @@ type FuncCall struct {
 // functions must render it through batch.FormatDate first — otherwise
 // SUBSTR(date_col, 1, 4) substrings the DIGITS of the day number
 // (issue #273: SF100's date32 columns grouped Q07/Q08/Q09 day-granular;
-// string-date test data never exercised the path). Keyed lowercase, the
-// registry's convention. Timestamps are excluded deliberately: they have
-// no canonical string form today (GetValue emits raw epoch-ms), and these
-// functions must stay consistent with result-output rendering.
+// string-date test data never exercised the path). A TypeIPv4/TypeMAC
+// ColRef argument has the identical shape — a raw encoded int64, not the
+// dotted-quad/colon-hex address text CAST and every other function-argument
+// site render — so FuncCall.Eval also runs formatNetworkArgs for every entry
+// here (#500: `length(ipv4_col)` answered the DIGIT COUNT of the address's
+// raw number). Keyed lowercase, the registry's convention. Timestamps are
+// excluded deliberately: they have no canonical string form today (GetValue
+// emits raw epoch-ms), and these functions must stay consistent with
+// result-output rendering.
 var stringInputFuncs = map[string]bool{
 	"upper": true, "lower": true, "concat": true, "length": true,
 	"len": true, "substr": true, "substring": true, "trim": true,
@@ -2108,13 +2113,25 @@ var networkTextFuncs = map[string]bool{
 
 // formatNetworkArgs rewrites boxed TypeIPv4/TypeMAC ColRef argument values
 // to their canonical text form (dotted-quad / colon-hex) for
-// networkTextFuncs. Reads through the column directly — like
-// resolveTemporalArgs's columnInstant, and unlike formatTemporalArgs above —
-// because formatIPv4/formatMAC are batch-package-internal; Vector.GetValue
-// is the exported boundary that already renders them correctly (it is what
-// a bare `SELECT ip_col` reads through, via exec.ColumnRef). Only direct
-// column references are covered, matching formatTemporalArgs: a nested
-// expression's output type isn't known here.
+// networkTextFuncs AND stringInputFuncs. Reads through the column directly —
+// like resolveTemporalArgs's columnInstant, and unlike formatTemporalArgs
+// above — because formatIPv4/formatMAC are batch-package-internal;
+// Vector.GetValue is the exported boundary that already renders them
+// correctly (it is what a bare `SELECT ip_col` reads through, via
+// exec.ColumnRef). Only direct column references are covered, matching
+// formatTemporalArgs: a nested expression's output type isn't known here.
+//
+// stringInputFuncs (length/concat/upper/starts_with/...) went unfixed by
+// #484, which only taught networkTextFuncs (ip_to_string, cidr_contains, ...)
+// this rewrite: a SEPARATE registry, so `length(ipv4_col)` kept reading the
+// raw encoded int64 and answering the DIGIT COUNT of the address's number
+// instead of its text (#500). TypeIPv6/TypeCIDR/TypeUUID need no entry here:
+// ColRef.Eval already falls through to Vector.GetValue's default case for
+// those three (see the type switch there), which is the correct rendering
+// for a function argument same as it is for CAST — only TypeIPv4/TypeMAC
+// take the raw-int64 fast path that needs unwinding. TypePort/TypeProtocol
+// need none either: their canonical text IS their raw number, so the box
+// ColRef.Eval already returns is already the right string.
 func (e *FuncCall) formatNetworkArgs(b *batch.RecordBatch, row int, args []any) {
 	for i, a := range e.Args {
 		cr, ok := a.(*ColRef)
@@ -2356,6 +2373,13 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	}
 	if e.wantsText {
 		e.formatTemporalArgs(args)
+		// stringInputFuncs (length/concat/upper/starts_with/... — #500) has
+		// the identical gap networkTextFuncs already closed for a different
+		// function family: a TypeIPv4/TypeMAC ColRef argument boxes as its
+		// raw encoded int64, and formatNetworkArgs is the one rewrite that
+		// turns it back into address text, so it runs for both families
+		// rather than being duplicated.
+		e.formatNetworkArgs(b, row, args)
 	}
 	if e.wantsNetworkText {
 		e.formatNetworkArgs(b, row, args)
@@ -2462,6 +2486,12 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 			// as a byte array at all: `SELECT UPPER(int_col)` indexed a nil
 			// offsets array and killed the process.
 			//
+			// TypeIPv4/TypeMAC get the identical guard for the identical
+			// reason (#500): both box as a raw encoded int64 with no bytes
+			// arena at all, and formatNetworkArgs — the rewrite that turns
+			// that back into address text — only runs on the per-row Eval
+			// path, never here.
+			//
 			// Every argument the kernel reads AS TEXT gets that check, not
 			// just position 0. Position 0 alone was the premise "the one
 			// argument every function in stringInputFuncs reads as text",
@@ -2470,7 +2500,7 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 			// contains two. `CONCAT(text_col, int_col)` therefore handed
 			// vecConcat a BIGINT vector with a zero-length Offsets slice and
 			// took the whole server down on ordinary single-table SQL (#509).
-			if e.vecTextFn && (a.typ == batch.TypeDate ||
+			if e.vecTextFn && (a.typ == batch.TypeDate || a.typ == batch.TypeIPv4 || a.typ == batch.TypeMAC ||
 				(!e.vecTypedArgs[i] && !vecTextReadable(b.Columns[a.idx], n))) {
 				e.evalVecPerRow(b, out, n)
 				return
