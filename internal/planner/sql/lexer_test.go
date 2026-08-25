@@ -85,6 +85,52 @@ func TestLexStringEscapedQuote(t *testing.T) {
 	}
 }
 
+// TestLexStringLiteralKeepsItsBytes gates #570's carrier. lexString used to
+// copy the body rune by rune, and utf8.DecodeRuneInString answers
+// (RuneError, 1) for a byte that starts no valid sequence — so every such
+// byte came back as the three-byte replacement character U+FFFD and the
+// literal held different bytes than the statement did.
+//
+// It matters beyond the corruption itself: pgwire's Bind has no
+// bound-parameter path below the parser, so it renders each parameter as a
+// LITERAL. A bytea parameter of 0xff 0xfe 0x00 0x41 therefore reached the
+// engine as three replacement characters and `WHERE b = $1` matched
+// nothing.
+func TestLexStringLiteralKeepsItsBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"invalid utf8 lead bytes", string([]byte{0xff, 0xfe, 0x00, 0x41})},
+		{"lone continuation byte", string([]byte{0x80})},
+		{"truncated multi-byte sequence", string([]byte{0xe2, 0x82})},
+		{"embedded NUL", string([]byte{'a', 0x00, 'b'})},
+		{"every byte value", func() string {
+			b := make([]byte, 0, 255)
+			for i := 0; i < 256; i++ {
+				if byte(i) == '\'' {
+					continue // doubled by the writer, covered above
+				}
+				b = append(b, byte(i))
+			}
+			return string(b)
+		}()},
+		// A valid multi-byte rune must still round-trip as itself.
+		{"valid multi-byte runes", "héllo — 世界"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tokens := collectTokens("'" + tc.body + "'")
+			if tokens[0].typ != TokenString {
+				t.Fatalf("token type %d, want TokenString (%v)", tokens[0].typ, tokens[0].val)
+			}
+			if tokens[0].val != tc.body {
+				t.Errorf("literal came back as % x, want % x", tokens[0].val, tc.body)
+			}
+		})
+	}
+}
+
 func TestLexUnterminatedString(t *testing.T) {
 	tokens := collectTokens("'unterminated")
 	if tokens[0].typ != TokenError {

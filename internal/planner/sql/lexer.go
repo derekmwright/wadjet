@@ -717,6 +717,22 @@ func lexStart(l *lexer) stateFn {
 
 // lexString scans a single-quoted string literal.
 // The opening quote has already been consumed by lexStart.
+//
+// The body is copied BYTE for byte, not rune by rune. next() decodes UTF-8,
+// and utf8.DecodeRuneInString answers (RuneError, 1) for a byte that starts
+// no valid sequence — so sb.WriteRune(r) wrote the three-byte replacement
+// character U+FFFD in its place and the literal came out holding different
+// bytes than the client sent. That is silent corruption for any literal at
+// all, and it made the one carrier the extended protocol has for a bytea
+// parameter unusable: pgwire's Bind renders each parameter as a literal
+// (there is no bound-parameter path below the parser), so `WHERE b = $1`
+// bound with 0xff 0xfe 0x00 0x41 compared the column against three
+// replacement characters and matched nothing (#570). A NUL was never the
+// problem — eof is -1 here, so a zero byte is an ordinary one.
+//
+// Slicing the input keeps every other property: l.width is the width next()
+// just consumed, so l.input[l.pos-l.width : l.pos] is exactly those bytes,
+// and a valid multi-byte rune round-trips as itself.
 func lexString(l *lexer) stateFn {
 	var sb strings.Builder
 
@@ -736,7 +752,7 @@ func lexString(l *lexer) stateFn {
 			l.emitVal(TokenString, sb.String())
 			return nil
 		default:
-			sb.WriteRune(r)
+			sb.WriteString(l.input[l.pos-l.width : l.pos])
 		}
 	}
 }
