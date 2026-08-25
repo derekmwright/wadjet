@@ -1795,6 +1795,32 @@ func postgresSemanticsCases() []pgCase {
 	// the qualifier. The derived table's own alias used to be written OVER the
 	// inner ones, after which nothing could tell the arms apart: PostgreSQL 17
 	// answers 5 groups here and wadjet answered 25, on both arms.
+	out = append(out,
+		pgCase{name: "DerivedSelfJoinGroupByQualifiedAlias", ordered: true,
+			sql: `SELECT u.b, COUNT(*) AS c FROM
+				(SELECT n1.n_name AS a, n2.n_name AS b FROM nation n1
+					JOIN nation n2 ON n1.n_regionkey = n2.n_nationkey) u
+				GROUP BY u.b ORDER BY u.b`},
+		pgCase{name: "DerivedSelfJoinGroupByBareAlias", ordered: true,
+			sql: `SELECT b, COUNT(*) AS c FROM
+				(SELECT n1.n_name AS a, n2.n_name AS b FROM nation n1
+					JOIN nation n2 ON n1.n_regionkey = n2.n_nationkey) u
+				GROUP BY b ORDER BY b`},
+		// The other arm's alias, whose answer differs — a fix that bound both
+		// to the same side would pass one of these and fail the other.
+		pgCase{name: "DerivedSelfJoinGroupByOtherArm", ordered: true,
+			sql: `SELECT u.a, COUNT(*) AS c FROM
+				(SELECT n1.n_name AS a, n2.n_name AS b FROM nation n1
+					JOIN nation n2 ON n1.n_regionkey = n2.n_nationkey) u
+				GROUP BY u.a ORDER BY u.a`},
+		// The projection itself, without an aggregate on top: the two columns
+		// came back identical.
+		pgCase{name: "DerivedSelfJoinProjectsBothArms", ordered: true,
+			sql: `SELECT a, b FROM
+				(SELECT n1.n_name AS a, n2.n_name AS b FROM nation n1
+					JOIN nation n2 ON n1.n_regionkey = n2.n_nationkey) u
+				ORDER BY a, b`},
+	)
 
 	// --- #490: window, UNION and three-way derived-alias consumers ----------
 	//

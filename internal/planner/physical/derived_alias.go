@@ -41,9 +41,15 @@ func derivedScopeBareName(name string, subtree *logical.Node) string {
 }
 
 // subtreeNamesRelation reports whether any scan in the subtree answers to
-// name — its alias when it has one, its table name otherwise. This is the
-// same alias→scan association subtreeNaming.aliasCols builds; the walk is
-// kept separate because this one needs no column sets and runs per key.
+// name — its alias when it has one, its table name otherwise, or a DERIVED
+// TABLE whose scope it sits inside. This is the same alias→scan association
+// subtreeNaming.aliasCols builds; the walk is kept separate because this one
+// needs no column sets and runs per key.
+//
+// The derived aliases are consulted separately from TableAlias because a scan
+// inside a derived table can have both: `(SELECT … FROM nation n1 JOIN nation
+// n2 …) u` leaves each scan named n1 or n2 — which is what tells the join's
+// two sides apart (#489) — while both sit in u's scope.
 func subtreeNamesRelation(n *logical.Node, name string) bool {
 	if n == nil || name == "" {
 		return false
@@ -56,6 +62,11 @@ func subtreeNamesRelation(n *logical.Node, name string) bool {
 		if strings.EqualFold(alias, name) {
 			return true
 		}
+		for _, d := range n.DerivedAliases {
+			if strings.EqualFold(d, name) {
+				return true
+			}
+		}
 	}
 	for _, c := range n.Children {
 		if subtreeNamesRelation(c, name) {
@@ -63,6 +74,21 @@ func subtreeNamesRelation(n *logical.Node, name string) bool {
 		}
 	}
 	return false
+}
+
+// projSourceName is the spelling of the column a PLAIN rename reads, keeping
+// the table qualifier when the projection has one.
+//
+// Projection.Column is the bare name, which is enough everywhere one relation
+// in scope carries it and ambiguous exactly where two do: over a self-join
+// both arms answer to `n_name`, and only `n2.n_name` names one of them. Expr
+// is the reference as WRITTEN, so it carries the qualifier when the query did;
+// where it did not, the two agree and this is Column.
+func projSourceName(proj *logical.Projection) string {
+	if proj.Expr != "" {
+		return proj.Expr
+	}
+	return proj.Column
 }
 
 // projectionForName finds the SELECT-list item of a Project that a consumer's

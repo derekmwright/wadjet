@@ -97,8 +97,24 @@ type Node struct {
 	Children []*Node
 
 	// Scan
-	TableName       string
-	TableAlias      string
+	TableName  string
+	TableAlias string
+	// DerivedAliases are the DERIVED TABLE aliases whose scope this scan sits
+	// inside, outermost last — `x` for the supplier scan in `(SELECT
+	// s_suppkey AS k FROM supplier s1) x`. They are recorded ALONGSIDE
+	// TableAlias rather than in it because the two answer different
+	// questions: TableAlias is which relation the scan IS, and the derived
+	// alias is which derived table's scope it is IN.
+	//
+	// Collapsing them cost a wrong answer. setSubtreeAlias used to overwrite
+	// TableAlias, so `(SELECT n1.n_name AS a, n2.n_name AS b FROM nation n1
+	// JOIN nation n2 ON …) u` planned as two scans BOTH aliased `u`, the join
+	// could no longer tell its two sides apart by name, and `a` and `b` came
+	// back as the same column — 25 groups where PostgreSQL 17 answers 5
+	// (#489). The scope question still has to be answerable, because that is
+	// what lets `u.a` drop its qualifier inside this subtree and nowhere else
+	// (physical.derivedScopeBareName), so it is recorded rather than dropped.
+	DerivedAliases  []string
 	ScanColumns     []string                   // column names available from this scan (populated by physical planner)
 	RequiredColumns []string                   // columns actually needed from this scan (set by optimizer column pruning)
 	PartitionFilter map[string]string          // extracted partition key filters (year, month, day, hour)

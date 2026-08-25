@@ -896,11 +896,26 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 	return node, nil
 }
 
-// setSubtreeAlias sets the table alias on all Scan nodes in a subtree,
-// used to alias derived table output so columns can be referenced by the alias.
+// setSubtreeAlias records a DERIVED TABLE's alias on every Scan in its
+// subtree, so that a reference qualified by it (`u.a`) can be recognized as
+// naming this scope — see Node.DerivedAliases and physical.derivedScopeBareName.
+//
+// A scan that answers to a name the QUERY wrote keeps it. The alias inside the
+// derived table is what tells one arm of a self-join from the other, and
+// overwriting it made `(SELECT n1.n_name AS a, n2.n_name AS b FROM nation n1
+// JOIN nation n2 ON …) u` plan as two scans both called `u`, after which
+// nothing downstream could say which `n_name` was which — 25 groups where
+// PostgreSQL 17 answers 5 (#489).
+//
+// A scan answering only to its own TABLE NAME still takes the derived alias,
+// which keeps every other plan spelled exactly as before: `(SELECT … FROM
+// nation) u` scans `nation AS u` today and after this change.
 func setSubtreeAlias(n *Node, alias string) {
 	if n.Type == NodeScan {
-		n.TableAlias = alias
+		if n.TableAlias == "" || strings.EqualFold(n.TableAlias, n.TableName) {
+			n.TableAlias = alias
+		}
+		n.DerivedAliases = append(n.DerivedAliases, alias)
 	}
 	for _, c := range n.Children {
 		setSubtreeAlias(c, alias)

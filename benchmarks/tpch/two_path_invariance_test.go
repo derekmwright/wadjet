@@ -4231,6 +4231,57 @@ func twoPathCorpus() []twoPathQuery {
 	)
 
 	out = append(out,
+		// #489. A self-join INSIDE a derived table: both arms answer to the
+		// same bare column name, and the derived alias used to be written
+		// OVER the inner ones. PostgreSQL 17 answers 5 groups for the first
+		// and 25 for the second; this engine answered 25 for both.
+		twoPathQuery{name: "DerivedSelfJoinGroupByQualifiedAlias", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT u.b, COUNT(*) AS c FROM
+				(SELECT n1.n_name AS a, n2.n_name AS b FROM nation n1
+					JOIN nation n2 ON n1.n_regionkey = n2.n_nationkey) u
+				GROUP BY u.b ORDER BY u.b`,
+			wantRows: 5, wantCols: []string{"b", "c"},
+			assertA: assertDerivedSelfJoinGroups("b")},
+		twoPathQuery{name: "DerivedSelfJoinGroupByBareAlias", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT b, COUNT(*) AS c FROM
+				(SELECT n1.n_name AS a, n2.n_name AS b FROM nation n1
+					JOIN nation n2 ON n1.n_regionkey = n2.n_nationkey) u
+				GROUP BY b ORDER BY b`,
+			wantRows: 5, wantCols: []string{"b", "c"},
+			assertA: assertDerivedSelfJoinGroups("b")},
+		twoPathQuery{name: "DerivedSelfJoinGroupByOtherArm", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT u.a, COUNT(*) AS c FROM
+				(SELECT n1.n_name AS a, n2.n_name AS b FROM nation n1
+					JOIN nation n2 ON n1.n_regionkey = n2.n_nationkey) u
+				GROUP BY u.a ORDER BY u.a`,
+			wantRows: 25, wantCols: []string{"a", "c"},
+			assertA: assertDerivedSelfJoinGroups("a")},
+		twoPathQuery{name: "DerivedSelfJoinProjectsBothArms", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT a, b FROM
+				(SELECT n1.n_name AS a, n2.n_name AS b FROM nation n1
+					JOIN nation n2 ON n1.n_regionkey = n2.n_nationkey) u
+				ORDER BY a, b`,
+			wantRows: 25, wantCols: []string{"a", "b"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				// b is the name of the nation whose KEY equals a's region, so
+				// the two columns are equal only where that coincides. Before
+				// the fix they were equal on every row: the projection read
+				// one arm twice.
+				same := 0
+				for _, r := range rows {
+					if cellText(r, "a") == cellText(r, "b") {
+						same++
+					}
+				}
+				if same == len(rows) {
+					tb.Errorf("every row has a = b — both select items resolved to the same "+
+						"arm of the self-join (%d rows)", len(rows))
+				}
+			}},
+	)
+
+	out = append(out,
 		// #513. The output column NAME of an unaliased scalar function, which
 		// wantCols is the whole of: PostgreSQL labels it with the function's
 		// name, and this engine labelled it from the expression text with
@@ -4771,6 +4822,51 @@ func supplierAcctbalByKey(tb testing.TB) map[float64]float64 {
 		out[toFloat(r["s_suppkey"])] = toFloat(r["s_acctbal"])
 	}
 	return out
+}
+
+// assertDerivedSelfJoinGroups is the absolute truth for #489: over
+//
+//	(SELECT n1.n_name AS a, n2.n_name AS b FROM nation n1
+//	   JOIN nation n2 ON n1.n_regionkey = n2.n_nationkey) u
+//
+// each nation joins the ONE nation whose key equals its region, so grouping by
+// `a` gives one group per nation (25) and grouping by `b` gives one per region
+// key (5) with the region's population as its count. The two answers differ,
+// which is what makes this an absolute assertion rather than mere agreement:
+// binding both aliases to the same arm produced 25 either way.
+func assertDerivedSelfJoinGroups(col string) func(testing.TB, []map[string]any) {
+	return func(tb testing.TB, rows []map[string]any) {
+		tb.Helper()
+		byKey := map[float64]string{}
+		region := map[string]float64{}
+		for _, r := range sf001Table(tb, "nation") {
+			byKey[toFloat(r["n_nationkey"])] = fmt.Sprint(r["n_name"])
+			region[fmt.Sprint(r["n_name"])] = toFloat(r["n_regionkey"])
+		}
+		want := map[string]float64{}
+		for name, rk := range region {
+			partner, ok := byKey[rk]
+			if !ok {
+				continue // no nation whose key is this region: the row drops
+			}
+			switch col {
+			case "a":
+				want[name]++
+			default:
+				want[partner]++
+			}
+		}
+		if len(rows) != len(want) {
+			tb.Fatalf("got %d groups, want %d — a group key bound to the wrong arm of the self-join",
+				len(rows), len(want))
+		}
+		for _, r := range rows {
+			k := cellText(r, col)
+			if got := cellNum(r, "c"); got != want[k] {
+				tb.Errorf("group %s=%q: c = %v, want %v", col, k, got, want[k])
+			}
+		}
+	}
 }
 
 // assertDerivedAliasJoinKeys is the absolute truth for #467's silent repro:

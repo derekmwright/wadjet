@@ -4448,8 +4448,19 @@ func resolveAggInputName(name string, child *logical.Node) (resolved string, exp
 			bare := derivedScopeBareName(resolved, n)
 			if proj := projectionForName(n.Projections, resolved, bare); proj != nil {
 				switch {
-				case proj.Column != "" && !strings.EqualFold(proj.Column, resolved):
-					resolved, alias = proj.Column, true
+				case proj.Column != "" && !strings.EqualFold(projSourceName(proj), resolved):
+					// The QUALIFIER-PRESERVING spelling, for the reason
+					// resolveSortKeyColumn and annotateDerivedAliasSortKey
+					// both prefer it: a self-joined table gives both arms the
+					// same bare column name, so `n2.n_name AS b` carries
+					// Column "n_name" — which names n1's column just as well
+					// as n2's, and the aggregate bound the wrong one. GROUP BY
+					// over that derived table answered 25 groups where
+					// PostgreSQL 17 answers 5 (#489). Only "n2.n_name" says
+					// which arm, and the worker's own lookup applies the
+					// qualified↔bare fallback where the stream spells it the
+					// other way.
+					resolved, alias = projSourceName(proj), true
 				case proj.Column == "" && !proj.IsAgg && proj.ASTExpr != nil:
 					var below *logical.Node
 					if len(n.Children) == 1 {
