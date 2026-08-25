@@ -55,6 +55,14 @@ import (
 // one producer, which is what makes keys equal-comparable across runs; we
 // sort & merge by it rather than by display values for that reason. It must
 // be injective, or equal bytes merge two different groups.
+//
+// The per-column VALUE is a separate thing from that key and cannot be
+// decoded out of it: the key deliberately folds what the comparator calls
+// equal (a NaN payload, a -0.0) and re-keys a CIDR into inet order, none of
+// which is reversible. Flat types carry their value in a tagged scalar; an
+// ARRAY, ROW, MAP or VECTOR carries a lossless encoded tree under
+// partialTagContainer (aggregate_container_key.go), which is what lets a
+// container group key survive the round trip at all (#566, #576).
 
 const partialSpillMagic = "WAGS\x01"
 
@@ -77,6 +85,12 @@ const (
 	partialTagFloat32   byte = 7
 	partialTagBytes     byte = 8
 	partialTagInt128    byte = 9
+	// partialTagContainer is this format's own — the raw-row spill has no
+	// counterpart, because it never had to carry an ARRAY, ROW, MAP or
+	// VECTOR group key back out. Its payload is
+	// appendContainerKeyValue's tagged tree
+	// (aggregate_container_key.go), length-prefixed like a string.
+	partialTagContainer byte = 10
 )
 
 // partialSpillSeq is a per-process counter for unique partial-spill filenames.
@@ -131,7 +145,7 @@ type partialKeyValue struct {
 	Tag   byte         // one of partialTag* (partialTagNull means null)
 	I64   int64        // bool / int32 / int64 / timestamp / ipv4 / mac / duration / port / protocol / date
 	F64   float64      // float32 / float64
-	Bytes []byte       // string / bytes / ipv6 / cidr / uuid (header may alias backing buffer)
+	Bytes []byte       // string / bytes / ipv6 / cidr / uuid (header may alias backing buffer); a container's encoded tree under partialTagContainer
 	Dec   batch.Int128 // decimal
 }
 
@@ -522,8 +536,8 @@ func writeKeyValue(w *bufio.Writer, scratch []byte, kv *partialKeyValue, _ parqu
 		}
 		_, err := w.Write(kv.Bytes)
 		return err
-	case partialTagBytes:
-		if err := w.WriteByte(partialTagBytes); err != nil {
+	case partialTagBytes, partialTagContainer:
+		if err := w.WriteByte(kv.Tag); err != nil {
 			return err
 		}
 		binary.LittleEndian.PutUint32(scratch[:4], uint32(len(kv.Bytes)))
@@ -595,6 +609,25 @@ func setPartialKeyFromAny(dst *partialKeyValue, v any) {
 		dst.Tag = partialTagInt128
 		dst.Dec = tv
 	default:
+		if isBoxedContainer(v) {
+			// ARRAY / ROW / MAP / VECTOR. The display form the default arm
+			// below produces cannot be written back into a container vector
+			// at all — SetValue refuses it (#361, #566) — and could not
+			// rebuild the value if it were accepted, so the box is encoded
+			// losslessly instead (aggregate_container_key.go).
+			dst.Tag = partialTagContainer
+			// A FRESH buffer, never dst's own: kWayMerger.Next copies a
+			// partialKeyValue by STRUCT, so the Bytes header it keeps aliases
+			// whatever this wrote, and it then advances the source
+			// immediately. Re-encoding in place therefore rewrites the group
+			// the merger is still holding — one group came back carrying its
+			// successor's value and its own was never emitted. Every other
+			// arm here allocates or aliases stable storage for the same
+			// reason, and partialSpillReader.Next zeroes its slot before each
+			// read to force the same.
+			dst.Bytes = appendContainerKeyValue(nil, v, 0)
+			return
+		}
 		dst.Tag = partialTagString
 		dst.Bytes = []byte(fmt.Sprintf("%v", tv))
 	}
@@ -644,7 +677,7 @@ func readKeyValueInto(r *bufio.Reader, scratch []byte, dst *partialKeyValue) err
 		}
 		dst.F64 = float64(math.Float32frombits(binary.LittleEndian.Uint32(scratch[:4])))
 		return nil
-	case partialTagString, partialTagBytes:
+	case partialTagString, partialTagBytes, partialTagContainer:
 		if _, err := io.ReadFull(r, scratch[:4]); err != nil {
 			return err
 		}
@@ -1298,6 +1331,14 @@ func mapBatchTypeToParquet(t batch.TypeID) parquet.TypeID {
 		return parquet.TypeDate
 	case batch.TypeDecimal:
 		return parquet.TypeDecimal
+	case batch.TypeArray:
+		return parquet.TypeArray
+	case batch.TypeMap:
+		return parquet.TypeMap
+	case batch.TypeRow:
+		return parquet.TypeRow
+	case batch.TypeVector:
+		return parquet.TypeVector
 	default:
 		return parquet.TypeString
 	}
@@ -1857,7 +1898,9 @@ func (h *HashAggregate) nextFromPartialMerger() (*batch.RecordBatch, error) {
 // batch.TypeID directly to the typed Vector slot — no `any` round-trip.
 func (h *HashAggregate) writeMergedRow(out *batch.RecordBatch, i int, g *partialGroup, nGroupCols int) error {
 	for k := 0; k < nGroupCols && k < len(g.KeyVals); k++ {
-		writePartialKeyToColumn(out.Columns[k], i, &g.KeyVals[k])
+		if err := writePartialKeyToColumn(out.Columns[k], i, &g.KeyVals[k]); err != nil {
+			return err
+		}
 	}
 	for j, agg := range h.Aggs {
 		colIdx := nGroupCols + j
@@ -2029,15 +2072,36 @@ func writeAccFallback(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggF
 // the dispatch; the kv tag is used only to detect the null sentinel (and
 // for variable-width types where len(kv.Bytes) is the payload). No `any`
 // round-trip and no type assertion.
-func writePartialKeyToColumn(dst *batch.Vector, i int, kv *partialKeyValue) {
+//
+// The error is the container decode's: a run file whose encoded tree does not
+// parse is corruption, and the group's value is then unknowable. It is
+// returned rather than swallowed because writing SOMETHING there — a NULL, an
+// empty container — is the silent-wrong-answer shape #361 exists to stop.
+func writePartialKeyToColumn(dst *batch.Vector, i int, kv *partialKeyValue) error {
 	if kv.Tag == partialTagNull {
 		dst.Nulls.SetNull(i)
 		switch dst.Type {
 		case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 			dst.BytesData.Set(i, nil)
 		}
-		return
+		return nil
 	}
+
+	// An ARRAY, ROW, MAP or VECTOR key: the one shape whose value is a tree
+	// rather than a scalar. It travels losslessly
+	// (appendContainerKeyValue) and goes back in through SetValue — the same
+	// boxed round trip the un-spilled emit path performs on its own
+	// keyValues, which is what makes the two paths agree value for value
+	// (#566, #576).
+	if kv.Tag == partialTagContainer {
+		v, err := decodeContainerKeyValue(kv.Bytes)
+		if err != nil {
+			return fmt.Errorf("decoding a %s group key from its partial-state run: %w", dst.Type, err)
+		}
+		dst.SetValue(i, v)
+		return nil
+	}
+
 	dst.Nulls.SetValid(i)
 
 	// A partialTagString kv carries the key's DISPLAY form. The consume-time
@@ -2064,7 +2128,7 @@ func writePartialKeyToColumn(dst *batch.Vector, i int, kv *partialKeyValue) {
 		default:
 			writePartialKeyFallback(dst, i, kv)
 		}
-		return
+		return nil
 	}
 
 	switch dst.Type {
@@ -2087,6 +2151,7 @@ func writePartialKeyToColumn(dst *batch.Vector, i int, kv *partialKeyValue) {
 		// here. SF100 group keys are not decimals; the slow path is fine.
 		writePartialKeyFallback(dst, i, kv)
 	}
+	return nil
 }
 
 // writeIntKeyToColumn writes a group-by column value held in int64 SoA

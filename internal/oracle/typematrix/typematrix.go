@@ -715,6 +715,27 @@ func Corpus() []Query {
 			add("minmax_group_"+n,
 				fmt.Sprintf(`SELECT g, MIN(%s) AS lo, MAX(%s) AS hi FROM %s GROUP BY g ORDER BY g`, n, n, tbl),
 				oracle.CmpOrdered, n)
+			// The GROUP-BY POSITION. Every template above reads a container
+			// as a VALUE; none puts one where the engine has to capture the
+			// key, carry it across a partial-aggregate merge and materialize
+			// it back into an output column. That absence is what let #566
+			// and #576 exist: the drained partial captured a container key as
+			// its rendered TEXT, and a container vector refuses text (#361's
+			// guard), so the query FAILED the moment a spill — or a
+			// morsel-parallel clone handing its partial to the primary as run
+			// files, which needs no memory pressure at all — routed the group
+			// through the run format. The flat arm below has carried these
+			// three templates all along; the containers were skipped by the
+			// `continue`, not by a decision.
+			add("groupby_"+n,
+				fmt.Sprintf(`SELECT %s AS k, COUNT(*) AS n FROM %s GROUP BY %s ORDER BY k, n`, n, tbl, n),
+				oracle.CmpOrdered, n)
+			add("countdistinct_"+n,
+				fmt.Sprintf(`SELECT g, COUNT(DISTINCT %s) AS n FROM %s GROUP BY g ORDER BY g`, n, tbl),
+				oracle.CmpOrdered, n)
+			add("distinct_"+n,
+				fmt.Sprintf(`SELECT DISTINCT %s AS v FROM %s ORDER BY v`, n, tbl),
+				oracle.CmpOrdered, n)
 			continue
 		}
 		// TEXT FUNCTIONS over a typed column. A vec string kernel reads its
