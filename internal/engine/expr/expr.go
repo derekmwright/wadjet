@@ -5704,6 +5704,12 @@ func (e *ExistsSubquery) resolveSlow() {
 type Cast struct {
 	Operand  Expr
 	DestType string // "int", "float", "string", "date", "timestamp"
+
+	// boolSrc caches the OPERAND's declared type for a cast to BOOLEAN, which
+	// selects the conversion rule (cast_bool.go). Zero means "not resolved
+	// yet"; nothing else in this node needs it, and no other destination
+	// reads it.
+	boolSrc atomic.Int32
 }
 
 func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
@@ -5749,6 +5755,11 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		return ToFloat64(v)
 	case "decimal", "numeric":
 		return ToFloat64(v)
+	case "bool", "boolean":
+		// The conversion the operand's DECLARATION selects, not the one its
+		// Go box suggests — see cast_bool.go for what each source type
+		// answers and why the box cannot decide it.
+		return e.castToBool(b, v)
 	case "char", "varchar", "text", "string":
 		// A BYTES operand boxes as a raw []byte — both here and from
 		// GetValue, since ColRef.Eval has no divergent fast path for

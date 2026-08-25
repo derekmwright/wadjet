@@ -667,7 +667,30 @@ func rewriteExpr(node plansql.Node, cols []plansql.SelectColumn) plansql.Node {
 	}
 	switch n := node.(type) {
 	case *plansql.FuncCallNode:
-		// This is an aggregate call — find the matching output column name
+		// Only an AGGREGATE stands for a column the aggregate produced. This
+		// arm used to rewrite EVERY function call that way, so a HAVING over
+		// an ordinary scalar function of a grouped column — `HAVING
+		// COALESCE(f, FALSE)`, `HAVING starts_with(name, 'A')` — became a
+		// reference to a column literally named "coalesce(f, false)", which
+		// no batch has. As a bare predicate that filter silently admitted NO
+		// GROUP; with a comparison around it the query failed with `filter
+		// column "coalesce(f, false)" does not exist in the input schema`
+		// (#592's sweep of the bare-boolean class).
+		//
+		// The bug was only reachable here because this whole function is the
+		// fallback for a HAVING that names no aggregate at all — one that
+		// does takes ReplaceAllAggregates above, which has always asked
+		// IsAggregate. A scalar call's ARGUMENTS still get walked: an
+		// aggregate can hide inside one, `HAVING ABS(MAX(c)) > 1`.
+		if !plansql.IsAggregate(n.Name) {
+			args := make([]plansql.Node, len(n.Args))
+			for i, a := range n.Args {
+				args[i] = rewriteExpr(a, cols)
+			}
+			out := *n
+			out.Args = args
+			return &out
+		}
 		funcStr := n.String()
 		colName := funcStr // default: use the expression string as column name
 		for _, col := range cols {
@@ -704,6 +727,11 @@ func rewriteExpr(node plansql.Node, cols []plansql.SelectColumn) plansql.Node {
 	case *plansql.NotNode:
 		return &plansql.NotNode{
 			Inner: rewriteExpr(n.Inner, cols),
+		}
+	case *plansql.CastNode:
+		return &plansql.CastNode{
+			Inner:    rewriteExpr(n.Inner, cols),
+			TypeName: n.TypeName,
 		}
 	default:
 		// Literals, ColRef, etc. — pass through unchanged

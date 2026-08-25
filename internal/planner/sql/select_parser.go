@@ -1202,7 +1202,15 @@ func (p *selectParser) parseComparison() (Node, error) {
 			}
 			return &CmpExpr{Left: left, Op: op, Right: right}, nil
 		default:
-			return nil, fmt.Errorf("expected NULL, TRUE, FALSE, or DISTINCT FROM after IS [NOT]")
+			// IS [NOT] UNKNOWN is IS [NOT] NULL over a boolean expression —
+			// PostgreSQL's own definition, and the third arm every TLP-WHERE
+			// query issues (#592). UNKNOWN is not a keyword token here, so it
+			// arrives as a plain identifier.
+			if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "unknown") {
+				p.advance()
+				return &IsExpr{Left: left, Not: not, Check: "null"}, nil
+			}
+			return nil, fmt.Errorf("expected NULL, TRUE, FALSE, UNKNOWN, or DISTINCT FROM after IS [NOT]")
 		}
 	}
 
