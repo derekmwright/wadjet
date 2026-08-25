@@ -17,9 +17,12 @@ import (
 // Two independent layers stop it now, and this asserts both. Ownership:
 // registerDataFiles registers through AddFiles, so warehouse files are
 // never marked engine-written and never enter pendingDrops at all —
-// asserted here as "nothing was even scheduled", which holds no matter
-// where the warehouse lives. And the live-manifest guard behind it, which
-// would catch the same paths at delete time.
+// asserted directly on catalog.Catalog.PendingDropCount, not merely
+// inferred from what a later flush does or does not delete (a flush that
+// deletes nothing is equally consistent with "layer 0 stopped it" and
+// "layer 0 missed it but layer 1 caught it at delete time"). And the
+// live-manifest guard behind it, which would catch the same paths at
+// delete time regardless.
 //
 // Reclaim is explicitly wired on, so the flush below is real work rather
 // than a no-op that would pass whatever the guards did.
@@ -49,6 +52,13 @@ func TestReviewRepro_IcebergRefreshDeletesLiveWarehouseFiles(t *testing.T) {
 	// A routine metadata refresh: drop + re-create + re-register the SAME files.
 	if _, err := ci.RefreshTable(ctx, "events", "warehouse/events/metadata/v1.metadata.json"); err != nil {
 		t.Fatal(err)
+	}
+
+	// Layer 0, pinned directly: the drop half of that refresh must not
+	// have scheduled anything at all, not merely "scheduled but then
+	// caught by the live-manifest guard below".
+	if n := cat.PendingDropCount(); n != 0 {
+		t.Errorf("drop+recreate scheduled %d entries for reclaim, want 0 — warehouse files must never be marked engine-written", n)
 	}
 
 	// The table is live and its manifest references all three files.

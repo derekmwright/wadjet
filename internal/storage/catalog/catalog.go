@@ -1218,6 +1218,19 @@ func (c *Catalog) EnableDropReclaim() {
 	c.dropReclaimWired = true
 }
 
+// PendingDropCount reports how many dropped-table entries are currently
+// queued in pendingDrops, awaiting FlushDroppedTableFiles. Exported so a
+// regression test outside this package (internal/iceberg's #494 repros)
+// can pin layer 0 — ownership marking — directly: zero here means nothing
+// was ever scheduled, which a test that only checks what a later flush
+// deletes cannot distinguish from "scheduled, then caught by a later
+// guard".
+func (c *Catalog) PendingDropCount() int {
+	c.dropMu.Lock()
+	defer c.dropMu.Unlock()
+	return len(c.pendingDrops)
+}
+
 // recordPendingDrop appends a dropped table's file snapshot to
 // pendingDrops, evicting the OLDEST entries first while the list would
 // otherwise exceed maxPendingDropPaths. Eviction leaks the evicted
