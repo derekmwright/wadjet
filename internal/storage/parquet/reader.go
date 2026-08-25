@@ -368,9 +368,17 @@ func readLeafColumn(fr *FileReader, rgIdx, colIdx int) (leafColumnData, error) {
 	leaf := leaves[colIdx]
 	// The whole Column, not just its TypeID: a leaf below a container needs
 	// its VECTOR dimension and its DECIMAL precision to decode, exactly as a
-	// top-level leaf does. nodeToColumn is the same recovery the file's own
-	// Schema is built from.
-	col := nodeToColumn(leaf)
+	// top-level leaf does.
+	//
+	// FileReader.LeafColumn, not nodeToColumn: the file's own DECLARED
+	// schema, which is what the top-level arm of this same read already uses
+	// (readCols comes from r.schema). Taking the bare parquet inference here
+	// instead meant an IPv6, a UUID or a BYTES leaf below a container — the
+	// types parquet has no annotation for — recovered as TypeString, and
+	// decodePresentValues handed sixteen intact bytes to the caller as a Go
+	// string. batch.Vector.SetValue read that as text, net.ParseIP refused
+	// it, and the value read back as "" (#589).
+	col := fr.LeafColumn(colIdx)
 	typeID := col.Type
 
 	lcd := leafColumnData{

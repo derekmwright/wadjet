@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sync"
 )
 
 // FileReader provides direct access to a Parquet file using our custom
@@ -30,6 +31,13 @@ type FileReader struct {
 	schemaRoot *SchemaNode   // schema tree
 	leaves     []*SchemaNode // leaf nodes indexed by column position
 	schema     Schema        // Wadjet-level schema (for compatibility)
+
+	// leafCols is schema's leaves indexed by leaf position — the DECLARED
+	// column for each leaf, built once by LeafColumn. Lazy because the
+	// pruning path opens thousands of metadata-only readers that never
+	// decode a page and never ask.
+	leafColsOnce sync.Once
+	leafCols     []Column
 
 	// cacheIdentity is an opaque, content-stable identity for the underlying
 	// object (e.g. "<bucket>/<key>#<size>"), set by callers that know it via
@@ -181,6 +189,25 @@ func (f *FileReader) SchemaRoot() *SchemaNode { return f.schemaRoot }
 
 // Leaves returns all leaf column schema nodes.
 func (f *FileReader) Leaves() []*SchemaNode { return f.leaves }
+
+// LeafColumn returns leaf i as the FILE'S OWN schema describes it — the
+// declared type restored from the footer blob, at whatever depth the leaf
+// sits (see leafDeclaredColumns). It is Schema()'s answer for a top-level
+// leaf and Schema()'s answer for a leaf below a ROW, ARRAY or MAP, which is
+// the whole point: a decoder that reached for nodeToColumn instead read an
+// IPv6 buried in a container back as a STRING and the sixteen bytes died in
+// the wrong Go box (#589).
+//
+// Returns the zero Column for an out-of-range index.
+func (f *FileReader) LeafColumn(i int) Column {
+	if i < 0 || i >= len(f.leaves) {
+		return Column{}
+	}
+	f.leafColsOnce.Do(func() {
+		f.leafCols = leafDeclaredColumns(f.schema, f.schemaRoot, f.leaves)
+	})
+	return f.leafCols[i]
+}
 
 // NumRows returns the total row count.
 func (f *FileReader) NumRows() int64 { return f.meta.NumRows }
@@ -792,11 +819,12 @@ func leafIsUTF8String(n *SchemaNode) bool {
 	return false
 }
 
-// overlayDeclaredSchema restores the declared TYPE IDENTITY of each leaf
-// column from the footer's declared-schema blob. Nothing else is taken: name,
-// nullability, precision, scale, dimension and nested structure all stay as
-// the parquet tree described them, because those the tree CAN express and the
-// tree is what the page decoders are driven by.
+// overlayDeclaredSchema restores the declared TYPE IDENTITY of every leaf in
+// the schema — top-level columns and the leaves inside ROW, ARRAY and MAP
+// alike — from the footer's declared-schema blob. Nothing else is taken:
+// name, nullability, precision, scale, dimension and nested structure all
+// stay as the parquet tree described them, because those the tree CAN express
+// and the tree is what the page decoders are driven by.
 //
 // A file written before this key existed, or by any other producer, has no
 // blob and keeps the inferred schema — the behaviour this replaces.
@@ -804,12 +832,13 @@ func leafIsUTF8String(n *SchemaNode) bool {
 // The blob is UNTRUSTED INPUT: it is bytes in a file, and a reader that lets
 // it choose how pages are interpreted has handed a file the power to make the
 // engine misread its own data. Five conditions must all hold before a single
-// column is touched, and any failure leaves that column — or the whole
-// schema — exactly as the tree described it:
+// leaf is touched, and any failure leaves that leaf — or that subtree, or the
+// whole schema — exactly as the tree described it:
 //
 //  1. the blob is under maxDeclaredSchemaBytes and decodes as JSON;
 //  2. it describes the same number of top-level columns, with the same names
-//     in the same order;
+//     in the same order (inside a container: the same structural shape, and
+//     ROW fields matched by exact name — see overlayDeclaredContainer);
 //  3. the leaf carries NO LogicalType and NO ConvertedType — the file itself
 //     said nothing about what the column means, which is the only situation
 //     the blob is here to fix — or it is annotated UTF8 text, the single
@@ -848,34 +877,188 @@ func overlayDeclaredSchema(inferred Schema, nodes []*SchemaNode, kv []KeyValue) 
 		}
 	}
 	for i := range inferred.Columns {
-		ic, dc, n := &inferred.Columns[i], &declared.Columns[i], nodes[i]
-		if n == nil || !n.IsLeaf() {
-			// Group node: LIST/MAP/STRUCT round trip through parquet's own
-			// annotations, and their element and field definitions carry
-			// nullability the blob does not re-derive.
-			continue
-		}
-		if ic.ElementType != nil || len(ic.Fields) > 0 ||
-			dc.ElementType != nil || len(dc.Fields) > 0 {
-			continue
-		}
-		if n.LogicalType != nil || n.ConvertedType != nil {
-			// The file annotated this leaf, so the file wins — with one
-			// exception: a UTF8 STRING leaf may carry back the name CIDR,
-			// whose storage and rendering are that same text.
-			if !(leafIsUTF8String(n) && declaredOverlayUTF8Types[dc.Type]) {
-				continue
-			}
-		} else if !declaredOverlayTypes[dc.Type] {
-			continue
-		}
-		if wadjetTypeToPhysical(dc.Type) != *n.Type {
-			continue
-		}
-		// Type identity ONLY. None of the eight has a precision, scale or
-		// dimension to carry, and copying those fields is how a blob would
-		// reach the decode and allocation paths.
-		ic.Type = dc.Type
+		overlayDeclaredColumn(&inferred.Columns[i], &declared.Columns[i], nodes[i])
 	}
 	return inferred
+}
+
+// overlayDeclaredColumn restores one column's declared identity: the leaf
+// rule when the tree says leaf, the container walk when it says group.
+//
+// The recursion is driven by the TREE, never by the blob: nodeToColumn has
+// already walked this same tree to this same depth to build the inferred
+// column, so a footer cannot reach deeper here than it already does there.
+func overlayDeclaredColumn(ic, dc *Column, n *SchemaNode) {
+	if ic == nil || dc == nil || n == nil {
+		return
+	}
+	if n.IsLeaf() {
+		overlayDeclaredLeaf(ic, dc, n)
+		return
+	}
+	overlayDeclaredContainer(ic, dc, n)
+}
+
+// overlayDeclaredContainer walks a ROW, ARRAY or MAP and overlays what is
+// underneath it.
+//
+// The container's own structure is NOT taken from the blob — parquet's LIST,
+// MAP and STRUCT annotations express it and the tree already carries it. What
+// parquet cannot express is the same thing one level down that it cannot
+// express at the top: an IPv6, a UUID or a BYTES leaf is an unannotated
+// BYTE_ARRAY wherever it sits, so the reader read one back as TypeString and
+// the row assembler boxed sixteen intact bytes as a Go string, which
+// Vector.SetValue then handed to net.ParseIP and dropped — the value read
+// back as "" (#589). The blob is the only place the declared type survives,
+// at every depth.
+//
+// Alignment is re-derived from the shape nodeToColumn itself read, so the
+// inferred column and the tree cannot drift apart here:
+//
+//   - ARRAY: one repeated child holding one element node;
+//   - MAP: one repeated child holding the key and the value, which the
+//     inferred column presents as the synthesized "entry" ROW's two fields —
+//     so the ROW arm aligns them against that same repeated group;
+//   - ROW: fields positionally aligned with the group's children (that is how
+//     nodeToColumn built them), each matched to a DECLARED field by exact
+//     name.
+//
+// Any disagreement — the blob calling a container something the tree does
+// not, a field the blob does not name, a field name it repeats — leaves that
+// subtree exactly as the tree described it.
+func overlayDeclaredContainer(ic, dc *Column, n *SchemaNode) {
+	if ic.Type != dc.Type {
+		return
+	}
+	icols, nodes := containerChildren(ic, n)
+	dcols, _ := containerChildren(dc, n)
+	if len(icols) == 0 || len(icols) != len(dcols) {
+		return
+	}
+	// The same rule condition 2 applies to top-level columns, one level
+	// down: same count, same names, same order, or the blob is describing a
+	// container this file does not have and the whole subtree keeps the
+	// tree's own answer.
+	for i := range icols {
+		if icols[i].Name != dcols[i].Name {
+			return
+		}
+	}
+	for i := range icols {
+		overlayDeclaredColumn(icols[i], dcols[i], nodes[i])
+	}
+}
+
+// containerChildren pairs a container Column's children with the tree nodes
+// nodeToColumn read them from, in that order. It returns nil when c and n do
+// not describe the same shape, which is the signal to leave the subtree
+// alone.
+//
+// This is the ONE place the Column-tree-to-node-tree alignment is written
+// down. nodeToColumn is what it has to agree with, so the shape tests here
+// are that function's own branch conditions read backwards.
+func containerChildren(c *Column, n *SchemaNode) ([]*Column, []*SchemaNode) {
+	switch c.Type {
+	case TypeArray:
+		if c.ElementType == nil {
+			return nil, nil
+		}
+		if len(n.Children) != 1 || n.Children[0] == nil || !n.Children[0].IsRepeated() {
+			return nil, nil
+		}
+		inner := n.Children[0].Children
+		if len(inner) != 1 {
+			return nil, nil
+		}
+		return []*Column{c.ElementType}, inner
+	case TypeMap:
+		// The "entry" ROW is synthetic — nodeToColumn invents it around the
+		// repeated key_value group's two children — so the group IS the node
+		// its two fields align against.
+		if c.ElementType == nil {
+			return nil, nil
+		}
+		if len(n.Children) != 1 || n.Children[0] == nil || !n.Children[0].IsRepeated() {
+			return nil, nil
+		}
+		return containerChildren(c.ElementType, n.Children[0])
+	case TypeRow:
+		if len(c.Fields) == 0 || len(c.Fields) != len(n.Children) {
+			return nil, nil
+		}
+		cols := make([]*Column, len(c.Fields))
+		for i := range c.Fields {
+			cols[i] = &c.Fields[i]
+		}
+		return cols, n.Children
+	}
+	return nil, nil
+}
+
+// leafDeclaredColumns returns every leaf of the tree as the file's OWN schema
+// describes it — the overlaid schema, so a leaf below a container carries the
+// declared type the footer blob restored — indexed by the leaf's LeafIndex so
+// it lines up with FileReader.Leaves().
+//
+// Every entry starts as nodeToColumn's bare inference and is replaced only
+// where the walk actually reaches that leaf, so a schema and a tree that
+// disagree about some subtree degrade to the pre-#589 answer for it rather
+// than to no answer at all.
+func leafDeclaredColumns(schema Schema, root *SchemaNode, leaves []*SchemaNode) []Column {
+	out := make([]Column, len(leaves))
+	for i, leaf := range leaves {
+		if leaf != nil {
+			out[i] = nodeToColumn(leaf)
+		}
+	}
+	if root == nil || len(root.Children) != len(schema.Columns) {
+		return out
+	}
+	for i := range schema.Columns {
+		collectLeafColumns(&schema.Columns[i], root.Children[i], out)
+	}
+	return out
+}
+
+func collectLeafColumns(c *Column, n *SchemaNode, out []Column) {
+	if c == nil || n == nil {
+		return
+	}
+	if n.IsLeaf() {
+		if n.LeafIndex >= 0 && n.LeafIndex < len(out) {
+			out[n.LeafIndex] = *c
+		}
+		return
+	}
+	cols, nodes := containerChildren(c, n)
+	for i := range cols {
+		collectLeafColumns(cols[i], nodes[i], out)
+	}
+}
+
+// overlayDeclaredLeaf applies conditions 3 to 5 to a single leaf.
+func overlayDeclaredLeaf(ic, dc *Column, n *SchemaNode) {
+	if ic.ElementType != nil || len(ic.Fields) > 0 ||
+		dc.ElementType != nil || len(dc.Fields) > 0 {
+		// One side calls this a container and the tree calls it a leaf. The
+		// two are describing different files.
+		return
+	}
+	if n.LogicalType != nil || n.ConvertedType != nil {
+		// The file annotated this leaf, so the file wins — with one
+		// exception: a UTF8 STRING leaf may carry back the name CIDR,
+		// whose storage and rendering are that same text.
+		if !(leafIsUTF8String(n) && declaredOverlayUTF8Types[dc.Type]) {
+			return
+		}
+	} else if !declaredOverlayTypes[dc.Type] {
+		return
+	}
+	if wadjetTypeToPhysical(dc.Type) != *n.Type {
+		return
+	}
+	// Type identity ONLY. None of the eight has a precision, scale or
+	// dimension to carry, and copying those fields is how a blob would
+	// reach the decode and allocation paths.
+	ic.Type = dc.Type
 }

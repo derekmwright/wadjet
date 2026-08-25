@@ -7,7 +7,12 @@ writer's box for a value is the reader's box for it", after the same arc's
 review found read → write was not the identity for DECIMAL (#429) and that
 `ReadRowGroup` and `ReadRows` were two readers that disagreed about a nested
 column (#428). A second compatibility note follows the pre-#409 one, for the
-`DECIMAL(p > 18)` files the writer produced before #429 (#437).
+`DECIMAL(p > 18)` files the writer produced before #429 (#437). Amended
+2026-08-25 with §8, "a declared type is restored at every depth, or the paths
+do not agree", after the same self-describing-footer channel §3 and §4 rely
+on was found to stop at the top level: an IPv6 or a UUID inside a ROW, ARRAY
+or MAP read back as the empty string while the flat column read correctly
+(#589).
 
 ## Context
 
@@ -371,6 +376,56 @@ a decode error and `Catalog.TableRGMeta` turns a decode error into "no blob"
 blob degrades in SPEED only — and only for the tables that actually hold the
 new type, which a version bump would not have managed.
 
+### 8. A declared type is restored at every depth, or the paths do not agree
+
+§3 says a file is readable through all of the decode paths or through none.
+§4 says the writer's box for a value is the reader's box for it. Both rest on
+a footer side channel: parquet cannot annotate eight of wadjet's 22 types
+(IPv4, IPv6, MAC, UUID, Bytes, Port, Protocol, Duration) and spells the ninth
+(CIDR) as plain UTF8, so the writer stamps the declared schema into the footer
+under `wadjet.schema` and the reader overlays it back over the bare parquet
+inference. That is the only place those nine types survive a round trip.
+
+The overlay restored them for TOP-LEVEL columns and stopped at the first group
+node. Its comment reasoned that LIST/MAP/STRUCT "round trip through parquet's
+own annotations" — true of the container STRUCTURE, false of the leaf TYPES
+beneath it, which are the same nine one level down with the same absent
+annotations. So a nested IPv6 recovered as STRING, the row reader boxed its
+sixteen intact bytes as a Go string, `batch.Vector.SetValue` handed the string
+to `net.ParseIP`, and the slot was set NULL — read back as "". Silently, on
+data that was never damaged on disk (#589).
+
+**The overlay recurses the declared schema through every container node — ROW
+fields matched to the tree's children by exact name, ARRAY through its
+element, MAP through its key and value, to any depth — under the same
+conditions the top-level rule applies, per leaf.** Structure, names,
+nullability, precision, scale and dimension still come from the parquet tree,
+which CAN express them; only a leaf's type identity comes from the blob, which
+is the one thing it cannot. The recursion is driven by the TREE, not the blob:
+`nodeToColumn` has already walked the same tree to the same depth to build the
+inferred column, so a footer cannot reach deeper here than it already does
+there, and a subtree where the blob and the tree disagree (a field the blob
+does not name, a name it repeats, a count that does not match, a type whose
+storage is not the leaf's) keeps the tree's own answer. The blast radius of a
+hostile footer stays what §1's bounds make it — relabelling a column as
+another type with IDENTICAL storage — now at every depth rather than only the
+top.
+
+Restoring the schema is necessary but not sufficient: the row reader's nested
+leaf-decode took the leaf's type from `nodeToColumn` (the bare inference), not
+from the file's own recovered schema, so it kept taking the STRING arm after
+`Schema()` already said IPV6. `FileReader.LeafColumn` is now the single answer
+both the schema and the decode come from. This is §3's "the paths agree"
+applied to depth: a type the reader can read as a top-level column it can read
+three containers deep, and vice versa.
+
+The corollary about consumers that read types from the CATALOG rather than the
+file (`retypeFromCatalog`, the `SchemaAs`/`ReadRowsAs` path) is the SAME
+top-level-only limitation, unchanged here on purpose: it only matters for
+pre-`wadjet.schema` files, which have no blob, and the no-blob path is pinned
+by `TestTypeMatrixTwoPathWithoutDeclaredSchemaFooter`. Moving both halves at
+once would leave that gate unable to say which one moved (#608).
+
 ## Consequences
 
 - Files that were read before and are refused now: a footer whose row groups
@@ -583,3 +638,11 @@ ANSWER through the prune, which is where #442's sweep gates it, not here.
 - **Keep writing wide DECIMAL as INT64 and refuse the values that overflow.**
   Rejected: the refusal was already there and the file was still malformed —
   a reader outside wadjet cannot open it whatever the values are.
+- **Overlay a container's declared type from the blob's own nested shape.**
+  Rejected: it would let the footer choose how deep to reach and what a group
+  node contains, which is exactly the power §1 and §2 deny it at the top. The
+  recursion walks the parquet TREE and consults the blob only for a leaf's
+  type identity, so it can reach no node `nodeToColumn` did not already build.
+- **Restore the schema and leave the row reader taking `nodeToColumn`.**
+  Rejected as half a fix: `Schema()` would say IPV6 while the nested decode
+  still boxed the value as a STRING — §3's paths disagreeing by construction.
