@@ -3,6 +3,7 @@ package exec
 import (
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -96,6 +97,39 @@ func TestContainerKeyCodecRoundTrips(t *testing.T) {
 				continue
 			}
 			seen[enc] = fmt.Sprintf("%#v", tc.v)
+		}
+	})
+
+	// The depth cap has to hold at the SAME depth on both sides: anything the
+	// encoder emits must decode, and anything it refuses must fail loudly
+	// rather than come back as a `%v` rendering two different values share.
+	t.Run("depth cap is symmetric", func(t *testing.T) {
+		nest := func(d int) any {
+			var v any = "leaf"
+			for i := 0; i < d; i++ {
+				v = []any{v}
+			}
+			return v
+		}
+		// One level inside the cap round-trips.
+		deep := nest(ckMaxDepth - 1)
+		got, err := decodeContainerKeyValue(appendContainerKeyValue(nil, deep, 0))
+		if err != nil {
+			t.Fatalf("a value at the cap must still round-trip: %v", err)
+		}
+		if !ckDeepEqual(got, deep) {
+			t.Fatalf("a value at the cap round-tripped to something else")
+		}
+		// Past it, the encoder refuses and the decoder says so — it does not
+		// come back as text, and it does not encode into bytes that fail to
+		// decode for an unrelated reason.
+		enc := appendContainerKeyValue(nil, nest(ckMaxDepth+8), 0)
+		v, err := decodeContainerKeyValue(enc)
+		if err == nil {
+			t.Fatalf("a subtree past the cap decoded to %#v instead of erroring", v)
+		}
+		if !strings.Contains(err.Error(), "deeper than") {
+			t.Fatalf("past-the-cap error should name the depth, got %v", err)
 		}
 	})
 

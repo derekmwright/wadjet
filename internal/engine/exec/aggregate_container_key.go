@@ -61,11 +61,22 @@ const (
 	ckFields
 	ckFloats
 	ckDecimal
+	// ckTooDeep marks a subtree the encoder REFUSED, and every decode of it
+	// is an error. It exists so the depth cap cannot be enforced on only one
+	// side: the encoder used to write the subtree's `%v` rendering instead,
+	// which is not injective — two different values render alike and would
+	// become one group — and the reader errored on the depth before it ever
+	// looked at the tag anyway, so those bytes encoded and then failed to
+	// decode. Refusing loudly at both ends is the only version of this that
+	// is neither a wrong answer nor a write nobody can read.
+	ckTooDeep
 )
 
-// ckMaxDepth bounds the recursion on both sides. Container nesting comes from
-// a declared schema, which is a handful of levels at most; the cap is here so
-// a corrupted run file cannot drive the decoder into a stack overflow.
+// ckMaxDepth bounds the recursion on BOTH sides, at the same depth. Container
+// nesting comes from a declared schema, which is a handful of levels at most;
+// the cap is here so a corrupted run file cannot drive the decoder into a
+// stack overflow, and the encoder honours the same number so it never writes
+// bytes its own reader would refuse.
 const ckMaxDepth = 64
 
 // isBoxedContainer reports whether v is one of the three boxed shapes
@@ -84,9 +95,9 @@ func isBoxedContainer(v any) bool {
 // appendContainerKeyValue appends v's tagged, lossless encoding to buf.
 func appendContainerKeyValue(buf []byte, v any, depth int) []byte {
 	if depth > ckMaxDepth {
-		// Unreachable from a declared schema; encoded as text rather than
-		// dropped so the bytes still decode to something honest.
-		return appendCkRaw(append(buf, ckString), fmt.Sprint(v))
+		// Unreachable from a declared schema. Marked refused rather than
+		// rendered: a rendering is not injective, and this is a group KEY.
+		return append(buf, ckTooDeep)
 	}
 	switch tv := v.(type) {
 	case nil:
@@ -297,6 +308,8 @@ func (r *ckReader) value(depth int) (any, error) {
 			out[name] = v
 		}
 		return out, nil
+	case ckTooDeep:
+		return nil, fmt.Errorf("container key: a subtree nested deeper than %d was refused at encode", ckMaxDepth)
 	case ckFloats:
 		n, err := r.uvarint()
 		if err != nil {
