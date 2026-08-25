@@ -298,7 +298,23 @@ func allData(n int) []map[string]any {
 //
 // id=700 lands on case 0 and keeps its old value, "192.168.188.0/24", so
 // networkLit's equality literal is unchanged.
+//
+// id=298 spells id=299's own /32 address BARE (no "/32") instead of taking
+// its own case's shape. Both land inside union_c_cidr's `WHERE id < 300` arm,
+// so a query that unions the fixture against itself holds one address two
+// ways: PostgreSQL's inet calls a bare address and its own /32 host route ONE
+// value (`'10.0.0.1' = '10.0.0.1/32'`), and text order calls them two
+// distinct strings. That is exactly the pair the single-process set
+// operation's dedup (`rowHashKey`, keyed on the boxed value's raw text) and
+// the stage DAG's (a `GroupByAll` aggregate keyed through
+// `kernel.CidrOrderKey`, #520) now answer DIFFERENTLY for the identical
+// UNION — tracked as #546 and pinned in
+// internal/coordinator/type_matrix_distributed_test.go's tmdPins, which is
+// what this pair of rows exists to make visible.
 func cidrValue(i int) string {
+	if i == 298 {
+		return strings.TrimSuffix(cidrValue(299), "/32")
+	}
 	switch i % 4 {
 	case 0:
 		return fmt.Sprintf("192.168.%d.0/24", i%256)

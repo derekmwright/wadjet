@@ -37,13 +37,28 @@ import (
 // Pins follow ADR-0013: the comparison runs for a pinned entry, a divergence
 // is logged, and a pin whose issue stops diverging anywhere FAILS.
 
-// tmdPins is empty: #392 (MIN_BY/MAX_BY's declared output type), #394
-// (DECIMAL ordering), #396 (network and UUID columns in raw storage form,
-// 37+ entries), #407 (VECTOR reading NULL on the single-process engine) and
-// #425 (a NULL ROW arriving from the DAG as a present ROW with all-NULL
-// fields) are all fixed, so nothing here diverges by VALUE anymore.
-// tmdRawFormReason and tmdMinByTypeReason go with them — nothing references
-// either string now.
+// tmdPins carries one live entry, #546: #392 (MIN_BY/MAX_BY's declared
+// output type), #394 (DECIMAL ordering), #396 (network and UUID columns in
+// raw storage form, 37+ entries), #407 (VECTOR reading NULL on the
+// single-process engine) and #425 (a NULL ROW arriving from the DAG as a
+// present ROW with all-NULL fields) are all fixed, so nothing they touched
+// diverges by VALUE anymore. tmdRawFormReason and tmdMinByTypeReason go with
+// them — nothing references either string now.
+//
+// #546: union_c_cidr's dedup disagrees between the two engines. The
+// single-process set operation (`physical/plan.go`'s `rowHashKey`, keyed on
+// the boxed value's raw TEXT) and the stage DAG (UNION lowered to a
+// `GroupByAll` final aggregate, keyed through `kernel.CidrOrderKey`, #520)
+// answer a DIFFERENT row count for the same UNION whenever it carries a bare
+// address and its own `/32` host route — one PostgreSQL `inet` value,
+// deduped to one row by the DAG and kept as two by the single-process path.
+// `typematrix.cidrValue` (id=298) puts exactly that pair inside this entry's
+// query so the divergence is not merely theoretical. The fix's home is
+// `internal/planner/physical/set_op_key.go`'s `setOpKeyer` (added for #499,
+// DECIMAL/FLOAT/VECTOR set-op keys): a `parquet.TypeCIDR` arm there closes
+// this the same way, and the moment it lands this pin's issue stops
+// diverging and `ratchet.finish` fails on it — delete the pin then, per
+// ADR-0013 §Pins.
 //
 // #407 is the one to read carefully, because this gate never saw its live
 // half. project_c_vec agreed as soon as the container codec that closed #397
@@ -76,7 +91,15 @@ import (
 // swapped a pair that was not misassigned. The corpus had no semi/anti join
 // entry at all before #511 added one, which is why every gate it feeds was
 // blind to a wrong answer on one of the most ordinary shapes in SQL.
-var tmdPins = map[string]typematrix.Pin{}
+var tmdPins = map[string]typematrix.Pin{
+	"union_c_cidr": {
+		Issue: "#546",
+		Reason: "the single-process set operation dedups CIDR by raw stored TEXT " +
+			"while the stage DAG dedups it through kernel.CidrOrderKey (#520): a " +
+			"bare address and its own /32 host route are one PostgreSQL inet value " +
+			"and answer as two rows locally, one on the DAG",
+	},
+}
 
 var tmdUnsupported = map[string]typematrix.Pin{}
 
