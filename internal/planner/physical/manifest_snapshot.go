@@ -28,7 +28,7 @@ import (
 // time internally (to key its own revision-validated cache) rather than
 // accepting an already-fetched one — Catalog has no API for that today.
 // Sharing the manifest object between the two would need one, which is a
-// Catalog-level change past this fix's scope; filed as a follow-up. What
+// Catalog-level change past this fix's scope; filed as #540. What
 // this DOES fix, completely, is the N-scales-with-scan-nodes-and-passes
 // growth: 9 reads for one table's SELECT, or 2×(distinct tables) for any
 // statement naming more than one table, however many times each is scanned
