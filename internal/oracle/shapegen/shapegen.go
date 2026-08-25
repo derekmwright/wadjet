@@ -447,6 +447,7 @@ var shapes = []struct {
 	{"subquery", 10},
 	{"dates", 8},
 	{"star", 6},
+	{"window", 10},
 }
 
 // Query generates one query.
@@ -478,6 +479,12 @@ func (g *Gen) Query() *Query {
 		g.rebuildScope(q)
 	case "subquery":
 		g.genDerivedFrom(q) // sets the scope itself: derived columns are a subset
+	case "window":
+		// One base table. A window's answer is only determined when its
+		// ORDER BY is unique, and a single entry is where a single-column PK
+		// is reachable to make it so — see genWindow.
+		g.genFrom(q, 0, false)
+		g.rebuildScope(q)
 	default:
 		g.genFrom(q, g.pick(3), g.chance(0.25))
 		g.rebuildScope(q)
@@ -496,6 +503,8 @@ func (g *Gen) Query() *Query {
 		g.genShadow(q)
 	case "dates":
 		g.genDates(q)
+	case "window":
+		g.genWindow(q)
 	default:
 		g.genProjection(q)
 		if g.chance(0.25) {
@@ -639,11 +648,19 @@ func (g *Gen) genSelfJoin(q *Query) {
 // query resolves names through a subquery boundary.
 func (g *Gen) genDerivedFrom(q *Query) {
 	t := g.s.Tables[g.pick(len(g.s.Tables))]
-	pk := t.PK[0]
-	var cols []string
-	cols = append(cols, pk)
+	// The FULL composite primary key, every column, projected into the
+	// subquery — not just t.PK[0]. A derived table that exposes only PART of
+	// a composite key is NOT unique on what it exposes: lineitem's
+	// (l_orderkey, l_linenumber) projected as l_orderkey alone has 448 tied
+	// groups, and declaring that column the derived PK made appendTiebreaker
+	// mark the query TotalOrder and compare a non-unique order POSITIONALLY.
+	// That is a harness false positive — the query's SQL does not determine
+	// the order the comparison then demands of it (seed 21) — so the key the
+	// derived table advertises must be one it is actually unique on, which is
+	// the whole composite or nothing.
+	cols := append([]string(nil), t.PK...)
 	for _, c := range t.Cols {
-		if c.Name != pk && len(cols) < 4 && g.chance(0.5) {
+		if !contains(cols, c.Name) && len(cols) < 4+len(t.PK) && g.chance(0.5) {
 			cols = append(cols, c.Name)
 		}
 	}
@@ -654,8 +671,10 @@ func (g *Gen) genDerivedFrom(q *Query) {
 	}
 
 	// The derived table exposes a subset of columns; the scope must reflect
-	// that, so register a synthetic table under the alias.
-	sub := Table{Name: t.Name, PK: []string{pk}}
+	// that, so register a synthetic table under the alias. Its PK is the full
+	// composite one, which the projection above guarantees is present.
+	derivedPK := append([]string(nil), t.PK...)
+	sub := Table{Name: t.Name, PK: derivedPK}
 	for _, c := range t.Cols {
 		if contains(cols, c.Name) {
 			sub.Cols = append(sub.Cols, c)
@@ -663,9 +682,9 @@ func (g *Gen) genDerivedFrom(q *Query) {
 	}
 	if g.chance(0.5) {
 		q.With = fmt.Sprintf("WITH src AS (%s) ", inner)
-		q.From = []From{{Table: "src", Alias: "t0", PK: []string{pk}}}
+		q.From = []From{{Table: "src", Alias: "t0", PK: derivedPK}}
 	} else {
-		q.From = []From{{Derived: inner, Alias: "t0", PK: []string{pk}}}
+		q.From = []From{{Derived: inner, Alias: "t0", PK: derivedPK}}
 	}
 	// Register the subquery's columns under t0 without consulting the real
 	// schema — the derived table exposes only the projected subset.
@@ -1034,6 +1053,162 @@ func zeroLit(k Kind) string {
 		return "0.0"
 	}
 	return "0"
+}
+
+// genWindow emits window functions, including the ones whose answer is CHOSEN
+// by a comparison rather than computed: MIN and MAX.
+//
+// This arm did not exist. The package comment claimed window functions among
+// the shapes it generates and no arm produced one, so the fuzzer could not
+// have found #569 — windowed MIN/MAX failing the query outright for twelve of
+// the twenty-two types — nor any other defect that needs a window to fire.
+//
+// Three rules keep the generated query's answer DETERMINED, which is what a
+// differential arm needs before it can call a difference a defect:
+//
+//  1. The window's ORDER BY is the entry's single-column PK, so no two rows
+//     tie and a running or sliding frame has exactly one answer. Without a
+//     unique key the arm emits only whole-partition and OVER () shapes, whose
+//     answers do not depend on the order within the partition.
+//  2. SUM and AVG over a float are generated but marked NOT exact, because
+//     accumulation order is a legal difference (ADR-0013 §4).
+//  3. MIN, MAX and the value functions are marked exact: they return one of
+//     their input's values untouched, so any difference is a real one — and
+//     Opaque follows the column's kind, since an IPv4's rendered form does
+//     not order the way the address does.
+//
+// The PARTITION BY key is written BARE and is always a plain column. A
+// QUALIFIED reference (`PARTITION BY t0.g`) or an EXPRESSION (`PARTITION BY
+// id % 3`) is silently dropped by the engine today and the window degrades to
+// a single partition (#585). Generating those shapes here would bury every
+// other window divergence under that one; widen this once it is fixed.
+//
+// # Adding an arm moves every seed
+//
+// The shape roll is weighted over this table, so a new entry changes which
+// shape each seed draws and therefore the QUERY each seed generates — in
+// every shape, not just this one. That is not a side effect to be avoided; it
+// is how a generator covers new ground. It does mean the arm lands with a
+// batch of unrelated findings: this one surfaced #593 (a comma-join whose
+// equi-predicate is in WHERE runs as a real cross product and is OOM-killed,
+// seed 51) and #594 (the same FROM shape answering ZERO ROWS, seed 24). Both
+// are pre-existing — the same suite with this arm's weight at 0 passes — and
+// both are now filed rather than hidden.
+func (g *Gen) genWindow(q *Query) {
+	if len(g.sc.refs) == 0 || len(q.From) != 1 {
+		g.genProjection(q)
+		return
+	}
+	// A unique in-partition order, when the entry offers one.
+	ordCol := ""
+	if pk := q.From[0].PK; len(pk) == 1 {
+		ordCol = pk[0]
+	}
+
+	// A low-cardinality PARTITION BY, so partitions hold several rows. Any
+	// column will do — the point is to partition, not to be clever — but an
+	// integer one keeps the partitions few.
+	part := ""
+	if g.chance(0.75) {
+		var cands []ref
+		for _, r := range g.sc.refs {
+			if r.col.Kind == KindInt && r.col.Name != ordCol {
+				cands = append(cands, r)
+			}
+		}
+		if len(cands) == 0 {
+			cands = g.sc.refs
+		}
+		part = cands[g.pick(len(cands))].col.Name
+	}
+
+	// Project the order key so the outer ORDER BY has a total one to reach
+	// for, and so a divergence names the row it is on.
+	if ordCol != "" {
+		q.Items = append(q.Items, Item{Expr: ordCol, Alias: g.alias(), Exact: true})
+	}
+
+	n := 1 + g.pick(3)
+	for i := 0; i < n; i++ {
+		r := g.sc.refs[g.pick(len(g.sc.refs))]
+		q.Items = append(q.Items, g.windowItem(r, part, ordCol))
+	}
+}
+
+// windowItem renders one window select item over r.
+func (g *Gen) windowItem(r ref, part, ordCol string) Item {
+	col := r.col.Name
+	a := g.alias()
+	over := g.windowOver(part, ordCol, true)
+
+	// The numeric-only functions, when the column can carry them.
+	if r.col.Kind == KindInt || r.col.Kind == KindFloat {
+		switch {
+		case g.chance(0.10):
+			// Item.Agg means "an aggregate that COLLAPSES rows and therefore
+			// needs a GROUP BY" — wellFormed rejects a select list mixing one
+			// with a bare column. A windowed aggregate collapses nothing, so
+			// it is not one, whatever its spelling.
+			return Item{Expr: fmt.Sprintf("SUM(%s) %s", col, over), Alias: a}
+		case g.chance(0.10):
+			return Item{Expr: fmt.Sprintf("AVG(%s) %s", col, over), Alias: a}
+		}
+	}
+	switch {
+	case g.chance(0.10) && ordCol != "":
+		// The rank family reads the partition and its ORDER BY, never the
+		// frame, so it is emitted only where the order is unique.
+		fn := []string{"ROW_NUMBER()", "RANK()", "DENSE_RANK()"}[g.pick(3)]
+		return Item{Expr: fmt.Sprintf("%s %s", fn, g.windowOver(part, ordCol, false)), Alias: a, Exact: true}
+	case g.chance(0.08):
+		return Item{Expr: fmt.Sprintf("COUNT(%s) %s", col, over), Alias: a, Exact: true}
+	case g.chance(0.20) && ordCol != "":
+		fn := []string{"FIRST_VALUE", "LAST_VALUE"}[g.pick(2)]
+		return Item{Expr: fmt.Sprintf("%s(%s) %s", fn, col, over), Alias: a,
+			Exact: true, Opaque: opaqueOrder(r.col.Kind)}
+	case g.chance(0.15) && ordCol != "":
+		fn := []string{"LAG", "LEAD"}[g.pick(2)]
+		return Item{Expr: fmt.Sprintf("%s(%s) %s", fn, col, g.windowOver(part, ordCol, false)), Alias: a,
+			Exact: true, Opaque: opaqueOrder(r.col.Kind)}
+	}
+	// The default, and the arm this exists for: MIN/MAX over ANY type.
+	fn := []string{"MIN", "MAX"}[g.pick(2)]
+	return Item{Expr: fmt.Sprintf("%s(%s) %s", fn, col, over), Alias: a,
+		Exact: true, Opaque: opaqueOrder(r.col.Kind)}
+}
+
+// windowOver renders the OVER clause. framed=false suppresses the explicit
+// frame for the functions SQL defines against the partition rather than the
+// frame (the rank family, LAG/LEAD), where a frame would be noise.
+//
+// An explicit frame is emitted only alongside a unique ORDER BY: a ROWS frame
+// over a TIED order advances one row at a time through a sequence SQL does not
+// determine, so two correct engines may legitimately disagree (the reason
+// WindowDefaultFrameIsRange in the PostgreSQL corpus orders by a unique key
+// for its ROWS control).
+func (g *Gen) windowOver(part, ordCol string, framed bool) string {
+	var sb strings.Builder
+	sb.WriteString("OVER (")
+	sep := ""
+	if part != "" {
+		fmt.Fprintf(&sb, "PARTITION BY %s", part)
+		sep = " "
+	}
+	if ordCol != "" {
+		fmt.Fprintf(&sb, "%sORDER BY %s", sep, ordCol)
+		if framed {
+			switch g.pick(4) {
+			case 0:
+				sb.WriteString(" ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING")
+			case 1:
+				sb.WriteString(" ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW")
+			case 2:
+				fmt.Fprintf(&sb, " ROWS BETWEEN %d PRECEDING AND CURRENT ROW", 1+g.pick(4))
+			}
+		}
+	}
+	sb.WriteString(")")
+	return sb.String()
 }
 
 // genShadow aliases a column to the NAME OF A DIFFERENT REAL COLUMN, so the

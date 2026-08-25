@@ -48,13 +48,20 @@ import (
 //	WADJET_FUZZ_SEED_COUNT=5000 go test -run TestFuzzDuckDBDifferential \
 //	    -timeout 60m ./benchmarks/tpch/                                 # hunting
 //
-// STATE: the default seed windows are green. Extending them is what hunting
-// means, and today it reports OPEN defects — roughly one per 60 seeds on the
-// DuckDB arm (alias-vs-column collisions, star-with-IN-subquery, cross joins,
-// a group key misaligned from its values) and one per 30 on the two-path arm
-// (OFFSET ignored on the DAG, ORDER BY dropped after DISTINCT, a broadcast
-// probe panic). Those are engine bugs to fix, not harness noise: rerun the
-// failing seed and read the reduced query it prints.
+// STATE: the default seed windows are green — every OPEN defect a default
+// window reaches is either kept out of the generator or matched by
+// fuzzKnownDivergence and skipped (see KNOWN DIVERGENCES). The window arm
+// (internal/oracle/shapegen, #569) re-weighted the shape roll so the default
+// window now draws different queries, which surfaced the comma-join-mixed
+// shape at seeds 24 and 51; that shape is matched (bugCommaJoinMixedResidual)
+// because #593's instance is a process killer. Extending the window is what
+// hunting means, and past the default it still reports OPEN defects — roughly
+// one per 60 seeds on the DuckDB arm (alias-vs-column collisions,
+// star-with-IN-subquery, cross joins, a group key misaligned from its values)
+// and one per 30 on the two-path arm (OFFSET ignored on the DAG, ORDER BY
+// dropped after DISTINCT, a broadcast probe panic). Those are engine bugs to
+// fix, not harness noise: rerun the failing seed and read the reduced query
+// it prints.
 //
 // KNOWN DIVERGENCES: constructs already proven to disagree are kept out of the
 // generator, or recognised by fuzzKnownDivergence and skipped — a harness that
@@ -110,6 +117,27 @@ const (
 	// outlive the bug.
 	bugOuterOnResidual = "outer-join-on-residual-dropped"
 	bugHiddenSortKey   = "hidden-sort-key-with-filter"
+	// An explicit JOIN ... ON MIXED with a comma-join whose equi-predicate
+	// sits in WHERE. genFrom emits `a t0 JOIN b t1 ON …, c t2 WHERE
+	// t1.x = t2.y`, and wadjet mishandles it two ways depending on the
+	// tables: it either answers ZERO ROWS (#594 — supplier⋈partsupp, part →
+	// 0 where DuckDB says 8000) or MATERIALIZES the full cross product and is
+	// OOM-KILLED (#593 — orders⋈lineitem × part is 120M rows, ~30 GB, a
+	// `fatal error: out of memory` that takes the whole test binary with it).
+	//
+	// The OOM is why this is matched to skip GENERATION rather than pinned as
+	// a knownBug: a pinned entry still RUNS its query, and a process killer
+	// cannot be pinned — it would kill the fuzzer before any comparison. A
+	// PURE comma join (no explicit JOIN in the same FROM) is correct on both
+	// engines and is deliberately NOT matched, so that shape stays generated.
+	//
+	// Gated as a corpus entry — CommaJoinMixedWithExplicitJoin in
+	// duckdb_compare_test.go, which uses the small supplier/partsupp/part
+	// instance that answers 0 without OOMing — so the skip cannot outlive the
+	// bug. #593/#594 are being fixed on main; when the fix lands, that entry
+	// starts agreeing and its knownBug must be deleted, and THIS matcher with
+	// it.
+	bugCommaJoinMixedResidual = "comma-join-mixed-with-explicit-join"
 )
 
 // fuzzKnownDivergence reports which filed defect a query is guaranteed to hit,
@@ -147,6 +175,22 @@ func fuzzKnownDivergence(s *shapegen.Schema, q *shapegen.Query) string {
 				return bugHiddenSortKey
 			}
 		}
+	}
+	// A comma-join entry (its equi-predicate lives in WHERE) alongside an
+	// explicit JOIN in the same FROM: #593/#594. Matched structurally because
+	// #593's instance is a process killer that no pin can survive — see
+	// bugCommaJoinMixedResidual.
+	comma, explicitJoin := false, false
+	for _, f := range q.From {
+		switch {
+		case f.Join == ",":
+			comma = true
+		case strings.Contains(strings.ToUpper(f.Join), "JOIN"):
+			explicitJoin = true
+		}
+	}
+	if comma && explicitJoin {
+		return bugCommaJoinMixedResidual
 	}
 	return ""
 }

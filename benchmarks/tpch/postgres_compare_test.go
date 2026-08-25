@@ -1712,6 +1712,121 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "StringAggSeparator", sql: `SELECT LENGTH(STRING_AGG(o_orderstatus, '::')) AS n FROM orders`},
 	)
 
+	// --- Windowed MIN/MAX (#569) --------------------------------------------
+	//
+	// `MIN(c) OVER (…)` and `MIN(c) … GROUP BY g` are the same question asked
+	// twice, and until #569 one of the two spellings FAILED the query for
+	// twelve of Wadjet's twenty-two types: the window declared FLOAT64 for
+	// anything outside a ten-type allow-list and then could not write the
+	// value it chose into it.
+	//
+	// PostgreSQL is the reference for the four of those types it has an
+	// aggregate for — `numeric` and the three that map onto `inet`. It has
+	// none for `uuid`, `macaddr`, `bytea` or `boolean` (verified live on
+	// postgres:17-alpine: each errors with "function min(...) does not
+	// exist"), so those are Wadjet extensions in the sense ADR-0012 §5
+	// already records for BOOL, and the type-matrix corpus gates them
+	// instead.
+	//
+	// Every PARTITION BY here names a BARE column. That is not stylistic: a
+	// window whose PARTITION BY is an EXPRESSION (`PARTITION BY d_key % 7`)
+	// or a QUALIFIED reference (`PARTITION BY p.n_grp`) silently loses the
+	// partitioning in wadjet and answers the whole input as one partition —
+	// found by the first version of these entries, filed separately, and not
+	// #569's subject. Writing the key as a bare column keeps these entries
+	// about the value MIN/MAX chooses and the type it declares.
+	out = append(out,
+		// The ordering literals below are chosen against the fixture's own
+		// text-order inversions (pgNetRows): the answers cannot come out
+		// right under a lexical comparison of the rendered addresses.
+		pgCase{name: "WindowMinMaxInetV4", sql: `SELECT n_key, n_grp,
+			MIN(n_v4) OVER (PARTITION BY n_grp ORDER BY n_key
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w_lo,
+			MAX(n_v4) OVER (PARTITION BY n_grp ORDER BY n_key
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w_hi
+			FROM net_probe ORDER BY n_key`},
+		pgCase{name: "WindowMinMaxInetV6", sql: `SELECT n_key, n_grp,
+			MIN(n_v6) OVER (PARTITION BY n_grp ORDER BY n_key
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w_lo,
+			MAX(n_v6) OVER (PARTITION BY n_grp ORDER BY n_key
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w_hi
+			FROM net_probe ORDER BY n_key`},
+		pgCase{name: "WindowMinMaxInetCidr", sql: `SELECT n_key, n_grp,
+			MIN(n_cidr) OVER (PARTITION BY n_grp ORDER BY n_key
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w_lo,
+			MAX(n_cidr) OVER (PARTITION BY n_grp ORDER BY n_key
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w_hi
+			FROM net_probe ORDER BY n_key`},
+		// The empty-PARTITION-BY form takes a different evaluator in Wadjet:
+		// it streams the whole input as one partition and carries the running
+		// extreme as a BOXED value across batches, so the comparison there is
+		// the boxed one rather than the columnar one. Same answer required.
+		pgCase{name: "WindowMinMaxInetOverEverything", sql: `SELECT n_key,
+			MIN(n_v4) OVER () AS v4_lo, MAX(n_v4) OVER () AS v4_hi,
+			MIN(n_v6) OVER () AS v6_lo, MAX(n_v6) OVER () AS v6_hi,
+			MIN(n_cidr) OVER () AS c_lo, MAX(n_cidr) OVER () AS c_hi
+			FROM net_probe ORDER BY n_key`},
+		// The running frame, and its agreement with the grouped aggregate at
+		// the partition's last row. RANGE is the default frame and the ORDER
+		// BY key is unique, so every row's frame is [first .. this row].
+		pgCase{name: "WindowMinMaxInetRunning", sql: `SELECT n_key, n_grp,
+			MIN(n_v4) OVER (PARTITION BY n_grp ORDER BY n_key) AS run_lo,
+			MAX(n_v4) OVER (PARTITION BY n_grp ORDER BY n_key) AS run_hi
+			FROM net_probe ORDER BY n_key`},
+		// A partition whose every value is NULL answers NULL, and a partition
+		// with SOME nulls ignores them — PostgreSQL's rule for MIN/MAX, which
+		// a window that wrote a zero instead would pass every count-based
+		// check for.
+		pgCase{name: "WindowMinMaxInetNullPartition", sql: `SELECT n_key, m,
+			MIN(v) OVER (PARTITION BY m) AS lo, MAX(v) OVER (PARTITION BY m) AS hi
+			FROM (SELECT n_key, CASE WHEN n_key % 11 = 0 THEN 0 ELSE 1 END AS m,
+				CASE WHEN n_key % 11 = 0 THEN NULL ELSE n_v6 END AS v
+				FROM net_probe) s ORDER BY n_key`},
+
+		// DECIMAL. exactNumeric on every one: the answer IS the digits, and a
+		// float64 rendering agrees about the first six of them whatever the
+		// window did (#455's lesson).
+		pgCase{name: "WindowMinMaxDecimalScale2", exactNumeric: true, sql: `SELECT d_key,
+			MIN(d_2) OVER (PARTITION BY d_grp ORDER BY d_key
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w_lo,
+			MAX(d_2) OVER (PARTITION BY d_grp ORDER BY d_key
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w_hi
+			FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WindowMinMaxDecimalScale4Running", exactNumeric: true, sql: `SELECT d_key,
+			MIN(d_4) OVER (ORDER BY d_key) AS run_lo,
+			MAX(d_4) OVER (ORDER BY d_key) AS run_hi
+			FROM dec_probe ORDER BY d_key`},
+		// The WIDE arm. Every value needs more than 64 bits, so a window that
+		// answered through a float64 — which is what the FLOAT64 declaration
+		// would have done had the write not been refused outright — loses
+		// everything past the 16th digit while still looking like a number.
+		pgCase{name: "WindowMinMaxDecimalWide", exactNumeric: true, sql: `SELECT d_key,
+			MIN(d_wide) OVER (PARTITION BY d_grp
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w_lo,
+			MAX(d_wide) OVER (PARTITION BY d_grp
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w_hi
+			FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "WindowMinMaxDecimalOverEverything", exactNumeric: true, sql: `SELECT d_key,
+			MIN(d_wide) OVER () AS lo, MAX(d_wide) OVER () AS hi
+			FROM dec_probe ORDER BY d_key`},
+
+		// The types that ALREADY worked, so the widening did not disturb
+		// them: STRING, DATE (stored as text on both sides — see
+		// createPostgresSchema), TIMESTAMP-free INT and FLOAT.
+		pgCase{name: "WindowMinMaxStringAndDate", sql: `SELECT o_orderkey,
+			MIN(o_orderstatus) OVER (PARTITION BY o_custkey
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS s_lo,
+			MAX(o_orderdate) OVER (PARTITION BY o_custkey
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS d_hi
+			FROM orders WHERE o_orderkey < 4000 ORDER BY o_orderkey`},
+		pgCase{name: "WindowMinMaxNumeric", sql: `SELECT o_orderkey,
+			MIN(o_totalprice) OVER (PARTITION BY o_custkey
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS f_lo,
+			MAX(o_custkey) OVER (PARTITION BY o_orderstatus
+				ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS i_hi
+			FROM orders WHERE o_orderkey < 4000 ORDER BY o_orderkey`},
+	)
+
 	// --- Joins and outer-join NULL padding ----------------------------------
 	out = append(out,
 		pgCase{name: "LeftJoinMissIsNull", sql: `SELECT n.n_name, r.r_name FROM nation n

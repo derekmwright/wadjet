@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/big"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strconv"
@@ -315,6 +316,9 @@ func (o *postgresOracle) load(t *testing.T, ctx context.Context) {
 			// contain every literal, and #438 was a PRUNE.
 			rowGroup = pgDecimalRowGroup
 		}
+		if name == pgNetTable {
+			rowGroup = pgNetRowGroup
+		}
 		if err := db.CreateTable(ctx, name, schema, nil); err != nil {
 			t.Fatalf("wadjet create table %s: %v", name, err)
 		}
@@ -361,6 +365,9 @@ func (o *postgresOracle) load(t *testing.T, ctx context.Context) {
 		if err := sink(tbl.Name, tbl.Rows); err != nil {
 			t.Fatalf("%v", err)
 		}
+	}
+	if err := sink(pgNetTable, pgNetRows()); err != nil {
+		t.Fatalf("%v", err)
 	}
 	for name, ing := range ingesters {
 		if err := ing.FlushAll(ctx); err != nil {
@@ -546,6 +553,34 @@ const (
 // drives the harness, the seeders and both data tiers.
 const pgBytesTable = "bytea_probe"
 
+// pgNetTable is the second fixture the TPC-H schema cannot provide, and it
+// exists for the same reason dec_probe does: no TPC-H column is an address, so
+// no arm of this oracle ever asked PostgreSQL what an address ORDER is.
+//
+// That question is not decorative. Wadjet renders all three of these types for
+// DISPLAY, and display order is not address order — "9.0.0.1" sorts above
+// "10.0.0.1" and "2001:db8::9" above "2001:db8::10" as text, below them as
+// addresses — so every consumer that compares the RENDERED value rather than
+// the stored one has to re-key, and each one that forgot has been its own
+// defect (#492 the filter, #520 the sort and the keys, #565 the row-at-a-time
+// path, #569 the window). PostgreSQL's `inet` is the authority on the answer
+// (ADR-0012), and until this table there was nothing here to ask it with.
+//
+// PostgreSQL has min/max over `inet` — verified live on postgres:17-alpine —
+// so the windowed and grouped MIN/MAX entries over these columns are gated
+// against a real reference. It has NO min/max over `uuid`, `macaddr`, `bytea`
+// or `boolean` (all four error with "function min(...) does not exist"), which
+// is why those four of #569's eight types are gated by the type-matrix corpus
+// and ADR-0012 §5 instead, not here.
+const (
+	pgNetTable    = "net_probe"
+	pgNetRows_    = 200
+	pgNetRowGroup = 50
+	// pgNetV4Base is 9.255.255.240. The column walks upward from here, so the
+	// fixture straddles the 9.x/10.x boundary within the first 16 rows.
+	pgNetV4Base = uint32(9)<<24 | uint32(255)<<16 | uint32(255)<<8 | 240
+)
+
 // oracleTables is AllTables plus the fixtures that exist only for this oracle.
 func oracleTables() map[string]parquet.Schema {
 	out := make(map[string]parquet.Schema, len(AllTables)+1)
@@ -554,6 +589,11 @@ func oracleTables() map[string]parquet.Schema {
 	}
 	out[pgDecimalTable] = parquet.Schema{Columns: []parquet.Column{
 		{Name: "d_key", Type: parquet.TypeInt64},
+		// A low-cardinality partition key. A windowed aggregate needs one to
+		// be a window over PARTITIONS rather than over the whole input, and
+		// the only other column here is the monotonic key — one row per
+		// partition, which every frame answers identically (#569).
+		{Name: "d_grp", Type: parquet.TypeInt32},
 		{Name: "d_2", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
 		{Name: "d_4", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true},
 		// The WIDE arm. Precision 38 is the other side of ADR-0018 §4's
@@ -581,6 +621,13 @@ func oracleTables() map[string]parquet.Schema {
 	for _, t := range multikey.Tables() {
 		out[t.Name] = t.Schema
 	}
+	out[pgNetTable] = parquet.Schema{Columns: []parquet.Column{
+		{Name: "n_key", Type: parquet.TypeInt64},
+		{Name: "n_grp", Type: parquet.TypeInt32},
+		{Name: "n_v4", Type: parquet.TypeIPv4, Nullable: true},
+		{Name: "n_v6", Type: parquet.TypeIPv6, Nullable: true},
+		{Name: "n_cidr", Type: parquet.TypeCIDR, Nullable: true},
+	}}
 	return out
 }
 
@@ -665,6 +712,98 @@ func pgBytesDuckDBSetup() string {
 	return b.String()
 }
 
+// pgNetRows builds the address fixture.
+//
+// Every column crosses at least one boundary where the TEXT order and the
+// ADDRESS order disagree, because an entry that does not is satisfied by a
+// plain string comparator and gates nothing:
+//
+//   - n_v4 walks 9.255.255.240 → 10.0.0.183, so the "9" > "1" character
+//     comparison inverts the address order at the boundary.
+//   - n_v6 walks 2001:db8::9 → 2001:db8::10 → 2001:db8::c8, where the hex
+//     digit COUNT changes and text ordering inverts twice.
+//   - n_cidr mixes prefix lengths under one network and mixes families, which
+//     is where PostgreSQL's network_cmp differs from any address-only order:
+//     the common bits decide first, then the MASK, then the full address.
+//
+// A NULL every 11th/13th/17th row, on strides that do not coincide, so a
+// partition always has some and never only.
+//
+// No value is spelled with a FULL-WIDTH prefix ("/32", "/128"). pgx decodes
+// `inet` as a netip.Prefix whose bits are always present, so PostgreSQL's own
+// distinction between `inet '10.0.0.1'` and `inet '10.0.0.1/32'` does not
+// survive the driver — pgNetText renders a full-width prefix bare, which is
+// the bare form both engines then agree on. Writing "/32" here would be the
+// one spelling that rendering cannot round-trip.
+func pgNetRows() []map[string]any {
+	rows := make([]map[string]any, pgNetRows_)
+	for i := range rows {
+		r := map[string]any{"n_key": int64(i), "n_grp": int32(i % 4)}
+		if i%11 != 0 {
+			// 9.255.255.240 .. 9.255.255.255, then 10.0.0.0 upward: the
+			// address order runs straight through the boundary where the
+			// text order inverts ('9' > '1' as a character).
+			v := pgNetV4Base + uint32(i)
+			r["n_v4"] = netip.AddrFrom4([4]byte{
+				byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}).String()
+		}
+		if i%13 != 0 {
+			r["n_v6"] = fmt.Sprintf("2001:db8::%x", i+9)
+		}
+		if i%17 != 0 {
+			switch i % 5 {
+			case 0:
+				r["n_cidr"] = fmt.Sprintf("9.255.255.%d/24", i%256)
+			case 1:
+				r["n_cidr"] = fmt.Sprintf("10.0.%d.0/16", i%256)
+			case 2:
+				r["n_cidr"] = fmt.Sprintf("10.0.%d.7/24", i%256)
+			case 3:
+				r["n_cidr"] = fmt.Sprintf("192.168.%d.0/24", i%256)
+			default:
+				r["n_cidr"] = fmt.Sprintf("2001:db8:%x::/48", i)
+			}
+		}
+		rows[i] = r
+	}
+	return rows
+}
+
+// pgNetPrefix converts a fixture address string into the netip.Prefix pgx
+// encodes for an `inet` column. pgx's inet codec has no binary encode plan for
+// a Go string, so the box has to be spelled in the driver's type — the same
+// rendering decision, for the same reason, as pgNumericOf.
+//
+// A bare address is a host route: /32 for v4, /128 for v6, which is what
+// PostgreSQL's own inet does with the same input.
+func pgNetPrefix(s string) (netip.Prefix, error) {
+	if strings.ContainsRune(s, '/') {
+		return netip.ParsePrefix(s)
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
+}
+
+// pgNetText renders a netip.Prefix the way Wadjet renders the same stored
+// value, so the two engines are compared on one spelling.
+//
+// A FULL-WIDTH prefix renders BARE. Wadjet's IPV4 and IPV6 columns store an
+// address and render it with no mask at all, and pgx hands back /32 and /128
+// for those rows because the inet wire format always carries the bits — so
+// without this the two sides would differ by a suffix on every row of two
+// columns while agreeing about the address. It is the same class of harness
+// rendering decision as normalizeTemporal, and it is one-way: a prefix that is
+// NOT full width keeps its mask, which is what the CIDR column compares on.
+func pgNetText(p netip.Prefix) string {
+	if p.Bits() == p.Addr().BitLen() {
+		return p.Addr().String()
+	}
+	return p.String()
+}
+
 // pgDecimalRows is MONOTONIC in both decimal columns and spans both signs, so
 // each row group's bounds are narrow and a literal in the middle of one is
 // outside every other's — the only shape a wrong row-group prune is visible
@@ -672,7 +811,7 @@ func pgBytesDuckDBSetup() string {
 func pgDecimalRows() []map[string]any {
 	rows := make([]map[string]any, pgDecimalRows_)
 	for i := range rows {
-		r := map[string]any{"d_key": int64(i)}
+		r := map[string]any{"d_key": int64(i), "d_grp": int32(i % 7)}
 		// Every 17th row is NULL in d_2 and every 23rd in d_4, on strides that
 		// do not line up with the row-group boundary.
 		if i%17 != 0 {
@@ -723,13 +862,15 @@ func postgresColumnType(t *testing.T, c parquet.Column) string {
 		// bytea, which is byte-ordered and byte-compared in every collation:
 		// no COLLATE clause applies to it and none is needed (#570).
 		return "bytea"
-	case parquet.TypeCIDR:
-		// PostgreSQL's own network type, not text: its equality compares the
-		// address AND the mask length, which is the comparison a CIDR key has
-		// to make. Wadjet stores a CIDR as unvalidated text, so the fixture's
-		// values are canonical networks — `cidr` rejects a set host bit, and
-		// a fixture PostgreSQL refuses to load is not an oracle.
-		return "cidr"
+	case parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR:
+		// One PostgreSQL type for three Wadjet ones. `inet` carries an
+		// address of either family with an optional prefix length, which is
+		// exactly the union of what IPV4, IPV6 and CIDR hold, and its
+		// network_cmp is the order kernel.CidrSortKey reproduces. `inet`
+		// (unlike `cidr`) also accepts host bits, which the net fixture
+		// deliberately carries; the multikey fixture's canonical networks
+		// load into it unchanged.
+		return "inet"
 	case parquet.TypeUUID:
 		return "uuid"
 	default:
@@ -756,6 +897,16 @@ func (o *postgresOracle) copyInto(ctx context.Context, table string, rows []map[
 			val := row[col]
 			if d, ok := val.(parquet.Decimal128); ok {
 				val = pgNumericOf(d, int32(schema.Columns[j].Scale))
+			}
+			switch schema.Columns[j].Type {
+			case parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR:
+				if s, ok := val.(string); ok {
+					p, err := pgNetPrefix(s)
+					if err != nil {
+						return fmt.Errorf("%s.%s: %q is not an address: %w", table, col, s, err)
+					}
+					val = p
+				}
 			}
 			v[j] = val
 		}
@@ -840,6 +991,10 @@ func normalizePostgresValue(v any) any {
 		return string(x)
 	case bool, string, int16, int32, int64, float32, float64:
 		return x
+	case netip.Prefix:
+		// An `inet` cell. Rendered the way Wadjet renders the same stored
+		// value — see pgNetText.
+		return pgNetText(x)
 	default:
 		// pgtype.Numeric and friends implement Float64Value(); anything that
 		// can say what number it is, says so.

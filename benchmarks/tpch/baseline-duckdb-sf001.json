@@ -367,6 +367,17 @@
       "fine": "792376c209f33895",
       "coarse": "792376c209f33895"
     },
+    "CommaJoinMixedWithExplicitJoin": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "06516f7a6e849dd3",
+      "coarse": "06516f7a6e849dd3"
+    },
     "CommaJoinMixtureWhereFilter": {
       "source": "duckdb",
       "row_count": 1,

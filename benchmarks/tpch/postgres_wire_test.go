@@ -549,6 +549,35 @@ const (
 // wireCorpus is the statement set the protocol arm compares. Each entry is
 // chosen for the TYPE it forces into the RowDescription, not for its rows: the
 // answer is usually two or three rows, because the wire metadata is the subject.
+// networkAsTextOIDPin records the standing network-as-text wire choice: every
+// IPV4/IPV6/CIDR column is declared OID 25 (text) where PostgreSQL declares
+// 869 (inet)/650 (cidr). It is DELIBERATE — the same choice VECTOR takes, so a
+// generic client renders the value rather than needing an inet type plan — and
+// a difference of TYPE, not of value, which is exactly what the wire arm
+// exists to record and a value oracle cannot see. Not #569's doing: #569 only
+// made a windowed MIN/MAX over these types produce a column at all.
+const networkAsTextOIDPin = "DELIBERATE (network-as-text on the wire, like VECTOR): wadjet declares " +
+	"OID 25 (text) for an IPV4/IPV6/CIDR column where PostgreSQL declares 869 (inet). A difference of " +
+	"type, not value; the wire arm is the only place it is visible. The pin fails if wadjet ever adopts " +
+	"the inet OID"
+
+// windowDecimalTypmodPin is #587, shared by the two windowed-DECIMAL entries.
+const windowDecimalTypmodPin = "WADJET BUG (#587): PostgreSQL declares typmod -1 for a numeric produced " +
+	"by ANY function call, window functions included — verified live, min(d) OVER () and " +
+	"first_value(d) OVER () both describe as plain `numeric` where the bare column describes as " +
+	"numeric(18,4). declaredWireUnconstrainedDecimal marks a projection unconstrained only when " +
+	"proj.IsAgg, and a window function reaches the output projection as a bare reference to the " +
+	"Window operator's output column. Same gap as #542's set-operation case, one shape over"
+
+// windowDecimalZeroRowPin is #587's second half: the zero-row path declares
+// the wrong TYPE, not merely the wrong modifier.
+const windowDecimalZeroRowPin = "WADJET BUG (#587): a windowed MIN/MAX over a DECIMAL column declares " +
+	"float8 on a ZERO-ROW result and numeric on a non-empty one — the #458 class, one shape over. " +
+	"The zero-row schema comes from the plan, and windowSpecOutputType falls back to " +
+	"windowOutputType's FLOAT64 because colRefDeclaredType declines to resolve a parameterized type " +
+	"for the window argument; the non-empty answer is re-typed from the input vector at runtime, " +
+	"where exec.windowOutputColumn also carries the (p,s)"
+
 func wireCorpus() []wireCase {
 	return []wireCase{
 		// The shape that broke DataGrip: a plain projection of an int, a text
@@ -632,6 +661,78 @@ func wireCorpus() []wireCase {
 		{name: "MinOverDecimalColumnZeroRows", sql: `SELECT MIN(d_2) AS lo FROM dec_probe WHERE d_key = -1`},
 		{name: "SumOverDecimalColumn", sql: `SELECT SUM(d_2) AS s FROM dec_probe WHERE d_key IN (1, 2, 3)`},
 		{name: "SumOverDecimalColumnZeroRows", sql: `SELECT SUM(d_2) AS s FROM dec_probe WHERE d_key = -1`},
+		// The WINDOWED form of the same aggregate. It is a separate entry
+		// because it is a separate declaration path: an aggregate reaches the
+		// output projection as an aggregate (proj.IsAgg, which
+		// declaredWireUnconstrainedDecimal reads), a window function reaches
+		// it as a bare reference to the Window operator's output column.
+		//
+		// Before #569 there was nothing to compare here at all — a windowed
+		// MIN over a DECIMAL column FAILED the query ("cannot store string
+		// into FLOAT64 vector"), so no RowDescription was ever sent. The OID
+		// and the value are right now; the typmod is #587.
+		{name: "WindowMinOverDecimalColumn",
+			sql: `SELECT d_key, MIN(d_2) OVER (PARTITION BY d_grp) AS lo FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
+			pins: map[string]string{
+				wirePropTypeMods: windowDecimalTypmodPin,
+			}},
+		// The ZERO-ROW form is a DIFFERENT declaration path and a different
+		// divergence, which is why it is pinned on the OID rather than the
+		// modifier. A zero-row result is described from the PLAN
+		// (declaredOutputSchema), and the plan declines to resolve a
+		// parameterized type for a window argument — colRefDeclaredType
+		// returns Undecided for DECIMAL — so the column keeps
+		// windowOutputType's FLOAT64 and goes out as float8 where the
+		// non-empty form of the SAME query goes out as numeric. The typmod
+		// agrees here only because a float8's typmod is -1 anyway.
+		{name: "WindowMinOverDecimalColumnZeroRows",
+			sql: `SELECT d_key, MIN(d_2) OVER (PARTITION BY d_grp) AS lo FROM dec_probe WHERE d_key = -1`,
+			pins: map[string]string{
+				wirePropTypeOIDs:  windowDecimalZeroRowPin,
+				wirePropTypeSizes: windowDecimalZeroRowPin + " — the declared SIZE follows the OID",
+			}},
+		// The CONTROL for the two above: MIN/MAX over a window of a
+		// non-DECIMAL column, where no typmod is in play. It carries no pin,
+		// which is what proves the pinned entries are about the modifier and
+		// not about windowed MIN/MAX declaring a wrong type in general.
+		{name: "WindowMinMaxOverIntAndText",
+			sql: `SELECT o_orderkey, MIN(o_custkey) OVER (PARTITION BY o_orderstatus) AS lo,
+				MAX(o_orderstatus) OVER (PARTITION BY o_orderstatus) AS hi
+				FROM orders WHERE o_orderkey IN (1, 2, 3) ORDER BY o_orderkey`},
+		// Windowed MIN/MAX over the three network types that map onto
+		// PostgreSQL's `inet` (#569). Before the fix a windowed MIN/MAX over
+		// any of them FAILED the query, so there was no RowDescription to
+		// compare at all; now there is, and the wire arm is the only one that
+		// can see what OID it carries — a value oracle reads a right address
+		// under a wrong type and cannot tell. PostgreSQL has min(inet), so
+		// this is gated against a real reference, unlike the four types it has
+		// no aggregate for (ADR-0012 §5).
+		//
+		// wadjet declares OID 25 (text) for every network column — the
+		// standing network-as-text choice, the same one VECTOR takes — where
+		// PostgreSQL declares 869 (inet). That is a deliberate divergence of
+		// TYPE, pinned here on the OID and its dependent size; every other
+		// wire property stays gated — the declared SIZE (-1 on both, text and
+		// inet are both variable-length), the values on the wire (a rendered
+		// address matches inet's text form), the field count, the names, the
+		// null representation. The pin fails the day wadjet declares 869,
+		// which is the only way network-as-text is ever revisited.
+		{name: "WindowMinMaxOverInet",
+			sql: `SELECT n_key,
+				MIN(n_v4) OVER (PARTITION BY n_grp) AS v4,
+				MIN(n_v6) OVER (PARTITION BY n_grp) AS v6,
+				MIN(n_cidr) OVER (PARTITION BY n_grp) AS c
+				FROM net_probe WHERE n_key IN (1, 2, 3) ORDER BY n_key`,
+			pins: map[string]string{
+				// type_oids ONLY. The declared SIZE agrees at -1 on both
+				// sides — text and inet are each variable-length — so pinning
+				// it would be a false pin the ratchet reports as already
+				// fixed. The values on the wire agree too (a rendered address
+				// matches inet's text form), which is the whole point: right
+				// value, wrong OID, and only this arm sees the OID.
+				wirePropTypeOIDs: networkAsTextOIDPin,
+			}},
 		// A SET OPERATION over two DECIMAL columns of different (p,s). Live
 		// PostgreSQL's \gdesc declares the result UNCONSTRAINED — plain
 		// `numeric`, typmod -1 — where the same column selected on its own is

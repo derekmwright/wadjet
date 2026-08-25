@@ -714,6 +714,40 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "OuterJoinOnResidual", sql: `SELECT COUNT(*) AS c FROM nation n
 			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey
 			WHERE r.r_name IS NULL`},
+		// An explicit JOIN ... ON mixed with a comma-join whose equi-predicate
+		// is in WHERE (#593/#594). The paired half of bugCommaJoinMixedResidual
+		// (shape_fuzz_test.go): the matcher skips GENERATING this shape in the
+		// fuzzer because #593's larger instance (orders⋈lineitem × part, 120M
+		// rows) is a process killer, and this entry keeps the shape gated
+		// somewhere so the skip cannot outlive the bug.
+		//
+		// This instance is the SMALL one — supplier⋈partsupp is 8000 rows,
+		// part is 2000, and wadjet answers 0 (the join comes back empty)
+		// rather than materializing the 16M cross product, so it diverges
+		// WITHOUT OOMing and can be run here. DuckDB answers 8000. Pinned
+		// armBoth: both wadjet paths drop the comma-join relation.
+		//
+		// The shape is not uniformly broken — CommaJoinMixtureWhereFilter
+		// below is the same JOIN-then-comma-with-WHERE shape over
+		// region/nation/supplier and answers correctly (100). Which join
+		// graphs break is #593/#594's territory, not this entry's; the entry
+		// exists to keep ONE known-broken instance gated so the fuzzer skip
+		// cannot outlive the bug.
+		//
+		// #593/#594 are being fixed on main. When that lands this entry starts
+		// agreeing (8000 on both arms), its knownBug/knownBugArm must be
+		// deleted — that deletion is the fix's proof — and the matcher in
+		// shape_fuzz_test.go deleted with it.
+		duckdbCase{name: "CommaJoinMixedWithExplicitJoin",
+			sql: `SELECT COUNT(*) AS n FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+				part t2 WHERE t1.ps_partkey = t2.p_partkey`,
+			knownBugArm: armBoth,
+			knownBug: "#594: an explicit JOIN ... ON mixed with a comma-join whose equi-predicate is in " +
+				"WHERE drops the comma-joined relation — wadjet answers 0 where DuckDB answers 8000. The " +
+				"larger instance of the same shape (#593) materializes the full cross product instead and " +
+				"is OOM-killed, which is why the fuzzer SKIPS the shape (bugCommaJoinMixedResidual) rather " +
+				"than pinning it. Fixed on main; delete this pin and the matcher together when it lands",
+		},
 		// Window VALUE functions over a non-float column (#345). LAG, LEAD,
 		// FIRST_VALUE, LAST_VALUE and NTH_VALUE return a value taken FROM
 		// their input column, so the output type is that column's type — and
