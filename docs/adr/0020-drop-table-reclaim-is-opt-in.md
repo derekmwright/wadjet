@@ -284,11 +284,28 @@ and leaks. That is deliberate, and it is why the default is off.
   `internal/iceberg/drop_reclaim_test.go`), including all three cases the
   reviews reproduced, and each was confirmed to fail with its own fix
   backed out.
-- Reclaim collects only what the engine wrote. A catalog whose tables
-  were all registered rather than ingested — every bench and harness
-  topology — reclaims **nothing**, by design, and its DROPs are still
-  metadata-only. That is a leak, and the right one: the alternative is
-  deleting an operator's staged data.
+- Reclaim collects only what the engine wrote — but "the engine wrote"
+  is not the same claim as "the engine wrote at registration time", and
+  this record used to conflate them. `AddFiles`-registered inputs
+  themselves are never reclaimed: they are never marked, so `DropTable`
+  never schedules them, on every bench and harness topology. **That stops
+  being the whole story once background compaction has run.**
+  `--background-compaction` defaults to **true**, and
+  `compaction.Compactor.mergeGroup` merges a table's small registered
+  files into a `compacted_<uuid>` output written through `AddNewFiles` —
+  engine-written — while deleting the originals outright via
+  `deleteFromStore`, unconditionally and independent of
+  `--reclaim-dropped-tables`. Once that has run once, the table's live
+  manifest holds only the engine-written compacted copy, and a DROP with
+  reclaim enabled removes it: **a compacted bench or harness table's data
+  does leave the bucket.** The inputs leak, by design; the engine-minted
+  copy that replaced them does not.
+
+  Operator rule: do not enable `--reclaim-dropped-tables` on a catalog
+  over a shared or do-not-wipe bucket unless background compaction is
+  also disabled there (`--background-compaction=false`) — the two
+  defaults combined is what turns a DROP into deleting data an operator
+  staged and never asked wadjet to own.
 - With `ReclaimDroppedTables` left at its default, dropped tables' files
   leak in the object store until an operator enables the flag or cleans
   them up by other means. This is a known, accepted gap, not a silent one
