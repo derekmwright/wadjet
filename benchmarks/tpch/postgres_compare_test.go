@@ -557,6 +557,52 @@ func postgresRowFieldCases() []pgCase {
 		`SELECT COUNT(*) AS both_null, SUM(CASE WHEN rw IS NULL THEN 1 ELSE 0 END) AS row_null `+
 			`FROM `+tbl+` WHERE (rw).a IS NULL`)
 
+	// The container reached through a DERIVED TABLE and a CTE. A rename-only
+	// projection forwards the column, so the field path above it must type
+	// exactly as it does at the base — the walk used to stop at any Project
+	// and answer nil, so the path fell back to STRING and an aggregate over
+	// it could not resolve its input at all.
+	add("RowFieldDerivedTable",
+		`SELECT k, rw.b AS v FROM (SELECT k, rw FROM `+tbl+`) s ORDER BY k`,
+		`SELECT k, (rw).b AS v FROM (SELECT k, rw FROM `+tbl+`) s ORDER BY k`)
+	add("RowFieldCTE",
+		`WITH s AS (SELECT k, rw FROM `+tbl+`) SELECT k, rw.b AS v FROM s ORDER BY k`,
+		`WITH s AS (SELECT k, rw FROM `+tbl+`) SELECT k, (rw).b AS v FROM s ORDER BY k`)
+	add("RowFieldDerivedMinMax",
+		`SELECT MIN(rw.b) AS lo, MAX(rw.b) AS hi FROM (SELECT rw FROM `+tbl+`) s`,
+		`SELECT MIN((rw).b) AS lo, MAX((rw).b) AS hi FROM (SELECT rw FROM `+tbl+`) s`)
+	// A field as a FUNCTION ARGUMENT, where the box has to be undone: the
+	// engine hands a field over the way a column of its type is handed over,
+	// and every family that renders one has to accept a field path too.
+	out = append(out, pgCase{
+		name:  "RowFieldTextFunctions",
+		sql:   `SELECT k, UPPER(rw.a) AS u, LENGTH(rw.a) AS l, CONCAT('x=', rw.b) AS c FROM ` + tbl + ` ORDER BY k`,
+		pgSQL: `SELECT k, UPPER((rw).a) AS u, LENGTH((rw).a) AS l, CONCAT('x=', (rw).b) AS c FROM ` + tbl + ` ORDER BY k`,
+		// The UPPER and LENGTH columns are GATED and pass; the pin is the
+		// CONCAT one, and it is not about field paths at all. PostgreSQL's
+		// CONCAT IGNORES a NULL argument — that is what distinguishes it from
+		// `||` — and wadjet's propagates, so `CONCAT('x=', <null>)` is NULL
+		// here and 'x=' there. A flat column and a bare NULL literal diverge
+		// identically; this entry is only where it happened to be caught.
+		knownBug: pgBugWadjet + " CONCAT propagates NULL where PostgreSQL ignores it, so " +
+			"CONCAT('x=', <null field>) is NULL here and 'x=' there. Not field-path specific: " +
+			"CONCAT('a', NULL, 'b') answers NULL over a flat column and a bare literal too",
+		issue: "#609",
+	})
+	// Arithmetic over an integer field stays INTEGER, the way it does over an
+	// integer column (#297's rule).
+	add("RowFieldIntArithmetic",
+		`SELECT k, rw.b + 1 AS v FROM `+tbl+` WHERE rw.b IS NOT NULL ORDER BY k`,
+		`SELECT k, (rw).b + 1 AS v FROM `+tbl+` WHERE (rw).b IS NOT NULL ORDER BY k`)
+	// BETWEEN and IN over a field path, which failed outright with
+	// `filter column "rw.b" does not exist in the input schema`.
+	add("RowFieldBetween",
+		`SELECT k FROM `+tbl+` WHERE rw.b BETWEEN 20 AND 120 ORDER BY k`,
+		`SELECT k FROM `+tbl+` WHERE (rw).b BETWEEN 20 AND 120 ORDER BY k`)
+	add("RowFieldIn",
+		`SELECT k FROM `+tbl+` WHERE rw.b IN (0, 37, 74) ORDER BY k`,
+		`SELECT k FROM `+tbl+` WHERE (rw).b IN (0, 37, 74) ORDER BY k`)
+
 	// A CAST off a field path, which reads the value through the typed route
 	// rather than the boxed one.
 	add("RowFieldCastIntToText",

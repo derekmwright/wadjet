@@ -162,6 +162,10 @@ refusal survives the delegation.
   materialization, which the window path has no seam for yet — a third
   pre-projection site, in a subsystem this change does not touch. Filed
   rather than fixed here, and overlapping #585.
+- **CONCAT propagates NULL where PostgreSQL ignores it** (#609). Caught by
+  this change's oracle entries and not caused by them: a flat column and a
+  bare `NULL` literal diverge identically. `RowFieldTextFunctions` is pinned
+  with `knownBug` naming it; its UPPER and LENGTH columns stay gated.
 - **A field path naming no field answers NULL** (#604) where an unknown
   COLUMN errors and PostgreSQL raises 42703. `colDecls.field` can already
   answer whether the field exists; the plan-time validation is not wired to
