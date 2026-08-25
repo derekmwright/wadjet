@@ -1845,25 +1845,33 @@ func (c *Coordinator) mergeScalarAggregates(batches []*batch.RecordBatch, column
 			}
 			merged[ae.OutputCol] = total
 		case "min":
+			var colType parquet.TypeID
+			if idx < len(schema) {
+				colType = schema[idx].Type
+			}
 			var minVal any
 			for _, row := range rows {
 				v := row[ae.OutputCol]
 				if v == nil {
 					continue
 				}
-				if minVal == nil || compareAnyValues(v, minVal) < 0 {
+				if minVal == nil || compareAnyValues(v, minVal, colType) < 0 {
 					minVal = v
 				}
 			}
 			merged[ae.OutputCol] = minVal
 		case "max":
+			var colType parquet.TypeID
+			if idx < len(schema) {
+				colType = schema[idx].Type
+			}
 			var maxVal any
 			for _, row := range rows {
 				v := row[ae.OutputCol]
 				if v == nil {
 					continue
 				}
-				if maxVal == nil || compareAnyValues(v, maxVal) > 0 {
+				if maxVal == nil || compareAnyValues(v, maxVal, colType) > 0 {
 					maxVal = v
 				}
 			}
@@ -1946,14 +1954,40 @@ func mergeDecimalPartials(rows []map[string]any, col string, scale int, fn strin
 	return acc.FormatDecimal(scale), true
 }
 
-// compareAnyValues compares two values for min/max merge.
+// compareAnyValues compares two values for min/max merge. typ is the
+// column's declared type, when the caller has it (parquet.TypeID's zero
+// value, TypeInt32, never collides with a real network type here because a
+// scalar MIN/MAX of a partial-aggregate string box is only ever CIDR or
+// plain STRING/BYTES/IPv6/UUID — all of which agree with the plain `string`
+// arm below except CIDR).
 //
 // The float64 arm follows kernel.CompareFloat64 (ADR-0012: PostgreSQL
 // decides float ordering — NaN sorts greatest and equal to itself) so this
 // legacy scalar-aggregate merge path agrees with the engine's own MIN/MAX
 // accumulators and with ORDER BY, instead of arrival-order-dependent IEEE
 // `<`/`>` where a NaN partial is silently skipped (#457).
-func compareAnyValues(a, b any) int {
+//
+// The CIDR arm is the same substitution one level up: a scalar
+// MIN(c_cidr)/MAX(c_cidr) whose partials cross more than one worker used to
+// fall to the plain `string` arm and answer PostgreSQL's TEXT extreme
+// instead of its inet one — kernel.Accumulator.Merge closed the identical gap
+// for the engine's own per-batch/per-worker MIN/MAX accumulator (#520); this
+// is that fix's counterpart in the coordinator's legacy scalar merge.
+func compareAnyValues(a, b any, typ parquet.TypeID) int {
+	if typ == parquet.TypeCIDR {
+		av, aok := a.(string)
+		bv, bok := b.(string)
+		if aok && bok {
+			ak, bk := kernel.CidrOrderKey(av), kernel.CidrOrderKey(bv)
+			if ak < bk {
+				return -1
+			}
+			if ak > bk {
+				return 1
+			}
+			return 0
+		}
+	}
 	switch av := a.(type) {
 	case float64:
 		bv, _ := b.(float64)
@@ -2120,9 +2154,20 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
 				return strconv.AppendFloat(dst, b.Columns[ci].Float64Data[row], 'g', -1, 64)
 			}
-		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
+		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeUUID:
 			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
 				return append(dst, b.Columns[ci].BytesData.Value(row)...)
+			}
+		case parquet.TypeCIDR:
+			// PostgreSQL's inet equality (#492), not raw stored-text bytes:
+			// '10.0.0.1' and '10.0.0.1/32' are one value there, so this
+			// GROUP BY re-aggregation key must call them one group the same
+			// way the engine's own hash key already does (appendColumnValue,
+			// #520) — a worker-partial merge is exactly the cross-worker
+			// boundary that #520's fix was for, one layer up in the
+			// coordinator's own re-aggregation path.
+			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
+				return append(dst, kernel.CidrOrderKey(b.Columns[ci].BytesData.UnsafeStringValue(row))...)
 			}
 		case parquet.TypeBool:
 			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
@@ -2515,10 +2560,28 @@ func compareBatchRows(b *batch.RecordBatch, a, bIdx int, orderBy []logical.Order
 		case va > vb:
 			cmp = 1
 		default:
-			// For string columns, compare as strings
-			if schema[ci].Type == parquet.TypeString {
+			// extractFloat64 has no numeric reading for a text-backed
+			// column, so va and vb are both 0 here regardless of the row's
+			// actual value — this default arm is the ONLY place those
+			// columns are compared at all. Only TypeString and TypeCIDR are
+			// named below; extractFloat64's own doc names the broader gap
+			// (IPv6/UUID/BYTES/BOOL/DECIMAL all read 0 here too), filed as
+			// #548 rather than widened into this fix.
+			switch schema[ci].Type {
+			case parquet.TypeString:
 				sa := extractStringValue(b.Columns[ci], a)
 				sb := extractStringValue(b.Columns[ci], bIdx)
+				cmp = strings.Compare(sa, sb)
+			case parquet.TypeCIDR:
+				// PostgreSQL's inet order (#492), not the stored text's byte
+				// order: without this arm a probe-split gather's `ORDER BY
+				// c_cidr` fell through to a no-op tie on every row (va==vb==0
+				// above), which is not even the OLD text-order answer — it is
+				// an ARBITRARY order, since slices.SortFunc is not guaranteed
+				// stable. kernel.CidrOrderKey is the same re-key ORDER BY,
+				// GROUP BY and MIN/MAX already use (#520).
+				sa := kernel.CidrOrderKey(extractStringValue(b.Columns[ci], a))
+				sb := kernel.CidrOrderKey(extractStringValue(b.Columns[ci], bIdx))
 				cmp = strings.Compare(sa, sb)
 			}
 		}
