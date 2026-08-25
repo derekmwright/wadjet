@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -276,6 +277,97 @@ func (w *Window) retypeValueColumns() bool {
 	return changed
 }
 
+// bindKeyNames rewrites every PARTITION BY term, window ORDER BY term and
+// input column to the spelling the input batch actually carries, and REFUSES
+// a partition or order key the input does not carry at all.
+//
+// Both halves close #585. A window key was resolved with RecordBatch.
+// ColumnIndex's exact-name match at three separate sites — the columnar
+// compute, the external partition walker and the row-oriented spill path —
+// and every one of them treated the -1 as a key to SKIP. `PARTITION BY p.g`
+// over a batch carrying `g` therefore dropped out of the key list, and a
+// window whose only key dropped out degrades to ONE partition spanning the
+// input: ROW_NUMBER() numbered straight through three groups, SUM OVER
+// answered the whole-table sum, and nothing said a word. The same silence
+// covered a key that names nothing at all (`PARTITION BY nosuchcol`).
+//
+// The qualified↔bare fallback is columnIndexFallback's, which is what every
+// other operator resolves a column with (the hash join's keys, the
+// aggregate's group keys), so a window resolves names the way the rest of the
+// engine does. Refusing what it cannot resolve is unresolvedAggColumn's rule
+// applied one operator over: an unresolvable GROUP BY key collapsing every
+// row into one group is the same defect as an unresolvable PARTITION BY key
+// collapsing every row into one partition, and the aggregate stopped
+// answering it in silence first.
+//
+// An EXPRESSION key (`PARTITION BY id % 3`) never reaches the refusal: the
+// planner materializes it as a computed column named by the expression's own
+// text before the operator sees a row (physical.windowKeyProjections), the
+// same way a GROUP BY expression is pre-projected for the hash aggregate. A
+// key that reaches here unresolved is one nothing computed.
+//
+// InputCol takes the fallback but NOT the refusal. It is not always a column:
+// COUNT(*) OVER () carries "*", and a constant argument carries its literal
+// text — the operator has no parser to tell those from a misspelled column,
+// and the planner is where an unknown one is caught. What the fallback fixes
+// is the qualified spelling after a join, whose symptom was an all-NULL
+// output column rather than a wrong one (#585's note).
+//
+// The rewrite copies before it writes: NewWindow copies the WindowColumn
+// structs but not the slices inside them, which are the planner's own — on
+// the single-process path they are the logical plan's, and a cached plan
+// re-run against a differently-spelled input would otherwise see the previous
+// run's binding.
+func (w *Window) bindKeyNames(b *batch.RecordBatch) error {
+	for i := range w.Columns {
+		wc := &w.Columns[i]
+		if wc.InputCol != "" && wc.InputCol != "*" {
+			if idx := columnIndexFallback(b, wc.InputCol); idx >= 0 {
+				wc.InputCol = b.Schema[idx].Name
+			}
+		}
+		if len(wc.PartitionBy) > 0 {
+			bound := make([]string, len(wc.PartitionBy))
+			for j, pc := range wc.PartitionBy {
+				name, err := boundWindowKey(b, "PARTITION BY", pc)
+				if err != nil {
+					return err
+				}
+				bound[j] = name
+			}
+			wc.PartitionBy = bound
+		}
+		if len(wc.OrderBy) > 0 {
+			bound := make([]SortKey, len(wc.OrderBy))
+			copy(bound, wc.OrderBy)
+			for j := range bound {
+				name, err := boundWindowKey(b, "ORDER BY", bound[j].Column)
+				if err != nil {
+					return err
+				}
+				bound[j].Column = name
+			}
+			wc.OrderBy = bound
+		}
+	}
+	return nil
+}
+
+// boundWindowKey resolves one window key against the input batch, or explains
+// that it cannot. See bindKeyNames for why a miss is an error.
+func boundWindowKey(b *batch.RecordBatch, clause, name string) (string, error) {
+	idx := columnIndexFallback(b, name)
+	if idx < 0 {
+		have := make([]string, len(b.Schema))
+		for i, c := range b.Schema {
+			have[i] = c.Name
+		}
+		return "", fmt.Errorf("window: %s %q is not a column of its input (input has: %s)",
+			clause, name, strings.Join(have, ", "))
+	}
+	return b.Schema[idx].Name, nil
+}
+
 // Window is a SinkSource that collects all rows, partitions and sorts them,
 // computes window function values, and emits the original rows with computed
 // window columns appended. Operates directly on column vectors to avoid
@@ -349,13 +441,21 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 	defer w.mu.Unlock()
 	if w.schema == nil {
 		w.schema = b.Schema
-		if w.retypeValueColumns() {
-			// The grouping holds COPIES of the specs, so it has to be
-			// rebuilt to see the corrected types. Group identity is
-			// (PartitionBy, OrderBy) only, so the grouping itself — and any
-			// run already spilled under w.groups[0].sortKeys — is unchanged.
-			w.groups = groupWindowSpecs(w.Columns)
+		// Bind first: retypeValueColumns and windowOutputColumn look the
+		// input column up in w.schema by name, so they need the spelling the
+		// batch carries, not the one the query wrote (#585).
+		if err := w.bindKeyNames(b); err != nil {
+			return err
 		}
+		// The grouping holds COPIES of the specs, so it has to be rebuilt to
+		// see the bound names and the corrected types. Group identity is
+		// (PartitionBy, OrderBy) only — and binding can CHANGE it, since two
+		// OVER clauses spelling one key differently ("g" and "p.g") are one
+		// group once both name the column the batch carries. No run has been
+		// spilled yet: the binding happens on the first batch, before the
+		// first pressure check below.
+		w.retypeValueColumns()
+		w.groups = groupWindowSpecs(w.Columns)
 	}
 	FlattenForConsumer(b, nil) // retained past the batch cycle: views must not survive
 	b.Detach()                 // prevent pool recycle — pipeline calls Release() after Consume()

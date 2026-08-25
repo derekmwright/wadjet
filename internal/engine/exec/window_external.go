@@ -137,9 +137,14 @@ func newPartitionWalker(m *runMerger, partitionBy []string, charge func(delta in
 // (sort_merge_join.go), which already fails loudly on the same condition.
 func (w *partitionWalker) resolve(b *batch.RecordBatch) error {
 	for i, name := range w.partitionBy {
-		idx := b.ColumnIndex(name)
-		if idx >= len(b.Columns) {
-			continue
+		idx := columnIndexFallback(b, name)
+		// A key the merged run does not carry is an error for the reason
+		// Window.bindKeyNames refuses one (#585): dropping it from the
+		// comparison merges every partition into one. The old guard tested
+		// only the UPPER bound, so a -1 from the exact-name lookup fell
+		// through to b.Columns[-1] and panicked the task instead.
+		if idx < 0 || idx >= len(b.Columns) {
+			return fmt.Errorf("window: PARTITION BY %q is not a column of its spilled input", name)
 		}
 		w.partIdxs[i] = idx
 		cmp := kernel.ResolveSortCompare(b.Columns[idx].Type)
@@ -155,9 +160,9 @@ func (w *partitionWalker) resolve(b *batch.RecordBatch) error {
 // sameRow reports whether two rows agree on every partition column.
 func (w *partitionWalker) sameRow(ba *batch.RecordBatch, ra int, bb *batch.RecordBatch, rb int) bool {
 	for i, idx := range w.partIdxs {
-		// idx < 0 is a column resolve could not find — a legitimate skip,
-		// unrelated to type support. A resolved column always carries a
-		// non-nil compare: resolve errors out before returning otherwise.
+		// resolve() binds every key or errors out, so a negative index here
+		// can only mean sameRow ran before it — defensive, not a skip with a
+		// meaning (#585 removed the one it used to have).
 		if idx < 0 {
 			continue
 		}
