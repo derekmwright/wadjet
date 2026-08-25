@@ -234,10 +234,6 @@ var pins = map[string]struct{ issue, reason string }{
 	"notin_null_build_key": {"#578", "same: the correlated NOT IN answers the two-valued question"},
 	"notin_null_probe_key": {"#578", "same, and this one needs only the PROBE's own NULL key — " +
 		"the half of the rule that requires no per-group state"},
-	"exists_derived_inner": {"#577", "a semi/anti join whose BUILD SIDE is a derived table matches " +
-		"nothing; reproduces with one key and with no correlation at all"},
-	"notexists_derived_inner": {"#577", "the anti twin of the same defect: the whole probe side survives"},
-	"in_derived_inner":        {"#577", "the IN spelling of the same defect"},
 }
 
 // Corpus is the query set. Every entry counts rows, because a count is what
@@ -409,6 +405,13 @@ func sharedNameCorpus() []Case {
 			`WHERE b.n = a.n)`, Outer, Inner, Dim), 27, 2)
 
 	// --- the subquery's inner is a DERIVED TABLE -------------------------
+	//
+	// Gated, not pinned: #550/#571 (fix(planner,expr): decline decorrelation
+	// over a derived-table inner) made all three correct on both paths, so
+	// the #577 pins these carried were deleted — the entries now assert the
+	// live PostgreSQL answer outright. The HARDER derived shapes #577 still
+	// tracks (CTE, renamed columns, nested, aggregate) are fix-577's, not
+	// these.
 	add("exists_derived_inner", fmt.Sprintf(
 		`SELECT COUNT(*) AS n FROM %s a WHERE EXISTS (SELECT 1 FROM `+
 			`(SELECT s, n, g FROM %s WHERE id < 20) b WHERE b.s = a.s AND b.n = a.n)`,

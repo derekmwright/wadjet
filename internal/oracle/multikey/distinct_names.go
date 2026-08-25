@@ -122,11 +122,13 @@ func DNData(table string) []map[string]any {
 
 // dnPins are the entries a defect OTHER than #562 keeps wadjet from
 // answering. Same ratchet as the shared-schema arm's.
+//
+// dn_exists_derived was here under #577 and is gone: #550/#571 declined
+// decorrelation over a derived-table inner, so it is correct on both paths
+// and gated outright now.
 var dnPins = map[string]struct{ issue, reason string }{
 	"dn_notin_2key": {"#578", "a CORRELATED NOT IN is lowered to a plain anti join, so it answers " +
 		"its NOT EXISTS twin instead of NOT IN's three-valued rule (#507's remainder)"},
-	"dn_exists_derived": {"#577", "a semi/anti join whose BUILD SIDE is a derived table matches " +
-		"nothing; reproduces with one key and with no correlation at all"},
 }
 
 // DistinctNameCorpus is the arm on which the narrowing actually FIRES.
