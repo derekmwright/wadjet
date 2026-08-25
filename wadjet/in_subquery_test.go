@@ -203,15 +203,15 @@ func jiOpen(t *testing.T) *DB {
 // PostgreSQL says 1, silently. So the strip is scoped to a subquery with no
 // JOIN in it, and a joined inner keeps the spelling the user wrote.
 //
-// The `knownBug` entries are two OLDER defects this fixture is the first to
-// see, both of them the same premise applied one layer over: #526, where a
-// qualified item over a joined inner names a column the build schema does not
-// carry (exec.HashJoin's key repair then swaps the pair on the false premise
-// #516 documents, and the join matches nothing), and #527, where a correlated
-// EXISTS over a joined inner strips its correlation column the same way and
-// correlates on the wrong relation. They RUN and they LOG; the gate FAILS if
-// one starts agreeing, because that is the proof the fix landed and the pin
-// should go (ADR-0013 §Pins).
+// The five entries that used to carry a `knownBug` pin — three for #526 (a
+// qualified item over a joined inner named a column the build schema does not
+// carry, exec.HashJoin's key repair swapped the pair on #516's false premise,
+// and the join matched nothing) and two for #527 (a correlated EXISTS over a
+// joined inner stripped its correlation column and correlated on the other
+// relation) — now agree, so the pins are gone. What replaced the strip is
+// repairDecorrelatedSpelling: the decorrelations record the relation and
+// column their build-side references MEAN, and the spelling is settled after
+// reorderJoins from the join's real output, not from write order.
 //
 // Every want below is a live postgres:17-alpine transcript over this fixture.
 func TestInSubqueryOverAJoinedInnerAgreesWithPostgres(t *testing.T) {
@@ -245,29 +245,38 @@ func TestInSubqueryOverAJoinedInnerAgreesWithPostgres(t *testing.T) {
 		// like: the semi join and the anti join agree with each other and
 		// disagree with PostgreSQL.
 		{name: "exists_over_joined_inner",
-			sql:      `SELECT COUNT(*) AS n FROM tt a WHERE EXISTS (SELECT 1 FROM uu c JOIN tt b ON b.id = c.k WHERE c.x = a.x)`,
-			want:     1,
-			knownBug: "#527"},
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE EXISTS (SELECT 1 FROM uu c JOIN tt b ON b.id = c.k WHERE c.x = a.x)`,
+			want: 1},
 		{name: "not_exists_over_joined_inner",
-			sql:      `SELECT COUNT(*) AS n FROM tt a WHERE NOT EXISTS (SELECT 1 FROM uu c JOIN tt b ON b.id = c.k WHERE c.x = a.x)`,
-			want:     3,
-			knownBug: "#527"},
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE NOT EXISTS (SELECT 1 FROM uu c JOIN tt b ON b.id = c.k WHERE c.x = a.x)`,
+			want: 3},
 		// #526: the other relation's column. Wrong before #516, wrong after
 		// it, wrong here — and wrong in BOTH directions of write order, which
 		// is why it is not "the non-leading relation" but "the spelling the
 		// join's output does not carry".
 		{name: "nonlead_qualified_small_lead",
-			sql:      `SELECT COUNT(*) AS n FROM tt a WHERE a.x IN (SELECT b.x FROM uu c JOIN tt b ON b.id = c.k)`,
-			want:     2,
-			knownBug: "#526"},
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.x IN (SELECT b.x FROM uu c JOIN tt b ON b.id = c.k)`,
+			want: 2},
 		{name: "lead_qualified_big_lead",
-			sql:      `SELECT COUNT(*) AS n FROM tt a WHERE a.x IN (SELECT b.x FROM tt b JOIN uu c ON b.id = c.k)`,
-			want:     2,
-			knownBug: "#526"},
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.x IN (SELECT b.x FROM tt b JOIN uu c ON b.id = c.k)`,
+			want: 2},
 		{name: "not_in_nonlead_qualified_small_lead",
-			sql:      `SELECT COUNT(*) AS n FROM tt a WHERE a.x NOT IN (SELECT b.x FROM uu c JOIN tt b ON b.id = c.k)`,
-			want:     2,
-			knownBug: "#526"},
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.x NOT IN (SELECT b.x FROM uu c JOIN tt b ON b.id = c.k)`,
+			want: 2},
+		// The spellings the join emits BARE because nothing collides — the
+		// ordinary cross-relation shape, and the one a strip is right about
+		// only by luck about which side the estimator chose.
+		{name: "nonlead_qualified_no_collision",
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.id IN (SELECT c.k FROM uu c JOIN tt b ON b.id = c.k)`,
+			want: 2},
+		{name: "lead_qualified_no_collision",
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.id IN (SELECT b.id FROM uu c JOIN tt b ON b.id = c.k)`,
+			want: 2},
+		// An inner-only filter on the joined inner, so the membership set is
+		// not the whole column: the key must still name the right relation.
+		{name: "filtered_joined_inner",
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.x IN (SELECT c.x FROM uu c JOIN tt b ON b.id = c.k WHERE c.k < 2)`,
+			want: 1},
 	}
 
 	for _, tc := range cases {
@@ -294,6 +303,74 @@ func TestInSubqueryOverAJoinedInnerAgreesWithPostgres(t *testing.T) {
 				return
 			}
 			if got != tc.want {
+				t.Errorf("COUNT(*) = %v, want %d (PostgreSQL 17)\n  SQL: %s", got, tc.want, tc.sql)
+			}
+		})
+	}
+}
+
+// TestCorrelatedExistsInequalityOverAJoinedInnerAgreesWithPostgres is #527's
+// other half: a correlated EXISTS whose correlation is an INEQUALITY does not
+// become a join key — it becomes the semi join's JoinFilter, evaluated at
+// probe time against the stored build batch.
+//
+// That path lost the qualifier twice. decorrelateExists stripped it (the same
+// premise as the equality key), and the physical planner's filter builders
+// stripped it again through cleanExpr, so `c.x > a.x` over `uu c JOIN tt b`
+// compared the probe against tt.x — whichever relation reorderJoins had put
+// on the probe of the INNER join. The wrongness was direction-dependent and
+// so easy to miss: on this fixture `>=` and `<=` read as "the filter was
+// ignored" while `>` and `!=` read as "the filter rejects everything".
+//
+// Both spellings are exercised: `c.x` is a column the inner join emits
+// QUALIFIED (its bare name collides with tt b's), `b.id` and `b.x` are ones it
+// emits bare. The single-relation entries are the control — no inner join, so
+// nothing to qualify, and they answered correctly before.
+//
+// Every want is a live postgres:17-alpine transcript over the same fixture.
+func TestCorrelatedExistsInequalityOverAJoinedInnerAgreesWithPostgres(t *testing.T) {
+	ctx := context.Background()
+	db := jiOpen(t)
+
+	joined := func(cond string) string {
+		return `SELECT COUNT(*) AS n FROM tt a WHERE EXISTS ` +
+			`(SELECT 1 FROM uu c JOIN tt b ON b.id = c.k WHERE c.k = a.id AND ` + cond + `)`
+	}
+	single := func(cond string) string {
+		return `SELECT COUNT(*) AS n FROM tt a WHERE EXISTS ` +
+			`(SELECT 1 FROM uu c WHERE c.k = a.id AND ` + cond + `)`
+	}
+
+	cases := []struct {
+		name string
+		sql  string
+		want int64
+	}{
+		// On the matching keys c.x is {10, 99} against a.x {10, 20}.
+		{"qualified_gt", joined("c.x > a.x"), 1},
+		{"qualified_ge", joined("c.x >= a.x"), 2},
+		{"qualified_lt", joined("c.x < a.x"), 0},
+		{"qualified_le", joined("c.x <= a.x"), 1},
+		{"qualified_ne", joined("c.x != a.x"), 1},
+		// b.x is {10, 20}, emitted bare because tt b is the inner join's probe.
+		{"bare_gt", joined("b.x > a.x"), 0},
+		{"bare_ge", joined("b.x >= a.x"), 2},
+		{"bare_lt", joined("b.id < a.x"), 2},
+		{"single_relation_gt", single("c.x > a.x"), 1},
+		{"single_relation_le", single("c.x <= a.x"), 1},
+		{"single_relation_ne", single("c.x != a.x"), 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := db.Query(ctx, tc.sql)
+			if err != nil {
+				t.Fatalf("query error: %v\n  SQL: %s", err, tc.sql)
+			}
+			if len(res.Rows) != 1 {
+				t.Fatalf("got %d rows, want 1 (scalar COUNT)\n  SQL: %s", len(res.Rows), tc.sql)
+			}
+			if got := res.Rows[0]["n"]; got != tc.want {
 				t.Errorf("COUNT(*) = %v, want %d (PostgreSQL 17)\n  SQL: %s", got, tc.want, tc.sql)
 			}
 		})

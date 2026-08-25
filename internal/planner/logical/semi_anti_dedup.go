@@ -52,6 +52,14 @@ func dedupSemiAntiBuildSide(n *Node) *Node {
 	if len(n.Children) < 2 {
 		return n
 	}
+	// A decorrelated join whose build-side key is still unspelled would be
+	// projected to a name that may not exist, and a Project of nothing emits
+	// nothing (#526). Wait — repairDecorrelatedSpelling calls this pass again
+	// on the node once reorderJoins has settled the spelling, so the NDV
+	// bound is applied then instead of lost.
+	if deferSemiAntiDedup(n) {
+		return n
+	}
 	right := n.Children[1]
 	rightKeys := extractRightJoinKeys(n.JoinCond, right)
 	if len(rightKeys) == 0 {

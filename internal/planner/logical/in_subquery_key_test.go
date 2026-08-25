@@ -62,7 +62,7 @@ func TestInSubqueryNamesAnInnerKeyTheInnerPlanEmits(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := buildPlan(t, tc.sql)
 			annotateScanColumnsForTest(plan)
-			join := findNodeMatching(Optimize(plan), func(n *Node) bool {
+			join := findNodeMatching(Optimize(plan, annotateScanColumnsForTest), func(n *Node) bool {
 				return n.Type == NodeJoin && (n.JoinType == "semi" || n.JoinType == "anti")
 			})
 			if join == nil {
@@ -83,19 +83,59 @@ func TestInSubqueryNamesAnInnerKeyTheInnerPlanEmits(t *testing.T) {
 	}
 }
 
-// A qualifier naming a JOINED subquery's non-leading relation is left as
-// written: the inner join qualifies a build-side column when its bare name
-// collides, so the qualified spelling can be the correct one there. Pinning
-// this keeps the #516 fix from widening into a rename it cannot justify.
-func TestInSubqueryKeepsANonLeadingRelationsQualifier(t *testing.T) {
-	got, ok := innerSemiJoinKeyFor(t,
-		`SELECT o_orderkey FROM orders WHERE o_custkey IN
-			(SELECT n.n_nationkey FROM customer c JOIN nation n ON c.c_nationkey = n.n_nationkey)`)
-	if !ok {
-		t.Fatal("decorrelation declined a shape it used to accept")
+// #526 — over a JOINED inner, the key is spelled from the join's REAL output,
+// which only reorderJoins settles. A join emits its probe side's columns bare
+// and qualifies a build column exactly where the bare name collides, so
+// neither "keep what the user wrote" nor "strip the qualifier" is right on its
+// own: each is right for one of the two cases and silently wrong for the
+// other. repairDecorrelatedSpelling picks per join, after the reorder.
+//
+// These assert the KEY, because that is the defect — a key naming a column
+// the build subtree does not carry lets exec.HashJoin's repair swap the pair
+// and the join then matches nothing. The ANSWERS are gated against
+// PostgreSQL in wadjet.TestInSubqueryOverAJoinedInnerAgreesWithPostgres.
+func TestInSubqueryOverAJoinedInnerNamesTheKeyTheJoinEmits(t *testing.T) {
+	cases := []struct {
+		name    string
+		sql     string
+		wantKey string
+	}{
+		{
+			// customer and nation share no bare column name, so whichever
+			// side the estimator puts on the build, the join emits
+			// n_nationkey BARE. The qualified spelling names nothing.
+			name: "no collision: the join emits the column bare",
+			sql: `SELECT o_orderkey FROM orders WHERE o_custkey IN
+				(SELECT n.n_nationkey FROM customer c JOIN nation n ON c.c_nationkey = n.n_nationkey)`,
+			wantKey: "n_nationkey",
+		},
+		{
+			// A self-join: both relations carry n_nationkey, so the build
+			// side's copy IS qualified and the key must say so.
+			name: "collision: the build side's copy is qualified",
+			sql: `SELECT o_orderkey FROM orders WHERE o_custkey IN
+				(SELECT b.n_nationkey FROM nation a JOIN nation b ON a.n_regionkey = b.n_regionkey)`,
+			wantKey: "b.n_nationkey",
+		},
+		{
+			// The other half of the same self-join: the probe side's copy is
+			// the bare one.
+			name: "collision: the probe side's copy is bare",
+			sql: `SELECT o_orderkey FROM orders WHERE o_custkey IN
+				(SELECT a.n_nationkey FROM nation a JOIN nation b ON a.n_regionkey = b.n_regionkey)`,
+			wantKey: "n_nationkey",
+		},
 	}
-	if got != "n.n_nationkey" {
-		t.Errorf("inner key = %q, want the qualified %q", got, "n.n_nationkey")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := innerSemiJoinKeyFor(t, tc.sql)
+			if !ok {
+				t.Fatal("decorrelation declined a shape it used to accept")
+			}
+			if got != tc.wantKey {
+				t.Errorf("inner key = %q, want %q", got, tc.wantKey)
+			}
+		})
 	}
 }
 
@@ -114,7 +154,7 @@ func TestInSubqueryWithALimitDeclinesDecorrelation(t *testing.T) {
 	} {
 		plan := buildPlan(t, sql)
 		annotateScanColumnsForTest(plan)
-		optimized := Optimize(plan)
+		optimized := Optimize(plan, annotateScanColumnsForTest)
 		if join := findNodeMatching(optimized, func(n *Node) bool {
 			return n.Type == NodeJoin && (n.JoinType == "semi" || n.JoinType == "anti")
 		}); join != nil {
@@ -130,7 +170,7 @@ func TestInSubqueryWithALimitDeclinesDecorrelation(t *testing.T) {
 	// blanket disable of the rewrite rather than a bound on it.
 	plan := buildPlan(t, `SELECT o_orderkey FROM orders WHERE o_custkey IN (SELECT o_custkey FROM orders WHERE o_orderkey < 500)`)
 	annotateScanColumnsForTest(plan)
-	if findNodeMatching(Optimize(plan), func(n *Node) bool { return n.Type == NodeJoin && n.JoinType == "semi" }) == nil {
+	if findNodeMatching(Optimize(plan, annotateScanColumnsForTest), func(n *Node) bool { return n.Type == NodeJoin && n.JoinType == "semi" }) == nil {
 		t.Error("an unbounded IN-subquery no longer decorrelates into a semi join")
 	}
 }
@@ -141,7 +181,7 @@ func innerSemiJoinKeyFor(t *testing.T, sql string) (string, bool) {
 	t.Helper()
 	plan := buildPlan(t, sql)
 	annotateScanColumnsForTest(plan)
-	join := findNodeMatching(Optimize(plan), func(n *Node) bool {
+	join := findNodeMatching(Optimize(plan, annotateScanColumnsForTest), func(n *Node) bool {
 		return n.Type == NodeJoin && (n.JoinType == "semi" || n.JoinType == "anti")
 	})
 	if join == nil {

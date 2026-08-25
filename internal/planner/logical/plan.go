@@ -164,8 +164,15 @@ type Node struct {
 	// consumed by the two-level distinct rewrite's cost gate).
 	ScanIntCols map[string]bool
 
-	GroupBy          []string
-	GroupByExprs     []plansql.Node // AST for GROUP BY expressions (may be nil)
+	GroupBy      []string
+	GroupByExprs []plansql.Node // AST for GROUP BY expressions (may be nil)
+	// InnerGroupRefs parallels GroupBy on an Aggregate the IN decorrelation
+	// built inside a subquery's plan: what each group term MEANS, for
+	// repairDecorrelatedSpelling to spell once the inner join order is
+	// final. An aggregate's output column IS its group key's text, so a key
+	// named from write order moves the #526 mismatch one node up rather
+	// than removing it. Nil elsewhere, and nil again after the repair.
+	InnerGroupRefs   []InnerKeyRef
 	AggExprs         []AggExpr
 	GroupingSetNulls []string   // columns that should be NULL in this grouping set (legacy, per-node)
 	GroupingSets     [][]string // single-pass grouping sets: each entry lists the columns in that set
@@ -184,6 +191,16 @@ type Node struct {
 	LeftKeys      []string
 	RightKeys     []string
 	NeededColumns []string // columns the parent needs from this join's output (set by optimizer)
+
+	// InnerKeys and InnerFilterKeys record what a semi/anti join produced by
+	// the IN / EXISTS decorrelations MEANS by its build-side references —
+	// the relation qualifier and source column the subquery wrote — for
+	// repairDecorrelatedSpelling to turn back into JoinCond / JoinFilter
+	// text once reorderJoins has settled which relation's columns the inner
+	// join emits bare. Nil on every other join, and nil again after the
+	// repair has run. See inner_key_spelling.go (#526, #527).
+	InnerKeys       []DecorrelatedKey
+	InnerFilterKeys []DecorrelatedKey
 
 	// Window
 	WindowExprs []WindowExpr

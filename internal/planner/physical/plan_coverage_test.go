@@ -861,9 +861,13 @@ func TestExtractFilterBuildColumns(t *testing.T) {
 	if len(cols) != 1 {
 		t.Fatalf("expected 1 column, got %d: %v", len(cols), cols)
 	}
-	// The right side of "e.id = u.id" is "u.id" → cleanExpr → "id"
-	if cols[0] != "id" {
-		t.Errorf("expected 'id', got %q", cols[0])
+	// The right side of "e.id = u.id" is the build column, kept QUALIFIED: a
+	// join emits a build column under its relation's qualifier whenever the
+	// bare name collides on the probe side, and stripping here read the
+	// wrong relation's column (#527). exec resolves it with a bare-name
+	// fallback for the single-relation builds that emit it that way.
+	if cols[0] != "u.id" {
+		t.Errorf("expected 'u.id', got %q", cols[0])
 	}
 
 	// Multiple conditions with AND

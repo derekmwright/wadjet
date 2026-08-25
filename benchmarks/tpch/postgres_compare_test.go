@@ -1325,50 +1325,61 @@ func postgresSemanticsCases() []pgCase {
 	// Only a self-join can show it in this schema, because TPC-H prefixes
 	// every column with its table and nothing else collides.
 	//
-	// All five are #526 pins: a QUALIFIED item over a joined inner names a
+	// All five were #526 pins: a QUALIFIED item over a joined inner named a
 	// column the semi join's build schema does not carry, exec.HashJoin's key
-	// repair swaps the pair on #516's false premise, and the join matches
-	// nothing — IN answers 0 and NOT IN answers every row. Measured over this
-	// fixture, all five diverge on the base commit too, so nothing here is a
-	// regression; they are in the corpus because it had no joined-inner
-	// IN-subquery of any kind, which is why this whole family was dark.
+	// repair swapped the pair on #516's false premise, and the join matched
+	// nothing — IN answered 0 and NOT IN answered every row. They are plain
+	// entries now: the decorrelations record the relation and column each
+	// build-side reference MEANS, and repairDecorrelatedSpelling settles the
+	// text after reorderJoins has decided which relation's columns the inner
+	// join emits bare.
 	out = append(out,
 		pgCase{name: "InSubqueryJoinedInnerLeadQualified",
 			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey IN
 				(SELECT c.n_nationkey FROM nation c JOIN nation b ON b.n_regionkey = c.n_regionkey
-				 WHERE c.n_nationkey < 3)`,
-			knownBug: pgBugWadjet + " an IN over a JOINED inner with a qualified select item names a " +
-				"key the build schema does not carry, so the semi join matches nothing and the " +
-				"predicate selects no rows (PostgreSQL: 3, wadjet: 0)", issue: "#526"},
+				 WHERE c.n_nationkey < 3)`},
 		pgCase{name: "InSubqueryJoinedInnerLeadQualifiedValues",
 			sql: `SELECT a.n_nationkey AS k FROM nation a WHERE a.n_nationkey IN
 				(SELECT c.n_nationkey FROM nation c JOIN nation b ON b.n_regionkey = c.n_regionkey
 				 WHERE c.n_nationkey < 3)
-				ORDER BY k`, ordered: true,
-			knownBug: pgBugWadjet + " the VALUES of the same shape: PostgreSQL returns 0,1,2 and " +
-				"wadjet returns no rows at all", issue: "#526"},
+				ORDER BY k`, ordered: true},
 		pgCase{name: "NotInSubqueryJoinedInnerLeadQualified",
 			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey NOT IN
 				(SELECT c.n_nationkey FROM nation c JOIN nation b ON b.n_regionkey = c.n_regionkey
-				 WHERE c.n_nationkey < 3)`,
-			knownBug: pgBugWadjet + " the NOT IN half of the same defect: the anti join matches " +
-				"nothing, so every row survives (PostgreSQL: 22, wadjet: 25)", issue: "#526"},
+				 WHERE c.n_nationkey < 3)`},
 		// Across two DIFFERENT tables, where no bare name collides. This is
-		// the ORDINARY spelling of a joined inner and it is wrong for the
-		// same reason, which is what says #526 is a property of the JOIN and
-		// not of the name collision the self-join above needs.
+		// the ORDINARY spelling of a joined inner and it was wrong for the
+		// same reason, which is what said #526 is a property of the JOIN and
+		// not of the name collision the self-join above needs. The non-lead
+		// twin is the one no strip could have got right: with nothing
+		// colliding the join emits the column BARE, so the qualified spelling
+		// names nothing whichever side the estimator picks.
 		pgCase{name: "InSubqueryJoinedInnerCrossTable",
 			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
 				(SELECT r.r_regionkey FROM region r JOIN nation b ON b.n_regionkey = r.r_regionkey
-				 WHERE r.r_regionkey < 2)`,
-			knownBug: pgBugWadjet + " a joined inner across two tables, item qualified by the " +
-				"relation written first (PostgreSQL: 10, wadjet: 0)", issue: "#526"},
+				 WHERE r.r_regionkey < 2)`},
 		pgCase{name: "InSubqueryJoinedInnerCrossTableNonLead",
 			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
 				(SELECT b.n_regionkey FROM region r JOIN nation b ON b.n_regionkey = r.r_regionkey
-				 WHERE r.r_regionkey < 2)`,
-			knownBug: pgBugWadjet + " the same across two tables with the item qualified by the " +
-				"relation written second (PostgreSQL: 10, wadjet: 0)", issue: "#526"},
+				 WHERE r.r_regionkey < 2)`},
+		// #527: a correlated EXISTS over a joined inner, both directions.
+		// Both inner relations carry n_nationkey, so a stripped correlation
+		// column resolved to whichever one reorderJoins put on the probe.
+		pgCase{name: "ExistsJoinedInnerQualifiedCorrelation",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE EXISTS
+				(SELECT 1 FROM nation c JOIN nation b ON b.n_regionkey = c.n_regionkey
+				 WHERE c.n_nationkey = a.n_nationkey AND b.n_nationkey < 3)`},
+		pgCase{name: "NotExistsJoinedInnerQualifiedCorrelation",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE NOT EXISTS
+				(SELECT 1 FROM nation c JOIN nation b ON b.n_regionkey = c.n_regionkey
+				 WHERE c.n_nationkey = a.n_nationkey AND b.n_nationkey < 3)`},
+		// An INEQUALITY correlation rides the semi join's JoinFilter rather
+		// than a key, and the physical planner's filter builders stripped the
+		// qualifier a second time (#527).
+		pgCase{name: "ExistsJoinedInnerInequalityCorrelation",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE EXISTS
+				(SELECT 1 FROM nation c JOIN nation b ON b.n_regionkey = c.n_regionkey
+				 WHERE c.n_regionkey = a.n_regionkey AND c.n_nationkey > a.n_nationkey)`},
 	)
 
 	// --- String functions -------------------------------------------------

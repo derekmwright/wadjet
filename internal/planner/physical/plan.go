@@ -6691,11 +6691,13 @@ func ParseSemiAntiNE(filter string) (probeCol, buildCol string, ok bool) {
 	} else {
 		return "", "", false
 	}
-	left := cleanExpr(strings.TrimSpace(part[:idx]))
-	right := cleanExpr(strings.TrimSpace(part[idx+opLen:]))
+	left := strings.TrimSpace(part[:idx])
+	right := strings.TrimSpace(part[idx+opLen:])
 	if !isBareColumnRef(left) || !isBareColumnRef(right) {
 		return "", "", false
 	}
+	// Qualified: exec resolves both through columnIndexFallback, and the
+	// qualifier is what distinguishes a joined build's colliding names.
 	return left, right, true
 }
 
@@ -6735,8 +6737,15 @@ func BuildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow 
 		for _, op := range []string{"!=", ">=", "<=", "<>", ">", "<"} {
 			idx := strings.Index(part, " "+op+" ")
 			if idx >= 0 {
-				left := cleanExpr(strings.TrimSpace(part[:idx]))
-				right := cleanExpr(strings.TrimSpace(part[idx+len(op)+2:]))
+				// Kept QUALIFIED. A join emits a build column under its
+				// relation's qualifier whenever the bare name collides on
+				// the probe side, so stripping here resolved the filter to
+				// whichever relation reorderJoins put on the probe — the
+				// #527 defect one layer down from the logical plan.
+				// filterColumnIndex falls back to the bare name for the
+				// single-relation builds that emit it that way.
+				left := strings.TrimSpace(part[:idx])
+				right := strings.TrimSpace(part[idx+len(op)+2:])
 				conds = append(conds, filterCond{probeCol: left, op: op, buildCol: right})
 				break
 			}
@@ -6785,8 +6794,8 @@ func BuildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow 
 	return func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
 		resolveOnce.Do(func() {
 			for i, c := range conds {
-				probeIdxs[i] = probe.ColumnIndex(c.probeCol)
-				buildIdxs[i] = build.ColumnIndex(c.buildCol)
+				probeIdxs[i] = filterColumnIndex(probe, c.probeCol)
+				buildIdxs[i] = filterColumnIndex(build, c.buildCol)
 			}
 		})
 
@@ -6803,6 +6812,32 @@ func BuildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow 
 		}
 		return true
 	}
+}
+
+// filterColumnIndex resolves a semi/anti join filter's column name against a
+// batch, mirroring exec.columnIndexFallback: the exact spelling first, then
+// the bare name for a qualified reference over a single-relation build, then
+// a UNIQUE qualified column for a bare reference. Ambiguity resolves to -1
+// rather than to a guess — a filter that silently reads the wrong relation's
+// column is what #527 was.
+func filterColumnIndex(b *batch.RecordBatch, name string) int {
+	if idx := b.ColumnIndex(name); idx >= 0 {
+		return idx
+	}
+	if dot := strings.Index(name, "."); dot >= 0 {
+		return b.ColumnIndex(name[dot+1:])
+	}
+	suffix := "." + name
+	match := -1
+	for i, c := range b.Schema {
+		if strings.HasSuffix(c.Name, suffix) {
+			if match >= 0 {
+				return -1
+			}
+			match = i
+		}
+	}
+	return match
 }
 
 // evalFilterTyped compares two vector values at given rows using typed dispatch.
@@ -11319,7 +11354,11 @@ func extractFilterBuildColumns(filter string) []string {
 			sep := " " + op + " "
 			idx := strings.Index(part, sep)
 			if idx >= 0 {
-				right := cleanExpr(strings.TrimSpace(part[idx+len(sep):]))
+				// Qualified, for BuildSemiAntiFilter's reason: the stored
+				// build batch may carry the column under either spelling and
+				// only the qualified one is unambiguous (#527). Both
+				// consumers resolve with a bare-name fallback.
+				right := strings.TrimSpace(part[idx+len(sep):])
 				if right != "" {
 					seen[right] = true
 				}

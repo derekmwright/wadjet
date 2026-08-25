@@ -1806,16 +1806,31 @@ func (h *HashJoin) PruneBuildColumns(keepCols []string) {
 		return
 	}
 
-	keep := make(map[string]bool, len(keepCols))
+	// Both spellings of every kept column. A join emits a build column
+	// qualified when its bare name collides and bare when it does not, and
+	// the filter that named it may have used either — pruning by exact name
+	// alone dropped the column the filter then could not resolve (#527).
+	// Keeping one column too many is free; the prune is a memory
+	// optimization, not a semantic one.
+	keep := make(map[string]bool, len(keepCols)*2)
 	for _, c := range keepCols {
 		keep[c] = true
+		if dot := strings.LastIndex(c, "."); dot >= 0 {
+			keep[c[dot+1:]] = true
+		}
 	}
 
 	// Build new pruned schema
 	var newSchema []parquet.Column
 	var colIdx []int
 	for i, col := range h.buildSchema {
-		if keep[col.Name] {
+		kept := keep[col.Name]
+		if !kept {
+			if dot := strings.LastIndex(col.Name, "."); dot >= 0 {
+				kept = keep[col.Name[dot+1:]]
+			}
+		}
+		if kept {
 			newSchema = append(newSchema, col)
 			colIdx = append(colIdx, i)
 		}

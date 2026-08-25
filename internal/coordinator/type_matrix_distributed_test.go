@@ -84,42 +84,19 @@ var tmdUnsupported = map[string]typematrix.Pin{}
 // defect that is a property of a TYPE rather than of one query shape and
 // whose members are too many, or too dynamically named, to enumerate
 // cheaply. #516 used to be the one entry here and moved to thirteen named
-// tmdPins entries once naming them turned out to be just as cheap; #526 is
-// the case the trade does not favor — three query shapes × thirteen wide
-// types, all firing on one cause, so three prefixes say it once.
+// tmdPins entries once naming them turned out to be just as cheap; #526 was
+// the case the trade did not favor — three query shapes x thirteen wide
+// types, all firing on one cause, so three prefixes said it once.
 //
-// #526: an IN/NOT IN whose subquery JOINS, with a QUALIFIED select item.
-// decorrelateInSubqueries names the semi join's inner key from the subquery's
-// SELECT list, and with a single relation that name is provably what the
-// bottom Scan emits — which is what #516 fixed. With a JOIN it is not: which
-// relation's columns the join emits bare is decided by reorderJoins from
-// estimated row counts at Optimize step 73, long after decorrelation names
-// the key at step 36. The key names a column the build schema does not carry,
-// exec.HashJoin.FixKeyAssignment swaps the pair on #516's false premise, and
-// the single-process arm answers 0 (IN) or every row (NOT IN) while the DAG
-// answers correctly — the same signature #516 had, one relation over.
-//
-// antijoin_join_ is NOT pinned: a correlated NOT EXISTS over a joined inner
-// decorrelates on its own equality and both arms agree. It stays in the
-// corpus as the control that says the joined-inner FIXTURE is not what
-// diverges here.
-var tmdPinPrefixes = map[string]typematrix.Pin{
-	"semijoin_join_lead_": {
-		Issue: "#526",
-		Reason: "IN over a joined inner, item qualified by the relation written first: " +
-			"single-process answers 0, the stage DAG answers correctly",
-	},
-	"semijoin_join_nonlead_": {
-		Issue: "#526",
-		Reason: "IN over a joined inner, item qualified by the relation written second: " +
-			"single-process answers 0, the stage DAG answers correctly",
-	},
-	"notin_join_": {
-		Issue: "#526",
-		Reason: "NOT IN over a joined inner: the anti join matches nothing, so the " +
-			"single-process arm keeps every row and the stage DAG answers correctly",
-	},
-}
+// It is empty now. #526 (an IN/NOT IN whose subquery JOINS, with a QUALIFIED
+// select item, naming a key the build schema does not carry) is fixed: the
+// decorrelations record the relation and column each build-side reference
+// MEANS, and repairDecorrelatedSpelling settles the text after reorderJoins
+// has decided which relation's columns the inner join emits bare. All three
+// prefixes agreed on both arms, so the ratchet fired and the pins are gone
+// (ADR-0013 §Pins). The `semijoin_join_*` / `notin_join_` / `antijoin_join_`
+// corpus entries stay and are now plain gates.
+var tmdPinPrefixes = map[string]typematrix.Pin{}
 
 func TestTypeMatrixTwoPath(t *testing.T) {
 	if testing.Short() {

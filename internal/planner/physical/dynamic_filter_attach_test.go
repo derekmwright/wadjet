@@ -238,8 +238,12 @@ func TestParseSemiAntiNE(t *testing.T) {
 		wantProbe, wantBuild string
 		wantOK               bool
 	}{
-		{"l1.l_suppkey <> l2.l_suppkey", "l_suppkey", "l_suppkey", true},
-		{"a.x != b.y", "x", "y", true},
+		// Qualifiers are KEPT: a joined build emits a colliding column under
+		// its relation's qualifier and only that spelling is unambiguous
+		// (#527). Both consumers resolve through columnIndexFallback, which
+		// falls back to the bare name for a single-relation build.
+		{"l1.l_suppkey <> l2.l_suppkey", "l1.l_suppkey", "l2.l_suppkey", true},
+		{"a.x != b.y", "a.x", "b.y", true},
 		{"l_suppkey <> s_suppkey", "l_suppkey", "s_suppkey", true},
 		{"a.x <> b.y AND a.z > b.w", "", "", false}, // conjunction
 		{"a.x = b.y", "", "", false},                // wrong op
