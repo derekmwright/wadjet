@@ -1,0 +1,142 @@
+package coordinator
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+)
+
+// The cross-scale DECIMAL pair fixture (#506, #499).
+//
+// The type-matrix table carries ONE DECIMAL column, so nothing in this package
+// could tell an exact comparison from a lexicographic one: a column compared
+// against itself renders the same text on both sides whatever rule is applied.
+// Two columns at DIFFERENT scales is the shape where the two rules disagree,
+// and it is the shape both issues are about — #506 for the boxed comparison
+// sites, #499 for the set-operation dedup key.
+//
+// It rides along in tmdTables() rather than standing up a third cluster, the
+// way dtpTable and ketTable already do: the tests below use the same two arms
+// and no type-matrix corpus entry names this table.
+const dbpTable = "decpair"
+
+func dbpSchema() parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "a", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
+		{Name: "b", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true},
+	}}
+}
+
+// dbpDec renders an unscaled int64 as the two halves parquet.Decimal128
+// carries, sign-extended the way two's complement requires.
+func dbpDec(v int64) parquet.Decimal128 {
+	hi := int64(0)
+	if v < 0 {
+		hi = -1
+	}
+	return parquet.Decimal128{Hi: hi, Lo: uint64(v)}
+}
+
+// dbpData is the same nine rows wadjet.TestDecimalColumnPairAtBoxedSites uses,
+// chosen so lexical and numeric order DISAGREE on the rows that matter: ±1 ulp
+// at the wider scale around an exactly-equal pair, a leading-digit trap
+// ("2.00" sorts above "10.0000" as text), zero and a negative at two scales,
+// and NULL on either side and on both.
+func dbpData() []map[string]any {
+	src := []struct {
+		id         int64
+		a, b       int64
+		aNil, bNil bool
+	}{
+		{id: 1, a: 1275, b: 127500},
+		{id: 2, a: 1275, b: 127501},
+		{id: 3, a: 1275, b: 127499},
+		{id: 4, a: -1, b: -100},
+		{id: 5, a: 200, b: 100000},
+		{id: 6, a: 0, b: 0},
+		{id: 7, aNil: true, b: 10000},
+		{id: 8, a: 1275, bNil: true},
+		{id: 9, aNil: true, bNil: true},
+	}
+	rows := make([]map[string]any, 0, len(src))
+	for _, r := range src {
+		m := map[string]any{"id": r.id}
+		if !r.aNil {
+			m["a"] = dbpDec(r.a)
+		}
+		if !r.bNil {
+			m["b"] = dbpDec(r.b)
+		}
+		rows = append(rows, m)
+	}
+	return rows
+}
+
+// TestDecimalBoxedPairTwoPath holds the single-process engine and the stage
+// DAG to the same answer for #506's three boxed comparison sites, and holds
+// both to what live postgres:17-alpine answers on the identical rows.
+//
+// The DAG matters here on its own: it re-parses the filter text in a later
+// stage and always compiles to the row-at-a-time evaluator, so a binding that
+// reached only the vectorized path would show up as an arm disagreement rather
+// than as a wrong answer on both.
+func TestDecimalBoxedPairTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	for _, tc := range []struct {
+		name string
+		pred string
+		want int64
+	}{
+		// The direct comparison, bound in NewCmp since #477: the control both
+		// boxed forms below must agree with.
+		{"direct_eq", "a = b", 3},
+		{"direct_ne", "a <> b", 3},
+		{"direct_lt", "a < b", 2},
+		// #506's three sites over the same pair.
+		{"simple_case", "CASE a WHEN b THEN 1 ELSE 0 END = 1", 3},
+		{"is_distinct_from", "a IS DISTINCT FROM b", 5},
+		{"is_not_distinct_from", "a IS NOT DISTINCT FROM b", 4},
+		{"greatest", "GREATEST(a, b) = b", 6},
+		{"least", "LEAST(a, b) = a", 6},
+		{"greatest_literal", "GREATEST(a, b) = 12.75", 3},
+		{"least_zero", "LEAST(a, b) > 0", 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sql := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE %s", dbpTable, tc.pred)
+			var single64, dag64 int64
+			for _, arm := range []struct {
+				name string
+				dag  bool
+			}{{"single", false}, {"dag", true}} {
+				rows := dtpRun(t, ctx, single, coord, sql, arm.dag)
+				if len(rows) != 1 {
+					t.Fatalf("%s: %d rows, want 1", arm.name, len(rows))
+				}
+				got := ketInt(t, arm.name, rows[0]["n"])
+				if arm.dag {
+					dag64 = got
+				} else {
+					single64 = got
+				}
+				if got != tc.want {
+					t.Errorf("%s: %s\n  got %d, want %d (live PostgreSQL 17)", arm.name, sql, got, tc.want)
+				}
+			}
+			if single64 != dag64 {
+				t.Errorf("the two paths disagree: single-process %d, stage DAG %d", single64, dag64)
+			}
+		})
+	}
+}

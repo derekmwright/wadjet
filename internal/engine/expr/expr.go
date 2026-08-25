@@ -955,38 +955,20 @@ type Cmp struct {
 	// decCols is the two-bare-columns binding, for the pair whose boxes carry
 	// no way to tell a DECIMAL from a string (#477).
 	decCols *decimalColCmp
-	// lText/rText are the operands' literal source texts, hoisted out of the
-	// row loop. They carry the exact literal into the GENERIC path, which is
-	// where an operand that is not a bare column — `GREATEST(d, lit) = lit`,
-	// the outer comparison of #465's own repro — meets a DECIMAL rendered as
-	// text.
-	lText, rText string
-	// notText caches a settled "neither operand's boxed value is ever a Go
-	// string" answer for the GENERIC path. compareWithText's exactTextOrder
-	// can only ever succeed when at least one operand boxes as a string (a
-	// STRING or DECIMAL column reads as its rendered text; every other type
-	// never does), so once one row shows neither side is a string, no later
-	// row can be either — PROVIDED both operands are bare columns and/or
-	// literals, whose boxed TYPE is as fixed for the query as a column's
-	// declared type is (decimalLitCmp.notDecimal relies on the same
-	// invariant). That is why EvalBoolNull only consults this cache when dec
-	// or decCols matched at bind time: a composite operand like GREATEST/LEAST
-	// has no such guarantee — pickExtremum can return a DECIMAL column's text
-	// on one row and a literal's own numeric box on the next for the SAME
-	// Cmp, and settling "not text" from the row that happened to be numeric
-	// would wrongly skip the exact comparison on a later row that is text
-	// (caught by TestDecimalLiteralAtEveryComparisonSite/least_one_ulp_away).
+	// pair is the GENERIC path's declaration-driven binding, for the operand
+	// shapes dec and decCols do not cover: a COMPOSITE operand meeting a
+	// DECIMAL — `GREATEST(d_2, d_4) = d_4`, the outer comparison of #506's own
+	// repro, where both sides arrive as rendered text and compare()'s
+	// two-strings fast path answered LEXICOGRAPHICALLY. It also carries the
+	// operands' literal source texts, hoisted out of the row loop.
 	//
-	// Settling this lets a comparison between two ordinary (non-DECIMAL)
-	// columns skip compareWithText's two failed interface assertions and the
-	// exactTextOrder call itself, falling straight to compare() — measured
-	// +18% on FLOAT64 rows (21.7 -> 26 ns/row) before this cache.
-	//
-	// Same atomic-publish reasoning as notDecimal: parallel pipeline workers
-	// can race to settle this, but the answer is a pure function of the
-	// operands' fixed types, so a losing racer's store is redundant, not
-	// wrong.
-	notText atomic.Bool
+	// It replaces the old notText cache and keeps its property: a pair whose
+	// declarations can never select a rule disarms itself on the first batch
+	// that settles both operands, so the generic path's per-row cost stays one
+	// atomic load. Unlike notText it does not need dec or decCols to have
+	// matched first, because it settles from DECLARATIONS rather than from
+	// what one row's box happened to be.
+	pair *boxedPair
 }
 
 // NewCmp builds a comparison, binding the two operand shapes that cannot be
@@ -995,7 +977,7 @@ type Cmp struct {
 func NewCmp(left, right Expr, op CmpOp) *Cmp {
 	return &Cmp{Left: left, Right: right, Op: op,
 		dec: bindDecimalCmp(left, right), decCols: bindDecimalCols(left, right),
-		lText: litText(left), rText: litText(right)}
+		pair: newBoxedPair(left, right)}
 }
 
 func (e *Cmp) Eval(b *batch.RecordBatch, row int) any {
@@ -1029,20 +1011,7 @@ func (e *Cmp) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if lv == nil || rv == nil {
 		return false, true // a comparison against NULL is UNKNOWN (#370)
 	}
-	// notText is only trustworthy when both operands are bare columns
-	// and/or literals (dec or decCols matched) — see its doc comment.
-	if e.dec != nil || e.decCols != nil {
-		if e.notText.Load() {
-			return compare(lv, rv, e.Op), false
-		}
-		_, lIsStr := lv.(string)
-		_, rIsStr := rv.(string)
-		if !lIsStr && !rIsStr {
-			e.notText.Store(true)
-			return compare(lv, rv, e.Op), false
-		}
-	}
-	return compareWithText(lv, rv, e.lText, e.rText, e.Op), false
+	return e.pair.compare(b, lv, rv, e.Op), false
 }
 
 // CmpTemporalLit compares a bare column against a string literal that
@@ -1364,20 +1333,30 @@ type IsDistinctFrom struct {
 	Left, Right Expr
 	Not         bool // true for IS NOT DISTINCT FROM
 
-	// refuse is the non-numeric-literal refusal, armed from the operand
-	// SHAPES on first evaluation and reused for every row after (refuseArm).
+	// arms holds the two operand-shaped bindings this node needs: the
+	// non-numeric-literal refusal (refuseArm) and the declaration-driven
+	// comparison (boxedPair). Armed from the operand SHAPES on first
+	// evaluation and reused for every row after.
+	//
 	// Armed lazily rather than at construction because this node is also
 	// built by direct struct literal, and a refusal that only existed on the
 	// compiler's path would be a refusal the compiler's tests alone see.
-	refuse atomic.Pointer[refuseArm]
+	arms atomic.Pointer[isDistinctArms]
 }
 
-func (e *IsDistinctFrom) refusal() *refuseArm {
-	if a := e.refuse.Load(); a != nil {
+// isDistinctArms is IsDistinctFrom's per-node binding, published as one
+// immutable value so a row reads one atomic pointer rather than two.
+type isDistinctArms struct {
+	refuse *refuseArm
+	pair   *boxedPair
+}
+
+func (e *IsDistinctFrom) armed() *isDistinctArms {
+	if a := e.arms.Load(); a != nil {
 		return a
 	}
-	a := armRefusal(e.Left, e.Right)
-	e.refuse.Store(a)
+	a := &isDistinctArms{refuse: armRefusal(e.Left, e.Right), pair: newBoxedPair(e.Left, e.Right)}
+	e.arms.Store(a)
 	return a
 }
 
@@ -1409,8 +1388,15 @@ func (e *IsDistinctFrom) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool
 		// query ERROR against a DECIMAL column, never a value (#463) — this
 		// boxed site carried the exact-text comparison but not the refusal
 		// (#505): `d IS DISTINCT FROM 'abc'` answered every row instead.
-		e.refusal().check(b)
-		distinct = !compareWithText(lv, rv, litText(e.Left), litText(e.Right), CmpEq)
+		//
+		// TWO DECIMAL COLUMNS are the pair no box can be dispatched on: both
+		// arrive as rendered text, indistinguishable from two strings, so
+		// `d_2 IS DISTINCT FROM d_4` compared them LEXICOGRAPHICALLY and
+		// called two spellings of one number distinct (#506). The pair is
+		// bound from the operands' declarations instead.
+		a := e.armed()
+		a.refuse.check(b)
+		distinct = !a.pair.compare(b, lv, rv, CmpEq)
 	}
 	if e.Not {
 		return !distinct, false
@@ -1815,21 +1801,25 @@ type Case struct {
 	Whens   []CaseWhen // WHEN condition THEN result
 	Else    Expr       // optional ELSE clause
 
-	// refuse holds one refuseArm per WHEN — see caseRefusal for why the
-	// arming is per-WHEN and not per-CASE. Armed lazily, like
-	// IsDistinctFrom.refuse, and for the same reason.
-	refuse atomic.Pointer[caseRefusal]
+	// arms holds one refusal and one declaration-driven comparison per WHEN
+	// — see caseArms for why the arming is per-WHEN and not per-CASE. Armed
+	// lazily, like IsDistinctFrom's, and for the same reason.
+	arms atomic.Pointer[caseArms]
 }
 
-func (e *Case) refusal() *caseRefusal {
-	if r := e.refuse.Load(); r != nil {
+func (e *Case) armed() *caseArms {
+	if r := e.arms.Load(); r != nil {
 		return r
 	}
-	r := &caseRefusal{arms: make([]*refuseArm, len(e.Whens))}
-	for i, w := range e.Whens {
-		r.arms[i] = armRefusal(e.Operand, w.Cond)
+	r := &caseArms{
+		refuse: make([]*refuseArm, len(e.Whens)),
+		pairs:  make([]*boxedPair, len(e.Whens)),
 	}
-	e.refuse.Store(r)
+	for i, w := range e.Whens {
+		r.refuse[i] = armRefusal(e.Operand, w.Cond)
+		r.pairs[i] = newBoxedPair(e.Operand, w.Cond)
+	}
+	e.arms.Store(r)
 	return r
 }
 
@@ -1843,8 +1833,7 @@ func (e *Case) Eval(b *batch.RecordBatch, row int) any {
 	if e.Operand != nil {
 		// Simple CASE: CASE x WHEN v1 THEN r1 ...
 		opVal := e.Operand.Eval(b, row)
-		opText := litText(e.Operand)
-		refuse := e.refusal()
+		arms := e.armed()
 		for i, w := range e.Whens {
 			whenVal := w.Cond.Eval(b, row)
 			// The WHEN value's exact source text settles a match a float64
@@ -1852,9 +1841,15 @@ func (e *Case) Eval(b *batch.RecordBatch, row int) any {
 			// the ELSE branch (#465). A WHEN value that is not a number is a
 			// query ERROR against a DECIMAL operand, never a silent ELSE
 			// (#463/#505): `CASE d WHEN 'abc'` answered 0 instead of refusing.
+			//
+			// And when BOTH sides are DECIMAL columns, neither box says so —
+			// two rendered DECIMALs are two strings as far as compare() can
+			// tell, so `CASE d_2 WHEN d_4` took the ELSE branch for the row
+			// where the two hold the same number at different scales (#506).
+			// The pair is bound from the operands' declarations instead.
 			if opVal != nil && whenVal != nil {
-				refuse.arms[i].check(b)
-				if compareWithText(opVal, whenVal, opText, litText(w.Cond), CmpEq) {
+				arms.refuse[i].check(b)
+				if arms.pairs[i].compare(b, opVal, whenVal, CmpEq) {
 					return w.Result.Eval(b, row)
 				}
 			}
@@ -1944,10 +1939,11 @@ type FuncCall struct {
 	// (#465). extremumOp is CmpGt for GREATEST and CmpLt for LEAST.
 	extremum   bool
 	extremumOp CmpOp
-	// extremumRefuse is the non-numeric-literal refusal for those arguments,
-	// armed once alongside extremumOp under fnMu. nil means this call can
-	// never refuse, which is every ordinary GREATEST/LEAST.
-	extremumRefuse *extremumRefusal
+	// extremumArms is the per-argument binding for those arguments, armed
+	// once alongside extremumOp under fnMu: the non-numeric-literal refusal
+	// and the declaration-driven comparison, both keyed by argument index
+	// because the (best-so-far, candidate) pair moves between iterations.
+	extremumArms *extremumArms
 
 	vecOnce sync.Once
 	vecFn   VecScalarFunc
@@ -2315,10 +2311,10 @@ func (e *FuncCall) resolveFnSlow() {
 	switch lower {
 	case "greatest":
 		e.extremum, e.extremumOp = true, CmpGt
-		e.extremumRefuse = armExtremum(e.Args)
+		e.extremumArms = armExtremumArms(e.Args)
 	case "least":
 		e.extremum, e.extremumOp = true, CmpLt
-		e.extremumRefuse = armExtremum(e.Args)
+		e.extremumArms = armExtremumArms(e.Args)
 	}
 	e.fnReady.Store(true)
 }
@@ -2346,7 +2342,7 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 		e.resolveTemporalArgs(b, row, args)
 	}
 	if e.extremum {
-		return pickExtremum(b, e.Args, args, e.extremumOp, e.extremumRefuse)
+		return pickExtremum(b, args, e.extremumOp, e.extremumArms)
 	}
 	return e.fn(args)
 }
@@ -2364,8 +2360,14 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 // argument, never a value PostgreSQL would just skip past (#463/#505):
 // `GREATEST(d, 'abc')` answered 'abc' as the extremum instead of refusing.
 // The refusal checks the pair actually being compared THIS iteration — best
-// so far against the new candidate — the same as compareWithText itself.
-func pickExtremum(b *batch.RecordBatch, argExprs []Expr, args []any, op CmpOp, refuse *extremumRefusal) any {
+// so far against the new candidate — the same as the comparison itself.
+//
+// Two DECIMAL arguments are the pair the boxes cannot distinguish from two
+// strings, so `GREATEST(d_2, d_4)` picked the LEXICOGRAPHICALLY greater
+// rendering (#506). arms.order answers that pair — and every mixed
+// DECIMAL/number pair — from the arguments' declarations; anything it declines
+// falls through to the literal-side carry-through, exactly as before.
+func pickExtremum(b *batch.RecordBatch, args []any, op CmpOp, arms *extremumArms) any {
 	var best any
 	bestIdx := -1
 	bestText := ""
@@ -2374,15 +2376,25 @@ func pickExtremum(b *batch.RecordBatch, argExprs []Expr, args []any, op CmpOp, r
 			continue
 		}
 		text := ""
-		if i < len(argExprs) {
-			text = litText(argExprs[i])
+		if arms != nil && i < len(arms.texts) {
+			text = arms.texts[i]
 		}
 		if best == nil {
 			best, bestText, bestIdx = a, text, i
 			continue
 		}
-		refuse.check(b, bestIdx, i)
-		if compareWithText(a, best, text, bestText, op) {
+		var better bool
+		if arms != nil {
+			arms.refuse.check(b, bestIdx, i)
+			if c, ok := arms.order(b, i, bestIdx, a, best); ok {
+				better = cmpOrder(c, op)
+			} else {
+				better = compareWithText(a, best, text, bestText, op)
+			}
+		} else {
+			better = compareWithText(a, best, text, bestText, op)
+		}
+		if better {
 			best, bestText, bestIdx = a, text, i
 		}
 	}

@@ -160,23 +160,34 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      dispatched on — two rendered DECIMALs are indistinguishable from two
      strings — so that pair is bound from the column DECLARATIONS, per item 8.
 
-     **Known residual: that declaration-bound pair is wired at exactly one
-     site.** `expr.bindDecimalCols` is called from `NewCmp` alone, so a
-     direct `d1 op d2` gets the exact Int128 comparison but the SAME two
-     columns at a BOXED site — a simple `CASE d1 WHEN d2 THEN ...`,
-     `d1 IS DISTINCT FROM d2`, `GREATEST(d1, d2)` — still fall through
-     `compare()`'s two-rendered-strings path and compare LEXICOGRAPHICALLY,
-     the same defect #477 fixed for the direct comparison. Measured on the
-     `declit` fixture (`wadjet/decimal_literal_test.go`), where `d_2` and
-     `d_4` are numerically equal at exactly one row: `d_2 = d_4` (bound)
-     answers 1, matching PostgreSQL; `CASE d_2 WHEN d_4 THEN 1 ELSE 0 END = 1`
-     answers 0. `GREATEST(d_2, d_4) = d_4` and `d_2 IS DISTINCT FROM d_4`
-     diverge the same way, by construction rather than by one unlucky row.
-     Closing this means extending `#465`'s literal-side `compareWithText`
-     carry-through to a column-side counterpart, not a new comparison rule —
-     tracked as #506 rather than folded into this fix, since `#465`'s three
-     sites need their OWN column-pair binding, not the literal one they
-     already carry.
+     **Every boxed site is now bound from the declarations, not from one
+     call site.** (Amended 2026-08-24, #506.) `expr.bindDecimalCols` used to
+     be called from `NewCmp` alone, so a direct `d1 op d2` got the exact
+     Int128 comparison while the SAME two columns at a BOXED site — a simple
+     `CASE d1 WHEN d2 THEN ...`, `d1 IS DISTINCT FROM d2`,
+     `GREATEST(d1, d2)`, and a Cmp whose operand is a COMPOSITE like
+     `GREATEST(d1, d2) = d2` — fell through `compare()`'s two-rendered-strings
+     path and compared LEXICOGRAPHICALLY, the same defect #477 fixed for the
+     direct comparison. Verified against live postgres:17-alpine on the
+     `declit` fixture: `CASE d_2 WHEN d_4 THEN 1 ELSE 0 END = 1` answered 0
+     against PostgreSQL's 1, `GREATEST(d_2, d_4) = d_4` answered 167 against
+     101, `LEAST(d_2, d_4) = d_2` 164 against 98, and
+     `d_2 IS DISTINCT FROM d_4` 199 against 198.
+
+     `expr.boxedPair` (`internal/engine/expr/boxed_pair.go`) is the binding.
+     It classifies each operand's DECLARED kind — DECIMAL, a non-DECIMAL
+     number, genuine text, or unknown — resolving a bare column from the
+     batch and a composite (`GREATEST`/`LEAST`, `CASE`, `COALESCE`) from the
+     join of the alternatives one of its values comes from, and then applies
+     one rule per kind PAIR. The kinds are cached once settled, and a pair
+     whose declarations can select no rule disarms itself, so the generic
+     path's per-row cost stays one atomic load. Four sites hold one:
+     `Cmp`'s generic arm, `Case`'s simple-CASE arm (one per WHEN),
+     `IsDistinctFrom`, and `pickExtremum` (one operand per ARGUMENT, since
+     the best-so-far moves between iterations). Nothing in it reads a box to
+     decide which RULE applies — only to decide which side of the chosen rule
+     holds this row's value, which is what item 8's boxed-value rule requires
+     generally.
    - **A constant that is not a number is a query ERROR, never a value.**
      (Added 2026-08-24, #463.) The conversion used to answer ZERO for
      anything it could not parse, so `WHERE d = 'abc'` — and `WHERE d = 1e400`,

@@ -612,6 +612,46 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DecimalColColLtInCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_2 < d_4 THEN 1 ELSE 0 END = 1`},
 	)
 
+	// The same two DECIMAL columns at the BOXED sites (#506). #477's binding
+	// lived in NewCmp alone, so a simple CASE's WHEN, IS [NOT] DISTINCT FROM
+	// and GREATEST/LEAST still saw two rendered decimals as two strings and
+	// ordered them LEXICOGRAPHICALLY, where "10.00" sorts below "2.5000".
+	// Every entry here answers over the same pair the family above compares
+	// directly, so a fix that reaches one site and not another shows up as a
+	// disagreement between the two families rather than as silence.
+	out = append(out,
+		pgCase{name: "DecimalColPairSimpleCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE d_2 WHEN d_4 THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "DecimalColPairSimpleCaseWide", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE d_4 WHEN d_wide THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "DecimalColPairIsDistinctFrom", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IS DISTINCT FROM d_4`},
+		pgCase{name: "DecimalColPairIsNotDistinctFrom", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IS NOT DISTINCT FROM d_4`},
+		pgCase{name: "DecimalColPairIsDistinctFromWide", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 IS DISTINCT FROM d_wide`},
+		pgCase{name: "DecimalColPairGreatest", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_2, d_4) = d_4`},
+		pgCase{name: "DecimalColPairLeast", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE LEAST(d_2, d_4) = d_2`},
+		pgCase{name: "DecimalColPairGreatestWide", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_2, d_wide) = d_wide`},
+		// The rows themselves: the counts above can agree while the row SET
+		// does not, because two wrong picks can cancel.
+		pgCase{name: "DecimalColPairGreatestRows", sql: `SELECT d_key FROM dec_probe WHERE GREATEST(d_2, d_4) = d_4 ORDER BY d_key`},
+		// GREATEST/LEAST's own VALUE, at full precision. A wrong pick that
+		// happens to satisfy the predicates above is visible here — once the
+		// query can run: PROJECTING an extremum over a DECIMAL column fails
+		// outright today, because the registry declares the return type
+		// FLOAT64 and the value arrives as the column's rendered text. That
+		// is the declared-output-type layer, not the comparison rule this
+		// family gates, so it is pinned rather than fixed here.
+		pgCase{name: "DecimalColPairGreatestValue", exactNumeric: true,
+			sql: `SELECT d_key, GREATEST(d_2, d_4) AS g, LEAST(d_2, d_4) AS l FROM dec_probe ORDER BY d_key`,
+			knownBug: pgBugWadjet + ` a projected GREATEST/LEAST over a DECIMAL column cannot run at ` +
+				`all — "cannot store string into FLOAT64 vector"`, issue: "#529"},
+		// One side a DECIMAL and the other an INT64 column, at the same three
+		// sites: the pair #476 fixed for the direct comparison, which these
+		// sites answered by SNIFFING the box until #504 bound it from the
+		// declarations.
+		pgCase{name: "DecimalColPairMixedGreatest", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_key, d_2) = d_key`},
+		pgCase{name: "DecimalColPairMixedLeast", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE LEAST(d_key, d_2) = d_2`},
+		pgCase{name: "DecimalColPairMixedIsDistinctFrom", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key IS DISTINCT FROM d_2`},
+		pgCase{name: "DecimalColPairMixedSimpleCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE d_key WHEN d_2 THEN 1 ELSE 0 END = 1`},
+	)
+
 	// The comparison sites #452's binding did not reach (#465). A simple
 	// CASE's WHEN, IS [NOT] DISTINCT FROM and GREATEST/LEAST all compared
 	// through the boxed path, where the column is rendered TEXT and the

@@ -392,6 +392,38 @@ func decimalColColPredicateCases() []predCase {
 		{"DecimalColColSameLt", "c_dec < c_dec", none},
 		{"DecimalColColSameGt", "c_dec > c_dec", none},
 		{"DecimalColColSameNotLt", "NOT (c_dec < c_dec)", present},
+
+		// The BOXED sites (#506). `bindDecimalCols` was wired into NewCmp
+		// alone, so a simple CASE's WHEN, IS [NOT] DISTINCT FROM and
+		// GREATEST/LEAST still read a DECIMAL column's rendered text as text.
+		// They must answer what the direct comparisons above answer, on both
+		// arms — the same predicate reaching two different comparison rules
+		// because it took a different lowering is the two-path defect class.
+		//
+		// id is NOT NULL and c_dec is about id plus a fraction, so `id` and
+		// `c_dec` differ on every row that has a value and the operators are
+		// not vacuous.
+		{"DecimalBoxedSimpleCase", "CASE id WHEN c_dec THEN 1 ELSE 0 END = 1", ord(rowID, eq)},
+		{"DecimalBoxedSimpleCaseSelf", "CASE c_dec WHEN c_dec THEN 1 ELSE 0 END = 1", present},
+		{"DecimalBoxedGreatest", "GREATEST(id, c_dec) = id", func(r tmxRow) bool {
+			// GREATEST SKIPS a NULL argument, so a NULL c_dec leaves id as
+			// the extremum and the equality holds. That is PostgreSQL's rule
+			// and the reason this is not `ord(rowID, ge)`.
+			u, ok := decUnscaled(r)
+			return !ok || r.id*10000 >= u
+		}},
+		{"DecimalBoxedLeast", "LEAST(id, c_dec) = id", func(r tmxRow) bool {
+			u, ok := decUnscaled(r)
+			return !ok || r.id*10000 <= u
+		}},
+		{"DecimalBoxedIsDistinctFrom", "id IS DISTINCT FROM c_dec", func(r tmxRow) bool {
+			// IS DISTINCT FROM is TOTAL over NULL: a NULL c_dec against a
+			// non-NULL id IS distinct, where `<>` would answer UNKNOWN.
+			u, ok := decUnscaled(r)
+			return !ok || r.id*10000 != u
+		}},
+		{"DecimalBoxedIsNotDistinctFromSelf", "c_dec IS NOT DISTINCT FROM c_dec",
+			func(tmxRow) bool { return true }},
 	}
 }
 

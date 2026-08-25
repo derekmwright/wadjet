@@ -380,6 +380,11 @@ func tmdTables() []tmdTable {
 		// Rides along for the same reason as dtpTable: TestKeyEncodingTwoPath
 		// uses the same two arms, and no type-matrix corpus entry names it.
 		{ketTable, ketSchema(), ketData()},
+		// The cross-scale DECIMAL pair fixture (#506 boxed comparison sites,
+		// #499 set-operation dedup keys). Rides along for the same reason:
+		// the type-matrix table has ONE DECIMAL column, so nothing in this
+		// package could tell an exact comparison from a lexicographic one.
+		{dbpTable, dbpSchema(), dbpData()},
 	}
 }
 

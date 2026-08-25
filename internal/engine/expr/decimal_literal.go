@@ -214,12 +214,19 @@ func (a *refuseArm) check(b *batch.RecordBatch) {
 	raiseInvalidTextRepresentation("numeric", a.text)
 }
 
-// caseRefusal is one refuseArm per WHEN of a simple CASE, armed together and
-// published as one immutable value. Per-WHEN rather than per-CASE because the
-// refusal must still depend on the WHEN being REACHED: `CASE d WHEN 0.00 THEN
-// 1 WHEN 'abc' THEN 2 END` answers 1 for the row holding 0.00, exactly as it
-// did before the arms were hoisted.
-type caseRefusal struct{ arms []*refuseArm }
+// caseArms is a simple CASE's per-WHEN binding: the refusal for that WHEN,
+// and the declaration-driven comparison between the CASE's operand and that
+// WHEN's value. Armed together and published as one immutable value.
+//
+// Per-WHEN rather than per-CASE because the refusal must still depend on the
+// WHEN being REACHED: `CASE d WHEN 0.00 THEN 1 WHEN 'abc' THEN 2 END` answers
+// 1 for the row holding 0.00, exactly as it did before the arms were hoisted.
+// The comparisons are per-WHEN for the same reason a Cmp's is per-node: each
+// pair has its own two declarations.
+type caseArms struct {
+	refuse []*refuseArm
+	pairs  []*boxedPair
+}
 
 // extremumRefusal is pickExtremum's arming: the pairs it compares are
 // (best-so-far, candidate) and the best-so-far MOVES, so the table is per
@@ -230,6 +237,55 @@ type extremumRefusal struct {
 	// bad[i] is argument i's literal text when that text names no number,
 	// else "". A pair refuses when one side has a col and the other a bad.
 	bad []string
+}
+
+// extremumArms is pickExtremum's full arming: the refusal above, plus one
+// declaration-driven operand per ARGUMENT and that argument's literal text.
+//
+// Per argument rather than per pair for the same reason the refusal is: the
+// best-so-far MOVES, so the pair being compared is assembled per iteration.
+// N arguments give N(N-1)/2 possible pairs and only N-1 are ever compared, so
+// a boxedPair per pair would allocate for comparisons that never happen.
+type extremumArms struct {
+	refuse *extremumRefusal
+	ops    []boxOperand
+	texts  []string
+}
+
+// armExtremumArms builds the per-argument table. It is always built — unlike
+// armExtremum, which returns nil for a call that can never refuse — because
+// the COMPARISON applies to every GREATEST/LEAST, not only to the ones holding
+// a bad literal.
+func armExtremumArms(argExprs []Expr) *extremumArms {
+	a := &extremumArms{
+		refuse: armExtremum(argExprs),
+		ops:    make([]boxOperand, len(argExprs)),
+		texts:  make([]string, len(argExprs)),
+	}
+	for i, e := range argExprs {
+		a.ops[i].expr = e
+		a.texts[i] = litText(e)
+	}
+	return a
+}
+
+// order compares the values at argument indices li and ri under the rule
+// their DECLARATIONS select, or reports ok=false when none applies.
+//
+// Both indices are bounds-checked against the armed table rather than assumed
+// to line up: args can outrun argExprs when a vectorized caller evaluates
+// values the expression list does not name, the same guard
+// extremumRefusal.check carries.
+func (a *extremumArms) order(b *batch.RecordBatch, li, ri int, lv, rv any) (int, bool) {
+	if a == nil || li < 0 || li >= len(a.ops) || ri < 0 || ri >= len(a.ops) {
+		return 0, false
+	}
+	lk := a.ops[li].resolve(b)
+	rk := a.ops[ri].resolve(b)
+	if !pairApplies(lk, rk, a.texts[li], a.texts[ri]) {
+		return 0, false
+	}
+	return orderByKinds(lk, rk, lv, rv, a.texts[li], a.texts[ri])
 }
 
 // armExtremum returns nil — "this call can never refuse" — unless some
