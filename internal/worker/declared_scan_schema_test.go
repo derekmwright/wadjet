@@ -77,3 +77,42 @@ func TestApplyDeclaredScanSchemaRefusesAnUndeclaredBaseTableRead(t *testing.T) {
 		})
 	}
 }
+
+// The kill switch, on the #308 precedent (WADJET_FASTPATH_STRICT): this guard
+// turns a read that USED to answer into a hard failure, so there has to be a
+// way back to the old behavior for a deployment that hits an unfound plumbing
+// gap. Turning it off restores trust-the-file — which is a read that can
+// answer 167772165 for 10.0.0.5 — so the refusal names the switch and the
+// bypass logs at Warn.
+func TestDeclaredSchemaGuardHasAKillSwitch(t *testing.T) {
+	files := []string{"tables/t/chunk_0000.parquet"}
+
+	if err := applyDeclaredScanSchema(&cachedFileStreamSource{}, "scan", "alias", files, nil); err == nil {
+		t.Fatal("the guard is off by default; it must refuse an undeclared base-table read")
+	} else if !strings.Contains(err.Error(), "WADJET_DECLARED_SCHEMA_STRICT=0") {
+		t.Errorf("the refusal does not name its way out: %v", err)
+	}
+
+	prev := DeclaredSchemaStrict.Set(false)
+	t.Cleanup(func() { DeclaredSchemaStrict.Set(prev) })
+
+	src := &cachedFileStreamSource{}
+	if err := applyDeclaredScanSchema(src, "scan", "alias", files, nil); err != nil {
+		t.Fatalf("with the switch off the read must proceed, not be refused: %v", err)
+	}
+	if len(src.declaredSchema) != 0 {
+		t.Error("the switch-off path must leave the source undeclared — the file's types are " +
+			"what it restores; declaring something here would be inventing types")
+	}
+
+	// A DECLARED read is unaffected: the switch governs the refusal, not
+	// whether the catalog's types are applied when they are present.
+	declared := []distributed.ColumnSpec{{Name: "c0", Type: int(parquet.TypeInt64)}}
+	src = &cachedFileStreamSource{}
+	if err := applyDeclaredScanSchema(src, "scan", "alias", files, declared); err != nil {
+		t.Fatalf("a declared read must still be applied with the switch off: %v", err)
+	}
+	if len(src.declaredSchema) == 0 {
+		t.Error("the switch turned off the declaration itself, not just the refusal")
+	}
+}

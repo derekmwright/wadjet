@@ -21,6 +21,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -3106,6 +3107,15 @@ func applyBuildSchema(src exec.Source, spec distributed.OpSpec) error {
 // payload carries its own types, and there is nothing for a declaration to
 // add. That is the whole of the distinction, and readsBaseTableParquet is
 // where it is drawn.
+//
+// WADJET_DECLARED_SCHEMA_STRICT=0 restores the pre-#503 behavior — the file's
+// own types win — for the same reason WADJET_FASTPATH_STRICT=0 exists: this
+// refusal turns a class of query that USED to answer into a hard failure, and
+// a plumbing path nobody has found yet (a stage that forgets to carry
+// ScanSchema) then takes a deployment down rather than answering as it did
+// last release. It is a way out, not a supported mode: what it restores is a
+// read that can answer 167772165 for 10.0.0.5, so it logs at Warn every time
+// it is used.
 func applyDeclaredScanSchema(src exec.Source, what, alias string, files []string, declared []distributed.ColumnSpec) error {
 	if len(declared) > 0 {
 		if cs, ok := src.(*cachedFileStreamSource); ok {
@@ -3116,8 +3126,24 @@ func applyDeclaredScanSchema(src exec.Source, what, alias string, files []string
 	if !readsBaseTableParquet(files) {
 		return nil
 	}
+	if !DeclaredSchemaStrict.On() {
+		slog.Warn("declared-schema guard DISABLED: typing a base-table read from the files "+
+			"themselves, which cannot express nine of this engine's types and cannot "+
+			"contradict the catalog (WADJET_DECLARED_SCHEMA_STRICT=0)",
+			"what", what, "alias", alias, "files", len(files))
+		return nil
+	}
 	return fmt.Errorf("%s: base-table parquet input %q arrived with no declared schema; "+
 		"refusing to type %d file(s) from their own footers — the catalog's types must ride the plan "+
-		"(physical.Stage.ScanSchema → OpSpec.ColumnTypes / BuildColumnTypes / Task.ColumnTypes)",
+		"(physical.Stage.ScanSchema → OpSpec.ColumnTypes / BuildColumnTypes / Task.ColumnTypes). "+
+		"WADJET_DECLARED_SCHEMA_STRICT=0 restores the pre-#503 behavior of trusting the file",
 		what, alias, len(files))
 }
+
+// DeclaredSchemaStrict gates the refusal above. Registered in the kill-switch
+// registry so the optimization-invariance oracle runs the corpus with it off
+// as well as on: a healthy fixture declares every base-table read, so the two
+// configurations must answer identically, and a divergence would mean some
+// path is already reading a file the catalog disagrees with.
+var DeclaredSchemaStrict = optswitch.Register("declared-schema-strict", "WADJET_DECLARED_SCHEMA_STRICT",
+	"refuse a base-table parquet read that arrives with no declared schema instead of typing it from the file")

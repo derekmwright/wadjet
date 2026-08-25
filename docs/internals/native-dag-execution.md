@@ -278,10 +278,30 @@ The carriers the refusal found empty, and now filled:
 | Dispatcher | Was | Now |
 |---|---|---|
 | `dispatchGatherStage` | nothing — a plain `SELECT … FROM t` dispatches no scan task, so the GATHER task does the base-table read | `Task.ColumnTypes` + the ordered fragment's `OpSpec.ColumnTypes` |
-| `dispatchReplicateStage` (pass-through branch) | dropped `ScanTable`/`ScanColumns`/`ScanSchema` off the `StageOutput`, so a broadcast join's build read parquet blind | forwards all four scan annotations |
+| `dispatchReplicateStage` (pass-through branch AND the materialization-failure fallback) | dropped `ScanTable`/`ScanColumns`/`ScanSchema` off the `StageOutput`, so a broadcast join's build read parquet blind | both go through `replicatePassThrough`, which forwards all four scan annotations |
 | `materializeReplicate` | an `OpScan` with neither `Columns` nor `ColumnTypes`; its `allWSHF` bypass means every list that reaches it IS base parquet | both, from the upstream's annotations |
 | `dispatchFinalAggregateFanout` | built its own tasks and never called `applySourceProjection`/`applySourceColumnTypes` | calls both on the intermediates (the final merge reads WSHF and needs neither) |
 | `stageInputDeps` | join stages emitted probe+build only, and every other stage only `Dependencies[0]` | fused- and chained-join build aliases, and every dependency on the default arm |
+
+The fallback is the one worth stating twice: it exists so a materialization
+failure costs the query its consolidation and not its answer, and it runs
+only over an upstream the bypass declined — which by construction is
+multi-file BASE parquet, exactly what the guard refuses. Handing that over
+bare made the guard fail the query. Both branches build their output with the
+same function for that reason (`coordinator/execute_stage_dag.go`,
+`replicatePassThrough`); gate:
+`coordinator.TestReplicateFallbackKeepsTheQueryAnswerable`.
+
+**Kill switch: `WADJET_DECLARED_SCHEMA_STRICT=0`** restores the pre-#503
+behavior — the file's own types win — on the `WADJET_FASTPATH_STRICT` (#308)
+precedent. The refusal turns reads that USED to answer into hard failures, so
+a deployment that hits a plumbing gap nobody has found yet needs a way back
+to last release's behavior rather than an outage. It is a way out, not a
+supported mode: what it restores is a read that can answer `167772165` for
+`10.0.0.5`, and every use logs at Warn. Registered in `internal/optswitch`, so
+the optimization-invariance oracle runs the whole corpus with it off as well
+as on — a healthy fixture declares every base-table read, so the two
+configurations must agree.
 
 A gather task that fails now says so on the wire, too. The coordinator waits
 on the gather STREAM and nothing else for that stage — it never reads the
