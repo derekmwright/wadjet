@@ -327,6 +327,10 @@ func tmdTables() []tmdTable {
 		// The CIDR set-operation fixture, for the same reason: two spellings
 		// of one address, which only an inet-aware key collapses.
 		{cidrTable, cidrSchema(), cidrData()},
+		// The IPv6 col-col fixture (#565 ratchet, #580 review). Rides along
+		// for the same reason as cidrTable: TestIPv6ColColTwoPath uses the
+		// same two arms, and no type-matrix corpus entry names this table.
+		{ipv6Table, ipv6Schema(), ipv6Data()},
 		// The cross-scale SET-OPERATION fixtures (#533). Same reason again:
 		// TestSetOpDecimalScaleTwoPath and its siblings use these two arms,
 		// and no type-matrix corpus entry names either table.
