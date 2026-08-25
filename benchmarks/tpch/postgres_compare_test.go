@@ -2244,6 +2244,67 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT k FROM (` + pgNumericTextRows + `) t WHERE LEAST(v, '1.5') = '1.5' ORDER BY k`},
 	)
 
+	// --- ARRAY[...] built from a column (#596) ---------------------------
+	//
+	// collectASTColumnRefs (internal/planner/logical/optimizer.go) had no
+	// case for ArrayLitNode, so a column referenced ONLY inside ARRAY[...]
+	// was pruned out of the scan before the ARRAY constructor ever ran,
+	// which read a column that was not in the batch and produced NULL per
+	// element. None of the entries below reference the target column
+	// anywhere else in the query — the filters and ORDER BY keys are chosen
+	// so nothing but the ARRAY[...] expression itself keeps the column
+	// alive, which is exactly the shape that went silently wrong.
+	out = append(out,
+		pgCase{name: "ArrayLitSingleColumn",
+			sql: `SELECT n_nationkey, ARRAY[n_name] AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		// array_to_string, not the raw two-element array: PostgreSQL's own
+		// array literal text form ("{a,b}") and wadjet's container
+		// rendering are a text-CONVENTION difference neither engine is
+		// wrong about (same family as the DECIMAL boxing note above).
+		// array_to_string is common ground both engines answer identically,
+		// and its argument is still ARRAY[n_name, n_comment] nested inside a
+		// function call — the same collectASTColumnRefs walk
+		// (FuncCallNode -> ArrayLitNode -> ColRef) #596 fixed.
+		pgCase{name: "ArrayLitTwoColumns",
+			sql: `SELECT n_nationkey, array_to_string(ARRAY[n_name, n_comment], '|') AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		pgCase{name: "ArrayLitFuncArg",
+			sql: `SELECT n_nationkey, ARRAY[UPPER(n_name)] AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		pgCase{name: "ArrayLitArithmetic",
+			sql: `SELECT n_nationkey, ARRAY[n_regionkey + 1] AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		pgCase{name: "ArrayLitGroupBy",
+			sql: `SELECT ARRAY[n_regionkey] AS a, COUNT(*) AS n FROM nation GROUP BY ARRAY[n_regionkey] ORDER BY a`},
+		pgCase{name: "ArrayLitOrderBy",
+			sql: `SELECT n_nationkey FROM nation ORDER BY ARRAY[n_name], n_nationkey LIMIT 5`},
+		pgCase{name: "ArrayLitWhereEquality",
+			sql: `SELECT n_nationkey FROM nation WHERE ARRAY[n_name] = ARRAY['CANADA'] ORDER BY n_nationkey`},
+		// No ArrayLitNested entry here (unlike the DuckDB and two-path
+		// corpora): PostgreSQL's ARRAY[ARRAY[x]] is not a nested container —
+		// it builds one genuine N-DIMENSIONAL array (`{{ALGERIA}}`, a 1x1
+		// two-dimensional text[] value), which is a different TYPE than
+		// wadjet's ARRAY-of-ARRAY container (matching DuckDB's nested LIST).
+		// Verified live: comparing the two answers content-digest-diverges
+		// on every row even though both sides hold "ALGERIA" — PostgreSQL
+		// has no equivalent of a jagged/nested array to be authoritative
+		// about here, so per ADR-0012 this is not a semantics question
+		// PostgreSQL can settle, not a #596-style defect.
+		//
+		// One row of the 25-row nation table (regionkey 1) is forced to NULL
+		// via NULLIF so the constructed array holds a genuine NULL element,
+		// not just a pruned-away one. Indexed + IS NULL rather than the raw
+		// array: both engines DROP a NULL element from array_to_string's
+		// join (so that form can't tell "NULL survived" from "column was
+		// pruned to NULL and then dropped"), and the raw array's per-engine
+		// NULL-slot text rendering is exactly the boxing difference
+		// ArrayLitTwoColumns' comment describes. Indexing into element 1
+		// and asking IS NULL answers a plain boolean both engines render
+		// identically, while still routing n_regionkey through NULLIF
+		// nested inside ArrayLitNode nested inside a subscript expression.
+		pgCase{name: "ArrayLitOverNullColumn",
+			sql: `SELECT n_nationkey, (ARRAY[NULLIF(n_regionkey, 1)])[1] IS NULL AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		pgCase{name: "ArrayLitInDerivedTable",
+			sql: `SELECT a FROM (SELECT ARRAY[n_name] AS a FROM nation WHERE n_nationkey < 5) t ORDER BY a`},
+	)
+
 	out = append(out, postgresBytesCases()...)
 
 	out = append(out, multiKeyCorrelatedCases()...)

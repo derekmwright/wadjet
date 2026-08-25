@@ -774,6 +774,16 @@ func collectASTColumnRefs(node plansql.Node, refs map[string]bool) {
 		for _, e := range n.Elements {
 			collectASTColumnRefs(e, refs)
 		}
+	// ARRAY[expr, expr, ...] is a container literal built from column
+	// expressions the same way TupleNode is. The walk had no case for it,
+	// so a bare ARRAY[c] select-list expression contributed no names, the
+	// scan pruned the referenced column away, and the compiled ARRAY
+	// constructor read a column that was not in the batch — a silent NULL
+	// per element (#596).
+	case *plansql.ArrayLitNode:
+		for _, e := range n.Elements {
+			collectASTColumnRefs(e, refs)
+		}
 	}
 }
 

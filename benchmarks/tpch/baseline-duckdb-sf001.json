@@ -25,6 +25,123 @@
       "fine": "41f158f908cc8de4",
       "coarse": "41f158f908cc8de4"
     },
+    "ArrayLitArithmetic": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "a"
+      ],
+      "fine": "c4ac5f1c3fa3e6a5",
+      "coarse": "c4ac5f1c3fa3e6a5"
+    },
+    "ArrayLitFuncArg": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "a"
+      ],
+      "fine": "003846ad4aaeae0d",
+      "coarse": "003846ad4aaeae0d"
+    },
+    "ArrayLitGroupBy": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "a",
+        "n"
+      ],
+      "fine": "404c6a7dcf2b8749",
+      "coarse": "404c6a7dcf2b8749"
+    },
+    "ArrayLitInDerivedTable": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "a"
+      ],
+      "fine": "e13d45da04327d68",
+      "coarse": "e13d45da04327d68"
+    },
+    "ArrayLitNested": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "a"
+      ],
+      "fine": "337d4973ec4add30",
+      "coarse": "337d4973ec4add30"
+    },
+    "ArrayLitOrderBy": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey"
+      ],
+      "fine": "facc0da3bcff67d0",
+      "coarse": "facc0da3bcff67d0"
+    },
+    "ArrayLitOverNullColumn": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "a"
+      ],
+      "fine": "a76b062901ee5193",
+      "coarse": "a76b062901ee5193"
+    },
+    "ArrayLitSingleColumn": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "a"
+      ],
+      "fine": "003846ad4aaeae0d",
+      "coarse": "003846ad4aaeae0d"
+    },
+    "ArrayLitTwoColumns": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey",
+        "a"
+      ],
+      "fine": "6ab8300cf6f2f717",
+      "coarse": "6ab8300cf6f2f717"
+    },
+    "ArrayLitWhereEquality": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey"
+      ],
+      "fine": "1121cfccd5913f0a",
+      "coarse": "1121cfccd5913f0a"
+    },
     "BareLimit": {
       "source": "duckdb",
       "row_count": 7,

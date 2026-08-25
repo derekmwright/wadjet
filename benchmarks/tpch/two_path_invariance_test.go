@@ -5022,6 +5022,40 @@ func twoPathCorpus() []twoPathQuery {
 			sql: `SELECT t.s_suppkey, s2.s_name FROM (
 				SELECT s_suppkey FROM supplier ORDER BY s_suppkey + 1 DESC LIMIT 20) t
 				JOIN supplier s2 ON t.s_suppkey = s2.s_suppkey`},
+
+		// --- ARRAY[...] built from a column (#596) ------------------------
+		//
+		// collectASTColumnRefs had no case for ArrayLitNode, so a column
+		// referenced ONLY inside ARRAY[...] never reached the scan's
+		// RequiredColumns and the constructed array read back NULL per
+		// element — GROUP BY ARRAY[c] additionally collapsed every row into
+		// one group, since every constructed key looked identical. Nothing
+		// else in any of these queries references the target column, which
+		// is what made the bug invisible to every prior corpus entry.
+		twoPathQuery{name: "ArrayLitSingleColumn", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey, ARRAY[n_name] AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		// array_to_string (matches the DuckDB/PostgreSQL corpora's spelling
+		// of this entry, kept identical across all three for the same name)
+		// — its argument is still ARRAY[n_name, n_comment] nested inside a
+		// function call, the same collectASTColumnRefs walk #596 fixed.
+		twoPathQuery{name: "ArrayLitTwoColumns", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey, array_to_string(ARRAY[n_name, n_comment], '|') AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		twoPathQuery{name: "ArrayLitFuncArg", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey, ARRAY[UPPER(n_name)] AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		twoPathQuery{name: "ArrayLitArithmetic", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey, ARRAY[n_regionkey + 1] AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		twoPathQuery{name: "ArrayLitGroupBy", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT ARRAY[n_regionkey] AS a, COUNT(*) AS n FROM nation GROUP BY ARRAY[n_regionkey] ORDER BY a`},
+		twoPathQuery{name: "ArrayLitOrderBy", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey FROM nation ORDER BY ARRAY[n_name], n_nationkey LIMIT 5`},
+		twoPathQuery{name: "ArrayLitWhereEquality", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey FROM nation WHERE ARRAY[n_name] = ARRAY['CANADA'] ORDER BY n_nationkey`},
+		twoPathQuery{name: "ArrayLitNested", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey, ARRAY[ARRAY[n_name]] AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		twoPathQuery{name: "ArrayLitOverNullColumn", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey, (ARRAY[NULLIF(n_regionkey, 1)])[1] IS NULL AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		twoPathQuery{name: "ArrayLitInDerivedTable", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT a FROM (SELECT ARRAY[n_name] AS a FROM nation WHERE n_nationkey < 5) t ORDER BY a`},
 	)
 	return out
 }

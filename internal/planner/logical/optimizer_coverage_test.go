@@ -196,6 +196,48 @@ func TestComputeRequiredColumns_ProjectWithAST(t *testing.T) {
 	}
 }
 
+// TestComputeRequiredColumns_ProjectWithArrayLit is the regression test for
+// #596: a column referenced only inside ARRAY[...] must survive projection
+// pruning. Before the fix, ArrayLitNode had no case in collectASTColumnRefs,
+// so the scan's RequiredColumns never named the referenced column and the
+// compiled ARRAY constructor read a column that was not in the batch.
+func TestComputeRequiredColumns_ProjectWithArrayLit(t *testing.T) {
+	scan := NewScan("events", "e")
+	proj := NewProject(scan, []Projection{
+		{ASTExpr: &plansql.ArrayLitNode{Elements: []plansql.Node{&plansql.ColRef{Column: "name"}}}},
+	})
+	computeRequiredColumns(proj)
+
+	needed := map[string]bool{}
+	for _, c := range scan.RequiredColumns {
+		needed[c] = true
+	}
+	if !needed["name"] {
+		t.Errorf("expected name in required (from ARRAY[name]), got %v", scan.RequiredColumns)
+	}
+}
+
+// TestComputeRequiredColumns_ProjectWithArrayLitMultiElement covers
+// ARRAY[c1, c2] and a nested function call inside an element, per #596.
+func TestComputeRequiredColumns_ProjectWithArrayLitMultiElement(t *testing.T) {
+	scan := NewScan("events", "e")
+	proj := NewProject(scan, []Projection{
+		{ASTExpr: &plansql.ArrayLitNode{Elements: []plansql.Node{
+			&plansql.ColRef{Column: "id"},
+			&plansql.FuncCallNode{Name: "upper", Args: []plansql.Node{&plansql.ColRef{Column: "name"}}},
+		}}},
+	})
+	computeRequiredColumns(proj)
+
+	needed := map[string]bool{}
+	for _, c := range scan.RequiredColumns {
+		needed[c] = true
+	}
+	if !needed["id"] || !needed["name"] {
+		t.Errorf("expected id and name in required (from ARRAY[id, upper(name)]), got %v", scan.RequiredColumns)
+	}
+}
+
 // --- collectNodeColumnRefs ---
 
 func TestCollectNodeColumnRefs_AllNodeTypes(t *testing.T) {
@@ -283,6 +325,16 @@ func TestCollectASTColumnRefs(t *testing.T) {
 			Whens:   []plansql.WhenClause{{Cond: &plansql.ColRef{Column: "r"}, Result: &plansql.ColRef{Column: "s"}}},
 			Else:    &plansql.ColRef{Column: "t2"},
 		}, "q"},
+		// ARRAY[expr, ...] (#596): the walk had no case for ArrayLitNode, so
+		// a column referenced only inside ARRAY[...] was pruned out of the
+		// scan and the constructed array read a missing column as NULL.
+		{"ArrayLitNode", &plansql.ArrayLitNode{Elements: []plansql.Node{&plansql.ColRef{Column: "u"}}}, "u"},
+		{"ArrayLitNode_FuncArg", &plansql.ArrayLitNode{
+			Elements: []plansql.Node{&plansql.FuncCallNode{Name: "upper", Args: []plansql.Node{&plansql.ColRef{Column: "v"}}}},
+		}, "v"},
+		{"ArrayLitNode_MultiElement", &plansql.ArrayLitNode{
+			Elements: []plansql.Node{&plansql.Lit{Value: "x", Kind: plansql.LitString}, &plansql.ColRef{Column: "w"}},
+		}, "w"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

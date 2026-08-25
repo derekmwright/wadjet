@@ -1733,6 +1733,50 @@ func duckdbCorpus() []duckdbCase {
 		// subquery requires a SubqueryRunner", the #535 family). Pinning arm
 		// B for that would make this entry about a different defect than the
 		// one above it. The control's numbers are in #584.
+		// --- ARRAY[...] built from a column (#596) ------------------------
+		//
+		// See postgresSemanticsCases's identical family for the root cause:
+		// collectASTColumnRefs had no case for ArrayLitNode, so a column
+		// referenced ONLY inside ARRAY[...] was pruned from the scan and
+		// every constructed element read back NULL. Nothing else in any of
+		// these queries references the target column.
+		duckdbCase{name: "ArrayLitSingleColumn",
+			sql: `SELECT n_nationkey, ARRAY[n_name] AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		// array_to_string, not the raw two-element array: DuckDB's CLI joins
+		// list elements with ", " while wadjet's own container rendering
+		// joins with a single space, a text-CONVENTION difference neither
+		// engine is wrong about (same family as the DECIMAL boxing note
+		// above). array_to_string is common ground both engines answer
+		// identically, and its argument is still ARRAY[n_name, n_comment]
+		// nested inside a function call — the same collectASTColumnRefs
+		// walk (FuncCallNode -> ArrayLitNode -> ColRef) #596 fixed.
+		duckdbCase{name: "ArrayLitTwoColumns",
+			sql: `SELECT n_nationkey, array_to_string(ARRAY[n_name, n_comment], '|') AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		duckdbCase{name: "ArrayLitFuncArg",
+			sql: `SELECT n_nationkey, ARRAY[UPPER(n_name)] AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		duckdbCase{name: "ArrayLitArithmetic",
+			sql: `SELECT n_nationkey, ARRAY[n_regionkey + 1] AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		duckdbCase{name: "ArrayLitGroupBy",
+			sql: `SELECT ARRAY[n_regionkey] AS a, COUNT(*) AS n FROM nation GROUP BY ARRAY[n_regionkey] ORDER BY a`},
+		duckdbCase{name: "ArrayLitOrderBy",
+			sql: `SELECT n_nationkey FROM nation ORDER BY ARRAY[n_name], n_nationkey LIMIT 5`},
+		duckdbCase{name: "ArrayLitWhereEquality",
+			sql: `SELECT n_nationkey FROM nation WHERE ARRAY[n_name] = ARRAY['CANADA'] ORDER BY n_nationkey`},
+		duckdbCase{name: "ArrayLitNested",
+			sql: `SELECT n_nationkey, ARRAY[ARRAY[n_name]] AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		// Indexed + IS NULL rather than the raw array: both engines DROP a
+		// NULL element in array_to_string's join (so that form can't tell
+		// "NULL survived" from "column was pruned to NULL and then
+		// dropped"), and the raw array's per-engine NULL-slot text
+		// rendering is exactly the boxing difference ArrayLitTwoColumns'
+		// comment describes. Indexing into element 1 and asking IS NULL
+		// answers a plain boolean both engines render identically, while
+		// still routing n_regionkey through NULLIF nested inside
+		// ArrayLitNode nested inside a subscript expression.
+		duckdbCase{name: "ArrayLitOverNullColumn",
+			sql: `SELECT n_nationkey, (ARRAY[NULLIF(n_regionkey, 1)])[1] IS NULL AS a FROM nation WHERE n_nationkey < 5 ORDER BY n_nationkey`},
+		duckdbCase{name: "ArrayLitInDerivedTable",
+			sql: `SELECT a FROM (SELECT ARRAY[n_name] AS a FROM nation WHERE n_nationkey < 5) t ORDER BY a`},
 	)
 
 	// --- BYTES / BLOB (#570) --------------------------------------------

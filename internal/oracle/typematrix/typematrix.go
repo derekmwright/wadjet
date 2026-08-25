@@ -684,11 +684,27 @@ func Corpus() []Query {
 			fmt.Sprintf(`SELECT id, UPPER(%s) AS v FROM %s WHERE id %% 331 = 7 ORDER BY id`, n, tbl),
 			oracle.CmpOrdered, n)
 
+		// ARRAY[expr] built from a typed column, with the column referenced
+		// NOWHERE else in the query — the exact shape of #596: projection
+		// pruning had no case for ArrayLitNode, so the scan dropped the
+		// column and every constructed array element read back NULL. The
+		// WHERE clause filters on id, never on n, so nothing else keeps the
+		// column alive.
+		add("array_of_"+n,
+			fmt.Sprintf(`SELECT id, ARRAY[%s] AS v FROM %s WHERE id %% 331 = 7 ORDER BY id`, n, tbl),
+			oracle.CmpOrdered, n)
+
 		// GROUP BY key: the key is serialized into the hash table and
 		// reconstructed on output, a second retention path with its own
 		// per-type encoding.
 		add("groupby_"+n,
 			fmt.Sprintf(`SELECT %s AS k, COUNT(*) AS n FROM %s GROUP BY %s ORDER BY k, n`, n, Table, n),
+			oracle.CmpOrdered, n)
+		// GROUP BY ARRAY[expr]: #596 also collapsed every row into one group
+		// under this shape, because the pruned-away column made every
+		// constructed key the same NULL-element array.
+		add("groupby_array_"+n,
+			fmt.Sprintf(`SELECT ARRAY[%s] AS k, COUNT(*) AS n FROM %s GROUP BY ARRAY[%s] ORDER BY k, n`, n, Table, n),
 			oracle.CmpOrdered, n)
 		// COUNT(DISTINCT) hashes the value into a per-group set.
 		add("countdistinct_"+n,
