@@ -817,6 +817,7 @@ func TestSwapFileForGCRefusesDuplicatePath(t *testing.T) {
 // their grace period has elapsed.
 func TestDropTableDefersPhysicalDeletion(t *testing.T) {
 	cat, ctx := setupCatalog(t)
+	cat.EnableDropReclaim()
 	schema := testSchema()
 	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
 		t.Fatal(err)
@@ -861,6 +862,7 @@ func TestDropTableDefersPhysicalDeletion(t *testing.T) {
 // must not delete it out from under that write.
 func TestDropTableFlushSkipsRecreatedObject(t *testing.T) {
 	cat, ctx := setupCatalog(t)
+	cat.EnableDropReclaim()
 	schema := testSchema()
 	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
 		t.Fatal(err)
@@ -909,6 +911,7 @@ func TestDropTableFlushSkipsRecreatedObject(t *testing.T) {
 // though a pendingDrops entry for the earlier incarnation is due.
 func TestFlushDroppedTableFilesSkipsPathsLiveInARecreatedTable(t *testing.T) {
 	cat, ctx := setupCatalog(t)
+	cat.EnableDropReclaim()
 	schema := testSchema()
 	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
 		t.Fatal(err)
@@ -962,6 +965,7 @@ func TestFlushDroppedTableFilesSkipsPathsLiveInARecreatedTable(t *testing.T) {
 // and nothing protects it in liveCatalogState.
 func TestFlushDroppedTableFilesNeverDeletesOutsideItsOwnTablePrefix(t *testing.T) {
 	cat, ctx := setupCatalog(t)
+	cat.EnableDropReclaim()
 	schema := testSchema()
 	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
 		t.Fatal(err)
@@ -1028,6 +1032,7 @@ func TestFailedDropLeavesTheCatalogFullyConsistent(t *testing.T) {
 	if err := cat.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
+	cat.EnableDropReclaim()
 	schema := testSchema()
 
 	mk := func(table, path string) {
@@ -1172,15 +1177,20 @@ func (p *putHookKV) Put(key string, value []byte) (uint64, error) {
 	return rev, err
 }
 
-// TestPendingDropsCapEvictsOldestWithoutDeleting is a #494 regression for
-// the reclaim-is-opt-in default: if nothing ever calls
-// FlushDroppedTableFiles (compaction.BackgroundConfig.ReclaimDroppedTables
-// defaults off), pendingDrops must not grow without bound. Past
-// maxPendingTableDrops the OLDEST entry is evicted — leaking its files —
-// rather than ever risking their deletion outside FlushDroppedTableFiles's
-// guard.
-func TestPendingDropsCapEvictsOldestWithoutDeleting(t *testing.T) {
+// TestPendingDropsCapIsDenominatedInPathsAndEvictsWithoutDeleting is a
+// #494 regression for the pending list's bound. Two properties:
+//
+// The cap counts PATHS, not entries. Entries are the wrong unit by orders
+// of magnitude — one dropped table can hold a single chunk or an SF100
+// lineitem's worth of files — so a cap of N entries bounds memory only if
+// every table is the same size.
+//
+// And eviction LEAKS. Past the cap the oldest entry is dropped from the
+// list without ever being scheduled for physical deletion, rather than
+// anything being deleted outside FlushDroppedTableFiles's guard.
+func TestPendingDropsCapIsDenominatedInPathsAndEvictsWithoutDeleting(t *testing.T) {
 	cat, ctx := setupCatalog(t)
+	cat.EnableDropReclaim()
 
 	path0 := "tables/t0/chunk_a.parquet"
 	if _, err := cat.Store().Put(ctx, cat.Bucket(), path0, bytes.NewReader([]byte("x")), 1, "application/octet-stream"); err != nil {
@@ -1188,23 +1198,113 @@ func TestPendingDropsCapEvictsOldestWithoutDeleting(t *testing.T) {
 	}
 	cat.recordPendingDrop("t0", []string{path0})
 
-	for i := 1; i <= maxPendingTableDrops; i++ {
-		cat.recordPendingDrop(fmt.Sprintf("t%d", i), []string{fmt.Sprintf("tables/t%d/chunk_a.parquet", i)})
+	// Far fewer ENTRIES than any plausible entry cap, but well past the
+	// path cap: 400 tables of 500 files each is 200k paths.
+	const tables, filesPer = 400, 500
+	for i := 1; i <= tables; i++ {
+		paths := make([]string, filesPer)
+		for j := range paths {
+			paths[j] = fmt.Sprintf("tables/t%d/chunk_%d.parquet", i, j)
+		}
+		cat.recordPendingDrop(fmt.Sprintf("t%d", i), paths)
 	}
 
 	cat.dropMu.Lock()
-	n := len(cat.pendingDrops)
+	entries := len(cat.pendingDrops)
+	total := cat.pendingDropPaths
 	oldest := cat.pendingDrops[0].table
+	counted := 0
+	for _, pd := range cat.pendingDrops {
+		counted += len(pd.paths)
+	}
+	// Everything past the live prefix must be zeroed, or the backing array
+	// keeps the evicted entries' path slices alive — the memory the cap
+	// exists to bound.
+	live := cat.pendingDrops[:len(cat.pendingDrops):len(cat.pendingDrops)]
+	full := cat.pendingDrops[:cap(cat.pendingDrops)]
+	retained := 0
+	for i := len(live); i < len(full); i++ {
+		if full[i].paths != nil {
+			retained++
+		}
+	}
 	cat.dropMu.Unlock()
-	if n != maxPendingTableDrops {
-		t.Fatalf("pendingDrops = %d entries, want capped at %d", n, maxPendingTableDrops)
+
+	if total > maxPendingDropPaths {
+		t.Errorf("pendingDropPaths = %d, want <= the %d-path cap", total, maxPendingDropPaths)
+	}
+	if counted != total {
+		t.Errorf("pendingDropPaths accounting drifted: counted %d paths, tracked %d", counted, total)
+	}
+	if entries >= tables {
+		t.Errorf("cap bounded nothing: %d entries still held after %d drops", entries, tables)
 	}
 	if oldest == "t0" {
-		t.Fatal("expected t0 (the oldest entry) to have been evicted")
+		t.Error("expected t0 (the oldest entry) to have been evicted")
+	}
+	if retained != 0 {
+		t.Errorf("%d evicted entries are still reachable through the backing array; evicted slots must be zeroed", retained)
 	}
 	// t0's file must be LEAKED (still present) — it fell out of
 	// pendingDrops without ever reaching FlushDroppedTableFiles.
 	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), path0); err != nil {
 		t.Fatalf("evicted drop's file must be leaked, not deleted: %v", err)
+	}
+}
+
+// TestDropRecordsNothingWhenNoFlusherIsWired pins the other half of the
+// bound: reclaim is off by default and a *Catalog is not unique per
+// process, so on a catalog nobody sweeps a pending-drop list is pure cost —
+// nothing will ever consume it. DropTable records only where a flusher has
+// been declared, which makes the default configuration cost exactly
+// nothing and makes "which catalogs reclaim" structural rather than a
+// comment.
+func TestDropRecordsNothingWhenNoFlusherIsWired(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := "tables/events/chunk_aaaa.parquet"
+	if _, err := cat.Store().Put(ctx, cat.Bucket(), path, bytes.NewReader([]byte("data")), 4, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
+		{Path: path, SizeBytes: 4, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+
+	cat.dropMu.Lock()
+	n, paths := len(cat.pendingDrops), cat.pendingDropPaths
+	cat.dropMu.Unlock()
+	if n != 0 || paths != 0 {
+		t.Errorf("an unwired catalog recorded %d pending entries / %d paths, want 0", n, paths)
+	}
+	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), path); err != nil {
+		t.Errorf("the file must survive: %v", err)
+	}
+
+	// Declaring a flusher makes subsequent drops recordable.
+	cat.EnableDropReclaim()
+	if err := cat.CreateTable(ctx, "events2", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events2", nil, "tables/events2", []FileEntry{
+		{Path: "tables/events2/chunk_bbbb.parquet", SizeBytes: 4, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.DropTable(ctx, "events2"); err != nil {
+		t.Fatal(err)
+	}
+	cat.dropMu.Lock()
+	n = len(cat.pendingDrops)
+	cat.dropMu.Unlock()
+	if n != 1 {
+		t.Errorf("a wired catalog recorded %d pending entries, want 1", n)
 	}
 }

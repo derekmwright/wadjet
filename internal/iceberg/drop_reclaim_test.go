@@ -9,13 +9,23 @@ import (
 // TestReviewRepro_IcebergRefreshDeletesLiveWarehouseFiles is a permanent
 // #494 regression, promoted from the adversarial review's reproducer:
 // RefreshTable drops and re-creates the catalog table over the SAME
-// Iceberg warehouse data files on every metadata refresh. Before the
-// live-manifest guard in catalog.Catalog.FlushDroppedTableFiles, DropTable
+// Iceberg warehouse data files on every metadata refresh. DropTable
 // scheduling the dropped manifest's exact paths for physical deletion
 // meant a background sweep run after the drop grace elapsed deleted the
 // files the LIVE, freshly-refreshed table still references.
+//
+// Two independent layers stop it now, and this asserts both. Ownership:
+// registerDataFiles registers through AddFiles, so warehouse files are
+// never marked engine-written and never enter pendingDrops at all —
+// asserted here as "nothing was even scheduled", which holds no matter
+// where the warehouse lives. And the live-manifest guard behind it, which
+// would catch the same paths at delete time.
+//
+// Reclaim is explicitly wired on, so the flush below is real work rather
+// than a no-op that would pass whatever the guards did.
 func TestReviewRepro_IcebergRefreshDeletesLiveWarehouseFiles(t *testing.T) {
 	cat, store := setupCatalogTest(t)
+	cat.EnableDropReclaim()
 	ctx := context.Background()
 
 	seedIcebergTable(t, store, "test-bucket")
@@ -55,8 +65,9 @@ func TestReviewRepro_IcebergRefreshDeletesLiveWarehouseFiles(t *testing.T) {
 	}
 
 	// The background sweep runs after the grace elapses.
-	n := cat.FlushDroppedTableFiles(ctx, 0)
-	t.Logf("FlushDroppedTableFiles deleted %d objects", n)
+	if n := cat.FlushDroppedTableFiles(ctx, 0); n != 0 {
+		t.Errorf("reclaim deleted %d Iceberg warehouse objects, want 0", n)
+	}
 
 	for _, p := range dataObjects {
 		if _, _, err := store.Get(ctx, "test-bucket", p); err != nil {

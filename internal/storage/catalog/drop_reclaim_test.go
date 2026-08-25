@@ -94,6 +94,7 @@ func TestReclaimNeverDeletesOperatorRegisteredFilesTheEngineNeverWrote(t *testin
 // the stamp from AddNewFiles).
 func TestOwnershipMarkerIsStampedOnlyByTheEngineWritePaths(t *testing.T) {
 	cat, ctx := setupCatalog(t)
+	cat.EnableDropReclaim()
 	if err := cat.CreateTable(ctx, "events", testSchema(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -174,6 +175,7 @@ func TestGCRewriteOutputIsMarkedEngineWritten(t *testing.T) {
 // is exactly what an older wadjet wrote.
 func TestLegacyManifestWithoutTheOwnershipMarkerIsNeverReclaimed(t *testing.T) {
 	cat, ctx := setupCatalog(t)
+	cat.EnableDropReclaim()
 	if err := cat.CreateTable(ctx, "events", testSchema(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -315,6 +317,7 @@ func TestReclaimReVerifiesBeforeDeletingAPathThatBecameLiveMidFlush(t *testing.T
 	if err := cat.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
+	cat.EnableDropReclaim()
 	schema := testSchema()
 
 	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
@@ -384,6 +387,7 @@ func TestReclaimReVerifiesBeforeDeletingAPathThatBecameLiveMidFlush(t *testing.T
 // and the recreated table's files are protected precisely — by path.
 func TestReclaimStillCollectsTheOldIncarnationAfterADropRecreateInsert(t *testing.T) {
 	cat, ctx := setupCatalog(t)
+	cat.EnableDropReclaim()
 	schema := testSchema()
 
 	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
@@ -475,6 +479,7 @@ func TestReclaimLogsEverySkipClass(t *testing.T) {
 	if err := cat.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
+	cat.EnableDropReclaim()
 	schema := testSchema()
 
 	put := func(key string) {
@@ -558,6 +563,7 @@ func TestReclaimLogsTheRecreatedTableSkip(t *testing.T) {
 	if err := cat.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
+	cat.EnableDropReclaim()
 	schema := testSchema()
 	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
 		t.Fatal(err)

@@ -409,6 +409,17 @@ func TestBackgroundSweep_FlushesDroppedTableFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The compactor is constructed BEFORE the drop, which is also the
+	// production order (cmd/wadjet/main.go builds it at startup): with
+	// ReclaimDroppedTables set it declares itself the flusher on this
+	// catalog, and DropTable only records where a flusher exists.
+	bc := NewBackgroundCompactor(cat, BackgroundConfig{
+		Enabled:              true,
+		Compaction:           DefaultConfig(),
+		DropGrace:            time.Nanosecond,
+		ReclaimDroppedTables: true,
+	}, nil)
+
 	if err := cat.DropTable(ctx, "events"); err != nil {
 		t.Fatal(err)
 	}
@@ -417,12 +428,6 @@ func TestBackgroundSweep_FlushesDroppedTableFiles(t *testing.T) {
 	}
 
 	time.Sleep(2 * time.Millisecond)
-	bc := NewBackgroundCompactor(cat, BackgroundConfig{
-		Enabled:              true,
-		Compaction:           DefaultConfig(),
-		DropGrace:            time.Nanosecond,
-		ReclaimDroppedTables: true,
-	}, nil)
 	bc.sweep(ctx)
 
 	if _, _, err := store.Get(ctx, "test-bucket", path); err == nil {
@@ -461,6 +466,9 @@ func TestBackgroundSweep_ReclaimDroppedTablesDefaultsOff(t *testing.T) {
 		DropGrace:  time.Nanosecond,
 		// ReclaimDroppedTables left at its zero value (false).
 	}, nil)
+	// Holds twice over now: the sweep never calls FlushDroppedTableFiles,
+	// AND the drop above recorded nothing, because no flusher was ever
+	// declared on this catalog (catalog.Catalog.EnableDropReclaim).
 	bc.sweep(ctx)
 
 	if _, _, err := store.Get(ctx, "test-bucket", path); err != nil {
@@ -485,10 +493,22 @@ func TestReviewRepro_DropThenReregisterSameFilesLosesThem(t *testing.T) {
 	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
 		t.Fatal(err)
 	}
-	path := "tables/events/chunk_0000.parquet"
+	// Declaring the flusher first is the production order, and it is what
+	// makes the drop below recordable at all.
+	bc := NewBackgroundCompactor(cat, BackgroundConfig{
+		Enabled:              true,
+		Compaction:           DefaultConfig(),
+		DropGrace:            time.Nanosecond,
+		ReclaimDroppedTables: true,
+	}, nil)
+
+	// AddNewFiles, so this is an OWNED file: the ownership marker would
+	// otherwise keep it out of pendingDrops entirely and this test would
+	// pass without ever reaching the guard it is about.
+	path := "tables/events/chunk_0198ff00-0000-7000-8000-000000000001.parquet"
 	rows := []map[string]any{{"id": int64(1), "name": "alice"}}
 	size := writeTestFile(t, store, "test-bucket", path, schema, rows)
-	if err := cat.AddFiles(ctx, "events", nil, "tables/events", []catalog.FileEntry{
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []catalog.FileEntry{
 		{Path: path, SizeBytes: size, NumRows: 1, CreatedAt: time.Now().UTC()},
 	}); err != nil {
 		t.Fatal(err)
@@ -517,12 +537,6 @@ func TestReviewRepro_DropThenReregisterSameFilesLosesThem(t *testing.T) {
 
 	// The background sweep runs after DropGrace elapses.
 	time.Sleep(2 * time.Millisecond)
-	bc := NewBackgroundCompactor(cat, BackgroundConfig{
-		Enabled:              true,
-		Compaction:           DefaultConfig(),
-		DropGrace:            time.Nanosecond,
-		ReclaimDroppedTables: true,
-	}, nil)
 	bc.sweep(ctx)
 
 	man, err := cat.GetManifest(ctx, "events")

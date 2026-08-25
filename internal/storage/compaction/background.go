@@ -74,6 +74,15 @@ func NewBackgroundCompactor(cat *catalog.Catalog, cfg BackgroundConfig, logger *
 	if cfg.DropGrace == 0 {
 		cfg.DropGrace = catalog.DefaultDropTableGrace
 	}
+	if cfg.ReclaimDroppedTables {
+		// Declare the flusher before anything can DROP through this
+		// catalog: DropTable records a pending entry only where something
+		// will consume it, so a catalog nobody sweeps never grows a list.
+		// Done at construction rather than in Start so the window between
+		// "the process is up" and "the sweep loop is running" is not a
+		// window in which drops go unrecorded.
+		cat.EnableDropReclaim()
+	}
 	return &BackgroundCompactor{
 		compactor: New(cat, logger, cfg.Compaction),
 		catalog:   cat,

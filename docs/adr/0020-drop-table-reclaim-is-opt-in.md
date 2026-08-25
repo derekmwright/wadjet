@@ -149,11 +149,26 @@ the sweep that calls it is opt-in.**
    asserted only that the files survived, which they did — because the
    half-dropped table made every later flush abort. It passed on the
    strength of the bug it was meant to exclude.)
-5. **Bounded pending list.** The in-memory list of pending drops is capped
-   (`maxPendingTableDrops`); past the cap the *oldest* entry is evicted —
-   its files are never scheduled for deletion and leak — rather than ever
-   deleting outside the guards above. A leak is a storage-hygiene cleanup
-   problem; an incorrect delete is unrecoverable data loss.
+5. **Bounded pending list, and empty unless something will consume it.**
+   The in-memory list of pending drops is capped at
+   `maxPendingDropPaths` — denominated in **paths, not entries**, because
+   one dropped table can hold a single chunk or an SF100 lineitem's worth
+   of files, and a cap of N entries bounds memory only if every table is
+   the same size. Past the cap the *oldest* entries are evicted, their
+   slots zeroed so the backing array stops retaining their path slices —
+   their files are never scheduled for deletion and leak — rather than
+   ever deleting outside the guards above. A leak is a storage-hygiene
+   cleanup problem; an incorrect delete is unrecoverable data loss.
+
+   More to the point, the list does not grow at all on a catalog nobody
+   sweeps. Reclaim is opt-in and a `*Catalog` is not unique per process,
+   so on most of them nothing will ever consume a pending-drop entry;
+   `DropTable` records only where a flusher has declared itself
+   (`Catalog.EnableDropReclaim`, called by
+   `compaction.NewBackgroundCompactor` at construction when
+   `ReclaimDroppedTables` is set). The default configuration therefore
+   costs exactly nothing, and *which* catalogs reclaim is a structural
+   fact rather than a comment.
 
 **Wiring is opt-in** (`compaction.BackgroundConfig.ReclaimDroppedTables`,
 default `false`), not unconditional the way the compactor's own deferred

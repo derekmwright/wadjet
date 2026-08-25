@@ -76,9 +76,18 @@ type Catalog struct {
 	// FlushDroppedTableFiles's live-manifest guard. See DropTable and
 	// FlushDroppedTableFiles. Nothing in this package flushes it on a
 	// timer, and production wiring of that flush is opt-in — see
-	// compaction.BackgroundConfig.ReclaimDroppedTables.
-	dropMu       sync.Mutex
-	pendingDrops []pendingTableDrop
+	// compaction.BackgroundConfig.ReclaimDroppedTables and
+	// EnableDropReclaim.
+	//
+	// dropReclaimWired gates recording entirely: with no flusher wired,
+	// nothing will ever consume this list, so nothing is put on it.
+	// pendingDropPaths is the running total of len(pd.paths) across
+	// pendingDrops — what the cap is actually denominated in, since one
+	// entry can hold a single file or a hundred thousand.
+	dropMu           sync.Mutex
+	pendingDrops     []pendingTableDrop
+	pendingDropPaths int
+	dropReclaimWired bool
 }
 
 // aggStatsCacheEntry is a memoized AggregateColumnStats result, valid for
@@ -1175,34 +1184,76 @@ func (c *Catalog) DropTable(ctx context.Context, name string) error {
 	return nil
 }
 
-// maxPendingTableDrops bounds pendingDrops so a process that drops many
-// tables while nothing ever calls FlushDroppedTableFiles — reclaim is
-// opt-in (compaction.BackgroundConfig.ReclaimDroppedTables), and an
-// embedded wadjet.DB or a standalone pgwire DB may never wire it at all —
-// doesn't grow this list, and the process's memory, without bound.
-const maxPendingTableDrops = 10_000
+// maxPendingDropPaths bounds pendingDrops so a process that drops many
+// tables faster than they are reclaimed doesn't grow this list, and the
+// process's memory, without bound.
+//
+// Denominated in PATHS, not entries. Entries are the wrong unit by three
+// or four orders of magnitude: one dropped table can hold a single chunk
+// or an SF100 lineitem's worth of files, so a cap of N entries bounds
+// memory only if you assume every table is the same size. Paths are what
+// the memory actually is.
+const maxPendingDropPaths = 100_000
+
+// EnableDropReclaim declares that something in this process will call
+// FlushDroppedTableFiles, and is what allows DropTable to record anything
+// at all.
+//
+// Reclaim is opt-in (compaction.BackgroundConfig.ReclaimDroppedTables,
+// default off) and a *Catalog is not unique per process — an embedded
+// wadjet.DB and a standalone pgwire DB each hold their own. On a catalog
+// nobody sweeps, a pending-drop list is pure cost: nothing will ever
+// consume it, so every DROP would grow it until the cap started evicting.
+// Recording only where a flusher exists makes the default configuration
+// (reclaim off) cost exactly nothing, and makes "which catalogs reclaim"
+// a structural fact rather than a comment.
+//
+// Call it before the DROPs whose files should be reclaimed —
+// compaction.NewBackgroundCompactor does, at construction, when
+// ReclaimDroppedTables is set. Idempotent; there is no disable, since a
+// flusher that stops running just leaves entries pending.
+func (c *Catalog) EnableDropReclaim() {
+	c.dropMu.Lock()
+	defer c.dropMu.Unlock()
+	c.dropReclaimWired = true
+}
 
 // recordPendingDrop appends a dropped table's file snapshot to
-// pendingDrops, evicting the OLDEST entry first if the list is already at
-// maxPendingTableDrops. Eviction leaks the evicted table's files — they
-// are removed from pendingDrops without ever being scheduled for physical
-// deletion — rather than deleting anything outside FlushDroppedTableFiles's
-// guard: a leak is a storage-hygiene problem an operator can clean up
-// later; an incorrect delete is unrecoverable data loss (#494).
+// pendingDrops, evicting the OLDEST entries first while the list would
+// otherwise exceed maxPendingDropPaths. Eviction leaks the evicted
+// table's files — they are removed from pendingDrops without ever being
+// scheduled for physical deletion — rather than deleting anything outside
+// FlushDroppedTableFiles's guard: a leak is a storage-hygiene problem an
+// operator can clean up later; an incorrect delete is unrecoverable data
+// loss (#494).
 func (c *Catalog) recordPendingDrop(table string, paths []string) {
 	c.dropMu.Lock()
 	defer c.dropMu.Unlock()
-	if len(c.pendingDrops) >= maxPendingTableDrops {
-		evicted := c.pendingDrops[0]
-		c.pendingDrops = c.pendingDrops[1:]
-		slog.Default().Warn("pendingDrops at capacity: evicting the oldest dropped table's file record without deleting its files",
-			"evicted_table", evicted.table, "evicted_files", len(evicted.paths), "cap", maxPendingTableDrops)
+	if !c.dropReclaimWired {
+		return // nothing will ever flush this list: don't build one
 	}
+	for c.pendingDropPaths+len(paths) > maxPendingDropPaths && len(c.pendingDrops) > 0 {
+		evicted := c.pendingDrops[0]
+		// Zero the evicted slot before re-slicing: the backing array
+		// outlives the re-slice, and an un-zeroed element keeps its whole
+		// []string alive — which is the memory this cap exists to bound.
+		c.pendingDrops[0] = pendingTableDrop{}
+		c.pendingDrops = c.pendingDrops[1:]
+		c.pendingDropPaths -= len(evicted.paths)
+		slog.Default().Warn("pending drop-reclaim list at capacity: evicting the oldest dropped table's file record without deleting its files",
+			"evicted_table", evicted.table, "evicted_files", len(evicted.paths), "cap_paths", maxPendingDropPaths)
+	}
+	// A single snapshot larger than the whole cap is still recorded, after
+	// the drain above has emptied the list: refusing it would leak a real
+	// table's files to bound memory we are already holding anyway (that
+	// manifest was just read into this process), and the overshoot is
+	// exactly one table's path list.
 	c.pendingDrops = append(c.pendingDrops, pendingTableDrop{
 		table: table,
 		paths: paths,
 		at:    time.Now(),
 	})
+	c.pendingDropPaths += len(paths)
 }
 
 // pendingTableDrop is one dropped table's data files awaiting physical
@@ -1368,14 +1419,17 @@ func (c *Catalog) FlushDroppedTableFiles(ctx context.Context, grace time.Duratio
 	cutoff := time.Now().Add(-grace)
 	c.dropMu.Lock()
 	var due, keep []pendingTableDrop
+	keptPaths := 0
 	for _, pd := range c.pendingDrops {
 		if pd.at.Before(cutoff) {
 			due = append(due, pd)
 		} else {
 			keep = append(keep, pd)
+			keptPaths += len(pd.paths)
 		}
 	}
 	c.pendingDrops = keep
+	c.pendingDropPaths = keptPaths
 	c.dropMu.Unlock()
 
 	// reborn collects table names that were absent from the FIRST
@@ -1489,6 +1543,7 @@ func (c *Catalog) requeuePendingDrop(pd pendingTableDrop) {
 	c.dropMu.Lock()
 	defer c.dropMu.Unlock()
 	c.pendingDrops = append(c.pendingDrops, pd)
+	c.pendingDropPaths += len(pd.paths)
 }
 
 // AggregateColumnStats computes table-level column statistics by merging
