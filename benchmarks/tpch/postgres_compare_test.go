@@ -2912,6 +2912,127 @@ func postgresSemanticsCases() []pgCase {
 			ROW_NUMBER() OVER (PARTITION BY u.k % 2 ORDER BY u.k) AS rn
 			FROM u ORDER BY u.k`},
 	)
+	// --- A BOOLEAN-VALUED EXPRESSION USED AS THE PREDICATE (#592) ----------
+	//
+	// `Cast.Eval` had no boolean arm, so a CAST to BOOLEAN returned its
+	// operand unconverted and three consumers read the box three different
+	// ways: the projection coerced an integer to `!= 0` through
+	// Vector.SetValue, NOT and IS NULL read the same truthiness through
+	// toBoolVal, and the FILTER asked `v.(bool)`, failed the assertion, and
+	// answered FALSE for every row. One expression, three readings — which is
+	// why the SQLancer TLP-WHERE oracle found it: its partition IS those three
+	// readings, and the arm that contributed nothing made it undercount.
+	//
+	// n_regionkey is an `integer` on both sides, which is the one integer
+	// width PostgreSQL HAS a boolean cast for; it is 0 for five of the 25
+	// nations, so the FALSE arm is not empty. Wadjet extends the same rule to
+	// BIGINT, which PostgreSQL cannot be asked at all ("cannot cast type
+	// bigint to boolean") — that half is a deliberate divergence recorded in
+	// ADR-0012 item 5 and gated in wadjet.TestCastToBooleanTruthTable, not
+	// here, because an entry PostgreSQL refuses is not a question about
+	// wadjet.
+	out = append(out,
+		pgCase{name: "BareCastIntPredicate",
+			sql: `SELECT n_nationkey FROM nation WHERE CAST(n_regionkey AS BOOLEAN) ORDER BY n_nationkey`},
+		pgCase{name: "BareCastIntPredicateColonCast",
+			sql: `SELECT n_nationkey FROM nation WHERE (n_regionkey)::BOOLEAN ORDER BY n_nationkey`},
+		pgCase{name: "BareCastIntNegated",
+			sql: `SELECT n_nationkey FROM nation WHERE NOT CAST(n_regionkey AS BOOLEAN) ORDER BY n_nationkey`},
+		pgCase{name: "BareCastIntEqTrue",
+			sql: `SELECT n_nationkey FROM nation WHERE CAST(n_regionkey AS BOOLEAN) = TRUE ORDER BY n_nationkey`},
+		pgCase{name: "BareCastIntIsTrue",
+			sql: `SELECT n_nationkey FROM nation WHERE CAST(n_regionkey AS BOOLEAN) IS TRUE ORDER BY n_nationkey`},
+		pgCase{name: "BareCastIntIsNotFalse",
+			sql: `SELECT n_nationkey FROM nation WHERE CAST(n_regionkey AS BOOLEAN) IS NOT FALSE ORDER BY n_nationkey`},
+		// The SELECT list and the WHERE clause over ONE cast, in the same
+		// corpus: the divergence was between them, so an arm that only
+		// projected or only filtered could not see it.
+		pgCase{name: "BareCastIntProjected",
+			sql: `SELECT n_nationkey, CAST(n_regionkey AS BOOLEAN) AS b FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "BareCastThroughDerivedTable",
+			sql: `SELECT n_nationkey FROM (SELECT n_nationkey, CAST(n_regionkey AS BOOLEAN) AS b FROM nation) s
+				WHERE b ORDER BY n_nationkey`},
+
+		// A NULL-bearing cast, so the three-valued rule is exercised: a WHERE
+		// admits only TRUE, so a NULL predicate drops the row from BOTH the
+		// predicate and its negation.
+		pgCase{name: "BareCastNullablePredicate",
+			sql: `SELECT n_nationkey FROM nation WHERE CAST(NULLIF(n_regionkey, 1) AS BOOLEAN) ORDER BY n_nationkey`},
+		pgCase{name: "BareCastNullableNegated",
+			sql: `SELECT n_nationkey FROM nation WHERE NOT CAST(NULLIF(n_regionkey, 1) AS BOOLEAN) ORDER BY n_nationkey`},
+		pgCase{name: "BareCastNullableIsNull",
+			sql: `SELECT n_nationkey FROM nation WHERE CAST(NULLIF(n_regionkey, 1) AS BOOLEAN) IS NULL ORDER BY n_nationkey`},
+		pgCase{name: "BareCastNullableIsUnknown",
+			sql: `SELECT n_nationkey FROM nation WHERE CAST(NULLIF(n_regionkey, 1) AS BOOLEAN) IS UNKNOWN ORDER BY n_nationkey`},
+		pgCase{name: "BareCastNullableProjected",
+			sql: `SELECT n_nationkey, CAST(NULLIF(n_regionkey, 1) AS BOOLEAN) AS b FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "BareCastNullableCoalesce",
+			sql: `SELECT n_nationkey FROM nation
+				WHERE COALESCE(CAST(NULLIF(n_regionkey, 1) AS BOOLEAN), FALSE) ORDER BY n_nationkey`},
+
+		// TLP-WHERE's partition itself: the three arms of one predicate are
+		// the whole table, once each. This is the assertion that failed.
+		pgCase{name: "BareCastTLPWherePartition",
+			sql: `SELECT n_nationkey FROM nation WHERE CAST(NULLIF(n_regionkey, 1) AS BOOLEAN)
+				UNION ALL SELECT n_nationkey FROM nation WHERE NOT (CAST(NULLIF(n_regionkey, 1) AS BOOLEAN))
+				UNION ALL SELECT n_nationkey FROM nation WHERE CAST(NULLIF(n_regionkey, 1) AS BOOLEAN) IS NULL
+				ORDER BY n_nationkey`},
+
+		// The other clauses a bare boolean can be the whole of.
+		pgCase{name: "BareCastCaseWhen",
+			sql: `SELECT n_nationkey FROM nation
+				WHERE CASE WHEN CAST(n_regionkey AS BOOLEAN) THEN TRUE ELSE FALSE END ORDER BY n_nationkey`},
+		pgCase{name: "BareCastInJoinOn",
+			sql: `SELECT n.n_nationkey AS k FROM nation n JOIN region r
+				ON n.n_regionkey = r.r_regionkey AND CAST(n.n_nationkey AS BOOLEAN) ORDER BY k`},
+		// HAVING over a bare boolean of a GROUPED column. `logical.rewriteExpr`
+		// took EVERY function call in a HAVING for an aggregate and rewrote it
+		// to a column named after the call's rendered text, so a HAVING naming
+		// no aggregate at all silently admitted NO GROUP.
+		pgCase{name: "BareCastInHaving",
+			sql: `SELECT n_regionkey AS r, COUNT(*) AS n FROM nation GROUP BY n_regionkey
+				HAVING CAST(n_regionkey AS BOOLEAN) ORDER BY r`},
+		pgCase{name: "BareCoalesceInHaving",
+			sql: `SELECT n_regionkey AS r, COUNT(*) AS n FROM nation GROUP BY n_regionkey
+				HAVING COALESCE(CAST(NULLIF(n_regionkey, 1) AS BOOLEAN), FALSE) ORDER BY r`},
+		pgCase{name: "BareFuncCallInHaving",
+			sql: `SELECT n_regionkey AS r, COUNT(*) AS n FROM nation GROUP BY n_regionkey
+				HAVING ABS(n_regionkey) > 1 ORDER BY r`},
+
+		// A boolean LITERAL as the whole predicate, both ways round.
+		pgCase{name: "BareCastLiteralTrue",
+			sql: `SELECT COUNT(*) AS n FROM nation WHERE CAST(1 AS BOOLEAN)`},
+		pgCase{name: "BareCastLiteralFalse",
+			sql: `SELECT COUNT(*) AS n FROM nation WHERE CAST(0 AS BOOLEAN)`},
+		pgCase{name: "BareCastLiteralNull",
+			sql: `SELECT COUNT(*) AS n FROM nation WHERE CAST(NULL AS BOOLEAN)`},
+	)
+
+	// PostgreSQL's boolean INPUT function, which is what `text::boolean` runs
+	// (parse_bool_with_len, src/backend/utils/adt/bool.c). The prefix rule is
+	// the part a hand-rolled reader gets wrong: any non-empty prefix of
+	// "true"/"false"/"yes"/"no" is a value, and `'o'` alone is an ERROR
+	// because it cannot choose between "on" and "off". Asked of the engine
+	// that defines it rather than pinned to a table written from memory.
+	//
+	// The REFUSALS ('garbage', 'o', '2') are not here: PostgreSQL answers
+	// those with 22P02 and this arm fatals on an oracle error by design, so
+	// the error half is gated in wadjet.TestCastTextToBooleanIsPostgresBoolin
+	// against the same transcript.
+	out = append(out,
+		pgCase{name: "CastTextToBooleanCanonical",
+			sql: `SELECT CAST('t' AS BOOLEAN) AS a, CAST('true' AS BOOLEAN) AS b,
+				CAST('yes' AS BOOLEAN) AS c, CAST('on' AS BOOLEAN) AS d, CAST('1' AS BOOLEAN) AS e,
+				CAST('f' AS BOOLEAN) AS g, CAST('false' AS BOOLEAN) AS h,
+				CAST('no' AS BOOLEAN) AS i, CAST('off' AS BOOLEAN) AS j, CAST('0' AS BOOLEAN) AS k`},
+		pgCase{name: "CastTextToBooleanPrefixesAndCase",
+			sql: `SELECT CAST('tr' AS BOOLEAN) AS a, CAST('tru' AS BOOLEAN) AS b,
+				CAST('fa' AS BOOLEAN) AS c, CAST('fals' AS BOOLEAN) AS d,
+				CAST('ye' AS BOOLEAN) AS e, CAST('n' AS BOOLEAN) AS f, CAST('of' AS BOOLEAN) AS g,
+				CAST('TRUE' AS BOOLEAN) AS h, CAST('Off' AS BOOLEAN) AS i,
+				CAST('  true  ' AS BOOLEAN) AS j`},
+		pgCase{name: "CastNullToBoolean", sql: `SELECT CAST(NULL AS BOOLEAN) AS b`},
+	)
 
 	return out
 }

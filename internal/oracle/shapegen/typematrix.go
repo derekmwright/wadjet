@@ -37,6 +37,7 @@ func TypeMatrix() *Schema {
 		}
 		flat.Cols = append(flat.Cols, Column{
 			Name: c.Name, Kind: kindOf(c.Type), Lits: typeMatrixLits(c.Name),
+			Bool: c.Type == parquet.TypeBool,
 		})
 	}
 	// typematrix.Nested is deliberately ABSENT. It would contribute only an id

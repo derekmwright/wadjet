@@ -1180,6 +1180,58 @@ func Corpus() []Query {
 			fmt.Sprintf(`SELECT MIN(%s) AS lo, MAX(%s) AS hi FROM %s`, fp.path, fp.path, Nested),
 			oracle.CmpUnordered, "c_rownest")
 	}
+	// A BOOLEAN-VALUED EXPRESSION USED AS THE PREDICATE, with no comparison
+	// around it (#592). Not one entry above writes a WHERE that is not a
+	// comparison, an IS test or a set predicate, so the whole bare-predicate
+	// class — the arm every TLP-WHERE query issues — had no coverage from
+	// this corpus at all. `CAST(<int> AS BOOLEAN)` used as a filter excluded
+	// EVERY ROW on BOTH arms while the identical expression projected
+	// correctly, so a two-path gate could only have caught it by carrying the
+	// projection and the filter of one cast in the same corpus, which the
+	// first pair below does.
+	//
+	// c_bool is the native BOOL column and c_i64 the reported one; both null
+	// on their own strides, and c_i64 is zero on exactly one row, which is
+	// the row that separates a working cast from a no-op that a non-zero
+	// integer's truthiness papers over.
+	add("bare_bool_predicate",
+		fmt.Sprintf(`SELECT id, c_bool AS v FROM %s WHERE c_bool ORDER BY id`, Table),
+		oracle.CmpOrdered, "c_bool")
+	add("bare_bool_negated",
+		fmt.Sprintf(`SELECT id, c_bool AS v FROM %s WHERE NOT c_bool ORDER BY id`, Table),
+		oracle.CmpOrdered, "c_bool")
+	add("bare_bool_is_unknown",
+		fmt.Sprintf(`SELECT id FROM %s WHERE c_bool IS UNKNOWN ORDER BY id`, Table),
+		oracle.CmpOrdered, "c_bool")
+	add("bare_bool_coalesce",
+		fmt.Sprintf(`SELECT id FROM %s WHERE COALESCE(c_bool, FALSE) ORDER BY id`, Table),
+		oracle.CmpOrdered, "c_bool")
+	add("bare_cast_int64_predicate",
+		fmt.Sprintf(`SELECT id FROM %s WHERE CAST(c_i64 AS BOOLEAN) ORDER BY id`, Table),
+		oracle.CmpOrdered, "c_i64")
+	add("bare_cast_int64_projected",
+		fmt.Sprintf(`SELECT id, CAST(c_i64 AS BOOLEAN) AS v FROM %s WHERE id < 400 ORDER BY id`, Table),
+		oracle.CmpOrdered, "c_i64")
+	add("bare_cast_int32_predicate",
+		fmt.Sprintf(`SELECT id FROM %s WHERE (c_i32)::BOOLEAN ORDER BY id`, Table),
+		oracle.CmpOrdered, "c_i32")
+	add("bare_cast_conjunct",
+		fmt.Sprintf(`SELECT id FROM %s WHERE CAST(c_i64 AS BOOLEAN) AND id < 900 ORDER BY id`, Table),
+		oracle.CmpOrdered, "c_i64")
+	add("bare_bool_having",
+		fmt.Sprintf(`SELECT c_bool AS k, COUNT(*) AS n FROM %s GROUP BY c_bool `+
+			`HAVING COALESCE(c_bool, FALSE) ORDER BY k`, Table),
+		oracle.CmpOrdered, "c_bool")
+	add("bare_bool_join_on",
+		fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s t JOIN %s d ON t.g = d.k AND t.c_bool`, Table, Dim),
+		oracle.CmpUnordered, "c_bool")
+	// TLP-WHERE's own partition: the three arms of one predicate are the
+	// whole table, once each. The `p` arm contributed nothing before the fix.
+	add("bare_cast_tlp_partition",
+		fmt.Sprintf(`SELECT id FROM %[1]s WHERE CAST(c_i64 AS BOOLEAN)`+
+			` UNION ALL SELECT id FROM %[1]s WHERE NOT (CAST(c_i64 AS BOOLEAN))`+
+			` UNION ALL SELECT id FROM %[1]s WHERE CAST(c_i64 AS BOOLEAN) IS NULL ORDER BY id`, Table),
+		oracle.CmpOrdered, "c_i64")
 
 	// A join ACROSS the two tables: the flat side's typed columns and the
 	// nested side's containers meet in one output batch, which is the shape a

@@ -60,6 +60,12 @@ type Column struct {
 	Name string
 	Kind Kind
 	Lits []string
+	// Bool marks a BOOLEAN column, which is a fact about the DOMAIN rather
+	// than about the operators Kind selects: a BOOL is KindOpaque for every
+	// arm that needs arithmetic or a string function, and is the ONE column
+	// shape that can stand alone as a predicate. genBarePredicate is the only
+	// reader.
+	Bool bool
 }
 
 // Table is one generatable table. PK is a column set unique within the table —
@@ -401,6 +407,16 @@ func (sc *scope) numeric() []ref {
 	for _, r := range sc.refs {
 		switch r.col.Kind {
 		case KindInt, KindFloat, KindDecimal:
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func (sc *scope) boolean() []ref {
+	var out []ref
+	for _, r := range sc.refs {
+		if r.col.Bool {
 			out = append(out, r)
 		}
 	}
@@ -793,9 +809,67 @@ func (g *Gen) genWhere(q *Query) {
 		}
 		q.Where = append(q.Where, fmt.Sprintf("%s IS %sNULL", g.name(r), neg))
 	}
+	// A boolean-valued expression used AS the predicate.
+	if g.chance(0.15) {
+		g.genBarePredicate(q)
+	}
 	// Subquery predicates.
 	if g.chance(0.15) {
 		g.genSubqueryPred(q)
+	}
+}
+
+// genBarePredicate emits a boolean-valued expression with NO comparison around
+// it — the shape this generator could not produce at all before #592.
+//
+// Every other predicate above is a comparison, a LIKE, an IN, a BETWEEN, an IS
+// NULL or an EXISTS, so `WHERE <boolean expression>` — the arm every TLP-WHERE
+// query issues, and the one that excluded EVERY ROW when `CAST(<int> AS
+// BOOLEAN)` reached it — was outside the generator's reach even in principle.
+//
+// The integer cast is generated for EVERY schema, the BOOL-column forms only
+// where a boolean column exists (TPC-H has none). Both spellings the parser
+// accepts are emitted, because they are separate parse paths that meet at the
+// same node.
+//
+// Deliberately NOT generated: a TEXT source. PostgreSQL's `text::boolean`
+// accepts any prefix of "true"/"false"/"yes"/"no" and DuckDB's does not, so a
+// generated text cast would report a divergence the engines are entitled to —
+// that rule is pinned by an explicit corpus entry against PostgreSQL instead
+// (wadjet.TestCastTextToBooleanIsPostgresBoolin). A FLOAT or DECIMAL source is
+// likewise out: PostgreSQL has no such cast (42846) and wadjet follows it, so
+// the query would be an error rather than a comparison.
+func (g *Gen) genBarePredicate(q *Query) {
+	if bs := g.sc.boolean(); len(bs) > 0 && g.chance(0.5) {
+		nm := g.name(bs[g.pick(len(bs))])
+		switch g.pick(5) {
+		case 0:
+			q.Where = append(q.Where, nm)
+		case 1:
+			q.Where = append(q.Where, "NOT "+nm)
+		case 2:
+			q.Where = append(q.Where, nm+" IS TRUE")
+		case 3:
+			q.Where = append(q.Where, nm+" IS NOT FALSE")
+		default:
+			q.Where = append(q.Where, fmt.Sprintf("COALESCE(%s, FALSE)", nm))
+		}
+		return
+	}
+	ints := g.sc.ofKind(KindInt)
+	if len(ints) == 0 {
+		return
+	}
+	nm := g.name(ints[g.pick(len(ints))])
+	switch g.pick(4) {
+	case 0:
+		q.Where = append(q.Where, fmt.Sprintf("CAST(%s AS BOOLEAN)", nm))
+	case 1:
+		q.Where = append(q.Where, fmt.Sprintf("NOT CAST(%s AS BOOLEAN)", nm))
+	case 2:
+		q.Where = append(q.Where, fmt.Sprintf("(%s)::BOOLEAN", nm))
+	default:
+		q.Where = append(q.Where, fmt.Sprintf("CAST(%s AS BOOLEAN) = TRUE", nm))
 	}
 }
 

@@ -59,6 +59,8 @@ type tmxRow struct {
 	i32 *int32
 	str *string
 	dec *float64
+	f64 *float64
+	bl  *bool
 	g   *int32
 }
 
@@ -78,6 +80,12 @@ func tmxRows() []tmxRow {
 		}
 		if v, ok := r["c_dec"].(float64); ok {
 			row.dec = &v
+		}
+		if v, ok := r["c_f64"].(float64); ok {
+			row.f64 = &v
+		}
+		if v, ok := r["c_bool"].(bool); ok {
+			row.bl = &v
 		}
 		if v, ok := r["g"].(int32); ok {
 			row.g = &v
@@ -427,6 +435,123 @@ func decimalColColPredicateCases() []predCase {
 	}
 }
 
+// bareBooleanPredicateCases pin what a BOOLEAN-VALUED EXPRESSION means when it
+// IS the predicate, with no comparison around it (#592).
+//
+// `Cast.Eval` had no boolean arm, so `CAST(<int> AS BOOLEAN)` returned its
+// operand unconverted and three consumers read that box three different ways:
+// the projection's Vector.SetValue coerced an integer to `!= 0` (so the SELECT
+// list looked right), `evalBoolNull`'s toBoolVal did the same (so NOT and
+// IS NULL were right), and the filter's `v.(bool)` assertion failed and
+// answered FALSE — so the bare form, the one arm every TLP-WHERE query
+// issues, excluded EVERY ROW.
+//
+// The corpus sweeps the whole bare-predicate class rather than the one
+// reported spelling, because the defect was in what the filter does with a
+// value and not in the cast alone: a bare BOOL column, a negation, the three
+// IS tests, COALESCE, CASE, a boolean function call and the AND/OR
+// compositions all reach the same entry point. The NULL-bearing strides are
+// what make them load-bearing: a WHERE admits only TRUE, so a NULL predicate
+// drops the row from BOTH a predicate and its negation.
+//
+// c_bool is `i%3 == 0` and NULL on the 23-stride; c_i64 is `i*1_000_003`,
+// NULL on the 31-stride, and ZERO on exactly one row (id 0) — which is the
+// row that separates "the cast works" from "the cast is a no-op that the
+// truthiness of a non-zero integer happens to paper over".
+func bareBooleanPredicateCases() []predCase {
+	none := func(tmxRow) bool { return false }
+	boolTrue := func(r tmxRow) bool { return r.bl != nil && *r.bl }
+	boolFalse := func(r tmxRow) bool { return r.bl != nil && !*r.bl }
+	castTrue := func(r tmxRow) bool { return r.i64 != nil && *r.i64 != 0 }
+	castFalse := func(r tmxRow) bool { return r.i64 != nil && *r.i64 == 0 }
+	return []predCase{
+		// A native BOOL column, bare. The control: this was always right,
+		// and a fix for the cast that moved it moved too much.
+		{"BareBoolColumn", "c_bool", boolTrue},
+		{"BareBoolNegated", "NOT c_bool", boolFalse},
+		{"BareBoolParen", "(c_bool)", boolTrue},
+		{"BareBoolEqTrue", "c_bool = TRUE", boolTrue},
+		{"BareBoolEqFalse", "c_bool = FALSE", boolFalse},
+
+		// The three IS tests. IS UNKNOWN is IS NULL over a boolean, and is
+		// the third arm of TLP-WHERE's partition — the parser refused it
+		// outright before #592.
+		{"BareBoolIsTrue", "c_bool IS TRUE", boolTrue},
+		{"BareBoolIsFalse", "c_bool IS FALSE", boolFalse},
+		{"BareBoolIsUnknown", "c_bool IS UNKNOWN", func(r tmxRow) bool { return r.bl == nil }},
+		{"BareBoolIsNotUnknown", "c_bool IS NOT UNKNOWN", func(r tmxRow) bool { return r.bl != nil }},
+		{"BareBoolIsNotTrue", "c_bool IS NOT TRUE", func(r tmxRow) bool { return r.bl == nil || !*r.bl }},
+
+		// COALESCE over a BOOL, both defaults, so the NULL stride lands on
+		// each side of the answer in turn.
+		{"BareBoolCoalesceTrue", "COALESCE(c_bool, TRUE)", func(r tmxRow) bool {
+			return r.bl == nil || *r.bl
+		}},
+		{"BareBoolCoalesceFalse", "COALESCE(c_bool, FALSE)", boolTrue},
+
+		// #592's reported shape, in all three spellings, plus the two the
+		// report says were RIGHT — those two are the evidence the three
+		// readings existed, so they belong in the gate that keeps them one.
+		{"BareCastInt64", "CAST(c_i64 AS BOOLEAN)", castTrue},
+		{"BareCastInt64ColonColon", "(c_i64)::BOOLEAN", castTrue},
+		{"BareCastInt64EqTrue", "CAST(c_i64 AS BOOLEAN) = TRUE", castTrue},
+		{"BareCastInt64Negated", "NOT CAST(c_i64 AS BOOLEAN)", castFalse},
+		{"BareCastInt64IsNull", "CAST(c_i64 AS BOOLEAN) IS NULL", func(r tmxRow) bool {
+			return r.i64 == nil
+		}},
+		{"BareCastInt64IsUnknown", "CAST(c_i64 AS BOOLEAN) IS UNKNOWN", func(r tmxRow) bool {
+			return r.i64 == nil
+		}},
+		{"BareCastInt64IsFalse", "CAST(c_i64 AS BOOLEAN) IS FALSE", castFalse},
+
+		// The other integer width, because the conversion is per storage
+		// class and c_i32 nulls on its own stride.
+		{"BareCastInt32", "CAST(c_i32 AS BOOLEAN)", func(r tmxRow) bool {
+			return r.i32 != nil && *r.i32 != 0
+		}},
+		{"BareCastInt32Negated", "NOT CAST(c_i32 AS BOOLEAN)", func(r tmxRow) bool {
+			return r.i32 != nil && *r.i32 == 0
+		}},
+
+		// A BOOL through the cast is the identity, and a NULL literal cast to
+		// BOOLEAN is UNKNOWN for every row — never TRUE, and never an error.
+		{"BareCastBoolIdentity", "CAST(c_bool AS BOOLEAN)", boolTrue},
+		{"BareCastNullLiteral", "CAST(NULL AS BOOLEAN)", none},
+		{"BareCastNullLiteralNegated", "NOT CAST(NULL AS BOOLEAN)", none},
+
+		// The compositions. An AND stops at a FALSE and an OR at a TRUE, so
+		// each puts the cast on a different side of a short circuit; the
+		// second conjunct is deliberately one the lowering CAN vectorize, so
+		// tryPartialVectorize splits the predicate across both machineries.
+		{"BareCastAnd", "CAST(c_i64 AS BOOLEAN) AND id < 100", func(r tmxRow) bool {
+			return castTrue(r) && r.id < 100
+		}},
+		{"BareCastAndFlipped", "id < 100 AND CAST(c_i64 AS BOOLEAN)", func(r tmxRow) bool {
+			return castTrue(r) && r.id < 100
+		}},
+		{"BareCastOr", "CAST(c_i64 AS BOOLEAN) OR id = 0", func(r tmxRow) bool {
+			return castTrue(r) || r.id == 0
+		}},
+		{"BareCastAndBool", "CAST(c_i64 AS BOOLEAN) AND c_bool", func(r tmxRow) bool {
+			return castTrue(r) && boolTrue(r)
+		}},
+
+		// A CASE whose result is a boolean, used bare, and a boolean function
+		// call used bare. Both were already right and are here so a change to
+		// the filter's reading of a value cannot move them unnoticed.
+		{"BareCaseWhenBool", "CASE WHEN CAST(c_i64 AS BOOLEAN) THEN TRUE ELSE FALSE END", castTrue},
+		{"BareCaseWhenBoolNull", "CASE WHEN id < 100 THEN c_bool ELSE FALSE END", func(r tmxRow) bool {
+			return r.id < 100 && boolTrue(r)
+		}},
+		{"BareFuncCall", "starts_with(c_str, 's-00001')", func(r tmxRow) bool {
+			return r.str != nil && strings.HasPrefix(*r.str, "s-00001")
+		}},
+		{"BareFuncCallNegated", "NOT starts_with(c_str, 's-00001')", func(r tmxRow) bool {
+			return r.str != nil && !strings.HasPrefix(*r.str, "s-00001")
+		}},
+	}
+}
+
 func TestTypeMatrixPredicateSemanticsTwoPath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: the predicate-semantics gate stands up an embedded NATS cluster")
@@ -440,6 +565,7 @@ func TestTypeMatrixPredicateSemanticsTwoPath(t *testing.T) {
 
 	cases := append(notPredicateCases(), nullLiteralPredicateCases()...)
 	cases = append(cases, decimalColColPredicateCases()...)
+	cases = append(cases, bareBooleanPredicateCases()...)
 	t.Logf("predicate-semantics gate: %d predicates × 2 arms (A single-process, B stage DAG), "+
 		"each held to the row set SQL requires", len(cases))
 
@@ -475,6 +601,54 @@ func TestTypeMatrixPredicateSemanticsTwoPath(t *testing.T) {
 			check(t, "SELECT id FROM "+typematrix.Table+" WHERE "+c.where+" ORDER BY id", c.want)
 		})
 	}
+
+	// TLP-WHERE's own partition, which is what found #592: the three arms of
+	// a boolean predicate must together return the whole table, exactly once
+	// each. The `p` arm contributed NOTHING before the fix, so the partition
+	// undercounted by every row the predicate is TRUE for — an assertion that
+	// holds for any p, which is why it is the oracle's core invariant and
+	// why it belongs here rather than only in the row-set cases above.
+	for _, p := range []struct{ name, pred string }{
+		{"CastInt64", "CAST(c_i64 AS BOOLEAN)"},
+		{"CastColonColon", "(c_i64)::BOOLEAN"},
+		{"BoolColumn", "c_bool"},
+		{"CoalesceBool", "COALESCE(c_bool, FALSE)"},
+	} {
+		t.Run("TLPWherePartition"+p.name, func(t *testing.T) {
+			sql := fmt.Sprintf(
+				"SELECT id FROM %[1]s WHERE %[2]s"+
+					" UNION ALL SELECT id FROM %[1]s WHERE NOT (%[2]s)"+
+					" UNION ALL SELECT id FROM %[1]s WHERE (%[2]s) IS NULL"+
+					" ORDER BY id", typematrix.Table, p.pred)
+			check(t, sql, func(tmxRow) bool { return true })
+		})
+	}
+
+	// The same predicate READ BACK OUT of a derived table, which is #592's
+	// fourth reported spelling. The projection and the filter are different
+	// consumers of one cast, and this is the shape that puts both in one
+	// query.
+	t.Run("BareCastThroughDerivedTable", func(t *testing.T) {
+		check(t, fmt.Sprintf(
+			"SELECT id FROM (SELECT id, CAST(c_i64 AS BOOLEAN) AS b FROM %s) s WHERE b ORDER BY id",
+			typematrix.Table),
+			func(r tmxRow) bool { return r.i64 != nil && *r.i64 != 0 })
+	})
+
+	// A bare boolean in a JOIN's ON clause, where the predicate is evaluated
+	// by the join rather than by a filter operator.
+	t.Run("BareBoolInJoinOn", func(t *testing.T) {
+		check(t, fmt.Sprintf(
+			"SELECT t.id AS id FROM %s t JOIN %s d ON t.g = d.k AND t.c_bool ORDER BY id",
+			typematrix.Table, typematrix.Dim),
+			func(r tmxRow) bool { return r.g != nil && r.bl != nil && *r.bl })
+	})
+	t.Run("BareCastInJoinOn", func(t *testing.T) {
+		check(t, fmt.Sprintf(
+			"SELECT t.id AS id FROM %s t JOIN %s d ON t.g = d.k AND CAST(t.c_i64 AS BOOLEAN) ORDER BY id",
+			typematrix.Table, typematrix.Dim),
+			func(r tmxRow) bool { return r.g != nil && r.i64 != nil && *r.i64 != 0 })
+	})
 
 	// A negation over a JOIN: the predicate travels through join planning and,
 	// on the DAG, through a separate stage's re-parse of the filter text. g is
