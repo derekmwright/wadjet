@@ -886,6 +886,10 @@ could not serve both.
   so it is a scalability bound only. **A window over a leaf scan is always
   this case** — a scan is Singleton, which already satisfies clustered-on —
   so today's common shape is one task holding all the rows.
+- A **materialized** key (`__winkey_N`, below) is likewise Singleton: it
+  exists only inside the window fragment, after that fragment's own
+  projection has run, so no upstream stage emits a column by that name and
+  no exchange can hash-partition on it.
 
 **Spec resolution.** `physical.WindowColSpec` is filled by `windowExecColumn`,
 the same helper `buildWindow` compiles the single-process operator from: the
@@ -899,6 +903,41 @@ keeps the conservative float64, which `exec.Window.retypeValueColumns` still
 fixes for the five value functions. It is a **pointer**, unlike
 `AggSpec.OutputType`, because `parquet.TypeID`'s zero value is BOOL — an int
 field cannot tell `LAG(bool_col)` from a spec that declares nothing.
+
+**Key resolution** (`physical/window_keys.go`, `resolveWindowKeys`). A window
+reads its PARTITION BY / ORDER BY keys and its argument **by name** off the
+input batch, and until #585 a name the batch did not carry was SKIPPED — so a
+window whose only key dropped out ran over ONE partition spanning the input
+and answered a different query in silence. Three spellings did that, and each
+takes a different repair, chosen once here for both execution paths:
+
+- a **qualified** reference (`PARTITION BY p.g`) is BOUND to the input column
+  — `cleanExpr` drops the qualifier, and where a join really emits `p.g` the
+  exact spelling wins. This has to happen at plan time and not only in the
+  operator, because the key name is also the DAG's clustering key;
+- an **expression** (`PARTITION BY id % 3`) is MATERIALIZED as a synthetic
+  `__winkey_N` column, the `__gb_expr_N` convention one operator over. Named
+  synthetically rather than by the expression's text because that text is
+  already a key elsewhere — `exec.Project` types a projection by looking its
+  source spelling up in the input batch;
+- a **ROW field path** (`PARTITION BY rw.f`, `SUM(rw.f) OVER ()`) is
+  materialized too, at the FIELD's declared type (#603, #568's rule): it
+  parses as a qualified reference, so dropping the qualifier keys on a column
+  named `f` that exists nowhere.
+
+Anything else reaches `exec.Window.bindKeyNames`, which resolves it with
+`columnIndexFallback` (the qualified↔bare rule every other operator uses) and
+**refuses** what it cannot resolve. Degrading to one partition is not an
+outcome either half can produce.
+
+The materialized keys ride the wire as `Stage.WindowKeyExprs` →
+`OpSpec.WindowKeyExprs`, and the worker compiles them into a pass-through
+projection prepended to the window's consume phase
+(`worker.buildWindowKeyProjection`, `physical.NewComputedColumnsOp`). It
+APPENDS rather than narrowing, because a window emits every input column plus
+its own — which is also why it is not `exec.Project`. Nothing above the window
+reads `__winkey_N`, which is what keeps it clear of #558: the gather projects
+to the visible SELECT list and a consumer stage reads the window's outputs.
 
 **Not covered:** frames are carried end to end but `exec.Window` never reads
 `WindowColumn.Frame` at all (#350) — an operator defect both paths share.

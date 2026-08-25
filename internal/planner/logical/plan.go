@@ -134,7 +134,16 @@ type Node struct {
 	// left every declared-schema DECIMAL column at Precision=0 (typmod -1,
 	// "unconstrained") even when the underlying column had a real (p,s)
 	// (#458).
-	ScanColDecimal    map[string]DecimalMeta
+	ScanColDecimal map[string]DecimalMeta
+	// ScanColFields maps this scan's lower-cased ROW column names to their
+	// declared FIELDS. It is what types a field PATH (`rw.c`): `c` is not a
+	// column of anything, so ScanColTypes cannot carry it and every lookup
+	// keyed by column name misses. Without it a field path is declared
+	// STRING — `SELECT rw.n` over an INT64 field returned string("9"),
+	// `ORDER BY rw.c` sorted a CIDR field by its stored text, and the wire
+	// reported OID 25 for both (#568). Populated by
+	// physical.AnnotateScanColumns alongside ScanColTypes.
+	ScanColFields     map[string][]parquet.Column
 	FilterOnlyColumns []string // columns needed ONLY by the filter directly above this scan (candidates for scan-level filter evaluation without materialization)
 	ShapeOnlyColumns  []string // byte-array columns whose EVERY use in the plan reads shape, not contents (LENGTH/IS NULL/= ''/COUNT) — the scan decodes them as lengths, see shape_only_columns.go
 	SampleMethod      string   // TABLESAMPLE method: BERNOULLI, SYSTEM

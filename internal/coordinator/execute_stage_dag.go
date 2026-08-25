@@ -3917,6 +3917,19 @@ func buildWindowFragment(stage physical.Stage, t *distributed.Task, taskInputs m
 			}
 		}
 	}
+	windowOp := distributed.OpSpec{
+		Type:       distributed.OpWindow,
+		WindowCols: winCols,
+	}
+	// The expression keys the fragment has to compute before it can
+	// partition on them (#585). projectOpFromSpecs builds the same
+	// ProjectSpec list a Stage.ProjectExprs OpProject gets; only the
+	// destination differs, because a window's projection APPENDS to the
+	// batch rather than narrowing it — the window's output is every input
+	// column plus its own.
+	if op, ok := projectOpFromSpecs(stage.WindowKeyExprs); ok {
+		windowOp.WindowKeyExprs = op.Projections
+	}
 	ops := []distributed.OpSpec{
 		{
 			Type:        distributed.OpShuffleSource,
@@ -3924,10 +3937,7 @@ func buildWindowFragment(stage physical.Stage, t *distributed.Task, taskInputs m
 			InputFiles:  files,
 			InputBucket: t.DataBucket,
 		},
-		{
-			Type:       distributed.OpWindow,
-			WindowCols: winCols,
-		},
+		windowOp,
 	}
 	// A predicate walkStages pushed onto this stage names the window's
 	// OUTPUT columns, so it runs after the operator — and it has to run at

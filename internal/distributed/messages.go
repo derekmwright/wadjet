@@ -620,6 +620,21 @@ type OpSpec struct {
 	// operator appends them to its input's columns in this order.
 	WindowCols []WindowColSpec `json:"window_cols,omitempty"`
 
+	// OpWindow. The PARTITION BY / window ORDER BY terms the fragment must
+	// COMPUTE before the operator can key on them, each named by the term's
+	// own text — the same name WindowColSpec.PartitionBy/OrderBy carry, so
+	// the projection and the operator need no second naming convention.
+	// One list for the whole operator, not one per column: two OVER clauses
+	// routinely share a key, and computing it twice would put two columns of
+	// one name on the batch.
+	//
+	// A window key that is an expression named no column anywhere, and
+	// exec.Window's name lookup used to SKIP what it could not find — so
+	// `PARTITION BY id % 3` ran the window over one partition spanning the
+	// input and answered a different query (#585). This is the aggregate's
+	// AggSpec.InputExpr route, one operator over.
+	WindowKeyExprs []ProjectSpec `json:"window_key_exprs,omitempty"`
+
 	// OpScan (build-side, dynamic-filter producer). Each Emit makes the scan
 	// task compute a partial bloom+range over the named column and upload it
 	// as a sideband artifact returned in ResultNotification.DynamicFilterPartials.

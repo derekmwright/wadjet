@@ -242,6 +242,19 @@ type Stage struct {
 	// Window metadata
 	WindowCols []WindowColSpec
 
+	// WindowKeyExprs are the PARTITION BY / window ORDER BY terms the window
+	// fragment must COMPUTE before it can key on them — an expression key
+	// (`PARTITION BY id % 3`) names no column any upstream stage emits, and a
+	// window that cannot find its key used to answer over one partition
+	// (#585). Each spec's Name is the term's own text, which is also the name
+	// WindowColSpec.PartitionBy/OrderBy carry, so the worker's projection and
+	// the operator agree without a second naming convention.
+	//
+	// Nothing ABOVE the window reads these columns, which is what keeps them
+	// clear of #558: the gather projects to the visible SELECT list and a
+	// consumer stage reads the window's own outputs.
+	WindowKeyExprs []ProjectExprSpec
+
 	// JoinPartitionCount is the number of partitions for a hash-join stage
 	// that was preceded by repartition exchanges. Zero means the join is
 	// not partitioned (broadcast or single-partition). Exchange stages carry
@@ -1463,11 +1476,23 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 			intCols := make(map[string]bool, len(table.Schema.Columns))
 			colTypes := make(map[string]parquet.TypeID, len(table.Schema.Columns))
 			colDecimal := make(map[string]logical.DecimalMeta)
+			var colFields map[string][]parquet.Column
 			for i, c := range table.Schema.Columns {
 				cols[i] = c.Name
 				colTypes[strings.ToLower(c.Name)] = c.Type
 				if c.Type == parquet.TypeDecimal {
 					colDecimal[strings.ToLower(c.Name)] = logical.DecimalMeta{Precision: c.Precision, Scale: c.Scale}
+				}
+				if c.Type == parquet.TypeRow && len(c.Fields) > 0 {
+					// A ROW's fields are the only declaration a field path
+					// has; they live nowhere in a map keyed by column name
+					// (#568). Kept as their full parquet.Column so a
+					// DECIMAL field keeps its (p,s) and a nested container
+					// field keeps its own shape.
+					if colFields == nil {
+						colFields = make(map[string][]parquet.Column)
+					}
+					colFields[strings.ToLower(c.Name)] = c.Fields
 				}
 				switch c.Type {
 				case parquet.TypeInt64, parquet.TypeInt32, parquet.TypeTimestamp,
@@ -1488,6 +1513,7 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 			node.ScanStrictIntCols = strictInt
 			node.ScanColTypes = colTypes
 			node.ScanColDecimal = colDecimal
+			node.ScanColFields = colFields
 		}
 		// Estimate row count from manifest for join reordering
 		if manifest, err := p.getManifest(ctx, node.TableName); err == nil {
@@ -5598,16 +5624,20 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			p.walkStages(child, stages, nil)
 		}
 		stageID := fmt.Sprintf("window-%d", len(*stages))
+		winKeys := resolveWindowKeys(node)
 		var winCols []WindowColSpec
 		for _, we := range node.WindowExprs {
 			// Resolved by the same helper buildWindow uses, so the stage
 			// spec and the single-process operator describe one computation
 			// — including the output type, which nothing downstream of the
 			// worker can correct (#345).
-			ec := windowExecColumn(node, we)
+			ec := windowExecColumn(node, we, winKeys)
 			var orderBy []SortKeySpec
-			for _, ob := range we.OrderBy {
-				orderBy = append(orderBy, SortKeySpec{Column: ob.Column, Desc: ob.Desc, NullsLast: resolveNullsLast(ob)})
+			for i, ob := range we.OrderBy {
+				// ec.OrderBy carries the RESOLVED spelling; ob.Column is
+				// what the query wrote. A stage keyed on the latter would
+				// send the worker the name #585 could not resolve.
+				orderBy = append(orderBy, SortKeySpec{Column: ec.OrderBy[i].Column, Desc: ob.Desc, NullsLast: resolveNullsLast(ob)})
 			}
 			winCols = append(winCols, WindowColSpec{
 				Func:           we.Func,
@@ -5624,10 +5654,16 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			})
 		}
 		stage := Stage{
-			ID:         stageID,
-			Type:       StageWindow,
-			Tasks:      1,
-			WindowCols: winCols,
+			ID:    stageID,
+			Type:  StageWindow,
+			Tasks: 1,
+			// The keys the window fragment has to COMPUTE before it can
+			// partition on them (#585). The worker prepends one projection
+			// for the whole stage: the keys are shared across its OVER
+			// clauses, and computing a shared key twice would put two
+			// columns of one name on the batch.
+			WindowKeyExprs: windowKeySpecs(winKeys),
+			WindowCols:     winCols,
 		}
 		// Only depend on leaf stages from subtree (not transitive deps like scan).
 		stage.Dependencies = leafStages((*stages)[preCount:])
@@ -8792,6 +8828,28 @@ func isSimpleColRef(node plansql.Node) bool {
 	}
 }
 
+// NewComputedColumnsOp returns an operator that passes every input column
+// through and appends the computed ones.
+//
+// The type is aggPreProject, named for its first caller. It is exported
+// through a constructor rather than moved because it has a second caller now
+// with the same need and none of the aggregate's context: the window
+// fragment, which must compute an expression PARTITION BY key before
+// exec.Window can resolve it by name (#585) and which — like the pre-
+// aggregate projection — cannot narrow the batch, since the window's output
+// is every input column plus its own.
+func NewComputedColumnsOp(cols []exec.ProjectColumn) exec.UnaryOperator {
+	// shareOutputs, which here means per-CALL computed vectors rather than
+	// the pooled ones. The aggregate consumes each batch's values before the
+	// next Execute overwrites them; the window RETAINS every batch it is
+	// given (Consume detaches and buffers), so a pooled vector would leave
+	// every stored batch pointing at the LAST batch's key values — one
+	// constant key column, and a window over one partition. That is #585's
+	// symptom produced by its own fix, and it showed up the moment the
+	// window's input was an aggregate emitting a batch per group.
+	return &aggPreProject{computed: cols, shareOutputs: true}
+}
+
 // aggPreProject is a UnaryOperator that passes through all input columns
 // and adds computed expression columns for aggregate inputs.
 type aggPreProject struct {
@@ -9166,9 +9224,22 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 		return nil, nil, nil, err
 	}
 
+	winKeys := resolveWindowKeys(node)
+	keyProjections, err := p.windowKeyProjections(winKeys)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(keyProjections) > 0 {
+		// The GROUP BY expression shape, one operator over: a pass-through
+		// projection that keeps every input column and appends the computed
+		// PARTITION BY / ORDER BY keys, so exec.Window resolves them by name
+		// like any other column (#585).
+		childOps = append(childOps, NewComputedColumnsOp(keyProjections))
+	}
+
 	var winCols []exec.WindowColumn
 	for _, we := range node.WindowExprs {
-		winCols = append(winCols, windowExecColumn(node, we))
+		winCols = append(winCols, windowExecColumn(node, we, winKeys))
 	}
 
 	winOp := exec.NewWindow(winCols)
@@ -11037,7 +11108,16 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) parquet.Typ
 // no catalog and no logical plan, so a second implementation there would be a
 // second answer; the arguments are parsed once, here, where the types resolve
 // (#345's shape, and #329/#333's).
-func windowExecColumn(node *logical.Node, we logical.WindowExpr) exec.WindowColumn {
+func windowExecColumn(node *logical.Node, we logical.WindowExpr, keys map[string]windowKey) exec.WindowColumn {
+	// resolveWindowKeys binds a qualified reference to the input column and
+	// renames an expression to the column the pre-window projection computes
+	// under; a term it left alone keeps its own spelling (#585).
+	keyName := func(term string) string {
+		if k, ok := keys[strings.TrimSpace(term)]; ok {
+			return k.Name
+		}
+		return term
+	}
 	var orderKeys []exec.SortKey
 	for _, ob := range we.OrderBy {
 		order := exec.Ascending
@@ -11045,11 +11125,16 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr) exec.WindowColu
 			order = exec.Descending
 		}
 		orderKeys = append(orderKeys, exec.SortKey{
-			Column:    ob.Column,
+			Column:    keyName(ob.Column),
 			Order:     order,
 			NullsLast: resolveNullsLast(ob),
 		})
 	}
+	partBy := make([]string, len(we.PartitionBy))
+	for i, pb := range we.PartitionBy {
+		partBy[i] = keyName(pb)
+	}
+	fn := strings.ToLower(we.Func)
 	wc := exec.WindowColumn{
 		Func: parseWindowFunc(we.Func),
 		// InputColumn drops the offset/default/N that share the
@@ -11060,8 +11145,24 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr) exec.WindowColu
 		InputCol:    cleanExpr(we.InputColumn()),
 		OutputCol:   we.OutputCol,
 		OutputType:  windowSpecOutputType(node, we),
-		PartitionBy: we.PartitionBy,
+		PartitionBy: partBy,
 		OrderBy:     orderKeys,
+	}
+	// A ROW FIELD PATH argument is materialized like a key and read under the
+	// synthetic name: `SUM(rw.f) OVER ()` reached exec as the bare `f`, found
+	// no input vector, and answered NULL in every row (#603). The output type
+	// follows the FIELD for the functions whose answer is one of their input's
+	// values — windowSpecOutputType could not resolve it, because the name it
+	// types is the field's, which is a column of nothing.
+	if k, ok := keys[strings.TrimSpace(we.InputColumn())]; ok && k.Expr != nil {
+		wc.InputCol = k.Name
+		if windowValueFunc(fn) {
+			wc.OutputType = k.Type
+		} else if fn == "min" || fn == "max" {
+			if out, vetted := exec.WindowMinMaxType(k.Type); vetted {
+				wc.OutputType = out
+			}
+		}
 	}
 	if we.Frame != nil {
 		wc.Frame = &exec.WindowFrameSpec{
@@ -11072,7 +11173,6 @@ func windowExecColumn(node *logical.Node, we logical.WindowExpr) exec.WindowColu
 	}
 	// Parse the function-specific arguments out of the rest of the
 	// argument string (WindowExpr.InputCol carries the whole list verbatim).
-	fn := strings.ToLower(we.Func)
 	if fn == "ntile" {
 		if n, err := strconv.Atoi(strings.TrimSpace(we.InputCol)); err == nil {
 			wc.NtileBuckets = n

@@ -70,6 +70,14 @@ func ValidateNativeDAGShape(stages []Stage) error {
 			if len(s.WindowCols) == 0 {
 				return fmt.Errorf("native-DAG: window stage %s carries no window columns", s.ID)
 			}
+			// A key spelled __winkey_N is one the FRAGMENT computes, and it
+			// computes it from WindowKeyExprs. A stage carrying the name
+			// without the expression ships a window that will refuse its own
+			// key at the worker — the #349 precedent again: fail where the
+			// shape is visible, not three dispatch attempts later (#585).
+			if err := validateWindowKeyExprs(s); err != nil {
+				return err
+			}
 		case StageLimit:
 			// buildLimitFragment reads exactly one input alias and needs a
 			// bound to build an operator from. A stage that violates either

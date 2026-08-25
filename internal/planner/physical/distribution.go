@@ -3,6 +3,7 @@ package physical
 import (
 	"fmt"
 	"log"
+	"strings"
 )
 
 // DistKind is the kind of partitioning a stage's output has.
@@ -452,6 +453,23 @@ func windowPartitionKeys(stage Stage) ([]string, bool) {
 	for _, wc := range stage.WindowCols[1:] {
 		if !keysEqual(wc.PartitionBy, keys) {
 			return nil, false
+		}
+	}
+	// A key the window COMPUTES is not a key the exchange can cluster on:
+	// __winkey_N exists only inside the window fragment, after its own
+	// projection runs, so an exchange asked to hash-partition on that name
+	// would find no such column upstream. Today that is caught by the
+	// exchange-consistency validator and the query fails at plan time; what
+	// it must not become is a partition spread across tasks, each windowing
+	// a fragment of somebody else's — a wrong answer, not a slow one. Those
+	// stages run Singleton, which is what the no-PARTITION-BY case above
+	// already does and is honest for the same reason: one task reads
+	// everything (#585).
+	for _, k := range keys {
+		for _, m := range stage.WindowKeyExprs {
+			if strings.EqualFold(m.Name, k) {
+				return nil, false
+			}
 		}
 	}
 	return keys, true

@@ -2187,11 +2187,28 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Ta
 			win.Close()
 			return nil, fmt.Errorf("window init: %w", err)
 		}
-		return &fragmentBreaker{
+		fb := &fragmentBreaker{
 			Op:      win,
 			Label:   "window",
 			Cleanup: func() { win.Close() },
-		}, nil
+		}
+		// An expression PARTITION BY / ORDER BY key names no column any
+		// upstream stage emits, so it is computed here, ahead of the
+		// operator's consume phase — the derived-aggregate-input shape one
+		// operator over (#585).
+		keyProject, kerr := buildWindowKeyProjection(spec.WindowKeyExprs)
+		if kerr != nil {
+			win.Close()
+			return nil, fmt.Errorf("window key project: %w", kerr)
+		}
+		if keyProject != nil {
+			if kerr := keyProject.Init(ctx); kerr != nil {
+				win.Close()
+				return nil, fmt.Errorf("window key project init: %w", kerr)
+			}
+			fb.PrependOps = append(fb.PrependOps, keyProject)
+		}
+		return fb, nil
 
 	case distributed.OpSortMergeJoin:
 		return e.buildFragmentSortMergeJoin(ctx, task, spec)

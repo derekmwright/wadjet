@@ -12,6 +12,69 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
+// buildWindowKeyProjection compiles the PARTITION BY / window ORDER BY terms
+// an OpWindow fragment must compute, into an operator that passes every input
+// column through and APPENDS them.
+//
+// It cannot be exec.Project, which narrows the batch to its own list: a
+// window emits every input column plus its own outputs, and this side has no
+// input schema to enumerate a passthrough list from. physical's
+// pre-aggregate projection is the same operator answering the same need for
+// the hash aggregate, so it is reused rather than re-implemented (#585).
+//
+// A term that will not parse or compile fails the TASK. Skipping it would put
+// exec.Window back where #585 found it — resolving a key name nothing
+// produces — except that there the operator now refuses, so the only thing
+// silence would buy is a worse error message.
+func buildWindowKeyProjection(specs []distributed.ProjectSpec) (exec.UnaryOperator, error) {
+	if len(specs) == 0 {
+		return nil, nil
+	}
+	cols := make([]exec.ProjectColumn, 0, len(specs))
+	seen := make(map[string]bool, len(specs))
+	for _, spec := range specs {
+		if spec.Name == "" || seen[spec.Name] {
+			continue
+		}
+		seen[spec.Name] = true
+		node, err := plansql.ParseExpression(spec.Expr)
+		if err != nil {
+			return nil, fmt.Errorf("parse window key %q: %w", spec.Expr, err)
+		}
+		compiled, err := expr.Compile(node)
+		if err != nil {
+			return nil, fmt.Errorf("compile window key %q: %w", spec.Expr, err)
+		}
+		// The planner's declared type, for the reason the aggregate's
+		// derived input carries one: this side has the expression's text and
+		// no catalog, so a schema-blind inference would type
+		// `PARTITION BY COALESCE(f, 0)` from its literal and truncate every
+		// float key on the write (#379). Nil = an older coordinator; the
+		// planner's own fallback for an unresolved key is STRING.
+		outType := physical.ProjectionOutputType(node, parquet.TypeString)
+		if spec.Type != nil {
+			outType = parquet.TypeID(*spec.Type)
+		}
+		e := compiled
+		pc := exec.ProjectColumn{
+			Name:     spec.Name,
+			Type:     outType,
+			Computed: true,
+			Expr: func(b *batch.RecordBatch, row int) any {
+				return e.Eval(b, row)
+			},
+		}
+		if ve, ok := compiled.(expr.VecExpr); ok {
+			pc.VecEval = ve.EvalVec
+		}
+		cols = append(cols, pc)
+	}
+	if len(cols) == 0 {
+		return nil, nil
+	}
+	return physical.NewComputedColumnsOp(cols), nil
+}
+
 // compileFilterExprs parses each scan-pushed filter SQL fragment and returns
 // a slice of filter operators plus the union of bare column names they
 // reference. The column set lets callers extend their parquet projection

@@ -691,16 +691,53 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 			// "s, 2" as the required column left the real one, s, unread —
 			// the window operator then resolved no input vector and
 			// nil-dereferenced it.
-			if col := w.InputColumn(); col != "" {
-				refs[strings.ToLower(col)] = true
+			// The ARGUMENT takes the same parse as the keys below: a ROW
+			// field path (`SUM(rw.f) OVER ()`) needs the ROW column `rw`
+			// read, and registering the path's text leaves it pruned away
+			// (#603).
+			if col := w.InputColumn(); col != "" && col != "*" {
+				collectWindowKeyRefs(col, refs)
 			}
+			// A window key is an EXPRESSION as often as it is a column
+			// (`PARTITION BY id % 3`, `PARTITION BY upper(s)`), and
+			// registering the expression's TEXT as a required column left
+			// the columns it reads unread — the pre-window projection then
+			// computed the key over a column the scan had pruned away, every
+			// row got the same value, and the window ran over one partition
+			// (#585, the same shape as InputColumn's above).
 			for _, pb := range w.PartitionBy {
-				refs[strings.ToLower(pb)] = true
+				collectWindowKeyRefs(pb, refs)
 			}
 			for _, ob := range w.OrderBy {
-				refs[strings.ToLower(ob.Column)] = true
+				collectWindowKeyRefs(ob.Column, refs)
 			}
 		}
+	}
+}
+
+// collectWindowKeyRefs registers the columns one PARTITION BY / window ORDER
+// BY term reads.
+//
+// The qualifier is registered as a column name of its own, which
+// collectASTColumnRefs does not do: `PARTITION BY rw.f` over a ROW column is
+// a FIELD PATH, so the column the scan has to read is `rw` and neither `f`
+// nor `rw.f` names anything it stores. Registering a name no table carries
+// costs nothing — the pruner keeps the columns it recognizes and ignores the
+// rest — and the alternative is a pruned-away ROW column and a key that is
+// NULL in every row.
+func collectWindowKeyRefs(term string, refs map[string]bool) {
+	term = strings.TrimSpace(term)
+	if term == "" {
+		return
+	}
+	ast, err := plansql.ParseExpression(term)
+	if err != nil {
+		refs[strings.ToLower(term)] = true
+		return
+	}
+	collectASTColumnRefs(ast, refs)
+	if col, ok := ast.(*plansql.ColRef); ok && col.Table != "" {
+		refs[strings.ToLower(col.Table)] = true
 	}
 }
 
