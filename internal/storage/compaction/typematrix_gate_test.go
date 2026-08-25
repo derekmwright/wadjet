@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,23 +81,28 @@ func gateFlatSchema() parquet.Schema {
 	return s
 }
 
+func gateI64(name string) parquet.Column {
+	return parquet.Column{Name: name, Type: parquet.TypeInt64, Nullable: true}
+}
+
+func gateArr(name string, elem parquet.Column) parquet.Column {
+	return parquet.Column{Name: name, Type: parquet.TypeArray, Nullable: true, ElementType: &elem}
+}
+
+func gateMap(name string, val parquet.Column) parquet.Column {
+	val.Name = "value"
+	return parquet.Column{Name: name, Type: parquet.TypeMap, Nullable: true,
+		ElementType: &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
+			{Name: "key", Type: parquet.TypeString}, val,
+		}}}
+}
+
+func gateRow(name string, fields ...parquet.Column) parquet.Column {
+	return parquet.Column{Name: name, Type: parquet.TypeRow, Nullable: true, Fields: fields}
+}
+
 func gateNestedSchema() parquet.Schema {
-	i64 := func(name string) parquet.Column {
-		return parquet.Column{Name: name, Type: parquet.TypeInt64, Nullable: true}
-	}
-	arr := func(name string, elem parquet.Column) parquet.Column {
-		return parquet.Column{Name: name, Type: parquet.TypeArray, Nullable: true, ElementType: &elem}
-	}
-	mp := func(name string, val parquet.Column) parquet.Column {
-		val.Name = "value"
-		return parquet.Column{Name: name, Type: parquet.TypeMap, Nullable: true,
-			ElementType: &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{
-				{Name: "key", Type: parquet.TypeString}, val,
-			}}}
-	}
-	row := func(name string, fields ...parquet.Column) parquet.Column {
-		return parquet.Column{Name: name, Type: parquet.TypeRow, Nullable: true, Fields: fields}
-	}
+	i64, arr, mp, row := gateI64, gateArr, gateMap, gateRow
 	s := typematrix.NestedSchema()
 	// Containers inside containers: the matrix's four are one level deep,
 	// and #409's assembler bug lived below that. c_map_map and c_arr_row
@@ -109,7 +115,140 @@ func gateNestedSchema() parquet.Schema {
 		mp("c_map_map", mp("v", i64(""))),
 		arr("c_arr_row", row("element", i64("a"), i64("b"))),
 	)
+	s.Columns = append(s.Columns, gateDeclaredNestedColumns()...)
 	return s
+}
+
+// gateDeclaredLeaves is the #589 half of this gate: the nine types parquet
+// has NO annotation for.
+//
+// buildLeafSchemaElement can say nothing about IPv4, IPv6, MAC, UUID, BYTES,
+// PORT, PROTOCOL or DURATION — they are not parquet concepts — and it spells
+// CIDR as plain UTF8 text, so all nine survive a round trip only because the
+// writer stamps the declared schema into the footer and the reader overlays
+// it back. That overlay used to stop at the top level. The identical leaf one
+// container down recovered as STRING or INT64, and for the BYTE_ARRAY four
+// that is not a cosmetic mislabel: the row reader boxed sixteen intact bytes
+// as a Go string, batch.Vector.SetValue read the string as TEXT, net.ParseIP
+// refused it, and the value read back as the EMPTY STRING (#589).
+//
+// The bytes were on disk and correct the whole time, which is exactly what
+// makes compaction the dangerous operation over them: it reads them through
+// that hole and writes back what it read, and then the inputs are gone.
+//
+// Every one of the nine appears below every container shape — ROW, ARRAY,
+// MAP, ARRAY<ROW>, ROW<ARRAY>, MAP<K,ROW> — so the leaf sits one and two
+// containers deep, under each kind of parent, in each position (a ROW field,
+// a list element, a map value).
+var gateDeclaredLeaves = []struct {
+	suffix string
+	typ    parquet.TypeID
+	val    func(i int) any
+}{
+	{"ipv4", parquet.TypeIPv4, func(i int) any {
+		return fmt.Sprintf("10.%d.%d.%d", (i/65536)%256, (i/256)%256, i%256)
+	}},
+	{"ipv6", parquet.TypeIPv6, func(i int) any { return fmt.Sprintf("2001:db8::%x", i) }},
+	{"mac", parquet.TypeMAC, func(i int) any {
+		return fmt.Sprintf("aa:bb:cc:%02x:%02x:%02x", (i/65536)%256, (i/256)%256, i%256)
+	}},
+	{"uuid", parquet.TypeUUID, func(i int) any {
+		return fmt.Sprintf("00000000-0000-4000-8000-%012x", i)
+	}},
+	// Distinct per row and of varying length, including the ZERO-length
+	// value: BYTES has no fixed width, so an empty entry is a value and not
+	// an absence, and it is the one a width guard would be tempted to call
+	// missing.
+	{"byt", parquet.TypeBytes, func(i int) any {
+		if i%13 == 0 {
+			return []byte{}
+		}
+		return []byte(fmt.Sprintf("b-%06d-%s", i, strings.Repeat("y", i%7)))
+	}},
+	{"port", parquet.TypePort, func(i int) any { return int32(1024 + i%40000) }},
+	{"proto", parquet.TypeProtocol, func(i int) any { return int32(i % 256) }},
+	{"dur", parquet.TypeDuration, func(i int) any { return int64(i) * 1_000_000 }},
+	// The four CIDR spellings the matrix cycles at the top level — a
+	// canonical /24, a HOST-BEARING /24, a host-bearing /8 and a /32 host
+	// route — so the shapes #492 and #546 turn on are present below a
+	// container too, not just canonical networks.
+	{"cidr", parquet.TypeCIDR, func(i int) any {
+		switch i % 4 {
+		case 0:
+			return fmt.Sprintf("192.168.%d.0/24", i%256)
+		case 1:
+			return fmt.Sprintf("192.168.%d.%d/24", (i-1)%256, 1+i%200)
+		case 2:
+			return fmt.Sprintf("10.%d.%d.%d/8", (i/256)%256, (i/16)%256, i%256)
+		default:
+			return fmt.Sprintf("172.16.%d.%d/32", (i/256)%256, i%256)
+		}
+	}},
+}
+
+// gateDeclaredShapes names the six container shapes each of the nine takes,
+// in the order gateDeclaredNestedColumns emits and gateDeclaredNestedData
+// fills them.
+var gateDeclaredShapes = []string{"row", "arr", "map", "arow", "rarr", "mrow"}
+
+func gateDeclaredName(suffix, shape string) string { return "c_" + suffix + "_" + shape }
+
+func gateDeclaredNestedColumns() []parquet.Column {
+	out := make([]parquet.Column, 0, len(gateDeclaredLeaves)*len(gateDeclaredShapes))
+	for _, d := range gateDeclaredLeaves {
+		leaf := func(name string) parquet.Column {
+			return parquet.Column{Name: name, Type: d.typ, Nullable: true}
+		}
+		n := func(shape string) string { return gateDeclaredName(d.suffix, shape) }
+		out = append(out,
+			gateRow(n("row"), leaf("v")),
+			gateArr(n("arr"), leaf("element")),
+			gateMap(n("map"), leaf("value")),
+			gateArr(n("arow"), gateRow("element", leaf("v"))),
+			gateRow(n("rarr"), gateArr("l", leaf("element"))),
+			gateMap(n("mrow"), gateRow("value", leaf("v"))),
+		)
+	}
+	return out
+}
+
+// gateDeclaredNestedData fills row gi's 54 container columns. Each type
+// walks its own four-way cycle — populated, empty, NULL leaf inside a
+// present container, NULL container — offset by the type's position, so no
+// two of the nine are ever in the same state on the same row and a shape
+// that only breaks at a boundary cannot hide behind one that does not.
+func gateDeclaredNestedData(gi int, r map[string]any) {
+	for di, d := range gateDeclaredLeaves {
+		v, w := d.val(gi), d.val(gi+1)
+		set := func(shape string, val any) { r[gateDeclaredName(d.suffix, shape)] = val }
+		switch (gi + di) % 4 {
+		case 0: // populated, and more than one element where there can be
+			set("row", map[string]any{"v": v})
+			set("arr", []any{v, w})
+			set("map", map[string]any{"k": v, "k2": w})
+			set("arow", []any{map[string]any{"v": v}, map[string]any{"v": w}})
+			set("rarr", map[string]any{"l": []any{v, w}})
+			set("mrow", map[string]any{"k": map[string]any{"v": v}})
+		case 1: // empty containers (a ROW has no empty, so it stays present)
+			set("row", map[string]any{"v": v})
+			set("arr", []any{})
+			set("map", map[string]any{})
+			set("arow", []any{})
+			set("rarr", map[string]any{"l": []any{}})
+			set("mrow", map[string]any{})
+		case 2: // a NULL leaf inside a present container
+			set("row", map[string]any{"v": nil})
+			set("arr", []any{nil})
+			set("map", map[string]any{"k": nil})
+			set("arow", []any{map[string]any{"v": nil}})
+			set("rarr", map[string]any{"l": []any{nil}})
+			set("mrow", map[string]any{"k": map[string]any{"v": nil}})
+		case 3: // the container itself NULL
+			for _, shape := range gateDeclaredShapes {
+				set(shape, nil)
+			}
+		}
+	}
 }
 
 // gateNull spells the matrix's own "NULL every stride-th row" rule.
@@ -191,6 +330,7 @@ func gateNestedData(offset, n int) []map[string]any {
 			r["c_map_map"] = map[string]any{"a": map[string]any{"x": nil}, "b": map[string]any{"y": int64(gi)}}
 			r["c_arr_row"] = []any{map[string]any{"a": int64(gi), "b": nil}}
 		}
+		gateDeclaredNestedData(gi, r)
 	}
 	return rows
 }
