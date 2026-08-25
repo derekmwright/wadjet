@@ -1281,6 +1281,13 @@ func postgresSemanticsCases() []pgCase {
 	// Every bounded entry carries an ORDER BY inside the subquery: a bare
 	// LIMIT does not say WHICH rows it yields, so the two engines may
 	// legitimately pick different ones (ADR-0013's nondeterminism list).
+	//
+	// These run the EngineSemantics arm, which is embedded and single-process
+	// by construction — it is where PostgreSQL's answer is established. That
+	// used to be the whole of their coverage, because a bounded subquery
+	// could not execute on the stage DAG at all (#524). It can now, and the
+	// DAG's agreement with this arm is gated separately, entry for entry, in
+	// two_path_invariance_test.go.
 	out = append(out,
 		pgCase{name: "InSubqueryAliasedSelfJoin",
 			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
@@ -1425,6 +1432,46 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "NotInSubqueryNullFreeList",
 			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey NOT IN
 				(SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey < 5)`},
+	)
+
+	// --- IN-subqueries the semi-join rewrite DECLINES (#524) -------------
+	//
+	// A LIMIT/OFFSET (#482), an ungrouped aggregate item, and a computed item
+	// (#516) each leave the IN a subquery PREDICATE rather than a semi join.
+	// The stage DAG had no way to execute one and errored; the coordinator now
+	// materializes the set and the predicate becomes a literal list. These
+	// entries pin the ANSWER against PostgreSQL, which is what says the
+	// materialized set means the same thing the subquery did — LIMIT included.
+	out = append(out,
+		// The VALUES of a bounded set, not just its count: the LIMIT decides
+		// WHICH three, and a materialization that kept the wrong three counts
+		// the same.
+		pgCase{name: "InSubqueryBoundedByLimitValues",
+			sql: `SELECT a.n_nationkey AS k FROM nation a WHERE a.n_nationkey IN
+				(SELECT b.n_nationkey FROM nation b ORDER BY b.n_nationkey LIMIT 3)
+				ORDER BY k`, ordered: true},
+		// LIMIT 0 is a bound, not an absence (#481): the set is EMPTY, so IN
+		// is false for every row and NOT IN is TRUE for every row — an empty
+		// set has nothing to be UNKNOWN about, so even a NULL key survives.
+		// (The IN half is InSubqueryLimitZero, above.)
+		pgCase{name: "NotInSubqueryLimitZero",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey NOT IN
+				(SELECT b.n_nationkey FROM nation b ORDER BY b.n_nationkey LIMIT 0)`},
+		pgCase{name: "InSubqueryUngroupedAggregate",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey IN
+				(SELECT MAX(b.n_nationkey) FROM nation b)`},
+		pgCase{name: "InSubqueryComputedItem",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey IN
+				(SELECT b.n_nationkey + 0 FROM nation b WHERE b.n_nationkey < 10)`},
+		// A STRING set: the values ride the filter as TEXT, and a quoting slip
+		// is a wrong answer with no error attached.
+		pgCase{name: "InSubqueryBoundedStringSet",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_name IN
+				(SELECT b.n_name FROM nation b ORDER BY b.n_name LIMIT 4)`},
+		pgCase{name: "InSubqueryStringSetValues",
+			sql: `SELECT a.n_name AS n FROM nation a WHERE a.n_name IN
+				(SELECT b.n_name FROM nation b ORDER BY b.n_name LIMIT 4)
+				ORDER BY n`, ordered: true},
 	)
 
 	// --- String functions -------------------------------------------------

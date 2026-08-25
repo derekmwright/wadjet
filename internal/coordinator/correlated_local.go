@@ -37,6 +37,30 @@ func (c *Coordinator) runDistinctLocal(ctx context.Context, queryID string, logi
 		"DISTINCT with no distributed stage", &c.localDistinct)
 }
 
+// runInSubqueryLocal executes a query the stage DAG refused
+// (physical.ErrInSubqueryDistributed) on the coordinator-local single-process
+// pipeline, where expr.InSubquery resolves the set once under resolveMu and
+// caches it.
+//
+// The refusal covers what the planner's materialization cannot inline: a set
+// past the row bound, or a value with no literal spelling that survives the
+// round trip through the filter's text. Everything it CAN inline never
+// reaches here — the predicate becomes a literal list and the DAG runs it
+// like any other filter. Refusing beat shipping the subquery to a worker that
+// has no SubqueryRunner (#524), and routing beats handing the client an error,
+// exactly as #359 does for correlated subqueries.
+func (c *Coordinator) runInSubqueryLocal(ctx context.Context, queryID string, logicalPlan *logical.Node, planStr string, start time.Time, refusal error) (*SQLResult, error) {
+	return c.runRefusedLocal(ctx, queryID, logicalPlan, planStr, start, refusal,
+		"IN subquery with no distributed stage", &c.localInSubquery)
+}
+
+// InSubqueryLocalRoutes reports how many plans refused for an unmaterializable
+// IN-subquery were routed to the coordinator-local pipeline. Separate from the
+// other two counters so a suite can assert WHICH refusal fired.
+func (c *Coordinator) InSubqueryLocalRoutes() int64 {
+	return c.localInSubquery.Load()
+}
+
 // CorrelatedLocalRoutes reports how many refused correlated-subquery plans
 // were routed to the coordinator-local pipeline. Exposed for tests and
 // observability — a distributed suite asserting DAG engagement uses it to

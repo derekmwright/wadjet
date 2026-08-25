@@ -850,6 +850,10 @@ type Planner struct {
 	// dangling outer reference to NULL and the query silently answers 0.
 	// Reset at the start of generateStages.
 	correlatedErr error
+	// inSubqueryErr records an IN-subquery the planner could not materialize
+	// into a literal set, for the same reason and by the same mechanism as
+	// correlatedErr. See in_subquery_set.go.
+	inSubqueryErr error
 
 	// aggStageRenames maps a name an Aggregate node reads in the LOGICAL plan
 	// to the name the aggregate STAGE emits for it, for every group key
@@ -1282,6 +1286,30 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 			return scalarToLiteral(v)
 		}
 		return node
+
+	case *plansql.InExpr:
+		// `x IN (SELECT …)` that reached here did NOT decorrelate into a
+		// semi/anti join, and the worker has no SubqueryRunner to execute it
+		// with — the filter used to ship verbatim and fail (#524). An
+		// uncorrelated IN-subquery is a SET, so it is materialized here and
+		// the predicate becomes the literal list the expression layer already
+		// evaluates. See in_subquery_set.go for the two bounds and the
+		// refusal that routes past them.
+		if subq := findInSubqueryValue(n); subq != nil {
+			if rewritten, ok := p.materializeInSubquery(ctx, n, subq); ok {
+				return rewritten
+			}
+			return node
+		}
+		vals := make([]plansql.Node, len(n.Values))
+		for i, v := range n.Values {
+			vals[i] = p.resolveSubqueryAST(ctx, v, deferred)
+		}
+		return &plansql.InExpr{
+			Left:   p.resolveSubqueryAST(ctx, n.Left, deferred),
+			Not:    n.Not,
+			Values: vals,
+		}
 
 	case *plansql.CmpExpr:
 		return &plansql.CmpExpr{
@@ -2345,6 +2373,9 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	}
 	if p.correlatedErr != nil {
 		return nil, p.correlatedErr
+	}
+	if p.inSubqueryErr != nil {
+		return nil, p.inSubqueryErr
 	}
 	if err := p.enforceQueryLimits(stages, node); err != nil {
 		return nil, err
@@ -3837,6 +3868,7 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	p.setOpErr = nil
 	p.joinCondErr = nil
 	p.correlatedErr = nil
+	p.inSubqueryErr = nil
 	p.aggStageRenames = nil
 	p.walkStages(node, &stages, nil)
 	// Resolve cte-alias phantoms emitted by walkStages dedup. Must happen

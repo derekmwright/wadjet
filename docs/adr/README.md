@@ -38,3 +38,4 @@ Conventions:
 | [0018](0018-parquet-file-numbers-are-input.md) | A parquet file's own numbers are input, not fact | Accepted |
 | [0019](0019-query-scoped-panic-boundary.md) | A panic fails the query, not the server — and the gate is what keeps that honest | Accepted |
 | [0020](0020-drop-table-reclaim-is-opt-in.md) | DROP TABLE's physical reclaim is guarded and opt-in | Accepted |
+| [0020](0020-subquery-name-resolution-and-set-materialization.md) | A decorrelated subquery's names are resolved from the plan, and the sets it cannot join are materialized | Accepted |

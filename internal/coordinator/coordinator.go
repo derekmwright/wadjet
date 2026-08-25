@@ -227,6 +227,10 @@ type Coordinator struct {
 	// DISTINCT it has no stage for (#466) and that were routed to the
 	// coordinator-local single-process pipeline instead.
 	localDistinct atomic.Int64
+	// localInSubquery counts queries whose plan the stage DAG refused for an
+	// IN-subquery the planner could not materialize into a literal set, and
+	// which ran on the coordinator-local pipeline instead (#524).
+	localInSubquery atomic.Int64
 	// local executions reported to the client instead of retried on the
 	// DAG (#308) — every increment is a query the two paths might have
 	// answered differently.
@@ -950,6 +954,14 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		// wherever it sits, so route it there rather than erroring.
 		if errors.Is(err, physical.ErrDistinctDistributed) {
 			return c.runDistinctLocal(ctx, queryID, logicalPlan, planStr, start, err)
+		}
+		// And once more for an IN-subquery the planner could not materialize
+		// into a literal set — too many rows, or a value with no literal
+		// spelling. The single-process pipeline resolves the set once through
+		// expr.InSubquery and caches it, so the query has an answer here even
+		// though the DAG has no stage for the predicate (#524).
+		if errors.Is(err, physical.ErrInSubqueryDistributed) {
+			return c.runInSubqueryLocal(ctx, queryID, logicalPlan, planStr, start, err)
 		}
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}

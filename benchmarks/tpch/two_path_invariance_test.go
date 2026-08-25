@@ -399,6 +399,7 @@ func TestTwoPathInvariance(t *testing.T) {
 			localRows, localCols, localErr := runArm(t, ctx, fast, q.sql)
 			routesBefore := dag.CorrelatedLocalRoutes()
 			distinctRoutesBefore := dag.DistinctLocalRoutes()
+			inSubqRoutesBefore := dag.InSubqueryLocalRoutes()
 			dagRows, dagCols, dagErr := runArm(t, ctx, dag, q.sql)
 
 			// The #359 route must engage exactly for the entries that
@@ -424,6 +425,17 @@ func TestTwoPathInvariance(t *testing.T) {
 			}
 			if !q.distinctRoute && distinctRouted != 0 {
 				t.Errorf("arm B routed this query to the coordinator-local pipeline — the #466 DISTINCT refusal fired for a shape the stage DAG can run")
+			}
+
+			// The #524 IN-subquery refusal fires only when the planner cannot
+			// materialize the set — past the row bound, or a value with no
+			// literal spelling. Nothing in this corpus is either, so it must
+			// fire for NOTHING here: an entry taking this route means the
+			// materialization declined a set it should have inlined, and the
+			// answer stays right while distributed execution quietly stops.
+			if routed := dag.InSubqueryLocalRoutes() - inSubqRoutesBefore; routed != 0 {
+				t.Errorf("arm B routed this query to the coordinator-local pipeline — " +
+					"the #524 IN-subquery refusal fired for a set the planner should have materialized")
 			}
 
 			// The fast path declines any plan it cannot size-estimate —
@@ -3798,6 +3810,79 @@ func twoPathCorpus() []twoPathQuery {
 			assertA: func(tb testing.TB, rows []map[string]any) {
 				tb.Helper()
 				assertSingleCell(tb, rows, "c", 10)
+			}},
+		// #524: an IN-subquery the logical rewrite DECLINES stays a subquery
+		// PREDICATE, and the stage DAG had nothing to execute one with — the
+		// filter shipped to the worker verbatim and failed with "IN subquery
+		// requires a SubqueryRunner". Arm A answered every one of these
+		// correctly, so it was a two-path divergence in which the distributed
+		// side ERRORED. resolveSubqueryAST now materializes the set on the
+		// coordinator and the predicate becomes a literal list, so both arms
+		// run the same filter.
+		//
+		// The three reasons the rewrite declines are all here: a LIMIT (#482,
+		// where decorrelating matched the FULL unbounded set), an ungrouped
+		// aggregate item and a computed item (#516, where the key named
+		// nothing). LIMIT 0 is a BOUND, not an absence (#481) — the set is
+		// empty and nothing matches, which is a different answer from "no
+		// limit".
+		twoPathQuery{name: "InSubqueryBoundedByLimit", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey IN
+				(SELECT b.n_nationkey FROM nation b ORDER BY b.n_nationkey LIMIT 3)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 3)
+			}},
+		twoPathQuery{name: "NotInSubqueryBoundedByLimit", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey NOT IN
+				(SELECT b.n_nationkey FROM nation b ORDER BY b.n_nationkey LIMIT 3)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 22)
+			}},
+		twoPathQuery{name: "InSubqueryLimitZero", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey IN
+				(SELECT b.n_nationkey FROM nation b ORDER BY b.n_nationkey LIMIT 0)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 0)
+			}},
+		twoPathQuery{name: "NotInSubqueryLimitZero", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey NOT IN
+				(SELECT b.n_nationkey FROM nation b ORDER BY b.n_nationkey LIMIT 0)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 25)
+			}},
+		twoPathQuery{name: "InSubqueryUngroupedAggregate", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey IN
+				(SELECT MAX(b.n_nationkey) FROM nation b)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 1)
+			}},
+		twoPathQuery{name: "InSubqueryComputedItem", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey IN
+				(SELECT b.n_nationkey + 0 FROM nation b WHERE b.n_nationkey < 10)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 10)
+			}},
+		// A STRING set, because the values ride the filter as TEXT and a
+		// quoting slip is a wrong answer with no error attached.
+		twoPathQuery{name: "InSubqueryBoundedStringSet", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_name IN
+				(SELECT b.n_name FROM nation b ORDER BY b.n_name LIMIT 4)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 4)
 			}},
 		// #480, repro A: a non-equi join has no join keys, so its build side
 		// requires clustered_on[] — an empty key list only a singleton or a

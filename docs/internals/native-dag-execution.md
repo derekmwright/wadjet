@@ -694,6 +694,51 @@ The real distributed algorithm for this shape is a dependent join / general
 non-equi decorrelation — a separate feature, exactly as #346 grew
 INTERSECT/EXCEPT stages after their refusal landed.
 
+## IN-subqueries the semi-join rewrite declines (materialized → set literal)
+
+`WHERE x IN (SELECT …)` has ONE distributed lowering:
+`logical.tryDecorrelateInSubquery` turns it into a semi/anti join. Three guards
+DECLINE that rewrite — a subquery carrying `LIMIT`/`OFFSET` (#482), an
+ungrouped aggregate item, and a computed item (#516) — and a declined IN stays
+a subquery PREDICATE. Until #524 the DAG had nothing to execute one with:
+`Planner.resolveSubqueryAST` handled a scalar `SubqueryNode` and fell through
+`default:` for `InExpr`, so the filter shipped verbatim and the fragment failed
+with *"IN subquery requires a SubqueryRunner"* while the single-process path
+answered correctly.
+
+Mechanism (`physical/in_subquery_set.go`, ADR-0020 §2):
+
+- `resolveSubqueryAST`'s `InExpr` arm calls `Planner.materializeInSubquery`,
+  which executes the UNCORRELATED subquery once on the coordinator and rewrites
+  the predicate to the literal list the expression layer already evaluates —
+  three-valued over a NULL in the list (#370), the same rule #507 gave the
+  semi-join lowering. The subquery runs AS WRITTEN, so `LIMIT`, `OFFSET` and
+  `ORDER BY` mean what they say.
+- An EMPTY set renders as the constant it is (`1 = 0` for IN, `1 = 1` for NOT
+  IN): true for every row including a NULL-keyed one, because an empty set has
+  nothing to be UNKNOWN about (#481's `LIMIT 0` is a bound, not an absence).
+- Two bounds refuse rather than guess: a set past `WADJET_IN_SET_MAX` rows
+  (default 10,000 — a plan-TEXT budget, since the expression is serialized into
+  every task; `=0` disables materialization) and a value with no literal
+  spelling that survives the round trip through the filter's text.
+- Typed error `physical.ErrInSubqueryDistributed`, parked like `correlatedErr`
+  and returned by `PlanDistributed`; the coordinator routes it to
+  `Coordinator.runInSubqueryLocal` — the same `runRefusedLocal` guards as the
+  #359 and #466 routes. Counter: `InSubqueryLocalRoutes()`.
+- A subquery that is NOT self-contained is the correlated refusal's shape, not
+  this one, and `materializeInSubquery` hands it there via
+  `plansql.DanglingTableRefs`.
+
+Coverage: `benchmarks/tpch/two_path_invariance_test.go` (seven declined shapes
+including a string set, each with PostgreSQL's absolute answer in `assertA`;
+the runner asserts this refusal fires for NO corpus entry, because one that
+takes the route is a set the planner should have inlined),
+`benchmarks/tpch/in_subquery_dag_test.go` (the refusal forced by shrinking the
+bound: the query must still ANSWER, and answer the same thing),
+`physical/in_subquery_set_test.go` (literal round trip per kind — the quote is
+the one that turns a set into a different set — refusal for what it cannot
+spell, and the empty-set constants).
+
 ## Window
 
 `walkStages` has always emitted a `window` stage, and until #349 nothing
