@@ -864,11 +864,7 @@ func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 type batchRenamer struct {
 	renames  []physical.OutputRename
 	compiled map[int]expr.Expr // index → compiled expr; nil map = compilation failed
-	// srcIdx is rename i's source column INDEX, resolved once for the whole
-	// result. A name alone cannot address a source once two output columns
-	// share one — see renameSourceIndices.
-	srcIdx  []int
-	project bool
+	project  bool
 }
 
 // newBatchRenamer compiles expression-bearing renames and decides whether a
@@ -893,12 +889,14 @@ func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRe
 		br.compiled[i] = e
 	}
 	if br.project && len(columns) > 0 {
-		br.srcIdx = renameSourceIndices(columns, renames)
+		// The decision only: apply() resolves again against each batch it is
+		// handed, so nothing is cached across batches.
+		srcIdx := renameSourceIndices(columns, renames)
 		for i, r := range renames {
 			if r.Expr != nil {
 				continue // existence check uses expression evaluation
 			}
-			if br.srcIdx[i] < 0 {
+			if srcIdx[i] < 0 {
 				br.project = false
 				break
 			}
@@ -921,17 +919,34 @@ func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRe
 // PostgreSQL answers `ALGERIA | NATION ALGERIA COMMENT`.
 //
 // Duplicates are assigned ORDINALLY — the k-th rename spelled X takes the
-// k-th column spelled X — and that is positional identity rather than a
-// guess: both lists are the SAME visible SELECT list in the SAME order, the
-// rename list by construction (extractOutputRenames walks
-// VisibleProjections) and the producer's columns because the pass that
-// materialized them walked it too.
+// k-th column spelled X — and the correspondence is exact because the
+// matching is NAME-SCOPED. The two lists are not the same list: the rename
+// list is the VISIBLE select items (extractOutputRenames walks
+// VisibleProjections) while the producer's projection carries the hidden ones
+// too (attachScanSelectProjections walks Projections, hidden ORDER BY terms
+// included). What makes the k-th ↔ k-th correspondence hold anyway is that
+// only columns SPELLED LIKE THE GROUP are counted, and a hidden term is named
+// __sortkey_N — a spelling no user alias can collide with — so it can neither
+// join a group nor shift one. Within one name, both lists are that name's
+// select items in select order.
 //
-// The assignment is SELF-VALIDATING: it is used only when the number of
-// columns carrying the name is at least the number of renames asking for it.
-// Where it is not, every rename in the group falls back to the single-name
-// resolution and the caller degrades to a rename-only pass exactly as before
-// — a shape this rule cannot justify must not be answered by it.
+// A group of N renames over M columns of that name resolves by counting, and
+// the three cases are different questions rather than degrees of confidence:
+//
+//	M >= N  ordinal. Each output has its own column, which is what the
+//	        producer emits when it MATERIALIZED the select list.
+//	M == 1  every rename reads it. The producer did NOT materialize, so the
+//	        streams carry SOURCE columns and N select items reading ONE
+//	        source share ONE column — `SELECT DISTINCT k AS u, k AS u` really
+//	        is that column twice, and PostgreSQL answers it that way.
+//	else    NOTHING (-1). 1 < M < N means the producer emitted several
+//	        columns of the name but fewer than the outputs asking for it, and
+//	        no counting rule maps them; handing each the same first match is
+//	        precisely the defect this function exists to end. -1 makes the
+//	        caller degrade to a rename-only pass, which returns a WIDER
+//	        result than the select list — visibly wrong rather than silently
+//	        wrong, and the degradation the projection has always taken when a
+//	        source does not resolve.
 func renameSourceIndices(names []string, renames []physical.OutputRename) []int {
 	out := make([]int, len(renames))
 	groups := make(map[string][]int, len(renames))
@@ -946,8 +961,9 @@ func renameSourceIndices(names []string, renames []physical.OutputRename) []int 
 	for key, group := range groups {
 		if len(group) > 1 {
 			// Exact matches only: a duplicate arises from one literal alias
-			// written N times, so the qualified/bare fallbacks below have no
-			// part in deciding WHICH of the N a rename means.
+			// written N times, so the qualified/bare fallbacks resolveRename
+			// Source applies have no part in deciding WHICH of the N a rename
+			// means.
 			var matches []int
 			for i, n := range names {
 				if strings.EqualFold(strings.TrimSpace(n), key) {
@@ -960,10 +976,31 @@ func renameSourceIndices(names []string, renames []physical.OutputRename) []int 
 				}
 				continue
 			}
+			if len(matches) == 1 {
+				// One column for N outputs: they read one SOURCE, so they
+				// read one column. Correct, and what this path has always
+				// answered.
+				for _, ri := range group {
+					out[ri] = matches[0]
+				}
+				continue
+			}
+			if len(matches) > 1 {
+				// Several, but fewer than the outputs asking. Nothing maps
+				// them; falling through to resolveRenameSource would hand
+				// every member the same index (it is deterministic in From,
+				// and a group shares one From), which is the defect itself.
+				for _, ri := range group {
+					out[ri] = -1
+				}
+				continue
+			}
+			// No exact match at all: the qualified↔bare fallbacks may still
+			// find the column, and they answer the same way for every member
+			// of the group — which is right when it is a single shared
+			// source and refused outright when it is ambiguous.
 		}
-		for _, ri := range group {
-			out[ri] = resolveRenameSource(names, renames[ri].From)
-		}
+		out[group[0]] = resolveRenameSource(names, renames[group[0]].From)
 	}
 	return out
 }
@@ -1053,13 +1090,15 @@ func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
 	for j, c := range b.Schema {
 		names[j] = c.Name
 	}
-	// Resolved against THIS batch, not against the column list the renamer
-	// was built from: a spilled result replays batches whose schema is the
-	// same shape, and re-resolving keeps the two paths reading one rule.
-	srcIdx := br.srcIdx
-	if len(srcIdx) != len(br.renames) {
-		srcIdx = renameSourceIndices(names, br.renames)
-	}
+	// Resolved against THIS batch, every time. Caching the indices from the
+	// column list the renamer was built with was wrong in a way a length
+	// check cannot catch: a batch of the SAME WIDTH whose columns are in a
+	// different order ([b a] where the renamer saw [a b]) silently read them
+	// transposed. Re-resolving costs what the pre-#513 code already paid —
+	// one resolveRenameSource per rename per batch — and is the only form
+	// that is correct for the spill-replay path, whose batches are decoded
+	// separately.
+	srcIdx := renameSourceIndices(names, br.renames)
 	newCols := make([]*batch.Vector, len(br.renames))
 	newSchema := make([]parquet.Column, len(br.renames))
 	for i, r := range br.renames {

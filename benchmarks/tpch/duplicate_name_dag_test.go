@@ -3,18 +3,20 @@ package tpch
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/coordinator"
 )
 
-// The gate that was missing.
+// The gate for DUPLICATE output column names, on both coordinator paths.
 //
 // A result may legally carry two output columns of one NAME — PostgreSQL
 // answers `SELECT upper(a), upper(b)` with two columns called `upper`, and
 // #513 made this engine agree. Nothing that existed could see a value swap
-// between them on the STAGE DAG:
+// between them:
 //
 //   - the two-path suite realigns arm B onto arm A BY NAME, so both arms
 //     "agree" whatever either answers;
@@ -23,81 +25,230 @@ import (
 //   - the pgwire transport tests feed a synthetic SliceStream, so they never
 //     reach the gather's rename.
 //
-// So the gather's own projection — which resolved each rename BY NAME and
-// handed two renames the same column — went unseen: 25 rows of
-// `ALGERIA | ALGERIA` where PostgreSQL answers
-// `ALGERIA | NATION ALGERIA COMMENT`.
+// Two things make this gate able to see one. It reads the coordinator's batch
+// stream POSITIONALLY, which is the only way to address a duplicate-named
+// column. And it compares against a REFERENCE spelling of the same query with
+// DISTINCT aliases (`AS u1, AS u2`), which is the same question asked in a way
+// no name-keyed layer can get wrong — so a swap, a collapse, a dropped column
+// and a wrong sort order all show, where "every row has cell0 == cell1" would
+// only have caught the collapse.
 //
-// This gate reads the coordinator's batch stream POSITIONALLY, which is the
-// only way to address a duplicate-named column, and runs every shape on BOTH
-// coordinators.
+// Rows are compared both as an ORDERED sequence (the ORDER BY makes the
+// sequence part of the answer) and as a MULTISET, so a reordering and a
+// substitution are distinguishable in the failure.
 func TestDuplicateOutputNamesOnBothCoordinatorPaths(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	t.Cleanup(cancel)
 	fast, dag := setupTwoPathCluster(t, ctx)
 
-	for _, tc := range []struct {
-		name string
-		sql  string
-	}{
-		// The producing fragment does NOT materialize the SELECT list here,
-		// so the gather sees distinct source names — the shape that worked.
-		{"two calls of one function",
-			`SELECT UPPER(n_name), UPPER(n_comment) FROM nation`},
-		// An ORDER BY term the SELECT list does not carry forces a projection
+	const (
+		armLocal = "A (single-process)"
+		armDAG   = "B (stage DAG)"
+	)
+
+	for _, tc := range []dupShape{
+		// The producing fragment does NOT materialize the select list here,
+		// so the gather sees distinct source names.
+		{name: "two calls of one function",
+			dup: `SELECT UPPER(n_name), UPPER(n_comment) FROM nation ORDER BY n_nationkey`,
+			ref: `SELECT UPPER(n_name) AS u1, UPPER(n_comment) AS u2 FROM nation ORDER BY n_nationkey`},
+		// An ORDER BY term the select list does not carry forces a projection
 		// below the sort, which materializes BOTH aliases: the gather is then
 		// handed two columns named `upper` and two renames spelled `upper`.
-		{"under a hidden sort key",
-			`SELECT UPPER(n_name), UPPER(n_comment) FROM nation ORDER BY n_regionkey, n_name`},
-		{"a computed column and an alias",
-			`SELECT UPPER(n_name), n_comment AS upper FROM nation ORDER BY n_regionkey, n_name`},
-		{"an explicit duplicate alias",
-			`SELECT UPPER(n_name) AS u, UPPER(n_comment) AS u FROM nation ORDER BY n_regionkey, n_name`},
-		// Two PLAIN columns under one alias — the same defect with no
-		// computed projection anywhere, which is how it was reachable before
-		// #513 made duplicates ordinary.
-		{"two plain columns under one alias",
-			`SELECT n_name AS u, n_comment AS u FROM nation ORDER BY n_regionkey, n_name`},
-		// Over a join, so the gather's input is a join fragment rather than a
-		// scan one.
-		{"over a join",
-			`SELECT UPPER(n_name), UPPER(n_comment) FROM nation n
-			 JOIN region r ON n.n_regionkey = r.r_regionkey ORDER BY r.r_name, n.n_name`},
+		{name: "under a hidden sort key",
+			dup: `SELECT UPPER(n_name), UPPER(n_comment) FROM nation ORDER BY n_regionkey, n_name`,
+			ref: `SELECT UPPER(n_name) AS u1, UPPER(n_comment) AS u2 FROM nation ORDER BY n_regionkey, n_name`},
+		{name: "a computed column and an alias",
+			dup: `SELECT UPPER(n_name), n_comment AS upper FROM nation ORDER BY n_regionkey, n_name`,
+			ref: `SELECT UPPER(n_name) AS u1, n_comment AS u2 FROM nation ORDER BY n_regionkey, n_name`},
+		{name: "an explicit duplicate alias",
+			dup: `SELECT UPPER(n_name) AS u, UPPER(n_comment) AS u FROM nation ORDER BY n_regionkey, n_name`,
+			ref: `SELECT UPPER(n_name) AS u1, UPPER(n_comment) AS u2 FROM nation ORDER BY n_regionkey, n_name`},
+		// Two PLAIN columns under one alias — the same defect with no computed
+		// projection anywhere, which is how it was reachable before #513 made
+		// duplicates ordinary.
+		{name: "two plain columns under one alias",
+			dup: `SELECT n_name AS u, n_comment AS u FROM nation ORDER BY n_regionkey, n_name`,
+			ref: `SELECT n_name AS u1, n_comment AS u2 FROM nation ORDER BY n_regionkey, n_name`},
+		// Reversed against the table's own column order, so a resolver that
+		// happens to walk the schema cannot pass by accident.
+		{name: "reversed plain columns",
+			dup: `SELECT n_comment AS u, n_name AS u FROM nation ORDER BY n_nationkey`,
+			ref: `SELECT n_comment AS u1, n_name AS u2 FROM nation ORDER BY n_nationkey`},
+		// The duplicates are not adjacent: an ordinal rule has to count only
+		// the columns carrying the name, not positions in the row.
+		{name: "duplicates separated by another column",
+			dup: `SELECT n_name AS u, n_regionkey AS keep, n_comment AS u FROM nation ORDER BY n_nationkey`,
+			ref: `SELECT n_name AS u1, n_regionkey AS keep, n_comment AS u2 FROM nation ORDER BY n_nationkey`},
+		{name: "three duplicates",
+			dup: `SELECT n_name AS u, n_comment AS u, n_name AS u FROM nation ORDER BY n_nationkey`,
+			ref: `SELECT n_name AS u1, n_comment AS u2, n_name AS u3 FROM nation ORDER BY n_nationkey`},
+		{name: "over a join",
+			dup: `SELECT UPPER(n_name), UPPER(n_comment) FROM nation n
+			      JOIN region r ON n.n_regionkey = r.r_regionkey ORDER BY r.r_name, n.n_name`,
+			ref: `SELECT UPPER(n_name) AS u1, UPPER(n_comment) AS u2 FROM nation n
+			      JOIN region r ON n.n_regionkey = r.r_regionkey ORDER BY r.r_name, n.n_name`},
+		// LIMIT on top of the hidden-sort-key trim.
+		{name: "limit under a sort trim",
+			dup: `SELECT UPPER(n_name), UPPER(n_comment) FROM nation ORDER BY n_comment LIMIT 5`,
+			ref: `SELECT UPPER(n_name) AS u1, UPPER(n_comment) AS u2 FROM nation ORDER BY n_comment LIMIT 5`},
+		// Two outputs reading ONE source column: the answer really is that
+		// column twice, so a resolver that refuses duplicates outright drops
+		// a column here.
+		{name: "distinct over duplicates",
+			dup: `SELECT DISTINCT n_regionkey AS u, n_regionkey AS u FROM nation ORDER BY 1`,
+			ref: `SELECT DISTINCT n_regionkey AS u1, n_regionkey AS u2 FROM nation ORDER BY 1`},
+
+		// --- pinned residuals, each tracked and each still diverging -------
+		{name: "window beside duplicates",
+			dup: `SELECT UPPER(n_name), UPPER(n_comment), ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn
+			      FROM nation ORDER BY n_regionkey, n_name`,
+			ref: `SELECT UPPER(n_name) AS u1, UPPER(n_comment) AS u2, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn
+			      FROM nation ORDER BY n_regionkey, n_name`,
+			pins: map[string]string{armDAG: "#558: a hidden ORDER BY term above a WINDOW has nowhere to be " +
+				"materialized on the DAG — materializeSortKey needs a fragment that carries an OpProject " +
+				"and a window stage is not one. Fails loud, no duplicates required"}},
+		{name: "union all over duplicates",
+			dup:       `SELECT n_name AS u, n_comment AS u FROM nation UNION ALL SELECT r_name, r_comment FROM region`,
+			ref:       `SELECT n_name AS u1, n_comment AS u2 FROM nation UNION ALL SELECT r_name, r_comment FROM region`,
+			unordered: true,
+			pins: map[string]string{armLocal: "#556: the single-process set-operation lowering resolves the " +
+				"arms' columns by NAME, so both outputs carry the second source column — all 30 rows. " +
+				"The DAG answers it correctly, which is what isolates the collision as the cause"}},
+		{name: "positional ORDER BY over duplicates",
+			dup: `SELECT n_name AS u, n_regionkey AS u FROM nation ORDER BY 2, 1`,
+			ref: `SELECT n_name AS u1, n_regionkey AS u2 FROM nation ORDER BY 2, 1`,
+			pins: map[string]string{
+				armLocal: "#557: resolvePositionalRefs rewrites ORDER BY N to the NAME of the N-th select " +
+					"item, and a name is not an address once two items share it — the sort binds the first " +
+					"column carrying it. VALUES are paired correctly; only the ORDER is wrong",
+				armDAG: "#557, same cause on the other path",
+			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, arm := range []struct {
 				label string
 				c     *coordinator.Coordinator
-			}{{"A (single-process)", fast}, {"B (stage DAG)", dag}} {
-				cells, cols, err := streamRowValues(ctx, arm.c, tc.sql)
-				if err != nil {
-					t.Fatalf("arm %s: %v\n  SQL: %s", arm.label, err, tc.sql)
-				}
-				if len(cols) != 2 || cols[0] != cols[1] {
-					t.Fatalf("arm %s returned columns %v — not the duplicate-name shape this gate is about",
-						arm.label, cols)
-				}
-				if len(cells) != 25 {
-					t.Fatalf("arm %s returned %d rows, want 25", arm.label, len(cells))
-				}
-				same := 0
-				for i, row := range cells {
-					if len(row) != 2 {
-						t.Fatalf("arm %s row %d has %d cells, want 2", arm.label, i, len(row))
-					}
-					if fmt.Sprint(row[0]) == fmt.Sprint(row[1]) {
-						same++
-					}
-				}
-				if same == len(cells) {
-					t.Errorf("arm %s: every one of %d rows has cell 0 == cell 1 — the second output "+
-						"column carries the first one's value, which is what resolving a duplicate "+
-						"name BY NAME does\n  SQL: %s\n  first row: %v",
-						arm.label, same, tc.sql, cells[0])
+			}{{armLocal, fast}, {armDAG, dag}} {
+				pin, pinned := tc.pins[arm.label]
+				detail := tc.compareOnArm(ctx, arm.c)
+				switch {
+				case detail == "" && pinned:
+					t.Errorf("arm %s now agrees with the distinct-alias reference, so this known "+
+						"divergence is FIXED:\n  %s\nDelete the pin on %q in "+
+						"TestDuplicateOutputNamesOnBothCoordinatorPaths.", arm.label, pin, tc.name)
+				case detail != "" && pinned:
+					t.Logf("known divergence, NOT gated on arm %s: %s\n  %s", arm.label, detail, pin)
+				case detail != "":
+					t.Errorf("arm %s: %s\n  duplicate-name spelling: %s\n  reference spelling:      %s",
+						arm.label, detail, oneLine(tc.dup), oneLine(tc.ref))
 				}
 			}
 		})
 	}
+}
+
+// dupShape is one query in two spellings: dup names two output columns the
+// same, ref gives them distinct aliases. Everything else about them is
+// identical, so the reference IS the answer.
+type dupShape struct {
+	name string
+	dup  string
+	ref  string
+	// unordered: the statement has no total order of its own, so only the
+	// row MULTISET is part of the answer.
+	unordered bool
+	// pins maps an arm label to the issue tracking a divergence that is not
+	// gated there. The comparison still runs, and an arm that starts agreeing
+	// FAILS — deleting the pin is the fix's proof.
+	pins map[string]string
+}
+
+// compareOnArm runs both spellings on one coordinator and returns "" when they
+// agree, or a description of the first way they do not.
+func (tc dupShape) compareOnArm(ctx context.Context, c *coordinator.Coordinator) string {
+	dupRows, dupCols, dupErr := streamRowValues(ctx, c, tc.dup)
+	refRows, refCols, refErr := streamRowValues(ctx, c, tc.ref)
+	if refErr != nil {
+		return fmt.Sprintf("the REFERENCE spelling failed, so it cannot be ground truth for "+
+			"anything: %v", refErr)
+	}
+	if dupErr != nil {
+		return fmt.Sprintf("the duplicate-name spelling failed where the reference answered "+
+			"%d rows: %v", len(refRows), dupErr)
+	}
+	if len(dupCols) != len(refCols) {
+		return fmt.Sprintf("returned %d columns %v, the reference %d %v",
+			len(dupCols), dupCols, len(refCols), refCols)
+	}
+	if len(dupRows) != len(refRows) {
+		return fmt.Sprintf("returned %d rows, the reference %d", len(dupRows), len(refRows))
+	}
+	// Multiset first: it says WHAT is wrong (a value substituted or dropped)
+	// independently of WHERE, which an ordered compare cannot separate.
+	if a, b := rowMultiset(dupRows), rowMultiset(refRows); !equalStrings(a, b) {
+		return fmt.Sprintf("the row MULTISET differs from the reference — a value is substituted "+
+			"or dropped, not merely reordered\n    first differing row (sorted): %s",
+			firstDiff(a, b))
+	}
+	if tc.unordered {
+		return ""
+	}
+	for i := range dupRows {
+		if got, want := renderRow(dupRows[i]), renderRow(refRows[i]); got != want {
+			return fmt.Sprintf("row %d is %s, the reference %s — same multiset, so the ORDER "+
+				"differs", i, got, want)
+		}
+	}
+	return ""
+}
+
+func renderRow(cells []any) string {
+	parts := make([]string, len(cells))
+	for i, c := range cells {
+		parts[i] = fmt.Sprintf("%v", c)
+	}
+	return "[" + strings.Join(parts, " | ") + "]"
+}
+
+func rowMultiset(rows [][]any) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = renderRow(r)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func firstDiff(a, b []string) string {
+	for i := range a {
+		if i >= len(b) {
+			return a[i] + " (reference has no such row)"
+		}
+		if a[i] != b[i] {
+			return a[i] + ", reference " + b[i]
+		}
+	}
+	if len(b) > len(a) {
+		return "(missing) , reference " + b[len(a)]
+	}
+	return "(none)"
+}
+
+func oneLine(sql string) string {
+	return strings.Join(strings.Fields(sql), " ")
 }
 
 // streamRowValues reads a coordinator result POSITIONALLY, off the batch
