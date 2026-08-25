@@ -1201,6 +1201,62 @@ func appendKeyValue(buf []byte, v any) []byte {
 	}
 }
 
+// appendKeyValueWithMeta is appendKeyValue with the value's DECLARED column
+// type available, so a CIDR value re-keys through kernel.CidrOrderKey even
+// nested inside an ARRAY, MAP or ROW — where appendKeyValue's plain `any`
+// switch has no type tag to tell a CIDR string from an ordinary one, the same
+// gap appendSerializedKey already closes for a bare top-level CIDR column.
+//
+// Without this arm, GROUP BY arr_cidr agreed with the un-spilled columnar key
+// (appendColumnValue → appendListKey → appendNestedElem, which walks the real
+// *batch.Vector tree and re-keys every CIDR leaf already) only until a
+// cross-batch, cross-worker or spill-boundary MERGE went through this boxed
+// path instead: '10.0.0.1' and '10.0.0.1/32' inside the array serialized to
+// two different byte strings, so a k-way merge of otherwise-identical groups
+// answered two groups where the un-spilled path already answers one.
+//
+// Every leaf type this does not name keeps appendKeyValue's existing
+// encoding exactly — this only intercepts CIDR and recurses into a
+// container's own element/field metadata to find one.
+func appendKeyValueWithMeta(buf []byte, v any, meta *parquet.Column) []byte {
+	if meta == nil || v == nil {
+		return appendKeyValue(buf, v)
+	}
+	switch meta.Type {
+	case parquet.TypeCIDR:
+		if s, ok := v.(string); ok {
+			return appendKeyValue(buf, kernel.CidrOrderKey(s))
+		}
+	case parquet.TypeArray, parquet.TypeMap:
+		if vals, ok := v.([]any); ok {
+			buf = binary.AppendUvarint(buf, uint64(len(vals)))
+			for _, e := range vals {
+				buf = appendKeyValueWithMeta(buf, e, meta.ElementType)
+			}
+			return buf
+		}
+	case parquet.TypeRow:
+		if m, ok := v.(map[string]any); ok {
+			buf = binary.AppendUvarint(buf, uint64(len(m)))
+			names := make([]string, 0, len(m))
+			for name := range m {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			fieldMeta := make(map[string]*parquet.Column, len(meta.Fields))
+			for i := range meta.Fields {
+				fieldMeta[meta.Fields[i].Name] = &meta.Fields[i]
+			}
+			for _, name := range names {
+				buf = appendKeyRaw(buf, name)
+				buf = appendKeyValueWithMeta(buf, m[name], fieldMeta[name])
+			}
+			return buf
+		}
+	}
+	return appendKeyValue(buf, v)
+}
+
 // appendKeyRaw writes a uvarint length then the bytes. Uvarint rather than a
 // fixed 4 bytes because the drain cursor's key arena holds one of these per
 // string group-key column per group: a short value pays one byte.

@@ -6,6 +6,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // partialKeyMode selects how a cursor reifies group-key values from SoA state.
@@ -55,6 +56,7 @@ type partialGroupCursor struct {
 	serializedKeys []string      // group keys, 1:1 with strGroupStates (deferred-boxing source of truth; RAW strings in single-string mode, binary framing otherwise)
 	rawStringKeys  bool          // single-string path: serializedKeys entries are the keys themselves
 	groupColTypes  []batch.TypeID
+	groupColMeta   []parquet.Column // full declared metadata, 1:1 with groupColTypes — a container's element/field types for appendSerializedKey's nested CIDR re-key
 	nAggs          int
 	nGroupCols     int
 	keyMode        partialKeyMode
@@ -136,6 +138,7 @@ func newPartialGroupCursor(h *HashAggregate, liveGroups []int32) *partialGroupCu
 		serializedKeys: h.serializedKeys,
 		rawStringKeys:  h.useStrGroupKey,
 		groupColTypes:  h.groupColTypes,
+		groupColMeta:   h.groupColMeta,
 		nAggs:          nAggs,
 		nGroupCols:     nGroupCols,
 		keyMode:        keyMode,
@@ -174,14 +177,14 @@ func newPartialGroupCursor(h *HashAggregate, liveGroups []int32) *partialGroupCu
 		for p := 0; p < numGroups; p++ {
 			slot := c.slotAt(p)
 			c.keyOffsets[p] = int32(len(c.keyArena))
-			c.keyArena = appendSerializedKey(c.keyArena, c.intGroupStates[slot].extras.keyValues, c.groupColTypes)
+			c.keyArena = appendSerializedKey(c.keyArena, c.intGroupStates[slot].extras.keyValues, c.groupColTypes, c.groupColMeta)
 			c.sortedIdx[p] = uint32(p)
 		}
 	default: // partialKeyModeStrOrGeneric
 		for p := 0; p < numGroups; p++ {
 			slot := c.slotAt(p)
 			c.keyOffsets[p] = int32(len(c.keyArena))
-			c.keyArena = appendSerializedKey(c.keyArena, c.strKeyValsAt(slot), c.groupColTypes)
+			c.keyArena = appendSerializedKey(c.keyArena, c.strKeyValsAt(slot), c.groupColTypes, c.groupColMeta)
 			c.sortedIdx[p] = uint32(p)
 		}
 	}
@@ -417,7 +420,20 @@ func (c *partialGroupCursor) loadHeadAccsAoS(gi int) {
 // groups across a spill boundary the un-spilled path already calls one
 // value. types may be shorter than vals (or nil); a value with no
 // corresponding type serializes as before.
-func appendSerializedKey(buf []byte, vals []any, types []batch.TypeID) []byte {
+//
+// meta is the same GROUP BY columns' full declared metadata, needed for a
+// CIDR value ONE LEVEL DOWN: an ARRAY, MAP or ROW whose types[i] entry is
+// batch.TypeArray/TypeMap/TypeRow carries no element type of its own, so a
+// CIDR leaf below it fell all the way through to appendKeyValue's plain-text
+// encoding — the same drift one level up that types[i] closes, and the same
+// failure mode: GROUP BY arr_cidr answers one group in memory
+// (appendColumnValue → appendNestedElem, which walks the real child vector's
+// own type) and can answer two once a cross-batch, cross-worker or spill
+// boundary routes the SAME groups through this boxed path instead. meta may
+// be shorter than vals (or nil); a value with no corresponding entry, or
+// whose declared type is not a container, serializes exactly as before via
+// appendKeyValueWithMeta's own fallback.
+func appendSerializedKey(buf []byte, vals []any, types []batch.TypeID, meta []parquet.Column) []byte {
 	for i, v := range vals {
 		if i > 0 {
 			buf = append(buf, 0)
@@ -425,6 +441,13 @@ func appendSerializedKey(buf []byte, vals []any, types []batch.TypeID) []byte {
 		if i < len(types) && types[i] == batch.TypeCIDR {
 			if s, ok := v.(string); ok {
 				buf = appendKeyValue(buf, kernel.CidrOrderKey(s))
+				continue
+			}
+		}
+		if i < len(meta) {
+			switch meta[i].Type {
+			case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
+				buf = appendKeyValueWithMeta(buf, v, &meta[i])
 				continue
 			}
 		}

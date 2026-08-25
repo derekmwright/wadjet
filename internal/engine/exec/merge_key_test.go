@@ -3,6 +3,9 @@ package exec
 import (
 	"math"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // TestMergeKeyKeepsBoxedTypesDistinct is the regression for appendKeyValue's
@@ -138,5 +141,53 @@ func TestMergeKeyFoldsCanonicalFloatValues(t *testing.T) {
 				t.Fatalf("values the comparator treats as equal produced different merge keys: %q vs %q", ka, kb)
 			}
 		})
+	}
+}
+
+// TestAppendSerializedKeyReKeysNestedCIDR is the regression for
+// appendSerializedKey re-keying a CIDR GROUP BY column only at the TOP
+// LEVEL: an ARRAY(CIDR) column's types[i] entry is batch.TypeArray, which
+// carries no element type of its own, so a CIDR leaf inside it fell all the
+// way through appendKeyValue's plain-text `case string:` — unlike the
+// in-memory columnar key (exec.appendColumnValue -> appendListKey ->
+// appendNestedElem, which walks the real child vector's own declared type
+// and already re-keys every CIDR leaf). GROUP BY arr_cidr therefore agreed
+// with the un-spilled answer only until a cross-batch, cross-worker or spill
+// boundary routed the same groups through this boxed path instead: a bare
+// address and its own /32 host route inside the array produced two
+// different spill/merge keys for one PostgreSQL inet value.
+func TestAppendSerializedKeyReKeysNestedCIDR(t *testing.T) {
+	meta := []parquet.Column{
+		{Name: "arr_cidr", Type: parquet.TypeArray,
+			ElementType: &parquet.Column{Name: "element", Type: parquet.TypeCIDR}},
+	}
+	types := []batch.TypeID{batch.TypeArray}
+
+	bare := appendSerializedKey(nil, []any{[]any{"10.0.0.1"}}, types, meta)
+	slash32 := appendSerializedKey(nil, []any{[]any{"10.0.0.1/32"}}, types, meta)
+	if string(bare) != string(slash32) {
+		t.Fatalf("ARRAY(CIDR) holding a bare address vs its own /32 produced two spill/merge keys, "+
+			"%q vs %q — one PostgreSQL inet value answers two GROUP BY groups after a spill", bare, slash32)
+	}
+
+	// A genuinely different address must still key differently — the fix
+	// must not collapse every CIDR array into one key.
+	different := appendSerializedKey(nil, []any{[]any{"10.0.0.2/32"}}, types, meta)
+	if string(bare) == string(different) {
+		t.Fatalf("two DIFFERENT addresses produced the same spill/merge key %q", bare)
+	}
+
+	// A ROW field one level down needs the same re-key, through meta.Fields.
+	rowMeta := []parquet.Column{
+		{Name: "r", Type: parquet.TypeRow, Fields: []parquet.Column{
+			{Name: "c", Type: parquet.TypeCIDR},
+		}},
+	}
+	rowTypes := []batch.TypeID{batch.TypeRow}
+	rowBare := appendSerializedKey(nil, []any{map[string]any{"c": "10.0.0.1"}}, rowTypes, rowMeta)
+	rowSlash32 := appendSerializedKey(nil, []any{map[string]any{"c": "10.0.0.1/32"}}, rowTypes, rowMeta)
+	if string(rowBare) != string(rowSlash32) {
+		t.Fatalf("ROW field holding a bare address vs its own /32 produced two spill/merge keys, %q vs %q",
+			rowBare, rowSlash32)
 	}
 }
