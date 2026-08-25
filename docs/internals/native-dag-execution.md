@@ -539,10 +539,34 @@ nothing (#348, same declare-on-the-wire shape as #329's `AggSpec.OutputType`).
 
 **Unmatched build rows.** `HashJoinProbe.FlushUnmatchedRows` emits them once
 per join, guarded on the shared `HashJoin` because every clone drains
-`FlushableOperator`. Both drivers go through it: `physical.joinFlushSource`
-(single process) and the worker's `drainFlushableOps`. The worker had no
-equivalent at all before #352, so a distributed RIGHT/FULL join answered with
-its matched rows only.
+`FlushableOperator`. Both drivers reach it through `NextFlush`:
+`physical.joinFlushSource` (single process) and the worker's
+`drainFlushableOps`. The worker had no equivalent at all before #352, so a
+distributed RIGHT/FULL join answered with its matched rows only.
+
+`NextFlush`, not `FlushUnmatchedRows` directly, is the entry point, and the
+difference is the whole of #550. A grace build that EVICTED a partition nils
+its `h.buildBatches` slots while leaving the arena entries that point at them
+in place — an argument written about the in-memory PROBE path, where partition
+routing diverts the probe row before any hash lookup. The build-side flushes
+are not that path: they walk the arena directly, so they used to dereference
+the nil slot and fail the query. They skip a non-resident entry now
+(`HashJoin.residentBuildBatch`), and the rows are not lost with it: `NextFlush`
+replays each spilled partition from disk first, and the temp join over it emits
+that partition's own build-side rows — `FlushUnmatched` for RIGHT/FULL,
+`FlushAntiMatched` for RIGHT ANTI, `FlushMatched` for RIGHT SEMI. The replay
+reads the partition's COMPLETE contents (the batches evicted plus every row
+that arrived for it afterwards, which was never indexed and has no arena entry
+at all), so emitting them from the resident flush as well would double them.
+
+Two things that path depends on and that a reader should not assume:
+`buildTempJoinFromBatches` resolves the replayed build key with
+`columnIndexFallback`, because the key is spelled the way the PLAN wrote it
+(`ON b.bk = p.pk`) while the spilled batch carries bare source names; and
+`joinFlushSource` must DRAIN `NextFlush` rather than call the resident flush,
+because the probe sits in its `innerOps` and `exec.Pipeline.flushSpilledOps`
+never sees it. `exec.JoinPartitionsEvicted` counts evictions so a gate can
+prove it reached this path instead of skipping.
 
 **Why RIGHT/FULL never broadcast.** Any layout that REPLICATES the build side
 across tasks is unsound for them: each task holds the whole build and sees one

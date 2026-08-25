@@ -6695,8 +6695,9 @@ func (rb *reverseBloomBridge) Close() error {
 	return nil
 }
 
-// joinFlushSource wraps a join probe pipeline and appends unmatched build-side
-// rows (via FlushUnmatched) after the probe side is exhausted.
+// joinFlushSource wraps a join probe pipeline and, after the probe side is
+// exhausted, drains the probe's flush phase: the spilled partitions first,
+// then the resident unmatched build rows (see Next).
 type joinFlushSource struct {
 	inner    exec.Source
 	innerOps []exec.UnaryOperator
