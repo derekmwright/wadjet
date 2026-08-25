@@ -82,11 +82,24 @@ consumer can sniff and decode, including mid-stream.
   is 12.7501. That was reachable from any cross-scale set operation until
   #533, silently, because the union stage's arms were reconciled by `TypeID`
   and two DECIMALs share one. `shuffleWriter.writeChunk` now refuses a chunk
-  whose DECIMAL vector disagrees with the header, which turns the whole class
-  from a wrong answer into a failed task. The planner is still where it is
-  FIXED — `physical.reconcileSetOpArmTypes` coerces every arm to the set
-  operation's output `(p,s)` before its rows enter the stream (ADR-0012 item
-  12) — and this is the backstop for the producers it cannot reconcile.
+  whose DECIMAL vector disagrees with the header.
+
+  **That check covers the SINGLE-WRITER shape and only that shape**, and the
+  distinction matters because the first draft of this bullet claimed it
+  covered the whole class. It fires where ONE writer is handed batches at two
+  scales — a gather task assembling both arms before writing. It does NOT fire
+  where each arm is its own task writing its own internally-consistent file
+  and the DOWNSTREAM stage reads several of them and takes the first header's
+  scale: there is no writer at the point of reinterpretation. That is the
+  ordinary union-stage shape, and a residual of it survives in
+  `reconcileSetOpArmTypes` today (#551, a join arm whose `(p,s)` the type walk
+  drops).
+
+  The planner is where this is FIXED — `physical.reconcileSetOpArmTypes`
+  coerces every arm to the set operation's output `(p,s)` before its rows enter
+  the stream (ADR-0012 item 12). The writer check is a narrow second line, not
+  a safety net for the general case, and reasoning that treats it as one will
+  be wrong in exactly the direction that hurts.
 
 - **The partition ASSIGNMENT is part of the exchange contract, not just the
   byte layout.** Every producer of a repartition stage must map a key to the

@@ -791,7 +791,37 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     **A value with no exact carrier at the output scale is an ERROR.** Same
     rule and same reason as SUM's overflow in item 9: a wrapped value is a
     different number wearing the right type, and nothing downstream can see
-    that it is wrong.
+    that it is wrong. The bound checked is the DECLARED PRECISION (`10^p`),
+    not the Int128 carrier's — they are different bounds and only the first is
+    the type. A DECIMAL(38,2) whose unscaled value lands in `[10^38, 2^127-1]`
+    fits the carrier and not the declaration, and admitting it would write a
+    number the declared type cannot hold into a column the parquet writer
+    sizes from that precision (ADR-0018 §4).
+
+    **The 38-digit cap is a RANGE REDUCTION, and it costs answers** (#552).
+    The cap can pull the output precision below what an arm's own values need,
+    so a value BOTH arms held before the union becomes a hard failure after
+    it: `DECIMAL(38,0)` holding `10^30` beside `DECIMAL(11,10)` resolves to
+    `DECIMAL(38,10)`, and `10^30` at scale 10 needs `10^40`. PostgreSQL's
+    numeric is unbounded and never reaches this. Worse, a filter or a `LIMIT`
+    above the union does NOT rescue the query — the coercion runs in the arm's
+    own fragment, ahead of the post-filter and ahead of the Singleton `LIMIT`
+    stage — so `… WHERE v < 100` over that union fails on a row it does not
+    want. This is the honest side of a 128-bit carrier and it is RECORDED
+    rather than hidden; `TestSetOpDecimalCapIsARangeReduction` pins all three
+    shapes so a future widening shows up as that test failing.
+
+    **A computed DECIMAL expression is not typed DECIMAL, and the new
+    DECIMAL↔FLOAT64 rung makes that visible** (#555). `inferProjectionTypeCols`
+    resolves `d + d`, `COALESCE(d, d)` and even `CAST(d AS DECIMAL)` to
+    something other than DECIMAL. Before this item's ladder those arms were
+    REFUSED at plan time when they met a real DECIMAL arm; now the pair
+    resolves to FLOAT64 and the query answers with float-rounded values where
+    PostgreSQL answers `numeric`. Trading a loud refusal for a quiet
+    approximation is the wrong direction, and it is the underlying typing gap
+    that has to close, not the rung — the rung is what PostgreSQL resolves for
+    a genuine float arm. `COALESCE` over two DECIMALs fails at runtime on both
+    paths (#361's guard catches the store), which is at least loud.
 
     **The dedup key is the columnar one.** UNION, INTERSECT and EXCEPT decide
     membership by EQUALITY, so their key must agree with the comparator. On
@@ -801,6 +831,18 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     scale anyway. The single-process path keys a boxed row by its RENDERED
     TEXT and needs its own fix (#499); the two paths are held to one answer by
     `internal/coordinator/setop_decimal_scale_two_path_test.go`.
+
+    **Where an arm's `(p,s)` cannot be resolved, nothing is coerced and the
+    answer is WRONG — not refused.** An earlier draft of this item said
+    `shuffleWriter.writeChunk`'s scale check turns that residual into a failed
+    task. It does not: that check sees a SINGLE writer handed two scales, and
+    in a union stage each arm writes its own consistent file while the
+    reinterpretation happens in the downstream stage that reads several of
+    them (ADR-0010 carries the corrected statement). The open resolution holes
+    are a JOIN arm — `inputColTypes`/`inputColDecimal` merge a join's two sides
+    and delete any name they disagree about, which is the fact being
+    reconciled (#551) — and a computed DECIMAL expression, which carries no
+    `(p,s)` (#458, #555). Both are pinned, not claimed covered.
 
     **Two carrier properties are deliberate divergences, not defects.** A
     wadjet DECIMAL column has ONE declared scale, so the narrow arm's rows

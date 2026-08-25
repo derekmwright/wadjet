@@ -610,10 +610,19 @@ concatenation well-formed:
   rather than wrapping. An integer arm (`numeric UNION ALL bigint` is numeric
   in PostgreSQL) is coerced by the same operator, from scale 0. A CAST cannot
   serve here — the cast evaluator's DECIMAL destination produces a float64.
-  Where an arm's `(p,s)` cannot be resolved at plan time nothing is coerced;
-  `shuffleWriter.writeChunk` then refuses a chunk whose DECIMAL scale
-  disagrees with its file header, so the residual is a failed task rather than
-  a wrong answer (ADR-0010).
+  Where an arm's `(p,s)` cannot be resolved at plan time **nothing is coerced
+  and the arms keep their own scales** — a wrong answer, not a failed task.
+  `shuffleWriter.writeChunk` refuses a chunk whose DECIMAL scale disagrees with
+  its file header, but that guard only sees a SINGLE writer handed two scales;
+  in a union stage each arm writes its own consistent file and the
+  reinterpretation happens in the downstream stage that reads several of them,
+  upstream of any writer (ADR-0010). Two resolution holes are open today:
+  a **join arm**, because `inputColTypes`/`inputColDecimal` merge a
+  `NodeJoin`'s two sides and DELETE any name they disagree about — which is
+  precisely the fact being reconciled (#551, pinned in
+  `internal/coordinator/setop_decimal_scale_two_path_test.go`) — and a
+  **computed DECIMAL expression**, which carries no `(p,s)` at all (#458, and
+  #555 for the typing gap underneath it).
 - **Nested arms.** `a UNION ALL b UNION ALL c` parses LEFT-DEEP, so the outer
   union's first arm is itself a union. Its reconciled output type comes from
   `setOpNodeResultTypes`, which recurses. Before that it was reported as
