@@ -990,7 +990,14 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 	tmpJoin.buildSchema = buildBatches[0].Schema
 	tmpJoin.buildKeyIdx = make([]int, len(tmpJoin.RightKeys))
 	for i, col := range tmpJoin.RightKeys {
-		tmpJoin.buildKeyIdx[i] = buildBatches[0].ColumnIndex(col)
+		// columnIndexFallback, not ColumnIndex: the key is spelled the way the
+		// PLAN wrote it (`ON b.bk = p.pk` keeps the qualifier) while the
+		// spilled batch carries the build relation's own bare column names.
+		// Every other build path resolves it with the fallback; this one did
+		// not, so an alias-qualified key resolved to -1 here, the replay keyed
+		// every spilled build row on a lone null flag byte, and NOTHING in a
+		// spilled partition ever matched — silently, on every join type.
+		tmpJoin.buildKeyIdx[i] = columnIndexFallback(buildBatches[0], col)
 	}
 	tmpJoin.tryEnableIntKey(buildBatches[0])
 
@@ -1019,7 +1026,13 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 		}
 	}
 
-	if (tmpJoin.JoinType == RightJoin || tmpJoin.JoinType == FullOuterJoin) && len(tmpJoin.arena) > 0 {
+	// Same rule as the two full-build paths (join.go, join_partition_arrival.go):
+	// RightSemi/RightAnti mark build entries during the probe and read the
+	// marks back out of the arena afterwards, so they need the bitmap too.
+	// Without it FlushAntiMatched reads a nil arenaMatched as "nothing
+	// matched" and emits the partition's whole build side.
+	if (tmpJoin.JoinType == RightJoin || tmpJoin.JoinType == FullOuterJoin ||
+		tmpJoin.JoinType == RightSemiJoin || tmpJoin.JoinType == RightAntiJoin) && len(tmpJoin.arena) > 0 {
 		tmpJoin.arenaMatched = make([]bool, len(tmpJoin.arena))
 	}
 	tmpJoin.buildBloom()
@@ -1310,18 +1323,29 @@ func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, erro
 			return out, nil
 		}
 
-		// Current partition exhausted: emit any unmatched build rows for
-		// right/full-outer, then close it down.
+		// Current partition exhausted: emit the build-side rows this join
+		// type owes for the partition, then close it down. The main join's
+		// own flush SKIPS every arena entry whose partition was evicted
+		// (HashJoin.residentBuildBatch), so this is the only place those rows
+		// are emitted — and the partition replay read them from disk, which
+		// is what makes them readable at all (#550).
 		if !p.spillFlushDone {
 			p.spillFlushDone = true
-			if p.spillFlushTmpJoin.JoinType == RightJoin || p.spillFlushTmpJoin.JoinType == FullOuterJoin {
-				if unmatched := p.spillFlushTmpProbe.FlushUnmatched(p.join.spillLeftSchema); unmatched != nil {
-					unmatched.Detach()
-					// Close the partition AFTER returning the unmatched batch.
-					// Mark it done so the next call advances.
-					p.closeCurrentSpillPartition()
-					return unmatched, nil
-				}
+			var pending *batch.RecordBatch
+			switch p.spillFlushTmpJoin.JoinType {
+			case RightJoin, FullOuterJoin:
+				pending = p.spillFlushTmpProbe.FlushUnmatched(p.join.spillLeftSchema)
+			case RightAntiJoin:
+				pending = p.spillFlushTmpProbe.FlushAntiMatched()
+			case RightSemiJoin:
+				pending = p.spillFlushTmpProbe.FlushMatched()
+			}
+			if pending != nil {
+				pending.Detach()
+				// Close the partition AFTER returning the batch. Mark it done
+				// so the next call advances.
+				p.closeCurrentSpillPartition()
+				return pending, nil
 			}
 		}
 		p.closeCurrentSpillPartition()

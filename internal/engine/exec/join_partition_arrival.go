@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
@@ -511,6 +512,16 @@ func computeBuildPartitionRows(h *HashJoin, b *batch.RecordBatch, out *[numSpill
 // partition rows to disk before any hash lookup. Their ~12 bytes/row of arena
 // + arenaNext overhead is a tracked-but-not-freed residual; the dominant
 // memory cost (column data) is freed cleanly.
+// JoinPartitionsEvicted counts grace-partition evictions
+// (spillOneInMemoryPartition) across the process.
+//
+// It exists so a gate can PROVE it reached the eviction path instead of
+// skipping when it did not. #550's pin had to `t.Skip` when no partition was
+// evicted, which on a machine where the fixture stayed resident made the pin
+// silently vacuous; a counter turns "the shape stopped spilling" into a
+// failure of the test that depends on it.
+var JoinPartitionsEvicted atomic.Int64
+
 func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 	ss := h.spillState
 	if ss == nil {
@@ -555,6 +566,7 @@ func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 	freed := ss.partMemory[partID]
 	delete(ss.partBuildBatches, partID)
 	delete(ss.partMemory, partID)
+	JoinPartitionsEvicted.Add(1)
 
 	if h.MemTracker != nil && freed > 0 {
 		h.MemTracker.Release(freed)

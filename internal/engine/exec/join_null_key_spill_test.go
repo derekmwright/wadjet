@@ -194,66 +194,145 @@ func TestSemiAntiOverNullKeyedBuild(t *testing.T) {
 	}
 }
 
-// A pin, not a gate: a RIGHT or FULL OUTER join whose build EVICTS a partition
-// to disk panics with a nil dereference in FlushUnmatched, which walks the
-// arena and reads h.buildBatches[ref.batchIdx] — nil'd by
-// spillOneInMemoryPartition. That function's correctness argument is written
-// entirely about the PROBE path ("unreachable on the in-memory probe path");
-// the flush walks the arena directly and was never in scope.
+// #550's gate, which replaces the pin that stood here.
 //
-// It has nothing to do with NULL keys — it reproduces with none — so it is
-// pre-existing and tracked in #550. This pin RUNS, so the day the flush learns
-// to restore an evicted partition it starts ANSWERING and this test fails,
-// which is the signal to delete it (ADR-0013 §Pins).
-func TestSpilledRightJoinFlushPanicsPinned550(t *testing.T) {
+// A RIGHT or FULL OUTER join whose build EVICTS a partition used to panic with
+// a nil dereference: spillOneInMemoryPartition writes the partition's batches
+// to disk and nils their h.buildBatches slots, and FlushUnmatched walks the
+// ARENA — every entry, including the ones pointing at the freed slots.
+// spillOneInMemoryPartition's correctness argument is written entirely about
+// the in-memory PROBE path, which the flush is not.
+//
+// The fix is not "skip the nil": that would DROP those build rows, which is a
+// wrong answer where the panic was at least loud. The evicted partition is
+// replayed from disk by NextFlush, and the temp join built over it emits the
+// partition's own unmatched build rows — so the resident flush skips exactly
+// the entries the replay owns, and every build row is emitted exactly once.
+//
+// The assertion is per-ROW, not a count: a right count with a duplicated row
+// standing in for a dropped one is the shape ADR-0013 §Pins warns about.
+func TestRightJoinOverAnEvictedBuildEmitsEveryBuildRowExactlyOnce(t *testing.T) {
 	const buildN = 24000
-	schema := []parquet.Column{
-		{Name: "id", Type: parquet.TypeInt64},
-		{Name: "k", Type: parquet.TypeInt64},
-		{Name: "pad", Type: parquet.TypeString},
-	}
-	buildRows := make([]map[string]any, 0, buildN)
-	for i := 0; i < buildN; i++ {
-		buildRows = append(buildRows, map[string]any{
-			"id": int64(i), "k": int64(i), "pad": "xxxxxxxxxxxxxxxx",
+	for _, tc := range []struct {
+		name      string
+		joinType  JoinType
+		nullEvery int // 0 = no NULL keys
+	}{
+		{"right", RightJoin, 0},
+		{"right_with_null_keys", RightJoin, 7},
+		{"full_outer", FullOuterJoin, 0},
+		{"full_outer_with_null_keys", FullOuterJoin, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := []parquet.Column{
+				{Name: "id", Type: parquet.TypeInt64},
+				{Name: "k", Type: parquet.TypeInt64, Nullable: true},
+				{Name: "pad", Type: parquet.TypeString},
+			}
+			buildRows := make([]map[string]any, 0, buildN)
+			nullKeyed := map[int64]bool{}
+			for i := 0; i < buildN; i++ {
+				row := map[string]any{"id": int64(i), "pad": "xxxxxxxxxxxxxxxx"}
+				if tc.nullEvery > 0 && i%tc.nullEvery == 0 {
+					row["k"] = nil
+					nullKeyed[int64(i)] = true
+				} else {
+					row["k"] = int64(i)
+				}
+				buildRows = append(buildRows, row)
+			}
+			// Probe keys spread across the hash partitions so both resident
+			// and evicted partitions carry matched rows.
+			probeSchema := []parquet.Column{{Name: "pk", Type: parquet.TypeInt64}}
+			var probeRows []map[string]any
+			matched := map[int64]bool{}
+			for i := 0; i < buildN; i += 977 {
+				if nullKeyed[int64(i)] {
+					continue // a NULL build key matches nothing
+				}
+				probeRows = append(probeRows, map[string]any{"pk": int64(i)})
+				matched[int64(i)] = true
+			}
+
+			tmpDir := t.TempDir()
+			tracker := memory.NewTracker("test", 1_500_000)
+			sm, err := memory.NewSpillManager(tmpDir, tracker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sm.Cleanup()
+
+			evictedBefore := JoinPartitionsEvicted.Load()
+			hj := NewHashJoin(tc.joinType, []string{"pk"}, []string{"k"})
+			hj.Spill = sm
+			hj.MemTracker = tracker
+			if err := hj.Build(context.Background(), NewSliceSource(schema, buildRows)); err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			// The whole point of the fixture. A build that stayed resident
+			// exercises none of this, and a gate that quietly skips there is
+			// how #550 survived: its pin did exactly that.
+			if n := len(hj.spillState.spilledParts); n == 0 {
+				t.Fatalf("no partition was EVICTED at a 1.5 MB budget over %d build rows — "+
+					"this gate is not exercising the path it exists for", buildN)
+			}
+			if got := JoinPartitionsEvicted.Load() - evictedBefore; got == 0 {
+				t.Fatal("JoinPartitionsEvicted did not move; the eviction counter is not wired")
+			}
+
+			sink := &CollectSink{}
+			probe := hj.Probe()
+			pipe := &Pipeline{
+				Source: NewSliceSource(probeSchema, probeRows),
+				Ops:    []UnaryOperator{probe},
+				Sink:   sink,
+			}
+			if err := pipe.Run(context.Background()); err != nil {
+				t.Fatalf("pipeline: %v", err)
+			}
+
+			// One output row per build row: the matched pairs plus every
+			// unmatched build row NULL-padded. Counted per id so a duplicate
+			// cannot cover for a loss.
+			seen := make(map[int64]int, buildN)
+			var padCount int
+			for _, r := range sink.Rows {
+				id, ok := r["id"].(int64)
+				if !ok {
+					t.Fatalf("output row has no build id: %v", r)
+				}
+				seen[id]++
+				if r["pad"] == nil {
+					padCount++
+				}
+				// The probe half is NULL exactly for the build rows nothing
+				// matched, and carries the key for the ones that did.
+				wantMatched := matched[id]
+				gotMatched := r["pk"] != nil
+				if wantMatched != gotMatched {
+					t.Errorf("build id=%d: probe side matched=%v, want %v (row %v)",
+						id, gotMatched, wantMatched, r)
+				}
+				if k := r["k"]; nullKeyed[id] != (k == nil) {
+					t.Errorf("build id=%d: key NULL=%v, want %v", id, k == nil, nullKeyed[id])
+				}
+			}
+			if padCount != 0 {
+				t.Errorf("%d output rows carry no build payload; every row this join emits comes "+
+					"FROM the build side", padCount)
+			}
+			if len(seen) != buildN {
+				t.Errorf("%d distinct build rows reached the output, want %d", len(seen), buildN)
+			}
+			for id, n := range seen {
+				if n != 1 {
+					t.Fatalf("build id=%d emitted %d times, want exactly 1 — an evicted partition "+
+						"is flushed by the disk replay AND must be skipped by the resident flush", id, n)
+				}
+			}
+			if len(sink.Rows) != buildN {
+				t.Errorf("emitted %d rows, want %d", len(sink.Rows), buildN)
+			}
 		})
 	}
-	probeSchema := []parquet.Column{{Name: "pk", Type: parquet.TypeInt64}}
-	probeRows := []map[string]any{{"pk": int64(2)}}
-
-	tmpDir, err := os.MkdirTemp("", "spill-flush-pin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-	tracker := memory.NewTracker("test", 1_500_000)
-	sm, err := memory.NewSpillManager(tmpDir, tracker)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sm.Cleanup()
-
-	hj := NewHashJoin(RightJoin, []string{"pk"}, []string{"k"})
-	hj.Spill = sm
-	hj.MemTracker = tracker
-	if err := hj.Build(context.Background(), NewSliceSource(schema, buildRows)); err != nil {
-		t.Skipf("build did not reach the eviction path: %v", err)
-	}
-	if hj.spillState == nil || len(hj.spillState.spilledParts) == 0 {
-		t.Skip("no partition was evicted — the pinned condition did not arise on this machine")
-	}
-
-	sink := &CollectSink{}
-	pipe := &Pipeline{
-		Source: NewSliceSource(probeSchema, probeRows),
-		Ops:    []UnaryOperator{hj.Probe()},
-		Sink:   sink,
-	}
-	err = pipe.Run(context.Background())
-	if err == nil {
-		t.Fatalf("PIN #550 now ANSWERS (%d rows): a RIGHT join over an EVICTED build no longer "+
-			"panics in FlushUnmatched. Delete this pin — it is the proof the fix landed.",
-			len(sink.Rows))
-	}
-	t.Logf("PINNED #550: RIGHT join over an evicted build fails instead of answering: %v", err)
 }

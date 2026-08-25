@@ -6698,12 +6698,12 @@ func (rb *reverseBloomBridge) Close() error {
 // joinFlushSource wraps a join probe pipeline and appends unmatched build-side
 // rows (via FlushUnmatched) after the probe side is exhausted.
 type joinFlushSource struct {
-	inner      exec.Source
-	innerOps   []exec.UnaryOperator
-	probe      *exec.HashJoinProbe
-	pipeline   *pipelineSource
-	flushed    bool
-	flushBatch *batch.RecordBatch
+	inner    exec.Source
+	innerOps []exec.UnaryOperator
+	probe    *exec.HashJoinProbe
+	pipeline *pipelineSource
+	flushed  bool
+	drained  bool
 }
 
 func (s *joinFlushSource) Init(ctx context.Context) error {
@@ -6728,11 +6728,28 @@ func (s *joinFlushSource) Next(ctx context.Context) (*batch.RecordBatch, error) 
 		// emitted no output batch at all — nothing matched — used to skip the
 		// flush entirely and lose all of them.
 		s.flushed = true
-		s.flushBatch = s.probe.FlushUnmatchedRows()
 	}
-	if s.flushBatch != nil {
-		b := s.flushBatch
-		s.flushBatch = nil
+	// NextFlush, not FlushUnmatchedRows: a RIGHT/FULL join whose build
+	// EVICTED partitions owes the spilled partitions' joined output and their
+	// build-side unmatched rows too, and this source is the only driver for
+	// this shape — the probe sits in innerOps here, never in the outer
+	// Pipeline's Ops, so exec.Pipeline.flushSpilledOps never sees it. Calling
+	// the resident-only flush left every spilled partition unprocessed and
+	// then dereferenced the nil'd build slots its own arena still pointed at
+	// (#550). NextFlush walks the spilled partitions first and ends with
+	// exactly the FlushUnmatchedRows this used to call.
+	for !s.drained {
+		b, err := s.probe.NextFlush(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if b == nil {
+			s.drained = true
+			break
+		}
+		if b.ActiveLen() == 0 {
+			continue
+		}
 		return b, nil
 	}
 	return nil, nil
@@ -6764,6 +6781,8 @@ type rightSemiFlushSource struct {
 	joinType exec.JoinType
 	pipeline *pipelineSource
 	flushed  bool
+	drained  bool
+	resident bool
 	result   *batch.RecordBatch
 }
 
@@ -6788,6 +6807,28 @@ func (s *rightSemiFlushSource) Next(ctx context.Context) (*batch.RecordBatch, er
 			// source wraps probe as an op, so we just keep pulling
 		}
 		s.flushed = true
+	}
+	// A spilling build evicts partitions, and the arena entries pointing at
+	// the evicted rows are skipped by the flushes below — the spilled
+	// partitions are replayed from disk here instead, each emitting its own
+	// matched/unmatched build rows (#550). Without this drain those rows are
+	// dropped and the partition's probe rows are never probed at all.
+	for !s.drained {
+		b, err := s.probe.NextFlush(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if b == nil {
+			s.drained = true
+			break
+		}
+		if b.ActiveLen() == 0 {
+			continue
+		}
+		return b, nil
+	}
+	if s.result == nil && !s.resident {
+		s.resident = true
 		if s.joinType == exec.RightSemiJoin {
 			s.result = s.probe.FlushMatched()
 		} else {
