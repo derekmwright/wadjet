@@ -24,6 +24,15 @@ import (
 // path and compared LEXICOGRAPHICALLY, where "10.001" sorts below "2.0002"
 // (#506).
 //
+// The other direction was worse. `compare()` used to tell the two apart by
+// SNIFFING: any string operand that PARSED as a number was read numerically
+// against the other side. That made a genuine STRING column compare
+// NUMERICALLY on the row path — `WHERE s = 1.5` found the row holding "1.50" —
+// while the vectorized kernel compared the same predicate as text, so one
+// query had two answers depending on which path it took (#504). The sniff is
+// gone: a STRING column is classified from its declaration and compares as
+// text on both paths.
+//
 // A boxedPair is armed from the operand EXPRESSIONS at construction, resolves
 // each operand's DECLARED kind on the first batch that can answer it, and then
 // applies one rule per kind pair. Nothing here reads a value's box to decide
@@ -46,8 +55,6 @@ const (
 	boxNumber
 	// boxText: a genuine text value, which compares AS TEXT — bytewise,
 	// wadjet's collation (ADR-0012 item 5) — whatever its digits look like.
-	// No rule below reads one yet; classifying it keeps a STRING column from
-	// being mistaken for a DECIMAL's rendering by any rule that does.
 	boxText
 )
 
@@ -217,6 +224,10 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 		return true
 	case rk == boxDecimal && lk == boxNumber:
 		return true
+	case lk == boxText && rk == boxNumber && rText != "":
+		return true
+	case rk == boxText && lk == boxNumber && lText != "":
+		return true
 	}
 	return false
 }
@@ -235,6 +246,15 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 //   - DECIMAL against a non-DECIMAL number: exact against an integer, float64
 //     against a float, which is what `numeric <op> double precision` does —
 //     it casts the numeric (#476).
+//   - TEXT against a numeric LITERAL: the literal's source TEXT against the
+//     column's value, bytewise. PostgreSQL refuses this pair outright —
+//     verified live, `WHERE s = 1.5` over a text column is 42883 "operator
+//     does not exist: text = numeric" — but that is an OVERLOAD RESOLUTION
+//     failure, and wadjet has one generic comparison operator with no
+//     overload set to fail resolution against, exactly the situation
+//     ADR-0012 item 5 already records for unary minus over a quoted string.
+//     So the pair gets the STRING column's own rule instead of a reading of
+//     its digits, which is also what the vectorized kernel answers (#504).
 func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (int, bool) {
 	if p == nil || p.disarmed.Load() {
 		return 0, false
@@ -260,7 +280,6 @@ func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (int, bool) {
 func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (int, bool) {
 	ls, lIsStr := lv.(string)
 	rs, rIsStr := rv.(string)
-	_ = rIsStr
 	switch {
 	case lk == boxDecimal && rk == boxDecimal:
 		if lIsStr && rIsStr {
@@ -280,23 +299,30 @@ func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (int, bool) {
 		if c, ok := decimalTextOrder(lv, rs); ok {
 			return c, true
 		}
+	case lk == boxText && lIsStr && rText != "":
+		return strings.Compare(ls, rText), true
+	case rk == boxText && rIsStr && lText != "":
+		return strings.Compare(lText, rs), true
 	}
 	return 0, false
 }
 
 // compare answers one comparison operator for this pair, falling through to
-// compareWithText — the literal-side carry-through this binding is the
-// column-side counterpart of — when no declaration-driven rule applies.
+// compare() when the operands' declarations select no rule.
+//
+// That fallthrough is the whole reason the sniff could be deleted. An operand
+// whose declaration nothing here can read — a CAST, a scalar subquery, an
+// ordinary function's result — is compared by compare()'s own type rules,
+// which is the documented stance for a value with no declaration to consult
+// (ADR-0012 item 8's `compareAny` fallback). What it must NOT do is guess a
+// declaration from the box, because that guess is what disagreed with the
+// kernel.
+//
 // A nil pair is an unbound node — a Cmp assembled as a struct literal rather
-// than through NewCmp, the same shape that leaves dec and decCols nil — and
-// falls all the way through to compare(), which is what such a node did before
-// any of these bindings existed.
+// than through NewCmp, the same shape that leaves dec and decCols nil.
 func (p *boxedPair) compare(b *batch.RecordBatch, lv, rv any, op CmpOp) bool {
 	if c, ok := p.order(b, lv, rv); ok {
 		return cmpOrder(c, op)
 	}
-	if p == nil {
-		return compare(lv, rv, op)
-	}
-	return compareWithText(lv, rv, p.lText, p.rText, op)
+	return compare(lv, rv, op)
 }

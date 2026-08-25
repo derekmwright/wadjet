@@ -140,15 +140,14 @@ func bareCol(e Expr) (*ColRef, bool) {
 // written to hold shut (it is why `decimalLitCmp.numeric` is a cached slice
 // rather than a per-row `Numeric()` call).
 //
-// This is the refusal half of compareWithText's job, for the three sites
-// (#465) that carry a literal's exact text into a boxed comparison but never
-// call Numeric() on it: Case's simple-CASE arm, IsDistinctFrom, and
-// pickExtremum (GREATEST/LEAST) all compare through compareWithText, whose
-// exactTextOrder only fires for a literal ALREADY known to be numeric
-// (compileLit sets Lit.Text for exactly that shape) — a non-numeric string
-// like 'abc' carries no Text, so exactTextOrder never runs and compareWithText
-// falls through to compare()'s ordinary string comparison instead of
-// refusing, resurrecting #463's exact failure mode on the boxed path (#505).
+// This is the refusal half of the boxed comparison's job, for the three sites
+// (#465) that carry a literal's exact text into that comparison but never call
+// Numeric() on it: Case's simple-CASE arm, IsDistinctFrom, and pickExtremum
+// (GREATEST/LEAST). boxedPair's literal arm only fires for a literal ALREADY
+// known to be numeric (compileLit sets Lit.Text for exactly that shape) — a
+// non-numeric string like 'abc' carries no Text, so no arm matches it and the
+// comparison falls through to compare()'s ordinary string comparison instead
+// of refusing, which is #463's exact failure mode on the boxed path (#505).
 //
 // bindDecimalCmp's `d op lit` shape does not need this: NewCmp binds it at
 // construction time and decimalLitCmp.order already refuses there. This is
@@ -635,50 +634,6 @@ func litText(e Expr) string {
 		return l.Text
 	}
 	return ""
-}
-
-// compareWithText is compare() for a site that knows its operands' literal
-// TEXTS.
-//
-// It exists because the boxed comparison cannot be exact on its own where one
-// side is a DECIMAL — the column arrives as its rendered text and the literal
-// as a float64 that has already lost the digits past a double, so the best
-// compare() can do for the pair is a float comparison. That is right for a
-// genuine FLOAT column and wrong for a numeric literal, which PostgreSQL types
-// as numeric and compares at full precision.
-//
-// `CASE d WHEN lit`, `d IS DISTINCT FROM lit` and `GREATEST/LEAST(d, lit)` are
-// the sites: they compare through the boxed path, and #452's binding — which
-// covers `col op lit`, IN and BETWEEN — never reached them (#465).
-func compareWithText(a, b any, aText, bText string, op CmpOp) bool {
-	if c, ok := exactTextOrder(a, b, aText, bText); ok {
-		return cmpOrder(c, op)
-	}
-	return compare(a, b, op)
-}
-
-// exactTextOrder orders a value BOXED AS TEXT against a literal whose exact
-// text is known, as the two exact decimals they are.
-//
-// It applies only when exactly one side is a text box and the other carries a
-// literal's text. Two text boxes are two STRING values as far as anything here
-// can tell — nothing in a box says "this came from a DECIMAL column", which is
-// what decimalColCmp's declaration binding is for — and two numeric boxes are
-// already compared by their own types' rules.
-func exactTextOrder(a, b any, aText, bText string) (int, bool) {
-	if as, ok := a.(string); ok {
-		if bText == "" {
-			return 0, false
-		}
-		return batch.CompareDecimalTexts(as, bText)
-	}
-	if bs, ok := b.(string); ok {
-		if aText == "" {
-			return 0, false
-		}
-		return batch.CompareDecimalTexts(aText, bs)
-	}
-	return 0, false
 }
 
 // negateLitText flips the sign of a numeric literal's source text, so folding

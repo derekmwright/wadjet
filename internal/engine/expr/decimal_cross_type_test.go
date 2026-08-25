@@ -11,6 +11,21 @@ import (
 // "10" — so `d_key >= d_2` answered 129 rows where PostgreSQL answers 188.
 // `=` and `<>` were right, which is what kept it hidden: only the ORDERING
 // operators were wrong.
+//
+// The reading is selected by the operands' DECLARED kinds now, not by whether
+// the string happens to parse as a number (#504), so these assertions go
+// through orderByKinds — the rule table boxedPair applies once it has resolved
+// both operands — rather than through compare(), which no longer sniffs.
+
+// boxedCmp is what a bound comparison site answers for one operator, given the
+// two operands' declared kinds: the declaration-driven rule when one applies,
+// and compare()'s ordinary type rules when none does.
+func boxedCmp(lk, rk boxKind, lv, rv any, lText, rText string, op CmpOp) bool {
+	if c, ok := orderByKinds(lk, rk, lv, rv, lText, rText); ok {
+		return cmpOrder(c, op)
+	}
+	return compare(lv, rv, op)
+}
 
 func TestCompareIntegerAgainstDecimalTextIsExact(t *testing.T) {
 	for _, tc := range []struct {
@@ -56,14 +71,14 @@ func TestCompareIntegerAgainstDecimalTextIsExact(t *testing.T) {
 			{CmpLt, tc.want < 0}, {CmpLe, tc.want <= 0},
 			{CmpGt, tc.want > 0}, {CmpGe, tc.want >= 0},
 		} {
-			if got := compare(tc.num, tc.text, opTc.op); got != opTc.want {
-				t.Errorf("compare(%d, %q, op %d) = %v, want %v", tc.num, tc.text, opTc.op, got, opTc.want)
+			if got := boxedCmp(boxNumber, boxDecimal, tc.num, tc.text, "", "", opTc.op); got != opTc.want {
+				t.Errorf("boxedCmp(%d, %q, op %d) = %v, want %v", tc.num, tc.text, opTc.op, got, opTc.want)
 			}
 			// Flipped operands flip the order.
 			flipped := map[CmpOp]CmpOp{CmpEq: CmpEq, CmpNe: CmpNe,
 				CmpLt: CmpGt, CmpGt: CmpLt, CmpLe: CmpGe, CmpGe: CmpLe}[opTc.op]
-			if got := compare(tc.text, tc.num, flipped); got != opTc.want {
-				t.Errorf("compare(%q, %d, op %d) = %v, want %v", tc.text, tc.num, flipped, got, opTc.want)
+			if got := boxedCmp(boxDecimal, boxNumber, tc.text, tc.num, "", "", flipped); got != opTc.want {
+				t.Errorf("boxedCmp(%q, %d, op %d) = %v, want %v", tc.text, tc.num, flipped, got, opTc.want)
 			}
 		}
 	}
@@ -93,14 +108,53 @@ func TestCompareIntegerAgainstDecimalTextMatchesRationals(t *testing.T) {
 // on live postgres:17-alpine:
 // `9007199254740993::numeric = 9007199254740992::float8` is TRUE there.
 func TestCompareFloatAgainstDecimalTextFollowsPostgres(t *testing.T) {
-	if !compare(float64(9007199254740992), "9007199254740993", CmpEq) {
+	if !boxedCmp(boxNumber, boxDecimal, float64(9007199254740992), "9007199254740993", "", "", CmpEq) {
 		t.Error("float8 against numeric is not the float8 comparison PostgreSQL makes it")
 	}
-	if !compare(float64(1.5), "1.50", CmpEq) {
+	if !boxedCmp(boxNumber, boxDecimal, float64(1.5), "1.50", "", "", CmpEq) {
 		t.Error("1.5 <> 1.50")
 	}
-	if !compare(float64(1.5), "1.75", CmpLt) {
+	if !boxedCmp(boxNumber, boxDecimal, float64(1.5), "1.75", "", "", CmpLt) {
 		t.Error("1.5 is not below 1.75")
+	}
+}
+
+// #504: the SAME two boxes, with the text side declared a STRING column
+// instead of a DECIMAL one, must compare AS TEXT — and must do so whichever
+// path the query takes, which is the property the sniff broke. A numeric
+// literal contributes its exact SOURCE TEXT, so `s = 1.50` and `s = 1.5` are
+// different predicates here exactly as `s = '1.50'` and `s = '1.5'` are.
+func TestTextColumnAgainstNumericLiteralComparesAsText(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		text  string
+		op    CmpOp
+		want  bool
+	}{
+		// The reported shape: "1.50" is not "1.5", however equal the numbers.
+		{"1.50", "1.5", CmpEq, false},
+		{"1.50", "1.5", CmpNe, true},
+		{"1.5", "1.5", CmpEq, true},
+		{"1.50", "1.50", CmpEq, true},
+		// Ordering is bytewise, so "10" sorts above "1.5" ('0' > '.') and
+		// "9" above both — the numeric reading would say otherwise.
+		{"10", "1.5", CmpGt, true},
+		{"9", "1.5", CmpGt, true},
+		{"abc", "1.5", CmpGt, true},
+		{"1.50", "1.5", CmpGt, true},
+		{"1.5", "1.5", CmpLt, false},
+	} {
+		if got := boxedCmp(boxText, boxNumber, tc.value, 1.5, "", tc.text, tc.op); got != tc.want {
+			t.Errorf("boxedCmp(text %q, literal %s, op %d) = %v, want %v",
+				tc.value, tc.text, tc.op, got, tc.want)
+		}
+		// Flipped operands flip the order, and the rule does not change.
+		flipped := map[CmpOp]CmpOp{CmpEq: CmpEq, CmpNe: CmpNe,
+			CmpLt: CmpGt, CmpGt: CmpLt, CmpLe: CmpGe, CmpGe: CmpLe}[tc.op]
+		if got := boxedCmp(boxNumber, boxText, 1.5, tc.value, tc.text, "", flipped); got != tc.want {
+			t.Errorf("boxedCmp(literal %s, text %q, op %d) = %v, want %v",
+				tc.text, tc.value, flipped, got, tc.want)
+		}
 	}
 }
 
@@ -120,5 +174,13 @@ func TestCompareLeavesNonNumericTextAlone(t *testing.T) {
 	// Two strings still compare as strings, lexicographically.
 	if !compare("10.001", "2.0002", CmpLt) {
 		t.Error("two strings no longer compare as strings")
+	}
+	// And compare() itself no longer reads a numeric-looking string as a
+	// number against a number: that guess is what made one predicate answer
+	// two different things depending on which path evaluated it (#504). Only
+	// a DECLARATION selects the numeric reading now, which boxedCmp supplies
+	// above and this call deliberately does not.
+	if compare(int64(9), "10.0000", CmpLt) {
+		t.Error("compare() still sniffs a numeric-looking string into a numeric comparison")
 	}
 }

@@ -28,6 +28,11 @@ func dbpSchema() parquet.Schema {
 		{Name: "id", Type: parquet.TypeInt64},
 		{Name: "a", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
 		{Name: "b", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true},
+		// A genuine STRING column holding numeric-looking text (#504): the
+		// other half of the pair no box can distinguish. A DECIMAL renders as
+		// text and so does this, and only the DECLARATION says which rule
+		// each one takes.
+		{Name: "s", Type: parquet.TypeString, Nullable: true},
 	}}
 }
 
@@ -51,16 +56,17 @@ func dbpData() []map[string]any {
 		id         int64
 		a, b       int64
 		aNil, bNil bool
+		s          string
 	}{
-		{id: 1, a: 1275, b: 127500},
-		{id: 2, a: 1275, b: 127501},
-		{id: 3, a: 1275, b: 127499},
-		{id: 4, a: -1, b: -100},
-		{id: 5, a: 200, b: 100000},
-		{id: 6, a: 0, b: 0},
-		{id: 7, aNil: true, b: 10000},
-		{id: 8, a: 1275, bNil: true},
-		{id: 9, aNil: true, bNil: true},
+		{id: 1, a: 1275, b: 127500, s: "1.50"},
+		{id: 2, a: 1275, b: 127501, s: "1.5"},
+		{id: 3, a: 1275, b: 127499, s: "abc"},
+		{id: 4, a: -1, b: -100, s: "10"},
+		{id: 5, a: 200, b: 100000, s: "9"},
+		{id: 6, a: 0, b: 0, s: "1.500"},
+		{id: 7, aNil: true, b: 10000, s: "0"},
+		{id: 8, a: 1275, bNil: true, s: "-1"},
+		{id: 9, aNil: true, bNil: true, s: "1.5"},
 	}
 	rows := make([]map[string]any, 0, len(src))
 	for _, r := range src {
@@ -71,6 +77,7 @@ func dbpData() []map[string]any {
 		if !r.bNil {
 			m["b"] = dbpDec(r.b)
 		}
+		m["s"] = r.s
 		rows = append(rows, m)
 	}
 	return rows
@@ -112,6 +119,20 @@ func TestDecimalBoxedPairTwoPath(t *testing.T) {
 		{"least", "LEAST(a, b) = a", 6},
 		{"greatest_literal", "GREATEST(a, b) = 12.75", 3},
 		{"least_zero", "LEAST(a, b) > 0", 6},
+		// #504: the STRING column against an UNQUOTED numeric literal. The
+		// row path used to read it numerically and the vectorized kernel as
+		// text — one predicate, two answers. Both must now answer what
+		// PostgreSQL answers for the QUOTED spelling of the same literal,
+		// which is what these counts are.
+		{"text_eq_numeric_literal", "s = 1.5", 2},
+		{"text_ne_numeric_literal", "s <> 1.5", 7},
+		{"text_eq_trailing_zero", "s = 1.50", 1},
+		{"text_eq_two_trailing_zeros", "s = 1.500", 1},
+		{"text_gt_numeric_literal", "s > 1.5", 5},
+		{"text_lt_numeric_literal", "s < 1.5", 2},
+		{"text_case_numeric_literal", "CASE s WHEN 1.5 THEN 1 ELSE 0 END = 1", 2},
+		{"text_is_distinct_numeric_literal", "s IS DISTINCT FROM 1.5", 7},
+		{"text_greatest_numeric_literal", "GREATEST(s, 1.5) = s", 7},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sql := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE %s", dbpTable, tc.pred)

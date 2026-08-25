@@ -483,8 +483,26 @@ func decimalLitValue(typ batch.TypeID, value any, litText string) any {
 	if value == nil {
 		return nil
 	}
-	if typ == batch.TypeDecimal && litText != "" {
+	if litText == "" {
+		return value
+	}
+	switch typ {
+	case batch.TypeDecimal:
 		return litText
+	case batch.TypeString:
+		// A STRING column compares its bytes against the literal's, and the
+		// literal's bytes are the ones the user WROTE: `s = 1.50` is a
+		// different predicate from `s = 1.5` here, exactly as `s = '1.50'`
+		// and `s = '1.5'` are. Rendering the float64 box instead would
+		// collapse them, and would disagree with the row-at-a-time path,
+		// which compares against Lit.Text (expr.boxedPair's text arm, #504).
+		//
+		// Only when the box is NOT already a string: a quoted literal has
+		// litText empty, and a network literal that reached a STRING column
+		// keeps its own text.
+		if _, isStr := value.(string); !isStr {
+			return litText
+		}
 	}
 	return value
 }

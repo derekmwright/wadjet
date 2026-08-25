@@ -794,12 +794,32 @@ func TestToFloat64(t *testing.T) {
 	}
 }
 
+// toString renders a filter constant for a TEXT-storage column's kernel. A
+// non-string box used to come back as the EMPTY STRING, which is not a value
+// anybody wrote: `WHERE s = 1.5` became a comparison against "", so `=`
+// selected nothing, `>` selected every row including the one holding "1.5",
+// and `<` selected nothing (#504). A number renders as a number.
 func TestToString(t *testing.T) {
-	if toString("hello") != "hello" {
-		t.Fatal("expected hello")
-	}
-	if toString(42) != "" {
-		t.Fatal("expected empty for non-string")
+	for _, tc := range []struct {
+		in   any
+		want string
+	}{
+		{"hello", "hello"},
+		{"", ""},
+		{int64(42), "42"},
+		{int32(-7), "-7"},
+		{42, "42"},
+		{1.5, "1.5"},
+		{float64(-0.25), "-0.25"},
+		{float32(2.5), "2.5"},
+		// Not a scalar the comparison can render: still the empty string,
+		// which the caller's own arm (a nil kernel, or a refusal) handles.
+		{[]byte("x"), ""},
+		{nil, ""},
+	} {
+		if got := toString(tc.in); got != tc.want {
+			t.Errorf("toString(%#v) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

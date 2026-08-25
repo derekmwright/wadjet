@@ -1642,8 +1642,60 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT COUNT(*) AS n FROM dec_probe a JOIN dec_probe b ON a.d_2 = b.d_2`},
 	)
 
+	// A TEXT value that LOOKS like a number is still text (#504). Wadjet's
+	// row-at-a-time path used to read any string that parsed as a number
+	// numerically against the other operand, which made a genuine STRING
+	// column compare NUMERICALLY there and as TEXT through the vectorized
+	// kernel — one predicate with two answers.
+	//
+	// PostgreSQL cannot be asked the shape that broke (`s = 1.5` is 42883,
+	// "operator does not exist: text = numeric" — an overload-resolution
+	// failure wadjet has no overload set to reproduce; ADR-0012 item 5). It
+	// CAN be asked the QUOTED form, which is the same comparison once the
+	// literal is typed, and that is what these gate: the byte order where
+	// "1.50" and "1.5" are two values and "9" sorts ABOVE "10".
+	out = append(out,
+		pgCase{name: "NumericLookingTextEq",
+			sql: `SELECT k FROM (` + pgNumericTextRows + `) t WHERE v = '1.5' ORDER BY k`},
+		pgCase{name: "NumericLookingTextEqTrailingZero",
+			sql: `SELECT k FROM (` + pgNumericTextRows + `) t WHERE v = '1.50' ORDER BY k`},
+		pgCase{name: "NumericLookingTextNe",
+			sql: `SELECT k FROM (` + pgNumericTextRows + `) t WHERE v <> '1.5' ORDER BY k`},
+		pgCase{name: "NumericLookingTextGt",
+			sql: `SELECT k FROM (` + pgNumericTextRows + `) t WHERE v > '1.5' ORDER BY k`},
+		pgCase{name: "NumericLookingTextLt",
+			sql: `SELECT k FROM (` + pgNumericTextRows + `) t WHERE v < '10' ORDER BY k`},
+		pgCase{name: "NumericLookingTextGtTwoDigit",
+			sql: `SELECT k FROM (` + pgNumericTextRows + `) t WHERE v > '10' ORDER BY k`},
+		pgCase{name: "NumericLookingTextOrder",
+			sql: `SELECT v FROM (` + pgNumericTextRows + `) t ORDER BY v`},
+		// The three boxed sites over the same values, where wadjet reads the
+		// operand through a different evaluator.
+		pgCase{name: "NumericLookingTextSimpleCase",
+			sql: `SELECT k FROM (` + pgNumericTextRows + `) t
+				WHERE CASE v WHEN '1.5' THEN 1 ELSE 0 END = 1 ORDER BY k`},
+		pgCase{name: "NumericLookingTextIsDistinctFrom",
+			sql: `SELECT k FROM (` + pgNumericTextRows + `) t WHERE v IS DISTINCT FROM '1.5' ORDER BY k`},
+		pgCase{name: "NumericLookingTextGreatest",
+			sql: `SELECT k FROM (` + pgNumericTextRows + `) t WHERE GREATEST(v, '1.5') = v ORDER BY k`},
+		pgCase{name: "NumericLookingTextLeast",
+			sql: `SELECT k FROM (` + pgNumericTextRows + `) t WHERE LEAST(v, '1.5') = '1.5' ORDER BY k`},
+	)
+
 	return out
 }
+
+// pgNumericTextRows is the five-row TEXT fixture the #504 entries above are
+// written over, as a derived table both engines parse identically. The values
+// are chosen so the byte order and the numeric order DISAGREE: "1.50" and
+// "1.5" are one number and two strings, and "9" sorts above "10" as text and
+// below it as a number.
+const pgNumericTextRows = `
+	SELECT 1 AS k, CAST('1.50' AS VARCHAR) AS v
+	UNION ALL SELECT 2, CAST('1.5' AS VARCHAR)
+	UNION ALL SELECT 3, CAST('abc' AS VARCHAR)
+	UNION ALL SELECT 4, CAST('10' AS VARCHAR)
+	UNION ALL SELECT 5, CAST('9' AS VARCHAR)`
 
 // pgFloatRows is the eight-row float fixture the #459 entries above are
 // written over, as a derived table both engines parse identically. NaN and

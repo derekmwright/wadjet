@@ -80,6 +80,42 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      input type, matching PostgreSQL's own `min(bytea)`; no divergence, noted
      here only because early declared-schema code guessed STRING for every
      MIN/MAX before the input-typed fix.
+   - **A TEXT value compared against a NUMBER.** (Added 2026-08-24, #504.)
+     PostgreSQL refuses the pair outright — verified live, `WHERE s = 1.5`
+     over a `text` column is 42883 "operator does not exist: text = numeric",
+     and so are `>`, `text = bigint`, `CASE s WHEN 1.5`, `s IS DISTINCT FROM
+     1.5` and `GREATEST(s, 1.5)`. That is an OVERLOAD RESOLUTION failure, the
+     same class as the unary-minus bullet below: wadjet has ONE generic
+     comparison operator and no overload set to fail resolution against, so
+     reproducing 42883 would mean building the overload machinery first.
+
+     Wadjet instead gives the pair the column's own rule: a STRING column
+     compares its BYTES against the literal's SOURCE TEXT, on the vectorized
+     path and the row-at-a-time path alike. The literal's text is the carrier
+     for the same reason item 6 makes it one — `s = 1.50` and `s = 1.5` are
+     different predicates, exactly as `s = '1.50'` and `s = '1.5'` already
+     were.
+
+     This is a narrower divergence than it looks. Every answer it produces is
+     PostgreSQL's answer to the QUOTED spelling of the same predicate, checked
+     entry by entry against live postgres:17-alpine over a `text COLLATE "C"`
+     column: `s = '1.5'` 1, `s > '1.5'` 4, `s > '10'` 2, `s < '10'` 2, and the
+     three boxed sites likewise. The only thing wadjet does that PostgreSQL
+     does not is RESOLVE the unquoted spelling at all.
+
+     What was there before was neither rule. `compare()` read any string
+     operand that PARSED as a number numerically — a guess about where the box
+     came from, since a DECIMAL column and a STRING column both box as Go
+     strings — while the vectorized kernel rendered the numeric constant as
+     the EMPTY STRING and compared against that. So `WHERE s = 1.5` found the
+     row holding "1.50" through a projected CASE and no rows at all through a
+     scan-pushed filter, and `WHERE s > 1.5` admitted every row including
+     "1.5" itself. One predicate, two answers, decided by which lowering the
+     query happened to take. The guess is gone: `expr.boxedPair` selects the
+     rule from the operands' DECLARED types (item 8), and
+     `kernel.toString`/`exec.decimalLitValue` give the kernel the same
+     literal text the row path uses.
+
    - **Unary minus over a QUOTED string literal.** (Added 2026-08-24, #505.)
      PostgreSQL refuses EVERY `-'…'` form, numeric-looking or not, with
      42725 "operator is not unique: - unknown" — verified live: both

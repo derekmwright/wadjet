@@ -1561,9 +1561,36 @@ func toFloat64(v any) float64 {
 	}
 }
 
+// toString renders a filter constant as the text a TEXT-storage column is
+// compared against.
+//
+// It used to answer the EMPTY STRING for every non-string box, which made
+// `WHERE s = 1.5` over a STRING column a comparison against "" — nothing
+// equals it, everything is greater than it, so `=` selected no rows, `>`
+// selected ALL of them including the row holding "1.5", and `<` selected
+// none. That is not a lexical answer and not a numeric one; it is the
+// type's zero standing in for a value nobody wrote, the same defect class
+// #450 fixed for a nil constant one arm over.
+//
+// A number is rendered as a number now. The exact SOURCE TEXT is better
+// still, and the caller substitutes it when it has one (exec.litValueForType,
+// ADR-0012 item 6: a numeric literal's carrier is its text) — this is the
+// floor for a constant that reached here without one, such as a folded
+// expression's value.
 func toString(v any) string {
-	if s, ok := v.(string); ok {
+	switch s := v.(type) {
+	case string:
 		return s
+	case int64:
+		return strconv.FormatInt(s, 10)
+	case int32:
+		return strconv.FormatInt(int64(s), 10)
+	case int:
+		return strconv.FormatInt(int64(s), 10)
+	case float64:
+		return strconv.FormatFloat(s, 'g', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(s), 'g', -1, 32)
 	}
 	return ""
 }
