@@ -615,6 +615,27 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     promised to validate; falling back to a lexical comparison on one path
     only (what `evalCIDR` did) is how one bad row split the two paths apart.
 
+    **That UNKNOWN rule is a PREDICATE rule, not a value rule.** A malformed
+    row is invisible to `WHERE c_cidr = anything` and `WHERE c_cidr <>
+    anything`, but it is still an ORDINARY value everywhere a query retains
+    or orders values rather than testing them against one: GROUP BY gives it
+    its own group, ORDER BY gives it a definite position, and MIN/MAX can
+    return it. `kernel.CidrOrderKey` is exactly this split, by construction —
+    it is `CidrSortKey`'s `ok` collapsed to always succeed, falling back to
+    the row's own raw text when the value does not parse, so "no defined
+    place in `WHERE`'s order" becomes "the row's own bytes decide its place"
+    the moment the consumer is a key or a comparator instead of a predicate.
+    One consequence worth naming because it looks like a bug and is not:
+    `MAX(c_cidr)` can return a value that no `WHERE c_cidr = '<that text>'`
+    will ever match — a malformed value sorts (as its raw text, which a
+    real address's inet-ordered key does not collide with except by exact
+    byte match) and predicates refuse it. PostgreSQL has no equivalent case
+    to verify against, because its `inet` input function rejects a
+    malformed literal before a row can ever hold one; wadjet's column is
+    unvalidated text, so this asymmetry is the shape the "don't fail a whole
+    query over one bad row" decision above takes once #520 gave GROUP BY/
+    ORDER BY/MIN-MAX their own inet-ordered key.
+
     **IPv6 against a v4-shaped literal is a FAMILY comparison.**
     PostgreSQL's inet puts every v4 address below every v6 one
     (`'255.255.255.255'::inet < '::'::inet`), including below a v4-MAPPED v6
@@ -785,6 +806,30 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     longer skipping non-flat columns) and
     `wadjet.TestLikeAgainstContainerRefusesWithPostgresErrorCode` pin the
     SQLSTATE at both sites.
+
+    **Both refusals are RUNTIME, not plan-time — the same open question
+    #517 tracks for DECIMAL, one type family over.** `WHERE id > 100000 AND
+    col = 'garbage'` answers 0 rows SILENTLY rather than raising, when no row
+    satisfies `id > 100000`: row-group pruning (or simply zero matching
+    rows) means the scan never delivers a batch to the `col = 'garbage'`
+    filter at all, so `KernelFilter.Execute`/`expr.Like.EvalBoolNull` — and
+    item 10's own `networkConstError`/`CmpNetworkLit` raise for a literal
+    that names no address — never RUN for that column, and a refusal that
+    only fires when data flows through it is not the same guarantee as one
+    PostgreSQL's planner gives by type-checking the literal against the
+    column's declared type before any row is read. #517 names the identical
+    mechanism for DECIMAL's boxed CASE/IS DISTINCT FROM/GREATEST sites —
+    those still ANSWER for a malformed literal reaching them, the same way a
+    container or a malformed network literal still answers through a
+    conjunct no row survives to. Neither this pair nor #517 is fixed here;
+    #517's own "fix direction" (a plan-time check against the column's
+    declaration, before any row is scanned) is the shape a fix for any of
+    these would need to take, and it is one check for all of them precisely
+    because the column's declaration is known before any type's differing
+    runtime code path matters. (Unrelated to this pair, and mentioned only
+    because it was found alongside them and is not fixed here either: #544,
+    `CAST(timestamp AS STRING)` and LIKE render epoch milliseconds rather
+    than the instant pgwire renders.)
 
 12. **A set operation's result type is the COMMON type of its arms, and every
     arm is MOVED into it — never reinterpreted.** (Added 2026-08-25, #533.)
