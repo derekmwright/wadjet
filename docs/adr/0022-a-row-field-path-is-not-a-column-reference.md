@@ -140,19 +140,19 @@ refusal survives the delegation.
   `rowfield_*` entries over a `c_row` widened to IPv4, MAC, DATE, CIDR and
   DECIMAL fields, and `wadjet.TestRowFieldPathCarriesTheFieldsDeclaredType`
   over every flat type.
-- **The container itself loses its children's declarations** (#589). Two
-  faces of one defect, both of them container-level rather than field-path
-  ones — the whole-ROW read shows each identically, so a field path is
-  faithfully reporting what the container holds:
-  - IPv6 and UUID inside a ROW read back as the empty string. Pinned by
-    `wadjet.TestRowFieldContainerLossIsStillReal`.
-  - On the STAGE DAG a network or temporal field inside a ROW comes back in
-    RAW STORAGE FORM (`ip:167772167` for `ip:10.0.0.7`) and a CIDR field
-    orders by that text rather than structurally. Pinned as `nested589` in
-    `coordinator.TestTypeMatrixTwoPath`, across the thirty corpus entries the
-    widened `c_row` fixture reaches. Verified pre-existing by running that
-    gate with this change's engine and planner edits stashed and the fixture
-    edit alone applied.
+- **The container lost its children's declarations** (#589) — now CLOSED on
+  main, and recorded here because the widened `c_row` fixture is what surfaced
+  its full extent. Two faces of one defect, both container-level rather than
+  field-path ones (the whole-ROW read showed each identically): IPv6 and UUID
+  inside a ROW read back as the empty string, and on the stage DAG a network
+  or temporal field inside a ROW came back in raw storage form (`ip:167772167`
+  for `ip:10.0.0.7`) with CIDR ordered by that text. fix-589 recursed the
+  declared-schema overlay through every container, which fixes both faces on
+  both paths; the one residual it did not reach — a windowed temporal
+  function over a field path taking the vec kernel with the container vector
+  as its argument — is closed here (see the EvalVec guard above). The
+  type-matrix `c_row` entries and `wadjet`'s IPv6/UUID field cases are now
+  plain gates, no pins.
 - **Window functions over a field path are silently wrong** (#603):
   `SUM(rw.f) OVER ()` and `LAG(rw.f)` answer NULL, `ORDER BY rw.f` inside an
   OVER clause is ignored, and `PARTITION BY rw.f` makes one partition.
@@ -192,5 +192,6 @@ refusal survives the delegation.
   filters' row fallbacks), `internal/engine/expr/expr.go`
   (`ColRef.valueType` / `valueVector` / `fieldValue`, and the boxing-undo
   family that keys on them)
-- #603, #604 (residuals filed by this change), #589 (the container-level
-  defect its pins name), #585 (overlaps #603)
+- #603, #604, #609 (residuals filed by this change), #589 (the
+  container-level defect the widened fixture surfaced, fixed on main), #585
+  (overlaps #603)

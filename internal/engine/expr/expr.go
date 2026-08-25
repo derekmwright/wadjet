@@ -2783,6 +2783,19 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 				e.evalVecPerRow(b, out, n)
 				return
 			}
+			// A ROW FIELD PATH is not vectorizable through these kernels: its
+			// idx points at the CONTAINER column, so argVecs[i] below would
+			// hand the kernel the ROW vector instead of the field's child —
+			// vecYear then read an empty Int64Data and answered NULL, while
+			// the same query with only one temporal function took the
+			// per-row path and answered correctly (#568). The per-row path
+			// resolves the field through ColRef.Eval / resolveTemporalArgs,
+			// which already handle a field path; send every field-path arg
+			// there, for every vec kernel at once.
+			if a.structField != "" {
+				e.evalVecPerRow(b, out, n)
+				return
+			}
 			// String-input vec kernels read BytesData; a TypeDate column
 			// has none and must render through the (fixed) per-row path
 			// (issue #273). The same is true of a column that is not stored

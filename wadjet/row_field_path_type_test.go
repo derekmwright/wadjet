@@ -145,49 +145,6 @@ func rowFieldRows() []map[string]any {
 
 const rowFieldPresent = "rw IS NOT NULL"
 
-// rowFieldContainerLoss names the field types whose value does not survive
-// being stored INSIDE a ROW at all, so the comparison against the flat column
-// cannot be gated for them.
-//
-// It is not a field-path defect and not #568: reading the WHOLE ROW loses
-// them the same way — `SELECT rw` hands back "" for the IPv6 and the UUID
-// while the identical value in a flat column reads back correctly — so the
-// field path is faithfully reporting what the container holds. Verified on
-// origin/main before any of #568's changes, which is what rules out a
-// regression here.
-//
-// Ratcheted, not skipped: rowFieldContainerLossStillLoses asserts the loss is
-// still happening, so the day the container starts carrying these the pin
-// fails and every shape below is gated for them too.
-var rowFieldContainerLoss = map[string]string{
-	"f_ipv6": "an IPv6 stored in a ROW field reads back as the empty string, whole-ROW read included",
-	"f_uuid": "a UUID stored in a ROW field reads back as the empty string, whole-ROW read included",
-}
-
-// TestRowFieldContainerLossIsStillReal is the ratchet on rowFieldContainerLoss.
-// A pinned type that starts round-tripping through a ROW fails here, which is
-// the signal to delete its entry and gate it alongside the rest.
-func TestRowFieldContainerLossIsStillReal(t *testing.T) {
-	db, ctx := rowFieldOpen(t)
-	res, err := db.Query(ctx, `SELECT rw FROM rowfld WHERE id = 0`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	row, ok := res.Rows[0]["rw"].(map[string]any)
-	if !ok {
-		t.Fatalf("rw came back as %T, not a ROW", res.Rows[0]["rw"])
-	}
-	for field, why := range rowFieldContainerLoss {
-		if v, isStr := row[field].(string); !isStr || v != "" {
-			t.Errorf("the whole-ROW read now carries %s as %#v — the container no longer loses it.\n"+
-				"  Delete its rowFieldContainerLoss entry so every shape is gated for it.\n  was: %s",
-				field, row[field], why)
-			continue
-		}
-		t.Logf("known container-level loss, NOT gated (not #568): %s — %s", field, why)
-	}
-}
-
 func rowFieldOpen(t *testing.T) (*DB, context.Context) {
 	t.Helper()
 	ctx := context.Background()
@@ -309,10 +266,6 @@ func TestRowFieldPathCarriesTheFieldsDeclaredType(t *testing.T) {
 	}
 
 	for _, f := range rowFieldTypes() {
-		if why, pinned := rowFieldContainerLoss[f.Name]; pinned {
-			t.Run(f.Name, func(t *testing.T) { t.Skipf("not gated: %s", why) })
-			continue
-		}
 		t.Run(f.Name, func(t *testing.T) {
 			for _, sh := range append(append([]struct{ name, sql string }{}, shapes...), typed[f.Name]...) {
 				t.Run(sh.name, func(t *testing.T) {
@@ -349,9 +302,6 @@ func TestRowFieldPathComparesAgainstItsOwnColumn(t *testing.T) {
 		switch f.Type {
 		case parquet.TypeRow, parquet.TypeArray, parquet.TypeMap:
 			continue // container equality is a separate question (#415/#426)
-		}
-		if _, pinned := rowFieldContainerLoss[f.Name]; pinned {
-			continue
 		}
 		t.Run(f.Name, func(t *testing.T) {
 			// Every present row whose field is non-NULL holds the same value

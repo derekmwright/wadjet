@@ -129,27 +129,18 @@ func TestNestedDeclaredTypesTwoPath(t *testing.T) {
 // arms start agreeing. Deleting a pin is the fix's proof, and a pin naming an
 // entry the corpus does not contain fails too.
 //
-// #605 is type-independent: it reproduces with a STRING ROW field
-// (c_row.a in typemx_nested), so it is not what this gate exists for. The
-// container-GROUP-BY divergence this corpus also found was #606; it was fixed
-// by #566 (ADR-0023) and its three pins were deleted once the arms agreed,
-// which is the ratchet's proof.
-var ndeclPins = map[string]typematrix.Pin{
-	"ndecl_select_row_field": {Issue: "#605", Reason: "" +
-		"the stage DAG DROPS a ROW field path from the projection — it answers " +
-		"the same rows with the field's column missing entirely. Reproduces on " +
-		"c_row.a (STRING) in typemx_nested."},
-	"ndecl_select_nested_row_field": {Issue: "#605", Reason: "" +
-		"same: the DAG drops a field path to a nested ROW."},
-	"ndecl_where_row_field": {Issue: "#605", Reason: "" +
-		"the DAG drops a WHERE on a ROW field path and answers ZERO rows where " +
-		"the single-process engine answers the matching row."},
-	"ndecl_where_row_field_not_null": {Issue: "#605", Reason: "" +
-		"same, for IS NOT NULL: the DAG answers zero rows."},
-	"ndecl_orderby_row_field": {Issue: "#605", Reason: "" +
-		"the DAG refuses ORDER BY on a ROW field path outright: " +
-		"column \"rw.f_uuid\" does not exist in the input schema."},
-}
+// ndeclPins is empty. Two issues this corpus found are now both fixed and
+// their pins deleted, which is the ratchet's proof (ADR-0013 §Pins):
+//
+//   - #606 (a container GROUP BY divergence) — fixed by #566 (ADR-0023).
+//   - #605 (the stage DAG dropped or refused a ROW field path: a projected
+//     field came back missing, a WHERE on one answered zero rows, an ORDER BY
+//     on one failed with `column "rw.f_uuid" does not exist in the input
+//     schema`) — fixed by #568, whose DAG half is exactly this: the planner
+//     keeps the parent column alive through pruning, exec.ColumnRef resolves
+//     the field, and the vectorized filters carry a row-at-a-time fallback.
+//     All five #605 pins agreed once #568 landed and are gone.
+var ndeclPins = map[string]typematrix.Pin{}
 
 // ndeclAssertAnchored is the half a differential cannot supply: within ONE
 // arm's own answer, every container position must hold what the flat column
