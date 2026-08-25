@@ -2,6 +2,7 @@ package wadjet
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"testing"
 
@@ -34,10 +35,11 @@ import (
 // calls out elsewhere (CidrSortKey, appendColumnValue) for exactly this
 // class of bug.
 
-// TestCastStringMatchesProjectionForDateAndFloat32 pins the two fixed types
-// to literal values, so a CAST implementation and a comparator that agreed
-// on the same wrong answer would still fail the test.
-func TestCastStringMatchesProjectionForDateAndFloat32(t *testing.T) {
+// TestCastStringPinsPostgresRenderingPerType pins one literal answer per
+// fixed type, so a CAST implementation and a comparator that agreed on the
+// same wrong answer would still fail the test. Every value here was read
+// off live PostgreSQL 17, which is the authority ADR-0012 item 1 names.
+func TestCastStringPinsPostgresRenderingPerType(t *testing.T) {
 	ctx := context.Background()
 	db := tmOpen(t)
 
@@ -48,6 +50,15 @@ func TestCastStringMatchesProjectionForDateAndFloat32(t *testing.T) {
 	}{
 		{"date", fmt.Sprintf("SELECT CAST(c_date AS STRING) AS v FROM %s WHERE id = 1", typematrix.Table), "2011-02-02"},
 		{"float32", fmt.Sprintf("SELECT CAST(c_f32 AS STRING) AS v FROM %s WHERE id = 7", typematrix.Table), "1"},
+		// BYTES (#570): PostgreSQL's `bytea::text` under the default
+		// bytea_output = hex. Verified against live PostgreSQL 17 —
+		// `'bytes-000001-x'::bytea::text` answers
+		// "\x62797465732d3030303030312d78". The literal spelling is pinned
+		// here rather than derived, because deriving it from the same
+		// hex.EncodeToString the fix uses would only prove the function is
+		// deterministic.
+		{"bytes", fmt.Sprintf("SELECT CAST(c_bytes AS STRING) AS v FROM %s WHERE id = 1", typematrix.Table),
+			`\x62797465732d3030303030312d78`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,10 +89,12 @@ func TestCastStringMatchesProjectionForDateAndFloat32(t *testing.T) {
 // about "types that box differently" needing a checkable list, not an
 // enumeration someone has to remember to extend).
 //
-// BYTES is the one type whose plain projection does NOT come back as a Go
-// string (Vector.GetValue copies it out as []byte), so it is compared as
-// TEXT of its own bytes rather than by fmt.Sprint, which would print the
-// byte SLICE ("[98 121 ...]") instead of the string CAST renders.
+// BYTES is the one type whose CAST rendering is NOT the projection's own
+// text, and deliberately: Vector.GetValue copies the value out as []byte,
+// and PostgreSQL's `bytea::text` is `\x` plus lowercase hex, so that is what
+// CAST answers (#570). The expectation below is built from the projected
+// bytes rather than read from CAST, so a CAST implementation and a
+// comparator agreeing on the same wrong hex would still fail.
 func TestCastStringAgreesWithProjectionAcrossFixture(t *testing.T) {
 	ctx := context.Background()
 	db := tmOpen(t)
@@ -105,7 +118,7 @@ func TestCastStringAgreesWithProjectionAcrossFixture(t *testing.T) {
 			for _, r := range res.Rows {
 				var want string
 				if b, ok := r["v"].([]byte); ok {
-					want = string(b)
+					want = `\x` + hex.EncodeToString(b)
 				} else {
 					want = fmt.Sprint(r["v"])
 				}
