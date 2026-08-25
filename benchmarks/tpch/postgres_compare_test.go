@@ -1161,6 +1161,64 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT v FROM (SELECT d_2 AS v FROM dec_probe UNION SELECT d_4 FROM dec_probe) u ORDER BY v`},
 	)
 
+	// --- Set operations over NUMERIC arms of different type ---------------
+	//
+	// A set operation's result type is the COMMON type of its arms, and for
+	// the numeric family PostgreSQL resolves it as: numeric over an integer
+	// (an integer converts to numeric implicitly and not back), and double
+	// precision over numeric (float8 is the PREFERRED type of the category).
+	// Arm ORDER does not change either answer. Verified against live
+	// postgres:17-alpine; these entries are what keeps the engine's ladder
+	// (physical.setOpWiden) tied to it.
+	//
+	// The d_key list is chosen so every d_4 value it selects is a whole
+	// number of HUNDREDTHS — d_4 is (d_key-100)*0.0625, exact at scale 2
+	// whenever d_key-100 is a multiple of four. That isolates the TYPE
+	// question from the SCALE question: these rows have the same value at
+	// either scale, so an entry that fails here failed on the type
+	// resolution and not on a lost digit.
+	out = append(out,
+		pgCase{name: "SetOpUnionAllAcrossDecimalScales", ordered: true,
+			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (0, 4, 8, 92, 96, 100, 104, 108, 196)
+				UNION ALL SELECT d_4 FROM dec_probe WHERE d_key IN (0, 4, 8, 92, 96, 100, 104, 108, 196)
+				ORDER BY 1`},
+		pgCase{name: "SetOpUnionAllAcrossDecimalScalesReversed", ordered: true,
+			sql: `SELECT d_4 AS v FROM dec_probe WHERE d_key IN (0, 4, 8, 92, 96, 100, 104, 108, 196)
+				UNION ALL SELECT d_2 FROM dec_probe WHERE d_key IN (0, 4, 8, 92, 96, 100, 104, 108, 196)
+				ORDER BY 1`},
+		// The same-scale control: both arms already agree, so nothing is
+		// coerced and the answer must not move.
+		pgCase{name: "SetOpUnionAllSameDecimalScale", ordered: true,
+			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (1, 2, 3)
+				UNION ALL SELECT d_2 FROM dec_probe WHERE d_key IN (2, 3, 4) ORDER BY 1`},
+		// numeric with double precision resolves to double precision, so the
+		// numeric arm's values are the ones that move.
+		pgCase{name: "SetOpUnionAllDecimalWithDouble", ordered: true,
+			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (0, 4, 8, 96, 100, 104)
+				UNION ALL SELECT CAST(d_key AS DOUBLE PRECISION) FROM dec_probe WHERE d_key IN (0, 4, 8)
+				ORDER BY 1`},
+		// The same pair with the FLOAT arm first, which the single-process
+		// engine — the arm this corpus runs — cannot answer at all: it boxes
+		// each row and hands them to batch.FromRows under the FIRST arm's
+		// schema, and a DECIMAL boxes as its rendered TEXT. The stage DAG
+		// answers it, because it reconciles the arms' types at plan time
+		// (physical.reconcileSetOpArmTypes, #533). This is a LOUD failure,
+		// not a wrong answer — the #361 guard catches the mismatched store —
+		// and it is pinned rather than dropped because the pin fails the day
+		// the single-process path learns to reconcile, which is the fix's
+		// proof.
+		pgCase{name: "SetOpUnionAllDoubleWithDecimal", ordered: true,
+			sql: `SELECT CAST(d_key AS DOUBLE PRECISION) AS v FROM dec_probe WHERE d_key IN (0, 4, 8)
+				UNION ALL SELECT d_2 FROM dec_probe WHERE d_key IN (0, 4, 8, 96, 100, 104)
+				ORDER BY 1`,
+			knownBug: pgBugWadjet + " the single-process set-operation adapter does not reconcile arms of " +
+				"different TYPE: it builds the result under the FIRST arm's schema, so a DECIMAL arm " +
+				"under a FLOAT64 first arm fails the store outright, and an INTEGER arm under a DECIMAL " +
+				"first arm is read as an unscaled carrier (1 becomes 0.0001). The stage DAG reconciles " +
+				"both (physical.setOpWiden / setOpDecimalTarget); unifySetOpSchemas should delegate to " +
+				"the same two functions", issue: "#541"},
+	)
+
 	// --- Pagination ------------------------------------------------------
 	out = append(out,
 		pgCase{name: "OffsetAlone", sql: `SELECT n_nationkey FROM nation ORDER BY n_nationkey OFFSET 5`},

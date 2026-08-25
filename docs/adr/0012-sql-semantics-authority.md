@@ -744,6 +744,83 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     text (or refusing LIKE for containers, which is the other honest answer)
     is left open as #522, deliberately not blessed by silence here.
 
+12. **A set operation's result type is the COMMON type of its arms, and every
+    arm is MOVED into it — never reinterpreted.** (Added 2026-08-25, #533.)
+
+    The numeric ladder, verified against live postgres:17-alpine and pinned
+    by `physical.TestSetOpWidenLadder`:
+
+        INT32 → INT64 → DECIMAL → FLOAT64
+
+    `numeric UNION ALL bigint` is **numeric** (an integer converts to numeric
+    implicitly and not back); `numeric UNION ALL double precision` is
+    **double precision** (float8 is the PREFERRED type of PostgreSQL's
+    numeric category). Arm ORDER changes neither, there or here. Nothing
+    outside the numeric family widens: rendering a number as text to make two
+    arms line up would answer a different query.
+
+    **When the common type is DECIMAL, the (p,s) is:**
+
+    - **scale = max over the arms.** The only choice that moves no value; a
+      narrower one DROPS digits the wider arm holds.
+    - **precision = max over the arms of (precision − scale), plus that
+      scale**, capped at 38. Rebuilt from the widest INTEGER part rather than
+      taken as max(precision), because max(precision) is not a bound on the
+      widened values: `DECIMAL(18,2)` alongside `DECIMAL(9,4)` needs 16
+      integer digits at scale 4 — 20 — where max(precision) would declare 18
+      and hand the parquet writer a leaf too small for its own values
+      (ADR-0018 §4's encoding rule keys off precision). For every pair whose
+      integer parts order the same way as their precisions the two rules
+      agree, `(9,2)/(18,4)/(38,10)` included.
+    - An INTEGER arm contributes its whole range's digits (10 for INT32, 19
+      for INT64) at scale 0.
+
+    **The arms are moved, and that is the whole point.** A DECIMAL value is
+    an unscaled integer plus the column's declared scale (ADR-0018 §4), and on
+    the stage DAG the two travel apart: each arm's task writes its own `.wshf`
+    file carrying its own scale in the header, and the task that reads several
+    such files writes ONE file under the schema of the first batch it saw.
+    Reconciling only the `TypeID` reconciles nothing for two DECIMALs — they
+    ARE the same TypeID — so the wider arm's unscaled integer was read at the
+    narrower arm's scale and every value from it came back 100× too large,
+    silently (#533). `exec.DecimalCoerce` multiplies the carrier instead, in
+    the union arm's own fragment, before the rows meet. A CAST cannot do this
+    job: the cast evaluator's DECIMAL destination produces a float64, which is
+    the precision loss the exact carrier exists to prevent.
+
+    **A value with no exact carrier at the output scale is an ERROR.** Same
+    rule and same reason as SUM's overflow in item 9: a wrapped value is a
+    different number wearing the right type, and nothing downstream can see
+    that it is wrong.
+
+    **The dedup key is the columnar one.** UNION, INTERSECT and EXCEPT decide
+    membership by EQUALITY, so their key must agree with the comparator. On
+    the DAG they already do — the operation lowers to a hash aggregate whose
+    DECIMAL key is `batch.AppendDecimalKey` at the column's scale (#474), the
+    canonical minimal-scale form — and after this the arms reach it at one
+    scale anyway. The single-process path keys a boxed row by its RENDERED
+    TEXT and needs its own fix (#499); the two paths are held to one answer by
+    `internal/coordinator/setop_decimal_scale_two_path_test.go`.
+
+    **Two carrier properties are deliberate divergences, not defects.** A
+    wadjet DECIMAL column has ONE declared scale, so the narrow arm's rows
+    render with the unified scale's trailing zeros (`12.7500` beside
+    `12.7501`) where PostgreSQL's variable-scale numeric prints `12.75` — the
+    same number, the same row set, the class item 9 already records for AVG's
+    digits. And PostgreSQL declares a cross-scale set operation's numeric
+    result UNCONSTRAINED on the wire (`\gdesc` says `numeric`, typmod −1,
+    where a single-arm `SELECT` of the same column says `numeric(9,2)`);
+    wadjet still declares a real (p,s) there. That is wire METADATA only and
+    is tracked separately (#542), not a value difference.
+
+    **The single-process path does not yet resolve two different TypeIDs**
+    (#541): it builds the result under the FIRST arm's schema, so an integer
+    arm under a DECIMAL first arm reads as an unscaled carrier (1 becomes
+    0.0001) and a DECIMAL arm under a FLOAT64 first arm fails the store
+    outright. `unifySetOpSchemas` should delegate to `setOpWiden` and
+    `setOpDecimalTarget` rather than keep its own rule, so the two paths
+    cannot drift on what the output type IS.
+
 ## Consequences
 
 - `ORDER BY x DESC` places NULLs first (changed 2026-08-19). The default had

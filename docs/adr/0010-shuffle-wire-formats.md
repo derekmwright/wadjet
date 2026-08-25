@@ -72,6 +72,22 @@ consumer can sniff and decode, including mid-stream.
   (file, stream, pread) share this one decoder, so they cannot diverge
   on what a payload means, and a defect fixed once is fixed on every
   tier at once.
+- **A DECIMAL's SCALE is part of the file, not part of the chunk, and the
+  writer enforces that.** The header declares the schema ONCE and every chunk
+  after the first is read under it, so for a DECIMAL the header holds half the
+  value: the chunk carries the unscaled integer and the header carries the
+  scale. A task that concatenates two producers' batches at different scales
+  therefore writes one file that means something other than what it was given
+  — 127501 written at scale 4 and read at scale 2 is 1275.01 where the value
+  is 12.7501. That was reachable from any cross-scale set operation until
+  #533, silently, because the union stage's arms were reconciled by `TypeID`
+  and two DECIMALs share one. `shuffleWriter.writeChunk` now refuses a chunk
+  whose DECIMAL vector disagrees with the header, which turns the whole class
+  from a wrong answer into a failed task. The planner is still where it is
+  FIXED — `physical.reconcileSetOpArmTypes` coerces every arm to the set
+  operation's output `(p,s)` before its rows enter the stream (ADR-0012 item
+  12) — and this is the backstop for the producers it cannot reconcile.
+
 - **The partition ASSIGNMENT is part of the exchange contract, not just the
   byte layout.** Every producer of a repartition stage must map a key to the
   same partition number, because the consumer of partition *p* reads only the

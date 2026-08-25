@@ -168,6 +168,29 @@ func (sw *shuffleWriter) writeChunk(cols []*batch.Vector, sel []uint32, numRows 
 
 	for ci := range sw.schema {
 		vec := cols[ci]
+		// A WSHF file declares its schema ONCE, in the header, and every
+		// chunk after the first is read under it. For a DECIMAL that
+		// declaration is half the value — the chunk carries the unscaled
+		// integer and the header carries the scale — so a chunk whose vector
+		// disagrees with the header is the same integer read as a different
+		// number, silently: 127501 written at scale 4 and read at scale 2 is
+		// 1275.01 instead of 12.7501 (#533).
+		//
+		// The planner makes a set operation's arms agree before they meet,
+		// which is where that defect came from and where it is fixed. This
+		// is the backstop for every producer whose batches the planner did
+		// NOT reconcile — an arm whose (p,s) nothing could resolve, or a
+		// future stage that concatenates two streams — and it turns the
+		// whole class from a wrong answer into a failed task.
+		if sw.schema[ci].Type == parquet.TypeDecimal {
+			if got := decimalVectorScale(vec); got != sw.schema[ci].Scale {
+				return fmt.Errorf(
+					"shuffle write: column %q is DECIMAL scale %d in this batch but scale %d in the "+
+						"file header — one file cannot declare two scales for one column, and the "+
+						"unscaled values would be read as different numbers",
+					sw.schema[ci].Name, got, sw.schema[ci].Scale)
+			}
+		}
 		colSel := sel
 		if vec.Base != nil {
 			if vec.Nulls.HasNulls() {
@@ -184,6 +207,18 @@ func (sw *shuffleWriter) writeChunk(cols []*batch.Vector, sel []uint32, numRows 
 		}
 	}
 	return nil
+}
+
+// decimalVectorScale is the scale a DECIMAL vector's unscaled integers are
+// at. A view owns no storage, so it defers to the base it reads through.
+func decimalVectorScale(v *batch.Vector) int {
+	if v == nil {
+		return 0
+	}
+	if v.Base != nil {
+		return v.Base.DecimalData.Scale
+	}
+	return v.DecimalData.Scale
 }
 
 // writeFooter appends the WIDX extent-index footer at the current write

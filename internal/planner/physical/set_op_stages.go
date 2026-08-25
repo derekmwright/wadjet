@@ -118,7 +118,11 @@ func (p *Planner) emitSetOpStages(node *logical.Node, stages *[]Stage) {
 
 	arms := make([]UnionArm, len(plans))
 	for i := range plans {
-		arms[i] = UnionArm{DepStage: deps[i], Projections: plans[i].specs}
+		arms[i] = UnionArm{
+			DepStage:         deps[i],
+			Projections:      plans[i].specs,
+			DecimalCoercions: plans[i].coerce,
+		}
 	}
 	if counting {
 		// Tag columns ride AFTER the reconciled result columns so
@@ -311,6 +315,12 @@ func setOpOutputNames(arm *logical.Node) []string {
 type setOpArmPlan struct {
 	specs []ProjectExprSpec
 	types []setOpColType
+	// coerce names the columns whose VALUES this arm must move before they
+	// enter the union stream — a DECIMAL carrier at the wrong scale, or an
+	// integer that has to become one (#533). A CAST cannot do this job: the
+	// cast evaluator produces a float64 for a DECIMAL destination, which is
+	// exactly the precision loss the exact carrier exists to avoid.
+	coerce []DecimalCoercion
 }
 
 // setOpColType is a plan-time output type, or the absence of one. There is no
@@ -319,6 +329,18 @@ type setOpArmPlan struct {
 type setOpColType struct {
 	typ   parquet.TypeID
 	known bool
+	// dec is a DECIMAL column's declared precision and scale: the two facts
+	// a bare TypeID cannot express, and the ones two DECIMAL arms can
+	// DISAGREE on while looking identical to a TypeID comparison. That is
+	// #533 — reconcileSetOpArmTypes saw one TypeID on both arms, reconciled
+	// nothing, and the wider arm's unscaled Int128 was then read at the
+	// narrower arm's scale, 100x too large.
+	//
+	// decKnown is false for a DECIMAL whose (p,s) the arm walk could not
+	// resolve — a computed expression carries none, the same case
+	// declaredProjectionDecimal declines (#458).
+	dec      logical.DecimalMeta
+	decKnown bool
 }
 
 // setOpArmProjection builds the OpProject spec list that puts one arm's
@@ -348,6 +370,18 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 		for i, n := range innerNames {
 			plan.specs[i] = ProjectExprSpec{Expr: n, Name: outNames[i]}
 		}
+		// The nested operation's OWN reconciliation decides what this arm
+		// actually emits, so ask for it rather than reporting "unknown".
+		// Reporting unknown is what made `a UNION ALL b UNION ALL c` — which
+		// parses left-deep, so arm 1 of the outer union IS a union — skip
+		// reconciliation entirely: the enclosing operation saw one typed arm
+		// and one untyped one, declined to cast either, and the three files
+		// then disagreed about the column. For a DECIMAL that is #533 again
+		// one level up; for the INT32/INT64/FLOAT64 ladder it dropped a whole
+		// arm's rows on the floor.
+		if inferred := setOpNodeResultTypes(inner); len(inferred) == len(outNames) {
+			plan.types = inferred
+		}
 		return plan, nil
 	}
 	// A bare scan arm (`SELECT * FROM t`): the columns correspond by catalog
@@ -362,9 +396,13 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			types: make([]setOpColType, len(outNames)),
 		}
 		for i, c := range inner.ScanColumns {
-			plan.specs[i] = ProjectExprSpec{Expr: strings.ToLower(c), Name: outNames[i]}
-			if t, ok := inner.ScanColTypes[strings.ToLower(c)]; ok {
+			lc := strings.ToLower(c)
+			plan.specs[i] = ProjectExprSpec{Expr: lc, Name: outNames[i]}
+			if t, ok := inner.ScanColTypes[lc]; ok {
 				plan.types[i] = setOpColType{typ: t, known: true}
+				if t == parquet.TypeDecimal {
+					plan.types[i].dec, plan.types[i].decKnown = setOpColDecimalMeta(inner.ScanColDecimal, lc)
+				}
 			}
 		}
 		return plan, nil
@@ -382,11 +420,15 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 	// does not exist in the arm's schema, so the worker cannot resolve it
 	// (same reason attachScanSelectProjections carries Type — #333).
 	var colTypes map[string]parquet.TypeID
+	var colDecimal map[string]logical.DecimalMeta
 	var strictInt map[string]bool
 	var below *logical.Node
 	if len(projNode.Children) == 1 {
 		below = projNode.Children[0]
 		colTypes = inputColTypes(below)
+		// The DECIMAL half of the same walk (#458): a set operation has to
+		// reconcile SCALES, which colTypes cannot carry (#533).
+		colDecimal = inputColDecimal(below)
 		// Same integer-preserving-arithmetic hint as
 		// attachScanSelectProjections (#297, #445).
 		strictInt = strictIntArithCols(below)
@@ -442,7 +484,21 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			// A bare reference copies its source column, so the source's
 			// type is what the arm emits. spec.Type stays unset: the worker
 			// resolves a plain ColRef by DirectCopy and ignores it.
+			//
+			// setOpRefType resolves each candidate spelling through
+			// lookupColType rather than a direct map read, so a QUALIFIED
+			// reference resolves too: an arm that ends in a join names its
+			// columns `a.u4`, and the maps are keyed by the bare name. Left
+			// unresolved, the whole column went unreconciled — which for two
+			// DECIMAL arms is #533 again, and for a join arm was reachable
+			// from any `SELECT t.col FROM a JOIN b` arm. The fallback is safe
+			// by construction: inputColTypes DELETES a bare name the two
+			// sides of a join disagree on, so a name that survives means one
+			// type.
 			ct = setOpColType{typ: t, known: true}
+			if t == parquet.TypeDecimal {
+				ct.dec, ct.decKnown = setOpColDecimalMeta(colDecimal, e)
+			}
 		}
 		plan.specs = append(plan.specs, spec)
 		plan.types = append(plan.types, ct)
@@ -455,15 +511,19 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 // resolved to) or the OUTPUT name the SELECT list wrote. inputColTypes answers
 // for whichever of the two its walk reached, and a miss on both leaves the
 // column untyped, which is what it was before either spelling was tried.
+//
+// Each candidate goes through lookupColType rather than a direct map read, so
+// a QUALIFIED spelling resolves too: an arm that ends in a join names its
+// columns "a.u4", and the maps are keyed by the bare name (#533).
 func setOpRefType(colTypes map[string]parquet.TypeID, resolved string, pr logical.Projection) (parquet.TypeID, bool) {
-	if t, ok := colTypes[strings.ToLower(resolved)]; ok {
+	if t, ok := lookupColType(colTypes, resolved); ok {
 		return t, true
 	}
 	for _, alt := range []string{pr.Expr, pr.Column, pr.Alias} {
 		if alt == "" {
 			continue
 		}
-		if t, ok := colTypes[strings.ToLower(alt)]; ok {
+		if t, ok := lookupColType(colTypes, alt); ok {
 			return t, true
 		}
 	}
@@ -477,37 +537,26 @@ func setOpRefType(colTypes map[string]parquet.TypeID, resolved string, pr logica
 // AS k FROM region UNION ALL SELECT n_nationkey AS k FROM nation` panicked
 // the gather task writing the second arm's chunk.
 //
-// Only numeric widening is performed (the ladder INT32 → INT64 → FLOAT64,
-// applied with a CAST on the narrower arms). Any other disagreement is
+// Only numeric widening is performed (the ladder INT32 → INT64 → DECIMAL →
+// FLOAT64, applied with a CAST on the narrower arms, or with a value-moving
+// coercion where the destination is DECIMAL). Any other disagreement is
 // refused: coercing, say, a number to text to make the files line up would
 // answer a question the user did not ask.
+//
+// TWO DECIMAL arms need reconciling as much as two different TypeIDs do, and
+// this is the part that was missing (#533). A TypeID comparison calls
+// DECIMAL(9,2) and DECIMAL(18,4) equal — they are the same TypeID — so
+// nothing was rewritten, each arm's file kept its own scale in its WSHF
+// header, and the reader of both files took the first one's. The unscaled
+// integer 127501 then rendered as 1275.01 instead of 12.7501.
 func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string) error {
 	if len(plans) < 2 {
 		return nil
 	}
 	for col := range outNames {
-		var want setOpColType
-		allKnown := true
-		for _, plan := range plans {
-			ct := plan.types[col]
-			if !ct.known {
-				allKnown = false
-				continue
-			}
-			if !want.known {
-				want = ct
-				continue
-			}
-			if ct.typ == want.typ {
-				continue
-			}
-			widened, ok := setOpWiden(want.typ, ct.typ)
-			if !ok {
-				return fmt.Errorf("the arms disagree on the type of result column %q (%s vs %s) and "+
-					"neither widens into the other; make the types match in the query",
-					outNames[col], want.typ, ct.typ)
-			}
-			want = setOpColType{typ: widened, known: true}
+		want, allKnown, err := setOpTargetType(plans, col, outNames[col])
+		if err != nil {
+			return err
 		}
 		if !want.known {
 			continue // nothing typed this column; leave every arm as written
@@ -516,6 +565,29 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string) error {
 		// be cast to match, and forcing the typed ones alone would just move
 		// the mismatch.
 		if !allKnown {
+			continue
+		}
+		if want.typ == parquet.TypeDecimal {
+			if !want.decKnown {
+				// An arm whose (p,s) nothing resolved. Leaving every arm as
+				// written is the pre-#533 behaviour and the only honest one:
+				// a scale guessed here would move values by a power of ten.
+				// The shuffle writer's scale check is what keeps a residual
+				// of this shape from being silent.
+				continue
+			}
+			for i := range plans {
+				ct := plans[i].types[col]
+				if ct.typ == want.typ && ct.decKnown && ct.dec == want.dec {
+					continue
+				}
+				plans[i].coerce = append(plans[i].coerce, DecimalCoercion{
+					Name:      outNames[col],
+					Precision: want.dec.Precision,
+					Scale:     want.dec.Scale,
+				})
+				plans[i].types[col] = want
+			}
 			continue
 		}
 		for i := range plans {
@@ -536,9 +608,81 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string) error {
 	return nil
 }
 
-// setOpWiden is the numeric ladder: INT32 → INT64 → FLOAT64. FLOAT32 widens
-// to FLOAT64 rather than staying itself because the cast evaluator produces a
-// float64, so declaring FLOAT32 would mis-describe the values.
+// setOpTargetType folds one result column's arms into the type they must all
+// emit. allKnown is false when some arm carries no type at all, which is the
+// caller's signal to leave the column alone.
+func setOpTargetType(plans []setOpArmPlan, col int, name string) (setOpColType, bool, error) {
+	var want setOpColType
+	allKnown := true
+	for _, plan := range plans {
+		ct := plan.types[col]
+		if !ct.known {
+			allKnown = false
+			continue
+		}
+		if !want.known {
+			want = ct
+			continue
+		}
+		widened, ok := setOpWiden(want.typ, ct.typ)
+		if !ok {
+			return setOpColType{}, false, fmt.Errorf(
+				"the arms disagree on the type of result column %q (%s vs %s) and "+
+					"neither widens into the other; make the types match in the query",
+				name, want.typ, ct.typ)
+		}
+		want = setOpColType{typ: widened, known: true}
+	}
+	if want.known && want.typ == parquet.TypeDecimal && allKnown {
+		arms := make([]setOpColType, 0, len(plans))
+		for _, plan := range plans {
+			arms = append(arms, plan.types[col])
+		}
+		want.dec, want.decKnown = setOpDecimalTarget(arms)
+	}
+	return want, allKnown, nil
+}
+
+// setOpNodeResultTypes is the per-column type a nested set-operation node
+// emits: exactly what reconcileSetOpArmTypes will make ITS arms agree on,
+// computed without emitting anything. nil when the shape is one this walk
+// cannot type, which the caller reads as "unknown", the answer it had before.
+func setOpNodeResultTypes(n *logical.Node) []setOpColType {
+	names := setOpOutputNames(n)
+	if len(names) == 0 || len(n.Children) < 2 {
+		return nil
+	}
+	plans := make([]setOpArmPlan, 0, len(n.Children))
+	for _, child := range n.Children {
+		plan, err := setOpArmProjection(child, names)
+		if err != nil {
+			return nil
+		}
+		plans = append(plans, plan)
+	}
+	out := make([]setOpColType, len(names))
+	for col := range names {
+		want, allKnown, err := setOpTargetType(plans, col, names[col])
+		if err != nil || !allKnown {
+			continue
+		}
+		out[col] = want
+	}
+	return out
+}
+
+// setOpWiden is the numeric ladder: INT32 → INT64 → DECIMAL → FLOAT64.
+//
+// FLOAT32 widens to FLOAT64 rather than staying itself because the cast
+// evaluator produces a float64, so declaring FLOAT32 would mis-describe the
+// values.
+//
+// The two rungs around DECIMAL are PostgreSQL's, verified against
+// postgres:17-alpine: `numeric UNION ALL bigint` resolves to numeric (an
+// integer converts to numeric implicitly and not back), and `numeric UNION
+// ALL double precision` resolves to double precision (float8 is the
+// PREFERRED type of the numeric category). Arm ORDER does not change either
+// answer there, and does not change it here.
 func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 	if a == b {
 		return a, true
@@ -549,8 +693,10 @@ func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 			return 1
 		case parquet.TypeInt64:
 			return 2
-		case parquet.TypeFloat32, parquet.TypeFloat64:
+		case parquet.TypeDecimal:
 			return 3
+		case parquet.TypeFloat32, parquet.TypeFloat64:
+			return 4
 		}
 		return 0
 	}
@@ -558,8 +704,11 @@ func setOpWiden(a, b parquet.TypeID) (parquet.TypeID, bool) {
 	if ra == 0 || rb == 0 {
 		return 0, false
 	}
-	if ra == 3 || rb == 3 {
+	switch {
+	case ra == 4 || rb == 4:
 		return parquet.TypeFloat64, true
+	case ra == 3 || rb == 3:
+		return parquet.TypeDecimal, true
 	}
 	return parquet.TypeInt64, true
 }

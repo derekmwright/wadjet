@@ -457,6 +457,18 @@ const (
 	// precisely so this operator sees every row: a per-task LIMIT n over N
 	// tasks is not a global LIMIT n. See physical.StageLimit (#478).
 	OpLimit OpType = "limit"
+
+	// OpDecimalCoerce moves the named columns into one declared
+	// DECIMAL(p,s) (exec.DecimalCoerce), rescaling the unscaled carrier
+	// rather than reinterpreting it. It runs in a union-stage fragment,
+	// right after the projection that puts the arm's columns under the set
+	// operation's result names, so every arm's .wshf file declares the same
+	// scale for the same column (#533).
+	//
+	// A worker that does not know this op FAILS the task by name rather
+	// than ignoring it, which is the right side of ADR-0010's rolling-deploy
+	// test: ignoring it would answer with values off by a power of ten.
+	OpDecimalCoerce OpType = "decimal_coerce"
 )
 
 // OpSpec describes one operator within a fragment pipeline. Fields are
@@ -496,6 +508,11 @@ type OpSpec struct {
 
 	// OpProject.
 	Projections []ProjectSpec `json:"projections,omitempty"`
+
+	// OpDecimalCoerce. Each entry's Type is always parquet's DECIMAL id;
+	// Precision and Scale are the set operation's reconciled output type
+	// for that column (#533).
+	Coercions []ColumnSpec `json:"coercions,omitempty"`
 
 	// OpHashJoinProbe / OpBroadcastProbe.
 	JoinType    string   `json:"join_type,omitempty"`  // inner, left, semi, anti, …

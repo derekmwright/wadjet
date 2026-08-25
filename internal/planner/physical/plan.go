@@ -445,6 +445,25 @@ type ProjectExprSpec struct {
 type UnionArm struct {
 	DepStage    string
 	Projections []ProjectExprSpec
+	// DecimalCoercions names the result columns this arm must MOVE into the
+	// set operation's output DECIMAL(p,s) — after the projection above has
+	// put them under the result names — before its rows join the union
+	// stream. Empty for an arm that already carries the output type.
+	//
+	// It is a separate list rather than a field on ProjectExprSpec because
+	// it is not a projection at all: a DECIMAL value is an unscaled integer
+	// plus a declared scale, and making two arms agree means multiplying the
+	// integer, which no CAST expression in this engine does exactly (the
+	// cast evaluator's DECIMAL destination produces a float64). See
+	// exec.DecimalCoerce and issue #533.
+	DecimalCoercions []DecimalCoercion
+}
+
+// DecimalCoercion is one column that must arrive as DECIMAL(Precision, Scale).
+type DecimalCoercion struct {
+	Name      string
+	Precision int
+	Scale     int
 }
 
 // WindowColSpec defines a window function column in a stage. Every field is

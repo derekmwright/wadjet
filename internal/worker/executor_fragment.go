@@ -2656,6 +2656,21 @@ func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task
 		}
 		return []exec.UnaryOperator{proj}, nil, nil
 
+	case distributed.OpDecimalCoerce:
+		// A set operation's arms agreeing on ONE DECIMAL(p,s) (#533): the
+		// unscaled carrier is multiplied, never reinterpreted, and a value
+		// with no Int128 at the output scale fails the task.
+		if len(spec.Coercions) == 0 {
+			return nil, nil, fmt.Errorf("decimal coerce: no columns declared")
+		}
+		cols := make([]exec.DecimalCoerceColumn, 0, len(spec.Coercions))
+		for _, c := range spec.Coercions {
+			cols = append(cols, exec.DecimalCoerceColumn{
+				Name: c.Name, Precision: c.Precision, Scale: c.Scale,
+			})
+		}
+		return []exec.UnaryOperator{exec.NewDecimalCoerce(cols)}, nil, nil
+
 	case distributed.OpLimit:
 		// The global bound of a StageLimit (#478). Singleton by plan
 		// construction, so this one operator sees the whole stream —

@@ -583,7 +583,7 @@ list.
 **`UNION ALL` → `StageUnion`** (`exchange.go`), Dependencies = the arms in SQL
 order, `Tasks = len(UnionArms)`. Task *i* reads arm *i*'s output **whole** (not
 a partition slice) and its fragment is
-`[OpShuffleSource, OpProject(arm→result columns), OpFilter?, sink]`
+`[OpShuffleSource, OpProject(arm→result columns), OpDecimalCoerce?, OpFilter?, sink]`
 (`coordinator/execute_stage_dag.go buildUnionFragment`). Three things make the
 concatenation well-formed:
 
@@ -593,8 +593,33 @@ concatenation well-formed:
 - **Types.** The arms' outputs are separate `.wshf` files read as one stream, so
   a column declared FLOAT64 by one arm and INT32 by another is a decoding
   error, not a union — it panicked the gather task writing the second arm's
-  chunk. `reconcileSetOpArmTypes` widens numerics (INT32 → INT64 → FLOAT64) with
-  a `CAST` on the narrower arms and refuses anything else.
+  chunk. `reconcileSetOpArmTypes` widens numerics along
+  INT32 → INT64 → DECIMAL → FLOAT64 (PostgreSQL's own resolution, ADR-0012
+  item 12) and refuses anything else. A CAST rewrites the narrower arm's
+  projection where the target is INT64 or FLOAT64.
+- **Scales.** A DECIMAL needs more than a matching `TypeID`, and this is where
+  a `TypeID`-only reconciliation silently lied: `DECIMAL(9,2)` and
+  `DECIMAL(18,4)` ARE the same TypeID, so nothing was rewritten, each arm's
+  file kept its own scale in its WSHF header, and the reader of both files took
+  the FIRST one's — the wider arm's unscaled Int128 read at the narrower arm's
+  scale, every value 100× too large (#533). `setOpDecimalTarget` computes the
+  arms' common `(p,s)`, and each arm carries a `UnionArm.DecimalCoercions`
+  entry that becomes an **`OpDecimalCoerce`** (`exec.DecimalCoerce`) right
+  after the projection: the unscaled carrier is MULTIPLIED, never
+  reinterpreted, and a value with no Int128 at the output scale fails the task
+  rather than wrapping. An integer arm (`numeric UNION ALL bigint` is numeric
+  in PostgreSQL) is coerced by the same operator, from scale 0. A CAST cannot
+  serve here — the cast evaluator's DECIMAL destination produces a float64.
+  Where an arm's `(p,s)` cannot be resolved at plan time nothing is coerced;
+  `shuffleWriter.writeChunk` then refuses a chunk whose DECIMAL scale
+  disagrees with its file header, so the residual is a failed task rather than
+  a wrong answer (ADR-0010).
+- **Nested arms.** `a UNION ALL b UNION ALL c` parses LEFT-DEEP, so the outer
+  union's first arm is itself a union. Its reconciled output type comes from
+  `setOpNodeResultTypes`, which recurses. Before that it was reported as
+  "unknown", the enclosing operation declined to reconcile ANY arm of the
+  chain, and the three files disagreed: for a DECIMAL that is #533 one level
+  up, and for the INT/FLOAT ladder it dropped a whole arm's rows.
 - **Output shape.** `dispatchComputeStage` collapses the per-task files into one
   `OutputSinglePart` list (the `probeSplit` / `rrAggGroups` branch) — a
   consumer reading `Files[0]` alone would get one arm.

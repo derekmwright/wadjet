@@ -3819,6 +3819,20 @@ func buildUnionFragment(stage physical.Stage, t *distributed.Task, taskInputs ma
 		},
 		projectOp,
 	}
+	// The arms' agreed DECIMAL(p,s), applied AFTER the projection because it
+	// names the set operation's RESULT columns. Without it each arm's file
+	// declares its own scale and the reader of both takes the first one's,
+	// which is the same unscaled integer read as a different number (#533).
+	if len(arm.DecimalCoercions) > 0 {
+		cols := make([]distributed.ColumnSpec, 0, len(arm.DecimalCoercions))
+		for _, c := range arm.DecimalCoercions {
+			cols = append(cols, distributed.ColumnSpec{
+				Name: c.Name, Type: int(parquet.TypeDecimal),
+				Precision: c.Precision, Scale: c.Scale,
+			})
+		}
+		ops = append(ops, distributed.OpSpec{Type: distributed.OpDecimalCoerce, Coercions: cols})
+	}
 	// A WHERE above the set operation lands on this stage (walkStages pushes
 	// a Filter onto the stage it just emitted). It names the set operation's
 	// OUTPUT columns, so it runs after the projection — and it has to run at

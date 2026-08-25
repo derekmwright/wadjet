@@ -365,6 +365,11 @@ func tmdTables() []tmdTable {
 		// The CIDR set-operation fixture, for the same reason: two spellings
 		// of one address, which only an inet-aware key collapses.
 		{cidrTable, cidrSchema(), cidrData()},
+		// The cross-scale SET-OPERATION fixtures (#533). Same reason again:
+		// TestSetOpDecimalScaleTwoPath and its siblings use these two arms,
+		// and no type-matrix corpus entry names either table.
+		{sodTable, sodSchema(), sodData()},
+		{sodOvfTable, sodOvfSchema(), sodOvfData()},
 	}
 }
 
