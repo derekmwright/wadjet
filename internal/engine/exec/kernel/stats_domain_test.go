@@ -154,8 +154,8 @@ func TestStatsDomainValueAgreesWithTheFilterKernel(t *testing.T) {
 	if got, _ := StatsDomainValue(batch.TypeIPv6, 0, "2001:db8::5dc"); got != mustIPv6Key("2001:db8::5dc") {
 		t.Error("the IPv6 stats value is not the kernel's IPv6 literal")
 	}
-	if got, _ := StatsDomainValue(batch.TypeUUID, 0, "00000000-0000-4000-8000-0000000005dc"); got !=
-		parseUUIDToRawString("00000000-0000-4000-8000-0000000005dc") {
+	wantUUID, _ := parseUUIDToRawString("00000000-0000-4000-8000-0000000005dc")
+	if got, _ := StatsDomainValue(batch.TypeUUID, 0, "00000000-0000-4000-8000-0000000005dc"); got != wantUUID {
 		t.Error("the UUID stats value is not the kernel's UUID literal")
 	}
 	// The DECIMAL literal the kernel resolves at scale 2 is the same unscaled

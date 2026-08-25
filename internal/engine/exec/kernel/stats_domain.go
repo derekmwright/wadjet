@@ -108,8 +108,8 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 		if !ok {
 			return v, true // already numeric
 		}
-		n := parseIPv4ToInt64(s)
-		if n == 0 && s != "0.0.0.0" {
+		n, ok := parseIPv4ToInt64(s)
+		if !ok {
 			return nil, false
 		}
 		return n, true
@@ -118,8 +118,8 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 		if !ok {
 			return v, true
 		}
-		n := parseMACToInt64(s)
-		if n == 0 && s != "00:00:00:00:00:00" {
+		n, ok := parseMACToInt64(s)
+		if !ok {
 			return nil, false
 		}
 		return n, true
@@ -150,8 +150,8 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 		if !ok {
 			return nil, false
 		}
-		raw := parseUUIDToRawString(s)
-		if raw == "" {
+		raw, ok := parseUUIDToRawString(s)
+		if !ok {
 			return nil, false
 		}
 		return raw, true

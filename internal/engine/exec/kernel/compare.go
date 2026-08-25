@@ -268,9 +268,20 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 	case batch.TypeString:
 		return compareFilterString(op, toString(value))
 	case batch.TypeIPv4:
-		return compareFilterImpl(getInt64Data, parseIPv4ToInt64(toString(value)), op)
+		// ok is false when the literal names no address at all. Returning a
+		// kernel keyed on 0 used to answer that as the address 0.0.0.0,
+		// MATCHING every row holding it (#519, the CIDR/IPv6 shape #492
+		// already fixed) — a nil kernel is how this package asks the caller
+		// to raise 22P02 instead (exec.networkConstError).
+		if n, ok := parseIPv4ToInt64(toString(value)); ok {
+			return compareFilterImpl(getInt64Data, n, op)
+		}
+		return nil
 	case batch.TypeMAC:
-		return compareFilterImpl(getInt64Data, parseMACToInt64(toString(value)), op)
+		if n, ok := parseMACToInt64(toString(value)); ok {
+			return compareFilterImpl(getInt64Data, n, op)
+		}
+		return nil
 	case batch.TypeIPv6:
 		// IPv6LitKey, not a plain net.ParseIP: a v4-shaped literal against a
 		// v6 column is a FAMILY comparison in PostgreSQL, not a v4-mapped
@@ -295,24 +306,27 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 		// The literal is not an address at all. Returning a match-nothing
 		// kernel here made `c_cidr <> 'garbage'` answer ZERO rows where every
 		// row is a legitimate answer, and it is not what the other network
-		// arms do either: parseIPv4ToInt64 answers 0 for an unparseable
-		// literal, which MATCHES the rows holding 0.0.0.0, and
+		// arms do either: the pre-#519 parseIPv4ToInt64 answered 0 for an
+		// unparseable literal, which MATCHED the rows holding 0.0.0.0, and
 		// the IPv6 arm's plain net.ParseIP answered "" before IPv6LitKey
-		// replaced it. All three are silent wrong answers to a query that
+		// replaced it. All three were silent wrong answers to a query that
 		// cannot mean anything; PostgreSQL raises 22P02 for it, and
 		// ADR-0012 item 1 makes that the answer. A nil kernel is how this
 		// package asks the caller to raise — see compareFilterDecimal.
-		//
-		// TypeIPv4/TypeMAC/TypeUUID still take the silent-sentinel path; that
-		// is the same defect one type over, filed as #519 rather than widened
-		// here.
 		return nil
 	case batch.TypePort, batch.TypeProtocol:
 		return compareFilterImpl(getInt32Data, int32(toInt64(value)), op)
 	case batch.TypeDuration:
 		return compareFilterImpl(getInt64Data, toInt64(value), op)
 	case batch.TypeUUID:
-		return compareFilterString(op, parseUUIDToRawString(toString(value)))
+		// ok is false when the literal is 36/32 characters of something
+		// other than hex, or any other length: not a UUID at all. The old
+		// "" sentinel matched nothing for `=` and MATCHED EVERY ROW for
+		// `<>` (#519) — a nil kernel raises 22P02 instead.
+		if raw, ok := parseUUIDToRawString(toString(value)); ok {
+			return compareFilterString(op, raw)
+		}
+		return nil
 	case batch.TypeDate:
 		return compareFilterImpl(getInt32Data, toDateInt32(value), op)
 	case batch.TypeBytes:
@@ -789,7 +803,11 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 		// UUID stores 16 RAW bytes, not the 36-character text.
 		set := make(map[string]struct{}, len(values))
 		for _, v := range values {
-			set[parseUUIDToRawString(toString(v))] = struct{}{}
+			raw, ok := parseUUIDToRawString(toString(v))
+			if !ok {
+				return nil // not a UUID: the caller raises 22P02
+			}
+			set[raw] = struct{}{}
 		}
 		return inFilterString(set, negate)
 	case batch.TypeIPv6:
@@ -817,13 +835,21 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 	case batch.TypeIPv4:
 		set := make(map[int64]struct{}, len(values))
 		for _, v := range values {
-			set[parseIPv4ToInt64(toString(v))] = struct{}{}
+			n, ok := parseIPv4ToInt64(toString(v))
+			if !ok {
+				return nil // not an address: the caller raises 22P02
+			}
+			set[n] = struct{}{}
 		}
 		return inFilterInt64(getInt64Data, set, negate)
 	case batch.TypeMAC:
 		set := make(map[int64]struct{}, len(values))
 		for _, v := range values {
-			set[parseMACToInt64(toString(v))] = struct{}{}
+			n, ok := parseMACToInt64(toString(v))
+			if !ok {
+				return nil // not an address: the caller raises 22P02
+			}
+			set[n] = struct{}{}
 		}
 		return inFilterInt64(getInt64Data, set, negate)
 	case batch.TypeDuration:
@@ -1605,29 +1631,47 @@ func toString(v any) string {
 	return ""
 }
 
-// parseIPv4ToInt64 converts a string IPv4 address to its int64 representation.
-func parseIPv4ToInt64(s string) int64 {
+// parseIPv4ToInt64 converts a string IPv4 address to its int64
+// representation. ok is false when s names no address at all — callers must
+// turn that into a query ERROR (see ResolveFilterKernel's TypeIPv4 arm and
+// exec.networkConstError), never read it as the address 0.0.0.0 the way this
+// used to (#519: `WHERE c_ipv4 = 'garbage'` matched every row holding
+// 0.0.0.0, the CIDR/IPv6 shape #492 already fixed one type over).
+func parseIPv4ToInt64(s string) (int64, bool) {
 	ip := net.ParseIP(s)
-	if ip != nil {
-		if ip4 := ip.To4(); ip4 != nil {
-			return int64(binary.BigEndian.Uint32(ip4))
-		}
+	if ip == nil {
+		return 0, false
 	}
-	return 0
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return 0, false
+	}
+	return int64(binary.BigEndian.Uint32(ip4)), true
 }
 
+// IPv4LitKey exports parseIPv4ToInt64 for exec.networkConstError, which needs
+// to know whether a filter literal named an address at all — not just its
+// encoded value — the same way kernel.IPv6LitKey and kernel.CidrSortKey
+// already do for their two types.
+func IPv4LitKey(s string) (int64, bool) { return parseIPv4ToInt64(s) }
+
 // parseMACToInt64 converts a string MAC address to its int64 representation.
-func parseMACToInt64(s string) int64 {
+// ok is false when s names no address at all (#519; see parseIPv4ToInt64).
+func parseMACToInt64(s string) (int64, bool) {
 	hw, err := net.ParseMAC(s)
 	if err != nil || len(hw) != 6 {
-		return 0
+		return 0, false
 	}
 	var n uint64
 	for _, b := range hw {
 		n = (n << 8) | uint64(b)
 	}
-	return int64(n)
+	return int64(n), true
 }
+
+// MACLitKey exports parseMACToInt64 for exec.networkConstError; see
+// IPv4LitKey.
+func MACLitKey(s string) (int64, bool) { return parseMACToInt64(s) }
 
 // parseUUIDToRawString converts a UUID literal to the 16 RAW bytes a UUID
 // column stores. Comparing the 36-character text against those bytes — which
@@ -1640,11 +1684,12 @@ func parseMACToInt64(s string) int64 {
 // that form, and no UUID TEXT is 16 characters long (32 without dashes, 36
 // with), so the two cannot be confused.
 //
-// A literal that is neither yields "", which matches nothing: a stored value
-// is always 16 bytes.
-func parseUUIDToRawString(s string) string {
+// ok is false when s names no address at all — callers must turn that into a
+// query ERROR rather than the historical match-nothing/match-everything
+// sentinel of "" (#519; see parseIPv4ToInt64).
+func parseUUIDToRawString(s string) (string, bool) {
 	if len(s) == 16 {
-		return s
+		return s, true
 	}
 	clean := make([]byte, 0, 32)
 	for i := 0; i < len(s); i++ {
@@ -1653,18 +1698,18 @@ func parseUUIDToRawString(s string) string {
 		}
 	}
 	if len(clean) != 32 {
-		return ""
+		return "", false
 	}
 	raw := make([]byte, 16)
 	if _, err := hex.Decode(raw, clean); err != nil {
-		return ""
+		return "", false
 	}
-	return string(raw)
+	return string(raw), true
 }
 
 // UUIDLiteralToRaw is parseUUIDToRawString for the row-at-a-time predicate in
 // package exec, so the two comparison paths convert the literal identically.
-func UUIDLiteralToRaw(s string) string { return parseUUIDToRawString(s) }
+func UUIDLiteralToRaw(s string) (string, bool) { return parseUUIDToRawString(s) }
 
 // ColColFilterKernel compares two columns element-wise, returning matching row indices.
 type ColColFilterKernel func(left, right *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32

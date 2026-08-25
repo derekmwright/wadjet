@@ -68,16 +68,19 @@ type decimalLitCmp struct {
 	// double as "there is none". `c_cidr = ''` is not a hypothetical: the
 	// parser lowers it to a ColEmptyStr whose Fallback is this Cmp, so the
 	// zero-length shape reaches the refusal through here and nowhere else.
-	// It is the CIDR/IPv6 counterpart of the refusal order() raises for a
-	// DECIMAL column, and it lives here rather than in a binding of its own
-	// because this one already resolves the column: the check costs nothing
-	// per row, running once on the batch that settles notDecimal.
+	// It is the CIDR/IPv6/IPv4/MAC/UUID counterpart of the refusal order()
+	// raises for a DECIMAL column, and it lives here rather than in a
+	// binding of its own because this one already resolves the column: the
+	// check costs nothing per row, running once on the batch that settles
+	// notDecimal.
 	//
-	// tryNetworkLit takes every literal that parses as an address before
-	// NewCmp is ever reached, so a literal that arrives here against a
-	// network column is one no reading can make sense of — `c_cidr <>
-	// 'garbage'`, which used to answer ZERO rows through the kernel and EVERY
-	// row through this path (#492).
+	// tryNetworkLit takes every literal that parses as an IPv4, MAC, IPv6 or
+	// CIDR address before NewCmp is ever reached, so a literal that arrives
+	// here against one of those four column types is one no reading can
+	// make sense of — `c_cidr <> 'garbage'`, which used to answer ZERO rows
+	// through the kernel and EVERY row through this path (#492). UUID has no
+	// such pre-filter (tryNetworkLit doesn't cover it — see its own doc), so
+	// firstNonAddressLit checks UUID validity directly (#519).
 	nonAddr    string
 	nonAddrSet bool
 }
@@ -369,6 +372,15 @@ func newDecimalLitCmp(col *ColRef, lits []*kernel.DecimalLiteral, flip bool, ope
 // Quoted only: a bare numeric literal against an address column is a
 // different refusal (PostgreSQL has no `inet = integer` operator at all,
 // which is 42883, not 22P02) and is left where it was.
+//
+// Checks all five address families the DECIMAL-shaped binding can be asked
+// to refuse against (#519, one type over from #492's CIDR/IPv6): a `col =
+// lit` comparison never reaches here for a literal that parses as one of
+// these (compileCmp's tryNetworkLit already built a CmpNetworkLit for it
+// before NewCmp ever runs), but BETWEEN and IN have no such pre-filter —
+// bindDecimalList binds straight off the operand list — so a literal that
+// DOES name a valid address must still be excluded here or `c_ipv4 BETWEEN
+// '10.0.0.1' AND '10.0.0.5'` would misreport its own bounds as unparseable.
 func firstNonAddressLit(operands []Expr) (string, bool) {
 	for _, e := range operands {
 		lit, ok := e.(*Lit)
@@ -383,6 +395,15 @@ func firstNonAddressLit(operands []Expr) (string, bool) {
 			continue
 		}
 		if _, ok := kernel.IPv6LitKey(s); ok {
+			continue
+		}
+		if _, ok := ipv4LitToInt64(s); ok {
+			continue
+		}
+		if _, ok := macLitToInt64(s); ok {
+			continue
+		}
+		if parseUUIDHex(s) != nil {
 			continue
 		}
 		return s, true
@@ -464,8 +485,13 @@ func (d *decimalLitCmp) refuseNonAddress() {
 	switch d.col.typ {
 	case batch.TypeCIDR:
 		raiseInvalidTextRepresentation("cidr", d.nonAddr)
-	case batch.TypeIPv6:
+	case batch.TypeIPv6, batch.TypeIPv4:
+		// PostgreSQL has one type, inet, for both v4 and v6 addresses.
 		raiseInvalidTextRepresentation("inet", d.nonAddr)
+	case batch.TypeMAC:
+		raiseInvalidTextRepresentation("macaddr", d.nonAddr)
+	case batch.TypeUUID:
+		raiseInvalidTextRepresentation("uuid", d.nonAddr)
 	}
 }
 

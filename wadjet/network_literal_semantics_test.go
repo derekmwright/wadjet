@@ -165,6 +165,65 @@ func TestNonAddressLiteralAgainstACidrColumnIsAQueryError(t *testing.T) {
 	}
 }
 
+// TestNonAddressLiteralAgainstIPv4MacOrUUIDColumnIsAQueryError is #519: the
+// same defect TestNonAddressLiteralAgainstACidrColumnIsAQueryError closed for
+// CIDR/IPv6, one type family over. A literal that names no address used to
+// answer a silent SENTINEL instead of erroring, and a different one on each
+// path: TypeIPv4/TypeMAC read it as the encoded ZERO, which MATCHED every row
+// holding 0.0.0.0 / 00:00:00:00:00:00 through the kernel while the row
+// evaluator's lexical fallback answered false; TypeUUID read it as the empty
+// string, which matched NOTHING through the kernel (`=`) or EVERYTHING
+// (`<>`) while the row evaluator again answered by lexical text.
+func TestNonAddressLiteralAgainstIPv4MacOrUUIDColumnIsAQueryError(t *testing.T) {
+	ctx := context.Background()
+	db := tmOpen(t)
+
+	for _, sql := range []string{
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_ipv4 = 'garbage'", typematrix.Table),
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_ipv4 <> 'garbage'", typematrix.Table),
+		fmt.Sprintf("SELECT id, c_ipv4 = 'garbage' AS m FROM %s WHERE id = 188", typematrix.Table),
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_ipv4 IN ('garbage')", typematrix.Table),
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_mac = 'garbage'", typematrix.Table),
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_mac <> 'garbage'", typematrix.Table),
+		fmt.Sprintf("SELECT id, c_mac = 'garbage' AS m FROM %s WHERE id = 188", typematrix.Table),
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_mac IN ('garbage')", typematrix.Table),
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_uuid = 'garbage'", typematrix.Table),
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_uuid <> 'garbage'", typematrix.Table),
+		fmt.Sprintf("SELECT id, c_uuid = 'garbage' AS m FROM %s WHERE id = 188", typematrix.Table),
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_uuid IN ('garbage')", typematrix.Table),
+	} {
+		t.Run(sql, func(t *testing.T) {
+			_, err := tmRun(ctx, db, sql)
+			if err == nil {
+				t.Fatalf("answered instead of refusing: %s", sql)
+			}
+			if !strings.Contains(err.Error(), "garbage") {
+				t.Errorf("the error must quote the literal, got %q", err.Error())
+			}
+		})
+	}
+}
+
+// TestIPv4LiteralZeroSentinelNoLongerMatchesEndToEnd is the exact repro from
+// #501/#519: `WHERE c_ipv4 > 'not-an-ip'` used to be read as `> 0` by the
+// kernel, matching every non-zero row, while the SELECT-list form of the
+// identical predicate answered false for every row. Both must now refuse.
+func TestIPv4LiteralZeroSentinelNoLongerMatchesEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	db := tmOpen(t)
+
+	_, err := tmRun(ctx, db, fmt.Sprintf(
+		"SELECT id FROM %s WHERE c_ipv4 > 'not-an-ip' ORDER BY id", typematrix.Table))
+	if err == nil {
+		t.Fatal("WHERE c_ipv4 > 'not-an-ip' answered instead of refusing")
+	}
+	_, err = tmRun(ctx, db, fmt.Sprintf(
+		"SELECT id, c_ipv4 > 'not-an-ip' AS v FROM %s ORDER BY id", typematrix.Table))
+	if err == nil {
+		t.Fatal("SELECT c_ipv4 > 'not-an-ip' answered instead of refusing")
+	}
+}
+
 // TestIPv6ColumnAgainstAV4LiteralEndToEnd: PostgreSQL compares the address
 // FAMILY first, so every stored v6 address is above every v4 literal. The
 // scan kernel used to read the literal as its v4-MAPPED v6 bytes and the row

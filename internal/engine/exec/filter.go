@@ -159,7 +159,7 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 	ipv4Val := parseIPv4FilterVal(value)
 	macVal := parseMACFilterVal(value)
 	ipv6Val := parseIPv6FilterVal(value)
-	uuidVal := kernel.UUIDLiteralToRaw(strVal)
+	uuidVal, _ := kernel.UUIDLiteralToRaw(strVal)
 	bytesVal := bytesFilterVal(value)
 	// Offsets-shape: comparing a string column against the empty string is
 	// a zero-length test, not a byte compare — and it is what keeps such a
@@ -529,21 +529,28 @@ func decimalConstError(typ batch.TypeID, value any) error {
 	return sqlerr.New("22P02", "invalid input syntax for type numeric: %q", fmt.Sprint(value))
 }
 
-// networkConstError is decimalConstError's counterpart for the two network
-// types whose kernel arm refuses a literal it cannot read as an ADDRESS:
-// TypeCIDR (kernel.CidrSortKey) and TypeIPv6 (kernel.IPv6LitKey).
+// networkConstError is decimalConstError's counterpart for the network types
+// whose kernel arm refuses a literal it cannot read as an ADDRESS: TypeCIDR
+// (kernel.CidrSortKey), TypeIPv6 (kernel.IPv6LitKey), and — since #519 closed
+// the same gap one type over — TypeIPv4 (kernel.IPv4LitKey), TypeMAC
+// (kernel.MACLitKey) and TypeUUID (kernel.UUIDLiteralToRaw).
 //
-// Both used to answer instead of refusing, and the answers were silently
-// wrong in opposite directions: the CIDR arm returned a match-nothing kernel,
-// so `c_cidr <> 'garbage'` dropped every row, while the IPv6 arm read an
+// All five used to answer instead of refusing, and the answers were silently
+// wrong in different directions: the CIDR arm returned a match-nothing
+// kernel, so `c_cidr <> 'garbage'` dropped every row; the IPv6 arm read an
 // unparseable literal as the empty raw address, which every stored address
-// compares ABOVE. PostgreSQL refuses `'garbage'::inet` with 22P02 and
-// ADR-0012 item 1 makes PostgreSQL the authority on error-versus-not, so this
-// is its SQLSTATE and its wording.
+// compares ABOVE; the IPv4/MAC arms read it as the encoded zero, which
+// MATCHED every row holding the address 0.0.0.0 / 00:00:00:00:00:00; the
+// UUID arm read it as the empty string, which matches nothing for `=` and
+// EVERY row for `<>`. PostgreSQL refuses `'garbage'::inet` /
+// `'garbage'::macaddr` / `'garbage'::uuid` with 22P02, and ADR-0012 item 1
+// makes PostgreSQL the authority on error-versus-not, so this is its
+// SQLSTATE and its wording.
 //
 // The row-at-a-time path raises the same error for the same literal
-// (expr.CmpNetworkLit's CIDR arm and expr's Cmp binding): one path erroring
-// while the other answers is the two-path defect class.
+// (expr.CmpNetworkLit's CIDR/IPv6 arms and expr's Cmp binding via
+// decimalLitCmp.refuseNonAddress, which covers IPv4/MAC/UUID too): one path
+// erroring while the other answers is the two-path defect class.
 func networkConstError(typ batch.TypeID, value any) error {
 	if value == nil {
 		return nil
@@ -559,6 +566,21 @@ func networkConstError(typ batch.TypeID, value any) error {
 			return nil
 		}
 		return sqlerr.New("22P02", "invalid input syntax for type inet: %q", fmt.Sprint(value))
+	case batch.TypeIPv4:
+		if _, ok := kernel.IPv4LitKey(fmt.Sprint(value)); ok {
+			return nil
+		}
+		return sqlerr.New("22P02", "invalid input syntax for type inet: %q", fmt.Sprint(value))
+	case batch.TypeMAC:
+		if _, ok := kernel.MACLitKey(fmt.Sprint(value)); ok {
+			return nil
+		}
+		return sqlerr.New("22P02", "invalid input syntax for type macaddr: %q", fmt.Sprint(value))
+	case batch.TypeUUID:
+		if _, ok := kernel.UUIDLiteralToRaw(fmt.Sprint(value)); ok {
+			return nil
+		}
+		return sqlerr.New("22P02", "invalid input syntax for type uuid: %q", fmt.Sprint(value))
 	}
 	return nil
 }

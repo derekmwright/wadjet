@@ -832,31 +832,31 @@ func TestToString(t *testing.T) {
 // --- Network type parsing ---
 
 func TestParseIPv4ToInt64(t *testing.T) {
-	result := parseIPv4ToInt64("192.168.1.1")
-	if result == 0 {
-		t.Fatal("expected non-zero for valid IP")
+	result, ok := parseIPv4ToInt64("192.168.1.1")
+	if !ok || result == 0 {
+		t.Fatal("expected ok and non-zero for valid IP")
 	}
 
-	result = parseIPv4ToInt64("not-an-ip")
-	if result != 0 {
-		t.Fatalf("expected 0 for invalid IP, got %d", result)
+	// A literal that names no address at all is not the address 0.0.0.0 —
+	// ok must be false, not a silent 0 (#519: a nil `ok` here used to become
+	// a kernel that MATCHED every row holding 0.0.0.0).
+	if _, ok := parseIPv4ToInt64("not-an-ip"); ok {
+		t.Fatal("expected ok=false for invalid IP")
 	}
 
-	result = parseIPv4ToInt64("::1") // IPv6 address
-	if result != 0 {
-		t.Fatalf("expected 0 for IPv6, got %d", result)
+	if _, ok := parseIPv4ToInt64("::1"); ok { // IPv6 address
+		t.Fatal("expected ok=false for IPv6")
 	}
 }
 
 func TestParseMACToInt64(t *testing.T) {
-	result := parseMACToInt64("aa:bb:cc:dd:ee:ff")
-	if result == 0 {
-		t.Fatal("expected non-zero for valid MAC")
+	result, ok := parseMACToInt64("aa:bb:cc:dd:ee:ff")
+	if !ok || result == 0 {
+		t.Fatal("expected ok and non-zero for valid MAC")
 	}
 
-	result = parseMACToInt64("not-a-mac")
-	if result != 0 {
-		t.Fatalf("expected 0 for invalid MAC, got %d", result)
+	if _, ok := parseMACToInt64("not-a-mac"); ok {
+		t.Fatal("expected ok=false for invalid MAC")
 	}
 }
 
