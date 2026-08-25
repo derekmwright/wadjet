@@ -1,7 +1,8 @@
 # ADR-0021: A decorrelated subquery's names are resolved from the plan, and the sets it cannot join are materialized
 
 Status: Accepted (2026-08-25; §1a added the same day after a derived-table
-inner was found to reach the executor as a scan of a nonexistent table)
+inner was found to reach the executor as a scan of a nonexistent table; §3
+added the same day (#562))
 
 ## Context
 
@@ -42,6 +43,15 @@ to the worker verbatim and failed with *"IN subquery requires a
 SubqueryRunner"* (#524). The single-process path answered every one of those
 correctly, which made it a two-path divergence where the distributed side
 errored.
+
+**Narrowing.** A third class sits beside the other two and is reached through
+the same shape. `dedupSemiAntiBuildSide` PROJECTS the build side down to the
+join keys, so how it reads the condition decides which columns still exist by
+the time the join compares them. It read the condition as TEXT, split on
+`" and "` — and a decorrelation renders `" AND "`, so a two-key correlation
+lost its second key and the join matched nothing (#562). Nothing in any corpus
+here correlated on more than one column, in this project or in the fuzzer, so
+the shape had never been asked.
 
 ## Decision
 
@@ -169,7 +179,60 @@ row and `x NOT IN ()` is TRUE for every row, including a row whose key is
 NULL, because an empty set has nothing to be UNKNOWN about. Neither renders as
 an empty value list, so both render as the constant they are.
 
-### 3. What was rejected
+### 3. A build-side narrowing is all-or-nothing, and the condition is read STRUCTURALLY
+
+`dedupSemiAntiBuildSide` narrows a semi/anti join's build side to
+`Project(keys) → Distinct` so the hash table is sized to NDV rather than to
+raw rows. The caller projects the build down to exactly the key list
+`extractRightJoinKeys` returns, which makes that list a correctness interface
+and not a hint: a list short by one conjunct DELETES a column the join still
+compares, and the join then matches nothing — the semi answers zero rows and
+the anti answers every row, in silence.
+
+It read the condition by splitting the TEXT on `" and "` and then on the first
+`"="`. A decorrelation renders its condition with `" AND "`
+(`renderDecorrelatedKeys`), which that split does not see: a two-key
+correlation arrived as ONE part whose right operand was the literal text
+`o_custkey AND o_orderstatus = o_orderstatus`, only the first conjunct's key
+survived, and every two-column correlated `EXISTS` answered 0 (#562). It is
+the same lexical-where-the-condition-is-structural defect
+`physical.parseJoinKeys` was rewritten for in #351, one layer up, and it had
+been unreachable only because nothing in any corpus correlated on two columns.
+
+So the same rule applies at both layers: parse, flatten the top-level ANDs,
+require each conjunct to be an equality between two bare column references,
+and DECLINE the whole condition on anything else. FOUR declines. The first
+three are because the narrowing cannot attribute the key:
+
+- a conjunct that is not an equality of two columns (a literal operand, the
+  `1 = 1` ON-TRUE sentinel, an expression) names no build column;
+- a name that resolves on BOTH sides — a self-join's `k = k` — is not
+  attributable from the condition alone, which is what it always did;
+- two keys whose BARE names collide, because the Project aliases each key to
+  its bare name and the second would then read the first's column.
+
+The fourth is about the Project rather than the condition, and it is the one
+the first cut of this decision got wrong. The Project aliases EVERY key to its
+bare name (`Projection{Column: k, Alias: stripQualifier(k)}`), so a key the
+condition spells QUALIFIED is renamed out from under the condition still
+asking for it: the build emits `q_s` while the join looks up `b1.q_s`, which
+resolves to index -1 and matches nothing. That is reachable whenever the build
+subtree has two arms sharing a bare name and `reorderJoins` therefore
+qualifies one side — an `EXISTS` whose inner self-joins. Aliasing the key to
+its qualified text instead is not available: the spelling is settled by the
+model in §1 and the narrowing does not get to re-decide it. So:
+
+- a key whose text is not already its bare name declines.
+
+The NDV bound is a performance optimization and the key list is not, so a
+decline costs a bigger hash table and nothing else. `dedupSemiAntiBuildSide`
+is registered in `internal/optswitch` as `WADJET_SEMIANTI_BUILD_DEDUP`
+(#287): it changes the row set in both directions when it is wrong — a semi
+join answers nothing, an anti join answers everything — which is exactly the
+class the invariance oracle enumerates, and the oracle would have reported
+#562 as a divergence the first time a two-key correlation entered any corpus.
+
+### 4. What was rejected
 
 - **Projecting the inner plan explicitly** so the build side has a schema the
   rewrite chose. It moves the problem rather than solving it: the Project's
@@ -204,6 +267,20 @@ an empty value list, so both render as the constant they are.
   read still happens in full before the bound refuses it, and the local route
   then executes the subquery again — two executions and one full result in
   coordinator memory is the cost of a refusal today.
+- A multi-column correlation is now a gated shape rather than an unreachable
+  one. `internal/oracle/multikey` carries the fixture and the corpus, in TWO
+  arms that differ in one thing: whether the narrowing can attribute the keys.
+  The shared-schema arm's relations carry one schema, so every conjunct reads
+  `s = s` and the pass DECLINES; the distinct-name arm gives them `p_`/`q_`/
+  `w_` prefixes, so it FIRES. An arm with only the first gates the decline and
+  never runs the narrowing — which is how the qualified-key defect above
+  reached a green branch. The corpus spans
+  EXISTS / NOT EXISTS / IN / NOT IN on two and three keys, over STRING+INT64,
+  DECIMAL+DATE and CIDR+UUID, with the inner-only predicate on either side of
+  the correlations, with NULLs in one key on each side, with the estimator's
+  semi/anti swap engaged and declined, and with the inner a join or a derived
+  table. Every expected count is live PostgreSQL 17's, re-derived by the
+  oracle arm rather than recorded once.
 - The two-path gate asserts the IN-subquery refusal fires for NOTHING in its
   corpus. An entry taking that route means the materialization declined a set
   it should have inlined — the answer stays right while distributed execution
@@ -214,6 +291,15 @@ an empty value list, so both render as the constant they are.
 - ADR-0012 (PostgreSQL decides semantics), ADR-0013 (the gates and their pins)
 - #516, #526, #527 (naming), #482, #524 (sets), #507 (three-valued NOT IN)
 - #571 (derived-table inner), #572 (the key repair it reached), #535 (CTE)
+- #562 (the multi-key narrowing), #351 (the same lexical split one layer down)
+- Reachable from #562's corpus and tracked separately, because they reproduce
+  with ONE key: #577 (a semi/anti join whose build side is a derived table
+  matches nothing), #578 (a CORRELATED `NOT IN` answers its `NOT EXISTS`
+  twin — #507's remainder) and #584 (an unqualified outer conjunct pushed onto
+  a decorrelated EXISTS's subquery scan)
 - `internal/planner/logical/inner_key_spelling.go`,
+  `internal/planner/logical/semi_anti_dedup.go`,
   `internal/planner/physical/in_subquery_set.go`,
+  `internal/oracle/multikey` (the fixture and corpus, answers pinned to live
+  PostgreSQL 17),
   `docs/internals/native-dag-execution.md` §Correlated subqueries

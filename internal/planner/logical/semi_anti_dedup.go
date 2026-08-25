@@ -1,6 +1,11 @@
 package logical
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/derekmwright/wadjet/internal/optswitch"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+)
 
 // dedupSemiAntiBuildSide wraps the build side (right child) of every SEMI
 // or ANTI join in a GroupBy on the join keys, so the hash-join build phase
@@ -23,6 +28,16 @@ import "strings"
 // This pass runs after pushdownPredicates (so filters land on the inner
 // scan before dedup) and before reorderJoins (so the dedup'd subtree's
 // cost estimate flows through the join reorderer).
+// buildDedupToggle is the #287 kill switch. This pass CHANGES THE ROW SET when
+// it is wrong, in both directions — a build side narrowed to too few columns
+// makes a semi join answer nothing and an anti join answer everything (#562) —
+// so it belongs in the registry the invariance oracle enumerates. Had it been
+// there, the oracle would have reported #562 as a divergence under
+// WADJET_SEMIANTI_BUILD_DEDUP=0 the first time a two-key correlation entered
+// any corpus, instead of the shape having to be noticed by hand.
+var buildDedupToggle = optswitch.Register("semianti-build-dedup", "WADJET_SEMIANTI_BUILD_DEDUP",
+	"narrow a semi/anti join's build side to Project(join keys) -> Distinct, so the hash table is sized to NDV")
+
 func dedupSemiAntiBuildSide(n *Node) *Node {
 	if n == nil {
 		return nil
@@ -31,7 +46,7 @@ func dedupSemiAntiBuildSide(n *Node) *Node {
 	for i, child := range n.Children {
 		n.Children[i] = dedupSemiAntiBuildSide(child)
 	}
-	if n.Type != NodeJoin {
+	if n.Type != NodeJoin || !buildDedupToggle.On() {
 		return n
 	}
 	switch n.JoinType {
@@ -89,10 +104,35 @@ func dedupSemiAntiBuildSide(n *Node) *Node {
 	return n
 }
 
-// extractRightJoinKeys parses a join condition like "a.k = b.k AND a.k2 = b.k2"
-// and returns the keys belonging to the right subtree. Side membership is
-// decided by walking the right subtree's available columns; whichever side
-// of each equality resolves there is the right key.
+// extractRightJoinKeys reads a join condition STRUCTURALLY and returns the
+// build-side key of every one of its conjuncts, or nil when even one conjunct
+// cannot be attributed.
+//
+// All-or-nothing is the whole contract. The caller projects the build side
+// down to exactly these keys, so a key list that is short by one conjunct
+// deletes a column the join still compares and the join then matches NOTHING
+// — a semi join answers zero rows and an anti join answers every row, both
+// silently.
+//
+// This used to split the text on " and " and then on the first "=". The
+// condition a decorrelated EXISTS/IN writes is rendered with " AND "
+// (renderDecorrelatedKeys), which that split does not see: a two-key
+// correlation came through as ONE part whose right operand was the literal
+// text "b.k AND a.k2 = b.k2", and the only key that survived was the first
+// conjunct's (#562). It is the same lexical-where-the-condition-is-structural
+// defect physical.parseJoinKeys was rewritten for in #351, one layer up, so
+// this reads the same way: parse, flatten the top-level ANDs, and require
+// each conjunct to be an equality between two bare column references.
+//
+// Side membership is decided by walking the right subtree's available
+// columns; whichever side of each equality resolves there is the build key.
+// A name that resolves on BOTH sides (a self-join's `k = k`) is not
+// attributable from the condition alone and bails — as it always has.
+//
+// The last decline is about the narrowing's own Project rather than the
+// condition: it aliases every key to its BARE name, so a QUALIFIED key would
+// be renamed out from under the join that still asks for it. See the comment
+// at the check.
 func extractRightJoinKeys(cond string, rightSubtree *Node) []string {
 	if cond == "" || rightSubtree == nil {
 		return nil
@@ -101,32 +141,95 @@ func extractRightJoinKeys(cond string, rightSubtree *Node) []string {
 	if len(rightCols) == 0 {
 		return nil
 	}
+	expr := tryParseExpr(cond)
+	if expr == nil {
+		// Unparseable: attribute nothing rather than guess from text.
+		return nil
+	}
 	var keys []string
-	for _, part := range strings.Split(cond, " and ") {
-		part = strings.TrimSpace(part)
-		eq := strings.SplitN(part, "=", 2)
-		if len(eq) != 2 {
-			continue
+	stripped := make(map[string]bool)
+	for _, conj := range flattenJoinCondConjuncts(expr) {
+		cmp, isCmp := conj.(*plansql.CmpExpr)
+		if !isCmp || cmp.Op != "=" {
+			return nil // non-equi conjunct: no key to dedup on
 		}
-		l := strings.TrimSpace(eq[0])
-		r := strings.TrimSpace(eq[1])
-		lStripped := strings.ToLower(stripQualifier(l))
-		rStripped := strings.ToLower(stripQualifier(r))
-		// Check which side is in the right subtree (lowercase match).
-		lInRight := containsColumn(rightCols, lStripped)
-		rInRight := containsColumn(rightCols, rStripped)
+		l, lIsCol := joinCondColName(cmp.Left)
+		r, rIsCol := joinCondColName(cmp.Right)
+		if !lIsCol || !rIsCol {
+			// A literal operand — including the optimizer's `1 = 1` ON-TRUE
+			// sentinel — names no build column.
+			return nil
+		}
+		lInRight := containsColumn(rightCols, strings.ToLower(stripQualifier(l)))
+		rInRight := containsColumn(rightCols, strings.ToLower(stripQualifier(r)))
+		var key string
 		switch {
 		case rInRight && !lInRight:
-			keys = append(keys, r)
+			key = r
 		case lInRight && !rInRight:
-			keys = append(keys, l)
+			key = l
 		default:
-			// Ambiguous or neither resolved — bail on this equality.
+			// Ambiguous or neither resolved — bail on the whole condition.
 			// Conservative: don't dedup if we can't be sure.
 			return nil
 		}
+		// The Project the caller builds aliases every key to its BARE name
+		// (Projection{Column: k, Alias: stripQualifier(k)}), so a key the
+		// CONDITION spells qualified would be renamed out from under the
+		// condition: the build emits `q_s` while the join still asks for
+		// `b1.q_s`, which resolves to index -1 and matches nothing. That is
+		// reachable whenever the build subtree has two arms sharing a bare
+		// name and reorderJoins therefore qualifies one side — an EXISTS
+		// whose inner self-joins. The narrowing does not get to pick a
+		// spelling the condition above it already fixed, so it declines.
+		if !strings.EqualFold(bare(key), key) {
+			return nil
+		}
+		// Two keys that strip to the same name would emit one column twice
+		// and the second key would read the first's values. Same reason,
+		// same answer.
+		if stripped[bare(key)] {
+			return nil
+		}
+		stripped[bare(key)] = true
+		keys = append(keys, key)
 	}
 	return keys
+}
+
+// bare is a key's unqualified, case-folded name — what the narrowing's
+// Project would emit it under.
+func bare(key string) string { return strings.ToLower(stripQualifier(key)) }
+
+// flattenJoinCondConjuncts splits a parsed join condition on its top-level
+// ANDs, unwrapping parentheses. Unlike a string split it cannot be fooled by
+// an " and " inside a string literal, by one under an OR, or by a rendering
+// that spelled the operator in a different case.
+func flattenJoinCondConjuncts(expr plansql.Node) []plansql.Node {
+	switch e := expr.(type) {
+	case *plansql.ParenNode:
+		return flattenJoinCondConjuncts(e.Inner)
+	case *plansql.AndNode:
+		return append(flattenJoinCondConjuncts(e.Left), flattenJoinCondConjuncts(e.Right)...)
+	}
+	return []plansql.Node{expr}
+}
+
+// joinCondColName renders an ON operand as the column name the plan spells it
+// with, keeping any qualifier. ok reports whether the operand IS a bare column
+// reference; anything else (a literal, an arithmetic expression, a function
+// call) comes back false.
+func joinCondColName(n plansql.Node) (string, bool) {
+	switch e := n.(type) {
+	case *plansql.ParenNode:
+		return joinCondColName(e.Inner)
+	case *plansql.ColRef:
+		if e.Table != "" {
+			return e.Table + "." + e.Column, true
+		}
+		return e.Column, true
+	}
+	return "", false
 }
 
 // containsColumn looks up a (lowercase, unqualified) column name in the
