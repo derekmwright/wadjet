@@ -4282,6 +4282,61 @@ func twoPathCorpus() []twoPathQuery {
 	)
 
 	out = append(out,
+		// #490, one entry per consumer that used to fail LOUD on the DAG.
+		twoPathQuery{name: "DerivedAliasSortOverWindowProducer", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT k, rn FROM
+				(SELECT s_suppkey AS k, ROW_NUMBER() OVER (ORDER BY s_name) AS rn
+					FROM supplier) x
+				ORDER BY k`,
+			wantRows: 100, wantCols: []string{"k", "rn"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, false, "k",
+					func(r map[string]any) float64 { return cellNum(r, "k") })
+			}},
+		twoPathQuery{name: "DerivedAliasInUnionArm", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT SUM(k) AS s FROM
+				(SELECT k FROM (SELECT s_suppkey AS k FROM supplier) x
+				 UNION ALL SELECT n_nationkey FROM nation) u`,
+			wantRows: 1, wantCols: []string{"s"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				var want float64
+				for _, r := range sf001Table(tb, "supplier") {
+					want += toFloat(r["s_suppkey"])
+				}
+				for _, r := range sf001Table(tb, "nation") {
+					want += toFloat(r["n_nationkey"])
+				}
+				assertSingleCell(tb, rows, "s", want)
+			}},
+		// #490's third repro, and the one that was SILENT: three sibling
+		// derived tables joined on each other's aliases. Ownership of a
+		// derived output column was unanswerable, so the join-key pair kept
+		// its positional order and each key was resolved against the arm
+		// that does not own it.
+		twoPathQuery{name: "ThreeSiblingDerivedAliasesJoined", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT SUM(y.b) AS s FROM
+				(SELECT DISTINCT s_nationkey AS a FROM supplier) x
+				JOIN (SELECT DISTINCT n_nationkey AS b FROM nation) y ON x.a = y.b
+				JOIN (SELECT DISTINCT r_regionkey AS c FROM region) z ON z.c = y.b`,
+			wantRows: 1, wantCols: []string{"s"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				// The three-way join keeps the nation keys that are also a
+				// supplier's nation AND a region key.
+				suppliers := distinctKeys(tb, "supplier", "s_nationkey")
+				regions := distinctKeys(tb, "region", "r_regionkey")
+				var want float64
+				for k := range distinctKeys(tb, "nation", "n_nationkey") {
+					if suppliers[k] && regions[k] {
+						want += k
+					}
+				}
+				assertSingleCell(tb, rows, "s", want)
+			}},
+	)
+
+	out = append(out,
 		// #513. The output column NAME of an unaliased scalar function, which
 		// wantCols is the whole of: PostgreSQL labels it with the function's
 		// name, and this engine labelled it from the expression text with

@@ -138,6 +138,93 @@ func projectableProducer(typ string) bool {
 	return false
 }
 
+// sortInputStage returns the stage whose output the stage at i sorts, of
+// WHATEVER type — the standalone sort's single dependency, or the stage itself
+// when fuseSortIntoPredecessor folded the ordering onto its producer.
+//
+// It is sortKeyProducer without the projectableProducer gate, because the two
+// callers ask different things. Materializing a computed key needs a fragment
+// that appends an OpProject for Stage.ProjectExprs, which is the narrow list
+// that gate names. REWRITING a key that already names a column needs nothing
+// of the kind: it only has to know which columns the stream carries. Refusing
+// both questions with one answer is why an ORDER BY over a WINDOW producer
+// failed loud — `sort: key column "k" does not exist in the input schema` for
+// a derived alias this pass could have settled (#490).
+func sortInputStage(stages []Stage, idx map[string]int, i int) *Stage {
+	s := &stages[i]
+	if s.Type != StageSort && s.Type != "merge_sort" {
+		return s
+	}
+	if len(s.Dependencies) != 1 {
+		return nil
+	}
+	depIdx, ok := idx[s.Dependencies[0]]
+	if !ok {
+		return nil
+	}
+	return &stages[depIdx]
+}
+
+// passThroughDepth bounds the walk below a pass-through stage. Stage graphs
+// are acyclic and these chains are one or two long in practice; the bound is
+// there so a malformed graph cannot spin.
+const passThroughDepth = 8
+
+// emittedThroughPassThrough lists the columns a stage's stream carries,
+// following a PASS-THROUGH stage down to the producer whose columns it
+// forwards.
+//
+// A window stage is the case that needs it: its Stage carries WindowCols and
+// nothing else, so stageEmittedColumns alone reports it as emitting NOTHING,
+// while the fragment actually forwards every input column and appends the
+// window outputs. Every other stage type answers for itself.
+func emittedThroughPassThrough(stages []Stage, idx map[string]int, s *Stage) map[string]string {
+	emitted := stageEmittedColumns(s)
+	for depth := 0; s != nil && s.Type == StageWindow && depth < passThroughDepth; depth++ {
+		for _, w := range s.WindowCols {
+			if w.OutputCol != "" {
+				emitted[strings.ToLower(w.OutputCol)] = w.OutputCol
+			}
+		}
+		if len(s.Dependencies) != 1 {
+			return emitted
+		}
+		depIdx, ok := idx[s.Dependencies[0]]
+		if !ok {
+			return emitted
+		}
+		s = &stages[depIdx]
+		for k, v := range stageEmittedColumns(s) {
+			if _, dup := emitted[k]; !dup {
+				emitted[k] = v
+			}
+		}
+	}
+	return emitted
+}
+
+// materializedThroughPassThrough reports whether name is COMPUTED under that
+// exact spelling anywhere in the pass-through chain below s — the alias-
+// naming OpProject attachScanSelectProjections may have attached to the
+// fragment a window stage forwards. See projectionMaterializes for why the
+// stage's plain column list does not count.
+func materializedThroughPassThrough(stages []Stage, idx map[string]int, s *Stage, name string) bool {
+	for depth := 0; s != nil && depth < passThroughDepth; depth++ {
+		if projectionMaterializes(s, name) {
+			return true
+		}
+		if s.Type != StageWindow || len(s.Dependencies) != 1 {
+			return false
+		}
+		depIdx, ok := idx[s.Dependencies[0]]
+		if !ok {
+			return false
+		}
+		s = &stages[depIdx]
+	}
+	return false
+}
+
 // stageEmittedColumns lists the columns a stage's fragment ships, keyed by
 // lowercased name and valued by the spelling the stream carries.
 //
@@ -351,14 +438,15 @@ func resolveDerivedAliasSortKeys(stages []Stage) {
 		if !hasAliasSortKey(stages[i].SortKeys) {
 			continue
 		}
-		producer := sortKeyProducer(stages, idx, i)
+		producer := sortInputStage(stages, idx, i)
 		if producer == nil {
 			continue
 		}
-		emitted := stageEmittedColumns(producer)
+		emitted := emittedThroughPassThrough(stages, idx, producer)
 		for k := range stages[i].SortKeys {
 			key := &stages[i].SortKeys[k]
-			if key.AliasSource == "" || projectionMaterializes(producer, key.Column) {
+			if key.AliasSource == "" ||
+				materializedThroughPassThrough(stages, idx, producer, key.Column) {
 				continue
 			}
 			name, ok := lookupEmittedColumn(emitted, key.AliasSource)

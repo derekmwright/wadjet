@@ -383,11 +383,13 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 	// (same reason attachScanSelectProjections carries Type — #333).
 	var colTypes map[string]parquet.TypeID
 	var strictInt map[string]bool
+	var below *logical.Node
 	if len(projNode.Children) == 1 {
-		colTypes = inputColTypes(projNode.Children[0])
+		below = projNode.Children[0]
+		colTypes = inputColTypes(below)
 		// Same integer-preserving-arithmetic hint as
 		// attachScanSelectProjections (#297, #445).
-		strictInt = strictIntArithCols(projNode.Children[0])
+		strictInt = strictIntArithCols(below)
 	}
 	plan := setOpArmPlan{
 		specs: make([]ProjectExprSpec, 0, len(outNames)),
@@ -406,6 +408,25 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 		if e == "" {
 			return setOpArmPlan{}, fmt.Errorf("select item %d has neither an expression nor a column", i+1)
 		}
+		// The arm's SELECT list is written against the arm's OUTPUT schema,
+		// and the arm's stream carries SOURCE names — a Project inside the
+		// arm emits no stage, the convention every consumer compensates for.
+		// The union stage is a consumer like the rest: without this,
+		// `SELECT k FROM (SELECT s_suppkey AS k FROM supplier) x UNION ALL
+		// …` projected a column named `k` over a stream that carries
+		// s_suppkey and the task failed loud with `column "k" does not exist
+		// in the input schema` (#490).
+		ast := pr.ASTExpr
+		if below != nil {
+			if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
+				if sub, ok := substituteNestedRenameRefs(pr.ASTExpr, below); ok && sub != nil {
+					ast = sub
+					e = sub.String()
+				}
+			} else if src := resolveOutputRenameSource(strings.ToLower(e), below); src != "" {
+				e = src
+			}
+		}
 		spec := ProjectExprSpec{Expr: e, Name: outNames[i]}
 		ct := setOpColType{}
 		if pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr) {
@@ -414,10 +435,10 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			}
 			// A computed column's declared type IS its runtime type: the
 			// worker builds the output vector from it.
-			spec.Type = inferProjectionTypeCols(pr.ASTExpr, parquet.TypeString, strictInt, colTypes)
+			spec.Type = inferProjectionTypeCols(ast, parquet.TypeString, strictInt, colTypes)
 			spec.TypeKnown = true
 			ct = setOpColType{typ: spec.Type, known: true}
-		} else if t, ok := colTypes[strings.ToLower(e)]; ok {
+		} else if t, ok := setOpRefType(colTypes, e, pr); ok {
 			// A bare reference copies its source column, so the source's
 			// type is what the arm emits. spec.Type stays unset: the worker
 			// resolves a plain ColRef by DirectCopy and ignores it.
@@ -427,6 +448,26 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 		plan.types = append(plan.types, ct)
 	}
 	return plan, nil
+}
+
+// setOpRefType types a bare column reference an arm forwards, under either
+// spelling: the SOURCE name the stream carries (what the projection was just
+// resolved to) or the OUTPUT name the SELECT list wrote. inputColTypes answers
+// for whichever of the two its walk reached, and a miss on both leaves the
+// column untyped, which is what it was before either spelling was tried.
+func setOpRefType(colTypes map[string]parquet.TypeID, resolved string, pr logical.Projection) (parquet.TypeID, bool) {
+	if t, ok := colTypes[strings.ToLower(resolved)]; ok {
+		return t, true
+	}
+	for _, alt := range []string{pr.Expr, pr.Column, pr.Alias} {
+		if alt == "" {
+			continue
+		}
+		if t, ok := colTypes[strings.ToLower(alt)]; ok {
+			return t, true
+		}
+	}
+	return 0, false
 }
 
 // reconcileSetOpArmTypes makes every arm emit the same TYPE per column, not

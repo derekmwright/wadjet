@@ -34,6 +34,10 @@ type subtreeNaming struct {
 	// probe-side columns keep their names and duplicate build-side columns
 	// get qualified, so the probe-most scan owns the bare name.
 	origins map[string]string
+	// root is the subtree itself, kept so ownsKey can ask the derived-scope
+	// question the three maps cannot answer: whether a qualifier names a
+	// DERIVED TABLE this subtree is, rather than a scan it contains.
+	root *logical.Node
 }
 
 // subtreeNamingOf computes the naming facts for a logical subtree.
@@ -42,6 +46,7 @@ func subtreeNamingOf(n *logical.Node) *subtreeNaming {
 		aliasCols:   make(map[string]map[string]bool),
 		outputNames: make(map[string]bool),
 		origins:     make(map[string]string),
+		root:        n,
 	}
 	s.collect(n)
 	return s
@@ -106,19 +111,43 @@ func (s *subtreeNaming) collect(n *logical.Node) {
 // ownsKey reports whether a join-key reference resolves to a column this
 // subtree exposes. Alias-qualified keys ("n2.n_nationkey") are owned only
 // when the qualifier is one of the subtree's scan aliases and the column
-// belongs to that scan — a self-join's other copy does NOT own them.
-// Bare keys are owned when any scan in the subtree provides the column or
-// the subtree exposes it as a projection/aggregate output name.
+// belongs to that scan — a self-join's other copy does NOT own them — or when
+// the qualifier names a DERIVED TABLE this subtree is and the column is one of
+// its outputs. Bare keys are owned when any scan in the subtree provides the
+// column or the subtree exposes it as a projection/aggregate output name.
 // Expression keys (anything that isn't a plain column reference) resolve to
 // not-owned, matching the previous membership test's behavior.
+//
+// The derived-table half is what `y.b` over `(SELECT n_nationkey AS b FROM
+// nation) y` needs: `b` is the derived table's OUTPUT name and appears in no
+// scan's column set, so ownership came back false for BOTH sides of a join,
+// assignJoinKeySides left the pair in its positional order, and each key was
+// then resolved against the arm that does not own it. In a two-way join the
+// mistake is invisible (the arms' keys are symmetric); in a three-way one it
+// reached the worker verbatim and the shuffle failed loud with `partitioned
+// shuffle: key "y.b" not in schema` (#490).
 func (s *subtreeNaming) ownsKey(key string) bool {
 	k := strings.ToLower(strings.TrimSpace(key))
 	if dot := strings.IndexByte(k, '.'); dot >= 0 {
-		if cols, ok := s.aliasCols[k[:dot]]; ok {
-			return cols[k[dot+1:]]
+		if cols, ok := s.aliasCols[k[:dot]]; ok && cols[k[dot+1:]] {
+			return true
+		}
+		// The qualifier may name a DERIVED TABLE rather than a scan, and then
+		// the column after it is that table's OUTPUT name — resolved here the
+		// way a bare key is, inside the scope that owns the qualifier and
+		// nowhere else (derivedScopeBareName).
+		if bare := derivedScopeBareName(k, s.root); bare != "" {
+			return s.ownsBareName(bare)
 		}
 		return false
 	}
+	return s.ownsBareName(k)
+}
+
+// ownsBareName reports whether an UNQUALIFIED column name resolves inside this
+// subtree: a projection or aggregate output it exposes, or a column any of its
+// scans provides.
+func (s *subtreeNaming) ownsBareName(k string) bool {
 	if s.outputNames[k] {
 		return true
 	}

@@ -1828,6 +1828,31 @@ func postgresSemanticsCases() []pgCase {
 	// first two failed loud and the third resolved a join key against the arm
 	// that does not own it — which the single-process pipeline did too, and
 	// answered a silently wrong SUM for.
+	out = append(out,
+		pgCase{name: "DerivedAliasSortOverWindowProducer", ordered: true,
+			sql: `SELECT k, rn FROM
+				(SELECT s_suppkey AS k, ROW_NUMBER() OVER (ORDER BY s_name) AS rn
+					FROM supplier) x
+				ORDER BY k`},
+		pgCase{name: "DerivedAliasInUnionArm",
+			sql: `SELECT SUM(k) AS s FROM
+				(SELECT k FROM (SELECT s_suppkey AS k FROM supplier) x
+				 UNION ALL SELECT n_nationkey FROM nation) u`},
+		pgCase{name: "DerivedAliasInUnionDistinctArm",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT k FROM (SELECT s_suppkey AS k FROM supplier) x
+				 UNION SELECT n_nationkey FROM nation) u`},
+		pgCase{name: "ThreeSiblingDerivedAliasesJoined",
+			sql: `SELECT SUM(y.b) AS s FROM
+				(SELECT DISTINCT s_nationkey AS a FROM supplier) x
+				JOIN (SELECT DISTINCT n_nationkey AS b FROM nation) y ON x.a = y.b
+				JOIN (SELECT DISTINCT r_regionkey AS c FROM region) z ON z.c = y.b`},
+		pgCase{name: "ThreeSiblingDerivedAliasesJoinedNoDistinct",
+			sql: `SELECT SUM(y.b) AS s FROM
+				(SELECT s_nationkey AS a FROM supplier) x
+				JOIN (SELECT n_nationkey AS b FROM nation) y ON x.a = y.b
+				JOIN (SELECT r_regionkey AS c FROM region) z ON z.c = y.b`},
+	)
 
 	// --- MIN/MAX float NaN ordering (#457) -----------------------------------
 	//
