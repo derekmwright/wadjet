@@ -864,7 +864,11 @@ func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 type batchRenamer struct {
 	renames  []physical.OutputRename
 	compiled map[int]expr.Expr // index → compiled expr; nil map = compilation failed
-	project  bool
+	// srcIdx is rename i's source column INDEX, resolved once for the whole
+	// result. A name alone cannot address a source once two output columns
+	// share one — see renameSourceIndices.
+	srcIdx  []int
+	project bool
 }
 
 // newBatchRenamer compiles expression-bearing renames and decides whether a
@@ -889,17 +893,79 @@ func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRe
 		br.compiled[i] = e
 	}
 	if br.project && len(columns) > 0 {
-		for _, r := range renames {
+		br.srcIdx = renameSourceIndices(columns, renames)
+		for i, r := range renames {
 			if r.Expr != nil {
 				continue // existence check uses expression evaluation
 			}
-			if resolveRenameSource(columns, r.From) < 0 {
+			if br.srcIdx[i] < 0 {
 				br.project = false
 				break
 			}
 		}
 	}
 	return br
+}
+
+// renameSourceIndices resolves every rename to the source column it reads,
+// as INDICES, so that two renames can never be handed the same column.
+//
+// A name is not a key here. The SELECT list may legally carry two output
+// columns of one name — PostgreSQL answers `SELECT upper(a), upper(b)` with
+// two columns called `upper`, and #513 made this engine agree — and when the
+// producing fragment MATERIALIZES that list (attachScanSelectProjections does,
+// whenever an ORDER BY term forces a projection below the sort) the gather is
+// handed two columns both named `upper` and two renames both spelled
+// From:"upper". Resolving each by name gave both column 0, so the second
+// output carried the first one's values: 25 rows of `ALGERIA | ALGERIA` where
+// PostgreSQL answers `ALGERIA | NATION ALGERIA COMMENT`.
+//
+// Duplicates are assigned ORDINALLY — the k-th rename spelled X takes the
+// k-th column spelled X — and that is positional identity rather than a
+// guess: both lists are the SAME visible SELECT list in the SAME order, the
+// rename list by construction (extractOutputRenames walks
+// VisibleProjections) and the producer's columns because the pass that
+// materialized them walked it too.
+//
+// The assignment is SELF-VALIDATING: it is used only when the number of
+// columns carrying the name is at least the number of renames asking for it.
+// Where it is not, every rename in the group falls back to the single-name
+// resolution and the caller degrades to a rename-only pass exactly as before
+// — a shape this rule cannot justify must not be answered by it.
+func renameSourceIndices(names []string, renames []physical.OutputRename) []int {
+	out := make([]int, len(renames))
+	groups := make(map[string][]int, len(renames))
+	for i, r := range renames {
+		out[i] = -1
+		if r.Expr != nil {
+			continue // resolved by evaluation, not by column
+		}
+		key := strings.ToLower(strings.TrimSpace(r.From))
+		groups[key] = append(groups[key], i)
+	}
+	for key, group := range groups {
+		if len(group) > 1 {
+			// Exact matches only: a duplicate arises from one literal alias
+			// written N times, so the qualified/bare fallbacks below have no
+			// part in deciding WHICH of the N a rename means.
+			var matches []int
+			for i, n := range names {
+				if strings.EqualFold(strings.TrimSpace(n), key) {
+					matches = append(matches, i)
+				}
+			}
+			if len(matches) >= len(group) {
+				for k, ri := range group {
+					out[ri] = matches[k]
+				}
+				continue
+			}
+		}
+		for _, ri := range group {
+			out[ri] = resolveRenameSource(names, renames[ri].From)
+		}
+	}
+	return out
 }
 
 // resolveRenameSource finds the column an OutputRename's source names, with
@@ -987,6 +1053,13 @@ func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
 	for j, c := range b.Schema {
 		names[j] = c.Name
 	}
+	// Resolved against THIS batch, not against the column list the renamer
+	// was built from: a spilled result replays batches whose schema is the
+	// same shape, and re-resolving keeps the two paths reading one rule.
+	srcIdx := br.srcIdx
+	if len(srcIdx) != len(br.renames) {
+		srcIdx = renameSourceIndices(names, br.renames)
+	}
 	newCols := make([]*batch.Vector, len(br.renames))
 	newSchema := make([]parquet.Column, len(br.renames))
 	for i, r := range br.renames {
@@ -998,13 +1071,13 @@ func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
 			newSchema[i] = parquet.Column{Name: r.To, Type: parquet.TypeFloat64, Nullable: true}
 			continue
 		}
-		srcIdx := resolveRenameSource(names, r.From)
-		if srcIdx < 0 {
+		si := srcIdx[i]
+		if si < 0 || si >= len(b.Columns) {
 			// Should not happen — project was decided from these names.
 			continue
 		}
-		newCols[i] = b.Columns[srcIdx]
-		newSchema[i] = b.Schema[srcIdx]
+		newCols[i] = b.Columns[si]
+		newSchema[i] = b.Schema[si]
 		newSchema[i].Name = r.To
 	}
 	return &batch.RecordBatch{
@@ -2766,8 +2839,8 @@ func (c *Coordinator) dispatchComputeStage(
 			SortKeys:            sorts,
 			// Task.Limit is dead (zero readers) and stage.Limit can now be NoLimit(-1);
 			// deliberately not carried — see #481.
-			RowLimit:            stage.RowLimit,
-			Inputs:              taskInputs,
+			RowLimit: stage.RowLimit,
+			Inputs:   taskInputs,
 			// Probe-split affinity: the rendezvous owner of this task's
 			// probe files ("" on every other path — plain binpack).
 			AffinityWorkerID: affinityFor(probeOwners, w),
