@@ -599,6 +599,27 @@ func networkConstError(typ batch.TypeID, value any) error {
 	return nil
 }
 
+// dateConstError is decimalConstError's counterpart for a DATE literal that
+// is a real, validly-formatted date whose day count does not fit the int32
+// the DATE column encoding stores (kernel.DateLiteralDays / #451).
+//
+// It used to answer instead of refusing: parseDateToDays SATURATED past
+// roughly 1677-09-22..2262-04-11 (a time.Duration nanosecond overflow, not
+// this column's actual range), so `d = '9999-12-31'` — the common SCD-2
+// end-of-time sentinel — silently compared as 2262-04-11 instead. PostgreSQL
+// raises 22008 (datetime_field_overflow) for a date outside its own
+// representable range, and ADR-0012 item 1 makes PostgreSQL the authority on
+// error-versus-not, so this is its SQLSTATE.
+func dateConstError(typ batch.TypeID, value any) error {
+	if typ != batch.TypeDate || value == nil {
+		return nil
+	}
+	if _, err := kernel.DateLiteralDays(value); err != nil {
+		return sqlerr.New("22008", "date out of range: %v", value)
+	}
+	return nil
+}
+
 func (f *KernelFilter) Init(_ context.Context) error { return nil }
 
 func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
@@ -642,6 +663,9 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 			return nil, err
 		}
 		if err := networkConstError(typ, f.Value); err != nil {
+			return nil, err
+		}
+		if err := dateConstError(typ, f.Value); err != nil {
 			return nil, err
 		}
 		// The column resolved; the TYPE has no comparison kernel. Reporting
@@ -735,6 +759,9 @@ func (f *InFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Rec
 				return nil, err
 			}
 			if err := networkConstError(typ, v); err != nil {
+				return nil, err
+			}
+			if err := dateConstError(typ, v); err != nil {
 				return nil, err
 			}
 		}

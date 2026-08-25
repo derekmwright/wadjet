@@ -472,6 +472,32 @@ func TestParseDateForWrite(t *testing.T) {
 	}
 }
 
+// TestParseDateForWriteDoesNotClampFarDates is the parquet-writer half of
+// #451: computing the day count via t.Sub(epochDate) is a time.Duration,
+// which saturates at ±math.MaxInt64 ns (~292 years) rather than reporting
+// an overflow, so ingesting a string DATE value outside roughly
+// 1677-09-22..2262-04-11 silently WROTE the wrong day into the file — a
+// real data-corruption path, since this runs at ingest. Values below are
+// PostgreSQL-verified (`date '<lit>' - date '1970-01-01'`).
+func TestParseDateForWriteDoesNotClampFarDates(t *testing.T) {
+	tests := []struct {
+		lit  string
+		days int32
+	}{
+		{"2262-04-11", 106751},  // last date the old code got right
+		{"2262-04-12", 106752},  // first date the old code clamped
+		{"9999-12-31", 2932896}, // the SCD-2 "end of time" sentinel
+		{"1677-09-22", -106751}, // last date the old code got right, downward
+		{"1677-09-21", -106752}, // first date the old code clamped, downward
+		{"0001-01-01", -719162},
+	}
+	for _, tc := range tests {
+		if got := parseDateForWrite(tc.lit); got != tc.days {
+			t.Errorf("parseDateForWrite(%q) = %d, want %d", tc.lit, got, tc.days)
+		}
+	}
+}
+
 func TestUnhex(t *testing.T) {
 	// Digits
 	for i := byte('0'); i <= '9'; i++ {

@@ -4620,6 +4620,16 @@ func parseDateToEpochDays(s string) int64 {
 // parseDateToEpochDaysOK is the uncached parse with an explicit success
 // signal (0 is a valid result for the epoch itself). Used at expression
 // compile time by compileCmp's temporal-literal specialization.
+//
+// The day count is computed from t.Unix() (civil-days arithmetic), not
+// t.Sub(epoch): Sub returns a time.Duration, which saturates at
+// ±math.MaxInt64 ns (~292 years) rather than reporting an overflow, so a
+// 4-digit-year date before 1678 or after 2262 previously answered a
+// silently CLAMPED day count (#451, same mechanism as
+// kernel.parseDateToDays). No range check is needed here: the result
+// compares against a DATE column's int32-range value, and an int64 outside
+// that range simply never equals one — the value has nowhere further to
+// truncate to.
 func parseDateToEpochDaysOK(s string) (int64, bool) {
 	for _, layout := range []string{
 		"2006-01-02",
@@ -4628,8 +4638,13 @@ func parseDateToEpochDaysOK(s string) (int64, bool) {
 		"2006-01-02 15:04:05",
 	} {
 		if t, err := time.Parse(layout, s); err == nil {
-			epoch := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
-			return int64(t.Sub(epoch).Hours() / 24), true
+			const secondsPerDay = 86400
+			sec := t.Unix()
+			days := sec / secondsPerDay
+			if sec%secondsPerDay < 0 {
+				days--
+			}
+			return days, true
 		}
 	}
 	return 0, false

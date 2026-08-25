@@ -92,7 +92,17 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 		case int:
 			return int64(tv), true
 		case string:
-			d := parseDateToDays(tv)
+			d, err := parseDateToDays(tv)
+			if err != nil {
+				// Out of the DATE column's int32 day range (#451): there is
+				// no in-range bound to prune with, and using the pre-fix
+				// clamped value deleted row groups the filter kept.
+				// Withholding is safe — the per-row kernel
+				// (ResolveFilterKernel) refuses this same literal with the
+				// same SQLSTATE, and no row group being excluded by
+				// pruning is what lets that refusal actually run.
+				return nil, false
+			}
 			if d == 0 && tv != "1970-01-01" {
 				return nil, false
 			}

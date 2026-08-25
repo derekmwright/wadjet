@@ -1715,6 +1715,21 @@ func postgresSemanticsCases() []pgCase {
 			CAST('1996-01-10' AS date) - 1 AS prev, CAST('1996-01-10' AS date) + 5 AS nxt`},
 		pgCase{name: "ExtractFromDate", sql: `SELECT EXTRACT(YEAR FROM DATE '1996-03-15') AS y,
 			EXTRACT(MONTH FROM DATE '1996-03-15') AS m, EXTRACT(DAY FROM DATE '1996-03-15') AS d`},
+		// #451: a DATE literal's day count used to be computed via
+		// t.Sub(epoch), a time.Duration that saturates at ±math.MaxInt64 ns
+		// (~292 years) instead of reporting an overflow, so every date
+		// outside roughly 1677-09-22..2262-04-11 silently answered the
+		// window's edge. PostgreSQL's own `date` range reaches 4713 BC to
+		// 5874897 AD, comfortably past every literal here, so it is the
+		// authority these are checked against — not just Go arithmetic
+		// re-deriving its own answer.
+		pgCase{name: "DateFarFromEpoch", sql: `SELECT
+			DATE '9999-12-31' - DATE '1970-01-01' AS far_future,
+			DATE '0001-01-01' - DATE '1970-01-01' AS far_past,
+			DATE '2262-04-12' - DATE '1970-01-01' AS just_past_old_clamp_upper,
+			DATE '1677-09-21' - DATE '1970-01-01' AS just_past_old_clamp_lower,
+			DATE '9999-12-31' = DATE '9999-12-31' AS far_future_self_equal,
+			DATE '9999-12-31' > DATE '2262-04-11' AS far_future_greater_than_old_clamp_edge`},
 	)
 
 	// --- DISTINCT, and where its dedup key comes from -------------------

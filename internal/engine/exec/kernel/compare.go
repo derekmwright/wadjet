@@ -328,7 +328,14 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 		}
 		return nil
 	case batch.TypeDate:
-		return compareFilterImpl(getInt32Data, toDateInt32(value), op)
+		// A literal that does not fit the DATE column's int32 day encoding
+		// returns no kernel; the caller (exec.dateConstError) raises 22008
+		// for it, the same convention as the CIDR arm above (#451).
+		days, err := toDateInt32(value)
+		if err != nil {
+			return nil
+		}
+		return compareFilterImpl(getInt32Data, days, op)
 	case batch.TypeBytes:
 		// BYTES compares by bytes, which is what the string kernel does —
 		// it reads the same arena. The constant arrives as a string from a
@@ -831,7 +838,11 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 	case batch.TypeDate:
 		set := make(map[int32]struct{}, len(values))
 		for _, v := range values {
-			set[toDateInt32(v)] = struct{}{}
+			days, err := toDateInt32(v)
+			if err != nil {
+				return nil // not representable: the caller raises 22008
+			}
+			set[days] = struct{}{}
 		}
 		return inFilterInt32(getInt32Data, set, negate)
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
@@ -1591,37 +1602,88 @@ func toInt64(v any) int64 {
 	}
 }
 
-// toDateInt32 converts a value to days-since-epoch for DATE column comparison.
-// DATE columns store int32 days since 1970-01-01, not milliseconds.
-func toDateInt32(v any) int32 {
+// errDateDaysOutOfRange is returned by toDateInt32/parseDateToDays for a
+// value that is a real, validly-formatted date whose day count does not fit
+// the DATE column's int32 storage (batch.TypeDate → Int32Data). Every
+// caller must treat it as a query error (SQLSTATE 22008,
+// datetime_field_overflow — see exec.dateConstError) and never fall back to
+// a clamped or truncated day count; this is what lets ResolveFilterKernel
+// and ResolveInFilterKernel decline to build a kernel, the same "nil
+// kernel, caller raises" convention CidrSortKey and DecimalConstText
+// already use (#451).
+var errDateDaysOutOfRange = fmt.Errorf("date value out of range for the DATE column's day encoding")
+
+// dateDaysToInt32 checks that a day count fits the DATE column's int32
+// encoding before narrowing it. int32(days) alone truncates silently, which
+// is the same class of defect as parseDateToDays's Duration saturation — a
+// bound PostgreSQL's own `date` type never reaches (its supported range,
+// 4713 BC to 5874897 AD, sits comfortably inside int32 days from
+// 1970-01-01) but a caller can still hand this function a raw int64/int
+// outside it.
+func dateDaysToInt32(days int64) (int32, error) {
+	if days < math.MinInt32 || days > math.MaxInt32 {
+		return 0, errDateDaysOutOfRange
+	}
+	return int32(days), nil
+}
+
+// toDateInt32 converts a value to days-since-epoch for DATE column
+// comparison, or reports an error when the value cannot be represented in
+// the DATE column's int32 day encoding. DATE columns store int32 days since
+// 1970-01-01, not milliseconds.
+func toDateInt32(v any) (int32, error) {
 	switch tv := v.(type) {
 	case int32:
-		return tv
+		return tv, nil
 	case int64:
-		return int32(tv)
+		return dateDaysToInt32(tv)
 	case int:
-		return int32(tv)
+		return dateDaysToInt32(int64(tv))
 	case string:
 		return parseDateToDays(tv)
 	default:
-		return 0
+		return 0, nil
 	}
+}
+
+// DateLiteralDays is toDateInt32 exported for exec.dateConstError to recover
+// the same failure ResolveFilterKernel/ResolveInFilterKernel already saw
+// when they returned a nil kernel for a DATE constant, mirroring
+// CidrSortKey/IPv6LitKey/DecimalConstText's role for their own types.
+func DateLiteralDays(v any) (int32, error) {
+	return toDateInt32(v)
+}
+
+// civilDaysSinceEpoch floors a UTC instant to whole days since 1970-01-01
+// without a time.Duration round trip (see parseDateToDays). Flooring rather
+// than truncating also fixes this same arithmetic's rounding of a pre-epoch
+// timestamp WITH a time-of-day toward the epoch: parseDateToDays(
+// "1969-12-31 12:00:00") was 0 while parseDateToDays("1969-12-31") was -1,
+// from the same expression's Hours()/24 truncating toward zero (#451).
+func civilDaysSinceEpoch(t time.Time) int64 {
+	const secondsPerDay = 86400
+	sec := t.Unix()
+	days := sec / secondsPerDay
+	if sec%secondsPerDay < 0 {
+		days--
+	}
+	return days
 }
 
 // parseDateToDays converts a date string to days since 1970-01-01.
 //
-// KNOWN CORRECTNESS LIMIT (#451): dates outside 1677-09-22 .. 2262-04-11 are
-// SATURATED, not refused. t.Sub returns a time.Duration — int64 NANOSECONDS —
-// and its contract is to return the maximum (minimum) Duration rather than
-// report an overflow, and ±math.MaxInt64 ns is ±106751.99 days, so every date
-// past the upper edge answers 106751 (2262-04-11) and every date past the
-// lower edge answers -106751 (1677-09-22). The int32 return is not the
-// constraint: it holds ~5.8 million years. Nothing reports the clamp — the
-// caller gets an ordinary-looking day count, so `d = '9999-12-31'` (the SCD
-// end-of-time sentinel) filters on 2262-04-11, and StatsDomainValue hands the
-// same clamped count to the prune layer as a row-group bound. The answer is
-// wrong rows, not an error.
-func parseDateToDays(s string) int32 {
+// Computes the day count from t.Unix() (civil-days arithmetic) rather than
+// t.Sub(epoch) (#451): Sub returns a time.Duration — an int64 count of
+// NANOSECONDS — whose documented contract is to SATURATE at
+// ±math.MaxInt64 ns (~106751.99 days, ~292 years) rather than report an
+// overflow, so every date outside roughly 1677-09-22..2262-04-11 answered a
+// silently CLAMPED day count with no error and nothing logged: `d =
+// '9999-12-31'` (the SCD end-of-time sentinel) compared as 2262-04-11, and
+// StatsDomainValue handed the same clamped count to the prune layer as a
+// row-group bound, deleting rows the filter would have kept. A date beyond
+// the DATE column's own int32 day range now returns errDateDaysOutOfRange
+// instead of silently narrowing.
+func parseDateToDays(s string) (int32, error) {
 	t, err := time.Parse("2006-01-02", s)
 	if err != nil {
 		// Try with timestamp formats, truncate to date
@@ -1635,11 +1697,10 @@ func parseDateToDays(s string) int32 {
 			}
 		}
 		if err != nil {
-			return 0
+			return 0, nil
 		}
 	}
-	epoch := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
-	return int32(t.Sub(epoch).Hours() / 24)
+	return dateDaysToInt32(civilDaysSinceEpoch(t))
 }
 
 // parseTimestampString parses common timestamp formats into epoch milliseconds.

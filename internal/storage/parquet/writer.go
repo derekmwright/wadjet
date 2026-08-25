@@ -228,10 +228,23 @@ func unhex(c byte) byte {
 }
 
 // parseDateForWrite converts a date string "2006-01-02" to days since epoch.
+//
+// Computed from t.Unix() (civil-days arithmetic), not t.Sub(epochDate):
+// Sub returns a time.Duration, which saturates at ±math.MaxInt64 ns
+// (~292 years) rather than reporting an overflow, so a 4-digit-year date
+// before 1678 or after 2262 previously wrote a silently WRONG day count —
+// a real data-corruption path, since this runs at ingest
+// (batch.parseDateString / kernel.parseDateToDays, #451).
 func parseDateForWrite(s string) int32 {
 	t, err := time.Parse("2006-01-02", s)
 	if err != nil {
 		return 0
 	}
-	return int32(t.Sub(epochDate).Hours() / 24)
+	const secondsPerDay = 86400
+	sec := t.Unix()
+	days := sec / secondsPerDay
+	if sec%secondsPerDay < 0 {
+		days--
+	}
+	return int32(days)
 }
