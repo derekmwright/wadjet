@@ -248,14 +248,33 @@ func TestSemiAntiBuildFilter_FixtureNegatives(t *testing.T) {
 			t.Fatal("non-semi consumer of the shared exchange must block marking")
 		}
 	})
-	t.Run("non-integer join key", func(t *testing.T) {
-		// l_shipmode is a STRING. Nothing between this pass and the emit op
-		// converts it, and the emit op reads Int64Data — this gate is the
-		// planner half of that claim, dynamicFilterIntKey the runtime half.
+	// The two key-class gates are pinned SEPARATELY. There is one gate per
+	// side and they are checked in sequence, so a single negative that trips
+	// both leaves whichever runs second untested — deleting the probe-side
+	// check used to leave the whole suite green.
+	t.Run("non-integer BUILD key", func(t *testing.T) {
+		// l_shipmode is a real STRING column of the fixture catalog (not a
+		// missing one, which would refuse for a different reason). The probe
+		// key stays o_orderkey, an INT32, so the build gate is the only one
+		// that can be the reason this does not mark.
 		stages := semiAntiFixture("l_shipmode")
 		NewPlanner(cat).markSemiAntiBuildFilters(ctx, stages)
 		if _, consumers := findSemiAntiMarks(stages); len(consumers) != 0 {
-			t.Fatal("a STRING join key must not be marked: the emit op indexes Int64Data")
+			t.Fatal("a STRING build key must not be marked: the emit op indexes Int64Data")
+		}
+	})
+	t.Run("non-integer PROBE key", func(t *testing.T) {
+		// The mirror: an INT32 build key, so the build gate passes, and a
+		// STRING probe key. The emit runs over S's output, so it is the PROBE
+		// column DynamicFilterEmitOp actually indexes — applyDynamicFilters
+		// has always checked both sides and this pass checked only one.
+		stages := semiAntiFixture("l_orderkey")
+		stages[2].Columns = []string{"o_orderstatus"}
+		stages[3].JoinLeftKeys = []string{"o_orderstatus"}
+		stages[4].JoinLeftKeys = []string{"o_orderstatus"}
+		NewPlanner(cat).markSemiAntiBuildFilters(ctx, stages)
+		if _, consumers := findSemiAntiMarks(stages); len(consumers) != 0 {
+			t.Fatal("a STRING probe key must not be marked: the emit op indexes Int64Data on S's output")
 		}
 	})
 	t.Run("no catalog", func(t *testing.T) {

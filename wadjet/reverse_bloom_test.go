@@ -180,3 +180,46 @@ func TestReverseBloomNeverAnswersFromABrokenFilter(t *testing.T) {
 		t.Errorf("%d bloom key-type mismatches across the type matrix", got)
 	}
 }
+
+// TestForwardBloomAcceptsEveryIntBackedKeyType runs at DEFAULT thresholds, so
+// the reverse bloom never engages and what is under test is the FORWARD one —
+// the bloom HashJoin.BloomPushdownOp hands the probe pipeline on every inner,
+// semi and right join.
+//
+// It shares BloomFilterOp with the reverse bloom, and therefore shares the
+// key-type guard, but NOT the predicate behind it: HashJoin.useIntKey comes
+// from isIntKeyColumn, which admits nine types, while a bloom KEY's encoding
+// is chosen by bloomIntKey, which admits five. TIMESTAMP, IPv4, MAC and
+// DURATION live in Int64Data and the integer fast path indexes them correctly,
+// but they take appendColumnValue's bytes encoding when they are a bloom key.
+// Two different questions, two different answers, and a guard that asked the
+// wrong one disengaged a perfectly good forward bloom on four shipped types —
+// with an ERROR log and a wrong-answer counter — for an ordinary
+// `IN (SELECT ...)`.
+//
+// Every one of the nine is covered here, because the two predicates differ by
+// exactly the four this list would otherwise be missing.
+func TestForwardBloomAcceptsEveryIntBackedKeyType(t *testing.T) {
+	db := tmOpen(t)
+	ctx := context.Background()
+	for _, col := range []string{"c_i32", "c_i64", "c_ts", "c_ipv4", "c_mac", "c_port", "c_proto", "c_dur", "c_date"} {
+		t.Run(col, func(t *testing.T) {
+			before := exec.BloomKeyTypeMismatches.Load()
+			sql := fmt.Sprintf(
+				`SELECT COUNT(*) AS n FROM %s a WHERE a.%s IN (SELECT b.%s FROM %s b WHERE b.id < 2500)`,
+				typematrix.Table, col, col, typematrix.Table)
+			res, err := tmRun(ctx, db, sql)
+			if err != nil {
+				t.Fatalf("query on %s: %v", col, err)
+			}
+			if n := exec.BloomKeyTypeMismatches.Load() - before; n != 0 {
+				t.Fatalf("%d key-type mismatches on a %s key: the forward bloom reads this column correctly "+
+					"and was disengaged anyway", n, col)
+			}
+			if len(res.Rows) != 1 {
+				t.Fatalf("expected one aggregate row, got %d", len(res.Rows))
+			}
+			t.Logf("%s: %v", col, res.Rows[0])
+		})
+	}
+}

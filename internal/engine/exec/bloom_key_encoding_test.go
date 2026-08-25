@@ -457,3 +457,68 @@ func TestBloomFilterRefusesIntFastPathOverANonIntColumn(t *testing.T) {
 		t.Fatal("the mismatch was not counted")
 	}
 }
+
+// TestBloomRefusesAnIntBackedColumnOfTheWrongType pins the boundary between
+// keyTypesAgree's two claims, which is exactly one predicate wide.
+//
+// TIMESTAMP passes the STORAGE claim (isIntKeyColumn: it is Int64Data and the
+// fast path reads it correctly) and fails the ENCODING claim (bloomIntKey: a
+// TIMESTAMP bloom key goes through appendColumnValue, an INT64 one does not).
+// A bloom built on INT64 and pointed at a TIMESTAMP column must therefore
+// still disengage — widening the encoding claim to isIntKeyColumn to fix the
+// forward-bloom regression would let those two meet and answer wrongly.
+func TestBloomRefusesAnIntBackedColumnOfTheWrongType(t *testing.T) {
+	const n = 64
+	ins := bloomKeyBatch(t, parquet.Column{Name: "k", Type: parquet.TypeInt64, Nullable: true},
+		"k", n, func(i int) any { return int64(i) })
+	bb := NewBloomBuilder(n)
+	if err := bb.Add(ins, "k"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	op := bb.FilterOp("k")
+
+	before := BloomKeyTypeMismatches.Load()
+	probe := bloomKeyBatch(t, parquet.Column{Name: "k", Type: parquet.TypeTimestamp, Nullable: true},
+		"k", n, func(i int) any { return int64(i) })
+	out, err := op.Execute(context.Background(), probe)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if out == nil || out.ActiveLen() != n {
+		t.Fatal("a bloom built on INT64 must disengage over a TIMESTAMP column, not filter with an encoding that cannot match")
+	}
+	if BloomKeyTypeMismatches.Load() == before {
+		t.Fatal("the encoding-class mismatch was not counted — the second claim has been widened to the storage predicate")
+	}
+}
+
+// ...and the same pair the other way round is FINE, because both sides took
+// the integer fast path and it is width-agnostic.
+func TestBloomAcceptsCrossWidthIntegerKeys(t *testing.T) {
+	const n = 64
+	ins := bloomKeyBatch(t, parquet.Column{Name: "k", Type: parquet.TypeInt64, Nullable: true},
+		"k", n, func(i int) any { return int64(i) })
+	bb := NewBloomBuilder(n)
+	if err := bb.Add(ins, "k"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	op := bb.FilterOp("k")
+
+	before := BloomKeyTypeMismatches.Load()
+	probe := bloomKeyBatch(t, parquet.Column{Name: "k", Type: parquet.TypeInt32, Nullable: true},
+		"k", n, func(i int) any { return int32(i) })
+	out, err := op.Execute(context.Background(), probe)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if out == nil || out.ActiveLen() != n {
+		got := 0
+		if out != nil {
+			got = out.ActiveLen()
+		}
+		t.Fatalf("INT32 probe against an INT64-built bloom kept %d of %d rows; the integer path widens both to int64", got, n)
+	}
+	if BloomKeyTypeMismatches.Load() != before {
+		t.Fatal("a cross-width integer pair must not count as a mismatch")
+	}
+}
