@@ -1273,6 +1273,14 @@ type pendingTableDrop struct {
 // the bytes the instant the manifest disappears races every such query. No
 // NEW query can be racing — the table is already gone from meta.Tables —
 // so the grace only has to outlive work already in flight.
+//
+// Nothing ENFORCES that it does, and an operator enabling reclaim has to
+// know it: wadjet's --query-timeout defaults to 0 (unlimited), so a long
+// analytical query can outlive any grace. The rule is to keep the query
+// timeout at or below the drop grace, or raise the grace above the
+// longest query allowed. The failure mode if you don't is a query failing
+// on a missing object, not a wrong answer — but it is still a failure the
+// operator chose. See docs/adr/0020-drop-table-reclaim-is-opt-in.md.
 const DefaultDropTableGrace = 30 * time.Minute
 
 // liveCatalogState observes the catalog as it stands RIGHT NOW: the set of
@@ -1348,11 +1356,15 @@ func (c *Catalog) liveCatalogState(ctx context.Context) (paths map[string]bool, 
 //     not close it (see the residual note below).
 //  2. Defense in depth: a path is only ever a delete candidate if it
 //     falls under its OWN table's partition.TablePrefix(name) —
-//     "tables/<name>/...". An Iceberg-registered table's warehouse files
-//     (or anything registered against a foreign store/bucket via
-//     iceberg.NewCatalogIntegrationWithStore) never take that shape, so
-//     they can never reach the Delete call below even if layer (1)
-//     somehow missed them.
+//     "tables/<name>/..." — and only via this catalog's own configured
+//     store and bucket. This is a CONVENTION, not an impossibility:
+//     iceberg/reader.go's resolvePath strips the scheme AND the bucket
+//     off an absolute data-file URI, so a warehouse at
+//     s3://somebucket/tables/events/... resolves into exactly the
+//     guarded shape. It is a cheap second opinion on paths that are
+//     already owned, not the thing standing between an Iceberg warehouse
+//     and a delete — layer 0 is (everything Iceberg registers goes
+//     through AddFiles, so none of it is ever marked).
 //
 // On top of those, this mirrors compaction.Compactor's own
 // deleteFromStore/FlushDeferredDeletes recreated-object guard: a path

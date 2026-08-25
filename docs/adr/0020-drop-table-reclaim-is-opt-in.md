@@ -111,14 +111,32 @@ the sweep that calls it is opt-in.**
    is a bigger design than this one. Layer 0 is the layer that does not
    depend on timing at all, which is why the blast radius is bounded
    there and not here.
-2. **Table-prefix scoping (defense in depth).** A pending path is only
-   ever a delete candidate if it falls under its own table's
-   `partition.TablePrefix(name)` — `tables/<name>/...`. An
-   Iceberg-registered table's warehouse files, or anything registered
-   against a foreign store/bucket via
-   `iceberg.NewCatalogIntegrationWithStore`, never take that shape, so
-   they can never reach the delete call even if the guard above somehow
-   missed them.
+2. **Table-prefix scoping (defense in depth, and a CONVENTION — not an
+   impossibility).** A pending path is only ever a delete candidate if it
+   falls under its own table's `partition.TablePrefix(name)` —
+   `tables/<name>/...`. The first version of this record claimed foreign
+   data "never takes that shape". That is not true, and the record should
+   not have said it:
+
+   - `iceberg/reader.go`'s `resolvePath` strips the scheme *and the
+     bucket* off an absolute data-file URI, so an Iceberg table named
+     `events` whose manifests point at
+     `s3://somebucket/tables/events/part-0.parquet` resolves to exactly
+     `tables/events/part-0.parquet` — the guarded shape, character for
+     character. Nothing stops a warehouse from being laid out that way.
+   - `iceberg/catalog.go`'s three best-effort rollbacks (`RegisterTable`,
+     `DiscoverAndRegister`, `RefreshTable` each call
+     `_ = ci.catalog.DropTable(...)` when registration fails partway)
+     schedule whatever the partial registration had already written into
+     the manifest — warehouse paths included.
+
+   Both are safe, but they are safe because of **layer 0**: everything
+   Iceberg registers goes through `AddFiles`, so none of it is marked
+   engine-written and none of it can enter `pendingDrops` at all,
+   whatever shape the path takes. Prefix scoping is a cheap second
+   opinion for paths that *are* owned; it is not the thing standing
+   between an Iceberg warehouse and a delete, and treating it as one
+   would be exactly the mistake the first version of this ADR made.
 3. **Recreated-object guard**, mirroring `compaction.Compactor`'s own
    `deleteFromStore`/`FlushDeferredDeletes`: a path whose object was
    modified after the drop was recorded is skipped, since something has
@@ -186,13 +204,64 @@ default everywhere, and turning it on is safe wherever it runs — the
 guards above hold regardless of which `*Catalog` instance calls
 `FlushDroppedTableFiles`.
 
+## The invariant, with its qualifiers
+
+Written out so nobody has to infer it from five bullet points:
+
+> **At the moment `FlushDroppedTableFiles` observes it, a path it deletes
+> was written by this engine, was referenced by a table that no longer
+> exists, is referenced by no table that does exist, lies under that
+> table's own prefix in this catalog's own bucket, and carries no object
+> modification later than the drop that scheduled it.**
+
+Every clause is load-bearing, and two qualifiers are not decoration:
+
+- *"At the moment it observes it"* is the TOCTOU residual. Observation and
+  deletion are not atomic, and cannot be made so from inside one process:
+  `pendingDrops` is in-process while the catalog it consults is shared.
+  Re-observing per pending entry shrinks the window to one entry's delete
+  batch, and layer 0 makes what is inside that window bytes this engine
+  wrote — but the window is not zero. A re-registration by another
+  `*Catalog` instance landing inside it is still invisible.
+- *"was written by this engine"* is what the invariant leans on when
+  timing gives out, which is why ownership, not the live-manifest guard,
+  is the layer described first.
+
+## Two limitations an operator has to know about
+
+**In-flight queries and the grace period.** `DefaultDropTableGrace` is 30
+minutes for the same reason `compaction.DefaultDeleteGrace` is: a query
+dispatched against the table's last manifest resolved its file list at
+dispatch time and keeps reading those exact paths until it finishes. No
+*new* query can be racing — the table is gone from `meta.Tables` — so the
+grace only has to outlive work already in flight. But nothing enforces
+that it does: wadjet's `--query-timeout` **defaults to `0`, unlimited**, so
+a long analytical query can outlive any grace you pick, and it will fail
+on a missing object rather than return a wrong answer.
+
+> Operator rule: keep the query timeout **at or below** `DropGrace`, or
+> raise `DropGrace` above the longest query you allow. `--query-timeout=0`
+> with reclaim enabled means a sufficiently long query can be killed by a
+> DROP that ran half an hour into it.
+
+**Reclaim is per-`*Catalog`, not per-cluster.** See the wiring paragraph
+above: a DROP through a catalog with no flusher declared records nothing
+and leaks. That is deliberate, and it is why the default is off.
+
 ## Consequences
 
 - Every one of the guards above has a permanent regression test
-  (`internal/storage/catalog/catalog_test.go`,
+  (`internal/storage/catalog/drop_reclaim_test.go`,
+  `internal/storage/catalog/catalog_test.go`,
   `internal/storage/compaction/gc_test.go`,
-  `internal/iceberg/drop_reclaim_test.go`), including both cases the
-  review reproduced.
+  `internal/iceberg/drop_reclaim_test.go`), including all three cases the
+  reviews reproduced, and each was confirmed to fail with its own fix
+  backed out.
+- Reclaim collects only what the engine wrote. A catalog whose tables
+  were all registered rather than ingested — every bench and harness
+  topology — reclaims **nothing**, by design, and its DROPs are still
+  metadata-only. That is a leak, and the right one: the alternative is
+  deleting an operator's staged data.
 - With `ReclaimDroppedTables` left at its default, dropped tables' files
   leak in the object store until an operator enables the flag or cleans
   them up by other means. This is a known, accepted gap, not a silent one
