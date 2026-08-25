@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -430,5 +432,165 @@ func TestReclaimStillCollectsTheOldIncarnationAfterADropRecreateInsert(t *testin
 	}
 	if len(man.Partitions) != 1 || len(man.Partitions[0].Files) != 1 || man.Partitions[0].Files[0].Path != newPath {
 		t.Fatalf("live manifest should still reference exactly %q, got %+v", newPath, man.Partitions)
+	}
+}
+
+// deleteFailingStore fails Delete for the named keys, so the reclaim
+// sweep's delete-error path can be exercised without an S3 outage.
+type deleteFailingStore struct {
+	objstore.Store
+	fail map[string]bool
+}
+
+func (d *deleteFailingStore) Delete(ctx context.Context, bucket, key string) error {
+	if d.fail[key] {
+		return errors.New("injected: delete failed")
+	}
+	return d.Store.Delete(ctx, bucket, key)
+}
+
+// captureLogs redirects the default slog logger into a buffer for the
+// duration of the test and returns an accessor for what was written.
+func captureLogs(t *testing.T) func() string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf.String
+}
+
+// TestReclaimLogsEverySkipClass pins reclaim's observability. Every branch
+// that declines to delete is an operator signal — most of all the
+// live-manifest one, which means something re-registered a path a dropped
+// table also owned — and a bare `continue` makes "the sweep protected your
+// data" indistinguishable from "the sweep did nothing".
+func TestReclaimLogsEverySkipClass(t *testing.T) {
+	logs := captureLogs(t)
+
+	base := objstore.NewMemStore()
+	failing := &deleteFailingStore{Store: base, fail: map[string]bool{}}
+	cat := New(NewMemKV(), failing, "test-bucket")
+	ctx := context.Background()
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	schema := testSchema()
+
+	put := func(key string) {
+		t.Helper()
+		if _, err := failing.Put(ctx, "test-bucket", key, bytes.NewReader([]byte("x")), 1, "application/octet-stream"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// events owns four engine-written files, each of which will be skipped
+	// (or fail) for a different reason.
+	livePath := "tables/events/chunk_live.parquet"
+	prefixPath := "warehouse/events/chunk_foreign.parquet"
+	modifiedPath := "tables/events/chunk_modified.parquet"
+	failPath := "tables/events/chunk_undeletable.parquet"
+	for _, p := range []string{livePath, prefixPath, modifiedPath, failPath} {
+		put(p)
+	}
+	failing.fail[failPath] = true
+
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	entries := []FileEntry{}
+	for _, p := range []string{livePath, prefixPath, modifiedPath, failPath} {
+		entries = append(entries, FileEntry{Path: p, SizeBytes: 1, NumRows: 1, CreatedAt: time.Now().UTC()})
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", entries); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second, surviving table registers one of those paths, so it is
+	// live at flush time.
+	if err := cat.CreateTable(ctx, "keeper", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddFiles(ctx, "keeper", nil, "tables/keeper", []FileEntry{
+		{Path: livePath, SizeBytes: 1, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	put(modifiedPath) // rewritten after the drop was recorded
+
+	if n := cat.FlushDroppedTableFiles(ctx, 0); n != 0 {
+		t.Fatalf("every path should have been skipped or failed, got %d deleted", n)
+	}
+
+	out := logs()
+	for _, want := range []string{
+		"path is still referenced by a live table's manifest",
+		"path falls outside its own table's prefix",
+		"object was written after the drop was recorded",
+		"reclaim failed to delete a dropped table's file",
+		"dropped-table reclaim finished with skips",
+		"skipped_live=1",
+		"skipped_prefix=1",
+		"skipped_modified=1",
+		"delete_errors=1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("reclaim logs are missing %q\n--- logs ---\n%s", want, out)
+		}
+	}
+}
+
+// TestReclaimLogsTheRecreatedTableSkip covers the one skip class the test
+// above cannot stage without a mid-flush writer: the dropped name coming
+// back while the sweep runs.
+func TestReclaimLogsTheRecreatedTableSkip(t *testing.T) {
+	logs := captureLogs(t)
+
+	store := objstore.NewMemStore()
+	kv := &hookKV{MetaKV: NewMemKV()}
+	cat := New(kv, store, "test-bucket")
+	ctx := context.Background()
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	schema := testSchema()
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := "tables/events/chunk_0198ff00-0000-7000-8000-00000000000c.parquet"
+	if _, err := store.Put(ctx, "test-bucket", path, bytes.NewReader([]byte("d")), 1, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
+		{Path: path, SizeBytes: 1, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+	kv.onGet = func() {
+		if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+			t.Errorf("recreate: %v", err)
+		}
+	}
+	kv.armed = true
+
+	if n := cat.FlushDroppedTableFiles(ctx, -time.Minute); n != 0 {
+		t.Fatalf("expected the re-created name to block the entry, got %d deleted", n)
+	}
+	out := logs()
+	for _, want := range []string{
+		"the dropped table's name was re-created while this sweep was running",
+		"skipped_recreated_table=1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("reclaim logs are missing %q\n--- logs ---\n%s", want, out)
+		}
 	}
 }

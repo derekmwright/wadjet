@@ -1301,12 +1301,29 @@ func (c *Catalog) FlushDroppedTableFiles(ctx context.Context, grace time.Duratio
 		return 0
 	}
 
+	// Every branch below that declines to delete something is an operator
+	// signal, and a bare `continue` makes reclaim unobservable: "the
+	// sweep ran, nothing happened" is indistinguishable from "the sweep
+	// protected a live table's files from a re-registration race". Each
+	// class is logged, and counted for the one summary line at the end.
+	// Mirrors compaction.Compactor.FlushDeferredDeletes.
+	log := slog.Default().With("component", "drop_reclaim")
+	var (
+		skipLive     int // protected by a live manifest — the interesting one
+		skipReborn   int // the table name came back mid-flush
+		skipPrefix   int // outside its own table's prefix
+		skipModified int // object written since the drop was recorded
+		failedDelete int
+		requeued     int
+	)
+
 	// First observation. Taken before anything is removed from
 	// pendingDrops, so an error here costs nothing but a round.
 	livePaths, liveNames, err := c.liveCatalogState(ctx)
 	if err != nil {
 		// Can't prove any path is safe to delete this round: try again
 		// next sweep instead of deleting blind.
+		log.Warn("reclaim round skipped: cannot read the live catalog state", "error", err)
 		return 0
 	}
 
@@ -1350,7 +1367,10 @@ func (c *Catalog) FlushDroppedTableFiles(ctx context.Context, grace time.Duratio
 			// Same rule as the first observation, applied to one entry:
 			// prove nothing, delete nothing. Put it back so a transient
 			// KV error doesn't leak a whole table's files.
+			log.Warn("reclaim deferred: cannot re-read the live catalog state before deleting",
+				"table", pd.table, "files", len(pd.paths), "error", reErr)
 			c.requeuePendingDrop(pd)
+			requeued++
 			continue
 		}
 		// The protected set only ever GROWS within a flush: a path seen
@@ -1365,25 +1385,58 @@ func (c *Catalog) FlushDroppedTableFiles(ctx context.Context, grace time.Duratio
 			}
 		}
 		if reborn[pd.table] {
-			continue // re-created mid-flush: leak this entry rather than race it
+			// re-created mid-flush: leak this entry rather than race it
+			log.Warn("reclaim skipped: the dropped table's name was re-created while this sweep was running",
+				"table", pd.table, "files", len(pd.paths), "dropped_at", pd.at)
+			skipReborn++
+			continue
 		}
 
 		tablePrefix := partition.TablePrefix(pd.table) + "/"
 		for _, p := range pd.paths {
 			if livePaths[p] {
-				continue // still referenced by a live manifest: never delete
+				// Still referenced by a live manifest: never delete. This
+				// is the guard earning its keep — some table re-registered
+				// a path a dropped incarnation also owned — so it is a
+				// signal, not routine.
+				log.Warn("reclaim skipped: path is still referenced by a live table's manifest",
+					"table", pd.table, "path", p)
+				skipLive++
+				continue
 			}
 			if !strings.HasPrefix(p, tablePrefix) {
-				continue // defense in depth: never delete outside our own table's prefix
+				log.Warn("reclaim skipped: path falls outside its own table's prefix",
+					"table", pd.table, "path", p, "prefix", tablePrefix)
+				skipPrefix++
+				continue
 			}
 			if info, hErr := c.store.Head(ctx, c.bucket, p); hErr == nil && info.LastModified.After(pd.at) {
-				continue // recreated-object guard: something wrote here since the drop
+				log.Warn("reclaim skipped: object was written after the drop was recorded",
+					"table", pd.table, "path", p, "dropped_at", pd.at, "object_modified", info.LastModified)
+				skipModified++
+				continue
 			}
 			if dErr := c.store.Delete(ctx, c.bucket, p); dErr != nil {
+				log.Warn("reclaim failed to delete a dropped table's file",
+					"table", pd.table, "path", p, "error", dErr)
+				failedDelete++
 				continue
 			}
 			deleted++
 		}
+	}
+
+	skipped := skipLive + skipReborn + skipPrefix + skipModified
+	switch {
+	case skipped > 0 || failedDelete > 0 || requeued > 0:
+		// A round that protected something, or failed to delete
+		// something, is worth a line even when nothing was reclaimed.
+		log.Warn("dropped-table reclaim finished with skips",
+			"deleted", deleted, "skipped_live", skipLive, "skipped_recreated_table", skipReborn,
+			"skipped_prefix", skipPrefix, "skipped_modified", skipModified,
+			"delete_errors", failedDelete, "entries_requeued", requeued)
+	case deleted > 0:
+		log.Info("reclaimed dropped tables' files", "deleted", deleted, "tables", len(due))
 	}
 	return deleted
 }
