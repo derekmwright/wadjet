@@ -1760,6 +1760,49 @@ func postgresSemanticsCases() []pgCase {
 				GROUP BY y.j ORDER BY y.j`},
 	)
 
+	// --- #488: a QUALIFIED ORDER BY term names the INPUT column --------------
+	//
+	// PostgreSQL matches an ORDER BY term against the SELECT list's output
+	// names only when the term is a BARE identifier. `x.col` is resolved in
+	// the FROM scope like any other expression, so it names the input column
+	// even when a select alias shadows it — verified live, where these two
+	// statements come back in OPPOSITE orders. Wadjet answered both the same
+	// way (the alias's), on both arms and silently.
+	out = append(out,
+		pgCase{name: "QualifiedSortTermOverShadowingAlias", ordered: true,
+			sql: `SELECT s.s_acctbal AS s_suppkey, s.s_name FROM supplier s
+				ORDER BY s.s_suppkey DESC`},
+		pgCase{name: "QualifiedSortTermByTableName", ordered: true,
+			sql: `SELECT s_acctbal AS s_suppkey, s_name FROM supplier
+				ORDER BY supplier.s_suppkey DESC`},
+		// The BARE spelling of the same query, which binds the alias. Both
+		// entries have to hold at once — that is the whole rule.
+		pgCase{name: "BareSortTermOverShadowingAlias", ordered: true,
+			sql: `SELECT s_acctbal AS s_suppkey, s_name FROM supplier
+				ORDER BY s_suppkey DESC`},
+		// Over a self-join the qualifier is the only thing that says which arm
+		// the term means; the bare fallback matched the other one.
+		pgCase{name: "QualifiedSortTermOverSelfJoin", ordered: true,
+			sql: `SELECT n2.n_name, n1.n_regionkey FROM nation n1
+				JOIN nation n2 ON n1.n_regionkey = n2.n_nationkey
+				ORDER BY n1.n_name`},
+	)
+
+	// --- #489: a self-join INSIDE a derived table ---------------------------
+	//
+	// Both arms answer to the same bare column name, so a SELECT-list alias
+	// over one of them can only be resolved through the spelling that keeps
+	// the qualifier. The derived table's own alias used to be written OVER the
+	// inner ones, after which nothing could tell the arms apart: PostgreSQL 17
+	// answers 5 groups here and wadjet answered 25, on both arms.
+
+	// --- #490: window, UNION and three-way derived-alias consumers ----------
+	//
+	// Three more consumers of a derived table's alias. On the stage DAG the
+	// first two failed loud and the third resolved a join key against the arm
+	// that does not own it — which the single-process pipeline did too, and
+	// answered a silently wrong SUM for.
+
 	// --- MIN/MAX float NaN ordering (#457) -----------------------------------
 	//
 	// PostgreSQL's float order (float8_cmp_internal) places NaN ABOVE every

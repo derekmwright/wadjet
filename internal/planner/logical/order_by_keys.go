@@ -81,7 +81,7 @@ func VisibleProjections(projs []Projection) []Projection {
 // one passed in only when a `SELECT *` query needed a projection created for
 // it.
 func resolveOrderBy(child, project *Node, info *plansql.SelectInfo) (*Node, []OrderExpr, error) {
-	outputs := selectOutputNames(info)
+	outputs, items := selectOutputNames(info)
 	starOnly := isStarOnly(info.Columns)
 
 	keys := make([]OrderExpr, 0, len(info.OrderBy))
@@ -89,7 +89,7 @@ func resolveOrderBy(child, project *Node, info *plansql.SelectInfo) (*Node, []Or
 
 	for _, ob := range info.OrderBy {
 		key := resolveOrderByColumn(cleanExpr(ob.Column), info.Columns)
-		if sortKeyCarried(key, outputs, starOnly, ob.Expr) {
+		if sortKeyCarried(key, items, outputs, starOnly, ob.Expr) {
 			keys = append(keys, orderExprFor(key, ob))
 			continue
 		}
@@ -204,17 +204,80 @@ func orderExprFor(column string, ob plansql.OrderByItem) OrderExpr {
 // column set is not known here — a bare column reference is taken at its word
 // (that is the pre-existing contract, and the catalog rejects a name that does
 // not exist), and anything computed is materialized.
-func sortKeyCarried(key string, outputs []string, starOnly bool, ast plansql.Node) bool {
+//
+// items are the SELECT-list columns outputs was derived from, index for index,
+// and they are needed for one rule: **a QUALIFIED ORDER BY term names an INPUT
+// column, never a SELECT-list alias** (#488). PostgreSQL only consults output
+// names for a bare identifier — that is what makes `SELECT s_acctbal AS
+// s_suppkey … ORDER BY s_suppkey` order by ACCTBAL — and `x.col` is resolved in
+// the FROM scope like any other expression. The two rules meet here because
+// namesSameColumn deliberately tolerates one side carrying a qualifier the
+// other omits, so `s.s_suppkey` matched the output named `s_suppkey` and the
+// sort read the alias: verified live on postgres:17-alpine, which orders that
+// query by the real key while this engine ordered it by the shadowing alias, on
+// both arms and silently.
+//
+// The match therefore has to prove the output IS that input column: the select
+// item is a bare column reference of the same name, qualified by the same
+// relation or by none. Anything else falls through and the term is
+// materialized as a hidden key over the input, where it belongs.
+func sortKeyCarried(key string, items []plansql.SelectColumn, outputs []string, starOnly bool, ast plansql.Node) bool {
 	if starOnly {
 		_, isCol := ast.(*plansql.ColRef)
 		return isCol || ast == nil
 	}
-	for _, out := range outputs {
-		if namesSameColumn(out, key) {
+	ref := qualifiedInputRef(key, ast)
+	for i, out := range outputs {
+		if !namesSameColumn(out, key) {
+			continue
+		}
+		if ref == nil || selectItemIsColumn(items, i, ref) {
 			return true
 		}
 	}
 	return false
+}
+
+// qualifiedInputRef returns the column reference an ORDER BY term names when
+// the term is a QUALIFIED one still being resolved against the input.
+//
+// resolveOrderByColumn runs first and may already have mapped the term onto a
+// select item by its EXPRESSION text (`SELECT s.a AS k … ORDER BY s.a` becomes
+// the key `k`). That mapping names the same column the qualified reference
+// does, so it is not the shadowing case and gets no extra scrutiny — which is
+// what the key-vs-spelling comparison here detects.
+func qualifiedInputRef(key string, ast plansql.Node) *plansql.ColRef {
+	col, ok := unwrapParens(ast).(*plansql.ColRef)
+	if !ok || col.Table == "" {
+		return nil
+	}
+	if !strings.EqualFold(key, qualifiedColumn(col)) {
+		return nil
+	}
+	return col
+}
+
+// selectItemIsColumn reports whether the select item at index i IS the input
+// column ref names — a bare column reference of the same name, qualified by
+// the same relation or by none.
+//
+// An unqualified item is accepted because a bare column in a SELECT list is
+// only legal when one relation in scope carries that name, so it cannot be the
+// other side of a self-join; a DIFFERENTLY qualified one is rejected for
+// exactly that reason (`SELECT n2.nm … ORDER BY n1.nm` orders by n1's column in
+// PostgreSQL, and the bare fallback would have matched n2's).
+func selectItemIsColumn(items []plansql.SelectColumn, i int, ref *plansql.ColRef) bool {
+	if i >= len(items) {
+		return false
+	}
+	sc := items[i]
+	if sc.Alias != "" || sc.ColumnRef == "" || sc.IsAgg || sc.IsWindow {
+		return false
+	}
+	if !strings.EqualFold(sc.ColumnRef, ref.Column) {
+		return false
+	}
+	return sc.TableRef == "" || strings.EqualFold(sc.TableRef, ref.Table)
 }
 
 // namesSameColumn compares two column spellings the way the engine's runtime
@@ -271,9 +334,12 @@ func qualifiedColumn(c *plansql.ColRef) string {
 
 // selectOutputNames lists the column names the SELECT-list Project emits, in
 // order — the same choice buildProject makes: the alias, else the column
-// reference, else the expression text.
-func selectOutputNames(info *plansql.SelectInfo) []string {
+// reference, else the expression text — together with the select item each
+// name came from, index for index. sortKeyCarried needs the items to tell an
+// output that IS an input column from one that merely shares its name.
+func selectOutputNames(info *plansql.SelectInfo) ([]string, []plansql.SelectColumn) {
 	out := make([]string, 0, len(info.Columns))
+	items := make([]plansql.SelectColumn, 0, len(info.Columns))
 	for _, col := range info.Columns {
 		if col.Star {
 			continue
@@ -288,8 +354,9 @@ func selectOutputNames(info *plansql.SelectInfo) []string {
 		default:
 			out = append(out, cleanExpr(col.Expr))
 		}
+		items = append(items, col)
 	}
-	return out
+	return out, items
 }
 
 // aggregateBelow finds the Aggregate the SELECT-list projection reads from,

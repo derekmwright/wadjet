@@ -4189,6 +4189,47 @@ func twoPathCorpus() []twoPathQuery {
 			}},
 	)
 
+	// --- #488 / #489 / #490 / #513: the rest of the derived-alias family ----
+	//
+	// Four defects with one shape between them: a NAME resolved against the
+	// wrong thing. Three of them were wrong on BOTH arms, so the two-arm
+	// compare alone would have passed every one — the assertA truths below
+	// are what hold them, and each was read off postgres:17-alpine.
+	out = append(out,
+		// #488. A QUALIFIED ORDER BY term names the INPUT column: PostgreSQL
+		// consults output names only for a bare identifier. The two entries
+		// here are the same query in its two spellings, and they answer in
+		// OPPOSITE orders — an engine that binds both to the alias (which
+		// this one did, silently, on both arms) passes one and fails the
+		// other.
+		twoPathQuery{name: "QualifiedSortTermOverShadowingAlias", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT s.s_acctbal AS s_suppkey, s.s_name FROM supplier s
+				ORDER BY s.s_suppkey DESC`,
+			wantRows: 100, wantCols: []string{"s_suppkey", "s_name"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				// The sort key is the REAL s_suppkey, which the result does
+				// not carry — but s_name encodes it: Supplier#000000NNN.
+				assertOrderedBy(tb, rows, true, "the input column s_suppkey (via s_name)",
+					func(r map[string]any) string { return cellText(r, "s_name") })
+			}},
+		twoPathQuery{name: "BareSortTermOverShadowingAlias", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT s_acctbal AS s_suppkey, s_name FROM supplier
+				ORDER BY s_suppkey DESC`,
+			wantRows: 100, wantCols: []string{"s_suppkey", "s_name"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, true, "the ALIAS s_suppkey (which carries s_acctbal)",
+					func(r map[string]any) float64 { return cellNum(r, "s_suppkey") })
+			}},
+		twoPathQuery{name: "QualifiedSortTermByTableName", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT s_acctbal AS s_suppkey, s_name FROM supplier
+				ORDER BY supplier.s_suppkey DESC`,
+			wantRows: 100, wantCols: []string{"s_suppkey", "s_name"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				assertOrderedBy(tb, rows, true, "the input column s_suppkey (via s_name)",
+					func(r map[string]any) string { return cellText(r, "s_name") })
+			}},
+	)
+
 	out = append(out,
 		// #513. The output column NAME of an unaliased scalar function, which
 		// wantCols is the whole of: PostgreSQL labels it with the function's
