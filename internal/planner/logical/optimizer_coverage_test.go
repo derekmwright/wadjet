@@ -1005,7 +1005,7 @@ func TestBuildSetOpPlan_Except(t *testing.T) {
 // --- decorrelateExists edge cases ---
 
 func TestDecorrelateExists_NilNode(t *testing.T) {
-	result := decorrelateExists(nil)
+	result := decorrelateExists(nil, nil)
 	if result != nil {
 		t.Error("expected nil for nil input")
 	}
@@ -1013,7 +1013,7 @@ func TestDecorrelateExists_NilNode(t *testing.T) {
 
 func TestDecorrelateExists_NonFilter(t *testing.T) {
 	scan := NewScan("events", "e")
-	result := decorrelateExists(scan)
+	result := decorrelateExists(scan, nil)
 	if result.Type != NodeScan {
 		t.Errorf("expected scan unchanged, got %s", result.Type)
 	}
@@ -1022,7 +1022,7 @@ func TestDecorrelateExists_NonFilter(t *testing.T) {
 // --- decorrelateScalarSubqueries edge cases ---
 
 func TestDecorrelateScalarSubqueries_NilNode(t *testing.T) {
-	result := decorrelateScalarSubqueries(nil)
+	result := decorrelateScalarSubqueries(nil, nil)
 	if result != nil {
 		t.Error("expected nil for nil input")
 	}
@@ -1030,7 +1030,7 @@ func TestDecorrelateScalarSubqueries_NilNode(t *testing.T) {
 
 func TestDecorrelateScalarSubqueries_NonFilter(t *testing.T) {
 	scan := NewScan("events", "e")
-	result := decorrelateScalarSubqueries(scan)
+	result := decorrelateScalarSubqueries(scan, nil)
 	if result.Type != NodeScan {
 		t.Errorf("expected scan unchanged, got %s", result.Type)
 	}

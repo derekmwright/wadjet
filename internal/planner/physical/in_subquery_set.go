@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -108,6 +109,19 @@ func (p *Planner) materializeInSubquery(ctx context.Context, in *plansql.InExpr,
 		p.refuseCorrelated(fmt.Errorf("%w: an IN subquery references outer %s"+
 			" and cannot execute as a standalone set producer",
 			ErrCorrelatedSubqueryDistributed, describeOuterRefs(dangling)))
+		return nil, false
+	}
+	// A subquery whose FROM reads a RECURSIVE CTE has no set to inline here.
+	// executeSubquery runs it through buildSubqueryPipeline, which has no
+	// fixed-point cache, so a recursive reference reads ZERO rows with NO
+	// error — and the len(rows)==0 branch below would take that for a genuine
+	// empty set and answer `x IN ()` FALSE / `x NOT IN ()` TRUE for every row.
+	// That is the silent wrong answer #F1 removes, so the shape is REFUSED and
+	// routed to the coordinator-local pipeline, which materializes the
+	// recursive CTE and answers it.
+	if p.subqueryReadsRecursiveCTE(subq.SQL) {
+		p.refuseInSubquery(fmt.Errorf("%w: the subquery reads a recursive CTE, "+
+			"which has no set-producer lowering", ErrInSubqueryDistributed))
 		return nil, false
 	}
 	bound := maxInlinedInSetRows()
@@ -254,3 +268,67 @@ func findInSubqueryValue(in *plansql.InExpr) *plansql.SubqueryNode {
 // BroadcastBytesThreshold < 0 — is now replicated to every task. #539 tracks
 // the shape that removes the need.
 var NullAwareAntiForcedBroadcasts atomic.Int64
+
+// subqueryReadsRecursiveCTE reports whether the FROM of sql — at any nesting,
+// including inside a derived table and through the subquery's own WITH — names
+// a RECURSIVE CTE, one declared recursive in the enclosing statement (p.ctes)
+// or in the subquery itself. Its logical twin is innerRelationsAreScannable's
+// CTE decline: the logical pass keeps a recursive CTE out of a semi/anti
+// join's build side, and this keeps it out of a materialized IN set.
+func (p *Planner) subqueryReadsRecursiveCTE(sql string) bool {
+	recursive := make(map[string]bool, len(p.ctes))
+	for _, c := range p.ctes {
+		if c.Recursive {
+			recursive[strings.ToLower(c.Name)] = true
+		}
+	}
+	return sqlReadsRecursiveCTE(sql, recursive)
+}
+
+func sqlReadsRecursiveCTE(sql string, recursive map[string]bool) bool {
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		return false
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil || info == nil {
+		return false
+	}
+	scope := recursive
+	if len(info.CTEs) > 0 {
+		scope = make(map[string]bool, len(recursive)+len(info.CTEs))
+		for k := range recursive {
+			scope[k] = true
+		}
+		for _, c := range info.CTEs {
+			if c.Recursive {
+				scope[strings.ToLower(c.Name)] = true
+			}
+		}
+	}
+	for _, t := range info.Tables {
+		if tableRefReadsRecursiveCTE(t, scope) {
+			return true
+		}
+	}
+	for _, j := range info.Joins {
+		ref := plansql.TableRef{Name: j.RightTable}
+		if j.RightTableRef != nil {
+			ref = *j.RightTableRef
+		}
+		if tableRefReadsRecursiveCTE(ref, scope) {
+			return true
+		}
+	}
+	return false
+}
+
+func tableRefReadsRecursiveCTE(t plansql.TableRef, recursive map[string]bool) bool {
+	if strings.HasPrefix(t.Name, "(") {
+		if len(t.Name) < 2 || !strings.HasSuffix(t.Name, ")") {
+			return false
+		}
+		return sqlReadsRecursiveCTE(t.Name[1:len(t.Name)-1], recursive)
+	}
+	return recursive[strings.ToLower(t.Name)]
+}
