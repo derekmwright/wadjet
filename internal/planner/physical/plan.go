@@ -8983,28 +8983,35 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		leftRows := leftSink.ToRows()
 		rightRows := alignSetOpRows(leftSink.Schema(), rightSink.Schema(), rightSink.ToRows())
 
+		// Schema() instead of Batches()[0].Schema — ToRows above released the
+		// sinks' batches as it boxed them — and the arms' two schemas
+		// UNIFIED rather than the first one alone, because FromRows re-reads
+		// each row's rendered decimal text at the schema's scale and the
+		// first arm's scale truncated the second arm's values (#532).
+		//
+		// It is resolved HERE rather than at the FromRows call below because
+		// the DEDUP KEY needs it too: a set operation decides membership by
+		// equality, so two values the comparator calls equal have to produce
+		// one key — which their BOXES alone cannot say, a DECIMAL being
+		// rendered text (#499).
+		schema := unifySetOpSchemas(leftSink.Schema(), rightSink.Schema())
+		keyer := newSetOpKeyer(schema)
+
 		var resultRows []map[string]any
 
 		switch u.op {
 		case "intersect":
-			resultRows = intersectRows(leftRows, rightRows, u.all)
+			resultRows = intersectRows(keyer, leftRows, rightRows, u.all)
 		case "except":
-			resultRows = exceptRows(leftRows, rightRows, u.all)
+			resultRows = exceptRows(keyer, leftRows, rightRows, u.all)
 		default: // "union"
 			resultRows = append(leftRows, rightRows...)
 			if !u.all {
-				resultRows = deduplicateRows(resultRows)
+				resultRows = deduplicateRows(keyer, resultRows)
 			}
 		}
 
 		if len(resultRows) > 0 {
-			// Schema() instead of Batches()[0].Schema — ToRows above
-			// released the sinks' batches as it boxed them, and the arms'
-			// two schemas UNIFIED rather than the first one alone: the rows
-			// are boxed as text at each arm's own DECIMAL scale, and
-			// FromRows re-reads that text at the schema's scale, so the
-			// first arm's scale truncated the second arm's values (#532).
-			schema := unifySetOpSchemas(leftSink.Schema(), rightSink.Schema())
 			if schema != nil {
 				u.batches = []*batch.RecordBatch{batch.FromRows(schema, resultRows)}
 			}
@@ -9050,16 +9057,16 @@ func (u *setOpSourceAdapter) RowsScanned() int64 {
 
 // intersectRows returns rows that appear in both left and right.
 // If all is true, preserves duplicate counts (min of left/right occurrences).
-func intersectRows(left, right []map[string]any, all bool) []map[string]any {
+func intersectRows(k *setOpKeyer, left, right []map[string]any, all bool) []map[string]any {
 	rightSet := make(map[string]int, len(right))
 	for _, row := range right {
-		rightSet[rowHashKey(row)]++
+		rightSet[k.key(row)]++
 	}
 
 	if all {
 		result := make([]map[string]any, 0)
 		for _, row := range left {
-			key := rowHashKey(row)
+			key := k.key(row)
 			if rightSet[key] > 0 {
 				result = append(result, row)
 				rightSet[key]--
@@ -9072,7 +9079,7 @@ func intersectRows(left, right []map[string]any, all bool) []map[string]any {
 	seen := make(map[string]struct{}, len(left))
 	result := make([]map[string]any, 0)
 	for _, row := range left {
-		key := rowHashKey(row)
+		key := k.key(row)
 		if _, already := seen[key]; already {
 			continue
 		}
@@ -9086,16 +9093,16 @@ func intersectRows(left, right []map[string]any, all bool) []map[string]any {
 
 // exceptRows returns rows from left that do not appear in right.
 // If all is true, each right occurrence removes one left occurrence.
-func exceptRows(left, right []map[string]any, all bool) []map[string]any {
+func exceptRows(k *setOpKeyer, left, right []map[string]any, all bool) []map[string]any {
 	rightSet := make(map[string]int, len(right))
 	for _, row := range right {
-		rightSet[rowHashKey(row)]++
+		rightSet[k.key(row)]++
 	}
 
 	if all {
 		result := make([]map[string]any, 0)
 		for _, row := range left {
-			key := rowHashKey(row)
+			key := k.key(row)
 			if rightSet[key] > 0 {
 				rightSet[key]--
 			} else {
@@ -9109,7 +9116,7 @@ func exceptRows(left, right []map[string]any, all bool) []map[string]any {
 	seen := make(map[string]struct{}, len(left))
 	result := make([]map[string]any, 0)
 	for _, row := range left {
-		key := rowHashKey(row)
+		key := k.key(row)
 		if _, already := seen[key]; already {
 			continue
 		}
@@ -9157,11 +9164,11 @@ func alignSetOpRows(want, have []parquet.Column, rows []map[string]any) []map[st
 }
 
 // deduplicateRows removes duplicate rows from a slice of row maps.
-func deduplicateRows(rows []map[string]any) []map[string]any {
+func deduplicateRows(k *setOpKeyer, rows []map[string]any) []map[string]any {
 	seen := make(map[string]struct{}, len(rows))
 	result := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
-		key := rowHashKey(row)
+		key := k.key(row)
 		if _, exists := seen[key]; !exists {
 			seen[key] = struct{}{}
 			result = append(result, row)
@@ -9170,7 +9177,13 @@ func deduplicateRows(rows []map[string]any) []map[string]any {
 	return result
 }
 
-// rowHashKey generates a unique string key from a row's column values.
+// rowHashKey generates a string key from a row's column values, with no types
+// to consult: names sorted for determinism, values rendered with %v.
+//
+// It is the FALLBACK now, for a set operation whose schema cannot type the
+// rows — an arm that produced nothing has none. setOpKeyer.key is the typed
+// path and is what every schema-carrying set operation uses, because %v alone
+// cannot say that a DECIMAL's "12.75" and "12.7500" are one value (#499).
 func rowHashKey(row map[string]any) string {
 	// Sort keys for deterministic hashing
 	keys := make([]string, 0, len(row))

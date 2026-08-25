@@ -1030,6 +1030,33 @@ func postgresSemanticsCases() []pgCase {
 			INTERSECT ALL SELECT r_regionkey FROM region ORDER BY 1`},
 		pgCase{name: "ExceptAllMultiplicity", sql: `SELECT n_regionkey FROM nation
 			EXCEPT ALL SELECT r_regionkey FROM region ORDER BY 1`},
+		// A set operation decides membership by EQUALITY, so its dedup key
+		// has to agree with the comparator — and two DECIMAL columns of
+		// DIFFERENT scale are where those two can part company: 12.75 and
+		// 12.7500 are one number and two renderings, and the local path keyed
+		// on the rendering (#499). d_2 is (d_key-100)*0.25 and d_4 is
+		// (d_key-100)*0.0625, so the two arms overlap on a quarter of their
+		// values and neither contains the other.
+		pgCase{name: "UnionAcrossDecimalScales",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT d_2 AS v FROM dec_probe UNION SELECT d_4 FROM dec_probe) u`},
+		pgCase{name: "UnionAllAcrossDecimalScales",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT d_2 AS v FROM dec_probe UNION ALL SELECT d_4 FROM dec_probe) u`},
+		pgCase{name: "IntersectAcrossDecimalScales",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT d_2 AS v FROM dec_probe INTERSECT SELECT d_4 FROM dec_probe) u`},
+		pgCase{name: "ExceptAcrossDecimalScales",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT d_2 AS v FROM dec_probe EXCEPT SELECT d_4 FROM dec_probe) u`},
+		pgCase{name: "ExceptReversedAcrossDecimalScales",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT d_4 AS v FROM dec_probe EXCEPT SELECT d_2 FROM dec_probe) u`},
+		// The tell from the filing: GROUP BY over the same concatenation keys
+		// through the COLUMNAR encoding and was already right, so it has to
+		// agree with the set operation above — one engine, one answer to "are
+		// these the same value".
+		pgCase{name: "GroupByAcrossDecimalScales",
+			sql: `SELECT COUNT(*) AS n FROM (SELECT v FROM
+				(SELECT d_2 AS v FROM dec_probe UNION ALL SELECT d_4 FROM dec_probe) t GROUP BY v) g`},
+		// The VALUES, not only their count: two wrong keys can cancel.
+		pgCase{name: "UnionAcrossDecimalScalesRows",
+			sql: `SELECT v FROM (SELECT d_2 AS v FROM dec_probe UNION SELECT d_4 FROM dec_probe) u ORDER BY v`},
 	)
 
 	// --- Pagination ------------------------------------------------------

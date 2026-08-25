@@ -3,6 +3,8 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"slices"
+	"sort"
 	"testing"
 	"time"
 
@@ -160,4 +162,129 @@ func TestDecimalBoxedPairTwoPath(t *testing.T) {
 			}
 		})
 	}
+
+	// The two arms agree on the COUNTS above and do NOT agree on the VALUES:
+	// the stage DAG carries the wider arm's unscaled Int128 across the shuffle
+	// and renders it at the FIRST arm's declared scale, so every value from a
+	// DECIMAL(18,4) arm comes back 100x too large under a DECIMAL(9,2) first
+	// arm (#533). That is a different site from the one #532 fixed — the arm's
+	// declared type is decided at plan time and carried in the stage schema,
+	// not where the rows are boxed — so it is PINNED here rather than papered
+	// over, in the shape the pg-oracle corpus uses: the pin FAILS the moment
+	// the two agree, which is the fix's proof.
+	t.Run("values_pinned_533", func(t *testing.T) {
+		sql := fmt.Sprintf("SELECT a FROM %s UNION ALL SELECT b FROM %s", dbpTable, dbpTable)
+		render := func(dag bool) []string {
+			rows := dtpRun(t, ctx, single, coord, sql, dag)
+			out := make([]string, 0, len(rows))
+			for _, r := range rows {
+				out = append(out, fmt.Sprintf("%v", r["a"]))
+			}
+			sort.Strings(out)
+			return out
+		}
+		sv, dv := render(false), render(true)
+		if slices.Equal(sv, dv) {
+			t.Errorf("the two paths now render the same values, so #533 is FIXED:\n  %v\n"+
+				"Delete this pin and assert the values against PostgreSQL instead.", sv)
+			return
+		}
+		t.Logf("known divergence, NOT gated (#533): the stage DAG rescales the wider arm.\n"+
+			"  single-process: %v\n  stage DAG:      %v", sv, dv)
+	})
+}
+
+// TestSetOpDecimalKeyTwoPath holds both arms to PostgreSQL's answer for a set
+// operation whose two sides are DECIMAL columns of DIFFERENT scale (#499).
+//
+// The single-process path boxed every row into a map and keyed it with
+// `fmt.Sprintf("%v", ...)`, and a DECIMAL boxes as its RENDERED TEXT — so
+// "12.75" and "12.7500" were two keys for one number, and UNION counted a
+// value twice where INTERSECT could not find it at all. The DAG lowers a set
+// operation to a GroupByAll aggregate, which keys through the columnar
+// encoding, so the two paths could disagree about the same query; that is what
+// this gate is for, over and above each arm matching PostgreSQL.
+func TestSetOpDecimalKeyTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want int64
+	}{
+		// a is DECIMAL(9,2) and b is DECIMAL(18,4); they hold the same number
+		// at two scales on four of the nine rows, and NULL is a member like
+		// any other and matches a NULL on the other side.
+		{"union", "SELECT a FROM %s UNION SELECT b FROM %s", 9},
+		{"union_all", "SELECT a FROM %s UNION ALL SELECT b FROM %s", 18},
+		{"intersect", "SELECT a FROM %s INTERSECT SELECT b FROM %s", 4},
+		{"except", "SELECT a FROM %s EXCEPT SELECT b FROM %s", 1},
+		{"except_reversed", "SELECT b FROM %s EXCEPT SELECT a FROM %s", 4},
+		// One arm against itself: the shape a single scale already answered,
+		// pinning that the key did not change for it.
+		{"self_union", "SELECT a FROM %s UNION SELECT a FROM %s", 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sql := fmt.Sprintf("SELECT COUNT(*) AS n FROM ("+tc.sql+") u", dbpTable, dbpTable)
+			var single64, dag64 int64
+			for _, arm := range []struct {
+				name string
+				dag  bool
+			}{{"single", false}, {"dag", true}} {
+				rows := dtpRun(t, ctx, single, coord, sql, arm.dag)
+				if len(rows) != 1 {
+					t.Fatalf("%s: %d rows, want 1", arm.name, len(rows))
+				}
+				got := ketInt(t, arm.name, rows[0]["n"])
+				if arm.dag {
+					dag64 = got
+				} else {
+					single64 = got
+				}
+				if got != tc.want {
+					t.Errorf("%s: %s\n  got %d, want %d (live PostgreSQL 17)", arm.name, sql, got, tc.want)
+				}
+			}
+			if single64 != dag64 {
+				t.Errorf("the two paths disagree: single-process %d, stage DAG %d", single64, dag64)
+			}
+		})
+	}
+
+	// The two arms agree on the COUNTS above and do NOT agree on the VALUES:
+	// the stage DAG carries the wider arm's unscaled Int128 across the shuffle
+	// and renders it at the FIRST arm's declared scale, so every value from a
+	// DECIMAL(18,4) arm comes back 100x too large under a DECIMAL(9,2) first
+	// arm (#533). That is a different site from the one #532 fixed — the arm's
+	// declared type is decided at plan time and carried in the stage schema,
+	// not where the rows are boxed — so it is PINNED here rather than papered
+	// over, in the shape the pg-oracle corpus uses: the pin FAILS the moment
+	// the two agree, which is the fix's proof.
+	t.Run("values_pinned_533", func(t *testing.T) {
+		sql := fmt.Sprintf("SELECT a FROM %s UNION ALL SELECT b FROM %s", dbpTable, dbpTable)
+		render := func(dag bool) []string {
+			rows := dtpRun(t, ctx, single, coord, sql, dag)
+			out := make([]string, 0, len(rows))
+			for _, r := range rows {
+				out = append(out, fmt.Sprintf("%v", r["a"]))
+			}
+			sort.Strings(out)
+			return out
+		}
+		sv, dv := render(false), render(true)
+		if slices.Equal(sv, dv) {
+			t.Errorf("the two paths now render the same values, so #533 is FIXED:\n  %v\n"+
+				"Delete this pin and assert the values against PostgreSQL instead.", sv)
+			return
+		}
+		t.Logf("known divergence, NOT gated (#533): the stage DAG rescales the wider arm.\n"+
+			"  single-process: %v\n  stage DAG:      %v", sv, dv)
+	})
 }
