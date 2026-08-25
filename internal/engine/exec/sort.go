@@ -1218,6 +1218,13 @@ func appendKeyValue(buf []byte, v any) []byte {
 // Every leaf type this does not name keeps appendKeyValue's existing
 // encoding exactly — this only intercepts CIDR and recurses into a
 // container's own element/field metadata to find one.
+//
+// The recursion goes through appendKeyElemWithMeta, NOT back through this
+// function. A container's elements are framed (a kind tag, then a fixed-width
+// or length-prefixed payload) precisely because there is no separator down
+// there; recursing here instead wrote each element in the TOP-LEVEL encoding,
+// which for an int64 is bare decimal digits, and ARRAY[1,23] and ARRAY[12,3]
+// became the same key.
 func appendKeyValueWithMeta(buf []byte, v any, meta *parquet.Column) []byte {
 	if meta == nil || v == nil {
 		return appendKeyValue(buf, v)
@@ -1229,32 +1236,87 @@ func appendKeyValueWithMeta(buf []byte, v any, meta *parquet.Column) []byte {
 		}
 	case parquet.TypeArray, parquet.TypeMap:
 		if vals, ok := v.([]any); ok {
-			buf = binary.AppendUvarint(buf, uint64(len(vals)))
-			for _, e := range vals {
-				buf = appendKeyValueWithMeta(buf, e, meta.ElementType)
-			}
-			return buf
+			return appendKeyElemsWithMeta(buf, vals, meta.ElementType)
 		}
 	case parquet.TypeRow:
 		if m, ok := v.(map[string]any); ok {
-			buf = binary.AppendUvarint(buf, uint64(len(m)))
-			names := make([]string, 0, len(m))
-			for name := range m {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			fieldMeta := make(map[string]*parquet.Column, len(meta.Fields))
-			for i := range meta.Fields {
-				fieldMeta[meta.Fields[i].Name] = &meta.Fields[i]
-			}
-			for _, name := range names {
-				buf = appendKeyRaw(buf, name)
-				buf = appendKeyValueWithMeta(buf, m[name], fieldMeta[name])
-			}
-			return buf
+			return appendKeyFieldsWithMeta(buf, m, meta)
 		}
 	}
 	return appendKeyValue(buf, v)
+}
+
+// appendKeyElemsWithMeta is appendKeyElems with the elements' DECLARED type
+// available. appendKeyFieldsWithMeta is appendKeyFields' counterpart.
+//
+// They exist because the meta path used to recurse into
+// appendKeyValueWithMeta, which falls back to appendKeyValue for an ordinary
+// leaf — the TOP-LEVEL encoding, where an int64 is bare decimal digits with no
+// kind tag and no length. Inside a container there is no separator to delimit
+// those, which is the whole reason appendKeyElem exists and exactly what its
+// own const block warns about: ARRAY[1,23] and ARRAY[12,3] both serialized to
+// 02 31 32 33 through here, so two different GROUP BY keys merged into one
+// past a spill boundary and stayed two before it. Recursing through
+// appendKeyElemWithMeta restores the framing and keeps the CIDR re-key.
+func appendKeyElemsWithMeta(buf []byte, vals []any, elem *parquet.Column) []byte {
+	buf = binary.AppendUvarint(buf, uint64(len(vals)))
+	for _, e := range vals {
+		buf = appendKeyElemWithMeta(buf, e, elem)
+	}
+	return buf
+}
+
+func appendKeyFieldsWithMeta(buf []byte, m map[string]any, meta *parquet.Column) []byte {
+	buf = binary.AppendUvarint(buf, uint64(len(m)))
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	fieldMeta := make(map[string]*parquet.Column, len(meta.Fields))
+	for i := range meta.Fields {
+		fieldMeta[meta.Fields[i].Name] = &meta.Fields[i]
+	}
+	for _, name := range names {
+		buf = appendKeyRaw(buf, name)
+		buf = appendKeyElemWithMeta(buf, m[name], fieldMeta[name])
+	}
+	return buf
+}
+
+// appendKeyElemWithMeta is appendKeyElem with the element's DECLARED type
+// available: it writes the same kind tag and payload for every type, and
+// intercepts only the two the declaration is needed for — a CIDR leaf, which
+// re-keys into PostgreSQL's inet order (#520), and a nested container, whose
+// own element/field metadata has to travel one level further down.
+//
+// Every other type falls through to appendKeyElem, so a CIDR-free value
+// serializes BYTE-IDENTICALLY whether or not its column was declared with
+// element metadata. That equality is the property
+// TestSerializedKeyMetaMatchesPlainEncoding asserts, and it is what makes the
+// meta path safe to take for a container column whose leaves happen to hold no
+// CIDR at all.
+func appendKeyElemWithMeta(buf []byte, v any, meta *parquet.Column) []byte {
+	if meta == nil || v == nil {
+		return appendKeyElem(buf, v)
+	}
+	switch meta.Type {
+	case parquet.TypeCIDR:
+		if s, ok := v.(string); ok {
+			// The same tag a plain nested string gets: the re-key changes the
+			// BYTES a CIDR value contributes, never its framing.
+			return appendKeyRaw(append(buf, keyElemString), kernel.CidrOrderKey(s))
+		}
+	case parquet.TypeArray, parquet.TypeMap:
+		if vals, ok := v.([]any); ok {
+			return appendKeyElemsWithMeta(append(buf, keyElemList), vals, meta.ElementType)
+		}
+	case parquet.TypeRow:
+		if m, ok := v.(map[string]any); ok {
+			return appendKeyFieldsWithMeta(append(buf, keyElemFields), m, meta)
+		}
+	}
+	return appendKeyElem(buf, v)
 }
 
 // appendKeyRaw writes a uvarint length then the bytes. Uvarint rather than a

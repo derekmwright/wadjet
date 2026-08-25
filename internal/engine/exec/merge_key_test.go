@@ -191,3 +191,135 @@ func TestAppendSerializedKeyReKeysNestedCIDR(t *testing.T) {
 			rowBare, rowSlash32)
 	}
 }
+
+// TestSerializedKeyMetaMatchesPlainEncoding crosses the two halves of the
+// drain cursor's key: appendSerializedKey takes the META path for a container
+// column (so a CIDR leaf below it re-keys, #520) and the PLAIN path for
+// everything else, and the two must produce the SAME BYTES for a value with no
+// CIDR in it.
+//
+// They did not. appendKeyValueWithMeta's ARRAY/MAP/ROW arms recursed through
+// appendKeyValueWithMeta, which for an ordinary leaf falls back to
+// appendKeyValue — the TOP-LEVEL encoding, where an int64 is bare decimal
+// digits with no kind tag and no length. The plain path recurses through
+// appendKeyElem instead, which writes a tag byte and a fixed-width or
+// length-prefixed payload precisely because a container has no separator of
+// its own (its own const block says so: "ARRAY[1,23] and ARRAY[12,3] are the
+// same digits").
+//
+// So the meta path lost injectivity: ARRAY[1,23] and ARRAY[12,3] both
+// serialized to 02 31 32 33. Two different GROUP BY keys merging into one is
+// the "answer depends on how much memory it had" failure this file exists for,
+// and it was reachable only past a spill boundary — the un-spilled columnar
+// key (appendColumnValue) never goes through here.
+func TestSerializedKeyMetaMatchesPlainEncoding(t *testing.T) {
+	arrOf := func(t parquet.TypeID) []parquet.Column {
+		return []parquet.Column{{Name: "a", Type: parquet.TypeArray,
+			ElementType: &parquet.Column{Name: "element", Type: t}}}
+	}
+	rowOf := func(fields ...parquet.Column) []parquet.Column {
+		return []parquet.Column{{Name: "r", Type: parquet.TypeRow, Fields: fields}}
+	}
+
+	// Every shape here is CIDR-FREE, so the meta path must be byte-identical
+	// to the plain one: meta only ever changes a CIDR leaf.
+	for _, tc := range []struct {
+		name  string
+		meta  []parquet.Column
+		types []batch.TypeID
+		val   any
+	}{
+		{"array of int64", arrOf(parquet.TypeInt64), []batch.TypeID{batch.TypeArray},
+			[]any{int64(1), int64(23)}},
+		{"array of string", arrOf(parquet.TypeString), []batch.TypeID{batch.TypeArray},
+			[]any{"a", "b"}},
+		{"array of string with a NUL", arrOf(parquet.TypeString), []batch.TypeID{batch.TypeArray},
+			[]any{"a\x00", "b"}},
+		{"array with a NULL element", arrOf(parquet.TypeString), []batch.TypeID{batch.TypeArray},
+			[]any{nil, ""}},
+		{"array of float64", arrOf(parquet.TypeFloat64), []batch.TypeID{batch.TypeArray},
+			[]any{1.5, 2.5}},
+		{"array of bool", arrOf(parquet.TypeBool), []batch.TypeID{batch.TypeArray},
+			[]any{true, false}},
+		{"empty array", arrOf(parquet.TypeInt64), []batch.TypeID{batch.TypeArray}, []any{}},
+		{"row of int64 and string",
+			rowOf(parquet.Column{Name: "n", Type: parquet.TypeInt64},
+				parquet.Column{Name: "s", Type: parquet.TypeString}),
+			[]batch.TypeID{batch.TypeRow},
+			map[string]any{"n": int64(1), "s": "x"}},
+		{"row with a NULL field",
+			rowOf(parquet.Column{Name: "n", Type: parquet.TypeInt64},
+				parquet.Column{Name: "s", Type: parquet.TypeString}),
+			[]batch.TypeID{batch.TypeRow},
+			map[string]any{"n": nil, "s": ""}},
+		{"array nested in an array",
+			[]parquet.Column{{Name: "a", Type: parquet.TypeArray,
+				ElementType: &parquet.Column{Name: "element", Type: parquet.TypeArray,
+					ElementType: &parquet.Column{Name: "element", Type: parquet.TypeInt64}}}},
+			[]batch.TypeID{batch.TypeArray},
+			[]any{[]any{int64(1)}, []any{int64(23)}}},
+		{"row nested in an array",
+			[]parquet.Column{{Name: "a", Type: parquet.TypeArray,
+				ElementType: &parquet.Column{Name: "element", Type: parquet.TypeRow,
+					Fields: []parquet.Column{{Name: "n", Type: parquet.TypeInt64}}}}},
+			[]batch.TypeID{batch.TypeArray},
+			[]any{map[string]any{"n": int64(1)}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withMeta := appendSerializedKey(nil, []any{tc.val}, tc.types, tc.meta)
+			plain := appendSerializedKey(nil, []any{tc.val}, nil, nil)
+			if string(withMeta) != string(plain) {
+				t.Errorf("the meta and plain key encodings differ for a CIDR-free value:\n"+
+					"  with meta %x\n  plain     %x\n"+
+					"one group key has two byte forms, so which one a group gets depends on "+
+					"whether its column was declared with element metadata", withMeta, plain)
+			}
+		})
+	}
+}
+
+// TestSerializedKeyMetaKeepsNestedValuesDistinct is
+// TestMergeKeyKeepsBoxedTypesDistinct's own collision cases run through the
+// META path, which is the half that lost them.
+//
+// The plain path has framed nested elements since appendKeyElem existed; the
+// meta path added for #520's nested CIDR re-key did not, so it re-opened
+// exactly the collisions the const block above appendKeyElem was written to
+// close. A GROUP BY over an ARRAY column answered one group in memory and one
+// group past a spill for two DIFFERENT arrays.
+func TestSerializedKeyMetaKeepsNestedValuesDistinct(t *testing.T) {
+	intArr := []parquet.Column{{Name: "a", Type: parquet.TypeArray,
+		ElementType: &parquet.Column{Name: "element", Type: parquet.TypeInt64}}}
+	strArr := []parquet.Column{{Name: "a", Type: parquet.TypeArray,
+		ElementType: &parquet.Column{Name: "element", Type: parquet.TypeString}}}
+	rowMeta := []parquet.Column{{Name: "r", Type: parquet.TypeRow, Fields: []parquet.Column{
+		{Name: "a", Type: parquet.TypeString}, {Name: "c", Type: parquet.TypeString},
+	}}}
+
+	for _, tc := range []struct {
+		name       string
+		meta       []parquet.Column
+		types      []batch.TypeID
+		left, righ any
+	}{
+		// The case the const block names: adjacent nested integers have no
+		// separator, so an untagged, unframed encoding runs them together.
+		{"nested int boundary", intArr, []batch.TypeID{batch.TypeArray},
+			[]any{int64(1), int64(23)}, []any{int64(12), int64(3)}},
+		{"nested string boundary", strArr, []batch.TypeID{batch.TypeArray},
+			[]any{"a b"}, []any{"a", "b"}},
+		{"nested null vs empty string", strArr, []batch.TypeID{batch.TypeArray},
+			[]any{nil}, []any{""}},
+		{"row field boundary", rowMeta, []batch.TypeID{batch.TypeRow},
+			map[string]any{"a": "b c:d"}, map[string]any{"a": "b", "c": "d"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := appendSerializedKey(nil, []any{tc.left}, tc.types, tc.meta)
+			r := appendSerializedKey(nil, []any{tc.righ}, tc.types, tc.meta)
+			if string(l) == string(r) {
+				t.Errorf("two different values produced the same spill/merge key %x — "+
+					"they merge into ONE group past a spill boundary and stay two before it", l)
+			}
+		})
+	}
+}
