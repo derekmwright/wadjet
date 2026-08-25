@@ -44,7 +44,14 @@ func TestGeneratorCoversTargetShapes(t *testing.T) {
 		bump("star", q.hasStar())
 		bump("self-join", len(q.From) > 1 && q.From[0].Table == q.From[1].Table)
 		bump("left-join", strings.Contains(sql, "LEFT JOIN"))
-		bump("comma-join", strings.Contains(sql, ", ") && strings.Contains(sql, " FROM "))
+		// Count the FROM entries, not the text: `", "` matches any multi-item
+		// SELECT list, so the old predicate was true for nearly every query
+		// and would have stayed green with comma-join emission deleted
+		// outright. "comma-join-mixed" is the shape #593/#594 turn on — a
+		// comma FROM item beside an explicit JOIN ... ON — and it is rarer
+		// than a plain comma join, so it needs its own key.
+		bump("comma-join", commaJoins(q) > 0)
+		bump("comma-join-mixed", commaJoins(q) > 0 && explicitJoins(q) > 0)
 		bump("chain-4", len(q.From) >= 4)
 		bump("derived", strings.Contains(sql, "FROM ("))
 		bump("cte", strings.HasPrefix(sql, "WITH "))
@@ -110,7 +117,7 @@ func TestGeneratorCoversTargetShapes(t *testing.T) {
 		"shape:outerjoin", "shape:groupagg", "shape:distinct", "shape:subquery",
 		"shape:dates", "shape:star",
 		"qualified-ref", "bare-ref", "quoted-ident", "star", "self-join", "left-join",
-		"comma-join", "chain-4", "derived", "cte", "exists", "in-subquery",
+		"comma-join", "comma-join-mixed", "chain-4", "derived", "cte", "exists", "in-subquery",
 		"scalar-subquery", "group-by", "group-by-ordinal", "having", "distinct",
 		"having-null-check", "having-negated", "having-connective", "having-range",
 		"having-bare-agg",
@@ -324,4 +331,26 @@ func multiKeyDistinctNames(sql string) bool {
 		}
 	}
 	return keys >= 2 && distinct
+}
+
+// commaJoins counts the FROM entries joined by a comma, and explicitJoins the
+// ones joined by a JOIN keyword. The leading entry carries neither.
+func commaJoins(q *Query) int {
+	n := 0
+	for _, f := range q.From {
+		if f.Join == "," {
+			n++
+		}
+	}
+	return n
+}
+
+func explicitJoins(q *Query) int {
+	n := 0
+	for _, f := range q.From {
+		if f.Join != "" && f.Join != "," {
+			n++
+		}
+	}
+	return n
 }

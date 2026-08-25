@@ -322,6 +322,17 @@
       "fine": "3101a4471015045b",
       "coarse": "3101a4471015045b"
     },
+    "CommaJoinAfterLeftJoinItem": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "2803909f68737ceb",
+      "coarse": "2803909f68737ceb"
+    },
     "CommaJoinAfterOnJoin": {
       "source": "duckdb",
       "row_count": 1,
@@ -367,6 +378,130 @@
       "fine": "792376c209f33895",
       "coarse": "792376c209f33895"
     },
+    "CommaJoinBeforeOnJoinWhereEquality": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "06516f7a6e849dd3",
+      "coarse": "06516f7a6e849dd3"
+    },
+    "CommaJoinChainThreeRelations": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "06516f7a6e849dd3",
+      "coarse": "06516f7a6e849dd3"
+    },
+    "CommaJoinCrossBetweenEquiJoinedPair": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "792376c209f33895",
+      "coarse": "792376c209f33895"
+    },
+    "CommaJoinGenuineCrossAlongsideEqui": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "81ca2baac0ed8746",
+      "coarse": "81ca2baac0ed8746"
+    },
+    "CommaJoinMixedCrossProductBlowup": {
+      "source": "duckdb",
+      "row_count": 29246,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "l_receiptdate",
+        "c1",
+        "t2"
+      ],
+      "fine": "d8bbcd1d059b282f",
+      "coarse": "d8bbcd1d059b282f"
+    },
+    "CommaJoinMixedDerivedTable": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "06516f7a6e849dd3",
+      "coarse": "06516f7a6e849dd3"
+    },
+    "CommaJoinMixedNonEquiResidual": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "633c784df99fcebc",
+      "coarse": "633c784df99fcebc"
+    },
+    "CommaJoinMixedOrIsNotLifted": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "85746257c1487ff8",
+      "coarse": "85746257c1487ff8"
+    },
+    "CommaJoinMixedSelfAlias": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "a5e45837a2959db8",
+      "coarse": "a5e45837a2959db8"
+    },
+    "CommaJoinMixedWhereEquality": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "06516f7a6e849dd3",
+      "coarse": "06516f7a6e849dd3"
+    },
+    "CommaJoinMixedWhereEqualitySum": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "s",
+        "s2"
+      ],
+      "fine": "f4f657d54c044320",
+      "coarse": "f4f657d54c044320"
+    },
     "CommaJoinMixedWithExplicitJoin": {
       "source": "duckdb",
       "row_count": 1,
@@ -388,6 +523,28 @@
       ],
       "fine": "eea8254c7500ba3d",
       "coarse": "eea8254c7500ba3d"
+    },
+    "CommaJoinOnReferencesEarlierItem": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c4"
+      ],
+      "fine": "673650f936cb3b0a",
+      "coarse": "673650f936cb3b0a"
+    },
+    "CommaJoinTwoJoinedItems": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "06516f7a6e849dd3",
+      "coarse": "06516f7a6e849dd3"
     },
     "CorrOverJoin": {
       "source": "duckdb",
@@ -2908,6 +3065,164 @@
       ],
       "fine": "ca1c4936a4137a59",
       "coarse": "ca1c4936a4137a59"
+    },
+    "TPCH03CommaJoin": {
+      "source": "duckdb",
+      "row_count": 10,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "l_orderkey",
+        "revenue",
+        "o_orderdate",
+        "o_shippriority"
+      ],
+      "fine": "69831032cf47cddd",
+      "coarse": "908ea3992b965dd8"
+    },
+    "TPCH05CommaJoin": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "revenue"
+      ],
+      "fine": "f9eb6a415f80cc2f",
+      "coarse": "4b5cdcd9f5e0c939"
+    },
+    "TPCH07CommaJoin": {
+      "source": "duckdb",
+      "row_count": 4,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "supp_nation",
+        "cust_nation",
+        "l_year",
+        "revenue"
+      ],
+      "fine": "48850a88008ac56a",
+      "coarse": "51b19ac8cc74c319"
+    },
+    "TPCH08CommaJoin": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "o_year",
+        "brazil_revenue",
+        "total_revenue"
+      ],
+      "fine": "500b3324f9678805",
+      "coarse": "23499b7275ae186a"
+    },
+    "TPCH09CommaJoin": {
+      "source": "duckdb",
+      "row_count": 173,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "nation",
+        "o_year",
+        "sum_profit"
+      ],
+      "fine": "bb943df4f1bfd1b3",
+      "coarse": "9bf0f62e54220705"
+    },
+    "TPCH10CommaJoin": {
+      "source": "duckdb",
+      "row_count": 20,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "c_custkey",
+        "c_name",
+        "revenue",
+        "c_acctbal",
+        "n_name",
+        "c_address",
+        "c_phone",
+        "c_comment"
+      ],
+      "fine": "bd1aa426dd53bf5f",
+      "coarse": "c1f037a2944f7746"
+    },
+    "TPCH11CommaJoin": {
+      "source": "duckdb",
+      "row_count": 359,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "ps_partkey",
+        "value"
+      ],
+      "fine": "b7102665d99c7b2f",
+      "coarse": "32b7d38d2bbe5ceb"
+    },
+    "TPCH17CommaJoin": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "avg_yearly"
+      ],
+      "fine": "fa4d91d2941621e2",
+      "coarse": "fa4d91d2941621e2"
+    },
+    "TPCH18CommaJoin": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "c_name",
+        "c_custkey",
+        "o_orderkey",
+        "o_orderdate",
+        "o_totalprice",
+        "total_qty"
+      ],
+      "fine": "bc5a04abe324bd15",
+      "coarse": "f7c970031fab0670"
+    },
+    "TPCH19CommaJoin": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "revenue"
+      ],
+      "fine": "3672b2390594f3f5",
+      "coarse": "edd80e16acda74d8"
+    },
+    "TPCH20CommaJoin": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "s_name",
+        "s_address"
+      ],
+      "fine": "2cad260f710ee8b5",
+      "coarse": "2cad260f710ee8b5"
+    },
+    "TPCH21CommaJoin": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "s_name",
+        "numwait"
+      ],
+      "fine": "3c350ba996bea4e4",
+      "coarse": "3c350ba996bea4e4"
     },
     "TimestampCastComparison": {
       "source": "duckdb",

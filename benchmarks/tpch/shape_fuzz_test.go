@@ -53,8 +53,8 @@ import (
 // fuzzKnownDivergence and skipped (see KNOWN DIVERGENCES). The window arm
 // (internal/oracle/shapegen, #569) re-weighted the shape roll so the default
 // window now draws different queries, which surfaced the comma-join-mixed
-// shape at seeds 24 and 51; that shape is matched (bugCommaJoinMixedResidual)
-// because #593's instance is a process killer. Extending the window is what
+// shape at seeds 24 and 51 (#593/#594) — now FIXED, so it is generated and
+// gated live rather than skipped. Extending the window is what
 // hunting means, and past the default it still reports OPEN defects — roughly
 // one per 60 seeds on the DuckDB arm (alias-vs-column collisions,
 // star-with-IN-subquery, cross joins, a group key misaligned from its values)
@@ -117,27 +117,18 @@ const (
 	// outlive the bug.
 	bugOuterOnResidual = "outer-join-on-residual-dropped"
 	bugHiddenSortKey   = "hidden-sort-key-with-filter"
-	// An explicit JOIN ... ON MIXED with a comma-join whose equi-predicate
-	// sits in WHERE. genFrom emits `a t0 JOIN b t1 ON …, c t2 WHERE
-	// t1.x = t2.y`, and wadjet mishandles it two ways depending on the
-	// tables: it either answers ZERO ROWS (#594 — supplier⋈partsupp, part →
-	// 0 where DuckDB says 8000) or MATERIALIZES the full cross product and is
-	// OOM-KILLED (#593 — orders⋈lineitem × part is 120M rows, ~30 GB, a
-	// `fatal error: out of memory` that takes the whole test binary with it).
-	//
-	// The OOM is why this is matched to skip GENERATION rather than pinned as
-	// a knownBug: a pinned entry still RUNS its query, and a process killer
-	// cannot be pinned — it would kill the fuzzer before any comparison. A
-	// PURE comma join (no explicit JOIN in the same FROM) is correct on both
-	// engines and is deliberately NOT matched, so that shape stays generated.
-	//
-	// Gated as a corpus entry — CommaJoinMixedWithExplicitJoin in
-	// duckdb_compare_test.go, which uses the small supplier/partsupp/part
-	// instance that answers 0 without OOMing — so the skip cannot outlive the
-	// bug. #593/#594 are being fixed on main; when the fix lands, that entry
-	// starts agreeing and its knownBug must be deleted, and THIS matcher with
-	// it.
-	bugCommaJoinMixedResidual = "comma-join-mixed-with-explicit-join"
+	// A join whose key equates an INTEGER column to a FLOAT/DECIMAL column,
+	// in a FROM of three or more relations, panics the executor:
+	// HashJoinProbe.inlineIntProbe takes the int-key fast path on one side
+	// while the other side's build is empty for that key type, and indexes a
+	// zero-length slice ("index out of range [0] with length 0", join.go).
+	// A two-relation int=float join does NOT hit it — the reordered
+	// multi-join is what exposes it. Pre-existing and independent of the
+	// comma-join work (it reproduces on an all-explicit-JOIN equivalent on
+	// main); #593/#594's fix merely lets the comma spelling REACH it by
+	// correctly lifting the equality into a key. Filed as #615; delete this
+	// matcher when it is fixed.
+	bugCrossTypeNumericJoinKey = "cross-type-numeric-join-key-panic"
 )
 
 // fuzzKnownDivergence reports which filed defect a query is guaranteed to hit,
@@ -176,23 +167,75 @@ func fuzzKnownDivergence(s *shapegen.Schema, q *shapegen.Query) string {
 			}
 		}
 	}
-	// A comma-join entry (its equi-predicate lives in WHERE) alongside an
-	// explicit JOIN in the same FROM: #593/#594. Matched structurally because
-	// #593's instance is a process killer that no pin can survive — see
-	// bugCommaJoinMixedResidual.
-	comma, explicitJoin := false, false
-	for _, f := range q.From {
-		switch {
-		case f.Join == ",":
-			comma = true
-		case strings.Contains(strings.ToUpper(f.Join), "JOIN"):
-			explicitJoin = true
-		}
-	}
-	if comma && explicitJoin {
-		return bugCommaJoinMixedResidual
+	// #593/#594 — an explicit JOIN ... ON mixed with a comma-join whose
+	// equi-predicate is in WHERE — USED to be matched and skipped here: #593's
+	// instance materialized a 120M-row cross product and OOM-killed the
+	// process, which no pin survives. The fix lifts the comma-join equality
+	// into a hash join, so the shape is now generated and gated live (seeds
+	// 11/81/84/94 are pinned in fuzzRegressionSeeds), and the CommaJoin corpus
+	// in duckdb_compare_test.go covers it on both paths.
+
+	// A cross-type numeric equi-join key (int column = float/decimal column)
+	// in a 3+-relation FROM panics the executor's int-key probe. This is
+	// reached through both an explicit JOIN ... ON and a comma-join whose
+	// equality is lifted into a key (the latter is why removing the broad
+	// comma-mixed skip above surfaced it), so it is matched by the key
+	// relation, not the FROM syntax. See bugCrossTypeNumericJoinKey.
+	if len(q.From) >= 3 && crossTypeNumericEquiKey(s, q) {
+		return bugCrossTypeNumericJoinKey
 	}
 	return ""
+}
+
+// crossTypeNumericEquiKey reports whether any join condition equates an
+// integer column to a float/decimal column. It reads the ON clauses and the
+// WHERE equalities (a comma-join's key lives in WHERE), resolving each side's
+// storage class from the schema by column name — TPC-H column names are unique
+// across tables, so the qualifier is not needed to find the kind.
+func crossTypeNumericEquiKey(s *shapegen.Schema, q *shapegen.Query) bool {
+	kind := make(map[string]shapegen.Kind, 64)
+	for _, t := range s.Tables {
+		for _, c := range t.Cols {
+			kind[strings.ToLower(c.Name)] = c.Kind
+		}
+	}
+	numeric := func(k shapegen.Kind) bool {
+		return k == shapegen.KindInt || k == shapegen.KindFloat || k == shapegen.KindDecimal
+	}
+	isInt := func(k shapegen.Kind) bool { return k == shapegen.KindInt }
+	colKind := func(tok string) (shapegen.Kind, bool) {
+		tok = strings.TrimSpace(tok)
+		if i := strings.LastIndexByte(tok, '.'); i >= 0 {
+			tok = tok[i+1:]
+		}
+		tok = strings.Trim(tok, "\"() ")
+		k, ok := kind[strings.ToLower(tok)]
+		return k, ok
+	}
+	conds := make([]string, 0, len(q.From)+len(q.Where))
+	for _, f := range q.From {
+		if f.On != "" {
+			conds = append(conds, f.On)
+		}
+	}
+	conds = append(conds, q.Where...)
+	for _, cond := range conds {
+		for _, part := range strings.Split(cond, " AND ") {
+			l, r, ok := strings.Cut(part, " = ")
+			if !ok {
+				continue
+			}
+			lk, lok := colKind(l)
+			rk, rok := colKind(r)
+			if !lok || !rok || !numeric(lk) || !numeric(rk) {
+				continue
+			}
+			if isInt(lk) != isInt(rk) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func fuzzEnvInt(name string, def int) int {
@@ -204,14 +247,80 @@ func fuzzEnvInt(name string, def int) int {
 	return def
 }
 
+// fuzzRegressionSeeds are seeds a defect was found at, kept in EVERY window
+// regardless of its size or start. A corpus entry says "this query is right";
+// a regression seed says "this generated SHAPE is never allowed to regress",
+// which is the stronger statement when the shape — not the query — was the
+// bug. Add one here whenever a seed finds a defect, in the same commit as the
+// fix, with the issue in the comment.
+//
+// The comma-join seeds below are not decoration: genFrom emits a comma at a
+// 12% per-step chance, so whether a 60-seed window contains the shape at all
+// is luck, and whether it contains the shape MIXED with an explicit JOIN ...
+// ON — the one #593/#594 turn on — is luckier still. Pinning them makes the
+// default window cover it by construction.
+var fuzzRegressionSeeds = []int64{
+	11, // #594 — comma item FIRST, then JOIN ... ON, equality in WHERE
+	81, // #593 — a four-JOIN chain, then a comma item with its equality in WHERE
+	84, // #593 — TWO joined FROM items separated by a comma (JoinInfo.FromItem)
+	94, // #594 — a comma item beside a LEFT JOIN
+}
+
 func fuzzSeeds(defaultCount int) []int64 {
 	start := int64(fuzzEnvInt("WADJET_FUZZ_SEED_START", 1))
 	count := fuzzEnvInt("WADJET_FUZZ_SEED_COUNT", defaultCount)
-	out := make([]int64, count)
-	for i := range out {
-		out[i] = start + int64(i)
+	out := make([]int64, 0, count+len(fuzzRegressionSeeds))
+	in := make(map[int64]bool, count+len(fuzzRegressionSeeds))
+	for i := 0; i < count; i++ {
+		seed := start + int64(i)
+		out, in[seed] = append(out, seed), true
+	}
+	for _, seed := range fuzzRegressionSeeds {
+		if !in[seed] {
+			out, in[seed] = append(out, seed), true
+		}
 	}
 	return out
+}
+
+// TestFuzzWindowCoversCommaJoinMixture is the guard on the guard: it asserts
+// the DEFAULT window actually generates a comma-joined FROM item mixed with an
+// explicit JOIN ... ON. Without it, retuning shapegen's weights or adding a
+// draw anywhere upstream renumbers every seed (one sequential stream per
+// seed), and this coverage could vanish with every suite still green.
+//
+// It runs without DuckDB, so it gates in CI where the differential arm skips.
+func TestFuzzWindowCoversCommaJoinMixture(t *testing.T) {
+	schema := shapegen.TPCH()
+	comma, mixed := 0, 0
+	for _, seed := range fuzzSeeds(60) {
+		q := shapegen.New(seed, schema).Query()
+		commas, ons := 0, 0
+		for _, f := range q.From {
+			switch f.Join {
+			case ",":
+				commas++
+			case "":
+				// the leading FROM item carries no join keyword
+			default:
+				ons++
+			}
+		}
+		if commas > 0 {
+			comma++
+		}
+		if commas > 0 && ons > 0 {
+			mixed++
+		}
+	}
+	if comma == 0 {
+		t.Errorf("the default fuzz window generates no comma-joined FROM list at all")
+	}
+	if mixed == 0 {
+		t.Errorf("the default fuzz window generates no comma FROM item MIXED with an explicit JOIN ... ON — "+
+			"the shape #593/#594 turn on. Pin a seed that does in fuzzRegressionSeeds (%v covered it when "+
+			"this gate was written).", fuzzRegressionSeeds)
+	}
 }
 
 // fuzzTrace names the query about to run, on stderr, unbuffered. Some defects

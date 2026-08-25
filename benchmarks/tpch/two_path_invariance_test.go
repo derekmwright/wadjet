@@ -4620,6 +4620,64 @@ func twoPathCorpus() []twoPathQuery {
 	// worker rejects. An absent condition IS a cross join (#352 gave the
 	// DAG the Cartesian path).
 	out = append(out,
+		// #593 / #594 — a comma FROM item mixed with an explicit JOIN ... ON
+		// whose equi-predicate is in the WHERE. The comma tables were folded
+		// in BEFORE the explicit joins, so the WHERE equality landed on a
+		// join the reorderer then reshaped out from under it: the conjunct
+		// was stranded on a subtree that no longer held the relation it
+		// names, the key resolved to nothing, and the query answered zero
+		// rows while the stranded relation became a real cross product
+		// (30 GB and an OOM kill on the SF0.01 fixture). Both arms have to
+		// agree AND be non-empty, so `expectRows` carries as much of the
+		// gate as the comparison does.
+		twoPathQuery{name: "CommaJoinMixedWhereEquality", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+				part t2 WHERE t1.ps_partkey = t2.p_partkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 1 {
+					tb.Fatalf("%d rows, want 1", len(rows))
+				}
+				if got := cellText(rows[0], "n"); got != "8000" {
+					tb.Errorf("COUNT(*) = %s, want 8000 — every partsupp row joins one part (#594)", got)
+				}
+			}},
+		twoPathQuery{name: "CommaJoinBeforeOnJoinWhereEquality", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM part t2, supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey
+				WHERE t1.ps_partkey = t2.p_partkey`},
+		twoPathQuery{name: "CommaJoinTwoJoinedItems", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+				nation n JOIN region r ON n.n_regionkey = r.r_regionkey
+				WHERE t0.s_nationkey = n.n_nationkey`},
+		twoPathQuery{name: "CommaJoinMixedDerivedTable", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+				(SELECT p_partkey AS pk FROM part) d WHERE t1.ps_partkey = d.pk`},
+		// The same relation twice in the comma list under two aliases, each
+		// equi-joined to a different relation — TPC-H Q7's and Q8's FROM
+		// shape, where every bare column name is owned by both.
+		twoPathQuery{name: "CommaJoinSelfAliasedRelation", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT n1.n_name AS supp_nation, n2.n_name AS cust_nation, COUNT(*) AS c
+				FROM supplier, lineitem, orders, customer, nation n1, nation n2
+				WHERE s_suppkey = l_suppkey AND o_orderkey = l_orderkey AND c_custkey = o_custkey
+					AND s_nationkey = n1.n_nationkey AND c_nationkey = n2.n_nationkey
+					AND l_shipdate >= '1995-01-01' AND l_shipdate <= '1995-03-31'
+				GROUP BY n1.n_name, n2.n_name`},
+		// A CYCLE in the join graph — TPC-H Q5's `c_nationkey = s_nationkey`
+		// on top of the customer-orders-lineitem-supplier chain. Two
+		// conjuncts over three relations on one join.
+		twoPathQuery{name: "CommaJoinGraphCycle", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT n_name, COUNT(*) AS c
+				FROM customer, orders, lineitem, supplier, nation, region
+				WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey AND l_suppkey = s_suppkey
+					AND s_nationkey = n_nationkey AND n_regionkey = r_regionkey
+					AND c_nationkey = s_nationkey AND r_name = 'ASIA'
+				GROUP BY n_name`},
+		// A GENUINE cross product mixed into the same FROM list must survive
+		// the fix — dropping the unconstrained item is #281's failure.
+		twoPathQuery{name: "CommaJoinGenuineCrossAlongsideEqui", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM supplier t0, partsupp t1, region t2
+				WHERE t0.s_suppkey = t1.ps_suppkey`},
+
 		twoPathQuery{name: "OuterJoinResidualLeft", cmp: cmpUnordered, expectRows: true,
 			sql: `SELECT COUNT(*) AS c, COUNT(r.r_name) AS matched FROM nation n
 				LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey`,

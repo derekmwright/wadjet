@@ -463,6 +463,73 @@ func postgresSemanticsCases() []pgCase {
 	// into it (default_null_order). Here it is simply asked of the engine that
 	// defines it, which is the difference between a convention and a citation.
 	out = append(out,
+		// #593 / #594 — a comma FROM item mixed with an explicit JOIN ... ON
+		// whose equi-predicate is in the WHERE. PostgreSQL is the authority
+		// here (ADR-0012) and the shape is not ambiguous: comma-separated
+		// FROM items are cross-joined, an explicit JOIN belongs to the item
+		// it follows, and an inner join's WHERE equality is a join
+		// predicate. Wadjet planned `FROM a JOIN b ON …, c` as `(a x c) ⋈ b`,
+		// stranded the WHERE equality on a subtree that no longer held the
+		// relation it names, and answered ZERO ROWS — with SUM answering
+		// NULL, which is what an empty input legitimately produces, so
+		// nothing about the result said the join was wrong.
+		pgCase{name: "CommaJoinMixedWhereEquality",
+			sql: `SELECT COUNT(*) AS n FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+				part t2 WHERE t1.ps_partkey = t2.p_partkey`},
+		pgCase{name: "CommaJoinMixedWhereEqualitySum",
+			sql: `SELECT SUM(t1.ps_availqty) AS s FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+				part t2 WHERE t1.ps_partkey = t2.p_partkey`},
+		pgCase{name: "CommaJoinMixedOrderedRows",
+			sql: `SELECT t1.ps_partkey, t1.ps_suppkey, t2.p_size
+				FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey, part t2
+				WHERE t1.ps_partkey = t2.p_partkey AND t1.ps_partkey <= 5
+				ORDER BY t1.ps_partkey, t1.ps_suppkey`},
+		pgCase{name: "CommaJoinBeforeOnJoinWhereEquality",
+			sql: `SELECT COUNT(*) AS n FROM part t2, supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey
+				WHERE t1.ps_partkey = t2.p_partkey`},
+		pgCase{name: "CommaJoinTwoJoinedItems",
+			sql: `SELECT COUNT(*) AS n FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+				nation n JOIN region r ON n.n_regionkey = r.r_regionkey
+				WHERE t0.s_nationkey = n.n_nationkey`},
+		pgCase{name: "CommaJoinMixedDerivedTable",
+			sql: `SELECT COUNT(*) AS n FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+				(SELECT p_partkey AS pk FROM part) d WHERE t1.ps_partkey = d.pk`},
+		// The same relation twice under two aliases (TPC-H Q7/Q8's FROM
+		// shape) and a CYCLE in the join graph (Q5's), both in comma form.
+		pgCase{name: "CommaJoinSelfAliasedRelation",
+			sql: `SELECT n1.n_name AS supp_nation, n2.n_name AS cust_nation, COUNT(*) AS c
+				FROM supplier, lineitem, orders, customer, nation n1, nation n2
+				WHERE s_suppkey = l_suppkey AND o_orderkey = l_orderkey AND c_custkey = o_custkey
+					AND s_nationkey = n1.n_nationkey AND c_nationkey = n2.n_nationkey
+					AND l_shipdate >= '1995-01-01' AND l_shipdate <= '1995-03-31'
+				GROUP BY n1.n_name, n2.n_name ORDER BY supp_nation, cust_nation`},
+		pgCase{name: "CommaJoinGraphCycle",
+			sql: `SELECT n_name, COUNT(*) AS c
+				FROM customer, orders, lineitem, supplier, nation, region
+				WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey AND l_suppkey = s_suppkey
+					AND s_nationkey = n_nationkey AND n_regionkey = r_regionkey
+					AND c_nationkey = s_nationkey AND r_name = 'ASIA'
+				GROUP BY n_name ORDER BY n_name`},
+		// An OR is not an equi-conjunct and must not become a join key; a
+		// non-equi conjunct alongside a lifted one stays a filter.
+		pgCase{name: "CommaJoinMixedOrIsNotLifted",
+			sql: `SELECT COUNT(*) AS n FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+				part t2 WHERE t1.ps_partkey = t2.p_partkey OR t2.p_partkey = 1`},
+		pgCase{name: "CommaJoinMixedNonEquiResidual",
+			sql: `SELECT COUNT(*) AS n FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+				part t2 WHERE t1.ps_partkey = t2.p_partkey AND t2.p_size > 20`},
+		// Genuine cross products: small ones must answer, and one mixed with
+		// an equi-join must not be dropped (#281) or invented into a join.
+		pgCase{name: "CommaJoinPureCrossProduct",
+			sql: `SELECT COUNT(*) AS n FROM nation a, region b`},
+		pgCase{name: "CommaJoinGenuineCrossAlongsideEqui",
+			sql: `SELECT COUNT(*) AS n FROM supplier t0, partsupp t1, region t2 WHERE t0.s_suppkey = t1.ps_suppkey`},
+		pgCase{name: "CommaJoinCrossBetweenEquiJoinedPair",
+			sql: `SELECT COUNT(*) AS n FROM nation a, region x, supplier b WHERE a.n_nationkey = b.s_nationkey`},
+		pgCase{name: "CommaJoinAfterLeftJoinItem",
+			sql: `SELECT COUNT(*) AS n FROM supplier t0 LEFT JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+				region t2 WHERE t2.r_regionkey = t0.s_nationkey`},
+
 		pgCase{name: "NullOrderAscDefault", sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation ORDER BY k, n_name`},
 		pgCase{name: "NullOrderDescDefault", sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation ORDER BY k DESC, n_name`},
 		pgCase{name: "NullOrderAscNullsFirst", sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation ORDER BY k ASC NULLS FIRST, n_name`},

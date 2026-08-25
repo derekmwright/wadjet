@@ -715,39 +715,18 @@ func duckdbCorpus() []duckdbCase {
 			LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey
 			WHERE r.r_name IS NULL`},
 		// An explicit JOIN ... ON mixed with a comma-join whose equi-predicate
-		// is in WHERE (#593/#594). The paired half of bugCommaJoinMixedResidual
-		// (shape_fuzz_test.go): the matcher skips GENERATING this shape in the
-		// fuzzer because #593's larger instance (orders⋈lineitem × part, 120M
-		// rows) is a process killer, and this entry keeps the shape gated
-		// somewhere so the skip cannot outlive the bug.
-		//
-		// This instance is the SMALL one — supplier⋈partsupp is 8000 rows,
-		// part is 2000, and wadjet answers 0 (the join comes back empty)
-		// rather than materializing the 16M cross product, so it diverges
-		// WITHOUT OOMing and can be run here. DuckDB answers 8000. Pinned
-		// armBoth: both wadjet paths drop the comma-join relation.
-		//
-		// The shape is not uniformly broken — CommaJoinMixtureWhereFilter
-		// below is the same JOIN-then-comma-with-WHERE shape over
-		// region/nation/supplier and answers correctly (100). Which join
-		// graphs break is #593/#594's territory, not this entry's; the entry
-		// exists to keep ONE known-broken instance gated so the fuzzer skip
-		// cannot outlive the bug.
-		//
-		// #593/#594 are being fixed on main. When that lands this entry starts
-		// agreeing (8000 on both arms), its knownBug/knownBugArm must be
-		// deleted — that deletion is the fix's proof — and the matcher in
-		// shape_fuzz_test.go deleted with it.
+		// is in WHERE (#593/#594). This was pinned armBoth — wadjet dropped
+		// the comma-joined relation and answered 0 where DuckDB answers 8000,
+		// on both paths — while the fuzzer SKIPPED generating the shape
+		// (bugCommaJoinMixedResidual) because #593's larger instance
+		// (orders⋈lineitem × part, 120M rows) OOM-killed the process. #593/
+		// #594 are now fixed: the comma-join equi-predicate is lifted into a
+		// hash join, the pin is deleted (this gate agreeing is the fix's
+		// proof), and the fuzzer skip is gone with it. The #593/#594 block
+		// further down carries the rest of the shape family.
 		duckdbCase{name: "CommaJoinMixedWithExplicitJoin",
 			sql: `SELECT COUNT(*) AS n FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
-				part t2 WHERE t1.ps_partkey = t2.p_partkey`,
-			knownBugArm: armBoth,
-			knownBug: "#594: an explicit JOIN ... ON mixed with a comma-join whose equi-predicate is in " +
-				"WHERE drops the comma-joined relation — wadjet answers 0 where DuckDB answers 8000. The " +
-				"larger instance of the same shape (#593) materializes the full cross product instead and " +
-				"is OOM-killed, which is why the fuzzer SKIPS the shape (bugCommaJoinMixedResidual) rather " +
-				"than pinning it. Fixed on main; delete this pin and the matcher together when it lands",
-		},
+				part t2 WHERE t1.ps_partkey = t2.p_partkey`},
 		// Window VALUE functions over a non-float column (#345). LAG, LEAD,
 		// FIRST_VALUE, LAST_VALUE and NTH_VALUE return a value taken FROM
 		// their input column, so the output type is that column's type — and
@@ -1572,6 +1551,309 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "CommaJoinMixtureWhereFilter", sql: `SELECT COUNT(*) AS c
 			FROM region t0 JOIN nation t1 ON t0.r_regionkey = t1.n_regionkey, supplier t2
 			WHERE t1.n_nationkey = t2.s_nationkey`},
+
+		// --- #593 / #594: a comma FROM item mixed with an explicit JOIN ... ON,
+		// whose equi-predicate sits in the WHERE ---
+		//
+		// #376 (above) covered the mixture where the comma relation has NO
+		// equality to it. These are the mixture where it HAS one, which is a
+		// different failure and slipped past that block because the shapes
+		// there are small enough (region/nation/supplier) that the cost model
+		// happens to order them safely.
+		//
+		// The builder folded every comma table in BEFORE the explicit joins,
+		// so `FROM a JOIN b ON …, c` planned as `(a x c) ⋈ b`. The lift then
+		// attached the WHERE equality to that top join, and reorderJoins moved
+		// the comma relation out to a cross join above while leaving behind the
+		// conjunct that names it. A key resolving to nothing matches nothing:
+		// the query answered ZERO ROWS with no error (#594 — SUM answers NULL,
+		// which is exactly what an empty input legitimately produces, so the
+		// result says nothing about the join being wrong), and the stranded
+		// relation became a real cross product that reached 30 GB and an OOM
+		// kill on this same 3 MB fixture (#593).
+		duckdbCase{name: "CommaJoinMixedWhereEquality", sql: `SELECT COUNT(*) AS n
+			FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey, part t2
+			WHERE t1.ps_partkey = t2.p_partkey`},
+		duckdbCase{name: "CommaJoinMixedWhereEqualitySum", sql: `SELECT SUM(t1.ps_availqty) AS s,
+			SUM(t1.ps_availqty * (1 - t0.s_suppkey)) AS s2
+			FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey, part t2
+			WHERE t1.ps_partkey = t2.p_partkey`},
+		// #593 verbatim, aliases and all: the SELECT list renames l_tax to
+		// another column's name and the comma relation's alias to a column
+		// alias, so it gates the shape and the shadowing together.
+		duckdbCase{name: "CommaJoinMixedCrossProductBlowup", sql: `SELECT l_tax AS l_receiptdate,
+			l_receiptdate AS c1, t2.p_size AS t2
+			FROM orders t0 JOIN lineitem t1 ON t0.o_orderkey = t1.l_orderkey, part t2
+			WHERE t1.l_partkey = t2.p_partkey AND t0.o_orderstatus <= 'F'`},
+		// The comma item FIRST, so the explicit JOIN extends the LAST item.
+		duckdbCase{name: "CommaJoinBeforeOnJoinWhereEquality", sql: `SELECT COUNT(*) AS n
+			FROM part t2, supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey
+			WHERE t1.ps_partkey = t2.p_partkey`},
+		// Two FROM items that BOTH carry an explicit JOIN: the flattened
+		// Tables/Joins pair cannot tell them apart without FromItem.
+		duckdbCase{name: "CommaJoinTwoJoinedItems", sql: `SELECT COUNT(*) AS n
+			FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+			nation n JOIN region r ON n.n_regionkey = r.r_regionkey
+			WHERE t0.s_nationkey = n.n_nationkey`},
+		// A derived table in the comma list: it READS p_partkey and EMITS pk,
+		// so ownership resolved through the scan looks for the wrong name.
+		duckdbCase{name: "CommaJoinMixedDerivedTable", sql: `SELECT COUNT(*) AS n
+			FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
+			(SELECT p_partkey AS pk FROM part) d
+			WHERE t1.ps_partkey = d.pk`},
+		// The same relation twice under different aliases — the shape where a
+		// bare column name is owned by BOTH sides.
+		duckdbCase{name: "CommaJoinMixedSelfAlias", sql: `SELECT COUNT(*) AS n
+			FROM nation a JOIN region r ON a.n_regionkey = r.r_regionkey, nation b
+			WHERE a.n_regionkey = b.n_regionkey`},
+		// An OR is NOT an equi-conjunct and must NOT be lifted into a join key.
+		duckdbCase{name: "CommaJoinMixedOrIsNotLifted", sql: `SELECT COUNT(*) AS n
+			FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey, part t2
+			WHERE t1.ps_partkey = t2.p_partkey OR t2.p_partkey = 1`},
+		// A non-equi conjunct alongside the lifted one stays a filter.
+		duckdbCase{name: "CommaJoinMixedNonEquiResidual", sql: `SELECT COUNT(*) AS n
+			FROM supplier t0 JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey, part t2
+			WHERE t1.ps_partkey = t2.p_partkey AND t2.p_size > 20`},
+		// A LEFT-joined FROM item with a comma item beside it.
+		duckdbCase{name: "CommaJoinAfterLeftJoinItem", sql: `SELECT COUNT(*) AS n
+			FROM supplier t0 LEFT JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey, region t2
+			WHERE t2.r_regionkey = t0.s_nationkey`},
+		// A three-relation comma chain, and the same chain with a GENUINE
+		// cross product alongside: the lift must not invent a condition, and
+		// the fix must not drop the unconstrained item (#281's failure).
+		duckdbCase{name: "CommaJoinChainThreeRelations", sql: `SELECT COUNT(*) AS n
+			FROM supplier t0, partsupp t1, part t2
+			WHERE t0.s_suppkey = t1.ps_suppkey AND t1.ps_partkey = t2.p_partkey`},
+		duckdbCase{name: "CommaJoinGenuineCrossAlongsideEqui", sql: `SELECT COUNT(*) AS n
+			FROM supplier t0, partsupp t1, region t2 WHERE t0.s_suppkey = t1.ps_suppkey`},
+		duckdbCase{name: "CommaJoinCrossBetweenEquiJoinedPair", sql: `SELECT COUNT(*) AS n
+			FROM nation a, region x, supplier b WHERE a.n_nationkey = b.s_nationkey`},
+		// The explicit JOIN's ON references an EARLIER comma item, not its own
+		// operand: SQL scopes an ON over every FROM item to its left, so the
+		// comma sibling must be in the join's left subtree. Answered 0 rows
+		// when it was not (fuzzer seed 11; DuckDB 40).
+		duckdbCase{name: "CommaJoinOnReferencesEarlierItem", sql: `SELECT COUNT(DISTINCT t1.p_container) AS c4
+			FROM partsupp t0, part t1 JOIN supplier t2 ON t0.ps_suppkey = t2.s_suppkey
+			WHERE t0.ps_partkey = t1.p_partkey`},
+
+		// --- The TPC-H corpus in its OFFICIAL comma-join spelling ---
+		//
+		// benchmarks/tpch/queries.go writes all 22 with explicit JOIN ... ON,
+		// but the TPC-H specification's own query text uses comma joins with
+		// the equi-predicates in WHERE for Q2, Q3, Q5, Q7-Q11 and Q17-Q21 —
+		// so the shape every TPC-H-derived client actually emits had NO
+		// coverage here. Each variant below was verified against DuckDB to
+		// return byte-identical output to its explicit-JOIN original, so a
+		// divergence is wadjet's, never a transcription slip.
+		// Q2 has NO comma-join variant here, deliberately. Its subquery is
+		// CORRELATED and itself comma-joined, and that shape hangs: the inner
+		// FROM list collapses to its first table and the plan then deadlocks
+		// on the shared scan cache's ready channel (catalogScanSource.Init).
+		// It reproduces identically on the parent commit, so it is a
+		// PRE-EXISTING defect of the #281 family rather than anything
+		// #593/#594 touch, and a hanging entry would take CI with it.
+		duckdbCase{name: "TPCH03CommaJoin", sql: `SELECT
+			l_orderkey,
+			SUM(l_extendedprice * (1 - l_discount)) as revenue,
+			o_orderdate,
+			o_shippriority
+		FROM customer, orders, lineitem
+		WHERE c_custkey = o_custkey
+			AND l_orderkey = o_orderkey
+			AND c_mktsegment = 'BUILDING'
+			AND o_orderdate < '1995-03-15'
+			AND l_shipdate > '1995-03-15'
+		GROUP BY l_orderkey, o_orderdate, o_shippriority
+		ORDER BY revenue DESC, o_orderdate
+		LIMIT 10`},
+		duckdbCase{name: "TPCH05CommaJoin", sql: `SELECT
+			n_name,
+			SUM(l_extendedprice * (1 - l_discount)) as revenue
+		FROM customer, orders, lineitem, supplier, nation, region
+		WHERE c_custkey = o_custkey
+			AND l_orderkey = o_orderkey
+			AND l_suppkey = s_suppkey
+			AND s_nationkey = n_nationkey
+			AND n_regionkey = r_regionkey
+			AND c_nationkey = s_nationkey
+			AND r_name = 'ASIA'
+			AND o_orderdate >= '1994-01-01'
+			AND o_orderdate < '1995-01-01'
+		GROUP BY n_name
+		ORDER BY revenue DESC`},
+		duckdbCase{name: "TPCH07CommaJoin", sql: `SELECT
+			n1.n_name as supp_nation,
+			n2.n_name as cust_nation,
+			SUBSTR(l_shipdate, 1, 4) as l_year,
+			SUM(l_extendedprice * (1 - l_discount)) as revenue
+		FROM supplier, lineitem, orders, customer, nation n1, nation n2
+		WHERE s_suppkey = l_suppkey
+			AND o_orderkey = l_orderkey
+			AND c_custkey = o_custkey
+			AND s_nationkey = n1.n_nationkey
+			AND c_nationkey = n2.n_nationkey
+			AND ((n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY')
+				OR (n1.n_name = 'GERMANY' AND n2.n_name = 'FRANCE'))
+			AND l_shipdate >= '1995-01-01'
+			AND l_shipdate <= '1996-12-31'
+		GROUP BY n1.n_name, n2.n_name, SUBSTR(l_shipdate, 1, 4)
+		ORDER BY supp_nation, cust_nation, l_year`},
+		duckdbCase{name: "TPCH08CommaJoin", sql: `SELECT
+			SUBSTR(o_orderdate, 1, 4) as o_year,
+			SUM(CASE WHEN n2.n_name = 'BRAZIL' THEN l_extendedprice * (1 - l_discount) ELSE 0 END) as brazil_revenue,
+			SUM(l_extendedprice * (1 - l_discount)) as total_revenue
+		FROM part, lineitem, supplier, orders, customer, nation n1, region, nation n2
+		WHERE p_partkey = l_partkey
+			AND s_suppkey = l_suppkey
+			AND o_orderkey = l_orderkey
+			AND c_custkey = o_custkey
+			AND c_nationkey = n1.n_nationkey
+			AND n1.n_regionkey = r_regionkey
+			AND s_nationkey = n2.n_nationkey
+			AND r_name = 'AMERICA'
+			AND o_orderdate >= '1995-01-01'
+			AND o_orderdate <= '1996-12-31'
+			AND p_type = 'ECONOMY ANODIZED STEEL'
+		GROUP BY SUBSTR(o_orderdate, 1, 4)
+		ORDER BY o_year`},
+		duckdbCase{name: "TPCH09CommaJoin", sql: `SELECT
+			n_name as nation,
+			SUBSTR(o_orderdate, 1, 4) as o_year,
+			SUM(l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity) as sum_profit
+		FROM part, lineitem, supplier, partsupp, orders, nation
+		WHERE p_partkey = l_partkey
+			AND s_suppkey = l_suppkey
+			AND ps_suppkey = l_suppkey
+			AND ps_partkey = l_partkey
+			AND o_orderkey = l_orderkey
+			AND s_nationkey = n_nationkey
+			AND p_name LIKE '%green%'
+		GROUP BY n_name, SUBSTR(o_orderdate, 1, 4)
+		ORDER BY nation, o_year DESC`},
+		duckdbCase{name: "TPCH10CommaJoin", sql: `SELECT
+			c_custkey, c_name,
+			SUM(l_extendedprice * (1 - l_discount)) as revenue,
+			c_acctbal, n_name, c_address, c_phone, c_comment
+		FROM customer, orders, lineitem, nation
+		WHERE c_custkey = o_custkey
+			AND l_orderkey = o_orderkey
+			AND c_nationkey = n_nationkey
+			AND o_orderdate >= '1993-10-01'
+			AND o_orderdate < '1994-01-01'
+			AND l_returnflag = 'R'
+		GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment
+		ORDER BY revenue DESC
+		LIMIT 20`},
+		duckdbCase{name: "TPCH11CommaJoin", sql: `SELECT
+			ps_partkey,
+			SUM(ps_supplycost * ps_availqty) as value
+		FROM partsupp, supplier, nation
+		WHERE ps_suppkey = s_suppkey
+			AND s_nationkey = n_nationkey
+			AND n_name = 'GERMANY'
+		GROUP BY ps_partkey
+		HAVING SUM(ps_supplycost * ps_availqty) > (
+			SELECT SUM(ps_supplycost * ps_availqty) * 0.0001
+			FROM partsupp, supplier, nation
+			WHERE ps_suppkey = s_suppkey
+				AND s_nationkey = n_nationkey
+				AND n_name = 'GERMANY'
+		)
+		ORDER BY value DESC`},
+		duckdbCase{name: "TPCH17CommaJoin", sql: `SELECT
+			SUM(l_extendedprice) / 7.0 as avg_yearly
+		FROM lineitem, part
+		WHERE p_partkey = l_partkey
+			AND p_brand = 'Brand#23'
+			AND p_container = 'MED BOX'
+			AND l_quantity < (
+				SELECT 0.2 * AVG(l_quantity)
+				FROM lineitem
+				WHERE l_partkey = p_partkey
+			)`},
+		duckdbCase{name: "TPCH18CommaJoin", sql: `SELECT
+			c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice,
+			SUM(l_quantity) as total_qty
+		FROM customer, orders, lineitem
+		WHERE c_custkey = o_custkey
+			AND o_orderkey = l_orderkey
+			AND o_orderkey IN (
+				SELECT l_orderkey
+				FROM lineitem
+				GROUP BY l_orderkey
+				HAVING SUM(l_quantity) > 300
+			)
+		GROUP BY c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
+		ORDER BY o_totalprice DESC, o_orderdate
+		LIMIT 100`},
+		duckdbCase{name: "TPCH19CommaJoin", sql: `SELECT
+			SUM(l_extendedprice * (1 - l_discount)) as revenue
+		FROM lineitem, part
+		WHERE p_partkey = l_partkey
+			AND ((
+				p_brand = 'Brand#12'
+				AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
+				AND l_quantity >= 1 AND l_quantity <= 11
+				AND p_size >= 1 AND p_size <= 5
+				AND l_shipmode IN ('AIR', 'REG AIR')
+				AND l_shipinstruct = 'DELIVER IN PERSON'
+			) OR (
+				p_brand = 'Brand#23'
+				AND p_container IN ('MED BAG', 'MED BOX', 'MED PACK', 'MED PKG')
+				AND l_quantity >= 10 AND l_quantity <= 20
+				AND p_size >= 1 AND p_size <= 10
+				AND l_shipmode IN ('AIR', 'REG AIR')
+				AND l_shipinstruct = 'DELIVER IN PERSON'
+			) OR (
+				p_brand = 'Brand#34'
+				AND p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
+				AND l_quantity >= 20 AND l_quantity <= 30
+				AND p_size >= 1 AND p_size <= 15
+				AND l_shipmode IN ('AIR', 'REG AIR')
+				AND l_shipinstruct = 'DELIVER IN PERSON'
+			))`},
+		duckdbCase{name: "TPCH20CommaJoin", sql: `SELECT s_name, s_address
+		FROM supplier, nation
+		WHERE s_nationkey = n_nationkey
+			AND n_name = 'CANADA'
+			AND s_suppkey IN (
+				SELECT ps_suppkey
+				FROM partsupp
+				WHERE ps_partkey IN (
+					SELECT p_partkey FROM part WHERE p_name LIKE 'forest%'
+				)
+				AND ps_availqty > (
+					SELECT 0.5 * SUM(l_quantity)
+					FROM lineitem
+					WHERE l_partkey = ps_partkey
+						AND l_suppkey = ps_suppkey
+						AND l_shipdate >= '1994-01-01'
+						AND l_shipdate < '1995-01-01'
+				)
+			)
+		ORDER BY s_name`},
+		duckdbCase{name: "TPCH21CommaJoin", sql: `SELECT s_name, COUNT(*) as numwait
+		FROM supplier, lineitem l1, orders, nation
+		WHERE s_suppkey = l1.l_suppkey
+			AND o_orderkey = l1.l_orderkey
+			AND s_nationkey = n_nationkey
+			AND o_orderstatus = 'F'
+			AND l1.l_receiptdate > l1.l_commitdate
+			AND n_name = 'SAUDI ARABIA'
+			AND EXISTS (
+				SELECT 1 FROM lineitem l2
+				WHERE l2.l_orderkey = l1.l_orderkey
+					AND l2.l_suppkey != l1.l_suppkey
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM lineitem l3
+				WHERE l3.l_orderkey = l1.l_orderkey
+					AND l3.l_suppkey != l1.l_suppkey
+					AND l3.l_receiptdate > l3.l_commitdate
+			)
+		GROUP BY s_name
+		ORDER BY numwait DESC, s_name
+		LIMIT 100`},
 
 		// --- #383: a computed subquery projection feeding a join input ---
 		//
