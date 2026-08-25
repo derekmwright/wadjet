@@ -2503,8 +2503,10 @@ func postgresSemanticsCases() []pgCase {
 		// that column, not a second copy of the same aggregate.
 		pgCase{name: "HavingReusesSelectedAggregate",
 			sql: `SELECT k, COUNT(*) AS c FROM (` + pgHavingRows + `) t GROUP BY k HAVING COUNT(*) > 1 ORDER BY k`},
-		pgCase{name: "HavingOverSelectAlias",
-			sql: `SELECT k, COUNT(*) AS c FROM (` + pgHavingRows + `) t GROUP BY k HAVING c > 1 ORDER BY k`},
+		// (`HAVING <select alias>` is deliberately NOT here: PostgreSQL refuses
+		// it — an output alias is visible to GROUP BY and ORDER BY but not to
+		// HAVING — so it cannot be ground truth for anything. Wadjet accepts
+		// it as an extension, gated in the planner's own binder tests.)
 		// An aggregate inside a NULL check in the SELECT list, which is the
 		// same walker gap one clause over.
 		pgCase{name: "SelectAggregateIsNull",
