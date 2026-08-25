@@ -1774,7 +1774,23 @@ func (c *Catalog) prefetchFileSketches(manifest *PartitionManifest) map[string][
 	return out
 }
 
-// compareStatValues compares two statistic values for ordering.
+// compareStatValues compares two statistic values for ordering, for
+// AggregateColumnStats' cross-FILE min/max merge.
+//
+// A pair whose types neither arm below recognizes is a BUG, not an unusual
+// value, and must not answer "equal": doing so silently keeps whichever
+// bound happened to arrive first and discards every other file's, which is
+// the identical defect class parquet.CompareNative's own doc comment
+// describes for the row-group-level merge one layer down — and the one
+// that let a CIDR column's bound fall through here unnoticed, because
+// nothing named the type CidrInetBound actually arrives as (#579 review).
+// Reaching the panic means a boxed stat-value type gained a new case
+// somewhere upstream (RowGroupStats today, something else tomorrow)
+// without a matching arm here; AggregateColumnStats runs at plan/ANALYZE
+// time, never per row, so this is a planning-time failure the coordinator's
+// query-boundary recover (coordinator.go's ExecuteSQL, #511) turns into an
+// XX000 for that one statement — not a process-wide crash, and not a wrong
+// answer nobody notices.
 func compareStatValues(a, b any) int {
 	// JSON unmarshals numbers as float64
 	af, aOk := toStatFloat(a)
@@ -1799,7 +1815,21 @@ func compareStatValues(a, b any) int {
 		}
 		return 0
 	}
-	return 0
+	// A confirmed CIDR bound (#523) — compared by Key, PostgreSQL's inet
+	// order, never by Text: the two disagree, which is the whole reason the
+	// box exists (parquet.CidrInetBound's own doc comment).
+	if ab, ok := a.(parquet.CidrInetBound); ok {
+		if bb, ok := b.(parquet.CidrInetBound); ok {
+			switch {
+			case ab.Key < bb.Key:
+				return -1
+			case ab.Key > bb.Key:
+				return 1
+			}
+			return 0
+		}
+	}
+	panic(fmt.Sprintf("compareStatValues: no ordering arm for stat-value pair (%T, %T)", a, b))
 }
 
 func toStatFloat(v any) (float64, bool) {
