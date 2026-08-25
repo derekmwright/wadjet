@@ -1186,39 +1186,51 @@ type pendingTableDrop struct {
 // so the grace only has to outlive work already in flight.
 const DefaultDropTableGrace = 30 * time.Minute
 
-// liveManifestPaths returns the set of every file path referenced by ANY
-// table's manifest right now. This is FlushDroppedTableFiles's load-bearing
-// guard: a path recorded in pendingDrops can ALSO be live at flush time —
-// the same table name re-created and the very same object paths
-// re-registered into it (#278's documented idempotent re-registration
-// workflow lets a harness/bench loader do exactly that, and
+// liveCatalogState observes the catalog as it stands RIGHT NOW: the set of
+// every file path referenced by ANY table's manifest, and the set of table
+// names that exist. Both halves are FlushDroppedTableFiles's guard.
+//
+// The path set is the load-bearing one: a path recorded in pendingDrops can
+// ALSO be live at flush time — the same table name re-created and the very
+// same object paths re-registered into it (#278's documented idempotent
+// re-registration workflow lets a harness/bench loader do exactly that, and
 // iceberg.CatalogIntegration.RefreshTable does it on every metadata
 // refresh: drop, recreate, re-register the same warehouse files) — and a
 // path referenced by any CURRENT manifest must never be deleted just
 // because some OTHER, already-gone incarnation once also owned it.
 //
+// The name set closes the window the path set alone cannot: CreateTable
+// publishes a table's name and its (empty) manifest BEFORE any AddFiles
+// call registers a single path into it, so there is an interval in which a
+// re-created table is live and its manifest is still empty. Nothing is
+// protected by path during that interval. A dropped name that has come back
+// since this flush started is therefore treated as "the world changed under
+// us" and its whole pending entry is left alone — see FlushDroppedTableFiles.
+//
 // A GetManifest error for a table ListTables just returned is treated as
 // "this sweep cannot prove anything is safe" rather than "that table has
-// no files": the caller aborts the whole flush for this round instead of
-// deleting against a possibly-incomplete picture.
-func (c *Catalog) liveManifestPaths(ctx context.Context) (map[string]bool, error) {
+// no files": the caller declines to delete against a possibly-incomplete
+// picture.
+func (c *Catalog) liveCatalogState(ctx context.Context) (paths map[string]bool, names map[string]bool, err error) {
 	tables, err := c.ListTables(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing tables: %w", err)
+		return nil, nil, fmt.Errorf("listing tables: %w", err)
 	}
-	live := make(map[string]bool)
+	paths = make(map[string]bool)
+	names = make(map[string]bool, len(tables))
 	for _, name := range tables {
+		names[name] = true
 		manifest, mErr := c.GetManifest(ctx, name)
 		if mErr != nil {
-			return nil, fmt.Errorf("reading manifest for %q: %w", name, mErr)
+			return nil, nil, fmt.Errorf("reading manifest for %q: %w", name, mErr)
 		}
 		for _, part := range manifest.Partitions {
 			for _, f := range part.Files {
-				live[f.Path] = true
+				paths[f.Path] = true
 			}
 		}
 	}
-	return live, nil
+	return paths, names, nil
 }
 
 // FlushDroppedTableFiles physically deletes the data files of tables
@@ -1233,13 +1245,18 @@ func (c *Catalog) liveManifestPaths(ctx context.Context) (map[string]bool, error
 //     AddNewFiles and SwapFileForGC, never by the AddFiles registration
 //     path. Nothing an operator staged and merely registered can reach
 //     this function, whatever shape its path takes.
-//  1. The live-manifest guard (liveManifestPaths, built once per call,
-//     only when there is something pending to check it against): a path
-//     referenced by ANY current table's manifest is never deleted, no
-//     matter how long its OLD incarnation has been gone. This is the
-//     load-bearing layer — it is what makes drop-then-re-register-the-
-//     same-files (#278's workflow) and Iceberg's RefreshTable
-//     (drop+recreate over the same warehouse files, every refresh) safe.
+//  1. The live-manifest guard, RE-OBSERVED per pending entry immediately
+//     before that entry's deletes (liveCatalogState): a path referenced by
+//     ANY current table's manifest is never deleted, no matter how long
+//     its OLD incarnation has been gone. This is the load-bearing layer —
+//     it is what makes drop-then-re-register-the-same-files (#278's
+//     workflow) and Iceberg's RefreshTable (drop+recreate over the same
+//     warehouse files, every refresh) safe. Building the set ONCE up front
+//     and deleting against it was the review's second reproduced data
+//     loss: a re-registration landing after the set was built and before
+//     the Delete fired was invisible to it. Re-observation narrows that
+//     window from "the whole flush" to "one entry's delete batch"; it does
+//     not close it (see the residual note below).
 //  2. Defense in depth: a path is only ever a delete candidate if it
 //     falls under its OWN table's partition.TablePrefix(name) —
 //     "tables/<name>/...". An Iceberg-registered table's warehouse files
@@ -1248,10 +1265,19 @@ func (c *Catalog) liveManifestPaths(ctx context.Context) (map[string]bool, error
 //     they can never reach the Delete call below even if layer (1)
 //     somehow missed them.
 //
-// On top of both, this mirrors compaction.Compactor's own
+// On top of those, this mirrors compaction.Compactor's own
 // deleteFromStore/FlushDeferredDeletes recreated-object guard: a path
 // whose object was modified after the drop was recorded is skipped,
 // since something has legitimately written there since.
+//
+// RESIDUAL, stated plainly: pendingDrops is in-process, and the
+// re-observation is a read. A re-registration performed by a DIFFERENT
+// *Catalog instance (a separate process, or standalone's pgwire DB
+// against the compactor's catalog) that lands between this entry's
+// re-observation and its Delete call is still invisible. Layer 0 —
+// ownership — is the layer that does not depend on timing at all, which
+// is why it, not this one, is what bounds the blast radius. See
+// docs/adr/0020-drop-table-reclaim-is-opt-in.md.
 //
 // Not called from within this package on any timer, and — unlike
 // compaction's own deferred-delete flush — not called unconditionally by
@@ -1275,7 +1301,9 @@ func (c *Catalog) FlushDroppedTableFiles(ctx context.Context, grace time.Duratio
 		return 0
 	}
 
-	livePaths, err := c.liveManifestPaths(ctx)
+	// First observation. Taken before anything is removed from
+	// pendingDrops, so an error here costs nothing but a round.
+	livePaths, liveNames, err := c.liveCatalogState(ctx)
 	if err != nil {
 		// Can't prove any path is safe to delete this round: try again
 		// next sweep instead of deleting blind.
@@ -1295,8 +1323,51 @@ func (c *Catalog) FlushDroppedTableFiles(ctx context.Context, grace time.Duratio
 	c.pendingDrops = keep
 	c.dropMu.Unlock()
 
+	// reborn collects table names that were absent from the FIRST
+	// observation and have appeared in a later one — a re-creation that
+	// landed while this very flush was running. That is the signal the
+	// path set cannot carry on its own, because CreateTable publishes a
+	// name and an empty manifest before AddFiles registers anything into
+	// it. A name in here means "the world changed under us for this
+	// table": leave its whole entry alone. A name that was live in the
+	// first observation is NOT reborn — the recreated table's files are
+	// protected precisely, by path, so an earlier incarnation's dead
+	// files are still reclaimable.
+	reborn := make(map[string]bool)
+
 	deleted := 0
 	for _, pd := range due {
+		// Second (and third, and fourth...) observation: re-read the
+		// catalog immediately before THIS entry's delete batch. Once per
+		// entry, not once per path — the whole point is to be current at
+		// the moment of deletion, and re-reading per path would multiply
+		// the KV traffic by a table's file count for no additional
+		// narrowing. GetManifest revalidates a cached manifest against
+		// its KV revision (#483), so repeated observations inside one
+		// flush are a revision probe each, not a full manifest download.
+		rePaths, reNames, reErr := c.liveCatalogState(ctx)
+		if reErr != nil {
+			// Same rule as the first observation, applied to one entry:
+			// prove nothing, delete nothing. Put it back so a transient
+			// KV error doesn't leak a whole table's files.
+			c.requeuePendingDrop(pd)
+			continue
+		}
+		// The protected set only ever GROWS within a flush: a path seen
+		// live at any observation this round is off limits for the rest
+		// of it, even if a later read no longer shows it.
+		for p := range rePaths {
+			livePaths[p] = true
+		}
+		for n := range reNames {
+			if !liveNames[n] {
+				reborn[n] = true
+			}
+		}
+		if reborn[pd.table] {
+			continue // re-created mid-flush: leak this entry rather than race it
+		}
+
 		tablePrefix := partition.TablePrefix(pd.table) + "/"
 		for _, p := range pd.paths {
 			if livePaths[p] {
@@ -1315,6 +1386,18 @@ func (c *Catalog) FlushDroppedTableFiles(ctx context.Context, grace time.Duratio
 		}
 	}
 	return deleted
+}
+
+// requeuePendingDrop puts an entry back on the pending list after a flush
+// declined to act on it for a reason that may not hold next time — a KV
+// read that failed, not a guard that fired. A guard firing is a decision
+// (leak it); a failed read is an absence of information, and dropping the
+// entry on the floor for that would turn one transient KV error into a
+// whole table's files leaked forever.
+func (c *Catalog) requeuePendingDrop(pd pendingTableDrop) {
+	c.dropMu.Lock()
+	defer c.dropMu.Unlock()
+	c.pendingDrops = append(c.pendingDrops, pd)
 }
 
 // AggregateColumnStats computes table-level column statistics by merging

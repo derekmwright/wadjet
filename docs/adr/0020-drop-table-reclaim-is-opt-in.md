@@ -65,14 +65,52 @@ the sweep that calls it is opt-in.**
    registration — safe by default rather than by remembering to check.
    Unmarked entries leak on `DROP`; that is the documented trade, and it is
    the right one, since the alternative is deleting somebody else's bytes.
-1. **Live-manifest guard (load-bearing).** Before deleting anything,
-   `FlushDroppedTableFiles` builds the set of every path referenced by
-   *every* current table's manifest (`ListTables` + `GetManifest`, once
-   per call, only when there is something pending to check) and skips any
-   pending path that appears in it. This is what makes both reproduced
-   cases safe: a re-registered or re-discovered path is live in some
-   table's manifest right now, regardless of which incarnation originally
-   owned it.
+1. **Live-manifest guard, re-observed per pending entry (load-bearing).**
+   Before deleting anything, `FlushDroppedTableFiles` builds the set of
+   every path referenced by *every* current table's manifest
+   (`ListTables` + `GetManifest`, only when there is something pending to
+   check) and skips any pending path that appears in it. That is what
+   makes both reproduced re-registration cases safe: a re-registered or
+   re-discovered path is live in some table's manifest right now,
+   regardless of which incarnation originally owned it.
+
+   Building the set **once** and deleting against it was itself the
+   review's second reproduced loss. It is a time-of-check/time-of-use
+   check: the set was built at the top of the call and the delete loop
+   never looked again, so a re-registration landing after the build and
+   before the `Delete` was invisible to it — the ordinary interleaving of
+   a five-minute background sweep against any process that re-registers,
+   `iceberg.CatalogIntegration.RefreshTable` included, whose
+   drop/re-register window spans an S3 metadata read. So the catalog is
+   re-observed immediately before **each pending entry's** delete batch
+   (once per entry, not per path — the point is to be current at the
+   moment of deletion, and per-path re-reads would multiply KV traffic by
+   a table's file count for no further narrowing; #483's revision-keyed
+   manifest cache makes a repeat observation a revision probe, not a
+   download). The protected set only ever grows within a flush: a path
+   seen live at any observation is off limits for the rest of that round.
+
+   The re-observation also carries the set of **table names**, which the
+   path set cannot substitute for: `CreateTable` publishes a name and an
+   empty manifest *before* any `AddFiles` registers a path into it, so a
+   re-created table is live and protected by nothing for that interval. A
+   name absent from the first observation that appears in a later one is
+   "the world changed under us": that entry is left alone entirely and its
+   files leak. A name that was already live in the *first* observation is
+   not treated that way — the live table's files are protected precisely,
+   by path, so an earlier incarnation's genuinely dead files stay
+   reclaimable (the drop → recreate → insert case, covered by a test).
+
+   **This is a narrowing, not a closure, and the record should say so.**
+   `pendingDrops` is in-process and the re-observation is a read. A
+   re-registration performed by a *different* `*Catalog` instance — a
+   separate process, or standalone's pgwire `wadjet.DB` against the
+   compactor's catalog — that lands between an entry's re-observation and
+   its `Delete` is still invisible. Closing it would take a lease or a
+   catalog-side tombstone that a re-registering writer must clear, which
+   is a bigger design than this one. Layer 0 is the layer that does not
+   depend on timing at all, which is why the blast radius is bounded
+   there and not here.
 2. **Table-prefix scoping (defense in depth).** A pending path is only
    ever a delete candidate if it falls under its own table's
    `partition.TablePrefix(name)` — `tables/<name>/...`. An

@@ -959,7 +959,7 @@ func TestFlushDroppedTableFilesSkipsPathsLiveInARecreatedTable(t *testing.T) {
 // warehouse files look like, or anything registered against a foreign
 // store/bucket via iceberg.NewCatalogIntegrationWithStore — must never be
 // deleted by FlushDroppedTableFiles, even once its own table is long gone
-// and nothing protects it in liveManifestPaths.
+// and nothing protects it in liveCatalogState.
 func TestFlushDroppedTableFilesNeverDeletesOutsideItsOwnTablePrefix(t *testing.T) {
 	cat, ctx := setupCatalog(t)
 	schema := testSchema()

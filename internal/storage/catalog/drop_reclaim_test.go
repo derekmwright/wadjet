@@ -261,3 +261,174 @@ func TestOwnershipMarkerSurvivesTheManifestRoundTrip(t *testing.T) {
 		t.Errorf("decoded manifest has %d engine-written entries, want 1", marked)
 	}
 }
+
+// hookKV wraps a MetaKV and fires onGet AFTER the underlying value has been
+// read but BEFORE it is returned to the caller. That models the ordinary
+// interleaving of a concurrent writer landing between the moment a flush
+// reads the catalog state and the moment it acts on it — the read observes
+// the world as it was, the writer's change is invisible to it, and the
+// caller proceeds on the stale picture.
+//
+// It deliberately does NOT implement RevisionReader, so manifest reads take
+// the kv.Get path and stay observable here.
+type hookKV struct {
+	MetaKV
+	armed bool
+	onGet func()
+}
+
+func (h *hookKV) Get(key string) ([]byte, uint64, error) {
+	v, rev, err := h.MetaKV.Get(key)
+	if h.armed && h.onGet != nil {
+		h.armed = false // one-shot, and re-entrant calls from onGet see it disarmed
+		h.onGet()
+	}
+	return v, rev, err
+}
+
+// TestReclaimReVerifiesBeforeDeletingAPathThatBecameLiveMidFlush is a
+// permanent #494 regression, promoted from the second adversarial review's
+// reproducer.
+//
+// The live-manifest guard used to be a time-of-check/time-of-use check: the
+// live set was built ONCE, up front, and the delete loop never re-checked.
+// A re-registration that landed after the set was built and before the
+// Delete fired was invisible to the guard, and the live table's file was
+// deleted. The one-shot Get hook lands a re-creation at exactly that
+// instant; in production it is the ordinary interleaving of a 5-minute
+// background sweep against any process that re-registers, including
+// iceberg.CatalogIntegration.RefreshTable, whose drop/re-register window
+// spans an S3 metadata read.
+//
+// Note which layer this pins. The re-created table's file arrives through
+// AddFiles (registration), so it is unowned and could never have been
+// scheduled — but the PENDING entry under test was written by AddNewFiles,
+// so the deletion here is one ownership does not stop. The per-entry
+// re-observation is what stops it.
+func TestReclaimReVerifiesBeforeDeletingAPathThatBecameLiveMidFlush(t *testing.T) {
+	store := objstore.NewMemStore()
+	kv := &hookKV{MetaKV: NewMemKV()}
+	cat := New(kv, store, "test-bucket")
+	ctx := context.Background()
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	schema := testSchema()
+
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := "tables/events/chunk_0198ff00-0000-7000-8000-000000000001.parquet"
+	if _, err := store.Put(ctx, "test-bucket", path, bytes.NewReader([]byte("real-user-data")), 14, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
+		{Path: path, SizeBytes: 14, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The operator drops the table. Its exact paths are scheduled.
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The loader re-runs (#278's idempotent re-registration) at the worst
+	// possible instant: after the sweep has read the catalog's table list
+	// and before the sweep deletes.
+	kv.onGet = func() {
+		if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+			t.Errorf("recreate: %v", err)
+			return
+		}
+		if err := cat.AddFiles(ctx, "events", nil, "tables/events", []FileEntry{
+			{Path: path, SizeBytes: 14, NumRows: 1, CreatedAt: time.Now().UTC()},
+		}); err != nil {
+			t.Errorf("re-register: %v", err)
+		}
+	}
+	kv.armed = true
+
+	if n := cat.FlushDroppedTableFiles(ctx, -time.Minute); n != 0 {
+		t.Errorf("flush deleted %d objects that became live mid-flush, want 0", n)
+	}
+
+	// The table is LIVE and its manifest references the path.
+	man, err := cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatalf("live table's manifest: %v", err)
+	}
+	refs := 0
+	for _, p := range man.Partitions {
+		refs += len(p.Files)
+	}
+	if refs != 1 {
+		t.Fatalf("precondition: live manifest should reference 1 file, got %d", refs)
+	}
+	if _, _, err := store.Get(ctx, "test-bucket", path); err != nil {
+		t.Errorf("DATA LOSS: the LIVE table's manifest references %q but the flush deleted it: %v", path, err)
+	}
+}
+
+// TestReclaimStillCollectsTheOldIncarnationAfterADropRecreateInsert is the
+// coverage half of the guards: they must block the losses without blocking
+// the feature. DROP a table whose files the engine wrote, recreate the same
+// name, INSERT fresh (UUIDv7-named) files into it — the OLD incarnation's
+// owned paths are dead and must be reclaimed, the new ones must not be
+// touched.
+//
+// This is the case the mid-flush "reborn" rule must NOT swallow: the name is
+// live in the flush's very first observation, so nothing changed under us,
+// and the recreated table's files are protected precisely — by path.
+func TestReclaimStillCollectsTheOldIncarnationAfterADropRecreateInsert(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := "tables/events/chunk_0198ff00-0000-7000-8000-00000000000a.parquet"
+	if _, err := cat.Store().Put(ctx, cat.Bucket(), oldPath, bytes.NewReader([]byte("v1")), 2, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
+		{Path: oldPath, SizeBytes: 2, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same name back, brand-new files: every engine-minted path carries a
+	// full UUIDv7, so the new incarnation shares nothing with the old.
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	newPath := "tables/events/chunk_0198ff00-0000-7000-8000-00000000000b.parquet"
+	if _, err := cat.Store().Put(ctx, cat.Bucket(), newPath, bytes.NewReader([]byte("v2")), 2, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
+		{Path: newPath, SizeBytes: 2, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := cat.FlushDroppedTableFiles(ctx, -time.Minute); n != 1 {
+		t.Errorf("reclaim collected %d files, want exactly the dropped incarnation's 1", n)
+	}
+	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), oldPath); err == nil {
+		t.Errorf("the dropped incarnation's owned file %q should have been reclaimed", oldPath)
+	}
+	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), newPath); err != nil {
+		t.Errorf("DATA LOSS: the live table's file %q was reclaimed: %v", newPath, err)
+	}
+	man, err := cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(man.Partitions) != 1 || len(man.Partitions[0].Files) != 1 || man.Partitions[0].Files[0].Path != newPath {
+		t.Fatalf("live manifest should still reference exactly %q, got %+v", newPath, man.Partitions)
+	}
+}
