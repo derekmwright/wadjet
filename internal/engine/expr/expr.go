@@ -5162,7 +5162,7 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 // differently is a failing test rather than another quiet divergence.
 //
 // Cast keeps networkOperand instead: its string-family case has its own
-// rendering contract for DATE (a separate defect, filed) and must not be
+// rendering contract for DATE (a separate defect, #521) and must not be
 // changed by a LIKE fix.
 func likeOperand(b *batch.RecordBatch, row int, operand Expr, v any) any {
 	cr, ok := operand.(*ColRef)

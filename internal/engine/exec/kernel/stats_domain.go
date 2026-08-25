@@ -66,8 +66,8 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 	// text-order extremes of the group, and the inet-order extremes are two
 	// different rows. Recovering them needs a statistic the file does not
 	// carry, which is what "no conversion exists" means here. Restoring the
-	// prune for CIDR means writing an inet-ordered bound at WRITE time, not
-	// converting harder at read time.
+	// prune for CIDR means writing an inet-ordered bound at WRITE time
+	// (#523), not converting harder at read time.
 	case batch.TypeCIDR:
 		return nil, false
 

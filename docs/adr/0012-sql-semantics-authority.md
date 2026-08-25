@@ -490,7 +490,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     literal with a match-nothing sentinel was simply wrong — the first
     returns 0, which MATCHES the rows holding `0.0.0.0` — and TypeIPv4,
     TypeMAC and TypeUUID still take that silent path. That is the same
-    defect one type over; it is filed rather than widened into this fix.
+    defect one type over, filed as #519 rather than widened into this fix.
 
     **A malformed STORED value is UNKNOWN, not an error and not a text
     comparison.** The column is unvalidated, so a row can hold something
@@ -529,15 +529,16 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     PRUNE does not, and cannot: the footer bounds are the address TEXT's
     extremes and the inet-order extremes are different rows, so TypeCIDR is
     withheld from pruning entirely — ADR-0018 §6, which is where that
-    reasoning lives.
+    reasoning lives; restoring it needs an inet-ordered bound written at
+    WRITE time, filed as #523.
 
     **Known residual: `ORDER BY`, `GROUP BY` and MIN/MAX over a CIDR column
     still use TEXT order.** The two engines agree with each other there, so
     no two-path gate sees it, but PostgreSQL would sort those by inet order
     too. Closing it means an inet-ordered comparator in the sort kernels,
     the group key, the container comparators and the shuffle's own router —
-    the same breadth item 8's float rule needed — so it is filed rather than
-    folded into a predicate fix.
+    the same breadth item 8's float rule needed — so it is filed as #520
+    rather than folded into a predicate fix.
 
     The two-path divergence this item closes was reproducible directly: the
     single-process engine answered 16 rows and the stage DAG answered 2 for
@@ -584,8 +585,8 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     for DATE: `CAST(c_date AS STRING)` answers the epoch DAY (`15007`) where
     the projection and LIKE answer `2011-02-02`. PostgreSQL's `date::text`
     is the date, so the CAST is the side that is wrong; it is a separate
-    defect in CAST's string family, filed rather than repaired inside a LIKE
-    fix, and named here so the next reader does not take the two for one
+    defect in CAST's string family, filed as #521 rather than repaired inside
+    a LIKE fix, and named here so the next reader does not take the two for one
     contract again.
 
     **Both sites must render alike, and two did not.** `ResolveLikeFilterKernel`
@@ -626,7 +627,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     it is not a text form the engine produces anywhere else and it is not a
     contract: it would change if the boxing did. Deciding a real container
     text (or refusing LIKE for containers, which is the other honest answer)
-    is left open and filed, deliberately not blessed by silence here.
+    is left open as #522, deliberately not blessed by silence here.
 
 ## Consequences
 

@@ -256,7 +256,8 @@ is withheld and the rest of the type is not.
 The general form: **a bound is only usable by a prune that reads it in the
 same order the filter reads the column.** When the engine's order for a type
 stops being the file's, the answer is to withhold — or to write a bound in
-the engine's order at WRITE time — never to convert harder at read time.
+the engine's order at WRITE time, filed as #523 — never to convert harder at
+read time.
 
 ## Consequences
 

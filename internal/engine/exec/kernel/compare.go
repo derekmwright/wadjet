@@ -304,7 +304,8 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 		// package asks the caller to raise — see compareFilterDecimal.
 		//
 		// TypeIPv4/TypeMAC/TypeUUID still take the silent-sentinel path; that
-		// is the same defect one type over, filed rather than widened here.
+		// is the same defect one type over, filed as #519 rather than widened
+		// here.
 		return nil
 	case batch.TypePort, batch.TypeProtocol:
 		return compareFilterImpl(getInt32Data, int32(toInt64(value)), op)
@@ -1273,7 +1274,7 @@ func ResolveLikeFilterKernel(typ batch.TypeID, pattern string, negate bool) Filt
 // That CAST-agreement claim is scoped to those SEVEN types and no further.
 // It is false for DATE, whose CAST AS STRING answers the epoch DAY (15007)
 // while this renderer, the projection and PostgreSQL's own `date::text` all
-// answer 2011-02-02 — a separate defect in CAST's string family, filed, not
+// answer 2011-02-02 — a separate defect in CAST's string family (#521), not
 // a contract this function is part of.
 //
 // The default arm covers every OTHER type (Int64/Float64/Bool/Decimal/Date/
