@@ -1367,7 +1367,15 @@ func (g *Gen) genGroupAgg(q *Query) {
 	}
 
 	if havingAgg != "" && g.chance(0.35) {
-		switch g.pick(3) {
+		// The predicate shapes past `agg > N`. Every one of them reaches the
+		// aggregate through an AST node the lowering's aggregate walk used to
+		// stop at, so the aggregate was never registered and the filter above
+		// the Aggregate tested a column that did not exist: `IS NULL` was
+		// true for every group and `IS NOT NULL` for none, `NOT` and IN and
+		// BETWEEN answered nothing, and AND/OR failed the query outright
+		// (#591). TLP found all of it and this generator could not have —
+		// it only ever emitted the one comparison.
+		switch g.pick(8) {
 		case 0:
 			q.Having = fmt.Sprintf("%s > %d", havingAgg, 1+g.pick(20))
 		case 1:
@@ -1377,6 +1385,66 @@ func (g *Gen) genGroupAgg(q *Query) {
 					q.Having = fmt.Sprintf("%s > %d", it.Alias, 1+g.pick(20))
 					break
 				}
+			}
+		case 2:
+			// A NULL check on the aggregate's own value. MIN/MAX/SUM are NULL
+			// for a group with no non-NULL input; COUNT never is, and both
+			// facts are about the same lowering.
+			not := ""
+			if g.chance(0.5) {
+				not = "NOT "
+			}
+			q.Having = fmt.Sprintf("(%s) IS %sNULL", havingAgg, not)
+		case 3:
+			// A negated comparison.
+			q.Having = fmt.Sprintf("NOT (%s > %d)", havingAgg, 1+g.pick(20))
+		case 4:
+			// A range and a membership test over the aggregate.
+			lo := g.pick(10)
+			if g.chance(0.5) {
+				q.Having = fmt.Sprintf("%s BETWEEN %d AND %d", havingAgg, lo, lo+1+g.pick(50))
+			} else {
+				q.Having = fmt.Sprintf("%s IN (%d, %d, %d)", havingAgg, lo, lo+1+g.pick(9), lo+11+g.pick(9))
+			}
+		case 5:
+			// Two aggregates joined by a connective, which is where the
+			// walkers used to fail the query rather than answer it wrongly.
+			second := havingAgg
+			for _, it := range q.Items {
+				if it.Agg && it.Expr != havingAgg {
+					second = it.Expr
+					break
+				}
+			}
+			op := "AND"
+			if g.chance(0.5) {
+				op = "OR"
+			}
+			q.Having = fmt.Sprintf("%s > %d %s (%s) IS NOT NULL", havingAgg, 1+g.pick(20), op, second)
+		case 6:
+			// A BARE aggregate as the predicate — #591 repro 1's shape, and
+			// the only one where the lowering's synthetic column has nothing
+			// wrapping it. Needs a boolean-valued aggregate, so it is built
+			// from a comparison the schema can supply a literal for.
+			lits := g.sc.withLits()
+			if len(lits) == 0 {
+				q.Having = fmt.Sprintf("%s > %d", havingAgg, 1+g.pick(20))
+				break
+			}
+			r := lits[g.pick(len(lits))]
+			lit := r.col.Lits[g.pick(len(r.col.Lits))]
+			fn := "BOOL_OR"
+			if g.chance(0.5) {
+				fn = "BOOL_AND"
+			}
+			pred := fmt.Sprintf("%s(%s = %s)", fn, g.name(r), lit)
+			switch g.pick(3) {
+			case 0:
+				q.Having = pred
+			case 1:
+				q.Having = "NOT (" + pred + ")"
+			default:
+				q.Having = "(" + pred + ") IS NULL"
 			}
 		default:
 			// Scalar-subquery threshold, data-derived on both sides.

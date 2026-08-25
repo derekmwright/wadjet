@@ -68,6 +68,19 @@ func TestGeneratorCoversTargetShapes(t *testing.T) {
 		bump("group-by", len(q.GroupBy) > 0)
 		bump("group-by-ordinal", groupByOrdinal(q))
 		bump("having", q.Having != "")
+		// The HAVING predicate SHAPES, separately: `agg > N` was the only one
+		// this generator emitted, so the arms of the differential that found
+		// #591 — a NULL check, a negation, a connective, a range, and a bare
+		// boolean aggregate — were dormant.
+		bump("having-null-check", q.Having != "" && strings.Contains(q.Having, "IS ") &&
+			strings.Contains(q.Having, "NULL"))
+		bump("having-negated", strings.HasPrefix(q.Having, "NOT ("))
+		bump("having-connective", q.Having != "" &&
+			(strings.Contains(q.Having, " AND ") || strings.Contains(q.Having, " OR ")))
+		bump("having-range", q.Having != "" &&
+			(strings.Contains(q.Having, " BETWEEN ") || strings.Contains(q.Having, " IN (")))
+		bump("having-bare-agg", strings.HasPrefix(q.Having, "BOOL_OR(") ||
+			strings.HasPrefix(q.Having, "BOOL_AND("))
 		bump("distinct", q.Distinct)
 		bump("count-distinct", strings.Contains(sql, "COUNT(DISTINCT"))
 		bump("count-case", strings.Contains(sql, "COUNT(CASE"))
@@ -99,6 +112,8 @@ func TestGeneratorCoversTargetShapes(t *testing.T) {
 		"qualified-ref", "bare-ref", "quoted-ident", "star", "self-join", "left-join",
 		"comma-join", "chain-4", "derived", "cte", "exists", "in-subquery",
 		"scalar-subquery", "group-by", "group-by-ordinal", "having", "distinct",
+		"having-null-check", "having-negated", "having-connective", "having-range",
+		"having-bare-agg",
 		"count-distinct", "count-case", "order-by", "order-by-ordinal", "order-by-alias",
 		"order-by-expr", "order-by-hidden", "order-desc", "limit", "offset", "total-order",
 		"date-extract", "date-cast", "is-null", "like", "between", "in-list", "case-when",

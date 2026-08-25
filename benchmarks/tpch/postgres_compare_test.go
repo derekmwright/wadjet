@@ -2420,6 +2420,150 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT a FROM (SELECT ARRAY[n_name] AS a FROM nation WHERE n_nationkey < 5) t ORDER BY a`},
 	)
 
+	// --- GROUP BY / HAVING: what a grouped query MEANS (#590, #591) --------
+	//
+	// Every entry here is a query PostgreSQL ANSWERS. The ones it refuses —
+	// an ungrouped column in SELECT / HAVING / ORDER BY — are 42803 and live
+	// in the wire arm's runWireErrors, where a SQLSTATE is comparable.
+	//
+	// The shape that matters is TLP's: `HAVING p`, `HAVING NOT p` and
+	// `HAVING p IS NULL` partition the ungated GROUP BY, so the three arms of
+	// each predicate below must sum to the unfiltered answer. Wadjet failed
+	// that at volume in two different ways — an aggregate predicate the
+	// lowering never registered (so `MAX(v) IS NULL` was true for every group
+	// and `IS NOT NULL` for none) and a synthetic `__having_0` column in the
+	// result — and neither was visible to the DuckDB arm, because both arms
+	// of a two-path comparison get the first one identically wrong.
+	out = append(out,
+		// The ungated GROUP BY each partition below must reconstruct.
+		pgCase{name: "HavingBaseGroups", sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k ORDER BY k`},
+
+		// BOOL_OR: a bare aggregate AS the predicate — #591 repro 1's shape.
+		pgCase{name: "HavingBoolOrBare",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING BOOL_OR(flag) ORDER BY k`},
+		pgCase{name: "HavingBoolOrNot",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING NOT BOOL_OR(flag) ORDER BY k`},
+		pgCase{name: "HavingBoolOrIsNull",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING (BOOL_OR(flag)) IS NULL ORDER BY k`},
+		// BOOL_AND, the same three arms over the other boolean aggregate.
+		pgCase{name: "HavingBoolAndBare",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING BOOL_AND(flag) ORDER BY k`},
+		pgCase{name: "HavingBoolAndNot",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING NOT BOOL_AND(flag) ORDER BY k`},
+		pgCase{name: "HavingBoolAndIsNull",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING (BOOL_AND(flag)) IS NULL ORDER BY k`},
+
+		// MAX over a column whose group-2 values are all NULL: the aggregate
+		// is NULL for exactly one group, so IS NULL and IS NOT NULL split the
+		// four groups 1/3. Answering "every group" and "no group" — which is
+		// what #591 repro 2 did — passes neither.
+		pgCase{name: "HavingMaxIsNull",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING MAX(v) IS NULL ORDER BY k`},
+		pgCase{name: "HavingMaxIsNotNull",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING MAX(v) IS NOT NULL ORDER BY k`},
+		pgCase{name: "HavingMinIsNull",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING MIN(v) IS NULL ORDER BY k`},
+		pgCase{name: "HavingMinIsNotNull",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING MIN(v) IS NOT NULL ORDER BY k`},
+		pgCase{name: "HavingSumIsNull",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING SUM(v) IS NULL ORDER BY k`},
+		pgCase{name: "HavingSumIsNotNull",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING SUM(v) IS NOT NULL ORDER BY k`},
+		// COUNT is never NULL, which is a different fact about the same
+		// lowering: IS NULL must answer NO groups and IS NOT NULL all of them.
+		pgCase{name: "HavingCountIsNull",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING COUNT(v) IS NULL ORDER BY k`},
+		pgCase{name: "HavingCountIsNotNull",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING COUNT(v) IS NOT NULL ORDER BY k`},
+
+		// Comparisons, and their negations. Every one of these reaches the
+		// aggregate through a node the aggregate walkers used to stop at.
+		pgCase{name: "HavingCountCmp",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING COUNT(*) > 1 ORDER BY k`},
+		pgCase{name: "HavingCountCmpNegated",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING NOT (COUNT(*) > 1) ORDER BY k`},
+		pgCase{name: "HavingSumCmp",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING SUM(v) > 15 ORDER BY k`},
+		pgCase{name: "HavingMinCmp",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING MIN(v) <= 7 ORDER BY k`},
+		pgCase{name: "HavingCountEqZero",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING COUNT(v) = 0 ORDER BY k`},
+		// Conjunction, disjunction, IN and BETWEEN over aggregates: AND/OR
+		// used to fail outright ("filter column \"count(*)\" does not exist"),
+		// IN and BETWEEN silently returned nothing.
+		pgCase{name: "HavingConjunction",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING COUNT(*) > 1 AND MAX(v) > 0 ORDER BY k`},
+		pgCase{name: "HavingDisjunction",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING COUNT(*) > 1 OR MAX(v) > 6 ORDER BY k`},
+		pgCase{name: "HavingAggIn",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING MAX(v) IN (20, 5) ORDER BY k`},
+		pgCase{name: "HavingAggBetween",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING MAX(v) BETWEEN 1 AND 9 ORDER BY k`},
+		// An aggregate the SELECT list already computes: HAVING must reference
+		// that column, not a second copy of the same aggregate.
+		pgCase{name: "HavingReusesSelectedAggregate",
+			sql: `SELECT k, COUNT(*) AS c FROM (` + pgHavingRows + `) t GROUP BY k HAVING COUNT(*) > 1 ORDER BY k`},
+		pgCase{name: "HavingOverSelectAlias",
+			sql: `SELECT k, COUNT(*) AS c FROM (` + pgHavingRows + `) t GROUP BY k HAVING c > 1 ORDER BY k`},
+		// An aggregate inside a NULL check in the SELECT list, which is the
+		// same walker gap one clause over.
+		pgCase{name: "SelectAggregateIsNull",
+			sql: `SELECT k, MAX(v) IS NULL AS mx_null FROM (` + pgHavingRows + `) t GROUP BY k ORDER BY k`},
+		pgCase{name: "SelectAggregateNegated",
+			sql: `SELECT k, NOT BOOL_OR(flag) AS none_set FROM (` + pgHavingRows + `) t GROUP BY k ORDER BY k`},
+
+		// The LEGAL side of #590: a grouped query whose SELECT list and
+		// ORDER BY stay inside the grouped expressions. These are the queries
+		// the 42803 refusal must NOT touch — a false positive here breaks
+		// working SQL, which is the more expensive of the two mistakes.
+		pgCase{name: "GroupedSelectsGroupedColumn",
+			sql: `SELECT n_regionkey, COUNT(*) AS c FROM nation GROUP BY n_regionkey ORDER BY n_regionkey`},
+		pgCase{name: "GroupedSelectsExpressionOverKey",
+			sql: `SELECT n_regionkey + 1 AS r1, COUNT(*) AS c FROM nation GROUP BY n_regionkey ORDER BY r1`},
+		pgCase{name: "GroupedSelectsQualifiedKey",
+			sql: `SELECT nation.n_regionkey, COUNT(*) AS c FROM nation GROUP BY n_regionkey ORDER BY 1`},
+		pgCase{name: "GroupedByQualifiedKey",
+			sql: `SELECT n_regionkey, COUNT(*) AS c FROM nation GROUP BY nation.n_regionkey ORDER BY 1`},
+		pgCase{name: "GroupedByOrdinal",
+			sql: `SELECT n_regionkey, COUNT(*) AS c FROM nation GROUP BY 1 ORDER BY 1`},
+		pgCase{name: "GroupedByOutputAlias",
+			sql: `SELECT n_regionkey AS r, COUNT(*) AS c FROM nation GROUP BY r ORDER BY r`},
+		pgCase{name: "GroupedByExpressionAlias",
+			sql: `SELECT n_regionkey % 3 AS r, COUNT(*) AS c FROM nation GROUP BY r ORDER BY r`},
+		pgCase{name: "GroupedByExpressionRepeated",
+			sql: `SELECT SUBSTR(n_name, 1, 1) AS ini, COUNT(*) AS c FROM nation
+				GROUP BY SUBSTR(n_name, 1, 1) ORDER BY ini`},
+		pgCase{name: "GroupedKeyNotSelected",
+			sql: `SELECT COUNT(*) AS c FROM nation GROUP BY n_regionkey ORDER BY c, n_regionkey`},
+		pgCase{name: "GroupedExtraKeyNotSelected",
+			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey, n_nationkey ORDER BY n_regionkey, n_nationkey`},
+		pgCase{name: "GroupedOrderByAggregate",
+			sql: `SELECT n_regionkey, COUNT(*) AS c FROM nation GROUP BY n_regionkey ORDER BY COUNT(*), n_regionkey`},
+		pgCase{name: "GroupedOrderByUnselectedAggregate",
+			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey ORDER BY MAX(n_nationkey)`,
+			knownBug: pgBugUnsupported + " ORDER BY an aggregate the SELECT list does not carry is refused " +
+				"outright (\"an aggregate expression that is not itself a select item cannot be sorted on\"). " +
+				"resolveOrderBy already materializes an unselected ORDER BY COLUMN under a hidden projection " +
+				"(#320); the aggregate spelling needs the same treatment one node down. A refusal is the safe " +
+				"direction of failure, which is why this is pinned rather than fixed here",
+			issue: "#597"},
+		pgCase{name: "GroupedCorrelatedOuterColumn",
+			sql: `SELECT r_regionkey, (SELECT COUNT(*) FROM nation n WHERE n.n_regionkey = r.r_regionkey) AS c
+				FROM region r ORDER BY r_regionkey`},
+
+		// The SQLancer TLP reductions, verbatim from #590 and #591, over the
+		// same fixture their tables described. Every finding this soak makes
+		// becomes a permanent corpus entry.
+		pgCase{name: "SQLancerTLPHavingBoolOr",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t4 GROUP BY k HAVING BOOL_OR(flag) ORDER BY k`},
+		pgCase{name: "SQLancerTLPHavingBoolOrNegated",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t4 GROUP BY k HAVING NOT (BOOL_OR(flag)) ORDER BY k`},
+		pgCase{name: "SQLancerTLPHavingBoolOrUnknown",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t4 GROUP BY k HAVING (BOOL_OR(flag)) IS NULL ORDER BY k`},
+		pgCase{name: "SQLancerHavingMaxCastToInt",
+			sql: `SELECT k FROM (` + pgHavingRows + `) t GROUP BY k HAVING MAX(CAST(flag AS INTEGER)) > 0 ORDER BY k`},
+	)
+
 	out = append(out, postgresBytesCases()...)
 
 	out = append(out, multiKeyCorrelatedCases()...)
@@ -2578,6 +2722,22 @@ func postgresBytesCases() []pgCase {
 			issue: "#582"},
 	}
 }
+
+// pgHavingRows is the six-row fixture the #590/#591 entries above are written
+// over, as a derived table both engines parse identically. It reproduces the
+// tables those issues minimized to: group 1 has both boolean values and two
+// non-NULL v, group 2 is all-TRUE with every v NULL (so MAX(v) is NULL for
+// exactly one group), group 3's only flag is NULL (so BOOL_OR and BOOL_AND
+// are UNKNOWN there and the `p IS NULL` arm of a TLP partition is non-empty),
+// and group 4 is all-FALSE. Four groups, and no two aggregates agree about
+// which of them they select.
+const pgHavingRows = `
+	SELECT 1 AS k, CAST(TRUE AS BOOLEAN) AS flag, CAST(10 AS BIGINT) AS v
+	UNION ALL SELECT 1, CAST(FALSE AS BOOLEAN), CAST(20 AS BIGINT)
+	UNION ALL SELECT 2, CAST(TRUE AS BOOLEAN), CAST(NULL AS BIGINT)
+	UNION ALL SELECT 2, CAST(TRUE AS BOOLEAN), CAST(NULL AS BIGINT)
+	UNION ALL SELECT 3, CAST(NULL AS BOOLEAN), CAST(5 AS BIGINT)
+	UNION ALL SELECT 4, CAST(FALSE AS BOOLEAN), CAST(7 AS BIGINT)`
 
 // pgNumericTextRows is the five-row TEXT fixture the #504 entries above are
 // written over, as a derived table both engines parse identically. The values

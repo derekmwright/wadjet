@@ -933,6 +933,42 @@ func wireCorpus() []wireCase {
 					"own hazard back in through a derived value, since those bytes are invalid UTF-8 " +
 					"and hold an embedded NUL that libpq truncates at",
 			}},
+		// --- The SHAPE of a grouped answer (#591) ---------------------------
+		//
+		// A HAVING over an aggregate the SELECT list does not carry adds a
+		// synthetic `__having_N` column to the aggregate's output, and the
+		// projection above it used to be elided as redundant — so the column
+		// reached RowDescription and psql drew it. The semantics arm cannot
+		// see this: it compares cells POSITIONALLY and the extra column is
+		// last. Field COUNT and field NAMES are exactly what this arm
+		// compares, which makes these entries the gate for the leak.
+		{name: "HavingBareAggregateOneColumn",
+			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey
+				HAVING BOOL_OR(n_nationkey > 5) ORDER BY n_regionkey`},
+		{name: "HavingComparisonOneColumn",
+			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey
+				HAVING MAX(n_nationkey) > 5 ORDER BY n_regionkey`},
+		{name: "HavingNullCheckOneColumn",
+			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey
+				HAVING MAX(n_nationkey) IS NOT NULL ORDER BY n_regionkey`},
+		// Two selected columns and a THIRD aggregate only HAVING mentions.
+		{name: "HavingUnselectedAggregateTwoColumns",
+			sql: `SELECT n_regionkey, COUNT(*) AS c FROM nation GROUP BY n_regionkey
+				HAVING MAX(n_nationkey) > 5 ORDER BY n_regionkey`},
+		// The aggregate HAVING names IS the selected one, so nothing
+		// synthetic should be created at all — the control for the entries
+		// above, and the gate on the reuse that avoids computing it twice.
+		{name: "HavingReusesSelectedAggregate",
+			sql: `SELECT n_regionkey, COUNT(*) AS c FROM nation GROUP BY n_regionkey
+				HAVING COUNT(*) > 1 ORDER BY n_regionkey`},
+		// A grouping key the SELECT list does not ask for is the same leak
+		// through a different door: the aggregate emits it, and only the
+		// projection can trim it.
+		{name: "GroupedKeyNotSelected",
+			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey, n_nationkey
+				ORDER BY n_regionkey, n_nationkey`},
+		{name: "GroupedNoKeySelected",
+			sql: `SELECT COUNT(*) AS c FROM nation GROUP BY n_regionkey ORDER BY c, n_regionkey`},
 
 		{name: "UnaliasedAggregate",
 			sql: `SELECT COUNT(supplier.s_name) FROM supplier`,
@@ -1024,6 +1060,32 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 				"position against a PostgreSQL answer, because there is none"},
 		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`},
 		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`},
+		// #367 fixed the no-GROUP-BY shape above. With a GROUP BY present
+		// PostgreSQL's rule does not relax, it NARROWS — every non-aggregated
+		// SELECT / HAVING / ORDER BY expression must be one of the grouped
+		// ones — and wadjet did not check that case at all. What came out was
+		// not a missing error but three silent wrong answers: the SELECT-list
+		// column was replaced in place by the grouping key, and a HAVING over
+		// a bare ungrouped column excluded EVERY group, so TLP's `p` /
+		// `NOT p` / `p IS NULL` partition summed to zero rows (#590).
+		{name: "GroupBySelectsUngroupedColumn",
+			sql: `SELECT n_regionkey, n_name FROM nation GROUP BY n_regionkey`},
+		{name: "GroupBySelectsUngroupedColumnBesideAggregate",
+			sql: `SELECT COUNT(*), n_name FROM nation GROUP BY n_regionkey`},
+		{name: "GroupBySelectsUngroupedColumnInExpression",
+			sql: `SELECT n_regionkey, UPPER(n_name) FROM nation GROUP BY n_regionkey`},
+		{name: "GroupByHavingUngroupedColumn",
+			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey HAVING n_nationkey > 5`},
+		{name: "GroupByHavingUngroupedColumnIsNull",
+			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey HAVING n_name IS NULL`},
+		{name: "GroupByHavingUngroupedColumnNegated",
+			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey HAVING NOT (n_nationkey > 5)`},
+		{name: "GroupByOrderByUngroupedColumn",
+			sql: `SELECT n_regionkey FROM nation GROUP BY n_regionkey ORDER BY n_name`},
+		// A HAVING with no GROUP BY makes the whole table one group, so the
+		// SELECT list is under the same rule.
+		{name: "HavingWithoutGroupBySelectsUngroupedColumn",
+			sql: `SELECT n_name FROM nation HAVING COUNT(*) > 1`},
 		{name: "AmbiguousColumn", sql: `SELECT n_nationkey FROM nation a JOIN nation b ON a.n_nationkey = b.n_nationkey`},
 	}
 	for _, c := range cases {
