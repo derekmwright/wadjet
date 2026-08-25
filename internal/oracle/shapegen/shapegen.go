@@ -818,6 +818,27 @@ func (g *Gen) genSubqueryPred(q *Query) {
 		k := ints[g.pick(len(ints))]
 		q.Where = append(q.Where, fmt.Sprintf("%s IN (%s)", g.name(k), inner))
 	default:
+		// Correlated EXISTS. Half the time on MORE THAN ONE key, which is the
+		// shape this generator could not produce at all until #562: the FK
+		// arm below emits exactly one equality, so a defect that needs two
+		// correlated columns to fire was unreachable in principle. It fired
+		// in practice — a two-column correlated EXISTS answered zero rows and
+		// its NOT EXISTS twin answered every row.
+		if g.chance(0.5) {
+			// Half of THOSE across two relations, where the two sides carry
+			// different bare names. That is not a cosmetic difference: a
+			// self-correlation reads `sub.x = t0.x`, which resolves on both
+			// sides, so dedupSemiAntiBuildSide cannot attribute either and
+			// DECLINES — the narrowing never runs. Only a distinct-name
+			// correlation makes it fire, which is the code path #562 lived
+			// on.
+			if g.chance(0.5) && g.genMultiKeyEdgeExists(q, r) {
+				return
+			}
+			if g.genMultiKeyExists(q, r) {
+				return
+			}
+		}
 		// Correlated EXISTS over an FK edge.
 		for _, e := range g.s.Edges {
 			if e.LTable == r.table {
@@ -831,6 +852,128 @@ func (g *Gen) genSubqueryPred(q *Query) {
 			}
 		}
 	}
+}
+
+// genMultiKeyExists emits a correlated EXISTS keyed on two or three columns.
+//
+// It correlates the outer relation with its OWN table, for a reason: an FK
+// edge gives one column pair and nothing says a second pair of columns from
+// two different tables holds any value in common, so a cross-table multi-key
+// EXISTS would be empty for every row and prove nothing. A self-correlation
+// always has a match — each row matches itself — unless a key is NULL, which
+// is the other rule worth generating: a NULL key matches nothing, itself
+// included, so those rows drop out and the answer is neither "all" nor "none".
+//
+// An inner-only predicate goes in most of the time, on either side of the
+// correlations, because where it sits decides which conjunct the rewrite
+// classifies first.
+//
+// ok=false when the table has too few columns to key on, and the caller falls
+// through to the FK arm.
+func (g *Gen) genMultiKeyExists(q *Query, r ref) bool {
+	t := g.s.table(r.table)
+	if t == nil {
+		return false
+	}
+	// Key columns come from the SCOPE, not from the table: the outer entry may
+	// be a derived table exposing only part of it, and a correlation naming a
+	// column that entry does not carry is a query neither engine can answer.
+	// Every scope ref still belongs to r.table, so `sub.<col>` resolves too.
+	var cols []Column
+	for _, e := range g.sc.refs {
+		if e.tblAlias == r.tblAlias {
+			cols = append(cols, e.col)
+		}
+	}
+	if len(cols) < 2 {
+		return false
+	}
+	// Deterministic, distinct, and in the scope's own column order so the
+	// rendered SQL is a function of the seed alone.
+	want := 2
+	if len(cols) > 2 && g.chance(0.35) {
+		want = 3
+	}
+	chosen := map[int]bool{}
+	for len(chosen) < want {
+		chosen[g.pick(len(cols))] = true
+	}
+	conds := make([]string, 0, want+1)
+	for i, c := range cols {
+		if chosen[i] {
+			conds = append(conds, fmt.Sprintf("sub.%s = %s.%s", c.Name, r.tblAlias, c.Name))
+		}
+	}
+	if lits := litCols(*t); len(lits) > 0 && g.chance(0.7) {
+		c := lits[g.pick(len(lits))]
+		pred := fmt.Sprintf("sub.%s %s %s", c.Name, cmpOp(g), c.Lits[g.pick(len(c.Lits))])
+		// Before, between or after the correlations.
+		switch g.pick(3) {
+		case 0:
+			conds = append([]string{pred}, conds...)
+		case 1:
+			conds = append(conds[:1], append([]string{pred}, conds[1:]...)...)
+		default:
+			conds = append(conds, pred)
+		}
+	}
+	neg := ""
+	if g.chance(0.4) {
+		neg = "NOT "
+	}
+	q.Where = append(q.Where, fmt.Sprintf("%sEXISTS (SELECT 1 FROM %s sub WHERE %s)",
+		neg, r.table, strings.Join(conds, " AND ")))
+	return true
+}
+
+// genMultiKeyEdgeExists emits a correlated EXISTS across an FK edge with a
+// SECOND correlated equality, so the outer and inner key names differ.
+//
+// The second pair is any two same-Kind columns, one from each relation, that
+// are not the edge's own. It is not a meaningful relationship and does not
+// need to be: what it exercises is the key LIST, and both engines answer the
+// same question whatever the columns mean. The edge equality keeps the answer
+// off zero.
+//
+// ok=false when no second pair exists, and the caller falls back to the
+// self-correlated form.
+func (g *Gen) genMultiKeyEdgeExists(q *Query, r ref) bool {
+	for _, e := range g.s.Edges {
+		if e.LTable != r.table {
+			continue
+		}
+		lt, rt := g.s.table(e.LTable), g.s.table(e.RTable)
+		if lt == nil || rt == nil {
+			continue
+		}
+		// Deterministic: first same-Kind pair in declared column order.
+		for _, oc := range lt.Cols {
+			if oc.Name == e.LCol {
+				continue
+			}
+			for _, ic := range rt.Cols {
+				if ic.Name == e.RCol || ic.Kind != oc.Kind {
+					continue
+				}
+				conds := []string{
+					fmt.Sprintf("sub.%s = %s.%s", e.RCol, r.tblAlias, e.LCol),
+					fmt.Sprintf("sub.%s = %s.%s", ic.Name, r.tblAlias, oc.Name),
+				}
+				if len(ic.Lits) > 0 && g.chance(0.5) {
+					conds = append(conds, fmt.Sprintf("sub.%s %s %s",
+						ic.Name, cmpOp(g), ic.Lits[g.pick(len(ic.Lits))]))
+				}
+				neg := ""
+				if g.chance(0.4) {
+					neg = "NOT "
+				}
+				q.Where = append(q.Where, fmt.Sprintf("%sEXISTS (SELECT 1 FROM %s sub WHERE %s)",
+					neg, e.RTable, strings.Join(conds, " AND ")))
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (g *Gen) genProjection(q *Query) {

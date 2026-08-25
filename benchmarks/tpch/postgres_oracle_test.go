@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/derekmwright/wadjet/internal/oracle/multikey"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -356,6 +357,11 @@ func (o *postgresOracle) load(t *testing.T, ctx context.Context) {
 	if err := sink(pgBytesTable, pgBytesRows()); err != nil {
 		t.Fatalf("%v", err)
 	}
+	for _, tbl := range multikey.Tables() {
+		if err := sink(tbl.Name, tbl.Rows); err != nil {
+			t.Fatalf("%v", err)
+		}
+	}
 	for name, ing := range ingesters {
 		if err := ing.FlushAll(ctx); err != nil {
 			t.Fatalf("wadjet flush %s: %v", name, err)
@@ -566,6 +572,15 @@ func oracleTables() map[string]parquet.Schema {
 		// key, have something to be compared against.
 		{Name: "b_other", Type: parquet.TypeBytes, Nullable: true},
 	}}
+	// The multi-key correlated-subquery fixture (#562). It is here rather than
+	// in a second oracle because it needs exactly what this one already has —
+	// one source feeding both engines — and because the shapes it carries are
+	// ones only PostgreSQL can arbitrate: a correlated EXISTS keyed on two
+	// columns, over DATE, CIDR and UUID columns the TPC-H schema does not have
+	// at all.
+	for _, t := range multikey.Tables() {
+		out[t.Name] = t.Schema
+	}
 	return out
 }
 
@@ -708,6 +723,15 @@ func postgresColumnType(t *testing.T, c parquet.Column) string {
 		// bytea, which is byte-ordered and byte-compared in every collation:
 		// no COLLATE clause applies to it and none is needed (#570).
 		return "bytea"
+	case parquet.TypeCIDR:
+		// PostgreSQL's own network type, not text: its equality compares the
+		// address AND the mask length, which is the comparison a CIDR key has
+		// to make. Wadjet stores a CIDR as unvalidated text, so the fixture's
+		// values are canonical networks — `cidr` rejects a set host bit, and
+		// a fixture PostgreSQL refuses to load is not an oracle.
+		return "cidr"
+	case parquet.TypeUUID:
+		return "uuid"
 	default:
 		t.Fatalf("column %s has type %s, which the PostgreSQL oracle does not map yet", c.Name, c.Type)
 		return ""

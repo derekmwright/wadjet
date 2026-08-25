@@ -15,6 +15,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/distributed"
 	"github.com/derekmwright/wadjet/internal/oracle"
+	"github.com/derekmwright/wadjet/internal/oracle/multikey"
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
@@ -361,7 +362,7 @@ type tmdTable struct {
 }
 
 func tmdTables() []tmdTable {
-	return []tmdTable{
+	return append([]tmdTable{
 		{typematrix.Table, typematrix.Schema(), typematrix.Data(typematrix.Rows)},
 		{typematrix.Nested, typematrix.NestedSchema(), typematrix.NestedData(typematrix.Rows)},
 		{typematrix.Dim, typematrix.DimSchema(), typematrix.DimData()},
@@ -394,7 +395,27 @@ func tmdTables() []tmdTable {
 		{sodOvfTable, sodOvfSchema(), sodOvfData()},
 		{sodJoinA, sodJoinSchema(9, 2), sodJoinData(1275)},
 		{sodJoinB, sodJoinSchema(18, 4), sodJoinData(127500)},
+	}, multikeyTables()...)
+}
+
+// multikeyTables is the multi-key correlated-subquery fixture (#562), adapted
+// to this package's tmdTable. It rides along here for the same reason as the
+// fixtures above: TestMultiKeyCorrelatedTwoPath uses these two arms and no
+// type-matrix corpus entry names its tables. The type matrix cannot stand in
+// for it — every correlated entry there correlates on exactly ONE column,
+// which is the blind spot #562 lived in.
+//
+// Both of the corpus's arms are here: the shared-schema relations, on which
+// the build-side narrowing DECLINES, and the distinct-name ones (p_/q_/w_
+// prefixes), on which it FIRES. Going through multikey.Tables() means an arm
+// added to the corpus cannot be forgotten in this gate.
+func multikeyTables() []tmdTable {
+	src := multikey.Tables()
+	out := make([]tmdTable, len(src))
+	for i, t := range src {
+		out[i] = tmdTable{t.Name, t.Schema, t.Rows}
 	}
+	return out
 }
 
 // tmdCluster is arm B: embedded NATS + MemStore + NATS-KV catalog + three

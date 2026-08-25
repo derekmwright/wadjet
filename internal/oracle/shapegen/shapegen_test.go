@@ -49,6 +49,20 @@ func TestGeneratorCoversTargetShapes(t *testing.T) {
 		bump("derived", strings.Contains(sql, "FROM ("))
 		bump("cte", strings.HasPrefix(sql, "WITH "))
 		bump("exists", strings.Contains(sql, "EXISTS"))
+		// #562: a correlated EXISTS keyed on MORE THAN ONE column. The FK arm
+		// emits exactly one equality, so before genMultiKeyExists this
+		// generator could not produce the shape even in principle — and the
+		// defect it hides answers zero rows for the EXISTS and every row for
+		// the NOT EXISTS, silently.
+		bump("exists-multikey", correlatedKeys(sql) >= 2)
+		bump("exists-threekey", correlatedKeys(sql) >= 3)
+		bump("not-exists-multikey", strings.Contains(sql, "NOT EXISTS") && correlatedKeys(sql) >= 2)
+		// A multi-key correlation whose two sides carry DIFFERENT bare names.
+		// The self-correlated form cannot make dedupSemiAntiBuildSide fire —
+		// `sub.x = t0.x` resolves on both sides, so the pass declines — so
+		// without this arm the fuzzer generates the shape and never reaches
+		// the code path it lives on.
+		bump("exists-multikey-distinct-names", multiKeyDistinctNames(sql))
 		bump("in-subquery", strings.Contains(sql, "IN (SELECT"))
 		bump("scalar-subquery", strings.Contains(sql, "(SELECT AVG"))
 		bump("group-by", len(q.GroupBy) > 0)
@@ -89,6 +103,8 @@ func TestGeneratorCoversTargetShapes(t *testing.T) {
 		"order-by-expr", "order-by-hidden", "order-desc", "limit", "offset", "total-order",
 		"date-extract", "date-cast", "is-null", "like", "between", "in-list", "case-when",
 		"coalesce", "cmp-unordered", "cmp-ordered", "cmp-count",
+		"exists-multikey", "exists-threekey", "not-exists-multikey",
+		"exists-multikey-distinct-names",
 	} {
 		if counts[k] == 0 {
 			t.Errorf("shape %q never generated in 3000 seeds — that arm of the differential is dormant", k)
@@ -245,4 +261,52 @@ func projectsAlias(q *Query, alias string) bool {
 		}
 	}
 	return false
+}
+
+// correlatedKeys counts the `sub.x = tN.x` conjuncts inside a generated
+// EXISTS — the number of columns its correlation is keyed on.
+func correlatedKeys(sql string) int {
+	i := strings.Index(sql, "EXISTS (SELECT 1 FROM ")
+	if i < 0 {
+		return 0
+	}
+	body := sql[i:]
+	if j := strings.Index(body, ")"); j >= 0 {
+		body = body[:j]
+	}
+	n := 0
+	for _, conj := range strings.Split(body, " AND ") {
+		if strings.Contains(conj, "sub.") && strings.Count(conj, ".") >= 2 && strings.Contains(conj, " = ") {
+			n++
+		}
+	}
+	return n
+}
+
+// multiKeyDistinctNames reports whether a generated EXISTS correlates on two
+// or more columns AND at least one conjunct compares two DIFFERENT bare names
+// — the shape whose keys the build-side narrowing can attribute.
+func multiKeyDistinctNames(sql string) bool {
+	i := strings.Index(sql, "EXISTS (SELECT 1 FROM ")
+	if i < 0 {
+		return false
+	}
+	body := sql[i:]
+	if j := strings.Index(body, ")"); j >= 0 {
+		body = body[:j]
+	}
+	keys, distinct := 0, false
+	for _, conj := range strings.Split(body, " AND ") {
+		l, r, ok := strings.Cut(conj, " = ")
+		if !ok || !strings.Contains(l, "sub.") {
+			continue
+		}
+		keys++
+		lb := l[strings.LastIndexByte(l, '.')+1:]
+		rb := r[strings.LastIndexByte(r, '.')+1:]
+		if !strings.EqualFold(strings.TrimSpace(lb), strings.TrimSpace(rb)) {
+			distinct = true
+		}
+	}
+	return keys >= 2 && distinct
 }

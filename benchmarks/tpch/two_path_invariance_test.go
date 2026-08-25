@@ -2906,6 +2906,81 @@ func twoPathCorpus() []twoPathQuery {
 					WHERE c2.c_nationkey < c1.c_nationkey AND c2.c_acctbal > 9000)`,
 			assertA: assertCorrelatedExistsCount("NOT EXISTS over an unprojected correlation", true)},
 
+		// #562 — a correlated subquery keyed on MORE THAN ONE column. Every
+		// correlated entry above this one, in this corpus and in every other,
+		// correlates on exactly ONE equality; the two-column form answered
+		// ZERO rows and its NOT EXISTS twin answered EVERY row, because the
+		// build side's NDV narrowing (dedupSemiAntiBuildSide) read the join
+		// keys out of the condition TEXT with a split on " and " while a
+		// decorrelation renders " AND ". It kept the first conjunct's key and
+		// projected away the column the second conjunct compares.
+		//
+		// The two-arm compare could not have caught it: the defect is in the
+		// LOGICAL optimizer, which both arms share, so they answered 0
+		// together. Every entry here carries an assertA that recomputes the
+		// answer from the fixture rows — that is the half with the authority.
+		// The per-type and NULL-rule half of this family lives over its own
+		// fixture in internal/oracle/multikey.
+		twoPathQuery{name: "MultiKeyCorrelatedExists", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM orders a WHERE EXISTS (
+				SELECT 1 FROM orders b
+				WHERE b.o_custkey = a.o_custkey AND b.o_orderstatus = a.o_orderstatus
+				  AND b.o_orderkey < 5000)`,
+			assertA: assertMultiKeyCorrelated("two-key correlated EXISTS over orders", false,
+				"orders", "orders", [][2]string{{"o_custkey", "o_custkey"}, {"o_orderstatus", "o_orderstatus"}},
+				func(b map[string]any) bool { return toFloat(b["o_orderkey"]) < 5000 })},
+		// The conjuncts the other way round: #562 reproduced in both orders,
+		// so a fix that reads only the first conjunct passes one and fails
+		// the other.
+		twoPathQuery{name: "MultiKeyCorrelatedExistsReordered", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM orders a WHERE EXISTS (
+				SELECT 1 FROM orders b
+				WHERE b.o_orderstatus = a.o_orderstatus AND b.o_custkey = a.o_custkey
+				  AND b.o_orderkey < 5000)`,
+			assertA: assertMultiKeyCorrelated("the same two conjuncts reordered", false,
+				"orders", "orders", [][2]string{{"o_custkey", "o_custkey"}, {"o_orderstatus", "o_orderstatus"}},
+				func(b map[string]any) bool { return toFloat(b["o_orderkey"]) < 5000 })},
+		// The anti twin, whose failure mode is the whole probe side rather
+		// than none of it — a wrong answer that reads entirely plausible.
+		twoPathQuery{name: "MultiKeyCorrelatedNotExists", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM orders a WHERE NOT EXISTS (
+				SELECT 1 FROM orders b
+				WHERE b.o_custkey = a.o_custkey AND b.o_orderstatus = a.o_orderstatus
+				  AND b.o_orderkey < 5000)`,
+			assertA: assertMultiKeyCorrelated("two-key correlated NOT EXISTS over orders", true,
+				"orders", "orders", [][2]string{{"o_custkey", "o_custkey"}, {"o_orderstatus", "o_orderstatus"}},
+				func(b map[string]any) bool { return toFloat(b["o_orderkey"]) < 5000 })},
+		twoPathQuery{name: "MultiKeyCorrelatedExistsThreeKeys", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM orders a WHERE EXISTS (
+				SELECT 1 FROM orders b
+				WHERE b.o_custkey = a.o_custkey AND b.o_orderstatus = a.o_orderstatus
+				  AND b.o_shippriority = a.o_shippriority AND b.o_orderkey < 5000)`,
+			assertA: assertMultiKeyCorrelated("three-key correlated EXISTS over orders", false,
+				"orders", "orders", [][2]string{{"o_custkey", "o_custkey"},
+					{"o_orderstatus", "o_orderstatus"}, {"o_shippriority", "o_shippriority"}},
+				func(b map[string]any) bool { return toFloat(b["o_orderkey"]) < 5000 })},
+		// A correlated IN contributes the IN key AND the correlation, so this
+		// is a two-key semi join built by tryDecorrelateInSubquery rather than
+		// by tryDecorrelateExists — a second lowering into the same defect.
+		twoPathQuery{name: "MultiKeyCorrelatedIn", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM orders a WHERE a.o_orderkey IN (
+				SELECT b.o_orderkey FROM orders b
+				WHERE b.o_custkey = a.o_custkey AND b.o_orderkey < 5000)`,
+			assertA: assertMultiKeyCorrelated("correlated IN: the IN key plus one correlation", false,
+				"orders", "orders", [][2]string{{"o_orderkey", "o_orderkey"}, {"o_custkey", "o_custkey"}},
+				func(b map[string]any) bool { return toFloat(b["o_orderkey"]) < 5000 })},
+		// Two keys across DIFFERENT relations, which is where the narrowing
+		// actually fires — the self-correlated shapes above decline it
+		// because neither side of `k = k` is attributable from the condition
+		// alone.
+		twoPathQuery{name: "MultiKeyCorrelatedExistsCrossTable", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM orders a WHERE EXISTS (
+				SELECT 1 FROM customer c
+				WHERE c.c_custkey = a.o_custkey AND c.c_nationkey = a.o_shippriority)`,
+			assertA: assertMultiKeyCorrelated("two keys across two relations", false,
+				"orders", "customer", [][2]string{{"o_custkey", "c_custkey"}, {"o_shippriority", "c_nationkey"}},
+				nil)},
+
 		// #375: a five-table join chain whose unqualified WHERE compares
 		// columns of DIFFERENT types across the chain (o_totalprice is
 		// FLOAT64, r_regionkey INT32). The vectorized col-col filter kernel
@@ -5562,4 +5637,62 @@ func assertCorrelatedExistsCount(why string, not bool) func(testing.TB, []map[st
 			tb.Errorf("n = %v, want %d — %s (recomputed over the fixture rows)", got, want, why)
 		}
 	}
+}
+
+// assertMultiKeyCorrelated recomputes a correlated EXISTS / NOT EXISTS keyed
+// on SEVERAL columns, straight over the fixture rows.
+//
+// It is the half of the #562 family with the authority. The two-arm compare
+// has none here: the defect was in the logical optimizer, so the stage DAG and
+// the single-process pipeline produced the same wrong count and agreed.
+//
+// pairs are (outer column, inner column). innerPred is the subquery's own
+// WHERE, or nil.
+func assertMultiKeyCorrelated(why string, not bool, outerTable, innerTable string,
+	pairs [][2]string, innerPred func(map[string]any) bool) func(testing.TB, []map[string]any) {
+	return func(tb testing.TB, rows []map[string]any) {
+		tb.Helper()
+		if len(rows) != 1 {
+			tb.Fatalf("%d rows, want 1 (%s)", len(rows), why)
+		}
+		inner := sf001Table(tb, innerTable)
+		present := make(map[string]bool, len(inner))
+		for _, b := range inner {
+			if innerPred != nil && !innerPred(b) {
+				continue
+			}
+			key, ok := multiKeyTuple(b, pairs, 1)
+			if !ok {
+				continue // a NULL key matches nothing, itself included
+			}
+			present[key] = true
+		}
+		want := 0
+		for _, a := range sf001Table(tb, outerTable) {
+			key, ok := multiKeyTuple(a, pairs, 0)
+			// A NULL anywhere in the probe's key matches nothing, so the row
+			// survives NOT EXISTS and fails EXISTS.
+			if matched := ok && present[key]; matched != not {
+				want++
+			}
+		}
+		if got := cellNum(rows[0], "n"); got != float64(want) {
+			tb.Errorf("n = %v, want %d — %s (recomputed over the fixture rows)", got, want, why)
+		}
+	}
+}
+
+// multiKeyTuple renders one row's composite key. side picks which half of each
+// pair to read. ok=false when any component is NULL, which is a key that
+// matches nothing.
+func multiKeyTuple(row map[string]any, pairs [][2]string, side int) (string, bool) {
+	var b strings.Builder
+	for _, p := range pairs {
+		v, present := row[p[side]]
+		if !present || v == nil {
+			return "", false
+		}
+		fmt.Fprintf(&b, "%v\x00", v)
+	}
+	return b.String(), true
 }
