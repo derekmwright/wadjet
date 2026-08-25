@@ -27,7 +27,7 @@ import (
 //	               2001:db8:: address, so every row group is pruned.
 //
 // The engine's own order for those columns is the stored one — the filter
-// kernel converts the LITERAL (parseIPv6ToRawString, and decimalLiteralAt
+// kernel converts the LITERAL (IPv6LitKey, and decimalLiteralAt
 // against the vector's scale) rather than rendering the column — so this
 // function is that same conversion, hoisted to where the planner still knows
 // the column's type and scale. Rendering the bounds the other way would be
@@ -49,10 +49,27 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 	// leaf's unit — see parquet.RowGroupStats.)
 	case batch.TypeBool, batch.TypeInt32, batch.TypeInt64,
 		batch.TypeFloat32, batch.TypeFloat64,
-		batch.TypeString, batch.TypeCIDR,
+		batch.TypeString,
 		batch.TypePort, batch.TypeProtocol,
 		batch.TypeDuration, batch.TypeTimestamp:
 		return v, true
+
+	// CIDR is WITHHELD. Its physical value is the address TEXT and its footer
+	// bounds are that text's min/max, but the engine no longer ORDERS it that
+	// way: ResolveFilterKernel's TypeCIDR arm compares PostgreSQL's inet order
+	// (CidrSortKey), where "9.0.0.0/8" is below "10.0.0.0/8" and the text is
+	// above it. A prune reading the raw bounds therefore deletes row groups
+	// the filter would have kept — `WHERE c_cidr < '10.0.0.0/16'` answered 0
+	// rows with the prune on and 2 with it off (ADR-0018 §the two-input rule).
+	//
+	// Re-keying the BOUNDS instead is not available: the min/max are the
+	// text-order extremes of the group, and the inet-order extremes are two
+	// different rows. Recovering them needs a statistic the file does not
+	// carry, which is what "no conversion exists" means here. Restoring the
+	// prune for CIDR means writing an inet-ordered bound at WRITE time, not
+	// converting harder at read time.
+	case batch.TypeCIDR:
+		return nil, false
 
 	// BYTES compares by bytes and a []byte literal has to become the string
 	// the stats decode to.
@@ -107,17 +124,27 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 		}
 		return n, true
 
-	// IPV6 and UUID store the raw 16 bytes.
+	// IPV6 and UUID store the raw 16 bytes. That IS the engine's order for
+	// IPv6 — a fixed-width big-endian address, so byte order is address order
+	// — which is why this one converts rather than being withheld with CIDR.
+	//
+	// A v4-SHAPED literal is the exception. IPv6LitKey keys it below every
+	// stored address (PostgreSQL compares the FAMILY first), and no 16-byte
+	// bound can express "below all of them" the way the empty key does
+	// against a value; converting it to its v4-mapped 16 bytes instead —
+	// a plain net.ParseIP does — puts it in the MIDDLE of the range,
+	// so the prune and the filter would read the same predicate differently.
+	// Withheld, which costs a prune and cannot cost a row.
 	case batch.TypeIPv6:
 		s, ok := v.(string)
 		if !ok {
 			return nil, false
 		}
-		raw := parseIPv6ToRawString(s)
-		if raw == "" {
+		key, keyed := IPv6LitKey(s)
+		if !keyed || key == "" {
 			return nil, false
 		}
-		return raw, true
+		return key, true
 	case batch.TypeUUID:
 		s, ok := v.(string)
 		if !ok {

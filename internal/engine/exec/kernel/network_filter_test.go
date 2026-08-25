@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -322,5 +323,289 @@ func TestResolveLikeFilterKernelNetworkTypes(t *testing.T) {
 				t.Errorf("LIKE %q against %v = %v, want %v (sel=%v)", tt.pattern, tt.value, got, tt.want, sel)
 			}
 		})
+	}
+}
+
+// pgInetOrder is the total order live PostgreSQL 17 puts these values in.
+//
+// It was DERIVED, not reasoned out: the list was fed to
+//
+//	SELECT t FROM v ORDER BY t::inet, t
+//
+// in a postgres:17-alpine container, and this slice is that output verbatim.
+// Ties (a value equal to the one before it under inet, broken here by text)
+// are named in pgInetTies so the assertion below does not read a tie as an
+// ordering.
+//
+// The set is chosen to separate PostgreSQL's network_cmp from every simpler
+// rule: host-bearing prefixes at four mask lengths, bare addresses, /0 and
+// /32 at the ends, v4 and v6 interleaved by family rather than by bytes, and
+// a v4-MAPPED v6 address, which PostgreSQL still calls family 6.
+var pgInetOrder = []string{
+	"0.0.0.0/0",
+	"0.0.0.0/32",
+	"9.255.255.255/32",
+	"10.0.0.0/8",
+	"10.0.0.1/8",
+	"10.255.255.255/8",
+	"10.0.0.0/9",
+	"10.0.0.1/32",
+	"10.0.0.2",
+	"10.128.0.0/9",
+	"128.0.0.0/1",
+	"192.168.1.0/24",
+	"192.168.1.5/24",
+	"192.168.1.255/24",
+	"192.168.1.0/32",
+	"192.168.1.5/32",
+	"192.168.1.7",
+	"255.255.255.255/32",
+	"::/0",
+	"::1/128",
+	"::ffff:10.0.0.2",
+	"::ffff:10.0.0.2/128",
+	"2001:db8::/32",
+	"2001:db8::1/32",
+	"2001:db8::1/128",
+	"2001:db8::9/128",
+	"2001:db8::10/128",
+	"2001:db8:ffff::/48",
+	"fe80::1/64",
+	"ffff::/16",
+}
+
+// pgInetTies names the adjacent pairs in pgInetOrder that PostgreSQL calls
+// EQUAL — a bare address and its explicit host route are one value.
+var pgInetTies = map[string]string{
+	"::ffff:10.0.0.2/128": "::ffff:10.0.0.2",
+}
+
+// TestCidrSortKeyMatchesPostgresInetOrder is the semantics gate for #492's
+// second pass: CidrSortKey must reproduce PostgreSQL's inet order — family,
+// then the common bits under the SMALLER mask, then the mask length, then the
+// FULL unmasked address — over host-bearing and canonical values alike.
+//
+// The first CidrSortKey keyed net.ParseCIDR's MASKED network, which threw the
+// host bits away: '10.0.0.1/8' and '10.0.0.0/8' became one value, so
+// `WHERE c_cidr = '10.0.0.1/8'` answered a row holding a DIFFERENT address.
+// Comparing every adjacent pair here catches that (the two are adjacent), and
+// comparing every PAIR catches a key that gets one step of the four right and
+// another wrong.
+func TestCidrSortKeyMatchesPostgresInetOrder(t *testing.T) {
+	keys := make([]string, len(pgInetOrder))
+	for i, s := range pgInetOrder {
+		k, ok := CidrSortKey(s)
+		if !ok {
+			t.Fatalf("CidrSortKey(%q) refused a value PostgreSQL's inet accepts", s)
+		}
+		keys[i] = k
+	}
+	for i := 0; i < len(pgInetOrder); i++ {
+		for j := i + 1; j < len(pgInetOrder); j++ {
+			tied := pgInetTies[pgInetOrder[j]] == pgInetOrder[i]
+			switch {
+			case tied && keys[i] != keys[j]:
+				t.Errorf("PostgreSQL calls %s and %s EQUAL; the keys differ",
+					pgInetOrder[i], pgInetOrder[j])
+			case !tied && !(keys[i] < keys[j]):
+				t.Errorf("PostgreSQL orders %s BEFORE %s; the keys do not",
+					pgInetOrder[i], pgInetOrder[j])
+			}
+		}
+	}
+}
+
+// TestCidrSortKeyIsATotalOrder is the property the pinned table cannot state:
+// the key must order EVERY pair consistently, not only the 30 PostgreSQL was
+// asked about. A byte-string key is transitive and antisymmetric for free —
+// what is not free is that every value produces one, at every mask length and
+// in both families, so that no pair falls back to "neither is less".
+func TestCidrSortKeyIsATotalOrder(t *testing.T) {
+	var vals []string
+	for _, a := range []string{"0.0.0.0", "10.0.0.1", "10.0.0.255", "10.128.0.1", "192.168.1.7", "255.255.255.255"} {
+		for _, m := range []int{0, 1, 8, 9, 16, 24, 31, 32} {
+			vals = append(vals, fmt.Sprintf("%s/%d", a, m))
+		}
+		vals = append(vals, a)
+	}
+	for _, a := range []string{"::", "::1", "2001:db8::1", "2001:db8::ffff", "fe80::1", "ffff::"} {
+		for _, m := range []int{0, 16, 32, 64, 127, 128} {
+			vals = append(vals, fmt.Sprintf("%s/%d", a, m))
+		}
+		vals = append(vals, a)
+	}
+	keys := make(map[string]string, len(vals))
+	for _, v := range vals {
+		k, ok := CidrSortKey(v)
+		if !ok {
+			t.Fatalf("CidrSortKey(%q) refused a well-formed value", v)
+		}
+		keys[v] = k
+	}
+	for _, a := range vals {
+		for _, b := range vals {
+			ka, kb := keys[a], keys[b]
+			if a == b && ka != kb {
+				t.Fatalf("%s does not key to itself", a)
+			}
+			if (ka < kb) && (kb < ka) {
+				t.Fatalf("%s and %s are both less than each other", a, b)
+			}
+			for _, c := range vals {
+				kc := keys[c]
+				if ka < kb && kb < kc && !(ka < kc) {
+					t.Fatalf("not transitive: %s < %s < %s", a, b, c)
+				}
+			}
+		}
+	}
+}
+
+// TestCidrSortKeyReadsABareAddressAsAHostRoute pins the literal shape the
+// kernel used to answer with a match-nothing sentinel. PostgreSQL's inet
+// reads '10.0.0.1' as '10.0.0.1/32' — verified live, the two are `=` — and a
+// CIDR column holding either text must therefore answer the other.
+func TestCidrSortKeyReadsABareAddressAsAHostRoute(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"10.0.0.1", "10.0.0.1/32"},
+		{"2001:db8::1", "2001:db8::1/128"},
+		{"::ffff:10.0.0.2", "::ffff:10.0.0.2/128"},
+	} {
+		a, aok := CidrSortKey(pair[0])
+		b, bok := CidrSortKey(pair[1])
+		if !aok || !bok || a != b {
+			t.Errorf("%q and %q must be one value; ok=%v/%v equal=%v",
+				pair[0], pair[1], aok, bok, a == b)
+		}
+	}
+	// A v4 literal and a v6 one are never the same value, family first.
+	v4, _ := CidrSortKey("10.0.0.2")
+	v6, _ := CidrSortKey("::ffff:10.0.0.2")
+	if !(v4 < v6) {
+		t.Error("PostgreSQL puts every v4 address below every v6 one, v4-mapped included")
+	}
+}
+
+// TestCidrSortKeyKeepsHostBits is #492's own regression, stated as small as it
+// gets: the two values differ only in a bit the mask covers up, and the first
+// implementation made them one.
+func TestCidrSortKeyKeepsHostBits(t *testing.T) {
+	zero, _ := CidrSortKey("10.0.0.0/8")
+	one, _ := CidrSortKey("10.0.0.1/8")
+	if zero == one {
+		t.Fatal("10.0.0.0/8 and 10.0.0.1/8 keyed the same: the host bits were masked away")
+	}
+	if !(zero < one) {
+		t.Error("10.0.0.0/8 must sort below 10.0.0.1/8 — the full address is the last tiebreak")
+	}
+}
+
+// TestResolveFilterKernelRefusesANonAddressLiteral: a CIDR or IPv6 column
+// against a literal that is no address gets NO kernel, which is how this
+// package asks the caller for a query error (exec.networkConstError, SQLSTATE
+// 22P02). It used to get a match-nothing kernel for CIDR — so `c_cidr <>
+// 'garbage'` dropped EVERY row — and, for IPv6, the empty raw address, which
+// every stored address compares above.
+func TestResolveFilterKernelRefusesANonAddressLiteral(t *testing.T) {
+	for _, typ := range []batch.TypeID{batch.TypeCIDR, batch.TypeIPv6} {
+		for _, op := range []CompareOp{OpEq, OpNe, OpLt, OpGt} {
+			if k := ResolveFilterKernel(typ, op, "garbage"); k != nil {
+				t.Errorf("%v op %v against 'garbage' returned a kernel; want nil so the caller raises", typ, op)
+			}
+		}
+	}
+	// A bare address IS an address: it must still get a kernel.
+	if k := ResolveFilterKernel(batch.TypeCIDR, OpEq, "10.0.0.1"); k == nil {
+		t.Error("a bare address against CIDR must resolve to a /32 host route, not a refusal")
+	}
+	// A v4 literal against IPv6 is an address too — a family comparison.
+	if k := ResolveFilterKernel(batch.TypeIPv6, OpGt, "10.0.0.2"); k == nil {
+		t.Error("a v4 literal against IPv6 must resolve; PostgreSQL compares the family")
+	}
+}
+
+// TestIPv6KernelPutsAV4LiteralBelowEveryRow: PostgreSQL's inet compares the
+// FAMILY first, so every v6 address is greater than every v4 one — including
+// ::1, whose raw bytes are far below a v4-mapped address's. Reading the
+// literal as its v4-mapped 16 bytes (what the arm did before IPv6LitKey) put
+// it in the MIDDLE of the v6 range instead.
+func TestIPv6KernelPutsAV4LiteralBelowEveryRow(t *testing.T) {
+	schema := []parquet.Column{{Name: "c", Type: parquet.TypeIPv6}}
+	rows := []string{"::", "::1", "::ffff:10.0.0.2", "2001:db8::1", "ffff::"}
+	b := batch.NewRecordBatch(schema, len(rows))
+	for i, r := range rows {
+		b.Columns[0].SetValue(i, r)
+	}
+	for _, tc := range []struct {
+		op   CompareOp
+		want int
+	}{
+		{OpGt, len(rows)}, // every v6 row is above a v4 literal
+		{OpLt, 0},
+		{OpEq, 0},
+	} {
+		kern := ResolveFilterKernel(batch.TypeIPv6, tc.op, "10.0.0.2")
+		if kern == nil {
+			t.Fatal("no kernel for a v4 literal against IPv6")
+		}
+		got := len(kern(b.Columns[0], nil, len(rows), make([]uint32, 0, len(rows))))
+		if got != tc.want {
+			t.Errorf("op %v against '10.0.0.2': %d rows, want %d", tc.op, got, tc.want)
+		}
+	}
+}
+
+// TestFilterCIDRIgnoresAMalformedStoredValue: the column is unvalidated text,
+// so a row can hold something that is not an address. It matches NOTHING, for
+// every operator including `<>` — UNKNOWN, the answer a NULL row gets — and
+// expr.CmpNetworkLit.evalCIDR answers the same row the same way. Falling
+// through to a lexical text comparison on one path and not the other is the
+// two-path defect this whole item exists to close.
+func TestFilterCIDRIgnoresAMalformedStoredValue(t *testing.T) {
+	schema := []parquet.Column{{Name: "c", Type: parquet.TypeCIDR}}
+	b := batch.NewRecordBatch(schema, 2)
+	b.Columns[0].SetValue(0, "10.0.0.0/8")
+	b.Columns[0].SetValue(1, "not-an-address")
+	for _, op := range []CompareOp{OpEq, OpNe, OpLt, OpGt, OpLe, OpGe} {
+		kern := ResolveFilterKernel(batch.TypeCIDR, op, "10.0.0.0/8")
+		sel := kern(b.Columns[0], nil, 2, make([]uint32, 0, 2))
+		for _, idx := range sel {
+			if idx == 1 {
+				t.Errorf("op %v admitted the malformed row", op)
+			}
+		}
+	}
+}
+
+// TestInFilterCIDRUsesTheSameKeyAsTheComparison: `c = 'X'` and `c IN ('X')`
+// must answer alike. The IN arm shared TypeString's raw-text set, so a
+// non-canonical spelling of the same network was one value to `=` and another
+// to IN.
+func TestInFilterCIDRUsesTheSameKeyAsTheComparison(t *testing.T) {
+	schema := []parquet.Column{{Name: "c", Type: parquet.TypeCIDR}}
+	b := batch.NewRecordBatch(schema, 2)
+	b.Columns[0].SetValue(0, "10.0.0.1/8")
+	b.Columns[0].SetValue(1, "2001:db8::1/64")
+	for _, tc := range []struct {
+		lit  string
+		want int
+	}{
+		{"10.0.0.1", 0},          // bare form of row 0's address, but /32 != /8
+		{"10.0.0.1/8", 0},        // row 0
+		{"2001:0db8:0::1/64", 1}, // a non-canonical spelling of row 1
+	} {
+		kern := ResolveInFilterKernel(batch.TypeCIDR, []any{tc.lit}, false)
+		if kern == nil {
+			t.Fatalf("no IN kernel for %q", tc.lit)
+		}
+		sel := kern(b.Columns[0], nil, 2, make([]uint32, 0, 2))
+		eq := ResolveFilterKernel(batch.TypeCIDR, OpEq, tc.lit)
+		eqSel := eq(b.Columns[0], nil, 2, make([]uint32, 0, 2))
+		if fmt.Sprint(sel) != fmt.Sprint(eqSel) {
+			t.Errorf("IN (%q) selected %v but = %q selected %v", tc.lit, sel, tc.lit, eqSel)
+		}
+	}
+	if k := ResolveInFilterKernel(batch.TypeCIDR, []any{"garbage"}, false); k != nil {
+		t.Error("IN with a non-address member must return nil so the caller raises")
 	}
 }

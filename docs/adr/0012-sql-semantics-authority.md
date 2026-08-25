@@ -348,9 +348,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      the defect ship green. AVG keeps the float comparison, for the scale
      contract above and for no other reason.
 
-10. **A network-literal ORDERING comparison follows the address's own
-    order, not the column's rendered text — item 8's boxed-value rule
-    applied to IPv6 and CIDR.** (Added 2026-08-24, #492.) `tryNetworkLit`/
+10. **A network-literal comparison follows the ADDRESS's own order and
+    PostgreSQL's `inet` rules — item 8's boxed-value rule applied to IPv6
+    and CIDR — and a literal that names no address is a query ERROR.**
+    (Added 2026-08-24, #492. Rewritten 2026-08-24 after review: the first
+    pass got the ordering RULE wrong for CIDR and invented a match-nothing
+    answer for a literal it could not parse.) `tryNetworkLit`/
     `CmpNetworkLit` (`internal/engine/expr`) already pre-parsed an IPv4 or
     MAC literal into its column's raw int64 encoding at compile time, so
     ordering compared the address numerically. IPv6 and CIDR literals had
@@ -364,24 +367,91 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     (`parquet/schema.go`) with no raw-byte form to fall back on the way
     IPv6 already had.
 
-    The fix extends the existing pattern instead of inventing a new one:
-    `tryNetworkLit` now also recognizes an IPv6 literal (pre-parsed into
-    the column's raw 16 bytes, compared byte-for-byte — a fixed-width
-    big-endian encoding, so Go's own string ordering IS the address's
-    numeric order) and a CIDR literal (pre-parsed into a STRUCTURAL key —
-    family, then address bytes, then prefix length, PostgreSQL's own inet
-    order verified live: `'9.0.0.0/8' < '10.0.0.0/8'` is true where the
-    same comparison on the raw text is false, and `'10.0.0.0/8' <
-    '10.0.0.0/24'` is true — ascending prefix length at equal address).
-    `kernel.CidrSortKey` is the ONE implementation both the kernel's
+    **The order is PostgreSQL's `inet`, not its `cidr`.** Those are two
+    types there and only one of them can hold what wadjet's column holds:
+    `'10.0.0.1/8'::cidr` is an ERROR in PostgreSQL ("Value has bits set to
+    right of mask") while `'10.0.0.1/8'::inet` is an ordinary value, and
+    wadjet's CIDR column is unvalidated text (`internal/storage/ingest`)
+    into which host-bearing prefixes are routinely written — they are what
+    most network telemetry carries. Choosing `cidr`'s semantics would mean
+    declaring most of the real data invalid; choosing `inet`'s means every
+    value has a place in the order. `inet` it is.
+
+    `network_cmp_internal` (`src/backend/utils/adt/network.c`) compares, in
+    order: the address FAMILY; the common bits under the SMALLER of the two
+    prefix lengths; the prefix length; the FULL, UNMASKED address. Three
+    consequences a simpler rule gets wrong, all verified against live
+    PostgreSQL 17:
+
+	'9.255.255.255/32' < '10.0.0.0/8'    — common bits decide before the mask
+	'192.168.1.5/24'   < '192.168.1.0/32' — the MASK outranks the address
+	'10.0.0.0/8'       < '10.0.0.1/8'    — host bits are KEPT, ordered last
+
+    `kernel.CidrSortKey` is that order as a byte string —
+    `[family][address masked to its own prefix][prefix length][full unmasked
+    address]` — and is the ONE implementation both the kernel's
     scan-pushdown path and `expr.CmpNetworkLit`'s generic-evaluation path
     call, exported for exactly the reason its own doc comment gives: two
     structural parsers maintained separately is the two-path defect class
     this item closes, not a shape to reintroduce by duplicating it.
-    `internal/planner/physical/plan.go`'s `extractFilterOps` needed no
-    change at all — its `*expr.CmpNetworkLit` case was already generic over
-    which typed fields the node carries, dispatching on the column's REAL
-    runtime type through `ResolveFilterKernel` the same way it always had.
+    `TestCidrSortKeyMatchesPostgresInetOrder` pins the whole order against a
+    PostgreSQL-derived table of host-bearing and canonical values, v4 and
+    v6, at mixed prefix lengths.
+
+    **The first pass keyed the MASKED network alone**, which threw the host
+    bits away: `10.0.0.1/8` and `10.0.0.0/8` became one value, so
+    `WHERE c_cidr = '10.0.0.1/8'` answered a row holding a DIFFERENT
+    address. Every value in the corpus was a canonical `192.168.N.0/24`, so
+    no gate could see it; the fixture now mixes canonical and host-bearing
+    prefixes at four mask lengths, with host-bearing addresses INSIDE
+    networks the fixture also holds (`typematrix.cidrValue`).
+
+    **A BARE address is a /32 or /128 host route**, which is what
+    PostgreSQL's inet does with the same input (`'10.0.0.1'::inet =
+    '10.0.0.1/32'::inet` is true). The first pass could not parse one, and
+    answered `c_cidr = '10.0.0.1'` with a match-nothing kernel through the
+    scan while the row-at-a-time path compared the text — so a WHERE clause
+    and a SELECT list disagreed about the same row.
+
+    **A literal that names NO address is a query ERROR — SQLSTATE 22P02 —
+    never a value and never a match-nothing kernel.** This is #463's rule
+    for DECIMAL, one type family over, and for the same reason: a
+    match-nothing answer to `c_cidr <> 'garbage'` deletes every row of a
+    query that cannot mean anything, silently. Both paths raise it: the
+    kernel returns no kernel and `exec.networkConstError` turns that into
+    the error (the mechanism `compareFilterDecimal` already used), and the
+    row path raises from `CmpNetworkLit`'s CIDR/IPv6 arms for a literal that
+    parses as some OTHER address kind, or from the binding `Cmp` already
+    carries for a literal that parses as nothing at all. The lexical
+    `genericFallback` is gone from both arms. The comment that claimed
+    `parseIPv4ToInt64`/`parseIPv6ToRawString` already answered such a
+    literal with a match-nothing sentinel was simply wrong — the first
+    returns 0, which MATCHES the rows holding `0.0.0.0` — and TypeIPv4,
+    TypeMAC and TypeUUID still take that silent path. That is the same
+    defect one type over; it is filed rather than widened into this fix.
+
+    **A malformed STORED value is UNKNOWN, not an error and not a text
+    comparison.** The column is unvalidated, so a row can hold something
+    that is not an address. It matches nothing for every operator, `<>`
+    included — the answer a NULL row gets — on both paths. Raising instead
+    would fail a whole query over one bad row in a column the engine never
+    promised to validate; falling back to a lexical comparison on one path
+    only (what `evalCIDR` did) is how one bad row split the two paths apart.
+
+    **IPv6 against a v4-shaped literal is a FAMILY comparison.**
+    PostgreSQL's inet puts every v4 address below every v6 one
+    (`'255.255.255.255'::inet < '::'::inet`), including below a v4-MAPPED v6
+    address, which it still calls family 6. `kernel.IPv6LitKey` keys a v4
+    literal to the EMPTY string — shorter than, and a prefix of, every
+    16-byte row value, so it compares strictly below all of them with no
+    per-row re-keying. The kernel used to read that literal as its v4-mapped
+    16 bytes, landing it in the MIDDLE of the v6 range, while the expr path
+    fell through to a lexical text compare: two paths, two orders, neither
+    PostgreSQL's.
+
+    IPv6's ordinary case needed the same preparse CIDR did: the literal is
+    the address's raw 16 bytes, a fixed-width big-endian encoding, so Go's
+    own string ordering IS the address's numeric order.
 
     UUID needed no fix: its literal always zero-pads to a fixed 32-hex-digit
     form, so lexical order of that FIXED-WIDTH text happens to equal the
@@ -390,6 +460,22 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     silently, because it does not generalize to IPv6's variable-width
     `::`-compressed form or CIDR's variable-width prefix notation, which is
     exactly why those two needed a real fix and UUID did not.
+
+    **One key, every consumer of the comparison.** `IN` shares it
+    (`kernel.inFilterKeyed`), because `c = 'X'` and `c IN ('X')` answering
+    differently is the two-kernel version of the same defect. The row-group
+    PRUNE does not, and cannot: the footer bounds are the address TEXT's
+    extremes and the inet-order extremes are different rows, so TypeCIDR is
+    withheld from pruning entirely — ADR-0018 §6, which is where that
+    reasoning lives.
+
+    **Known residual: `ORDER BY`, `GROUP BY` and MIN/MAX over a CIDR column
+    still use TEXT order.** The two engines agree with each other there, so
+    no two-path gate sees it, but PostgreSQL would sort those by inet order
+    too. Closing it means an inet-ordered comparator in the sort kernels,
+    the group key, the container comparators and the shuffle's own router —
+    the same breadth item 8's float rule needed — so it is filed rather than
+    folded into a predicate fix.
 
     The two-path divergence this item closes was reproducible directly: the
     single-process engine answered 16 rows and the stage DAG answered 2 for
@@ -401,8 +487,9 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     both already shared. `internal/oracle/typematrix`'s corpus, which had
     deliberately excluded an ordering literal comparison against IPv6/CIDR
     to avoid gating an already-known bug, now includes one
-    (`litcmp_ord_c_ipv6`, `litcmp_ord_c_cidr`) — verified to reproduce the
-    689-vs-1358-row divergence on the pre-fix engine and agree after.
+    (`litcmp_ord_c_ipv6`, `litcmp_ord_c_cidr`) plus the shapes the second
+    pass needed (`litcmp_bare_c_cidr`, `litcmp_hostbits_c_cidr`,
+    `litcmp_xfamily_c_ipv6` and their ordering forms).
 
 11. **LIKE against a network-native type or UUID renders the column to
     TEXT, the same convention CAST AS STRING and every scalar function

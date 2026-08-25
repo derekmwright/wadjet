@@ -511,6 +511,40 @@ func decimalConstError(typ batch.TypeID, value any) error {
 	return sqlerr.New("22P02", "invalid input syntax for type numeric: %q", fmt.Sprint(value))
 }
 
+// networkConstError is decimalConstError's counterpart for the two network
+// types whose kernel arm refuses a literal it cannot read as an ADDRESS:
+// TypeCIDR (kernel.CidrSortKey) and TypeIPv6 (kernel.IPv6LitKey).
+//
+// Both used to answer instead of refusing, and the answers were silently
+// wrong in opposite directions: the CIDR arm returned a match-nothing kernel,
+// so `c_cidr <> 'garbage'` dropped every row, while the IPv6 arm read an
+// unparseable literal as the empty raw address, which every stored address
+// compares ABOVE. PostgreSQL refuses `'garbage'::inet` with 22P02 and
+// ADR-0012 item 1 makes PostgreSQL the authority on error-versus-not, so this
+// is its SQLSTATE and its wording.
+//
+// The row-at-a-time path raises the same error for the same literal
+// (expr.CmpNetworkLit's CIDR arm and expr's Cmp binding): one path erroring
+// while the other answers is the two-path defect class.
+func networkConstError(typ batch.TypeID, value any) error {
+	if value == nil {
+		return nil
+	}
+	switch typ {
+	case batch.TypeCIDR:
+		if _, ok := kernel.CidrSortKey(fmt.Sprint(value)); ok {
+			return nil
+		}
+		return sqlerr.New("22P02", "invalid input syntax for type cidr: %q", fmt.Sprint(value))
+	case batch.TypeIPv6:
+		if _, ok := kernel.IPv6LitKey(fmt.Sprint(value)); ok {
+			return nil
+		}
+		return sqlerr.New("22P02", "invalid input syntax for type inet: %q", fmt.Sprint(value))
+	}
+	return nil
+}
+
 func (f *KernelFilter) Init(_ context.Context) error { return nil }
 
 func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
@@ -551,6 +585,9 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 	if f.kern == nil {
 		typ := in.Columns[f.colIdx].Type
 		if err := decimalConstError(typ, decimalLitValue(typ, f.Value, f.LitText)); err != nil {
+			return nil, err
+		}
+		if err := networkConstError(typ, f.Value); err != nil {
 			return nil, err
 		}
 		// The column resolved; the TYPE has no comparison kernel. Reporting
@@ -641,6 +678,9 @@ func (f *InFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Rec
 		typ := in.Columns[f.colIdx].Type
 		for _, v := range f.kernelValues(typ) {
 			if err := decimalConstError(typ, v); err != nil {
+				return nil, err
+			}
+			if err := networkConstError(typ, v); err != nil {
 				return nil, err
 			}
 		}

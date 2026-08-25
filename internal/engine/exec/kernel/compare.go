@@ -272,24 +272,40 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 	case batch.TypeMAC:
 		return compareFilterImpl(getInt64Data, parseMACToInt64(toString(value)), op)
 	case batch.TypeIPv6:
-		return compareFilterString(op, parseIPv6ToRawString(toString(value)))
+		// IPv6LitKey, not a plain net.ParseIP: a v4-shaped literal against a
+		// v6 column is a FAMILY comparison in PostgreSQL, not a v4-mapped
+		// address in the middle of the v6 range (#492 follow-up). An
+		// unparseable literal returns no kernel at all — see the CIDR arm.
+		if key, ok := IPv6LitKey(toString(value)); ok {
+			return compareFilterString(op, key)
+		}
+		return nil
 	case batch.TypeCIDR:
 		// The column stores plain TEXT (parquet/schema.go), so comparing the
 		// literal against it directly is a byte comparison of that text —
-		// LEXICAL, not PostgreSQL's structural inet order (family, then
-		// address bytes, then prefix length): "10.0.0.0/24" sorts below
+		// LEXICAL, not PostgreSQL's inet order (family, common bits under the
+		// smaller mask, mask length, full address): "10.0.0.0/24" sorts below
 		// "9.0.0.0/8" as text even though 10.x is the larger address (#492).
 		// compareFilterCIDR re-keys both the literal and every row's own
-		// text into that structural order before comparing.
+		// text into that order before comparing. A bare address parses as a
+		// /32 or /128 host route, as PostgreSQL's inet reads the same input.
 		if key, ok := CidrSortKey(toString(value)); ok {
 			return compareFilterCIDR(op, key)
 		}
-		// The literal itself is not a parseable CIDR: no stored value (which
-		// the column enforces the shape of) can equal it, matching how
-		// TypeIPv4/TypeIPv6 above answer an unparseable literal with a
-		// sentinel that matches nothing rather than falling back to a raw
-		// text compare of a shape the column never holds.
-		return matchNothingKernel
+		// The literal is not an address at all. Returning a match-nothing
+		// kernel here made `c_cidr <> 'garbage'` answer ZERO rows where every
+		// row is a legitimate answer, and it is not what the other network
+		// arms do either: parseIPv4ToInt64 answers 0 for an unparseable
+		// literal, which MATCHES the rows holding 0.0.0.0, and
+		// the IPv6 arm's plain net.ParseIP answered "" before IPv6LitKey
+		// replaced it. All three are silent wrong answers to a query that
+		// cannot mean anything; PostgreSQL raises 22P02 for it, and
+		// ADR-0012 item 1 makes that the answer. A nil kernel is how this
+		// package asks the caller to raise — see compareFilterDecimal.
+		//
+		// TypeIPv4/TypeMAC/TypeUUID still take the silent-sentinel path; that
+		// is the same defect one type over, filed rather than widened here.
+		return nil
 	case batch.TypePort, batch.TypeProtocol:
 		return compareFilterImpl(getInt32Data, int32(toInt64(value)), op)
 	case batch.TypeDuration:
@@ -526,53 +542,141 @@ func compareFilterString(op CompareOp, val string) FilterKernel {
 	}
 }
 
-// CidrSortKey re-keys a CIDR literal's TEXT ("192.168.1.0/24") into
-// PostgreSQL's structural inet order — family, then address bytes, then
-// prefix length (verified against live PostgreSQL: '10.0.0.0/8' <
-// '::1/128' is true, '10.0.0.0/8' < '10.0.0.0/24' is true, i.e. ascending
-// prefix length at equal address) — as a byte string two keys compare
-// lexically in exactly that order: the family byte disambiguates length
-// before any address byte is compared, so a v4 key and a v6 key never
-// collide despite their different widths, and the trailing prefix-length
-// byte only matters once every address byte already tied.
+// CidrSortKey re-keys a CIDR/inet TEXT value ("192.168.1.0/24", "10.0.0.1/8",
+// or a bare "10.0.0.1") into PostgreSQL's `inet` order — network_cmp — as a
+// byte string two keys compare LEXICALLY in exactly that order.
 //
-// ok is false when s does not parse as a CIDR at all — a stored column
-// value never fails this (the column enforces the shape), but a literal
-// might.
+// PostgreSQL's network_cmp_internal compares, in this sequence:
+//
+//  1. the address FAMILY (v4 before v6),
+//  2. the common bits under the SMALLER of the two prefix lengths,
+//  3. the prefix length itself,
+//  4. the FULL, UNMASKED address.
+//
+// The key is [family][address masked to its own prefix, full width][prefix
+// length][full unmasked address], which reproduces that order exactly. Step 2
+// needs both operands and no single-value key can hold it directly, but the
+// masked address is equivalent: if the first min(len) bits differ, both keys
+// retain the differing bit and compare the same way; if they agree, the
+// shorter prefix's key has zeros where the longer one may have ones, so it
+// sorts first — which is step 3's answer — and when those bits are zero too
+// the keys tie and the explicit prefix-length byte decides. The trailing full
+// address is step 4.
+//
+// Verified against live PostgreSQL 17 over host-bearing and canonical values,
+// v4 and v6, at mixed prefix lengths — the whole table is
+// TestCidrSortKeyMatchesPostgresInetOrder's fixture. Three of its consequences
+// are worth naming because a simpler key gets them wrong:
+//
+//	'9.255.255.255/32' < '10.0.0.0/8'   — common bits decide before the mask
+//	'192.168.1.5/24'   < '192.168.1.0/32' — the MASK outranks the address
+//	'10.0.0.0/8'       < '10.0.0.1/8'   — host bits are kept, and ordered last
+//
+// That last one is why the key cannot be built from net.ParseCIDR's MASKED
+// network alone, which is what this function did when #492 introduced it:
+// keying only ipnet.IP threw the host bits away, so '10.0.0.1/8' and
+// '10.0.0.0/8' became the SAME value and `= '10.0.0.1/8'` answered rows
+// holding a different address. Wadjet's CIDR column is unvalidated text
+// (internal/storage/ingest), and host-bearing prefixes are ordinary in the
+// network data this type exists for, so those are not edge values.
+//
+// A BARE address with no "/" is a /32 (v4) or /128 (v6), which is what
+// PostgreSQL's inet does with the same input — `'10.0.0.1'::inet =
+// '10.0.0.1/32'::inet` is true. A v4-MAPPED v6 address ("::ffff:10.0.0.2")
+// keeps the v6 family, also matching PostgreSQL (`family()` answers 6).
+//
+// ok is false when s is not an address at all. Callers must turn that into a
+// query ERROR, never a match-nothing kernel: see ResolveFilterKernel's
+// TypeCIDR arm.
 //
 // Exported — unlike this file's other literal parse helpers
-// (parseIPv4ToInt64, parseMACToInt64, parseIPv6ToRawString), which
-// internal/engine/expr duplicates locally rather than importing — because
-// this one is not a trivial re-encode: expr.CmpNetworkLit's CIDR literal and
-// this kernel's per-row CIDR key MUST agree bit for bit, and two structural
-// parsers maintained separately is exactly the shape #492 already is (the
-// kernel path numeric, the expr path lexical). One implementation, shared,
-// is what keeps them from drifting apart again.
+// (parseIPv4ToInt64, parseMACToInt64), which internal/engine/expr duplicates
+// locally rather than importing — because this one is not a trivial
+// re-encode: expr.CmpNetworkLit's CIDR literal and this kernel's per-row CIDR
+// key MUST agree bit for bit, and two structural parsers maintained
+// separately is exactly the shape #492 already is (the kernel path numeric,
+// the expr path lexical). One implementation, shared, is what keeps them from
+// drifting apart again.
 func CidrSortKey(s string) (string, bool) {
-	_, ipnet, err := net.ParseCIDR(s)
+	t := s
+	if !strings.ContainsRune(t, '/') {
+		// A bare address is a host route. ':' is present in every IPv6 text
+		// form and in no IPv4 one, which is the same split net.ParseCIDR
+		// itself makes (it tries the dotted-quad parse first and falls back
+		// to the v6 parser).
+		if strings.ContainsRune(t, ':') {
+			t += "/128"
+		} else {
+			t += "/32"
+		}
+	}
+	ip, ipnet, err := net.ParseCIDR(t)
 	if err != nil || ipnet == nil {
 		return "", false
 	}
 	ones, bits := ipnet.Mask.Size()
-	var buf []byte
-	if bits == 32 {
-		buf = make([]byte, 0, 1+net.IPv4len+1)
-		buf = append(buf, 0x04)
-		buf = append(buf, ipnet.IP.To4()...)
+	var full, masked net.IP
+	var family byte
+	if bits == net.IPv4len*8 {
+		family, full, masked = 0x04, ip.To4(), ipnet.IP.To4()
 	} else {
-		buf = make([]byte, 0, 1+net.IPv6len+1)
-		buf = append(buf, 0x06)
-		buf = append(buf, ipnet.IP.To16()...)
+		family, full, masked = 0x06, ip.To16(), ipnet.IP.To16()
 	}
+	if full == nil || masked == nil {
+		return "", false
+	}
+	buf := make([]byte, 0, 2+2*len(full))
+	buf = append(buf, family)
+	buf = append(buf, masked...)
 	buf = append(buf, byte(ones))
+	buf = append(buf, full...)
 	return string(buf), true
 }
 
-// compareFilterCIDR orders a CIDR column against a literal STRUCTURALLY
-// (CidrSortKey), never by the column's raw stored text (#492). litKey is the
-// literal's key, precomputed once; each row's own key is recomputed from its
-// text every time, since the column has no compact byte encoding to read
-// instead (parquet/schema.go stores CIDR as plain text).
+// IPv6LitKey re-keys an IPv6 filter literal into the form a TypeIPv6 column's
+// rows compare against: the address's raw 16 bytes, which a byte comparison
+// orders exactly as the address's own big-endian numeric value.
+//
+// A v4-shaped literal is not that, and is not a v4-MAPPED v6 address either.
+// PostgreSQL's inet compares the FAMILY first and puts every v4 address below
+// every v6 one (`'255.255.255.255'::inet < '::'::inet` is true), including
+// below a v4-mapped v6 address, which it still calls family 6
+// (`family('::ffff:10.0.0.2'::inet)` answers 6). The key for a v4 literal is
+// therefore the EMPTY string: it is shorter than, and a prefix of, every
+// 16-byte row value, so it compares strictly below all of them and equals
+// none — PostgreSQL's family rule, with no per-row re-keying.
+//
+// Reading a v4 literal as its v4-mapped 16 bytes instead — which is what
+// the TypeIPv6 kernel arm used to do, through a plain net.ParseIP —
+// placed it in the MIDDLE of the v6 range (below 2001:db8:: and above ::1),
+// while the row-at-a-time path fell through to a lexical text comparison
+// entirely: two paths, two orders, neither PostgreSQL's.
+//
+// ok is false for a literal that is no address at all; the caller raises the
+// query error, the same as CidrSortKey's.
+func IPv6LitKey(s string) (key string, ok bool) {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return "", false
+	}
+	if ip.To4() != nil && !strings.ContainsRune(s, ':') {
+		return "", true // a v4 literal: below every v6 row, by family
+	}
+	return string(ip.To16()), true
+}
+
+// compareFilterCIDR orders a CIDR column against a literal in PostgreSQL's
+// inet order (CidrSortKey), never by the column's raw stored text (#492).
+// litKey is the literal's key, precomputed once; each row's own key is
+// recomputed from its text every time, since the column has no compact byte
+// encoding to read instead (parquet/schema.go stores CIDR as plain text).
+//
+// A stored value that is not an address matches NOTHING, for every operator
+// including `<>`: the column is unvalidated text, and a value with no place
+// in the order has no defined comparison, which is UNKNOWN — the same answer
+// a NULL row gets. expr.CmpNetworkLit.evalCIDR answers that row the same way,
+// deliberately: it used to fall through to a LEXICAL text comparison there,
+// so one malformed row made the two paths disagree.
 func compareFilterCIDR(op CompareOp, litKey string) FilterKernel {
 	cmpFn := resolveCompare[string](op)
 	match := func(vec *batch.Vector, i int) bool {
@@ -658,12 +762,28 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 	case batch.TypeFloat64:
 		set, hasNaN := floatInSet(values)
 		return inFilterFloat64(set, hasNaN, negate)
-	case batch.TypeString, batch.TypeCIDR:
+	case batch.TypeString:
 		set := make(map[string]struct{}, len(values))
 		for _, v := range values {
 			set[toString(v)] = struct{}{}
 		}
 		return inFilterString(set, negate)
+	case batch.TypeCIDR:
+		// CIDR shares TypeString's storage but not its equality: two spellings
+		// of one network are one value in PostgreSQL's inet and two strings
+		// here, so the set holds CidrSortKey keys and every row is re-keyed to
+		// match — the same key `=` compares through, because
+		// `c_cidr = 'X'` and `c_cidr IN ('X')` answering differently would be
+		// the two-kernel version of the two-path defect #492 closed.
+		set := make(map[string]struct{}, len(values))
+		for _, v := range values {
+			key, ok := CidrSortKey(toString(v))
+			if !ok {
+				return nil // not an address: the caller raises 22P02
+			}
+			set[key] = struct{}{}
+		}
+		return inFilterKeyed(set, CidrSortKey, negate)
 	case batch.TypeUUID:
 		// UUID stores 16 RAW bytes, not the 36-character text.
 		set := make(map[string]struct{}, len(values))
@@ -673,12 +793,18 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 		return inFilterString(set, negate)
 	case batch.TypeIPv6:
 		// IPv6 stores the 16 RAW bytes; the literal is text. The scalar
-		// comparison kernel already parses it (parseIPv6ToRawString) and the
-		// IN path did not, so `WHERE ipv6_col IN ('2001:db8::1')` could not
-		// have matched even once the type had an arm.
+		// comparison kernel already parses it (IPv6LitKey) and the IN path did
+		// not, so `WHERE ipv6_col IN ('2001:db8::1')` could not have matched
+		// even once the type had an arm. A v4 literal keys to the empty
+		// string, which no 16-byte row equals — PostgreSQL's family rule, the
+		// same answer the scalar arm gives.
 		set := make(map[string]struct{}, len(values))
 		for _, v := range values {
-			set[parseIPv6ToRawString(toString(v))] = struct{}{}
+			key, ok := IPv6LitKey(toString(v))
+			if !ok {
+				return nil // not an address: the caller raises 22P02
+			}
+			set[key] = struct{}{}
 		}
 		return inFilterString(set, negate)
 	case batch.TypeBytes:
@@ -1043,6 +1169,40 @@ func inFilterString(set map[string]struct{}, negate bool) FilterKernel {
 				}
 				_, found := set[vec.BytesData.UnsafeStringValue(i)]
 				if found != negate {
+					out = append(out, uint32(i))
+				}
+			}
+		}
+		return out
+	}
+}
+
+// inFilterKeyed is inFilterString for a column whose stored TEXT is not the
+// value's comparison key: each row is re-keyed with the same function the set
+// members went through. A row the key function rejects matches nothing, for
+// either polarity — the value is not an address, so membership is UNKNOWN
+// rather than false, which is what a NULL row does here too.
+func inFilterKeyed(set map[string]struct{}, keyOf func(string) (string, bool), negate bool) FilterKernel {
+	member := func(vec *batch.Vector, i int) bool {
+		key, ok := keyOf(vec.BytesData.UnsafeStringValue(i))
+		if !ok {
+			return false
+		}
+		_, found := set[key]
+		return found != negate
+	}
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		if sel != nil {
+			for _, idx := range sel {
+				if (!hasNulls || !vec.Nulls.IsNullFast(int(idx))) && member(vec, int(idx)) {
+					out = append(out, idx)
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				if (!hasNulls || !vec.Nulls.IsNullFast(i)) && member(vec, i) {
 					out = append(out, uint32(i))
 				}
 			}
@@ -1421,20 +1581,11 @@ func parseMACToInt64(s string) int64 {
 	return int64(n)
 }
 
-// parseIPv6ToRawString converts a string IPv6 address to its raw 16-byte string form.
-func parseIPv6ToRawString(s string) string {
-	ip := net.ParseIP(s)
-	if ip != nil {
-		return string(ip.To16())
-	}
-	return ""
-}
-
 // parseUUIDToRawString converts a UUID literal to the 16 RAW bytes a UUID
 // column stores. Comparing the 36-character text against those bytes — which
 // is what the string kernel did before — can never match, so
 // `WHERE uuid_col = '…'` silently returned no rows. Same shape as IPv6's, and
-// the same reason parseIPv6ToRawString exists.
+// the same reason IPv6LitKey exists.
 //
 // A 16-byte input is already raw and passes through: internal callers that
 // build a predicate from a value they read out of a vector hand it over in

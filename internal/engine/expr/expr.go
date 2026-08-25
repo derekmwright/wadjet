@@ -1190,12 +1190,17 @@ func (e *CmpNetworkLit) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool)
 		return e.evalInt64(b, row, e.mac)
 	case batch.TypeIPv6:
 		if !e.ipv6ok {
-			return e.genericFallback(b, row)
+			// The literal is an address of no family this column can hold
+			// (a MAC), so there is no comparison to make. The kernel path
+			// answers the same query with 22P02 (exec.networkConstError);
+			// falling back to a lexical text compare here instead is the
+			// two-path divergence #492 exists to close.
+			raiseInvalidTextRepresentation("inet", e.Lit)
 		}
 		return e.evalRawBytes(b, row, e.ipv6)
 	case batch.TypeCIDR:
 		if !e.cidrok {
-			return e.genericFallback(b, row)
+			raiseInvalidTextRepresentation("cidr", e.Lit)
 		}
 		return e.evalCIDR(b, row)
 	default:
@@ -1236,7 +1241,8 @@ func (e *CmpNetworkLit) evalRawBytes(b *batch.RecordBatch, row int, lit string) 
 
 // evalCIDR is the CIDR arm: the column stores plain TEXT (parquet/
 // schema.go), so its own value is re-keyed through the identical
-// kernel.CidrSortKey the literal already went through at compile time —
+// kernel.CidrSortKey (PostgreSQL's inet order) the literal already went
+// through at compile time —
 // anything else risks the row and the literal disagreeing about what
 // "structural order" means, which is the two-implementation defect #492's
 // own doc comment warns CidrSortKey's export exists to prevent.
@@ -1247,10 +1253,15 @@ func (e *CmpNetworkLit) evalCIDR(b *batch.RecordBatch, row int) (bool, bool) {
 	}
 	key, ok := kernel.CidrSortKey(raw)
 	if !ok {
-		// The column enforces the CIDR shape, so a stored value should
-		// always re-key; if it somehow does not, fall back rather than
-		// silently mis-order it.
-		return e.genericFallback(b, row)
+		// The column does NOT enforce the CIDR shape — it is unvalidated
+		// text (internal/storage/ingest) — so a stored value can fail to
+		// re-key. A value with no place in the order has no defined
+		// comparison against one that does, which is UNKNOWN, and that is
+		// exactly what kernel.compareFilterCIDR answers for the same row.
+		// Falling back to a LEXICAL text comparison here (what this arm did
+		// when #492 introduced it) made one malformed row enough to split
+		// the two paths apart again.
+		return false, true
 	}
 	a, bv := key, e.cidr
 	if e.Flip {

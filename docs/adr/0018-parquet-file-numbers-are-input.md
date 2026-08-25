@@ -218,6 +218,46 @@ A predicate whose truth depends on that excluded value's presence cannot be
 answered from the bound and must decline to prune, the same rule §1's
 ceilings apply to a claim the file never made in the first place.
 
+### 6. A bound in the wrong ORDER is not a bound
+
+(Added 2026-08-24, from #492's second pass.) §5 is about a bound that is
+*silent* about a value. This is the neighbouring failure: a bound that
+records every value faithfully, in an order the engine no longer uses.
+
+A CIDR column is stored as plain address TEXT (`internal/storage/parquet/
+schema.go`), so its footer min/max are the text-order extremes of the row
+group. That was fine while the engine compared CIDR as text too. It is not
+fine now: `kernel.ResolveFilterKernel`'s TypeCIDR arm compares PostgreSQL's
+`inet` order (ADR-0012 item 10), where `9.0.0.0/8` is BELOW `10.0.0.0/8` and
+the text says the opposite. The bound and the predicate then disagree about
+which values a row group can hold, and the prune deletes rows the filter
+would have kept — `WHERE c_cidr < '10.0.0.0/16'` answered 0 rows with the
+prune on and a non-zero count with it off, on the same data.
+
+Re-keying the BOUNDS at read time does not recover it. The stored min and max
+are two particular rows — the text-order extremes — and the inet-order
+extremes are, in general, two DIFFERENT rows the footer never named. There is
+no conversion from one pair to the other, which is precisely what
+`kernel.StatsDomainValue`'s "no conversion exists" answer means. TypeCIDR is
+therefore WITHHELD from the prune entirely, through the mechanism that file
+already has, and `tmPruneWithheldTypes` (`wadjet/type_matrix_prune_test.go`)
+names it in both directions so the withhold cannot be lost by omission or
+kept past its usefulness by inertia.
+
+The same audit clears IPv6 and narrows it by one case. IPv6's physical value
+IS the engine's comparison key — the raw 16 bytes, a fixed-width big-endian
+address whose byte order is its numeric order — so its bounds stay in the
+prune. But a v4-SHAPED literal against a v6 column is a FAMILY comparison
+(every v4 address is below every v6 one), which no 16-byte bound can express;
+converting it to its v4-mapped bytes instead would place it mid-range, so the
+prune would read that one predicate differently from the filter. That literal
+is withheld and the rest of the type is not.
+
+The general form: **a bound is only usable by a prune that reads it in the
+same order the filter reads the column.** When the engine's order for a type
+stops being the file's, the answer is to withhold — or to write a bound in
+the engine's order at WRITE time — never to convert harder at read time.
+
 ## Consequences
 
 - Files that were read before and are refused now: a footer whose row groups

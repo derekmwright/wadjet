@@ -144,6 +144,25 @@ func TestTypeMatrixPruningNeverChangesTheAnswer(t *testing.T) {
 		// one side crashing on a nil bound while the other quietly matches
 		// nothing.
 		{"NullLiteralEq", fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE id = NULL", typematrix.Table)},
+		// CIDR's own shape, spelled out rather than left to the sweep's
+		// per-column probe value. The engine orders CIDR by PostgreSQL's inet
+		// order and the footer bounds are the address TEXT's, so a literal
+		// chosen to sit on the wrong side of that disagreement is what makes
+		// a re-engaged prune visible here: "10.0.0.0/16" is BELOW every
+		// "192.168.x" row as text and ABOVE the fixture's "10.x" rows as an
+		// address. Before kernel.StatsDomainValue withheld TypeCIDR this
+		// answered 0 rows pruned-on and a non-zero count pruned-off.
+		{"CidrLessThanAcrossTheTextBarrier",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_cidr < '10.0.0.0/16'", typematrix.Table)},
+		{"CidrGreaterEqualAcrossTheTextBarrier",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_cidr >= '10.0.0.0/16'", typematrix.Table)},
+		// A HOST-BEARING literal: the fixture holds rows that differ from it
+		// only in bits the mask covers, which the first CidrSortKey erased.
+		{"CidrEqualsAHostBearingPrefix",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_cidr = '192.168.188.190/24'", typematrix.Table)},
+		// A BARE address is a /32 host route, as PostgreSQL's inet reads it.
+		{"CidrEqualsABareAddress",
+			fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_cidr = '172.16.2.187'", typematrix.Table)},
 	}
 	for _, tc := range extra {
 		tc := tc
@@ -505,6 +524,16 @@ var tmPruneWithheldTypes = map[parquet.TypeID]bool{
 	parquet.TypeRow:    true,
 	parquet.TypeMap:    true,
 	parquet.TypeVector: true,
+	// CIDR is withheld for a different reason from the containers': it HAS a
+	// scalar bound, and the bound is in the wrong ORDER. The footer holds the
+	// address TEXT's min/max and the engine compares PostgreSQL's inet order
+	// (kernel.CidrSortKey), so a group whose text-min is above the literal can
+	// still hold a value the filter keeps — `WHERE c_cidr < '10.0.0.0/16'`
+	// answered 0 rows with the prune on and 2 with it off (#492, ADR-0018:
+	// the prune's inputs are the FILE's, and the engine's order is not the
+	// file's). Restoring it means writing an inet-ordered bound, not reading
+	// the text one harder.
+	parquet.TypeCIDR: true,
 }
 
 // tmPruneMustConvert is the floor: the everyday types whose predicates carry

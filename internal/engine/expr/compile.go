@@ -2,7 +2,6 @@ package expr
 
 import (
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 
@@ -546,6 +545,13 @@ func tryTemporalLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpTemporalLi
 // entirely to the column's REAL type at kernel-build/eval time — a STRING
 // column takes its ordinary compareFilterString/lexical-compare path either
 // way, never one of the typed branches.
+// The IPv6 key comes from kernel.IPv6LitKey, which — unlike the local parse
+// this used to do — accepts a v4 literal too, keying it BELOW every v6 row
+// (PostgreSQL compares the address FAMILY first). The two encodings no longer
+// have to be mutually exclusive because the branch is chosen by the COLUMN's
+// resolved type, never by which parses the literal accepted: a v4 literal
+// legitimately keys as an IPv4 int64, as a v6 family sentinel, and as a /32
+// CIDR key all at once, and exactly one of those is read.
 func tryNetworkLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpNetworkLit {
 	lit, ok := other.(*Lit)
 	if !ok {
@@ -557,7 +563,7 @@ func tryNetworkLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpNetworkLit 
 	}
 	ipv4, ipv4ok := ipv4LitToInt64(s)
 	mac, macok := macLitToInt64(s)
-	ipv6, ipv6ok := ipv6LitToRawString(s)
+	ipv6, ipv6ok := kernel.IPv6LitKey(s)
 	cidr, cidrok := kernel.CidrSortKey(s)
 	if !ipv4ok && !macok && !ipv6ok && !cidrok {
 		return nil
@@ -569,20 +575,6 @@ func tryNetworkLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpNetworkLit 
 		ipv6: ipv6, ipv6ok: ipv6ok,
 		cidr: cidr, cidrok: cidrok,
 	}
-}
-
-// ipv6LitToRawString parses a pure IPv6 literal into the 16-byte raw form
-// TypeIPv6 columns use (batch.Vector.SetValue's TypeIPv6 case). ok is false
-// for anything that is not a valid IPv6 text form, INCLUDING a plain IPv4
-// literal: ipv4LitToInt64 already owns that shape, and net.ParseIP would
-// otherwise also accept a v4 address through its v4-in-v6-mapped form,
-// double-binding the same literal to two branches.
-func ipv6LitToRawString(s string) (string, bool) {
-	ip := net.ParseIP(s)
-	if ip == nil || ip.To4() != nil {
-		return "", false
-	}
-	return string(ip.To16()), true
 }
 
 // isProvablyInt64 returns true if the expression definitely produces int64 values.

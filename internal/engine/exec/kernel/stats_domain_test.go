@@ -28,14 +28,17 @@ func TestStatsDomainValueCoversEveryType(t *testing.T) {
 		batch.TypeString:    {"abc", "abc", true},
 		batch.TypeBytes:     {[]byte("abc"), "abc", true},
 		batch.TypeTimestamp: {int64(1700000000000), int64(1700000000000), true},
-		batch.TypeCIDR:      {"10.0.0.0/8", "10.0.0.0/8", true},
-		batch.TypePort:      {int64(443), int64(443), true},
-		batch.TypeProtocol:  {int64(6), int64(6), true},
-		batch.TypeDuration:  {int64(1000), int64(1000), true},
-		batch.TypeDate:      {"2021-03-04", int64(18690), true},
-		batch.TypeIPv4:      {"10.0.5.220", int64(167773660), true},
-		batch.TypeMAC:       {"aa:bb:cc:00:05:dc", int64(187723558159836), true},
-		batch.TypeIPv6:      {"2001:db8::5dc", "\x20\x01\x0d\xb8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x05\xdc", true},
+		// CIDR is WITHHELD: the footer bounds are the address TEXT's extremes
+		// and the engine orders CIDR by PostgreSQL's inet order, so a prune
+		// reading those bounds deletes rows the filter keeps (#492).
+		batch.TypeCIDR:     {"10.0.0.0/8", nil, false},
+		batch.TypePort:     {int64(443), int64(443), true},
+		batch.TypeProtocol: {int64(6), int64(6), true},
+		batch.TypeDuration: {int64(1000), int64(1000), true},
+		batch.TypeDate:     {"2021-03-04", int64(18690), true},
+		batch.TypeIPv4:     {"10.0.5.220", int64(167773660), true},
+		batch.TypeMAC:      {"aa:bb:cc:00:05:dc", int64(187723558159836), true},
+		batch.TypeIPv6:     {"2001:db8::5dc", "\x20\x01\x0d\xb8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x05\xdc", true},
 		batch.TypeUUID: {"00000000-0000-4000-8000-0000000005dc",
 			"\x00\x00\x00\x00\x00\x00\x40\x00\x80\x00\x00\x00\x00\x00\x05\xdc", true},
 		batch.TypeDecimal: {0.25, int64(25), true},
@@ -130,10 +133,25 @@ func TestStatsDomainValueRefusesUnparseableLiterals(t *testing.T) {
 	}
 }
 
+// A v4-shaped literal against an IPv6 column is an ADDRESS, so the filter
+// kernel answers it (below every stored v6 address, by family) — but the
+// prune must decline it: a 16-byte bound cannot express "below every value",
+// and converting it to its v4-mapped bytes instead would place it in the
+// middle of the range, so the prune and the filter would read one predicate
+// two ways (#492).
+func TestStatsDomainWithholdsAV4LiteralAgainstIPv6(t *testing.T) {
+	if key, ok := IPv6LitKey("10.0.0.2"); !ok || key != "" {
+		t.Fatalf("IPv6LitKey(v4) = %q ok=%v, want the empty family sentinel", key, ok)
+	}
+	if got, ok := StatsDomainValue(batch.TypeIPv6, 0, "10.0.0.2"); ok {
+		t.Errorf("a v4 literal against IPv6 converted to %#v, want a withhold", got)
+	}
+}
+
 // The conversion has to be the SAME one the filter kernel applies, or the
 // prune and the filter disagree about which rows the predicate wants.
 func TestStatsDomainValueAgreesWithTheFilterKernel(t *testing.T) {
-	if got, _ := StatsDomainValue(batch.TypeIPv6, 0, "2001:db8::5dc"); got != parseIPv6ToRawString("2001:db8::5dc") {
+	if got, _ := StatsDomainValue(batch.TypeIPv6, 0, "2001:db8::5dc"); got != mustIPv6Key("2001:db8::5dc") {
 		t.Error("the IPv6 stats value is not the kernel's IPv6 literal")
 	}
 	if got, _ := StatsDomainValue(batch.TypeUUID, 0, "00000000-0000-4000-8000-0000000005dc"); got !=
@@ -198,4 +216,13 @@ func TestStatsDomainValueDecimalAtTheInt64Bounds(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mustIPv6Key is IPv6LitKey for a literal the test knows is a v6 address.
+func mustIPv6Key(s string) string {
+	key, ok := IPv6LitKey(s)
+	if !ok {
+		panic("not an address: " + s)
+	}
+	return key
 }

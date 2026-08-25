@@ -834,15 +834,22 @@ func TestParseMACToInt64(t *testing.T) {
 	}
 }
 
-func TestParseIPv6ToRawString(t *testing.T) {
-	result := parseIPv6ToRawString("::1")
-	if result == "" {
-		t.Fatal("expected non-empty for valid IPv6")
+func TestIPv6LitKey(t *testing.T) {
+	result, ok := IPv6LitKey("::1")
+	if !ok || result == "" {
+		t.Fatalf("expected a non-empty key for a valid IPv6 literal, got %q ok=%v", result, ok)
 	}
 
-	result = parseIPv6ToRawString("not-an-ip")
-	if result != "" {
-		t.Fatal("expected empty for invalid IP")
+	// A v4 literal is an address, and its key is deliberately EMPTY: it sorts
+	// below every 16-byte v6 row, which is PostgreSQL's family rule (#492).
+	result, ok = IPv6LitKey("10.0.0.2")
+	if !ok || result != "" {
+		t.Fatalf("expected the empty family sentinel for a v4 literal, got %q ok=%v", result, ok)
+	}
+
+	// Not an address at all: the caller raises 22P02 rather than comparing.
+	if _, ok := IPv6LitKey("not-an-ip"); ok {
+		t.Fatal("expected ok=false for a literal that is no address")
 	}
 }
 

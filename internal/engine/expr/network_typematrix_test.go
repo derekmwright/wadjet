@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -315,5 +316,175 @@ func TestUUIDOrderingIsCorrectByHexAccident(t *testing.T) {
 				t.Errorf("row0 = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// evalRefusal runs a comparison for row 0 and returns the query error it
+// raised, or nil when it answered. The refusal travels as a fatalEval panic
+// (expr/fatal.go), the per-row error channel the pipeline drivers convert
+// back into a query error.
+func evalRefusal(t *testing.T, e Expr, b *batch.RecordBatch) (err error) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			fe, ok := r.(interface{ FatalEvalError() error })
+			if !ok {
+				panic(r)
+			}
+			err = fe.FatalEvalError()
+		}
+	}()
+	be, ok := e.(BoolExpr)
+	if !ok {
+		t.Fatalf("%T does not implement BoolExpr", e)
+	}
+	be.EvalBool(b, 0)
+	return nil
+}
+
+// TestCIDRBareAddressLiteralIsAHostRoute is the shape the kernel and this
+// path answered DIFFERENTLY after #492's first pass: `c_cidr = '10.0.0.1'`
+// got a match-nothing kernel through the scan and a lexical text comparison
+// here, so the WHERE clause and the SELECT list disagreed about the same
+// row. PostgreSQL's inet reads a bare address as a /32 host route and both
+// paths now do.
+func TestCIDRBareAddressLiteralIsAHostRoute(t *testing.T) {
+	schema := []parquet.Column{{Name: "c_cidr", Type: parquet.TypeCIDR}}
+	b := batch.NewRecordBatch(schema, 2)
+	b.Columns[0].SetValue(0, "10.0.0.1/32")
+	b.Columns[0].SetValue(1, "10.0.0.1/8")
+
+	eq := compileCmp(&ColRef{Name: "c_cidr"}, &Lit{Val: "10.0.0.1"}, CmpEq)
+	if _, ok := eq.(*CmpNetworkLit); !ok {
+		t.Fatalf("compileCmp(cidr = bare address) = %T, want *CmpNetworkLit", eq)
+	}
+	be := eq.(BoolExpr)
+	if !be.EvalBool(b, 0) {
+		t.Error("'10.0.0.1' must equal the row holding '10.0.0.1/32'")
+	}
+	if be.EvalBool(b, 1) {
+		t.Error("'10.0.0.1' (a /32) must NOT equal '10.0.0.1/8': the mask is part of the value")
+	}
+}
+
+// TestCIDRHostBitsAreNotMaskedAway is the wrong answer #492's first
+// CidrSortKey shipped: it keyed net.ParseCIDR's MASKED network, so every
+// address inside a /8 collapsed onto the network address and
+// `= '10.0.0.1/8'` answered the row holding '10.0.0.0/8'.
+func TestCIDRHostBitsAreNotMaskedAway(t *testing.T) {
+	schema := []parquet.Column{{Name: "c_cidr", Type: parquet.TypeCIDR}}
+	b := batch.NewRecordBatch(schema, 2)
+	b.Columns[0].SetValue(0, "10.0.0.0/8")
+	b.Columns[0].SetValue(1, "10.0.0.1/8")
+
+	eq := compileCmp(&ColRef{Name: "c_cidr"}, &Lit{Val: "10.0.0.1/8"}, CmpEq).(BoolExpr)
+	if eq.EvalBool(b, 0) {
+		t.Error("'10.0.0.1/8' matched the row holding '10.0.0.0/8' — the host bits were masked away")
+	}
+	if !eq.EvalBool(b, 1) {
+		t.Error("'10.0.0.1/8' must match its own row")
+	}
+	lt := compileCmp(&ColRef{Name: "c_cidr"}, &Lit{Val: "10.0.0.1/8"}, CmpLt).(BoolExpr)
+	if !lt.EvalBool(b, 0) {
+		t.Error("10.0.0.0/8 must sort below 10.0.0.1/8")
+	}
+}
+
+// TestNonAddressLiteralAgainstAnAddressColumnIsRefused: both spellings of
+// "this literal is not an address" raise 22P02 on this path, the same error
+// the kernel path raises through exec.networkConstError.
+//
+// Two compile shapes reach it. A literal that parses as SOME address but not
+// the column's (a MAC against CIDR) becomes a *CmpNetworkLit and is refused
+// in its own arm; one that parses as nothing (`'garbage'`) never becomes one
+// at all and is refused through the binding *Cmp already carries. Both used
+// to fall through to a LEXICAL text comparison, which is how
+// `c_cidr <> 'garbage'` answered every row here and zero rows through the
+// scan.
+func TestNonAddressLiteralAgainstAnAddressColumnIsRefused(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "c_cidr", Type: parquet.TypeCIDR},
+		{Name: "c_ipv6", Type: parquet.TypeIPv6},
+		{Name: "c_str", Type: parquet.TypeString},
+	}
+	b := batch.NewRecordBatch(schema, 1)
+	b.Columns[0].SetValue(0, "10.0.0.0/8")
+	b.Columns[1].SetValue(0, "2001:db8::1")
+	b.Columns[2].SetValue(0, "garbage")
+
+	for _, tt := range []struct {
+		name string
+		col  string
+		lit  string
+		op   CmpOp
+	}{
+		{"cidr = garbage", "c_cidr", "garbage", CmpEq},
+		{"cidr <> garbage", "c_cidr", "garbage", CmpNe},
+		{"cidr < garbage", "c_cidr", "garbage", CmpLt},
+		{"cidr = a MAC", "c_cidr", "aa:bb:cc:dd:ee:ff", CmpEq},
+		{"ipv6 <> garbage", "c_ipv6", "garbage", CmpNe},
+		{"ipv6 = a MAC", "c_ipv6", "aa:bb:cc:dd:ee:ff", CmpEq},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := compileCmp(&ColRef{Name: tt.col}, &Lit{Val: tt.lit}, tt.op)
+			err := evalRefusal(t, e, b)
+			if err == nil {
+				t.Fatalf("%s answered instead of refusing", tt.name)
+			}
+			if !strings.Contains(err.Error(), tt.lit) {
+				t.Errorf("the error must quote the literal, got %q", err.Error())
+			}
+		})
+	}
+
+	// A STRING column is untouched: 'garbage' is an ordinary value there.
+	e := compileCmp(&ColRef{Name: "c_str"}, &Lit{Val: "garbage"}, CmpEq)
+	if err := evalRefusal(t, e, b); err != nil {
+		t.Errorf("a STRING column must compare 'garbage' as a string, got %v", err)
+	}
+}
+
+// TestCIDRMalformedStoredValueIsUnknown: the CIDR column is unvalidated text,
+// so a row can hold a non-address. It answers UNKNOWN — no operator admits
+// it, `<>` included — which is exactly what kernel.compareFilterCIDR does for
+// the same row. This arm used to fall back to a LEXICAL text comparison, so
+// one malformed row was enough to split the two paths apart again.
+func TestCIDRMalformedStoredValueIsUnknown(t *testing.T) {
+	schema := []parquet.Column{{Name: "c_cidr", Type: parquet.TypeCIDR}}
+	b := batch.NewRecordBatch(schema, 1)
+	b.Columns[0].SetValue(0, "not-an-address")
+	for _, op := range []CmpOp{CmpEq, CmpNe, CmpLt, CmpGt, CmpLe, CmpGe} {
+		e := compileCmp(&ColRef{Name: "c_cidr"}, &Lit{Val: "10.0.0.0/8"}, op).(*CmpNetworkLit)
+		v, null := e.EvalBoolNull(b, 0)
+		if !null || v {
+			t.Errorf("op %v on a malformed stored value = (%v,%v), want UNKNOWN", op, v, null)
+		}
+	}
+}
+
+// TestIPv6ColumnAgainstAV4LiteralComparesTheFamily: PostgreSQL's inet
+// compares the address FAMILY before anything else, so every v6 value is
+// above every v4 one — `'255.255.255.255'::inet < '::'::inet` is true. This
+// path used to fall through to a lexical text comparison (tryNetworkLit's
+// IPv6 parse rejected a v4 literal outright) while the kernel read the same
+// literal as its v4-MAPPED v6 bytes, landing it in the middle of the range:
+// two paths, two answers, neither PostgreSQL's.
+func TestIPv6ColumnAgainstAV4LiteralComparesTheFamily(t *testing.T) {
+	schema := []parquet.Column{{Name: "c_ipv6", Type: parquet.TypeIPv6}}
+	rows := []string{"::", "::1", "::ffff:10.0.0.2", "2001:db8::1", "ffff::"}
+	b := batch.NewRecordBatch(schema, len(rows))
+	for i, r := range rows {
+		b.Columns[0].SetValue(i, r)
+	}
+	gt := compileCmp(&ColRef{Name: "c_ipv6"}, &Lit{Val: "10.0.0.2"}, CmpGt).(BoolExpr)
+	lt := compileCmp(&ColRef{Name: "c_ipv6"}, &Lit{Val: "10.0.0.2"}, CmpLt).(BoolExpr)
+	eq := compileCmp(&ColRef{Name: "c_ipv6"}, &Lit{Val: "10.0.0.2"}, CmpEq).(BoolExpr)
+	for i, r := range rows {
+		if !gt.EvalBool(b, i) {
+			t.Errorf("%s > '10.0.0.2' = false; every v6 address is above every v4 one", r)
+		}
+		if lt.EvalBool(b, i) || eq.EvalBool(b, i) {
+			t.Errorf("%s must be neither < nor = a v4 literal", r)
+		}
 	}
 }

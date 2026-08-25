@@ -61,6 +61,20 @@ type decimalLitCmp struct {
 	// (the answer is a pure function of the column's fixed type), so a
 	// losing racer's store is redundant, not wrong.
 	notDecimal atomic.Bool
+
+	// nonAddr is the source text of a STRING literal operand that names no
+	// address, and "" when every literal operand does (or none is a string).
+	// It is the CIDR/IPv6 counterpart of the refusal order() raises for a
+	// DECIMAL column, and it lives here rather than in a binding of its own
+	// because this one already resolves the column: the check costs nothing
+	// per row, running once on the batch that settles notDecimal.
+	//
+	// tryNetworkLit takes every literal that parses as an address before
+	// NewCmp is ever reached, so a literal that arrives here against a
+	// network column is one no reading can make sense of — `c_cidr <>
+	// 'garbage'`, which used to answer ZERO rows through the kernel and EVERY
+	// row through this path (#492).
+	nonAddr string
 }
 
 // numericLit reports the exact source text of a constant operand that a
@@ -149,26 +163,58 @@ func refuseIfDecimalSide(b *batch.RecordBatch, colSide, litSide Expr) bool {
 }
 
 // newDecimalLitCmp builds a binding and resolves every literal's Numeric()
-// answer once, up front — see decimalLitCmp.numeric.
-func newDecimalLitCmp(col *ColRef, lits []*kernel.DecimalLiteral, flip bool) *decimalLitCmp {
+// answer once, up front — see decimalLitCmp.numeric. nonAddr is resolved the
+// same way, from the operand EXPRESSIONS, because a literal's text is fixed
+// for the query's lifetime.
+func newDecimalLitCmp(col *ColRef, lits []*kernel.DecimalLiteral, flip bool, operands ...Expr) *decimalLitCmp {
 	numeric := make([]bool, len(lits))
 	for i, lit := range lits {
 		numeric[i] = lit.Numeric()
 	}
-	return &decimalLitCmp{col: col, lits: lits, flip: flip, numeric: numeric}
+	return &decimalLitCmp{
+		col: col, lits: lits, flip: flip, numeric: numeric,
+		nonAddr: firstNonAddressLit(operands),
+	}
+}
+
+// firstNonAddressLit reports the text of the first QUOTED string literal in
+// operands that parses as no address, and "" when there is none.
+//
+// Quoted only: a bare numeric literal against an address column is a
+// different refusal (PostgreSQL has no `inet = integer` operator at all,
+// which is 42883, not 22P02) and is left where it was.
+func firstNonAddressLit(operands []Expr) string {
+	for _, e := range operands {
+		lit, ok := e.(*Lit)
+		if !ok || lit.Text != "" {
+			continue
+		}
+		s, ok := lit.Val.(string)
+		if !ok {
+			continue
+		}
+		if _, ok := kernel.CidrSortKey(s); ok {
+			continue
+		}
+		if _, ok := kernel.IPv6LitKey(s); ok {
+			continue
+		}
+		return s
+	}
+	return ""
 }
 
 // bindDecimalCmp binds `col op lit` or `lit op col`, in either operand order.
 func bindDecimalCmp(left, right Expr) *decimalLitCmp {
 	if col, ok := bareCol(left); ok {
 		if lit, ok := numericLit(right); ok {
-			return newDecimalLitCmp(col, []*kernel.DecimalLiteral{lit}, false)
+			return newDecimalLitCmp(col, []*kernel.DecimalLiteral{lit}, false, right)
 		}
 		return nil
 	}
 	if col, ok := bareCol(right); ok {
 		if lit, ok := numericLit(left); ok {
-			return newDecimalLitCmp(col, []*kernel.DecimalLiteral{lit}, true)
+			return newDecimalLitCmp(col, []*kernel.DecimalLiteral{lit}, true, left)
 		}
 	}
 	return nil
@@ -191,7 +237,7 @@ func bindDecimalList(col Expr, values []Expr) *decimalLitCmp {
 		}
 		lits[i] = lit
 	}
-	return newDecimalLitCmp(c, lits, false)
+	return newDecimalLitCmp(c, lits, false, values...)
 }
 
 // vector returns the batch's DECIMAL column for this binding, or nil when the
@@ -204,6 +250,9 @@ func (d *decimalLitCmp) vector(b *batch.RecordBatch) *batch.Vector {
 	}
 	d.col.resolve(b)
 	if d.col.idx < 0 || d.col.idx >= len(b.Columns) || d.col.typ != batch.TypeDecimal {
+		if d.col.idx >= 0 && d.col.idx < len(b.Columns) {
+			d.refuseNonAddress()
+		}
 		d.notDecimal.Store(true)
 		return nil
 	}
@@ -212,6 +261,26 @@ func (d *decimalLitCmp) vector(b *batch.RecordBatch) *batch.Vector {
 		return nil
 	}
 	return v
+}
+
+// refuseNonAddress raises 22P02 when the bound column turns out to be an
+// ADDRESS column and a literal operand names no address.
+//
+// It runs on the one batch that settles notDecimal, so it costs nothing per
+// row: the answer depends only on the column's type and the literal's text,
+// neither of which changes across a query. The kernel path raises the same
+// error for the same literal (exec.networkConstError), which is the property
+// that makes the refusal a semantics decision rather than a path accident.
+func (d *decimalLitCmp) refuseNonAddress() {
+	if d.nonAddr == "" {
+		return
+	}
+	switch d.col.typ {
+	case batch.TypeCIDR:
+		raiseInvalidTextRepresentation("cidr", d.nonAddr)
+	case batch.TypeIPv6:
+		raiseInvalidTextRepresentation("inet", d.nonAddr)
+	}
 }
 
 // order compares the row's value against literal i, as -1, 0 or +1, with the

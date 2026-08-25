@@ -263,7 +263,7 @@ func allData(n int) []map[string]any {
 		r["c_ts"] = orNull(i, 53, int64(1_700_000_000_000+int64(i)*61_000))
 		r["c_ipv4"] = orNull(i, 59, fmt.Sprintf("10.%d.%d.%d", (i/65536)%256, (i/256)%256, i%256))
 		r["c_ipv6"] = orNull(i, 61, fmt.Sprintf("2001:db8::%x", i))
-		r["c_cidr"] = orNull(i, 67, fmt.Sprintf("192.168.%d.0/24", i%256))
+		r["c_cidr"] = orNull(i, 67, cidrValue(i))
 		r["c_mac"] = orNull(i, 71, fmt.Sprintf("aa:bb:cc:%02x:%02x:%02x", (i/65536)%256, (i/256)%256, i%256))
 		r["c_port"] = orNull(i, 73, int32(1024+i%40000))
 		r["c_proto"] = orNull(i, 79, int32(i%256))
@@ -279,6 +279,41 @@ func allData(n int) []map[string]any {
 		rows[i] = r
 	}
 	return rows
+}
+
+// cidrValue is row i's CIDR text. It cycles through four shapes on purpose:
+// a CANONICAL /24, a HOST-BEARING /24, a host-bearing /8 and a /32 host
+// route.
+//
+// The fixture used to be canonical /24s alone ("192.168.<i%256>.0/24"), which
+// made three of the four things PostgreSQL's inet order decides invisible to
+// this corpus: the mask length never varied, so "the shorter mask sorts
+// first" was never exercised; the host bits were always zero, so a key built
+// from the MASKED network alone — which is what #492's first CidrSortKey did
+// — could throw them away and still agree with itself; and no two rows shared
+// a network, so `= '10.0.0.1/8'` could not answer a DIFFERENT address's row.
+// Wadjet's CIDR column is unvalidated text (internal/storage/ingest) and
+// host-bearing prefixes are ordinary in the network data this type exists
+// for, so the canonical-only fixture was not the conservative choice.
+//
+// id=700 lands on case 0 and keeps its old value, "192.168.188.0/24", so
+// networkLit's equality literal is unchanged.
+func cidrValue(i int) string {
+	switch i % 4 {
+	case 0:
+		return fmt.Sprintf("192.168.%d.0/24", i%256)
+	case 1:
+		// (i-1)%256, not i%256: case 0 runs on i%4==0 and this on i%4==1, so
+		// sharing the third octet with the PREVIOUS row is what puts a
+		// host-bearing address INSIDE a /24 the fixture also holds as its own
+		// network row. Without that overlap no query can tell a masked key
+		// from a full one — the two spellings would never meet.
+		return fmt.Sprintf("192.168.%d.%d/24", (i-1)%256, 1+i%200)
+	case 2:
+		return fmt.Sprintf("10.%d.%d.%d/8", (i/256)%256, (i/16)%256, i%256)
+	default:
+		return fmt.Sprintf("172.16.%d.%d/32", (i/256)%256, i%256)
+	}
 }
 
 // rowValue returns a PRESENT ROW whose fields cycle through present,
@@ -463,6 +498,33 @@ var networkOrdLit = map[string]string{
 	"c_cidr": networkLit["c_cidr"],
 }
 
+// networkExtraLit adds the literal SHAPES the equality/ordering pair above
+// cannot reach, one per column, as (suffix, operator, literal) triples.
+//
+// Each is a shape #492's first fix answered differently on the two engines,
+// and none of them is exotic:
+//
+//   - c_cidr against a BARE address. PostgreSQL's inet reads "172.16.2.187"
+//     as "172.16.2.187/32" and so does wadjet now; the kernel used to answer
+//     an unparseable-literal sentinel that matched NOTHING while the
+//     row-at-a-time path compared the text, so `WHERE c_cidr = '<a bare
+//     address the fixture holds>'` answered zero rows on one engine and the
+//     row on the other. `>=` is the ordering half of the same literal.
+//   - c_cidr against a HOST-BEARING prefix. Two rows share the /24 network
+//     and differ only in host bits, which the masked-network key erased.
+//   - c_ipv6 against a v4-shaped literal. Different FAMILIES: PostgreSQL puts
+//     every v4 address below every v6 one, so every non-NULL row is `>` it.
+//     The kernel read the literal as its v4-MAPPED v6 bytes (mid-range) and
+//     the expr path fell through to a lexical text compare — two engines,
+//     two answers, neither PostgreSQL's.
+var networkExtraLit = []struct{ col, suffix, op, lit string }{
+	{"c_cidr", "bare", "=", "'172.16.2.187'"},
+	{"c_cidr", "bare_ord", ">=", "'172.16.2.187'"},
+	{"c_cidr", "hostbits", "=", "'192.168.188.190/24'"},
+	{"c_cidr", "hostbits_ord", "<", "'192.168.188.190/24'"},
+	{"c_ipv6", "xfamily", ">", "'10.0.0.2'"},
+}
+
 // Corpus generates the query corpus: per type-column templates plus the
 // entries that need no particular column.
 //
@@ -529,6 +591,15 @@ func Corpus() []Query {
 			if lit, ok := networkOrdLit[n]; ok {
 				add("litcmp_ord_"+n,
 					fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE %s < %s ORDER BY id`, n, tbl, n, lit),
+					oracle.CmpOrdered, n)
+			}
+			for _, x := range networkExtraLit {
+				if x.col != n {
+					continue
+				}
+				add("litcmp_"+x.suffix+"_"+n,
+					fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE %s %s %s ORDER BY id`,
+						n, tbl, n, x.op, x.lit),
 					oracle.CmpOrdered, n)
 			}
 		}
