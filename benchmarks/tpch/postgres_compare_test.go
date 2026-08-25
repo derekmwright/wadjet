@@ -1432,6 +1432,31 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "NotInSubqueryNullFreeList",
 			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey NOT IN
 				(SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey < 5)`},
+		// An EMPTY subquery is the boundary of the three-valued rule, and
+		// getting it wrong is the shape a NULL-guard invites: `k NOT IN ()`
+		// is TRUE for every row INCLUDING one whose key is NULL, because
+		// there is no value for the comparison to be UNKNOWN about. Both
+		// rules are guarded on the build having rows at all.
+		pgCase{name: "NotInSubqueryEmptySet",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey NOT IN
+				(SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey > 999)`},
+		pgCase{name: "InSubqueryEmptySet",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
+				(SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey > 999)`},
+		// The estimator's semi/anti SWAP (a build 3× the probe becomes a
+		// RightAntiJoin, which marks build entries during the probe instead
+		// of taking the semi/anti probe path) must not fire for a null-aware
+		// anti join: the two rules live on the path it stops taking. region
+		// (5 rows) against nation (25) crosses the ratio, so this is the
+		// shape where the rule went missing on the single-process path while
+		// the DAG kept it.
+		pgCase{name: "NotInSubqueryNullInListSwapShape",
+			sql: `SELECT COUNT(*) AS c FROM region a WHERE a.r_regionkey NOT IN
+				(SELECT r.r_regionkey FROM nation b
+				 LEFT JOIN region r ON r.r_regionkey = b.n_regionkey AND r.r_regionkey < 2)`},
+		pgCase{name: "NotInSubqueryNullFreeListSwapShape",
+			sql: `SELECT COUNT(*) AS c FROM region a WHERE a.r_regionkey NOT IN
+				(SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey < 5)`},
 	)
 
 	// --- IN-subqueries the semi-join rewrite DECLINES (#524) -------------

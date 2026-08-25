@@ -187,11 +187,12 @@ func emittedColumns(n *Node) []emittedCol {
 	case NodeAggregate:
 		child := emittedColumns(firstChild(n))
 		out := make([]emittedCol, 0, len(n.GroupBy)+len(n.AggExprs))
-		for _, g := range n.GroupBy {
-			// A group key's OUTPUT column IS its text, and it still names
-			// the relation it was read from — which is what lets a key over
-			// a grouped inner resolve by owner.
-			out = append(out, emittedCol{name: g, owner: ownerOf(child, g)})
+		for i, name := range aggregateGroupOutputNames(n.GroupBy) {
+			// A group key READS one name and EMITS another: the aggregate
+			// strips the qualifier off its output column. The key of a semi
+			// join over a grouped inner has to say the emitted one, and the
+			// owner comes from what it READ.
+			out = append(out, emittedCol{name: name, owner: ownerOf(child, n.GroupBy[i])})
 		}
 		for _, a := range n.AggExprs {
 			if a.OutputCol != "" {
@@ -214,6 +215,30 @@ func emittedColumns(n *Node) []emittedCol {
 		// child's schema through unchanged.
 		return emittedColumns(firstChild(n))
 	}
+}
+
+// aggregateGroupOutputNames returns the names an Aggregate EMITS for its group
+// keys, which are not the names it reads them under.
+//
+// It mirrors exec.HashAggregate.outputSchema: the qualifier is stripped, and
+// kept only where stripping would make two keys collide (`GROUP BY n1.n_name,
+// n2.n_name` must stay distinguishable downstream). Modelling the output as
+// the key's own TEXT was the #526 defect one node higher — the semi join above
+// a grouped inner named its key `c.x` while the aggregate emitted `x`, so the
+// executor's key repair swapped the pair and the join matched nothing.
+func aggregateGroupOutputNames(groupBy []string) []string {
+	out := make([]string, len(groupBy))
+	base := make(map[string]int, len(groupBy))
+	for i, name := range groupBy {
+		out[i] = stripQualifier(name)
+		base[strings.ToLower(out[i])]++
+	}
+	for i, name := range groupBy {
+		if base[strings.ToLower(out[i])] > 1 {
+			out[i] = name // ambiguous stripped: the aggregate keeps it qualified
+		}
+	}
+	return out
 }
 
 func firstChild(n *Node) *Node {
@@ -348,7 +373,8 @@ func repairDecorrelatedSpelling(n *Node) *Node {
 }
 
 // innerOnlyPredicate turns one of a decorrelated subquery's own WHERE
-// conditions into a plan Predicate.
+// conditions into a plan Predicate, and reports ok=false when the rewrite
+// must DECLINE rather than produce one.
 //
 // The decorrelations strip table qualifiers here, for the same reason they
 // strip them off a key: the inner plan is Scan → [Join …] → [Filter] and
@@ -359,24 +385,40 @@ func repairDecorrelatedSpelling(n *Node) *Node {
 // filtered on b instead of c and the membership set became a different set
 // entirely — a silent wrong answer with no key involved.
 //
-// A FULLY QUALIFIED single-relation condition therefore keeps its qualifiers
-// over a joined inner: pushFilterThroughJoin attributes it by exactly the
-// refs collected here and lands it on that relation's own Scan, where the
-// executor resolves the qualified name to the bare column it stores. Anything
-// this cannot attribute — a bare reference, more than one relation, a
-// subquery — is stripped as before, which leaves it above the join reading
-// whatever the join emits.
-func innerOnlyPredicate(node plansql.Node, joinedInner bool) Predicate {
+// Three outcomes over a joined inner, decided by how many of its relations the
+// condition names:
+//
+//   - ONE, fully qualified: keep the qualifiers. pushFilterThroughJoin
+//     attributes it by exactly the refs collected here and lands it on that
+//     relation's own Scan, where the executor resolves the qualified name to
+//     the bare column it stores.
+//   - MORE THAN ONE: DECLINE the whole rewrite. There is no spelling that
+//     works: stripped, pushdown puts `c.x > b.x` on ONE scan as `x > x`
+//     (which evaluates against that relation's own column twice — the
+//     membership set collapses); qualified, it stays above the join, where
+//     the join emits one side's column bare and the qualified spelling names
+//     nothing. Declining leaves the IN a subquery predicate, executed as
+//     written — which the stage DAG can now do too (#524).
+//   - Unattributable — a bare reference, or a subquery inside the condition:
+//     stripped, exactly as before. A bare reference over a joined inner is
+//     ambiguous SQL unless one relation owns the name, and in that case the
+//     strip names it correctly.
+//
+// A single-relation inner is unchanged: strip, and the bottom Scan emits it.
+func innerOnlyPredicate(node plansql.Node, joinedInner bool) (Predicate, bool) {
 	if joinedInner {
 		// A nil colToTable resolves nothing, so a bare reference reports
 		// unresolved and falls through to the strip. That is the point: only
 		// a spelling the pushdown can attribute without guessing is kept.
-		if refs := predicateTableRefs(Predicate{ASTExpr: node}, nil); len(refs) == 1 {
-			return Predicate{Raw: node.String(), ASTExpr: node}
+		if refs := predicateTableRefs(Predicate{ASTExpr: node}, nil); len(refs) > 0 {
+			if len(refs) > 1 {
+				return Predicate{}, false
+			}
+			return Predicate{Raw: node.String(), ASTExpr: node}, true
 		}
 	}
 	stripped := stripTableQualifiers(node)
-	return Predicate{Raw: stripped.String(), ASTExpr: stripped}
+	return Predicate{Raw: stripped.String(), ASTExpr: stripped}, true
 }
 
 // deferSemiAntiDedup reports whether dedupSemiAntiBuildSide must wait for

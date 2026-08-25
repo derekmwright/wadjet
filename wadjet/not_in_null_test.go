@@ -141,6 +141,25 @@ func TestNotInSubqueryIsThreeValuedOverNulls(t *testing.T) {
 		{"b_not_in_null_free_list",
 			`SELECT COUNT(*) AS n FROM probe_b p WHERE p.k NOT IN (SELECT l.k FROM lst_b l WHERE l.k IS NOT NULL)`, 2},
 
+		// An EMPTY subquery is the boundary of the rule, and the place a
+		// NULL-guard goes one step too far. Both rules above are about a
+		// COMPARISON, and an empty set offers none: `k NOT IN ()` is TRUE for
+		// EVERY row — the NULL-keyed one included, because there is no value
+		// for its comparison to be UNKNOWN about — and `k IN ()` is FALSE for
+		// every row, NULL-keyed one included. Guarding only on "the list held
+		// a NULL" answered 2 of 3 here.
+		{"c_not_in_empty_set",
+			`SELECT COUNT(*) AS n FROM probe_c p WHERE p.k NOT IN (SELECT l.k FROM lst_c l WHERE l.k > 999)`, 3},
+		{"c_in_empty_set",
+			`SELECT COUNT(*) AS n FROM probe_c p WHERE p.k IN (SELECT l.k FROM lst_c l WHERE l.k > 999)`, 0},
+		// The same over an empty list on the STRING key path.
+		{"s_not_in_empty_set",
+			`SELECT COUNT(*) AS n FROM probe_s p WHERE p.s NOT IN (SELECT l.s FROM lst_s l WHERE l.s > 'zzz')`, 3},
+		// A list that is not empty but holds ONLY NULLs is NOT the empty case
+		// — it poisons, and the guard must tell the two apart.
+		{"c_not_in_all_null_list",
+			`SELECT COUNT(*) AS n FROM probe_c p WHERE p.k NOT IN (SELECT l.k FROM lst_b l WHERE l.k IS NULL)`, 0},
+
 		// The serialized-key path reaches the hash table by different code
 		// than the integer one, and #459 is the last time the two disagreed
 		// about NULL.

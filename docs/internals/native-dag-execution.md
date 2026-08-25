@@ -706,7 +706,7 @@ a subquery PREDICATE. Until #524 the DAG had nothing to execute one with:
 with *"IN subquery requires a SubqueryRunner"* while the single-process path
 answered correctly.
 
-Mechanism (`physical/in_subquery_set.go`, ADR-0020 §2):
+Mechanism (`physical/in_subquery_set.go`, ADR-0021 §2):
 
 - `resolveSubqueryAST`'s `InExpr` arm calls `Planner.materializeInSubquery`,
   which executes the UNCORRELATED subquery once on the coordinator and rewrites

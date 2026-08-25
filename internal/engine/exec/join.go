@@ -3614,7 +3614,15 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 	// NOT IN is three-valued, and an anti join on its own is not (#507). Two
 	// rules restore the difference, and both are applied here so every probe
 	// path below sees only the rows an ordinary anti join may answer for.
-	if h.NullAwareAnti && !isSemi {
+	//
+	// Both rules are about a COMPARISON, so both need something to compare
+	// against: over an EMPTY subquery `k NOT IN ()` is TRUE for every row
+	// INCLUDING a NULL-keyed one, because there is no value for the
+	// comparison to be UNKNOWN about. Dropping the NULL-keyed rows there
+	// answered 2 where PostgreSQL answers 3. buildRows counts NULL-keyed
+	// build rows too (#496), so a subquery that yields only NULLs is not
+	// empty and still poisons.
+	if h.NullAwareAnti && !isSemi && h.buildRows > 0 {
 		// A NULL anywhere in the subquery's result makes `k <> that value`
 		// UNKNOWN for every k it did not match on some other value, so the
 		// predicate is TRUE for nothing at all.

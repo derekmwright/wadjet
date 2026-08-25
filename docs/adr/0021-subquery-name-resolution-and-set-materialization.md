@@ -1,4 +1,4 @@
-# ADR-0020: A decorrelated subquery's names are resolved from the plan, and the sets it cannot join are materialized
+# ADR-0021: A decorrelated subquery's names are resolved from the plan, and the sets it cannot join are materialized
 
 Status: Accepted (2026-08-25)
 
@@ -55,9 +55,14 @@ modelling what the build subtree actually emits
 
 The model mirrors `exec.joinOutputSchemaWithMapping`: probe columns verbatim,
 then build columns qualified by their owning relation exactly where the bare
-name already occurs on the probe side. It walks bottom-up, so an Aggregate's
-group keys — whose text IS the names it emits — are settled before the semi
-join above resolves a key against them.
+name already occurs on the probe side. It also mirrors
+`exec.HashAggregate.outputSchema`, which is a SECOND renaming and was got
+wrong first time round: a group key READS one name and EMITS another, because
+the aggregate strips the qualifier off its output column unless stripping
+would make two keys collide. Modelling the output as the key's own text left
+a semi join over a grouped inner naming `c.x` while the aggregate emitted `x`
+— the same wrong answer one node higher. The pass walks bottom-up so those
+output names are settled before the join above resolves a key against them.
 
 Three properties make this safe to adopt everywhere rather than case by case:
 
@@ -67,11 +72,20 @@ Three properties make this safe to adopt everywhere rather than case by case:
   plan that never reaches the repair (an un-annotated Scan, no catalog) reads
   exactly as it did before.
 - **It applies to every site with the same exposure**, not only the reported
-  one: the IN key, the GROUP BY term of a grouped inner, a correlated EXISTS's
-  equality key, its non-equality JoinFilter term, and the inner-only WHERE
-  conditions — which had the same premise and a worse failure, since a
-  stripped `c.n_nationkey < 3` over `nation c JOIN nation b` is *pushed to the
-  wrong relation* and changes the membership set outright.
+  one: the IN key, the GROUP BY term of a grouped inner (and the aggregate's
+  own output renaming above it), a correlated EXISTS's equality key, its
+  non-equality JoinFilter term, and the inner-only WHERE conditions — which
+  had the same premise and a worse failure, since a stripped
+  `c.n_nationkey < 3` over `nation c JOIN nation b` is *pushed to the wrong
+  relation* and changes the membership set outright.
+
+One inner-only shape has no spelling at all and is DECLINED rather than
+guessed: a condition naming MORE THAN ONE inner relation. Stripped, pushdown
+lands `c.x > b.x` on one scan as `x > x`, which compares that relation's
+column against itself; qualified, it stays above the join, where one side's
+column is emitted bare and the qualified spelling names nothing. The IN stays
+a subquery predicate, executed as written — which §2 now lets the stage DAG do
+too.
 
 Two consequences are accepted. `dedupSemiAntiBuildSide` has to run before
 `reorderJoins` for its NDV bound to reach the cost model — which is before the
@@ -98,12 +112,22 @@ Two bounds, and crossing either is a typed refusal rather than a guess:
   million literals into a filter expression is not a plan. The bound is a
   plan-TEXT budget (the expression is serialized into every task), default
   10,000 rows, `WADJET_IN_SET_MAX` to override and `=0` to disable
-  materialization entirely.
+  materialization entirely. It is a bound on what gets INLINED, not on what
+  gets read: `executeSubquery` collects the whole result before the count is
+  checked, so an unbounded subquery is materialized in coordinator memory once
+  and then refused — and executed a SECOND time on the local route. Capping
+  the sink so the read stops at the bound is the honest fix and is not done
+  here; the row count is the only thing the refusal currently protects.
 - **Every value must have a literal spelling that survives the round trip
-  through the filter's text.** Integers, floats, strings, booleans and NULL
-  do. A value this cannot render honestly is refused rather than
-  approximated: an inlined value that re-parses as something else is a wrong
-  answer with no error attached.
+  through the filter's text, AND a kernel that compares it the way the engine
+  stores it.** Integers, finite float64s (round-trip checked), strings,
+  booleans and NULL qualify. NaN and the infinities have no numeric literal in
+  this dialect. FLOAT32 is refused for a different reason: the IN-literal-list
+  kernel compares a float32 column in float64 space while `=` narrows the
+  literal, so a set of eight values that eight rows satisfy under an
+  OR-of-equals matches none of them through IN (#549). Inlining there would
+  turn a loud failure into a silent wrong answer, which is the one trade this
+  whole change exists to avoid.
 
 `ErrInSubqueryDistributed` routes the query to the coordinator-local
 single-process pipeline, where `expr.InSubquery` resolves the set once under
@@ -130,7 +154,8 @@ an empty value list, so both render as the constant they are.
   answer for a large set and it is what removes the plan-time execution cost,
   but it needs a placeholder kind the coordinator can substitute a LIST into,
   which is machinery the literal list does not need. Left as the follow-up the
-  row bound's refusal covers in the meantime.
+  row bound's refusal covers in the meantime — imperfectly, since the refusal
+  reads the result before it counts it.
 - **Refusing every declined IN-subquery** (#524's cheaper option). Correct,
   but it sends the whole query single-process for a bounded subquery the DAG
   could otherwise run in full — the outer query is the expensive half.
@@ -146,8 +171,10 @@ an empty value list, so both render as the constant they are.
   type through `internal/oracle/typematrix`'s `semijoin_join_*` /
   `notin_join_` families.
 - A materialized IN-set is executed at PLAN time on the coordinator. For the
-  bounded shapes this exists for that is a small read; for anything larger the
-  row bound refuses before the result is in memory.
+  bounded shapes this exists for that is a small read. For anything larger the
+  read still happens in full before the bound refuses it, and the local route
+  then executes the subquery again — two executions and one full result in
+  coordinator memory is the cost of a refusal today.
 - The two-path gate asserts the IN-subquery refusal fires for NOTHING in its
   corpus. An entry taking that route means the materialization declined a set
   it should have inlined — the answer stays right while distributed execution

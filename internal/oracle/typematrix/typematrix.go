@@ -691,6 +691,32 @@ func Corpus() []Query {
 				fmt.Sprintf(`SELECT COUNT(*) AS n, MIN(a.id) AS lo, MAX(b.id) AS hi `+
 					`FROM %s a JOIN %s b ON a.%s = b.%s WHERE a.id < 500`, tbl, tbl, n, n),
 				oracle.CmpUnordered, n)
+			// RIGHT and FULL OUTER on the typed column. Every column here
+			// carries NULLs, and a NULL key is unmatched BY DEFINITION — so
+			// the outer join owes it a NULL-padded row. The integer build
+			// paths used to drop those rows before they reached the arena
+			// FlushUnmatched enumerates, while the serialized-key path kept
+			// them, which made the answer depend on the key's ENCODING
+			// rather than on the query (#496). Per type, because the
+			// encoding is what the type decides: single int, two ints,
+			// float, and the serialized fallback are four different build
+			// loops, and a wide type reaches whichever its storage picks.
+			add("rightjoin_null_"+n,
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a RIGHT JOIN %s b ON a.%s = b.%s `+
+					`WHERE b.id < 500`, tbl, tbl, n, n),
+				oracle.CmpUnordered, n)
+			add("fullouter_null_"+n,
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a FULL OUTER JOIN %s b ON a.%s = b.%s `+
+					`WHERE a.id < 500 OR b.id < 500`, tbl, tbl, n, n),
+				oracle.CmpUnordered, n)
+			// The two-column key takes its own build loop (dualIntKey when
+			// both are integers, the serialized one otherwise), and it had
+			// the same missing arena append plus a probe that never marked
+			// a build row matched at all.
+			add("rightjoin_dualkey_null_"+n,
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a RIGHT JOIN %s b ON a.%s = b.%s AND a.g = b.g `+
+					`WHERE b.id < 500`, tbl, tbl, n, n),
+				oracle.CmpUnordered, n)
 			// The same join with the typed column on the PAYLOAD side, so a
 			// build-side value that is copied rather than compared is read
 			// back out.

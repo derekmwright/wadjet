@@ -3811,6 +3811,60 @@ func twoPathCorpus() []twoPathQuery {
 				tb.Helper()
 				assertSingleCell(tb, rows, "c", 10)
 			}},
+		// An EMPTY subquery is where a NULL-guard goes too far: `k NOT IN ()`
+		// is TRUE for EVERY row, a NULL-keyed one included, because there is
+		// no value for the comparison to be UNKNOWN about.
+		twoPathQuery{name: "NotInSubqueryEmptySet", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey NOT IN
+				(SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey > 999)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 25)
+			}},
+		twoPathQuery{name: "InSubqueryEmptySet", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
+				(SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey > 999)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 0)
+			}},
+		// The estimator's semi/anti SWAP shape: a build 3× the probe becomes
+		// a RightAntiJoin, which marks build entries during the probe rather
+		// than taking the semi/anti probe path where NOT IN's two rules are
+		// applied. region (5) against nation (25) crosses the ratio, and this
+		// is where the rule went missing on the single-process path while the
+		// DAG (whose worker sets the flag from the spec) kept it — arms
+		// disagreeing, with PostgreSQL on the DAG's side.
+		twoPathQuery{name: "NotInSubqueryNullInListSwapShape", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM region a WHERE a.r_regionkey NOT IN
+				(SELECT r.r_regionkey FROM nation b
+				 LEFT JOIN region r ON r.r_regionkey = b.n_regionkey AND r.r_regionkey < 2)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 0)
+			}},
+		twoPathQuery{name: "NotInSubqueryNullFreeListSwapShape", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM region a WHERE a.r_regionkey NOT IN
+				(SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey < 5)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 2)
+			}},
+		// A NOT EXISTS over the same relations is NOT null-aware, so it still
+		// TAKES the swap — the control that says declining it for NOT IN
+		// narrowed the optimization rather than disabling it.
+		twoPathQuery{name: "NotExistsSwapShape", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM region a WHERE NOT EXISTS
+				(SELECT 1 FROM nation b WHERE b.n_regionkey = a.r_regionkey AND b.n_nationkey < 5)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 2)
+			}},
 		// #524: an IN-subquery the logical rewrite DECLINES stays a subquery
 		// PREDICATE, and the stage DAG had nothing to execute one with — the
 		// filter shipped to the worker verbatim and failed with "IN subquery

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -189,9 +191,31 @@ func inSetLiteral(v any) (plansql.Node, bool) {
 	case int64:
 		return &plansql.Lit{Value: strconv.FormatInt(val, 10), Kind: plansql.LitNumber}, true
 	case float32:
-		return &plansql.Lit{Value: strconv.FormatFloat(float64(val), 'f', -1, 32), Kind: plansql.LitNumber}, true
+		// REFUSED, and not because it cannot be rendered. The IN-literal-list
+		// kernel compares a FLOAT32 column against its literals in float64
+		// space while `=` narrows the literal to float32, so a set of eight
+		// values that eight rows satisfy under an OR-of-equals matches NONE
+		// of them through IN — measured 0 vs 8 on `float32(i)+0.1` (#549).
+		// Inlining here would turn that kernel bug into a silent wrong answer
+		// for a query that used to fail loudly, so a float32 set takes the
+		// local route, where expr.InSubquery compares typed values instead.
+		return nil, false
 	case float64:
-		return &plansql.Lit{Value: strconv.FormatFloat(val, 'f', -1, 64), Kind: plansql.LitNumber}, true
+		if math.IsNaN(val) || math.IsInf(val, 0) {
+			// "NaN" and "+Inf" are not numeric literals in this dialect;
+			// they re-parse as identifiers or not at all.
+			return nil, false
+		}
+		text := strconv.FormatFloat(val, 'f', -1, 64)
+		// A float that does not render EXACTLY is a different value once the
+		// worker parses the filter text back. FormatFloat with precision -1
+		// is round-trip exact for float64 by contract; the check costs
+		// nothing and makes that a property of this code rather than of a
+		// doc comment.
+		if back, err := strconv.ParseFloat(text, 64); err != nil || back != val {
+			return nil, false
+		}
+		return &plansql.Lit{Value: text, Kind: plansql.LitNumber}, true
 	case string:
 		return &plansql.Lit{Value: val, Kind: plansql.LitString}, true
 	default:
@@ -218,3 +242,15 @@ func findInSubqueryValue(in *plansql.InExpr) *plansql.SubqueryNode {
 		}
 	}
 }
+
+// NullAwareAntiForcedBroadcasts counts the joins whose build side was forced
+// to REPLICATE against the size decision because the join is null-aware
+// (#507): NOT IN's three-valued rule reads one fact off the WHOLE build, and a
+// hash-partitioned build splits it.
+//
+// Exported because it is the only way to see the trade from outside: the
+// answers stay right either way, and what changes is that a build the
+// broadcast threshold would have refused — including one refused explicitly by
+// BroadcastBytesThreshold < 0 — is now replicated to every task. #539 tracks
+// the shape that removes the need.
+var NullAwareAntiForcedBroadcasts atomic.Int64

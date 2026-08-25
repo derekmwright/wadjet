@@ -139,6 +139,106 @@ func TestInSubqueryOverAJoinedInnerNamesTheKeyTheJoinEmits(t *testing.T) {
 	}
 }
 
+// A GROUPED joined inner resolves its key one node higher, and the aggregate
+// RENAMES it: exec.HashAggregate.outputSchema strips a group key's qualifier
+// unless stripping would make two keys collide. The semi join above has to say
+// the name the aggregate EMITS, not the one it reads.
+func TestInSubqueryOverAGroupedJoinedInnerNamesTheAggregatesOutput(t *testing.T) {
+	cases := []struct {
+		name    string
+		sql     string
+		wantKey string
+	}{
+		{
+			name: "grouped, no collision: the aggregate emits it bare",
+			sql: `SELECT o_orderkey FROM orders WHERE o_custkey IN
+				(SELECT n.n_nationkey FROM customer c JOIN nation n ON c.c_nationkey = n.n_nationkey
+				 GROUP BY n.n_nationkey)`,
+			wantKey: "n_nationkey",
+		},
+		{
+			// Two group keys whose bare names collide. The spelling happens
+			// in TWO steps and they compose: the join's output is settled
+			// first (the probe side's copy comes out bare, the build side's
+			// qualified), and the aggregate's strip then runs over THAT — so
+			// the terms are `n_nationkey` and `b.n_nationkey`, which still
+			// collide when stripped and are therefore kept as they are. The
+			// key names what the aggregate emits for the term the SELECT
+			// item names, whatever that turned out to be; what matters is
+			// that the two steps agree, which the value gate over the tt/uu
+			// fixture is what actually proves.
+			name: "grouped, two colliding keys: the join's spelling comes first",
+			sql: `SELECT o_orderkey FROM orders WHERE o_custkey IN
+				(SELECT a.n_nationkey FROM nation a JOIN nation b ON a.n_regionkey = b.n_regionkey
+				 GROUP BY a.n_nationkey, b.n_nationkey)`,
+			wantKey: "n_nationkey",
+		},
+		{
+			// …and the sibling that names the OTHER relation resolves to the
+			// qualified one, which is the pair being consistent rather than
+			// both collapsing onto one column.
+			name: "grouped, two colliding keys: the build side's copy stays qualified",
+			sql: `SELECT o_orderkey FROM orders WHERE o_custkey IN
+				(SELECT b.n_nationkey FROM nation a JOIN nation b ON a.n_regionkey = b.n_regionkey
+				 GROUP BY a.n_nationkey, b.n_nationkey)`,
+			wantKey: "b.n_nationkey",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := innerSemiJoinKeyFor(t, tc.sql)
+			if !ok {
+				t.Fatal("decorrelation declined a shape it should accept")
+			}
+			if got != tc.wantKey {
+				t.Errorf("inner key = %q, want %q", got, tc.wantKey)
+			}
+		})
+	}
+}
+
+// An inner-only condition naming MORE THAN ONE of the subquery's relations has
+// no spelling this rewrite can produce. Stripped, pushFilterThroughJoin lands
+// `c.x > b.x` on ONE scan as `x > x`, comparing that relation's column against
+// itself; qualified, it stays above the join, where one side's column comes out
+// bare and the qualified spelling names nothing. Declining leaves the IN a
+// subquery predicate, executed as written.
+func TestInSubqueryDeclinesACrossRelationInnerCondition(t *testing.T) {
+	for _, sql := range []string{
+		`SELECT o_orderkey FROM orders WHERE o_custkey IN
+			(SELECT c.c_custkey FROM customer c JOIN nation n ON c.c_nationkey = n.n_nationkey
+			 WHERE c.c_nationkey > n.n_regionkey)`,
+		`SELECT o_orderkey FROM orders WHERE o_custkey NOT IN
+			(SELECT c.c_custkey FROM customer c JOIN nation n ON c.c_nationkey = n.n_nationkey
+			 WHERE c.c_nationkey <> n.n_regionkey)`,
+	} {
+		plan := buildPlan(t, sql)
+		annotateScanColumnsForTest(plan)
+		optimized := Optimize(plan, annotateScanColumnsForTest)
+		if join := findNodeMatching(optimized, func(n *Node) bool {
+			return n.Type == NodeJoin && (n.JoinType == "semi" || n.JoinType == "anti")
+		}); join != nil {
+			t.Errorf("a cross-relation inner condition was decorrelated into a %s join, which has "+
+				"no spelling for it\n  SQL: %s\n  ON: %s", join.JoinType, sql, join.JoinCond)
+		}
+		if !hasNodeType(optimized, NodeFilter) {
+			t.Errorf("the IN predicate survived neither as a join nor as a filter\n  SQL: %s", sql)
+		}
+	}
+
+	// The SINGLE-relation twin must still decorrelate, or the guard is a
+	// blanket disable rather than a bound on the shape it names.
+	plan := buildPlan(t, `SELECT o_orderkey FROM orders WHERE o_custkey IN
+		(SELECT c.c_custkey FROM customer c JOIN nation n ON c.c_nationkey = n.n_nationkey
+		 WHERE c.c_acctbal > 0)`)
+	annotateScanColumnsForTest(plan)
+	if findNodeMatching(Optimize(plan, annotateScanColumnsForTest), func(n *Node) bool {
+		return n.Type == NodeJoin && n.JoinType == "semi"
+	}) == nil {
+		t.Error("a single-relation inner condition no longer decorrelates")
+	}
+}
+
 // #482 — the subquery's LIMIT/OFFSET was dropped on the floor: the semi join's
 // build side IS the relation the subquery reads, so the membership set was the
 // whole unbounded column and the predicate matched every row for any n.

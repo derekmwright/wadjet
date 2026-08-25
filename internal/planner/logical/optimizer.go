@@ -991,7 +991,14 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 		joinedInner := len(info.Joins) > 0 || len(info.Tables) > 1
 		var innerPreds []Predicate
 		for _, f := range innerFilterNodes {
-			innerPreds = append(innerPreds, innerOnlyPredicate(f, joinedInner))
+			// A condition naming more than one inner relation has no
+			// spelling that survives this rewrite — decline and leave the
+			// scalar subquery as written (see innerOnlyPredicate).
+			inner, ok := innerOnlyPredicate(f, joinedInner)
+			if !ok {
+				return nil, pred, false
+			}
+			innerPreds = append(innerPreds, inner)
 		}
 		innerPlan = NewFilter(innerPlan, innerPreds)
 	}
@@ -1477,8 +1484,11 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 				correlationKeys = append(correlationKeys, DecorrelatedKey{Outer: outerCol, Op: "=", Inner: innerRef})
 			} else {
 				// Inner-only condition (including subquery expressions)
-				innerFilterPreds = append(innerFilterPreds,
-					innerOnlyPredicate(node, len(info.Joins) > 0 || len(info.Tables) > 1))
+				pred, ok := innerOnlyPredicate(node, len(info.Joins) > 0 || len(info.Tables) > 1)
+				if !ok {
+					return nil
+				}
+				innerFilterPreds = append(innerFilterPreds, pred)
 			}
 		}
 	}
@@ -2700,7 +2710,11 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 		joinedInner := len(info.Joins) > 0 || len(info.Tables) > 1
 		var innerPreds []Predicate
 		for _, f := range innerFilterNodes {
-			innerPreds = append(innerPreds, innerOnlyPredicate(f, joinedInner))
+			pred, ok := innerOnlyPredicate(f, joinedInner)
+			if !ok {
+				return nil
+			}
+			innerPreds = append(innerPreds, pred)
 		}
 		innerPlan = NewFilter(innerPlan, innerPreds)
 	}

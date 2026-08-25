@@ -186,6 +186,17 @@ func jiOpen(t *testing.T) *DB {
 			{"k": int64(1), "x": int64(10)},
 			{"k": int64(2), "x": int64(99)},
 		})
+	// uu2 differs from uu in one thing: both its x values EXCEED the tt row
+	// they join to, so a condition comparing the two relations keeps both
+	// rows. Over uu it would keep one, and the wrong answer that motivates
+	// the entry (a condition stripped to `x > x`, which keeps none) would be
+	// indistinguishable from the right one on this fixture.
+	load("uu2",
+		[]parquet.Column{{Name: "k", Type: parquet.TypeInt64}, {Name: "x", Type: parquet.TypeInt64}},
+		[]map[string]any{
+			{"k": int64(1), "x": int64(100)},
+			{"k": int64(2), "x": int64(99)},
+		})
 	return db
 }
 
@@ -277,6 +288,41 @@ func TestInSubqueryOverAJoinedInnerAgreesWithPostgres(t *testing.T) {
 		{name: "filtered_joined_inner",
 			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.x IN (SELECT c.x FROM uu c JOIN tt b ON b.id = c.k WHERE c.k < 2)`,
 			want: 1},
+		// A GROUPED joined inner. The key resolves one node higher, and the
+		// aggregate RENAMES it: a group key reads `c.x` and emits `x`,
+		// because HashAggregate.outputSchema strips the qualifier unless
+		// stripping would make two keys collide. Naming the key by the group
+		// term's own text left the semi join asking for `c.x` while the
+		// aggregate emitted `x` — the executor's key repair swapped the pair
+		// and the join matched nothing. Both qualifications, because only one
+		// of them is also the name the join below emits bare.
+		{name: "grouped_joined_inner_lead_qualified",
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.x IN (SELECT c.x FROM uu c JOIN tt b ON b.id = c.k GROUP BY c.x)`,
+			want: 1},
+		{name: "grouped_joined_inner_nonlead_qualified",
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.x IN (SELECT b.x FROM uu c JOIN tt b ON b.id = c.k GROUP BY b.x)`,
+			want: 2},
+		// TWO group keys whose bare names collide: the join's spelling is
+		// settled first and the aggregate's strip runs over THAT, so the two
+		// renamings have to compose. If they do not, one term collapses onto
+		// the other's column and the membership set is a different set.
+		{name: "grouped_two_colliding_keys_lead",
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.x IN (SELECT c.x FROM uu c JOIN tt b ON b.id = c.k GROUP BY c.x, b.x)`,
+			want: 1},
+		{name: "grouped_two_colliding_keys_nonlead",
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.x IN (SELECT b.x FROM uu c JOIN tt b ON b.id = c.k GROUP BY c.x, b.x)`,
+			want: 2},
+		{name: "not_in_grouped_joined_inner",
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.x NOT IN (SELECT c.x FROM uu c JOIN tt b ON b.id = c.k GROUP BY c.x)`,
+			want: 3},
+		// An inner condition naming BOTH inner relations has no spelling this
+		// rewrite can produce: stripped, pushdown lands `c.x > b.x` on one
+		// scan as `x > x`; qualified, it stays above the join, where one
+		// side's column is emitted bare. The rewrite declines and the IN is
+		// executed as the subquery it is.
+		{name: "cross_relation_inner_condition",
+			sql:  `SELECT COUNT(*) AS n FROM tt a WHERE a.id IN (SELECT c.k FROM uu2 c JOIN tt b ON b.id = c.k WHERE c.x > b.x)`,
+			want: 2},
 	}
 
 	for _, tc := range cases {

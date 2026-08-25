@@ -5200,8 +5200,23 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// list came back with the rows a two-valued anti join would keep.
 		// Replicating the build is what makes the fact whole per task; it is
 		// a correctness requirement here, not a size heuristic.
-		if node.NullAwareAnti && !preservesBuildSide(jt) {
+		//
+		// It overrides the SIZE decision, including an explicit
+		// BroadcastBytesThreshold < 0 ("broadcast disabled"), so it is
+		// counted and logged rather than silent: a null-aware anti join whose
+		// build the threshold would have refused is replicating N× across the
+		// cluster, and #539 is where the shape that removes the trade is
+		// tracked.
+		if node.NullAwareAnti && !preservesBuildSide(jt) && !isBroadcast {
 			isBroadcast = true
+			NullAwareAntiForcedBroadcasts.Add(1)
+			bytes, known := p.estimateSubtreeBytes(node.Children[1])
+			slog.Warn("null-aware anti join: build side FORCED to replicate past the broadcast decision",
+				"reason", "NOT IN's three-valued rule reads one fact off the WHOLE build (#507); "+
+					"a hash-partitioned build splits it",
+				"build_bytes", bytes, "build_bytes_known", known,
+				"broadcast_threshold", p.BroadcastBytesThreshold,
+				"tracked_in", "#539")
 		}
 		joinType := "hash_join"
 		if isBroadcast {
@@ -6038,11 +6053,28 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// 16GB lineitem hash table to 1.7GB orders hash table per worker.
 	rightEst := findScanRowEstimate(node.Children[1])
 	leftEst := findScanRowEstimate(node.Children[0])
+	// NOT IN's three-valued rule, which the anti join does not ask on its own
+	// (#507). The logical rewrite is the only thing that knows this anti join
+	// came from a NOT IN rather than a NOT EXISTS — and this is computed
+	// BEFORE the swap below, because after it joinType is RightAntiJoin and
+	// the flag would silently evaluate to false. It did: the local path
+	// dropped the rule whenever the estimator chose the swap, while the DAG
+	// (whose worker sets the flag from the spec) kept it — a two-path
+	// divergence with PostgreSQL on the DAG's side.
+	nullAwareAnti := node.NullAwareAnti && joinType == exec.AntiJoin
+
 	// A filtered semi/anti join must NOT swap: the RightSemi/RightAnti probe
 	// (markMatchedBuildEntries) marks every key-chain entry matched and never
 	// evaluates SemiAntiFilter, so the non-equality condition would silently
 	// vanish from the query — wrong results, not a performance trade.
-	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter == "" &&
+	//
+	// A NULL-AWARE anti join must not swap either, and for the same KIND of
+	// reason: its two rules (a NULL probe key never survives; a NULL anywhere
+	// in the build empties the answer) are applied on the semi/anti probe
+	// path, which RightAntiJoin does not take — it marks build entries during
+	// the probe and emits the unmatched ones from the arena afterwards. The
+	// rules would vanish exactly as the filter would.
+	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter == "" && !nullAwareAnti &&
 		rightEst > 0 && leftEst > 0 && rightEst > 3*leftEst {
 		// Swap: build the small outer table, probe with the large inner table
 		if joinType == exec.SemiJoin {
@@ -6078,10 +6110,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		hj.SemiAntiKeyOnly = true
 	}
 
-	// NOT IN's three-valued rule, which the anti join does not ask on its
-	// own (#507). The logical rewrite is the only thing that knows this anti
-	// join came from a NOT IN rather than a NOT EXISTS.
-	hj.NullAwareAnti = node.NullAwareAnti && joinType == exec.AntiJoin
+	hj.NullAwareAnti = nullAwareAnti
 
 	// Filtered semi/anti builds must store rows for probe-time SemiAntiFilter
 	// evaluation, but only the join keys + filter-referenced columns — narrow

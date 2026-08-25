@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"math"
 	"testing"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -22,7 +23,10 @@ func TestInSetLiteralsSurviveTheRoundTrip(t *testing.T) {
 		{"int", 7, "x in (7)"},
 		{"float64", float64(1.5), "x in (1.5)"},
 		{"float64 whole", float64(2), "x in (2)"},
-		{"float32", float32(1.5), "x in (1.5)"},
+		// A value that only renders exactly at precision -1: the round-trip
+		// check in inSetLiteral is what makes this a property and not a hope.
+		{"float64 many digits", float64(0.1), "x in (0.1)"},
+		{"float64 negative", float64(-2.25), "x in (-2.25)"},
 		{"string", "abc", "x in ('abc')"},
 		// The quote is the one that turns a set into a syntax error, or
 		// worse, into a different set.
@@ -68,6 +72,17 @@ func TestInSetLiteralRefusesWhatItCannotSpell(t *testing.T) {
 		struct{ A int }{1},
 		map[string]int{"a": 1},
 		[]int64{1, 2},
+		// NaN and the infinities have no numeric literal in this dialect:
+		// FormatFloat renders "NaN" / "+Inf", which re-parse as an
+		// identifier or not at all.
+		math.NaN(),
+		math.Inf(1),
+		math.Inf(-1),
+		// float32 is refused for a different reason — see inSetLiteral and
+		// #549: the IN-literal-list kernel compares a FLOAT32 column in
+		// float64 space, so inlining would answer WRONG rather than fail.
+		float32(1.5),
+		float32(0.1),
 	} {
 		if lit, ok := inSetLiteral(v); ok {
 			t.Errorf("inSetLiteral(%T) rendered %q instead of refusing", v, lit.String())
