@@ -517,6 +517,14 @@ var networkOrdLit = map[string]string{
 //     The kernel read the literal as its v4-MAPPED v6 bytes (mid-range) and
 //     the expr path fell through to a lexical text compare — two engines,
 //     two answers, neither PostgreSQL's.
+//
+// The literal shape that is NOT here is the one that must ERROR — `c_cidr <>
+// 'garbage'`, which raised zero rows through the scan and every row through
+// the row evaluator before #492's second pass. A corpus entry cannot carry it:
+// oracle.Run fails the whole run on any query error, so an entry whose correct
+// answer IS an error would read as a broken corpus. It lives in
+// wadjet.TestNonAddressLiteralAgainstACidrColumnIsAQueryError instead, where
+// both sites are asserted to raise the same SQLSTATE.
 var networkExtraLit = []struct{ col, suffix, op, lit string }{
 	{"c_cidr", "bare", "=", "'172.16.2.187'"},
 	{"c_cidr", "bare_ord", ">=", "'172.16.2.187'"},
