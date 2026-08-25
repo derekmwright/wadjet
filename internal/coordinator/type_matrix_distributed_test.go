@@ -385,6 +385,9 @@ func tmdTables() []tmdTable {
 		// the type-matrix table has ONE DECIMAL column, so nothing in this
 		// package could tell an exact comparison from a lexicographic one.
 		{dbpTable, dbpSchema(), dbpData()},
+		// The CIDR set-operation fixture, for the same reason: two spellings
+		// of one address, which only an inet-aware key collapses.
+		{cidrTable, cidrSchema(), cidrData()},
 	}
 }
 

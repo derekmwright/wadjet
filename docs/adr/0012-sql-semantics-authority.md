@@ -116,6 +116,50 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `kernel.toString`/`exec.decimalLitValue` give the kernel the same
      literal text the row path uses.
 
+     **This rule is about a NUMERIC literal meeting a TEXT column, and it does
+     not run backwards.** (Added 2026-08-25, from the #504 review.) A QUOTED
+     literal meeting a NUMBER column is the opposite pair and takes the
+     opposite rule: PostgreSQL types an unknown-typed literal FROM the operand
+     it meets, so `WHERE k > '2'` over a BIGINT column is the integer
+     comparison `k > 2` — not a text comparison, and not the comparison
+     against ZERO the constant used to become. Deleting the box-sniffing
+     branch removed all three of the readings it was doing at once, and only
+     the DECIMAL one was re-stated; `boxedPair` carries a distinct `boxQuoted`
+     kind for exactly this reason, so the two directions cannot be collapsed
+     again. Verified live on `k BIGINT` 0..11: `k > '2'` 9, `k >= '2'` 10,
+     `k < '2'` 2, `k = '2'` 1, and the same for a FLOAT column under the
+     float rule.
+
+     Two more of the box-sniff's jobs came back with it. `compare()`'s
+     temporal branch guarded itself with "the string parsed OR the number is
+     zero", which is true of ANY unparseable string against a zero — so
+     `0 = '0.0001'` was TRUE, and once the sniff above it was gone every
+     `int_col = 'anything'` matched the row holding zero. It asks the parser
+     whether it parsed now (`parseTemporalInt64OK`). And `IN`/`BETWEEN` are
+     `=` and `>=`/`<=` chained, so they take the same binding: `s = 2.00` and
+     `s IN (2.00)` disagreed until they did.
+
+     `kernel.toString`'s empty string was not only for numbers. A BOOL
+     constant reached it too, so `WHERE s = TRUE` compared every row against
+     `""` on the scan path and matched the row spelled `""` rather than the
+     one spelled `"true"` — a wrong ROW, not a wrong count. It renders
+     `true`/`false`, which is PostgreSQL's own `boolean::text` (the
+     single-letter `t` is psql's display) and what the row path's `fmt.Sprint`
+     already produced.
+
+     **The equivalent question for CIDR is open, and must not be answered one
+     site at a time.** (Added 2026-08-25, #546.) A CIDR value is stored as
+     TEXT, and every KEY and every column-to-column comparison uses that text
+     while the column-to-LITERAL comparison re-keys through
+     `kernel.CidrSortKey` (#492) — so `WHERE c = '10.0.0.1'` finds both
+     spellings of one address and `WHERE c = d`, `GROUP BY c`, `DISTINCT` and
+     every set operation find neither. PostgreSQL says they are one value
+     (`inet '10.0.0.1' = inet '10.0.0.1/32'` is TRUE). Both wadjet paths agree
+     with each other today, so keying the local set operation by inet ALONE
+     would create the divergence it looks like it closes; the fix moves the
+     whole key layer and the shuffle router together, the way #459 did for
+     floats.
+
    - **Unary minus over a QUOTED string literal.** (Added 2026-08-24, #505.)
      PostgreSQL refuses EVERY `-'…'` form, numeric-looking or not, with
      42725 "operator is not unique: - unknown" — verified live: both
