@@ -650,6 +650,42 @@ func TestTypeMatrixPredicateSemanticsTwoPath(t *testing.T) {
 			func(r tmxRow) bool { return r.g != nil && r.i64 != nil && *r.i64 != 0 })
 	})
 
+	// A CAST to BOOLEAN PostgreSQL has no cast for is a query ERROR (42846),
+	// and it has to be an error on BOTH arms and reach the client as one.
+	// The refusal is raised from inside the row evaluator through
+	// `expr.fatalEval` — an error channel that is a PANIC until a pipeline
+	// driver recovers it — so the thing worth gating is not the SQLSTATE (the
+	// wadjet-package test holds that) but that the DAG's worker converts it
+	// the way the single process does instead of taking the worker down.
+	for _, c := range []struct{ name, where string }{
+		{"Float", "CAST(c_f64 AS BOOLEAN)"},
+		{"Decimal", "CAST(c_dec AS BOOLEAN)"},
+		{"Date", "CAST(c_date AS BOOLEAN)"},
+	} {
+		t.Run("BareCastRefused"+c.name, func(t *testing.T) {
+			sql := "SELECT id FROM " + typematrix.Table + " WHERE " + c.where + " ORDER BY id"
+			for _, arm := range []struct {
+				name string
+				run  func() (*oracle.Result, error)
+			}{
+				{"single", func() (*oracle.Result, error) { return tmdRunSingle(ctx, single, sql) }},
+				{"dag", func() (*oracle.Result, error) { return tmdRunDAG(ctx, coord, sql) }},
+			} {
+				res, err := arm.run()
+				switch {
+				case err == nil:
+					t.Errorf("%s arm answered %d rows; PostgreSQL refuses this cast with 42846\n  SQL: %s",
+						arm.name, len(res.Rows), sql)
+				case strings.HasPrefix(err.Error(), "PANIC:"):
+					t.Errorf("%s arm PANICKED instead of reporting the refusal: %v\n  SQL: %s",
+						arm.name, err, sql)
+				case !strings.Contains(err.Error(), "to boolean"):
+					t.Errorf("%s arm failed for some other reason: %v\n  SQL: %s", arm.name, err, sql)
+				}
+			}
+		})
+	}
+
 	// A negation over a JOIN: the predicate travels through join planning and,
 	// on the DAG, through a separate stage's re-parse of the filter text. g is
 	// the join key and is nullable, so a NULL-key row is dropped by the join

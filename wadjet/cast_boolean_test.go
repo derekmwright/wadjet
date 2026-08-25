@@ -389,3 +389,119 @@ func quoteSQL(s string) string {
 	}
 	return string(append(out, '\''))
 }
+
+// TestSQLancerTLPWhereRepro592 is the reported query, verbatim in shape, over
+// the reported fixture.
+//
+// SQLancer's TLP-WHERE oracle (`sqlancer.common.oracle.TLPWhereOracle`) asserts
+// that `SELECT * FROM t` and the three-way partition of any predicate return
+// the same multiset. It reported "The size of the result sets mismatch (6 and
+// 3)" against wadjet main @ 6c40c829 with `t2.c2` a BIGINT: the `p` arm
+// contributed zero rows instead of its share, so the partition undercounted by
+// exactly the rows the predicate is TRUE for.
+//
+// The minimized table and the four spellings the report walks through are kept
+// here as written rather than folded into the fixture above, because a repro
+// that has been paraphrased is no longer the thing that was reported.
+func TestSQLancerTLPWhereRepro592(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	sch := parquet.Schema{Columns: []parquet.Column{{Name: "c", Type: parquet.TypeInt64, Nullable: true}}}
+	if err := db.CreateTable(ctx, "z", sch, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	ing := db.NewIngester("z", sch, nil, ingest.Config{MaxBufferRows: 64, RowGroupSize: 8})
+	if err := ing.Ingest(ctx, []map[string]any{
+		{"c": int64(0)}, {"c": int64(1)}, {"c": int64(2)}, {"c": int64(-1)}, {"c": nil},
+	}); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	cs := func(sql string) []int64 {
+		t.Helper()
+		res, err := db.Query(ctx, sql)
+		if err != nil {
+			t.Fatalf("query error: %v\n  SQL: %s", err, sql)
+		}
+		out := make([]int64, 0, len(res.Rows))
+		for _, r := range res.Rows {
+			if v, ok := r["c"].(int64); ok {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+
+	// The report's own four spellings and their expected answers.
+	want := []int64{-1, 1, 2}
+	for _, sql := range []string{
+		`SELECT c FROM z WHERE (c)::BOOLEAN ORDER BY c`,
+		`SELECT c FROM z WHERE (c)::BOOLEAN = TRUE ORDER BY c`,
+		`SELECT c FROM z WHERE CAST(c AS BOOLEAN) ORDER BY c`,
+		`SELECT c FROM (SELECT c, (c)::BOOLEAN AS b FROM z) sub WHERE b ORDER BY c`,
+	} {
+		if got := cs(sql); !cbSame(got, want) {
+			t.Errorf("%s answered %v, want %v", sql, got, want)
+		}
+	}
+	// And the two the report says were already right.
+	if got := cs(`SELECT c FROM z WHERE NOT (c)::BOOLEAN ORDER BY c`); !cbSame(got, []int64{0}) {
+		t.Errorf("NOT (c)::BOOLEAN answered %v, want [0]", got)
+	}
+	res, err := db.Query(ctx, `SELECT c FROM z WHERE (c)::BOOLEAN IS NULL`)
+	if err != nil {
+		t.Fatalf("query error: %v", err)
+	}
+	if len(res.Rows) != 1 || res.Rows[0]["c"] != nil {
+		t.Errorf("(c)::BOOLEAN IS NULL answered %v, want the single NULL row", res.Rows)
+	}
+
+	// The oracle's assertion itself, in the shape SQLancer emits it: the whole
+	// table on the left, the three-way partition on the right, compared by
+	// CARDINALITY (which is what ComparatorHelper.assumeResultSetsAreEqual
+	// reported: "the size of the result sets mismatch (6 and 3)").
+	base, err := db.Query(ctx, `SELECT * FROM z`)
+	if err != nil {
+		t.Fatalf("query error: %v", err)
+	}
+	part, err := db.Query(ctx, `SELECT * FROM z WHERE (z.c)::BOOLEAN`+
+		` UNION ALL SELECT * FROM z WHERE NOT ((z.c)::BOOLEAN)`+
+		` UNION ALL SELECT * FROM z WHERE ((z.c)::BOOLEAN) IS NULL`)
+	if err != nil {
+		t.Fatalf("query error: %v", err)
+	}
+	if len(base.Rows) != len(part.Rows) {
+		t.Errorf("TLP-WHERE partition returned %d rows against the table's %d — "+
+			"the three arms of a predicate are the table, once each",
+			len(part.Rows), len(base.Rows))
+	}
+}
+
+// TestBareBooleanScalarSubqueryPredicate covers the one member of the class
+// whose value does not come from the row: a scalar subquery answering a
+// boolean, used bare. It reaches the filter through the same entry point, and
+// is here so the whole class is swept rather than the shapes a column can
+// reach.
+func TestBareBooleanScalarSubqueryPredicate(t *testing.T) {
+	db := cbOpen(t)
+	// MAX(b) over {false,true,true,NULL,false} is TRUE, so every row survives;
+	// MAX over the empty set is NULL, so none does. The two together say the
+	// predicate is being READ rather than defaulted either way.
+	if got := cbIDs(t, db, `SELECT id FROM cb WHERE (SELECT MAX(b) FROM cb) ORDER BY id`); !cbSame(got, []int64{1, 2, 3, 4, 5}) {
+		t.Errorf("a TRUE scalar-subquery predicate answered %v, want every row", got)
+	}
+	if got := cbIDs(t, db, `SELECT id FROM cb WHERE (SELECT MAX(b) FROM cb WHERE id > 99) ORDER BY id`); len(got) != 0 {
+		t.Errorf("a NULL scalar-subquery predicate answered %v, want no rows", got)
+	}
+	if got := cbIDs(t, db, `SELECT id FROM cb WHERE (SELECT MIN(b) FROM cb) ORDER BY id`); len(got) != 0 {
+		t.Errorf("a FALSE scalar-subquery predicate answered %v, want no rows", got)
+	}
+}
