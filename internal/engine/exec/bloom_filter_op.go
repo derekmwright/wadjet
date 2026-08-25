@@ -2,9 +2,34 @@ package exec
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
+	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
+
+// Counters for the three things a bloom filter can do that are not a normal
+// filtering decision. Exported so tests and the harness can assert on them:
+// #543 was invisible precisely because a filter rejecting 100% of its input
+// produced no counter, no log line and no failure.
+var (
+	// BloomSelfCheckFailures counts filters that could not match keys taken
+	// from their own insert side. Every one is a wrong-answer bug.
+	BloomSelfCheckFailures atomic.Int64
+	// BloomKeyTypeMismatches counts filters disengaged because the column
+	// they resolved encodes its keys differently from the column they were
+	// built from.
+	BloomKeyTypeMismatches atomic.Int64
+	// BloomFullRejections counts filters observed rejecting every row they
+	// have seen. Legal (disjoint key sets) but always worth a look.
+	BloomFullRejections atomic.Int64
+)
+
+// bloomAdaptiveBatches is how many batches the adaptive rules observe before
+// deciding anything.
+const bloomAdaptiveBatches = 32
 
 // BloomFilterOp is a UnaryOperator that pre-filters probe batches using the
 // build-side bloom filter. Rows whose join key hash is not in the bloom are
@@ -32,6 +57,17 @@ type BloomFilterOp struct {
 	totalPassed  int
 	batchesSeen  int
 	disabled     bool
+
+	// keyType is the type of the column whose values were INSERTED into this
+	// bloom, and selfCheck a copy of a sample of those values. Both are set
+	// by BloomBuilder.FilterOp, and together they are what makes a bloom that
+	// cannot match its own keys LOUD instead of silent (#543): the type guard
+	// fires on the first batch, the sample replay at the moment the filter
+	// starts rejecting everything.
+	keyType    batch.TypeID
+	keyTypeSet bool
+	selfCheck  *batch.RecordBatch
+	verified   bool
 }
 
 func (op *BloomFilterOp) Init(_ context.Context) error { return nil }
@@ -55,6 +91,10 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 			op.keyIdx[i] = in.ColumnIndex(col)
 		}
 		op.resolved = true
+		if !op.keyTypesAgree(in) {
+			op.disabled = true
+			return in, nil
+		}
 	}
 
 	activeLen := in.ActiveLen()
@@ -194,28 +234,136 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 		}
 	}
 
-	if len(sel) == 0 {
-		return nil, nil
+	// Rejection accounting, and it runs BEFORE the all-rejected early return
+	// below rather than after it. That ordering is the whole blind spot #543
+	// hid in: a filter rejecting every row of every batch returned here on
+	// each one, so batchesSeen never advanced, and the adaptive rule — the
+	// only code watching this filter at all — never ran even once.
+	op.totalChecked += activeLen
+	op.totalPassed += len(sel)
+	op.batchesSeen++
+
+	// An entire batch rejected is the first observable symptom of a bloom
+	// whose two sides encode keys differently, and it is answerable on the
+	// spot: ask the filter to match keys it was itself built from.
+	if len(sel) == 0 && !op.verified {
+		op.verifyOrDisengage()
+		if op.disabled {
+			return in, nil // unfiltered: this batch's rejections were not trustworthy
+		}
 	}
 
-	// Track rejection rate for adaptive disabling.
-	// After 32 batches, if <5% of rows are rejected, the bloom filter
-	// costs more than it saves and is disabled for remaining batches.
-	if !op.disabled {
-		op.totalChecked += activeLen
-		op.totalPassed += len(sel)
-		op.batchesSeen++
-		if op.batchesSeen >= 32 && op.totalChecked > 0 {
-			rejected := op.totalChecked - op.totalPassed
-			if rejected*20 < op.totalChecked { // <5% rejection
-				op.disabled = true
+	if op.batchesSeen >= bloomAdaptiveBatches && op.totalChecked > 0 {
+		rejected := op.totalChecked - op.totalPassed
+		switch {
+		case rejected*20 < op.totalChecked:
+			// <5% rejection: the hash plus two random reads per row cost
+			// more than the probe lookups they save.
+			op.disabled = true
+		case rejected*1000 >= op.totalChecked*999 && !op.verified:
+			// >=99.9%. The rate alone cannot tell a disjoint key set from a
+			// broken filter — the self-check can.
+			op.verifyOrDisengage()
+			if op.disabled {
+				return in, nil
 			}
 		}
+	}
+
+	if len(sel) == 0 {
+		return nil, nil
 	}
 
 	op.selBuf = sel
 	in.Sel = sel
 	return in, nil
+}
+
+// keyTypesAgree reports whether the column this op just resolved encodes its
+// keys the same way the column the bloom was built from does. It does not
+// when a join puts differently typed columns on the two sides: the integer
+// fast path is width-agnostic (every arm widens to int64), but nothing else
+// is — a STRING column read through the integer path indexes Int64Data that a
+// string vector does not have, and a 4-byte FLOAT32 key never equals the
+// 8-byte FLOAT64 encoding of the same number. Disengaging costs a scan
+// filter; guessing costs rows.
+func (op *BloomFilterOp) keyTypesAgree(in *batch.RecordBatch) bool {
+	if !op.keyTypeSet || len(op.keyIdx) != 1 || op.keyIdx[0] < 0 {
+		return true
+	}
+	got := in.Columns[op.keyIdx[0]].Type
+	if got == op.keyType || (bloomIntKey(got) && bloomIntKey(op.keyType)) {
+		return true
+	}
+	BloomKeyTypeMismatches.Add(1)
+	slog.Error("bloom filter key type mismatch — filter disengaged",
+		"column", op.leftKeys[0], "built_from", op.keyType.String(), "resolved", got.String())
+	return false
+}
+
+// verifyOrDisengage runs at the moment a filter is seen rejecting everything.
+// A bloom has false positives and never false negatives, so a key that was
+// inserted MUST probe true; if a sampled one does not, every row this filter
+// has rejected is a row the query silently lost, and the only safe move left
+// is to stop filtering and say so.
+func (op *BloomFilterOp) verifyOrDisengage() {
+	op.verified = true
+	BloomFullRejections.Add(1)
+	if op.selfCheck == nil {
+		// Nothing retained to check against: a bloom that arrived over the
+		// wire, or one built through NewBloomFilterOp. Log it anyway — an
+		// unremarked 100% rejection is exactly what let #543 cost a whole
+		// build scan's worth of rows without a single line of output.
+		slog.Warn("bloom filter rejected every row it has seen; no build-key sample to verify it against",
+			"columns", op.leftKeys, "rows_checked", op.totalChecked)
+		return
+	}
+	if err := op.SelfCheck(); err != nil {
+		BloomSelfCheckFailures.Add(1)
+		op.disabled = true
+		slog.Error("bloom filter cannot match its own build keys — disengaged; rows already rejected are LOST",
+			"columns", op.leftKeys, "rows_rejected", op.totalChecked-op.totalPassed, "err", err)
+		return
+	}
+	slog.Warn("bloom filter rejected every row it has seen and does match its own build keys — the key sets are disjoint",
+		"columns", op.leftKeys, "rows_checked", op.totalChecked)
+}
+
+// SelfCheck probes the filter with a sample of the very values that were
+// inserted into it. All of them must survive. A miss means the insert side and
+// the probe side hashed different byte streams, which is not a lost
+// optimization but a lost row on every rejection the filter makes (#543).
+//
+// Returns nil when the op carries no sample — see BloomBuilder.FilterOp.
+func (op *BloomFilterOp) SelfCheck() error {
+	if op.selfCheck == nil || op.selfCheck.Len == 0 {
+		return nil
+	}
+	// A fresh op over the same bits, so the check exercises the real Execute
+	// dispatch (integer fast path included) without touching this op's
+	// resolution or adaptive state.
+	probe, ok := op.Clone().(*BloomFilterOp)
+	if !ok {
+		return nil
+	}
+	probe.selfCheck = nil
+	probe.verified = true // no recursion, and no second "rejected everything" line
+	// Value copy: Execute writes Sel, and concurrent clones share the batch.
+	sample := *op.selfCheck
+	sample.Sel = nil
+	out, err := probe.Execute(context.Background(), &sample)
+	if err != nil {
+		return fmt.Errorf("probing the build-key sample: %w", err)
+	}
+	got := 0
+	if out != nil {
+		got = out.ActiveLen()
+	}
+	if got != op.selfCheck.Len {
+		return fmt.Errorf("bloom rejected %d of %d values taken from its own insert side (column %q, type %s)",
+			op.selfCheck.Len-got, op.selfCheck.Len, op.leftKeys[0], op.keyType.String())
+	}
+	return nil
 }
 
 // probeKeyHash builds the key buffer for a row and checks the bloom filter.
@@ -230,8 +378,7 @@ func (op *BloomFilterOp) probeKeyHash(in *batch.RecordBatch, row int) bool {
 		if v.Nulls.IsNullFast(row) {
 			return false // null key → no match
 		}
-		op.keyBuf = append(op.keyBuf, 0) // not-null flag
-		op.keyBuf = appendColumnValue(op.keyBuf, v, row, v.Type)
+		op.keyBuf = appendBloomKey(op.keyBuf, v, row)
 	}
 	return bloomContains(op.bloom, op.bloomMask, bloomHashBytes(op.keyBuf))
 }
@@ -249,6 +396,9 @@ func (op *BloomFilterOp) Clone() UnaryOperator {
 		leftKeys:      op.leftKeys,
 		useIntKey:     op.useIntKey,
 		useDualIntKey: op.useDualIntKey,
+		keyType:       op.keyType,
+		keyTypeSet:    op.keyTypeSet,
+		selfCheck:     op.selfCheck,
 	}
 }
 
@@ -336,52 +486,193 @@ func NewBloomSized(totalRows int) (bloom []uint64, bloomMask uint64) {
 	return make([]uint64, nSlots), uint64(nSlots - 1)
 }
 
-// BloomAddBatch hashes one batch's key column into the bloom. Incremental
-// counterpart of BuildBloomFromBatches, used when the source batches stream
-// from a spill-backed collector instead of sitting in memory all at once.
-func BloomAddBatch(bloom []uint64, bloomMask uint64, b *batch.RecordBatch, keyCol string) {
+// bloomIntKey reports whether a column type takes the bloom's integer fast
+// path. It is the ONE place that question is answered: the insert side and
+// the probe side used to decide it independently, from different inputs, and
+// #543 is what that costs when the two answers disagree.
+//
+// Note which int-backed types are NOT here. TIMESTAMP, IPv4, MAC and DURATION
+// live in Int64Data but encode through appendColumnValue like everything
+// else, because that is what the hash join's own key builder does with them.
+func bloomIntKey(t batch.TypeID) bool {
+	switch t {
+	case batch.TypeInt32, batch.TypeInt64, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return true
+	}
+	return false
+}
+
+// appendBloomKey appends ONE key column's canonical join-key bytes: the
+// not-null flag the hash join's own key builders write (join.go's
+// buildProbeKey and the build-side strIndex key), then appendColumnValue's
+// encoding of the value.
+//
+// Every bloom key on every side goes through here, so a bloom's key set is a
+// SUBSET of the join's by construction rather than by two edits agreeing —
+// float NaN/-0.0 folding, DECIMAL scale normalization, container encodings and
+// all. The build side used to hash the raw col.BytesData.Value(row) instead,
+// which is the same bytes for no type at all: every bytes-backed key
+// (STRING, BYTES, IPv6, CIDR, UUID) missed the length prefix and the flag, and
+// every other non-integer type indexed a BytesColumn its vector does not have
+// (#543).
+func appendBloomKey(buf []byte, v *batch.Vector, row int) []byte {
+	buf = append(buf, 0) // not-null flag
+	return appendColumnValue(buf, v, row, v.Type)
+}
+
+// bloomSet marks both of a hash's bits.
+func bloomSet(bloom []uint64, mask, hash uint64) {
+	h1 := hash & mask
+	h2 := (hash >> 17) & mask
+	bloom[h1] |= 1 << (hash & 63)
+	bloom[h2] |= 1 << ((hash >> 6) & 63)
+}
+
+// bloomSelfCheckRows is how many inserted values a builder retains for
+// SelfCheck, and bloomSelfCheckPerBatch how many it takes from any one batch,
+// so the sample spans the build rather than being the head of its first batch.
+const (
+	bloomSelfCheckRows     = 64
+	bloomSelfCheckPerBatch = 8
+)
+
+// BloomBuilder accumulates one key column's values into a bloom and then hands
+// back the BloomFilterOp that probes it.
+//
+// It exists so the two sides cannot disagree about the key encoding: the
+// encoding is decided once, here, from the inserted column's own type, frozen
+// against a later batch that disagrees, and handed to the op the builder
+// produces along with a sample of the keys that went in (#543).
+type BloomBuilder struct {
+	bloom []uint64
+	mask  uint64
+
+	keyType   batch.TypeID
+	typed     bool
+	useIntKey bool
+	resolved  bool // the key column was found in at least one batch
+	inserted  int64
+	keyBuf    []byte
+
+	sample   *batch.Vector // copies of inserted values, replayed by SelfCheck
+	noSample bool
+}
+
+// NewBloomBuilder allocates a builder sized for totalRows keys. Returns nil
+// for zero rows, matching NewBloomSized.
+func NewBloomBuilder(totalRows int) *BloomBuilder {
+	bloom, mask := NewBloomSized(totalRows)
+	if bloom == nil {
+		return nil
+	}
+	return &BloomBuilder{bloom: bloom, mask: mask}
+}
+
+// Inserted returns how many non-NULL keys went into the bloom, and Resolved
+// whether the key column was ever found. A caller must not install a filter
+// built from an unresolved column: it rejects everything, which for an
+// anti-join means inventing unmatched probe rows.
+func (bb *BloomBuilder) Inserted() int64 { return bb.inserted }
+
+// Resolved reports whether the key column was found in at least one batch.
+func (bb *BloomBuilder) Resolved() bool { return bb.resolved }
+
+// Add hashes one batch's key column into the bloom. A batch whose key column
+// has a different type from the first one's is refused rather than encoded
+// two ways.
+func (bb *BloomBuilder) Add(b *batch.RecordBatch, keyCol string) error {
+	if b == nil {
+		return nil
+	}
 	colIdx := b.ColumnIndex(keyCol)
 	if colIdx < 0 {
-		return
+		return nil
 	}
 	col := b.Columns[colIdx]
-	isInt := col.Type == batch.TypeInt32 || col.Type == batch.TypeInt64 ||
-		col.Type == batch.TypePort || col.Type == batch.TypeProtocol ||
-		col.Type == batch.TypeDate
+	if !bb.typed {
+		bb.keyType, bb.useIntKey, bb.typed = col.Type, bloomIntKey(col.Type), true
+		if !bb.noSample {
+			bb.sample = batch.NewVectorLike(col)
+		}
+	} else if col.Type != bb.keyType {
+		return fmt.Errorf("bloom key column %q arrived as %s after %s: one bloom, one encoding",
+			keyCol, col.Type.String(), bb.keyType.String())
+	}
+	bb.resolved = true
 
-	set := func(hash uint64) {
-		h1 := hash & bloomMask
-		h2 := (hash >> 17) & bloomMask
-		b1 := hash & 63
-		b2 := (hash >> 6) & 63
-		bloom[h1] |= 1 << b1
-		bloom[h2] |= 1 << b2
+	taken := 0
+	add := func(row int) {
+		if col.Nulls.IsNull(row) {
+			return // NULL matches nothing, itself included — see probeKeyHash
+		}
+		if bb.useIntKey {
+			bloomSet(bb.bloom, bb.mask, bloomHashInt(intValFromCol(col, row)))
+		} else {
+			bb.keyBuf = appendBloomKey(bb.keyBuf[:0], col, row)
+			bloomSet(bb.bloom, bb.mask, bloomHashBytes(bb.keyBuf))
+		}
+		bb.inserted++
+		if bb.sample != nil && bb.sample.Len < bloomSelfCheckRows && taken < bloomSelfCheckPerBatch {
+			bb.sample.AppendFrom(col, row)
+			taken++
+		}
 	}
 
 	if b.Sel != nil {
 		for _, si := range b.Sel {
-			row := int(si)
-			if col.Nulls.IsNull(row) {
-				continue
-			}
-			if isInt {
-				set(bloomHashInt(intValFromCol(col, row)))
-			} else {
-				set(bloomHashBytes(col.BytesData.Value(row)))
-			}
+			add(int(si))
 		}
 	} else {
 		for row := 0; row < b.Len; row++ {
-			if col.Nulls.IsNull(row) {
-				continue
-			}
-			if isInt {
-				set(bloomHashInt(intValFromCol(col, row)))
-			} else {
-				set(bloomHashBytes(col.BytesData.Value(row)))
-			}
+			add(row)
 		}
 	}
+	return nil
+}
+
+// FilterOp returns the operator that probes this bloom over the named column,
+// carrying the encoding the builder froze and the sample SelfCheck replays.
+func (bb *BloomBuilder) FilterOp(column string) *BloomFilterOp {
+	op := &BloomFilterOp{
+		bloom:      bb.bloom,
+		bloomMask:  bb.mask,
+		leftKeys:   []string{column},
+		useIntKey:  bb.useIntKey,
+		keyType:    bb.keyType,
+		keyTypeSet: bb.typed,
+	}
+	if bb.sample != nil && bb.sample.Len > 0 {
+		sc := parquet.Column{Name: column, Type: bb.keyType, Nullable: true}
+		switch bb.keyType {
+		case batch.TypeDecimal:
+			sc.Scale = bb.sample.DecimalData.Scale
+		case batch.TypeVector:
+			sc.Dimension = bb.sample.VectorDim
+		}
+		op.selfCheck = &batch.RecordBatch{
+			Schema:  []parquet.Column{sc},
+			Columns: []*batch.Vector{bb.sample},
+			Len:     bb.sample.Len,
+		}
+	}
+	return op
+}
+
+// Bloom returns the raw bits and mask, for callers that hand a bloom on rather
+// than probing it here.
+func (bb *BloomBuilder) Bloom() ([]uint64, uint64) { return bb.bloom, bb.mask }
+
+// BloomAddBatch hashes one batch's key column into the bloom. Incremental
+// counterpart of BuildBloomFromBatches, used when the source batches stream
+// from a spill-backed collector instead of sitting in memory all at once.
+//
+// Prefer BloomBuilder: it freezes the encoding and retains the sample that
+// makes a broken filter loud. This wrapper keeps the free-function shape for
+// callers that already own the bits, and shares the builder's one encoder so
+// it cannot drift from the probe side again.
+func BloomAddBatch(bloom []uint64, bloomMask uint64, b *batch.RecordBatch, keyCol string) {
+	bb := &BloomBuilder{bloom: bloom, mask: bloomMask, noSample: true}
+	_ = bb.Add(b, keyCol)
 }
 
 // BuildBloomFromBatches constructs a bloom filter from a column across
@@ -396,8 +687,13 @@ func BuildBloomFromBatches(batches []*batch.RecordBatch, keyCol string) (bloom [
 	if bloom == nil {
 		return nil, 0
 	}
+	bb := &BloomBuilder{bloom: bloom, mask: bloomMask, noSample: true}
 	for _, b := range batches {
-		BloomAddBatch(bloom, bloomMask, b, keyCol)
+		if err := bb.Add(b, keyCol); err != nil {
+			// One column, two types across the batches: no single encoding
+			// is right, so answer with no filter rather than a wrong one.
+			return nil, 0
+		}
 	}
 	return bloom, bloomMask
 }

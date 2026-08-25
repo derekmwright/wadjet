@@ -1329,7 +1329,10 @@ func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, h
 // arm for arm — the sink routes with that one and the tests verify the
 // routing with this one, so a divergence would read as a routing bug.
 // ARRAY/MAP/ROW still hash a zero byte (deterministic but skewed — every
-// row of such a key lands in one partition; see the default there).
+// row of such a key lands in one partition; see the default there), and they
+// are now the ONLY types that do: FLOAT32/FLOAT64 fell into that default too
+// until #543's review, which made this function disagree with the sink it
+// exists to verify for every float partition key.
 func hashVectorValue(h interface{ Write([]byte) (int, error) }, col *batch.Vector, row int, scratch []byte) {
 	if col.Nulls.IsNullFast(row) {
 		// Null contributes a distinct marker so that null rows are consistently
@@ -1343,6 +1346,17 @@ func hashVectorValue(h interface{ Write([]byte) (int, error) }, col *batch.Vecto
 		_, _ = h.Write(scratch[:4])
 	case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
 		binary.LittleEndian.PutUint64(scratch[:8], uint64(col.Int64Data[row]))
+		_, _ = h.Write(scratch[:8])
+	case parquet.TypeFloat32:
+		// Canonical bits, matching the TypeFloat32 arm of
+		// hashRowsIntoPartitions: -0.0 and +0.0 are one value and every NaN
+		// payload is one value (kernel/float_order.go). Without this arm a
+		// float key fell to the default and mixed a single 0x00, so this
+		// function said "one partition" for values the sink routes to many.
+		binary.LittleEndian.PutUint32(scratch[:4], kernel.KeyFloat32Bits(col.Float32Data[row]))
+		_, _ = h.Write(scratch[:4])
+	case parquet.TypeFloat64:
+		binary.LittleEndian.PutUint64(scratch[:8], kernel.KeyFloat64Bits(col.Float64Data[row]))
 		_, _ = h.Write(scratch[:8])
 	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
 		_, _ = h.Write(col.BytesData.Value(row))

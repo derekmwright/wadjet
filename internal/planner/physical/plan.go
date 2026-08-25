@@ -23,6 +23,7 @@ import (
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/engine/scan"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
@@ -3296,6 +3297,15 @@ var (
 	ReverseBloomInnerThreshold int64 = 50_000_000
 )
 
+// reverseBloomToggle is the kill switch for the whole reverse-bloom path
+// (#287's convention: WADJET_REVERSE_BLOOM=0 disables). The optimization
+// removes build-side rows before they reach the hash table, so a defect in it
+// is a defect in the ANSWER — #543 dropped every row of a string-keyed
+// semi/anti build — and the invariance oracle can only compare against a run
+// without it if there is a switch to turn it off.
+var reverseBloomToggle = optswitch.Register("reverse-bloom", "WADJET_REVERSE_BLOOM",
+	"reverse-bloom pushdown: build a bloom from the probe side's join keys and filter the build-side scan with it")
+
 func init() {
 	if v := os.Getenv("WADJET_REVERSE_BLOOM_INNER_THRESHOLD"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
@@ -6169,8 +6179,9 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// only sees 1/N of the probe keys, so ~(N-1)/N of build rows are filtered
 	// out. At SF100 with 3 workers, this reduces orders (150M) to ~50M and
 	// partsupp (80M) to ~27M per worker — fitting in 4GB memory budget.
-	useReverseBloom := (est > ReverseBloomThreshold && (joinType == exec.SemiJoin || joinType == exec.AntiJoin)) ||
-		(est > ReverseBloomInnerThreshold && joinType == exec.InnerJoin)
+	useReverseBloom := reverseBloomToggle.On() &&
+		((est > ReverseBloomThreshold && (joinType == exec.SemiJoin || joinType == exec.AntiJoin)) ||
+			(est > ReverseBloomInnerThreshold && joinType == exec.InnerJoin))
 
 	// Pre-compute post-build operations that can run in the build goroutine.
 	var keepCols []string
@@ -6485,6 +6496,12 @@ func (d *deferredJoinBridge) Close() error {
 	return nil
 }
 
+// ReverseBloomsInstalled counts reverse-bloom filters actually pushed onto a
+// build-side scan. A gate that means to exercise this path asserts on it:
+// without it, a test can only prove the query answered, not that the
+// optimization it was written for ever engaged.
+var ReverseBloomsInstalled atomic.Int64
+
 // reverseBloomBridge runs the probe-side child pipeline first, builds a bloom
 // filter from the collected join key values, injects it into the build-side
 // scan, then signals the build goroutine to start. This drastically reduces
@@ -6531,11 +6548,19 @@ func (rb *reverseBloomBridge) Init(ctx context.Context) error {
 	// Phase 2: Build bloom from the collected key column — a streaming
 	// pass over the collector (reads spilled runs back from disk), so the
 	// bloom build adds no resident copy.
-	bloom, bloomMask := exec.NewBloomSized(rb.collector.Rows())
-	if bloom != nil {
+	//
+	// The builder owns the key encoding for BOTH sides of this filter: it
+	// freezes it from the inserted column's own type and hands it to the op
+	// it produces. That used to be two independent derivations — the insert
+	// side hashed raw bytes while the probe side hashed the join's canonical
+	// [null-flag][value] key, and the probe's int-vs-bytes dispatch came from
+	// a THIRD reading, of the collector's parquet schema. For any bytes-backed
+	// key they never agreed, so the filter rejected every build row and the
+	// join answered on an empty build side (#543).
+	bb := exec.NewBloomBuilder(rb.collector.Rows())
+	if bb != nil {
 		if err := rb.collector.Iterate(func(b *batch.RecordBatch) error {
-			exec.BloomAddBatch(bloom, bloomMask, b, rb.probeKey)
-			return nil
+			return bb.Add(b, rb.probeKey)
 		}); err != nil {
 			rb.collector.Release()
 			close(rb.buildStart)
@@ -6545,21 +6570,31 @@ func (rb *reverseBloomBridge) Init(ctx context.Context) error {
 	}
 
 	// Phase 3: Inject bloom filter into build-side pipeline.
-	if bloom != nil {
-		useIntKey := false
-		for _, col := range rb.collector.Schema() {
-			if col.Name == rb.probeKey {
-				useIntKey = col.Type == parquet.TypeInt32 || col.Type == parquet.TypeInt64 ||
-					col.Type == parquet.TypePort || col.Type == parquet.TypeProtocol ||
-					col.Type == parquet.TypeDate
-				break
+	//
+	// Two conditions before it goes in. The column has to have RESOLVED and
+	// carried keys: a bloom built from a column no batch had rejects
+	// everything, which for an anti-join invents unmatched probe rows. And
+	// the filter has to match keys taken from its own insert side — a bloom
+	// never has false negatives, so a miss there means the two sides encode
+	// differently and every rejection is a lost row. Neither failure is worth
+	// failing the query over: the join is correct without the filter, just
+	// slower. Both are worth saying out loud.
+	if bb != nil && bb.Resolved() && bb.Inserted() > 0 {
+		bloomOp := bb.FilterOp(rb.buildKey)
+		if err := bloomOp.SelfCheck(); err != nil {
+			exec.BloomSelfCheckFailures.Add(1)
+			slog.Error("reverse bloom rejects its own probe keys — filter NOT installed",
+				"probe_key", rb.probeKey, "build_key", rb.buildKey, "err", err)
+		} else {
+			*rb.rbBuildSource = &pipelineSource{
+				source: rb.buildSource,
+				ops:    []exec.UnaryOperator{bloomOp},
 			}
+			ReverseBloomsInstalled.Add(1)
 		}
-		bloomOp := exec.NewBloomFilterOp(bloom, bloomMask, []string{rb.buildKey}, useIntKey)
-		*rb.rbBuildSource = &pipelineSource{
-			source: rb.buildSource,
-			ops:    []exec.UnaryOperator{bloomOp},
-		}
+	} else if bb != nil && !bb.Resolved() {
+		slog.Warn("reverse bloom key column not found in the probe output — filter not installed",
+			"probe_key", rb.probeKey, "build_key", rb.buildKey)
 	}
 
 	// Phase 4: Signal build goroutine to start with the bloom-filtered scan.
