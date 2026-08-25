@@ -31,7 +31,10 @@ import (
 // runs it single-consumer.
 // SMJCounterpartAdoptions counts key resolutions that only succeeded by
 // adopting the OTHER side's key name (swapped pair) — the sort-merge analog
-// of KeyAssignmentRepairs. Tripwire: should stay 0 on planner-produced plans.
+// of KeyAssignmentRepairs, and carrying the same warning: on a self-join the
+// swap can be wrong rather than corrective. Should stay 0 on
+// planner-produced plans. NOTE: unlike KeyAssignmentRepairs, no suite
+// asserts that today — this is observability, not a gate.
 var SMJCounterpartAdoptions atomic.Int64
 
 type SortMergeJoin struct {

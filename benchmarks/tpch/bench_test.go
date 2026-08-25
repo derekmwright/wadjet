@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -166,9 +167,30 @@ var expectedRowsSF001 = map[int]int{
 
 // TestTPCHQueries runs each TPC-H query at SF0.01 to verify correctness.
 // Validates both execution success and expected row counts.
+//
+// It also holds exec.KeyAssignmentRepairs at zero across the whole suite.
+// That counter is the runtime safety net for a join whose probe/build key
+// pair the PLANNER assigned to the wrong sides: HashJoin.FixKeyAssignment
+// swaps them after the build, on the premise that a left key present in the
+// build schema must be misassigned. The premise is false whenever the bare
+// name is on BOTH sides, which is every self-join — and the swap then leaves
+// the probe resolving a name only the build has, so the join matches nothing
+// and the query answers zero rows with no error (#516, #526). A repair
+// firing on a planner-produced plan is therefore a defect signal, not a
+// rescue, and the counter's own doc comment claimed this suite asserted it
+// long before anything did.
 func TestTPCHQueries(t *testing.T) {
 	db := setupTPCH(t, SF001)
 	ctx := context.Background()
+	repairsBefore := exec.KeyAssignmentRepairs.Load()
+	t.Cleanup(func() {
+		if d := exec.KeyAssignmentRepairs.Load() - repairsBefore; d != 0 {
+			t.Errorf("HashJoin.FixKeyAssignment fired %d time(s) over the TPC-H corpus. "+
+				"On a planner-produced plan that is a plan-time key-assignment defect, and the "+
+				"repair's premise (a left key found in the build schema must be misassigned) is "+
+				"FALSE on a self-join — where it produces a wrong answer rather than rescuing one.", d)
+		}
+	})
 
 	// Get sorted query numbers
 	queryNums := make([]int, 0, len(TPCHQueries))

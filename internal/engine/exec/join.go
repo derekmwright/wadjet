@@ -1905,10 +1905,21 @@ func (h *HashJoin) BuildRows() int64 {
 
 // KeyAssignmentRepairs counts runtime probe/build key swaps performed by
 // FixKeyAssignment after a build completed — cases where PLAN-TIME side
-// assignment (assignJoinKeySides) got a pair wrong and the runtime safety
-// net rescued it. Tripwire observability: the TPC-H suites assert this
-// stays 0; a nonzero count means a plan shape leaked through the planner's
-// ownership resolution (rebuild cost + a hazard for partitioned builds).
+// assignment (assignJoinKeySides) got a pair wrong.
+//
+// "Rescued" is only sometimes the word. The repair's premise is that a left
+// key present in the build schema must be misassigned, and that premise is
+// FALSE whenever the bare name is on BOTH sides — every self-join. There the
+// swap leaves the probe resolving a name only the build has, the join matches
+// nothing, and the query answers zero rows with no error: it was the second
+// half of #516 and it is the mechanism of #526. So a firing on a
+// planner-produced plan is a defect signal, not a save.
+//
+// Asserted to stay 0 by benchmarks/tpch.TestTPCHQueries over the whole
+// 22-query corpus and by physical.TestBushyBuild_* over the bushy-build
+// shapes. A nonzero count means a plan shape leaked through the planner's
+// ownership resolution (rebuild cost, a hazard for partitioned builds, and
+// possibly a wrong answer).
 var KeyAssignmentRepairs atomic.Int64
 
 // FixKeyAssignment corrects misassigned join keys after the build phase.
