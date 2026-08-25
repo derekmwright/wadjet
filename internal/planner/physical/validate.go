@@ -3,7 +3,9 @@ package physical
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -530,17 +532,27 @@ func (b *binder) registerCTE(ctx context.Context, cte plansql.CTEDef) error {
 	return b.validateBlock(ctx, body, nil)
 }
 
-// checkUngrouped rejects a bare column in the SELECT list beside an aggregate
-// when the block has no GROUP BY at all — PostgreSQL's 42803 grouping_error
-// for the shape `SELECT n_name, COUNT(*) FROM nation` (#367). The check is
-// deliberately narrow: with a GROUP BY (or GROUPING SETS) present the legal
-// forms are richer (expressions over grouped columns, matching grouping
-// expressions), so those stay unchecked. A ref that does not certainly resolve
-// to one of this block's OWN sources is skipped too — it may be a correlated
-// outer reference (constant per invocation) or a niladic the parser reads as a
-// column — as is the whole check when any source is unenumerable.
+// checkUngrouped enforces PostgreSQL's grouping rule: in a GROUPED query,
+// every SELECT / HAVING / ORDER BY expression must be built from the grouped
+// expressions, aggregate calls and constants — a bare reference to anything
+// else has no defined value for the group and is 42803 grouping_error.
+//
+// A query is GROUPED when it has a GROUP BY, a GROUPING SETS, an aggregate in
+// the SELECT list, or a HAVING clause (the last two collapse the table into
+// one group, which is #367's `SELECT n_name, COUNT(*) FROM nation`).
+//
+// PostgreSQL relaxes the rule for a column functionally dependent on a grouped
+// PRIMARY KEY. Wadjet has no primary keys, so the relaxation has nothing to
+// apply to and every such reference is refused.
+//
+// The check keeps the binder's stance that a false positive breaks a working
+// query while a false negative merely lets one through: it is skipped whenever
+// a source is unenumerable, and a reference that does not certainly resolve to
+// one of this block's OWN sources is skipped too — it may be a correlated
+// outer reference (constant per group) or a niladic the parser reads as a
+// column.
 func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
-	if from == nil || from.open || len(info.GroupBy) > 0 || len(info.GroupingSets) > 0 {
+	if from == nil || from.open {
 		return nil
 	}
 	hasAgg := false
@@ -550,31 +562,251 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 			break
 		}
 	}
-	if !hasAgg {
+	grouped := len(info.GroupBy) > 0 || len(info.GroupingSets) > 0 || hasAgg || info.HavingExpr != nil
+	if !grouped {
 		return nil
 	}
+
+	g := &groupCheck{from: from, keys: map[string]bool{}, cols: map[string]bool{}}
+	g.addGroupTerms(info)
+
+	// SELECT list. An output alias is NOT visible here — a select item cannot
+	// reference another item's alias — so this arm runs against the group
+	// terms alone.
 	for i := range info.Columns {
 		col := info.Columns[i]
-		if col.IsAgg || col.IsWindow || col.Star {
+		if col.Star || col.IsWindow || col.ASTExpr == nil {
 			continue
 		}
-		var refs []*plansql.ColRef
-		walkExpr(col.ASTExpr, &refs, nil)
-		for _, r := range refs {
-			c := strings.ToLower(r.Column)
-			if pgSystemColumns[c] {
-				continue
-			}
-			if r.Table != "" {
-				q := strings.ToLower(r.Table)
-				if cols, ok := from.quals[q]; !ok || !cols[c] {
-					continue
-				}
-			} else if !from.cols[c] {
-				continue
-			}
-			return sqlerr.New("42803", "column %q must appear in the GROUP BY clause or be used in an aggregate function", r.String())
+		if err := g.check(col.ASTExpr); err != nil {
+			return err
 		}
+	}
+
+	// HAVING and ORDER BY additionally see the SELECT list's output names.
+	// Whatever each of those names stands for was just checked on its own, so
+	// admitting the name here cannot admit an expression the SELECT arm would
+	// have refused.
+	for i := range info.Columns {
+		if a := strings.ToLower(strings.TrimSpace(info.Columns[i].Alias)); a != "" {
+			g.cols[a] = true
+			g.keys[a] = true
+		}
+	}
+	if err := g.check(info.HavingExpr); err != nil {
+		return err
+	}
+	for _, ob := range info.OrderBy {
+		expr, err := plansql.ParseExpression(ob.Column)
+		if err != nil {
+			continue
+		}
+		if err := g.check(expr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// groupCheck holds the grouped expressions of one query block.
+//
+// keys holds the rendered text of every grouped expression, so a SELECT item
+// that repeats a grouping expression verbatim (`GROUP BY substr(c_phone,1,2)`)
+// matches as a whole and its columns are never examined. cols holds the bare
+// names of the grouped expressions that are plain column references, matched
+// qualifier-insensitively: `GROUP BY a` licenses `t.a`, and the alternative —
+// refusing it — would break working queries for a spelling difference.
+type groupCheck struct {
+	from *colScope
+	keys map[string]bool
+	cols map[string]bool
+}
+
+// addGroupTerms records this block's grouped expressions. A term written as a
+// positional reference (`GROUP BY 1`) or as a SELECT output alias resolves to
+// the select item it names, and that item's own expression is grouped too.
+func (g *groupCheck) addGroupTerms(info *plansql.SelectInfo) {
+	add := func(n plansql.Node) {
+		if n == nil {
+			return
+		}
+		g.keys[groupTermKey(n)] = true
+		if ref, ok := unparen(n).(*plansql.ColRef); ok {
+			g.cols[strings.ToLower(ref.Column)] = true
+		}
+	}
+	for _, gb := range info.GroupBy {
+		g.keys[strings.ToLower(strings.TrimSpace(gb))] = true
+	}
+	for i := range info.GroupByExprs {
+		gbExpr := info.GroupByExprs[i]
+		if gbExpr == nil {
+			continue
+		}
+		add(gbExpr)
+		if item := selectItemForGroupTerm(info, gbExpr); item != nil {
+			add(item.ASTExpr)
+			if a := strings.ToLower(strings.TrimSpace(item.Alias)); a != "" {
+				g.keys[a] = true
+				g.cols[a] = true
+			}
+		}
+	}
+	// GroupByExprs is documented as parallel to GroupBy but is not always
+	// populated; fall back to parsing the raw terms so an ordinal or alias
+	// still resolves.
+	if len(info.GroupByExprs) != len(info.GroupBy) {
+		for _, gb := range info.GroupBy {
+			parsed, err := plansql.ParseExpression(gb)
+			if err != nil {
+				continue
+			}
+			add(parsed)
+			if item := selectItemForGroupTerm(info, parsed); item != nil {
+				add(item.ASTExpr)
+				if a := strings.ToLower(strings.TrimSpace(item.Alias)); a != "" {
+					g.keys[a] = true
+					g.cols[a] = true
+				}
+			}
+		}
+	}
+}
+
+// selectItemForGroupTerm resolves a GROUP BY term that names a select item
+// rather than an input expression: a 1-based ordinal, or an output alias.
+func selectItemForGroupTerm(info *plansql.SelectInfo, term plansql.Node) *plansql.SelectColumn {
+	switch n := unparen(term).(type) {
+	case *plansql.Lit:
+		idx, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(n.Value)))
+		if err != nil || idx < 1 || idx > len(info.Columns) {
+			return nil
+		}
+		return &info.Columns[idx-1]
+	case *plansql.ColRef:
+		if n.Table != "" {
+			return nil
+		}
+		name := strings.ToLower(n.Column)
+		for i := range info.Columns {
+			if strings.ToLower(strings.TrimSpace(info.Columns[i].Alias)) == name {
+				return &info.Columns[i]
+			}
+		}
+	}
+	return nil
+}
+
+// check walks one expression and returns the 42803 for the first reference
+// that is neither grouped nor inside an aggregate.
+func (g *groupCheck) check(node plansql.Node) error {
+	if node == nil {
+		return nil
+	}
+	if g.keys[groupTermKey(node)] {
+		return nil
+	}
+	switch n := node.(type) {
+	case *plansql.ColRef:
+		if !g.owns(n) || g.cols[strings.ToLower(n.Column)] {
+			return nil
+		}
+		return sqlerr.New("42803", "column %q must appear in the GROUP BY clause or be used in an aggregate function", n.String())
+	case *plansql.FuncCallNode:
+		// An aggregate is the licence to read ungrouped columns; its
+		// arguments are consumed, not published.
+		if plansql.IsAggregate(n.Name) {
+			return nil
+		}
+	case *plansql.SubqueryNode, *plansql.ExistsNode, *plansql.WindowFuncNode:
+		// Their own scope, validated on their own terms.
+		return nil
+	}
+	for _, child := range exprOperands(node) {
+		if err := g.check(child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// owns reports whether ref certainly names a column of one of this block's own
+// FROM sources — the only references this check judges.
+func (g *groupCheck) owns(ref *plansql.ColRef) bool {
+	c := strings.ToLower(ref.Column)
+	if pgSystemColumns[c] {
+		return false
+	}
+	if ref.Table != "" {
+		cols, ok := g.from.quals[strings.ToLower(ref.Table)]
+		return ok && cols[c]
+	}
+	return g.from.cols[c]
+}
+
+// groupTermKey renders an expression for comparison against the grouped terms.
+// Parentheses are not part of the expression, so `(a+1)` and `a+1` are one key.
+func groupTermKey(node plansql.Node) string {
+	if node == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(unparen(node).String()))
+}
+
+func unparen(node plansql.Node) plansql.Node {
+	for {
+		p, ok := node.(*plansql.ParenNode)
+		if !ok || p.Inner == nil {
+			return node
+		}
+		node = p.Inner
+	}
+}
+
+// exprOperands returns a node's direct sub-expressions. It mirrors walkExpr's
+// case list, and like walkExpr it does NOT descend into a subquery. A node type
+// it does not know contributes no children, which makes the grouping check more
+// permissive, never less.
+func exprOperands(node plansql.Node) []plansql.Node {
+	switch n := node.(type) {
+	case *plansql.BinaryOp:
+		return []plansql.Node{n.Left, n.Right}
+	case *plansql.UnaryOp:
+		return []plansql.Node{n.Inner}
+	case *plansql.CmpExpr:
+		return []plansql.Node{n.Left, n.Right}
+	case *plansql.AndNode:
+		return []plansql.Node{n.Left, n.Right}
+	case *plansql.OrNode:
+		return []plansql.Node{n.Left, n.Right}
+	case *plansql.NotNode:
+		return []plansql.Node{n.Inner}
+	case *plansql.ParenNode:
+		return []plansql.Node{n.Inner}
+	case *plansql.FuncCallNode:
+		return n.Args
+	case *plansql.CastNode:
+		return []plansql.Node{n.Inner}
+	case *plansql.InExpr:
+		return append([]plansql.Node{n.Left}, n.Values...)
+	case *plansql.BetweenExpr:
+		return []plansql.Node{n.Left, n.Low, n.High}
+	case *plansql.LikeExpr:
+		return []plansql.Node{n.Left, n.Pattern}
+	case *plansql.IsExpr:
+		return []plansql.Node{n.Left}
+	case *plansql.CaseNode:
+		out := []plansql.Node{n.Subject}
+		for _, w := range n.Whens {
+			out = append(out, w.Cond, w.Result)
+		}
+		return append(out, n.Else)
+	case *plansql.ArrayLitNode:
+		return n.Elements
+	case *plansql.TupleNode:
+		return n.Elements
+	case *plansql.AnyAllExpr:
+		return append([]plansql.Node{n.Left}, n.Values...)
 	}
 	return nil
 }

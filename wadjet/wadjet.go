@@ -329,17 +329,24 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 		return nil, fmt.Errorf("extracting SELECT: %w", err)
 	}
 
-	logicalPlan, err := logical.BuildFromSelect(selectInfo)
-	if err != nil {
-		return nil, fmt.Errorf("building logical plan: %w", err)
-	}
-
 	planner := db.newPlanner()
 
 	// Reject references to columns that resolve to no source (plan-time name
 	// binding) before annotation/optimization rewrite the plan.
+	//
+	// This runs BEFORE the logical build, as the coordinator's entry point
+	// already does: the builder refuses some of the same statements on its
+	// own — an ORDER BY term a GROUP BY does not carry is one — and does it
+	// with a message that carries no SQLSTATE, so building first meant the
+	// two entry points answered the same statement with different errors
+	// (#590).
 	if err := planner.ValidateColumns(ctx, selectInfo); err != nil {
 		return nil, err
+	}
+
+	logicalPlan, err := logical.BuildFromSelect(selectInfo)
+	if err != nil {
+		return nil, fmt.Errorf("building logical plan: %w", err)
 	}
 
 	// Annotate scan columns before ABAC enforcement so column policies can resolve
@@ -412,14 +419,16 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 		return nil, fmt.Errorf("extracting SELECT: %w", err)
 	}
 
+	planner := db.newPlanner()
+	// Before the build, for the reason Query's own call site records: the
+	// builder's own refusals carry no SQLSTATE (#590).
+	if err := planner.ValidateColumns(ctx, selectInfo); err != nil {
+		return nil, err
+	}
+
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
 	if err != nil {
 		return nil, fmt.Errorf("building logical plan: %w", err)
-	}
-
-	planner := db.newPlanner()
-	if err := planner.ValidateColumns(ctx, selectInfo); err != nil {
-		return nil, err
 	}
 	planner.AnnotateScanColumns(ctx, logicalPlan)
 
