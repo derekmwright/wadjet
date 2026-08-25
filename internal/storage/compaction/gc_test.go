@@ -476,6 +476,49 @@ func TestBackgroundSweep_ReclaimDroppedTablesDefaultsOff(t *testing.T) {
 	}
 }
 
+// TestReclaimNotWiredWhenBackgroundCompactionIsDisabled is a review
+// regression for the wiring gate itself: NewBackgroundCompactor used to
+// declare the drop-reclaim flusher on ReclaimDroppedTables alone, so a
+// compactor built with Enabled:false — whose Start never launches the
+// sweep loop, and whose sweep is never called on any timer — still left
+// DropTable recording every drop's files into pendingDrops. Nothing was
+// ever going to consume that list, so it only grew toward
+// maxPendingDropPaths and evicted (leaked) instead of costing nothing,
+// which is the entire point of declaring the flusher lazily.
+func TestReclaimNotWiredWhenBackgroundCompactionIsDisabled(t *testing.T) {
+	cat, store := setupTestCatalog(t)
+	ctx := context.Background()
+	schema := testGCSchema()
+
+	// Constructed before the drop — the production order, and exactly
+	// what makes the flusher wire itself prematurely without the gate.
+	_ = NewBackgroundCompactor(cat, BackgroundConfig{
+		Enabled:              false,
+		Compaction:           DefaultConfig(),
+		DropGrace:            time.Nanosecond,
+		ReclaimDroppedTables: true,
+	}, nil)
+
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := "tables/events/chunk_0000.parquet"
+	rows := []map[string]any{{"id": int64(1), "name": "alice"}}
+	size := writeTestFile(t, store, "test-bucket", path, schema, rows)
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []catalog.FileEntry{
+		{Path: path, SizeBytes: size, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := cat.PendingDropCount(); n != 0 {
+		t.Errorf("DropTable recorded %d pending entries on a catalog whose compactor is disabled (Enabled:false); a sweep that never runs will never consume them", n)
+	}
+}
+
 // TestReviewRepro_DropThenReregisterSameFilesLosesThem is a permanent
 // #494 regression, promoted from the adversarial review's reproducer: the
 // documented re-registration workflow (#278 — harness / bench loaders /

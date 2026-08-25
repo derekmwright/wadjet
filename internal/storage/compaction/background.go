@@ -74,13 +74,23 @@ func NewBackgroundCompactor(cat *catalog.Catalog, cfg BackgroundConfig, logger *
 	if cfg.DropGrace == 0 {
 		cfg.DropGrace = catalog.DefaultDropTableGrace
 	}
-	if cfg.ReclaimDroppedTables {
+	if cfg.Enabled && cfg.ReclaimDroppedTables {
 		// Declare the flusher before anything can DROP through this
 		// catalog: DropTable records a pending entry only where something
 		// will consume it, so a catalog nobody sweeps never grows a list.
 		// Done at construction rather than in Start so the window between
 		// "the process is up" and "the sweep loop is running" is not a
 		// window in which drops go unrecorded.
+		//
+		// Gated on cfg.Enabled too: Start returns immediately when it is
+		// false and the sweep loop that would ever call
+		// FlushDroppedTableFiles never runs. Without this gate a
+		// Enabled:false, ReclaimDroppedTables:true compactor still wired
+		// the flusher, so every DROP through this *Catalog would record a
+		// pending entry that nothing will ever consume — accumulating
+		// toward maxPendingDropPaths and evicting (leaking) rather than
+		// costing nothing, which is the whole point of declaring the
+		// flusher lazily in the first place.
 		cat.EnableDropReclaim()
 	}
 	return &BackgroundCompactor{
