@@ -68,8 +68,11 @@ the sweep that calls it is opt-in.**
 1. **Live-manifest guard, re-observed per pending entry (load-bearing).**
    Before deleting anything, `FlushDroppedTableFiles` builds the set of
    every path referenced by *every* current table's manifest
-   (`ListTables` + `GetManifest`, only when there is something pending to
-   check) and skips any pending path that appears in it. That is what
+   (`ListTables` + `GetManifest`, and only when a pending entry is
+   actually past its grace — during the grace window there is something
+   pending but nothing due, and observing then costs a full catalog read
+   for a round that cannot delete anything) and skips any pending path
+   that appears in it. That is what
    makes both reproduced re-registration cases safe: a re-registered or
    re-discovered path is live in some table's manifest right now,
    regardless of which incarnation originally owned it.

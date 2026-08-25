@@ -600,3 +600,58 @@ func TestReclaimLogsTheRecreatedTableSkip(t *testing.T) {
 		}
 	}
 }
+
+// countingKV counts Get calls so a test can assert that a flush with
+// nothing due does not read the catalog at all.
+type countingKV struct {
+	MetaKV
+	gets int
+}
+
+func (c *countingKV) Get(key string) ([]byte, uint64, error) {
+	c.gets++
+	return c.MetaKV.Get(key)
+}
+
+// TestReclaimReadsNothingWhenNothingIsDue keeps the guard's cost
+// proportional to its work. A DROP leaves an entry pending for a 30-minute
+// grace against a 5-minute sweep — six rounds that cannot delete anything —
+// and observing the catalog in those rounds is a ListTables plus a
+// GetManifest per table for no possible outcome.
+func TestReclaimReadsNothingWhenNothingIsDue(t *testing.T) {
+	store := objstore.NewMemStore()
+	kv := &countingKV{MetaKV: NewMemKV()}
+	cat := New(kv, store, "test-bucket")
+	ctx := context.Background()
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cat.EnableDropReclaim()
+	if err := cat.CreateTable(ctx, "events", testSchema(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
+		{Path: "tables/events/chunk_a.parquet", SizeBytes: 1, NumRows: 1, CreatedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.DropTable(ctx, "events"); err != nil {
+		t.Fatal(err)
+	}
+
+	before := kv.gets
+	if n := cat.FlushDroppedTableFiles(ctx, time.Hour); n != 0 {
+		t.Fatalf("nothing is due, got %d deleted", n)
+	}
+	if got := kv.gets - before; got != 0 {
+		t.Errorf("a flush with nothing due read the catalog %d times, want 0", got)
+	}
+
+	// And the entry is still pending, not silently dropped.
+	cat.dropMu.Lock()
+	pending := len(cat.pendingDrops)
+	cat.dropMu.Unlock()
+	if pending != 1 {
+		t.Errorf("pendingDrops = %d, want the not-yet-due entry still held", pending)
+	}
+}

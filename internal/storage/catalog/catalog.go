@@ -1343,7 +1343,8 @@ func (c *Catalog) liveCatalogState(ctx context.Context) (paths map[string]bool, 
 //     path. Nothing an operator staged and merely registered can reach
 //     this function, whatever shape its path takes.
 //  1. The live-manifest guard, RE-OBSERVED per pending entry immediately
-//     before that entry's deletes (liveCatalogState): a path referenced by
+//     before that entry's deletes (liveCatalogState, and only when
+//     something is actually DUE): a path referenced by
 //     ANY current table's manifest is never deleted, no matter how long
 //     its OLD incarnation has been gone. This is the load-bearing layer —
 //     it is what makes drop-then-re-register-the-same-files (#278's
@@ -1418,16 +1419,11 @@ func (c *Catalog) FlushDroppedTableFiles(ctx context.Context, grace time.Duratio
 		requeued     int
 	)
 
-	// First observation. Taken before anything is removed from
-	// pendingDrops, so an error here costs nothing but a round.
-	livePaths, liveNames, err := c.liveCatalogState(ctx)
-	if err != nil {
-		// Can't prove any path is safe to delete this round: try again
-		// next sweep instead of deleting blind.
-		log.Warn("reclaim round skipped: cannot read the live catalog state", "error", err)
-		return 0
-	}
-
+	// What is DUE decides whether this round reads the catalog at all.
+	// During the grace window after a DROP — six sweeps at the 5m/30m
+	// defaults — there is something pending but nothing due, and observing
+	// the catalog then is a ListTables plus a GetManifest per table for a
+	// round that cannot delete anything.
 	cutoff := time.Now().Add(-grace)
 	c.dropMu.Lock()
 	var due, keep []pendingTableDrop
@@ -1443,6 +1439,22 @@ func (c *Catalog) FlushDroppedTableFiles(ctx context.Context, grace time.Duratio
 	c.pendingDrops = keep
 	c.pendingDropPaths = keptPaths
 	c.dropMu.Unlock()
+	if len(due) == 0 {
+		return 0
+	}
+
+	// First observation.
+	livePaths, liveNames, err := c.liveCatalogState(ctx)
+	if err != nil {
+		// Can't prove any path is safe to delete this round: put the due
+		// entries back and try again next sweep instead of deleting blind.
+		log.Warn("reclaim round skipped: cannot read the live catalog state",
+			"error", err, "entries_requeued", len(due))
+		for _, pd := range due {
+			c.requeuePendingDrop(pd)
+		}
+		return 0
+	}
 
 	// reborn collects table names that were absent from the FIRST
 	// observation and have appeared in a later one — a re-creation that
