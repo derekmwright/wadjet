@@ -110,15 +110,31 @@ the sweep that calls it is opt-in.**
    reclaimable (the drop → recreate → insert case, covered by a test).
 
    **This is a narrowing, not a closure, and the record should say so.**
-   `pendingDrops` is in-process and the re-observation is a read. A
-   re-registration performed by a *different* `*Catalog` instance — a
-   separate process, or standalone's pgwire `wadjet.DB` against the
-   compactor's catalog — that lands between an entry's re-observation and
-   its `Delete` is still invisible. Closing it would take a lease or a
-   catalog-side tombstone that a re-registering writer must clear, which
-   is a bigger design than this one. Layer 0 is the layer that does not
-   depend on timing at all, which is why the blast radius is bounded
-   there and not here.
+   `pendingDrops` is in-process, and the re-observation is a read; nothing
+   serializes it against a concurrent write. `dropMu` guards only
+   `pendingDrops` itself, not the delete loop's `Head`/`Delete` calls
+   against the store, so the residual is **not** scoped to a *different*
+   `*Catalog` instance — the first version of this record said that, and
+   it understated the exposure. Any writer not serialized with the delete
+   loop is invisible inside the window, including a second goroutine
+   calling `AddFiles` on this **same** `*Catalog` while the delete loop is
+   mid-entry: a reviewer's probe against one instance reproduced exactly
+   that, deleting a file `AddFiles` had just re-registered. The window is
+   one pending entry's **whole delete batch** — every `Head`+`Delete` pair
+   over that entry's `pd.paths`, not a single call — so a multi-file table
+   widens it. Closing it would take a lease or a catalog-side tombstone
+   that a registering writer must clear, which is a bigger design than
+   this one. Layer 0 is the layer that does not depend on timing at all,
+   which is why the blast radius is bounded there and not here.
+
+   Concretely, where this is reachable today: `cmd/wadjet`'s standalone
+   mode has no in-process caller that runs `AddFiles` against the same
+   `*Catalog` a `BackgroundCompactor` sweeps — its pgwire server opens its
+   own separate `wadjet.DB` — so the window is unreachable through that
+   binary as shipped. An embedder calling `db.Catalog().AddFiles` directly
+   alongside its own `compaction.NewBackgroundCompactor(db.Catalog(),
+   ...)` reaches it: that registration call is exactly the "second
+   goroutine on this same `*Catalog`" case above.
 2. **Table-prefix scoping (defense in depth, and a CONVENTION — not an
    impossibility).** A pending path is only ever a delete candidate if it
    falls under its own table's `partition.TablePrefix(name)` —
@@ -226,11 +242,14 @@ Every clause is load-bearing, and two qualifiers are not decoration:
 
 - *"At the moment it observes it"* is the TOCTOU residual. Observation and
   deletion are not atomic, and cannot be made so from inside one process:
-  `pendingDrops` is in-process while the catalog it consults is shared.
-  Re-observing per pending entry shrinks the window to one entry's delete
-  batch, and layer 0 makes what is inside that window bytes this engine
-  wrote — but the window is not zero. A re-registration by another
-  `*Catalog` instance landing inside it is still invisible.
+  `pendingDrops` is in-process while the catalog it consults is shared,
+  and nothing serializes the delete loop against a write to that catalog.
+  Re-observing per pending entry shrinks the window to one entry's whole
+  delete batch, and layer 0 makes what is inside that window bytes this
+  engine wrote — but the window is not zero. Any writer not serialized
+  with the delete loop can land inside it, including another goroutine on
+  this **same** `*Catalog` instance (see the decision section above for
+  which processes can actually reach that today).
 - *"was written by this engine"* is what the invariant leans on when
   timing gives out, which is why ownership, not the live-manifest guard,
   is the layer described first.

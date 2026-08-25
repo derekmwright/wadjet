@@ -1386,12 +1386,20 @@ func (c *Catalog) liveCatalogState(ctx context.Context) (paths map[string]bool, 
 // since something has legitimately written there since.
 //
 // RESIDUAL, stated plainly: pendingDrops is in-process, and the
-// re-observation is a read. A re-registration performed by a DIFFERENT
-// *Catalog instance (a separate process, or standalone's pgwire DB
-// against the compactor's catalog) that lands between this entry's
-// re-observation and its Delete call is still invisible. Layer 0 —
-// ownership — is the layer that does not depend on timing at all, which
-// is why it, not this one, is what bounds the blast radius. See
+// re-observation is a read; nothing serializes it against a write. dropMu
+// guards only pendingDrops itself, not the Head/Delete calls below, so
+// this is NOT scoped to a DIFFERENT *Catalog instance — a second
+// goroutine calling AddFiles on THIS SAME *Catalog while the delete loop
+// is mid-entry is just as invisible, and was reproduced directly against
+// one instance. The window is one pending entry's WHOLE delete batch
+// (every Head+Delete pair over that entry's paths), not a single call.
+// cmd/wadjet's standalone mode has no in-process AddFiles caller sharing
+// a *Catalog with its BackgroundCompactor (its pgwire server opens a
+// separate wadjet.DB), so this is unreachable through that binary today;
+// an embedder calling db.Catalog().AddFiles beside its own
+// BackgroundCompactor reaches it. Layer 0 — ownership — is the layer that
+// does not depend on timing at all, which is why it, not this one, is
+// what bounds the blast radius. See
 // docs/adr/0020-drop-table-reclaim-is-opt-in.md.
 //
 // Not called from within this package on any timer, and — unlike
