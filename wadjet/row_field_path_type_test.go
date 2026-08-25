@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -413,21 +414,22 @@ func TestRowFieldPathDeclaresTheFieldsTypeOnAnEmptyResult(t *testing.T) {
 	}
 }
 
-// TestRowFieldPathRefusesAMalformedNetworkLiteral is the error half of the
+// TestRowFieldPathRefusesAMalformedLiteral is the error half of the
 // same rule: a field path must REFUSE what its column refuses.
 //
-// `cidr_col = 'not-a-cidr'` raises 22P02 — the literal names no value the
+// `cidr_col = 'not-a-cidr'` and `dec_col = 'abc'` raise 22P02 — the literal names no value the
 // column can hold, so there is no comparison to make (#492). The field path
 // delegated to the row predicate without that check and answered ZERO ROWS,
 // which is a value answer to a question that has none, and the empty result
 // is indistinguishable from a genuine no-match.
-func TestRowFieldPathRefusesAMalformedNetworkLiteral(t *testing.T) {
+func TestRowFieldPathRefusesAMalformedLiteral(t *testing.T) {
 	db, ctx := rowFieldOpen(t)
 	for _, tc := range []struct{ field, lit string }{
 		{"f_cidr", "not-a-cidr"},
 		{"f_ipv4", "not-an-ip"},
 		{"f_ipv6", "aa:bb:cc:dd:ee:ff"},
 		{"f_mac", "10.0.0.1"},
+		{"f_dec", "abc"},
 	} {
 		t.Run(tc.field, func(t *testing.T) {
 			flat := fmt.Sprintf(`SELECT COUNT(*) AS n FROM rowfld WHERE %s = '%s'`, flatName(tc.field), tc.lit)
@@ -440,7 +442,15 @@ func TestRowFieldPathRefusesAMalformedNetworkLiteral(t *testing.T) {
 			if pathErr == nil {
 				t.Fatalf("%s answered rows; the same predicate on the column refuses it: %v", path, flatErr)
 			}
-			if pathErr.Error() != flatErr.Error() {
+			// SQLSTATE and the message the client reads, not the wrapping:
+			// the column's refusal is raised where the scan resolves its
+			// pushed filter and the field's where the operator does, so the
+			// two carry different context prefixes around the same error.
+			if got, want := sqlerr.StateOf(pathErr), sqlerr.StateOf(flatErr); got != want {
+				t.Errorf("SQLSTATE %s over the field path, %s over the column\n  column: %v\n  field:  %v",
+					got, want, flatErr, pathErr)
+			}
+			if !strings.HasSuffix(pathErr.Error(), flatErr.Error()) {
 				t.Errorf("the two spellings refuse differently\n  column: %v\n  field:  %v", flatErr, pathErr)
 			}
 		})

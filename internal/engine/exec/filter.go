@@ -661,13 +661,18 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 				// row-at-a-time predicate.
 				if pi := in.ColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
 					// The literal is still checked against the FIELD's
-					// declared type first. Delegating without it is how
-					// `rw.cidr = 'not-a-cidr'` answered ZERO ROWS where the
-					// same predicate on a CIDR COLUMN raises 22P02: the row
-					// predicate compares text and finds no match, which is a
-					// value answer to a question that has none (#568).
+					// declared type first — every check the resolved-column
+					// path below makes. Delegating without them is how
+					// `rw.cidr = 'not-a-cidr'` and `rw.dec = 'abc'` answered
+					// ZERO ROWS where the same predicate on a CIDR or DECIMAL
+					// COLUMN raises 22P02: the row predicate compares text
+					// and finds no match, which is a value answer to a
+					// question that has none (#568).
 					if ft, ok := rowFieldType(in.Columns[pi], parts[1]); ok {
 						if err := networkConstError(ft, f.Value); err != nil {
+							return nil, err
+						}
+						if err := decimalConstError(ft, f.Value); err != nil {
 							return nil, err
 						}
 					}
