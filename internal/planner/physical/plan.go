@@ -8999,11 +8999,12 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 
 		if len(resultRows) > 0 {
 			// Schema() instead of Batches()[0].Schema — ToRows above
-			// released the sinks' batches as it boxed them.
-			schema := leftSink.Schema()
-			if schema == nil {
-				schema = rightSink.Schema()
-			}
+			// released the sinks' batches as it boxed them, and the arms'
+			// two schemas UNIFIED rather than the first one alone: the rows
+			// are boxed as text at each arm's own DECIMAL scale, and
+			// FromRows re-reads that text at the schema's scale, so the
+			// first arm's scale truncated the second arm's values (#532).
+			schema := unifySetOpSchemas(leftSink.Schema(), rightSink.Schema())
 			if schema != nil {
 				u.batches = []*batch.RecordBatch{batch.FromRows(schema, resultRows)}
 			}
