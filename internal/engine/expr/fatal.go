@@ -39,6 +39,19 @@ func raiseInvalidTextRepresentation(destType, input string) {
 	panic(fatalEval{sqlerr.New("22P02", "invalid input syntax for type %s: %q", destType, input)})
 }
 
+// raiseNoLikeOperator aborts the query with SQLSTATE 42883,
+// PostgreSQL's undefined_function — the same code an unresolvable
+// function name raises (UnknownFuncError.SQLState) — for LIKE against a
+// container-shaped value (#522). PostgreSQL raises the identical code for
+// the same reason against its own composite/array types (verified live:
+// `ARRAY[1,2,3] LIKE 'x'` answers "operator does not exist: integer[] ~~
+// unknown"): there is no `~~` operator for that type, not a value that
+// fails to parse. kind names the closest PostgreSQL type
+// (containerLikeKind resolves it).
+func raiseNoLikeOperator(kind string) {
+	panic(fatalEval{sqlerr.New("42883", "operator does not exist: %s ~~ unknown", kind)})
+}
+
 // InvalidLiteralError names a constant the compiler refused outright: a
 // literal that cannot be read as a value of the type its context demands.
 //

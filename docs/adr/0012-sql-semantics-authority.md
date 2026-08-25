@@ -760,14 +760,31 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     "types that box differently" is the same shape of gap #497 was filed
     for; the sweep is what makes the list checkable.
 
-    **Containers are rendered but not specified.** ARRAY, ROW, MAP and
-    VECTOR reach the default arm and match Go's own `fmt.Sprint` of the
-    boxed value (`[1 2 3]`, `map[k0:0]`). Both sites agree on it — it is the
-    same `fmt.Sprint(GetValue(i))` on each — so it is not a divergence, but
-    it is not a text form the engine produces anywhere else and it is not a
-    contract: it would change if the boxing did. Deciding a real container
-    text (or refusing LIKE for containers, which is the other honest answer)
-    is left open as #522, deliberately not blessed by silence here.
+    **Containers refuse, closed 2026-08-25 (#522).** ARRAY, ROW, MAP and
+    VECTOR used to reach the default arm and match Go's own `fmt.Sprint` of
+    the boxed value (`[1 2 3]`, `map[k0:0]`) — both sites agreed on it, so it
+    was not a two-path divergence, but it was not a text form the engine
+    produces anywhere else and not a contract: it would have changed if the
+    boxing did. Of the two honest answers the open question named — define a
+    real container text, or refuse the way PostgreSQL refuses its own
+    composite/array types — the decision is REFUSE, on rule 1 above: this is
+    not one of the seven types wadjet has its own reason to diverge from
+    PostgreSQL for (they have no PostgreSQL equivalent at all), it is an
+    ordinary composite/array value, and PostgreSQL's answer for `LIKE`
+    against one is unambiguous (verified live: `ARRAY[1,2,3] LIKE '1'` and a
+    composite-typed value both raise "operator does not exist: <type> ~~
+    unknown", SQLSTATE 42883/undefined_function). Inventing a text form
+    wadjet has never committed to anywhere else would be manufacturing a
+    contract this ADR's own rules argue against creating casually.
+    `kernel.ResolveLikeFilterKernel` returns nil for the four container
+    types (`exec.LikeFilter` turns that into the 42883, the same shape
+    `decimalConstError`/`networkConstError` already use for a different type
+    family) and `expr.Like.EvalBoolNull` raises the same error from the row
+    path (`containerLikeKind`/`raiseNoLikeOperator`) — both verified against
+    live PostgreSQL 17, and `wadjet.TestLikeAnswersTheSameAtBothSites` (no
+    longer skipping non-flat columns) and
+    `wadjet.TestLikeAgainstContainerRefusesWithPostgresErrorCode` pin the
+    SQLSTATE at both sites.
 
 12. **A set operation's result type is the COMMON type of its arms, and every
     arm is MOVED into it — never reinterpreted.** (Added 2026-08-25, #533.)
@@ -962,6 +979,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   `internal/engine/exec/aggregate.go` (`appendColumnValue`),
   `internal/engine/exec/partitioned_agg.go` (`legacyCompositeHash`),
   `internal/worker/partitioned_shuffle_sink.go`
+- #522 (LIKE against a container column matched Go's own `fmt.Sprint` of the
+  boxed value, an unspecified text form — item 11's own open question,
+  settled as a refusal, closed) — `internal/engine/exec/kernel/compare.go`
+  (`ResolveLikeFilterKernel`), `internal/engine/exec/filter.go`
+  (`likeConstError`), `internal/engine/expr/expr.go` (`containerLikeKind`),
+  `internal/engine/expr/fatal.go` (`raiseNoLikeOperator`)
 - #444 (boxed ROW comparator ordered fields by name, not declared position),
   #446 (VECTOR/ARRAY(FLOAT) comparators not transitive under NaN) — the work
   item 8 above records the settled position for

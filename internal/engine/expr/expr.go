@@ -1803,18 +1803,58 @@ func (e *Like) EvalBool(b *batch.RecordBatch, row int) bool {
 }
 
 // EvalBoolNull: LIKE with NULL on either side is UNKNOWN, and NOT LIKE
-// stays UNKNOWN with it (#370).
+// stays UNKNOWN with it (#370). A container-shaped operand is a query ERROR
+// (#522) rather than a value, matched or not — see containerLikeKind.
 func (e *Like) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	v := e.Expr.Eval(b, row)
 	p := e.Pattern.Eval(b, row)
 	if v == nil || p == nil {
 		return false, true
 	}
+	if kind, ok := containerLikeKind(e.Expr, v); ok {
+		raiseNoLikeOperator(kind)
+	}
 	result := matchLike(toString(boxedTextOperand(b, row, e.Expr, v)), toString(p))
 	if e.Not {
 		return !result, false
 	}
 	return result, false
+}
+
+// containerLikeKind reports whether v is a container-shaped LIKE operand and
+// names its PostgreSQL-ish kind, for raiseNoLikeOperator (#522: PostgreSQL
+// has no `~~` operator for any composite or array type, and wadjet has never
+// committed to a text form for one either — kernel.ResolveLikeFilterKernel
+// makes the matching refusal on the WHERE-clause kernel path).
+//
+// A bare column reference resolves exactly, from its declared type. Every
+// other operand shape (a nested expression, a literal) falls back to the
+// boxed value's Go shape: []any is ARRAY (or MAP, which boxes as a list of
+// entry ROWs the same way — GetValue's TypeArray/TypeMap case — so the
+// fallback cannot tell them apart and names the more common of the two),
+// map[string]any is ROW, and []float32 is VECTOR.
+func containerLikeKind(operand Expr, v any) (string, bool) {
+	if cr, ok := operand.(*ColRef); ok && cr.structField == "" {
+		switch cr.typ {
+		case batch.TypeArray:
+			return "array", true
+		case batch.TypeMap:
+			return "map", true
+		case batch.TypeRow:
+			return "record", true
+		case batch.TypeVector:
+			return "vector", true
+		}
+	}
+	switch v.(type) {
+	case []any:
+		return "array", true
+	case map[string]any:
+		return "record", true
+	case []float32:
+		return "vector", true
+	}
+	return "", false
 }
 
 // Case is a CASE WHEN ... THEN ... ELSE ... END expression.

@@ -3,6 +3,7 @@ package wadjet
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/oracle/typematrix"
@@ -188,7 +189,29 @@ func TestLikeAnswersTheSameAtBothSites(t *testing.T) {
 
 	for _, c := range typematrix.Columns() {
 		if !c.Flat {
-			continue // a container has no single text form to match
+			// A container has no `~~` operator in PostgreSQL, and #522 made
+			// wadjet refuse the same way at both sites (SQLSTATE 42883)
+			// instead of matching Go's own fmt.Sprint of the boxed value.
+			tbl := c.TableOf()
+			for _, pat := range patterns {
+				t.Run(c.Name+"_"+pat, func(t *testing.T) {
+					_, err := tmRun(ctx, db, fmt.Sprintf(
+						"SELECT COUNT(*) AS n FROM %s WHERE %s LIKE '%s'", tbl, c.Name, pat))
+					if err == nil {
+						t.Errorf("WHERE %s LIKE '%s' answered instead of refusing", c.Name, pat)
+					} else if !strings.Contains(err.Error(), "operator does not exist") {
+						t.Errorf("WHERE form: unexpected error: %v", err)
+					}
+					_, err = tmRun(ctx, db, fmt.Sprintf(
+						"SELECT %s LIKE '%s' AS m FROM %s", c.Name, pat, tbl))
+					if err == nil {
+						t.Errorf("SELECT %s LIKE '%s' answered instead of refusing", c.Name, pat)
+					} else if !strings.Contains(err.Error(), "operator does not exist") {
+						t.Errorf("projection form: unexpected error: %v", err)
+					}
+				})
+			}
+			continue
 		}
 		for _, pat := range patterns {
 			t.Run(c.Name+"_"+pat, func(t *testing.T) {

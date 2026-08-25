@@ -824,7 +824,13 @@ func (f *LikeFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.R
 		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
 	}
-	if f.colIdx < 0 || f.kern == nil {
+	if f.colIdx < 0 {
+		return nil, nil
+	}
+	if f.kern == nil {
+		if err := likeConstError(in.Columns[f.colIdx].Type); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	// Compact in-place when a prior selection exists (see KernelFilter.Execute).
@@ -838,6 +844,36 @@ func (f *LikeFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.R
 	}
 	in.Sel = sel
 	return in, nil
+}
+
+// likeConstError is decimalConstError/networkConstError's counterpart for
+// LIKE against a container column (#522): PostgreSQL has no `~~` operator
+// for any composite or array type, and kernel.ResolveLikeFilterKernel
+// returns nil for exactly the four container types to signal it. Every
+// other type still returns a kernel, so nil is unambiguous here.
+func likeConstError(typ batch.TypeID) error {
+	name, ok := containerLikeName(typ)
+	if !ok {
+		return nil
+	}
+	return sqlerr.New("42883", "operator does not exist: %s ~~ unknown", name)
+}
+
+// containerLikeName names typ the way PostgreSQL's own operator-does-not-
+// exist error would for the closest such type, for the four container
+// types LIKE refuses. ok is false for every other type.
+func containerLikeName(typ batch.TypeID) (string, bool) {
+	switch typ {
+	case batch.TypeArray:
+		return "array", true
+	case batch.TypeMap:
+		return "map", true
+	case batch.TypeRow:
+		return "record", true
+	case batch.TypeVector:
+		return "vector", true
+	}
+	return "", false
 }
 
 func (f *LikeFilter) Close() error { return nil }

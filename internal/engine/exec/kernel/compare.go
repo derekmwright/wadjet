@@ -1283,7 +1283,22 @@ func inFilterKeyed(set map[string]struct{}, keyOf func(string) (string, bool), n
 // likeTextRenderer resolves the row->text function once per column, the same
 // per-type-dispatch-once discipline ResolveFilterKernel already follows, so
 // the inner loop has no per-row type switch.
+//
+// nil for the four container types (#522): PostgreSQL has no `~~` operator
+// for any composite or array type (verified live: `ARRAY[1,2,3] LIKE 'x'`
+// raises "operator does not exist: integer[] ~~ unknown", SQLSTATE 42883),
+// and there is no established text form for a ROW/ARRAY/MAP/VECTOR value
+// this engine has committed to anywhere else — the old default arm's
+// `fmt.Sprint(Vector.GetValue(i))` (`[1 2 3]`, `map[k0:0]`) was never a
+// contract, just what happened to fall out of not refusing. The caller
+// (exec.LikeFilter) turns a nil kernel into that same 42883, the way
+// KernelFilter already turns decimalConstError/networkConstError into a
+// query error for a different type family.
 func ResolveLikeFilterKernel(typ batch.TypeID, pattern string, negate bool) FilterKernel {
+	switch typ {
+	case batch.TypeArray, batch.TypeRow, batch.TypeMap, batch.TypeVector:
+		return nil
+	}
 	matcher := compileLikePattern(pattern)
 	render := likeTextRenderer(typ)
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
@@ -1335,11 +1350,13 @@ func ResolveLikeFilterKernel(typ batch.TypeID, pattern string, negate bool) Filt
 // boxedTextOperand this file's LIKE kernel already agrees with — so the
 // claim covers every flat type again.
 //
-// The default arm covers every OTHER type (Int64/Float64/Bool/Decimal/Date/
-// the containers) with the row's own boxed value — fmt.Sprint on whatever
+// The default arm covers every remaining flat type (Int64/Float64/Bool/
+// Decimal/Date) with the row's own boxed value — fmt.Sprint on whatever
 // Vector.GetValue returns — never indexing BytesData on a column that does
 // not have it, which is the one invariant this function exists to restore
-// regardless of what LIKE against a given type is decided to MEAN.
+// regardless of what LIKE against a given type is decided to MEAN. The four
+// container types never reach here at all: ResolveLikeFilterKernel refuses
+// them before calling this function (#522).
 //
 // This rendering is the DEFINITION of what LIKE matches, so the
 // row-at-a-time path has to reproduce it rather than the other way round:
