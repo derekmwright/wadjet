@@ -64,10 +64,11 @@ type BloomFilterOp struct {
 	// cannot match its own keys LOUD instead of silent (#543): the type guard
 	// fires on the first batch, the sample replay at the moment the filter
 	// starts rejecting everything.
-	keyType    batch.TypeID
-	keyTypeSet bool
-	selfCheck  *batch.RecordBatch
-	verified   bool
+	keyType         batch.TypeID
+	keyTypeSet      bool
+	selfCheck       *batch.RecordBatch
+	selfChecked     bool
+	fullRejectNoted bool
 }
 
 func (op *BloomFilterOp) Init(_ context.Context) error { return nil }
@@ -243,30 +244,45 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 	op.totalPassed += len(sel)
 	op.batchesSeen++
 
-	// An entire batch rejected is the first observable symptom of a bloom
-	// whose two sides encode keys differently, and it is answerable on the
-	// spot: ask the filter to match keys it was itself built from.
-	if len(sel) == 0 && !op.verified {
-		op.verifyOrDisengage()
-		if op.disabled {
+	// The self-check runs on the FIRST batch, unconditionally, and no
+	// rejection rate is allowed to gate it.
+	//
+	// A rate cannot be the trigger, because a broken filter does not reject
+	// everything: it rejects everything the bloom's own false positives do not
+	// wave through. At the design ~1% FPR over 100k STRING keys, a #543-shaped
+	// divergence rejects about 89% — comfortably between a 5% floor and any
+	// ceiling near 100%, so a rate rule of any shape misses it. And at
+	// DefaultBatchSize a fully rejected BATCH may never occur at all: 2048
+	// rows at 3% FPR pass ~60 rows, every time. (A test that zeroes the bloom
+	// bits does see 100% rejection, which is exactly why it is not sufficient
+	// evidence that a runtime rule works.)
+	//
+	// The check costs one pass over a bounded sample, once per operator, and
+	// it answers the only question that matters: can this filter match keys
+	// that were put INTO it.
+	if !op.selfChecked {
+		op.selfChecked = true
+		if err := op.SelfCheck(); err != nil {
+			BloomSelfCheckFailures.Add(1)
+			op.disabled = true
+			slog.Error("bloom filter cannot match its own build keys — disengaged; rows already rejected are LOST",
+				"columns", op.leftKeys, "rows_rejected", op.totalChecked-op.totalPassed, "err", err)
 			return in, nil // unfiltered: this batch's rejections were not trustworthy
 		}
 	}
 
+	op.noteFullRejection(len(sel))
+
 	if op.batchesSeen >= bloomAdaptiveBatches && op.totalChecked > 0 {
 		rejected := op.totalChecked - op.totalPassed
-		switch {
-		case rejected*20 < op.totalChecked:
+		if rejected*20 < op.totalChecked {
 			// <5% rejection: the hash plus two random reads per row cost
-			// more than the probe lookups they save.
+			// more than the probe lookups they save. NOTE this rule now sees
+			// fully-rejected batches too (they used to return before the
+			// accounting), which is a behaviour change for the FORWARD bloom
+			// as well: a filter that rejects a lot no longer looks, to this
+			// rule, like a filter that was never asked.
 			op.disabled = true
-		case rejected*1000 >= op.totalChecked*999 && !op.verified:
-			// >=99.9%. The rate alone cannot tell a disjoint key set from a
-			// broken filter — the self-check can.
-			op.verifyOrDisengage()
-			if op.disabled {
-				return in, nil
-			}
 		}
 	}
 
@@ -279,15 +295,38 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 	return in, nil
 }
 
-// keyTypesAgree reports whether the column this op just resolved encodes its
-// keys the same way the column the bloom was built from does. It does not
-// when a join puts differently typed columns on the two sides: the integer
-// fast path is width-agnostic (every arm widens to int64), but nothing else
-// is — a STRING column read through the integer path indexes Int64Data that a
-// string vector does not have, and a 4-byte FLOAT32 key never equals the
-// 8-byte FLOAT64 encoding of the same number. Disengaging costs a scan
-// filter; guessing costs rows.
+// keyTypesAgree reports whether the column this op just resolved can be read
+// the way this op intends to read it.
+//
+// Two claims are checked, and the first one holds even for a bloom that
+// arrived over the WIRE with no record of what built it. UseIntKey says "index
+// Int32Data or Int64Data directly"; pointed at a column that has neither, that
+// is not a filter that answers wrongly, it is a panic. The DAG's dynamic
+// filters are integer-only by planner gate (columnIntType at every emit site)
+// and the worker's apply path hardcodes UseIntKey, so nothing between the two
+// re-checks the claim against the column that actually shows up — this is the
+// only place it is verified.
+//
+// The second claim needs a builder: the resolved column must encode its keys
+// the way the inserted column did. The integer fast path is width-agnostic
+// (every arm widens to int64), but nothing else is — a 4-byte FLOAT32 key
+// never equals the 8-byte FLOAT64 encoding of the same number.
+//
+// Disengaging costs a scan filter; guessing costs rows, or the process.
 func (op *BloomFilterOp) keyTypesAgree(in *batch.RecordBatch) bool {
+	if op.useIntKey || op.useDualIntKey {
+		for _, idx := range op.keyIdx {
+			if idx < 0 {
+				continue
+			}
+			if got := in.Columns[idx].Type; !bloomIntKey(got) {
+				BloomKeyTypeMismatches.Add(1)
+				slog.Error("bloom filter takes the integer fast path over a non-integer column — filter disengaged",
+					"columns", op.leftKeys, "resolved", got.String())
+				return false
+			}
+		}
+	}
 	if !op.keyTypeSet || len(op.keyIdx) != 1 || op.keyIdx[0] < 0 {
 		return true
 	}
@@ -301,28 +340,26 @@ func (op *BloomFilterOp) keyTypesAgree(in *batch.RecordBatch) bool {
 	return false
 }
 
-// verifyOrDisengage runs at the moment a filter is seen rejecting everything.
-// A bloom has false positives and never false negatives, so a key that was
-// inserted MUST probe true; if a sampled one does not, every row this filter
-// has rejected is a row the query silently lost, and the only safe move left
-// is to stop filtering and say so.
-func (op *BloomFilterOp) verifyOrDisengage() {
-	op.verified = true
-	BloomFullRejections.Add(1)
-	if op.selfCheck == nil {
-		// Nothing retained to check against: a bloom that arrived over the
-		// wire, or one built through NewBloomFilterOp. Log it anyway — an
-		// unremarked 100% rejection is exactly what let #543 cost a whole
-		// build scan's worth of rows without a single line of output.
-		slog.Warn("bloom filter rejected every row it has seen; no build-key sample to verify it against",
-			"columns", op.leftKeys, "rows_checked", op.totalChecked)
+// noteFullRejection records, once per operator, a filter observed rejecting
+// every row it has seen. It is observability, not a decision: by the time this
+// runs the self-check has already passed, so a total rejection means the two
+// key sets are genuinely disjoint — legal, and the reason the query is fast.
+//
+// It waits for at least one full batch. A three-row probe side rejecting all
+// three is not a signal about anything, and logging it made the line noise on
+// correct behaviour — which is how a warning stops being read.
+func (op *BloomFilterOp) noteFullRejection(passed int) {
+	if op.fullRejectNoted || passed != 0 || op.totalChecked < batch.DefaultBatchSize {
 		return
 	}
-	if err := op.SelfCheck(); err != nil {
-		BloomSelfCheckFailures.Add(1)
-		op.disabled = true
-		slog.Error("bloom filter cannot match its own build keys — disengaged; rows already rejected are LOST",
-			"columns", op.leftKeys, "rows_rejected", op.totalChecked-op.totalPassed, "err", err)
+	op.fullRejectNoted = true
+	BloomFullRejections.Add(1)
+	if op.selfCheck == nil {
+		// A bloom that arrived over the wire, or one built through
+		// NewBloomFilterOp: there is nothing to verify it against, so this
+		// carries no information beyond "disjoint or broken, cannot say".
+		slog.Debug("bloom filter rejected every row it has seen; no build-key sample to verify it against",
+			"columns", op.leftKeys, "rows_checked", op.totalChecked)
 		return
 	}
 	slog.Warn("bloom filter rejected every row it has seen and does match its own build keys — the key sets are disjoint",
@@ -347,7 +384,8 @@ func (op *BloomFilterOp) SelfCheck() error {
 		return nil
 	}
 	probe.selfCheck = nil
-	probe.verified = true // no recursion, and no second "rejected everything" line
+	probe.selfChecked = true     // no recursion into SelfCheck from Execute
+	probe.fullRejectNoted = true // and no log line from the sample itself
 	// Value copy: Execute writes Sel, and concurrent clones share the batch.
 	sample := *op.selfCheck
 	sample.Sel = nil
@@ -528,11 +566,17 @@ func bloomSet(bloom []uint64, mask, hash uint64) {
 	bloom[h2] |= 1 << ((hash >> 6) & 63)
 }
 
-// bloomSelfCheckRows is how many inserted values a builder retains for
-// SelfCheck, and bloomSelfCheckPerBatch how many it takes from any one batch,
-// so the sample spans the build rather than being the head of its first batch.
+// The retained self-check sample is bounded twice: a cap on the whole sample,
+// and a cap on what any ONE batch may contribute, so the sample spans the
+// build instead of being the head of its first batch.
+//
+// A build of fewer than eight batches therefore retains FEWER than the cap —
+// eight values from a single-batch build — and that is deliberate rather than
+// a shortfall. The check is a differential between two key encoders over one
+// column type: they agree for every value of the type or for none, so one
+// value already decides it. The sample is generous, not load-bearing.
 const (
-	bloomSelfCheckRows     = 64
+	bloomSelfCheckMaxRows  = 64
 	bloomSelfCheckPerBatch = 8
 )
 
@@ -612,7 +656,7 @@ func (bb *BloomBuilder) Add(b *batch.RecordBatch, keyCol string) error {
 			bloomSet(bb.bloom, bb.mask, bloomHashBytes(bb.keyBuf))
 		}
 		bb.inserted++
-		if bb.sample != nil && bb.sample.Len < bloomSelfCheckRows && taken < bloomSelfCheckPerBatch {
+		if bb.sample != nil && bb.sample.Len < bloomSelfCheckMaxRows && taken < bloomSelfCheckPerBatch {
 			bb.sample.AppendFrom(col, row)
 			taken++
 		}

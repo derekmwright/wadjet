@@ -4,18 +4,22 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync/atomic"
+
+	"github.com/derekmwright/wadjet/internal/optswitch"
 )
 
 // SemiAntiBuildFilter gates markSemiAntiBuildFilters. Kill switch
-// WADJET_SEMIANTI_BUILD_FILTER=0. Exported atomic.Bool (ExchangeSubsume
-// pattern) so tests can pin either arm.
-var SemiAntiBuildFilter atomic.Bool
-
-func init() {
-	SemiAntiBuildFilter.Store(os.Getenv("WADJET_SEMIANTI_BUILD_FILTER") != "0")
-}
+// WADJET_SEMIANTI_BUILD_FILTER=0.
+//
+// Registered with optswitch rather than kept as a bare atomic.Bool (the
+// ExchangeSubsume pattern it used to follow). The pass drops build-side rows
+// against a key set collected from another stage, so it can change the ANSWER
+// — which is the definition of a switch the invariance oracle must enumerate
+// (#287). An ad-hoc env var is invisible to optswitch.All(), so the oracle
+// never ran a single corpus query with this optimization off.
+var SemiAntiBuildFilter = optswitch.Register("semianti-build-filter", "WADJET_SEMIANTI_BUILD_FILTER",
+	"semi/anti build-side filtering: filter a shared build scan by the probe stage's key set")
 
 // SemiAntiBuildFiltersPlanned counts build-filter annotations the pass
 // produced, process-wide. Mechanism marker for A/B runs (the
@@ -81,7 +85,7 @@ const (
 // AntiJoin at decorrelation — decorrelateInSubqueries' documented punt —
 // so this pass introduces no additional NULL hazard.)
 func (p *Planner) markSemiAntiBuildFilters(ctx context.Context, stages []Stage) []Stage {
-	if !SemiAntiBuildFilter.Load() {
+	if !SemiAntiBuildFilter.On() {
 		return stages
 	}
 	byID := make(map[string]int, len(stages))
@@ -147,6 +151,25 @@ func (p *Planner) markSemiAntiBuildFilters(ctx context.Context, stages []Stage) 
 		s := &stages[sIdx]
 		if !semiAntiProbeSourceEligible(s, bscan) {
 			continue
+		}
+		// Both sides, not just the build side — the alignment
+		// applyDynamicFilters already had. The build column's type decides
+		// the KeyType the emit op hashes with; the EMIT runs over S's
+		// output, so it is S's column that DynamicFilterEmitOp indexes, and
+		// a cross-class pair (INT64 build, STRING probe) would hash two
+		// different things under one filter id.
+		//
+		// When S names no table — a join output, an aggregate — the catalog
+		// cannot answer and this check does not apply. That gap is why the
+		// emit op carries its own runtime guard (dynamicFilterIntKey in
+		// internal/engine/exec/dynamic_filter_emit.go): a planner check runs
+		// at a different time, over the catalog, on a column name that may
+		// not be the one that arrives.
+		if s.TableName != "" {
+			probeType, okProbe := p.columnIntType(ctx, s.TableName, probeKey)
+			if !okProbe || probeType != keyType {
+				continue
+			}
 		}
 		// Cycle guard: the stat-dep edge B ← S must not close a loop.
 		if stageReaches(s.ID, bscan.ID, stages, byID) ||

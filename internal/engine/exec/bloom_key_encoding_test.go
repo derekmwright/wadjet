@@ -350,3 +350,110 @@ func TestBloomBuilderResolvedReportsAMissingColumn(t *testing.T) {
 		t.Fatalf("inserted %d keys from a missing column", bb.Inserted())
 	}
 }
+
+// TestBloomSelfCheckCatchesTheRealDivergenceAtBatchSize is the shape the
+// review of the first fix pointed at, and it is the one that decides whether
+// the runtime guard is worth anything.
+//
+// A bloom whose two sides encode keys differently does NOT reject everything.
+// It rejects everything its own false positives do not wave through — at the
+// design ~1% target and a real key count, a few percent survive, every batch,
+// forever. So: no batch is ever fully rejected, and the rejection RATE sits in
+// the wide gap between the adaptive bypass's 5% floor and any ceiling near
+// 100%. Both of the rate-shaped triggers the first fix relied on are blind to
+// it. Only running the self-check unconditionally sees it.
+func TestBloomSelfCheckCatchesTheRealDivergenceAtBatchSize(t *testing.T) {
+	const n = 100_000
+	ctx := context.Background()
+	col := parquet.Column{Name: "k", Type: parquet.TypeString, Nullable: true}
+	key := func(i int) any { return fmt.Sprintf("key-%08d", i) }
+
+	// Build correctly, so the op carries a sample and the right encoding...
+	ins := bloomKeyBatch(t, col, "k", n, key)
+	bb := NewBloomBuilder(n)
+	if err := bb.Add(ins, "k"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	op := bb.FilterOp("k")
+
+	// ...then rewrite the bits the way the pre-fix insert side wrote them:
+	// the raw bytes, with neither the not-null flag nor the length prefix.
+	bits, mask := bb.Bloom()
+	for i := range bits {
+		bits[i] = 0
+	}
+	for row := 0; row < n; row++ {
+		bloomSet(bits, mask, bloomHashBytes(ins.Columns[0].BytesData.Value(row)))
+	}
+
+	// First: what the filter WOULD do with no self-check, over one production
+	// batch of keys that are all in the build set.
+	blind, _ := op.Clone().(*BloomFilterOp)
+	blind.selfCheck = nil
+	blind.selfChecked = true
+	probe := bloomKeyBatch(t, col, "k", batch.DefaultBatchSize, key)
+	out, err := blind.Execute(ctx, probe)
+	if err != nil {
+		t.Fatalf("execute (unguarded): %v", err)
+	}
+	survived := 0
+	if out != nil {
+		survived = out.ActiveLen()
+	}
+	if survived == 0 {
+		t.Fatalf("the divergence rejected the whole batch; this test is meant to cover the case where it does NOT")
+	}
+	rejected := batch.DefaultBatchSize - survived
+	pct := float64(rejected) * 100 / float64(batch.DefaultBatchSize)
+	if pct <= 5 || pct >= 99.9 {
+		t.Fatalf("rejection rate %.1f%% is outside the blind zone; the point of this test is that it is inside it", pct)
+	}
+	t.Logf("a #543-shaped divergence rejects %.1f%% of a %d-row batch — above the 5%% bypass floor, "+
+		"below a 99.9%% ceiling, and never a fully rejected batch", pct, batch.DefaultBatchSize)
+
+	// Now the real operator, with the guard.
+	before := BloomSelfCheckFailures.Load()
+	probe2 := bloomKeyBatch(t, col, "k", batch.DefaultBatchSize, key)
+	out2, err := op.Execute(ctx, probe2)
+	if err != nil {
+		t.Fatalf("execute (guarded): %v", err)
+	}
+	got := 0
+	if out2 != nil {
+		got = out2.ActiveLen()
+	}
+	if got != batch.DefaultBatchSize {
+		t.Fatalf("guarded filter kept %d of %d rows on its first batch; it must disengage and pass all of them",
+			got, batch.DefaultBatchSize)
+	}
+	if BloomSelfCheckFailures.Load() == before {
+		t.Fatal("the self-check did not fire on the first batch")
+	}
+}
+
+// TestBloomFilterRefusesIntFastPathOverANonIntColumn covers the claim that has
+// no builder behind it: a bloom that arrived over the WIRE carries UseIntKey
+// and no record of what built it. The integer path indexes Int64Data, so a
+// STRING column there is a panic, not a wrong answer — and the only thing
+// between the two is a planner gate that ran at a different time.
+func TestBloomFilterRefusesIntFastPathOverANonIntColumn(t *testing.T) {
+	bloom, mask := NewBloomSized(64)
+	for i := int64(0); i < 64; i++ {
+		bloomSet(bloom, mask, bloomHashInt(i))
+	}
+	op := NewBloomFilterOp(bloom, mask, []string{"k"}, true) // wire shape: no keyType
+
+	before := BloomKeyTypeMismatches.Load()
+	probe := bloomKeyBatch(t, parquet.Column{Name: "k", Type: parquet.TypeString, Nullable: true},
+		"k", 32, func(i int) any { return fmt.Sprintf("key-%04d", i) })
+	out, err := op.Execute(context.Background(), probe) // must not panic
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if out == nil || out.ActiveLen() != 32 {
+		t.Fatal("filter must disengage and pass every row when its fast path cannot read the column")
+	}
+	if BloomKeyTypeMismatches.Load() == before {
+		t.Fatal("the mismatch was not counted")
+	}
+}

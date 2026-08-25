@@ -201,3 +201,44 @@ func TestDynamicFilterEmitOpQualifiedSuffixResolution(t *testing.T) {
 		t.Fatal("ambiguous suffix must stay unresolved (wrong column would poison the bloom)")
 	}
 }
+
+// TestDynamicFilterEmitWithholdsANonIntegerKey covers the claim the DAG's
+// dynamic filters rest on and never verified. Every emit site gates on
+// Planner.columnIntType and the worker's apply path hardcodes UseIntKey, so
+// the op's arms — which index Int32Data and Int64Data — are protected by a
+// planner check that ran at a different time, over the catalog, on a column
+// name that may not be the one that arrives. Nothing asserted what happens
+// when it is wrong, and the answer was a panic.
+//
+// A non-integer column is now treated exactly like a column that was not
+// found: pass through, emit a row_count=0 partial, scan unfiltered.
+func TestDynamicFilterEmitWithholdsANonIntegerKey(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		col  parquet.Column
+		val  any
+	}{
+		{"string", parquet.Column{Name: "k", Type: parquet.TypeString, Nullable: true}, "abc"},
+		{"float64", parquet.Column{Name: "k", Type: parquet.TypeFloat64, Nullable: true}, 1.5},
+		{"bool", parquet.Column{Name: "k", Type: parquet.TypeBool, Nullable: true}, true},
+		{"decimal", parquet.Column{Name: "k", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true}, 1.25},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := batch.NewRecordBatch([]parquet.Column{tc.col}, 8)
+			for i := 0; i < 8; i++ {
+				b.Columns[0].SetValue(i, tc.val)
+			}
+			op := NewDynamicFilterEmitOp("df-nonint", "k", "int64", 1<<12)
+			out, err := op.Execute(context.Background(), b) // must not panic
+			if err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if out == nil || out.ActiveLen() != 8 {
+				t.Fatal("the op is a pass-through; withholding a filter must not drop rows")
+			}
+			if snap := op.Snapshot(); snap.RowCount != 0 {
+				t.Fatalf("withheld filter still reported %d rows", snap.RowCount)
+			}
+		})
+	}
+}

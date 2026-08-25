@@ -148,8 +148,8 @@ func TestSemiAntiBuildFilter_Q21Marks(t *testing.T) {
 }
 
 func TestSemiAntiBuildFilter_KillSwitch(t *testing.T) {
-	SemiAntiBuildFilter.Store(false)
-	defer SemiAntiBuildFilter.Store(true)
+	prev := SemiAntiBuildFilter.Set(false)
+	defer SemiAntiBuildFilter.Set(prev)
 	cat, ctx := setupTPCHCatalog(t)
 	stages := sqlToStagesShuffled(t, cat, ctx, q21SQL)
 	emitters, consumers := findSemiAntiMarks(stages)
@@ -169,45 +169,103 @@ func TestSemiAntiBuildFilter_Q18Unmarked(t *testing.T) {
 	}
 }
 
+// semiAntiFixture is a hand-built plan that the pass MARKS: a raw lineitem
+// scan behind a repartition exchange, feeding a semi and an anti build, both
+// probed from a filtered orders scan. Two builds satisfy the cost gate, the
+// probe source is a different table, and every consumer of the exchange is a
+// semi/anti join from that source.
+//
+// It marks, and that is the point. Every negative below is this fixture with
+// exactly one thing changed, so "did not mark" means the changed thing is what
+// stopped it. The negatives used to run against NewPlanner(nil): with no
+// catalog, columnIntType returns false and the pass bailed at the type gate
+// before reaching a single safety walk, so each of them would have passed with
+// the walk it names deleted outright.
+func semiAntiFixture(key string) []Stage {
+	return []Stage{
+		{ID: "scan-raw", Type: StageScan, TableName: "lineitem",
+			ScanFiles: []string{"f"}, Columns: []string{key, "l_suppkey"}},
+		{ID: "rp", Type: StageExchangeRepartition,
+			Exchange:     &ExchangeStage{Keys: []string{key}, Count: 4},
+			Dependencies: []string{"scan-raw"}},
+		{ID: "probe-src", Type: StageScan, TableName: "orders",
+			ScanFiles: []string{"f2"}, Columns: []string{"o_orderkey"},
+			FilterExprs: []string{"o_orderstatus = 'F'"}},
+		{ID: "semi", Type: StageHashJoin, JoinType: "semi",
+			JoinLeftKeys: []string{"o_orderkey"}, JoinRightKeys: []string{key},
+			LeftDepStage: "probe-src", RightDepStage: "rp",
+			Dependencies: []string{"probe-src", "rp"}},
+		{ID: "anti", Type: StageHashJoin, JoinType: "anti",
+			JoinLeftKeys: []string{"o_orderkey"}, JoinRightKeys: []string{key},
+			LeftDepStage: "probe-src", RightDepStage: "rp",
+			Dependencies: []string{"probe-src", "rp"}},
+	}
+}
+
+// TestSemiAntiBuildFilter_FixturePositive is the control the negatives below
+// are differentials against. Without it, a negative proves nothing: a fixture
+// that cannot mark for an unrelated reason reports every walk as working.
+func TestSemiAntiBuildFilter_FixturePositive(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	stages := semiAntiFixture("l_orderkey")
+	NewPlanner(cat).markSemiAntiBuildFilters(ctx, stages)
+	emitters, consumers := findSemiAntiMarks(stages)
+	if len(emitters) == 0 || len(consumers) == 0 {
+		t.Fatalf("control fixture did not mark (emitters=%d consumers=%d) — every negative below is vacuous",
+			len(emitters), len(consumers))
+	}
+}
+
 // Fixture-level negative coverage for the safety walks. A raw scan of the
 // same table as the build provides no reduction evidence; a consumer of
-// the shared exchange that is NOT a semi/anti join blocks marking.
+// the shared exchange that is NOT a semi/anti join blocks marking; and a
+// non-integer join key is refused because the whole path downstream —
+// DynamicFilterEmitOp's hash, the bloom's UseIntKey probe — indexes
+// Int32Data/Int64Data and a STRING column has neither.
 func TestSemiAntiBuildFilter_FixtureNegatives(t *testing.T) {
-	base := func() []Stage {
-		return []Stage{
-			{ID: "scan-raw", Type: StageScan, TableName: "lineitem",
-				ScanFiles: []string{"f"}, Columns: []string{"l_orderkey", "l_suppkey"}},
-			{ID: "rp", Type: StageExchangeRepartition,
-				Exchange:     &ExchangeStage{Keys: []string{"l_orderkey"}, Count: 4},
-				Dependencies: []string{"scan-raw"}},
-			{ID: "probe-src", Type: StageScan, TableName: "lineitem",
-				ScanFiles: []string{"f2"}, Columns: []string{"l_orderkey"}},
-			{ID: "semi", Type: StageHashJoin, JoinType: "semi",
-				JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"l_orderkey"},
-				LeftDepStage: "probe-src", RightDepStage: "rp",
-				Dependencies: []string{"probe-src", "rp"}},
-		}
-	}
+	cat, ctx := setupTPCHCatalog(t)
+
 	t.Run("same-table raw probe source", func(t *testing.T) {
-		stages := base()
-		p := NewPlanner(nil)
-		p.markSemiAntiBuildFilters(context.Background(), stages)
+		stages := semiAntiFixture("l_orderkey")
+		stages[2].TableName = "lineitem"
+		stages[2].Columns = []string{"l_orderkey"}
+		stages[2].FilterExprs = nil
+		stages[3].JoinLeftKeys = []string{"l_orderkey"}
+		stages[4].JoinLeftKeys = []string{"l_orderkey"}
+		NewPlanner(cat).markSemiAntiBuildFilters(ctx, stages)
 		if _, consumers := findSemiAntiMarks(stages); len(consumers) != 0 {
 			t.Fatal("same-table raw probe source must not mark")
 		}
 	})
 	t.Run("non-semi sibling consumer of exchange", func(t *testing.T) {
-		stages := base()
-		stages[2].TableName = "orders"
-		stages[2].FilterExprs = []string{"o_orderstatus = 'F'"}
+		stages := semiAntiFixture("l_orderkey")
 		stages = append(stages, Stage{
 			ID: "other", Type: "final_aggregate",
 			Dependencies: []string{"rp"},
 		})
-		p := NewPlanner(nil)
-		p.markSemiAntiBuildFilters(context.Background(), stages)
+		NewPlanner(cat).markSemiAntiBuildFilters(ctx, stages)
 		if _, consumers := findSemiAntiMarks(stages); len(consumers) != 0 {
 			t.Fatal("non-semi consumer of the shared exchange must block marking")
+		}
+	})
+	t.Run("non-integer join key", func(t *testing.T) {
+		// l_shipmode is a STRING. Nothing between this pass and the emit op
+		// converts it, and the emit op reads Int64Data — this gate is the
+		// planner half of that claim, dynamicFilterIntKey the runtime half.
+		stages := semiAntiFixture("l_shipmode")
+		NewPlanner(cat).markSemiAntiBuildFilters(ctx, stages)
+		if _, consumers := findSemiAntiMarks(stages); len(consumers) != 0 {
+			t.Fatal("a STRING join key must not be marked: the emit op indexes Int64Data")
+		}
+	})
+	t.Run("no catalog", func(t *testing.T) {
+		// The state the negatives above USED to run in. Asserted rather than
+		// stumbled into, so a future fixture that loses its catalog fails
+		// here instead of quietly making every other negative vacuous.
+		stages := semiAntiFixture("l_orderkey")
+		NewPlanner(nil).markSemiAntiBuildFilters(context.Background(), stages)
+		if _, consumers := findSemiAntiMarks(stages); len(consumers) != 0 {
+			t.Fatal("with no catalog the key class is unknowable and the pass must refuse")
 		}
 	})
 }

@@ -3285,10 +3285,39 @@ var ProbeSplitMinBytes int64 = 64 * 1024 * 1024
 
 // ReverseBloomThreshold and ReverseBloomInnerThreshold gate the reverse-bloom
 // optimization (see buildJoin). Declared as vars so regression tests can lower
-// them to fire on tiny SF0.x datasets, AND so they can be raised at runtime
-// to disable the optimization while we hunt the SF100 Q05 0-rows bug whose
-// triggering code path is somewhere in this optimization. The semi/anti
-// threshold is left at 10M because we have no evidence of bugs there yet.
+// them to fire on tiny SF0.x datasets — TestTPCHReverseBloomForcedSF001 does
+// exactly that — and so they can be raised at runtime to turn the optimization
+// off without rebuilding.
+//
+// These lines used to say the vars existed "to disable the optimization while
+// we hunt the SF100 Q05 0-rows bug whose triggering code path is somewhere in
+// this optimization", and that the semi/anti threshold stayed at 10M because
+// there was "no evidence of bugs there yet". Both halves are settled now, and
+// not in the direction the second one guessed.
+//
+// A 0-rows MECHANISM in this optimization is identified and fixed (#543):
+// reverseBloomBridge installed the bloom whether or not the key column had
+// been found in the probe output, so a probeKey that did not resolve produced
+// an EMPTY bloom that rejected every build row — a join answering over an
+// empty build side, which is 0 rows for an inner or semi join. Forcing both
+// thresholds to 100 over the SF0.01 corpus fires it on exactly one query,
+// Q21, whose probeKey arrives alias-qualified as "l1.l_orderkey" against
+// batches carrying "l_orderkey": on the parent commit Q21 returns 0 rows
+// where the answer is 1 (and 0 where it is 100 at SF1). Init now refuses to
+// install a bloom whose column never resolved or that received no keys.
+//
+// Whether that mechanism is what produced the Q05 incident at SF100 was never
+// reduced to a repro and is not claimed here: Q05's own reverse blooms resolve
+// their columns at SF0.01, and the corpus-wide forced run shows Q21 as the
+// only unresolved one. What IS claimed is that this optimization could return
+// 0 rows for a reason that had nothing to do with the query, that the reason
+// is now gone, and that a gate runs the whole corpus with both thresholds
+// forced down so the next one cannot hide behind a production threshold.
+//
+// The semi/anti threshold's "no evidence of bugs there yet" was wrong twice
+// over: #543's key-encoding divergence was semi/anti-only in practice, since
+// that is where string keys appear, and the empty-bloom mechanism above fires
+// on a semi/anti query. The threshold stays at 10M for COST reasons.
 //
 // Init reads WADJET_REVERSE_BLOOM_INNER_THRESHOLD if set, so the bench can
 // disable the inner-join path on SF100 without rebuilding the binary.
@@ -6559,13 +6588,28 @@ func (rb *reverseBloomBridge) Init(ctx context.Context) error {
 	// join answered on an empty build side (#543).
 	bb := exec.NewBloomBuilder(rb.collector.Rows())
 	if bb != nil {
+		// A key column that changes type between batches has no single right
+		// encoding, so the builder refuses it. That is a reason to answer with
+		// NO filter, never a reason to fail the query: the join is correct
+		// without one. Iterate's own errors (a spilled run that will not read
+		// back) are real and still propagate.
+		var encErr error
 		if err := rb.collector.Iterate(func(b *batch.RecordBatch) error {
-			return bb.Add(b, rb.probeKey)
+			if encErr != nil {
+				return nil
+			}
+			encErr = bb.Add(b, rb.probeKey)
+			return nil
 		}); err != nil {
 			rb.collector.Release()
 			close(rb.buildStart)
 			<-rb.barrier
 			return fmt.Errorf("reverse bloom build: %w", err)
+		}
+		if encErr != nil {
+			slog.Warn("reverse bloom key column is not one type across the probe output — filter not installed",
+				"probe_key", rb.probeKey, "build_key", rb.buildKey, "err", encErr)
+			bb = nil
 		}
 	}
 

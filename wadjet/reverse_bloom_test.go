@@ -74,9 +74,10 @@ func rbAnswer(t *testing.T, db *DB, sql string, on bool) (*oracle.Result, int64)
 // DURATION, FLOAT, DECIMAL) took the process down reading offsets a vector
 // does not have.
 func TestReverseBloomAnswersTheSameWithAndWithout(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping type-matrix gate under -short")
-	}
+	// No -short skip. ci.yml's Unit Tests step runs with -short and its
+	// TypeMatrix step's pattern does not match this name, so a skip here
+	// would mean this gate never runs in CI at all — the exact trap ci.yml
+	// documents around TestQueryPanicBoundary. It costs about a second.
 	rbLowerThreshold(t)
 	db := tmOpen(t)
 
@@ -149,9 +150,7 @@ func TestReverseBloomStringSemiJoinKeepsItsRows(t *testing.T) {
 // slow query, it is a filter that was about to drop rows — so the run that
 // exercises every type must record neither.
 func TestReverseBloomNeverAnswersFromABrokenFilter(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping type-matrix gate under -short")
-	}
+	// No -short skip: see TestReverseBloomAnswersTheSameWithAndWithout.
 	rbLowerThreshold(t)
 	db := tmOpen(t)
 

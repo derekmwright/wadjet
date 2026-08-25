@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"log/slog"
 	"math"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -65,6 +66,19 @@ func NewDynamicFilterEmitOp(filterID, keyColumn, keyType string, bloomBits int) 
 	}
 }
 
+// dynamicFilterIntKey reports whether a column type is one this op can read.
+// Deliberately NOT bloomIntKey (internal/engine/exec/bloom_filter_op.go):
+// that one answers "which encoding does a bloom KEY take", this one answers
+// "which columns does intKeyFromVector index", and the two happening to list
+// the same five types today is not a reason to make one depend on the other.
+func dynamicFilterIntKey(t batch.TypeID) bool {
+	switch t {
+	case batch.TypeInt32, batch.TypeInt64, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return true
+	}
+	return false
+}
+
 func (op *DynamicFilterEmitOp) Init(_ context.Context) error { return nil }
 
 func (op *DynamicFilterEmitOp) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
@@ -81,6 +95,20 @@ func (op *DynamicFilterEmitOp) Execute(_ context.Context, in *batch.RecordBatch)
 			// (two qualified columns with the same base name) stays
 			// unresolved — a wrong column would poison the bloom.
 			op.keyIdx = uniqueSuffixColumnIndex(in, op.keyColumn)
+		}
+		// The op hashes int64 keys and every arm below indexes Int32Data or
+		// Int64Data. A column that has neither does not produce a weaker
+		// filter, it panics — and the only thing standing between a
+		// non-integer join key and this loop is a planner gate
+		// (Planner.columnIntType) that runs at a different time, over the
+		// CATALOG, on a column name that may not be the one that arrives.
+		// Treat a non-integer column exactly like a column that was not
+		// found: pass through, emit a row_count=0 partial, scan unfiltered.
+		if op.keyIdx >= 0 && !dynamicFilterIntKey(in.Columns[op.keyIdx].Type) {
+			slog.Error("dynamic filter emit resolved a non-integer key column — filter withheld",
+				"filter_id", op.filterID, "column", op.keyColumn,
+				"resolved", in.Columns[op.keyIdx].Type.String())
+			op.keyIdx = -1
 		}
 		op.resolved = true
 		if op.bloom == nil {
