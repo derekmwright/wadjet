@@ -63,6 +63,17 @@ func openCidrKeyConsumerTable(t *testing.T, name string) *DB {
 // TestCidrGroupByAndDistinctUseInetEquality: '10.0.0.1' and '10.0.0.1/32'
 // are one value in PostgreSQL's inet, so GROUP BY and COUNT(DISTINCT) must
 // answer ONE group/value for the pair, not two.
+//
+// A count alone can pass by accident — two wrong keys can still add up to
+// the right total, the same trap ADR-0012 calls out for the DECIMAL set-op
+// key (#499's "the VALUES, not only their count: two wrong keys can
+// cancel"). This asserts the emitted VALUES too: the collapsed group's own
+// c_cidr comes back as "10.0.0.1" (the first row's own raw text — GROUP BY
+// picks a representative the same way a value that keys equal but renders
+// two ways always does, and this pins WHICH one so a future change to that
+// choice is a visible diff, not silent), and the three DISTINCT values are
+// exactly the three inet-distinct addresses, not e.g. two copies of one
+// spelling with a real value dropped.
 func TestCidrGroupByAndDistinctUseInetEquality(t *testing.T) {
 	db := openCidrKeyConsumerTable(t, "cidr_keys")
 	ctx := context.Background()
@@ -77,6 +88,22 @@ func TestCidrGroupByAndDistinctUseInetEquality(t *testing.T) {
 	if n := res.Rows[0]["n"]; n != int64(2) {
 		t.Errorf("the collapsed group's count = %#v, want 2", n)
 	}
+	if v := res.Rows[0]["c_cidr"]; v != "10.0.0.1" {
+		t.Errorf("the collapsed group's emitted c_cidr = %#v, want \"10.0.0.1\"", v)
+	}
+	wantGroups := map[string]int64{"10.0.0.1": 2, "9.0.0.0/8": 1, "10.0.0.0/8": 1}
+	gotGroups := map[string]int64{}
+	for _, r := range res.Rows {
+		gotGroups[r["c_cidr"].(string)] = r["n"].(int64)
+	}
+	if len(gotGroups) != len(wantGroups) {
+		t.Fatalf("GROUP BY c_cidr emitted values %v, want %v", gotGroups, wantGroups)
+	}
+	for k, want := range wantGroups {
+		if got := gotGroups[k]; got != want {
+			t.Errorf("group %q count = %d, want %d (full result: %v)", k, got, want, gotGroups)
+		}
+	}
 
 	res, err = db.Query(ctx, `SELECT COUNT(DISTINCT c_cidr) AS n FROM cidr_keys`)
 	if err != nil {
@@ -84,6 +111,20 @@ func TestCidrGroupByAndDistinctUseInetEquality(t *testing.T) {
 	}
 	if got := res.Rows[0]["n"]; got != int64(3) {
 		t.Errorf("COUNT(DISTINCT c_cidr) = %#v, want 3", got)
+	}
+
+	res, err = db.Query(ctx, `SELECT DISTINCT c_cidr FROM cidr_keys ORDER BY c_cidr`)
+	if err != nil {
+		t.Fatalf("DISTINCT query failed: %v", err)
+	}
+	wantDistinct := []string{"9.0.0.0/8", "10.0.0.0/8", "10.0.0.1"} // inet order (#520): 9.../8 sorts before 10.../8
+	if len(res.Rows) != len(wantDistinct) {
+		t.Fatalf("SELECT DISTINCT c_cidr = %#v, want %v", res.Rows, wantDistinct)
+	}
+	for i, want := range wantDistinct {
+		if got := res.Rows[i]["c_cidr"]; got != want {
+			t.Errorf("DISTINCT row %d = %#v, want %q", i, got, want)
+		}
 	}
 }
 
