@@ -232,6 +232,9 @@ func TestFragmentSourceAppliesSpecColumns(t *testing.T) {
 		InputAlias: "scan-0",
 		InputFiles: []string{"tables/t/chunk_0.parquet"},
 		Columns:    []string{"id", "payload"},
+		// A base-table parquet read with no declared schema is refused
+		// (#503); the coordinator fills this from Stage.ScanSchema.
+		ColumnTypes: projTestColumnTypes(),
 	}
 	src, err := ex.buildFragmentSource(task, spec)
 	if err != nil {
@@ -256,4 +259,17 @@ func TestFragmentSourceAppliesSpecColumns(t *testing.T) {
 		}
 		t.Fatalf("fragment source read %v, want [id payload]", got)
 	}
+}
+
+// projTestColumnTypes is projTestSchema in wire form — the catalog's answer a
+// base-table read must carry.
+func projTestColumnTypes() []distributed.ColumnSpec {
+	out := make([]distributed.ColumnSpec, len(projTestSchema.Columns))
+	for i, c := range projTestSchema.Columns {
+		out[i] = distributed.ColumnSpec{
+			Name: c.Name, Type: int(c.Type),
+			Precision: c.Precision, Scale: c.Scale, Dimension: c.Dimension,
+		}
+	}
+	return out
 }

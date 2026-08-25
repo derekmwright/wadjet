@@ -1312,14 +1312,27 @@ func (c *Coordinator) dispatchReplicateStage(
 		// CPU savings here and adds a 2 m+ serial-task wall on Q21 SF100.
 		// Pass through; downstream probe-split tasks each open all N
 		// upstream files directly via cachedFileStreamSource (mmap, cheap).
+		//
+		// A pass-through of a pass-through: when the upstream was itself a
+		// leaf scan handed over as raw parquet, the CONSUMER of this
+		// replicate reads base-table files, so the scan annotations have to
+		// survive the hop. Dropping them left a broadcast join's build side
+		// typing an IPv4 column from a file that cannot say it is one
+		// (#423), and a file whose stored type contradicts the catalog
+		// decoding silently (#503). Empty on a WSHF upstream, which is what
+		// the fields already mean.
 		return StageOutput{
-			Kind:  OutputReplicated,
-			Files: [][]string{upstreamFiles},
-			Bytes: upstream.Bytes,
+			Kind:          OutputReplicated,
+			Files:         [][]string{upstreamFiles},
+			Bytes:         upstream.Bytes,
+			ScanTable:     upstream.ScanTable,
+			ScanColumns:   append([]string(nil), upstream.ScanColumns...),
+			ScanSchema:    upstream.ScanSchema,
+			ScanFileSizes: append([]int64(nil), upstream.ScanFileSizes...),
 		}, nil
 	}
 
-	cacheFiles, cacheBytes, err := c.materializeReplicate(ctx, queryID, stage, stage.Dependencies[0], upstreamFiles, upstream.Bytes)
+	cacheFiles, cacheBytes, err := c.materializeReplicate(ctx, queryID, stage, stage.Dependencies[0], upstreamFiles, upstream)
 	if err != nil {
 		// Materialization failure must not break the query — fall back to
 		// pass-through. Workers can still read the raw upstream files; we
@@ -1355,8 +1368,9 @@ func (c *Coordinator) materializeReplicate(
 	stage physical.Stage,
 	upstreamID string,
 	files []string,
-	estBytes int64, // upstream output size; the task reads all of it
+	upstream StageOutput, // the task reads all of it; Bytes is the estimate
 ) ([]string, int64, error) {
+	estBytes := upstream.Bytes
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 	task := distributed.Task{
 		ID:             uuid.New().String()[:8],
@@ -1378,6 +1392,16 @@ func (c *Coordinator) materializeReplicate(
 				InputAlias:  upstreamID,
 				InputFiles:  files,
 				InputBucket: c.config.ResultBucket,
+				// The allWSHF bypass above already returned for stage
+				// output, so a list that reaches here is base-table
+				// parquet — a pass-through leaf scan being consolidated
+				// into one broadcast file. It needs the catalog's types
+				// and the read set that goes with them, or the WSHF this
+				// task writes carries raw storage form to every join task
+				// downstream (#423), and a file whose stored type
+				// contradicts the catalog decodes silently (#503).
+				Columns:     append([]string(nil), upstream.ScanColumns...),
+				ColumnTypes: wireColumnSpecs(upstream.ScanSchema),
 			},
 			{
 				Type: distributed.OpUnpartitionedSink,
@@ -4134,6 +4158,8 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	if b := inputs[depID].Bytes; b > 0 && N > 0 {
 		intermEst = b / int64(N)
 	}
+	intermScanCols := c.stageInputScanColumns(ctx, stage, inputs)
+	intermScanTypes := stageInputScanSchemas(stage, inputs)
 	for i, group := range groups {
 		t := distributed.Task{
 			ID:             uuid.New().String()[:8],
@@ -4153,6 +4179,16 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 			return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: build interm fragment %d: %w", stage.ID, i, ferr)
 		}
 		t.Operators = ops
+		// This dispatcher builds its own tasks instead of going through
+		// dispatchComputeStage, so it has to do that function's two
+		// source-annotation steps itself. The fan-out fires over a
+		// Singleton upstream, which a PASS-THROUGH leaf scan is — so
+		// `group` can be base-table parquet, and without these the read
+		// takes its columns and its TYPES from the files (#423/#503). The
+		// final task below reads the intermediates' own WSHF and needs
+		// neither.
+		applySourceProjection(t.Operators, intermScanCols)
+		applySourceColumnTypes(t.Operators, intermScanTypes)
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
 		}
@@ -4592,6 +4628,19 @@ func stageInputDeps(stage physical.Stage) map[string]string {
 		buildAlias, probeAlias := joinInputAliases(stage)
 		put(buildAlias, buildDep)
 		put(probeAlias, probeDep)
+		// A fused or chained join's build is a dependency of this stage
+		// too — buildTaskInputsForStage counts 2 + len(FusedJoins) +
+		// len(ChainedJoins) — and buildJoinFragment gives each one an
+		// OpBroadcastProbe keyed by its own BuildTableAlias. Leaving them
+		// out here meant applySourceColumnTypes had no entry to find, so a
+		// fused build over a PASS-THROUGH leaf scan read base-table parquet
+		// with no declared types (#423/#503).
+		for _, fj := range stage.FusedJoins {
+			put(fj.BuildTableAlias, fj.BuildDepStage)
+		}
+		for _, cj := range stage.ChainedJoins {
+			put(cj.BuildTableAlias, cj.BuildDepStage)
+		}
 	case physical.StageUnion:
 		// Every arm, not just this task's: the alias IS the dep ID, so one
 		// map serves all tasks.
@@ -4599,8 +4648,12 @@ func stageInputDeps(stage physical.Stage) map[string]string {
 			put(arm.DepStage, arm.DepStage)
 		}
 	default:
-		if len(stage.Dependencies) > 0 {
-			put(stage.Dependencies[0], stage.Dependencies[0])
+		// The alias IS the dep ID on every non-join fragment, so every
+		// dependency can be mapped, not just the first: a stage with a
+		// stat-dep edge or a scalar-producer dep alongside its real input
+		// used to drop everything past Dependencies[0].
+		for _, dep := range stage.Dependencies {
+			put(dep, dep)
 		}
 	}
 	return out
@@ -4945,6 +4998,19 @@ func (c *Coordinator) dispatchGatherStage(
 		ReplySubject: replySubject,
 		CreatedAt:    time.Now(),
 	}
+	// A pass-through leaf scan hands its parquet keys to the CONSUMER, and
+	// for a plain `SELECT … FROM t` that consumer is this gather task. So
+	// the catalog's declared schema has to ride here too, or the read types
+	// itself from files that cannot express nine of this engine's types —
+	// and, where a file's stored type CONTRADICTS the catalog, decodes it
+	// silently as whatever it holds (#423/#503). Empty for a gather over
+	// stage output, which carries its own types in the WSHF payload; the
+	// worker refuses a base-table read that arrives without it.
+	scanTypes := wireColumnSpecs(upstream.ScanSchema)
+	if len(scanTypes) == 0 {
+		scanTypes = wireColumnSpecs(depStage.ScanSchema)
+	}
+	task.ColumnTypes = scanTypes
 	if len(ordering) > 0 {
 		task.Operators = []distributed.OpSpec{
 			{
@@ -4952,6 +5018,7 @@ func (c *Coordinator) dispatchGatherStage(
 				InputAlias:  alias,
 				InputFiles:  task.Inputs[alias],
 				InputBucket: c.config.ResultBucket,
+				ColumnTypes: scanTypes,
 			},
 			{
 				Type:         distributed.OpSort,

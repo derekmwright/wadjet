@@ -84,11 +84,9 @@ func (e *Executor) sourceForAlias(task distributed.Task, bucket, alias string, f
 // derived column names — the source skips projection when any requested
 // column is missing from the file schema. WSHF payloads ignore the hint.
 func (e *Executor) sourceForAliasWithProjection(task distributed.Task, bucket, alias string, files []string, projectColumns []string) (exec.Source, error) {
-	kind, err := classifyInputFiles(files)
-	if err != nil {
+	if _, err := classifyInputFiles(files); err != nil {
 		return nil, fmt.Errorf("alias %q: %w", alias, err)
 	}
-	_ = kind
 	// Merge-on-read deletes for whichever of these files are base-table
 	// parquet (#491). Takes the whole task rather than its QueryID because
 	// the markers are a task-level declaration keyed by FILE — the alias
@@ -106,4 +104,19 @@ func (e *Executor) sourceForAliasWithProjection(task distributed.Task, bucket, a
 	}
 	src.SetDeleteMarkers(deletes)
 	return src, nil
+}
+
+// readsBaseTableParquet reports whether an alias's files are base-table
+// parquet rather than an upstream stage's WSHF output.
+//
+// The distinction decides whether a MISSING declared schema is fine or is a
+// defect: stage output carries its own types in the WSHF payload and needs no
+// declaration, while a parquet file cannot express nine of this engine's
+// types and answers from the catalog or not at all (#423). An unclassifiable
+// list answers false — classifyInputFiles has already failed the read by then
+// on every path that matters, and a guard is not the place to invent a second
+// verdict.
+func readsBaseTableParquet(files []string) bool {
+	kind, err := classifyInputFiles(files)
+	return err == nil && kind == inputKindParquet
 }

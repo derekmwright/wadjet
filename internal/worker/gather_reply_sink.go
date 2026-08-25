@@ -191,4 +191,22 @@ func (s *gatherReplySink) Finalize(_ context.Context) error {
 	return nil
 }
 
+// recordErr makes err the terminal message's Err, unless the sink already
+// recorded one of its own.
+//
+// A gather task that FAILS still publishes its terminal marker — the
+// coordinator's receiver blocks on it, and withholding it turned every
+// failure into a query-timeout hang. But the marker is also the only thing
+// the coordinator waits on for this stage: it never reads the task's result
+// notification. So a marker published without the failure on it reported
+// SUCCESS with zero rows, which is how a worker that correctly REFUSED to
+// decode a type-drifted file (#503) still answered the client with an empty
+// result set.
+func (s *gatherReplySink) recordErr(err error) {
+	if err == nil || s.err != nil {
+		return
+	}
+	s.err = err
+}
+
 func (s *gatherReplySink) Close() error { return nil }

@@ -1332,7 +1332,11 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	// written before the declared-schema footer key existed cannot say what
 	// nine of their column types are, and the WSHF this task writes would
 	// then carry raw storage form to every consumer downstream (#423).
-	src.SetDeclaredSchema(execColumns(task.ColumnTypes))
+	// …and refused outright when a base-table read arrives without them,
+	// rather than typed from the file's own footer (#503).
+	if err := applyDeclaredScanSchema(src, "shuffle task", task.ID, task.Files, task.ColumnTypes); err != nil {
+		return err
+	}
 	// Dynamic-filter pushdown for shuffle's implicit parquet scan. Operates
 	// at two layers:
 	//   - Row-group level (via cachedFileStreamSource.SetDynamicFilters →

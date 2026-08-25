@@ -94,7 +94,7 @@ func (e *Executor) uploadUnpartitionedSpill(ctx context.Context, task distribute
 // coordinator's reply subject via gatherReplySink. No SQL, no physical
 // plan — the upstream stage already produced the final result shape; the
 // gather worker is just a pipe.
-func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
+func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) (err error) {
 	e.logger.Info("executeGatherStage: entry",
 		"task_id", task.ID, "query_id", task.QueryID,
 		"reply_subject", task.ReplySubject, "inputs_aliases", len(task.Inputs))
@@ -121,7 +121,17 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 	// payload cap; the failed task returned without finalizing and the
 	// coord waited 1m+ for batches that would never come). Finalize is
 	// idempotent so the explicit success-path call below stays.
-	defer func() { _ = sink.Finalize(ctx) }()
+	//
+	// …and the marker has to CARRY the failure. The coordinator waits on
+	// this stream and nothing else for a gather stage — it never reads the
+	// task's result notification — so a terminal published with no Err
+	// reported success with zero rows for a task that failed. A worker that
+	// correctly refused to decode a type-drifted file (#503) still answered
+	// the client with an empty result set.
+	defer func() {
+		sink.recordErr(err)
+		_ = sink.Finalize(ctx)
+	}()
 	var totalRows, batchesPublished int64
 	// A bare LIMIT pushed onto the upstream scan (#311). A plain scan with no
 	// filters is not dispatched as its own task: the coordinator passes its
@@ -152,6 +162,15 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 		src, err := e.sourceForAlias(task, bucket, alias, files)
 		if err != nil {
 			return fmt.Errorf("gather task %s: source for %q: %w", task.ID, alias, err)
+		}
+		// A gather over a PASS-THROUGH leaf scan reads base-table parquet
+		// directly — the plain `SELECT … FROM t` shape, where no scan task
+		// is dispatched at all and the coordinator hands its file list to
+		// this task. Task.ColumnTypes is that read's declared schema, and
+		// its absence is refused rather than trusted (#503).
+		if err := applyDeclaredScanSchema(src, "gather task", alias, files, task.ColumnTypes); err != nil {
+			src.Close()
+			return fmt.Errorf("gather task %s: %w", task.ID, err)
 		}
 		if err := src.Init(ctx); err != nil {
 			return fmt.Errorf("gather task %s: init source %q: %w", task.ID, alias, err)

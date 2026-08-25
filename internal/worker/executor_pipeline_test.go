@@ -426,6 +426,23 @@ func TestExecutePipelineStaleSizeBytes(t *testing.T) {
 	t.Logf("stale SizeBytes: %d rows (correct despite size mismatch)", result.NumRows)
 }
 
+// declaredFromRows is the catalog's answer a shuffle/scan task must carry for
+// a base-table parquet input: the same schema writeParquetFile writes, in
+// wire form. Post-#503 a base-table read with no declaration is REFUSED, so
+// a fixture that dispatches one has to say what it holds — exactly as the
+// coordinator does from physical.Stage.ScanSchema.
+func declaredFromRows(rows []map[string]any) []distributed.ColumnSpec {
+	cols := schemaFromRows(rows)
+	out := make([]distributed.ColumnSpec, len(cols))
+	for i, c := range cols {
+		out[i] = distributed.ColumnSpec{
+			Name: c.Name, Type: int(c.Type),
+			Precision: c.Precision, Scale: c.Scale, Dimension: c.Dimension,
+		}
+	}
+	return out
+}
+
 func writeParquetFile(t *testing.T, store objstore.Store, bucket, path string, rows []map[string]any) {
 	t.Helper()
 	schema := schemaFromRows(rows)

@@ -261,6 +261,38 @@ out. Gate: `coordinator.TestTypeMatrixTwoPathWithoutDeclaredSchemaFooter`,
 which runs the type-matrix corpus over footer-stripped files
 (`parquet.StripDeclaredSchema`).
 
+**And the worker REFUSES a base-table read that arrives without one** —
+`applyDeclaredScanSchema` (`worker/executor_fragment.go`), on all three
+carriers. Absence used to mean "no opinion" everywhere, and
+`parquet.Reader.SchemaAs(nil)` short-circuits to the FILE's own schema, so
+the catalog never entered the comparison: a stale or foreign file — the shape
+a chunk-name collision (#494) produces on its own — returned the string
+`'hello'` for a column the catalog calls BIGINT, while the single-process
+reader refused it by name. The distinction the guard needs is one
+`classifyInputFiles` already computed and threw away
+(`worker/source_select.go`): a `.wshf` input legitimately carries no
+declaration, a `.parquet` one cannot (#503).
+
+The carriers the refusal found empty, and now filled:
+
+| Dispatcher | Was | Now |
+|---|---|---|
+| `dispatchGatherStage` | nothing — a plain `SELECT … FROM t` dispatches no scan task, so the GATHER task does the base-table read | `Task.ColumnTypes` + the ordered fragment's `OpSpec.ColumnTypes` |
+| `dispatchReplicateStage` (pass-through branch) | dropped `ScanTable`/`ScanColumns`/`ScanSchema` off the `StageOutput`, so a broadcast join's build read parquet blind | forwards all four scan annotations |
+| `materializeReplicate` | an `OpScan` with neither `Columns` nor `ColumnTypes`; its `allWSHF` bypass means every list that reaches it IS base parquet | both, from the upstream's annotations |
+| `dispatchFinalAggregateFanout` | built its own tasks and never called `applySourceProjection`/`applySourceColumnTypes` | calls both on the intermediates (the final merge reads WSHF and needs neither) |
+| `stageInputDeps` | join stages emitted probe+build only, and every other stage only `Dependencies[0]` | fused- and chained-join build aliases, and every dependency on the default arm |
+
+A gather task that fails now says so on the wire, too. The coordinator waits
+on the gather STREAM and nothing else for that stage — it never reads the
+task's result notification — and the worker publishes its terminal marker
+even on error (withholding it turned every failure into a timeout hang). A
+marker with no `Err` on it therefore reported SUCCESS with zero rows: the
+worker refused correctly and the client got an empty result set.
+`executeGatherStage` records its error on the sink before the deferred
+`Finalize`, and `gatherReceiver` already turns that into
+`gather worker error: …`.
+
 Worker side: `buildFragmentUnary` (`worker/executor_fragment.go:952`) and
 `buildFragmentHashAggregate` (`:788`). **Gap:** the hash-aggregate fragment
 requires `len(GroupByCols)>0 || len(Aggregates)>0` and has **no `GroupByAll`**

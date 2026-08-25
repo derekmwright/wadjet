@@ -2265,7 +2265,9 @@ func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distribu
 		if err != nil {
 			return nil, fmt.Errorf("sort_merge_join build source: %w", err)
 		}
-		applyBuildSchema(src, spec)
+		if serr := applyBuildSchema(src, spec); serr != nil {
+			return nil, fmt.Errorf("sort_merge_join build source: %w", serr)
+		}
 		buildSrc = src
 	}
 
@@ -2598,16 +2600,10 @@ func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.O
 	if err != nil {
 		return nil, err
 	}
-	// The catalog's declared schema for a base-table scan (#423). Without it
-	// the scan types its columns from the FILE, which cannot express IPv4,
-	// IPv6, MAC, UUID, BYTES, PORT, PROTOCOL, DURATION or CIDR — so a file
-	// written before the declared-schema footer key existed answered those
-	// columns in raw storage form on this path while the single-process
-	// engine, reading the catalog, answered the display form.
-	if len(spec.ColumnTypes) > 0 {
-		if cs, ok := src.(*cachedFileStreamSource); ok {
-			cs.SetDeclaredSchema(execColumns(spec.ColumnTypes))
-		}
+	// The catalog's declared schema for a base-table scan (#423), and a
+	// REFUSAL when a base-table read arrives without one (#503).
+	if err := applyDeclaredScanSchema(src, string(spec.Type), spec.InputAlias, spec.InputFiles, spec.ColumnTypes); err != nil {
+		return nil, err
 	}
 	// Row-group sharding for OpScan over a single compacted parquet file.
 	if spec.ScanShardCount > 1 {
@@ -2776,7 +2772,9 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			if err != nil {
 				return nil, fmt.Errorf("build source: %w", err)
 			}
-			applyBuildSchema(src, spec)
+			if err := applyBuildSchema(src, spec); err != nil {
+				return nil, fmt.Errorf("build source: %w", err)
+			}
 		}
 		if err := src.Init(ctx); err != nil {
 			src.Close()
@@ -3081,12 +3079,45 @@ func (s *fragmentGatherSink) close() {}
 // applyBuildSchema tells a join's BUILD source what its columns are when the
 // build reads base-table parquet — a pass-through leaf scan feeding the join,
 // whose file cannot express nine of this engine's types on its own (#423).
-// A build reading stage output carries no declaration and is untouched.
-func applyBuildSchema(src exec.Source, spec distributed.OpSpec) {
-	if len(spec.BuildColumnTypes) == 0 {
-		return
+// A build reading stage output carries no declaration and is untouched; a
+// build reading PARQUET without one is refused (#503).
+func applyBuildSchema(src exec.Source, spec distributed.OpSpec) error {
+	return applyDeclaredScanSchema(src, string(spec.Type)+" build", spec.BuildAlias, spec.BuildFiles, spec.BuildColumnTypes)
+}
+
+// applyDeclaredScanSchema hands a source the catalog's declared column types,
+// and REFUSES the read when a base-table parquet input arrives without them.
+//
+// The declaration is not an optimization. A parquet file cannot express nine
+// of this engine's types (IPv4, IPv6, MAC, UUID, BYTES, PORT, PROTOCOL,
+// DURATION have no logical annotation; CIDR is written as plain UTF8), and
+// files written before v0.18.0 do not carry wadjet's own footer key either —
+// so a scan that types its columns from the FILE answers 167772165 where the
+// catalog says 10.0.0.5 (#396/#423). Worse, and the reason this refuses
+// rather than warns: parquet.Reader.SchemaAs(nil) short-circuits to the
+// file's own schema, so the catalog never enters the comparison and a file
+// whose stored type CONTRADICTS the catalog decodes silently as whatever it
+// happens to hold. A stale or foreign file — the shape a chunk-name collision
+// (#494) produces on its own — returned the string 'hello' for a column the
+// catalog calls BIGINT, while the single-process reader refused it by name
+// ("schema declares INT64 but the file stores STRING").
+//
+// Stage output is the legitimate empty case and is left alone: a .wshf
+// payload carries its own types, and there is nothing for a declaration to
+// add. That is the whole of the distinction, and readsBaseTableParquet is
+// where it is drawn.
+func applyDeclaredScanSchema(src exec.Source, what, alias string, files []string, declared []distributed.ColumnSpec) error {
+	if len(declared) > 0 {
+		if cs, ok := src.(*cachedFileStreamSource); ok {
+			cs.SetDeclaredSchema(execColumns(declared))
+		}
+		return nil
 	}
-	if cs, ok := src.(*cachedFileStreamSource); ok {
-		cs.SetDeclaredSchema(execColumns(spec.BuildColumnTypes))
+	if !readsBaseTableParquet(files) {
+		return nil
 	}
+	return fmt.Errorf("%s: base-table parquet input %q arrived with no declared schema; "+
+		"refusing to type %d file(s) from their own footers — the catalog's types must ride the plan "+
+		"(physical.Stage.ScanSchema → OpSpec.ColumnTypes / BuildColumnTypes / Task.ColumnTypes)",
+		what, alias, len(files))
 }
