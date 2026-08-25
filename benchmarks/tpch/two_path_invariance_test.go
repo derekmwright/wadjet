@@ -4352,6 +4352,83 @@ func twoPathCorpus() []twoPathQuery {
 			limit: 3, wantRows: 3, wantCols: []string{"coalesce"}},
 	)
 
+	// --- #489 follow-up: a CORRELATED subquery into a derived table --------
+	//
+	// The correlated-subquery collectors resolve `u.did` by asking which
+	// names a subtree answers to. A scan inside a derived table answers to
+	// its OWN alias and to the derived one, and recording only one of the two
+	// stopped the reference being seen as outer: the subquery stayed per-row,
+	// which the single-process pipeline answered as 0 rows SILENTLY and the
+	// stage DAG refused loudly. Both spellings of the inner scan are here
+	// because a fix that trades one for the other passes half of them.
+	out = append(out,
+		twoPathQuery{name: "CorrelatedExistsIntoDerivedTable", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n1.n_nationkey AS did FROM nation n1) u
+				WHERE EXISTS (SELECT 1 FROM region WHERE region.r_regionkey = u.did)`,
+			wantRows: 1, wantCols: []string{"c"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", float64(len(distinctKeys(tb, "region", "r_regionkey"))))
+			}},
+		twoPathQuery{name: "CorrelatedNotExistsIntoDerivedTable", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n1.n_nationkey AS did FROM nation n1) u
+				WHERE NOT EXISTS (SELECT 1 FROM region WHERE region.r_regionkey = u.did)`,
+			wantRows: 1, wantCols: []string{"c"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				regions := distinctKeys(tb, "region", "r_regionkey")
+				var want float64
+				for _, r := range sf001Table(tb, "nation") {
+					if !regions[toFloat(r["n_nationkey"])] {
+						want++
+					}
+				}
+				assertSingleCell(tb, rows, "c", want)
+			}},
+		twoPathQuery{name: "CorrelatedScalarSubqueryIntoDerivedTable", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT u.did, (SELECT COUNT(*) FROM region WHERE region.r_regionkey = u.did) AS c
+				FROM (SELECT n1.n_nationkey AS did FROM nation n1) u ORDER BY u.did`,
+			wantRows: 25, wantCols: []string{"did", "c"}, localRoute: true,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				regions := distinctKeys(tb, "region", "r_regionkey")
+				for _, r := range rows {
+					want := float64(0)
+					if regions[cellNum(r, "did")] {
+						want = 1
+					}
+					if got := cellNum(r, "c"); got != want {
+						tb.Errorf("did=%v: c = %v, want %v", cellNum(r, "did"), got, want)
+					}
+				}
+			}},
+		twoPathQuery{name: "CorrelatedExistsIntoDerivedTableUnaliased", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n_nationkey AS did FROM nation) u
+				WHERE EXISTS (SELECT 1 FROM region WHERE region.r_regionkey = u.did)`,
+			wantRows: 1, wantCols: []string{"c"},
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", float64(len(distinctKeys(tb, "region", "r_regionkey"))))
+			}},
+	)
+
+	// --- #513 follow-up: DUPLICATE output column names ----------------------
+	//
+	// PostgreSQL answers `SELECT upper(a), upper(b)` with two columns both
+	// called `upper`, and #513 made this engine agree.
+	//
+	// These entries deliberately compare COUNT and SHAPE only, and the reason
+	// is a limit of this suite rather than a property of the queries: its
+	// comparison realigns arm B onto arm A BY NAME (realign/lookupCell), and
+	// rows arrive here as name-keyed maps, so two columns of one name are
+	// indistinguishable to it — arm A and arm B would "agree" whatever either
+	// answered. wantCols still pins the NAMES on both paths, which is what
+	// this suite can honestly assert. The VALUES are gated where they can be:
+	// the PostgreSQL wire oracle compares cells POSITIONALLY through the real
+	// DataRow path (DuplicateName* in wireCorpus), and
+	// TestDuplicateOutputNamesKeepBothValues asserts the embedded API's
+	// positional form.
+
 	// #358 — the outer-join ON residual: the non-key conjunct runs on the
 	// combined row BEFORE the match is accepted, a probe row whose
 	// candidates all fail comes back NULL-padded rather than dropped, and a

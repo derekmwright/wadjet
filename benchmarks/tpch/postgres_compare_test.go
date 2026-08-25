@@ -1854,6 +1854,50 @@ func postgresSemanticsCases() []pgCase {
 				JOIN (SELECT r_regionkey AS c FROM region) z ON z.c = y.b`},
 	)
 
+	// --- #489 follow-up: a CORRELATED subquery into a derived table ---------
+	//
+	// A derived table whose inner scan carries an alias of its own. The
+	// correlated-subquery collectors resolve `u.did` by asking which names a
+	// subtree answers to, and a scan inside a derived table answers to both
+	// its own alias and the derived one — the distinction #489 drew for the
+	// join arms. When only ONE of the two was recorded the reference was no
+	// longer seen as outer, the subquery stayed per-row, and the answer was
+	// 0 rows silently on the single-process pipeline (loud on the DAG).
+	out = append(out,
+		pgCase{name: "CorrelatedExistsIntoDerivedTable",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n1.n_nationkey AS did FROM nation n1) u
+				WHERE EXISTS (SELECT 1 FROM region WHERE region.r_regionkey = u.did)`},
+		pgCase{name: "CorrelatedNotExistsIntoDerivedTable",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n1.n_nationkey AS did FROM nation n1) u
+				WHERE NOT EXISTS (SELECT 1 FROM region WHERE region.r_regionkey = u.did)`},
+		pgCase{name: "CorrelatedScalarSubqueryIntoDerivedTable", ordered: true,
+			sql: `SELECT u.did, (SELECT COUNT(*) FROM region WHERE region.r_regionkey = u.did) AS c
+				FROM (SELECT n1.n_nationkey AS did FROM nation n1) u ORDER BY u.did`},
+		// The same three with an UNALIASED inner scan, which is the spelling
+		// that always worked — a fix that traded one for the other passes
+		// half of these.
+		pgCase{name: "CorrelatedExistsIntoDerivedTableUnaliased",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n_nationkey AS did FROM nation) u
+				WHERE EXISTS (SELECT 1 FROM region WHERE region.r_regionkey = u.did)`},
+		pgCase{name: "CorrelatedNotExistsIntoDerivedTableUnaliased",
+			sql: `SELECT COUNT(*) AS c FROM (SELECT n_nationkey AS did FROM nation) u
+				WHERE NOT EXISTS (SELECT 1 FROM region WHERE region.r_regionkey = u.did)`},
+		// A self-joined derived table, where the inner aliases are the only
+		// thing telling the arms apart AND the outer scope has to see `u`.
+		pgCase{name: "CorrelatedExistsIntoSelfJoinedDerivedTable",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n1.n_nationkey AS did, n2.n_name AS nm FROM nation n1
+					JOIN nation n2 ON n1.n_regionkey = n2.n_nationkey) u
+				WHERE EXISTS (SELECT 1 FROM region WHERE region.r_regionkey = u.did)`},
+	)
+
+	// --- #513 follow-up: DUPLICATE output column names ----------------------
+	//
+	// PostgreSQL answers `SELECT abs(a), abs(b)` with two columns both called
+	// `abs`. This arm compares cells POSITIONALLY (see comparePostgres), which
+	// is what makes these entries meaningful at all: a name comparison cannot
+	// tell the two columns apart, and neither could the engine's own row map.
+
 	// --- MIN/MAX float NaN ordering (#457) -----------------------------------
 	//
 	// PostgreSQL's float order (float8_cmp_internal) places NaN ABOVE every

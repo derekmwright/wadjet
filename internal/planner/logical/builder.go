@@ -1055,9 +1055,11 @@ func collectLogicalAliases(n *Node) map[string]bool {
 			return
 		}
 		if n.Type == NodeScan {
-			aliases[strings.ToLower(n.TableName)] = true
-			if n.TableAlias != "" {
-				aliases[strings.ToLower(n.TableAlias)] = true
+			// Every name an outer scope may qualify with, derived-table
+			// aliases included — this set decides whether a LATERAL
+			// subquery's predicate references the left side (#489).
+			for _, name := range n.ScopeNames() {
+				aliases[strings.ToLower(name)] = true
 			}
 		}
 		for _, c := range n.Children {

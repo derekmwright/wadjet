@@ -10178,9 +10178,10 @@ func collectTableAliases(node *logical.Node) map[string]bool {
 			return
 		}
 		if n.Type == logical.NodeScan {
-			aliases[strings.ToLower(n.TableName)] = true
-			if n.TableAlias != "" {
-				aliases[strings.ToLower(n.TableAlias)] = true
+			// Derived-table aliases count: this is the outer scope a
+			// correlated subquery's references are resolved against (#489).
+			for _, name := range n.ScopeNames() {
+				aliases[strings.ToLower(name)] = true
 			}
 		}
 		for _, child := range n.Children {
@@ -10475,10 +10476,9 @@ func collectOuterColumns(node *logical.Node) map[string]string {
 			return
 		}
 		if n.Type == logical.NodeScan {
-			tableID := strings.ToLower(n.TableAlias)
-			if tableID == "" {
-				tableID = strings.ToLower(n.TableName)
-			}
+			// What the ENCLOSING query calls this scan, which inside a
+			// derived table is the derived alias (#489).
+			tableID := strings.ToLower(n.OuterTableID())
 			for _, col := range n.ScanColumns {
 				colMap[strings.ToLower(col)] = tableID
 			}

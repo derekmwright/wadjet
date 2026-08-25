@@ -656,6 +656,64 @@ func NewScan(table, alias string) *Node {
 	return &Node{Type: NodeScan, TableName: table, TableAlias: alias}
 }
 
+// ScopeNames lists every name an ENCLOSING scope may use to qualify a column
+// of this scan: its table name, its own alias, and every derived table it sits
+// inside. Empty for a node that is not a scan.
+//
+// This is the question "could `x.` in a predicate mean something in here",
+// which is what the correlated-subquery collectors ask, and it is NOT the same
+// question as "which relation is this scan" — a scan inside `(SELECT … FROM
+// nation n1 …) u` answers to n1 AND to u, for different purposes. Collapsing
+// the two is what #489 fixed for the join arms and what regressed here: once
+// TableAlias stopped being overwritten with the derived alias, `u` was no
+// longer a name any collector knew, `WHERE EXISTS (… WHERE t.k = u.did)` was
+// no longer recognized as CORRELATED, and the subquery was left per-row —
+// silently 0 rows on the single-process pipeline and loud on the DAG.
+func (n *Node) ScopeNames() []string {
+	if n == nil || n.Type != NodeScan {
+		return nil
+	}
+	out := make([]string, 0, 2+len(n.DerivedAliases))
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		for _, have := range out {
+			if strings.EqualFold(have, name) {
+				return
+			}
+		}
+		out = append(out, name)
+	}
+	add(n.TableName)
+	add(n.TableAlias)
+	for _, d := range n.DerivedAliases {
+		add(d)
+	}
+	return out
+}
+
+// OuterTableID is the single name an enclosing scope calls this scan by: the
+// OUTERMOST derived table it sits inside when there is one, else its own alias,
+// else its table name.
+//
+// The outermost wins because that is the only one visible from outside: in
+// `(SELECT … FROM (… FROM nation n1) x) y` the enclosing query can write `y.`
+// and nothing else. Where a scan is in no derived table this is exactly its
+// alias, which is what every caller had before Node.DerivedAliases existed.
+func (n *Node) OuterTableID() string {
+	if n == nil || n.Type != NodeScan {
+		return ""
+	}
+	if len(n.DerivedAliases) > 0 {
+		return n.DerivedAliases[len(n.DerivedAliases)-1]
+	}
+	if n.TableAlias != "" {
+		return n.TableAlias
+	}
+	return n.TableName
+}
+
 // NewFilter creates a filter node.
 func NewFilter(child *Node, predicates []Predicate) *Node {
 	return &Node{Type: NodeFilter, Children: []*Node{child}, Predicates: predicates}

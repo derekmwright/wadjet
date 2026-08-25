@@ -2268,19 +2268,17 @@ func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]s
 		return
 	}
 	if n.Type == NodeScan {
-		name := strings.ToLower(n.TableName)
-		alias := strings.ToLower(n.TableAlias)
-		if name != "" {
-			tables[name] = true
+		// Both halves are OUTER-scope questions, so both go through the
+		// scope helpers rather than through TableAlias: which names may
+		// qualify a reference into this subtree, and what the enclosing
+		// query calls the scan a bare column came from. Inside a derived
+		// table that is the derived alias — the only name visible from
+		// outside — which is what TableAlias used to be made to hold and
+		// what #489 stopped overwriting it with.
+		for _, name := range n.ScopeNames() {
+			tables[strings.ToLower(name)] = true
 		}
-		if alias != "" && alias != name {
-			tables[alias] = true
-		}
-		// Map column names to the table identifier (prefer alias)
-		tableID := alias
-		if tableID == "" {
-			tableID = name
-		}
+		tableID := strings.ToLower(n.OuterTableID())
 		for _, col := range n.ScanColumns {
 			colToTable[strings.ToLower(col)] = tableID
 		}
@@ -2993,11 +2991,11 @@ func collectTableNames(n *Node, tables map[string]bool) {
 		return
 	}
 	if n.Type == NodeScan {
-		if n.TableName != "" {
-			tables[strings.ToLower(n.TableName)] = true
-		}
-		if n.TableAlias != "" {
-			tables[strings.ToLower(n.TableAlias)] = true
+		// Node.ScopeNames, not TableName/TableAlias: a scan inside a derived
+		// table also answers to that table's alias, and this set is exactly
+		// "what may qualify an OUTER column reference" (#489 regression).
+		for _, name := range n.ScopeNames() {
+			tables[strings.ToLower(name)] = true
 		}
 	}
 	for _, child := range n.Children {
