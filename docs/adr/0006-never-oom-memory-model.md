@@ -20,7 +20,10 @@ heartbeat starvation followed by reap/redispatch loops.
 - **Every pipeline breaker spills**: HashJoin grace-partitions on
   arrival, HashAggregate merges partial states k-way, Sort/Window run
   external sorted-run merges. Degradation is graceful slowdown, never
-  process death.
+  process death. What a drained group's BYTES have to be is
+  [ADR-0023](0023-group-key-and-group-value-are-two-encodings.md): the
+  merge key and the group's value are two encodings, and neither is
+  derived from the other.
 - **OS-facing relief valves**, each with a kill switch: mmap relief
   (RSS ceiling via MADV_DONTNEED), bounded dirty writes, the page-cache
   refault sensor with its episode cap, GOGC=100 + GOMEMLIMIT.
