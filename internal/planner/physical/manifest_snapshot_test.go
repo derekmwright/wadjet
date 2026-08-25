@@ -105,18 +105,27 @@ func selfJoinLogicalPlan(t *testing.T) *logical.Node {
 
 // TestManifestSnapshotPinsReadsAcrossAStatement is the #502 regression: a
 // self-join statement over one table — annotated, optimized (which
-// re-annotates), planned and (via PlanDistributed's NodeScan handling)
-// walked into stages — reads the catalog exactly TWICE for table "t": once
-// for its manifest, once for its aggregated column stats (a separate
-// Catalog operation with its own internal manifest read — see
-// ManifestSnapshot's doc for why the floor is two, not one) — when every
-// physical.Planner built for the statement shares one context-attached
-// ManifestSnapshot (physical.NewPlannerForContext), reproducing the
-// coordinator's own ExecuteSQL/SubmitSQL wiring. Without the pin (plain
-// NewPlanner, no context) it reads the catalog many times over: at least
-// twice per scan node per AnnotateScanColumns call, and AnnotateScanColumns
-// runs again for every logical.Optimize pass — see
+// re-annotates), routed through the LOCAL FAST PATH's estimate and plan, and
+// then planned and (via PlanDistributed's NodeScan handling) walked into
+// stages — reads the catalog exactly TWICE for table "t": once for its
+// manifest, once for its aggregated column stats (a separate Catalog
+// operation with its own internal manifest read — see ManifestSnapshot's doc
+// for why the floor is two, not one) — when every physical.Planner built for
+// the statement shares one context-attached ManifestSnapshot
+// (physical.NewPlannerForContext), reproducing the coordinator's own
+// ExecuteSQL/SubmitSQL wiring. Without the pin (plain NewPlanner, no
+// context) it reads the catalog many times over: at least twice per scan
+// node per AnnotateScanColumns call, and AnnotateScanColumns runs again for
+// every logical.Optimize pass — see
 // TestManifestSnapshotUnpinnedReadsRepeatedly.
+//
+// The fast-path leg is not decoration. EstimatePlanScanBytes is the FIRST
+// thing tryLocalFastPath (internal/coordinator/local_fastpath.go) does on
+// the DEFAULT route, before the threshold that decides between the two
+// paths, and it visits every scan node — so a statement that skipped it here
+// could assert ==2 while the shipped route paid one extra read per scan node
+// on every query. Exercising it is what makes the number the statement's
+// real cost rather than one leg's.
 func TestManifestSnapshotPinsReadsAcrossAStatement(t *testing.T) {
 	cat, kv, ctx := setupSelfJoinCatalog(t)
 	ctx = WithManifestSnapshot(ctx, NewManifestSnapshot())
@@ -127,6 +136,22 @@ func TestManifestSnapshotPinsReadsAcrossAStatement(t *testing.T) {
 	}
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+
+	// The local fast path's own leg, with the constructor tryLocalFastPath
+	// uses. Its Plan() call is deliberately not reproduced: that one opens
+	// the parquet objects, which this catalog-only fixture does not have —
+	// and the read this leg contributes is the estimate's, not the plan's.
+	fastPlanner := NewPlannerForContext(ctx, cat)
+	estBytes, estOK := fastPlanner.EstimatePlanScanBytes(ctx, logicalPlan)
+	if !estOK {
+		t.Fatal("EstimatePlanScanBytes declined the self-join — the fast-path leg this test " +
+			"exercises never ran, so the read count below does not cover it")
+	}
+	// Both scan nodes, counted: 2 files × 1 KiB × the two sides of the join.
+	if estBytes != 4096 {
+		t.Errorf("EstimatePlanScanBytes = %d, want 4096 — the walk did not reach both scan nodes, "+
+			"so it is not the per-scan-node cost this leg is here to pin", estBytes)
+	}
 
 	planner := NewPlannerForContext(ctx, cat)
 	planner.WorkerCount = 2
@@ -326,4 +351,121 @@ func TestManifestSnapshotClosesTheDeleteMarkerRace(t *testing.T) {
 			t.Fatalf("scan node %d's ScanDeletes disagrees with scan node 0's: %v vs %v", i, got, want)
 		}
 	}
+}
+
+// setupMetadataFoldCatalog builds a one-table "orders" catalog behind a
+// countingKV, for the two shapes that answer from the manifest alone.
+func setupMetadataFoldCatalog(t *testing.T) (*catalog.Catalog, *countingKV, context.Context) {
+	t.Helper()
+	ctx := context.Background()
+	kv := newCountingKV()
+	cat := catalog.New(kv, objstore.NewMemStore(), "test")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatalf("catalog init: %v", err)
+	}
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "o_orderkey", Type: parquet.TypeInt64},
+		{Name: "o_custkey", Type: parquet.TypeInt64},
+	}}
+	if err := cat.CreateTable(ctx, "orders", schema, nil); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if err := cat.AddFiles(ctx, "orders", map[string]string{}, "tables/orders/", []catalog.FileEntry{
+		{Path: "tables/orders/chunk_0000.parquet", SizeBytes: 1024, NumRows: 100},
+		{Path: "tables/orders/chunk_0001.parquet", SizeBytes: 1024, NumRows: 100},
+	}); err != nil {
+		t.Fatalf("add files: %v", err)
+	}
+	kv.mu.Lock()
+	kv.gets = make(map[string]int)
+	kv.mu.Unlock()
+	return cat, kv, ctx
+}
+
+// TestManifestSnapshotPinsTheMetadataFoldReads covers the two OTHER
+// in-package manifest readers the #502 pin has to include, both reached from
+// Planner.Plan rather than from PlanDistributed: tryBuildMetadataCount
+// (internal/planner/physical/metadata_count.go), which answers COUNT(*) from
+// the manifest's row counts without scanning, and tryBuildMetadataMinMax
+// (metadata_minmax.go), which folds MIN/MAX from file statistics. Each ran
+// its own catalog.GetManifest, so the shapes that are SUPPOSED to be the
+// cheapest queries in the engine paid an extra full manifest fetch apiece.
+//
+// Both land on the same floor as the self-join above — two reads, one
+// GetManifest and one AggregateColumnStats — against nine unpinned.
+func TestManifestSnapshotPinsTheMetadataFoldReads(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sql  string
+	}{
+		{"CountFromTheManifest", "SELECT COUNT(*) AS n FROM orders"},
+		{"MinMaxFromFileStats", "SELECT MIN(o_orderkey) AS m FROM orders"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cat, kv, ctx := setupMetadataFoldCatalog(t)
+			ctx = WithManifestSnapshot(ctx, NewManifestSnapshot())
+
+			logicalPlan := metadataFoldPlan(t, tc.sql)
+			scanAnnotator := func(plan *logical.Node) {
+				NewPlannerForContext(ctx, cat).AnnotateScanColumns(ctx, plan)
+			}
+			scanAnnotator(logicalPlan)
+			logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+
+			planner := NewPlannerForContext(ctx, cat)
+			planner.WorkerCount = 2
+			if _, ok := planner.EstimatePlanScanBytes(ctx, logicalPlan); !ok {
+				t.Fatal("EstimatePlanScanBytes declined the plan")
+			}
+			if _, err := planner.Plan(ctx, logicalPlan); err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			if _, err := planner.PlanDistributed(ctx, logicalPlan); err != nil {
+				t.Fatalf("PlanDistributed: %v", err)
+			}
+			if got := kv.manifestGets(); got != 2 {
+				t.Errorf("manifest Get calls = %d, want exactly 2 (one GetManifest, one "+
+					"AggregateColumnStats) — a metadata-fold path is reading the catalog unpinned", got)
+			}
+
+			// The unpinned contrast, so a green assertion above cannot be
+			// something else having started caching.
+			cat2, kv2, ctx2 := setupMetadataFoldCatalog(t)
+			logicalPlan2 := metadataFoldPlan(t, tc.sql)
+			ann2 := func(plan *logical.Node) { NewPlanner(cat2).AnnotateScanColumns(ctx2, plan) }
+			ann2(logicalPlan2)
+			logicalPlan2 = logical.Optimize(logicalPlan2, ann2)
+			p2 := NewPlanner(cat2)
+			p2.WorkerCount = 2
+			p2.EstimatePlanScanBytes(ctx2, logicalPlan2)
+			if _, err := p2.Plan(ctx2, logicalPlan2); err != nil {
+				t.Fatalf("unpinned Plan: %v", err)
+			}
+			if _, err := p2.PlanDistributed(ctx2, logicalPlan2); err != nil {
+				t.Fatalf("unpinned PlanDistributed: %v", err)
+			}
+			if got := kv2.manifestGets(); got <= 2 {
+				t.Errorf("unpinned manifest Get calls = %d, want more than 2 — the pin above "+
+					"is not doing work any more", got)
+			}
+		})
+	}
+}
+
+// metadataFoldPlan parses and builds a logical plan for one SQL statement.
+func metadataFoldPlan(t *testing.T, sql string) *logical.Node {
+	t.Helper()
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		t.Fatalf("parse %q: %v", sql, err)
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		t.Fatalf("extract %q: %v", sql, err)
+	}
+	logicalPlan, err := logical.BuildFromSelect(info)
+	if err != nil {
+		t.Fatalf("build %q: %v", sql, err)
+	}
+	return logicalPlan
 }

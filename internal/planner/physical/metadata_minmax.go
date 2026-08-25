@@ -373,7 +373,7 @@ func (p *Planner) tryBuildMetadataMinMax(ctx context.Context, node *logical.Node
 		return nil, false // pure COUNT(*) belongs to tryBuildMetadataCount
 	}
 
-	manifest, err := p.catalog.GetManifest(ctx, scanNode.TableName)
+	manifest, err := p.getManifest(ctx, scanNode.TableName)
 	if err != nil || manifest == nil {
 		return nil, false
 	}

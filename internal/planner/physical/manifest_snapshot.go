@@ -162,6 +162,19 @@ func (m *ManifestSnapshot) AggregateColumnStats(ctx context.Context, cat *catalo
 // has one, and the ordinary per-call catalog.GetManifest otherwise — the
 // fallback a bare Planner literal (rather than one built by NewPlanner)
 // gets, which today is only test code.
+//
+// EVERY in-package manifest read goes through here; a direct
+// p.catalog.GetManifest call silently opts that site out of the statement's
+// pin, which is not visible in any answer — only in the read count. The
+// sites are AnnotateScanColumns, walkStages and estimateSubtreeBytes
+// (plan.go), EstimatePlanScanBytes (scan_estimate.go — the FIRST catalog
+// read the default route makes, in tryLocalFastPath, once per scan node),
+// tryBuildMetadataCount (metadata_count.go) and tryBuildMetadataMinMax
+// (metadata_minmax.go) — the two shapes that answer from the manifest
+// instead of scanning, so an extra fetch there is a large fraction of the
+// query — and estimateFKReferencedRowCount (dynamic_filter.go), whose reads
+// are SPECULATIVE lookups of table names guessed from a column name and so
+// are pure overhead when the guess misses.
 func (p *Planner) getManifest(ctx context.Context, table string) (*catalog.PartitionManifest, error) {
 	if p.ManifestSnapshot != nil {
 		return p.ManifestSnapshot.Get(ctx, p.catalog, table)

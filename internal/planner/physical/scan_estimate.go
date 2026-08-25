@@ -26,7 +26,12 @@ func (p *Planner) EstimatePlanScanBytes(ctx context.Context, n *logical.Node) (i
 	}
 	var total int64
 	if n.Type == logical.NodeScan {
-		meta, err := p.catalog.GetManifest(ctx, n.TableName)
+		// p.getManifest, not p.catalog.GetManifest: this is the FIRST
+		// catalog read the default route makes (tryLocalFastPath calls it
+		// before anything else), and it visits every scan node, so an
+		// unpinned call here costs one manifest read per scan node on every
+		// statement (#502).
+		meta, err := p.getManifest(ctx, n.TableName)
 		if err != nil {
 			return 0, false
 		}

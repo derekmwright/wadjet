@@ -304,7 +304,11 @@ func (p *Planner) estimateFKReferencedRowCount(ctx context.Context, column strin
 	// Try as-is then plural form. TPC-H tables: order/orders, customer,
 	// part, supplier, nation, region, lineitem, partsupp.
 	for _, candidate := range []string{stem, stem + "s"} {
-		manifest, err := p.catalog.GetManifest(ctx, candidate)
+		// Pinned (#502): these are SPECULATIVE reads for a table name this
+		// function GUESSED from a column name, run for every statement, and
+		// a guess that misses is exactly the read a pin makes free the
+		// second time.
+		manifest, err := p.getManifest(ctx, candidate)
 		if err != nil || manifest == nil {
 			continue
 		}
