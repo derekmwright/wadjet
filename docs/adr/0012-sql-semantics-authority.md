@@ -861,7 +861,15 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     0.0001) and a DECIMAL arm under a FLOAT64 first arm fails the store
     outright. `unifySetOpSchemas` should delegate to `setOpWiden` and
     `setOpDecimalTarget` rather than keep its own rule, so the two paths
-    cannot drift on what the output type IS.
+    cannot drift on what the output type IS. It also SATURATES rather than
+    failing when the value it re-reads has no Int128 at the result scale
+    (#553) — `batch.DecimalTextAt` returns `Int128Max` with a `Sat` flag the
+    caller discards, so `10^30` comes back as
+    `17014118346046923173168730371.5884105727`. Saturation is right where it
+    was built, in #462's COMPARISON path, where an out-of-range literal
+    genuinely orders above every value the column holds; as a stored VALUE it
+    is a lie, and the rule above (a value with no exact carrier is an error)
+    is what the value-producing callers owe.
 
 ## Consequences
 
