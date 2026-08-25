@@ -71,12 +71,36 @@ func liftWhereEquiPredsIntoJoins(n *Node) *Node {
 		rels = append(rels, spine[i].Children[1])
 	}
 	relCols := make([]map[string]bool, len(rels))
+	relAliases := make([]map[string]bool, len(rels))
 	for i, r := range rels {
-		relCols[i] = collectSubtreeColumns(r)
+		relCols[i] = liftExposedColumns(r)
+		relAliases[i] = liftRelationAliases(r)
 	}
 
-	// owners returns the relation indexes that expose col.
-	owners := func(col string) []int {
+	// owners returns the relation indexes a reference can name. A QUALIFIED
+	// reference is resolved by its qualifier first: with the same table in
+	// the FROM list twice the bare column name is owned by both, and picking
+	// by name alone attached both of `s_nationkey = n1.n_nationkey` and
+	// `c_nationkey = n2.n_nationkey` to whichever alias came first. The other
+	// alias was then left dangling under a bare cross join carrying a
+	// condition that names it from a subtree that does not contain it — a key
+	// resolving to nothing, so TPC-H Q7 and Q8 in their official comma-join
+	// spelling answered ZERO ROWS (#593, #594).
+	owners := func(qual, col string) []int {
+		if qual != "" {
+			var byAlias []int
+			for i := range rels {
+				if relAliases[i][qual] {
+					byAlias = append(byAlias, i)
+				}
+			}
+			// Trust the qualifier only when it names relations of this chain;
+			// otherwise fall through to the name-based rule, which is what a
+			// reference to an outer scope or an un-annotated scan needs.
+			if len(byAlias) > 0 {
+				return byAlias
+			}
+		}
 		var out []int
 		for i := range rels {
 			if relCols[i][col] {
@@ -97,13 +121,13 @@ func liftWhereEquiPredsIntoJoins(n *Node) *Node {
 			kept = append(kept, pred)
 			continue
 		}
-		lcol := stripQualifier(colRefName(cmp.Left))
-		rcol := stripQualifier(colRefName(cmp.Right))
+		lqual, lcol := colRefParts(cmp.Left)
+		rqual, rcol := colRefParts(cmp.Right)
 		if lcol == "" || rcol == "" {
 			kept = append(kept, pred)
 			continue
 		}
-		lown, rown := owners(lcol), owners(rcol)
+		lown, rown := owners(lqual, lcol), owners(rqual, rcol)
 		li, ri := disjointOwnerPair(lown, rown)
 		if li < 0 {
 			kept = append(kept, pred)
@@ -161,4 +185,98 @@ func disjointOwnerPair(lown, rown []int) (int, int) {
 		}
 	}
 	return best[0], best[1]
+}
+
+// liftExposedColumns returns the column names a chain relation EXPOSES to the
+// join above it. For a scan (or a filter over one) that is the scan's own
+// columns, which is what collectSubtreeColumns answers. For a DERIVED TABLE
+// in the comma list it is not: `(SELECT p_partkey AS pk FROM part) d` reads
+// p_partkey and emits pk, so resolving ownership through the scan looks for
+// the wrong name, finds nothing, and the WHERE equality is left as a filter
+// above a real cross product.
+func liftExposedColumns(n *Node) map[string]bool {
+	if n == nil {
+		return map[string]bool{}
+	}
+	switch n.Type {
+	case NodeProject:
+		out := make(map[string]bool, len(n.Projections))
+		for _, p := range n.Projections {
+			if p.Hidden {
+				continue
+			}
+			name := p.Alias
+			if name == "" {
+				name = p.Column
+			}
+			if name != "" {
+				out[strings.ToLower(stripQualifier(name))] = true
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	case NodeAggregate:
+		out := make(map[string]bool, len(n.GroupBy)+len(n.AggExprs))
+		for _, g := range n.GroupBy {
+			out[strings.ToLower(stripQualifier(g))] = true
+		}
+		for _, a := range n.AggExprs {
+			if a.OutputCol != "" {
+				out[strings.ToLower(stripQualifier(a.OutputCol))] = true
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return collectSubtreeColumns(n)
+}
+
+// colRefParts splits a column reference into its relation qualifier and its
+// column name, both lower-cased, or ("", "") when the node is not a bare
+// column reference. The qualifier has to come off the AST node: colRefName
+// returns ColRef.Column alone and DROPS ColRef.Table, which is exactly the
+// information that tells `n1.n_nationkey` from `n2.n_nationkey`.
+func colRefParts(node plansql.Node) (qual, col string) {
+	ref, ok := node.(*plansql.ColRef)
+	if !ok {
+		return "", ""
+	}
+	return strings.ToLower(ref.Table), strings.ToLower(ref.Column)
+}
+
+// liftRelationAliases returns the names a chain relation may be QUALIFIED by:
+// each scan's alias (or, unaliased, its table name) and every derived-table
+// scope it sits inside. It is what lets ownership tell `nation n1` from
+// `nation n2`, which share every bare column name.
+func liftRelationAliases(n *Node) map[string]bool {
+	out := make(map[string]bool, 2)
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == NodeScan {
+			if n.TableAlias != "" {
+				out[strings.ToLower(n.TableAlias)] = true
+			} else if n.TableName != "" {
+				out[strings.ToLower(n.TableName)] = true
+			}
+			for _, d := range n.DerivedAliases {
+				out[strings.ToLower(d)] = true
+			}
+		}
+		// A semi/anti join contributes only its probe side's names, matching
+		// liftExposedColumns' view of what the subtree emits.
+		if n.Type == NodeJoin && len(n.Children) == 2 && isSemiOrAnti(n) {
+			walk(n.Children[0])
+			return
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(n)
+	return out
 }

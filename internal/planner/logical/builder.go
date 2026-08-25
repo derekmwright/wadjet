@@ -30,29 +30,63 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		if len(info.Tables) == 0 {
 			return nil, fmt.Errorf("no tables in FROM clause")
 		}
-		var err error
-		plan, err = resolveTableOrCTE(info.Tables[0], ctes)
-		if err != nil {
-			return nil, err
-		}
 		// Comma-separated FROM entries beyond the first parse into
 		// info.Tables (the parser only emits JoinInfo for explicit JOIN
-		// syntax). Fold them in as cross joins; pushdownPredicates and
-		// reorderJoins recover the real join conditions from WHERE.
-		// Dropping them silently returned wrong results (issue #281).
-		for _, t := range info.Tables[1:] {
-			right, err := resolveTableOrCTE(t, ctes)
+		// syntax). Each is a FROM ITEM, and an explicit JOIN extends the
+		// item it follows — JoinInfo.FromItem says which. Build every item's
+		// own subtree first, then cross-join the items left to right;
+		// pushdownPredicates, liftWhereEquiPredsIntoJoins and reorderJoins
+		// recover the real join conditions from WHERE.
+		//
+		// Dropping the extra tables silently returned wrong results (#281).
+		// Folding them in BEFORE the explicit joins — which is what this did
+		// until #593/#594 — was the next wrong answer: `FROM a JOIN b ON …,
+		// c` planned as `(a × c) ⋈ b` rather than `(a ⋈ b) × c`, so a real
+		// cross product sat under the equi-join (60,175 × 2,000 rows on the
+		// SF0.01 fixture, an OOM kill at 30 GB, #593) and the WHERE equality
+		// between b and c straddled that join's two sides, where its key
+		// pair resolves against neither and the query answers zero rows with
+		// no error (#594).
+		items := make([]*Node, len(info.Tables))
+		for i, t := range info.Tables {
+			item, err := resolveTableOrCTE(t, ctes)
 			if err != nil {
 				return nil, err
 			}
-			plan = NewJoin(plan, right, "cross", "")
+			items[i] = item
+		}
+		// crossFold merges items[0..k] into items[k], left-deep, leaving nil
+		// behind. LATERAL needs it: its right side may reference EVERY
+		// preceding FROM item, not just the one it extends.
+		crossFold := func(k int) *Node {
+			var acc *Node
+			for i := 0; i <= k; i++ {
+				if items[i] == nil {
+					continue
+				}
+				if acc == nil {
+					acc = items[i]
+				} else {
+					acc = NewJoin(acc, items[i], "cross", "")
+				}
+				items[i] = nil
+			}
+			items[k] = acc
+			return acc
 		}
 
 		for _, join := range info.Joins {
+			// FromItem is non-decreasing across Joins, so the slot a join
+			// names is never one an earlier crossFold emptied.
+			idx := join.FromItem
+			if idx < 0 || idx >= len(items) {
+				idx = len(items) - 1
+			}
 			if join.Lateral && strings.HasPrefix(join.RightTable, "(") {
 				// LATERAL subquery: decorrelate by extracting correlated
 				// WHERE predicates and moving them to the join condition.
-				right, joinCond, err := buildLateralSubquery(plan, join, ctes)
+				left := crossFold(idx)
+				right, joinCond, err := buildLateralSubquery(left, join, ctes)
 				if err != nil {
 					return nil, err
 				}
@@ -62,7 +96,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				if joinCond != "" && strings.EqualFold(strings.TrimSpace(jt), "cross join") {
 					jt = "join"
 				}
-				plan = NewJoin(plan, right, jt, joinCond)
+				items[idx] = NewJoin(left, right, jt, joinCond)
 			} else {
 				rightRef := plansql.TableRef{
 					Name:  join.RightTable,
@@ -75,7 +109,31 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				if err != nil {
 					return nil, err
 				}
-				plan = NewJoin(plan, right, join.Type, join.Condition)
+				// The join's left is its own FROM item — UNLESS its ON clause
+				// references an earlier comma item, which SQL scopes it to see
+				// (a JOIN's ON may name any relation to its left in the FROM
+				// list). `FROM a, b JOIN c ON a.k = c.k` must put a in the
+				// join's left subtree, or the key naming a resolves to nothing
+				// and the join answers no rows — the #593/#594 failure mode,
+				// reached here by an ON rather than a WHERE. Fold only the
+				// referenced case, so a join whose ON stays within its own two
+				// sides keeps the later comma items as siblings (the shape the
+				// #593/#594 builder fix restored).
+				left := items[idx]
+				if join.Lateral || onRefsEarlierItem(join, items, idx) {
+					left = crossFold(idx)
+				}
+				items[idx] = NewJoin(left, right, join.Type, join.Condition)
+			}
+		}
+		for _, item := range items {
+			if item == nil {
+				continue
+			}
+			if plan == nil {
+				plan = item
+			} else {
+				plan = NewJoin(plan, item, "cross", "")
 			}
 		}
 	} else if len(info.Tables) > 0 {
@@ -1196,4 +1254,63 @@ func normalizeCorrelatedEquality(expr string, outerAliases map[string]bool) stri
 		return right + " = " + left
 	}
 	return expr
+}
+
+// onRefsEarlierItem reports whether an explicit join's ON clause references a
+// relation belonging to a FROM item BEFORE the one it extends. SQL scopes a
+// join's ON over every FROM item to its left, so `FROM a, b JOIN c ON a.k =
+// c.k` is legal and a must be in the join's left input. The builder attaches a
+// join to the single item it follows by default (the #593/#594 fix), so this
+// is what pulls the earlier items back in when the ON actually needs them —
+// and only then, leaving the common case (an ON within its own two sides) with
+// its later comma items still siblings.
+//
+// Detection is by relation QUALIFIER, which is all that is resolvable at build
+// time: scans carry their alias/name here, but not yet their columns
+// (AnnotateScanColumns runs in the physical planner). A bare column in an ON
+// referencing an earlier comma item is not recognised — an extreme edge the
+// fuzzer and BI clients do not emit, since a cross-item ON is always
+// qualified — and falls through to the default, exactly as before this change.
+func onRefsEarlierItem(join plansql.JoinInfo, items []*Node, idx int) bool {
+	if idx <= 0 {
+		return false
+	}
+	quals := condQualifiers(join)
+	if len(quals) == 0 {
+		return false
+	}
+	for i := 0; i < idx; i++ {
+		if items[i] == nil {
+			continue
+		}
+		for name := range liftRelationAliases(items[i]) {
+			if quals[name] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// condQualifiers returns the lower-cased relation qualifiers a join condition
+// references — {"a", "c"} for `a.k = c.k`. It reads the parsed AST when the
+// parser kept one and falls back to re-parsing the text. It reuses
+// collectASTColumnRefs — which already emits every qualified reference as a
+// lower-cased "table.column" entry — and keeps the table halves, so it covers
+// every expression node that walker does (AND/OR/CASE/func/IN/…) rather than a
+// hand-picked subset.
+func condQualifiers(join plansql.JoinInfo) map[string]bool {
+	expr := join.CondExpr
+	if expr == nil {
+		expr = tryParseExpr(join.Condition)
+	}
+	refs := make(map[string]bool, 8)
+	collectASTColumnRefs(expr, refs)
+	out := make(map[string]bool, 4)
+	for ref := range refs {
+		if i := strings.IndexByte(ref, '.'); i > 0 {
+			out[ref[:i]] = true
+		}
+	}
+	return out
 }

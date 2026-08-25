@@ -607,6 +607,7 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 					RightAlias:    rightTable.Alias,
 					RightTableRef: &rightTable,
 					Lateral:       true,
+					FromItem:      len(info.Tables) - 1,
 				}
 				if p.isKeyword(TokenKWOn) {
 					p.advance()
@@ -649,6 +650,9 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 			RightAlias:    rightTable.Alias,
 			RightTableRef: &rightTable,
 			Lateral:       lateral,
+			// The FROM item this join extends: the last one parsed, since a
+			// comma starts a new item and a JOIN continues the current one.
+			FromItem: len(info.Tables) - 1,
 		}
 
 		// Parse ON condition

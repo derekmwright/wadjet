@@ -3250,45 +3250,147 @@ func flattenJoinChain(n *Node, rels *[]*Node, edges *[]joinEdge) {
 		return
 	}
 
-	// Find which left-side relation owns the columns in the join condition.
-	// The naive approach (leftRep = leftAfter-1) is wrong for multi-way joins
-	// where the condition references a non-last relation (e.g., supplier-nation
-	// edge in supplier-lineitem-orders-nation chain).
-	leftRep := leftAfter - 1
-	if leftRep < 0 {
-		leftRep = 0
+	// Resolve which relation each SIDE of a condition belongs to.
+	//
+	// The naive answer (leftRep = leftAfter-1, rightRep = rightBefore) is
+	// wrong for multi-way joins whose condition references a non-last
+	// relation — the supplier-nation edge in a supplier-lineitem-orders-
+	// nation chain — so both endpoints are matched against the condition's
+	// own column references.
+	defLeft := leftAfter - 1
+	if defLeft < 0 {
+		defLeft = 0
 	}
-	rightRep := rightBefore
+	defRight := rightBefore
 
-	// Extract column refs from the join condition and match to relations.
-	// We must exclude right-side columns to avoid matching self-join aliases
-	// on the wrong side (e.g., for "c_nationkey = n2.n_nationkey" where n1 is
-	// already on the left, n_nationkey would incorrectly match n1).
-	condRefs := make(map[string]bool, 4)
-	extractJoinColumnRefs(n.JoinCond, condRefs)
-	if len(condRefs) > 0 {
-		// Collect right-side relation columns to exclude them from left matching
-		rightCols := collectSubtreeColumns((*rels)[rightRep])
+	leftAll := make(map[string]bool, 16)
+	for i := leftStart; i < leftAfter; i++ {
+		for c := range collectSubtreeColumns((*rels)[i]) {
+			leftAll[c] = true
+		}
+	}
+
+	// endpoints returns the (left, right) relation indexes cond relates.
+	endpoints := func(cond string) (int, int) {
+		condRefs := make(map[string]bool, 4)
+		extractJoinColumnRefs(cond, condRefs)
+		if len(condRefs) == 0 {
+			return defLeft, defRight
+		}
+		// The RIGHT endpoint used to be left at rightBefore — the first
+		// relation of the right subtree, which is the one the condition names
+		// only by luck. For `part x (supplier ⋈ partsupp)` with the condition
+		// `t1.ps_partkey = t2.p_partkey` the edge was recorded as
+		// part-supplier, and the reorderer then hung a conjunct naming
+		// partsupp on a join whose subtree does not contain it. A key that
+		// resolves to nothing matches nothing, so the join answered no rows
+		// and the query answered zero with no error, while the stranded
+		// relation became a real cross product (#593, #594).
+		//
+		// Prefer a relation owning a referenced column the other side does
+		// NOT expose; a shared bare name (self-joins) is ambiguous and is
+		// only a fallback, which keeps the previous choice where the
+		// condition says nothing new.
+		right, ambiguous := -1, -1
+		for i := rightBefore; i < len(*rels); i++ {
+			relCols := collectSubtreeColumns((*rels)[i])
+			for ref := range condRefs {
+				if !relCols[ref] {
+					continue
+				}
+				if !leftAll[ref] {
+					right = i
+					break
+				}
+				if ambiguous < 0 {
+					ambiguous = i
+				}
+			}
+			if right >= 0 {
+				break
+			}
+		}
+		if right < 0 {
+			right = ambiguous
+		}
+		if right < 0 {
+			right = defRight
+		}
+
+		// Left side: exclude the refs the chosen right relation owns, so a
+		// self-join alias does not match on the wrong side.
+		rightCols := collectSubtreeColumns((*rels)[right])
+		left := defLeft
 		for i := leftStart; i < leftAfter; i++ {
 			relCols := collectSubtreeColumns((*rels)[i])
 			for ref := range condRefs {
 				if rightCols[ref] {
-					continue // skip refs owned by the right side
+					continue
 				}
 				if relCols[ref] {
-					leftRep = i
+					left = i
 					break
 				}
 			}
 		}
+		return left, right
 	}
 
-	*edges = append(*edges, joinEdge{
-		leftIdx:  leftRep,
-		rightIdx: rightRep,
-		joinType: n.JoinType,
-		joinCond: n.JoinCond,
-	})
+	// ONE EDGE PER CONJUNCT. A join carrying a single (leftIdx, rightIdx)
+	// pair and its WHOLE condition text is only right while every conjunct
+	// relates the same two relations, and a comma-join FROM list routinely
+	// breaks that: the lift attaches each WHERE equality to the deepest join
+	// covering its two relations, so one join can end up with
+	// `l_suppkey = s_suppkey AND c_nationkey = s_nationkey` — two conjuncts
+	// over THREE relations. Recorded as one edge, the reorderer moved
+	// lineitem elsewhere and carried `l_suppkey = s_suppkey` onto a join
+	// whose subtree no longer had it; the key resolved to nothing and
+	// TPC-H Q5's revenue came back ~100x too large in its official
+	// comma-join spelling. Split, each conjunct lands on a join that spans
+	// the two relations it actually names — including the cycle edge, which
+	// the DP applies once both its endpoints are joined.
+	//
+	// Splitting is only safe when every part is a self-contained comparison:
+	// splitOnAnd is textual and would cut through a parenthesised OR.
+	upper := strings.ToUpper(n.JoinCond)
+	parts := splitOnAnd(n.JoinCond, upper)
+	splittable := len(parts) > 1
+	for _, part := range parts {
+		if _, ok := tryParseExpr(part).(*plansql.CmpExpr); !ok {
+			splittable = false
+			break
+		}
+	}
+	if !splittable {
+		l, r := endpoints(n.JoinCond)
+		*edges = append(*edges, joinEdge{
+			leftIdx:  l,
+			rightIdx: r,
+			joinType: n.JoinType,
+			joinCond: n.JoinCond,
+		})
+		return
+	}
+
+	type edgeKey struct{ l, r int }
+	grouped := make(map[edgeKey][]string, len(parts))
+	order := make([]edgeKey, 0, len(parts))
+	for _, part := range parts {
+		l, r := endpoints(part)
+		k := edgeKey{l, r}
+		if _, seen := grouped[k]; !seen {
+			order = append(order, k)
+		}
+		grouped[k] = append(grouped[k], strings.TrimSpace(part))
+	}
+	for _, k := range order {
+		*edges = append(*edges, joinEdge{
+			leftIdx:  k.l,
+			rightIdx: k.r,
+			joinType: n.JoinType,
+			joinCond: strings.Join(grouped[k], " AND "),
+		})
+	}
 }
 
 // estimateRelCost assigns a heuristic cost to a relation subtree.

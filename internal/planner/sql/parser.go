@@ -431,6 +431,21 @@ type JoinInfo struct {
 	Condition     string
 	CondExpr      Node
 	Lateral       bool // LATERAL join — right side can reference left side columns
+	// FromItem is the index into SelectInfo.Tables of the comma-separated
+	// FROM item this join EXTENDS. A FROM list is a list of items and an
+	// explicit JOIN belongs to the item it follows, but the parser flattens
+	// items into Tables and joins into Joins, which loses that association:
+	// `FROM a JOIN b ON …, c` and `FROM a, b JOIN c ON …` produce two-entry
+	// Tables and a one-entry Joins that are otherwise indistinguishable.
+	// The builder needs it to attach each join to the right item — folding
+	// the comma tables in first instead planned the former as `(a × c) ⋈ b`,
+	// which buries a real cross product under the equi-join (#593) and
+	// leaves the WHERE equality straddling that join's two sides, where the
+	// key pair resolves to nothing and the query answers zero rows (#594).
+	// Non-decreasing across Joins, since Tables only grows as parsing
+	// advances. Zero for a hand-built JoinInfo, which attaches it to the
+	// first item — the same tree the single-item case has always produced.
+	FromItem int
 }
 
 // OrderByItem describes an ORDER BY element.

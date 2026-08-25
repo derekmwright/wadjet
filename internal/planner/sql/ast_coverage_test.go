@@ -1182,6 +1182,82 @@ func TestParse_CommaJoin(t *testing.T) {
 	}
 }
 
+// TestParse_CommaJoinFromItem pins JoinInfo.FromItem: the parser flattens a
+// FROM clause into a Tables list and a Joins list, which on its own cannot
+// tell `FROM a JOIN b ON …, c` from `FROM a, b JOIN c ON …` — both produce two
+// tables and one join. FromItem records which comma-separated FROM ITEM each
+// join extends, which is what lets the builder keep the join attached to it
+// (#593, #594).
+func TestParse_CommaJoinFromItem(t *testing.T) {
+	cases := []struct {
+		name         string
+		sql          string
+		wantTables   []string
+		wantFromItem []int
+	}{
+		{
+			name:         "join_then_comma",
+			sql:          "SELECT 1 FROM a JOIN b ON a.id = b.id, c",
+			wantTables:   []string{"a", "c"},
+			wantFromItem: []int{0},
+		},
+		{
+			name:         "comma_then_join",
+			sql:          "SELECT 1 FROM c, a JOIN b ON a.id = b.id",
+			wantTables:   []string{"c", "a"},
+			wantFromItem: []int{1},
+		},
+		{
+			name:         "two_joined_items",
+			sql:          "SELECT 1 FROM a JOIN b ON a.id = b.id, c JOIN d ON c.id = d.id",
+			wantTables:   []string{"a", "c"},
+			wantFromItem: []int{0, 1},
+		},
+		{
+			name:         "single_item_chain",
+			sql:          "SELECT 1 FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id",
+			wantTables:   []string{"a"},
+			wantFromItem: []int{0, 0},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := Parse(tc.sql)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			info, err := ExtractSelect(parsed)
+			if err != nil {
+				t.Fatalf("ExtractSelect: %v", err)
+			}
+			if len(info.Tables) != len(tc.wantTables) {
+				t.Fatalf("got %d FROM items, want %d", len(info.Tables), len(tc.wantTables))
+			}
+			for i, want := range tc.wantTables {
+				if info.Tables[i].Name != want {
+					t.Errorf("FROM item %d is %q, want %q", i, info.Tables[i].Name, want)
+				}
+			}
+			if len(info.Joins) != len(tc.wantFromItem) {
+				t.Fatalf("got %d joins, want %d", len(info.Joins), len(tc.wantFromItem))
+			}
+			last := -1
+			for i, want := range tc.wantFromItem {
+				if got := info.Joins[i].FromItem; got != want {
+					t.Errorf("join %d extends FROM item %d, want %d", i, got, want)
+				}
+				// The builder relies on this being non-decreasing: it folds
+				// earlier items into a LATERAL's left side and must never be
+				// asked for a slot it already emptied.
+				if info.Joins[i].FromItem < last {
+					t.Errorf("join %d's FromItem %d went backwards from %d", i, info.Joins[i].FromItem, last)
+				}
+				last = info.Joins[i].FromItem
+			}
+		})
+	}
+}
+
 func TestParse_LeftJoinNoOuter(t *testing.T) {
 	parsed, err := Parse("SELECT a.id FROM a LEFT JOIN b ON a.id = b.id")
 	if err != nil {
