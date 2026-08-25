@@ -1206,20 +1206,17 @@ func postgresSemanticsCases() []pgCase {
 				ORDER BY 1`},
 		// The SCALE question, not dodged: d_key 1/2/3 give d_4 values of
 		// -6.1875, -6.1250 and -6.0625, none of which is a whole number of
-		// hundredths. The single-process engine — the arm this corpus runs —
-		// re-reads every row's rendered text at the FIRST arm's scale, so it
-		// TRUNCATES those to -6.18 / -6.12 / -6.06 and the union answers six
-		// values PostgreSQL does not have. That is #532, fixed separately;
-		// pinned here so the corpus carries the shape rather than avoiding
-		// it, and so the pin fails the day the fix lands.
+		// hundredths. The single-process engine used to re-read every row's
+		// rendered text at the FIRST arm's scale, truncating those to
+		// -6.18 / -6.12 / -6.06 and answering six values PostgreSQL does not
+		// have. Fixed by widening the result to both arms' declared DECIMAL
+		// scale before boxing, same as the stage DAG (#533). Gated, not pinned:
+		// this entry WAS the #532 pin, and its agreeing is that fix's proof.
+		// Refs #532.
 		pgCase{name: "SetOpUnionAllAcrossDecimalScalesLosesDigits", ordered: true,
 			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (1, 2, 3)
 				UNION ALL SELECT d_4 FROM dec_probe WHERE d_key IN (1, 2, 3)
-				ORDER BY 1`,
-			knownBug: pgBugWadjet + " the single-process set-operation adapter builds its result under " +
-				"the FIRST arm's schema and re-reads each row's rendered DECIMAL text at that scale, " +
-				"so a wider arm's digits are truncated (-6.1875 comes back as -6.18). The stage DAG " +
-				"widens both arms and keeps them (#533)", issue: "#532"},
+				ORDER BY 1`},
 		// The same pair with the FLOAT arm first, which the single-process
 		// engine — the arm this corpus runs — cannot answer at all: it boxes
 		// each row and hands them to batch.FromRows under the FIRST arm's
