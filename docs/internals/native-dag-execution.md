@@ -114,7 +114,7 @@ the embedded engine per policy shape.
 | `NodeSort` | `sort` → merge-sort tree | `plan.go:3105`. A key naming a term the SELECT list drops is a `__sortkey_N` that no stage emits — see §Synthetic sort keys. |
 | `NodeWindow` | `window` | `plan.go:3384`. One task per PARTITION BY partition when the input already arrives clustered on those keys; Singleton otherwise — see §Window. |
 | `NodeFilter` | pushes predicates onto child stage | `plan.go:3323` |
-| `NodeLimit` | a bound on the sort stage below it, a per-task `RowLimit` on the scans, and — for every LIMIT the coordinator's post-gather pass cannot see — a `limit` stage | `plan.go`, `needsLimitStage`. See §Where a LIMIT is applied. |
+| `NodeLimit` | a bound on the sort stage below it (unless a lower LIMIT already owns that sort — #525), a per-task `RowLimit` on the scans, and — for every LIMIT the coordinator's post-gather pass cannot see — a `limit` stage | `plan.go`, `needsLimitStage`. See §Where a LIMIT is applied. |
 | `NodeUnion` | `union` (+ a `GroupByAll` `final_aggregate` when not ALL) | `set_op_stages.go`. One task per arm: task *i* reads arm *i*'s whole output and projects it onto the result column names and types, so the stage's files ARE the concatenation. |
 | `NodeIntersect` / `NodeExcept` | `union` (with per-arm tag columns) + a grouped counting `final_aggregate` | `set_op_stages.go` (#346). The distribution pass inserts an `exchange-repartition` on the full result row between them — see §Set operations. |
 | **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. No USER DISTINCT reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns every `Distinct(Project)` in the tree, at any depth, into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages (#466 widened this from the root path only). What still passes through: planner-inserted `BuildSideDedup` Distincts (semi/anti build dedup, decorrelated semijoin key source), which carry no user-visible semantics, and root-path fallback shapes the coordinator dedups after the gather. A user Distinct anywhere else is REFUSED by `refuseUnstageableDistinct` (`physical/distinct_refusal.go`) rather than dropped, and the coordinator answers it on the local single-process pipeline. |
@@ -946,15 +946,31 @@ correctness of a distributed change before EC2.
 
 ## Where a LIMIT is applied
 
-Three things can bound a stream on the DAG, and they cover disjoint cases.
-Deciding which one owns a given `NodeLimit` is `needsLimitStage`
-(`planner/physical/plan.go`):
+Three things can bound a stream on the DAG. Deciding which one owns a given
+`NodeLimit` is `needsLimitStage` (`planner/physical/plan.go`):
 
 | Applier | Reaches | How |
 |---|---|---|
 | the coordinator's post-gather pass | the PLAN ROOT's LIMIT and no other | `ExecuteSQL`'s `mi.Limit`/`mi.Offset` block, from `logical.ExtractMergeInfo` — which reads `plan` itself, not a path |
-| a `sort` / `merge_sort` stage's top-N | a LIMIT with an ORDER BY directly below it **and no OFFSET** | `walkStages` writes `Stage.Limit = limit+offset`; the SKIP is the coordinator's job in the shape that was written for |
+| a `sort` / `merge_sort` stage's top-N | a LIMIT with an ORDER BY below it, **no OFFSET**, and **no lower LIMIT already holding that sort** | `walkStages` scans backwards for an unclaimed sort and writes `Stage.Limit = limit+offset`; the SKIP is the coordinator's job in the shape that was written for |
 | **`limit` stage** (`StageLimit`) | everything else | one Singleton task, `[OpShuffleSource, OpLimit, sink]`, applying OFFSET then LIMIT once over its whole input |
+
+**Disjoint is a property of the ownership RULE, not of the shapes.** Two
+LIMITs in one query can both want the same sort stage, and until #525 the
+outer one took it: `(SELECT n FROM nation ORDER BY n LIMIT 3) i LIMIT 5`
+overwrote the inner's 3 with 5 and then suppressed the outer's own stage
+because it had just found a sort, so the query answered 5 where PostgreSQL
+answers 3. Both halves were wrong and each hid the other. `walkStages`'
+backwards scan now stops at a sort that already carries `HasLimit` (nothing
+else writes it during the walk) and at any `StageLimit` it passes (a lower
+LIMIT is applied above that sort, so this bound has to compose ON TOP), and
+reports `sorted = false` for both — which sends the outer LIMIT to a stage of
+its own, the composition the all-bare nesting already produced. Restricting
+the scan to this LIMIT's own stages would not have helped: the inner sort is
+inside the outer's child walk. Gates:
+`physical.TestNestedLimitDoesNotStealTheInnerSort` (plan shape),
+`coordinator.TestDerivedLimitBoundsDistributedResult` (`nested_limit_*`), and
+the `NestedLimit*` families in the two-path and PostgreSQL corpora.
 
 A LIMIT the first two miss bounded **nothing** before #478. `SELECT COUNT(*)
 FROM (SELECT DISTINCT k FROM t LIMIT 2) u` counted every distinct k, its plain

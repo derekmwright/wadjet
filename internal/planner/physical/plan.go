@@ -3624,8 +3624,16 @@ func hasFilterOrPartition(n *logical.Node) bool {
 //   - A sort stage's top-N. It needs an ORDER BY below the LIMIT, and it
 //     truncates to limit+OFFSET rather than skipping, because the OFFSET is
 //     the coordinator's job in the shape it was written for. So it covers a
-//     sorted LIMIT with no OFFSET, and only that.
+//     sorted LIMIT with no OFFSET that NO LOWER LIMIT has already claimed,
+//     and only that.
 //   - This stage.
+//
+// "Disjoint" is a property of the OWNERSHIP RULE, not of the shapes: two
+// LIMITs in one query can both want the same sort stage, and until #525 the
+// outer one took it — overwriting the inner's bound and then suppressing its
+// own stage because it had just found a sort. walkStages' backwards scan
+// stops at a claimed sort for that reason, so `sorted` here means "a sort
+// stage carries THIS limit", never "there is a sort somewhere below".
 //
 // A LIMIT the first two miss bounded NOTHING before #478: `SELECT COUNT(*)
 // FROM (SELECT DISTINCT k FROM t LIMIT 2) u` counted every distinct k, and
@@ -5020,25 +5028,47 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			stageBound = node.LimitVal + node.OffsetVal
 			hasStageBound = true
 		}
-		// Propagate limit to both merge_sort and sort stages
+		// Propagate limit to both merge_sort and sort stages — but only to a
+		// sort NO LOWER LIMIT ALREADY OWNS.
+		//
+		// The scan is backwards over the whole stage list, so for a nested
+		// LIMIT it reaches the INNER one's sort: `(SELECT n FROM nation
+		// ORDER BY n LIMIT 3) i LIMIT 5` wrote 5 over the inner's 3 and then
+		// suppressed its own stage on the strength of the sort it had just
+		// mis-claimed, answering 5 where PostgreSQL answers 3 (#525).
+		// Restricting the range to (*stages)[preLimitCount:] does not help —
+		// the inner sort is inside this LIMIT's own child walk.
+		//
+		// Two things say a sort is spoken for. A sort/merge_sort that already
+		// carries HasLimit was bounded by a LIMIT below (nothing else writes
+		// it during walkStages), and a StageLimit anywhere between here and
+		// the sort means a lower LIMIT is applied above that sort — this
+		// bound has to compose ON TOP of it, not underneath. Either way the
+		// scan stops and reports sorted=false, so needsLimitStage gives this
+		// LIMIT a stage of its own, which is the correct composition and the
+		// one the all-bare nesting already produced.
 		sorted := false
 		for i := len(*stages) - 1; i >= 0; i-- {
-			if (*stages)[i].Type == "merge_sort" {
-				if hasStageBound {
-					(*stages)[i].Limit = stageBound
-					(*stages)[i].HasLimit = true
-				}
-				// else: leave both fields at their zero value — an unbounded
-				// stage is (0,false), and the shared-subplan fingerprint
-				// hashes Limit unconditionally, so writing NoLimit here would
-				// split an OFFSET-only sort from its no-LIMIT twin.
-				sorted = true
-			} else if (*stages)[i].Type == "sort" {
-				if hasStageBound {
-					(*stages)[i].Limit = stageBound
-					(*stages)[i].HasLimit = true
-				}
-				sorted = true
+			st := &(*stages)[i]
+			if st.Type == StageLimit {
+				break
+			}
+			if st.Type != "merge_sort" && st.Type != "sort" {
+				continue
+			}
+			if st.HasLimit {
+				break
+			}
+			if hasStageBound {
+				st.Limit = stageBound
+				st.HasLimit = true
+			}
+			// else: leave both fields at their zero value — an unbounded
+			// stage is (0,false), and the shared-subplan fingerprint hashes
+			// Limit unconditionally, so writing NoLimit here would split an
+			// OFFSET-only sort from its no-LIMIT twin.
+			sorted = true
+			if st.Type == "sort" {
 				break
 			}
 		}

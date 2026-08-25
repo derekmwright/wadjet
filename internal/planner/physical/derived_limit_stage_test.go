@@ -176,3 +176,135 @@ func renderStages(stages []Stage) string {
 	}
 	return out
 }
+
+// #525: two LIMITs, one sort, and the ownership rule that decides which of
+// them the sort belongs to.
+//
+// walkStages scans BACKWARDS over the whole stage list for a sort to hand its
+// bound to. For a nested LIMIT that scan reaches the INNER one's sort — the
+// outer `LIMIT 5` wrote 5 over the inner's 3, and then suppressed its own
+// stage because it had just found a sort, so the query answered 5 where
+// PostgreSQL answers 3. Both halves were wrong and each hid the other.
+//
+// Asserted on the SHAPE, because the shape is the invariant. Note which half
+// applies where: when the outer LIMIT is the plan ROOT, the coordinator's
+// post-gather pass owns it and no stage is emitted for it — so all that must
+// hold there is that the INNER bound survived on the sort. When the outer
+// LIMIT is itself one level down, it gets a StageLimit above the sort, which
+// is the composition the all-bare nesting already produced.
+func TestNestedLimitDoesNotStealTheInnerSort(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+
+	cases := []struct {
+		name string
+		sql  string
+		// wantSortLimit is the bound the sort stage must still carry, or -1
+		// when the plan must carry no bounded sort at all.
+		wantSortLimit int
+		// wantLimitStages are the (Limit, Offset) of the StageLimits, in
+		// plan order.
+		wantLimitStages [][2]int
+	}{
+		{
+			// #525's own repro. The outer LIMIT is inside a derived table,
+			// so it needs a stage of its own AND must leave the inner's 3
+			// alone. Before the fix: sort.Limit=5 and no stage at all.
+			name: "outer LIMIT one level down, over an inner ORDER BY LIMIT",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5) o`,
+			wantSortLimit:   3,
+			wantLimitStages: [][2]int{{5, 0}},
+		},
+		{
+			name: "…with an OFFSET on the outer one",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5 OFFSET 1) o`,
+			wantSortLimit:   3,
+			wantLimitStages: [][2]int{{5, 1}},
+		},
+		{
+			// The outer bound is the tighter one here, and it still may not
+			// be written onto the inner's sort: the rule must not depend on
+			// which number happens to be smaller.
+			name: "outer LIMIT tighter than the inner one",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 5) i LIMIT 2) o`,
+			wantSortLimit:   5,
+			wantLimitStages: [][2]int{{2, 0}},
+		},
+		{
+			// An inner OFFSET with no LIMIT leaves the sort UNBOUNDED but
+			// gives the inner its own StageLimit. The outer must compose on
+			// top of that stage, not reach under it to the sort.
+			name: "inner OFFSET-only under an outer LIMIT",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey OFFSET 20) i LIMIT 3) o`,
+			wantSortLimit:   -1,
+			wantLimitStages: [][2]int{{0, 20}, {3, 0}},
+		},
+		{
+			// The outer LIMIT at the ROOT: the coordinator's post-gather
+			// pass owns it, so no stage — but the inner's bound still has
+			// to survive on the sort, and that is the half #525 broke.
+			name:            "outer LIMIT at the plan root",
+			sql:             `SELECT n_nationkey FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5`,
+			wantSortLimit:   3,
+			wantLimitStages: nil,
+		},
+		{
+			name:            "…and at the root with an OFFSET",
+			sql:             `SELECT n_nationkey FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5 OFFSET 1`,
+			wantSortLimit:   3,
+			wantLimitStages: nil,
+		},
+		{
+			// The control: ONE sorted LIMIT still rides the sort and emits
+			// no stage of its own. The rule narrows who may claim a sort, it
+			// does not stop the claim.
+			name:            "a single sorted derived LIMIT is unchanged",
+			sql:             `SELECT COUNT(*) AS c FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) u`,
+			wantSortLimit:   3,
+			wantLimitStages: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stages := sqlToStages(t, cat, ctx, tc.sql, 3)
+
+			gotSortLimit := -1
+			for _, s := range stages {
+				if (s.Type == "sort" || s.Type == "merge_sort") && s.HasLimit {
+					gotSortLimit = s.Limit
+					break
+				}
+			}
+			if gotSortLimit != tc.wantSortLimit {
+				t.Errorf("bounded sort stage carries Limit=%d, want %d — an outer LIMIT "+
+					"overwrote a bound that is not its own\n  SQL: %s\n%s",
+					gotSortLimit, tc.wantSortLimit, tc.sql, renderStages(stages))
+			}
+
+			var got [][2]int
+			for _, s := range stages {
+				if s.Type == StageLimit {
+					got = append(got, [2]int{s.Limit, s.Offset})
+				}
+			}
+			if len(got) != len(tc.wantLimitStages) {
+				t.Fatalf("plan carries %d limit stages %v, want %d %v\n  SQL: %s\n%s",
+					len(got), got, len(tc.wantLimitStages), tc.wantLimitStages, tc.sql, renderStages(stages))
+			}
+			for i, w := range tc.wantLimitStages {
+				if got[i] != w {
+					t.Errorf("limit stage %d carries (Limit=%d Offset=%d), want (%d %d)",
+						i, got[i][0], got[i][1], w[0], w[1])
+				}
+			}
+		})
+	}
+}

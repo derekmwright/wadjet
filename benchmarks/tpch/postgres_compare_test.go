@@ -1056,6 +1056,46 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DerivedLimitFeedsWindow",
 			sql: `SELECT MAX(rn) AS c FROM (SELECT n_nationkey, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn
 				FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 4) v) w`},
+		// #525: a LIMIT under a LIMIT. Every entry above has exactly one per
+		// query, and one per query is what made the ownership rule look
+		// disjoint: walkStages scanned backwards for a sort to bound and
+		// reached the INNER LIMIT's, overwrote its 3 with the outer's 5, and
+		// then suppressed the outer's own stage on the strength of the sort
+		// it had just mis-claimed. `LIMIT <page>` over an already-bounded
+		// inner query is an ordinary BI pagination spelling.
+		pgCase{name: "NestedLimitSortedInner",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5) o`},
+		pgCase{name: "NestedLimitSortedInnerOuterOffset",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5 OFFSET 1) o`},
+		pgCase{name: "NestedLimitOuterTighter",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 5) i LIMIT 2) o`},
+		pgCase{name: "NestedLimitInnerOffsetOnly",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey OFFSET 20) i LIMIT 3) o`},
+		pgCase{name: "NestedLimitBareInner",
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation LIMIT 3) i LIMIT 5) o`},
+		// The VALUES, at the root and one level down: the two bounds have to
+		// COMPOSE, so the OFFSET skips into the inner's three rows rather
+		// than into the whole relation.
+		pgCase{name: "NestedLimitRootOuterValues",
+			sql: `SELECT n_nationkey FROM
+				(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5`,
+			ordered: true},
+		pgCase{name: "NestedLimitOffsetValues",
+			sql: `SELECT n_nationkey FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5 OFFSET 1) o
+				ORDER BY n_nationkey`,
+			ordered: true},
 	)
 
 	// --- Subquery predicates: where a bound inside a subquery binds --------

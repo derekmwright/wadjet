@@ -67,6 +67,34 @@ func TestDerivedLimitBoundsDistributedResult(t *testing.T) {
 		{"limit_feeds_window",
 			`SELECT MAX(rn) AS c FROM (SELECT n_nationkey, ROW_NUMBER() OVER (ORDER BY n_nationkey) AS rn
 				FROM (SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 4) v) w`, 4},
+		// #525: a LIMIT under a LIMIT, where the inner one has the ORDER BY.
+		// walkStages' backwards scan for a sort to bound reached the INNER
+		// one's, wrote the outer's 5 over its 3, and then suppressed the
+		// outer's own stage because it had just found a sort — so the query
+		// answered the OUTER bound, 5, where PostgreSQL answers 3. The
+		// all-bare nesting was already right (each LIMIT got its own stage),
+		// which is why only the sorted-inner form was wrong.
+		{"nested_limit_sorted_inner",
+			`SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5) o`, 3},
+		{"nested_limit_sorted_inner_outer_offset",
+			`SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5 OFFSET 1) o`, 2},
+		{"nested_limit_outer_tighter",
+			`SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 5) i LIMIT 2) o`, 2},
+		{"nested_limit_inner_offset_only",
+			`SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey OFFSET 20) i LIMIT 3) o`, 3},
+		// The all-bare nesting #478 already fixed, kept as the control.
+		{"nested_limit_bare_inner",
+			`SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation LIMIT 3) i LIMIT 5) o`, 3},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			res, err := tmdRunDAG(ctx, coord, tt.sql)
@@ -104,6 +132,54 @@ func TestDerivedLimitBoundsDistributedResult(t *testing.T) {
 			got, ok := numericCell(res.Rows[i]["n_nationkey"])
 			if !ok || got != w {
 				t.Errorf("row %d = %#v, want %v (PostgreSQL 17 returns 5,6,7)", i, res.Rows[i]["n_nationkey"], w)
+			}
+		}
+	})
+
+	// The outer LIMIT at the plan ROOT, where the coordinator's post-gather
+	// pass owns it and no stage is emitted for it. The inner bound still has
+	// to survive on the sort — which is the half of #525 that this shape
+	// shows and the aggregate-wrapped entries above cannot: PostgreSQL
+	// returns three rows, and the pre-fix DAG returned five.
+	t.Run("nested_limit_root_outer_values", func(t *testing.T) {
+		const sql = `SELECT n_nationkey FROM
+			(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5`
+		res, err := tmdRunDAG(ctx, coord, sql)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		want := []int64{0, 1, 2}
+		if len(res.Rows) != len(want) {
+			t.Fatalf("got %d rows, want %d (PostgreSQL 17) — the outer LIMIT overwrote the "+
+				"inner one's bound on the sort stage", len(res.Rows), len(want))
+		}
+		for i, w := range want {
+			got, ok := numericCell(res.Rows[i]["n_nationkey"])
+			if !ok || got != w {
+				t.Errorf("row %d = %#v, want %v", i, res.Rows[i]["n_nationkey"], w)
+			}
+		}
+	})
+
+	// The same one level down, with an OFFSET on the outer bound: the two
+	// bounds have to COMPOSE (skip 1 of the inner's 3), not replace.
+	t.Run("nested_limit_offset_values", func(t *testing.T) {
+		const sql = `SELECT n_nationkey FROM
+			(SELECT n_nationkey FROM
+				(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5 OFFSET 1) o
+			ORDER BY n_nationkey`
+		res, err := tmdRunDAG(ctx, coord, sql)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		want := []int64{1, 2}
+		if len(res.Rows) != len(want) {
+			t.Fatalf("got %d rows, want %d (PostgreSQL 17 returns 1,2)", len(res.Rows), len(want))
+		}
+		for i, w := range want {
+			got, ok := numericCell(res.Rows[i]["n_nationkey"])
+			if !ok || got != w {
+				t.Errorf("row %d = %#v, want %v", i, res.Rows[i]["n_nationkey"], w)
 			}
 		}
 	})

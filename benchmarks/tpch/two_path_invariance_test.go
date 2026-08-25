@@ -3671,6 +3671,57 @@ func twoPathCorpus() []twoPathQuery {
 					}
 				}
 			}},
+		// #525: a LIMIT under a LIMIT. Every derived-LIMIT entry above has
+		// exactly one per query, and that is what made the ownership rule
+		// look disjoint — walkStages' backwards scan for a sort to bound
+		// reached the INNER LIMIT's, overwrote its 3 with the outer's 5, and
+		// then suppressed the outer's own stage on the strength of the sort
+		// it had just mis-claimed. The all-bare nesting was already right
+		// (each LIMIT got its own stage), which is why only the sorted-inner
+		// form was wrong.
+		twoPathQuery{name: "NestedLimitSortedInner", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5) o`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 3)
+			}},
+		twoPathQuery{name: "NestedLimitSortedInnerOuterOffset", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5 OFFSET 1) o`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 2)
+			}},
+		twoPathQuery{name: "NestedLimitOuterTighter", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 5) i LIMIT 2) o`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 2)
+			}},
+		// The two bounds have to COMPOSE: the OFFSET skips into the inner's
+		// three rows, not into the whole relation.
+		twoPathQuery{name: "NestedLimitOffsetValues", cmp: cmpOrdered, expectRows: true,
+			sql: `SELECT n_nationkey FROM
+				(SELECT n_nationkey FROM
+					(SELECT n_nationkey FROM nation ORDER BY n_nationkey LIMIT 3) i LIMIT 5 OFFSET 1) o
+				ORDER BY n_nationkey`,
+			wantCols: []string{"n_nationkey"}, wantRows: 2,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				for i, want := range []float64{1, 2} {
+					if got := cellNum(rows[i], "n_nationkey"); got != want {
+						tb.Errorf("row %d = %v, want %v", i, got, want)
+					}
+				}
+			}},
 		// #526: an IN/NOT IN whose subquery JOINS, with a QUALIFIED select
 		// item. decorrelateInSubqueries names the semi join's inner key from
 		// the subquery's SELECT list; with ONE relation that name is provably
