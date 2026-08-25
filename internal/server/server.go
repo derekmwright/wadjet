@@ -35,39 +35,40 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // Config holds server configuration.
 type Config struct {
-	Addr              string
-	Catalog           *catalog.Catalog
-	Coordinator       *coordinator.Coordinator // nil = local execution only
-	DLQ               *coordinator.DLQ         // nil = no DLQ (standalone mode)
-	Auth              *auth.Authenticator      // nil = no authentication (static mode)
-	Authz             *auth.Authorizer         // nil = no authorization (static mode)
-	Policies          *auth.PolicySet          // nil = no cell-level policies (static mode)
-	Provider          *auth.Provider           // nil = use static Auth/Authz/Policies above
-	Metrics           *metrics.Metrics         // nil = no metrics collection
-	TLSConfig         *tls.Config              // nil = plain HTTP
-	MaxConnections     int                      // 0 = unlimited
-	SlowQueryThreshold time.Duration            // 0 = disabled, log queries exceeding this
-	ShutdownTimeout    time.Duration            // graceful shutdown drain timeout (default 30s)
-	QueryLimits        *config.QueryLimits      // global cost-based query limits (nil = unlimited)
-	RoleLimits         map[string]*config.QueryLimits // per-role overrides (nil = use global)
-	SortMergeJoinBytes int64                    // local sort-merge-join gate (0 = disabled)
-	LateMaterialization bool                    // view-column join output, deferred gather (default off)
+	Addr                string
+	Catalog             *catalog.Catalog
+	Coordinator         *coordinator.Coordinator       // nil = local execution only
+	DLQ                 *coordinator.DLQ               // nil = no DLQ (standalone mode)
+	Auth                *auth.Authenticator            // nil = no authentication (static mode)
+	Authz               *auth.Authorizer               // nil = no authorization (static mode)
+	Policies            *auth.PolicySet                // nil = no cell-level policies (static mode)
+	Provider            *auth.Provider                 // nil = use static Auth/Authz/Policies above
+	Metrics             *metrics.Metrics               // nil = no metrics collection
+	TLSConfig           *tls.Config                    // nil = plain HTTP
+	MaxConnections      int                            // 0 = unlimited
+	SlowQueryThreshold  time.Duration                  // 0 = disabled, log queries exceeding this
+	ShutdownTimeout     time.Duration                  // graceful shutdown drain timeout (default 30s)
+	QueryLimits         *config.QueryLimits            // global cost-based query limits (nil = unlimited)
+	RoleLimits          map[string]*config.QueryLimits // per-role overrides (nil = use global)
+	SortMergeJoinBytes  int64                          // local sort-merge-join gate (0 = disabled)
+	LateMaterialization bool                           // view-column join output, deferred gather (default off)
 }
 
 // Server is the Wadjet HTTP API server.
 type Server struct {
 	config   Config
-	catalog *catalog.Catalog
-	coord   *coordinator.Coordinator // nil = local execution
+	catalog  *catalog.Catalog
+	coord    *coordinator.Coordinator // nil = local execution
 	dlq      *coordinator.DLQ         // nil = no DLQ
 	logger   *slog.Logger
 	mux      chi.Router
 	server   *http.Server
-	provider *auth.Provider   // hot-reloadable auth (nil = static)
+	provider *auth.Provider // hot-reloadable auth (nil = static)
 	authz    *auth.Authorizer
 	policies *auth.PolicySet
 	metrics  *metrics.Metrics // nil = no metrics
@@ -82,8 +83,8 @@ func New(cfg Config, logger *slog.Logger) *Server {
 
 	s := &Server{
 		config:   cfg,
-		catalog: cfg.Catalog,
-		coord:   cfg.Coordinator,
+		catalog:  cfg.Catalog,
+		coord:    cfg.Coordinator,
 		dlq:      cfg.DLQ,
 		logger:   logger,
 		mux:      chi.NewRouter(),
@@ -630,7 +631,7 @@ func executeDMLInsert(ctx context.Context, cat *catalog.Catalog, info *plansql.I
 		}
 		row := make(map[string]any, len(columns))
 		for i, colName := range columns {
-			v, err := convertDMLValue(vals[i], typeMap[colName])
+			v, err := wadjet.ConvertValue(vals[i], typeMap[colName])
 			if err != nil {
 				return nil, fmt.Errorf("row %d, column %q: %w", rowIdx, colName, err)
 			}
@@ -781,7 +782,7 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 			for _, idx := range indices {
 				row := b.RowAt(int(idx))
 				for _, sc := range info.SetClauses {
-					v, convErr := convertDMLValue(sc.Value, typeMap[sc.Column])
+					v, convErr := wadjet.ConvertValue(sc.Value, typeMap[sc.Column])
 					if convErr != nil {
 						return nil, fmt.Errorf("SET %s: %w", sc.Column, convErr)
 					}
@@ -842,44 +843,6 @@ func readDMLFile(ctx context.Context, cat *catalog.Catalog, filePath string, sch
 		return nil, err
 	}
 	return scan.ReadFileColumnar(reader, schema)
-}
-
-func convertDMLValue(s string, typ parquet.TypeID) (any, error) {
-	s = strings.TrimSpace(s)
-	if strings.EqualFold(s, "null") {
-		return nil, nil
-	}
-	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
-		s = s[1 : len(s)-1]
-	}
-	switch typ {
-	case parquet.TypeBool:
-		return strconv.ParseBool(s)
-	case parquet.TypeInt32:
-		v, err := strconv.ParseInt(s, 10, 32)
-		return int32(v), err
-	case parquet.TypeInt64:
-		return strconv.ParseInt(s, 10, 64)
-	case parquet.TypeFloat32:
-		v, err := strconv.ParseFloat(s, 32)
-		return float32(v), err
-	case parquet.TypeFloat64:
-		return strconv.ParseFloat(s, 64)
-	case parquet.TypeString:
-		return s, nil
-	case parquet.TypeTimestamp:
-		for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02"} {
-			if t, err := time.Parse(layout, s); err == nil {
-				return t, nil
-			}
-		}
-		return nil, fmt.Errorf("cannot parse timestamp %q", s)
-	case parquet.TypeDate:
-		t, err := time.Parse("2006-01-02", s)
-		return t, err
-	default:
-		return s, nil
-	}
 }
 
 func (s *Server) handleListTables(w http.ResponseWriter, r *http.Request) {

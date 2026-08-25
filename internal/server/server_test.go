@@ -568,55 +568,106 @@ func TestWriteJSON(t *testing.T) {
 	}
 }
 
-// --- convertDMLValue ---
+// --- HTTP DML INSERT: PORT/PROTOCOL/DURATION (#495) ---
 
-func TestConvertDMLValue(t *testing.T) {
-	tests := []struct {
-		name string
-		val  string
-		typ  parquet.TypeID
-		want any
-		err  bool
-	}{
-		{"null", "null", parquet.TypeString, nil, false},
-		{"NULL", "NULL", parquet.TypeString, nil, false},
-		{"string_quoted", "'hello'", parquet.TypeString, "hello", false},
-		{"string_unquoted", "hello", parquet.TypeString, "hello", false},
-		{"int32", "42", parquet.TypeInt32, int32(42), false},
-		{"int64", "9999999", parquet.TypeInt64, int64(9999999), false},
-		{"float32", "3.14", parquet.TypeFloat32, float32(3.14), false},
-		{"float64", "2.718", parquet.TypeFloat64, 2.718, false},
-		{"bool_true", "true", parquet.TypeBool, true, false},
-		{"bool_false", "false", parquet.TypeBool, false, false},
-		{"date", "2024-01-15", parquet.TypeDate, mustParseTime("2006-01-02", "2024-01-15"), false},
-		{"timestamp_rfc3339", "2024-01-15T10:30:00Z", parquet.TypeTimestamp, mustParseTime(time.RFC3339, "2024-01-15T10:30:00Z"), false},
-		{"timestamp_space", "2024-01-15 10:30:00", parquet.TypeTimestamp, mustParseTime("2006-01-02 15:04:05", "2024-01-15 10:30:00"), false},
-		{"timestamp_invalid", "not-a-timestamp", parquet.TypeTimestamp, nil, true},
-		{"int32_invalid", "abc", parquet.TypeInt32, nil, true},
-		{"default_type", "whatever", parquet.TypeBytes, "whatever", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := convertDMLValue(tt.val, tt.typ)
-			if tt.err {
-				if err == nil {
-					t.Error("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", tt.want) {
-				t.Errorf("expected %v, got %v", tt.want, got)
-			}
-		})
-	}
-}
+// TestHandleDMLInsertPortProtocolDuration is the HTTP-path counterpart of
+// wadjet/dml_network_types_test.go's TestInsertNetworkTypedColumns (#485).
+//
+// server.go had its own, independently-maintained copy of dml.go's
+// convertValue — convertDMLValue — with the same three gaps #485 fixed in
+// the embedded API and never fixed here: PORT and PROTOCOL literals failed
+// the INSERT outright ("expected integer, got string", ingest.checkType
+// rejecting the raw string convertDMLValue's default arm handed it), and
+// DURATION silently wrote int64(0) for every row (checkType accepts a
+// string for DURATION, so validateRow let it through, but the writer's
+// int64 conversion has no string case for it). Every POST /v1/queries INSERT
+// reached this duplicate, not the fixed wadjet.ConvertValue — #485 shipped
+// with no test that actually exercised the HTTP path, which is why the
+// duplicate went unnoticed.
+//
+// The fix deletes convertDMLValue and routes both executeDMLInsert and
+// executeDMLUpdate through wadjet.ConvertValue directly (one
+// implementation), so this test drives the bug's exact repro through the
+// real HTTP handler chain (handleQuery -> handleDML -> executeDMLInsert)
+// instead of calling a conversion function directly.
+func TestHandleDMLInsertPortProtocolDuration(t *testing.T) {
+	srv, cat := newTestServer(t)
+	ctx := context.Background()
 
-func mustParseTime(layout, value string) time.Time {
-	t, _ := time.Parse(layout, value)
-	return t
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "dst_port", Type: parquet.TypePort, Nullable: true},
+		{Name: "proto", Type: parquet.TypeProtocol, Nullable: true},
+		{Name: "elapsed", Type: parquet.TypeDuration, Nullable: true},
+	}}
+	if err := cat.CreateTable(ctx, "flow_logs", schema, nil); err != nil {
+		t.Fatalf("creating table: %v", err)
+	}
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	postSQL := func(sql string) QueryResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"sql": sql})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.Post(ts.URL+"/v1/queries", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("POST %q: %v", sql, err)
+		}
+		defer resp.Body.Close()
+		var qr QueryResponse
+		if err := json.NewDecoder(resp.Body).Decode(&qr); err != nil {
+			t.Fatalf("decoding response for %q: %v", sql, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST %q: status %d, body %+v", sql, resp.StatusCode, qr)
+		}
+		return qr
+	}
+
+	postSQL(`INSERT INTO flow_logs (id, dst_port, proto, elapsed) VALUES (1, 443, 6, 1500000)`)
+
+	qr := postSQL(`SELECT dst_port, proto, elapsed FROM flow_logs WHERE id = 1`)
+	if len(qr.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d: %+v", len(qr.Rows), qr.Rows)
+	}
+	row := qr.Rows[0]
+	// JSON numbers decode as float64 into map[string]any.
+	want := map[string]float64{"dst_port": 443, "proto": 6, "elapsed": 1_500_000}
+	for col, w := range want {
+		got, ok := row[col].(float64)
+		if !ok {
+			t.Errorf("column %q = %#v (%T), want a number", col, row[col], row[col])
+			continue
+		}
+		if got != w {
+			t.Errorf("column %q = %v, want %v (elapsed=0 is the #495 silent-DURATION-zero symptom)", col, got, w)
+		}
+	}
+
+	// executeDMLUpdate's SET-clause values go through the identical
+	// wadjet.ConvertValue call (server.go's second convertDMLValue call
+	// site) -- verify PORT/PROTOCOL/DURATION convert there too.
+	postSQL(`UPDATE flow_logs SET dst_port = 8443, proto = 17, elapsed = 2500000 WHERE id = 1`)
+	qr = postSQL(`SELECT dst_port, proto, elapsed FROM flow_logs WHERE id = 1`)
+	if len(qr.Rows) != 1 {
+		t.Fatalf("after UPDATE: expected 1 row, got %d: %+v", len(qr.Rows), qr.Rows)
+	}
+	row = qr.Rows[0]
+	wantAfterUpdate := map[string]float64{"dst_port": 8443, "proto": 17, "elapsed": 2_500_000}
+	for col, w := range wantAfterUpdate {
+		got, ok := row[col].(float64)
+		if !ok {
+			t.Errorf("after UPDATE: column %q = %#v (%T), want a number", col, row[col], row[col])
+			continue
+		}
+		if got != w {
+			t.Errorf("after UPDATE: column %q = %v, want %v", col, got, w)
+		}
+	}
 }
 
 // --- defaultMaskValue ---
