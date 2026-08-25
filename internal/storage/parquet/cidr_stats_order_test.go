@@ -9,19 +9,19 @@ import (
 // against the local sort-key helper (#523): "9.0.0.0/8" is BELOW
 // "10.0.0.0/8" in PostgreSQL's inet order and ABOVE it as text.
 func TestCidrStatsSortKeyOrdersLikeInet(t *testing.T) {
-	lo, ok := cidrStatsSortKey("9.0.0.0/8")
+	lo, ok := CidrStatsSortKey("9.0.0.0/8")
 	if !ok {
-		t.Fatal("cidrStatsSortKey(9.0.0.0/8) ok = false")
+		t.Fatal("CidrStatsSortKey(9.0.0.0/8) ok = false")
 	}
-	hi, ok := cidrStatsSortKey("10.0.0.0/8")
+	hi, ok := CidrStatsSortKey("10.0.0.0/8")
 	if !ok {
-		t.Fatal("cidrStatsSortKey(10.0.0.0/8) ok = false")
+		t.Fatal("CidrStatsSortKey(10.0.0.0/8) ok = false")
 	}
 	if !("9.0.0.0/8" > "10.0.0.0/8") {
 		t.Fatal("test setup: \"9.0.0.0/8\" is not above \"10.0.0.0/8\" as text — the case this test exists for")
 	}
 	if lo >= hi {
-		t.Errorf("cidrStatsSortKey(9.0.0.0/8) = %x, want it BELOW cidrStatsSortKey(10.0.0.0/8) = %x", lo, hi)
+		t.Errorf("CidrStatsSortKey(9.0.0.0/8) = %x, want it BELOW CidrStatsSortKey(10.0.0.0/8) = %x", lo, hi)
 	}
 }
 
@@ -29,8 +29,8 @@ func TestCidrStatsSortKeyOrdersLikeInet(t *testing.T) {
 // refused rather than silently keyed as something — the fallback
 // updateStatsCIDR takes on this signal, not a value it could be misread as.
 func TestCidrStatsSortKeyRefusesGarbage(t *testing.T) {
-	if _, ok := cidrStatsSortKey("not a cidr"); ok {
-		t.Error("cidrStatsSortKey(\"not a cidr\") ok = true, want false")
+	if _, ok := CidrStatsSortKey("not a cidr"); ok {
+		t.Error("CidrStatsSortKey(\"not a cidr\") ok = true, want false")
 	}
 }
 
@@ -88,21 +88,29 @@ func TestCIDRRowGroupStatsAreInetOrdered(t *testing.T) {
 	if !ok || !cs.HasStats {
 		t.Fatalf("c_cidr stats = %+v, want HasStats", cs)
 	}
-	wantMin, ok := cidrStatsSortKey("9.0.0.0/8")
+	wantMin, ok := CidrStatsSortKey("9.0.0.0/8")
 	if !ok {
-		t.Fatal("cidrStatsSortKey(9.0.0.0/8) ok = false")
+		t.Fatal("CidrStatsSortKey(9.0.0.0/8) ok = false")
 	}
-	wantMax, ok := cidrStatsSortKey("192.168.188.190/24")
+	wantMax, ok := CidrStatsSortKey("192.168.188.190/24")
 	if !ok {
-		t.Fatal("cidrStatsSortKey(192.168.188.190/24) ok = false")
+		t.Fatal("CidrStatsSortKey(192.168.188.190/24) ok = false")
 	}
 	gotMin, ok := cs.MinValue.(CidrInetBound)
-	if !ok || string(gotMin) != wantMin {
+	if !ok || gotMin.Key != wantMin {
 		t.Errorf("MinValue = %#v, want the inet-order minimum (9.0.0.0/8)'s sort key, boxed as CidrInetBound", cs.MinValue)
 	}
 	gotMax, ok := cs.MaxValue.(CidrInetBound)
-	if !ok || string(gotMax) != wantMax {
+	if !ok || gotMax.Key != wantMax {
 		t.Errorf("MaxValue = %#v, want the inet-order maximum (192.168.188.190/24)'s sort key, boxed as CidrInetBound", cs.MaxValue)
+	}
+	// The box also carries the winning rows' TEXT, which is what the
+	// CATALOG persists — the Key is binary and JSON cannot hold it.
+	if gotMin.Text != "9.0.0.0/8" {
+		t.Errorf("MinValue.Text = %q, want the winning row's address text %q", gotMin.Text, "9.0.0.0/8")
+	}
+	if gotMax.Text != "192.168.188.190/24" {
+		t.Errorf("MaxValue.Text = %q, want the winning row's address text %q", gotMax.Text, "192.168.188.190/24")
 	}
 }
 

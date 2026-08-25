@@ -739,6 +739,24 @@ func extractColumnStatsAt(ra io.ReaderAt, size int64) map[string]catalog.FileCol
 			merged[col] = cur
 		}
 	}
+	// Unbox any CIDR bound before these stats leave for the CATALOG.
+	// parquet.RowGroupStats hands back a confirmed CIDR min/max as a
+	// parquet.CidrInetBound so the prune layer can compare it in inet order
+	// (#523) — but that box's Key is a BINARY string, and
+	// catalog.FileColumnStats is JSON-tagged and persisted in NATS KV, where
+	// encoding/json rewrites every byte above 0x7F as U+FFFD with no way
+	// back. The merge above needed the box (CompareNative orders CIDR by the
+	// key); the catalog needs the winning row's address TEXT, which is what
+	// the box's other half carries.
+	for col, cs := range merged {
+		if b, ok := cs.MinValue.(parquet.CidrInetBound); ok {
+			cs.MinValue = b.Text
+		}
+		if b, ok := cs.MaxValue.(parquet.CidrInetBound); ok {
+			cs.MaxValue = b.Text
+		}
+		merged[col] = cs
+	}
 	if len(merged) == 0 {
 		return nil
 	}

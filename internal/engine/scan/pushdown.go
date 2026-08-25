@@ -191,7 +191,9 @@ func compareValuesOK(a, b any) (int, bool) {
 		if !ok {
 			return 0, false
 		}
-		return cmpOrdered(string(ab), string(bb)), true
+		// Key, never Text: Text is the address as the file spells it and
+		// its byte order is the WRONG one — the whole defect #523 fixes.
+		return cmpOrdered(ab.Key, bb.Key), true
 	}
 	if _, ok := b.(pqt.CidrInetBound); ok {
 		return 0, false

@@ -23,19 +23,40 @@ type ColumnStats struct {
 }
 
 // CidrInetBound is a CIDR row-group MinValue/MaxValue RowGroupStats has
-// CONFIRMED is a PostgreSQL inet-order sort key (kernel.CidrSortKey's
-// encoding, duplicated in this package as cidrStatsSortKey) rather than the
-// column's raw address TEXT (#523). It is a distinct type, not a plain
-// string, specifically so a consumer's comparison cannot mix the two by
-// accident: kernel.StatsDomainValue's CIDR literal converts to this same
-// type, and a generic string comparator that special-cases it (see
-// scan.compareValuesOK) refuses to compare one against an ordinary string —
-// which is what an UNCONFIRMED file's untouched TEXT bound still is. That
-// refusal is what keeps kernel.StatsDomainValue's conversion unconditional
-// (every valid CIDR literal converts) safe even for a row group whose file
-// this reader cannot confirm is CIDR at all, or is CIDR but pre-#523: the
-// type system, not a per-file heuristic, is what stops the comparison.
-type CidrInetBound string
+// CONFIRMED is orderable in PostgreSQL's inet order (#523). It is a distinct
+// type, not a plain string, specifically so a consumer's comparison cannot
+// mix the two by accident: kernel.StatsDomainValue's CIDR literal converts
+// to this same type, and a generic string comparator that special-cases it
+// (see scan.compareValuesOK) refuses to compare one against an ordinary
+// string — which is what an UNCONFIRMED file's untouched TEXT bound still
+// is. That refusal is what keeps kernel.StatsDomainValue's conversion
+// unconditional (every valid CIDR literal converts) safe even for a row
+// group whose file this reader cannot confirm is CIDR at all, or is CIDR but
+// pre-#523: the type system, not a per-file heuristic, is what stops the
+// comparison.
+//
+// It carries BOTH representations because its two consumers need different
+// ones and neither can be derived from the other without loss:
+//
+//   - Key is the comparison domain — kernel.CidrSortKey's encoding,
+//     duplicated in this package as CidrStatsSortKey. It is a BINARY string
+//     (a family byte, the masked address bytes, the mask length, the full
+//     address bytes), so it is not valid UTF-8 and must never reach a JSON
+//     or text encoder.
+//   - Text is the winning row's address text exactly as the file stores it,
+//     which is what a CATALOG stat has to hold: catalog.FileColumnStats is
+//     JSON-tagged and persisted in NATS KV, and encoding/json rewrites every
+//     byte a Key holds above 0x7F as U+FFFD, irreversibly. Both
+//     extractColumnStats sites (storage/ingest, storage/compaction) unbox to
+//     this before the stats leave for the catalog.
+//
+// Text is empty on the LITERAL side (kernel.StatsDomainValue has a predicate
+// constant, not a row), which is sound because a literal-side bound is only
+// ever compared, never persisted.
+type CidrInetBound struct {
+	Key  string
+	Text string
+}
 
 // Reader reads rows from a Parquet file.
 type Reader struct {
@@ -1456,8 +1477,27 @@ func dictEntries(decoded int, dict *DictionaryData, typeID TypeID) error {
 }
 
 // CompareNative compares two native Go values for ordering.
+//
+// A pair it does not recognize answers 0 — "equal" — which for its callers
+// (the extractColumnStats merges in storage/ingest and storage/compaction)
+// means "the incumbent bound wins". That is why every native form
+// RowGroupStats can hand back needs an arm here: without one, a multi-row-
+// group file records ROW GROUP 0's bound as the whole file's, silently, and
+// the catalog's min/max for that column is wrong for every consumer of it.
 func CompareNative(a, b any) int {
 	switch av := a.(type) {
+	case CidrInetBound:
+		// The comparison domain is Key (inet order), never Text: the two
+		// disagree, which is the whole reason #523 exists.
+		if bv, ok := b.(CidrInetBound); ok {
+			switch {
+			case av.Key < bv.Key:
+				return -1
+			case av.Key > bv.Key:
+				return 1
+			}
+			return 0
+		}
 	case int64:
 		if bv, ok := b.(int64); ok {
 			if av < bv {

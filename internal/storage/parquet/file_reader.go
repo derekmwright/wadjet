@@ -330,14 +330,20 @@ func (f *FileReader) RowGroupStats(index int) RowGroupStats {
 				if !f.cidrStatsAreInetOrder() {
 					cs = ColumnStats{}
 				} else if mn, ok := cs.MinValue.(string); ok {
-					mnKey, okMn := cidrStatsSortKey(mn)
+					mnKey, okMn := CidrStatsSortKey(mn)
 					mx, okMx0 := cs.MaxValue.(string)
 					var mxKey string
 					if okMx0 {
-						mxKey, okMx0 = cidrStatsSortKey(mx)
+						mxKey, okMx0 = CidrStatsSortKey(mx)
 					}
 					if okMn && okMx0 {
-						cs.MinValue, cs.MaxValue = CidrInetBound(mnKey), CidrInetBound(mxKey)
+						// The bound keeps BOTH forms: Key is what the prune
+						// layer compares, Text is the winning row's address
+						// as the file stores it, which is what a catalog
+						// stat must persist (see CidrInetBound's doc — the
+						// Key is binary and JSON destroys it).
+						cs.MinValue = CidrInetBound{Key: mnKey, Text: mn}
+						cs.MaxValue = CidrInetBound{Key: mxKey, Text: mx}
 					} else {
 						// The writer promised every value in the file
 						// parsed; a footer that still fails to re-key is

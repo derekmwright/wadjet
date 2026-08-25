@@ -17,7 +17,9 @@ func TestStatsDomainValueCoversEveryType(t *testing.T) {
 	if !cidrOK {
 		t.Fatal("CidrSortKey(\"10.0.0.0/8\") ok = false, want true")
 	}
-	cidrKey := parquet.CidrInetBound(cidrKeyStr)
+	// Text is empty on the LITERAL side: StatsDomainValue converts a
+	// predicate constant, not a row (see parquet.CidrInetBound).
+	cidrKey := parquet.CidrInetBound{Key: cidrKeyStr}
 	// A literal of the shape a query carries for each type, and whether the
 	// prune layer may use it.
 	cases := map[batch.TypeID]struct {
@@ -165,7 +167,7 @@ func TestStatsDomainValueAgreesWithTheFilterKernel(t *testing.T) {
 	}
 	if got, ok := StatsDomainValue(batch.TypeCIDR, 0, "10.0.0.0/16"); !ok {
 		t.Error("the CIDR literal was withheld, want a conversion")
-	} else if want, _ := CidrSortKey("10.0.0.0/16"); got != parquet.CidrInetBound(want) {
+	} else if want, _ := CidrSortKey("10.0.0.0/16"); got != (parquet.CidrInetBound{Key: want}) {
 		t.Error("the CIDR stats value is not the kernel's CidrSortKey, boxed as parquet.CidrInetBound")
 	}
 	wantUUID, _ := parseUUIDToRawString("00000000-0000-4000-8000-0000000005dc")

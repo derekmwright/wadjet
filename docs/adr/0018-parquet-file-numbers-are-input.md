@@ -322,6 +322,55 @@ something keyed a pruning DECISION on it, which nothing did before #523.
 `TestFooterCacheRestoresDeclaredSchemaType` pins it directly; the type-safe
 box above is what stopped it from being a silent wrong answer a second time.
 
+### 7a. A comparison box is not a persistable value
+
+(Added 2026-08-25, review follow-up to #523.) `CidrInetBound` as first shipped
+carried ONE string: the inet-order sort key. That is the right value for the
+comparator and the wrong value for everything else that touches a
+`RowGroupStats`, because its other consumers do not compare it at all — they
+COPY it:
+
+- `internal/storage/ingest`'s and `internal/storage/compaction`'s
+  `extractColumnStats*` copy `RowGroupStats(i)`'s `MinValue`/`MaxValue`
+  verbatim into `catalog.FileColumnStats`, which is JSON-tagged and persisted
+  in NATS KV. The sort key is a BINARY string (family byte, masked address
+  bytes, mask length, full address bytes); `encoding/json` rewrites every byte
+  above 0x7F as U+FFFD and nothing puts them back. Compaction REWRITES these
+  stats, so the corruption is not confined to new tables — an existing table
+  acquires it on its next compaction pass.
+- `catalog.EncodeTableRGMeta`'s `writeValue` switches on the value's Go type
+  and stores anything it does not recognise as `nil`. A CIDR bound stored as
+  nil is a prune the coordinator's rgmeta path silently forgoes for the rest
+  of that table's life after ANALYZE.
+- `parquet.CompareNative` — the merge those same two extract sites use to fold
+  several row groups into one file-level bound — had no arm for the type and
+  answered 0 ("equal") for every pair, so a multi-row-group file recorded ROW
+  GROUP 0's bound as the whole file's.
+
+None of the three is a wrong ANSWER, which is exactly why every gate stayed
+green: two of them lose a prune (never a row) and the third writes metadata
+the optimizer only reads approximately. That is §6's failure mode seen from
+the other side — a defect whose only symptom is that an optimization stopped
+running, plus, here, permanent bad metadata.
+
+The rule: **a statistics bound whose COMPARISON domain differs from its
+STORAGE form carries both, and the box names which is which.**
+`CidrInetBound` is `{Key, Text}` — `Key` is the inet-order sort key and is the
+only half any comparator may read; `Text` is the winning row's address exactly
+as the file stores it, and is the half that leaves for the catalog. Both
+extract sites unbox to `Text` at that boundary, `CompareNative` and
+`scan.compareValuesOK` order on `Key`, and the rgmeta blob carries both under
+its own value tag (`rgMetaTagCidrInet`) so an ANALYZEd bound reaches the
+planner still boxed — still confirmed, still comparable. `Text` is empty on
+the LITERAL side, where there is no row; sound because a literal-side bound is
+only ever compared, never persisted.
+
+The blob tag is additive rather than a format version bump. An unknown tag is
+a decode error and `Catalog.TableRGMeta` turns a decode error into "no blob"
+(scans fall back to per-file footer reads), so an older binary reading a newer
+blob degrades in SPEED only — and only for the tables that actually hold the
+new type, which a version bump would not have managed.
+
 ## Consequences
 
 - Files that were read before and are refused now: a footer whose row groups

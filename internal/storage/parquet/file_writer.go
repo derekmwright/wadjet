@@ -93,7 +93,7 @@ type leafBuffer struct {
 	minF64, maxF64     float64
 	minBytes, maxBytes []byte
 
-	// minCidrKey/maxCidrKey are the sort keys (cidrStatsSortKey) of whichever
+	// minCidrKey/maxCidrKey are the sort keys (CidrStatsSortKey) of whichever
 	// TEXT values currently hold minBytes/maxBytes, for a TypeCIDR leaf only.
 	// Reset alongside the stats they compare, per row group.
 	minCidrKey, maxCidrKey string
@@ -1622,7 +1622,7 @@ func (lb *leafBuffer) updateStatsBytes(b []byte) {
 // rather than none — a bound the reader will withhold using anyway, once it
 // sees the missing flag, so its exact order does not matter.
 func (lb *leafBuffer) updateStatsCIDR(b []byte) {
-	key, ok := cidrStatsSortKey(string(b))
+	key, ok := CidrStatsSortKey(string(b))
 	if !ok {
 		lb.cidrKeyFailed = true
 		if !lb.hasStats {
@@ -1657,13 +1657,22 @@ func (lb *leafBuffer) updateStatsCIDR(b []byte) {
 	}
 }
 
-// cidrStatsSortKey is kernel.CidrSortKey, duplicated here rather than
+// CidrStatsSortKey is kernel.CidrSortKey, duplicated here rather than
 // imported: internal/storage/parquet sits BELOW internal/engine/exec/kernel
 // in the import graph (kernel imports internal/engine/batch, which imports
-// this package), so this package cannot import kernel without a cycle. Any
-// change to CidrSortKey's encoding must be mirrored here — the two are
-// covered by the same fixture in TestCidrStatsSortKeyMatchesKernel.
-func cidrStatsSortKey(s string) (string, bool) {
+// this package, and since #523 imports this package directly as well), so
+// this package cannot import kernel without a cycle. Any change to
+// CidrSortKey's encoding must be mirrored here.
+//
+// Exported ONLY so the duplication can be pinned from the side of the graph
+// that can see both: kernel.TestCidrStatsSortKeyMatchesKernel runs
+// PostgreSQL's own inet-order fixture (pgInetOrder, derived from a live
+// postgres:17-alpine) through both functions and requires byte-identical
+// keys. Nothing outside this package should call it to make a decision —
+// RowGroupStats' CidrInetBound is the supported way to get a comparable
+// CIDR bound, because it also carries the per-file confirmation this
+// function cannot make.
+func CidrStatsSortKey(s string) (string, bool) {
 	t := s
 	if !strings.ContainsRune(t, '/') {
 		if strings.ContainsRune(t, ':') {

@@ -29,6 +29,20 @@ func TestRGMetaRoundTrip(t *testing.T) {
 						"l_flag":     {HasStats: true, MinValue: false, MaxValue: true, NullCount: 0},
 						"l_nostats":  {HasStats: false},
 						"l_nullmin":  {HasStats: true, MinValue: nil, MaxValue: int64(10), NullCount: 1},
+						// A CONFIRMED CIDR bound stays BOXED across the blob
+						// (#523): its Key is the binary inet-order sort key
+						// (not valid UTF-8, hence the non-UTF-8 bytes below
+						// being ordinary here) and its Text is the winning
+						// row's address. Decoding it as a plain string would
+						// keep both halves' bytes and still lose the prune:
+						// scan.compareValuesOK refuses to compare an
+						// unboxed bound against the boxed literal
+						// kernel.StatsDomainValue produces, so the
+						// coordinator's rgmeta path would silently stop
+						// pruning CIDR — no wrong answer, no failing gate.
+						"l_cidr": {HasStats: true, NullCount: 2,
+							MinValue: parquet.CidrInetBound{Key: "\x04\n\x00\x00\x00\x08\n\x00\x00\x00", Text: "10.0.0.0/8"},
+							MaxValue: parquet.CidrInetBound{Key: "\x04\xc0\xa8\x01\x00\x18\xc0\xa8\x01\xbe", Text: "192.168.1.190/24"}},
 					},
 				},
 				{NumRows: 7, Columns: map[string]parquet.ColumnStats{}},

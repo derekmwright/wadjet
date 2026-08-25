@@ -83,7 +83,9 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 		if !ok {
 			return nil, false
 		}
-		return parquet.CidrInetBound(key), true
+		// Text stays empty: this is a predicate CONSTANT, not a row, and a
+		// literal-side bound is only ever compared, never persisted.
+		return parquet.CidrInetBound{Key: key}, true
 
 	// BYTES compares by bytes and a []byte literal has to become the string
 	// the stats decode to.

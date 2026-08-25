@@ -57,7 +57,16 @@ import (
 //	      max value: [1] type tag + payload
 //
 // Value tags: 0 = nil, 1 = bool (1 byte), 2 = int64 (8 bytes LE),
-// 3 = float64 (8 bytes LE), 4 = string ([4] length uint32 LE + bytes).
+// 3 = float64 (8 bytes LE), 4 = string ([4] length uint32 LE + bytes),
+// 5 = CIDR inet bound (two length-prefixed strings: the inet-order sort key,
+// then the address text — see parquet.CidrInetBound).
+//
+// A tag this decoder does not know is an ERROR, and TableRGMeta turns a
+// decode error into "no blob" (scans fall back to per-file footer reads), so
+// an older binary reading a blob a newer one wrote degrades in performance
+// only, never in answers. That is what makes adding a tag safe without a
+// version bump — a version bump would degrade the SAME way, for every table
+// rather than only the ones holding the new type.
 const (
 	rgMetaMagic   = "WRGM"
 	rgMetaVersion = 1
@@ -69,6 +78,14 @@ const (
 	rgMetaTagInt64  = 2
 	rgMetaTagFloat  = 3
 	rgMetaTagString = 4
+	// rgMetaTagCidrInet keeps a confirmed CIDR bound BOXED across the blob
+	// (#523). Writing it as a plain string would lose the box, and the box
+	// is the whole confirmation: scan.compareValuesOK refuses to compare a
+	// parquet.CidrInetBound against an ordinary string, so a bound that
+	// came back unboxed would prune nothing and the coordinator's rgmeta
+	// path would silently forgo pruning that a footer read gets — green on
+	// every gate, because a withheld prune is never a wrong answer.
+	rgMetaTagCidrInet = 5
 )
 
 // rgMetaMaxStringLen caps decoded stat-string allocations so a corrupt
@@ -124,6 +141,13 @@ func EncodeTableRGMeta(files []FileRGMeta) []byte {
 			binary.LittleEndian.PutUint32(lb[:4], uint32(len(tv)))
 			buf.Write(lb[:4])
 			buf.WriteString(tv)
+		case parquet.CidrInetBound:
+			buf.WriteByte(rgMetaTagCidrInet)
+			for _, part := range [2]string{tv.Key, tv.Text} {
+				binary.LittleEndian.PutUint32(lb[:4], uint32(len(part)))
+				buf.Write(lb[:4])
+				buf.WriteString(part)
+			}
 		default:
 			// Not a type statsToNative produces — store nothing rather
 			// than an approximation the pruner might act on.
@@ -216,6 +240,23 @@ func DecodeTableRGMeta(r io.Reader) (map[string][]parquet.RowGroupStats, error) 
 				return nil, err
 			}
 			return string(b), nil
+		case rgMetaTagCidrInet:
+			var parts [2]string
+			for i := range parts {
+				if _, err := io.ReadFull(r, lb[:4]); err != nil {
+					return nil, err
+				}
+				n := binary.LittleEndian.Uint32(lb[:4])
+				if n > rgMetaMaxStringLen {
+					return nil, fmt.Errorf("rgmeta: cidr bound length %d exceeds cap", n)
+				}
+				b := make([]byte, n)
+				if _, err := io.ReadFull(r, b); err != nil {
+					return nil, err
+				}
+				parts[i] = string(b)
+			}
+			return parquet.CidrInetBound{Key: parts[0], Text: parts[1]}, nil
 		default:
 			return nil, fmt.Errorf("rgmeta: unknown value tag %d", lb[0])
 		}
