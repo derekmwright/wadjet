@@ -68,6 +68,10 @@ type decimalCoercion struct {
 	name      string
 	rewrite   bool
 	shiftPow1 int // 10^shiftPow1 multiplies the unscaled carrier
+	// limit is 10^dstPrec, the exclusive bound on the coerced magnitude,
+	// resolved once per column rather than per row. Zero means the
+	// declaration named no precision this carrier can express.
+	limit batch.Int128
 }
 
 // NewDecimalCoerce returns an operator that coerces the named columns. An
@@ -152,6 +156,7 @@ func (d *DecimalCoerce) resolve(in *batch.RecordBatch) error {
 			idx: idx, srcType: src.Type, srcScale: srcScale,
 			dstScale: want.Scale, dstPrec: want.Precision, name: want.Name,
 		}
+		c.limit, _ = decimalPrecisionLimit(want.Precision)
 		switch src.Type {
 		case parquet.TypeDecimal:
 			if srcScale > want.Scale {
@@ -199,6 +204,14 @@ func sourceDecimalScale(v *batch.Vector, col parquet.Column) int {
 // coerceDecimalVector builds the rescaled column. Every row is converted,
 // including rows a selection vector excludes, so the caller's Sel stays valid
 // against the new vector without being rewritten.
+//
+// The bound checked is the DECLARED PRECISION, not the Int128 carrier's. They
+// are different bounds and only one of them is the type: a DECIMAL(38,2) whose
+// unscaled value lands in [10^38, 2^127-1] fits the carrier and does NOT fit
+// the declaration, and DECIMAL(11,4) is 10^11 short of the carrier entirely.
+// Admitting such a value writes a number the declared type cannot hold into a
+// column the parquet writer will size from that precision (ADR-0018 §4's
+// encoding rule) and that every consumer will read back as in-range.
 func coerceDecimalVector(src *batch.Vector, c *decimalCoercion) (*batch.Vector, error) {
 	n := src.Len
 	out := batch.NewVectorWithScale(batch.TypeDecimal, n, c.dstScale)
@@ -209,15 +222,50 @@ func coerceDecimalVector(src *batch.Vector, c *decimalCoercion) (*batch.Vector, 
 			continue
 		}
 		shifted, ok := unscaled.MulPow10(c.shiftPow1)
+		if ok {
+			ok = decimalFitsPrecision(shifted, c.limit)
+		}
 		if !ok {
 			return nil, fmt.Errorf(
 				"numeric field overflow: %s does not fit DECIMAL(%d,%d), the type this set operation's "+
-					"arms agree on for column %q",
-				unscaled.FormatDecimal(c.srcScale), c.dstPrec, c.dstScale, c.name)
+					"arms agree on for column %q — a field with precision %d, scale %d holds an "+
+					"absolute value below 10^%d",
+				unscaled.FormatDecimal(c.srcScale), c.dstPrec, c.dstScale, c.name,
+				c.dstPrec, c.dstScale, c.dstPrec-c.dstScale)
 		}
 		out.DecimalData.Data[i] = shifted
 	}
 	return out, nil
+}
+
+// decimalPrecisionLimit is 10^precision, the exclusive bound on a
+// DECIMAL(precision, s) column's unscaled magnitude. ok=false where the bound
+// itself has no Int128 — precision 39 and beyond, which setOpDecimalTarget's
+// cap makes unreachable, and which the caller then treats as "no bound to
+// check" rather than rejecting every row.
+func decimalPrecisionLimit(precision int) (batch.Int128, bool) {
+	if precision <= 0 || precision > batch.MaxDecimalPrecision {
+		return batch.Int128{}, false
+	}
+	return batch.Int128From(1).MulPow10(precision)
+}
+
+// decimalFitsPrecision reports whether an unscaled value's MAGNITUDE is below
+// the limit. A zero limit means the caller had none to give.
+func decimalFitsPrecision(v, limit batch.Int128) bool {
+	if limit.IsZero() {
+		return true
+	}
+	mag := v
+	if mag.IsNegative() {
+		mag = mag.Neg()
+		if mag.IsNegative() {
+			// -2^127 negates to itself; its magnitude has no Int128, so it is
+			// certainly outside any precision this carrier can declare.
+			return false
+		}
+	}
+	return mag.Cmp(limit) < 0
 }
 
 // decimalSourceCell reads row i's unscaled carrier, through a view when the

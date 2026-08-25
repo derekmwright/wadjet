@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"math/big"
 	"strings"
 	"testing"
 
@@ -262,5 +263,122 @@ func TestDecimalCoerceIsCloneable(t *testing.T) {
 	}
 	if got := out.Columns[0].DecimalData.Data[0].ToInt64(); got != 127500 {
 		t.Errorf("clone produced unscaled %d, want 127500", got)
+	}
+}
+
+// dcInt128 builds an Int128 from decimal text, for the values that do not fit
+// an int64 literal.
+func dcInt128(t *testing.T, text string) batch.Int128 {
+	t.Helper()
+	v, ok := new(big.Int).SetString(text, 10)
+	if !ok {
+		t.Fatalf("dcInt128: %q is not an integer", text)
+	}
+	neg := v.Sign() < 0
+	mag := new(big.Int).Abs(v)
+	lo := new(big.Int).And(mag, new(big.Int).SetUint64(^uint64(0)))
+	hi := new(big.Int).Rsh(mag, 64)
+	out := batch.Int128{Hi: hi.Int64(), Lo: lo.Uint64()}
+	if neg {
+		out = out.Neg()
+	}
+	return out
+}
+
+// dcDecimalBatch is dcBatch for a single Int128 the int64 helper cannot carry.
+func dcDecimalBatch(col parquet.Column, v batch.Int128) *batch.RecordBatch {
+	vec := batch.NewVectorWithScale(parquet.TypeDecimal, 1, col.Scale)
+	vec.DecimalData.Data[0] = v
+	return &batch.RecordBatch{
+		Schema:  []parquet.Column{col},
+		Columns: []*batch.Vector{vec},
+		Len:     1,
+	}
+}
+
+// TestDecimalCoerceChecksTheDeclaredPrecisionNotTheCarrier.
+//
+// The Int128 carrier and the DECLARED precision are two different bounds, and
+// only the second one is the type. Between them sits a band — an unscaled
+// magnitude in [10^38, 2^127-1] under a DECIMAL(38,s), and everything above
+// 10^p under any narrower p — where the multiplication succeeds and the value
+// still does not fit the column it is being written into. Admitting it writes
+// a number the declared type cannot hold into a column the parquet writer
+// sizes from that precision (ADR-0018 §4) and every consumer reads back as
+// in-range.
+func TestDecimalCoerceChecksTheDeclaredPrecisionNotTheCarrier(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		src      parquet.Column
+		unscaled string
+		wantP    int
+		wantS    int
+		ok       bool
+	}{
+		// The band the carrier check misses at the widest declaration:
+		// 1.5e37 at scale 9 shifts to 1.5e38, which is under 2^127-1
+		// (~1.70e38) and over 10^38.
+		{"band_at_38", dcDecimal(38, 9), "15000000000000000000000000000000000000", 38, 10, false},
+		// One ulp under the bound is admitted: 10^38-1 at scale 10 is the
+		// largest DECIMAL(38,10) there is.
+		{"largest_representable", dcDecimal(38, 9), "9999999999999999999999999999999999999", 38, 10, true},
+		// A narrower declaration is 10^11 short of the carrier, so the band
+		// there is enormous and trivially reachable.
+		{"narrow_precision", dcDecimal(9, 2), "10000000000", 11, 4, false},
+		{"narrow_precision_fits", dcDecimal(9, 2), "9999999", 11, 4, true},
+		// Negative magnitudes take the same bound.
+		{"negative_band", dcDecimal(38, 9), "-15000000000000000000000000000000000000", 38, 10, false},
+		{"negative_fits", dcDecimal(9, 2), "-9999999", 11, 4, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := dcDecimalBatch(tc.src, dcInt128(t, tc.unscaled))
+			op := NewDecimalCoerce([]DecimalCoerceColumn{{Name: "v", Precision: tc.wantP, Scale: tc.wantS}})
+			out, err := op.Execute(context.Background(), in)
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("a value inside DECIMAL(%d,%d) was rejected: %v", tc.wantP, tc.wantS, err)
+				}
+				if out.Columns[0].DecimalData.Scale != tc.wantS {
+					t.Errorf("output scale = %d, want %d", out.Columns[0].DecimalData.Scale, tc.wantS)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("a value outside DECIMAL(%d,%d) was admitted as %v — the check is on the "+
+					"declared precision, not on what an Int128 happens to hold",
+					tc.wantP, tc.wantS, out.Columns[0].DecimalData.Data[0])
+			}
+			for _, want := range []string{"numeric field overflow", `"v"`, "precision"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error should mention %q; got %q", want, err)
+				}
+			}
+		})
+	}
+}
+
+// TestDecimalPrecisionLimit pins the bound itself, including the edge the
+// 38-digit cap makes the widest reachable one.
+func TestDecimalPrecisionLimit(t *testing.T) {
+	for _, tc := range []struct {
+		p    int
+		want string
+		ok   bool
+	}{
+		{1, "10", true},
+		{18, "1000000000000000000", true},
+		{38, "100000000000000000000000000000000000000", true},
+		{39, "", false},
+		{0, "", false},
+		{-1, "", false},
+	} {
+		got, ok := decimalPrecisionLimit(tc.p)
+		if ok != tc.ok {
+			t.Errorf("decimalPrecisionLimit(%d) ok = %v, want %v", tc.p, ok, tc.ok)
+			continue
+		}
+		if ok && got.String() != tc.want {
+			t.Errorf("decimalPrecisionLimit(%d) = %s, want %s", tc.p, got.String(), tc.want)
+		}
 	}
 }
