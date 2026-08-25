@@ -37,6 +37,16 @@ if [ "$#" -eq 0 ]; then
     exit 1
 fi
 
+# Resolve JAR to an absolute path BEFORE the cd below — a relative
+# SQLANCER_JAR (or the relative default, if this script is ever invoked
+# from somewhere the default doesn't hold) would otherwise be looked up
+# relative to $RUN_DIR instead of the caller's original cwd, since it's
+# only expanded when "java -jar $JAR" finally runs.
+case "$JAR" in
+    /*) ;;
+    *) JAR="$(cd "$(dirname "$JAR")" && pwd)/$(basename "$JAR")" ;;
+esac
+
 RUN_DIR="${SQLANCER_RUN_DIR:-$(mktemp -d /tmp/sqlancer-run.XXXXXX)}"
 mkdir -p "$RUN_DIR"
 echo "tools/sqlancer/run.sh: running from $RUN_DIR (logs/wadjet/*.log lands there, never the repo checkout)" >&2

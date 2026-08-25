@@ -230,11 +230,18 @@ tasks:
     requires:
       vars: [ARGS]
     cmds:
+      # ARGS is deliberately UNQUOTED: it's a space-separated list of
+      # distinct java/SQLancer flags (see the desc above), and run.sh
+      # needs each one as its own argv entry. Quoting it collapses the
+      # whole thing into a single argument instead (verified: `task ...
+      # ARGS="--oracle NOREC --num-queries 10"` then reaches run.sh as
+      # one literal string containing spaces) — silently breaking every
+      # documented invocation instead of hardening this one.
       - tools/sqlancer/run.sh {{.ARGS}}
 
   sqlancer:triage:
-    desc: 'Classify SQLancer soak-log output into genuine oracle violations vs crash echoes vs noise, e.g. task sqlancer:triage LOGS="tools/sqlancer/soak-run/"'
+    desc: 'Classify SQLancer soak-log output into genuine oracle violations vs crash echoes vs noise, e.g. task sqlancer:triage LOGS="/tmp/sqlancer-soak"'
     requires:
       vars: [LOGS]
     cmds:
-      - go run ./cmd/sqlancer-triage {{.LOGS}}
+      - go run ./cmd/sqlancer-triage "{{.LOGS}}"

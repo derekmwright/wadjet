@@ -12,6 +12,13 @@
 // decompressed), or a directory (walked recursively for *.log/*.log.gz,
 // skipping "data" and "nats" subdirectories — a soak pair's wadjet
 // data/NATS store dirs, never log output).
+//
+// Exit status is non-zero if any argument couldn't be classified at all,
+// or if any file was only partially scanned (e.g. a line past this
+// package's line-length cap, or a corrupt gzip stream) — the printed
+// report still runs to completion using whatever was read, but a non-zero
+// exit means its counts are a floor, not a complete answer, and a script
+// driving this command should not treat that report as authoritative.
 package main
 
 import (
@@ -42,12 +49,19 @@ func main() {
 	}
 
 	report := triage.NewReport()
+	hadError := false
 	for _, f := range files {
 		if err := report.ClassifyFile(f); err != nil {
-			fmt.Fprintf(os.Stderr, "skipping %s: %v\n", f, err)
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+			hadError = true
 		}
 	}
 	report.Print(os.Stdout)
+
+	if hadError {
+		fmt.Fprintln(os.Stderr, "\nsqlancer-triage: one or more sources were unreadable or only partially scanned (see warnings above) — the counts above may undercount")
+		os.Exit(1)
+	}
 }
 
 func collectFiles(args []string) ([]string, error) {

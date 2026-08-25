@@ -225,7 +225,14 @@ priority: TLP first, then NoREC, then PQS):
 - **`--oracle CERT`** — **do not use.** It parses `EXPLAIN` plan text for
   Postgres-specific cardinality-estimator row counts and plan-node names;
   wadjet's `EXPLAIN` output has neither, so every check would fail on
-  format alone, not a real defect.
+  format alone, not a real defect. (It's still reachable —
+  `WadjetProvider` extends `PostgresProvider` and doesn't remove `CERT`
+  from `PostgresOracleFactory` — and `tools/sqlancer/triage` still
+  recognizes its `"Inconsistent result for query:"` assertion text as its
+  own category rather than filing it away as ordinary noise, in case this
+  advisory is ever overridden or an old soak ran it anyway. A CERT finding
+  needs the same false-positive-format-mismatch skepticism this advisory
+  already gives it, though — expect to have to rule that out by hand.)
 - **`--oracle FUZZER`** — pure crash-hunting, no correctness oracle. Cheap
   or free to add to a long soak alongside one of the above; not run in
   this pilot.
@@ -277,6 +284,10 @@ For every SQLancer-reported failure, in order:
      *unexpected error* below. The only way to tell a genuine PQS
      violation apart from routine noise is the **stack trace**: look for
      a frame naming `PivotedQuerySynthesisBase.reportMissingPivotRow`.
+   - CERT (`CERTOracle.check`; see "do not use" above): `"Inconsistent
+     result for query: " + query1 + "; --" + rowCount1 + "\n" + query2 +
+     "; --" + rowCount2` — its own distinct text, at least, so unlike PQS
+     it needs no stack-frame check to tell apart from an unexpected error.
 
    Everything else (an `AssertionError` whose message is just the raw
    query text, thrown by `SQLQueryAdapter.checkException`) is an
@@ -285,12 +296,27 @@ For every SQLancer-reported failure, in order:
    `ExpectedErrors` list. Both are worth triaging, but they mean different
    things.
 
+   One more trap a grep (correct pattern or not) can't see around: SQLancer's
+   own per-round reproduction log (`logs/wadjet/database<N>[-cur].log` —
+   what "Reproducing a finding from a seed" above points you at) never
+   prints the unprefixed exception form at all, only the `"--"`-commented
+   echo `state.getState().getLocalState().log(...)` appends after a
+   round's real DDL/DML. A tool (or a human grep) that dedupes a
+   *session* log's doubled form by skipping every `"--"`-prefixed line
+   would find nothing at all in a file like that and report a silent 0.
+   `tools/sqlancer/triage` handles this (see its package doc and
+   `classify_test.go`'s `roundLogEchoOnlyFixture`), but it's worth knowing
+   about if you're ever tempted to grep one of these files directly.
+
    Use `tools/sqlancer/triage` (`task sqlancer:triage LOGS="<path>"`,
    or `go run ./cmd/sqlancer-triage <file-or-dir>...`) instead of grepping
    for these by hand — it classifies every failure shape above (plus a
    wadjet crash's echo on the SQLancer/JDBC side: connection
    refused/reset, an I/O error sending to the backend) and prints counts
-   plus each genuine violation's best-effort minimized query. It
+   plus each genuine violation's best-effort minimized query. Its exit
+   status is non-zero if any source was unreadable or only partially
+   scanned, so a script driving it can tell a clean run from one whose
+   counts are a floor, not a complete answer. It
    transparently reads gzip'd session logs and walks a directory
    recursively. See `tools/sqlancer/triage/classify_test.go` for the
    classifier's own fixtures (several are real snippets pulled from a
@@ -491,27 +517,50 @@ completed agreed with wadjet's own answer.
 >
 > | Oracle | Reported (old grep) | Corrected (triage tool) |
 > |---|---:|---:|
-> | WHERE | 0 | 0 |
+> | WHERE | 0 | 0 (see caveat below — this is not evidence TLP-WHERE is clean) |
 > | HAVING | 0 | **9,913** (TLP result-set) |
 > | QUERY_PARTITIONING | 0 | **2,259** (1,760 TLP result-set + 499 TLP-Aggregate) |
 > | NOREC | 0 | 0 |
 > | PQS | 0 | 0 |
+> | CERT | not run | 0 (this classifier check applies retroactively; CERT was never one of this soak's oracles) |
 > | **Total** | **0** | **12,172** |
+>
+> **The WHERE row's 0 is not proof TLP-WHERE is clean.** Of the 1,760
+> QUERY_PARTITIONING TLP-result-set violations, 418 carry a
+> `TLPWhereOracle.check` stack frame (via `Finding.OracleCheck` —
+> `tools/sqlancer/triage` now records which oracle method's frame produced
+> each finding, precisely to make this check possible) — TLP-WHERE
+> genuinely fires there. The *dedicated* WHERE-only soak (10 seeds,
+> 31,576 queries) reported 0 not because the check is clean, but because
+> it barely ran: only 10 `AssertionError`s of any kind (mismatch or
+> otherwise) occurred across all 31,576 queries in that run — every other
+> query attempt was a connection-refused/reset symptom of that soak's own
+> crash-restart loop (see "The crash class that dominated this soak"
+> below), so TLP-WHERE's own check almost never got to execute to
+> completion there. "0 because clean" and "0 because starved" are not the
+> same finding, and only `QUERY_PARTITIONING`'s mixed run (where the crash
+> rate was lower) can currently tell them apart.
 >
 > Every TLP result-set violation sampled (dozens, spanning single-table
 > and multi-table, WHERE-only and HAVING shapes) has a `GROUP BY` with a
 > `SELECT`-list column outside it and not wrapped in an aggregate —
 > wadjet#590's exact shape, still open and unfixed at this soak's `main @
-> 1cf758ba` (unchanged as of this writing). Of the TLP-Aggregate
-> violations, ~25% show wadjet#592's `CAST(... AS BOOLEAN)`-in-a-predicate
-> shape directly in their query text; the remaining ~75% match a
-> TLP-Aggregate/multi-table-join lead documented (but not reproduced) on
-> wadjet#289's 2026-08-25 standing-soak comment — one concrete instance
-> was replayed here byte-for-byte from this soak's own log (exact
-> `CREATE`/`INSERT`/query sequence) against a fresh wadjet instance and
-> still did not reproduce, so it is **not** filed as a new issue; it
-> remains an open, unconfirmed lead. No violation sampled from this soak
-> needed a new issue — all trace to wadjet#590/#591/#592
+> 1cf758ba` (unchanged as of this writing). Of the 499 TLP-Aggregate
+> violations, 85 (17.0%) have a partition predicate (the `p` in the
+> `WHERE p` / `WHERE NOT p` / `WHERE (p) IS NULL` split) that is *itself*
+> exactly `CAST(... AS BOOLEAN)` or `(...)::BOOLEAN` — wadjet#592's exact
+> shape. (A looser count — a `CAST`-to-`BOOLEAN` pattern appearing
+> *anywhere* in the query, not necessarily as the whole partition
+> predicate — reaches 125 (25.1%); that looser number was this
+> correction's first draft and is not what wadjet#592 actually describes,
+> so the 85/17.0% figure is the one to trust.) The remaining TLP-Aggregate
+> violations match a TLP-Aggregate/multi-table-join lead documented (but
+> not reproduced) on wadjet#289's 2026-08-25 standing-soak comment — one
+> concrete instance was replayed here byte-for-byte from this soak's own
+> log (exact `CREATE`/`INSERT`/query sequence) against a fresh wadjet
+> instance and still did not reproduce, so it is **not** filed as a new
+> issue; it remains an open, unconfirmed lead. No violation sampled from
+> this soak needed a new issue — all trace to wadjet#590/#591/#592
 > (`bug,correctness,priority:high`, all open) or the unconfirmed lead
 > above, both already on record before this correction.
 
