@@ -1695,6 +1695,44 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "SubqueryCaseComputedWhere", sql: `SELECT n_name, bucket
 			FROM (SELECT n_name, CASE WHEN n_regionkey < 2 THEN NULL ELSE n_regionkey END AS bucket FROM nation) t
 			WHERE bucket > 2 ORDER BY n_name`},
+
+		// #584 — an UNQUALIFIED outer WHERE conjunct is attributed to the
+		// SUBQUERY's relation and pushed onto the inner scan, when a
+		// correlated EXISTS is decorrelated and the outer relation carries an
+		// alias. The outer rows are never filtered by it and the membership
+		// set is filtered by a predicate that was never meant for it.
+		//
+		// The entry IS the number that proves it. This query answers 6 on
+		// PostgreSQL 17 and DuckDB (the orders under 1000, each of which
+		// trivially has a matching clerk) and 104 on wadjet. 104 is not a
+		// corruption: it is the EXACT answer to
+		// `EXISTS (... AND sub.o_totalprice < 1000)`, the predicate written
+		// deliberately onto the subquery — verified equal on both engines.
+		// Dropping the predicate entirely would answer 15000, every order;
+		// mis-attributing it answers 104; the correct answer is 6. The engine
+		// answers 104, so it is mis-attributed, not dropped.
+		duckdbCase{name: "OuterPredicateBesideExists",
+			sql: `SELECT COUNT(*) AS n FROM orders t0
+				WHERE o_totalprice < 1000
+				  AND EXISTS (SELECT 1 FROM orders sub WHERE sub.o_clerk = t0.o_clerk)`,
+			knownBugArm: armBoth,
+			knownBug: "an unqualified outer conjunct beside a decorrelated EXISTS is pushed onto the " +
+				"subquery's scan: 104 rows where PostgreSQL 17 and DuckDB both say 6 (#584)"},
+		// The control, and the whole localization: the SAME query with the
+		// conjunct QUALIFIED answers 6 on both arms. Fully gated — if this one
+		// ever starts diverging, the defect has grown past #584.
+		duckdbCase{name: "OuterPredicateBesideExistsQualified",
+			sql: `SELECT COUNT(*) AS n FROM orders t0
+				WHERE t0.o_totalprice < 1000
+				  AND EXISTS (SELECT 1 FROM orders sub WHERE sub.o_clerk = t0.o_clerk)`},
+		// #584's second control — no alias on the outer relation, unqualified
+		// conjunct, attribution correct again — is deliberately NOT an entry
+		// here. Correlating by TABLE NAME rather than by alias is not
+		// recognized as a correlation at all, so the EXISTS survives as a
+		// per-row predicate and the stage DAG refuses it outright ("EXISTS
+		// subquery requires a SubqueryRunner", the #535 family). Pinning arm
+		// B for that would make this entry about a different defect than the
+		// one above it. The control's numbers are in #584.
 	)
 
 	// --- BYTES / BLOB (#570) --------------------------------------------

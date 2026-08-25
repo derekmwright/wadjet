@@ -1767,6 +1767,28 @@
       "fine": "1121cfccd5913f0a",
       "coarse": "1121cfccd5913f0a"
     },
+    "OuterPredicateBesideExists": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "06e9d52c1720fca4",
+      "coarse": "06e9d52c1720fca4"
+    },
+    "OuterPredicateBesideExistsQualified": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "06e9d52c1720fca4",
+      "coarse": "06e9d52c1720fca4"
+    },
     "OuterWhereAntiJoinIdiom": {
       "source": "duckdb",
       "row_count": 10,
