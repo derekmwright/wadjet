@@ -11,25 +11,26 @@ import (
 // CAST(<x> AS BOOLEAN).
 //
 // Before this existed, `Cast.Eval`'s switch had no boolean arm at all, so the
-// destination type was silently DROPPED and the operand came back unconverted.
-// Two consumers then read that unconverted value by two different rules and
-// answered two different things about the same expression (#592):
+// destination type was silently DROPPED and the operand came back
+// unconverted. THREE consumers then read that one unconverted value by three
+// different rules and answered three different things about the same
+// expression (#592):
 //
 //   - the PROJECTION allocated a BOOL output vector (inferCastType maps
 //     BOOLEAN to batch.TypeBool) and wrote the raw box through
 //     Vector.SetValue, whose TypeBool arm coerces an int64/int32/float64 to
 //     `!= 0` — so `SELECT (c)::BOOLEAN` looked correct, by accident, and a
 //     STRING operand hit the #361 silent-write guard and failed the query;
-//   - the FILTER asked `v.(bool)` and took the failed assertion for FALSE, so
-//     `WHERE (c)::BOOLEAN` excluded EVERY row while `WHERE NOT (c)::BOOLEAN`
-//     and `WHERE (c)::BOOLEAN IS NULL` were right — those two go through
-//     `evalBoolNull`, whose `toBoolVal` DOES read an integer's truthiness.
+//   - NOT, AND, OR and IS NULL went through `evalBoolNull`, whose
+//     `toBoolVal` DOES read an integer's truthiness — so those were right;
+//   - the bare FILTER asked `v.(bool)` and took the failed assertion for
+//     FALSE, so `WHERE (c)::BOOLEAN` excluded EVERY ROW.
 //
 // One expression with three readings is the two-path defect class, and it is
 // worse than an ordinary wrong answer here: TLP-WHERE's partition
 // (`p` UNION ALL `NOT p` UNION ALL `p IS NULL`) is exactly these three
 // readings, so the `p` arm contributed nothing and the partition permanently
-// undercounted.
+// undercounted by the rows the predicate is TRUE for.
 //
 // What the cast now answers, per ADR-0012 item 1 and item 5's new entry:
 //
@@ -69,29 +70,31 @@ const (
 // castToBool converts one already-non-nil operand value under the rule its
 // declaration selects.
 func (e *Cast) castToBool(b *batch.RecordBatch, v any) any {
+	rule := castBoolByBox
 	typ, declared := e.boolSourceType(b)
 	if declared {
-		switch castBoolRuleFor(typ) {
-		case castBoolIdentity:
-			if bv, ok := v.(bool); ok {
-				return bv
-			}
-		case castBoolFromInt:
-			if i, ok := toInt64Safe(v); ok {
-				return i != 0
-			}
-		case castBoolFromText:
-			if s, ok := stringOperand(v); ok {
-				return boolFromText(s)
-			}
-		case castBoolRefuse:
-			raiseCannotCastToBoolean(pgCastSourceName(typ))
-		}
-		// The declaration and the box disagree about this row's shape. Fall
-		// through rather than guess: the box rules below answer the same way
-		// for every shape they share with the declaration, and refuse the
-		// rest.
+		rule = castBoolRuleFor(typ)
 	}
+	switch rule {
+	case castBoolIdentity:
+		if bv, ok := v.(bool); ok {
+			return bv
+		}
+	case castBoolFromInt:
+		if i, ok := toInt64Safe(v); ok {
+			return i != 0
+		}
+	case castBoolFromText:
+		if s, ok := stringOperand(v); ok {
+			return boolFromText(s)
+		}
+	case castBoolRefuse:
+		raiseCannotCastToBoolean(pgCastSourceName(typ))
+	}
+	// Either no declaration answered, or the declaration and the box disagree
+	// about this row's shape. Read the box rather than guess: it answers the
+	// same way for every shape it shares with a declaration, and refuses the
+	// rest.
 	switch tv := v.(type) {
 	case bool:
 		return tv
