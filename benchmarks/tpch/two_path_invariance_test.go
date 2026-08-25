@@ -4678,6 +4678,40 @@ func twoPathCorpus() []twoPathQuery {
 			sql: `SELECT COUNT(*) AS n FROM supplier t0, partsupp t1, region t2
 				WHERE t0.s_suppkey = t1.ps_suppkey`},
 
+		// F1: a BARE (unqualified) cross-item ON — the join's ON names a
+		// column of a COMMA sibling, not one of its own two tables. Both paths
+		// must agree AND be non-empty; before the fix the query answered 0
+		// (the earlier comma item was never folded into the join's left, so
+		// its key stranded). DuckDB answers 15000 / 60175 / 60175.
+		twoPathQuery{name: "CommaBareCrossItemOn1", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM customer, orders JOIN nation ON c_nationkey = n_nationkey
+				WHERE c_custkey = o_custkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 1 || cellText(rows[0], "n") != "15000" {
+					tb.Fatalf("bare cross-item ON = %v, want 15000 (earlier comma item stranded, #F1)", rows)
+				}
+			}},
+		twoPathQuery{name: "CommaBareCrossItemOn2", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM customer, orders, lineitem JOIN nation ON c_nationkey = n_nationkey
+				WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey`},
+		twoPathQuery{name: "CommaBareCrossItemOn3", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM customer, orders, lineitem, supplier JOIN nation ON s_nationkey = n_nationkey
+				WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey AND l_suppkey = s_suppkey`},
+		// LEFT-JOIN control: an outer join beside a comma, ON confined to its
+		// own two sides. The fix must NOT fold preceding items into an outer
+		// join's left, so both paths keep the 500 unmatched-customer rows
+		// (15,500, not 15,000).
+		twoPathQuery{name: "CommaBesideLeftJoinControl", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS n FROM nation, customer LEFT JOIN orders ON c_custkey = o_custkey
+				WHERE c_nationkey = n_nationkey`,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				if len(rows) != 1 || cellText(rows[0], "n") != "15500" {
+					tb.Fatalf("left-join-beside-comma = %v, want 15500 (outer join must not fold its left)", rows)
+				}
+			}},
+
 		twoPathQuery{name: "OuterJoinResidualLeft", cmp: cmpUnordered, expectRows: true,
 			sql: `SELECT COUNT(*) AS c, COUNT(r.r_name) AS matched FROM nation n
 				LEFT JOIN region r ON n.n_regionkey = r.r_regionkey AND n.n_nationkey > r.r_regionkey`,

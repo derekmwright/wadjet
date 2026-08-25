@@ -1636,6 +1636,46 @@ func duckdbCorpus() []duckdbCase {
 			FROM partsupp t0, part t1 JOIN supplier t2 ON t0.ps_suppkey = t2.s_suppkey
 			WHERE t0.ps_partkey = t1.p_partkey`},
 
+		// A BARE (unqualified) cross-item ON — the join's ON names a column of
+		// a COMMA sibling, not one of its own two tables:
+		//   FROM customer, orders JOIN nation ON c_nationkey = n_nationkey
+		//   WHERE c_custkey = o_custkey
+		// The builder attaches a join to the FROM item it follows (the
+		// #593/#594 fix), and onRefsEarlierItem only pulls earlier items back
+		// in when a QUALIFIER names them. A bare cross-item key carries no
+		// qualifier, so the earlier item (customer) was not folded into the
+		// join's left, c_nationkey resolved to nothing, and the query answered
+		// 0 (F1). The fix folds an inner/cross join's left whenever its ON is
+		// not provably confined to its own two sides — exactly main's
+		// fold-comma-first behaviour, restored for the bare case.
+		//
+		// NOTE ON SEMANTICS: this shape is a DuckDB-valid extension, not a
+		// PostgreSQL-valid query. PostgreSQL 17 REJECTS a JOIN whose ON names
+		// a comma sibling ("invalid reference to FROM-clause entry", verified
+		// bare and qualified). Wadjet follows DuckDB here (as it and main
+		// always have), so this is gated against DuckDB and the two-path
+		// oracle, NOT the PostgreSQL oracle; the silent 0 it replaces was a
+		// wrong answer under every interpretation.
+		duckdbCase{name: "CommaBareCrossItemOn1", sql: `SELECT COUNT(*) AS n
+			FROM customer, orders JOIN nation ON c_nationkey = n_nationkey
+			WHERE c_custkey = o_custkey`},
+		duckdbCase{name: "CommaBareCrossItemOn2", sql: `SELECT COUNT(*) AS n
+			FROM customer, orders, lineitem JOIN nation ON c_nationkey = n_nationkey
+			WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey`},
+		duckdbCase{name: "CommaBareCrossItemOn3", sql: `SELECT COUNT(*) AS n
+			FROM customer, orders, lineitem, supplier JOIN nation ON s_nationkey = n_nationkey
+			WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey AND l_suppkey = s_suppkey`},
+		// LEFT-JOIN control: a comma item beside an OUTER join whose ON IS
+		// confined to its own two sides. The fix deliberately does NOT fold
+		// preceding items into an outer join's left — which rows an outer join
+		// preserves depends on what its left input is — so this must stay
+		// correct without folding. 500 of the 15,500 rows are customers with
+		// no orders, preserved with a NULL order (a fold that dropped them
+		// would answer 15,000).
+		duckdbCase{name: "CommaBesideLeftJoinControl", sql: `SELECT COUNT(*) AS n
+			FROM nation, customer LEFT JOIN orders ON c_custkey = o_custkey
+			WHERE c_nationkey = n_nationkey`},
+
 		// --- The TPC-H corpus in its OFFICIAL comma-join spelling ---
 		//
 		// benchmarks/tpch/queries.go writes all 22 with explicit JOIN ... ON,
@@ -1646,12 +1686,15 @@ func duckdbCorpus() []duckdbCase {
 		// return byte-identical output to its explicit-JOIN original, so a
 		// divergence is wadjet's, never a transcription slip.
 		// Q2 has NO comma-join variant here, deliberately. Its subquery is
-		// CORRELATED and itself comma-joined, and that shape hangs: the inner
-		// FROM list collapses to its first table and the plan then deadlocks
-		// on the shared scan cache's ready channel (catalogScanSource.Init).
-		// It reproduces identically on the parent commit, so it is a
-		// PRE-EXISTING defect of the #281 family rather than anything
-		// #593/#594 touch, and a hanging entry would take CI with it.
+		// CORRELATED and itself comma-joined, and #593/#594's predicate-
+		// lifting now lets that plan REACH a pre-existing #281-family defect
+		// in decorrelation over a comma-joined subquery: depending on the base
+		// it either errors (an unresolved join-key kernel) or deadlocks on the
+		// shared scan cache's ready channel (catalogScanSource.Init). Either
+		// way wadjet cannot yet answer it, so it is kept out of the corpus (a
+		// hang would wedge CI), and the pre-existing defect is tracked in its
+		// own issue (see #616) rather than only here. The lift is correct; the
+		// downstream decorrelation is what needs the fix.
 		duckdbCase{name: "TPCH03CommaJoin", sql: `SELECT
 			l_orderkey,
 			SUM(l_extendedprice * (1 - l_discount)) as revenue,

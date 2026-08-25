@@ -529,6 +529,15 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "CommaJoinAfterLeftJoinItem",
 			sql: `SELECT COUNT(*) AS n FROM supplier t0 LEFT JOIN partsupp t1 ON t0.s_suppkey = t1.ps_suppkey,
 				region t2 WHERE t2.r_regionkey = t0.s_nationkey`},
+		// F1 LEFT-JOIN control: an outer join beside a comma, ON confined to
+		// its own two sides. Valid in PostgreSQL (unlike a cross-item ON,
+		// which PG rejects as an invalid FROM-clause reference — so the
+		// bare-cross-item-ON shapes themselves are gated only against DuckDB
+		// and the two-path oracle, not here). The fix must not fold the outer
+		// join's left; PG preserves the unmatched customers.
+		pgCase{name: "CommaBesideLeftJoinControl",
+			sql: `SELECT COUNT(*) AS n FROM nation, customer LEFT JOIN orders ON c_custkey = o_custkey
+				WHERE c_nationkey = n_nationkey`},
 
 		pgCase{name: "NullOrderAscDefault", sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation ORDER BY k, n_name`},
 		pgCase{name: "NullOrderDescDefault", sql: `SELECT NULLIF(n_regionkey, 1) AS k, n_name FROM nation ORDER BY k DESC, n_name`},

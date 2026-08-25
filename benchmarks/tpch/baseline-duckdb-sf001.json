@@ -322,6 +322,50 @@
       "fine": "3101a4471015045b",
       "coarse": "3101a4471015045b"
     },
+    "CommaBareCrossItemOn1": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "af8d06e02ca04dfd",
+      "coarse": "af8d06e02ca04dfd"
+    },
+    "CommaBareCrossItemOn2": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "8db1dd5cfde3837f",
+      "coarse": "8db1dd5cfde3837f"
+    },
+    "CommaBareCrossItemOn3": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "8db1dd5cfde3837f",
+      "coarse": "8db1dd5cfde3837f"
+    },
+    "CommaBesideLeftJoinControl": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "c0dd19444890cdbd",
+      "coarse": "c0dd19444890cdbd"
+    },
     "CommaJoinAfterLeftJoinItem": {
       "source": "duckdb",
       "row_count": 1,
