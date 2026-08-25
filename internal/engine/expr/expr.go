@@ -1885,6 +1885,11 @@ type In struct {
 	// `s IN (2.00)` answered none, one predicate with two readings (#504
 	// review, non-blocker a).
 	pairs []*boxedPair
+	// disarm caches "none of pairs carries a declaration-driven rule",
+	// collapsing the per-row cost to one atomic load once every member has
+	// settled — see pairSetState. Mixed lists (some member armed) keep
+	// dispatching through pairs[i].compare exactly as before.
+	disarm pairSetState
 }
 
 // NewIn builds a set-membership test, binding the DECIMAL-column-against-
@@ -1932,6 +1937,10 @@ func (e *In) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 		return false, true
 	}
 	sawNull := false
+	// Once every pair on this node is confirmed disarmed, skip the per-pair
+	// dispatch entirely — one atomic load instead of one boxedPair.compare
+	// call per member per row (see pairSetState).
+	fast := e.disarm.disarmed(e.pairs)
 	for i, v := range e.Values {
 		rv := v.Eval(b, row)
 		if rv == nil {
@@ -1939,9 +1948,12 @@ func (e *In) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 			continue
 		}
 		var eq bool
-		if i < len(e.pairs) {
+		switch {
+		case fast:
+			eq = compare(lv, rv, CmpEq)
+		case i < len(e.pairs):
 			eq = e.pairs[i].compare(b, lv, rv, CmpEq)
-		} else {
+		default:
 			eq = compare(lv, rv, CmpEq)
 		}
 		if eq {
@@ -1966,14 +1978,23 @@ type Between struct {
 	// for the shapes dec declines. `x BETWEEN a AND b` is `x >= a AND x <= b`
 	// and must read its bounds the way those two comparisons do.
 	loPair, hiPair *boxedPair
+	// pairs is {loPair, hiPair}, built once so the disarm check below never
+	// allocates a slice on the hot path.
+	pairs []*boxedPair
+	// disarm caches "neither bound carries a declaration-driven rule" — see
+	// pairSetState and In.disarm.
+	disarm pairSetState
 }
 
 // NewBetween builds a range test, binding the DECIMAL-column-against-
 // numeric-literals shape and one boxed pair per bound.
 func NewBetween(e, low, hi Expr, not bool) *Between {
+	loPair := newBoxedPair(e, low)
+	hiPair := newBoxedPair(e, hi)
 	return &Between{Expr: e, Low: low, Hi: hi, Not: not,
 		dec:    bindDecimalList(e, []Expr{low, hi}),
-		loPair: newBoxedPair(e, low), hiPair: newBoxedPair(e, hi)}
+		loPair: loPair, hiPair: hiPair,
+		pairs: []*boxedPair{loPair, hiPair}}
 }
 
 func (e *Between) Eval(b *batch.RecordBatch, row int) any {
@@ -2011,11 +2032,31 @@ func (e *Between) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	// Three-valued AND over the two half-comparisons.
 	geNull := lo == nil
 	leNull := hi == nil
-	if !geNull && !e.loPair.compare(b, v, lo, CmpGe) {
-		return e.Not, false
+	// Once both bounds are confirmed disarmed, skip the per-bound dispatch —
+	// one atomic load instead of two boxedPair.compare calls per row (see
+	// pairSetState).
+	fast := e.disarm.disarmed(e.pairs)
+	if !geNull {
+		var ge bool
+		if fast {
+			ge = compare(v, lo, CmpGe)
+		} else {
+			ge = e.loPair.compare(b, v, lo, CmpGe)
+		}
+		if !ge {
+			return e.Not, false
+		}
 	}
-	if !leNull && !e.hiPair.compare(b, v, hi, CmpLe) {
-		return e.Not, false
+	if !leNull {
+		var le bool
+		if fast {
+			le = compare(v, hi, CmpLe)
+		} else {
+			le = e.hiPair.compare(b, v, hi, CmpLe)
+		}
+		if !le {
+			return e.Not, false
+		}
 	}
 	if geNull || leNull {
 		return false, true

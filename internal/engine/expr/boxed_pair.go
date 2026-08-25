@@ -523,3 +523,56 @@ func (p *boxedPair) compareNull(b *batch.RecordBatch, lv, rv any, op CmpOp) (val
 	}
 	return compare(lv, rv, op), false
 }
+
+// pairSetState lifts boxedPair's own one-pair disarm cache to a SET of pairs
+// — the shape In (one pair per list member) and Between (one pair per bound)
+// both have. Dispatching every member/bound through its own *boxedPair costs
+// one atomic load and a method call per member per row even once every pair
+// on the node is permanently disarmed, which is the common case: an IN list
+// or a BETWEEN range over an ordinary INT/FLOAT/STRING column never has a
+// DECIMAL or boxed-text rule to apply, so that per-member dispatch is pure
+// overhead once the node has settled. This caches the SET's own answer the
+// same way, so the per-row cost for an all-disarmed node collapses to the one
+// atomic load below, matching a bare Cmp's.
+type pairSetState struct {
+	// state: 0 = still settling, 1 = every pair disarmed (fast path applies),
+	// 2 = at least one pair is (and, being a pure function of declared kinds,
+	// stays) armed, so the caller must keep dispatching through each pair.
+	state atomic.Int32
+}
+
+// disarmed reports whether every pair in pairs has settled disarmed.
+//
+// It never performs a comparison and never derives a kind itself — it only
+// reads the state a pair's own order() leaves behind once dispatched, so a
+// caller must keep dispatching through each pairs[i].compare (as it always
+// did) for as long as this returns false; that dispatch is what settles the
+// individual pairs in the first place. Once every pair is settled, the
+// answer is a pure function of their declared kinds (boxedPair's own
+// contract) and is cached here forever, the same way boxedPair.disarmed
+// itself is.
+func (s *pairSetState) disarmed(pairs []*boxedPair) bool {
+	if v := s.state.Load(); v != 0 {
+		return v == 1
+	}
+	allDisarmed := true
+	for _, p := range pairs {
+		if p == nil || p.disarmed.Load() {
+			continue
+		}
+		if p.left.kind.Load() != 0 && p.right.kind.Load() != 0 {
+			// Both operands are settled and this pair is still not
+			// disarmed: pairApplies is a pure function of settled kinds, so
+			// it applies now and always will — this SET can never reach
+			// all-disarmed, and there is no need to keep checking the rest.
+			s.state.Store(2)
+			return false
+		}
+		allDisarmed = false
+	}
+	if allDisarmed {
+		s.state.Store(1)
+		return true
+	}
+	return false
+}
