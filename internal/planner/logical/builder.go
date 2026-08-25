@@ -242,33 +242,43 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			havingAggs := plansql.FindAllAggregates(info.HavingExpr)
 			for _, hAgg := range havingAggs {
 				hKey := strings.ToLower(hAgg.String())
-				// Check if this aggregate already exists in the SELECT-derived aggs
+				aggInputCol := ""
+				var aggInputExpr plansql.Node
+				if len(hAgg.Args) > 0 {
+					aggInputCol = cleanExpr(hAgg.Args[0].String())
+					aggInputExpr = hAgg.Args[0]
+				}
+				funcName := strings.ToLower(hAgg.Name)
+				if funcName == "count" && (aggInputCol == "*" || aggInputCol == "") {
+					aggInputCol = ""
+				}
+				// Reuse an identical aggregate the SELECT list already
+				// computes, so HAVING references its output column instead
+				// of adding a second copy under a synthetic name. Match on
+				// the NORMALIZED fields rather than on rendered text: the
+				// old key rebuilt "count()" from an AggExpr whose InputCol
+				// the normalization above had already emptied, and compared
+				// it against the AST's "count(*)", so `SELECT a, COUNT(*)
+				// AS c ... HAVING COUNT(*) > 1` never matched — it counted
+				// twice and leaked the second count as __having_N.
 				found := false
-				for _, existing := range aggs {
-					existingKey := strings.ToLower(existing.Func + "(")
-					if existing.Distinct {
-						existingKey += "distinct "
-					}
-					existingKey += existing.InputCol + ")"
-					if existingKey == hKey {
-						found = true
-						havingReplacements[hKey] = existing.OutputCol
-						break
+				if len(hAgg.Args) <= 1 {
+					for _, existing := range aggs {
+						if existing.InputCol2 != "" || existing.Separator != "" || existing.Percentile != 0 {
+							continue
+						}
+						if strings.EqualFold(existing.Func, funcName) &&
+							strings.EqualFold(existing.InputCol, aggInputCol) &&
+							existing.Distinct == hAgg.Distinct {
+							found = true
+							havingReplacements[hKey] = existing.OutputCol
+							break
+						}
 					}
 				}
 				if !found {
 					synName := fmt.Sprintf("__having_%d", aggCounter)
 					aggCounter++
-					aggInputCol := ""
-					var aggInputExpr plansql.Node
-					if len(hAgg.Args) > 0 {
-						aggInputCol = cleanExpr(hAgg.Args[0].String())
-						aggInputExpr = hAgg.Args[0]
-					}
-					funcName := strings.ToLower(hAgg.Name)
-					if funcName == "count" && (aggInputCol == "*" || aggInputCol == "") {
-						aggInputCol = ""
-					}
 					ae := AggExpr{
 						Func:      funcName,
 						InputCol:  aggInputCol,

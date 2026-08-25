@@ -1945,12 +1945,16 @@ func TestParse_Cube(t *testing.T) {
 // --- FindNestedAggregate: cover ArrayLitNode and WindowFuncNode branches ---
 
 func TestFindNestedAggregate_ArrayLit(t *testing.T) {
-	// ArrayLitNode is not handled by FindNestedAggregate (falls through to default)
+	// An aggregate inside an array literal is still an aggregate: the walkers
+	// used to stop at every node type outside the arithmetic/CASE/CAST core,
+	// and a select item or HAVING predicate they walked past kept its
+	// aggregate unregistered — which is how `HAVING MAX(v) IS NULL` came to
+	// be answered without ever computing MAX(v) (#591).
 	inner := &FuncCallNode{Name: "count", Star: true}
 	arr := &ArrayLitNode{Elements: []Node{inner}}
 	result := FindNestedAggregate(arr)
-	if result != nil {
-		t.Error("expected nil since FindNestedAggregate does not recurse into ArrayLitNode")
+	if result != inner {
+		t.Errorf("FindNestedAggregate(ARRAY[count(*)]) = %v, want the count(*) node", result)
 	}
 }
 

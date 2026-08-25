@@ -637,6 +637,63 @@ func FindNestedAggregate(node Node) *FuncCallNode {
 		return FindNestedAggregate(n.Else)
 	case *CastNode:
 		return FindNestedAggregate(n.Inner)
+	case *IsExpr:
+		return FindNestedAggregate(n.Left)
+	case *NotNode:
+		return FindNestedAggregate(n.Inner)
+	case *AndNode:
+		if found := FindNestedAggregate(n.Left); found != nil {
+			return found
+		}
+		return FindNestedAggregate(n.Right)
+	case *OrNode:
+		if found := FindNestedAggregate(n.Left); found != nil {
+			return found
+		}
+		return FindNestedAggregate(n.Right)
+	case *InExpr:
+		if found := FindNestedAggregate(n.Left); found != nil {
+			return found
+		}
+		for _, v := range n.Values {
+			if found := FindNestedAggregate(v); found != nil {
+				return found
+			}
+		}
+	case *BetweenExpr:
+		if found := FindNestedAggregate(n.Left); found != nil {
+			return found
+		}
+		if found := FindNestedAggregate(n.Low); found != nil {
+			return found
+		}
+		return FindNestedAggregate(n.High)
+	case *LikeExpr:
+		if found := FindNestedAggregate(n.Left); found != nil {
+			return found
+		}
+		return FindNestedAggregate(n.Pattern)
+	case *AnyAllExpr:
+		if found := FindNestedAggregate(n.Left); found != nil {
+			return found
+		}
+		for _, v := range n.Values {
+			if found := FindNestedAggregate(v); found != nil {
+				return found
+			}
+		}
+	case *TupleNode:
+		for _, e := range n.Elements {
+			if found := FindNestedAggregate(e); found != nil {
+				return found
+			}
+		}
+	case *ArrayLitNode:
+		for _, e := range n.Elements {
+			if found := FindNestedAggregate(e); found != nil {
+				return found
+			}
+		}
 	}
 	return nil
 }
@@ -682,6 +739,41 @@ func findAllAggsHelper(node Node, result *[]*FuncCallNode) {
 		findAllAggsHelper(n.Else, result)
 	case *CastNode:
 		findAllAggsHelper(n.Inner, result)
+	case *IsExpr:
+		findAllAggsHelper(n.Left, result)
+	case *NotNode:
+		findAllAggsHelper(n.Inner, result)
+	case *AndNode:
+		findAllAggsHelper(n.Left, result)
+		findAllAggsHelper(n.Right, result)
+	case *OrNode:
+		findAllAggsHelper(n.Left, result)
+		findAllAggsHelper(n.Right, result)
+	case *InExpr:
+		findAllAggsHelper(n.Left, result)
+		for _, v := range n.Values {
+			findAllAggsHelper(v, result)
+		}
+	case *BetweenExpr:
+		findAllAggsHelper(n.Left, result)
+		findAllAggsHelper(n.Low, result)
+		findAllAggsHelper(n.High, result)
+	case *LikeExpr:
+		findAllAggsHelper(n.Left, result)
+		findAllAggsHelper(n.Pattern, result)
+	case *AnyAllExpr:
+		findAllAggsHelper(n.Left, result)
+		for _, v := range n.Values {
+			findAllAggsHelper(v, result)
+		}
+	case *TupleNode:
+		for _, e := range n.Elements {
+			findAllAggsHelper(e, result)
+		}
+	case *ArrayLitNode:
+		for _, e := range n.Elements {
+			findAllAggsHelper(e, result)
+		}
 	}
 }
 
@@ -767,9 +859,93 @@ func ReplaceAllAggregates(node Node, replacements map[string]string) Node {
 			return node
 		}
 		return &CaseNode{Subject: n.Subject, Whens: newWhens, Else: elseNode}
+	case *IsExpr:
+		left := ReplaceAllAggregates(n.Left, replacements)
+		if left == n.Left {
+			return node
+		}
+		return &IsExpr{Left: left, Not: n.Not, Check: n.Check}
+	case *NotNode:
+		inner := ReplaceAllAggregates(n.Inner, replacements)
+		if inner == n.Inner {
+			return node
+		}
+		return &NotNode{Inner: inner}
+	case *AndNode:
+		left := ReplaceAllAggregates(n.Left, replacements)
+		right := ReplaceAllAggregates(n.Right, replacements)
+		if left == n.Left && right == n.Right {
+			return node
+		}
+		return &AndNode{Left: left, Right: right}
+	case *OrNode:
+		left := ReplaceAllAggregates(n.Left, replacements)
+		right := ReplaceAllAggregates(n.Right, replacements)
+		if left == n.Left && right == n.Right {
+			return node
+		}
+		return &OrNode{Left: left, Right: right}
+	case *InExpr:
+		left := ReplaceAllAggregates(n.Left, replacements)
+		newVals, changed := replaceAggsInList(n.Values, replacements)
+		if left == n.Left && !changed {
+			return node
+		}
+		return &InExpr{Left: left, Not: n.Not, Values: newVals}
+	case *BetweenExpr:
+		left := ReplaceAllAggregates(n.Left, replacements)
+		low := ReplaceAllAggregates(n.Low, replacements)
+		high := ReplaceAllAggregates(n.High, replacements)
+		if left == n.Left && low == n.Low && high == n.High {
+			return node
+		}
+		return &BetweenExpr{Left: left, Not: n.Not, Low: low, High: high}
+	case *LikeExpr:
+		left := ReplaceAllAggregates(n.Left, replacements)
+		pattern := ReplaceAllAggregates(n.Pattern, replacements)
+		if left == n.Left && pattern == n.Pattern {
+			return node
+		}
+		return &LikeExpr{Left: left, Not: n.Not, Pattern: pattern}
+	case *AnyAllExpr:
+		left := ReplaceAllAggregates(n.Left, replacements)
+		newVals, changed := replaceAggsInList(n.Values, replacements)
+		if left == n.Left && !changed {
+			return node
+		}
+		return &AnyAllExpr{Left: left, Op: n.Op, Modifier: n.Modifier, Values: newVals}
+	case *TupleNode:
+		newEls, changed := replaceAggsInList(n.Elements, replacements)
+		if !changed {
+			return node
+		}
+		return &TupleNode{Elements: newEls}
+	case *ArrayLitNode:
+		newEls, changed := replaceAggsInList(n.Elements, replacements)
+		if !changed {
+			return node
+		}
+		return &ArrayLitNode{Elements: newEls}
 	default:
 		return node
 	}
+}
+
+// replaceAggsInList maps ReplaceAllAggregates over a node list, reporting
+// whether anything changed so the caller can return its input unmodified.
+func replaceAggsInList(nodes []Node, replacements map[string]string) ([]Node, bool) {
+	out := make([]Node, len(nodes))
+	changed := false
+	for i, n := range nodes {
+		out[i] = ReplaceAllAggregates(n, replacements)
+		if out[i] != n {
+			changed = true
+		}
+	}
+	if !changed {
+		return nodes, false
+	}
+	return out, true
 }
 
 // ReplaceAggregate replaces the first aggregate function call in the expression
