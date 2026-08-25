@@ -117,11 +117,25 @@ func bareCol(e Expr) (*ColRef, bool) {
 	return col, true
 }
 
-// refuseNonNumericAgainstDecimal raises #463's refusal — SQLSTATE 22P02,
-// never a value — when one operand is a materialized DECIMAL column in THIS
-// batch and the other is a literal whose text does not name a number.
+// refuseArm is the plan-shaped half of #463's refusal — SQLSTATE 22P02, never
+// a value — for ONE operand pair: the bare-column operand, and the other
+// operand's source text when that text does not name a number. A nil col
+// means no refusal is possible for this pair whatever the column turns out to
+// be, which is the overwhelmingly common case and the one that has to be free.
 //
-// It is the refusal half of compareWithText's job, for the three sites
+// It exists because the refusal's two questions have very different lifetimes.
+// "Is the literal a number?" is fixed for the query — `kernel.DecimalLiteral.
+// Numeric()` walks the digits from scratch — and "is the column a DECIMAL?" is
+// fixed for the query too, once one batch has answered it. Asking both PER ROW
+// is what the first #505 fix did, and it cost a `NewDecimalLiteral` allocation
+// plus a full text parse on every row of every batch at three sites that are
+// otherwise allocation-free: +35% on a simple CASE over a DECIMAL column, +25%
+// on IS DISTINCT FROM, and +200% with 7x the bytes on an exponent-form literal
+// — reintroducing exactly the regression `decimal_order_bench_test.go` was
+// written to hold shut (it is why `decimalLitCmp.numeric` is a cached slice
+// rather than a per-row `Numeric()` call).
+//
+// This is the refusal half of compareWithText's job, for the three sites
 // (#465) that carry a literal's exact text into a boxed comparison but never
 // call Numeric() on it: Case's simple-CASE arm, IsDistinctFrom, and
 // pickExtremum (GREATEST/LEAST) all compare through compareWithText, whose
@@ -134,32 +148,137 @@ func bareCol(e Expr) (*ColRef, bool) {
 // bindDecimalCmp's `d op lit` shape does not need this: NewCmp binds it at
 // construction time and decimalLitCmp.order already refuses there. This is
 // for the three sites that reach a DECIMAL column with no such binding.
-func refuseNonNumericAgainstDecimal(b *batch.RecordBatch, left, right Expr) {
-	if refuseIfDecimalSide(b, left, right) {
-		return
-	}
-	refuseIfDecimalSide(b, right, left)
+type refuseArm struct {
+	col  *ColRef
+	text string
+
+	// settled caches "this column is not a DECIMAL", the way
+	// decimalLitCmp.notDecimal does and for the same reason — including why
+	// it is atomic: these nodes are shared across parallel pipeline workers
+	// evaluating one batch, and concurrent writers can only ever agree.
+	settled atomic.Bool
 }
 
-// refuseIfDecimalSide checks one operand order of refuseNonNumericAgainstDecimal:
-// colSide as the candidate DECIMAL column, litSide as the candidate literal.
-// Reports whether colSide resolved to a bare column at all (numeric or not),
-// so the caller does not also try the flipped order when colSide already
-// settles the question.
-func refuseIfDecimalSide(b *batch.RecordBatch, colSide, litSide Expr) bool {
-	col, ok := bareCol(colSide)
+// noRefusal is the shared arm for every pair that can never refuse. Sharing
+// one value keeps arming allocation-free in the common case.
+var noRefusal = &refuseArm{}
+
+// armRefusal decides, from the operand SHAPES alone, whether this pair can
+// ever raise — and against which column, with which text. It reproduces the
+// operand-order rule the per-row version had: the LEFT operand is the
+// candidate column when it is a bare one, and only when it is not is the right
+// operand tried, so `lit op col` is covered and `col op col` refuses nothing.
+func armRefusal(left, right Expr) *refuseArm {
+	col, other, ok := refusalOperands(left, right)
 	if !ok {
-		return false
+		return noRefusal
+	}
+	lit, ok := numericLit(other)
+	if !ok || lit.Numeric() {
+		return noRefusal
+	}
+	return &refuseArm{col: col, text: lit.Text()}
+}
+
+func refusalOperands(left, right Expr) (*ColRef, Expr, bool) {
+	if col, ok := bareCol(left); ok {
+		return col, right, true
+	}
+	if col, ok := bareCol(right); ok {
+		return col, left, true
+	}
+	return nil, nil, false
+}
+
+// check raises when the armed column is a materialized DECIMAL in THIS batch.
+// Once it has seen the column resolve to anything else the whole call is one
+// atomic load, which is the point.
+func (a *refuseArm) check(b *batch.RecordBatch) {
+	if a.col == nil || a.settled.Load() {
+		return
+	}
+	a.col.resolve(b)
+	if a.col.idx < 0 || a.col.idx >= len(b.Columns) {
+		// Unresolved says nothing about the next batch, so do not settle.
+		return
+	}
+	if a.col.typ != batch.TypeDecimal {
+		a.settled.Store(true)
+		return
+	}
+	raiseInvalidTextRepresentation("numeric", a.text)
+}
+
+// caseRefusal is one refuseArm per WHEN of a simple CASE, armed together and
+// published as one immutable value. Per-WHEN rather than per-CASE because the
+// refusal must still depend on the WHEN being REACHED: `CASE d WHEN 0.00 THEN
+// 1 WHEN 'abc' THEN 2 END` answers 1 for the row holding 0.00, exactly as it
+// did before the arms were hoisted.
+type caseRefusal struct{ arms []*refuseArm }
+
+// extremumRefusal is pickExtremum's arming: the pairs it compares are
+// (best-so-far, candidate) and the best-so-far MOVES, so the table is per
+// ARGUMENT and the pair is assembled per iteration from it.
+type extremumRefusal struct {
+	// cols[i] is argument i when it is a bare column reference, else nil.
+	cols []*ColRef
+	// bad[i] is argument i's literal text when that text names no number,
+	// else "". A pair refuses when one side has a col and the other a bad.
+	bad []string
+}
+
+// armExtremum returns nil — "this call can never refuse" — unless some
+// argument is a literal naming no number. That is the whole-node fast path,
+// and it is the one every ordinary GREATEST/LEAST takes: nothing is resolved,
+// nothing is parsed, and check() below returns on a nil receiver.
+//
+// There is deliberately no cached "settled" flag here, unlike refuseArm's.
+// The pairs this checks involve DIFFERENT columns as the best-so-far moves,
+// so one column resolving to a non-DECIMAL says nothing about the next —
+// caching it would disarm a real refusal in `GREATEST(s, 'abc', d)`.
+func armExtremum(argExprs []Expr) *extremumRefusal {
+	r := &extremumRefusal{cols: make([]*ColRef, len(argExprs)), bad: make([]string, len(argExprs))}
+	any := false
+	for i, e := range argExprs {
+		if e == nil {
+			continue
+		}
+		if col, ok := bareCol(e); ok {
+			r.cols[i] = col
+			continue
+		}
+		if lit, ok := numericLit(e); ok && !lit.Numeric() {
+			r.bad[i] = lit.Text()
+			any = true
+		}
+	}
+	if !any {
+		return nil
+	}
+	return r
+}
+
+// check is refuseArm.check for the (best, candidate) pair at indices bi and
+// ci, applying the same left-operand-first rule armRefusal does.
+func (r *extremumRefusal) check(b *batch.RecordBatch, bi, ci int) {
+	// args can outrun argExprs (a vectorized caller evaluates values the
+	// expression list does not name), so both indices are bounds-checked
+	// against the armed table rather than assumed to line up.
+	if r == nil || bi < 0 || bi >= len(r.cols) || ci < 0 || ci >= len(r.cols) {
+		return
+	}
+	col, text := r.cols[bi], r.bad[ci]
+	if col == nil {
+		col, text = r.cols[ci], r.bad[bi]
+	}
+	if col == nil || text == "" {
+		return
 	}
 	col.resolve(b)
 	if col.idx < 0 || col.idx >= len(b.Columns) || col.typ != batch.TypeDecimal {
-		return true
+		return
 	}
-	lit, ok := numericLit(litSide)
-	if ok && !lit.Numeric() {
-		raiseInvalidTextRepresentation("numeric", lit.Text())
-	}
-	return true
+	raiseInvalidTextRepresentation("numeric", text)
 }
 
 // newDecimalLitCmp builds a binding and resolves every literal's Numeric()

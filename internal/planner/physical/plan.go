@@ -7263,7 +7263,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					// Replace inner aggregate with a column reference in the AST
 					rewritten := replaceAggWithColRef(proj.ASTExpr, innerAgg, aggOutputCol)
 					compiled, compErr := expr.CompileWithRunner(rewritten, p.subqueryRunner)
-					if expr.IsUnknownFunc(compErr) {
+					if expr.IsCompileRefusal(compErr) {
 						return nil, nil, nil, compErr
 					}
 					if compErr == nil {
@@ -7306,7 +7306,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			// A name nothing implements has no input column to fall back to,
 			// so the direct-copy path below would only re-report it as a
 			// missing column. Propagate instead (#341).
-			if expr.IsUnknownFunc(compErr) {
+			if expr.IsCompileRefusal(compErr) {
 				return nil, nil, nil, compErr
 			}
 			if compErr == nil {
@@ -7448,7 +7448,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			}
 			synName := fmt.Sprintf("__agg_expr_%d", i)
 			compiled, compErr := expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner)
-			if expr.IsUnknownFunc(compErr) {
+			if expr.IsCompileRefusal(compErr) {
 				return nil, nil, nil, compErr
 			}
 			if compErr == nil {
@@ -7578,7 +7578,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					continue
 				}
 				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
-				if expr.IsUnknownFunc(compErr) {
+				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
 				}
 				if compErr != nil {
@@ -7605,7 +7605,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			if gbExpr != nil && !isPlainGroupKey(gbExpr) {
 				synName := fmt.Sprintf("__gb_expr_%d", i)
 				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
-				if expr.IsUnknownFunc(compErr) {
+				if expr.IsCompileRefusal(compErr) {
 					return nil, nil, nil, compErr
 				}
 				if compErr == nil {
@@ -9422,7 +9422,7 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 		} else {
 			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner)
 		}
-		if expr.IsUnknownFunc(err) {
+		if expr.IsCompileRefusal(err) {
 			return nil, err
 		}
 		if err == nil {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/scan"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -564,4 +565,90 @@ func TestDecimalUnaryMinusOverQuotedStringLiteral(t *testing.T) {
 		"SELECT COUNT(*) AS n FROM declit WHERE d_2 = -'1e400'", 0)
 	declitCheck(t, ctx, db,
 		"SELECT COUNT(*) AS n FROM declit WHERE d_2 <> -'1e400'", 188)
+}
+
+// TestRefusedLiteralReachesTheClientAsItsOwnError is the #505 review finding:
+// the compiler DID refuse `-'abc'` before any row existed, and the physical
+// planner then swallowed the refusal.
+//
+// Six sites there compile an AST and quietly keep going when it will not
+// compile, because a failed compile usually means "this expression is really a
+// reference to an aggregate's output column" and the right recovery is to copy
+// that column. Only `expr.IsUnknownFunc` was exempt from the fallback, so a
+// refused literal fell into it and came back as `column "-'abc'" does not
+// exist in the input schema` — a name-resolution message for a diagnosed data
+// error, with no SQLSTATE at all (the blanket 42000 on the wire). The refusal
+// is now its own error TYPE and `expr.IsCompileRefusal` names both classes.
+//
+// PostgreSQL refuses every `-'…'` form with 42725 ("operator is not unique:
+// - unknown") — verified live — rather than 22P02; wadjet has one generic
+// unary-minus operator and no overload ambiguity to report, so it reports what
+// it actually found. ADR-0012 item 5 records that difference.
+func TestRefusedLiteralReachesTheClientAsItsOwnError(t *testing.T) {
+	ctx := context.Background()
+	db := declitOpen(t)
+
+	for _, sql := range []string{
+		"SELECT -'abc' AS v FROM declit",
+		"SELECT k FROM declit WHERE -'abc' > 0",
+		"SELECT k FROM declit ORDER BY -'abc'",
+		"SELECT k, COUNT(*) AS n FROM declit GROUP BY k, -'abc'",
+		"SELECT MAX(-'abc') AS v FROM declit",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			_, err := db.Query(ctx, sql)
+			if err == nil {
+				t.Fatalf("%s answered instead of refusing", sql)
+			}
+			if !strings.Contains(err.Error(), `invalid input syntax for type numeric: "abc"`) {
+				t.Errorf("%s\n  error = %v\n  want PostgreSQL's numeric input-syntax error, quoting the literal", sql, err)
+			}
+			if got := sqlerr.StateOf(err); got != "22P02" {
+				t.Errorf("%s\n  SQLSTATE = %q, want 22P02 — a client branches on this", sql, got)
+			}
+		})
+	}
+
+	// A numeric-looking quoted literal is not refused: it folds into the
+	// literal path and answers, which is the other half of #505's fold.
+	if _, err := db.Query(ctx, "SELECT -'5' AS v FROM declit"); err != nil {
+		t.Errorf("-'5' must still compile: %v", err)
+	}
+}
+
+// TestBoxedSiteRefusalIsPerRowAndPairwise pins what the three boxed sites
+// ACTUALLY do, because ADR-0012 item 6 claimed more than they deliver and a
+// claim no test holds shut is how the next reader is misled again.
+//
+// Two residuals, both tracked as #517, both unchanged by the hoist that made
+// the check cheap:
+//
+//   - PER ROW. The refusal runs inside the comparison, so a conjunct no row
+//     survives to never reaches it and the query answers zero rows.
+//   - PAIRWISE, so it depends on which argument is the running best. GREATEST
+//     and LEAST examine (best-so-far, candidate) pairs, and only a pair with a
+//     DECIMAL column on one side and the bad literal on the other refuses — so
+//     the same three arguments refuse under GREATEST and answer under LEAST,
+//     decided by the DATA rather than by the query.
+//
+// The compile-time fold is the one shape with neither residual: `-'abc'` is
+// refused before a plan exists at all, whatever conjunct or operand order
+// surrounds it, which TestRefusedLiteralReachesTheClientAsItsOwnError covers.
+func TestBoxedSiteRefusalIsPerRowAndPairwise(t *testing.T) {
+	ctx := context.Background()
+	db := declitOpen(t)
+
+	t.Run("a conjunct no row survives hides the refusal", func(t *testing.T) {
+		declitCheck(t, ctx, db,
+			"SELECT COUNT(*) AS n FROM declit WHERE k > 100000 AND d_2 IS DISTINCT FROM 'abc'", 0)
+	})
+
+	t.Run("GREATEST refuses where LEAST answers, on the same arguments", func(t *testing.T) {
+		if _, err := tmRun(ctx, db, "SELECT COUNT(*) AS n FROM declit WHERE GREATEST(k, 'abc', d_2) = 'abc'"); err == nil {
+			t.Error("GREATEST(k, 'abc', d_2) answered; this shape does refuse today")
+		}
+		if _, err := tmRun(ctx, db, "SELECT COUNT(*) AS n FROM declit WHERE LEAST(k, 'abc', d_2) = 'abc'"); err != nil {
+			t.Errorf("LEAST(k, 'abc', d_2) refused; today it answers, which is the residual: %v", err)
+		}
+	})
 }

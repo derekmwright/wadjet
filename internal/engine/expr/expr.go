@@ -1363,6 +1363,22 @@ func (e *CmpInt64) EvalBool(b *batch.RecordBatch, row int) bool {
 type IsDistinctFrom struct {
 	Left, Right Expr
 	Not         bool // true for IS NOT DISTINCT FROM
+
+	// refuse is the non-numeric-literal refusal, armed from the operand
+	// SHAPES on first evaluation and reused for every row after (refuseArm).
+	// Armed lazily rather than at construction because this node is also
+	// built by direct struct literal, and a refusal that only existed on the
+	// compiler's path would be a refusal the compiler's tests alone see.
+	refuse atomic.Pointer[refuseArm]
+}
+
+func (e *IsDistinctFrom) refusal() *refuseArm {
+	if a := e.refuse.Load(); a != nil {
+		return a
+	}
+	a := armRefusal(e.Left, e.Right)
+	e.refuse.Store(a)
+	return a
 }
 
 func (e *IsDistinctFrom) Eval(b *batch.RecordBatch, row int) any {
@@ -1393,7 +1409,7 @@ func (e *IsDistinctFrom) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool
 		// query ERROR against a DECIMAL column, never a value (#463) — this
 		// boxed site carried the exact-text comparison but not the refusal
 		// (#505): `d IS DISTINCT FROM 'abc'` answered every row instead.
-		refuseNonNumericAgainstDecimal(b, e.Left, e.Right)
+		e.refusal().check(b)
 		distinct = !compareWithText(lv, rv, litText(e.Left), litText(e.Right), CmpEq)
 	}
 	if e.Not {
@@ -1804,6 +1820,23 @@ type Case struct {
 	Operand Expr       // optional: CASE <operand> WHEN ...
 	Whens   []CaseWhen // WHEN condition THEN result
 	Else    Expr       // optional ELSE clause
+
+	// refuse holds one refuseArm per WHEN — see caseRefusal for why the
+	// arming is per-WHEN and not per-CASE. Armed lazily, like
+	// IsDistinctFrom.refuse, and for the same reason.
+	refuse atomic.Pointer[caseRefusal]
+}
+
+func (e *Case) refusal() *caseRefusal {
+	if r := e.refuse.Load(); r != nil {
+		return r
+	}
+	r := &caseRefusal{arms: make([]*refuseArm, len(e.Whens))}
+	for i, w := range e.Whens {
+		r.arms[i] = armRefusal(e.Operand, w.Cond)
+	}
+	e.refuse.Store(r)
+	return r
 }
 
 // CaseWhen is a single WHEN clause in a CASE expression.
@@ -1817,7 +1850,8 @@ func (e *Case) Eval(b *batch.RecordBatch, row int) any {
 		// Simple CASE: CASE x WHEN v1 THEN r1 ...
 		opVal := e.Operand.Eval(b, row)
 		opText := litText(e.Operand)
-		for _, w := range e.Whens {
+		refuse := e.refusal()
+		for i, w := range e.Whens {
 			whenVal := w.Cond.Eval(b, row)
 			// The WHEN value's exact source text settles a match a float64
 			// box cannot: `CASE d WHEN <a literal naming d exactly>` answered
@@ -1825,7 +1859,7 @@ func (e *Case) Eval(b *batch.RecordBatch, row int) any {
 			// query ERROR against a DECIMAL operand, never a silent ELSE
 			// (#463/#505): `CASE d WHEN 'abc'` answered 0 instead of refusing.
 			if opVal != nil && whenVal != nil {
-				refuseNonNumericAgainstDecimal(b, e.Operand, w.Cond)
+				refuse.arms[i].check(b)
 				if compareWithText(opVal, whenVal, opText, litText(w.Cond), CmpEq) {
 					return w.Result.Eval(b, row)
 				}
@@ -1916,6 +1950,10 @@ type FuncCall struct {
 	// (#465). extremumOp is CmpGt for GREATEST and CmpLt for LEAST.
 	extremum   bool
 	extremumOp CmpOp
+	// extremumRefuse is the non-numeric-literal refusal for those arguments,
+	// armed once alongside extremumOp under fnMu. nil means this call can
+	// never refuse, which is every ordinary GREATEST/LEAST.
+	extremumRefuse *extremumRefusal
 
 	vecOnce sync.Once
 	vecFn   VecScalarFunc
@@ -2283,8 +2321,10 @@ func (e *FuncCall) resolveFnSlow() {
 	switch lower {
 	case "greatest":
 		e.extremum, e.extremumOp = true, CmpGt
+		e.extremumRefuse = armExtremum(e.Args)
 	case "least":
 		e.extremum, e.extremumOp = true, CmpLt
+		e.extremumRefuse = armExtremum(e.Args)
 	}
 	e.fnReady.Store(true)
 }
@@ -2312,7 +2352,7 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 		e.resolveTemporalArgs(b, row, args)
 	}
 	if e.extremum {
-		return pickExtremum(b, e.Args, args, e.extremumOp)
+		return pickExtremum(b, e.Args, args, e.extremumOp, e.extremumRefuse)
 	}
 	return e.fn(args)
 }
@@ -2331,27 +2371,25 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 // `GREATEST(d, 'abc')` answered 'abc' as the extremum instead of refusing.
 // The refusal checks the pair actually being compared THIS iteration — best
 // so far against the new candidate — the same as compareWithText itself.
-func pickExtremum(b *batch.RecordBatch, argExprs []Expr, args []any, op CmpOp) any {
+func pickExtremum(b *batch.RecordBatch, argExprs []Expr, args []any, op CmpOp, refuse *extremumRefusal) any {
 	var best any
-	var bestExpr Expr
+	bestIdx := -1
 	bestText := ""
 	for i, a := range args {
 		if a == nil {
 			continue
 		}
-		var curExpr Expr
 		text := ""
 		if i < len(argExprs) {
-			curExpr = argExprs[i]
-			text = litText(curExpr)
+			text = litText(argExprs[i])
 		}
 		if best == nil {
-			best, bestText, bestExpr = a, text, curExpr
+			best, bestText, bestIdx = a, text, i
 			continue
 		}
-		refuseNonNumericAgainstDecimal(b, bestExpr, curExpr)
+		refuse.check(b, bestIdx, i)
 		if compareWithText(a, best, text, bestText, op) {
-			best, bestText, bestExpr = a, text, curExpr
+			best, bestText, bestIdx = a, text, i
 		}
 	}
 	return best

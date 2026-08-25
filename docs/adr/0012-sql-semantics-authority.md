@@ -80,6 +80,24 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      input type, matching PostgreSQL's own `min(bytea)`; no divergence, noted
      here only because early declared-schema code guessed STRING for every
      MIN/MAX before the input-typed fix.
+   - **Unary minus over a QUOTED string literal.** (Added 2026-08-24, #505.)
+     PostgreSQL refuses EVERY `-'…'` form, numeric-looking or not, with
+     42725 "operator is not unique: - unknown" — verified live: both
+     `SELECT -'5'` and `SELECT -'abc'` error there, because unary minus
+     resolves before the comparison can type the literal from context and
+     several overloads match an unknown-typed operand equally well. Wadjet
+     has ONE generic unary-minus operator and so has no overload ambiguity
+     to report. It folds the literal instead: a numeric-looking string
+     becomes a negated `Lit` carrying its exact text (so `d = -'5.00'`
+     enters the same exact-DECIMAL path `d = -5.00` does, per item 6), and a
+     non-numeric one is refused with 22P02. The visible consequence is that
+     `SELECT -'5'` SUCCEEDS here and answers `-5` typed **varchar** — the
+     literal keeps its own type, since nothing in that statement asks for a
+     number — where PostgreSQL errors and, in the shapes where it does
+     resolve (`-'5'::numeric`), answers a numeric. This is a deliberate
+     extension of item 6's convention for the column type it exists for, not
+     a position against PostgreSQL's overload resolution; reproducing 42725
+     would mean building the overload ambiguity first.
 
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
@@ -197,20 +215,64 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      negated `Lit` carrying its exact text — so `d = -'5.00'` enters the
      same `DecimalLiteral` path `d = -5.00` does, saturating past the
      carrier exactly as this item already specifies rather than matching
-     the wrong row — and a non-numeric string is refused at COMPILE time,
-     before any row, batch, or short-circuiting conjunct exists to hide it.
+     the wrong row — and a non-numeric string is refused at COMPILE time.
 
-     **Known residual: the three boxed sites' refusal is still a PER-ROW
-     check, not a plan-time one — tracked as #517.** `d = 'abc'` against an
-     EMPTY table, or behind a conjunct no row survives to
-     (`k > 100000 AND d = 'abc'`), still answers zero rows instead of
-     erroring, on this shape and on the original #463 shape alike: the
-     comparison — and therefore the refusal — never runs. PostgreSQL
-     resolves an unknown-typed literal's type from the column's DECLARATION
-     and refuses at parse/bind time, independent of any row existing.
-     Closing that needs the column's declared type available where the
-     predicate is planned/bound, which is planner territory rather than an
-     extension of the boxed-comparison machinery this bullet closes.
+     (Corrected 2026-08-24. That last sentence used to continue "before any
+     row, batch, or short-circuiting conjunct exists to hide it", which
+     described the refusal and not the QUERY. The refusal was raised at
+     compile time and then SWALLOWED: the physical planner's six compile
+     sites fall back to copying an input column when an expression will not
+     compile, and only `expr.IsUnknownFunc` was exempt, so `SELECT -'abc'`
+     came back as `column "-'abc'" does not exist in the input schema` with
+     no SQLSTATE. A refused literal is now its own error TYPE
+     (`expr.InvalidLiteralError`, SQLSTATE 22P02) and
+     `expr.IsCompileRefusal` names both classes the planner must propagate;
+     `TestRefusedLiteralReachesTheClientAsItsOwnError` gates the SELECT,
+     WHERE, ORDER BY, GROUP BY and aggregate-argument forms. With that, the
+     sentence is true of the fold — and of nothing else.)
+
+     **Known residual: the three boxed sites' refusal is a PER-ROW,
+     PAIRWISE check, not a plan-time one — tracked as #517.** Two separate
+     ways a query that should be refused is answered instead, both pinned by
+     `wadjet.TestBoxedSiteRefusalIsPerRowAndPairwise`:
+
+     - **Per row.** `d = 'abc'` against an EMPTY table, or behind a conjunct
+       no row survives to (`k > 100000 AND d IS DISTINCT FROM 'abc'`),
+       answers zero rows instead of erroring, on this shape and on the
+       original #463 shape alike: the comparison — and therefore the
+       refusal — never runs.
+     - **Pairwise, so the DATA decides.** `GREATEST`/`LEAST` compare
+       (best-so-far, candidate) pairs, and a pair refuses only when a
+       DECIMAL column is on one side and the bad literal on the other. Which
+       argument is the running best depends on the values, so the SAME three
+       arguments refuse under one and answer under the other:
+       `GREATEST(k, 'abc', d)` raises and `LEAST(k, 'abc', d)` returns a row.
+       A refusal that depends on which operand won a comparison is not a
+       type rule at all.
+
+     PostgreSQL resolves an unknown-typed literal's type from the column's
+     DECLARATION and refuses at parse/bind time, independent of any row
+     existing and of any operand order. Closing that needs the column's
+     declared type available where the predicate is planned/bound, which is
+     planner territory rather than an extension of the boxed-comparison
+     machinery this bullet closes.
+
+     **The refusal's cost is a plan-time cost, not a per-row one.**
+     (Added 2026-08-24, from the #505 review.) The first version asked both
+     of the refusal's questions on EVERY ROW — allocating a
+     `kernel.DecimalLiteral` and re-walking the literal's digits to answer
+     "is this a number", then re-resolving the column to answer "is this a
+     DECIMAL" — which cost +42% on a simple CASE over a DECIMAL column,
+     +37% on IS DISTINCT FROM, and +69% with 7x the bytes on an
+     exponent-form literal. Both answers are fixed for the query's lifetime,
+     which is why `decimalLitCmp.numeric` was already a cached slice rather
+     than a per-row `Numeric()` call, and the same discipline now applies at
+     the three boxed sites (`expr.refuseArm`, `caseRefusal`,
+     `extremumRefusal`): the literal is judged once when the node is first
+     evaluated, and the column's answer is cached the way
+     `decimalLitCmp.notDecimal` caches its own. Residual overhead against
+     removing the check entirely is inside the noise. A correctness fix that
+     re-introduces a documented performance regression has not finished.
 
    Arithmetic over DECIMAL still goes through float64, and so do MIN/MAX/SUM
    over a DECIMAL column. That is a separate, visible limit — comparison is
