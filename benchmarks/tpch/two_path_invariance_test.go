@@ -5297,15 +5297,16 @@ func setupCluster(tb testing.TB, ctx context.Context, data map[string][]map[stri
 func loadTPCHIntoCatalog(tb testing.TB, ctx context.Context, cat *catalog.Catalog, store objstore.Store, data map[string][]map[string]any) {
 	tb.Helper()
 
-	names := make([]string, 0, len(AllTables))
-	for name := range AllTables {
+	schemas := fixtureSchemas(data)
+	names := make([]string, 0, len(schemas))
+	for name := range schemas {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
 	const chunks = 3
 	for _, name := range names {
-		schema := AllTables[name]
+		schema := schemas[name]
 		rows := data[name]
 		if err := cat.CreateTable(ctx, name, schema, nil); err != nil {
 			tb.Fatalf("create table %s: %v", name, err)

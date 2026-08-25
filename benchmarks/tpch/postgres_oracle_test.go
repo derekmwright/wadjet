@@ -353,6 +353,9 @@ func (o *postgresOracle) load(t *testing.T, ctx context.Context) {
 	if err := sink(pgDecimalTable, pgDecimalRows()); err != nil {
 		t.Fatalf("%v", err)
 	}
+	if err := sink(pgBytesTable, pgBytesRows()); err != nil {
+		t.Fatalf("%v", err)
+	}
 	for name, ing := range ingesters {
 		if err := ing.FlushAll(ctx); err != nil {
 			t.Fatalf("wadjet flush %s: %v", name, err)
@@ -527,6 +530,16 @@ const (
 	pgDecimalRowGroup = 50
 )
 
+// pgBytesTable is the second fixture the TPC-H schema cannot provide, for the
+// same reason dec_probe is the first: `bytea` appeared NOWHERE in benchmarks/
+// or internal/oracle/ before #570, so neither arm of this oracle had ever
+// compared a BYTES value or the OID it is declared under — and the wire was
+// answering OID 25 (text) with Go's %v of the byte slice ("[255 254 0 65]").
+//
+// It is DELIBERATELY not in AllTables, exactly as dec_probe is not: that map
+// drives the harness, the seeders and both data tiers.
+const pgBytesTable = "bytea_probe"
+
 // oracleTables is AllTables plus the fixtures that exist only for this oracle.
 func oracleTables() map[string]parquet.Schema {
 	out := make(map[string]parquet.Schema, len(AllTables)+1)
@@ -546,7 +559,95 @@ func oracleTables() map[string]parquet.Schema {
 		// truncates.
 		{Name: "d_wide", Type: parquet.TypeDecimal, Precision: 38, Scale: 10, Nullable: true},
 	}}
+	out[pgBytesTable] = parquet.Schema{Columns: []parquet.Column{
+		{Name: "b_key", Type: parquet.TypeInt64},
+		{Name: "b_val", Type: parquet.TypeBytes, Nullable: true},
+		// A second BYTES column so column-to-column comparison, and a join
+		// key, have something to be compared against.
+		{Name: "b_other", Type: parquet.TypeBytes, Nullable: true},
+	}}
 	return out
+}
+
+// pgBytesRows is the BYTES fixture: the values a rendering can go wrong on,
+// not a distribution.
+//
+//	empty          zero bytes, which must stay distinguishable from NULL —
+//	               `\x` on the wire, a zero LENGTH, never a negative one
+//	all-zero       four NULs, which no text-format PostgreSQL field can carry
+//	               and which libpq's strlen-based reader truncates at
+//	high bytes    0xff 0xfe 0x00 0x41: invalid UTF-8 AND an embedded NUL, the
+//	               exact value #570 was filed with
+//	ASCII text     the case that looks fine under every wrong rendering
+//	NULL           the one a wrong NULL representation collapses into ""
+//
+// b_other repeats the set shifted by one row, so b_val = b_other holds for
+// exactly one row and the column-to-column comparisons are not all-or-nothing.
+func pgBytesRows() []map[string]any {
+	vals := [][]byte{
+		{},
+		{0x00, 0x00, 0x00, 0x00},
+		{0xff, 0xfe, 0x00, 0x41},
+		[]byte("hi"),
+		[]byte("Hi"),
+		{0x41},
+		[]byte("wadjet"),
+		{0xff},
+		{0x00},
+		[]byte("hi there"),
+	}
+	rows := make([]map[string]any, 0, len(vals)+1)
+	for i, v := range vals {
+		r := map[string]any{"b_key": int64(i), "b_val": v}
+		r["b_other"] = vals[(i+1)%len(vals)]
+		rows = append(rows, r)
+	}
+	// A row NULL in both columns, and one NULL in only b_val, so IS NULL and
+	// the three-valued comparisons have something to answer about — plus one
+	// row where the two columns hold the SAME bytes, so `b_val = b_other` is
+	// not vacuously empty.
+	rows = append(rows,
+		map[string]any{"b_key": int64(len(vals))},
+		map[string]any{"b_key": int64(len(vals) + 1), "b_other": []byte("hi")},
+		map[string]any{"b_key": int64(len(vals) + 2), "b_val": []byte("hi"), "b_other": []byte("hi")},
+	)
+	return rows
+}
+
+// pgBytesDuckDBSetup spells pgBytesRows as DuckDB DDL, so the DuckDB arm and
+// the PostgreSQL arm look at the SAME rows rather than at two hand-kept
+// copies of "the same" fixture. unhex() is DuckDB's BLOB constructor and
+// takes the hex form on both sides of the comparison, so no value here
+// depends on how a byte is escaped inside a string literal.
+func pgBytesDuckDBSetup() string {
+	schema := oracleTables()[pgBytesTable]
+	cols := make([]string, 0, len(schema.Columns))
+	for _, c := range schema.Columns {
+		typ := "BIGINT"
+		if c.Type == parquet.TypeBytes {
+			typ = "BLOB"
+		}
+		cols = append(cols, c.Name+" "+typ)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "CREATE TABLE %s (%s);\n", pgBytesTable, strings.Join(cols, ", "))
+	for _, r := range pgBytesRows() {
+		vals := make([]string, 0, len(schema.Columns))
+		for _, c := range schema.Columns {
+			switch v := r[c.Name].(type) {
+			case nil:
+				vals = append(vals, "NULL")
+			case int64:
+				vals = append(vals, strconv.FormatInt(v, 10))
+			case []byte:
+				vals = append(vals, fmt.Sprintf("unhex('%x')", v))
+			default:
+				panic(fmt.Sprintf("pgBytesDuckDBSetup: %s holds %T", c.Name, v))
+			}
+		}
+		fmt.Fprintf(&b, "INSERT INTO %s VALUES (%s);\n", pgBytesTable, strings.Join(vals, ", "))
+	}
+	return b.String()
 }
 
 // pgDecimalRows is MONOTONIC in both decimal columns and spans both signs, so
@@ -603,6 +704,10 @@ func postgresColumnType(t *testing.T, c parquet.Column) string {
 		return "timestamp"
 	case parquet.TypeDecimal:
 		return fmt.Sprintf("numeric(%d,%d)", c.Precision, c.Scale)
+	case parquet.TypeBytes:
+		// bytea, which is byte-ordered and byte-compared in every collation:
+		// no COLLATE clause applies to it and none is needed (#570).
+		return "bytea"
 	default:
 		t.Fatalf("column %s has type %s, which the PostgreSQL oracle does not map yet", c.Name, c.Type)
 		return ""

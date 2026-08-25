@@ -475,6 +475,8 @@ func oidName(oid uint32) string {
 		return "int2"
 	case 23:
 		return "int4"
+	case 17:
+		return "bytea"
 	case 25:
 		return "text"
 	case 700:
@@ -767,6 +769,70 @@ func wireCorpus() []wireCase {
 					"means implementing FigureColname's recursion, not a one-line rule",
 			}},
 
+		// --- BYTES is bytea (#570) -----------------------------------------
+		//
+		// The coverage hole this family closes: `bytea` appeared NOWHERE in
+		// benchmarks/ or internal/oracle/ before it, so this arm had never
+		// compared the OID a BYTES column is declared under, the text body
+		// beneath it, or the binary one. It was declaring OID 25 (text) and
+		// sending Go's %v of the byte slice ("[255 254 0 65]") in BOTH
+		// formats — right values nowhere, and invisible to a value oracle
+		// because pgx decoded the text bytes into something.
+		//
+		// The rows are chosen for what a rendering breaks on: the empty
+		// value (`\x`, a ZERO length, not NULL's negative one), four NULs,
+		// the invalid-UTF-8-with-embedded-NUL value from the issue, and
+		// ASCII.
+		{name: "ByteaColumn", sql: `SELECT b_key, b_val FROM bytea_probe WHERE b_key IN (0, 1, 2, 3) ORDER BY b_key`},
+		// NULL against the EMPTY value in one result, which is the pair a
+		// wrong NULL representation collapses.
+		{name: "ByteaNullAndEmpty", sql: `SELECT b_key, b_val FROM bytea_probe WHERE b_key IN (0, 10) ORDER BY b_key`},
+		// A zero-row bytea result: RowDescription is sent before any DataRow,
+		// so the declaration is exactly as comparable here — and it comes off
+		// the PLAN-declared schema rather than a batch, which is the path
+		// #458 found a different type's declaration missing from.
+		{name: "ByteaColumnZeroRows", sql: `SELECT b_val FROM bytea_probe WHERE b_key = -1`},
+		// bytea as an ORDER BY key, so the sort runs on the wire arm too.
+		{name: "ByteaOrderBy", sql: `SELECT b_key, b_val FROM bytea_probe ORDER BY b_val, b_key LIMIT 4`},
+		// A predicate over bytea: an unknown-typed literal beside a bytea
+		// column is coerced by byteain on both engines.
+		{name: "ByteaEquality", sql: `SELECT b_key FROM bytea_probe WHERE b_val = 'hi'`},
+		// `bytea::text` — the second half of #570, and the one whose old
+		// answer put an embedded NUL inside a text-format DataRow field.
+		{name: "ByteaCastText", sql: `SELECT b_key, CAST(b_val AS text) AS s FROM bytea_probe WHERE b_key IN (0, 2, 3) ORDER BY b_key`},
+		// OCTET_LENGTH over bytea: the value agrees, the declared type does
+		// not, and for the reason #530 already records for LENGTH and ABS.
+		{name: "ByteaOctetLength", sql: `SELECT b_key, OCTET_LENGTH(b_val) AS n FROM bytea_probe WHERE b_key IN (0, 2, 3) ORDER BY b_key`,
+			pins: map[string]string{
+				wirePropTypeOIDs: "#530: OCTET_LENGTH is int4 in PostgreSQL (OID 23) and wadjet declares " +
+					"float8 (701), because the expr layer computes it as a float64 — the same defect " +
+					"LENGTH and ABS have, and nothing to do with the bytea column it is measuring",
+				wirePropTypeSizes: "#530, follows the OID: 8 for float8 where PostgreSQL declares 4 for int4",
+			}},
+		// A bytea PARAMETER, declared and inferred. The parameter format is
+		// TEXT here (readOne sends every parameter as text), so these also
+		// cover byteain's escape spelling on the way in — the shape that
+		// used to bind the SPELLING of the bytes and match nothing.
+		{name: "ByteaParamDeclared", sql: `SELECT b_key FROM bytea_probe WHERE b_val = $1`,
+			paramOIDs: []uint32{17}, params: [][]byte{[]byte("hi")}},
+		{name: "ByteaParamHexSpelling", sql: `SELECT b_key FROM bytea_probe WHERE b_val = $1`,
+			paramOIDs: []uint32{17}, params: [][]byte{[]byte(`\x6869`)}},
+		// A DERIVED bytea value. PostgreSQL has `bytea || bytea` and it
+		// returns bytea; wadjet's expr layer has no BYTES return type, so
+		// every scalar function reads the value through toString and the
+		// result is TEXT. Pinned per property so the row COUNT, the field
+		// names and the format handling of the same statement stay gated.
+		{name: "ByteaConcat", sql: `SELECT b_key, b_val || b_other AS c FROM bytea_probe WHERE b_key IN (2, 3) ORDER BY b_key`,
+			pins: map[string]string{
+				wirePropTypeOIDs: "#583: `bytea || bytea` is bytea (OID 17) in PostgreSQL and wadjet " +
+					"declares text (25), because expr has no BYTES return type — every scalar function " +
+					"reads its operand through toString",
+				wirePropValuesText: "#583, the same cause seen as bytes: PostgreSQL renders the derived " +
+					"bytea as \\x hex and wadjet sends the RAW bytes under OID 25 — which puts #570's " +
+					"own hazard back in through a derived value, since those bytes are invalid UTF-8 " +
+					"and hold an embedded NUL that libpq truncates at",
+			}},
+
 		{name: "UnaliasedAggregate",
 			sql: `SELECT COUNT(supplier.s_name) FROM supplier`,
 			pins: map[string]string{
@@ -837,6 +903,24 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		{name: "IntegerNonNumericConstant", sql: `SELECT COUNT(*) FROM nation WHERE n_nationkey = 'abc'`,
 			pin: missingValidationPin + " Specifically: the constant is read as the integer ZERO and " +
 				"matches the rows holding 0. (#536)"},
+		// A TEXT-only function over bytea. PostgreSQL has no upper(bytea) —
+		// 42883, the same shape as min(boolean) — and wadjet answers,
+		// because expr reads every operand through toString (#583).
+		{name: "ByteaTextFunctionOverBytes", sql: `SELECT UPPER(b_val) FROM bytea_probe WHERE b_key = 3`,
+			pin: missingValidationPin + " Specifically: UPPER reads the BYTES operand through " +
+				"expr.toString and answers the text those bytes spell. (#583)"},
+		// MIN/MAX over bytea, which PostgreSQL genuinely does not have
+		// either — verified live, "function min(bytea) does not exist".
+		// This one is a DELIBERATE extension rather than a defect, in the
+		// same class as MIN/MAX over BOOL, and the entry exists so
+		// ADR-0012 item 5's claim about it is checkable rather than
+		// remembered.
+		{name: "ByteaMinMax", sql: `SELECT MIN(b_val) FROM bytea_probe`,
+			pin: "DELIBERATE (ADR-0012 item 5): PostgreSQL has no min(bytea)/max(bytea) at all " +
+				"(verified live: \"function min(bytea) does not exist\"), exactly as it has no " +
+				"min(boolean). wadjet supports both as an extension over a type whose order it " +
+				"defines anyway — bytewise, which is what every bytea comparison uses. Not a " +
+				"position against a PostgreSQL answer, because there is none"},
 		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`},
 		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`},
 		{name: "AmbiguousColumn", sql: `SELECT n_nationkey FROM nation a JOIN nation b ON a.n_nationkey = b.n_nationkey`},

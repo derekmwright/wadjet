@@ -2243,7 +2243,123 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT k FROM (` + pgNumericTextRows + `) t WHERE LEAST(v, '1.5') = '1.5' ORDER BY k`},
 	)
 
+	out = append(out, postgresBytesCases()...)
+
 	return out
+}
+
+// postgresBytesCases is the BYTES/bytea family (#570). Before it, `bytea`
+// appeared nowhere in benchmarks/ or internal/oracle/ at all: the TPC-H
+// fixture has no BYTES column, so this arm had never compared a BYTES VALUE
+// and the wire arm had never compared its OID. The wire half is where the
+// defect lived; this half is what proves the ENGINE's answers were already
+// PostgreSQL's, so the wire fix did not have to move them.
+//
+// Every entry is a rule PostgreSQL defines for bytea:
+//
+//   - comparison and ordering are BYTEWISE, in every collation (no COLLATE
+//     applies to bytea), which is what wadjet does for BYTES anyway;
+//   - an unknown-typed literal beside a bytea column is coerced by byteain,
+//     so `b_val = 'hi'` is the two bytes and not the two characters of some
+//     other type — the same reading wadjet gives it;
+//   - `~~` over bytea EXISTS and is bytewise (verified live:
+//     `'\xfffe0041'::bytea LIKE '%A%'` is true, matching the 0x41 BYTE),
+//     which is why LIKE and `::text` disagree for this one type;
+//   - `bytea::text` is `\x` plus lowercase hex under bytea_output = hex.
+//
+// MIN/MAX over a bare bytea column is deliberately absent: PostgreSQL has no
+// min(bytea)/max(bytea) at all (verified live — "function min(bytea) does
+// not exist", the same shape as min(boolean)), so asking for one would make
+// the ORACLE refuse the entry rather than compare anything. The aggregate is
+// exercised over the CAST instead, where PostgreSQL does have an answer.
+func postgresBytesCases() []pgCase {
+	return []pgCase{
+		// The VALUE itself, straight through. pgx decodes bytea to []byte
+		// and wadjet boxes BYTES as []byte, and the fingerprint digests both
+		// as their raw bytes — so this compares the values and not two
+		// renderings of them.
+		pgCase{name: "BytesProjection", sql: `SELECT b_key, b_val FROM bytea_probe ORDER BY b_key`},
+		pgCase{name: "BytesProjectionBothColumns", sql: `SELECT b_key, b_val, b_other FROM bytea_probe ORDER BY b_key`},
+
+		// Ordering, both directions. NULL placement is item 5's rule and the
+		// non-NULL order is bytewise: the empty value first, 0xff last.
+		pgCase{name: "BytesOrderBy", sql: `SELECT b_key FROM bytea_probe ORDER BY b_val, b_key`},
+		pgCase{name: "BytesOrderByDesc", sql: `SELECT b_key FROM bytea_probe ORDER BY b_val DESC, b_key`},
+		pgCase{name: "BytesOrderByValues", sql: `SELECT b_val FROM bytea_probe ORDER BY b_val, b_key`},
+
+		// Equality and the rest of the operator set against a literal. 'hi'
+		// and 'Hi' differ only in case, which a byte comparison separates and
+		// a locale one does not.
+		pgCase{name: "BytesEq", sql: `SELECT b_key FROM bytea_probe WHERE b_val = 'hi' ORDER BY b_key`},
+		pgCase{name: "BytesEqCaseDiffers", sql: `SELECT b_key FROM bytea_probe WHERE b_val = 'Hi' ORDER BY b_key`},
+		pgCase{name: "BytesEqEmpty", sql: `SELECT b_key FROM bytea_probe WHERE b_val = '' ORDER BY b_key`},
+		pgCase{name: "BytesNe", sql: `SELECT b_key FROM bytea_probe WHERE b_val <> 'hi' ORDER BY b_key`},
+		pgCase{name: "BytesLt", sql: `SELECT b_key FROM bytea_probe WHERE b_val < 'hi' ORDER BY b_key`},
+		pgCase{name: "BytesLe", sql: `SELECT b_key FROM bytea_probe WHERE b_val <= 'hi' ORDER BY b_key`},
+		pgCase{name: "BytesGt", sql: `SELECT b_key FROM bytea_probe WHERE b_val > 'hi' ORDER BY b_key`},
+		pgCase{name: "BytesGe", sql: `SELECT b_key FROM bytea_probe WHERE b_val >= 'hi' ORDER BY b_key`},
+		// A PREFIX of another value: 'hi' < 'hi there', which is the one
+		// ordering rule a length-first comparison would get wrong.
+		pgCase{name: "BytesPrefixOrder", sql: `SELECT b_key FROM bytea_probe WHERE b_val > 'hi' AND b_val < 'wadjet' ORDER BY b_key`},
+		pgCase{name: "BytesIn", sql: `SELECT b_key FROM bytea_probe WHERE b_val IN ('hi', 'A', '') ORDER BY b_key`},
+		pgCase{name: "BytesBetween", sql: `SELECT b_key FROM bytea_probe WHERE b_val BETWEEN 'A' AND 'hi' ORDER BY b_key`},
+
+		// NULL, and the empty value beside it: two different answers a wrong
+		// NULL representation collapses into one.
+		pgCase{name: "BytesIsNull", sql: `SELECT b_key FROM bytea_probe WHERE b_val IS NULL ORDER BY b_key`},
+		pgCase{name: "BytesIsNotNull", sql: `SELECT b_key FROM bytea_probe WHERE b_val IS NOT NULL ORDER BY b_key`},
+		pgCase{name: "BytesIsDistinctFrom", sql: `SELECT b_key FROM bytea_probe WHERE b_val IS DISTINCT FROM 'hi' ORDER BY b_key`},
+		pgCase{name: "BytesCoalesce", sql: `SELECT b_key, COALESCE(b_val, b_other) AS v FROM bytea_probe ORDER BY b_key`},
+
+		// Column against column, which takes a different path from column
+		// against literal in every type family this ADR has had to fix.
+		pgCase{name: "BytesColColEq", sql: `SELECT b_key FROM bytea_probe WHERE b_val = b_other ORDER BY b_key`},
+		pgCase{name: "BytesColColLt", sql: `SELECT b_key FROM bytea_probe WHERE b_val < b_other ORDER BY b_key`},
+		pgCase{name: "BytesJoinOnBytes",
+			sql: `SELECT a.b_key AS ak, b.b_key AS bk FROM bytea_probe a JOIN bytea_probe b ON a.b_val = b.b_other ORDER BY ak, bk`},
+
+		// The value as a GROUP BY / DISTINCT key, which is the serialized-key
+		// path rather than the comparison one.
+		pgCase{name: "BytesGroupBy", sql: `SELECT b_val, COUNT(*) AS n FROM bytea_probe GROUP BY b_val ORDER BY b_val`},
+		pgCase{name: "BytesDistinct", sql: `SELECT DISTINCT b_val FROM bytea_probe ORDER BY b_val`},
+		pgCase{name: "BytesCountDistinct", sql: `SELECT COUNT(DISTINCT b_val) AS n FROM bytea_probe`},
+
+		// LENGTH/OCTET_LENGTH over bytea are the OCTET count in PostgreSQL,
+		// not a character count — there are no characters.
+		pgCase{name: "BytesLength", sql: `SELECT b_key, LENGTH(b_val) AS n, OCTET_LENGTH(b_val) AS o FROM bytea_probe ORDER BY b_key`},
+
+		// The rendering #570 changed, asked of the engine that defines it.
+		pgCase{name: "BytesCastText", sql: `SELECT b_key, CAST(b_val AS text) AS s FROM bytea_probe ORDER BY b_key`},
+		pgCase{name: "BytesCastTextOrder", sql: `SELECT CAST(b_val AS text) AS s FROM bytea_probe ORDER BY s, b_key`},
+		// MIN/MAX over the cast, since PostgreSQL has no min(bytea): the
+		// aggregate still runs over BYTES-derived text on both sides.
+		pgCase{name: "BytesMinMaxOverCast",
+			sql: `SELECT MIN(CAST(b_val AS text)) AS lo, MAX(CAST(b_val AS text)) AS hi FROM bytea_probe`},
+
+		// `~~` over bytea is BYTEWISE, so the pattern matches the 0x41 BYTE
+		// in 0xff 0xfe 0x00 0x41 and not a hex digit of its \x spelling.
+		// This is why CAST and LIKE deliberately disagree for BYTES.
+		pgCase{name: "BytesLike", sql: `SELECT b_key FROM bytea_probe WHERE b_val LIKE '%A%' ORDER BY b_key`},
+		pgCase{name: "BytesLikePrefix", sql: `SELECT b_key FROM bytea_probe WHERE b_val LIKE 'h%' ORDER BY b_key`},
+		pgCase{name: "BytesNotLike", sql: `SELECT b_key FROM bytea_probe WHERE b_val NOT LIKE '%A%' ORDER BY b_key`},
+
+		// The remaining half of #570, on the way IN. An unknown-typed
+		// literal beside a bytea column is read by byteain in PostgreSQL, so
+		// the HEX spelling names the same two bytes `'hi'` does. wadjet has
+		// no BYTES literal — the lexer produces a string and nothing
+		// re-types it from the column's declaration — so the six characters
+		// are compared against two bytes and match nothing. Pinned, not
+		// exempted: the day a bytea literal lands, this entry fails.
+		pgCase{name: "BytesEqHexSpelledLiteral",
+			sql: `SELECT b_key FROM bytea_probe WHERE b_val = '\x6869' ORDER BY b_key`,
+			knownBug: pgBugWadjet + " PostgreSQL's byteain reads an unknown-typed literal beside a " +
+				"bytea column, so '\\x6869' is the two bytes 0x68 0x69 and this finds the row. wadjet " +
+				"has no BYTES literal at all: the lexer produces a string, nothing re-types it from the " +
+				"column's declaration, and the SIX characters match nothing. The bytea Bind PARAMETER " +
+				"path does decode both spellings (it has the declared OID to decode against); a " +
+				"hand-written literal has no declaration to consult",
+			issue: "#582"},
+	}
 }
 
 // pgNumericTextRows is the five-row TEXT fixture the #504 entries above are

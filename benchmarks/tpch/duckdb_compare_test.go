@@ -122,6 +122,11 @@ func TestDuckDBCompare(t *testing.T) {
 	t.Cleanup(cancel)
 
 	rows := duckdbFixtureRows(t)
+	// The BYTES fixture (#570). It is the SAME rows the PostgreSQL arm
+	// loads (pgBytesRows), not a second copy: `bytea` appeared nowhere in
+	// benchmarks/ before that issue, so neither oracle had a BYTES value to
+	// compare, and two hand-kept fixtures would be two questions.
+	rows[pgBytesTable] = pgBytesRows()
 	embedded := ingestDuckDBFixture(t, ctx, rows) // arm A
 	_, dag := setupCluster(t, ctx, rows)          // arm B
 
@@ -1691,6 +1696,65 @@ func duckdbCorpus() []duckdbCase {
 			FROM (SELECT n_name, CASE WHEN n_regionkey < 2 THEN NULL ELSE n_regionkey END AS bucket FROM nation) t
 			WHERE bucket > 2 ORDER BY n_name`},
 	)
+
+	// --- BYTES / BLOB (#570) --------------------------------------------
+	//
+	// `bytea`/`BLOB` appeared nowhere in benchmarks/ before this: the TPC-H
+	// fixture has no BYTES column, so this arm had never compared one
+	// either. It runs over the same bytea_probe rows the PostgreSQL arm
+	// loads.
+	//
+	// The BLOB VALUE is never projected. DuckDB's CSV output escapes a
+	// non-printable byte as \xNN, so a raw-bytes comparison would be
+	// comparing wadjet's bytes against DuckDB's DISPLAY of them and would
+	// report a divergence about neither engine — the same reason the
+	// DECIMAL entries project d_key. What is compared instead is the KEY a
+	// predicate selects, the octet count, and the hex TEXT, which is where
+	// a wrong byte actually shows.
+	//
+	// duckdbSQL carries the dialect differences (ADR-0012 rule 3: configure
+	// the oracle, never exempt the entry): DuckDB needs `::BLOB` on a
+	// literal that meets a BLOB column, and spells `bytea::text` as
+	// '\x' || lower(hex(...)).
+	const duckBlobHex = `CASE WHEN b_val IS NULL THEN NULL ELSE '\x' || lower(hex(b_val)) END`
+	out = append(out,
+		duckdbCase{name: "BlobEqLiteral",
+			sql:       `SELECT b_key FROM bytea_probe WHERE b_val = 'hi' ORDER BY b_key`,
+			duckdbSQL: `SELECT b_key FROM bytea_probe WHERE b_val = 'hi'::BLOB ORDER BY b_key`},
+		duckdbCase{name: "BlobEqEmpty",
+			sql:       `SELECT b_key FROM bytea_probe WHERE b_val = '' ORDER BY b_key`,
+			duckdbSQL: `SELECT b_key FROM bytea_probe WHERE b_val = ''::BLOB ORDER BY b_key`},
+		duckdbCase{name: "BlobGtLiteral",
+			sql:       `SELECT b_key FROM bytea_probe WHERE b_val > 'hi' ORDER BY b_key`,
+			duckdbSQL: `SELECT b_key FROM bytea_probe WHERE b_val > 'hi'::BLOB ORDER BY b_key`},
+		// A PREFIX against the longer value it starts: the one ordering a
+		// length-first comparison gets wrong.
+		duckdbCase{name: "BlobOrderByKeys",
+			sql: `SELECT b_key FROM bytea_probe ORDER BY b_val, b_key`},
+		duckdbCase{name: "BlobOrderByKeysDesc",
+			sql: `SELECT b_key FROM bytea_probe ORDER BY b_val DESC, b_key`},
+		duckdbCase{name: "BlobColColEq",
+			sql: `SELECT b_key FROM bytea_probe WHERE b_val = b_other ORDER BY b_key`},
+		duckdbCase{name: "BlobColColLt",
+			sql: `SELECT b_key FROM bytea_probe WHERE b_val < b_other ORDER BY b_key`},
+		duckdbCase{name: "BlobIsNull",
+			sql: `SELECT b_key FROM bytea_probe WHERE b_val IS NULL ORDER BY b_key`},
+		duckdbCase{name: "BlobOctetLength",
+			sql: `SELECT b_key, OCTET_LENGTH(b_val) AS n FROM bytea_probe ORDER BY b_key`},
+		duckdbCase{name: "BlobCountDistinct",
+			sql: `SELECT COUNT(DISTINCT b_val) AS n FROM bytea_probe`},
+		// The rendering #570 changed, against the second oracle.
+		duckdbCase{name: "BlobCastText",
+			sql:       `SELECT b_key, CAST(b_val AS text) AS s FROM bytea_probe ORDER BY b_key`,
+			duckdbSQL: `SELECT b_key, ` + duckBlobHex + ` AS s FROM bytea_probe ORDER BY b_key`},
+		duckdbCase{name: "BlobCastTextOrder",
+			sql:       `SELECT CAST(b_val AS text) AS s FROM bytea_probe ORDER BY s, b_key`,
+			duckdbSQL: `SELECT ` + duckBlobHex + ` AS s FROM bytea_probe ORDER BY s, b_key`},
+		duckdbCase{name: "BlobMinMaxOverCast",
+			sql:       `SELECT MIN(CAST(b_val AS text)) AS lo, MAX(CAST(b_val AS text)) AS hi FROM bytea_probe`,
+			duckdbSQL: `SELECT MIN(` + duckBlobHex + `) AS lo, MAX(` + duckBlobHex + `) AS hi FROM bytea_probe`},
+	)
+
 	// The hand-written entries above declare `ordered` implicitly through
 	// their SQL; derive it the same way the TPC-H entries do so the two can
 	// never drift apart.
@@ -1851,7 +1915,34 @@ func duckdbViews(t *testing.T, dataDir string) string {
 	for _, name := range duckdbTables {
 		fmt.Fprintf(&sb, "CREATE VIEW %s AS SELECT * FROM read_parquet('%s/%s.parquet');\n", name, absDir, name)
 	}
+	// The BYTES fixture has no committed parquet: it is generated in Go and
+	// spelled for DuckDB from the SAME rows both engines are loaded with
+	// (#570), so the two cannot drift.
+	sb.WriteString(pgBytesDuckDBSetup())
 	return sb.String()
+}
+
+// fixtureSchemas is the schema for every table in data: AllTables, plus the
+// probe tables that exist only for an oracle and are deliberately kept out
+// of AllTables (which drives the harness, the seeders and both data tiers).
+// A caller whose data holds nothing but AllTables gets exactly AllTables.
+func fixtureSchemas(data map[string][]map[string]any) map[string]parquet.Schema {
+	out := make(map[string]parquet.Schema, len(AllTables)+1)
+	for name, schema := range AllTables {
+		out[name] = schema
+	}
+	probes := oracleTables()
+	for name := range data {
+		if _, ok := out[name]; ok {
+			continue
+		}
+		schema, ok := probes[name]
+		if !ok {
+			continue
+		}
+		out[name] = schema
+	}
+	return out
 }
 
 // duckdbFixtureRows reads every committed DuckDB-written parquet through
@@ -1881,7 +1972,7 @@ func ingestDuckDBFixture(t *testing.T, ctx context.Context, data map[string][]ma
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	for tableName, schema := range AllTables {
+	for tableName, schema := range fixtureSchemas(data) {
 		if err := db.CreateTable(ctx, tableName, schema, nil); err != nil {
 			t.Fatalf("create table %s: %v", tableName, err)
 		}

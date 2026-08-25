@@ -1,5 +1,5 @@
 {
-  "generator": "duckdb v1.4.1 (Andium) b390a7c376 over duckdb-data (WADJET_REGENERATE_DUCKDB_BASELINE=1)",
+  "generator": "duckdb v1.5.5 (Variegata) d8cdaa33fd over duckdb-data (WADJET_REGENERATE_DUCKDB_BASELINE=1)",
   "note": "Ground truth. Every entry is DuckDB output; nothing here is derived from Wadjet.",
   "queries": {
     "AliasedGroupKeyOrderBy": {
@@ -32,6 +32,152 @@
       "ordered": false,
       "limit": 7,
       "why": "a LIMIT with no ORDER BY picks arbitrary rows by definition"
+    },
+    "BlobCastText": {
+      "source": "duckdb",
+      "row_count": 13,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "b_key",
+        "s"
+      ],
+      "fine": "456f5a57fd123fbf",
+      "coarse": "456f5a57fd123fbf"
+    },
+    "BlobCastTextOrder": {
+      "source": "duckdb",
+      "row_count": 13,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "s"
+      ],
+      "fine": "24c11db24a8c240b",
+      "coarse": "24c11db24a8c240b"
+    },
+    "BlobColColEq": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "b_key"
+      ],
+      "fine": "a1fb50e6c86fae16",
+      "coarse": "a1fb50e6c86fae16"
+    },
+    "BlobColColLt": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "b_key"
+      ],
+      "fine": "8238b3c7c6d0986f",
+      "coarse": "8238b3c7c6d0986f"
+    },
+    "BlobCountDistinct": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "n"
+      ],
+      "fine": "917df3320d778ddb",
+      "coarse": "917df3320d778ddb"
+    },
+    "BlobEqEmpty": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "b_key"
+      ],
+      "fine": "9a271f2a916b0b6e",
+      "coarse": "9a271f2a916b0b6e"
+    },
+    "BlobEqLiteral": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "b_key"
+      ],
+      "fine": "043e42748d5d232a",
+      "coarse": "043e42748d5d232a"
+    },
+    "BlobGtLiteral": {
+      "source": "duckdb",
+      "row_count": 4,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "b_key"
+      ],
+      "fine": "a58334ead1a15f91",
+      "coarse": "a58334ead1a15f91"
+    },
+    "BlobIsNull": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "b_key"
+      ],
+      "fine": "f2fee51a01545828",
+      "coarse": "f2fee51a01545828"
+    },
+    "BlobMinMaxOverCast": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "lo",
+        "hi"
+      ],
+      "fine": "6d93c43415ea07e7",
+      "coarse": "6d93c43415ea07e7"
+    },
+    "BlobOctetLength": {
+      "source": "duckdb",
+      "row_count": 13,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "b_key",
+        "n"
+      ],
+      "fine": "dcd8be0cc9806eae",
+      "coarse": "dcd8be0cc9806eae"
+    },
+    "BlobOrderByKeys": {
+      "source": "duckdb",
+      "row_count": 13,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "b_key"
+      ],
+      "fine": "a8375811e1ac0927",
+      "coarse": "a8375811e1ac0927"
+    },
+    "BlobOrderByKeysDesc": {
+      "source": "duckdb",
+      "row_count": 13,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "b_key"
+      ],
+      "fine": "4dcaa96dad21d3c0",
+      "coarse": "4dcaa96dad21d3c0"
     },
     "BoolAggregates": {
       "source": "duckdb",
