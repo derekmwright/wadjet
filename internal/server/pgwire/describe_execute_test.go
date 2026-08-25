@@ -418,6 +418,51 @@ func TestDataGripOpeningSequenceSimpleProtocol(t *testing.T) {
 	}
 }
 
+// startupTimePlausible reports whether a startup_time value returned by
+// pg_postmaster_start_time() looks like a real process start rather than
+// garbage. It deliberately has no upper bound: startup comes from a
+// package-level time.Time captured once at process init
+// (expr.processStart), so "now" can legitimately be arbitrarily far past
+// it depending on how long the rest of this test binary's suite ran before
+// reaching the caller — under -race that can run past any fixed few-minute
+// window with nothing wrong on the server (#518). The only thing that can
+// never be true of a real process start is that it is in the future.
+func startupTimePlausible(startup, now float64) bool {
+	return now-startup >= 0
+}
+
+// TestStartupTimePlausible pins #518: a startup_time far in the past must
+// stay plausible however long the rest of the -race suite took to reach the
+// caller, and one that reports a future timestamp must not.
+func TestStartupTimePlausible(t *testing.T) {
+	tests := []struct {
+		name          string
+		startup, now  float64
+		wantPlausible bool
+	}{
+		{"just started", 1_000_000, 1_000_000, true},
+		{"a few seconds of query round trips", 1_000_000, 1_000_003, true},
+		{
+			// Before the fix this was rejected by a hardcoded 300s bound
+			// measured against total suite runtime rather than the
+			// server's actual start — exactly the -race flake in #518.
+			name:          "far in the past under a slow -race suite",
+			startup:       1_000_000,
+			now:           1_000_000 + 400,
+			wantPlausible: true,
+		},
+		{"in the future is never a real process start", 1_000_000, 999_999, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := startupTimePlausible(tt.startup, tt.now); got != tt.wantPlausible {
+				t.Errorf("startupTimePlausible(%v, %v) = %v, want %v",
+					tt.startup, tt.now, got, tt.wantPlausible)
+			}
+		})
+	}
+}
+
 // TestDataGripOpeningSequencePgx drives the same sequence through pgx, which
 // speaks the extended protocol the way pgJDBC does — it holds the statement
 // description from Describe and decodes DataRows against it, so a shape
@@ -526,8 +571,8 @@ func TestDataGripOpeningSequencePgx(t *testing.T) {
 		t.Fatalf("scanning startup_time as a number: %v", err)
 	}
 	t.Logf("startup_time = %v", startup)
-	if delta := float64(time.Now().Unix()) - startup; delta < 0 || delta > 300 {
-		t.Errorf("startup_time %v is %vs from now — not this process's start", startup, delta)
+	if !startupTimePlausible(startup, float64(time.Now().Unix())) {
+		t.Errorf("startup_time %v is in the future relative to now — not this process's start", startup)
 	}
 
 	// The database picker. An empty list here is what left DataGrip with no
