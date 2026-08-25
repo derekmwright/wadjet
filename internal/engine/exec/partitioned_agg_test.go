@@ -221,3 +221,79 @@ func TestPartitionedAggMatchesSerial(t *testing.T) {
 		})
 	}
 }
+
+// TestPartitionedAggCidrRoutingUsesInetEquality is #520's local (single-
+// process, morsel-parallel) partitioned-aggregation router: a single-column
+// CIDR GROUP BY falls to buildRoutePlan's hashKindNone plan (no fast-path
+// route exists for CIDR — the same restriction the SINK's own single-string
+// fast path applies, TypeString/TypeBytes only), so routing goes through
+// legacyCompositeHash. That function hashed the column's raw stored TEXT for
+// every "string-class" type including CIDR, so '10.0.0.1' and '10.0.0.1/32'
+// — one value in PostgreSQL's inet, and one GROUP already since
+// appendColumnValue's #520 fix — could hash to two DIFFERENT partitions.
+// Each partition's HashAggregate clone is PartitionedDisjoint (assumed to
+// own disjoint keys) and MergeSink adopts a disjoint clone's state WITHOUT
+// re-merging by key, so the two spellings surfaced as two separate output
+// groups only when the query happened to run parallel — invisible at
+// workers=1, and invisible to any gate that never runs GROUP BY c_cidr
+// through more than one worker.
+func TestPartitionedAggCidrRoutingUsesInetEquality(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "c_cidr", Type: parquet.TypeCIDR},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	// Every row names the SAME address, alternating spelling, so a
+	// text-based router splits them across workers by construction (two
+	// distinct byte strings hashed independently) while an inet-aware
+	// router sends every row to the same partition.
+	const n = 2000
+	rows := make([]map[string]any, n)
+	for i := range rows {
+		addr := "10.0.0.1"
+		if i%2 == 1 {
+			addr = "10.0.0.1/32"
+		}
+		rows[i] = map[string]any{"c_cidr": addr, "v": int64(1)}
+	}
+
+	run := func(workers int) map[string]int64 {
+		agg := NewHashAggregate([]string{"c_cidr"}, []AggColumn{
+			{Func: AggCount, InputCol: "v", OutputCol: "cnt", OutputType: parquet.TypeInt64},
+		})
+		pipe := &Pipeline{Source: NewSliceSource(schema, rows), Sink: agg, Workers: workers}
+		if err := pipe.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]int64{}
+		for {
+			b, err := agg.Next(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b == nil {
+				break
+			}
+			for _, r := range b.ToRows() {
+				out[fmt.Sprintf("%v", r["c_cidr"])] += r["cnt"].(int64)
+			}
+		}
+		return out
+	}
+
+	serial := run(1)
+	if len(serial) != 1 {
+		t.Fatalf("serial (workers=1) produced %d groups, want 1: %v", len(serial), serial)
+	}
+	parallel := run(8)
+	if len(parallel) != 1 {
+		t.Fatalf("parallel (workers=8) produced %d groups, want 1 — PostgreSQL's inet calls "+
+			"'10.0.0.1' and '10.0.0.1/32' one value: %v", len(parallel), parallel)
+	}
+	var total int64
+	for _, v := range parallel {
+		total = v
+	}
+	if total != n {
+		t.Errorf("total count = %d, want %d", total, n)
+	}
+}

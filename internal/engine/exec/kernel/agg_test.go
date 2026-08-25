@@ -344,6 +344,47 @@ func TestFinalMax(t *testing.T) {
 	})
 }
 
+// TestAccumulatorMergeCIDRUsesInetOrder is #520's Accumulator.Merge half:
+// combining two partial MIN/MAX accumulators — one per scan batch, row
+// group, or parallel worker split — with plain string `<`/`>` disagreed
+// with the single-batch kernel path (minCIDRUpdate/maxCIDRUpdate) the
+// moment a scalar MIN/MAX(cidr_col) query's input crossed more than one
+// batch: "192.168.252.62/24" sorts ABOVE "192.168.252.190/24" as text, the
+// opposite of PostgreSQL's inet order for two addresses in the same masked
+// network. TestTypeMatrixOptimizationInvariance's minmax_c_cidr entry
+// caught the divergence because the type-matrix fixture always spans more
+// than one scan batch.
+func TestAccumulatorMergeCIDRUsesInetOrder(t *testing.T) {
+	t.Run("Min", func(t *testing.T) {
+		a := Accumulator{HasMin: true, IsString: true, StrType: batch.TypeCIDR, MinStr: "192.168.252.190/24"}
+		b := Accumulator{HasMin: true, IsString: true, StrType: batch.TypeCIDR, MinStr: "192.168.252.62/24"}
+		a.Merge(&b)
+		if a.MinStr != "192.168.252.62/24" {
+			t.Errorf("merged MinStr = %q, want %q (inet order, not text order)", a.MinStr, "192.168.252.62/24")
+		}
+	})
+
+	t.Run("Max", func(t *testing.T) {
+		a := Accumulator{HasMax: true, IsString: true, StrType: batch.TypeCIDR, MaxStr: "192.168.252.62/24"}
+		b := Accumulator{HasMax: true, IsString: true, StrType: batch.TypeCIDR, MaxStr: "192.168.252.190/24"}
+		a.Merge(&b)
+		if a.MaxStr != "192.168.252.190/24" {
+			t.Errorf("merged MaxStr = %q, want %q (inet order, not text order)", a.MaxStr, "192.168.252.190/24")
+		}
+	})
+
+	// A plain STRING column must keep its ordinary lexical merge — the CIDR
+	// branch must not leak onto every byte-backed type.
+	t.Run("PlainStringUnaffected", func(t *testing.T) {
+		a := Accumulator{HasMax: true, IsString: true, StrType: batch.TypeString, MaxStr: "9"}
+		b := Accumulator{HasMax: true, IsString: true, StrType: batch.TypeString, MaxStr: "10"}
+		a.Merge(&b)
+		if a.MaxStr != "9" {
+			t.Errorf("merged MaxStr = %q, want %q (lexical: \"9\" > \"10\")", a.MaxStr, "9")
+		}
+	})
+}
+
 // A DECIMAL aggregate finalizes as the value's TEXT, not as a float64: the
 // box has to survive an output vector at a different scale, and the whole
 // point of #455 is that the digits past the 16th are still there.

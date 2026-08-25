@@ -2,6 +2,7 @@ package exec
 
 import (
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -102,8 +103,35 @@ func boxedValueCompare(col parquet.Column) boxedCompare {
 		return boxedListCompare(col.ElementType)
 	case parquet.TypeDecimal:
 		return boxedDecimalCompare(col.Scale)
+	case parquet.TypeCIDR:
+		return boxedCidrCompare()
 	default:
 		return compareAny
+	}
+}
+
+// boxedCidrCompare orders two boxed CIDR values (Vector.GetValue's rendering
+// is the column's own stored text) by PostgreSQL's inet order
+// (kernel.CidrOrderKey) rather than compareAny's plain string compare
+// (#520): the row-oriented window spill, its MIN/MAX deque, and the global
+// (empty-PARTITION-BY) window evaluator all read this comparator, and
+// without it a windowed MIN/MAX or a window ORDER BY over a CIDR column
+// disagreed with the WHERE-clause ordering #492 already fixed.
+func boxedCidrCompare() boxedCompare {
+	return func(a, b any) int {
+		as, aok := a.(string)
+		bs, bok := b.(string)
+		if !aok || !bok {
+			return compareAny(a, b)
+		}
+		ak, bk := kernel.CidrOrderKey(as), kernel.CidrOrderKey(bs)
+		switch {
+		case ak < bk:
+			return -1
+		case ak > bk:
+			return 1
+		}
+		return 0
 	}
 }
 

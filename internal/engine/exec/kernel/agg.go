@@ -376,8 +376,12 @@ func ResolveRowMin(typ batch.TypeID) RowAggUpdater {
 		return minRowFloat32
 	case batch.TypeDecimal:
 		return minRowDecimal
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		return minRowString
+	case batch.TypeCIDR:
+		// PostgreSQL's inet order, not the stored text's byte order (#520):
+		// see minCIDRUpdate.
+		return minRowCIDR
 	case batch.TypeBool:
 		return minRowBool
 	default:
@@ -398,8 +402,10 @@ func ResolveRowMinNoNulls(typ batch.TypeID) RowAggUpdater {
 		return minRowFloat32NoNulls
 	case batch.TypeDecimal:
 		return minRowDecimal
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		return minRowStringNoNulls
+	case batch.TypeCIDR:
+		return minRowCIDRNoNulls
 	case batch.TypeBool:
 		return minRowBoolNoNulls
 	default:
@@ -420,8 +426,10 @@ func ResolveRowMax(typ batch.TypeID) RowAggUpdater {
 		return maxRowFloat32
 	case batch.TypeDecimal:
 		return maxRowDecimal
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		return maxRowString
+	case batch.TypeCIDR:
+		return maxRowCIDR
 	case batch.TypeBool:
 		return maxRowBool
 	default:
@@ -442,8 +450,10 @@ func ResolveRowMaxNoNulls(typ batch.TypeID) RowAggUpdater {
 		return maxRowFloat32NoNulls
 	case batch.TypeDecimal:
 		return maxRowDecimal
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		return maxRowStringNoNulls
+	case batch.TypeCIDR:
+		return maxRowCIDRNoNulls
 	case batch.TypeBool:
 		return maxRowBoolNoNulls
 	default:
@@ -582,8 +592,10 @@ func ResolveBatchMin(typ batch.TypeID) BatchAggKernel {
 			acc.IsDecimal = true
 			acc.DecScale = vec.DecimalData.Scale
 		}
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		return minBatchString
+	case batch.TypeCIDR:
+		return minBatchCIDR
 	case batch.TypeBool:
 		return minBatchBool
 	default:
@@ -640,8 +652,10 @@ func ResolveBatchMax(typ batch.TypeID) BatchAggKernel {
 			acc.IsDecimal = true
 			acc.DecScale = vec.DecimalData.Scale
 		}
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		return maxBatchString
+	case batch.TypeCIDR:
+		return maxBatchCIDR
 	case batch.TypeBool:
 		return maxBatchBool
 	default:

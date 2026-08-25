@@ -110,8 +110,12 @@ func TestMinMaxByteBackedLiteralValues(t *testing.T) {
 		// would beat "2001:db8::1387".
 		{"c_ipv6", "2001:db8::", "2001:db8::1387"},
 		{"c_uuid", "00000000-0000-4000-8000-000000000000", "00000000-0000-4000-8000-000000001387"},
-		// CIDR's storage IS its text, so it orders as text: "99" > "255".
-		{"c_cidr", "192.168.0.0/24", "192.168.99.0/24"},
+		// CIDR orders by PostgreSQL's inet (#520, ADR-0012 item 10's
+		// residual), not the stored text's byte order: this used to read
+		// "192.168.99.0/24" ('9' > '2' as a character), but 255 is the
+		// numerically larger third octet and #520 made MIN/MAX agree with
+		// the WHERE-clause/ORDER BY comparison #492 already fixed.
+		{"c_cidr", "192.168.0.0/24", "192.168.255.0/24"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.col, func(t *testing.T) {

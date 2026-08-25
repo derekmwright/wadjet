@@ -1213,7 +1213,7 @@ func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, h
 				}
 				hashes[i] = h
 			}
-		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
+		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeUUID:
 			for i := 0; i < n; i++ {
 				row := i
 				if useSel {
@@ -1225,6 +1225,29 @@ func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, h
 				} else {
 					for _, c := range col.BytesData.Value(row) {
 						h = (h ^ uint64(c)) * fnvPrime64
+					}
+				}
+				hashes[i] = h
+			}
+		case parquet.TypeCIDR:
+			// PostgreSQL's inet equality, not the stored text's byte
+			// equality (#520): '10.0.0.1' and '10.0.0.1/32' are the SAME
+			// value there, so they must route to the SAME partition or a
+			// distributed hash join / hash aggregate on a CIDR key answers
+			// differently from the single-process engine, which already
+			// groups them as one (appendColumnValue, aggregate.go).
+			for i := 0; i < n; i++ {
+				row := i
+				if useSel {
+					row = int(b.Sel[i])
+				}
+				h := hashes[i]
+				if col.Nulls.IsNullFast(row) {
+					h = (h ^ 0xff) * fnvPrime64
+				} else {
+					key := kernel.CidrOrderKey(col.BytesData.UnsafeStringValue(row))
+					for j := 0; j < len(key); j++ {
+						h = (h ^ uint64(key[j])) * fnvPrime64
 					}
 				}
 				hashes[i] = h
@@ -1358,8 +1381,12 @@ func hashVectorValue(h interface{ Write([]byte) (int, error) }, col *batch.Vecto
 	case parquet.TypeFloat64:
 		binary.LittleEndian.PutUint64(scratch[:8], kernel.KeyFloat64Bits(col.Float64Data[row]))
 		_, _ = h.Write(scratch[:8])
-	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
+	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeUUID:
 		_, _ = h.Write(col.BytesData.Value(row))
+	case parquet.TypeCIDR:
+		// Must mix the SAME bytes as hashRowsIntoPartitions' TypeCIDR arm —
+		// see this function's own doc comment.
+		_, _ = h.Write([]byte(kernel.CidrOrderKey(col.BytesData.UnsafeStringValue(row))))
 	case parquet.TypeBool:
 		var v byte
 		if col.BoolData[row] {

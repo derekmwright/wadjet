@@ -27,8 +27,12 @@ func ResolveSortCompare(typ batch.TypeID) SortCompareKernel {
 		return sortCompareFloat64
 	case batch.TypeFloat32:
 		return sortCompareFloat32
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		return sortCompareString
+	case batch.TypeCIDR:
+		// PostgreSQL's inet order, not the stored text's byte order (#520):
+		// see sortCompareCIDR.
+		return sortCompareCIDR
 	case batch.TypeBool:
 		return sortCompareBool
 	case batch.TypeDecimal:
@@ -140,6 +144,36 @@ func sortCompareString(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 	return 0
 }
 
+// sortCompareCIDR is sortCompareString for a TypeCIDR column, ordering by
+// CidrOrderKey (PostgreSQL's inet order) instead of the stored text's byte
+// order (#520): text order puts "9.0.0.0/8" above "10.0.0.0/8" and
+// "192.168.1.0/24" below "192.168.1.0/32" at the same address, neither of
+// which is what `WHERE c_cidr < '10.0.0.0/8'` already answers (#492) —
+// ORDER BY, GROUP BY's output order, DISTINCT, MIN/MAX and a sort-merge
+// join key all used to disagree with the predicate they sat next to.
+func sortCompareCIDR(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
+	aN := a.Nulls.IsNullFast(ai)
+	bN := b.Nulls.IsNullFast(bi)
+	if aN && bN {
+		return 0
+	}
+	if aN {
+		return -1
+	}
+	if bN {
+		return 1
+	}
+	as := CidrOrderKey(a.BytesData.UnsafeStringValue(ai))
+	bs := CidrOrderKey(b.BytesData.UnsafeStringValue(bi))
+	if as < bs {
+		return -1
+	}
+	if as > bs {
+		return 1
+	}
+	return 0
+}
+
 func sortCompareBool(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 	aN := a.Nulls.IsNullFast(ai)
 	bN := b.Nulls.IsNullFast(bi)
@@ -176,8 +210,10 @@ func ResolveSortCompareNoNulls(typ batch.TypeID) SortCompareKernel {
 		return sortCompareFloat64NoNulls
 	case batch.TypeFloat32:
 		return sortCompareFloat32NoNulls
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		return sortCompareStringNoNulls
+	case batch.TypeCIDR:
+		return sortCompareCIDRNoNulls
 	case batch.TypeBool:
 		return sortCompareBoolNoNulls
 	case batch.TypeDecimal:
@@ -233,6 +269,20 @@ func sortCompareStringNoNulls(a *batch.Vector, ai int, b *batch.Vector, bi int) 
 	return 0
 }
 
+// sortCompareCIDRNoNulls is sortCompareCIDR without the null checks; see
+// sortCompareCIDR.
+func sortCompareCIDRNoNulls(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
+	as := CidrOrderKey(a.BytesData.UnsafeStringValue(ai))
+	bs := CidrOrderKey(b.BytesData.UnsafeStringValue(bi))
+	if as < bs {
+		return -1
+	}
+	if as > bs {
+		return 1
+	}
+	return 0
+}
+
 func sortCompareBoolNoNulls(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 	av, bv := a.BoolData[ai], b.BoolData[bi]
 	if av == bv {
@@ -259,8 +309,10 @@ func ResolveSortCompareNullsLast(typ batch.TypeID) SortCompareKernel {
 		return sortCompareFloat64NullsLast
 	case batch.TypeFloat32:
 		return sortCompareFloat32NullsLast
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		return sortCompareStringNullsLast
+	case batch.TypeCIDR:
+		return sortCompareCIDRNullsLast
 	case batch.TypeBool:
 		return sortCompareBoolNullsLast
 	case batch.TypeDecimal:
@@ -360,6 +412,31 @@ func sortCompareStringNullsLast(a *batch.Vector, ai int, b *batch.Vector, bi int
 	}
 	as := a.BytesData.UnsafeStringValue(ai)
 	bs := b.BytesData.UnsafeStringValue(bi)
+	if as < bs {
+		return -1
+	}
+	if as > bs {
+		return 1
+	}
+	return 0
+}
+
+// sortCompareCIDRNullsLast is sortCompareCIDR with NULLS LAST ordering; see
+// sortCompareCIDR.
+func sortCompareCIDRNullsLast(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
+	aN := a.Nulls.IsNullFast(ai)
+	bN := b.Nulls.IsNullFast(bi)
+	if aN && bN {
+		return 0
+	}
+	if aN {
+		return 1
+	}
+	if bN {
+		return -1
+	}
+	as := CidrOrderKey(a.BytesData.UnsafeStringValue(ai))
+	bs := CidrOrderKey(b.BytesData.UnsafeStringValue(bi))
 	if as < bs {
 		return -1
 	}

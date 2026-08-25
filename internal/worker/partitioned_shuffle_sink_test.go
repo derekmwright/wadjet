@@ -386,3 +386,45 @@ func TestPartitionedShuffleSink_PartitionRowCounts(t *testing.T) {
 		t.Errorf("sum of counts = %d, want %d", total, n)
 	}
 }
+
+// TestCIDRShuffleRoutingUsesInetEquality is #520's shuffle-router half:
+// PostgreSQL's inet equality says '10.0.0.1' and '10.0.0.1/32' are the SAME
+// value (already true of `=` since #492, and of the in-process GROUP BY /
+// DISTINCT / hash-join key since #520), so a distributed hash join or hash
+// aggregate keyed on a CIDR column must route both spellings to the SAME
+// partition — otherwise the single-process engine calls them one group and
+// the distributed one splits them into two, silently, with no two-path gate
+// able to see it (both sides of a two-path COMPARISON would still agree; the
+// row COUNT per group would not). Before the fix, hashRowsIntoPartitions and
+// hashVectorValue both hashed the column's raw stored TEXT.
+func TestCIDRShuffleRoutingUsesInetEquality(t *testing.T) {
+	schema := []parquet.Column{{Name: "c", Type: parquet.TypeCIDR}}
+	b := batch.NewRecordBatch(schema, 2)
+	b.Columns[0].BytesData.Set(0, []byte("10.0.0.1"))
+	b.Columns[0].Nulls.SetValid(0)
+	b.Columns[0].BytesData.Set(1, []byte("10.0.0.1/32"))
+	b.Columns[0].Nulls.SetValid(1)
+
+	const numParts = 16
+	hashScratch := make([]uint64, 2)
+	out := make([]int, 2)
+	if ok := hashRowsIntoPartitions(b, []int{0}, numParts, hashScratch, out); !ok {
+		t.Fatal("hashRowsIntoPartitions returned false")
+	}
+	if out[0] != out[1] {
+		t.Errorf("'10.0.0.1' routed to partition %d, '10.0.0.1/32' to %d; PostgreSQL's inet calls them one value",
+			out[0], out[1])
+	}
+
+	// hashVectorValue must mix the identical bytes hashRowsIntoPartitions
+	// does — the two are required to agree by this function's own doc
+	// comment, and the round-trip test above (TestPartitionedShuffleSink_
+	// RoundTrip) verifies routing BY RECOMPUTING it independently.
+	var scratch [8]byte
+	h0, h1 := fnv.New64a(), fnv.New64a()
+	hashVectorValue(h0, b.Columns[0], 0, scratch[:])
+	hashVectorValue(h1, b.Columns[0], 1, scratch[:])
+	if h0.Sum64() != h1.Sum64() {
+		t.Errorf("hashVectorValue disagrees for equivalent CIDR values: %d vs %d", h0.Sum64(), h1.Sum64())
+	}
+}

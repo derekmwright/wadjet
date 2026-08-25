@@ -174,14 +174,14 @@ func newPartialGroupCursor(h *HashAggregate, liveGroups []int32) *partialGroupCu
 		for p := 0; p < numGroups; p++ {
 			slot := c.slotAt(p)
 			c.keyOffsets[p] = int32(len(c.keyArena))
-			c.keyArena = appendSerializedKey(c.keyArena, c.intGroupStates[slot].extras.keyValues)
+			c.keyArena = appendSerializedKey(c.keyArena, c.intGroupStates[slot].extras.keyValues, c.groupColTypes)
 			c.sortedIdx[p] = uint32(p)
 		}
 	default: // partialKeyModeStrOrGeneric
 		for p := 0; p < numGroups; p++ {
 			slot := c.slotAt(p)
 			c.keyOffsets[p] = int32(len(c.keyArena))
-			c.keyArena = appendSerializedKey(c.keyArena, c.strKeyValsAt(slot))
+			c.keyArena = appendSerializedKey(c.keyArena, c.strKeyValsAt(slot), c.groupColTypes)
 			c.sortedIdx[p] = uint32(p)
 		}
 	}
@@ -404,10 +404,29 @@ func (c *partialGroupCursor) loadHeadAccsAoS(gi int) {
 // into buf, returning the extended buf. The two share one definition of the
 // on-the-wire format; callers track the pre-call length to recover offset
 // boundaries.
-func appendSerializedKey(buf []byte, vals []any) []byte {
+//
+// types carries each value's declared GROUP BY column type, one per vals
+// entry, so a CIDR value re-keys into PostgreSQL's inet order
+// (kernel.CidrOrderKey) instead of its raw stored text (#520).
+// appendKeyValue's boxed `any` has no type tag of its own — a CIDR value
+// boxes as a plain Go string, indistinguishable there from a STRING
+// column's — so the re-key has to happen here, where the caller still has
+// groupColTypes in hand. Without it, this spill/merge key would disagree
+// with the in-memory hash key appendColumnValue (aggregate.go) already
+// builds, silently splitting '10.0.0.1' and '10.0.0.1/32' back into two
+// groups across a spill boundary the un-spilled path already calls one
+// value. types may be shorter than vals (or nil); a value with no
+// corresponding type serializes as before.
+func appendSerializedKey(buf []byte, vals []any, types []batch.TypeID) []byte {
 	for i, v := range vals {
 		if i > 0 {
 			buf = append(buf, 0)
+		}
+		if i < len(types) && types[i] == batch.TypeCIDR {
+			if s, ok := v.(string); ok {
+				buf = appendKeyValue(buf, kernel.CidrOrderKey(s))
+				continue
+			}
 		}
 		buf = appendKeyValue(buf, v)
 	}

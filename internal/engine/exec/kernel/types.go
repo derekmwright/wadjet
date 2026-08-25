@@ -208,7 +208,17 @@ func (a *Accumulator) Merge(other *Accumulator) {
 			a.HasMin = true
 		} else {
 			if other.IsString || a.IsString {
-				if other.MinStr < a.MinStr {
+				if a.StrType == batch.TypeCIDR || other.StrType == batch.TypeCIDR {
+					// PostgreSQL's inet order, not the stored text's byte
+					// order (#520): merging two partial MIN accumulators —
+					// one per scan split, row group, or parallel worker —
+					// with plain `<` disagreed with the single-batch
+					// kernel path (minCIDRUpdate) the moment a query's
+					// input crossed more than one batch.
+					if CidrOrderKey(other.MinStr) < CidrOrderKey(a.MinStr) {
+						a.MinStr = other.MinStr
+					}
+				} else if other.MinStr < a.MinStr {
 					a.MinStr = other.MinStr
 				}
 			} else if other.IsFloat || a.IsFloat {
@@ -235,7 +245,11 @@ func (a *Accumulator) Merge(other *Accumulator) {
 			a.HasMax = true
 		} else {
 			if other.IsString || a.IsString {
-				if other.MaxStr > a.MaxStr {
+				if a.StrType == batch.TypeCIDR || other.StrType == batch.TypeCIDR {
+					if CidrOrderKey(other.MaxStr) > CidrOrderKey(a.MaxStr) {
+						a.MaxStr = other.MaxStr
+					}
+				} else if other.MaxStr > a.MaxStr {
 					a.MaxStr = other.MaxStr
 				}
 			} else if other.IsFloat || a.IsFloat {

@@ -563,6 +563,18 @@ func legacyCompositeHash(cols []*batch.Vector, row int) uint64 {
 				} else {
 					hv = 0x79b9
 				}
+			case batch.TypeCIDR:
+				// PostgreSQL's inet equality, not the stored text's byte
+				// equality (#520, the CIDR instance of the class f64bits'
+				// comment above names): '10.0.0.1' and '10.0.0.1/32' are
+				// the SAME value there, and the SINK's key already calls
+				// them one group (appendColumnValue, aggregate.go) — this
+				// ROUTER has to as well, or two morsel-parallel clones,
+				// each with its own disjoint hash table
+				// (HashAggregate.PartitionedDisjoint), never see both
+				// spellings together and the query answers two groups
+				// where the un-partitioned path answers one.
+				hv = fnv1aBytes([]byte(kernel.CidrOrderKey(v.BytesData.UnsafeStringValue(row))))
 			default: // string-class
 				hv = fnv1aBytes(v.BytesData.Value(row))
 			}

@@ -648,6 +648,33 @@ func CidrSortKey(s string) (string, bool) {
 	return string(buf), true
 }
 
+// CidrOrderKey is CidrSortKey for every CIDR consumer that needs a definite
+// key for EVERY stored value, not just the ones that parse: ORDER BY, GROUP
+// BY / DISTINCT / COUNT(DISTINCT) / hash-join hash keys, MIN/MAX, and the
+// distributed shuffle router (#520 — the residual ADR-0012 item 10 left open
+// after #492 fixed WHERE-clause comparison: those consumers still keyed a
+// CIDR column on its raw stored TEXT, so '10.0.0.1' and '10.0.0.1/32' were
+// two GROUP BY groups, two DISTINCT values and could land in two different
+// hash-join buckets or shuffle partitions, while `=` already called them one
+// value).
+//
+// A stored value that names no address at all falls back to its own raw
+// text: the column is unvalidated (internal/storage/ingest), so a malformed
+// row still needs a stable, total-order position instead of a panic or an
+// arbitrary collision — it groups/sorts with other byte-identical garbage,
+// which is the same answer every OTHER type gives an unparseable value it
+// cannot special-case either. This is deliberately NOT the same rule as a
+// FILTER LITERAL that names no address (kernel.ResolveFilterKernel's TypeCIDR
+// arm, exec.networkConstError): a bad literal in a WHERE/comparison is a
+// query the engine cannot answer at all (22P02); a bad STORED value is just
+// one row with no defined place in the order, same as a NULL.
+func CidrOrderKey(s string) string {
+	if key, ok := CidrSortKey(s); ok {
+		return key
+	}
+	return s
+}
+
 // IPv6LitKey re-keys an IPv6 filter literal into the form a TypeIPv6 column's
 // rows compare against: the address's raw 16 bytes, which a byte comparison
 // orders exactly as the address's own big-endian numeric value.

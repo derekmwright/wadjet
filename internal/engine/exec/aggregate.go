@@ -6363,11 +6363,22 @@ func appendColumnValue(buf []byte, v *batch.Vector, row int, typ batch.TypeID) [
 	case batch.TypeFloat32:
 		val := keyFloat32bits(v.Float32Data[row])
 		return append(buf, byte(val), byte(val>>8), byte(val>>16), byte(val>>24))
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		data := v.BytesData.Value(row)
 		l := uint16(len(data))
 		buf = append(buf, byte(l), byte(l>>8))
 		return append(buf, data...)
+	case batch.TypeCIDR:
+		// PostgreSQL's inet equality, not byte equality of the stored TEXT:
+		// '10.0.0.1' and '10.0.0.1/32' are the SAME value there (#492), so
+		// they must be the SAME key here too or GROUP BY, DISTINCT,
+		// COUNT(DISTINCT) and a hash join all split one value into two
+		// (#520) — kernel.CidrOrderKey is the canonical re-key every other
+		// CIDR comparison site (filter, sort, MIN/MAX) already uses.
+		key := kernel.CidrOrderKey(v.BytesData.UnsafeStringValue(row))
+		l := uint16(len(key))
+		buf = append(buf, byte(l), byte(l>>8))
+		return append(buf, key...)
 	case batch.TypeBool:
 		if v.BoolData[row] {
 			return append(buf, 1)

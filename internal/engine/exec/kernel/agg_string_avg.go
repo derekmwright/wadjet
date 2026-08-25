@@ -73,6 +73,88 @@ func maxStrUpdate(acc *Accumulator, vec *batch.Vector, row int) {
 	}
 }
 
+func minRowCIDR(acc *Accumulator, vec *batch.Vector, row int) {
+	if !vec.Nulls.IsNullFast(row) {
+		minCIDRUpdate(acc, vec, row)
+	}
+}
+func minRowCIDRNoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	minCIDRUpdate(acc, vec, row)
+}
+
+// minCIDRUpdate is minStrUpdate ordered by PostgreSQL's inet order
+// (kernel.CidrOrderKey) instead of the stored text's byte order (#520):
+// MIN(cidr_col) must agree with the ordering `WHERE c_cidr < ...` already
+// uses (#492), or a query comparing the two disagrees with its own aggregate.
+func minCIDRUpdate(acc *Accumulator, vec *batch.Vector, row int) {
+	acc.IsString = true
+	acc.StrType = vec.Type
+	v := vec.BytesData.UnsafeStringValue(row)
+	if !acc.HasMin || CidrOrderKey(v) < CidrOrderKey(acc.MinStr) {
+		acc.MinStr = vec.BytesData.StringValue(row)
+		acc.HasMin = true
+	}
+}
+
+func maxRowCIDR(acc *Accumulator, vec *batch.Vector, row int) {
+	if !vec.Nulls.IsNullFast(row) {
+		maxCIDRUpdate(acc, vec, row)
+	}
+}
+func maxRowCIDRNoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	maxCIDRUpdate(acc, vec, row)
+}
+
+// maxCIDRUpdate is maxStrUpdate ordered by PostgreSQL's inet order; see
+// minCIDRUpdate.
+func maxCIDRUpdate(acc *Accumulator, vec *batch.Vector, row int) {
+	acc.IsString = true
+	acc.StrType = vec.Type
+	v := vec.BytesData.UnsafeStringValue(row)
+	if !acc.HasMax || CidrOrderKey(v) > CidrOrderKey(acc.MaxStr) {
+		acc.MaxStr = vec.BytesData.StringValue(row)
+		acc.HasMax = true
+	}
+}
+
+func minBatchCIDR(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
+	acc.IsString = true
+	acc.StrType = vec.Type
+	nulls := &vec.Nulls
+	if sel != nil {
+		for _, idx := range sel {
+			if !nulls.IsNullFast(int(idx)) {
+				minCIDRUpdate(acc, vec, int(idx))
+			}
+		}
+		return
+	}
+	for i := 0; i < vecLen; i++ {
+		if !nulls.IsNullFast(i) {
+			minCIDRUpdate(acc, vec, i)
+		}
+	}
+}
+
+func maxBatchCIDR(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
+	acc.IsString = true
+	acc.StrType = vec.Type
+	nulls := &vec.Nulls
+	if sel != nil {
+		for _, idx := range sel {
+			if !nulls.IsNullFast(int(idx)) {
+				maxCIDRUpdate(acc, vec, int(idx))
+			}
+		}
+		return
+	}
+	for i := 0; i < vecLen; i++ {
+		if !nulls.IsNullFast(i) {
+			maxCIDRUpdate(acc, vec, i)
+		}
+	}
+}
+
 func minBatchString(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 	acc.IsString = true
 	acc.StrType = vec.Type
