@@ -616,39 +616,126 @@ func TestRefusedLiteralReachesTheClientAsItsOwnError(t *testing.T) {
 	}
 }
 
-// TestBoxedSiteRefusalIsPerRowAndPairwise pins what the three boxed sites
-// ACTUALLY do, because ADR-0012 item 6 claimed more than they deliver and a
-// claim no test holds shut is how the next reader is misled again.
+// TestDecimalLiteralRefusalIsPlanTime is #517: the refusal of a constant that
+// names no number against a DECIMAL column is a TYPE rule, so it must depend
+// on the column's DECLARATION and on nothing else — not on a row reaching the
+// comparison, and not on which operand won one.
 //
-// Two residuals, both tracked as #517, both unchanged by the hoist that made
-// the check cheap:
+// It used to depend on both, because it lived inside the comparison:
 //
-//   - PER ROW. The refusal runs inside the comparison, so a conjunct no row
-//     survives to never reaches it and the query answers zero rows.
-//   - PAIRWISE, so it depends on which argument is the running best. GREATEST
-//     and LEAST examine (best-so-far, candidate) pairs, and only a pair with a
-//     DECIMAL column on one side and the bad literal on the other refuses — so
-//     the same three arguments refuse under GREATEST and answer under LEAST,
-//     decided by the DATA rather than by the query.
+//   - PER ROW. `k > 100000 AND d_2 IS DISTINCT FROM 'abc'` answered zero rows,
+//     and so did the same predicate over an empty table. Nothing evaluated the
+//     comparison, so nothing refused it.
+//   - PAIRWISE, so the DATA decided. GREATEST/LEAST compare (best-so-far,
+//     candidate) pairs and only a pair with a DECIMAL column on one side and
+//     the bad literal on the other refuses — so with GREATEST, 'abc' beat the
+//     integer and met d_2 (refused), while with LEAST the integer stayed best
+//     and met d_2 directly (answered). The SAME three arguments.
 //
-// The compile-time fold is the one shape with neither residual: `-'abc'` is
-// refused before a plan exists at all, whatever conjunct or operand order
-// surrounds it, which TestRefusedLiteralReachesTheClientAsItsOwnError covers.
-func TestBoxedSiteRefusalIsPerRowAndPairwise(t *testing.T) {
+// The check is now the binder's (`physical.checkLiteralTypes`), against the
+// column's catalog type, before a plan exists. The runtime refusals stay for
+// the shapes the binder cannot prove, and share its numeric test
+// (`expr.IsNumericLiteralText`) so the two cannot disagree.
+func TestDecimalLiteralRefusalIsPlanTime(t *testing.T) {
 	ctx := context.Background()
 	db := declitOpen(t)
 
-	t.Run("a conjunct no row survives hides the refusal", func(t *testing.T) {
-		declitCheck(t, ctx, db,
-			"SELECT COUNT(*) AS n FROM declit WHERE k > 100000 AND d_2 IS DISTINCT FROM 'abc'", 0)
+	refused := func(t *testing.T, sql string) {
+		t.Helper()
+		_, err := tmRun(ctx, db, sql)
+		if err == nil {
+			t.Fatalf("%s answered instead of refusing a non-numeric constant", sql)
+		}
+		if !strings.Contains(err.Error(), `invalid input syntax for type numeric: "abc"`) {
+			t.Errorf("%s\n  error = %v\n  want PostgreSQL's numeric input-syntax error, quoting the literal", sql, err)
+		}
+		if got := sqlerr.StateOf(err); got != "22P02" {
+			t.Errorf("%s\n  SQLSTATE = %q, want 22P02 — a client branches on this", sql, got)
+		}
+	}
+
+	t.Run("no row survives the conjunct", func(t *testing.T) {
+		for _, sql := range []string{
+			"SELECT COUNT(*) AS n FROM declit WHERE k > 100000 AND d_2 IS DISTINCT FROM 'abc'",
+			"SELECT COUNT(*) AS n FROM declit WHERE k > 100000 AND d_2 = 'abc'",
+			"SELECT COUNT(*) AS n FROM declit WHERE k > 100000 AND CASE d_2 WHEN 'abc' THEN 1 ELSE 0 END = 1",
+			// The conjunct short-circuits before the comparison is ever
+			// COMPILED into a row loop, which is the other way a per-row
+			// refusal was skipped.
+			"SELECT COUNT(*) AS n FROM declit WHERE 1 = 0 AND d_2 = 'abc'",
+		} {
+			refused(t, sql)
+		}
 	})
 
-	t.Run("GREATEST refuses where LEAST answers, on the same arguments", func(t *testing.T) {
-		if _, err := tmRun(ctx, db, "SELECT COUNT(*) AS n FROM declit WHERE GREATEST(k, 'abc', d_2) = 'abc'"); err == nil {
-			t.Error("GREATEST(k, 'abc', d_2) answered; this shape does refuse today")
-		}
-		if _, err := tmRun(ctx, db, "SELECT COUNT(*) AS n FROM declit WHERE LEAST(k, 'abc', d_2) = 'abc'"); err != nil {
-			t.Errorf("LEAST(k, 'abc', d_2) refused; today it answers, which is the residual: %v", err)
+	t.Run("empty table", func(t *testing.T) {
+		empty := declitEmptyOpen(t)
+		for _, pred := range []string{
+			"d_2 = 'abc'",
+			"d_2 IS DISTINCT FROM 'abc'",
+			"CASE d_2 WHEN 'abc' THEN 1 ELSE 0 END = 1",
+			"GREATEST(d_2, 'abc') = 'abc'",
+		} {
+			sql := "SELECT COUNT(*) AS n FROM declit WHERE " + pred
+			_, err := tmRun(ctx, empty, sql)
+			if err == nil {
+				t.Errorf("%s answered over an EMPTY table instead of refusing", sql)
+				continue
+			}
+			if !strings.Contains(err.Error(), "invalid input syntax for type numeric") {
+				t.Errorf("%s\n  error = %v, want PostgreSQL's numeric input-syntax error", sql, err)
+			}
 		}
 	})
+
+	t.Run("GREATEST and LEAST agree on the same arguments", func(t *testing.T) {
+		// The pair that used to split: with GREATEST the bad literal met the
+		// DECIMAL column and refused; with LEAST it never did and the query
+		// answered a row.
+		refused(t, "SELECT COUNT(*) AS n FROM declit WHERE GREATEST(k, 'abc', d_2) = 'abc'")
+		refused(t, "SELECT COUNT(*) AS n FROM declit WHERE LEAST(k, 'abc', d_2) = 'abc'")
+		// Argument ORDER cannot matter either.
+		refused(t, "SELECT COUNT(*) AS n FROM declit WHERE LEAST(d_2, 'abc', k) = 'abc'")
+		refused(t, "SELECT COUNT(*) AS n FROM declit WHERE GREATEST('abc', d_2, k) = 'abc'")
+	})
+
+	// What must NOT be refused, so the check has not widened into a type
+	// error of its own.
+	t.Run("still answers", func(t *testing.T) {
+		for _, sql := range []string{
+			// A quoted literal that IS a number, against a DECIMAL column:
+			// PostgreSQL types it from the column and compares numerically.
+			"SELECT COUNT(*) AS n FROM declit WHERE d_2 = '0.00'",
+			"SELECT COUNT(*) AS n FROM declit WHERE d_2 IS DISTINCT FROM '0.00'",
+			"SELECT COUNT(*) AS n FROM declit WHERE GREATEST(d_2, '0.00') = '0.00'",
+			// Exponent form is a number too (ADR-0012 item 6).
+			"SELECT COUNT(*) AS n FROM declit WHERE d_2 = '1e400'",
+			// A non-numeric literal against a NON-DECIMAL column is an
+			// ordinary comparison, not a refusal.
+			"SELECT COUNT(*) AS n FROM declit WHERE k = 'abc'",
+			// And a literal on its own, with no DECIMAL column in sight.
+			"SELECT COUNT(*) AS n FROM declit WHERE 'abc' = 'def'",
+		} {
+			if _, err := tmRun(ctx, db, sql); err != nil {
+				t.Errorf("%s was refused: %v", sql, err)
+			}
+		}
+	})
+}
+
+// declitEmptyOpen is declitOpen's table with no rows in it: the fixture that
+// tells a plan-time refusal from a per-row one, because a per-row check has
+// nothing to run on.
+func declitEmptyOpen(t *testing.T) *DB {
+	t.Helper()
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.CreateTable(ctx, "declit", declitSchema(), nil); err != nil {
+		t.Fatal(err)
+	}
+	return db
 }

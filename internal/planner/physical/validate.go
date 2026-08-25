@@ -9,6 +9,7 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/catalog"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // tableColumnSource resolves a table name to its catalog metadata. It is the
@@ -55,10 +56,19 @@ type colScope struct {
 	cols     map[string]bool
 	quals    map[string]map[string]bool
 	srcCount map[string]int
+	// decimals / qualDecimals record which columns a BASE TABLE declares
+	// DECIMAL, for the plan-time literal refusal (validate_literal.go). A
+	// bare name two sources disagree about is recorded FALSE — the refusal
+	// has to be certain — and a name from a derived table or a CTE, whose
+	// column types this binder does not carry, appears in neither map and is
+	// therefore never refused.
+	decimals     map[string]bool
+	qualDecimals map[string]map[string]bool
 }
 
 func newColScope() *colScope {
-	return &colScope{cols: map[string]bool{}, quals: map[string]map[string]bool{}, srcCount: map[string]int{}}
+	return &colScope{cols: map[string]bool{}, quals: map[string]map[string]bool{}, srcCount: map[string]int{},
+		decimals: map[string]bool{}, qualDecimals: map[string]map[string]bool{}}
 }
 
 func (s *colScope) addColumn(col string) {
@@ -93,6 +103,52 @@ func (s *colScope) addQualified(qual, col string) {
 	s.quals[q][c] = true
 }
 
+// addQualifiedTyped is addQualified for a source whose column TYPES are known
+// — a base table, the only source this binder reads a catalog schema for.
+// Everything else keeps calling addQualified and contributes no type, which is
+// what keeps the literal refusal from firing on a column it cannot prove.
+func (s *colScope) addQualifiedTyped(qual, col string, isDecimal bool) {
+	s.addQualified(qual, col)
+	c := strings.ToLower(col)
+	if prev, seen := s.decimals[c]; !seen {
+		s.decimals[c] = isDecimal
+	} else if prev != isDecimal {
+		// Two sources, two answers: the bare name is not provably a DECIMAL.
+		// (resolveRef refuses it as ambiguous first, so this is belt and
+		// braces — but the refusal must never be the thing that decides.)
+		s.decimals[c] = false
+	}
+	if qual == "" {
+		return
+	}
+	q := strings.ToLower(qual)
+	if s.qualDecimals[q] == nil {
+		s.qualDecimals[q] = map[string]bool{}
+	}
+	s.qualDecimals[q][c] = isDecimal
+}
+
+// isDecimalRef reports whether ref PROVABLY names a column declared DECIMAL.
+// Every uncertain case answers false: an open scope, a name no base table
+// registered, an ambiguous bare name, or a qualifier this scope does not know.
+func (s *colScope) isDecimalRef(ref *plansql.ColRef) bool {
+	if s == nil || s.open {
+		return false
+	}
+	col := strings.ToLower(ref.Column)
+	if ref.Table != "" {
+		cols, ok := s.qualDecimals[strings.ToLower(ref.Table)]
+		if !ok {
+			return false
+		}
+		return cols[col]
+	}
+	if s.srcCount[col] > 1 {
+		return false
+	}
+	return s.decimals[col]
+}
+
 // merge folds an OUTER (or sibling) scope into s for resolution only: names
 // and qualifiers become visible, but srcCount is untouched — outer columns
 // never make an inner reference ambiguous.
@@ -112,6 +168,21 @@ func (s *colScope) merge(o *colScope) {
 		}
 		for c := range cs {
 			s.quals[q][c] = true
+		}
+	}
+	for c, isDec := range o.decimals {
+		if prev, seen := s.decimals[c]; !seen {
+			s.decimals[c] = isDec
+		} else if prev != isDec {
+			s.decimals[c] = false
+		}
+	}
+	for q, cs := range o.qualDecimals {
+		if s.qualDecimals[q] == nil {
+			s.qualDecimals[q] = map[string]bool{}
+		}
+		for c, isDec := range cs {
+			s.qualDecimals[q][c] = isDec
 		}
 	}
 }
@@ -348,7 +419,10 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 			return err
 		}
 	}
-	return nil
+	// Names first, then the literals they are compared against: a reference
+	// that resolves to nothing has no declared type to refuse a literal
+	// against, and reporting the name is the more useful of the two errors.
+	return checkLiteralTypes(expr, scope)
 }
 
 // resolveSource resolves one FROM source into `into`. lateralOuter is the scope a
@@ -421,7 +495,7 @@ func (b *binder) resolveSource(ctx context.Context, tr plansql.TableRef, lateral
 		return nil
 	}
 	for _, c := range meta.Schema.Columns {
-		into.addQualified(qual, c.Name)
+		into.addQualifiedTyped(qual, c.Name, c.Type == parquet.TypeDecimal)
 	}
 	return nil
 }

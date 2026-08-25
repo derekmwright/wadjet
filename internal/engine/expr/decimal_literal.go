@@ -660,3 +660,10 @@ func negateLitText(text string) string {
 func isNumericLitText(s string) bool {
 	return kernel.NewDecimalLiteral(s).Numeric()
 }
+
+// IsNumericLiteralText is isNumericLitText for the planner, which asks the
+// same question one layer up: the plan-time refusal of a non-numeric constant
+// against a DECIMAL column (#517) must accept and refuse exactly the strings
+// the runtime refusal does, or a query would be refused at one and answered at
+// the other — the two-path defect class the refusal exists to close.
+func IsNumericLiteralText(s string) bool { return isNumericLitText(s) }

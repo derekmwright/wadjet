@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -286,5 +287,86 @@ func TestSetOpDecimalKeyTwoPath(t *testing.T) {
 		}
 		t.Logf("known divergence, NOT gated (#533): the stage DAG rescales the wider arm.\n"+
 			"  single-process: %v\n  stage DAG:      %v", sv, dv)
+	})
+}
+
+// TestDecimalLiteralRefusalTwoPath holds both arms to REFUSING the statements
+// PostgreSQL refuses at parse/bind time: a constant that names no number,
+// against a column declared DECIMAL (#517).
+//
+// The refusal used to live inside the comparison, so it depended on a row
+// reaching it and on which operand won one — and the two arms compile
+// expressions differently (the DAG re-parses a filter in a later stage and
+// always evaluates row-at-a-time), so the same statement could be refused on
+// one path and answered on the other. It is the binder's now, before either
+// path exists, which is what makes the two agree by construction rather than
+// by both happening to evaluate the same pair.
+func TestDecimalLiteralRefusalTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	for _, tc := range []struct {
+		name string
+		pred string
+	}{
+		{"direct", "a = 'abc'"},
+		{"is_distinct_from", "a IS DISTINCT FROM 'abc'"},
+		{"simple_case", "CASE a WHEN 'abc' THEN 1 ELSE 0 END = 1"},
+		{"in_list", "a IN ('abc', 1.0)"},
+		{"between", "a BETWEEN 'abc' AND 'def'"},
+		// No row survives the conjunct: nothing evaluates the comparison, so
+		// a per-row refusal never fired and the query answered 0.
+		{"no_row_survives", "id > 100000 AND a = 'abc'"},
+		{"short_circuited", "1 = 0 AND a = 'abc'"},
+		// GREATEST and LEAST on the SAME arguments: which pair the runtime
+		// compares depends on the values, so these two used to disagree.
+		{"greatest", "GREATEST(id, 'abc', a) = 'abc'"},
+		{"least", "LEAST(id, 'abc', a) = 'abc'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sql := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE %s", dbpTable, tc.pred)
+			for _, arm := range []struct {
+				name string
+				run  func() error
+			}{
+				{"single", func() error { _, err := tmdRunSingle(ctx, single, sql); return err }},
+				{"dag", func() error { _, err := tmdRunDAG(ctx, coord, sql); return err }},
+			} {
+				err := arm.run()
+				if err == nil {
+					t.Errorf("%s arm ANSWERED a statement PostgreSQL refuses: %s", arm.name, sql)
+					continue
+				}
+				if !strings.Contains(err.Error(), "invalid input syntax for type numeric") {
+					t.Errorf("%s arm refused %s with the wrong error: %v\n  want PostgreSQL's numeric input-syntax error",
+						arm.name, sql, err)
+				}
+			}
+		})
+	}
+
+	// And the other direction, so the refusal has not widened: a quoted
+	// literal that IS a number is typed from the column and answered, on both
+	// arms.
+	t.Run("numeric_quoted_literal_still_answers", func(t *testing.T) {
+		sql := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE a = '12.75'", dbpTable)
+		for _, arm := range []struct {
+			name string
+			dag  bool
+		}{{"single", false}, {"dag", true}} {
+			rows := dtpRun(t, ctx, single, coord, sql, arm.dag)
+			if len(rows) != 1 {
+				t.Fatalf("%s: %d rows, want 1", arm.name, len(rows))
+			}
+			if got := ketInt(t, arm.name, rows[0]["n"]); got != 4 {
+				t.Errorf("%s: %s\n  got %d, want 4 (live PostgreSQL 17)", arm.name, sql, got)
+			}
+		}
 	})
 }

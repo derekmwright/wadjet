@@ -278,31 +278,49 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      WHERE, ORDER BY, GROUP BY and aggregate-argument forms. With that, the
      sentence is true of the fold — and of nothing else.)
 
-     **Known residual: the three boxed sites' refusal is a PER-ROW,
-     PAIRWISE check, not a plan-time one — tracked as #517.** Two separate
-     ways a query that should be refused is answered instead, both pinned by
-     `wadjet.TestBoxedSiteRefusalIsPerRowAndPairwise`:
+     **The refusal is a PLAN-TIME check now, not a per-row one.** (Amended
+     2026-08-24, #517.) It used to live inside the comparison, so it
+     depended on two things a type rule may not depend on:
 
-     - **Per row.** `d = 'abc'` against an EMPTY table, or behind a conjunct
+     - **A row.** `d = 'abc'` against an EMPTY table, or behind a conjunct
        no row survives to (`k > 100000 AND d IS DISTINCT FROM 'abc'`),
-       answers zero rows instead of erroring, on this shape and on the
+       answered zero rows instead of erroring, on this shape and on the
        original #463 shape alike: the comparison — and therefore the
-       refusal — never runs.
-     - **Pairwise, so the DATA decides.** `GREATEST`/`LEAST` compare
-       (best-so-far, candidate) pairs, and a pair refuses only when a
-       DECIMAL column is on one side and the bad literal on the other. Which
-       argument is the running best depends on the values, so the SAME three
-       arguments refuse under one and answer under the other:
-       `GREATEST(k, 'abc', d)` raises and `LEAST(k, 'abc', d)` returns a row.
-       A refusal that depends on which operand won a comparison is not a
-       type rule at all.
+       refusal — never ran.
+     - **Which operand won.** `GREATEST`/`LEAST` compare (best-so-far,
+       candidate) pairs, and a pair refused only when a DECIMAL column was on
+       one side and the bad literal on the other. Which argument is the
+       running best depends on the VALUES, so the SAME three arguments
+       refused under one and answered under the other: `GREATEST(k, 'abc',
+       d)` raised and `LEAST(k, 'abc', d)` returned a row.
 
      PostgreSQL resolves an unknown-typed literal's type from the column's
      DECLARATION and refuses at parse/bind time, independent of any row
-     existing and of any operand order. Closing that needs the column's
-     declared type available where the predicate is planned/bound, which is
-     planner territory rather than an extension of the boxed-comparison
-     machinery this bullet closes.
+     existing and of any operand order — verified live for all nine shapes,
+     `=`, `<>`, IN, BETWEEN, the three boxed sites, and both extremum
+     orders, each with the same 22P02 and the same message wadjet raises.
+
+     `physical.checkLiteralTypes` is the check, in the AST binder
+     (`validate.go`) that already resolves every column reference against the
+     catalog before a plan exists. `colScope` carries which columns a BASE
+     TABLE declares DECIMAL, and the refusal fires only when the column
+     PROVABLY resolves to one in a CLOSED scope — the same conservatism the
+     rest of the binder is built on, since a false positive breaks a working
+     query. The runtime refusals STAY, for the shapes the binder cannot
+     prove (an open scope, a derived table or CTE column, an expression it
+     does not parse); both call `expr.IsNumericLiteralText`, so the two
+     cannot disagree about which strings are numbers.
+
+     **What this does NOT cover, deliberately.** The same silent reading of
+     an unparseable constant as the type's ZERO is still live for the
+     INTEGER and FLOAT families — `WHERE k = 'abc'` over a BIGINT column
+     matches the rows holding 0, where PostgreSQL raises 22P02 "invalid
+     input syntax for type bigint". That is #463's failure mode on the
+     families #463 never covered, tracked as #536 and pinned in the wire
+     corpus, and closing it means carrying the destination TYPE into the
+     refusal rather than extending its timing. `'NaN'` is a third case:
+     PostgreSQL's numeric HAS a NaN and wadjet's exact carrier does not, so
+     `d = 'NaN'` is refused here and answered there (#534).
 
      **The refusal's cost is a plan-time cost, not a per-row one.**
      (Added 2026-08-24, from the #505 review.) The first version asked both
@@ -314,7 +332,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      exponent-form literal. Both answers are fixed for the query's lifetime,
      which is why `decimalLitCmp.numeric` was already a cached slice rather
      than a per-row `Numeric()` call, and the same discipline now applies at
-     the three boxed sites (`expr.refuseArm`, `caseRefusal`,
+     the three boxed sites (`expr.refuseArm`, `caseArms`,
      `extremumRefusal`): the literal is judged once when the node is first
      evaluated, and the column's answer is cached the way
      `decimalLitCmp.notDecimal` caches its own. Residual overhead against

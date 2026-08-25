@@ -666,6 +666,30 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		// answer the rows holding zero (#463), which is worse than a wrong
 		// code because the client treats the rows as the truth.
 		{name: "DecimalNonNumericConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 = 'abc'`},
+		// The same constant where NO ROW reaches the comparison, and where
+		// which pair gets compared depends on the DATA. PostgreSQL resolves
+		// the literal's type from the column's declaration at parse time, so
+		// all four are refused there whatever the rows do; wadjet refused
+		// them from inside the comparison until #517, so an empty row set
+		// answered zero rows and GREATEST refused where LEAST answered — on
+		// the same three arguments.
+		{name: "DecimalNonNumericConstantNoRowSurvives",
+			sql: `SELECT COUNT(*) FROM dec_probe WHERE d_key > 100000 AND d_2 = 'abc'`},
+		{name: "DecimalNonNumericConstantShortCircuited",
+			sql: `SELECT COUNT(*) FROM dec_probe WHERE 1 = 0 AND d_2 = 'abc'`},
+		{name: "DecimalNonNumericConstantGreatest",
+			sql: `SELECT COUNT(*) FROM dec_probe WHERE GREATEST(d_key, 'abc', d_2) = 'abc'`},
+		{name: "DecimalNonNumericConstantLeast",
+			sql: `SELECT COUNT(*) FROM dec_probe WHERE LEAST(d_key, 'abc', d_2) = 'abc'`},
+		{name: "DecimalNonNumericConstantIsDistinctFrom",
+			sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 IS DISTINCT FROM 'abc'`},
+		// The same rule one type family over, and NOT yet implemented: an
+		// integer column reads an unparseable constant as the value ZERO and
+		// answers the rows holding zero, which is #463's failure mode on the
+		// family #463 never covered.
+		{name: "IntegerNonNumericConstant", sql: `SELECT COUNT(*) FROM nation WHERE n_nationkey = 'abc'`,
+			pin: missingValidationPin + " Specifically: the constant is read as the integer ZERO and " +
+				"matches the rows holding 0. (#536)"},
 		{name: "UndefinedFunction", sql: `SELECT no_such_function_here(1)`},
 		{name: "GroupByMissingColumn", sql: `SELECT n_name, COUNT(*) FROM nation`},
 		{name: "AmbiguousColumn", sql: `SELECT n_nationkey FROM nation a JOIN nation b ON a.n_nationkey = b.n_nationkey`},
