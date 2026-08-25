@@ -2079,7 +2079,16 @@ func ResolveColColFilterKernel(typ batch.TypeID, op CompareOp) ColColFilterKerne
 		return colColFilterFloat(getFloat64Data, op)
 	case batch.TypeFloat32:
 		return colColFilterFloat(getFloat32Data, op)
-	case batch.TypeString, batch.TypeIPv6, batch.TypeUUID:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
+		// TypeBytes belongs here and was missing (#570, found by the bytea
+		// corpus the same issue added): BYTES is stored in BytesData exactly
+		// as STRING is, and PostgreSQL compares two bytea values BYTEWISE in
+		// every collation — the same comparison this kernel performs. Its
+		// absence was not a wrong answer but a FAILED QUERY: two BYTES
+		// columns share a TypeID, so ColColFilter's row-at-a-time fallback
+		// (attached only when the two types DIFFER, #375) did not apply, and
+		// `WHERE b_val = b_other` came back as "could not resolve kernel" —
+		// the identical shape #477 found for two DECIMAL columns.
 		return colColFilterString(op)
 	case batch.TypeCIDR:
 		return colColFilterCidr(op)
