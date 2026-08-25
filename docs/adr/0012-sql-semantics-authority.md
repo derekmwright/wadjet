@@ -686,6 +686,79 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     is the one implementation every site now calls, the same breadth item
     8's float rule needed for its own primitive (`kernel.KeyFloat64Bits`).
 
+    **Residual, closed 2026-08-25 (#546): the single-process SET OPERATION
+    dedupped a CIDR column by its raw stored TEXT** while the stage DAG —
+    which lowers a set operation to a `GroupByAll` aggregate, so #520's key
+    already reached it — dedupped it by inet. The identical `UNION` answered
+    4 rows locally and 3 on the DAG. `physical.keyValueText`'s
+    `parquet.TypeCIDR` arm is the missing consumer, and it takes
+    `CidrOrderKey` rather than `CidrSortKey` for the reason the split above
+    gives: this is a KEY, so a value that names no address needs a position
+    rather than a refusal, and discarding those to the empty string would
+    dedup three DISTINCT malformed values into one member.
+
+    **Residual, closed 2026-08-25 (#565): a column-to-COLUMN comparison was
+    inet-ordered on the VECTORIZED kernel alone.** `WHERE c = d` answered
+    PostgreSQL's 2 in process and 0 on the stage DAG, and — the sharper
+    form, needing no second engine — one process selected two rows through
+    the kernel and then said `SELECT c = d` was FALSE about those same rows.
+    `expr.compare()`'s both-string fast path is what a projection and a later
+    DAG stage's re-parsed filter reach, and it compared the stored texts.
+
+    The fix is item 8's boxed-value rule applied to this family: the pair is
+    bound from the two operands' DECLARATIONS (`expr/boxed_pair.go`'s
+    `boxCidr`/`boxIPv6` kinds), which is the only place the answer exists,
+    since a CIDR value and a STRING value are the same Go box. That reaches
+    the three sites #506 needed for DECIMAL — a simple `CASE`'s operand, `IS
+    DISTINCT FROM`, `GREATEST`/`LEAST` — which were wrong on BOTH arms and
+    so invisible to every two-path gate.
+
+    Two findings from sweeping the other network types on that shape:
+
+    - **IPv6 column-to-column ORDERING had the identical split**, and is
+      fixed with it. The kernel compares the stored raw 16 bytes;
+      `ColRef.Eval` boxes the RENDERED text, and "2001:db8::9" sorts above
+      "2001:db8::10" as text and below it as an address.
+      `kernel.IPv6RowKey` re-keys the rendering back to the stored bytes —
+      exactly, v4-MAPPED addresses included, which is why it is NOT
+      `IPv6LitKey`: a LITERAL dotted quad is a v4 address and keys below
+      every v6 row by family, while a STORED one is a v4-mapped v6 address
+      and keys among them. IPv4, MAC and UUID were checked on the same shape
+      and AGREE — the first two box the raw encoded int64, UUID by the
+      fixed-width-hex accident recorded above — and are pinned that way.
+    - **A malformed STORED value was compared by TEXT at both col-col
+      sites**, the kernel included, contradicting this item's own UNKNOWN
+      rule. `colColFilterCidr` keyed through `CidrOrderKey`, whose text
+      fallback is right for a KEY and wrong for a PREDICATE — the split this
+      item draws, missed at one site — so `WHERE c = 'garbage'` and
+      `WHERE c = d` followed two different rules about the same bad row.
+      Both take `CidrSortKey` and UNKNOWN now.
+
+    **Open residuals, filed 2026-08-25.** Three places a CIDR value still
+    does not get the order this item specifies. None is a predicate, which is
+    why none of them is fixed here:
+
+    - **#568: a ROW FIELD PATH is declared STRING, so `ORDER BY rw.c` sorts
+      by text** — `9.0.0.0/8` LAST, where `ORDER BY rw` over the same values
+      puts it FIRST. The sort is not what is wrong: `colRefDeclaredType`
+      resolves the field name against the input's own COLUMNS, where it is
+      not one, and never consults the parent's `parquet.Column.Fields`, so
+      the projection keeps its STRING default and `ResolveSortCompare` is
+      handed a STRING column. It is not a CIDR defect — `ORDER BY rw.n`
+      sorts an INT64 field as text by the same mechanism — which is why it
+      is its own issue rather than a line in this list.
+      `wadjet.TestRowFieldPathLosesTheFieldsDeclaredType` pins it.
+    - **#569: windowed MIN/MAX declares FLOAT64 and fails the query** for
+      CIDR and seven other types, where the plain aggregate answers
+      correctly. `exec.WindowMinMaxType`'s allow-list is deliberate — the
+      window picks its answer with `compareAny`, which dispatches on the Go
+      box and has no type tag to route a CIDR to `CidrOrderKey`, so the
+      FLOAT64 declaration turns a silently wrong ordering into a loud
+      failure. Widening it means giving that comparison the declaration
+      (`exec.newBoxedCompare`), which is this item's rule again at a site
+      that never had it.
+    - **#523: the row-group PRUNE**, unchanged and recorded above.
+
     The two-path divergence this item closes was reproducible directly: the
     single-process engine answered 16 rows and the stage DAG answered 2 for
     the same `WHERE c_ipv6 < '2001:db8::10'` — both engines compile the
@@ -830,6 +903,45 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     because it was found alongside them and is not fixed here either: #544,
     `CAST(timestamp AS STRING)` and LIKE render epoch milliseconds rather
     than the instant pgwire renders.)
+
+    **BYTES is a THIRD divergence in the same family, and this one is not
+    just a rendering — it is a hazard.** (Added 2026-08-25, #570.)
+    PostgreSQL's `bytea::text` is `\x<hex>` under the default
+    `bytea_output = hex`. Wadjet has three renderings of one BYTES value and
+    none of them is that: the embedded projection hands back a `[]byte`
+    (`Vector.GetValue`'s TypeBytes arm), `CAST AS STRING` and LIKE hand back
+    the RAW BYTES as a Go string (`expr.stringOperand`,
+    `kernel.likeTextRenderer` — made to agree with each other rather than
+    with PostgreSQL), and the WIRE hands back Go's `%v`, `[255 254 0 65]`,
+    under OID **25** because `pgwire.pgTypeOID` has no BYTES case and
+    `formatPgValueTyped` has no `[]byte` case. `oidBytea = 17` exists in the
+    tree and is used only for inbound Bind parameters and the `pg_type`
+    catalog row.
+
+    The hazard is the CAST rendering. For the four bytes
+    `0xff 0xfe 0x00 0x41` it produces a string that is invalid UTF-8 and
+    holds an EMBEDDED NUL. PostgreSQL cannot represent that in a text-format
+    field at all — `text` rejects `\0`, so no PG server ever puts one inside
+    a DataRow text field — and libpq TRUNCATES at it: `PQgetvalue` returns a
+    NUL-terminated `char*`, so a length-aware client (pgx, JDBC) reads four
+    bytes and a strlen-based one reads two. One query, two answers,
+    decided by the client library. The `\x` form removes that for free,
+    being pure ASCII.
+
+    Recorded rather than fixed because the fix is the WIRE's — OID 17 plus a
+    hex TEXT encoding and a raw BINARY one — and the CAST should follow it,
+    which reverses the direction of the change that produced today's
+    rendering. Both halves are #570.
+
+    **Neither oracle arm has ever seen a BYTES value.** `bytea` appears
+    nowhere in `benchmarks/` or `internal/oracle/`, and the pg-oracle runs
+    only over the TPC-H fixture, which has no BYTES column — so
+    `EngineSemantics` never compared the value and `WireProtocol` never
+    compared the OID. This is exactly the coverage shape ADR-0013's
+    type-matrix amendment was written for, one gate short: the type matrix
+    covers all 22 types, the PostgreSQL arms cover three. Whichever
+    rendering lands, the pg-oracle fixture needs a BYTES column against a PG
+    `bytea` one, or the decision this item records has nothing holding it.
 
 12. **A set operation's result type is the COMMON type of its arms, and every
     arm is MOVED into it — never reinterpreted.** (Added 2026-08-25, #533.)
@@ -1024,6 +1136,30 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   `internal/engine/exec/aggregate.go` (`appendColumnValue`),
   `internal/engine/exec/partitioned_agg.go` (`legacyCompositeHash`),
   `internal/worker/partitioned_shuffle_sink.go`
+- #546 (the single-process set operation dedupped CIDR by stored TEXT while
+  the stage DAG dedupped it by inet — closed) and #565 (a column-to-COLUMN
+  CIDR comparison, and IPv6's ordering, were inet-ordered on the vectorized
+  kernel only, so a WHERE clause and a projection of the same comparison
+  disagreed inside one process — closed) — `internal/planner/physical/
+  set_op_key.go` (`keyValueText`), `internal/engine/expr/boxed_pair.go`
+  (`boxCidr`, `boxIPv6`, `netOrder`, `netKeyFor`, `compareNull`),
+  `internal/engine/exec/kernel/compare.go` (`IPv6RowKey`,
+  `colColFilterCidr`), `internal/coordinator/cidr_col_col_two_path_test.go`,
+  `internal/engine/expr/network_col_col_test.go`
+- #568 (a ROW field path is declared STRING, so `ORDER BY rw.c` sorts CIDR by
+  text and `ORDER BY rw.n` sorts an INT64 by text, while `ORDER BY rw` is
+  correct — open, pinned by
+  `wadjet.TestRowFieldPathLosesTheFieldsDeclaredType`), #569 (windowed
+  MIN/MAX declares FLOAT64 for eight types and fails the query where the
+  plain aggregate answers — open), #570 (BYTES is not `bytea` on the wire,
+  and `CAST AS STRING` yields an invalid-UTF-8 string with an embedded NUL
+  that libpq truncates — open) — items 10 and 11's open residual lists
+- #566 (a GROUP BY over an ARRAY/ROW/MAP/VECTOR column fails the query past a
+  partial-aggregate spill — open, pinned by
+  `exec.TestContainerGroupByPastASpillFails`), and the merge key underneath
+  it: `internal/engine/exec/sort.go` (`appendKeyElemWithMeta` — a container's
+  elements were written in the TOP-LEVEL encoding on the meta path, so
+  ARRAY[1,23] and ARRAY[12,3] were one key)
 - #522 (LIKE against a container column matched Go's own `fmt.Sprint` of the
   boxed value, an unspecified text form — item 11's own open question,
   settled as a refusal, closed) — `internal/engine/exec/kernel/compare.go`
