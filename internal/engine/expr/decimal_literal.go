@@ -277,20 +277,22 @@ func armExtremumArms(argExprs []Expr) *extremumArms {
 }
 
 // order compares the values at argument indices li and ri under the rule
-// their DECLARATIONS select, or reports ok=false when none applies.
+// their DECLARATIONS select, reports ok=false when none applies, and reports
+// unknown when the rule that applies says the two have no comparable relation
+// (a stored value that names no address — netOrder, ADR-0012 item 10).
 //
 // Both indices are bounds-checked against the armed table rather than assumed
 // to line up: args can outrun argExprs when a vectorized caller evaluates
 // values the expression list does not name, the same guard
 // extremumRefusal.check carries.
-func (a *extremumArms) order(b *batch.RecordBatch, li, ri int, lv, rv any) (int, bool) {
+func (a *extremumArms) order(b *batch.RecordBatch, li, ri int, lv, rv any) (c int, ok, unknown bool) {
 	if a == nil || li < 0 || li >= len(a.ops) || ri < 0 || ri >= len(a.ops) {
-		return 0, false
+		return 0, false, false
 	}
 	lk := a.ops[li].resolve(b)
 	rk := a.ops[ri].resolve(b)
 	if !pairApplies(lk, rk, a.texts[li], a.texts[ri]) {
-		return 0, false
+		return 0, false, false
 	}
 	return orderByKinds(lk, rk, lv, rv, a.texts[li], a.texts[ri])
 }

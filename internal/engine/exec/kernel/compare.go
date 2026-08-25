@@ -707,6 +707,45 @@ func IPv6LitKey(s string) (key string, ok bool) {
 	return string(ip.To16()), true
 }
 
+// IPv6RowKey re-keys a TypeIPv6 column's RENDERED text back into the raw 16
+// bytes the column actually stores, which is what the vectorized kernel
+// compares (ResolveColColFilterKernel's TypeIPv6 arm reads BytesData directly)
+// and what a byte comparison orders as the address's own big-endian value.
+//
+// It exists because the two evaluation sites read the column through different
+// doors. The kernel has the vector and reads the 16 bytes; the row-at-a-time
+// evaluator has ColRef.Eval's BOX, which for TypeIPv6 is the address's TEXT
+// (Vector.GetValue renders `net.IP(raw).String()`). Comparing that text
+// lexically is not the address's order — "2001:db8::9" sorts ABOVE
+// "2001:db8::10" as text and BELOW it as an address — so `WHERE a < z`
+// answered one thing through the scan and the opposite through a projection
+// or a later DAG stage's re-parsed filter (#565, #492's finding one type
+// over).
+//
+// The round trip is exact: Vector.SetValue stores `net.ParseIP(s).To16()` and
+// GetValue renders that back, so parsing the rendering recovers the identical
+// bytes — including for a v4-MAPPED address, which Go renders as a dotted quad
+// and re-parses to the same v4-mapped 16 bytes, keeping the row on the v6 side
+// of PostgreSQL's family split the way the stored bytes already put it. That
+// is why this is NOT IPv6LitKey: a LITERAL dotted quad is a v4 address and
+// keys BELOW every v6 row (PostgreSQL compares family first), while a STORED
+// one is a v4-mapped v6 address and keys among them.
+//
+// ok is false for a rendering that names no address, which a 16-byte column
+// does not produce — GetValue answers "" only for a value that is not 16 bytes
+// wide, which SetValue never writes.
+func IPv6RowKey(s string) (string, bool) {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return "", false
+	}
+	raw := ip.To16()
+	if raw == nil {
+		return "", false
+	}
+	return string(raw), true
+}
+
 // compareFilterCIDR orders a CIDR column against a literal in PostgreSQL's
 // inet order (CidrSortKey), never by the column's raw stored text (#492).
 // litKey is the literal's key, precomputed once; each row's own key is
@@ -1851,7 +1890,7 @@ func colColFilterString(op CompareOp) ColColFilterKernel {
 }
 
 // colColFilterCidr is colColFilterString for two TypeCIDR columns, comparing
-// PostgreSQL's inet order (CidrOrderKey) instead of the stored text's byte
+// PostgreSQL's inet order (CidrSortKey) instead of the stored text's byte
 // order — the same substitution sortCompareCIDR (sort.go) makes for ORDER BY,
 // and ADR-0012 item 10's own rule for a CIDR literal comparison applied to a
 // column-column comparison instead: `WHERE c1 = c2` still fell through to
@@ -1860,10 +1899,28 @@ func colColFilterString(op CompareOp) ColColFilterKernel {
 // fewer equal rows than the column-vs-literal kernel (ResolveFilterKernel's
 // TypeCIDR arm) and expr.CmpNetworkLit already agree the address is equal to
 // itself under (#492).
+//
+// CidrSortKey and not CidrOrderKey, because this is a PREDICATE and not a KEY
+// (#565). CidrOrderKey's fallback — an unparseable value keys as its own raw
+// text — exists so ORDER BY and GROUP BY have a definite position for every
+// stored value in an unvalidated column, and is exactly wrong here: ADR-0012
+// item 10 says a stored value that names no address is UNKNOWN and matches
+// NOTHING for every operator, `<>` included, which is what compareFilterCIDR
+// (the column-vs-literal kernel) and expr.CmpNetworkLit.evalCIDR already
+// answer. Keying the malformed row instead made `WHERE c = 'garbage'` and
+// `WHERE c = d` follow two different rules about the same bad row.
 func colColFilterCidr(op CompareOp) ColColFilterKernel {
 	cmpFn := resolveCompare[string](op)
 	test := func(left, right *batch.Vector, i int) bool {
-		return cmpFn(CidrOrderKey(left.BytesData.UnsafeStringValue(i)), CidrOrderKey(right.BytesData.UnsafeStringValue(i)))
+		lk, lok := CidrSortKey(left.BytesData.UnsafeStringValue(i))
+		if !lok {
+			return false
+		}
+		rk, rok := CidrSortKey(right.BytesData.UnsafeStringValue(i))
+		if !rok {
+			return false
+		}
+		return cmpFn(lk, rk)
 	}
 	return func(left, right *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		out := outSel[:0]

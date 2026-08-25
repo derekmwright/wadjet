@@ -457,6 +457,11 @@ func cidrData() []map[string]any {
 //     so already keyed by inet — one engine with two answers to "are these the
 //     same value".
 //
+// col_col_equality joined the table with #565, whose fix put the SAME inet
+// order under the row-at-a-time comparison the vectorized col-col kernel
+// already had; TestCidrColColTwoPath sweeps that shape across all six
+// operators.
+//
 // This replaces the pin (TestCidrKeyIsStoredTextNotInet) that recorded the
 // stored-TEXT answers as today's, and its deletion is #546's and #520's proof
 // per ADR-0013 §Pins. It is a POSITIVE gate: every count below is what live
@@ -490,6 +495,11 @@ func TestCidrKeyIsInetOnBothPaths(t *testing.T) {
 		{"count_distinct", "SELECT COUNT(DISTINCT c) AS n FROM %s", 2},
 		{"self_join", "SELECT COUNT(*) AS n FROM %s a JOIN %s b ON a.c = b.d", 4},
 		{"col_literal_equality", "SELECT COUNT(*) AS n FROM %s WHERE c = '10.0.0.1'", 2},
+		// #565's shape, unpinned: the col-col comparison is inet-ordered at
+		// BOTH evaluation sites now, not the vectorized kernel alone.
+		// TestCidrColColTwoPath sweeps all six operators and the projected
+		// form; this entry keeps the key gate's own table complete.
+		{"col_col_equality", "SELECT COUNT(*) AS n FROM %s WHERE c = d", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sql := tc.sql
@@ -521,50 +531,6 @@ func TestCidrKeyIsInetOnBothPaths(t *testing.T) {
 			}
 		})
 	}
-
-	// The one CIDR key shape that is still WRONG, and it is wrong on ONE arm
-	// only: `WHERE c = d`.
-	//
-	// kernel.colColFilterCidr re-keys a column-to-column CIDR comparison
-	// through inet order, but only on the VECTORIZED kernel. expr.compare()'s
-	// both-string fast path — the row-at-a-time evaluator, which is what a
-	// projection uses and what the stage DAG's re-parsed filter ALWAYS
-	// compiles to — still compares the two stored texts byte for byte. So the
-	// single-process arm answers PostgreSQL's 2 and the DAG answers 0 for the
-	// identical query.
-	//
-	// Pinned here rather than papered over, and the pin asserts BOTH arms'
-	// answers: it fails the moment they agree, which is the fix's proof
-	// (ADR-0013 §Pins). Delete this subtest with the fix.
-	t.Run("col_col_equality_pinned_565", func(t *testing.T) {
-		sql := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c = d", cidrTable)
-		got := map[string]int64{}
-		for _, arm := range []struct {
-			name string
-			dag  bool
-		}{{"single", false}, {"dag", true}} {
-			rows := dtpRun(t, ctx, single, coord, sql, arm.dag)
-			if len(rows) != 1 {
-				t.Fatalf("%s: %d rows, want 1", arm.name, len(rows))
-			}
-			got[arm.name] = ketInt(t, arm.name, rows[0]["n"])
-		}
-		if got["single"] == got["dag"] {
-			t.Errorf("the two paths now agree on `WHERE c = d` (%d) — #565 is FIXED.\n"+
-				"Delete this pin and add col_col_equality to the table above, gated at PostgreSQL's 2.",
-				got["single"])
-			return
-		}
-		if got["single"] != 2 || got["dag"] != 0 {
-			t.Errorf("#565's shape changed — re-read it before re-pinning\n"+
-				"  single-process %d (want 2, PostgreSQL's answer, via kernel.colColFilterCidr)\n"+
-				"  stage DAG      %d (want 0, via expr.compare()'s byte comparison)",
-				got["single"], got["dag"])
-			return
-		}
-		t.Logf("known divergence, NOT gated (#565): single-process 2 (PostgreSQL's answer), "+
-			"stage DAG 0 — the col-col CIDR fix landed on the vectorized kernel only.\n  SQL: %s", sql)
-	})
 }
 
 // TestMixedDecimalIntegerSetOpIsNotReconciled pins what a set operation across

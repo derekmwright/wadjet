@@ -1011,7 +1011,11 @@ func (e *Cmp) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if lv == nil || rv == nil {
 		return false, true // a comparison against NULL is UNKNOWN (#370)
 	}
-	return e.pair.compare(b, lv, rv, e.Op), false
+	// compareNull, not compare: a network comparison has a third answer for a
+	// stored value that names no address, and it is the one a NULL row gets
+	// (ADR-0012 item 10, #565). Every other pair answers null=false here, so
+	// this is the same two values it always was.
+	return e.pair.compareNull(b, lv, rv, e.Op)
 }
 
 // CmpTemporalLit compares a bare column against a string literal that
@@ -2467,9 +2471,20 @@ func pickExtremum(b *batch.RecordBatch, args []any, op CmpOp, arms *extremumArms
 		better := false
 		if arms != nil {
 			arms.refuse.check(b, bestIdx, i)
-			if c, ok := arms.order(b, i, bestIdx, a, best); ok {
+			c, ok, unknown := arms.order(b, i, bestIdx, a, best)
+			switch {
+			case unknown:
+				// A candidate with no place in the order — a stored value
+				// that names no address (ADR-0012 item 10) — is SKIPPED, the
+				// way PostgreSQL's GREATEST/LEAST skip a NULL argument, and
+				// is never text-ordered against the best so far. Residual:
+				// such a value arriving FIRST becomes the running best and
+				// nothing displaces it, so the answer is the malformed value
+				// (#565).
+				better = false
+			case ok:
 				better = cmpOrder(c, op)
-			} else {
+			default:
 				better = compare(a, best, op)
 			}
 		} else {

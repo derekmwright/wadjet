@@ -21,7 +21,14 @@ import (
 // two operands' declared kinds: the declaration-driven rule when one applies,
 // and compare()'s ordinary type rules when none does.
 func boxedCmp(lk, rk boxKind, lv, rv any, lText, rText string, op CmpOp) bool {
-	if c, ok := orderByKinds(lk, rk, lv, rv, lText, rText); ok {
+	c, ok, unknown := orderByKinds(lk, rk, lv, rv, lText, rText)
+	switch {
+	case unknown:
+		// A rule applied and said the two have no comparable relation — the
+		// network types' malformed-stored-value case (#565). No pair here is
+		// one, and boxedPair.compareNull collapses it to false the same way.
+		return false
+	case ok:
 		return cmpOrder(c, op)
 	}
 	return compare(lv, rv, op)

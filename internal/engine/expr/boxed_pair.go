@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 )
 
 // This file is the declaration-driven half of the boxed comparison path.
@@ -64,6 +65,20 @@ const (
 	// comparison it looks like. Collapsing this into boxText is what dropped
 	// PostgreSQL's rule for the first two (#504 review, B1).
 	boxQuoted
+	// boxCidr: values from here are CIDR. A CIDR column boxes as its stored
+	// TEXT, which is indistinguishable in the box from a STRING column's —
+	// the same problem boxDecimal has, one type family over. Its order is
+	// PostgreSQL's inet (ADR-0012 item 10), and the stored text's byte order
+	// is not that: "9.0.0.0/8" sorts ABOVE "10.0.0.0/24" as text and BELOW it
+	// as an address, and a bare address and its own /32 host route are one
+	// value the text calls two (#565).
+	boxCidr
+	// boxIPv6: values from here are IPv6. The column STORES the address's raw
+	// 16 bytes, which the vectorized kernel compares directly, but
+	// ColRef.Eval boxes the RENDERED text — and "2001:db8::9" sorts above
+	// "2001:db8::10" as text and below it as an address, so the two sites
+	// answered `a < z` opposite ways (#565).
+	boxIPv6
 )
 
 // classifyOperand reports an operand's declared kind and whether that answer
@@ -92,13 +107,19 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 			return boxNumber, true
 		case batch.TypeString:
 			return boxText, true
+		case batch.TypeCIDR:
+			return boxCidr, true
+		case batch.TypeIPv6:
+			return boxIPv6, true
 		default:
 			// Every other type either boxes as a number of its own (PORT,
-			// DURATION), as a formatted string with its own comparison rule
-			// (DATE, CIDR, UUID), or as a container. None of them is a
-			// DECIMAL-vs-number pair, and none of them wants the text rule
-			// applied to a numeric literal, so they keep compare()'s
-			// behaviour exactly.
+			// DURATION, and IPv4/MAC, whose box is the raw encoded int64 that
+			// already sorts as the address does), as a formatted string whose
+			// own order its text happens to give (DATE, UUID — UUID by the
+			// fixed-width-hex accident ADR-0012 item 10 records), or as a
+			// container. None of them is a DECIMAL-vs-number pair, and none
+			// of them wants the text rule applied to a numeric literal, so
+			// they keep compare()'s behaviour exactly.
 			return boxUnknown, true
 		}
 	case *Lit:
@@ -289,8 +310,64 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 		return true
 	case rk == boxNumber && lk == boxQuoted && lText != "":
 		return true
+	// A network column whose ORDER is the address's, against another column
+	// of its own type or against a quoted literal. Two of them, or one and a
+	// literal, is the pair no box can tell from two strings — the shape
+	// ADR-0012 item 8 says must be answered from the DECLARATIONS (#565).
+	case lk == boxCidr && rk == boxCidr, lk == boxIPv6 && rk == boxIPv6:
+		return true
+	case (lk == boxCidr || lk == boxIPv6) && rk == boxQuoted && rText != "":
+		return true
+	case (rk == boxCidr || rk == boxIPv6) && lk == boxQuoted && lText != "":
+		return true
 	}
 	return false
+}
+
+// netOrder orders two network-typed boxes by the address's own order, with
+// each side re-keyed by the function its OPERAND's kind selects.
+//
+// unknown reports ADR-0012 item 10's rule for a stored value that names no
+// address: the column is unvalidated text (internal/storage/ingest), so a row
+// can hold something that is not an address, and a value with no place in the
+// order has no defined comparison against one that does. That is UNKNOWN — it
+// matches nothing for every operator, `<>` included, the answer a NULL row
+// gets — and never a fallback to comparing the two TEXTS, which is how one bad
+// row split the two evaluation sites apart in the first place.
+func netOrder(lKey, rKey func(string) (string, bool), lv, rv any) (c int, ok, unknown bool) {
+	ls, lIsStr := lv.(string)
+	rs, rIsStr := rv.(string)
+	if !lIsStr || !rIsStr {
+		// Not the boxes this rule reads. Falling through is right: the
+		// declaration says what the COLUMN is, and a box of another shape
+		// from it is something compare() should judge on its own terms.
+		return 0, false, false
+	}
+	lk, lParsed := lKey(ls)
+	rk, rParsed := rKey(rs)
+	if !lParsed || !rParsed {
+		return 0, true, true
+	}
+	return strings.Compare(lk, rk), true, false
+}
+
+// netKeyFor is the re-key function one operand's kind selects, and the side it
+// is on matters for IPv6: a STORED value is the address's own 16 bytes
+// (kernel.IPv6RowKey), while a LITERAL dotted quad is a v4 address that
+// PostgreSQL's family rule puts BELOW every v6 row (kernel.IPv6LitKey keys it
+// to the empty string for exactly that). CIDR uses one function on both sides
+// because a bare address is a /32 host route wherever it is written.
+func netKeyFor(k boxKind, literal bool) func(string) (string, bool) {
+	switch k {
+	case boxCidr:
+		return kernel.CidrSortKey
+	case boxIPv6:
+		if literal {
+			return kernel.IPv6LitKey
+		}
+		return kernel.IPv6RowKey
+	}
+	return nil
 }
 
 // order compares two boxed values under the rule their DECLARATIONS select,
@@ -320,9 +397,9 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 //     PostgreSQL types an unknown-typed literal from the operand it meets.
 //     `k > '2'` over a BIGINT column is `k > 2` there, not a text comparison
 //     and not a comparison against zero.
-func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (int, bool) {
+func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (c int, ok, unknown bool) {
 	if p == nil || p.disarmed.Load() {
-		return 0, false
+		return 0, false, false
 	}
 	lk := p.left.resolve(b)
 	rk := p.right.resolve(b)
@@ -332,7 +409,7 @@ func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (int, bool) {
 		if p.left.kind.Load() != 0 && p.right.kind.Load() != 0 {
 			p.disarmed.Store(true)
 		}
-		return 0, false
+		return 0, false, false
 	}
 	return orderByKinds(lk, rk, lv, rv, p.lText, p.rText)
 }
@@ -342,32 +419,47 @@ func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (int, bool) {
 // OPERANDS move between iterations: those sites resolve one boxOperand per
 // ARGUMENT and assemble the pair per comparison, instead of holding a
 // boxedPair for every ordered pair of arguments.
-func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (int, bool) {
+func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (c int, ok, unknown bool) {
 	ls, lIsStr := lv.(string)
 	rs, rIsStr := rv.(string)
 	switch {
 	case lk == boxDecimal && rk == boxDecimal:
 		if lIsStr && rIsStr {
-			return batch.CompareDecimalTexts(ls, rs)
+			c, ok := batch.CompareDecimalTexts(ls, rs)
+			return c, ok, false
 		}
 	case lk == boxDecimal && lIsStr:
 		if rText != "" {
-			return batch.CompareDecimalTexts(ls, rText)
+			c, ok := batch.CompareDecimalTexts(ls, rText)
+			return c, ok, false
 		}
 		if c, ok := decimalTextOrder(rv, ls); ok {
-			return -c, true
+			return -c, true, false
 		}
 	case rk == boxDecimal && rIsStr:
 		if lText != "" {
-			return batch.CompareDecimalTexts(lText, rs)
+			c, ok := batch.CompareDecimalTexts(lText, rs)
+			return c, ok, false
 		}
 		if c, ok := decimalTextOrder(lv, rs); ok {
-			return c, true
+			return c, true, false
 		}
 	case lk == boxText && lIsStr && rText != "":
-		return strings.Compare(ls, rText), true
+		return strings.Compare(ls, rText), true, false
 	case rk == boxText && rIsStr && lText != "":
-		return strings.Compare(lText, rs), true
+		return strings.Compare(lText, rs), true, false
+	// Two network columns of one type, or one against a quoted literal, in
+	// the ADDRESS's own order rather than the rendered text's (#565). The
+	// literal's key comes from its own SIDE, which is what puts a dotted-quad
+	// literal below every IPv6 row while a v4-MAPPED stored value stays among
+	// them (netKeyFor).
+	case lk == boxCidr && rk == boxCidr, lk == boxIPv6 && rk == boxIPv6:
+		return netOrder(netKeyFor(lk, false), netKeyFor(rk, false), lv, rv)
+	case (lk == boxCidr || lk == boxIPv6) && rk == boxQuoted:
+		return netOrder(netKeyFor(lk, false), netKeyFor(lk, true), lv, rText)
+	case (rk == boxCidr || rk == boxIPv6) && lk == boxQuoted:
+		c, ok, unknown := netOrder(netKeyFor(rk, false), netKeyFor(rk, true), rv, lText)
+		return -c, ok, unknown
 	// A NUMBER column against a QUOTED literal. PostgreSQL types an
 	// unknown-typed literal from the operand it meets, so `k > '2'` over a
 	// BIGINT column is the integer comparison `k > 2` — exact against an
@@ -376,14 +468,14 @@ func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (int, bool) {
 	// and falls through; refusing it is #536's rule, not this one's.
 	case lk == boxNumber && rk == boxQuoted:
 		if c, ok := decimalTextOrder(lv, rText); ok {
-			return c, true
+			return c, true, false
 		}
 	case rk == boxNumber && lk == boxQuoted:
 		if c, ok := decimalTextOrder(rv, lText); ok {
-			return -c, true
+			return -c, true, false
 		}
 	}
-	return 0, false
+	return 0, false, false
 }
 
 // compare answers one comparison operator for this pair, falling through to
@@ -400,8 +492,28 @@ func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (int, bool) {
 // A nil pair is an unbound node — a Cmp assembled as a struct literal rather
 // than through NewCmp, the same shape that leaves dec and decCols nil.
 func (p *boxedPair) compare(b *batch.RecordBatch, lv, rv any, op CmpOp) bool {
-	if c, ok := p.order(b, lv, rv); ok {
-		return cmpOrder(c, op)
+	v, _ := p.compareNull(b, lv, rv, op)
+	return v
+}
+
+// compareNull is compare with the third answer a network comparison can give:
+// UNKNOWN, for a stored value that names no address (netOrder's own doc, and
+// ADR-0012 item 10).
+//
+// Only Cmp reads the null half. The other sites — IS DISTINCT FROM, IN,
+// BETWEEN, a simple CASE's WHEN — want the FALSE that compare() collapses it
+// to, and each for its own reason rather than by accident: IS DISTINCT FROM is
+// a total predicate, so `distinct = !compare(..., CmpEq)` answers TRUE for an
+// unorderable pair exactly as it does for a NULL one; an IN list, a BETWEEN
+// bound and an unmatched WHEN all treat "no" and "cannot say" alike, which is
+// what a NULL operand already gets there.
+func (p *boxedPair) compareNull(b *batch.RecordBatch, lv, rv any, op CmpOp) (val, null bool) {
+	c, ok, unknown := p.order(b, lv, rv)
+	switch {
+	case unknown:
+		return false, true
+	case ok:
+		return cmpOrder(c, op), false
 	}
-	return compare(lv, rv, op)
+	return compare(lv, rv, op), false
 }
