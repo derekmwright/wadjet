@@ -202,7 +202,11 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      with each other today, so keying the local set operation by inet ALONE
      would create the divergence it looks like it closes; the fix moves the
      whole key layer and the shuffle router together, the way #459 did for
-     floats.
+     floats — predicate kernels, hash keys, and the set-operation key
+     (`physical.keyValueText`, `internal/planner/physical/set_op_key.go`) all
+     at once, not one at a time. (Amended 2026-08-25. Closed 2026-08-25 — see
+     item 10's #546 and #565 residuals for the landed fix and the
+     column-to-column comparison it turned out to share a cause with.)
 
    - **Unary minus over a QUOTED string literal.** (Added 2026-08-24, #505.)
      PostgreSQL refuses EVERY `-'…'` form, numeric-looking or not, with

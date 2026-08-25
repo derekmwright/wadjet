@@ -1748,7 +1748,7 @@ func toFloat64(v any) float64 {
 // #450 fixed for a nil constant one arm over.
 //
 // A number is rendered as a number now. The exact SOURCE TEXT is better
-// still, and the caller substitutes it when it has one (exec.litValueForType,
+// still, and the caller substitutes it when it has one (exec.decimalLitValue,
 // ADR-0012 item 6: a numeric literal's carrier is its text) — this is the
 // floor for a constant that reached here without one, such as a folded
 // expression's value.
