@@ -123,10 +123,32 @@ the sweep that calls it is opt-in.**
    `deleteFromStore`/`FlushDeferredDeletes`: a path whose object was
    modified after the drop was recorded is skipped, since something has
    legitimately written there since.
-4. **Commit ordering.** `DropTable` appends to its pending-delete list only
-   *after* the metadata put that actually removes the table succeeds. A
-   DROP that fails partway through schedules nothing for deletion — it
-   stays exactly as recoverable as before the call.
+4. **Commit ordering: metadata first, cleanup after.** The put that removes
+   the name from `meta.Tables` is the write that constitutes the DROP —
+   `ListTables`, `GetTable` and the planner all resolve through it — so it
+   goes first, and the `table.<name>` / `manifest.<name>` key deletes are
+   cleanup of metadata nothing can reach any more. The reverse order put
+   the failure window in the worst place: a failed put left the table
+   *listed* in `meta` with its keys already gone, every read of it failed,
+   and because the live-manifest guard refuses to delete against a picture
+   it cannot complete, that one failure **bricked reclaim catalog-wide,
+   permanently, for every other table**. Meta-first makes a failed DROP a
+   no-op.
+
+   The order it does open a window on is a concurrent `CreateTable`
+   claiming the freed name before the cleanup deletes run; deleting *its*
+   keys would brick a live table. So the cleanup re-reads `meta` and, if
+   the name is back, leaves both keys alone — the new incarnation has
+   already overwritten them, so there is nothing of ours left to clean.
+   Both halves have a test.
+
+   `DropTable` also appends to its pending-delete list only *after* the
+   metadata put succeeds. A DROP that fails schedules nothing for
+   deletion — it stays exactly as recoverable as before the call, which is
+   asserted on `pendingDrops` directly. (The test that used to cover this
+   asserted only that the files survived, which they did — because the
+   half-dropped table made every later flush abort. It passed on the
+   strength of the bug it was meant to exclude.)
 5. **Bounded pending list.** The in-memory list of pending drops is capped
    (`maxPendingTableDrops`); past the cap the *oldest* entry is evicted —
    its files are never scheduled for deletion and leak — rather than ever

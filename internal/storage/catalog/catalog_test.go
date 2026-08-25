@@ -1005,14 +1005,119 @@ func (f *failingKV) Put(key string, value []byte) (uint64, error) {
 	return f.MetaKV.Put(key, value)
 }
 
-// TestDropTableKeepsFilesOnFailedMetaPut is a #494 regression for the
-// pendingDrops append ordering: DropTable must schedule nothing for
-// physical deletion unless its final metadata put actually succeeds. A
-// DROP that fails partway through must leave the table's files exactly as
-// recoverable as they were before the call — not scheduled for reclaim.
-func TestDropTableKeepsFilesOnFailedMetaPut(t *testing.T) {
+// TestFailedDropLeavesTheCatalogFullyConsistent is a #494 regression for
+// DropTable's write ordering, and it replaces a test that passed for the
+// wrong reason: it only ever asserted that the files SURVIVED, which they
+// did — because the half-dropped table then made every later flush abort.
+// "The bug protected the file" is not the property anybody wants pinned.
+//
+// Two things must hold when the metadata commit fails. The obvious one:
+// nothing is scheduled for physical deletion, asserted on pendingDrops
+// directly rather than inferred from a flush that had other reasons to do
+// nothing. The one that was actually broken: the catalog stays CONSISTENT.
+// With the per-table keys deleted before the meta commit, a single failed
+// DROP left the table listed in meta with no manifest, and because
+// liveCatalogState refuses to delete against a picture it cannot complete,
+// that one failure bricked reclaim for every other table in the catalog,
+// permanently. Committing meta first makes a failed DROP a no-op.
+func TestFailedDropLeavesTheCatalogFullyConsistent(t *testing.T) {
 	store := objstore.NewMemStore()
 	kv := &failingKV{MetaKV: NewMemKV()}
+	cat := New(kv, store, "test-bucket")
+	ctx := context.Background()
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	schema := testSchema()
+
+	mk := func(table, path string) {
+		t.Helper()
+		if err := cat.CreateTable(ctx, table, schema, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cat.Store().Put(ctx, cat.Bucket(), path, bytes.NewReader([]byte("data")), 4, "application/octet-stream"); err != nil {
+			t.Fatal(err)
+		}
+		if err := cat.AddNewFiles(ctx, table, nil, "tables/"+table, []FileEntry{
+			{Path: path, SizeBytes: 4, NumRows: 1, CreatedAt: time.Now().UTC()},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eventsPath := "tables/events/chunk_aaaa.parquet"
+	otherPath := "tables/other/chunk_bbbb.parquet"
+	mk("events", eventsPath)
+	mk("other", otherPath)
+
+	// An unrelated table drops cleanly first: its files are legitimately
+	// due for reclaim, and must stay reclaimable no matter what the failed
+	// DROP below does.
+	if err := cat.DropTable(ctx, "other"); err != nil {
+		t.Fatal(err)
+	}
+
+	kv.failNextPut = true
+	if err := cat.DropTable(ctx, "events"); err == nil {
+		t.Fatal("expected DropTable to surface the injected meta-put failure")
+	}
+
+	// Nothing from the failed DROP was scheduled — asserted on the list
+	// itself, not inferred from a flush.
+	cat.dropMu.Lock()
+	pending := append([]pendingTableDrop(nil), cat.pendingDrops...)
+	cat.dropMu.Unlock()
+	if len(pending) != 1 || pending[0].table != "other" {
+		t.Fatalf("pendingDrops should hold only the successful drop, got %+v", pending)
+	}
+
+	// The failed DROP left the table entirely intact.
+	tables, err := cat.ListTables(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := false
+	for _, tn := range tables {
+		if tn == "events" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatalf("a failed DROP must leave the table listed, got %v", tables)
+	}
+	if _, err := cat.GetTable(ctx, "events"); err != nil {
+		t.Errorf("a failed DROP must leave the table readable: %v", err)
+	}
+	manifest, err := cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatalf("a failed DROP must leave the manifest readable: %v", err)
+	}
+	if len(manifest.Partitions) != 1 || len(manifest.Partitions[0].Files) != 1 {
+		t.Fatalf("a failed DROP must leave the manifest whole, got %+v", manifest.Partitions)
+	}
+
+	// And reclaim is not bricked catalog-wide: the unrelated drop still
+	// collects. This is the assertion the old test could never make.
+	time.Sleep(2 * time.Millisecond)
+	if n := cat.FlushDroppedTableFiles(ctx, 0); n != 1 {
+		t.Errorf("the unrelated dropped table should still be reclaimable, got %d files flushed", n)
+	}
+	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), otherPath); err == nil {
+		t.Error("the cleanly dropped table's file should have been reclaimed")
+	}
+	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), eventsPath); err != nil {
+		t.Fatalf("the failed DROP's file must survive: %v", err)
+	}
+}
+
+// TestDropCleansUpNothingWhenTheNameIsReclaimedFirst covers the window
+// meta-first ordering opens: between the meta commit and the per-table key
+// deletes, the name is free, and a concurrent CreateTable can claim it. The
+// cleanup must then leave the NEW incarnation's keys alone — deleting them
+// would brick a live table (listed, with no manifest), which is precisely
+// the failure mode meta-first exists to prevent.
+func TestDropCleansUpNothingWhenTheNameIsReclaimedFirst(t *testing.T) {
+	store := objstore.NewMemStore()
+	kv := &putHookKV{MetaKV: NewMemKV()}
 	cat := New(kv, store, "test-bucket")
 	ctx := context.Background()
 	if err := cat.Init(ctx); err != nil {
@@ -1022,27 +1127,49 @@ func TestDropTableKeepsFilesOnFailedMetaPut(t *testing.T) {
 	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
 		t.Fatal(err)
 	}
-	path := "tables/events/chunk_aaaa.parquet"
-	if _, err := cat.Store().Put(ctx, cat.Bucket(), path, bytes.NewReader([]byte("data")), 4, "application/octet-stream"); err != nil {
-		t.Fatal(err)
+
+	// Fire the recreate on the meta put that commits the drop — i.e. the
+	// instant the name becomes free, before the cleanup deletes run.
+	kv.onPut = func(key string) {
+		if !strings.HasSuffix(key, ".meta") {
+			return
+		}
+		kv.onPut = nil
+		if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+			t.Errorf("recreate: %v", err)
+		}
 	}
-	if err := cat.AddNewFiles(ctx, "events", nil, "tables/events", []FileEntry{
-		{Path: path, SizeBytes: 4, NumRows: 1, CreatedAt: time.Now().UTC()},
-	}); err != nil {
+	if err := cat.DropTable(ctx, "events"); err != nil {
 		t.Fatal(err)
 	}
 
-	kv.failNextPut = true
-	if err := cat.DropTable(ctx, "events"); err == nil {
-		t.Fatal("expected DropTable to surface the injected meta-put failure")
+	// The re-created table is whole: listed, with a readable manifest.
+	if _, err := cat.GetTable(ctx, "events"); err != nil {
+		t.Errorf("the re-created table's metadata was deleted by the finishing DROP: %v", err)
 	}
+	if _, err := cat.GetManifest(ctx, "events"); err != nil {
+		t.Errorf("the re-created table's manifest was deleted by the finishing DROP: %v", err)
+	}
+	// And that state is usable, not just readable: a flush must not abort
+	// on it.
+	if n := cat.FlushDroppedTableFiles(ctx, -time.Minute); n != 0 {
+		t.Errorf("nothing should have been reclaimed, got %d", n)
+	}
+}
 
-	if n := cat.FlushDroppedTableFiles(ctx, 0); n != 0 {
-		t.Fatalf("a failed DROP must not schedule any files for deletion, got %d flushed", n)
+// putHookKV fires onPut after a key is written, so a test can interleave a
+// concurrent writer at an exact point in a multi-write sequence.
+type putHookKV struct {
+	MetaKV
+	onPut func(key string)
+}
+
+func (p *putHookKV) Put(key string, value []byte) (uint64, error) {
+	rev, err := p.MetaKV.Put(key, value)
+	if err == nil && p.onPut != nil {
+		p.onPut(key)
 	}
-	if _, _, err := cat.Store().Get(ctx, cat.Bucket(), path); err != nil {
-		t.Fatalf("file must survive a failed DROP: %v", err)
-	}
+	return rev, err
 }
 
 // TestPendingDropsCapEvictsOldestWithoutDeleting is a #494 regression for

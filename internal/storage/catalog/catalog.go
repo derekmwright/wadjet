@@ -1067,11 +1067,14 @@ func (c *Catalog) LoadUDFs() ([]UDFDef, error) {
 // outside #494's collision hazard; leaking them is a separate, lower-
 // severity storage-hygiene gap.
 //
-// Ordering matters: the pending-drop record is appended only AFTER the
-// metadata put below succeeds. A failed DROP (the put returns an error)
-// must leave the table exactly as recoverable as it was before the call —
-// nothing scheduled for physical deletion — not half-gone with its files
-// already timed for reclaim.
+// Ordering matters twice. The metadata put that removes the name from
+// meta.Tables goes FIRST — it is the write that constitutes the drop, and
+// putting it first is what makes a failed DROP a clean no-op rather than a
+// table that is listed but unreadable (see the comment at the put). And
+// the pending-drop record is appended only AFTER that put succeeds: a
+// failed DROP must leave the table exactly as recoverable as it was before
+// the call — nothing scheduled for physical deletion — not half-gone with
+// its files already timed for reclaim.
 func (c *Catalog) DropTable(ctx context.Context, name string) error {
 	meta, err := c.getMeta()
 	if err != nil {
@@ -1121,15 +1124,50 @@ func (c *Catalog) DropTable(ctx context.Context, name string) error {
 		}
 	}
 
-	c.invalidateManifestCache(name)
-	_ = c.kv.Delete(c.key("table." + name))
-	_ = c.kv.Delete(c.key("manifest." + name))
-
+	// The meta put goes FIRST, and it is the whole DROP. It is the write
+	// that makes the table invisible — ListTables, GetTable and the
+	// planner all resolve through meta.Tables — so once it lands the DROP
+	// has happened, and everything after it is cleanup of metadata nothing
+	// reaches any more.
+	//
+	// The reverse order (delete the per-table keys, then commit meta) put
+	// the failure window in the worst possible place: a failed put left
+	// the table LISTED in meta with its table./manifest. keys already
+	// gone. Every read of it then failed, and — because
+	// liveCatalogState treats a GetManifest error for a listed table as
+	// "prove nothing, delete nothing" — one such failure bricked reclaim
+	// catalog-wide, permanently, for every other table. Committing meta
+	// first makes a failed DROP a no-op: nothing else has been touched
+	// yet, and the caller sees the error with the table fully intact.
 	meta.Tables = tables
 	meta.UpdatedAt = time.Now().UTC()
 	if err := c.putJSON(c.key("meta"), meta); err != nil {
 		return err
 	}
+
+	// Cleanup, past the point of no return. Re-read meta first: the name
+	// is free the instant the put above lands, so a concurrent CreateTable
+	// can legitimately claim it and write its own table./manifest. keys
+	// before we get here — and deleting THOSE would brick a live table
+	// (listed, with no manifest) instead of the one we dropped. If the
+	// name is back, its new incarnation has already overwritten both keys,
+	// so there is nothing of ours left to clean anyway.
+	if fresh, mErr := c.getMeta(); mErr == nil {
+		for _, t := range fresh.Tables {
+			if t == name {
+				slog.Default().Warn("DROP TABLE: the name was re-created before this drop finished cleaning up; leaving the new incarnation's metadata alone",
+					"table", name)
+				c.invalidateManifestCache(name)
+				if len(dropPaths) > 0 {
+					c.recordPendingDrop(name, dropPaths)
+				}
+				return nil
+			}
+		}
+	}
+	c.invalidateManifestCache(name)
+	_ = c.kv.Delete(c.key("table." + name))
+	_ = c.kv.Delete(c.key("manifest." + name))
 
 	if len(dropPaths) > 0 {
 		c.recordPendingDrop(name, dropPaths)
