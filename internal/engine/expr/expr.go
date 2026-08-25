@@ -1641,12 +1641,23 @@ type In struct {
 	// dec binds a DECIMAL column against an all-numeric-literal list; see
 	// NewCmp and decimal_literal.go.
 	dec *decimalLitCmp
+	// pairs is one declaration-driven binding per LIST MEMBER, for the lists
+	// dec declines: a mixed list, a member that is not a literal, or a column
+	// that is not a DECIMAL. `x IN (v)` is `x = v` chained with OR, so it has
+	// to take the same comparison rule — `s = 2.00` answered one row while
+	// `s IN (2.00)` answered none, one predicate with two readings (#504
+	// review, non-blocker a).
+	pairs []*boxedPair
 }
 
 // NewIn builds a set-membership test, binding the DECIMAL-column-against-
-// numeric-literals shape.
+// numeric-literals shape and one boxed pair per member.
 func NewIn(e Expr, values []Expr, not bool) *In {
-	return &In{Expr: e, Values: values, Not: not, dec: bindDecimalList(e, values)}
+	pairs := make([]*boxedPair, len(values))
+	for i, v := range values {
+		pairs[i] = newBoxedPair(e, v)
+	}
+	return &In{Expr: e, Values: values, Not: not, dec: bindDecimalList(e, values), pairs: pairs}
 }
 
 func (e *In) Eval(b *batch.RecordBatch, row int) any {
@@ -1684,13 +1695,19 @@ func (e *In) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 		return false, true
 	}
 	sawNull := false
-	for _, v := range e.Values {
+	for i, v := range e.Values {
 		rv := v.Eval(b, row)
 		if rv == nil {
 			sawNull = true
 			continue
 		}
-		if compare(lv, rv, CmpEq) {
+		var eq bool
+		if i < len(e.pairs) {
+			eq = e.pairs[i].compare(b, lv, rv, CmpEq)
+		} else {
+			eq = compare(lv, rv, CmpEq)
+		}
+		if eq {
 			return !e.Not, false
 		}
 	}
@@ -1708,13 +1725,18 @@ type Between struct {
 	// dec binds a DECIMAL column against two numeric-literal bounds; see
 	// NewCmp and decimal_literal.go.
 	dec *decimalLitCmp
+	// loPair/hiPair are the declaration-driven bindings for the two bounds,
+	// for the shapes dec declines. `x BETWEEN a AND b` is `x >= a AND x <= b`
+	// and must read its bounds the way those two comparisons do.
+	loPair, hiPair *boxedPair
 }
 
 // NewBetween builds a range test, binding the DECIMAL-column-against-
-// numeric-literals shape.
+// numeric-literals shape and one boxed pair per bound.
 func NewBetween(e, low, hi Expr, not bool) *Between {
 	return &Between{Expr: e, Low: low, Hi: hi, Not: not,
-		dec: bindDecimalList(e, []Expr{low, hi})}
+		dec:    bindDecimalList(e, []Expr{low, hi}),
+		loPair: newBoxedPair(e, low), hiPair: newBoxedPair(e, hi)}
 }
 
 func (e *Between) Eval(b *batch.RecordBatch, row int) any {
@@ -1752,10 +1774,10 @@ func (e *Between) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	// Three-valued AND over the two half-comparisons.
 	geNull := lo == nil
 	leNull := hi == nil
-	if !geNull && !compare(v, lo, CmpGe) {
+	if !geNull && !e.loPair.compare(b, v, lo, CmpGe) {
 		return e.Not, false
 	}
-	if !leNull && !compare(v, hi, CmpLe) {
+	if !leNull && !e.hiPair.compare(b, v, hi, CmpLe) {
 		return e.Not, false
 	}
 	if geNull || leNull {
@@ -4464,11 +4486,27 @@ func ToInt64(v any) int64 {
 // TypeTimestamp columns use epoch milliseconds (large int64 values).
 // The threshold 500_000 (~year 3339 in days) safely distinguishes the two.
 func parseTemporalInt64(ref int64, s string) int64 {
+	v, _ := parseTemporalInt64OK(ref, s)
+	return v
+}
+
+// parseTemporalInt64OK is parseTemporalInt64 with an explicit success signal.
+//
+// The signal is the whole point at the comparison site. Its callers used to
+// test the RESULT — `if bi := parseTemporalInt64(ai, bs); bi != 0 || ai == 0`
+// — which reads "the string parsed, OR the number is zero", and the second
+// half is true of ANY unparseable string once the numeric side is zero. So
+// `0 = '0.0001'` was TRUE, and after the box-sniffing branch above it was
+// deleted, every `int_col = 'anything'` comparison against the row holding
+// ZERO went the same way: `k = '2'` matched k=0 as well as nothing else
+// (#504 review, B1). A parse either happened or it did not; that is what the
+// branch needs to know.
+func parseTemporalInt64OK(ref int64, s string) (int64, bool) {
 	if ref < 500_000 && ref > -500_000 {
 		// Reference is epoch days — parse the string as days too.
-		return parseDateToEpochDays(s)
+		return parseDateToEpochDaysOK(s)
 	}
-	return parseTimestampToEpochMs(s)
+	return parseTimestampToEpochMsOK(s)
 }
 
 // Deterministic temporal-string parsers are called row-by-row from
@@ -4663,7 +4701,7 @@ func compare(a, b any, op CmpOp) bool {
 	// Date strings ("YYYY-MM-DD") are exactly 10 chars with no time component.
 	if ai, ok := a.(int64); ok {
 		if bs, ok := b.(string); ok {
-			if bi := parseTemporalInt64(ai, bs); bi != 0 || ai == 0 {
+			if bi, ok := parseTemporalInt64OK(ai, bs); ok {
 				switch op {
 				case CmpEq:
 					return ai == bi
@@ -4683,7 +4721,7 @@ func compare(a, b any, op CmpOp) bool {
 	}
 	if as, ok := a.(string); ok {
 		if bi, ok := b.(int64); ok {
-			if ai := parseTemporalInt64(bi, as); ai != 0 || bi == 0 {
+			if ai, ok := parseTemporalInt64OK(bi, as); ok {
 				switch op {
 				case CmpEq:
 					return ai == bi

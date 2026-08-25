@@ -181,11 +181,11 @@ func refuseLiteralAmong(scope *colScope, args []plansql.Node) error {
 // predicate the runtime refusal uses, so the two cannot disagree about which
 // strings are numbers.
 func refuseLiteralAgainstColumn(scope *colScope, colSide, litSide plansql.Node) error {
-	ref, ok := colSide.(*plansql.ColRef)
+	ref, ok := unwrapParens(colSide).(*plansql.ColRef)
 	if !ok || !scope.isDecimalRef(ref) {
 		return nil
 	}
-	lit, ok := litSide.(*plansql.Lit)
+	lit, ok := unwrapParens(litSide).(*plansql.Lit)
 	if !ok || lit.Kind != plansql.LitString {
 		return nil
 	}
@@ -193,4 +193,22 @@ func refuseLiteralAgainstColumn(scope *colScope, colSide, litSide plansql.Node) 
 		return nil
 	}
 	return &expr.InvalidLiteralError{Input: lit.Value, DestType: "numeric"}
+}
+
+// unwrapParens strips redundant parentheses from an operand.
+//
+// `WHERE (d) = 'abc'` is the same query as `WHERE d = 'abc'` and PostgreSQL
+// refuses both, but the check matched a bare *ColRef only, so a pair of
+// parentheses put the refusal back where #517 found it: per row, and skipped
+// entirely over an empty table (#504 review, non-blocker b). Parentheses carry
+// no meaning past grouping, so a rule that reads operand SHAPES has to see
+// through them.
+func unwrapParens(n plansql.Node) plansql.Node {
+	for {
+		p, ok := n.(*plansql.ParenNode)
+		if !ok || p.Inner == nil {
+			return n
+		}
+		n = p.Inner
+	}
 }

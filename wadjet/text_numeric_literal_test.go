@@ -149,3 +149,76 @@ func TestTextColumnAgainstNumericLiteralAtBoxedSites(t *testing.T) {
 		})
 	}
 }
+
+// A BOOLEAN literal against a TEXT column is the same shape one type over, and
+// the same requirement: PostgreSQL refuses the pair (`text = boolean` is
+// 42883, verified live), so nothing outside the engine decides it — but one
+// predicate still has to get ONE answer.
+//
+// It did not. kernel.toString returned the EMPTY STRING for a bool, so the
+// vectorized filter compared every row against "" while the row-at-a-time
+// path compared against "true" (fmt.Sprint). Rendering it the way
+// PostgreSQL's own `boolean::text` does — "true"/"false", the single-letter
+// 't' being psql's display and not the cast — makes the two agree and makes
+// the answer explainable (#504 review, non-blocker c).
+func TestTextColumnAgainstBooleanLiteral(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "s", Type: parquet.TypeString, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "strbool", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	ing := db.NewIngester("strbool", schema, nil, ingest.Config{MaxBufferRows: 8})
+	if err := ing.Ingest(ctx, []map[string]any{
+		{"k": int64(1), "s": "true"},
+		{"k": int64(2), "s": "false"},
+		{"k": int64(3), "s": "t"},
+		{"k": int64(4), "s": ""},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// The row IDENTITY, not the count: this fixture holds both a "true" row
+	// and an empty-string row on purpose, so a COUNT cannot tell "matched the
+	// row spelled true" from "matched the row spelled nothing" — which is
+	// exactly the confusion the empty-string rendering created.
+	for _, tc := range []struct {
+		pred string
+		want int64 // the k of the single row that must match
+	}{
+		{"s = TRUE", 1},
+		{"s = FALSE", 2},
+		{"s = ''", 4},
+	} {
+		t.Run(tc.pred, func(t *testing.T) {
+			for _, sql := range []string{
+				"SELECT k FROM strbool WHERE " + tc.pred,
+				"SELECT k FROM strbool WHERE CASE WHEN " + tc.pred + " THEN 1 ELSE 0 END = 1",
+			} {
+				res, err := tmRun(ctx, db, sql)
+				if err != nil {
+					t.Fatalf("%s: %v", sql, err)
+				}
+				if len(res.Rows) != 1 {
+					t.Fatalf("%s\n  matched %d rows %v, want exactly row k=%d",
+						sql, len(res.Rows), res.Rows, tc.want)
+				}
+				got, _ := tmAsInt64(res.Rows[0]["k"])
+				if got != tc.want {
+					t.Errorf("%s\n  matched row k=%d, want k=%d — the two paths must "+
+						"match the SAME row, not merely the same number of them", sql, got, tc.want)
+				}
+			}
+		})
+	}
+}

@@ -1591,6 +1591,16 @@ func toString(v any) string {
 		return strconv.FormatFloat(s, 'g', -1, 64)
 	case float32:
 		return strconv.FormatFloat(float64(s), 'g', -1, 32)
+	case bool:
+		// "true"/"false", which is both PostgreSQL's own `boolean::text`
+		// (verified live — the single-letter 't' is psql's DISPLAY, not the
+		// cast) and what the row-at-a-time path's toString produces through
+		// fmt.Sprint. The two have to agree: PostgreSQL refuses `text =
+		// boolean` outright (42883), so nothing decides this pair for us
+		// except the requirement that one predicate get one answer, and the
+		// empty string this used to return made the kernel disagree with the
+		// row path on every row (#504 review, non-blocker c).
+		return strconv.FormatBool(s)
 	}
 	return ""
 }

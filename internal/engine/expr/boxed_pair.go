@@ -56,6 +56,14 @@ const (
 	// boxText: a genuine text value, which compares AS TEXT — bytewise,
 	// wadjet's collation (ADR-0012 item 5) — whatever its digits look like.
 	boxText
+	// boxQuoted: a QUOTED string literal, which is a different thing from a
+	// text value. PostgreSQL types such a literal as `unknown` and resolves
+	// it FROM THE OTHER OPERAND, so `k > '2'` over a BIGINT column is an
+	// integer comparison and `d = '12.75'` over a DECIMAL one is an exact
+	// numeric comparison — while `s > '2'` over a text column is the text
+	// comparison it looks like. Collapsing this into boxText is what dropped
+	// PostgreSQL's rule for the first two (#504 review, B1).
+	boxQuoted
 )
 
 // classifyOperand reports an operand's declared kind and whether that answer
@@ -101,7 +109,7 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		}
 		switch v.Val.(type) {
 		case string:
-			return boxText, true
+			return boxQuoted, true
 		case int64, int32, int, float64, float32:
 			return boxNumber, true
 		}
@@ -138,16 +146,31 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 // The join keeps DECIMAL over a plain number: an expression that answers
 // either a DECIMAL or an integer still only ever produces a STRING box when
 // the DECIMAL wins, so "a string from here is decimal text" stays true, which
-// is the only claim the kind makes. Any other disagreement — text against a
-// number — leaves the box ambiguous again and yields boxUnknown.
+// is the only claim the kind makes. A QUOTED literal alternative contributes
+// nothing and takes the others' type, the way PostgreSQL resolves an
+// unknown-typed literal from its context — `COALESCE(d, 'text')` is a numeric
+// expression there, not an ambiguous one. Any other disagreement leaves the
+// box ambiguous again and yields boxUnknown.
+//
+// A NULL alternative is SKIPPED outright. `COALESCE(d, NULL)` is a DECIMAL
+// expression, and reading the NULL literal as its own kind poisoned the join
+// to boxUnknown — which is how a DECIMAL column wrapped in a COALESCE started
+// comparing as rendered text (#504 review, B2). NULL never reaches a
+// comparison anyway: every caller short-circuits a nil operand first.
 func joinOperandKinds(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
 	kind, have, settled := boxUnknown, false, true
 	for _, a := range args {
 		if a == nil {
 			continue
 		}
+		if lit, ok := a.(*Lit); ok && lit.Val == nil {
+			continue
+		}
 		k, s := classifyOperand(a, b)
 		settled = settled && s
+		if k == boxQuoted {
+			continue // unknown-typed: takes whatever the others declare
+		}
 		if !have {
 			kind, have = k, true
 			continue
@@ -212,21 +235,59 @@ func newBoxedPair(left, right Expr) *boxedPair {
 	return &boxedPair{
 		left:  boxOperand{expr: left},
 		right: boxOperand{expr: right},
-		lText: litText(left), rText: litText(right),
+		lText: operandLitText(left), rText: operandLitText(right),
 	}
+}
+
+// operandLitText is a LITERAL operand's source text, for either spelling a
+// user can write a value in: the verbatim digits of a numeric literal
+// (`Lit.Text`, set by compileLit) or the contents of a quoted string. Empty
+// for every operand that is not a literal.
+//
+// One field for both because the rule that reads it is the same one —
+// PostgreSQL compares a `numeric` column against `12.75` and against `'12.75'`
+// identically — and the operand's KIND is what tells the two apart where it
+// matters (a quoted literal is unknown-typed and takes the column's type; a
+// numeric literal is already `numeric` and so makes a TEXT column's
+// comparison a text one, per ADR-0012 item 5).
+func operandLitText(e Expr) string {
+	lit, ok := e.(*Lit)
+	if !ok {
+		return ""
+	}
+	if lit.Text != "" {
+		return lit.Text
+	}
+	if s, ok := lit.Val.(string); ok {
+		return s
+	}
+	return ""
 }
 
 // pairApplies reports whether any rule below can fire for this KIND pair. It
 // depends only on the declarations, so a false answer is permanent.
 func pairApplies(lk, rk boxKind, lText, rText string) bool {
 	switch {
-	case lk == boxDecimal && (rk == boxDecimal || rk == boxNumber):
+	// A PROVEN DECIMAL operand applies against ANY other kind. It used to
+	// require the other side to be a number as well, which left a DECIMAL
+	// column comparing as RENDERED TEXT against every operand this file
+	// cannot classify — a scalar subquery, arithmetic, a CAST (#504 review,
+	// B2). Nothing is lost by widening it: orderByKinds' decimalTextOrder
+	// returns ok=false for a box that is not a number, so a genuine STRING
+	// column on the other side still falls through to the lexical comparison
+	// #504 settled.
+	case lk == boxDecimal || rk == boxDecimal:
 		return true
-	case rk == boxDecimal && lk == boxNumber:
-		return true
+	// A TEXT column against a NUMERIC literal: the text comparison (#504).
 	case lk == boxText && rk == boxNumber && rText != "":
 		return true
 	case rk == boxText && lk == boxNumber && lText != "":
+		return true
+	// A NUMBER column against a QUOTED literal: the numeric comparison,
+	// because PostgreSQL types the unknown literal from the column (B1).
+	case lk == boxNumber && rk == boxQuoted && rText != "":
+		return true
+	case rk == boxNumber && lk == boxQuoted && lText != "":
 		return true
 	}
 	return false
@@ -255,6 +316,10 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 //     ADR-0012 item 5 already records for unary minus over a quoted string.
 //     So the pair gets the STRING column's own rule instead of a reading of
 //     its digits, which is also what the vectorized kernel answers (#504).
+//   - A NUMBER against a QUOTED literal: the NUMBER's rule, because
+//     PostgreSQL types an unknown-typed literal from the operand it meets.
+//     `k > '2'` over a BIGINT column is `k > 2` there, not a text comparison
+//     and not a comparison against zero.
 func (p *boxedPair) order(b *batch.RecordBatch, lv, rv any) (int, bool) {
 	if p == nil || p.disarmed.Load() {
 		return 0, false
@@ -303,6 +368,20 @@ func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (int, bool) {
 		return strings.Compare(ls, rText), true
 	case rk == boxText && rIsStr && lText != "":
 		return strings.Compare(lText, rs), true
+	// A NUMBER column against a QUOTED literal. PostgreSQL types an
+	// unknown-typed literal from the operand it meets, so `k > '2'` over a
+	// BIGINT column is the integer comparison `k > 2` — exact against an
+	// integer, float64 against a float, which is what decimalTextOrder
+	// already states. A literal that names no number answers ok=false here
+	// and falls through; refusing it is #536's rule, not this one's.
+	case lk == boxNumber && rk == boxQuoted:
+		if c, ok := decimalTextOrder(lv, rText); ok {
+			return c, true
+		}
+	case rk == boxNumber && lk == boxQuoted:
+		if c, ok := decimalTextOrder(rv, lText); ok {
+			return -c, true
+		}
 	}
 	return 0, false
 }

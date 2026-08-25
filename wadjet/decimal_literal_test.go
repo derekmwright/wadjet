@@ -675,6 +675,14 @@ func TestDecimalLiteralRefusalIsPlanTime(t *testing.T) {
 			"d_2 IS DISTINCT FROM 'abc'",
 			"CASE d_2 WHEN 'abc' THEN 1 ELSE 0 END = 1",
 			"GREATEST(d_2, 'abc') = 'abc'",
+			// PARENTHESES carry no meaning past grouping, so a check that
+			// reads operand shapes has to see through them. Matching a bare
+			// ColRef only put the refusal straight back where #517 found it
+			// — per row, and skipped entirely here.
+			"(d_2) = 'abc'",
+			"d_2 = ('abc')",
+			"((d_2)) IS DISTINCT FROM (('abc'))",
+			"GREATEST((d_2), ('abc')) = 'abc'",
 		} {
 			sql := "SELECT COUNT(*) AS n FROM declit WHERE " + pred
 			_, err := tmRun(ctx, empty, sql)

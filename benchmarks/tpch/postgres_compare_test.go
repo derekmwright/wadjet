@@ -652,6 +652,108 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DecimalColPairMixedSimpleCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE d_key WHEN d_2 THEN 1 ELSE 0 END = 1`},
 	)
 
+	// A DECIMAL column against an operand whose DECLARATION the boxed
+	// comparison cannot read — a scalar subquery, arithmetic, a CAST, a
+	// COALESCE with a NULL or an untyped literal alternative. The binding
+	// used to require the OTHER side to be a number it could name, which
+	// left every one of these comparing the DECIMAL as its RENDERED TEXT
+	// (#504 review, B2). A proven DECIMAL operand now applies against
+	// anything, and the numeric reading simply declines when the other box
+	// is not a number.
+	out = append(out,
+		pgCase{name: "DecimalVsScalarSubqueryGt",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 > (SELECT MIN(d_key) FROM dec_probe)`},
+		pgCase{name: "DecimalVsScalarSubqueryLt",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 < (SELECT MAX(d_key) FROM dec_probe)`},
+		pgCase{name: "DecimalVsScalarSubqueryRows",
+			sql: `SELECT d_key FROM dec_probe WHERE d_2 > (SELECT MIN(d_key) FROM dec_probe) ORDER BY d_key`},
+		// Arithmetic and a CAST, beside the bare column they must agree with:
+		// `d_2 > d_key` and `d_2 > d_key + 0` are the same question.
+		pgCase{name: "DecimalVsBareIntColumn",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 > d_key`},
+		pgCase{name: "DecimalVsIntArithmetic",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 > d_key + 0`},
+		pgCase{name: "DecimalVsIntCast",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 > CAST(d_key AS BIGINT)`},
+		pgCase{name: "DecimalVsIntArithmeticRows",
+			sql: `SELECT d_key FROM dec_probe WHERE d_2 > d_key + 0 ORDER BY d_key`},
+		// COALESCE: a NULL alternative used to poison the operand's kind, and
+		// an untyped literal one still has to take the DECIMAL's type the way
+		// PostgreSQL resolves it.
+		pgCase{name: "DecimalInCoalesceWithNull",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE COALESCE(d_2, NULL) = 12.75`},
+		pgCase{name: "DecimalInCoalesceWithNullOrdering",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE COALESCE(d_2, NULL) > 12.75`},
+		pgCase{name: "DecimalInCoalesceTwoDecimals",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE COALESCE(d_2, d_4) > 12.75`},
+		pgCase{name: "DecimalInCaseResult",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE (CASE WHEN d_key > 100 THEN d_2 ELSE d_4 END) > 12.75`},
+		// A quoted numeric literal against a DECIMAL column, at the boxed
+		// sites: PostgreSQL types the unknown literal from the column, so
+		// these are exact numeric comparisons and not text ones.
+		pgCase{name: "DecimalVsQuotedNumericSimpleCase",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE d_4 WHEN '3.1875' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "DecimalVsQuotedNumericIsDistinctFrom",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 IS DISTINCT FROM '3.1875'`},
+		pgCase{name: "DecimalVsQuotedNumericGreatest",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_4, '3.1875') = '3.1875'`},
+	)
+
+	// A NUMBER column against a QUOTED numeric literal. PostgreSQL types the
+	// unknown-typed literal from the column — `d_key > '2'` is `d_key > 2`
+	// there, not a text comparison and not a comparison against zero.
+	//
+	// The CASE-wrapped forms are GATED: they take the row-at-a-time path,
+	// which follows that rule. The bare forms are PINNED: they take the
+	// vectorized filter, whose integer and float arms read ANY string
+	// constant as the type's ZERO, so `d_key > '2'` selects every row above
+	// ZERO. That is #536, pre-existing and unchanged by this round; the pin
+	// fails when it is fixed.
+	const quotedNumericPin = pgBugWadjet + ` the vectorized filter reads a quoted numeric constant as the ` +
+		`column type's ZERO, so this asks "> 0" instead of "> 2". The row-at-a-time path answers ` +
+		`PostgreSQL's number (the CASE-wrapped entries beside this one gate it).`
+	out = append(out,
+		pgCase{name: "IntColumnVsQuotedNumericGtInCase",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_key > '2' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "IntColumnVsQuotedNumericGeInCase",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_key >= '2' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "IntColumnVsQuotedNumericLtInCase",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_key < '2' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "IntColumnVsQuotedNumericEqInCase",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_key = '2' THEN 1 ELSE 0 END = 1`},
+		// The zero row is the one the old temporal-epoch guard matched for
+		// ANY unparseable string once the numeric side was zero.
+		pgCase{name: "IntColumnVsQuotedNumericZeroInCase",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_key = '0' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "IntColumnVsQuotedNumericInListInCase",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_key IN ('2','3') THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "IntColumnVsQuotedNumericBetweenInCase",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_key BETWEEN '2' AND '4' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "IntColumnVsQuotedNumericGreatest",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_key, '2') = d_key`},
+		pgCase{name: "IntColumnVsQuotedNumericSimpleCase",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE d_key WHEN '2' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "IntColumnVsQuotedNumericIsDistinctFrom",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key IS DISTINCT FROM '2'`},
+		// A FLOAT column, whose rule is the float comparison rather than the
+		// exact one.
+		pgCase{name: "FloatColumnVsQuotedNumericInCase",
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE CASE WHEN l_discount > '0.05' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "FloatColumnVsQuotedNumericEqInCase",
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE CASE WHEN l_discount = '0.05' THEN 1 ELSE 0 END = 1`},
+		// The scan path, pinned.
+		pgCase{name: "IntColumnVsQuotedNumericGt",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key > '2'`, knownBug: quotedNumericPin, issue: "#536"},
+		pgCase{name: "IntColumnVsQuotedNumericLt",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key < '2'`, knownBug: quotedNumericPin, issue: "#536"},
+		pgCase{name: "IntColumnVsQuotedNumericInList",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key IN ('2','3')`, knownBug: quotedNumericPin, issue: "#536"},
+		pgCase{name: "IntColumnVsQuotedNumericBetween",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key BETWEEN '2' AND '4'`, knownBug: quotedNumericPin, issue: "#536"},
+		pgCase{name: "FloatColumnVsQuotedNumericGt",
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_discount > '0.05'`, knownBug: quotedNumericPin, issue: "#536"},
+	)
+
 	// The comparison sites #452's binding did not reach (#465). A simple
 	// CASE's WHEN, IS [NOT] DISTINCT FROM and GREATEST/LEAST all compared
 	// through the boxed path, where the column is rendered TEXT and the

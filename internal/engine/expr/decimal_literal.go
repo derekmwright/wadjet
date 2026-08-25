@@ -263,7 +263,12 @@ func armExtremumArms(argExprs []Expr) *extremumArms {
 	}
 	for i, e := range argExprs {
 		a.ops[i].expr = e
-		a.texts[i] = litText(e)
+		// operandLitText, not litText: a QUOTED literal argument is
+		// unknown-typed and takes its neighbour's type, so `GREATEST(k, '2')`
+		// is the integer comparison PostgreSQL makes it. litText saw only
+		// numeric literals, which left the quoted spelling with no text and
+		// therefore no rule.
+		a.texts[i] = operandLitText(e)
 	}
 	return a
 }

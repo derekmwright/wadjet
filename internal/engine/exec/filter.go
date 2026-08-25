@@ -720,10 +720,18 @@ func (f *InFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Rec
 
 func (f *InFilter) Close() error { return nil }
 
-// kernelValues is Values with each member's exact literal text substituted for
-// a DECIMAL column (#452); the slice is unchanged for every other type.
+// kernelValues is Values with each member's exact literal source text
+// substituted for the two column types whose kernels take their constant as
+// TEXT: a DECIMAL (#452) and a STRING (#504). Unchanged for every other type,
+// which decimalLitValue decides.
+//
+// It used to return early for anything but a DECIMAL, so `s IN (2.00)` over a
+// STRING column never reached the substitution that `s = 2.00` did: the
+// numeric box became the empty string and the list matched nothing, while the
+// equality matched one row. `x IN (v)` is `x = v` chained with OR and cannot
+// answer differently (#504 review, non-blocker a).
 func (f *InFilter) kernelValues(typ batch.TypeID) []any {
-	if typ != batch.TypeDecimal || len(f.ValueTexts) != len(f.Values) {
+	if len(f.ValueTexts) != len(f.Values) {
 		return f.Values
 	}
 	out := make([]any, len(f.Values))

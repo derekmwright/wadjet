@@ -812,6 +812,12 @@ func TestToString(t *testing.T) {
 		{1.5, "1.5"},
 		{float64(-0.25), "-0.25"},
 		{float32(2.5), "2.5"},
+		// A BOOL renders the way PostgreSQL's boolean::text does, which is
+		// also what the row-at-a-time path's fmt.Sprint produces — the two
+		// paths must answer one predicate one way, and "" made them differ
+		// on every row.
+		{true, "true"},
+		{false, "false"},
 		// Not a scalar the comparison can render: still the empty string,
 		// which the caller's own arm (a nil kernel, or a refusal) handles.
 		{[]byte("x"), ""},
