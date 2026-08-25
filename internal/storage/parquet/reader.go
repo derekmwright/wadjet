@@ -22,6 +22,21 @@ type ColumnStats struct {
 	NullCount int64
 }
 
+// CidrInetBound is a CIDR row-group MinValue/MaxValue RowGroupStats has
+// CONFIRMED is a PostgreSQL inet-order sort key (kernel.CidrSortKey's
+// encoding, duplicated in this package as cidrStatsSortKey) rather than the
+// column's raw address TEXT (#523). It is a distinct type, not a plain
+// string, specifically so a consumer's comparison cannot mix the two by
+// accident: kernel.StatsDomainValue's CIDR literal converts to this same
+// type, and a generic string comparator that special-cases it (see
+// scan.compareValuesOK) refuses to compare one against an ordinary string —
+// which is what an UNCONFIRMED file's untouched TEXT bound still is. That
+// refusal is what keeps kernel.StatsDomainValue's conversion unconditional
+// (every valid CIDR literal converts) safe even for a row group whose file
+// this reader cannot confirm is CIDR at all, or is CIDR but pre-#523: the
+// type system, not a per-file heuristic, is what stops the comparison.
+type CidrInetBound string
+
 // Reader reads rows from a Parquet file.
 type Reader struct {
 	fr     *FileReader

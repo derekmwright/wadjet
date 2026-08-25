@@ -388,3 +388,67 @@ func BenchmarkFooterDecode(b *testing.B) {
 		})
 	}
 }
+
+// TestFooterCacheRestoresDeclaredSchemaType pins a bug #523 found rather
+// than caused: decodeFooter (the cached path every OpenFileReader*Cached
+// constructor shares) built its Schema from the bare parquet inference,
+// schemaFromTree, instead of readerSchema — skipping the DeclaredSchemaKey
+// overlay every UNCACHED constructor applies. A cached reader's Schema()
+// therefore answered TypeString for a CIDR column and the bare
+// INT64/BYTE_ARRAY inference for IPv4/IPv6/MAC/UUID/Bytes/Port/Protocol/
+// Duration — invisible for nine types until something keyed a DECISION on
+// the declared type rather than merely rendering it, which #523's CIDR
+// row-group-stats conversion was the first to do: a cached reader silently
+// withheld pruning it should have engaged. footerFixture's all-int64
+// columns cannot exercise this — TypeInt64 has its own parquet annotation
+// and is immune to the overlay either way — so this uses a schema built
+// from the two representative classes: CIDR (declaredOverlayUTF8Types,
+// #523's own case) and IPv4 (declaredOverlayTypes, the original #396 set).
+func TestFooterCacheRestoresDeclaredSchemaType(t *testing.T) {
+	withCleanFooterCache(t, true)
+	schema := Schema{Columns: []Column{
+		{Name: "id", Type: TypeInt64},
+		{Name: "c_cidr", Type: TypeCIDR},
+		{Name: "c_ipv4", Type: TypeIPv4},
+	}}
+	var buf bytes.Buffer
+	w, err := NewWriter(&buf, schema, DefaultWriterConfig())
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	rows := []map[string]any{{"id": int64(1), "c_cidr": "10.0.0.0/8", "c_ipv4": "10.0.0.1"}}
+	if err := w.WriteRows(rows); err != nil {
+		t.Fatalf("WriteRows: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	data := buf.Bytes()
+
+	uncached, err := OpenFileReaderFromBytes(data)
+	if err != nil {
+		t.Fatalf("OpenFileReaderFromBytes: %v", err)
+	}
+	cached, err := OpenFileReaderFromBytesCached(data, "mem:1/test/declared.parquet#9@9")
+	if err != nil {
+		t.Fatalf("OpenFileReaderFromBytesCached: %v", err)
+	}
+
+	wantSchema, gotSchema := uncached.Schema(), cached.Schema()
+	for _, name := range []string{"c_cidr", "c_ipv4"} {
+		wantIdx := wantSchema.ColumnIndex(name)
+		gotIdx := gotSchema.ColumnIndex(name)
+		if wantIdx < 0 || gotIdx < 0 {
+			t.Fatalf("column %q missing (uncached idx %d, cached idx %d)", name, wantIdx, gotIdx)
+		}
+		want := wantSchema.Columns[wantIdx].Type
+		got := gotSchema.Columns[gotIdx].Type
+		if got != want {
+			t.Errorf("cached reader's declared type for %q = %v, want %v (matching the uncached reader)",
+				name, got, want)
+		}
+	}
+	if got := cached.declaredColumnType("c_cidr"); got != TypeCIDR {
+		t.Errorf("cached.declaredColumnType(c_cidr) = %v, want TypeCIDR", got)
+	}
+}

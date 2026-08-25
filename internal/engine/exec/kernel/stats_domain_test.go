@@ -13,6 +13,11 @@ import (
 // raw" is exactly how #442 happened. This asserts the list is complete, so a
 // 23rd type cannot inherit the old default by omission.
 func TestStatsDomainValueCoversEveryType(t *testing.T) {
+	cidrKeyStr, cidrOK := CidrSortKey("10.0.0.0/8")
+	if !cidrOK {
+		t.Fatal("CidrSortKey(\"10.0.0.0/8\") ok = false, want true")
+	}
+	cidrKey := parquet.CidrInetBound(cidrKeyStr)
 	// A literal of the shape a query carries for each type, and whether the
 	// prune layer may use it.
 	cases := map[batch.TypeID]struct {
@@ -28,10 +33,12 @@ func TestStatsDomainValueCoversEveryType(t *testing.T) {
 		batch.TypeString:    {"abc", "abc", true},
 		batch.TypeBytes:     {[]byte("abc"), "abc", true},
 		batch.TypeTimestamp: {int64(1700000000000), int64(1700000000000), true},
-		// CIDR is WITHHELD: the footer bounds are the address TEXT's extremes
-		// and the engine orders CIDR by PostgreSQL's inet order, so a prune
-		// reading those bounds deletes rows the filter keeps (#492).
-		batch.TypeCIDR:     {"10.0.0.0/8", nil, false},
+		// CIDR converts to its sort key (#523): parquet.RowGroupStats hands
+		// back a bound in the same order for a file whose writer promised
+		// every CIDR value parsed, and withholds otherwise — see
+		// TestStatsDomainValueAgreesWithTheFilterKernel and
+		// internal/storage/parquet's CidrStatsOrderKey tests.
+		batch.TypeCIDR:     {"10.0.0.0/8", cidrKey, true},
 		batch.TypePort:     {int64(443), int64(443), true},
 		batch.TypeProtocol: {int64(6), int64(6), true},
 		batch.TypeDuration: {int64(1000), int64(1000), true},
@@ -123,6 +130,8 @@ func TestStatsDomainValueRefusesUnparseableLiterals(t *testing.T) {
 		{batch.TypeMAC, "zz:zz"},
 		{batch.TypeDate, "not a date"},
 		{batch.TypeBytes, 5},
+		{batch.TypeCIDR, "not a cidr"},
+		{batch.TypeCIDR, int64(5)},
 	} {
 		if got, ok := StatsDomainValue(tc.typ, 0, tc.lit); ok {
 			t.Errorf("%s: %#v was accepted as %#v, want a refusal", tc.typ, tc.lit, got)
@@ -153,6 +162,11 @@ func TestStatsDomainWithholdsAV4LiteralAgainstIPv6(t *testing.T) {
 func TestStatsDomainValueAgreesWithTheFilterKernel(t *testing.T) {
 	if got, _ := StatsDomainValue(batch.TypeIPv6, 0, "2001:db8::5dc"); got != mustIPv6Key("2001:db8::5dc") {
 		t.Error("the IPv6 stats value is not the kernel's IPv6 literal")
+	}
+	if got, ok := StatsDomainValue(batch.TypeCIDR, 0, "10.0.0.0/16"); !ok {
+		t.Error("the CIDR literal was withheld, want a conversion")
+	} else if want, _ := CidrSortKey("10.0.0.0/16"); got != parquet.CidrInetBound(want) {
+		t.Error("the CIDR stats value is not the kernel's CidrSortKey, boxed as parquet.CidrInetBound")
 	}
 	wantUUID, _ := parseUUIDToRawString("00000000-0000-4000-8000-0000000005dc")
 	if got, _ := StatsDomainValue(batch.TypeUUID, 0, "00000000-0000-4000-8000-0000000005dc"); got != wantUUID {

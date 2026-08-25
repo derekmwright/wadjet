@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // StatsDomainValue converts a SQL literal into the representation a column's
@@ -54,22 +55,35 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 		batch.TypeDuration, batch.TypeTimestamp:
 		return v, true
 
-	// CIDR is WITHHELD. Its physical value is the address TEXT and its footer
-	// bounds are that text's min/max, but the engine no longer ORDERS it that
-	// way: ResolveFilterKernel's TypeCIDR arm compares PostgreSQL's inet order
-	// (CidrSortKey), where "9.0.0.0/8" is below "10.0.0.0/8" and the text is
-	// above it. A prune reading the raw bounds therefore deletes row groups
-	// the filter would have kept — `WHERE c_cidr < '10.0.0.0/16'` answered 0
-	// rows with the prune on and 2 with it off (ADR-0018 §the two-input rule).
+	// CIDR converts to its sort key, boxed as parquet.CidrInetBound rather
+	// than a plain string (#523): parquet.RowGroupStats hands back a bound
+	// in that SAME boxed type — the row-group's inet-order min/max,
+	// re-keyed from the TEXT the writer chose using that order — for a file
+	// whose footer promises every CIDR value parsed (parquet.
+	// CidrStatsOrderKey). An older file, or one this reader cannot even
+	// confirm is CIDR, leaves MinValue/MaxValue as plain strings (raw TEXT,
+	// exactly as before #523) or withholds them entirely, and
+	// scan.compareValuesOK refuses to compare a CidrInetBound against a
+	// plain string. That refusal — not a per-file check here, which this
+	// function has no way to make — is what lets this conversion return
+	// ok=true unconditionally for any address literal: pruning safely
+	// declines wherever the bound's box does not prove it is comparable,
+	// the same way a NULL-typed comparison declines rather than guesses
+	// (ADR-0018 §6).
 	//
-	// Re-keying the BOUNDS instead is not available: the min/max are the
-	// text-order extremes of the group, and the inet-order extremes are two
-	// different rows. Recovering them needs a statistic the file does not
-	// carry, which is what "no conversion exists" means here. Restoring the
-	// prune for CIDR means writing an inet-ordered bound at WRITE time
-	// (#523), not converting harder at read time.
+	// A literal that is not an address at all withholds exactly as before —
+	// pruning does not get to decide that; the query does (exec.
+	// networkConstError raises 22P02 for the same literal).
 	case batch.TypeCIDR:
-		return nil, false
+		s, ok := v.(string)
+		if !ok {
+			return nil, false
+		}
+		key, ok := CidrSortKey(s)
+		if !ok {
+			return nil, false
+		}
+		return parquet.CidrInetBound(key), true
 
 	// BYTES compares by bytes and a []byte literal has to become the string
 	// the stats decode to.

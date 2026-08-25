@@ -10,6 +10,7 @@ import (
 	"net"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/klauspost/compress/gzip"
@@ -91,6 +92,18 @@ type leafBuffer struct {
 	minF32, maxF32     float32
 	minF64, maxF64     float64
 	minBytes, maxBytes []byte
+
+	// minCidrKey/maxCidrKey are the sort keys (cidrStatsSortKey) of whichever
+	// TEXT values currently hold minBytes/maxBytes, for a TypeCIDR leaf only.
+	// Reset alongside the stats they compare, per row group.
+	minCidrKey, maxCidrKey string
+	// cidrKeyFailed latches true the first time a TypeCIDR value in this
+	// leaf does not parse as an address, ACROSS THE WHOLE FILE — unlike the
+	// stats above, reset() must not clear it: a row group that parsed fine
+	// does not undo an earlier row group's unparseable value, because
+	// writeFooter's CidrStatsOrderKey flag is a promise about every CIDR
+	// value in the FILE, not just the current row group's.
+	cidrKeyFailed bool
 }
 
 // NewNativeWriter creates a Parquet writer that writes to the given io.Writer.
@@ -1150,16 +1163,40 @@ func (nw *NativeWriter) writeFooter() error {
 		return fmt.Errorf("encoding declared schema for the footer: %w", err)
 	}
 
+	kv := []KeyValue{
+		{Key: "wadjet.version", Value: "0.1.0"},
+		{Key: DeclaredSchemaKey, Value: string(declared)},
+	}
+	// CidrStatsOrderKey is a promise about EVERY CIDR value in the file, not
+	// just the current row group's, so it is decided once here from every
+	// leaf's cidrKeyFailed rather than per row group. Its absence — an old
+	// file, or a value somewhere that did not parse as an address — is what
+	// tells a reader the min/max it is holding for a CIDR column, if any,
+	// are the column's raw TEXT byte-order extremes and must be withheld
+	// rather than trusted for pruning (#523). Written only when the schema
+	// actually has a CIDR column, so a file with none is byte-for-byte
+	// unchanged.
+	hasCidr, cidrStatsInet := false, true
+	for i := range nw.leafBufs {
+		if nw.leafBufs[i].col.Type == TypeCIDR {
+			hasCidr = true
+			if nw.leafBufs[i].cidrKeyFailed {
+				cidrStatsInet = false
+				break
+			}
+		}
+	}
+	if hasCidr && cidrStatsInet {
+		kv = append(kv, KeyValue{Key: CidrStatsOrderKey, Value: CidrStatsOrderInet})
+	}
+
 	md := &FileMetaData{
-		Version:   1,
-		Schema:    schemaElements,
-		NumRows:   totalRows,
-		RowGroups: nw.rowGroups,
-		CreatedBy: "wadjet (native writer)",
-		KeyValueMetadata: []KeyValue{
-			{Key: "wadjet.version", Value: "0.1.0"},
-			{Key: DeclaredSchemaKey, Value: string(declared)},
-		},
+		Version:          1,
+		Schema:           schemaElements,
+		NumRows:          totalRows,
+		RowGroups:        nw.rowGroups,
+		CreatedBy:        "wadjet (native writer)",
+		KeyValueMetadata: kv,
 	}
 
 	footerBytes := EncodeFileMetaData(md)
@@ -1496,6 +1533,9 @@ func (lb *leafBuffer) reset() {
 	lb.hasStats = false
 	lb.minBytes = nil
 	lb.maxBytes = nil
+	lb.minCidrKey = ""
+	lb.maxCidrKey = ""
+	// cidrKeyFailed is deliberately NOT reset here — see its doc.
 }
 
 func (lb *leafBuffer) updateStatsI32(v int32) {
@@ -1547,6 +1587,10 @@ func (lb *leafBuffer) updateStatsF64(v float64) {
 }
 
 func (lb *leafBuffer) updateStatsBytes(b []byte) {
+	if lb.col.Type == TypeCIDR {
+		lb.updateStatsCIDR(b)
+		return
+	}
 	if !lb.hasStats {
 		lb.minBytes = append([]byte(nil), b...)
 		lb.maxBytes = append([]byte(nil), b...)
@@ -1559,6 +1603,96 @@ func (lb *leafBuffer) updateStatsBytes(b []byte) {
 			lb.maxBytes = append(lb.maxBytes[:0], b...)
 		}
 	}
+}
+
+// updateStatsCIDR tracks a CIDR leaf's row-group min/max by PostgreSQL's
+// inet order (family, common bits under the smaller mask, mask length, full
+// address — kernel.CidrSortKey's ordering) rather than the text's own byte
+// order (#523, ADR-0018 §6: the footer previously held the text-order
+// extremes, which a reader compares in the WRONG order against the engine's
+// inet-ordered literal, and #492 withheld CIDR from pruning entirely rather
+// than answer wrong). The stored minBytes/maxBytes stay the WINNING ROWS'
+// TEXT — CIDR's physical storage is unchanged — only the comparison used to
+// pick them changes; the reader re-derives the sort key from that text when
+// writeFooter's CidrStatsOrderKey flag says every value in the file parsed.
+//
+// A value that fails to parse as an address latches cidrKeyFailed (which
+// suppresses that flag for the whole file, see its doc) and falls back to
+// the raw byte-order comparison above so the leaf still produces SOME bound
+// rather than none — a bound the reader will withhold using anyway, once it
+// sees the missing flag, so its exact order does not matter.
+func (lb *leafBuffer) updateStatsCIDR(b []byte) {
+	key, ok := cidrStatsSortKey(string(b))
+	if !ok {
+		lb.cidrKeyFailed = true
+		if !lb.hasStats {
+			lb.minBytes = append([]byte(nil), b...)
+			lb.maxBytes = append([]byte(nil), b...)
+			lb.hasStats = true
+		} else {
+			if bytes.Compare(b, lb.minBytes) < 0 {
+				lb.minBytes = append(lb.minBytes[:0], b...)
+			}
+			if bytes.Compare(b, lb.maxBytes) > 0 {
+				lb.maxBytes = append(lb.maxBytes[:0], b...)
+			}
+		}
+		return
+	}
+	if !lb.hasStats {
+		lb.minBytes = append([]byte(nil), b...)
+		lb.maxBytes = append([]byte(nil), b...)
+		lb.minCidrKey = key
+		lb.maxCidrKey = key
+		lb.hasStats = true
+		return
+	}
+	if key < lb.minCidrKey {
+		lb.minBytes = append(lb.minBytes[:0], b...)
+		lb.minCidrKey = key
+	}
+	if key > lb.maxCidrKey {
+		lb.maxBytes = append(lb.maxBytes[:0], b...)
+		lb.maxCidrKey = key
+	}
+}
+
+// cidrStatsSortKey is kernel.CidrSortKey, duplicated here rather than
+// imported: internal/storage/parquet sits BELOW internal/engine/exec/kernel
+// in the import graph (kernel imports internal/engine/batch, which imports
+// this package), so this package cannot import kernel without a cycle. Any
+// change to CidrSortKey's encoding must be mirrored here — the two are
+// covered by the same fixture in TestCidrStatsSortKeyMatchesKernel.
+func cidrStatsSortKey(s string) (string, bool) {
+	t := s
+	if !strings.ContainsRune(t, '/') {
+		if strings.ContainsRune(t, ':') {
+			t += "/128"
+		} else {
+			t += "/32"
+		}
+	}
+	ip, ipnet, err := net.ParseCIDR(t)
+	if err != nil || ipnet == nil {
+		return "", false
+	}
+	ones, bits := ipnet.Mask.Size()
+	var full, masked net.IP
+	var family byte
+	if bits == net.IPv4len*8 {
+		family, full, masked = 0x04, ip.To4(), ipnet.IP.To4()
+	} else {
+		family, full, masked = 0x06, ip.To16(), ipnet.IP.To16()
+	}
+	if full == nil || masked == nil {
+		return "", false
+	}
+	buf := make([]byte, 0, 2+2*len(full))
+	buf = append(buf, family)
+	buf = append(buf, masked...)
+	buf = append(buf, byte(ones))
+	buf = append(buf, full...)
+	return string(buf), true
 }
 
 func (lb *leafBuffer) buildStats() *Statistics {

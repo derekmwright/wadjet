@@ -314,11 +314,75 @@ func (f *FileReader) RowGroupStats(index int) RowGroupStats {
 					cs.MaxValue = TimestampToEngineMillis(mx, div)
 				}
 			}
+
+			// A CIDR column's stored bounds are the address TEXT's, and
+			// the engine compares PostgreSQL's inet order — the same
+			// mismatch TimestampDivisorFromSchemaNode resolves for a unit,
+			// resolved here for an ORDER (#523, ADR-0018 §6). Only a file
+			// whose writer promised every CIDR value parsed
+			// (CidrStatsOrderKey) may have its min/max re-keyed into that
+			// order; every other file — old, or one this reader cannot
+			// even identify as CIDR because it carries no declared-schema
+			// blob — keeps cs as statsToNative already built it, which for
+			// a recognized CIDR column without the promise is withheld
+			// below rather than left comparable-looking but wrong.
+			if f.declaredColumnType(colName) == TypeCIDR {
+				if !f.cidrStatsAreInetOrder() {
+					cs = ColumnStats{}
+				} else if mn, ok := cs.MinValue.(string); ok {
+					mnKey, okMn := cidrStatsSortKey(mn)
+					mx, okMx0 := cs.MaxValue.(string)
+					var mxKey string
+					if okMx0 {
+						mxKey, okMx0 = cidrStatsSortKey(mx)
+					}
+					if okMn && okMx0 {
+						cs.MinValue, cs.MaxValue = CidrInetBound(mnKey), CidrInetBound(mxKey)
+					} else {
+						// The writer promised every value in the file
+						// parsed; a footer that still fails to re-key is
+						// corrupt or foreign rather than merely old, and
+						// the safe answer is the same as for an old file.
+						cs = ColumnStats{NullCount: cs.NullCount}
+					}
+				}
+			}
 		}
 		stats.Columns[colName] = cs
 	}
 
 	return stats
+}
+
+// declaredColumnType returns name's DECLARED type per the file's own schema
+// (f.schema, which restores TypeCIDR from DeclaredSchemaKey per
+// declaredOverlayUTF8Types), or TypeID(0) if the column is unknown. A file
+// with no declared-schema blob — never written by this writer, or older
+// than #396 — reports whatever the bare parquet annotation infers, which
+// for a UTF8 byte-array column is TypeString, never TypeCIDR: this is a
+// query against the FILE's own self-description, not the caller's catalog,
+// so a CIDR column a file cannot identify as its own keeps its pre-#523
+// behavior rather than risk comparing a bound this reader never confirmed
+// is in the right order.
+func (f *FileReader) declaredColumnType(name string) TypeID {
+	if i := f.schema.ColumnIndex(name); i >= 0 {
+		return f.schema.Columns[i].Type
+	}
+	return TypeID(0)
+}
+
+// cidrStatsAreInetOrder reports whether this file's writer promised every
+// CIDR value it wrote parsed as an address (CidrStatsOrderKey).
+func (f *FileReader) cidrStatsAreInetOrder() bool {
+	if f.meta == nil {
+		return false
+	}
+	for i := range f.meta.KeyValueMetadata {
+		if f.meta.KeyValueMetadata[i].Key == CidrStatsOrderKey {
+			return f.meta.KeyValueMetadata[i].Value == CidrStatsOrderInet
+		}
+	}
+	return false
 }
 
 // statsToNative converts raw statistics bytes to a Go native type.
@@ -622,6 +686,23 @@ func (r *bytesReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // Those eight are also the ONLY types the read side takes from this blob:
 // see declaredOverlayTypes for why an annotated leaf ignores it.
 const DeclaredSchemaKey = "wadjet.schema"
+
+// CidrStatsOrderKey is the footer KeyValueMetadata key a writer stamps with
+// CidrStatsOrderInet once every CIDR value it wrote to this file parsed as
+// an address, meaning every CIDR leaf's min/max are the row-group's true
+// PostgreSQL inet-order extremes (kernel.CidrSortKey's ordering) rather
+// than the column's raw TEXT byte-order ones.
+//
+// Its absence — an older file, or a file with even one unparseable CIDR
+// value — means a CIDR column's min/max, if the footer has any, are in the
+// wrong order for the engine's comparisons (#492, ADR-0018 §6) and
+// RowGroupStats withholds them rather than converting a bound it cannot
+// repair (#523). This is a promise about the WHOLE FILE, not one row
+// group: a file with several CIDR row groups gets one flag or none.
+const CidrStatsOrderKey = "wadjet.cidr_stats_order"
+
+// CidrStatsOrderInet is CidrStatsOrderKey's one defined value.
+const CidrStatsOrderInet = "inet"
 
 // readerSchema is the schema a FileReader reports: the one inferred from the
 // parquet schema tree, with the declared types restored from

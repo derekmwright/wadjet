@@ -275,7 +275,20 @@ func decodeFooter(r io.ReaderAt, size int64, validateHeader bool) (*footerEntry,
 		}
 	}
 	root, leaves := BuildSchemaTree(meta.Schema)
-	schema := schemaFromTree(root, leaves)
+	// readerSchema, not the bare schemaFromTree: every OTHER FileReader
+	// constructor (OpenFileReader, OpenFileReaderMetadata, OpenFileReaderAt,
+	// OpenFileReaderFromBytes) restores the DECLARED type from
+	// DeclaredSchemaKey before handing out a Schema, and this cached path
+	// had not — nine types (IPv4, IPv6, MAC, UUID, Bytes, Port, Protocol,
+	// Duration, CIDR) came back as their bare parquet inference instead of
+	// their declared identity for any reader built through the footer
+	// cache. Harmless as long as nothing keyed a DECISION on the declared
+	// type here; #523 is the first thing that does (a CIDR column's
+	// row-group stats are trusted for pruning only when RowGroupStats can
+	// confirm the column IS CIDR), so a cached reader silently withheld
+	// pruning it should have engaged. Every consumer of this cache gets the
+	// fix for free, not just the CIDR case that found it.
+	schema := readerSchema(root, leaves, meta.KeyValueMetadata)
 	// Clip the two slices handed out by value so a consumer's append can
 	// never write into storage shared with other readers (safety note 2).
 	leaves = leaves[:len(leaves):len(leaves)]

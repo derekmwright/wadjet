@@ -259,6 +259,69 @@ stops being the file's, the answer is to withhold — or to write a bound in
 the engine's order at WRITE time, filed as #523 — never to convert harder at
 read time.
 
+### 7. Restoring a withheld prune needs a type-safe bound, not a write-time fix alone
+
+(Added 2026-08-25, closing #523.) §6 named the fix and filed it; this is what
+shipped, and the reason the write-time fix alone was not enough.
+
+`leafBuffer.updateStatsCIDR` (`internal/storage/parquet/file_writer.go`) now
+tracks a CIDR leaf's row-group min/max by comparing each value's inet-order
+sort key (a package-local copy of `kernel.CidrSortKey` — this package sits
+BELOW `internal/engine/exec/kernel` in the import graph and cannot import it)
+rather than the address text's own bytes, while the STORED bound stays the
+winning rows' TEXT — the physical column is unchanged. A file's footer
+carries `CidrStatsOrderKey=inet` only when EVERY CIDR value in the file
+parsed as an address; one that does not suppresses the flag for the whole
+file, and `RowGroupStats` treats that file exactly like one written before
+#523 — this is a promise about the FILE, not a per-row-group hedge.
+
+That much makes a NEW file's own bounds trustworthy. It does not make
+`kernel.StatsDomainValue`'s conversion safe to turn on unconditionally,
+because that conversion runs ONCE per query, before any specific file's
+footer has been examined — the per-file "is this bound really in inet
+order" answer only exists later, inside `RowGroupStats` for one row group
+at a time. Making the literal's conversion depend on a fact only a later,
+per-file step can know produced the two real regressions the fix's own
+gates caught: `TestTypeMatrixPruningNeverChangesTheAnswer/c_cidr_*`, where
+the type-matrix table's rows genuinely span the shapes #492 first
+diagnosed, wrongly pruned to zero because a stale FOOTER CACHE entry
+(`decodeFooter`, a second, independent bug this arc also found and fixed —
+see below) still reported the column as `TypeString`; and
+`TestTypeMatrixTwoPathWithoutDeclaredSchemaFooter`, a file with no declared-
+schema blob at all, where the reader cannot identify the column as CIDR by
+construction and so cannot have converted its bound either.
+
+The fix is a distinct Go type, not a per-file check threaded back into
+`StatsDomainValue`. `parquet.CidrInetBound` (`internal/storage/parquet/
+reader.go`) is what `RowGroupStats` boxes a bound in when — and only when —
+it has confirmed both facts: the column is declared CIDR (`DeclaredSchemaKey`
+restores that identity per `declaredOverlayUTF8Types`, exactly as it always
+has) and the file's `CidrStatsOrderKey` flag is `inet`. `kernel.
+StatsDomainValue`'s CIDR literal converts to the SAME boxed type. Every other
+case — no declared schema, no flag, a value that failed to re-key — leaves
+`MinValue`/`MaxValue` as a plain `string` (raw text) or withholds them
+outright. `scan.compareValuesOK` special-cases `CidrInetBound`: two of them
+compare as their own bytes, but a `CidrInetBound` against a plain `string`
+— or anything else — refuses (`ok=false`), which is `CanPruneRowGroup`'s
+existing "not comparable, don't prune" path. The type system is what
+guarantees the mismatch can never reach a byte comparison, not a discipline
+about which functions are allowed to call which — the same shape as this
+ADR's DECIMAL rule (§4): a value's BOX states what it is safe to compare
+against, and the comparator trusts the box instead of re-deriving the
+per-file fact that produced it.
+
+The stale-footer-cache defect this arc also fixed:
+`internal/storage/parquet/footer_cache.go`'s `decodeFooter` — the path every
+`OpenFileReader*Cached` constructor shares — built its `Schema` from the bare
+parquet inference (`schemaFromTree`) instead of `readerSchema`, skipping the
+`DeclaredSchemaKey` overlay every UNCACHED constructor applies. That silently
+cost the same nine types §6's compatibility note lists (IPv4, IPv6, MAC,
+UUID, Bytes, Port, Protocol, Duration, and now CIDR) their declared identity
+for any reader built through the process footer cache — invisible until
+something keyed a pruning DECISION on it, which nothing did before #523.
+`TestFooterCacheRestoresDeclaredSchemaType` pins it directly; the type-safe
+box above is what stopped it from being a silent wrong answer a second time.
+
 ## Consequences
 
 - Files that were read before and are refused now: a footer whose row groups

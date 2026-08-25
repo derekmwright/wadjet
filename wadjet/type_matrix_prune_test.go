@@ -524,16 +524,17 @@ var tmPruneWithheldTypes = map[parquet.TypeID]bool{
 	parquet.TypeRow:    true,
 	parquet.TypeMap:    true,
 	parquet.TypeVector: true,
-	// CIDR is withheld for a different reason from the containers': it HAS a
-	// scalar bound, and the bound is in the wrong ORDER. The footer holds the
-	// address TEXT's min/max and the engine compares PostgreSQL's inet order
-	// (kernel.CidrSortKey), so a group whose text-min is above the literal can
-	// still hold a value the filter keeps — `WHERE c_cidr < '10.0.0.0/16'`
-	// answered 0 rows with the prune on and 2 with it off (#492, ADR-0018:
-	// the prune's inputs are the FILE's, and the engine's order is not the
-	// file's). Restoring it means writing an inet-ordered bound, not reading
-	// the text one harder.
-	parquet.TypeCIDR: true,
+	// CIDR is no longer withheld (#523): the writer now accumulates a CIDR
+	// leaf's row-group min/max by PostgreSQL's inet order rather than the
+	// text's own byte order (parquet.CidrStatsOrderKey), and
+	// kernel.StatsDomainValue converts a literal to the same order
+	// (CidrSortKey) unconditionally, since RowGroupStats only ever hands
+	// back a bound in that order — an old-footer file, or one this reader
+	// cannot identify as CIDR at all, withholds at RowGroupStats instead
+	// (parquet's TestCIDRRowGroupStatsWithheldOnOldFooter /
+	// WithheldOnUnparseableValue). Was #492's fix for the same defect one
+	// layer up: WITHHOLDING an order it could not repair rather than
+	// answering it wrong; this is the write-time repair #492 deferred.
 }
 
 // tmPruneMustConvert is the floor: the everyday types whose predicates carry

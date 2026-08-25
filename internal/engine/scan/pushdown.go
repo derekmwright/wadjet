@@ -177,6 +177,25 @@ func compareValuesOK(a, b any) (int, bool) {
 		}
 		return 0, false
 	}
+	// A CIDR bound RowGroupStats has CONFIRMED is in inet order boxes as
+	// pqt.CidrInetBound, a distinct type from plain string, specifically so
+	// this comparison cannot mix it with an ordinary string (#523): a type
+	// assertion to string fails on it (the dynamic type is CidrInetBound,
+	// not string), so without this arm both sides would fall through to
+	// "not comparable" — safe, but it would also refuse the case that must
+	// work, two CONFIRMED bounds. A row group whose file could not confirm
+	// the order keeps a plain string for MinValue/MaxValue, which still
+	// correctly refuses against a CidrInetBound literal here.
+	if ab, ok := a.(pqt.CidrInetBound); ok {
+		bb, ok := b.(pqt.CidrInetBound)
+		if !ok {
+			return 0, false
+		}
+		return cmpOrdered(string(ab), string(bb)), true
+	}
+	if _, ok := b.(pqt.CidrInetBound); ok {
+		return 0, false
+	}
 	as, aok := a.(string)
 	bs, bok := b.(string)
 	if aok && bok {
