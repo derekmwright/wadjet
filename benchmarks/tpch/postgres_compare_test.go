@@ -1898,6 +1898,26 @@ func postgresSemanticsCases() []pgCase {
 	// is what makes these entries meaningful at all: a name comparison cannot
 	// tell the two columns apart, and neither could the engine's own row map.
 
+	// --- #513 follow-up: DUPLICATE output column names ----------------------
+	//
+	// PostgreSQL answers `SELECT abs(a), abs(b)` with two columns both called
+	// `abs`. This arm compares cells POSITIONALLY (see comparePostgres), which
+	// is what makes these entries meaningful at all: a name comparison cannot
+	// tell the two columns apart, and neither could the engine's own row map.
+	out = append(out,
+		pgCase{name: "DuplicateNameScalarFuncs", ordered: true,
+			sql: `SELECT ABS(n_nationkey), ABS(n_regionkey) FROM nation ORDER BY n_nationkey`},
+		pgCase{name: "DuplicateNameFuncAndAlias", ordered: true,
+			sql: `SELECT ABS(n_nationkey), n_regionkey AS abs FROM nation ORDER BY n_nationkey`},
+		// The ORDER BY term is not in the SELECT list, so the hidden-sort-key
+		// trim sits between the projection and the result — the projection
+		// that used to copy its columns by NAME.
+		pgCase{name: "DuplicateNameUnderHiddenSortKey", ordered: true,
+			sql: `SELECT ABS(n_nationkey), ABS(n_regionkey) FROM nation ORDER BY n_comment`},
+		pgCase{name: "DuplicateNameExplicitAlias", ordered: true,
+			sql: `SELECT ABS(n_nationkey) AS x, ABS(n_regionkey) AS x FROM nation ORDER BY n_nationkey`},
+	)
+
 	// --- MIN/MAX float NaN ordering (#457) -----------------------------------
 	//
 	// PostgreSQL's float order (float8_cmp_internal) places NaN ABOVE every

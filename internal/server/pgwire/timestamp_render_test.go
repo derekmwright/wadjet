@@ -55,7 +55,7 @@ func TestTimestampTextFormat(t *testing.T) {
 	c := &pgConn{conn: rc}
 
 	rows := []map[string]any{{"ts": int64(826727136000)}}
-	sent, err := c.sendResultRows(context.Background(), []string{"ts"}, nil, rows, nil, tsMetas(), nil)
+	sent, err := c.sendResultRows(context.Background(), []string{"ts"}, nil, boxedRows([]string{"ts"}, rows), nil, tsMetas(), nil)
 	if err != nil {
 		t.Fatalf("sendResultRows: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestTimestampTextFormatWithoutMetas(t *testing.T) {
 	c := &pgConn{conn: rc}
 
 	rows := []map[string]any{{"ts": int64(826727136000)}}
-	if _, err := c.sendResultRows(context.Background(), []string{"ts"}, nil, rows, nil, nil, nil); err != nil {
+	if _, err := c.sendResultRows(context.Background(), []string{"ts"}, nil, boxedRows([]string{"ts"}, rows), nil, nil, nil); err != nil {
 		t.Fatalf("sendResultRows: %v", err)
 	}
 	fields := dataRowFields(t, rc.buf.Bytes())
@@ -108,7 +108,7 @@ func TestTimestampBinaryFormat(t *testing.T) {
 		rc := &recordConn{}
 		c := &pgConn{conn: rc}
 		rows := []map[string]any{{"ts": tc.ms}}
-		if _, err := c.sendResultRows(context.Background(), []string{"ts"}, nil, rows, []int16{1}, tsMetas(), nil); err != nil {
+		if _, err := c.sendResultRows(context.Background(), []string{"ts"}, nil, boxedRows([]string{"ts"}, rows), []int16{1}, tsMetas(), nil); err != nil {
 			t.Fatalf("%s: sendResultRows: %v", tc.name, err)
 		}
 		fields := dataRowFields(t, rc.buf.Bytes())
@@ -130,7 +130,7 @@ func TestTimestampBinaryOutOfRange(t *testing.T) {
 	rc := &recordConn{}
 	c := &pgConn{conn: rc}
 	rows := []map[string]any{{"ts": int64(1) << 62}}
-	if _, err := c.sendResultRows(context.Background(), []string{"ts"}, nil, rows, []int16{1}, tsMetas(), nil); err != nil {
+	if _, err := c.sendResultRows(context.Background(), []string{"ts"}, nil, boxedRows([]string{"ts"}, rows), []int16{1}, tsMetas(), nil); err != nil {
 		t.Fatalf("sendResultRows: %v", err)
 	}
 	if f := dataRowFields(t, rc.buf.Bytes()); f[0] != nil {

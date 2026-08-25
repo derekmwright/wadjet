@@ -976,7 +976,7 @@ func (c *pgConn) handleQuery(sql string) {
 
 	// Send DataRow for each row — coord-path batches are boxed and sent
 	// one batch at a time, never materialized as a whole.
-	sent, sendErr := c.sendResultRows(ctx, columns, stream, result.Rows, nil, result.ColumnMetas, nestedSchema)
+	sent, sendErr := c.sendResultRows(ctx, columns, stream, result, nil, result.ColumnMetas, nestedSchema)
 	if sendErr != nil {
 		// Partial DataRows followed by ErrorResponse is legal in the v3
 		// protocol; the client discards the partial result.
@@ -1461,7 +1461,7 @@ func (c *pgConn) handleExecute(payload []byte) {
 	// Extended query protocol: Execute sends only DataRow + CommandComplete.
 	// RowDescription was already sent by Describe. Do NOT send it again.
 	// Coord-path batches are boxed and sent one batch at a time.
-	sent, sendErr := c.sendResultRows(ctx, columns, stream, result.Rows, c.resultFmtCodes, result.ColumnMetas, nestedSchema)
+	sent, sendErr := c.sendResultRows(ctx, columns, stream, result, c.resultFmtCodes, result.ColumnMetas, nestedSchema)
 	if sendErr != nil {
 		c.sendQueryError(ctx, "58030", fmt.Errorf("reading result batches: %w", sendErr))
 		return
@@ -2054,13 +2054,16 @@ func (c *pgConn) sendSynthRowDescription(ans *synthAnswer, fmtCodes []int16) {
 // alone; Execute contributes tuples.
 func (c *pgConn) sendSynthRows(ans *synthAnswer, fmtCodes []int16) {
 	for _, row := range ans.rows {
+		// A synthetic catalog answer's column list is written out by hand
+		// and carries no duplicates, so boxing its map row by name is exact.
+		cells := cellsByName(ans.cols, row)
 		if len(fmtCodes) > 0 {
 			// Synthetic catalog answers carry no typed metas, so there is
 			// no timestamp column to convert, and no nested-type schema
 			// either — every catalog-emulation value is a scalar.
-			c.sendDataRowFormatted(ans.cols, row, fmtCodes, nil, nil)
+			c.sendDataRowFormatted(ans.cols, cells, fmtCodes, nil, nil)
 		} else {
-			c.sendDataRow(ans.cols, row, nil, nil)
+			c.sendDataRow(ans.cols, cells, nil, nil)
 		}
 	}
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(ans.rows)))
@@ -3037,15 +3040,47 @@ func columnTypeAt(types []parquet.TypeID, i int) parquet.TypeID {
 // `timestamp` values are microseconds relative to the latter.
 const pgEpochOffsetMicros = 946684800 * 1_000_000
 
-func (c *pgConn) sendDataRow(columns []string, row map[string]any, colTypes []parquet.TypeID, nestedSchema *nestedFieldSchema) {
+// cellAt returns the value of output column i, or nil when the row is short.
+// A short row is a NULL column, which is what a missing map key meant before
+// the send path became positional.
+func cellAt(cells []any, i int) any {
+	if i < 0 || i >= len(cells) {
+		return nil
+	}
+	return cells[i]
+}
+
+// cellsByName boxes a name-keyed row positionally. It is exact only where the
+// column names are UNIQUE, which is true of every synthetic catalog answer
+// (their column lists are written out by hand) and is why those callers may
+// still hold rows as maps.
+func cellsByName(columns []string, row map[string]any) []any {
+	cells := make([]any, len(columns))
+	for i, col := range columns {
+		cells[i] = row[col]
+	}
+	return cells
+}
+
+// sendDataRow writes one DataRow. cells are the row's values POSITIONALLY,
+// aligned with columns; columns is needed only to name each field for the
+// nested-type lookup.
+//
+// Positional, not keyed by name, because a result may legally carry two
+// columns of the same NAME — PostgreSQL answers `SELECT abs(a), abs(b)` with
+// two columns called `abs` — and reading a map by name then sent column 0's
+// value under column 1's name. A wrong VALUE is strictly worse than a wrong
+// name, and the transport is where it has to be prevented: the name is a
+// label, the cell is the answer (#513 follow-up).
+func (c *pgConn) sendDataRow(columns []string, cells []any, colTypes []parquet.TypeID, nestedSchema *nestedFieldSchema) {
 	c.buf = c.buf[:0]
 
 	// Column count (int16)
 	c.buf = appendInt16(c.buf, int16(len(columns)))
 
 	for i, col := range columns {
-		val, ok := row[col]
-		if !ok || val == nil {
+		val := cellAt(cells, i)
+		if val == nil {
 			// NULL: length = -1
 			c.buf = appendInt32(c.buf, -1)
 			continue
@@ -3099,13 +3134,13 @@ func nestedColumnFor(nestedSchema *nestedFieldSchema, name string, pos int) *par
 // sendDataRowFormatted sends a DataRow using the format codes from Bind.
 // Columns with format code 1 (binary) get binary-encoded values.
 // metas provides type info for correct binary encoding (may be nil for text-only).
-func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtCodes []int16, colTypes []parquet.TypeID, nestedSchema *nestedFieldSchema) {
+func (c *pgConn) sendDataRowFormatted(columns []string, cells []any, fmtCodes []int16, colTypes []parquet.TypeID, nestedSchema *nestedFieldSchema) {
 	c.buf = c.buf[:0]
 	c.buf = appendInt16(c.buf, int16(len(columns)))
 
 	for i, col := range columns {
-		val, ok := row[col]
-		if !ok || val == nil {
+		val := cellAt(cells, i)
+		if val == nil {
 			c.buf = appendInt32(c.buf, -1)
 			continue
 		}

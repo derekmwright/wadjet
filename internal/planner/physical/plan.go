@@ -3209,7 +3209,7 @@ func hiddenSortTrimOp(root *logical.Node) exec.UnaryOperator {
 	}
 	visible := logical.VisibleProjections(projs)
 	cols := make([]exec.ProjectColumn, 0, len(visible))
-	for _, p := range visible {
+	for i, p := range visible {
 		// Same output naming buildProject applies: the alias, else the column
 		// reference, else the expression text.
 		name := p.Alias
@@ -3226,7 +3226,19 @@ func hiddenSortTrimOp(root *logical.Node) exec.UnaryOperator {
 			return nil
 		}
 		cols = append(cols, exec.ProjectColumn{
-			Name:       name,
+			Name: name,
+			// POSITIONAL, not by name. The trim is a narrowing: hidden
+			// columns go LAST and stay last (logical.resolveOrderBy keeps
+			// that invariant for the gather's benefit too), so visible
+			// output i IS input column i. Copying by name instead gave two
+			// same-named outputs — which `SELECT abs(a), abs(b)` now
+			// legitimately produces, PostgreSQL calling both `abs` — the
+			// SAME input column, so the second carried the first's values.
+			SourceIdx:    i,
+			SourceIdxSet: true,
+			// The name-based fields stay as the fallback for an input whose
+			// column count does not match (nothing produces one today, and
+			// an extra column beats projecting every row to nulls).
 			DirectCopy: name,
 			SourceCol:  name,
 			// DirectCopy resolution can still miss on a qualified/bare

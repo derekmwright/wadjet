@@ -62,7 +62,15 @@ type ProjectColumn struct {
 	VecEval         VecExpression               // optional vectorized evaluation for any output type
 	SourceCol       string                      // source column name for type resolution on renames
 	DirectCopy      string                      // if set, bulk copy this input column (no per-row eval)
-	Dimension       int                         // VECTOR output dimensionality (e.g. embed()); 0 = not a vector
+	// SourceIdx names the input column by POSITION, for a projection whose
+	// source cannot be identified by name: an output list may legally carry
+	// two columns of the same name (`SELECT abs(a), abs(b)` — PostgreSQL
+	// calls both `abs`), and a name-keyed copy then gives the second one the
+	// first one's values. SourceIdxSet is required because 0 is a valid
+	// index, the same reason ProjectExprSpec carries TypeKnown.
+	SourceIdx    int
+	SourceIdxSet bool
+	Dimension    int // VECTOR output dimensionality (e.g. embed()); 0 = not a vector
 	// Computed marks an output whose value comes from Expr rather than from
 	// an input column of the same name. Such an output must NOT be typed by
 	// looking its own name up in the input: when the alias shadows an input
@@ -132,7 +140,13 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			// ROW field, which stays on the per-row route — both fall
 			// through to the resolutions below, as before.
 			srcIdx := -1
-			if proj.DirectCopy != "" {
+			// A positional source is exact and beats every name-based
+			// resolution below, which cannot tell two same-named columns
+			// apart.
+			if proj.SourceIdxSet && proj.SourceIdx >= 0 && proj.SourceIdx < len(in.Schema) {
+				srcIdx = proj.SourceIdx
+			}
+			if srcIdx < 0 && proj.DirectCopy != "" {
 				srcIdx, _ = resolvePlainColumn(in, proj.DirectCopy)
 			}
 			if srcIdx < 0 && proj.SourceCol != "" {
@@ -215,6 +229,10 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 		p.directSrcIdx = make([]int, len(p.Projections))
 		for j, proj := range p.Projections {
 			p.directSrcIdx[j] = -1
+			if proj.SourceIdxSet && proj.SourceIdx >= 0 && proj.SourceIdx < len(in.Columns) {
+				p.directSrcIdx[j] = proj.SourceIdx
+				continue
+			}
 			if proj.DirectCopy != "" {
 				idx, ok := resolvePlainColumn(in, proj.DirectCopy)
 				if !ok {

@@ -492,6 +492,37 @@ func (b *RecordBatch) RowAt(i int) map[string]any {
 }
 
 // ToRows converts a RecordBatch to row-oriented data.
+// ToRowValues boxes the batch POSITIONALLY: one []any per active row, its
+// cells aligned index-for-index with b.Schema.
+//
+// This is ToRows without the lossy step. A result may legally carry two
+// columns of the SAME NAME — PostgreSQL answers `SELECT abs(a), abs(b)` with
+// two columns both called `abs`, and #513 made this engine agree — and a
+// map keyed by name cannot hold both, so the second silently overwrites the
+// first and a client reads column 0's value under column 1's name. A wrong
+// VALUE is strictly worse than a wrong name, so every transport that has the
+// batch boxes it this way and only convenience APIs take the map.
+func (b *RecordBatch) ToRowValues() [][]any {
+	rows := make([][]any, 0, b.ActiveLen())
+	appendRow := func(i int) {
+		row := make([]any, len(b.Schema))
+		for j := range b.Schema {
+			row[j] = b.Columns[j].GetValue(i)
+		}
+		rows = append(rows, row)
+	}
+	if b.Sel != nil {
+		for _, idx := range b.Sel {
+			appendRow(int(idx))
+		}
+	} else {
+		for i := 0; i < b.Len; i++ {
+			appendRow(i)
+		}
+	}
+	return rows
+}
+
 func (b *RecordBatch) ToRows() []map[string]any {
 	rows := make([]map[string]any, 0, b.ActiveLen())
 	if b.Sel != nil {

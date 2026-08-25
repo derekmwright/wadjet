@@ -227,8 +227,44 @@ type ColumnMeta struct {
 type QueryResult struct {
 	Columns     []string
 	ColumnMetas []ColumnMeta // typed column metadata (may be nil for introspection queries)
-	Rows        []map[string]any
-	Plan        string
+	// Rows is the result keyed by column NAME, and it is a convenience: a
+	// result may legally carry two columns of the same name (PostgreSQL
+	// answers `SELECT abs(a), abs(b)` with two columns called `abs`, and
+	// #513 made this engine agree), and a map cannot hold both — the LAST
+	// one wins and the earlier value is not represented. Columns still lists
+	// every column, so len(Rows[i]) < len(Columns) is how a caller detects
+	// it. Read RowValues when the values matter.
+	Rows []map[string]any
+	// RowValues is the same result POSITIONALLY, cells aligned with Columns,
+	// and it is populated ONLY when Rows would lose a value — that is, when
+	// two output columns share a name. nil means the names are unique and
+	// Rows is exact. Nothing that transports values (the pgwire DataRow
+	// path) may read Rows without consulting this first.
+	RowValues [][]any
+	Plan      string
+}
+
+// Cells returns row i positionally, whether or not the result needed
+// RowValues: from RowValues when duplicate column names made the map lossy,
+// and otherwise by looking each column up in Rows, which is exact there.
+// Returns nil when i is out of range.
+func (r *QueryResult) Cells(i int) []any {
+	// The range check comes FIRST and covers both forms: a negative index
+	// passes `i < len(RowValues)` and would index the slice with it.
+	if r == nil || i < 0 {
+		return nil
+	}
+	if i < len(r.RowValues) {
+		return r.RowValues[i]
+	}
+	if i >= len(r.Rows) {
+		return nil
+	}
+	cells := make([]any, len(r.Columns))
+	for j, col := range r.Columns {
+		cells[j] = r.Rows[i][col]
+	}
+	return cells
 }
 
 // Query executes a SQL query and returns the results.
@@ -334,8 +370,12 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 	defer pipeline.Close()
 
 	var rows []map[string]any
+	var rowValues [][]any
 	if collectSink, ok := pipeline.Sink.(*exec.CollectSink); ok {
 		rows = collectSink.ToRows()
+		// Non-nil only when two output columns share a name, which is
+		// exactly when rows above cannot represent the answer.
+		rowValues = collectSink.ToRowValues()
 	}
 
 	// Derive column order from the projection list, not map iteration. The
@@ -361,6 +401,7 @@ func (db *DB) Query(ctx context.Context, sql string) (res *QueryResult, err erro
 		Columns:     columns,
 		ColumnMetas: metas,
 		Rows:        rows,
+		RowValues:   rowValues,
 		Plan:        planStr,
 	}, nil
 }

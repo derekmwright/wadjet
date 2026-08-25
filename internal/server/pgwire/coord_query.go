@@ -178,17 +178,17 @@ func coordColumnMetas(res *coordinator.SQLResult) []wadjet.ColumnMeta {
 // ErrorResponse after the partial DataRows (legal in the v3 protocol).
 // ctx is the statement's context: a CancelRequest (or statement_timeout)
 // mid-send stops the stream instead of sending the remaining rows.
-func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream coordinator.BatchStream, rows []map[string]any, fmtCodes []int16, metas []wadjet.ColumnMeta, nestedSchema *nestedFieldSchema) (int, error) {
+func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream coordinator.BatchStream, boxed *wadjet.QueryResult, fmtCodes []int16, metas []wadjet.ColumnMeta, nestedSchema *nestedFieldSchema) (int, error) {
 	sent := 0
 	// Resolved once per result, not per row: the value a client reads has
 	// to match the type the RowDescription declared, and only the metas
 	// carry that (see timestampColumns).
 	colTypes := sendColumnTypes(columns, metas)
-	send := func(row map[string]any) {
+	send := func(cells []any) {
 		if len(fmtCodes) > 0 {
-			c.sendDataRowFormatted(columns, row, fmtCodes, colTypes, nestedSchema)
+			c.sendDataRowFormatted(columns, cells, fmtCodes, colTypes, nestedSchema)
 		} else {
-			c.sendDataRow(columns, row, colTypes, nestedSchema)
+			c.sendDataRow(columns, cells, colTypes, nestedSchema)
 		}
 		sent++
 	}
@@ -205,21 +205,30 @@ func (c *pgConn) sendResultRows(ctx context.Context, columns []string, stream co
 			if b == nil {
 				break
 			}
-			for _, row := range b.ToRows() {
-				send(row)
+			// ToRowValues, not ToRows: the batch is already positional and
+			// a name-keyed box cannot represent two columns of the same
+			// name (#513 follow-up). This is also strictly cheaper — no
+			// map per row.
+			for _, cells := range b.ToRowValues() {
+				send(cells)
 			}
 		}
 	}
-	for i, row := range rows {
-		// Boxed results (legacy db.Query path) are already in memory, but a
-		// large one still takes real time to write out; check for
-		// cancellation once per batch-sized run rather than per row.
-		if i%1024 == 0 {
-			if err := ctx.Err(); err != nil {
-				return sent, err
+	if boxed != nil {
+		for i := range boxed.Rows {
+			// Boxed results (legacy db.Query path) are already in memory,
+			// but a large one still takes real time to write out; check for
+			// cancellation once per batch-sized run rather than per row.
+			if i%1024 == 0 {
+				if err := ctx.Err(); err != nil {
+					return sent, err
+				}
 			}
+			// Cells reads the positional form when the result has one —
+			// which is exactly when its column names collide — and boxes
+			// the map by name otherwise, where that is exact.
+			send(boxed.Cells(i))
 		}
-		send(row)
 	}
 	return sent, nil
 }

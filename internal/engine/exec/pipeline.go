@@ -883,6 +883,7 @@ func (s *BatchSink) Batches() []*batch.RecordBatch {
 
 type CollectSink struct {
 	Rows       []map[string]any     // populated lazily on first access
+	rowValues  [][]any              // positional form; see ToRowValues
 	batches    []*batch.RecordBatch // columnar storage; released by ToRows
 	schema     []parquet.Column     // captured from the first batch; survives ToRows
 	rowsDone   bool
@@ -931,6 +932,7 @@ type CollectSink struct {
 
 func (s *CollectSink) Init(_ context.Context) error {
 	s.Rows = nil
+	s.rowValues = nil
 	s.batches = nil
 	s.schema = nil
 	s.rowsDone = false
@@ -966,7 +968,7 @@ func (s *CollectSink) Finalize(_ context.Context) error {
 	if s.SkipFinalizeToRows {
 		return nil
 	}
-	s.ToRows() // populate Rows for backward compatibility
+	s.convert() // populate Rows for backward compatibility
 	return nil
 }
 
@@ -978,15 +980,63 @@ func (s *CollectSink) Finalize(_ context.Context) error {
 // are never recycled out from under them. Batches() returns nil after this;
 // use Schema() for post-conversion schema access.
 func (s *CollectSink) ToRows() []map[string]any {
-	if !s.rowsDone {
-		s.rowsDone = true
-		for i, b := range s.batches {
-			s.Rows = append(s.Rows, b.ToRows()...)
-			s.batches[i] = nil
-		}
-		s.batches = nil
-	}
+	s.convert()
 	return s.Rows
+}
+
+// ToRowValues returns the result POSITIONALLY — one []any per row, aligned
+// with Schema() — or nil when the map form is already lossless.
+//
+// A result may legally carry two output columns of the SAME NAME: PostgreSQL
+// answers `SELECT abs(a), abs(b)` with two columns both called `abs`, and
+// #513 made this engine agree. A map keyed by name cannot hold both, so the
+// second overwrites the first and a consumer reads column 0's value under
+// column 1's name — a wrong VALUE, which is strictly worse than a wrong name.
+//
+// nil is the answer when the schema's names are unique, and it is not a
+// hedge: it says the map IS the positional form, and a caller reading it by
+// name gets the same cells. Materializing a []any per row unconditionally
+// would add to a sink that has been measured at 68% of inuse_space on large
+// results (SkipFinalizeToRows' comment), for a shape almost no query has,
+// so the cost is paid exactly where the loss would otherwise happen.
+func (s *CollectSink) ToRowValues() [][]any {
+	s.convert()
+	return s.rowValues
+}
+
+// convert boxes the batches once, into the map form and — when the schema
+// makes the map lossy — the positional form as well. Both share the same
+// value boxes, so the second form costs one slice header per row.
+func (s *CollectSink) convert() {
+	if s.rowsDone {
+		return
+	}
+	s.rowsDone = true
+	positional := hasDuplicateColumnName(s.Schema())
+	for i, b := range s.batches {
+		s.Rows = append(s.Rows, b.ToRows()...)
+		if positional {
+			s.rowValues = append(s.rowValues, b.ToRowValues()...)
+		}
+		s.batches[i] = nil
+	}
+	s.batches = nil
+}
+
+// hasDuplicateColumnName reports whether two columns of a schema share a
+// name, which is exactly when boxing rows into a map loses a value.
+func hasDuplicateColumnName(schema []parquet.Column) bool {
+	if len(schema) < 2 {
+		return false
+	}
+	seen := make(map[string]bool, len(schema))
+	for _, col := range schema {
+		if seen[col.Name] {
+			return true
+		}
+		seen[col.Name] = true
+	}
+	return false
 }
 
 // Batches returns the raw columnar batches (zero-copy, no conversion).

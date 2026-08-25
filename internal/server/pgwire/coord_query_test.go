@@ -124,7 +124,7 @@ func TestSendResultRows_LegacyRows(t *testing.T) {
 	c := &pgConn{conn: rc}
 
 	rows := []map[string]any{{"n": int64(1)}, {"n": int64(2)}}
-	sent, err := c.sendResultRows(context.Background(), []string{"n"}, nil, rows, nil, nil, nil)
+	sent, err := c.sendResultRows(context.Background(), []string{"n"}, nil, boxedRows([]string{"n"}, rows), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("sendResultRows: %v", err)
 	}

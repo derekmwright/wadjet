@@ -4429,6 +4429,34 @@ func twoPathCorpus() []twoPathQuery {
 	// TestDuplicateOutputNamesKeepBothValues asserts the embedded API's
 	// positional form.
 
+	// --- #513 follow-up: DUPLICATE output column names ----------------------
+	//
+	// PostgreSQL answers `SELECT upper(a), upper(b)` with two columns both
+	// called `upper`, and #513 made this engine agree.
+	//
+	// These entries deliberately compare COUNT and SHAPE only, and the reason
+	// is a limit of this suite rather than a property of the queries: its
+	// comparison realigns arm B onto arm A BY NAME (realign/lookupCell), and
+	// rows arrive here as name-keyed maps, so two columns of one name are
+	// indistinguishable to it — arm A and arm B would "agree" whatever either
+	// answered. wantCols still pins the NAMES on both paths, which is what
+	// this suite can honestly assert. The VALUES are gated where they can be:
+	// the PostgreSQL wire oracle compares cells POSITIONALLY through the real
+	// DataRow path (DuplicateName* in wireCorpus), and
+	// TestDuplicateOutputNamesKeepBothValues asserts the embedded API's
+	// positional form.
+	out = append(out,
+		twoPathQuery{name: "DuplicateNameScalarFuncs", cmp: cmpCount, expectRows: true,
+			sql:      `SELECT UPPER(n_name), UPPER(n_comment) FROM nation ORDER BY n_nationkey`,
+			wantRows: 25, wantCols: []string{"upper", "upper"}},
+		twoPathQuery{name: "DuplicateNameUnderHiddenSortKey", cmp: cmpCount, expectRows: true,
+			sql:      `SELECT UPPER(n_name), UPPER(n_comment) FROM nation ORDER BY n_comment`,
+			wantRows: 25, wantCols: []string{"upper", "upper"}},
+		twoPathQuery{name: "DuplicateNameFuncAndAlias", cmp: cmpCount, expectRows: true,
+			sql:      `SELECT UPPER(n_name), n_comment AS upper FROM nation ORDER BY n_nationkey`,
+			wantRows: 25, wantCols: []string{"upper", "upper"}},
+	)
+
 	// #358 — the outer-join ON residual: the non-key conjunct runs on the
 	// combined row BEFORE the match is accepted, a probe row whose
 	// candidates all fail comes back NULL-padded rather than dropped, and a

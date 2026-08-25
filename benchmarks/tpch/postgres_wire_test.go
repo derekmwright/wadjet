@@ -669,6 +669,55 @@ func wireCorpus() []wireCase {
 					"the stage DAG the full text. Adopting `?column?` is a separate change: it names " +
 					"every such column the same thing, which the result-row map cannot represent",
 			}},
+		// --- DUPLICATE output names, values compared cell by cell ----------
+		//
+		// PostgreSQL answers `SELECT abs(a), abs(b)` with two columns both
+		// called `abs`, and #513 made this engine agree. The DataRow path
+		// then looked each cell up in a name-keyed map, so the second column
+		// was sent carrying the FIRST column's value — 100|100 where
+		// PostgreSQL says 100|200. This arm is where that is caught: it
+		// compares cells POSITIONALLY, which is the only comparison a
+		// duplicate name leaves meaningful.
+		// Text-returning functions, so the VALUE comparison is not masked by
+		// the separate integer-declaration divergence (#530).
+		{name: "DuplicateNameScalarFuncs",
+			sql: `SELECT UPPER(n_name), UPPER(n_comment) FROM nation ORDER BY n_nationkey LIMIT 6`},
+		{name: "DuplicateNameCoalesce",
+			sql: `SELECT COALESCE(n_name, 'q'), COALESCE(n_comment, 'q') FROM nation ORDER BY n_nationkey LIMIT 3`},
+		// A computed column and a plain one that an ALIAS collides with, so
+		// the duplicate is not two calls of the same function.
+		{name: "DuplicateNameFuncAndAlias",
+			sql: `SELECT UPPER(n_name), n_comment AS upper FROM nation ORDER BY n_nationkey LIMIT 6`},
+		// The same shape with an ORDER BY term the SELECT list does not
+		// carry, which is what puts the hidden-sort-key trim between the
+		// projection and the client — the projection that used to do the
+		// name-keyed copy.
+		{name: "DuplicateNameUnderHiddenSortKey",
+			sql: `SELECT UPPER(n_name), UPPER(n_comment) FROM nation ORDER BY n_comment LIMIT 6`},
+		// The integer spelling of the same shape, kept because it is the one
+		// the issue was reported with. Its VALUES still gate; only the
+		// declared type is pinned, and to a different defect.
+		{name: "DuplicateNameIntegerFuncs",
+			sql: `SELECT ABS(n_nationkey), ABS(n_regionkey) FROM nation ORDER BY n_nationkey LIMIT 6`,
+			pins: map[string]string{
+				wirePropTypeOIDs: "#530: ABS over an integer is int4 in PostgreSQL and wadjet declares " +
+					"float8, because the expr layer computes it as a float64 — the same defect LENGTH " +
+					"has, and nothing to do with the duplicate NAME this entry is here for",
+				wirePropTypeSizes: "#530, follows the OID: 8 for float8 where PostgreSQL declares 4",
+			}},
+		// CAST's label, pinned rather than changed: PostgreSQL names a cast
+		// after its ARGUMENT (`n_nationkey`), and only after the target type
+		// when the argument has no name of its own.
+		{name: "UnaliasedCast",
+			sql: `SELECT CAST(n_nationkey AS BIGINT) FROM nation ORDER BY n_nationkey LIMIT 2`,
+			pins: map[string]string{
+				wirePropFieldNames: "#513, deliberately out of scope: PostgreSQL labels `CAST(x AS t)` " +
+					"after the ARGUMENT (`n_nationkey`) and only after the TYPE when the argument is " +
+					"itself computed. Wadjet uses the expression text (`cast(n_nationkey as bigint)`). " +
+					"Unlike the function case this is not a mangled fragment, and getting it right " +
+					"means implementing FigureColname's recursion, not a one-line rule",
+			}},
+
 		{name: "UnaliasedAggregate",
 			sql: `SELECT COUNT(supplier.s_name) FROM supplier`,
 			pins: map[string]string{
