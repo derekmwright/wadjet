@@ -63,7 +63,11 @@ type decimalLitCmp struct {
 	notDecimal atomic.Bool
 
 	// nonAddr is the source text of a STRING literal operand that names no
-	// address, and "" when every literal operand does (or none is a string).
+	// address, and nonAddrSet says whether there is one — a separate flag
+	// because the EMPTY STRING is itself a non-address literal, so "" cannot
+	// double as "there is none". `c_cidr = ''` is not a hypothetical: the
+	// parser lowers it to a ColEmptyStr whose Fallback is this Cmp, so the
+	// zero-length shape reaches the refusal through here and nowhere else.
 	// It is the CIDR/IPv6 counterpart of the refusal order() raises for a
 	// DECIMAL column, and it lives here rather than in a binding of its own
 	// because this one already resolves the column: the check costs nothing
@@ -74,7 +78,8 @@ type decimalLitCmp struct {
 	// network column is one no reading can make sense of — `c_cidr <>
 	// 'garbage'`, which used to answer ZERO rows through the kernel and EVERY
 	// row through this path (#492).
-	nonAddr string
+	nonAddr    string
+	nonAddrSet bool
 }
 
 // numericLit reports the exact source text of a constant operand that a
@@ -290,19 +295,21 @@ func newDecimalLitCmp(col *ColRef, lits []*kernel.DecimalLiteral, flip bool, ope
 	for i, lit := range lits {
 		numeric[i] = lit.Numeric()
 	}
+	nonAddr, nonAddrSet := firstNonAddressLit(operands)
 	return &decimalLitCmp{
 		col: col, lits: lits, flip: flip, numeric: numeric,
-		nonAddr: firstNonAddressLit(operands),
+		nonAddr: nonAddr, nonAddrSet: nonAddrSet,
 	}
 }
 
 // firstNonAddressLit reports the text of the first QUOTED string literal in
-// operands that parses as no address, and "" when there is none.
+// operands that parses as no address, and ok=false when there is none. The
+// text can legitimately be "" — see decimalLitCmp.nonAddrSet.
 //
 // Quoted only: a bare numeric literal against an address column is a
 // different refusal (PostgreSQL has no `inet = integer` operator at all,
 // which is 42883, not 22P02) and is left where it was.
-func firstNonAddressLit(operands []Expr) string {
+func firstNonAddressLit(operands []Expr) (string, bool) {
 	for _, e := range operands {
 		lit, ok := e.(*Lit)
 		if !ok || lit.Text != "" {
@@ -318,9 +325,9 @@ func firstNonAddressLit(operands []Expr) string {
 		if _, ok := kernel.IPv6LitKey(s); ok {
 			continue
 		}
-		return s
+		return s, true
 	}
-	return ""
+	return "", false
 }
 
 // bindDecimalCmp binds `col op lit` or `lit op col`, in either operand order.
@@ -391,7 +398,7 @@ func (d *decimalLitCmp) vector(b *batch.RecordBatch) *batch.Vector {
 // error for the same literal (exec.networkConstError), which is the property
 // that makes the refusal a semantics decision rather than a path accident.
 func (d *decimalLitCmp) refuseNonAddress() {
-	if d.nonAddr == "" {
+	if !d.nonAddrSet {
 		return
 	}
 	switch d.col.typ {

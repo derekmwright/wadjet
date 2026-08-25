@@ -139,6 +139,30 @@ func TestNonAddressLiteralAgainstACidrColumnIsAQueryError(t *testing.T) {
 			}
 		})
 	}
+
+	// The EMPTY string is a non-address literal too, and it is the one shape
+	// that does not reach the refusal the same way: the compiler lowers
+	// `col = ''` to an expr.ColEmptyStr zero-length test whose Fallback is the
+	// generic Cmp, so the refusal is reached only through that fallback. It
+	// also cannot be signalled by an empty `nonAddr` text, which is what made
+	// `SELECT c_cidr = ''` answer false while `WHERE c_cidr = ''` raised.
+	for _, sql := range []string{
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_cidr = ''", typematrix.Table),
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_cidr <> ''", typematrix.Table),
+		fmt.Sprintf("SELECT id, c_cidr = '' AS m FROM %s WHERE id = 188", typematrix.Table),
+		fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c_ipv6 = ''", typematrix.Table),
+		fmt.Sprintf("SELECT id, c_ipv6 = '' AS m FROM %s WHERE id = 1", typematrix.Table),
+	} {
+		t.Run(sql, func(t *testing.T) {
+			_, err := tmRun(ctx, db, sql)
+			if err == nil {
+				t.Fatalf("answered instead of refusing: %s", sql)
+			}
+			if !strings.Contains(err.Error(), `""`) {
+				t.Errorf("the error must quote the literal, got %q", err.Error())
+			}
+		})
+	}
 }
 
 // TestIPv6ColumnAgainstAV4LiteralEndToEnd: PostgreSQL compares the address
