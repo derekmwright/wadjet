@@ -369,6 +369,9 @@ func (o *postgresOracle) load(t *testing.T, ctx context.Context) {
 	if err := sink(pgNetTable, pgNetRows()); err != nil {
 		t.Fatalf("%v", err)
 	}
+	if err := sink(pgRowTable, pgRowRowsData()); err != nil {
+		t.Fatalf("%v", err)
+	}
 	for name, ing := range ingesters {
 		if err := ing.FlushAll(ctx); err != nil {
 			t.Fatalf("wadjet flush %s: %v", name, err)
@@ -470,6 +473,25 @@ func pgNumericOf(d parquet.Decimal128, scale int32) pgtype.Numeric {
 // PostgreSQL answer a different query.
 func (o *postgresOracle) createPostgresSchema(t *testing.T, ctx context.Context) {
 	t.Helper()
+	// The composite type the ROW fixture's column is declared as. It must
+	// exist before the table and be dropped after it, and its field list is
+	// the SAME pgRowFields() the wadjet schema uses, rendered through the
+	// same postgresColumnType — so a field the two engines disagree about is
+	// a disagreement about the engines, not about two hand-written schemas.
+	if _, err := o.conn.Exec(ctx, "DROP TABLE IF EXISTS "+pgRowTable+" CASCADE"); err != nil {
+		t.Fatalf("drop %s: %v", pgRowTable, err)
+	}
+	if _, err := o.conn.Exec(ctx, "DROP TYPE IF EXISTS "+pgRowType+" CASCADE"); err != nil {
+		t.Fatalf("drop type %s: %v", pgRowType, err)
+	}
+	rowFields := make([]string, 0, len(pgRowFields()))
+	for _, f := range pgRowFields() {
+		rowFields = append(rowFields, f.Name+" "+postgresColumnType(t, f))
+	}
+	if _, err := o.conn.Exec(ctx,
+		fmt.Sprintf("CREATE TYPE %s AS (%s)", pgRowType, strings.Join(rowFields, ", "))); err != nil {
+		t.Fatalf("create type %s: %v", pgRowType, err)
+	}
 	for name, schema := range oracleTables() {
 		if _, err := o.conn.Exec(ctx, "DROP TABLE IF EXISTS "+name+" CASCADE"); err != nil {
 			t.Fatalf("drop %s: %v", name, err)
@@ -581,12 +603,81 @@ const (
 	pgNetV4Base = uint32(9)<<24 | uint32(255)<<16 | uint32(255)<<8 | 240
 )
 
+// pgRowTable is the ROW-field-path fixture (#568), and the reason it exists is
+// the same as pgDecimalTable's: TPC-H has no such column, so no arm of this
+// oracle could ask what a field path MEANS.
+//
+// PostgreSQL is the authority for that question and can answer it — a
+// composite type is exactly a wadjet ROW — but it spells the access
+// differently: `(rw).b`, with the parentheses, because unparenthesised `rw.b`
+// is read as table.column and fails with "missing FROM-clause entry for table
+// rw". That is a SPELLING difference and not a semantic one, which is what
+// pgCase.pgSQL is for.
+//
+// Field types are the four this oracle already maps and compares cleanly.
+// A DATE field is deliberately absent: TPC-H's dates are text on both sides
+// (createPostgresSchema's note), and mixing the two conventions inside one
+// composite would make the comparison a question about the fixture.
+const (
+	pgRowTable = "row_probe"
+	pgRowType  = "row_probe_rw"
+	pgRowRows  = 120
+)
+
+func pgRowFields() []parquet.Column {
+	return []parquet.Column{
+		{Name: "a", Type: parquet.TypeString, Nullable: true},
+		{Name: "b", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "f", Type: parquet.TypeFloat64, Nullable: true},
+		{Name: "n", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
+	}
+}
+
+// pgRowRowsData gives every field a value order that DISAGREES with its text
+// order — 9 sorts after 10 and 192 as text — so a field read at the wrong
+// declared type shows as a different ORDER BY, not just a different Go type.
+// Each field is NULL on its own stride inside a PRESENT row, and the whole
+// composite is NULL on another, so PostgreSQL's NULL rules are exercised at
+// both levels.
+func pgRowRowsData() []map[string]any {
+	rows := make([]map[string]any, pgRowRows)
+	for i := range rows {
+		v := (i * 37) % 200
+		fields := map[string]any{
+			"a": fmt.Sprintf("s-%03d", v),
+			"b": int64(v),
+			"f": float64(v) + 0.25,
+			"n": fmt.Sprintf("%d.25", v),
+		}
+		switch i % 5 {
+		case 1:
+			fields["a"] = nil
+		case 2:
+			fields["b"] = nil
+		case 3:
+			fields["f"], fields["n"] = nil, nil
+		}
+		r := map[string]any{"k": int64(i)}
+		if i%11 == 10 {
+			r["rw"] = nil
+		} else {
+			r["rw"] = fields
+		}
+		rows[i] = r
+	}
+	return rows
+}
+
 // oracleTables is AllTables plus the fixtures that exist only for this oracle.
 func oracleTables() map[string]parquet.Schema {
-	out := make(map[string]parquet.Schema, len(AllTables)+1)
+	out := make(map[string]parquet.Schema, len(AllTables)+2)
 	for name, schema := range AllTables {
 		out[name] = schema
 	}
+	out[pgRowTable] = parquet.Schema{Columns: []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "rw", Type: parquet.TypeRow, Nullable: true, Fields: pgRowFields()},
+	}}
 	out[pgDecimalTable] = parquet.Schema{Columns: []parquet.Column{
 		{Name: "d_key", Type: parquet.TypeInt64},
 		// A low-cardinality partition key. A windowed aggregate needs one to
@@ -873,6 +964,11 @@ func postgresColumnType(t *testing.T, c parquet.Column) string {
 		return "inet"
 	case parquet.TypeUUID:
 		return "uuid"
+	case parquet.TypeRow:
+		// A wadjet ROW is a PostgreSQL composite. The fixture declares one,
+		// created by createPostgresSchema from the same Fields list, so the
+		// two sides carry the same field names and types by construction.
+		return pgRowType
 	default:
 		t.Fatalf("column %s has type %s, which the PostgreSQL oracle does not map yet", c.Name, c.Type)
 		return ""
@@ -885,6 +981,14 @@ func (o *postgresOracle) copyInto(ctx context.Context, table string, rows []map[
 	schema, ok := oracleTables()[table]
 	if !ok {
 		return fmt.Errorf("no schema for table %s", table)
+	}
+	if table == pgRowTable {
+		// COPY builds its parameter list straight from the row maps, and a
+		// composite has no binary encode plan for a map[string]any. The
+		// fixture is 120 rows, so INSERT with a ROW() constructor — whose
+		// field ORDER is the schema's, the same order wadjet's ingester
+		// reads — costs nothing and needs no pgtype registration.
+		return o.insertRowProbe(ctx, rows)
 	}
 	cols := make([]string, len(schema.Columns))
 	for i, c := range schema.Columns {
@@ -914,6 +1018,59 @@ func (o *postgresOracle) copyInto(ctx context.Context, table string, rows []map[
 	}
 	_, err := o.conn.CopyFrom(ctx, pgx.Identifier{table}, cols, pgx.CopyFromRows(values))
 	return err
+}
+
+// pgRowFieldCast is the CAST spelling of a composite field's type, which is
+// postgresColumnType's minus the COLLATE clause a cast cannot carry. The
+// collation lives on the composite TYPE's declaration, where it belongs.
+func pgRowFieldCast(c parquet.Column) string {
+	if c.Type == parquet.TypeString {
+		return "text"
+	}
+	if c.Type == parquet.TypeDecimal {
+		return fmt.Sprintf("numeric(%d,%d)", c.Precision, c.Scale)
+	}
+	switch c.Type {
+	case parquet.TypeInt64:
+		return "bigint"
+	case parquet.TypeFloat64:
+		return "double precision"
+	}
+	return "text"
+}
+
+// insertRowProbe loads the composite fixture one row at a time. A NULL
+// composite and a composite of NULL fields are DIFFERENT values in
+// PostgreSQL exactly as they are in wadjet, and passing the whole ROW as nil
+// versus passing four nil fields is what keeps them apart here.
+func (o *postgresOracle) insertRowProbe(ctx context.Context, rows []map[string]any) error {
+	fields := pgRowFields()
+	for _, r := range rows {
+		if r["rw"] == nil {
+			if _, err := o.conn.Exec(ctx,
+				fmt.Sprintf("INSERT INTO %s (k, rw) VALUES ($1, NULL)", pgRowTable), r["k"]); err != nil {
+				return err
+			}
+			continue
+		}
+		f, ok := r["rw"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("row_probe: rw is %T, want map[string]any", r["rw"])
+		}
+		args := make([]any, 0, len(fields)+1)
+		args = append(args, r["k"])
+		holders := make([]string, len(fields))
+		for i, fc := range fields {
+			args = append(args, f[fc.Name])
+			holders[i] = fmt.Sprintf("$%d::%s", i+2, pgRowFieldCast(fc))
+		}
+		sql := fmt.Sprintf("INSERT INTO %s (k, rw) VALUES ($1, ROW(%s)::%s)",
+			pgRowTable, strings.Join(holders, ", "), pgRowType)
+		if _, err := o.conn.Exec(ctx, sql, args...); err != nil {
+			return fmt.Errorf("%s: %w", sql, err)
+		}
+	}
+	return nil
 }
 
 // runPostgres executes sql on the oracle and returns rows keyed by column name,

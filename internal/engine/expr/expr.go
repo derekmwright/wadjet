@@ -108,6 +108,12 @@ type ColRef struct {
 	idx         int
 	typ         batch.TypeID
 	structField string // for ROW field access (e.g., "person.name" → structField="name")
+	// fieldTyp is the DECLARED type of structField, and fieldIdx its position
+	// among the container's children, both resolved alongside it. typ stays
+	// the container's type — see resolveSlow — so these are the only place a
+	// field path's own declaration is available (#568).
+	fieldTyp batch.TypeID
+	fieldIdx int
 }
 
 // resolve performs first-time column lookup. Idempotent.
@@ -140,7 +146,131 @@ func (e *ColRef) resolveSlow(b *batch.RecordBatch) {
 	if e.idx >= 0 {
 		e.typ = b.Columns[e.idx].Type
 	}
+	if e.structField != "" {
+		e.fieldIdx = -1
+		for i, name := range b.Columns[e.idx].FieldNames {
+			if strings.EqualFold(name, e.structField) && i < len(b.Columns[e.idx].Children) {
+				e.fieldIdx = i
+				break
+			}
+		}
+		// The FIELD's own declared type, kept apart from e.typ on purpose.
+		// e.typ stays the CONTAINER's (TypeRow), because it is what every
+		// typed kernel keyed on this reference indexes storage with —
+		// b.Columns[e.idx] is the ROW vector, whose Int64Data/BytesData are
+		// empty, so a field type there sends the network comparator and the
+		// float vector path reading off the end of a zero-length slice.
+		// fieldTyp is the DECLARATION half of the same reference, and it is
+		// what the declaration-driven comparison rules ask for (#568).
+		e.fieldTyp = batch.TypeRow
+		if e.fieldIdx >= 0 {
+			e.fieldTyp = b.Columns[e.idx].Children[e.fieldIdx].Type
+		}
+	}
 	e.resolved.Store(true)
+}
+
+// fieldVector resolves a ROW field to the CHILD VECTOR that holds it and the
+// row index within it, or reports that the field has no value here (the
+// container is NULL, or the field is not one of its children).
+//
+// A view is followed to its base the way Vector.GetValue follows one: a
+// view's children are not addressable by the view's own row index, only the
+// base's are.
+func (e *ColRef) fieldVector(b *batch.RecordBatch, row int) (*batch.Vector, int, bool) {
+	v := b.Columns[e.idx]
+	for {
+		if v.Nulls.IsNullFast(row) {
+			return nil, 0, false
+		}
+		if v.Base == nil {
+			break
+		}
+		row = int(v.Indices[row])
+		v = v.Base
+	}
+	if e.fieldIdx < 0 || e.fieldIdx >= len(v.Children) {
+		return nil, 0, false
+	}
+	return v.Children[e.fieldIdx], row, true
+}
+
+// fieldValue boxes a ROW field's value the way a COLUMN of that type boxes
+// its own — through the child vector's typed storage, not through the
+// container's map.
+//
+// The distinction is not cosmetic. Vector.GetValue renders an IPv4 or a MAC
+// as its TEXT, while ColRef.Eval hands back the raw int64 a column of that
+// type stores. Reading the field out of the container's boxed map therefore
+// produced a value that could not be compared against the identical value in
+// a column: `WHERE rw.ip = ip_col` matched NO rows with both sides holding
+// "9.0.0.1", because one was int64 and the other a string (#568). Going
+// through the child vector makes a field path and a column interchangeable
+// wherever a boxed value travels.
+func (e *ColRef) fieldValue(b *batch.RecordBatch, row int) any {
+	fv, r, ok := e.fieldVector(b, row)
+	if !ok {
+		return nil
+	}
+	return boxVectorValue(fv, r)
+}
+
+// valueType is the declared type of the VALUE this reference yields: the
+// FIELD's for a ROW field path, the column's otherwise. Every renderer that
+// has to undo Eval's typed boxing asks for this rather than for typ, which
+// for a field path names the CONTAINER.
+func (e *ColRef) valueType() batch.TypeID {
+	if e.structField != "" {
+		return e.fieldTyp
+	}
+	return e.typ
+}
+
+// displayValue is the value as Vector.GetValue renders it — the text form for
+// the types Eval boxes as a number. Reports false when this reference cannot
+// be resolved to a vector at all, in which case the caller keeps the box it
+// already has.
+func (e *ColRef) displayValue(b *batch.RecordBatch, row int) (any, bool) {
+	if e.idx < 0 || e.idx >= len(b.Columns) {
+		return nil, false
+	}
+	if e.structField == "" {
+		return b.Columns[e.idx].GetValue(row), true
+	}
+	fv, r, ok := e.fieldVector(b, row)
+	if !ok {
+		return nil, false
+	}
+	return fv.GetValue(r), true
+}
+
+// boxVectorValue is ColRef.Eval's typed boxing, applied to an arbitrary
+// vector. The two must agree: it is what makes a ROW field's box identical to
+// the box a column of the same type produces.
+func boxVectorValue(v *batch.Vector, row int) any {
+	if v.Nulls.IsNullFast(row) {
+		return nil
+	}
+	switch v.Type {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return v.Int64Data[row]
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return int64(v.Int32Data[row])
+	case batch.TypeFloat64:
+		return v.Float64Data[row]
+	case batch.TypeFloat32:
+		return float64(v.Float32Data[row])
+	case batch.TypeBool:
+		return v.BoolData[row]
+	case batch.TypeString:
+		val, ok := v.GetString(row)
+		if !ok {
+			return nil
+		}
+		return val
+	default:
+		return v.GetValue(row)
+	}
 }
 
 func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
@@ -150,14 +280,7 @@ func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
 	}
 	// Struct field access: extract named field from ROW value
 	if e.structField != "" {
-		v := b.Columns[e.idx].GetValue(row)
-		if v == nil {
-			return nil
-		}
-		if m, ok := v.(map[string]any); ok {
-			return m[e.structField]
-		}
-		return nil
+		return e.fieldValue(b, row)
 	}
 	v := b.Columns[e.idx]
 	// Use typed accessors to avoid boxing where possible for numeric hot paths.
@@ -209,6 +332,9 @@ func (e *ColRef) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
 	if e.idx < 0 || e.idx >= len(b.Columns) {
 		return 0, false
 	}
+	if e.structField != "" {
+		return toFloat64Safe(e.fieldValue(b, row))
+	}
 	v := b.Columns[e.idx]
 	if v.Nulls.IsNullFast(row) {
 		return 0, false
@@ -232,6 +358,17 @@ func (e *ColRef) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
 // EvalFloat64Vec evaluates the column for all rows [0, n) into dst.
 func (e *ColRef) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int) bool {
 	e.resolve(b)
+	if e.structField != "" {
+		hasNulls := false
+		for i := 0; i < n; i++ {
+			f, ok := e.EvalFloat64(b, i)
+			if !ok {
+				hasNulls = true
+			}
+			dst[i] = f
+		}
+		return hasNulls
+	}
 	if e.idx < 0 || e.idx >= len(b.Columns) {
 		for i := 0; i < n; i++ {
 			dst[i] = 0
@@ -274,6 +411,16 @@ func (e *ColRef) EvalString(b *batch.RecordBatch, row int) (string, bool) {
 	if e.idx < 0 || e.idx >= len(b.Columns) {
 		return "", false
 	}
+	if e.structField != "" {
+		v := e.fieldValue(b, row)
+		if v == nil {
+			return "", false
+		}
+		if s, ok := v.(string); ok {
+			return s, true
+		}
+		return fmt.Sprint(v), true
+	}
 	return b.Columns[e.idx].GetString(row)
 }
 
@@ -282,6 +429,9 @@ func (e *ColRef) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 	e.resolve(b)
 	if e.idx < 0 || e.idx >= len(b.Columns) {
 		return 0, false
+	}
+	if e.structField != "" {
+		return toInt64Safe(e.fieldValue(b, row))
 	}
 	v := b.Columns[e.idx]
 	if v.Nulls.IsNullFast(row) {
@@ -5499,18 +5649,22 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 // divergence.
 func boxedTextOperand(b *batch.RecordBatch, row int, operand Expr, v any) any {
 	cr, ok := operand.(*ColRef)
-	if !ok || cr.structField != "" {
+	if !ok {
 		return v
 	}
-	switch cr.typ {
+	// A ROW FIELD PATH boxes exactly as a column of the field's type does
+	// (ColRef.fieldValue), so it needs the same undoing — and gets it from
+	// the same list, keyed on the FIELD's type (#568).
+	switch cr.valueType() {
 	case batch.TypeIPv4, batch.TypeMAC, batch.TypeDate, batch.TypeFloat32:
 	default:
 		return v
 	}
-	if cr.idx < 0 || cr.idx >= len(b.Columns) {
+	dv, ok := cr.displayValue(b, row)
+	if !ok {
 		return v
 	}
-	return b.Columns[cr.idx].GetValue(row)
+	return dv
 }
 
 // stringOperand reports v's text when it is a string or byte slice — the two

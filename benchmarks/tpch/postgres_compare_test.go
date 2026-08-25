@@ -71,6 +71,17 @@ type pgCase struct {
 	// exactly the agreement #455 had while MAX(numeric(38,10)) was returning
 	// 9.777777778877776e+14 for 977777777887777.7577887713.
 	exactNumeric bool
+	// pgSQL is the PostgreSQL-dialect spelling of the same question, for the
+	// handful of shapes the two engines write differently. It is a SPELLING
+	// escape hatch and nothing more: it must ask PostgreSQL the identical
+	// question, and the entry is worthless the moment it does not.
+	//
+	// The one use today is ROW field access. PostgreSQL requires the
+	// parentheses — `(rw).b`, because bare `rw.b` is read as table.column and
+	// errors with "missing FROM-clause entry for table rw" — while wadjet
+	// spells it `rw.b`. Nothing about the MEANING differs, which is exactly
+	// why the comparison is worth making (#568).
+	pgSQL string
 	// knownBug pins a divergence that is not gated today. The comparison still
 	// runs and the subtest FAILS when the divergence disappears, so deleting
 	// this field is the whole of "the fix landed". Classified by kind:
@@ -102,13 +113,17 @@ func runPostgresSemanticsArm(t *testing.T, ctx context.Context, o *postgresOracl
 			if c.exactNumeric {
 				run = o.runPostgresExact
 			}
-			pgRows, pgCols, pgErr := run(ctx, c.sql)
+			oracleSQL := c.sql
+			if c.pgSQL != "" {
+				oracleSQL = c.pgSQL
+			}
+			pgRows, pgCols, pgErr := run(ctx, oracleSQL)
 			if pgErr != nil {
 				// PostgreSQL refusing the query means the entry is not a
 				// question about Wadjet. It is always the corpus's fault, so
 				// it fails loudly rather than being skipped.
 				t.Fatalf("the ORACLE refused this query, so it cannot be ground truth for anything: %v\n  SQL: %s",
-					pgErr, c.sql)
+					pgErr, oracleSQL)
 			}
 
 			wRows, wCols, wErr := runWadjet(ctx, o.db, c.sql)
@@ -441,6 +456,7 @@ func postgresCorpus() []pgCase {
 		out = append(out, c)
 	}
 
+	out = append(out, postgresRowFieldCases()...)
 	out = append(out, postgresSemanticsCases()...)
 
 	for i := range out {
@@ -448,6 +464,105 @@ func postgresCorpus() []pgCase {
 			out[i].ordered = hasTopLevelOrderBy(out[i].sql)
 		}
 	}
+	return out
+}
+
+// postgresRowFieldCases asks PostgreSQL what a ROW FIELD PATH means (#568).
+//
+// This is the question the DuckDB arm cannot carry: its fixture is the eight
+// committed TPC-H parquet files, none of which has a STRUCT column, and
+// adding one would mean regenerating all eight and rippling through every
+// suite that reads AllTables. The PostgreSQL arm has the clean seam —
+// oracleTables plus a Go row builder — so the composite fixture lives here
+// and the field-path semantics are gated against the engine that DEFINES
+// them (ADR-0012).
+//
+// Each entry differs from its PostgreSQL twin only in the parentheses the
+// composite access requires; the values, the ordering and the NULL rules
+// compared are PostgreSQL's own.
+func postgresRowFieldCases() []pgCase {
+	var out []pgCase
+	add := func(name, w, p string) {
+		out = append(out, pgCase{name: name, sql: w, pgSQL: p})
+	}
+	addExact := func(name, w, p string) {
+		out = append(out, pgCase{name: name, sql: w, pgSQL: p, exactNumeric: true})
+	}
+	const tbl = pgRowTable
+
+	// The projection. A field read at the wrong declared type comes back as
+	// its TEXT, which the fingerprint sees as a different cell.
+	add("RowFieldProjectText",
+		`SELECT k, rw.a AS v FROM `+tbl+` ORDER BY k`,
+		`SELECT k, (rw).a AS v FROM `+tbl+` ORDER BY k`)
+	add("RowFieldProjectInt",
+		`SELECT k, rw.b AS v FROM `+tbl+` ORDER BY k`,
+		`SELECT k, (rw).b AS v FROM `+tbl+` ORDER BY k`)
+	add("RowFieldProjectFloat",
+		`SELECT k, rw.f AS v FROM `+tbl+` ORDER BY k`,
+		`SELECT k, (rw).f AS v FROM `+tbl+` ORDER BY k`)
+	addExact("RowFieldProjectDecimal",
+		`SELECT k, rw.n AS v FROM `+tbl+` ORDER BY k`,
+		`SELECT k, (rw).n AS v FROM `+tbl+` ORDER BY k`)
+
+	// ORDER BY, both directions. This is the shape the issue was filed on:
+	// an INT64 field sorted as TEXT puts 9 after 10 and 192. PostgreSQL's
+	// NULL placement — LAST for ASC, FIRST for DESC — is part of the answer
+	// and is compared with it.
+	add("RowFieldOrderIntAsc",
+		`SELECT k, rw.b AS v FROM `+tbl+` ORDER BY rw.b, k`,
+		`SELECT k, (rw).b AS v FROM `+tbl+` ORDER BY (rw).b, k`)
+	add("RowFieldOrderIntDesc",
+		`SELECT k, rw.b AS v FROM `+tbl+` ORDER BY rw.b DESC, k`,
+		`SELECT k, (rw).b AS v FROM `+tbl+` ORDER BY (rw).b DESC, k`)
+	add("RowFieldOrderText",
+		`SELECT k, rw.a AS v FROM `+tbl+` ORDER BY rw.a, k`,
+		`SELECT k, (rw).a AS v FROM `+tbl+` ORDER BY (rw).a, k`)
+
+	// GROUP BY and the aggregates, which could not run at all before the
+	// fix: the aggregate resolved the field name against its input's columns
+	// and missed.
+	add("RowFieldGroupInt",
+		`SELECT rw.b AS g, COUNT(*) AS n FROM `+tbl+` GROUP BY rw.b ORDER BY g`,
+		`SELECT (rw).b AS g, COUNT(*) AS n FROM `+tbl+` GROUP BY (rw).b ORDER BY (rw).b`)
+	add("RowFieldMinMaxInt",
+		`SELECT MIN(rw.b) AS lo, MAX(rw.b) AS hi, COUNT(rw.b) AS n FROM `+tbl,
+		`SELECT MIN((rw).b) AS lo, MAX((rw).b) AS hi, COUNT((rw).b) AS n FROM `+tbl)
+	add("RowFieldMinMaxText",
+		`SELECT MIN(rw.a) AS lo, MAX(rw.a) AS hi FROM `+tbl,
+		`SELECT MIN((rw).a) AS lo, MAX((rw).a) AS hi FROM `+tbl)
+	addExact("RowFieldSumDecimal",
+		`SELECT SUM(rw.n) AS s FROM `+tbl,
+		`SELECT SUM((rw).n) AS s FROM `+tbl)
+
+	// Predicates: the comparison rule follows the FIELD's declaration, so an
+	// integer field meets an integer literal and a text field meets a text
+	// one.
+	add("RowFieldPredicateInt",
+		`SELECT k FROM `+tbl+` WHERE rw.b > 100 ORDER BY k`,
+		`SELECT k FROM `+tbl+` WHERE (rw).b > 100 ORDER BY k`)
+	add("RowFieldPredicateText",
+		`SELECT k FROM `+tbl+` WHERE rw.a > 's-100' ORDER BY k`,
+		`SELECT k FROM `+tbl+` WHERE (rw).a > 's-100' ORDER BY k`)
+
+	// The two NULL shapes a field path has and a column does not: a NULL
+	// FIELD inside a present composite, and a field of a NULL composite.
+	// PostgreSQL answers NULL for both, and they must not be conflated.
+	add("RowFieldIsNull",
+		`SELECT COUNT(*) AS n FROM `+tbl+` WHERE rw.b IS NULL`,
+		`SELECT COUNT(*) AS n FROM `+tbl+` WHERE (rw).b IS NULL`)
+	add("RowFieldNullContainerVsNullField",
+		`SELECT COUNT(*) AS both_null, SUM(CASE WHEN rw IS NULL THEN 1 ELSE 0 END) AS row_null `+
+			`FROM `+tbl+` WHERE rw.a IS NULL`,
+		`SELECT COUNT(*) AS both_null, SUM(CASE WHEN rw IS NULL THEN 1 ELSE 0 END) AS row_null `+
+			`FROM `+tbl+` WHERE (rw).a IS NULL`)
+
+	// A CAST off a field path, which reads the value through the typed route
+	// rather than the boxed one.
+	add("RowFieldCastIntToText",
+		`SELECT k, CAST(rw.b AS VARCHAR) AS v FROM `+tbl+` WHERE rw.b IS NOT NULL ORDER BY k`,
+		`SELECT k, CAST((rw).b AS VARCHAR) AS v FROM `+tbl+` WHERE (rw).b IS NOT NULL ORDER BY k`)
+
 	return out
 }
 

@@ -60,17 +60,28 @@ func TestSanitizeScanNeeds(t *testing.T) {
 		},
 		{
 			// "attrs.score" where attrs is a ROW-typed column of THIS scan
-			// is a field path, not an alias qualifier — kept verbatim.
-			// Dropping it broke every dotted Row access when sanitization
-			// landed in #249 (filter column "attrs.score" does not exist).
-			"row field path kept",
+			// is a field path, not an alias qualifier. What the scan must
+			// read is the BASE column: the expression compiler resolves the
+			// field out of it, and there is no such column as "attrs.score"
+			// in any file.
+			//
+			// Both of the other two answers have shipped and both were
+			// wrong. Dropping the reference entirely broke every dotted ROW
+			// access when sanitization landed in #249 ("filter column
+			// attrs.score does not exist"); keeping the DOTTED spelling —
+			// the fix for that — left a name no file schema carries in the
+			// stage's requested-column list, where it is intersected away
+			// along with the parent, so the field came back NULL on the
+			// stage DAG while the single-process path answered correctly
+			// (#568).
+			"row field path resolves to its base column",
 			&Node{
 				Type:        NodeScan,
 				TableName:   "events",
 				ScanColumns: []string{"id", "attrs"},
 			},
 			[]string{"id", "attrs.score", "other.col"},
-			[]string{"attrs.score", "id"},
+			[]string{"attrs", "id"},
 		},
 		{
 			// Table name works as the alias when no explicit alias exists.

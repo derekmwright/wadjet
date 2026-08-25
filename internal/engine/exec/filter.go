@@ -851,13 +851,18 @@ func (f *MatchNothingFilter) Clone() UnaryOperator { return &MatchNothingFilter{
 
 // LikeFilter uses a vectorized kernel for SQL LIKE pattern matching.
 type LikeFilter struct {
-	ColName  string
-	Pattern  string
-	Negate   bool
-	colIdx   int
-	kern     kernel.FilterKernel
-	outSel   []uint32
-	resolved bool
+	ColName string
+	Pattern string
+	Negate  bool
+	// RowFallback mirrors KernelFilter.RowFallback: the row-at-a-time
+	// predicate for a ROW field path the kernel cannot address (#568).
+	RowFallback Predicate
+	colIdx      int
+	kern        kernel.FilterKernel
+	outSel      []uint32
+	resolved    bool
+	useFallback bool
+	inner       *Filter
 }
 
 func NewLikeFilter(colName, pattern string, negate bool) *LikeFilter {
@@ -866,18 +871,31 @@ func NewLikeFilter(colName, pattern string, negate bool) *LikeFilter {
 
 func (f *LikeFilter) Init(_ context.Context) error { return nil }
 
-func (f *LikeFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+func (f *LikeFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
 		f.colIdx = in.ColumnIndex(f.ColName)
 		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
 			parts := strings.SplitN(f.ColName, ".", 2)
 			f.colIdx = in.ColumnIndex(parts[1])
+			if f.colIdx < 0 && f.RowFallback != nil {
+				// A ROW FIELD PATH the LIKE kernel cannot reach — same
+				// delegation KernelFilter makes, and for the same reason:
+				// without it the name resolved to nothing and every row was
+				// dropped silently (#568).
+				if pi := in.ColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
+					f.useFallback = true
+					f.inner = NewFilter(f.RowFallback)
+				}
+			}
 		}
 		if f.colIdx >= 0 {
 			f.kern = kernel.ResolveLikeFilterKernel(in.Columns[f.colIdx].Type, f.Pattern, f.Negate)
 		}
 		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
+	}
+	if f.useFallback {
+		return f.inner.Execute(ctx, in)
 	}
 	if f.colIdx < 0 {
 		return nil, nil
@@ -934,7 +952,7 @@ func containerLikeName(typ batch.TypeID) (string, bool) {
 func (f *LikeFilter) Close() error { return nil }
 
 func (f *LikeFilter) Clone() UnaryOperator {
-	return &LikeFilter{ColName: f.ColName, Pattern: f.Pattern, Negate: f.Negate}
+	return &LikeFilter{ColName: f.ColName, Pattern: f.Pattern, Negate: f.Negate, RowFallback: f.RowFallback}
 }
 
 // NullCheckFilter is a vectorized filter for IS NULL / IS NOT NULL predicates.
@@ -942,9 +960,18 @@ func (f *LikeFilter) Clone() UnaryOperator {
 type NullCheckFilter struct {
 	ColName   string
 	CheckNull bool // true = IS NULL, false = IS NOT NULL
-	colIdx    int
-	outSel    []uint32
-	resolved  bool
+	// RowFallback, when non-nil, evaluates the original IS [NOT] NULL
+	// row-at-a-time for the shape this bitmap scan cannot serve: a ROW FIELD
+	// PATH, whose null is the FIELD's and not the container's. Without it
+	// the name resolved to nothing and `WHERE rw.f IS NULL` answered NO ROWS
+	// on every input — an empty result indistinguishable from real data,
+	// the #147 failure mode one level down (#568).
+	RowFallback Predicate
+	colIdx      int
+	outSel      []uint32
+	resolved    bool
+	useFallback bool
+	inner       *Filter
 }
 
 func NewNullCheckFilter(colName string, checkNull bool) *NullCheckFilter {
@@ -953,15 +980,24 @@ func NewNullCheckFilter(colName string, checkNull bool) *NullCheckFilter {
 
 func (f *NullCheckFilter) Init(_ context.Context) error { return nil }
 
-func (f *NullCheckFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+func (f *NullCheckFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
 		f.colIdx = in.ColumnIndex(f.ColName)
 		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
 			parts := strings.SplitN(f.ColName, ".", 2)
 			f.colIdx = in.ColumnIndex(parts[1])
+			if f.colIdx < 0 && f.RowFallback != nil {
+				if pi := in.ColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
+					f.useFallback = true
+					f.inner = NewFilter(f.RowFallback)
+				}
+			}
 		}
 		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
+	}
+	if f.useFallback {
+		return f.inner.Execute(ctx, in)
 	}
 	if f.colIdx < 0 {
 		if f.CheckNull {
@@ -1027,7 +1063,7 @@ func (f *NullCheckFilter) Execute(_ context.Context, in *batch.RecordBatch) (*ba
 func (f *NullCheckFilter) Close() error { return nil }
 
 func (f *NullCheckFilter) Clone() UnaryOperator {
-	return &NullCheckFilter{ColName: f.ColName, CheckNull: f.CheckNull}
+	return &NullCheckFilter{ColName: f.ColName, CheckNull: f.CheckNull, RowFallback: f.RowFallback}
 }
 
 func toKernelOp(op CompareOp) kernel.CompareOp {

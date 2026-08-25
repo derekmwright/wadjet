@@ -63,7 +63,7 @@ func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
 			// still shapes it correctly. Bare columns and renames fall
 			// through to the scans below, source-named as the DAG spells
 			// them.
-			var colTypes map[string]parquet.TypeID
+			var colTypes colDecls
 			var strictInt map[string]bool
 			haveTypes := false
 			for _, pr := range cur.Projections {
@@ -76,7 +76,7 @@ func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
 					continue
 				}
 				if !haveTypes && len(cur.Children) == 1 {
-					colTypes = inputColTypes(cur.Children[0])
+					colTypes = inputColDecls(cur.Children[0])
 					// Same integer-preserving-arithmetic hint
 					// absorbComputedSubqueryProjection passes when it
 					// materializes this same computed column into the scan
@@ -90,7 +90,7 @@ func declaredJoinSchema(n *logical.Node, want []string) []parquet.Column {
 				seen[lc] = true
 				out = append(out, parquet.Column{
 					Name:     pr.Alias,
-					Type:     inferProjectionTypeCols(pr.ASTExpr, parquet.TypeString, strictInt, colTypes),
+					Type:     inferProjectionTypeDecls(pr.ASTExpr, parquet.TypeString, strictInt, colTypes),
 					Nullable: true,
 				})
 			}

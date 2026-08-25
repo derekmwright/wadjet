@@ -385,13 +385,19 @@ func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
 				continue
 			}
 			// "attrs.score" where attrs is a ROW-typed column of THIS
-			// scan is a field path, not an alias qualifier — keep it
-			// verbatim (the expression compiler resolves the field, and
-			// the scan must read the base column). Dropping it broke
-			// every dotted Row access (filter column "attrs.score" does
-			// not exist) when sanitization landed in #249.
-			if _, ok := inSchema[strings.ToLower(alias)]; ok {
-				keep[name] = true
+			// scan is a field path, not an alias qualifier. What the scan
+			// must read is the BASE column — the expression compiler
+			// resolves the field out of it — so that is what is kept.
+			// Dropping the reference entirely broke every dotted ROW access
+			// (filter column "attrs.score" does not exist) when sanitization
+			// landed in #249, and keeping the DOTTED spelling was the other
+			// half of the same mistake: a stage's requested-column list is
+			// intersected with the file schema, which has no such column, so
+			// the parent went unread and every field came back NULL on the
+			// stage DAG while the single-process path answered correctly
+			// (#568 — the "parquet projection narrowed" warning names it).
+			if canon, ok := inSchema[strings.ToLower(alias)]; ok {
+				keep[canon] = true
 			}
 			continue // other relation's qualified column: drop
 		}

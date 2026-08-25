@@ -98,7 +98,7 @@ func TestNodeDeclaredTypeThroughNestedCalls(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: parse %q: %v", tc.name, tc.sql, err)
 		}
-		got, c := nodeDeclaredType(node, nil)
+		got, c := nodeDeclaredType(node, colDecls{})
 		if got != tc.want || c != tc.wantC {
 			t.Errorf("%s\n  %s\n  declared (%s, %s), want (%s, %s)",
 				tc.name, tc.sql, got, c, tc.want, tc.wantC)
@@ -290,7 +290,7 @@ func TestNodeDeclaredTypeFromColumnTypes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: parse %q: %v", tc.name, tc.sql, err)
 		}
-		got, c := nodeDeclaredType(node, nationColTypes)
+		got, c := nodeDeclaredType(node, colDecls{types: nationColTypes})
 		if got != tc.want || c != tc.wantC {
 			t.Errorf("%s\n  %s\n  declared (%s, %s), want (%s, %s)",
 				tc.name, tc.sql, got, c, tc.want, tc.wantC)

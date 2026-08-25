@@ -1036,6 +1036,82 @@ func Corpus() []Query {
 				`FROM %s WHERE id < 400 ORDER BY id`, n, n, tbl),
 			oracle.CmpOrdered, n)
 	}
+	// ROW FIELD PATHS. A field path is declared by its PARENT's schema and by
+	// nothing else — `b` is not a column of typemx_nested — so until #568
+	// every one of these was typed STRING: `c_row.b` over an INT64 field came
+	// back as text, ORDER BY sorted it as text ("10" before "9"), and GROUP
+	// BY and MIN/MAX could not run at all ("aggregate input \"b\" is not a
+	// column of its input"). The entries below take the same field through
+	// each consumer class the corpus uses for a column, so a regression in
+	// any one of them shows as a two-path or reuse divergence rather than as
+	// a shape no gate ever asks for.
+	//
+	// c_row.a is STRING and c_row.b INT64, both NULLABLE inside a ROW that is
+	// itself NULL on a stride — so every entry also crosses the two NULL
+	// shapes a field path has and a column does not: a null FIELD in a
+	// present ROW, and a field of a null ROW.
+	for _, fp := range []struct{ path, kind string }{
+		{"c_row.a", "str"},
+		{"c_row.b", "int"},
+	} {
+		add("rowfield_project_"+fp.kind,
+			fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE id < 400 ORDER BY id`, fp.path, Nested),
+			oracle.CmpOrdered, "c_row")
+		add("rowfield_order_"+fp.kind,
+			fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE id < 400 ORDER BY %s, id`, fp.path, Nested, fp.path),
+			oracle.CmpOrdered, "c_row")
+		add("rowfield_order_desc_"+fp.kind,
+			fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE id < 400 ORDER BY %s DESC, id`, fp.path, Nested, fp.path),
+			oracle.CmpOrdered, "c_row")
+		add("rowfield_group_"+fp.kind,
+			fmt.Sprintf(`SELECT %s AS k, COUNT(*) AS n FROM %s WHERE id < 400 GROUP BY %s ORDER BY k`,
+				fp.path, Nested, fp.path),
+			oracle.CmpOrdered, "c_row")
+		add("rowfield_minmax_"+fp.kind,
+			fmt.Sprintf(`SELECT MIN(%s) AS lo, MAX(%s) AS hi FROM %s`, fp.path, fp.path, Nested),
+			oracle.CmpUnordered, "c_row")
+		add("rowfield_minmax_group_"+fp.kind,
+			fmt.Sprintf(`SELECT g, MIN(%s) AS lo, MAX(%s) AS hi FROM %s GROUP BY g ORDER BY g`,
+				fp.path, fp.path, Nested),
+			oracle.CmpOrdered, "c_row")
+		add("rowfield_isnull_"+fp.kind,
+			fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s WHERE %s IS NULL`, Nested, fp.path),
+			oracle.CmpUnordered, "c_row")
+	}
+	// A typed literal on the other side of the comparison: the predicate the
+	// field's declaration decides. `b > 1100` is an INTEGER comparison over
+	// an INT64 field, and was a TEXT one while the field read STRING.
+	add("rowfield_pred_int",
+		fmt.Sprintf(`SELECT id, c_row.b AS v FROM %s WHERE c_row.b > 1100 AND id < 400 ORDER BY id`, Nested),
+		oracle.CmpOrdered, "c_row")
+	add("rowfield_pred_str",
+		fmt.Sprintf(`SELECT id, c_row.a AS v FROM %s WHERE c_row.a > 'r-00100' AND id < 400 ORDER BY id`, Nested),
+		oracle.CmpOrdered, "c_row")
+	// CAST off a field path, and arithmetic over one: both read the value
+	// through the typed route rather than the boxed one.
+	add("rowfield_cast",
+		fmt.Sprintf(`SELECT id, CAST(c_row.b AS DOUBLE) AS v FROM %s WHERE id < 200 ORDER BY id`, Nested),
+		oracle.CmpOrdered, "c_row")
+	add("rowfield_arith",
+		fmt.Sprintf(`SELECT id, c_row.b + 1 AS v FROM %s WHERE id < 200 ORDER BY id`, Nested),
+		oracle.CmpOrdered, "c_row")
+	// A field that is itself a CONTAINER. The declaration a bare TypeID
+	// cannot carry is exactly what these need — a ROW field with its own
+	// Fields, an ARRAY field with its ElementType, a MAP field with its
+	// entry ROW — and without it the value came back as the Go rendering of
+	// a map ("map[x:7]"), written into a STRING vector.
+	for _, fp := range []struct{ path, kind string }{
+		{"c_rownest.s", "row"},
+		{"c_rownest.l", "arr"},
+		{"c_rownest.m", "map"},
+	} {
+		add("rowfield_nested_project_"+fp.kind,
+			fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE id < 400 ORDER BY id`, fp.path, Nested),
+			oracle.CmpOrdered, "c_rownest")
+		add("rowfield_nested_minmax_"+fp.kind,
+			fmt.Sprintf(`SELECT MIN(%s) AS lo, MAX(%s) AS hi FROM %s`, fp.path, fp.path, Nested),
+			oracle.CmpUnordered, "c_rownest")
+	}
 
 	// A join ACROSS the two tables: the flat side's typed columns and the
 	// nested side's containers meet in one output batch, which is the shape a

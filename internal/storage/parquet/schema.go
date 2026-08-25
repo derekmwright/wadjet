@@ -316,6 +316,28 @@ type Column struct {
 	Fields      []Column `json:"fields,omitempty"`       // for ROW/MAP: child field definitions
 }
 
+// Field returns c's named child field. It answers only for a ROW column:
+// that is the one shape a field PATH (`rw.c`) can name, and it is the test
+// the runtime resolver makes too (expr.ColRef.resolveSlow requires the
+// parent vector to be TypeRow). MAP reuses ElementType for its entry ROW and
+// ARRAY has no names at all, so neither is addressable this way.
+//
+// The match is case-insensitive, like every other column-name resolution in
+// the planner. A field path whose type is not resolved here is declared
+// STRING all the way down — the projection's output vector, the sort
+// comparator and the wire OID with it (#568).
+func (c *Column) Field(name string) (Column, bool) {
+	if c == nil || c.Type != TypeRow {
+		return Column{}, false
+	}
+	for i := range c.Fields {
+		if strings.EqualFold(c.Fields[i].Name, name) {
+			return c.Fields[i], true
+		}
+	}
+	return Column{}, false
+}
+
 // Schema defines the schema for a Parquet file.
 type Schema struct {
 	Columns []Column `json:"columns"`

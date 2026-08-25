@@ -103,7 +103,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 	// SELECT list is not a row-wise computation at all.
 	var computed []ProjectExprSpec
 	needCols := map[string]bool{}
-	var colTypes map[string]parquet.TypeID
+	var colTypes colDecls
 	var strictInt map[string]bool
 	haveTypes := false
 	for _, pr := range proj.Projections {
@@ -117,7 +117,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 			return
 		}
 		if !haveTypes {
-			colTypes = inputColTypes(proj.Children[0])
+			colTypes = inputColDecls(proj.Children[0])
 			// Same integer-preserving-arithmetic hint as
 			// attachScanSelectProjections (#297, #445): without it, `id + 1`
 			// over a strict-int column declares (and computes) FLOAT64 here.
@@ -134,7 +134,7 @@ func absorbComputedSubqueryProjection(child *logical.Node, childStages []Stage, 
 			// The computed column exists nowhere in the catalog, so its
 			// declared type IS its runtime type — the worker builds the
 			// output vector from it (#333).
-			Type:      inferProjectionTypeCols(pr.ASTExpr, parquet.TypeString, strictInt, colTypes),
+			Type:      inferProjectionTypeDecls(pr.ASTExpr, parquet.TypeString, strictInt, colTypes),
 			TypeKnown: true,
 		})
 		collectASTCols(pr.ASTExpr, needCols)

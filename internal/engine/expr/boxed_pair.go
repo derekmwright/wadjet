@@ -91,16 +91,22 @@ const (
 func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 	switch v := e.(type) {
 	case *ColRef:
-		if v.structField != "" {
-			// A ROW field access reads a boxed value out of a container; the
-			// container's declaration does not type the field here.
-			return boxUnknown, true
-		}
 		v.resolve(b)
 		if v.idx < 0 || v.idx >= len(b.Columns) {
 			return boxUnknown, false
 		}
-		switch v.typ {
+		declared := v.typ
+		if v.structField != "" {
+			// A ROW field access reads a boxed value out of a container, and
+			// the CONTAINER's declaration says nothing about the field. Its
+			// own does: the field's declared type is resolved alongside it
+			// (ColRef.fieldTyp), so a DECIMAL field compares as a decimal
+			// and a STRING field as text, the same rules a column of that
+			// type gets. Before #568 this arm answered boxUnknown outright
+			// and every field path fell through to compare()'s guess.
+			declared = v.fieldTyp
+		}
+		switch declared {
 		case batch.TypeDecimal:
 			return boxDecimal, true
 		case batch.TypeInt32, batch.TypeInt64, batch.TypeFloat32, batch.TypeFloat64:

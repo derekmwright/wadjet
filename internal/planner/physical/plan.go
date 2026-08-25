@@ -2733,10 +2733,10 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 	// onto exec.ProjectColumn.Type. Resolving bare column references against
 	// the catalog has to happen here too, or COALESCE(n_name, n_comment)
 	// stays Float64 on arm B alone (#333).
-	var colTypes map[string]parquet.TypeID
+	var colTypes colDecls
 	var strictInt map[string]bool
 	if len(projNode.Children) == 1 {
-		colTypes = inputColTypes(projNode.Children[0])
+		colTypes = inputColDecls(projNode.Children[0])
 		// The same integer-preserving-arithmetic hint the single-process
 		// path resolves via emittedColTypes/declaredProjectionType (#297):
 		// without it, `id + 1` over a strict-int column declares (and
@@ -2760,12 +2760,17 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 		name := strings.ToLower(expr)
 		var typ parquet.TypeID
 		var typeKnown bool
-		if p.ASTExpr != nil && !isSimpleColRefForRename(p.ASTExpr) {
+		// A ROW FIELD PATH looks like a simple column reference and is not
+		// one: no stage carries a column by that name, so the fragment has
+		// to COMPUTE it, and its type has to be declared here — nothing
+		// downstream can correct a spec the way exec.Project corrects a
+		// placeholder (#568).
+		if p.ASTExpr != nil && (!isSimpleColRefForRename(p.ASTExpr) || astIsFieldPath(p.ASTExpr, colTypes)) {
 			if referencesSyntheticAgg(p.ASTExpr) {
 				return // wrapped aggregate — evaluated at the gather
 			}
 			hasExpr = true
-			typ = inferProjectionTypeCols(p.ASTExpr, parquet.TypeString, strictInt, colTypes)
+			typ = inferProjectionTypeDecls(p.ASTExpr, parquet.TypeString, strictInt, colTypes)
 			typeKnown = true
 		}
 		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ, TypeKnown: typeKnown})
@@ -2805,9 +2810,9 @@ func attachScanSelectProjections(root *logical.Node, stages []Stage) {
 				// just below it: the rewritten expression names only SOURCE
 				// columns, so the strict-int set to check it against is the
 				// one visible BELOW the rename chain, same as #445 above.
-				specs[j].Type = inferProjectionTypeCols(rewritten, parquet.TypeString,
+				specs[j].Type = inferProjectionTypeDecls(rewritten, parquet.TypeString,
 					strictIntArithColsThroughRenames(renameChild),
-					sourceColTypesThroughRenames(renameChild))
+					sourceColDeclsThroughRenames(renameChild))
 				specs[j].TypeKnown = true
 				anyNestedRename = true
 			}
@@ -4630,7 +4635,7 @@ func aggStageGroupKey(key string, child *logical.Node) (string, bool) {
 // because that text is what the worker parses and looks up (#379).
 func derivedGroupKeyTypes(groupBy []string, child *logical.Node) map[string]parquet.TypeID {
 	var out map[string]parquet.TypeID
-	var colTypes map[string]parquet.TypeID
+	var colTypes colDecls
 	var strictInt map[string]bool
 	resolved := false
 	for _, key := range groupBy {
@@ -4641,18 +4646,25 @@ func derivedGroupKeyTypes(groupBy []string, child *logical.Node) map[string]parq
 		if err != nil {
 			continue
 		}
-		if _, bare := node.(*plansql.ColRef); bare {
-			continue
-		}
 		if !resolved {
-			colTypes = inputColTypes(child)
+			colTypes = inputColDecls(child)
 			strictInt = strictIntArithCols(child)
 			resolved = true
+		}
+		// A bare column reference needs no derived key — except a ROW FIELD
+		// PATH, which parses as one and is not one: no stage emits a column
+		// by that name, so the worker has to COMPUTE it, and an entry here is
+		// how it learns that (buildAggInputProjection reads this map as the
+		// planner's "this key is derived, and this is its type"). Without it
+		// the key reached HashAggregate as a name and failed to resolve
+		// (#568).
+		if _, bare := node.(*plansql.ColRef); bare && !astIsFieldPath(node, colTypes) {
+			continue
 		}
 		if out == nil {
 			out = make(map[string]parquet.TypeID)
 		}
-		out[key] = inferProjectionTypeCols(node, parquet.TypeString, strictInt, colTypes)
+		out[key] = inferProjectionTypeDecls(node, parquet.TypeString, strictInt, colTypes)
 	}
 	return out
 }
@@ -4988,12 +5000,17 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// native-DAG workers need this to project the derived column
 			// before running HashAggregate.
 			if agg.InputExpr != nil {
-				if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
+				// A ROW FIELD PATH is a bare reference in shape only: the
+				// worker's HashAggregate resolves inputs by NAME through
+				// columnIndexFallback, which has no ROW arm, so it has to be
+				// pre-projected exactly like a computed argument (#568).
+				_, bare := agg.InputExpr.(*plansql.ColRef)
+				if !bare || astIsFieldPath(agg.InputExpr, inputColDecls(exprCols)) {
 					spec.InputExpr = agg.InputExpr.String()
 					// And the type that expression evaluates into, since
 					// the worker builds the pre-aggregate projection from
 					// the text alone and has no catalog to consult.
-					spec.InputType = inferProjectionTypeCols(agg.InputExpr, parquet.TypeFloat64, nil, inputColTypes(exprCols))
+					spec.InputType = inferProjectionTypeDecls(agg.InputExpr, parquet.TypeFloat64, nil, inputColDecls(exprCols))
 				}
 			}
 			aggSpecs = append(aggSpecs, spec)
@@ -5758,7 +5775,8 @@ func absorbSecurityBarrier(node, scan *logical.Node, stages *[]Stage) {
 		if isExpr {
 			// Same integer-preserving-arithmetic hint as
 			// attachScanSelectProjections (#297, #445).
-			typ = inferProjectionTypeCols(pr.ASTExpr, parquet.TypeString, strictIntArithCols(scan), scan.ScanColTypes)
+			typ = inferProjectionTypeDecls(pr.ASTExpr, parquet.TypeString, strictIntArithCols(scan),
+				colDecls{types: scan.ScanColTypes, fields: scan.ScanColFields})
 		}
 		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ, TypeKnown: isExpr})
 	}
@@ -7566,12 +7584,19 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	//   1. Any non-aggregate projection has a complex AST expression (e.g., SUM(x) * 0.0001)
 	//   2. Any projection renames a column via alias (e.g., l_suppkey AS supplier_no)
 	if hasAggregateAncestor(child) {
+		// A group key is decided against the AGGREGATE'S INPUT, which is
+		// where a ROW column and its fields live — the aggregate's own
+		// output carries neither.
+		var elideKeyDecls colDecls
+		if agg := findAggregateAncestor(child); agg != nil && len(agg.Children) == 1 {
+			elideKeyDecls = inputColDecls(agg.Children[0])
+		}
 		needsProject := false
 		for _, proj := range node.Projections {
 			// A literal select item is NOT elidable: the aggregate's output
 			// carries it as a synthetic __gb_expr_N key column, and only the
 			// projection renames it to the select-list name.
-			if proj.ASTExpr != nil && !proj.IsAgg && !isPlainGroupKey(proj.ASTExpr) {
+			if proj.ASTExpr != nil && !proj.IsAgg && !isPlainGroupKey(proj.ASTExpr, elideKeyDecls) {
 				needsProject = true
 				break
 			}
@@ -7640,8 +7665,12 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	// aggregate output — use the synthetic column instead.
 	gbExprToSyn := map[string]string{}
 	if isOverAggregate && len(aggNode.GroupByExprs) == len(aggNode.GroupBy) {
+		var gbDecls colDecls
+		if len(aggNode.Children) == 1 {
+			gbDecls = inputColDecls(aggNode.Children[0])
+		}
 		for i, gbExpr := range aggNode.GroupByExprs {
-			if gbExpr != nil && !isPlainGroupKey(gbExpr) {
+			if gbExpr != nil && !isPlainGroupKey(gbExpr, gbDecls) {
 				gbExprToSyn[gbExpr.String()] = fmt.Sprintf("__gb_expr_%d", i)
 			}
 		}
@@ -7653,10 +7682,10 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	// map is for a SELECT expression that maps to a synthetic group column —
 	// a rename of a value computed BELOW the aggregate, so it types against
 	// the aggregate's input rather than its output.
-	childColTypes := inputColTypes(child)
-	var aggInputColTypes map[string]parquet.TypeID
+	childColTypes := inputColDecls(child)
+	var aggInputColTypes colDecls
 	if isOverAggregate && len(aggNode.Children) > 0 {
-		aggInputColTypes = inputColTypes(aggNode.Children[0])
+		aggInputColTypes = inputColDecls(aggNode.Children[0])
 	}
 
 	var projCols []exec.ProjectColumn
@@ -7683,9 +7712,11 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// matches a GROUP BY expression that was pre-computed into a synthetic
 		// column. If so, use a ColumnRef to the synthetic column instead of
 		// re-evaluating the expression (the original columns are gone).
+		var synSource string
 		if isOverAggregate && proj.ASTExpr != nil && !proj.IsAgg {
 			if synName, ok := gbExprToSyn[proj.ASTExpr.String()]; ok {
 				expression = exec.ColumnRef(synName)
+				synSource = synName
 			}
 		}
 
@@ -7791,7 +7822,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					colTypes = aggInputColTypes
 				}
 			}
-			outType = inferProjectionTypeCols(proj.ASTExpr, outType, strictInt, colTypes)
+			outType = inferProjectionTypeDecls(proj.ASTExpr, outType, strictInt, colTypes)
 		}
 
 		pc := exec.ProjectColumn{
@@ -7813,6 +7844,26 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// source column so Project.Execute can resolve the correct type.
 		if name != colRef {
 			pc.SourceCol = colRef
+		}
+		// A ROW FIELD PATH records the WHOLE path, qualifier included, even
+		// when the output name matches the field name. It is the only
+		// spelling exec.Project can resolve the field's declaration from —
+		// colRef here has already lost the `rw.` through cleanExpr — and it
+		// is what carries the shape a bare TypeID cannot: a DECIMAL field's
+		// (p,s) and a nested ROW/ARRAY/MAP field's own structure, which
+		// colRefDeclaredType declines for the same reason it declines them
+		// for a column (#568).
+		if fp, ok := fieldPathRef(proj.ASTExpr, childColTypes); ok {
+			pc.SourceCol = fp
+		}
+		// A SELECT item that maps to a synthetic GROUP BY key column reads
+		// that column, so it is the source exec.Project must type from. The
+		// planner's own declaration cannot carry a parameterized type
+		// (colRefDeclaredType declines DECIMAL and the containers), which
+		// left `SELECT rw.d ... GROUP BY rw.d` declaring STRING over a
+		// DECIMAL key the aggregate had already emitted correctly (#568).
+		if synSource != "" {
+			pc.SourceCol = synSource
 		}
 		// Tell the runtime this output is computed, so it does not type the
 		// output vector from an input column that merely shares the alias
@@ -7889,11 +7940,23 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// that evaluates it into a synthetic column.
 	// CSE: deduplicate identical expressions by their string representation.
 	var preProjectCols []exec.ProjectColumn
+	var preProjectMeta []parquet.Column
 	syntheticNames := make(map[int]string) // agg index → synthetic column name
 	exprDedup := make(map[string]string)   // expr string → synthetic column name
 
+	// The declarations of what feeds the aggregate, resolved once: they are
+	// what tells a ROW FIELD PATH apart from a table-qualified column, and a
+	// field path is NOT a simple column reference however much it looks like
+	// one. exec.HashAggregate resolves its inputs by NAME through
+	// columnIndexFallback, which has no ROW arm, so `MIN(rw.n)` failed with
+	// `aggregate input "n" is not a column of its input` — cleanExpr having
+	// dropped the `rw.` on the way. Routing it through the synthetic
+	// pre-projection below is what materializes the field as a real column,
+	// at its declared type (#568).
+	aggInputDecls := inputColDecls(node.Children[0])
+
 	for i, agg := range node.AggExprs {
-		if agg.InputExpr != nil && !isSimpleColRef(agg.InputExpr) {
+		if agg.InputExpr != nil && (!isSimpleColRef(agg.InputExpr) || astIsFieldPath(agg.InputExpr, aggInputDecls)) {
 			exprStr := agg.InputExpr.String()
 			if existing, ok := exprDedup[exprStr]; ok {
 				// Reuse previously compiled expression
@@ -7915,7 +7978,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					// projection path (#310). MAX(COALESCE(a, b)) needs the
 					// input's column types on top of that, or the polymorphic
 					// declaration falls back to the same wrong Float64 (#333).
-					Type: inferProjectionTypeCols(agg.InputExpr, parquet.TypeFloat64, nil, inputColTypes(node.Children[0])),
+					Type: inferProjectionTypeDecls(agg.InputExpr, parquet.TypeFloat64, nil, aggInputDecls),
 					Expr: wrapExpr(compiled),
 				}
 				// Use general vectorized evaluation when available.
@@ -7927,20 +7990,55 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				}
 				// Use vectorized float64 evaluation when available (entire column at once),
 				// falling back to typed per-row eval.
-				if ve, ok := compiled.(expr.VecFloat64Expr); ok {
-					pc.VecFloat64Eval = ve.EvalFloat64Vec
-					if binop, ok := ve.(*expr.BinOpFloat64); ok {
-						pc.VecFloat64Clone = func() exec.VecFloat64Expression {
-							return binop.CloneVec().EvalFloat64Vec
+				//
+				// Gated on the DECLARED type, the way the SELECT-list
+				// projection gates its own typed paths. aggPreProject picks
+				// its write route from WHICH eval is set, not from the
+				// column, so a float writer on a non-float column writes
+				// into a nil Float64Data — reached the moment a ROW field
+				// path started taking this route, since a bare column
+				// reference implements every one of these interfaces
+				// (#568).
+				if pc.Type == parquet.TypeFloat64 {
+					if ve, ok := compiled.(expr.VecFloat64Expr); ok {
+						pc.VecFloat64Eval = ve.EvalFloat64Vec
+						if binop, ok := ve.(*expr.BinOpFloat64); ok {
+							pc.VecFloat64Clone = func() exec.VecFloat64Expression {
+								return binop.CloneVec().EvalFloat64Vec
+							}
 						}
 					}
+					if fe, ok := compiled.(expr.Float64Expr); ok {
+						pc.Float64Eval = fe.EvalFloat64
+					}
 				}
-				if fe, ok := compiled.(expr.Float64Expr); ok {
-					pc.Float64Eval = fe.EvalFloat64
-				} else if ie, ok := compiled.(expr.Int64Expr); ok {
-					pc.Int64Eval = ie.EvalInt64
+				if pc.Type == parquet.TypeInt64 {
+					if ie, ok := compiled.(expr.Int64Expr); ok {
+						pc.Int64Eval = ie.EvalInt64
+					}
+				}
+				// A ROW FIELD PATH declares the FIELD, wholesale: its (p,s),
+				// its dimension, its nested shape. colRefDeclaredType above
+				// declines every parameterized type — it can only answer a
+				// TypeID — so MIN over a DECIMAL field fell back to the
+				// Float64 default and a container field to Float64 outright
+				// (#568).
+				meta := parquet.Column{Name: synName, Type: pc.Type, Nullable: true}
+				if fc, ok := aggInputDecls.field(fieldPathColRef(agg.InputExpr)); ok {
+					meta = fc
+					meta.Name, meta.Nullable = synName, true
+					pc.Type = fc.Type
+					pc.Dimension = fc.Dimension
+					// The boxed route is the only null-correct one for a
+					// field path: aggPreProject picks its writer from WHICH
+					// eval is set, and the typed writers have no way to mark
+					// a NULL field — MIN over a float field read the 0 they
+					// leave behind instead of skipping the row.
+					pc.VecEval, pc.VecFloat64Eval, pc.VecFloat64Clone = nil, nil, nil
+					pc.Float64Eval, pc.Int64Eval = nil, nil
 				}
 				preProjectCols = append(preProjectCols, pc)
+				preProjectMeta = append(preProjectMeta, meta)
 				syntheticNames[i] = synName
 				exprDedup[exprStr] = synName
 			}
@@ -7988,7 +8086,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// Catalog types of the aggregate's input, for typing derived GROUP BY
 	// key expressions (see nodeDeclaredType, #333). Resolved once.
 	aggChildStrictInt := strictIntArithCols(node.Children[0])
-	aggChildColTypes := inputColTypes(node.Children[0])
+	aggChildColTypes := inputColDecls(node.Children[0])
 
 	groupByCols := make([]string, len(node.GroupBy))
 	for i, gb := range node.GroupBy {
@@ -8040,7 +8138,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				}
 				litPostOps = append(litPostOps, &aggPreProject{computed: []exec.ProjectColumn{{
 					Name: fmt.Sprintf("__gb_expr_%d", i),
-					Type: inferProjectionTypeCols(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes),
+					Type: inferProjectionTypeDecls(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes),
 					Expr: wrapExpr(compiled),
 				}}})
 				litElided[i] = true
@@ -8056,7 +8154,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			if litElided[i] {
 				continue
 			}
-			if gbExpr != nil && !isPlainGroupKey(gbExpr) {
+			if gbExpr != nil && !isPlainGroupKey(gbExpr, aggChildColTypes) {
 				synName := fmt.Sprintf("__gb_expr_%d", i)
 				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
 				if expr.IsCompileRefusal(compErr) {
@@ -8068,7 +8166,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 						// Numeric expressions (abs(x), x-1, …) must get a
 						// numeric synthetic column: SetValue on a String
 						// vector mangles float group keys.
-						Type: inferProjectionTypeCols(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes),
+						Type: inferProjectionTypeDecls(gbExpr, parquet.TypeString, aggChildStrictInt, aggChildColTypes),
 						Expr: wrapExpr(compiled),
 					}
 					// Batched evaluation when available — beyond the vec
@@ -8079,7 +8177,20 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					if ve, ok := compiled.(expr.VecExpr); ok {
 						pc.VecEval = ve.EvalVec
 					}
+					// Same rule the aggregate INPUT takes above: a ROW field
+					// path declares the whole field, and its value is
+					// written through the boxed route so a NULL field stays
+					// NULL (#568).
+					meta := parquet.Column{Name: synName, Type: pc.Type, Nullable: true}
+					if fc, ok := aggChildColTypes.field(fieldPathColRef(gbExpr)); ok {
+						meta = fc
+						meta.Name, meta.Nullable = synName, true
+						pc.Type = fc.Type
+						pc.Dimension = fc.Dimension
+						pc.VecEval = nil
+					}
 					preProjectCols = append(preProjectCols, pc)
+					preProjectMeta = append(preProjectMeta, meta)
 					groupByCols[i] = synName
 				}
 			}
@@ -8090,7 +8201,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// pass-through projection that keeps all input columns and adds
 	// the computed ones.
 	if len(preProjectCols) > 0 {
-		childOps = append(childOps, &aggPreProject{computed: preProjectCols})
+		childOps = append(childOps, &aggPreProject{computed: preProjectCols, meta: preProjectMeta})
 	}
 
 	// Compact literal-elided entries out of the key set.
@@ -8200,6 +8311,17 @@ func replaceAggWithColRef(node plansql.Node, target *plansql.FuncCallNode, colNa
 // lets a bare column reference INSIDE the expression decide a type rather than
 // leaving the polymorphic declarations to fall back to Float64 (#333).
 func inferProjectionTypeCols(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool, colTypes map[string]parquet.TypeID) parquet.TypeID {
+	return inferProjectionTypeDecls(node, fallback, strictInt, colDecls{types: colTypes})
+}
+
+// inferProjectionTypeDecls is inferProjectionTypeCols with the ROW FIELDS of
+// its input in hand as well as the column types, so a field path inside the
+// expression can decide a type. Callers that hold the logical node the
+// expression reads should use this one (inputColDecls); the map-only
+// signature above stays for the callers whose types are synthesized rather
+// than read off a scan (emittedColTypes and friends), where there are no
+// fields to carry.
+func inferProjectionTypeDecls(node plansql.Node, fallback parquet.TypeID, strictInt map[string]bool, decls colDecls) parquet.TypeID {
 	if strictInt != nil && expr.IntArithOn() {
 		inner := node
 		for {
@@ -8213,7 +8335,7 @@ func inferProjectionTypeCols(node plansql.Node, fallback parquet.TypeID, strictI
 			return parquet.TypeInt64
 		}
 	}
-	if !isComputedProjection(node) {
+	if !isComputedProjection(node) && !astIsFieldPath(node, decls) {
 		// A bare column reference is a copy, and exec.Project types that
 		// output from the column it copies — the input schema is the
 		// authority there, and it sees renames and derived inputs the
@@ -8221,12 +8343,18 @@ func inferProjectionTypeCols(node plansql.Node, fallback parquet.TypeID, strictI
 		// so this projection is typed by the caller's fallback exactly as
 		// before. #333 is about the arguments INSIDE an expression, where
 		// the output is computed and no input column describes it.
-		colTypes = nil
+		//
+		// A ROW FIELD PATH is the exception, and the reason the second
+		// clause exists: it LOOKS like a bare reference but copies no
+		// column, so the runtime has nothing to type it from and the
+		// fallback STRING stood — an INT64 field projected as text (#568).
+		// Here the catalog IS the authority, so the declarations stay.
+		decls = colDecls{}
 	}
 	// A guess is still the answer here: nothing is left to consult, and a
 	// polymorphic function's fallback is what types SELECT NULLIF(int_col, 1)
 	// numeric. Only expr.Undecided leaves the type to the caller.
-	if t, c := nodeDeclaredType(node, colTypes); c != expr.Undecided {
+	if t, c := nodeDeclaredType(node, decls); c != expr.Undecided {
 		return t
 	}
 	return fallback
@@ -8345,6 +8473,77 @@ func inputColTypes(n *logical.Node) map[string]parquet.TypeID {
 	return nil
 }
 
+// inputColFields is inputColTypes' companion for the ROW FIELDS of its
+// columns (#568): the same walk, sourced from ScanColFields, holding an entry
+// only for a ROW column that declares fields. A name two scans disagree on is
+// dropped rather than picking a side, exactly as the type walk does — a field
+// path resolved against the wrong side's ROW is the same silent-wrong-column
+// failure, one level down.
+func inputColFields(n *logical.Node) map[string][]parquet.Column {
+	if n == nil {
+		return nil
+	}
+	switch n.Type {
+	case logical.NodeScan:
+		return n.ScanColFields
+	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
+		if len(n.Children) != 1 {
+			return nil
+		}
+		return inputColFields(n.Children[0])
+	case logical.NodeJoin:
+		if len(n.Children) != 2 {
+			return nil
+		}
+		left, right := inputColFields(n.Children[0]), inputColFields(n.Children[1])
+		if left == nil {
+			return right
+		}
+		if right == nil {
+			return left
+		}
+		merged := make(map[string][]parquet.Column, len(left)+len(right))
+		for c, f := range left {
+			merged[c] = f
+		}
+		for c, f := range right {
+			if prev, dup := merged[c]; dup && !sameRowFields(prev, f) {
+				delete(merged, c)
+				continue
+			}
+			merged[c] = f
+		}
+		return merged
+	}
+	return nil
+}
+
+// sameRowFields reports whether two ROW declarations are the same shape, so a
+// join that carries the name on both sides can keep it. parquet.Column holds
+// a slice and is not comparable, which is why this is spelled out rather than
+// written as ==.
+func sameRowFields(a, b []parquet.Column) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !strings.EqualFold(a[i].Name, b[i].Name) || a[i].Type != b[i].Type ||
+			a[i].Precision != b[i].Precision || a[i].Scale != b[i].Scale ||
+			a[i].Dimension != b[i].Dimension || !sameRowFields(a[i].Fields, b[i].Fields) {
+			return false
+		}
+	}
+	return true
+}
+
+// inputColDecls is the pair of walks above taken together: what a node's
+// output columns declare, ready to hand to nodeDeclaredType. Callers that
+// hold the logical node an expression reads should build the context here
+// rather than passing inputColTypes alone, which cannot type a field path.
+func inputColDecls(n *logical.Node) colDecls {
+	return colDecls{types: inputColTypes(n), fields: inputColFields(n)}
+}
+
 // inputColDecimal is inputColTypes' companion for DECIMAL precision/scale
 // (#458): the same walk, sourced from ScanColDecimal instead of
 // ScanColTypes, and holding only entries a DECIMAL column has. A name two
@@ -8394,6 +8593,21 @@ func inputColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 // column-forwarders (every item a plain column reference); a computed or
 // aggregate item stops it with nil, because past that point a name may be
 // rebound to a different value and inputColTypes' own warning applies.
+// sourceColDeclsThroughRenames is sourceColTypesThroughRenames paired with
+// the ROW fields visible at the same point, so an expression rewritten
+// through a rename chain can still type a field path (#568).
+func sourceColDeclsThroughRenames(n *logical.Node) colDecls {
+	for n != nil && n.Type == logical.NodeProject && len(n.Children) == 1 {
+		for _, p := range n.Projections {
+			if p.IsAgg || p.Column == "" {
+				return colDecls{}
+			}
+		}
+		n = n.Children[0]
+	}
+	return inputColDecls(n)
+}
+
 func sourceColTypesThroughRenames(n *logical.Node) map[string]parquet.TypeID {
 	for n != nil && n.Type == logical.NodeProject && len(n.Children) == 1 {
 		for _, p := range n.Projections {
@@ -8424,19 +8638,129 @@ func strictIntArithColsThroughRenames(n *logical.Node) map[string]bool {
 	return strictIntArithCols(n)
 }
 
-// colRefDeclaredType resolves a bare column reference against the catalog
-// types of its input (inputColTypes). Undecided — today's answer, and the
-// caller's fallback with it — for a name no scan carries, a name two scans
-// disagree on, and anything that is not a scan column at all: an aggregate
-// output, a synthetic sort or group key. #331's machinery propagates a
-// decision as fact, so a wrong confident answer here is worse than the guess
-// it replaces.
+// colDecls is what a node's output columns declare, as far as the planner can
+// know it: the flat catalog types (inputColTypes) plus, for the ROW columns
+// among them, the FIELDS a field path can name (inputColFields).
 //
-// A qualified reference matches on its Column alone: the parser keeps the
-// qualifier in Table, and a delimited identifier that contains a dot
-// ("id.orig_h", a flat Zeek JSON column) is one name that must not be split.
-func colRefDeclaredType(n *plansql.ColRef, colTypes map[string]parquet.TypeID) (parquet.TypeID, expr.Confidence) {
-	t, ok := colTypes[strings.ToLower(n.Column)]
+// The second map exists because the first cannot answer the question. It is
+// keyed by column name, and the `c` in `rw.c` is not a column of anything —
+// so every lookup missed, the projection kept its STRING default, and a ROW
+// field path was declared STRING whatever its real type (#568).
+type colDecls struct {
+	types  map[string]parquet.TypeID
+	fields map[string][]parquet.Column
+}
+
+// colType resolves a column reference to its declared type, mirroring the
+// RUNTIME resolver (expr.ColRef.resolveSlow) step for step so a declaration
+// never describes a different column than the one the operator will read:
+// the full dotted spelling names a column of its own first, then the bare
+// name, and only then is the qualifier read as a ROW column and the name as
+// its field.
+//
+// The order is load-bearing in both directions. A delimited identifier that
+// contains a dot ("id.orig_h", a flat Zeek JSON column) is ONE name the
+// parser keeps whole in Column, so the bare lookup is what finds it; and a
+// table alias that happens to match a ROW column must not turn a real column
+// reference into a field path.
+func (d colDecls) colType(n *plansql.ColRef) (parquet.TypeID, bool) {
+	if n.Table != "" {
+		if t, ok := d.types[strings.ToLower(n.Table+"."+n.Column)]; ok {
+			return t, true
+		}
+	}
+	if t, ok := d.types[strings.ToLower(n.Column)]; ok {
+		return t, true
+	}
+	if f, ok := d.field(n); ok {
+		return f.Type, true
+	}
+	return 0, false
+}
+
+// field resolves n as a ROW field path and returns the field's full
+// declaration — its type, and for a parameterized field the (p,s), dimension
+// or nested shape that a bare TypeID cannot carry.
+func (d colDecls) field(n *plansql.ColRef) (parquet.Column, bool) {
+	if n == nil || n.Table == "" || d.fields == nil {
+		return parquet.Column{}, false
+	}
+	fields, ok := d.fields[strings.ToLower(n.Table)]
+	if !ok {
+		return parquet.Column{}, false
+	}
+	parent := parquet.Column{Type: parquet.TypeRow, Fields: fields}
+	return parent.Field(n.Column)
+}
+
+// isFieldPath reports whether n names a ROW FIELD rather than a column of the
+// input. It is the test every "is this a bare column reference?" predicate in
+// the planner needs, because a field path is NOT one: nothing downstream
+// resolves it by name — exec.columnIndexFallback has no ROW arm, and neither
+// does the hash aggregate that calls it — so a field path has to be
+// MATERIALIZED the way a computed expression is, not passed through as a name.
+//
+// It answers false whenever the reference resolves as a column first, in the
+// same order colType uses, so a real qualified reference is never mistaken
+// for one.
+func (d colDecls) isFieldPath(n *plansql.ColRef) bool {
+	if n == nil || n.Table == "" {
+		return false
+	}
+	if _, ok := d.types[strings.ToLower(n.Table+"."+n.Column)]; ok {
+		return false
+	}
+	if _, ok := d.types[strings.ToLower(n.Column)]; ok {
+		return false
+	}
+	_, ok := d.field(n)
+	return ok
+}
+
+// astIsFieldPath is isFieldPath over an expression node, seeing through
+// parentheses the way isComputedProjection does.
+func astIsFieldPath(node plansql.Node, decls colDecls) bool {
+	_, ok := fieldPathRef(node, decls)
+	return ok
+}
+
+// fieldPathRef returns the reference behind a ROW field path, and its
+// undropped `parent.field` spelling. cleanExpr strips the qualifier from
+// every column reference — right for a table alias, and the reason a field
+// path arrives downstream as a bare field name no column carries — so this is
+// the one place the whole path survives.
+func fieldPathRef(node plansql.Node, decls colDecls) (string, bool) {
+	for {
+		switch n := node.(type) {
+		case *plansql.ColRef:
+			if !decls.isFieldPath(n) {
+				return "", false
+			}
+			return n.Table + "." + n.Column, true
+		case *plansql.ParenNode:
+			node = n.Inner
+		default:
+			return "", false
+		}
+	}
+}
+
+// colRefDeclaredType resolves a column reference against the declarations of
+// its input (inputColDecls). Undecided — today's answer, and the caller's
+// fallback with it — for a name no scan carries, a name two scans disagree
+// on, and anything that is not a scan column at all: an aggregate output, a
+// synthetic sort or group key. #331's machinery propagates a decision as
+// fact, so a wrong confident answer here is worse than the guess it replaces.
+//
+// A ROW FIELD PATH resolves here too, on exactly the same terms as a column
+// (colDecls.colType). Before #568 it could not: the lookup was keyed by
+// column name and `c` is not a column of `t(id, c_flat, rw)`, so `rw.c`
+// answered Undecided and the caller's STRING fallback stood — which is how
+// `SELECT rw.n` over an INT64 field returned string("9") and `ORDER BY rw.c`
+// sorted a CIDR field by its stored text while `ORDER BY rw` over the same
+// values sorted by inet.
+func colRefDeclaredType(n *plansql.ColRef, decls colDecls) (parquet.TypeID, expr.Confidence) {
+	t, ok := decls.colType(n)
 	if !ok {
 		return 0, expr.Undecided
 	}
@@ -8447,6 +8771,10 @@ func colRefDeclaredType(n *plansql.ColRef, colTypes map[string]parquet.TypeID) (
 		// scale, VECTOR without its dimension, or ARRAY without its element
 		// type builds an output vector that reads back wrong. funcReturnType
 		// declines the nested types for the same reason.
+		//
+		// A field path of one of these types declines too, and for the same
+		// reason — exec.Project repairs it from the input batch, where the
+		// parent ROW vector's child carries the whole shape.
 		return 0, expr.Undecided
 	}
 	return t, expr.Decided
@@ -8478,7 +8806,7 @@ func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.Typ
 // every string it is handed — 1 group where there are 25 (#331/#333). The
 // caller's fallback stands in those cases, exactly as before.
 func ProjectionOutputType(node plansql.Node, fallback parquet.TypeID) parquet.TypeID {
-	if t, c := nodeDeclaredType(node, nil); c == expr.Decided {
+	if t, c := nodeDeclaredType(node, colDecls{}); c == expr.Decided {
 		return t
 	}
 	return fallback
@@ -8499,10 +8827,10 @@ func ProjectionOutputType(node plansql.Node, fallback parquet.TypeID) parquet.Ty
 // The confidence matters only inside a nested call: everything below returns a
 // type it decides outright, but a function call may return one it merely
 // guessed, and its caller must keep looking (see expr.Confidence, #331).
-func nodeDeclaredType(node plansql.Node, colTypes map[string]parquet.TypeID) (parquet.TypeID, expr.Confidence) {
+func nodeDeclaredType(node plansql.Node, decls colDecls) (parquet.TypeID, expr.Confidence) {
 	switch n := node.(type) {
 	case *plansql.ColRef:
-		return colRefDeclaredType(n, colTypes)
+		return colRefDeclaredType(n, decls)
 	case *plansql.BinaryOp:
 		if n.Op == "||" {
 			// String concatenation, not arithmetic. Declaring it Float64
@@ -8510,7 +8838,7 @@ func nodeDeclaredType(node plansql.Node, colTypes map[string]parquet.TypeID) (pa
 			// so every row came back NULL (#328).
 			return parquet.TypeString, expr.Decided
 		}
-		if t, c := binOpTemporalType(n, colTypes); c != expr.Undecided {
+		if t, c := binOpTemporalType(n, decls); c != expr.Undecided {
 			return t, c
 		}
 		if !binOpInvolvesInterval(n) {
@@ -8523,7 +8851,7 @@ func nodeDeclaredType(node plansql.Node, colTypes map[string]parquet.TypeID) (pa
 		// the hidden key materializes into a typed vector rather than into
 		// text, where "-0" vs "0" rendering used to decide the order.
 		if n.Op == "-" || n.Op == "+" {
-			t, c := nodeDeclaredType(n.Inner, colTypes)
+			t, c := nodeDeclaredType(n.Inner, decls)
 			if c != expr.Undecided {
 				switch t {
 				case parquet.TypeInt64, parquet.TypeInt32:
@@ -8534,11 +8862,11 @@ func nodeDeclaredType(node plansql.Node, colTypes map[string]parquet.TypeID) (pa
 			}
 		}
 	case *plansql.FuncCallNode:
-		return funcReturnType(n, colTypes)
+		return funcReturnType(n, decls)
 	case *plansql.ParenNode:
-		return nodeDeclaredType(n.Inner, colTypes)
+		return nodeDeclaredType(n.Inner, decls)
 	case *plansql.CaseNode:
-		return caseDeclaredType(n, colTypes)
+		return caseDeclaredType(n, decls)
 	case *plansql.CmpExpr, *plansql.AndNode, *plansql.OrNode, *plansql.NotNode,
 		*plansql.IsExpr, *plansql.LikeExpr, *plansql.BetweenExpr,
 		*plansql.InExpr, *plansql.ExistsNode, *plansql.AnyAllExpr:
@@ -8588,14 +8916,14 @@ func nodeDeclaredType(node plansql.Node, colTypes map[string]parquet.TypeID) (pa
 // write and answered the integer 0 — while the same CASE projected was
 // correct, because exec.Project re-types from its input and the
 // pre-aggregate projection does not.
-func caseDeclaredType(n *plansql.CaseNode, colTypes map[string]parquet.TypeID) (parquet.TypeID, expr.Confidence) {
+func caseDeclaredType(n *plansql.CaseNode, decls colDecls) (parquet.TypeID, expr.Confidence) {
 	var guess parquet.TypeID
 	guessed := false
 	consider := func(branch plansql.Node) (parquet.TypeID, bool) {
 		if branch == nil {
 			return 0, false
 		}
-		t, c := nodeDeclaredType(branch, colTypes)
+		t, c := nodeDeclaredType(branch, decls)
 		switch c {
 		case expr.Decided:
 			return t, true
@@ -8640,9 +8968,9 @@ func caseDeclaredType(n *plansql.CaseNode, colTypes map[string]parquet.TypeID) (
 // CALLING function still holding a candidate of its own must prefer that one —
 // which is the whole of #331, where coalesce took a nested nullif's numeric
 // fallback for fact and never asked the string literal beside it.
-func funcReturnType(n *plansql.FuncCallNode, colTypes map[string]parquet.TypeID) (parquet.TypeID, expr.Confidence) {
+func funcReturnType(n *plansql.FuncCallNode, decls colDecls) (parquet.TypeID, expr.Confidence) {
 	t, c := expr.DefaultRegistry.ReturnType(n.Name).Resolve(len(n.Args), func(i int) (parquet.TypeID, expr.Confidence) {
-		return nodeDeclaredType(n.Args[i], colTypes)
+		return nodeDeclaredType(n.Args[i], decls)
 	})
 	if c == expr.Undecided {
 		return 0, expr.Undecided
@@ -8697,12 +9025,12 @@ func inferCastType(typeName string) parquet.TypeID {
 // particular a TIMESTAMP operand declines: SQL calls that difference an
 // INTERVAL and the engine has no interval column, so expr.BinOp.dateArith
 // leaves it on the numeric path and this must agree.
-func binOpTemporalType(n *plansql.BinaryOp, colTypes map[string]parquet.TypeID) (parquet.TypeID, expr.Confidence) {
+func binOpTemporalType(n *plansql.BinaryOp, decls colDecls) (parquet.TypeID, expr.Confidence) {
 	if n.Op != "+" && n.Op != "-" {
 		return 0, expr.Undecided
 	}
-	lk := nodeTemporalKind(n.Left, colTypes)
-	rk := nodeTemporalKind(n.Right, colTypes)
+	lk := nodeTemporalKind(n.Left, decls)
+	rk := nodeTemporalKind(n.Right, decls)
 	switch {
 	case n.Op == "-" && lk == temporalDay && rk == temporalDay:
 		return parquet.TypeInt64, expr.Decided
@@ -8733,16 +9061,16 @@ const (
 
 // nodeTemporalKind reports what kind of temporal value an operand carries: a
 // CAST names one outright, and a column reference has one in the catalog.
-func nodeTemporalKind(node plansql.Node, colTypes map[string]parquet.TypeID) temporalKind {
+func nodeTemporalKind(node plansql.Node, decls colDecls) temporalKind {
 	var t parquet.TypeID
 	switch n := node.(type) {
 	case *plansql.ParenNode:
-		return nodeTemporalKind(n.Inner, colTypes)
+		return nodeTemporalKind(n.Inner, decls)
 	case *plansql.CastNode:
 		t = inferCastType(n.TypeName)
 	case *plansql.ColRef:
 		var ok bool
-		if t, ok = colTypes[strings.ToLower(n.Column)]; !ok {
+		if t, ok = decls.colType(n); !ok {
 			return temporalNone
 		}
 		if t == parquet.TypeString {
@@ -8812,9 +9140,17 @@ func nodeIsDateOrInterval(n plansql.Node) bool {
 // actual constant key) has no input column — it needs the synthetic
 // pre-projection like any computed expression, or the key silently
 // resolves to a nonexistent column and every row lands in one NULL group.
-func isPlainGroupKey(node plansql.Node) bool {
-	_, ok := node.(*plansql.ColRef)
-	return ok
+//
+// Nor is a ROW FIELD PATH, which is why decls is a parameter: `rw.n` parses
+// to the same *plansql.ColRef a table-qualified reference does, and only the
+// input's declarations tell them apart. exec.HashAggregate resolves its keys
+// through columnIndexFallback, which has no ROW arm, so a field path handed
+// through as a name failed with `GROUP BY key "rw.n" is not a column of its
+// input`. The synthetic pre-projection materializes it instead, at the
+// field's declared type (#568).
+func isPlainGroupKey(node plansql.Node, decls colDecls) bool {
+	cr, ok := node.(*plansql.ColRef)
+	return ok && !decls.isFieldPath(cr)
 }
 
 func isSimpleColRef(node plansql.Node) bool {
@@ -8853,7 +9189,15 @@ func NewComputedColumnsOp(cols []exec.ProjectColumn) exec.UnaryOperator {
 // aggPreProject is a UnaryOperator that passes through all input columns
 // and adds computed expression columns for aggregate inputs.
 type aggPreProject struct {
-	computed          []exec.ProjectColumn
+	computed []exec.ProjectColumn
+	// meta, when set, is the full declaration of each computed column,
+	// aligned with computed. exec.ProjectColumn carries a bare TypeID, which
+	// is enough for the arithmetic these columns were built for and not
+	// enough for a ROW FIELD PATH of a parameterized type: a DECIMAL field
+	// needs its (p,s) and a container field its own shape, or the output
+	// vector reads back wrong (#568). Empty means "Name/Type is the whole
+	// declaration", which is what every pre-#568 caller passes.
+	meta              []parquet.Column
 	cachedSchema      []parquet.Column   // cached output schema (computed once)
 	cachedOutput      *batch.RecordBatch // most recent output (NOT reused — fresh struct each Execute call to avoid clobbering downstream's stored references; only the underlying Vectors are pooled via computedVectors)
 	computedVectors   []*batch.Vector    // pooled computed-column vectors (reused across calls, sized to computedCap)
@@ -8862,6 +9206,22 @@ type aggPreProject struct {
 	checkedSelPass    bool               // true after first call resolves canPassSelThrough
 	matPool           *batch.BatchPool   // pool for materialize buffers (avoids per-call allocation)
 	shareOutputs      bool               // per-call vector allocation (partitioned-agg sharing)
+}
+
+// columnMeta is the declaration of computed column k: the full parquet.Column
+// when the builder supplied one, else the Name/Type pair every caller before
+// #568 relied on.
+func (a *aggPreProject) columnMeta(k int, c exec.ProjectColumn) parquet.Column {
+	if k < len(a.meta) && a.meta[k].Type != 0 {
+		m := a.meta[k]
+		m.Name, m.Nullable = c.Name, true
+		return m
+	}
+	col := parquet.Column{Name: c.Name, Type: c.Type, Nullable: true}
+	if c.Type == parquet.TypeVector {
+		col.Dimension = c.Dimension
+	}
+	return col
 }
 
 func (a *aggPreProject) Init(_ context.Context) error { return nil }
@@ -8888,7 +9248,7 @@ func (a *aggPreProject) Clone() exec.UnaryOperator {
 			clonedComputed[i].VecFloat64Eval = c.VecFloat64Clone()
 		}
 	}
-	return &aggPreProject{computed: clonedComputed, shareOutputs: a.shareOutputs}
+	return &aggPreProject{computed: clonedComputed, meta: a.meta, shareOutputs: a.shareOutputs}
 }
 
 func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
@@ -8924,12 +9284,8 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	if a.cachedSchema == nil {
 		schema := make([]parquet.Column, 0, len(in.Schema)+len(a.computed))
 		schema = append(schema, in.Schema...)
-		for _, c := range a.computed {
-			schema = append(schema, parquet.Column{
-				Name:     c.Name,
-				Type:     c.Type,
-				Nullable: true,
-			})
+		for k, c := range a.computed {
+			schema = append(schema, a.columnMeta(k, c))
 		}
 		a.cachedSchema = schema
 	}
@@ -8952,7 +9308,7 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	if a.shareOutputs || a.computedVectors == nil || in.Len > a.computedCap {
 		a.computedVectors = make([]*batch.Vector, len(a.computed))
 		for k, c := range a.computed {
-			a.computedVectors[k] = batch.NewVector(c.Type, in.Len)
+			a.computedVectors[k] = batch.NewColumnVector(a.columnMeta(k, c), in.Len)
 		}
 		a.computedCap = in.Len
 	} else {
@@ -10033,6 +10389,45 @@ func colColFilterWithRowFallback(left, right string, op exec.CompareOp, cmp expr
 	return f
 }
 
+// fieldPathColRef returns node as a *plansql.ColRef when it is one, seeing
+// through parentheses — the shape colDecls.field resolves against. A nil
+// answer simply resolves to no field.
+func fieldPathColRef(node plansql.Node) *plansql.ColRef {
+	for {
+		switch n := node.(type) {
+		case *plansql.ColRef:
+			return n
+		case *plansql.ParenNode:
+			node = n.Inner
+		default:
+			return nil
+		}
+	}
+}
+
+// nullCheckWithRowFallback and likeFilterWithRowFallback are
+// kernelFilterWithRowFallback for the two vectorized filters that had no
+// fallback at all. Both resolved a dotted name by stripping the qualifier and
+// then, finding nothing, matched NO ROWS silently — so `WHERE rw.f IS NULL`
+// and `WHERE rw.s LIKE 'x%'` over a ROW field answered an empty result
+// indistinguishable from real data (#568). The comparison filters have had
+// this delegation since #147.
+func nullCheckWithRowFallback(name string, checkNull bool, e expr.Expr) exec.UnaryOperator {
+	f := exec.NewNullCheckFilter(name, checkNull)
+	if strings.Contains(name, ".") {
+		f.RowFallback = wrapPredicate(e)
+	}
+	return f
+}
+
+func likeFilterWithRowFallback(name, pattern string, negate bool, e expr.Expr) exec.UnaryOperator {
+	f := exec.NewLikeFilter(name, pattern, negate)
+	if strings.Contains(name, ".") {
+		f.RowFallback = wrapPredicate(e)
+	}
+	return f
+}
+
 func kernelFilterWithRowFallback(name string, op exec.CompareOp, lit *expr.Lit, cmp expr.Expr) exec.UnaryOperator {
 	if lit.Val == nil {
 		// A comparison against a NULL literal is UNKNOWN for every row, so no
@@ -10350,20 +10745,20 @@ func extractFilterOps(e expr.Expr, neg bool) []exec.UnaryOperator {
 					return []exec.UnaryOperator{exec.NewMatchNothingFilter()}
 				}
 				if s, ok := pat.Val.(string); ok {
-					return []exec.UnaryOperator{exec.NewLikeFilter(col.Name, s, v.Not != neg)}
+					return []exec.UnaryOperator{likeFilterWithRowFallback(col.Name, s, v.Not != neg, negatedExpr(v, neg))}
 				}
 			}
 		}
 	case *expr.IsNull:
 		// col IS NULL / col IS NOT NULL — vectorized null bitmap scan
 		if col, ok := v.Operand.(*expr.ColRef); ok {
-			return []exec.UnaryOperator{exec.NewNullCheckFilter(col.Name, v.Not == neg)}
+			return []exec.UnaryOperator{nullCheckWithRowFallback(col.Name, v.Not == neg, negatedExpr(v, neg))}
 		}
 	case *expr.ColIsNull:
 		// Offsets-shape rewrite of `col IS [NOT] NULL` (expr/shape_funcs.go).
 		// Same kernel the *expr.IsNull case builds — without this the filter
 		// would silently drop to row-at-a-time evaluation.
-		return []exec.UnaryOperator{exec.NewNullCheckFilter(v.Col.Name, v.Not == neg)}
+		return []exec.UnaryOperator{nullCheckWithRowFallback(v.Col.Name, v.Not == neg, negatedExpr(v, neg))}
 	case *expr.ColEmptyStr:
 		// Offsets-shape rewrite of a column compared against the empty
 		// string literal (expr/shape_funcs.go). Reproduces exactly what the
@@ -11077,7 +11472,13 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) parquet.Typ
 	// describes itself numeric — tracked in #587, not fixable by widening
 	// colRefDeclaredType, whose decline exists for projections that have no
 	// runtime correction at all.
-	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, inputColTypes(node.Children[0]))
+	//
+	// inputColDecls, not inputColTypes: it carries the ROW columns' FIELDS
+	// too, so a windowed value function or MIN/MAX over a field path
+	// (`MIN(rw.f_i64) OVER ()`) resolves the field's type here instead of
+	// defaulting to float64 (#568). A field path of a parameterized type
+	// still declines and rides the same runtime correction as a column.
+	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, inputColDecls(node.Children[0]))
 	if conf != expr.Decided {
 		return windowOutputType(fn)
 	}

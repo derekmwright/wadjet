@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
@@ -16,18 +18,95 @@ type Expression func(b *batch.RecordBatch, row int) any
 // ColumnRef creates an expression that reads a column value.
 // The column index is resolved on first call and cached for subsequent rows.
 //
-// The cache is a lazyColIdx and not a captured int because Project.Clone
+// The cache is a lazyFieldIdx and not a captured int because Project.Clone
 // copies the ProjectColumn structs but SHARES this closure with every
 // parallel worker — see lazyColIdx (filter.go) for the race that is.
 func ColumnRef(name string) Expression {
-	col := &lazyColIdx{}
+	col := &lazyFieldIdx{}
 	return func(b *batch.RecordBatch, row int) any {
-		idx := col.get(b, name)
+		idx, field := col.get(b, name)
 		if idx < 0 {
 			return nil
 		}
-		return b.Columns[idx].GetValue(row)
+		v := b.Columns[idx]
+		if field < 0 {
+			return v.GetValue(row)
+		}
+		return rowFieldValue(v, field, row)
 	}
+}
+
+// lazyFieldIdx is lazyColIdx for a name that may be a ROW FIELD PATH: it
+// publishes the column index AND, for a field path, the child position within
+// the container.
+//
+// ColumnRef resolved by b.ColumnIndex alone, so `c_row.b` answered -1 and the
+// projection emitted NULL for every row — silently, and only on the STAGE
+// DAG, where the fragment's OpProject is built from expression TEXT and this
+// is the evaluator it gets (the single-process pipeline compiles an
+// expr.ColRef, which has resolved ROW fields since #147). One query, two
+// answers, decided by which path it took (#568).
+type lazyFieldIdx struct {
+	resolved atomic.Bool
+	mu       sync.Mutex
+	idx      int
+	field    int
+}
+
+// get resolves name against b on first use. The order mirrors
+// expr.ColRef.resolveSlow exactly — the whole dotted spelling names a column
+// of its own first (a flat Zeek "id.orig_h"), then the bare name, and only
+// then is the qualifier read as a ROW column — so the two evaluators can
+// never disagree about WHICH value a name denotes.
+func (c *lazyFieldIdx) get(b *batch.RecordBatch, name string) (int, int) {
+	if c.resolved.Load() {
+		return c.idx, c.field
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.resolved.Load() {
+		return c.idx, c.field
+	}
+	c.field = -1
+	c.idx = b.ColumnIndex(name)
+	if c.idx < 0 {
+		if dot := strings.IndexByte(name, '.'); dot > 0 && dot < len(name)-1 {
+			c.idx = b.ColumnIndex(name[dot+1:])
+			if c.idx < 0 {
+				if pi := b.ColumnIndex(name[:dot]); pi >= 0 && b.Columns[pi].Type == batch.TypeRow {
+					for j, fn := range b.Columns[pi].FieldNames {
+						if strings.EqualFold(fn, name[dot+1:]) && j < len(b.Columns[pi].Children) {
+							c.idx, c.field = pi, j
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	c.resolved.Store(true)
+	return c.idx, c.field
+}
+
+// rowFieldValue reads field j of a ROW vector at row, following a view to its
+// base the way Vector.GetValue does — a view's children are not addressable
+// by the view's own row index. The box is GetValue's, which is what
+// ColumnRef already returns for a column.
+func rowFieldValue(v *batch.Vector, field, row int) any {
+	for {
+		if v.Nulls.IsNullFast(row) {
+			return nil
+		}
+		if v.Base == nil {
+			break
+		}
+		row = int(v.Indices[row])
+		v = v.Base
+	}
+	if field >= len(v.Children) {
+		return nil
+	}
+	return v.Children[field].GetValue(row)
 }
 
 // Literal creates an expression that returns a constant.
@@ -179,6 +258,22 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 				Name:     proj.Name,
 				Type:     typ,
 				Nullable: true,
+			}
+			// A ROW FIELD PATH resolves to no column INDEX at all — the
+			// value comes out of a container, not out of a column — so
+			// every resolution above leaves the planner's placeholder
+			// standing, and that placeholder is STRING. An INT64 field
+			// then came back as the string "9", a CIDR field sorted by
+			// its stored text, and pgwire declared OID 25 for both
+			// (#568). The parent ROW carries the field's whole
+			// declaration; take it wholesale, so a DECIMAL field keeps
+			// its (p,s) and a nested field its own Fields.
+			if srcIdx < 0 {
+				if fc, ok := fieldPathColumn(in, projSourceName(proj)); ok {
+					fc.Name, fc.Nullable = proj.Name, true
+					schema[i] = fc
+					continue
+				}
 			}
 			// Preserve type metadata for parameterized types — including
 			// nested structure: without Fields/ElementType the pooled
@@ -353,6 +448,71 @@ func (p *Project) Close() error { return nil }
 // The ROW-parent check runs BEFORE the fallback so "attrs.score" keeps
 // extracting the ROW field even when an unrelated bare "score" column is
 // also in scope.
+// projSourceName is the input spelling a projection reads its value from,
+// resolved in the same order the schema pass resolves its source index:
+// the bulk-copy name, then the rename's source, then the output's own name
+// for a projection that is not computed.
+func projSourceName(proj ProjectColumn) string {
+	if proj.DirectCopy != "" {
+		return proj.DirectCopy
+	}
+	if proj.SourceCol != "" {
+		return proj.SourceCol
+	}
+	if !proj.Computed {
+		return proj.Name
+	}
+	return ""
+}
+
+// fieldPathColumn resolves name as a ROW FIELD PATH against b and returns the
+// FIELD's declaration — the answer resolvePlainColumn cannot give, because a
+// field is not a column and has no index.
+//
+// The resolution order mirrors expr.ColRef.resolveSlow step for step, because
+// that is what actually produces the VALUE: the full dotted spelling names a
+// column of its own first (a flat Zeek "id.orig_h"), then the bare name, and
+// only then is the qualifier read as a ROW column. A type resolved in a
+// different order than the value would describe a different column.
+//
+// The declared schema answers first because it is the richer half — a DECIMAL
+// field's (p,s), a nested field's own Fields — and the child VECTOR is the
+// fallback for a batch whose schema lost that metadata.
+func fieldPathColumn(b *batch.RecordBatch, name string) (parquet.Column, bool) {
+	dot := strings.IndexByte(name, '.')
+	if dot <= 0 || dot == len(name)-1 {
+		return parquet.Column{}, false
+	}
+	if b.ColumnIndex(name) >= 0 || b.ColumnIndex(name[dot+1:]) >= 0 {
+		return parquet.Column{}, false
+	}
+	pi := b.ColumnIndex(name[:dot])
+	if pi < 0 || pi >= len(b.Columns) || b.Columns[pi].Type != batch.TypeRow {
+		return parquet.Column{}, false
+	}
+	field := name[dot+1:]
+	if pi < len(b.Schema) {
+		if fc, ok := b.Schema[pi].Field(field); ok {
+			return fc, true
+		}
+	}
+	parent := b.Columns[pi]
+	for j, fn := range parent.FieldNames {
+		if !strings.EqualFold(fn, field) || j >= len(parent.Children) {
+			continue
+		}
+		child := parent.Children[j]
+		return parquet.Column{
+			Name:      field,
+			Type:      child.Type,
+			Nullable:  true,
+			Scale:     child.DecimalData.Scale,
+			Dimension: child.VectorDim,
+		}, true
+	}
+	return parquet.Column{}, false
+}
+
 func resolvePlainColumn(b *batch.RecordBatch, name string) (int, bool) {
 	if idx := b.ColumnIndex(name); idx >= 0 {
 		return idx, true

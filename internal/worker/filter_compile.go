@@ -161,7 +161,15 @@ func buildAggInputProjection(
 			continue
 		}
 		if _, bare := node.(*plansql.ColRef); bare {
-			continue
+			// Bare by SHAPE is not bare by resolution: a ROW FIELD PATH
+			// (`c_row.b`) parses to a ColRef and names no column any stage
+			// emits, so HashAggregate cannot look it up and the key
+			// serialized as NULL. groupByTypes is the planner's answer —
+			// derivedGroupKeyTypes records an entry for exactly the keys
+			// that must be COMPUTED here, and a bare column has none (#568).
+			if _, derived := groupByTypes[g]; !derived {
+				continue
+			}
 		}
 		derivedGroupBy[g] = node
 		hasDerived = true

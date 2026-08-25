@@ -419,13 +419,13 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 	// Types for computed outputs have to be decided here: the output column
 	// does not exist in the arm's schema, so the worker cannot resolve it
 	// (same reason attachScanSelectProjections carries Type — #333).
-	var colTypes map[string]parquet.TypeID
+	var colTypes colDecls
 	var colDecimal map[string]logical.DecimalMeta
 	var strictInt map[string]bool
 	var below *logical.Node
 	if len(projNode.Children) == 1 {
 		below = projNode.Children[0]
-		colTypes = inputColTypes(below)
+		colTypes = inputColDecls(below)
 		// The DECIMAL half of the same walk (#458): a set operation has to
 		// reconcile SCALES, which colTypes cannot carry (#533).
 		colDecimal = inputColDecimal(below)
@@ -477,10 +477,10 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			}
 			// A computed column's declared type IS its runtime type: the
 			// worker builds the output vector from it.
-			spec.Type = inferProjectionTypeCols(ast, parquet.TypeString, strictInt, colTypes)
+			spec.Type = inferProjectionTypeDecls(ast, parquet.TypeString, strictInt, colTypes)
 			spec.TypeKnown = true
 			ct = setOpColType{typ: spec.Type, known: true}
-		} else if t, ok := setOpRefType(colTypes, e, pr); ok {
+		} else if t, ok := setOpRefType(colTypes.types, e, pr); ok {
 			// A bare reference copies its source column, so the source's
 			// type is what the arm emits. spec.Type stays unset: the worker
 			// resolves a plain ColRef by DirectCopy and ignores it.

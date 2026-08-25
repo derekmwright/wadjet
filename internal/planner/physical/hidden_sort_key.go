@@ -525,8 +525,8 @@ func annotateHiddenSortSource(key *SortKeySpec, child *logical.Node) {
 		// table declares FLOAT64 here where the same term at the query's
 		// root gets INT64 through attachScanSelectProjections (#472).
 		strictInt := strictIntArithCols(owner.Children[0])
-		key.SourceType = inferProjectionTypeCols(proj.ASTExpr, parquet.TypeString,
-			strictInt, inputColTypes(owner.Children[0]))
+		key.SourceType = inferProjectionTypeDecls(proj.ASTExpr, parquet.TypeString,
+			strictInt, inputColDecls(owner.Children[0]))
 		key.SourceTypeKnown = true
 	}
 }

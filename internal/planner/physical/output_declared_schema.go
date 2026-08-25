@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/planner/logical"
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -54,7 +55,7 @@ func declaredOutputSchema(root *logical.Node) []parquet.Column {
 		if typ == parquet.TypeDecimal {
 			// precision 0 (pgTypeMod's "unconstrained") when it cannot be
 			// resolved — the honest fallback, not a fabricated (p,s) (#458).
-			if m, ok := declaredProjectionDecimal(proj, childDecimal); ok {
+			if m, ok := declaredProjectionDecimal(proj, childTypes, childDecimal); ok {
 				col.Precision, col.Scale = m.Precision, m.Scale
 			}
 		}
@@ -116,17 +117,25 @@ func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 // against. ok is false when there is nothing to declare (no output
 // projection node, or an empty SELECT list) — callers return their own
 // empty answer in that case rather than proceeding with nil maps.
-func declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, childTypes map[string]parquet.TypeID, childDecimal map[string]logical.DecimalMeta, strictInt map[string]bool, ok bool) {
+func declaredProjectionInputs(root *logical.Node) (projs []logical.Projection, childTypes colDecls, childDecimal map[string]logical.DecimalMeta, strictInt map[string]bool, ok bool) {
 	pn := findOutputProjectionNode(root)
 	if pn == nil {
-		return nil, nil, nil, nil, false
+		return nil, colDecls{}, nil, nil, false
 	}
 	projs = logical.VisibleProjections(pn.Projections)
 	if len(projs) == 0 {
-		return nil, nil, nil, nil, false
+		return nil, colDecls{}, nil, nil, false
 	}
 	if len(pn.Children) == 1 {
-		childTypes = emittedColTypes(pn.Children[0])
+		// The ROW fields come from inputColFields rather than an emitted-
+		// column walk of its own: the nodes emittedColTypes adds — an
+		// Aggregate and a Project — rebind names, and a field path over
+		// either resolves against nothing anyway. Everything else passes
+		// its input through, which is exactly inputColFields' walk (#568).
+		childTypes = colDecls{
+			types:  emittedColTypes(pn.Children[0]),
+			fields: inputColFields(pn.Children[0]),
+		}
 		childDecimal = emittedColDecimal(pn.Children[0])
 		// The same integer-preserving-arithmetic hint the projection builder
 		// passes: without it `id + 1` declares FLOAT64 here where the
@@ -156,23 +165,40 @@ func declaredProjectionName(proj logical.Projection) string {
 // overwrites it from the input batch. So a bare reference is typed from the
 // input's columns here, the way the operator would, and only a COMPUTED
 // expression takes inferProjectionTypeCols' answer.
-func declaredProjectionType(proj logical.Projection, colTypes map[string]parquet.TypeID, strictInt map[string]bool) parquet.TypeID {
+func declaredProjectionType(proj logical.Projection, decls colDecls, strictInt map[string]bool) parquet.TypeID {
 	if proj.IsAgg {
 		// The aggregate below emitted a column under this alias; its type
 		// is in the child's emitted map.
-		if t, ok := lookupColType(colTypes, declaredProjectionName(proj)); ok {
+		if t, ok := lookupColType(decls.types, declaredProjectionName(proj)); ok {
 			return t
 		}
 		return parquet.TypeString
 	}
+	// A ROW FIELD PATH is not the bare reference it looks like: the name
+	// resolution below strips the qualifier and then finds no column, so
+	// every field path was declared STRING and pgwire reported OID 25 for a
+	// zero-row result whatever the field's type (#568).
+	//
+	// The field's declaration answers DIRECTLY, not through
+	// colRefDeclaredType — which declines every parameterized type because
+	// it can return only a TypeID. That decline is right for the OUTPUT
+	// VECTOR a projection allocates and wrong here: this schema is advisory
+	// metadata, its DECIMAL (p,s) comes from declaredProjectionDecimal
+	// alongside, and a bare column of the same type is already declared this
+	// way one branch down (lookupColType makes no such distinction). Leaving
+	// a DECIMAL field at STRING would make the empty result disagree with
+	// the full one about its own column.
+	if fc, ok := declaredFieldPath(proj, decls); ok {
+		return fc.Type
+	}
 	if proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr) {
-		return inferProjectionTypeCols(proj.ASTExpr, parquet.TypeString, strictInt, colTypes)
+		return inferProjectionTypeDecls(proj.ASTExpr, parquet.TypeString, strictInt, decls)
 	}
 	ref := proj.Column
 	if ref == "" {
 		ref = cleanExpr(proj.Expr)
 	}
-	if t, ok := lookupColType(colTypes, ref); ok {
+	if t, ok := lookupColType(decls.types, ref); ok {
 		return t
 	}
 	return parquet.TypeString
@@ -186,9 +212,18 @@ func declaredProjectionType(proj logical.Projection, colTypes map[string]parquet
 // column's metadata they are describing — only declaredProjectionType's
 // caller decides whether the answer here is even consulted (only when the
 // projection's declared type is itself DECIMAL).
-func declaredProjectionDecimal(proj logical.Projection, decMeta map[string]logical.DecimalMeta) (logical.DecimalMeta, bool) {
+func declaredProjectionDecimal(proj logical.Projection, decls colDecls, decMeta map[string]logical.DecimalMeta) (logical.DecimalMeta, bool) {
 	if proj.IsAgg {
 		return lookupColDecimal(decMeta, declaredProjectionName(proj))
+	}
+	// A DECIMAL ROW FIELD keeps its (p,s) the same way a DECIMAL column does
+	// — from the declaration, which for a field lives in its parent's Fields
+	// and in no name-keyed map (#568).
+	if fc, ok := declaredFieldPath(proj, decls); ok {
+		if fc.Type != parquet.TypeDecimal {
+			return logical.DecimalMeta{}, false
+		}
+		return logical.DecimalMeta{Precision: fc.Precision, Scale: fc.Scale}, true
 	}
 	if proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr) {
 		// A computed DECIMAL expression (CAST, arithmetic, a scalar
@@ -202,6 +237,29 @@ func declaredProjectionDecimal(proj logical.Projection, decMeta map[string]logic
 		ref = cleanExpr(proj.Expr)
 	}
 	return lookupColDecimal(decMeta, ref)
+}
+
+// declaredFieldPath resolves a non-aggregate projection that is a ROW field
+// path to the FIELD's declaration. Both declaredProjectionType and
+// declaredProjectionDecimal go through it so the two never describe different
+// columns.
+func declaredFieldPath(proj logical.Projection, decls colDecls) (parquet.Column, bool) {
+	if proj.IsAgg || proj.ASTExpr == nil {
+		return parquet.Column{}, false
+	}
+	cr, ok := proj.ASTExpr.(*plansql.ColRef)
+	if !ok {
+		if p, isParen := proj.ASTExpr.(*plansql.ParenNode); isParen {
+			cr, ok = p.Inner.(*plansql.ColRef)
+		}
+		if !ok {
+			return parquet.Column{}, false
+		}
+	}
+	if !decls.isFieldPath(cr) {
+		return parquet.Column{}, false
+	}
+	return decls.field(cr)
 }
 
 // lookupColDecimal is lookupColType's companion for a DECIMAL-meta map.
@@ -289,7 +347,7 @@ func emittedColTypes(n *logical.Node) map[string]parquet.TypeID {
 			if name == "" {
 				continue
 			}
-			out[strings.ToLower(name)] = declaredProjectionType(proj, in, strictInt)
+			out[strings.ToLower(name)] = declaredProjectionType(proj, colDecls{types: in}, strictInt)
 		}
 		return out
 	case logical.NodeFilter, logical.NodeLimit, logical.NodeSort, logical.NodeDistinct:
@@ -370,13 +428,14 @@ func emittedColDecimal(n *logical.Node) map[string]logical.DecimalMeta {
 			return nil
 		}
 		in := emittedColDecimal(n.Children[0])
+		fieldDecls := colDecls{fields: inputColFields(n.Children[0])}
 		out := make(map[string]logical.DecimalMeta, len(n.Projections))
 		for _, proj := range n.Projections {
 			name := declaredProjectionName(proj)
 			if name == "" {
 				continue
 			}
-			if m, ok := declaredProjectionDecimal(proj, in); ok {
+			if m, ok := declaredProjectionDecimal(proj, fieldDecls, in); ok {
 				out[strings.ToLower(name)] = m
 			}
 		}
