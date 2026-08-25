@@ -1,7 +1,12 @@
 # ADR-0020: DROP TABLE's physical reclaim is guarded and opt-in
 
-Status: Accepted (landed 2026-08-24, following #494's naming fix and an
-adversarial review of its first attempt at physical reclaim)
+Status: Accepted (landed 2026-08-24, following #494's naming fix and TWO
+adversarial reviews of physical reclaim: the first reproduced the
+re-registration and Iceberg-refresh losses, the second found that reclaim
+deleted files the engine never wrote, that the live-manifest guard was a
+time-of-check/time-of-use check, and that a failed DROP bricked reclaim
+catalog-wide. Every layer below has a regression test confirmed to fail
+with its own fix backed out.)
 
 ## Context
 
