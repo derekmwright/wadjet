@@ -660,3 +660,49 @@ func TestReclaimReadsNothingWhenNothingIsDue(t *testing.T) {
 		t.Errorf("pendingDrops = %d, want the not-yet-due entry still held", pending)
 	}
 }
+
+// TestRequeuePendingDropInsertsAtFrontToPreserveOldestFirstEviction pins a
+// review finding: requeuePendingDrop used to append a failed-reobservation
+// entry to the TAIL, the same place recordPendingDrop appends genuinely
+// new drops. Both recordPendingDrop's own eviction and
+// FlushDroppedTableFiles's due/keep split treat index 0 as oldest, so a
+// requeued entry sitting behind entries recorded after it breaks that
+// invariant: a real, newer drop would be evicted first under the cap
+// while a stale, older requeue that merely hit a transient KV read error
+// waits safely at the tail.
+func TestRequeuePendingDropInsertsAtFrontToPreserveOldestFirstEviction(t *testing.T) {
+	cat, _ := setupCatalog(t)
+	cat.EnableDropReclaim()
+
+	// The oldest real drop.
+	cat.recordPendingDrop("older", []string{"tables/older/chunk_0001.parquet"})
+	// A second, genuinely newer drop that plays no part in the failed
+	// round below — it simply has not come due yet, exactly what
+	// FlushDroppedTableFiles's `keep` slice looks like mid-round.
+	cat.recordPendingDrop("newer_kept", []string{"tables/newer_kept/chunk_0001.parquet"})
+
+	// A flush pulls "older" out (it was due) and puts it back after a
+	// transient KV read error during re-observation — not a guard
+	// decision, so it must be retried, not leaked.
+	cat.dropMu.Lock()
+	var older pendingTableDrop
+	for i, pd := range cat.pendingDrops {
+		if pd.table == "older" {
+			older = pd
+			cat.pendingDrops = append(cat.pendingDrops[:i], cat.pendingDrops[i+1:]...)
+			break
+		}
+	}
+	cat.dropMu.Unlock()
+	cat.requeuePendingDrop(older)
+
+	cat.dropMu.Lock()
+	defer cat.dropMu.Unlock()
+	if len(cat.pendingDrops) != 2 {
+		t.Fatalf("pendingDrops = %d entries, want 2", len(cat.pendingDrops))
+	}
+	if cat.pendingDrops[0].table != "older" {
+		t.Errorf("pendingDrops[0] = %q, want %q — a requeued entry must sort ahead of an untouched, genuinely newer entry so eviction still takes the oldest genuine drop first",
+			cat.pendingDrops[0].table, "older")
+	}
+}

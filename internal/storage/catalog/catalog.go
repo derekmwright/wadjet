@@ -1584,10 +1584,22 @@ func (c *Catalog) FlushDroppedTableFiles(ctx context.Context, grace time.Duratio
 // (leak it); a failed read is an absence of information, and dropping the
 // entry on the floor for that would turn one transient KV error into a
 // whole table's files leaked forever.
+//
+// Inserted at the FRONT, not appended to the tail: a requeued entry was
+// already due (recordPendingDrop's eviction and this flush's due/keep
+// split both work in insertion order, treating index 0 as oldest), so
+// appending it would put a genuinely older entry behind every entry
+// recorded after this failed round — including ones recordPendingDrop
+// adds while this round is still running. Eviction under
+// maxPendingDropPaths always drops pendingDrops[0], so that ordering
+// mistake would evict a real table's files ahead of a KV hiccup's stale
+// requeue, which is backwards: the requeue's staleness is exactly why it
+// should be first in line to retry, and eviction should still take the
+// oldest genuine drop first, not whichever one happened to fail a read.
 func (c *Catalog) requeuePendingDrop(pd pendingTableDrop) {
 	c.dropMu.Lock()
 	defer c.dropMu.Unlock()
-	c.pendingDrops = append(c.pendingDrops, pd)
+	c.pendingDrops = append([]pendingTableDrop{pd}, c.pendingDrops...)
 	c.pendingDropPaths += len(pd.paths)
 }
 
