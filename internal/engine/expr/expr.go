@@ -226,22 +226,90 @@ func (e *ColRef) valueType() batch.TypeID {
 	return e.typ
 }
 
+// valueVector resolves this reference to the VECTOR that actually holds its
+// value and the row index within it: the column itself, or — for a ROW FIELD
+// PATH — the container's child.
+//
+// It is the seam every family that has to UNDO ColRef.Eval's boxing needs.
+// Those families all read the reference's vector directly (columnInstant,
+// Vector.GetValue) because the box has lost something the storage still
+// knows: an IPv4's dotted-quad text, a DATE's unit. Each of them used to
+// reach for b.Columns[cr.idx] and skip a field path outright, which left the
+// field boxed as a raw number in exactly the places the number is wrong —
+// UPPER(rw.ipv4) rendered "150994945" and DATE_TRUNC('month', rw.date) read
+// an epoch DAY as epoch SECONDS and answered 1970-01-01 (#568).
+//
+// Pair it with valueType(): the two together are "what this reference
+// declares and where its bytes are", for a column and a field alike.
+func (e *ColRef) valueVector(b *batch.RecordBatch, row int) (*batch.Vector, int, bool) {
+	if e.idx < 0 || e.idx >= len(b.Columns) {
+		return nil, 0, false
+	}
+	if e.structField == "" {
+		return b.Columns[e.idx], row, true
+	}
+	return e.fieldVector(b, row)
+}
+
 // displayValue is the value as Vector.GetValue renders it — the text form for
 // the types Eval boxes as a number. Reports false when this reference cannot
 // be resolved to a vector at all, in which case the caller keeps the box it
 // already has.
 func (e *ColRef) displayValue(b *batch.RecordBatch, row int) (any, bool) {
-	if e.idx < 0 || e.idx >= len(b.Columns) {
-		return nil, false
-	}
-	if e.structField == "" {
-		return b.Columns[e.idx].GetValue(row), true
-	}
-	fv, r, ok := e.fieldVector(b, row)
+	v, r, ok := e.valueVector(b, row)
 	if !ok {
 		return nil, false
 	}
-	return fv.GetValue(r), true
+	return v.GetValue(r), true
+}
+
+// vectorFloat64 and vectorInt64 are EvalFloat64's and EvalInt64's typed reads
+// applied to whichever vector actually holds the value — the ROW field's
+// child, for a field path.
+//
+// The arms mirror the column ones exactly, and must keep mirroring them.
+// Routing the field through the BOXED value instead (toFloat64Safe of
+// ColRef.Eval's result) is what these replace, and it lost the one type whose
+// box is not a number: a DECIMAL boxes as its rendered TEXT, so `rw.dec + 1`
+// answered NULL where `dec_col + 1` answers the sum (#568). The column arms
+// are left untouched on purpose — EvalFloat64 is the numeric hot path, and
+// this costs it nothing.
+func vectorFloat64(v *batch.Vector, row int) (float64, bool) {
+	if v.Nulls.IsNullFast(row) {
+		return 0, false
+	}
+	switch v.Type {
+	case batch.TypeFloat64:
+		return v.Float64Data[row], true
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return float64(v.Int64Data[row]), true
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return float64(v.Int32Data[row]), true
+	case batch.TypeFloat32:
+		return float64(v.Float32Data[row]), true
+	case batch.TypeDecimal:
+		return v.DecimalData.Data[row].ToFloat64(v.DecimalData.Scale), true
+	default:
+		return 0, false
+	}
+}
+
+func vectorInt64(v *batch.Vector, row int) (int64, bool) {
+	if v.Nulls.IsNullFast(row) {
+		return 0, false
+	}
+	switch v.Type {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return v.Int64Data[row], true
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return int64(v.Int32Data[row]), true
+	case batch.TypeFloat64:
+		return int64(v.Float64Data[row]), true
+	case batch.TypeFloat32:
+		return int64(v.Float32Data[row]), true
+	default:
+		return 0, false
+	}
 }
 
 // boxVectorValue is ColRef.Eval's typed boxing, applied to an arbitrary
@@ -333,7 +401,11 @@ func (e *ColRef) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
 		return 0, false
 	}
 	if e.structField != "" {
-		return toFloat64Safe(e.fieldValue(b, row))
+		fv, r, ok := e.fieldVector(b, row)
+		if !ok {
+			return 0, false
+		}
+		return vectorFloat64(fv, r)
 	}
 	v := b.Columns[e.idx]
 	if v.Nulls.IsNullFast(row) {
@@ -431,7 +503,11 @@ func (e *ColRef) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 		return 0, false
 	}
 	if e.structField != "" {
-		return toInt64Safe(e.fieldValue(b, row))
+		fv, r, ok := e.fieldVector(b, row)
+		if !ok {
+			return 0, false
+		}
+		return vectorInt64(fv, r)
 	}
 	v := b.Columns[e.idx]
 	if v.Nulls.IsNullFast(row) {
@@ -1300,7 +1376,14 @@ func (e *CmpNetworkLit) EvalBool(b *batch.RecordBatch, row int) bool {
 
 func (e *CmpNetworkLit) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	e.Col.resolve(b)
-	switch e.Col.typ {
+	// valueType, not typ: this node is BUILT at compile time, where
+	// structField is not yet known (it is resolved on the first batch), so a
+	// ROW field path always reaches here. Keying on the container's TypeRow
+	// dropped every field path into genericFallback — `rw.cidr > '10.0.0.0/8'`
+	// compared the stored TEXT lexically where the same value in a column is
+	// compared by kernel.CidrSortKey's inet order, and a malformed literal
+	// answered rows instead of 22P02 (#568).
+	switch e.Col.valueType() {
 	case batch.TypeIPv4:
 		if !e.ipv4ok {
 			return e.genericFallback(b, row)
@@ -1397,14 +1480,14 @@ func (e *CmpNetworkLit) evalCIDR(b *batch.RecordBatch, row int) (bool, bool) {
 // storage, never the rendered text ColRef.Eval would produce — and whether
 // the row is non-NULL. e.Col must already be resolved.
 func (e *CmpNetworkLit) colRawBytes(b *batch.RecordBatch, row int) (string, bool) {
-	if e.Col.idx < 0 || e.Col.idx >= len(b.Columns) {
+	v, r, ok := e.Col.valueVector(b, row)
+	if !ok {
 		return "", false
 	}
-	v := b.Columns[e.Col.idx]
-	if v.Nulls.IsNullFast(row) {
+	if v.Nulls.IsNullFast(r) {
 		return "", false
 	}
-	return v.BytesData.UnsafeStringValue(row), true
+	return v.BytesData.UnsafeStringValue(r), true
 }
 
 func (e *CmpNetworkLit) genericFallback(b *batch.RecordBatch, row int) (bool, bool) {
@@ -2256,8 +2339,11 @@ func (e *FuncCall) formatTemporalArgs(args []any) {
 			}
 			continue
 		}
+		// valueType: a ROW FIELD PATH of type DATE boxes as the same epoch
+		// day a DATE column does, so it needs the same rendering, and typ
+		// names the CONTAINER (#568).
 		cr, ok := a.(*ColRef)
-		if !ok || cr.typ != batch.TypeDate {
+		if !ok || cr.valueType() != batch.TypeDate {
 			continue
 		}
 		if v, ok := args[i].(int64); ok {
@@ -2329,16 +2415,18 @@ var networkTextFuncs = map[string]bool{
 func (e *FuncCall) formatNetworkArgs(b *batch.RecordBatch, row int, args []any) {
 	for i, a := range e.Args {
 		cr, ok := a.(*ColRef)
-		if !ok || cr.structField != "" {
+		if !ok {
 			continue
 		}
-		if cr.typ != batch.TypeIPv4 && cr.typ != batch.TypeMAC {
+		// valueType, not typ: a ROW FIELD PATH boxes exactly as a column of
+		// the FIELD's type does, so it needs the same unwinding, and typ
+		// names the CONTAINER (#568).
+		if t := cr.valueType(); t != batch.TypeIPv4 && t != batch.TypeMAC {
 			continue
 		}
-		if cr.idx < 0 || cr.idx >= len(b.Columns) {
-			continue
+		if dv, ok := cr.displayValue(b, row); ok {
+			args[i] = dv
 		}
-		args[i] = b.Columns[cr.idx].GetValue(row)
 	}
 }
 
@@ -2440,17 +2528,22 @@ func (e *FuncCall) resolveTemporalArgs(b *batch.RecordBatch, row int, args []any
 			continue
 		}
 		cr, ok := a.(*ColRef)
-		if !ok || cr.structField != "" {
+		if !ok {
 			continue
 		}
-		if cr.typ != batch.TypeDate && cr.typ != batch.TypeTimestamp {
+		// A ROW FIELD PATH loses its unit at the same point a column does,
+		// and recovers it the same way — from the vector that holds the
+		// value. valueType/valueVector are that pair for both (#568).
+		vt := cr.valueType()
+		if vt != batch.TypeDate && vt != batch.TypeTimestamp {
 			continue
 		}
-		if cr.idx < 0 || cr.idx >= len(b.Columns) {
+		src, r, ok := cr.valueVector(b, row)
+		if !ok {
 			continue
 		}
-		if t, ok := columnInstant(b.Columns[cr.idx], row); ok {
-			if e.wantsDateKind && cr.typ == batch.TypeDate {
+		if t, ok := columnInstant(src, r); ok {
+			if e.wantsDateKind && vt == batch.TypeDate {
 				args[i] = civilDate{t: t}
 				continue
 			}
@@ -2502,20 +2595,25 @@ func temporalOperand(b *batch.RecordBatch, row int, e Expr, v any) (any, bool) {
 		return nil, false
 	}
 	cr, ok := e.(*ColRef)
-	if !ok || cr.structField != "" {
-		return nil, false
-	}
-	if cr.typ != batch.TypeDate && cr.typ != batch.TypeTimestamp {
-		return nil, false
-	}
-	if cr.idx < 0 || cr.idx >= len(b.Columns) {
-		return nil, false
-	}
-	t, ok := columnInstant(b.Columns[cr.idx], row)
 	if !ok {
 		return nil, false
 	}
-	if cr.typ == batch.TypeDate {
+	// Same rule as resolveTemporalArgs, for the operator instead of the
+	// function: a ROW FIELD PATH's unit lives in the FIELD's declaration and
+	// its value in the child vector (#568).
+	vt := cr.valueType()
+	if vt != batch.TypeDate && vt != batch.TypeTimestamp {
+		return nil, false
+	}
+	src, r, ok := cr.valueVector(b, row)
+	if !ok {
+		return nil, false
+	}
+	t, ok := columnInstant(src, r)
+	if !ok {
+		return nil, false
+	}
+	if vt == batch.TypeDate {
 		return civilDate{t: t}, true
 	}
 	return t, true

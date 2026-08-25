@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
@@ -230,6 +231,80 @@ func TestRowFieldPathCarriesTheFieldsDeclaredType(t *testing.T) {
 		// type reaches the kernel here, not just the text one: the pattern
 		// is matched against the value's own rendering.
 		{"like", `SELECT id FROM rowfld WHERE ` + rowFieldPresent + ` AND %[1]s LIKE '%%1%%' ORDER BY id`},
+
+		// A field as a FUNCTION ARGUMENT. This is where boxing and
+		// declaration meet: ColRef.Eval hands IPv4/MAC over as the raw
+		// encoded int64 and DATE as the epoch day, and every family that has
+		// to undo that — stringInputFuncs, networkTextFuncs,
+		// temporalInputFuncs, the date-arithmetic operator — keys on the
+		// reference's declared type and reads its vector. All of them
+		// resolved only a bare COLUMN, so a field path reached them still
+		// boxed as a number: UPPER(rw.ipv4) rendered "150994945",
+		// LENGTH(rw.ipv4) counted that number's digits, and
+		// DATE_TRUNC('month', rw.date) read the epoch day as epoch SECONDS
+		// and answered 1970-01-01 (#568; the #484/#500/#319 family one level
+		// down).
+		//
+		// Each shape runs for EVERY field type, not just the one it looks
+		// written for: the comparison is against the same value in a flat
+		// column, so whatever the engine does to an IPv4 in UPPER() it must
+		// do to a ROW's IPv4 field.
+		{"fn_upper", `SELECT id, UPPER(%[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+		{"fn_lower", `SELECT id, LOWER(%[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+		{"fn_length", `SELECT id, LENGTH(%[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+		{"fn_concat", `SELECT id, CONCAT('x=', %[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+		{"fn_substring", `SELECT id, SUBSTRING(CAST(%[1]s AS VARCHAR), 1, 3) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+		{"fn_starts_with", `SELECT id, STARTS_WITH(%[1]s, '1') AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+
+		// The ROW column reached through a DERIVED TABLE and a CTE. A
+		// rename-only projection forwards the column unchanged, so the field
+		// path above it must type exactly as it does at the base — but the
+		// declared-schema walk handed the outer projection an emitted-type
+		// map with no FIELDS in it, so the path fell back to STRING and the
+		// aggregate could not resolve it at all (#568).
+		// The subquery projects the CONTAINER ALONE on purpose: carrying an
+		// `id` alongside it took a different route and hid the defect.
+		{"derived", `SELECT %[1]s AS v FROM (SELECT rw FROM rowfld WHERE ` + rowFieldPresent + `) s ORDER BY v`},
+		{"cte", `WITH s AS (SELECT rw FROM rowfld WHERE ` + rowFieldPresent + `) SELECT %[1]s AS v FROM s ORDER BY v`},
+		{"derived_minmax", `SELECT MIN(%[1]s) AS lo, MAX(%[1]s) AS hi FROM (SELECT rw FROM rowfld WHERE ` + rowFieldPresent + `) s`},
+		{"derived_group", `SELECT %[1]s AS k, COUNT(*) AS n FROM (SELECT rw FROM rowfld WHERE ` + rowFieldPresent + `) s GROUP BY %[1]s ORDER BY k, n`},
+	}
+
+	// Shapes that only make sense for a subset of the types, keyed by the
+	// field they apply to. Kept apart from the generic list above because
+	// the reference query has to be answerable for the flat column too, and
+	// `ip_version(a_string)` is not the same question as `ip_version(an_ip)`.
+	typed := map[string][]struct{ name, sql string }{
+		"f_ipv4": {
+			{"fn_ip_version", `SELECT id, ip_version(%[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+			{"fn_ip_to_string", `SELECT id, ip_to_string(%[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+			{"fn_is_private", `SELECT id, is_private_ip(%[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+		},
+		"f_mac": {
+			{"fn_mac_to_string", `SELECT id, mac_to_string(%[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+		},
+		"f_date": {
+			{"fn_date_trunc", `SELECT id, DATE_TRUNC('month', %[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+			{"fn_year", `SELECT id, YEAR(%[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+			{"fn_extract", `SELECT id, EXTRACT(MONTH FROM %[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+			{"op_date_minus_interval", `SELECT id, %[1]s - INTERVAL '1' DAY AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+		},
+		"f_ts": {
+			{"fn_date_trunc", `SELECT id, DATE_TRUNC('month', %[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+			{"fn_year", `SELECT id, YEAR(%[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+		},
+		"f_cidr": {
+			{"fn_prefix_length", `SELECT id, prefix_length(%[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+			{"pred_gt_literal", `SELECT id FROM rowfld WHERE ` + rowFieldPresent + ` AND %[1]s > '10.0.0.0/8' ORDER BY id`},
+		},
+		"f_dec": {
+			{"arith_plus_one", `SELECT id, %[1]s + 1 AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+		},
+		"f_i64": {
+			{"arith_plus_one", `SELECT id, %[1]s + 1 AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+			{"pred_between", `SELECT id FROM rowfld WHERE ` + rowFieldPresent + ` AND %[1]s BETWEEN 10 AND 100 ORDER BY id`},
+			{"pred_in", `SELECT id FROM rowfld WHERE ` + rowFieldPresent + ` AND %[1]s IN (9, 10, 192) ORDER BY id`},
+		},
 	}
 
 	for _, f := range rowFieldTypes() {
@@ -238,9 +313,10 @@ func TestRowFieldPathCarriesTheFieldsDeclaredType(t *testing.T) {
 			continue
 		}
 		t.Run(f.Name, func(t *testing.T) {
-			for _, sh := range shapes {
+			for _, sh := range append(append([]struct{ name, sql string }{}, shapes...), typed[f.Name]...) {
 				t.Run(sh.name, func(t *testing.T) {
-					flatSQL := fmt.Sprintf(sh.sql, flatName(f.Name))
+					flatSQL := strings.ReplaceAll(fmt.Sprintf(sh.sql, flatName(f.Name)),
+						"SELECT rw FROM rowfld", "SELECT "+flatName(f.Name)+" FROM rowfld")
 					pathSQL := fmt.Sprintf(sh.sql, "rw."+f.Name)
 					want, err := db.Query(ctx, flatSQL)
 					if err != nil {
@@ -332,6 +408,40 @@ func TestRowFieldPathDeclaresTheFieldsTypeOnAnEmptyResult(t *testing.T) {
 			if gotType != wantType {
 				t.Errorf("empty result declares v as %s, the same query with rows declares %s — "+
 					"a client binding by OID sees two different columns for one query", gotType, wantType)
+			}
+		})
+	}
+}
+
+// TestRowFieldPathRefusesAMalformedNetworkLiteral is the error half of the
+// same rule: a field path must REFUSE what its column refuses.
+//
+// `cidr_col = 'not-a-cidr'` raises 22P02 — the literal names no value the
+// column can hold, so there is no comparison to make (#492). The field path
+// delegated to the row predicate without that check and answered ZERO ROWS,
+// which is a value answer to a question that has none, and the empty result
+// is indistinguishable from a genuine no-match.
+func TestRowFieldPathRefusesAMalformedNetworkLiteral(t *testing.T) {
+	db, ctx := rowFieldOpen(t)
+	for _, tc := range []struct{ field, lit string }{
+		{"f_cidr", "not-a-cidr"},
+		{"f_ipv4", "not-an-ip"},
+		{"f_ipv6", "aa:bb:cc:dd:ee:ff"},
+		{"f_mac", "10.0.0.1"},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			flat := fmt.Sprintf(`SELECT COUNT(*) AS n FROM rowfld WHERE %s = '%s'`, flatName(tc.field), tc.lit)
+			path := fmt.Sprintf(`SELECT COUNT(*) AS n FROM rowfld WHERE rw.%s = '%s'`, tc.field, tc.lit)
+			_, flatErr := db.Query(ctx, flat)
+			if flatErr == nil {
+				t.Skipf("the column itself does not refuse %q, so the field path has nothing to match", tc.lit)
+			}
+			_, pathErr := db.Query(ctx, path)
+			if pathErr == nil {
+				t.Fatalf("%s answered rows; the same predicate on the column refuses it: %v", path, flatErr)
+			}
+			if pathErr.Error() != flatErr.Error() {
+				t.Errorf("the two spellings refuse differently\n  column: %v\n  field:  %v", flatErr, pathErr)
 			}
 		})
 	}

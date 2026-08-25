@@ -59,15 +59,34 @@ both were wrong: dropping the reference broke every dotted ROW access (#249),
 and keeping the dotted spelling left a name no file carries in the requested
 set, where it was intersected away along with the parent.
 
-**4. A field path BOXES exactly as a column of the field's type does.**
+**4. A field path BOXES exactly as a column of the field's type does — and
+every family that UNDOES that boxing must accept one.**
 `expr.ColRef.Eval` boxes IPv4, MAC, DATE and FLOAT32 differently from
 `Vector.GetValue` — the raw encoded number, not the text — and a field read
 out of the container's boxed map produced the other one. `WHERE rw.ip =
 ip_col` matched NO rows with both sides holding `"9.0.0.1"`, because one was
-an int64 and the other a string. The field is read through the child vector,
-and the renderers that undo that boxing (`likeOperand`, `networkOperand`) key
-on the FIELD's type. `ColRef.fieldTyp` is that type; `ColRef.typ` remains the
-CONTAINER's, because it is what every typed kernel indexes storage with.
+an int64 and the other a string.
+
+The field is read through the child vector. `ColRef.fieldTyp` is the field's
+declared type and `ColRef.typ` remains the CONTAINER's, because it is what
+every typed kernel indexes storage with; the pair `valueType()` /
+`valueVector()` is what a caller asks for instead — "what this reference
+declares, and where its bytes are" — and it answers for a column and a field
+alike.
+
+Half a fix here is worse than none, and the first version of this change was
+half. It taught `boxedTextOperand` (LIKE's and CAST's renderer) about field
+paths and left the rest of the family keyed on `typ`, so a field path reached
+them boxed as a number and they had no reason to unwind it:
+`UPPER(rw.ipv4)` rendered `"150994945"`, `LENGTH(rw.ipv4)` counted that
+number's digits, `ip_version(rw.ipv4)` answered NULL, and
+`DATE_TRUNC('month', rw.date)` read an epoch DAY as epoch SECONDS and
+answered 1970-01-01. The sites are `FuncCall.formatNetworkArgs`,
+`FuncCall.formatTemporalArgs`, `FuncCall.resolveTemporalArgs`,
+`temporalOperand`, `boxedTextOperand`, `temporalColOperand` and
+`CmpNetworkLit` — every one of them now keys on `valueType()`, and a new one
+must too. This is #484/#500/#319's family one level down, and those were
+found the same way: one member fixed, the rest left keyed on the old test.
 
 **5. A parameterized field declares the same way a parameterized column
 does.** `colRefDeclaredType` declines DECIMAL, VECTOR and the containers for a
@@ -97,6 +116,18 @@ the answer is advisory metadata rather than a vector.
   difference — PostgreSQL requires `(rw).b`, since unparenthesised `rw.b` is
   read as table.column.
 
+**6. A field path composes with the whole comparison cluster, or it is not a
+reference at all.** `CmpNetworkLit` is built at COMPILE time, where
+`structField` is not yet resolved, so a field path always reaches it; keying
+its eval on the container's type dropped every one into the generic
+text fallback, where `rw.cidr > '10.0.0.0/8'` compared stored text instead of
+`kernel.CidrSortKey`'s inet order and `rw.cidr = 'not-a-cidr'` answered ZERO
+ROWS where the column raises 22P02. The same rule reaches the vectorized
+filters: `KernelFilter`, `NullCheckFilter`, `LikeFilter` and `InFilter` all
+delegate a field path to their row-at-a-time fallback, and `KernelFilter`
+checks the literal against the FIELD's type before delegating, so the
+refusal survives the delegation.
+
 ## Not decided here
 
 - **Three-part paths.** `rw.inner.k` and `t.rw.f` do not parse at all
@@ -105,10 +136,36 @@ the answer is advisory metadata rather than a vector.
 - **The differential fuzzer** cannot generate field paths, because it
   qualifies references with the table alias and the parser accepts only a
   two-part reference. See the note in `internal/oracle/shapegen/typematrix.go`.
-- **IPv6 and UUID stored inside a ROW** read back as the empty string, on the
-  whole-ROW read as much as through a field path. That is a container-level
-  defect, not a field-path one, and is pinned by
-  `wadjet.TestRowFieldContainerLossIsStillReal`.
+  The fixed corpora carry the coverage instead: `typematrix.Corpus`'s
+  `rowfield_*` entries over a `c_row` widened to IPv4, MAC, DATE, CIDR and
+  DECIMAL fields, and `wadjet.TestRowFieldPathCarriesTheFieldsDeclaredType`
+  over every flat type.
+- **The container itself loses its children's declarations** (#589). Two
+  faces of one defect, both of them container-level rather than field-path
+  ones — the whole-ROW read shows each identically, so a field path is
+  faithfully reporting what the container holds:
+  - IPv6 and UUID inside a ROW read back as the empty string. Pinned by
+    `wadjet.TestRowFieldContainerLossIsStillReal`.
+  - On the STAGE DAG a network or temporal field inside a ROW comes back in
+    RAW STORAGE FORM (`ip:167772167` for `ip:10.0.0.7`) and a CIDR field
+    orders by that text rather than structurally. Pinned as `nested589` in
+    `coordinator.TestTypeMatrixTwoPath`, across the thirty corpus entries the
+    widened `c_row` fixture reaches. Verified pre-existing by running that
+    gate with this change's engine and planner edits stashed and the fixture
+    edit alone applied.
+- **Window functions over a field path are silently wrong** (#603):
+  `SUM(rw.f) OVER ()` and `LAG(rw.f)` answer NULL, `ORDER BY rw.f` inside an
+  OVER clause is ignored, and `PARTITION BY rw.f` makes one partition.
+  `windowSpecOutputType` builds its reference from `cleanExpr`'s output,
+  which has already dropped the qualifier, and the window operator resolves
+  its input, partition and order keys by NAME. It needs rule 2's
+  materialization, which the window path has no seam for yet — a third
+  pre-projection site, in a subsystem this change does not touch. Filed
+  rather than fixed here, and overlapping #585.
+- **A field path naming no field answers NULL** (#604) where an unknown
+  COLUMN errors and PostgreSQL raises 42703. `colDecls.field` can already
+  answer whether the field exists; the plan-time validation is not wired to
+  it.
 - **An aggregate over a PARAMETERIZED field on the stage DAG.** The worker
   builds its pre-aggregate projection from `distributed.AggSpec.InputType`,
   which is a bare TypeID, so `MIN(rw.dec_field)` declares the Float64 fallback
@@ -125,6 +182,11 @@ the answer is advisory metadata rather than a vector.
 - ADR-0012 (PostgreSQL decides semantics), ADR-0013 (the gates and their
   blind spots)
 - `internal/planner/physical/plan.go` (`colDecls`, `colRefDeclaredType`,
-  `isPlainGroupKey`), `internal/planner/logical/optimizer.go`
+  `isPlainGroupKey`, `intArithAllInt`), `internal/planner/logical/optimizer.go`
   (`sanitizeScanNeeds`), `internal/engine/exec/project.go` (`ColumnRef`,
-  `fieldPathColumn`), `internal/engine/expr/expr.go` (`ColRef.fieldValue`)
+  `fieldPathColumn`), `internal/engine/exec/filter.go` (the four vectorized
+  filters' row fallbacks), `internal/engine/expr/expr.go`
+  (`ColRef.valueType` / `valueVector` / `fieldValue`, and the boxing-undo
+  family that keys on them)
+- #603, #604 (residuals filed by this change), #589 (the container-level
+  defect its pins name), #585 (overlaps #603)

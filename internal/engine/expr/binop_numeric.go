@@ -119,14 +119,16 @@ func operandIsInt(e Expr, b *batch.RecordBatch) bool {
 // in its own right, and every non-column operand already decides its own form.
 func temporalColOperand(e Expr, b *batch.RecordBatch) bool {
 	cr, ok := e.(*ColRef)
-	if !ok || cr.structField != "" {
+	if !ok {
 		return false
 	}
 	cr.resolve(b)
 	if cr.idx < 0 {
 		return false
 	}
-	switch cr.typ {
+	// valueType: a ROW FIELD PATH of a date-carrying type is one too, and
+	// typ names the CONTAINER (#568).
+	switch cr.valueType() {
 	case batch.TypeDate, batch.TypeTimestamp, batch.TypeString, batch.TypeBytes:
 		return true
 	}

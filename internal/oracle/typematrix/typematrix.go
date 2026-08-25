@@ -183,9 +183,22 @@ func schemaFor(flat bool) parquet.Schema {
 // which reader a column reaches is part of what the fixture has to cover.
 func rowFields(name string) []parquet.Column {
 	if name != "c_rownest" {
+		// The field list is deliberately WIDER than the two leaves it began
+		// with. A field path is typed from its parent's declaration and from
+		// nothing else (#568), so the types whose BOX differs from their
+		// storage — IPv4 and MAC box as a raw int64, DATE as an epoch day,
+		// DECIMAL as its rendered text, CIDR as text ordered structurally —
+		// are exactly the ones a wrong declaration answers wrongly and
+		// silently. With only STRING and INT64 here, none of them was
+		// reachable through a field path by any gate that reads this corpus.
 		return []parquet.Column{
 			{Name: "a", Type: parquet.TypeString, Nullable: true},
 			{Name: "b", Type: parquet.TypeInt64, Nullable: true},
+			{Name: "ip", Type: parquet.TypeIPv4, Nullable: true},
+			{Name: "mc", Type: parquet.TypeMAC, Nullable: true},
+			{Name: "dt", Type: parquet.TypeDate, Nullable: true},
+			{Name: "cd", Type: parquet.TypeCIDR, Nullable: true},
+			{Name: "dc", Type: parquet.TypeDecimal, Precision: 18, Scale: 4, Nullable: true},
 		}
 	}
 	return []parquet.Column{
@@ -341,7 +354,15 @@ func cidrValue(i int) string {
 // The stride is 7, coprime with both the batch size and the row-group size, so
 // each variant lands at interior and boundary rows.
 func rowValue(i int) any {
-	v := map[string]any{"a": fmt.Sprintf("r-%05d", i), "b": int64(i) * 11}
+	v := map[string]any{
+		"a":  fmt.Sprintf("r-%05d", i),
+		"b":  int64(i) * 11,
+		"ip": fmt.Sprintf("10.%d.%d.%d", (i/65536)%256, (i/256)%256, i%256),
+		"mc": fmt.Sprintf("aa:bb:cc:%02x:%02x:%02x", (i/65536)%256, (i/256)%256, i%256),
+		"dt": fmt.Sprintf("20%02d-%02d-%02d", 10+i%15, 1+i%12, 1+i%28),
+		"cd": cidrValue(i),
+		"dc": fmt.Sprintf("%d.%04d", i, i%9973),
+	}
 	switch i % 7 {
 	case 1:
 		v["a"] = nil
@@ -349,6 +370,13 @@ func rowValue(i int) any {
 		v["b"] = nil
 	case 3:
 		v["a"], v["b"] = nil, nil
+	case 4:
+		// The wider fields null on their own arm, so a NULL field inside a
+		// PRESENT row is covered for every type here and not only for the
+		// original two.
+		v["ip"], v["dt"], v["dc"] = nil, nil, nil
+	case 5:
+		v["mc"], v["cd"] = nil, nil
 	}
 	return v
 }
@@ -1053,6 +1081,11 @@ func Corpus() []Query {
 	for _, fp := range []struct{ path, kind string }{
 		{"c_row.a", "str"},
 		{"c_row.b", "int"},
+		{"c_row.ip", "ipv4"},
+		{"c_row.mc", "mac"},
+		{"c_row.dt", "date"},
+		{"c_row.cd", "cidr"},
+		{"c_row.dc", "dec"},
 	} {
 		add("rowfield_project_"+fp.kind,
 			fmt.Sprintf(`SELECT id, %s AS v FROM %s WHERE id < 400 ORDER BY id`, fp.path, Nested),
@@ -1078,6 +1111,41 @@ func Corpus() []Query {
 			fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s WHERE %s IS NULL`, Nested, fp.path),
 			oracle.CmpUnordered, "c_row")
 	}
+	// A field path as a FUNCTION ARGUMENT. Every family that has to undo
+	// ColRef.Eval's boxing — the string functions, the network text
+	// functions, the temporal ones — resolved only a bare COLUMN, so a field
+	// path reached them still boxed as a raw number: UPPER(c_row.ip)
+	// rendered the encoded integer and DATE_TRUNC over c_row.dt read an
+	// epoch DAY as epoch SECONDS (#568).
+	for _, fp := range []struct{ path, kind string }{
+		{"c_row.a", "str"},
+		{"c_row.ip", "ipv4"},
+		{"c_row.mc", "mac"},
+		{"c_row.dt", "date"},
+	} {
+		add("rowfield_fn_text_"+fp.kind,
+			fmt.Sprintf(`SELECT id, UPPER(%s) AS u, LENGTH(%s) AS l, CONCAT('x=', %s) AS c `+
+				`FROM %s WHERE id < 300 ORDER BY id`, fp.path, fp.path, fp.path, Nested),
+			oracle.CmpOrdered, "c_row")
+	}
+	add("rowfield_fn_network",
+		fmt.Sprintf(`SELECT id, ip_to_string(c_row.ip) AS s, ip_version(c_row.ip) AS v, `+
+			`mac_to_string(c_row.mc) AS m FROM %s WHERE id < 300 ORDER BY id`, Nested),
+		oracle.CmpOrdered, "c_row")
+	add("rowfield_fn_temporal",
+		fmt.Sprintf(`SELECT id, YEAR(c_row.dt) AS y, DATE_TRUNC('month', c_row.dt) AS t `+
+			`FROM %s WHERE id < 300 ORDER BY id`, Nested),
+		oracle.CmpOrdered, "c_row")
+	add("rowfield_arith_int",
+		fmt.Sprintf(`SELECT id, c_row.b + 1 AS v FROM %s WHERE id < 300 ORDER BY id`, Nested),
+		oracle.CmpOrdered, "c_row")
+	// The container reached through a DERIVED TABLE: a rename-only
+	// projection forwards it, so the field path above must type exactly as
+	// it does at the base.
+	add("rowfield_derived",
+		fmt.Sprintf(`SELECT id, c_row.b AS v FROM (SELECT id, c_row FROM %s WHERE id < 300) s ORDER BY id`, Nested),
+		oracle.CmpOrdered, "c_row")
+
 	// A typed literal on the other side of the comparison: the predicate the
 	// field's declaration decides. `b > 1100` is an INTEGER comparison over
 	// an INT64 field, and was a TEXT one while the field read STRING.

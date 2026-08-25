@@ -86,6 +86,12 @@ func runPostgresWireArm(t *testing.T, ctx context.Context, o *postgresOracle) {
 type wireCase struct {
 	name string
 	sql  string
+	// pgSQL is the PostgreSQL-dialect spelling of the same statement, for the
+	// shapes the two engines write differently. It must ask the identical
+	// question — see pgCase.pgSQL, whose one use this shares: PostgreSQL
+	// requires parentheses around a composite before a field access,
+	// `(rw).b`, because bare `rw.b` is read as table.column (#568).
+	pgSQL string
 	// paramOIDs / params bind a parameter by its DECLARED type. Empty means an
 	// unparameterized statement.
 	paramOIDs []uint32
@@ -125,7 +131,7 @@ func runWireMetadata(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgC
 
 			// --- Describe: what the server PROMISES before any row moves ----
 			wDesc, wErr := wConn.Prepare(ctx, "", c.sql, c.paramOIDs)
-			pDesc, pErr := pConn.Prepare(ctx, "", c.sql, c.paramOIDs)
+			pDesc, pErr := pConn.Prepare(ctx, "", c.oracleSQL(), c.paramOIDs)
 			if pErr != nil {
 				t.Fatalf("the ORACLE refused to describe this statement: %v\n  SQL: %s", pErr, c.sql)
 			}
@@ -137,8 +143,8 @@ func runWireMetadata(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgC
 			cmp.compareParamOIDs(wDesc.ParamOIDs, pDesc.ParamOIDs)
 
 			// --- Text result format -----------------------------------------
-			wText := readOne(ctx, wConn, c, textFormats(len(pDesc.Fields)))
-			pText := readOne(ctx, pConn, c, textFormats(len(pDesc.Fields)))
+			wText := readOne(ctx, wConn, c, c.sql, textFormats(len(pDesc.Fields)))
+			pText := readOne(ctx, pConn, c, c.oracleSQL(), textFormats(len(pDesc.Fields)))
 			if pText.Err != nil {
 				t.Fatalf("the ORACLE refused to execute this statement: %v\n  SQL: %s", pText.Err, c.sql)
 			}
@@ -156,8 +162,8 @@ func runWireMetadata(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgC
 			// handed the text rendering under a fixed-width OID is not a value
 			// error — every value is "right" — and it makes a typed client
 			// decode whatever the string happened to contain.
-			wBin := readOne(ctx, wConn, c, binaryFormats(len(pDesc.Fields)))
-			pBin := readOne(ctx, pConn, c, binaryFormats(len(pDesc.Fields)))
+			wBin := readOne(ctx, wConn, c, c.sql, binaryFormats(len(pDesc.Fields)))
+			pBin := readOne(ctx, pConn, c, c.oracleSQL(), binaryFormats(len(pDesc.Fields)))
 			if pBin.Err != nil {
 				t.Fatalf("the ORACLE refused a binary-format execute: %v\n  SQL: %s", pBin.Err, c.sql)
 			}
@@ -447,9 +453,18 @@ func describeCell(b []byte) string {
 	return strconv.Quote(string(b))
 }
 
-func readOne(ctx context.Context, conn *pgconn.PgConn, c wireCase, resultFormats []int16) *pgconn.Result {
+func readOne(ctx context.Context, conn *pgconn.PgConn, c wireCase, sql string, resultFormats []int16) *pgconn.Result {
 	paramFormats := make([]int16, len(c.params)) // all text unless a case says otherwise
-	return conn.ExecParams(ctx, c.sql, c.params, c.paramOIDs, paramFormats, resultFormats).Read()
+	return conn.ExecParams(ctx, sql, c.params, c.paramOIDs, paramFormats, resultFormats).Read()
+}
+
+// oracleSQL is the spelling to send to PostgreSQL: the entry's own, unless it
+// declares a dialect variant.
+func (c wireCase) oracleSQL() string {
+	if c.pgSQL != "" {
+		return c.pgSQL
+	}
+	return c.sql
 }
 
 func textFormats(n int) []int16 { return make([]int16, n) }
@@ -970,6 +985,28 @@ func wireCorpus() []wireCase {
 		{name: "GroupedNoKeySelected",
 			sql: `SELECT COUNT(*) AS c FROM nation GROUP BY n_regionkey ORDER BY c, n_regionkey`},
 
+		// ROW FIELD PATHS on the wire (#568). A field path was declared
+		// STRING all the way down, so RowDescription carried OID 25 for a
+		// bigint field and a driver bound it as text — the half of the defect
+		// only this arm can see, since a value oracle compares the VALUE
+		// under whatever OID it arrives with.
+		//
+		// row_probe is the composite fixture (postgres_oracle_test.go); the
+		// pgSQL spelling is the parentheses PostgreSQL requires.
+		{name: "RowFieldTypes",
+			sql:   `SELECT rw.a AS a, rw.b AS b, rw.f AS f FROM row_probe WHERE k IN (0, 2, 4) ORDER BY k`,
+			pgSQL: `SELECT (rw).a AS a, (rw).b AS b, (rw).f AS f FROM row_probe WHERE k IN (0, 2, 4) ORDER BY k`},
+		// The zero-row form, where the OID comes from the PLAN rather than
+		// from a batch (declaredOutputSchema, #416) — a separate resolution
+		// that was STRING for every field path.
+		{name: "RowFieldTypesZeroRows",
+			sql:   `SELECT rw.a AS a, rw.b AS b, rw.f AS f FROM row_probe WHERE k = -1`,
+			pgSQL: `SELECT (rw).a AS a, (rw).b AS b, (rw).f AS f FROM row_probe WHERE k = -1`},
+		// An aggregate over a field path: the output OID follows the field's
+		// type, and the query could not run at all before the fix.
+		{name: "MinOverRowField",
+			sql:   `SELECT MIN(rw.b) AS lo, MAX(rw.a) AS hi FROM row_probe`,
+			pgSQL: `SELECT MIN((rw).b) AS lo, MAX((rw).a) AS hi FROM row_probe`},
 		{name: "UnaliasedAggregate",
 			sql: `SELECT COUNT(supplier.s_name) FROM supplier`,
 			pins: map[string]string{

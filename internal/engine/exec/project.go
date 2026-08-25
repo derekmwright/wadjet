@@ -501,16 +501,41 @@ func fieldPathColumn(b *batch.RecordBatch, name string) (parquet.Column, bool) {
 		if !strings.EqualFold(fn, field) || j >= len(parent.Children) {
 			continue
 		}
-		child := parent.Children[j]
-		return parquet.Column{
-			Name:      field,
-			Type:      child.Type,
-			Nullable:  true,
-			Scale:     child.DecimalData.Scale,
-			Dimension: child.VectorDim,
-		}, true
+		return vectorColumn(field, parent.Children[j]), true
 	}
 	return parquet.Column{}, false
+}
+
+// vectorColumn reconstructs a declaration from a VECTOR, for the fallback
+// path where the batch's schema lost it. It recurses into ARRAY/MAP elements
+// and ROW children: an earlier version copied Type/Scale/Dimension only, so
+// the pooled output vector for a nested field came back with nil Child /
+// Children and every value inside it was silently dropped — the same
+// shape-loss the schema-carrying path above exists to avoid.
+func vectorColumn(name string, v *batch.Vector) parquet.Column {
+	col := parquet.Column{
+		Name:      name,
+		Type:      v.Type,
+		Nullable:  true,
+		Scale:     v.DecimalData.Scale,
+		Dimension: v.VectorDim,
+	}
+	switch v.Type {
+	case batch.TypeArray, batch.TypeMap:
+		if v.Child != nil {
+			el := vectorColumn("element", v.Child)
+			col.ElementType = &el
+		}
+	case batch.TypeRow:
+		for i, ch := range v.Children {
+			fn := fmt.Sprintf("f%d", i)
+			if i < len(v.FieldNames) {
+				fn = v.FieldNames[i]
+			}
+			col.Fields = append(col.Fields, vectorColumn(fn, ch))
+		}
+	}
+	return col
 }
 
 func resolvePlainColumn(b *batch.RecordBatch, name string) (int, bool) {

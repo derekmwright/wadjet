@@ -7992,13 +7992,22 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				// falling back to typed per-row eval.
 				//
 				// Gated on the DECLARED type, the way the SELECT-list
-				// projection gates its own typed paths. aggPreProject picks
+				// projection gates its own typed paths (buildProjectOp only
+				// attaches them when outType is Float64). aggPreProject picks
 				// its write route from WHICH eval is set, not from the
-				// column, so a float writer on a non-float column writes
-				// into a nil Float64Data — reached the moment a ROW field
-				// path started taking this route, since a bare column
-				// reference implements every one of these interfaces
-				// (#568).
+				// column, so a float writer on a non-float column writes into
+				// a nil Float64Data — reached the moment a ROW field path
+				// started taking this route, since a bare column reference
+				// implements every one of these interfaces (#568).
+				//
+				// The gate applies to EVERY derived aggregate input, not only
+				// to field paths, and that is deliberate: the mismatch it
+				// prevents was always possible here — any expression whose
+				// declared type is not Float64 while its compiled form
+				// implements VecFloat64Expr had the same nil-slice write
+				// available to it — and the two sites now state the same
+				// rule. Nothing that was reaching a typed path with a
+				// matching declared type loses it.
 				if pc.Type == parquet.TypeFloat64 {
 					if ve, ok := compiled.(expr.VecFloat64Expr); ok {
 						pc.VecFloat64Eval = ve.EvalFloat64Vec
@@ -8331,7 +8340,7 @@ func inferProjectionTypeDecls(node plansql.Node, fallback parquet.TypeID, strict
 			}
 			inner = p.Inner
 		}
-		if bo, ok := inner.(*plansql.BinaryOp); ok && intArithAllInt(bo, strictInt) {
+		if bo, ok := inner.(*plansql.BinaryOp); ok && intArithAllInt(bo, strictInt, decls) {
 			return parquet.TypeInt64
 		}
 	}
@@ -8366,7 +8375,7 @@ func inferProjectionTypeDecls(node plansql.Node, fallback parquet.TypeID, strict
 // integer division over integer operands (#369, ADR-0012), so it declares
 // Int64 exactly as +,-,*,% do — mirroring expr.BinOpNumeric's runtime mode,
 // of which this must stay a strict subset.
-func intArithAllInt(node plansql.Node, strictInt map[string]bool) bool {
+func intArithAllInt(node plansql.Node, strictInt map[string]bool, decls colDecls) bool {
 	switch n := node.(type) {
 	case *plansql.BinaryOp:
 		switch n.Op {
@@ -8374,11 +8383,22 @@ func intArithAllInt(node plansql.Node, strictInt map[string]bool) bool {
 		default:
 			return false
 		}
-		return intArithAllInt(n.Left, strictInt) && intArithAllInt(n.Right, strictInt)
+		return intArithAllInt(n.Left, strictInt, decls) && intArithAllInt(n.Right, strictInt, decls)
 	case *plansql.ParenNode:
-		return intArithAllInt(n.Inner, strictInt)
+		return intArithAllInt(n.Inner, strictInt, decls)
 	case *plansql.ColRef:
-		return strictInt[strings.ToLower(n.Column)]
+		if strictInt[strings.ToLower(n.Column)] {
+			return true
+		}
+		// A ROW FIELD PATH of a strictly-int type is one too. strictInt is
+		// keyed by COLUMN name and a field is not a column, so `rw.n + 1`
+		// declared FLOAT64 where `n + 1` over the same value declares INT64
+		// — the two spellings of one question answering with different types
+		// (#568, #297's rule).
+		if f, ok := decls.field(n); ok && decls.isFieldPath(n) {
+			return f.Type == parquet.TypeInt64 || f.Type == parquet.TypeInt32
+		}
+		return false
 	case *plansql.Lit:
 		if n.Kind != plansql.LitNumber {
 			return false
@@ -8491,6 +8511,46 @@ func inputColFields(n *logical.Node) map[string][]parquet.Column {
 			return nil
 		}
 		return inputColFields(n.Children[0])
+	case logical.NodeProject:
+		// inputColTypes STOPS at a Project because a rename can bind a name
+		// to a different value. The FIELDS walk does not have to: a
+		// rename-only projection FORWARDS its columns, and which column each
+		// output name forwards is written down right here. Mapping them is
+		// what lets a field path through a derived table or a CTE keep its
+		// type — `SELECT rw.n FROM (SELECT rw FROM t) s` answered string("9")
+		// and `MIN(rw.n)` over the same subquery could not resolve its input
+		// at all, because the walk answered nil the moment a Project was in
+		// the way (#568).
+		//
+		// A computed or aggregate item stops the whole walk, exactly as
+		// sourceColTypesThroughRenames stops for it: past that point a name
+		// may be bound to a value the fields below do not describe.
+		if len(n.Children) != 1 {
+			return nil
+		}
+		below := inputColFields(n.Children[0])
+		if below == nil {
+			return nil
+		}
+		var out map[string][]parquet.Column
+		for _, p := range n.Projections {
+			if p.IsAgg || p.Column == "" {
+				return nil
+			}
+			f, ok := below[strings.ToLower(cleanExpr(p.Column))]
+			if !ok {
+				continue
+			}
+			name := p.Alias
+			if name == "" {
+				name = p.Column
+			}
+			if out == nil {
+				out = make(map[string][]parquet.Column)
+			}
+			out[strings.ToLower(cleanExpr(name))] = f
+		}
+		return out
 	case logical.NodeJoin:
 		if len(n.Children) != 2 {
 			return nil
@@ -9191,7 +9251,11 @@ func NewComputedColumnsOp(cols []exec.ProjectColumn) exec.UnaryOperator {
 type aggPreProject struct {
 	computed []exec.ProjectColumn
 	// meta, when set, is the full declaration of each computed column,
-	// aligned with computed. exec.ProjectColumn carries a bare TypeID, which
+	// aligned with computed. An entry is PRESENT when its Name is set — not
+	// when its Type is non-zero, which would have read a declared BOOL
+	// (parquet.TypeBool is TypeID 0) as "no declaration", the same
+	// zero-value-versus-unset collision ProjectExprSpec.TypeKnown exists for
+	// (#445). exec.ProjectColumn carries a bare TypeID, which
 	// is enough for the arithmetic these columns were built for and not
 	// enough for a ROW FIELD PATH of a parameterized type: a DECIMAL field
 	// needs its (p,s) and a container field its own shape, or the output
@@ -9212,7 +9276,7 @@ type aggPreProject struct {
 // when the builder supplied one, else the Name/Type pair every caller before
 // #568 relied on.
 func (a *aggPreProject) columnMeta(k int, c exec.ProjectColumn) parquet.Column {
-	if k < len(a.meta) && a.meta[k].Type != 0 {
+	if k < len(a.meta) && a.meta[k].Name != "" {
 		m := a.meta[k]
 		m.Name, m.Nullable = c.Name, true
 		return m
@@ -10452,10 +10516,47 @@ func kernelFilterWithRowFallback(name string, op exec.CompareOp, lit *expr.Lit, 
 // not arrive inside an expr.Lit — a BETWEEN bound, or a value parsed out of
 // raw predicate text. Same NULL rule as kernelFilterWithRowFallback.
 func kernelOrNothing(col string, op exec.CompareOp, val any, text string) exec.UnaryOperator {
+	return kernelOrNothingRef(nil, col, op, val, text)
+}
+
+// kernelOrNothingRef is kernelOrNothing carrying the reference the constant is
+// compared against, so a dotted name can be given the row-at-a-time fallback
+// kernelFilterWithRowFallback gives the `col <op> lit` shape. Without it a
+// BETWEEN over a ROW field path failed with `filter column "rw.f" does not
+// exist in the input schema` — loud, but a query PostgreSQL answers (#568).
+//
+// Each HALF of a BETWEEN gets its own fallback comparison rather than the
+// whole predicate: the two halves are separate operators, and handing both
+// the same conjunction would evaluate it twice.
+func kernelOrNothingRef(ref *expr.ColRef, col string, op exec.CompareOp, val any, text string) exec.UnaryOperator {
 	if val == nil {
 		return exec.NewMatchNothingFilter()
 	}
-	return exec.NewKernelFilterLit(col, op, val, text)
+	kf := exec.NewKernelFilterLit(col, op, val, text)
+	if ref != nil && strings.Contains(col, ".") {
+		kf.RowFallback = wrapPredicate(expr.NewCmp(ref, &expr.Lit{Val: val, Text: text}, execToCmpOp(op)))
+	}
+	return kf
+}
+
+// execToCmpOp is cmpToExecOp's inverse, for the sites that lower a comparison
+// to a kernel and then have to rebuild the equivalent expression as a
+// fallback.
+func execToCmpOp(op exec.CompareOp) expr.CmpOp {
+	switch op {
+	case exec.OpEq:
+		return expr.CmpEq
+	case exec.OpNe:
+		return expr.CmpNe
+	case exec.OpLt:
+		return expr.CmpLt
+	case exec.OpLe:
+		return expr.CmpLe
+	case exec.OpGt:
+		return expr.CmpGt
+	default:
+		return expr.CmpGe
+	}
 }
 
 // inFilterForList builds the IN / NOT IN operator for a list of literals,
@@ -10709,13 +10810,13 @@ func extractFilterOps(e expr.Expr, neg bool) []exec.UnaryOperator {
 					// FALSE whatever the UNKNOWN one says (#450).
 					if v.Not != neg {
 						return []exec.UnaryOperator{exec.NewOrFilter(
-							kernelOrNothing(col.Name, exec.OpLt, lo.Val, lo.Text),
-							kernelOrNothing(col.Name, exec.OpGt, hi.Val, hi.Text),
+							kernelOrNothingRef(col, col.Name, exec.OpLt, lo.Val, lo.Text),
+							kernelOrNothingRef(col, col.Name, exec.OpGt, hi.Val, hi.Text),
 						)}
 					}
 					return []exec.UnaryOperator{
-						kernelOrNothing(col.Name, exec.OpGe, lo.Val, lo.Text),
-						kernelOrNothing(col.Name, exec.OpLe, hi.Val, hi.Text),
+						kernelOrNothingRef(col, col.Name, exec.OpGe, lo.Val, lo.Text),
+						kernelOrNothingRef(col, col.Name, exec.OpLe, hi.Val, hi.Text),
 					}
 				}
 			}
@@ -10733,7 +10834,11 @@ func extractFilterOps(e expr.Expr, neg bool) []exec.UnaryOperator {
 					return nil // non-literal in IN list
 				}
 			}
-			return []exec.UnaryOperator{inFilterForList(col.Name, values, texts, v.Not != neg)}
+			f := inFilterForList(col.Name, values, texts, v.Not != neg)
+			if inf, ok := f.(*exec.InFilter); ok && strings.Contains(col.Name, ".") {
+				inf.RowFallback = wrapPredicate(negatedExpr(v, neg))
+			}
+			return []exec.UnaryOperator{f}
 		}
 	case *expr.Like:
 		// col LIKE 'pattern' or col NOT LIKE 'pattern'

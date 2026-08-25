@@ -99,7 +99,60 @@ import (
 // value, and the pair `typematrix.cidrValue` puts at id=298/299 for exactly
 // this reason — answered as two rows locally and one on the DAG.
 // `physical.keyValueText`'s parquet.TypeCIDR arm keys both arms by inet.
-var tmdPins = map[string]typematrix.Pin{}
+// nested589 is the one divergence the widened c_row fixture exposes: the
+// stage DAG loses the declared types of a CONTAINER'S CHILDREN, so a network
+// or temporal field inside a ROW comes back in RAW STORAGE FORM where the
+// single-process engine renders it — `ip:167772167` for `ip:10.0.0.7` — and
+// a CIDR field orders by that raw text instead of structurally.
+//
+// It is #396's shape one level down, and it is NOT a field-path defect: the
+// whole-container entries below (project_c_row, wide_row_nested, window_c_row,
+// the min/max family) carry no field path at all and diverge identically.
+// Verified by running this gate with #568's engine and planner changes
+// stashed and the fixture change alone applied — the same raw integers came
+// back. The cause is parquet's declared-schema overlay not recursing into
+// ROW children (#589), which is handed to a separate change; this pin is what
+// makes that change's completeness checkable, because every entry here has to
+// start agreeing when it lands.
+var nested589 = typematrix.Pin{
+	Issue: "#589",
+	Reason: "the stage DAG loses a ROW's CHILD declarations, so a network or temporal field inside a " +
+		"container reads back in raw storage form (an IPv4 as its encoded int64) and a CIDR field " +
+		"orders by that text rather than structurally; the single-process engine renders both",
+}
+
+var tmdPins = map[string]typematrix.Pin{
+	"maxby_c_row":                nested589,
+	"minby_c_row":                nested589,
+	"minby_scalar_c_row":         nested589,
+	"minmax_c_row":               nested589,
+	"minmax_group_c_row":         nested589,
+	"project_c_row":              nested589,
+	"project_nulls_c_row":        nested589,
+	"rowfield_fn_network":        nested589,
+	"rowfield_fn_temporal":       nested589,
+	"rowfield_fn_text_ipv4":      nested589,
+	"rowfield_fn_text_mac":       nested589,
+	"rowfield_group_cidr":        nested589,
+	"rowfield_group_ipv4":        nested589,
+	"rowfield_group_mac":         nested589,
+	"rowfield_minmax_cidr":       nested589,
+	"rowfield_minmax_group_cidr": nested589,
+	"rowfield_minmax_group_ipv4": nested589,
+	"rowfield_minmax_group_mac":  nested589,
+	"rowfield_minmax_ipv4":       nested589,
+	"rowfield_minmax_mac":        nested589,
+	"rowfield_order_cidr":        nested589,
+	"rowfield_order_desc_cidr":   nested589,
+	"rowfield_order_desc_ipv4":   nested589,
+	"rowfield_order_desc_mac":    nested589,
+	"rowfield_order_ipv4":        nested589,
+	"rowfield_order_mac":         nested589,
+	"rowfield_project_ipv4":      nested589,
+	"rowfield_project_mac":       nested589,
+	"wide_row_nested":            nested589,
+	"window_c_row":               nested589,
+}
 
 var tmdUnsupported = map[string]typematrix.Pin{}
 

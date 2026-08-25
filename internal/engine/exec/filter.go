@@ -543,6 +543,18 @@ func decimalConstError(typ batch.TypeID, value any) error {
 	return sqlerr.New("22P02", "invalid input syntax for type numeric: %q", fmt.Sprint(value))
 }
 
+// rowFieldType reports the declared type of a ROW vector's named field. It is
+// the exec-side counterpart of expr.ColRef.valueType, for the operators that
+// hold a NAME rather than a resolved reference.
+func rowFieldType(parent *batch.Vector, field string) (batch.TypeID, bool) {
+	for i, n := range parent.FieldNames {
+		if strings.EqualFold(n, field) && i < len(parent.Children) {
+			return parent.Children[i].Type, true
+		}
+	}
+	return 0, false
+}
+
 // networkConstError is decimalConstError's counterpart for the network types
 // whose kernel arm refuses a literal it cannot read as an ADDRESS: TypeCIDR
 // (kernel.CidrSortKey), TypeIPv6 (kernel.IPv6LitKey), and — since #519 closed
@@ -648,6 +660,17 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 				// field the typed kernel cannot reach — delegate to the
 				// row-at-a-time predicate.
 				if pi := in.ColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
+					// The literal is still checked against the FIELD's
+					// declared type first. Delegating without it is how
+					// `rw.cidr = 'not-a-cidr'` answered ZERO ROWS where the
+					// same predicate on a CIDR COLUMN raises 22P02: the row
+					// predicate compares text and finds no match, which is a
+					// value answer to a question that has none (#568).
+					if ft, ok := rowFieldType(in.Columns[pi], parts[1]); ok {
+						if err := networkConstError(ft, f.Value); err != nil {
+							return nil, err
+						}
+					}
 					f.useFallback = true
 					f.inner = NewFilter(f.RowFallback)
 				}
@@ -727,10 +750,17 @@ type InFilter struct {
 	// Values, for a DECIMAL column — see KernelFilter.LitText (#452). Nil, or
 	// an empty entry, keeps the boxed value.
 	ValueTexts []string
-	colIdx     int
-	kern       kernel.FilterKernel
-	outSel     []uint32
-	resolved   bool
+	// RowFallback mirrors KernelFilter.RowFallback: the row-at-a-time
+	// predicate for a ROW field path the set kernel cannot address, which
+	// otherwise reported the field path as a column that does not exist
+	// (#568).
+	RowFallback Predicate
+	colIdx      int
+	kern        kernel.FilterKernel
+	outSel      []uint32
+	resolved    bool
+	useFallback bool
+	inner       *Filter
 }
 
 func NewInFilter(colName string, values []any, negate bool) *InFilter {
@@ -745,12 +775,18 @@ func NewInFilterLit(colName string, values []any, texts []string, negate bool) *
 
 func (f *InFilter) Init(_ context.Context) error { return nil }
 
-func (f *InFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+func (f *InFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
 		f.colIdx = in.ColumnIndex(f.ColName)
 		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
 			parts := strings.SplitN(f.ColName, ".", 2)
 			f.colIdx = in.ColumnIndex(parts[1])
+			if f.colIdx < 0 && f.RowFallback != nil {
+				if pi := in.ColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
+					f.useFallback = true
+					f.inner = NewFilter(f.RowFallback)
+				}
+			}
 		}
 		if f.colIdx >= 0 {
 			typ := in.Columns[f.colIdx].Type
@@ -763,6 +799,9 @@ func (f *InFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Rec
 	// #147 was filed for: an empty result indistinguishable from genuinely
 	// empty data. It fired for real — seven column types had no arm in
 	// ResolveInFilterKernel, so `WHERE bool_col IN (true)` dropped every row.
+	if f.useFallback {
+		return f.inner.Execute(ctx, in)
+	}
 	if f.colIdx < 0 {
 		return nil, fmt.Errorf("IN filter column %q does not exist in the input schema", f.ColName)
 	}
@@ -820,7 +859,7 @@ func (f *InFilter) kernelValues(typ batch.TypeID) []any {
 
 func (f *InFilter) Clone() UnaryOperator {
 	return &InFilter{ColName: f.ColName, Values: f.Values,
-		ValueTexts: f.ValueTexts, Negate: f.Negate}
+		ValueTexts: f.ValueTexts, Negate: f.Negate, RowFallback: f.RowFallback}
 }
 
 // MatchNothingFilter admits no rows. It is the operator for a predicate that
