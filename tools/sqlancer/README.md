@@ -168,10 +168,18 @@ dist/wadjet serve --mode=standalone --pg-addr=:15432 \
   --storage-type=file --data-dir=/tmp/wadjet-sqlancer-data
 ```
 
-Then, from the SQLancer build directory:
+Then run it through `tools/sqlancer/run.sh` (or `task sqlancer:run`) —
+**not** a raw `java -jar`. SQLancer writes `logs/wadjet/*.log` relative to
+wherever it's launched from, and launching it from an arbitrary shell's
+cwd instead of a scratch directory landed ~800 stray log files in this
+repo's main checkout, twice, during the 2026-08-25 standing soak
+(wadjet#289) — an ad hoc supervisor script skipped the "cd first" this
+section used to just tell you to remember. `run.sh` always cds into a
+scratch working directory before invoking java, so that mistake now takes
+deliberately bypassing this script to repeat:
 
 ```bash
-java -jar target/sqlancer-2.0.0.jar \
+tools/sqlancer/run.sh \
   --num-threads 1 \
   --random-seed <N> \
   --num-queries <per-round budget> \
@@ -181,6 +189,10 @@ java -jar target/sqlancer-2.0.0.jar \
   wadjet --oracle <ORACLE> --test-collations=false \
   --connection-url postgresql://localhost:15432/wadjet
 ```
+
+`run.sh` prints the scratch directory it's using to stderr (override with
+`SQLANCER_RUN_DIR`) — that's where `logs/wadjet/database<N>-cur.log` lands
+for the "Reproducing a finding from a seed" steps below.
 
 `--num-tries` (default 100) is SQLancer's own "stop after N found errors"
 budget, and it counts *every* uncaught exception toward that total — not
@@ -227,10 +239,10 @@ with the seed value in the header. To reproduce:
 
 1. Find the `-- seed value: N` line for the failing round in the log or in
    the captured stdout.
-2. Rerun with `--random-seed N --max-generated-databases 1
-   --num-threads 1` and the same `--oracle`/`--num-queries` — SQLancer's
-   generation is seed-deterministic, so this regenerates the identical
-   schema and query sequence.
+2. Rerun through `tools/sqlancer/run.sh` with `--random-seed N
+   --max-generated-databases 1 --num-threads 1` and the same
+   `--oracle`/`--num-queries` — SQLancer's generation is seed-deterministic,
+   so this regenerates the identical schema and query sequence.
 3. For a **genuine oracle violation** (see "Triage protocol" below), copy
    the exact CREATE TABLE/INSERT/SELECT statements straight out of the
    database log into `psql -p 15432` against a scratch wadjet server —
@@ -241,17 +253,48 @@ with the seed value in the header. To reproduce:
 
 For every SQLancer-reported failure, in order:
 
-1. **Classify the failure shape first.** A genuine oracle-detected
-   wrong-result finding's `AssertionError` message is oracle-specific and
-   starts with a stable phrase — NoREC: `"the counts mismatch (%d and
-   %d)!"`; the TLP family: `"... mismatch:"` — followed by the compared
-   queries and their results. Everything else (an `AssertionError` whose
-   message is just the raw query text, thrown by
-   `SQLQueryAdapter.checkException`) is an *unexpected error*: wadjet
-   rejected or failed on a generated statement with a message that isn't
-   in `sqlancer.postgres`'s Postgres-shaped `ExpectedErrors` list. Both are
-   worth triaging, but they mean different things — grep a soak log for
-   `"counts mismatch"` / `"mismatch:"` to pull out just the former.
+1. **Classify the failure shape first — with the classifier, not a grep.**
+   This section used to say to grep a soak log for `"counts mismatch"` /
+   `"mismatch:"`. **That grep cannot match a real TLP violation and never
+   could** — a defect found on 2026-08-25 (wadjet#289) after the standing
+   soak's own `"0 genuine violations"` reading turned out to be an artifact
+   of this exact grep, not a real absence of violations. Every genuine
+   oracle-detected wrong-result finding's `AssertionError` message is
+   oracle-specific:
+   - NoREC (`NoRECOracle.check`): `"the counts mismatch (%d and %d)!"` —
+     this is the one case the old grep actually matched.
+   - TLP-WHERE / TLP-HAVING (`ComparatorHelper.assumeResultSetsAreEqual`,
+     shared by both and by `QUERY_PARTITIONING`'s composite):
+     `"The size of the result sets mismatch (%d and %d)!"` or `"The
+     content of the result sets mismatch!"` — no colon after "mismatch",
+     and not "counts". The old grep's `"mismatch:"` half was chasing text
+     that does not exist anywhere in SQLancer's source.
+   - TLP-Aggregate (`PostgresTLPAggregateOracle.aggregateCheck` and its
+     per-dialect equivalents): `"the results mismatch!"`.
+   - PQS (`PivotedQuerySynthesisBase.reportMissingPivotRow`): `throw new
+     AssertionError(query)`, whose message is just the bare, unquoted SQL
+     query string — **byte-for-byte the same shape** as the ordinary
+     *unexpected error* below. The only way to tell a genuine PQS
+     violation apart from routine noise is the **stack trace**: look for
+     a frame naming `PivotedQuerySynthesisBase.reportMissingPivotRow`.
+
+   Everything else (an `AssertionError` whose message is just the raw
+   query text, thrown by `SQLQueryAdapter.checkException`) is an
+   *unexpected error*: wadjet rejected or failed on a generated statement
+   with a message that isn't in `sqlancer.postgres`'s Postgres-shaped
+   `ExpectedErrors` list. Both are worth triaging, but they mean different
+   things.
+
+   Use `tools/sqlancer/triage` (`task sqlancer:triage LOGS="<path>"`,
+   or `go run ./cmd/sqlancer-triage <file-or-dir>...`) instead of grepping
+   for these by hand — it classifies every failure shape above (plus a
+   wadjet crash's echo on the SQLancer/JDBC side: connection
+   refused/reset, an I/O error sending to the backend) and prints counts
+   plus each genuine violation's best-effort minimized query. It
+   transparently reads gzip'd session logs and walks a directory
+   recursively. See `tools/sqlancer/triage/classify_test.go` for the
+   classifier's own fixtures (several are real snippets pulled from a
+   past soak) if you need to see the exact shapes it recognizes.
 2. **Reduce to a minimal repro** (see above) — strip the reproduced SQL
    down by hand to the smallest table/query shape that still reproduces.
 3. **Verify against live `postgres:17-alpine`** (`docker run -d -p
@@ -281,12 +324,20 @@ For every SQLancer-reported failure, in order:
 
 ## Pilot soak results (2026-08-24)
 
+> **Correction (2026-08-25, wadjet#289):** the "0 genuine oracle
+> violations" reading below was measured with the `"counts mismatch"` /
+> `"mismatch:"` grep this README used to recommend, which cannot match a
+> genuine TLP violation (see "Triage protocol" above) — it could report
+> 0 violations whether or not any occurred. This pilot's own soak was too
+> small (~200s) to say either way with the corrected classifier; the
+> re-triage that matters is the full soak below.
+
 `--oracle QUERY_PARTITIONING`, wadjet main @ `b570b5e879404c16e49f5d89f48164660363ad67`,
 `--num-threads 1`, patches above applied. Two soaks after the patch set
 landed, ~200s / up to 60-200 database rounds each, `--test-collations=false`:
 
 - **0 genuine oracle violations** (`"counts mismatch"` / `"mismatch:"`) in
-  either soak.
+  either soak — see the correction above.
 - **~100 "unexpected error" events per soak** (SQLancer's own `--num-tries`
   default cap — see "Running" above for why this stops a soak early rather
   than reflecting the real defect rate). Bucketed by underlying wadjet
@@ -431,6 +482,38 @@ minute yield). **Zero genuine oracle violations** (`"counts mismatch"` /
 `"... mismatch:"`) at any volume — every TLP-WHERE, TLP-HAVING,
 TLP-Aggregate (via QUERY_PARTITIONING), NoREC, and PQS check that actually
 completed agreed with wadjet's own answer.
+
+> **Correction (2026-08-25, wadjet#289): that "zero genuine violations"
+> reading was wrong — the grep it was measured with cannot match a TLP
+> violation.** Re-run with `tools/sqlancer/triage` over this soak's own
+> retained logs (`soak-run/<oracle>-seed<seed>/session-*.log.gz` +
+> `crash-stacktraces.log`), the corrected counts are:
+>
+> | Oracle | Reported (old grep) | Corrected (triage tool) |
+> |---|---:|---:|
+> | WHERE | 0 | 0 |
+> | HAVING | 0 | **9,913** (TLP result-set) |
+> | QUERY_PARTITIONING | 0 | **2,259** (1,760 TLP result-set + 499 TLP-Aggregate) |
+> | NOREC | 0 | 0 |
+> | PQS | 0 | 0 |
+> | **Total** | **0** | **12,172** |
+>
+> Every TLP result-set violation sampled (dozens, spanning single-table
+> and multi-table, WHERE-only and HAVING shapes) has a `GROUP BY` with a
+> `SELECT`-list column outside it and not wrapped in an aggregate —
+> wadjet#590's exact shape, still open and unfixed at this soak's `main @
+> 1cf758ba` (unchanged as of this writing). Of the TLP-Aggregate
+> violations, ~25% show wadjet#592's `CAST(... AS BOOLEAN)`-in-a-predicate
+> shape directly in their query text; the remaining ~75% match a
+> TLP-Aggregate/multi-table-join lead documented (but not reproduced) on
+> wadjet#289's 2026-08-25 standing-soak comment — one concrete instance
+> was replayed here byte-for-byte from this soak's own log (exact
+> `CREATE`/`INSERT`/query sequence) against a fresh wadjet instance and
+> still did not reproduce, so it is **not** filed as a new issue; it
+> remains an open, unconfirmed lead. No violation sampled from this soak
+> needed a new issue — all trace to wadjet#590/#591/#592
+> (`bug,correctness,priority:high`, all open) or the unconfirmed lead
+> above, both already on record before this correction.
 
 | Oracle | Seeds | Queries (sum) | Crashes (auto-recovered) |
 |---|---|---|---|

@@ -208,3 +208,33 @@ tasks:
       SCALE: '{{.SCALE | default "0.1"}}'
     cmds:
       - WADJET_PG_SCALE={{.SCALE}} go test -v -run 'TestPostgresOracle$' -timeout 120m ./benchmarks/tpch/
+
+  # --- SQLancer adversarial harness (tools/sqlancer/) ---
+  #
+  # See tools/sqlancer/README.md for the full runbook. SQLancer is GPLv3 and
+  # deliberately never vendored — sqlancer:build clones it fresh into a
+  # scratch dir. `task sqlancer:run` (not a raw `java -jar`) is the
+  # supported way to launch it: it always runs from a scratch working
+  # directory, never the caller's cwd — see tools/sqlancer/run.sh's header
+  # comment for why that matters.
+
+  sqlancer:build:
+    desc: 'Clone, patch, and build the SQLancer jar (default target-dir /tmp/sqlancer-wadjet)'
+    vars:
+      TARGET_DIR: '{{.TARGET_DIR | default "/tmp/sqlancer-wadjet"}}'
+    cmds:
+      - tools/sqlancer/build.sh {{.TARGET_DIR}}
+
+  sqlancer:run:
+    desc: 'Run one SQLancer invocation from a scratch dir, e.g. task sqlancer:run ARGS="--num-threads 1 --random-seed 1 --num-queries 1000 --username wadjet --password wadjet wadjet --oracle NOREC --test-collations=false --connection-url postgresql://localhost:15432/wadjet"'
+    requires:
+      vars: [ARGS]
+    cmds:
+      - tools/sqlancer/run.sh {{.ARGS}}
+
+  sqlancer:triage:
+    desc: 'Classify SQLancer soak-log output into genuine oracle violations vs crash echoes vs noise, e.g. task sqlancer:triage LOGS="tools/sqlancer/soak-run/"'
+    requires:
+      vars: [LOGS]
+    cmds:
+      - go run ./cmd/sqlancer-triage {{.LOGS}}
