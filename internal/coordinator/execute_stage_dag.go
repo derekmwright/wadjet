@@ -1312,39 +1312,25 @@ func (c *Coordinator) dispatchReplicateStage(
 		// CPU savings here and adds a 2 m+ serial-task wall on Q21 SF100.
 		// Pass through; downstream probe-split tasks each open all N
 		// upstream files directly via cachedFileStreamSource (mmap, cheap).
-		//
-		// A pass-through of a pass-through: when the upstream was itself a
-		// leaf scan handed over as raw parquet, the CONSUMER of this
-		// replicate reads base-table files, so the scan annotations have to
-		// survive the hop. Dropping them left a broadcast join's build side
-		// typing an IPv4 column from a file that cannot say it is one
-		// (#423), and a file whose stored type contradicts the catalog
-		// decoding silently (#503). Empty on a WSHF upstream, which is what
-		// the fields already mean.
-		return StageOutput{
-			Kind:          OutputReplicated,
-			Files:         [][]string{upstreamFiles},
-			Bytes:         upstream.Bytes,
-			ScanTable:     upstream.ScanTable,
-			ScanColumns:   append([]string(nil), upstream.ScanColumns...),
-			ScanSchema:    upstream.ScanSchema,
-			ScanFileSizes: append([]int64(nil), upstream.ScanFileSizes...),
-		}, nil
+		return replicatePassThrough(upstream, upstreamFiles), nil
 	}
 
-	cacheFiles, cacheBytes, err := c.materializeReplicate(ctx, queryID, stage, stage.Dependencies[0], upstreamFiles, upstream)
+	cacheFiles, cacheBytes, err := replicateMaterialize(c, ctx, queryID, stage, stage.Dependencies[0], upstreamFiles, upstream)
 	if err != nil {
 		// Materialization failure must not break the query — fall back to
 		// pass-through. Workers can still read the raw upstream files; we
 		// just lose the consolidation benefit. Logged at Warn so an unhealthy
 		// cluster is visible.
+		//
+		// The SAME pass-through as the bypass above, annotations included:
+		// this branch runs over an upstream that is BY CONSTRUCTION
+		// multi-file base parquet (the bypass took every other case), which
+		// is exactly the input the #503 guard refuses to type from its own
+		// footers. Handing it over bare turned "we lost the consolidation
+		// benefit" into "the query fails".
 		c.logger.Warn("dispatchReplicateStage: materialization failed, falling back to pass-through",
 			"stage_id", stage.ID, "upstream_files", len(upstreamFiles), "err", err)
-		return StageOutput{
-			Kind:  OutputReplicated,
-			Files: [][]string{upstreamFiles},
-			Bytes: upstream.Bytes,
-		}, nil
+		return replicatePassThrough(upstream, upstreamFiles), nil
 	}
 
 	return StageOutput{
@@ -1353,6 +1339,41 @@ func (c *Coordinator) dispatchReplicateStage(
 		Bytes: cacheBytes,
 	}, nil
 }
+
+// replicatePassThrough is the replicate stage's output when the upstream's
+// files are handed to every downstream reader as they are — the bypass above,
+// and the fallback when materialization fails.
+//
+// It carries the upstream's SCAN ANNOTATIONS because a pass-through can be a
+// pass-through of a pass-through: when the upstream was itself a leaf scan
+// handed over as raw parquet, the CONSUMER of this replicate reads base-table
+// files, and the catalog's types have to survive the hop. Dropping them left
+// a broadcast join's build side typing an IPv4 column from a file that cannot
+// say it is one (#423), and a file whose stored type contradicts the catalog
+// decoding silently (#503) — and once #503's guard landed, it left the build
+// side with an empty BuildColumnTypes and the whole query REFUSED. The fields
+// are empty on a WSHF upstream, which is what they already mean.
+//
+// One function rather than two constructions, because two is how the fallback
+// came to differ from the bypass in the first place.
+func replicatePassThrough(upstream StageOutput, files []string) StageOutput {
+	return StageOutput{
+		Kind:          OutputReplicated,
+		Files:         [][]string{files},
+		Bytes:         upstream.Bytes,
+		ScanTable:     upstream.ScanTable,
+		ScanColumns:   append([]string(nil), upstream.ScanColumns...),
+		ScanSchema:    upstream.ScanSchema,
+		ScanFileSizes: append([]int64(nil), upstream.ScanFileSizes...),
+	}
+}
+
+// replicateMaterialize is dispatchReplicateStage's call to the consolidation
+// step, indirected through a var for the same reason
+// replicateMaterializeMinFiles is one: a test cannot otherwise reach the
+// fallback, which on a healthy cluster needs S3 or a worker to be unhealthy.
+// Nothing but a test replaces it.
+var replicateMaterialize = (*Coordinator).materializeReplicate
 
 // materializeReplicate dispatches a single TaskTypeStage scan task that reads
 // the upstream files and writes a consolidated WSHF that downstream readers
