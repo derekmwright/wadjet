@@ -88,10 +88,35 @@ func boxedElemCompare(col parquet.Column) boxedCompare {
 }
 
 // boxedValueCompare returns the null-blind comparator for col's declared
-// type. Only the four types whose box loses information the order needs are
+// type. Only the types whose box loses information the order needs are
 // resolved here; everything else is compareAny, whose dynamic dispatch is
-// already the columnar order for the scalars, for VECTOR and for an ARRAY of
-// scalars.
+// already the columnar order.
+//
+// The ADDRESS types below join the containers and DECIMAL because
+// Vector.GetValue renders them for DISPLAY and display order is not address
+// order (#569, the windowed MIN/MAX half of the split #492/#520/#565 closed
+// for the filter and the sort):
+//
+//	IPV4  "9.0.0.1" > "10.0.0.1" as text, < as an address
+//	IPV6  "2001:db8::9" > "2001:db8::10" as text, < as an address
+//	CIDR  '9.255.255.255/32' vs '10.0.0.0/8', and the /mask ranks too
+//	MAC   agrees today, and is re-keyed anyway — see boxedMACCompare
+//
+// The types NOT listed here order correctly under compareAny, and each for a
+// reason worth stating rather than re-keying at a cost:
+//
+//   - UUID renders FIXED-WIDTH LOWERCASE HEX with its dashes at fixed
+//     positions, and hex digits ascend in ASCII, so the text order IS the
+//     raw-byte order sortCompareString gives the column.
+//     TestBoxedCompareAgreesWithColumnarForEveryFlatType pins that
+//     equivalence, so a rendering change cannot quietly break it.
+//   - BYTES boxes as []byte and takes compareAny's bytes.Compare arm — the
+//     same bytewise order sortCompareString gives the column.
+//   - BOOL boxes as a bool: false < true, compareAny's bool arm.
+//   - STRING/the integer-backed types/DATE/TIMESTAMP/DURATION/PORT/PROTOCOL
+//     box as the value the kernel compares, or as a byte-ordered rendering of
+//     it (DATE's ISO form).
+//   - VECTOR boxes as []float32 and takes kernel's float order element-wise.
 func boxedValueCompare(col parquet.Column) boxedCompare {
 	switch col.Type {
 	case parquet.TypeRow:
@@ -105,6 +130,12 @@ func boxedValueCompare(col parquet.Column) boxedCompare {
 		return boxedDecimalCompare(col.Scale)
 	case parquet.TypeCIDR:
 		return boxedCidrCompare()
+	case parquet.TypeIPv4:
+		return boxedIPv4Compare()
+	case parquet.TypeMAC:
+		return boxedMACCompare()
+	case parquet.TypeIPv6:
+		return boxedIPv6Compare()
 	default:
 		return compareAny
 	}
@@ -133,6 +164,108 @@ func boxedCidrCompare() boxedCompare {
 		}
 		return 0
 	}
+}
+
+// boxedIPv4Compare orders two boxed IPV4 values by the ADDRESS, not by the
+// dotted quad Vector.GetValue renders. Text puts "9.0.0.1" above "10.0.0.1";
+// the column stores the address as a 32-bit number and every columnar
+// consumer (sortCompareInt64, compareVectorValues, kernel.CompareValuesAt)
+// compares that number.
+//
+// kernel.IPv4LitKey is the re-key for BOTH sides here, unlike IPv6 below,
+// because IPV4 has no family split to make a literal read differently from a
+// stored value: Vector.SetValue's IPV4 arm encodes a dotted quad with the
+// very same parse, so keying the rendering recovers the stored int64 exactly.
+//
+// A rendering that names no address cannot come out of a TypeIPv4 vector —
+// GetValue formats the stored uint32 — so the fallback is compareAny, for a
+// box that did not come from this column at all.
+func boxedIPv4Compare() boxedCompare {
+	return func(a, b any) int {
+		as, aok := a.(string)
+		bs, bok := b.(string)
+		if !aok || !bok {
+			return compareAny(a, b)
+		}
+		ak, aparsed := kernel.IPv4LitKey(as)
+		bk, bparsed := kernel.IPv4LitKey(bs)
+		if !aparsed || !bparsed {
+			return compareAny(a, b)
+		}
+		return cmpInt64(ak, bk)
+	}
+}
+
+// boxedMACCompare orders two boxed MAC values by the 48-bit address the
+// column stores (kernel.MACLitKey), which is what sortCompareInt64 and
+// compareVectorValues compare.
+//
+// This arm changes NO answer, today or ever, and is here only so a MAC
+// column's order is resolved from its declaration the same way every other
+// network type's is — one uniform rule at this site rather than a silent
+// reliance on compareAny happening to agree. batch.formatMAC renders the
+// stored int64 as six bytes of fixed-width lowercase hex, whose text order
+// is exactly the 48-bit numeric order MACLitKey recovers, so the two cannot
+// disagree. Nor can a value wider than 48 bits reach here to make them: both
+// formatMAC and MACLitKey keep only the low 48 bits, and Vector.SetValue
+// stores exactly what net.ParseMAC produced (six bytes) — there is no
+// >48-bit MAC in any vector, so nothing tests, or could test, a divergence
+// that the storage does not admit.
+func boxedMACCompare() boxedCompare {
+	return func(a, b any) int {
+		as, aok := a.(string)
+		bs, bok := b.(string)
+		if !aok || !bok {
+			return compareAny(a, b)
+		}
+		ak, aparsed := kernel.MACLitKey(as)
+		bk, bparsed := kernel.MACLitKey(bs)
+		if !aparsed || !bparsed {
+			return compareAny(a, b)
+		}
+		return cmpInt64(ak, bk)
+	}
+}
+
+// boxedIPv6Compare orders two boxed IPV6 values by the address's raw 16 bytes
+// (kernel.IPv6RowKey), which is the storage the vectorized kernel reads and
+// what a byte comparison orders as the address's big-endian value.
+//
+// IPv6RowKey, not IPv6LitKey: this box is a STORED value's rendering, so a
+// dotted quad in it is a v4-MAPPED v6 address that keys among the v6 rows —
+// where a dotted-quad LITERAL is a v4 address PostgreSQL's family rule puts
+// below every one of them (#565, and kernel.IPv6RowKey's own doc).
+func boxedIPv6Compare() boxedCompare {
+	return func(a, b any) int {
+		as, aok := a.(string)
+		bs, bok := b.(string)
+		if !aok || !bok {
+			return compareAny(a, b)
+		}
+		ak, aparsed := kernel.IPv6RowKey(as)
+		bk, bparsed := kernel.IPv6RowKey(bs)
+		if !aparsed || !bparsed {
+			return compareAny(a, b)
+		}
+		switch {
+		case ak < bk:
+			return -1
+		case ak > bk:
+			return 1
+		}
+		return 0
+	}
+}
+
+// cmpInt64 is the three-way comparison the two address arms above share.
+func cmpInt64(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
 }
 
 // boxedRowCompare compares two boxed ROWs field by field in DECLARED order —

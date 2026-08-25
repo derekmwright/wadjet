@@ -10921,10 +10921,10 @@ func parseWindowFunc(s string) exec.WindowFunc {
 // MIN/MAX over a window were the last input-dependent family answered from
 // this list, and landed on the float64 default: MIN(a_string) OVER (...)
 // and MIN(int32_col) OVER (...) had #345's symptom for the same reason
-// (#361). They now resolve from the input column like the value functions —
-// but only across the types the operator's compare-and-copy path
-// (compareAny over Vector.GetValue values) orders correctly, which
-// windowMinMaxType vets; anything else keeps this list's float64.
+// (#361). They resolve from the input column like the value functions, and
+// since #569 for EVERY type the engine has — exec.WindowMinMaxType names
+// them all, so what still reaches this list from a MIN/MAX is only an input
+// type the planner could not resolve at all.
 func windowOutputType(funcName string) parquet.TypeID {
 	switch strings.ToLower(funcName) {
 	case "row_number", "rank", "dense_rank", "count", "ntile":
@@ -10978,15 +10978,28 @@ func windowSpecOutputType(node *logical.Node, we logical.WindowExpr) parquet.Typ
 	if col == "" || len(node.Children) != 1 {
 		return windowOutputType(fn)
 	}
+	// colRefDeclaredType declines every PARAMETERIZED type (DECIMAL without
+	// its scale, VECTOR without its dimension, the nested types), so those
+	// keep the float64 fallback here and are corrected at runtime instead:
+	// exec.Window.retypeValueColumns re-declares from the input vector and
+	// exec.windowOutputColumn carries the (p,s)/element/field metadata with
+	// it. A ZERO-ROW result has no such vector and is described from this
+	// declaration alone, which is why `MIN(dec_col) OVER (...)` matching no
+	// row still describes itself float8 while the same query matching rows
+	// describes itself numeric — tracked in #587, not fixable by widening
+	// colRefDeclaredType, whose decline exists for projections that have no
+	// runtime correction at all.
 	t, conf := colRefDeclaredType(&plansql.ColRef{Column: col}, inputColTypes(node.Children[0]))
 	if conf != expr.Decided {
 		return windowOutputType(fn)
 	}
 	if minMax {
 		// MIN/MAX copy an input value through the same GetValue/SetValue
-		// route as the value functions, but their answer is chosen by
-		// compareAny — so only the types that path orders correctly may
-		// re-declare (#361); the rest keep the float64 fallback.
+		// route as the value functions, so the declaration is the input's
+		// own — for every type, since #569. exec.WindowMinMaxType is asked
+		// rather than assumed so the planner and the operator cannot come to
+		// different conclusions about a type; !ok keeps the float64
+		// fallback, as an unresolvable input type does above.
 		out, ok := exec.WindowMinMaxType(t)
 		if !ok {
 			return windowOutputType(fn)

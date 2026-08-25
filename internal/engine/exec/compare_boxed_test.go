@@ -29,21 +29,43 @@ func rowZACol() parquet.Column {
 	}}
 }
 
-func boxedAgreementRows(vals []any) []map[string]any {
+// boxedAgreementRows builds one row per value, keyed by the COLUMN's own
+// name.
+//
+// batch.FromRows reads `row[col.Name]`, and this helper used to key every row
+// "v" while assertBoxedAgreesWithColumnar's callers rename the column to the
+// case name — so every value read back as NULL, every pair of NULLs compared
+// equal on both sides, and the whole table agreed while proving nothing. It
+// was found by adding cases that MUST fail without their fix (the address
+// types, #569) and watching them pass.
+func boxedAgreementRows(name string, vals []any) []map[string]any {
 	rows := make([]map[string]any, len(vals))
 	for i, v := range vals {
-		rows[i] = map[string]any{"v": v}
+		rows[i] = map[string]any{name: v}
 	}
 	return rows
 }
 
 func assertBoxedAgreesWithColumnar(t *testing.T, col parquet.Column, vals []any) {
 	t.Helper()
-	b := batch.FromRows([]parquet.Column{col}, boxedAgreementRows(vals))
+	b := batch.FromRows([]parquet.Column{col}, boxedAgreementRows(col.Name, vals))
 	if b == nil || len(b.Columns) != 1 {
 		t.Fatalf("FromRows built no column for %s", col.Name)
 	}
 	vec := b.Columns[0]
+	// The fixture must actually hold the values. A helper that silently
+	// wrote nothing is what made this assertion vacuous once already, and a
+	// column of NULLs compares equal on both sides for every pair.
+	nonNull := 0
+	for i := range vals {
+		if vals[i] != nil && vec.GetValue(i) != nil {
+			nonNull++
+		}
+	}
+	if want := len(vals) - 1; nonNull < want {
+		t.Fatalf("%s: fixture holds %d non-NULL values, want %d — FromRows did not store them, "+
+			"so this comparison proves nothing", col.Name, nonNull, want)
+	}
 	columnar := kernel.ResolveSortCompare(col.Type)
 	if columnar == nil {
 		t.Fatalf("%v: no columnar comparator", col.Type)
@@ -294,5 +316,107 @@ func TestBoxedVectorCompareOrdersNaNLast(t *testing.T) {
 	}
 	if got := compareAny(math.NaN(), 1e308); got != 1 {
 		t.Errorf("boxed float64 NaN vs finite = %d, want 1", got)
+	}
+}
+
+// TestBoxedCompareAgreesWithColumnarForEveryFlatType is the table above
+// widened from "the shapes whose box drops a DECLARATION" to EVERY flat type,
+// which is what #569 showed was necessary.
+//
+// The window's MIN/MAX declined to declare an output type for twelve of the
+// twenty-two types, so no query could reach the boxed comparator with an
+// IPV4, IPV6 or MAC column at all and nothing here had a reason to name them.
+// Once MIN/MAX declares from the input, the spilled and global (empty
+// PARTITION BY) window paths compare those boxes — and Vector.GetValue
+// renders all three for DISPLAY, where "9.0.0.1" sorts above "10.0.0.1" and
+// "2001:db8::9" above "2001:db8::10" while the addresses do not.
+//
+// The types that need NO re-keying are in the table for the opposite reason:
+// their agreement is a PROPERTY of the rendering (UUID and MAC are
+// fixed-width lowercase hex, DATE is ISO, BYTES boxes as bytes), and a
+// property nothing checks is a property that can be lost. Each value list
+// deliberately contains a pair whose TEXT order and VALUE order differ where
+// such a pair exists.
+func TestBoxedCompareAgreesWithColumnarForEveryFlatType(t *testing.T) {
+	cases := []struct {
+		name string
+		typ  parquet.TypeID
+		vals []any
+	}{
+		{"bool", parquet.TypeBool, []any{nil, false, true}},
+		{"int32", parquet.TypeInt32, []any{nil, int32(-9), int32(-2), int32(0), int32(2), int32(10)}},
+		{"int64", parquet.TypeInt64, []any{nil, int64(-9), int64(0), int64(2), int64(10)}},
+		{"float32", parquet.TypeFloat32, []any{nil, float32(-1.5), float32(0), float32(2), float32(10),
+			float32(math.NaN())}},
+		{"float64", parquet.TypeFloat64, []any{nil, -1.5, 0.0, 2.0, 10.0, math.NaN()}},
+		{"string", parquet.TypeString, []any{nil, "", "10", "2", "alpha", "beta"}},
+		// BYTES boxes as []byte and takes compareAny's bytes.Compare arm —
+		// the arm whose ABSENCE was the documented reason BYTES was declined
+		// (window.go's old prose); it has existed since #415.
+		{"bytes", parquet.TypeBytes, []any{nil, []byte(nil), []byte("10"), []byte("2"), []byte("alpha")}},
+		{"timestamp", parquet.TypeTimestamp, []any{nil, int64(0), int64(1_700_000_000_000), int64(1_700_000_061_000)}},
+		// "9.x" above "10.x" as text, below it as an address.
+		{"ipv4", parquet.TypeIPv4, []any{nil, "0.0.0.0", "9.255.255.255", "10.0.0.1", "10.0.0.2",
+			"192.168.1.1", "255.255.255.255"}},
+		// "2001:db8::9" above "2001:db8::10" as text, below it as an address.
+		{"ipv6", parquet.TypeIPv6, []any{nil, "::", "::1", "2001:db8::9", "2001:db8::10", "2001:db8::1387",
+			"ffff::1"}},
+		// PostgreSQL inet order: the common bits, then the mask, then the
+		// full unmasked address — none of which the stored text gives.
+		{"cidr", parquet.TypeCIDR, []any{nil, "9.255.255.255/32", "10.0.0.0/8", "10.0.0.1/8",
+			"192.168.1.5/24", "192.168.1.0/32", "192.168.255.0/24", "2001:db8::/32"}},
+		{"mac", parquet.TypeMAC, []any{nil, "00:00:00:00:00:00", "aa:bb:cc:00:00:09", "aa:bb:cc:00:00:10",
+			"ff:ff:ff:ff:ff:ff"}},
+		{"port", parquet.TypePort, []any{nil, int32(0), int32(22), int32(1024), int32(65535)}},
+		{"protocol", parquet.TypeProtocol, []any{nil, int32(0), int32(6), int32(17), int32(255)}},
+		{"duration", parquet.TypeDuration, []any{nil, int64(-1), int64(0), int64(1_000_000)}},
+		{"uuid", parquet.TypeUUID, []any{nil,
+			"00000000-0000-4000-8000-000000000000",
+			"00000000-0000-4000-8000-000000000009",
+			"00000000-0000-4000-8000-000000001387",
+			"ffffffff-ffff-4fff-bfff-ffffffffffff"}},
+		{"date", parquet.TypeDate, []any{nil, "1970-01-01", "2009-12-31", "2010-01-01", "2024-02-29"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertBoxedAgreesWithColumnar(t,
+				parquet.Column{Name: tc.name, Type: tc.typ, Nullable: true}, tc.vals)
+		})
+	}
+}
+
+// TestBoxedAddressCompareIsNotTheTextOrder pins the DIRECTION for the three
+// types #569 re-keys, the way TestBoxedRowComparePositionalNotAlphabetical
+// does for ROW. Each pair below compares one way as TEXT and the other way as
+// an address, so a comparator that fell back to compareAny's string arm fails
+// here rather than merely agreeing with a columnar comparator that was never
+// consulted.
+func TestBoxedAddressCompareIsNotTheTextOrder(t *testing.T) {
+	cases := []struct {
+		name     string
+		typ      parquet.TypeID
+		lo, hi   string
+		wantText int // what a plain string compare answers for (lo, hi)
+	}{
+		{"ipv4", parquet.TypeIPv4, "9.255.255.255", "10.0.0.1", 1},
+		{"ipv6", parquet.TypeIPv6, "2001:db8::9", "2001:db8::10", 1},
+		{"cidr", parquet.TypeCIDR, "9.255.255.255/32", "10.0.0.0/8", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sign(compareAny(tc.lo, tc.hi)); got != tc.wantText {
+				t.Fatalf("the premise no longer holds: compareAny(%q,%q) = %d, want %d — "+
+					"pick a pair whose text order still disagrees with the address order",
+					tc.lo, tc.hi, got, tc.wantText)
+			}
+			cmp := newBoxedCompare(parquet.Column{Name: "v", Type: tc.typ, Nullable: true})
+			if got := sign(cmp(tc.lo, tc.hi)); got != -1 {
+				t.Errorf("boxed %v compare(%q, %q) = %d, want -1 (the address order)",
+					tc.typ, tc.lo, tc.hi, got)
+			}
+			if got := sign(cmp(tc.hi, tc.lo)); got != 1 {
+				t.Errorf("boxed %v compare(%q, %q) = %d, want 1", tc.typ, tc.hi, tc.lo, got)
+			}
+		})
 	}
 }

@@ -124,10 +124,10 @@ type WindowColumn struct {
 // input-dependent functions left on the planner's float64 declaration —
 // MIN(int32_col) OVER and MIN(a_string) OVER answered 0 on every row, #345's
 // symptom reached through a different name (#361). They are not on THIS
-// list because their answer is chosen by compareAny rather than lifted by
-// position: retyping is only sound for the input types that comparison
-// orders correctly on Vector.GetValue's representation, which is
-// WindowMinMaxType's decision.
+// list because their answer is CHOSEN by a comparison rather than lifted by
+// position, so retyping them also commits the operator to comparing in the
+// declared type's own order; WindowMinMaxType is where that is stated, and
+// it now names every type (#569).
 func windowValueFunc(f WindowFunc) bool {
 	switch f {
 	case WinLag, WinLead, WinFirstValue, WinLastValue, WinNthValue:
@@ -139,27 +139,52 @@ func windowValueFunc(f WindowFunc) bool {
 // WindowMinMaxType is the output type MIN/MAX over a window declare for an
 // input column of type in, and whether they may re-declare at all.
 //
-// The vetted set is exactly the types whose Vector.GetValue representation
-// compareAny orders correctly — the ints and floats, strings (byte order),
-// TIMESTAMP/DURATION (bare int64), DATE (its ISO string form is
-// byte-ordered), PORT/PROTOCOL (int32). The output type is the input type:
-// MIN/MAX return one of their input's values untouched.
+// The output type IS the input type, for every type the engine has: MIN/MAX
+// return one of their input's values untouched, so the only declaration that
+// can hold the answer is the one the value came out of. That is
+// minMaxOutputType's rule (aggregate.go) and MIN_BY's before it (#392), and
+// the two must agree — `MIN(c) OVER (PARTITION BY g)` and `MIN(c) … GROUP BY
+// g` are the same question asked twice, and a client that reads both in one
+// result set gets two column types for one answer if they disagree.
 //
-// ok=false declines: BYTES compares as 0-everywhere under compareAny (no
-// []byte arm), the network types and UUID surface display strings whose
-// byte order is not their value order ("9.x" > "10.x"), and DECIMAL
-// surfaces a formatted string with the same problem. Those keep the
-// planner's float64 declaration, where Vector.SetValue's type guard now
-// reports the write it cannot perform instead of dropping it — an error,
-// not a silently wrong ordering.
+// This used to be an ALLOW-LIST of ten types, and everything else kept the
+// planner's float64 declaration on the reasoning that the in-memory MIN/MAX
+// deque chose its answer with compareAny over Vector.GetValue's box, which
+// has no type tag to route a CIDR to kernel.CidrOrderKey. Both halves of
+// that have since stopped being true: the deque compares COLUMNAR
+// (kernel.CompareValuesAt, right here in computePartitionColumnar) and the
+// spill and global-window paths resolve newBoxedCompare from the declaration
+// (compare_boxed.go). What the declining left behind was not a safe
+// fallback but a FAILED QUERY — Vector.SetValue's #361 guard reporting
+// "cannot store string into FLOAT64 vector" for a shape BI tools generate
+// routinely, over twelve of the twenty-two types (#569): the eight scalars
+// CIDR/UUID/IPV6/IPV4/MAC/DECIMAL/BYTES/BOOL, and ARRAY/ROW/MAP/VECTOR,
+// while the plain aggregate over the identical column answered correctly.
+//
+// Two types' window output differs from the grouped aggregate's — INT32 and
+// FLOAT32. The grouped MIN/MAX widens INT32 to INT64 and FLOAT32 to FLOAT64
+// because its accumulator is the wider type; the window copies an input value
+// rather than accumulating one, so nothing forces the widening and it keeps
+// INT32 and FLOAT32. Those narrower declarations are the PostgreSQL-correct
+// ones: `min(int4)` is `int4` and `min(real)` is `real` there, both ways.
+//
+// The bool result is kept, rather than returning a bare type, because the
+// planner's caller has a second question the exec caller does not: whether
+// to leave windowOutputType's fallback standing for an input type it could
+// not resolve at all. Every type the engine has answers true.
 //
 // Exported because the physical planner declares from the catalog with this
-// same function; two vetting lists would drift.
+// same function; two lists would drift.
 func WindowMinMaxType(in parquet.TypeID) (parquet.TypeID, bool) {
 	switch in {
-	case batch.TypeInt32, batch.TypeInt64, batch.TypeFloat32, batch.TypeFloat64,
-		batch.TypeString, batch.TypeTimestamp, batch.TypeDate,
-		batch.TypeDuration, batch.TypePort, batch.TypeProtocol:
+	case batch.TypeBool, batch.TypeInt32, batch.TypeInt64,
+		batch.TypeFloat32, batch.TypeFloat64,
+		batch.TypeString, batch.TypeBytes,
+		batch.TypeTimestamp, batch.TypeDate, batch.TypeDuration,
+		batch.TypeIPv4, batch.TypeIPv6, batch.TypeCIDR, batch.TypeMAC,
+		batch.TypePort, batch.TypeProtocol, batch.TypeUUID,
+		batch.TypeDecimal,
+		batch.TypeArray, batch.TypeRow, batch.TypeMap, batch.TypeVector:
 		return in, true
 	}
 	return 0, false
@@ -231,9 +256,10 @@ func (w *Window) retypeValueColumns() bool {
 			}
 			t := col.Type
 			if minMax {
-				// Only the compareAny-vetted types may re-declare (#361);
-				// the rest keep the planner's declaration, whose wrong
-				// writes SetValue now reports instead of dropping.
+				// The input type, for every type the engine has (#569).
+				// A type WindowMinMaxType does not name keeps the planner's
+				// declaration, whose wrong writes SetValue reports instead
+				// of dropping.
 				vetted, ok := WindowMinMaxType(t)
 				if !ok {
 					break

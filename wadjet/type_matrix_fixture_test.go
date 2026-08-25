@@ -134,10 +134,29 @@ func mbMapValue(i int) map[string]any {
 	}
 }
 
-func mbOpen(t *testing.T) *DB {
+func mbOpen(t *testing.T) *DB { return mbOpenBudget(t, 0) }
+
+// mbOpenBudget is mbOpen with a per-query memory budget, which is how a gate
+// asks for the SPILLED form of a pipeline breaker over this fixture: a budget
+// far below the fixture's size forces Sort/Window/HashAggregate onto their
+// external paths. 0 means unlimited.
+//
+// A caveat worth knowing before reaching for it (#569): a budget small enough
+// to spill a pipeline breaker also forces the SCAN past its budget, and the
+// never-OOM model waits for relief before forcing each such reservation —
+// roughly two seconds per query, which is minutes across a 22-type matrix.
+// Nothing the embedded API returns says whether the breaker actually spilled
+// either, so an arm built this way can silently become a second in-memory run.
+// Where the SPILLED path itself is the subject, exec's runWindowBothPaths
+// (internal/engine/exec/window_external_test.go) is the better instrument: it
+// asserts a run file was written and compares the two paths directly.
+func mbOpenBudget(t *testing.T, budget int64) *DB {
 	t.Helper()
 	ctx := context.Background()
-	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	db, err := Open(ctx, Config{
+		Store: objstore.NewMemStore(), Bucket: "test",
+		MemoryBudget: budget, SpillDir: t.TempDir(),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
