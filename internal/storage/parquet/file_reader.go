@@ -23,13 +23,13 @@ import (
 //	    }
 //	}
 type FileReader struct {
-	data       []byte          // entire file in memory; nil in staged (pread) mode
-	src        io.ReaderAt     // staged mode: chunk reads issue ranged reads here
-	size       int64           // staged mode: file size (chunk-range clamp)
-	meta       *FileMetaData   // decoded footer
-	schemaRoot *SchemaNode     // schema tree
-	leaves     []*SchemaNode   // leaf nodes indexed by column position
-	schema     Schema          // Wadjet-level schema (for compatibility)
+	data       []byte        // entire file in memory; nil in staged (pread) mode
+	src        io.ReaderAt   // staged mode: chunk reads issue ranged reads here
+	size       int64         // staged mode: file size (chunk-range clamp)
+	meta       *FileMetaData // decoded footer
+	schemaRoot *SchemaNode   // schema tree
+	leaves     []*SchemaNode // leaf nodes indexed by column position
+	schema     Schema        // Wadjet-level schema (for compatibility)
 
 	// cacheIdentity is an opaque, content-stable identity for the underlying
 	// object (e.g. "<bucket>/<key>#<size>"), set by callers that know it via
