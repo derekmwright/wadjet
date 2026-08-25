@@ -223,6 +223,37 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      a position against PostgreSQL's overload resolution; reproducing 42725
      would mean building the overload ambiguity first.
 
+   - **The grouping rule has no functional-dependency escape here.** (Added
+     2026-08-25, #590.) PostgreSQL refuses a non-aggregated SELECT / HAVING /
+     ORDER BY expression that is not one of the grouped expressions — 42803 —
+     with one relaxation: a column FUNCTIONALLY DEPENDENT on a grouped
+     PRIMARY KEY is allowed, so `SELECT id, name FROM t GROUP BY id` works
+     when `id` is the primary key and fails when it is not. Wadjet has no
+     primary keys and no unique constraints, so there is nothing for the
+     relaxation to apply to and every such reference is refused. This is the
+     STRICTER end of PostgreSQL's own rule, not a divergence from it: every
+     query wadjet refuses here, a PostgreSQL table without the matching
+     primary key refuses too. Should key constraints ever arrive, the
+     relaxation arrives with them rather than being invented separately.
+
+   - **HAVING sees the SELECT list's output aliases; PostgreSQL's does not.**
+     (Added 2026-08-25, from the #591 corpus work.) PostgreSQL makes an
+     output alias visible to GROUP BY and ORDER BY but NOT to HAVING or WHERE
+     — verified live, `SELECT k, COUNT(*) AS c FROM t GROUP BY k HAVING c > 1`
+     is 42703 "column \"c\" does not exist" there. Wadjet resolves it, because
+     its binder puts output names in one scope shared by GROUP BY, HAVING,
+     QUALIFY and ORDER BY, and because the spelling is what a user writing
+     the query expects to work.
+
+     This one cannot be recorded the way the others are. The PostgreSQL
+     oracle's semantics arm FAILS when the oracle refuses a query — an entry
+     PostgreSQL cannot answer is not ground truth for anything — so a
+     corpus entry is not available to carry it, and the wire arm's error
+     list is for statements BOTH engines should refuse. It is gated in
+     `internal/planner/physical/validate_grouping_test.go` instead, where the
+     question is about wadjet's own rule. Recorded here so a later reading of
+     the oracle's silence does not mistake the extension for an oversight.
+
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added
    2026-08-23, from #452.) PostgreSQL types an unsuffixed decimal literal as
    `numeric` and compares it at full precision, so `WHERE d = 493827160549382.7160549350`

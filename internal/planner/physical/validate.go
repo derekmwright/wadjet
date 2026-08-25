@@ -626,17 +626,25 @@ type groupCheck struct {
 // positional reference (`GROUP BY 1`) or as a SELECT output alias resolves to
 // the select item it names, and that item's own expression is grouped too.
 func (g *groupCheck) addGroupTerms(info *plansql.SelectInfo) {
+	// An empty key would match every expression whose String() is empty and
+	// turn the check off silently, so nothing empty is ever recorded.
 	add := func(n plansql.Node) {
 		if n == nil {
 			return
 		}
-		g.keys[groupTermKey(n)] = true
+		if k := groupTermKey(n); k != "" {
+			g.keys[k] = true
+		}
 		if ref, ok := unparen(n).(*plansql.ColRef); ok {
-			g.cols[strings.ToLower(ref.Column)] = true
+			if c := strings.ToLower(ref.Column); c != "" {
+				g.cols[c] = true
+			}
 		}
 	}
 	for _, gb := range info.GroupBy {
-		g.keys[strings.ToLower(strings.TrimSpace(gb))] = true
+		if k := strings.ToLower(strings.TrimSpace(gb)); k != "" {
+			g.keys[k] = true
+		}
 	}
 	for i := range info.GroupByExprs {
 		gbExpr := info.GroupByExprs[i]
@@ -703,7 +711,7 @@ func (g *groupCheck) check(node plansql.Node) error {
 	if node == nil {
 		return nil
 	}
-	if g.keys[groupTermKey(node)] {
+	if k := groupTermKey(node); k != "" && g.keys[k] {
 		return nil
 	}
 	switch n := node.(type) {
