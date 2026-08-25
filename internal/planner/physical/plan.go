@@ -11385,18 +11385,27 @@ func isComputedProjection(e plansql.Node) bool {
 	}
 }
 
+// cleanExpr drops the table qualifier from a COLUMN REFERENCE, and leaves
+// everything else exactly as written.
+//
+// The distinction is the whole of the function. Its callers hand it text that
+// is usually `t.col` and sometimes an arbitrary expression, and the second
+// kind has no qualifier to strip: the first dot in `concat(t0.c0, t0.c1)`
+// separates a table from a column only if you already know the text is a
+// column reference. A naive SplitN on '.' does not, so it returned
+// `c0, t0.c1)` — a fragment of the expression, parentheses and commas
+// included, which then became the OUTPUT COLUMN NAME a client binds by
+// (#513).
+//
+// plansql.SplitIdentRef is the test, because it is the lexer: it accepts
+// `col`, `t.col` and the delimited spellings (`"id.orig_h"` is ONE name, a
+// flat Zeek JSON column with no qualifier — #304) and rejects anything that
+// does not end after the identifier, which is every function call, operator
+// expression and literal.
 func cleanExpr(s string) string {
 	s = strings.TrimSpace(s)
-	// A delimited identifier is a single name: "id.orig_h" (a flat Zeek
-	// JSON column) has no qualifier to strip, and splitting it would leave
-	// a name no batch column matches.
-	if strings.Contains(s, `"`) {
-		if _, name, ok := plansql.SplitIdentRef(s); ok {
-			return name
-		}
-	}
-	if parts := strings.SplitN(s, ".", 2); len(parts) == 2 {
-		return parts[1]
+	if _, name, ok := plansql.SplitIdentRef(s); ok {
+		return name
 	}
 	return s
 }

@@ -337,6 +337,10 @@ func mapKeys(m map[string]any) []string {
 
 // Regression test for GitHub issue #7: CURRENT_DATE returns NULL.
 // Table-less SELECT must work and return correct values.
+//
+// The column KEYS are PostgreSQL's: an unaliased function call is labelled
+// with the function's own name, so `SELECT NOW()` reports `now` and not
+// `now()` (#513, verified against postgres:17-alpine).
 func TestCurrentDateNotNull(t *testing.T) {
 	ctx := context.Background()
 	store := objstore.NewMemStore()
@@ -354,12 +358,12 @@ func TestCurrentDateNotNull(t *testing.T) {
 	}{
 		{
 			sql:    "SELECT CURRENT_DATE",
-			colKey: "current_date()",
+			colKey: "current_date",
 			check:  func(val any) bool { return val == today },
 		},
 		{
 			sql:    "SELECT CURRENT_TIMESTAMP",
-			colKey: "current_timestamp()",
+			colKey: "current_timestamp",
 			check: func(val any) bool {
 				s, ok := val.(string)
 				return ok && strings.HasPrefix(s, today[:10])
@@ -367,7 +371,7 @@ func TestCurrentDateNotNull(t *testing.T) {
 		},
 		{
 			sql:    "SELECT NOW()",
-			colKey: "now()",
+			colKey: "now",
 			check: func(val any) bool {
 				s, ok := val.(string)
 				return ok && strings.HasPrefix(s, today[:10])
@@ -792,6 +796,7 @@ func TestConcurrentQueryNoPanic(t *testing.T) {
 		}
 	}
 }
+
 // TestLeftJoinNonEquiOnFilter is a regression test for the Q13/Q16 family
 // of bugs. The logical optimizer's extractJoinCondPredicates only pushed
 // non-equi ON-clause predicates for INNER joins, so a query like:
@@ -939,7 +944,6 @@ func TestEmptyAggregateNullSemantics(t *testing.T) {
 	}
 }
 
-
 // TestLiteralProjectionType is a regression test for the Q20 bug where
 // `WHERE col IN (SELECT 13)` returned no rows. The physical planner's
 // inferProjectionType ignored *plansql.Lit nodes, so a numeric-literal
@@ -1001,8 +1005,6 @@ func TestLiteralProjectionType(t *testing.T) {
 		t.Errorf("x: got %v (%T), want %v (int64)", got, got, want)
 	}
 }
-
-
 
 // TestCTEColumnarMaterialization is the regression suite for issue #127:
 // materialized CTEs moved from boxed map[string]any rows (unbounded heap)

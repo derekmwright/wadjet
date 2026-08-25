@@ -4189,6 +4189,22 @@ func twoPathCorpus() []twoPathQuery {
 			}},
 	)
 
+	out = append(out,
+		// #513. The output column NAME of an unaliased scalar function, which
+		// wantCols is the whole of: PostgreSQL labels it with the function's
+		// name, and this engine labelled it from the expression text with
+		// everything up to the first dot stripped — `s_name)`. The two arms
+		// did not even agree with EACH OTHER (arm A `s_name)`, arm B
+		// `upper(supplier.s_name)`), which nothing in this suite could see
+		// until wantCols named the answer.
+		twoPathQuery{name: "UnaliasedFuncOverQualifiedColumnName", cmp: cmpOrdered, expectRows: true,
+			sql:   `SELECT UPPER(supplier.s_name) FROM supplier ORDER BY supplier.s_suppkey LIMIT 3`,
+			limit: 3, wantRows: 3, wantCols: []string{"upper"}},
+		twoPathQuery{name: "UnaliasedFuncSeveralArgsName", cmp: cmpOrdered, expectRows: true,
+			sql:   `SELECT COALESCE(supplier.s_name, 'q') FROM supplier ORDER BY supplier.s_suppkey LIMIT 3`,
+			limit: 3, wantRows: 3, wantCols: []string{"coalesce"}},
+	)
+
 	// #358 — the outer-join ON residual: the non-key conjunct runs on the
 	// combined row BEFORE the match is accepted, a probe row whose
 	// candidates all fail comes back NULL-padded rather than dropped, and a

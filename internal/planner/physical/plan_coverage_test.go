@@ -897,6 +897,30 @@ func TestCleanExpr(t *testing.T) {
 	}
 }
 
+// TestCleanExprLeavesExpressionsAlone pins the #513 rule: only a COLUMN
+// REFERENCE has a qualifier to strip. Splitting on the first dot of an
+// expression returns a fragment of it — `upper(t0.c0)` became `c0)` — and that
+// fragment became the output column name a client binds by.
+func TestCleanExprLeavesExpressionsAlone(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"upper(t0.c0)", "upper(t0.c0)"},
+		{"concat(t0.c0, t0.c1)", "concat(t0.c0, t0.c1)"},
+		{"coalesce(t0.c0, 'q')", "coalesce(t0.c0, 'q')"},
+		{"t0.c1 + 1", "t0.c1 + 1"},
+		{"count(t0.c0)", "count(t0.c0)"},
+		{"cast(t.c as bigint)", "cast(t.c as bigint)"},
+		// Still a plain reference, still stripped.
+		{"t.col", "col"},
+		{"col", "col"},
+		// A delimited identifier is ONE name, dot included (#304).
+		{`"id.orig_h"`, "id.orig_h"},
+	} {
+		if got := cleanExpr(tc.in); got != tc.want {
+			t.Errorf("cleanExpr(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // --- PlanDistributed: additional node types ---
 
 func TestPlanDistributed_Window(t *testing.T) {

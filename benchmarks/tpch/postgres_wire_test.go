@@ -629,6 +629,55 @@ func wireCorpus() []wireCase {
 		// survive into a plan rather than only into a scan predicate.
 		{name: "ParamInAggregate", sql: `SELECT COUNT(*) AS c FROM nation WHERE n_regionkey = $1`,
 			paramOIDs: []uint32{23}, params: [][]byte{int4Text(1)}},
+
+		// --- Output column NAMES for unaliased items (#513) -----------------
+		//
+		// The name in RowDescription is what a client shows and binds by, and
+		// it is the one thing only this arm compares — the semantics arm
+		// compares cells POSITIONALLY on purpose. PostgreSQL labels an
+		// unaliased function call with the FUNCTION's name; wadjet labelled it
+		// from the expression's text with everything up to the first '.'
+		// stripped, so `UPPER(supplier.s_name)` came back as `s_name)`,
+		// parenthesis included.
+		{name: "UnaliasedFuncOverQualifiedColumn",
+			sql: `SELECT UPPER(supplier.s_name) FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`},
+		{name: "UnaliasedFuncOverBareColumn",
+			sql: `SELECT UPPER(s_name) FROM supplier ORDER BY s_suppkey LIMIT 2`},
+		{name: "UnaliasedFuncSeveralArgs",
+			sql: `SELECT COALESCE(supplier.s_name, 'q') FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`},
+		// Two unaliased calls in one list, so the names are compared where
+		// PostgreSQL happens to give them DIFFERENT labels. The declared type
+		// of the second is a divergence of its own, found by this entry.
+		{name: "UnaliasedFuncTwice",
+			sql: `SELECT UPPER(s_name), LENGTH(s_name) FROM supplier ORDER BY s_suppkey LIMIT 2`,
+			pins: map[string]string{
+				wirePropTypeOIDs: "#530: LENGTH is int4 in PostgreSQL (OID 23) and wadjet declares " +
+					"float8 (701) — honestly, because the expr layer COMPUTES it as a float64. " +
+					"Declaring int4 over a float64 vector would read back NULL through the typed " +
+					"getter, so the value and the declaration have to move together",
+				wirePropTypeSizes: "#530, follows the OID: 8 for float8 where PostgreSQL declares 4 for int4",
+			}},
+		// The two shapes the same change deliberately does NOT touch, pinned
+		// so the remaining divergence is recorded rather than forgotten.
+		{name: "UnaliasedArithmetic",
+			sql: `SELECT supplier.s_acctbal + 1 FROM supplier ORDER BY supplier.s_suppkey LIMIT 2`,
+			pins: map[string]string{
+				wirePropFieldNames: "#513, not fixed: PostgreSQL labels an operator expression with " +
+					"no natural name `?column?`; wadjet uses the expression's own text " +
+					"(`supplier.s_acctbal + 1`). Both arms of this engine now agree with each other, " +
+					"which they did not before — the single-process path answered `s_acctbal + 1` and " +
+					"the stage DAG the full text. Adopting `?column?` is a separate change: it names " +
+					"every such column the same thing, which the result-row map cannot represent",
+			}},
+		{name: "UnaliasedAggregate",
+			sql: `SELECT COUNT(supplier.s_name) FROM supplier`,
+			pins: map[string]string{
+				wirePropFieldNames: "#513, deliberately out of scope: PostgreSQL labels an aggregate " +
+					"call `count`, wadjet `count(supplier.s_name)`. Unlike the scalar case this is not " +
+					"a mangled name, and an aggregate's output name is load-bearing inside the planner " +
+					"(it IS the Aggregate node's OutputCol, which GROUP BY, HAVING and ORDER BY resolve " +
+					"against), so renaming it is its own change",
+			}},
 	}
 }
 

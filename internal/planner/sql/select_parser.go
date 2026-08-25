@@ -465,10 +465,12 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 		col.Alias = p.advance().val
 	}
 
-	// Unaliased session information function: label the output column the way
-	// PostgreSQL does (`current_user`, not `current_user()`).
-	if col.Alias == "" {
-		if label := sessionInfoLabel(expr); label != "" {
+	// An unaliased function call is labelled with the function's own name, the
+	// way PostgreSQL labels it (`upper`, not `upper(t.c)` and certainly not
+	// `c)`). Aggregates keep the name the planner already gives them — see
+	// funcCallLabel.
+	if col.Alias == "" && !col.IsAgg {
+		if label := funcCallLabel(expr); label != "" {
 			col.Alias = label
 		}
 	}
@@ -1822,33 +1824,35 @@ var niladicFuncs = map[string]bool{
 
 func isNiladicFunc(upper string) bool { return niladicFuncs[upper] }
 
-// sessionInfoFuncs are the session/catalog information functions whose result
-// column PostgreSQL labels with the bare function name: `SELECT current_user`
-// reports the column as `current_user`, not `current_user()`. JDBC and BI
-// clients read these results by label, so the label has to match.
-var sessionInfoFuncs = map[string]bool{
-	"current_user":     true,
-	"session_user":     true,
-	"user":             true,
-	"current_role":     true,
-	"current_catalog":  true,
-	"current_schema":   true,
-	"current_schemas":  true,
-	"current_database": true,
-	"version":          true,
-}
-
-// sessionInfoLabel returns the PostgreSQL output column name for a session
-// information function call, or "" when expr is not one.
-func sessionInfoLabel(expr Node) string {
-	fn, ok := expr.(*FuncCallNode)
-	if !ok || fn.Star || fn.Distinct {
-		return ""
+// funcCallLabel returns the output column name PostgreSQL gives an unaliased
+// SELECT item that is a FUNCTION CALL: the function's own name. `SELECT
+// upper(t.c)` reports the column as `upper`, `SELECT current_user` as
+// `current_user`, `SELECT coalesce(a, b)` as `coalesce`. It returns "" for
+// everything else, which is what leaves an operator expression (`c + 1`) and
+// a cast to the naming rules those have.
+//
+// This is PostgreSQL's FigureColname, and the reason it is decided from the
+// AST rather than from the expression's TEXT: the text-based rule stripped
+// everything up to the first '.' on the assumption that a qualifier preceded
+// it, so `upper(t0.c0)` was labelled `c0)` — a fragment with a parenthesis in
+// it, and the key of the result-row map every client binds by (#513).
+//
+// Parentheses are transparent, as they are in PostgreSQL: `(upper(c))` is
+// still `upper`. An AGGREGATE call is deliberately NOT labelled here — the
+// caller excludes it — because an aggregate's output name is load-bearing
+// inside the planner (it is the Aggregate node's OutputCol, which GROUP BY,
+// HAVING and ORDER BY resolve against) and renaming it is a separate change.
+func funcCallLabel(expr Node) string {
+	for {
+		switch e := expr.(type) {
+		case *ParenNode:
+			expr = e.Inner
+		case *FuncCallNode:
+			return e.Name
+		default:
+			return ""
+		}
 	}
-	if !sessionInfoFuncs[fn.Name] {
-		return ""
-	}
-	return fn.Name
 }
 
 func (p *selectParser) parseIdentExpr() (Node, error) {
