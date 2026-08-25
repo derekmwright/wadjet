@@ -234,6 +234,19 @@ var pins = map[string]struct{ issue, reason string }{
 	"notin_null_build_key": {"#578", "same: the correlated NOT IN answers the two-valued question"},
 	"notin_null_probe_key": {"#578", "same, and this one needs only the PROBE's own NULL key — " +
 		"the half of the rule that requires no per-group state"},
+	"derived_exists_colalias": {"#613", "a derived table's column-alias LIST `(…) AS b(kk,nn)` is " +
+		"dropped by resolveTableOrCTE, so b.kk/b.nn resolve to nothing and EXISTS answers 0 where " +
+		"PostgreSQL says 23; the `SELECT s AS kk` rename spelling (derived_exists_renamed) is right, " +
+		"so it is the alias LIST, not the rename, that is unhandled — and the decline route inherits it"},
+	"derived_in_colalias": {"#613", "the IN spelling of the same dropped column-alias list: 0 where " +
+		"PostgreSQL says 36"},
+	"cte_probe_base_build": {"#535", "the PROBE side is a CTE and a correlated EXISTS over one is not " +
+		"decorrelated at all (its outer-scope collectors lack the CTE's alias), so it stays a Filter " +
+		"predicate and answers 30 where PostgreSQL says 19; the BUILD side is a BASE table here, " +
+		"which rules out the derived/CTE build-side path as the cause"},
+	"cte_referenced_twice": {"#535", "the same probe-side-CTE defect with the CTE on BOTH sides: the " +
+		"build side is fixed by the CTE decline, but the probe CTE is still not decorrelated, so it " +
+		"answers 30 where PostgreSQL says 27"},
 }
 
 // Corpus is the query set. Every entry counts rows, because a count is what
@@ -423,6 +436,105 @@ func sharedNameCorpus() []Case {
 	add("in_derived_inner", fmt.Sprintf(
 		`SELECT COUNT(*) AS n FROM %s a WHERE a.s IN (SELECT b.s FROM `+
 			`(SELECT s, n FROM %s WHERE id < 20) b WHERE b.n = a.n)`, Outer, Inner), 23, 2)
+
+	// --- HARDER derived/CTE shapes, and RECURSIVE CTEs (#577 remainder) ---
+	//
+	// The simple derived shapes above (exists/notexists/in_derived_inner) are
+	// answered by innerRelationsAreScannable declining the derived table and
+	// the materialize/local routes running it as written (#550). These are the
+	// shapes that remained: a renamed or computed derived column, a two-level
+	// nest, and — the class the decline did NOT reach until the enclosing WITH
+	// was threaded to it — a CTE feeding the subquery, and a RECURSIVE CTE.
+	//
+	// All are GATED (unpinned): a CTE reference now declines exactly as a
+	// derived table does, and buildSubqueryPipeline resolves it (it merges the
+	// enclosing WITH); a recursive CTE is declined too and the materializer
+	// REFUSES it (physical/in_subquery_set.go) rather than reading its
+	// cacheless set as empty. Every Want is live PostgreSQL 17's.
+	add("derived_exists_renamed", fmt.Sprintf(
+		`SELECT COUNT(*) AS n FROM %s a WHERE EXISTS (SELECT 1 FROM `+
+			`(SELECT s AS kk, n AS nn FROM %s WHERE id < 20) b WHERE b.kk = a.s AND b.nn = a.n)`,
+		Outer, Inner), 23, 2)
+	add("derived_in_computed", fmt.Sprintf(
+		`SELECT COUNT(*) AS n FROM %s a WHERE a.n IN (SELECT b.m FROM `+
+			`(SELECT n + 1 AS m FROM %s) b)`, Outer, Inner), 32, 1)
+	add("derived_in_nested", fmt.Sprintf(
+		`SELECT COUNT(*) AS n FROM %s a WHERE a.s IN (SELECT b.s FROM `+
+			`(SELECT s FROM (SELECT s FROM %s) c) b)`, Outer, Inner), 36, 1)
+	add("derived_exists_nested", fmt.Sprintf(
+		`SELECT COUNT(*) AS n FROM %s a WHERE EXISTS (SELECT 1 FROM `+
+			`(SELECT s, n FROM (SELECT s, n, id FROM %s) c WHERE c.id < 20) b `+
+			`WHERE b.s = a.s AND b.n = a.n)`, Outer, Inner), 23, 2)
+
+	// A CTE feeding the subquery — declined and resolved like a derived table
+	// now that the WITH reaches innerRelationsAreScannable (#535/#581 build side).
+	add("cte_in_2key", fmt.Sprintf(
+		`WITH src AS (SELECT s, n FROM %s WHERE id < 20) `+
+			`SELECT COUNT(*) AS n FROM %s a WHERE a.s IN (SELECT b.s FROM src b WHERE b.n = a.n)`,
+		Inner, Outer), 23, 2)
+	add("cte_notin_2key", fmt.Sprintf(
+		`WITH src AS (SELECT s, n FROM %s WHERE id < 20) `+
+			`SELECT COUNT(*) AS n FROM %s a WHERE a.s NOT IN (SELECT b.s FROM src b WHERE b.n = a.n)`,
+		Inner, Outer), 13, 2)
+	add("cte_exists_2key", fmt.Sprintf(
+		`WITH src AS (SELECT s, n FROM %s WHERE id < 20) `+
+			`SELECT COUNT(*) AS n FROM %s a WHERE EXISTS (SELECT 1 FROM src b WHERE b.s = a.s AND b.n = a.n)`,
+		Inner, Outer), 23, 2)
+	add("cte_notexists_2key", fmt.Sprintf(
+		`WITH src AS (SELECT s, n FROM %s WHERE id < 20) `+
+			`SELECT COUNT(*) AS n FROM %s a WHERE NOT EXISTS (SELECT 1 FROM src b WHERE b.s = a.s AND b.n = a.n)`,
+		Inner, Outer), 17, 2)
+	add("cte_in_renamed", fmt.Sprintf(
+		`WITH src AS (SELECT s AS kk FROM %s WHERE id < 12) `+
+			`SELECT COUNT(*) AS n FROM %s a WHERE a.s IN (SELECT b.kk FROM src b)`,
+		Inner, Outer), 36, 1)
+	add("cte_in_aggregate", fmt.Sprintf(
+		`WITH src AS (SELECT n, COUNT(*) AS c FROM %s WHERE n IS NOT NULL GROUP BY n HAVING COUNT(*) > 4) `+
+			`SELECT COUNT(*) AS n FROM %s a WHERE a.n IN (SELECT b.n FROM src b)`,
+		Inner, Outer), 8, 1)
+	add("cte_exists_chained", fmt.Sprintf(
+		`WITH s1 AS (SELECT s, n, id FROM %s), s2 AS (SELECT s, n FROM s1 WHERE id < 20) `+
+			`SELECT COUNT(*) AS n FROM %s a WHERE EXISTS (SELECT 1 FROM s2 b WHERE b.s = a.s AND b.n = a.n)`,
+		Inner, Outer), 23, 2)
+	add("cte_in_joined", fmt.Sprintf(
+		`WITH src AS (SELECT s, n, g FROM %s WHERE id < 20) `+
+			`SELECT COUNT(*) AS n FROM %s a WHERE a.s IN (SELECT b.s FROM src b `+
+			`JOIN %s k ON k.k = b.g WHERE b.n = a.n)`, Inner, Outer, Dim), 23, 2)
+
+	// A RECURSIVE CTE feeding IN/NOT IN — declined, and the materializer
+	// refuses it (no fixed-point cache in the set producer) rather than
+	// reading an empty set: IN was 0 and NOT IN every row on the DAG (#F1).
+	rec := "WITH RECURSIVE r(x) AS (SELECT 0 UNION ALL SELECT x + 1 FROM r WHERE x < 3) "
+	add("rec_in_direct", rec+fmt.Sprintf(
+		`SELECT COUNT(*) AS n FROM %s a WHERE a.n IN (SELECT r.x FROM r)`, Outer), 32, 1)
+	add("rec_notin_direct", rec+fmt.Sprintf(
+		`SELECT COUNT(*) AS n FROM %s a WHERE a.n NOT IN (SELECT r.x FROM r)`, Outer), 8, 1)
+	add("rec_in_derived", rec+fmt.Sprintf(
+		`SELECT COUNT(*) AS n FROM %s a WHERE a.n IN (SELECT y.x FROM (SELECT x FROM r) y)`, Outer), 32, 1)
+	add("rec_notin_derived", rec+fmt.Sprintf(
+		`SELECT COUNT(*) AS n FROM %s a WHERE a.n NOT IN (SELECT y.x FROM (SELECT x FROM r) y)`, Outer), 8, 1)
+
+	// --- pinned, tracked elsewhere ---------------------------------------
+	//
+	// A derived table's column-alias LIST is dropped by the builder (#613);
+	// the rename spelling above is right, so the list is the gap. Pinned.
+	add("derived_exists_colalias", fmt.Sprintf(
+		`SELECT COUNT(*) AS n FROM %s a WHERE EXISTS (SELECT 1 FROM `+
+			`(SELECT s, n FROM %s WHERE id < 20) AS b(kk, nn) WHERE b.kk = a.s AND b.nn = a.n)`,
+		Outer, Inner), 23, 2)
+	add("derived_in_colalias", fmt.Sprintf(
+		`SELECT COUNT(*) AS n FROM %s a WHERE a.s IN (SELECT b.kk FROM `+
+			`(SELECT s FROM %s WHERE id < 12) AS b(kk))`, Outer, Inner), 36, 1)
+	// A CTE on the PROBE side is not decorrelated (#535); the build side being
+	// a base table rules out the CTE-build path as the cause. Pinned.
+	add("cte_probe_base_build", fmt.Sprintf(
+		`WITH src AS (SELECT s, n FROM %s WHERE id < 30) `+
+			`SELECT COUNT(*) AS n FROM src a WHERE EXISTS (SELECT 1 FROM %s b WHERE b.s = a.s AND b.n = a.n)`,
+		Outer, Inner), 19, 2)
+	add("cte_referenced_twice", fmt.Sprintf(
+		`WITH src AS (SELECT s, n FROM %s WHERE id < 30) `+
+			`SELECT COUNT(*) AS n FROM src a WHERE EXISTS (SELECT 1 FROM src b WHERE b.s = a.s AND b.n = a.n)`,
+		Outer), 27, 2)
 
 	// --- single-key controls ---------------------------------------------
 	//
