@@ -120,7 +120,21 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				// sides keeps the later comma items as siblings (the shape the
 				// #593/#594 builder fix restored).
 				left := items[idx]
-				if join.Lateral || onRefsEarlierItem(join, items, idx) {
+				switch {
+				case join.Lateral:
+					left = crossFold(idx)
+				case onRefsEarlierItem(join, items, idx):
+					// A QUALIFIED reference to an earlier comma item.
+					left = crossFold(idx)
+				case isInnerOrCrossJoin(join.Type) && !onConfinedToOwnSides(join, items[idx], right):
+					// An INNER/cross join whose ON is NOT provably confined to
+					// its own two sides — a bare (unqualified) cross-item key
+					// is the common case — may reference an earlier comma item
+					// that onRefsEarlierItem cannot see without a qualifier.
+					// main folded every comma item in first, which made such
+					// ONs resolve; restore that here. OUTER joins deliberately
+					// do NOT take this path: folding preceding items into a
+					// preserved side changes which rows survive.
 					left = crossFold(idx)
 				}
 				items[idx] = NewJoin(left, right, join.Type, join.Condition)
@@ -1267,10 +1281,11 @@ func normalizeCorrelatedEquality(expr string, outerAliases map[string]bool) stri
 //
 // Detection is by relation QUALIFIER, which is all that is resolvable at build
 // time: scans carry their alias/name here, but not yet their columns
-// (AnnotateScanColumns runs in the physical planner). A bare column in an ON
-// referencing an earlier comma item is not recognised — an extreme edge the
-// fuzzer and BI clients do not emit, since a cross-item ON is always
-// qualified — and falls through to the default, exactly as before this change.
+// (AnnotateScanColumns runs in the physical planner). A BARE cross-item ON
+// carries no qualifier for this to match, so it is handled separately: an
+// inner/cross join whose ON is not provably confined to its own two sides
+// folds its preceding items in via onConfinedToOwnSides, which is main's
+// original fold-comma-first behaviour restored for exactly that case.
 func onRefsEarlierItem(join plansql.JoinInfo, items []*Node, idx int) bool {
 	if idx <= 0 {
 		return false
@@ -1290,6 +1305,109 @@ func onRefsEarlierItem(join plansql.JoinInfo, items []*Node, idx int) bool {
 		}
 	}
 	return false
+}
+
+// isInnerOrCrossJoin reports whether a join type is an inner or cross join,
+// for which folding preceding comma items into the left input is always
+// semantically safe (a cross join commutes with an inner join, so the extra
+// relations only widen the left before the same equi-join runs). Outer joins
+// are excluded: which rows an outer join preserves depends on what its left
+// input IS, so folding earlier items in would change the answer.
+func isInnerOrCrossJoin(joinType string) bool {
+	jt := strings.ToLower(strings.TrimSpace(joinType))
+	if jt == "" || jt == "join" || jt == "inner" || jt == "inner join" {
+		return true
+	}
+	return strings.Contains(jt, "cross")
+}
+
+// onConfinedToOwnSides reports whether every column reference in a join's ON
+// clause is QUALIFIED by a relation the join itself exposes — its own FROM
+// item (ownItem) or its right table (right). When it is, the ON cannot name an
+// earlier comma item and the join needs no preceding items folded in. When it
+// is not — a bare column, or a qualifier naming neither side — the reference
+// MIGHT be an earlier comma item, which at build time (before scan columns are
+// annotated) cannot be ruled out, so the caller folds conservatively. It
+// returns false for an unparseable ON, which also folds: the safe direction,
+// since folding an inner/cross join's left never changes its answer.
+func onConfinedToOwnSides(join plansql.JoinInfo, ownItem, right *Node) bool {
+	expr := join.CondExpr
+	if expr == nil {
+		expr = tryParseExpr(join.Condition)
+	}
+	if expr == nil {
+		return false
+	}
+	own := liftRelationAliases(ownItem)
+	for a := range liftRelationAliases(right) {
+		own[a] = true
+	}
+	confined := true
+	var walk func(plansql.Node)
+	walk = func(n plansql.Node) {
+		if !confined || n == nil {
+			return
+		}
+		switch e := n.(type) {
+		case *plansql.ColRef:
+			if e.Table == "" || !own[strings.ToLower(e.Table)] {
+				confined = false
+			}
+		case *plansql.CmpExpr:
+			walk(e.Left)
+			walk(e.Right)
+		case *plansql.AndNode:
+			walk(e.Left)
+			walk(e.Right)
+		case *plansql.OrNode:
+			walk(e.Left)
+			walk(e.Right)
+		case *plansql.BinaryOp:
+			walk(e.Left)
+			walk(e.Right)
+		case *plansql.UnaryOp:
+			walk(e.Inner)
+		case *plansql.NotNode:
+			walk(e.Inner)
+		case *plansql.ParenNode:
+			walk(e.Inner)
+		case *plansql.CastNode:
+			walk(e.Inner)
+		case *plansql.FuncCallNode:
+			for _, a := range e.Args {
+				walk(a)
+			}
+		case *plansql.InExpr:
+			walk(e.Left)
+			for _, v := range e.Values {
+				walk(v)
+			}
+		case *plansql.BetweenExpr:
+			walk(e.Left)
+			walk(e.Low)
+			walk(e.High)
+		case *plansql.LikeExpr:
+			walk(e.Left)
+			walk(e.Pattern)
+		case *plansql.IsExpr:
+			walk(e.Left)
+		case *plansql.CaseNode:
+			walk(e.Subject)
+			for _, w := range e.Whens {
+				walk(w.Cond)
+				walk(w.Result)
+			}
+			walk(e.Else)
+		case *plansql.Lit, *plansql.IntervalLit, nil:
+			// literals reference no relation
+		default:
+			// An ON node this walk does not model might hide a bare or
+			// foreign reference; fold rather than assume it is confined.
+			confined = false
+		}
+	}
+	walk(expr)
+	return confined
 }
 
 // condQualifiers returns the lower-cased relation qualifiers a join condition

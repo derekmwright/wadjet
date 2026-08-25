@@ -306,6 +306,16 @@ func TestCommaJoinMixedWithExplicitJoin(t *testing.T) {
 			sql:  `select count(*) from supplier t0 left join partsupp t1 on t0.s_suppkey = t1.ps_suppkey, region t2 where t2.r_regionkey = t0.s_nationkey`,
 		},
 		{
+			// A BARE (unqualified) cross-item ON: the join's ON names a column
+			// of a comma sibling with no qualifier (`FROM a, b JOIN c ON x =
+			// c.y` where x is a's). onRefsEarlierItem cannot see it (no
+			// qualifier), so onConfinedToOwnSides is what folds a in — a's
+			// column is not confined to the join's own two sides. Answered 0
+			// rows before (F1).
+			name: "bare_cross_item_on",
+			sql:  `select count(*) from customer, orders join nation on c_nationkey = n_nationkey where c_custkey = o_custkey`,
+		},
+		{
 			// The explicit JOIN's ON references an EARLIER comma item rather
 			// than its own operand: `FROM a, b JOIN c ON a.k = c.k`. SQL
 			// scopes a join's ON over every FROM item to its left, so a must
