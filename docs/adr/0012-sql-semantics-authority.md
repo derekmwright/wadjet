@@ -257,6 +257,47 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      `internal/planner/physical/validate_grouping_test.go` instead, where the
      question is about wadjet's own rule. Recorded here so a later reading of
      the oracle's silence does not mistake the extension for an oversight.
+   - **CAST(<integer> AS BOOLEAN) over the WHOLE integer family.** (Added
+     2026-08-25, #592.) PostgreSQL HAS this cast, for exactly one width:
+     `1::int4::boolean` is `t`, while `int8`, `int2`, `float8` and `numeric`
+     to boolean are all 42846 "cannot cast type ... to boolean" (verified
+     live on postgres:17-alpine). Wadjet applies the int4 rule — 0 is FALSE,
+     every other value TRUE, NULL is NULL — to INT32 and INT64 alike, and
+     refuses everything else with the same 42846 PostgreSQL raises.
+
+     The int8 half is the divergence, and it is a divergence from an
+     OMISSION rather than from a position: PostgreSQL's own `1::bigint::int::bool`
+     answers, so nothing about the meaning of the cast changes with the
+     width — only whether a pg_cast row exists. Refusing it would mean
+     `CAST(c AS BOOLEAN)` erroring on a BIGINT column and answering on an
+     INTEGER one holding the identical values, and BIGINT is what wadjet's
+     `BIGINT` declaration and its integer literals produce, so the cast
+     would be unreachable for most columns while its twin worked.
+
+     **FLOAT and DECIMAL are refused, not extended.** That asymmetry is the
+     point: PostgreSQL declines float truthiness deliberately (there is no
+     cast to omit — a float has no int4 twin whose rule this would be
+     borrowing), and the value wadjet used to answer there was one nothing
+     agreed on. `SELECT (f)::BOOLEAN` came back TRUE/FALSE through
+     `Vector.SetValue`'s coercion while `WHERE (f)::BOOLEAN` excluded every
+     row, which is the same two-path failure this item closes.
+
+     **STRING is PostgreSQL's boolean input function exactly**
+     (`parse_bool_with_len`, `expr.parseBoolText`): case-insensitive, C
+     whitespace trimmed, any non-empty PREFIX of "true"/"false"/"yes"/"no",
+     plus "on"/"off" and the single characters "1" and "0". `'tr'` and
+     `'fals'` ARE values there; `'o'` alone is not, because it cannot choose
+     between "on" and "off". A string that names no boolean is SQLSTATE
+     22P02, never a value and never a match-nothing predicate — #463's rule
+     for DECIMAL, one type family over.
+
+     **The rule is selected from the operand's DECLARATION, never from its
+     Go box** — item 8's boxed-value rule. A DECIMAL column and a STRING
+     column both box as a Go string, so a box-driven cast would give
+     `DECIMAL(9,0)` holding 1 the answer TRUE where PostgreSQL refuses
+     outright, and DATE/IPv4/MAC (boxed as their raw integer encodings)
+     would take the integer arm. `expr.castBoolDeclared` resolves the
+     declaration from the batch and caches it, the way `boxedPair` does.
 
    - **A JOIN's ON condition can reference comma-join siblings; PostgreSQL rejects this.** (Closed #617.) A join predicate like `SELECT ... FROM a, b JOIN c ON a.k = c.k WHERE ...` references a sibling of the comma join in its ON clause. PostgreSQL 17 rejects this with "invalid reference to FROM-clause entry"; wadjet answers it, matching DuckDB. This is a strict SUPERSET: errors on PostgreSQL, runs on wadjet; not a value divergence and not a wire-protocol violation. Gated against DuckDB and the two-path oracle (PostgreSQL offers no value to assert). #593 fixed the prior silent-zero wrong answer in this shape. The reject-like-PostgreSQL alternative was considered and declined because no client should rely on the error and the planner lacks the ON-scope validation it would require.
 
