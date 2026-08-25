@@ -5014,6 +5014,22 @@ func (e *ScalarSubquery) resolveSlow() {
 	}
 }
 
+// MemoryAccountant is the minimal per-task memory-budget hook InSubquery
+// uses to charge its uncorrelated membership set (ADR-0006, #528). It is
+// declared here rather than importing internal/engine/memory: expr has no
+// other reason to depend on that package, and *memory.Tracker already has
+// exactly this method set, so a caller that holds one satisfies this
+// interface with no adapter — the seam CompileWithBudget threads through
+// costs no new package dependency.
+type MemoryAccountant interface {
+	// Reserve charges n bytes against the budget, returning an error (which
+	// InSubquery treats as a query error, never a silent no-op) if doing so
+	// would exceed it.
+	Reserve(n int64) error
+	// Release returns n previously reserved bytes.
+	Release(n int64)
+}
+
 // InSubquery checks if a value is in the result set of a subquery.
 // Example: WHERE user_id IN (SELECT user_id FROM active_users)
 // Uncorrelated: executed once and result set cached in a hash set for O(1) lookup.
@@ -5022,6 +5038,15 @@ type InSubquery struct {
 	SQL    string
 	Runner SubqueryRunner
 	Not    bool
+	// Budget charges the membership set resolveSlow builds to the caller's
+	// per-task memory tracker (ADR-0006, #528). nil (CompileWithRunner,
+	// CompileWithScope, etc.) keeps the map unbudgeted, exactly as before
+	// #528 — every shape that decorrelates into a semi join never reaches
+	// this type at all (its build side is already budgeted and spillable);
+	// only tryDecorrelateInSubquery's DECLINED shapes do, and only a
+	// computed inner select item is unbounded (a LIMIT/OFFSET or an
+	// ungrouped-aggregate inner item is bounded by construction).
+	Budget MemoryAccountant
 	// resolved publishes the set: stored last under resolveMu. Same
 	// contract, and the same defect, as ScalarSubquery's (#398) — an
 	// unsynchronized flag let a parallel worker probe a half-built map.
@@ -5035,6 +5060,9 @@ type InSubquery struct {
 	strSet  map[string]struct{}
 	fltSet  map[float64]struct{}
 	vals    []any // fallback for mixed types
+	// chargedBytes is exactly what was handed to Budget.Reserve, guarded by
+	// resolveMu, so Release returns exactly that many bytes exactly once.
+	chargedBytes int64
 }
 
 func (e *InSubquery) Eval(b *batch.RecordBatch, row int) any {
@@ -5156,6 +5184,89 @@ func (e *InSubquery) resolveSlow() {
 			}
 		}
 	}
+	e.chargeMemory()
+}
+
+// chargeMemory reserves the membership set's estimated heap footprint
+// against Budget (ADR-0006, #528). A nil Budget (every compile path except
+// CompileWithBudget) is a no-op, exactly the pre-#528 behavior — this is
+// what makes the fix opt-in rather than a change to every existing caller.
+//
+// Called once, from inside resolveSlow's already-held resolveMu, after the
+// set this query holds has been decided, so the estimate matches exactly
+// what stays reachable for the life of this InSubquery.
+func (e *InSubquery) chargeMemory() {
+	if e.Budget == nil {
+		return
+	}
+	n := inSubqueryMemBytes(e.intSet, e.strSet, e.fltSet, e.vals)
+	if n <= 0 {
+		return
+	}
+	if err := e.Budget.Reserve(n); err != nil {
+		// A giant uncorrelated IN-subquery is exactly the shape ADR-0006
+		// exists to refuse rather than let grow an unbudgeted map until the
+		// process OOMs (#528) — raised the same way every other expr-level
+		// query error is (fatal.go), since EvalBoolNull has no error return
+		// to propagate one through.
+		panic(fatalEval{fmt.Errorf("IN subquery membership set: %w", err)})
+	}
+	e.chargedBytes = n
+}
+
+// Release returns any bytes charged to Budget in resolveSlow, and is
+// idempotent — a caller that does not know whether resolveSlow ever ran, or
+// has already called Release, may call it any number of times.
+func (e *InSubquery) Release() {
+	if e.Budget == nil {
+		return
+	}
+	e.resolveMu.Lock()
+	n := e.chargedBytes
+	e.chargedBytes = 0
+	e.resolveMu.Unlock()
+	if n > 0 {
+		e.Budget.Release(n)
+	}
+}
+
+// inSubqueryMapEntryOverhead approximates a Go map's per-entry bookkeeping:
+// a bucket holds up to 8 (key, value) pairs plus one tophash byte and an
+// amortized share of an overflow-bucket pointer per entry, which rounds up
+// to about this many bytes on top of the key/value payload itself. This
+// does not need to be exact — Reserve's job is to catch an unbounded
+// subquery before it outgrows the task's budget, not to account every byte
+// precisely — and rounding up is the safe direction for a budget check.
+const inSubqueryMapEntryOverhead = 16
+
+// inSubqueryMemBytes estimates the heap footprint of whichever membership
+// set resolveSlow built — at most one of intSet/strSet/fltSet/vals is
+// non-nil, matching resolveSlow's mutually exclusive construction.
+func inSubqueryMemBytes(intSet map[int64]struct{}, strSet map[string]struct{}, fltSet map[float64]struct{}, vals []any) int64 {
+	switch {
+	case intSet != nil:
+		return int64(len(intSet)) * (8 + inSubqueryMapEntryOverhead)
+	case fltSet != nil:
+		return int64(len(fltSet)) * (8 + inSubqueryMapEntryOverhead)
+	case strSet != nil:
+		var n int64
+		for k := range strSet {
+			n += int64(len(k)) + 16 /* string header */ + inSubqueryMapEntryOverhead
+		}
+		return n
+	case len(vals) > 0:
+		var n int64
+		for _, v := range vals {
+			n += 16 // interface header (type word + data word)
+			if s, ok := v.(string); ok {
+				n += int64(len(s))
+			} else {
+				n += 8 // scalar payload estimate
+			}
+		}
+		return n
+	}
+	return 0
 }
 
 // missAnswer is the IN answer for a probe the set does not contain: FALSE

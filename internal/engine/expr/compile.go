@@ -15,6 +15,11 @@ type compileContext struct {
 	outerTables map[string]bool      // table aliases from the outer query scope
 	outerCols   map[string]string    // column name → table mapping for unqualified resolution
 	innerCols   plansql.TableColumns // a subquery's own column namespace, for scoping unqualified names
+	// budget charges an uncorrelated IN-subquery's membership set to the
+	// caller's per-task memory tracker (ADR-0006, #528). nil (the default,
+	// and every existing CompileWith* entry point below) keeps the
+	// pre-#528 unbudgeted behavior — set via CompileWithBudget.
+	budget MemoryAccountant
 }
 
 // Compile converts our AST Node into an Expr tree.
@@ -53,6 +58,26 @@ func CompileWithScopeResolver(node plansql.Node, runner SubqueryRunner, outerTab
 		outerTables: outerTables,
 		outerCols:   outerCols,
 		innerCols:   innerCols,
+	})
+}
+
+// CompileWithBudget is CompileWithScopeResolver plus a memory budget that an
+// uncorrelated InSubquery charges its membership set against (ADR-0006,
+// #528). budget may be nil, which keeps the pre-#528 unbudgeted behavior
+// every other CompileWith* entry point still has; any *memory.Tracker
+// satisfies MemoryAccountant structurally; see that type's doc for why this
+// package does not import internal/engine/memory to accept one.
+//
+// outerTables, outerCols and innerCols may be nil for a top-level,
+// non-correlated compile — pass CompileWithScope's or CompileWithRunner's
+// arguments through unchanged and add only the budget.
+func CompileWithBudget(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool, outerCols map[string]string, innerCols plansql.TableColumns, budget MemoryAccountant) (Expr, error) {
+	return compileWithCtx(node, &compileContext{
+		runner:      runner,
+		outerTables: outerTables,
+		outerCols:   outerCols,
+		innerCols:   innerCols,
+		budget:      budget,
 	})
 }
 
@@ -245,7 +270,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 						}
 					}
 				}
-				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not}, nil
+				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not, Budget: ctx.budget}, nil
 			}
 		}
 		var values []Expr
