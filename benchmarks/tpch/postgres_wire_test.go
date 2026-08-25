@@ -514,6 +514,25 @@ const (
 	// renders the fraction at its declared scale instead of trimming it. The
 	// two properties are gated again.
 
+	// setOpDecimalDigitsPin is a DELIBERATE difference of CARRIER, recorded in
+	// ADR-0012 item 12: PostgreSQL's numeric is variable-scale, so a set
+	// operation renders each arm's rows at that ARM's original scale
+	// ("-6.00" beside "-6.1875"); a wadjet DECIMAL column has ONE declared
+	// scale, so every row of the result prints at it. Same number, same row
+	// set, same class as AVG's digit count in item 9.
+	//
+	// The digits differ in the OTHER direction today, for a second and
+	// temporary reason: this server takes the single-process path, which
+	// builds the result under the FIRST arm's schema and so renders the WIDER
+	// arm's rows too narrow (#532). When that lands the direction flips and
+	// this pin still holds — which is why it is a deliberate pin and not a bug
+	// pin. The typmod pin beside it is the one that must disappear.
+	setOpDecimalDigitsPin = "DELIBERATE (ADR-0012 item 12): PostgreSQL's variable-scale numeric renders " +
+		"each arm of a set operation at that arm's own scale; a wadjet DECIMAL column has one declared " +
+		"scale and renders every row at it. Same number, same row set. Today the difference also " +
+		"carries #532's narrowing on the single-process path, which is a defect and is pinned " +
+		"separately in the semantics corpus"
+
 	// noExactNumericPin is a DELIBERATE difference, documented rather than
 	// fixed: the engine has one numeric tower and it is float64.
 	noExactNumericPin = "DELIBERATE: Wadjet has no exact numeric type. PostgreSQL promotes SUM(int4) to " +
@@ -611,6 +630,36 @@ func wireCorpus() []wireCase {
 		{name: "MinOverDecimalColumnZeroRows", sql: `SELECT MIN(d_2) AS lo FROM dec_probe WHERE d_key = -1`},
 		{name: "SumOverDecimalColumn", sql: `SELECT SUM(d_2) AS s FROM dec_probe WHERE d_key IN (1, 2, 3)`},
 		{name: "SumOverDecimalColumnZeroRows", sql: `SELECT SUM(d_2) AS s FROM dec_probe WHERE d_key = -1`},
+		// A SET OPERATION over two DECIMAL columns of different (p,s). Live
+		// PostgreSQL's \gdesc declares the result UNCONSTRAINED — plain
+		// `numeric`, typmod -1 — where the same column selected on its own is
+		// `numeric(9,2)`: a set operation keeps the arms' typmod only when
+		// every arm agrees on it, and drops it otherwise. Wadjet declares a
+		// real (p,s) either way, which is #542.
+		//
+		// The VALUES agree (the DAG widens both arms since #533, and this
+		// server takes the single-process path where #532 governs the
+		// rendering), so a value oracle cannot see this at all — it is exactly
+		// the class the wire arm exists for. Pinned per PROPERTY, so every
+		// other property of this statement stays gated.
+		{name: "SetOpAcrossDecimalScales",
+			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (0, 4, 8)
+				UNION ALL SELECT d_4 FROM dec_probe WHERE d_key IN (0, 4, 8) ORDER BY 1`,
+			pins: map[string]string{
+				wirePropTypeMods: "WADJET BUG (#542): PostgreSQL declares a set operation's numeric " +
+					"result unconstrained (typmod -1) unless every arm carries the SAME typmod; " +
+					"wadjet declares a real (p,s). declaredWireUnconstrainedDecimal already does this " +
+					"for the other shape PostgreSQL drops typmod on (an aggregate call) and needs the " +
+					"set-operation case added",
+				wirePropFloatRender: setOpDecimalDigitsPin,
+			}},
+		// The control for the entry above: BOTH arms are the same column, so
+		// PostgreSQL KEEPS numeric(9,2) and wadjet agrees outright. It carries
+		// no pin, which is what proves the pinned entry is about the arms
+		// disagreeing and not about set operations in general.
+		{name: "SetOpSameDecimalScale",
+			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (1, 2)
+				UNION ALL SELECT d_2 FROM dec_probe WHERE d_key IN (2, 3) ORDER BY 1`},
 		// A parameter bound by its DECLARED type rather than as a string —
 		// the shape of the 4a25af0 fix, and the one that exercises
 		// ParameterDescription.

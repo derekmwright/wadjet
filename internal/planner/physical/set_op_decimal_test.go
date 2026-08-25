@@ -134,3 +134,115 @@ func TestSetOpDecimalTargetNeverNarrowsAnArm(t *testing.T) {
 		}
 	}
 }
+
+// TestReconcileEmitsNoCoercionWhenTheArmsAlreadyAgree.
+//
+// Every coercion costs a fresh vector and a pass over the rows, and — more to
+// the point — an OpDecimalCoerce in a fragment is a declaration that the arm's
+// values MOVE. An arm already carrying the output type must carry neither. The
+// same-(p,s) union is the overwhelmingly common case, and a reconciliation
+// that emitted a no-op coercion for it would be paying for #533 on every union
+// in the corpus.
+func TestReconcileEmitsNoCoercionWhenTheArmsAlreadyAgree(t *testing.T) {
+	dec := func(p, s int) setOpColType {
+		return setOpColType{typ: parquet.TypeDecimal, known: true,
+			dec: logical.DecimalMeta{Precision: p, Scale: s}, decKnown: true}
+	}
+	arm := func(cts ...setOpColType) setOpArmPlan {
+		specs := make([]ProjectExprSpec, len(cts))
+		for i := range cts {
+			specs[i] = ProjectExprSpec{Expr: "c", Name: "v"}
+		}
+		return setOpArmPlan{specs: specs, types: cts}
+	}
+
+	t.Run("identical", func(t *testing.T) {
+		plans := []setOpArmPlan{arm(dec(9, 2)), arm(dec(9, 2))}
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		for i, p := range plans {
+			if len(p.coerce) != 0 {
+				t.Errorf("arm %d got %d coercions for a column it already carries: %+v", i, len(p.coerce), p.coerce)
+			}
+		}
+	})
+
+	t.Run("three_identical_arms", func(t *testing.T) {
+		plans := []setOpArmPlan{arm(dec(18, 4)), arm(dec(18, 4)), arm(dec(18, 4))}
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		for i, p := range plans {
+			if len(p.coerce) != 0 {
+				t.Errorf("arm %d got %d coercions: %+v", i, len(p.coerce), p.coerce)
+			}
+		}
+	})
+
+	t.Run("non_decimal_arms_are_untouched", func(t *testing.T) {
+		i64 := setOpColType{typ: parquet.TypeInt64, known: true}
+		plans := []setOpArmPlan{arm(i64), arm(i64)}
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		for i, p := range plans {
+			if len(p.coerce) != 0 {
+				t.Errorf("arm %d got %d coercions for an INT64 column: %+v", i, len(p.coerce), p.coerce)
+			}
+		}
+	})
+
+	// The control, and the precise rule: ONLY the arm that differs is moved.
+	// (9,2) with (18,4) resolves to (18,4), so the second arm already carries
+	// the output type and must be left alone even though the operation as a
+	// whole needed reconciling — the coercion is per ARM, not per operation.
+	t.Run("only_the_differing_arm_is_moved", func(t *testing.T) {
+		plans := []setOpArmPlan{arm(dec(9, 2)), arm(dec(18, 4))}
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if len(plans[0].coerce) != 1 {
+			t.Fatalf("the narrow arm got %d coercions, want 1: %+v", len(plans[0].coerce), plans[0].coerce)
+		}
+		if plans[0].coerce[0] != (DecimalCoercion{Name: "v", Precision: 18, Scale: 4}) {
+			t.Errorf("the narrow arm's coercion = %+v, want DECIMAL(18,4) on v", plans[0].coerce[0])
+		}
+		if len(plans[1].coerce) != 0 {
+			t.Errorf("the arm already carrying the output type got %d coercions: %+v",
+				len(plans[1].coerce), plans[1].coerce)
+		}
+	})
+
+	// Neither arm carrying the output type means BOTH move: (18,2) with
+	// (9,4) resolves to (20,4), which is neither.
+	t.Run("both_arms_move_when_neither_is_the_target", func(t *testing.T) {
+		plans := []setOpArmPlan{arm(dec(18, 2)), arm(dec(9, 4))}
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		for i, p := range plans {
+			if len(p.coerce) != 1 {
+				t.Fatalf("arm %d got %d coercions, want 1: %+v", i, len(p.coerce), p.coerce)
+			}
+			if p.coerce[0] != (DecimalCoercion{Name: "v", Precision: 20, Scale: 4}) {
+				t.Errorf("arm %d coercion = %+v, want DECIMAL(20,4) on v", i, p.coerce[0])
+			}
+		}
+	})
+
+	// An arm whose (p,s) nothing resolved leaves EVERY arm alone: a scale
+	// guessed here would move values by a power of ten (#533's own failure
+	// mode), and the residual is tracked as #551.
+	t.Run("an_unresolved_arm_moves_nothing", func(t *testing.T) {
+		plans := []setOpArmPlan{arm(dec(9, 2)), arm(setOpColType{typ: parquet.TypeDecimal, known: true})}
+		if err := reconcileSetOpArmTypes(plans, []string{"v"}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		for i, p := range plans {
+			if len(p.coerce) != 0 {
+				t.Errorf("arm %d got %d coercions from an unresolvable target: %+v", i, len(p.coerce), p.coerce)
+			}
+		}
+	})
+}

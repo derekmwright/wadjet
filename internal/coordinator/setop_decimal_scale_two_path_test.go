@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -540,8 +541,15 @@ func TestSetOpDecimalOverflowIsAnError(t *testing.T) {
 	t.Logf("refused, as it must be: %v", err)
 }
 
-// The overflow fixture: one column whose values need every one of its 36
-// integer digits, and one at a scale that forces those digits to move.
+// The overflow fixture: columns whose widening has no exact Int128, in the
+// two shapes that reach it.
+//
+//   - wide/huge: DECIMAL(38,10) beside DECIMAL(38,2). 36 integer digits at
+//     scale 10 is 46 digits, past the 38 an Int128 holds.
+//   - d380/d1110: DECIMAL(38,0) holding 10^30 beside DECIMAL(11,10). The
+//     integer part is ALREADY near the carrier's limit, so any scale at all
+//     on the other arm pushes it out. That is the shape showing the 38-digit
+//     cap is a RANGE REDUCTION, not only a rounding rule (#552).
 const sodOvfTable = "setopdecovf"
 
 func sodOvfSchema() parquet.Schema {
@@ -549,6 +557,8 @@ func sodOvfSchema() parquet.Schema {
 		{Name: "id", Type: parquet.TypeInt64},
 		{Name: "wide", Type: parquet.TypeDecimal, Precision: 38, Scale: 10, Nullable: true},
 		{Name: "huge", Type: parquet.TypeDecimal, Precision: 38, Scale: 2, Nullable: true},
+		{Name: "d380", Type: parquet.TypeDecimal, Precision: 38, Scale: 0, Nullable: true},
+		{Name: "d1110", Type: parquet.TypeDecimal, Precision: 11, Scale: 10, Nullable: true},
 	}}
 }
 
@@ -556,8 +566,14 @@ func sodOvfData() []map[string]any {
 	// 10^37 as an unscaled DECIMAL(38,2) is 10^35 whole units; restated at
 	// scale 10 it needs 10^45, which no Int128 holds.
 	huge, _ := new(big.Int).SetString("10000000000000000000000000000000000000", 10)
+	// 10^30: a value both engines hold comfortably at scale 0, and neither
+	// this carrier nor a 38-digit declaration holds at scale 10.
+	e30, _ := new(big.Int).SetString("1000000000000000000000000000000", 10)
 	return []map[string]any{
-		{"id": int64(1), "wide": sodDec(12345), "huge": sodBigDec(huge)},
+		{"id": int64(1), "wide": sodDec(12345), "huge": sodBigDec(huge),
+			"d380": sodBigDec(e30), "d1110": sodDec(10000000001)},
+		{"id": int64(2), "wide": sodDec(1), "huge": sodDec(1),
+			"d380": sodDec(7), "d1110": sodDec(20000000000)},
 	}
 }
 
@@ -565,4 +581,181 @@ func sodBigDec(v *big.Int) parquet.Decimal128 {
 	lo := new(big.Int).And(v, new(big.Int).SetUint64(^uint64(0)))
 	hi := new(big.Int).Rsh(v, 64)
 	return parquet.Decimal128{Hi: hi.Int64(), Lo: lo.Uint64()}
+}
+
+// The join-arm fixture (#551): the SAME column name at two different (p,s),
+// in two tables, so a set-operation arm that ends in a JOIN of them reaches
+// the type walk with a name the two sides disagree about.
+const (
+	sodJoinA = "setopdecja"
+	sodJoinB = "setopdecjb"
+)
+
+func sodJoinSchema(precision, scale int) parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "dx", Type: parquet.TypeDecimal, Precision: precision, Scale: scale, Nullable: true},
+	}}
+}
+
+// sodJoinData is four rows of the SAME NUMBER at whichever scale the column
+// declares, so any difference in the answer is the scale being misread and
+// nothing else.
+func sodJoinData(unscaled int64) []map[string]any {
+	rows := make([]map[string]any, 0, 4)
+	for i := 1; i <= 4; i++ {
+		rows = append(rows, map[string]any{"id": int64(i), "dx": sodDec(unscaled)})
+	}
+	return rows
+}
+
+// TestSetOpDecimalJoinArmScaleResidual pins the case fa907d44 did NOT fix
+// (#551), in the shape the fix's own backstop cannot see.
+//
+// An arm that ends in a JOIN reaches the type walk through inputColTypes /
+// inputColDecimal, which merge the two sides and DELETE any name they disagree
+// about. For a TypeID that is right — two tables genuinely have two `dx`
+// columns. For a set operation it throws away the one fact being reconciled,
+// so `dx` resolves to DECIMAL with no (p,s), setOpDecimalTarget declines, and
+// both arms keep their own scale.
+//
+// The writer's scale check does not catch it: each arm's task writes its OWN
+// file, internally consistent, and the reinterpretation happens in the
+// downstream stage that reads several files and takes the first header's
+// scale — upstream of any writer. That is why the guard is a SINGLE-WRITER
+// shape only, and why this is pinned rather than claimed fixed.
+//
+// The pin asserts the arms DISAGREE. It fails the day they agree, which is
+// the fix's proof.
+func TestSetOpDecimalJoinArmScaleResidual(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	// Eight rows of 12.75, four through the join arm and four direct.
+	sql := fmt.Sprintf(
+		"SELECT v FROM (SELECT a.dx AS v FROM %[1]s a JOIN %[2]s b ON a.id = b.id "+
+			"UNION ALL SELECT dx FROM %[2]s) t ORDER BY v", sodJoinA, sodJoinB)
+	want := make([]*big.Rat, 0, 8)
+	for i := 0; i < 8; i++ {
+		want = append(want, big.NewRat(1275, 100))
+	}
+
+	sv, _ := sodRats(t, "single", dtpRun(t, ctx, single, coord, sql, false), "v")
+	dv, _ := sodRats(t, "dag", dtpRun(t, ctx, single, coord, sql, true), "v")
+
+	// The single-process arm is the one that is RIGHT here, and it is asserted
+	// so the pin cannot be satisfied by both arms becoming wrong together.
+	if !sodRatsEqual(sv, want) {
+		t.Errorf("the single-process arm is the control and must answer 12.75 eight times\ngot %s",
+			sodShow(sv, 0))
+	}
+	if sodRatsEqual(dv, want) {
+		t.Errorf("the stage DAG now answers the join arm correctly, so #551 is FIXED:\n  %s\n"+
+			"Delete this pin, move the query into TestSetOpDecimalScaleTwoPath, and correct "+
+			"ADR-0010 / ADR-0012 item 12 / the internals doc, which all say the writer's scale "+
+			"check leaves this shape uncovered.", sodShow(dv, 0))
+		return
+	}
+	t.Logf("known divergence, NOT gated (#551): a join arm keeps its own DECIMAL scale.\n"+
+		"  single-process: %s\n  stage DAG:      %s", sodShow(sv, 0), sodShow(dv, 0))
+}
+
+// TestSetOpDecimalCapIsARangeReduction pins what the 38-digit cap costs
+// (#552): a value both arms hold before the union becomes a hard failure
+// after it, and neither a filter nor a LIMIT above the union rescues it,
+// because the coercion runs in the arm's own fragment ahead of both.
+//
+// This is the honest side of a 128-bit carrier — ADR-0012 item 9 already
+// settled that a value with no exact carrier is an error rather than a wrapped
+// number. It is pinned so the cost is a recorded, tested position instead of a
+// surprise, and so a future widening of the carrier shows up as this test
+// failing.
+func TestSetOpDecimalCapIsARangeReduction(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	// d380 is DECIMAL(38,0) holding 10^30; d1110 is DECIMAL(11,10). The output
+	// type is 38 integer digits plus scale 10 = 48, capped to DECIMAL(38,10),
+	// and 10^30 at scale 10 needs 10^40.
+	union := fmt.Sprintf("SELECT d380 AS v FROM %[1]s UNION ALL SELECT d1110 FROM %[1]s", sodOvfTable)
+	for _, tc := range []struct{ name, sql string }{
+		{"bare", union},
+		// A predicate that excludes the offending row does not save it: the
+		// post-filter runs on the union stage, after the arm's coercion.
+		{"filtered_below_the_bad_row", fmt.Sprintf("SELECT v FROM (%s) t WHERE v < 100", union)},
+		// Nor does a LIMIT, which is its own Singleton stage further down.
+		{"limited", fmt.Sprintf("SELECT v FROM (%s) t LIMIT 1", union)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The single-process arm ANSWERS all three — it is not subject to
+			// the cap, because it never resolves a common type at all (#541),
+			// and its answer for the 10^30 row is its own defect (#553).
+			if _, err := tmdRunSingle(ctx, single, tc.sql); err != nil {
+				t.Logf("single-process also refused: %v", err)
+			}
+			res, err := tmdRunDAG(ctx, coord, tc.sql)
+			if err == nil {
+				t.Errorf("the stage DAG answered %v.\nIf the carrier widened, or the coercion moved "+
+					"below the post-filter, #552 is fixed: delete this entry and assert the values "+
+					"against PostgreSQL, which answers all four rows.", res.Rows)
+				return
+			}
+			if !strings.Contains(err.Error(), "numeric field overflow") {
+				t.Errorf("expected the overflow refusal, got: %v", err)
+			}
+			t.Logf("refused, as the cap requires (#552): %v", err)
+		})
+	}
+}
+
+// TestSetOpDerivedTableArmsOnTheDAG pins #554, which is pre-existing and
+// unrelated to DECIMAL: a set operation whose arms are DERIVED TABLES cannot
+// execute on the stage DAG at all. setOpArmProjection takes each arm's source
+// expression from its SELECT list as written, and for a derived table that is
+// the name the SUBQUERY exposes, which the arm's materialized output does not
+// carry.
+//
+// It is pinned here because this file is where the set-operation arm walk is
+// gated, and because the failure is LOUD — exec.Project refuses a DirectCopy
+// that resolves to nothing (#147) — so it cannot become a silent wrong answer
+// while it waits.
+func TestSetOpDerivedTableArmsOnTheDAG(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	sql := fmt.Sprintf(
+		"SELECT x AS v FROM (SELECT e2 AS x FROM %[1]s) a UNION ALL SELECT y FROM (SELECT e4 AS y FROM %[1]s) b",
+		sodTable)
+
+	// The control: the single-process engine answers, so the query is legal
+	// and the pin is about the DAG and nothing else.
+	if rows := dtpRun(t, ctx, single, coord, sql, false); len(rows) != 18 {
+		t.Errorf("the single-process arm is the control and must answer 18 rows, got %d", len(rows))
+	}
+
+	if _, err := tmdRunDAG(ctx, coord, sql); err == nil {
+		t.Errorf("the stage DAG now executes a derived-table set operation, so #554 is FIXED. " +
+			"Delete this pin and assert the values on both arms instead.")
+		return
+	} else {
+		t.Logf("known divergence, NOT gated (#554): %v", err)
+	}
 }

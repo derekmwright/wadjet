@@ -1177,6 +1177,13 @@ func postgresSemanticsCases() []pgCase {
 	// question from the SCALE question: these rows have the same value at
 	// either scale, so an entry that fails here failed on the type
 	// resolution and not on a lost digit.
+	//
+	// Value selection like that is exactly what ADR-0012 item 3 forbids as a
+	// way of DODGING a divergence, so the entry immediately after these picks
+	// d_key values whose d_4 is NOT a whole hundredth and is PINNED to the
+	// divergence it then finds (#532). The narrow entries above are the
+	// isolation; the pinned one is the coverage, and it fails the day #532
+	// lands.
 	out = append(out,
 		pgCase{name: "SetOpUnionAllAcrossDecimalScales", ordered: true,
 			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (0, 4, 8, 92, 96, 100, 104, 108, 196)
@@ -1197,6 +1204,22 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (0, 4, 8, 96, 100, 104)
 				UNION ALL SELECT CAST(d_key AS DOUBLE PRECISION) FROM dec_probe WHERE d_key IN (0, 4, 8)
 				ORDER BY 1`},
+		// The SCALE question, not dodged: d_key 1/2/3 give d_4 values of
+		// -6.1875, -6.1250 and -6.0625, none of which is a whole number of
+		// hundredths. The single-process engine — the arm this corpus runs —
+		// re-reads every row's rendered text at the FIRST arm's scale, so it
+		// TRUNCATES those to -6.18 / -6.12 / -6.06 and the union answers six
+		// values PostgreSQL does not have. That is #532, fixed separately;
+		// pinned here so the corpus carries the shape rather than avoiding
+		// it, and so the pin fails the day the fix lands.
+		pgCase{name: "SetOpUnionAllAcrossDecimalScalesLosesDigits", ordered: true,
+			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (1, 2, 3)
+				UNION ALL SELECT d_4 FROM dec_probe WHERE d_key IN (1, 2, 3)
+				ORDER BY 1`,
+			knownBug: pgBugWadjet + " the single-process set-operation adapter builds its result under " +
+				"the FIRST arm's schema and re-reads each row's rendered DECIMAL text at that scale, " +
+				"so a wider arm's digits are truncated (-6.1875 comes back as -6.18). The stage DAG " +
+				"widens both arms and keeps them (#533)", issue: "#532"},
 		// The same pair with the FLOAT arm first, which the single-process
 		// engine — the arm this corpus runs — cannot answer at all: it boxes
 		// each row and hands them to batch.FromRows under the FIRST arm's
