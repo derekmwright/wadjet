@@ -65,17 +65,38 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      more than it helps, and no BI client depends on it. Where the oracle
      needs to agree, use a `C`-collation database rather than exempting
      string ordering.
-   - **MIN/MAX over BOOL.** PostgreSQL has no `min(boolean)`/`max(boolean)`
-     aggregate (verified against live PostgreSQL: it errors, "function
-     min(boolean) does not exist") — `bool_and`/`bool_or` are its idiom for
-     the same question. Wadjet supports MIN/MAX over BOOL as a deliberate
-     extension, not a divergence PostgreSQL took a position on; `bool_and`/
-     `bool_or` remain available and are still the PostgreSQL-idiomatic
-     spelling.
+   - **MIN/MAX over BOOL, UUID, MACADDR, BYTEA and ROW.** (Widened
+     2026-08-25, #569: BOOL was the only one recorded, and the rest are the
+     same class.) PostgreSQL's `min`/`max` are defined over exactly 22 input
+     types, enumerated live from `pg_proc` on postgres:17-alpine:
+     `anyarray`, `anyenum`, `bigint`, `character`, `date`, `double
+     precision`, `inet`, `integer`, `interval`, `money`, `numeric`, `oid`,
+     `pg_lsn`, `real`, `smallint`, `text`, `tid`, `time`/`timetz`,
+     `timestamp`/`timestamptz`, `xid8`. `boolean`, `uuid`, `macaddr` and
+     `bytea` are NOT among them — each errors with "function min(...) does
+     not exist" — and neither is `record`: `min(ROW(…))` errors the same way
+     (verified live), so wadjet's MIN/MAX over its ROW type is in this set
+     too. All five are EXTENSIONS, not divergences PostgreSQL took a position
+     on. `bool_and`/`bool_or` remain available and are still the
+     PostgreSQL-idiomatic spelling for the boolean question.
+
+     The consequence for the gates is the part worth writing down: those
+     five types cannot be gated against PostgreSQL at all, in any shape —
+     grouped, windowed or otherwise. `internal/oracle/typematrix` is their
+     differential coverage (wadjet against itself across the stage DAG, the
+     kill switches and the pooled/poisoned batch arms), and the four
+     PostgreSQL DOES have among wadjet's network types — CIDR, IPV6 and IPV4,
+     all of which map onto `inet`, plus DECIMAL onto `numeric` — are gated
+     live in `benchmarks/tpch`'s `net_probe`/`dec_probe` fixtures.
    - **MAP and VECTOR ordering.** Both are wadjet-only types — PostgreSQL has
      neither — so their total orders (`internal/engine/exec/kernel/
      container_sort.go`) are wadjet-defined, not a choice against a
-     PostgreSQL answer.
+     PostgreSQL answer. This bullet is ONLY MAP and VECTOR: ROW is `record`,
+     which PostgreSQL HAS as a type but offers no `min`/`max` over (it is in
+     the extension set above), and ARRAY maps to PostgreSQL's `anyarray`,
+     which DOES have `min`/`max` — so ARRAY is the one container whose
+     ordering is a choice measurable against a PostgreSQL answer, even though
+     no fixture gates it there today.
    - **MIN/MAX over BYTES.** (Corrected 2026-08-25, #570. The original said
      this matched "PostgreSQL's own `min(bytea)`", which does not exist:
      verified live, `min(bytea)` raises "function min(bytea) does not
@@ -88,6 +109,21 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      code guessed STRING for every MIN/MAX before the input-typed fix.
      `ByteaMinMax` in the wire arm's error list pins it, so the claim is
      checkable rather than remembered.
+
+   - **A window's MIN/MAX declares its input's type too.** (Added
+     2026-08-25, #569.) `MIN(c) OVER (…)` and `MIN(c) … GROUP BY g` are the
+     same question asked twice and must answer under the same type, so
+     `exec.WindowMinMaxType` names every type the engine has, exactly as
+     `exec.minMaxOutputType` does for the grouped form. They differ on TWO
+     types, INT32 and FLOAT32: the grouped aggregate widens INT32 to INT64
+     and FLOAT32 to FLOAT64 because its accumulator is the wider type, while
+     the window copies the value and keeps INT32 and FLOAT32 — which are
+     PostgreSQL's own answers, `min(integer)` returning `integer` and
+     `min(real)` returning `real`.
+     Choosing the value in the DECLARED type's order is the other half of the
+     same rule; a boxed comparator that reads a rendered address or a
+     formatted decimal is not that order (`internal/engine/exec/
+     compare_boxed.go`).
    - **A TEXT value compared against a NUMBER.** (Added 2026-08-24, #504.)
      PostgreSQL refuses the pair outright — verified live, `WHERE s = 1.5`
      over a `text` column is 42883 "operator does not exist: text = numeric",
