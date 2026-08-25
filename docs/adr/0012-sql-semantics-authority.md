@@ -154,8 +154,12 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    `GREATEST`/`LEAST(d, lit)` now hold them too. Those three compare through
    the BOXED path, where the column is rendered text and the literal is the
    float64 box, so they carry the literal's `Text` into the comparison and
-   order the two exact decimals — `expr.compareWithText`,
-   `batch.CompareDecimalTexts`. An arithmetic-wrapped operand — `d + 0 = lit`
+   order the two exact decimals — `expr.boxedPair`'s literal arm and
+   `batch.CompareDecimalTexts`. (That carry-through was `expr.compareWithText`
+   until #504 replaced it: it applied the exact reading to ANY string box
+   against a literal's text, which read a genuine STRING column numerically.
+   The rule it applied is unchanged; what selects it is now the operands'
+   declared kinds.) An arithmetic-wrapped operand — `d + 0 = lit`
    — still does not: arithmetic over DECIMAL goes through float64 before any
    comparison sees it, which is the separate limit recorded at the end of this
    item.)
@@ -239,17 +243,19 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
    - **The #463 refusal reaches the #465 boxed sites and a negated string
      literal.** (Added 2026-08-24, #505.) `CASE d WHEN 'abc'`,
      `d IS DISTINCT FROM 'abc'` and `GREATEST`/`LEAST(d, 'abc')` answered
-     instead of erroring: `compareWithText`'s `exactTextOrder` only fires
-     when the literal already looks numeric (`Lit.Text` set by `compileLit`),
-     so a non-numeric string never reached ANY refusal on these three sites
-     and fell through to `compare()`'s ordinary string comparison instead.
-     `expr.refuseNonNumericAgainstDecimal` closes it: whichever operand
-     resolves, in THIS batch, to a materialized DECIMAL column is checked
-     against the other operand's literal text before `compareWithText` runs,
-     raising the same 22P02 `decimalLitCmp.order` already raises for the
-     direct-comparison shapes — so the refusal still depends only on the
-     column's REAL type, never on the operand's Go box, the way item 8's
-     boxed-value rule requires generally.
+     instead of erroring: the boxed sites' exact-text arm only fires when the
+     literal already looks numeric (`Lit.Text` set by `compileLit`), so a
+     non-numeric string never reached ANY refusal on these three sites and
+     fell through to `compare()`'s ordinary string comparison instead.
+     `expr.refuseArm` closes it: whichever operand resolves, in THIS batch,
+     to a materialized DECIMAL column is checked against the other operand's
+     literal text before the comparison runs, raising the same 22P02
+     `decimalLitCmp.order` already raises for the direct-comparison shapes —
+     so the refusal depends only on the column's REAL type, never on the
+     operand's Go box, the way item 8's boxed-value rule requires generally.
+     (#517 lifted the same question to bind time, where it also stops
+     depending on a row and on operand order; this runtime half remains for
+     the shapes the binder cannot prove.)
 
      `d = -'abc'` and `d = -'1e400'` were the same failure mode wearing a
      `UnaryOp`: a unary minus over a STRING literal was deliberately left
