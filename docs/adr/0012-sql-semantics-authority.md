@@ -681,7 +681,7 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   matched nothing) — item 10 and item 11 above record the settled position
   for; `internal/engine/exec/kernel/compare.go` (`CidrSortKey`,
   `likeTextRenderer`), `internal/engine/expr/compile.go` (`tryNetworkLit`,
-  `ipv6LitToRawString`), `internal/engine/expr/expr.go` (`CmpNetworkLit`,
+  `kernel.IPv6LitKey`), `internal/engine/expr/expr.go` (`CmpNetworkLit`,
   `Like.EvalBoolNull`), `internal/oracle/typematrix/typematrix.go`
   (`networkOrdLit`)
 - #444 (boxed ROW comparator ordered fields by name, not declared position),
