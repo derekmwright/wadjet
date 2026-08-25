@@ -176,6 +176,30 @@ type FileEntry struct {
 	// sketches are externalized (legacy inline path still supported via
 	// FileColumnStats.HLL / .Sample).
 	SketchesKey string `json:"sketches_key,omitempty"`
+	// EngineWritten marks an object WADJET ITSELF wrote: ingest's
+	// chunk_<uuid>, compaction's compacted_<uuid>, delete-marker GC's
+	// rewrite_<uuid>. It is the ownership marker DropTable's physical
+	// reclaim keys off — only a marked entry is ever scheduled for
+	// deletion (#494), so reclaim can only ever delete bytes this engine
+	// created.
+	//
+	// Set in exactly two places, both of which mint the path themselves:
+	// AddNewFiles (ingest, compaction) and SwapFileForGC's rewrite output.
+	// AddFiles — the REGISTRATION path — deliberately leaves it alone,
+	// because its callers point the catalog at objects somebody else
+	// staged: cmd/tpch-bench (--data-prefix "tables/"), cmd/clickbench-
+	// bench (--s3-prefix "tables/hits/"), internal/harness's s3_catalog,
+	// and iceberg.CatalogIntegration all register pre-existing operator
+	// data, and a bench bucket's reference dataset is not wadjet's to
+	// delete on a DROP.
+	//
+	// Absent means NOT owned, which is the safe default in both
+	// directions that matter: `omitempty` keeps it out of every manifest
+	// that has no engine-written files, and every manifest written before
+	// this field existed decodes with it false — so no pre-existing
+	// object can be reclaimed by a newer binary. Unmarked entries leak on
+	// DROP by design; see docs/adr/0020-drop-table-reclaim-is-opt-in.md.
+	EngineWritten bool `json:"engine_written,omitempty"`
 }
 
 // TableColumnStats holds aggregated per-column statistics across all files.
@@ -601,8 +625,21 @@ func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[s
 // (#494). Uses the same CAS retry as AddFiles, but a Path collision with an
 // existing entry is refused with an error rather than silently replaced;
 // see mergeNewFileEntries.
+//
+// This is also where the ownership marker is stamped: every entry landing
+// through here names an object wadjet itself just wrote, which is exactly
+// the condition FileEntry.EngineWritten records and DropTable's physical
+// reclaim requires. The caller's slice is copied rather than mutated —
+// stamping in place would edit a FileEntry the caller still holds (and, for
+// a caller that reuses a backing array, entries it has already handed
+// elsewhere).
 func (c *Catalog) AddNewFiles(_ context.Context, tableName string, partValues map[string]string, partPath string, files []FileEntry) error {
-	return c.addFiles(tableName, partValues, partPath, files, mergeNewFileEntries)
+	owned := make([]FileEntry, len(files))
+	copy(owned, files)
+	for i := range owned {
+		owned[i].EngineWritten = true
+	}
+	return c.addFiles(tableName, partValues, partPath, owned, mergeNewFileEntries)
 }
 
 // AddDeleteMarkers adds delete markers to a table's manifest using CAS.
@@ -877,6 +914,16 @@ func (c *Catalog) SwapFileForGC(_ context.Context, tableName string, oldPath str
 	key := c.key("manifest." + tableName)
 	const maxRetries = 10
 
+	// The rewrite output is an object the GC sweep itself just wrote, so it
+	// carries the same ownership marker AddNewFiles stamps — this is the
+	// third of the three engine write paths (#494). Copied, not mutated in
+	// place: newFile belongs to the caller.
+	if newFile != nil {
+		owned := *newFile
+		owned.EngineWritten = true
+		newFile = &owned
+	}
+
 	for retry := 0; retry < maxRetries; retry++ {
 		raw, rev, err := c.kv.Get(key)
 		if err != nil {
@@ -1010,10 +1057,11 @@ func (c *Catalog) LoadUDFs() ([]UDFDef, error) {
 // new, unrelated set of files at that same prefix (chunk/compacted names
 // are per-file random, not derived from the table name), and a prefix
 // delete run after the fact cannot tell that incarnation's files from the
-// dropped one's — it would eat the new table's data. Recording the EXACT
-// paths this incarnation owned, once, right here, and checking each one
-// against every CURRENT manifest before ever deleting it
-// (FlushDroppedTableFiles) has no such blast radius. It doesn't reach
+// dropped one's — it would eat the new table's data. Recording the exact
+// paths this incarnation OWNED (engine-written only — see the snapshot
+// below), once, right here, and checking each one against every CURRENT
+// manifest before ever deleting it (FlushDroppedTableFiles) has no such
+// blast radius. It doesn't reach
 // RGMetaKey/SketchesKey blobs under stats/<name>/ — those are named by
 // table+column, not by a birthday-collision-prone short ID, so they sit
 // outside #494's collision hazard; leaking them is a separate, lower-
@@ -1043,14 +1091,31 @@ func (c *Catalog) DropTable(ctx context.Context, name string) error {
 		return fmt.Errorf("table %q not found", name)
 	}
 
-	// Snapshot every data file this incarnation owns before its manifest
+	// Snapshot the data files this incarnation OWNS before its manifest
 	// disappears. CreateTable always writes an (initially empty) manifest
 	// alongside the table entry, so this should never miss for a table
 	// meta.Tables still lists; a miss just means nothing to schedule.
+	//
+	// Ownership, not mere reference, is the test (#494 review): only an
+	// entry wadjet itself wrote — FileEntry.EngineWritten, stamped by
+	// AddNewFiles and SwapFileForGC — is ever scheduled for physical
+	// deletion. A manifest is full of paths the engine merely POINTS at:
+	// cmd/tpch-bench registers its dataset under --data-prefix "tables/",
+	// cmd/clickbench-bench under --s3-prefix "tables/hits/",
+	// internal/harness's s3_catalog and Iceberg discovery do the same —
+	// all through AddFiles, all naming objects an operator staged in a
+	// bucket that is not ours to empty. Those entries take exactly the
+	// "tables/<name>/..." shape the prefix check below permits, so without
+	// this marker a single DROP plus one grace period would delete the
+	// shared reference datasets out of the SF10/SF100/ClickBench buckets.
+	// Unmarked entries leak instead; that is the documented trade.
 	var dropPaths []string
 	if manifest, mErr := c.GetManifest(ctx, name); mErr == nil {
 		for _, part := range manifest.Partitions {
 			for _, f := range part.Files {
+				if !f.EngineWritten {
+					continue
+				}
 				dropPaths = append(dropPaths, f.Path)
 			}
 		}
@@ -1158,10 +1223,16 @@ func (c *Catalog) liveManifestPaths(ctx context.Context) (map[string]bool, error
 
 // FlushDroppedTableFiles physically deletes the data files of tables
 // DropTable removed at least grace ago (zero or negative flushes
-// everything pending, for tests). Two independent safety layers stand
-// between a pending path and the Delete call below; either alone blocks
-// the #494 review's reproduced data loss:
+// everything pending, for tests). Three independent safety layers stand
+// between a pending path and the Delete call below; the first alone bounds
+// the blast radius to bytes wadjet wrote, and either of the next two alone
+// blocks the #494 review's reproduced data loss:
 //
+//  0. Ownership (DropTable, upstream of this list at all): a path is only
+//     ever in pendingDrops if its FileEntry was EngineWritten — stamped by
+//     AddNewFiles and SwapFileForGC, never by the AddFiles registration
+//     path. Nothing an operator staged and merely registered can reach
+//     this function, whatever shape its path takes.
 //  1. The live-manifest guard (liveManifestPaths, built once per call,
 //     only when there is something pending to check it against): a path
 //     referenced by ANY current table's manifest is never deleted, no

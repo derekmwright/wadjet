@@ -33,11 +33,38 @@ two shapes, both hitting the same missing check:
 Both are the identical bug: the delete list was built once, at drop time,
 and nothing checked it against the world as it stood *at delete time*.
 
+A second adversarial review of the guarded redo found a third shape, which
+neither of those guards addresses because it never involves a recreate at
+all: **reclaim deleted files the engine never wrote.** `DropTable`
+snapshotted *every* path in the dropped manifest, and a manifest is full of
+paths the catalog merely points at. `cmd/tpch-bench` registers its dataset
+under `--data-prefix "tables/"`, `cmd/clickbench-bench` under
+`--s3-prefix "tables/hits/"`, `internal/harness`'s `s3_catalog` primes the
+same way, and all of them go through `AddFiles`, the registration path.
+Those objects are operator-staged reference data in buckets that are
+explicitly do-not-wipe, and they take exactly the `tables/<name>/...` shape
+the prefix layer permits. One `DROP` of a bench table, one grace period,
+one process with the flag on, and the shared SF10/SF100/ClickBench datasets
+are gone.
+
 ## Decision
 
-**A load-bearing live-manifest guard, plus two smaller layers, all in
-`catalog.Catalog`, and the sweep that calls it is opt-in.**
+**Ownership marking, then a load-bearing live-manifest guard re-verified
+per pending entry, plus two smaller layers, all in `catalog.Catalog`, and
+the sweep that calls it is opt-in.**
 
+0. **Ownership marking (bounds the blast radius).** `FileEntry` carries
+   `EngineWritten bool` (`json:"engine_written,omitempty"`), stamped in the
+   two places that mint a path themselves — `AddNewFiles` (ingest's
+   `chunk_<uuid>`, compaction's `compacted_<uuid>`) and `SwapFileForGC`'s
+   `rewrite_<uuid>` output. `AddFiles`, the registration path, never stamps
+   it. `DropTable` snapshots **only marked entries**, so an operator-staged
+   object that wadjet merely registered can never enter `pendingDrops`,
+   whatever shape its path takes. Absent means not owned, which makes every
+   manifest written before this field existed — and every future
+   registration — safe by default rather than by remembering to check.
+   Unmarked entries leak on `DROP`; that is the documented trade, and it is
+   the right one, since the alternative is deleting somebody else's bytes.
 1. **Live-manifest guard (load-bearing).** Before deleting anything,
    `FlushDroppedTableFiles` builds the set of every path referenced by
    *every* current table's manifest (`ListTables` + `GetManifest`, once
