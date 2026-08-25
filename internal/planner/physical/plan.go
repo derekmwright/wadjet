@@ -731,6 +731,13 @@ type Planner struct {
 	MemoryBudget   int64            // per-query memory budget in bytes (0 = unlimited)
 	SpillDir       string           // directory for spill files (empty = os temp dir)
 
+	// ManifestSnapshot pins each table's manifest to one catalog read for
+	// this statement (#502). NewPlanner sets a fresh one; forSubquery's
+	// shallow copy shares it with every child/subquery planner. A caller
+	// that builds several Planner instances for one statement must assign
+	// the SAME snapshot to each — see ManifestSnapshot's doc.
+	ManifestSnapshot *ManifestSnapshot
+
 	// SharedTracker / SharedSpillMgr (if set) are used in place of per-query
 	// Tracker+SpillManager creation. Workers set these to point at the
 	// executor-level pool so concurrent tasks on the same worker compete for
@@ -1028,7 +1035,7 @@ type scanCached struct {
 
 // NewPlanner creates a new physical planner.
 func NewPlanner(cat *catalog.Catalog) *Planner {
-	p := &Planner{catalog: cat, res: &queryResources{}}
+	p := &Planner{catalog: cat, res: &queryResources{}, ManifestSnapshot: NewManifestSnapshot()}
 	// Create a subquery runner that re-uses this planner for nested queries
 	p.subqueryRunner = p.makeSubqueryRunner()
 	return p
@@ -1483,7 +1490,7 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 			node.ScanColDecimal = colDecimal
 		}
 		// Estimate row count from manifest for join reordering
-		if manifest, err := p.catalog.GetManifest(ctx, node.TableName); err == nil {
+		if manifest, err := p.getManifest(ctx, node.TableName); err == nil {
 			var total int64
 			for _, part := range manifest.Partitions {
 				for _, f := range part.Files {
@@ -1493,7 +1500,7 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 			node.ScanRowEstimate = total
 
 			// Aggregate per-column stats for CBO selectivity estimation
-			if colStats, err := p.catalog.AggregateColumnStats(ctx, node.TableName); err == nil && colStats != nil {
+			if colStats, err := p.getAggregateColumnStats(ctx, node.TableName); err == nil && colStats != nil {
 				scanStats := make(map[string]logical.ScanColumnStats, len(colStats))
 				for col, cs := range colStats {
 					var hist any
@@ -4823,7 +4830,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		var estBytes, estRows int64
 		partFilter := node.PartitionFilter
 		var scanDeletes map[string][]int64
-		if meta, err := p.catalog.GetManifest(context.Background(), node.TableName); err == nil {
+		if meta, err := p.getManifest(context.Background(), node.TableName); err == nil {
 			for _, part := range meta.Partitions {
 				if len(partFilter) > 0 && len(part.Values) > 0 {
 					if !matchesPartitionFilter(part.Values, partFilter) {
@@ -5786,7 +5793,7 @@ func (p *Planner) estimateSubtreeBytes(n *logical.Node) (int64, bool) {
 		return 0, false
 	}
 	// Estimate size from file count
-	manifest, err := p.catalog.GetManifest(context.Background(), scan.TableName)
+	manifest, err := p.getManifest(context.Background(), scan.TableName)
 	if err != nil {
 		return 0, false
 	}
@@ -9469,11 +9476,12 @@ func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter m
 
 	// Create a scanner source that reads from the catalog
 	src := &catalogScanSource{
-		catalog:         p.catalog,
-		tableName:       tableName,
-		partitionFilter: partFilter,
-		requiredCols:    requiredCols,
-		scanPreds:       scanPreds,
+		catalog:          p.catalog,
+		tableName:        tableName,
+		partitionFilter:  partFilter,
+		requiredCols:     requiredCols,
+		scanPreds:        scanPreds,
+		manifestSnapshot: p.ManifestSnapshot,
 	}
 	// Attach scan cache if this table is scanned multiple times in this query.
 	if p.scanCache != nil {
@@ -9497,27 +9505,28 @@ func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter m
 // non-deterministic Q02 row counts (4/5/6 rows depending on which goroutine
 // won the increment).
 type catalogScanSource struct {
-	catalog         *catalog.Catalog
-	tableName       string
-	partitionFilter map[string]string
-	requiredCols    []string
-	scanPreds       []logical.Predicate
-	allowedFiles    []string // probe-split: only scan these files (nil = all)
-	inner           exec.Source
-	cache           *scanCached           // non-nil when this table is scanned multiple times
-	replayIdx       atomic.Int64          // position in cache replay (atomic for parallel pipeline)
-	projOnce        sync.Once             // guards projIdx/projSchema init (replay Next is concurrent)
-	projIdx         []int                 // cache-batch column indices for this consumer; nil = no projection
-	projSchema      []parquet.Column      // this consumer's projected schema
-	isReplay        bool                  // true when reading from cache instead of scanning; written once in Init before runParallel starts, so no synchronization needed
-	bloomFilter     *exec.BloomScanFilter // bloom filter pushdown from hash join build side
-	dynamicFilter   []exec.DynamicRange   // dynamic min/max range filter from hash join build side
-	rowLimit        int64                 // LIMIT pushdown: enables lazy file downloading (0 = eager)
-	memTracker      *memory.Tracker       // per-query memory tracker; wired at construction when budget>0
-	spillMgr        *memory.SpillManager  // for pre-emptive relief on file-load reservations; nil-safe
-	emitRowLoc      bool                  // top-N late materialization: stamp __row_loc on scan batches
-	rowPreds        []scan.RowPred        // scan-level filter conjuncts (scan_filter_pushdown.go)
-	shapeOnlyCols   map[string]bool       // byte-array columns decoded as lengths only (logical/shape_only_columns.go)
+	catalog          *catalog.Catalog
+	tableName        string
+	partitionFilter  map[string]string
+	requiredCols     []string
+	scanPreds        []logical.Predicate
+	allowedFiles     []string // probe-split: only scan these files (nil = all)
+	inner            exec.Source
+	cache            *scanCached           // non-nil when this table is scanned multiple times
+	replayIdx        atomic.Int64          // position in cache replay (atomic for parallel pipeline)
+	projOnce         sync.Once             // guards projIdx/projSchema init (replay Next is concurrent)
+	projIdx          []int                 // cache-batch column indices for this consumer; nil = no projection
+	projSchema       []parquet.Column      // this consumer's projected schema
+	isReplay         bool                  // true when reading from cache instead of scanning; written once in Init before runParallel starts, so no synchronization needed
+	bloomFilter      *exec.BloomScanFilter // bloom filter pushdown from hash join build side
+	dynamicFilter    []exec.DynamicRange   // dynamic min/max range filter from hash join build side
+	rowLimit         int64                 // LIMIT pushdown: enables lazy file downloading (0 = eager)
+	memTracker       *memory.Tracker       // per-query memory tracker; wired at construction when budget>0
+	spillMgr         *memory.SpillManager  // for pre-emptive relief on file-load reservations; nil-safe
+	emitRowLoc       bool                  // top-N late materialization: stamp __row_loc on scan batches
+	rowPreds         []scan.RowPred        // scan-level filter conjuncts (scan_filter_pushdown.go)
+	shapeOnlyCols    map[string]bool       // byte-array columns decoded as lengths only (logical/shape_only_columns.go)
+	manifestSnapshot *ManifestSnapshot     // pins this table's manifest to one read per statement (#502); nil-safe
 }
 
 // RefetchRows re-reads the full-width rows named by __row_loc values (see
@@ -9575,7 +9584,7 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 	if s.cache != nil {
 		scanCols = s.cache.unionCols
 	}
-	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter, scanCols, s.scanPreds)
+	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter, scanCols, s.scanPreds, s.manifestSnapshot)
 	if ses, ok := sc.(*scannerExecSource); ok {
 		if s.bloomFilter != nil {
 			ses.bloomFilter = s.bloomFilter
@@ -11763,33 +11772,36 @@ func (w *windowSourceAdapter) Close() error {
 	return w.childSource.Close()
 }
 
-// newScannerSource creates a scanner exec.Source from the catalog
-func newScannerSource(cat *catalog.Catalog, tableName string, partFilter map[string]string, requiredCols []string, scanPreds []logical.Predicate) exec.Source {
+// newScannerSource creates a scanner exec.Source from the catalog. snap may
+// be nil (falls back to an ordinary catalog.GetManifest call in Init).
+func newScannerSource(cat *catalog.Catalog, tableName string, partFilter map[string]string, requiredCols []string, scanPreds []logical.Predicate, snap *ManifestSnapshot) exec.Source {
 	return &scannerExecSource{
-		catalog:         cat,
-		tableName:       tableName,
-		partitionFilter: partFilter,
-		requiredCols:    requiredCols,
-		scanPreds:       scanPreds,
+		catalog:          cat,
+		tableName:        tableName,
+		partitionFilter:  partFilter,
+		requiredCols:     requiredCols,
+		scanPreds:        scanPreds,
+		manifestSnapshot: snap,
 	}
 }
 
 type scannerExecSource struct {
-	catalog         *catalog.Catalog
-	tableName       string
-	partitionFilter map[string]string
-	requiredCols    []string
-	scanPreds       []logical.Predicate
-	allowedFiles    []string // probe-split: only scan these files (nil = all)
-	scanner         *scanSourceInner
-	bloomFilter     *exec.BloomScanFilter
-	dynamicFilter   []exec.DynamicRange
-	rowLimit        int64                // LIMIT pushdown: enables lazy file downloading (0 = eager)
-	memTracker      *memory.Tracker      // per-query memory tracker; passed to scanSourceInner at Init
-	spillMgr        *memory.SpillManager // for pre-emptive relief on file-load reservations; nil-safe
-	emitRowLoc      bool                 // top-N late materialization: stamp __row_loc on scan batches
-	rowPreds        []scan.RowPred       // scan-level filter conjuncts
-	shapeOnlyCols   map[string]bool      // byte-array columns decoded as lengths only
+	catalog          *catalog.Catalog
+	tableName        string
+	partitionFilter  map[string]string
+	requiredCols     []string
+	scanPreds        []logical.Predicate
+	allowedFiles     []string // probe-split: only scan these files (nil = all)
+	scanner          *scanSourceInner
+	bloomFilter      *exec.BloomScanFilter
+	dynamicFilter    []exec.DynamicRange
+	rowLimit         int64                // LIMIT pushdown: enables lazy file downloading (0 = eager)
+	memTracker       *memory.Tracker      // per-query memory tracker; passed to scanSourceInner at Init
+	spillMgr         *memory.SpillManager // for pre-emptive relief on file-load reservations; nil-safe
+	emitRowLoc       bool                 // top-N late materialization: stamp __row_loc on scan batches
+	rowPreds         []scan.RowPred       // scan-level filter conjuncts
+	shapeOnlyCols    map[string]bool      // byte-array columns decoded as lengths only
+	manifestSnapshot *ManifestSnapshot    // pins this table's manifest to one read per statement (#502); nil-safe
 }
 
 type scanSourceInner struct {
@@ -11981,7 +11993,7 @@ type scanPredicate struct {
 }
 
 func (s *scannerExecSource) Init(ctx context.Context) error {
-	manifest, err := s.catalog.GetManifest(ctx, s.tableName)
+	manifest, err := getManifestWith(ctx, s.manifestSnapshot, s.catalog, s.tableName)
 	if err != nil {
 		return err
 	}

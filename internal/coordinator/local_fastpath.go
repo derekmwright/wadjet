@@ -147,7 +147,13 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 		return nil, false, nil
 	}
 
-	planner := physical.NewPlanner(c.catalog)
+	// physical.NewPlannerForContext, not NewPlanner: ExecuteSQL/SubmitSQL
+	// attach a per-statement ManifestSnapshot to ctx (#502) so this
+	// planner shares the same pinned manifests as the scanAnnotator passes
+	// and (if this bails out) the main distributed planner, instead of
+	// re-reading the catalog for every table this fast-path attempt
+	// touches.
+	planner := physical.NewPlannerForContext(ctx, c.catalog)
 	estBytes, ok := planner.EstimatePlanScanBytes(ctx, logicalPlan)
 	if !ok || estBytes > threshold {
 		return nil, false, nil

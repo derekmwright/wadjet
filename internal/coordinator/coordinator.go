@@ -835,6 +835,13 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	// Every panic boundary below this point — the pipeline, its workers, the
 	// scan goroutines — logs the query it belongs to (#511).
 	ctx = exec.WithQueryID(ctx, queryID)
+	// Pins each table's manifest to one catalog read for this whole
+	// statement (#502): ValidateColumns, every scanAnnotator pass, the
+	// local fast path and the main distributed planner each build their
+	// OWN physical.Planner below, and physical.NewPlannerForContext is what
+	// makes them share this one snapshot instead of each reading the
+	// catalog independently.
+	ctx = physical.WithManifestSnapshot(ctx, physical.NewManifestSnapshot())
 
 	// Start OTel span for the query if tracing is enabled
 	if c.otel != nil {
@@ -875,7 +882,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 	}
 
 	// Reject references to columns that resolve to no source (plan-time name binding).
-	if err := physical.NewPlanner(c.catalog).ValidateColumns(ctx, selectInfo); err != nil {
+	if err := physical.NewPlannerForContext(ctx, c.catalog).ValidateColumns(ctx, selectInfo); err != nil {
 		return nil, err
 	}
 
@@ -887,7 +894,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 
 	// Annotate scan columns and optimize — pass scan annotator for IN decorrelation
 	scanAnnotator := func(plan *logical.Node) {
-		physical.NewPlanner(c.catalog).AnnotateScanColumns(ctx, plan)
+		physical.NewPlannerForContext(ctx, c.catalog).AnnotateScanColumns(ctx, plan)
 	}
 	scanAnnotator(logicalPlan)
 
@@ -927,7 +934,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (res *SQLResul
 		return res, err
 	}
 
-	planner := physical.NewPlanner(c.catalog)
+	planner := physical.NewPlannerForContext(ctx, c.catalog)
 	planner.WorkerCount = c.workers.Count()
 	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
 	if c.config.BroadcastBytesOverride != 0 {
@@ -2976,6 +2983,9 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	}
 
 	queryID = uuid.New().String()[:8]
+	// See ExecuteSQL: pins each table's manifest to one catalog read for
+	// this statement (#502) across every physical.Planner built below.
+	ctx = physical.WithManifestSnapshot(ctx, physical.NewManifestSnapshot())
 
 	// Parse
 	parsed, err := plansql.Parse(sql)
@@ -2989,7 +2999,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	}
 
 	// Reject references to columns that resolve to no source (plan-time name binding).
-	if err := physical.NewPlanner(c.catalog).ValidateColumns(ctx, selectInfo); err != nil {
+	if err := physical.NewPlannerForContext(ctx, c.catalog).ValidateColumns(ctx, selectInfo); err != nil {
 		return "", "", err
 	}
 
@@ -2999,14 +3009,14 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		return "", "", fmt.Errorf("logical plan: %w", err)
 	}
 	explainAnnotator := func(plan *logical.Node) {
-		physical.NewPlanner(c.catalog).AnnotateScanColumns(ctx, plan)
+		physical.NewPlannerForContext(ctx, c.catalog).AnnotateScanColumns(ctx, plan)
 	}
 	explainAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, explainAnnotator)
 	planStr = logicalPlan.PrettyPrint(0)
 
 	// Generate distributed stages and route to pipeline execution
-	planner := physical.NewPlanner(c.catalog)
+	planner := physical.NewPlannerForContext(ctx, c.catalog)
 	planner.WorkerCount = c.workers.Count()
 	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
 	if c.config.BroadcastBytesOverride != 0 {

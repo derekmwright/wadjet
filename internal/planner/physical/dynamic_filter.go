@@ -246,7 +246,7 @@ func (p *Planner) lookupCatalogNDV(ctx context.Context, table, column string) in
 	if p == nil || p.catalog == nil || table == "" || column == "" {
 		return 0
 	}
-	stats, err := p.catalog.AggregateColumnStats(ctx, table)
+	stats, err := p.getAggregateColumnStats(ctx, table)
 	if err != nil || stats == nil {
 		return 0
 	}

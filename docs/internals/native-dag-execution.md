@@ -378,12 +378,29 @@ because a delete marker belongs to the **file**, not to the alias reading it:
 `collectStageDeletes` unions its stages' snapshots FIRST-WINS on a file that
 appears in more than one (`delete_markers.go:63`) — harmless for a self-join,
 where every scan of the file comes from the SAME plan-time manifest read, but
-a genuine gap for a concurrent DELETE landing between two *separate*
-scan-node manifest reads within one statement: the older marker set can win
-for a file the newer read would have marked further. #502's per-statement
-manifest pinning (one revision threaded through planning and scan Init)
-closes this the same way it closes the analogous staleness window for
-`ScanSchema`.
+was a genuine gap for a concurrent DELETE landing between two *separate*
+scan-node manifest reads within one statement: the older marker set could win
+for a file the newer read would have marked further. Closed by #502's
+per-statement manifest pinning: `physical.ManifestSnapshot`
+(`internal/planner/physical/manifest_snapshot.go`), attached to a statement's
+context by the coordinator (`physical.WithManifestSnapshot`,
+`ExecuteSQL`/`SubmitSQL`) and consulted by every `physical.Planner` built for
+it (`NewPlannerForContext`) in place of a bare `catalog.GetManifest` call.
+Every scan node of one table in one statement now reads from the SAME
+`*catalog.PartitionManifest` object regardless of how many times, or through
+how many `logical.Optimize` passes, that table is scanned — closing this
+race and the analogous staleness window for `ScanSchema` together, since
+both are read off the one pinned manifest. `physical.
+TestManifestSnapshotClosesTheDeleteMarkerRace` covers the race directly;
+`TestManifestSnapshotPinsReadsAcrossAStatement` and
+`TestManifestSnapshotIgnoresAConcurrentWriteMidStatement` cover the read-count
+and staleness properties. The floor the pin reaches is two catalog reads per
+table per statement, not one — `GetManifest` and `AggregateColumnStats` are
+separate `Catalog` operations pinned separately, and the latter reads the
+manifest a second time internally to key its own revision-validated cache
+(`ManifestSnapshot`'s doc comment has the full accounting) — down from the
+#483 review's 9 for a single-table SELECT, and no longer scaling with scan
+node or optimizer-pass count.
 
 Wire form: `distributed.DeleteSpec{File, Runs}`, where `Runs` is
 `scan.EncodeDeleteRuns` — varint (gap, length) pairs over the coalesced runs.

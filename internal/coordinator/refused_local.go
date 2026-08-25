@@ -59,7 +59,10 @@ func (c *Coordinator) runRefusedLocal(
 	if base <= 0 {
 		base = DefaultLocalFastPathBytes
 	}
-	planner := physical.NewPlanner(c.catalog)
+	// physical.NewPlannerForContext: ctx carries the SAME per-statement
+	// ManifestSnapshot ExecuteSQL/SubmitSQL attached (#502), so a table
+	// PlanDistributed's failed attempt already read is not read again here.
+	planner := physical.NewPlannerForContext(ctx, c.catalog)
 	planner.MemoryBudget = 8 * base
 	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
 	planner.LateMaterialization = c.config.LateMaterialization
