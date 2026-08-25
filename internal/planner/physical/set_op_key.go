@@ -17,7 +17,8 @@ import (
 // agree with the comparator: two values `=` calls equal have to produce one
 // key, or the same value appears twice in a UNION and matches nothing in an
 // INTERSECT. `rowHashKey` used `fmt.Sprintf("%v", ...)` on the boxed value,
-// which breaks that for two type families (#499, ADR-0012 item 8):
+// which breaks that for three type families (#499, #546; ADR-0012 items 8
+// and 10):
 //
 //   - DECIMAL boxes as its RENDERED TEXT (Vector.GetValue), so "12.75" from a
 //     DECIMAL(9,2) and "12.7500" from a DECIMAL(18,4) were two keys for one
@@ -29,6 +30,11 @@ import (
 //     equal (PostgreSQL's float order, ADR-0012 item 8), and every NaN payload
 //     as "NaN", which it also calls equal — but the rendering is the only
 //     thing keeping those two agreeing, by accident rather than by rule.
+//   - CIDR boxes as its stored TEXT, and PostgreSQL's inet calls a bare
+//     address and its own /32 host route ONE value, so "10.0.0.1" and
+//     "10.0.0.1/32" were two keys for one member: UNION answered 4 rows here
+//     and 3 on the stage DAG, whose set-op-as-aggregate lowering keys through
+//     kernel.CidrOrderKey already (#546, #520).
 //
 // The issue filing ruled out "normalize the DECIMAL text before hashing" on
 // the grounds that at `rowHashKey` the value is an untyped string,
@@ -102,6 +108,28 @@ func keyValueText(c *parquet.Column, v any) string {
 			if sd, ok := batch.DecimalTextAt(s, int(c.Scale)); ok {
 				return string(batch.AppendDecimalKey(nil, sd.Unscaled, int(c.Scale)))
 			}
+		}
+	case parquet.TypeCIDR:
+		if s, ok := v.(string); ok {
+			// PostgreSQL's inet order, the key every OTHER CIDR consumer
+			// already uses (#520): a bare address and its own /32 host route
+			// are ONE value, so they must be one member of a set operation.
+			// Without this arm the single-process path dedups a CIDR column
+			// by its raw stored TEXT while the stage DAG — which lowers a set
+			// operation to a GroupByAll aggregate, keyed through
+			// kernel.CidrOrderKey — dedups it by inet, and the identical
+			// UNION answers 4 rows locally and 3 on the DAG (#546).
+			//
+			// CidrOrderKey, not CidrSortKey: this is a KEY, and every stored
+			// value needs one. CidrSortKey answers ok=false for a value that
+			// names no address and the column is unvalidated text
+			// (internal/storage/ingest), so discarding those to "" would
+			// dedup three DISTINCT malformed values into one member — the
+			// same defect this arm exists to fix, wearing the other sign.
+			// CidrOrderKey falls back to the value's own raw text, which
+			// keeps byte-identical garbage together and everything else
+			// apart, exactly as ORDER BY and GROUP BY key it.
+			return kernel.CidrOrderKey(s)
 		}
 	case parquet.TypeFloat64:
 		if f, ok := v.(float64); ok {

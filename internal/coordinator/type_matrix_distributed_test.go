@@ -91,15 +91,14 @@ import (
 // swapped a pair that was not misassigned. The corpus had no semi/anti join
 // entry at all before #511 added one, which is why every gate it feeds was
 // blind to a wrong answer on one of the most ordinary shapes in SQL.
-var tmdPins = map[string]typematrix.Pin{
-	"union_c_cidr": {
-		Issue: "#546",
-		Reason: "the single-process set operation dedups CIDR by raw stored TEXT " +
-			"while the stage DAG dedups it through kernel.CidrOrderKey (#520): a " +
-			"bare address and its own /32 host route are one PostgreSQL inet value " +
-			"and answer as two rows locally, one on the DAG",
-	},
-}
+// #546 is FIXED and its union_c_cidr pin is gone — that deletion is the proof
+// (ADR-0013 §Pins). The single-process set operation dedupped CIDR by the raw
+// stored TEXT while the stage DAG dedupped it through kernel.CidrOrderKey
+// (#520), so a bare address and its own /32 host route — one PostgreSQL inet
+// value, and the pair `typematrix.cidrValue` puts at id=298/299 for exactly
+// this reason — answered as two rows locally and one on the DAG.
+// `physical.keyValueText`'s parquet.TypeCIDR arm keys both arms by inet.
+var tmdPins = map[string]typematrix.Pin{}
 
 var tmdUnsupported = map[string]typematrix.Pin{}
 

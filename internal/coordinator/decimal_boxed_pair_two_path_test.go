@@ -412,10 +412,15 @@ func TestDecimalLiteralRefusalTwoPath(t *testing.T) {
 	})
 }
 
-// The CIDR set-operation fixture (#504 review, network cluster). Two spellings
-// of ONE address — "10.0.0.1" and "10.0.0.1/32" — plus a second address, so a
-// dedup key that compares the stored TEXT splits one value in two while the
-// inet order the comparison uses calls them equal.
+// The CIDR key fixture (#504 review, network cluster; #546, #565). Two
+// spellings of ONE address — "10.0.0.1" and "10.0.0.1/32" — plus a second
+// address, so a key or a comparison that reads the stored TEXT splits one
+// PostgreSQL inet value in two while inet order calls them equal.
+//
+// The pair is spelled BOTH WAYS ROUND across the two columns (row 1 is
+// c bare / d /32, row 3 is c /32 / d bare) so a column-to-column comparison
+// cannot agree by having the same spelling on both sides of one row, and
+// `c = d` has two true rows rather than one.
 const cidrTable = "cidrpair"
 
 func cidrSchema() parquet.Schema {
@@ -434,24 +439,30 @@ func cidrData() []map[string]any {
 	}
 }
 
-// TestCidrKeyIsStoredTextNotInet pins what a CIDR value's KEY actually is —
-// the stored TEXT — against what PostgreSQL says it is: an inet, where a bare
-// address is a /32 host route and `inet '10.0.0.1' = inet '10.0.0.1/32'` is
-// TRUE (verified live).
+// TestCidrKeyIsInetOnBothPaths holds both arms to PostgreSQL's own answer for
+// every place a CIDR value is used as a KEY: a set operation's dedup set, a
+// GROUP BY, a DISTINCT and a hash join.
 //
-// The engine disagrees with ITSELF here, which is the finding: the
-// column-to-LITERAL comparison already re-keys through kernel.CidrSortKey
-// (#492), so `WHERE c = '10.0.0.1'` finds both spellings, while every KEY and
-// the column-to-COLUMN comparison use the raw bytes, so `WHERE c = d` finds
-// neither and `GROUP BY c` splits one address in two.
+// PostgreSQL's inet calls a bare address and its own /32 host route ONE value
+// (`inet '10.0.0.1' = inet '10.0.0.1/32'` is TRUE, verified live), so the
+// fixture's three rows hold one address spelled two ways on each side. Two
+// separate fixes have to hold for these to agree:
 //
-// It is pinned rather than fixed here because BOTH ARMS AGREE. Keying the
-// local set operation by inet on its own would put `UNION` at 3 while
-// `GROUP BY` stayed at 3-against-2 and the DAG stayed at 4 — one engine with
-// two answers to "are these the same value", which is #499's own defect class
-// one type over. The fix has to move the whole key layer and the shuffle
-// router together (#546), the way #459 did for floats.
-func TestCidrKeyIsStoredTextNotInet(t *testing.T) {
+//   - kernel.CidrOrderKey under the ORDER BY / GROUP BY / DISTINCT / hash-join
+//     key and the shuffle's own router (#520), which is what makes GROUP BY,
+//     DISTINCT and the self join answer 2, 2 and 4 on BOTH arms, and
+//   - physical.keyValueText's TypeCIDR arm (#546), the single-process set
+//     operation's own dedup key. Without it UNION answered 4 here and 3 on the
+//     stage DAG — which lowers a set operation to a GroupByAll aggregate and
+//     so already keyed by inet — one engine with two answers to "are these the
+//     same value".
+//
+// This replaces the pin (TestCidrKeyIsStoredTextNotInet) that recorded the
+// stored-TEXT answers as today's, and its deletion is #546's and #520's proof
+// per ADR-0013 §Pins. It is a POSITIVE gate: every count below is what live
+// postgres:17-alpine answers on the identical rows, asserted on both arms, so
+// a regression on either one fails rather than being absorbed into a new pin.
+func TestCidrKeyIsInetOnBothPaths(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
 	}
@@ -464,20 +475,21 @@ func TestCidrKeyIsStoredTextNotInet(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		sql  string
-		// pg is what live postgres:17-alpine answers; today is what wadjet
-		// answers on BOTH arms. Where they differ the entry is pinned.
-		pg, today int64
+		// pg is what live postgres:17-alpine answers, and what BOTH arms must
+		// answer. No pins: this gate has none left.
+		pg int64
 	}{
-		{"union", "SELECT COUNT(*) AS n FROM (SELECT c FROM %s UNION SELECT d FROM %s) u", 3, 4},
-		{"intersect", "SELECT COUNT(*) AS n FROM (SELECT c FROM %s INTERSECT SELECT d FROM %s) u", 1, 2},
-		{"except", "SELECT COUNT(*) AS n FROM (SELECT c FROM %s EXCEPT SELECT d FROM %s) u", 1, 1},
-		{"group_by", "SELECT COUNT(*) AS n FROM (SELECT c FROM %s GROUP BY c) g", 2, 3},
-		{"distinct", "SELECT COUNT(*) AS n FROM (SELECT DISTINCT c FROM %s) g", 2, 3},
-		{"self_join", "SELECT COUNT(*) AS n FROM %s a JOIN %s b ON a.c = b.d", 4, 2},
-		{"col_col_equality", "SELECT COUNT(*) AS n FROM %s WHERE c = d", 2, 0},
-		// The one site that already follows PostgreSQL, and the reason the
-		// rest are visible as a self-disagreement rather than a policy.
-		{"col_literal_equality", "SELECT COUNT(*) AS n FROM %s WHERE c = '10.0.0.1'", 2, 2},
+		{"union", "SELECT COUNT(*) AS n FROM (SELECT c FROM %s UNION SELECT d FROM %s) u", 3},
+		// The control that says the dedup key is what moved and not the
+		// scan: UNION ALL keeps every row whatever the key says.
+		{"union_all", "SELECT COUNT(*) AS n FROM (SELECT c FROM %s UNION ALL SELECT d FROM %s) u", 6},
+		{"intersect", "SELECT COUNT(*) AS n FROM (SELECT c FROM %s INTERSECT SELECT d FROM %s) u", 1},
+		{"except", "SELECT COUNT(*) AS n FROM (SELECT c FROM %s EXCEPT SELECT d FROM %s) u", 1},
+		{"group_by", "SELECT COUNT(*) AS n FROM (SELECT c FROM %s GROUP BY c) g", 2},
+		{"distinct", "SELECT COUNT(*) AS n FROM (SELECT DISTINCT c FROM %s) g", 2},
+		{"count_distinct", "SELECT COUNT(DISTINCT c) AS n FROM %s", 2},
+		{"self_join", "SELECT COUNT(*) AS n FROM %s a JOIN %s b ON a.c = b.d", 4},
+		{"col_literal_equality", "SELECT COUNT(*) AS n FROM %s WHERE c = '10.0.0.1'", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sql := tc.sql
@@ -499,24 +511,60 @@ func TestCidrKeyIsStoredTextNotInet(t *testing.T) {
 				} else {
 					single64 = got
 				}
-				if got != tc.today {
-					t.Errorf("%s arm answered %d; this gate pins today's answer as %d\n  SQL: %s",
-						arm.name, got, tc.today, sql)
+				if got != tc.pg {
+					t.Errorf("%s arm: %s\n  got %d, want %d (live PostgreSQL 17)", arm.name, sql, got, tc.pg)
 				}
 			}
-			// The property that makes a one-site fix WRONG: the two arms must
-			// keep answering alike, whatever the answer is.
 			if single64 != dag64 {
 				t.Errorf("the two paths disagree: single-process %d, stage DAG %d\n  SQL: %s",
 					single64, dag64, sql)
 			}
-			if tc.today == tc.pg {
-				return
-			}
-			t.Logf("known divergence, NOT gated (#546): %d, PostgreSQL %d — a CIDR key is the stored "+
-				"TEXT, so two spellings of one address are two values.\n  SQL: %s", tc.today, tc.pg, sql)
 		})
 	}
+
+	// The one CIDR key shape that is still WRONG, and it is wrong on ONE arm
+	// only: `WHERE c = d`.
+	//
+	// kernel.colColFilterCidr re-keys a column-to-column CIDR comparison
+	// through inet order, but only on the VECTORIZED kernel. expr.compare()'s
+	// both-string fast path — the row-at-a-time evaluator, which is what a
+	// projection uses and what the stage DAG's re-parsed filter ALWAYS
+	// compiles to — still compares the two stored texts byte for byte. So the
+	// single-process arm answers PostgreSQL's 2 and the DAG answers 0 for the
+	// identical query.
+	//
+	// Pinned here rather than papered over, and the pin asserts BOTH arms'
+	// answers: it fails the moment they agree, which is the fix's proof
+	// (ADR-0013 §Pins). Delete this subtest with the fix.
+	t.Run("col_col_equality_pinned_565", func(t *testing.T) {
+		sql := fmt.Sprintf("SELECT COUNT(*) AS n FROM %s WHERE c = d", cidrTable)
+		got := map[string]int64{}
+		for _, arm := range []struct {
+			name string
+			dag  bool
+		}{{"single", false}, {"dag", true}} {
+			rows := dtpRun(t, ctx, single, coord, sql, arm.dag)
+			if len(rows) != 1 {
+				t.Fatalf("%s: %d rows, want 1", arm.name, len(rows))
+			}
+			got[arm.name] = ketInt(t, arm.name, rows[0]["n"])
+		}
+		if got["single"] == got["dag"] {
+			t.Errorf("the two paths now agree on `WHERE c = d` (%d) — #565 is FIXED.\n"+
+				"Delete this pin and add col_col_equality to the table above, gated at PostgreSQL's 2.",
+				got["single"])
+			return
+		}
+		if got["single"] != 2 || got["dag"] != 0 {
+			t.Errorf("#565's shape changed — re-read it before re-pinning\n"+
+				"  single-process %d (want 2, PostgreSQL's answer, via kernel.colColFilterCidr)\n"+
+				"  stage DAG      %d (want 0, via expr.compare()'s byte comparison)",
+				got["single"], got["dag"])
+			return
+		}
+		t.Logf("known divergence, NOT gated (#565): single-process 2 (PostgreSQL's answer), "+
+			"stage DAG 0 — the col-col CIDR fix landed on the vectorized kernel only.\n  SQL: %s", sql)
+	})
 }
 
 // TestMixedDecimalIntegerSetOpIsNotReconciled pins what a set operation across

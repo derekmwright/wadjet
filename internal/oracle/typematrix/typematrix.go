@@ -304,13 +304,12 @@ func allData(n int) []map[string]any {
 // so a query that unions the fixture against itself holds one address two
 // ways: PostgreSQL's inet calls a bare address and its own /32 host route ONE
 // value (`'10.0.0.1' = '10.0.0.1/32'`), and text order calls them two
-// distinct strings. That is exactly the pair the single-process set
-// operation's dedup (`rowHashKey`, keyed on the boxed value's raw text) and
-// the stage DAG's (a `GroupByAll` aggregate keyed through
-// `kernel.CidrOrderKey`, #520) now answer DIFFERENTLY for the identical
-// UNION — tracked as #546 and pinned in
-// internal/coordinator/type_matrix_distributed_test.go's tmdPins, which is
-// what this pair of rows exists to make visible.
+// distinct strings. That pair is what made #546 visible: the single-process
+// set operation's dedup (`rowHashKey`, keyed on the boxed value's raw text)
+// and the stage DAG's (a `GroupByAll` aggregate keyed through
+// `kernel.CidrOrderKey`, #520) answered the identical UNION DIFFERENTLY. Both
+// now key by inet (`physical.keyValueText`'s TypeCIDR arm), so these two rows
+// are what keeps that agreement gated rather than what records its absence.
 func cidrValue(i int) string {
 	if i == 298 {
 		return strings.TrimSuffix(cidrValue(299), "/32")
