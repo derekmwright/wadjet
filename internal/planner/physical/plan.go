@@ -12031,6 +12031,16 @@ func aggregateOutputNames(node *logical.Node) ([]string, bool) {
 				}
 			}
 		}
+		// The SAME decls buildAggregate classifies its group keys against
+		// (aggChildColTypes = inputColDecls(node.Children[0])): a key is
+		// "plain" only if it is a bare column of the aggregate's input, and a
+		// ROW FIELD PATH is not — it is materialized as __gb_expr_%d there,
+		// so this name list must agree or the projection-elision shapes
+		// diverge (#568, #590's aggregateOutputNames).
+		var gbDecls colDecls
+		if len(node.Children) == 1 {
+			gbDecls = inputColDecls(node.Children[0])
+		}
 		names := make([]string, 0, len(node.GroupBy)+len(node.AggExprs))
 		var elidedLits []string
 		for i, gb := range node.GroupBy {
@@ -12040,7 +12050,7 @@ func aggregateOutputNames(node *logical.Node) ([]string, bool) {
 					elidedLits = append(elidedLits, fmt.Sprintf("__gb_expr_%d", i))
 					continue
 				}
-				if !isPlainGroupKey(node.GroupByExprs[i]) {
+				if !isPlainGroupKey(node.GroupByExprs[i], gbDecls) {
 					name = fmt.Sprintf("__gb_expr_%d", i)
 				}
 			}
