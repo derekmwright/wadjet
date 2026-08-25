@@ -261,28 +261,17 @@ func TestSetOpDecimalKeyTwoPath(t *testing.T) {
 		})
 	}
 
-	// The two arms agree on the COUNTS above and do NOT agree on the VALUES.
-	//
-	// The stage DAG carries the wider arm's unscaled Int128 across the shuffle
-	// and renders it at the FIRST arm's declared scale, so a DECIMAL(18,4) arm
-	// comes back 100x too large under a DECIMAL(9,2) first arm, and the
-	// distinct forms TRUNCATE instead — which is how a DISTINCT result ends up
-	// holding the same rendering twice (#533). That is a plan-time
-	// stage-schema site, not the runtime one #532 fixed, so it is PINNED here
-	// rather than papered over.
-	//
-	// The pin has two halves, and both are load-bearing:
-	//
-	//   - the SINGLE-PROCESS arm's values are GATED against PostgreSQL's, so
-	//     the half that IS fixed cannot regress behind the pin. Comparison is
-	//     on the canonical value, not the spelling: PostgreSQL's numeric is
-	//     variable-scale and renders each value at its own scale, while a
-	//     wadjet DECIMAL column has ONE declared scale (ADR-0012 item 6, the
-	//     #532 bullet).
-	//   - the two arms are asserted to DIFFER, so the pin FAILS the moment
-	//     they agree. That failure is #533's fix's proof, and the agent that
-	//     fixes it deletes this subtest.
-	t.Run("values_pinned_533", func(t *testing.T) {
+	// The two arms agree on the COUNTS above and, since #533's rescale-at-the-
+	// arm fix, on the VALUES as well: both are GATED against PostgreSQL's
+	// answer here, canonicalized to its minimal spelling since PostgreSQL's
+	// numeric is variable-scale and renders each value at its own scale, while
+	// a wadjet DECIMAL column has ONE declared scale (ADR-0012 item 6, the
+	// #532 bullet). Before the fix the stage DAG carried the wider arm's
+	// unscaled Int128 across the shuffle and rendered it at the FIRST arm's
+	// declared scale instead of its own, which this gate would have caught by
+	// the DAG arm failing to match PostgreSQL rather than by the two arms
+	// merely disagreeing with each other.
+	t.Run("values_vs_postgres", func(t *testing.T) {
 		canon := func(vals []string) []string {
 			out := make([]string, 0, len(vals))
 			for _, v := range vals {
@@ -328,17 +317,15 @@ func TestSetOpDecimalKeyTwoPath(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				sql := fmt.Sprintf(tc.sql, dbpTable, dbpTable)
 				sv, dv := render(sql, false), render(sql, true)
-				if got, want := canon(sv), canon(tc.pg); !slices.Equal(got, want) {
+				want := canon(tc.pg)
+				if got := canon(sv); !slices.Equal(got, want) {
 					t.Errorf("single-process arm diverges from PostgreSQL\n  got  %v\n  want %v\n  SQL: %s",
 						got, want, sql)
 				}
-				if slices.Equal(sv, dv) {
-					t.Errorf("the two paths now render the same values, so #533 is FIXED for %s:\n  %v\n"+
-						"Delete this pin and gate the DAG arm against PostgreSQL too.", tc.name, sv)
-					return
+				if got := canon(dv); !slices.Equal(got, want) {
+					t.Errorf("stage DAG arm diverges from PostgreSQL\n  got  %v\n  want %v\n  SQL: %s",
+						got, want, sql)
 				}
-				t.Logf("known divergence, NOT gated (#533): the stage DAG rescales the wider arm.\n"+
-					"  single-process: %v\n  stage DAG:      %v", sv, dv)
 			})
 		}
 	})
@@ -532,23 +519,23 @@ func TestCidrKeyIsStoredTextNotInet(t *testing.T) {
 	}
 }
 
-// TestMixedDecimalIntegerSetOpIsNotReconciled pins the three different things
-// a set operation across a DECIMAL arm and an INTEGER arm does today (#547).
+// TestMixedDecimalIntegerSetOpIsNotReconciled pins what a set operation across
+// a DECIMAL arm and an INTEGER arm does today (#547).
 //
 // PostgreSQL answers it: `numeric ∪ bigint` is `numeric`, so
 // `SELECT a UNION SELECT id` is 12 values there. Wadjet:
 //
 //   - single-process, DECIMAL arm first: ANSWERS, and every integer is read
 //     as an UNSCALED value at the DECIMAL's scale, so 1 comes back as 0.01.
-//     A silent hundred-fold shrink is the worst of the three.
+//     A silent hundred-fold shrink, still pinned here.
 //   - single-process, INTEGER arm first: fails with an internal message
-//     ("cannot store string into INT64 vector").
-//   - stage DAG, either order: refused at plan time, because
-//     reconcileSetOpArmTypes' widening ladder has no DECIMAL rung.
-//
-// Pinned rather than fixed in the #504/#506/#499/#517 round: the fix is that
-// ladder, not the dedup key or the boxed comparison. The pin fails when any of
-// the three changes, which is what says the ladder moved.
+//     ("cannot store string into INT64 vector"), still pinned here.
+//   - stage DAG, either order: fixed as a side effect of #533's coercion —
+//     reconcileSetOpArmTypes' widening ladder gained the INT→DECIMAL rung
+//     that a set operation's arms reconcile through, so both orders now
+//     ANSWER and are gated against PostgreSQL's values here instead of
+//     pinned. The single-process arm is untouched by that fix and stays
+//     pinned to its two wrong shapes until #547's other half lands.
 func TestMixedDecimalIntegerSetOpIsNotReconciled(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
@@ -562,15 +549,32 @@ func TestMixedDecimalIntegerSetOpIsNotReconciled(t *testing.T) {
 	decFirst := fmt.Sprintf("SELECT a FROM %s UNION SELECT id FROM %s", dbpTable, dbpTable)
 	intFirst := fmt.Sprintf("SELECT id FROM %s UNION SELECT a FROM %s", dbpTable, dbpTable)
 
-	t.Run("dag refuses both orders", func(t *testing.T) {
+	// PostgreSQL's answer, canonicalized to its minimal spelling: -0.01, 0,
+	// 1, 2, 3, 4, 5, 6, 7, 8, 9, 12.75 and a NULL. Wadjet's DECIMAL column
+	// has one declared scale, so every value — including what came in
+	// through the INTEGER arm — renders at that scale instead of at
+	// PostgreSQL's variable one (ADR-0012 item 6): 1 stays 1, i.e. renders as
+	// 1.00.
+	t.Run("dag answers both orders", func(t *testing.T) {
+		want := []string{
+			"-0.01", "0.00", "1.00", "12.75", "2.00", "3.00", "4.00", "5.00",
+			"6.00", "7.00", "8.00", "9.00", "<nil>",
+		}
 		for _, sql := range []string{decFirst, intFirst} {
-			_, err := tmdRunDAG(ctx, coord, sql)
-			if err == nil {
-				t.Errorf("the stage DAG now ANSWERS %s — #547 moved; re-gate this against PostgreSQL", sql)
+			res, err := tmdRunDAG(ctx, coord, sql)
+			if err != nil {
+				t.Errorf("%s: %v", sql, err)
 				continue
 			}
-			if !strings.Contains(err.Error(), "arms disagree on the type") {
-				t.Errorf("%s refused with an unexpected error: %v", sql, err)
+			got := make([]string, 0, len(res.Rows))
+			for _, r := range res.Rows {
+				for _, v := range r {
+					got = append(got, fmt.Sprintf("%v", v))
+				}
+			}
+			sort.Strings(got)
+			if !slices.Equal(got, want) {
+				t.Errorf("stage DAG diverges from PostgreSQL\n  got  %v\n  want %v\n  SQL: %s", got, want, sql)
 			}
 		}
 	})
