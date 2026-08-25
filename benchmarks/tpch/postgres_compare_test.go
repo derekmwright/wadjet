@@ -1382,6 +1382,51 @@ func postgresSemanticsCases() []pgCase {
 				 WHERE c.n_regionkey = a.n_regionkey AND c.n_nationkey > a.n_nationkey)`},
 	)
 
+	// --- NOT IN's three-valued rule over NULLs (#507) ------------------
+	//
+	// `decorrelateInSubqueries` lowers NOT IN to an anti join, and an anti
+	// join asks a TWO-valued question: did this probe row match nothing.
+	// NOT IN's rule is three-valued — UNKNOWN, so WHERE drops the row, the
+	// moment the probe key is NULL or the subquery returned a NULL the key
+	// did not match on some other value. Every TPC-H column is NOT NULL, so
+	// the NULLs have to be manufactured, and a LEFT JOIN is the way to do it
+	// that both engines lower the same way.
+	out = append(out,
+		// A NULL PROBE key: the outer LEFT JOIN leaves r_regionkey NULL for
+		// every nation outside regions 0-1, and those rows compare UNKNOWN
+		// against every list value whether they matched or not.
+		pgCase{name: "NotInSubqueryNullProbeKey",
+			sql: `SELECT COUNT(*) AS c FROM nation a
+				LEFT JOIN region r ON r.r_regionkey = a.n_regionkey AND r.r_regionkey < 2
+				WHERE r.r_regionkey NOT IN (SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey < 5)`},
+		pgCase{name: "NotInSubqueryNullProbeKeyValues",
+			sql: `SELECT a.n_nationkey AS k FROM nation a
+				LEFT JOIN region r ON r.r_regionkey = a.n_regionkey AND r.r_regionkey < 2
+				WHERE r.r_regionkey NOT IN (SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey < 5)
+				ORDER BY k`, ordered: true},
+		// The IN twin is the control: a semi join IS the right two-valued
+		// question, and a fix to NOT IN must not move it.
+		pgCase{name: "InSubqueryNullProbeKey",
+			sql: `SELECT COUNT(*) AS c FROM nation a
+				LEFT JOIN region r ON r.r_regionkey = a.n_regionkey AND r.r_regionkey < 2
+				WHERE r.r_regionkey IN (SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey < 5)`},
+		// A NULL in the LIST: the inner LEFT JOIN puts one there, and it
+		// poisons every non-matching comparison, so nothing survives.
+		pgCase{name: "NotInSubqueryNullInList",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey NOT IN
+				(SELECT r.r_regionkey FROM nation b
+				 LEFT JOIN region r ON r.r_regionkey = b.n_regionkey AND r.r_regionkey < 2)`},
+		pgCase{name: "InSubqueryNullInList",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
+				(SELECT r.r_regionkey FROM nation b
+				 LEFT JOIN region r ON r.r_regionkey = b.n_regionkey AND r.r_regionkey < 2)`},
+		// The control that says the anti join still ANSWERS rather than
+		// having been turned into a way of returning nothing.
+		pgCase{name: "NotInSubqueryNullFreeList",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey NOT IN
+				(SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey < 5)`},
+	)
+
 	// --- String functions -------------------------------------------------
 	//
 	// SQL string positions are 1-based, SUBSTRING clamps rather than erroring

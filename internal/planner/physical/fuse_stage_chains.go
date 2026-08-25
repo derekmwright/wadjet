@@ -67,7 +67,12 @@ func fuseStageChains(stages []Stage) []Stage {
 // chainProducerEligible reports whether s can absorb a downstream join.
 // A stage that already absorbed a partial aggregate is chain-terminal.
 func chainProducerEligible(s *Stage) bool {
-	return s.Type == StageHashJoin &&
+	// A null-aware anti join's semantics flag (#507) has no field on
+	// ChainedJoinSpec, and absorbing it would silently answer the two-valued
+	// question instead. Not fusing is the honest alternative to carrying the
+	// flag nowhere.
+	return !s.NullAwareAnti &&
+		s.Type == StageHashJoin &&
 		len(s.ChainedAggSpecs) == 0 && len(s.ChainedAggGroupBy) == 0 &&
 		s.Distribution.Kind == DistHashPartitioned && s.Distribution.Count > 0 &&
 		s.Exchange == nil &&
@@ -88,6 +93,9 @@ func chainProducerEligible(s *Stage) bool {
 func chainConsumerEligible(c, p *Stage) bool {
 	if c.Type != StageHashJoin && c.Type != StageBroadcastJoin {
 		return false
+	}
+	if c.NullAwareAnti {
+		return false // see chainProducerEligible (#507)
 	}
 	// A RIGHT/FULL consumer emits its unmatched BUILD rows after probing.
 	// Absorbed, its build rides the producer's tasks as a chained spec —

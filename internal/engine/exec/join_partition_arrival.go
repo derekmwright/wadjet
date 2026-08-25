@@ -422,6 +422,11 @@ func (h *HashJoin) freezeAllOpenAccums() error {
 // partition 0 and will produce no hash-table match — but keeping them grouped
 // means the same partition holds all keys that hash to it, including a
 // probe-side null lookup that hits this same partition.
+//
+// It is also the one place that sees EVERY build row's key before grace
+// partitioning splits them, so it is where a null-aware anti join learns its
+// build held a NULL at all — a fact that poisons the whole answer and must
+// therefore not be per-partition (#507).
 func computeBuildPartitionRows(h *HashJoin, b *batch.RecordBatch, out *[numSpillPartitions][]int) {
 	switch {
 	case h.useIntKey:
@@ -431,6 +436,7 @@ func computeBuildPartitionRows(h *HashJoin, b *batch.RecordBatch, out *[numSpill
 				row := int(si)
 				key, ok := intKeyFromVector(col, row)
 				if !ok {
+					h.buildHasNullKey = true
 					out[0] = append(out[0], row)
 					continue
 				}
@@ -441,6 +447,7 @@ func computeBuildPartitionRows(h *HashJoin, b *batch.RecordBatch, out *[numSpill
 			for i := 0; i < b.Len; i++ {
 				key, ok := intKeyFromVector(col, i)
 				if !ok {
+					h.buildHasNullKey = true
 					out[0] = append(out[0], i)
 					continue
 				}
@@ -455,6 +462,7 @@ func computeBuildPartitionRows(h *HashJoin, b *batch.RecordBatch, out *[numSpill
 				row := int(si)
 				a, bb, ok := dualIntKeyFromVectors(col0, col1, row)
 				if !ok {
+					h.buildHasNullKey = true
 					out[0] = append(out[0], row)
 					continue
 				}
@@ -465,6 +473,7 @@ func computeBuildPartitionRows(h *HashJoin, b *batch.RecordBatch, out *[numSpill
 			for i := 0; i < b.Len; i++ {
 				a, bb, ok := dualIntKeyFromVectors(col0, col1, i)
 				if !ok {
+					h.buildHasNullKey = true
 					out[0] = append(out[0], i)
 					continue
 				}

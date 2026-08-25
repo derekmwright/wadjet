@@ -1601,6 +1601,11 @@ func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode
 		JoinType:  joinType,
 		JoinCond:  renderDecorrelatedKeys(keys),
 		InnerKeys: keys,
+		// An anti join answers "did nothing match", which is NOT what NOT IN
+		// asks (#507). See Node.NullAwareAnti: only the UNCORRELATED form
+		// carries the flag, because a correlated NOT IN's poison is per
+		// correlation group and one flag on the operator cannot say that.
+		NullAwareAnti: inExpr.Not && len(correlationKeys) == 0,
 	}
 }
 

@@ -338,6 +338,11 @@ type Task struct {
 	// SemiAntiFilter — enables key-only build (skip batch storage).
 	SemiAntiKeyOnly bool `json:"semi_anti_key_only,omitempty"`
 
+	// NullAwareAnti marks an anti-join stage that came from a NOT IN
+	// subquery and owes its three-valued rule (#507). See
+	// exec.HashJoin.NullAwareAnti.
+	NullAwareAnti bool `json:"null_aware_anti,omitempty"`
+
 	// Operators carries a multi-operator pipeline the worker runs end-to-end
 	// without inter-operator round-trips through S3+NATS. When set, the worker
 	// builds an exec.Pipeline from these specs in order: Operators[0] is the
@@ -508,6 +513,10 @@ type OpSpec struct {
 	JoinFilter       string       `json:"join_filter,omitempty"`
 	BuildRowHint     int64        `json:"build_row_hint,omitempty"`
 	SemiAntiKeyOnly  bool         `json:"semi_anti_key_only,omitempty"`
+	// NullAwareAnti marks an anti-join op that came from a NOT IN and must
+	// answer its three-valued rule: a NULL probe key never survives, and a
+	// NULL anywhere in the build makes the whole answer empty (#507).
+	NullAwareAnti bool `json:"null_aware_anti,omitempty"`
 	// BuildFilterExprs filter the BUILD input rows before hash-table
 	// insertion (exchange subsumption dedup: the dropped exchange's scan
 	// filter — or its computed flag column — applied at build read).

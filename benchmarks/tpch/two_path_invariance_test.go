@@ -3767,6 +3767,38 @@ func twoPathCorpus() []twoPathQuery {
 				tb.Helper()
 				assertSingleCell(tb, rows, "c", 10)
 			}},
+		// #507: NOT IN is three-valued and an anti join is not. Every TPC-H
+		// column is NOT NULL, so a LEFT JOIN manufactures the NULLs — one
+		// entry puts them in the PROBE key, one in the LIST, and the third is
+		// the null-free control that says the anti join still ANSWERS rather
+		// than having become a way of returning nothing. assertA carries
+		// PostgreSQL's number, because both arms were wrong together before.
+		twoPathQuery{name: "NotInSubqueryNullProbeKey", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a
+				LEFT JOIN region r ON r.r_regionkey = a.n_regionkey AND r.r_regionkey < 2
+				WHERE r.r_regionkey NOT IN (SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey < 5)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 0)
+			}},
+		twoPathQuery{name: "NotInSubqueryNullInList", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey NOT IN
+				(SELECT r.r_regionkey FROM nation b
+				 LEFT JOIN region r ON r.r_regionkey = b.n_regionkey AND r.r_regionkey < 2)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 0)
+			}},
+		twoPathQuery{name: "NotInSubqueryNullFreeList", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey NOT IN
+				(SELECT b.n_regionkey FROM nation b WHERE b.n_nationkey < 5)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 10)
+			}},
 		// #480, repro A: a non-equi join has no join keys, so its build side
 		// requires clustered_on[] — an empty key list only a singleton or a
 		// broadcast satisfies — and the derived aggregate feeding it is

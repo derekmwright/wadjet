@@ -189,6 +189,10 @@ type Stage struct {
 	// build columns with the OWNING alias instead of BuildTableAlias.
 	BuildColOrigins map[string]string
 	JoinFilter      string // semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
+	// NullAwareAnti carries logical.Node.NullAwareAnti to the worker: this
+	// anti join came from a NOT IN and owes its three-valued rule, not the
+	// two-valued "did nothing match" an anti join asks on its own (#507).
+	NullAwareAnti bool
 	// BuildFilterExprs are row predicates applied to the BUILD input before
 	// hash-table insertion. Set by dedupeSubsumedScanExchanges when this
 	// join's build was rewired from a filtered exchange to a subsuming raw
@@ -4130,6 +4134,14 @@ func fuseJoinStages(stages []Stage) []Stage {
 		if consumer.Type != "hash_join" && consumer.Type != "broadcast_join" {
 			continue
 		}
+		// A null-aware anti join carries a semantics flag (#507) that the
+		// absorbed-join spec has no field for, and absorbing it would answer
+		// the two-valued question instead. FusedJoinSpec can grow the field
+		// the day a shape needs it; until then, not fusing is the honest
+		// alternative to carrying it silently.
+		if s.NullAwareAnti || consumer.NullAwareAnti {
+			continue
+		}
 		// The candidate's output must feed the consumer's PROBE side.
 		// Fusion replays the absorbed join as a broadcast-probe step on the
 		// consumer's probe STREAM — valid only when the absorbed output IS
@@ -5148,6 +5160,17 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// each task owns a disjoint slice of the build. Same rule
 		// planSkewSplitTasks already applies for the same reason.
 		isBroadcast := !preservesBuildSide(jt) && p.isBroadcastCandidate(node)
+		// A null-aware anti join reads ONE fact off its whole build side —
+		// did any row have a NULL key — and answers with no rows at all when
+		// the answer is yes (#507). Hash-partitioning the build splits that
+		// fact: the task holding the NULL partition emits nothing while every
+		// other task emits its probe rows, so `NOT IN` over a NULL-carrying
+		// list came back with the rows a two-valued anti join would keep.
+		// Replicating the build is what makes the fact whole per task; it is
+		// a correctness requirement here, not a size heuristic.
+		if node.NullAwareAnti && !preservesBuildSide(jt) {
+			isBroadcast = true
+		}
 		joinType := "hash_join"
 		if isBroadcast {
 			joinType = "broadcast_join"
@@ -5336,6 +5359,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		if node.JoinFilter != "" {
 			stage.JoinFilter = node.JoinFilter
 		}
+		// …and NOT IN's three-valued rule, which is a property of the
+		// PREDICATE this anti join came from and unknowable from the stage
+		// alone (#507).
+		stage.NullAwareAnti = node.NullAwareAnti
 		if leftDep != "" {
 			stage.Dependencies = append(stage.Dependencies, leftDep)
 		}
@@ -6018,6 +6045,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter == "" {
 		hj.SemiAntiKeyOnly = true
 	}
+
+	// NOT IN's three-valued rule, which the anti join does not ask on its
+	// own (#507). The logical rewrite is the only thing that knows this anti
+	// join came from a NOT IN rather than a NOT EXISTS.
+	hj.NullAwareAnti = node.NullAwareAnti && joinType == exec.AntiJoin
 
 	// Filtered semi/anti builds must store rows for probe-time SemiAntiFilter
 	// evaluation, but only the join keys + filter-referenced columns — narrow

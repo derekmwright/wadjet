@@ -131,6 +131,32 @@ type HashJoin struct {
 	// for large build sides (e.g., 6M-row lineitem scan for EXISTS subqueries).
 	SemiAntiKeyOnly bool
 
+	// NullAwareAnti marks an AntiJoin that must answer `NOT IN (subquery)`
+	// rather than the two-valued question an anti join asks on its own.
+	//
+	// An anti join emits a probe row when nothing in the build matched it.
+	// `k NOT IN (SELECT v …)` is three-valued: TRUE only when k differs from
+	// EVERY v, FALSE when it equals one, and UNKNOWN — so WHERE drops the
+	// row — the moment k itself is NULL, or the subquery yielded a NULL that
+	// k did not match on some other value. A plain anti join cannot tell "no
+	// match because the row genuinely differs" from "no match because NULL
+	// equals nothing", and emits both (#507).
+	//
+	// Two rules restore the difference, and both are decided by the BUILD:
+	// a probe row whose own key is NULL never survives, and a NULL anywhere
+	// in the build poisons every non-matching comparison, so the join's whole
+	// output is empty. See buildHasNullKey.
+	NullAwareAnti bool
+
+	// buildHasNullKey records that some build row's key was NULL. Set by
+	// nullBuildKey on every build path — flat, key-only, parallel key-only,
+	// partition-on-arrival and spill — and read only by a NullAwareAnti
+	// join. It is a property of the build side this operator saw: under a
+	// hash-partitioned exchange each worker sees one partition, so a
+	// distributed null-aware anti join needs its build complete per worker
+	// (broadcast/replicated), which is what the planner arranges.
+	buildHasNullKey bool
+
 	// SemiAntiNEProbeCol/SemiAntiNEBuildCol carry the planner-recognized
 	// single-condition `probe.col <> build.col` join filter (the
 	// decorrelated-EXISTS self-inequality class). When both are set on a
@@ -566,6 +592,60 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 	}
 }
 
+// nullBuildKey records a build row whose join key is NULL — a row the hash
+// index must NOT hold, because NULL equals nothing and no probe may match it.
+//
+// Skipping the index insert is the whole of "must not match". Skipping the
+// row is a different claim, and two consumers need it not to be made:
+//
+//   - A RIGHT / FULL OUTER / RIGHT ANTI join owes every unmatched build row a
+//     NULL-padded output row, and FlushUnmatched / FlushAntiMatched enumerate
+//     the ARENA. The integer key paths used to `continue` past the arena
+//     append as well, so those rows were invisible to the flush and vanished
+//     — while the serialized-key path appended them and answered correctly,
+//     which is why the same query was right with a TEXT key and wrong with a
+//     BIGINT one (#496). storeRows=true appends the row with arenaNext = -1:
+//     a chain of one that no hash bucket points at. arenaMatched is sized
+//     from len(arena) after every append, so the extra entries are safe.
+//
+//   - A null-aware anti join needs to know the build contained a NULL AT ALL,
+//     because that alone makes `NOT IN`'s answer UNKNOWN for every probe row
+//     it did not otherwise match (#507). That is recorded on every path,
+//     including the key-only builds that store no rows.
+//
+// buildRows counts it: it is a real build row. (nullBuildKeyOnly is the
+// key-only variant, for the builds that store no rows and already count every
+// arriving row in bulk.)
+//
+// Caller must hold h.mu on the paths that take it.
+func (h *HashJoin) nullBuildKey(ref buildRef) {
+	h.buildHasNullKey = true
+	h.buildRows++
+	if !h.emitsUnmatchedBuildRows() {
+		return
+	}
+	h.arena = append(h.arena, ref)
+	h.arenaNext = append(h.arenaNext, -1)
+}
+
+// nullBuildKeyOnly records a NULL build key on a build that stores no rows —
+// SemiAntiKeyOnly and its parallel variant. There is no arena to append to and
+// nothing to count (those paths add ActiveLen() per batch), so only the
+// null-aware anti join's poison flag is left to set.
+func (h *HashJoin) nullBuildKeyOnly() { h.buildHasNullKey = true }
+
+// emitsUnmatchedBuildRows reports whether this join owes output for a build
+// row nothing matched — the rows FlushUnmatched and FlushAntiMatched read out
+// of the arena. RightSemiJoin emits MATCHED build rows, and a NULL-keyed row
+// is never matched, so it is deliberately not in the list.
+func (h *HashJoin) emitsUnmatchedBuildRows() bool {
+	switch h.JoinType {
+	case RightJoin, FullOuterJoin, RightAntiJoin:
+		return true
+	}
+	return false
+}
+
 // arenaAppendInt adds a buildRef to the arena and chains it under an int64 key.
 // Uses PutNoGrow to defer growth checks — caller must call intIndex.CheckGrow()
 // after each batch to maintain the load factor invariant.
@@ -939,6 +1019,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 					for _, si := range b.Sel {
 						key, ok := intKeyFromVector(col, int(si))
 						if !ok {
+							h.nullBuildKeyOnly()
 							continue
 						}
 						h.intIndex.PutNoGrow(key, 0)
@@ -960,6 +1041,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 						key, ok := intKeyFromVector(col, rowIdx)
 						if !ok {
+							h.nullBuildKeyOnly()
 							continue
 						}
 						h.intIndex.PutNoGrow(key, 0)
@@ -972,6 +1054,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 					for _, si := range b.Sel {
 						a, bb, ok := dualIntKeyFromVectors(col0, col1, int(si))
 						if !ok {
+							h.nullBuildKeyOnly()
 							continue
 						}
 						h.intIndex.PutNoGrow(dualIntHash(a, bb), 0)
@@ -980,6 +1063,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 						a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
 						if !ok {
+							h.nullBuildKeyOnly()
 							continue
 						}
 						h.intIndex.PutNoGrow(dualIntHash(a, bb), 0)
@@ -996,12 +1080,16 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				}
 				if b.Sel != nil {
 					for _, si := range b.Sel {
-						h.buildKeyFromBatch(b, int(si))
+						if !h.buildKeyFromBatch(b, int(si)) {
+							h.nullBuildKeyOnly()
+						}
 						h.strIndex.GetOrInsertNoGrow(h.keyBuf, 0)
 					}
 				} else {
 					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-						h.buildKeyFromBatch(b, rowIdx)
+						if !h.buildKeyFromBatch(b, rowIdx) {
+							h.nullBuildKeyOnly()
+						}
 						h.strIndex.GetOrInsertNoGrow(h.keyBuf, 0)
 					}
 				}
@@ -1068,6 +1156,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				for _, si := range b.Sel {
 					key, ok := intKeyFromVector(col, int(si))
 					if !ok {
+						h.nullBuildKey(buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
 						continue
 					}
 					h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
@@ -1092,6 +1181,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 					key, ok := intKeyFromVector(col, rowIdx)
 					if !ok {
+						h.nullBuildKey(buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
 						continue
 					}
 					h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
@@ -1104,6 +1194,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				for _, si := range b.Sel {
 					a, bb, ok := dualIntKeyFromVectors(col0, col1, int(si))
 					if !ok {
+						h.nullBuildKey(buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
 						continue
 					}
 					h.arenaAppendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
@@ -1113,6 +1204,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 					a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
 					if !ok {
+						h.nullBuildKey(buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
 						continue
 					}
 					h.arenaAppendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
@@ -1133,13 +1225,17 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			}
 			if b.Sel != nil {
 				for _, si := range b.Sel {
-					h.buildKeyFromBatch(b, int(si))
+					if !h.buildKeyFromBatch(b, int(si)) {
+						h.buildHasNullKey = true
+					}
 					h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
 					h.buildRows++
 				}
 			} else {
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-					h.buildKeyFromBatch(b, rowIdx)
+					if !h.buildKeyFromBatch(b, rowIdx) {
+						h.buildHasNullKey = true
+					}
 					h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
@@ -1331,6 +1427,9 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 	var bestSize int
 	for i, lb := range locals {
 		totalRows += lb.rows
+		if lb.hasNullKey {
+			h.buildHasNullKey = true
+		}
 		var sz int
 		if h.useIntKey || h.useDualIntKey {
 			sz = lb.intIndex.Len()
@@ -1380,6 +1479,10 @@ type localKeyBuild struct {
 	strIndex *strHashTable
 	rows     int64
 	keyBuf   []byte
+	// hasNullKey is this worker's half of HashJoin.buildHasNullKey; the
+	// merge below ORs them, because a NULL anywhere in the build poisons a
+	// null-aware anti join's whole answer (#507).
+	hasNullKey bool
 }
 
 // insertKeyOnlyBatch inserts keys from a batch into a local key-only hash table.
@@ -1397,6 +1500,7 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 			for _, si := range b.Sel {
 				key, ok := intKeyFromVector(col, int(si))
 				if !ok {
+					lk.hasNullKey = true
 					continue
 				}
 				lk.intIndex.PutNoGrow(key, 0)
@@ -1418,6 +1522,7 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 				key, ok := intKeyFromVector(col, rowIdx)
 				if !ok {
+					lk.hasNullKey = true
 					continue
 				}
 				lk.intIndex.PutNoGrow(key, 0)
@@ -1430,6 +1535,7 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 			for _, si := range b.Sel {
 				a, bb, ok := dualIntKeyFromVectors(col0, col1, int(si))
 				if !ok {
+					lk.hasNullKey = true
 					continue
 				}
 				lk.intIndex.PutNoGrow(dualIntHash(a, bb), 0)
@@ -1438,6 +1544,7 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 				a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
 				if !ok {
+					lk.hasNullKey = true
 					continue
 				}
 				lk.intIndex.PutNoGrow(dualIntHash(a, bb), 0)
@@ -1463,6 +1570,7 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 					v := b.Columns[idx]
 					if v.Nulls.IsNullFast(int(si)) {
 						lk.keyBuf = append(lk.keyBuf, 1)
+						lk.hasNullKey = true
 					} else {
 						lk.keyBuf = append(lk.keyBuf, 0)
 						lk.keyBuf = appendColumnValue(lk.keyBuf, v, int(si), v.Type)
@@ -1481,6 +1589,7 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 					v := b.Columns[idx]
 					if v.Nulls.IsNullFast(rowIdx) {
 						lk.keyBuf = append(lk.keyBuf, 1)
+						lk.hasNullKey = true
 					} else {
 						lk.keyBuf = append(lk.keyBuf, 0)
 						lk.keyBuf = appendColumnValue(lk.keyBuf, v, rowIdx, v.Type)
@@ -1881,25 +1990,51 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 	// spin. The int index is pre-sized by tryEnableIntKey only on the first
 	// call, and the string index was seeded at 64 buckets, so any call
 	// inserting more distinct keys than the remaining headroom hung here.
-	if h.useIntKey {
+	// tryEnableIntKey has THREE outcomes, not two: a single integer key sets
+	// useIntKey, a two-integer key sets useDualIntKey (and nils strIndex),
+	// and everything else leaves both false. Testing only useIntKey sent a
+	// two-integer-key build down the string branch and populated strIndex,
+	// while lookupBuild and existsInBuild test useDualIntKey FIRST and probe
+	// the intIndex nothing had filled — every probe missed, so the join
+	// returned no rows at all (an anti join: every row). BuildFromRows is the
+	// worker's entry point, so that was reachable from the distributed path
+	// (#498).
+	switch {
+	case h.useIntKey:
 		h.intIndex.EnsureCapacity(b.Len)
 		col := b.Columns[h.buildKeyIdx[0]]
 		for i := 0; i < b.Len; i++ {
 			key, ok := intKeyFromVector(col, i)
 			if !ok {
+				h.nullBuildKey(buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
 				continue
 			}
 			h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
 			h.buildRows++
 		}
 		h.intIndex.CheckGrow()
-	} else {
+	case h.useDualIntKey:
+		h.intIndex.EnsureCapacity(b.Len)
+		col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
+		for i := 0; i < b.Len; i++ {
+			a, bb, ok := dualIntKeyFromVectors(col0, col1, i)
+			if !ok {
+				h.nullBuildKey(buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
+				continue
+			}
+			h.arenaAppendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
+			h.buildRows++
+		}
+		h.intIndex.CheckGrow()
+	default:
 		if h.strIndex == nil {
 			h.strIndex = newStrHashTable(b.Len)
 		}
 		h.strIndex.EnsureCapacity(b.Len)
 		for i := 0; i < b.Len; i++ {
-			h.buildKeyFromBatch(b, i)
+			if !h.buildKeyFromBatch(b, i) {
+				h.buildHasNullKey = true
+			}
 			h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
 			h.buildRows++
 		}
@@ -2004,6 +2139,9 @@ func (h *HashJoin) FixKeyAssignment() bool {
 			h.tryEnableIntKey(b)
 		}
 		h.buildRows = 0
+		// The key columns just changed sides, so which rows have a NULL key is
+		// a different question than it was. Recompute it with the rest (#507).
+		h.buildHasNullKey = false
 		// Count total rows across build batches for pre-sizing
 		totalBuildRows := 0
 		for _, b := range h.buildBatches {
@@ -2027,6 +2165,7 @@ func (h *HashJoin) FixKeyAssignment() bool {
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 					key, ok := intKeyFromVector(col, rowIdx)
 					if !ok {
+						h.nullBuildKey(buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 						continue
 					}
 					h.arenaAppendInt(key, buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
@@ -2041,6 +2180,7 @@ func (h *HashJoin) FixKeyAssignment() bool {
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 					a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
 					if !ok {
+						h.nullBuildKey(buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 						continue
 					}
 					h.arenaAppendInt(dualIntHash(a, bb), buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
@@ -2052,7 +2192,9 @@ func (h *HashJoin) FixKeyAssignment() bool {
 			h.strIndex = newStrHashTable(totalBuildRows)
 			for batchIdx, b := range h.buildBatches {
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-					h.buildKeyFromBatch(b, rowIdx)
+					if !h.buildKeyFromBatch(b, rowIdx) {
+						h.buildHasNullKey = true
+					}
 					h.arenaAppendStr(buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
@@ -2083,8 +2225,15 @@ func (h *HashJoin) Probe() *HashJoinProbe {
 
 // buildKeyFromBatch fills h.keyBuf with the serialized build-side key for a row.
 // Uses pre-resolved column indices and a reusable buffer to avoid allocations.
-func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) {
+// It reports matchability the way buildProbeKey does: false when a key column
+// of this row is NULL, which is what a null-aware anti join reads to learn the
+// build held a NULL at all (#507). The row is still keyed and still stored —
+// nothing probes it, because the probe side refuses to match a NULL key
+// (#459), and a RIGHT/FULL join still owes it a NULL-padded output row.
+// Callers that do not care discard the result.
+func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) bool {
 	h.keyBuf = h.keyBuf[:0]
+	matchable := true
 	for _, idx := range h.buildKeyIdx {
 		if idx < 0 {
 			h.keyBuf = append(h.keyBuf, 1) // null flag
@@ -2093,11 +2242,13 @@ func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) {
 		v := b.Columns[idx]
 		if v.Nulls.IsNullFast(rowIdx) {
 			h.keyBuf = append(h.keyBuf, 1) // null flag
+			matchable = false
 		} else {
 			h.keyBuf = append(h.keyBuf, 0) // not-null flag
 			h.keyBuf = appendColumnValue(h.keyBuf, v, rowIdx, v.Type)
 		}
 	}
+	return matchable
 }
 
 // resolveProbeKeyIdx lazily resolves probe-side column indices.
@@ -2312,6 +2463,36 @@ func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
 		}
 		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
 			h.arenaMatched[idx] = true
+		}
+	} else if h.useDualIntKey {
+		// The two-integer key had no arm here at all, and its index is never
+		// the string one (tryEnableIntKey nils strIndex when it takes this
+		// path) — so nothing marked a build row matched, and a RIGHT or FULL
+		// OUTER join on two integer columns emitted EVERY build row as
+		// unmatched on top of the pairs it had already joined.
+		//
+		// The chain is keyed by dualIntHash, which collides by construction,
+		// so each entry's actual pair is verified before it is marked —
+		// exactly what lookupBuild does on this path.
+		h.resolveProbeKeyIdx(in)
+		if h.probeKeyIdx[0] < 0 || h.probeKeyIdx[1] < 0 {
+			return
+		}
+		a, b, ok := dualIntKeyFromVectors(in.Columns[h.probeKeyIdx[0]], in.Columns[h.probeKeyIdx[1]], row)
+		if !ok {
+			return // NULL key: matches nothing, so it marks nothing
+		}
+		head, ok := h.intIndex.Get(dualIntHash(a, b))
+		if !ok {
+			return
+		}
+		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
+			ref := h.arena[idx]
+			bb := h.buildBatches[ref.batchIdx]
+			ba, bbv, bok := dualIntKeyFromVectors(bb.Columns[h.buildKeyIdx[0]], bb.Columns[h.buildKeyIdx[1]], int(ref.rowIdx))
+			if bok && ba == a && bbv == b {
+				h.arenaMatched[idx] = true
+			}
 		}
 	} else if h.strIndex != nil {
 		if !p.buildProbeKey(in, row) {
@@ -3370,6 +3551,54 @@ func (p *HashJoinProbe) genericProbe(in *batch.RecordBatch, pairs []matchPair, l
 	return pairs, true
 }
 
+// nonNullProbeKeys returns a selection over in that drops every row with a
+// NULL in any join key column, and ok=false when there is nothing to drop (no
+// null bitmap on any key column, or a key column that does not resolve — the
+// latter is a naming problem, not a NULL, and belongs to the paths below).
+//
+// It exists so the null-aware anti join can apply `k IS NULL → UNKNOWN` once,
+// on the way in, instead of in each of the four typed probe loops — every one
+// of which treats a NULL probe key as "no match" and therefore emits it.
+func (p *HashJoinProbe) nonNullProbeKeys(in *batch.RecordBatch) ([]uint32, bool) {
+	h := p.join
+	h.resolveProbeKeyIdx(in)
+	var nullCols []*batch.Vector
+	for _, idx := range h.probeKeyIdx {
+		if idx < 0 {
+			return nil, false
+		}
+		if col := in.Columns[idx]; col.Nulls.HasNulls() {
+			nullCols = append(nullCols, col)
+		}
+	}
+	if len(nullCols) == 0 {
+		return nil, false
+	}
+	keep := func(row int) bool {
+		for _, col := range nullCols {
+			if col.Nulls.IsNullFast(row) {
+				return false
+			}
+		}
+		return true
+	}
+	sel := make([]uint32, 0, in.ActiveLen())
+	if in.Sel != nil {
+		for _, idx := range in.Sel {
+			if keep(int(idx)) {
+				sel = append(sel, idx)
+			}
+		}
+	} else {
+		for i := 0; i < in.Len; i++ {
+			if keep(i) {
+				sel = append(sel, uint32(i))
+			}
+		}
+	}
+	return sel, true
+}
+
 // executeSemiAntiJoin handles SemiJoin and AntiJoin semantics.
 // Uses a selection vector on the input batch to avoid copying rows.
 func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.RecordBatch, error) {
@@ -3381,6 +3610,26 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 	h := p.join
 	isSemi := h.JoinType == SemiJoin
 	hasFilter := h.SemiAntiFilter != nil
+
+	// NOT IN is three-valued, and an anti join on its own is not (#507). Two
+	// rules restore the difference, and both are applied here so every probe
+	// path below sees only the rows an ordinary anti join may answer for.
+	if h.NullAwareAnti && !isSemi {
+		// A NULL anywhere in the subquery's result makes `k <> that value`
+		// UNKNOWN for every k it did not match on some other value, so the
+		// predicate is TRUE for nothing at all.
+		if h.buildHasNullKey {
+			return nil, nil
+		}
+		// And a probe row whose own key is NULL compares UNKNOWN against
+		// every value, matched or not — WHERE drops it either way.
+		if sel, ok := p.nonNullProbeKeys(in); ok {
+			if len(sel) == 0 {
+				return nil, nil
+			}
+			in.Sel = sel
+		}
+	}
 
 	// Fast path: int-key semi/anti without filter — fully inlined typed loops.
 	// Eliminates closure overhead by splitting into typed branches outside the loop.

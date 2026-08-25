@@ -202,6 +202,17 @@ type Node struct {
 	InnerKeys       []DecorrelatedKey
 	InnerFilterKeys []DecorrelatedKey
 
+	// NullAwareAnti marks an anti join the NOT IN rewrite produced, which
+	// must answer NOT IN's three-valued rule rather than the two-valued
+	// question an anti join asks on its own: a NULL probe key, or a NULL
+	// anywhere in the subquery's result, is UNKNOWN and not TRUE (#507).
+	// Set only for an UNCORRELATED NOT IN — with a correlation the "the list
+	// held a NULL" fact is per correlation group, which a single flag on the
+	// operator cannot express, so that shape is left alone. NOT EXISTS is a
+	// different predicate with its own (already correct) semantics and never
+	// carries this. Consumed by exec.HashJoin.NullAwareAnti.
+	NullAwareAnti bool
+
 	// Window
 	WindowExprs []WindowExpr
 

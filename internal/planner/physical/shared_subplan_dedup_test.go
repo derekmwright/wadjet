@@ -408,6 +408,10 @@ func TestSharedSubplanDedup_StageFieldCoverage(t *testing.T) {
 		"JoinLeftKeys": "hashed", "JoinRightKeys": "hashed",
 		"BuildTableAlias": "hashed", "BuildColOrigins": "hashed",
 		"JoinFilter": "hashed", "BuildFilterExprs": "hashed",
+		// NOT IN's three-valued rule changes which rows the stage EMITS
+		// (#507), so an anti join that owes it is not interchangeable with
+		// one that does not.
+		"NullAwareAnti":     "hashed",
 		"ChainedAggGroupBy": "hashed", "ChainedAggSpecs": "hashed",
 		// Derived group-key types (#379) are a pure function of GroupByCols
 		// plus the input schema, so identical subtrees carry identical maps

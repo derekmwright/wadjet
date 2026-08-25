@@ -116,6 +116,8 @@ func TestTaskFieldCarrierCoverage(t *testing.T) {
 		"ReplySubject":   notFile,
 		"GatherOrdering": notFile, "GatherLimit": notFile,
 		"StageType": notFile, "BuildRowHint": notFile, "SemiAntiKeyOnly": notFile,
+		// A semantics flag on the anti-join operator (#507), not a file path.
+		"NullAwareAnti": notFile,
 		// DeleteMarkers is the walkers' OWN OUTPUT, not an input to walk —
 		// stamping it from itself would be circular.
 		"DeleteMarkers": notFile,

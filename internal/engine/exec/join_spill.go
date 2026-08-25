@@ -973,6 +973,12 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 		SemiAntiKeyOnly: h.SemiAntiKeyOnly,
 		BuildTableAlias: h.BuildTableAlias,
 		keyBuf:          make([]byte, 0, 128),
+		// A NULL anywhere in the build poisons a null-aware anti join's whole
+		// answer, and grace partitioning sends every NULL key to ONE partition
+		// — so the per-partition join has to inherit what the whole build saw
+		// rather than what its own partition holds (#507).
+		NullAwareAnti:   h.NullAwareAnti,
+		buildHasNullKey: h.buildHasNullKey,
 	}
 
 	totalRows := 0
@@ -1030,6 +1036,7 @@ func (h *HashJoin) indexBuildBatch(b *batch.RecordBatch, batchIdx int32) {
 			for _, si := range b.Sel {
 				key, ok := intKeyFromVector(col, int(si))
 				if !ok {
+					h.nullBuildKey(buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
 					continue
 				}
 				h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
@@ -1053,6 +1060,7 @@ func (h *HashJoin) indexBuildBatch(b *batch.RecordBatch, batchIdx int32) {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 				key, ok := intKeyFromVector(col, rowIdx)
 				if !ok {
+					h.nullBuildKey(buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
 					continue
 				}
 				h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
@@ -1065,6 +1073,7 @@ func (h *HashJoin) indexBuildBatch(b *batch.RecordBatch, batchIdx int32) {
 			for _, si := range b.Sel {
 				a, bb, ok := dualIntKeyFromVectors(col0, col1, int(si))
 				if !ok {
+					h.nullBuildKey(buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
 					continue
 				}
 				h.arenaAppendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
@@ -1074,6 +1083,7 @@ func (h *HashJoin) indexBuildBatch(b *batch.RecordBatch, batchIdx int32) {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 				a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
 				if !ok {
+					h.nullBuildKey(buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
 					continue
 				}
 				h.arenaAppendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
@@ -1086,13 +1096,17 @@ func (h *HashJoin) indexBuildBatch(b *batch.RecordBatch, batchIdx int32) {
 		}
 		if b.Sel != nil {
 			for _, si := range b.Sel {
-				h.buildKeyFromBatch(b, int(si))
+				if !h.buildKeyFromBatch(b, int(si)) {
+					h.buildHasNullKey = true
+				}
 				h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
 				h.buildRows++
 			}
 		} else {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-				h.buildKeyFromBatch(b, rowIdx)
+				if !h.buildKeyFromBatch(b, rowIdx) {
+					h.buildHasNullKey = true
+				}
 				h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
 				h.buildRows++
 			}
@@ -1108,6 +1122,7 @@ func (h *HashJoin) indexBuildBatchKeyOnly(b *batch.RecordBatch) {
 			for _, si := range b.Sel {
 				key, ok := intKeyFromVector(col, int(si))
 				if !ok {
+					h.nullBuildKeyOnly()
 					continue
 				}
 				h.intIndex.Put(key, 0)
@@ -1129,6 +1144,7 @@ func (h *HashJoin) indexBuildBatchKeyOnly(b *batch.RecordBatch) {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 				key, ok := intKeyFromVector(col, rowIdx)
 				if !ok {
+					h.nullBuildKeyOnly()
 					continue
 				}
 				h.intIndex.Put(key, 0)
@@ -1140,6 +1156,7 @@ func (h *HashJoin) indexBuildBatchKeyOnly(b *batch.RecordBatch) {
 			for _, si := range b.Sel {
 				a, bb, ok := dualIntKeyFromVectors(col0, col1, int(si))
 				if !ok {
+					h.nullBuildKeyOnly()
 					continue
 				}
 				h.intIndex.Put(dualIntHash(a, bb), 0)
@@ -1148,6 +1165,7 @@ func (h *HashJoin) indexBuildBatchKeyOnly(b *batch.RecordBatch) {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 				a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
 				if !ok {
+					h.nullBuildKeyOnly()
 					continue
 				}
 				h.intIndex.Put(dualIntHash(a, bb), 0)
@@ -1159,12 +1177,16 @@ func (h *HashJoin) indexBuildBatchKeyOnly(b *batch.RecordBatch) {
 		}
 		if b.Sel != nil {
 			for _, si := range b.Sel {
-				h.buildKeyFromBatch(b, int(si))
+				if !h.buildKeyFromBatch(b, int(si)) {
+					h.nullBuildKeyOnly()
+				}
 				h.strIndex.GetOrInsert(h.keyBuf, 0)
 			}
 		} else {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-				h.buildKeyFromBatch(b, rowIdx)
+				if !h.buildKeyFromBatch(b, rowIdx) {
+					h.nullBuildKeyOnly()
+				}
 				h.strIndex.GetOrInsert(h.keyBuf, 0)
 			}
 		}

@@ -726,13 +726,37 @@ func Corpus() []Query {
 			// NOT IN is a THIRD lowering, not a spelling of the one above: a
 			// correlated NOT EXISTS decorrelates on its own equality, while
 			// an uncorrelated NOT IN takes its key from the subquery's SELECT
-			// list — the half #516 got wrong. Both sides are NULL-guarded,
-			// because SQL's NOT IN over a set CONTAINING a NULL is NULL for
-			// every probe row and this corpus is not where that rule is
-			// settled.
+			// list — the half #516 got wrong. Both sides are NULL-guarded
+			// here so this entry isolates the KEY; the two below take the
+			// guards off, one at a time.
 			add("notin_"+n,
 				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE a.%s IS NOT NULL AND a.%s NOT IN `+
 					`(SELECT b.%s FROM %s b WHERE b.id < 500 AND b.%s IS NOT NULL)`, tbl, n, n, n, tbl, n),
+				oracle.CmpUnordered, n)
+			// NOT IN's three-valued rule, per type and per key encoding
+			// (#507). An anti join asks "did nothing match", which is a
+			// two-valued question; NOT IN's is not, and the difference is
+			// decided entirely by NULLs.
+			//
+			// The list is unguarded here and every column of this fixture
+			// carries NULLs, so a NULL reaches the build side and the
+			// predicate is UNKNOWN for every probe row it did not otherwise
+			// match — the answer is no rows at all. Degenerate on purpose:
+			// what it gates is that the poison fires on BOTH arms and for
+			// every key encoding, which is exactly where an anti join used
+			// to answer with the whole probe side instead.
+			add("notin_nulllist_"+n,
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE a.%s NOT IN `+
+					`(SELECT b.%s FROM %s b WHERE b.id < 500)`, tbl, n, n, tbl),
+				oracle.CmpUnordered, n)
+			// The non-degenerate half: a clean list, so the anti join still
+			// answers — but the PROBE carries NULLs, and a NULL key compares
+			// UNKNOWN against every value whether it matched or not. Those
+			// rows must not survive, which is the rule an anti join gets
+			// backwards on its own (no match => emit).
+			add("notin_nullprobe_"+n,
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE a.%s NOT IN `+
+					`(SELECT b.%s FROM %s b WHERE b.id < 500 AND b.%s IS NOT NULL)`, tbl, n, n, tbl, n),
 				oracle.CmpUnordered, n)
 
 			// The same three lowerings with a JOIN inside the subquery.

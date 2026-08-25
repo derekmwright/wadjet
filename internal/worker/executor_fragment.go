@@ -2806,6 +2806,10 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			hj.BuildRowHint = spec.BuildRowHint
 		}
 		hj.SemiAntiKeyOnly = spec.SemiAntiKeyOnly
+		// NOT IN's three-valued rule (#507): only the logical rewrite knows
+		// this anti join came from a NOT IN rather than a NOT EXISTS, so the
+		// fact rides the spec rather than being re-derived here.
+		hj.NullAwareAnti = spec.NullAwareAnti && joinType == exec.AntiJoin
 		switch {
 		case spec.JoinFilter != "" &&
 			(joinType == exec.LeftJoin || joinType == exec.RightJoin || joinType == exec.FullOuterJoin):
