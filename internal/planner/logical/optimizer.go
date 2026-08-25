@@ -1296,10 +1296,11 @@ func innerSemiJoinKey(info *plansql.SelectInfo) (string, bool) {
 		return "", false
 	}
 	if ref.Table != "" && !namesInnerLeadRelation(info, ref.Table) {
-		// A qualifier naming a joined subquery's NON-leading relation. The
-		// inner join qualifies a build-side column only when its bare name
-		// collides, so the qualified spelling can be the right one; leave it
-		// as written rather than guess.
+		// A qualifier this rewrite cannot resolve to the inner plan's bottom
+		// Scan: any qualifier at all once the subquery joins (see
+		// namesInnerLeadRelation), or one naming a second relation. Leave the
+		// item spelled as written rather than guess which relation the join
+		// emits bare.
 		return cleanExpr(col.Expr), true
 	}
 	return ref.Column, ref.Column != ""
@@ -1317,11 +1318,28 @@ func plainColRef(node plansql.Node) *plansql.ColRef {
 	return nil
 }
 
-// namesInnerLeadRelation reports whether qualifier names the subquery's
-// LEADING relation — the one tryDecorrelateInSubquery turns into the inner
-// plan's bottom Scan, whose columns every node above it carries unqualified.
+// namesInnerLeadRelation reports whether qualifier names the relation whose
+// columns the inner plan is known to emit UNQUALIFIED — the bottom Scan of
+// tryDecorrelateInSubquery's Scan → [Join …] → [Filter] → [Aggregate].
+//
+// That is knowable only when the subquery reads a SINGLE relation. With a
+// JOIN in it, info.Tables[0] is merely the relation written first: which side
+// ends up probe-most, and therefore which relation's bare names come out of
+// the join, is decided by reorderJoins (optimizer.go, "Join reordering") from
+// ESTIMATED ROWS at Optimize step 73 — long after decorrelateInSubqueries has
+// run at step 36. Stripping a qualifier on the strength of write order then
+// names whichever relation the estimator happened to put on the probe:
+// `a.x IN (SELECT c.x FROM uu c JOIN tt b ON b.id = c.k)` with a small `uu`
+// answers over tt.x instead of uu.x — a silent wrong answer, 2 rows where
+// PostgreSQL says 1.
+//
+// So a joined inner reports false and its select item is left spelled as the
+// user wrote it, which is what this rewrite did before #516 named the key.
+// (A qualifier the join's own output does not carry is a separate, older
+// defect — see #526 — but leaving it alone keeps this rewrite from turning
+// one wrong answer into a different one.)
 func namesInnerLeadRelation(info *plansql.SelectInfo, qualifier string) bool {
-	if qualifier == "" || len(info.Tables) == 0 {
+	if qualifier == "" || len(info.Tables) == 0 || len(info.Joins) > 0 {
 		return false
 	}
 	lead := info.Tables[0]

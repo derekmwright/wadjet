@@ -3671,6 +3671,54 @@ func twoPathCorpus() []twoPathQuery {
 					}
 				}
 			}},
+		// #526: an IN/NOT IN whose subquery JOINS, with a QUALIFIED select
+		// item. decorrelateInSubqueries names the semi join's inner key from
+		// the subquery's SELECT list; with ONE relation that name is provably
+		// what the bottom Scan emits (#516), but with a JOIN it is not —
+		// which relation's columns come out bare is decided by reorderJoins
+		// from estimated row counts at Optimize step 73, long after the key
+		// is named at step 36. The key names a column the build schema does
+		// not carry, exec.HashJoin's repair swaps the pair on #516's false
+		// premise, and the join matches nothing: IN keeps no rows and NOT IN
+		// keeps every one. Both arms are affected, so this corpus sees it
+		// only through assertA's absolute answer, which is why the entries
+		// carry PostgreSQL's number rather than the other arm's.
+		//
+		// The first pair self-joins so both relations carry `n_nationkey`;
+		// the cross-table one is the ordinary spelling and fails the same
+		// way, which is what says #526 is a property of the JOIN and not of
+		// the name collision. Deleting the three knownBug fields is the whole
+		// of "the fix landed" — the assertions are already written.
+		twoPathQuery{name: "InSubqueryJoinedInnerLeadQualified", cmp: cmpUnordered, expectRows: true,
+			knownBug: "#526",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey IN
+				(SELECT c.n_nationkey FROM nation c JOIN nation b ON b.n_regionkey = c.n_regionkey
+				 WHERE c.n_nationkey < 3)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 3)
+			}},
+		twoPathQuery{name: "NotInSubqueryJoinedInnerLeadQualified", cmp: cmpUnordered, expectRows: true,
+			knownBug: "#526",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_nationkey NOT IN
+				(SELECT c.n_nationkey FROM nation c JOIN nation b ON b.n_regionkey = c.n_regionkey
+				 WHERE c.n_nationkey < 3)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 22)
+			}},
+		twoPathQuery{name: "InSubqueryJoinedInnerCrossTable", cmp: cmpUnordered, expectRows: true,
+			knownBug: "#526",
+			sql: `SELECT COUNT(*) AS c FROM nation a WHERE a.n_regionkey IN
+				(SELECT r.r_regionkey FROM region r JOIN nation b ON b.n_regionkey = r.r_regionkey
+				 WHERE r.r_regionkey < 2)`,
+			wantCols: []string{"c"}, wantRows: 1,
+			assertA: func(tb testing.TB, rows []map[string]any) {
+				tb.Helper()
+				assertSingleCell(tb, rows, "c", 10)
+			}},
 		// #480, repro A: a non-equi join has no join keys, so its build side
 		// requires clustered_on[] — an empty key list only a singleton or a
 		// broadcast satisfies — and the derived aggregate feeding it is

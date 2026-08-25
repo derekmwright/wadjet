@@ -734,6 +734,44 @@ func Corpus() []Query {
 				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE a.%s IS NOT NULL AND a.%s NOT IN `+
 					`(SELECT b.%s FROM %s b WHERE b.id < 500 AND b.%s IS NOT NULL)`, tbl, n, n, n, tbl, n),
 				oracle.CmpUnordered, n)
+
+			// The same three lowerings with a JOIN inside the subquery.
+			// Every entry above reads a SINGLE relation, and that is the
+			// axis the corpus was blind on: decorrelateInSubqueries names
+			// the semi join's inner key from the subquery's SELECT list,
+			// and with one relation the bottom Scan's bare column name is
+			// provably what the inner plan emits. With a JOIN it is not —
+			// which relation's columns come out bare is decided by
+			// reorderJoins from estimated row counts, at Optimize step 73,
+			// long after decorrelation has named the key at step 36. A
+			// rewrite that assumes write order answers over the wrong
+			// relation, silently (#526, #527), and a self-IN cannot show
+			// it because both sides of a self-IN carry the same values.
+			//
+			// Both qualifications, because they are different code paths
+			// in innerSemiJoinKey: the item may qualify the relation
+			// written FIRST or the one written second, and the two are
+			// spelled the same way only by accident.
+			add("semijoin_join_lead_"+n,
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE a.%s IN `+
+					`(SELECT b.%s FROM %s b JOIN %s d ON d.k = b.g WHERE b.id < 500)`,
+					tbl, n, n, tbl, Dim),
+				oracle.CmpUnordered, n)
+			add("semijoin_join_nonlead_"+n,
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE a.%s IN `+
+					`(SELECT b.%s FROM %s d JOIN %s b ON d.k = b.g WHERE b.id < 500)`,
+					tbl, n, n, Dim, tbl),
+				oracle.CmpUnordered, n)
+			add("antijoin_join_"+n,
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE NOT EXISTS `+
+					`(SELECT 1 FROM %s b JOIN %s d ON d.k = b.g WHERE b.%s = a.%s AND b.id < 500)`,
+					tbl, tbl, Dim, n, n),
+				oracle.CmpUnordered, n)
+			add("notin_join_"+n,
+				fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s a WHERE a.%s IS NOT NULL AND a.%s NOT IN `+
+					`(SELECT b.%s FROM %s d JOIN %s b ON d.k = b.g WHERE b.id < 500 AND b.%s IS NOT NULL)`,
+					tbl, n, n, n, Dim, tbl, n),
+				oracle.CmpUnordered, n)
 		}
 	}
 
