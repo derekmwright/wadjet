@@ -1324,11 +1324,16 @@ func ResolveLikeFilterKernel(typ batch.TypeID, pattern string, negate bool) Filt
 // (parquet/schema.go), so it falls through to the same BytesData path
 // TypeString/TypeBytes use.
 //
-// That CAST-agreement claim is scoped to those SEVEN types and no further.
-// It is false for DATE, whose CAST AS STRING answers the epoch DAY (15007)
-// while this renderer, the projection and PostgreSQL's own `date::text` all
-// answer 2011-02-02 — a separate defect in CAST's string family (#521), not
-// a contract this function is part of.
+// That CAST-agreement claim used to be scoped to seven types, DATE excepted:
+// CAST AS STRING answered the epoch DAY (15007) for a DATE column while this
+// renderer, the projection and PostgreSQL's own `date::text` all answered
+// 2011-02-02 — a separate defect in CAST's string family (#521). #521 also
+// found the identical gap for FLOAT32 (CAST AS STRING answered the
+// float64-widened text, not the float32-shortest-round-trip form this
+// renderer and the projection use). Both are fixed now — Cast.Eval's
+// string-family case renders every ColRef operand through the same
+// boxedTextOperand this file's LIKE kernel already agrees with — so the
+// claim covers every flat type again.
 //
 // The default arm covers every OTHER type (Int64/Float64/Bool/Decimal/Date/
 // the containers) with the row's own boxed value — fmt.Sprint on whatever
@@ -1338,11 +1343,11 @@ func ResolveLikeFilterKernel(typ batch.TypeID, pattern string, negate bool) Filt
 //
 // This rendering is the DEFINITION of what LIKE matches, so the
 // row-at-a-time path has to reproduce it rather than the other way round:
-// expr.likeOperand reads Vector.GetValue for the four types ColRef.Eval boxes
-// differently (IPv4, MAC, DATE, FLOAT32), and
-// wadjet.TestLikeAnswersTheSameAtBothSites sweeps every flat type through
-// both sites. Changing a per-type arm here without checking that sweep
-// re-opens the divergence it exists to catch.
+// expr.boxedTextOperand reads Vector.GetValue for the four types ColRef.Eval
+// boxes differently (IPv4, MAC, DATE, FLOAT32) — the same resolver Cast.Eval
+// now shares — and wadjet.TestLikeAnswersTheSameAtBothSites sweeps every
+// flat type through both sites. Changing a per-type arm here without
+// checking that sweep re-opens the divergence it exists to catch.
 func likeTextRenderer(typ batch.TypeID) func(*batch.Vector, int) string {
 	switch typ {
 	case batch.TypeString, batch.TypeBytes, batch.TypeCIDR:

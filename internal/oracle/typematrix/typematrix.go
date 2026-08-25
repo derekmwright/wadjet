@@ -612,6 +612,22 @@ func Corpus() []Query {
 			}
 		}
 
+		// CAST AS STRING for the two non-network types whose ColRef.Eval box
+		// isn't their own rendering (#521): DATE boxes as its raw epoch-day
+		// int32, and FLOAT32 boxes widened to float64. Both used to answer
+		// through that raw box — the epoch day, or the float64-widened
+		// digits — instead of the same text the projection and LIKE render.
+		// This entry only pins the two wadjet EXECUTION PATHS (single-
+		// process vs stage DAG) against each other, which agreed on the
+		// wrong answer before the fix (one shared expr.Cast implementation);
+		// the independent check is the PostgreSQL oracle, which reads the
+		// value cold.
+		if n == "c_date" || n == "c_f32" {
+			add("caststr_"+n,
+				fmt.Sprintf(`SELECT id, CAST(%s AS STRING) AS v FROM %s WHERE id %% 331 = 7 ORDER BY id`, n, tbl),
+				oracle.CmpOrdered, n)
+		}
+
 		if !c.Flat {
 			// A plain projection over a range that CERTAINLY contains a NULL
 			// container. project_<n> above cannot promise that — its filter

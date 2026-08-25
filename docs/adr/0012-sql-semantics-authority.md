@@ -647,13 +647,23 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     reasoning lives; restoring it needs an inet-ordered bound written at
     WRITE time, filed as #523.
 
-    **Known residual: `ORDER BY`, `GROUP BY` and MIN/MAX over a CIDR column
-    still use TEXT order.** The two engines agree with each other there, so
-    no two-path gate sees it, but PostgreSQL would sort those by inet order
-    too. Closing it means an inet-ordered comparator in the sort kernels,
-    the group key, the container comparators and the shuffle's own router —
-    the same breadth item 8's float rule needed — so it is filed as #520
-    rather than folded into a predicate fix.
+    **Residual, closed 2026-08-25 (#520): `ORDER BY`, `GROUP BY`, DISTINCT,
+    COUNT(DISTINCT), MIN/MAX and hash-join keys over a CIDR column used TEXT
+    order.** The two engines agreed with each other there, so no two-path
+    gate saw it, but PostgreSQL sorts those by inet order too — '10.0.0.1'
+    and '10.0.0.1/32' are one value there, so text-order GROUP BY/DISTINCT
+    answered TWO groups/values for a pair `=` already called one. Closing it
+    needed an inet-ordered comparator in the sort kernels, the group/hash
+    key (`appendColumnValue` and the spill/boxed key path), the
+    declaration-resolved boxed comparator, MIN/MAX (both the batch kernel
+    and `Accumulator.Merge`, which combines partials across a scan-batch or
+    parallel-worker boundary and had the identical TEXT-order bug one level
+    up), and BOTH partition routers — the distributed shuffle sink and a
+    second, LOCAL one (`legacyCompositeHash`, the morsel-parallel
+    aggregation router), which was the hardest of the sites to find because
+    it only misroutes rows across a `workers > 1` boundary. `kernel.CidrOrderKey`
+    is the one implementation every site now calls, the same breadth item
+    8's float rule needed for its own primitive (`kernel.KeyFloat64Bits`).
 
     The two-path divergence this item closes was reproducible directly: the
     single-process engine answered 16 rows and the stage DAG answered 2 for
@@ -695,14 +705,29 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     `10.0.0.1` for an IPv4, `1.0001` for a DECIMAL, epoch MILLISECONDS for a
     TIMESTAMP, `0.14285715` for a FLOAT32 (float32 shortest round-trip, not
     its float64 widening). For the six network types and UUID this is also
-    exactly what `CAST AS STRING` and every scalar function argument produce
-    — that seven-type agreement is the claim, and it holds. It does NOT hold
-    for DATE: `CAST(c_date AS STRING)` answers the epoch DAY (`15007`) where
-    the projection and LIKE answer `2011-02-02`. PostgreSQL's `date::text`
-    is the date, so the CAST is the side that is wrong; it is a separate
-    defect in CAST's string family, filed as #521 rather than repaired inside
-    a LIKE fix, and named here so the next reader does not take the two for one
-    contract again.
+    exactly what `CAST AS STRING` and every scalar function argument produce.
+    (Amended 2026-08-25, #521: it did NOT hold for DATE — `CAST(c_date AS
+    STRING)` answered the epoch DAY, `15007`, where the projection and LIKE
+    answered `2011-02-02` — and the review that closed it found the identical
+    gap for FLOAT32, where CAST answered the float64-widened digits instead
+    of the float32-shortest-round-trip form. Both were `expr.Cast.Eval`'s
+    string-family case reading the operand through `ColRef.Eval`'s raw-box
+    fast path (epoch-day int32 for DATE, float64-widened for FLOAT32)
+    instead of the column's own rendering — the identical mechanism LIKE's
+    operand had via `likeOperand`, which #497's review had already fixed
+    for these same two types on the LIKE side and left CAST's separate,
+    narrower `networkOperand` (IPv4/MAC only) unfixed. The two resolvers
+    are now one function, `boxedTextOperand`, shared by both call sites —
+    the two-implementation drift this ADR calls out elsewhere (`CidrSortKey`,
+    `appendColumnValue`) for the same reason: two structural renderers
+    maintained separately is how one gets fixed and the other doesn't. The
+    claim now holds for every flat type PostgreSQL gives wadjet a printed
+    form to agree on, verified against live PostgreSQL 17: `date::text` and
+    a `real` column's `::text` match wadjet's rendering exactly.
+    `wadjet.TestCastStringAgreesWithProjectionAcrossFixture` sweeps DATE and
+    FLOAT32 across the type-matrix fixture; item 11 below records LIKE's own
+    sweep, `wadjet.TestLikeAnswersTheSameAtBothSites`, which already covered
+    every flat type and is what caught FLOAT32 for LIKE in the first place.)
 
     **Both sites must render alike, and two did not.** `ResolveLikeFilterKernel`
     (`internal/engine/exec/kernel/compare.go`) unconditionally read the
@@ -926,6 +951,17 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
   `kernel.IPv6LitKey`), `internal/engine/expr/expr.go` (`CmpNetworkLit`,
   `Like.EvalBoolNull`), `internal/oracle/typematrix/typematrix.go`
   (`networkOrdLit`)
+- #521 (CAST AS STRING did not render DATE or FLOAT32 the way the projection
+  and LIKE already did — closed, item 11's amendment above) and #520 (ORDER
+  BY/GROUP BY/DISTINCT/COUNT(DISTINCT)/MIN/MAX/hash-join keys over a CIDR
+  column still used TEXT order — item 10's own "known residual," now
+  closed) — `internal/engine/expr/expr.go` (`boxedTextOperand`),
+  `internal/engine/exec/kernel/compare.go` (`CidrOrderKey`),
+  `internal/engine/exec/kernel/sort.go`, `internal/engine/exec/kernel/agg.go`,
+  `internal/engine/exec/kernel/types.go` (`Accumulator.Merge`),
+  `internal/engine/exec/aggregate.go` (`appendColumnValue`),
+  `internal/engine/exec/partitioned_agg.go` (`legacyCompositeHash`),
+  `internal/worker/partitioned_shuffle_sink.go`
 - #444 (boxed ROW comparator ordered fields by name, not declared position),
   #446 (VECTOR/ARRAY(FLOAT) comparators not transitive under NaN) — the work
   item 8 above records the settled position for
