@@ -71,6 +71,22 @@ func CompileWithScopeResolver(node plansql.Node, runner SubqueryRunner, outerTab
 // outerTables, outerCols and innerCols may be nil for a top-level,
 // non-correlated compile — pass CompileWithScope's or CompileWithRunner's
 // arguments through unchanged and add only the budget.
+//
+// NOTHING IN PRODUCTION CALLS THIS YET — only this package's tests do, so
+// #528's mechanism is present and inert. #531 is the wiring, into
+// Planner.makeSubqueryRunner (internal/planner/physical/plan.go). Two things
+// that wiring must do beyond the one-line call-site change, both easy to
+// miss because neither shows up while Budget is nil:
+//
+//   - Call InSubquery.Release when the compiled Expr tree is torn down.
+//     Release has no caller today; without one, every uncorrelated
+//     IN-subquery in a task keeps its charge for the task's lifetime, and a
+//     task that plans several runs out of budget for work that has already
+//     finished. This is the half that needs a decision (where an Expr tree's
+//     lifetime ends), not just a line.
+//   - Not mistake the charge for a guard. chargeMemory runs AFTER
+//     resolveSlow has built the map, so it makes the set visible to the
+//     budget; it does not prevent the allocation. See its doc.
 func CompileWithBudget(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool, outerCols map[string]string, innerCols plansql.TableColumns, budget MemoryAccountant) (Expr, error) {
 	return compileWithCtx(node, &compileContext{
 		runner:      runner,

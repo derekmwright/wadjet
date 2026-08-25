@@ -5046,6 +5046,17 @@ type InSubquery struct {
 	// only tryDecorrelateInSubquery's DECLINED shapes do, and only a
 	// computed inner select item is unbounded (a LIMIT/OFFSET or an
 	// ungrouped-aggregate inner item is bounded by construction).
+	//
+	// TODAY IT IS ALWAYS NIL IN PRODUCTION: CompileWithBudget, the only
+	// entry point that sets it, has no non-test caller. Wiring it into
+	// Planner.makeSubqueryRunner is #531 — and whoever does that MUST wire
+	// Release with it. Nothing calls Release now (see its doc), which is
+	// harmless only because nothing charges: the moment a real tracker is
+	// threaded in, every uncorrelated IN-subquery in a task LEAKS its
+	// charge for the task's lifetime, and a task that plans several of them
+	// runs out of budget for work that has already finished. The compile
+	// side is one line; the release side is a lifetime question about where
+	// a compiled Expr tree is torn down, and it is the harder half.
 	Budget MemoryAccountant
 	// resolved publishes the set: stored last under resolveMu. Same
 	// contract, and the same defect, as ScalarSubquery's (#398) — an
@@ -5195,6 +5206,23 @@ func (e *InSubquery) resolveSlow() {
 // Called once, from inside resolveSlow's already-held resolveMu, after the
 // set this query holds has been decided, so the estimate matches exactly
 // what stays reachable for the life of this InSubquery.
+//
+// AFTER, which bounds what this can do. The map is already built and already
+// resident by the time a byte is charged, so a subquery large enough to
+// exhaust the machine exhausts it before Reserve is ever called: this does
+// not PREVENT that OOM, and #528's issue text describing it as doing so is
+// wrong. What it does do is make the set VISIBLE to the task's budget — it
+// counts against every later allocation the task makes, and a set that is
+// over budget on its own turns into a query error instead of a permanently
+// unaccounted resident map that every other operator then has to fit
+// alongside. That is worth having and is what ADR-0006 asks of a structure
+// that cannot spill; it is not the same claim.
+//
+// Charging as the set is BUILT — a Reserve per N rows inside resolveSlow's
+// accumulation loop, refusing partway — is what would actually bound peak
+// resident bytes. It needs resolveSlow to have somewhere to put a partial
+// failure and a caller that can act on one, so it is a change to this
+// type's contract rather than to this function. Not attempted here.
 func (e *InSubquery) chargeMemory() {
 	if e.Budget == nil {
 		return
@@ -5217,6 +5245,15 @@ func (e *InSubquery) chargeMemory() {
 // Release returns any bytes charged to Budget in resolveSlow, and is
 // idempotent — a caller that does not know whether resolveSlow ever ran, or
 // has already called Release, may call it any number of times.
+//
+// It has NO CALLER outside this package's tests. That is not an oversight
+// left to be tidied later: it is the unfinished half of #531. While Budget
+// is always nil in production both halves are no-ops and nothing is wrong,
+// but wiring CompileWithBudget without also finding a teardown point for
+// this call converts an unbudgeted map into a permanently-charged one, which
+// is a worse failure than the one #528 set out to fix — the bytes are
+// returned to the OS by GC and never returned to the tracker. See Budget's
+// doc for where that seam is.
 func (e *InSubquery) Release() {
 	if e.Budget == nil {
 		return
