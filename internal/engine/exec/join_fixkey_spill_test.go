@@ -92,3 +92,103 @@ func TestFixKeyAssignment_PartitionedBuildSafe(t *testing.T) {
 		}
 	}
 }
+
+// #572. A key-only build stores no rows, so FixKeyAssignment's rebuild —
+// which resets buildRows and buildHasNullKey and then recomputes them by
+// walking h.buildBatches — runs zero iterations and leaves both at their zero
+// values, while replacing the populated key index with an empty one.
+//
+// buildHasNullKey is what makes NOT IN three-valued (#507): a NULL anywhere in
+// the build empties the answer. Losing it flips `x NOT IN (…)` from no rows to
+// EVERY row, and losing the index flips `x IN (…)` from its matches to none.
+// Both silently.
+//
+// The repair is forced the way a real plan forces it: the pair is misassigned,
+// with the build's column on the LEFT and a probe-qualified name on the right
+// that only columnIndexFallback resolves in the build schema. That is the same
+// premise TestFixKeyAssignment_PartitionedBuildSafe above uses, and the same
+// reason the guard may keep the arrival-time index: the two spellings name the
+// same physical column.
+func TestFixKeyAssignmentKeepsAKeyOnlyBuildsRowsAndNullFlag(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "k", Type: parquet.TypeInt64, Nullable: true},
+	}
+	buildRows := []map[string]any{
+		{"id": int64(1), "k": int64(1)},
+		{"id": int64(2), "k": nil},
+		{"id": int64(3), "k": int64(3)},
+	}
+	probeRows := []map[string]any{
+		{"id": int64(1), "k": int64(1)}, // matches the build's 1
+		{"id": int64(2), "k": int64(9)}, // matches nothing
+		{"id": int64(3), "k": nil},      // NULL: matches nothing
+	}
+
+	for _, tc := range []struct {
+		name     string
+		joinType JoinType
+		// nullAware selects NOT IN's rule over NOT EXISTS's.
+		nullAware bool
+		want      int
+	}{
+		// NOT IN over a build holding a NULL: UNKNOWN for every probe row
+		// that did not match, so nothing survives.
+		{"null_aware_anti", AntiJoin, true, 0},
+		// The two-valued control. NOT EXISTS is a different predicate and
+		// must not move: the 9 and the NULL both match nothing.
+		{"plain_anti", AntiJoin, false, 2},
+		// IN: only the row that equals a build key.
+		{"semi", SemiJoin, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// LeftKeys[0]="k" is present in the build schema and
+			// RightKeys[0]="s.k" is not, which is exactly the condition
+			// FixKeyAssignment swaps on.
+			hj := NewHashJoin(tc.joinType, []string{"k"}, []string{"s.k"})
+			hj.SemiAntiKeyOnly = true
+			hj.NullAwareAnti = tc.nullAware
+			if err := hj.Build(context.Background(), NewSliceSource(schema, buildRows)); err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			if len(hj.buildBatches) != 0 {
+				t.Fatalf("a key-only build stored %d batches; this test's premise is that it stores "+
+					"none", len(hj.buildBatches))
+			}
+			wantRows, wantNull := hj.BuildRows(), hj.buildHasNullKey
+			if wantRows != int64(len(buildRows)) || !wantNull {
+				t.Fatalf("before the repair: BuildRows()=%d hasNullKey=%v, want %d/true",
+					wantRows, wantNull, len(buildRows))
+			}
+
+			if !hj.FixKeyAssignment() {
+				t.Fatal("FixKeyAssignment did not fire; this test needs the repair path")
+			}
+			if got := hj.BuildRows(); got != wantRows {
+				t.Errorf("BuildRows() = %d after the key repair, want %d — the repair rebuilt from "+
+					"h.buildBatches, which a key-only build never fills", got, wantRows)
+			}
+			if !hj.buildHasNullKey {
+				t.Error("buildHasNullKey was cleared by the key repair — that flag IS NOT IN's " +
+					"three-valued rule (#507), and it cannot be recomputed from a build that " +
+					"stores no rows")
+			}
+
+			// The index has to survive too: an emptied one answers IN with
+			// nothing and NOT IN with everything, which is the same wrong
+			// answer by a different route.
+			sink := &CollectSink{}
+			pipe := &Pipeline{
+				Source: NewSliceSource(schema, probeRows),
+				Ops:    []UnaryOperator{hj.Probe()},
+				Sink:   sink,
+			}
+			if err := pipe.Run(context.Background()); err != nil {
+				t.Fatalf("pipeline: %v", err)
+			}
+			if got := len(sink.Rows); got != tc.want {
+				t.Errorf("%s emitted %d rows after the key repair, want %d", tc.name, got, tc.want)
+			}
+		})
+	}
+}
