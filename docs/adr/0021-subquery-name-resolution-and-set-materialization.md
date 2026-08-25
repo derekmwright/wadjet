@@ -1,6 +1,6 @@
 # ADR-0021: A decorrelated subquery's names are resolved from the plan, and the sets it cannot join are materialized
 
-Status: Accepted (2026-08-25; §1a added the same day after a derived-table
+Status: Accepted (2026-08-25; §1a added the same day after a derived-table; §1b added for the CTE and recursive-CTE remainder
 inner was found to reach the executor as a scan of a nonexistent table; §3
 added the same day (#562))
 
@@ -132,9 +132,40 @@ rewrite would then have to NAME the derived side's columns, and
 which the catalog annotation fills and a derived table has no catalog entry
 for. `spellInner` reports "unresolved" and the caller keeps the rewrite's
 pre-reorder guess, which is exactly the silent wrong answer §1 exists to
-remove. A CTE name has the same exposure by a different spelling and is not
-covered, because nothing at this layer distinguishes it from a base table
-(#535).
+remove. A CTE name has the same exposure by a different spelling; §1b covers it.
+
+### 1b. A CTE name is declined too, and a recursive CTE is refused downstream
+
+A CTE reference is `NewScan(cteName)` — a table the catalog has never heard of,
+the same empty-build failure §1a describes, but spelled as a bare identifier
+rather than `(SELECT …)`. The decline could not see it because the layer had
+no CTE list. It does now: `Optimize` threads the enclosing `WITH`
+(`plan.CTEs`) into the three decorrelations, and `innerRelationsAreScannable`
+declines a FROM/JOIN item whose name is a CTE — from the enclosing statement or
+one the subquery declares itself — exactly as it declines a derived table
+(#535, #581, the build side). The declined subquery is executed as written, and
+the routes resolve the CTE: `buildSubqueryPipeline` merges the enclosing `WITH`
+before building, so the materialized IN-set and the local pipeline both see it.
+
+A RECURSIVE CTE is declined by the same rule, but the materialized-set route
+has a hole the decline makes reachable: `buildSubqueryPipeline` has no
+fixed-point cache, so it reads a recursive reference as ZERO rows with no
+error, and §2's `len(rows)==0` branch would take that for a genuine empty set —
+`IN` answered 0 and `NOT IN` every row on the DAG. So `materializeInSubquery`
+now REFUSES a subquery whose FROM reads a recursive CTE (at any nesting,
+through a derived wrapper, and through the subquery's own `WITH`) and routes it
+to the coordinator-local pipeline, which materializes the recursive CTE and
+answers it. Building the CTE plan here instead was not chosen, for §1a's
+reason and for consistency with the derived-table decline; a CTE feeding a
+subquery is a slower right answer on the local/materialize route, which the
+maintainer's own "a slower right answer beats a wrong one" settles.
+
+Two shapes remain PINNED, tracked and gated as divergences: a derived table's
+column-alias LIST `(…) AS b(kk,nn)`, which the builder drops so the aliased
+names resolve to nothing (#613), and a CTE on the PROBE side, which is not
+decorrelated at all because its outer-scope collectors lack the CTE's alias
+(#535). Both reproduce with one key and are the corpus's `derived_*_colalias`
+and `cte_probe_base_build` / `cte_referenced_twice` entries.
 
 ### 2. An IN-subquery the join cannot express is a SET, and the coordinator materializes it
 
