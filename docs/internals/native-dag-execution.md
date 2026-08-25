@@ -160,7 +160,7 @@ This is the follow-on to #390: that guard keeps a sort with a dependent as its
 own stage rather than folding it into a predecessor dispatch may re-fan-out,
 and that stage is exactly the one whose input had no key to sort on.
 
-## Derived-table aliases: five resolvers, one convention
+## Derived-table aliases: seven resolvers, one convention
 
 Because a Project emits no stage, **a derived table's rename happens nowhere
 on the DAG**: every stream carries SOURCE column names, and each consumer
@@ -169,12 +169,15 @@ resolves the alias back through the logical plan.
 | consumer | resolver | file |
 |---|---|---|
 | join key / shuffle partition key | `resolveShuffleKey` | `plan.go` |
+| which SIDE of a join a key belongs to | `subtreeNaming.ownsKey` → `assignJoinKeySides` | `subtree_naming.go` |
 | aggregate argument, GROUP BY key | `resolveAggInputName` / `aggStageGroupKey` | `plan.go` |
 | ORDER BY term over an AGGREGATE producer | `resolveSortKeyColumn` | `plan.go` |
-| ORDER BY term over a SCAN/JOIN producer | `annotateDerivedAliasSortKey` → `resolveDerivedAliasSortKeys` | `hidden_sort_key.go` |
+| ORDER BY term over a SCAN/JOIN/WINDOW producer | `annotateDerivedAliasSortKey` → `resolveDerivedAliasSortKeys` | `hidden_sort_key.go` |
+| a UNION/INTERSECT/EXCEPT arm's projection | `setOpArmProjection` | `set_op_stages.go` |
 | the gather's result schema | `resolveOutputRenameSource` | `output_rename_resolve.go` |
 
-Two rules they all share (`planner/physical/derived_alias.go`, #467/#468/#480):
+Three rules they share (`planner/physical/derived_alias.go`,
+#467/#468/#480/#489/#490):
 
 - **Renames chain.** `SELECT k AS j FROM (SELECT s_nationkey AS k FROM
   supplier) x` has to walk `j` → `k` → `s_nationkey`; stopping one level
@@ -182,19 +185,43 @@ Two rules they all share (`planner/physical/derived_alias.go`, #467/#468/#480):
 - **A qualified reference may drop its qualifier only inside the scope that
   owns it.** `x.k`, `u.k`, `y.j` name the derived table's OUTPUT column, and
   `derivedScopeBareName` drops the qualifier when the subtree being searched
-  actually contains the relation it names — `BuildFromTable`'s
-  `setSubtreeAlias` stamps the derived alias onto every Scan below it. The
-  guard is not decoration: `SUM(t.c)` over `t JOIN (SELECT d AS c FROM u) v`
-  must keep naming t's own column, and an unconditional strip resolves it to
-  `d`. Both join-recursing resolvers descend one arm at a time, so the
-  scoping is exact.
+  is in the scope it names — `BuildFromTable`'s `setSubtreeAlias` records the
+  derived alias on every Scan below it. The guard is not decoration:
+  `SUM(t.c)` over `t JOIN (SELECT d AS c FROM u) v` must keep naming t's own
+  column, and an unconditional strip resolves it to `d`.
+- **The scope is recorded ALONGSIDE the scan's own alias, never over it**
+  (`logical.Node.DerivedAliases`, #489). The two answer different questions —
+  which relation the scan IS, and which derived table's scope it is IN — and
+  writing the first into the second erased it: `(SELECT n1.n_name AS a,
+  n2.n_name AS b FROM nation n1 JOIN nation n2 ON …) u` planned as two scans
+  both called `u`, after which nothing could say which `n_name` was which.
+  For the same reason a plain rename resolves to the QUALIFIER-PRESERVING
+  spelling (`Projection.Expr`, not `Projection.Column`) wherever a self-join
+  can put the same bare name on both arms.
 
-One cause, four failure modes before the fix: the sort loud (`sort: key
+Which resolvers are join-recursing is **not** uniform, and the difference is
+where the gaps have been: `resolveShuffleKey`, `resolveAggInputName` and
+`resolveOutputRenameSource` descend one arm at a time, so their scoping is
+exact; the sort resolvers do not recurse into a join at all, which is why
+`ORDER BY x.col` at the query ROOT (where `x` is a base-table alias and a
+SELECT alias shadows `col`) is settled in the logical builder instead —
+`sortKeyCarried`, #488 — rather than here.
+
+One cause, five failure modes before the fixes: the sort loud (`sort: key
 column "k" does not exist in the input schema`), the aggregate loud (`hash
 aggregate: GROUP BY key "u.k" is not a column of its input`), the shuffle
-loud (`partitioned shuffle: key "y.b" not in schema`), and a **broadcast join
+loud (`partitioned shuffle: key "y.b" not in schema`), the union arm loud
+(`column "k" does not exist in the input schema`), and a **broadcast join
 SILENT** — its probe matched nothing and the query returned 0 rows where
 PostgreSQL returns 24.
+
+The join-SIDE consumer is the one whose failure is silent on the small end
+and loud on the large end. `assignJoinKeySides` decides which key is the
+probe's and which the build's by column OWNERSHIP, and a derived table's
+output column belongs to no scan's column set — so ownership was
+unanswerable for BOTH sides, the pair kept its positional order, and each key
+was resolved against the arm that does not own it. Two sibling derived tables
+hide it (their keys are symmetric); three do not.
 
 The sort consumer is split across two passes rather than resolved in place
 because `attachScanSelectProjections` may still MATERIALIZE the alias on the
