@@ -184,7 +184,11 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 	// stage its whole retry budget plus two more chances to hit whatever
 	// the panic damaged on a worker. It is terminal on the first failure,
 	// the same way an input-lost failure is.
-	fatalNow := r.Panicked || (tr.fatal != nil && tr.fatal(r))
+	//
+	// PlanRefused is the same argument without the panic: the worker
+	// declined the task on the strength of the plan it was handed (#503's
+	// declared-schema guard), and the plan is what every retry carries.
+	fatalNow := r.Panicked || r.PlanRefused || (tr.fatal != nil && tr.fatal(r))
 	if !fatalNow && tr.retryEnabled && st.attempts < maxTaskAttempts {
 		st.attempts++
 		task := tr.growEstimateLocked(r.TaskID)

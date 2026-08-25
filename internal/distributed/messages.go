@@ -951,6 +951,19 @@ type ResultNotification struct {
 	// worker's liveness and the key's durability bit — producer dead with
 	// the key not durable is ErrInputLost (unrecoverable by task retry).
 	MissingInputKey string `json:"missing_input_key,omitempty"`
+
+	// PlanRefused marks a failure the worker attributes to the PLAN it was
+	// handed rather than to the machine it ran on: the identical task
+	// re-dispatched to another worker reproduces it exactly. Set from the
+	// error's TYPE, never from Error's text, for the reason Panicked is
+	// (that text is free-form and can carry any substring as user data).
+	//
+	// Today's one producer is #503's declared-schema refusal: a base-table
+	// parquet read whose declaration never rode the plan. Three attempts of
+	// it cost a stage its whole retry budget and told the client nothing the
+	// first attempt had not, so the retrier treats it the way it treats a
+	// recovered panic — terminal on the first failure.
+	PlanRefused bool `json:"plan_refused,omitempty"`
 }
 
 // UploadComplete (streaming exchange Phase B) is published by a worker when

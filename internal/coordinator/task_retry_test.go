@@ -144,6 +144,38 @@ func TestTaskRetrier_ExhaustsAttempts(t *testing.T) {
 	}
 }
 
+// A PLAN refusal is terminal on the FIRST failure, the way a recovered panic
+// is: the worker declined the task on the strength of the plan it was handed
+// (#503's declared-schema guard), and the plan is what every retry carries.
+// Three attempts of it cost the stage its whole retry budget and told the
+// client nothing the first attempt had not.
+func TestTaskRetrier_PlanRefusalIsTerminalImmediately(t *testing.T) {
+	rep := &collectingRepublisher{}
+	tr := newTaskRetrier(retryTestTasks(1), true, rep.republish, slog.Default(), "s", nil)
+
+	r := failResult("a", `broadcast_probe build: base-table parquet input "d" arrived with no declared schema`)
+	r.PlanRefused = true
+	if !tr.Observe(r) {
+		t.Fatal("a plan refusal was retried; it must be terminal on the first failure")
+	}
+	if n := len(rep.snapshot()); n != 0 {
+		t.Fatalf("republished %d times after a plan refusal, want 0", n)
+	}
+	taskID, errMsg, _, failed := tr.FirstError()
+	if !failed || taskID != "a" || errMsg != r.Error {
+		t.Fatalf("FirstError = (%s,%s,%v), want (a,%q,true)", taskID, errMsg, failed, r.Error)
+	}
+
+	// The control: the identical failure WITHOUT the bit still gets its
+	// retries, so the change is the classification and not the budget.
+	rep2 := &collectingRepublisher{}
+	tr2 := newTaskRetrier(retryTestTasks(1), true, rep2.republish, slog.Default(), "s", nil)
+	if tr2.Observe(failResult("a", r.Error)) {
+		t.Fatal("an unclassified failure went terminal on its first attempt")
+	}
+	waitRepublished(t, rep2, 1)
+}
+
 func TestTaskRetrier_RetryDisabled(t *testing.T) {
 	rep := &collectingRepublisher{}
 	tr := newTaskRetrier(retryTestTasks(1), false, rep.republish, slog.Default(), "s", nil)

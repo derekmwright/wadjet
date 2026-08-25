@@ -1,6 +1,8 @@
 package worker
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -114,5 +116,30 @@ func TestDeclaredSchemaGuardHasAKillSwitch(t *testing.T) {
 	}
 	if len(src.declaredSchema) == 0 {
 		t.Error("the switch turned off the declaration itself, not just the refusal")
+	}
+}
+
+// The refusal has to be a TYPE, not a sentence: the worker marks the result
+// PlanRefused by matching the error's type (#511's rule — Error text is
+// free-form and can carry any substring as ordinary user data), and the
+// coordinator's retrier then stops at the first attempt instead of spending
+// the stage's whole budget repeating a verdict about the plan.
+func TestUndeclaredBaseTableReadIsRefusedByType(t *testing.T) {
+	err := applyDeclaredScanSchema(&cachedFileStreamSource{}, "broadcast_probe build", "d",
+		[]string{"tables/t/a.parquet", "tables/t/b.parquet"}, nil)
+	if err == nil {
+		t.Fatal("no refusal")
+	}
+	var dsr *declaredSchemaRefusal
+	if !errors.As(err, &dsr) {
+		t.Fatalf("the refusal is not a typed error, so the worker cannot classify it "+
+			"without matching text: %T", err)
+	}
+	if dsr.alias != "d" || dsr.files != 2 {
+		t.Errorf("refusal carries alias=%q files=%d, want d/2", dsr.alias, dsr.files)
+	}
+	// Wrapped, the way every caller frames it, and still recognisable.
+	if !errors.As(fmt.Errorf("gather task 1234: %w", err), &dsr) {
+		t.Error("the refusal does not survive wrapping")
 	}
 }

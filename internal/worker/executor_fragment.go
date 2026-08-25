@@ -3133,11 +3133,26 @@ func applyDeclaredScanSchema(src exec.Source, what, alias string, files []string
 			"what", what, "alias", alias, "files", len(files))
 		return nil
 	}
-	return fmt.Errorf("%s: base-table parquet input %q arrived with no declared schema; "+
+	return &declaredSchemaRefusal{what: what, alias: alias, files: len(files)}
+}
+
+// declaredSchemaRefusal is the guard's verdict as a TYPE, so the worker can
+// mark the result PlanRefused without matching on error text (#511's rule).
+// It is a property of the plan the task was handed: another worker, another
+// attempt, same refusal — so the retrier stops at the first one instead of
+// spending the stage's whole budget saying it three times.
+type declaredSchemaRefusal struct {
+	what  string
+	alias string
+	files int
+}
+
+func (e *declaredSchemaRefusal) Error() string {
+	return fmt.Sprintf("%s: base-table parquet input %q arrived with no declared schema; "+
 		"refusing to type %d file(s) from their own footers — the catalog's types must ride the plan "+
 		"(physical.Stage.ScanSchema → OpSpec.ColumnTypes / BuildColumnTypes / Task.ColumnTypes). "+
 		"WADJET_DECLARED_SCHEMA_STRICT=0 restores the pre-#503 behavior of trusting the file",
-		what, alias, len(files))
+		e.what, e.alias, e.files)
 }
 
 // DeclaredSchemaStrict gates the refusal above. Registered in the kill-switch

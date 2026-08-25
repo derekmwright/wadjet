@@ -292,6 +292,14 @@ same function for that reason (`coordinator/execute_stage_dag.go`,
 `replicatePassThrough`); gate:
 `coordinator.TestReplicateFallbackKeepsTheQueryAnswerable`.
 
+The refusal is **fatal, not retryable**. It is a verdict on the PLAN, which
+every retry carries unchanged, so the worker types it
+(`declaredSchemaRefusal`) and sets `ResultNotification.PlanRefused` from the
+error's TYPE — never from its text, on #511's rule. `taskRetrier.Observe`
+treats that bit the way it treats `Panicked`: terminal on the first failure.
+Before this it burned all three attempts and told the client nothing the
+first had not (`stage join-2 … failed after 3 attempts`).
+
 **Kill switch: `WADJET_DECLARED_SCHEMA_STRICT=0`** restores the pre-#503
 behavior — the file's own types win — on the `WADJET_FASTPATH_STRICT` (#308)
 precedent. The refusal turns reads that USED to answer into hard failures, so

@@ -835,6 +835,14 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		if errors.As(err, &qp) {
 			result.Panicked = true
 		}
+		// And for a refusal the PLAN earns rather than the machine: #503's
+		// declared-schema guard says the same thing on every worker and on
+		// every attempt, so saying it three times only costs the stage its
+		// retry budget.
+		var dsr *declaredSchemaRefusal
+		if errors.As(err, &dsr) {
+			result.PlanRefused = true
+		}
 	} else {
 		result.Success = true
 	}
