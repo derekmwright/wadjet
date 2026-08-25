@@ -985,10 +985,10 @@ func compareVectorValues(col *batch.Vector, a, b int) int {
 			return 1
 		}
 		return 0
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-		// All five are BytesColumn-backed and the sort kernel groups them
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
+		// All four are BytesColumn-backed and the sort kernel groups them
 		// together, so they order by BYTES here too. Only STRING was listed
-		// before; the other four fell to compareAny over GetValue, which
+		// before; the other three fell to compareAny over GetValue, which
 		// compares the RENDERED text — and "2001:db8::10" sorts before
 		// "2001:db8::9" as text while the addresses do not. Same
 		// path-dependent sequence #394 found for DECIMAL, here deciding
@@ -999,6 +999,25 @@ func compareVectorValues(col *batch.Vector, a, b int) int {
 			return -1
 		}
 		if va > vb {
+			return 1
+		}
+		return 0
+	case batch.TypeCIDR:
+		// PostgreSQL's inet order (kernel.CidrOrderKey), not the stored
+		// text's byte order — the same substitution the sort kernel makes
+		// (sortCompareCIDR). Without this arm a CIDR column fell into the
+		// case above and ordered by raw bytes: '10.0.0.1' and '10.0.0.1/32'
+		// are one value under `=` (#492) but two different byte strings, so
+		// an in-memory window would draw its PARTITION BY boundary and RANK
+		// peer groups between them where ORDER BY (already fixed, #520)
+		// would not — the exact "answer depends on which path ran" split
+		// #446 found for VECTOR/ARRAY(FLOAT) NaN ordering, here for CIDR.
+		as := kernel.CidrOrderKey(col.BytesData.UnsafeStringValue(a))
+		bs := kernel.CidrOrderKey(col.BytesData.UnsafeStringValue(b))
+		if as < bs {
+			return -1
+		}
+		if as > bs {
 			return 1
 		}
 		return 0

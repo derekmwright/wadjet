@@ -1850,6 +1850,58 @@ func colColFilterString(op CompareOp) ColColFilterKernel {
 	}
 }
 
+// colColFilterCidr is colColFilterString for two TypeCIDR columns, comparing
+// PostgreSQL's inet order (CidrOrderKey) instead of the stored text's byte
+// order — the same substitution sortCompareCIDR (sort.go) makes for ORDER BY,
+// and ADR-0012 item 10's own rule for a CIDR literal comparison applied to a
+// column-column comparison instead: `WHERE c1 = c2` still fell through to
+// colColFilterString's plain byte compare, so a fixture where c1 and c2 hold
+// the same address spelled two ways ('10.0.0.1' and '10.0.0.1/32') answered
+// fewer equal rows than the column-vs-literal kernel (ResolveFilterKernel's
+// TypeCIDR arm) and expr.CmpNetworkLit already agree the address is equal to
+// itself under (#492).
+func colColFilterCidr(op CompareOp) ColColFilterKernel {
+	cmpFn := resolveCompare[string](op)
+	test := func(left, right *batch.Vector, i int) bool {
+		return cmpFn(CidrOrderKey(left.BytesData.UnsafeStringValue(i)), CidrOrderKey(right.BytesData.UnsafeStringValue(i)))
+	}
+	return func(left, right *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		out := outSel[:0]
+		hasNulls := left.Nulls.HasNulls() || right.Nulls.HasNulls()
+		if sel != nil {
+			if hasNulls {
+				for _, idx := range sel {
+					i := int(idx)
+					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && test(left, right, i) {
+						out = append(out, idx)
+					}
+				}
+			} else {
+				for _, idx := range sel {
+					if test(left, right, int(idx)) {
+						out = append(out, idx)
+					}
+				}
+			}
+		} else {
+			if hasNulls {
+				for i := 0; i < vecLen; i++ {
+					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && test(left, right, i) {
+						out = append(out, uint32(i))
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					if test(left, right, i) {
+						out = append(out, uint32(i))
+					}
+				}
+			}
+		}
+		return out
+	}
+}
+
 // colColFilterFloat is colColFilterImpl for FLOAT32/FLOAT64, with the
 // per-row test taken from PostgreSQL's float total order — the same
 // substitution compareFilterFloat makes on the constant side, and the reason
@@ -1909,8 +1961,10 @@ func ResolveColColFilterKernel(typ batch.TypeID, op CompareOp) ColColFilterKerne
 		return colColFilterFloat(getFloat64Data, op)
 	case batch.TypeFloat32:
 		return colColFilterFloat(getFloat32Data, op)
-	case batch.TypeString, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+	case batch.TypeString, batch.TypeIPv6, batch.TypeUUID:
 		return colColFilterString(op)
+	case batch.TypeCIDR:
+		return colColFilterCidr(op)
 	case batch.TypeDecimal:
 		return colColFilterDecimal(op)
 	default:

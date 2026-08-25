@@ -219,3 +219,38 @@ func TestResolveSortCompareCoversEveryType(t *testing.T) {
 		t.Error("an unknown type resolved to a comparator; the SMJ nil guard is dead again")
 	}
 }
+
+func arrayCidrCol() parquet.Column {
+	return parquet.Column{Name: "v", Type: parquet.TypeArray, Nullable: true,
+		ElementType: &parquet.Column{Name: "element", Type: parquet.TypeCIDR, Nullable: true}}
+}
+
+// TestSortCompareArrayCidrUsesInetOrder is the regression for
+// CompareValuesAt's TypeCIDR arm: before this fix a CIDR element fell into
+// the String/Bytes/IPv6/UUID group above and ordered by raw stored TEXT, so
+// `ORDER BY arr_cidr` (or a sort-merge join keyed on one) disagreed with the
+// element-vs-element `=`/`<`/`>` comparison (#492, ADR-0012 item 10) and with
+// the column's own GROUP BY key (exec.appendColumnValue's ARRAY path already
+// re-keys a CIDR leaf through CidrOrderKey via appendNestedElem).
+func TestSortCompareArrayCidrUsesInetOrder(t *testing.T) {
+	assertOrder(t, arrayCidrCol(), []map[string]any{
+		{"v": nil},
+		{"v": []any{}},
+		// 9.0.0.0/8 sorts BELOW 10.0.0.0/8 in inet order (the differing
+		// leading octet decides); text order says the opposite ('9' > '1').
+		{"v": []any{"9.0.0.0/8"}},
+		{"v": []any{"10.0.0.0/8"}},
+		{"v": []any{"10.0.0.1"}},
+	})
+
+	// A bare address and its own /32 are one inet value: CompareValuesAt must
+	// call them EQUAL, the one property assertOrder's strict "<" chain above
+	// cannot exercise directly.
+	vec := containerBatch(t, arrayCidrCol(), []map[string]any{
+		{"v": []any{"10.0.0.1"}},
+		{"v": []any{"10.0.0.1/32"}},
+	})
+	if c := CompareValuesAt(vec, 0, vec, 1); c != 0 {
+		t.Errorf("CompareValuesAt(10.0.0.1, 10.0.0.1/32) = %d, want 0 (one inet value)", c)
+	}
+}

@@ -89,8 +89,18 @@ func CompareValuesAt(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 		return sortCompareFloat64NoNulls(a, ai, b, bi)
 	case batch.TypeFloat32:
 		return sortCompareFloat32NoNulls(a, ai, b, bi)
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		return sortCompareStringNoNulls(a, ai, b, bi)
+	case batch.TypeCIDR:
+		// PostgreSQL's inet order (#520), not the stored text's byte order:
+		// an ARRAY(CIDR)/ROW element comparison — ORDER BY arr_cidr, or a
+		// sort-merge join keyed on one — used to fall into the case above
+		// and order '10.0.0.1' after '10.0.0.1/32' as text while `=` already
+		// calls them one address (#492). GROUP BY's own key for the same
+		// column already goes through CidrOrderKey (appendColumnValue,
+		// aggregate.go), so an unfixed element comparator here disagreed
+		// with the key that groups the very values it orders.
+		return sortCompareCIDRNoNulls(a, ai, b, bi)
 	case batch.TypeBool:
 		return sortCompareBoolNoNulls(a, ai, b, bi)
 	case batch.TypeDecimal:
