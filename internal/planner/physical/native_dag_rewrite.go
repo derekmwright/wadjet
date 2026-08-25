@@ -82,11 +82,28 @@ func ValidateNativeDAGShape(stages []Stage) error {
 			if !s.HasLimit && s.Offset <= 0 {
 				return fmt.Errorf("native-DAG: limit stage %s carries neither a LIMIT nor an OFFSET", s.ID)
 			}
+			// A multi-task limit stage is not a bound: each task would keep
+			// its own n rows and the union would be up to k*n. TWO fields
+			// have to say one task, and neither alone is enough to assert
+			// it:
+			//
+			//   - Distribution.Kind is what the dispatcher reads to pick
+			//     numTasks, and a fusion pass CAN overwrite it
+			//     (fuse_stage_chains, fuse_join_shuffle both copy a
+			//     neighbour's distribution wholesale). But DistSingleton is
+			//     the zero value, so this half is silent about a stage whose
+			//     distribution was never assigned at all.
+			//   - Tasks is what walkStages set when it built the stage, and
+			//     its zero value is 0 — so it is the half that catches an
+			//     unpopulated stage, and it is what a future fan-out pass
+			//     would have to change.
 			if s.Distribution.Kind != DistSingleton {
-				// A multi-task limit stage is not a bound: each task would keep
-				// its own n rows and the union would be up to k*n.
 				return fmt.Errorf("native-DAG: limit stage %s is %v, must be Singleton for the bound to be global",
 					s.ID, s.Distribution.Kind)
+			}
+			if s.Tasks != 1 {
+				return fmt.Errorf("native-DAG: limit stage %s carries Tasks=%d, must be exactly 1 — "+
+					"k tasks each keeping n rows is not the first n rows of their union", s.ID, s.Tasks)
 			}
 		case StageUnion:
 			// Arm i is dispatched as task i reading Dependencies[i], so the

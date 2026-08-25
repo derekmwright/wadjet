@@ -985,8 +985,15 @@ first n rows of their union. `RequiredChildDistribution` stays `RequiredAny`
 because a Singleton stage's single task already reads every partition of its
 input (`partitionFilesForWorker` with `workerCount == 1`) — the same rule the
 Singleton window stage runs on — so no gather exchange is spliced in to move
-the same bytes to the same task. `ValidateNativeDAGShape` asserts the stage is
-Singleton, has exactly one dependency, and carries a bound.
+the same bytes to the same task. `ValidateNativeDAGShape` asserts the stage has
+exactly one dependency, carries a bound, and says ONE TASK in both fields that
+can say it: `Distribution.Kind == DistSingleton` (what the dispatcher reads to
+pick `numTasks`, and what a fusion pass could overwrite — `fuse_stage_chains`
+and `fuse_join_shuffle` both copy a neighbour's distribution wholesale) and
+`Tasks == 1`. Neither alone is an assertion: `DistSingleton` is `DistKind`'s
+zero value, so that half is silent about a stage whose distribution was never
+assigned, while `Tasks`' zero value is 0 and catches exactly that.
+`physical.TestValidateNativeDAGShapeLimit` exercises every rejection.
 
 The per-task `Stage.RowLimit` pushdown is unchanged and still an optimization
 underneath this: each producing task stops pulling at limit+offset, and the

@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -304,6 +305,64 @@ func TestNestedLimitDoesNotStealTheInnerSort(t *testing.T) {
 					t.Errorf("limit stage %d carries (Limit=%d Offset=%d), want (%d %d)",
 						i, got[i][0], got[i][1], w[0], w[1])
 				}
+			}
+		})
+	}
+}
+
+// The limit stage's own shape assertions, exercised rather than assumed.
+//
+// The Singleton half was FALSE COMFORT on its own: DistSingleton is DistKind's
+// zero value, so `s.Distribution.Kind != DistSingleton` says nothing about a
+// stage whose distribution was never assigned — and OutputDistribution's
+// StageLimit arm returns Singleton unconditionally, so nothing in the normal
+// path can make it fire. What it does guard is a fusion pass overwriting the
+// field (fuse_stage_chains and fuse_join_shuffle both copy a neighbour's
+// distribution wholesale, and both run before this validator). Tasks is the
+// other half: its zero value is 0, so it is what catches an unpopulated stage
+// and what a future fan-out would have to change.
+//
+// Every case below is asserted to FAIL. A validator nobody has watched reject
+// anything is a comment with a func keyword.
+func TestValidateNativeDAGShapeLimit(t *testing.T) {
+	ok := Stage{
+		ID: "limit-1", Type: StageLimit, Tasks: 1,
+		Dependencies: []string{"scan-0"},
+		Limit:        3, HasLimit: true,
+		Distribution: Distribution{Kind: DistSingleton},
+	}
+	if err := ValidateNativeDAGShape([]Stage{ok}); err != nil {
+		t.Fatalf("well-formed limit stage rejected: %v", err)
+	}
+	// An OFFSET with no LIMIT is a bound too.
+	offsetOnly := ok
+	offsetOnly.Limit, offsetOnly.HasLimit, offsetOnly.Offset = 0, false, 5
+	if err := ValidateNativeDAGShape([]Stage{offsetOnly}); err != nil {
+		t.Fatalf("offset-only limit stage rejected: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Stage)
+		want   string
+	}{
+		{"two dependencies", func(s *Stage) { s.Dependencies = []string{"scan-0", "scan-1"} }, "dependencies"},
+		{"no bound at all", func(s *Stage) { s.Limit, s.HasLimit, s.Offset = 0, false, 0 }, "neither a LIMIT nor an OFFSET"},
+		{"hash-partitioned by a fusion pass", func(s *Stage) {
+			s.Distribution = Distribution{Kind: DistHashPartitioned, Count: 3, Keys: []string{"k"}}
+		}, "must be Singleton"},
+		{"fanned out to k tasks", func(s *Stage) { s.Tasks = 3 }, "Tasks=3"},
+		{"task count never populated", func(s *Stage) { s.Tasks = 0 }, "Tasks=0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := ok
+			tc.mutate(&bad)
+			err := ValidateNativeDAGShape([]Stage{bad})
+			if err == nil {
+				t.Fatalf("ValidateNativeDAGShape accepted a limit stage that cannot bound its input")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error does not name the defect (%q): %v", tc.want, err)
 			}
 		})
 	}
