@@ -79,6 +79,13 @@ type AggColumn struct {
 	Separator  string  // separator for STRING_AGG (default ',')
 	InputCol2  string  // second input column (corr, covar, min_by, max_by)
 	Percentile float64 // percentile value for percentile_cont/percentile_disc
+	// InputColIdx pins the input to a physical column POSITION, bypassing
+	// name resolution, when InputColIdxSet is true. A distributed merge over
+	// two aggregates sharing one alias (#575) reads two partial columns of
+	// the SAME name; the name path resolves both to the first, collapsing
+	// them, so the worker addresses each by its ordinal partial slot instead.
+	InputColIdx    int
+	InputColIdxSet bool
 }
 
 // isAggIntType returns true if the type can be used as an integer group-by key.
@@ -1479,7 +1486,16 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) error {
 			// AggSpec.InputCol ("l_quantity") and vice-versa. Without this,
 			// Q18's outer SUM(l_quantity) returned NULL because the join
 			// chain's QualifyAllBuildCols renamed the column.
-			idx := columnIndexFallback(b, agg.InputCol)
+			//
+			// A pinned position wins outright: it is the only way to tell two
+			// same-named partial columns apart in a duplicate-alias merge
+			// (#575), which the name lookup cannot.
+			idx := -1
+			if agg.InputColIdxSet && agg.InputColIdx >= 0 && agg.InputColIdx < len(b.Columns) {
+				idx = agg.InputColIdx
+			} else {
+				idx = columnIndexFallback(b, agg.InputCol)
+			}
 			h.aggColIdx[i] = idx
 			if idx < 0 {
 				return unresolvedAggColumn("aggregate input", agg.InputCol, b)

@@ -425,6 +425,12 @@ type OutputRename struct {
 	From string
 	To   string
 	Expr plansql.Node
+	// IsAgg marks a rename whose source is an AGGREGATE output column rather
+	// than a group key. The producer emits all group keys before all
+	// aggregates, so when an aggregate shares a name with a group key their
+	// select order is not their output order; the gather uses this to pair
+	// each rename with the column of its own class (#575).
+	IsAgg bool
 }
 
 // ProjectExprSpec is one SELECT-list item a scan fragment must emit: Name is
@@ -3052,6 +3058,7 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 	for _, p := range proj {
 		var src, target string
 		var astExpr plansql.Node
+		isAgg := p.IsAgg
 		switch {
 		case p.IsAgg:
 			// AggSpec.OutputCol == alias; if no alias, fall back to expr.
@@ -3109,7 +3116,7 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 		default:
 			continue
 		}
-		renames = append(renames, OutputRename{From: src, To: target, Expr: astExpr})
+		renames = append(renames, OutputRename{From: src, To: target, Expr: astExpr, IsAgg: isAgg})
 	}
 	return renames
 }
@@ -7688,6 +7695,57 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		aggInputColTypes = inputColDecls(aggNode.Children[0])
 	}
 
+	// When the aggregate below emits two output columns of one NAME, a
+	// name-based DirectCopy resolves both projections to the FIRST such
+	// column and collapses them to one value (#575). The fix pins each such
+	// projection to the physical slot its TRUE PROVENANCE names, so
+	// appearance order is never assumed to equal slot order — it does not
+	// when an aggregate shares its alias with a group key (`SELECT COUNT(*)
+	// AS k, k AS x GROUP BY k`) or when the select list orders aggregates
+	// and keys differently from the aggregate's [keys…, aggs…] output.
+	//
+	// keySlotByName / aggSlotByName carry the ABSOLUTE indices of the
+	// duplicated names in the child's output, split by class: a group-key
+	// projection consumes key slots, an aggregate projection consumes
+	// aggregate slots. Only built when the child is a clean
+	// [group keys…, aggregates…] aggregate output (no grouping sets, no
+	// elided-literal reordering); anything else leaves every reference on
+	// the existing name path.
+	keySlotByName := map[string][]int{}
+	aggSlotByName := map[string][]int{}
+	if isOverAggregate && aggNode != nil {
+		if full, ok := aggregateOutputNames(child); ok {
+			nAgg := len(aggNode.AggExprs)
+			nKey := len(full) - nAgg
+			clean := nKey >= 0
+			for j := 0; clean && j < nAgg; j++ {
+				if !strings.EqualFold(strings.TrimSpace(full[nKey+j]),
+					strings.TrimSpace(aggNode.AggExprs[j].OutputCol)) {
+					clean = false
+				}
+			}
+			if clean {
+				total := map[string]int{}
+				for _, n := range full {
+					total[strings.ToLower(strings.TrimSpace(n))]++
+				}
+				for i, n := range full {
+					key := strings.ToLower(strings.TrimSpace(n))
+					if total[key] < 2 {
+						continue // unambiguous by name; leave it on the name path
+					}
+					if i < nKey {
+						keySlotByName[key] = append(keySlotByName[key], i)
+					} else {
+						aggSlotByName[key] = append(aggSlotByName[key], i)
+					}
+				}
+			}
+		}
+	}
+	keySlotSeen := map[string]int{}
+	aggSlotSeen := map[string]int{}
+
 	var projCols []exec.ProjectColumn
 	for _, proj := range node.Projections {
 		colRef := proj.Column
@@ -7902,6 +7960,26 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				pc.Float64Eval = fe.EvalFloat64
 			} else if ie, ok := compiledExpr.(expr.Int64Expr); ok {
 				pc.Int64Eval = ie.EvalInt64
+			}
+		}
+		// A plain direct copy of a DUPLICATED output column: pin it to the
+		// next physical slot of its PROVENANCE class — aggregate projections
+		// take aggregate slots, group-key references take key slots — so two
+		// projections reading `u` read the two distinct `u` columns and an
+		// aggregate never reads the group-key column it happens to share a
+		// name with (#575). SourceIdx is exact and beats the name path.
+		if isDirectCopy {
+			key := strings.ToLower(strings.TrimSpace(colRef))
+			seen, slots := keySlotSeen, keySlotByName
+			if proj.IsAgg {
+				seen, slots = aggSlotSeen, aggSlotByName
+			}
+			if idxs := slots[key]; len(idxs) > 0 {
+				if k := seen[key]; k < len(idxs) {
+					pc.SourceIdx = idxs[k]
+					pc.SourceIdxSet = true
+					seen[key] = k + 1
+				}
 			}
 		}
 		projCols = append(projCols, pc)

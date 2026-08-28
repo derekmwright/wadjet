@@ -288,3 +288,76 @@ func streamRowValues(ctx context.Context, c *coordinator.Coordinator, sql string
 	}
 	return out, cols, nil
 }
+
+// The gate for two DIFFERENT AGGREGATES sharing one output alias (#575).
+//
+// Sibling of #556/#557: a duplicate output column name breaks a NAME-based
+// resolver, but here the colliding columns are two aggregate results, which a
+// name-keyed layer collapses into one value — a silent wrong answer. Read
+// POSITIONALLY and compared against a DISTINCT-alias reference, exactly like
+// TestDuplicateOutputNamesOnBothCoordinatorPaths above.
+func TestAggregateAliasCollisionOnBothCoordinatorPaths(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+	fast, dag := setupTwoPathCluster(t, ctx)
+
+	const (
+		armLocal = "A (single-process)"
+		armDAG   = "B (stage DAG)"
+	)
+
+	for _, tc := range []dupShape{
+		{name: "two sums under one alias",
+			dup:       `SELECT SUM(n_nationkey) AS u, SUM(n_regionkey) AS u FROM nation`,
+			ref:       `SELECT SUM(n_nationkey) AS u1, SUM(n_regionkey) AS u2 FROM nation`,
+			unordered: true},
+		{name: "count and sum under one alias",
+			dup:       `SELECT COUNT(*) AS u, SUM(n_nationkey) AS u FROM nation`,
+			ref:       `SELECT COUNT(*) AS u1, SUM(n_nationkey) AS u2 FROM nation`,
+			unordered: true},
+		{name: "min and max under one alias",
+			dup:       `SELECT MIN(n_name) AS u, MAX(n_name) AS u FROM nation`,
+			ref:       `SELECT MIN(n_name) AS u1, MAX(n_name) AS u2 FROM nation`,
+			unordered: true},
+		{name: "three aggregates under one alias",
+			dup:       `SELECT SUM(n_nationkey) AS u, COUNT(*) AS u, MAX(n_regionkey) AS u FROM nation`,
+			ref:       `SELECT SUM(n_nationkey) AS u1, COUNT(*) AS u2, MAX(n_regionkey) AS u3 FROM nation`,
+			unordered: true},
+		// An aggregate colliding with a group-key alias where the AGGREGATE
+		// comes FIRST — appearance order is NOT slot order here (the aggregate
+		// output column sits AFTER the group key), so a resolver that counts
+		// select-list appearances against a keys-first name list sends the
+		// COUNT to the group-key slot and loses it.
+		{name: "aggregate before a colliding group key",
+			dup: `SELECT COUNT(*) AS n_regionkey, n_regionkey AS x FROM nation GROUP BY n_regionkey ORDER BY x`,
+			ref: `SELECT COUNT(*) AS u1, n_regionkey AS u2 FROM nation GROUP BY n_regionkey ORDER BY u2`},
+		{name: "grouped sum and count under one alias",
+			dup: `SELECT n_regionkey AS g, SUM(n_nationkey) AS u, COUNT(*) AS u FROM nation GROUP BY n_regionkey ORDER BY n_regionkey`,
+			ref: `SELECT n_regionkey AS g, SUM(n_nationkey) AS u1, COUNT(*) AS u2 FROM nation GROUP BY n_regionkey ORDER BY n_regionkey`},
+		// Regression guard: a GROUP BY key alias colliding with an aggregate
+		// alias is already correct on both paths — proving the defect is
+		// specifically two AGGREGATES sharing an alias.
+		{name: "group key alias collides with aggregate alias",
+			dup: `SELECT n_regionkey AS u, COUNT(*) AS u FROM nation GROUP BY n_regionkey ORDER BY n_regionkey`,
+			ref: `SELECT n_regionkey AS u1, COUNT(*) AS u2 FROM nation GROUP BY n_regionkey ORDER BY n_regionkey`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range []struct {
+				label string
+				c     *coordinator.Coordinator
+			}{{armLocal, fast}, {armDAG, dag}} {
+				pin, pinned := tc.pins[arm.label]
+				detail := tc.compareOnArm(ctx, arm.c)
+				switch {
+				case detail == "" && pinned:
+					t.Errorf("arm %s now agrees, delete the pin on %q", arm.label, tc.name)
+				case detail != "" && pinned:
+					t.Logf("known divergence, NOT gated on arm %s: %s\n  %s", arm.label, detail, pin)
+				case detail != "":
+					t.Errorf("arm %s: %s\n  duplicate-alias spelling: %s\n  reference spelling:       %s",
+						arm.label, detail, oneLine(tc.dup), oneLine(tc.ref))
+				}
+			}
+		})
+	}
+}

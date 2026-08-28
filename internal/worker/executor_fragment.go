@@ -2403,6 +2403,37 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 	if !spec.GroupByAll && len(spec.Aggregates) == 0 && len(spec.GroupByCols) == 0 {
 		return nil, fmt.Errorf("hash_aggregate: at least one of GroupByCols, Aggregates, or GroupByAll is required")
 	}
+	// A merge whose partial input carries two columns of one NAME reads them
+	// by name and collapses them to the first (#575): two aggregates sharing
+	// an alias, or an aggregate whose alias also names a GROUP KEY. The
+	// partial emits [group keys..., aggregates in spec order], so address
+	// each aggregate by its ORDINAL slot — aggregate i is column
+	// len(GroupByCols) + i — bypassing the name lookup. Fires only when an
+	// aggregate's output name is duplicated across the partial schema, and
+	// only for plain grouped/ungrouped merges (GroupByAll passes its input
+	// through and has no aggregates).
+	mergeByPosition := false
+	if spec.MergeMode && !spec.GroupByAll {
+		seen := make(map[string]int, len(spec.GroupByCols)+len(spec.Aggregates))
+		for _, g := range spec.GroupByCols {
+			base := g
+			if dot := strings.LastIndexByte(g, '.'); dot >= 0 {
+				base = g[dot+1:]
+			}
+			seen[strings.ToLower(base)]++
+		}
+		for _, a := range spec.Aggregates {
+			if a.OutputCol != "" {
+				seen[strings.ToLower(a.OutputCol)]++
+			}
+		}
+		for _, a := range spec.Aggregates {
+			if a.OutputCol != "" && seen[strings.ToLower(a.OutputCol)] > 1 {
+				mergeByPosition = true
+				break
+			}
+		}
+	}
 	aggCols := make([]exec.AggColumn, len(spec.Aggregates))
 	for i, a := range spec.Aggregates {
 		inputCol := a.InputCol
@@ -2439,6 +2470,10 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 			Percentile: a.Percentile,
 			OutputCol:  a.OutputCol,
 			OutputType: aggSpecOutputType(a),
+		}
+		if mergeByPosition {
+			aggCols[i].InputColIdx = len(spec.GroupByCols) + i
+			aggCols[i].InputColIdxSet = true
 		}
 	}
 	hashAgg := exec.NewHashAggregate(spec.GroupByCols, aggCols)

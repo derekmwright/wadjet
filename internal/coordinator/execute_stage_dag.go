@@ -971,6 +971,36 @@ func renameSourceIndices(names []string, renames []physical.OutputRename) []int 
 				}
 			}
 			if len(matches) >= len(group) {
+				// A group that MIXES an aggregate output with a group-key
+				// reference of one name (#575) cannot be assigned by plain
+				// select-order ordinal: the producer emits all group keys
+				// before all aggregates, so within `matches` (ascending) the
+				// key columns come first and the aggregate columns after,
+				// while in select order the aggregate can appear first. Pair
+				// each rename with the column of its OWN class, ordinally
+				// within the class. Uniform-provenance groups (the common
+				// duplicate-alias case) keep the plain ordinal below.
+				aggR, keyR := 0, 0
+				for _, ri := range group {
+					if renames[ri].IsAgg {
+						aggR++
+					} else {
+						keyR++
+					}
+				}
+				if aggR > 0 && keyR > 0 && len(matches) == len(group) {
+					ki, ai := 0, keyR
+					for _, ri := range group {
+						if renames[ri].IsAgg {
+							out[ri] = matches[ai]
+							ai++
+						} else {
+							out[ri] = matches[ki]
+							ki++
+						}
+					}
+					continue
+				}
 				for k, ri := range group {
 					out[ri] = matches[k]
 				}
