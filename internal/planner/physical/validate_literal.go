@@ -5,16 +5,25 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // checkLiteralTypes refuses a constant that names no value of the type its
 // context demands, from the column's DECLARATION, before any row exists.
 //
-// Today that is one rule: a quoted string that is not a number, compared
-// against a DECIMAL column. PostgreSQL resolves an unknown-typed literal's
-// type from the column it meets and refuses at parse/bind time — `SELECT
-// count(*) FROM t WHERE d = 'abc'` is 22P02 there whether or not the table
-// holds a row.
+// The column's declared parquet.TypeID reaches here through colScope
+// (validate.go), and refuseLiteralForType holds the rule per type that has a
+// "this string names no value of me" test. Today that is DECIMAL alone: a
+// quoted string that is not a number against a DECIMAL column. PostgreSQL
+// resolves an unknown-typed literal's type from the column it meets and
+// refuses at parse/bind time — `SELECT count(*) FROM t WHERE d = 'abc'` is
+// 22P02 there whether or not the table holds a row.
+//
+// #579 widened colScope from a bare `isDecimal bool` to the full TypeID so the
+// network types (CIDR/IPv4/IPv6/MAC/UUID) can join this rule, but wiring their
+// refusal waits on #627 — wadjet's network parsers are stricter than
+// PostgreSQL's grammar, so refusing on them here would reject PG-valid input
+// (see refuseLiteralForType).
 //
 // Wadjet already raised the same SQLSTATE, but from inside the COMPARISON, so
 // it depended on a row reaching it and on which operand won (#517):
@@ -157,9 +166,10 @@ func refuseLiteralPair(scope *colScope, a, b plansql.Node) error {
 	return refuseLiteralAgainstColumn(scope, b, a)
 }
 
-// refuseLiteralAmong refuses a call whose arguments put a DECIMAL column and a
-// non-numeric literal in the same comparison, whichever pair the values end up
-// selecting.
+// refuseLiteralAmong refuses a call whose arguments put a column with a
+// literal rule (see refuseLiteralForType — today DECIMAL) and a literal that
+// names no value of its type in the same comparison, whichever pair the
+// values end up selecting.
 func refuseLiteralAmong(scope *colScope, args []plansql.Node) error {
 	for _, a := range args {
 		for _, b := range args {
@@ -171,28 +181,68 @@ func refuseLiteralAmong(scope *colScope, args []plansql.Node) error {
 	return nil
 }
 
-// refuseLiteralAgainstColumn raises when colSide is a DECIMAL column this
-// scope can prove and litSide is a quoted string that names no number.
+// refuseLiteralAgainstColumn raises when colSide is a column this scope can
+// prove has a type with a "this string names no value of me" rule (today
+// DECIMAL — see refuseLiteralForType) and litSide is a quoted string the
+// type's own test rejects.
 //
-// A NUMERIC literal is never refused, however large: `1e400` IS a number and
-// is read as one at the column's scale, saturating past the carrier
-// (ADR-0012 item 6). A NULL or a boolean is a different rule and is left to
-// the comparison. The numeric test is `expr.IsNumericLiteralText`, the SAME
-// predicate the runtime refusal uses, so the two cannot disagree about which
-// strings are numbers.
+// A NUMERIC literal is never refused against a DECIMAL, however large: `1e400`
+// IS a number and is read as one at the column's scale, saturating past the
+// carrier (ADR-0012 item 6). A NULL or a boolean is a different rule and is
+// left to the comparison. The DECIMAL text test is `expr.IsNumericLiteralText`,
+// the SAME predicate the runtime refusal uses, so the two paths cannot
+// disagree about which strings name a value.
 func refuseLiteralAgainstColumn(scope *colScope, colSide, litSide plansql.Node) error {
 	ref, ok := unwrapParens(colSide).(*plansql.ColRef)
-	if !ok || !scope.isDecimalRef(ref) {
+	if !ok {
+		return nil
+	}
+	typ, ok := scope.provableColType(ref)
+	if !ok {
 		return nil
 	}
 	lit, ok := unwrapParens(litSide).(*plansql.Lit)
 	if !ok || lit.Kind != plansql.LitString {
 		return nil
 	}
-	if expr.IsNumericLiteralText(lit.Value) {
-		return nil
+	return refuseLiteralForType(typ, lit.Value)
+}
+
+// refuseLiteralForType raises when text names no value of a column type that
+// has a plan-time literal rule.
+//
+// Today that is DECIMAL alone → expr.InvalidLiteralError (22P02, "type
+// numeric"), the site #517 closed, kept byte-for-byte.
+//
+// The switch is deliberately extensible per TypeID because #579 widened
+// colScope to carry the column's parquet.TypeID (not a bare bool), but the
+// NETWORK types (CIDR/IPv4/IPv6/MAC/UUID) are NOT wired here yet: wadjet's
+// network literal parsers (net.ParseCIDR, net.ParseMAC, the brace-unaware
+// UUID parser) are STRICTER than PostgreSQL's input grammar — they reject
+// abbreviated cidr/inet ('192.168', '10/8'), several macaddr notations
+// ('08002b:010203', '0800-2b01-0203') and the brace/no-dash/uppercase UUID
+// forms that PostgreSQL ACCEPTS. Refusing on those parsers here would raise
+// 22P02 for input PostgreSQL answers — a PG-superset regression the binder
+// must never make (ADR-0012 item 1: never refuse what PostgreSQL accepts),
+// net-new at the boxed sites (GREATEST/LEAST, simple CASE, IN, IS DISTINCT
+// FROM) that had no refusal before. That over-strictness is a latent RUNTIME
+// bug too (exec.networkConstError refuses the same PG-valid forms
+// data-dependently), and both halves are deferred to #627: widen the parsers
+// to a SUPERSET of PostgreSQL's grammar first, then a network arm can be
+// added here using that same predicate without ever refusing a PG-valid
+// literal.
+//
+// Types with no rule (every other TypeID, PORT/PROTOCOL included — they have
+// no PostgreSQL analog) return nil: a legal comparison must still work, and
+// the binder refuses only what PostgreSQL refuses.
+func refuseLiteralForType(typ parquet.TypeID, text string) error {
+	switch typ {
+	case parquet.TypeDecimal:
+		if !expr.IsNumericLiteralText(text) {
+			return &expr.InvalidLiteralError{Input: text, DestType: "numeric"}
+		}
 	}
-	return &expr.InvalidLiteralError{Input: lit.Value, DestType: "numeric"}
+	return nil
 }
 
 // unwrapParens strips redundant parentheses from an operand.
