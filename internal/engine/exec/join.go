@@ -1976,7 +1976,7 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 	if h.buildKeyIdx == nil {
 		h.buildKeyIdx = make([]int, len(h.RightKeys))
 		for i, col := range h.RightKeys {
-			h.buildKeyIdx[i] = b.ColumnIndex(col)
+			h.buildKeyIdx[i] = columnIndexFallback(b, col)
 		}
 		// Pre-size hash table for all rows to avoid growth during PutNoGrow.
 		if h.BuildRowHint == 0 {
@@ -2160,7 +2160,7 @@ func (h *HashJoin) FixKeyAssignment() bool {
 			b := h.buildBatches[0]
 			h.buildKeyIdx = make([]int, len(h.RightKeys))
 			for i, col := range h.RightKeys {
-				h.buildKeyIdx[i] = b.ColumnIndex(col)
+				h.buildKeyIdx[i] = columnIndexFallback(b, col)
 			}
 			// Re-check int key eligibility with new key assignment
 			h.useIntKey = false
