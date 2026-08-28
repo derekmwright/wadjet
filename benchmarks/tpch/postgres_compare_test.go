@@ -458,12 +458,66 @@ func postgresCorpus() []pgCase {
 
 	out = append(out, postgresRowFieldCases()...)
 	out = append(out, postgresSemanticsCases()...)
+	out = append(out, postgresConstArgAggCases()...)
 
 	for i := range out {
 		if !out[i].countOnly {
 			out[i].ordered = hasTopLevelOrderBy(out[i].sql)
 		}
 	}
+	return out
+}
+
+// postgresConstArgAggCases asks PostgreSQL what an aggregate over a
+// COMPILE-TIME LITERAL argument means — MIN(1), BOOL_AND(TRUE), SUM(0) (#621).
+//
+// Wadjet handed such an aggregate to the executor with its argument as a
+// column NAME ("1"), which no scan produces: the whole-table form errored and
+// the grouped form silently dropped every group, so `HAVING MIN(1) > 0` — TRUE
+// for every non-empty group — returned nothing. PostgreSQL evaluates the
+// constant per group and keeps them all, which is the ground truth here
+// (ADR-0012). The single-process pre-aggregate projection now materializes the
+// literal into a column, matching the DAG spec path that already did.
+//
+// The entries are grouped over nation.n_regionkey (five groups) and cover both
+// the value in the SELECT list and the aggregate used as a HAVING predicate,
+// for each aggregate kind.
+func postgresConstArgAggCases() []pgCase {
+	var out []pgCase
+	add := func(name, sql string) {
+		out = append(out, pgCase{name: name, sql: sql})
+	}
+
+	// The value carried in the SELECT list.
+	add("ConstArgSelectValues",
+		`SELECT n_regionkey, MIN(1) AS mn, MAX(1) AS mx, SUM(0) AS s, COUNT(1) AS c,
+			BOOL_AND(TRUE) AS ba, BOOL_OR(FALSE) AS bo
+		 FROM nation GROUP BY n_regionkey ORDER BY n_regionkey`)
+	add("ConstArgSelectMinMaxNonTrivial",
+		`SELECT n_regionkey, MIN(7) AS mn, MAX(7) AS mx, SUM(3) AS s
+		 FROM nation GROUP BY n_regionkey ORDER BY n_regionkey`)
+
+	// The aggregate used directly as the HAVING predicate. Each keeps every
+	// group (the constant makes the test TRUE for all of them), which is the
+	// exact shape the soak reduced to.
+	for _, c := range []struct{ name, having string }{
+		{"ConstArgHavingMin", "MIN(1) > 0"},
+		{"ConstArgHavingMax", "MAX(1) > 0"},
+		{"ConstArgHavingSum", "SUM(0) = 0"},
+		{"ConstArgHavingCount", "COUNT(1) > 0"},
+		{"ConstArgHavingBoolAnd", "BOOL_AND(TRUE)"},
+		{"ConstArgHavingBoolOr", "BOOL_OR(TRUE)"},
+		{"ConstArgHavingMinExcludesAll", "MIN(1) > 1"},
+		{"ConstArgHavingBoolAndFalse", "BOOL_AND(FALSE)"},
+	} {
+		add(c.name,
+			`SELECT n_regionkey FROM nation GROUP BY n_regionkey HAVING `+c.having+
+				` ORDER BY n_regionkey`)
+	}
+
+	// The whole-table form (no GROUP BY), which used to ERROR outright.
+	add("ConstArgWholeTable",
+		`SELECT MIN(1) AS mn, MAX(1) AS mx, SUM(0) AS s, COUNT(1) AS c FROM nation`)
 	return out
 }
 

@@ -1384,7 +1384,8 @@ func (g *Gen) genGroupAgg(q *Query) {
 	var havingAgg string
 	for i := 0; i < na; i++ {
 		var agg string
-		switch g.pick(8) {
+		constArg := false
+		switch g.pick(9) {
 		case 0:
 			agg = "COUNT(*)"
 		case 1:
@@ -1419,6 +1420,19 @@ func (g *Gen) genGroupAgg(q *Query) {
 			}
 			a, b := nums[g.pick(len(nums))], nums[g.pick(len(nums))]
 			agg = fmt.Sprintf("SUM(%s * (1 - %s))", g.name(a), g.name(b))
+		case 8:
+			// An aggregate over a COMPILE-TIME LITERAL argument. Its value is
+			// the constant for every non-empty group — MIN(1)=1, SUM(0)=0,
+			// COUNT(7)=the group size — so the answer stays determined and
+			// exact. The lowering must materialize the literal into a column
+			// before aggregating; it used to hand the aggregate the literal as
+			// a COLUMN NAME, erroring without a GROUP BY and dropping every
+			// group with one, so `HAVING MIN(1) > 0` returned nothing (#621).
+			// SQLancer found this; this generator could not, because every
+			// other arm draws the argument from a column or an expression.
+			fn := []string{"MIN", "MAX", "SUM", "COUNT"}[g.pick(4)]
+			agg = fmt.Sprintf("%s(%d)", fn, g.pick(5))
+			constArg = true
 		default:
 			// COUNT(CASE WHEN ...) / SUM(CASE WHEN ...)
 			lits := g.sc.withLits()
@@ -1433,7 +1447,7 @@ func (g *Gen) genGroupAgg(q *Query) {
 				agg = fmt.Sprintf("SUM(CASE WHEN %s = %s THEN 1 ELSE 0 END)", g.name(r), lit)
 			}
 		}
-		exact := strings.HasPrefix(agg, "COUNT")
+		exact := strings.HasPrefix(agg, "COUNT") || constArg
 		q.Items = append(q.Items, Item{Expr: agg, Alias: g.alias(), Agg: true, Exact: exact})
 		if havingAgg == "" {
 			havingAgg = agg

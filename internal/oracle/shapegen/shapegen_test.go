@@ -3,6 +3,7 @@ package shapegen
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -26,6 +27,10 @@ func TestGeneratorDeterministic(t *testing.T) {
 // TestGeneratorCoversTargetShapes pins that the generator really reaches every
 // risk cluster it claims to. A shape that never fires makes the differential
 // silently narrower than the report says it is.
+// constArgAgg matches an aggregate whose argument is a bare integer literal
+// (MIN(1), SUM(0), COUNT(7)) — the #621 shape.
+var constArgAgg = regexp.MustCompile(`(?:MIN|MAX|SUM|COUNT)\([0-9]`)
+
 func TestGeneratorCoversTargetShapes(t *testing.T) {
 	s := TPCH()
 	counts := map[string]int{}
@@ -88,6 +93,11 @@ func TestGeneratorCoversTargetShapes(t *testing.T) {
 			(strings.Contains(q.Having, " BETWEEN ") || strings.Contains(q.Having, " IN (")))
 		bump("having-bare-agg", strings.HasPrefix(q.Having, "BOOL_OR(") ||
 			strings.HasPrefix(q.Having, "BOOL_AND("))
+		// #621: an aggregate over a compile-time LITERAL argument — MIN(1),
+		// SUM(0), COUNT(7). Every other aggregate arm draws its argument from a
+		// column or an expression, so before the constant-argument arm this
+		// generator could not emit the shape the soak reduced #621 to.
+		bump("const-arg-agg", constArgAgg.MatchString(sql))
 		bump("distinct", q.Distinct)
 		bump("count-distinct", strings.Contains(sql, "COUNT(DISTINCT"))
 		bump("count-case", strings.Contains(sql, "COUNT(CASE"))
@@ -120,7 +130,7 @@ func TestGeneratorCoversTargetShapes(t *testing.T) {
 		"comma-join", "comma-join-mixed", "chain-4", "derived", "cte", "exists", "in-subquery",
 		"scalar-subquery", "group-by", "group-by-ordinal", "having", "distinct",
 		"having-null-check", "having-negated", "having-connective", "having-range",
-		"having-bare-agg",
+		"having-bare-agg", "const-arg-agg",
 		"count-distinct", "count-case", "order-by", "order-by-ordinal", "order-by-alias",
 		"order-by-expr", "order-by-hidden", "order-desc", "limit", "offset", "total-order",
 		"date-extract", "date-cast", "is-null", "like", "between", "in-list", "case-when",

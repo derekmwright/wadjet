@@ -9227,14 +9227,16 @@ func isPlainGroupKey(node plansql.Node, decls colDecls) bool {
 }
 
 func isSimpleColRef(node plansql.Node) bool {
-	switch node.(type) {
-	case *plansql.ColRef:
-		return true
-	case *plansql.Lit:
-		return true
-	default:
-		return false
-	}
+	// A bare column reference is the ONLY aggregate input that needs no
+	// pre-projection: it already names a column of the aggregate's input.
+	// A literal does NOT — `MIN(1)` must materialize a constant column and
+	// aggregate over it, or the aggregate is handed a column literally named
+	// "1" that no scan produces, and it errors (no GROUP BY) or drops every
+	// group (with one). The DAG spec path treats only a *ColRef as bare
+	// (plan.go's aggSpecs builder), and this gate must state the same rule
+	// (#621).
+	_, ok := node.(*plansql.ColRef)
+	return ok
 }
 
 // NewComputedColumnsOp returns an operator that passes every input column

@@ -117,6 +117,16 @@ func TestGroupingSemanticsTwoPath(t *testing.T) {
 			"MAX(c_i64) > 0",
 			"COUNT(*) > 1",
 			"MIN(c_i64) IS NULL",
+			// #621: an aggregate over a compile-time LITERAL. Its argument is
+			// a constant, so `p` is TRUE for every non-empty group and the
+			// three-arm partition still has to sum back to the ungated groups
+			// — which it did not when the constant was never materialized into
+			// a column and every group was silently dropped.
+			"MIN(1) > 0",
+			"MAX(1) > 0",
+			"SUM(0) = 0",
+			"BOOL_AND(TRUE)",
+			"COUNT(1) > 0",
 		} {
 			t.Run(p, func(t *testing.T) {
 				for _, arm := range arms {
@@ -164,6 +174,12 @@ func TestGroupingSemanticsTwoPath(t *testing.T) {
 			{"HavingColumnIsNull", `SELECT g FROM ` + tbl + ` GROUP BY g HAVING c_bool IS NULL`},
 			{"HavingComparison", `SELECT g FROM ` + tbl + ` GROUP BY g HAVING c_i64 > 100`},
 			{"OrderByColumn", `SELECT g FROM ` + tbl + ` GROUP BY g ORDER BY c_i64`},
+			// #620: an ungrouped column sourced from an explicitly JOINed
+			// table must be refused on both paths, not silently answered.
+			{"HavingJoinSourcedColumn",
+				`SELECT g FROM ` + tbl + ` JOIN ` + typematrix.Dim + ` ON k = g GROUP BY g HAVING label IS NOT NULL`},
+			{"SelectJoinSourcedColumn",
+				`SELECT g, label FROM ` + tbl + ` JOIN ` + typematrix.Dim + ` ON k = g GROUP BY g`},
 		} {
 			t.Run(c.name, func(t *testing.T) {
 				for _, arm := range arms {
@@ -213,6 +229,64 @@ func TestGroupingSemanticsTwoPath(t *testing.T) {
 			})
 		}
 	})
+
+	// --- 5. A constant-argument aggregate carries its real value on BOTH
+	//        paths (#621) ------------------------------------------------
+	//
+	// The single-process path skipped the pre-aggregate projection for a
+	// literal and dropped every group; the DAG spec builder projected it.
+	// Held to the value SQL requires — MIN(1)=1, MAX(1)=1, SUM(0)=0,
+	// BOOL_AND(TRUE)=true for every non-empty group — and then to agreement.
+	t.Run("ConstArgAggregateCarriesItsValue", func(t *testing.T) {
+		sql := `SELECT g, MIN(1) AS mn, MAX(1) AS mx, SUM(0) AS s, BOOL_AND(TRUE) AS ba ` +
+			`FROM ` + tbl + ` GROUP BY g ORDER BY g`
+		results := map[string]*oracle.Result{}
+		for _, arm := range arms {
+			res, err := arm.run(sql)
+			if err != nil {
+				t.Fatalf("%s arm failed: %v\n  SQL: %s", arm.name, err, sql)
+			}
+			if len(res.Rows) == 0 {
+				t.Fatalf("%s arm returned no rows — a constant-argument aggregate dropped every group\n  SQL: %s",
+					arm.name, sql)
+			}
+			for _, row := range res.Rows {
+				if v, ok := numAsInt(row["mn"]); !ok || v != 1 {
+					t.Errorf("%s arm: MIN(1) = %v, want 1", arm.name, row["mn"])
+				}
+				if v, ok := numAsInt(row["mx"]); !ok || v != 1 {
+					t.Errorf("%s arm: MAX(1) = %v, want 1", arm.name, row["mx"])
+				}
+				if v, ok := numAsInt(row["s"]); !ok || v != 0 {
+					t.Errorf("%s arm: SUM(0) = %v, want 0", arm.name, row["s"])
+				}
+				if row["ba"] != true {
+					t.Errorf("%s arm: BOOL_AND(TRUE) = %v, want true", arm.name, row["ba"])
+				}
+			}
+			results[arm.name] = res
+		}
+		if a, b := results["single"], results["dag"]; a != nil && b != nil {
+			if !sameNames(a.Columns, b.Columns) {
+				t.Errorf("column lists differ: single %v, dag %v", a.Columns, b.Columns)
+			}
+		}
+	})
+}
+
+// numAsInt reads a numeric result value as an int64 regardless of the arm's
+// boxing (int32 vs int64), so a constant aggregate's value can be asserted
+// without deciding which width is right.
+func numAsInt(v any) (int64, bool) {
+	switch x := v.(type) {
+	case int64:
+		return x, true
+	case int32:
+		return int64(x), true
+	case float64:
+		return int64(x), true
+	}
+	return 0, false
 }
 
 // groupKeyStrings renders each row's first declared column as a string, which
