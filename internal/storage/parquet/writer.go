@@ -98,12 +98,18 @@ func NewWriter(w io.Writer, schema Schema, cfg WriterConfig) (*Writer, error) {
 // Values for network types (IPv4, IPv6, MAC) are converted from their string
 // representations to the internal binary format before writing.
 func (w *Writer) WriteRows(rows []map[string]any) error {
-	w.prepareRows(rows)
+	if err := w.prepareRows(rows); err != nil {
+		return err
+	}
 	return w.nw.WriteMapRows(rows)
 }
 
-// prepareRows converts network/typed values in maps to parquet-compatible representations.
-func (w *Writer) prepareRows(rows []map[string]any) {
+// prepareRows converts network/typed values in maps to parquet-compatible
+// representations. It returns an error for a value that cannot be stored
+// without corruption — an invalid DATE string, which used to become the
+// epoch silently (#560) — so the write fails instead of persisting a wrong
+// value under the caller's date.
+func (w *Writer) prepareRows(rows []map[string]any) error {
 	// Fast path: check if any columns need conversion
 	needsConversion := false
 	for _, col := range w.schema.Columns {
@@ -113,7 +119,7 @@ func (w *Writer) prepareRows(rows []map[string]any) {
 		}
 	}
 	if !needsConversion {
-		return
+		return nil
 	}
 
 	for _, row := range rows {
@@ -177,11 +183,16 @@ func (w *Writer) prepareRows(rows []map[string]any) {
 				}
 			case TypeDate:
 				if s, ok := val.(string); ok {
-					row[col.Name] = parseDateForWrite(s)
+					d, err := parseDateForWriteChecked(s)
+					if err != nil {
+						return fmt.Errorf("column %q: %w", col.Name, err)
+					}
+					row[col.Name] = d
 				}
 			}
 		}
 	}
+	return nil
 }
 
 // Close finalizes the Parquet file and closes the writer.
@@ -236,15 +247,27 @@ func unhex(c byte) byte {
 // a real data-corruption path, since this runs at ingest
 // (batch.parseDateString / kernel.parseDateToDays, #451).
 func parseDateForWrite(s string) int32 {
-	t, err := time.Parse("2006-01-02", s)
-	if err != nil {
-		return 0
-	}
-	const secondsPerDay = 86400
-	sec := t.Unix()
-	days := sec / secondsPerDay
-	if sec%secondsPerDay < 0 {
-		days--
-	}
-	return int32(days)
+	d, _ := ParseDateDays(s)
+	return d
+}
+
+// parseDateForWriteChecked is parseDateForWrite with the error surfaced: an
+// unparseable or nonexistent calendar date ('not-a-date', '2026-02-30',
+// month 13, day 32) is rejected instead of being silently written as the
+// epoch (day 0 = 1970-01-01) — ingest-time data CORRUPTION, since the
+// original text is gone and 1970-01-01 reads back in its place (#560). It is
+// the thin checked wrapper the map-row write path (prepareRows) and the
+// ingest boundary (ingest.checkType, via ValidateDateString) use; the accept
+// set and classification live in ParseDateDays.
+func parseDateForWriteChecked(s string) (int32, error) {
+	return ParseDateDays(s)
+}
+
+// ValidateDateString reports whether s is a date the writer can store without
+// corrupting it. The ingest boundary (ingest.checkType) uses it to reject an
+// unparseable or nonexistent calendar date before the writer turns it into
+// the epoch (#560).
+func ValidateDateString(s string) error {
+	_, err := ParseDateDays(s)
+	return err
 }

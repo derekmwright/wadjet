@@ -1076,6 +1076,40 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 		// non-whitespace byte PostgreSQL rejects with 22P02. strings.TrimSpace
 		// would have stripped it and accepted the value.
 		{name: "IntegerNBSPConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_key = ' 42'`},
+		// The same rule for a DATE column: an unparseable or nonexistent
+		// calendar date reaching a DATE comparison must be REFUSED, not read
+		// as the epoch (1970-01-01) and answered as the rows holding it.
+		// PostgreSQL splits the two — 22008 (datetime_field_overflow) for a
+		// well-formed but nonexistent date, 22007 (invalid_datetime_format)
+		// for a string that is not a date at all — and a value oracle cannot
+		// see the difference between "raised" and "returned the epoch", which
+		// is the whole point of gating it here (#560). TPC-H's o_orderdate is
+		// a string, not a DATE, so these ask the multikey fixture's mk_outer.dt
+		// column, the one real DATE seeded into both engines.
+		{name: "DateNonexistentCalendarConstant",
+			sql: `SELECT COUNT(*) FROM mk_outer WHERE dt = '2026-02-30'`},
+		{name: "DateMonthOutOfRangeConstant",
+			sql: `SELECT COUNT(*) FROM mk_outer WHERE dt = '2026-13-01'`},
+		{name: "DateUnparseableConstant",
+			sql: `SELECT COUNT(*) FROM mk_outer WHERE dt = 'not-a-date'`},
+		{name: "DateNonexistentCalendarConstantIn",
+			sql: `SELECT COUNT(*) FROM mk_outer WHERE dt IN ('2026-02-30')`},
+		// A short leading field PostgreSQL reads as a MONTH under MDY: '31/1/2'
+		// and '13/1/2' are month 31 and month 13, which PostgreSQL rejects
+		// with 22008. wadjet refuses the SHAPE (a non-4-digit leading field is
+		// not an unambiguous year) with 22007 rather than guess year-first and
+		// risk a value that differs from PostgreSQL's (#560). BOTH refuse, so
+		// no silent divergence; the SQLSTATE differs only because wadjet has
+		// not implemented DateStyle-ordered parsing (#639), which is what
+		// would let it see these as an out-of-range MONTH.
+		{name: "DateShortMDYLeadingMonth31", sql: `SELECT COUNT(*) FROM mk_outer WHERE dt = '31/1/2'`,
+			pin: "WADJET: refuses a non-4-digit leading DATE field as malformed (22007) where PostgreSQL, " +
+				"reading it MDY, refuses it as an out-of-range month (22008). Both refuse; the code differs " +
+				"until wadjet implements DateStyle-ordered parsing (#639)."},
+		{name: "DateShortMDYLeadingMonth13", sql: `SELECT COUNT(*) FROM mk_outer WHERE dt = '13/1/2'`,
+			pin: "WADJET: refuses a non-4-digit leading DATE field as malformed (22007) where PostgreSQL, " +
+				"reading it MDY, refuses it as an out-of-range month (22008). Both refuse; the code differs " +
+				"until wadjet implements DateStyle-ordered parsing (#639)."},
 		// A TEXT-only function over bytea. PostgreSQL has no upper(bytea) —
 		// 42883, the same shape as min(boolean) — and wadjet answers,
 		// because expr reads every operand through toString (#583).

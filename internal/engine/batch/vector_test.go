@@ -289,14 +289,23 @@ func TestFormatDateAndParseDateString(t *testing.T) {
 	})
 
 	t.Run("parseDateString", func(t *testing.T) {
-		days := parseDateString("1970-01-01")
-		if days != 0 {
-			t.Fatalf("expected 0 days, got %d", days)
+		days, ok := parseDateString("1970-01-01")
+		if !ok || days != 0 {
+			t.Fatalf("expected (0, true), got (%d, %v)", days, ok)
 		}
-		// Invalid date
-		days = parseDateString("not-a-date")
-		if days != 0 {
-			t.Fatalf("expected 0 for invalid date, got %d", days)
+		// Invalid date: ok=false so the caller stores NULL, never the epoch
+		// (#560) — the row->batch path used to read 'not-a-date' as 1970.
+		if _, ok := parseDateString("not-a-date"); ok {
+			t.Fatal("expected ok=false for an invalid date")
+		}
+		if _, ok := parseDateString("2026-02-30"); ok {
+			t.Fatal("expected ok=false for a nonexistent calendar date")
+		}
+		// PostgreSQL-valid non-canonical spellings now parse (#560 accept-set).
+		for _, s := range []string{"2026-1-2", "2026/01/02", "20260102", " 2026-01-01 "} {
+			if _, ok := parseDateString(s); !ok {
+				t.Errorf("parseDateString(%q) ok=false, want a valid PostgreSQL date to parse", s)
+			}
 		}
 	})
 
@@ -319,8 +328,8 @@ func TestFormatDateAndParseDateString(t *testing.T) {
 			{"0001-01-01", -719162},
 		}
 		for _, tc := range tests {
-			if got := parseDateString(tc.lit); got != tc.days {
-				t.Errorf("parseDateString(%q) = %d, want %d", tc.lit, got, tc.days)
+			if got, ok := parseDateString(tc.lit); !ok || got != tc.days {
+				t.Errorf("parseDateString(%q) = (%d, %v), want (%d, true)", tc.lit, got, ok, tc.days)
 			}
 		}
 	})

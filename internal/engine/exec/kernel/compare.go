@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // CompareOp represents a comparison operation.
@@ -1892,6 +1893,17 @@ func parseIntText(s string) (int64, IntConstStatus) {
 // already use (#451).
 var errDateDaysOutOfRange = fmt.Errorf("date value out of range for the DATE column's day encoding")
 
+// IsDateSyntaxError reports whether err is a malformed-DATE-literal failure
+// (PostgreSQL 22007, invalid_datetime_format) as opposed to a nonexistent or
+// out-of-range calendar date (22008, datetime_field_overflow). exec.
+// dateConstError reads it to pick the SQLSTATE, the same "nil kernel, caller
+// raises" convention CidrSortKey/DecimalConstText use. The classification is
+// owned by parquet.ParseDateDays, the one string->date conversion the filter
+// path, the writers and the ingest boundary all share (#560).
+func IsDateSyntaxError(err error) bool {
+	return parquet.IsDateSyntaxError(err)
+}
+
 // dateDaysToInt32 checks that a day count fits the DATE column's int32
 // encoding before narrowing it. int32(days) alone truncates silently, which
 // is the same class of defect as parseDateToDays's Duration saturation — a
@@ -1933,53 +1945,16 @@ func DateLiteralDays(v any) (int32, error) {
 	return toDateInt32(v)
 }
 
-// civilDaysSinceEpoch floors a UTC instant to whole days since 1970-01-01
-// without a time.Duration round trip (see parseDateToDays). Flooring rather
-// than truncating also fixes this same arithmetic's rounding of a pre-epoch
-// timestamp WITH a time-of-day toward the epoch: parseDateToDays(
-// "1969-12-31 12:00:00") was 0 while parseDateToDays("1969-12-31") was -1,
-// from the same expression's Hours()/24 truncating toward zero (#451).
-func civilDaysSinceEpoch(t time.Time) int64 {
-	const secondsPerDay = 86400
-	sec := t.Unix()
-	days := sec / secondsPerDay
-	if sec%secondsPerDay < 0 {
-		days--
-	}
-	return days
-}
-
-// parseDateToDays converts a date string to days since 1970-01-01.
-//
-// Computes the day count from t.Unix() (civil-days arithmetic) rather than
-// t.Sub(epoch) (#451): Sub returns a time.Duration — an int64 count of
-// NANOSECONDS — whose documented contract is to SATURATE at
-// ±math.MaxInt64 ns (~106751.99 days, ~292 years) rather than report an
-// overflow, so every date outside roughly 1677-09-22..2262-04-11 answered a
-// silently CLAMPED day count with no error and nothing logged: `d =
-// '9999-12-31'` (the SCD end-of-time sentinel) compared as 2262-04-11, and
-// StatsDomainValue handed the same clamped count to the prune layer as a
-// row-group bound, deleting rows the filter would have kept. A date beyond
-// the DATE column's own int32 day range now returns errDateDaysOutOfRange
-// instead of silently narrowing.
+// parseDateToDays converts a DATE string to days since 1970-01-01, delegating
+// to parquet.ParseDateDays — the single string->date conversion the filter
+// path, the writers, the ingest boundary and the row->batch builder all share,
+// so the accept-set and the 22007/22008 classification are decided in exactly
+// one place (#560). That function carries #451's fixes too: it counts civil
+// days from t.Unix() rather than the saturating t.Sub, so `d = '9999-12-31'`
+// is the correct 2,932,896 days, and it returns a field-range error for a day
+// count beyond the DATE column's int32 range rather than narrowing silently.
 func parseDateToDays(s string) (int32, error) {
-	t, err := time.Parse("2006-01-02", s)
-	if err != nil {
-		// Try with timestamp formats, truncate to date
-		for _, layout := range []string{
-			"2006-01-02 15:04:05",
-			"2006-01-02T15:04:05",
-			time.RFC3339,
-		} {
-			if t, err = time.Parse(layout, s); err == nil {
-				break
-			}
-		}
-		if err != nil {
-			return 0, nil
-		}
-	}
-	return dateDaysToInt32(civilDaysSinceEpoch(t))
+	return parquet.ParseDateDays(s)
 }
 
 // parseTimestampString parses common timestamp formats into epoch milliseconds.

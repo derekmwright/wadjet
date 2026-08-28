@@ -465,10 +465,16 @@ func TestParseDateForWrite(t *testing.T) {
 		t.Fatalf("2026-03-15 should be positive days since epoch, got %d", d)
 	}
 
-	// Invalid date
-	d = parseDateForWrite("not-a-date")
-	if d != 0 {
-		t.Fatalf("invalid date should return 0, got %d", d)
+	// Invalid date: the checked variant errors instead of silently writing
+	// the epoch — the ingest-corruption half of #560.
+	if _, err := parseDateForWriteChecked("not-a-date"); err == nil {
+		t.Fatal("parseDateForWriteChecked(\"not-a-date\") = nil error, want an error")
+	}
+	if _, err := parseDateForWriteChecked("2026-02-30"); err == nil {
+		t.Fatal("parseDateForWriteChecked(\"2026-02-30\") = nil error, want an error for a nonexistent calendar date")
+	}
+	if _, err := parseDateForWriteChecked("2026-03-15"); err != nil {
+		t.Fatalf("parseDateForWriteChecked(\"2026-03-15\") = %v, want a valid date to parse", err)
 	}
 }
 
@@ -762,5 +768,163 @@ func TestVectorRoundTrip(t *testing.T) {
 	}
 	if n := fr.RowGroupNumRows(0); n != 3 {
 		t.Fatalf("expected 3 rows, got %d", n)
+	}
+}
+
+// TestWriteRowsRejectsInvalidDate pins the direct-writer half of #560: the map
+// write path must fail rather than persist the epoch for an invalid DATE
+// string, so a caller reaching parquet.Writer.WriteRows without the ingest
+// boundary is still protected.
+func TestWriteRowsRejectsInvalidDate(t *testing.T) {
+	var buf bytes.Buffer
+	schema := Schema{Columns: []Column{
+		{Name: "d", Type: TypeDate},
+	}}
+	w, err := NewWriter(&buf, schema, WriterConfig{})
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	for _, lit := range []string{"not-a-date", "2026-02-30", "2026-13-01"} {
+		if err := w.WriteRows([]map[string]any{{"d": lit}}); err == nil {
+			t.Errorf("WriteRows(d=%q) = nil, want an error instead of writing the epoch", lit)
+		}
+	}
+	// A valid date still writes.
+	if err := w.WriteRows([]map[string]any{{"d": "2026-03-15"}}); err != nil {
+		t.Errorf("WriteRows(d=%q) = %v, want a valid date to write", "2026-03-15", err)
+	}
+}
+
+// TestParseDateDaysAcceptSet pins #560's accept-set: the PostgreSQL-valid
+// year-first spellings a client sends must PARSE (not reject, not epoch), and
+// genuinely-invalid input must ERROR with the SQLSTATE-matching classification
+// (22007 for a malformed string, 22008 for a nonexistent/out-of-range date).
+func TestParseDateDaysAcceptSet(t *testing.T) {
+	valid := []struct {
+		s    string
+		days int32
+	}{
+		{"2026-01-02", 20455},
+		{"2026-1-2", 20455},   // single-digit month/day, 4-digit year
+		{"2026/01/02", 20455}, // slash
+		{"2026/1/2", 20455},
+		{"2026.01.02", 20455}, // dot separator (PostgreSQL accepts it)
+		{"2026.1.2", 20455},
+		{"20260102", 20455},            // compact 8-digit
+		{" 2026-01-02 ", 20455},        // surrounding whitespace
+		{"2026-01-02 15:04:05", 20455}, // trailing time-of-day, truncated
+		{"2026-01-02T15:04:05Z", 20455},
+		{"1970-01-01", 0},
+		{"9999-12-31", 2932896}, // #451 SCD sentinel, still correct
+		{"0001-01-01", -719162},
+		{"1969-12-31", -1},
+		{"2024-02-29", 19782}, // a real leap day
+	}
+	for _, tc := range valid {
+		got, err := ParseDateDays(tc.s)
+		if err != nil {
+			t.Errorf("ParseDateDays(%q) = err %v, want %d", tc.s, err, tc.days)
+			continue
+		}
+		if got != tc.days {
+			t.Errorf("ParseDateDays(%q) = %d, want %d", tc.s, got, tc.days)
+		}
+	}
+
+	invalid := []struct {
+		s      string
+		syntax bool // true => 22007, false => 22008
+	}{
+		{"not-a-date", true},
+		{"", true},
+		{"   ", true},
+		{"2026-01-02 nonsense", true}, // trailing garbage where a time should be
+		// Short / MDY / DMY-ambiguous leading field: PostgreSQL decides the
+		// field order from DateStyle, not the digits, so guessing year-first
+		// would store a value that differs from PostgreSQL's. These ERROR
+		// (deferred to #639) rather than parse to a wrong year (#560).
+		{"5/6/7", true},       // PostgreSQL: 2007-05-06 (MDY); we refuse
+		{"2/1/3", true},       // PostgreSQL: 2003-02-01
+		{"12/1/2", true},      // PostgreSQL: 2002-12-01
+		{"01/02/2026", true},  // PostgreSQL: 2026-01-02 (trailing 4-digit year, MDY)
+		{"31/1/2", true},      // PostgreSQL rejects (month 31); we refuse the shape
+		{"99/1/2", true},      // PostgreSQL rejects (month 99); we refuse the shape
+		{"26-01-02", true},    // two-digit year
+		{"2026-13-01", false}, // month out of range
+		{"2026-00-01", false}, // month zero
+		{"2026-02-30", false}, // nonexistent day
+		{"2026-02-29", false}, // 2026 is not a leap year
+		{"2026-01-32", false}, // day out of range
+		{"2026.13.01", false}, // dot separator, month out of range
+		{"20260230", false},   // compact nonexistent day
+	}
+	for _, tc := range invalid {
+		_, err := ParseDateDays(tc.s)
+		if err == nil {
+			t.Errorf("ParseDateDays(%q) = nil error, want a rejection (not the epoch)", tc.s)
+			continue
+		}
+		if IsDateSyntaxError(err) != tc.syntax {
+			t.Errorf("ParseDateDays(%q): IsDateSyntaxError = %v, want %v (err = %v)",
+				tc.s, IsDateSyntaxError(err), tc.syntax, err)
+		}
+	}
+}
+
+// TestWriteRowsRejectsInvalidDateNested pins the highest-severity half of
+// #560: a DATE nested in a ROW/ARRAY/MAP must fail the write, not reach the
+// native writer's leaf and store the epoch. prepareRows only rewrites
+// top-level columns, so before the fix WriteRows({"r":{"dt":"2026-02-30"}})
+// returned nil and stored 1970-01-01 inside the container.
+func TestWriteRowsRejectsInvalidDateNested(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema Schema
+		row    map[string]any
+	}{
+		{
+			name: "row",
+			schema: Schema{Columns: []Column{
+				{Name: "r", Type: TypeRow, Nullable: true, Fields: []Column{
+					{Name: "dt", Type: TypeDate, Nullable: true},
+				}},
+			}},
+			row: map[string]any{"r": map[string]any{"dt": "2026-02-30"}},
+		},
+		{
+			name: "array",
+			schema: Schema{Columns: []Column{
+				{Name: "a", Type: TypeArray, Nullable: true,
+					ElementType: &Column{Name: "element", Type: TypeDate, Nullable: true}},
+			}},
+			row: map[string]any{"a": []any{"2026-01-01", "2026-13-01"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w, err := NewWriter(&buf, tc.schema, WriterConfig{})
+			if err != nil {
+				t.Fatalf("NewWriter: %v", err)
+			}
+			if err := w.WriteRows([]map[string]any{tc.row}); err == nil {
+				t.Fatal("WriteRows with an invalid nested DATE = nil, want an error (not a silently-stored epoch)")
+			}
+		})
+	}
+
+	// A valid nested date still writes.
+	schema := Schema{Columns: []Column{
+		{Name: "r", Type: TypeRow, Nullable: true, Fields: []Column{
+			{Name: "dt", Type: TypeDate, Nullable: true},
+		}},
+	}}
+	var buf bytes.Buffer
+	w, err := NewWriter(&buf, schema, WriterConfig{})
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if err := w.WriteRows([]map[string]any{{"r": map[string]any{"dt": "2026-03-15"}}}); err != nil {
+		t.Fatalf("WriteRows with a valid nested DATE = %v, want success", err)
 	}
 }

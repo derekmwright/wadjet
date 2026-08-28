@@ -191,9 +191,17 @@ func checkType(col parquet.Column, v any) error {
 			return fmt.Errorf("column %q: expected timestamp (time.Time, int64, or string), got %T", col.Name, v)
 		}
 	case parquet.TypeDate:
-		switch v.(type) {
-		case time.Time, int32, int64, string:
+		switch tv := v.(type) {
+		case time.Time, int32, int64:
 			// ok
+		case string:
+			// Reject an unparseable or nonexistent calendar date at the
+			// ingest boundary, before the writer turns it into the epoch
+			// (day 0 = 1970-01-01) — silent data corruption, since the
+			// original text is then gone (#560).
+			if err := parquet.ValidateDateString(tv); err != nil {
+				return fmt.Errorf("column %q: %w", col.Name, err)
+			}
 		default:
 			return fmt.Errorf("column %q: expected date (time.Time, int, or string), got %T", col.Name, v)
 		}
@@ -203,6 +211,14 @@ func checkType(col parquet.Column, v any) error {
 			// ok
 		default:
 			return fmt.Errorf("column %q: expected duration (time.Duration, int64, or string), got %T", col.Name, v)
+		}
+	case parquet.TypeArray, parquet.TypeRow, parquet.TypeMap:
+		// Reject an unparseable or nonexistent calendar date NESTED in a
+		// container at the ingest boundary, before the writer's leaf turns
+		// it into the epoch -- the same silent corruption as a top-level
+		// DATE, one the top-level checks never saw (#560).
+		if err := parquet.ValidateNestedDates(col, v); err != nil {
+			return fmt.Errorf("column %q: %w", col.Name, err)
 		}
 	}
 	return nil

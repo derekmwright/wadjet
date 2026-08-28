@@ -567,3 +567,87 @@ func TestMinFlushRows_SkipsTinyBuffers(t *testing.T) {
 		t.Errorf("FlushAll should flush regardless of MinFlushRows, got %d files", parquetCount)
 	}
 }
+
+// dateTestSchema is a DATE-carrying table partitioned by a plain string key,
+// used by the #560 ingest regression test below.
+var dateTestSchema = parquet.Schema{Columns: []parquet.Column{
+	{Name: "id", Type: parquet.TypeInt64},
+	{Name: "d", Type: parquet.TypeDate},
+	{Name: "part", Type: parquet.TypeString},
+}}
+
+func setupDateCatalog(t *testing.T) *catalog.Catalog {
+	t.Helper()
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, testBucket)
+	ctx := context.Background()
+	if err := cat.Init(ctx); err != nil {
+		t.Fatalf("catalog init: %v", err)
+	}
+	if err := cat.CreateTable(ctx, "dated", dateTestSchema, []string{"part"}); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	return cat
+}
+
+// TestIngestRejectsInvalidDate pins #560's ingest half: an unparseable or
+// nonexistent calendar date must be REJECTED at the ingest boundary, not
+// silently written as day 0 (1970-01-01) — silent data corruption, since the
+// original text is gone once written. A valid date must still ingest.
+func TestIngestRejectsInvalidDate(t *testing.T) {
+	cat := setupDateCatalog(t)
+	ing := New(cat, "dated", dateTestSchema, []string{"part"}, DefaultConfig())
+	ctx := context.Background()
+
+	invalid := []string{"not-a-date", "2026-02-30", "2026-13-01", "2026-02-29", "5/6/7", "2026-01-32"}
+	for _, lit := range invalid {
+		t.Run("reject/"+lit, func(t *testing.T) {
+			rows := []map[string]any{{"id": int64(1), "d": lit, "part": "p"}}
+			if err := ing.Ingest(ctx, rows); err == nil {
+				t.Fatalf("Ingest(d=%q) = nil, want an error — an invalid date must not be stored as the epoch", lit)
+			}
+		})
+	}
+
+	// A valid date must still ingest cleanly, including the PostgreSQL-valid
+	// non-canonical spellings the widened accept-set now takes (#560).
+	for _, lit := range []string{"2026-03-15", "2026-3-5", "2026/03/15", "20260315"} {
+		rows := []map[string]any{{"id": int64(2), "d": lit, "part": "p"}}
+		if err := ing.Ingest(ctx, rows); err != nil {
+			t.Fatalf("Ingest(d=%q) = %v, want a valid date to ingest", lit, err)
+		}
+	}
+}
+
+// TestIngestRejectsInvalidDateNestedInRow pins the container half of #560: a
+// DATE nested in a ROW must be validated at the ingest boundary too, not slip
+// past the top-level checks and reach the native writer's leaf as the epoch.
+func TestIngestRejectsInvalidDateNestedInRow(t *testing.T) {
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, testBucket)
+	ctx := context.Background()
+	if err := cat.Init(ctx); err != nil {
+		t.Fatalf("catalog init: %v", err)
+	}
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "rw", Type: parquet.TypeRow, Nullable: true, Fields: []parquet.Column{
+			{Name: "dt", Type: parquet.TypeDate, Nullable: true},
+		}},
+		{Name: "part", Type: parquet.TypeString},
+	}}
+	if err := cat.CreateTable(ctx, "nested_dated", schema, []string{"part"}); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	ing := New(cat, "nested_dated", schema, []string{"part"}, DefaultConfig())
+
+	bad := []map[string]any{{"id": int64(1), "rw": map[string]any{"dt": "2026-02-30"}, "part": "p"}}
+	if err := ing.Ingest(ctx, bad); err == nil {
+		t.Fatal("Ingest of a ROW with an invalid nested DATE = nil, want an error (not a silently-stored epoch)")
+	}
+
+	good := []map[string]any{{"id": int64(2), "rw": map[string]any{"dt": "2026-03-15"}, "part": "p"}}
+	if err := ing.Ingest(ctx, good); err != nil {
+		t.Fatalf("Ingest of a ROW with a valid nested DATE = %v, want success", err)
+	}
+}

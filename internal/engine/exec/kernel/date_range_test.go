@@ -14,15 +14,12 @@ import (
 // edge instead — a time.Duration nanosecond saturation in the old
 // t.Sub(epoch) arithmetic.
 //
-// What #451 did NOT cover, and this file therefore does not assert: a string
-// that is not a date at all. parseDateToDays still returns (0, nil) after
-// every layout fails, so `WHERE d = '2026-02-30'` answers the rows holding
-// 1970-01-01 where PostgreSQL raises 22008, and parquet.parseDateForWrite
-// does the same thing at INGEST — writing the epoch for an unparseable
-// value, which is silent data loss rather than a query-time misreading.
-// Tracked as #560; the fix belongs to the same refusal convention
-// CidrSortKey/IPv6LitKey/DecimalConstText already use, but the ingest arm
-// needs its own decision and neither is in #451's scope.
+// The adjacent defect — a string that is not a date at all — is #560, now
+// fixed: parseDateToDays returns errDateInvalidSyntax/errDateFieldOutOfRange
+// instead of (0, nil), so `WHERE d = '2026-02-30'` raises rather than
+// answering the rows holding 1970-01-01, and the ingest boundary rejects the
+// same strings before parquet.parseDateForWrite can write the epoch. See
+// TestParseDateToDaysRejectsInvalidDates below.
 func TestParseDateToDaysDoesNotClampAtTheDurationBoundary(t *testing.T) {
 	tests := []struct {
 		lit  string
@@ -182,5 +179,49 @@ func TestStatsDomainValueDateBeyondOldClamp(t *testing.T) {
 	}
 	if got != int64(-106752) {
 		t.Errorf("StatsDomainValue(TypeDate, '1677-09-21') = %v, want -106752", got)
+	}
+}
+
+// TestParseDateToDaysRejectsInvalidDates pins #560: an unparseable or
+// nonexistent calendar date must return an error, not (0, nil) — the epoch —
+// and a real date must still parse. The syntax/field split mirrors
+// PostgreSQL's 22007 vs 22008, read back through IsDateSyntaxError.
+func TestParseDateToDaysRejectsInvalidDates(t *testing.T) {
+	tests := []struct {
+		lit    string
+		syntax bool // IsDateSyntaxError → true for 22007 (malformed), false for 22008 (field out of range)
+	}{
+		{"not-a-date", true},
+		{"", true},
+		{"5/6/7", true},       // short MDY: PostgreSQL 2007-05-06; we refuse the shape
+		{"2026/02/30", false}, // slash is valid; the day is not (22008)
+		{"2021-13-40", false}, // month out of range
+		{"2021-13-01", false},
+		{"2026-02-30", false}, // day out of range
+		{"2026-02-29", false}, // 2026 is not a leap year
+		{"2021-01-32", false},
+		{"2021-00-01", false}, // month zero
+	}
+	for _, tc := range tests {
+		t.Run(tc.lit, func(t *testing.T) {
+			got, err := parseDateToDays(tc.lit)
+			if err == nil {
+				t.Fatalf("parseDateToDays(%q) = (%d, nil), want an error (not the epoch)", tc.lit, got)
+			}
+			if IsDateSyntaxError(err) != tc.syntax {
+				t.Errorf("parseDateToDays(%q): IsDateSyntaxError = %v, want %v (err = %v)",
+					tc.lit, IsDateSyntaxError(err), tc.syntax, err)
+			}
+		})
+	}
+
+	// A valid date must still parse cleanly, including the PostgreSQL-valid
+	// non-canonical spellings the widened accept-set now takes (#560): a filter
+	// literal that PostgreSQL accepts must not be rejected by wadjet.
+	for _, lit := range []string{"2026-03-15", "2024-02-29", "1970-01-01", "9999-12-31",
+		"2026-3-5", "2026/03/15", "20260315", " 2026-03-15 "} {
+		if _, err := parseDateToDays(lit); err != nil {
+			t.Errorf("parseDateToDays(%q) = %v, want a valid date to parse", lit, err)
+		}
 	}
 }

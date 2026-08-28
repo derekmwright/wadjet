@@ -70,11 +70,10 @@ func TestKernelFilterDateInRangeStillWorks(t *testing.T) {
 // time.Duration arithmetic made it look otherwise. It must COMPARE, not
 // raise 22008.
 //
-// And no DATE string literal can reach the 22008 path at all: every layout
-// kernel.parseDateToDays accepts uses time.Parse's "2006", which takes
-// exactly four digits, so 9999-12-31 is the largest date a literal can spell.
-// The guard stays live for a raw int64/int day count, which the two tests
-// above use and which no parser bounds.
+// A VALID DATE literal must never raise, however it is spelled — #560 widened
+// the accept-set (a malformed or nonexistent date now raises 22007/22008), and
+// the risk of that change is over-rejection, so the two representable sentinels
+// below must still resolve to a nil error.
 func TestKernelFilterDateSentinelLiteralIsNotAnError(t *testing.T) {
 	b := batch.NewRecordBatch([]parquet.Column{
 		{Name: "d", Type: parquet.TypeDate},
@@ -95,7 +94,64 @@ func TestKernelFilterDateSentinelLiteralIsNotAnError(t *testing.T) {
 	// both well inside the int32 day range the guard protects.
 	for _, lit := range []string{"9999-12-31", "0001-01-01"} {
 		if err := dateConstError(batch.TypeDate, lit); err != nil {
-			t.Errorf("dateConstError(%q) = %v, want nil — no DATE string literal can be out of range", lit, err)
+			t.Errorf("dateConstError(%q) = %v, want nil — a representable date must not raise", lit, err)
 		}
 	}
+}
+
+// TestKernelFilterInvalidDateRaises pins #560's query half: an unparseable or
+// nonexistent DATE literal must raise the PostgreSQL error (22007 for a
+// malformed string, 22008 for a nonexistent calendar field), not silently
+// match the epoch row — dateBatch holds exactly one row, 1970-01-01, which is
+// what `d = '2026-02-30'` used to return the count of.
+func TestKernelFilterInvalidDateRaises(t *testing.T) {
+	tests := []struct {
+		lit   string
+		state string
+	}{
+		{"2026-02-30", "22008"}, // nonexistent calendar date
+		{"2026-13-01", "22008"}, // month out of range
+		{"2026-02-29", "22008"}, // 2026 is not a leap year
+		{"2026/02/30", "22008"}, // slash is valid; the day is not
+		{"not-a-date", "22007"}, // not a date at all
+		{"5/6/7", "22007"},      // short MDY: refused rather than guessed year-first
+	}
+	for _, tc := range tests {
+		t.Run(tc.lit, func(t *testing.T) {
+			f := NewKernelFilter("d", OpEq, tc.lit)
+			out, err := f.Execute(context.Background(), dateBatch(t))
+			if err == nil {
+				t.Fatalf("`d = '%s'` returned %d rows and no error — it matched the epoch instead of raising",
+					tc.lit, len(selOf(out)))
+			}
+			if got := sqlerr.StateOf(err); got != tc.state {
+				t.Errorf("SQLSTATE = %q, want %q; err = %v", got, tc.state, err)
+			}
+		})
+	}
+
+	// IN-list counterpart routes through the same dateConstError.
+	f := NewInFilter("d", []any{"2026-02-30"}, false)
+	if _, err := f.Execute(context.Background(), dateBatch(t)); err == nil || sqlerr.StateOf(err) != "22008" {
+		t.Errorf("d IN ('2026-02-30'): err = %v, want SQLSTATE 22008", err)
+	}
+
+	// The accept-set must not over-reject: a PostgreSQL-valid spelling of the
+	// epoch (dateBatch's one row) must MATCH it, not raise (#560).
+	for _, lit := range []string{"1970/01/01", "1970-1-1", "19700101"} {
+		out, err := f2Execute(t, NewKernelFilter("d", OpEq, lit))
+		if err != nil {
+			t.Errorf("`d = '%s'` raised %v — a PostgreSQL-valid date must compare, not raise", lit, err)
+			continue
+		}
+		if got := selOf(out); len(got) != 1 || got[0] != 0 {
+			t.Errorf("`d = '%s'` Sel = %v, want [0] (the epoch row)", lit, got)
+		}
+	}
+}
+
+// f2Execute runs a kernel filter over a fresh single-epoch-row DATE batch.
+func f2Execute(t *testing.T, f *KernelFilter) (*batch.RecordBatch, error) {
+	t.Helper()
+	return f.Execute(context.Background(), dateBatch(t))
 }

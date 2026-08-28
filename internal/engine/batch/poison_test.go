@@ -33,6 +33,14 @@ func TestPoisonVectorCoversEveryType(t *testing.T) {
 		check func(t *testing.T, v *Vector, poisoned bool)
 	}
 
+	dateDaysForTest := func(s string) int32 {
+		d, ok := parseDateString(s)
+		if !ok {
+			t.Fatalf("parseDateString(%q) failed in test setup", s)
+		}
+		return d
+	}
+
 	int32Check := func(want int32) func(*testing.T, *Vector, bool) {
 		return func(t *testing.T, v *Vector, poisoned bool) {
 			t.Helper()
@@ -157,7 +165,7 @@ func TestPoisonVectorCoversEveryType(t *testing.T) {
 		{"UUID", parquet.Column{Name: "c", Type: parquet.TypeUUID}, "00000000-0000-4000-8000-000000000001",
 			bytesCheck(parseUUID("00000000-0000-4000-8000-000000000001"))},
 		{"Date", parquet.Column{Name: "c", Type: parquet.TypeDate}, "2026-08-23",
-			int32Check(parseDateString("2026-08-23"))},
+			int32Check(dateDaysForTest("2026-08-23"))},
 		{"Decimal", parquet.Column{Name: "c", Type: parquet.TypeDecimal, Precision: 18, Scale: 4}, float64(12.3456),
 			func(t *testing.T, v *Vector, poisoned bool) {
 				if poisoned {

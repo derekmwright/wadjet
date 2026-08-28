@@ -2910,6 +2910,46 @@ func postgresSemanticsCases() []pgCase {
 
 	out = append(out, postgresBytesCases()...)
 
+	// PostgreSQL-valid DATE spellings the widened accept-set must PARSE, not
+	// reject (#560). mk_outer.dt holds 2024-01-01..2024-01-05, so each of
+	// these non-canonical forms of 2024-01-03 must count the same rows as the
+	// canonical one in BOTH engines — a value oracle catches an accept-set
+	// divergence as "wadjet cannot answer" when it rejects a literal
+	// PostgreSQL takes. The zero-padded canonical entries the error corpus
+	// already carries only test the reject side; these test the accept side.
+	out = append(out,
+		pgCase{name: "DateCanonicalSpelling",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer WHERE dt = '2024-01-03'`},
+		pgCase{name: "DateSingleDigitFields",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer WHERE dt = '2024-1-3'`},
+		pgCase{name: "DateSlashSeparator",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer WHERE dt = '2024/01/03'`},
+		pgCase{name: "DateCompactEightDigit",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer WHERE dt = '20240103'`},
+		pgCase{name: "DateSurroundingWhitespace",
+			sql: `SELECT COUNT(*) AS n FROM mk_outer WHERE dt = ' 2024-01-03 '`},
+	)
+
+	// The OTHER side of the accept-set: a short/MDY DATE spelling PostgreSQL
+	// PARSES its own way (a leading field it reads as the MONTH, not the
+	// year) — '5/6/7' is 2007-05-06 and '01/02/2026' is 2026-01-02. wadjet
+	// deliberately REFUSES these rather than guess year-first and store a
+	// value that differs from PostgreSQL's (#560 invariant). Pinned to #639:
+	// the day wadjet parses DateStyle-ordered dates, it will answer these and
+	// this pin fires. Without the pin the entry is a plain divergence; with it
+	// the corpus records exactly which spellings are deferred and proves they
+	// still ERROR (wadjet cannot answer) rather than silently diverging.
+	out = append(out,
+		pgCase{name: "DateShortMDYRefused",
+			sql:      `SELECT COUNT(*) AS n FROM mk_outer WHERE dt = '5/6/7'`,
+			knownBug: pgBugUnsupported + " a short DATE literal whose field order PostgreSQL takes from DateStyle (MDY: '5/6/7' is 2007-05-06) is refused, not guessed year-first",
+			issue:    "#639"},
+		pgCase{name: "DateTrailingYearMDYRefused",
+			sql:      `SELECT COUNT(*) AS n FROM mk_outer WHERE dt = '01/02/2026'`,
+			knownBug: pgBugUnsupported + " a trailing-4-digit-year MDY DATE literal ('01/02/2026' is 2026-01-02 to PostgreSQL) is refused, not guessed",
+			issue:    "#639"},
+	)
+
 	out = append(out, multiKeyCorrelatedCases()...)
 
 	// --- A window's PARTITION BY / ORDER BY key spelling (#585) -------------

@@ -983,7 +983,17 @@ func (v *Vector) SetValue(i int, val any) {
 		case int64:
 			v.Int32Data[i] = int32(tv)
 		case string:
-			v.Int32Data[i] = parseDateString(tv)
+			days, ok := parseDateString(tv)
+			if !ok {
+				// An unparseable or nonexistent calendar date is the type's
+				// value-parse failure, exactly as an unparseable IPv4/MAC/UUID
+				// is above: store NULL, never the epoch. Reading '2026-02-30'
+				// back as 1970-01-01 on the row->batch path (JSON reader,
+				// columnar scan) was silent data corruption (#560).
+				v.Nulls.SetNull(i)
+				return
+			}
+			v.Int32Data[i] = days
 		default:
 			v.mismatch(val)
 		}
@@ -1486,27 +1496,18 @@ func FormatTimestamp(ms int64) string {
 	return t.Format("2006-01-02 15:04:05")
 }
 
-// parseDateString parses "2006-01-02" to days since epoch.
-//
-// Computed from t.Unix() (civil-days arithmetic), not t.Sub(epochDate):
-// Sub returns a time.Duration, which saturates at ±math.MaxInt64 ns
-// (~292 years) rather than reporting an overflow, so a year outside
-// roughly 1677-2262 answered a silently CLAMPED day count (#451, same
-// mechanism as kernel.parseDateToDays). No int32 range check is needed
-// here: the "2006-01-02" layout accepts only a 4-digit year, whose full
-// range (0000-9999) is a few million days — far inside what int32 holds.
-func parseDateString(s string) int32 {
-	t, err := time.Parse("2006-01-02", s)
+// parseDateString parses a DATE string to days since epoch via the shared
+// parquet.ParseDateDays — the one accept-set and classification the filter
+// path, the writers and the ingest boundary share, which also carries #451's
+// civil-days arithmetic (t.Unix(), not the saturating t.Sub) and the int32
+// range check. ok is false for an unparseable or nonexistent calendar date;
+// the caller stores NULL for it rather than the epoch (#560).
+func parseDateString(s string) (int32, bool) {
+	d, err := parquet.ParseDateDays(s)
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	const secondsPerDay = 86400
-	sec := t.Unix()
-	days := sec / secondsPerDay
-	if sec%secondsPerDay < 0 {
-		days--
-	}
-	return int32(days)
+	return d, true
 }
 
 // --- Nested-aware typed copy primitives ---

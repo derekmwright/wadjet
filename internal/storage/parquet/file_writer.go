@@ -447,6 +447,22 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 		}
 		val = conv
 	}
+	// A DATE text literal is converted HERE too, at the leaf, so a DATE
+	// nested in a ROW/ARRAY/MAP is validated on the same path a top-level
+	// one is (prepareRows only rewrites top-level columns). An unparseable
+	// or nonexistent calendar date used to reach toInt32 -> parseDateForWrite
+	// and store the epoch silently — data corruption inside a container the
+	// top-level guard never saw (#560). ParseDateDays is the one accept-set
+	// and classification the filter path shares.
+	if s, ok := val.(string); ok && col.Type == TypeDate {
+		days, err := ParseDateDays(s)
+		if err != nil {
+			nw.fail(fmt.Errorf("column %q, row %d: %w", col.Name, nw.rowsSeen, err))
+			lb.appendEntry(defLevel, repLevel)
+			return
+		}
+		val = days
+	}
 	// A DECIMAL whose precision fits an INT64 leaf is stored in one, and an
 	// unscaled value past 64 bits then has no encoding at all. The row
 	// reader can hand one back (Decimal128), and the only ways to write it
