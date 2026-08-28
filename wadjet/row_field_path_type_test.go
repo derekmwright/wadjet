@@ -226,6 +226,17 @@ func TestRowFieldPathCarriesTheFieldsDeclaredType(t *testing.T) {
 		{"cte", `WITH s AS (SELECT rw FROM rowfld WHERE ` + rowFieldPresent + `) SELECT %[1]s AS v FROM s ORDER BY v`},
 		{"derived_minmax", `SELECT MIN(%[1]s) AS lo, MAX(%[1]s) AS hi FROM (SELECT rw FROM rowfld WHERE ` + rowFieldPresent + `) s`},
 		{"derived_group", `SELECT %[1]s AS k, COUNT(*) AS n FROM (SELECT rw FROM rowfld WHERE ` + rowFieldPresent + `) s GROUP BY %[1]s ORDER BY k, n`},
+
+		// A field path as a WINDOW key and a windowed aggregate's input.
+		// The window operator resolves its PARTITION BY / ORDER BY / input
+		// by NAME, and a field path names no column — it defaulted to
+		// FLOAT64/NULL until fix-585 materialized a window's expression and
+		// field-path keys on both paths (#603, closed). These shapes keep it
+		// gated against the same value in a flat column.
+		{"win_min", `SELECT id, MIN(%[1]s) OVER () AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+		{"win_max", `SELECT id, MAX(%[1]s) OVER () AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
+		{"win_count_partition", `SELECT id, COUNT(*) OVER (PARTITION BY %[1]s) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id, v`},
+		{"win_rownum_order", `SELECT id, ROW_NUMBER() OVER (ORDER BY %[1]s, id) AS v FROM rowfld WHERE ` + rowFieldPresent + ` ORDER BY id`},
 	}
 
 	// Shapes that only make sense for a subset of the types, keyed by the
@@ -269,6 +280,25 @@ func TestRowFieldPathCarriesTheFieldsDeclaredType(t *testing.T) {
 		t.Run(f.Name, func(t *testing.T) {
 			for _, sh := range append(append([]struct{ name, sql string }{}, shapes...), typed[f.Name]...) {
 				t.Run(sh.name, func(t *testing.T) {
+					// A windowed MIN/MAX over a field path of a PARAMETERIZED
+					// or CONTAINER type does not yet carry the field's (p,s)
+					// or shape through fix-585's window materialization: the
+					// DECIMAL comes back scale-stripped ("1" for 1.2500) and a
+					// ROW/ARRAY field comes back NULL, while the flat column of
+					// the same type is correct. It is the window counterpart
+					// of the parameterized-field aggregate residual, and it is
+					// fix-585's territory (window keys), filed as #618. Every
+					// SCALAR type passes every window shape.
+					if strings.HasPrefix(sh.name, "win_") {
+						switch f.Type {
+						case parquet.TypeRow, parquet.TypeArray, parquet.TypeMap, parquet.TypeVector:
+							t.Skipf("not gated (#618): a window over a container field path drops it")
+						case parquet.TypeDecimal:
+							if sh.name == "win_min" || sh.name == "win_max" {
+								t.Skipf("not gated (#618): a windowed MIN/MAX over a DECIMAL field path loses scale")
+							}
+						}
+					}
 					flatSQL := strings.ReplaceAll(fmt.Sprintf(sh.sql, flatName(f.Name)),
 						"SELECT rw FROM rowfld", "SELECT "+flatName(f.Name)+" FROM rowfld")
 					pathSQL := fmt.Sprintf(sh.sql, "rw."+f.Name)

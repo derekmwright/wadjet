@@ -153,15 +153,16 @@ refusal survives the delegation.
   as its argument — is closed here (see the EvalVec guard above). The
   type-matrix `c_row` entries and `wadjet`'s IPv6/UUID field cases are now
   plain gates, no pins.
-- **Window functions over a field path are silently wrong** (#603):
-  `SUM(rw.f) OVER ()` and `LAG(rw.f)` answer NULL, `ORDER BY rw.f` inside an
-  OVER clause is ignored, and `PARTITION BY rw.f` makes one partition.
-  `windowSpecOutputType` builds its reference from `cleanExpr`'s output,
-  which has already dropped the qualifier, and the window operator resolves
-  its input, partition and order keys by NAME. It needs rule 2's
-  materialization, which the window path has no seam for yet — a third
-  pre-projection site, in a subsystem this change does not touch. Filed
-  rather than fixed here, and overlapping #585.
+- **Window functions over a field path** (#603) — CLOSED by fix-585, which
+  materialized a window's expression and field-path keys on both paths, the
+  third pre-projection site this change had left to the window subsystem.
+  `MIN(rw.f) OVER ()` and `PARTITION BY rw.f` now answer for every scalar
+  field type. The `win_*` shapes in
+  `wadjet.TestRowFieldPathCarriesTheFieldsDeclaredType` gate it.
+  RESIDUAL: a windowed MIN/MAX over a PARAMETERIZED or CONTAINER field path
+  still loses the field's (p,s) or drops the container value — the window
+  counterpart of the aggregate-over-a-parameterized-field residual below,
+  filed as #618 and skipped by those shapes for the affected types.
 - **CONCAT propagates NULL where PostgreSQL ignores it** (#609). Caught by
   this change's oracle entries and not caused by them: a flat column and a
   bare `NULL` literal diverge identically. `RowFieldTextFunctions` is pinned
@@ -192,6 +193,7 @@ refusal survives the delegation.
   filters' row fallbacks), `internal/engine/expr/expr.go`
   (`ColRef.valueType` / `valueVector` / `fieldValue`, and the boxing-undo
   family that keys on them)
-- #603, #604, #609 (residuals filed by this change), #589 (the
-  container-level defect the widened fixture surfaced, fixed on main), #585
-  (overlaps #603)
+- #604, #609, #618 (residuals filed by this change), #603/#585 (window
+  field-path keys, closed on main), #589 (the container-level defect the
+  widened fixture surfaced, fixed on main)
+
