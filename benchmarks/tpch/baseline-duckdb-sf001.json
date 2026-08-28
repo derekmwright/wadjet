@@ -814,6 +814,39 @@
       "fine": "b2c1939226a69e44",
       "coarse": "b2c1939226a69e44"
     },
+    "DisjunctionWithAllRowsBranch": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "64aeb9975f234bec",
+      "coarse": "64aeb9975f234bec"
+    },
+    "DisjunctiveNullCheckIsTautology": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "c"
+      ],
+      "fine": "64aeb9975f234bec",
+      "coarse": "64aeb9975f234bec"
+    },
+    "DisjunctiveNullCheckSelectsEveryRow": {
+      "source": "duckdb",
+      "row_count": 25,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_nationkey"
+      ],
+      "fine": "f2288fad473e22f1",
+      "coarse": "f2288fad473e22f1"
+    },
     "DistinctCoalesceLiteralScan": {
       "source": "duckdb",
       "row_count": 35921,
@@ -1122,6 +1155,18 @@
       "fine": "f0b5c2c2211c8d67",
       "coarse": "f0b5c2c2211c8d67"
     },
+    "FullOuterAllUnmatchedAggregate": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "matched",
+        "total"
+      ],
+      "fine": "975efb9519f154cc",
+      "coarse": "975efb9519f154cc"
+    },
     "GroupByAndAggregateRenamed": {
       "source": "duckdb",
       "row_count": 3,
@@ -1429,6 +1474,19 @@
       ],
       "fine": "2cf7ca78f38489da",
       "coarse": "2cf7ca78f38489da"
+    },
+    "LeftOuterAllUnmatchedAggregateAlwaysTrueFilter": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "matched",
+        "mn",
+        "mx"
+      ],
+      "fine": "84104f3ab1c33f64",
+      "coarse": "84104f3ab1c33f64"
     },
     "LimitThenOffset": {
       "source": "duckdb",

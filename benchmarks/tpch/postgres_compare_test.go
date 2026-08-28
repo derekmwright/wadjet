@@ -3034,6 +3034,47 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "CastNullToBoolean", sql: `SELECT CAST(NULL AS BOOLEAN) AS b`},
 	)
 
+	// --- #622 follow-on: a disjunction with an IS NOT NULL branch ---------
+	//
+	// A vectorized OR branch that matches EVERY row returns the batch with a
+	// nil selection vector (the "all rows" convention); OrFilter read that as
+	// ZERO rows, so `col IS NULL OR col IS NOT NULL` over a column with no
+	// nulls answered nothing. PostgreSQL is the authority: the predicate is a
+	// tautology and admits every row. Found while building the #622 gate,
+	// fixed in exec.OrFilter.
+	out = append(out,
+		pgCase{name: "DisjunctiveNullCheckIsTautology",
+			sql: `SELECT COUNT(*) AS c FROM nation WHERE n_comment IS NULL OR n_comment IS NOT NULL`},
+		pgCase{name: "DisjunctiveNullCheckIsTautologyReversed",
+			sql: `SELECT COUNT(*) AS c FROM nation WHERE n_name IS NOT NULL OR n_name IS NULL`},
+		pgCase{name: "DisjunctiveNullCheckSelectsEveryRow",
+			sql: `SELECT n_nationkey FROM nation WHERE n_name IS NULL OR n_name IS NOT NULL ORDER BY n_nationkey`},
+		pgCase{name: "DisjunctionWithAllRowsBranch",
+			sql: `SELECT COUNT(*) AS c FROM nation WHERE n_nationkey = 3 OR n_name IS NOT NULL`},
+
+		// The #622 theme in a shape PostgreSQL accepts: an aggregate over an
+		// OUTER JOIN's null-padded rows must not move when an always-true
+		// filter is added. TPC-H has no colliding column names, so the
+		// qualifier-strip half of #622 lives in the coordinator two-path
+		// gate; here the null-padding + always-true-filter half is checked
+		// against live PostgreSQL. The ON's equality is hash/merge-joinable,
+		// so PostgreSQL accepts the FULL JOIN (unlike the soak's bare-boolean
+		// ON); the o_orderkey<0 conjunct makes every row unmatched.
+		pgCase{name: "FullOuterAllUnmatchedAggregate",
+			sql: `SELECT COUNT(o.o_orderkey) AS matched, COUNT(*) AS total
+				FROM customer c FULL OUTER JOIN orders o
+				ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0`},
+		pgCase{name: "LeftOuterAllUnmatchedAggregate",
+			sql: `SELECT COUNT(o.o_orderkey) AS matched, MIN(o.o_totalprice) AS mn, MAX(o.o_totalprice) AS mx
+				FROM customer c LEFT JOIN orders o
+				ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0`},
+		pgCase{name: "LeftOuterAllUnmatchedAggregateAlwaysTrueFilter",
+			sql: `SELECT COUNT(o.o_orderkey) AS matched, MIN(o.o_totalprice) AS mn, MAX(o.o_totalprice) AS mx
+				FROM customer c LEFT JOIN orders o
+				ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0
+				WHERE c.c_name IS NULL OR c.c_name IS NOT NULL`},
+	)
+
 	return out
 }
 

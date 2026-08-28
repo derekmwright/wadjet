@@ -8060,7 +8060,20 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		if agg.Distinct && fn == exec.AggCount {
 			fn = exec.AggCountDistinct
 		}
-		inputCol := cleanExpr(agg.InputCol)
+		// Preserve the table qualifier — NormalizeIdentRef only strips the
+		// quotes off a delimited identifier, the way the GROUP BY keys below
+		// are normalized and the way the stage-DAG AggSpec carries
+		// agg.InputCol verbatim. cleanExpr here would drop the qualifier
+		// ("t2.c2" -> "c2"), and a bare name binds to the FIRST column of
+		// that name in the input schema. Over a join whose two sides share a
+		// bare column name, that is the wrong table's column: BOOL_OR(t2.c2)
+		// over `t5, t1 FULL OUTER JOIN t2 ON t1.c7` read t5.c2 (all NULL) and
+		// answered NULL, and an always-true WHERE that reorders the cross
+		// join flipped which wrong column it read (t1.c2, FALSE) — a
+		// TLP-Aggregate self-consistency violation (#622). exec.HashAggregate's
+		// columnIndexFallback still resolves the qualified name against a
+		// scan that emits the column bare via its qualified->bare fallback.
+		inputCol := plansql.NormalizeIdentRef(strings.TrimSpace(agg.InputCol))
 		// Use synthetic column name if the input was an expression
 		if synName, ok := syntheticNames[i]; ok {
 			inputCol = synName

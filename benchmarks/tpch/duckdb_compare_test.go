@@ -2194,6 +2194,29 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "BlobMinMaxOverCast",
 			sql:       `SELECT MIN(CAST(b_val AS text)) AS lo, MAX(CAST(b_val AS text)) AS hi FROM bytea_probe`,
 			duckdbSQL: `SELECT MIN(` + duckBlobHex + `) AS lo, MAX(` + duckBlobHex + `) AS hi FROM bytea_probe`},
+
+		// #622 follow-on: a disjunction one of whose branches (IS NOT NULL
+		// over a no-null column) matches every row. OrFilter used to read
+		// that all-rows branch as zero rows. Both engines agree the
+		// predicate is a tautology.
+		duckdbCase{name: "DisjunctiveNullCheckIsTautology",
+			sql: `SELECT COUNT(*) AS c FROM nation WHERE n_comment IS NULL OR n_comment IS NOT NULL`},
+		duckdbCase{name: "DisjunctionWithAllRowsBranch",
+			sql: `SELECT COUNT(*) AS c FROM nation WHERE n_nationkey = 3 OR n_name IS NOT NULL`},
+		duckdbCase{name: "DisjunctiveNullCheckSelectsEveryRow",
+			sql: `SELECT n_nationkey FROM nation WHERE n_name IS NULL OR n_name IS NOT NULL ORDER BY n_nationkey`},
+		// An aggregate over an OUTER JOIN's null-padded rows (all-unmatched),
+		// with and without an always-true filter — the #622 theme, in a
+		// shape whose equi-ON both engines accept.
+		duckdbCase{name: "FullOuterAllUnmatchedAggregate",
+			sql: `SELECT COUNT(o.o_orderkey) AS matched, COUNT(*) AS total
+				FROM customer c FULL OUTER JOIN orders o
+				ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0`},
+		duckdbCase{name: "LeftOuterAllUnmatchedAggregateAlwaysTrueFilter",
+			sql: `SELECT COUNT(o.o_orderkey) AS matched, MIN(o.o_totalprice) AS mn, MAX(o.o_totalprice) AS mx
+				FROM customer c LEFT JOIN orders o
+				ON c.c_custkey = o.o_custkey AND o.o_orderkey < 0
+				WHERE c.c_name IS NULL OR c.c_name IS NOT NULL`},
 	)
 
 	// The hand-written entries above declare `ordered` implicitly through
