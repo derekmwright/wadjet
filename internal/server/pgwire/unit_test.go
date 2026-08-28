@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -66,6 +67,32 @@ func TestPgTypeOID(t *testing.T) {
 				t.Errorf("pgTypeOID(%q) = %d, want %d", tt.typeName, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestIntegerReturningScalarsWireInt4 is the server-independent half of #530's
+// wire gate (the oracle's WireProtocol UnaliasedFuncTwice entry is the arm that
+// exercises a live driver): it walks the same path RowDescription does — the
+// function's expr-declared return type, to its type-name string, to the OID and
+// size a client reads — and asserts int4 (OID 23, size 4) for LENGTH and its
+// siblings, where the bug shipped float8 (OID 701, size 8).
+func TestIntegerReturningScalarsWireInt4(t *testing.T) {
+	for _, name := range []string{
+		"length", "octet_length", "bit_length", "char_length", "character_length",
+		"strpos", "position", "codepoint", "width_bucket", "cardinality", "array_length",
+	} {
+		typ, conf := expr.DefaultRegistry.ReturnType(name).Resolve(1, nil)
+		if conf != expr.Decided {
+			t.Errorf("%s: return type not DECIDED (%v)", name, conf)
+			continue
+		}
+		oid := pgTypeOID(typ.String())
+		if oid != 23 {
+			t.Errorf("%s: wire OID %d (from type %s), want 23 (int4)", name, oid, typ)
+		}
+		if sz := pgTypeSize(oid); sz != 4 {
+			t.Errorf("%s: wire size %d, want 4", name, sz)
+		}
 	}
 }
 

@@ -816,14 +816,7 @@ func wireCorpus() []wireCase {
 		// PostgreSQL happens to give them DIFFERENT labels. The declared type
 		// of the second is a divergence of its own, found by this entry.
 		{name: "UnaliasedFuncTwice",
-			sql: `SELECT UPPER(s_name), LENGTH(s_name) FROM supplier ORDER BY s_suppkey LIMIT 2`,
-			pins: map[string]string{
-				wirePropTypeOIDs: "#530: LENGTH is int4 in PostgreSQL (OID 23) and wadjet declares " +
-					"float8 (701) — honestly, because the expr layer COMPUTES it as a float64. " +
-					"Declaring int4 over a float64 vector would read back NULL through the typed " +
-					"getter, so the value and the declaration have to move together",
-				wirePropTypeSizes: "#530, follows the OID: 8 for float8 where PostgreSQL declares 4 for int4",
-			}},
+			sql: `SELECT UPPER(s_name), LENGTH(s_name) FROM supplier ORDER BY s_suppkey LIMIT 2`},
 		// The two shapes the same change deliberately does NOT touch, pinned
 		// so the remaining divergence is recorded rather than forgotten.
 		{name: "UnaliasedArithmetic",
@@ -918,13 +911,7 @@ func wireCorpus() []wireCase {
 		{name: "ByteaCastText", sql: `SELECT b_key, CAST(b_val AS text) AS s FROM bytea_probe WHERE b_key IN (0, 2, 3) ORDER BY b_key`},
 		// OCTET_LENGTH over bytea: the value agrees, the declared type does
 		// not, and for the reason #530 already records for LENGTH and ABS.
-		{name: "ByteaOctetLength", sql: `SELECT b_key, OCTET_LENGTH(b_val) AS n FROM bytea_probe WHERE b_key IN (0, 2, 3) ORDER BY b_key`,
-			pins: map[string]string{
-				wirePropTypeOIDs: "#530: OCTET_LENGTH is int4 in PostgreSQL (OID 23) and wadjet declares " +
-					"float8 (701), because the expr layer computes it as a float64 — the same defect " +
-					"LENGTH and ABS have, and nothing to do with the bytea column it is measuring",
-				wirePropTypeSizes: "#530, follows the OID: 8 for float8 where PostgreSQL declares 4 for int4",
-			}},
+		{name: "ByteaOctetLength", sql: `SELECT b_key, OCTET_LENGTH(b_val) AS n FROM bytea_probe WHERE b_key IN (0, 2, 3) ORDER BY b_key`},
 		// A bytea PARAMETER, declared and inferred. The parameter format is
 		// TEXT here (readOne sends every parameter as text), so these also
 		// cover byteain's escape spelling on the way in — the shape that

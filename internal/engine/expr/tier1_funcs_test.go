@@ -40,9 +40,9 @@ func TestStrPos(t *testing.T) {
 		args []any
 		want any
 	}{
-		{[]any{"hello world", "world"}, float64(7)},
-		{[]any{"hello world", "hello"}, float64(1)},
-		{[]any{"hello world", "xyz"}, float64(0)},
+		{[]any{"hello world", "world"}, int32(7)},
+		{[]any{"hello world", "hello"}, int32(1)},
+		{[]any{"hello world", "xyz"}, int32(0)},
 		{[]any{nil, "x"}, nil},
 	}
 	for _, tt := range tests {

@@ -47,7 +47,7 @@ func fnOctetLength(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	return float64(len(toString(args[0])))
+	return int32(len(toString(args[0])))
 }
 
 // fnBitLength returns the number of bits (8 x octet_length).
@@ -55,7 +55,7 @@ func fnBitLength(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	return float64(8 * len(toString(args[0])))
+	return int32(8 * len(toString(args[0])))
 }
 
 // --- vectorized kernels ---
@@ -72,11 +72,16 @@ func vecBitLength(args []*batch.Vector, out *batch.Vector, n int) {
 
 // vecShapeLenScaled is the shared offsets-only length kernel. mul is 1 for
 // length/octet_length and 8 for bit_length.
+//
+// The length family declares int4 (RetInt32), matching PostgreSQL, so its
+// projection allocates an Int32 output vector and this kernel writes
+// Int32Data (#530). It used to declare and compute float8 — a JDBC/pgx client
+// reading LENGTH as an Integer got a Double.
 func vecShapeLenScaled(args []*batch.Vector, out *batch.Vector, n int, mul int) {
 	src := args[0]
-	if len(out.Float64Data) < n {
+	if len(out.Int32Data) < n {
 		// The output vector cannot hold what this kernel writes — the
-		// planner declared a non-numeric type for the projection. Writing
+		// planner declared a non-int32 type for the projection. Writing
 		// anyway indexed off the end of a zero-length slice and panicked the
 		// whole server process: `SELECT LENGTH(c) FROM t` killed every
 		// connection, not just the one that asked. Degrade to a typed write
@@ -106,14 +111,14 @@ func vecShapeLenScaled(args []*batch.Vector, out *batch.Vector, n int, mul int) 
 		if offs[i+1] >= offs[i] {
 			l = int(offs[i+1] - offs[i])
 		}
-		out.Float64Data[i] = float64(mul * l)
+		out.Int32Data[i] = int32(mul * l)
 	}
 }
 
 // vecShapeLenBoxed is the non-byte-array fallback: it reproduces
 // fnOctetLength/fnBitLength over GetValue exactly.
 func vecShapeLenBoxed(src *batch.Vector, out *batch.Vector, n int, mul int) {
-	if len(out.Float64Data) < n {
+	if len(out.Int32Data) < n {
 		vecShapeLenAny(src, out, n, mul)
 		return
 	}
@@ -123,12 +128,12 @@ func vecShapeLenBoxed(src *batch.Vector, out *batch.Vector, n int, mul int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		out.Float64Data[i] = float64(mul * len(toString(v)))
+		out.Int32Data[i] = int32(mul * len(toString(v)))
 	}
 }
 
 // vecShapeLenAny writes lengths through the output vector's own typed setter,
-// for the case where that vector is not float64-backed. Slower than either
+// for the case where that vector is not int32-backed. Slower than either
 // fast path and never taken when the projection is typed correctly — it exists
 // so a type mismatch is a slow answer rather than a process-wide panic.
 func vecShapeLenAny(src *batch.Vector, out *batch.Vector, n int, mul int) {
@@ -138,7 +143,7 @@ func vecShapeLenAny(src *batch.Vector, out *batch.Vector, n int, mul int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		out.SetValue(i, int64(mul*len(toString(v))))
+		out.SetValue(i, int32(mul*len(toString(v))))
 	}
 }
 
@@ -146,15 +151,15 @@ func vecShapeLenAny(src *batch.Vector, out *batch.Vector, n int, mul int) {
 // that genuinely needs the bytes — no offsets fast path exists for it.
 func vecCharLength(args []*batch.Vector, out *batch.Vector, n int) {
 	src := args[0]
-	if len(out.Float64Data) < n {
-		// Non-float64 output vector: see vecShapeLenScaled.
+	if len(out.Int32Data) < n {
+		// Non-int32 output vector: see vecShapeLenScaled.
 		for i := 0; i < n; i++ {
 			v := src.GetValue(i)
 			if v == nil {
 				out.Nulls.SetNull(i)
 				continue
 			}
-			out.SetValue(i, int64(utf8.RuneCountInString(toString(v))))
+			out.SetValue(i, int32(utf8.RuneCountInString(toString(v))))
 		}
 		return
 	}
@@ -165,7 +170,7 @@ func vecCharLength(args []*batch.Vector, out *batch.Vector, n int) {
 				out.Nulls.SetNull(i)
 				continue
 			}
-			out.Float64Data[i] = float64(utf8.RuneCountInString(toString(v)))
+			out.Int32Data[i] = int32(utf8.RuneCountInString(toString(v)))
 		}
 		return
 	}
@@ -175,7 +180,7 @@ func vecCharLength(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		out.Float64Data[i] = float64(utf8.RuneCount(src.BytesData.Value(i)))
+		out.Int32Data[i] = int32(utf8.RuneCount(src.BytesData.Value(i)))
 	}
 }
 
@@ -197,7 +202,10 @@ func (e *ColShapeLen) Eval(b *batch.RecordBatch, row int) any {
 	if !ok {
 		return nil
 	}
-	return v
+	// int4, matching fnLength/fnOctetLength/fnBitLength and PostgreSQL (#530).
+	// The boxed value must carry the same Go type as the generic FuncCall it
+	// replaces, or a consumer that type-asserts it disagrees by path.
+	return int32(v)
 }
 
 func (e *ColShapeLen) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
@@ -223,10 +231,11 @@ func (e *ColShapeLen) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 }
 
 // EvalVec fills out for the whole batch. Mirrors FuncCall.EvalVec's
-// contract: writes Float64Data, marking nulls in out.Nulls.
+// contract: writes Int32Data (the length family is int4, #530), marking
+// nulls in out.Nulls.
 func (e *ColShapeLen) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 	v, ok := e.fastCol(b)
-	if !ok || out.Float64Data == nil {
+	if !ok || out.Int32Data == nil {
 		e.Fallback.EvalVec(b, out, n)
 		return
 	}

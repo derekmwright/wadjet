@@ -282,13 +282,13 @@ func TestTier3WidthBucket(t *testing.T) {
 		want any
 	}{
 		// 5.0 in range [0, 10) with 5 buckets -> bucket 3
-		{[]any{float64(5), float64(0), float64(10), float64(5)}, float64(3)},
+		{[]any{float64(5), float64(0), float64(10), float64(5)}, int32(3)},
 		// Below lower bound -> bucket 0
-		{[]any{float64(-1), float64(0), float64(10), float64(5)}, float64(0)},
+		{[]any{float64(-1), float64(0), float64(10), float64(5)}, int32(0)},
 		// At or above upper bound -> n+1
-		{[]any{float64(10), float64(0), float64(10), float64(5)}, float64(6)},
+		{[]any{float64(10), float64(0), float64(10), float64(5)}, int32(6)},
 		// Edge: first bucket
-		{[]any{float64(0), float64(0), float64(10), float64(5)}, float64(1)},
+		{[]any{float64(0), float64(0), float64(10), float64(5)}, int32(1)},
 		// Invalid: 0 buckets
 		{[]any{float64(5), float64(0), float64(10), float64(0)}, nil},
 		// Invalid: equal bounds

@@ -46,6 +46,7 @@ const (
 // formatted strings, so they declare RetString.
 var (
 	RetBool      = Ret{kind: retFixed, typ: batch.TypeBool}
+	RetInt32     = Ret{kind: retFixed, typ: batch.TypeInt32}
 	RetInt64     = Ret{kind: retFixed, typ: batch.TypeInt64}
 	RetFloat64   = Ret{kind: retFixed, typ: batch.TypeFloat64}
 	RetString    = Ret{kind: retFixed, typ: batch.TypeString}

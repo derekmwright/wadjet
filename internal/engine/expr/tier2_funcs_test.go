@@ -54,13 +54,13 @@ func TestChrCodepoint(t *testing.T) {
 	if chr([]any{float64(65)}) != "A" {
 		t.Error("chr(65) should be 'A'")
 	}
-	if cp([]any{"A"}) != float64(65) {
-		t.Error("codepoint('A') should be 65")
+	if cp([]any{"A"}) != int32(65) {
+		t.Error("codepoint('A') should be int32(65)")
 	}
 
 	// Round-trip
 	emoji := "🔥"
-	code := cp([]any{emoji}).(float64)
+	code := cp([]any{emoji}).(int32)
 	back := chr([]any{code})
 	if back != emoji {
 		t.Errorf("chr/codepoint round-trip failed for %s", emoji)
@@ -95,12 +95,12 @@ func TestConcatWS(t *testing.T) {
 
 func TestCharLength(t *testing.T) {
 	fn := DefaultRegistry.Lookup("char_length")
-	if fn([]any{"hello"}) != float64(5) {
-		t.Error("char_length('hello') should be 5")
+	if fn([]any{"hello"}) != int32(5) {
+		t.Error("char_length('hello') should be int32(5)")
 	}
 	// Multi-byte characters
-	if fn([]any{"日本語"}) != float64(3) {
-		t.Error("char_length('日本語') should be 3")
+	if fn([]any{"日本語"}) != int32(3) {
+		t.Error("char_length('日本語') should be int32(3)")
 	}
 }
 

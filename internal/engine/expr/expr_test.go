@@ -221,7 +221,7 @@ func TestScalarFunctions(t *testing.T) {
 	}{
 		{"UPPER", &FuncCall{Name: "upper", Args: []Expr{&ColRef{Name: "name"}}}, 0, "ALICE"},
 		{"LOWER", &FuncCall{Name: "lower", Args: []Expr{&Lit{Val: "HELLO"}}}, 0, "hello"},
-		{"LENGTH", &FuncCall{Name: "length", Args: []Expr{&ColRef{Name: "name"}}}, 0, float64(5)},
+		{"LENGTH", &FuncCall{Name: "length", Args: []Expr{&ColRef{Name: "name"}}}, 0, int32(5)},
 		{"ABS", &FuncCall{Name: "abs", Args: []Expr{&Lit{Val: float64(-5)}}}, 0, float64(5)},
 		{"CEIL", &FuncCall{Name: "ceil", Args: []Expr{&ColRef{Name: "amount"}}}, 0, float64(101)},
 		{"FLOOR", &FuncCall{Name: "floor", Args: []Expr{&ColRef{Name: "amount"}}}, 0, float64(100)},
@@ -715,8 +715,8 @@ func TestArrayFunctions(t *testing.T) {
 		if fn == nil {
 			t.Fatal("cardinality function not registered")
 		}
-		if result := fn([]any{arr}); result != int64(3) {
-			t.Fatalf("expected 3, got %v", result)
+		if result := fn([]any{arr}); result != int32(3) {
+			t.Fatalf("expected int32(3), got %v (%T)", result, result)
 		}
 	})
 

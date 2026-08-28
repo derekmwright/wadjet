@@ -3325,15 +3325,15 @@ func init() {
 		"upper":  {fnUpper, RetString},
 		"lower":  {fnLower, RetString},
 		"concat": {fnConcat, RetString},
-		"length": {fnLength, RetFloat64},
-		"len":    {fnLength, RetFloat64},
+		"length": {fnLength, RetInt32},
+		"len":    {fnLength, RetInt32},
 		// length() has always counted BYTES here (see fnLength), so
 		// octet_length is an exact alias and bit_length is 8x. The rune-counting
 		// member of the family is char_length/character_length below. These
 		// three names were reachable from the parser and typed numeric by the
 		// planner but had no implementation, so they evaluated to NULL.
-		"octet_length": {fnOctetLength, RetFloat64},
-		"bit_length":   {fnBitLength, RetFloat64},
+		"octet_length": {fnOctetLength, RetInt32},
+		"bit_length":   {fnBitLength, RetInt32},
 		"substr":       {fnSubstr, RetString},
 		"substring":    {fnSubstr, RetString},
 		"trim":         {fnTrim, RetString},
@@ -3429,8 +3429,8 @@ func init() {
 
 		// String: regex and parsing
 		"split_part":     {fnSplitPart, RetString},
-		"strpos":         {fnStrPos, RetFloat64},
-		"position":       {fnStrPos, RetFloat64},
+		"strpos":         {fnStrPos, RetInt32},
+		"position":       {fnStrPos, RetInt32},
 		"regexp_like":    {fnRegexpLike, RetBool},
 		"regexp_extract": {fnRegexpExtract, RetString},
 		"regexp_replace": {fnRegexpReplace, RetString},
@@ -3462,10 +3462,10 @@ func init() {
 		"lpad":             {fnLPad, RetString},
 		"rpad":             {fnRPad, RetString},
 		"chr":              {fnChr, RetString},
-		"codepoint":        {fnCodepoint, RetFloat64},
+		"codepoint":        {fnCodepoint, RetInt32},
 		"concat_ws":        {fnConcatWS, RetString},
-		"char_length":      {fnCharLength, RetFloat64},
-		"character_length": {fnCharLength, RetFloat64},
+		"char_length":      {fnCharLength, RetInt32},
+		"character_length": {fnCharLength, RetInt32},
 		"translate":        {fnTranslate, RetString},
 
 		// Math: trigonometry
@@ -3521,7 +3521,7 @@ func init() {
 		"is_nan":       {fnIsNaN, RetBool},
 		"is_finite":    {fnIsFinite, RetBool},
 		"is_infinite":  {fnIsInfinite, RetBool},
-		"width_bucket": {fnWidthBucket, RetFloat64},
+		"width_bucket": {fnWidthBucket, RetInt32},
 		"from_base":    {fnFromBase, RetFloat64},
 		"to_base":      {fnToBase, RetString},
 		"bit_count":    {fnBitCount, RetFloat64},
@@ -3729,8 +3729,8 @@ func init() {
 		"parse_rate":   {fnParseRate, RetInt64},
 
 		// Array/nested type functions (Trino-compatible)
-		"cardinality":    {fnCardinality, RetInt64},
-		"array_length":   {fnCardinality, RetInt64},
+		"cardinality":    {fnCardinality, RetInt32},
+		"array_length":   {fnCardinality, RetInt32},
 		"element_at":     {fnElementAt, RetDynamic},
 		"array_contains": {fnArrayContains, RetBool},
 		"array_join":     {fnArrayJoin, RetString},
@@ -3841,7 +3841,7 @@ func fnLength(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	return float64(len(toString(args[0])))
+	return int32(len(toString(args[0])))
 }
 
 func fnSubstr(args []any) any {
@@ -5887,9 +5887,9 @@ func fnStrPos(args []any) any {
 	}
 	pos := strings.Index(toString(args[0]), toString(args[1]))
 	if pos < 0 {
-		return float64(0)
+		return int32(0)
 	}
-	return float64(pos + 1) // 1-based
+	return int32(pos + 1) // 1-based
 }
 
 func fnRegexpLike(args []any) any {
@@ -6231,7 +6231,7 @@ func fnCodepoint(args []any) any {
 		return nil
 	}
 	runes := []rune(s)
-	return float64(runes[0])
+	return int32(runes[0])
 }
 
 func fnConcatWS(args []any) any {
@@ -6253,7 +6253,7 @@ func fnCharLength(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	return float64(len([]rune(toString(args[0]))))
+	return int32(len([]rune(toString(args[0]))))
 }
 
 func fnTranslate(args []any) any {
@@ -6849,17 +6849,17 @@ func fnWidthBucket(args []any) any {
 		return nil
 	}
 	if value < bound1 {
-		return float64(0)
+		return int32(0)
 	}
 	if value >= bound2 {
-		return float64(n + 1)
+		return int32(n + 1)
 	}
 	width := (bound2 - bound1) / float64(n)
 	bucket := int((value-bound1)/width) + 1
 	if bucket > n {
 		bucket = n + 1
 	}
-	return float64(bucket)
+	return int32(bucket)
 }
 
 func fnFromBase(args []any) any {
@@ -10000,7 +10000,7 @@ func fnCardinality(args []any) any {
 	if !ok {
 		return nil
 	}
-	return int64(len(arr))
+	return int32(len(arr))
 }
 
 // element_at(array, index) — returns the element at 1-based index (Trino convention)

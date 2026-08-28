@@ -78,17 +78,19 @@ func TestVecShapeLenParity(t *testing.T) {
 			for _, k := range []struct {
 				name string
 				fn   VecScalarFunc
-				want func(string) float64
+				want func(string) int32
 			}{
-				{"length", vecLength, func(s string) float64 { return float64(len(s)) }},
-				{"octet_length", vecOctetLength, func(s string) float64 { return float64(len(s)) }},
-				{"bit_length", vecBitLength, func(s string) float64 { return float64(8 * len(s)) }},
-				{"char_length", vecCharLength, func(s string) float64 {
-					return float64(utf8.RuneCountInString(s))
+				{"length", vecLength, func(s string) int32 { return int32(len(s)) }},
+				{"octet_length", vecOctetLength, func(s string) int32 { return int32(len(s)) }},
+				{"bit_length", vecBitLength, func(s string) int32 { return int32(8 * len(s)) }},
+				{"char_length", vecCharLength, func(s string) int32 {
+					return int32(utf8.RuneCountInString(s))
 				}},
 			} {
 				t.Run(k.name, func(t *testing.T) {
-					out := batch.NewVector(batch.TypeFloat64, n)
+					// The length family is int4 (RetInt32), so its output
+					// vector is Int32-backed (#530).
+					out := batch.NewVector(batch.TypeInt32, n)
 					k.fn([]*batch.Vector{b.Columns[0]}, out, n)
 					for i := 0; i < n; i++ {
 						if nulls[i] {
@@ -100,7 +102,7 @@ func TestVecShapeLenParity(t *testing.T) {
 						if out.Nulls.IsNull(i) {
 							t.Fatalf("row %d: non-null input produced NULL output", i)
 						}
-						if got, want := out.Float64Data[i], k.want(vals[i]); got != want {
+						if got, want := out.Int32Data[i], k.want(vals[i]); got != want {
 							t.Fatalf("row %d (%q): got %v want %v", i, vals[i], got, want)
 						}
 					}
@@ -118,26 +120,26 @@ func TestVecShapeLenMultibyteSemantics(t *testing.T) {
 	nulls := make([]bool, len(vals))
 	b := shapeBatch(t, "s", parquet.TypeString, vals, nulls)
 
-	out := batch.NewVector(batch.TypeFloat64, len(vals))
+	out := batch.NewVector(batch.TypeInt32, len(vals))
 	vecLength([]*batch.Vector{b.Columns[0]}, out, len(vals))
-	wantBytes := []float64{6, 2, 4, 3}
+	wantBytes := []int32{6, 2, 4, 3}
 	for i := range vals {
-		if out.Float64Data[i] != wantBytes[i] {
-			t.Fatalf("length(%q): got %v want %v (byte semantics)", vals[i], out.Float64Data[i], wantBytes[i])
+		if out.Int32Data[i] != wantBytes[i] {
+			t.Fatalf("length(%q): got %v want %v (byte semantics)", vals[i], out.Int32Data[i], wantBytes[i])
 		}
 		// The boxed scalar definition must agree — this is the invariant the
 		// offsets fast path is allowed to exist under.
 		if got := fnLength([]any{vals[i]}); got != any(wantBytes[i]) {
-			t.Fatalf("fnLength(%q): got %v want %v", vals[i], got, wantBytes[i])
+			t.Fatalf("fnLength(%q): got %v (%T) want %v", vals[i], got, got, wantBytes[i])
 		}
 	}
 
-	outRunes := batch.NewVector(batch.TypeFloat64, len(vals))
+	outRunes := batch.NewVector(batch.TypeInt32, len(vals))
 	vecCharLength([]*batch.Vector{b.Columns[0]}, outRunes, len(vals))
-	wantRunes := []float64{2, 1, 1, 3}
+	wantRunes := []int32{2, 1, 1, 3}
 	for i := range vals {
-		if outRunes.Float64Data[i] != wantRunes[i] {
-			t.Fatalf("char_length(%q): got %v want %v (rune semantics)", vals[i], outRunes.Float64Data[i], wantRunes[i])
+		if outRunes.Int32Data[i] != wantRunes[i] {
+			t.Fatalf("char_length(%q): got %v want %v (rune semantics)", vals[i], outRunes.Int32Data[i], wantRunes[i])
 		}
 	}
 }
@@ -151,10 +153,10 @@ func TestVecShapeLenNonByteArray(t *testing.T) {
 	b.Columns[0].Int64Data[1] = 12345
 	b.Columns[0].Nulls.SetNull(2)
 
-	out := batch.NewVector(batch.TypeFloat64, 3)
+	out := batch.NewVector(batch.TypeInt32, 3)
 	vecLength([]*batch.Vector{b.Columns[0]}, out, 3)
-	if out.Float64Data[0] != 1 || out.Float64Data[1] != 5 {
-		t.Fatalf("length(int) got %v %v want 1 5", out.Float64Data[0], out.Float64Data[1])
+	if out.Int32Data[0] != 1 || out.Int32Data[1] != 5 {
+		t.Fatalf("length(int) got %v %v want 1 5", out.Int32Data[0], out.Int32Data[1])
 	}
 	if !out.Nulls.IsNull(2) {
 		t.Error("NULL int should yield NULL length")
@@ -186,8 +188,11 @@ func TestColShapeLenParityAgainstGeneric(t *testing.T) {
 					t.Fatalf("%s boxed Eval row %d: fast=%v generic=%v", name, i, fv, gv)
 				}
 			}
-			// Vectorized fill must agree with the per-row values.
-			out := batch.NewVector(batch.TypeFloat64, n)
+			// Vectorized fill must agree with the per-row values. The
+			// projection materializes int4 (#530), so EvalVec writes an
+			// Int32 vector; EvalFloat64Vec keeps the float64 contract its
+			// arithmetic callers rely on.
+			out := batch.NewVector(batch.TypeInt32, n)
 			fast.EvalVec(b, out, n)
 			dst := make([]float64, n)
 			anyNull := fast.EvalFloat64Vec(b, dst, n)
@@ -202,8 +207,8 @@ func TestColShapeLenParityAgainstGeneric(t *testing.T) {
 					}
 					continue
 				}
-				if out.Float64Data[i] != want || dst[i] != want {
-					t.Fatalf("%s row %d: vec=%v float64vec=%v want %v", name, i, out.Float64Data[i], dst[i], want)
+				if int32(out.Int32Data[i]) != int32(want) || dst[i] != want {
+					t.Fatalf("%s row %d: vec=%v float64vec=%v want %v", name, i, out.Int32Data[i], dst[i], want)
 				}
 			}
 		}
@@ -433,10 +438,11 @@ func TestShapeLenKernelsSurviveMismatchedOutput(t *testing.T) {
 	for i, s := range []string{"abc", "de", ""} {
 		src.SetValue(i, s)
 	}
-	// A Bytes output vector: no Float64Data at all.
+	// A Bytes output vector: no Int32Data at all (the type the length
+	// family's kernels now write, #530).
 	out := batch.NewVector(batch.TypeString, 3)
-	if len(out.Float64Data) != 0 {
-		t.Skip("string vectors carry Float64Data on this build")
+	if len(out.Int32Data) != 0 {
+		t.Skip("string vectors carry Int32Data on this build")
 	}
 
 	vecLength([]*batch.Vector{src}, out, 3)

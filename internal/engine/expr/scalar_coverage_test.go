@@ -309,9 +309,9 @@ func TestFnLength(t *testing.T) {
 	if fnLength([]any{nil}) != nil {
 		t.Error("nil arg")
 	}
-	// length returns float64
-	if fnLength([]any{"hello"}) != float64(5) {
-		t.Errorf("expected 5.0, got %v (%T)", fnLength([]any{"hello"}), fnLength([]any{"hello"}))
+	// length returns int32 (int4 in PostgreSQL, #530)
+	if fnLength([]any{"hello"}) != int32(5) {
+		t.Errorf("expected int32(5), got %v (%T)", fnLength([]any{"hello"}), fnLength([]any{"hello"}))
 	}
 }
 
@@ -417,8 +417,8 @@ func TestFnCardinality(t *testing.T) {
 	if fnCardinality([]any{"not-slice"}) != nil {
 		t.Error("non-slice")
 	}
-	if fnCardinality([]any{[]any{1, 2, 3}}) != int64(3) {
-		t.Error("expected 3")
+	if fnCardinality([]any{[]any{1, 2, 3}}) != int32(3) {
+		t.Error("expected int32(3)")
 	}
 }
 
