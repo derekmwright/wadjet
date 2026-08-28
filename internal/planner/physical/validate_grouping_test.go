@@ -150,3 +150,87 @@ func TestValidateGroupedQuerySkipsWhenAScopeIsOpen(t *testing.T) {
 		}
 	}
 }
+
+// #620: the grouping check matched a reference against grouped terms by BARE
+// column NAME, so `GROUP BY t3.c1` licensed ANY column named `c1` — including
+// an ungrouped `t1.c1` from a JOINed (or comma-joined) second table. The
+// SELECT list then returned another column's values under `t1.c1`'s name and a
+// HAVING over it excluded every group, both silently. The offending table
+// reached the query the same way the fixed comma-join case did; the true
+// defect was the qualifier-insensitive match, not the FROM shape, so the gate
+// exercises both the collision (refused) and the spelling differences a
+// grouped column is still allowed (admitted).
+func TestValidateGroupedQueryResolvesColumnIdentityAcrossJoins(t *testing.T) {
+	cat := &fakeCatalog{tables: map[string][]string{
+		"t3": {"c0", "c1", "c2", "c4"},
+		"t0": {"c0"},
+		"t1": {"c1", "c2"},
+	}}
+
+	tests := []struct {
+		name      string
+		sql       string
+		wantState string // "" = must validate
+		wantIn    string
+	}{
+		// --- #620 repro: an ungrouped column from the JOINed table whose
+		//     NAME collides with a grouped column of the other table -------
+		{"join select ungrouped name-collision",
+			"SELECT t3.c4, t1.c1 FROM t3 LEFT OUTER JOIN t1 ON t1.c2 GROUP BY t3.c1, t3.c2, t3.c4",
+			"42803", `"t1.c1"`},
+		{"plain join having ungrouped name-collision",
+			"SELECT t3.c4 FROM t3 JOIN t1 ON t1.c2 GROUP BY t3.c1, t3.c2, t3.c4 HAVING t1.c1",
+			"42803", `"t1.c1"`},
+		{"left join having ungrouped name-collision",
+			"SELECT t3.c4 FROM t3, t0 LEFT OUTER JOIN t1 ON t1.c2 GROUP BY t3.c1, t3.c2, t3.c4 HAVING t1.c1",
+			"42803", `"t1.c1"`},
+		{"right join having ungrouped name-collision",
+			"SELECT t3.c4 FROM t3 RIGHT OUTER JOIN t1 ON t1.c2 GROUP BY t3.c1, t3.c2, t3.c4 HAVING t1.c1",
+			"42803", `"t1.c1"`},
+		{"full join having ungrouped name-collision",
+			"SELECT t3.c4 FROM t3 FULL OUTER JOIN t1 ON t1.c2 GROUP BY t3.c1, t3.c2, t3.c4 HAVING t1.c1",
+			"42803", `"t1.c1"`},
+		// The gap was never JOIN-specific: a comma join with the same NAME
+		// collision was equally silently wrong.
+		{"comma join having ungrouped name-collision",
+			"SELECT t3.c4 FROM t3, t1 GROUP BY t3.c1, t3.c2, t3.c4 HAVING t1.c1",
+			"42803", `"t1.c1"`},
+
+		// --- The legal shapes that identity resolution must keep admitting.
+		//     A grouped column licenses every spelling of ITSELF, and an
+		//     aggregate over the joined table's column is always fine. -----
+		{"grouped join column selected qualified",
+			"SELECT t3.c1, COUNT(*) FROM t3 JOIN t1 ON t1.c2 = t3.c2 GROUP BY t3.c1", "", ""},
+		{"grouped join column selected bare",
+			"SELECT c4, COUNT(*) FROM t3 JOIN t1 ON t1.c2 = t3.c2 GROUP BY t3.c4", "", ""},
+		{"aggregate over the joined table's column",
+			"SELECT t3.c1, MAX(t1.c1) FROM t3 JOIN t1 ON t1.c2 = t3.c2 GROUP BY t3.c1", "", ""},
+		{"having aggregate over the joined table's column",
+			"SELECT t3.c1 FROM t3 JOIN t1 ON t1.c2 = t3.c2 GROUP BY t3.c1 HAVING COUNT(t1.c1) > 0", "", ""},
+		{"grouped column of the joined table selected",
+			"SELECT t1.c1, COUNT(*) FROM t3 JOIN t1 ON t1.c2 = t3.c2 GROUP BY t1.c1", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := mustExtract(t, tt.sql)
+			err := validateColumns(context.Background(), cat, info)
+			if tt.wantState == "" {
+				if err != nil {
+					t.Fatalf("expected %q to validate, got: %v", tt.sql, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected a %s rejection for %q, got nil — the statement would be answered silently",
+					tt.wantState, tt.sql)
+			}
+			if got := sqlerr.StateOf(err); got != tt.wantState {
+				t.Errorf("SQLSTATE = %q, want %s (err: %v)", got, tt.wantState, err)
+			}
+			if tt.wantIn != "" && !strings.Contains(err.Error(), tt.wantIn) {
+				t.Errorf("error must name the offender %s, got: %v", tt.wantIn, err)
+			}
+		})
+	}
+}

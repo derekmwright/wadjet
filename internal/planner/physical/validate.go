@@ -567,7 +567,7 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 		return nil
 	}
 
-	g := &groupCheck{from: from, keys: map[string]bool{}, cols: map[string]bool{}}
+	g := &groupCheck{from: from, keys: map[string]bool{}, idents: map[string]bool{}, bare: map[string]bool{}}
 	g.addGroupTerms(info)
 
 	// SELECT list. An output alias is NOT visible here — a select item cannot
@@ -589,7 +589,7 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 	// have refused.
 	for i := range info.Columns {
 		if a := strings.ToLower(strings.TrimSpace(info.Columns[i].Alias)); a != "" {
-			g.cols[a] = true
+			g.bare[a] = true
 			g.keys[a] = true
 		}
 	}
@@ -612,14 +612,62 @@ func checkUngrouped(info *plansql.SelectInfo, from *colScope) error {
 //
 // keys holds the rendered text of every grouped expression, so a SELECT item
 // that repeats a grouping expression verbatim (`GROUP BY substr(c_phone,1,2)`)
-// matches as a whole and its columns are never examined. cols holds the bare
-// names of the grouped expressions that are plain column references, matched
-// qualifier-insensitively: `GROUP BY a` licenses `t.a`, and the alternative —
-// refusing it — would break working queries for a spelling difference.
+// matches as a whole and its columns are never examined.
+//
+// idents holds the RESOLVED identity — base source plus column — of every
+// grouped term that is a plain column reference, so `GROUP BY t3.c1` licenses
+// exactly t3.c1 (however it is spelled, qualified or bare) and NOT some other
+// table's column that merely shares the name `c1`. Matching on the bare name
+// alone let a JOINed table's ungrouped `t1.c1` pass whenever any grouped term
+// happened to be named `c1` — silently wrong SELECT values, and a HAVING that
+// excluded every group (#620).
+//
+// bare is the lenient fallback: the bare names of grouped terms whose base
+// source could NOT be resolved uniquely (an unknown or ambiguous qualifier),
+// plus SELECT output aliases, which have no base source. A reference the check
+// cannot resolve to a source is never judged, so the fallback only ever admits
+// more — it cannot turn a working query into a false rejection.
 type groupCheck struct {
-	from *colScope
-	keys map[string]bool
-	cols map[string]bool
+	from   *colScope
+	keys   map[string]bool
+	idents map[string]bool
+	bare   map[string]bool
+}
+
+// identKey renders a resolved (source, column) identity. Both halves are
+// already lower-cased by the callers; the NUL separator cannot occur in either.
+func identKey(table, col string) string {
+	return table + "\x00" + col
+}
+
+// resolveOwnTable resolves ref to the single base source (qualifier/alias) of
+// this block that provides it. ok is false whenever that is not certain — a
+// system column, an unknown qualifier, a bare name no source or more than one
+// source provides — and an uncertain reference is never judged by the grouping
+// check, matching the binder's stance that a false positive breaks a working
+// query while a false negative merely lets one through.
+func (g *groupCheck) resolveOwnTable(ref *plansql.ColRef) (string, bool) {
+	c := strings.ToLower(ref.Column)
+	if pgSystemColumns[c] {
+		return "", false
+	}
+	if ref.Table != "" {
+		q := strings.ToLower(ref.Table)
+		if cols, ok := g.from.quals[q]; ok && cols[c] {
+			return q, true
+		}
+		return "", false
+	}
+	// A bare name must be provided by exactly one of this block's sources.
+	if g.from.srcCount[c] != 1 {
+		return "", false
+	}
+	for q, cols := range g.from.quals {
+		if cols[c] {
+			return q, true
+		}
+	}
+	return "", false
 }
 
 // addGroupTerms records this block's grouped expressions. A term written as a
@@ -637,7 +685,11 @@ func (g *groupCheck) addGroupTerms(info *plansql.SelectInfo) {
 		}
 		if ref, ok := unparen(n).(*plansql.ColRef); ok {
 			if c := strings.ToLower(ref.Column); c != "" {
-				g.cols[c] = true
+				if tbl, resolved := g.resolveOwnTable(ref); resolved {
+					g.idents[identKey(tbl, c)] = true
+				} else {
+					g.bare[c] = true
+				}
 			}
 		}
 	}
@@ -656,7 +708,7 @@ func (g *groupCheck) addGroupTerms(info *plansql.SelectInfo) {
 			add(item.ASTExpr)
 			if a := strings.ToLower(strings.TrimSpace(item.Alias)); a != "" {
 				g.keys[a] = true
-				g.cols[a] = true
+				g.bare[a] = true
 			}
 		}
 	}
@@ -674,7 +726,7 @@ func (g *groupCheck) addGroupTerms(info *plansql.SelectInfo) {
 				add(item.ASTExpr)
 				if a := strings.ToLower(strings.TrimSpace(item.Alias)); a != "" {
 					g.keys[a] = true
-					g.cols[a] = true
+					g.bare[a] = true
 				}
 			}
 		}
@@ -716,7 +768,16 @@ func (g *groupCheck) check(node plansql.Node) error {
 	}
 	switch n := node.(type) {
 	case *plansql.ColRef:
-		if !g.owns(n) || g.cols[strings.ToLower(n.Column)] {
+		tbl, ok := g.resolveOwnTable(n)
+		if !ok {
+			// Not certainly one of this block's own columns (an outer
+			// correlated reference, a niladic the parser reads as a column, or
+			// an ambiguous bare name another arm refuses as 42702) — not
+			// judged here.
+			return nil
+		}
+		c := strings.ToLower(n.Column)
+		if g.idents[identKey(tbl, c)] || g.bare[c] {
 			return nil
 		}
 		return sqlerr.New("42803", "column %q must appear in the GROUP BY clause or be used in an aggregate function", n.String())
@@ -736,20 +797,6 @@ func (g *groupCheck) check(node plansql.Node) error {
 		}
 	}
 	return nil
-}
-
-// owns reports whether ref certainly names a column of one of this block's own
-// FROM sources — the only references this check judges.
-func (g *groupCheck) owns(ref *plansql.ColRef) bool {
-	c := strings.ToLower(ref.Column)
-	if pgSystemColumns[c] {
-		return false
-	}
-	if ref.Table != "" {
-		cols, ok := g.from.quals[strings.ToLower(ref.Table)]
-		return ok && cols[c]
-	}
-	return g.from.cols[c]
 }
 
 // groupTermKey renders an expression for comparison against the grouped terms.
