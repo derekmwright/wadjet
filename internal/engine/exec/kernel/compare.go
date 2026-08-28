@@ -224,15 +224,6 @@ func compareFilterBool(op CompareOp, val bool) FilterKernel {
 	}
 }
 
-func toBool(v any) bool {
-	switch tv := v.(type) {
-	case bool:
-		return tv
-	default:
-		return false
-	}
-}
-
 // ResolveFilterKernel creates a FilterKernel for comparing a column of the
 // given type against a constant value. The type dispatch happens once here;
 // the returned function has no type switches in its inner loop.
@@ -253,7 +244,16 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 	}
 	switch typ {
 	case batch.TypeBool:
-		return compareFilterBool(op, toBool(value))
+		// A text literal is read through PostgreSQL's boolean input grammar,
+		// not asserted as a Go bool: `bo = 't'`/`'yes'`/`'1'` all mean TRUE.
+		// The old toBool read every non-bool as FALSE, so every string
+		// literal matched the FALSE rows (#574). A literal that names no
+		// boolean returns no kernel; exec.boolConstError raises 22P02.
+		val, ok := BoolFilterConst(value)
+		if !ok {
+			return nil
+		}
+		return compareFilterBool(op, val)
 	case batch.TypeInt64, batch.TypeTimestamp:
 		return compareFilterImpl(getInt64Data, toInt64(value), op)
 	case batch.TypeInt32:
@@ -1014,7 +1014,15 @@ func inFilterFloat32(set map[float64]struct{}, hasNaN, negate bool) FilterKernel
 func inFilterBool(values []any, negate bool) FilterKernel {
 	var wantTrue, wantFalse bool
 	for _, v := range values {
-		if toBool(v) {
+		// Same boolean input grammar as the scalar TypeBool arm (#574): a
+		// string member is parsed, not asserted, so `bo IN ('t','no')`
+		// reads {TRUE, FALSE}. An unparseable member returns no kernel and
+		// exec.boolConstError raises 22P02, matching the `=` path.
+		b, ok := BoolFilterConst(v)
+		if !ok {
+			return nil
+		}
+		if b {
 			wantTrue = true
 		} else {
 			wantFalse = true

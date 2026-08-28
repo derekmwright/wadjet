@@ -160,6 +160,13 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 	macVal := parseMACFilterVal(value)
 	ipv6Val := parseIPv6FilterVal(value)
 	uuidVal, uuidOK := kernel.UUIDLiteralToRaw(strVal)
+	// A BOOL column's literal is read through PostgreSQL's boolean input
+	// grammar, exactly as the vectorized kernel does (#574). boolOK false
+	// means the text names no boolean; the arm below raises 22P02 the same
+	// way the UUID arm does, rather than the old `value.(bool)` — which
+	// PANICKED on any string literal and, for a Go-bool parameter, ignored
+	// the string spellings entirely.
+	boolVal, boolOK := kernel.BoolFilterConst(value)
 	bytesVal := bytesFilterVal(value)
 	// Offsets-shape: comparing a string column against the empty string is
 	// a zero-length test, not a byte compare — and it is what keeps such a
@@ -209,11 +216,19 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 			}
 			return compareString(v.BytesData.UnsafeStringValue(row), strVal, op)
 		case batch.TypeBool:
+			// boolOK false means the literal names no boolean — the same
+			// refusal networkConstError/boolConstError make for the
+			// vectorized kernel path, raised here via the pipeline's
+			// FatalEvalPanic shape since this path has no error return
+			// (mirrors the TypeUUID arm above).
+			if !boolOK {
+				panic(fatalEvalError{sqlerr.New("22P02", "invalid input syntax for type boolean: %q", strVal)})
+			}
 			if op == OpEq {
-				return v.BoolData[row] == value.(bool)
+				return v.BoolData[row] == boolVal
 			}
 			if op == OpNe {
-				return v.BoolData[row] != value.(bool)
+				return v.BoolData[row] != boolVal
 			}
 		case batch.TypeIPv4:
 			return compareInt64(v.Int64Data[row], ipv4Val, op)
@@ -543,6 +558,28 @@ func decimalConstError(typ batch.TypeID, value any) error {
 	return sqlerr.New("22P02", "invalid input syntax for type numeric: %q", fmt.Sprint(value))
 }
 
+// boolConstError is decimalConstError's counterpart for a BOOL column whose
+// kernel arm refuses a text literal it cannot read as a boolean
+// (kernel.ParseBoolText / #574). PostgreSQL accepts t/f/true/false/yes/no/
+// y/n/on/off/1/0 and their unambiguous prefixes, case-insensitively, as
+// boolean text input, and raises 22P02 (`invalid input syntax for type
+// boolean`) for anything else. Before this, the kernel read every string as
+// FALSE and the row path string-matched only "true"/"false" — two silent
+// wrong answers in opposite directions; now both read the grammar and both
+// refuse the same unparseable literal here and in expr.compare.
+//
+// A nil constant is NOT this case: ResolveFilterKernel's own nil guard
+// answers it as UNKNOWN for every row.
+func boolConstError(typ batch.TypeID, value any) error {
+	if typ != batch.TypeBool || value == nil {
+		return nil
+	}
+	if _, ok := kernel.BoolFilterConst(value); ok {
+		return nil
+	}
+	return sqlerr.New("22P02", "invalid input syntax for type boolean: %q", fmt.Sprint(value))
+}
+
 // rowFieldType reports the declared type of a ROW vector's named field. It is
 // the exec-side counterpart of expr.ColRef.valueType, for the operators that
 // hold a NAME rather than a resolved reference.
@@ -675,6 +712,9 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 						if err := decimalConstError(ft, f.Value); err != nil {
 							return nil, err
 						}
+						if err := boolConstError(ft, f.Value); err != nil {
+							return nil, err
+						}
 					}
 					f.useFallback = true
 					f.inner = NewFilter(f.RowFallback)
@@ -708,6 +748,9 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 			return nil, err
 		}
 		if err := dateConstError(typ, f.Value); err != nil {
+			return nil, err
+		}
+		if err := boolConstError(typ, f.Value); err != nil {
 			return nil, err
 		}
 		// The column resolved; the TYPE has no comparison kernel. Reporting
@@ -820,6 +863,9 @@ func (f *InFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 				return nil, err
 			}
 			if err := dateConstError(typ, v); err != nil {
+				return nil, err
+			}
+			if err := boolConstError(typ, v); err != nil {
 				return nil, err
 			}
 		}

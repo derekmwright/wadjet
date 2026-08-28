@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -127,65 +128,14 @@ func boolFromText(s string) bool {
 	return v
 }
 
-// parseBoolText is `parse_bool_with_len` (src/backend/utils/adt/bool.c),
-// which is what PostgreSQL's `text::boolean` runs.
-//
-// It accepts, case-insensitively and after trimming C `isspace` whitespace,
-// any non-empty PREFIX of "true", "false", "yes" or "no", plus "on"/"off"
-// and the single characters "1" and "0". The prefix rule is not decoration:
-// `'tr'::boolean` and `'fals'::boolean` answer on live PostgreSQL 17, and a
-// stricter reader would raise 22P02 for values PostgreSQL accepts.
-//
-// "o" alone is the one prefix REFUSED, because it cannot choose between "on"
-// and "off" — PostgreSQL spells that as comparing at least two characters,
-// and `SELECT 'o'::boolean` is an error there.
+// parseBoolText is PostgreSQL's `parse_bool_with_len`
+// (src/backend/utils/adt/bool.c), the grammar `text::boolean` runs. It is the
+// SINGLE binding kernel.ParseBoolText: both the CAST here and the
+// BOOL-column-versus-text-literal comparison — vectorized kernel and this
+// row-at-a-time path alike (#574) — read the one function, so no two of them
+// can drift apart on which spellings mean TRUE.
 func parseBoolText(s string) (val, ok bool) {
-	t := strings.Trim(s, " \t\n\v\f\r")
-	if t == "" {
-		return false, false
-	}
-	switch t[0] {
-	case 't', 'T':
-		if isPrefixFold(t, "true") {
-			return true, true
-		}
-	case 'f', 'F':
-		if isPrefixFold(t, "false") {
-			return false, true
-		}
-	case 'y', 'Y':
-		if isPrefixFold(t, "yes") {
-			return true, true
-		}
-	case 'n', 'N':
-		if isPrefixFold(t, "no") {
-			return false, true
-		}
-	case 'o', 'O':
-		if len(t) < 2 {
-			return false, false
-		}
-		if isPrefixFold(t, "on") {
-			return true, true
-		}
-		if isPrefixFold(t, "off") {
-			return false, true
-		}
-	case '1':
-		if len(t) == 1 {
-			return true, true
-		}
-	case '0':
-		if len(t) == 1 {
-			return false, true
-		}
-	}
-	return false, false
-}
-
-// isPrefixFold reports whether s is a case-insensitive prefix of word.
-func isPrefixFold(s, word string) bool {
-	return len(s) <= len(word) && strings.EqualFold(s, word[:len(s)])
+	return kernel.ParseBoolText(s)
 }
 
 // castBoolRuleFor is the rule table, keyed by the operand's declared type.

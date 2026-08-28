@@ -48,11 +48,33 @@ func StatsDomainValue(typ batch.TypeID, scale int, v any) (any, bool) {
 	// the literal already arrives as one. (TIMESTAMP's bounds are rescaled to
 	// engine milliseconds by the reader, at the one place that still holds the
 	// leaf's unit — see parquet.RowGroupStats.)
-	case batch.TypeBool, batch.TypeInt32, batch.TypeInt64,
+	case batch.TypeInt32, batch.TypeInt64,
 		batch.TypeFloat32, batch.TypeFloat64,
 		batch.TypeString,
 		batch.TypePort, batch.TypeProtocol,
 		batch.TypeDuration, batch.TypeTimestamp:
+		return v, true
+
+	// BOOL stats bounds are Go bools; a SQL text literal has to be read
+	// through PostgreSQL's boolean input grammar before it can be compared
+	// against them, exactly as the per-row kernel does (#574). Comparing the
+	// raw string against a bool bound would prune on garbage. A literal that
+	// names no boolean withholds — pruning declines rather than guesses, and
+	// the kernel (ResolveFilterKernel) refuses the same literal with 22P02,
+	// which is what lets that refusal actually run.
+	case batch.TypeBool:
+		switch tv := v.(type) {
+		case string:
+			if b, ok := ParseBoolText(tv); ok {
+				return b, true
+			}
+			return nil, false
+		case []byte:
+			if b, ok := ParseBoolText(string(tv)); ok {
+				return b, true
+			}
+			return nil, false
+		}
 		return v, true
 
 	// CIDR converts to its sort key, boxed as parquet.CidrInetBound rather

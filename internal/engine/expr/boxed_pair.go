@@ -79,6 +79,18 @@ const (
 	// "2001:db8::10" as text and below it as an address, so the two sites
 	// answered `a < z` opposite ways (#565).
 	boxIPv6
+	// boxBool: values from here are BOOL. A BOOL column against a QUOTED
+	// literal reads the literal through PostgreSQL's boolean input grammar
+	// (parse_bool: t/f/true/false/yes/no/y/n/on/off/1/0 and word prefixes),
+	// because the unknown-typed literal is typed FROM the column — the same
+	// rule boxNumber and the network kinds get for a quoted literal, one type
+	// over (#574). The KIND is what keeps this apart from a TEXT column
+	// against a BOOL literal (`s = TRUE`): that pair is boxText vs a
+	// boxUnknown bool literal, which falls through to compare()'s toString
+	// rendering, PostgreSQL-as-a-superset's existing answer. Reading the box
+	// could not tell the two apart — both produce a Go bool and a Go string —
+	// which is why the declaration decides, ADR-0012 item 8.
+	boxBool
 )
 
 // classifyOperand reports an operand's declared kind and whether that answer
@@ -117,6 +129,8 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 			return boxCidr, true
 		case batch.TypeIPv6:
 			return boxIPv6, true
+		case batch.TypeBool:
+			return boxBool, true
 		default:
 			// Every other type either boxes as a number of its own (PORT,
 			// DURATION, and IPv4/MAC, whose box is the raw encoded int64 that
@@ -326,6 +340,14 @@ func pairApplies(lk, rk boxKind, lText, rText string) bool {
 		return true
 	case (rk == boxCidr || rk == boxIPv6) && lk == boxQuoted && lText != "":
 		return true
+	// A BOOL column against a QUOTED literal: the literal is parsed through
+	// PostgreSQL's boolean input grammar, not string-matched against the
+	// bool rendered as "true"/"false" (#574). A bool LITERAL is boxUnknown,
+	// so `s = TRUE` never reaches here.
+	case lk == boxBool && rk == boxQuoted && rText != "":
+		return true
+	case rk == boxBool && lk == boxQuoted && lText != "":
+		return true
 	}
 	return false
 }
@@ -480,8 +502,34 @@ func orderByKinds(lk, rk boxKind, lv, rv any, lText, rText string) (c int, ok, u
 		if c, ok := decimalTextOrder(rv, lText); ok {
 			return -c, true, false
 		}
+	// A BOOL column against a QUOTED literal, in boolean order (FALSE <
+	// TRUE), the literal read through PostgreSQL's input grammar (#574). A
+	// literal that names no boolean is 22P02, raised by boolFromText — never
+	// a fallthrough to a text comparison that would silently miss, which is
+	// the same refusal the vectorized kernel makes (exec.boolConstError).
+	case lk == boxBool && rk == boxQuoted:
+		if lb, ok := lv.(bool); ok {
+			return boolOrder(lb, boolFromText(rText)), true, false
+		}
+	case rk == boxBool && lk == boxQuoted:
+		if rb, ok := rv.(bool); ok {
+			return -boolOrder(rb, boolFromText(lText)), true, false
+		}
 	}
 	return 0, false, false
+}
+
+// boolOrder orders two booleans in PostgreSQL's boolean order, FALSE < TRUE,
+// as a -1/0/1 comparison the caller applies its operator to.
+func boolOrder(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case !a:
+		return -1
+	default:
+		return 1
+	}
 }
 
 // compare answers one comparison operator for this pair, falling through to
