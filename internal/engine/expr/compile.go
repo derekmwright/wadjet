@@ -796,6 +796,14 @@ func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, er
 		return nil, err
 	}
 
+	// element_at / the x[k] subscript route MAP key lookup vs. ARRAY index
+	// from the compiled type of the first argument, which only a dedicated
+	// node can see (a MAP and map_entries()'s ARRAY are the same runtime
+	// shape — #607).
+	if name == "element_at" && len(args) == 2 {
+		return &elementAtExpr{arg0: args[0], arg1: args[1]}, nil
+	}
+
 	fc := &FuncCall{Name: name, Args: args}
 	// ROUND on a DOUBLE PRECISION (or REAL/FLOAT — Wadjet's Cast collapses
 	// all three to the same runtime float64) operand rounds half TO EVEN in

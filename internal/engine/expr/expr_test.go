@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -876,4 +877,87 @@ func TestArraySubscriptParsing(t *testing.T) {
 		t.Fatal("expected non-empty expression")
 	}
 	t.Logf("parsed expression: %s", expr)
+}
+
+// mapEntry returns the ROW("key","value") element schema for a MAP column of
+// the given key/value column types.
+func mapEntry(key, value parquet.Column) *parquet.Column {
+	key.Name, value.Name = "key", "value"
+	return &parquet.Column{Name: "entry", Type: parquet.TypeRow, Fields: []parquet.Column{key, value}}
+}
+
+// TestElementAtMapColumn is the #607 regression driven end to end through the
+// compiler: element_at(m, k) and the m[k] subscript (which parse to the same
+// call) must key-look-up a MAP column and return its value, NULL for an absent
+// key. A MAP column materializes as an ARRAY(ROW("key","value")) []any and
+// map_entries() returns that identical shape, so the routing is decided from
+// the COMPILED type of the first argument, not the runtime value — which is
+// why element_at(map_entries(m), i) still indexes positionally (its guard case
+// here). Types (string keys, integer keys, container values), an empty map, a
+// NULL map, a present-key-with-NULL-value, and a duplicate key are covered.
+func TestElementAtMapColumn(t *testing.T) {
+	str := parquet.Column{Type: parquet.TypeString, Nullable: true}
+	i64 := parquet.Column{Type: parquet.TypeInt64, Nullable: true}
+	arrI64 := parquet.Column{Type: parquet.TypeArray, Nullable: true,
+		ElementType: &parquet.Column{Name: "element", Type: parquet.TypeInt64, Nullable: true}}
+
+	schema := []parquet.Column{
+		{Name: "mstr", Type: parquet.TypeMap, Nullable: true, ElementType: mapEntry(str, i64)},
+		{Name: "mint", Type: parquet.TypeMap, Nullable: true, ElementType: mapEntry(i64, str)},
+		{Name: "marr", Type: parquet.TypeMap, Nullable: true, ElementType: mapEntry(str, arrI64)},
+		{Name: "mdup", Type: parquet.TypeMap, Nullable: true, ElementType: mapEntry(str, i64)},
+		{Name: "msingle", Type: parquet.TypeMap, Nullable: true, ElementType: mapEntry(str, i64)},
+	}
+	b := batch.NewRecordBatch(schema, 3)
+
+	entry := func(k, v any) map[string]any { return map[string]any{"key": k, "value": v} }
+	// mstr: row0 {k:42, other:7, nul:NULL}, row1 {} (empty), row2 NULL.
+	b.ColumnByName("mstr").SetValue(0, []any{entry("k", int64(42)), entry("other", int64(7)), entry("nul", nil)})
+	b.ColumnByName("mstr").SetValue(1, []any{})
+	b.ColumnByName("mstr").SetValue(2, nil)
+	// mint: integer keys.
+	b.ColumnByName("mint").SetValue(0, []any{entry(int64(7), "seven")})
+	// marr: container (ARRAY) values.
+	b.ColumnByName("marr").SetValue(0, []any{entry("arr", []any{int64(1), int64(2), int64(3)})})
+	// mdup: duplicate key — last wins, matching toMap.
+	b.ColumnByName("mdup").SetValue(0, []any{entry("d", int64(1)), entry("d", int64(2))})
+	// msingle: one entry, so map_entries() ordering is deterministic.
+	b.ColumnByName("msingle").SetValue(0, []any{entry("only", int64(99))})
+
+	tests := []struct {
+		name string
+		expr string // first SELECT column expression
+		row  int
+		want any
+	}{
+		// Subscript form and the desugared element_at form, side by side.
+		{"subscript present key", "SELECT mstr['k'] FROM t", 0, int64(42)},
+		{"element_at present key", "SELECT element_at(mstr,'k') FROM t", 0, int64(42)},
+		{"subscript second key", "SELECT mstr['other'] FROM t", 0, int64(7)},
+		{"present key NULL value", "SELECT mstr['nul'] FROM t", 0, nil},
+		{"absent key NULL", "SELECT mstr['missing'] FROM t", 0, nil},
+		{"element_at absent key NULL", "SELECT element_at(mstr,'missing') FROM t", 0, nil},
+		{"empty map NULL", "SELECT mstr['k'] FROM t", 1, nil},
+		{"null map NULL", "SELECT mstr['k'] FROM t", 2, nil},
+		// Integer keys.
+		{"integer key subscript", "SELECT mint[7] FROM t", 0, "seven"},
+		{"integer key absent", "SELECT mint[9] FROM t", 0, nil},
+		// Container value returned intact.
+		{"container value", "SELECT marr['arr'] FROM t", 0, []any{int64(1), int64(2), int64(3)}},
+		// Duplicate key -> last match (aligns with toMap's last-write-wins).
+		{"duplicate key last wins", "SELECT mdup['d'] FROM t", 0, int64(2)},
+		// Regression guard: map_entries(m) is an ARRAY, so element_at over it
+		// must index positionally and return the ENTRY ROW, not NULL.
+		{"map_entries indexed 1", "SELECT element_at(map_entries(msingle), 1) FROM t", 0, map[string]any{"key": "only", "value": int64(99)}},
+		{"map_entries index out of range", "SELECT element_at(map_entries(msingle), 2) FROM t", 0, nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := compileSelectCol(t, tc.expr).Eval(b, tc.row)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("%s row %d = %#v, want %#v", tc.expr, tc.row, got, tc.want)
+			}
+		})
+	}
 }

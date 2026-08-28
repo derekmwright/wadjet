@@ -10006,17 +10006,21 @@ func fnCardinality(args []any) any {
 // element_at(array, index) — returns the element at 1-based index (Trino convention)
 // For MAPs: element_at(map, key) returns the value for the given key.
 // Negative indices count from the end.
+//
+// A MAP value and an ARRAY of ROW("key","value") (e.g. map_entries()'s output)
+// share the same runtime shape — []any of {key,value} rows — so this
+// value-only entry point CANNOT tell a MAP key lookup from an array index and
+// treats every slice positionally. The MAP-vs-ARRAY choice is made from the
+// COMPILED type of the first argument instead, in elementAtExpr, which the
+// compiler wraps every element_at / m['k'] subscript in (#607). A genuine Go
+// map (map_from_entries, constructed literals) is unambiguous and keyed here
+// directly.
 func fnElementAt(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	// Try map lookup first
-	if m, ok := toMap(args[0]); ok {
-		// If second arg is not numeric, or the first arg isn't a plain array, treat as map key
-		if _, isSlice := args[0].([]any); !isSlice {
-			key := fmt.Sprint(args[1])
-			return m[key]
-		}
+	if m, ok := args[0].(map[string]any); ok {
+		return m[fmt.Sprint(args[1])]
 	}
 	arr, ok := toSlice(args[0])
 	if !ok {
@@ -10112,6 +10116,98 @@ func fnRowField(args []any) any {
 // toMap extracts key-value pairs from a MAP value.
 // MAPs are stored as []any where each element is map[string]any{"key":k, "value":v}
 // or as map[string]any directly.
+// elementAtExpr evaluates element_at(x, k) / the x[k] subscript, choosing MAP
+// key lookup vs. ARRAY positional index from the COMPILED type of x rather than
+// the runtime value's shape. A MAP column materializes as an
+// ARRAY(ROW("key","value")) []any and map_entries() returns that identical
+// shape, so a value-only heuristic misroutes one of them; the static type does
+// not (#607).
+type elementAtExpr struct {
+	arg0, arg1 Expr
+	// resolved publishes isMap, decided on the first Eval because a ColRef
+	// needs the batch to know its column's declared type. Set last under mu.
+	resolved atomic.Bool
+	mu       sync.Mutex
+	isMap    bool
+}
+
+func (e *elementAtExpr) Eval(b *batch.RecordBatch, row int) any {
+	container := e.arg0.Eval(b, row)
+	key := e.arg1.Eval(b, row)
+	if container == nil || key == nil {
+		return nil
+	}
+	if !e.resolved.Load() {
+		e.resolveDispatch(b)
+	}
+	if e.isMap {
+		return mapElementAt(container, key)
+	}
+	return fnElementAt([]any{container, key})
+}
+
+func (e *elementAtExpr) resolveDispatch(b *batch.RecordBatch) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.resolved.Load() {
+		return
+	}
+	e.isMap = staticallyMap(e.arg0, b)
+	e.resolved.Store(true)
+}
+
+// staticallyMap reports whether e is known from its COMPILED/declared type to
+// evaluate to a MAP — never from a runtime value's shape, which a MAP shares
+// with an ARRAY of {key,value} rows. b supplies a ColRef its column's declared
+// type. A FuncCall is a MAP when its registered return type fixes it to one
+// (map_from_entries is RetMap; map_entries is RetArray, so map_entries(m)[i]
+// correctly indexes). Anything else is treated as an ARRAY.
+func staticallyMap(e Expr, b *batch.RecordBatch) bool {
+	switch a := e.(type) {
+	case *ColRef:
+		a.resolve(b)
+		return a.typ == batch.TypeMap
+	case *FuncCall:
+		t, c := DefaultRegistry.ReturnType(a.Name).Resolve(len(a.Args), nil)
+		return c != Undecided && t == batch.TypeMap
+	default:
+		return false
+	}
+}
+
+// mapElementAt looks key up in a MAP value in either materialized shape: a Go
+// map (map_from_entries, constructed literals) or the ARRAY(ROW("key","value"))
+// entry rows a MAP column produces through batch.Vector.GetValue. Keys compare
+// by string form, covering the MAP's string and integer key types. A duplicate
+// key returns the LAST match, matching toMap (the shape map_keys/map_values and
+// a MAP GROUP BY key go through, which last-write-wins into a Go map). An
+// absent key returns NULL.
+func mapElementAt(m, key any) any {
+	if gm, ok := m.(map[string]any); ok {
+		return gm[fmt.Sprint(key)]
+	}
+	entries, ok := toSlice(m)
+	if !ok {
+		return nil
+	}
+	want := fmt.Sprint(key)
+	var val any
+	found := false
+	for _, entry := range entries {
+		row, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if fmt.Sprint(row["key"]) == want {
+			val, found = row["value"], true
+		}
+	}
+	if !found {
+		return nil
+	}
+	return val
+}
+
 func toMap(v any) (map[string]any, bool) {
 	switch tv := v.(type) {
 	case map[string]any:
