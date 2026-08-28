@@ -3,12 +3,14 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/oracle"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -84,6 +86,100 @@ func dbpData() []map[string]any {
 		rows = append(rows, m)
 	}
 	return rows
+}
+
+// The DECIMAL/INTEGER OVERFLOW fixture (#547 review): a high-scale DECIMAL
+// beside a BIGINT whose value, restated at that scale, leaves the type the two
+// arms agree on. It rides along in tmdTables for the same reason the others do
+// — TestMixedDecimalIntegerSetOpOverflowTwoPath is the only test that names it,
+// and no type-matrix corpus entry does.
+//
+// midDec DECIMAL(38,30). numeric ∪ bigint is numeric(38,30) here, so a BIGINT
+// is restated at scale 30:
+//
+//   - id = 5           -> 5·10^30, 31 digits: in range.
+//   - id = 100000000   -> 10^38, 39 digits: fits the Int128 carrier but NOT
+//     the declared precision 38 (the sub-carrier band).
+//   - id = 1000000000  -> 10^39, 40 digits: no Int128 at all (the carrier band).
+const midTable = "mixintdecovf"
+
+func midSchema() parquet.Schema {
+	return parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "d", Type: parquet.TypeDecimal, Precision: 38, Scale: 30, Nullable: true},
+	}}
+}
+
+// midWholeDec renders a whole number as an unscaled DECIMAL(38,30), i.e.
+// units·10^30, through a big.Int because that product has no int64.
+func midWholeDec(units int64) parquet.Decimal128 {
+	v := new(big.Int).Mul(big.NewInt(units), new(big.Int).Exp(big.NewInt(10), big.NewInt(30), nil))
+	return sodBigDec(v)
+}
+
+func midData() []map[string]any {
+	return []map[string]any{
+		{"id": int64(5), "d": midWholeDec(1)},
+		{"id": int64(100_000_000), "d": midWholeDec(2)},
+		{"id": int64(1_000_000_000), "d": midWholeDec(3)},
+	}
+}
+
+// TestMixedDecimalIntegerSetOpOverflowTwoPath is the soundness half of #547's
+// fix (its adversarial review): a BIGINT value a set operation must restate at
+// the DECIMAL arm's scale, but which leaves the type the arms agree on, must
+// be refused on BOTH paths with the SAME "numeric field overflow" the stage
+// DAG already raises (exec.coerceDecimalVector) — never the silent Int128Max a
+// saturating text parse would have produced. Both bands the DAG rejects are
+// covered, over UNION, INTERSECT and EXCEPT (all three flow through the same
+// coerceSetOpArmRows + newSetOpKeyer).
+//
+// In this band wadjet errors where PostgreSQL's unconstrained numeric answers
+// (1000000000). That is the finite-DECIMAL carrier's range reduction, the
+// residual tracked by #552 (and the constrained-typmod-on-the-wire difference
+// by #542); this test pins that both paths refuse it identically, not that
+// they match PostgreSQL, which they deliberately cannot here.
+func TestMixedDecimalIntegerSetOpOverflowTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+	}{
+		// The carrier band (id=10^9 -> 10^39): every set-op flavour, in both
+		// arm orders.
+		{"union_carrier", fmt.Sprintf("SELECT d FROM %[1]s UNION SELECT id FROM %[1]s WHERE id = 1000000000", midTable)},
+		{"union_carrier_int_first", fmt.Sprintf("SELECT id FROM %[1]s WHERE id = 1000000000 UNION SELECT d FROM %[1]s", midTable)},
+		{"union_all_carrier", fmt.Sprintf("SELECT d FROM %[1]s UNION ALL SELECT id FROM %[1]s WHERE id = 1000000000", midTable)},
+		{"intersect_carrier", fmt.Sprintf("SELECT d FROM %[1]s INTERSECT SELECT id FROM %[1]s WHERE id = 1000000000", midTable)},
+		{"except_carrier", fmt.Sprintf("SELECT id FROM %[1]s WHERE id = 1000000000 EXCEPT SELECT d FROM %[1]s", midTable)},
+		// The sub-carrier precision band (id=10^8 -> 10^38): fits the Int128,
+		// exceeds the declared precision 38.
+		{"union_precision", fmt.Sprintf("SELECT d FROM %[1]s UNION SELECT id FROM %[1]s WHERE id = 100000000", midTable)},
+		{"intersect_precision", fmt.Sprintf("SELECT d FROM %[1]s INTERSECT SELECT id FROM %[1]s WHERE id = 100000000", midTable)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, sErr := tmdRunSingle(ctx, single, tc.sql)
+			_, dErr := tmdRunDAG(ctx, coord, tc.sql)
+			if sErr == nil {
+				t.Errorf("single-process ANSWERED an out-of-range coercion (silent wrong answer risk)\n  SQL: %s", tc.sql)
+			} else if !strings.Contains(sErr.Error(), "numeric field overflow") {
+				t.Errorf("single-process failed with an unexpected error: %v", sErr)
+			}
+			if dErr == nil {
+				t.Errorf("stage DAG ANSWERED an out-of-range coercion\n  SQL: %s", tc.sql)
+			} else if !strings.Contains(dErr.Error(), "numeric field overflow") {
+				t.Errorf("stage DAG failed with an unexpected error: %v", dErr)
+			}
+		})
+	}
 }
 
 // TestDecimalBoxedPairTwoPath holds the single-process engine and the stage
@@ -533,24 +629,31 @@ func TestCidrKeyIsInetOnBothPaths(t *testing.T) {
 	}
 }
 
-// TestMixedDecimalIntegerSetOpIsNotReconciled pins what a set operation across
-// a DECIMAL arm and an INTEGER arm does today (#547).
+// TestMixedDecimalIntegerSetOpIsReconciled holds both paths to PostgreSQL's
+// answer for a set operation across a DECIMAL arm and an INTEGER arm (#547).
 //
-// PostgreSQL answers it: `numeric ∪ bigint` is `numeric`, so
-// `SELECT a UNION SELECT id` is 12 values there. Wadjet:
+// PostgreSQL resolves `numeric ∪ bigint` to `numeric`, so an integer arm
+// widens INTO the DECIMAL at its scale; arm ORDER does not change the answer.
+// The value set is -0.01, 0, 1..9, 12.75 and a NULL — 12 values plus NULL.
 //
-//   - single-process, DECIMAL arm first: ANSWERS, and every integer is read
-//     as an UNSCALED value at the DECIMAL's scale, so 1 comes back as 0.01.
-//     A silent hundred-fold shrink, still pinned here.
-//   - single-process, INTEGER arm first: fails with an internal message
-//     ("cannot store string into INT64 vector"), still pinned here.
-//   - stage DAG, either order: fixed as a side effect of #533's coercion —
-//     reconcileSetOpArmTypes' widening ladder gained the INT→DECIMAL rung
-//     that a set operation's arms reconcile through, so both orders now
-//     ANSWER and are gated against PostgreSQL's values here instead of
-//     pinned. The single-process arm is untouched by that fix and stays
-//     pinned to its two wrong shapes until #547's other half lands.
-func TestMixedDecimalIntegerSetOpIsNotReconciled(t *testing.T) {
+// This test used to pin three WRONG behaviours (this function was
+// TestMixedDecimalIntegerSetOpIsNotReconciled):
+//
+//   - single-process, DECIMAL arm first: every integer was read as an
+//     UNSCALED value at the DECIMAL's scale, so 1 came back as 0.01 — a silent
+//     hundred-fold shrink.
+//   - single-process, INTEGER arm first: failed with an internal message
+//     ("cannot store string into INT64 vector").
+//   - stage DAG, either order: refused at plan time.
+//
+// The DAG's refusal was fixed as a side effect of #533's coercion. This
+// commit fixes the single-process path's two halves: unifySetOpSchemas now
+// resolves the same DECIMAL type the DAG does, and coerceSetOpArmRows moves an
+// integer arm's box into it. All three arms now answer, and every arm is
+// gated against PostgreSQL's values here — the pin agreeing is #547's proof.
+// Wadjet's DECIMAL column has one declared scale, so every value renders at
+// that scale (ADR-0012 item 6): 1 renders as 1.00.
+func TestMixedDecimalIntegerSetOpIsReconciled(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
 	}
@@ -560,69 +663,77 @@ func TestMixedDecimalIntegerSetOpIsNotReconciled(t *testing.T) {
 	coord := tmdCluster(t, ctx)
 	single := tmdStandalone(t, ctx)
 
-	decFirst := fmt.Sprintf("SELECT a FROM %s UNION SELECT id FROM %s", dbpTable, dbpTable)
-	intFirst := fmt.Sprintf("SELECT id FROM %s UNION SELECT a FROM %s", dbpTable, dbpTable)
-
-	// PostgreSQL's answer, canonicalized to its minimal spelling: -0.01, 0,
-	// 1, 2, 3, 4, 5, 6, 7, 8, 9, 12.75 and a NULL. Wadjet's DECIMAL column
-	// has one declared scale, so every value — including what came in
-	// through the INTEGER arm — renders at that scale instead of at
-	// PostgreSQL's variable one (ADR-0012 item 6): 1 stays 1, i.e. renders as
-	// 1.00.
-	t.Run("dag answers both orders", func(t *testing.T) {
-		want := []string{
-			"-0.01", "0.00", "1.00", "12.75", "2.00", "3.00", "4.00", "5.00",
-			"6.00", "7.00", "8.00", "9.00", "<nil>",
-		}
-		for _, sql := range []string{decFirst, intFirst} {
-			res, err := tmdRunDAG(ctx, coord, sql)
-			if err != nil {
-				t.Errorf("%s: %v", sql, err)
-				continue
-			}
-			got := make([]string, 0, len(res.Rows))
-			for _, r := range res.Rows {
-				for _, v := range r {
-					got = append(got, fmt.Sprintf("%v", v))
-				}
-			}
-			sort.Strings(got)
-			if !slices.Equal(got, want) {
-				t.Errorf("stage DAG diverges from PostgreSQL\n  got  %v\n  want %v\n  SQL: %s", got, want, sql)
-			}
-		}
-	})
-
-	t.Run("single-process shrinks the integer arm", func(t *testing.T) {
-		res, err := tmdRunSingle(ctx, single, decFirst)
-		if err != nil {
-			t.Fatalf("%s: %v", decFirst, err)
-		}
+	collect := func(res *oracle.Result) []string {
 		got := make([]string, 0, len(res.Rows))
 		for _, r := range res.Rows {
-			got = append(got, fmt.Sprintf("%v", r["a"]))
+			for _, v := range r {
+				got = append(got, fmt.Sprintf("%v", v))
+			}
 		}
 		sort.Strings(got)
-		// PostgreSQL's answer is -0.01, 0.00, 1, 2.00, 3, 4, 5, 6, 7, 8, 9,
-		// 12.75 and a NULL. Wadjet's integers arrive divided by 100.
-		want := []string{
-			"-0.01", "0.00", "0.01", "0.02", "0.03", "0.04", "0.05", "0.06",
-			"0.07", "0.08", "0.09", "12.75", "2.00", "<nil>",
-		}
-		if !slices.Equal(got, want) {
-			t.Errorf("the corruption changed shape — #547 moved, re-read it before re-pinning\n"+
-				"  got  %v\n  want %v (today's WRONG answer; PostgreSQL says 1..9, not 0.01..0.09)", got, want)
-		}
-	})
+		return got
+	}
 
-	t.Run("single-process errors in the other arm order", func(t *testing.T) {
-		_, err := tmdRunSingle(ctx, single, intFirst)
-		if err == nil {
-			t.Errorf("%s now answers — #547 moved; re-gate it against PostgreSQL", intFirst)
-			return
-		}
-		if !strings.Contains(err.Error(), "cannot store string into INT64 vector") {
-			t.Errorf("%s failed with an unexpected error: %v", intFirst, err)
-		}
-	})
+	// Every expectation is PostgreSQL's answer for the identical rows,
+	// rendered at the DECIMAL(9,2) column's scale and sorted as text. The two
+	// arm orders name the result column differently ("a" vs "id") but produce
+	// the identical value set; the DISTINCT and ALL forms differ only in the
+	// duplicate 12.75s and the second NULL that UNION ALL keeps.
+	wantDistinct := []string{
+		"-0.01", "0.00", "1.00", "12.75", "2.00", "3.00", "4.00", "5.00",
+		"6.00", "7.00", "8.00", "9.00", "<nil>",
+	}
+	wantAll := []string{
+		"-0.01", "0.00", "1.00", "12.75", "12.75", "12.75", "12.75", "2.00",
+		"2.00", "3.00", "4.00", "5.00", "6.00", "7.00", "8.00", "9.00",
+		"<nil>", "<nil>",
+	}
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want []string
+	}{
+		{"union_decimal_first",
+			fmt.Sprintf("SELECT a FROM %s UNION SELECT id FROM %s", dbpTable, dbpTable), wantDistinct},
+		{"union_integer_first",
+			fmt.Sprintf("SELECT id FROM %s UNION SELECT a FROM %s", dbpTable, dbpTable), wantDistinct},
+		{"union_all_decimal_first",
+			fmt.Sprintf("SELECT a FROM %s UNION ALL SELECT id FROM %s", dbpTable, dbpTable), wantAll},
+		{"union_all_integer_first",
+			fmt.Sprintf("SELECT id FROM %s UNION ALL SELECT a FROM %s", dbpTable, dbpTable), wantAll},
+		// INTERSECT and EXCEPT decide membership by EQUALITY, so they exercise
+		// the dedup key over the coerced integer as much as UNION does: the
+		// only a-value that is also an id is 2.00 (= 2), so it is the whole
+		// intersection, and the reverse EXCEPT drops exactly that 2 from
+		// 1..9. If the integer arm were still shrunk 100x, or keyed unlike an
+		// equal DECIMAL, neither match would land.
+		{"intersect_decimal_first",
+			fmt.Sprintf("SELECT a FROM %s INTERSECT SELECT id FROM %s", dbpTable, dbpTable),
+			[]string{"2.00"}},
+		{"except_integer_first",
+			fmt.Sprintf("SELECT id FROM %s EXCEPT SELECT a FROM %s", dbpTable, dbpTable),
+			[]string{"1.00", "3.00", "4.00", "5.00", "6.00", "7.00", "8.00", "9.00"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sres, err := tmdRunSingle(ctx, single, tc.sql)
+			if err != nil {
+				t.Fatalf("single-process %s: %v", tc.sql, err)
+			}
+			dres, err := tmdRunDAG(ctx, coord, tc.sql)
+			if err != nil {
+				t.Fatalf("stage DAG %s: %v", tc.sql, err)
+			}
+			sgot, dgot := collect(sres), collect(dres)
+			if !slices.Equal(sgot, tc.want) {
+				t.Errorf("single-process diverges from PostgreSQL\n  got  %v\n  want %v\n  SQL: %s", sgot, tc.want, tc.sql)
+			}
+			if !slices.Equal(dgot, tc.want) {
+				t.Errorf("stage DAG diverges from PostgreSQL\n  got  %v\n  want %v\n  SQL: %s", dgot, tc.want, tc.sql)
+			}
+			if !slices.Equal(sgot, dgot) {
+				t.Errorf("the two paths disagree\n  single-process %v\n  stage DAG      %v\n  SQL: %s", sgot, dgot, tc.sql)
+			}
+		})
+	}
 }

@@ -324,6 +324,11 @@ func tmdTables() []tmdTable {
 		// the type-matrix table has ONE DECIMAL column, so nothing in this
 		// package could tell an exact comparison from a lexicographic one.
 		{dbpTable, dbpSchema(), dbpData()},
+		// The DECIMAL/INTEGER overflow fixture (#547 review): a high-scale
+		// DECIMAL beside a BIGINT that overflows the type the arms agree on.
+		// Rides along for the same reason; only
+		// TestMixedDecimalIntegerSetOpOverflowTwoPath names it.
+		{midTable, midSchema(), midData()},
 		// The CIDR set-operation fixture, for the same reason: two spellings
 		// of one address, which only an inet-aware key collapses.
 		{cidrTable, cidrSchema(), cidrData()},

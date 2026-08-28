@@ -9879,21 +9879,43 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		// region` deduped nothing (every row of one arm was a distinct map
 		// from every row of the other) and batch.FromRows then read the
 		// right arm's values under names it does not carry and wrote NULLs.
-		leftRows := leftSink.ToRows()
-		rightRows := alignSetOpRows(leftSink.Schema(), rightSink.Schema(), rightSink.ToRows())
-
-		// Schema() instead of Batches()[0].Schema — ToRows above released the
-		// sinks' batches as it boxed them — and the arms' two schemas
+		//
+		// Schema() instead of Batches()[0].Schema — ToRows below releases the
+		// sinks' batches as it boxes them — and the arms' two schemas
 		// UNIFIED rather than the first one alone, because FromRows re-reads
 		// each row's rendered decimal text at the schema's scale and the
-		// first arm's scale truncated the second arm's values (#532).
+		// first arm's scale truncated the second arm's values (#532); and
+		// because an INTEGER arm meeting a DECIMAL arm widens INTO the DECIMAL
+		// rather than being read raw as an unscaled carrier (#547).
 		//
-		// It is resolved HERE rather than at the FromRows call below because
-		// the DEDUP KEY needs it too: a set operation decides membership by
-		// equality, so two values the comparator calls equal have to produce
-		// one key — which their BOXES alone cannot say, a DECIMAL being
-		// rendered text (#499).
-		schema := unifySetOpSchemas(leftSink.Schema(), rightSink.Schema())
+		// The type is resolved HERE rather than at the FromRows call below
+		// because the DEDUP KEY needs it too: a set operation decides
+		// membership by equality, so two values the comparator calls equal
+		// have to produce one key — which their BOXES alone cannot say, a
+		// DECIMAL being rendered text (#499).
+		leftSchema := leftSink.Schema()
+		rightSchema := rightSink.Schema()
+		schema := unifySetOpSchemas(leftSchema, rightSchema)
+
+		// An INTEGER arm the union widened to DECIMAL boxes as a raw int64,
+		// which FromRows would read into the DECIMAL vector as an UNSCALED
+		// carrier (1 -> 0.01, #547). coerceSetOpArmRows rewrites those boxes
+		// to their decimal text before the arms meet, so both the dedup key
+		// and FromRows read them at the unified scale — and ERRORS on a value
+		// that does not fit the unified DECIMAL, the same overflow the stage
+		// DAG raises (exec.coerceDecimalVector), rather than saturating
+		// silently. The right arm is coerced against its OWN schema, before
+		// alignSetOpRows re-keys it to the result names.
+		leftRows, err := coerceSetOpArmRows(leftSink.ToRows(), leftSchema, schema)
+		if err != nil {
+			return nil, fmt.Errorf("executing %s left side: %w", u.op, err)
+		}
+		rightRows, err := coerceSetOpArmRows(rightSink.ToRows(), rightSchema, schema)
+		if err != nil {
+			return nil, fmt.Errorf("executing %s right side: %w", u.op, err)
+		}
+		rightRows = alignSetOpRows(leftSchema, rightSchema, rightRows)
+
 		keyer := newSetOpKeyer(schema)
 
 		var resultRows []map[string]any
