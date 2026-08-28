@@ -827,7 +827,24 @@ func emptyStringFilter(nonEmpty bool) FilterKernel {
 
 // ResolveInFilterKernel creates a FilterKernel that checks set membership.
 // The set is built once; the inner loop does a hash lookup per element.
+//
+// It assumes the list's syntactic arity equals len(values), which holds
+// whenever no NULL member was stripped before the call. The FLOAT32 width rule
+// (see ResolveInFilterKernelArity) is the only place that distinction matters;
+// a caller that strips NULLs must use the arity-aware variant.
 func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKernel {
+	return ResolveInFilterKernelArity(typ, values, negate, len(values))
+}
+
+// ResolveInFilterKernelArity is ResolveInFilterKernel with the list's SYNTACTIC
+// element count — the count BEFORE any NULL member was stripped for
+// three-valued logic — passed explicitly. It matters only for FLOAT32:
+// PostgreSQL decides `real IN (...)`'s comparison WIDTH from the syntactic arity
+// (it casts the whole `{...}` array literal, NULLs included, to real[] when
+// there is more than one element), so `real IN (0.1, NULL)` NARROWS and matches
+// the 0.1 row even though one non-NULL literal reaches the kernel (#549). Every
+// other type compares identically at either width, so they ignore the count.
+func ResolveInFilterKernelArity(typ batch.TypeID, values []any, negate bool, syntacticLen int) FilterKernel {
 	switch typ {
 	case batch.TypeInt64, batch.TypeTimestamp:
 		set := make(map[int64]struct{}, len(values))
@@ -936,10 +953,43 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 		}
 		return inFilterInt64(getInt64Data, set, negate)
 	case batch.TypeFloat32:
-		// The probe widens to float64, which is exact for every float32, so
-		// the set is built the same way and 1.5 in the list matches 1.5 in
-		// the column.
-		set, hasNaN := floatInSet(values)
+		// PostgreSQL's `real IN (...)` is ARITY-DEPENDENT, and the two arities
+		// compare at DIFFERENT widths (both verified with EXPLAIN VERBOSE on
+		// postgres:17):
+		//
+		//	multi-element  →  real = ANY('{...}'::real[])   -- NARROW to real
+		//	single-element →  real = 'x'::double precision  -- WIDEN to double
+		//
+		// So the fix for #549 (the multi-element list matching nothing because
+		// it compared at float64 width) narrows ONLY when the SYNTACTIC list
+		// held more than one element. The decision is syntacticLen, NOT
+		// len(values): a NULL member is stripped before the kernel sees the
+		// list, and PostgreSQL still casts the whole `{...}` to real[] when the
+		// SOURCE had >1 element, so `real IN (0.1, NULL)` narrows and matches
+		// even though only 0.1 reaches here. A truly single-element list keeps
+		// the historical WIDENING path, which already matched PostgreSQL:
+		// `f IN (0.1)` → 0 rows (0.1 is not representable in float32, so the
+		// widened column value differs), and `f IN (1e40)` → 0 rows with NO
+		// error (1e40 is a finite double that widens, misses, and never becomes
+		// the +Inf a real cast would).
+		//
+		// Single-element IN is deliberately NOT folded to the scalar `=`
+		// kernel: `=` NARROWS (float32(toFloat64(value))) and that narrowing is
+		// itself the divergence #631 tracks — PostgreSQL widens `real = <lit>`
+		// too. Folding here would inherit that bug. IN(x) and `= x` therefore
+		// take different kernels on purpose, and this test does NOT assert
+		// IN == OR-of-equals for real.
+		if syntacticLen <= 1 {
+			set, hasNaN := floatInSet(values)
+			return inFilterFloat32Widen(set, hasNaN, negate)
+		}
+		set, hasNaN, ok := float32InSet(values)
+		if !ok {
+			// An out-of-range-for-real literal in a MULTI-element list: the
+			// array cast to real[] raises 22003 in PostgreSQL, so decline the
+			// kernel and let exec.floatConstError raise it.
+			return nil
+		}
 		return inFilterFloat32(set, hasNaN, negate)
 	case batch.TypeBool:
 		return inFilterBool(values, negate)
@@ -974,8 +1024,97 @@ func floatInSet(values []any) (map[float64]struct{}, bool) {
 	return set, hasNaN
 }
 
-// inFilterFloat32 probes a FLOAT32 column against a float64 set.
-func inFilterFloat32(set map[float64]struct{}, hasNaN, negate bool) FilterKernel {
+// float32InSet builds an IN list's float32 membership set, narrowing each
+// literal to float32 the way the scalar `=` arm does, and reports separately
+// whether the list held a NaN (see floatInSet for why the flag is not
+// redundant with the map, and why `==` keys give -0.0/+0.0 the same answer
+// PostgreSQL gives).
+//
+// ok is false when a FINITE literal overflows real's range — float32(1e40) is
+// +Inf. Inserting that +Inf would make `f IN (1e40)` MATCH a genuine +Inf row,
+// a false positive, where PostgreSQL raises 22003 for the whole predicate (it
+// does not silently drop the offending element). Declining the set lets the
+// caller raise that error. A literal that is ITSELF ±Inf (e.g. 'Infinity'::real)
+// is a legal real value, not an overflow, and stays in the set so it matches
+// the corresponding infinite rows — the distinction Float32LitOverflow draws.
+func float32InSet(values []any) (set map[float32]struct{}, hasNaN, ok bool) {
+	set = make(map[float32]struct{}, len(values))
+	for _, v := range values {
+		f64 := toFloat64(v)
+		f := float32(f64)
+		if f != f {
+			hasNaN = true
+			continue
+		}
+		if math.IsInf(float64(f), 0) && !math.IsInf(f64, 0) {
+			return nil, false, false
+		}
+		set[f] = struct{}{}
+	}
+	return set, hasNaN, true
+}
+
+// Float32LitOverflow reports whether v is a finite number whose magnitude
+// exceeds real's range, so narrowing it to float32 yields ±Inf. PostgreSQL
+// raises 22003 ("out of range for type real") for such a literal in a real
+// comparison; this is the check exec.floatConstError turns into that error,
+// the same "nil kernel, caller raises" convention DateLiteralDays serves for
+// DATE. A value that is already ±Inf or NaN is not an overflow.
+func Float32LitOverflow(v any) bool {
+	f64 := toFloat64(v)
+	if math.IsNaN(f64) || math.IsInf(f64, 0) {
+		return false
+	}
+	return math.IsInf(float64(float32(f64)), 0)
+}
+
+// inFilterFloat32 probes a FLOAT32 column against a float32 set. The set holds
+// float32-narrowed literals so IN agrees with the scalar `=` kernel bit-for-bit
+// on the float32 boundary (#549).
+func inFilterFloat32(set map[float32]struct{}, hasNaN, negate bool) FilterKernel {
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		keep := func(i int) bool {
+			f := vec.Float32Data[i]
+			if f != f {
+				return hasNaN != negate
+			}
+			_, found := set[f]
+			return found != negate
+		}
+		if sel != nil {
+			for _, idx := range sel {
+				if hasNulls && vec.Nulls.IsNullFast(int(idx)) {
+					continue
+				}
+				if keep(int(idx)) {
+					out = append(out, idx)
+				}
+			}
+			return out
+		}
+		for i := 0; i < vecLen; i++ {
+			if hasNulls && vec.Nulls.IsNullFast(i) {
+				continue
+			}
+			if keep(i) {
+				out = append(out, uint32(i))
+			}
+		}
+		return out
+	}
+}
+
+// inFilterFloat32Widen probes a FLOAT32 column against a FLOAT64 set, WIDENING
+// each row value to double before the lookup. It is PostgreSQL's single-element
+// `real IN (x)` semantics — `real = 'x'::double precision` — which #549's
+// multi-element narrowing must NOT apply to (see the TypeFloat32 arm). It is
+// also the pre-#549 behavior for every arity, kept here for the one arity where
+// that behavior was already right. A non-representable literal misses because
+// float64(float32_col) != float64(literal); a finite over-range literal (1e40)
+// simply never matches, with no error, because nothing is narrowed to +Inf.
+func inFilterFloat32Widen(set map[float64]struct{}, hasNaN, negate bool) FilterKernel {
 	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()

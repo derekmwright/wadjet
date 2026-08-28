@@ -683,6 +683,29 @@ func dateConstError(typ batch.TypeID, value any) error {
 	return nil
 }
 
+// floatConstError is decimalConstError's counterpart for a FLOAT32 (real)
+// column whose IN-list arm declines a literal that overflows real's range.
+// PostgreSQL raises 22003 (numeric_value_out_of_range) for `real IN (1e40)`
+// — the whole predicate, not a silently dropped element (verified on
+// postgres:17) — and ADR-0012 makes PostgreSQL the authority on
+// error-versus-not, so this is its SQLSTATE.
+//
+// It exists because the #549 fix narrows each IN literal to float32; a finite
+// literal past FLT_MAX narrows to +Inf, and inserting that would make the
+// predicate MATCH a genuine +Inf row (a false positive) instead of erroring.
+// kernel.ResolveInFilterKernel returns a nil kernel for that list, and this
+// turns the same condition into the error PostgreSQL gives. A literal that is
+// itself ±Inf is a legal real value, not an overflow, and does not reach here.
+func floatConstError(typ batch.TypeID, value any) error {
+	if typ != batch.TypeFloat32 || value == nil {
+		return nil
+	}
+	if kernel.Float32LitOverflow(value) {
+		return sqlerr.New("22003", "%q is out of range for type real", fmt.Sprint(value))
+	}
+	return nil
+}
+
 func (f *KernelFilter) Init(_ context.Context) error { return nil }
 
 func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
@@ -803,22 +826,37 @@ type InFilter struct {
 	// otherwise reported the field path as a column that does not exist
 	// (#568).
 	RowFallback Predicate
-	colIdx      int
-	kern        kernel.FilterKernel
-	outSel      []uint32
-	resolved    bool
-	useFallback bool
-	inner       *Filter
+	// syntacticLen is the IN list's element count BEFORE any NULL member was
+	// stripped for three-valued logic. PostgreSQL decides a `real IN (...)`'s
+	// comparison WIDTH from this syntactic arity — it casts the whole `{...}`
+	// array literal, NULLs included, to real[] when there is more than one
+	// element — so `real IN (0.1, NULL)` narrows and matches even though one
+	// non-NULL literal reaches the kernel (#549). Set by the constructors to
+	// len(Values) and overridden by SetSyntacticLen at the NULL-strip site.
+	syntacticLen int
+	colIdx       int
+	kern         kernel.FilterKernel
+	outSel       []uint32
+	resolved     bool
+	useFallback  bool
+	inner        *Filter
 }
 
 func NewInFilter(colName string, values []any, negate bool) *InFilter {
-	return &InFilter{ColName: colName, Values: values, Negate: negate}
+	return &InFilter{ColName: colName, Values: values, Negate: negate, syntacticLen: len(values)}
 }
+
+// SetSyntacticLen records the list's pre-NULL-strip element count, which the
+// caller that does the stripping (planner inFilterForList) knows and the
+// constructor cannot. It is the arity PostgreSQL decides a real IN list's width
+// from (#549); leaving it at the constructor's len(Values) is correct only when
+// no NULL was dropped.
+func (f *InFilter) SetSyntacticLen(n int) { f.syntacticLen = n }
 
 // NewInFilterLit is NewInFilter for a list of numeric literals, carrying each
 // literal's exact source text for a DECIMAL column (#452).
 func NewInFilterLit(colName string, values []any, texts []string, negate bool) *InFilter {
-	return &InFilter{ColName: colName, Values: values, ValueTexts: texts, Negate: negate}
+	return &InFilter{ColName: colName, Values: values, ValueTexts: texts, Negate: negate, syntacticLen: len(values)}
 }
 
 func (f *InFilter) Init(_ context.Context) error { return nil }
@@ -838,7 +876,7 @@ func (f *InFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 		}
 		if f.colIdx >= 0 {
 			typ := in.Columns[f.colIdx].Type
-			f.kern = kernel.ResolveInFilterKernel(typ, f.kernelValues(typ), f.Negate)
+			f.kern = kernel.ResolveInFilterKernelArity(typ, f.kernelValues(typ), f.Negate, f.syntacticLen)
 		}
 		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
@@ -866,6 +904,9 @@ func (f *InFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 				return nil, err
 			}
 			if err := boolConstError(typ, v); err != nil {
+				return nil, err
+			}
+			if err := floatConstError(typ, v); err != nil {
 				return nil, err
 			}
 		}
@@ -910,7 +951,8 @@ func (f *InFilter) kernelValues(typ batch.TypeID) []any {
 
 func (f *InFilter) Clone() UnaryOperator {
 	return &InFilter{ColName: f.ColName, Values: f.Values,
-		ValueTexts: f.ValueTexts, Negate: f.Negate, RowFallback: f.RowFallback}
+		ValueTexts: f.ValueTexts, Negate: f.Negate, RowFallback: f.RowFallback,
+		syntacticLen: f.syntacticLen}
 }
 
 // MatchNothingFilter admits no rows. It is the operator for a predicate that

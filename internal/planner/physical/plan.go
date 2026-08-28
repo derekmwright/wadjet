@@ -10688,6 +10688,16 @@ func execToCmpOp(op exec.CompareOp) expr.CmpOp {
 //
 // An empty list with no NULL in it is left alone — that is a different shape
 // and the set kernel already answers it.
+//
+// RESIDUAL (real NOT IN + NULL + over-range literal only): `real NOT IN (1e40,
+// NULL)` short-circuits to MatchNothing below on the NULL rule (#450) before any
+// literal is examined, so PostgreSQL's 22003 for the over-range 1e40 in the
+// real[] cast is not raised — wadjet answers empty. The positive `IN (1e40,
+// NULL)` is NOT affected: it keeps the over-range literal, carries the syntactic
+// arity of 2 (SetSyntacticLen below), narrows to real[], and raises 22003 like
+// PostgreSQL. Surfacing the error on the NOT-IN path would mean checking the
+// over-range literal before the MatchNothing short-circuit; left as a documented
+// residual (obscure — a NULL in a NOT IN already empties the answer).
 func inFilterForList(col string, values []any, texts []string, negate bool) exec.UnaryOperator {
 	kept := make([]any, 0, len(values))
 	keptTexts := make([]string, 0, len(texts))
@@ -10705,7 +10715,14 @@ func inFilterForList(col string, values []any, texts []string, negate bool) exec
 	if hadNull && (negate || len(kept) == 0) {
 		return exec.NewMatchNothingFilter()
 	}
-	return exec.NewInFilterLit(col, kept, keptTexts, negate)
+	inf := exec.NewInFilterLit(col, kept, keptTexts, negate)
+	// The comparison WIDTH of a FLOAT32 IN list is decided by the SYNTACTIC
+	// element count, not the count that survives the NULL strip above: PostgreSQL
+	// casts the whole `{...}` array literal — NULLs included — to real[] whenever
+	// there is more than one element, so `real IN (0.1, NULL)` narrows to real
+	// and matches, while `real IN (0.1)` widens to double and does not (#549).
+	inf.SetSyntacticLen(len(values))
+	return inf
 }
 
 // negateCmpOp inverts a comparison for an enclosing NOT. Under SQL's

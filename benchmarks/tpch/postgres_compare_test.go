@@ -808,6 +808,46 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DecimalEqScale4", sql: `SELECT d_key FROM dec_probe WHERE d_4 = 3.1875 ORDER BY d_key`},
 		pgCase{name: "DecimalGeScale4", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 >= 3.1875`},
 		pgCase{name: "DecimalTwoColumns", sql: `SELECT d_key FROM dec_probe WHERE d_2 = 12.75 AND d_4 >= 0 ORDER BY d_key`},
+
+		// FLOAT32 (real) IN-list — #549. PostgreSQL's multi-element
+		// `real IN (...)` narrows the literals to real[] (EXPLAIN VERBOSE:
+		// `= ANY('{...}'::real[])`), so a literal not exactly representable in
+		// float32 still matches its row. r_val holds real(i)+0.1, so these
+		// literals are the non-representable case the bug turned up on.
+		pgCase{name: "RealInNonRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val IN (0.1, 3.1, 7.1) ORDER BY r_key`},
+		pgCase{name: "RealInRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val IN (0.5, 1.5) ORDER BY r_key`},
+		pgCase{name: "RealInMixed", sql: `SELECT r_key FROM real_probe WHERE r_val IN (0.1, 0.5, 9.1) ORDER BY r_key`},
+		pgCase{name: "RealNotIn", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val NOT IN (0.1, 3.1)`},
+		// Representable, so `=` agrees on both sides (1.5 is exact in float32).
+		pgCase{name: "RealEqRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val = 1.5 ORDER BY r_key`},
+		// The scalar `=` divergence #631 tracks: PostgreSQL WIDENS `real = 3.1`
+		// to double and returns 0 rows; wadjet narrows to float32 and keeps the
+		// row. Pinned live — this subtest FAILS (deleting the pin) when #631
+		// lands. It is the sibling of #549, deliberately not fixed with it
+		// because changing float `=` semantics has a broad blast radius.
+		pgCase{name: "RealEqNonRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val = 3.1 ORDER BY r_key`,
+			knownBug: pgBugWadjet + " scalar `real = <lit>` narrows the literal to float32 and matches, " +
+				"where PostgreSQL widens the column to double and returns 0 rows (EXPLAIN: " +
+				"`r_val = '3.1'::double precision`). The multi-element IN path narrows correctly (#549); " +
+				"only scalar `=` and single-element IN widen.", issue: "#631"},
+
+		// SINGLE-element real IN — the arity split #549's re-review turned up.
+		// PostgreSQL folds `real IN (x)` to `= 'x'::double precision` (WIDEN),
+		// not the multi-element `= ANY(real[])` (NARROW), so a single
+		// non-representable literal matches nothing and a single finite
+		// over-range literal returns 0 rows with NO error. These are gated (not
+		// pinned): wadjet keeps the widening path for arity 1 and agrees.
+		pgCase{name: "RealInSingleNonRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val IN (0.1) ORDER BY r_key`},
+		pgCase{name: "RealInSingleRepresentable", sql: `SELECT r_key FROM real_probe WHERE r_val IN (1.5) ORDER BY r_key`},
+		pgCase{name: "RealInSingleOverflowNoError", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val IN (1e40)`},
+		// A NULL member in the list does NOT change the arity PostgreSQL uses
+		// for the width decision: `real IN (0.1, NULL)` is syntactically two
+		// elements, so it NARROWS to real[] and the 0.1 row matches — even
+		// though the NULL is stripped for three-valued logic before the kernel
+		// sees the list. This is the canonical #549 value (0.1) inside the most
+		// common BI shape (a NULL in an IN list); before the syntactic-arity
+		// fix wadjet decided WIDEN from the post-strip count and returned 0 rows.
+		pgCase{name: "RealInNonRepresentableWithNull", sql: `SELECT r_key FROM real_probe WHERE r_val IN (0.1, NULL) ORDER BY r_key`},
 	)
 
 	// A literal wider than the 128-bit carrier at the column's scale (#462).

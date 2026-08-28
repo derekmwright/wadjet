@@ -361,6 +361,9 @@ func (o *postgresOracle) load(t *testing.T, ctx context.Context) {
 	if err := sink(pgBytesTable, pgBytesRows()); err != nil {
 		t.Fatalf("%v", err)
 	}
+	if err := sink(pgRealTable, pgRealRows()); err != nil {
+		t.Fatalf("%v", err)
+	}
 	for _, tbl := range multikey.Tables() {
 		if err := sink(tbl.Name, tbl.Rows); err != nil {
 			t.Fatalf("%v", err)
@@ -575,6 +578,16 @@ const (
 // drives the harness, the seeders and both data tiers.
 const pgBytesTable = "bytea_probe"
 
+// pgRealTable is the FLOAT32 (`real`) fixture the TPC-H schema cannot provide:
+// every TPC-H numeric is a DECIMAL, so no arm of this oracle ever asked
+// PostgreSQL what `real IN (...)` MEANS. #549 was exactly that gap — a
+// hand-written `real IN (0.1, …)` matched nothing because the kernel compared
+// at float64 width, and no corpus entry put a non-representable literal in an
+// IN-list against a real column. PostgreSQL is the authority (ADR-0012): its
+// multi-element `real IN (...)` narrows the literals to `real[]`, which this
+// fixture now pins.
+const pgRealTable = "real_probe"
+
 // pgNetTable is the second fixture the TPC-H schema cannot provide, and it
 // exists for the same reason dec_probe does: no TPC-H column is an address, so
 // no arm of this oracle ever asked PostgreSQL what an address ORDER is.
@@ -702,6 +715,11 @@ func oracleTables() map[string]parquet.Schema {
 		// A second BYTES column so column-to-column comparison, and a join
 		// key, have something to be compared against.
 		{Name: "b_other", Type: parquet.TypeBytes, Nullable: true},
+	}}
+	out[pgRealTable] = parquet.Schema{Columns: []parquet.Column{
+		{Name: "r_key", Type: parquet.TypeInt64},
+		{Name: "r_grp", Type: parquet.TypeInt32},
+		{Name: "r_val", Type: parquet.TypeFloat32, Nullable: true},
 	}}
 	// The multi-key correlated-subquery fixture (#562). It is here rather than
 	// in a second oracle because it needs exactly what this one already has —
@@ -922,6 +940,28 @@ func pgDecimalRows() []map[string]any {
 		}
 		rows[i] = r
 	}
+	return rows
+}
+
+// pgRealRows builds the real_probe fixture (#549). Rows 0..15 hold real(i)+0.1
+// — NON-representable in float32, the values #549 turned up on — so a
+// multi-element `real IN (0.1, 3.1, …)` exercises the narrowing that must
+// match PostgreSQL's `= ANY(real[])`. Rows 16..17 hold exactly-representable
+// values (0.5, 1.5), the case that masked the bug, and row 18 is NULL so the
+// NOT-IN entry meets an UNKNOWN. r_val is boxed as float32 — the column's own
+// width — not float64.
+func pgRealRows() []map[string]any {
+	rows := make([]map[string]any, 0, 19)
+	for i := 0; i < 16; i++ {
+		rows = append(rows, map[string]any{
+			"r_key": int64(i), "r_grp": int32(i % 4), "r_val": float32(i) + 0.1,
+		})
+	}
+	rows = append(rows,
+		map[string]any{"r_key": int64(16), "r_grp": int32(0), "r_val": float32(0.5)},
+		map[string]any{"r_key": int64(17), "r_grp": int32(1), "r_val": float32(1.5)},
+		map[string]any{"r_key": int64(18), "r_grp": int32(2), "r_val": nil},
+	)
 	return rows
 }
 
