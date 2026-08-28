@@ -2073,10 +2073,7 @@ func duckdbCorpus() []duckdbCase {
 		duckdbCase{name: "OuterPredicateBesideExists",
 			sql: `SELECT COUNT(*) AS n FROM orders t0
 				WHERE o_totalprice < 1000
-				  AND EXISTS (SELECT 1 FROM orders sub WHERE sub.o_clerk = t0.o_clerk)`,
-			knownBugArm: armBoth,
-			knownBug: "an unqualified outer conjunct beside a decorrelated EXISTS is pushed onto the " +
-				"subquery's scan: 104 rows where PostgreSQL 17 and DuckDB both say 6 (#584)"},
+				  AND EXISTS (SELECT 1 FROM orders sub WHERE sub.o_clerk = t0.o_clerk)`},
 		// The control, and the whole localization: the SAME query with the
 		// conjunct QUALIFIED answers 6 on both arms. Fully gated — if this one
 		// ever starts diverging, the defect has grown past #584.

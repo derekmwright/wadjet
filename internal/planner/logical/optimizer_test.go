@@ -712,3 +712,61 @@ func TestPushdownStopsAtCTEFence(t *testing.T) {
 		t.Fatalf("untagged Filter-Project swap broken: root = %s", got2.Type)
 	}
 }
+
+// Regression for #584: an UNQUALIFIED conjunct of the OUTER WHERE, sitting
+// above a semi/anti join produced by decorrelating a correlated EXISTS, must
+// be attributed to the PROBE (left) side and never pushed onto the build
+// (right) side. A self-EXISTS decorrelates to `orders t0` over `orders sub`,
+// both carrying `o_totalprice`; the merged column map used to resolve the bare
+// `o_totalprice` to the build relation and push the predicate onto the
+// subquery's scan, silently filtering the wrong relation. A semi/anti join
+// emits only the probe side's columns, so a predicate above it can only mean
+// the probe.
+func TestPushFilterThroughSemiJoinAttributesUnqualifiedToProbe(t *testing.T) {
+	for _, jt := range []string{"semi", "anti"} {
+		for _, spelling := range []string{"o_totalprice < 1000", "t0.o_totalprice < 1000"} {
+			t.Run(jt+"/"+spelling, func(t *testing.T) {
+				left := NewScan("orders", "t0")
+				left.ScanColumns = []string{"o_totalprice", "o_clerk"}
+				right := NewScan("orders", "sub")
+				right.ScanColumns = []string{"o_totalprice", "o_clerk"}
+				join := NewJoin(left, right, jt, "o_clerk = o_clerk")
+				filter := NewFilter(join, []Predicate{{Raw: spelling, ASTExpr: tryParseExpr(spelling)}})
+
+				got := pushdownPredicates(filter)
+
+				if got.Type != NodeJoin || got.JoinType != jt {
+					t.Fatalf("expected the predicate to push through the %s join, got root %s/%q", jt, got.Type, got.JoinType)
+				}
+				// Probe side must now carry the predicate.
+				if got.Children[0].Type != NodeFilter {
+					t.Fatalf("outer conjunct was not pushed onto the probe side: probe root = %s", got.Children[0].Type)
+				}
+				// Build side (the decorrelated subquery scan) must be untouched.
+				if got.Children[1].Type != NodeScan {
+					t.Fatalf("outer conjunct was mis-attributed to the build (subquery) side: build root = %s (#584)", got.Children[1].Type)
+				}
+			})
+		}
+	}
+}
+
+// Control for #584: over an INNER join, a genuinely build-side predicate still
+// pushes to the build side — the fix must not over-correct semi/anti behavior
+// onto ordinary joins.
+func TestPushFilterThroughInnerJoinStillPushesRight(t *testing.T) {
+	left := NewScan("orders", "o")
+	left.ScanColumns = []string{"o_orderkey", "o_custkey"}
+	right := NewScan("customer", "c")
+	right.ScanColumns = []string{"c_custkey", "c_acctbal"}
+	join := NewJoin(left, right, "inner", "o_custkey = c_custkey")
+	filter := NewFilter(join, []Predicate{{Raw: "c_acctbal > 0", ASTExpr: tryParseExpr("c_acctbal > 0")}})
+
+	got := pushdownPredicates(filter)
+	if got.Type != NodeJoin {
+		t.Fatalf("expected predicate to push through the inner join, got root %s", got.Type)
+	}
+	if got.Children[1].Type != NodeFilter {
+		t.Fatalf("build-side predicate was not pushed onto the build side: build root = %s", got.Children[1].Type)
+	}
+}

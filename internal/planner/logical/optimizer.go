@@ -1818,15 +1818,6 @@ func pushFilterThroughJoin(filter, join *Node) *Node {
 	leftTables, leftColMap := collectScanInfo(join.Children[0])
 	rightTables, rightColMap := collectScanInfo(join.Children[1])
 
-	// Merge column maps for resolving unqualified column references
-	allColMap := make(map[string]string, len(leftColMap)+len(rightColMap))
-	for k, v := range leftColMap {
-		allColMap[k] = v
-	}
-	for k, v := range rightColMap {
-		allColMap[k] = v
-	}
-
 	// A WHERE predicate sits ABOVE the join, so it sees whatever the join
 	// emitted — including the NULLs an outer join manufactures for a row
 	// that found no partner. Pushing it below that padding is legal only
@@ -1834,6 +1825,30 @@ func pushFilterThroughJoin(filter, join *Node) *Node {
 	// itself simplifies, because no padded row can survive (#335).
 	kind := joinKind(join.JoinType)
 	leftPadded, rightPadded := nullSupplyingSides(kind)
+
+	// A semi/anti join emits its PROBE (left) side's columns alone; the
+	// build (right) side is not visible above the join. So a predicate here
+	// can only reference left-side columns, and an UNQUALIFIED name must
+	// resolve against the probe side, never the build. Merging the build's
+	// columns into the resolution map would let a bare name that also exists
+	// on the build — a self-EXISTS decorrelates to `orders t0` over `orders
+	// sub`, both carrying `o_totalprice` — resolve to the build relation and
+	// be pushed onto the subquery's scan, filtering the wrong relation and
+	// silently changing the row set (#584). The build side is likewise never
+	// a legal push target for such a predicate.
+	semiAnti := kind == "semi" || kind == "anti"
+
+	// Merge column maps for resolving unqualified column references. For a
+	// semi/anti join only the probe side's columns are in scope.
+	allColMap := make(map[string]string, len(leftColMap)+len(rightColMap))
+	for k, v := range leftColMap {
+		allColMap[k] = v
+	}
+	if !semiAnti {
+		for k, v := range rightColMap {
+			allColMap[k] = v
+		}
+	}
 	demoteLeft, demoteRight := false, false
 
 	var leftPreds, rightPreds, remainingPreds []Predicate
@@ -1853,6 +1868,13 @@ func pushFilterThroughJoin(filter, join *Node) *Node {
 			if !rightTables[table] {
 				allRight = false
 			}
+		}
+		// A semi/anti join's build side is not a legal push target: a
+		// predicate that resolves to it (e.g. a qualified build reference,
+		// which cannot appear in valid SQL above the join) stays put rather
+		// than filtering the subquery's scan (#584).
+		if semiAnti {
+			allRight = false
 		}
 
 		switch {
