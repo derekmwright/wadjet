@@ -4100,6 +4100,14 @@ func (h *HashAggregate) flushSpillBuffer() error {
 	if len(h.spillBuffer) == 0 {
 		return nil
 	}
+	// A container group key (or a container agg input) boxes as []any /
+	// map[string]any / []float32, which SpillRows can only render to display
+	// text — a string batch.FromRows then refuses to write back into a
+	// container vector (#611). Encode those boxes to the lossless ADR-0023
+	// container codec first; Finalize's read loop decodes them symmetrically.
+	// The buffer is discarded right after this flush, so the in-place rewrite
+	// is safe.
+	encodeContainerColsForSpill(h.spillBuffer, h.inputSchema)
 	path, err := h.Spill.SpillRows(h.spillBuffer)
 	if err != nil {
 		return err
@@ -4152,6 +4160,11 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 			h.Spill.RemoveSpilled(f)
 			if len(rows) == 0 {
 				continue
+			}
+			// Reverse flushSpillBuffer's container encoding: rebuild the box
+			// GetValue produced before batch.FromRows writes it (#611).
+			if err := decodeContainerColsFromSpill(rows, h.inputSchema); err != nil {
+				return err
 			}
 			b := batch.FromRows(h.inputSchema, rows)
 			// Resolve indices only if not already resolved. Do NOT force
