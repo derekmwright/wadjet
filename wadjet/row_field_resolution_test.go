@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/storage/ingest"
+	"github.com/derekmwright/wadjet/internal/storage/objstore"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // Regression tests for issue #147 (partial: filter strictness + dotted ROW
@@ -134,6 +138,46 @@ func TestPlanTimeColumnValidation(t *testing.T) {
 		}
 	})
 
+	// #604: a field path naming NO field of a ROW column must ERROR at plan
+	// time (42703-class), the way an unknown top-level column already does —
+	// not resolve to a column of NULLs indistinguishable from a genuinely
+	// NULL field. attrs is ROW(name STRING, score INT64).
+	t.Run("dotted_row_field_typo_errors", func(t *testing.T) {
+		cases := []struct{ name, sql string }{
+			{"select_list", `SELECT attrs.nosuch FROM events`},
+			{"select_list_aliased", `SELECT attrs.nosuch AS x FROM events`},
+			{"where", `SELECT id FROM events WHERE attrs.nosuch > 1`},
+			{"order_by", `SELECT id FROM events ORDER BY attrs.nosuch`},
+			{"group_by", `SELECT attrs.nosuch, count(*) FROM events GROUP BY attrs.nosuch`},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				_, err := db.Query(ctx, c.sql)
+				if err == nil {
+					t.Fatalf("nonexistent ROW field must error, not resolve to NULL: %s", c.sql)
+				}
+				if !strings.Contains(err.Error(), "nosuch") {
+					t.Fatalf("error should name the field: %v", err)
+				}
+				if !strings.Contains(err.Error(), "record data type") {
+					t.Fatalf("error should be the composite-field 42703 shape: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("dotted_row_valid_field_resolves", func(t *testing.T) {
+		// The valid field must still return its value, not be caught by the
+		// new refusal. score is INT64; row 0's attrs.score is 0 in the source.
+		res, err := db.Query(ctx, `SELECT id, attrs.score AS sc FROM events WHERE id = 0`)
+		if err != nil {
+			t.Fatalf("valid ROW field wrongly rejected: %v", err)
+		}
+		if len(res.Rows) != 1 {
+			t.Fatalf("rows = %d, want 1", len(res.Rows))
+		}
+	})
+
 	t.Run("valid_query_unaffected", func(t *testing.T) {
 		res, err := db.Query(ctx, `SELECT id, grp FROM events WHERE id < 5`)
 		if err != nil {
@@ -141,6 +185,70 @@ func TestPlanTimeColumnValidation(t *testing.T) {
 		}
 		if len(res.Rows) != 5 {
 			t.Fatalf("rows = %d, want 5", len(res.Rows))
+		}
+	})
+}
+
+// TestRowFieldPathNestedPlanTimeValidation checks the #604 refusal over a ROW
+// column whose fields include a NESTED ROW: a field path naming one of the
+// declared fields — flat or the nested-ROW field itself — resolves, and one
+// naming no field of the top-level ROW errors at plan time (42703-class),
+// exactly as an unknown top-level column does.
+func TestRowFieldPathNestedPlanTimeValidation(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// rw ROW(flat INT64, sub ROW(deep STRING))
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "rw", Type: parquet.TypeRow, Nullable: true, Fields: []parquet.Column{
+			{Name: "flat", Type: parquet.TypeInt64, Nullable: true},
+			{Name: "sub", Type: parquet.TypeRow, Nullable: true, Fields: []parquet.Column{
+				{Name: "deep", Type: parquet.TypeString, Nullable: true},
+			}},
+		}},
+	}}
+	if err := db.CreateTable(ctx, "nested_rw", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows := []map[string]any{
+		{"k": int64(1), "rw": map[string]any{"flat": int64(10), "sub": map[string]any{"deep": "x"}}},
+		{"k": int64(2), "rw": map[string]any{"flat": int64(20), "sub": map[string]any{"deep": "y"}}},
+	}
+	ing := db.NewIngester("nested_rw", schema, nil, ingest.Config{MaxBufferRows: 100, RowGroupSize: 100})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("valid_flat_field_resolves", func(t *testing.T) {
+		res, err := db.Query(ctx, `SELECT k, rw.flat AS v FROM nested_rw ORDER BY k`)
+		if err != nil {
+			t.Fatalf("valid flat field rejected: %v", err)
+		}
+		if len(res.Rows) != 2 {
+			t.Fatalf("rows = %d, want 2", len(res.Rows))
+		}
+	})
+
+	t.Run("valid_nested_row_field_resolves", func(t *testing.T) {
+		// sub is a field whose type is itself a ROW — a valid path.
+		if _, err := db.Query(ctx, `SELECT rw.sub FROM nested_rw LIMIT 1`); err != nil {
+			t.Fatalf("valid nested-ROW field rejected: %v", err)
+		}
+	})
+
+	t.Run("nonexistent_field_errors", func(t *testing.T) {
+		_, err := db.Query(ctx, `SELECT rw.nope FROM nested_rw`)
+		if err == nil {
+			t.Fatal("nonexistent ROW field must error, not resolve to NULL")
+		}
+		if !strings.Contains(err.Error(), "nope") || !strings.Contains(err.Error(), "record data type") {
+			t.Fatalf("error should be the composite-field 42703 shape naming the field: %v", err)
 		}
 	})
 }

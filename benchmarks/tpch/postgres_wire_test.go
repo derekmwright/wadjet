@@ -1028,10 +1028,24 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 	cases := []struct {
 		name string
 		sql  string
-		pin  string
+		// pgSQL is the PostgreSQL-dialect spelling of the same refusal, for
+		// the entries the two engines write differently — the one use today
+		// is ROW field access, where PostgreSQL needs `(rw).f` and bare
+		// `rw.f` is read as table.column (see pgCase.pgSQL). Empty means the
+		// engines share the spelling.
+		pgSQL string
+		pin   string
 	}{
 		{name: "UndefinedTable", sql: `SELECT * FROM no_such_table_here`},
 		{name: "UndefinedColumn", sql: `SELECT no_such_column FROM nation`},
+		// #604: a field path naming no field of a ROW column. wadjet spells it
+		// `rw.nosuch`; PostgreSQL raises 42703 ("could not identify column
+		// ... in record data type") only for the parenthesised `(rw).nosuch`,
+		// because bare `rw.nosuch` is read as table.column and is 42P01. Both
+		// must be undefined_column (42703), not a silent column of NULLs.
+		{name: "UndefinedRowField",
+			sql:   `SELECT rw.nosuch FROM row_probe`,
+			pgSQL: `SELECT (rw).nosuch FROM row_probe`},
 		{name: "SyntaxError", sql: `SELECT FROM WHERE`},
 		{name: "DivisionByZero", sql: `SELECT 1/0`},
 		{name: "InvalidTextRepresentation", sql: `SELECT CAST('abc' AS integer)`},
@@ -1160,9 +1174,13 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			pState, pErr := execSQLState(ctx, pConn, c.sql)
+			pgSQL := c.sql
+			if c.pgSQL != "" {
+				pgSQL = c.pgSQL
+			}
+			pState, pErr := execSQLState(ctx, pConn, pgSQL)
 			if pErr == nil {
-				t.Fatalf("the ORACLE accepted a statement this entry exists to see refused: %s", c.sql)
+				t.Fatalf("the ORACLE accepted a statement this entry exists to see refused: %s", pgSQL)
 			}
 			wState, wErr := execSQLState(ctx, wConn, c.sql)
 			if wErr == nil {

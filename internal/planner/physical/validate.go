@@ -66,6 +66,14 @@ type colScope struct {
 	// not carry, appears in neither map and is therefore never refused.
 	colTypes     map[string]parquet.TypeID
 	qualColTypes map[string]map[string]parquet.TypeID
+	// rowFields records the declared FIELDS of the ROW columns a BASE TABLE
+	// provides, keyed by bare column name, so a dotted field path (rw.field)
+	// can be checked at plan time the way an unknown column already is (#604).
+	// A bare name two sources declare with DIFFERENT ROW shapes is removed —
+	// the refusal has to be certain — and a name from a derived table or CTE,
+	// whose field shape this binder does not carry, is never in the map and so
+	// is never refused. Only ROW columns with a non-empty field list appear.
+	rowFields map[string][]parquet.Column
 }
 
 // typeAmbiguous marks a bare column name that two FROM sources declare with
@@ -76,7 +84,8 @@ const typeAmbiguous = parquet.TypeID(-1)
 
 func newColScope() *colScope {
 	return &colScope{cols: map[string]bool{}, quals: map[string]map[string]bool{}, srcCount: map[string]int{},
-		colTypes: map[string]parquet.TypeID{}, qualColTypes: map[string]map[string]parquet.TypeID{}}
+		colTypes: map[string]parquet.TypeID{}, qualColTypes: map[string]map[string]parquet.TypeID{},
+		rowFields: map[string][]parquet.Column{}}
 }
 
 func (s *colScope) addColumn(col string) {
@@ -199,6 +208,15 @@ func (s *colScope) merge(o *colScope) {
 			s.qualColTypes[q][c] = typ
 		}
 	}
+	for c, fields := range o.rowFields {
+		if prev, seen := s.rowFields[c]; seen && !sameRowFields(prev, fields) {
+			// Two sources declare the same ROW column with different shapes:
+			// the field refusal cannot be certain, so drop it.
+			delete(s.rowFields, c)
+			continue
+		}
+		s.rowFields[c] = fields
+	}
 }
 
 func (s *colScope) clone() *colScope {
@@ -233,7 +251,19 @@ func (s *colScope) resolveRef(ref *plansql.ColRef) error {
 		}
 		if s.cols[q] {
 			// Qualifier is itself a column → dotted ROW/struct field access
-			// (e.g. attrs.score). Field existence is checked at runtime.
+			// (e.g. attrs.score). When the qualifier is a ROW column whose
+			// fields are known (a base table), the FIELD must exist too:
+			// a path naming no field resolved to NULL at runtime, silently
+			// wrong the way an unknown column would have been before #147
+			// (#604). A qualifier whose fields are not known — a non-ROW
+			// column, or one from a derived table / CTE — keeps the runtime
+			// fieldIdx == -1 check as its defence.
+			if fields, known := s.rowFields[q]; known {
+				parent := parquet.Column{Type: parquet.TypeRow, Fields: fields}
+				if _, found := parent.Field(ref.Column); !found {
+					return s.unknownField(ref, fields)
+				}
+			}
 			return nil
 		}
 		if strings.Contains(q, ".") {
@@ -263,6 +293,26 @@ func (s *colScope) unknownColumn(ref *plansql.ColRef) error {
 		return sqlerr.New("42703", "unknown column %q (available: %s)", ref.String(), strings.Join(avail, ", "))
 	}
 	return sqlerr.New("42703", "unknown column %q", ref.String())
+}
+
+// unknownField builds the 42703 undefined_column error for a dotted field
+// path (rw.field) whose FIELD names no field of the ROW column rw. The
+// SQLSTATE and message mirror what PostgreSQL raises for `(rw).field`:
+// "could not identify column ... in record data type", 42703 (#604).
+func (s *colScope) unknownField(ref *plansql.ColRef, fields []parquet.Column) error {
+	names := make([]string, 0, len(fields))
+	for _, f := range fields {
+		names = append(names, f.Name)
+	}
+	sort.Strings(names)
+	if len(names) > 8 {
+		names = names[:8]
+	}
+	if len(names) > 0 {
+		return sqlerr.New("42703", "could not identify column %q in record data type %q (fields: %s)",
+			ref.Column, ref.Table, strings.Join(names, ", "))
+	}
+	return sqlerr.New("42703", "could not identify column %q in record data type %q", ref.Column, ref.Table)
 }
 
 // available returns up to a handful of sorted column names for an error message.
@@ -510,8 +560,26 @@ func (b *binder) resolveSource(ctx context.Context, tr plansql.TableRef, lateral
 	}
 	for _, c := range meta.Schema.Columns {
 		into.addQualifiedTyped(qual, c.Name, c.Type)
+		into.addRowColumn(c)
 	}
 	return nil
+}
+
+// addRowColumn records a ROW column's declared FIELDS so a field path against
+// it can be checked at plan time (#604). Only a ROW with a declared field list
+// is recorded; anything else leaves field existence to the runtime resolver.
+// A second source declaring the same bare name with a DIFFERENT shape removes
+// the entry, so the refusal is never made on an uncertain shape.
+func (s *colScope) addRowColumn(c parquet.Column) {
+	if c.Type != parquet.TypeRow || len(c.Fields) == 0 {
+		return
+	}
+	name := strings.ToLower(c.Name)
+	if prev, seen := s.rowFields[name]; seen && !sameRowFields(prev, c.Fields) {
+		delete(s.rowFields, name)
+		return
+	}
+	s.rowFields[name] = c.Fields
 }
 
 // registerCTE parses, validates and records a CTE's output columns so later
