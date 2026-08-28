@@ -1057,13 +1057,25 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 			sql: `SELECT COUNT(*) FROM dec_probe WHERE LEAST(d_key, 'abc', d_2) = 'abc'`},
 		{name: "DecimalNonNumericConstantIsDistinctFrom",
 			sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 IS DISTINCT FROM 'abc'`},
-		// The same rule one type family over, and NOT yet implemented: an
-		// integer column reads an unparseable constant as the value ZERO and
-		// answers the rows holding zero, which is #463's failure mode on the
-		// family #463 never covered.
-		{name: "IntegerNonNumericConstant", sql: `SELECT COUNT(*) FROM nation WHERE n_nationkey = 'abc'`,
-			pin: missingValidationPin + " Specifically: the constant is read as the integer ZERO and " +
-				"matches the rows holding 0. (#536)"},
+		// The same rule one type family over (#536, closed): an integer
+		// column used to read an unparseable constant as the value ZERO and
+		// answer the rows holding zero — #463's failure mode on the family
+		// #463 never covered. Both comparison paths now read the integer
+		// input grammar (kernel.Int64FilterConst/Int32FilterConst) and raise
+		// 22P02 for a literal that names no integer, so this AGREES now.
+		{name: "IntegerNonNumericConstant", sql: `SELECT COUNT(*) FROM nation WHERE n_nationkey = 'abc'`},
+		// #536 review: the SQLSTATE for an integer literal that OVERFLOWS the
+		// column type is 22003 (numeric_value_out_of_range), a DIFFERENT code
+		// from the 22P02 a non-numeric literal earns — PostgreSQL distinguishes
+		// them and so must both wadjet comparison paths. d_key is bigint,
+		// d_grp is integer, so these cover both widths.
+		{name: "BigintOutOfRangeConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_key = '99999999999999999999999'`},
+		{name: "IntegerOutOfRangeConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_grp = '3000000000'`},
+		// #536 review: the integer input trims only PostgreSQL's whitespace
+		// (ASCII), never Unicode — a NBSP (U+00A0) before the digits is a
+		// non-whitespace byte PostgreSQL rejects with 22P02. strings.TrimSpace
+		// would have stripped it and accepted the value.
+		{name: "IntegerNBSPConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_key = ' 42'`},
 		// A TEXT-only function over bytea. PostgreSQL has no upper(bytea) —
 		// 42883, the same shape as min(boolean) — and wadjet answers,
 		// because expr reads every operand through toString (#583).

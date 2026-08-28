@@ -3,6 +3,7 @@ package kernel
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -254,10 +255,27 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 			return nil
 		}
 		return compareFilterBool(op, val)
-	case batch.TypeInt64, batch.TypeTimestamp:
+	case batch.TypeInt64:
+		// A text literal is read through the integer input grammar, not
+		// parseTimestampString: `k = 'abc'` (and `k = '42'`) coerced to 0 and
+		// matched every row holding zero (#536). A literal that names no
+		// integer returns no kernel; exec.intConstError raises 22P02.
+		n, st := Int64FilterConst(value)
+		if st != IntConstOK {
+			return nil
+		}
+		return compareFilterImpl(getInt64Data, n, op)
+	case batch.TypeTimestamp:
+		// TIMESTAMP keeps its own string grammar (parseTimestampString via
+		// toInt64): a quoted string against a TIMESTAMP column is a timestamp,
+		// not an integer — #493, not #536.
 		return compareFilterImpl(getInt64Data, toInt64(value), op)
 	case batch.TypeInt32:
-		return compareFilterImpl(getInt32Data, int32(toInt64(value)), op)
+		n, st := Int32FilterConst(value)
+		if st != IntConstOK {
+			return nil
+		}
+		return compareFilterImpl(getInt32Data, n, op)
 	case batch.TypeFloat64:
 		// Not compareFilterImpl: FLOAT compares in PostgreSQL's total order,
 		// where NaN is the greatest value and equal to itself, so `> 1e300`
@@ -315,9 +333,19 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 		// package asks the caller to raise — see compareFilterDecimal.
 		return nil
 	case batch.TypePort, batch.TypeProtocol:
-		return compareFilterImpl(getInt32Data, int32(toInt64(value)), op)
+		// int32-backed integer types: same silent-zero as TypeInt32 (#536).
+		n, st := Int32FilterConst(value)
+		if st != IntConstOK {
+			return nil
+		}
+		return compareFilterImpl(getInt32Data, n, op)
 	case batch.TypeDuration:
-		return compareFilterImpl(getInt64Data, toInt64(value), op)
+		// int64-backed integer type: same silent-zero as TypeInt64 (#536).
+		n, st := Int64FilterConst(value)
+		if st != IntConstOK {
+			return nil
+		}
+		return compareFilterImpl(getInt64Data, n, op)
 	case batch.TypeUUID:
 		// ok is false when the literal is 36/32 characters of something
 		// other than hex, or any other length: not a UUID at all. The old
@@ -1747,6 +1775,110 @@ func toInt64(v any) int64 {
 	default:
 		return 0
 	}
+}
+
+// IntConstStatus classifies an integer-column filter constant. IntConstOK
+// means it is a usable value; IntConstSyntax means the text names no integer
+// at all (PostgreSQL raises 22P02, invalid_text_representation); IntConstRange
+// means it names an integer that overflows the column type (PostgreSQL raises
+// 22003, numeric_value_out_of_range, a DIFFERENT SQLSTATE with different
+// wording). The two error paths carry this classification rather than a bare
+// bool so each can raise the SQLSTATE PostgreSQL actually raises.
+type IntConstStatus int
+
+const (
+	IntConstOK IntConstStatus = iota
+	IntConstSyntax
+	IntConstRange
+)
+
+// pgIntWhitespace is the whitespace PostgreSQL's integer input (pg_strtoint*)
+// skips at both ends: C isspace() in the default locale — space, tab,
+// newline, vertical tab, form feed, carriage return. It is DELIBERATELY not
+// strings.TrimSpace, which also strips Unicode spaces such as NBSP (U+00A0);
+// PostgreSQL treats NBSP as a non-whitespace byte and rejects ` 42` with
+// NBSP, so trimming it would accept a literal PostgreSQL refuses. This is the
+// same six-byte set kernel.ParseBoolText trims.
+const pgIntWhitespace = " \t\n\v\f\r"
+
+// Int64FilterConst resolves an integer-column filter constant to an int64,
+// reporting a non-OK status for a text literal that is not a usable integer.
+//
+// An integer box (int64/int32/int from a parameter or a folded literal)
+// arrives already in the domain. A SQL text literal, though, is a STRING here
+// — and the old toInt64 read a string through parseTimestampString, so `k =
+// 'abc'` (and even `k = '42'`, which no timestamp layout matches) coerced to
+// 0 and MATCHED every row holding zero (#536, the integer rung of #463's
+// silent-sentinel ladder). It is read through Go's base-10 integer grammar
+// now, so '42' compares as 42 and 'abc' names no integer (IntConstSyntax): the
+// caller (ResolveFilterKernel's integer arms return a nil kernel; the row path
+// panics) refuses the query the way PostgreSQL does, rather than answering the
+// zero rows.
+//
+// Go's base-10 grammar is a SUBSET of PostgreSQL's integer input, not a match
+// for it: PostgreSQL 16+ also accepts 0x/0o/0b radix prefixes, underscore
+// digit separators and leading-zero decimals (`'0x1A'::int` = 26, `'1_000'` =
+// 1000, `'007'` = 7), all of which this rejects. That over-strictness is a
+// separate, tracked gap (#634 — full PostgreSQL integer-input grammar parity);
+// it turns forms that PostgreSQL answers into a 22P02 here, whereas before
+// #536 they read as the silent zero, so this is not a regression from the
+// filed behaviour, and the common decimal case is exact.
+//
+// TIMESTAMP is deliberately NOT routed here: its string literal IS a timestamp
+// and must keep reading through parseTimestampString — a quoted numeric string
+// against a TIMESTAMP column is #493's territory, not this fix's.
+func Int64FilterConst(v any) (int64, IntConstStatus) {
+	switch tv := v.(type) {
+	case int64:
+		return tv, IntConstOK
+	case int:
+		return int64(tv), IntConstOK
+	case int32:
+		return int64(tv), IntConstOK
+	case float64:
+		return int64(tv), IntConstOK
+	case string:
+		return parseIntText(tv)
+	case []byte:
+		return parseIntText(string(tv))
+	default:
+		return 0, IntConstSyntax
+	}
+}
+
+// Int32FilterConst is Int64FilterConst for the int32-backed integer types
+// (TypeInt32 and the network-native TypePort/TypeProtocol): it parses the
+// same grammar but reports IntConstRange for a value outside int32's range, so
+// a numeric literal that would silently WRAP on narrowing (`int4col =
+// '3000000000'`) becomes the 22003 refusal PostgreSQL gives rather than a
+// comparison against the wrapped value — the same silent-wrong class #536
+// closes for the non-numeric literal.
+func Int32FilterConst(v any) (int32, IntConstStatus) {
+	n, st := Int64FilterConst(v)
+	if st != IntConstOK {
+		return 0, st
+	}
+	if n < math.MinInt32 || n > math.MaxInt32 {
+		return 0, IntConstRange
+	}
+	return int32(n), IntConstOK
+}
+
+// parseIntText reads PostgreSQL's integer input for the digits it shares with
+// Go's base-10 grammar: PostgreSQL's leading/trailing whitespace (pgIntWhite-
+// space, not Unicode), an optional sign, then base-10 digits. strconv.ParseInt
+// refuses trailing junk, '42.0' and the radix/underscore forms; a value past
+// int64's range comes back as strconv.ErrRange, which is 22003 (IntConstRange)
+// rather than a syntax error.
+func parseIntText(s string) (int64, IntConstStatus) {
+	n, err := strconv.ParseInt(strings.Trim(s, pgIntWhitespace), 10, 64)
+	if err != nil {
+		if errors.Is(err, strconv.ErrRange) {
+			return 0, IntConstRange
+		}
+		return 0, IntConstSyntax
+	}
+	return n, IntConstOK
 }
 
 // errDateDaysOutOfRange is returned by toDateInt32/parseDateToDays for a

@@ -1036,14 +1036,18 @@ func postgresSemanticsCases() []pgCase {
 	// there, not a text comparison and not a comparison against zero.
 	//
 	// The CASE-wrapped forms are GATED: they take the row-at-a-time path,
-	// which follows that rule. The bare forms are PINNED: they take the
-	// vectorized filter, whose integer and float arms read ANY string
-	// constant as the type's ZERO, so `d_key > '2'` selects every row above
-	// ZERO. That is #536, pre-existing and unchanged by this round; the pin
-	// fails when it is fixed.
-	const quotedNumericPin = pgBugWadjet + ` the vectorized filter reads a quoted numeric constant as the ` +
-		`column type's ZERO, so this asks "> 0" instead of "> 2". The row-at-a-time path answers ` +
-		`PostgreSQL's number (the CASE-wrapped entries beside this one gate it).`
+	// which follows that rule. The bare scalar comparisons on d_key (an
+	// integer column) are now GATED too: #536 gave the vectorized filter's
+	// integer arms PostgreSQL's integer input grammar, so `d_key > '2'` asks
+	// "> 2". What STAYS pinned is the pair #536 did not reach: the IN-LIST
+	// arm (kernel.ResolveInFilterKernel still builds its set through toInt64,
+	// so `d_key IN ('2','3')` reads the elements as ZERO) and the FLOAT arm
+	// (l_discount, whose toFloat64 still reads a string as 0.0). Both are the
+	// same silent-zero one predicate/type over; each pin fails when its arm
+	// is fixed.
+	const quotedNumericPin = pgBugWadjet + ` a quoted numeric constant is read as the column type's ZERO ` +
+		`on this arm (the IN-list set builder / the float comparison), so this asks against 0 instead ` +
+		`of the number. The scalar integer comparisons beside this one gate the fixed arm (#536).`
 	out = append(out,
 		pgCase{name: "IntColumnVsQuotedNumericGtInCase",
 			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_key > '2' THEN 1 ELSE 0 END = 1`},
@@ -1073,15 +1077,22 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE CASE WHEN l_discount > '0.05' THEN 1 ELSE 0 END = 1`},
 		pgCase{name: "FloatColumnVsQuotedNumericEqInCase",
 			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE CASE WHEN l_discount = '0.05' THEN 1 ELSE 0 END = 1`},
-		// The scan path, pinned.
+		// The scan path. The scalar integer comparisons now GATE #536's fix
+		// (the vectorized filter parses the quoted integer): they must agree.
+		// #536 review: an explicit valid-integer control, so the fix cannot
+		// over-fire into refusing a genuine quoted integer.
+		pgCase{name: "IntColumnVsQuotedIntegerEq",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key = '3'`},
 		pgCase{name: "IntColumnVsQuotedNumericGt",
-			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key > '2'`, knownBug: quotedNumericPin, issue: "#536"},
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key > '2'`},
 		pgCase{name: "IntColumnVsQuotedNumericLt",
-			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key < '2'`, knownBug: quotedNumericPin, issue: "#536"},
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key < '2'`},
+		pgCase{name: "IntColumnVsQuotedNumericBetween",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key BETWEEN '2' AND '4'`},
+		// Still pinned: the IN-list set builder and the float arm read the
+		// quoted numeric as ZERO — the two arms #536 did not reach.
 		pgCase{name: "IntColumnVsQuotedNumericInList",
 			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key IN ('2','3')`, knownBug: quotedNumericPin, issue: "#536"},
-		pgCase{name: "IntColumnVsQuotedNumericBetween",
-			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key BETWEEN '2' AND '4'`, knownBug: quotedNumericPin, issue: "#536"},
 		pgCase{name: "FloatColumnVsQuotedNumericGt",
 			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_discount > '0.05'`, knownBug: quotedNumericPin, issue: "#536"},
 	)

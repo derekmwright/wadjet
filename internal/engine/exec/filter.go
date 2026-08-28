@@ -155,6 +155,16 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 	// removes the branch from the row loop.
 	strVal := fmt.Sprint(value)
 	intVal := toInt64(value)
+	// An integer column's literal is read through the integer input grammar,
+	// exactly as the vectorized kernel does (#536). A non-OK status means the
+	// text names no integer (IntConstSyntax → 22P02) or overflows the type
+	// (IntConstRange → 22003); the arms below raise the matching error the
+	// same way the UUID/BOOL arms do, rather than the old toInt64 that read
+	// `k = 'abc'` — and `k = '42'` — as the zero value and matched every row
+	// holding it. TIMESTAMP/DATE keep intVal (parseTimestampString), which is
+	// #493's territory, not this fix's.
+	int64Val, int64Status := kernel.Int64FilterConst(value)
+	int32Val, int32Status := kernel.Int32FilterConst(value)
 	floatVal := toFloat64(value)
 	ipv4Val := parseIPv4FilterVal(value)
 	macVal := parseMACFilterVal(value)
@@ -201,10 +211,25 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 		}
 
 		switch v.Type {
-		case batch.TypeInt64, batch.TypeTimestamp:
+		case batch.TypeInt64:
+			// A non-OK status means the literal names no integer (22P02) or
+			// overflows the type (22003) — the same refusal intConstError
+			// makes for the vectorized kernel path, raised here via the
+			// pipeline's FatalEvalPanic shape since this path has no error
+			// return (mirrors the TypeUUID/TypeBool arms).
+			if int64Status != kernel.IntConstOK {
+				panic(fatalEvalError{intLitError(v.Type, int64Status, strVal)})
+			}
+			return compareInt64(v.Int64Data[row], int64Val, op)
+		case batch.TypeTimestamp:
+			// TIMESTAMP reads intVal (parseTimestampString), not the integer
+			// grammar — a quoted string is a timestamp here (#493).
 			return compareInt64(v.Int64Data[row], intVal, op)
 		case batch.TypeInt32:
-			return compareInt64(int64(v.Int32Data[row]), intVal, op)
+			if int32Status != kernel.IntConstOK {
+				panic(fatalEvalError{intLitError(v.Type, int32Status, strVal)})
+			}
+			return compareInt64(int64(v.Int32Data[row]), int64(int32Val), op)
 		case batch.TypeFloat64:
 			return compareFloat64(v.Float64Data[row], floatVal, op)
 		case batch.TypeFloat32:
@@ -239,9 +264,15 @@ func ColumnCompareLit(colName string, op CompareOp, value any, litText string) P
 		case batch.TypeCIDR:
 			return compareString(v.BytesData.UnsafeStringValue(row), strVal, op)
 		case batch.TypePort, batch.TypeProtocol:
-			return compareInt64(int64(v.Int32Data[row]), intVal, op)
+			if int32Status != kernel.IntConstOK {
+				panic(fatalEvalError{intLitError(v.Type, int32Status, strVal)})
+			}
+			return compareInt64(int64(v.Int32Data[row]), int64(int32Val), op)
 		case batch.TypeDuration:
-			return compareInt64(v.Int64Data[row], intVal, op)
+			if int64Status != kernel.IntConstOK {
+				panic(fatalEvalError{intLitError(v.Type, int64Status, strVal)})
+			}
+			return compareInt64(v.Int64Data[row], int64Val, op)
 		case batch.TypeUUID:
 			// A UUID column stores 16 RAW bytes; the literal is 36 characters
 			// of text. Comparing them directly could never match, so
@@ -580,6 +611,87 @@ func boolConstError(typ batch.TypeID, value any) error {
 	return sqlerr.New("22P02", "invalid input syntax for type boolean: %q", fmt.Sprint(value))
 }
 
+// intTypeName is the PostgreSQL type name an integer column's error wording
+// carries. The wadjet-native TypePort/TypeProtocol/TypeDuration have no
+// PostgreSQL equivalent, so they name themselves; INT64/INT32 use PostgreSQL's
+// own bigint/integer, which the pg-oracle checks byte-for-byte.
+func intTypeName(typ batch.TypeID) (string, bool) {
+	switch typ {
+	case batch.TypeInt64:
+		return "bigint", true
+	case batch.TypeInt32:
+		return "integer", true
+	case batch.TypePort:
+		return "port", true
+	case batch.TypeProtocol:
+		return "protocol", true
+	case batch.TypeDuration:
+		return "duration", true
+	}
+	return "", false
+}
+
+// intStatusError turns a kernel.IntConstStatus into the exact error PostgreSQL
+// gives: 22P02 (invalid_text_representation, `invalid input syntax for type
+// bigint: "abc"`) for text that names no integer, and 22003
+// (numeric_value_out_of_range, `value "3000000000" is out of range for type
+// integer`) for an integer that overflows the column type. Routing overflow
+// through the 22P02 wording would name the wrong SQLSTATE and the wrong cause;
+// PostgreSQL distinguishes them and the WireProtocol oracle checks both.
+func intStatusError(st kernel.IntConstStatus, name, text string) error {
+	switch st {
+	case kernel.IntConstSyntax:
+		return sqlerr.New("22P02", "invalid input syntax for type %s: %q", name, text)
+	case kernel.IntConstRange:
+		return sqlerr.New("22003", `value "%s" is out of range for type %s`, text, name)
+	}
+	return nil
+}
+
+// intLitError is the row-at-a-time path's (ColumnCompareLit) error for a
+// constant that is not a usable integer against an integer column — it raises
+// via the pipeline's FatalEvalPanic shape, since that path has no error return
+// of its own, exactly as its TypeUUID/TypeBool arms do.
+func intLitError(typ batch.TypeID, st kernel.IntConstStatus, text string) error {
+	name, ok := intTypeName(typ)
+	if !ok {
+		name = "integer"
+	}
+	return intStatusError(st, name, text)
+}
+
+// intConstError is decimalConstError's counterpart for the integer-family
+// columns whose kernel arm refuses a text literal it cannot read as a usable
+// integer (kernel.Int64FilterConst / Int32FilterConst / #536). The old toInt64
+// read a string through parseTimestampString, so `k = 'abc'` — and `k = '42'`,
+// which no timestamp layout matches either — coerced to 0 and MATCHED every
+// row holding zero, the integer rung of #463's silent-sentinel ladder.
+// PostgreSQL refuses `'abc'::bigint` with 22P02 and `'3000000000'::integer`
+// with 22003, and ADR-0012 makes PostgreSQL the authority on error-versus-not,
+// so this raises its SQLSTATE and its wording. Both paths read the SAME kernel
+// helper and share intStatusError, so they cannot disagree on which literal is
+// refused or how.
+//
+// A nil constant is NOT this case: ResolveFilterKernel's own nil guard answers
+// it as UNKNOWN for every row.
+func intConstError(typ batch.TypeID, value any) error {
+	if value == nil {
+		return nil
+	}
+	name, ok := intTypeName(typ)
+	if !ok {
+		return nil
+	}
+	var st kernel.IntConstStatus
+	switch typ {
+	case batch.TypeInt64, batch.TypeDuration:
+		_, st = kernel.Int64FilterConst(value)
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
+		_, st = kernel.Int32FilterConst(value)
+	}
+	return intStatusError(st, name, fmt.Sprint(value))
+}
+
 // rowFieldType reports the declared type of a ROW vector's named field. It is
 // the exec-side counterpart of expr.ColRef.valueType, for the operators that
 // hold a NAME rather than a resolved reference.
@@ -738,6 +850,9 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 						if err := boolConstError(ft, f.Value); err != nil {
 							return nil, err
 						}
+						if err := intConstError(ft, f.Value); err != nil {
+							return nil, err
+						}
 					}
 					f.useFallback = true
 					f.inner = NewFilter(f.RowFallback)
@@ -774,6 +889,9 @@ func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*bat
 			return nil, err
 		}
 		if err := boolConstError(typ, f.Value); err != nil {
+			return nil, err
+		}
+		if err := intConstError(typ, f.Value); err != nil {
 			return nil, err
 		}
 		// The column resolved; the TYPE has no comparison kernel. Reporting
