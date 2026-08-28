@@ -1243,6 +1243,16 @@ func (f *OrFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 
 	// Snapshot the original selection vector. Filter branches may compact
 	// in.Sel in-place, so the right branch needs an independent copy.
+	//
+	// origSelWasNil records the "no prior selection" case, where the batch
+	// convention is that a nil Sel means EVERY one of the Len rows is live.
+	// A branch that matches all of them returns the batch with that same nil
+	// Sel — indistinguishable, by the Sel alone, from a branch that matched
+	// NONE (which returns a nil *batch). The all-rows reading is resolved
+	// below from whether the branch returned a batch at all; without it,
+	// `x IS NULL OR x IS NOT NULL` over a column with no nulls unioned
+	// {none} with {all-as-nil-Sel} and answered ZERO rows.
+	origSelWasNil := in.Sel == nil
 	var savedSel []uint32
 	if in.Sel != nil {
 		if cap(f.selCopy) < len(in.Sel) {
@@ -1257,6 +1267,10 @@ func (f *OrFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 	if err != nil {
 		return nil, err
 	}
+	// A non-nil result with a nil Sel is "all rows matched" only when this
+	// filter entered on all rows; with a prior selection a well-behaved
+	// branch narrows and returns that selection, never a nil one.
+	leftAll := origSelWasNil && leftResult != nil && leftResult.Sel == nil
 	var leftSel []uint32
 	if leftResult != nil {
 		leftSel = leftResult.Sel
@@ -1269,9 +1283,17 @@ func (f *OrFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 	if err != nil {
 		return nil, err
 	}
+	rightAll := origSelWasNil && rightResult != nil && rightResult.Sel == nil
 	var rightSel []uint32
 	if rightResult != nil {
 		rightSel = rightResult.Sel
+	}
+
+	// OR with an all-rows branch is all the rows that entered this filter.
+	if leftAll || rightAll {
+		in.Sel = nil
+		in.Len = origLen
+		return in, nil
 	}
 
 	// Union selection vectors
