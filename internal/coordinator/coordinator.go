@@ -2570,8 +2570,38 @@ func compareBatchRows(b *batch.RecordBatch, a, bIdx int, orderBy []logical.Order
 		if !ok {
 			continue
 		}
-		va := extractFloat64(b.Columns[ci], a, schema[ci].Type)
-		vb := extractFloat64(b.Columns[ci], bIdx, schema[ci].Type)
+		col := b.Columns[ci]
+
+		// NULL ordering is ABSOLUTE — it is not flipped by ASC/DESC, so it is
+		// resolved here, before the ob.Desc negation below. Placement matches
+		// the physical planner and the single-process sort (resolveNullsLast):
+		// an explicit NULLS FIRST/LAST wins, otherwise NULLS LAST for ASC and
+		// NULLS FIRST for DESC. Before #548 this comparator ignored nulls
+		// entirely, so extractFloat64 read a null row's garbage slot.
+		if col.Nulls.HasNulls() {
+			aNull := col.Nulls.IsNullFast(a)
+			bNull := col.Nulls.IsNullFast(bIdx)
+			if aNull || bNull {
+				if aNull && bNull {
+					continue // both null: tie on this key, fall to next
+				}
+				nullsLast := !ob.Desc
+				if ob.NullsFirst != nil {
+					nullsLast = !*ob.NullsFirst
+				}
+				c := 1 // a is the null → a sorts after b under NULLS LAST
+				if bNull {
+					c = -1
+				}
+				if !nullsLast {
+					c = -c
+				}
+				return c
+			}
+		}
+
+		va := extractFloat64(col, a, schema[ci].Type)
+		vb := extractFloat64(col, bIdx, schema[ci].Type)
 
 		var cmp int
 		switch {
@@ -2580,17 +2610,14 @@ func compareBatchRows(b *batch.RecordBatch, a, bIdx int, orderBy []logical.Order
 		case va > vb:
 			cmp = 1
 		default:
-			// extractFloat64 has no numeric reading for a text-backed
-			// column, so va and vb are both 0 here regardless of the row's
-			// actual value — this default arm is the ONLY place those
-			// columns are compared at all. Only TypeString and TypeCIDR are
-			// named below; extractFloat64's own doc names the broader gap
-			// (IPv6/UUID/BYTES/BOOL/DECIMAL all read 0 here too), filed as
-			// #548 rather than widened into this fix.
+			// extractFloat64 has no numeric reading for a text- or
+			// carrier-backed column, so va and vb are both 0 here regardless
+			// of the row's actual value — this default arm is the ONLY place
+			// those columns are compared at all.
 			switch schema[ci].Type {
 			case parquet.TypeString:
-				sa := extractStringValue(b.Columns[ci], a)
-				sb := extractStringValue(b.Columns[ci], bIdx)
+				sa := extractStringValue(col, a)
+				sb := extractStringValue(col, bIdx)
 				cmp = strings.Compare(sa, sb)
 			case parquet.TypeCIDR:
 				// PostgreSQL's inet order (#492), not the stored text's byte
@@ -2600,9 +2627,33 @@ func compareBatchRows(b *batch.RecordBatch, a, bIdx int, orderBy []logical.Order
 				// an ARBITRARY order, since slices.SortFunc is not guaranteed
 				// stable. kernel.CidrOrderKey is the same re-key ORDER BY,
 				// GROUP BY and MIN/MAX already use (#520).
-				sa := kernel.CidrOrderKey(extractStringValue(b.Columns[ci], a))
-				sb := kernel.CidrOrderKey(extractStringValue(b.Columns[ci], bIdx))
+				sa := kernel.CidrOrderKey(extractStringValue(col, a))
+				sb := kernel.CidrOrderKey(extractStringValue(col, bIdx))
 				cmp = strings.Compare(sa, sb)
+			case parquet.TypeBytes, parquet.TypeUUID, parquet.TypeIPv6:
+				// #548: byte order. These types' on-wire form is stored as
+				// canonical bytes (BYTES raw, UUID 16-byte, IPv6 16-byte),
+				// which compare bytewise the same way the single-process
+				// sortCompareStringNoNulls kernel orders them.
+				sa := extractStringValue(col, a)
+				sb := extractStringValue(col, bIdx)
+				cmp = strings.Compare(sa, sb)
+			case parquet.TypeBool:
+				// #548: false < true.
+				ba, bb := col.BoolData[a], col.BoolData[bIdx]
+				switch {
+				case !ba && bb:
+					cmp = -1
+				case ba && !bb:
+					cmp = 1
+				}
+			case parquet.TypeDecimal:
+				// #548: numeric order via the Int128 carrier, respecting
+				// scale. A DECIMAL column's scale is constant across its rows,
+				// so a direct Int128 compare IS the exact decimal order — no
+				// float rounding, no text render (the engine's own decimal
+				// comparison, per the task's Int128 mandate).
+				cmp = col.DecimalData.Data[a].Cmp(col.DecimalData.Data[bIdx])
 			}
 		}
 		if ob.Desc {
