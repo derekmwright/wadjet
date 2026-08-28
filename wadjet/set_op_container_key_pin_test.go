@@ -9,31 +9,32 @@ import (
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
-// TestSetOpContainerKeyIsAPinnedDivergence pins #612: UNION, INTERSECT and
-// EXCEPT decide membership for a container column by `fmt.Sprintf("%v", …)`,
-// which is not injective for any of them, so two DIFFERENT values become one
-// member.
+// TestSetOpContainerKeyStaysInjective gates the #612 fix: UNION, INTERSECT and
+// EXCEPT used to decide membership for a container column by
+// `fmt.Sprintf("%v", …)`, which is not injective for any of them, so two
+// DIFFERENT values became one member. keyValueText now keys a container column
+// through exec.AppendBoxedGroupKey — the same injective boxed group key the
+// aggregate path uses (#566/ADR-0023) — so distinct containers stay distinct
+// and equal ones still match.
 //
-// It is a PIN in the ADR-0013 sense: it asserts the defect is still present
-// and FAILS when the queries start answering correctly. That failure is the
-// fix's proof and the signal to delete this file — do not "repair" it by
-// relaxing the assertion.
+// This was a PIN in the ADR-0013 sense (it asserted the defect and its own
+// failure was the fix's proof). The fix landed, so it is now a plain
+// regression gate on the RIGHT answers, per its own instruction: the
+// deletion of the pinned wrong-answer assertion is the proof.
 //
 // The evidence is a self-contradiction inside one engine, so no second engine
 // is needed to call it a defect: over the same two rows, GROUP BY and DISTINCT
-// answer TWO values and UNION answers ONE, because they key through different
-// producers. GROUP BY walks the child vector (exec.appendColumnValue);
-// the set operation renders the boxed value (physical.keyValueText's
-// fall-through). INTERSECT is the sharper half — two disjoint one-row sets
-// intersect to a non-empty result.
+// answer TWO values, and the set operations must agree — they key through the
+// same injective producer now. INTERSECT is the sharper half — two disjoint
+// one-row sets must intersect to an EMPTY result.
 //
 // It lives here rather than as a two-path corpus entry because the corpus
 // cannot reach it: over a 5000-row table a set operation lowers to a
 // GroupByAll aggregate, which keys columnar and is RIGHT on both arms. Only
-// the small-input rowHashKey path renders, so the pin needs its own two-row
+// the small-input rowHashKey path renders, so the gate needs its own two-row
 // table. typematrix.arrayValue's ids 101/102 carry the same colliding pair
 // for the day the corpus can use it.
-func TestSetOpContainerKeyIsAPinnedDivergence(t *testing.T) {
+func TestSetOpContainerKeyStaysInjective(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
 	if err != nil {
@@ -86,31 +87,47 @@ func TestSetOpContainerKeyIsAPinnedDivergence(t *testing.T) {
 		}
 	})
 
-	t.Run("set_operations_still_merge_them", func(t *testing.T) {
+	t.Run("set_operations_keep_them_distinct", func(t *testing.T) {
 		for _, q := range []struct {
 			name string
 			sql  string
-			want int // what the defect answers today
 			ok   int // what SQL requires
 		}{
-			{"union", `SELECT a FROM setopc UNION SELECT a FROM setopc`, 1, 2},
-			{"intersect", `SELECT a FROM setopc WHERE id = 1 INTERSECT SELECT a FROM setopc WHERE id = 2`, 1, 0},
-			{"except", `SELECT a FROM setopc WHERE id = 1 EXCEPT SELECT a FROM setopc WHERE id = 2`, 0, 1},
+			// UNION of the table with itself keeps BOTH distinct arrays.
+			{"union", `SELECT a FROM setopc UNION SELECT a FROM setopc`, 2},
+			// Two disjoint one-row sets intersect to nothing.
+			{"intersect", `SELECT a FROM setopc WHERE id = 1 INTERSECT SELECT a FROM setopc WHERE id = 2`, 0},
+			// The left row is not in the right set, so it survives EXCEPT.
+			{"except", `SELECT a FROM setopc WHERE id = 1 EXCEPT SELECT a FROM setopc WHERE id = 2`, 1},
 		} {
-			got := rows(q.sql)
-			if got == q.ok {
-				t.Errorf("%s now answers %d rows, which is CORRECT — #612 is fixed. "+
-					"Delete this pin and gate the three shapes on their right answers instead; "+
-					"that deletion is the fix's proof.", q.name, got)
-				continue
+			if got := rows(q.sql); got != q.ok {
+				t.Errorf("%s answered %d rows, want %d — ARRAY['a b'] and ARRAY['a','b'] are "+
+					"different values and the set-op key must keep them apart (#612)", q.name, got, q.ok)
 			}
-			if got != q.want {
-				t.Errorf("#612 changed shape for %s: answered %d rows, the known-wrong answer is %d "+
-					"and the right one is %d — re-read the issue before re-pinning", q.name, got, q.want, q.ok)
-				continue
-			}
-			t.Logf("known divergence, tracked in #612 — NOT gated: %s answers %d rows, SQL requires %d",
-				q.name, got, q.ok)
+		}
+	})
+
+	// Equal containers must still dedup — the fix must not make everything
+	// distinct. Two rows carrying the identical array collapse to one member.
+	t.Run("equal_containers_still_dedup", func(t *testing.T) {
+		if err := ing.Ingest(ctx, []map[string]any{
+			{"id": int64(3), "a": []any{"x", "y"}},
+			{"id": int64(4), "a": []any{"x", "y"}},
+		}); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+		if err := ing.FlushAll(ctx); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		// id=3 and id=4 hold the same array, so a UNION over just those two
+		// rows yields ONE member; the two id=1/id=2 arrays add two more.
+		if got := rows(`SELECT a FROM setopc UNION SELECT a FROM setopc`); got != 3 {
+			t.Errorf("union answered %d rows, want 3 — equal arrays must dedup to one member", got)
+		}
+		if got := rows(
+			`SELECT a FROM setopc WHERE id = 3 INTERSECT SELECT a FROM setopc WHERE id = 4`,
+		); got != 1 {
+			t.Errorf("intersect of two equal arrays answered %d rows, want 1", got)
 		}
 	})
 }

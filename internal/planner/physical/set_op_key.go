@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -142,15 +143,24 @@ func keyValueText(c *parquet.Column, v any) string {
 		if f, ok := v.(float64); ok {
 			return fmt.Sprintf("%08x", kernel.KeyFloat32Bits(float32(f)))
 		}
-	case parquet.TypeVector:
-		if fs, ok := v.([]float32); ok {
-			var b strings.Builder
-			fmt.Fprintf(&b, "%d:", len(fs))
-			for _, f := range fs {
-				fmt.Fprintf(&b, "%08x", kernel.KeyFloat32Bits(f))
-			}
-			return b.String()
-		}
+	case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow, parquet.TypeVector:
+		// A container's `%v` rendering is not injective — ARRAY['a b'] and
+		// ARRAY['a','b'] both print `[a b]`, ROW{a:'b c:d'} and
+		// ROW{a:'b',c:'d'} both print `map[a:b c:d]` — so two DISTINCT values
+		// became one member: UNION merged them, INTERSECT of disjoint sets
+		// returned a row (#612). exec.AppendBoxedGroupKey is the engine's own
+		// boxed group key, the SAME producer the coordinator's cross-worker
+		// re-aggregation was moved onto in #566/ADR-0023: it walks the
+		// container's elements/fields with their declared metadata, framing
+		// every element so no separator can be swallowed and re-keying a
+		// nested CIDR leaf into inet order and folding a nested float's NaN
+		// payload / -0.0 the way the comparator does. Sharing the producer is
+		// the point — a second implementation of a key is a second definition
+		// of equality, which is how the local path and the DAG (whose set-op
+		// lowering keys columnar) drifted apart for the flat types (#546).
+		// The bytes are a KEY, not text, so they are returned verbatim as a
+		// string; keyValueText's result already only ever feeds a hash map.
+		return string(exec.AppendBoxedGroupKey(nil, v, c))
 	}
 	return fmt.Sprintf("%v", v)
 }
