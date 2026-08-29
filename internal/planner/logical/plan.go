@@ -250,8 +250,19 @@ type Node struct {
 	CTEs []plansql.CTEDef
 
 	// CTEName — set on the root of a CTE sub-plan so the physical planner
-	// can detect and materialize multi-referenced CTEs.
+	// can detect and materialize multi-referenced CTEs. It is also the
+	// SCOPE NAME the enclosing query qualifies this subtree's output columns
+	// by — the CTE's answer to a derived table's alias, which
+	// physical.subtreeNamesRelation reads so `c.gk` resolves to the SELECT
+	// item `gk` names (#653).
 	CTEName string
+
+	// CTERefAlias is the name ONE reference gives that scope — `x` in
+	// `FROM c AS x`, which PostgreSQL makes the only spelling the enclosing
+	// query may use. It sits beside CTEName rather than replacing it because
+	// the CTE cache is keyed on the definition's name and every reference
+	// shares it.
+	CTERefAlias string
 
 	// ScalarDecorrelated marks a LEFT join produced by
 	// decorrelateScalarSubqueries (children[1] is the grouped aggregate

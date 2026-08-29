@@ -506,6 +506,23 @@ type OpSpec struct {
 	// OpFilter.
 	Predicates []string `json:"predicates,omitempty"`
 
+	// ScanSchemaFilter marks an OpFilter that reads a BASE-TABLE SCAN's
+	// output directly, so its input schema is the catalog's declaration and
+	// a predicate naming something that is not in it names nothing at all.
+	// The worker turns that into a query error rather than an UNKNOWN on
+	// every row (the #147 rule, which only the vectorized filter had — see
+	// expr.CheckFilterColumns and #653).
+	//
+	// It is set ONLY there. A filter above a JOIN cannot be checked the same
+	// way: a hash-join partition with an EMPTY build side emits its probe
+	// rows with only the join KEYS declared for the missing side, so a
+	// legitimately-NULL build column is absent from that batch's schema —
+	// TPC-H Q20's `ps_availqty > 0.5 * __scalar_0` over a LEFT join is
+	// exactly that shape, right on every task and schema-less on the empty
+	// ones. Absent from an older coordinator's spec, which reads as false:
+	// the pre-guard behavior.
+	ScanSchemaFilter bool `json:"scan_schema_filter,omitempty"`
+
 	// OpProject.
 	Projections []ProjectSpec `json:"projections,omitempty"`
 

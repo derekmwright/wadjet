@@ -1005,6 +1005,24 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 			// and materialize multi-referenced CTEs.
 			plan.CTEName = cte.Name
 
+			// A CTE reference is a NAMED SCOPE, exactly as a derived table's
+			// alias is, and the enclosing query writes `c.col` for its OUTPUT
+			// columns. The name a REFERENCE gives it rides alongside, because
+			// `FROM c AS x` makes `x` the only spelling the enclosing query
+			// can use. physical.subtreeNamesRelation reads both off this node
+			// so the DAG's alias resolvers answer `c.gk` the way they answer
+			// a derived table's `x.gk` (#653).
+			//
+			// The scope is NOT stamped onto the scans below, which is what
+			// setSubtreeAlias does for a derived table: Node.OuterTableID
+			// would then answer `c` for every scan in the body, so two
+			// relations comma-joined INSIDE the CTE would share one identity
+			// and a predicate spanning them would be attributed to one of
+			// them and pushed there (issue #281's q18 CTE spelling).
+			if table.Alias != "" && !strings.EqualFold(table.Alias, cte.Name) {
+				plan.CTERefAlias = table.Alias
+			}
+
 			// If the CTE has an explicit column list, wrap with a rename projection
 			if len(cte.Columns) > 0 {
 				// Count output columns from the plan

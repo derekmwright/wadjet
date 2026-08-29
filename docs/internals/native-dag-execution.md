@@ -160,7 +160,7 @@ This is the follow-on to #390: that guard keeps a sort with a dependent as its
 own stage rather than folding it into a predecessor dispatch may re-fan-out,
 and that stage is exactly the one whose input had no key to sort on.
 
-## Derived-table aliases: seven resolvers, one convention
+## Derived-table aliases: eight resolvers, one convention
 
 Because a Project emits no stage, **a derived table's rename happens nowhere
 on the DAG**: every stream carries SOURCE column names, and each consumer
@@ -175,6 +175,50 @@ resolves the alias back through the logical plan.
 | ORDER BY term over a SCAN/JOIN/WINDOW producer | `annotateDerivedAliasSortKey` → `resolveDerivedAliasSortKeys` | `hidden_sort_key.go` |
 | a UNION/INTERSECT/EXCEPT arm's projection | `setOpArmProjection` | `set_op_stages.go` |
 | the gather's result schema | `resolveOutputRenameSource` | `output_rename_resolve.go` |
+| a WHERE above the Project | `logical.ResolveFilterThroughProjects` | `logical/filter_project_pushdown.go` |
+
+The filter is the eighth and was added last (#653), because for a DERIVED
+table it is normally not needed: `pushdownPredicates` swaps Filter-Project and
+SUBSTITUTES the alias away before the physical planner ever sees it
+(`splitFilterForProjectPush`, #384), so the predicate that reaches walkStages
+already names source columns. It DECLINES that swap for a Project tagged with
+a `CTEName` — the single-process planner replays one cached CTE result for
+every reference, so a predicate pushed inside would apply to all of them — and
+`walkStages`' `NodeFilter` case then appended the predicate's TEXT to the
+producing stage verbatim. `WITH c AS (SELECT c_i64 AS v FROM t) SELECT … WHERE
+c.v > 0` therefore reached a scan fragment whose schema carries `c_i64`, the
+row evaluator answered nil for `v`, and a WHERE that admits only TRUE dropped
+every row — zero rows on the DAG, correct single-process, for every type. The
+resolver re-spells the predicate in place (it never MOVES it, so the
+materialization fence is untouched), chaining through nested CTEs and
+descending a join one arm at a time.
+
+**The backstop under it.** A resolver that misses is silent, because the row
+evaluator answers nil for a name it cannot resolve and a WHERE admits only
+TRUE. The vectorized `KernelFilter` has refused that since #147; the row
+evaluator now does too, on the one input whose schema is authoritative — a
+SCAN's (`OpSpec.ScanSchemaFilter` → `worker.compileFilterExprs` →
+`expr.CheckFilterColumns`, SQLSTATE 42703). It is a schema test, never a value
+test, so a legitimately-NULL column resolves and passes. It is deliberately
+NOT applied above a join: a hash-join partition whose build side is EMPTY
+emits its probe rows with only the join keys declared for the missing side, so
+a build column that is genuinely NULL for every row of that partition is
+absent from the batch's schema — TPC-H Q20's `ps_availqty > 0.5 * __scalar_0`
+over a decorrelated LEFT join is exactly that, resolvable on the partitions
+with matches and schema-less on the ones without.
+
+**A CTE is a named scope, and it records it differently.** A derived table's
+alias is stamped onto every Scan below it (`setSubtreeAlias` →
+`Node.DerivedAliases`); a CTE's name sits on the SUBTREE ROOT
+(`Node.CTEName`, plus `Node.CTERefAlias` for `FROM c AS x`), and
+`subtreeNamesRelation` reads both. Stamping the CTE name onto its scans
+instead was tried and reverted: `Node.OuterTableID` would then answer `c` for
+every scan in the body, so two relations comma-joined INSIDE the CTE share one
+identity for predicate attribution and a predicate spanning them is pushed
+onto one of them (#281's q18 CTE spelling). Before the scope was readable at
+all, `c.gk` over `WITH c AS (SELECT g AS gk …)` resolved to nothing in
+`resolveShuffleKey`, and the broadcast join's probe matched no row — the
+silent half of #653.
 
 Three rules they share (`planner/physical/derived_alias.go`,
 #467/#468/#480/#489/#490):

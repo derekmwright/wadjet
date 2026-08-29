@@ -260,8 +260,15 @@ func rewritePredThroughProject(pred Predicate, outs map[string]projOutput) (plan
 		// arises for predicates that never named a Project alias.
 		return nil, true
 	}
+	return rewriteASTThroughProject(pred.ASTExpr, outs)
+}
+
+// rewriteASTThroughProject is rewritePredThroughProject's expression half:
+// (nil, true) means the expression names no output this Project renames or
+// computes, (ast, true) is the rewritten form, (nil, false) declines.
+func rewriteASTThroughProject(ast plansql.Node, outs map[string]projOutput) (plansql.Node, bool) {
 	refs := make(map[string]bool)
-	collectASTColumnRefs(pred.ASTExpr, refs)
+	collectASTColumnRefs(ast, refs)
 	needs := false
 	for r := range refs {
 		if strings.Contains(r, ".") {
@@ -281,11 +288,145 @@ func rewritePredThroughProject(pred Predicate, outs map[string]projOutput) (plan
 	if !needs {
 		return nil, true
 	}
-	newAST, ok := substituteColRefs(pred.ASTExpr, outs)
+	newAST, ok := substituteColRefs(ast, outs)
 	if !ok {
 		return nil, false
 	}
 	return newAST, true
+}
+
+// ResolveFilterThroughProjects re-spells a predicate that sits ABOVE one or
+// more Projects into the names their INPUT carries. It is the stage DAG's
+// half of the question the Filter-Project swap answers for the single-process
+// pipeline, and it exists because the two paths lower a Project differently.
+//
+// pushdownPredicates SWAPS a Filter below a Project and substitutes each
+// reference to a renamed or computed output with its defining expression, so
+// a DERIVED table's rename never survives into the physical plan. It DECLINES
+// that swap for a Project tagged with a CTEName — a materialization fence,
+// because the single-process planner replays ONE cached result for every
+// reference of a CTE and a predicate pushed inside it would apply to all of
+// them. Declining is right there, and nothing about it is wrong on the DAG
+// either: the predicate does not move.
+//
+// What is wrong on the DAG is the SPELLING. An ordinary Project emits NO
+// STAGE there (docs/internals/native-dag-execution.md §Derived-table
+// aliases), so the predicate walkStages attaches to the producing stage is
+// evaluated against a schema carrying SOURCE column names. A reference to the
+// alias resolves to nothing, `expr.ColRef.Eval` answers nil, the predicate is
+// UNKNOWN on every row, and a WHERE that admits only TRUE drops all of them —
+// silently, for every type (#653). Every other consumer of a derived name on
+// the DAG has a resolver for exactly this reason; the filter had none.
+//
+// So the predicate stays where it is and only its spelling changes, which is
+// sound whatever the Project is tagged with: substitution evaluates the exact
+// defining expression the Project would have produced, NULLs included. The
+// walk descends through the nodes that rename nothing (Sort, Limit, Distinct)
+// so a CTE body with an ORDER BY or a LIMIT resolves too, and STOPS at the
+// first Project whose output the substitution cannot express — an aggregate
+// output, a volatile function — because a stage that emits such a column
+// emits it under the alias, which is the name the predicate already carries.
+//
+// Returns (nil, false) when nothing changed; the caller then ships the
+// predicate exactly as it did before.
+func ResolveFilterThroughProjects(pred Predicate, child *Node) (plansql.Node, bool) {
+	if pred.ASTExpr == nil {
+		return nil, false
+	}
+	ast, changed := resolveFilterInSubtree(pred.ASTExpr, child, false)
+	if !changed {
+		return nil, false
+	}
+	return ast, true
+}
+
+// resolveFilterInSubtree walks the producing subtree applying each rename it
+// meets, and returns the expression as the stage carrying the filter will see
+// it. A subtree it cannot model STOPS the walk with whatever has been settled
+// so far, which is the spelling the predicate had on entry to that subtree.
+func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool) (plansql.Node, bool) {
+	for ; n != nil; n = n.Children[0] {
+		switch n.Type {
+		case NodeJoin:
+			// A join emits BOTH arms' columns, so a predicate above it can
+			// name either. The arms are resolved one at a time — the same
+			// scoping the other DAG alias resolvers use — but only when no
+			// output name is ambiguous between them: two arms emitting one
+			// name cannot be told apart from the predicate's text, and
+			// guessing is the silent wrong answer this exists to remove.
+			if len(n.Children) != 2 || subtreeRenamesCollide(n.Children[0], n.Children[1]) {
+				return ast, changed
+			}
+			ast, changed = resolveFilterInSubtree(ast, n.Children[0], changed)
+			ast, changed = resolveFilterInSubtree(ast, n.Children[1], changed)
+			return ast, changed
+		case NodeSort, NodeLimit, NodeDistinct:
+			// Rows pass through under their own names.
+		case NodeProject:
+			newAST, ok := rewriteASTThroughProject(ast, projectSubstitutions(n.Projections))
+			if !ok {
+				return ast, changed
+			}
+			if newAST != nil {
+				ast, changed = newAST, true
+			}
+		default:
+			// Anything else emits a stage of its own, under names the
+			// predicate can already see.
+			return ast, changed
+		}
+		if len(n.Children) != 1 {
+			return ast, changed
+		}
+	}
+	return ast, changed
+}
+
+// subtreeRenamesCollide reports whether the two join arms both EXPOSE an
+// output name that one of them renames or computes. Such a name has two
+// possible meanings above the join and the predicate's text does not say
+// which.
+func subtreeRenamesCollide(left, right *Node) bool {
+	l, r := map[string]bool{}, map[string]bool{}
+	collectExposedRenames(left, l)
+	collectExposedRenames(right, r)
+	for name := range l {
+		if r[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// collectExposedRenames records the renamed or computed names an arm EMITS,
+// which is what a predicate above the join can refer to. It stops at the
+// arm's outermost Project: a name that Project does not carry is invisible
+// from above, so a rename below it can collide with nothing. (The
+// substitution walk itself goes deeper, chaining `v` → `u` → `c_i64` — but
+// only for names that outermost Project actually exposes.)
+func collectExposedRenames(n *Node, out map[string]bool) {
+	for ; n != nil; n = n.Children[0] {
+		switch n.Type {
+		case NodeJoin:
+			for _, c := range n.Children {
+				collectExposedRenames(c, out)
+			}
+			return
+		case NodeSort, NodeLimit, NodeDistinct:
+		case NodeProject:
+			for name, o := range projectSubstitutions(n.Projections) {
+				if o.def != nil || o.unsafe {
+					out[name] = true
+				}
+			}
+			return
+		default:
+			return
+		}
+		if len(n.Children) != 1 {
+			return
+		}
+	}
 }
 
 // substituteColRefs returns expr with every column reference to a renamed or

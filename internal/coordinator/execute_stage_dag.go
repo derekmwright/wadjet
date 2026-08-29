@@ -2431,6 +2431,10 @@ func (c *Coordinator) dispatchScanFilterStage(
 			t.Operators = append(t.Operators, distributed.OpSpec{
 				Type:       distributed.OpFilter,
 				Predicates: append([]string(nil), stage.FilterExprs...),
+				// This filter reads the SCAN's output, whose schema is the
+				// catalog's, so a predicate column the batch does not carry
+				// names nothing — see OpSpec.ScanSchemaFilter and #653.
+				ScanSchemaFilter: true,
 			})
 		}
 		// The ABAC security barrier projects FIRST (masks applied, denied

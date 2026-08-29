@@ -89,7 +89,13 @@ func buildWindowKeyProjection(specs []distributed.ProjectSpec) (exec.UnaryOperat
 // compile error below is therefore a backstop, not a supported path — it
 // fails the task loudly rather than letting a subquery silently evaluate
 // wrong.
-func compileFilterExprs(exprs []string) ([]exec.UnaryOperator, []string, error) {
+//
+// scanSchema says the input is a BASE-TABLE SCAN's output, whose schema is the
+// catalog's declaration — the one place a missing predicate column can only
+// mean the planner named something the table does not have. See
+// OpSpec.ScanSchemaFilter for why a filter above a JOIN cannot be checked the
+// same way.
+func compileFilterExprs(exprs []string, scanSchema bool) ([]exec.UnaryOperator, []string, error) {
 	if len(exprs) == 0 {
 		return nil, nil, nil
 	}
@@ -105,7 +111,24 @@ func compileFilterExprs(exprs []string) ([]exec.UnaryOperator, []string, error) 
 		if err != nil {
 			return nil, nil, fmt.Errorf("compile filter %q: %w", s, err)
 		}
-		ops = append(ops, exec.NewFilter(expr.FilterPredicate(compiled)))
+		f := exec.NewFilter(expr.FilterPredicate(compiled))
+		// The #147 guard for the ROW evaluator. A scan stage's filter text is
+		// written by the planner against the catalog's schema, and every
+		// modelling defect so far has arrived here as a name the scan's
+		// batches do not carry — a renamed CTE column was the last one (#653).
+		// Without this the predicate is UNKNOWN on every row and the task
+		// answers zero rows in silence; with it the task fails and names the
+		// column. Refs are declined for a subquery-bearing predicate, where a
+		// name may legitimately resolve outside the batch.
+		if refs, ok := expr.FilterColumnRefs(node); ok && scanSchema {
+			f.Check = func(b *batch.RecordBatch) error {
+				if err := expr.CheckFilterColumns(b, refs); err != nil {
+					return fmt.Errorf("filter %q: %w", s, err)
+				}
+				return nil
+			}
+		}
+		ops = append(ops, f)
 	}
 	cols := make([]string, 0, len(colSet))
 	for c := range colSet {

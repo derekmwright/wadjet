@@ -116,6 +116,33 @@ type ColRef struct {
 	fieldIdx int
 }
 
+// ResolveColumnRef is the column lookup every ColRef performs, exported so a
+// caller can ask whether a reference resolves WITHOUT evaluating it — which
+// is what tells an absent column apart from a NULL one. It returns the batch
+// column index (-1 when the name names nothing) and, for a ROW field path,
+// the field name within it.
+//
+// Three spellings resolve, in order: the name exactly as written, the bare
+// column after dropping a table qualifier, and a `row.field` path whose first
+// part is a ROW column of the batch.
+func ResolveColumnRef(b *batch.RecordBatch, name string) (idx int, structField string) {
+	idx = b.ColumnIndex(name)
+	if idx >= 0 || !strings.Contains(name, ".") {
+		return idx, ""
+	}
+	parts := strings.SplitN(name, ".", 2)
+	// Try unqualified (strip table prefix)
+	if idx = b.ColumnIndex(parts[1]); idx >= 0 {
+		return idx, ""
+	}
+	// Try as struct field access: parts[0] is a ROW column, parts[1] is field name
+	parentIdx := b.ColumnIndex(parts[0])
+	if parentIdx >= 0 && b.Columns[parentIdx].Type == batch.TypeRow {
+		return parentIdx, parts[1]
+	}
+	return -1, ""
+}
+
 // resolve performs first-time column lookup. Idempotent.
 func (e *ColRef) resolve(b *batch.RecordBatch) {
 	if !e.resolved.Load() {
@@ -129,20 +156,7 @@ func (e *ColRef) resolveSlow(b *batch.RecordBatch) {
 	if e.resolved.Load() {
 		return
 	}
-	e.idx = b.ColumnIndex(e.Name)
-	if e.idx < 0 && strings.Contains(e.Name, ".") {
-		parts := strings.SplitN(e.Name, ".", 2)
-		// Try unqualified (strip table prefix)
-		e.idx = b.ColumnIndex(parts[1])
-		if e.idx < 0 {
-			// Try as struct field access: parts[0] is a ROW column, parts[1] is field name
-			parentIdx := b.ColumnIndex(parts[0])
-			if parentIdx >= 0 && b.Columns[parentIdx].Type == batch.TypeRow {
-				e.idx = parentIdx
-				e.structField = parts[1]
-			}
-		}
-	}
+	e.idx, e.structField = ResolveColumnRef(b, e.Name)
 	if e.idx >= 0 {
 		e.typ = b.Columns[e.idx].Type
 	}

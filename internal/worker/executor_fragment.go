@@ -2687,7 +2687,7 @@ func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.O
 func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task, spec distributed.OpSpec) ([]exec.UnaryOperator, func(), error) {
 	switch spec.Type {
 	case distributed.OpFilter:
-		ops, _, err := compileFilterExprs(spec.Predicates)
+		ops, _, err := compileFilterExprs(spec.Predicates, spec.ScanSchemaFilter)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2855,7 +2855,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			// dropped scan's filter (or its computed flag) to the build rows
 			// before insertion. Semantically identical to the dropped scan's
 			// own filter.
-			fops, _, err := compileFilterExprs(spec.BuildFilterExprs)
+			fops, _, err := compileFilterExprs(spec.BuildFilterExprs, false)
 			if err != nil {
 				return nil, fmt.Errorf("build filter: %w", err)
 			}

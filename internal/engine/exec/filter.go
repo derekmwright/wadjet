@@ -34,8 +34,22 @@ const (
 
 // Filter is a UnaryOperator that filters rows using a selection vector.
 type Filter struct {
-	Pred   Predicate
-	selBuf []uint32 // reusable selection vector to avoid per-batch allocation
+	Pred Predicate
+	// Check is the row path's half of the #147 guard, run ONCE on the first
+	// batch: a predicate whose column references name nothing in the input is
+	// a query error, never UNKNOWN on every row.
+	//
+	// KernelFilter has refused that since #147, because a filter that matches
+	// nothing is indistinguishable from genuinely empty data. The row
+	// evaluator had no equivalent — expr.ColRef.Eval simply answers nil — so
+	// every defect that handed this operator the wrong NAME came back as a
+	// silent zero-row answer (#653). The check lives here rather than inside
+	// the predicate because a Predicate returns bool and has nowhere to put
+	// an error; callers that know the predicate's references set it
+	// (expr.CheckFilterColumns), and callers that do not leave it nil.
+	Check   func(*batch.RecordBatch) error
+	checked bool
+	selBuf  []uint32 // reusable selection vector to avoid per-batch allocation
 }
 
 func NewFilter(pred Predicate) *Filter {
@@ -45,6 +59,12 @@ func NewFilter(pred Predicate) *Filter {
 func (f *Filter) Init(_ context.Context) error { return nil }
 
 func (f *Filter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	if !f.checked && f.Check != nil {
+		f.checked = true
+		if err := f.Check(in); err != nil {
+			return nil, err
+		}
+	}
 	if cap(f.selBuf) < in.Len {
 		f.selBuf = make([]uint32, 0, in.Len)
 	}
@@ -79,7 +99,9 @@ func (f *Filter) Close() error { return nil }
 // Clone returns a new Filter that shares the same predicate closure but has
 // its own scratch buffer, allowing concurrent Execute calls.
 func (f *Filter) Clone() UnaryOperator {
-	return &Filter{Pred: f.Pred}
+	// Check comes along: every clone reads the SAME schema, so a reference
+	// the original would refuse is one the clone must refuse too.
+	return &Filter{Pred: f.Pred, Check: f.Check}
 }
 
 // lazyColIdx resolves a column index once and publishes it to every

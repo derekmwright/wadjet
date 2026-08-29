@@ -5671,9 +5671,24 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			filterIdx := len(*stages) - 1
 			for _, pred := range node.Predicates {
 				var exprStr string
-				if pred.Raw != "" {
+				// A Project emits no stage here, so a predicate naming one of
+				// its RENAMED or computed outputs would reach the producing
+				// fragment as a column that fragment's schema does not carry
+				// — nil from expr.ColRef.Eval, UNKNOWN on every row, zero
+				// rows in silence (#653). The predicate does not move; only
+				// its spelling changes. pred is the loop's own copy, so this
+				// never writes to the logical plan the single-process path
+				// shares.
+				if len(node.Children) == 1 {
+					if ast, ok := logical.ResolveFilterThroughProjects(pred, node.Children[0]); ok {
+						exprStr = ast.String()
+					}
+				}
+				switch {
+				case exprStr != "":
+				case pred.Raw != "":
 					exprStr = pred.Raw
-				} else if pred.ASTExpr != nil {
+				case pred.ASTExpr != nil:
 					exprStr = pred.ASTExpr.String()
 				}
 				if exprStr == "" {
@@ -10590,10 +10605,19 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 			if vf := tryVectorizeFilter(compiled); vf != nil {
 				return vf, nil
 			}
-			if vf := tryPartialVectorize(compiled); vf != nil {
+			// The #147 guard for the ROW evaluator, which KernelFilter has
+			// had since and this path did not: a predicate naming a column
+			// the input does not carry is UNKNOWN on every row, and a WHERE
+			// admits only TRUE, so it answers zero rows in silence (#653).
+			// Declined for a CORRELATED predicate, whose outer references
+			// resolve outside this batch by design.
+			check := rowFilterColumnCheck(pred.ASTExpr, outerTables)
+			if vf := tryPartialVectorize(compiled, check); vf != nil {
 				return vf, nil
 			}
-			return exec.NewFilter(wrapPredicate(compiled)), nil
+			f := exec.NewFilter(wrapPredicate(compiled))
+			f.Check = check
+			return f, nil
 		}
 	}
 
@@ -10627,11 +10651,26 @@ func tryVectorizeFilter(e expr.Expr) exec.UnaryOperator {
 	return exec.NewChainFilter(ops)
 }
 
+// rowFilterColumnCheck returns the first-batch column-existence check for a
+// row-evaluated predicate, or nil where the guard cannot apply: a correlated
+// predicate (its outer references resolve outside the batch by design) or one
+// carrying a node FilterColumnRefs declines to enumerate.
+func rowFilterColumnCheck(ast plansql.Node, outerTables map[string]bool) func(*batch.RecordBatch) error {
+	if ast == nil || len(outerTables) > 0 {
+		return nil
+	}
+	refs, ok := expr.FilterColumnRefs(ast)
+	if !ok || len(refs) == 0 {
+		return nil
+	}
+	return func(b *batch.RecordBatch) error { return expr.CheckFilterColumns(b, refs) }
+}
+
 // tryPartialVectorize handles AND chains where some operands are vectorizable and
 // some are not. Vectorized operands run first (narrowing the selection vector),
 // followed by row-at-a-time predicates for the rest. This is better than falling
 // back entirely to row-at-a-time when any part of an AND chain isn't vectorizable.
-func tryPartialVectorize(e expr.Expr) exec.UnaryOperator {
+func tryPartialVectorize(e expr.Expr, check func(*batch.RecordBatch) error) exec.UnaryOperator {
 	parts := flattenAnds(e)
 	if len(parts) < 2 {
 		return nil // not an AND chain
@@ -10653,7 +10692,12 @@ func tryPartialVectorize(e expr.Expr) exec.UnaryOperator {
 	allOps := make([]exec.UnaryOperator, 0, len(vectorized)+len(nonVectorized))
 	allOps = append(allOps, vectorized...)
 	for _, e := range nonVectorized {
-		allOps = append(allOps, exec.NewFilter(wrapPredicate(e)))
+		f := exec.NewFilter(wrapPredicate(e))
+		// The whole predicate's references, not this conjunct's: every op in
+		// the chain reads ONE batch, so its schema answers for all of them.
+		f.Check = check
+		check = nil // once is enough
+		allOps = append(allOps, f)
 	}
 	if len(allOps) == 1 {
 		return allOps[0]

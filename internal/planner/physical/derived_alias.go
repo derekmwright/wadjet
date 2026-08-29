@@ -54,6 +54,22 @@ func subtreeNamesRelation(n *logical.Node, name string) bool {
 	if n == nil || name == "" {
 		return false
 	}
+	// A CTE reference is a named scope too, and the enclosing query writes
+	// `c.col` against its OUTPUT columns exactly as it writes `x.col` for a
+	// derived table's alias. The two record that scope in different places:
+	// a derived table's alias is stamped onto every scan below it
+	// (BuildFromTable's setSubtreeAlias), while a CTE's name sits on the
+	// SUBTREE ROOT (Node.CTEName, plus Node.CTERefAlias for the name ONE
+	// reference gives it in `FROM c AS x`) — stamping it on the scans would
+	// make two relations comma-joined inside the CTE body share one
+	// identity for predicate attribution (#281's q18 CTE spelling). So the
+	// scope test reads both. Without this a join key, GROUP BY term or sort
+	// key naming a RENAMED CTE column resolved to nothing: the broadcast
+	// join's probe matched no row and the query answered zero in silence
+	// (#653).
+	if strings.EqualFold(n.CTEName, name) || strings.EqualFold(n.CTERefAlias, name) {
+		return true
+	}
 	if n.Type == logical.NodeScan {
 		alias := n.TableAlias
 		if alias == "" {
