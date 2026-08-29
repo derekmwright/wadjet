@@ -148,6 +148,44 @@ func TestSQLDeclaredParameterizedTypesRoundTrip(t *testing.T) {
 	}
 }
 
+// The container spellings are PARENTHESISED, and the angle-bracket form every
+// Hive-descended engine uses is a syntax error — ADR-0024 item 9's claim, gated
+// here so it is checkable rather than remembered.
+//
+// It is not an oversight. `<` and `>` are comparison operators in this grammar,
+// so admitting them as type brackets would make a lexer decision depend on
+// parser context, which is exactly the ambiguity a hand-written
+// recursive-descent parser (ADR-0003) exists to avoid.
+func TestContainerTypesAreSpelledWithParentheses(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for _, accepted := range []string{
+		"CREATE TABLE p1 (c ARRAY(STRING))",
+		"CREATE TABLE p2 (c ROW(a INT64))",
+		"CREATE TABLE p3 (c MAP(STRING, INT64))",
+		"CREATE TABLE p4 (c VECTOR(8))",
+		"CREATE TABLE p5 (c DECIMAL(9,2))",
+	} {
+		if _, err := db.Query(ctx, accepted); err != nil {
+			t.Errorf("the parenthesised spelling was refused: %s\n  %v", accepted, err)
+		}
+	}
+	for _, refused := range []string{
+		"CREATE TABLE a1 (c ARRAY<STRING>)",
+		"CREATE TABLE a2 (c MAP<STRING, INT64>)",
+	} {
+		if _, err := db.Query(ctx, refused); err == nil {
+			t.Errorf("the angle-bracket spelling was ACCEPTED: %s — ADR-0024 item 9 says it is a "+
+				"syntax error, so either the record or the grammar has moved", refused)
+		}
+	}
+}
+
 // mapEntryValue reads one key's value out of whichever shape a MAP column
 // comes back in — a Go map, or the list of {key, value} entry rows the
 // columnar path boxes.

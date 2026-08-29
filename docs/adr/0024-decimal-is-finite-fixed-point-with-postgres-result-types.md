@@ -302,6 +302,48 @@ recovers the declaration, not the data. `TestLegacyPrecisionZeroDecimalReadsAsBa
 (`internal/server`) pins the reading in both directions so it cannot drift into
 an accidental refusal or an accidental different scale.
 
+### 9. A DDL type parameter is spelled with PARENTHESES, and the container spellings are a documented SUPERSET
+
+Added 2026-08-29 (#675, #678 review). Wadjet's `CREATE TABLE` takes a type's
+parameters in parentheses, for every parameterized type:
+
+```sql
+CREATE TABLE t (
+  d  DECIMAL(9,2),
+  v  VECTOR(384),
+  a  ARRAY(STRING),
+  a2 ARRAY(DECIMAL(9,2)),
+  r  ROW(a INT64, d DECIMAL(9,2)),
+  m  MAP(STRING, DECIMAL(9,2))
+)
+```
+
+**Angle brackets are a syntax error.** `ARRAY<STRING>` and `MAP<STRING, INT64>`
+— the Hive/Trino/Spark spelling — do not parse, and deliberately are not
+accepted: `<` and `>` are comparison operators in this grammar, so admitting
+them as type brackets would make the lexer's decision depend on parser context,
+which is the kind of ambiguity a hand-written recursive-descent parser
+(ADR-0003) exists to avoid. `parquet.ResolveColumn` is the single reader of the
+parenthesised grammar and `collectTypeParams` the single collector, so there is
+one place to change if that trade is ever reopened.
+
+The three container types are a **superset**, not a divergence to fix:
+PostgreSQL has arrays (`text[]`) and composite types (`CREATE TYPE`) with
+different syntax and different semantics, and no MAP at all, so there is no
+PostgreSQL answer to follow here (ADR-0012's rule applies only where there is
+one). `DECIMAL(p,s)`/`NUMERIC(p,s)` and the parenthesised `VECTOR(N)` are the
+two that DO have or resemble a PostgreSQL spelling, and both match it.
+
+What the DDL grammar can spell, `parquet.DeclaredColumn` must resolve
+completely — element types, ROW fields and MAP key/value included, at every
+depth. That is item 8's neighbour and the substance of #675: a declaration the
+parser accepts and the schema layer half-reads produces a table nothing can
+write. `TestEveryDDLDoorResolvesEveryParameterizedType` asserts the three doors
+agree byte-for-byte over the full 22-type matrix, and
+`TestSQLDeclaredParameterizedTypesRoundTrip` writes and reads one value per
+parameterized type through SQL DDL rather than through a programmatic schema —
+which is why the defect was invisible for as long as it was.
+
 ## Consequences
 
 - One table of rules replaces five independently-derived ones (grouped

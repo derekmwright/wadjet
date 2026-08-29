@@ -3,6 +3,7 @@ package wadjet
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -342,6 +343,12 @@ func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecR
 	if err != nil {
 		return nil, fmt.Errorf("parsing ON condition: %w", err)
 	}
+	// And RESOLVE them. A key column that does not exist used to match no row
+	// at all, so the statement reported success having done nothing — a wrong
+	// answer dressed as a no-op (#678 review, residual 3).
+	if err := ev.checkOnKeys(onKeys); err != nil {
+		return nil, err
+	}
 
 	// For each source row, check if it matches any target row
 	matchedTargetIndices := make(map[int]bool)
@@ -670,10 +677,15 @@ func splitSetClauses(s string) []string {
 // twelve characters "UPPER(s.name)" (#678). PostgreSQL evaluates it, and so
 // does this.
 type mergeEvaluator struct {
-	target      string
-	colByName   map[string]parquet.Column // the TARGET's columns, by lowercase name
-	mergedCols  []parquet.Column          // the merged row's batch schema
-	sourceKnown bool                      // false when the source's declared schema is unavailable
+	target       string
+	source       string
+	targetAlias  string
+	sourceAlias  string
+	colByName    map[string]parquet.Column // the TARGET's columns, by lowercase name
+	srcByName    map[string]parquet.Column // the SOURCE's columns, by lowercase name
+	mergedCols   []parquet.Column          // the merged row's batch schema
+	mergedByName map[string]parquet.Column // the same, by the spelling it is keyed on
+	sourceKnown  bool                      // false when the source's declared schema is unavailable
 }
 
 // buildMergeEvaluator assembles the merged namespace from the two tables'
@@ -687,7 +699,15 @@ type mergeEvaluator struct {
 func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 	targetCols []parquet.Column, targetAlias, sourceAlias string) *mergeEvaluator {
 
-	ev := &mergeEvaluator{target: info.Target, colByName: make(map[string]parquet.Column, len(targetCols))}
+	ev := &mergeEvaluator{
+		target:       info.Target,
+		source:       info.Source,
+		targetAlias:  strings.ToLower(targetAlias),
+		sourceAlias:  strings.ToLower(sourceAlias),
+		colByName:    make(map[string]parquet.Column, len(targetCols)),
+		srcByName:    map[string]parquet.Column{},
+		mergedByName: map[string]parquet.Column{},
+	}
 	for _, c := range targetCols {
 		ev.colByName[strings.ToLower(c.Name)] = c
 	}
@@ -697,24 +717,114 @@ func (db *DB) buildMergeEvaluator(ctx context.Context, info *plansql.MergeInfo,
 		sourceCols = srcMeta.Schema.Columns
 		ev.sourceKnown = true
 	}
+	for _, c := range sourceCols {
+		ev.srcByName[strings.ToLower(c.Name)] = c
+	}
 
 	plain := make(map[string]bool, len(targetCols)+len(sourceCols))
 	add := func(c parquet.Column, name string) {
 		c.Name = name
 		ev.mergedCols = append(ev.mergedCols, c)
+		if _, seen := ev.mergedByName[name]; !seen {
+			ev.mergedByName[name] = c
+		}
 	}
 	for _, c := range sourceCols {
 		add(c, strings.ToLower(c.Name))
-		add(c, sourceAlias+"."+strings.ToLower(c.Name))
+		add(c, ev.sourceAlias+"."+strings.ToLower(c.Name))
 		plain[strings.ToLower(c.Name)] = true
 	}
 	for _, c := range targetCols {
 		if !plain[strings.ToLower(c.Name)] {
 			add(c, strings.ToLower(c.Name))
 		}
-		add(c, targetAlias+"."+strings.ToLower(c.Name))
+		add(c, ev.targetAlias+"."+strings.ToLower(c.Name))
 	}
 	return ev
+}
+
+// checkOnKeys resolves the ON condition's key columns against the two tables.
+//
+// parseOnKeys already refuses a qualifier that is neither alias; what it never
+// did was ask whether the COLUMN exists. `ON t.nosuchcol = s.id` matched
+// nothing and the MERGE reported success with zero rows affected — a wrong
+// answer dressed as a no-op, where PostgreSQL raises 42703 naming
+// `t.nosuchcol` (#678 review, residual 3).
+func (ev *mergeEvaluator) checkOnKeys(keys []onKeyPair) error {
+	for _, k := range keys {
+		if _, ok := ev.colByName[strings.ToLower(k.TargetCol)]; !ok {
+			return sqlerr.New("42703", "column %s.%s does not exist", ev.targetAlias, k.TargetCol)
+		}
+		if ev.sourceKnown {
+			if _, ok := ev.srcByName[strings.ToLower(k.SourceCol)]; !ok {
+				return sqlerr.New("42703", "column %s.%s does not exist", ev.sourceAlias, k.SourceCol)
+			}
+		}
+	}
+	return nil
+}
+
+// resolveRef resolves one column reference against the merged namespace and
+// returns the spelling the merged ROW is keyed on.
+//
+// A QUALIFIER is honoured rather than dropped. It used to be stripped —
+// `merged[ref.Column]` — so `SET n = other.k` read the source's k and stored
+// it, for a relation the statement does not have; PostgreSQL raises 42P01
+// (#678 review R2). An unqualified name must exist somewhere in the merged
+// namespace, or it is 42703 rather than the NULL it used to evaluate to.
+func (ev *mergeEvaluator) resolveRef(ref *plansql.ColRef) (parquet.Column, string, error) {
+	col := strings.ToLower(ref.Column)
+	if ref.Table == "" {
+		c, ok := ev.mergedByName[col]
+		if !ok {
+			return parquet.Column{}, "", sqlerr.New("42703", "column %q does not exist", ref.Column)
+		}
+		return c, col, nil
+	}
+
+	qual := strings.ToLower(ref.Table)
+	var side map[string]parquet.Column
+	switch qual {
+	case ev.targetAlias:
+		side = ev.colByName
+	case ev.sourceAlias:
+		if !ev.sourceKnown {
+			// Nothing to check against; the row still carries the value.
+			return parquet.Column{}, qual + "." + col, nil
+		}
+		side = ev.srcByName
+	default:
+		// A ROW FIELD PATH looks qualified and is not one (ADR-0022).
+		if parent, ok := ev.mergedByName[qual]; ok && parent.Type == parquet.TypeRow {
+			return parquet.Column{}, "", errMergeRefIsFieldPath
+		}
+		return parquet.Column{}, "", sqlerr.New("42P01",
+			"missing FROM-clause entry for table %q", ref.Table)
+	}
+	c, ok := side[col]
+	if !ok {
+		return parquet.Column{}, "", sqlerr.New("42703", "column %s.%s does not exist", qual, ref.Column)
+	}
+	return c, qual + "." + col, nil
+}
+
+// errMergeRefIsFieldPath says a reference is a ROW field path, which
+// resolveRef cannot answer for and the expression evaluator can.
+var errMergeRefIsFieldPath = errors.New("row field path")
+
+// checkMergeColumns resolves every column an expression names, before the
+// statement writes anything.
+func (ev *mergeEvaluator) checkMergeColumns(node plansql.Node) error {
+	refs, err := plansql.ColumnRefs(node)
+	if err != nil {
+		return sqlerr.Wrap("0A000", err)
+	}
+	for _, ref := range refs {
+		if _, _, err := ev.resolveRef(ref); err != nil && err != errMergeRefIsFieldPath {
+			return err
+		}
+	}
+	return nil
 }
 
 // targetColumn resolves a SET / INSERT target name against the target table.
@@ -735,26 +845,45 @@ func (ev *mergeEvaluator) targetColumn(name string) (parquet.Column, error) {
 func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.Column) (any, error) {
 	text = strings.TrimSpace(text)
 
-	// A direct reference, in the exact spelling the merged row holds.
-	if v, ok := merged[text]; ok {
-		return v, checkValueForColumn(v, col)
-	}
-
 	node, err := plansql.ParseExpression(text)
 	if err != nil {
 		return nil, fmt.Errorf("parsing %q: %w", text, err)
 	}
 	if lit, isLit := dmlLiteralText(node); isLit {
-		return ConvertValueForColumn(lit, col)
+		return assignLiteralToColumn(lit, col)
 	}
-	// A reference the parse resolves but the map spells differently
-	// (unqualified where the row holds it qualified, or the other way).
+	// A bare reference is read straight out of the merged row — but RESOLVED
+	// first, so an unknown name is 42703 and an unknown qualifier is 42P01
+	// rather than a NULL or another relation's value (#678 review R2), and
+	// then ASSIGNED, so an integer box reaching a DECIMAL column is the value
+	// and not the unscaled carrier (R1).
 	if ref, ok := unwrapDMLParens(node).(*plansql.ColRef); ok {
-		for _, spelling := range []string{ref.Column, ref.Table + "." + ref.Column} {
-			if v, ok := merged[spelling]; ok {
-				return v, checkValueForColumn(v, col)
+		_, spelling, rerr := ev.resolveRef(ref)
+		if rerr == nil {
+			v := merged[spelling]
+			if v == nil {
+				// The merged row spells an unqualified name it also holds
+				// qualified, and vice versa; either is the same value.
+				for _, alt := range []string{strings.ToLower(ref.Column),
+					strings.ToLower(ref.Table) + "." + strings.ToLower(ref.Column)} {
+					if av, ok := merged[alt]; ok && av != nil {
+						v = av
+						break
+					}
+				}
 			}
+			cast, cerr := assignEvaluatedValue(v, col)
+			if cerr != nil {
+				return nil, cerr
+			}
+			return cast, checkValueForColumn(cast, col)
 		}
+		if rerr != errMergeRefIsFieldPath {
+			return nil, rerr
+		}
+	}
+	if err := ev.checkMergeColumns(node); err != nil {
+		return nil, err
 	}
 
 	if !ev.sourceKnown {
@@ -771,7 +900,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 		return nil, fmt.Errorf("compiling %q: %w", text, err)
 	}
 	b := batch.FromRows(ev.mergedCols, []map[string]any{lowercaseKeys(merged)})
-	v, err := coerceEvaluatedValue(compiled.Eval(b, 0), col)
+	v, err := assignEvaluatedValue(compiled.Eval(b, 0), col)
 	if err != nil {
 		return nil, err
 	}
@@ -791,40 +920,94 @@ func lowercaseKeys(m map[string]any) map[string]any {
 	return out
 }
 
-// coerceEvaluatedValue narrows an evaluated box to the one the target column's
-// carrier holds, and REFUSES the narrowing that would lose the value.
+// assignEvaluatedValue applies PostgreSQL's ASSIGNMENT CAST to a value the
+// expression engine produced, turning it into the box the target column's
+// writer stores.
 //
-// The expression engine has one numeric result box per family, not one per
-// column type: every REAL evaluates to float64, and every integral column
-// (INT32, PORT, PROTOCOL, DATE) reads back as int64. Assigning such a result
-// to an integer column is the one narrowing storage cannot do for itself —
-// ingest.checkType refuses a float64 into an INT64 column outright, so
-// `SET n = ABS(x)` failed with "expected integer, got float64" for a value
-// that is a perfectly good integer.
+// The rule it exists to enforce, and the one whose absence was a silent wrong
+// answer: **an evaluated value is a VALUE, never a carrier.** ADR-0018 §4
+// defines a STORED integer box in a DECIMAL column as the already-unscaled
+// carrier — the int64 325 in a DECIMAL(9,2) column is 3.25 — and an evaluated
+// int64 is nothing of the sort, it is the number itself at scale 0. Handing
+// one straight to DecimalValueFromBox reopened exactly the trap the #647 arc
+// closed: `UPDATE t SET d = n` with n = 10 stored 0.10, `SET d = 1 + 1` stored
+// 0.02, and both returned success (#678 review R1).
 //
-// A fractional result ROUNDS, half away from zero, and only a value outside
-// the column's range (NaN and the infinities included) is 22003. That is
-// PostgreSQL's assignment cast, verified live on postgres:17-alpine:
+// The whole matrix below was read off postgres:17-alpine rather than
+// remembered; each arm names the rows it implements.
 //
-//	SET n = 1 + 0.5      -> 2        SET n = 2.4  -> 2
-//	SET n = -2.5         -> -3       SET n = 5/2  -> 2 (integer division)
-//	SET i = 3000000000   -> 22003 integer out of range
-//	SET n = 'nan'::float8 -> 22003 bigint out of range
-//
-// The range check on the narrow integer types is the same rule reaching one
-// level further: a PORT is a uint16 and a PROTOCOL a uint8, and nothing below
-// this line re-checks either (convertValue does, but only for literals), so an
-// out-of-range value would truncate into a port no real port can be.
-func coerceEvaluatedValue(v any, col parquet.Column) (any, error) {
-	switch col.Type {
-	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol:
-	default:
-		return v, nil
+//	target INT64      5 -> 5    2.4 -> 2    2.5 -> 3    -2.5 -> -3
+//	                  d (numeric 1.50) -> 2    1 + 1.4 -> 2    ABS(0-3) -> 3
+//	                  3000000000 into INT32 -> 22003
+//	target NUMERIC    5 -> 5.00    2.567 -> 2.57    n (bigint 10) -> 10.00
+//	                  1 + 1 -> 2.00    d * 2 -> 3.00    n + 1 -> 11.00
+//	                  99999999.99 into (9,2) -> 22003
+//	target FLOAT8     n -> 10    d -> 1.5    1 + 1 -> 2
+//	target TEXT       5 -> '5'   n -> '10'   d -> '1.50'   UPPER(s) -> 'X'
+func assignEvaluatedValue(v any, col parquet.Column) (any, error) {
+	if v == nil {
+		return nil, nil
 	}
+	switch col.Type {
+	case parquet.TypeDecimal:
+		return assignDecimalValue(v, col)
+	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol:
+		return assignIntegerValue(v, col)
+	case parquet.TypeFloat32, parquet.TypeFloat64:
+		return assignFloatValue(v, col)
+	case parquet.TypeString:
+		return assignTextValue(v, col)
+	}
+	return v, nil
+}
+
+// assignDecimalValue is the R1 fix. An INTEGER box is rendered to its decimal
+// TEXT before it reaches DecimalValueFromBox, because that function reads an
+// integer as the UNSCALED carrier (ADR-0018 §4) and reads text as the VALUE.
+// Every other box the engine produces for a numeric expression — a float64
+// from real arithmetic, the numeric text a DECIMAL column reads back as — is
+// already on the value path and is left alone.
+func assignDecimalValue(v any, col parquet.Column) (any, error) {
+	switch t := v.(type) {
+	case int:
+		v = strconv.FormatInt(int64(t), 10)
+	case int8:
+		v = strconv.FormatInt(int64(t), 10)
+	case int16:
+		v = strconv.FormatInt(int64(t), 10)
+	case int32:
+		v = strconv.FormatInt(int64(t), 10)
+	case int64:
+		v = strconv.FormatInt(t, 10)
+	}
+	// Validated here so the failure names the SET clause rather than a flush,
+	// and rounded to the column's scale by the one checked converter (#647).
+	if _, err := parquet.DecimalValueFromBox(v, col.Precision, col.Scale); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// assignIntegerValue rounds, ranges and narrows a value into an integer
+// column.
+//
+// A fractional value ROUNDS half away from zero and only a value outside the
+// column's range (NaN and the infinities included) is 22003 — PostgreSQL's
+// numeric-to-integer assignment cast. The rounding of a float8 column's exact
+// half differs there (PostgreSQL rounds float8 half to EVEN, so `SET n = f`
+// with f = 2.5 gives 2 where this gives 3); the engine boxes a numeric
+// expression and a float8 column identically, so one rule has to serve both,
+// and half-away-from-zero is the one that matches the far commoner spelling
+// (`SET n = 0 - 2.5` is -3 in PostgreSQL). Recorded as a residual rather than
+// guessed at.
+//
+// The range check reaches PORT (uint16) and PROTOCOL (uint8) too, because
+// nothing below this line re-checks either — convertValue does, but only for
+// literals — so an out-of-range computed value would truncate into a port no
+// real port can be.
+func assignIntegerValue(v any, col parquet.Column) (any, error) {
 	var n int64
 	switch t := v.(type) {
-	case nil:
-		return nil, nil
 	case int64:
 		n = t
 	case int32:
@@ -832,13 +1015,26 @@ func coerceEvaluatedValue(v any, col parquet.Column) (any, error) {
 	case int:
 		n = int64(t)
 	case float64:
-		r := math.Round(t) // Go's Round is half AWAY FROM ZERO, like PostgreSQL's
+		r := math.Round(t) // Go's Round is half AWAY FROM ZERO, like PostgreSQL numeric's
 		if math.IsNaN(r) || math.IsInf(r, 0) || r < -9.223372036854776e18 || r > 9.223372036854776e18 {
 			return nil, sqlerr.New("22003", "%s out of range", col.Type)
 		}
 		n = int64(r)
 	case float32:
-		return coerceEvaluatedValue(float64(t), col)
+		return assignIntegerValue(float64(t), col)
+	case string:
+		// The box a DECIMAL column reads back as. DecimalValueFromText at
+		// scale 0 IS the rounding rule, exactly, and it refuses text that
+		// names no number (22P02) and a magnitude no int64 holds (22003).
+		d, err := parquet.DecimalValueFromText(t, parquet.MaxDecimalDigits, 0)
+		if err != nil {
+			return nil, err
+		}
+		i, fits := d.Int64()
+		if !fits {
+			return nil, sqlerr.New("22003", "%s out of range", col.Type)
+		}
+		n = i
 	default:
 		return v, nil
 	}
@@ -858,6 +1054,76 @@ func coerceEvaluatedValue(v any, col parquet.Column) (any, error) {
 		return n, nil
 	}
 	return int32(n), nil
+}
+
+// assignFloatValue accepts the numeric text a DECIMAL column reads back as;
+// every other numeric box a float column can already hold (ingest.checkType
+// takes float32, float64, int, int32, int64).
+func assignFloatValue(v any, col parquet.Column) (any, error) {
+	s, ok := v.(string)
+	if !ok {
+		return v, nil
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return nil, sqlerr.New("22P02", "invalid input syntax for type %s: %q", col.Type, s)
+	}
+	return f, nil
+}
+
+// assignTextValue renders a numeric box as the text PostgreSQL assigns:
+// `SET s = n` stores '10' and `SET s = d` stores '1.50'. A float is rendered
+// shortest-round-trip, which is what PostgreSQL prints for float8 at its
+// default extra_float_digits.
+func assignTextValue(v any, _ parquet.Column) (any, error) {
+	switch t := v.(type) {
+	case string:
+		return t, nil
+	case int64:
+		return strconv.FormatInt(t, 10), nil
+	case int32:
+		return strconv.FormatInt(int64(t), 10), nil
+	case int:
+		return strconv.FormatInt(int64(t), 10), nil
+	case float64:
+		return strconv.FormatFloat(t, 'g', -1, 64), nil
+	case float32:
+		return strconv.FormatFloat(float64(t), 'g', -1, 32), nil
+	case bool:
+		if t {
+			return "true", nil
+		}
+		return "false", nil
+	}
+	return v, nil
+}
+
+// assignLiteralToColumn converts a SET literal, falling back to the assignment
+// cast for the one class the literal converter cannot read.
+//
+// ConvertValueForColumn is the literal path, and it is the one that carries
+// #647's declaration checks (a DECIMAL literal parsed exactly from its digits,
+// the temporal accept-sets), so it goes first and its answer wins whenever it
+// has one. It has no rule for a FRACTIONAL literal assigned to an integer
+// column, though: `SET n = 2.4` failed in strconv.ParseInt where PostgreSQL
+// rounds it to 2 — and the same value written as an expression (`SET n =
+// 1 + 1.4`) already rounded, so one value had two answers depending on how it
+// was spelled (#678 review). The fallback is the same assignment cast the
+// expression path uses, so now it has one.
+func assignLiteralToColumn(text string, col parquet.Column) (any, error) {
+	v, err := ConvertValueForColumn(text, col)
+	if err == nil {
+		return v, nil
+	}
+	switch col.Type {
+	case parquet.TypeInt32, parquet.TypeInt64, parquet.TypePort, parquet.TypeProtocol:
+		// The cast's answer wins outright here, error included: strconv's
+		// "invalid syntax" and "value out of range" carry no SQLSTATE, while
+		// the cast raises PostgreSQL's own 22P02 for text naming no number
+		// and 22003 for a magnitude the column cannot hold.
+		return assignEvaluatedValue(text, col)
+	}
+	return nil, err
 }
 
 // checkValueForColumn is ConvertValueForColumn's half for a value that is
@@ -1110,7 +1376,7 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, table string, schema []pa
 			return nil, fmt.Errorf("SET %s: parsing %q: %w", name, sc.Value, err)
 		}
 		if text, isLit := dmlLiteralText(node); isLit {
-			v, err := ConvertValueForColumn(text, col)
+			v, err := assignLiteralToColumn(text, col)
 			if err != nil {
 				return nil, fmt.Errorf("SET %s: %w", name, err)
 			}
@@ -1202,7 +1468,7 @@ func BuildUpdatedRows(ctx context.Context, b *batch.RecordBatch, matched []int64
 				row[a.Column] = a.constant
 				continue
 			}
-			v, err := coerceEvaluatedValue(a.expr.Eval(b, int(idx)), a.col)
+			v, err := assignEvaluatedValue(a.expr.Eval(b, int(idx)), a.col)
 			if err != nil {
 				return nil, fmt.Errorf("SET %s: %w", a.Column, err)
 			}
