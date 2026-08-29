@@ -1203,9 +1203,11 @@ func (v *Vector) SetValueChecked(i int, val any) error {
 // real holding 0.1 stores as 0.1 rather than as its 55-digit exact expansion.
 //
 // A float with no decimal spelling at all (NaN and the infinities) has no
-// DECIMAL value either: strconv writes "NaN"/"+Inf" and the checked parser
-// reports 22P02. ADR-0024 item 6 makes NaN a comparison literal and never a
-// stored value, so refusing is the answer there too.
+// DECIMAL value either: strconv writes "NaN"/"+Inf"/"-Inf", all three of which
+// PostgreSQL's numeric input reads as VALUES, and the checked parser reports
+// 22003 for them — a value with no carrier, not an input-syntax error.
+// ADR-0024 item 6 makes NaN a comparison literal and never a stored value, so
+// refusing is the answer there too (#534).
 func (v *Vector) setCheckedDecimalFloat(i int, f float64, bitSize int) error {
 	d, err := ParseDecimalStringChecked(strconv.FormatFloat(f, 'f', -1, bitSize), v.DecimalData.Scale)
 	if err != nil {

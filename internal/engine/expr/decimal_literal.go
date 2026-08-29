@@ -684,19 +684,32 @@ func negateLitText(text string) string {
 	}
 }
 
-// isNumericLitText reports whether a QUOTED string literal's content names a
-// number, using the same shape test a DECIMAL comparison's refusal already
-// uses (kernel.DecimalLiteral.Numeric — isDecimalText → batch.DecimalTextAt).
-// One test decides both "does this parse" questions: compileWithCtx's unary
-// minus fold (compile.go) uses it to choose between folding `-'5.00'` into a
-// literal and refusing `-'abc'` at compile time (#505).
-func isNumericLitText(s string) bool {
-	return kernel.NewDecimalLiteral(s).Numeric()
+// isFiniteNumericLitText reports whether a QUOTED string literal's content
+// names a FINITE number. compileWithCtx's unary minus fold (compile.go) uses
+// it to choose between folding `-'5.00'` into a literal and refusing `-'abc'`
+// at compile time (#505).
+//
+// Deliberately the NARROW reader, unlike IsNumericLiteralText below: unary
+// minus over NaN or an infinity is not a value in PostgreSQL either (`-'NaN'`
+// is 42725, "operator is not unique: - unknown"), and folding it would produce
+// the text '-NaN', which PostgreSQL's numeric input refuses outright. So
+// `-'NaN'` stays the compile-time refusal it already was (kernel.
+// FiniteDecimalText carries the reasoning).
+func isFiniteNumericLitText(s string) bool {
+	return kernel.FiniteDecimalText(s)
 }
 
-// IsNumericLiteralText is isNumericLitText for the planner, which asks the
-// same question one layer up: the plan-time refusal of a non-numeric constant
-// against a DECIMAL column (#517) must accept and refuse exactly the strings
-// the runtime refusal does, or a query would be refused at one and answered at
-// the other — the two-path defect class the refusal exists to close.
-func IsNumericLiteralText(s string) bool { return isNumericLitText(s) }
+// IsNumericLiteralText reports whether a QUOTED string literal's content names
+// a value a DECIMAL column can be COMPARED against, for the planner: the
+// plan-time refusal of a non-numeric constant against a DECIMAL column (#517)
+// must accept and refuse exactly the strings the runtime refusal does, or a
+// query would be refused at one and answered at the other — the two-path
+// defect class the refusal exists to close.
+//
+// So it is `kernel.DecimalLiteral.Numeric()` itself, the runtime predicate,
+// which since #534 accepts PostgreSQL's NaN and ±Infinity spellings alongside
+// the finite numbers: none of the three is a value a DECIMAL column holds, all
+// three are bounds it can be ordered against, and refusing them here would put
+// the plan-time refusal back in front of a query PostgreSQL answers (ADR-0024
+// item 6).
+func IsNumericLiteralText(s string) bool { return kernel.NewDecimalLiteral(s).Numeric() }

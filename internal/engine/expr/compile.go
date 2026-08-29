@@ -208,7 +208,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					// unlike `d = 'abc'`, which could in principle be a
 					// legitimate string comparison against a non-DECIMAL
 					// column, `-'abc'` cannot be a value of any type).
-					if isNumericLitText(v) {
+					if isFiniteNumericLitText(v) {
 						return &Lit{Val: negateLitText(v), Text: negateLitText(v)}, nil
 					}
 					return nil, invalidNumericLiteralError(v)

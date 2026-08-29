@@ -610,8 +610,16 @@ func DecimalConstText(v any) (string, bool) {
 	case []byte:
 		return string(tv), isDecimalText(string(tv))
 	case float64:
-		// NaN and the infinities have no numeric text and no place in a
-		// DECIMAL's order; they are not values this column type holds.
+		// A FLOAT box that is NaN or an infinity is refused, where the TEXT
+		// spellings of the same three above are accepted as bounds (ADR-0024
+		// item 6). The two are different questions. Quoted text against a
+		// DECIMAL column is an unknown-typed literal PostgreSQL types FROM the
+		// column, so it is read as `numeric` and NaN is one of numeric's
+		// values; a float box is a value of ANOTHER type meeting a DECIMAL,
+		// where PostgreSQL's rule is `numeric <op> double precision` — it
+		// casts the numeric and compares as float8 — and this path has no
+		// float kernel to do that with. The binary-parameter route is shut
+		// ahead of here for the same reason (pgwire bindparams).
 		if math.IsNaN(tv) || math.IsInf(tv, 0) {
 			return "", false
 		}
@@ -633,9 +641,32 @@ func DecimalConstText(v any) (string, bool) {
 	}
 }
 
-// isDecimalText reports whether text names a number. Numeric shape does not
-// depend on the scale it will later be resolved at, so scale 0 answers it.
+// isDecimalText reports whether text names a value a DECIMAL column can be
+// COMPARED against. Shape does not depend on the scale the literal will later
+// be resolved at, so scale 0 answers it.
+//
+// That includes PostgreSQL's NaN and ±Infinity, which no DECIMAL column can
+// hold but which every DECIMAL column can be compared against: each is a bound
+// past one end of the column's range and orders there (ADR-0024 item 6). It is
+// batch.DecimalBoundTextAt that says so, the same reader decimalLiteralAt
+// resolves through, so the refusal and the order cannot disagree about which
+// spellings are literals.
 func isDecimalText(s string) bool {
+	_, ok := batch.DecimalBoundTextAt(s, 0)
+	return ok
+}
+
+// FiniteDecimalText reports whether text names a FINITE number — isDecimalText
+// without the comparison bounds.
+//
+// It exists for the one caller whose question is not "can a DECIMAL column be
+// compared against this": folding a unary minus into a quoted string literal
+// (expr.compileWithCtx). `-'NaN'` is not a value in PostgreSQL either — an
+// unknown-typed literal under unary minus is 42725 there, "operator is not
+// unique" — and negating the text would produce '-NaN', which PostgreSQL's
+// numeric input refuses outright. So that fold keeps the narrow reader and
+// `-'NaN'` stays the refusal it already was.
+func FiniteDecimalText(s string) bool {
 	_, ok := batch.DecimalTextAt(s, 0)
 	return ok
 }
@@ -649,9 +680,11 @@ func decimalLiteralText(v any) string {
 
 // decimalLiteralAt resolves decimal text into a column's domain at `scale`:
 // the unscaled value, the residual of the digits the scale could not hold,
-// and the saturation of a magnitude wider than Int128.
+// and the saturation of a magnitude wider than Int128 — or of a NaN/±Infinity
+// spelling, which is a bound past the same end for the same reason (ADR-0024
+// item 6).
 func decimalLiteralAt(text string, scale int) batch.ScaledDecimal {
-	d, _ := batch.DecimalTextAt(text, scale)
+	d, _ := batch.DecimalBoundTextAt(text, scale)
 	return d
 }
 

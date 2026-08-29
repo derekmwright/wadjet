@@ -152,6 +152,33 @@ holds no NaN (0 rows, all rows, all rows); `ORDER BY` needs nothing.
 message naming this record. Same for the infinities. A documented divergence:
 wadjet can compare against a NaN it cannot store.
 
+**Implemented 2026-08-29 (#534).** The mechanism is the one the carrier
+already had: `ScaledDecimal.Sat`, the flag a finite literal wider than Int128
+sets so it orders past every value the column can hold (#462). NaN and
+Infinity saturate ABOVE, -Infinity BELOW — exactly where PostgreSQL's total
+order puts them relative to anything a DECIMAL column can hold, so its
+`NaN > Infinity` is simply not observable here. `batch.DecimalBoundTextAt` is
+the comparison reader (specials, then `DecimalTextAt`) and the ONLY one that
+accepts them: `DecimalTextAt` still refuses, so nothing value-producing can
+reach a bound by accident, and `ParseDecimalStringChecked` turns the three
+into the `22003` above. One predicate serves both refusal sites — the plan-time
+one (`physical.refuseLiteralForType` → `expr.IsNumericLiteralText`) and the
+runtime one (`kernel.DecimalLiteral.Numeric`) — so the accept-set cannot
+differ between them; the row-group prune withholds for these literals
+(`kernel.StatsDomainValue`), which costs a prune and cannot cost a row.
+
+The accept-set is PostgreSQL 17.11's numeric input grammar, taken from a live
+transcript: C whitespace trimmed; `nan` case-insensitive and with NO sign
+(`'+NaN'` and `'-NaN'` are 22P02 there); `infinity` and `inf`
+case-insensitive with an optional IMMEDIATELY-adjacent `+`/`-`. Nothing is a
+prefix match, so `'Infin'` and `'infinit'` stay refused. Two deliberate
+non-widenings: a FLOAT BOX that is NaN still refuses at
+`kernel.DecimalConstText` (that pair is `numeric <op> double precision`, which
+PostgreSQL answers by casting the numeric — a float comparison this path has
+no kernel for), and `-'NaN'` stays the compile-time refusal `-'abc'` is,
+because PostgreSQL has no reading of an unknown-typed literal under unary
+minus either (42725) and the negated text `'-NaN'` is not in the accept-set.
+
 ### 7. The 38-digit set-operation cap (#552) is closed as a recorded divergence of item 1
 
 A set operation moves stored values, so item 3's fractional-digit reduction

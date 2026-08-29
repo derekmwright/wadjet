@@ -465,8 +465,128 @@ func saturatedDecimal(neg bool) ScaledDecimal {
 	return ScaledDecimal{Unscaled: Int128Max, Sat: 1}
 }
 
+// DecimalSpecialKind names one of the three values PostgreSQL's `numeric` has
+// and this carrier does not: NaN and, since PostgreSQL 14, ±Infinity. An
+// Int128 at a fixed scale has no bit pattern for any of them and the parquet
+// DECIMAL annotation has none either (ADR-0024 items 1 and 6).
+//
+// The constants ARE their rank in PostgreSQL's numeric order, which is a total
+// order rather than IEEE754's: -Infinity below every finite value, Infinity
+// above every finite value, and NaN above Infinity and equal only to itself.
+// So an int comparison of two kinds orders them, and the sign of a non-finite
+// kind says which end of a column's range it sits past.
+type DecimalSpecialKind int8
+
+const (
+	DecimalNegInf DecimalSpecialKind = -1
+	DecimalFinite DecimalSpecialKind = 0
+	DecimalPosInf DecimalSpecialKind = 1
+	DecimalNaN    DecimalSpecialKind = 2
+)
+
+// decimalSpaceCutset is the whitespace PostgreSQL's numeric input function
+// strips around a value: C `isspace` in the C locale, not Unicode's set.
+// Trimming Unicode space here would accept input PostgreSQL refuses — a
+// no-break space before a constant is 22P02 there, which the pg-oracle already
+// pins for the integer types.
+const decimalSpaceCutset = " \t\n\v\f\r"
+
+// DecimalSpecialText reads PostgreSQL's numeric input grammar for the three
+// values above, and returns DecimalFinite for everything else — including text
+// that names no number at all, which is DecimalTextAt's question, not this
+// one's.
+//
+// The accept-set is PostgreSQL 17.11's, verified live on postgres:17-alpine:
+// surrounding whitespace is stripped; `NaN` is case-insensitive and takes NO
+// sign (`+NaN` and `-NaN` are both 22P02 there); `Infinity` and its short form
+// `Inf` are case-insensitive and take an optional immediately-adjacent `+` or
+// `-`. Nothing else — a prefix (`Infin`, `infinit`), a sign separated by a
+// space (`- inf`) and any trailing character (`NaN0`) are all refused.
+func DecimalSpecialText(text string) DecimalSpecialKind {
+	// CompareDecimalTexts calls this per ROW on the boxed path, where every
+	// operand is an ordinary number, so the answer for "not one of the three"
+	// has to cost a byte rather than three case-folded comparisons: only 'n',
+	// 'i' and their upper-case forms can begin one, after the whitespace and
+	// the optional sign.
+	if !mayBeDecimalSpecial(text) {
+		return DecimalFinite
+	}
+	s := strings.Trim(text, decimalSpaceCutset)
+	signed, neg := false, false
+	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
+		signed, neg, s = true, s[0] == '-', s[1:]
+	}
+	switch {
+	case strings.EqualFold(s, "nan"):
+		if signed {
+			return DecimalFinite // PostgreSQL refuses '+NaN' and '-NaN' outright
+		}
+		return DecimalNaN
+	case strings.EqualFold(s, "infinity"), strings.EqualFold(s, "inf"):
+		if neg {
+			return DecimalNegInf
+		}
+		return DecimalPosInf
+	}
+	return DecimalFinite
+}
+
+// mayBeDecimalSpecial is DecimalSpecialText's rejection fast path: it walks
+// past leading whitespace and one optional sign and reports whether what
+// follows could begin "nan", "inf" or "infinity" in any case. Every digit, '.'
+// and every ordinary word answers false on one byte.
+func mayBeDecimalSpecial(text string) bool {
+	i := 0
+	for i < len(text) && isDecimalSpace(text[i]) {
+		i++
+	}
+	if i < len(text) && (text[i] == '+' || text[i] == '-') {
+		i++
+	}
+	if i >= len(text) {
+		return false
+	}
+	switch text[i] {
+	case 'n', 'N', 'i', 'I':
+		return true
+	}
+	return false
+}
+
+// isDecimalSpace is decimalSpaceCutset by byte, for the fast path above. The
+// two must name the same set.
+func isDecimalSpace(c byte) bool {
+	return strings.IndexByte(decimalSpaceCutset, c) >= 0
+}
+
+// DecimalBoundTextAt is DecimalTextAt widened to the NaN/±Infinity spellings,
+// for the callers resolving a COMPARISON literal rather than a value.
+//
+// A DECIMAL column holds no NaN and no infinity, so each of the three is a
+// BOUND lying past one end of everything the column can hold — which is
+// exactly what ScaledDecimal.Sat already expresses for a finite literal too
+// wide for the carrier (#462). NaN and Infinity both sit above every stored
+// value and -Infinity below every one, so `d = 'NaN'` finds nothing, `d <
+// 'NaN'` and `d <= 'Infinity'` and `d > '-Infinity'` find every non-NULL row,
+// and PostgreSQL's NaN > Infinity is invisible over a column that can hold
+// neither (ADR-0024 item 6).
+//
+// A value-producing caller must NOT take this reader: ParseDecimalStringChecked
+// turns the same three spellings into the 22003 that ADR-0024 item 6 requires,
+// because saturating a stored value is a lie the same way #553's was.
+func DecimalBoundTextAt(text string, scale int) (ScaledDecimal, bool) {
+	if k := DecimalSpecialText(text); k != DecimalFinite {
+		return saturatedDecimal(k < 0), true
+	}
+	return DecimalTextAt(text, scale)
+}
+
 // DecimalTextAt resolves numeric TEXT into a DECIMAL column's domain at
 // `scale`, exactly and without ever going through a float64.
+//
+// NaN and the infinities are deliberately NOT read here: this reader answers
+// for a stored value as well as a comparison, and they have no stored value.
+// DecimalBoundTextAt is the comparison-only reader that accepts them.
 //
 // ok=false means the text is not a number. It is deliberately NOT reported as
 // the value zero: a constant nobody can read used to compare EQUAL to every
@@ -568,6 +688,28 @@ func CanonicalDecimalText(s string) (string, bool) {
 // digit first and the digit strings after, so it is exact at any width and
 // allocates nothing.
 func CompareDecimalTexts(a, b string) (int, bool) {
+	// A NaN/±Infinity SPELLING on either side orders by PostgreSQL's rank
+	// (ADR-0024 item 6). Only a comparison LITERAL can be one: the three
+	// callers of this function are boxed comparisons where the other side is a
+	// DECIMAL column's rendered text, and no DECIMAL column renders a value
+	// this carrier cannot hold. The finite side still has to name a number,
+	// or the pair is refused exactly as it was.
+	if ka, kb := DecimalSpecialText(a), DecimalSpecialText(b); ka != DecimalFinite || kb != DecimalFinite {
+		switch {
+		case ka != DecimalFinite && kb != DecimalFinite:
+			return cmpDecimalRank(int(ka), int(kb)), true
+		case ka != DecimalFinite:
+			if _, _, _, ok := decimalParts(b); !ok {
+				return 0, false
+			}
+			return cmpDecimalRank(int(ka), 0), true
+		default:
+			if _, _, _, ok := decimalParts(a); !ok {
+				return 0, false
+			}
+			return cmpDecimalRank(0, int(kb)), true
+		}
+	}
 	aNeg, aDigits, aExp, aOK := decimalParts(a)
 	bNeg, bDigits, bExp, bOK := decimalParts(b)
 	if !aOK || !bOK {
@@ -599,6 +741,18 @@ func CompareDecimalTexts(a, b string) (int, bool) {
 		c = -c
 	}
 	return c, true
+}
+
+// cmpDecimalRank orders two positions in PostgreSQL's numeric order, where 0
+// is "some finite value" and the non-zero ranks are DecimalSpecialKind's.
+func cmpDecimalRank(a, b int) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
 }
 
 // trimDecimalDigits strips a magnitude's leading zeros and folds its trailing
@@ -739,6 +893,12 @@ func int128FromDigits(digits string, neg bool) (Int128, bool) {
 // zero made a constant nobody can read compare EQUAL to every stored zero
 // (#463). ADR-0024 item 4 is the rule: a value with no exact carrier is a
 // 22003 error, never a saturated, wrapped, narrowed or zeroed number.
+//
+// NaN and the infinities read as ZERO here for the same reason 'abc' does —
+// this reader answers through DecimalTextAt, which does not know them. That is
+// the unchecked writer's contract; the COMPARISON reader that does know them
+// is DecimalBoundTextAt, and the value-producing one that reports them is
+// ParseDecimalStringChecked (#534).
 func ParseDecimalString(s string, scale int) Int128 {
 	d, ok := DecimalTextAt(s, scale)
 	if !ok {
@@ -758,7 +918,22 @@ func ParseDecimalString(s string, scale int) Int128 {
 //     10^30 into 17014118346046923173168730371.5884105727 in a UNION, with
 //     no error and no warning (#553).
 //   - 22P02 invalid_text_representation: the text names no number at all.
+//
+// NaN and the infinities are a THIRD case and take the first SQLSTATE, not the
+// second: PostgreSQL reads all three as `numeric` values, so the text is not
+// an input-syntax error — it names a value this carrier has no bit pattern for
+// (ADR-0024 item 6). PostgreSQL raises exactly this SQLSTATE for the
+// infinities against a constrained column ("a field with precision 18, scale 4
+// cannot hold an infinite value", 22003, verified live); NaN it stores, and
+// wadjet refusing it is the divergence item 6 records.
 func ParseDecimalStringChecked(s string, scale int) (Int128, error) {
+	if DecimalSpecialText(s) != DecimalFinite {
+		return Int128{}, sqlerr.New("22003",
+			"numeric field overflow: %q has no DECIMAL value — PostgreSQL's numeric has NaN and "+
+				"±Infinity, and wadjet's DECIMAL is a finite 128-bit unscaled integer with no bit "+
+				"pattern for either, so they are COMPARISON literals only and never stored values "+
+				"(ADR-0024 item 6)", s)
+	}
 	d, ok := DecimalTextAt(s, scale)
 	if !ok {
 		return Int128{}, sqlerr.New("22P02", "invalid input syntax for type numeric: %q", s)

@@ -198,7 +198,12 @@ func TestDecimalLiteralOutOfFloatRangeIsOrdered(t *testing.T) {
 // comparison so the comparison can REFUSE it. Reading it as zero is what made
 // `WHERE d = 'abc'` answer the rows holding zero.
 func TestDecimalLiteralRejectsWhatIsNotANumber(t *testing.T) {
-	for _, text := range []string{"abc", "", "  ", "1.2.3", "1e", "1eX", "--1", "0x10", "1,000", "NaN"} {
+	for _, text := range []string{
+		"abc", "", "  ", "1.2.3", "1e", "1eX", "--1", "0x10", "1,000",
+		// PostgreSQL refuses a SIGNED NaN and every partial spelling of the
+		// infinities, so the widening of #534 must not reach them either.
+		"+NaN", "-NaN", "NaN0", "Infin", "infinit", "- inf",
+	} {
 		if NewDecimalLiteral(text).Numeric() {
 			t.Errorf("NewDecimalLiteral(%q).Numeric() = true", text)
 		}
@@ -206,9 +211,31 @@ func TestDecimalLiteralRejectsWhatIsNotANumber(t *testing.T) {
 			t.Errorf("DecimalConstText(%q) accepted a non-number", text)
 		}
 	}
-	for _, text := range []string{"0", "-0", "+1", ".5", "5.", "1e400", "1E-400", " 12.75 "} {
+	for _, text := range []string{
+		"0", "-0", "+1", ".5", "5.", "1e400", "1E-400", " 12.75 ",
+		// #534: NaN and ±Infinity are values PostgreSQL's numeric HAS, so a
+		// DECIMAL column can be compared against them even though it can hold
+		// none of them (ADR-0024 item 6). Numeric() answers "is this a literal
+		// this column can be compared against", and after #534 that is yes.
+		"NaN", "nan", "Infinity", "inf", "+inf", "-Infinity", "-inf", " NaN ",
+	} {
 		if !NewDecimalLiteral(text).Numeric() {
 			t.Errorf("NewDecimalLiteral(%q).Numeric() = false", text)
+		}
+		if _, ok := DecimalConstText(text); !ok {
+			t.Errorf("DecimalConstText(%q) refused a comparison literal", text)
+		}
+	}
+	// FiniteDecimalText is the narrow reader the unary-minus fold keeps: it
+	// answers "is this a finite number", and the three specials are not.
+	for _, text := range []string{"NaN", "Infinity", "-inf"} {
+		if FiniteDecimalText(text) {
+			t.Errorf("FiniteDecimalText(%q) = true", text)
+		}
+	}
+	for _, text := range []string{"0", "1e400", " 12.75 "} {
+		if !FiniteDecimalText(text) {
+			t.Errorf("FiniteDecimalText(%q) = false", text)
 		}
 	}
 	// Constants that are not text at all.

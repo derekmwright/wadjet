@@ -1265,6 +1265,119 @@ func postgresSemanticsCases() []pgCase {
 			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_discount > '0.05'`, knownBug: quotedNumericPin, issue: "#536"},
 	)
 
+	// NaN and the infinities against a DECIMAL column (#534, ADR-0024 item 6).
+	//
+	// PostgreSQL's `numeric` HAS all three — NaN above every non-NaN and equal
+	// only to itself, ±Infinity since PostgreSQL 14 — so every shape below is
+	// a question it answers over a column holding none of them: 0 rows for
+	// `=`, every non-NULL row for `<`. Wadjet's Int128-at-a-fixed-scale
+	// carrier has no bit pattern for any of them and REFUSED the query with
+	// 22P02 instead, which is PostgreSQL's answer for 'abc' and not for these.
+	// They are comparison BOUNDS now, resolved through the same
+	// ScaledDecimal.Sat a finite literal past the carrier already uses (#462).
+	//
+	// dec_probe's d_2/d_4 are NULL on no row, so the counts are the table's
+	// own size; the shapes rather than the numbers are what these gate, over
+	// three scales (2, 4 and the 38-digit wide column) and through both the
+	// vectorized filter and the boxed sites.
+	out = append(out,
+		pgCase{name: "DecimalEqNaN", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 = 'NaN'`},
+		pgCase{name: "DecimalNeNaN", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 <> 'NaN'`},
+		pgCase{name: "DecimalLtNaN", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 < 'NaN'`},
+		pgCase{name: "DecimalLeNaN", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 <= 'NaN'`},
+		pgCase{name: "DecimalGtNaN", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 > 'NaN'`},
+		pgCase{name: "DecimalGeNaN", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 >= 'NaN'`},
+		pgCase{name: "DecimalEqInfinity", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 = 'Infinity'`},
+		pgCase{name: "DecimalLeInfinity", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 <= 'Infinity'`},
+		pgCase{name: "DecimalGtInfinity", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 > 'Infinity'`},
+		pgCase{name: "DecimalGtNegInfinity", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 > '-Infinity'`},
+		pgCase{name: "DecimalLtNegInfinity", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 < '-Infinity'`},
+		pgCase{name: "DecimalBetweenInfinities",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 BETWEEN '-Infinity' AND 'Infinity'`},
+		// The row SET, not only its size: a count can agree while the rows do
+		// not, and a bound that landed in the MIDDLE of the range (which is
+		// what a wrapped or zeroed literal produces) shows up here.
+		pgCase{name: "DecimalLtNaNRows",
+			sql: `SELECT d_key FROM dec_probe WHERE d_2 < 'NaN' AND d_key < 10 ORDER BY d_key`},
+		pgCase{name: "DecimalGtNegInfinityRows",
+			sql: `SELECT d_key FROM dec_probe WHERE d_4 > '-Infinity' AND d_key < 10 ORDER BY d_key`},
+		// An IN list mixing a special with a value the column HOLDS keeps the
+		// value: the special equals nothing, so it contributes no member.
+		pgCase{name: "DecimalInNaNAndValue",
+			sql: `SELECT d_key FROM dec_probe WHERE d_2 IN ('NaN', 12.75) ORDER BY d_key`},
+		pgCase{name: "DecimalInBothInfinities",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IN ('-Infinity', 'Infinity')`},
+		pgCase{name: "DecimalNotInNaN", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 NOT IN ('NaN')`},
+		// Every spelling PostgreSQL's numeric input accepts, verified live:
+		// case-insensitive, the short `inf` form, an optional sign on the
+		// infinities (and NONE on NaN), and surrounding whitespace stripped.
+		pgCase{name: "DecimalLtNaNLowercase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 < 'nan'`},
+		pgCase{name: "DecimalLtNaNUppercase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 < 'NAN'`},
+		pgCase{name: "DecimalLtNaNPadded", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 < '  NaN  '`},
+		pgCase{name: "DecimalLtInfShort", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 < 'inf'`},
+		pgCase{name: "DecimalLtInfMixedCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 < 'Inf'`},
+		pgCase{name: "DecimalLtInfinityUppercase",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 < 'INFINITY'`},
+		pgCase{name: "DecimalLtPlusInfinity", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 < '+Infinity'`},
+		pgCase{name: "DecimalLtPlusInfShort", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 < '+inf'`},
+		pgCase{name: "DecimalGtNegInfShort", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 > '-inf'`},
+		pgCase{name: "DecimalGtNegInfMixedCase", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_4 > '-Inf'`},
+		// The 38-digit column, whose values no float64 and no int64 holds:
+		// the bound must not depend on the carrier width it is compared at.
+		pgCase{name: "WideDecimalLtNaN", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide < 'NaN'`},
+		pgCase{name: "WideDecimalGtNegInfinity",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide > '-Infinity'`},
+		pgCase{name: "WideDecimalEqNaN", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_wide = 'NaN'`},
+		// The BOXED sites (#465/#506), which reach the column as its rendered
+		// TEXT — the path that would otherwise compare "12.75" against "NaN"
+		// lexicographically, where "N" sorts below every digit.
+		pgCase{name: "DecimalSimpleCaseNaN",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE d_2 WHEN 'NaN' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "DecimalIsDistinctFromNaN",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IS DISTINCT FROM 'NaN'`},
+		pgCase{name: "DecimalIsNotDistinctFromNaN",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IS NOT DISTINCT FROM 'NaN'`},
+		pgCase{name: "DecimalGreatestNaN",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE GREATEST(d_2, 'NaN') = 'NaN'`},
+		pgCase{name: "DecimalLeastNegInfinity",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE LEAST(d_2, '-Infinity') = '-Infinity'`},
+		// Through the row-at-a-time evaluator, which a CASE forces.
+		pgCase{name: "DecimalLtNaNInCase",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_2 < 'NaN' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "DecimalGtNegInfinityInCase",
+			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE CASE WHEN d_2 > '-Infinity' THEN 1 ELSE 0 END = 1`},
+		// A FLOAT column against the same literals is the PARITY control:
+		// float8 and float4 DO hold all three, so their rule is PostgreSQL's
+		// float order (ADR-0012 item 8) and not the DECIMAL bound. The
+		// row-at-a-time path follows it, so these are GATED; the bare
+		// vectorized float arm is #536's silent zero and is pinned below.
+		pgCase{name: "FloatColumnVsNaNInCase",
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE CASE WHEN l_discount = 'NaN' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "FloatColumnLtNaNInCase",
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE CASE WHEN l_discount < 'NaN' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "FloatColumnGtNegInfinityInCase",
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE CASE WHEN l_discount > '-Infinity' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "RealColumnLtNaNInCase",
+			sql: `SELECT COUNT(*) AS n FROM real_probe WHERE CASE WHEN r_val < 'NaN' THEN 1 ELSE 0 END = 1`},
+		pgCase{name: "FloatColumnLtNaN",
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_discount < 'NaN'`,
+			knownBug: pgBugWadjet + ` the vectorized FLOAT kernel reads a quoted constant as 0.0 ` +
+				`(kernel.toFloat64 answers 0 for any string), so this asks '< 0.0' where PostgreSQL ` +
+				`asks '< NaN' and admits every row. The float arm of #536, tracked as #646; the ` +
+				`CASE-wrapped entries above take the row path and GATE the correct answer. #534 is a ` +
+				`DECIMAL rule and neither caused this nor fixes it.`,
+			issue: "#646"},
+	)
+
+	// The other side of #534's boundary — a signed NaN, a partial spelling of
+	// an infinity, and ordinary garbage — is 22P02 in PostgreSQL too, and this
+	// arm fatals on an oracle error by design (see the boolean-input note
+	// above). So the refusals are gated where an error is the assertion: the
+	// SQLSTATE in the WIRE arm's DecimalNonNumericConstant family, and the
+	// spellings in wadjet.TestNonNumericDecimalLiteralIsStillRefused and
+	// coordinator.TestNonNumericDecimalLiteralIsRefusedOnBothPaths, all
+	// against the same live transcript.
+
 	// The comparison sites #452's binding did not reach (#465). A simple
 	// CASE's WHEN, IS [NOT] DISTINCT FROM and GREATEST/LEAST all compared
 	// through the boxed path, where the column is rendered TEXT and the

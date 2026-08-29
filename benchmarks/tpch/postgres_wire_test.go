@@ -656,6 +656,14 @@ func wireCorpus() []wireCase {
 		// all (typmod -1, "unconstrained") where PostgreSQL still declares
 		// numeric(9,2)/numeric(18,4).
 		{name: "DecimalColumnZeroRows", sql: `SELECT d_2, d_4 FROM dec_probe WHERE d_key = -1`},
+		// #534: the same zero-row DECIMAL result, reached through a NaN
+		// literal. It belongs on this arm as well as the value one because
+		// the failure it replaces was an ERROR on the wire — 22P02 where
+		// PostgreSQL sends RowDescription and a command tag — and a value
+		// oracle cannot tell "answered zero rows" from "raised" at all.
+		{name: "DecimalColumnZeroRowsViaNaN", sql: `SELECT d_2, d_4 FROM dec_probe WHERE d_2 = 'NaN'`},
+		{name: "DecimalColumnAllRowsViaNegInfinity",
+			sql: `SELECT d_2 FROM dec_probe WHERE d_2 > '-Infinity' AND d_key < 4 ORDER BY d_key`},
 		// MIN/SUM over a DECIMAL column (FIX 2, fold-in to #457/#458): live
 		// PostgreSQL's \gdesc declares typmod -1 ("unconstrained numeric")
 		// for MIN(numeric(p,s)), SUM(numeric(p,s)), and every other
@@ -1152,6 +1160,20 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 			sql: `SELECT COUNT(*) FROM dec_probe WHERE LEAST(d_key, 'abc', d_2) = 'abc'`},
 		{name: "DecimalNonNumericConstantIsDistinctFrom",
 			sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 IS DISTINCT FROM 'abc'`},
+		// #534's boundary, on the arm where an ERROR is the assertion. The
+		// accept-set widened by exactly the NaN/±Infinity spellings
+		// PostgreSQL's numeric input takes: a SIGNED NaN and every partial
+		// spelling of an infinity are 22P02 in PostgreSQL too (verified live
+		// on postgres:17-alpine), so they must stay 22P02 here. If the
+		// widening over-fired, these would ANSWER on wadjet and RAISE on
+		// PostgreSQL, which is exactly what this arm reports and the value
+		// arm cannot.
+		{name: "DecimalSignedNaNConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 = '+NaN'`},
+		{name: "DecimalNegatedNaNConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 = '-NaN'`},
+		{name: "DecimalPartialInfinityConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 = 'Infin'`},
+		{name: "DecimalOverlongInfinityConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 = 'infinityy'`},
+		{name: "DecimalTrailingJunkNaNConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 = 'NaN0'`},
+		{name: "DecimalSpacedSignInfinityConstant", sql: `SELECT COUNT(*) FROM dec_probe WHERE d_2 = '- inf'`},
 		// The same rule one type family over (#536, closed): an integer
 		// column used to read an unparseable constant as the value ZERO and
 		// answer the rows holding zero — #463's failure mode on the family

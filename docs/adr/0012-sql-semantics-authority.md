@@ -299,6 +299,26 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
      would take the integer arm. `expr.castBoolDeclared` resolves the
      declaration from the batch and caches it, the way `boxedPair` does.
 
+   - **NaN and ±Infinity are DECIMAL comparison literals only, never stored
+     values.** (Added 2026-08-29, #534; the rule is ADR-0024 item 6 and this
+     is the divergence it produces.) PostgreSQL's `numeric` HAS all three —
+     NaN above every non-NaN and equal only to itself, ±Infinity since
+     PostgreSQL 14 — and wadjet's finite Int128-at-a-fixed-scale carrier has
+     no bit pattern for any of them. So `d = 'NaN'`, `d < 'NaN'`,
+     `d <= 'Infinity'` and `d > '-Infinity'` are ACCEPTED and answer by
+     PostgreSQL's order over a column that holds none of them (0 rows, every
+     non-NULL row, every non-NULL row, every non-NULL row), resolved through
+     the same `ScaledDecimal.Sat` bound item 6 gives a finite literal wider
+     than the carrier; and `CAST('NaN' AS DECIMAL)` as a VALUE, or ingesting
+     one, is 22003 with a message naming ADR-0024. PostgreSQL raises that same
+     22003 for the infinities against a constrained `numeric(p,s)` ("cannot
+     hold an infinite value", verified live); NaN it stores, and refusing that
+     is the divergence. The accepted spellings are PostgreSQL's own input
+     grammar and nothing wider — case-insensitive `nan` with NO sign,
+     case-insensitive `infinity`/`inf` with an optional adjacent sign, C
+     whitespace trimmed — so `'+NaN'`, `'Infin'` and `'abc'` all stay 22P02.
+     `ORDER BY` and `GROUP BY` need nothing: no such value can be stored, so
+     no comparator or key ever meets one.
    - **A JOIN's ON condition can reference comma-join siblings; PostgreSQL rejects this.** (Closed #617.) A join predicate like `SELECT ... FROM a, b JOIN c ON a.k = c.k WHERE ...` references a sibling of the comma join in its ON clause. PostgreSQL 17 rejects this with "invalid reference to FROM-clause entry"; wadjet answers it, matching DuckDB. This is a strict SUPERSET: errors on PostgreSQL, runs on wadjet; not a value divergence and not a wire-protocol violation. Gated against DuckDB and the two-path oracle (PostgreSQL offers no value to assert). #593 fixed the prior silent-zero wrong answer in this shape. The reject-like-PostgreSQL alternative was considered and declined because no client should rely on the error and the planner lacks the ON-scope validation it would require.
 
 6. **A numeric literal's carrier is its TEXT, not a float64.** (Added

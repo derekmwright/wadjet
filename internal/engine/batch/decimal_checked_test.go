@@ -174,11 +174,30 @@ func TestSetValueCheckedFloatBoxIsExactOrError(t *testing.T) {
 	// makes NaN a comparison literal and never a stored one, so refusing is
 	// the answer here too — the unchecked writer stored 0 or a garbage
 	// carrier for them.
+	//
+	// The SQLSTATE is 22003, not 22P02 (#534): PostgreSQL reads all three as
+	// `numeric` VALUES, so the text is not an input-syntax error — it names a
+	// value this carrier has no bit pattern for. PostgreSQL itself answers
+	// 22003 for the infinities against a constrained column ("a field with
+	// precision 18, scale 4 cannot hold an infinite value", verified live on
+	// postgres:17-alpine).
 	for _, box := range []any{math.NaN(), math.Inf(1), math.Inf(-1), float32(math.Inf(1))} {
 		if got, err := store(t, 2, box); err == nil {
 			t.Errorf("%v was stored as %q; it has no DECIMAL value", box, got)
-		} else if st := sqlerr.StateOf(err); st != "22P02" {
-			t.Errorf("%v: SQLSTATE = %q, want 22P02; err = %v", box, st, err)
+		} else if st := sqlerr.StateOf(err); st != "22003" {
+			t.Errorf("%v: SQLSTATE = %q, want 22003; err = %v", box, st, err)
+		}
+	}
+
+	// The same three as TEXT, which is how a row boxed by the set-operation
+	// adapter reaches this writer.
+	for _, text := range []string{"NaN", "nan", "Infinity", "inf", "-Infinity", "-inf"} {
+		if got, err := store(t, 2, text); err == nil {
+			t.Errorf("%q was stored as %q; it has no DECIMAL value", text, got)
+		} else if st := sqlerr.StateOf(err); st != "22003" {
+			t.Errorf("%q: SQLSTATE = %q, want 22003; err = %v", text, st, err)
+		} else if !strings.Contains(err.Error(), "ADR-0024 item 6") {
+			t.Errorf("%q: error does not name the record that decided it: %v", text, err)
 		}
 	}
 }
