@@ -9359,6 +9359,13 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 		// on every row.
 		return expr.Decl(parquet.TypeBool), expr.Decided
 	case *plansql.CastNode:
+		// A DECIMAL destination carries its own (p,s), and a BARE one takes
+		// the operand's — neither of which a plain TypeID can express, which
+		// is why `CAST(x AS DECIMAL(10,2))` used to declare STRING and
+		// `CAST(x AS DECIMAL)` FLOAT64 (ADR-0024 item 3, #555).
+		if t, ok := castDeclaredDecimal(n, decls); ok {
+			return t, expr.Decided
+		}
 		return expr.Decl(inferCastType(n.TypeName)), expr.Decided
 	case *plansql.Lit:
 		// Literal projections (e.g., SELECT 13, SELECT 'x') need a typed

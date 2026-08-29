@@ -209,29 +209,55 @@ func TestDecimalArithmeticDeclaresTheResultType(t *testing.T) {
 	}
 }
 
-// TestDecimalCastStillDeclaresAsBefore pins the other deferred half:
-// expr.Cast's DECIMAL destination produces a float64 for `CAST(x AS DECIMAL)`
-// and passes its argument through unchanged for `CAST(x AS DECIMAL(p,s))`.
-// Neither produces an exact value at a declared scale, so the declaration
-// stays where it was (TODO(#555), ADR-0024 item 3).
-func TestDecimalCastStillDeclaresAsBefore(t *testing.T) {
+// TestDecimalCastDeclaresItsDestination replaces the deferral pin this file
+// carried while expr.Cast's DECIMAL destination produced a float64 for
+// `CAST(x AS DECIMAL)` and passed its argument through UNCHANGED for
+// `CAST(x AS DECIMAL(p,s))` — the (p,s) silently ignored, no rounding and no
+// rescale. The declaration followed: a parameterized cast declared STRING,
+// because `"DECIMAL(10,2)"` matched no arm of inferCastType's switch.
+//
+// ADR-0024 item 3: a parameterized destination declares exactly (p,s); a BARE
+// DECIMAL declares the operand's own scale at the carrier's full width, and
+// (38,0) from an integer.
+func TestDecimalCastDeclaresItsDestination(t *testing.T) {
 	decls := decDecls()
 	for _, tc := range []struct {
 		sql  string
-		want parquet.TypeID
+		want expr.DeclType
 	}{
-		{"CAST(a AS DECIMAL)", parquet.TypeFloat64},
-		{"CAST(a AS NUMERIC)", parquet.TypeFloat64},
-		{"CAST(a AS DECIMAL(10, 2))", parquet.TypeString},
+		{"CAST(a AS DECIMAL(10, 2))", expr.DeclDecimal(10, 2)},
+		{"CAST(a AS NUMERIC(18, 4))", expr.DeclDecimal(18, 4)},
+		{"CAST(a AS DECIMAL(38, 10))", expr.DeclDecimal(38, 10)},
+		// A precision with no scale is scale 0, as PostgreSQL reads it.
+		{"CAST(a AS DECIMAL(9))", expr.DeclDecimal(9, 0)},
+		// Bare: the operand's own scale, at the carrier's full width.
+		{"CAST(a AS DECIMAL)", expr.DeclDecimal(38, 2)},
+		{"CAST(b AS NUMERIC)", expr.DeclDecimal(38, 4)},
+		{"CAST(i64 AS DECIMAL)", expr.DeclDecimal(38, 0)},
+		{"CAST(i32 AS NUMERIC)", expr.DeclDecimal(38, 0)},
+		// An arithmetic operand carries its computed scale into a bare cast.
+		{"CAST(a * b AS DECIMAL)", expr.DeclDecimal(38, 6)},
+
+		// A bare cast over an operand with no scale for the fold to take
+		// keeps inferCastType's FLOAT64 — the value the evaluator still
+		// answers for that shape, so the two agree. A documented residual:
+		// PostgreSQL says numeric.
+		{"CAST(f64 AS DECIMAL)", expr.Decl(parquet.TypeFloat64)},
+		{"CAST(txt AS NUMERIC)", expr.Decl(parquet.TypeFloat64)},
+		{"CAST(nops AS DECIMAL)", expr.Decl(parquet.TypeFloat64)},
+		// A width no Int128 can hold is not a declaration this engine makes.
+		{"CAST(a AS DECIMAL(50, 2))", expr.Decl(parquet.TypeString)},
 	} {
-		node, err := plansql.ParseExpression(tc.sql)
-		if err != nil {
-			t.Fatalf("parse %q: %v", tc.sql, err)
-		}
-		got, _ := nodeDeclaredType(node, decls)
-		if got.ID != tc.want {
-			t.Errorf("%s: declared %v, want %v (TODO(#555))", tc.sql, got, tc.want)
-		}
+		t.Run(tc.sql, func(t *testing.T) {
+			node, err := plansql.ParseExpression(tc.sql)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.sql, err)
+			}
+			got, c := nodeDeclaredType(node, decls)
+			if got != tc.want || c != expr.Decided {
+				t.Errorf("%s: declared (%v, %s), want (%v, DECIDED)", tc.sql, got, c, tc.want)
+			}
+		})
 	}
 }
 

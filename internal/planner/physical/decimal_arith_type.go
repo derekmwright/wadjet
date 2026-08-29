@@ -114,6 +114,17 @@ func decimalArithOperand(node plansql.Node, decls colDecls) (batch.DecimalType, 
 			return batch.DecimalType{Precision: batch.Int64DecimalDigits}, false, true
 		}
 		return batch.DecimalType{}, false, false
+	case *plansql.CastNode:
+		// A CAST that NAMES a (p,s) produces an exact DECIMAL and can be an
+		// operand of exact arithmetic — `CAST(x AS DECIMAL(10,2)) * 2` is
+		// numeric in PostgreSQL and exact here. A BARE cast cannot: its (p,s)
+		// is the operand's, resolved per VALUE at runtime, so the declaration
+		// this layer would have to commit to does not exist yet.
+		p, s, hasParams, ok := expr.DecimalCastDest(n.TypeName)
+		if !ok || !hasParams {
+			return batch.DecimalType{}, false, false
+		}
+		return batch.DecimalType{Precision: p, Scale: s}, true, true
 	case *plansql.Lit:
 		if n.Kind != plansql.LitNumber {
 			return batch.DecimalType{}, false, false
@@ -129,6 +140,35 @@ func decimalArithOperand(node plansql.Node, decls colDecls) (batch.DecimalType, 
 		return t, t.Scale > 0, true
 	}
 	return batch.DecimalType{}, false, false
+}
+
+// castDeclaredDecimal is a CAST's DECIMAL declaration — ADR-0024 item 3's
+// "CAST(x AS DECIMAL(p,s)): exactly (p,s); CAST(x AS DECIMAL): the operand's
+// own (p,s), (38,0) from an integer".
+//
+// A BARE cast over an operand this layer cannot type declines, and the caller
+// keeps inferCastType's FLOAT64 — which is what the evaluator still answers
+// for that shape, so the declaration and the value agree. That is the residual
+// case: `CAST(f AS NUMERIC)` over a float column is numeric in PostgreSQL and
+// float8 here, because a float has no scale for the fold to take and any fixed
+// one would either truncate the value or invent digits.
+func castDeclaredDecimal(n *plansql.CastNode, decls colDecls) (expr.DeclType, bool) {
+	p, s, hasParams, ok := expr.DecimalCastDest(n.TypeName)
+	if !ok {
+		return expr.DeclType{}, false
+	}
+	if hasParams {
+		return expr.DeclDecimal(p, s), true
+	}
+	t, isDec, ok := decimalArithOperand(n.Inner, decls)
+	if !ok {
+		return expr.DeclType{}, false
+	}
+	if !isDec {
+		// An INTEGER operand: (38,0), the carrier's full width at scale 0.
+		return expr.DeclDecimal(batch.MaxDecimalPrecision, 0), true
+	}
+	return expr.DeclDecimal(batch.MaxDecimalPrecision, t.Scale), true
 }
 
 // decimalTypeOfColumn is a declared column's fixed-point contribution: its own

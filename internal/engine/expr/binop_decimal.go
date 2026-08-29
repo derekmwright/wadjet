@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -331,6 +332,13 @@ func operandIsDecimalTyped(e Expr, b *batch.RecordBatch) bool {
 	case *BinOpNumeric:
 		v.resolveMode(b)
 		return v.isDec
+	case *UnaryOp:
+		return (v.Op == "-" || v.Op == "+") && operandIsDecimalTyped(v.Operand, b)
+	case *Cast:
+		// A cast that NAMES a (p,s) produces an exact DECIMAL; a bare one's
+		// type is the operand's, resolved per value, so it is not a
+		// declaration this layer can compute an arithmetic result from.
+		return castIsExactDecimal(v)
 	}
 	return false
 }
@@ -674,6 +682,33 @@ func raiseDecimalStatus(st batch.DecimalStatus, p, s int) {
 //	DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
 func raiseNumericFieldOverflow(p, s int) {
 	panic(fatalEval{numericFieldOverflow(p, s)})
+}
+
+// raiseIntegerOutOfRange is PostgreSQL's refusal for a numeric that has no
+// value in the integer type being cast to — `integer out of range` for int4
+// and `bigint out of range` for int8, both SQLSTATE 22003.
+//
+// It is what a wrapped or float-narrowed answer used to be: the generic cast
+// arm read the value through strconv.ParseFloat and then int64(math.Round(f)),
+// which is undefined past 2^63 and silently truncating below it.
+func raiseIntegerOutOfRange(dest string) {
+	name := "bigint"
+	switch dest {
+	case "int", "integer":
+		name = "integer"
+	}
+	panic(fatalEval{sqlerr.New("22003", "%s out of range", name)})
+}
+
+// nonFiniteDecimalError is ADR-0024 item 6's refusal: NaN and the infinities
+// are values PostgreSQL's numeric holds and an Int128 has no bit pattern for,
+// so they are refused as a VALUE with the SQLSTATE that says the range is the
+// problem. A recorded divergence, not a silent substitution.
+func nonFiniteDecimalError(text string) error {
+	return sqlerr.New("22003",
+		"%q has no DECIMAL value: a DECIMAL is a 128-bit unscaled integer with no "+
+			"representation for NaN or the infinities, which PostgreSQL's numeric does "+
+			"hold — a recorded divergence (ADR-0024 item 6)", strings.TrimSpace(text))
 }
 
 // numericFieldOverflow builds the error without raising it, for the sites that

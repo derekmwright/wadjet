@@ -6058,6 +6058,10 @@ type Cast struct {
 	// yet"; nothing else in this node needs it, and no other destination
 	// reads it.
 	boolSrc atomic.Int32
+	// decDest caches the parsed DECIMAL destination, for the same reason:
+	// `DECIMAL(10, 2)` is fixed for the query and re-parsing the type name
+	// per row cost a string walk on every value (cast_decimal.go).
+	decDest castDecimalState
 }
 
 func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
@@ -6072,6 +6076,13 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	if k := castTemporalKindLower(strings.TrimSpace(dest)); k != castNotTemporal {
 		return castTemporal(b, row, e.Operand, v, k)
 	}
+	// A DECIMAL destination is resolved before the switch because its type
+	// name CARRIES its parameters — `decimal(10, 2)` matches no case label,
+	// and used to reach `default: return v`, which passed the value through
+	// with the (p,s) silently ignored (ADR-0024 item 3, #555).
+	if d, ok := e.decimalDestination(); ok {
+		return e.castToDecimal(b, row, v, d)
+	}
 	switch dest {
 	case "int", "integer", "bigint", "signed":
 		// A string that does not read as a number is refused, not coerced to
@@ -6084,6 +6095,15 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		// rule (#373): a fractional cast to an integer type ROUNDS, half away
 		// from zero. TRUNC() is how a caller asks for truncation. An
 		// already-integral value passes through untouched.
+		// An exact DECIMAL is read on its own carrier, not through a double:
+		// strconv.ParseFloat loses every digit past the sixteenth, so a
+		// DECIMAL(38,10) holding 493827160549382.7160549350 came back as the
+		// nearest double's integer part, and a value past the destination's
+		// range came back as whatever the float conversion produced instead
+		// of the refusal PostgreSQL gives (ADR-0024 item 4).
+		if i, ok := castDecimalToInt(v, dest); ok {
+			return i
+		}
 		if s, ok := stringOperand(v); ok {
 			f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 			if err != nil {
@@ -6126,8 +6146,6 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		}
 		return float32(f)
 	case "float", "double", "float8", "double precision", "float64":
-		return ToFloat64(v)
-	case "decimal", "numeric":
 		return ToFloat64(v)
 	case "bool", "boolean":
 		// The conversion the operand's DECLARATION selects, not the one its
