@@ -1,7 +1,6 @@
 package logical
 
 import (
-	"fmt"
 	"strings"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -249,18 +248,35 @@ var volatileFuncs = map[string]bool{
 //   - ambiguous, when set, reports a bare name the SIBLING join arm can also
 //     emit. Nothing in the predicate's text says which arm is meant, so the
 //     rewrite refuses rather than picking one.
+//
+// projRefs is one Project's answer to "what does this column reference
+// mean?", and it is deliberately more than the output map.
+//
+// The map alone matches on the BARE column name and ignores the qualifier,
+// which is right where a Filter sits directly on a Project (every reference
+// it can carry names that Project's output) and WRONG under a join, where the
+// walk applies each arm's map to the whole predicate in turn. A reference
+// qualified to the OTHER arm was rewritten with this arm's definition:
+// `… c JOIN typemx_dim d ON c.gg = d.k WHERE d.k > 3 OR c.gg > 100` over
+// `SELECT id AS k, g AS gg` became `id > 3 or g > 100` — 4612 rows where
+// PostgreSQL answers 1978, a silent wrong answer replacing the obviously
+// wrong 0 that came before. So the qualifier decides:
+//
+//   - names is the set of relation names this Project's scope answers to
+//     (its CTE name, the derived alias stamped on the scans below it, each
+//     scan's own alias or table name). A reference qualified by one of them
+//     names this Project's OUTPUT column.
+//   - a qualifier that names one of this Project's OUTPUTS is a candidate ROW
+//     FIELD PATH — `rw.b` over `c_row AS rw`.
+//   - a qualifier this scope does not answer to and no output claims belongs
+//     to a sibling arm or an outer scope, and is left exactly as written.
 type projRefs struct {
-	outs      map[string]projOutput
-	names     map[string]bool
-	ambiguous func(bare string) bool
+	outs  map[string]projOutput
+	names map[string]bool
 }
 
-func newProjRefs(n *Node, ambiguous func(string) bool) projRefs {
-	return projRefs{
-		outs:      projectSubstitutions(n.Projections),
-		names:     nodeScopeNames(n),
-		ambiguous: ambiguous,
-	}
+func newProjRefs(n *Node) projRefs {
+	return projRefs{outs: projectSubstitutions(n.Projections), names: nodeScopeNames(n)}
 }
 
 // inScope reports whether a qualifier names the relation scope this Project
@@ -280,38 +296,46 @@ func (p projRefs) touches(bare string) bool {
 // resolve returns the replacement for one column reference, or nil to leave
 // it alone. ok=false declines the whole rewrite.
 //
-// The order mirrors expr.ResolveColumnRef, which is what actually resolves
-// the name at run time: the spelling as written, then the bare column, then
-// a ROW field path.
+// The order is ADR-0022 §1's, which is expr.ResolveColumnRef's, which is what
+// actually resolves the name at RUN time: the spelling as written, then the
+// BARE column after dropping the qualifier, and only then the qualifier read
+// as a ROW column with the name as its field. Resolving in a different order
+// describes a different column — `rw.b` over
+// `SELECT c_row AS rw, id AS b` is `id`, because `b` is a column of the
+// projection and the run-time lookup finds it before it ever considers a
+// field. Skipping step 2 for a qualified reference made the DAG answer the
+// FIELD where the single-process engine answered the COLUMN, and moved the
+// derived-table spelling on BOTH paths, so one query answered two ways by
+// spelling. (PostgreSQL 17 rejects the unparenthesised form outright —
+// `missing FROM-clause entry for table "rw"`, 42P01 — so it has no answer to
+// follow here; `(rw).b` is its field spelling. Answering at all is the
+// documented superset, and the ADR fixes which answer.)
 func (p projRefs) resolve(ref *plansql.ColRef) (plansql.Node, bool) {
-	if ref.Table != "" {
-		if o, ok := p.outs[strings.ToLower(ref.String())]; ok {
-			// A projection that aliases the QUALIFIED spelling itself owns
-			// the name outright (`n1.n_name AS "n1.n_name"`). Only a
-			// qualified reference can hit this: for a bare one String() IS
-			// the column, and taking this branch would skip the ambiguity
-			// test below.
-			return p.apply(o, "")
-		}
-	}
 	if ref.Table == "" {
 		o, ok := p.outs[strings.ToLower(ref.Column)]
 		if !ok {
 			return nil, true
 		}
-		if p.ambiguous != nil && p.ambiguous(strings.ToLower(ref.Column)) {
-			return nil, false
-		}
 		return p.apply(o, "")
 	}
-	if p.inScope(ref.Table) {
-		if o, ok := p.outs[strings.ToLower(ref.Column)]; ok {
-			return p.apply(o, "")
-		}
+	// A projection that aliases the QUALIFIED spelling itself owns the name
+	// outright (`n1.n_name AS "n1.n_name"`).
+	if o, ok := p.outs[strings.ToLower(ref.String())]; ok {
+		return p.apply(o, "")
 	}
-	if o, ok := p.outs[strings.ToLower(ref.Table)]; ok {
-		// A ROW field path through a renamed output.
-		return p.apply(o, ref.Column)
+	// Step 2 applies when the qualifier is one this Project can answer for:
+	// its own relation scope, or one of its outputs (the ROW-container
+	// candidate). A qualifier that is neither names a sibling join arm or an
+	// outer scope, and nothing here may touch it.
+	container, isContainer := p.outs[strings.ToLower(ref.Table)]
+	if !p.inScope(ref.Table) && !isContainer {
+		return nil, true
+	}
+	if o, ok := p.outs[strings.ToLower(ref.Column)]; ok {
+		return p.apply(o, "")
+	}
+	if isContainer {
+		return p.apply(container, ref.Column)
 	}
 	return nil, true
 }
@@ -379,7 +403,7 @@ func nodeScopeNames(n *Node) map[string]bool {
 // Filter-Project swap: `pushed` may cross below the Project (rewritten where
 // they referenced renamed or computed outputs), `kept` must stay above it.
 func splitFilterForProjectPush(preds []Predicate, project *Node) (pushed, kept []Predicate) {
-	p := newProjRefs(project, nil)
+	p := newProjRefs(project)
 	for _, pred := range preds {
 		newAST, ok := rewritePredThroughProject(pred, p)
 		if !ok {
@@ -433,27 +457,6 @@ func rewriteASTThroughProject(ast plansql.Node, p projRefs) (plansql.Node, bool)
 	return newAST, true
 }
 
-// ErrAmbiguousFilterColumn reports a filter column two join arms can both
-// emit, which the predicate's text does not disambiguate.
-//
-// It is a plan-time ERROR rather than a decline because a decline here is
-// invisible: the predicate keeps a spelling no stage emits, the row
-// evaluator answers UNKNOWN on every row, and a WHERE that admits only TRUE
-// returns nothing. Silently answering zero is what #653 exists to remove, so
-// the one case the resolver cannot decide says so (ADR-0019).
-type ErrAmbiguousFilterColumn struct {
-	Column    string
-	Predicate string
-}
-
-func (e *ErrAmbiguousFilterColumn) Error() string {
-	return fmt.Sprintf("filter column %q is ambiguous: both sides of the join emit it, "+
-		"and %q does not say which is meant — qualify the reference", e.Column, e.Predicate)
-}
-
-// SQLState returns PostgreSQL's ambiguous_column code.
-func (e *ErrAmbiguousFilterColumn) SQLState() string { return "42702" }
-
 // ResolveFilterThroughProjects re-spells a predicate that sits ABOVE one or
 // more Projects into the names their INPUT carries. It is the stage DAG's
 // half of the question the Filter-Project swap answers for the single-process
@@ -491,61 +494,47 @@ func (e *ErrAmbiguousFilterColumn) SQLState() string { return "42702" }
 // names above them, so a predicate re-spelled past one would name a column
 // the stage below the Project has and the stage the filter lands on does not.
 //
-// Returns (nil, false, nil) when nothing changed; the caller then ships the
-// predicate exactly as it did before.
-func ResolveFilterThroughProjects(pred Predicate, child *Node) (plansql.Node, bool, error) {
-	if pred.ASTExpr == nil {
-		return nil, false, nil
-	}
-	r := filterResolve{pred: pred}
-	ast, changed := r.subtree(pred.ASTExpr, child, nil, false)
-	if r.err != nil {
-		return nil, false, r.err
-	}
-	if !changed {
-		return nil, false, nil
-	}
-	return ast, true, nil
-}
-
-// filterResolve carries the walk's one out-of-band answer: the ambiguity that
-// is an error rather than a decline.
-type filterResolve struct {
-	pred Predicate
-	err  error
-}
-
-// subtree walks the producing subtree applying each rename it meets, and
-// returns the expression as the stage carrying the filter will see it. A
-// subtree it cannot model STOPS the walk with whatever has been settled so
-// far, which is the spelling the predicate had on entry to that subtree.
+// AMBIGUITY is not this pass's to report. A bare name two relations in scope
+// both carry is rejected by physical.validate before any of this runs
+// ("column reference %q is ambiguous", 42702, on both paths), so a decline
+// here can only be a shape the resolver leaves alone — never a name the query
+// failed to disambiguate.
 //
-// ambiguous is the bare-name test inherited from the enclosing joins: a name
-// a sibling arm can also emit is not attributable from the predicate's text.
-func (r *filterResolve) subtree(ast plansql.Node, n *Node, ambiguous func(string) bool, changed bool) (plansql.Node, bool) {
+// Returns (nil, false) when nothing changed; the caller then ships the
+// predicate exactly as it did before.
+func ResolveFilterThroughProjects(pred Predicate, child *Node) (plansql.Node, bool) {
+	if pred.ASTExpr == nil {
+		return nil, false
+	}
+	ast, changed := resolveFilterInSubtree(pred.ASTExpr, child, false)
+	if !changed {
+		return nil, false
+	}
+	return ast, true
+}
+
+// resolveFilterInSubtree walks the producing subtree applying each rename it
+// meets, and returns the expression as the stage carrying the filter will see
+// it. A subtree it cannot model STOPS the walk with whatever has been settled
+// so far, which is the spelling the predicate had on entry to that subtree.
+func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool) (plansql.Node, bool) {
 	for ; n != nil; n = n.Children[0] {
 		switch n.Type {
 		case NodeJoin:
 			// A join emits BOTH arms' columns, so a predicate above it can
 			// name either. Each arm is resolved with its OWN scope names, so
-			// a qualified reference only rewrites against the arm it names;
-			// a BARE one is refused where the sibling could answer it too.
+			// a qualified reference only rewrites against the arm it names.
 			if len(n.Children) != 2 {
 				return ast, changed
 			}
-			left, right := n.Children[0], n.Children[1]
-			ast, changed = r.subtree(ast, left, orExposes(ambiguous, right), changed)
-			ast, changed = r.subtree(ast, right, orExposes(ambiguous, left), changed)
+			ast, changed = resolveFilterInSubtree(ast, n.Children[0], changed)
+			ast, changed = resolveFilterInSubtree(ast, n.Children[1], changed)
 			return ast, changed
 		case NodeDistinct:
 			// Emits no stage and renames nothing.
 		case NodeProject:
-			p := newProjRefs(n, ambiguous)
-			newAST, ok := rewriteASTThroughProject(ast, p)
+			newAST, ok := rewriteASTThroughProject(ast, newProjRefs(n))
 			if !ok {
-				if name := ambiguousBareName(ast, p); name != "" && r.err == nil {
-					r.err = &ErrAmbiguousFilterColumn{Column: name, Predicate: r.pred.Raw}
-				}
 				return ast, changed
 			}
 			if newAST != nil {
@@ -562,81 +551,6 @@ func (r *filterResolve) subtree(ast plansql.Node, n *Node, ambiguous func(string
 		}
 	}
 	return ast, changed
-}
-
-// ambiguousBareName reports which bare reference in ast made the rewrite
-// decline for ambiguity, or "" when the decline had another cause (an
-// aggregate output, a volatile definition, a field path with no spelling).
-func ambiguousBareName(ast plansql.Node, p projRefs) string {
-	if p.ambiguous == nil {
-		return ""
-	}
-	refs := map[string]bool{}
-	collectASTColumnRefs(ast, refs)
-	for name := range refs {
-		if strings.Contains(name, ".") {
-			continue // the collector records the bare name alongside
-		}
-		if _, ok := p.outs[name]; ok && p.ambiguous(name) {
-			return name
-		}
-	}
-	return ""
-}
-
-// orExposes widens an inherited ambiguity test with what one more arm can
-// emit under a bare name.
-func orExposes(inherited func(string) bool, arm *Node) func(string) bool {
-	return func(name string) bool {
-		if inherited != nil && inherited(name) {
-			return true
-		}
-		return armExposes(arm, name)
-	}
-}
-
-// armExposes reports whether a join arm can emit a column under this bare
-// name — its Project's output list, or, with no Project in the way, the scan
-// columns the catalog annotated.
-//
-// Unknown reads as NO. The alternative is refusing every bare reference over
-// a plan with no catalog annotation, which is every plan built without one;
-// and a bare name two relations really do share is a reference PostgreSQL
-// itself rejects as ambiguous, so the shape that misses is already invalid
-// SQL rather than a working query.
-func armExposes(n *Node, name string) bool {
-	for ; n != nil; n = n.Children[0] {
-		switch n.Type {
-		case NodeJoin:
-			for _, c := range n.Children {
-				if armExposes(c, name) {
-					return true
-				}
-			}
-			return false
-		case NodeSort, NodeLimit, NodeDistinct:
-		case NodeProject:
-			for out := range projectSubstitutions(n.Projections) {
-				if strings.EqualFold(out, name) {
-					return true
-				}
-			}
-			return false
-		case NodeScan:
-			for _, c := range n.ScanColumns {
-				if strings.EqualFold(c, name) {
-					return true
-				}
-			}
-			return false
-		default:
-			return false
-		}
-		if len(n.Children) != 1 {
-			return false
-		}
-	}
-	return false
 }
 
 // substituteColRefs returns expr with every column reference to a renamed or

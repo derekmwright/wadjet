@@ -900,12 +900,6 @@ type Planner struct {
 	// into a literal set, for the same reason and by the same mechanism as
 	// correlatedErr. See in_subquery_set.go.
 	inSubqueryErr error
-	// filterRefErr records a filter column the DAG's rename resolver cannot
-	// attribute to one side of a join, for the same reason and by the same
-	// mechanism as correlatedErr: on the DAG a Project emits no stage, so a
-	// predicate whose spelling stays unresolved names nothing at run time and
-	// answers zero rows in silence. See logical.ResolveFilterThroughProjects.
-	filterRefErr error
 
 	// aggStageRenames maps a name an Aggregate node reads in the LOGICAL plan
 	// to the name the aggregate STAGE emits for it, for every group key
@@ -2458,9 +2452,6 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	}
 	if p.inSubqueryErr != nil {
 		return nil, p.inSubqueryErr
-	}
-	if p.filterRefErr != nil {
-		return nil, p.filterRefErr
 	}
 	if err := p.enforceQueryLimits(stages, node); err != nil {
 		return nil, err
@@ -4082,7 +4073,6 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	p.joinCondErr = nil
 	p.correlatedErr = nil
 	p.inSubqueryErr = nil
-	p.filterRefErr = nil
 	p.aggStageRenames = nil
 	p.walkStages(node, &stages, nil)
 	// Resolve cte-alias phantoms emitted by walkStages dedup. Must happen
@@ -5690,16 +5680,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				// never writes to the logical plan the single-process path
 				// shares.
 				if len(node.Children) == 1 {
-					ast, ok, err := logical.ResolveFilterThroughProjects(pred, node.Children[0])
-					if err != nil && p.filterRefErr == nil {
-						// A name both join arms emit. Declining silently
-						// would leave a predicate no stage can resolve,
-						// which is UNKNOWN on every row and therefore zero
-						// rows in silence — the thing this resolver exists
-						// to remove (ADR-0019).
-						p.filterRefErr = err
-					}
-					if ok {
+					if ast, ok := logical.ResolveFilterThroughProjects(pred, node.Children[0]); ok {
 						exprStr = ast.String()
 					}
 				}

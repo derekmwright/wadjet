@@ -92,11 +92,13 @@ func TestFilterQualifiedToOneJoinArmTwoPath(t *testing.T) {
 		pin string
 	}{
 		{name: "NoAliasCollision", item: "id AS kk"},
-		// The reviewer's literal spelling: the CTE aliases `id` to `k`, which
-		// is also typemx_dim's own column name. A build-side reference then
-		// stops resolving on the join stage — for a predicate this resolver
-		// does not touch at all, which is what
-		// TestBuildSideRefWithCollidingProbeAliasIsASeparateDefect proves.
+		// The literal spelling from the issue: the CTE aliases `id` to `k`,
+		// which is also typemx_dim's own column name. The FAILING reference
+		// is `d.k`, which this resolver leaves exactly as written (it does
+		// rewrite `c.gg` to `g` in the same predicate) — and it stops
+		// resolving on the join stage, which
+		// TestBuildSideRefWithCollidingProbeAliasIsASeparateDefect isolates
+		// on a predicate the resolver does not touch AT ALL.
 		{name: "AliasCollidesWithBuildColumn", item: "id AS k",
 			pin: "a probe-side SELECT alias equal to the build column's name"},
 	} {
@@ -139,23 +141,65 @@ func TestFilterQualifiedToOneJoinArmTwoPath(t *testing.T) {
 		ctrCheckCount(t, ctx, single, coord, sql, want)
 	})
 
-	// A BARE reference both arms can emit has no attribution in the
-	// predicate's text. PostgreSQL rejects it (42702) and so does the
-	// resolver: declining silently would leave a spelling no stage resolves,
-	// which is UNKNOWN on every row and zero rows in silence.
-	t.Run("AmbiguousBareNameIsRefused", func(t *testing.T) {
-		sql := fmt.Sprintf(
+	// A BARE reference two relations in scope both carry is rejected by the
+	// plan validator, which owns ambiguity for every query shape and both
+	// paths (physical.validate, "column reference %q is ambiguous", 42702).
+	// This is a gate on THAT, not on the rename resolver: the resolver never
+	// sees such a predicate, and an earlier cut of it grew a duplicate
+	// ambiguity check that no SQL could reach.
+	for _, c := range []struct{ name, sql, col string }{
+		{"BothArmsBaseColumn", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %[1]s a JOIN %[1]s b ON a.g = b.g WHERE c_i64 > 0`,
+			typematrix.Table), "c_i64"},
+		{"RenamedArmVersusBaseColumn", fmt.Sprintf(
 			`WITH c AS (SELECT g AS k, c_i64 AS v FROM %[1]s) `+
 				`SELECT COUNT(*) AS n FROM c JOIN %[2]s d ON c.k = d.k WHERE k > 3`,
-			typematrix.Table, typematrix.Dim)
-		_, err := tmdRunDAG(ctx, coord, sql)
-		if err == nil {
-			t.Fatalf("the stage DAG answered a reference both arms emit; PostgreSQL "+
-				"refuses it with 42702\n  SQL: %s", sql)
+			typematrix.Table, typematrix.Dim), "k"},
+	} {
+		c := c
+		t.Run("AmbiguousBareNameIsRefused/"+c.name, func(t *testing.T) {
+			for _, arm := range []struct {
+				name string
+				run  func() (*oracle.Result, error)
+			}{
+				{"single", func() (*oracle.Result, error) { return tmdRunSingle(ctx, single, c.sql) }},
+				{"dag", func() (*oracle.Result, error) { return tmdRunDAG(ctx, coord, c.sql) }},
+			} {
+				res, err := arm.run()
+				if err == nil {
+					t.Errorf("%s arm ANSWERED (%d rows) a reference two relations carry; "+
+						"PostgreSQL refuses it with 42702\n  SQL: %s", arm.name, len(res.Rows), c.sql)
+					continue
+				}
+				if !strings.Contains(err.Error(), "ambiguous") ||
+					!strings.Contains(err.Error(), `"`+c.col+`"`) {
+					t.Errorf("%s arm's refusal does not name the ambiguous column: %v\n  SQL: %s",
+						arm.name, err, c.sql)
+				}
+			}
+		})
+	}
+
+	// The substitution can INTRODUCE a name two arms carry: `k` is
+	// unambiguous as written (only c has it), and rewriting it to `id` hands
+	// the join stage a name BOTH arms have. The answer must still be the
+	// probe side's. Nothing checks this at plan time — the validator saw an
+	// unambiguous query — so it is pinned here.
+	t.Run("SubstitutionIntroducesASharedName", func(t *testing.T) {
+		sql := fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM (SELECT id AS k FROM %[1]s) c `+
+				`JOIN %[1]s d ON c.k = d.g WHERE k > 3`, typematrix.Table)
+		var want int64
+		for _, r := range typematrix.Data(typematrix.Rows) {
+			g, ok := r["g"].(int32)
+			if !ok {
+				continue // c.k = d.g cannot match a NULL g
+			}
+			if int64(g) > 3 {
+				want++ // c.k IS d.g on a matched row, and k = id
+			}
 		}
-		if !strings.Contains(err.Error(), "ambiguous") || !strings.Contains(err.Error(), `"k"`) {
-			t.Fatalf("the refusal does not name the ambiguous column: %v\n  SQL: %s", err, sql)
-		}
+		ctrCheckCount(t, ctx, single, coord, sql, want)
 	})
 }
 
@@ -163,9 +207,12 @@ func TestFilterQualifiedToOneJoinArmTwoPath(t *testing.T) {
 // remaining divergence the pinned rows above carry, and proves it is not this
 // resolver's.
 //
-// The predicate here needs NO rewriting — `c.g` is a passthrough and `d.k`
-// names the sibling arm — so ResolveFilterThroughProjects ships it verbatim,
-// exactly as the pre-#653 planner did. It still answers 0 on the DAG, and
+// The predicate here needs NO rewriting AT ALL — `c.g` is a passthrough and
+// `d.k` names the sibling arm — so ResolveFilterThroughProjects reports no
+// change and walkStages ships the text exactly as the pre-#653 planner did.
+// (In the pinned rows next door the resolver DOES rewrite, `c.gg` to `g`; it
+// is only the failing reference, `d.k`, that it leaves alone. This query
+// removes even that.) It still answers 0 on the DAG, and
 // renaming the probe-side alias away from the build column's name is the only
 // change that fixes it. So the cause is the alias/column COLLISION somewhere
 // in the join stage's schema, not the filter's spelling.
@@ -205,7 +252,7 @@ func TestBuildSideRefWithCollidingProbeAliasIsASeparateDefect(t *testing.T) {
 		t.Logf("tracked separate defect, NOT gated: a build-side qualified reference stops "+
 			"resolving on the join stage when the PROBE subtree carries a SELECT alias of the "+
 			"same bare name — the DAG answers %v where the single-process engine and "+
-			"PostgreSQL answer %d, for a predicate this resolver ships verbatim", got, gGt3)
+			"PostgreSQL answer %d, for a predicate this resolver reports no change on", got, gGt3)
 	})
 }
 
@@ -274,5 +321,37 @@ func TestRowFieldPathThroughRenamedColumnTwoPath(t *testing.T) {
 			`WITH c AS (SELECT c_row AS rw, id FROM %s) SELECT COUNT(*) AS n FROM c WHERE rw.b > 100`,
 			typematrix.Nested)
 		ctrCheckCount(t, ctx, single, coord, sql, int64(len(wantIDs)))
+	})
+
+	// The SAME spelling where the projection ALSO outputs a column named `b`.
+	// ADR-0022 §1 fixes the order — the bare column after dropping the
+	// qualifier is tried BEFORE the qualifier is read as a ROW container — so
+	// `rw.b` is `id` here, not the field. That is what expr.ResolveColumnRef
+	// does at run time, which is why the single-process engine answers it
+	// that way; a resolver that skipped step 2 made the DAG answer the FIELD
+	// and moved the derived-table spelling on BOTH paths, so one query
+	// answered two ways by spelling.
+	//
+	// PostgreSQL 17 has no answer to follow: it rejects the unparenthesised
+	// form outright (`missing FROM-clause entry for table "rw"`, 42P01) for
+	// every spelling here, and reads `(rw).b` as the field. Answering at all
+	// is the documented superset; the ADR fixes WHICH answer.
+	t.Run("ColumnWinsOverFieldWhenBothExist", func(t *testing.T) {
+		var want int64
+		for _, r := range typematrix.NestedData(typematrix.Rows) {
+			if r["id"].(int64) > 100 {
+				want++
+			}
+		}
+		if want == int64(len(wantIDs)) {
+			t.Fatalf("the column and the field select the same rows (%d), so this gate "+
+				"cannot tell them apart", want)
+		}
+		for _, tmpl := range []string{
+			`WITH c AS (SELECT c_row AS rw, id AS b FROM %s) SELECT COUNT(*) AS n FROM c WHERE rw.b > 100`,
+			`SELECT COUNT(*) AS n FROM (SELECT c_row AS rw, id AS b FROM %s) s WHERE rw.b > 100`,
+		} {
+			ctrCheckCount(t, ctx, single, coord, fmt.Sprintf(tmpl, typematrix.Nested), want)
+		}
 	})
 }

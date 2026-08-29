@@ -193,7 +193,7 @@ resolver re-spells the predicate in place (it never MOVES it, so the
 materialization fence is untouched), chaining through nested CTEs and
 descending a join one arm at a time.
 
-Three rules it needed on top of the bare-name map, each a wrong answer before
+Two rules it needed on top of the bare-name map, each a wrong answer before
 they existed:
 
 - **The QUALIFIER decides which arm.** Applying each arm's map to the whole
@@ -203,19 +203,28 @@ they existed:
   visible zero. Each arm carries its scope names (`logical.nodeScopeNames`:
   scan alias/table, derived alias, `CTEName`/`CTERefAlias`) and only rewrites
   references those names claim.
-- **A bare name both arms can emit is a plan-time 42702**
-  (`logical.ErrAmbiguousFilterColumn`, surfaced through
-  `Planner.filterRefErr`), not a silent decline — a decline leaves a spelling
-  no stage resolves, which is zero rows in silence. PostgreSQL rejects the
-  same query.
-- **`rw.b` over `c_row AS rw` is a ROW FIELD PATH, not a qualified column**
-  (ADR-0022): the QUALIFIER is substituted and the field kept (`c_row.b`).
-  Reading it as a table-qualified reference looks `b` up as a column and
-  leaves a name nothing emits.
+- **A dotted reference resolves in ADR-0022 §1's order**, which is
+  `expr.ResolveColumnRef`'s, which is what resolves the name at RUN time: the
+  spelling as written, then the BARE column after dropping the qualifier, and
+  only then the qualifier as a ROW container with the name as its field. So
+  `rw.b` over `SELECT c_row AS rw, id AS b` is `id`, and over
+  `SELECT c_row AS rw, id` it is the field — the QUALIFIER substituted, the
+  field kept (`c_row.b`). Resolving in a different order describes a different
+  column: skipping the bare-column step made the DAG answer the field where
+  the single-process engine answered the column, and moved the derived-table
+  spelling on both paths, so one query answered two ways by spelling.
+  PostgreSQL 17 rejects the unparenthesised form outright (42P01, "missing
+  FROM-clause entry"), so answering at all is the documented superset and the
+  ADR fixes which answer.
 
 And it STOPS at a Sort or a LIMIT: unlike a Project those DO emit stages,
 carrying the names above them, so re-spelling past one would name a column the
 stage the filter lands on does not have.
+
+AMBIGUITY is not this pass's to report: `physical.validate` rejects a bare
+name two relations in scope both carry before any of this runs ("column
+reference %q is ambiguous", 42702, on both paths). A duplicate check inside
+the resolver was written and removed — no SQL could reach it.
 
 **The backstop under it.** A resolver that misses is silent, because the row
 evaluator answers nil for a name it cannot resolve and a WHERE admits only

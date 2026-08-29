@@ -7,14 +7,14 @@ import (
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
 )
 
-// Unit cover for ResolveFilterThroughProjects' three rules, which the
-// two-path gates in internal/coordinator exercise end to end but cannot
-// localize: which relation a qualified reference names, what a ROW field path
-// through a rename means, and where the walk has to stop.
+// Unit cover for ResolveFilterThroughProjects' rules, which the two-path
+// gates in internal/coordinator exercise end to end but cannot localize:
+// which relation a qualified reference names, what a dotted reference through
+// a rename means, and where the walk has to stop.
 
 // resolveTopFilter builds sql, finds the outermost Filter, and returns the
 // re-spelling the DAG would ship for its first predicate ("" = unchanged).
-func resolveTopFilter(t *testing.T, sql string) (string, error) {
+func resolveTopFilter(t *testing.T, sql string) string {
 	t.Helper()
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
@@ -32,14 +32,11 @@ func resolveTopFilter(t *testing.T, sql string) (string, error) {
 	if filter == nil {
 		t.Fatalf("no Filter node in the optimized plan for %q", sql)
 	}
-	ast, ok, rerr := ResolveFilterThroughProjects(filter.Predicates[0], filter.Children[0])
-	if rerr != nil {
-		return "", rerr
-	}
+	ast, ok := ResolveFilterThroughProjects(filter.Predicates[0], filter.Children[0])
 	if !ok {
-		return "", nil
+		return ""
 	}
-	return ast.String(), nil
+	return ast.String()
 }
 
 func findTopFilter(n *Node) *Node {
@@ -70,12 +67,21 @@ func TestResolveFilterThroughProjectsScoping(t *testing.T) {
 		{"QualifiedToSiblingArmOnly",
 			`WITH c AS (SELECT id AS k, g AS gg FROM t) SELECT COUNT(*) FROM c JOIN dim d ON c.gg = d.k WHERE d.k > 3 OR d.k < 1`,
 			""},
-		// A ROW field path is not a table-qualified column (ADR-0022): the
-		// QUALIFIER is substituted and the field kept.
-		{"RowFieldPathThroughRename",
+		// ADR-0022 §1's order, which is expr.ResolveColumnRef's: the BARE
+		// column after dropping the qualifier is tried BEFORE the qualifier
+		// is read as a ROW container. `b` is a column of this projection, so
+		// `rw.b` is `id` — the run-time lookup finds it before it considers a
+		// field, and resolving in the other order described a different
+		// column on the DAG than the single-process engine evaluated.
+		{"DottedRefPrefersTheColumnOverTheField",
+			`WITH c AS (SELECT c_row AS rw, id AS b FROM t) SELECT COUNT(*) FROM c WHERE rw.b > 100`,
+			"id > 100"},
+		// With no competing column the same spelling IS the field path, and
+		// the QUALIFIER is what gets substituted.
+		{"DottedRefFallsToTheFieldPath",
 			`WITH c AS (SELECT c_row AS rw, id FROM t) SELECT COUNT(*) FROM c WHERE rw.b > 100`,
 			"c_row.b > 100"},
-		{"RowFieldPathThroughPassthrough",
+		{"FieldPathThroughPassthrough",
 			`WITH c AS (SELECT c_row, id FROM t) SELECT COUNT(*) FROM c WHERE c_row.b > 100`,
 			""},
 		// Chained renames still chain.
@@ -94,76 +100,9 @@ func TestResolveFilterThroughProjectsScoping(t *testing.T) {
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
-			got, err := resolveTopFilter(t, c.sql)
-			if err != nil {
-				t.Fatalf("resolve: %v", err)
-			}
-			if !strings.EqualFold(got, c.want) {
+			if got := resolveTopFilter(t, c.sql); !strings.EqualFold(got, c.want) {
 				t.Fatalf("resolved to %q, want %q\n  SQL: %s", got, c.want, c.sql)
 			}
 		})
 	}
-}
-
-// A bare name both join arms can emit has no attribution in the predicate's
-// text, and declining silently would leave a spelling no stage resolves —
-// UNKNOWN on every row, zero rows in silence. It is a plan-time 42702, which
-// is also what PostgreSQL answers.
-func TestResolveFilterThroughProjectsRefusesAnAmbiguousBareName(t *testing.T) {
-	sql := `WITH c AS (SELECT g AS k, c_i64 AS v FROM t) SELECT COUNT(*) FROM c JOIN dim d ON c.k = d.k WHERE k > 3`
-	parsed, err := plansql.Parse(sql)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	info, err := plansql.ExtractSelect(parsed)
-	if err != nil {
-		t.Fatalf("extract: %v", err)
-	}
-	plan, err := BuildFromSelect(info)
-	if err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	// The sibling arm is a bare Scan, so the ambiguity is only visible once
-	// the catalog has told the plan what that scan emits.
-	opt := Optimize(plan)
-	filter := findTopFilter(opt)
-	if filter == nil {
-		t.Fatal("no Filter node in the optimized plan")
-	}
-	setScanColumnsForTest(filter.Children[0], "dim", []string{"k", "label"})
-
-	_, _, rerr := ResolveFilterThroughProjects(filter.Predicates[0], filter.Children[0])
-	if rerr == nil {
-		t.Fatal("a bare name both arms emit was resolved silently; PostgreSQL refuses it with 42702")
-	}
-	var amb *ErrAmbiguousFilterColumn
-	if !asAmbiguous(rerr, &amb) {
-		t.Fatalf("error is %T (%v), want *ErrAmbiguousFilterColumn", rerr, rerr)
-	}
-	if !strings.EqualFold(amb.Column, "k") {
-		t.Fatalf("the refusal names %q, want %q", amb.Column, "k")
-	}
-	if amb.SQLState() != "42702" {
-		t.Fatalf("SQLSTATE is %q, want 42702", amb.SQLState())
-	}
-}
-
-func setScanColumnsForTest(n *Node, table string, cols []string) {
-	if n == nil {
-		return
-	}
-	if n.Type == NodeScan && strings.EqualFold(n.TableName, table) {
-		n.ScanColumns = cols
-	}
-	for _, c := range n.Children {
-		setScanColumnsForTest(c, table, cols)
-	}
-}
-
-func asAmbiguous(err error, target **ErrAmbiguousFilterColumn) bool {
-	e, ok := err.(*ErrAmbiguousFilterColumn)
-	if ok {
-		*target = e
-	}
-	return ok
 }
