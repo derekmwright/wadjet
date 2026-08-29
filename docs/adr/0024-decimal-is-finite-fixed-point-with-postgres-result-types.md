@@ -270,6 +270,14 @@ pins the literal form beside the two-column one.
 - New kernels: `Int128.Mul` (256-bit intermediate, checked), `Int128.QuoRem`
   with rescale and half-away-from-zero rounding, decimal arithmetic mode in
   `BinOpNumeric`, exact window SUM/AVG including the sliding-frame subtract.
+  Landed 2026-08-29 for arithmetic, CAST and the scalar family:
+  `kernel.DecimalArithVec` / `DecimalScalarVec` resolve the operand SHAPE once
+  per batch and run allocation-free (0 allocs/op over 2048 rows, 15-25
+  ns/row), with the boxed path answering the value's rendered TEXT — the same
+  box a DECIMAL COLUMN produces, so no consumer of a boxed value needs
+  teaching. A vectorized DECIMAL arm REPORTS whether it wrote the batch:
+  writing nothing and saying nothing leaves the output vector's zeros
+  standing, which reads back as the value 0 on every row.
 - The TPC-H benchmark gains a spec-conformant `DECIMAL(15,2)` schema variant.
   It is a correctness gate first (22 queries with decimal arithmetic,
   aggregation, comparison and ORDER BY on both execution paths) and the
@@ -313,6 +321,29 @@ pins the literal form beside the two-column one.
   produces — reads as 38 on BOTH halves of a column's definition (the physical
   type the writer picks and the annotation it writes), where it used to be an
   INT64 leaf annotated `DECIMAL(38, s)`.
+- Three more, added 2026-08-29 when items 3 and 4 were implemented, each
+  pinned by a test rather than left to be rediscovered:
+  - **The transcendental functions stay float64.** PostgreSQL answers
+    `sqrt`/`exp`/`ln`/`log`/`power` over a numeric in numeric. They need an
+    exact fixed-point tower, which is a different piece of work from a result
+    type — the same reason ADR-0012 item 9 gives for STDDEV. The seven that
+    answer in their argument's OWN domain (abs/ceil/floor/round/trunc/sign
+    /mod) are exact. Pinned by
+    `wadjet.TestTranscendentalFunctionsStayFloat64`.
+  - **A bare numeric LITERAL is float8, not numeric.** PostgreSQL types `1.5`
+    as numeric; wadjet declares FLOAT64 for a literal projection, so
+    `ROUND(0.5)` is a float here. Closing it is a change to the LITERAL's own
+    declaration — every projection, comparison and set-operation arm that
+    carries one — not to the functions above, and covering only half of it is
+    worse than covering none: the first cut of this work made `ROUND(-0.5)`
+    decimal while `ROUND(0.5)` stayed float, and the two halves of one query
+    disagreed about their own type. A literal INSIDE an expression is
+    unaffected: `d * 2` and `d + 0.005` take the literal's spelling as its
+    (p,s), which is item 3's rule.
+  - **`CAST(x AS DECIMAL)` over a FLOAT or TEXT operand stays float8.** A bare
+    destination takes the operand's own scale (item 3), and a float has none
+    — any fixed choice would either truncate the value or invent digits. A
+    destination that NAMES its (p,s) is exact from every source.
 - Refuted premise, recorded: "DECIMAL would be ideal but Wadjet uses float"
   in the TPC-H schema was an engine limitation, not a design choice, and its
   presence meant the type had no benchmark and no 22-query gate for two
