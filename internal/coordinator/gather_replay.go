@@ -34,7 +34,11 @@ type gatherReplayStream struct {
 	pending []*batch.RecordBatch // decoded batches from the current frame
 	pendIdx int
 	renamer *batchRenamer // applied to replayed batches; prefix is pre-applied
-	frame   []byte        // reusable frame read buffer
+	// guard holds every replayed frame to one description of the relation —
+	// see wshf.SchemaGuard (#685). The spilled frames are the same worker
+	// payloads gatherReceiver checks in memory, read back one at a time.
+	guard wshf.SchemaGuard
+	frame []byte // reusable frame read buffer
 }
 
 func newGatherReplayStream(prefix []*batch.RecordBatch, path string, renamer *batchRenamer) *gatherReplayStream {
@@ -98,6 +102,9 @@ func (s *gatherReplayStream) Next(_ context.Context) (*batch.RecordBatch, error)
 		decoded, err := wshf.DecodeBatches(s.frame)
 		if err != nil {
 			return nil, fmt.Errorf("decoding gather scratch frame: %w", err)
+		}
+		if err := s.guard.CheckBatches("a gather scratch frame in "+s.path, decoded); err != nil {
+			return nil, err
 		}
 		if s.renamer != nil {
 			for i, b := range decoded {

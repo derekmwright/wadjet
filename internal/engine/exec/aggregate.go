@@ -76,9 +76,22 @@ type AggColumn struct {
 	InputCol   string // input column name (empty for COUNT(*))
 	OutputCol  string // output column name
 	OutputType parquet.TypeID
-	Separator  string  // separator for STRING_AGG (default ',')
-	InputCol2  string  // second input column (corr, covar, min_by, max_by)
-	Percentile float64 // percentile value for percentile_cont/percentile_disc
+	// OutputPrecision/OutputScale carry a DECIMAL OutputType's (p,s) — the
+	// piece a bare TypeID cannot hold, and the half of a DECIMAL's VALUE that
+	// the .wshf header carries (ADR-0010). outputSchema fills them in from the
+	// input VECTOR whenever one was observed; these are what it declares when
+	// one never was, which is exactly the ungrouped identity row a partial
+	// task emits after a selective filter matched none of its rows. Without
+	// them that row shipped a file declaring DECIMAL(0,0), and the aggregate
+	// merging it read a scaled Int128 as unscaled — 10^scale too large (#685).
+	//
+	// Zero means "the planner declared no (p,s)", which is every non-DECIMAL
+	// aggregate and a DECIMAL one whose input is not a bare column reference.
+	OutputPrecision int
+	OutputScale     int
+	Separator       string  // separator for STRING_AGG (default ',')
+	InputCol2       string  // second input column (corr, covar, min_by, max_by)
+	Percentile      float64 // percentile value for percentile_cont/percentile_disc
 	// InputColIdx pins the input to a physical column POSITION, bypassing
 	// name resolution, when InputColIdxSet is true. A distributed merge over
 	// two aggregates sharing one alias (#575) reads two partial columns of
@@ -4887,6 +4900,23 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 	}
 	for i, agg := range h.Aggs {
 		out := parquet.Column{Name: agg.OutputCol, Type: agg.OutputType, Nullable: true}
+		// A DECIMAL's (p,s) is half its value on the wire (ADR-0010), so the
+		// column declares the plan-time pair BEFORE the observed-input arms
+		// below get a chance to refine it. Those arms need an input vector,
+		// and the one output that has none is the identity row an ungrouped
+		// aggregate emits when it consumed no rows — the shape a selective
+		// filter produces on a partial task whose files matched nothing.
+		// Declaring (0,0) there wrote a .wshf header that said the unscaled
+		// integers in every OTHER partial meant 10^scale more than they do
+		// (#685).
+		//
+		// Keyed on PRECISION, which a DECIMAL declaration always has (1..38,
+		// ADR-0024's DDL bound): a scale of 0 is a real declaration for
+		// DECIMAL(p,0), so keying on the scale would leave exactly that
+		// column's precision at 0.
+		if out.Type == parquet.TypeDecimal && agg.OutputPrecision > 0 {
+			out.Precision, out.Scale = agg.OutputPrecision, agg.OutputScale
+		}
 		resolved := i < len(h.aggColIdx) && h.aggColIdx[i] >= 0 && i < len(h.aggInputTypes)
 		switch agg.Func {
 		case AggMinBy, AggMaxBy:
@@ -5180,11 +5210,29 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 	if len(h.aggInputTypes) == 0 && len(o.aggInputTypes) > 0 {
 		h.aggInputTypes = o.aggInputTypes
 		h.aggInputMeta = o.aggInputMeta
-		h.aggInputDecScale = o.aggInputDecScale
+		h.aggInputDecScale = append([]int(nil), o.aggInputDecScale...)
 		h.aggBoxedMinMax = o.aggBoxedMinMax
 		h.hasBoxedMinMax = o.hasBoxedMinMax
 		if len(h.aggColIdx) == 0 {
 			h.aggColIdx = o.aggColIdx
+		}
+	}
+	// The DECIMAL scale upgrades on EVERY merge, not only the first one.
+	//
+	// It is the one piece of that metadata a clone can report WRONG rather
+	// than not at all: a clone whose morsel held no non-NULL value observed a
+	// vector but contributed nothing, so it reports scale 0 — and inheriting
+	// from that clone alone declares the output at scale 0 while the merged
+	// accumulator counts in the column's, which renders 4.00 as "4". This is
+	// the "prefer the first NONZERO observation" rule Consume already applies
+	// ACROSS BATCHES (#455) applied ACROSS CLONES: it costs a genuinely
+	// scale-0 column nothing, because every clone of one then reports 0.
+	//
+	// The inherit above copies rather than aliases so this loop cannot write
+	// through into the clone it inherited from.
+	for i := range h.aggInputDecScale {
+		if h.aggInputDecScale[i] == 0 && i < len(o.aggInputDecScale) {
+			h.aggInputDecScale[i] = o.aggInputDecScale[i]
 		}
 	}
 
@@ -6294,6 +6342,27 @@ func decimalSumOverflow(col string) error {
 		"the running total is outside the range DECIMAL(38) can represent", col)
 }
 
+// decimalScaleConflict reports an accumulator handed DECIMAL values at two
+// different scales — see kernel.Accumulator.DecScaleConflict. The unscaled
+// integers were added as if they were counted in one scale and they were not,
+// so the running total is a different number under either reading. It is the
+// same class of refusal as decimalSumOverflow: a value the carrier cannot hold
+// correctly is an error, never a plausible wrong number (ADR-0024 item 4).
+//
+// Every path that could deliver such a pair is closed upstream — the planner
+// reconciles set-operation arms, the shuffle writer refuses a cross-scale
+// chunk, the shuffle reader refuses a cross-scale stage input — so this is the
+// backstop, not the gate. It exists because those three cover the producers
+// that exist today and this covers the accumulator itself.
+func decimalScaleConflict(col string) error {
+	if col == "" {
+		col = "the aggregate"
+	}
+	return sqlerr.New("22003", "a DECIMAL aggregate (%s) was handed values at two different scales: "+
+		"the accumulator carries unscaled integers counted in one scale, so the running total "+
+		"means a different number under each of them", col)
+}
+
 // decimalAvgUnrepresentable reports a DECIMAL AVG whose exact quotient has no
 // Int128. It is the SAME refusal decimalSumOverflow makes, one multiplication
 // later: AVG scales the sum by 10^AvgScaleIncrement before it divides, so a
@@ -6332,6 +6401,9 @@ func (h *HashAggregate) decAggErr(acc *kernel.Accumulator, j int, fn AggFunc) er
 	}
 	if acc.DecOverflow {
 		return decimalSumOverflow(name())
+	}
+	if acc.DecScaleConflict {
+		return decimalScaleConflict(name())
 	}
 	if fn == AggAvg && acc.IsDecimal && acc.Count > 0 {
 		if _, ok := acc.DecimalAvg(); !ok {

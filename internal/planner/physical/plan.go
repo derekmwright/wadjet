@@ -599,6 +599,17 @@ type AggSpec struct {
 	// as "undeclared" is the #354/#371 shape — a declaration dropped on
 	// one dispatch path and re-guessed by the worker.
 	OutputTypeKnown bool
+	// OutputPrecision/OutputScale carry a DECIMAL OutputType's (p,s), for
+	// InputPrecision/InputScale's reason one direction over: the .wshf header
+	// a partial task writes carries half of every DECIMAL value it holds
+	// (ADR-0010), and the one output row nothing observed — the identity row
+	// an ungrouped aggregate emits when its filter matched no rows — has no
+	// input vector to read the pair from. Declaring (0,0) there made the
+	// aggregate merging that file read every OTHER partial's unscaled integer
+	// as unscaled-at-zero: SUM(a) WHERE id < 5 answered 3824.00 for 38.24
+	// (#685). Zero for every non-DECIMAL aggregate.
+	OutputPrecision int
+	OutputScale     int
 	// InputType is the plan-time type of the vector InputExpr evaluates
 	// into, mirrored onto distributed.AggSpec at dispatch. Zero when
 	// there is no derived input. The worker hardcoded Float64 here, which
@@ -5126,6 +5137,22 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				Separator:       agg.Separator,
 				Percentile:      agg.Percentile,
 			}
+			// The (p,s) that goes with a DECIMAL OutputType. See the field's
+			// comment: without it a partial task whose filter matched nothing
+			// writes a .wshf header declaring DECIMAL(0,0) (#685).
+			if m, known := aggSpecOutputDecimal(node, agg); known {
+				spec.OutputPrecision, spec.OutputScale = m.Precision, m.Scale
+			}
+			// And the INPUT's (p,s) for a bare DECIMAL column argument. The
+			// derived-expression branch below overwrites both when there is an
+			// expression to type instead. decomposeAvg needs this one: AVG
+			// travels as a (SUM, COUNT) pair, and the SUM leg's declaration is
+			// the INPUT's scale, which AVG's own declared scale cannot be
+			// inverted back to once the +4 increment saturates at the carrier's
+			// 38 digits (#685).
+			if m, known := aggSpecInputDecimal(node, agg); known {
+				spec.InputPrecision, spec.InputScale = m.Precision, m.Scale
+			}
 			agg.InputExpr = inputExpr
 			// DISTINCT rides the canonical Func string the worker already
 			// maps to exec.AggCountDistinct (#291: the flag used to be
@@ -8391,6 +8418,15 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			Percentile: agg.Percentile,
 			OutputCol:  agg.OutputCol,
 			OutputType: outType,
+		}
+		// And the (p,s) a bare TypeID cannot carry, for the same reason: it
+		// decides what the identity row of an EMPTY input declares, which is
+		// the one output no observed vector can type. On the DAG that row is
+		// a whole partial task's .wshf file (#685); here it is the zero-row
+		// result's schema, and the two paths declare the same thing only if
+		// both read this function.
+		if m, known := aggSpecOutputDecimal(node, agg); known {
+			ac.OutputPrecision, ac.OutputScale = m.Precision, m.Scale
 		}
 		aggCols = append(aggCols, ac)
 	}
@@ -12486,6 +12522,28 @@ func aggSpecOutputDecimal(node *logical.Node, agg logical.AggExpr) (logical.Deci
 	default:
 		return in, true
 	}
+}
+
+// aggSpecInputDecimal is the (p,s) of a bare DECIMAL COLUMN argument — the
+// declaration the aggregate READS, as opposed to the one aggSpecOutputDecimal
+// says it writes. Any aggregate, not only the six above: the pair describes the
+// column, not the function.
+//
+// It exists because AVG is not dispatched as AVG: decomposeAvg splits it into
+// SUM and COUNT legs, and the SUM leg declares the INPUT's scale where AVG
+// declares batch.AvgScale of it. That increment saturates at the carrier's 38
+// digits, so AVG's own declaration cannot be inverted back to the input's for
+// a scale of 34 or more — the leg has to be told (#685).
+//
+// Declines for a computed argument, where the derived-expression branch types
+// the projection instead (AggSpec.InputType/InputPrecision/InputScale).
+func aggSpecInputDecimal(node *logical.Node, agg logical.AggExpr) (logical.DecimalMeta, bool) {
+	if agg.InputExpr != nil {
+		if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
+			return logical.DecimalMeta{}, false
+		}
+	}
+	return scanColumnDecimal(node, agg.InputCol)
 }
 
 // minMaxDeclaredType maps a MIN/MAX input column type to the output type

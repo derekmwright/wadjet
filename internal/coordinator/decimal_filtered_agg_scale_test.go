@@ -7,43 +7,41 @@ import (
 	"time"
 )
 
-// TestFilteredDecimalAggregateScaleIsWrongOnTheDAG PINS an open, PRE-EXISTING
-// defect: an UNGROUPED aggregate over a DECIMAL column, under a filter that
-// actually excludes rows, comes back 10^scale too large on the stage DAG.
+// TestFilteredDecimalAggregateAgreesOnBothPaths was
+// TestFilteredDecimalAggregateScaleIsWrongOnTheDAG, the pin for #685: an
+// UNGROUPED aggregate over a DECIMAL column, under a filter that actually
+// excludes rows, came back 10^scale too large on the stage DAG.
 //
-//	SELECT SUM(d92) FROM decpair WHERE id < 5
+//	SELECT SUM(a) FROM decpair WHERE id < 5
 //	  PostgreSQL 38.24 · single-process 38.24 · stage DAG 3824.00
 //
-// It is the worst decimal defect in the tree and it predates every commit of
-// #555's arc — verified identical at 9a645dc0, the base this work branched
-// from. It is pinned rather than fixed because the mechanism was not found in
-// the time available, and a pin that starts AGREEING fails, so the fix cannot
-// land silently (ADR-0013's discipline).
+// Every entry it pinned as diverging now AGREES, which is what a pin is for
+// (ADR-0013): the `diverges` flags are gone and the entries are ordinary
+// two-path assertions, with the six headline shapes asserted at their VALUE as
+// well — two paths through one wrong accumulator would agree with each other
+// and prove nothing.
 //
-// What the investigation established, so the next pass does not repeat it:
+// The mechanism the pin's notes could not name, for the record, since those
+// notes were half right: the corruption IS upstream of the coordinator and the
+// factor IS one rescale of a value already at its scale, but the reader does
+// not adopt the first batch's schema — each file decodes under its own header.
+// The scale-0 header written by a partial whose filter matched nothing reached
+// the final aggregate as a scale-0 all-NULL BATCH, and the DECIMAL batch
+// kernels adopted `acc.DecScale` from it OUTSIDE their null guard, so a batch
+// that contributed nothing redefined the scale of an Int128 it never touched.
+// Both halves are fixed: the identity row now declares its stage's (p,s)
+// (exec.AggColumn.OutputPrecision/OutputScale), and the accumulator takes a
+// scale only from a batch that held a value.
 //
-//   - The trigger is SELECTIVITY, not the filter. `WHERE id < 100` and
-//     `WHERE a > -1000` match every row and are CORRECT; `WHERE id < 5`
-//     matches four of nine and is wrong. A derived table around the filter
-//     changes nothing.
-//   - GROUP BY is CORRECT. Only the ungrouped shape is affected.
-//   - Every aggregate is affected the same way — SUM, AVG, MIN and MAX — so
-//     it is not accumulation: MIN carries a value it never adds to.
-//   - The factor is exactly 10^(INPUT scale): scale 2 is 100x, scale 4 is
-//     10^4. That is a value at scale s being read as scale 0 and coerced to
-//     s — one rescale, not repeated arithmetic.
-//   - The GATHER receives the correct schema (DECIMAL(38,2)) with an already
-//     corrupted carrier, so the corruption is UPSTREAM of the coordinator.
-//   - Excluded by instrumentation: HashAggregate.decOutputParams (never
-//     reached on this path), exec.Project's two DECIMAL arms (never reached),
-//     exec.DecimalCoerce (set-operation arms only), and the gather's own
-//     rename/projection.
-//
-// The remaining suspect is the partial-to-final handoff across the shuffle,
-// where a task whose filter matched nothing contributes a schema with no
-// scale and ADR-0010's "the reader adopts the first batch's schema" rule
-// takes it.
-func TestFilteredDecimalAggregateScaleIsWrongOnTheDAG(t *testing.T) {
+// The gates that carry the detail: TestFilteredDecimalAggregateTwoPath (the
+// value matrix, both paths), TestEmptyPartialHeaderCarriesTheDeclaredDecimalParams
+// (the .wshf bytes over the whole legal (p,s) range),
+// TestAllNullFileDoesNotRescaleTheAggregate (the morsel-parallel half, which no
+// filter reaches), kernel.TestDecimalBatchKernelsKeepTheContributingScale and
+// exec.TestScalarDecimalMergeIgnoresANonContributingClone (the accumulator,
+// isolated), and wshf.TestSchemaGuardRefusesFilesThatDescribeDifferentRelations
+// (the reader-side backstop).
+func TestFilteredDecimalAggregateAgreesOnBothPaths(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: this gate stands up an embedded NATS cluster")
 	}
@@ -56,48 +54,59 @@ func TestFilteredDecimalAggregateScaleIsWrongOnTheDAG(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		sql  string
-		// diverges records the CURRENT, WRONG state. When the defect is
-		// fixed these flip to false and the entry becomes an ordinary
-		// two-path assertion; a diverging entry that starts agreeing fails
-		// here, which is the fix's proof.
-		diverges bool
+		// want is the single-cell answer, where the shape has one. Empty
+		// means "assert only that the two paths agree" — the multi-row
+		// grouped entries, whose values TestFilteredDecimalAggregateTwoPath
+		// asserts in full.
+		want string
 	}{
-		// The defect, across every aggregate and both wrapped and bare.
-		{"bare sum, selective filter", "SELECT SUM(a) AS v FROM " + dbpTable + " WHERE id < 5", true},
-		{"wrapped sum, selective filter", "SELECT SUM(b) * 2 AS v FROM " + dbpTable + " WHERE id < 5", true},
-		{"avg, selective filter", "SELECT AVG(a) * 100 AS v FROM " + dbpTable + " WHERE id < 5", true},
-		{"min, selective filter", "SELECT MIN(a) AS v FROM " + dbpTable + " WHERE id < 5", true},
-		{"max, selective filter", "SELECT MAX(a) AS v FROM " + dbpTable + " WHERE id < 5", true},
+		// The defect, across every aggregate and both wrapped and bare. The
+		// values are PostgreSQL 17.11's over the same nine rows, except the
+		// two AVG-derived ones: AVG keeps a different number of digits by
+		// contract (ADR-0012 item 9), and 956.000000 is that contract's
+		// rendering of PostgreSQL's 956.0000000000000000.
+		{"bare sum, selective filter", "SELECT SUM(a) AS v FROM " + dbpTable + " WHERE id < 5", "38.24"},
+		{"wrapped sum, selective filter", "SELECT SUM(b) * 2 AS v FROM " + dbpTable + " WHERE id < 5", "76.4800"},
+		{"avg, selective filter", "SELECT AVG(a) * 100 AS v FROM " + dbpTable + " WHERE id < 5", "956.000000"},
+		{"min, selective filter", "SELECT MIN(a) AS v FROM " + dbpTable + " WHERE id < 5", "-0.01"},
+		{"max, selective filter", "SELECT MAX(a) AS v FROM " + dbpTable + " WHERE id < 5", "12.75"},
 		{"through a derived table",
-			"SELECT SUM(a) AS v FROM (SELECT a FROM " + dbpTable + " WHERE id < 5) t", true},
+			"SELECT SUM(a) AS v FROM (SELECT a FROM " + dbpTable + " WHERE id < 5) t", "38.24"},
 
-		// The neighbours that are CORRECT, and which is why the trigger is
-		// selectivity rather than the filter or the aggregate.
-		{"no filter", "SELECT SUM(a) AS v FROM " + dbpTable, false},
-		{"filter matching every row", "SELECT SUM(a) AS v FROM " + dbpTable + " WHERE id < 100", false},
+		// The neighbours that were CORRECT throughout, kept because they are
+		// what said the trigger was selectivity rather than the filter or the
+		// aggregate — and because a fix that broke one of them would be
+		// trading a defect for a defect.
+		{"no filter", "SELECT SUM(a) AS v FROM " + dbpTable, "52.99"},
+		{"filter matching every row", "SELECT SUM(a) AS v FROM " + dbpTable + " WHERE id < 100", "52.99"},
 		{"filter on the decimal itself, matching every row",
-			"SELECT SUM(a) AS v FROM " + dbpTable + " WHERE a > -1000", false},
+			"SELECT SUM(a) AS v FROM " + dbpTable + " WHERE a > -1000", "52.99"},
 		{"grouped, selective filter",
-			"SELECT s, SUM(a) AS v FROM " + dbpTable + " WHERE id < 5 GROUP BY s ORDER BY s", false},
+			"SELECT s, SUM(a) AS v FROM " + dbpTable + " WHERE id < 5 GROUP BY s ORDER BY s", ""},
 		{"grouped avg and min, selective filter",
 			"SELECT s, AVG(a) AS av, MIN(a) AS mn, MAX(b) AS mx FROM " + dbpTable +
-				" WHERE id < 5 GROUP BY s ORDER BY s", false},
+				" WHERE id < 5 GROUP BY s ORDER BY s", ""},
 		{"an INTEGER aggregate under the same filter",
-			"SELECT SUM(id) AS v FROM " + dbpTable + " WHERE id < 5", false},
+			"SELECT SUM(id) AS v FROM " + dbpTable + " WHERE id < 5", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			singleRows := fmt.Sprint(dtpRun(t, ctx, single, coord, tc.sql, false))
-			dagRows := fmt.Sprint(dtpRun(t, ctx, single, coord, tc.sql, true))
-			agree := singleRows == dagRows
-			switch {
-			case tc.diverges && agree:
-				t.Errorf("%s AGREES now — the two paths match, so the pin is stale.\n"+
-					"  both %s\n"+
-					"Delete this entry's diverges:true (or the whole test once every "+
-					"entry agrees): a pin that starts agreeing is the fix's proof.", tc.sql, singleRows)
-			case !tc.diverges && !agree:
-				t.Errorf("%s: the two paths disagree, and this shape was CORRECT\n"+
-					"  single %s\n  dag    %s", tc.sql, singleRows, dagRows)
+			singleRows := dtpRun(t, ctx, single, coord, tc.sql, false)
+			dagRows := dtpRun(t, ctx, single, coord, tc.sql, true)
+			if fmt.Sprint(singleRows) != fmt.Sprint(dagRows) {
+				t.Fatalf("%s: the two paths disagree\n  single %v\n  dag    %v",
+					tc.sql, singleRows, dagRows)
+			}
+			if tc.want == "" {
+				return
+			}
+			for _, arm := range []struct {
+				name string
+				rows []map[string]any
+			}{{"single", singleRows}, {"dag", dagRows}} {
+				if len(arm.rows) != 1 {
+					t.Fatalf("%s %s: %d rows, want 1", arm.name, tc.sql, len(arm.rows))
+				}
+				dtpCell(t, arm.name+" "+tc.sql, arm.rows[0]["v"], tc.want)
 			}
 		})
 	}

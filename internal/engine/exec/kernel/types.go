@@ -44,6 +44,22 @@ type Accumulator struct {
 	// rides the accumulator rather than a per-operator flag because every
 	// merge, spill and clone path already carries the accumulator.
 	DecOverflow bool
+	// DecScaleConflict marks an accumulator handed two DECIMAL values at
+	// DIFFERENT scales. The Int128s it carries are unscaled integers counted
+	// in ONE scale, so 12.75 (1275 at scale 2) added to 0.1275 (1275 at scale
+	// 4) is 2550 under whichever scale wins — 25.50 or 0.2550 depending on
+	// arrival order, never the 12.8775 that is the answer. It rides the
+	// accumulator beside DecOverflow, for the same reason and through the same
+	// emit-time channel (exec.decAggErr), because there is no other way for a
+	// kernel with no error return to refuse.
+	//
+	// Nothing in the tree should be able to reach it: the planner reconciles a
+	// set operation's arms (#533), the shuffle writer refuses a cross-scale
+	// chunk, and the shuffle reader refuses a cross-scale stage input (#685).
+	// This is the last of those doors, and it is the only one that closes the
+	// path a future in-memory producer could open — a loud failure where the
+	// alternative is a wrong number nobody can see.
+	DecScaleConflict bool
 	// StrType is the SOURCE column type behind MinStr/MaxStr. The five
 	// byte-backed types share one accumulator slot but not one boxed shape:
 	// IPV6 and UUID store raw 16-byte values that only round-trip into their
@@ -51,6 +67,29 @@ type Accumulator struct {
 	// them all as a Go string handed the IPV6 output vector 16 arbitrary bytes
 	// as an ADDRESS TO PARSE, which fails and writes NULL (#417).
 	StrType batch.TypeID
+}
+
+// decContributed reports whether this accumulator is carrying a DECIMAL value
+// of its own — the only condition under which its DecScale means anything.
+// IsDecimal alone does not: it is set from the COLUMN by every producer,
+// including one that consumed nothing but NULLs.
+func (a *Accumulator) decContributed() bool {
+	return a.Count > 0 || a.HasMin || a.HasMax
+}
+
+// adoptDecScale records the scale a contributed DECIMAL value is counted in.
+// The first contribution sets it; a later one that disagrees is the conflict
+// DecScaleConflict describes, and is raised at emit rather than silently
+// resolved in either direction.
+func (a *Accumulator) adoptDecScale(scale int) {
+	if !a.IsDecimal {
+		a.IsDecimal = true
+		a.DecScale = scale
+		return
+	}
+	if a.DecScale != scale {
+		a.DecScaleConflict = true
+	}
 }
 
 // A DECIMAL answer is boxed as its TEXT, the same form (*Vector).GetValue
@@ -181,16 +220,28 @@ func (a *Accumulator) Merge(other *Accumulator) {
 		a.IsFloat = true
 	}
 	if other.IsDecimal {
-		a.IsDecimal = true
 		sum, ok := a.SumDec.AddChecked(other.SumDec)
 		a.SumDec = sum
 		if !ok {
 			a.DecOverflow = true
 		}
-		a.DecScale = other.DecScale
+		// The SCALE comes only from a side that HELD a value. IsDecimal is a
+		// property of the COLUMN — every producer sets it, including a clone
+		// or a partial that consumed nothing but NULLs — while DecScale is a
+		// property of the Int128s the accumulator is carrying, and a side
+		// carrying none has none to give. Adopting its zero is how a
+		// morsel-parallel clone over an all-NULL file made SUM(a) answer
+		// 400.00 for 4.00 on the single-process path, while the same query's
+		// DAG answered 4.00 (#685 review, F1).
+		if other.decContributed() {
+			a.adoptDecScale(other.DecScale)
+		}
 	}
 	if other.DecOverflow {
 		a.DecOverflow = true
+	}
+	if other.DecScaleConflict {
+		a.DecScaleConflict = true
 	}
 	if other.IsString {
 		a.IsString = true

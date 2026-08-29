@@ -77,6 +77,11 @@ func wireAggSpecs(specs []physical.AggSpec) []distributed.AggSpec {
 		if declared {
 			spec.OutputType = distributed.WindowTypePtr(int(a.OutputType))
 		}
+		// The (p,s) that goes with a DECIMAL OutputType. Carried
+		// unconditionally rather than under `declared`, because it is zero
+		// for every other type and a DECIMAL declaration always has a
+		// precision — see distributed.AggSpec.OutputPrecision (#685).
+		spec.OutputPrecision, spec.OutputScale = a.OutputPrecision, a.OutputScale
 		// Declared exactly when there is a derived input to type: the
 		// planner always resolves InputType alongside InputExpr (its
 		// fallback is Float64, never absence). Keying on the expression
@@ -84,8 +89,14 @@ func wireAggSpecs(specs []physical.AggSpec) []distributed.AggSpec {
 		// TypeID zero — survive the wire (#371).
 		if a.InputExpr != "" {
 			spec.InputType = distributed.WindowTypePtr(int(a.InputType))
-			spec.InputPrecision, spec.InputScale = a.InputPrecision, a.InputScale
 		}
+		// The INPUT's (p,s) travels whether or not there is an expression to
+		// type: filter_compile reads it only under a declared InputType (a
+		// derived argument), and decomposeAvg reads it for a BARE DECIMAL
+		// column to declare the SUM leg AVG is split into (#685). Zero for
+		// every non-DECIMAL input, so carrying it unconditionally says nothing
+		// new about the ones that had it before.
+		spec.InputPrecision, spec.InputScale = a.InputPrecision, a.InputScale
 		out = append(out, spec)
 	}
 	return out

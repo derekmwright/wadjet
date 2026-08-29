@@ -2000,9 +2000,19 @@ func (e *Executor) readInputFilesBatches(ctx context.Context, bucket string, fil
 	wg.Wait()
 
 	var allBatches []*batch.RecordBatch
+	// The files of one input describe one relation — see wshf.SchemaGuard.
+	// This reader concatenates them and hands the result to an operator that
+	// types itself from the first batch, which is the reinterpretation #685 is
+	// about. The check runs over the ASSEMBLED results rather than inside the
+	// goroutines above so it sees the files in a deterministic order, and so
+	// one guard covers them all.
+	var guard wshf.SchemaGuard
 	for i, r := range results {
 		if r.err != nil {
 			return nil, fmt.Errorf("reading file %s: %w", files[i], r.err)
+		}
+		if err := guard.CheckBatches(files[i], r.batches); err != nil {
+			return nil, err
 		}
 		allBatches = append(allBatches, r.batches...)
 	}

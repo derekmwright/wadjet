@@ -42,16 +42,22 @@ type gatherResult struct {
 // with the worker publishing before the subscriber exists), and wait() blocks
 // until `expectedTerminals` terminal messages arrive or ctx/timeout fires.
 type gatherReceiver struct {
-	sub               *nats.Subscription
-	workers           *WorkerRegistry // nil-safe; used to mark worker liveness from gather batches
-	budget            int64           // max decoded bytes held in memory; <=0 = uncapped
-	mu                sync.Mutex
-	batches           []*batch.RecordBatch
-	accBytes          int64 // decoded bytes accumulated in memory (MemBytes sum)
-	totalRows         int64
-	columns           []string
-	workerErr         string
-	terminals         int
+	sub       *nats.Subscription
+	workers   *WorkerRegistry // nil-safe; used to mark worker liveness from gather batches
+	budget    int64           // max decoded bytes held in memory; <=0 = uncapped
+	mu        sync.Mutex
+	batches   []*batch.RecordBatch
+	accBytes  int64 // decoded bytes accumulated in memory (MemBytes sum)
+	totalRows int64
+	columns   []string
+	workerErr string
+	terminals int
+	// guard holds every worker's gather payload to ONE description of the
+	// relation — see wshf.SchemaGuard. The receiver resolves r.columns from
+	// the first batch it decodes and every later one is read under that, so a
+	// worker whose payload declares a column differently is reinterpreted
+	// rather than refused (#685).
+	guard             wshf.SchemaGuard
 	expectedTerminals int
 	done              chan struct{}
 	msgCount          atomic.Int64 // diagnostic: incremented on every message received
@@ -162,6 +168,12 @@ func (r *gatherReceiver) handleParsed(msg *distributed.GatherBatchMsg) {
 	if err != nil {
 		if r.workerErr == "" {
 			r.workerErr = fmt.Sprintf("decoding gather batch: %v", err)
+		}
+		return
+	}
+	if err := r.guard.CheckBatches("a gather batch from worker "+msg.WorkerID, decoded); err != nil {
+		if r.workerErr == "" {
+			r.workerErr = err.Error()
 		}
 		return
 	}

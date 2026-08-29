@@ -1507,7 +1507,13 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 	var columns []string
 	var decodedBytes int64
 	totalRows := s3Rows
-	for _, d := range slot {
+	// One stage's partial results describe one relation. See wshf.SchemaGuard:
+	// the consumer types itself from the first batch it reads, so a partial
+	// that declares a column differently is read under a declaration that is
+	// not its own — silently, and for a DECIMAL that is a different number
+	// (#685).
+	var guard wshf.SchemaGuard
+	for si, d := range slot {
 		// A result that failed to decode is not an empty result. Reporting
 		// it as one silently drops a worker's whole share of the answer —
 		// the query returns fewer rows and says nothing about why.
@@ -1516,6 +1522,13 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 		}
 		if len(d.columns) > 0 && len(columns) == 0 {
 			columns = d.columns
+		}
+		what := "an inline partial result"
+		if si < len(pending) && pending[si].idx < len(results) {
+			what = "task " + results[pending[si].idx].TaskID + "'s inline result"
+		}
+		if err := guard.CheckBatches(what, d.batches); err != nil {
+			return nil, nil, 0, err
 		}
 		totalRows += d.rows
 		for _, b := range d.batches {
@@ -2898,9 +2911,15 @@ func ReadResultFiles(ctx context.Context, store objstore.Store, bucket string, p
 	var allBatches []*batch.RecordBatch
 	var columns []string
 	var totalRows int64
-	for _, r := range results {
+	// One stage's result files describe one relation — see wshf.SchemaGuard
+	// and readFinalResults' copy of this comment (#685).
+	var guard wshf.SchemaGuard
+	for i, r := range results {
 		if len(r.columns) > 0 && len(columns) == 0 {
 			columns = r.columns
+		}
+		if err := guard.CheckBatches(paths[i], r.batches); err != nil {
+			return nil, nil, 0, err
 		}
 		totalRows += r.rows
 		allBatches = append(allBatches, r.batches...)

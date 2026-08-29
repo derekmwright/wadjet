@@ -2484,6 +2484,12 @@ func (e *Executor) buildFragmentHashAggregate(ctx context.Context, spec distribu
 			Percentile: a.Percentile,
 			OutputCol:  a.OutputCol,
 			OutputType: aggSpecOutputType(a),
+			// The (p,s) the identity row of a zero-input aggregate declares.
+			// Every other output row takes it from the vector observed at
+			// Consume; that one has no vector, and a partial task whose
+			// filter matched nothing IS that row (#685).
+			OutputPrecision: a.OutputPrecision,
+			OutputScale:     a.OutputScale,
 		}
 		if mergeByPosition {
 			aggCols[i].InputColIdx = len(spec.GroupByCols) + i

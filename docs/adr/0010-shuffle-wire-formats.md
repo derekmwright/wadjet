@@ -106,6 +106,48 @@ consumer can sniff and decode, including mid-stream.
   a safety net for the general case, and reasoning that treats it as one will
   be wrong in exactly the direction that hurts.
 
+  **The multi-file half now has a guard of its own** (#685, 2026-08-29).
+  `cachedFileStreamSource.checkWSHFDecimalHeader` remembers the DECIMAL
+  parameters of the FIRST `.wshf` header a stage input hands it and refuses a
+  later file of the same input that declares the same column differently. It
+  compares only DECIMAL-to-DECIMAL at the same ordinal and name: a file that
+  disagrees on the TYPE, or on the column count, is the type-drift class with
+  its own guards (`applyDeclaredScanSchema`, #503), and widening this one to it
+  would refuse a live shape — an identity row for an aggregate whose type the
+  planner could not resolve. Like the writer's check it cannot repair anything
+  (the integers are already ambiguous by the time they are read); it turns the
+  class from a wrong answer into a failed task, and it is a second line behind
+  the producers, not the fix.
+
+  **And the producer that made this reachable from an ordinary query was the
+  IDENTITY ROW** (#685). An ungrouped aggregate that consumed no rows still owes
+  one row, and on the stage DAG a selective filter makes some partial tasks
+  exactly that: a task whose files matched nothing. That row has no input vector
+  to read a DECIMAL scale from, so it shipped `DECIMAL(0,0)` for a column every
+  other partial of the same stage declared `DECIMAL(38,s)`. The consumer adopted
+  whichever it saw first, and `SELECT SUM(a) FROM decpair WHERE id < 5` answered
+  `3824.00` for `38.24` — exactly `10^scale` out, on SUM, AVG, MIN and MAX
+  alike, with GROUP BY and an all-match filter both correct (a grouped partial
+  with no rows emits no rows, so it writes no header at all). Fixed at both
+  ends: `exec.AggColumn.OutputPrecision/OutputScale` carry the plan-time `(p,s)`
+  so `HashAggregate.outputSchema` declares it when no input was ever observed,
+  and the kernel's DECIMAL batch arms no longer adopt `acc.DecScale` from a
+  batch that contributed nothing — the rule the row updaters already followed.
+  So an EMPTY PARTIAL CARRIES ITS STAGE'S FULL DECLARED SCHEMA, `(p,s)`
+  included; a header that says otherwise is a defect, which is what the guard
+  above now says out loud. Gated by
+  `coordinator.TestEmptyPartialHeaderCarriesTheDeclaredDecimalParams` (the
+  bytes, over the whole legal `(p,s)` range),
+  `coordinator.TestFilteredDecimalAggregateTwoPath` (the answer, on both paths)
+  and `kernel.TestDecimalBatchKernelsKeepTheContributingScale` (the
+  accumulator, isolated).
+
+  Only DECIMAL is exposed this way: it is the one type whose parameters live in
+  the HEADER. A VECTOR's dimension and an ARRAY's element declaration are not
+  written there at all — the container payload is self-describing and
+  `batch.SyncContainerSchema` rebuilds the shape on read — so an identity row
+  has nothing to lose for them, which the same gate asserts through the answer.
+
 - **The partition ASSIGNMENT is part of the exchange contract, not just the
   byte layout.** Every producer of a repartition stage must map a key to the
   same partition number, because the consumer of partition *p* reads only the
@@ -144,6 +186,14 @@ consumer can sniff and decode, including mid-stream.
   and `ColumnTypes` degrade conservatively (an old worker answers the way it
   always did); `DeleteMarkers` does not, because the field's whole purpose is
   to REMOVE rows.
+
+  **`AggSpec.OutputPrecision`/`OutputScale` is the third entry** (#685,
+  2026-08-29). It carries the `(p, s)` an ungrouped aggregate's identity row
+  declares when it consumed no rows — see the DECIMAL bullet above. A partial
+  task that drops it writes `DECIMAL(0,0)` beside siblings writing
+  `DECIMAL(38,2)`, which the reader guard below now refuses BY NAME: a rolling
+  deploy costs the query, where before the guard it cost the answer. Either way
+  the worker ignoring the field does not answer correctly, which is the test.
 
 References: `docs/design/peer-wire-compression.md`,
 `docs/design/exchange-streaming-consumption.md`.

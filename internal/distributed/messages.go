@@ -810,6 +810,26 @@ type AggSpec struct {
 	// declaration — the DAG read it as undeclared and fell back to a guess,
 	// reinstating #345's silent-drop shape for exactly one type.
 	OutputType *int `json:"output_type,omitempty"`
+	// OutputPrecision/OutputScale carry a DECIMAL OutputType's (p,s), for
+	// InputPrecision/InputScale's reason on the output side: a .wshf header
+	// carries half of every DECIMAL value in the file (ADR-0010), and the one
+	// output row no input vector can type is the identity row an ungrouped
+	// aggregate emits when it consumed nothing — the shape a selective filter
+	// produces on a partial task whose files matched no rows. Declaring (0,0)
+	// there made the merging aggregate read every other partial's scaled
+	// Int128 as unscaled: SUM(a) WHERE id < 5 answered 3824.00 for 38.24, and
+	// AVG/MIN/MAX the same 10^scale over (#685). Zero for every other type.
+	//
+	// THIS IS A WHOLESALE-DEPLOY FIELD (ADR-0010). The first draft of this note
+	// said a worker ignoring it "still answers correctly", and that is false in
+	// both readings. A partial task that drops it writes DECIMAL(0,0) beside
+	// siblings that write DECIMAL(38,2), and the consumer of that stage now
+	// REFUSES the read by name (cachedFileStreamSource.checkWSHFDecimalHeader)
+	// — so a rolling deploy turns the query into a failed task, not a wrong
+	// answer, but not into a correct one either. Without that guard it is the
+	// silent 10^scale of #685. Coordinator and workers deploy together.
+	OutputPrecision int `json:"output_precision,omitempty"`
+	OutputScale     int `json:"output_scale,omitempty"`
 	// InputType is the plan-time parquet.TypeID of the vector InputExpr
 	// evaluates into, carried the same way and for the same reason: the
 	// worker compiles InputExpr from its text and has no catalog to

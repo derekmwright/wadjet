@@ -147,6 +147,13 @@ type cachedFileStreamSource struct {
 	// (single-pass drop-behind). Reset with each file.
 	walkDropMark int
 
+	// wshfGuard holds the several .wshf files of this stage input to one
+	// description of the relation they carry — the multi-file half of the
+	// guard shuffleWriter.writeChunk holds on a single writer (ADR-0010,
+	// #533/#685). It lives in internal/wshf because five other readers need
+	// the same check; see wshf.SchemaGuard.
+	wshfGuard wshf.SchemaGuard
+
 	// Streaming-decode state (docs/design/exchange-streaming-consumption.md
 	// §3 D1). When the current file is being stream-decoded, streamReader
 	// == chunkReader and streamKey names the object so a mid-stream
@@ -428,6 +435,9 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 				return nil, err
 			}
 			if b != nil {
+				if err := s.wshfGuard.CheckBatch(s.currentFileName(), b); err != nil {
+					return nil, err
+				}
 				s.dropBehindWalk()
 				return b, nil
 			}
@@ -537,6 +547,14 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 			return nil, err
 		}
 	}
+}
+
+// currentFileName names the file the source is reading, for an error message.
+func (s *cachedFileStreamSource) currentFileName() string {
+	if s.fileIdx > 0 && s.fileIdx <= len(s.files) {
+		return s.files[s.fileIdx-1]
+	}
+	return "this stage input file"
 }
 
 func (s *cachedFileStreamSource) Close() error {

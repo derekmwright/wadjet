@@ -1880,6 +1880,61 @@ func postgresSemanticsCases() []pgCase {
 				SUM(d_4) AS s4 FROM dec_probe GROUP BY g`},
 		// Both encodings in one predicate.
 		pgCase{name: "WideDecimalWithNarrow", sql: `SELECT d_key FROM dec_probe WHERE d_wide > 0 AND d_2 < 0 ORDER BY d_key`},
+		// An UNGROUPED aggregate under a SELECTIVE filter (#685). On the stage
+		// DAG the selectivity is what empties whole partial tasks, and an
+		// ungrouped aggregate that consumed nothing still owes an identity
+		// row — which is where its DECIMAL scale used to go missing and every
+		// value came back 10^scale too large. The entries here hold this arm
+		// to PostgreSQL's answer over the same rows; the DAG half of the same
+		// question is coordinator.TestFilteredDecimalAggregateTwoPath, since
+		// this arm runs through the embedded API and never fans out.
+		//
+		// Both selectivities, all three encodings, and the empty result: what
+		// the fix has to keep right is the whole range, not the one bound the
+		// failing query used.
+		pgCase{name: "FilteredDecimalAggSelective", exactNumeric: true,
+			sql: `SELECT SUM(d_2) AS s2, MIN(d_2) AS lo2, MAX(d_2) AS hi2,
+				SUM(d_4) AS s4, MIN(d_4) AS lo4, MAX(d_4) AS hi4,
+				SUM(d_wide) AS sw, MIN(d_wide) AS low, MAX(d_wide) AS hiw,
+				COUNT(d_2) AS n FROM dec_probe WHERE d_key < 5`},
+		pgCase{name: "FilteredDecimalAggVerySelective", exactNumeric: true,
+			sql: `SELECT SUM(d_2) AS s2, MIN(d_2) AS lo2, MAX(d_2) AS hi2,
+				SUM(d_wide) AS sw, COUNT(d_2) AS n FROM dec_probe WHERE d_key < 2`},
+		pgCase{name: "FilteredDecimalAggEmpty", exactNumeric: true,
+			sql: `SELECT SUM(d_2) AS s2, MIN(d_2) AS lo2, MAX(d_2) AS hi2,
+				SUM(d_wide) AS sw, COUNT(d_2) AS n FROM dec_probe WHERE d_key < 0`},
+		pgCase{name: "FilteredDecimalAvgSelective",
+			sql: `SELECT AVG(d_2) AS a2, AVG(d_4) AS a4, AVG(d_wide) AS aw
+				FROM dec_probe WHERE d_key < 5`},
+		// The same filter with the aggregate WRAPPED, so the carrier reaches
+		// an operator rather than the client: a scale that travelled apart
+		// from its integer shows up multiplied here too.
+		//
+		// NOT exactNumeric, deliberately and for a reason that is not this
+		// entry's: `numeric * 2` still resolves FLOAT64 here (ADR-0024 item
+		// 1's residual — the declared-type layer has no (p,s) for arithmetic
+		// yet), so the digits past float64's are a difference this entry does
+		// not own and must not pin. What it does own is the FACTOR: a scale
+		// read apart from its integer moves the value by 10^scale, which is
+		// 100x at the narrowest and survives any rendering either side picks.
+		pgCase{name: "FilteredDecimalAggWrapped",
+			sql: `SELECT SUM(d_2) * 2 AS s2, MIN(d_4) * 2 AS lo4, MAX(d_wide) * 2 AS hiw
+				FROM dec_probe WHERE d_key < 5`},
+		// And GROUPED under the same filter — the arm that was correct before
+		// the fix, kept as the control that says the entries above are about
+		// selectivity and not about the filter.
+		pgCase{name: "FilteredDecimalAggGrouped", exactNumeric: true,
+			sql: `SELECT d_key, SUM(d_2) AS s2, MIN(d_4) AS lo4, MAX(d_wide) AS hiw
+				FROM dec_probe WHERE d_key < 5 GROUP BY d_key ORDER BY d_key`},
+		// A DECIMAL GROUP-BY KEY under the same filter: the value IS the key
+		// there, and a key column that lost its (p,s) truncates rather than
+		// rescaling (ADR-0024 item 2).
+		pgCase{name: "FilteredDecimalGroupKey",
+			sql: `SELECT d_2 AS k, COUNT(*) AS n FROM dec_probe WHERE d_key < 5 GROUP BY d_2 ORDER BY d_2`},
+		// And a WINDOW aggregate under it, the third exact path.
+		pgCase{name: "FilteredDecimalWindow", exactNumeric: true,
+			sql: `SELECT d_key, SUM(d_2) OVER () AS ws, MIN(d_4) OVER () AS wlo,
+				MAX(d_wide) OVER () AS whi FROM dec_probe WHERE d_key < 5 ORDER BY d_key`},
 	)
 
 	// --- String ordering ------------------------------------------------

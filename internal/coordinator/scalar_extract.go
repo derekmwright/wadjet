@@ -50,6 +50,7 @@ func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOu
 	// files surfaced (e.g. a zero-row shard plus a one-row shard), scan
 	// until we find the first non-empty row.
 	tier := coordReadNone
+	var guard wshf.SchemaGuard
 	for _, path := range files {
 		data, t, err := c.fetchStageOutputData(ctx, path)
 		tier = t
@@ -66,6 +67,13 @@ func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOu
 		batches, err := wshf.DecodeBatches(decoded)
 		if err != nil {
 			return "", tier, fmt.Errorf("read shuffle %s: %w", path, err)
+		}
+		// One producer stage's files describe one relation — see
+		// wshf.SchemaGuard. This reader walks them until one yields a scalar,
+		// so without the check a later file's DECIMAL could be read under an
+		// earlier one's scale and become the subquery's literal (#685).
+		if err := guard.CheckBatches(path, batches); err != nil {
+			return "", tier, err
 		}
 		lit, ok := scalarFromBatches(batches, projection)
 		if ok {

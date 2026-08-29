@@ -296,19 +296,19 @@ func sumRowDecimal(acc *Accumulator, vec *batch.Vector, row int) {
 			acc.DecOverflow = true
 		}
 		acc.Count++
-		acc.IsDecimal = true
-		acc.DecScale = vec.DecimalData.Scale
+		acc.adoptDecScale(vec.DecimalData.Scale)
 	}
 }
 
 func minRowDecimal(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
 		v := vec.DecimalData.Data[row]
+		// Outside the win check: a row that LOSES still contributed, and its
+		// scale still has to agree with the one the accumulator counts in.
+		acc.adoptDecScale(vec.DecimalData.Scale)
 		if !acc.HasMin || v.Less(acc.MinDec) {
 			acc.MinDec = v
 			acc.HasMin = true
-			acc.IsDecimal = true
-			acc.DecScale = vec.DecimalData.Scale
 		}
 	}
 }
@@ -316,11 +316,11 @@ func minRowDecimal(acc *Accumulator, vec *batch.Vector, row int) {
 func maxRowDecimal(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
 		v := vec.DecimalData.Data[row]
+		// See minRowDecimal.
+		acc.adoptDecScale(vec.DecimalData.Scale)
 		if !acc.HasMax || acc.MaxDec.Less(v) {
 			acc.MaxDec = v
 			acc.HasMax = true
-			acc.IsDecimal = true
-			acc.DecScale = vec.DecimalData.Scale
 		}
 	}
 }
@@ -472,6 +472,22 @@ func ResolveRowCount(countStar bool) RowAggUpdater {
 
 // --- Batch-level resolve functions ---
 
+// A note the three DECIMAL arms below share: acc.DecScale is adopted ONLY
+// from a batch that actually contributed a value, exactly as the row updaters
+// (sumRowDecimal/minRowDecimal/maxRowDecimal) already did inside their null
+// guard. It is the scale the Int128 in SumDec/MinDec/MaxDec is counted in, and
+// FinalSum/FinalMin/FinalMax render the accumulator as text at it — so a batch
+// that added nothing but overwrote it makes the emit re-parse a right integer
+// under a wrong scale, which is a different number written silently.
+//
+// The reachable case is not hypothetical: an ungrouped aggregate that consumed
+// no rows emits an identity row (SUM/MIN/MAX -> NULL) whose DECIMAL vector has
+// no input to take a scale from, so it ships scale 0. On the stage DAG each
+// partial is its own task, a selective filter makes some of them match nothing,
+// and that all-NULL scale-0 batch is one of the inputs the final aggregate
+// merges. Adopting its scale turned SUM(a) WHERE id < 5 into 3824.00 where the
+// answer is 38.24 — 10^scale too large, on SUM, AVG, MIN and MAX alike (#685).
+
 // ResolveBatchSum returns a batch-level sum kernel for the given column type.
 func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 	switch typ {
@@ -506,6 +522,9 @@ func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 			data := vec.DecimalData.Data
 			nulls := &vec.Nulls
 			overflow := false
+			// SUM reads "did this batch contribute" off the count it already
+			// maintains, so the loop is untouched.
+			before := acc.Count
 			if sel != nil {
 				for _, idx := range sel {
 					if !nulls.IsNullFast(int(idx)) {
@@ -528,8 +547,9 @@ func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 			if overflow {
 				acc.DecOverflow = true
 			}
-			acc.IsDecimal = true
-			acc.DecScale = vec.DecimalData.Scale
+			if acc.Count != before {
+				acc.adoptDecScale(vec.DecimalData.Scale)
+			}
 		}
 	default:
 		return nil
@@ -568,10 +588,16 @@ func ResolveBatchMin(typ batch.TypeID) BatchAggKernel {
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			data := vec.DecimalData.Data
 			nulls := &vec.Nulls
+			// MIN/MAX keep no count, so the flag is set in the guard body the
+			// loop already runs. Asking a helper up front instead cost a
+			// SECOND full bitmap pass, which on an all-NULL batch — the shape
+			// this rule exists for — is the whole of the work (#685 review).
+			took := false
 			if sel != nil {
 				for _, idx := range sel {
 					if !nulls.IsNullFast(int(idx)) {
 						v := data[idx]
+						took = true
 						if !acc.HasMin || v.Less(acc.MinDec) {
 							acc.MinDec = v
 							acc.HasMin = true
@@ -582,6 +608,7 @@ func ResolveBatchMin(typ batch.TypeID) BatchAggKernel {
 				for i := 0; i < vecLen; i++ {
 					if !nulls.IsNullFast(i) {
 						v := data[i]
+						took = true
 						if !acc.HasMin || v.Less(acc.MinDec) {
 							acc.MinDec = v
 							acc.HasMin = true
@@ -589,8 +616,9 @@ func ResolveBatchMin(typ batch.TypeID) BatchAggKernel {
 					}
 				}
 			}
-			acc.IsDecimal = true
-			acc.DecScale = vec.DecimalData.Scale
+			if took {
+				acc.adoptDecScale(vec.DecimalData.Scale)
+			}
 		}
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		return minBatchString
@@ -628,10 +656,13 @@ func ResolveBatchMax(typ batch.TypeID) BatchAggKernel {
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			data := vec.DecimalData.Data
 			nulls := &vec.Nulls
+			// See ResolveBatchMin's DECIMAL arm.
+			took := false
 			if sel != nil {
 				for _, idx := range sel {
 					if !nulls.IsNullFast(int(idx)) {
 						v := data[idx]
+						took = true
 						if !acc.HasMax || acc.MaxDec.Less(v) {
 							acc.MaxDec = v
 							acc.HasMax = true
@@ -642,6 +673,7 @@ func ResolveBatchMax(typ batch.TypeID) BatchAggKernel {
 				for i := 0; i < vecLen; i++ {
 					if !nulls.IsNullFast(i) {
 						v := data[i]
+						took = true
 						if !acc.HasMax || acc.MaxDec.Less(v) {
 							acc.MaxDec = v
 							acc.HasMax = true
@@ -649,8 +681,9 @@ func ResolveBatchMax(typ batch.TypeID) BatchAggKernel {
 					}
 				}
 			}
-			acc.IsDecimal = true
-			acc.DecScale = vec.DecimalData.Scale
+			if took {
+				acc.adoptDecScale(vec.DecimalData.Scale)
+			}
 		}
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID:
 		return maxBatchString

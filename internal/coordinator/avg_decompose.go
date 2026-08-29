@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/distributed"
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -55,14 +56,27 @@ func decomposeAvg(specs []distributed.AggSpec) []distributed.AggSpec {
 		sumSpec.Func = "sum"
 		sumSpec.OutputCol = avgSumPrefix + a.OutputCol
 		sumSpec.OutputType = distributed.WindowTypePtr(int(parquet.TypeFloat64))
+		sumSpec.OutputPrecision, sumSpec.OutputScale = 0, 0
+		// AVG over a DECIMAL sums in DECIMAL, at the INPUT's scale — SUM's own
+		// rule (ADR-0024 item 2), not AVG's widened one. Declaring float64
+		// here left the identity row of a partial that consumed NO rows
+		// shipping a FLOAT64 column where every other partial of the same
+		// stage shipped a DECIMAL: a header that contradicts its siblings, and
+		// a merge that resolved its accumulator against that batch first would
+		// read the DECIMAL vectors through a float kernel (#685).
+		if p, s, ok := avgSumDecimalDecl(a); ok {
+			sumSpec.OutputType = distributed.WindowTypePtr(int(parquet.TypeDecimal))
+			sumSpec.OutputPrecision, sumSpec.OutputScale = p, s
+		}
 		countSpec := a
 		countSpec.Func = "count"
 		countSpec.OutputCol = avgCountPrefix + a.OutputCol
 		// The count leg is int64 whatever AVG's own type is, and
 		// applyAvgFold reads it straight out of Int64Data — inheriting
 		// AVG's float64 declaration here would hand the fold the wrong
-		// vector.
+		// vector. The (p,s) goes with the type it described.
 		countSpec.OutputType = distributed.WindowTypePtr(int(parquet.TypeInt64))
+		countSpec.OutputPrecision, countSpec.OutputScale = 0, 0
 		out = append(out, sumSpec, countSpec)
 	}
 	return out
@@ -92,6 +106,18 @@ func decomposeAvgPhysical(specs []physical.AggSpec) []physical.AggSpec {
 		sumSpec.Func = "sum"
 		sumSpec.OutputCol = avgSumPrefix + a.OutputCol
 		sumSpec.OutputType = parquet.TypeFloat64
+		sumSpec.OutputPrecision, sumSpec.OutputScale = 0, 0
+		// The same declaration decomposeAvg makes on the wire spec — see there
+		// for why the SUM leg is a DECIMAL at the INPUT's scale (#685).
+		if p, s, ok := avgSumDecimalDecl(distributed.AggSpec{
+			OutputType:     aggOutputTypePtr(a.OutputType, a.OutputTypeKnown),
+			InputPrecision: a.InputPrecision,
+			InputScale:     a.InputScale,
+		}); ok {
+			sumSpec.OutputType = parquet.TypeDecimal
+			sumSpec.OutputTypeKnown = true
+			sumSpec.OutputPrecision, sumSpec.OutputScale = p, s
+		}
 		countSpec := a
 		countSpec.Func = "count"
 		countSpec.OutputCol = avgCountPrefix + a.OutputCol
@@ -103,4 +129,35 @@ func decomposeAvgPhysical(specs []physical.AggSpec) []physical.AggSpec {
 
 func isAvgFunc(s string) bool {
 	return strings.EqualFold(strings.TrimSpace(s), "avg")
+}
+
+// avgSumDecimalDecl is the SUM leg's declaration for an AVG over a DECIMAL:
+// the carrier's full precision at the INPUT's scale, which is SUM's rule
+// (ADR-0024 item 2). ok=false means this AVG is not over a DECIMAL, or the
+// planner could not resolve the input column's (p,s) — in which case the leg
+// keeps its float64 declaration, and an identity row emitted for it declares
+// what it always did rather than a guessed pair.
+//
+// The input's scale has to be CARRIED (AggSpec.InputScale) rather than
+// recovered from AVG's own declared scale: batch.AvgScale adds a fixed
+// increment and saturates at 38, so every input scale from 34 up declares the
+// same output scale and the map is not invertible there.
+func avgSumDecimalDecl(a distributed.AggSpec) (precision, scale int, ok bool) {
+	if a.OutputType == nil || parquet.TypeID(*a.OutputType) != parquet.TypeDecimal {
+		return 0, 0, false
+	}
+	if a.InputPrecision <= 0 {
+		return 0, 0, false
+	}
+	return batch.MaxDecimalPrecision, a.InputScale, true
+}
+
+// aggOutputTypePtr mirrors physical.AggSpec's (type, known) pair onto the
+// pointer convention distributed.AggSpec uses, so decomposeAvgPhysical can ask
+// avgSumDecimalDecl the same question decomposeAvg does.
+func aggOutputTypePtr(t parquet.TypeID, known bool) *int {
+	if !known && t == 0 {
+		return nil
+	}
+	return distributed.WindowTypePtr(int(t))
 }
