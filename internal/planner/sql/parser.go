@@ -153,11 +153,34 @@ type AnalyzeTableInfo struct {
 	Name string
 }
 
+// DMLTarget is the relation a DELETE or an UPDATE names, together with the
+// statement text that named it.
+//
+// It is one type shared by both because both doors (the embedded API and the
+// HTTP server) resolve the two identically, and because the STATEMENT TEXT
+// has to travel with the clause for the empty-predicate backstop in
+// wadjet.BuildDMLPredicate to have anything to check (#686).
+type DMLTarget struct {
+	Table     string // table name, as the statement spelled it
+	Qualifier string // schema/catalog qualifier ("public"), "" when unqualified
+	// Alias is the `[AS] a` the statement gave, "" when it gave none. When it
+	// is set it HIDES the table name: PostgreSQL answers `DELETE FROM pr AS a
+	// WHERE pr.id = 1` with 42P01, not with a delete.
+	Alias string
+	// WhereSQL is the raw WHERE clause. "" means the statement had NO WHERE
+	// at all — which is a legal unconditional statement, and is why StmtSQL
+	// is carried beside it: a clause the parser dropped looks identical here.
+	WhereSQL string
+	// StmtSQL is the whole statement, trimmed. The backstop re-lexes it to
+	// ask whether a WHERE keyword the parsed clause does not account for was
+	// written.
+	StmtSQL string
+}
+
 // UpdateInfo holds details for an UPDATE statement.
 type UpdateInfo struct {
-	Table      string            // table name
-	SetClauses []SetClause       // SET column = value pairs
-	WhereSQL   string            // raw WHERE clause SQL (empty = update all rows)
+	DMLTarget
+	SetClauses []SetClause // SET column = value pairs
 }
 
 // SetClause represents a single SET column = value assignment.
@@ -168,8 +191,7 @@ type SetClause struct {
 
 // DeleteInfo holds details for a DELETE statement.
 type DeleteInfo struct {
-	Table    string // table name
-	WhereSQL string // raw WHERE clause SQL (empty = delete all rows)
+	DMLTarget
 }
 
 // InsertInfo holds details for an INSERT statement.
@@ -1317,11 +1339,16 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 	}
 	info := &MergeInfo{Target: strings.ToLower(targetTok.val)}
 
-	// Optional alias
+	// Optional alias. AS must be followed by a NAME: taking whatever came
+	// next made `MERGE INTO t AS USING s ...` an alias of "USING" and then
+	// failed on the missing USING, which named the wrong token (#686 sweep).
 	peek := l.peekToken()
 	if peek.typ == TokenKWAs {
 		l.nextToken()
 		aliasTok := l.nextToken()
+		if aliasTok.typ != TokenIdent {
+			return nil, fmt.Errorf("MERGE: expected target alias after AS, got %q", aliasTok.val)
+		}
 		info.TargetAlias = strings.ToLower(aliasTok.val)
 	} else if peek.typ == TokenIdent && !isClauseKeyword(peek) {
 		l.nextToken()
@@ -1363,6 +1390,9 @@ func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
 	if peek.typ == TokenKWAs {
 		l.nextToken()
 		aliasTok := l.nextToken()
+		if aliasTok.typ != TokenIdent {
+			return nil, fmt.Errorf("MERGE: expected source alias after AS, got %q", aliasTok.val)
+		}
 		info.SourceAlias = strings.ToLower(aliasTok.val)
 	} else if peek.typ == TokenIdent && !isClauseKeyword(peek) {
 		l.nextToken()

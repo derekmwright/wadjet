@@ -2629,11 +2629,43 @@ func windowSpecFromNode(wfn *WindowFuncNode, alias string) *WindowSpec {
 
 // ParseExpression parses a single expression from a SQL string.
 // Used for standalone expression parsing (e.g., UDF bodies, WHERE clauses).
+//
+// It stops where the expression grammar stops and does NOT require that the
+// whole string was consumed, so a caller holding text that must be an
+// expression IN FULL has to use ParseExpressionComplete instead.
 func ParseExpression(sql string) (Node, error) {
 	p := newSelectParser(sql)
 	expr, err := p.parseExpr()
 	if err != nil {
 		return nil, err
+	}
+	return expr, nil
+}
+
+// ParseExpressionComplete parses one expression and refuses text left over
+// after it.
+//
+// ParseExpression stops at the first token the expression grammar cannot use
+// and reports success, which for a DML WHERE clause is not a truncated
+// expression but silent data loss: `id > 0 AND name @@ 'zzz'` parses to
+// `id > 0`, and a DELETE carrying it removes every row the SURVIVING PREFIX
+// matches. The conjunct that was dropped is the one that would have NARROWED
+// it. Three spellings found this way — an unsupported operator (@@, #),
+// PostgreSQL's ISNULL suffix, and a stray token after a parenthesised term —
+// each emptied a table the full predicate matched in part or not at all
+// (#686 review).
+//
+// A WHERE this server cannot read in full is a WHERE whose meaning it does
+// not know, and running the part it did read is the worst available answer
+// (ADR-0019, correctness-fix protocol item 8).
+func ParseExpressionComplete(sql string) (Node, error) {
+	p := newSelectParser(sql)
+	expr, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	if p.peek() != TokenEOF {
+		return nil, fmt.Errorf("unexpected %q after the expression %q", p.cur.val, strings.TrimSpace(sql))
 	}
 	return expr, nil
 }

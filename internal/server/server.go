@@ -686,6 +686,9 @@ func executeDMLInsert(ctx context.Context, cat *catalog.Catalog, info *plansql.I
 }
 
 func executeDMLDelete(ctx context.Context, cat *catalog.Catalog, info *plansql.DeleteInfo) (*dmlResult, error) {
+	if err := wadjet.CheckDMLQualifier(info.DMLTarget); err != nil {
+		return nil, err
+	}
 	tableMeta, err := cat.GetTable(ctx, info.Table)
 	if err != nil {
 		return nil, fmt.Errorf("table %q: %w", info.Table, err)
@@ -697,7 +700,7 @@ func executeDMLDelete(ctx context.Context, cat *catalog.Catalog, info *plansql.D
 	}
 
 	schema := tableMeta.Schema.Columns
-	predicate, err := wadjet.BuildDMLPredicate(info.WhereSQL, info.Table, schema)
+	predicate, err := wadjet.BuildDMLPredicate(info.DMLTarget, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -739,6 +742,9 @@ func executeDMLDelete(ctx context.Context, cat *catalog.Catalog, info *plansql.D
 }
 
 func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.UpdateInfo) (*dmlResult, error) {
+	if err := wadjet.CheckDMLQualifier(info.DMLTarget); err != nil {
+		return nil, err
+	}
 	tableMeta, err := cat.GetTable(ctx, info.Table)
 	if err != nil {
 		return nil, fmt.Errorf("table %q: %w", info.Table, err)
@@ -750,7 +756,7 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 	}
 
 	schema := tableMeta.Schema.Columns
-	predicate, err := wadjet.BuildDMLPredicate(info.WhereSQL, info.Table, schema)
+	predicate, err := wadjet.BuildDMLPredicate(info.DMLTarget, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -759,7 +765,7 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 	// declaration, BEFORE the loop below touches a file: an unknown target is
 	// 42703 and a value the column cannot hold is refused here rather than
 	// after a delete marker is committed (#647, #678).
-	assigns, err := wadjet.ResolveDMLSetClauses(info.SetClauses, info.Table, schema)
+	assigns, err := wadjet.ResolveDMLSetClauses(info.SetClauses, info.DMLTarget, schema)
 	if err != nil {
 		return nil, err
 	}

@@ -5,21 +5,106 @@ import (
 	"strings"
 )
 
-// parseUpdate parses: UPDATE table SET col1 = val1, col2 = val2 [WHERE condition]
+// parseDMLRelation reads the relation a DELETE or an UPDATE targets:
+// `[qualifier.]table [[AS] alias]`, the same table reference the SELECT
+// parser reads (select_parser.go, parseTableRefTail).
+//
+// Neither the qualifier nor the alias used to be read at all, and the alias
+// was the one that lost data. The token after the table name ENDED the
+// statement, so `DELETE FROM pr AS a WHERE a.id = 1` left WhereSQL empty and
+// the executor — for which empty means "every row" — deleted the whole table
+// and reported DELETE 3, where PostgreSQL reports DELETE 1 (#686). The
+// UPDATE spelling was at least loud ("expected SET after UPDATE pr").
+//
+// Whatever follows the relation is the CALLER's to check, and both callers
+// refuse a token they do not expect rather than stopping quietly: a
+// statement whose tail this parser cannot read is a statement whose meaning
+// it does not know, and running it unconditionally is the worst available
+// answer.
+func parseDMLRelation(l *lexer, after string) (DMLTarget, error) {
+	tableTok := l.nextToken()
+	if tableTok.typ != TokenIdent {
+		return DMLTarget{}, fmt.Errorf("expected table name after %s, got %q", after, tableTok.val)
+	}
+	t := DMLTarget{Table: tableTok.val}
+
+	// A qualified name: schema.table, or catalog.schema.table. PostgreSQL
+	// clients write them constantly (`DELETE FROM public.orders`), and
+	// reading only the first identifier made that a DELETE against a table
+	// named "public" — which failed with "table public not found", loud but
+	// about the wrong name. The qualifier is kept rather than dropped so the
+	// executor can reject one that names a schema this server does not have.
+	for l.peekToken().typ == TokenDot {
+		l.nextToken() // consume .
+		partTok := l.nextToken()
+		if partTok.typ != TokenIdent {
+			return DMLTarget{}, fmt.Errorf("expected name after %q. in %s, got %q", t.Table, after, partTok.val)
+		}
+		if t.Qualifier == "" {
+			t.Qualifier = t.Table
+		} else {
+			t.Qualifier += "." + t.Table
+		}
+		t.Table = partTok.val
+	}
+
+	// Optional alias, with or without AS. A keyword after the relation is
+	// never the alias — SET ends an UPDATE's relation, WHERE ends either —
+	// which is what keeps `UPDATE t SET ...` and `DELETE FROM t WHERE ...`
+	// reading exactly as they did.
+	if l.peekToken().typ == TokenKWAs {
+		l.nextToken() // consume AS
+		aliasTok := l.nextToken()
+		if aliasTok.typ != TokenIdent {
+			return DMLTarget{}, fmt.Errorf("expected alias after AS in %s, got %q", after, aliasTok.val)
+		}
+		t.Alias = aliasTok.val
+	} else if peek := l.peekToken(); peek.typ == TokenIdent {
+		l.nextToken()
+		t.Alias = peek.val
+	}
+	return t, nil
+}
+
+// parseDMLWhere reads the optional trailing `WHERE <condition>` of a DELETE
+// or an UPDATE and refuses anything else that is left over.
+//
+// The two refusals are the point. An EMPTY condition (`DELETE FROM t WHERE`)
+// used to leave WhereSQL empty, which the executor reads as "every row" —
+// PostgreSQL answers 42601. And a token that is neither WHERE nor the end of
+// the statement (`DELETE FROM t x y`, `DELETE FROM t RETURNING *`) used to be
+// dropped on the floor together with the rest of the statement, so a DELETE
+// the parser only half understood still ran, unconditionally.
+func parseDMLWhere(l *lexer, t *DMLTarget, stmt string) error {
+	switch next := l.peekToken(); next.typ {
+	case TokenKWWhere:
+		l.nextToken() // consume WHERE
+		t.WhereSQL = strings.TrimSpace(l.rest())
+		if t.WhereSQL == "" {
+			return fmt.Errorf("%s: WHERE requires a condition", stmt)
+		}
+	case TokenEOF, TokenSemicolon:
+		// No WHERE: the statement is unconditional, and says so.
+	default:
+		return fmt.Errorf("%s: unexpected %q; expected WHERE or the end of the statement", stmt, next.val)
+	}
+	return nil
+}
+
+// parseUpdate parses: UPDATE table [[AS] alias] SET col1 = val1, col2 = val2 [WHERE condition]
 func parseUpdate(sql string, l *lexer) (*ParsedQuery, error) {
 	l.nextToken() // consume UPDATE
 
-	// Table name
-	tableTok := l.nextToken()
-	if tableTok.typ != TokenIdent {
-		return nil, fmt.Errorf("expected table name after UPDATE, got %q", tableTok.val)
+	target, err := parseDMLRelation(l, "UPDATE")
+	if err != nil {
+		return nil, err
 	}
-	tableName := tableTok.val
+	target.StmtSQL = sql
 
 	// SET keyword
 	setTok := l.nextToken()
 	if setTok.typ != TokenKWSet {
-		return nil, fmt.Errorf("expected SET after UPDATE %s, got %q", tableName, setTok.val)
+		return nil, fmt.Errorf("expected SET after UPDATE %s, got %q", target.Table, setTok.val)
 	}
 
 	// Parse SET clauses: col = expr [, col = expr ...]
@@ -35,8 +120,8 @@ func parseUpdate(sql string, l *lexer) (*ParsedQuery, error) {
 			return nil, fmt.Errorf("expected = after column %s, got %q", colTok.val, eqTok.val)
 		}
 
-		// Collect value expression tokens until comma, WHERE, or EOF
-		valParts := collectUntil(l, TokenComma, TokenKWWhere, TokenEOF)
+		// Collect value expression tokens until comma, WHERE, semicolon or EOF
+		valParts := collectUntil(l, TokenComma, TokenKWWhere, TokenSemicolon, TokenEOF)
 
 		clauses = append(clauses, SetClause{
 			Column: colTok.val,
@@ -56,27 +141,22 @@ func parseUpdate(sql string, l *lexer) (*ParsedQuery, error) {
 		return nil, fmt.Errorf("UPDATE requires at least one SET clause")
 	}
 
-	// Optional WHERE
-	var whereSQL string
-	next := l.peekToken()
-	if next.typ == TokenKWWhere {
-		l.nextToken() // consume WHERE
-		whereSQL = strings.TrimSpace(l.rest())
+	if err := parseDMLWhere(l, &target, "UPDATE "+target.Table); err != nil {
+		return nil, err
 	}
 
 	return &ParsedQuery{
 		Type:      QueryUpdate,
-		TableName: tableName,
+		TableName: target.Table,
 		SQL:       sql,
 		Update: &UpdateInfo{
-			Table:      tableName,
+			DMLTarget:  target,
 			SetClauses: clauses,
-			WhereSQL:   whereSQL,
 		},
 	}, nil
 }
 
-// parseDelete parses: DELETE FROM table [WHERE condition]
+// parseDelete parses: DELETE FROM table [[AS] alias] [WHERE condition]
 func parseDelete(sql string, l *lexer) (*ParsedQuery, error) {
 	l.nextToken() // consume DELETE
 
@@ -86,30 +166,55 @@ func parseDelete(sql string, l *lexer) (*ParsedQuery, error) {
 		return nil, fmt.Errorf("expected FROM after DELETE, got %q", fromTok.val)
 	}
 
-	// Table name
-	tableTok := l.nextToken()
-	if tableTok.typ != TokenIdent {
-		return nil, fmt.Errorf("expected table name after DELETE FROM, got %q", tableTok.val)
+	target, err := parseDMLRelation(l, "DELETE FROM")
+	if err != nil {
+		return nil, err
 	}
-	tableName := tableTok.val
+	target.StmtSQL = sql
 
-	// Optional WHERE
-	var whereSQL string
-	next := l.peekToken()
-	if next.typ == TokenKWWhere {
-		l.nextToken() // consume WHERE
-		whereSQL = strings.TrimSpace(l.rest())
+	if err := parseDMLWhere(l, &target, "DELETE FROM "+target.Table); err != nil {
+		return nil, err
 	}
 
 	return &ParsedQuery{
 		Type:      QueryDelete,
-		TableName: tableName,
+		TableName: target.Table,
 		SQL:       sql,
-		Delete: &DeleteInfo{
-			Table:    tableName,
-			WhereSQL: whereSQL,
-		},
+		Delete:    &DeleteInfo{DMLTarget: target},
 	}, nil
+}
+
+// HasTopLevelWhereToken reports whether sql spells a WHERE keyword outside
+// any parentheses.
+//
+// It exists for one caller: the backstop in wadjet.BuildDMLPredicate, which
+// has to tell "this DELETE is unconditional because it was written that way"
+// from "this DELETE is unconditional because the parser dropped its WHERE".
+// The two are indistinguishable in DMLTarget.WhereSQL, and the second one
+// empties tables (#686).
+//
+// The lexer decides, not strings.Contains: a WHERE inside a string literal
+// ('WHERE') or a quoted identifier ("where") is not a clause, and a WHERE
+// belonging to a SUBQUERY (`SET n = (SELECT ... WHERE ...)`) is not this
+// statement's clause either — hence the depth counter.
+func HasTopLevelWhereToken(sql string) bool {
+	l := newLexer(sql)
+	depth := 0
+	for {
+		tok := l.nextToken()
+		switch tok.typ {
+		case TokenEOF, TokenError:
+			return false
+		case TokenLParen:
+			depth++
+		case TokenRParen:
+			depth--
+		case TokenKWWhere:
+			if depth == 0 {
+				return true
+			}
+		}
+	}
 }
 
 // parseInsert parses: INSERT INTO table [(col1, col2)] VALUES (v1, v2), (v3, v4)

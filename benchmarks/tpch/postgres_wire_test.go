@@ -1479,6 +1479,31 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 			sql: `UPDATE mk_outer SET n = 1 WHERE nosuchcol = 1`},
 		{name: "DeleteUnknownWhereColumn",
 			sql: `DELETE FROM mk_outer WHERE nosuchcol = 1`},
+		// An ALIASED DML target. The alias token used to END the statement, so
+		// `DELETE FROM t AS a WHERE ...` reached the executor with an EMPTY
+		// WHERE — which means "every row" — and reported DELETE <all> as a
+		// success (#686). Only the refusals can live in this corpus, since it
+		// has no per-entry setup and a successful DELETE would mutate the
+		// fixture for every entry after it; the counts and the row sets are
+		// gated by wadjet.TestDMLTableAliasMatchesPostgres and
+		// pgwire.TestAliasedDMLCommandTagOnTheWire.
+		//
+		// The first four are the alias-HIDES-the-table rule and the name
+		// resolution that rides on it; the last two are statement tails this
+		// parser cannot read, which used to be dropped on the floor together
+		// with the WHERE that followed them.
+		{name: "DeleteAliasedTableQualifiedWhere",
+			sql: `DELETE FROM mk_outer AS a WHERE mk_outer.id = 1`},
+		{name: "UpdateAliasedTableQualifiedWhere",
+			sql: `UPDATE mk_outer AS a SET n = 1 WHERE mk_outer.id = 1`},
+		{name: "DeleteAliasedUnknownQualifier",
+			sql: `DELETE FROM mk_outer AS a WHERE b.id = 1`},
+		{name: "DeleteAliasedUnknownColumn",
+			sql: `DELETE FROM mk_outer AS a WHERE a.nosuchcol = 1`},
+		{name: "DeleteEmptyWhere",
+			sql: `DELETE FROM mk_outer AS a WHERE`},
+		{name: "DeleteUnreadableStatementTail",
+			sql: `DELETE FROM mk_outer x y`},
 		// A short leading field PostgreSQL reads as a MONTH under MDY: '31/1/2'
 		// and '13/1/2' are month 31 and month 13, which PostgreSQL rejects
 		// with 22008. wadjet refuses the SHAPE (a non-4-digit leading field is

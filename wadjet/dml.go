@@ -119,6 +119,9 @@ func (db *DB) executeInsert(ctx context.Context, info *plansql.InsertInfo) (*Exe
 
 // executeDelete handles DELETE FROM table [WHERE condition]
 func (db *DB) executeDelete(ctx context.Context, info *plansql.DeleteInfo) (*ExecResult, error) {
+	if err := CheckDMLQualifier(info.DMLTarget); err != nil {
+		return nil, err
+	}
 	tableMeta, err := db.catalog.GetTable(ctx, info.Table)
 	if err != nil {
 		return nil, fmt.Errorf("table %q: %w", info.Table, err)
@@ -130,7 +133,7 @@ func (db *DB) executeDelete(ctx context.Context, info *plansql.DeleteInfo) (*Exe
 		return nil, fmt.Errorf("reading manifest for %q: %w", info.Table, err)
 	}
 
-	predicate, err := BuildDMLPredicate(info.WhereSQL, info.Table, schema)
+	predicate, err := BuildDMLPredicate(info.DMLTarget, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -173,6 +176,9 @@ func (db *DB) executeDelete(ctx context.Context, info *plansql.DeleteInfo) (*Exe
 
 // executeUpdate handles UPDATE table SET col=val [WHERE condition]
 func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*ExecResult, error) {
+	if err := CheckDMLQualifier(info.DMLTarget); err != nil {
+		return nil, err
+	}
 	tableMeta, err := db.catalog.GetTable(ctx, info.Table)
 	if err != nil {
 		return nil, fmt.Errorf("table %q: %w", info.Table, err)
@@ -184,7 +190,7 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 		return nil, fmt.Errorf("reading manifest for %q: %w", info.Table, err)
 	}
 
-	predicate, err := BuildDMLPredicate(info.WhereSQL, info.Table, schema)
+	predicate, err := BuildDMLPredicate(info.DMLTarget, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +199,7 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 	// declaration, BEFORE the loop below touches a file: an unknown target is
 	// 42703 and a literal a column cannot hold is refused here rather than
 	// after a delete marker is committed (#647, #678).
-	assigns, err := ResolveDMLSetClauses(info.SetClauses, info.Table, schema)
+	assigns, err := ResolveDMLSetClauses(info.SetClauses, info.DMLTarget, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -1321,15 +1327,38 @@ func (db *DB) readParquetFile(ctx context.Context, filePath string, schema []par
 // every row, which is what a DML statement with no WHERE means.
 type DMLPredicate func(*batch.RecordBatch, int) bool
 
+// CheckDMLQualifier accepts the schema/catalog qualifier of a DML relation
+// when it names this server's own schema, and refuses any other.
+//
+// `DELETE FROM public.orders` is what a PostgreSQL client writes by default,
+// and the DML parser used to read only the first identifier — so the
+// statement addressed a table named "public". This is the SELECT path's rule
+// (logical/builder.go, buildScan) applied to the DML doors; PostgreSQL 17
+// answers an unknown qualifier with 42P01.
+func CheckDMLQualifier(target plansql.DMLTarget) error {
+	switch q := strings.ToLower(target.Qualifier); q {
+	case "", expr.SessionSchema, expr.SessionCatalog, expr.SessionCatalog + "." + expr.SessionSchema:
+		return nil
+	default:
+		return sqlerr.New("42P01", "relation %q does not exist: this server has one schema, %q, in database %q",
+			target.Qualifier+"."+target.Table, expr.SessionSchema, expr.SessionCatalog)
+	}
+}
+
 // checkDMLColumns resolves every column an expression names against a table's
 // declared schema, raising PostgreSQL's 42703 for one that does not exist.
 //
-// A qualifier is accepted only when it names the table itself; anything else
-// (`other.col`) is a reference to a relation the statement does not have,
-// which PostgreSQL reports as 42P01. A ROW FIELD PATH (`rw.f`) is a
+// A qualifier is accepted only when it names the relation itself; anything
+// else (`other.col`) is a reference to a relation the statement does not
+// have, which PostgreSQL reports as 42P01. A ROW FIELD PATH (`rw.f`) is a
 // qualified-looking name that is NOT a table reference (ADR-0022), so a
 // qualifier matching a ROW column of this table resolves as one.
-func checkDMLColumns(node plansql.Node, table string, schema []parquet.Column) error {
+//
+// An ALIAS HIDES THE TABLE NAME, which is PostgreSQL's rule and not a detail:
+// once `DELETE FROM pr AS a` is written, `pr.id` names nothing and PG answers
+// 42P01 with the hint that `a` was meant. Accepting both spellings would let
+// the same statement mean two things depending on which one resolved (#686).
+func checkDMLColumns(node plansql.Node, target plansql.DMLTarget, schema []parquet.Column) error {
 	refs, err := plansql.ColumnRefs(node)
 	if err != nil {
 		return sqlerr.Wrap("0A000", err)
@@ -1338,12 +1367,23 @@ func checkDMLColumns(node plansql.Node, table string, schema []parquet.Column) e
 	for _, c := range schema {
 		byName[strings.ToLower(c.Name)] = c
 	}
+	// The one name a qualifier may spell: the alias when there is one, the
+	// table when there is not.
+	relation := target.Table
+	if target.Alias != "" {
+		relation = target.Alias
+	}
 	for _, ref := range refs {
-		if ref.Table != "" && !strings.EqualFold(ref.Table, table) {
+		if ref.Table != "" && !strings.EqualFold(ref.Table, relation) {
 			// A ROW field path, not a relation: `rw.f` where rw is a ROW
 			// column of this table.
 			if parent, ok := byName[strings.ToLower(ref.Table)]; ok && parent.Type == parquet.TypeRow {
 				continue
+			}
+			if target.Alias != "" && strings.EqualFold(ref.Table, target.Table) {
+				return sqlerr.New("42P01",
+					"invalid reference to FROM-clause entry for table %q; perhaps you meant to reference the alias %q",
+					ref.Table, target.Alias)
 			}
 			return sqlerr.New("42P01", "missing FROM-clause entry for table %q", ref.Table)
 		}
@@ -1375,15 +1415,36 @@ func checkDMLColumns(node plansql.Node, table string, schema []parquet.Column) e
 // embedded ones and had a third and fourth copy of this compile step. A
 // predicate is only half of the contract, though; MatchDMLRows is the other
 // half and is the one that must be used to RUN it.
-func BuildDMLPredicate(whereSQL, table string, schema []parquet.Column) (DMLPredicate, error) {
-	if strings.TrimSpace(whereSQL) == "" {
+//
+// THE EMPTY-PREDICATE BACKSTOP. A nil predicate is the widest answer this
+// function can give — every row of the table — so "the statement had no
+// WHERE" and "the parser dropped the statement's WHERE" must not look the
+// same here. They did, and the second one emptied tables: a DELETE with an
+// aliased table returned an empty WhereSQL and deleted everything (#686). The
+// check below is not about that spelling, which the parser now reads; it
+// makes the CLASS unreachable, so the next clause any parser path fails to
+// carry fails the STATEMENT instead of widening it (ADR-0019, correctness-fix
+// protocol item 8: loud beats plausible).
+func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column) (DMLPredicate, error) {
+	whereSQL := strings.TrimSpace(target.WhereSQL)
+	if whereSQL == "" {
+		if plansql.HasTopLevelWhereToken(target.StmtSQL) {
+			return nil, sqlerr.New("XX000",
+				"refusing to run %q unconditionally: it writes a WHERE clause that this server parsed to nothing",
+				target.StmtSQL)
+		}
 		return nil, nil
 	}
-	node, err := plansql.ParseExpression(whereSQL)
+	// COMPLETE, not "as much as the grammar could use". A WHERE that parses
+	// to a PREFIX is the #686 class by another route: the dropped tail is a
+	// conjunct that would have NARROWED the statement, so running the prefix
+	// deletes rows the written predicate excludes. `id > 0 AND name @@ 'zzz'`
+	// emptied the table (#686 review). PostgreSQL answers 42601.
+	node, err := plansql.ParseExpressionComplete(whereSQL)
 	if err != nil {
-		return nil, fmt.Errorf("parsing expression %q: %w", whereSQL, err)
+		return nil, sqlerr.Wrap("42601", fmt.Errorf("parsing WHERE %q: %w", whereSQL, err))
 	}
-	if err := checkDMLColumns(node, table, schema); err != nil {
+	if err := checkDMLColumns(node, target, schema); err != nil {
 		return nil, err
 	}
 
@@ -1429,7 +1490,11 @@ type DMLAssignment struct {
 // running on the values that have them; anything else is compiled and
 // evaluated per row against the file's own batch, which carries the table's
 // declared types.
-func ResolveDMLSetClauses(clauses []plansql.SetClause, table string, schema []parquet.Column) ([]DMLAssignment, error) {
+//
+// A SET VALUE resolves against the same relation name the WHERE does, so
+// `UPDATE pr AS a SET n = a.n + 1` reads a.n and `SET n = pr.n` under that
+// alias is 42P01 — PostgreSQL's answer for both (#686).
+func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget, schema []parquet.Column) ([]DMLAssignment, error) {
 	byName := make(map[string]parquet.Column, len(schema))
 	for _, c := range schema {
 		byName[strings.ToLower(c.Name)] = c
@@ -1437,19 +1502,25 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, table string, schema []pa
 	out := make([]DMLAssignment, 0, len(clauses))
 	for _, sc := range clauses {
 		// A QUALIFIED target (`SET t.n = 1`) never arrives here: the UPDATE
-		// parser requires `=` after the column name and refuses the dot,
-		// which is the same answer PostgreSQL gives (it reads the qualifier
-		// as a column of the relation and raises 42703 for it). MERGE spells
-		// its own qualified targets and strips them in applySetClauses.
+		// parser requires `=` after the column name and refuses the dot.
+		// PostgreSQL refuses it too, reading the qualifier as a column of the
+		// relation and raising 42703 where this raises 42601; both refuse,
+		// and the statement writes nothing either way. MERGE spells its own
+		// qualified targets and strips them in applySetClauses.
 		name := strings.ToLower(strings.TrimSpace(sc.Column))
 		col, ok := byName[name]
 		if !ok {
-			return nil, sqlerr.New("42703", "column %q of relation %q does not exist", name, table)
+			// The RELATION is named, not the alias: PostgreSQL reports
+			// `column "nosuch" of relation "pr" does not exist` for
+			// `UPDATE pr AS a SET nosuch = 1` (verified on 17.11).
+			return nil, sqlerr.New("42703", "column %q of relation %q does not exist", name, target.Table)
 		}
 
-		node, err := plansql.ParseExpression(sc.Value)
+		// COMPLETE, for the reason BuildDMLPredicate gives: a SET value that
+		// parses to a prefix stored the prefix's value and reported success.
+		node, err := plansql.ParseExpressionComplete(sc.Value)
 		if err != nil {
-			return nil, fmt.Errorf("SET %s: parsing %q: %w", name, sc.Value, err)
+			return nil, sqlerr.Wrap("42601", fmt.Errorf("SET %s: parsing %q: %w", name, sc.Value, err))
 		}
 		if text, isLit := dmlLiteralText(node); isLit {
 			v, err := assignLiteralToColumn(text, col)
@@ -1459,7 +1530,7 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, table string, schema []pa
 			out = append(out, DMLAssignment{Column: name, col: col, constant: v})
 			continue
 		}
-		if err := checkDMLColumns(node, table, schema); err != nil {
+		if err := checkDMLColumns(node, target, schema); err != nil {
 			return nil, fmt.Errorf("SET %s: %w", name, err)
 		}
 		compiled, err := expr.Compile(node)
