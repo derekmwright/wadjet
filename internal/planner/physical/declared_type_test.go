@@ -299,18 +299,27 @@ func TestNodeDeclaredTypeFromColumnTypes(t *testing.T) {
 }
 
 // inferProjectionTypeCols is what the planner actually calls, and it withholds
-// the catalog from a projection that is a bare column copy: exec.Project types
+// the catalog from a projection that is a BARE column copy: exec.Project types
 // that output from the input column, which sees renames and derived inputs the
-// catalog cannot. Everything computed gets the catalog.
+// catalog cannot. Everything else — computed expressions, ROW field paths, and
+// a parenthesized reference, whose source name resolves to nothing — gets the
+// catalog.
 func TestInferProjectionTypeColsWithholdsTheCatalogFromACopy(t *testing.T) {
 	tests := []struct {
 		sql  string
 		want parquet.TypeID
 	}{
-		// Bare copies: the caller's fallback, as before this change.
+		// A BARE copy: the caller's fallback, as before this change.
 		{"n_nationkey", parquet.TypeString},
-		{"(n_nationkey)", parquet.TypeString},
 		{"n_name", parquet.TypeString},
+		// A PARENTHESIZED copy is not withheld from, and that is the
+		// difference this entry records. exec.Project resolves a copy's
+		// source by NAME, and the name a parenthesized reference carries is
+		// the parenthesized TEXT — which matches no column, so nothing
+		// downstream corrects the fallback and `SELECT (n_nationkey)` went
+		// out declared STRING (OID 25) where PostgreSQL declares int8. Here
+		// the declaration is the only authority there is.
+		{"(n_nationkey)", parquet.TypeInt64},
 		// Computed: the catalog decides.
 		{"COALESCE(n_name, n_comment)", parquet.TypeString},
 		{"NULLIF(n_nationkey, 1)", parquet.TypeInt64},

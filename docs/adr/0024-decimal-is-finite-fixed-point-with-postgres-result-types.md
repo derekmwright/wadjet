@@ -108,15 +108,38 @@ outside the column's range is a bound and orders above or below every stored
 value (#462). The value-producing callers of `DecimalTextAt` are the ones
 that must honour `Sat`.
 
-### 5. On the wire, a computed DECIMAL is unconstrained (typmod −1); a stored column keeps its declared (p,s)
+### 5. On the wire, a DECIMAL carries the typmod its inputs AGREE on — `select_common_typmod`
 
-PostgreSQL declares typmod −1 for every function call, operator, window
-function and cross-typmod set operation over numeric, and keeps the typmod
-only for a bare column reference (or a set operation whose arms all agree).
+PostgreSQL does not gate on "computed". It runs `select_common_typmod` over
+the inputs a result is resolved from: the typmod survives when every one of
+them carries the SAME one, and the result is unconstrained otherwise.
+
+A BARE COLUMN REFERENCE carries its column's typmod. An aggregate call, a
+window function, an operator, a CAST and every other function call carry
+−1 — so one of those anywhere in the fold makes the whole result −1. The
+CHOICE constructs fold their branches over exactly the arguments their TYPE
+resolution folds, which is why `NULLIF(numeric(9,2), numeric(18,4))` keeps
+`numeric(9,2)` (it mirrors argument 0 alone) while `GREATEST` over the same
+pair drops to plain `numeric`. A NULL branch — explicit, or a CASE's missing
+ELSE — is coerced into the common type carrying typmod −1, so it DROPS the
+modifier: this is where the typmod fold parts company with the TYPE fold,
+which skips a NULL outright (`COALESCE(a, NULL)` is `numeric(9,2)` as a type
+and plain `numeric` on the wire). Verified live against 17.11's `\gdesc`:
+
+    GREATEST(a,a), GREATEST(a), COALESCE(a,a),
+    CASE … THEN a ELSE a, NULLIF(a,b)      -> numeric(9,2)
+    NULLIF(b,a), LEAST(b,b)                -> numeric(18,4)
+    GREATEST(a,b), MIN(a), MIN(a) OVER ()  -> numeric
+    COALESCE(a,NULL), CASE … THEN a END    -> numeric
+    (SELECT MIN(a) …) UNION ALL (SELECT a …) -> numeric
+
 Wadjet's internal `(p,s)` is an engine fact that sizes vectors and parquet
 leaves; it is not the client's contract. `declaredWireUnconstrainedDecimal`
-gates on `proj.IsAgg` alone today (#587, #542); it gates on "not a bare
-column reference" after this.
+gated on `proj.IsAgg` alone (#587, #542); it runs the fold above after this.
+"Not a bare column reference" — the first correction — is wrong in BOTH
+directions: it drops the typmod PostgreSQL keeps for a choice over one
+column, and keeps the one PostgreSQL drops for a set operation over a
+computed arm.
 
 ### 6. NaN is a comparison literal, not a stored value
 
@@ -152,7 +175,8 @@ carrier (item 1's reopen clause). The shape — `DECIMAL(38,0)` beside
   decimal performance baseline second; the FLOAT64 schema stays the
   published-number benchmark until a release decides otherwise.
 - The pg-oracle gains a corpus entry per rule in item 3 (exact comparison
-  to `min(scale)`), the type-matrix gains a computed-DECIMAL column class,
+  to `min(scale)`) and per row of item 5's table, the type-matrix gains a
+  computed-DECIMAL column class,
   and every `knownBug`/`pins` entry naming #529/#542/#587/#555 must fail —
   deleting them is the proof.
 - Deliberate divergences from PostgreSQL, all recorded in ADR-0012 item 12's

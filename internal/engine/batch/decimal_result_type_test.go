@@ -81,3 +81,50 @@ func TestDecimalTypeOf(t *testing.T) {
 		t.Error("STRING must not contribute to a DECIMAL result type")
 	}
 }
+
+// TestCanonicalDecimalText pins the scale-independent text key: two
+// renderings of one number produce one key, and two different numbers never
+// do. It is AppendDecimalKey's rule where the carrier is the text itself,
+// which is what a row-at-a-time membership set holds (ADR-0012 item 8).
+func TestCanonicalDecimalText(t *testing.T) {
+	same := [][]string{
+		{"12.75", "12.7500", "0012.75", "+12.75", "1.275e1"},
+		{"0", "0.00", "-0", "0e5"},
+		{"-0.01", "-0.0100"},
+		{"1000", "1.000e3"},
+	}
+	for _, group := range same {
+		var key string
+		for i, spelling := range group {
+			got, ok := CanonicalDecimalText(spelling)
+			if !ok {
+				t.Fatalf("CanonicalDecimalText(%q) declined", spelling)
+			}
+			if i == 0 {
+				key = got
+				continue
+			}
+			if got != key {
+				t.Errorf("%q keys as %q but %q keys as %q — one number, two keys",
+					group[0], key, spelling, got)
+			}
+		}
+	}
+	distinct := []string{"12.75", "12.7501", "12.7499", "-12.75", "1275", "0.1275"}
+	seen := map[string]string{}
+	for _, spelling := range distinct {
+		got, ok := CanonicalDecimalText(spelling)
+		if !ok {
+			t.Fatalf("CanonicalDecimalText(%q) declined", spelling)
+		}
+		if prev, dup := seen[got]; dup {
+			t.Errorf("%q and %q are different numbers with one key %q", prev, spelling, got)
+		}
+		seen[got] = spelling
+	}
+	for _, notANumber := range []string{"abc", "", "NaN", "12.7.5"} {
+		if _, ok := CanonicalDecimalText(notANumber); ok {
+			t.Errorf("CanonicalDecimalText(%q) answered; it names no number", notANumber)
+		}
+	}
+}

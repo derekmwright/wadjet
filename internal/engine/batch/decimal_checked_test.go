@@ -145,10 +145,20 @@ func TestSetValueCheckedFloatBoxIsExactOrError(t *testing.T) {
 	if got, err := store(t, 2, 12.75); err != nil || got != "12.75" {
 		t.Errorf("float64(12.75) at scale 2 = %q, %v; want 12.75", got, err)
 	}
-	// Digits below the column's scale truncate, as every text conversion into
-	// a narrower scale does — that is the declared type, not a float defect.
-	if got, err := store(t, 2, 1.239); err != nil || got != "1.23" {
-		t.Errorf("float64(1.239) at scale 2 = %q, %v; want 1.23", got, err)
+	// Digits below the column's scale are REPORTED, not truncated. The
+	// checked writer's promise is exact-or-error, and 1.239 stored at scale
+	// 2 keeps 1.23 and drops the 9 — the same class of silent loss as
+	// saturating past the carrier, one digit position over. It is a
+	// declaration defect rather than a data condition: every value-producing
+	// site declares the scale it stores at, and ADR-0024 item 2's common
+	// type is the MAXIMUM of the branch scales, so a value with finer digits
+	// than the declared scale means the declaration was wrong. The
+	// COMPARISON path keeps DecimalTextAt's truncate-with-residual reading
+	// untouched, which is what #462 built it for.
+	if _, err := store(t, 2, 1.239); err == nil {
+		t.Error("float64(1.239) at scale 2 drops a digit and must be reported")
+	} else if got := sqlerr.StateOf(err); got != "22003" {
+		t.Errorf("SQLSTATE = %q, want 22003; err = %v", got, err)
 	}
 
 	// Past the carrier: 1e30 at scale 10 needs 10^40, so this is the same

@@ -518,6 +518,43 @@ func DecimalTextAt(text string, scale int) (ScaledDecimal, bool) {
 	return ScaledDecimal{Unscaled: v, Residual: residual}, true
 }
 
+// CanonicalDecimalText is AppendDecimalKey's rule for a value that is already
+// TEXT: the minimal-scale spelling of the number it names, so two renderings
+// of one value produce one key.
+//
+// A DECIMAL boxes as its rendered text at ITS OWN declared scale, so "12.75"
+// from a DECIMAL(9,2) and "12.7500" from a DECIMAL(18,4) are the same number
+// under two keys — which is how `d IN (SELECT ...)` missed every row whose
+// two sides were declared at different scales, the boxed twin of #474.
+// AppendDecimalKey already answers this for a stored Int128 and a scale
+// (ADR-0012 item 8); this is the same normalization where the carrier is the
+// text itself, which is what a row-at-a-time membership set holds.
+//
+// ok=false for text that names no number — the caller must then fall back to
+// the raw text, which is still injective for the values it can key.
+func CanonicalDecimalText(s string) (string, bool) {
+	neg, digits, exp, ok := decimalParts(s)
+	if !ok {
+		return "", false
+	}
+	digits = strings.TrimLeft(digits, "0")
+	// Trailing fraction zeros carry no value: 12.7500 and 12.75 are one
+	// number. Only FRACTION zeros are dropped — a trailing zero with a
+	// non-negative exponent is a factor of ten.
+	for exp < 0 && len(digits) > 0 && digits[len(digits)-1] == '0' {
+		digits, exp = digits[:len(digits)-1], exp+1
+	}
+	if digits == "" {
+		// Zero has one key whatever its scale or sign.
+		return "0", true
+	}
+	sign := ""
+	if neg {
+		sign = "-"
+	}
+	return sign + digits + "e" + strconv.Itoa(exp), true
+}
+
 // CompareDecimalTexts orders two numeric TEXTS as the exact numbers they name,
 // returning -1, 0 or +1, and ok=false when either is not a number.
 //
@@ -722,6 +759,25 @@ func ParseDecimalStringChecked(s string, scale int) (Int128, error) {
 	d, ok := DecimalTextAt(s, scale)
 	if !ok {
 		return Int128{}, sqlerr.New("22P02", "invalid input syntax for type numeric: %q", s)
+	}
+	if d.Residual != 0 {
+		// Fraction digits BELOW the target scale. DecimalTextAt keeps them
+		// as a residual because its first caller is the COMPARISON path,
+		// where a literal finer than the column's scale still has a rational
+		// place in the order (#462) — but a value-producing caller storing
+		// this text would keep the truncated number and drop the rest, which
+		// is the same class of silent loss as saturating past the carrier.
+		//
+		// It is also not a DATA condition. Every value-producing site
+		// declares the scale it is about to store at, and ADR-0024 item 2's
+		// common type is the MAXIMUM of the branch scales, so a residual
+		// here means the DECLARATION was narrower than the value — a planner
+		// defect, reported rather than rounded away.
+		return Int128{}, sqlerr.New("22003",
+			"numeric field overflow: %s does not fit a DECIMAL at scale %d — it carries "+
+				"fraction digits below that scale, and a value store keeps every digit or "+
+				"reports (ADR-0024 item 4)",
+			s, scale)
 	}
 	if d.Sat != 0 {
 		return Int128{}, sqlerr.New("22003",

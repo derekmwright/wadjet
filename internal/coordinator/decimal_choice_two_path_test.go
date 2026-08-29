@@ -127,6 +127,12 @@ func TestDecimalComputedWireTypmodTwoPath(t *testing.T) {
 		want bool
 	}{
 		{"bare column keeps its typmod", "SELECT a FROM " + dbpTable, "a", false},
+		// select_common_typmod KEEPS the modifier when every input agrees —
+		// the direction a "computed means unconstrained" rule gets wrong.
+		{"greatest over one column keeps it",
+			"SELECT GREATEST(a, a) AS v FROM " + dbpTable, "v", false},
+		{"nullif keeps its first argument's",
+			"SELECT NULLIF(a, b) AS v FROM " + dbpTable, "v", false},
 		{"windowed min is unconstrained",
 			"SELECT MIN(a) OVER () AS v FROM " + dbpTable, "v", true},
 		{"windowed min over zero rows is unconstrained",
@@ -137,6 +143,14 @@ func TestDecimalComputedWireTypmodTwoPath(t *testing.T) {
 			"SELECT a AS v FROM " + dbpTable + " UNION ALL SELECT a FROM " + dbpTable, "v", false},
 		{"a set operation whose arms disagree is unconstrained",
 			"SELECT a AS v FROM " + dbpTable + " UNION ALL SELECT b FROM " + dbpTable, "v", true},
+		// An arm carrying NO modifier makes the result unconstrained
+		// however well the widths line up. A COMPUTED arm is the shape the
+		// DAG can run — an AGGREGATE arm is refused there outright (#346),
+		// and wadjet/decimal_declared_result_test.go covers that one on the
+		// single-process path.
+		{"a set operation over a computed arm is unconstrained",
+			"SELECT COALESCE(a, b) AS v FROM " + dbpTable +
+				" UNION ALL SELECT b FROM " + dbpTable, "v", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := coord.ExecuteSQL(ctx, tc.sql)
@@ -217,6 +231,18 @@ func TestDecimalComputedKeyTwoPath(t *testing.T) {
 				"ON COALESCE(x.a, x.b) = COALESCE(y.a, y.b) AND x.id < y.id ORDER BY x.id", ""},
 		{"a computed decimal in a filter",
 			"SELECT COUNT(*) AS n FROM " + dbpTable + " WHERE GREATEST(a, b) = 12.7501", "[map[n:1]]"},
+		// The two-path split the review found: the single-process engine
+		// keys an IN subquery's membership set by the RENDERED text, and
+		// COALESCE's winner renders at the NARROW column's scale while the
+		// set holds the reconciled wide one — "12.75" against "12.7500", one
+		// number under two keys, zero rows. The stage DAG lowers the same
+		// predicate to a semi join keyed through the columnar encoding and
+		// was right all along, so this shape is a disagreement before it is
+		// a wrong answer (#474's row-at-a-time twin, ADR-0012 item 8).
+		{"an IN subquery whose two sides render at different scales",
+			"SELECT id FROM " + dbpTable + " WHERE COALESCE(a, b) IN " +
+				"(SELECT COALESCE(a, b) FROM " + dbpTable + " WHERE id = 2) ORDER BY id",
+			"[map[id:1] map[id:2] map[id:3] map[id:8]]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gotSingle := fmt.Sprintf("%v", dtpRun(t, ctx, single, coord, tc.sql, false))

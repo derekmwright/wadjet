@@ -2794,6 +2794,14 @@ func evalNullIf(b *batch.RecordBatch, args []any, arms *extremumArms) any {
 	if len(args) < 2 {
 		return nil
 	}
+	// The same refusal every sibling site makes: a literal that names no
+	// number beside a DECIMAL column is 22P02 on PostgreSQL and at wadjet's
+	// `=`, GREATEST, LEAST and simple CASE, and NULLIF was the one site that
+	// answered instead — `NULLIF(d, 'abc')` returned every row. It runs
+	// BEFORE the NULL short-circuit for the reason the other sites run it
+	// first: the refusal is a property of the operand PAIR's DECLARATIONS,
+	// not of the row's values (ADR-0012 item 6's neighbourhood).
+	arms.refuse.check(b, 0, 1)
 	if args[0] == nil || args[1] == nil {
 		return args[0]
 	}
@@ -5486,7 +5494,21 @@ type InSubquery struct {
 	intSet   map[int64]struct{}
 	strSet   map[string]struct{}
 	fltSet   map[float64]struct{}
-	vals     []any // fallback for mixed types
+	// decSet is strSet keyed by batch.CanonicalDecimalText instead of by the
+	// raw rendering, and it is consulted only when the PROBE is declared
+	// DECIMAL. A DECIMAL boxes as its text at its own scale, so
+	// `COALESCE(a, b) IN (SELECT COALESCE(a, b) FROM t WHERE …)` compared
+	// "12.75" against the set's "12.7500" and answered zero rows where
+	// PostgreSQL answers four — the row-at-a-time twin of #474, and a
+	// two-path split besides, since the stage DAG lowers the same predicate
+	// to a semi join keyed through the columnar encoding and got it right.
+	// The gate is the DECLARATION, never the box's shape: a genuine STRING
+	// column holding numeric-looking text still compares AS TEXT (#504).
+	decSet map[string]struct{}
+	// probe caches the settled kind of e.Expr, the same way every other
+	// declaration-driven comparison site caches its operands'.
+	probe boxOperand
+	vals  []any // fallback for mixed types
 	// chargedBytes is exactly what was handed to Budget.Reserve, guarded by
 	// resolveMu, so Release returns exactly that many bytes exactly once.
 	chargedBytes int64
@@ -5531,6 +5553,15 @@ func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	}
 	if e.strSet != nil {
 		if sv, ok := lv.(string); ok {
+			// A DECIMAL probe keys by VALUE, not by rendering: see decSet.
+			if e.decSet != nil && e.probe.resolve(b) == boxDecimal {
+				if key, ok := batch.CanonicalDecimalText(sv); ok {
+					if _, found := e.decSet[key]; found {
+						return !e.Not, false
+					}
+					return e.missAnswer()
+				}
+			}
 			if _, found := e.strSet[sv]; found {
 				return !e.Not, false
 			}
@@ -5562,6 +5593,10 @@ func (e *InSubquery) resolveSlow() {
 		return
 	}
 	defer e.resolved.Store(true)
+	// Bound here rather than at construction so every caller gets it: the
+	// write is under resolveMu and published by the Store above, the same
+	// release the value set itself rides.
+	e.probe.expr = e.Expr
 	rows, err := e.Runner(e.SQL)
 	if err != nil {
 		// An empty set: every probe misses, which is what the pre-#398
@@ -5598,12 +5633,16 @@ func (e *InSubquery) resolveSlow() {
 				}
 			} else if _, ok := rawVals[0].(string); ok {
 				e.strSet = make(map[string]struct{}, len(rawVals))
+				e.decSet = make(map[string]struct{}, len(rawVals))
 				for _, v := range rawVals {
 					if sv, ok := v.(string); ok {
 						e.strSet[sv] = struct{}{}
+						if key, ok := batch.CanonicalDecimalText(sv); ok {
+							e.decSet[key] = struct{}{}
+						}
 					} else {
 						e.vals = rawVals
-						e.strSet = nil
+						e.strSet, e.decSet = nil, nil
 						break
 					}
 				}

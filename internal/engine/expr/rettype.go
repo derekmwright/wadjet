@@ -30,10 +30,25 @@ type DeclType struct {
 	Precision int
 	Scale     int
 	DecKnown  bool
+	// Untyped marks SQL's `unknown`: an operand that names no type AND
+	// produces no value of its own — a bare NULL literal, and nothing else.
+	// It rides alongside Undecided because the two are not the same fact and
+	// CommonDeclType has to tell them apart: an operand that decided nothing
+	// but WILL produce a value at runtime (a scalar subquery, element_at over
+	// a container) makes a DECIMAL fold unsafe, because that value arrives at
+	// ITS OWN scale and the fold would declare a different one; a NULL never
+	// arrives at all, so COALESCE(d, NULL) is a DECIMAL expression exactly as
+	// PostgreSQL says it is.
+	Untyped bool
 }
 
 // Decl builds a declaration for a type that needs no parameters.
 func Decl(t batch.TypeID) DeclType { return DeclType{ID: t} }
+
+// DeclUntyped is SQL's `unknown`: a NULL literal, which contributes no type
+// and produces no value. Answered with Undecided confidence, like anything
+// else that names no type.
+func DeclUntyped() DeclType { return DeclType{Untyped: true} }
 
 // DeclDecimal builds a DECIMAL declaration with its (precision, scale).
 func DeclDecimal(prec, scale int) DeclType {
@@ -126,6 +141,30 @@ func RetSameAsArg(fallback batch.TypeID, args ...int) Ret {
 	return Ret{kind: retSameAsArg, typ: fallback, args: args}
 }
 
+// SameAsArgs reports the argument positions a polymorphic declaration mirrors,
+// for a call with nargs arguments, and whether the declaration is polymorphic
+// at all.
+//
+// It exists so PostgreSQL's select_common_typmod runs over exactly the
+// arguments select_common_type ran over: NULLIF mirrors argument 0 alone, so
+// NULLIF(numeric(9,2), numeric(18,4)) keeps numeric(9,2) while
+// GREATEST over the same pair drops to unconstrained. Reading the candidate
+// list off the declaration is what keeps those two answers from drifting
+// apart (ADR-0024 item 5).
+func (r Ret) SameAsArgs(nargs int) ([]int, bool) {
+	if r.kind != retSameAsArg {
+		return nil, false
+	}
+	if len(r.args) > 0 {
+		return r.args, true
+	}
+	all := make([]int, nargs)
+	for i := range all {
+		all[i] = i
+	}
+	return all, true
+}
+
 // RetTypeOf builds a fixed declaration for a type without a named constant
 // above. Kept for callers registering functions over the network-native types.
 func RetTypeOf(t batch.TypeID) Ret { return Ret{kind: retFixed, typ: t} }
@@ -204,21 +243,29 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 			}
 			var decided []DeclType
 			guess, guessed := DeclType{}, false
+			sawUnknown := false
 			for _, i := range candidates {
 				if i < 0 || i >= nargs {
 					continue
 				}
-				switch t, c := argType(i); c {
+				t, c := argType(i)
+				switch c {
 				case Decided:
 					decided = append(decided, t)
 				case Guessed:
 					if !guessed {
 						guess, guessed = t, true
 					}
+				default:
+					// An operand that named no type but still PRODUCES a
+					// value — see CommonDeclType's decline.
+					if !t.Untyped {
+						sawUnknown = true
+					}
 				}
 			}
-			if len(decided) > 0 {
-				return CommonDeclType(decided), Decided
+			if d, ok := CommonDeclType(decided, sawUnknown); ok {
+				return d, Decided
 			}
 			if guessed {
 				return guess, Guessed
@@ -231,9 +278,12 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 
 // CommonDeclType answers a polymorphic declaration from the argument types
 // that DECIDED one. It is the shared rule for every construct that CHOOSES
-// BETWEEN operands rather than computing a new value from them —
-// COALESCE/NULLIF/IFNULL/IF/GREATEST/LEAST here, and CASE's branches in the
-// physical planner, which calls this so the two can never disagree.
+// BETWEEN operands — COALESCE/NULLIF/IFNULL/IF/GREATEST/LEAST here, and
+// CASE's branches in the physical planner, which calls this so the two can
+// never disagree.
+//
+// ok=false means DECLINE: the caller must answer as if nothing had decided,
+// which is what it did before a DECIMAL operand could decide anything.
 //
 // The first decider still wins, which is what it always did — with one
 // exception, and it is the whole reason this function exists rather than a
@@ -244,6 +294,18 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 // they are folded through batch.DecimalCommon — the same rule a set operation
 // reconciles its arms with (ADR-0024 item 2).
 //
+// sawUnknown is the safety clause and it is not optional. A branch that
+// decided nothing still PRODUCES a value at runtime — a scalar subquery, a
+// container element, anything this layer cannot type — and a DECIMAL one
+// arrives as text at ITS OWN scale, not at the fold's. Folding only the
+// branches that spoke declared DECIMAL(9,2) for
+// `COALESCE(a, (SELECT MAX(b) FROM t))`, which then TRUNCATED the subquery's
+// 12.7501 to 12.75 and, at the comparison sites, left the operand
+// unclassifiable so the extremum was picked by BYTE order. A declined fold
+// answers exactly what it answered before ADR-0024 — a loud mismatch or the
+// STRING fallback — which is the only honest answer while the operand has no
+// declaration to fold in.
+//
 // TODO(#555): a DECIMAL beside an INTEGER or a FLOAT resolves to numeric /
 // float8 in PostgreSQL, and this declines both. The float half needs a
 // decimal→float coercion the extremum arms do not do; the integer half needs
@@ -252,28 +314,34 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 // declaring DECIMAL for GREATEST(int_col, dec_col) would read 5 back as 0.05.
 // A silent wrong answer is worse than the loud mismatch that stands today, so
 // the first NON-DECIMAL decider answers those — exactly what happened before
-// a DECIMAL column reference could decide anything at all.
-func CommonDeclType(decided []DeclType) DeclType {
+// a DECIMAL column reference could decide anything at all. That deferral is
+// DATA-DEPENDENT, not a stable refusal: `GREATEST(dec_col, 100)` declares
+// INT64 and answers 100 on every row the integer wins and fails loudly on the
+// first row the decimal wins.
+func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 	if len(decided) == 0 {
-		return DeclType{}
+		return DeclType{}, false
 	}
 	metas := make([]batch.DecimalType, 0, len(decided))
 	for _, d := range decided {
 		if d.ID != batch.TypeDecimal || !d.DecKnown {
 			for _, alt := range decided {
 				if alt.ID != batch.TypeDecimal {
-					return alt
+					return alt, true
 				}
 			}
-			return decided[0]
+			return decided[0], true
 		}
 		metas = append(metas, d.Dec())
 	}
+	if sawUnknown {
+		return DeclType{}, false
+	}
 	m, ok := batch.DecimalCommon(metas)
 	if !ok {
-		return decided[0]
+		return decided[0], true
 	}
-	return DeclDecimal(m.Precision, m.Scale)
+	return DeclDecimal(m.Precision, m.Scale), true
 }
 
 // Numeric reports whether the function always returns a number. It is the

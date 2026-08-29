@@ -115,10 +115,14 @@ func TestDecimalChoiceExpressionsDeclareTheCommonType(t *testing.T) {
 			expr.Decl(parquet.TypeFloat64), expr.Decided},
 		{"a DECIMAL beside a string defers", "COALESCE(a, txt)",
 			expr.Decl(parquet.TypeString), expr.Decided},
-		// An UNCONSTRAINED decimal decides nothing at all, so it neither
-		// widens nor blocks the operand that does (#458).
-		{"an unconstrained DECIMAL beside a real one is ignored", "COALESCE(nops, a)",
-			expr.DeclDecimal(9, 2), expr.Decided},
+		// An UNCONSTRAINED DECIMAL decides nothing and yet PRODUCES a value
+		// — at its own scale, which nobody here knows. Folding it away and
+		// declaring the other branch's (9,2) would truncate that value into
+		// the output vector, so the whole fold DECLINES and the call answers
+		// its own fallback exactly as it did before ADR-0024. Same clause,
+		// same reason, for a scalar subquery or a container element (#458).
+		{"an unconstrained DECIMAL beside a real one declines the fold", "COALESCE(nops, a)",
+			expr.Decl(parquet.TypeFloat64), expr.Guessed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node, err := plansql.ParseExpression(tc.sql)
@@ -220,6 +224,55 @@ func TestWindowSpecOutputTypeResolvesDecimal(t *testing.T) {
 			got := windowSpecOutputType(win, logical.WindowExpr{Func: tc.fn, InputCol: tc.input, OutputCol: "w"})
 			if got != tc.want {
 				t.Errorf("%s(%s) declared %v, want %v", tc.fn, tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDecimalFoldDeclinesOverAnUnknownProducer pins ADR-0024 item 2's safety
+// clause at the layer that makes the decision.
+//
+// expr.CommonDeclType folds only the branches that DECIDED a type. A branch
+// that decided nothing still produces a value, and a DECIMAL one arrives at
+// ITS OWN scale — so folding it away and declaring the other branches' (p,s)
+// truncates it. The fold declines instead, and the call answers exactly what
+// it answered before a DECIMAL could decide anything.
+//
+// A bare NULL literal is SQL's `unknown`: it produces no value at all, so it
+// neither contributes a type nor blocks the fold — which is why
+// COALESCE(d, NULL) is numeric on PostgreSQL and stays numeric here.
+func TestDecimalFoldDeclinesOverAnUnknownProducer(t *testing.T) {
+	decls := decDecls()
+	for _, tc := range []struct {
+		name  string
+		sql   string
+		want  expr.DeclType
+		wantC expr.Confidence
+	}{
+		// `nops` is a DECIMAL whose (p,s) nothing resolved: it decides
+		// nothing and produces a value. So does a container element and a
+		// scalar subquery, which this layer cannot type either.
+		{"an unconstrained DECIMAL blocks the fold", "GREATEST(a, nops)",
+			expr.Decl(parquet.TypeFloat64), expr.Guessed},
+		{"and blocks a CASE the same way", "CASE WHEN i64 > 0 THEN a ELSE nops END",
+			expr.DeclType{}, expr.Undecided},
+		{"a container element blocks it", "COALESCE(a, element_at(a, 1))",
+			expr.Decl(parquet.TypeFloat64), expr.Guessed},
+		// The NULL exception, in both constructs.
+		{"a NULL literal does not", "GREATEST(a, NULL)", expr.DeclDecimal(9, 2), expr.Decided},
+		{"nor in a CASE", "CASE WHEN i64 > 0 THEN a ELSE NULL END",
+			expr.DeclDecimal(9, 2), expr.Decided},
+		{"nor as a missing ELSE", "CASE WHEN i64 > 0 THEN a END",
+			expr.DeclDecimal(9, 2), expr.Decided},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node, err := plansql.ParseExpression(tc.sql)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.sql, err)
+			}
+			got, c := nodeDeclaredType(node, decls)
+			if got != tc.want || c != tc.wantC {
+				t.Errorf("%s\n  declared (%v, %s), want (%v, %s)", tc.sql, got, c, tc.want, tc.wantC)
 			}
 		})
 	}

@@ -162,6 +162,16 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		switch strings.ToLower(v.Name) {
 		case "greatest", "least":
 			return joinOperandKinds(v.Args, b)
+		case "element_at":
+			// element_at lifts a value OUT of a container, so its kind is the
+			// container's ELEMENT kind — exactly the reason a ROW field path
+			// is classified from the field above. The element type is on the
+			// vector (Vector.Child), which is the only place it exists at
+			// this point, so a DECIMAL element compares as a decimal instead
+			// of falling through to compare()'s byte order: without it
+			// `GREATEST(element_at(arr, 1), d)` picked 3.00 over 12.7501,
+			// because "3.00" sorts above "12.7501" as text.
+			return elementOperandKind(v.Args, b)
 		}
 		return boxUnknown, true
 	case *Case:
@@ -177,6 +187,40 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		return joinOperandKinds(arms, b)
 	case *Coalesce:
 		return joinOperandKinds(v.Args, b)
+	}
+	return boxUnknown, true
+}
+
+// elementOperandKind classifies element_at's result from its CONTAINER
+// argument's element vector. Only a bare column argument answers: anything
+// else has no vector to read a child type off, and a wrong kind is worse than
+// no kind (the whole premise of ADR-0012 item 8).
+//
+// unsettled while the column does not resolve, for classifyOperand's reason —
+// a name that resolves in no batch yet says nothing about the next one.
+func elementOperandKind(args []Expr, b *batch.RecordBatch) (boxKind, bool) {
+	if len(args) == 0 {
+		return boxUnknown, true
+	}
+	col, ok := args[0].(*ColRef)
+	if !ok {
+		return boxUnknown, true
+	}
+	col.resolve(b)
+	if col.idx < 0 || col.idx >= len(b.Columns) {
+		return boxUnknown, false
+	}
+	child := b.Columns[col.idx].Child
+	if child == nil {
+		return boxUnknown, true
+	}
+	switch child.Type {
+	case batch.TypeDecimal:
+		return boxDecimal, true
+	case batch.TypeInt32, batch.TypeInt64, batch.TypeFloat32, batch.TypeFloat64:
+		return boxNumber, true
+	case batch.TypeString:
+		return boxText, true
 	}
 	return boxUnknown, true
 }

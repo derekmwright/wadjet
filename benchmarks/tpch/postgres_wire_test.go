@@ -550,6 +550,19 @@ const (
 		"carries #532's narrowing on the single-process path, which is a defect and is pinned " +
 		"separately in the semantics corpus"
 
+	// choiceDecimalDigitsPin is setOpDecimalDigitsPin's twin for a CHOICE
+	// expression, and it is deliberate for the same reason: PostgreSQL's
+	// numeric carries a per-VALUE dscale, so COALESCE renders whichever
+	// branch won at THAT branch's scale, while a wadjet DECIMAL column has
+	// ONE declared scale — ADR-0024 item 2's common type — and renders every
+	// row at it. Same number, same row set, and the type modifier beside it
+	// is compared and agrees. It shows up on COALESCE and not on GREATEST
+	// over the same pair only because GREATEST's winner happens to be the
+	// wider column on every row of the fixture.
+	choiceDecimalDigitsPin = "DELIBERATE (ADR-0012 item 12, ADR-0024 item 2): PostgreSQL renders each " +
+		"numeric at the dscale of the value that produced it; a wadjet DECIMAL column has one declared " +
+		"scale — the common type of the branches — and renders every row at it. Same number, same rows"
+
 	// noExactNumericPin is a DELIBERATE difference, documented rather than
 	// fixed: the engine has one numeric tower and it is float64.
 	noExactNumericPin = "DELIBERATE: Wadjet has no exact numeric type. PostgreSQL promotes SUM(int4) to " +
@@ -769,6 +782,59 @@ func wireCorpus() []wireCase {
 		{name: "IntersectAcrossDecimalScales",
 			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (0, 4, 8)
 				INTERSECT SELECT d_4 FROM dec_probe WHERE d_key IN (0, 4, 8) ORDER BY 1`},
+		// select_common_typmod, both directions (ADR-0024 item 5). A numeric
+		// result KEEPS its inputs' type modifier when every one of them
+		// carries the SAME one and is unconstrained otherwise — which is
+		// NOT "computed means unconstrained": these seven entries all
+		// describe as numeric(9,2) or numeric(18,4) on live PostgreSQL,
+		// while the ones below them describe as plain numeric. NULLIF folds
+		// argument 0 ALONE, the same candidate list its type resolution
+		// folds, which is why the two NULLIF spellings answer differently.
+		{name: "GreatestOverOneDecimalColumn",
+			sql: `SELECT GREATEST(d_2, d_2) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "GreatestOfASingleDecimalArgument",
+			sql: `SELECT GREATEST(d_2) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "CoalesceOverOneDecimalColumn",
+			sql: `SELECT COALESCE(d_2, d_2) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "CaseOverOneDecimalColumn",
+			sql: `SELECT CASE WHEN d_key > 1 THEN d_2 ELSE d_2 END AS v FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "LeastOverOneWideDecimalColumn",
+			sql: `SELECT LEAST(d_4, d_4) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "NullifKeepsItsFirstArgumentsTypmod",
+			sql: `SELECT NULLIF(d_2, d_4) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "NullifTheOtherWayRound",
+			sql: `SELECT NULLIF(d_4, d_2) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "CoalesceWithANullBranch",
+			sql: `SELECT COALESCE(d_2, NULL) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		// The other direction: inputs whose modifiers DIFFER, and inputs
+		// that carry none at all.
+		{name: "GreatestAcrossDecimalScales",
+			sql: `SELECT GREATEST(d_2, d_4) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "CoalesceAcrossDecimalScales",
+			sql: `SELECT COALESCE(d_2, d_4) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
+			pins: map[string]string{
+				wirePropFloatRender: choiceDecimalDigitsPin,
+			}},
+		// A CASE with no ELSE: the implicit NULL branch is untyped, so the
+		// modifier goes the way CoalesceWithANullBranch's does.
+		{name: "CaseWithoutElseOverOneDecimalColumn",
+			sql: `SELECT CASE WHEN d_key > 1 THEN d_2 END AS v FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "GreatestAcrossDecimalScalesZeroRows",
+			sql: `SELECT GREATEST(d_2, d_4) AS v FROM dec_probe WHERE d_key = -1`},
+		// A set operation over an arm that carries NO modifier is
+		// unconstrained however well the arms' widths line up — the shape
+		// "the arms' (p,s) disagree" alone cannot see.
+		{name: "SetOpOverAnAggregateArm",
+			sql: `SELECT MIN(d_2) AS v FROM dec_probe WHERE d_key IN (1, 2, 3)
+				UNION ALL SELECT d_2 FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY 1`},
+		{name: "SetOpOverAComputedArm",
+			sql: `SELECT COALESCE(d_2, d_4) AS v FROM dec_probe WHERE d_key IN (1, 2, 3)
+				UNION ALL SELECT d_4 FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY 1`,
+			pins: map[string]string{
+				wirePropFloatRender: setOpDecimalDigitsPin,
+			}},
 		{name: "ExceptSameDecimalScale",
 			sql: `SELECT d_2 AS v FROM dec_probe WHERE d_key IN (1, 2)
 				EXCEPT SELECT d_2 FROM dec_probe WHERE d_key IN (2, 3) ORDER BY 1`},

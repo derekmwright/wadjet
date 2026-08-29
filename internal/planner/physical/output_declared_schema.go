@@ -157,23 +157,34 @@ func setOpRoot(n *logical.Node) *logical.Node {
 // operation is worse than none, for the reason declaredOutputSchema returns
 // nil on a column it cannot name.
 func setOpArmSchemas(n *logical.Node) [][]parquet.Column {
+	out, _ := setOpArmSchemasAndTypmods(n)
+	return out
+}
+
+// setOpArmSchemasAndTypmods is setOpArmSchemas with each arm's own
+// unconstrained-DECIMAL set alongside, so the reconciliation can tell an arm
+// that carries a real typmod from one that carries none.
+func setOpArmSchemasAndTypmods(n *logical.Node) ([][]parquet.Column, []map[string]bool) {
 	var out [][]parquet.Column
+	var mods []map[string]bool
 	for _, c := range n.Children {
 		if inner := setOpRoot(c); inner != nil {
-			nested := setOpArmSchemas(inner)
+			nested, nestedMods := setOpArmSchemasAndTypmods(inner)
 			if len(nested) == 0 {
-				return nil
+				return nil, nil
 			}
 			out = append(out, nested...)
+			mods = append(mods, nestedMods...)
 			continue
 		}
 		schema := declaredOutputSchema(c)
 		if len(schema) == 0 {
-			return nil
+			return nil, nil
 		}
 		out = append(out, schema)
+		mods = append(mods, declaredWireUnconstrainedDecimal(c))
 	}
-	return out
+	return out, mods
 }
 
 // declaredWireUnconstrainedDecimal names the DECIMAL output columns whose
@@ -193,21 +204,20 @@ func setOpArmSchemas(n *logical.Node) [][]parquet.Column {
 // wire-metadata ONLY, consulted solely by pgTypeMod (fold-in to #457/#458,
 // FIX 2).
 //
-// The gate is "not a BARE COLUMN REFERENCE", which is PostgreSQL's actual
-// rule and not a MIN/MAX/SUM/AVG allowlist. Four shapes fail it:
+// The gate is PostgreSQL's select_common_typmod: a numeric result KEEPS a
+// typmod when every input it is resolved from carries the SAME one, and is
+// unconstrained otherwise — verified live against 17.11's \gdesc, where
+// GREATEST(a, a), COALESCE(a, a), CASE … THEN a ELSE a and NULLIF(a, b) over
+// numeric(9,2) a and numeric(18,4) b all describe as numeric(9,2), NULLIF(b,
+// a) and LEAST(b, b) as numeric(18,4), and GREATEST(a, b) as plain numeric.
 //
-//   - proj.IsAgg — the value came from an aggregate spec.
-//   - a COMPUTED projection — an operator or a function call over DECIMAL
-//     (COALESCE/GREATEST/LEAST/CASE), which PostgreSQL also declares
-//     unconstrained.
-//   - a bare reference to a column some node BELOW computed: a window
-//     function reaches the output projection as a reference to the Window
-//     operator's output column, which is why #587 slipped through a gate
-//     that read proj.IsAgg alone.
-//   - a SET OPERATION whose arms do not all carry the same (p,s). PostgreSQL
-//     keeps the typmod only when every arm agrees; wadjet declared a real
-//     one either way, which is #542. Arms that DO agree keep it, and the
-//     wire corpus pins both directions.
+// It is emphatically NOT "computed ⇒ unconstrained": that reading is wrong in
+// both directions, dropping the typmod PostgreSQL keeps for a choice over one
+// column and keeping the one it drops for a set operation over a computed
+// arm. What carries a typmod is a BARE COLUMN REFERENCE and the choice
+// constructs folded over bare references; an aggregate, a window function,
+// arithmetic, a CAST and every other function call carry -1, and one -1
+// anywhere in the fold makes the result -1 (#587, #542, ADR-0024 item 5).
 func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 	if out := setOpWireUnconstrainedDecimal(root); out != nil {
 		return out
@@ -229,7 +239,7 @@ func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 		if declaredProjectionDecl(proj, childTypes, strictInt).ID != parquet.TypeDecimal {
 			continue
 		}
-		if !proj.IsAgg && !projectionIsComputed(proj) && !computed[strings.ToLower(sourceRefName(proj))] {
+		if projectionKeepsTypmod(proj, childTypes, computed) {
 			continue
 		}
 		if out == nil {
@@ -238,6 +248,111 @@ func declaredWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 		out[name] = true
 	}
 	return out
+}
+
+// projectionKeepsTypmod reports whether one output projection carries a real
+// PostgreSQL type modifier — select_common_typmod over what it is resolved
+// from.
+func projectionKeepsTypmod(proj logical.Projection, decls colDecls, computed map[string]bool) bool {
+	if proj.IsAgg {
+		// An aggregate call. PostgreSQL never carries its argument's typmod
+		// through one.
+		return false
+	}
+	if proj.ASTExpr == nil {
+		// Nothing to walk: the value is a copy of the column this projection
+		// names, so it keeps that column's typmod unless something below
+		// computed it.
+		return !computed[strings.ToLower(sourceRefName(proj))]
+	}
+	_, _, ok := declaredTypmod(proj.ASTExpr, decls, computed)
+	return ok
+}
+
+// declaredTypmod is PostgreSQL's select_common_typmod over an expression
+// tree: the (precision, scale) the result carries on the wire, and whether it
+// carries one at all.
+//
+// A BARE COLUMN REFERENCE carries its column's own typmod — unless some node
+// below the projection COMPUTED that column, which is how a window function
+// reaches the SELECT list looking exactly like a column (#587). The choice
+// constructs — CASE, COALESCE, NULLIF, IFNULL, IF, GREATEST, LEAST — fold
+// their branches, over the same candidate positions the TYPE resolution folds
+// (expr.Ret.SameAsArgs), and keep the typmod only when every branch carries
+// the same one. A NULL branch carries nothing and is skipped, the way it is
+// skipped when the common TYPE is chosen. Everything else — an aggregate, an
+// operator, a CAST, any other function call — carries -1, and one of those
+// anywhere in the fold makes the whole result -1.
+func declaredTypmod(node plansql.Node, decls colDecls, computed map[string]bool) (int, int, bool) {
+	switch n := node.(type) {
+	case *plansql.ParenNode:
+		return declaredTypmod(n.Inner, decls, computed)
+	case *plansql.ColRef:
+		if computed[strings.ToLower(cleanExpr(n.String()))] || computed[strings.ToLower(n.Column)] {
+			return 0, 0, false
+		}
+		c, ok := decls.colDecl(n)
+		if !ok || c.Type != parquet.TypeDecimal || c.Precision <= 0 {
+			return 0, 0, false
+		}
+		return c.Precision, c.Scale, true
+	case *plansql.CaseNode:
+		arms := make([]plansql.Node, 0, len(n.Whens)+1)
+		for _, w := range n.Whens {
+			arms = append(arms, w.Result)
+		}
+		// n.Else is appended even when nil: a CASE with no ELSE has an
+		// implicit NULL branch, and foldTypmod reads a nil arm as one.
+		arms = append(arms, n.Else)
+		return foldTypmod(arms, decls, computed)
+	case *plansql.FuncCallNode:
+		idx, poly := expr.DefaultRegistry.ReturnType(n.Name).SameAsArgs(len(n.Args))
+		if !poly {
+			// A fixed declaration is a function's OWN type, and PostgreSQL
+			// gives a function result no typmod.
+			return 0, 0, false
+		}
+		arms := make([]plansql.Node, 0, len(idx))
+		for _, i := range idx {
+			if i >= 0 && i < len(n.Args) {
+				arms = append(arms, n.Args[i])
+			}
+		}
+		return foldTypmod(arms, decls, computed)
+	}
+	return 0, 0, false
+}
+
+// foldTypmod is select_common_typmod over a set of alternatives: they all
+// carry the same modifier, or the result carries none.
+//
+// A NULL branch is NOT skipped, which is where the TYPMOD fold parts company
+// with the TYPE fold beside it. An untyped NULL coerced into the common type
+// carries typmod -1, so it drops the modifier the same way an aggregate
+// argument does — verified live: COALESCE(numeric(9,2), NULL) describes as
+// plain numeric, while its TYPE is still numeric(9,2) (which is why
+// expr.CommonDeclType skips it and this does not).
+func foldTypmod(arms []plansql.Node, decls colDecls, computed map[string]bool) (int, int, bool) {
+	p, s, have := 0, 0, false
+	for _, a := range arms {
+		if a == nil {
+			// A missing ELSE is an implicit NULL branch and carries -1 like
+			// an explicit one.
+			return 0, 0, false
+		}
+		ap, as, ok := declaredTypmod(a, decls, computed)
+		if !ok {
+			return 0, 0, false
+		}
+		if !have {
+			p, s, have = ap, as, true
+			continue
+		}
+		if ap != p || as != s {
+			return 0, 0, false
+		}
+	}
+	return p, s, have
 }
 
 // projectionIsComputed reports whether a projection's value comes from an
@@ -358,7 +473,7 @@ func setOpWireUnconstrainedDecimal(root *logical.Node) map[string]bool {
 // operation whose arms do not all declare the same (p,s). The result's column
 // NAMES come from the first arm, exactly as the executed schema does.
 func setOpArmDecimalDisagreements(n *logical.Node) map[string]bool {
-	arms := setOpArmSchemas(n)
+	arms, armUnconstrained := setOpArmSchemasAndTypmods(n)
 	if len(arms) < 2 {
 		// An arm this walk cannot type says nothing about agreement.
 		// Declaring every DECIMAL unconstrained is the safe answer: it is
@@ -372,7 +487,20 @@ func setOpArmDecimalDisagreements(n *logical.Node) map[string]bool {
 			continue
 		}
 		agree := true
-		for _, other := range arms[1:] {
+		for j, other := range arms {
+			// An arm whose OWN column carries no typmod — an aggregate, a
+			// window function, arithmetic, a CAST — makes the result
+			// unconstrained however well the arms' (p,s) line up:
+			// `SELECT MIN(a) FROM t UNION ALL SELECT a FROM t` is plain
+			// numeric on PostgreSQL, and wadjet declared numeric(9,2)
+			// because it compared only the widths (ADR-0024 item 5).
+			if j < len(armUnconstrained) && i < len(other) && armUnconstrained[j][other[i].Name] {
+				agree = false
+				break
+			}
+			if j == 0 {
+				continue
+			}
 			if i >= len(other) || other[i].Type != parquet.TypeDecimal ||
 				other[i].Precision != col.Precision || other[i].Scale != col.Scale {
 				agree = false
@@ -520,6 +648,20 @@ func declaredProjectionDecl(proj logical.Projection, decls colDecls, strictInt m
 	if proj.ASTExpr != nil && !isSimpleColRefForRename(proj.ASTExpr) {
 		return inferProjectionDeclType(proj.ASTExpr, parquet.TypeString, strictInt, decls)
 	}
+	// A PARENTHESIZED bare reference — `SELECT (a)` — is a bare reference,
+	// which isSimpleColRefForRename already says and the name resolution
+	// below could not: proj.Column is empty for it and cleanExpr answers the
+	// parenthesized TEXT, which names no column, so every such projection
+	// was declared STRING where PostgreSQL declares the column's own type.
+	// Resolve it from the AST, where the reference still is one.
+	if cr, ok := bareColRefOf(proj.ASTExpr); ok {
+		if c, ok := decls.colDecl(cr); ok {
+			if c.Type == parquet.TypeDecimal && c.Precision > 0 {
+				return expr.DeclDecimal(c.Precision, c.Scale)
+			}
+			return expr.Decl(c.Type)
+		}
+	}
 	ref := proj.Column
 	if ref == "" {
 		ref = cleanExpr(proj.Expr)
@@ -551,6 +693,21 @@ func declaredProjectionDecimal(proj logical.Projection, decls colDecls, decMeta 
 		return logical.DecimalMeta{}, false
 	}
 	return logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}, true
+}
+
+// bareColRefOf unwraps a projection expression that IS a column reference,
+// parentheses and all — the shape isSimpleColRefForRename accepts.
+func bareColRefOf(e plansql.Node) (*plansql.ColRef, bool) {
+	for {
+		switch n := e.(type) {
+		case *plansql.ColRef:
+			return n, true
+		case *plansql.ParenNode:
+			e = n.Inner
+		default:
+			return nil, false
+		}
+	}
 }
 
 // declaredFieldPath resolves a non-aggregate projection that is a ROW field

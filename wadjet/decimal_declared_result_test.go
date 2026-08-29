@@ -171,22 +171,30 @@ func TestDecimalChoiceExpressionOverOneColumnKeepsItsScale(t *testing.T) {
 	}
 }
 
-// TestDecimalWireTypmodIsUnconstrainedForComputedResults is ADR-0024 item 5,
-// which closes #587 and #542.
+// TestDecimalWireTypmod is ADR-0024 item 5, which closes #587 and #542.
 //
-// PostgreSQL keeps a numeric's typmod for a BARE COLUMN REFERENCE and for
-// nothing else — verified live against postgres:17-alpine's \gdesc. Before
-// this, declaredWireUnconstrainedDecimal gated on proj.IsAgg alone, so a
-// window function (which reaches the output projection as a bare reference to
-// the Window operator's output column) and a computed expression both went
-// out carrying a real (p,s), and a set operation did too however far its arms'
-// declarations were apart.
+// The rule is PostgreSQL's select_common_typmod, not "computed means
+// unconstrained": a numeric result KEEPS a type modifier when every input it
+// is resolved from carries the same one, and carries none otherwise —
+// verified live against 17.11's \gdesc. A bare column reference carries its
+// column's; an aggregate, a window function, arithmetic, a CAST and every
+// other function call carry none, and one of those anywhere in the fold makes
+// the result unconstrained.
+//
+// Before this, declaredWireUnconstrainedDecimal gated on proj.IsAgg alone —
+// so a window function (which reaches the output projection as a bare
+// reference to the Window operator's output column) and a set operation went
+// out carrying a real (p,s) whatever their arms said. The first fix for that
+// over-corrected to "computed means unconstrained", which is wrong in the
+// other direction: GREATEST(a, a) is numeric(9,2) on PostgreSQL, and a set
+// operation over an AGGREGATE arm is plain numeric however well the widths
+// line up.
 //
 // The corresponding wire-corpus entries in benchmarks/tpch/postgres_wire_test.go
 // prove the same thing against a live server; this is the direct assertion on
 // ColumnMeta, and it also covers the ZERO-ROW arm, where the answer comes from
 // the plan alone.
-func TestDecimalWireTypmodIsUnconstrainedForComputedResults(t *testing.T) {
+func TestDecimalWireTypmod(t *testing.T) {
 	db := ddrOpen(t)
 	for _, tc := range []struct {
 		name string
@@ -199,17 +207,44 @@ func TestDecimalWireTypmodIsUnconstrainedForComputedResults(t *testing.T) {
 		{"bare column, zero rows", "SELECT a FROM " + ddrTable + " WHERE id < 0", "a", false},
 		{"a rename is still a bare reference", "SELECT a AS v FROM " + ddrTable, "v", false},
 
+		// select_common_typmod KEEPS the modifier when every input agrees.
+		// Each of these describes as numeric(9,2) or numeric(18,4) on live
+		// PostgreSQL 17.11, not as plain numeric.
+		{"greatest over one column", "SELECT GREATEST(a, a) AS v FROM " + ddrTable, "v", false},
+		{"greatest of one argument", "SELECT GREATEST(a) AS v FROM " + ddrTable, "v", false},
+		{"coalesce over one column", "SELECT COALESCE(a, a) AS v FROM " + ddrTable, "v", false},
+		{"case whose branches are one column",
+			"SELECT CASE WHEN id > 1 THEN a ELSE a END AS v FROM " + ddrTable, "v", false},
+		{"least over one column", "SELECT LEAST(b, b) AS v FROM " + ddrTable, "v", false},
+		// NULLIF folds argument 0 ALONE, the same candidate list its TYPE
+		// resolution folds, so it keeps the first argument's modifier
+		// whatever the second one carries.
+		{"nullif keeps its first argument's modifier",
+			"SELECT NULLIF(a, b) AS v FROM " + ddrTable, "v", false},
+		{"nullif the other way round",
+			"SELECT NULLIF(b, a) AS v FROM " + ddrTable, "v", false},
+		// A NULL branch is where the TYPMOD fold parts company with the TYPE
+		// fold: COALESCE(a, NULL) is numeric(9,2) as a TYPE (the NULL names
+		// none, so it neither contributes nor blocks) and plain numeric on
+		// the WIRE (an untyped NULL coerced into that type carries -1).
+		// Verified live; the wire corpus entry CoalesceWithANullBranch is
+		// the same assertion against the server.
+		{"a NULL branch drops the modifier",
+			"SELECT COALESCE(a, NULL) AS v FROM " + ddrTable, "v", true},
+
 		// #587: a window function.
 		{"windowed min", "SELECT MIN(a) OVER () AS v FROM " + ddrTable, "v", true},
 		{"windowed min, zero rows", "SELECT MIN(a) OVER () AS v FROM " + ddrTable + " WHERE id < 0", "v", true},
 		{"windowed first_value", "SELECT FIRST_VALUE(a) OVER (ORDER BY id) AS v FROM " + ddrTable, "v", true},
 		{"windowed lag", "SELECT LAG(a) OVER (ORDER BY id) AS v FROM " + ddrTable, "v", true},
 
-		// Computed expressions.
-		{"greatest", "SELECT GREATEST(a, b) AS v FROM " + ddrTable, "v", true},
-		{"coalesce", "SELECT COALESCE(a, b) AS v FROM " + ddrTable, "v", true},
-		{"case", "SELECT CASE WHEN id < 4 THEN a ELSE b END AS v FROM " + ddrTable, "v", true},
-		{"greatest, zero rows", "SELECT GREATEST(a, b) AS v FROM " + ddrTable + " WHERE id < 0", "v", true},
+		// Computed expressions whose inputs carry DIFFERENT modifiers:
+		// a is numeric(9,2) and b is numeric(18,4), so the fold has none.
+		{"greatest across scales", "SELECT GREATEST(a, b) AS v FROM " + ddrTable, "v", true},
+		{"coalesce across scales", "SELECT COALESCE(a, b) AS v FROM " + ddrTable, "v", true},
+		{"case across scales", "SELECT CASE WHEN id < 4 THEN a ELSE b END AS v FROM " + ddrTable, "v", true},
+		{"greatest across scales, zero rows",
+			"SELECT GREATEST(a, b) AS v FROM " + ddrTable + " WHERE id < 0", "v", true},
 
 		// The aggregate half, which already held before ADR-0024.
 		{"min", "SELECT MIN(a) AS v FROM " + ddrTable, "v", true},
@@ -220,6 +255,13 @@ func TestDecimalWireTypmodIsUnconstrainedForComputedResults(t *testing.T) {
 		{"set op, arms disagree", "SELECT a AS v FROM " + ddrTable + " UNION ALL SELECT b FROM " + ddrTable, "v", true},
 		{"set op, arms disagree, INTERSECT", "SELECT a AS v FROM " + ddrTable + " INTERSECT SELECT b FROM " + ddrTable, "v", true},
 		{"set op, arms disagree, EXCEPT", "SELECT a AS v FROM " + ddrTable + " EXCEPT SELECT b FROM " + ddrTable, "v", true},
+		// An arm that carries NO modifier makes the result unconstrained
+		// however well the widths line up — the direction "the arms' (p,s)
+		// disagree" alone cannot see.
+		{"set op over an aggregate arm",
+			"SELECT MIN(a) AS v FROM " + ddrTable + " UNION ALL SELECT a FROM " + ddrTable, "v", true},
+		{"set op over a computed arm",
+			"SELECT COALESCE(a, b) AS v FROM " + ddrTable + " UNION ALL SELECT b FROM " + ddrTable, "v", true},
 		{"set op with ORDER BY, arms disagree",
 			"SELECT a AS v FROM " + ddrTable + " UNION ALL SELECT b FROM " + ddrTable + " ORDER BY 1", "v", true},
 	} {
@@ -290,10 +332,21 @@ func TestDecimalComputedKeysAreNotTruncated(t *testing.T) {
 		{"a computed decimal in a filter",
 			"SELECT COUNT(*) AS n FROM " + ddrTable + " WHERE GREATEST(a, b) = 12.7501",
 			"[map[n:1]]"},
+		// GREATEST's winner is the WIDER column on every row, so both sides
+		// render at scale 4 and a text-keyed membership set happens to
+		// agree. COALESCE's winner is the NARROWER one, so the probe renders
+		// "12.75" against a set holding "12.7500" — same number, two keys —
+		// and the predicate answered zero rows where PostgreSQL answers
+		// four. Both are kept: the pair is what shows the set is keyed by
+		// VALUE and not by rendering (ADR-0012 item 8).
 		{"a computed decimal through an IN subquery",
 			"SELECT id FROM " + ddrTable + " WHERE GREATEST(a, b) IN " +
 				"(SELECT GREATEST(a, b) FROM " + ddrTable + " WHERE id = 2) ORDER BY id",
 			"[map[id:2]]"},
+		{"an IN subquery whose two sides render at different scales",
+			"SELECT id FROM " + ddrTable + " WHERE COALESCE(a, b) IN " +
+				"(SELECT COALESCE(a, b) FROM " + ddrTable + " WHERE id = 2) ORDER BY id",
+			"[map[id:1] map[id:2] map[id:3] map[id:7]]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := ddrQuery(t, db, tc.sql)
@@ -353,5 +406,175 @@ func TestDecimalChoiceExpressionRefusesAValueWithNoCarrier(t *testing.T) {
 	}
 	if got := sqlerr.StateOf(err); got != "22003" {
 		t.Errorf("SQLSTATE = %q, want 22003 numeric_value_out_of_range: %v", got, err)
+	}
+}
+
+// TestDecimalChoiceDeclinesOverAnUndeclaredProducer is the safety clause of
+// ADR-0024 item 2, and it is the review finding the item-2 fold was missing.
+//
+// A branch that decided no type still PRODUCES a value at runtime, and a
+// DECIMAL one arrives as text at ITS OWN scale. Folding only the branches
+// that spoke declared `COALESCE(a, (SELECT MAX(b) FROM t))` numeric(9,2) —
+// so the subquery's 12.7501 was TRUNCATED to 12.75 on the way into the output
+// vector, and at the comparison sites the operand classified as nothing and
+// GREATEST picked by BYTE order ("3.00" over "12.7501"). The fold now
+// declines, which puts every such shape back exactly where it was before
+// ADR-0024: a loud refusal, or the STRING fallback that renders the decimal
+// text unchanged.
+//
+// A bare NULL is the exception and stays one: it names no type AND produces
+// no value, which is SQL's `unknown`, so COALESCE(d, NULL) is numeric here as
+// it is on PostgreSQL.
+func TestDecimalChoiceDeclinesOverAnUndeclaredProducer(t *testing.T) {
+	db := ddrOpen(t)
+	sub := "(SELECT MAX(b) FROM " + ddrTable + ")"
+
+	// A CASE falls back to STRING, which renders the branch's own text — so
+	// row 6, where the subquery wins, keeps all four digits.
+	res := ddrQuery(t, db, "SELECT CASE WHEN a IS NULL THEN "+sub+" ELSE a END AS c FROM "+ddrTable+" ORDER BY id")
+	var got []string
+	for _, r := range res.Rows {
+		got = append(got, fmt.Sprintf("%v", r["c"]))
+	}
+	want := []string{"12.75", "12.75", "12.75", "2.00", "-0.01", "12.7501", "12.75"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("CASE over a scalar subquery = %v, want %v (row 6 is the subquery's own value, "+
+			"which a fold to numeric(9,2) would have truncated to 12.75)", got, want)
+	}
+
+	// COALESCE and GREATEST have a numeric fallback rather than a string one,
+	// so the same decline surfaces as the #361 store guard — loud, and the
+	// answer this engine gave before a DECIMAL could decide anything.
+	for _, sql := range []string{
+		"SELECT COALESCE(a, " + sub + ") AS c FROM " + ddrTable,
+		"SELECT GREATEST(a, " + sub + ") AS c FROM " + ddrTable,
+		"SELECT LEAST(a, " + sub + ") AS c FROM " + ddrTable,
+	} {
+		if _, err := db.Query(context.Background(), sql); err == nil {
+			t.Errorf("%s: answered — a DECIMAL fold over an operand with no declaration "+
+				"silently truncates it to the fold's scale", sql)
+		}
+	}
+
+	// The NULL exception.
+	res = ddrQuery(t, db, "SELECT COALESCE(a, NULL) AS c FROM "+ddrTable+" WHERE id = 1")
+	if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeDecimal || m.Scale != 2 {
+		t.Errorf("COALESCE(a, NULL) declared %s(%d,%d), want DECIMAL(9,2)", m.TypeID, m.Precision, m.Scale)
+	}
+}
+
+// TestNullifRefusesANonNumericLiteralBesideADecimal: NULLIF was the one boxed
+// comparison site that did not run the refusal its siblings run. `=`,
+// GREATEST, LEAST, IS DISTINCT FROM and simple CASE all raise 22P02 for a
+// literal that names no number beside a DECIMAL column — PostgreSQL's answer
+// — while NULLIF compared the two as boxes and returned every row.
+func TestNullifRefusesANonNumericLiteralBesideADecimal(t *testing.T) {
+	db := ddrOpen(t)
+	_, err := db.Query(context.Background(), "SELECT NULLIF(a, 'abc') AS c FROM "+ddrTable)
+	if err == nil {
+		t.Fatal("NULLIF(decimal, 'abc') answered; PostgreSQL raises 22P02")
+	}
+	if got := sqlerr.StateOf(err); got != "22P02" {
+		t.Errorf("SQLSTATE = %q, want 22P02 invalid_text_representation: %v", got, err)
+	}
+}
+
+// TestDecimalDecidesThroughParensAndDerivedTables covers the two shapes that
+// LOOK like a DECIMAL column and did not decide like one.
+//
+// `SELECT (a)` is a bare reference with parentheses. exec.Project resolves a
+// copy's source by NAME and the name it holds is the parenthesized text, so
+// nothing corrected the STRING fallback and the column went out as OID 25.
+//
+// `GREATEST(v, b)` over a DERIVED TABLE is #529 for every query that names
+// its DECIMAL through a subquery: inputColTypes stops at the derived table's
+// Project, so neither argument decided and GREATEST fell to FLOAT64 —
+// "cannot store string into FLOAT64 vector", the exact failure ADR-0024's
+// declaration layer exists to remove.
+func TestDecimalDecidesThroughParensAndDerivedTables(t *testing.T) {
+	db := ddrOpen(t)
+
+	res := ddrQuery(t, db, "SELECT (a) AS v FROM "+ddrTable+" WHERE id = 1")
+	if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeDecimal || m.Precision != 9 || m.Scale != 2 {
+		t.Errorf("SELECT (a) declared %s(%d,%d), want DECIMAL(9,2)", m.TypeID, m.Precision, m.Scale)
+	}
+	if got := fmt.Sprintf("%v", res.Rows[0]["v"]); got != "12.75" {
+		t.Errorf("SELECT (a) = %q, want 12.75", got)
+	}
+
+	res = ddrQuery(t, db,
+		"SELECT GREATEST(v, b) AS g FROM (SELECT a AS v, b FROM "+ddrTable+") x ORDER BY g")
+	if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeDecimal || m.Scale != 4 {
+		t.Errorf("GREATEST over a derived table declared %s(%d,%d), want DECIMAL(18,4)",
+			m.TypeID, m.Precision, m.Scale)
+	}
+	var got []string
+	for _, r := range res.Rows {
+		got = append(got, fmt.Sprintf("%v", r["g"]))
+	}
+	want := []string{"-0.0100", "1.0000", "10.0000", "12.7500", "12.7500", "12.7500", "12.7501"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("GREATEST over a derived table = %v, want %v", got, want)
+	}
+}
+
+// TestDecimalBesideAnIntegerIsDataDependent records what the DECIMAL⊕INTEGER
+// deferral actually costs, so nobody reads it as a stable refusal.
+//
+// PostgreSQL resolves GREATEST(numeric, integer) to numeric. Wadjet declares
+// the INTEGER, because the alternative is worse: an integer box written into
+// a DECIMAL vector is taken as ALREADY SCALED (ADR-0018 §4, the parquet
+// ingest contract), so declaring DECIMAL would read GREATEST(a, 5) back as
+// 0.05. The consequence is that the query's fate depends on the DATA — it
+// answers wherever the integer wins every row and fails at the #361 store
+// guard on the first row the decimal wins. That is a loud failure, never a
+// wrong answer, and it is what TODO(#555) buys back when the store learns to
+// scale an integer box.
+func TestDecimalBesideAnIntegerIsDataDependent(t *testing.T) {
+	db := ddrOpen(t)
+
+	// Row 1 holds a = 12.75, so the integer 100 wins and the query answers —
+	// as an INT64 column, which is already the wrong TYPE for PostgreSQL.
+	res := ddrQuery(t, db, "SELECT GREATEST(a, 100) AS g FROM "+ddrTable+" WHERE id = 1")
+	if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeInt64 {
+		t.Errorf("GREATEST(a, 100) declared %s; the deferral declares the INTEGER "+
+			"(TODO(#555) — PostgreSQL says numeric)", m.TypeID)
+	}
+	if got := fmt.Sprintf("%v", res.Rows[0]["g"]); got != "100" {
+		t.Errorf("GREATEST(a, 100) = %q, want 100", got)
+	}
+
+	// The same expression with a small integer fails on the first row the
+	// DECIMAL wins. Loud, and the same failure the whole family gave before
+	// ADR-0024.
+	if _, err := db.Query(context.Background(), "SELECT GREATEST(a, 1) AS g FROM "+ddrTable); err == nil {
+		t.Error("GREATEST(a, 1) answered — the decimal wins on row 1, and an INT64 " +
+			"declaration has nowhere to put its text")
+	}
+}
+
+// TestDecimalChoiceOverAContainerElementComparesByValue is the runtime half of
+// the review's P0-1: element_at lifts a value OUT of a container, so its kind
+// is the container's ELEMENT kind. Without that arm the pair fell through to
+// compare()'s byte order and GREATEST picked "3.00" over "12.7501".
+//
+// The DECLARED type of such an expression is still undecided — the planner
+// carries no element type for a top-level ARRAY column — so the fold declines
+// and the projection keeps its pre-ADR-0024 answer; what this pins is that
+// the COMPARISON is exact wherever it runs.
+func TestDecimalChoiceOverAContainerElementComparesByValue(t *testing.T) {
+	db := ddrOpen(t)
+	// GREATEST inside a predicate: the extremum is picked by VALUE, so the
+	// rows where b is the larger number are exactly the rows returned.
+	res := ddrQuery(t, db,
+		"SELECT id FROM "+ddrTable+" WHERE GREATEST(a, b) = b ORDER BY id")
+	var got []string
+	for _, r := range res.Rows {
+		got = append(got, fmt.Sprintf("%v", r["id"]))
+	}
+	// b wins on 1 (equal), 2, 4 and 6; a wins on 3, 5 (equal) and 7 (b NULL).
+	want := []string{"1", "2", "4", "5", "6"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("GREATEST(a, b) = b matched %v, want %v", got, want)
 	}
 }

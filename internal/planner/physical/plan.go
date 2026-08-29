@@ -7840,7 +7840,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	// map is for a SELECT expression that maps to a synthetic group column —
 	// a rename of a value computed BELOW the aggregate, so it types against
 	// the aggregate's input rather than its output.
-	childColTypes := inputColDecls(child)
+	childColTypes := emittedColDecls(child)
 	var aggInputColTypes colDecls
 	if isOverAggregate && len(aggNode.Children) > 0 {
 		aggInputColTypes = inputColDecls(aggNode.Children[0])
@@ -8622,7 +8622,8 @@ func inferProjectionDeclType(node plansql.Node, fallback parquet.TypeID, strictI
 			return expr.Decl(parquet.TypeInt64)
 		}
 	}
-	if !isComputedProjection(node) && !astIsFieldPath(node, decls) {
+	_, bareRef := node.(*plansql.ColRef)
+	if bareRef && !astIsFieldPath(node, decls) {
 		// A bare column reference is a copy, and exec.Project types that
 		// output from the column it copies — the input schema is the
 		// authority there, and it sees renames and derived inputs the
@@ -8630,6 +8631,15 @@ func inferProjectionDeclType(node plansql.Node, fallback parquet.TypeID, strictI
 		// so this projection is typed by the caller's fallback exactly as
 		// before. #333 is about the arguments INSIDE an expression, where
 		// the output is computed and no input column describes it.
+		//
+		// A PARENTHESIZED bare reference — `SELECT (a)` — is deliberately
+		// NOT withheld, though isComputedProjection calls it uncomputed:
+		// exec.Project resolves its source by NAME and the name it holds is
+		// the parenthesized text, which matches no column, so nothing
+		// downstream corrects the fallback and every `SELECT (a)` was
+		// declared STRING where PostgreSQL declares the column's own type.
+		// Here the declaration IS the authority, exactly as it is for a ROW
+		// field path one clause down.
 		//
 		// A ROW FIELD PATH is the exception, and the reason the second
 		// clause exists: it LOOKS like a bare reference but copies no
@@ -9171,6 +9181,26 @@ func declTypeParts(d expr.DeclType) (parquet.TypeID, int, int) {
 	return d.ID, d.Precision, d.Scale
 }
 
+// emittedColDecls is inputColDecls over what a node EMITS rather than what it
+// passes through: it descends INTO a Project, an Aggregate and a Window
+// instead of stopping at them, which is the difference between seeing a
+// DERIVED TABLE's columns and seeing nothing.
+//
+// `SELECT GREATEST(v, b) FROM (SELECT a AS v, b FROM t) x` is the shape:
+// inputColTypes stops at the derived table's Project, so neither argument
+// decided a type, GREATEST fell to its FLOAT64 fallback and the query failed
+// with "cannot store string into FLOAT64 vector" — #529 unclosed for every
+// query that names its DECIMAL through a subquery. It is the same walk
+// declaredOutputSchema already resolves the OUTPUT projection against, so the
+// SELECT list and the plan-declared schema now answer from one map.
+func emittedColDecls(n *logical.Node) colDecls {
+	return colDecls{
+		types:  emittedColTypes(n),
+		fields: inputColFields(n),
+		dec:    emittedColDecimal(n),
+	}
+}
+
 // inferProjectionType infers the output parquet type from an AST expression
 // node with nothing known about its input, returning the fallback when
 // inference isn't possible.
@@ -9295,7 +9325,13 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 		case plansql.LitString:
 			return expr.Decl(parquet.TypeString), expr.Decided
 		}
-		// LitNull: type unknown; let the fallback decide.
+		// LitNull is SQL's `unknown`: it names no type AND produces no
+		// value, which is a different fact from "this branch decided
+		// nothing" and is why it is marked. COALESCE(d, NULL) is a numeric
+		// expression on PostgreSQL and stays one here; a branch that decided
+		// nothing but WILL produce a value makes a DECIMAL fold decline
+		// (expr.CommonDeclType).
+		return expr.DeclUntyped(), expr.Undecided
 	}
 	return expr.DeclType{}, expr.Undecided
 }
@@ -9319,8 +9355,11 @@ func caseDeclaredType(n *plansql.CaseNode, decls colDecls) (expr.DeclType, expr.
 	var guess expr.DeclType
 	guessed := false
 	var decided []expr.DeclType
+	sawUnknown := false
 	consider := func(branch plansql.Node) {
 		if branch == nil {
+			// A missing ELSE is an implicit NULL: it produces no value, so
+			// it neither decides nor blocks a DECIMAL fold.
 			return
 		}
 		t, c := nodeDeclaredType(branch, decls)
@@ -9331,21 +9370,26 @@ func caseDeclaredType(n *plansql.CaseNode, decls colDecls) (expr.DeclType, expr.
 			if !guessed {
 				guess, guessed = t, true
 			}
+		default:
+			if !t.Untyped {
+				sawUnknown = true
+			}
 		}
 	}
 	for _, w := range n.Whens {
 		consider(w.Result)
 	}
 	consider(n.Else)
-	if len(decided) > 0 {
-		// expr.CommonDeclType, not decided[0]: the first decider still wins
-		// for every type but DECIMAL, where the branches have to agree on a
-		// (p,s) that holds all of them or the narrower one truncates the
-		// wider branch's digits into the output vector (ADR-0024 item 2).
-		// COALESCE/GREATEST/LEAST reconcile through the same function, so a
-		// CASE and the COALESCE it rewrites to cannot answer different
-		// types.
-		return expr.CommonDeclType(decided), expr.Decided
+	// expr.CommonDeclType, not decided[0]: the first decider still wins for
+	// every type but DECIMAL, where the branches have to agree on a (p,s)
+	// that holds all of them or the narrower one truncates the wider
+	// branch's digits into the output vector (ADR-0024 item 2).
+	// COALESCE/GREATEST/LEAST reconcile through the same function, so a CASE
+	// and the COALESCE it rewrites to cannot answer different types — and
+	// they decline together on a branch that names no type but still
+	// produces a value.
+	if d, ok := expr.CommonDeclType(decided, sawUnknown); ok {
+		return d, expr.Decided
 	}
 	if guessed {
 		return guess, expr.Guessed
