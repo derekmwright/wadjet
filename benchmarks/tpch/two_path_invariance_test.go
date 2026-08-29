@@ -5393,6 +5393,14 @@ func setupTwoPathCluster(tb testing.TB, ctx context.Context) (fast, dag *coordin
 // arm runs over the same bytes its fingerprints were computed from.
 func setupCluster(tb testing.TB, ctx context.Context, data map[string][]map[string]any) (fast, dag *coordinator.Coordinator) {
 	tb.Helper()
+	return setupClusterFixture(tb, ctx, FloatFixture, data)
+}
+
+// setupClusterFixture is setupCluster for a chosen TPC-H fixture: the
+// DECIMAL(15,2) variant needs the same cluster over the same rows with the
+// spec-conformant schemas (ADR-0024).
+func setupClusterFixture(tb testing.TB, ctx context.Context, f Fixture, data map[string][]map[string]any) (fast, dag *coordinator.Coordinator) {
+	tb.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	natsCfg := distributed.DefaultNATSConfig()
@@ -5428,7 +5436,7 @@ func setupCluster(tb testing.TB, ctx context.Context, data map[string][]map[stri
 	if err := cat.Init(ctx); err != nil {
 		tb.Fatalf("catalog init: %v", err)
 	}
-	loadTPCHIntoCatalog(tb, ctx, cat, store, data)
+	loadTPCHIntoCatalogFixture(tb, ctx, f, cat, store, data)
 
 	const workers = 3
 	ids := make([]string, workers)
@@ -5497,8 +5505,13 @@ func setupCluster(tb testing.TB, ctx context.Context, data map[string][]map[stri
 // single-file table could hide a per-task bug by accident.
 func loadTPCHIntoCatalog(tb testing.TB, ctx context.Context, cat *catalog.Catalog, store objstore.Store, data map[string][]map[string]any) {
 	tb.Helper()
+	loadTPCHIntoCatalogFixture(tb, ctx, FloatFixture, cat, store, data)
+}
 
-	schemas := fixtureSchemas(data)
+func loadTPCHIntoCatalogFixture(tb testing.TB, ctx context.Context, f Fixture, cat *catalog.Catalog, store objstore.Store, data map[string][]map[string]any) {
+	tb.Helper()
+
+	schemas := fixtureSchemasFor(f, data)
 	names := make([]string, 0, len(schemas))
 	for name := range schemas {
 		names = append(names, name)

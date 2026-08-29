@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"sort"
 	"strconv"
 	"testing"
 	"time"
@@ -609,7 +610,7 @@ const networkAsTextOIDPin = "DELIBERATE (network-as-text on the wire, like VECTO
 	"the inet OID"
 
 func wireCorpus() []wireCase {
-	return []wireCase{
+	base := []wireCase{
 		// The shape that broke DataGrip: a plain projection of an int, a text
 		// and an int. Every column used to be declared OID 25; the OIDs are
 		// right now, and this entry is what keeps them right.
@@ -1141,6 +1142,118 @@ func wireCorpus() []wireCase {
 					"against), so renaming it is its own change",
 			}},
 	}
+	return append(base, decimalTPCHWireCorpus()...)
+}
+
+// decimalTPCHWireCorpus is the 22 TPC-H queries as wire cases, and it is
+// EMPTY unless TPCH_DECIMAL=1 (ADR-0024). Under the FLOAT64 schema they would
+// say nothing this arm does not already know: every monetary column is float8
+// on both sides. Under the DECIMAL(15,2) schema each one declares numeric
+// columns, and PostgreSQL — not a table in this repo — is the authority on
+// the OID and the typmod each of them carries:
+//
+//   - a BARE column reference (Q02's s_acctbal, Q10's c_acctbal, Q18's
+//     o_totalprice) keeps its column's typmod, numeric(15,2);
+//   - everything computed — every SUM, AVG, product and quotient — is
+//     unconstrained numeric, typmod -1.
+//
+// That is ADR-0024 item 5's rule applied to a real corpus, checked against
+// the engine that defines it, on the WIRE rather than in ColumnMeta.
+func decimalTPCHWireCorpus() []wireCase {
+	if FixtureFromEnv() != DecimalFixture {
+		return nil
+	}
+	nums := make([]int, 0, len(TPCHQueries))
+	for n := range TPCHQueries {
+		nums = append(nums, n)
+	}
+	sort.Ints(nums)
+	out := make([]wireCase, 0, len(nums))
+	for _, n := range nums {
+		c := wireCase{name: fmt.Sprintf("DecimalTPCH_Q%02d", n), sql: TPCHQueries[n].SQL}
+		if p := decimalWirePins(n); len(p) > 0 {
+			c.pins = p
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// decimalWirePins records the wire properties these queries diverge on today.
+// Each names its issue or the record that makes it deliberate, and a pinned
+// property that starts agreeing FAILS.
+func decimalWirePins(n int) map[string]string {
+	const digitsKept = "DELIBERATE: PostgreSQL's numeric is unbounded, so AVG and `/` keep every digit; " +
+		"wadjet's finite carrier keeps the (p,s) ADR-0024 item 3 computes — DECIMAL(38,6) here. Both are " +
+		"exact to the digits they keep and agree to min(scale). ADR-0012 item 9's accepted divergence."
+	const typmodDropped = "#697 — a subquery anywhere in the statement drops the typmod of every BARE " +
+		"DECIMAL output column. PostgreSQL sends numeric(15,2); wadjet sends -1. The VALUES agree."
+	const caseLiteral = "#695 — a CASE over a DECIMAL column and a numeric literal declares the literal's " +
+		"type, so this column reaches the wire as float8 (OID 701) where PostgreSQL sends numeric."
+	const scalarSubquery = "#696 — a DECIMAL column compared against a SCALAR SUBQUERY's value selects " +
+		"the wrong rows, so this group's count is inflated. The VALUE of the subquery is right; the " +
+		"substitution into the comparison is not."
+	switch n {
+	case 1:
+		// avg_price and avg_disc only: the three SUMs agree digit for digit.
+		return map[string]string{wirePropFloatRender: digitsKept}
+	case 17:
+		// SUM(l_extendedprice) / 7.0. The quotient terminates inside
+		// wadjet's six fraction digits at SF0.01 and repeats past it — see
+		// decimalTierPastSF001 — so the divergence is real but only visible
+		// on the larger tier.
+		if decimalTierPastSF001() {
+			return map[string]string{wirePropFloatRender: digitsKept}
+		}
+		return nil
+	case 9:
+		// sum_profit is float8 on BOTH sides — l_quantity stays FLOAT64 in
+		// the decimal fixture, and a float8 operand takes the whole
+		// expression to float8 in either engine. What differs is the last
+		// ULP of a float summation, which is accumulation order and not an
+		// answer.
+		return map[string]string{
+			wirePropFloatRender: "DELIBERATE: float64 summation order. sum_profit is float8 in both " +
+				"engines (l_quantity is the FLOAT64 column the decimal fixture keeps), and two correct " +
+				"engines adding the same values in different orders differ in the last ULP.",
+		}
+	case 12:
+		// SUM over an INTEGER CASE. Not a decimal defect at all — it is the
+		// standing SUM(int4) divergence, surfaced here because no wire case
+		// carried this shape before. The SIZE agrees (float8 and int8 are
+		// both 8 bytes), so only the OID is pinned.
+		return map[string]string{wirePropTypeOIDs: noExactNumericPin}
+	case 2, 18:
+		return map[string]string{wirePropTypeMods: typmodDropped}
+	case 8:
+		// Which face #695 shows here depends on the tier — see
+		// decimalTierPastSF001. At SF0.01 the query answers under a
+		// FLOAT64 declaration; past it the guard raises and there is no
+		// RowDescription to compare.
+		if decimalTierPastSF001() {
+			return map[string]string{
+				wirePropFieldCount: caseLiteral + " At this tier Q08's decimal branch fires, so the " +
+					"statement cannot be described and wadjet answers with no fields.",
+				wirePropValuesText: caseLiteral,
+			}
+		}
+		return map[string]string{
+			wirePropTypeOIDs:  caseLiteral,
+			wirePropTypeSizes: caseLiteral + " The declared SIZE follows the OID: 8 for float8, -1 for numeric.",
+		}
+	case 14:
+		return map[string]string{
+			wirePropFieldCount: caseLiteral + " Q14's decimal branch DOES fire, so the statement cannot " +
+				"be described at all and wadjet answers with no fields.",
+			wirePropValuesText: caseLiteral,
+		}
+	case 22:
+		return map[string]string{
+			wirePropValuesText:   scalarSubquery,
+			wirePropBinaryDecode: scalarSubquery,
+		}
+	}
+	return nil
 }
 
 // runWireErrors compares the SQLSTATE a client is handed for statements that

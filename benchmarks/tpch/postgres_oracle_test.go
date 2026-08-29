@@ -345,14 +345,20 @@ func (o *postgresOracle) load(t *testing.T, ctx context.Context) {
 	start := time.Now()
 	if committed {
 		o.tier = "SF0.01 (committed parquet fixture, duckdb-data/)"
-		for table, rows := range duckdbFixtureRows(t) {
+		fixture := duckdbFixtureRows
+		if FixtureFromEnv() == DecimalFixture {
+			o.tier = "SF0.01 (committed parquet fixture, duckdb-data-decimal/, TPCH_DECIMAL=1)"
+			fixture = decimalFixtureRows
+		}
+		for table, rows := range fixture(t) {
 			if err := sink(table, rows); err != nil {
 				t.Fatalf("%v", err)
 			}
 		}
 	} else {
-		o.tier = fmt.Sprintf("SF%g (generated, %s=%g)", float64(scale), postgresScaleEnv, float64(scale))
-		if err := GenerateChunked(scale, 50_000, sink); err != nil {
+		o.tier = fmt.Sprintf("SF%g (generated, %s=%g, %s fixture)", float64(scale), postgresScaleEnv,
+			float64(scale), FixtureFromEnv())
+		if err := GenerateChunkedFor(scale, 50_000, FixtureFromEnv(), sink); err != nil {
 			t.Fatalf("generating SF%g: %v", float64(scale), err)
 		}
 	}
@@ -682,10 +688,19 @@ func pgRowRowsData() []map[string]any {
 	return rows
 }
 
-// oracleTables is AllTables plus the fixtures that exist only for this oracle.
+// oracleTables is the fixture both engines are loaded with: the TPC-H tables
+// plus the probe tables that exist only for this oracle.
+//
+// The TPC-H half follows TPCH_DECIMAL (ADR-0024): unset, it is the FLOAT64
+// schema and this oracle is exactly what it was; set, the eight monetary
+// columns are DECIMAL(15,2) and `numeric` is what postgresColumnType emits
+// for them, so every corpus entry and every wire case runs against the
+// specification's own carrier. Opt-in, because the FLOAT64 schema is the
+// published benchmark.
 func oracleTables() map[string]parquet.Schema {
-	out := make(map[string]parquet.Schema, len(AllTables)+2)
-	for name, schema := range AllTables {
+	tables := TablesFor(FixtureFromEnv())
+	out := make(map[string]parquet.Schema, len(tables)+2)
+	for name, schema := range tables {
 		out[name] = schema
 	}
 	out[pgRowTable] = parquet.Schema{Columns: []parquet.Column{
@@ -1092,6 +1107,18 @@ func (o *postgresOracle) copyInto(ctx context.Context, table string, rows []map[
 				val = pgNumericOf(d, int32(schema.Columns[j].Scale))
 			}
 			switch schema.Columns[j].Type {
+			case parquet.TypeDecimal:
+				// The TPC-H generator's decimal arm emits exact TEXT, which
+				// binary COPY has no encode plan for. Scan it into a
+				// pgtype.Numeric so PostgreSQL receives the same digits
+				// wadjet's writer parses — no float64 in between.
+				if s, ok := val.(string); ok {
+					var n pgtype.Numeric
+					if err := n.Scan(s); err != nil {
+						return fmt.Errorf("%s.%s: %q is not a numeric: %w", table, col, s, err)
+					}
+					val = n
+				}
 			case parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR:
 				if s, ok := val.(string); ok {
 					p, err := pgNetPrefix(s)

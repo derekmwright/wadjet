@@ -366,6 +366,40 @@ which is why the defect was invisible for as long as it was.
   aggregation, comparison and ORDER BY on both execution paths) and the
   decimal performance baseline second; the FLOAT64 schema stays the
   published-number benchmark until a release decides otherwise.
+
+  **Landed and MEASURED 2026-08-29** (`benchmarks/tpch/schema_decimal.go`,
+  `decimal_variant_test.go`, `decimal_perf_test.go`; full numbers in
+  `docs/benchmarks/tpch-decimal-baseline-2026-08-29.md`). The prediction above
+  — that the cost would be "low, and unmeasurable on the current benchmark
+  suite" — is half right, and the half that is wrong is the interesting one.
+  At SF1, both fixtures built in one process from the same generator draws and
+  the queries interleaved over three repetitions, two independent samples put
+  the geomean of DECIMAL/FLOAT64 wall time over the 20 runnable queries at
+  **1.0393 and 1.0921**, with bytes at rest **0.9982** in both — an INT64 leaf
+  against a DOUBLE leaf, and the scaled integer compresses marginally better.
+  The cost is not spread: 12 to 14 of the 20 sit within ±10%, and removing Q01
+  alone drops the geomean to **0.9881 / 1.0286**. Q01 pays **2.71× and 3.41×
+  wall, 2.33× and 2.57× CPU**, because it is the only query in the corpus that
+  multiplies decimals in its inner loop — two 128-bit multiplications and two
+  additions per row over 6M rows, then a second SUM at scale 4 and two AVGs
+  dividing at scale 6. Q10 is second at 1.32–1.35× and does no decimal
+  arithmetic at all: it carries a 16-byte group value and a 16-byte sort key
+  where the float fixture carries 8. So the honest statement is that exact
+  decimals cost under 10% across a mixed analytics workload — within noise
+  once the one arithmetic-bound query is set aside — and about 3× on a
+  decimal-multiply-bound loop. **The measurement also produced a lead this
+  record did not anticipate**: the allocation OBJECT count, not the byte
+  count, is where the two carriers part company. Q01 allocates **1868× as many
+  objects** on decimals for 1.81× the bytes (Q06 27×, Q15 21×, Q11 6×). A
+  large count of very small allocations is a value being BOXED one at a time,
+  which is upstream of the kernels this record measured allocation-free over a
+  batch; that is where a future pass should look, and no tuning should precede
+  understanding it. The distributed exchange cost is still unmeasured.
+  Correctness-wise the variant paid for itself on the first run: #695, #696
+  and #697 are three defects the FLOAT64 fixture is structurally unable to
+  express, all of them silent or newly loud, and #696's single-process half
+  was invisible to the DuckDB gate (a count-only entry) and caught by the
+  PostgreSQL wire arm.
 - The pg-oracle gains a corpus entry per rule in item 3 (exact comparison
   to `min(scale)`) and per row of item 5's table, the type-matrix gains a
   computed-DECIMAL column class,

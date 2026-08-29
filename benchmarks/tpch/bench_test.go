@@ -16,8 +16,18 @@ import (
 	"github.com/derekmwright/wadjet/wadjet"
 )
 
-// setupTPCH creates a Wadjet DB loaded with TPC-H data at the given scale factor.
+// setupTPCH creates a Wadjet DB loaded with TPC-H data at the given scale
+// factor in the FLOAT64 fixture — the published-number schema.
 func setupTPCH(tb testing.TB, sf ScaleFactor) *wadjet.DB {
+	tb.Helper()
+	return setupTPCHFixture(tb, sf, FloatFixture)
+}
+
+// setupTPCHFixture is setupTPCH for a chosen fixture. The DECIMAL variant
+// takes the SAME path — CreateTable from the declared schema, then rows
+// through internal/storage/ingest — so the monetary text the generator emits
+// is parsed to Int128 by the writer every INSERT reaches (ADR-0024 §4).
+func setupTPCHFixture(tb testing.TB, sf ScaleFactor, f Fixture) *wadjet.DB {
 	tb.Helper()
 	ctx := context.Background()
 	store := objstore.NewMemStore()
@@ -30,9 +40,9 @@ func setupTPCH(tb testing.TB, sf ScaleFactor) *wadjet.DB {
 		tb.Fatal(err)
 	}
 
-	data := Generate(sf)
+	data := GenerateFor(sf, f)
 
-	for tableName, schema := range AllTables {
+	for tableName, schema := range TablesFor(f) {
 		if err := db.CreateTable(ctx, tableName, schema, nil); err != nil {
 			tb.Fatalf("creating table %s: %v", tableName, err)
 		}
@@ -356,6 +366,15 @@ func sortedKeys(m map[string][]map[string]any) []string {
 // Memory-bounded: generates data in chunks of chunkSize rows, ingests each chunk, releases.
 func setupTPCHStreaming(tb testing.TB, sf ScaleFactor) *wadjet.DB {
 	tb.Helper()
+	db, _ := setupTPCHStreamingFixture(tb, sf, FloatFixture)
+	return db
+}
+
+// setupTPCHStreamingFixture is setupTPCHStreaming for a chosen fixture. It
+// also returns the store, so a caller measuring the two fixtures against each
+// other can weigh what each one wrote (ADR-0011's byte metric).
+func setupTPCHStreamingFixture(tb testing.TB, sf ScaleFactor, f Fixture) (*wadjet.DB, objstore.Store) {
+	tb.Helper()
 	ctx := context.Background()
 	store := objstore.NewMemStore()
 
@@ -373,7 +392,7 @@ func setupTPCHStreaming(tb testing.TB, sf ScaleFactor) *wadjet.DB {
 	}
 
 	// Create all tables
-	for tableName, schema := range AllTables {
+	for tableName, schema := range TablesFor(f) {
 		if err := db.CreateTable(ctx, tableName, schema, nil); err != nil {
 			tb.Fatalf("creating table %s: %v", tableName, err)
 		}
@@ -381,7 +400,7 @@ func setupTPCHStreaming(tb testing.TB, sf ScaleFactor) *wadjet.DB {
 
 	// Create ingesters with auto-flush thresholds
 	ingesters := make(map[string]*ingest.Ingester)
-	for tableName, schema := range AllTables {
+	for tableName, schema := range TablesFor(f) {
 		ingesters[tableName] = db.NewIngester(tableName, schema, nil, ingest.Config{
 			MaxBufferRows: 100_000,
 			RowGroupSize:  65_536,
@@ -398,7 +417,7 @@ func setupTPCHStreaming(tb testing.TB, sf ScaleFactor) *wadjet.DB {
 	totalRows := 0
 	lastLog := time.Now()
 
-	err = GenerateChunked(sf, 50_000, func(table string, rows []map[string]any) error {
+	err = GenerateChunkedFor(sf, 50_000, f, func(table string, rows []map[string]any) error {
 		totalRows += len(rows)
 		if time.Since(lastLog) > 5*time.Second {
 			pct := float64(totalRows) / float64(totalExpected) * 100
@@ -427,7 +446,7 @@ func setupTPCHStreaming(tb testing.TB, sf ScaleFactor) *wadjet.DB {
 	runtime.ReadMemStats(&mem)
 	tb.Logf("Memory: heap=%dMB, sys=%dMB", mem.HeapAlloc/1024/1024, mem.Sys/1024/1024)
 
-	return db
+	return db, store
 }
 
 // scaleFromEnv reads TPCH_SCALE env var and returns the scale factor.

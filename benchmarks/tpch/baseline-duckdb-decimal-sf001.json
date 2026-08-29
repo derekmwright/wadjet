@@ -1,0 +1,338 @@
+{
+  "generator": "duckdb v1.5.5 (Variegata) d8cdaa33fd over duckdb-data-decimal (WADJET_REGENERATE_DECIMAL_BASELINE=1)",
+  "note": "Ground truth for the DECIMAL(15,2) fixture (ADR-0024). Every entry is DuckDB output; nothing here is derived from Wadjet. Decimal columns are digested at the scale decimal_variant_test.go's decimalOutputTypes records, which is min(scale) where the two engines' type rules keep a different number of digits.",
+  "queries": {
+    "Q01": {
+      "source": "duckdb",
+      "row_count": 4,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "l_returnflag",
+        "l_linestatus",
+        "sum_qty",
+        "sum_base_price",
+        "sum_disc_price",
+        "sum_charge",
+        "avg_qty",
+        "avg_price",
+        "avg_disc",
+        "count_order"
+      ],
+      "fine": "11b668f848ecdf26",
+      "coarse": "b9e8616aefb61380"
+    },
+    "Q02": {
+      "source": "duckdb",
+      "row_count": 4,
+      "compare": "count",
+      "ordered": true,
+      "tolerance": 4,
+      "limit": 100,
+      "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
+    },
+    "Q02_nolimit": {
+      "source": "duckdb",
+      "row_count": 4,
+      "compare": "count",
+      "ordered": true,
+      "tolerance": 4,
+      "why": "row membership turns on an aggregate threshold; borderline rows shift with accumulation order"
+    },
+    "Q03": {
+      "source": "duckdb",
+      "row_count": 10,
+      "compare": "count",
+      "ordered": true,
+      "limit": 10,
+      "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
+    },
+    "Q03_nolimit": {
+      "source": "duckdb",
+      "row_count": 138,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "l_orderkey",
+        "revenue",
+        "o_orderdate",
+        "o_shippriority"
+      ],
+      "fine": "30d141674215416a",
+      "coarse": "30d141674215416a"
+    },
+    "Q04": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "o_orderpriority",
+        "order_count"
+      ],
+      "fine": "4dbc238e856c565d",
+      "coarse": "4dbc238e856c565d"
+    },
+    "Q05": {
+      "source": "duckdb",
+      "row_count": 5,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "n_name",
+        "revenue"
+      ],
+      "fine": "3085bfab483665d4",
+      "coarse": "3085bfab483665d4"
+    },
+    "Q06": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "revenue"
+      ],
+      "fine": "abded82b8723bb59",
+      "coarse": "abded82b8723bb59"
+    },
+    "Q07": {
+      "source": "duckdb",
+      "row_count": 4,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "supp_nation",
+        "cust_nation",
+        "l_year",
+        "revenue"
+      ],
+      "fine": "e9e28c770ac98b9d",
+      "coarse": "e9e28c770ac98b9d"
+    },
+    "Q08": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "o_year",
+        "brazil_revenue",
+        "total_revenue"
+      ],
+      "fine": "9459feba8e6d6348",
+      "coarse": "9459feba8e6d6348"
+    },
+    "Q09": {
+      "source": "duckdb",
+      "row_count": 173,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "nation",
+        "o_year",
+        "sum_profit"
+      ],
+      "fine": "bb943df4f1bfd1b3",
+      "coarse": "9bf0f62e54220705"
+    },
+    "Q10": {
+      "source": "duckdb",
+      "row_count": 20,
+      "compare": "count",
+      "ordered": true,
+      "limit": 20,
+      "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
+    },
+    "Q10_nolimit": {
+      "source": "duckdb",
+      "row_count": 399,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "c_custkey",
+        "c_name",
+        "revenue",
+        "c_acctbal",
+        "n_name",
+        "c_address",
+        "c_phone",
+        "c_comment"
+      ],
+      "fine": "118bfc7467c43521",
+      "coarse": "118bfc7467c43521"
+    },
+    "Q11": {
+      "source": "duckdb",
+      "row_count": 359,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "ps_partkey",
+        "value"
+      ],
+      "fine": "915eff959624bda5",
+      "coarse": "915eff959624bda5"
+    },
+    "Q12": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "l_shipmode",
+        "high_line_count",
+        "low_line_count"
+      ],
+      "fine": "f5eb3beeadf2bed8",
+      "coarse": "f5eb3beeadf2bed8"
+    },
+    "Q13": {
+      "source": "duckdb",
+      "row_count": 100,
+      "compare": "count",
+      "ordered": true,
+      "limit": 100,
+      "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
+    },
+    "Q13_nolimit": {
+      "source": "duckdb",
+      "row_count": 1500,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "c_custkey",
+        "c_count"
+      ],
+      "fine": "e0db1ab6c7e9820d",
+      "coarse": "e0db1ab6c7e9820d"
+    },
+    "Q14": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "promo_revenue",
+        "total_revenue"
+      ],
+      "fine": "7d6d79588fca4558",
+      "coarse": "7d6d79588fca4558"
+    },
+    "Q15": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "s_suppkey",
+        "s_name",
+        "s_address",
+        "s_phone",
+        "total_revenue"
+      ],
+      "fine": "9cad83142fcf9a6d",
+      "coarse": "9cad83142fcf9a6d"
+    },
+    "Q16": {
+      "source": "duckdb",
+      "row_count": 296,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "p_brand",
+        "p_type",
+        "p_size",
+        "supplier_cnt"
+      ],
+      "fine": "edb101931d473445",
+      "coarse": "edb101931d473445"
+    },
+    "Q17": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "avg_yearly"
+      ],
+      "fine": "fa4d91d2941621e2",
+      "coarse": "fa4d91d2941621e2"
+    },
+    "Q18": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "count",
+      "ordered": true,
+      "limit": 100,
+      "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
+    },
+    "Q18_nolimit": {
+      "source": "duckdb",
+      "row_count": 2,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "c_name",
+        "c_custkey",
+        "o_orderkey",
+        "o_orderdate",
+        "o_totalprice",
+        "total_qty"
+      ],
+      "fine": "429d38cec28f2095",
+      "coarse": "429d38cec28f2095"
+    },
+    "Q19": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": false,
+      "columns": [
+        "revenue"
+      ],
+      "fine": "2694ca56bd49f63d",
+      "coarse": "2694ca56bd49f63d"
+    },
+    "Q20": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "s_name",
+        "s_address"
+      ],
+      "fine": "2cad260f710ee8b5",
+      "coarse": "2cad260f710ee8b5"
+    },
+    "Q21": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "count",
+      "ordered": true,
+      "limit": 100,
+      "why": "rows tied at the LIMIT boundary are interchangeable; the count is not"
+    },
+    "Q21_nolimit": {
+      "source": "duckdb",
+      "row_count": 1,
+      "compare": "rows",
+      "ordered": true,
+      "columns": [
+        "s_name",
+        "numwait"
+      ],
+      "fine": "3c350ba996bea4e4",
+      "coarse": "3c350ba996bea4e4"
+    },
+    "Q22": {
+      "source": "duckdb",
+      "row_count": 7,
+      "compare": "count",
+      "ordered": true,
+      "tolerance": 4,
+      "why": "row membership turns on an aggregate threshold; borderline rows shift with accumulation order"
+    }
+  }
+}

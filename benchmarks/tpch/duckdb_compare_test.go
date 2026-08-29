@@ -2388,8 +2388,16 @@ func duckdbViews(t *testing.T, dataDir string) string {
 // of AllTables (which drives the harness, the seeders and both data tiers).
 // A caller whose data holds nothing but AllTables gets exactly AllTables.
 func fixtureSchemas(data map[string][]map[string]any) map[string]parquet.Schema {
-	out := make(map[string]parquet.Schema, len(AllTables)+1)
-	for name, schema := range AllTables {
+	return fixtureSchemasFor(FloatFixture, data)
+}
+
+// fixtureSchemasFor is fixtureSchemas for a chosen TPC-H fixture. The probe
+// tables are the same in both — they are DECIMAL/BYTES/ROW corpora of their
+// own and have nothing to do with the monetary carrier.
+func fixtureSchemasFor(f Fixture, data map[string][]map[string]any) map[string]parquet.Schema {
+	tables := TablesFor(f)
+	out := make(map[string]parquet.Schema, len(tables)+1)
+	for name, schema := range tables {
 		out[name] = schema
 	}
 	probes := oracleTables()
@@ -2427,13 +2435,19 @@ func duckdbFixtureRows(t *testing.T) map[string][]map[string]any {
 // the fixture.
 func ingestDuckDBFixture(t *testing.T, ctx context.Context, data map[string][]map[string]any) *wadjet.DB {
 	t.Helper()
+	return openFixtureDB(t, ctx, FloatFixture, data)
+}
+
+// openFixtureDB is ingestDuckDBFixture for a chosen fixture.
+func openFixtureDB(t *testing.T, ctx context.Context, f Fixture, data map[string][]map[string]any) *wadjet.DB {
+	t.Helper()
 	store := objstore.NewMemStore()
 	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "tpch"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	for tableName, schema := range fixtureSchemas(data) {
+	for tableName, schema := range fixtureSchemasFor(f, data) {
 		if err := db.CreateTable(ctx, tableName, schema, nil); err != nil {
 			t.Fatalf("create table %s: %v", tableName, err)
 		}

@@ -190,6 +190,13 @@ refactor(scan): extract predicate pushdown into separate module
   task pg-oracle:test-large SCALE=0.1      # generated tier (~60s), one source feeds both engines
   ```
   Two arms: `EngineSemantics` compares values through the embedded API, and `WireProtocol` compares what the WIRE carries (type OIDs, result format codes, RowDescription, NULL representation, SQLSTATE, command tag, CancelRequest) through pgx against both servers. The wire arm is the one DuckDB cannot provide — a value oracle cannot see a right value under a wrong OID. It **skips** when no server is reachable, so CI is unaffected. Divergences are pinned per entry (`knownBug`) or per wire PROPERTY (`pins`), and a pin that starts agreeing FAILS — deleting it is the fix's proof. Never exempt a divergence by narrowing the corpus: configure the oracle instead (the fixture is loaded into a `--locale=C` database with `COLLATE "C"` text columns, because wadjet compares strings by bytes; `TestPostgresOracleIsConfiguredForByteCollation` guards that and runs without a server).
+- **DECIMAL gate**: the TPC-H fixture has a spec-conformant `DECIMAL(15,2)` variant (ADR-0024) — the same dbgen rows with the specification's eight monetary columns as exact fixed-point. It compares DIGIT FOR DIGIT where the answer is decimal, which the FLOAT64 gate's six-significant-digit quantum cannot. Run it after any change to decimal typing, arithmetic, aggregation or the wire declaration:
+  ```bash
+  go test -run 'TestTPCHQueriesDecimal|TestTPCHDecimalDeclaredTypes' ./benchmarks/tpch/
+  go test -run 'TestTPCHOptimizationInvarianceDecimal|TestTwoPathInvarianceDecimal' ./benchmarks/tpch/
+  task pg-oracle:test-decimal        # both oracle arms over the decimal fixture
+  ```
+  The FLOAT64 schema stays the default and the published-number benchmark; the variant is opt-in (`TPCH_DECIMAL=1`, or an explicit `Fixture`). Baseline numbers: `docs/benchmarks/tpch-decimal-baseline-2026-08-29.md`.
 - **Test patterns**: Table-driven tests preferred. Use `tb.Helper()` in test helpers. Use `objstore.NewMemStore()` for storage in tests (no real S3).
 
 ### Code Style

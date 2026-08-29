@@ -90,6 +90,36 @@ cp /tmp/tpch-sf001/*.parquet benchmarks/tpch/duckdb-data/
 WADJET_REGENERATE_DUCKDB_BASELINE=1 go test -run TestDuckDBCompare ./benchmarks/tpch/
 ```
 
+## The DECIMAL(15,2) sibling
+
+`export-wadjet-shape-decimal.sql` writes `benchmarks/tpch/duckdb-data-decimal/`
+from the SAME `dbgen(sf=0.01)` call. The eight columns the TPC-H specification
+declares `DECIMAL(15,2)` keep dbgen's native type instead of being cast to
+DOUBLE; every other column, `l_quantity` included, is identical. So the two
+fixtures hold the same values and differ only in carrier, which is what makes
+a comparison between them a comparison about the carrier.
+
+That fixture feeds `TestTPCHQueriesDecimal` and `TestTPCHDecimalDeclaredTypes`
+(ADR-0024), gated against `baseline-duckdb-decimal-sf001.json`:
+
+```bash
+go test -run TestTPCHQueriesDecimal ./benchmarks/tpch/                       # the gate
+WADJET_DUCKDB_COMPARE=1 go test -run TestTPCHQueriesDecimal ./benchmarks/tpch/   # + live DuckDB
+WADJET_REGENERATE_DECIMAL_BASELINE=1 go test -run TestTPCHQueriesDecimal ./benchmarks/tpch/
+
+# regenerate the parquet itself
+mkdir -p /tmp/tpch-sf001-decimal
+/tmp/duckdb < benchmarks/tpch/duckdb-setup/export-wadjet-shape-decimal.sql
+cp /tmp/tpch-sf001-decimal/*.parquet benchmarks/tpch/duckdb-data-decimal/
+```
+
+The decimal gate compares DIGIT FOR DIGIT where the answer is decimal, at the
+scale `decimal_variant_test.go`'s `decimalOutputTypes` records — each engine's
+declared scale where they agree, `min(scale)` where PostgreSQL's rules and
+DuckDB's differ (AVG and `/` over numeric, ADR-0012 item 9). The float gate's
+six-significant-digit quantum exists for float summation order and has no
+business in an answer that is exact.
+
 ## What `export-wadjet-shape.sql` does
 
 Generates SF0.01 in DuckDB's tpch extension and exports each table to

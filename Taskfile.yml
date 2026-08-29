@@ -202,6 +202,11 @@ tasks:
     cmds:
       - go test -v -run 'TestPostgresOracle$' -timeout 30m ./benchmarks/tpch/
 
+  pg-oracle:test-decimal:
+    desc: Run the oracle over the spec-conformant TPC-H DECIMAL(15,2) fixture (ADR-0024)
+    cmds:
+      - TPCH_DECIMAL=1 go test -v -run 'TestPostgresOracle$' -timeout 30m ./benchmarks/tpch/
+
   pg-oracle:test-large:
     desc: 'Run the oracle at a larger tier, e.g. task pg-oracle:test-large SCALE=1 (SF1 loads ~7.7M rows)'
     vars:

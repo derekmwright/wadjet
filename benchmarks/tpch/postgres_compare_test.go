@@ -454,6 +454,24 @@ func postgresCorpus() []pgCase {
 			c.countOnly, c.tolerance = true, 4
 			c.why = "row membership turns on a float threshold; borderline rows shift with accumulation order"
 		}
+		// Under TPCH_DECIMAL=1 (ADR-0024) some of the 22 reach defects the
+		// FLOAT64 carrier never does. Each pin names its issue and still
+		// RUNS, so it fails the day the query starts agreeing.
+		if FixtureFromEnv() == DecimalFixture {
+			caseLiteralBug := pgBugWadjet + " a CASE over a DECIMAL column and a numeric literal declares " +
+				"the LITERAL's type, so the decimal evaluator writes its text into an integer vector " +
+				"and the #361 silent-write guard raises"
+			switch {
+			case n == 14:
+				c.knownBug, c.issue = caseLiteralBug, "#695"
+			case n == 8 && decimalTierPastSF001():
+				// Q08 is the same defect, and which face it shows depends on
+				// the tier: at SF0.01 its decimal branch takes no row, so
+				// every VALUE agrees and only the declared type is wrong —
+				// which this arm does not look at, and the wire arm gates.
+				c.knownBug, c.issue = caseLiteralBug, "#695"
+			}
+		}
 		if lim := trailingLimit(sql); lim > 0 {
 			stripped := strings.TrimRight(trailingLimitRe.ReplaceAllString(sql, ""), " \t\n")
 			full := c
@@ -1572,8 +1590,13 @@ func postgresSemanticsCases() []pgCase {
 		// quoted numeric as ZERO — the two arms #536 did not reach.
 		pgCase{name: "IntColumnVsQuotedNumericInList",
 			sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key IN ('2','3')`, knownBug: quotedNumericPin, issue: "#536"},
+		// l_quantity, not l_discount: this entry's subject is a FLOAT column,
+		// and l_discount is DECIMAL(15,2) under TPCH_DECIMAL=1 (ADR-0024),
+		// where the question would silently become the decimal one the
+		// dec_probe entries already ask. l_quantity is FLOAT64 in BOTH
+		// fixtures, so the entry stays gated in both.
 		pgCase{name: "FloatColumnVsQuotedNumericGt",
-			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_discount > '0.05'`, knownBug: quotedNumericPin, issue: "#536"},
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_quantity > '25'`, knownBug: quotedNumericPin, issue: "#536"},
 	)
 
 	// NaN and the infinities against a DECIMAL column (#534, ADR-0024 item 6).
@@ -1712,8 +1735,11 @@ func postgresSemanticsCases() []pgCase {
 				`negative row where PostgreSQL asks '> -Infinity' and keeps them. The float arm of ` +
 				`#536; the CASE-wrapped entries beside this one gate the row path's correct answer.`,
 			issue: "#646"},
+		// l_quantity for the same reason as FloatColumnVsQuotedNumericGt: the
+		// subject must stay FLOAT in both fixtures, or the float arm of #536
+		// stops being asked under TPCH_DECIMAL=1.
 		pgCase{name: "FloatColumnLtNaN",
-			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_discount < 'NaN'`,
+			sql: `SELECT COUNT(*) AS n FROM lineitem WHERE l_quantity < 'NaN'`,
 			knownBug: pgBugWadjet + ` the vectorized FLOAT kernel reads a quoted constant as 0.0, ` +
 				`so this asks '< 0.0' where PostgreSQL asks '< NaN' and admits every row. The float ` +
 				`arm of #536, tracked as #646.`,
@@ -2972,11 +2998,16 @@ func postgresSemanticsCases() []pgCase {
 			GREATEST(n_nationkey, n_regionkey) AS greatest_int,
 			LEAST(n_nationkey, n_regionkey) AS least_int
 			FROM nation ORDER BY n_nationkey`},
-		pgCase{name: "PolymorphicOverFloatColumns", sql: `SELECT ps_partkey, ps_suppkey,
-			COALESCE(ps_supplycost, 0) AS coalesce_float,
-			GREATEST(ps_supplycost, ps_availqty) AS greatest_mixed,
-			LEAST(ps_supplycost, ps_availqty) AS least_mixed
-			FROM partsupp WHERE ps_partkey <= 20 ORDER BY ps_partkey, ps_suppkey`},
+		// l_quantity/l_linenumber rather than ps_supplycost/ps_availqty: this
+		// entry's subject is the CHOICE family over a FLOAT column, and
+		// ps_supplycost is DECIMAL(15,2) under TPCH_DECIMAL=1 (ADR-0024),
+		// where the same SQL asks the decimal question #695 is filed on.
+		// l_quantity is FLOAT64 in both fixtures.
+		pgCase{name: "PolymorphicOverFloatColumns", sql: `SELECT l_orderkey, l_linenumber,
+			COALESCE(l_quantity, 0) AS coalesce_float,
+			GREATEST(l_quantity, l_linenumber) AS greatest_mixed,
+			LEAST(l_quantity, l_linenumber) AS least_mixed
+			FROM lineitem WHERE l_orderkey <= 20 ORDER BY l_orderkey, l_linenumber`},
 		pgCase{name: "CaseWhenTypeResolution", sql: `SELECT n_nationkey,
 			CASE WHEN n_regionkey = 0 THEN 'zero' WHEN n_regionkey = 1 THEN 'one' ELSE 'many' END AS s,
 			CASE WHEN n_regionkey = 0 THEN 1 ELSE 2 END AS i,

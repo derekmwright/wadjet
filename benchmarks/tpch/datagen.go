@@ -82,21 +82,28 @@ func init() {
 	}
 }
 
-// Generate produces all TPC-H tables at the given scale factor.
-// Returns a map of table name → rows. Deterministic for a given SF.
+// Generate produces all TPC-H tables at the given scale factor in the FLOAT64
+// fixture. Returns a map of table name → rows. Deterministic for a given SF.
 func Generate(sf ScaleFactor) map[string][]map[string]any {
+	return GenerateFor(sf, FloatFixture)
+}
+
+// GenerateFor is Generate for a chosen fixture. The RNG draws are identical in
+// both, so the two fixtures hold the SAME VALUES and differ only in the carrier
+// of the eight monetary columns (see schema_decimal.go).
+func GenerateFor(sf ScaleFactor, f Fixture) map[string][]map[string]any {
 	rng := rand.New(rand.NewSource(int64(sf * 42_000_000)))
 	counts := sf.RowCounts()
 	data := make(map[string][]map[string]any, 8)
 
 	data["region"] = genRegion()
 	data["nation"] = genNation()
-	data["supplier"] = genSupplier(rng, counts.Supplier)
-	data["part"] = genPart(rng, counts.Part)
-	data["partsupp"] = genPartSupp(rng, counts.Part, counts.Supplier, counts.PartSupp)
-	data["customer"] = genCustomer(rng, counts.Customer)
-	data["orders"] = genOrders(rng, counts.Orders, counts.Customer)
-	data["lineitem"] = genLineItem(rng, counts.Orders, counts.LineItem, counts.Part, counts.Supplier)
+	data["supplier"] = genSupplier(rng, counts.Supplier, f)
+	data["part"] = genPart(rng, counts.Part, f)
+	data["partsupp"] = genPartSupp(rng, counts.Part, counts.Supplier, counts.PartSupp, f)
+	data["customer"] = genCustomer(rng, counts.Customer, f)
+	data["orders"] = genOrders(rng, counts.Orders, counts.Customer, f)
+	data["lineitem"] = genLineItem(rng, counts.Orders, counts.LineItem, counts.Part, counts.Supplier, f)
 
 	return data
 }
@@ -144,6 +151,11 @@ func (e *chunkEmitter) flush() error {
 // GenerateChunked streams TPC-H data for all tables, calling emit with chunks of rows.
 // Memory usage is bounded to O(chunkSize) regardless of scale factor.
 func GenerateChunked(sf ScaleFactor, chunkSize int, emit func(table string, rows []map[string]any) error) error {
+	return GenerateChunkedFor(sf, chunkSize, FloatFixture, emit)
+}
+
+// GenerateChunkedFor is GenerateChunked for a chosen fixture.
+func GenerateChunkedFor(sf ScaleFactor, chunkSize int, f Fixture, emit func(table string, rows []map[string]any) error) error {
 	rng := rand.New(rand.NewSource(int64(sf * 42_000_000)))
 	counts := sf.RowCounts()
 
@@ -160,13 +172,13 @@ func GenerateChunked(sf ScaleFactor, chunkSize int, emit func(table string, rows
 		fn   func(*chunkEmitter)
 	}
 	tables := []tableGen{
-		{"supplier", func(e *chunkEmitter) { streamSupplier(rng, counts.Supplier, e) }},
-		{"part", func(e *chunkEmitter) { streamPart(rng, counts.Part, e) }},
-		{"partsupp", func(e *chunkEmitter) { streamPartSupp(rng, counts.Part, counts.Supplier, counts.PartSupp, e) }},
-		{"customer", func(e *chunkEmitter) { streamCustomer(rng, counts.Customer, e) }},
-		{"orders", func(e *chunkEmitter) { streamOrders(rng, counts.Orders, counts.Customer, e) }},
+		{"supplier", func(e *chunkEmitter) { streamSupplier(rng, counts.Supplier, f, e) }},
+		{"part", func(e *chunkEmitter) { streamPart(rng, counts.Part, f, e) }},
+		{"partsupp", func(e *chunkEmitter) { streamPartSupp(rng, counts.Part, counts.Supplier, counts.PartSupp, f, e) }},
+		{"customer", func(e *chunkEmitter) { streamCustomer(rng, counts.Customer, f, e) }},
+		{"orders", func(e *chunkEmitter) { streamOrders(rng, counts.Orders, counts.Customer, f, e) }},
 		{"lineitem", func(e *chunkEmitter) {
-			streamLineItem(rng, counts.Orders, counts.LineItem, counts.Part, counts.Supplier, e)
+			streamLineItem(rng, counts.Orders, counts.LineItem, counts.Part, counts.Supplier, f, e)
 		}},
 	}
 
@@ -209,7 +221,7 @@ func genNation() []map[string]any {
 	return rows
 }
 
-func genSupplier(rng *rand.Rand, count int) []map[string]any {
+func genSupplier(rng *rand.Rand, count int, f Fixture) []map[string]any {
 	rows := make([]map[string]any, count)
 	for i := range rows {
 		rows[i] = map[string]any{
@@ -218,14 +230,14 @@ func genSupplier(rng *rand.Rand, count int) []map[string]any {
 			"s_address":   randString(rng, 10, 25),
 			"s_nationkey": int32(rng.Intn(25)),
 			"s_phone":     randPhone(rng),
-			"s_acctbal":   randFloat(rng, -999.99, 9999.99),
+			"s_acctbal":   f.money(randCents(rng, -999.99, 9999.99)),
 			"s_comment":   randString(rng, 20, 80),
 		}
 	}
 	return rows
 }
 
-func genPart(rng *rand.Rand, count int) []map[string]any {
+func genPart(rng *rand.Rand, count int, f Fixture) []map[string]any {
 	rows := make([]map[string]any, count)
 	for i := range rows {
 		rows[i] = map[string]any{
@@ -236,14 +248,14 @@ func genPart(rng *rand.Rand, count int) []map[string]any {
 			"p_type":        partTypes[rng.Intn(len(partTypes))],
 			"p_size":        int32(rng.Intn(50) + 1),
 			"p_container":   containers[rng.Intn(len(containers))],
-			"p_retailprice": float64(90000+i*3+int(rng.Int31n(1000))) / 100.0,
+			"p_retailprice": f.money(int64(90000 + i*3 + int(rng.Int31n(1000)))),
 			"p_comment":     randString(rng, 5, 20),
 		}
 	}
 	return rows
 }
 
-func genPartSupp(rng *rand.Rand, numParts, numSupps, count int) []map[string]any {
+func genPartSupp(rng *rand.Rand, numParts, numSupps, count int, f Fixture) []map[string]any {
 	rows := make([]map[string]any, 0, count)
 	suppPerPart := 4
 	if count < numParts*4 {
@@ -256,7 +268,7 @@ func genPartSupp(rng *rand.Rand, numParts, numSupps, count int) []map[string]any
 				"ps_partkey":    int32(i + 1),
 				"ps_suppkey":    int32(suppKey),
 				"ps_availqty":   int32(rng.Intn(9999) + 1),
-				"ps_supplycost": randFloat(rng, 1.0, 1000.0),
+				"ps_supplycost": f.money(randCents(rng, 1.0, 1000.0)),
 				"ps_comment":    randString(rng, 20, 120),
 			})
 		}
@@ -264,7 +276,7 @@ func genPartSupp(rng *rand.Rand, numParts, numSupps, count int) []map[string]any
 	return rows
 }
 
-func genCustomer(rng *rand.Rand, count int) []map[string]any {
+func genCustomer(rng *rand.Rand, count int, f Fixture) []map[string]any {
 	rows := make([]map[string]any, count)
 	for i := range rows {
 		rows[i] = map[string]any{
@@ -273,7 +285,7 @@ func genCustomer(rng *rand.Rand, count int) []map[string]any {
 			"c_address":    randString(rng, 10, 25),
 			"c_nationkey":  int32(rng.Intn(25)),
 			"c_phone":      randPhone(rng),
-			"c_acctbal":    randFloat(rng, -999.99, 9999.99),
+			"c_acctbal":    f.money(randCents(rng, -999.99, 9999.99)),
 			"c_mktsegment": mktSegments[rng.Intn(len(mktSegments))],
 			"c_comment":    randString(rng, 20, 80),
 		}
@@ -281,7 +293,7 @@ func genCustomer(rng *rand.Rand, count int) []map[string]any {
 	return rows
 }
 
-func genOrders(rng *rand.Rand, count, numCusts int) []map[string]any {
+func genOrders(rng *rand.Rand, count, numCusts int, f Fixture) []map[string]any {
 	rows := make([]map[string]any, count)
 	statuses := []string{"F", "O", "P"}
 	// TPC-H spec: orders only reference the first 2/3 of customers.
@@ -295,7 +307,7 @@ func genOrders(rng *rand.Rand, count, numCusts int) []map[string]any {
 			"o_orderkey":      int32(i + 1),
 			"o_custkey":       int32(rng.Intn(custRange) + 1),
 			"o_orderstatus":   statuses[rng.Intn(3)],
-			"o_totalprice":    randFloat(rng, 1000.0, 500000.0),
+			"o_totalprice":    f.money(randCents(rng, 1000.0, 500000.0)),
 			"o_orderdate":     fmt.Sprintf("%04d-%02d-%02d", year, month, day),
 			"o_orderpriority": priorities[rng.Intn(len(priorities))],
 			"o_clerk":         fmt.Sprintf("Clerk#%09d", rng.Intn(max(1, count/1000))+1),
@@ -306,7 +318,7 @@ func genOrders(rng *rand.Rand, count, numCusts int) []map[string]any {
 	return rows
 }
 
-func genLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int) []map[string]any {
+func genLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int, f Fixture) []map[string]any {
 	rows := make([]map[string]any, 0, count)
 	flags := []string{"N", "R", "A"}
 	lineStatuses := []string{"O", "F"}
@@ -316,9 +328,9 @@ func genLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int) []map
 		nLines := 1 + rng.Intn(7) // 1 to 7 line items
 		for ln := 1; ln <= nLines && len(rows) < count; ln++ {
 			quantity := float64(rng.Intn(50) + 1)
-			price := randFloat(rng, 900.0, 100000.0)
-			discount := float64(rng.Intn(11)) / 100.0
-			tax := float64(rng.Intn(9)) / 100.0
+			price := f.money(randCents(rng, 900.0, 100000.0))
+			discount := f.money(int64(rng.Intn(11)))
+			tax := f.money(int64(rng.Intn(9)))
 
 			// TPC-H spec date generation:
 			// L_COMMITDATE = O_ORDERDATE + random(5, 120) days
@@ -377,9 +389,14 @@ func randPhone(rng *rand.Rand) string {
 		rng.Intn(25)+10, rng.Intn(1000), rng.Intn(1000), rng.Intn(10000))
 }
 
-func randFloat(rng *rand.Rand, lo, hi float64) float64 {
+// randCents draws a monetary value in [lo, hi) and returns its EXACT
+// hundredths. It replaced randFloat, which drew the same value and then
+// divided the same truncated integer by 100 — so the FLOAT64 fixture's values
+// are bit-for-bit what they were, and the DECIMAL fixture gets the integer
+// before any float64 has touched it.
+func randCents(rng *rand.Rand, lo, hi float64) int64 {
 	v := lo + rng.Float64()*(hi-lo)
-	return float64(int64(v*100)) / 100.0 // 2 decimal places
+	return int64(v * 100) // 2 decimal places
 }
 
 var partNameWords = []string{
@@ -407,7 +424,7 @@ func randPartName(rng *rand.Rand) string {
 // Streaming generators — identical logic to gen* but emit rows via chunkEmitter
 // to bound memory usage at large scale factors.
 
-func streamSupplier(rng *rand.Rand, count int, e *chunkEmitter) {
+func streamSupplier(rng *rand.Rand, count int, f Fixture, e *chunkEmitter) {
 	for i := 0; i < count; i++ {
 		e.add(map[string]any{
 			"s_suppkey":   int32(i + 1),
@@ -415,13 +432,13 @@ func streamSupplier(rng *rand.Rand, count int, e *chunkEmitter) {
 			"s_address":   randString(rng, 10, 25),
 			"s_nationkey": int32(rng.Intn(25)),
 			"s_phone":     randPhone(rng),
-			"s_acctbal":   randFloat(rng, -999.99, 9999.99),
+			"s_acctbal":   f.money(randCents(rng, -999.99, 9999.99)),
 			"s_comment":   randString(rng, 20, 80),
 		})
 	}
 }
 
-func streamPart(rng *rand.Rand, count int, e *chunkEmitter) {
+func streamPart(rng *rand.Rand, count int, f Fixture, e *chunkEmitter) {
 	for i := 0; i < count; i++ {
 		e.add(map[string]any{
 			"p_partkey":     int32(i + 1),
@@ -431,13 +448,13 @@ func streamPart(rng *rand.Rand, count int, e *chunkEmitter) {
 			"p_type":        partTypes[rng.Intn(len(partTypes))],
 			"p_size":        int32(rng.Intn(50) + 1),
 			"p_container":   containers[rng.Intn(len(containers))],
-			"p_retailprice": float64(90000+i*3+int(rng.Int31n(1000))) / 100.0,
+			"p_retailprice": f.money(int64(90000 + i*3 + int(rng.Int31n(1000)))),
 			"p_comment":     randString(rng, 5, 20),
 		})
 	}
 }
 
-func streamPartSupp(rng *rand.Rand, numParts, numSupps, count int, e *chunkEmitter) {
+func streamPartSupp(rng *rand.Rand, numParts, numSupps, count int, f Fixture, e *chunkEmitter) {
 	suppPerPart := 4
 	if count < numParts*4 {
 		suppPerPart = max(1, count/max(1, numParts))
@@ -450,7 +467,7 @@ func streamPartSupp(rng *rand.Rand, numParts, numSupps, count int, e *chunkEmitt
 				"ps_partkey":    int32(i + 1),
 				"ps_suppkey":    int32(suppKey),
 				"ps_availqty":   int32(rng.Intn(9999) + 1),
-				"ps_supplycost": randFloat(rng, 1.0, 1000.0),
+				"ps_supplycost": f.money(randCents(rng, 1.0, 1000.0)),
 				"ps_comment":    randString(rng, 20, 120),
 			})
 			n++
@@ -458,7 +475,7 @@ func streamPartSupp(rng *rand.Rand, numParts, numSupps, count int, e *chunkEmitt
 	}
 }
 
-func streamCustomer(rng *rand.Rand, count int, e *chunkEmitter) {
+func streamCustomer(rng *rand.Rand, count int, f Fixture, e *chunkEmitter) {
 	for i := 0; i < count; i++ {
 		e.add(map[string]any{
 			"c_custkey":    int32(i + 1),
@@ -466,14 +483,14 @@ func streamCustomer(rng *rand.Rand, count int, e *chunkEmitter) {
 			"c_address":    randString(rng, 10, 25),
 			"c_nationkey":  int32(rng.Intn(25)),
 			"c_phone":      randPhone(rng),
-			"c_acctbal":    randFloat(rng, -999.99, 9999.99),
+			"c_acctbal":    f.money(randCents(rng, -999.99, 9999.99)),
 			"c_mktsegment": mktSegments[rng.Intn(len(mktSegments))],
 			"c_comment":    randString(rng, 20, 80),
 		})
 	}
 }
 
-func streamOrders(rng *rand.Rand, count, numCusts int, e *chunkEmitter) {
+func streamOrders(rng *rand.Rand, count, numCusts int, f Fixture, e *chunkEmitter) {
 	statuses := []string{"F", "O", "P"}
 	custRange := max(1, numCusts*2/3)
 	for i := 0; i < count; i++ {
@@ -484,7 +501,7 @@ func streamOrders(rng *rand.Rand, count, numCusts int, e *chunkEmitter) {
 			"o_orderkey":      int32(i + 1),
 			"o_custkey":       int32(rng.Intn(custRange) + 1),
 			"o_orderstatus":   statuses[rng.Intn(3)],
-			"o_totalprice":    randFloat(rng, 1000.0, 500000.0),
+			"o_totalprice":    f.money(randCents(rng, 1000.0, 500000.0)),
 			"o_orderdate":     fmt.Sprintf("%04d-%02d-%02d", year, month, day),
 			"o_orderpriority": priorities[rng.Intn(len(priorities))],
 			"o_clerk":         fmt.Sprintf("Clerk#%09d", rng.Intn(max(1, count/1000))+1),
@@ -494,7 +511,7 @@ func streamOrders(rng *rand.Rand, count, numCusts int, e *chunkEmitter) {
 	}
 }
 
-func streamLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int, e *chunkEmitter) {
+func streamLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int, f Fixture, e *chunkEmitter) {
 	flags := []string{"N", "R", "A"}
 	lineStatuses := []string{"O", "F"}
 
@@ -503,9 +520,9 @@ func streamLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int, e 
 		nLines := 1 + rng.Intn(7) // TPC-H spec: 1-7 line items per order
 		for ln := 1; ln <= nLines && n < count; ln++ {
 			quantity := float64(rng.Intn(50) + 1)
-			price := randFloat(rng, 900.0, 100000.0)
-			discount := float64(rng.Intn(11)) / 100.0
-			tax := float64(rng.Intn(9)) / 100.0
+			price := f.money(randCents(rng, 900.0, 100000.0))
+			discount := f.money(int64(rng.Intn(11)))
+			tax := f.money(int64(rng.Intn(9)))
 
 			// TPC-H spec date generation:
 			// L_COMMITDATE = O_ORDERDATE + random(5, 120) days
