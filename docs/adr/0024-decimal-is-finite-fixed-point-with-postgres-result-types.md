@@ -249,6 +249,18 @@ error (current, pinned by `TestSetOpDecimalCapIsARangeReduction`) or a wider
 carrier (item 1's reopen clause). The shape — `DECIMAL(38,0)` beside
 `DECIMAL(11,10)` — is the pathological corner of the cap, not a BI query.
 
+**Amended 2026-08-29 (#665): a numeric LITERAL arm is a second trigger, and it
+does not need a wide column to reach.** Once the literal carries its spelling's
+`(p,s)` (item 2's rule applied to a constant), its SCALE enters the common
+type: `SELECT d380 FROM t UNION ALL SELECT 0.1234567890 FROM t` over a
+`DECIMAL(38,0)` resolves `DECIMAL(38,10)`, and a `10^30` the column holds
+comfortably has no carrier at that scale. PostgreSQL answers all four rows.
+This is the same range reduction and the same position — the error, never a
+wrapped or silently narrowed value — but the trigger is now a constant a query
+writes rather than a second wide column it joins to, so it is more reachable
+than the shape this item was written for. `TestSetOpDecimalCapIsARangeReduction`
+pins the literal form beside the two-column one.
+
 ## Consequences
 
 - One table of rules replaces five independently-derived ones (grouped

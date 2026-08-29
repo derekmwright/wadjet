@@ -341,6 +341,7 @@ func tmdTables() []tmdTable {
 		// and no type-matrix corpus entry names either table.
 		{sodTable, sodSchema(), sodData()},
 		{sodOvfTable, sodOvfSchema(), sodOvfData()},
+		{sodUncTable, sodUncSchema(), sodUncData()},
 		{sodJoinA, sodJoinSchema(9, 2), sodJoinData(1275)},
 		{sodJoinB, sodJoinSchema(18, 4), sodJoinData(127500)},
 		// The FLOAT32 comparison-width fixture (#631 the scalar operators,

@@ -153,43 +153,70 @@ func TestSetOpArmDeclsClaimsNothingItCannotResolve(t *testing.T) {
 	}
 }
 
-// TestLitDeclType pins a numeric literal's (p,s) to its SPELLING, which is how
-// PostgreSQL types one (#665). Verified against postgres:17's pg_typeof over
-// `SELECT <literal>`.
+// TestLitDeclType pins a numeric literal's type and (p,s) to its SPELLING,
+// which is how PostgreSQL types one (#665). Every row was verified against
+// live postgres:17.11 with pg_typeof over `SELECT <literal>`.
 func TestLitDeclType(t *testing.T) {
 	for _, tc := range []struct {
 		lit   string
 		want  expr.DeclType
+		text  string
 		wantK bool
 	}{
-		// The issue's literal: numeric(6,5).
-		{"1.23456", expr.DeclDecimal(6, 5), true},
-		{"12.75", expr.DeclDecimal(4, 2), true},
-		// A leading zero holds no place: `0.5` is numeric(1,1).
-		{"0.5", expr.DeclDecimal(1, 1), true},
-		{"0.00", expr.DeclDecimal(2, 2), true},
-		// Trailing zeros DO count — they are digits the literal was written
-		// with, and a set operation must not drop a scale the query stated.
-		{"1.5000", expr.DeclDecimal(5, 4), true},
-		// An INTEGER literal is not numeric here: it is on the integer rung
-		// of the ladder, where an integer arm contributes its whole range.
-		{"1", expr.DeclType{}, false},
-		{"0", expr.DeclType{}, false},
-		// An EXPONENT literal is float8 to PostgreSQL, not numeric.
-		{"1e3", expr.DeclType{}, false},
-		{"1.5e-2", expr.DeclType{}, false},
-		{"1.5E2", expr.DeclType{}, false},
+		// The issue's literal.
+		{"1.23456", expr.DeclDecimal(6, 5), "1.23456", true},
+		{"12.75", expr.DeclDecimal(4, 2), "12.75", true},
+		// A leading zero holds no place: `0.5` is one digit at scale 1.
+		{"0.5", expr.DeclDecimal(1, 1), "0.5", true},
+		{"0.00", expr.DeclDecimal(2, 2), "0.00", true},
+		// Trailing zeros DO count — they are digits the query wrote, and a
+		// set operation must not drop a scale it stated.
+		{"1.5000", expr.DeclDecimal(5, 4), "1.5000", true},
+		// A trailing point is a decimal point: PostgreSQL types `1.` numeric.
+		{"1.", expr.DeclDecimal(1, 0), "1", true},
+		// An EXPONENT makes a literal numeric in PostgreSQL, with or without
+		// a decimal point — `pg_typeof(1e2)` is numeric, not double
+		// precision. The (p,s) is the digits it EXPANDS to.
+		{"1e2", expr.DeclDecimal(3, 0), "100", true},
+		{"1.5e1", expr.DeclDecimal(2, 0), "15", true},
+		{"1.5e-2", expr.DeclDecimal(3, 3), "0.015", true},
+		{"1.5E2", expr.DeclDecimal(3, 0), "150", true},
+		{"2e-1", expr.DeclDecimal(1, 1), "0.2", true},
+		// A plain INTEGER literal stays on the ladder's integer rung, where
+		// an integer arm contributes its whole range's digits — PostgreSQL
+		// types these integer and bigint, not numeric.
+		{"1", expr.DeclType{}, "", false},
+		{"0", expr.DeclType{}, "", false},
+		{"12345678901", expr.DeclType{}, "", false},
+		// …until no integer type holds it. PostgreSQL types a 21-digit
+		// integer constant numeric.
+		{"123456789012345678901", expr.DeclDecimal(21, 0), "123456789012345678901", true},
 		// Past the carrier's width there is no DECIMAL to declare, so the
 		// float declaration stands rather than a fabricated (p,s).
-		{"1.0000000000000000000000000000000000000000", expr.DeclType{}, false},
+		{"1.0000000000000000000000000000000000000000", expr.DeclType{}, "", false},
+		{"1e40", expr.DeclType{}, "", false},
 		// Not a number at all.
-		{"1.2.3", expr.DeclType{}, false},
-		{"", expr.DeclType{}, false},
+		{"1.2.3", expr.DeclType{}, "", false},
+		{"1e", expr.DeclType{}, "", false},
+		{"", expr.DeclType{}, "", false},
 	} {
 		t.Run(tc.lit, func(t *testing.T) {
 			got, ok := litDeclType(&plansql.Lit{Value: tc.lit, Kind: plansql.LitNumber})
-			if ok != tc.wantK || (ok && got != tc.want) {
-				t.Errorf("litDeclType(%q) = (%v, %v), want (%v, %v)", tc.lit, got, ok, tc.want, tc.wantK)
+			if ok != tc.wantK {
+				t.Fatalf("litDeclType(%q) ok = %v, want %v (got %+v)", tc.lit, ok, tc.wantK, got)
+			}
+			if !ok {
+				return
+			}
+			if got.decl != tc.want {
+				t.Errorf("litDeclType(%q) declared %v, want %v", tc.lit, got.decl, tc.want)
+			}
+			// The TEXT is what the arm's projection is rewritten to, and it is
+			// the whole point: the evaluator folds a numeric literal into a
+			// float64, so a DECIMAL declared over the box would be an exact
+			// type on an already-rounded number.
+			if got.text != tc.text {
+				t.Errorf("litDeclType(%q) text = %q, want %q", tc.lit, got.text, tc.text)
 			}
 		})
 	}
@@ -202,32 +229,41 @@ func TestLitDeclType(t *testing.T) {
 	}
 }
 
-// TestLitOfReadsTheSign covers the wrapper: the parser makes a leading sign a
-// UnaryOp, and reading only the unsigned spelling would let the sign decide
-// the column's TYPE.
-func TestLitOfReadsTheSign(t *testing.T) {
+// TestSetOpLitArmReadsTheSign covers the wrapper: the parser makes a leading
+// sign a UnaryOp, and reading only the unsigned spelling would let the sign
+// decide the column's TYPE.
+func TestSetOpLitArmReadsTheSign(t *testing.T) {
 	lit := &plansql.Lit{Value: "1.5000", Kind: plansql.LitNumber}
 	for _, tc := range []struct {
 		name string
 		node plansql.Node
-		want bool
+		want string
+		ok   bool
 	}{
-		{"bare", lit, true},
-		{"negated", &plansql.UnaryOp{Op: "-", Inner: lit}, true},
-		{"explicitly positive", &plansql.UnaryOp{Op: "+", Inner: lit}, true},
-		{"parenthesized", &plansql.ParenNode{Inner: lit}, true},
-		{"negated and parenthesized", &plansql.UnaryOp{Op: "-", Inner: &plansql.ParenNode{Inner: lit}}, true},
-		{"a column reference", &plansql.ColRef{Column: "a"}, false},
-		{"an expression", &plansql.BinaryOp{Left: lit, Op: "+", Right: lit}, false},
+		{"bare", lit, "1.5000", true},
+		{"negated", &plansql.UnaryOp{Op: "-", Inner: lit}, "-1.5000", true},
+		{"explicitly positive", &plansql.UnaryOp{Op: "+", Inner: lit}, "1.5000", true},
+		{"parenthesized", &plansql.ParenNode{Inner: lit}, "1.5000", true},
+		{"negated and parenthesized",
+			&plansql.UnaryOp{Op: "-", Inner: &plansql.ParenNode{Inner: lit}}, "-1.5000", true},
+		{"twice negated", &plansql.UnaryOp{Op: "-", Inner: &plansql.UnaryOp{Op: "-", Inner: lit}}, "1.5000", true},
+		{"a column reference", &plansql.ColRef{Column: "a"}, "", false},
+		{"an expression", &plansql.BinaryOp{Left: lit, Op: "+", Right: lit}, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := litOf(tc.node)
-			if ok != tc.want {
-				t.Fatalf("litOf ok = %v, want %v", ok, tc.want)
+			got, ok := setOpLitArm(tc.node)
+			if ok != tc.ok {
+				t.Fatalf("setOpLitArm ok = %v, want %v", ok, tc.ok)
 			}
-			if ok && got != lit {
-				t.Errorf("litOf returned %#v, want the literal itself", got)
+			if ok && got.text != tc.want {
+				t.Errorf("setOpLitArm text = %q, want %q", got.text, tc.want)
 			}
 		})
+	}
+	// A signed ZERO keeps no sign: "-0" is not a spelling any parser or
+	// reader needs to see, and ParseDecimalStringChecked would carry it.
+	zero := &plansql.UnaryOp{Op: "-", Inner: &plansql.Lit{Value: "0.0", Kind: plansql.LitNumber}}
+	if got, ok := setOpLitArm(zero); !ok || got.text != "0.0" {
+		t.Errorf("setOpLitArm(-0.0) = %q/%v, want \"0.0\"/true", got.text, ok)
 	}
 }

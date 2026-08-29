@@ -506,12 +506,19 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 			// PostgreSQL reads as numeric and this walk otherwise read as
 			// float8 — so `SELECT d FROM t UNION ALL SELECT 1.23456`
 			// resolved double precision where PostgreSQL resolves numeric
-			// (#665). litDeclType is scoped to this site on purpose; see its
+			// (#665). setOpLitArm is scoped to this site on purpose; see its
 			// own comment.
-			if lit, ok := litOf(ast); ok {
-				if d, ok := litDeclType(lit); ok {
-					decl = d
-				}
+			//
+			// The expression is REWRITTEN to the literal's plain text as a
+			// quoted string, because the evaluator folds a numeric literal
+			// into a float64 and `1234567890123456.78` is not one: declaring
+			// DECIMAL over that box would put an exact type on a number that
+			// is already rounded. SetValueChecked parses the text at the
+			// column's scale with no float in between.
+			if d, ok := setOpLitArm(ast); ok {
+				decl = d.decl
+				e = "'" + d.text + "'"
+				spec.Expr = e
 			}
 			spec.Type, spec.Precision, spec.Scale = declTypeParts(decl)
 			spec.TypeKnown = true
@@ -537,6 +544,25 @@ func setOpArmProjection(arm *logical.Node, outNames []string) (setOpArmPlan, err
 				spec.TypeKnown = true
 				if ct.decKnown {
 					spec.Precision, spec.Scale = ct.dec.Precision, ct.dec.Scale
+				}
+			}
+		} else if cr, isRef := bareColRefOf(pr.ASTExpr); isRef && colTypes.isFieldPath(cr) {
+			// A ROW FIELD PATH is not the bare reference it looks like: `rd.d`
+			// names no column of anything, so the lookups above all miss and
+			// the arm came back untyped — which for a DECIMAL field beside a
+			// DECIMAL column is #551's channel with the disagreement one level
+			// in. The FIELD's declaration answers, on exactly the terms
+			// colDecls.colDecl resolves it (ADR-0022), and the spec carries the
+			// type because nothing downstream resolves a field path by name:
+			// it is MATERIALIZED the way a computed expression is.
+			if fc, ok := colTypes.field(cr); ok {
+				ct = setOpColType{typ: fc.Type, known: true}
+				spec.Type = fc.Type
+				spec.TypeKnown = true
+				if fc.Type == parquet.TypeDecimal && fc.Precision > 0 {
+					ct.dec = logical.DecimalMeta{Precision: fc.Precision, Scale: fc.Scale}
+					ct.decKnown = true
+					spec.Precision, spec.Scale = fc.Precision, fc.Scale
 				}
 			}
 		}
@@ -623,6 +649,22 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string) error {
 		// be cast to match, and forcing the typed ones alone would just move
 		// the mismatch.
 		if !allKnown {
+			// Except when a known arm is DECIMAL. Then "leave it alone" is
+			// not neutral: the untyped arm writes its own .wshf at whatever
+			// scale it happens to carry, the stage that reads both takes the
+			// first header's, and the values come back a power of ten out
+			// with nothing able to see it. That is #551's channel reached
+			// through allKnown rather than through decKnown, and it is the
+			// one the SQL shapes actually take — a join arm with a DERIVED
+			// side resolves to no type at all, not to a DECIMAL with no
+			// (p,s). Refuse, naming the column.
+			if setOpAnyDecimalArm(plans, col) {
+				return fmt.Errorf("result column %q is DECIMAL in one arm and its type cannot be "+
+					"resolved in %s — a set operation moves every arm into one DECIMAL(precision, "+
+					"scale) and an arm with no resolved type cannot be moved; give the arm an "+
+					"explicit CAST to a DECIMAL(p,s), or select the column directly",
+					outNames[col], setOpUntypedArmsDesc(plans, col))
+			}
 			continue
 		}
 		if want.typ == parquet.TypeDecimal {
@@ -676,6 +718,35 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string) error {
 		}
 	}
 	return nil
+}
+
+// setOpAnyDecimalArm reports whether any arm of one result column resolved to
+// DECIMAL. It is what makes an UNTYPED sibling arm a refusal rather than a
+// shrug: two arms nothing typed are the pre-existing "leave it alone" case and
+// carry no scale to disagree about, while a typed DECIMAL beside an untyped
+// arm is the reinterpretation #551 is about.
+func setOpAnyDecimalArm(plans []setOpArmPlan, col int) bool {
+	for i := range plans {
+		if ct := plans[i].types[col]; ct.known && ct.typ == parquet.TypeDecimal {
+			return true
+		}
+	}
+	return false
+}
+
+// setOpUntypedArmsDesc names the arms the walk could not type at all, with the
+// expression each one selects.
+func setOpUntypedArmsDesc(plans []setOpArmPlan, col int) string {
+	var arms []string
+	for i := range plans {
+		if !plans[i].types[col].known {
+			arms = append(arms, fmt.Sprintf("arm %d (%s)", i+1, plans[i].specs[col].Expr))
+		}
+	}
+	if len(arms) == 0 {
+		return "one of its arms"
+	}
+	return strings.Join(arms, " and ")
 }
 
 // setOpUnresolvedArmsDesc names the arms whose DECIMAL (p,s) the walk could

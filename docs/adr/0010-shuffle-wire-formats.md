@@ -94,9 +94,11 @@ consumer can sniff and decode, including mid-stream.
   ordinary union-stage shape, and the residual that survived in
   `reconcileSetOpArmTypes` — a join arm whose `(p,s)` the type walk dropped —
   was #551. It is closed two ways: the arm walk resolves a join's sides
-  separately (`physical.setOpArmDecls`), and an arm whose `(p,s)` STILL cannot
-  be resolved is now REFUSED at plan time naming the column, rather than left
-  as written for this reader to misread.
+  separately, under their qualified and derived-scope names
+  (`physical.setOpArmDecls`), and an arm that STILL cannot be resolved — no
+  `(p,s)`, or no type at all beside a DECIMAL sibling — is now REFUSED at plan
+  time naming the column, rather than left as written for this reader to
+  misread.
 
   The planner is where this is FIXED — `physical.reconcileSetOpArmTypes`
   coerces every arm to the set operation's output `(p,s)` before its rows enter

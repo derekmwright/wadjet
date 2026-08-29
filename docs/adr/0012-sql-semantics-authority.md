@@ -1284,41 +1284,78 @@ from a broken engine, so a *correct* engine failed our own gate) one level up.
     TEXT and needs its own fix (#499); the two paths are held to one answer by
     `internal/coordinator/setop_decimal_scale_two_path_test.go`.
 
-    **Where an arm's `(p,s)` cannot be resolved, the query is REFUSED at plan
-    time, naming the column.** (Amended 2026-08-29, #551.) Leaving every arm as
+    **Where an arm cannot be resolved, the query is REFUSED at plan time,
+    naming the column.** (Amended 2026-08-29, #551.) Leaving every arm as
     written was the earlier answer and it is a SILENT WRONG ANSWER: an earlier
     draft said `shuffleWriter.writeChunk`'s scale check turns that residual
     into a failed task, and it does not — that check sees a SINGLE writer
     handed two scales, while in a union stage each arm writes its own
     consistent file and the reinterpretation happens in the downstream stage
     that reads several of them (ADR-0010 carries the corrected statement).
-    Refusing is what this record already called the honest interim, and it is
-    now what happens.
+
+    The refusal covers TWO conditions, because the resolution can fail in two
+    places: an arm typed DECIMAL whose `(p,s)` nothing resolved (#458's
+    "unconstrained" sentinel is the reachable one), and an arm with NO resolved
+    type at all sitting beside a DECIMAL arm — which is the condition the SQL
+    shapes actually take, and which the first draft of this amendment did not
+    cover. Both are witnessed end-to-end by
+    `TestSetOpUnresolvableDecimalArmIsRefused`; an assertion over a hand-built
+    arm state is not evidence that a refusal is reachable.
+
+    **The single-process path ANSWERS what the DAG refuses here.** It re-reads
+    each row's rendered text under a `max(scale)` fallback, which moves no
+    value on that path, so an unresolvable arm is a divergence in WHICH
+    ANSWER EXISTS, not in what the answer is. PostgreSQL answers too. That is
+    the price of the refusal and it is recorded rather than hidden.
 
     Most of the shapes that used to reach it are resolved instead.
     `physical.setOpArmDecls` is the set operation's own view of an arm's
-    columns: a JOIN keeps a PER-SIDE answer, because `inputColTypes` /
-    `inputColDecimal` merge the two sides and delete any name they disagree
-    about — right for a TypeID and exactly wrong here, since that disagreement
-    IS the fact being reconciled — so each side's columns are also keyed under
-    its own relation names and the QUALIFIED spelling the projection carries
-    resolves against the right one (#551); and a PROJECT is descended INTO, so
-    a DERIVED-TABLE arm resolves through the names its subplan emits (#554),
-    with `setOpArmComputedSource` rewriting a forwarded COMPUTED column into
-    the expression that builds it. A numeric LITERAL arm takes its spelling's
-    `(p,s)` — PostgreSQL types `1.23456` as `numeric(6,5)` and the union
-    `numeric`, where the declared-type layer answers float8 for any literal
-    with a decimal point (#665); `litDeclType` is scoped to the arm, because
-    the type of a literal inside an ARITHMETIC expression is decided with
-    ADR-0024 item 3's decimal arithmetic and declaring DECIMAL over a float
-    evaluator would write a rounded value into an exact vector. The
-    single-process path builds the literal arm's vector from the declared-type
-    layer and so still resolves float8 there — the values agree, the wire OID
-    does not, and closing that half is the literal `(p,s)` work in `expr`.
+    columns:
 
-    The remaining resolution hole is a computed DECIMAL expression, which
-    carries no `(p,s)` (#458, #555). It reaches the refusal rather than a
-    silent reinterpretation.
+    - A JOIN keeps a PER-SIDE answer. `inputColTypes` / `inputColDecimal`
+      merge the two sides and delete any name they disagree about — right for
+      a TypeID and exactly wrong here, since that disagreement IS the fact
+      being reconciled — so each side's columns are keyed under its own
+      relation names and the QUALIFIED spelling the projection carries
+      resolves against the right one (#551). A DERIVED TABLE or CTE on one
+      side keys under its SCOPE name the same way: without that its Project
+      emitted only bare names, the merge deleted the contested one, and
+      `SUM(v)` over `(SELECT s.dx FROM (SELECT id, dx FROM b) s JOIN a …
+      UNION ALL SELECT dx FROM a)` answered 5151.0000 where PostgreSQL
+      answers 102.0000.
+    - A PROJECT is descended INTO, so a DERIVED-TABLE arm resolves through the
+      names its subplan emits (#554), with `setOpArmComputedSource` rewriting
+      a forwarded COMPUTED column into the expression that builds it. A nested
+      SET OPERATION behind such a Project reads its own reconciled result
+      types.
+    - A ROW FIELD PATH resolves through the FIELD's declaration on ADR-0022's
+      terms, and the spec carries the type because nothing downstream resolves
+      a field path by name — it is materialized the way a computed expression
+      is.
+    - A numeric LITERAL arm takes its spelling's `(p,s)`. PostgreSQL types a
+      constant numeric whenever it carries a decimal point OR an exponent
+      (`1.23456`, `1.`, `1e2`, `1.5e-2` — verified live against 17.11 with
+      `pg_typeof`; there is no float8 constant syntax) and types an INTEGER
+      constant numeric once no integer type holds it. The arm's expression is
+      REWRITTEN to the literal's plain decimal TEXT, because the evaluator
+      folds a numeric literal into a float64 and `1234567890123456.78` is not
+      one: declaring DECIMAL over that box would put an exact type on an
+      already-rounded number. `litDeclType` is scoped to the arm, because the
+      type of a literal inside an ARITHMETIC expression is decided with
+      ADR-0024 item 3's decimal arithmetic. The single-process path builds the
+      literal arm's vector from the declared-type layer and so still resolves
+      float8 there — the values agree wherever float64 holds them, the wire
+      OID does not, and closing that half is the literal `(p,s)` work in
+      `expr`.
+
+    **A computed DECIMAL expression does NOT reach the refusal**, and saying it
+    did was wrong in both directions. `d + d` and `COALESCE(d, d)` are declared
+    FLOAT64 by the arithmetic rule that has not landed yet, so the pair
+    resolves FLOAT64 and the query answers with float-rounded values;
+    `CAST(d AS DECIMAL(12,3))` is declared STRING by `inferCastType` and meets
+    the LADDER's refusal ("the arms disagree on the type … and neither widens
+    into the other"), not this one. Both are #555's typing gap, and the rung
+    is not what has to change.
 
     **Two carrier properties are deliberate divergences, not defects.** A
     wadjet DECIMAL column has ONE declared scale, so the narrow arm's rows

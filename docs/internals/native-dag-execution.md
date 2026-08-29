@@ -728,13 +728,16 @@ concatenation well-formed:
   rather than wrapping. An integer arm (`numeric UNION ALL bigint` is numeric
   in PostgreSQL) is coerced by the same operator, from scale 0. A CAST cannot
   serve here — the cast evaluator's DECIMAL destination produces a float64.
-  Where an arm's `(p,s)` cannot be resolved at plan time the query is
-  **REFUSED, naming the column** — it used to leave every arm as written, which
-  is a wrong answer rather than a failed task, because
-  `shuffleWriter.writeChunk`'s scale check only sees a SINGLE writer handed two
-  scales: in a union stage each arm writes its own consistent file and the
-  reinterpretation happens in the downstream stage that reads several of them,
-  upstream of any writer (ADR-0010, ADR-0012 item 12).
+  Where an arm cannot be resolved at plan time the query is **REFUSED, naming
+  the column** — it used to leave every arm as written, which is a wrong answer
+  rather than a failed task, because `shuffleWriter.writeChunk`'s scale check
+  only sees a SINGLE writer handed two scales: in a union stage each arm writes
+  its own consistent file and the reinterpretation happens in the downstream
+  stage that reads several of them, upstream of any writer (ADR-0010, ADR-0012
+  item 12). TWO conditions reach it: an arm typed DECIMAL whose `(p,s)` nothing
+  resolved, and an arm with NO resolved type beside a DECIMAL sibling. The
+  single-process path answers both, so this is a divergence in which answer
+  EXISTS, not in what the answer is.
 - **What the arm walk resolves.** `setOpArmDecls`
   (`internal/planner/physical/set_op_arm_decls.go`) is the set operation's own
   view of an arm's columns, and it differs from `inputColDecls` in the two ways
@@ -751,13 +754,22 @@ concatenation well-formed:
   operation** behind such a Project reads its own reconciled result types
   (`setOpNodeDecls`), the same answer `setOpArmProjection` takes when the
   nested operation IS the arm. A numeric **LITERAL** arm takes its spelling's
-  `(p,s)` (`litDeclType`, #665). The walk
+  `(p,s)` and has its expression rewritten to that spelling's plain TEXT,
+  because the evaluator folds a literal into a float64 (`litDeclType`, #665).
+  A **ROW FIELD PATH** resolves through the field's declaration (ADR-0022) and
+  carries its type on the spec, because nothing downstream resolves a field
+  path by name. A **DERIVED TABLE or CTE on one side of a join** keys its
+  emitted names under its SCOPE name (`armScopeNames`), which is what tells
+  the two sides apart when neither contributes a qualified one. The walk
   claims NOTHING it cannot resolve — `declaredProjectionDecl`'s STRING
   fallback is right for advisory wire metadata and wrong here, where a
-  confident wrong type casts the arm's values. The remaining hole is a
-  **computed DECIMAL expression**, which carries no `(p,s)` at all (#458, and
-  #555 for the typing gap underneath it); it now reaches the refusal above
-  instead of a silent reinterpretation.
+  confident wrong type casts the arm's values.
+
+  What does NOT reach the refusal: a **computed DECIMAL expression**. `d + d`
+  and `COALESCE(d, d)` declare FLOAT64 (ADR-0024 item 3's arithmetic rule has
+  not landed) so the pair resolves FLOAT64 and answers float-rounded, and
+  `CAST(d AS DECIMAL(p,s))` declares STRING and meets the LADDER's refusal
+  instead. Both are #555, and the rung is not what has to change.
 - **Nested arms.** `a UNION ALL b UNION ALL c` parses LEFT-DEEP, so the outer
   union's first arm is itself a union. Its reconciled output type comes from
   `setOpNodeResultTypes`, which recurses. Before that it was reported as

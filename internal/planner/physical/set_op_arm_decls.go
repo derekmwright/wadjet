@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
@@ -176,6 +177,13 @@ func joinArmDecls(left, right colDecls) colDecls {
 	if len(dec) == 0 {
 		dec = nil
 	}
+	// The ROW FIELDS are deliberately NOT carried across the join. A field
+	// path resolves against them, and over a join the union stage cannot
+	// SPELL one: the join's output names its ROW column `a.rd` while the
+	// SELECT list wrote `rd.d`, so typing the arm only moves the failure from
+	// a plan-time refusal naming the column to a task error naming a column
+	// that does not exist. Leaving the arm untyped is what routes it to the
+	// refusal, which is the better of the two loud answers.
 	return colDecls{types: types, dec: dec}
 }
 
@@ -235,6 +243,14 @@ func projectArmDecls(n *logical.Node, in colDecls) colDecls {
 			dec[lc] = logical.DecimalMeta{Precision: d.Precision, Scale: d.Scale}
 		}
 	}
+	// The SCOPE names this Project's output answers to — a derived table's
+	// alias, a CTE's name — keyed alongside the bare ones, exactly as
+	// scanArmDecls keys a scan's table alias. Without them a DERIVED side of a
+	// join contributed only bare names, joinArmDecls deleted the contested
+	// one, and `s.dx` over `(SELECT id, dx FROM b) s JOIN a` resolved to
+	// nothing: the arm came back untyped and every file kept its own scale —
+	// #551 again, one node down.
+	quals := armScopeNames(n)
 	for _, proj := range n.Projections {
 		name := declaredProjectionName(proj)
 		if name == "" {
@@ -242,12 +258,56 @@ func projectArmDecls(n *logical.Node, in colDecls) colDecls {
 		}
 		if d, ok := projectionArmDecl(proj, in, strictInt); ok {
 			put(name, d)
+			for _, q := range quals {
+				put(q+"."+strings.ToLower(strings.TrimSpace(name)), d)
+			}
 		}
 	}
 	if len(types) == 0 {
 		return colDecls{}
 	}
 	return colDecls{types: types, fields: inputColFields(n), dec: dec}
+}
+
+// armScopeNames collects the relation names a subtree answers to: a CTE's name
+// and the alias one reference gives it, both recorded on the subtree ROOT, and
+// the DERIVED TABLE aliases stamped onto every scan below it. It is the same
+// association subtreeNamesRelation tests one name at a time, enumerated.
+//
+// A name from an INNER derived table is collected too — the walk cannot tell
+// at which level a stamp was applied — so `i.x` resolves for `(SELECT z AS x
+// FROM (SELECT e2 AS z FROM t) i) a` even though only `a.x` is in scope for
+// the enclosing query. That only ever ADDS a resolution for a spelling SQL
+// cannot legally write; it never redirects one that can.
+func armScopeNames(n *logical.Node) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(name string) {
+		lc := strings.ToLower(strings.TrimSpace(name))
+		if lc == "" || seen[lc] {
+			return
+		}
+		seen[lc] = true
+		out = append(out, lc)
+	}
+	var walk func(*logical.Node)
+	walk = func(n *logical.Node) {
+		if n == nil {
+			return
+		}
+		add(n.CTEName)
+		add(n.CTERefAlias)
+		if n.Type == logical.NodeScan {
+			for _, d := range n.DerivedAliases {
+				add(d)
+			}
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(n)
+	return out
 }
 
 // projectionArmDecl resolves one projection the way declaredProjectionDecl
@@ -408,81 +468,158 @@ func setOpArmComputedSource(name string, n *logical.Node) (plansql.Node, bool) {
 	return nil, false
 }
 
-// litOf unwraps an expression that IS a literal, parentheses and all — the
-// same shape bareColRefOf accepts for a column reference.
+// setOpLitDecimal is a numeric LITERAL arm's exact value: the DECIMAL its
+// spelling names, and the plain decimal TEXT that carries it.
 //
-// A leading sign is part of the literal here, though the parser makes it a
-// UnaryOp: `-1.5000` is numeric(5,4) to PostgreSQL exactly as `1.5000` is,
-// and reading only the unsigned spelling would make the sign decide the
-// column's TYPE.
-func litOf(e plansql.Node) (*plansql.Lit, bool) {
+// The text is not decoration. The arm's projection is EVALUATED, and the
+// evaluator folds a numeric literal into a float64 box — `1234567890123456.78`
+// becomes 1234567890123456.8 before it reaches the DECIMAL vector, and
+// exec.Project's checked writer then stores that float's own shortest decimal
+// faithfully. Declaring DECIMAL over a float box makes the type say EXACT
+// about a number that is already rounded, which is worse than the float8
+// column the arm had before. So the arm's expression is rewritten to the
+// literal's text as a QUOTED string, which SetValueChecked parses at the
+// column's scale with no float in between (ADR-0024 item 4) — the same shape
+// coerceSetOpArmRows already hands the single-process path.
+type setOpLitDecimal struct {
+	decl expr.DeclType
+	text string
+}
+
+// setOpLitArm reads a set-operation arm's SELECT item as a numeric literal,
+// parentheses and a leading sign included: the parser makes the sign a
+// UnaryOp, and `-1.5000` is numeric(5,4) to PostgreSQL exactly as `1.5000` is.
+func setOpLitArm(e plansql.Node) (setOpLitDecimal, bool) {
+	neg := false
 	for {
 		switch n := e.(type) {
 		case *plansql.Lit:
-			return n, true
+			d, ok := litDeclType(n)
+			if !ok {
+				return setOpLitDecimal{}, false
+			}
+			if neg && strings.Trim(d.text, "0.") != "" {
+				// A signed ZERO keeps no sign: "-0.00" reads back as the same
+				// carrier and only makes the rewritten SQL odder to read.
+				d.text = "-" + d.text
+			}
+			return d, true
 		case *plansql.ParenNode:
 			e = n.Inner
 		case *plansql.UnaryOp:
-			if n.Op != "-" && n.Op != "+" {
-				return nil, false
+			switch n.Op {
+			case "-":
+				neg = !neg
+			case "+":
+			default:
+				return setOpLitDecimal{}, false
 			}
 			e = n.Inner
 		default:
-			return nil, false
+			return setOpLitDecimal{}, false
 		}
 	}
 }
 
 // litDeclType is a numeric LITERAL's own type, as PostgreSQL reads its
-// SPELLING: `1.23456` is `numeric(6,5)` and `1` is an integer (#665).
+// SPELLING, with the plain decimal text that spelling expands to.
+//
+// PostgreSQL's rule, verified live against 17.11 with pg_typeof:
+//
+//	1.23456  1.  0.0        -> numeric   (a decimal point)
+//	1e2  1.5e1  1.5e-2      -> numeric   (an exponent, WITH or without a point)
+//	1  1234567890           -> integer
+//	12345678901             -> bigint
+//	123456789012345678901   -> numeric   (too wide for bigint)
+//
+// So a literal is numeric when it carries a decimal point OR an exponent, and
+// an INTEGER literal is numeric only when no integer type holds it. The
+// integer forms answer false here and stay on the ladder's integer rung, where
+// an integer arm contributes its whole range's digits.
+//
+// The (p,s) is the digits the literal EXPANDS to — PostgreSQL's numeric
+// constant carries typmod −1 and an exact value, and a finite carrier needs a
+// declaration wide enough to hold that value without moving it. `1e2` is
+// numeric(3,0), `1.5e-2` is numeric(3,3), `0.5` is numeric(1,1) (a leading
+// zero holds no place), and trailing zeros count because they are digits the
+// query wrote and a set operation must not drop a scale it stated.
 //
 // It is deliberately NOT wired into nodeDeclaredType's Lit case, which still
 // answers FLOAT64 for a fractional literal everywhere else: the declared type
 // of a literal in an ARITHMETIC expression is being decided alongside
-// ADR-0024 item 3's decimal arithmetic, and declaring DECIMAL over an
-// evaluator that still folds a literal into a float64 would write a rounded
-// value into an exact vector. A set-operation ARM is the one site where the
-// literal's own type is the whole answer — the arm produces the literal and
-// nothing else — so it is resolved here and nowhere else.
-//
-// An exponent (`1e3`, `1.5e-2`) answers false: PostgreSQL types those float8,
-// not numeric.
-func litDeclType(n *plansql.Lit) (expr.DeclType, bool) {
+// ADR-0024 item 3's decimal arithmetic. A set-operation ARM is the one site
+// where the literal's own type is the whole answer — the arm produces the
+// literal and nothing else.
+func litDeclType(n *plansql.Lit) (setOpLitDecimal, bool) {
 	if n == nil || n.Kind != plansql.LitNumber {
-		return expr.DeclType{}, false
+		return setOpLitDecimal{}, false
 	}
 	v := strings.TrimSpace(n.Value)
-	if v == "" {
-		return expr.DeclType{}, false
-	}
-	if strings.ContainsAny(v, "eE") {
-		return expr.DeclType{}, false
-	}
 	v = strings.TrimPrefix(strings.TrimPrefix(v, "-"), "+")
-	dot := strings.IndexByte(v, '.')
-	if dot < 0 {
-		return expr.DeclType{}, false
+	if v == "" {
+		return setOpLitDecimal{}, false
 	}
-	intPart, frac := v[:dot], v[dot+1:]
-	if strings.IndexByte(frac, '.') >= 0 {
-		return expr.DeclType{}, false
+	mant, expPart, hasExp := v, "", false
+	if i := strings.IndexAny(v, "eE"); i >= 0 {
+		mant, expPart, hasExp = v[:i], v[i+1:], true
 	}
-	for _, s := range []string{intPart, frac} {
-		for i := 0; i < len(s); i++ {
-			if s[i] < '0' || s[i] > '9' {
-				return expr.DeclType{}, false
-			}
+	dot := strings.IndexByte(mant, '.')
+	intPart, frac := mant, ""
+	if dot >= 0 {
+		intPart, frac = mant[:dot], mant[dot+1:]
+	}
+	if !allDigits(intPart) || !allDigits(frac) || intPart+frac == "" {
+		return setOpLitDecimal{}, false
+	}
+	exp := 0
+	if hasExp {
+		e, err := strconv.Atoi(expPart)
+		if err != nil {
+			return setOpLitDecimal{}, false
+		}
+		exp = e
+	}
+	if dot < 0 && !hasExp {
+		// A plain integer literal. It is numeric to PostgreSQL only when no
+		// integer type holds it; otherwise the ladder's integer rung answers
+		// and this declines, exactly as it did before.
+		if _, err := strconv.ParseInt(intPart, 10, 64); err == nil {
+			return setOpLitDecimal{}, false
 		}
 	}
-	if frac == "" {
-		return expr.DeclType{}, false
+	// Expand to a plain decimal spelling: digits with the point moved by exp.
+	digits := intPart + frac
+	point := len(intPart) + exp
+	var whole, fracOut string
+	switch {
+	case point >= len(digits):
+		whole = digits + strings.Repeat("0", point-len(digits))
+	case point <= 0:
+		whole, fracOut = "0", strings.Repeat("0", -point)+digits
+	default:
+		whole, fracOut = digits[:point], digits[point:]
 	}
-	// PostgreSQL's numeric literal keeps every digit it was written with, and
-	// drops a leading zero's place: `0.5` is numeric(1,1), `1.23456` is
-	// numeric(6,5), `12.75` is numeric(4,2).
-	prec := len(strings.TrimLeft(intPart, "0")) + len(frac)
-	if prec > batch.MaxDecimalPrecision {
-		return expr.DeclType{}, false
+	prec := len(strings.TrimLeft(whole, "0")) + len(fracOut)
+	if prec == 0 {
+		prec = 1
 	}
-	return expr.DeclDecimal(prec, len(frac)), true
+	if prec > batch.MaxDecimalPrecision || len(fracOut) > batch.MaxDecimalScale {
+		// No DECIMAL declaration this carrier can honour. Declaring one
+		// anyway would move the value; the float8 the arm had stands.
+		return setOpLitDecimal{}, false
+	}
+	text := whole
+	if fracOut != "" {
+		text += "." + fracOut
+	}
+	return setOpLitDecimal{decl: expr.DeclDecimal(prec, len(fracOut)), text: text}, true
+}
+
+func allDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
