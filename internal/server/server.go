@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -565,15 +566,8 @@ func (s *Server) handleDML(w http.ResponseWriter, r *http.Request, sql string, s
 		return
 	}
 
-	var result *dmlResult
-	switch parsed.Type {
-	case plansql.QueryInsert:
-		result, err = executeDMLInsert(ctx, s.catalog, parsed.Insert)
-	case plansql.QueryUpdate:
-		result, err = executeDMLUpdate(ctx, s.catalog, parsed.Update)
-	case plansql.QueryDelete:
-		result, err = executeDMLDelete(ctx, s.catalog, parsed.Delete)
-	default:
+	result, err := runHTTPDML(ctx, s.catalog, parsed)
+	if err == errUnsupportedDML {
 		writeError(w, http.StatusBadRequest, "unsupported DML type")
 		return
 	}
@@ -604,6 +598,42 @@ func (s *Server) handleDML(w http.ResponseWriter, r *http.Request, sql string, s
 type dmlResult struct {
 	rowsAffected int64
 	command      string
+}
+
+// errUnsupportedDML is the one failure handleDML reports as a shape problem
+// rather than an execution error.
+var errUnsupportedDML = errors.New("unsupported DML type")
+
+// runHTTPDML dispatches one DML statement under a query-scoped panic boundary.
+//
+// This is a goroutine entry point in ADR-0019's sense — net/http runs each
+// request on its own goroutine, and its own recover answers a panic by
+// DROPPING THE CONNECTION and logging a stack. So a DML statement that
+// panicked reached the client as a transport EOF plus a goroutine dump
+// instead of a SQLSTATE, where the same statement on the embedded and pgwire
+// doors (which both have a boundary) reported 22012 or 22P02 (#677).
+//
+// The obligations this frame holds are none beyond its return value: it takes
+// no lock, owns no channel and holds no reservation, so RecoverQueryPanic's
+// error IS the discharge. A FatalEvalPanic keeps its own SQLSTATE; anything
+// else becomes XX000 and is counted by exec.QueryPanicsRecovered, which is
+// what keeps a new panic from becoming invisible.
+func runHTTPDML(ctx context.Context, cat *catalog.Catalog, parsed *plansql.ParsedQuery) (res *dmlResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			res, err = nil, exec.RecoverQueryPanic(ctx, "HTTP DML statement", r)
+		}
+	}()
+	switch parsed.Type {
+	case plansql.QueryInsert:
+		return executeDMLInsert(ctx, cat, parsed.Insert)
+	case plansql.QueryUpdate:
+		return executeDMLUpdate(ctx, cat, parsed.Update)
+	case plansql.QueryDelete:
+		return executeDMLDelete(ctx, cat, parsed.Delete)
+	default:
+		return nil, errUnsupportedDML
+	}
 }
 
 func executeDMLInsert(ctx context.Context, cat *catalog.Catalog, info *plansql.InsertInfo) (*dmlResult, error) {
@@ -666,21 +696,9 @@ func executeDMLDelete(ctx context.Context, cat *catalog.Catalog, info *plansql.D
 		return nil, fmt.Errorf("reading manifest: %w", err)
 	}
 
-	var predicate func(b *batch.RecordBatch, row int) bool
-	if info.WhereSQL != "" {
-		node, parseErr := plansql.ParseExpression(info.WhereSQL)
-		if parseErr != nil {
-			return nil, fmt.Errorf("parsing WHERE: %w", parseErr)
-		}
-		compiled, compErr := expr.Compile(node)
-		if compErr != nil {
-			return nil, fmt.Errorf("compiling WHERE: %w", compErr)
-		}
-		predicate = func(b *batch.RecordBatch, row int) bool {
-			v := compiled.Eval(b, row)
-			bv, ok := v.(bool)
-			return ok && bv
-		}
+	predicate, err := wadjet.BuildDMLPredicate(info.WhereSQL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing WHERE: %w", err)
 	}
 
 	var totalDeleted int64
@@ -696,11 +714,9 @@ func executeDMLDelete(ctx context.Context, cat *catalog.Catalog, info *plansql.D
 			if b == nil {
 				continue
 			}
-			var indices []int64
-			for i := 0; i < b.Len; i++ {
-				if predicate == nil || predicate(b, i) {
-					indices = append(indices, int64(i))
-				}
+			indices, err := wadjet.MatchDMLRows(ctx, b, predicate)
+			if err != nil {
+				return nil, err
 			}
 			if len(indices) > 0 {
 				markers = append(markers, catalog.DeleteMarker{FilePath: file.Path, RowIndices: indices})
@@ -729,21 +745,9 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 		return nil, fmt.Errorf("reading manifest: %w", err)
 	}
 
-	var predicate func(b *batch.RecordBatch, row int) bool
-	if info.WhereSQL != "" {
-		node, parseErr := plansql.ParseExpression(info.WhereSQL)
-		if parseErr != nil {
-			return nil, fmt.Errorf("parsing WHERE: %w", parseErr)
-		}
-		compiled, compErr := expr.Compile(node)
-		if compErr != nil {
-			return nil, fmt.Errorf("compiling WHERE: %w", compErr)
-		}
-		predicate = func(b *batch.RecordBatch, row int) bool {
-			v := compiled.Eval(b, row)
-			bv, ok := v.(bool)
-			return ok && bv
-		}
+	predicate, err := wadjet.BuildDMLPredicate(info.WhereSQL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing WHERE: %w", err)
 	}
 
 	// Resolve every SET clause ONCE, against the column's full declaration,
@@ -793,11 +797,11 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 			if b == nil {
 				continue
 			}
-			var indices []int64
-			for i := 0; i < b.Len; i++ {
-				if predicate == nil || predicate(b, i) {
-					indices = append(indices, int64(i))
-				}
+			indices, err := wadjet.MatchDMLRows(ctx, b, predicate)
+			if err != nil {
+				// A predicate that cannot answer fails the STATEMENT, before
+				// any marker is committed.
+				return nil, err
 			}
 			if len(indices) == 0 {
 				continue

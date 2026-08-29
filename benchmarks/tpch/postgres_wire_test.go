@@ -1338,6 +1338,21 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 			sql: `INSERT INTO mk_outer (id, dt) VALUES (900001, '2026-02-30')`},
 		{name: "DateInsertUnparseable",
 			sql: `INSERT INTO mk_outer (id, dt) VALUES (900002, 'not-a-date')`},
+		// A DML WHERE whose evaluation cannot answer. PostgreSQL raises before
+		// touching a row; wadjet must too, and must do it as an ERROR on the
+		// wire rather than as a dead connection — the DML predicate closure
+		// called Eval with no recover, so over HTTP the client got a transport
+		// EOF and a goroutine dump (#677). These are the pgwire door's half of
+		// that gate, and neither engine's fixture is mutated because neither
+		// engine reaches a row.
+		{name: "DeleteWhereDivisionByZero",
+			sql: `DELETE FROM mk_outer WHERE 1/0 = 1`},
+		{name: "DeleteWhereInvalidCast",
+			sql: `DELETE FROM mk_outer WHERE id = CAST('abc' AS integer)`},
+		{name: "UpdateWhereDivisionByZero",
+			sql: `UPDATE mk_outer SET n = 1 WHERE 1/0 = 1`},
+		{name: "UpdateWhereInvalidCast",
+			sql: `UPDATE mk_outer SET n = 1 WHERE id = CAST('abc' AS integer)`},
 		// A short leading field PostgreSQL reads as a MONTH under MDY: '31/1/2'
 		// and '13/1/2' are month 31 and month 13, which PostgreSQL rejects
 		// with 22008. wadjet refuses the SHAPE (a non-4-digit leading field is

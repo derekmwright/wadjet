@@ -126,13 +126,9 @@ func (db *DB) executeDelete(ctx context.Context, info *plansql.DeleteInfo) (*Exe
 		return nil, fmt.Errorf("reading manifest for %q: %w", info.Table, err)
 	}
 
-	// Build WHERE predicate if present
-	var predicate func(b *batch.RecordBatch, row int) bool
-	if info.WhereSQL != "" {
-		predicate, err = buildWherePredicate(info.WhereSQL)
-		if err != nil {
-			return nil, fmt.Errorf("parsing WHERE clause: %w", err)
-		}
+	predicate, err := BuildDMLPredicate(info.WhereSQL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing WHERE clause: %w", err)
 	}
 
 	// Scan each file to find matching rows
@@ -180,13 +176,9 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 		return nil, fmt.Errorf("reading manifest for %q: %w", info.Table, err)
 	}
 
-	// Build WHERE predicate if present
-	var predicate func(b *batch.RecordBatch, row int) bool
-	if info.WhereSQL != "" {
-		predicate, err = buildWherePredicate(info.WhereSQL)
-		if err != nil {
-			return nil, fmt.Errorf("parsing WHERE clause: %w", err)
-		}
+	predicate, err := BuildDMLPredicate(info.WhereSQL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing WHERE clause: %w", err)
 	}
 
 	// Resolve every SET clause ONCE, against the column's full declaration,
@@ -243,11 +235,11 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 			if b == nil {
 				continue
 			}
-			var matchedIndices []int64
-			for i := 0; i < b.Len; i++ {
-				if predicate == nil || predicate(b, i) {
-					matchedIndices = append(matchedIndices, int64(i))
-				}
+			matchedIndices, err := MatchDMLRows(ctx, b, predicate)
+			if err != nil {
+				// A predicate that cannot answer fails the STATEMENT, before
+				// any marker is committed.
+				return nil, err
 			}
 			if len(matchedIndices) == 0 {
 				continue
@@ -712,7 +704,7 @@ func buildInsertRow(insertSQL string, srcRow map[string]any, srcAlias string, co
 
 // scanFileForDeletes reads a Parquet file and returns indices of rows matching the predicate.
 // If predicate is nil (no WHERE), all rows are matched.
-func (db *DB) scanFileForDeletes(ctx context.Context, filePath string, schema []parquet.Column, predicate func(*batch.RecordBatch, int) bool) ([]int64, error) {
+func (db *DB) scanFileForDeletes(ctx context.Context, filePath string, schema []parquet.Column, predicate DMLPredicate) ([]int64, error) {
 	b, err := db.readParquetFile(ctx, filePath, schema)
 	if err != nil {
 		return nil, err
@@ -720,14 +712,7 @@ func (db *DB) scanFileForDeletes(ctx context.Context, filePath string, schema []
 	if b == nil {
 		return nil, nil
 	}
-
-	var indices []int64
-	for i := 0; i < b.Len; i++ {
-		if predicate == nil || predicate(b, i) {
-			indices = append(indices, int64(i))
-		}
-	}
-	return indices, nil
+	return MatchDMLRows(ctx, b, predicate)
 }
 
 // readParquetFile downloads and decodes a Parquet file into a RecordBatch.
@@ -769,8 +754,22 @@ func (db *DB) readParquetFile(ctx context.Context, filePath string, schema []par
 	return scan.ReadFileColumnar(reader, schema)
 }
 
-// buildWherePredicate parses a WHERE clause string into a batch-level predicate function.
-func buildWherePredicate(whereSQL string) (func(*batch.RecordBatch, int) bool, error) {
+// DMLPredicate is a compiled DML WHERE clause: it answers, per row of a
+// scanned file, whether the statement matches it. A nil DMLPredicate matches
+// every row, which is what a DML statement with no WHERE means.
+type DMLPredicate func(*batch.RecordBatch, int) bool
+
+// BuildDMLPredicate compiles a DML WHERE clause. An empty clause compiles to
+// nil — "every row".
+//
+// It is exported because the HTTP DML executors are a second copy of the
+// embedded ones and had a third and fourth copy of this compile step. A
+// predicate is only half of the contract, though; MatchDMLRows is the other
+// half and is the one that must be used to RUN it.
+func BuildDMLPredicate(whereSQL string) (DMLPredicate, error) {
+	if strings.TrimSpace(whereSQL) == "" {
+		return nil, nil
+	}
 	node, err := plansql.ParseExpression(whereSQL)
 	if err != nil {
 		return nil, fmt.Errorf("parsing expression %q: %w", whereSQL, err)
@@ -789,6 +788,45 @@ func buildWherePredicate(whereSQL string) (func(*batch.RecordBatch, int) bool, e
 		bv, ok := v.(bool)
 		return ok && bv
 	}, nil
+}
+
+// MatchDMLRows returns the indices of b's rows the statement matches, and is
+// the ONLY place a DMLPredicate is allowed to be called.
+//
+// Expression evaluation has no error return (ADR-0019): the one class of
+// condition that cannot answer with a value and must not answer with NULL —
+// a division by zero, an invalid cast — raises a panic carrying a
+// FatalEvalPanic, and a driver converts it back into an error with
+// PostgreSQL's SQLSTATE. Every DML match scan called Eval with NO such
+// boundary, so `DELETE FROM t WHERE 1/0 = 1` over HTTP returned a transport
+// EOF and a goroutine dump instead of 22012 — net/http's own recover, which
+// drops the connection (#677). The embedded and pgwire doors survived only
+// because DB.Execute's own boundary caught it several frames up, and the
+// error a caller got there named the statement rather than the predicate.
+//
+// The boundary is per FILE SCAN, not per row: one deferred call for a whole
+// batch, no per-row cost. It owns nothing — no lock, no channel, no
+// reservation — so discharging its obligations (ADR-0019 §2a) is exactly
+// returning the error.
+func MatchDMLRows(ctx context.Context, b *batch.RecordBatch, predicate DMLPredicate) (matched []int64, err error) {
+	if predicate == nil {
+		matched = make([]int64, b.Len)
+		for i := range matched {
+			matched[i] = int64(i)
+		}
+		return matched, nil
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			matched, err = nil, exec.RecoverQueryPanic(ctx, "DML WHERE predicate", r)
+		}
+	}()
+	for i := 0; i < b.Len; i++ {
+		if predicate(b, i) {
+			matched = append(matched, int64(i))
+		}
+	}
+	return matched, nil
 }
 
 // convertValue converts a string value from the parser to the appropriate Go type
