@@ -149,6 +149,18 @@ type ProjectColumn struct {
 	// index, the same reason ProjectExprSpec carries TypeKnown.
 	SourceIdx    int
 	SourceIdxSet bool
+	// VecDecimalEval is the vectorized EXACT fixed-point path: it writes
+	// unscaled Int128 carriers straight into a DECIMAL output vector, with no
+	// box and no allocation (expr.BinOpNumeric.EvalDecimalVec, ADR-0024
+	// item 3).
+	//
+	// It is a field of its own rather than VecEval because the DECIMAL arm of
+	// Execute deliberately runs AHEAD of every vectorized path — the checked
+	// per-row writer is the only route with an error channel, and no other vec
+	// kernel writes DecimalData. Giving this its own field keeps that ordering
+	// intact for everything else while letting the one kernel that DOES write
+	// DecimalData skip the box.
+	VecDecimalEval VecExpression
 	Dimension    int // VECTOR output dimensionality (e.g. embed()); 0 = not a vector
 	// Precision and Scale declare a COMPUTED DECIMAL output, the same way
 	// Dimension declares a computed VECTOR one: the output column does not
@@ -422,6 +434,15 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			if srcIdx := p.directSrcIdx[j]; srcIdx >= 0 {
 				projectCopyColumn(col, in.Columns[srcIdx], in.Len)
 			} else if col.Type == parquet.TypeDecimal {
+				if proj.VecDecimalEval != nil {
+					// Exact fixed-point arithmetic writes carriers directly:
+					// no box to check, because nothing is converted (ADR-0024
+					// item 3). Its own errors — 22003 past the declared type,
+					// 22012 for a zero divisor — travel the per-row panic
+					// channel every other expression evaluator uses (#347).
+					proj.VecDecimalEval(in, col, in.Len)
+					continue
+				}
 				// The checked writer, for the reason the selection-vector
 				// branch above documents.
 				for i := 0; i < in.Len; i++ {

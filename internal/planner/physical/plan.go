@@ -8132,6 +8132,16 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					evalVec(b, out, n)
 				}
 			}
+			// Exact fixed-point arithmetic into a DECIMAL output: the one
+			// kernel that writes DecimalData, so it is the one projection
+			// that may skip exec.Project's checked per-row box (ADR-0024
+			// item 3, #555). Gated on the DECLARED type, because a node whose
+			// runtime mode turns out not to be decimal writes nothing.
+			if outType == parquet.TypeDecimal {
+				if dv, ok := compiledExpr.(expr.DecimalVecExpr); ok {
+					pc.VecDecimalEval = dv.EvalDecimalVec
+				}
+			}
 		}
 		// Use typed evaluation to avoid interface{} boxing in the inner loop.
 		// Only safe when the output type is explicitly Float64 (arithmetic exprs),
@@ -9294,14 +9304,14 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 			return t, c
 		}
 		if !binOpInvolvesInterval(n) {
-			// TODO(#555): ADR-0024 item 3 says a DECIMAL operand makes this
-			// DECIMAL, with batch.DecimalResultType's (p,s). The rule is
-			// written and tested; the declaration cannot use it yet because
-			// there is no decimal arithmetic to feed it — Int128 has no Mul
-			// and no QuoRem, so expr.BinOpNumeric resolves float mode for a
-			// DECIMAL operand and hands back a float64. Declaring DECIMAL
-			// over that would write a rounded float into an exact vector,
-			// which is worse than the float column a client gets today.
+			// ADR-0024 item 3: a DECIMAL operand makes this DECIMAL, at the
+			// (p,s) batch.DecimalResultType names, and expr.BinOpNumeric's
+			// decimal mode computes it exactly on the Int128 carrier (#555).
+			// binOpDecimalType is that mode's AST mirror and must stay a
+			// strict subset of it — see decimal_arith_type.go.
+			if t, ok := binOpDecimalType(n, decls); ok {
+				return t, expr.Decided
+			}
 			return expr.Decl(parquet.TypeFloat64), expr.Decided
 		}
 	case *plansql.UnaryOp:
@@ -9318,6 +9328,17 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 					return expr.Decl(parquet.TypeInt64), c
 				case parquet.TypeFloat64, parquet.TypeFloat32:
 					return expr.Decl(parquet.TypeFloat64), c
+				case parquet.TypeDecimal:
+					// Negation moves no digit, so -d is a value the same
+					// column holds and keeps its exact (p,s) — which is what
+					// makes `SELECT -d` a numeric column rather than the
+					// STRING the fallback used to declare, and what lets
+					// `-d * 2` stay on the exact path (ADR-0024 item 2).
+					// Only a DECIMAL whose (p,s) resolved: an unconstrained
+					// one has no vector to allocate (#458).
+					if t.DecKnown && decimalArithOperandDecided(n.Inner, decls) {
+						return t, c
+					}
 				}
 			}
 		}

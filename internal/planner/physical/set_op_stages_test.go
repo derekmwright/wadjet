@@ -236,8 +236,13 @@ func TestSetOpArmTypesReconciled(t *testing.T) {
 		castArm int
 	}{
 		{
+			// A genuine FLOAT column, because `+ 100.5` no longer forces
+			// FLOAT64: a numeric literal's carrier is its spelling, so
+			// `int + 100.5` is DECIMAL — which is what PostgreSQL answers
+			// too (`pg_typeof(1::int + 100.5)` is numeric, verified live).
+			// The DECIMAL rung is pinned in its own case below.
 			name:    "float64 widening",
-			sql:     "SELECT r_regionkey + 100.5 AS k FROM region UNION ALL SELECT n_nationkey AS k FROM nation",
+			sql:     "SELECT o_totalprice + 1 AS k FROM orders UNION ALL SELECT n_nationkey AS k FROM nation",
 			want:    parquet.TypeFloat64,
 			castArm: 1,
 		},
@@ -271,6 +276,52 @@ func TestSetOpArmTypesReconciled(t *testing.T) {
 				t.Errorf("the narrower arm's expression is %q — it must be cast to the reconciled type", got)
 			}
 		})
+	}
+}
+
+// TestSetOpDecimalRungReconcilesAnIntegerArm is the ladder's DECIMAL rung,
+// newly reachable now that `int + 100.5` resolves DECIMAL rather than FLOAT64
+// (#555, ADR-0024 item 3 — a numeric literal's carrier is its spelling, and
+// `pg_typeof(1::int + 100.5)` is numeric on postgres:17.11).
+//
+// A DECIMAL target is reconciled by MOVING each arm's carrier
+// (DecimalCoercion), never by a CAST — the cast evaluator's DECIMAL
+// destination cannot preserve an exact value, which is ADR-0012 item 12's
+// reason — so this rung asserts the coercion and the declared (p,s) rather
+// than a CAST in the expression text. The declared spec matters as much as the
+// coercion: the worker builds the arm's output vector from it, and a spec left
+// at the zero value builds a DECIMAL at scale 0.
+func TestSetOpDecimalRungReconcilesAnIntegerArm(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	stages, err := planSetOpStages(t, cat, ctx,
+		"SELECT r_regionkey + 100.5 AS k FROM region UNION ALL SELECT n_nationkey AS k FROM nation")
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+	union := onlyStageOfType(t, stages, StageUnion)
+	if len(union.UnionArms) != 2 {
+		t.Fatalf("union has %d arms, want 2", len(union.UnionArms))
+	}
+	// r_regionkey is INT32, so the computed arm is DECIMAL(10,0) + DECIMAL(4,1)
+	// = DECIMAL(max(0,1) + max(10,3) + 1, 1) = DECIMAL(12,1); the integer arm
+	// is DECIMAL(10,0). Their common type keeps the widest integer part (11)
+	// at the widest scale (1).
+	want := logical.DecimalMeta{Precision: 12, Scale: 1}
+	for i, arm := range union.UnionArms {
+		p := arm.Projections[0]
+		if p.Type != parquet.TypeDecimal || !p.TypeKnown {
+			t.Errorf("arm %d declares %s (known=%v); both arms must emit DECIMAL", i, p.Type, p.TypeKnown)
+		}
+		if p.Precision != want.Precision || p.Scale != want.Scale {
+			t.Errorf("arm %d declares DECIMAL(%d,%d), want DECIMAL(%d,%d)",
+				i, p.Precision, p.Scale, want.Precision, want.Scale)
+		}
+	}
+	// The INTEGER arm has no carrier at the result scale and must be moved.
+	if got := union.UnionArms[1].DecimalCoercions; len(got) != 1 ||
+		got[0].Precision != want.Precision || got[0].Scale != want.Scale {
+		t.Errorf("the integer arm carries %v; it must be coerced to DECIMAL(%d,%d)",
+			got, want.Precision, want.Scale)
 	}
 }
 

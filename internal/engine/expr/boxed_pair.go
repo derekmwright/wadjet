@@ -190,6 +190,26 @@ func classifyOperand(e Expr, b *batch.RecordBatch) (boxKind, bool) {
 		return joinOperandKinds(arms, b)
 	case *Coalesce:
 		return joinOperandKinds(v.Args, b)
+	case *BinOpNumeric:
+		// Exact fixed-point arithmetic boxes as its rendered TEXT, the same
+		// as the DECIMAL column it computes over (ADR-0024 item 3, #555). So
+		// the kind is boxDecimal exactly when the node resolved that mode:
+		// without this, `WHERE d * 2 > 10` compared "25.50" against 10 by
+		// BYTES, which is #504's failure one node up. Int and float modes
+		// produce a real Go number and answer boxNumber, which is what they
+		// answered before as an unclassified operand.
+		v.resolveMode(b)
+		if v.isDec {
+			return boxDecimal, true
+		}
+		return boxNumber, true
+	case *UnaryOp:
+		// Unary ± answers its operand's kind: -d is a DECIMAL and boxes as
+		// decimal text, for the same reason.
+		if v.Op == "-" || v.Op == "+" {
+			return classifyOperand(v.Operand, b)
+		}
+		return boxUnknown, true
 	}
 	return boxUnknown, true
 }

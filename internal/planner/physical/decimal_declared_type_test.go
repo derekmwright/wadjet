@@ -138,27 +138,74 @@ func TestDecimalChoiceExpressionsDeclareTheCommonType(t *testing.T) {
 	}
 }
 
-// TestDecimalArithmeticStillDeclaresFloat64 pins the DEFERRED half of
-// ADR-0024 item 3. The (p,s) rules for + - * / % are written and tested in
-// batch.DecimalResultType, but the declaration cannot use them until there is
-// decimal arithmetic to feed it: Int128 has no Mul and no QuoRem, so
-// expr.BinOpNumeric resolves float mode for a DECIMAL operand and hands back
-// a float64. Declaring DECIMAL over that would write a rounded float into an
-// exact vector — worse than the float column a client gets today.
+// TestDecimalArithmeticDeclaresTheResultType is ADR-0024 item 3, whole: the
+// (p,s) of `+ - * / %` over DECIMAL operands, declared from
+// batch.DecimalResultType and executed exactly on the Int128 carrier by
+// expr.BinOpNumeric's decimal mode (#555).
 //
-// The test exists so the day the kernel lands, this pin fails and says so.
-func TestDecimalArithmeticStillDeclaresFloat64(t *testing.T) {
+// It replaces the deferral pin this file carried while there was no decimal
+// arithmetic to feed the declaration. The rules, for the (9,2)/(18,4) pair:
+//
+//	+ - : s = max(2,4) = 4        ; p = 4 + max(7,14) + 1 = 19
+//	*   : s = 2+4 = 6             ; p = 9 + 18 + 1 = 28
+//	/   : s = max(6, 2+18+1) = 21 ; p = 9-2 + 4 + 21 = 32
+//	%   : s = max(2,4) = 4        ; p = min(7,14) + 4 = 11
+//
+// An INTEGER operand joins as its whole range at scale 0 (10 digits for INT32,
+// 19 for INT64) and a numeric LITERAL as its spelling — which is why `a + 1`
+// is DECIMAL(10,2) and `a * i64` is DECIMAL(29,2).
+func TestDecimalArithmeticDeclaresTheResultType(t *testing.T) {
 	decls := decDecls()
-	for _, sql := range []string{"a + b", "a - b", "a * b", "a / b", "a % b", "a + 1", "a * i64"} {
-		node, err := plansql.ParseExpression(sql)
-		if err != nil {
-			t.Fatalf("parse %q: %v", sql, err)
-		}
-		got, c := nodeDeclaredType(node, decls)
-		if got.ID != parquet.TypeFloat64 || c != expr.Decided {
-			t.Errorf("%s: declared (%v, %s), want (FLOAT64, DECIDED) until the decimal "+
-				"arithmetic kernel lands (TODO(#555), ADR-0024 item 3)", sql, got, c)
-		}
+	for _, tc := range []struct {
+		sql  string
+		want expr.DeclType
+	}{
+		{"a + b", expr.DeclDecimal(19, 4)},
+		{"a - b", expr.DeclDecimal(19, 4)},
+		{"a * b", expr.DeclDecimal(28, 6)},
+		{"a / b", expr.DeclDecimal(32, 21)},
+		{"a % b", expr.DeclDecimal(11, 4)},
+		// A whole-number literal is DECIMAL(1,0) by its spelling, so
+		// `a + 1` is (max(2,0) + max(7,1) + 1, 2).
+		{"a + 1", expr.DeclDecimal(10, 2)},
+		{"a * 2", expr.DeclDecimal(11, 2)},
+		// A fractional literal contributes its own scale.
+		{"a + 0.005", expr.DeclDecimal(11, 3)},
+		// An integer COLUMN brings its whole range, not one spelling.
+		{"a * i64", expr.DeclDecimal(29, 2)},
+		{"a + i32", expr.DeclDecimal(13, 2)},
+		// Nesting: the inner result is the outer operand's type.
+		{"(a + b) * a", expr.DeclDecimal(29, 6)},
+		// Unary minus moves no digit and keeps the column's own type.
+		{"-a", expr.DeclDecimal(9, 2)},
+		// The full carrier width, and the adjustment past 38: (38,10) x
+		// (38,10) wants p=77, s=20 — intDigits 57 already exceeds 38, so the
+		// scale falls to its floor min(20,6) = 6 and the precision to 38.
+		{"wide * wide", expr.DeclDecimal(38, 6)},
+
+		// A FLOAT operand makes the whole expression float8, which is what
+		// PostgreSQL answers: float8 is the preferred type of the numeric
+		// category (ADR-0024 item 2).
+		{"a + f64", expr.Decl(parquet.TypeFloat64)},
+		// Two integers stay integer arithmetic — PostgreSQL's rule, and the
+		// truncating division of #636. The declaration is the caller's, not
+		// this one's, so it still answers FLOAT64 here.
+		{"i64 + i32", expr.Decl(parquet.TypeFloat64)},
+		// An unconstrained DECIMAL has no (p,s) to compute from (#458).
+		{"nops + a", expr.Decl(parquet.TypeFloat64)},
+		// A string operand is not arithmetic this rule can type.
+		{"a + txt", expr.Decl(parquet.TypeFloat64)},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			node, err := plansql.ParseExpression(tc.sql)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.sql, err)
+			}
+			got, c := nodeDeclaredType(node, decls)
+			if got != tc.want || c != expr.Decided {
+				t.Errorf("%s: declared (%v, %s), want (%v, DECIDED)", tc.sql, got, c, tc.want)
+			}
+		})
 	}
 }
 

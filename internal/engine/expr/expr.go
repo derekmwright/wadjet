@@ -683,9 +683,22 @@ func dateAddInterval(dateStr string, iv IntervalValue, subtract bool) string {
 type BinOp struct {
 	Left, Right Expr
 	Op          string // +, -, *, /, %
+	// dec is the EXACT fixed-point arm (ADR-0024 item 3, #555). This node is
+	// where operands with no typed protocol meet — a negated column, a CAST —
+	// and a DECIMAL is one of them, because its box is text and nothing about
+	// it satisfies Float64Expr for compileBinOp to see. Resolved once, against
+	// the first batch. See binop_decimal.go.
+	dec decArm
 }
 
 func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
+	// Exact fixed-point arithmetic, ahead of the ToFloat64 pair below: `-a + b`
+	// over two DECIMAL columns is a numeric expression in PostgreSQL and an
+	// exact one here, where reading both boxes as doubles loses every digit
+	// past the sixteenth.
+	if v, ok := e.binOpDecimalBox(b, row); ok {
+		return v
+	}
 	lv := e.Left.Eval(b, row)
 	rv := e.Right.Eval(b, row)
 	if lv == nil || rv == nil {
@@ -1147,6 +1160,13 @@ type UnaryOp struct {
 }
 
 func (e *UnaryOp) Eval(b *batch.RecordBatch, row int) any {
+	// A DECIMAL operand negates EXACTLY, on the carrier, and boxes as its
+	// rendered text — the same box a DECIMAL column produces. Asked first,
+	// because the numeric arms below reach a decimal only through
+	// ToFloat64 of that text (ADR-0024, #555).
+	if v, ok := e.unaryDecimalBox(b, row); ok {
+		return v
+	}
 	v := e.Operand.Eval(b, row)
 	if v == nil {
 		return nil

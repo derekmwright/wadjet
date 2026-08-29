@@ -69,8 +69,18 @@ type BinOpNumeric struct {
 	modeReady atomic.Bool
 	modeMu    sync.Mutex
 	isInt     bool
-	opCode    arithOp       // e.Op as an opcode: no per-row string compare
-	flt       *BinOpFloat64 // delegate for float mode (keeps its typed fast path)
+	// isDec and dec are the EXACT fixed-point mode (ADR-0024 item 3, #555):
+	// at least one DECIMAL operand and no float one, computed on the Int128
+	// carrier at the result type batch.DecimalResultType names. It is
+	// resolved here rather than at compile time for the same reason isInt is
+	// — the operands' declarations do not exist until a batch arrives — and
+	// it is checked FIRST, because an integer operand beside a DECIMAL one is
+	// DECIMAL(19,0) in the result-type rule and must not take the int path.
+	// See binop_decimal.go.
+	isDec  bool
+	dec    decMode
+	opCode arithOp       // e.Op as an opcode: no per-row string compare
+	flt    *BinOpFloat64 // delegate for float mode (keeps its typed fast path)
 	// divTrunc marks a `/` whose operands are integer-typed while the node
 	// resolved to float mode (the int-arith kill switch is off): the float
 	// quotient is truncated toward zero so integer-division SEMANTICS hold
@@ -150,13 +160,19 @@ func (e *BinOpNumeric) resolveModeSlow(b *batch.RecordBatch) {
 	if e.modeReady.Load() {
 		return
 	}
-	e.isInt = intArithToggle.On() && operandIsInt(e.Left, b) && operandIsInt(e.Right, b)
-	if !e.isInt {
+	// The DECIMAL question is asked first and answers for the whole node: a
+	// DECIMAL beside an integer is numeric in PostgreSQL, so `d * 2` must not
+	// be caught by the int mode below, and `d * f` must not be caught by this
+	// one — a float operand does not implement decimalOperand at all, which
+	// is what makes that fall through to float mode (ADR-0024 item 2).
+	e.dec, e.isDec = resolveDecimalMode(e.Op, e.Left, e.Right, b)
+	e.isInt = !e.isDec && intArithToggle.On() && operandIsInt(e.Left, b) && operandIsInt(e.Right, b)
+	if !e.isInt && !e.isDec {
 		e.flt = &BinOpFloat64{Left: e.Left, Right: e.Right, Op: e.Op}
 		e.divTrunc = e.Op == "/" &&
 			operandIsIntStructural(e.Left, b) && operandIsIntStructural(e.Right, b)
 	}
-	if (e.Op == "+" || e.Op == "-") &&
+	if !e.isDec && (e.Op == "+" || e.Op == "-") &&
 		(temporalColOperand(e.Left, b) || temporalColOperand(e.Right, b)) {
 		e.dateNode = &BinOp{Left: e.Left, Right: e.Right, Op: e.Op}
 	}
@@ -171,6 +187,12 @@ func (e *BinOpNumeric) intMode(b *batch.RecordBatch) bool {
 
 func (e *BinOpNumeric) Eval(b *batch.RecordBatch, row int) any {
 	e.resolveMode(b)
+	if e.isDec {
+		// The exact answer, boxed the way a DECIMAL COLUMN's value is boxed —
+		// its rendered text — so a computed decimal and a stored one reach
+		// every consumer of a boxed value in the same shape (binop_decimal.go).
+		return e.evalDecimalText(b, row)
+	}
 	// A temporal column operand: ask date arithmetic first. It declines for
 	// anything that is not a date (a text column of non-dates, a timestamp
 	// difference, a fractional shift) and the numeric answer below stands
@@ -211,6 +233,9 @@ func (e *BinOpNumeric) Eval(b *batch.RecordBatch, row int) any {
 func (e *BinOpNumeric) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 	e.resolveMode(b)
 	if !e.isInt {
+		// Decimal mode reports not-ok too. A DECIMAL result is not an int64
+		// and answering one would truncate the fraction silently — the caller
+		// falls back to Eval, which hands it the exact value.
 		return 0, false
 	}
 	return e.intArith(b, row)
@@ -261,6 +286,18 @@ func (e *BinOpNumeric) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool
 	if e.isInt {
 		v, ok := e.intArith(b, row)
 		return float64(v), ok
+	}
+	if e.isDec {
+		// A consumer that asked for a float gets one, narrowed from the exact
+		// value rather than computed in float: the digits past a double are
+		// lost either way, but the ones a double CAN hold are the right ones,
+		// and every consumer that can take the exact answer (Eval, the
+		// vectorized DECIMAL writer) already has.
+		v, ok := e.evalDecimal(b, row)
+		if !ok {
+			return 0, false
+		}
+		return v.ToFloat64(e.dec.out.Scale), true
 	}
 	v, ok := e.flt.EvalFloat64(b, row)
 	if ok && e.divTrunc {

@@ -690,6 +690,21 @@ func reconcileSetOpArmTypes(plans []setOpArmPlan, outNames []string) error {
 			}
 			for i := range plans {
 				ct := plans[i].types[col]
+				// The arm's DECLARED spec follows the reconciliation whether
+				// or not this arm needs a coercion, because it is what the
+				// worker builds the output vector from: a spec left at the
+				// zero value declares TypeBool with no (p,s), and a DECIMAL
+				// vector built from that comes out at scale 0 with every
+				// value in it read back a hundredfold out (ADR-0024 item 2).
+				// The non-DECIMAL ladder below has always done this on its
+				// cast arm; the DECIMAL branch did not, which only became
+				// reachable once an INTEGER arm could meet a DECIMAL one
+				// (#555 — `i + 1.5` is numeric in PostgreSQL, so the pair
+				// resolves DECIMAL rather than FLOAT64).
+				plans[i].specs[col].Type = want.typ
+				plans[i].specs[col].TypeKnown = true
+				plans[i].specs[col].Precision = want.dec.Precision
+				plans[i].specs[col].Scale = want.dec.Scale
 				if ct.typ == want.typ && ct.decKnown && ct.dec == want.dec {
 					continue
 				}

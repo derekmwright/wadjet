@@ -110,3 +110,94 @@ func DecimalCommon(in []DecimalType) (DecimalType, bool) {
 	}
 	return DecimalType{Precision: prec, Scale: scale}, true
 }
+
+// DecimalScalarOp names a scalar math function whose DECIMAL result type this
+// package decides. They are the functions that answer a number IN THE SAME
+// DOMAIN as their argument — PostgreSQL's abs/ceil/floor/round/trunc/sign over
+// a numeric all return numeric — as opposed to the transcendental ones
+// (sqrt/exp/ln/power/log), which PostgreSQL also answers in numeric and which
+// wadjet deliberately keeps in float64: an exact fixed-point tower is what
+// those need, and ADR-0012 item 9 already records that class of divergence for
+// STDDEV and friends.
+type DecimalScalarOp uint8
+
+const (
+	// DecimalScalarAbs keeps the argument's type exactly: |v| is a value the
+	// same column holds.
+	DecimalScalarAbs DecimalScalarOp = iota
+	// DecimalScalarCeil and DecimalScalarFloor drop the fraction and may
+	// CARRY into a new integer digit — ceil(9.9) is 10 — so the integer part
+	// grows by one.
+	DecimalScalarCeil
+	DecimalScalarFloor
+	// DecimalScalarRound rounds half away from zero to `digits` fraction
+	// digits and can carry, like ceil.
+	DecimalScalarRound
+	// DecimalScalarTrunc cuts at `digits` fraction digits and cannot carry.
+	DecimalScalarTrunc
+	// DecimalScalarSign answers -1, 0 or 1 whatever the argument's width.
+	DecimalScalarSign
+)
+
+// DecimalScalarType returns the (precision, scale) of a scalar math function's
+// DECIMAL result, per ADR-0024 items 2 and 3.
+//
+// digits is the SECOND argument of round(x, n) / trunc(x, n) and is ignored by
+// the one-argument ops. PostgreSQL's one-argument round and trunc are the
+// two-argument ones at n = 0, so a caller with no second argument passes 0 and
+// gets the same answer PostgreSQL gives (`round(12.75::numeric)` is 13).
+//
+// A NEGATIVE n rounds to a power of ten ABOVE the point — PostgreSQL's
+// `round(1234.56, -2)` is 1200 and `round(1250, -2)` is 1300, half away from
+// zero like every other numeric rounding here — and the result has no fraction
+// at all, so the scale is 0. It is not a range reduction: 1200 still needs its
+// four integer digits.
+//
+// ok=false when the input carries no usable declaration (precision 0 is the
+// codebase's "unconstrained" sentinel, #458), and then the caller must decline
+// to declare a DECIMAL rather than guess one — the same clause DecimalCommon
+// has, for the same reason.
+func DecimalScalarType(op DecimalScalarOp, in DecimalType, digits int) (DecimalType, bool) {
+	if in.Precision <= 0 {
+		return DecimalType{}, false
+	}
+	p, s := normalizeDecimalPS(in.Precision, in.Scale)
+	intDigits := p - s
+	switch op {
+	case DecimalScalarAbs:
+		return DecimalType{Precision: p, Scale: s}, true
+	case DecimalScalarSign:
+		// -1, 0, 1: one digit, no fraction, whatever the argument was.
+		return DecimalType{Precision: 1}, true
+	case DecimalScalarCeil, DecimalScalarFloor:
+		return decScalarType(intDigits+1, 0), true
+	case DecimalScalarRound:
+		return decScalarType(intDigits+1+max(digits, 0), max(digits, 0)), true
+	case DecimalScalarTrunc:
+		// Truncation cannot carry, so the integer part does not grow.
+		return decScalarType(intDigits+max(digits, 0), max(digits, 0)), true
+	}
+	return DecimalType{}, false
+}
+
+// decScalarType caps a scalar result at the carrier's width. The scale is
+// named by the caller (it is the digits the user asked for) and the precision
+// is what is left, so the cap gives up INTEGER digits here rather than
+// fractional ones — the opposite of AdjustDecimalPrecisionScale, and right for
+// the same reason: there the fraction is a computed by-product, here it is the
+// request.
+func decScalarType(p, s int) DecimalType {
+	if s > MaxDecimalScale {
+		s = MaxDecimalScale
+	}
+	if p > MaxDecimalPrecision {
+		p = MaxDecimalPrecision
+	}
+	if p < s {
+		p = s
+	}
+	if p < 1 {
+		p = 1
+	}
+	return DecimalType{Precision: p, Scale: s}
+}
