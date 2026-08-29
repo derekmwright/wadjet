@@ -69,6 +69,62 @@ Category resolution is PostgreSQL's, already pinned for set operations by
     MIN/MAX/FIRST_VALUE/LAG/… keep the input's (p,s); SUM → (38,s); AVG → (38, min(s+4,38))
     windowed SUM/AVG answer what the grouped ones answer, exactly
 
+**The INTEGER half of the choice rule landed 2026-08-29 (#695), and the BOX is
+what it took.** The type fold was the easy half: an integer contributes its
+whole range at scale 0 and a numeric LITERAL its own spelling, so
+`GREATEST(d92, 100)` is DECIMAL(9,2) while `GREATEST(d92, i64)` is
+DECIMAL(21,2). What blocked it for a release was the value: an integer box
+written into a DECIMAL vector is the ALREADY-SCALED carrier of §4 below, so
+`GREATEST(d, 5)` would have read back as 0.05 and `Vector.SetValueChecked`
+refuses one outright. A choice whose arms fold to a DECIMAL therefore RENDERS
+its chosen box as the value's TEXT — the box a DECIMAL column and exact
+arithmetic already produce — and the store resolves it at the output vector's
+own scale through the checked parser. Only an INTEGER box is rewritten: a
+float box beside a decimal one is a pair the boxed-comparison layer already
+classifies, and handing it text would replace the literal's exact source text
+(ADR-0012 item 6) with a rounded rendering.
+
+Two limits on a CONSTANT arm, both deliberate. It **contributes** to the fold
+and never **triggers** it, so `GREATEST(-2.5, -7.5)` keeps the float8 a bare
+numeric literal declares — the deferral recorded under "a numeric literal is
+an EXACT operand of ARITHMETIC" below, which this record does not reopen. And
+it contributes only when the box `compileLit` built carries its spelling
+exactly, which is what leaves
+`GREATEST(d_wide, 493827160549382.7160549350)` where it was: past a double's
+~17 significant digits the box has already lost digits, and declaring DECIMAL
+for it would store a number nobody wrote on the rows the literal wins.
+Arithmetic is unaffected — it reads a literal through its TEXT, not the box.
+
+A DECIMAL beside a FLOAT declares double precision, which is right, and still
+FAILS at the #361 store guard on the rows the decimal wins: the box is that
+branch's text and the vector is a float one. That is the float half of the
+same deferral, it is loud rather than wrong, and it is pinned by
+`wadjet.TestDecimalBesideAFloatStaysDoublePrecision` with `TODO(#555)`.
+
+**The AGGREGATE's input needed the same walk the SELECT list got in #529.**
+TPC-H Q08 is `SUM(CASE WHEN nation = 'BRAZIL' THEN volume ELSE 0 END)` over a
+DERIVED TABLE that computes `volume`, and both pre-aggregate projections — the
+single-process one and the `AggSpec.InputType` the worker rebuilds from the
+expression text — resolved their column types with `inputColDecls`, which
+STOPS at a subquery's Project. So `volume` decided nothing, the CASE declared
+its integer ELSE, and the query failed at the store on the first row the
+branch fired. Both now use `emittedColDecls`, the walk that crosses a derived
+table and the one `declaredOutputSchema` already uses, so the aggregate's
+input, the SELECT list and the plan-declared schema answer from one map.
+
+**Residual, and it is not about DECIMAL: on the stage DAG an aggregate whose
+INPUT EXPRESSION names a DERIVED column reads that column as NULL.** The
+worker builds the pre-aggregate projection from the expression TEXT against
+the batch its stage hands it, and that batch carries the SCAN's columns rather
+than the derived table's — so `SUM(CASE … THEN volume ELSE 0 END)` sums only
+its ELSE branch. Over an INTEGER derived column the DAG answers 0 where the
+single-process path answers 2, and a plain rename (`id AS idr`) is enough; no
+DECIMAL is involved and it predates this record. The DECIMAL arm is now LOUD
+rather than silent — the input's declared (p,s) reaches the worker and the
+checked store refuses the integer box with 22003 — and the whole family is
+pinned by `coordinator.TestAggregateOverADerivedColumnTwoPath`, each pin
+failing when the DAG starts agreeing.
+
 ### 3. The (p,s) of a computed result follows the finite-decimal industry rule
 
 PostgreSQL has no `(p,s)` rule — numeric is unbounded. A finite carrier needs

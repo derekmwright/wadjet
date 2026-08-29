@@ -1290,6 +1290,73 @@ func postgresSemanticsCases() []pgCase {
 		pgCase{name: "DecimalColTripleGreatestValue", exactNumeric: true,
 			sql: `SELECT d_key, GREATEST(d_2, d_4, d_wide) AS g, LEAST(d_2, d_4, d_wide) AS l ` +
 				`FROM dec_probe ORDER BY d_key`},
+		// --- A DECIMAL branch beside an INTEGER one (ADR-0024 item 2, #695) --
+		//
+		// PostgreSQL resolves every one of these to numeric, verified live on
+		// 17.11. Wadjet declared the INTEGER, so the query's fate depended on
+		// the DATA: it answered wherever the integer won every row (as an
+		// INT64 column, TPC-H Q08's silent face) and failed at the #361 store
+		// guard on the first row the decimal won (Q14's loud one). d_2 runs
+		// from -25.00 to 24.75, so every entry below has rows on BOTH sides of
+		// its literal — a fixture where one branch always won would pass under
+		// either rule.
+		//
+		// The rendering the two engines do NOT share is the finite carrier's:
+		// PostgreSQL's numeric carries a per-VALUE scale and prints the
+		// integer branch as `0`, a DECIMAL column has one scale and prints
+		// `0.00`. canonicalizeNumericStrings trims both to the same spelling,
+		// so what is compared is the NUMBER.
+		pgCase{name: "DecimalChoiceIntegerLiteralValue", exactNumeric: true,
+			sql: `SELECT d_key, GREATEST(d_2, 0) AS g, LEAST(d_2, 0) AS l, COALESCE(d_2, 0) AS c ` +
+				`FROM dec_probe ORDER BY d_key`},
+		pgCase{name: "DecimalChoiceCaseIntegerElseValue", exactNumeric: true,
+			sql: `SELECT d_key, CASE WHEN d_grp < 3 THEN d_2 ELSE 0 END AS c ` +
+				`FROM dec_probe ORDER BY d_key`},
+		// A FRACTIONAL literal, whose own declaration is FLOAT64: only its
+		// carried (p,s) tells it from a float COLUMN, which PostgreSQL types
+		// double precision. 0.125 is finer than d_2's scale, so the fold
+		// WIDENS to scale 3 and the column's values gain a digit.
+		pgCase{name: "DecimalChoiceFractionalLiteralValue", exactNumeric: true,
+			sql: `SELECT d_key, CASE WHEN d_grp < 3 THEN d_2 ELSE 0.125 END AS c, ` +
+				`GREATEST(d_4, 1.5) AS g FROM dec_probe ORDER BY d_key`},
+		// An integer COLUMN rather than a literal: it contributes its whole
+		// RANGE at scale 0 (10 digits for an INT32, 19 for an INT64), so the
+		// fold's precision is wider while the values are the same.
+		pgCase{name: "DecimalChoiceIntegerColumnValue", exactNumeric: true,
+			sql: `SELECT d_key, LEAST(d_2, d_grp) AS l, GREATEST(d_4, d_key) AS g ` +
+				`FROM dec_probe ORDER BY d_key`},
+		// NULLIF mirrors argument 0 alone, so its fold is over the column and
+		// the output keeps the column's own scale — the TYPE half of the same
+		// rule the typmod table records.
+		pgCase{name: "DecimalChoiceNullifIntegerValue", exactNumeric: true,
+			sql: `SELECT d_key, NULLIF(d_2, 0) AS n FROM dec_probe ORDER BY d_key`},
+		// TPC-H Q14's expression and Q08's, which is where the defect was
+		// found: the choice is UNDER an aggregate, so its value travels
+		// through the pre-aggregate projection's own DECIMAL vector.
+		pgCase{name: "DecimalChoiceQ14Shape", exactNumeric: true,
+			sql: `SELECT SUM(CASE WHEN d_grp < 3 THEN d_2 * (1 - d_4) ELSE 0 END) AS s FROM dec_probe`},
+		pgCase{name: "DecimalChoiceQ08Shape", exactNumeric: true,
+			sql: `SELECT SUM(CASE WHEN d_grp = 1 THEN d_2 ELSE 0 END) AS s FROM dec_probe`},
+		// Q08 AS IT IS WRITTEN: the CASE branch is a bare reference to a
+		// column a DERIVED TABLE computes. The aggregate's pre-projection
+		// resolved its input types with a walk that STOPS at a subquery's
+		// Project, so `volume` decided nothing and the CASE declared its
+		// integer ELSE — the SELECT list had crossed a derived table since
+		// #529 and the aggregate input had not.
+		pgCase{name: "DecimalChoiceQ08ShapeOverADerivedTable", exactNumeric: true,
+			sql: `SELECT SUM(CASE WHEN grp = 1 THEN volume ELSE 0 END) AS num, SUM(volume) AS den ` +
+				`FROM (SELECT d_grp AS grp, d_2 * (1 - d_4) AS volume FROM dec_probe) x`},
+		// GROUP BY the choice, which makes it a KEY: the key is encoded from
+		// the materialized DECIMAL vector, so a branch that arrived as an
+		// integer carrier would group under a different number.
+		pgCase{name: "DecimalChoiceGroupKey", exactNumeric: true, ordered: true,
+			sql: `SELECT CASE WHEN d_grp < 3 THEN d_2 ELSE 0 END AS k, COUNT(*) AS n ` +
+				`FROM dec_probe GROUP BY 1 ORDER BY 1`},
+		// The control that must NOT move: int ⊕ int stays integer on both
+		// engines, so nothing here is reading "any number" as a decimal.
+		pgCase{name: "DecimalChoiceIntegerOnlyStaysInteger",
+			sql: `SELECT d_key, COALESCE(d_grp, 0) AS c, GREATEST(d_grp, 3) AS g ` +
+				`FROM dec_probe ORDER BY d_key`},
 		// --- Exact DECIMAL ARITHMETIC (ADR-0024 item 3, #555) --------------
 		//
 		// One entry per rule in item 3's table, over each pair of the

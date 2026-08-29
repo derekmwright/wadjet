@@ -5180,8 +5180,17 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					// And the type that expression evaluates into, since
 					// the worker builds the pre-aggregate projection from
 					// the text alone and has no catalog to consult.
+					// emittedColDecls, not inputColDecls, and for the reason
+					// the single-process pre-projection uses it too: the walk
+					// has to cross a DERIVED TABLE. TPC-H Q08's CASE branch is
+					// a bare reference to a column a subquery computes, and
+					// inputColTypes stops at that subquery's Project — so the
+					// expression declared FLOAT64, the worker built a float
+					// vector from the text alone, and the branch's DECIMAL box
+					// was DROPPED: the DAG answered 0 where the single-process
+					// path refused the store outright. Two paths, one walk.
 					spec.InputType, spec.InputPrecision, spec.InputScale = declTypeParts(
-						inferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, inputColDecls(exprCols)))
+						inferProjectionDeclType(agg.InputExpr, parquet.TypeFloat64, nil, emittedColDecls(exprCols)))
 					// And the OUTPUT declaration from that same triple. The
 					// worker materializes this projection from it, so the
 					// vector every partial that sees a row observes IS this
@@ -5191,6 +5200,14 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					// aggSpecOutputType's float64 default for anything that is
 					// not a bare column (#685: SUM(a * (1 - b)) and its whole
 					// class). See aggOutputFromInputDecl.
+					//
+					// It reads the triple the line above produced, so the two
+					// changes compose: #695 made that triple resolve through a
+					// DERIVED TABLE, which is where TPC-H Q08's `volume` lives,
+					// and #685 turns it into the output every partial declares.
+					// Before #695 that triple was FLOAT64 for every derived
+					// aggregate input, so #685's output declaration inherited
+					// the same wrong carrier.
 					if t, p, sc, known := aggOutputFromInputDecl(
 						agg.Func, agg.Distinct, spec.InputType, spec.InputPrecision, spec.InputScale); known {
 						spec.OutputType, spec.OutputTypeKnown = t, true
@@ -8283,7 +8300,19 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// dropped the `rw.` on the way. Routing it through the synthetic
 	// pre-projection below is what materializes the field as a real column,
 	// at its declared type (#568).
-	aggInputDecls := inputColDecls(node.Children[0])
+	//
+	// emittedColDecls, not inputColDecls: the walk has to cross a DERIVED
+	// TABLE. TPC-H Q08 is `SUM(CASE WHEN nation = 'BRAZIL' THEN volume ELSE 0
+	// END)` over `(SELECT …, l_extendedprice * (1 - l_discount) AS volume …)`,
+	// and inputColTypes stops at that subquery's Project — so `volume`
+	// decided nothing, the CASE declared its integer ELSE, and the branch's
+	// DECIMAL text met an INT64 vector at the #361 store guard. It is the
+	// same decline #529 hit one site over, where the SELECT list already
+	// resolves through emittedColDecls (see TestDecimalDecidesThroughParens
+	// AndDerivedTables), and the same walk declaredOutputSchema uses — so the
+	// aggregate's input, the SELECT list and the plan-declared schema now
+	// answer from one map.
+	aggInputDecls := emittedColDecls(node.Children[0])
 
 	for i, agg := range node.AggExprs {
 		if agg.InputExpr != nil && (!isSimpleColRef(agg.InputExpr) || astIsFieldPath(agg.InputExpr, aggInputDecls)) {
@@ -9406,11 +9435,19 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 		if n.Op == "-" || n.Op == "+" {
 			t, c := nodeDeclaredType(n.Inner, decls)
 			if c != expr.Undecided {
+				// A negated numeric LITERAL keeps the exact fixed-point
+				// contribution its spelling carries: negation moves no digit,
+				// so `CASE … THEN d ELSE -0.5 END` folds to the same DECIMAL
+				// `… ELSE 0.5 END` does (#695).
+				withExact := func(d expr.DeclType) expr.DeclType {
+					d.Exact, d.ExactSet = t.Exact, t.ExactSet
+					return d
+				}
 				switch t.ID {
 				case parquet.TypeInt64, parquet.TypeInt32:
-					return expr.Decl(parquet.TypeInt64), c
+					return withExact(expr.Decl(parquet.TypeInt64)), c
 				case parquet.TypeFloat64, parquet.TypeFloat32:
-					return expr.Decl(parquet.TypeFloat64), c
+					return withExact(expr.Decl(parquet.TypeFloat64)), c
 				case parquet.TypeDecimal:
 					// Negation moves no digit, so -d is a value the same
 					// column holds and keeps its exact (p,s) — which is what
@@ -9458,10 +9495,18 @@ func nodeDeclaredType(node plansql.Node, decls colDecls) (expr.DeclType, expr.Co
 		// hash lookup against an int column fails to match.
 		switch n.Kind {
 		case plansql.LitNumber:
+			// The literal declares INT64 or FLOAT64 on its own — ADR-0024's
+			// recorded deferral, and `SELECT 1.5` is still a double — and
+			// CARRIES the exact fixed-point (p,s) of its spelling beside it,
+			// which is what a DECIMAL fold over it resolves against (#695).
+			// `CASE … THEN d ELSE 0 END` is numeric in PostgreSQL and the
+			// literal's `0` is DECIMAL(1,0) in that fold; a FLOAT COLUMN
+			// beside the same DECIMAL carries no such (p,s) and keeps
+			// PostgreSQL's float8.
 			if _, err := strconv.ParseInt(n.Value, 10, 64); err == nil {
-				return expr.Decl(parquet.TypeInt64), expr.Decided
+				return expr.DeclNumericLit(parquet.TypeInt64, n.Value), expr.Decided
 			}
-			return expr.Decl(parquet.TypeFloat64), expr.Decided
+			return expr.DeclNumericLit(parquet.TypeFloat64, n.Value), expr.Decided
 		case plansql.LitBool:
 			return expr.Decl(parquet.TypeBool), expr.Decided
 		case plansql.LitString:

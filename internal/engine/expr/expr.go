@@ -2211,6 +2211,22 @@ type Case struct {
 	// — see caseArms for why the arming is per-WHEN and not per-CASE. Armed
 	// lazily, like IsDistinctFrom's, and for the same reason.
 	arms atomic.Pointer[caseArms]
+
+	// dch is the DECIMAL box mode: whether the result branches fold to a
+	// DECIMAL, so a branch that answers an INTEGER hands over the value's
+	// TEXT rather than a carrier (choice_decimal.go, #695).
+	dch decimalChoice
+}
+
+// decimalBoxed reports whether this CASE's chosen box must be rendered as
+// DECIMAL text. The arms slice is built only on the resolution path — Go
+// evaluates a call's arguments when the call is reached, and the fast path
+// returns first — so the row loop allocates nothing.
+func (e *Case) decimalBoxed(b *batch.RecordBatch) bool {
+	if e.dch.ready.Load() {
+		return e.dch.on
+	}
+	return e.dch.resolveSlow(b, caseResultArms(e))
 }
 
 func (e *Case) armed() *caseArms {
@@ -2236,6 +2252,14 @@ type CaseWhen struct {
 }
 
 func (e *Case) Eval(b *batch.RecordBatch, row int) any {
+	v := e.eval(b, row)
+	if v == nil || !e.decimalBoxed(b) {
+		return v
+	}
+	return decimalChoiceBox(v)
+}
+
+func (e *Case) eval(b *batch.RecordBatch, row int) any {
 	if e.Operand != nil {
 		// Simple CASE: CASE x WHEN v1 THEN r1 ...
 		opVal := e.Operand.Eval(b, row)
@@ -2277,16 +2301,30 @@ func (e *Case) Eval(b *batch.RecordBatch, row int) any {
 // Coalesce returns the first non-null argument.
 type Coalesce struct {
 	Args []Expr
+
+	// dch is the DECIMAL box mode — see Case.dch (#695).
+	dch decimalChoice
 }
 
 func (e *Coalesce) Eval(b *batch.RecordBatch, row int) any {
 	for _, arg := range e.Args {
 		v := arg.Eval(b, row)
-		if v != nil {
-			return v
+		if v == nil {
+			continue
 		}
+		if e.decimalBoxed(b) {
+			return decimalChoiceBox(v)
+		}
+		return v
 	}
 	return nil
+}
+
+func (e *Coalesce) decimalBoxed(b *batch.RecordBatch) bool {
+	if e.dch.ready.Load() {
+		return e.dch.on
+	}
+	return e.dch.resolveSlow(b, e.Args)
 }
 
 // --- Scalar functions ---
@@ -2359,6 +2397,15 @@ type FuncCall struct {
 	// missed, and was invisible until a projected NULLIF over a DECIMAL could
 	// run at all (ADR-0024 item 2).
 	nullifArms *extremumArms
+	// choiceArms is the argument list this call CHOOSES its value from, read
+	// off the registry's polymorphic declaration (Ret.SameAsArgs) so it
+	// cannot drift from the type fold: GREATEST/LEAST/COALESCE/IFNULL mirror
+	// every argument, NULLIF argument 0 alone, IF its two branches. nil for
+	// every function that declares its own type, which is what keeps the
+	// DECIMAL box check off the other 270-odd per-row paths. See dch.
+	choiceArms []Expr
+	// dch is the DECIMAL box mode for those arms — see Case.dch (#695).
+	dch decimalChoice
 
 	vecOnce sync.Once
 	vecFn   VecScalarFunc
@@ -2767,6 +2814,15 @@ func (e *FuncCall) resolveFnSlow() {
 			e.nullifArms = armExtremumArms(e.Args)
 		}
 	}
+	if idx, poly := DefaultRegistry.ReturnType(e.Name).SameAsArgs(len(e.Args)); poly {
+		arms := make([]Expr, 0, len(idx))
+		for _, i := range idx {
+			if i >= 0 && i < len(e.Args) {
+				arms = append(arms, e.Args[i])
+			}
+		}
+		e.choiceArms = arms
+	}
 	e.fnReady.Store(true)
 }
 
@@ -2799,13 +2855,34 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	if e.wantsInstant {
 		e.resolveTemporalArgs(b, row, args)
 	}
-	if e.extremum {
-		return pickExtremum(b, args, e.extremumOp, e.extremumArms)
+	var out any
+	switch {
+	case e.extremum:
+		out = pickExtremum(b, args, e.extremumOp, e.extremumArms)
+	case e.nullifArms != nil:
+		out = evalNullIf(b, args, e.nullifArms)
+	default:
+		out = e.fn(args)
 	}
-	if e.nullifArms != nil {
-		return evalNullIf(b, args, e.nullifArms)
+	if e.choiceArms == nil || out == nil {
+		// Not a construct that CHOOSES between its arguments. Every other
+		// function declares its own result type, so nothing here can be a
+		// DECIMAL answered through an integer box (#695).
+		return out
 	}
-	return e.fn(args)
+	if !e.decimalBoxed(b) {
+		return out
+	}
+	return decimalChoiceBox(out)
+}
+
+// decimalBoxed reports whether this call's chosen box must be rendered as
+// DECIMAL text — see Case.decimalBoxed (#695).
+func (e *FuncCall) decimalBoxed(b *batch.RecordBatch) bool {
+	if e.dch.ready.Load() {
+		return e.dch.on
+	}
+	return e.dch.resolveSlow(b, e.choiceArms)
 }
 
 // evalNullIf is fnNullIf with the argument EXPRESSIONS in hand, so the

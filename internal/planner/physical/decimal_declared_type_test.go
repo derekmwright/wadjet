@@ -103,15 +103,45 @@ func TestDecimalChoiceExpressionsDeclareTheCommonType(t *testing.T) {
 		{"a NULL branch decides nothing", "COALESCE(a, NULL)", expr.DeclDecimal(9, 2), expr.Decided},
 		{"one column repeated", "GREATEST(a, a)", expr.DeclDecimal(9, 2), expr.Decided},
 
-		// TODO(#555): the mixed shapes PostgreSQL answers numeric/float8 for.
-		// They keep the FIRST NON-DECIMAL decider, which is exactly what
-		// they declared before a DECIMAL reference could decide anything —
-		// a loud mismatch at the store, never a silent rescale. An integer
-		// box written into a DECIMAL vector is taken as ALREADY SCALED
-		// (ADR-0018 §4), so declaring DECIMAL here would read
-		// GREATEST(i64, a) = 5 back as 0.05.
-		{"a DECIMAL beside an integer defers", "GREATEST(a, i64)",
+		// A DECIMAL beside an INTEGER is numeric in PostgreSQL and DECIMAL
+		// here (#695). The integer contributes its whole range at scale 0 —
+		// 19 digits for an INT64, 10 for an INT32 — so the fold keeps the
+		// decimal's scale and widens the integer part; a LITERAL contributes
+		// its own SPELLING instead, which is why `GREATEST(a, 100)` stays
+		// DECIMAL(9,2) where `GREATEST(a, i64)` needs 21 digits.
+		{"a DECIMAL beside a bigint column", "GREATEST(a, i64)",
+			expr.DeclDecimal(21, 2), expr.Decided},
+		{"a DECIMAL beside an int column", "LEAST(a, i32)",
+			expr.DeclDecimal(12, 2), expr.Decided},
+		{"a DECIMAL beside an integer literal", "GREATEST(a, 100)",
+			expr.DeclDecimal(9, 2), expr.Decided},
+		{"a DECIMAL beside zero", "COALESCE(a, 0)",
+			expr.DeclDecimal(9, 2), expr.Decided},
+		{"a DECIMAL beside a fractional literal", "CASE WHEN i64 > 0 THEN a ELSE 1.5 END",
+			expr.DeclDecimal(9, 2), expr.Decided},
+		{"a literal finer than the column widens the scale",
+			"CASE WHEN i64 > 0 THEN a ELSE 0.12345 END",
+			expr.DeclDecimal(12, 5), expr.Decided},
+		{"nullif against an integer literal mirrors argument 0", "NULLIF(a, 0)",
+			expr.DeclDecimal(9, 2), expr.Decided},
+		{"a literal wider than the column widens the integer part",
+			"GREATEST(a, 1234567890123)", expr.DeclDecimal(15, 2), expr.Decided},
+		{"three widths and an integer", "COALESCE(a, b, 0)",
+			expr.DeclDecimal(18, 4), expr.Decided},
+		{"the Q14 shape", "CASE WHEN i64 > 0 THEN a * b ELSE 0 END",
+			expr.DeclDecimal(28, 6), expr.Decided},
+		// int ⊕ int is an INTEGER expression on both engines, and a fold of
+		// two literals keeps the FLOAT64 a bare numeric literal declares:
+		// a literal's OWN declaration is ADR-0024's recorded deferral and is
+		// not this rule's business.
+		{"an integer beside an integer stays integer", "COALESCE(i64, 0)",
 			expr.Decl(parquet.TypeInt64), expr.Decided},
+		{"two literals keep the literal declaration", "GREATEST(0.5, 1.5)",
+			expr.DeclNumericLit(parquet.TypeFloat64, "0.5"), expr.Decided},
+		// A FLOAT COLUMN makes the whole construct float8, which is
+		// PostgreSQL's rule: float8 is the preferred type of the numeric
+		// category. The literal above and this column both declare FLOAT64
+		// and only DeclType.Exact tells them apart.
 		{"a DECIMAL beside a float defers", "COALESCE(a, f64)",
 			expr.Decl(parquet.TypeFloat64), expr.Decided},
 		{"a DECIMAL beside a string defers", "COALESCE(a, txt)",
@@ -146,10 +176,10 @@ func TestDecimalChoiceExpressionsDeclareTheCommonType(t *testing.T) {
 // It replaces the deferral pin this file carried while there was no decimal
 // arithmetic to feed the declaration. The rules, for the (9,2)/(18,4) pair:
 //
-//	+ - : s = max(2,4) = 4        ; p = 4 + max(7,14) + 1 = 19
-//	*   : s = 2+4 = 6             ; p = 9 + 18 + 1 = 28
-//	/   : s = max(6, 2+18+1) = 21 ; p = 9-2 + 4 + 21 = 32
-//	%   : s = max(2,4) = 4        ; p = min(7,14) + 4 = 11
+//   - - : s = max(2,4) = 4        ; p = 4 + max(7,14) + 1 = 19
+//   - : s = 2+4 = 6             ; p = 9 + 18 + 1 = 28
+//     /   : s = max(6, 2+18+1) = 21 ; p = 9-2 + 4 + 21 = 32
+//     %   : s = max(2,4) = 4        ; p = min(7,14) + 4 = 11
 //
 // An INTEGER operand joins as its whole range at scale 0 (10 digits for INT32,
 // 19 for INT64) and a numeric LITERAL as its spelling — which is why `a + 1`

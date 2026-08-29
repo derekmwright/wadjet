@@ -696,6 +696,33 @@ func wireCorpus() []wireCase {
 		// the zero-row plan-declared path was compared (#458): both
 		// entries pass with NO pin, because after FIX 2 wadjet agrees with
 		// PostgreSQL outright rather than needing an exemption.
+		// A CHOICE construct over a DECIMAL branch and a numeric LITERAL —
+		// ADR-0024 item 5's select_common_typmod, over the pair #695 made
+		// reachable. The literal is a numeric with typmod -1, so it DISAGREES
+		// with the column and the result is unconstrained; NULLIF folds over
+		// argument 0 alone and therefore keeps numeric(9,2). Both verified
+		// live against 17.11's \gdesc, and both are the whole point of reading
+		// the candidate list off the registry's declaration rather than
+		// hand-listing the constructs.
+		{name: "DecimalChoiceIntegerLiteral",
+			sql:  `SELECT GREATEST(d_2, 0) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
+			pins: map[string]string{wirePropFloatRender: choiceDecimalDigitsPin}},
+		{name: "DecimalChoiceIntegerLiteralZeroRows",
+			sql: `SELECT GREATEST(d_2, 0) AS v FROM dec_probe WHERE d_key = -1`},
+		{name: "DecimalChoiceCaseIntegerElse",
+			sql: `SELECT CASE WHEN d_grp < 3 THEN d_2 ELSE 0 END AS v FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
+			pins: map[string]string{wirePropFloatRender: choiceDecimalDigitsPin}},
+		{name: "DecimalChoiceFractionalLiteralElse",
+			sql: `SELECT CASE WHEN d_grp < 3 THEN d_2 ELSE 0.125 END AS v FROM dec_probe
+				WHERE d_key IN (1, 2, 3) ORDER BY d_key`,
+			pins: map[string]string{wirePropFloatRender: choiceDecimalDigitsPin}},
+		{name: "DecimalChoiceIntegerColumn",
+			sql: `SELECT LEAST(d_2, d_grp) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "DecimalChoiceNullifIntegerLiteral",
+			sql: `SELECT NULLIF(d_2, 0) AS v FROM dec_probe WHERE d_key IN (1, 2, 3) ORDER BY d_key`},
+		{name: "DecimalChoiceNullifIntegerLiteralZeroRows",
+			sql: `SELECT NULLIF(d_2, 0) AS v FROM dec_probe WHERE d_key = -1`},
 		{name: "MinOverDecimalColumn", sql: `SELECT MIN(d_2) AS lo FROM dec_probe WHERE d_key IN (1, 2, 3)`},
 		{name: "MinOverDecimalColumnZeroRows", sql: `SELECT MIN(d_2) AS lo FROM dec_probe WHERE d_key = -1`},
 		{name: "SumOverDecimalColumn", sql: `SELECT SUM(d_2) AS s FROM dec_probe WHERE d_key IN (1, 2, 3)`},

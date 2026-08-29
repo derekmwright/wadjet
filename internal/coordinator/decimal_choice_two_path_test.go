@@ -259,3 +259,333 @@ func TestDecimalComputedKeyTwoPath(t *testing.T) {
 		})
 	}
 }
+
+// TestDecimalChoiceOverAnIntegerTwoPath is #695 on both engines: a choice
+// construct over a DECIMAL branch and an INTEGER one — a literal or a column
+// — is numeric on PostgreSQL and DECIMAL here, and the INTEGER branch's value
+// materializes at the fold's scale.
+//
+// The two paths reach it by different routes and can fail differently. The
+// single-process engine compiles exec.Project from the AST; the DAG ships a
+// ProjectExprSpec the worker re-parses and compiles against a schema it learns
+// from the stage, so a box that stayed an INTEGER on one of them would be a
+// 22003 there and a value here — and before #695 the DECLARATION itself was
+// INT64/FLOAT64, which made the failure depend on which branch each row took.
+//
+// Values verified live on postgres:17-alpine over the same nine rows. The one
+// rendering difference is a finite carrier's: PostgreSQL prints the integer
+// branch as `100` because its numeric carries a per-VALUE scale, and a DECIMAL
+// column has one scale for the whole column.
+func TestDecimalChoiceOverAnIntegerTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	for _, tc := range []struct {
+		name string
+		expr string
+		want []string
+	}{
+		// The literal's own spelling is its (p,s), so the fold keeps the
+		// column's DECIMAL(9,2) rather than widening to an INT64 range.
+		{"greatest over a literal the decimal never beats", "GREATEST(a, 100)",
+			[]string{"100.00", "100.00", "100.00", "100.00", "100.00", "100.00", "100.00", "100.00", "100.00"}},
+		{"coalesce with zero", "COALESCE(a, 0)",
+			[]string{"12.75", "12.75", "12.75", "-0.01", "2.00", "0.00", "0.00", "12.75", "0.00"}},
+		{"case with an integer else", "CASE WHEN id < 5 THEN a ELSE 0 END",
+			[]string{"12.75", "12.75", "12.75", "-0.01", "0.00", "0.00", "0.00", "0.00", "0.00"}},
+		// An integer COLUMN contributes its whole RANGE at scale 0, so this
+		// one is DECIMAL(21,2).
+		{"least over an integer column", "LEAST(a, id)",
+			[]string{"1.00", "2.00", "3.00", "-0.01", "2.00", "0.00", "7.00", "8.00", "9.00"}},
+		// NULLIF mirrors argument 0 alone, so the fold is over `a` and the
+		// output keeps its (9,2). Row 6 is NULL because a IS 0 there.
+		{"nullif against an integer literal", "NULLIF(a, 0)",
+			[]string{"12.75", "12.75", "12.75", "-0.01", "2.00", "", "", "12.75", ""}},
+		// TPC-H Q14's expression: exact arithmetic in the THEN branch and an
+		// integer literal in the ELSE. (9,2) x (18,4) is DECIMAL(28,6).
+		{"the Q14 shape", "CASE WHEN id < 5 THEN a * b ELSE 0 END",
+			[]string{"162.562500", "162.563775", "162.561225", "0.000100",
+				"0.000000", "0.000000", "0.000000", "0.000000", "0.000000"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sql := fmt.Sprintf("SELECT %s AS v FROM %s ORDER BY id", tc.expr, dbpTable)
+			var singleJoined, dagJoined string
+			for _, arm := range []struct {
+				name string
+				dag  bool
+			}{{"single", false}, {"dag", true}} {
+				rows := dtpRun(t, ctx, single, coord, sql, arm.dag)
+				got := make([]string, 0, len(rows))
+				for _, r := range rows {
+					if r["v"] == nil {
+						got = append(got, "")
+						continue
+					}
+					s, ok := r["v"].(string)
+					if !ok {
+						t.Fatalf("%s: v = %#v (%T), want the DECIMAL text — a non-string box "+
+							"means the value took the integer carrier reading (#695)",
+							arm.name, r["v"], r["v"])
+					}
+					got = append(got, s)
+				}
+				joined := strings.Join(got, ",")
+				if arm.dag {
+					dagJoined = joined
+				} else {
+					singleJoined = joined
+				}
+				if joined != strings.Join(tc.want, ",") {
+					t.Errorf("%s: %s\n  got  %v\n  want %v", arm.name, sql, got, tc.want)
+				}
+			}
+			if singleJoined != dagJoined {
+				t.Errorf("the two paths disagree:\n  single %s\n  dag    %s", singleJoined, dagJoined)
+			}
+		})
+	}
+}
+
+// TestDecimalChoiceOverAnIntegerAggregatedTwoPath puts the same expression
+// UNDER an aggregate and BEHIND a shuffle, which is where TPC-H Q14 and Q08
+// met #695: the pre-aggregate projection materializes the CASE into a DECIMAL
+// vector of its own (physical.aggPreProject) and the GROUP BY key hashes it,
+// and on the DAG both happen in the worker rather than in this process.
+func TestDecimalChoiceOverAnIntegerAggregatedTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want string
+		// wantDAG pins a DAG answer that differs from the single-process one
+		// for a reason OUTSIDE this fold. Empty means the two must agree,
+		// which is every entry but the last.
+		wantDAG string
+	}{
+		// Q14's numerator, exactly: SUM over a CASE whose ELSE is the
+		// integer 0. SUM(DECIMAL(28,6)) is DECIMAL(38,6).
+		{"sum over the Q14 shape",
+			"SELECT SUM(CASE WHEN id < 5 THEN a * b ELSE 0 END) AS v FROM " + dbpTable,
+			"487.687600", ""},
+		// Q08's shape: the branch is a bare DECIMAL column and the ELSE an
+		// integer literal, so the whole answer used to be declared FLOAT64
+		// and was right only while no row took the decimal branch.
+		{"sum over the Q08 shape",
+			"SELECT SUM(CASE WHEN id < 5 THEN a ELSE 0 END) AS v FROM " + dbpTable,
+			"38.24", ""},
+		{"sum over a coalesced column",
+			"SELECT SUM(COALESCE(a, 0)) AS v FROM " + dbpTable,
+			"52.99", ""},
+		// The choice ABOVE the aggregate rather than below it, which is a
+		// different site on the DAG: the gather re-evaluates a WRAPPED
+		// aggregate's expression against the merged batch
+		// (coordinator.evalExprColumn), and it decides whether to build a
+		// DECIMAL column from expr.DecimalResultOf — the same fold. Before
+		// #695 the pair `__agg_0` ⊕ `0` was not a DECIMAL result there, so
+		// the column was built float64.
+		{"coalesce over a sum",
+			"SELECT COALESCE(SUM(a), 0) AS v FROM " + dbpTable, "52.99", ""},
+		{"greatest over a sum",
+			"SELECT GREATEST(SUM(a), 0) AS v FROM " + dbpTable, "52.99", ""},
+		{"coalesce over a wrapped sum",
+			"SELECT COALESCE(SUM(a) * 2, 0) AS v FROM " + dbpTable, "105.98", ""},
+		// The EMPTY aggregate, where the LITERAL branch is the answer on
+		// every row: SUM over no rows is NULL, so the integer arm is what
+		// the value comes from. PostgreSQL answers 0.
+		//
+		// The two paths RENDER it differently, and the difference is not
+		// this fold's: the DAG's empty aggregate emits its DECIMAL column at
+		// SCALE 0 (there is no row to carry a scale, and the merged batch is
+		// where the gather reads one), so the choice above it resolves scale
+		// 0 and prints "0" where the single-process path prints "0.00".
+		// Same NUMBER on both, and the DAG's empty-aggregate scale is an
+		// open residual of its own — invisible until now, because a bare
+		// `SUM(d)` over no rows is NULL on both paths and renders nothing.
+		// wantDAG is the pin: when the DAG carries the declared scale, this
+		// entry fails and says so.
+		{"coalesce over an empty sum",
+			"SELECT COALESCE(SUM(a), 0) AS v FROM " + dbpTable + " WHERE id < 0", "0.00", "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, arm := range []struct {
+				name string
+				dag  bool
+			}{{"single", false}, {"dag", true}} {
+				want := tc.want
+				if arm.dag && tc.wantDAG != "" {
+					want = tc.wantDAG
+				}
+				rows := dtpRun(t, ctx, single, coord, tc.sql, arm.dag)
+				if len(rows) != 1 {
+					t.Fatalf("%s: %d rows, want 1", arm.name, len(rows))
+				}
+				dtpCell(t, arm.name+" "+tc.sql, rows[0]["v"], want)
+			}
+		})
+	}
+
+	// GROUP BY the expression, which makes the choice a SHUFFLE KEY on the
+	// DAG: the key is encoded from the materialized DECIMAL vector, so an
+	// integer box that reached it would hash a different number than the
+	// single-process path did.
+	t.Run("group by the choice expression", func(t *testing.T) {
+		sql := "SELECT CASE WHEN id < 5 THEN a ELSE 0 END AS k, COUNT(*) AS n FROM " +
+			dbpTable + " GROUP BY 1 ORDER BY 1"
+		want := []string{"-0.01=1", "0.00=5", "12.75=3"}
+		for _, arm := range []struct {
+			name string
+			dag  bool
+		}{{"single", false}, {"dag", true}} {
+			rows := dtpRun(t, ctx, single, coord, sql, arm.dag)
+			got := make([]string, 0, len(rows))
+			for _, r := range rows {
+				got = append(got, fmt.Sprintf("%v=%v", r["k"], r["n"]))
+			}
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Errorf("%s: %s\n  got  %v\n  want %v", arm.name, sql, got, want)
+			}
+		}
+	})
+}
+
+// TestAggregateOverADerivedColumnTwoPath is TPC-H Q08's exact shape, and it
+// records a defect the DECIMAL work only made visible: the two paths DISAGREE,
+// and the DAG's disagreement is not about DECIMAL at all.
+//
+// Q08 aggregates a CASE whose branch is a bare reference to a column a DERIVED
+// TABLE computes. On the single-process path that now answers exactly (#695:
+// the aggregate's pre-projection resolves its input types through the derived
+// table, the same walk the SELECT list has used since #529). On the DAG the
+// worker builds the pre-aggregate projection from the expression TEXT against
+// the batch the stage hands it — and that batch carries the SCAN's columns, not
+// the derived table's, so `volume` resolves to nothing and reads NULL on every
+// row. `SUM(CASE … THEN volume ELSE 0 END)` therefore sums only its ELSE
+// branch.
+//
+// It is TYPE-INDEPENDENT and predates all of this: over an INTEGER derived
+// column the DAG answers 0 where the single-process path answers 2, and a
+// plain RENAME (`id AS idr`) is enough to trigger it — no expression, no
+// DECIMAL. The DECIMAL arm is now LOUD rather than silent, because the
+// aggregate input's declared (p,s) reaches the worker and the checked store
+// refuses the integer box (22003); the integer arm is still a silent wrong
+// number, which is what makes this worth pinning rather than leaving to be
+// rediscovered.
+//
+// Each pin fails when the DAG starts agreeing. That is the fix's proof.
+func TestAggregateOverADerivedColumnTwoPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	for _, tc := range []struct {
+		name string
+		sql  string
+		// want is the answer PostgreSQL gives and the single-process path
+		// now gives.
+		want string
+		// dagRefuses: the DAG fails loudly instead of answering. dagWrong is
+		// the wrong number it answers when it does not fail. Exactly one is
+		// set, and both are pins on the SAME defect.
+		dagRefuses bool
+		dagWrong   string
+	}{
+		{
+			name: "a DECIMAL derived column, computed",
+			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN volume ELSE 0 END) AS v FROM " +
+				"(SELECT s, a * b AS volume FROM " + dbpTable + ") x",
+			want: "162.562500", dagRefuses: true,
+		},
+		{
+			name: "a DECIMAL derived column, renamed",
+			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN v ELSE 0 END) AS v FROM " +
+				"(SELECT s, a AS v FROM " + dbpTable + ") x",
+			want: "12.75", dagRefuses: true,
+		},
+		{
+			// No DECIMAL anywhere: this is the entry that says the DAG defect
+			// is about the derived NAME, not about the type.
+			name: "an INTEGER derived column, computed",
+			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN twice ELSE 0 END) AS v FROM " +
+				"(SELECT s, id * 2 AS twice FROM " + dbpTable + ") x",
+			want: "2", dagWrong: "0",
+		},
+		{
+			name: "an INTEGER derived column, renamed",
+			sql: "SELECT SUM(CASE WHEN s = '1.50' THEN idr ELSE 0 END) AS v FROM " +
+				"(SELECT s, id AS idr FROM " + dbpTable + ") x",
+			want: "1", dagWrong: "0",
+		},
+		{
+			// The CONTROL: a bare aggregate over the same derived column
+			// agrees on both paths, so the defect is specific to an aggregate
+			// whose INPUT is an EXPRESSION over a derived name.
+			name: "control, a bare aggregate over the derived column",
+			sql:  "SELECT SUM(volume) AS v FROM (SELECT a * b AS volume FROM " + dbpTable + ") x",
+			want: "507.687600",
+		},
+		{
+			// The other control: the same CASE with no derived table under it.
+			name: "control, the same CASE over the base table",
+			sql:  "SELECT SUM(CASE WHEN s = '1.50' THEN a ELSE 0 END) AS v FROM " + dbpTable,
+			want: "12.75",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := dtpRun(t, ctx, single, coord, tc.sql, false)
+			if len(rows) != 1 {
+				t.Fatalf("single: %d rows, want 1", len(rows))
+			}
+			if got := fmt.Sprintf("%v", rows[0]["v"]); got != tc.want {
+				t.Errorf("single %s = %q, want %q", tc.sql, got, tc.want)
+			}
+
+			res, err := tmdRunDAG(ctx, coord, tc.sql)
+			if tc.dagRefuses {
+				if err == nil {
+					t.Errorf("the DAG ANSWERED %v for\n  %s\nThe derived-column "+
+						"reference resolves there now, so delete this pin and assert %q on both paths",
+						res.Rows, tc.sql, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("stage DAG refused %q: %v", tc.sql, err)
+			}
+			if len(res.Rows) != 1 {
+				t.Fatalf("dag: %d rows, want 1", len(res.Rows))
+			}
+			got := fmt.Sprintf("%v", res.Rows[0]["v"])
+			if tc.dagWrong != "" {
+				if got == tc.want {
+					t.Errorf("the DAG now agrees (%q) for\n  %s\nDelete this pin", got, tc.sql)
+				} else if got != tc.dagWrong {
+					t.Errorf("dag %s = %q, want the pinned wrong answer %q or the right one %q",
+						tc.sql, got, tc.dagWrong, tc.want)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Errorf("dag %s = %q, want %q", tc.sql, got, tc.want)
+			}
+		})
+	}
+}

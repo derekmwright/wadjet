@@ -536,38 +536,280 @@ func TestDecimalDecidesThroughParensAndDerivedTables(t *testing.T) {
 	}
 }
 
-// TestDecimalBesideAnIntegerIsDataDependent records what the DECIMAL⊕INTEGER
-// deferral actually costs, so nobody reads it as a stable refusal.
+// TestDecimalBesideAnIntegerIsNumeric is #695, and it replaces the pin that
+// recorded the deferral this closes.
 //
-// PostgreSQL resolves GREATEST(numeric, integer) to numeric. Wadjet declares
-// the INTEGER, because the alternative is worse: an integer box written into
-// a DECIMAL vector is taken as ALREADY SCALED (ADR-0018 §4, the parquet
-// ingest contract), so declaring DECIMAL would read GREATEST(a, 5) back as
-// 0.05. The consequence is that the query's fate depends on the DATA — it
-// answers wherever the integer wins every row and fails at the #361 store
-// guard on the first row the decimal wins. That is a loud failure, never a
-// wrong answer, and it is what TODO(#555) buys back when the store learns to
-// scale an integer box.
-func TestDecimalBesideAnIntegerIsDataDependent(t *testing.T) {
+// PostgreSQL resolves every choice construct over a numeric and an integer —
+// a column or a literal — to numeric, verified live on 17.11 for CASE,
+// COALESCE, GREATEST, LEAST and NULLIF. Wadjet declared the INTEGER instead,
+// because an integer box written into a DECIMAL vector is taken as ALREADY
+// SCALED (ADR-0018 §4, the parquet ingest contract) and GREATEST(a, 5) would
+// have read back as 0.05. The fate of the query then depended on the DATA: it
+// answered wherever the integer won every row (`GREATEST(a, 100)`, as an INT64
+// column) and failed at the #361 store guard on the first row the decimal won
+// (`GREATEST(a, 1)`). TPC-H Q14 is that second shape and Q08 the first.
+//
+// The box is what closes it: a choice whose arms fold to a DECIMAL renders its
+// chosen value as TEXT — the same box a DECIMAL column and exact arithmetic
+// already hand over — so the store resolves it at the output vector's own
+// scale through the checked parser rather than reinterpreting a carrier.
+//
+// The values below are PostgreSQL's, over the same seven rows (`\gdesc` and
+// the value matrix are in the commit body). The one rendering difference is
+// the one a finite carrier owes: PostgreSQL's numeric carries a per-VALUE
+// scale and prints the integer branch as `100`, while a DECIMAL column has ONE
+// scale and prints `100.00`. Same number, and the pg-oracle compares both
+// sides canonicalised.
+func TestDecimalBesideAnIntegerIsNumeric(t *testing.T) {
 	db := ddrOpen(t)
-
-	// Row 1 holds a = 12.75, so the integer 100 wins and the query answers —
-	// as an INT64 column, which is already the wrong TYPE for PostgreSQL.
-	res := ddrQuery(t, db, "SELECT GREATEST(a, 100) AS g FROM "+ddrTable+" WHERE id = 1")
-	if m := res.ColumnMetas[0]; m.TypeID != parquet.TypeInt64 {
-		t.Errorf("GREATEST(a, 100) declared %s; the deferral declares the INTEGER "+
-			"(TODO(#555) — PostgreSQL says numeric)", m.TypeID)
+	for _, tc := range []struct {
+		name    string
+		sql     string
+		prec    int
+		scale   int
+		want    []string
+		wantErr bool
+	}{
+		{
+			// The shape that used to answer, as an INT64 column: the integer
+			// wins every row. TPC-H Q08's silent face.
+			name: "greatest over a literal the decimal never beats",
+			sql:  "SELECT GREATEST(a, 100) AS v FROM " + ddrTable + " ORDER BY id",
+			prec: 9, scale: 2,
+			// GREATEST ignores a NULL argument on PostgreSQL, so row 6
+			// answers 100 rather than NULL.
+			want: []string{"100.00", "100.00", "100.00", "100.00", "100.00", "100.00", "100.00"},
+		},
+		{
+			// The shape that used to FAIL at the store guard on row 1. TPC-H
+			// Q14's loud face.
+			name: "greatest over a literal the decimal beats",
+			sql:  "SELECT GREATEST(a, 1) AS v FROM " + ddrTable + " ORDER BY id",
+			prec: 9, scale: 2,
+			want: []string{"12.75", "12.75", "12.75", "2.00", "1.00", "1.00", "12.75"},
+		},
+		{
+			name: "coalesce with zero",
+			sql:  "SELECT COALESCE(a, 0) AS v FROM " + ddrTable + " ORDER BY id",
+			prec: 9, scale: 2,
+			want: []string{"12.75", "12.75", "12.75", "2.00", "-0.01", "0.00", "12.75"},
+		},
+		{
+			// A FRACTIONAL literal, whose own declaration is FLOAT64: only
+			// DeclType.Exact tells it from a float COLUMN, which would make
+			// the whole construct float8 as it does on PostgreSQL.
+			name: "case with a fractional literal branch",
+			sql:  "SELECT CASE WHEN id > 4 THEN a ELSE 1.5 END AS v FROM " + ddrTable + " ORDER BY id",
+			prec: 9, scale: 2,
+			want: []string{"1.50", "1.50", "1.50", "1.50", "-0.01", "", "12.75"},
+		},
+		{
+			// A literal FINER than the column widens the fold's scale, so
+			// the column's own values gain digits rather than the literal
+			// losing them.
+			name: "case with a literal finer than the column",
+			sql:  "SELECT CASE WHEN id > 4 THEN a ELSE 0.125 END AS v FROM " + ddrTable + " ORDER BY id",
+			prec: 10, scale: 3,
+			want: []string{"0.125", "0.125", "0.125", "0.125", "-0.010", "", "12.750"},
+		},
+		{
+			// NULLIF mirrors argument 0 alone, so the fold is over `a` and
+			// the output keeps its (9,2) — PostgreSQL's rule for the TYPE and
+			// for the typmod both.
+			name: "nullif against an integer literal",
+			sql:  "SELECT NULLIF(a, 0) AS v FROM " + ddrTable + " ORDER BY id",
+			prec: 9, scale: 2,
+			want: []string{"12.75", "12.75", "12.75", "2.00", "-0.01", "", "12.75"},
+		},
+		{
+			// An INTEGER COLUMN, which contributes its whole RANGE at scale 0
+			// (19 digits for an INT64) rather than a spelling — so the fold
+			// is DECIMAL(21,2), not (9,2).
+			name: "least over an integer column",
+			sql:  "SELECT LEAST(a, id) AS v FROM " + ddrTable + " ORDER BY id",
+			prec: 21, scale: 2,
+			want: []string{"1.00", "2.00", "3.00", "2.00", "-0.01", "6.00", "7.00"},
+		},
+		{
+			name: "greatest over an integer column",
+			sql:  "SELECT GREATEST(a, id) AS v FROM " + ddrTable + " ORDER BY id",
+			prec: 21, scale: 2,
+			want: []string{"12.75", "12.75", "12.75", "4.00", "5.00", "6.00", "12.75"},
+		},
+		{
+			// Three alternatives at three widths, one of them an integer
+			// literal: the fold takes the widest scale and the widest
+			// integer part, so no branch loses a digit.
+			name: "a three-way mix of two decimals and a literal",
+			sql: "SELECT CASE WHEN id < 3 THEN a WHEN id < 5 THEN b ELSE 0 END AS v FROM " +
+				ddrTable + " ORDER BY id",
+			prec: 18, scale: 4,
+			want: []string{"12.7500", "12.7500", "12.7499", "10.0000", "0.0000", "0.0000", "0.0000"},
+		},
+		{
+			// TPC-H Q14's expression, whose THEN branch is exact arithmetic
+			// over two DECIMAL columns: (9,2) x (18,4) is DECIMAL(28,6), and
+			// the literal ELSE folds in at scale 0.
+			name: "the Q14 shape",
+			sql: "SELECT CASE WHEN id > 3 THEN a * b ELSE 0 END AS v FROM " +
+				ddrTable + " ORDER BY id",
+			prec: 28, scale: 6,
+			want: []string{"0.000000", "0.000000", "0.000000", "20.000000", "0.000100", "", ""},
+		},
+		{
+			// The control that must NOT move: a FLOAT column beside a DECIMAL
+			// is double precision on PostgreSQL and stays FLOAT64 here, so
+			// the exact-numeric rule cannot be reading "any number".
+			name: "an integer beside an integer stays integer",
+			sql:  "SELECT COALESCE(id, 0) AS v FROM " + ddrTable + " ORDER BY id",
+			want: []string{"1", "2", "3", "4", "5", "6", "7"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := ddrQuery(t, db, tc.sql)
+			m := res.ColumnMetas[0]
+			if tc.prec == 0 {
+				if m.TypeID == parquet.TypeDecimal {
+					t.Errorf("declared %s(%d,%d), want a non-DECIMAL",
+						m.TypeID, m.Precision, m.Scale)
+				}
+			} else if m.TypeID != parquet.TypeDecimal || m.Precision != tc.prec || m.Scale != tc.scale {
+				t.Errorf("declared %s(%d,%d), want DECIMAL(%d,%d)",
+					m.TypeID, m.Precision, m.Scale, tc.prec, tc.scale)
+			}
+			var got []string
+			for _, row := range res.Rows {
+				if row["v"] == nil {
+					got = append(got, "")
+					continue
+				}
+				got = append(got, fmt.Sprintf("%v", row["v"]))
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("values = %v, want %v", got, tc.want)
+			}
+		})
 	}
-	if got := fmt.Sprintf("%v", res.Rows[0]["g"]); got != "100" {
-		t.Errorf("GREATEST(a, 100) = %q, want 100", got)
+}
+
+// TestDecimalChoiceUnderAnAggregateOverADerivedTable is TPC-H Q08's exact
+// shape, and it is the half of #695 the type fold alone does not reach.
+//
+// Q08's CASE branch is a bare reference to `volume`, a column a DERIVED TABLE
+// computes (`l_extendedprice * (1 - l_discount)`). The SELECT list has
+// resolved through a derived table since #529 (emittedColDecls), but the
+// AGGREGATE's own pre-projection was still built from inputColDecls, which
+// stops at the subquery's Project — so `volume` decided nothing, the CASE
+// declared its integer ELSE, and the branch's DECIMAL text met an INT64
+// vector at the #361 store guard on the first row the branch fired. The
+// aggregate input, the SELECT list and the plan-declared schema now answer
+// from one walk.
+//
+// Values are PostgreSQL's over the same seven rows.
+func TestDecimalChoiceUnderAnAggregateOverADerivedTable(t *testing.T) {
+	db := ddrOpen(t)
+	for _, tc := range []struct {
+		name  string
+		sql   string
+		prec  int
+		scale int
+		want  string
+	}{
+		{
+			name: "the Q08 numerator over a computed derived column",
+			sql: "SELECT SUM(CASE WHEN s = '12.75' THEN volume ELSE 0 END) AS v FROM " +
+				"(SELECT s, a * b AS volume FROM " + ddrTable + ") x",
+			prec: 38, scale: 6, want: "162.562500",
+		},
+		{
+			// A plain RENAME through the derived table, which failed for the
+			// same reason: the walk stopped at the Project, not at the
+			// arithmetic.
+			name: "the same over a renamed derived column",
+			sql: "SELECT SUM(CASE WHEN s = '12.75' THEN v ELSE 0 END) AS v FROM " +
+				"(SELECT s, a AS v FROM " + ddrTable + ") x",
+			prec: 38, scale: 2, want: "12.75",
+		},
+		{
+			name: "greatest over a computed derived column",
+			sql: "SELECT SUM(GREATEST(volume, 0)) AS v FROM " +
+				"(SELECT a * b AS volume FROM " + ddrTable + ") x",
+			prec: 38, scale: 6, want: "507.687600",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := ddrQuery(t, db, tc.sql)
+			m := res.ColumnMetas[0]
+			if m.TypeID != parquet.TypeDecimal || m.Precision != tc.prec || m.Scale != tc.scale {
+				t.Errorf("%s\n  declared %s(%d,%d), want DECIMAL(%d,%d)",
+					tc.sql, m.TypeID, m.Precision, m.Scale, tc.prec, tc.scale)
+			}
+			if got := fmt.Sprintf("%v", res.Rows[0]["v"]); got != tc.want {
+				t.Errorf("%s\n  = %q, want %q", tc.sql, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDecimalBesideAFloatStaysDoublePrecision is the boundary of the rule
+// above, and the reason a numeric literal needed its own carrier rather than
+// being read off its declared type: `CASE … THEN d ELSE 1.5 END` and
+// `CASE … THEN d ELSE f END` both have a FLOAT64-declared branch, and only one
+// of them is numeric on PostgreSQL.
+func TestDecimalBesideAFloatStaysDoublePrecision(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test", SpillDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "a", Type: parquet.TypeDecimal, Precision: 9, Scale: 2, Nullable: true},
+		{Name: "f", Type: parquet.TypeFloat64, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "ddrfloat", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows := []map[string]any{
+		// Row 1 is NULL in the DECIMAL arm, so every construct below answers
+		// from the FLOAT one and the query runs; row 2 is the shape the
+		// residual below is about.
+		{"id": int64(1), "f": 2.5},
+		{"id": int64(2), "a": parquet.Decimal128{Lo: 1275}, "f": 20.5},
+	}
+	ing := db.NewIngester("ddrfloat", schema, nil, ingest.Config{MaxBufferRows: len(rows) + 1})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range []string{
+		"SELECT COALESCE(a, f) AS v FROM ddrfloat WHERE id = 1",
+		"SELECT GREATEST(a, f) AS v FROM ddrfloat WHERE id = 1",
+		"SELECT CASE WHEN id = 2 THEN a ELSE f END AS v FROM ddrfloat WHERE id = 1",
+	} {
+		res := ddrQuery(t, db, sql)
+		if m := res.ColumnMetas[0]; m.TypeID == parquet.TypeDecimal {
+			t.Errorf("%s declared %s(%d,%d); PostgreSQL says double precision",
+				sql, m.TypeID, m.Precision, m.Scale)
+		}
+		if got := fmt.Sprintf("%v", res.Rows[0]["v"]); got != "2.5" {
+			t.Errorf("%s = %q, want 2.5", sql, got)
+		}
 	}
 
-	// The same expression with a small integer fails on the first row the
-	// DECIMAL wins. Loud, and the same failure the whole family gave before
-	// ADR-0024.
-	if _, err := db.Query(context.Background(), "SELECT GREATEST(a, 1) AS g FROM "+ddrTable); err == nil {
-		t.Error("GREATEST(a, 1) answered — the decimal wins on row 1, and an INT64 " +
-			"declaration has nowhere to put its text")
+	// TODO(#555): the FLOAT half of the same deferral is still open, and it
+	// is loud rather than wrong. A row where the DECIMAL arm wins boxes its
+	// rendered TEXT into a FLOAT64 vector and the #361 guard refuses the
+	// store — the failure ADR-0012 item 12 records for `COALESCE` over two
+	// DECIMALs, over a pair whose declared type is right. Closing it means a
+	// decimal→float coercion at the box, which is the mirror of what #695
+	// built for the integer half; this pin fails when that lands.
+	if _, err := db.Query(ctx, "SELECT COALESCE(a, f) AS v FROM ddrfloat"); err == nil {
+		t.Error("COALESCE(a, f) answered on the row the DECIMAL wins — " +
+			"the float half of the deferral has landed, so delete this pin")
 	}
 }
 

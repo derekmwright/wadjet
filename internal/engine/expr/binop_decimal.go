@@ -932,12 +932,22 @@ func caseResultArms(v *Case) []Expr {
 // decimalArmFold is the common DECIMAL type of a set of alternatives one value
 // is chosen from — ADR-0024 item 2's rule, applied to a compiled tree.
 //
-// Every arm that can PRODUCE a value must be a DECIMAL whose (p,s) resolved:
-// one that is not either makes the result a different type, or arrives at its
-// own scale and would be read at the fold's. A NULL literal is skipped, for
-// the reason CommonDeclType skips it — it names no type and produces no value.
+// Every arm that can PRODUCE a value must have an exact fixed-point form, and
+// at least one must be a genuine DECIMAL. An arm that has no such form — a
+// float, a string, an expression this layer cannot type — makes the result a
+// different type or arrives at its own scale and would be read at the fold's,
+// so it declines the whole fold. An INTEGER arm participates: an integer is
+// DECIMAL(10,0)/(19,0) and a numeric literal its own spelling (ADR-0024
+// item 2), which is what makes `COALESCE(d, 0)` numeric here as it is in
+// PostgreSQL (#695). A NULL literal is skipped, for the reason CommonDeclType
+// skips it — it names no type and produces no value.
+//
+// expr.CommonDeclType folds the same alternatives over their DECLARED types,
+// and the two must agree: a plan that declares DECIMAL for an expression the
+// runtime boxes as an integer hands the store a carrier instead of a value.
 func decimalArmFold(arms []Expr, b *batch.RecordBatch) (int, int, bool) {
 	metas := make([]batch.DecimalType, 0, len(arms))
+	sawDecimal := false
 	for _, a := range arms {
 		if a == nil {
 			continue
@@ -945,11 +955,17 @@ func decimalArmFold(arms []Expr, b *batch.RecordBatch) (int, int, bool) {
 		if lit, isLit := a.(*Lit); isLit && lit.Val == nil {
 			continue
 		}
-		p, s, ok := DecimalResultOf(a, b)
+		t, isDec, ok := decimalChoiceArm(a, b)
 		if !ok {
 			return 0, 0, false
 		}
-		metas = append(metas, batch.DecimalType{Precision: p, Scale: s})
+		sawDecimal = sawDecimal || isDec
+		metas = append(metas, t)
+	}
+	if !sawDecimal {
+		// All-integer alternatives are an INTEGER expression, not a decimal
+		// one: `COALESCE(i, 0)` is integer in PostgreSQL too.
+		return 0, 0, false
 	}
 	m, ok := batch.DecimalCommon(metas)
 	if !ok {

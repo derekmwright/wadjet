@@ -40,6 +40,39 @@ type DeclType struct {
 	// arrives at all, so COALESCE(d, NULL) is a DECIMAL expression exactly as
 	// PostgreSQL says it is.
 	Untyped bool
+
+	// Exact is the fixed-point (p,s) a NON-DECIMAL numeric operand
+	// contributes to a DECIMAL fold, and ExactSet says it has one. It is
+	// carried apart from Precision/Scale on purpose: those two ARE the
+	// declaration when ID is DECIMAL, and declTypeParts writes them into
+	// projection, sort-key and window-key specs, where a precision on an
+	// INT64 column would be read as a DECIMAL's.
+	//
+	// The one operand that needs it is a numeric LITERAL, whose own
+	// declaration is INT64 or FLOAT64 (`SELECT 1.5` is a double — ADR-0024's
+	// recorded deferral) while its fixed-point contribution is its SPELLING:
+	// `0` is DECIMAL(1,0) and `0.5` is DECIMAL(1,1). That is the whole
+	// difference between `CASE … THEN d ELSE 0.5 END`, which PostgreSQL types
+	// numeric, and `CASE … THEN d ELSE f END` over a FLOAT COLUMN, which it
+	// types double precision: both branches declare FLOAT64 here, and only
+	// this says which of them is an exact number the user wrote.
+	//
+	// An INTEGER COLUMN needs no field — its contribution is its whole range
+	// at scale 0, a function of the TypeID alone (batch.DecimalTypeOf).
+	Exact    batch.DecimalType
+	ExactSet bool
+}
+
+// DeclNumericLit builds the declaration of a numeric LITERAL: the type it
+// declares on its own (INT64 for integer digits, FLOAT64 otherwise — ADR-0024's
+// recorded deferral) plus the exact fixed-point (p,s) of its spelling, which is
+// what a DECIMAL fold over it resolves against.
+func DeclNumericLit(id batch.TypeID, text string) DeclType {
+	d := DeclType{ID: id}
+	if t, ok := LiteralChoiceDecimalType(text); ok {
+		d.Exact, d.ExactSet = t, true
+	}
+	return d
 }
 
 // Decl builds a declaration for a type that needs no parameters.
@@ -356,25 +389,34 @@ func (r Ret) Resolve(nargs int, argType func(i int) (DeclType, Confidence)) (Dec
 // STRING fallback — which is the only honest answer while the operand has no
 // declaration to fold in.
 //
-// TODO(#555): a DECIMAL beside an INTEGER or a FLOAT resolves to numeric /
-// float8 in PostgreSQL, and this declines both. The float half needs a
-// decimal→float coercion the extremum arms do not do; the integer half needs
-// a STORE that scales, because an integer box written into a DECIMAL vector
-// is taken as ALREADY SCALED (ADR-0018 §4 — the parquet ingest contract), so
-// declaring DECIMAL for GREATEST(int_col, dec_col) would read 5 back as 0.05.
-// A silent wrong answer is worse than the loud mismatch that stands today, so
-// the first NON-DECIMAL decider answers those — exactly what happened before
-// a DECIMAL column reference could decide anything at all. That deferral is
-// DATA-DEPENDENT, not a stable refusal: `GREATEST(dec_col, 100)` declares
-// INT64 and answers 100 on every row the integer wins and fails loudly on the
-// first row the decimal wins.
+// A DECIMAL beside an INTEGER — a column, or a numeric literal — resolves to
+// numeric in PostgreSQL, and does here (#695, verified live on 17.11:
+// `pg_typeof(CASE WHEN true THEN 1.5::numeric(15,2) ELSE 0 END)` is numeric,
+// and so are COALESCE/GREATEST/LEAST/NULLIF over the same pair). The integer
+// contributes its fixed-point form to the fold — its whole range at scale 0
+// for a COLUMN, its own spelling for a LITERAL (DeclType.Exact) — and the
+// value materializes through the exact-TEXT box every DECIMAL producer here
+// answers with, never as the already-scaled carrier an integer box means to
+// SetValue (ADR-0018 §4). That was the deferral this function carried until
+// #695: `GREATEST(dec_col, 100)` declared INT64, answered 100 on every row the
+// integer won, and failed at the #361 store guard on the first row the decimal
+// won — data-dependent, which is why it could not stand.
+//
+// A DECIMAL beside a FLOAT stays float8, which is PostgreSQL's rule (float8 is
+// the preferred type of the numeric category) and is what the first non-DECIMAL
+// decider already answered.
 func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 	if len(decided) == 0 {
 		return DeclType{}, false
 	}
 	metas := make([]batch.DecimalType, 0, len(decided))
+	sawDecimal := false
 	for _, d := range decided {
-		if d.ID != batch.TypeDecimal || !d.DecKnown {
+		m, isDec, ok := declFixedPoint(d)
+		if !ok {
+			// Not a fold this rule can make: a float, a string, a date. The
+			// first non-DECIMAL decider answers, exactly as it did before a
+			// DECIMAL column reference could decide anything at all.
 			for _, alt := range decided {
 				if alt.ID != batch.TypeDecimal {
 					return alt, true
@@ -382,7 +424,16 @@ func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 			}
 			return decided[0], true
 		}
-		metas = append(metas, d.Dec())
+		sawDecimal = sawDecimal || isDec
+		metas = append(metas, m)
+	}
+	if !sawDecimal {
+		// Every decider is an integer or a numeric literal and none is a
+		// DECIMAL: `COALESCE(i, 0)` is integer in PostgreSQL and stays INT64
+		// here, and `COALESCE(0.5, 1.5)` keeps the FLOAT64 a bare numeric
+		// literal declares (ADR-0024's deferral — a literal's OWN declaration
+		// is not this change's business).
+		return decided[0], true
 	}
 	if sawUnknown {
 		return DeclType{}, false
@@ -392,6 +443,32 @@ func CommonDeclType(decided []DeclType, sawUnknown bool) (DeclType, bool) {
 		return decided[0], true
 	}
 	return DeclDecimal(m.Precision, m.Scale), true
+}
+
+// declFixedPoint is one decider's contribution to a DECIMAL fold: the (p,s) it
+// brings, whether it is a genuine DECIMAL rather than an integer wearing a
+// fixed-point type, and whether it participates at all.
+//
+// The second return is what keeps `COALESCE(i, 0)` an integer expression: both
+// operands answer a (p,s) — an integer IS DECIMAL(19,0) for a result-type
+// computation (ADR-0024 item 2) — and only this tells the two shapes apart.
+// physical.decimalArithOperand and expr.decimalChoiceArm draw the same line
+// over the AST and over the compiled tree.
+func declFixedPoint(d DeclType) (batch.DecimalType, bool, bool) {
+	if d.ID == batch.TypeDecimal {
+		if !d.DecKnown {
+			// #458's unconstrained sentinel: a DECIMAL nobody could put a
+			// (p,s) on is not a declaration to fold against.
+			return batch.DecimalType{}, false, false
+		}
+		return d.Dec(), true, true
+	}
+	if d.ExactSet {
+		// A numeric LITERAL at its own spelling.
+		return d.Exact, false, true
+	}
+	m, ok := batch.DecimalTypeOf(d.ID, batch.DecimalType{})
+	return m, false, ok
 }
 
 // Numeric reports whether the function always returns a number. It is the
