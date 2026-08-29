@@ -68,6 +68,12 @@ type HashJoin struct {
 	// sides' key encodings disagree and nothing resolved them, which is a
 	// query error rather than a wrong answer.
 	probeKeyErr error
+	// buildKeyErr is checkBuildKeyTypes' verdict, set by tryEnableIntKey —
+	// which every build path calls with its first batch, BEFORE any key is
+	// encoded. The paths that return an error surface it there; the two that
+	// cannot (BuildFromRows, FixKeyAssignment) leave it to the probe, which
+	// checks it alongside probeKeyErr.
+	buildKeyErr error
 	buildDone   bool
 	buildSchema []parquet.Column
 	buildRows   int64 // total rows in build side
@@ -587,6 +593,10 @@ func intKeyFromVector(v *batch.Vector, row int) (int64, bool) {
 // the int64 hash fast path, avoiding string allocation per build/probe row.
 // sizeHint is used to pre-size the hash table (0 = default 64).
 func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
+	// Every build path calls this immediately after resolving buildKeyIdx and
+	// before encoding a single key, which makes it the one place a build-side
+	// type check is guaranteed to run early enough to matter (#615).
+	h.buildKeyErr = h.checkBuildKeyTypes(b)
 	hint := 64
 	if h.BuildRowHint > 0 {
 		hint = int(h.BuildRowHint)
@@ -996,6 +1006,10 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			}
 			// Try to enable int64 fast path for single-column integer keys
 			h.tryEnableIntKey(b)
+			if h.buildKeyErr != nil {
+				h.mu.Unlock()
+				return h.buildKeyErr
+			}
 			// Distinct-pair NE activation (join_semianti_ne.go): needs the
 			// int-key path plus an integer value vector on this batch.
 			h.neTryEnable(b)
@@ -1343,6 +1357,9 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 		h.buildKeyIdx[i] = columnIndexFallback(first, col)
 	}
 	h.tryEnableIntKey(first)
+	if h.buildKeyErr != nil {
+		return h.buildKeyErr
+	}
 
 	// Per-worker local hash tables (key-only, no arena/batch storage).
 	hint := 64
@@ -2701,6 +2718,9 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 		// first key read, so checkProbeKeyTypes' verdict has an error channel
 		// to come back through (#615).
 		p.join.resolveProbeKeyIdx(in)
+		if err := p.join.buildKeyErr; err != nil {
+			return nil, err
+		}
 		if err := p.join.probeKeyErr; err != nil {
 			return nil, err
 		}

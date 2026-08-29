@@ -1261,7 +1261,7 @@ type deferredScalar struct {
 // Non-native-DAG mode keeps the legacy behavior: CTE-referencing subqueries
 // are left unresolved (worker re-executes via SubqueryRunner), others are
 // pre-computed and substituted in place.
-func (p *Planner) resolveFilterSubqueries(exprStr string) (string, []deferredScalar) {
+func (p *Planner) resolveFilterSubqueries(exprStr string, decls colDecls) (string, []deferredScalar) {
 	// Quick check: no subquery to resolve
 	if !strings.Contains(strings.ToUpper(exprStr), "SELECT") {
 		return exprStr, nil
@@ -1279,7 +1279,7 @@ func (p *Planner) resolveFilterSubqueries(exprStr string) (string, []deferredSca
 	}
 
 	var deferred []deferredScalar
-	resolved := p.resolveSubqueryAST(ctx, ast, &deferred)
+	resolved := p.resolveSubqueryAST(ctx, ast, &deferred, decls)
 	if resolved != nil {
 		return resolved.String(), deferred
 	}
@@ -1313,7 +1313,7 @@ func (p *Planner) subqueryReferencesCTE(exprStr string) bool {
 // (when the subquery references a CTE under native-DAG) a LiteralPlaceholder
 // whose concrete value will be substituted by the coordinator. Any deferred
 // subqueries are appended to *deferred.
-func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, deferred *[]deferredScalar) plansql.Node {
+func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, deferred *[]deferredScalar, decls colDecls) plansql.Node {
 	if node == nil {
 		return nil
 	}
@@ -1372,43 +1372,43 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 		// evaluates. See in_subquery_set.go for the two bounds and the
 		// refusal that routes past them.
 		if subq := findInSubqueryValue(n); subq != nil {
-			if rewritten, ok := p.materializeInSubquery(ctx, n, subq); ok {
+			if rewritten, ok := p.materializeInSubquery(ctx, n, subq, decls); ok {
 				return rewritten
 			}
 			return node
 		}
 		vals := make([]plansql.Node, len(n.Values))
 		for i, v := range n.Values {
-			vals[i] = p.resolveSubqueryAST(ctx, v, deferred)
+			vals[i] = p.resolveSubqueryAST(ctx, v, deferred, decls)
 		}
 		return &plansql.InExpr{
-			Left:   p.resolveSubqueryAST(ctx, n.Left, deferred),
+			Left:   p.resolveSubqueryAST(ctx, n.Left, deferred, decls),
 			Not:    n.Not,
 			Values: vals,
 		}
 
 	case *plansql.CmpExpr:
 		return &plansql.CmpExpr{
-			Left:  p.resolveSubqueryAST(ctx, n.Left, deferred),
+			Left:  p.resolveSubqueryAST(ctx, n.Left, deferred, decls),
 			Op:    n.Op,
-			Right: p.resolveSubqueryAST(ctx, n.Right, deferred),
+			Right: p.resolveSubqueryAST(ctx, n.Right, deferred, decls),
 		}
 
 	case *plansql.BinaryOp:
 		return &plansql.BinaryOp{
-			Left:  p.resolveSubqueryAST(ctx, n.Left, deferred),
+			Left:  p.resolveSubqueryAST(ctx, n.Left, deferred, decls),
 			Op:    n.Op,
-			Right: p.resolveSubqueryAST(ctx, n.Right, deferred),
+			Right: p.resolveSubqueryAST(ctx, n.Right, deferred, decls),
 		}
 
 	case *plansql.UnaryOp:
 		return &plansql.UnaryOp{
 			Op:    n.Op,
-			Inner: p.resolveSubqueryAST(ctx, n.Inner, deferred),
+			Inner: p.resolveSubqueryAST(ctx, n.Inner, deferred, decls),
 		}
 
 	case *plansql.ParenNode:
-		inner := p.resolveSubqueryAST(ctx, n.Inner, deferred)
+		inner := p.resolveSubqueryAST(ctx, n.Inner, deferred, decls)
 		if inner != nil {
 			return &plansql.ParenNode{Inner: inner}
 		}
@@ -5760,7 +5760,14 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				// Resolve scalar subqueries. Under native-DAG, CTE-referencing
 				// subqueries are deferred to the coordinator — this call returns
 				// placeholders and the SQL for each producer we must emit.
-				resolvedExpr, deferred := p.resolveFilterSubqueries(exprStr)
+				// The FILTER's input column types, so an IN-subquery can be
+				// declined for a probe whose width the literal-list rule
+				// would change (#615 F2).
+				filterDecls := colDecls{}
+				if len(node.Children) == 1 {
+					filterDecls = inputColDecls(node.Children[0])
+				}
+				resolvedExpr, deferred := p.resolveFilterSubqueries(exprStr, filterDecls)
 				for _, d := range deferred {
 					producerID, err := p.emitScalarProducerStages(stages, d.SubquerySQL)
 					if err != nil {

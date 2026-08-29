@@ -22,7 +22,15 @@ func TestInSetLiteralsSurviveTheRoundTrip(t *testing.T) {
 		{"int32", int32(7), "x in (7)"},
 		{"int", 7, "x in (7)"},
 		{"float64", float64(1.5), "x in (1.5)"},
-		{"float64 whole", float64(2), "x in (2)"},
+		// A whole float8 keeps its decimal POINT. Rendered "2" it re-parses
+		// as an INTEGER literal, and an integer literal is compared exactly:
+		// the float8 9007199254740992 then failed to match the bigint
+		// 9007199254740993 that PostgreSQL, comparing at float8, calls equal
+		// (#615 F2). The round trip below is what this case exists for, and
+		// "2" survived it as text while changing TYPE.
+		{"float64 whole", float64(2), "x in (2.0)"},
+		{"float64 whole negative", float64(-2), "x in (-2.0)"},
+		{"float64 past 2^53", float64(9007199254740992), "x in (9007199254740992.0)"},
 		// A value that only renders exactly at precision -1: the round-trip
 		// check in inSetLiteral is what makes this a property and not a hope.
 		{"float64 many digits", float64(0.1), "x in (0.1)"},

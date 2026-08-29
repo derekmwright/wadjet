@@ -5517,7 +5517,13 @@ type InSubquery struct {
 	emptySet bool
 	intSet   map[int64]struct{}
 	strSet   map[string]struct{}
-	fltSet   map[float64]struct{}
+	// fltSet is keyed by kernel.KeyFloat64Bits, not by the raw float64: a Go
+	// map can never find a NaN key (NaN != NaN), and PostgreSQL's float order
+	// says NaN EQUALS itself and -0.0 equals +0.0 (ADR-0012 item 8). Keyed
+	// raw, `real IN (SELECT double …)` dropped the NaN row that the same
+	// predicate as a JOIN — whose key canonicalises the bits (ADR-0023
+	// item 1) — matched. It is a key; it folds what the comparator folds.
+	fltSet map[uint64]struct{}
 	// decSet is strSet keyed by batch.CanonicalDecimalText instead of by the
 	// raw rendering, and it is consulted only when the PROBE is declared
 	// DECIMAL. A DECIMAL boxes as its text at its own scale, so
@@ -5529,6 +5535,16 @@ type InSubquery struct {
 	// The gate is the DECLARATION, never the box's shape: a genuine STRING
 	// column holding numeric-looking text still compares AS TEXT (#504).
 	decSet map[string]struct{}
+	// setNumericKind records what the SET's members are, which is half of the
+	// rung this predicate compares at (#615 F2). PostgreSQL resolves
+	// `probe IN (SELECT …)` by the same OPERATOR ladder a join key uses —
+	// int ⊕ numeric → numeric, anything ⊕ float8 → float8, real ⊕ int →
+	// float8 — and this type only ever consulted the set that matched the
+	// probe's own box. Every cross-rung pair therefore missed EVERY member:
+	// `numeric IN (SELECT float8)` answered 0 where PostgreSQL answers 7,
+	// and its NOT IN answered 7 where PostgreSQL answers 0 — inventing rows,
+	// not just dropping them.
+	setNumericKind inSetKind
 	// probe caches the settled kind of e.Expr, the same way every other
 	// declaration-driven comparison site caches its operands'.
 	probe boxOperand
@@ -5566,22 +5582,34 @@ func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	if lv == nil {
 		return false, true
 	}
-	// A DECIMAL probe keys by VALUE, and the set it is compared against may
-	// have arrived as INTEGERS — `numeric IN (SELECT bigint ...)`, which
-	// PostgreSQL resolves to numeric and compares exactly (#615's
-	// row-at-a-time twin). The DECIMAL boxes as its TEXT at its own scale, so
-	// it misses an int64 set outright: `w_d2 IN (SELECT CAST(w_i32 AS BIGINT)
-	// ...)` answered 0 where PostgreSQL answers 3, while the same predicate
-	// over a BARE integer column decorrelated into a semi join and answered
-	// correctly — one predicate, two answers, decided by whether the inner
-	// select item was computed.
-	//
-	// Checked BEFORE the typed sets because the set to consult is decSet
-	// while the typed one present is intSet.
-	if e.decSet != nil && e.probe.resolve(b) == boxDecimal {
-		if sv, ok := lv.(string); ok {
-			if key, ok := batch.CanonicalDecimalText(sv); ok {
+	// The RUNG first: `x IN (SELECT y …)` is `x = y` quantified, so it is
+	// resolved by PostgreSQL's operator ladder over (probe, set) — not by
+	// whichever typed set happens to match the probe's Go box, which is what
+	// this used to do and why every cross-rung pair missed every member
+	// (#615 F2).
+	if e.setNumericKind != inSetOther {
+		_, probeIsInt := toInt64SafeStrict(lv)
+		switch inSubqueryRung(e.probe.resolve(b), probeIsInt, e.setNumericKind) {
+		case inSetDecimal:
+			// EXACT, at the value's own digits: numeric ⊕ integer.
+			if key, ok := inSubqueryDecimalKey(lv); ok && e.decSet != nil {
 				if _, found := e.decSet[key]; found {
+					return !e.Not, false
+				}
+				return e.missAnswer()
+			}
+		case inSetFloat:
+			// float8, the numeric category's preferred type. A DECIMAL probe
+			// reads through its exact text, which is `numeric::float8`.
+			if fv, ok := inSubqueryFloat(lv); ok && e.fltSet != nil {
+				if _, found := e.fltSet[kernel.KeyFloat64Bits(fv)]; found {
+					return !e.Not, false
+				}
+				return e.missAnswer()
+			}
+		case inSetInt:
+			if iv, ok := toInt64Safe(lv); ok && e.intSet != nil {
+				if _, found := e.intSet[iv]; found {
 					return !e.Not, false
 				}
 				return e.missAnswer()
@@ -5616,7 +5644,7 @@ func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 	}
 	if e.fltSet != nil {
 		if fv, ok := toFloat64Safe(lv); ok {
-			if _, found := e.fltSet[fv]; found {
+			if _, found := e.fltSet[kernel.KeyFloat64Bits(fv)]; found {
 				return !e.Not, false
 			}
 			return e.missAnswer()
@@ -5632,6 +5660,101 @@ func (e *InSubquery) EvalBoolNull(b *batch.RecordBatch, row int) (bool, bool) {
 }
 
 // resolveSlow runs the subquery once and builds the probe set. Idempotent.
+// inSetKind is what an IN-subquery's materialised value set holds. It is the
+// SET half of the operator ladder; boxOperand.resolve gives the probe half.
+type inSetKind int8
+
+const (
+	inSetOther   inSetKind = iota
+	inSetInt               // int64 members: an INTEGER in PostgreSQL's terms
+	inSetFloat             // float64 members: float8
+	inSetDecimal           // decimal TEXT members: numeric
+)
+
+// inSubqueryRung is the type this predicate compares at, by PostgreSQL's
+// operator resolution — the same ladder physical.joinKeyCommonType applies to
+// a join key, because `x IN (SELECT y …)` IS `x = y` quantified:
+//
+//	numeric ⊕ integer  -> numeric   (exact, at the value's own digits)
+//	numeric ⊕ float8   -> float8
+//	integer ⊕ float8   -> float8
+//	real    ⊕ anything -> float8    (a real boxes as a float64 already)
+//
+// probeIsInt distinguishes the two boxNumber cases at the row: an int64 box
+// against a decimal set is the exact rung, a float box against the same set is
+// the float one.
+func inSubqueryRung(probe boxKind, probeIsInt bool, set inSetKind) inSetKind {
+	switch set {
+	case inSetInt:
+		switch {
+		case probe == boxDecimal:
+			return inSetDecimal
+		case probe == boxNumber && !probeIsInt:
+			return inSetFloat
+		}
+		return inSetInt
+	case inSetDecimal:
+		switch {
+		case probe == boxDecimal:
+			return inSetDecimal
+		case probe == boxNumber && probeIsInt:
+			return inSetDecimal
+		case probe == boxNumber:
+			return inSetFloat
+		}
+		return inSetOther
+	case inSetFloat:
+		if probe == boxDecimal || probe == boxNumber {
+			return inSetFloat
+		}
+		return inSetOther
+	}
+	return inSetOther
+}
+
+// inSubqueryDecimalKey reads a probe box as a canonical DECIMAL key: a
+// DECIMAL boxes as its rendered text, an integer as an int64, and the two are
+// one numeric value to PostgreSQL.
+func inSubqueryDecimalKey(lv any) (string, bool) {
+	switch v := lv.(type) {
+	case string:
+		return batch.CanonicalDecimalText(v)
+	default:
+		if iv, ok := toInt64Safe(lv); ok {
+			return batch.CanonicalDecimalText(strconv.FormatInt(iv, 10))
+		}
+		_ = v
+	}
+	return "", false
+}
+
+// inSubqueryFloat reads a probe box as the float64 PostgreSQL would compare
+// at. A DECIMAL's text goes through ParseFloat, which is the correctly
+// rounded `numeric::float8`.
+func inSubqueryFloat(lv any) (float64, bool) {
+	if sv, ok := lv.(string); ok {
+		f, err := strconv.ParseFloat(sv, 64)
+		return f, err == nil
+	}
+	return toFloat64Safe(lv)
+}
+
+// toInt64SafeStrict is toInt64Safe restricted to boxes that ARE integers, so
+// a float64 box does not answer true for a whole-numbered value — the rung
+// for `float8 IN (SELECT numeric)` is float8 whether or not the row happens
+// to hold 2.0.
+func toInt64SafeStrict(lv any) (int64, bool) {
+	switch v := lv.(type) {
+	case int:
+		return int64(v), true
+	case int32:
+		return int64(v), true
+	case int64:
+		return v, true
+	}
+	return 0, false
+}
+
 func (e *InSubquery) resolveSlow() {
 	e.resolveMu.Lock()
 	defer e.resolveMu.Unlock()
@@ -5667,48 +5790,75 @@ func (e *InSubquery) resolveSlow() {
 		// all integer types (int32, int64, int) and float types (float32, float64).
 		if len(rawVals) > 0 {
 			if _, ok := toInt64Safe(rawVals[0]); ok {
+				// An INTEGER set, carried in all three spellings the ladder
+				// can ask for: exactly (intSet), as canonical DECIMAL text
+				// for a numeric probe, and as float64 for a float one. Every
+				// conversion here is exact — an int64 that does not survive
+				// float64 is the 2^53 case, and PostgreSQL rounds it too.
+				e.setNumericKind = inSetInt
 				e.intSet = make(map[int64]struct{}, len(rawVals))
-				// ...and the same values as canonical DECIMAL keys, for a
-				// probe declared DECIMAL. An integer IS a numeric to
-				// PostgreSQL, the two only meet here as text, and the set
-				// has to carry both spellings or the DECIMAL probe misses
-				// every member.
 				e.decSet = make(map[string]struct{}, len(rawVals))
+				e.fltSet = make(map[uint64]struct{}, len(rawVals))
 				for _, v := range rawVals {
 					if iv, ok := toInt64Safe(v); ok {
 						e.intSet[iv] = struct{}{}
+						e.fltSet[kernel.KeyFloat64Bits(float64(iv))] = struct{}{}
 						if key, ok := batch.CanonicalDecimalText(strconv.FormatInt(iv, 10)); ok {
 							e.decSet[key] = struct{}{}
 						}
 					} else {
 						e.vals = rawVals
-						e.intSet, e.decSet = nil, nil
+						e.intSet, e.decSet, e.fltSet = nil, nil, nil
+						e.setNumericKind = inSetOther
 						break
 					}
 				}
 			} else if _, ok := rawVals[0].(string); ok {
 				e.strSet = make(map[string]struct{}, len(rawVals))
 				e.decSet = make(map[string]struct{}, len(rawVals))
+				allDecimal := true
 				for _, v := range rawVals {
 					if sv, ok := v.(string); ok {
 						e.strSet[sv] = struct{}{}
 						if key, ok := batch.CanonicalDecimalText(sv); ok {
 							e.decSet[key] = struct{}{}
+						} else {
+							allDecimal = false
 						}
 					} else {
 						e.vals = rawVals
 						e.strSet, e.decSet = nil, nil
+						allDecimal = false
 						break
 					}
 				}
+				// A set every one of whose members is decimal text IS a
+				// numeric set, and a FLOAT probe compares against it at
+				// float8. ParseFloat is the correctly-rounded reading, which
+				// is what `numeric::float8` does.
+				if allDecimal && e.strSet != nil {
+					e.setNumericKind = inSetDecimal
+					e.fltSet = make(map[uint64]struct{}, len(rawVals))
+					for sv := range e.strSet {
+						if fv, err := strconv.ParseFloat(sv, 64); err == nil {
+							e.fltSet[kernel.KeyFloat64Bits(fv)] = struct{}{}
+						}
+					}
+				}
 			} else if _, ok := toFloat64Safe(rawVals[0]); ok {
-				e.fltSet = make(map[float64]struct{}, len(rawVals))
+				// A FLOAT set is float8 against everything (PostgreSQL's
+				// preferred type of the numeric category), so it gets NO
+				// decimal view: an exact comparison against it would be a
+				// different predicate.
+				e.setNumericKind = inSetFloat
+				e.fltSet = make(map[uint64]struct{}, len(rawVals))
 				for _, v := range rawVals {
 					if fv, ok := toFloat64Safe(v); ok {
-						e.fltSet[fv] = struct{}{}
+						e.fltSet[kernel.KeyFloat64Bits(fv)] = struct{}{}
 					} else {
 						e.vals = rawVals
 						e.fltSet = nil
+						e.setNumericKind = inSetOther
 						break
 					}
 				}
@@ -5803,7 +5953,7 @@ const inSubqueryMapEntryOverhead = 16
 // inSubqueryMemBytes estimates the heap footprint of whichever membership
 // set resolveSlow built — at most one of intSet/strSet/fltSet/vals is
 // non-nil, matching resolveSlow's mutually exclusive construction.
-func inSubqueryMemBytes(intSet map[int64]struct{}, strSet map[string]struct{}, fltSet map[float64]struct{}, vals []any) int64 {
+func inSubqueryMemBytes(intSet map[int64]struct{}, strSet map[string]struct{}, fltSet map[uint64]struct{}, vals []any) int64 {
 	switch {
 	case intSet != nil:
 		return int64(len(intSet)) * (8 + inSubqueryMapEntryOverhead)

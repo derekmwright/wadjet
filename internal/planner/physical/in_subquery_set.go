@@ -12,7 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
 // `WHERE x IN (SELECT …)` on the stage DAG
@@ -100,7 +102,23 @@ func (p *Planner) refuseInSubquery(err error) {
 // NULL one, because an empty set has nothing to be UNKNOWN about. Neither
 // renders as an empty value list (nothing parses that), so they render as the
 // constant they are.
-func (p *Planner) materializeInSubquery(ctx context.Context, in *plansql.InExpr, subq *plansql.SubqueryNode) (plansql.Node, bool) {
+func (p *Planner) materializeInSubquery(ctx context.Context, in *plansql.InExpr, subq *plansql.SubqueryNode, decls colDecls) (plansql.Node, bool) {
+	// A FLOAT32 PROBE cannot take this path at all, whatever the set holds.
+	// PostgreSQL's multi-element `real IN (…)` NARROWS its literals to real[]
+	// (#549) while `real = ANY(<subquery>)` widens the real to float8 — so
+	// materializing a subquery into a literal list silently changes the
+	// comparison WIDTH, and the rows whose real value does not survive the
+	// round trip appear or vanish: `r IN (SELECT double …)` answered 8 where
+	// PostgreSQL answers 6 (#615 F2). inSetLiteral already declines a float32
+	// SET for the mirror of this reason; this is the probe half, and it needs
+	// the declared type the value list cannot show.
+	if t, c := nodeDeclaredType(in.Left, decls); c == expr.Decided && t.ID == parquet.TypeFloat32 {
+		p.refuseInSubquery(fmt.Errorf("%w: the probe is REAL, and PostgreSQL compares a "+
+			"multi-element IN list at real width while a subquery widens it to double "+
+			"precision — inlining the set would change the predicate",
+			ErrInSubqueryDistributed))
+		return nil, false
+	}
 	// A subquery that is not self-contained cannot run as a standalone
 	// producer: its dangling outer reference resolves to no column and
 	// evaluates NULL, which is the silent 0 #359 is about. The correlated
@@ -221,6 +239,15 @@ func inSetLiteral(v any) (plansql.Node, bool) {
 			return nil, false
 		}
 		text := strconv.FormatFloat(val, 'f', -1, 64)
+		// A float64 whose shortest rendering has no fractional part comes
+		// back as an INTEGER literal when the worker re-parses the filter
+		// text, and an integer literal is compared EXACTLY: 9007199254740992
+		// then failed to match the bigint 9007199254740993 that
+		// PostgreSQL — comparing at float8 — calls equal (#615 F2). The
+		// decimal point is what keeps a float8 a float8 across the wire.
+		if !strings.ContainsAny(text, ".eE") {
+			text += ".0"
+		}
 		// A float that does not render EXACTLY is a different value once the
 		// worker parses the filter text back. FormatFloat with precision -1
 		// is round-trip exact for float64 by contract; the check costs

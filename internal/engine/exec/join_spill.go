@@ -1006,6 +1006,9 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 		tmpJoin.buildKeyIdx[i] = columnIndexFallback(buildBatches[0], col)
 	}
 	tmpJoin.tryEnableIntKey(buildBatches[0])
+	if tmpJoin.buildKeyErr != nil {
+		return nil, tmpJoin.buildKeyErr
+	}
 
 	if !tmpJoin.SemiAntiKeyOnly {
 		tmpJoin.arena = make([]buildRef, 0, totalRows)

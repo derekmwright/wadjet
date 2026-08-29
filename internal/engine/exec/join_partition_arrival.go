@@ -86,6 +86,9 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 				h.buildKeyIdx[i] = columnIndexFallback(b, col)
 			}
 			h.tryEnableIntKey(b)
+			if h.buildKeyErr != nil {
+				return h.buildKeyErr
+			}
 
 			// Pre-allocate arena and string index using BuildRowHint when set.
 			// Hash tables for the int paths were sized by tryEnableIntKey.

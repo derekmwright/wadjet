@@ -565,3 +565,183 @@ func TestUnresolvedCrossWidthKeyRaisesInsteadOfMatching(t *testing.T) {
 		}
 	})
 }
+
+// TestIntTargetKeyRefusesAVectorWithNoIntegerReading is the silent fan-out
+// the re-review found. appendCoercedKeyValue's INT64 arm discarded
+// intKeyFromVector's ok, and that function answers (0, false) for every type
+// it has no integer reading of — so a DECIMAL or a STRING vector keyed as
+// eight ZERO bytes for EVERY row. Not a wrong row here and there: 12.75, 2.00
+// and -20.00 became ONE key, the whole build side landing in one bucket.
+//
+// The three arms are asserted together, because the fan-out is the difference
+// between them: the DECIMAL and FLOAT arms already raised.
+func TestIntTargetKeyRefusesAVectorWithNoIntegerReading(t *testing.T) {
+	dec := batch.NewVectorWithScale(batch.TypeDecimal, 3, 2)
+	dec.DecimalData.Scale = 2
+	dec.DecimalData.Data[0] = batch.Int128From(1275)
+	dec.DecimalData.Data[1] = batch.Int128From(200)
+	dec.DecimalData.Data[2] = batch.Int128From(-2000)
+
+	// The bug, stated as the property it broke: three distinct values must
+	// not produce one key.
+	t.Run("DecimalAtIntTargetRaises", func(t *testing.T) {
+		keys := map[string]bool{}
+		for row := 0; row < 3; row++ {
+			func() {
+				defer func() {
+					if r := recover(); r == nil {
+						t.Errorf("row %d keyed at INT64 without raising", row)
+					}
+				}()
+				keys[string(AppendWidenedKeyValue(nil, dec, row, batch.TypeInt64))] = true
+			}()
+		}
+		if len(keys) != 0 {
+			t.Errorf("a DECIMAL keyed at INT64 produced %d key(s); it must produce none, "+
+				"and before the fix it produced ONE for all three values", len(keys))
+		}
+	})
+	t.Run("StringAtIntTargetRaises", func(t *testing.T) {
+		sv := batch.NewVector(batch.TypeString, 1)
+		sv.BytesData.SetString(0, "x")
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("a STRING keyed at INT64 did not raise")
+			}
+		}()
+		_ = AppendWidenedKeyValue(nil, sv, 0, batch.TypeInt64)
+	})
+	t.Run("IntAtIntTargetStillWorks", func(t *testing.T) {
+		iv := batch.NewVector(batch.TypeInt32, 2)
+		iv.Int32Data[0], iv.Int32Data[1] = 7, 8
+		a := string(AppendWidenedKeyValue(nil, iv, 0, batch.TypeInt64))
+		b := string(AppendWidenedKeyValue(nil, iv, 1, batch.TypeInt64))
+		if a == b || len(a) != 8 {
+			t.Errorf("INT32 at INT64 target: keys %x / %x, want two distinct 8-byte keys", a, b)
+		}
+	})
+}
+
+// TestCanEncodeKeyAtIsTheEncodersOwnTable keeps the backstop's admission test
+// and the encoder's arms from drifting: every (vector, target) pair
+// canEncodeKeyAt admits must actually encode, and every pair it refuses must
+// actually raise.
+func TestCanEncodeKeyAtIsTheEncodersOwnTable(t *testing.T) {
+	mk := func(tp batch.TypeID) *batch.Vector {
+		v := batch.NewVectorWithScale(tp, 1, 2)
+		switch tp {
+		case batch.TypeDecimal:
+			v.DecimalData.Scale = 2
+			v.DecimalData.Data[0] = batch.Int128From(200)
+		case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeUUID, batch.TypeCIDR:
+			v.BytesData.SetString(0, "1")
+		}
+		return v
+	}
+	vecs := []batch.TypeID{
+		batch.TypeInt32, batch.TypeInt64, batch.TypeFloat32, batch.TypeFloat64,
+		batch.TypeDecimal, batch.TypeString, batch.TypeBool, batch.TypeDate,
+		batch.TypeIPv4, batch.TypeUUID,
+	}
+	targets := []batch.TypeID{batch.TypeInt64, batch.TypeFloat64, batch.TypeDecimal}
+	for _, vt := range vecs {
+		for _, target := range targets {
+			admitted := canEncodeKeyAt(vt, target)
+			raised := func() (r bool) {
+				defer func() {
+					if recover() != nil {
+						r = true
+					}
+				}()
+				_ = AppendWidenedKeyValue(nil, mk(vt), 0, target)
+				return false
+			}()
+			if admitted == raised {
+				t.Errorf("canEncodeKeyAt(%v, %v)=%v but the encoder raised=%v — the "+
+					"backstop's table and the encoder's arms have drifted", vt, target, admitted, raised)
+			}
+		}
+	}
+}
+
+// TestResolvedKeyPairChecksTheACTUALVectors is the second half of the
+// re-review finding: the backstop short-circuited on "is the pair resolved"
+// and never compared the resolved type to the vectors that actually arrived.
+// A pair declared INT64 whose build vector is really a DECIMAL was therefore
+// ACCEPTED — and then keyed as zeroes by the arm above.
+func TestResolvedKeyPairChecksTheACTUALVectors(t *testing.T) {
+	decBuild := []parquet.Column{{Name: "bk", Type: parquet.TypeDecimal, Precision: 18, Scale: 2}}
+	strBuild := []parquet.Column{{Name: "bk", Type: parquet.TypeString}}
+
+	buildBatch := func(schema []parquet.Column) *batch.RecordBatch {
+		b := batch.NewRecordBatch(schema, 2)
+		b.Len = 2
+		switch schema[0].Type {
+		case parquet.TypeDecimal:
+			b.Columns[0].DecimalData.Scale = 2
+			b.Columns[0].DecimalData.Data[0] = batch.Int128From(1275)
+			b.Columns[0].DecimalData.Data[1] = batch.Int128From(200)
+		case parquet.TypeString:
+			b.Columns[0].BytesData.SetString(0, "a")
+			b.Columns[0].BytesData.SetString(1, "b")
+		}
+		return b
+	}
+	probeBatch := func(tp parquet.TypeID) *batch.RecordBatch {
+		b := batch.NewRecordBatch([]parquet.Column{{Name: "pk", Type: tp}}, 2)
+		b.Len = 2
+		switch tp {
+		case parquet.TypeInt64:
+			b.Columns[0].Int64Data[0], b.Columns[0].Int64Data[1] = 12, 2
+		case parquet.TypeFloat64:
+			b.Columns[0].Float64Data[0], b.Columns[0].Float64Data[1] = 12, 2
+		}
+		return b
+	}
+	run := func(t *testing.T, build []parquet.Column, probeType parquet.TypeID,
+		keyTypes []batch.TypeID) error {
+		t.Helper()
+		hj := NewHashJoin(InnerJoin, []string{"pk"}, []string{"bk"})
+		hj.KeyTypes = keyTypes
+		if err := hj.Build(context.Background(),
+			NewBatchSource([]*batch.RecordBatch{buildBatch(build)})); err != nil {
+			return err
+		}
+		pipe := &Pipeline{
+			Source: NewBatchSource([]*batch.RecordBatch{probeBatch(probeType)}),
+			Ops:    []UnaryOperator{hj.Probe()},
+			Sink:   &CollectSink{},
+		}
+		return pipe.Run(context.Background())
+	}
+
+	t.Run("DeclaredIntOverADecimalBuildRaises", func(t *testing.T) {
+		err := run(t, decBuild, parquet.TypeInt64, []batch.TypeID{batch.TypeInt64})
+		if err == nil {
+			t.Fatal("a pair declared INT64 over a DECIMAL build vector was ACCEPTED; " +
+				"that is the declared-vs-actual drift, and the INT64 arm then keys " +
+				"every row as eight zero bytes")
+		}
+		if !strings.Contains(err.Error(), "#615") {
+			t.Errorf("the error does not name the mechanism: %v", err)
+		}
+	})
+	t.Run("DeclaredFloatOverAStringBuildIsAnErrorReturn", func(t *testing.T) {
+		// The build is keyed FIRST, so this has to be caught before the
+		// encoder raises mid-build — an error the build path returns, not a
+		// recovered panic.
+		err := run(t, strBuild, parquet.TypeFloat64, []batch.TypeID{batch.TypeFloat64})
+		if err == nil {
+			t.Fatal("a pair declared FLOAT64 over a STRING build vector was accepted")
+		}
+		if strings.Contains(err.Error(), "internal error") || IsQueryPanicMessage(err.Error()) {
+			t.Errorf("this must be an error RETURN from the build, not a recovered panic: %v", err)
+		}
+	})
+	t.Run("DeclaredDecimalOverADecimalBuildAnswers", func(t *testing.T) {
+		if err := run(t, decBuild, parquet.TypeInt64,
+			[]batch.TypeID{batch.TypeDecimal}); err != nil {
+			t.Errorf("a correctly resolved DECIMAL pair must answer, not raise: %v", err)
+		}
+	})
+}

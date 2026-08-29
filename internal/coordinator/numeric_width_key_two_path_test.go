@@ -682,3 +682,94 @@ func TestNumericWidthDerivedSideKeysMatchPostgres(t *testing.T) {
 		})
 	}
 }
+
+// TestNumericWidthInSubqueryRungsMatchPostgres is the row-at-a-time twin of
+// the join-key ladder (#615 F2).
+//
+// `x IN (SELECT y …)` IS `x = y` quantified, so PostgreSQL resolves it by the
+// same OPERATOR ladder a join key uses. When the predicate decorrelates into
+// a semi join it gets that ladder from resolveJoinKeyTypes; when the inner
+// select item is COMPUTED it does not decorrelate, and the two remaining
+// mechanisms had rules of their own:
+//
+//   - expr.InSubquery consulted whichever typed value set matched the probe's
+//     own Go box, so every CROSS-rung pair missed every member. `numeric IN
+//     (SELECT float8)` answered 0 against PostgreSQL's 7 — and its NOT IN
+//     answered 7 against PostgreSQL's 0, inventing rows rather than dropping
+//     them.
+//   - materializeInSubquery inlined the set as a LITERAL list, and
+//     PostgreSQL's multi-element `real IN (…)` narrows its literals to real[]
+//     (#549) while a subquery widens the real to float8 — so the DAG answered
+//     8 where PostgreSQL answers 6. A float64 member also rendered without a
+//     decimal point when it happened to be whole, re-parsed as an INTEGER
+//     literal, and compared exactly: the 2^53 row PostgreSQL matches at
+//     float8 was dropped.
+//
+// Every expectation is PostgreSQL 17.11's over numwidth, taken live.
+func TestNumericWidthInSubqueryRungsMatchPostgres(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: this gate stands up an embedded NATS cluster")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	t.Cleanup(cancel)
+
+	coord := tmdCluster(t, ctx)
+	single := tmdStandalone(t, ctx)
+
+	tb := nwkTable
+	cases := []struct {
+		name string
+		sql  string
+		want int
+	}{
+		{"DecimalInFloat", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s WHERE w_d2 IN (SELECT CAST(w_f64 AS DOUBLE PRECISION) FROM %s)`, tb, tb), 7},
+		{"FloatInInt", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s WHERE w_f64 IN (SELECT CAST(w_i32 AS BIGINT) FROM %s)`, tb, tb), 4},
+		{"IntInDecimal", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s WHERE w_i64 IN (SELECT CAST(w_d2 AS DECIMAL(9,2)) FROM %s)`, tb, tb), 3},
+		// The REAL probe: PostgreSQL widens it to float8 for a subquery and
+		// would NARROW the literals for a list, which is why the materialised
+		// path has to decline rather than inline.
+		{"RealInInt", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s WHERE w_f32 IN (SELECT CAST(w_i32 AS BIGINT) FROM %s)`, tb, tb), 3},
+		{"RealInDouble", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s WHERE w_f32 IN (SELECT CAST(w_f64 AS DOUBLE PRECISION) FROM %s)`, tb, tb), 6},
+		// NOT IN over a NULL-free set: the rung decides the answer and the
+		// three-valued rule must survive it. The wrong rung answered 7 here —
+		// every row — where PostgreSQL answers none.
+		{"DecimalNotInFloat", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s WHERE w_d2 NOT IN (SELECT CAST(w_f64 AS DOUBLE PRECISION) FROM %s WHERE w_f64 IS NOT NULL)`, tb, tb), 0},
+		{"FloatInDecimal", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s WHERE w_f64 IN (SELECT CAST(w_d2 AS DECIMAL(9,2)) FROM %s)`, tb, tb), 6},
+		// The 2^53 row: PostgreSQL compares bigint against float8 AT float8,
+		// so 9007199254740993 matches the float 9007199254740992.0. A float
+		// member that rendered without a decimal point re-parsed as an
+		// integer literal and dropped it.
+		{"IntInFloat", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s WHERE w_i64 IN (SELECT CAST(w_f64 AS DOUBLE PRECISION) FROM %s)`, tb, tb), 5},
+		// NOT IN with the set's NULLs left in: three-valued UNKNOWN for every
+		// row, whichever rung the pair resolves to.
+		{"DecimalNotInFloatWithNulls", fmt.Sprintf(
+			`SELECT COUNT(*) AS n FROM %s WHERE w_d2 NOT IN (SELECT CAST(w_f64 AS DOUBLE PRECISION) FROM %s)`, tb, tb), 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, arm := range []struct {
+				name string
+				dag  bool
+			}{{"single", false}, {"dag", true}} {
+				got, err := nwkRunner(t, ctx, single, coord, arm.dag)(c.sql)
+				if err != nil {
+					t.Errorf("%s: %s\n  %v\n  (PostgreSQL 17.11 answers %d)",
+						arm.name, c.sql, err, c.want)
+					continue
+				}
+				if got != c.want {
+					t.Errorf("%s: %s = %d, want %d (PostgreSQL 17.11)",
+						arm.name, c.sql, got, c.want)
+				}
+			}
+		})
+	}
+}

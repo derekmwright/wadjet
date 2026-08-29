@@ -74,10 +74,18 @@ func appendCoercedKeyValue(buf []byte, v *batch.Vector, row int, target batch.Ty
 	case batch.TypeInt64:
 		// INT32 ⊕ INT64 → INT64: the narrow side's four little-endian bytes
 		// become eight. Exact, and the only integer rung there is.
-		val, _ := intKeyFromVector(v, row)
-		return append(buf,
-			byte(val), byte(val>>8), byte(val>>16), byte(val>>24),
-			byte(val>>32), byte(val>>40), byte(val>>48), byte(val>>56))
+		//
+		// ok is HONOURED. Discarding it was a silent fan-out, not a wrong
+		// row here and there: intKeyFromVector answers (0, false) for every
+		// type it has no integer reading of, so a DECIMAL or a STRING vector
+		// keyed as eight ZERO bytes for EVERY row — 12.75, 2.00 and -20.00
+		// collapsing onto one key, the whole build side landing in one hash
+		// bucket and matching anything that also mis-keyed to zero.
+		if val, ok := intKeyFromVector(v, row); ok {
+			return append(buf,
+				byte(val), byte(val>>8), byte(val>>16), byte(val>>24),
+				byte(val>>32), byte(val>>40), byte(val>>48), byte(val>>56))
+		}
 	case batch.TypeFloat64:
 		val := keyFloat64bits(widenKeyFloat64(v, row))
 		return append(buf,
@@ -233,10 +241,15 @@ func keyEncodingClass(t batch.TypeID) int {
 //	   eight little-endian bytes on one side and a canonical decimal key on
 //	   the other, matching only where the byte strings coincide by accident.
 //
-// A pair the ladder does not describe (a STRING against an INT64, a DATE
-// against a TIMESTAMP) is left exactly where it was: those are ill-typed
-// joins wadjet has always answered with no matches, and turning them into
-// errors is a separate question with a separate authority.
+// A pair the ladder does not describe is left where it was only when NEITHER
+// fast path is engaged: a DATE against a TIMESTAMP still answers no matches,
+// as it always has. An INTEGER build against a STRING, BOOL, UUID or CIDR
+// probe does NOT — R1 catches it, because the integer fast path is on and the
+// probe has no integer storage. That shape used to PANIC on a nil typed
+// slice, so the change there is a query error where there was a recovered
+// crash, and PostgreSQL refuses the same pair outright (42883, no operator).
+// Turning the remaining ill-typed pairs into errors is a separate question
+// with a separate authority.
 func (h *HashJoin) checkProbeKeyTypes(b *batch.RecordBatch) error {
 	for i, pi := range h.probeKeyIdx {
 		if pi < 0 || pi >= len(b.Columns) {
@@ -248,22 +261,30 @@ func (h *HashJoin) checkProbeKeyTypes(b *batch.RecordBatch) error {
 				"integer key path: the pair's common type was not resolved at plan time "+
 				"(exec.HashJoin.KeyTypes, #615)", h.LeftKeys[i], probeT)
 		}
-		bi := -1
-		if i < len(h.buildKeyIdx) {
-			bi = h.buildKeyIdx[i]
-		}
-		if bi < 0 || bi >= len(h.buildSchema) {
+		buildT, haveBuild := h.buildKeyType(i)
+		if target, ok := resolvedKeyType(h.KeyTypes, i); ok {
+			// RESOLVED: both sides' ACTUAL vectors must have a reading at
+			// the resolved type. Asking only "is it resolved" accepted a
+			// declaration that disagreed with the vector.
+			if !canEncodeKeyAt(probeT, target) {
+				return keyEncodableErr(h.LeftKeys[i], "probe", probeT, target)
+			}
+			if haveBuild && !canEncodeKeyAt(buildT, target) {
+				name := ""
+				if i < len(h.RightKeys) {
+					name = h.RightKeys[i]
+				}
+				return keyEncodableErr(name, "build", buildT, target)
+			}
 			continue
 		}
-		buildT := h.buildSchema[bi].Type
-		if keyEncodingClass(probeT) == keyEncodingClass(buildT) {
+		// UNRESOLVED: the implied target is each side's own type, so the two
+		// encodings have to agree.
+		if !haveBuild || keyEncodingClass(probeT) == keyEncodingClass(buildT) {
 			continue
 		}
 		if !joinKeyLadderType(probeT) || !joinKeyLadderType(buildT) {
 			continue
-		}
-		if keyPairResolved(h.KeyTypes, i) {
-			continue // the planner resolved it; the encoders are widening
 		}
 		return fmt.Errorf("join key %q is %s on the probe side and %q is %s on the build side, "+
 			"and the pair's common type was not resolved at plan time: the two sides would be "+
@@ -272,16 +293,6 @@ func (h *HashJoin) checkProbeKeyTypes(b *batch.RecordBatch) error {
 			h.LeftKeys[i], probeT, h.RightKeys[i], buildT)
 	}
 	return nil
-}
-
-// keyPairResolved reports whether the planner decided a common type for this
-// key pair. It is NOT "the resolved type differs from this side's": the
-// resolved type equals one side's own whenever that side is already the wider
-// one (a DECIMAL probe against an INT64 build resolves to DECIMAL), and
-// reading that as unresolved made the backstop fire on a correctly widened
-// join.
-func keyPairResolved(types []batch.TypeID, i int) bool {
-	return i < len(types) && types[i] != KeyTypeUnresolved
 }
 
 // joinKeyLadderType reports whether a type is on the numeric ladder
@@ -293,4 +304,95 @@ func joinKeyLadderType(t batch.TypeID) bool {
 		return true
 	}
 	return false
+}
+
+// resolvedKeyType returns the common type the planner decided for this key
+// pair, if it decided one. It is NOT "the resolved type differs from this
+// side's": the resolved type equals one side's own whenever that side is
+// already the wider one (a DECIMAL probe against an INT64 build resolves to
+// DECIMAL), and reading that as unresolved made the backstop fire on a
+// correctly widened join.
+func resolvedKeyType(types []batch.TypeID, i int) (batch.TypeID, bool) {
+	if i < len(types) && types[i] != KeyTypeUnresolved {
+		return types[i], true
+	}
+	return 0, false
+}
+
+// canEncodeKeyAt reports whether a vector of type `vec` has a reading at the
+// resolved key type `target` — whether appendCoercedKeyValue has an arm for
+// the pair rather than a raise.
+//
+// It asks about the ACTUAL vector against the RESOLVED type, which is the
+// question the declared-type layer cannot answer: the planner resolves from
+// DECLARED types, and a declaration that disagrees with the vector that turns
+// up is the drift DeclaredSchemaStrict exists for. Before this, a pair
+// resolved to INT64 whose build vector was really a DECIMAL was ACCEPTED by
+// the backstop — it asked only whether the pair was resolved at all — and
+// then keyed every row as eight zero bytes.
+func canEncodeKeyAt(vec, target batch.TypeID) bool {
+	if vec == target {
+		return true
+	}
+	switch target {
+	case batch.TypeInt64:
+		return isIntKeyColumn(vec)
+	case batch.TypeFloat64:
+		switch vec {
+		case batch.TypeFloat32, batch.TypeFloat64, batch.TypeDecimal:
+			return true
+		}
+		return isIntKeyColumn(vec)
+	case batch.TypeDecimal:
+		return vec == batch.TypeDecimal || isIntKeyColumn(vec)
+	}
+	return false
+}
+
+// buildKeyType is the build side's ACTUAL type for key pair i, read off the
+// schema the build recorded. ok=false when the build has not run, the key did
+// not resolve to a column, or the schema is unavailable.
+func (h *HashJoin) buildKeyType(i int) (batch.TypeID, bool) {
+	if i >= len(h.buildKeyIdx) {
+		return 0, false
+	}
+	bi := h.buildKeyIdx[i]
+	if bi < 0 || bi >= len(h.buildSchema) {
+		return 0, false
+	}
+	return h.buildSchema[bi].Type, true
+}
+
+// keyEncodableErr is the shared refusal for a side whose vector has no
+// reading at the pair's resolved type.
+func keyEncodableErr(name, side string, vec, target batch.TypeID) error {
+	return fmt.Errorf("join key %q is %s on the %s side but the pair resolved to %s: "+
+		"the declared type the plan resolved from and the vector that arrived disagree, "+
+		"and keying it anyway would collapse every row onto one key "+
+		"(exec.HashJoin.KeyTypes, #615)", name, vec, side, target)
+}
+
+// checkBuildKeyTypes is checkProbeKeyTypes' build-side half, run BEFORE the
+// first build key is encoded. It exists because the build is keyed first: a
+// pair resolved to FLOAT64 whose build vector is a STRING would otherwise
+// raise from inside the encoder, mid-build, and reach the client as a
+// recovered panic instead of an error the build path returns.
+func (h *HashJoin) checkBuildKeyTypes(b *batch.RecordBatch) error {
+	for i, bi := range h.buildKeyIdx {
+		if bi < 0 || bi >= len(b.Columns) {
+			continue
+		}
+		target, ok := resolvedKeyType(h.KeyTypes, i)
+		if !ok {
+			continue
+		}
+		if vec := b.Columns[bi].Type; !canEncodeKeyAt(vec, target) {
+			name := ""
+			if i < len(h.RightKeys) {
+				name = h.RightKeys[i]
+			}
+			return keyEncodableErr(name, "build", vec, target)
+		}
+	}
+	return nil
 }

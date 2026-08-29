@@ -1099,23 +1099,20 @@ func postgresSemanticsCases() []pgCase {
 		// its text and an integer set as int64, and missed every member.
 		pgCase{name: "SemiNumericInCastBigint", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IN (SELECT CAST(d_grp AS BIGINT) FROM dec_probe)`},
 		pgCase{name: "SemiNumericInGroupedBigint", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IN (SELECT d_key FROM dec_probe GROUP BY d_key)`},
-		// A REAL probe against a materialized subquery set is a DIFFERENT
-		// defect and is pinned, not fixed here. maxInlinedInSetRows turns an
-		// uncorrelated IN-subquery into a LITERAL list, and PostgreSQL's
-		// multi-element `real IN (…)` NARROWS its literals to real[] (#549)
-		// while `real = ANY(double precision[])` — what a subquery is —
-		// widens the real. So materializing changes the comparison WIDTH and
-		// drops the row whose real value does not survive the round trip:
-		// 6 where PostgreSQL answers 7. inSetLiteral already declines a
-		// float32 SET for this reason; the missing half is declining on the
-		// float32 PROBE, which that function cannot see. Pinned live — the
-		// subtest FAILS when it is fixed, which is what deletes this.
-		pgCase{name: "SemiRealInCastDouble", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val IN (SELECT CAST(d_val AS DOUBLE PRECISION) FROM real_probe)`,
-			knownBug: pgBugWadjet + " an uncorrelated IN-subquery materialized into a LITERAL list " +
-				"is compared under PostgreSQL's list-NARROWING rule (#549) instead of the " +
-				"subquery's widening one, so a REAL probe drops the rows whose value does not " +
-				"survive float32. The join-key half of this family is fixed; this is the " +
-				"materialized-set half.", issue: "#615"},
+		// The row-at-a-time LADDER, one entry per rung (#615 F2). A COMPUTED
+		// inner select item does not decorrelate, so the predicate is answered
+		// either by expr.InSubquery over a value SET or by a materialised
+		// literal list — and both had rules of their own instead of
+		// PostgreSQL's operator resolution. Every cross-rung pair missed every
+		// member, and the NOT IN spelling INVENTED rows rather than dropping
+		// them.
+		pgCase{name: "SemiNumericInCastDouble", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 IN (SELECT CAST(d_key AS DOUBLE PRECISION) FROM dec_probe)`},
+		pgCase{name: "SemiDoubleInCastNumeric", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE d_val IN (SELECT CAST(r_grp AS DECIMAL(9,2)) FROM real_probe)`},
+		pgCase{name: "SemiBigintInCastDouble", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_key IN (SELECT CAST(d_2 AS DOUBLE PRECISION) FROM dec_probe)`},
+		pgCase{name: "AntiNumericNotInCastDouble", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 NOT IN (SELECT CAST(d_key AS DOUBLE PRECISION) FROM dec_probe WHERE d_key IS NOT NULL)`},
+		pgCase{name: "AntiNumericNotInCastDoubleWithNulls", sql: `SELECT COUNT(*) AS n FROM dec_probe WHERE d_2 NOT IN (SELECT CAST(d_2 AS DOUBLE PRECISION) FROM dec_probe)`},
+		pgCase{name: "SemiRealInCastBigint", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val IN (SELECT CAST(r_grp AS BIGINT) FROM real_probe)`},
+		pgCase{name: "SemiRealInCastDouble", sql: `SELECT COUNT(*) AS n FROM real_probe WHERE r_val IN (SELECT CAST(d_val AS DOUBLE PRECISION) FROM real_probe)`},
 	)
 
 	// A literal wider than the 128-bit carrier at the column's scale (#462).

@@ -167,13 +167,29 @@ derived from the other.**
    INT32 and IPv4/MAC/TIMESTAMP/DURATION against INT64 keep matching, as they
    always have.
 
-   The row-at-a-time twin of the same question lives in `expr.InSubquery`: a
-   DECIMAL probe boxes as its TEXT and an integer set as int64, so `numeric IN
-   (SELECT bigint …)` missed every member whenever the inner select item was
-   COMPUTED and the predicate did not decorrelate into a semi join. The set
-   carries both spellings now, for the integer rung only — `numeric ⊕ float8`
-   is float8 there as everywhere, and is a separate rung this record does not
-   claim.
+   **The same ladder governs `x IN (SELECT y …)`**, which is `x = y`
+   quantified. When it decorrelates into a semi join it gets the ladder from
+   the key resolution above; when the inner select item is COMPUTED it does
+   not decorrelate, and the two remaining mechanisms each had a rule of their
+   own:
+
+   - `expr.InSubquery` consulted whichever typed value set matched the
+     PROBE's own Go box, so every cross-rung pair missed every member —
+     `numeric IN (SELECT float8)` answered 0 against PostgreSQL's 7, and its
+     NOT IN answered 7 against PostgreSQL's 0, inventing rows rather than
+     dropping them. It resolves the rung from (probe kind, set kind) now and
+     carries the set in every spelling the ladder can ask for: exactly, as
+     canonical decimal text, and as float64. A FLOAT set gets no decimal
+     view, because `numeric ⊕ float8` is float8 and an exact comparison
+     against it would be a different predicate.
+   - `physical.materializeInSubquery` inlines the set as a LITERAL list, and
+     PostgreSQL's multi-element `real IN (…)` NARROWS its literals to real[]
+     (#549) while a subquery WIDENS the real to float8. A float32 probe
+     therefore declines that path entirely — the mirror of the float32 SET
+     `inSetLiteral` already declined. A float64 member that rendered without
+     a decimal point re-parsed as an INTEGER literal and compared exactly,
+     which dropped the 2^53 row PostgreSQL matches at float8; the rendering
+     keeps the point.
 
    The DECIMAL rung needs no `(p,s)`: `AppendDecimalKey` is scale-normalized,
    so an integer keyed at scale 0 lands on the DECIMAL holding the same
