@@ -1781,7 +1781,7 @@ func pushdownPredicates(n *Node) *Node {
 			// or kept above the Project when substitution is unsound
 			// (aggregate outputs, volatile functions, subqueries). See
 			// filter_project_pushdown.go.
-			pushed, kept := splitFilterForProjectPush(n.Predicates, child.Projections)
+			pushed, kept := splitFilterForProjectPush(n.Predicates, child)
 			if len(pushed) == 0 {
 				return n
 			}

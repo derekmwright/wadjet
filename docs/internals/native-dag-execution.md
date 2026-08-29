@@ -193,6 +193,30 @@ resolver re-spells the predicate in place (it never MOVES it, so the
 materialization fence is untouched), chaining through nested CTEs and
 descending a join one arm at a time.
 
+Three rules it needed on top of the bare-name map, each a wrong answer before
+they existed:
+
+- **The QUALIFIER decides which arm.** Applying each arm's map to the whole
+  predicate rewrote a reference qualified to the OTHER arm with this arm's
+  definition — `d.k > 3 OR c.gg > 100` over `SELECT id AS k, g AS gg` became
+  `id > 3 or g > 100`, a *silent wrong* answer where the unfixed version was a
+  visible zero. Each arm carries its scope names (`logical.nodeScopeNames`:
+  scan alias/table, derived alias, `CTEName`/`CTERefAlias`) and only rewrites
+  references those names claim.
+- **A bare name both arms can emit is a plan-time 42702**
+  (`logical.ErrAmbiguousFilterColumn`, surfaced through
+  `Planner.filterRefErr`), not a silent decline — a decline leaves a spelling
+  no stage resolves, which is zero rows in silence. PostgreSQL rejects the
+  same query.
+- **`rw.b` over `c_row AS rw` is a ROW FIELD PATH, not a qualified column**
+  (ADR-0022): the QUALIFIER is substituted and the field kept (`c_row.b`).
+  Reading it as a table-qualified reference looks `b` up as a column and
+  leaves a name nothing emits.
+
+And it STOPS at a Sort or a LIMIT: unlike a Project those DO emit stages,
+carrying the names above them, so re-spelling past one would name a column the
+stage the filter lands on does not have.
+
 **The backstop under it.** A resolver that misses is silent, because the row
 evaluator answers nil for a name it cannot resolve and a WHERE admits only
 TRUE. The vectorized `KernelFilter` has refused that since #147; the row

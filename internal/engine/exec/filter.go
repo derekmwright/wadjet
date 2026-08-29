@@ -47,7 +47,22 @@ type Filter struct {
 	// the predicate because a Predicate returns bool and has nowhere to put
 	// an error; callers that know the predicate's references set it
 	// (expr.CheckFilterColumns), and callers that do not leave it nil.
-	Check   func(*batch.RecordBatch) error
+	//
+	// WHO sets it is the whole of its safety, and the two paths differ. The
+	// single-process planner sets it on every non-correlated row filter,
+	// because in one process each operator DECLARES its output schema and an
+	// empty join side still declares the columns it would have produced. The
+	// DAG sets it only on a filter reading a base-table SCAN
+	// (OpSpec.ScanSchemaFilter): a stage's input schema there is read back
+	// from what an upstream task WROTE, and a hash-join partition whose build
+	// side was empty writes only the join keys for the missing side — so a
+	// build column that is legitimately NULL for every row of that partition
+	// is absent from the schema, which is TPC-H Q20's
+	// `ps_availqty > 0.5 * __scalar_0` and not a defect.
+	Check func(*batch.RecordBatch) error
+	// checked is set only once the check has actually SEEN a schema. A batch
+	// with no columns tells it nothing, and marking it done there would
+	// disable the guard for the rest of the stream.
 	checked bool
 	selBuf  []uint32 // reusable selection vector to avoid per-batch allocation
 }
@@ -59,7 +74,7 @@ func NewFilter(pred Predicate) *Filter {
 func (f *Filter) Init(_ context.Context) error { return nil }
 
 func (f *Filter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
-	if !f.checked && f.Check != nil {
+	if !f.checked && f.Check != nil && len(in.Columns) > 0 {
 		f.checked = true
 		if err := f.Check(in); err != nil {
 			return nil, err

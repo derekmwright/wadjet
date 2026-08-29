@@ -388,6 +388,16 @@ func TestUnresolvableFilterColumnErrorsOnBothPaths(t *testing.T) {
 // count computed in Go.
 func ctrCheckCount(t *testing.T, ctx context.Context, single *wadjet.DB, coord *Coordinator, sql string, want int64) {
 	t.Helper()
+	ctrCheckCountPinned(t, ctx, single, coord, sql, want, false, "")
+}
+
+// ctrCheckCountPinned is ctrCheckCount with an escape for a DAG divergence
+// whose cause is a DIFFERENT defect, verified separately. It is a pin and not
+// an exemption: the single-process arm is still held to the answer, and the
+// day the DAG agrees the pin FAILS so it gets deleted.
+func ctrCheckCountPinned(t *testing.T, ctx context.Context, single *wadjet.DB, coord *Coordinator,
+	sql string, want int64, pinned bool, reason string) {
+	t.Helper()
 	for _, arm := range []struct {
 		name string
 		run  func() (*oracle.Result, error)
@@ -405,9 +415,19 @@ func ctrCheckCount(t *testing.T, ctx context.Context, single *wadjet.DB, coord *
 			t.Errorf("%s arm answered %d rows, want 1\n  SQL: %s", arm.name, len(res.Rows), sql)
 			continue
 		}
-		if got[0] != want {
-			t.Errorf("%s arm answered %d, want %d\n  SQL: %s", arm.name, got[0], want, sql)
+		if got[0] == want {
+			if pinned && arm.name == "dag" {
+				t.Errorf("the stage DAG now answers this shape, so the separate defect this "+
+					"entry pins is gone (%s). Delete the pin.\n  SQL: %s", reason, sql)
+			}
+			continue
 		}
+		if pinned && arm.name == "dag" {
+			t.Logf("tracked separate defect, NOT gated here (%s): the DAG answered %d, "+
+				"want %d\n  SQL: %s", reason, got[0], want, sql)
+			continue
+		}
+		t.Errorf("%s arm answered %d, want %d\n  SQL: %s", arm.name, got[0], want, sql)
 	}
 }
 
