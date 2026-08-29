@@ -114,7 +114,7 @@ func (w *Writer) prepareRows(rows []map[string]any) error {
 	needsConversion := false
 	for _, col := range w.schema.Columns {
 		switch col.Type {
-		case TypeIPv4, TypeIPv6, TypeMAC, TypePort, TypeProtocol, TypeDuration, TypeUUID, TypeDate:
+		case TypeIPv4, TypeIPv6, TypeMAC, TypePort, TypeProtocol, TypeDuration, TypeUUID, TypeDate, TypeTimestamp:
 			needsConversion = true
 		}
 	}
@@ -173,6 +173,18 @@ func (w *Writer) prepareRows(rows []map[string]any) error {
 					row[col.Name] = int64(tv)
 				case float64:
 					row[col.Name] = int64(tv)
+				default:
+					if norm, ok, err := normalizeTemporalBox(col.Type, val); err != nil {
+						return fmt.Errorf("column %q: %w", col.Name, err)
+					} else if ok {
+						row[col.Name] = norm
+					}
+				}
+			case TypeTimestamp:
+				if norm, ok, err := normalizeTemporalBox(col.Type, val); err != nil {
+					return fmt.Errorf("column %q: %w", col.Name, err)
+				} else if ok {
+					row[col.Name] = norm
 				}
 			case TypeUUID:
 				if s, ok := val.(string); ok {
@@ -182,12 +194,13 @@ func (w *Writer) prepareRows(rows []map[string]any) error {
 					}
 				}
 			case TypeDate:
-				if s, ok := val.(string); ok {
-					d, err := parseDateForWriteChecked(s)
-					if err != nil {
-						return fmt.Errorf("column %q: %w", col.Name, err)
-					}
-					row[col.Name] = d
+				// Both a text literal and a time.Time land here — the second
+				// is the box the SQL INSERT path produces, and it used to
+				// fall past every converter into toInt32's zero (#673).
+				if norm, ok, err := normalizeTemporalBox(col.Type, val); err != nil {
+					return fmt.Errorf("column %q: %w", col.Name, err)
+				} else if ok {
+					row[col.Name] = norm
 				}
 			}
 		}

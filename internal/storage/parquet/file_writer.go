@@ -458,14 +458,27 @@ func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel in
 	// and store the epoch silently — data corruption inside a container the
 	// top-level guard never saw (#560). ParseDateDays is the one accept-set
 	// and classification the filter path shares.
-	if s, ok := val.(string); ok && col.Type == TypeDate {
-		days, err := ParseDateDays(s)
-		if err != nil {
-			nw.fail(fmt.Errorf("column %q, row %d of this write: %w", col.Name, nw.rowsSeen, err))
-			lb.appendEntry(defLevel, repLevel)
-			return
-		}
-		val = days
+	//
+	// A time.Time for a DATE column, and a string or a time.Duration for the
+	// other two temporal types, are normalised HERE for the same reason and
+	// by the same rule: every one of them is a box ingest.checkType DECLARES
+	// acceptable, and every one of them used to reach toInt32/toInt64's
+	// default arm and store ZERO — 1970-01-01 for a DATE, 1970-01-01T00:00Z
+	// for a TIMESTAMP, a zero interval for a DURATION — with no error
+	// anywhere. That is how `INSERT INTO t VALUES (1, '2020-01-01')` stored
+	// the epoch while ingest.Ingest with the same text stored the date: the
+	// SQL path boxes a DATE as time.Time and the programmatic one boxes it as
+	// a string, and only the string had a converter (#673).
+	//
+	// The accept-set is the boxes checkType admits, so the two boundaries
+	// agree by construction, and what they cannot convert FAILS the write
+	// rather than storing a wrong instant.
+	if norm, ok, err := normalizeTemporalBox(col.Type, val); err != nil {
+		nw.fail(fmt.Errorf("column %q, row %d of this write: %w", col.Name, nw.rowsSeen, err))
+		lb.appendEntry(defLevel, repLevel)
+		return
+	} else if ok {
+		val = norm
 	}
 	// A DECIMAL box is resolved to its UNSCALED value HERE, at the leaf, for
 	// the same reason a DATE text literal is: this is the last place the

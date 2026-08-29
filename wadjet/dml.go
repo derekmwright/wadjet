@@ -798,6 +798,28 @@ func ConvertValue(s string, typ parquet.TypeID) (any, error) {
 	return convertValue(s, typ)
 }
 
+// convertTemporalValue reads a DATE, TIMESTAMP or DURATION literal through the
+// parquet package's accept-set for that type and returns the box the writer and
+// the partition-key formatter both understand.
+func convertTemporalValue(s string, typ parquet.TypeID) (any, error) {
+	switch typ {
+	case parquet.TypeDate:
+		days, err := parquet.ParseDateDays(s)
+		if err != nil {
+			return nil, err
+		}
+		return time.Unix(int64(days)*86400, 0).UTC(), nil
+	case parquet.TypeTimestamp:
+		ms, err := parquet.ParseTimestampMillis(s)
+		if err != nil {
+			return nil, err
+		}
+		return time.UnixMilli(ms).UTC(), nil
+	default:
+		return parquet.ParseDurationNanos(s)
+	}
+}
+
 // ConvertValueForColumn converts a literal's text against a column's FULL
 // declaration rather than its TypeID alone, so a value the column cannot hold
 // is refused HERE — before the caller commits anything destructive.
@@ -937,35 +959,26 @@ func convertValue(s string, typ parquet.TypeID) (any, error) {
 			return nil, fmt.Errorf("%s value %d out of range [%d, %d]", typ, v, lo, hi)
 		}
 		return int32(v), nil
-	case parquet.TypeDuration:
-		// schema.go: "nanoseconds, stored as int64" — the same unit
-		// batch.Vector.GetValue reads back and toInt64/convertStringToInt64
-		// (file_writer.go) do NOT special-case, unlike TypeDate/TypeTimestamp
-		// below. A bare integer literal is the only accepted form.
-		v, err := strconv.ParseInt(s, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("cannot parse duration value %q (nanoseconds): %w", s, err)
-		}
-		return v, nil
-	case parquet.TypeTimestamp:
-		// Try standard formats
-		for _, layout := range []string{
-			time.RFC3339,
-			"2006-01-02 15:04:05",
-			"2006-01-02T15:04:05",
-			"2006-01-02",
-		} {
-			if t, err := time.Parse(layout, s); err == nil {
-				return t, nil
-			}
-		}
-		return nil, fmt.Errorf("cannot parse timestamp %q", s)
-	case parquet.TypeDate:
-		t, err := time.Parse("2006-01-02", s)
-		if err != nil {
-			return nil, fmt.Errorf("cannot parse date %q: %w", s, err)
-		}
-		return t, nil
+	case parquet.TypeDuration, parquet.TypeTimestamp, parquet.TypeDate:
+		// One accept-set per temporal type, shared with the writer and the
+		// ingest boundary (parquet.ParseDurationNanos / ParseTimestampMillis /
+		// ParseDateDays), so a literal this door takes is a literal the leaf
+		// stores and a literal it refuses carries PostgreSQL's SQLSTATE.
+		//
+		// Three copies existed and all three were narrower than the engine's:
+		// DATE took only "2006-01-02" where the filter path and the writer take
+		// every unambiguous year-first spelling, and both DATE and TIMESTAMP
+		// failed with a bare error carrying no code. Worse, the DATE arm's
+		// time.Time box then reached a writer that had no case for it and
+		// stored the EPOCH — `INSERT INTO t VALUES (1, '2020-01-01')` read back
+		// as 1970-01-01 while ingest.Ingester with the same text stored the
+		// date (#673).
+		//
+		// The BOX each returns is deliberately unchanged: a DATE and a
+		// TIMESTAMP stay a time.Time, because ingest.formatPartitionValue
+		// formats a temporal PARTITION KEY from that box and an integer there
+		// would rename every partition directory.
+		return convertTemporalValue(s, typ)
 	default:
 		return s, nil
 	}

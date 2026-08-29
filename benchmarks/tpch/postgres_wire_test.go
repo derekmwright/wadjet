@@ -1322,6 +1322,22 @@ func runWireErrors(t *testing.T, ctx context.Context, wConn, pConn *pgconn.PgCon
 			sql: `SELECT COUNT(*) FROM mk_outer WHERE dt = 'not-a-date'`},
 		{name: "DateNonexistentCalendarConstantIn",
 			sql: `SELECT COUNT(*) FROM mk_outer WHERE dt IN ('2026-02-30')`},
+		// #560 fixed the DATE literal reaching a COMPARISON. The literal
+		// reaching a STORED VALUE was a separate path and stayed broken: the
+		// SQL INSERT converter took only "2006-01-02", failed with a bare
+		// error carrying no SQLSTATE, and — for the spellings it did take —
+		// handed the writer a time.Time box no writer arm converted, so
+		// `INSERT INTO t VALUES (1, '2020-01-01')` stored the EPOCH while
+		// ingest.Ingester with the same text stored the date (#673). Both
+		// entries are statements PostgreSQL REFUSES, so neither engine's
+		// fixture is mutated by running them; the value half (which
+		// spellings STORE, and as what) is gated by
+		// wadjet.TestSQLInsertStoresEveryTemporalLiteral, because this corpus
+		// has no per-entry setup and cannot compare a statement that succeeds.
+		{name: "DateInsertNonexistentCalendar",
+			sql: `INSERT INTO mk_outer (id, dt) VALUES (900001, '2026-02-30')`},
+		{name: "DateInsertUnparseable",
+			sql: `INSERT INTO mk_outer (id, dt) VALUES (900002, 'not-a-date')`},
 		// A short leading field PostgreSQL reads as a MONTH under MDY: '31/1/2'
 		// and '13/1/2' are month 31 and month 13, which PostgreSQL rejects
 		// with 22008. wadjet refuses the SHAPE (a non-4-digit leading field is

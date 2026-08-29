@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,6 +26,21 @@ func (e *DateParseError) Error() string {
 		return fmt.Sprintf("date/time field value out of range: %q", e.Text)
 	}
 	return fmt.Sprintf("invalid input syntax for type date: %q", e.Text)
+}
+
+// SQLState makes the classification above reach a PostgreSQL client, through
+// sqlerr.Coder rather than by importing sqlerr (which would be a cycle, since
+// sqlerr is below this package). The two codes are the ones the doc comment
+// names, and they are the ones psql/pgx branch on.
+//
+// It used to carry none: a DATE this package refused crossed the wire as the
+// blanket 42000 even though the failure had already been classified here
+// (#673). Every consumer of ParseDateDays gets the code for free.
+func (e *DateParseError) SQLState() string {
+	if e.FieldRange {
+		return "22008"
+	}
+	return "22007"
 }
 
 // IsDateSyntaxError reports whether err is a ParseDateDays failure of the
@@ -302,11 +318,9 @@ func validateNestedLeaf(col Column, val any) error {
 		return nil
 	}
 	switch col.Type {
-	case TypeDate:
-		if s, ok := val.(string); ok {
-			if _, err := ParseDateDays(s); err != nil {
-				return err
-			}
+	case TypeDate, TypeTimestamp, TypeDuration:
+		if _, _, err := normalizeTemporalBox(col.Type, val); err != nil {
+			return err
 		}
 	case TypeDecimal:
 		if _, err := DecimalValueFromBox(val, col.Precision, col.Scale); err != nil {
@@ -315,3 +329,140 @@ func validateNestedLeaf(col Column, val any) error {
 	}
 	return nil
 }
+
+// normalizeTemporalBox converts a box handed to a DATE, TIMESTAMP or DURATION
+// column into the integer that column's leaf stores — days, milliseconds and
+// nanoseconds respectively — and reports whether it converted anything.
+//
+// It exists because "which boxes are acceptable" was answered in two places
+// that disagreed. ingest.checkType admits, per type:
+//
+//	DATE       time.Time, int32, int64, string
+//	TIMESTAMP  time.Time, int64, string
+//	DURATION   time.Duration, int64, string
+//
+// and of those the writer converted exactly one — a DATE string. Every other
+// non-integer box fell through toInt32/toInt64's `default: return 0` and was
+// stored as ZERO, silently: a time.Time DATE (the box the SQL literal path
+// produces, #673), a string TIMESTAMP and a string or time.Duration DURATION
+// (time.Duration is a NAMED type, so `case int64` in a Go type switch does not
+// match it). An accepted box that stores a wrong value is worse than a
+// rejected one, so this is the single conversion both boundaries use, and a
+// box it cannot convert is an error naming the column and the row rather than
+// a zero.
+//
+// A DATE takes the CALENDAR DATE as written in the time's own location, not
+// its UTC instant — a DATE is a date, and this is also the rule
+// ingest.formatPartitionValue already formats a DATE partition key by
+// (t.Format("2006-01-02")), so a partition's directory name and its stored
+// value cannot disagree.
+func normalizeTemporalBox(t TypeID, val any) (any, bool, error) {
+	switch t {
+	case TypeDate:
+		switch v := val.(type) {
+		case string:
+			d, err := ParseDateDays(v)
+			if err != nil {
+				return nil, false, err
+			}
+			return d, true, nil
+		case time.Time:
+			y, mo, d := v.Date()
+			days := civilDaysSinceEpoch(time.Date(y, mo, d, 0, 0, 0, 0, time.UTC))
+			if days < math.MinInt32 || days > math.MaxInt32 {
+				return nil, false, &DateParseError{Text: v.Format("2006-01-02"), FieldRange: true}
+			}
+			return int32(days), true, nil
+		}
+	case TypeTimestamp:
+		if s, ok := val.(string); ok {
+			ms, err := ParseTimestampMillis(s)
+			if err != nil {
+				return nil, false, err
+			}
+			return ms, true, nil
+		}
+	case TypeDuration:
+		switch v := val.(type) {
+		case time.Duration:
+			return int64(v), true, nil
+		case string:
+			n, err := ParseDurationNanos(v)
+			if err != nil {
+				return nil, false, err
+			}
+			return n, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// timestampLayouts is the accept-set for a TIMESTAMP text literal, in the
+// order tried. It is the list the comparison kernel already parses a string
+// against (kernel.parseTimestampString), so a literal that STORES is a literal
+// a predicate over the same column reads the same way.
+var timestampLayouts = []string{
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02T15:04:05",
+	"2006-01-02T15:04:05.000",
+	"2006-01-02 15:04:05",
+	"2006-01-02 15:04:05.000",
+	"2006-01-02",
+}
+
+// ParseTimestampMillis converts a TIMESTAMP string to epoch milliseconds — the
+// unit the parquet schema declares for the column (TimestampMillis) and the
+// unit its reader hands back.
+//
+// The failure is 22007 rather than a zero. The kernel's copy of this list
+// returns 0 for an unparseable string, which is a defensible answer for a
+// COMPARISON (it cannot match) and an indefensible one for a WRITE, where 0 is
+// 1970-01-01T00:00:00Z stored under the caller's timestamp.
+func ParseTimestampMillis(s string) (int64, error) {
+	trimmed := strings.TrimSpace(s)
+	for _, layout := range timestampLayouts {
+		if t, err := time.Parse(layout, trimmed); err == nil {
+			return t.UnixMilli(), nil
+		}
+	}
+	return 0, &TimestampParseError{Text: s}
+}
+
+// TimestampParseError is ParseTimestampMillis's failure, carrying PostgreSQL's
+// 22007 the way DateParseError carries its own.
+type TimestampParseError struct{ Text string }
+
+func (e *TimestampParseError) Error() string {
+	return fmt.Sprintf("invalid input syntax for type timestamp: %q", e.Text)
+}
+
+func (e *TimestampParseError) SQLState() string { return "22007" }
+
+// ParseDurationNanos converts a DURATION string to nanoseconds.
+//
+// A plain integer count of nanoseconds is the only accepted spelling, and
+// deliberately so: schema.go defines the type as "nanoseconds, stored as
+// int64", that is the unit Vector.GetValue reads back, and nothing in the
+// system — parser, ingest, or a named-form registration — has ever defined
+// another literal for it. Accepting Go's "1h30m" spelling here would invent a
+// grammar the SQL literal path does not have, which is the divergence this
+// function exists to close rather than widen.
+func ParseDurationNanos(s string) (int64, error) {
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0, &DurationParseError{Text: s}
+	}
+	return n, nil
+}
+
+// DurationParseError is ParseDurationNanos's failure. PostgreSQL has no
+// DURATION type; 22007 is the code it uses for the interval literal this is
+// closest to.
+type DurationParseError struct{ Text string }
+
+func (e *DurationParseError) Error() string {
+	return fmt.Sprintf("invalid input syntax for type duration (expected an integer count of nanoseconds): %q", e.Text)
+}
+
+func (e *DurationParseError) SQLState() string { return "22007" }
