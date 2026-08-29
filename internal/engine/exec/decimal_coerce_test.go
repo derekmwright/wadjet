@@ -359,7 +359,14 @@ func TestDecimalCoerceChecksTheDeclaredPrecisionNotTheCarrier(t *testing.T) {
 
 // TestDecimalPrecisionLimit pins the bound itself, including the edge the
 // 38-digit cap makes the widest reachable one.
+//
+// A precision PAST the carrier's width now CLAMPS to 10^38 instead of
+// answering "no bound to check". The skip was the wrong direction: a
+// DECIMAL(50,2) declaration does not make an Int128 hold 10^50, so the values
+// the skip admitted were exactly the ones with no carrier at all (ADR-0024
+// item 4; the R12 row of the survey).
 func TestDecimalPrecisionLimit(t *testing.T) {
+	const tenPow38 = "100000000000000000000000000000000000000"
 	for _, tc := range []struct {
 		p    int
 		want string
@@ -367,18 +374,19 @@ func TestDecimalPrecisionLimit(t *testing.T) {
 	}{
 		{1, "10", true},
 		{18, "1000000000000000000", true},
-		{38, "100000000000000000000000000000000000000", true},
-		{39, "", false},
+		{38, tenPow38, true},
+		{39, tenPow38, true},
+		{50, tenPow38, true},
 		{0, "", false},
 		{-1, "", false},
 	} {
-		got, ok := decimalPrecisionLimit(tc.p)
+		got, ok := batch.DecimalPrecisionLimit(tc.p)
 		if ok != tc.ok {
-			t.Errorf("decimalPrecisionLimit(%d) ok = %v, want %v", tc.p, ok, tc.ok)
+			t.Errorf("batch.DecimalPrecisionLimit(%d) ok = %v, want %v", tc.p, ok, tc.ok)
 			continue
 		}
 		if ok && got.String() != tc.want {
-			t.Errorf("decimalPrecisionLimit(%d) = %s, want %s", tc.p, got.String(), tc.want)
+			t.Errorf("batch.DecimalPrecisionLimit(%d) = %s, want %s", tc.p, got.String(), tc.want)
 		}
 	}
 }

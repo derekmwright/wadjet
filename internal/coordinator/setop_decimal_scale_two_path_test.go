@@ -274,6 +274,7 @@ func TestSetOpDecimalScaleTwoPath(t *testing.T) {
 	e2, e2Nulls := sodExpect("e2")
 	e4, e4Nulls := sodExpect("e4")
 	ew, ewNulls := sodExpect("ew")
+	i8, i8Nulls := sodExpect("i8")
 
 	cat := func(parts ...[]*big.Rat) []*big.Rat {
 		var out []*big.Rat
@@ -352,35 +353,48 @@ func TestSetOpDecimalScaleTwoPath(t *testing.T) {
 		{"union_all_three_arms_widest_first",
 			"SELECT ew AS v FROM %[1]s UNION ALL SELECT e2 FROM %[1]s UNION ALL SELECT e4 FROM %[1]s",
 			cat(ew, e2, e4), e2Nulls + e4Nulls + ewNulls, ""},
+		// A DECIMAL arm beside an INTEGER one. `numeric ∪ bigint` is numeric
+		// in PostgreSQL and an integer is a VALUE at scale 0, so 1 is 1.00 —
+		// not 0.01, which is what reading the integer box as the DECIMAL's
+		// already-scaled carrier gives (ADR-0018 §4's ingest rule applied
+		// where it does not belong). These two were asserted on the stage DAG
+		// alone because the single-process adapter did not reconcile arms of
+		// different TypeID at all (#541); it now resolves the type through
+		// the same setOpWiden / setOpDecimalTarget the DAG uses and MOVES
+		// each arm's boxes into it, so the arms-agree comparison is the proof.
+		{"decimal_arm_with_an_integer_arm",
+			"SELECT e2 AS v FROM %[1]s UNION ALL SELECT i8 FROM %[1]s",
+			cat(e2, i8), e2Nulls + i8Nulls, ""},
+		{"integer_arm_with_a_decimal_arm",
+			"SELECT i8 AS v FROM %[1]s UNION ALL SELECT e2 FROM %[1]s",
+			cat(i8, e2), e2Nulls + i8Nulls, ""},
 		// The DISTINCT forms. Their dedup key must agree with the
 		// comparator: two values `=` calls equal produce ONE key, so 12.75
 		// at scale 2 and 12.7500 at scale 4 are one member.
 		//
 		// The stage DAG keys these through the COLUMNAR encoding — a
 		// GroupByAll aggregate over the concatenation, whose DECIMAL arm is
-		// batch.AppendDecimalKey (#474) — so it is held to the generator
-		// here. The single-process path keys a boxed row with
-		// fmt.Sprintf("%v", ...), where a DECIMAL is its RENDERED TEXT and
-		// "12.75" and "12.7500" are two keys for one number; that is #499,
-		// a different component and a separate fix (physical.setOpKeyer).
-		// These four move back to the arms-agree comparison the moment it
-		// lands — the four UNION ALL entries above already run both arms and
-		// are what proves the DAG's VALUES are right for the same fixture.
+		// batch.AppendDecimalKey (#474). The single-process path used to key
+		// a boxed row with fmt.Sprintf("%v", ...), where a DECIMAL is its
+		// RENDERED TEXT and "12.75" and "12.7500" are two keys for one
+		// number, so these five ran on the DAG alone (#499). They are on
+		// BOTH arms now: physical.setOpKeyer keys through the same encoding
+		// the DAG does, and the arms-agree comparison is what proves it.
 		{"union_distinct",
 			"SELECT e2 AS v FROM %[1]s UNION SELECT e4 FROM %[1]s",
-			sodDistinct(cat(e2, e4)), nullIn(e2Nulls + e4Nulls), "#499"},
+			sodDistinct(cat(e2, e4)), nullIn(e2Nulls + e4Nulls), ""},
 		{"union_distinct_three_arms",
 			"SELECT e2 AS v FROM %[1]s UNION SELECT e4 FROM %[1]s UNION SELECT ew FROM %[1]s",
-			sodDistinct(cat(e2, e4, ew)), nullIn(e2Nulls + e4Nulls + ewNulls), "#499"},
+			sodDistinct(cat(e2, e4, ew)), nullIn(e2Nulls + e4Nulls + ewNulls), ""},
 		{"intersect",
 			"SELECT e2 AS v FROM %[1]s INTERSECT SELECT e4 FROM %[1]s",
-			intersect(e2, e4), nullIn(e2Nulls) * nullIn(e4Nulls), "#499"},
+			intersect(e2, e4), nullIn(e2Nulls) * nullIn(e4Nulls), ""},
 		{"except",
 			"SELECT e2 AS v FROM %[1]s EXCEPT SELECT e4 FROM %[1]s",
-			except(e2, e4), 0, "#499"},
+			except(e2, e4), 0, ""},
 		{"except_reversed",
 			"SELECT e4 AS v FROM %[1]s EXCEPT SELECT e2 FROM %[1]s",
-			except(e4, e2), 0, "#499"},
+			except(e4, e2), 0, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sql := fmt.Sprintf(tc.sql, sodTable)
@@ -474,15 +488,20 @@ func TestSetOpDecimalScaleOnTheDAG(t *testing.T) {
 		check(t, fmt.Sprintf("SELECT e2 AS v FROM %[1]s INTERSECT SELECT u4 FROM %[1]s", sodTable), want, 1)
 	})
 
-	t.Run("decimal_arm_with_an_integer_arm", func(t *testing.T) {
+	t.Run("decimal_arm_with_an_integer_arm_against_the_wide_arm", func(t *testing.T) {
 		// PostgreSQL resolves `numeric UNION ALL bigint` to numeric, so the
 		// integers keep their VALUE: 1 is 1.0000, not 0.0001. Reading an
 		// integer box as an unscaled carrier is the same class of mistake as
 		// reading one arm's unscaled carrier at the other's scale.
-		check(t, fmt.Sprintf("SELECT e2 AS v FROM %[1]s UNION ALL SELECT i8 FROM %[1]s", sodTable),
-			append(append([]*big.Rat(nil), e2...), i8...), e2Nulls+i8Nulls)
-		check(t, fmt.Sprintf("SELECT i8 AS v FROM %[1]s UNION ALL SELECT e2 FROM %[1]s", sodTable),
-			append(append([]*big.Rat(nil), i8...), e2...), e2Nulls+i8Nulls)
+		//
+		// The e2 pair moved to TestSetOpDecimalScaleTwoPath when the
+		// single-process path learned to reconcile arm TYPES (#541). This one
+		// stays here because u4 carries digits the narrow arm's scale does not
+		// have, which is #532's territory rather than this issue's.
+		check(t, fmt.Sprintf("SELECT u4 AS v FROM %[1]s UNION ALL SELECT i8 FROM %[1]s", sodTable),
+			append(append([]*big.Rat(nil), u4...), i8...), u4Nulls+i8Nulls)
+		check(t, fmt.Sprintf("SELECT i8 AS v FROM %[1]s UNION ALL SELECT u4 FROM %[1]s", sodTable),
+			append(append([]*big.Rat(nil), i8...), u4...), u4Nulls+i8Nulls)
 	})
 
 	t.Run("order_by_limit_over_the_widened_output", func(t *testing.T) {

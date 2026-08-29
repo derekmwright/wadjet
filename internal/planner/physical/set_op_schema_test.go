@@ -37,8 +37,15 @@ func TestUnifySetOpSchemasDecimalIntegerRung(t *testing.T) {
 		{"int64_first_decimal", i64, a, parquet.TypeDecimal, 2, 21, true},
 		{"decimal_first_int32", a, i32, parquet.TypeDecimal, 2, 12, true},
 		{"int32_first_decimal", i32, a, parquet.TypeDecimal, 2, 12, true},
-		// Two integers are left alone — FromRows moves no value between them.
-		{"int32_int64", parquet.Column{Name: "id", Type: parquet.TypeInt32}, i64, parquet.TypeInt32, 0, 0, false},
+		// `integer ∪ bigint` is bigint (#541). No VALUE moves between them,
+		// which is why this rung used to be skipped — but the OID does, and a
+		// client reading int4 for a column carrying int64 values is the same
+		// defect one type family over. Both orders resolve to INT64, the type
+		// setOpWiden and the stage DAG already agree on.
+		{"int32_int64", i32, i64, parquet.TypeInt64, 0, 0, true},
+		{"int64_int32", i64, i32, parquet.TypeInt64, 0, 0, false},
+		// Two identical types are left alone.
+		{"int64_int64", i64, i64, parquet.TypeInt64, 0, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := unifySetOpSchemas([]parquet.Column{tc.left}, []parquet.Column{tc.right})

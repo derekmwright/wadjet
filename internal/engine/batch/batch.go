@@ -1,6 +1,7 @@
 package batch
 
 import (
+	"fmt"
 	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -348,6 +349,29 @@ func truncateVectorStorage(v *Vector) {
 // context is unambiguous: the value came from the row reader and the
 // catalog says the column is a MAP.
 func FromRows(schema []parquet.Column, rows []map[string]any) *RecordBatch {
+	b, _ := fromRows(schema, rows, false)
+	return b
+}
+
+// FromRowsChecked is FromRows for a caller materializing a stored VALUE: it
+// writes through Vector.SetValueChecked, so a DECIMAL conversion that cannot
+// be made exactly is an ERROR carrying PostgreSQL's SQLSTATE instead of the
+// nearest number the carrier can hold (ADR-0024 item 4).
+//
+// The single-process set-operation adapter is why it exists. It boxes both
+// arms' rows and rebuilds a batch under the unified schema, so every value
+// the operation returns is written HERE — and the saturating writer turned a
+// DECIMAL(38,0) arm's 10^30 into 2^127-1 rendered at scale 10, with no error
+// anywhere (#553).
+//
+// A partially-filled batch comes back alongside the error rather than nil, so
+// a caller that wants to name the failing row can; callers that do not simply
+// discard it.
+func FromRowsChecked(schema []parquet.Column, rows []map[string]any) (*RecordBatch, error) {
+	return fromRows(schema, rows, true)
+}
+
+func fromRows(schema []parquet.Column, rows []map[string]any, checked bool) (*RecordBatch, error) {
 	b := NewRecordBatch(schema, len(rows))
 	// A MAP's row shape needs converting wherever it SITS, not only when it
 	// is the whole column: the reader hands back a Go map for a MAP inside a
@@ -372,10 +396,16 @@ func FromRows(schema []parquet.Column, rows []map[string]any) *RecordBatch {
 			if deep != nil && deep[j] {
 				val = rowShapeToStorage(b.Columns[j], val)
 			}
+			if checked {
+				if err := b.Columns[j].SetValueChecked(i, val); err != nil {
+					return b, fmt.Errorf("column %q, row %d: %w", col.Name, i, err)
+				}
+				continue
+			}
 			b.Columns[j].SetValue(i, val)
 		}
 	}
-	return b
+	return b, nil
 }
 
 // hasMapBelow reports whether v or anything under it stores a MAP.

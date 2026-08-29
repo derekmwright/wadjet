@@ -8,6 +8,8 @@ import (
 	"math/bits"
 	"strconv"
 	"strings"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // Int128 is a 128-bit signed integer used for DECIMAL storage.
@@ -686,14 +688,95 @@ func int128FromDigits(digits string, neg bool) (Int128, bool) {
 
 // ParseDecimalString parses a decimal string like "123.45" into an Int128 at
 // the given scale, truncating toward zero. Text that is not a number reads as
-// zero here — callers that must tell "not a number" from "the value zero"
-// take DecimalTextAt, which is the same conversion with that answer kept.
+// zero here, and text with no Int128 at this scale reads as the SATURATED end
+// of the carrier's range.
+//
+// Both answers are for a COMPARISON, which is what this function is for: a
+// literal outside a column's range is a BOUND, and orders above (or below)
+// every value the column holds (#462). A caller producing a stored VALUE must
+// take ParseDecimalStringChecked instead — saturating there replaced 10^30
+// with 2^127-1 and reported nothing (#553), and reading unparseable text as
+// zero made a constant nobody can read compare EQUAL to every stored zero
+// (#463). ADR-0024 item 4 is the rule: a value with no exact carrier is a
+// 22003 error, never a saturated, wrapped, narrowed or zeroed number.
 func ParseDecimalString(s string, scale int) Int128 {
 	d, ok := DecimalTextAt(s, scale)
 	if !ok {
 		return Int128{}
 	}
 	return d.Unscaled
+}
+
+// ParseDecimalStringChecked is ParseDecimalString for a caller that is
+// producing a VALUE: the two answers ParseDecimalString gives silently — the
+// saturated carrier end for a magnitude with no Int128 at this scale, and
+// zero for text that is not a number — become the errors PostgreSQL raises
+// for them, with its SQLSTATEs (ADR-0024 item 4).
+//
+//   - 22003 numeric_value_out_of_range: the number is real but has no exact
+//     128-bit carrier at `scale`. Handing back Int128Max here is what turned
+//     10^30 into 17014118346046923173168730371.5884105727 in a UNION, with
+//     no error and no warning (#553).
+//   - 22P02 invalid_text_representation: the text names no number at all.
+func ParseDecimalStringChecked(s string, scale int) (Int128, error) {
+	d, ok := DecimalTextAt(s, scale)
+	if !ok {
+		return Int128{}, sqlerr.New("22P02", "invalid input syntax for type numeric: %q", s)
+	}
+	if d.Sat != 0 {
+		return Int128{}, sqlerr.New("22003",
+			"numeric field overflow: %s has no exact DECIMAL value at scale %d — a DECIMAL is a "+
+				"128-bit unscaled integer (ADR-0024 item 1), and this value needs more than 38 "+
+				"digits once shifted to that scale",
+			s, scale)
+	}
+	return d.Unscaled, nil
+}
+
+// DecimalPrecisionLimit is 10^precision, the EXCLUSIVE bound on the unscaled
+// magnitude a DECIMAL(precision, s) column may hold. ok=false means the
+// declaration named no bound at all — precision 0 is #458's "unconstrained"
+// sentinel.
+//
+// A precision past the carrier's own width is clamped to it rather than
+// treated as "no bound to check". Skipping the check there was the older
+// behaviour on both sides of the package boundary, and it is wrong in the one
+// direction that matters: a DECIMAL(50,2) declaration cannot make an Int128
+// hold 10^50, so the values admitted by the skip are exactly the ones with no
+// carrier. 10^38 is the widest bound an Int128 can express and is the honest
+// one to enforce.
+func DecimalPrecisionLimit(precision int) (Int128, bool) {
+	if precision <= 0 {
+		return Int128{}, false
+	}
+	if precision > MaxDecimalPrecision {
+		precision = MaxDecimalPrecision
+	}
+	return Int128From(1).MulPow10(precision)
+}
+
+// DecimalFitsPrecision reports whether an unscaled value's MAGNITUDE is below
+// the limit DecimalPrecisionLimit returned. A zero limit means the caller had
+// none to give, which admits every value.
+//
+// This is the ONE fits-precision helper: exec.coerceDecimalVector and the
+// single-process set operation both call it, so the two paths cannot come to
+// different conclusions about the same value (ADR-0024's consequence that the
+// grouped, DAG and local rules become one function).
+func DecimalFitsPrecision(v, limit Int128) bool {
+	if limit.IsZero() {
+		return true
+	}
+	mag := v
+	if mag.IsNegative() {
+		mag = mag.Neg()
+		if mag.IsNegative() {
+			// -2^127 negates to itself; its magnitude has no Int128, so it is
+			// certainly outside any precision this carrier can declare.
+			return false
+		}
+	}
+	return mag.Cmp(limit) < 0
 }
 
 // int128FromBig narrows a big.Int to Int128, SATURATING at the range's ends.
@@ -703,6 +786,13 @@ func ParseDecimalString(s string, scale int) Int128 {
 // against one, and a wrapped literal reappears inside the ordinary range as a
 // perfectly plausible number of the wrong sign (#462). Saturation keeps it on
 // the correct side of every value the column holds.
+//
+// Both callers inside this package (DecimalAvg and int128FromDigits) test
+// fitsInt128 first and report ok=false, so the saturating arm is reached only
+// by a caller that has decided a bound is what it wants. DecimalTextAt is
+// where the saturation a comparison relies on actually happens, and
+// ParseDecimalStringChecked is where a value-producing caller turns it into
+// the 22003 of ADR-0024 item 4.
 func int128FromBig(b *big.Int) Int128 {
 	if !fitsInt128(b) {
 		if b.Sign() < 0 {

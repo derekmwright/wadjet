@@ -11,6 +11,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -1012,6 +1013,21 @@ func (v *Vector) SetValue(i int, val any) {
 			// silently (#419).
 			v.DecimalData.Data[i] = Int128{Hi: tv.Hi, Lo: tv.Lo}
 		case int64:
+			// An INTEGER box is the ALREADY-SCALED unscaled carrier, written
+			// verbatim: ADR-0018 §4 says a DECIMAL value IS an unscaled
+			// integer plus the column's declared scale, and this arm is the
+			// INGEST spelling of that — a writer that has already scaled its
+			// value hands it over as an int64 rather than paying for text.
+			//
+			// It is therefore NOT the arm for a value at scale 0. A set
+			// operation's integer arm is such a value, and reading it here
+			// divided every integer by 10^scale (1 came back as 0.01,
+			// #547/#541); the reconciliation happens at the CALLER, which
+			// rewrites the box to decimal text before the arms meet
+			// (physical.coerceSetOpArmRows). SetValueChecked — the sibling
+			// every value-producing row→batch caller takes — REFUSES an
+			// integer box into a DECIMAL column for exactly this reason, so
+			// this reinterpretation stays reachable only from ingest.
 			v.DecimalData.Data[i] = Int128From(tv)
 		case int:
 			v.DecimalData.Data[i] = Int128From(int64(tv))
@@ -1022,6 +1038,10 @@ func (v *Vector) SetValue(i int, val any) {
 		case float32:
 			v.DecimalData.Data[i] = Int128FromFloat64(float64(tv), v.DecimalData.Scale)
 		case string:
+			// SATURATING, because this is the unchecked writer: text with no
+			// Int128 at this scale lands on Int128Max and text that is not a
+			// number lands on zero. Value-producing callers take
+			// SetValueChecked, which reports both (#553, ADR-0024 item 4).
 			v.DecimalData.Data[i] = ParseDecimalString(tv, v.DecimalData.Scale)
 		default:
 			v.mismatch(val)
@@ -1108,6 +1128,57 @@ func (v *Vector) SetValue(i int, val any) {
 			child.SetValue(i, row[name])
 		}
 	}
+}
+
+// SetValueChecked is SetValue for a caller producing a stored VALUE rather
+// than ingesting an already-encoded one.
+//
+// SetValue's DECIMAL arms answer a conversion they cannot make exactly with
+// the nearest thing they can store — the saturated end of the Int128 range
+// for text too wide at this scale, zero for text that is not a number, and
+// the raw carrier for an integer box. Each is right for the caller it was
+// built for (a comparison bound, #462; ingest's already-scaled carrier,
+// ADR-0018 §4) and each is a silently wrong ROW anywhere else: a 10^30 union
+// arm came back as 17014118346046923173168730371.5884105727 (#553) and an
+// integer arm came back divided by 10^scale (#547/#541).
+//
+// So this sibling exists rather than a signature change on SetValue: the
+// unchecked writer keeps its callers and its cost, and every value-producing
+// row→batch path (FromRowsChecked, and through it the single-process
+// set-operation adapter) takes this one. The errors carry PostgreSQL's
+// SQLSTATEs — 22003 for a value with no carrier, 22P02 for text that names no
+// number (ADR-0024 item 4).
+//
+// Every other type, and every other box, delegates to SetValue unchanged.
+func (v *Vector) SetValueChecked(i int, val any) error {
+	if v == nil || v.Type != TypeDecimal || val == nil {
+		v.SetValue(i, val)
+		return nil
+	}
+	switch tv := val.(type) {
+	case string:
+		d, err := ParseDecimalStringChecked(tv, v.DecimalData.Scale)
+		if err != nil {
+			return err
+		}
+		v.Nulls.SetValid(i)
+		v.DecimalData.Data[i] = d
+		return nil
+	case int64, int, int32:
+		// The ingest reinterpretation (SetValue's int arms) is a CARRIER
+		// hand-off, not a conversion, so a caller carrying VALUES must not
+		// reach it: at scale 2 the integer 1 would be stored as 0.01. The
+		// set-operation adapter rewrites such a box to decimal text before
+		// this point (physical.coerceSetOpArmRows), so arriving here with one
+		// means the reconciliation did not run — reported rather than stored.
+		return sqlerr.New("22003",
+			"integer value %v reached a DECIMAL(scale %d) column as a raw unscaled carrier: "+
+				"an integer is a value at scale 0 and must be multiplied by 10^%d first "+
+				"(ADR-0018 §4, ADR-0024 item 4)",
+			tv, v.DecimalData.Scale, v.DecimalData.Scale)
+	}
+	v.SetValue(i, val)
+	return nil
 }
 
 // mapEntryRows converts a MAP's row-level Go map into the entry rows the

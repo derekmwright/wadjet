@@ -9954,11 +9954,16 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		//
 		// Schema() instead of Batches()[0].Schema — ToRows below releases the
 		// sinks' batches as it boxes them — and the arms' two schemas
-		// UNIFIED rather than the first one alone, because FromRows re-reads
-		// each row's rendered decimal text at the schema's scale and the
-		// first arm's scale truncated the second arm's values (#532); and
-		// because an INTEGER arm meeting a DECIMAL arm widens INTO the DECIMAL
-		// rather than being read raw as an unscaled carrier (#547).
+		// UNIFIED rather than the first one alone. Under the first arm's
+		// schema the arm ORDER decided the answer: FromRows re-reads each
+		// row's rendered decimal text at the schema's scale, so the first
+		// arm's scale truncated the second arm's values (#532); an INTEGER
+		// arm was read raw as an unscaled carrier (#547); and a DECIMAL arm
+		// under a FLOAT64 first arm failed the store outright while the same
+		// pair the other way round silently kept the DECIMAL type (#541).
+		// unifySetOpSchemas resolves the common type through the same
+		// setOpWiden / setOpDecimalTarget the stage DAG uses, so the two
+		// paths cannot answer with different types for the same query.
 		//
 		// The type is resolved HERE rather than at the FromRows call below
 		// because the DEDUP KEY needs it too: a set operation decides
@@ -9969,15 +9974,16 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		rightSchema := rightSink.Schema()
 		schema := unifySetOpSchemas(leftSchema, rightSchema)
 
-		// An INTEGER arm the union widened to DECIMAL boxes as a raw int64,
-		// which FromRows would read into the DECIMAL vector as an UNSCALED
-		// carrier (1 -> 0.01, #547). coerceSetOpArmRows rewrites those boxes
-		// to their decimal text before the arms meet, so both the dedup key
-		// and FromRows read them at the unified scale — and ERRORS on a value
-		// that does not fit the unified DECIMAL, the same overflow the stage
-		// DAG raises (exec.coerceDecimalVector), rather than saturating
-		// silently. The right arm is coerced against its OWN schema, before
-		// alignSetOpRows re-keys it to the result names.
+		// The boxes are not uniform across types — a DECIMAL is its rendered
+		// TEXT, an integer a raw int64, a float a float64 — so a widened
+		// column needs each arm's box MOVED into the shape the unified column
+		// reads, not merely relabelled. coerceSetOpArmRows does that for every
+		// rung of the ladder before the arms meet, so both the dedup key and
+		// FromRows read one shape per column — and ERRORS on a value that does
+		// not fit the unified DECIMAL, the same overflow the stage DAG raises
+		// (exec.coerceDecimalVector), rather than saturating silently. The
+		// right arm is coerced against its OWN schema, before alignSetOpRows
+		// re-keys it to the result names.
 		leftRows, err := coerceSetOpArmRows(leftSink.ToRows(), leftSchema, schema)
 		if err != nil {
 			return nil, fmt.Errorf("executing %s left side: %w", u.op, err)
@@ -10006,7 +10012,19 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 
 		if len(resultRows) > 0 {
 			if schema != nil {
-				u.batches = []*batch.RecordBatch{batch.FromRows(schema, resultRows)}
+				// FromRowsChecked, not FromRows: this is where the operation's
+				// VALUES are materialized, and the unchecked writer answered a
+				// DECIMAL with no carrier at the unified scale with the
+				// SATURATED end of the Int128 range — a DECIMAL(38,0) arm's
+				// 10^30 came back as 17014118346046923173168730371.5884105727
+				// under a DECIMAL(38,10) union, silently (#553). ADR-0024
+				// item 4: at a value-producing site, no exact carrier is a
+				// 22003 error, never the nearest storable number.
+				b, err := batch.FromRowsChecked(schema, resultRows)
+				if err != nil {
+					return nil, fmt.Errorf("building the %s result: %w", u.op, err)
+				}
+				u.batches = []*batch.RecordBatch{b}
 			}
 		}
 	}

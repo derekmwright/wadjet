@@ -6281,11 +6281,16 @@ func resolveAggUpdaterNoNull(fn AggFunc, typ batch.TypeID) kernel.RowAggUpdater 
 // type, so the query fails here instead of answering it (ADR-0012 item 9). The
 // accumulator carries the flag from wherever the add happened (row kernel,
 // batch kernel, SoA scatter, merge, spill) to this one emit-time check.
+// The SQLSTATE is PostgreSQL's 22003 (numeric_value_out_of_range), which is
+// what it raises for an out-of-range numeric result and what ADR-0024 item 4
+// requires at every value-producing site. As a bare fmt.Errorf this reached
+// clients as the internal-error class, so nothing on the wire distinguished
+// "your total is too big" from "the server broke".
 func decimalSumOverflow(col string) error {
 	if col == "" {
 		col = "sum"
 	}
-	return fmt.Errorf("SUM over a DECIMAL column overflowed the 128-bit exact accumulator (%s): "+
+	return sqlerr.New("22003", "SUM over a DECIMAL column overflowed the 128-bit exact accumulator (%s): "+
 		"the running total is outside the range DECIMAL(38) can represent", col)
 }
 
@@ -6300,11 +6305,13 @@ func decimalSumOverflow(col string) error {
 // condition (worker.writeDecimalAvgColumn), so answering NULL on the
 // single-process path would make the two paths disagree about the same query
 // (ADR-0018 §3, the two-path contract).
+// It carries the same SQLSTATE as decimalSumOverflow, 22003, for the same
+// reason: it is the same refusal one multiplication later (ADR-0024 item 4).
 func decimalAvgUnrepresentable(col string) error {
 	if col == "" {
 		col = "avg"
 	}
-	return fmt.Errorf("AVG over a DECIMAL column has no exact 128-bit value (%s): "+
+	return sqlerr.New("22003", "AVG over a DECIMAL column has no exact 128-bit value (%s): "+
 		"the sum scaled to the output's scale is outside the range DECIMAL(38) can represent", col)
 }
 

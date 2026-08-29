@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/derekmwright/wadjet/internal/engine/batch"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -156,7 +157,7 @@ func (d *DecimalCoerce) resolve(in *batch.RecordBatch) error {
 			idx: idx, srcType: src.Type, srcScale: srcScale,
 			dstScale: want.Scale, dstPrec: want.Precision, name: want.Name,
 		}
-		c.limit, _ = decimalPrecisionLimit(want.Precision)
+		c.limit, _ = batch.DecimalPrecisionLimit(want.Precision)
 		switch src.Type {
 		case parquet.TypeDecimal:
 			if srcScale > want.Scale {
@@ -223,10 +224,15 @@ func coerceDecimalVector(src *batch.Vector, c *decimalCoercion) (*batch.Vector, 
 		}
 		shifted, ok := unscaled.MulPow10(c.shiftPow1)
 		if ok {
-			ok = decimalFitsPrecision(shifted, c.limit)
+			ok = batch.DecimalFitsPrecision(shifted, c.limit)
 		}
 		if !ok {
-			return nil, fmt.Errorf(
+			// 22003 numeric_value_out_of_range: PostgreSQL's SQLSTATE for the
+			// same condition, and the one ADR-0024 item 4 makes mandatory at
+			// every value-producing site. A bare fmt.Errorf reached clients as
+			// the internal-error class, so a client branching on SQLSTATE
+			// could not tell a numeric overflow from a server fault.
+			return nil, sqlerr.New("22003",
 				"numeric field overflow: %s does not fit DECIMAL(%d,%d), the type this set operation's "+
 					"arms agree on for column %q — a field with precision %d, scale %d holds an "+
 					"absolute value below 10^%d",
@@ -236,36 +242,6 @@ func coerceDecimalVector(src *batch.Vector, c *decimalCoercion) (*batch.Vector, 
 		out.DecimalData.Data[i] = shifted
 	}
 	return out, nil
-}
-
-// decimalPrecisionLimit is 10^precision, the exclusive bound on a
-// DECIMAL(precision, s) column's unscaled magnitude. ok=false where the bound
-// itself has no Int128 — precision 39 and beyond, which setOpDecimalTarget's
-// cap makes unreachable, and which the caller then treats as "no bound to
-// check" rather than rejecting every row.
-func decimalPrecisionLimit(precision int) (batch.Int128, bool) {
-	if precision <= 0 || precision > batch.MaxDecimalPrecision {
-		return batch.Int128{}, false
-	}
-	return batch.Int128From(1).MulPow10(precision)
-}
-
-// decimalFitsPrecision reports whether an unscaled value's MAGNITUDE is below
-// the limit. A zero limit means the caller had none to give.
-func decimalFitsPrecision(v, limit batch.Int128) bool {
-	if limit.IsZero() {
-		return true
-	}
-	mag := v
-	if mag.IsNegative() {
-		mag = mag.Neg()
-		if mag.IsNegative() {
-			// -2^127 negates to itself; its magnitude has no Int128, so it is
-			// certainly outside any precision this carrier can declare.
-			return false
-		}
-	}
-	return mag.Cmp(limit) < 0
 }
 
 // decimalSourceCell reads row i's unscaled carrier, through a view when the

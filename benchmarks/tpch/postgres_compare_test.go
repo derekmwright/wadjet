@@ -1561,25 +1561,20 @@ func postgresSemanticsCases() []pgCase {
 				UNION ALL SELECT d_4 FROM dec_probe WHERE d_key IN (1, 2, 3)
 				ORDER BY 1`},
 		// The same pair with the FLOAT arm first, which the single-process
-		// engine — the arm this corpus runs — cannot answer at all: it boxes
-		// each row and hands them to batch.FromRows under the FIRST arm's
-		// schema, and a DECIMAL boxes as its rendered TEXT. The stage DAG
-		// answers it, because it reconciles the arms' types at plan time
-		// (physical.reconcileSetOpArmTypes, #533). This is a LOUD failure,
-		// not a wrong answer — the #361 guard catches the mismatched store —
-		// and it is pinned rather than dropped because the pin fails the day
-		// the single-process path learns to reconcile, which is the fix's
-		// proof.
+		// engine — the arm this corpus runs — could not answer at all: it
+		// boxed each row and handed them to batch.FromRows under the FIRST
+		// arm's schema, and a DECIMAL boxes as its rendered TEXT, so the #361
+		// guard failed the store and the whole query with it. Gated, not
+		// pinned: this entry WAS the #541 pin, and its agreeing is that fix's
+		// proof. unifySetOpSchemas now resolves the arms' common type through
+		// the same setOpWiden / setOpDecimalTarget the stage DAG uses
+		// (physical.reconcileSetOpArmTypes) and MOVES each arm's boxes into
+		// it, so the two paths cannot drift on the type or the values.
+		// Refs #541.
 		pgCase{name: "SetOpUnionAllDoubleWithDecimal", ordered: true,
 			sql: `SELECT CAST(d_key AS DOUBLE PRECISION) AS v FROM dec_probe WHERE d_key IN (0, 4, 8)
 				UNION ALL SELECT d_2 FROM dec_probe WHERE d_key IN (0, 4, 8, 96, 100, 104)
-				ORDER BY 1`,
-			knownBug: pgBugWadjet + " the single-process set-operation adapter does not reconcile arms of " +
-				"different TYPE: it builds the result under the FIRST arm's schema, so a DECIMAL arm " +
-				"under a FLOAT64 first arm fails the store outright, and an INTEGER arm under a DECIMAL " +
-				"first arm is read as an unscaled carrier (1 becomes 0.0001). The stage DAG reconciles " +
-				"both (physical.setOpWiden / setOpDecimalTarget); unifySetOpSchemas should delegate to " +
-				"the same two functions", issue: "#541"},
+				ORDER BY 1`},
 	)
 
 	// --- Pagination ------------------------------------------------------
